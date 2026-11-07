@@ -12,6 +12,11 @@ Codex 记录的命令形如 `/bin/bash -lc '<脚本>'`。这里按 bash 语法�
 - 输出进了日志：本命令和其后管道段的 stdout 没被丢掉（/dev/null、关闭、写进之后没人读的文件），管道后面没有
   `true`/`:`/`head -0`/`grep -q` 这类吞输出的段；退出码没被掩盖：管道之后不接 `||`、`&`，前面不是 `||`，
   脚本末尾不是另起一段的 `true`/`:`/`exit 0`。
+
+命令文本只说明脚本打算让 git 输出补丁，不说明它真的输出了：`if false; then git diff …; fi` 没执行，
+`exec >/dev/null`、`export GIT_EXTERNAL_DIFF=true` 改的是之后命令的环境，textconv 保留 `diff --git`/`@@` 头而把内容
+换掉（#1969 kimi BLOCK）。所以还要看这条事件实际记录的输出（Codex `aggregated_output`，约 1 MiB 截断、保留前部）：
+其中须有一行就是冻结补丁的真实内容，见 FrozenPatch。
 """
 from __future__ import annotations
 
@@ -431,7 +436,45 @@ def _script(command: str) -> str | None:
     return command
 
 
-def reads_candidate_patch(command: str, head_sha: str, other_shas: tuple[str, ...]) -> bool:
+_LINE_NUMBER = re.compile(r"\d+[\t:]")  # `nl -ba`、`cat -n`、`grep -n` 加在行首的行号
+_DISTINCT = 12  # 够长的改动行才当证据；`}`、`return` 这类短行在任何文件里都可能出现
+
+
+@dataclass(frozen=True)
+class FrozenPatch:
+    """controller 侧取得的冻结候选补丁。`evidence` 是审查员输出里须出现的行（去掉首尾空白）：
+    改动行（`+`/`-` 之后的内容）里至少 _DISTINCT 个字符的；没有这样的行就取全部非空改动行；
+    纯二进制、改名、改权限的补丁没有改动行，取 `diff --git` 头。"""
+    head_sha: str
+    other_shas: tuple[str, ...]
+    evidence: frozenset[str]
+
+    @classmethod
+    def from_diff(cls, head_sha: str, other_shas: tuple[str, ...], diff: str) -> FrozenPatch:
+        changed = {line[1:].strip() for line in diff.splitlines()
+                   if line[:1] in "+-" and not line.startswith(("+++ ", "--- "))} - {""}
+        headers = {line for line in diff.splitlines() if line.startswith("diff --git ")}
+        return cls(head_sha, other_shas,
+                   frozenset({line for line in changed if len(line) >= _DISTINCT} or changed or headers))
+
+    def shown_in(self, output: str) -> bool:
+        """输出里有一行（去掉行号前缀、diff 的 `+`/`-`/空格标记后）是冻结补丁的改动内容。
+        `git show <head>:<path>` 输出的是新文件，加进来的行同样在其中。"""
+        for raw in output.splitlines():
+            line = raw.strip()
+            if match := _LINE_NUMBER.match(line):
+                line = line[match.end():].strip()
+            if line in self.evidence or (line[:1] in "+-" and line[1:].strip() in self.evidence):
+                return True
+        return False
+
+
+def reads_candidate_patch(command: str, output: str, patch: FrozenPatch) -> bool:
+    """命令按 bash 语义会让 git 输出冻结补丁，且记录的输出里真有冻结补丁的内容。"""
+    return _would_print_patch(command, patch.head_sha, patch.other_shas) and patch.shown_in(output)
+
+
+def _would_print_patch(command: str, head_sha: str, other_shas: tuple[str, ...]) -> bool:
     """`other_shas` 是同一冻结目标里别的已知提交（merge-base、base）；diff 另一侧须是它们或 head 的祖先写法，
     写一个不存在的 SHA 再接管道（`git diff <bad> <head> | head`，无 pipefail 时退出码为 0）不算读取。"""
     script = _script(command)

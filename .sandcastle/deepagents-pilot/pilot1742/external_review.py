@@ -40,7 +40,7 @@ from .github_app import (
     GitHubAppClient,
     IdentityError,
 )
-from .patch_read import reads_candidate_patch
+from .patch_read import FrozenPatch, reads_candidate_patch
 from .run import DEFAULT_HOME, SOURCE_REPO, _ps_rows, supervisor_alive
 
 # Codex 上游额度耗尽期间的临时组合（EXTERNAL-REVIEW.md「Codex 额度耗尽时的临时组合」）；
@@ -304,7 +304,15 @@ def review_prompt(target: ReviewTarget, names: tuple[str, ...]) -> str:
                          head=target.head_sha, names=json.dumps(names, ensure_ascii=False))
 
 
-def validate_review(target: ReviewTarget, launch: dict, receipt: dict, folder: Path) -> ReviewOutcome:
+def frozen_patch(source: Path, target: ReviewTarget) -> FrozenPatch:
+    """controller 自己从对象库取冻结补丁（不跑审查员的命令）：关掉外部 diff 与 textconv，固定 a/ b/ 前缀。"""
+    diff = _git(source, "diff", "--no-ext-diff", "--no-textconv", "--no-color", "-U0", "--src-prefix=a/",
+                "--dst-prefix=b/", target.merge_base_sha, target.head_sha)
+    return FrozenPatch.from_diff(target.head_sha, (target.merge_base_sha, target.base_sha),
+                                 diff.decode(errors="replace"))
+
+
+def validate_review(target: ReviewTarget, launch: dict, receipt: dict, folder: Path, source: Path) -> ReviewOutcome:
     model = launch["model"]
     def failed(reason: str) -> ReviewOutcome:
         return ReviewOutcome(model, "FAILED", None, reason)
@@ -342,6 +350,7 @@ def validate_review(target: ReviewTarget, launch: dict, receipt: dict, folder: P
         turn_completed = False
         final_text = None
         patch_reads = 0
+        patch = frozen_patch(source, target)
         for event in events:
             kind = event.get("type")
             if kind == "error":
@@ -360,17 +369,19 @@ def validate_review(target: ReviewTarget, launch: dict, receipt: dict, folder: P
             elif kind == "item.completed" and event.get("item", {}).get("type") == "command_execution":
                 item = event["item"]
                 patch_reads += (item.get("status") == "completed" and item.get("exit_code") == 0
-                                and reads_candidate_patch(str(item.get("command", "")), target.head_sha,
-                                                          (target.merge_base_sha, target.base_sha)))
+                                and reads_candidate_patch(str(item.get("command", "")),
+                                                          str(item.get("aggregated_output") or ""), patch))
         if not turn_completed:
             return failed("stdout 缺少重连后 turn.completed")
         sessions = {e.get("thread_id") for e in events if e.get("type") == "thread.started"}
         if sessions != {session}:
             return failed("stdout session 不符")
-        # #1968：审查容器里读代码的唯一手段是只读 shell。没有一条成功的 git diff/show 读到冻结候选的结论
-        # （#1940 的 kimi BLOCK 零调用即编造；跑一次 echo 再编同理）PASS、BLOCK 都不采信，记 FAILED，整轮发 error。
+        # #1968：审查容器里读代码的唯一手段是只读 shell。没有一条成功的 git diff/show 读到冻结候选、且记录的输出里
+        # 有冻结补丁内容的结论（#1940 的 kimi BLOCK 零调用即编造；跑一次 echo 再编同理；#1969 未执行的 git、
+        # 被外部 diff 或 textconv 换掉的输出同理）PASS、BLOCK 都不采信，记 FAILED，整轮发 error。
         if not patch_reads:
-            return failed("审查员未读取冻结候选补丁（无成功的 git diff/show 指名 head），PASS/BLOCK 均不采信")
+            return failed("审查员未读取冻结候选补丁（无成功的 git diff/show 指名 head 并在输出里出现冻结补丁内容），"
+                          "PASS/BLOCK 均不采信")
         output = receipt["result"]
         if final_text is None or json.loads(final_text) != output:
             return failed("结果与监督 stdout 不符")
@@ -761,7 +772,7 @@ class ExternalReview:
             time.sleep(self.poll_seconds)
         if process is not None:
             process.wait()
-        outcome = validate_review(target, launch, _read(worker / "receipt.json"), worker)
+        outcome = validate_review(target, launch, _read(worker / "receipt.json"), worker, self.source)
         self.cleanup_checkout(target, model, folder)
         return outcome
 
@@ -939,7 +950,8 @@ class ExternalReview:
             worker = folder / model
             if not (worker / "launch.json").exists() or not (worker / "receipt.json").exists():
                 return saved
-            outcomes.append(validate_review(target, _read(worker / "launch.json"), _read(worker / "receipt.json"), worker))
+            outcomes.append(validate_review(target, _read(worker / "launch.json"), _read(worker / "receipt.json"), worker,
+                                            self.source))
         if [(o.model, o.verdict) for o in outcomes] != recorded:
             return saved
         sessions = [o.session_id for o in outcomes if o.session_id]

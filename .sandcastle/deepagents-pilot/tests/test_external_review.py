@@ -30,6 +30,7 @@ from pilot1742.github_app import (
     IdentityError,
     OutcomeUnknown,
 )
+from pilot1742.patch_read import FrozenPatch
 
 
 class Gateway:
@@ -190,7 +191,7 @@ def test_terminal_receipt_requires_supervision_evidence(lane, mutation):
     launch = json.loads((folder / "launch.json").read_text())
     receipt = json.loads((folder / "receipt.json").read_text())
     mutation(receipt)
-    assert validate_review(target, launch, receipt, folder).verdict == "FAILED"
+    assert validate_review(target, launch, receipt, folder, lane.source).verdict == "FAILED"
 
 
 RECONNECT_CASES = json.loads((Path(__file__).parent / "fixtures" / "codex-reconnect.json").read_text())
@@ -209,7 +210,7 @@ def test_reconnect_protocol_matches_child_supervision(lane, scenario):
     (folder / "events.jsonl").write_text("\n".join(json.dumps(e) for e in events) + "\n")
     (folder / "session.jsonl").write_text(json.dumps({"type": "session_meta", "payload": {"id": session}}) + "\n")
     receipt.update(session_id=session, result=scenario["result"], exit_code=scenario["exit_code"])
-    outcome = validate_review(target, launch, receipt, folder)
+    outcome = validate_review(target, launch, receipt, folder, lane.source)
     assert outcome.verdict == scenario["verdict"], outcome.reason
     assert outcome.session_id == (None if scenario["verdict"] == "FAILED" else session)
 
@@ -223,7 +224,7 @@ def test_symlink_session_cannot_prove_pass(lane, tmp_path):
     session.rename(other)
     session.symlink_to(other)
     assert validate_review(target, json.loads((folder / "launch.json").read_text()),
-                           json.loads((folder / "receipt.json").read_text()), folder).verdict == "FAILED"
+                           json.loads((folder / "receipt.json").read_text()), folder, lane.source).verdict == "FAILED"
 
 
 def test_status_pagination_error_cannot_mean_absent_or_publish(lane):
@@ -674,10 +675,17 @@ def test_zero_tool_conclusion_is_error_not_verdict(lane, claim):
     assert opus["verdict"] == "PASS"
 
 
-def _command(script: str, exit_code: int = 0) -> dict:
-    """Codex 记录 command_execution 的真实形状：`/bin/bash -lc <shell 引号包好的脚本>`。"""
-    return {"type": "item.completed", "item": {"type": "command_execution", "command": f"/bin/bash -lc {shlex.quote(script)}",
-                                               "status": "completed" if exit_code == 0 else "failed", "exit_code": exit_code}}
+# lane 的冻结补丁在审查员日志里的样子（git diff merge-base head 的输出）
+LANE_PATCH = "".join(f"diff --git a/changed-{i} b/changed-{i}\nnew file mode 100644\n--- /dev/null\n+++ b/changed-{i}\n"
+                     f"@@ -0,0 +1 @@\n+{i}\n\\ No newline at end of file\n" for i in range(2))
+
+
+def _command(script: str, exit_code: int = 0, output: str | None = LANE_PATCH) -> dict:
+    """Codex 记录 command_execution 的真实形状：`/bin/bash -lc <shell 引号包好的脚本>`，输出在 aggregated_output；
+    `output=None` 是这个字段没进日志。"""
+    item = {"type": "command_execution", "command": f"/bin/bash -lc {shlex.quote(script)}",
+            "status": "completed" if exit_code == 0 else "failed", "exit_code": exit_code}
+    return {"type": "item.completed", "item": item if output is None else {**item, "aggregated_output": output}}
 
 
 def _verdicts_with_commands(lane, claim: str, cases: dict) -> dict[str, module.ReviewOutcome]:
@@ -692,7 +700,7 @@ def _verdicts_with_commands(lane, claim: str, cases: dict) -> dict[str, module.R
     for case, commands in cases.items():
         (folder / "events.jsonl").write_text("\n".join(json.dumps(e) for e in [
             events[0], *(c(target) for c in commands), *events[1:]]) + "\n")
-        outcomes[case] = validate_review(target, launch, receipt, folder)
+        outcomes[case] = validate_review(target, launch, receipt, folder, lane.source)
     return outcomes
 
 
@@ -763,22 +771,44 @@ NOT_A_PATCH_READ = {
     "stdout-devnull-after-dup": _diff(tail=" 2>&1 >/dev/null"),
     "stdout-closed": _diff(tail=" >&-"),
     "unread-file": _diff(tail=" > /tmp/p.diff"),
+    # #1969 正式审查 kimi BLOCK 与 #1971：命令文本像读取，记录的输出里却没有冻结补丁
+    "if-false-never-runs": [lambda t: _command(f"if false; then git diff {t.merge_base_sha} {t.head_sha}; fi", output="")],
+    "file-then-echo-name": [lambda t: _command(f"git diff {t.merge_base_sha} {t.head_sha} >/tmp/p; echo /tmp/p",
+                                               output="/tmp/p\n")],
+    "file-then-wc": [lambda t: _command(f"git diff {t.merge_base_sha} {t.head_sha} >/tmp/p; wc -l /tmp/p",
+                                        output="      14 /tmp/p\n")],
+    "exec-stdout-devnull": [lambda t: _command(f"exec >/dev/null; git diff {t.merge_base_sha} {t.head_sha}", output="")],
+    "export-external-diff": [lambda t: _command(
+        f"export GIT_EXTERNAL_DIFF=true; git diff {t.merge_base_sha} {t.head_sha}", output="")],
+    "ext-diff-from-config": [lambda t: _command(f"git diff --ext-diff {t.merge_base_sha} {t.head_sha}",
+                                                output="changed-0 is different\nchanged-1 is different\n")],
+    "textconv-replaces-content": [lambda t: _command(
+        f"git -c diff.t.textconv='echo X' diff {t.merge_base_sha} {t.head_sha}",
+        output="diff --git a/changed-0 b/changed-0\n--- /dev/null\n+++ b/changed-0\n@@ -0,0 +1 @@\n"
+               "+X /tmp/git-blob-ksCWK9/changed-0\n")],
+    "empty-output-exit-0": [lambda t: _command(f"git diff {t.merge_base_sha} {t.head_sha} -- README", output="")],
+    "output-not-logged": [lambda t: _command(f"git diff {t.merge_base_sha} {t.head_sha}", output=None)],
+    "show-unchanged-file": [lambda t: _command(f"git show {t.head_sha}:README", output="x\n")],
+    "show-missing-path-masked": [lambda t: _command(
+        f"git show {t.head_sha}:nope | head", output=f"fatal: path 'nope' does not exist in '{t.head_sha}'\n")],
 }
 PATCH_READ = {
     "range": [lambda t: _command(f"cd /review && git diff --no-ext-diff --no-textconv {t.merge_base_sha} {t.head_sha} | head")],
     "dotdot": [lambda t: _command(f"git -C /review diff {t.merge_base_sha[:7]}..{t.head_sha[:7]}")],
-    "show-file": [lambda t: _command("echo hi"), lambda t: _command(f"git --no-pager show {t.head_sha[:8]}:README.md")],
+    "show-file": [lambda t: _command("echo hi", output="hi\n"),
+                  lambda t: _command(f"git --no-pager show {t.head_sha[:8]}:changed-0", output="0")],
     "var-assign": [lambda t: _command(f"B={t.merge_base_sha}; H={t.head_sha}; git diff $B $H")],
-    "var-export-quoted-show": [lambda t: _command(f'export H={t.head_sha} && git show "$H":README.md')],
+    "var-export-quoted-show": [lambda t: _command(f'export H={t.head_sha} && git show "$H":changed-1', output="1")],
     "var-braces": [lambda t: _command(f"B={t.merge_base_sha}; H={t.head_sha}; git diff ${{B}} ${{H}}")],
     "var-last-assignment-wins": [lambda t: _command(f"H={FAKE}; H={t.head_sha}; git diff {t.merge_base_sha} $H")],
     # 真实审查日志里的形式（opus、kimi、gpt-6.1-sol，166 位审查员 6512 条命令）
     "merge-base-vs-clean-worktree": [lambda t: _command(f"git diff {t.merge_base_sha}")],
     "merge-base-HEAD": [lambda t: _command(f"git diff {t.merge_base_sha} HEAD")],
-    "merge-base-dotdot-HEAD": [lambda t: _command(f"cd /review && B={t.merge_base_sha}; git diff $B..HEAD -- README.md")],
+    "merge-base-dotdot-HEAD": [lambda t: _command(f"cd /review && B={t.merge_base_sha}; git diff $B..HEAD -- changed-0")],
     "triple-dot": [lambda t: _command(f"git diff {t.merge_base_sha}...{t.head_sha}")],
-    "show-HEAD-file": [lambda t: _command("cd /review && git show HEAD:README.md | sed -n 1,60p")],
-    "show-file-numbered": [lambda t: _command(f"git show {t.head_sha}:README.md | nl -ba | sed -n '1,200p'")],
+    "show-HEAD-file": [lambda t: _command("cd /review && git show HEAD:changed-0 | sed -n 1,60p", output="0\n")],
+    "show-file-numbered": [lambda t: _command(f"git show {t.head_sha}:changed-1 | nl -ba | sed -n '1,200p'",
+                                              output="     1\t1\n")],
     "show-commit-oneline": [lambda t: _command(f"git show --oneline {t.head_sha}")],
     "show-range": [lambda t: _command(f"git show {t.merge_base_sha}..{t.head_sha}")],
     "git-P": [lambda t: _command(f"git -P diff {t.merge_base_sha} {t.head_sha}")],
@@ -789,17 +819,32 @@ PATCH_READ = {
         f"cat /review/.agents/skills/code-review/SKILL.md && git diff --no-ext-diff --no-textconv {t.merge_base_sha} {t.head_sha}")],
     "stat-then-patch": _diff("--stat -p"),
     "stat-then-diff": [lambda t: _command(
-        f"git diff --stat {t.merge_base_sha} {t.head_sha} && git diff {t.merge_base_sha} {t.head_sha} -- README.md")],
+        f"git diff --stat {t.merge_base_sha} {t.head_sha} && git diff {t.merge_base_sha} {t.head_sha} -- changed-0")],
     "command-in-variable": [lambda t: _command(
-        f'cd /review && D="git diff --no-ext-diff --no-textconv {t.merge_base_sha} {t.head_sha}"; $D -- README.md')],
+        f'cd /review && D="git diff --no-ext-diff --no-textconv {t.merge_base_sha} {t.head_sha}"; $D -- changed-0')],
     "file-then-read": _diff(tail=" > /tmp/p.diff; wc -l /tmp/p.diff; sed -n 1,200p /tmp/p.diff"),
     "file-read-by-heredoc": [lambda t: _command(
-        f"git show {t.head_sha}:README.md > /tmp/r.md; python3 - <<'EOF'\nprint(open('/tmp/r.md').read())\nEOF")],
-    "for-loop-show": [lambda t: _command(f"H={t.head_sha}; for f in README.md a; do git show $H:$f | nl -ba; done")],
+        f"git show {t.head_sha}:changed-0 > /tmp/r.md; python3 - <<'EOF'\nprint(open('/tmp/r.md').read())\nEOF",
+        output="0\n")],
+    "for-loop-show": [lambda t: _command(f"H={t.head_sha}; for f in changed-0 changed-1; do git show $H:$f | nl -ba; done",
+                                         output="     1\t0\n     1\t1\n")],
     "stderr-dropped": _diff(tail=" 2>/dev/null"),
     "stderr-merged-piped": _diff(tail=" 2>&1 | head -200"),
     "and-then-true": _diff(tail=" && true"),
 }
+
+
+def test_frozen_patch_evidence_is_its_distinct_changed_lines():
+    diff = ("diff --git a/f.py b/f.py\n--- a/f.py\n+++ b/f.py\n@@ -1,2 +1,2 @@\n"
+            "-    old_value = compute_old()\n+    new_value = compute_new()\n+}\n")
+    patch = FrozenPatch.from_diff("a" * 40, (), diff)
+    assert patch.evidence == {"old_value = compute_old()", "new_value = compute_new()"}
+    assert patch.shown_in("+    new_value = compute_new()\n")
+    assert patch.shown_in("    12\t    new_value = compute_new()\n")  # git show <head>:f.py | nl -ba
+    assert not patch.shown_in("}\n")
+    assert not patch.shown_in("diff --git a/f.py b/f.py\n@@ -1,2 +1,2 @@\n+X /tmp/git-blob-ksCWK9/f.py\n")  # textconv
+    binary = FrozenPatch.from_diff("a" * 40, (), "diff --git a/p.png b/p.png\nBinary files a/p.png and b/p.png differ\n")
+    assert binary.shown_in("diff --git a/p.png b/p.png\n") and not binary.shown_in("")
 
 
 @pytest.mark.parametrize("claim", ["PASS", "BLOCK"])
