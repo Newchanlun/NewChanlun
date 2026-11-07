@@ -129,6 +129,9 @@ class QueueIntake:
             for path in sorted(units.glob(f't{ticket}-*.json')):
                 unit = load_unit(self.state_root, path.stem)[0]
                 existing.append(unit)
+            merged = self._merged_run(existing)
+            if merged is not None:
+                raise QueueWaiting(f'awaiting_human: run {merged} 的交付 PR 已合入，不重派；请关闭本票')
             unreleased = [u for u in existing if txn.record is None
                           or int(u.run_id.rsplit('-', 1)[1]) > int(txn.record.run_id.rsplit('-', 1)[1])]
             if unreleased:
@@ -138,9 +141,6 @@ class QueueIntake:
                 if unit.admission.proof != proof:
                     raise AdmissionRefused('registered queue proof changed')
                 return unit
-            merged = self._merged_run(existing)
-            if merged is not None:
-                raise QueueWaiting(f'awaiting_human: run {merged} 的交付 PR 已合入，不重派；请关闭本票')
             issue, spec = self.gateway.issue(ticket), self.gateway.issue(proof.spec_issue)
             scope = approved_scope(str(spec.get('body') or ''))
             base = self.gateway.get_ref('main')
