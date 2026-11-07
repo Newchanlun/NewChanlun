@@ -26,10 +26,48 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     permissions:
+      actions: read
       contents: read
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
+        with:
+          # PR 事件检出 refs/pull/N/merge；深度 2 才能拿到第一父（运行时的 main）做增量判定。
+          fetch-depth: 2
+
+      # #1875：DevSkim 规则逐文件匹配，一个文件的结果只取决于它自己的路径与内容。基线提交在 push 上已全量扫描通过、
+      #   且 PR 不改扫描器、本工作流、基线、误报清单与两个门脚本时，只扫 PR 改动的文件，门判定与全量扫描相同：
+      #   未改文件的结果与基线提交逐条一致，而那次已通过同一份基线与误报清单。Belay 实测（2026-11-08）：
+      #   PR #1969 改动文件 5 条结果、全部 628 个有发现的文件加随机 1415 个文件（43478 条结果），子集扫描与全量扫描逐条 JSON 相同。
+      #   push、定时任务、任何条件不满足或查询出错，一律全量扫描。
+      - name: Choose full or incremental scan
+        id: scope
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          EVENT: ${{ github.event_name }}
+        run: |
+          set -euo pipefail
+          full() { echo "scope=full ($1)"; echo "dir=$GITHUB_WORKSPACE" >> "$GITHUB_OUTPUT"; exit 0; }
+          [ "$EVENT" = pull_request ] || full "event $EVENT"
+          base=$(git rev-parse HEAD^1 2>/dev/null) || full "no first parent"
+          git diff --name-only --no-renames -z "$base" HEAD > "$RUNNER_TEMP/changed" || full "diff failed"
+          count=$(tr -cd '\0' < "$RUNNER_TEMP/changed" | wc -c | tr -d ' ')
+          [ "$count" -lt 3000 ] || full "$count changed files"
+          if tr '\0' '\n' < "$RUNNER_TEMP/changed" | grep -qE '^(\.github/devskim/|\.github/workflows/devskim\.yml$|\.github/devskim-baseline\.json$|\.github/devskim-reviewed-1488\.json$|scripts/devskim_sarif_gate\.sh$|scripts/devskim_reviewed_false_positives\.py$)'; then
+            full "scanner, workflow, baseline, allowlist or gate changed"
+          fi
+          run=$(gh api "repos/$GITHUB_REPOSITORY/actions/workflows/devskim.yml/runs?event=push&status=success&head_sha=$base&per_page=1" \
+            --jq '.workflow_runs[0].html_url // empty') || full "run lookup failed"
+          [ -n "$run" ] || full "no successful push scan of base $base"
+          sub="$RUNNER_TEMP/devskim-subset"
+          mkdir -p "$sub"
+          while IFS= read -r -d '' f; do
+            if [ -L "$f" ]; then full "symlink $f"; fi
+            if [ -f "$f" ]; then mkdir -p "$sub/$(dirname "$f")"; cp -p "$f" "$sub/$f"; fi
+          done < "$RUNNER_TEMP/changed"
+          echo "scope=incremental: $count changed file(s); base $base fully scanned in $run"
+          echo "dir=$sub" >> "$GITHUB_OUTPUT"
 
       - name: Build reproducible DevSkim scanner image
         id: build_scanner
@@ -61,12 +99,14 @@ jobs:
         shell: bash
         run: |
           docker run --rm \
-            --volume "$GITHUB_WORKSPACE:/workspace" \
+            --volume "${{ steps.scope.outputs.dir }}:/workspace" \
             --workdir /workspace \
             devskim-scanner:1.0.90 \
             /workspace \
             /workspace/devskim-results.sarif \
             "**/.git/**,**/bin/**,**/.chanlun/block-topology/concept_registry.json,**/.chanlun/block-topology/morse_landscape.json,**/.chanlun/block-topology/meta.json,**/.chanlun/concept_registry.json,**/topological-computation/experiment_long_run_2000.json,**/topological-computation/experiment_real_result.json,**/topological-computation/experiment_f_criterion_2000.json,**/topological-computation/signifier_net/.dialogue_ingest_state.json,**/skills-lock.json,**/chanlun/review-results/treasury-reverify-t1-armR-trades-golden-20260727.json,**/tmp/**,**/.claude/skills/brainstorming/**,**/.agents/skills/diagnosing-bugs/**,**/.claude/skills/diagnosing-bugs/**"
+          dir='${{ steps.scope.outputs.dir }}'
+          if [ "$dir" != "$GITHUB_WORKSPACE" ]; then cp "$dir/devskim-results.sarif" "$GITHUB_WORKSPACE/devskim-results.sarif"; fi
 
       - name: Upload DevSkim SARIF as an ordinary Actions artifact
         id: upload_devskim_artifact
