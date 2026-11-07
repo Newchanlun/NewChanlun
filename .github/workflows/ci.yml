@@ -31,11 +31,16 @@ jobs:
   # #1875 p2m：只改 .sandcastle/**、package.json、package-lock.json、tsconfig.sandcastle.json 的 PR 跳过 Rust 作业。
   #   依据（2026-11-07 全量核对）：rust/、s_session/、.github/scripts 与 Rust 作业步骤不引用这些路径；
   #   遍历目录的测试只遍历 rust/src、formal/Origin、s_session。docs/、.chanlun/ 有 Rust 测试读取，不在跳过集。
-  #   push main、手动触发总是全跑；重命名同时计旧路径；文件数达到 API 上限（3000）按需跑处理。
+  #   手动触发总是全跑；重命名同时计旧路径；文件数达到 API 上限（3000）按需跑处理。
+  # #1875 push 去重：合入 main 的 merge commit 若与 PR head（第二父）同树，且 PR 在该 head 上已有成功的 ci.yml run，
+  #   push 不再重跑 Rust 作业。strict 下 PR run 检出的 refs/pull/N/merge 与 head 同树，所以那次 run 测的正是这棵树。
+  #   rust/Cargo.lock 有变时仍全跑，让 main 作用域写入新的 cargo 缓存（PR 作用域的缓存别的 PR 读不到）。
+  #   单父提交、直接推送、查询出错一律全跑。
   changes:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     permissions:
+      actions: read
       contents: read
       pull-requests: read
     outputs:
@@ -48,6 +53,27 @@ jobs:
           PR: ${{ github.event.pull_request.number }}
         run: |
           set -euo pipefail
+          if [ "$EVENT" = push ]; then
+            R="repos/$GITHUB_REPOSITORY"
+            dedup() {
+              parents=$(gh api "$R/commits/$GITHUB_SHA" --jq '[.parents[].sha] | join(" ")') || return 1
+              set -- $parents
+              [ "$#" -eq 2 ] || { echo "parents=$#"; return 1; }
+              tree=$(gh api "$R/git/commits/$GITHUB_SHA" --jq .tree.sha) || return 1
+              head_tree=$(gh api "$R/git/commits/$2" --jq .tree.sha) || return 1
+              [ -n "$tree" ] && [ "$tree" = "$head_tree" ] || { echo "tree differs from parent2"; return 1; }
+              files=$(gh api "$R/compare/$1...$GITHUB_SHA" --jq '.files | length, (.[] | .filename, (.previous_filename // empty))') || return 1
+              [ "$(head -n1 <<<"$files")" -lt 300 ] || { echo "compare truncated"; return 1; }
+              ! tail -n +2 <<<"$files" | grep -qx 'rust/Cargo.lock' || { echo "Cargo.lock changed"; return 1; }
+              run=$(gh api "$R/actions/workflows/ci.yml/runs?event=pull_request&status=success&head_sha=$2&per_page=20" \
+                --jq '[.workflow_runs[] | select(.head_repository.id == .repository.id)][0].html_url // empty') || return 1
+              [ -n "$run" ] || { echo "no green PR run for $2"; return 1; }
+              echo "green PR run on same tree: $run"
+            }
+            if dedup; then rust=false; else rust=true; fi
+            echo "push dedup: rust=$rust"
+            echo "rust=$rust" >> "$GITHUB_OUTPUT"; exit 0
+          fi
           if [ "$EVENT" != pull_request ]; then echo rust=true >> "$GITHUB_OUTPUT"; exit 0; fi
           gh api --paginate "repos/$GITHUB_REPOSITORY/pulls/$PR/files?per_page=100" \
             --jq '.[] | .filename, (.previous_filename // empty)' > "$RUNNER_TEMP/files"
