@@ -10,6 +10,7 @@ import { promisify } from "node:util";
 import {
   DOCKER_CLIPROXY_BASE_URL,
   assertDockerCliProxyReachable,
+  responseModelIds,
   swarmAgent,
   swarmSandbox,
 } from "./swarm-route.mts";
@@ -273,4 +274,57 @@ test("源码断言：三条入口都不再在 consume 之后做模型预检—�
   assert.match(merge, /modelProbe: routeChecked \? undefined : \(id\) => \{ assertDockerCliProxyReachable\(id\); routeChecked = true; \}/);
   assert.ok(merge.indexOf("assertSwarmExecutionReady(image") < merge.indexOf("readiedCheckpoints.set(binding"));
   assert.doesNotMatch(merge, /\n\s*if \(!routeChecked\) \{ assertDockerCliProxyReachable/, "冲突路径不再有 consume 之后的预检");
+});
+
+async function probeAgainst(probe: string, responseModel: string): Promise<{ ok: boolean; output: string }> {
+  const server = createServer((request, response) => {
+    request.resume();
+    request.on("end", () => {
+      response.writeHead(200, { "content-type": "application/json" });
+      response.end(JSON.stringify({ object: "response", status: "completed", model: responseModel, output: [] }));
+    });
+  });
+  server.listen(0, "127.0.0.1");
+  await once(server, "listening");
+  try {
+    const address = server.address();
+    assert.ok(address && typeof address === "object");
+    const env = { ...process.env, CLIPROXY_BASE_URL: `http://127.0.0.1:${address.port}`, CLIPROXY_LOCAL_KEY: "fixture-secret" };
+    try {
+      const { stdout } = await promisify(execFile)(process.execPath, ["-e", probe], { env });
+      return { ok: true, output: stdout };
+    } catch (error) {
+      return { ok: false, output: String((error as { stderr?: string }).stderr ?? error) };
+    }
+  } finally {
+    server.close();
+    await once(server, "close");
+  }
+}
+
+test("上游型号名只对显式登记的主控模型放行", () => {
+  assert.deepEqual(responseModelIds("kimi-k3.1-pro"), ["kimi-k3.1-pro", "k3.1-pro"]);
+  assert.deepEqual(responseModelIds("gpt-6.1-sol"), ["gpt-6.1-sol"]);
+  assert.deepEqual(responseModelIds("claude-opus-5-5"), ["claude-opus-5-5"]);
+});
+
+test("主控为 kimi-k3.1-pro 时，探针接受 CLIProxy 回传的上游型号名，拒绝其它型号", async () => {
+  const { stdout } = await promisify(execFile)(process.execPath, ["--import", "tsx", "-e",
+    `import("./.sandcastle/swarm-route.mts").then((m) => process.stdout.write(m.DOCKER_MODEL_PROBE))`],
+  { env: { ...process.env, SANDCASTLE_MAIN_MODEL: "kimi-k3.1-pro" } });
+  const kimi = await probeAgainst(stdout, "k3.1-pro");
+  assert.ok(kimi.ok, kimi.output);
+  assert.match(kimi.output, /MAIN_MODEL_HTTP_OK model=k3\.1-pro/);
+  assert.ok((await probeAgainst(stdout, "kimi-k3.1-pro")).ok);
+  const other = await probeAgainst(stdout, "gpt-6.1-sol");
+  assert.equal(other.ok, false);
+  assert.match(other.output, /response is not a kimi-k3\.1-pro message/);
+});
+
+test("其它主控模型不接受 kimi 的上游型号名", async (t) => {
+  if (MAIN_MODEL === "kimi-k3.1-pro") return t.skip("主控即 kimi");
+  let probe = "";
+  assertDockerCliProxyReachable("fixture-image", (_image, value) => { probe = value; });
+  assert.equal((await probeAgainst(probe, "k3.1-pro")).ok, false);
+  assert.ok((await probeAgainst(probe, MAIN_MODEL)).ok);
 });
