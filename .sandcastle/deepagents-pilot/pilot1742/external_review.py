@@ -340,6 +340,7 @@ def validate_review(target: ReviewTarget, launch: dict, receipt: dict, folder: P
         events = [json.loads(line) for line in (folder / "events.jsonl").read_text().splitlines() if line.strip()]
         turn_completed = False
         final_text = None
+        tool_calls = 0
         for event in events:
             kind = event.get("type")
             if kind == "error":
@@ -355,11 +356,17 @@ def validate_review(target: ReviewTarget, launch: dict, receipt: dict, folder: P
                 turn_completed = True
             elif kind == "item.completed" and event.get("item", {}).get("type") == "agent_message":
                 final_text = event["item"].get("text")
+            elif kind == "item.completed" and event.get("item", {}).get("type") == "command_execution":
+                tool_calls += 1
         if not turn_completed:
             return failed("stdout 缺少重连后 turn.completed")
         sessions = {e.get("thread_id") for e in events if e.get("type") == "thread.started"}
         if sessions != {session}:
             return failed("stdout session 不符")
+        # #1968：审查容器里读代码的唯一手段是只读 shell。一次命令都没跑的结论（#1940 的 kimi BLOCK 即编造）
+        # PASS、BLOCK 都不采信，记 FAILED，整轮发 error。
+        if not tool_calls:
+            return failed("审查员零工具调用（没有读过代码），PASS/BLOCK 均不采信")
         output = receipt["result"]
         if final_text is None or json.loads(final_text) != output:
             return failed("结果与监督 stdout 不符")

@@ -203,7 +203,8 @@ def test_reconnect_protocol_matches_child_supervision(lane, scenario):
     launch = json.loads((folder / "launch.json").read_text())
     receipt = json.loads((folder / "receipt.json").read_text())
     session = RECONNECT_CASES["session_id"]
-    events = [{"type": "thread.started", "thread_id": session}, *scenario["events"]]
+    events = [{"type": "thread.started", "thread_id": session},
+              {"type": "item.completed", "item": {"type": "command_execution", "command": "git diff"}}, *scenario["events"]]
     (folder / "events.jsonl").write_text("\n".join(json.dumps(e) for e in events) + "\n")
     (folder / "session.jsonl").write_text(json.dumps({"type": "session_meta", "payload": {"id": session}}) + "\n")
     receipt.update(session_id=session, result=scenario["result"], exit_code=scenario["exit_code"])
@@ -658,6 +659,29 @@ def test_non_pass_conclusion_is_not_reused(lane, env, first_verdict):
     result = lane.review_pr(1810)
     assert result["verdict"] == "PASS" and "reused_from" not in result
     assert len(result["reviews"]) == len(MODELS)
+
+
+@pytest.mark.parametrize("claim", ["PASS", "BLOCK"])
+def test_zero_tool_conclusion_is_error_not_verdict(lane, claim):
+    """#1968：没跑过任何命令的审查员说 PASS 不能放行，说 BLOCK 也不能否决；两种都只能是 error。"""
+    _modes(lane, **{MODELS[0]: f"{claim}:notool", MODELS[1]: "PASS"})
+    result = lane.review_pr(1810)
+    assert result["verdict"] == "FAILED" and result["state"] == "error"
+    assert lane.gateway.sent == ["pending", "error"]
+    kimi, opus = result["reviews"]
+    assert kimi["verdict"] == "FAILED" and "零工具调用" in kimi["reason"]
+    assert opus["verdict"] == "PASS"
+
+
+def test_zero_tool_pass_is_never_reused(lane, env):
+    _modes(lane, **{model: "PASS:notool" for model in MODELS})
+    assert lane.review_pr(1810)["state"] == "error"
+    _clear_modes(lane)
+    _advance_main(lane, env)
+    result = lane.review_pr(1810)
+    assert result["verdict"] == "PASS" and "reused_from" not in result
+    assert _launches(lane) == 2 * len(MODELS)
+    assert lane.gateway.sent == ["pending", "error", "pending", "success"]
 
 
 @pytest.mark.parametrize("field", ["POLICY", "REVIEW_CONTRACT"])
