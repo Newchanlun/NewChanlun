@@ -3,7 +3,9 @@ import assert from "node:assert/strict";
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { QUEUE_LABEL, releaseLabel, withQueueAdmission, graphAdmissionFrozen, withGraphAdmission } from "./deepagents-cutover.mts";
+import { execFileSync } from "node:child_process";
+import { fileURLToPath } from "node:url";
+import { QUEUE_LABEL, releaseLabel, withQueueAdmission, graphAdmissionFrozen, withGraphAdmission, withTicketHold } from "./deepagents-cutover.mts";
 import { withFileLock, withLegacyAdmission, DrainFrozenError } from "./drain-control.mts";
 import { specRulingBody, specBodyDigest, classifyTicket, releaseTicket, recheckBeforeRelease, withEngineAdmission } from "../scripts/wayfinder_engine.mts";
 
@@ -92,4 +94,21 @@ test("选定切流到取得 admission 锁之间记录失效：锁内拒绝，不
     await pending;
     assert.equal(writes, 0);
   } finally { rmSync(f.root, { recursive: true, force: true }); }
+});
+
+test("执行器状态根尚不存在时，迁移的票级判定仍与 ClaimStore 领取互斥", async () => {
+  const root = mkdtempSync(join(tmpdir(), "ticket-hold-1742-"));
+  const claims = join(root, "exec", "claims");
+  const pilot = fileURLToPath(new URL("./deepagents-pilot", import.meta.url));
+  const claimer = `import sys; from pathlib import Path; from pilot1742.claims import ClaimStore, LockTimeout
+try:
+    with ClaimStore(Path(sys.argv[1]), lock_timeout=0.5).locked(42): print("claimed")
+except LockTimeout: print("waited")`;
+  try {
+    const seen = await withTicketHold(42, (claim) => {
+      assert.equal(claim, null);
+      return execFileSync("python3", ["-c", claimer, claims], { cwd: pilot, encoding: "utf8" }).trim();
+    }, claims);
+    assert.equal(seen, "waited", "迁移判定期间执行器不得在同一票上领取");
+  } finally { rmSync(root, { recursive: true, force: true }); }
 });

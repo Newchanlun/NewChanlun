@@ -1,5 +1,4 @@
 import { existsSync, mkdirSync, readFileSync } from "node:fs";
-import { dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { DRAIN_ROOT, LockBusyError, drainRequested, withAdmission, withFileLock, withLegacyAdmission } from "./drain-control.mts";
 
@@ -69,12 +68,12 @@ export interface LocalClaim { state: (typeof CLAIM_STATES)[number]; run_id: stri
 /**
  * 在执行器的票级动作锁（claims.py ClaimStore 的同一把 flock）内读本机持有记录再执行 action。
  * 领取从写 intent 到挂镜像、释放从记 released 到摘镜像都在这把锁内，迁移因此看不到半途状态。
- * 锁忙即抛错，由调用方下一轮重试；本机没有执行器状态根时没有本机持有，action 收到 null。
+ * 锁忙即抛错，由调用方下一轮重试。状态根缺失时与 ClaimStore.locked 一样先建目录再取锁，
+ * 否则首次领取与迁移会各自建根、互不见锁。
  */
 export async function withTicketHold<T>(ticket: number, action: (claim: LocalClaim | null) => T | Promise<T>,
   claimsRoot = CLAIMS_ROOT): Promise<T> {
   if (!Number.isSafeInteger(ticket) || ticket <= 0) throw new Error(`票号无效：${ticket}`);
-  if (!existsSync(dirname(claimsRoot))) return action(null);
   mkdirSync(claimsRoot, { recursive: true });
   try {
     return await withFileLock(`${claimsRoot}/${ticket}.lock`, () => {
