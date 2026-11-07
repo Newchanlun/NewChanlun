@@ -21,8 +21,9 @@ per_model = folder.parents[1] / f"fake-mode-{launch['model']}"  # 按模型覆�
 mode_file = per_model if per_model.exists() else folder.parents[1] / "fake-mode"
 mode, _, flag = (mode_file.read_text().strip() if mode_file.exists() else "PASS").partition(":")
 session = str(uuid.uuid4())
+read = f"/bin/bash -lc 'git diff --no-ext-diff --no-textconv {launch['merge_base_sha']} {launch['head_sha']}'"
 tool = [] if flag == "notool" else [  # 「BLOCK:notool」等：零工具调用的审查员（#1968）
-    {"type": "item.completed", "item": {"type": "command_execution", "command": "git diff", "exit_code": 0}}]
+    {"type": "item.completed", "item": {"type": "command_execution", "command": read, "status": "completed", "exit_code": 0}}]
 output = {"status": "blocked" if mode == "BLOCK" else "completed", "summary": f"VERDICT: {mode}",
           "findings": [], "validation": ["测试替身"]}
 events = [{"type": "thread.started", "thread_id": session}, *tool,

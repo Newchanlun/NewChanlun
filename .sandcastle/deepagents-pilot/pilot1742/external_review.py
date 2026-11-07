@@ -303,6 +303,18 @@ def review_prompt(target: ReviewTarget, names: tuple[str, ...]) -> str:
                          head=target.head_sha, names=json.dumps(names, ensure_ascii=False))
 
 
+_PATCH_READ = re.compile(r"\bgit(?:\s+(?:-C|-c)\s+\S+|\s+--[\w-]+(?:=\S+)?)*\s+(?:diff|show)\b")
+_SUMMARY_ONLY = re.compile(r"\s(?:--(?:stat|shortstat|numstat|name-only|name-status|summary|check|no-patch|quiet)|-s)(?=[\s=]|$)")
+_HEX = re.compile(r"(?<![0-9a-fA-F])[0-9a-fA-F]{7,40}(?![0-9a-fA-F])")
+
+
+def reads_candidate_patch(command: str, head_sha: str) -> bool:
+    """命令里有一段 git diff/show 指名了冻结 head（≥7 位前缀，merge-base..head 范围同样含 head），且不是只出统计。"""
+    return any(_PATCH_READ.search(part) and not _SUMMARY_ONLY.search(part)
+               and any(head_sha.startswith(token.lower()) for token in _HEX.findall(part))
+               for part in re.split(r"&&|\|\||[;|\n]", command))
+
+
 def validate_review(target: ReviewTarget, launch: dict, receipt: dict, folder: Path) -> ReviewOutcome:
     model = launch["model"]
     def failed(reason: str) -> ReviewOutcome:
@@ -340,7 +352,7 @@ def validate_review(target: ReviewTarget, launch: dict, receipt: dict, folder: P
         events = [json.loads(line) for line in (folder / "events.jsonl").read_text().splitlines() if line.strip()]
         turn_completed = False
         final_text = None
-        tool_calls = 0
+        patch_reads = 0
         for event in events:
             kind = event.get("type")
             if kind == "error":
@@ -357,16 +369,18 @@ def validate_review(target: ReviewTarget, launch: dict, receipt: dict, folder: P
             elif kind == "item.completed" and event.get("item", {}).get("type") == "agent_message":
                 final_text = event["item"].get("text")
             elif kind == "item.completed" and event.get("item", {}).get("type") == "command_execution":
-                tool_calls += 1
+                item = event["item"]
+                patch_reads += (item.get("status") == "completed" and item.get("exit_code") == 0
+                                and reads_candidate_patch(str(item.get("command", "")), target.head_sha))
         if not turn_completed:
             return failed("stdout 缺少重连后 turn.completed")
         sessions = {e.get("thread_id") for e in events if e.get("type") == "thread.started"}
         if sessions != {session}:
             return failed("stdout session 不符")
-        # #1968：审查容器里读代码的唯一手段是只读 shell。一次命令都没跑的结论（#1940 的 kimi BLOCK 即编造）
-        # PASS、BLOCK 都不采信，记 FAILED，整轮发 error。
-        if not tool_calls:
-            return failed("审查员零工具调用（没有读过代码），PASS/BLOCK 均不采信")
+        # #1968：审查容器里读代码的唯一手段是只读 shell。没有一条成功的 git diff/show 读到冻结候选的结论
+        # （#1940 的 kimi BLOCK 零调用即编造；跑一次 echo 再编同理）PASS、BLOCK 都不采信，记 FAILED，整轮发 error。
+        if not patch_reads:
+            return failed("审查员未读取冻结候选补丁（无成功的 git diff/show 指名 head），PASS/BLOCK 均不采信")
         output = receipt["result"]
         if final_text is None or json.loads(final_text) != output:
             return failed("结果与监督 stdout 不符")

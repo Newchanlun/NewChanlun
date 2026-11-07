@@ -204,7 +204,7 @@ def test_reconnect_protocol_matches_child_supervision(lane, scenario):
     receipt = json.loads((folder / "receipt.json").read_text())
     session = RECONNECT_CASES["session_id"]
     events = [{"type": "thread.started", "thread_id": session},
-              {"type": "item.completed", "item": {"type": "command_execution", "command": "git diff"}}, *scenario["events"]]
+              _command(f"git diff {target.merge_base_sha} {target.head_sha}"), *scenario["events"]]
     (folder / "events.jsonl").write_text("\n".join(json.dumps(e) for e in events) + "\n")
     (folder / "session.jsonl").write_text(json.dumps({"type": "session_meta", "payload": {"id": session}}) + "\n")
     receipt.update(session_id=session, result=scenario["result"], exit_code=scenario["exit_code"])
@@ -669,8 +669,58 @@ def test_zero_tool_conclusion_is_error_not_verdict(lane, claim):
     assert result["verdict"] == "FAILED" and result["state"] == "error"
     assert lane.gateway.sent == ["pending", "error"]
     kimi, opus = result["reviews"]
-    assert kimi["verdict"] == "FAILED" and "零工具调用" in kimi["reason"]
+    assert kimi["verdict"] == "FAILED" and "未读取冻结候选补丁" in kimi["reason"]
     assert opus["verdict"] == "PASS"
+
+
+def _command(command: str, exit_code: int = 0) -> dict:
+    return {"type": "item.completed", "item": {"type": "command_execution", "command": f"/bin/bash -lc '{command}'",
+                                               "status": "completed" if exit_code == 0 else "failed", "exit_code": exit_code}}
+
+
+def _verdict_with_commands(lane, claim: str, commands: list[dict]) -> module.ReviewOutcome:
+    """把一次 PASS/BLOCK 审查的 events.jsonl 换成给定命令序列后重新判定。"""
+    _modes(lane, **{model: claim for model in MODELS})
+    target = ReviewTarget(**lane.review_pr(1810)["target"])
+    folder = lane.state_root / "runs" / target.key / MODELS[0]
+    events = [json.loads(line) for line in (folder / "events.jsonl").read_text().splitlines()]
+    events = [e for e in events if e.get("item", {}).get("type") != "command_execution"]
+    events[1:1] = [c(target) for c in commands]
+    (folder / "events.jsonl").write_text("\n".join(json.dumps(e) for e in events) + "\n")
+    return validate_review(target, json.loads((folder / "launch.json").read_text()),
+                           json.loads((folder / "receipt.json").read_text()), folder)
+
+
+NOT_A_PATCH_READ = {
+    "echo": [lambda t: _command("echo hi")],
+    "ls": [lambda t: _command("ls -la /review")],
+    "unrelated-file": [lambda t: _command("cat /review/.agents/skills/code-review/SKILL.md")],
+    "git-log": [lambda t: _command(f"git log --oneline {t.merge_base_sha}..{t.head_sha}")],
+    "wrong-sha": [lambda t: _command(f"git diff {t.merge_base_sha} {'f' * 40}")],
+    "merge-base-only": [lambda t: _command(f"git diff {t.merge_base_sha}")],
+    "stat-only": [lambda t: _command(f"git diff --stat {t.merge_base_sha} {t.head_sha}")],
+    "failed-diff": [lambda t: _command(f"git diff {t.merge_base_sha} {t.head_sha}", exit_code=128)],
+    "sha-outside-diff": [lambda t: _command(f"git log -1 {t.head_sha}; git diff")],
+}
+PATCH_READ = {
+    "range": [lambda t: _command(f"cd /review && git diff --no-ext-diff --no-textconv {t.merge_base_sha} {t.head_sha} | head")],
+    "dotdot": [lambda t: _command(f"git -C /review diff {t.merge_base_sha[:7]}..{t.head_sha[:7]}")],
+    "show-file": [lambda t: _command("echo hi"), lambda t: _command(f"git --no-pager show {t.head_sha[:8]}:README.md")],
+}
+
+
+@pytest.mark.parametrize("claim", ["PASS", "BLOCK"])
+@pytest.mark.parametrize("case", NOT_A_PATCH_READ)
+def test_conclusion_without_frozen_patch_read_is_failed(lane, claim, case):
+    """#1968：跑过命令但没用 git diff/show 读冻结候选（echo、ls、无关文件、git log、错 SHA）同样不采信。"""
+    outcome = _verdict_with_commands(lane, claim, NOT_A_PATCH_READ[case])
+    assert outcome.verdict == "FAILED" and "未读取冻结候选补丁" in outcome.reason
+
+
+@pytest.mark.parametrize("claim", ["PASS", "BLOCK"])
+@pytest.mark.parametrize("case", PATCH_READ)
+def test_conclusion_after_frozen_patch_read_stands(lane, claim, case):
+    assert _verdict_with_commands(lane, claim, PATCH_READ[case]).verdict == claim
 
 
 def test_zero_tool_pass_is_never_reused(lane, env):
