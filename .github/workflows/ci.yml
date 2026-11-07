@@ -263,6 +263,9 @@ jobs:
       - name: Test s_session shard planner (#1588)
         run: python3 ../.github/scripts/test_test_shard.py -v
 
+      - name: "Test #1488 named-lock runner (#1875)"
+        run: python3 -m unittest discover -s ../.github/scripts -p 'test_run_1488_delta_ci.py' -v
+
       - uses: ./.github/actions/rust-job-setup
 
       # #1608：告警清零后防回潮——三档 cargo check 以 -D warnings 运行，任何新告警即红。
