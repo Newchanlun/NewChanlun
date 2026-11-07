@@ -21,7 +21,7 @@ blocking 边只表达必要依赖。可以独立开始的票不串成链；优�
 
 T/P 两类决策均经过考古、起草和非作者独审，全 PASS 后由代理裁定（#1909 / PR1915）。不再要求“agent 不得替人答”、`needs-approval` 或 `/graph-approve`。起草者提供推荐答案与推导，独审核对真实材料，不以撤标签代替通过。
 
-`decision-claimer` 负责决策票，`wayfinder_engine` 不替它裁决。BLOCK 用尽、`fact_gap` 或 `invalid_landing` 进入 held：事实缺口开 research/探针票并接 blocking 边；材料补齐后在原票发「退回：…」，整链重跑。旧 shadow 产物先原件归档，旧 PASS 不复用。旧 `needs-approval` grilling 票由 claimer 按新流程处理；实施票逐张核依赖、owner 和 SPEC 裁定，不批量摘标签。
+`decision-claimer` 负责决策票，`wayfinder_engine` 不替它裁决。BLOCK 用尽、`fact_gap` 或 `invalid_landing` 进入 held：事实缺口开 research/探针票并接 blocking 边；材料补齐后在原票发「退回：…」，整链重跑。触及资金、账户、凭据硬门（ADR 0041）的票进 held `user_authorization`，挂 `ready-for-human` 交还用户；用户本人以首行「退回：」评论给出签署值与有效域后重跑，落地时摘掉该标签，主控不代发。代理与用户共用同一 GitHub 账号，「退回：」评论的作者无法机器区分（现有信任模型，未改变）。旧 shadow 产物先原件归档，旧 PASS 不复用。旧 `needs-approval` grilling 票由 claimer 按新流程处理；实施票逐张核依赖、owner 和 SPEC 裁定，不批量摘标签。
 
 ## 从决策到实施
 
@@ -33,7 +33,7 @@ SPEC 由非作者独审。有效放行记录为编排者账号发布的结构化
 
 有效 SPEC 裁定后拆 tracer-bullet 实施票、接 blocking 边并逐票执行。只有符合票型、未认领、无 open blocker 且满足所属 SPEC/DAG 条件的票获得 `sandcastle` 标签；不把历史 `ready-for-agent` 全部放行。SPEC 裁定沿子树递归，控制面从 tracker 重算 ready 集。
 
-Sandcastle 使用既有隔离执行与独审入口；LangChain Deep Agents 队列沿 `pilot1742 executor serve` 与 ClaimStore 运行，不转交旧 swarm，也不重复认领已有任务。模型和路由以各入口配置为准。合入须非作者独审、适用 CI 和当前任务的合入授权；服务与发布变更仍按相应任务范围执行。
+Sandcastle 使用既有隔离执行与独审入口；LangChain Deep Agents 队列沿 `pilot1742 executor serve` 与 ClaimStore 运行，不转交旧 swarm，也不重复认领已有任务。模型和路由以各入口配置为准。普通 PR 在正式 `deepagents/review` 双审 success、适用 CI 通过后由代理合入，并遵守当前任务的合入授权；服务与发布变更仍按相应任务范围执行。
 
 过程证据落 `/Volumes/AgentStorage/<任务>/`，票与 PR 记录精确 head、实际结果及证据位置。产品文档、源代码、许可证和实际测试输入入 Git。SPEC 随对应交付完成而关闭，长期语义由代码、ADR 与教义正本维护。
 

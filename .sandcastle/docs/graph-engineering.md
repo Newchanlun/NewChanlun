@@ -9,14 +9,14 @@
 | 控制面 | `scripts/wayfinder_engine.mts`（已有） | 4 分钟 | 扫图、给合格实施票挂 `sandcastle` |
 | 裁决面 | `.sandcastle/decision-claimer.mts`（新） | 10 分钟 | grilling 票：每票 MAIN 会话分级+考古并续接起草 → 异家族独审 → PASS 落地，否则 held |
 | 执行面 | `claim-loop.mts` + `main.mts`（已有） | 60 秒 | 实施票：实装工蜂 + 独审工蜂 |
-| 验收面 | `harvest.sh`（#1660 PR 模式）+ main 合入人闸 | 15 分钟 | 评审完成的分支推远端、基于 main 开 PR、票面登记；不合入不关票 |
+| 验收面 | `harvest.sh`（#1660 PR 模式） | 15 分钟 | 评审完成的分支推远端、基于 main 开 PR、票面登记；正式 `deepagents/review` 双审 success 后由代理合入 |
 | 观测面 | `health-monitor` + 进度页（新） | 5 分钟 / 1 分钟 | 停摆即 _red_、自愈、进度 |
 
-普通研发流程的人闸只剩合入 main；真实资金、交易激活和凭据权限仍按 ADR 0041「授权来源与生效边界」取得对应授权。spec 与 P 类决策同 T 类一样，起草后经非作者独审 PASS 由代理裁定并记账（#1909，用户直接授权）；BLOCK 返修，缺有效独审不放行。
+普通研发流程不设人闸：普通 PR 在正式 `deepagents/review` 双审 success 后由代理合入。只有真实资金、账户/交易激活和凭据权限按 ADR 0041「授权来源与生效边界」交还用户签署（见「1. 分级」的资金与权限硬门）。spec 与 P 类决策同 T 类一样，起草后经非作者独审 PASS 由代理裁定并记账（#1909，用户直接授权）；BLOCK 返修，缺有效独审不放行。
 
 ### #1742 执行面依赖（PR #1915）
 
-保留 DeepAgents。本文的普通 SPEC 代理裁定合同是目标准入合同；现役 `deepagents-pilot/pilot1742/executor.py` / `approval.py` 仍有 SPEC_AUTHORIZATION 用户签署门，迁移由 Queued owner 的独立依赖 PR 交付。PR #1915 只交付控制面写前重验与文档，不能单独部署；依赖 PR 合入、精确集成版本通过首次队列执行验收后，才可声明新 PASS 贯通执行器。
+保留 DeepAgents。本文的普通 SPEC 代理裁定合同是目标准入合同；现役 `deepagents-pilot/pilot1742/executor.py` / `approval.py` 仍有 SPEC_AUTHORIZATION 用户签署门，迁移由 Queued owner 的独立依赖 PR 交付。PR #1915 改了控制面写前重验、decision-claimer 的 T/P 代理裁定与资金硬门，以及执行器的释放（本机先记 `released`，排空后摘镜像）和队列的已合入不重派；`executor.py` / `approval.py` 的 SPEC 准入不改。宿主从 `origin/main` 自动更新（见「宿主约束」），合入即部署这些改动；在依赖 PR 合入前，DeepAgents 队列路径的 SPEC 准入仍是原签署门。依赖 PR 合入、精确集成版本通过首次队列执行验收后，才可声明新 PASS 贯通执行器。
 
 ## 裁决流程（每张 grilling 票）
 
@@ -45,7 +45,7 @@
 
 决定等事实（`/wayfinder` Ticket Types：research 票「surface a fact a decision waits on」）：考古有 `research`/`probe` 缺口的票（T/P 同）不起草、不落地，进 `held`（`fact_gap`），票上列出要开的缺口票；主控按 `/graph-run` 第 3 步开票并接 blocking 边。
 
-资金与权限硬门（ADR 0041「授权来源与生效边界」节）：分级同时输出 `user_gate`，逐项列出本票要签的真实资金投入/取出/改额、账户/场所激活、真实交易量档与容量、成本/风险阈值，以及凭据和权限授予，每项带依据。`user_gate` 非空的票（T/P 同）不起草、不落地，进 `held`（`user_authorization`），挂 `ready-for-human`，票上列出待签事项。只定方法、推荐值或实现方案的不列；票上已有用户本人在同一有效域的签署值也不列。分级输出缺 `user_gate` 或不成形时按非空处理。用户在票上写首行「退回：」的评论并给出签署值与有效域，下一轮整链重跑，起草照引该评论。
+资金与权限硬门（ADR 0041「授权来源与生效边界」节）：分级同时输出 `user_gate`，逐项列出本票要签的真实资金投入/取出/改额、账户/场所激活、真实交易量档与容量、成本/风险阈值，以及凭据和权限授予，每项带依据。`user_gate` 非空的票（T/P 同）不起草、不落地，进 `held`（`user_authorization`），挂 `ready-for-human`，票上列出待签事项。只定方法、推荐值或实现方案的不列；票上已有用户本人在同一有效域的签署值也不列。分级输出缺 `user_gate` 或不成形时按非空处理；本地落盘的旧分级记录（`classify.json`，含硬门字段之前生成的）缺 `userGate` 时同样按非空处理，沿用旧分级的续做与未推送的 `reviewed_pass` 断点都交还用户，不落地。用户在票上写首行「退回：」的评论并给出签署值与有效域，下一轮整链重跑，起草照引该评论；落地时摘掉本流程挂的 `ready-for-human`（以票上有本流程的「裁决暂停（待用户签署）」评论为准，别处挂的不动），签署后重跑转入其他 held 原因时同样摘掉。主控不代用户发这条「退回：」。代理与用户共用同一 GitHub 账号，「退回：」评论的作者无法机器区分（现有信任模型，本流程未改变）。
 
 机械校验：两路缺一、tracker 未覆盖已关闭票、A/B 缺出处、B 缺默认值、C 缺关键词或去向、C 类 `decision` 缺推荐答案，都带问题重跑一次（重做时仍用主控模型重跑）；仍不过的问题交审查，草稿因此 BLOCK。
 
@@ -110,8 +110,8 @@
 
 ### 5. 落地
 
-- **PASS（T/P 同）**：正本写进 `decision/<票号>` 分支（`.chanlun/definitions/`、`docs/adr/` 或 `CONTEXT.md`），票上发 resolution 评论，首行按分级写授权句（见「1. 分级」），并附草稿、审查路径；票上若还挂旧 `needs-approval`，发 resolution 前摘掉。决策文档按日批量开 PR；PR 合入后关票，map 的 Decisions so far 加一行，接新 blocking 边。
-- **held（不放行）**：原因四种——`review_blocked`（轮次用尽仍 BLOCK）、`fact_gap`（考古事实缺口）、`invalid_landing`（获审草稿缺合法落点）、`user_authorization`（触及资金与权限硬门，待用户签署）。依次写入：票上发「**裁决暂停**」评论（BLOCK 表、缺口清单或待签事项）、`user_authorization` 时挂 `ready-for-human`、摘旧 `needs-approval`、取消认领；每步落 `heldDone` 断点（`held_pending`），中断后只补没做完的步。dry-run 只登记这些写入，断点留在 `held_pending`，同一输出目录的 live 轮照补。除 `ready-for-human` 外 held 不加标签，也不改判。
+- **PASS（T/P 同）**：正本写进 `decision/<票号>` 分支（`.chanlun/definitions/`、`docs/adr/` 或 `CONTEXT.md`），票上发 resolution 评论，首行按分级写授权句（见「1. 分级」），并附草稿、审查路径；票上若还挂旧 `needs-approval`，或本流程挂过的 `ready-for-human`，发 resolution 前摘掉。决策文档按日批量开 PR；PR 合入后关票，map 的 Decisions so far 加一行，接新 blocking 边。
+- **held（不放行）**：原因四种——`review_blocked`（轮次用尽仍 BLOCK）、`fact_gap`（考古事实缺口）、`invalid_landing`（获审草稿缺合法落点）、`user_authorization`（触及资金与权限硬门，待用户签署）。依次写入：票上发「**裁决暂停**」评论（BLOCK 表、缺口清单或待签事项）、`user_authorization` 时挂 `ready-for-human`、摘旧 `needs-approval`、取消认领；每步落 `heldDone` 断点（`held_pending`），中断后只补没做完的步。dry-run 只登记这些写入，断点留在 `held_pending`，同一输出目录的 live 轮照补。除 `user_authorization` 的 `ready-for-human` 外 held 不加标签，也不改判；非 `user_authorization` 的 held 摘掉本流程此前挂的 `ready-for-human`。
 - **返修入口**：held 票在 `summary.json` 的评论水印之后出现编排者账号首行以「退回 / 驳回 / 打回 / 否决 / 不批准 / 不同意」开头的评论，下一轮作废旧 MAIN 会话并整链重跑（新分级、考古、起草、非作者独审）；没有这样的评论，claimer 不重跑、不调模型。
 
 宿主确定性执行获审 `canonicalPlan`，不再调用 land 模型；triage、draft、review 的模型工具权限均只读。写入前核目标及父目录不是符号链接，当前目标与获审 `before` 逐字一致。main 无关文件前进可继续，目标漂移则保留 `reviewed_pass` 并要求重新起草、独审。提交前核工作树仅有目标改动，暂存与最终 commit 的目标 blob 均等于获审 `after`。
@@ -184,7 +184,7 @@ GitHub 不提供跨评论读取与写操作的原子事务，最后一次读取�
 
 > **N-1 技术类决策预授权**（用户 2026-10-18 原话：「其实很多技术的东西 完全不需要我来做 我完全信任你的判断」）：本图 T 类 grilling 票由代理起草、独立审查通过后直接裁定。依此判定的 resolution 首行注明「本条依 #1323 Notes N-1 预授权判定」。
 
-**#1909 扩展**（用户直接授权本次流程改变）：P 类与 SPEC 同样经起草与非作者独审 PASS 由代理裁定并记账，删除普通用户审批门与 `/graph-approve`（真实资金与权限边界见 ADR 0041）；P 类 resolution 首行「本条依 #1909 代理独审裁定」。合入 main 仍是人闸。
+**#1909 扩展**（用户直接授权本次流程改变）：P 类与 SPEC 同样经起草与非作者独审 PASS 由代理裁定并记账，删除普通用户审批门与 `/graph-approve`（真实资金与权限边界见 ADR 0041）；P 类 resolution 首行「本条依 #1909 代理独审裁定」。普通 PR 在正式 `deepagents/review` 双审 success 后由代理合入；资金、账户、凭据类硬门票交还用户签署。
 
 `wayfinder-workflow.md` 的「不碰决策票（v1）」只约束 wayfinder_engine 本体，裁决面是独立组件；该文同步加一行指向本文。
 
@@ -218,7 +218,7 @@ Sandcastle 宿主 `NewChanlun-sandcastle-host` 开启 `SANDCASTLE_HOST_AUTO_UPDA
 2. 裁决面 live：一张 T 类票走完分级、起草、独审、分支落文档、PR。
 3. 执行面：claim-loop 派出的实施工蜂实际产生输出（上下文非 0、有 commit 或明确 blocked 结论）。
 4. health-monitor 发现停摆能变 _red_ 并自愈，进度页可看。
-5. 以上改动经 PR 合入 main（人闸）。
+5. 以上改动经 PR 合入 main（正式 `deepagents/review` 双审 success 后由代理合入）。
 
 ### Codex 单票阶段交付（#1617，2026-10-25）
 
