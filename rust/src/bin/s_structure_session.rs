@@ -6622,8 +6622,56 @@ mod tests {
         assert_killed_published(&snaps, false, "0");
         let rows = design_rows(KILLED, true, 6);
         let (_, base) = run_design(&rows, None, &[rows.len()]);
-        let counts: Vec<usize> = (25..rows.len()).step_by(2).chain([rows.len()]).collect();
+        // #1875 TB-02-W 负责人裁定：预算轮只在设计点推进（27 耗尽、29 追加后 OPEN、31 再耗尽、33 判失效、
+        // 35 A 终结）加终点，并把四个设计点的状态逐项钉死。原先 25..len 每 2 根推进一次（16 代），37–53
+        // 只是把已判定的游标逐代后带；逐前缀不复活另由 tb02w_tests.rs 的 parser 层测试覆盖。
+        let counts: Vec<usize> = vec![25, 27, 29, 31, 33, 35, rows.len()];
         let (files, budgeted) = run_design(&rows, Some(1), &counts);
+        for (count, coverage, granted, semantic, result) in [
+            (
+                27,
+                "INCOMPLETE_RESOURCE_BOUND",
+                "1",
+                Value::Null,
+                "PENDING_CASE_TWO",
+            ),
+            (
+                29,
+                "COMPLETE",
+                "2",
+                json!("OPEN_AT_PREFIX_END"),
+                "PENDING_CASE_TWO",
+            ),
+            (
+                31,
+                "INCOMPLETE_RESOURCE_BOUND",
+                "2",
+                Value::Null,
+                "PENDING_CASE_TWO",
+            ),
+            (
+                33,
+                "COMPLETE",
+                "3",
+                json!("KILLED_BY_NEW_EXTREME"),
+                "KILLED_CASE_TWO",
+            ),
+        ] {
+            let snap = &budgeted[counts.iter().position(|&c| c == count).unwrap()];
+            let scan = &segment_data(snap, "CC-012.feature_sequence", "second:segment:1:1")
+                .unwrap_or_else(|| panic!("设计点 {count} 须有 second 序列"))["scan"];
+            assert_eq!(scan["coverage"], coverage, "设计点 {count} coverage");
+            assert_eq!(scan["budget"]["granted"], granted, "设计点 {count} granted");
+            assert_eq!(
+                scan["semantic_state"], semantic,
+                "设计点 {count} semantic_state"
+            );
+            assert_eq!(
+                segment_data(snap, "CC-013.segment", "segment:1:1").unwrap()["result"],
+                result,
+                "设计点 {count} 段结果"
+            );
+        }
         assert_killed_published(&budgeted, true, "1");
         let mut bound_seen = false;
         let mut granted_max = 0u64;
