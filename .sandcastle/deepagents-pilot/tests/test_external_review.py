@@ -1,6 +1,7 @@
 import copy
 import hashlib
 import json
+import shlex
 import subprocess
 import sys
 from dataclasses import asdict
@@ -673,62 +674,146 @@ def test_zero_tool_conclusion_is_error_not_verdict(lane, claim):
     assert opus["verdict"] == "PASS"
 
 
-def _command(command: str, exit_code: int = 0) -> dict:
-    return {"type": "item.completed", "item": {"type": "command_execution", "command": f"/bin/bash -lc '{command}'",
+def _command(script: str, exit_code: int = 0) -> dict:
+    """Codex 记录 command_execution 的真实形状：`/bin/bash -lc <shell 引号包好的脚本>`。"""
+    return {"type": "item.completed", "item": {"type": "command_execution", "command": f"/bin/bash -lc {shlex.quote(script)}",
                                                "status": "completed" if exit_code == 0 else "failed", "exit_code": exit_code}}
 
 
-def _verdict_with_commands(lane, claim: str, commands: list[dict]) -> module.ReviewOutcome:
-    """把一次 PASS/BLOCK 审查的 events.jsonl 换成给定命令序列后重新判定。"""
+def _verdicts_with_commands(lane, claim: str, cases: dict) -> dict[str, module.ReviewOutcome]:
+    """跑一次 PASS/BLOCK 审查，再把 events.jsonl 依次换成每个用例的命令序列重新判定。"""
     _modes(lane, **{model: claim for model in MODELS})
     target = ReviewTarget(**lane.review_pr(1810)["target"])
     folder = lane.state_root / "runs" / target.key / MODELS[0]
     events = [json.loads(line) for line in (folder / "events.jsonl").read_text().splitlines()]
     events = [e for e in events if e.get("item", {}).get("type") != "command_execution"]
-    events[1:1] = [c(target) for c in commands]
-    (folder / "events.jsonl").write_text("\n".join(json.dumps(e) for e in events) + "\n")
-    return validate_review(target, json.loads((folder / "launch.json").read_text()),
-                           json.loads((folder / "receipt.json").read_text()), folder)
+    launch, receipt = json.loads((folder / "launch.json").read_text()), json.loads((folder / "receipt.json").read_text())
+    outcomes = {}
+    for case, commands in cases.items():
+        (folder / "events.jsonl").write_text("\n".join(json.dumps(e) for e in [
+            events[0], *(c(target) for c in commands), *events[1:]]) + "\n")
+        outcomes[case] = validate_review(target, launch, receipt, folder)
+    return outcomes
 
 
+def _diff(flags: str = "", tail: str = "") -> list:
+    return [lambda t: _command(f"git diff {flags}{' ' if flags else ''}{t.merge_base_sha} {t.head_sha}{tail}")]
+
+
+FAKE = "f" * 40
 NOT_A_PATCH_READ = {
     "echo": [lambda t: _command("echo hi")],
     "ls": [lambda t: _command("ls -la /review")],
     "unrelated-file": [lambda t: _command("cat /review/.agents/skills/code-review/SKILL.md")],
     "git-log": [lambda t: _command(f"git log --oneline {t.merge_base_sha}..{t.head_sha}")],
-    "wrong-sha": [lambda t: _command(f"git diff {t.merge_base_sha} {'f' * 40}")],
-    "merge-base-only": [lambda t: _command(f"git diff {t.merge_base_sha}")],
-    "stat-only": [lambda t: _command(f"git diff --stat {t.merge_base_sha} {t.head_sha}")],
+    "wrong-sha": [lambda t: _command(f"git diff {t.merge_base_sha} {FAKE}")],
+    "stat-only": _diff("--stat"),
     "failed-diff": [lambda t: _command(f"git diff {t.merge_base_sha} {t.head_sha}", exit_code=128)],
     "sha-outside-diff": [lambda t: _command(f"git log -1 {t.head_sha}; git diff")],
-    "var-wrong-sha": [lambda t: _command(f"H={'f' * 40}; git diff $H")],
+    "var-wrong-sha": [lambda t: _command(f"H={FAKE}; git diff {t.merge_base_sha} $H")],
     "var-echo-not-diff": [lambda t: _command(f"H={t.head_sha}; echo $H")],
-    "var-stat-only": [lambda t: _command(
-        f"B={t.merge_base_sha}; H={t.head_sha}; git diff --stat $B $H")],
+    "var-stat-only": [lambda t: _command(f"B={t.merge_base_sha}; H={t.head_sha}; git diff --stat $B $H")],
+    # #1969 kimi BLOCK 与准入独审：命令文本里有 git diff 字样，但不是 git 本身在执行
+    "echo-diff-text": [lambda t: _command(f"echo git diff {t.merge_base_sha} {t.head_sha}")],
+    "printf-diff-text": [lambda t: _command(f"printf '%s\\n' 'git diff {t.merge_base_sha} {t.head_sha}'")],
+    "heredoc-diff-text": [lambda t: _command(f"cat <<EOF\ngit diff {t.merge_base_sha} {t.head_sha}\nEOF")],
+    "comment-diff-text": [lambda t: _command(f"ls /review # git diff {t.merge_base_sha} {t.head_sha}")],
+    "grep-for-diff-text": [lambda t: _command(f'rg -n "git show {t.head_sha}" /review')],
+    "diff-tree-raw": [lambda t: _command(f"git diff-tree {t.merge_base_sha} {t.head_sha}")],
+    "nested-shell": [lambda t: _command(f'bash -c "git diff {t.merge_base_sha} {t.head_sha}"')],
+    "command-substitution": [lambda t: _command(f"x=$(git diff {t.merge_base_sha} {t.head_sha})")],
+    # kimi BLOCK：变量代回必须按 shell 语义
+    "var-used-before-assign": [lambda t: _command(f"git diff $H; H={t.head_sha}")],
+    "var-reassigned-last-wins": [lambda t: _command(f"H={t.head_sha}; H={FAKE}; git diff {t.merge_base_sha} $H")],
+    "var-single-quoted": [lambda t: _command(f"H={t.head_sha}; git diff {t.merge_base_sha} '$H' | cat")],
+    "var-subshell": [lambda t: _command(f"(H={t.head_sha}); git diff {t.merge_base_sha} $H")],
+    "var-suffix": [lambda t: _command(f"H={t.head_sha}; git diff {t.merge_base_sha} ${{H}}x | cat")],
+    "var-prefix-assignment": [lambda t: _command(f"H={t.head_sha} git diff {t.merge_base_sha} $H")],
+    # 不输出补丁的形式（git 2.50 实测）
+    "empty-range": [lambda t: _command(f"git diff {t.head_sha}..{t.head_sha}")],
+    "same-commit": [lambda t: _command(f"git diff {t.head_sha} {t.head_sha}")],
+    "head-vs-clean-worktree": [lambda t: _command(f"git diff {t.head_sha}")],
+    "show-q": [lambda t: _command(f"git show -q {t.head_sha}")],
+    "show-quiet": [lambda t: _command(f"git show --quiet {t.head_sha}")],
+    "show-s-format": [lambda t: _command(f"git show -s --format=%H {t.head_sha}")],
+    "show-no-patch": [lambda t: _command(f"git show --no-patch {t.head_sha}")],
+    "show-patch-then-no-patch": [lambda t: _command(f"git show -p --no-patch {t.head_sha}")],
+    "show-name-only": [lambda t: _command(f"git show --name-only -p {t.head_sha}")],
+    "show-tree-root": [lambda t: _command(f"git show {t.head_sha}:")],
+    **{f"diff{flag}": _diff(flag) for flag in ("--name-only", "--name-status", "--numstat", "--shortstat",
+                                               "--summary", "--check", "--quiet", "--exit-code", "--raw", "-s",
+                                               "--no-patch", "--output=/tmp/p.diff")},
+    "trailing-stat": _diff(tail=" --stat"),
+    "trailing-name-only": _diff(tail=" --name-only"),
+    "ext-diff": [lambda t: _command(f"GIT_EXTERNAL_DIFF=true git diff {t.merge_base_sha} {t.head_sha}")],
+    "unknown-sha-piped": [lambda t: _command(f"git diff {'e' * 40} {t.head_sha} | head")],
+    # 输出被吞或退出码被掩盖
+    "pipe-true": _diff(tail=" | true"),
+    "pipe-colon": _diff(tail=" | :"),
+    "pipe-cat-devnull": _diff(tail=" | cat >/dev/null"),
+    "pipe-head-0": _diff(tail=" | head -0"),
+    "pipe-head-n-0": _diff(tail=" | head -n 0"),
+    "pipe-grep-q": _diff(tail=" | grep -q x"),
+    "or-true": _diff(tail=" || true"),
+    "semicolon-true": _diff(tail="; true"),
+    "newline-exit-0": _diff(tail="\nexit 0"),
+    "background": _diff(tail=" &"),
+    "or-guarded": [lambda t: _command(f"true || git diff {t.merge_base_sha} {t.head_sha}")],
+    "stdout-devnull": _diff(tail=" >/dev/null"),
+    "stdout-devnull-after-dup": _diff(tail=" 2>&1 >/dev/null"),
+    "stdout-closed": _diff(tail=" >&-"),
+    "unread-file": _diff(tail=" > /tmp/p.diff"),
 }
 PATCH_READ = {
     "range": [lambda t: _command(f"cd /review && git diff --no-ext-diff --no-textconv {t.merge_base_sha} {t.head_sha} | head")],
     "dotdot": [lambda t: _command(f"git -C /review diff {t.merge_base_sha[:7]}..{t.head_sha[:7]}")],
     "show-file": [lambda t: _command("echo hi"), lambda t: _command(f"git --no-pager show {t.head_sha[:8]}:README.md")],
     "var-assign": [lambda t: _command(f"B={t.merge_base_sha}; H={t.head_sha}; git diff $B $H")],
-    "var-export-quoted-show": [lambda t: _command(
-        f'export H={t.head_sha} && git show "$H":README.md')],
+    "var-export-quoted-show": [lambda t: _command(f'export H={t.head_sha} && git show "$H":README.md')],
     "var-braces": [lambda t: _command(f"B={t.merge_base_sha}; H={t.head_sha}; git diff ${{B}} ${{H}}")],
+    "var-last-assignment-wins": [lambda t: _command(f"H={FAKE}; H={t.head_sha}; git diff {t.merge_base_sha} $H")],
+    # 真实审查日志里的形式（opus、kimi、gpt-6.1-sol，166 位审查员 6512 条命令）
+    "merge-base-vs-clean-worktree": [lambda t: _command(f"git diff {t.merge_base_sha}")],
+    "merge-base-HEAD": [lambda t: _command(f"git diff {t.merge_base_sha} HEAD")],
+    "merge-base-dotdot-HEAD": [lambda t: _command(f"cd /review && B={t.merge_base_sha}; git diff $B..HEAD -- README.md")],
+    "triple-dot": [lambda t: _command(f"git diff {t.merge_base_sha}...{t.head_sha}")],
+    "show-HEAD-file": [lambda t: _command("cd /review && git show HEAD:README.md | sed -n 1,60p")],
+    "show-file-numbered": [lambda t: _command(f"git show {t.head_sha}:README.md | nl -ba | sed -n '1,200p'")],
+    "show-commit-oneline": [lambda t: _command(f"git show --oneline {t.head_sha}")],
+    "show-range": [lambda t: _command(f"git show {t.merge_base_sha}..{t.head_sha}")],
+    "git-P": [lambda t: _command(f"git -P diff {t.merge_base_sha} {t.head_sha}")],
+    "env-and-global-options": [lambda t: _command(
+        f"GIT_PAGER=cat git --no-pager -c core.quotepath=false --git-dir=/review/.git --work-tree /review "
+        f"diff {t.merge_base_sha} {t.head_sha}")],
+    "skill-then-diff": [lambda t: _command(
+        f"cat /review/.agents/skills/code-review/SKILL.md && git diff --no-ext-diff --no-textconv {t.merge_base_sha} {t.head_sha}")],
+    "stat-then-patch": _diff("--stat -p"),
+    "stat-then-diff": [lambda t: _command(
+        f"git diff --stat {t.merge_base_sha} {t.head_sha} && git diff {t.merge_base_sha} {t.head_sha} -- README.md")],
+    "command-in-variable": [lambda t: _command(
+        f'cd /review && D="git diff --no-ext-diff --no-textconv {t.merge_base_sha} {t.head_sha}"; $D -- README.md')],
+    "file-then-read": _diff(tail=" > /tmp/p.diff; wc -l /tmp/p.diff; sed -n 1,200p /tmp/p.diff"),
+    "file-read-by-heredoc": [lambda t: _command(
+        f"git show {t.head_sha}:README.md > /tmp/r.md; python3 - <<'EOF'\nprint(open('/tmp/r.md').read())\nEOF")],
+    "for-loop-show": [lambda t: _command(f"H={t.head_sha}; for f in README.md a; do git show $H:$f | nl -ba; done")],
+    "stderr-dropped": _diff(tail=" 2>/dev/null"),
+    "stderr-merged-piped": _diff(tail=" 2>&1 | head -200"),
+    "and-then-true": _diff(tail=" && true"),
 }
 
 
 @pytest.mark.parametrize("claim", ["PASS", "BLOCK"])
-@pytest.mark.parametrize("case", NOT_A_PATCH_READ)
-def test_conclusion_without_frozen_patch_read_is_failed(lane, claim, case):
-    """#1968：跑过命令但没用 git diff/show 读冻结候选（echo、ls、无关文件、git log、错 SHA）同样不采信。"""
-    outcome = _verdict_with_commands(lane, claim, NOT_A_PATCH_READ[case])
-    assert outcome.verdict == "FAILED" and "未读取冻结候选补丁" in outcome.reason
+def test_conclusion_without_frozen_patch_read_is_failed(lane, claim):
+    """#1968/#1969：跑过命令但没有让 git 把冻结候选补丁输出到日志的，PASS、BLOCK 都不采信。"""
+    outcomes = _verdicts_with_commands(lane, claim, NOT_A_PATCH_READ)
+    assert {case: o.verdict for case, o in outcomes.items()
+            if o.verdict != "FAILED" or "未读取冻结候选补丁" not in (o.reason or "")} == {}
 
 
 @pytest.mark.parametrize("claim", ["PASS", "BLOCK"])
-@pytest.mark.parametrize("case", PATCH_READ)
-def test_conclusion_after_frozen_patch_read_stands(lane, claim, case):
-    assert _verdict_with_commands(lane, claim, PATCH_READ[case]).verdict == claim
+def test_conclusion_after_frozen_patch_read_stands(lane, claim):
+    outcomes = _verdicts_with_commands(lane, claim, PATCH_READ)
+    assert {case: o.reason for case, o in outcomes.items() if o.verdict != claim} == {}
 
 
 def test_zero_tool_pass_is_never_reused(lane, env):
