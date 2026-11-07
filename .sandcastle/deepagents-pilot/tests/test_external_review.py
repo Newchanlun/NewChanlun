@@ -701,11 +701,19 @@ NOT_A_PATCH_READ = {
     "stat-only": [lambda t: _command(f"git diff --stat {t.merge_base_sha} {t.head_sha}")],
     "failed-diff": [lambda t: _command(f"git diff {t.merge_base_sha} {t.head_sha}", exit_code=128)],
     "sha-outside-diff": [lambda t: _command(f"git log -1 {t.head_sha}; git diff")],
+    "var-wrong-sha": [lambda t: _command(f"H={'f' * 40}; git diff $H")],
+    "var-echo-not-diff": [lambda t: _command(f"H={t.head_sha}; echo $H")],
+    "var-stat-only": [lambda t: _command(
+        f"B={t.merge_base_sha}; H={t.head_sha}; git diff --stat $B $H")],
 }
 PATCH_READ = {
     "range": [lambda t: _command(f"cd /review && git diff --no-ext-diff --no-textconv {t.merge_base_sha} {t.head_sha} | head")],
     "dotdot": [lambda t: _command(f"git -C /review diff {t.merge_base_sha[:7]}..{t.head_sha[:7]}")],
     "show-file": [lambda t: _command("echo hi"), lambda t: _command(f"git --no-pager show {t.head_sha[:8]}:README.md")],
+    "var-assign": [lambda t: _command(f"B={t.merge_base_sha}; H={t.head_sha}; git diff $B $H")],
+    "var-export-quoted-show": [lambda t: _command(
+        f'export H={t.head_sha} && git show "$H":README.md')],
+    "var-braces": [lambda t: _command(f"B={t.merge_base_sha}; H={t.head_sha}; git diff ${{B}} ${{H}}")],
 }
 
 

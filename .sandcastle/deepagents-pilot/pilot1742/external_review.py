@@ -306,10 +306,23 @@ def review_prompt(target: ReviewTarget, names: tuple[str, ...]) -> str:
 _PATCH_READ = re.compile(r"\bgit(?:\s+(?:-C|-c)\s+\S+|\s+--[\w-]+(?:=\S+)?)*\s+(?:diff|show)\b")
 _SUMMARY_ONLY = re.compile(r"\s(?:--(?:stat|shortstat|numstat|name-only|name-status|summary|check|no-patch|quiet)|-s)(?=[\s=]|$)")
 _HEX = re.compile(r"(?<![0-9a-fA-F])[0-9a-fA-F]{7,40}(?![0-9a-fA-F])")
+_SHA_ASSIGN = re.compile(r"\b(?:export\s+)?([A-Za-z_]\w*)=[\"']?([0-9a-fA-F]{7,40})[\"']?(?![0-9a-fA-F])")
+
+
+def _inline_sha_vars(command: str) -> str:
+    """同一条命令里 `NAME=<hex>`（可带 export、引号）的赋值代回后续的 `$NAME`/`${NAME}`/`"$NAME"`。
+    opus 常写 `B=<mb>; H=<head>; git diff $B $H`：按 `;` 切段后 SHA 留在赋值段，git diff 段只剩变量名，
+    不代回会被 reads_candidate_patch 判为未读取（#1969 增量 2，真实 74 个 opus 目录 3 个全程零合格读取）。
+    只代回值是十六进制 SHA 的赋值，其他变量不处理；不执行命令，纯文本替换。"""
+    for name, value in _SHA_ASSIGN.findall(command):
+        command = re.sub(r"\$\{?" + re.escape(name) + r"\}?(?!\w)", value, command)
+    return command
 
 
 def reads_candidate_patch(command: str, head_sha: str) -> bool:
-    """命令里有一段 git diff/show 指名了冻结 head（≥7 位前缀，merge-base..head 范围同样含 head），且不是只出统计。"""
+    """命令里有一段 git diff/show 指名了冻结 head（≥7 位前缀，merge-base..head 范围同样含 head），且不是只出统计。
+    先把同一条命令内 `NAME=<hex>` 赋值代回对应变量引用，再切段判定。"""
+    command = _inline_sha_vars(command)
     return any(_PATCH_READ.search(part) and not _SUMMARY_ONLY.search(part)
                and any(head_sha.startswith(token.lower()) for token in _HEX.findall(part))
                for part in re.split(r"&&|\|\||[;|\n]", command))
