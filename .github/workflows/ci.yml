@@ -29,7 +29,8 @@ concurrency:
 #   Boat 与 GitHub 托管 runner 的工作目录深度不同，两边各存各的。
 jobs:
   # #1875 p2m：只改 .sandcastle/**、package.json、package-lock.json、tsconfig.sandcastle.json、
-  #   .github/devskim-reviewed-1488.json（只有 devskim.yml 读，Sandcastle PR 常顺带登记误报）的 PR 跳过 Rust 作业。
+  #   以及 DevSkim 一组文件（devskim.yml、.github/devskim/、基线、误报清单、scripts/devskim_*；只有 devskim.yml 读，
+  #   Rust 侧只有行内 `devskim: ignore` 注释）的 PR 跳过 Rust 作业。Sandcastle PR 常顺带登记误报。
   #   依据（2026-11-07 全量核对）：rust/、s_session/、.github/scripts 与 Rust 作业步骤不引用这些路径；
   #   遍历目录的测试只遍历 rust/src、formal/Origin、s_session。docs/、.chanlun/ 有 Rust 测试读取，不在跳过集。
   #   push main、手动触发总是全跑；重命名同时计旧路径；文件数达到 API 上限（3000）按需跑处理。
@@ -53,7 +54,7 @@ jobs:
           gh api --paginate "repos/$GITHUB_REPOSITORY/pulls/$PR/files?per_page=100" \
             --jq '.[] | .filename, (.previous_filename // empty)' > "$RUNNER_TEMP/files"
           total=$(gh api "repos/$GITHUB_REPOSITORY/pulls/$PR" --jq .changed_files)
-          other=$(grep -c -v -E '^(\.sandcastle/.+|package\.json|package-lock\.json|tsconfig\.sandcastle\.json|\.github/devskim-reviewed-1488\.json)$' "$RUNNER_TEMP/files" || true)
+          other=$(grep -c -v -E '^(\.sandcastle/.+|package\.json|package-lock\.json|tsconfig\.sandcastle\.json|\.github/devskim-reviewed-1488\.json|\.github/devskim-baseline\.json|\.github/devskim/.+|\.github/workflows/devskim\.yml|scripts/devskim_[a-z_]+\.(sh|py))$' "$RUNNER_TEMP/files" || true)
           if [ "$total" -ge 3000 ] || [ ! -s "$RUNNER_TEMP/files" ] || [ "$other" -ne 0 ]; then rust=true; else rust=false; fi
           echo "changed=$total other=$other rust=$rust"
           echo "rust=$rust" >> "$GITHUB_OUTPUT"
