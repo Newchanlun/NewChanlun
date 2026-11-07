@@ -3,15 +3,15 @@
 Codex 记录的命令形如 `/bin/bash -lc '<脚本>'`。这里按 bash 语法静态切开脚本，不执行：引号、注释、heredoc 正文、
 `$(...)` 按 shell 的含义处理；变量按执行顺序代回（同名取最后一次赋值，单引号里不代回，子 shell 与多段管道里的赋值
 不外泄，`H=x cmd $H` 的前缀赋值不影响本命令的展开，未加引号的变量按空白分词）。求不出值的部分记为 _OPAQUE。
-一个简单命令算读取，须同时满足：
-- 去掉保留字 `do`/`then`/`else`/`{`/`time` 与 `NAME=val` 前缀后，第一个词就是 git，之后只有全局选项
-  `-C <dir>`、`-c <k=v>`、`--no-pager`/`-P`、`--git-dir`、`--work-tree`，紧跟子命令 diff 或 show；
-- 按 git 的实际输出规则会输出补丁：diff 两侧一边是冻结 head（`HEAD` 也算，审阅 checkout 已证实停在 head 且干净）、
+整条命令须是这个形状，其中恰好一个简单命令是 git 读取：
+- git 读取：去掉保留字 `do`/`then`/`else`/`{`/`time` 与 `NAME=val` 前缀后，第一个词就是 `git`（或 `/usr/bin/git`），
+  之后只有全局选项 `-C <dir>`、`-c <k=v>`、`--no-pager`/`-P`、`--git-dir`、`--work-tree`，紧跟子命令 diff 或 show；
+  按 git 的实际输出规则会输出补丁：diff 两侧一边是冻结 head（`HEAD` 也算，审阅 checkout 已证实停在 head 且干净）、
   另一边是别的已知提交，只给一个提交时另一边是工作区；show 指名 head 的提交、`<other>..<head>` 范围，
-  或 `<head>:<path>` 文件内容；
-- 输出进了日志：本命令和其后管道段的 stdout 没被丢掉（/dev/null、关闭、写进之后没人读的文件），管道后面没有
-  `true`/`:`/`head -0`/`grep -q` 这类吞输出的段；退出码没被掩盖：管道之后不接 `||`、`&`，前面不是 `||`，
-  脚本末尾不是另起一段的 `true`/`:`/`exit 0`。
+  或 `<head>:<path>` 文件内容；stdout 没被丢掉（/dev/null、关闭、写进文件）。
+- git 之前只有不输出的段（_setup），用 `&&`、`;` 或换行接上；git 之后只有经管道串联的纯过滤器（_FILTERS），
+  管道就是脚本的结尾。别的命令（echo、printf、cat 文件、tee、python、另一条 git……）只要出现，整条命令就不算：
+  aggregated_output 是整条命令的输出，那些段印出的改动行与 git 印出的分不开（#1969 正式审查 kimi BLOCK）。
 
 命令文本只说明脚本打算让 git 输出补丁，不说明它真的输出了：`if false; then git diff …; fi` 没执行，
 `exec >/dev/null`、`export GIT_EXTERNAL_DIFF=true` 改的是之后命令的环境，textconv 保留 `diff --git`/`@@` 头而把内容
@@ -313,23 +313,6 @@ def _discards_stdout(command: _Expanded, later: list[_Expanded]) -> bool:
     return False
 
 
-def _swallows(command: _Expanded, later: list[_Expanded]) -> bool:
-    if _discards_stdout(command, later):
-        return True
-    argv = command.argv
-    if not argv:
-        return False
-    name = argv[0].rsplit("/", 1)[-1]
-    if name in ("true", ":", "false", "exit"):
-        return True
-    args = " ".join(argv[1:])
-    if name in ("head", "tail"):
-        return bool(re.search(r"(?:^|\s)(?:-[nc]?\s*0+|--(?:lines|bytes)=0+)(?:\s|$)", args))
-    if name in ("grep", "egrep", "fgrep", "rg"):
-        return any(re.fullmatch(r"-[A-Za-z]*q[A-Za-z]*|--quiet|--silent", a) for a in argv[1:])
-    return False
-
-
 class _Revisions:
     def __init__(self, head: str, others: tuple[str, ...]) -> None:
         self.head, self.others = head.lower(), tuple(o.lower() for o in others if o)
@@ -476,29 +459,95 @@ def reads_candidate_patch(command: str, output: str, patch: FrozenPatch) -> bool
 
 def _would_print_patch(command: str, head_sha: str, other_shas: tuple[str, ...]) -> bool:
     """`other_shas` 是同一冻结目标里别的已知提交（merge-base、base）；diff 另一侧须是它们或 head 的祖先写法，
-    写一个不存在的 SHA 再接管道（`git diff <bad> <head> | head`，无 pipefail 时退出码为 0）不算读取。"""
+    写一个不存在的 SHA 再接管道（`git diff <bad> <head> | head`，无 pipefail 时退出码为 0）不算读取。
+    命令替换会执行别的命令，含换行的参数会被 git 或过滤器的报错原样带进输出（`git show <head>:$'x\n+<改动行>'`），
+    _SPECIAL_NAME 里的变量改的是跑哪个 git、读哪份配置和 shell 怎么分词，这三样都不算。"""
     script = _script(command)
     if script is None:
         return False
     items = _parse(_lex(script))
     commands = [x for x in items if isinstance(x, _Command)]
+    if not commands or any(kind == "opaque" for c in commands
+                           for word in [*c.words, *(t for _, t in c.redirects)] for kind, _ in word):
+        return False
     expanded = _evaluate(items)
+    if any("\n" in arg or "\r" in arg for e in expanded for arg in e.argv):
+        return False
     revisions = _Revisions(head_sha, other_shas)
-    last = expanded[-1] if expanded else None
-    trailing_mask = (len(commands) > 1 and commands[-2].op in (";", "\n", "&", ";;")
-                     and last is not None and not last.redirects
-                     and (last.argv in (["true"], [":"], ["exit"], ["exit", "0"])))
-    for k, simple in enumerate(expanded):
-        if _discards_stdout(simple, expanded[k + 1:]) or not _git_patch_read(simple, revisions):
-            continue
-        end = k
-        while commands[end].op in _PIPE and end + 1 < len(commands):
-            end += 1
-        if any(_swallows(expanded[j], expanded[j + 1:]) for j in range(k + 1, end + 1)):
-            continue
-        if commands[end].op in ("||", "&") or (k and commands[k - 1].op == "||"):
-            continue
-        if trailing_mask and end < len(commands) - 1:
-            continue
+    reads = [k for k, e in enumerate(expanded) if _git_patch_read(e, revisions)]
+    if len(reads) != 1:
+        return False
+    k = reads[0]
+    if (expanded[k].argv[0] not in ("git", "/usr/bin/git") or _discards_stdout(expanded[k], [])
+            or (k and commands[k - 1].op not in ("&&", ";", "\n"))
+            or commands[-1].op not in ("", ";", "\n")
+            or any(_SPECIAL_NAME.fullmatch(name) for e in expanded for name in e.env_names)):
+        return False
+    before, pipeline = expanded[:k], expanded[k + 1:]
+    return (all(_setup(e) and c.op in ("&&", ";", "\n") for c, e in zip(commands[:k], before, strict=True))
+            and all(commands[j].op in _PIPE for j in range(k, len(commands) - 1))
+            and all(_filter(e) for e in pipeline))
+
+
+def _setup(command: _Expanded) -> bool:
+    """git 之前不输出的段：`NAME=val`、`export NAME[=val]`、`cd /review`（审阅 checkout 的只读挂载点，本就是 cwd）。"""
+    argv = command.argv
+    if command.redirects:
+        return False
+    if not argv:
         return True
-    return False
+    if argv[0] == "export" and len(argv) > 1:
+        names = [arg.partition("=")[0] for arg in argv[1:]]
+        return all(_NAME.fullmatch(n) and not _SPECIAL_NAME.fullmatch(n) for n in names)
+    return argv == ["cd", "/review"]
+
+
+_SPECIAL_NAME = re.compile(r"GIT_(?!PAGER$)\w*|PATH|IFS|CDPATH|HOME|XDG_CONFIG_HOME")
+_COUNT = r"\+\d+|0*[1-9]\d*"  # 0 行就是吞掉输出
+_SED_SCRIPT = re.compile(r"(?:\d+|\$)(?:,(?:\d+|\$))?p(?:;(?:\d+|\$)(?:,(?:\d+|\$))?p)*")
+
+
+@dataclass(frozen=True)
+class _FilterSpec:
+    """flags：单独出现的选项；values：带值选项及值的形状；pattern：须且只能有一个位置参数（grep 的模式、sed 的脚本），
+    给了 `-e` 时不能再有。没有文件参数，也不接受会往输出里加任意文字的选项（`nl -s`、`grep --label`、sed 的 `i`/`a`/`s`）。"""
+    flags: str
+    values: dict[str, str] = field(default_factory=dict)
+    pattern: str | None = None
+
+
+_FILTERS = {
+    "nl": _FilterSpec(r"-b[at]|-w\d+|-n(?:ln|rn|rz)", {"-b": "[at]", "-w": r"\d+", "-n": "ln|rn|rz"}),
+    "head": _FilterSpec(rf"-(?:{_COUNT})|-[nc](?:{_COUNT})|--(?:lines|bytes)=(?:{_COUNT})", {"-n": _COUNT, "-c": _COUNT}),
+    "tail": _FilterSpec(rf"-(?:{_COUNT})|-[nc](?:{_COUNT})|--(?:lines|bytes)=(?:{_COUNT})", {"-n": _COUNT, "-c": _COUNT}),
+    "cat": _FilterSpec(r"-[nbsuvetAET]+|-"),
+    "sed": _FilterSpec(r"-n", {"-e": _SED_SCRIPT.pattern}, _SED_SCRIPT.pattern),
+    "grep": _FilterSpec(r"-[nivEFwxcaoh]+|-[ABCm]\d+|--colou?r=never",
+                        {"-e": r"(?s:.*)", "-A": r"\d+", "-B": r"\d+", "-C": r"\d+", "-m": r"\d+"}, r"(?s:.*)"),
+}
+
+
+def _filter(command: _Expanded) -> bool:
+    """git 之后的管道段只做筛选或截取，输出的每一行都来自 git 的输出（只加行号）。"""
+    argv = command.argv
+    spec = _FILTERS.get(argv[0]) if argv else None
+    if spec is None or any(not op.startswith("2") for op, _ in command.redirects) or (argv[0] == "sed" and "-n" not in argv):
+        return False
+    positional: list[str] = []
+    given_e, i, options_done = False, 1, False
+    while i < len(argv):
+        arg = argv[i]
+        if options_done or arg == "-" and argv[0] != "cat" or not arg.startswith("-"):
+            positional.append(arg)
+        elif arg == "--":
+            options_done = True
+        elif arg in spec.values:
+            if i + 1 == len(argv) or not re.fullmatch(spec.values[arg], argv[i + 1]):
+                return False
+            given_e, i = given_e or arg == "-e", i + 1
+        elif not re.fullmatch(spec.flags, arg):
+            return False
+        i += 1
+    if spec.pattern is None or given_e:
+        return not positional
+    return len(positional) == 1 and bool(re.fullmatch(spec.pattern, positional[0]))

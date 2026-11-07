@@ -791,6 +791,51 @@ NOT_A_PATCH_READ = {
     "show-unchanged-file": [lambda t: _command(f"git show {t.head_sha}:README", output="x\n")],
     "show-missing-path-masked": [lambda t: _command(
         f"git show {t.head_sha}:nope | head", output=f"fatal: path 'nope' does not exist in '{t.head_sha}'\n")],
+    # #1969 正式审查 kimi BLOCK（f566ce6b）：输出是整条命令的合并输出，git 之外的段可以印出冻结补丁的改动行
+    "kimi-printf-after-empty-diff": [lambda t: _command(
+        f"git diff {t.merge_base_sha} {t.head_sha} -- nope; printf '%s\\n' '+0'", output="+0\n")],
+    "echo-before-empty-diff": [lambda t: _command(f"echo +0 && git diff {t.merge_base_sha} {t.head_sha} -- nope",
+                                                  output="+0\n")],
+    "cat-file-before-diff": [lambda t: _command(f"cat /tmp/fake; git diff {t.merge_base_sha} {t.head_sha} -- nope",
+                                                output="+0\n")],
+    "second-git-prints-text": [lambda t: _command(
+        f"git log -1 --format=+0 {t.head_sha}; git diff {t.merge_base_sha} {t.head_sha} -- nope", output="+0\n")],
+    "two-patch-reads": [lambda t: _command(f"git diff {t.merge_base_sha} {t.head_sha}; git show {t.head_sha}:changed-0")],
+    "git-then-and-echo": _diff(tail=" -- nope | head && echo +0"),
+    "pipe-into-python": [lambda t: _command(
+        f"git diff {t.merge_base_sha} {t.head_sha} -- nope | python3 -c 'print(\"+0\")'", output="+0\n")],
+    "pipe-into-tee": _diff(tail=" | tee /tmp/p"),
+    "pipe-into-less": _diff(tail=" | less -R"),
+    "filter-reads-file": _diff(tail=" -- nope | grep . /tmp/fake"),
+    "filter-stdin-from-file": _diff(tail=" -- nope | cat </tmp/fake"),
+    "filter-here-string": _diff(tail=" -- nope | cat <<< +0"),
+    "sed-rewrites-lines": [lambda t: _command(f"git show {t.head_sha}:README | sed -n 's/.*/+0/p'", output="+0\n")],
+    "sed-inserts-text": [lambda t: _command(f"git show {t.head_sha}:README | sed -n '1i +0'", output="+0\nx\n")],
+    "nl-separator-text": [lambda t: _command(f"git show {t.head_sha}:README | nl -ba -s '\t+0'", output="     1\t+0\n")],
+    "grep-label-text": [lambda t: _command(f"git show {t.head_sha}:README | grep -H --label=+0 ''", output="+0:x\n")],
+    "filter-by-path": _diff(tail=" | /tmp/cat"),
+    "newline-arg-in-error": [lambda t: _command(
+        f"git show {t.head_sha}:'x\n+0\n' | cat", output=f"fatal: path 'x\n+0\n' does not exist in '{t.head_sha}'\n")],
+    "command-substitution-stderr": [lambda t: _command(
+        f"H=$(echo +0 >&2); git diff {t.merge_base_sha} {t.head_sha} -- nope", output="+0\n")],
+    "export-external-diff-prints": [lambda t: _command(
+        f"export GIT_EXTERNAL_DIFF=/tmp/x.sh; git diff {t.merge_base_sha} {t.head_sha}", output="+0\n")],
+    "path-assignment": [lambda t: _command(f"PATH=/tmp; git diff {t.merge_base_sha} {t.head_sha}")],
+    "git-by-path": [lambda t: _command(f"/tmp/git diff {t.merge_base_sha} {t.head_sha}")],
+    "cd-elsewhere": [lambda t: _command(f"cd /tmp/clone && git diff {t.merge_base_sha}")],
+    "export-prints": [lambda t: _command(f"export -p; git diff {t.merge_base_sha} {t.head_sha}")],
+    # 原先算读取、现在不算：git 之外还有段（真实日志里有这些形式，见 PR 正文的重放）
+    "skill-then-diff": [lambda t: _command(
+        f"cat /review/.agents/skills/code-review/SKILL.md && git diff --no-ext-diff --no-textconv {t.merge_base_sha} {t.head_sha}")],
+    "stat-then-diff": [lambda t: _command(
+        f"git diff --stat {t.merge_base_sha} {t.head_sha} && git diff {t.merge_base_sha} {t.head_sha} -- changed-0")],
+    "file-then-read": _diff(tail=" > /tmp/p.diff; wc -l /tmp/p.diff; sed -n 1,200p /tmp/p.diff"),
+    "file-read-by-heredoc": [lambda t: _command(
+        f"git show {t.head_sha}:changed-0 > /tmp/r.md; python3 - <<'EOF'\nprint(open('/tmp/r.md').read())\nEOF",
+        output="0\n")],
+    "for-loop-show": [lambda t: _command(f"H={t.head_sha}; for f in changed-0 changed-1; do git show $H:$f | nl -ba; done",
+                                         output="     1\t0\n     1\t1\n")],
+    "and-then-true": _diff(tail=" && true"),
 }
 PATCH_READ = {
     "range": [lambda t: _command(f"cd /review && git diff --no-ext-diff --no-textconv {t.merge_base_sha} {t.head_sha} | head")],
@@ -815,22 +860,14 @@ PATCH_READ = {
     "env-and-global-options": [lambda t: _command(
         f"GIT_PAGER=cat git --no-pager -c core.quotepath=false --git-dir=/review/.git --work-tree /review "
         f"diff {t.merge_base_sha} {t.head_sha}")],
-    "skill-then-diff": [lambda t: _command(
-        f"cat /review/.agents/skills/code-review/SKILL.md && git diff --no-ext-diff --no-textconv {t.merge_base_sha} {t.head_sha}")],
     "stat-then-patch": _diff("--stat -p"),
-    "stat-then-diff": [lambda t: _command(
-        f"git diff --stat {t.merge_base_sha} {t.head_sha} && git diff {t.merge_base_sha} {t.head_sha} -- changed-0")],
     "command-in-variable": [lambda t: _command(
         f'cd /review && D="git diff --no-ext-diff --no-textconv {t.merge_base_sha} {t.head_sha}"; $D -- changed-0')],
-    "file-then-read": _diff(tail=" > /tmp/p.diff; wc -l /tmp/p.diff; sed -n 1,200p /tmp/p.diff"),
-    "file-read-by-heredoc": [lambda t: _command(
-        f"git show {t.head_sha}:changed-0 > /tmp/r.md; python3 - <<'EOF'\nprint(open('/tmp/r.md').read())\nEOF",
-        output="0\n")],
-    "for-loop-show": [lambda t: _command(f"H={t.head_sha}; for f in changed-0 changed-1; do git show $H:$f | nl -ba; done",
-                                         output="     1\t0\n     1\t1\n")],
     "stderr-dropped": _diff(tail=" 2>/dev/null"),
     "stderr-merged-piped": _diff(tail=" 2>&1 | head -200"),
-    "and-then-true": _diff(tail=" && true"),
+    "filter-chain": [lambda t: _command(
+        f"cd /review && B={t.merge_base_sha}; export H={t.head_sha}; git diff --no-ext-diff $B $H 2>&1 "
+        "| nl -ba | grep -n -v -e zzz | sed -n '1,400p' | head -n 400 | tail -n +1 | cat -n")],
 }
 
 
