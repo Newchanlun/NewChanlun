@@ -10,8 +10,10 @@
 #   8080  — 逢亮 daemon (HTTP API: daemon.py + daemon_server.py)
 #   8765  — 逢亮 daemon (WebSocket: 实时穿越事件)
 #   8081  — Gateway Bridge (OpenClaw 消息路由)
-#   9800  — CC Daemon Loop webhook（体系路由）
 #   18789 — OpenClaw gateway（Web UI，可选）
+#
+# CC Daemon Loop webhook（端口 9800）随早年蜂群机制一并退役（#1952）：
+# topological-computation/daemon_loop.py 已删除，不再启动。
 
 set -euo pipefail
 
@@ -96,16 +98,9 @@ for i in $(seq 1 30); do
     sleep 1
 done
 
-# ---------------------------------------------------------------------------
-# 启动 CC Daemon Loop webhook（体系路由，可选）
-# ---------------------------------------------------------------------------
-
-echo "=== 启动 CC Daemon Loop webhook ==="
-start_component "cc-daemon-webhook" \
-    python "$TOPO_DIR/daemon_loop.py" \
-        --continuous \
-        --webhook 9800 \
-        --interval 120
+# CC Daemon Loop webhook（体系路由）已随早年蜂群机制退役（#1952）移除：
+# topological-computation/daemon_loop.py 已删除，不再启动，Gateway Bridge
+# 不再传 --daemon-webhook-url。
 
 # ---------------------------------------------------------------------------
 # 启动 Gateway Bridge
@@ -115,8 +110,7 @@ echo "=== 启动 Gateway Bridge ==="
 start_component "gateway-bridge" \
     python "$TOPO_DIR/gateway_bridge.py" \
         --port 8081 \
-        --fengliang-url http://localhost:8080 \
-        --daemon-webhook-url http://localhost:9800
+        --fengliang-url http://localhost:8080
 
 # ---------------------------------------------------------------------------
 # 可选：启动 OpenClaw gateway
