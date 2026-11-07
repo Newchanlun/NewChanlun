@@ -172,9 +172,11 @@ function userGateItems(v: unknown): UserGateItem[] | null {
   return items.every((x) => x.field && x.basis) ? items : null;
 }
 
-/** 落盘分级记录早于硬门字段时没有 userGate：按无硬门读，起草与独审提示仍拦签署值。 */
+const MISSING_USER_GATE: UserGateItem[] = [{ field: "分级输出缺可解析的 user_gate", basis: "ADR 0041「授权来源与生效边界」节：硬门拿不准时交还用户，不由代理裁定" }];
+
+/** 落盘分级记录缺 userGate（含硬门字段之前的旧记录）与新分级输出同口径：交还用户。 */
 export function storedUserGate(v: unknown): UserGateItem[] {
-  return userGateItems(v) ?? [];
+  return userGateItems(v) ?? MISSING_USER_GATE;
 }
 
 /** 分级解析：拿不准一律判 P；硬门判定缺失或不成形一律交还用户。 */
@@ -182,8 +184,7 @@ export function parseClassification(text: string): Classification {
   const j = extractJson(text) as { class?: unknown; klass?: unknown; reason?: unknown; user_gate?: unknown } | undefined;
   const raw = String(j?.class ?? j?.klass ?? "").trim().toUpperCase();
   const reason = typeof j?.reason === "string" ? j.reason.trim() : "";
-  const userGate = userGateItems(j?.user_gate) ??
-    [{ field: "分级输出缺可解析的 user_gate", basis: "ADR 0041「授权来源与生效边界」节：硬门拿不准时交还用户，不由代理裁定" }];
+  const userGate = storedUserGate(j?.user_gate);
   if ((raw === "T" || raw === "P") && reason) return { klass: raw, reason, parsed: true, userGate };
   return { klass: "P", reason: `分级输出无法解析，按「拿不准一律判 P」处理${reason ? `：${reason}` : ""}`, parsed: false, userGate };
 }
@@ -1622,6 +1623,8 @@ async function processTicketLocked(n: number, raw: Deps): Promise<Summary> {
       draft = resume.draft;
       review = resume.review;
       s = { ...initialState(p.klass ?? "P"), phase: p.stage === "reviewed_pass" ? "land_t" : "held", held: p.held?.reason, attempt: p.attempts, convertedToP: !!p.convertedToP };
+      // 未推送的获审断点照样过硬门：分级原件缺 userGate（硬门字段之前的旧记录）或非空即交还用户。
+      if (p.stage === "reviewed_pass" && !p.landedSha && loadUserGate(dir).length) s = { ...s, phase: "held", held: "user_authorization" };
       log(`#${n} 从断点 ${p.stage} 续做${p.landedSha ? `（已推送 ${p.landedSha.slice(0, 10)}）` : ""}`);
     } else {
     // 1. 分级+考古：一次联合调用（#1742 M1）。考古解析不出时两次后抛错，此前分级已落 classify.json；
@@ -1874,6 +1877,7 @@ async function processTicketLocked(n: number, raw: Deps): Promise<Summary> {
         if (d.mode === "dry-run") {
           summary.plannedWrites.push(`分支 decision/${n}：写 ${target} 并推送`,
             ...(t.labels.includes(LEGACY_APPROVAL_LABEL) ? [`标签 #${n}：-${LEGACY_APPROVAL_LABEL}`] : []),
+            ...(ownHumanLabel(t) ? [`标签 #${n}：-${HUMAN_LABEL}`] : []),
             `评论 #${n}：resolution（首行「${authLine(s.klass)}」）`);
         } else {
           await landT(t, draft, target, dir, d, summary, persist);
@@ -1897,7 +1901,8 @@ async function processTicketLocked(n: number, raw: Deps): Promise<Summary> {
       persist();
       const steps: Record<HeldStep, [string, string[], string?] | null> = {
         comment: [`评论 #${n}：裁决暂停（${summary.held.reason}）`, ["issue", "comment", String(n), "--body-file", "-"], summary.held.comment],
-        human: summary.held.reason === "user_authorization" ? [`标签 #${n}：+${HUMAN_LABEL}`, ["issue", "edit", String(n), "--add-label", HUMAN_LABEL]] : null,
+        human: summary.held.reason === "user_authorization" ? [`标签 #${n}：+${HUMAN_LABEL}`, ["issue", "edit", String(n), "--add-label", HUMAN_LABEL]]
+          : ownHumanLabel(t) ? [`标签 #${n}：-${HUMAN_LABEL}（用户已签署，转 ${summary.held.reason}）`, ["issue", "edit", String(n), "--remove-label", HUMAN_LABEL]] : null,
         unlabel: t.labels.includes(LEGACY_APPROVAL_LABEL) ? [`标签 #${n}：-${LEGACY_APPROVAL_LABEL}`, ["issue", "edit", String(n), "--remove-label", LEGACY_APPROVAL_LABEL]] : null,
         unassign: [`取消认领 #${n}`, ["issue", "edit", String(n), "--remove-assignee", "@me"]],
       };
@@ -1949,7 +1954,14 @@ function lastReviewer(s: Pick<Summary, "rounds">): string {
 /** 读本地 classify.json 的硬门清单（held 评论列待签事项用）。 */
 function loadUserGate(dir: string): UserGateItem[] {
   try { return storedUserGate((JSON.parse(readFileSync(join(dir, "classify.json"), "utf8")) as { userGate?: unknown }).userGate); }
-  catch { return []; }
+  catch { return MISSING_USER_GATE; }
+}
+
+const USER_GATE_HELD_HEAD = "**裁决暂停（待用户签署）**";
+
+/** 本流程挂过的待签标签：票上有本流程的待签暂停评论。别处挂的 ready-for-human 不动。 */
+function ownHumanLabel(t: TicketContext): boolean {
+  return t.labels.includes(HUMAN_LABEL) && t.comments.some((c) => c.body.startsWith(USER_GATE_HELD_HEAD));
 }
 
 /** 读本地 archaeology.json（held 评论列事实缺口用）。 */
@@ -1967,7 +1979,7 @@ const HELD_REOPEN_HINT = "返修：把要补的材料或改法写成本票评论
 export function heldComment(n: number, reason: HeldReason, dir: string, s: Pick<Summary, "attempts" | "rounds">, r?: Review, arch: Archaeology | null = null, gate: UserGateItem[] = []): string {
   if (reason === "user_authorization") {
     const items = gate.map((g) => `- ${g.field}（依据：${g.basis}）`).join("\n") || "（清单见分级原件）";
-    return `**裁决暂停（待用户签署）**：本票触及 ADR 0041「授权来源与生效边界」节的独立资金与权限硬门，代理不裁定；本票未起草、未落地，已标 ${HUMAN_LABEL}。\n\n` +
+    return `${USER_GATE_HELD_HEAD}：本票触及 ADR 0041「授权来源与生效边界」节的独立资金与权限硬门，代理不裁定；本票未起草、未落地，已标 ${HUMAN_LABEL}。\n\n` +
       `需要用户签署：\n${items}\n\n` +
       `签署：用户本人在本票评论首行写「退回：」，随后逐项写签署值与有效域；decision-claimer 下一轮整链重跑，分级器读到签署后不再交还，起草照引该评论。\n\n` +
       `分级原件：\`${dir}/classify.json\``;
@@ -2056,6 +2068,7 @@ async function landT(t: TicketContext, draft: string, target: string, dir: strin
     persist();
   }
   if (t.labels.includes(LEGACY_APPROVAL_LABEL)) d.gh(["issue", "edit", String(n), "--remove-label", LEGACY_APPROVAL_LABEL]);
+  if (ownHumanLabel(t)) d.gh(["issue", "edit", String(n), "--remove-label", HUMAN_LABEL]);
   d.gh(["issue", "comment", String(n), "--body-file", "-"], resolutionBody(n, s.klass ?? "T", target, branch, s.landedSha, dir, draft));
 }
 
