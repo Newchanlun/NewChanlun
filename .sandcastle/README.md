@@ -68,7 +68,7 @@ node --import tsx --test .sandcastle/scheduler-config.test.mts
 2. **队列交棒**：只给合资格实装票（已批准 spec/DAG + 未 assign + 无 open blocker）挂 `sandcastle`，不把全部历史 `ready-for-agent` 无差别放行；每轮五桶分明（ready-for-agent / sandcastle 拾取权 / blocked / claimed / running）。
 3. **状态页**：写 `.sandcastle/logs/wayfinder-status.md`，不再把 `sandcastle` 空误写成 `ready-for-agent` 全空。
 
-gh 查询有限重试 + 指数退避 + fail-loud；无 runnable 票 sleep 后重查、不退出。普通 P/SPEC 已由 #1909 改为起草 + 非作者独审 PASS 代理裁定，合入 main 人闸保留；真实资金与权限边界见 ADR 0041。拆票与排队前重读当前 SPEC 裁定；DeepAgents 执行器迁移仍依赖 Queued PR，见 graph-engineering.md「#1742 执行面依赖」。
+gh 查询有限重试 + 指数退避 + fail-loud；无 runnable 票 sleep 后重查、不退出。普通 P/SPEC 已由 #1909 改为起草 + 非作者独审 PASS 代理裁定，普通 PR 在正式 `deepagents/review` 双审 success 后由代理合入；资金、账户、凭据硬门票挂 `ready-for-human` 交还用户签署（ADR 0041）。拆票与排队前重读当前 SPEC 裁定；DeepAgents 执行器迁移仍依赖 Queued PR，见 graph-engineering.md「#1742 执行面依赖」。
 
 **部署成受管常驻服务**（launchd KeepAlive，默认真实执行 `--live`）：
 

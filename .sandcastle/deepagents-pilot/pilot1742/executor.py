@@ -694,14 +694,17 @@ def claim_effects(store: ClaimStore, ticket: int, run_id: str, generation: int) 
     return store.root / f"{ticket}.effects" / f"{run_id}-g{generation}"
 
 
-def release_claim(store: ClaimStore, gateway: RepoGateway, ticket: int, run_id: str, reason: str) -> TicketClaim:
+def release_claim(store: ClaimStore, gateway: RepoGateway | None, ticket: int, run_id: str, reason: str) -> TicketClaim:
     """主控释放。等在飞副作用做完才拿到锁，先记 released 让旧控制进程在下一次锁内复核时停下；
     执行者排空后才在同一把锁内摘票面镜像，持有结束由此在 GitHub 上可见。返回记录 mirror_label 仍为真
-    表示镜像保留，排空后重跑同一命令即可。记录已换成新 run 时拒绝，旧释放碰不到新代次的镜像。"""
+    表示镜像保留，排空后重跑同一命令即可。记录已换成新 run 时拒绝，旧释放碰不到新代次的镜像。
+    gateway 为 None 时只在本机记 released，不碰镜像。"""
     with store.locked(ticket) as txn:
         record = txn.record
         if record is None or record.run_id != run_id:
             raise ClaimRefused(f"票 #{ticket} 当前不由 {run_id} 持有")
+        if gateway is None:
+            return txn.write(advance(record, "release", reason=reason))
         try:
             run_quiet(record)
         except ClaimRefused:
@@ -885,6 +888,9 @@ def main(argv: list[str] | None = None) -> int:
             print(json.dumps({"claim": asdict(record) if record else None, "status": report}, ensure_ascii=False,
                              indent=2))
             return 0
+        if args.command == "release":
+            # 本机先记 released，GitHub 或 App 凭据不可用也能让旧控制进程停下；摘镜像在下面联网后做。
+            release_claim(store, None, args.ticket, args.run_id, args.reason)
         source_repo = Path(__file__).resolve().parents[3]
         cutover_store = CutoverStore(args.state_root, args.drain_root, getattr(args, "workers_log", WORKERS_LOG))
         if args.command == "serve":

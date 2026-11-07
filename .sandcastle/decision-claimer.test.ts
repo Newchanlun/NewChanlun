@@ -1601,7 +1601,7 @@ test("M1 旧两段式断点：只有 classify.json（旧角色名）且票上已
   const h = liveDeps([goodDraft, fence(pass())]);
   const dir = join(h.d.outRoot, "1565");
   mkdirSync(dir, { recursive: true });
-  writeFileSync(join(dir, "classify.json"), JSON.stringify({ ticket: 1565, model: MODEL_MAIN, klass: "T", reason: "接口", parsed: true, durationMs: 9, raw: "x" }));
+  writeFileSync(join(dir, "classify.json"), JSON.stringify({ ticket: 1565, model: MODEL_MAIN, klass: "T", reason: "接口", parsed: true, userGate: [], durationMs: 9, raw: "x" }));
   writeFileSync(join(dir, "summary.json"), JSON.stringify({ ticket: 1565, mode: "live", phase: "error", attempts: 0, durationsMs: { classify: 9 }, plannedWrites: [], error: "archaeology gpt-6.1-sol 调用失败", modelSwitches: [{ role: "classify", from: MODEL_MAIN, to: MODEL_DRAFTER, reason: "safeguard" }] }));
   h.comments.push({ author: { login: "xy7365527-lang" }, body: "分级：T — 接口" });
   const s = await processTicket(1565, h.d);
@@ -1612,6 +1612,46 @@ test("M1 旧两段式断点：只有 classify.json（旧角色名）且票上已
   assert.equal(classifyComments(h.comments).length, 1);
   assert.equal(writesOf(h.ghCalls).filter((w) => w.includes("--add-assignee")).length, 1);
   assert.equal(JSON.parse(readFileSync(join(dir, "classify.json"), "utf8")).raw, "x", "旧分级原件不被覆盖");
+});
+
+test("硬门字段之前的旧分级记录（classify.json 缺 userGate）不按无硬门读：沿用分级时交还用户，不起草不落地", async () => {
+  const h = liveDeps([goodDraft, fence(pass())]);
+  const dir = join(h.d.outRoot, "1565");
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(join(dir, "classify.json"), JSON.stringify({ ticket: 1565, model: MODEL_MAIN, klass: "P", reason: "资金参数", parsed: true, durationMs: 9, raw: "x" }));
+  writeFileSync(join(dir, "summary.json"), JSON.stringify({ ticket: 1565, mode: "live", phase: "error", attempts: 0, durationsMs: { classify: 9 }, plannedWrites: [], error: "archaeology 调用失败" }));
+  h.comments.push({ author: { login: "xy7365527-lang" }, body: "分级：P — 资金参数" });
+  const s = await processTicket(1565, h.d);
+  assert.equal(s.phase, "held", s.error ?? "");
+  assert.equal(s.held?.reason, "user_authorization");
+  assert.equal(s.resumedFrom, "triaged");
+  assert.deepEqual(h.modelCalls.map((c) => c.role), [], "不起草、不独审");
+  assert.ok(!h.gitCalls.some((a) => a[0] === "push"), "没有 decision 分支");
+  assert.ok(h.ghCalls.some((a) => a[3] === "--add-label" && a[4] === HUMAN_LABEL));
+  assert.match(h.comments.at(-1)!.body, /分级输出缺可解析的 user_gate/);
+
+  const done = mkdtempSync(join(tmpdir(), "gate-legacy-"));
+  writeFileSync(join(done, "classify.json"), JSON.stringify({ klass: "T", reason: "r", parsed: true }));
+  writeFileSync(join(done, "archaeology.json"), JSON.stringify({ parsed: false }));
+  assert.equal(loadTriaged(done)?.userGate.length, 1, "loadTriaged：缺字段从严");
+  writeFileSync(join(done, "archaeology.json"), JSON.stringify({ parsed: true, points: [], problems: [] }));
+  writeFileSync(join(done, "archaeology.md"), "");
+  assert.equal(loadTriageDone(done)?.cls.userGate.length, 1, "loadTriageDone：缺字段从严");
+});
+
+test("未推送的 reviewed_pass 断点：分级原件缺 userGate 时续做不落地，交还用户", async () => {
+  const h = liveDeps([fence({ user_gate: [], class: "P", reason: "资金参数" }), goodDraft, fence(pass())], { failWorktreeOnce: true });
+  const s1 = await processTicket(1565, h.d);
+  assert.equal(s1.stage, "reviewed_pass", s1.error ?? "");
+  const dir = join(h.d.outRoot, "1565");
+  const cp = join(dir, "classify.json");
+  const { userGate: _drop, ...legacy } = JSON.parse(readFileSync(cp, "utf8"));
+  writeFileSync(cp, JSON.stringify(legacy));
+  h.gitCalls.length = 0;
+  const s2 = await processTicket(1565, h.d);
+  assert.equal(s2.phase, "held", s2.error ?? "");
+  assert.equal(s2.held?.reason, "user_authorization");
+  assert.ok(!h.gitCalls.some((a) => a[0] === "push"), "没有推送 decision 分支");
 });
 
 test("M1 旧断点：已认领在自己名下也照常续，P 类旧分级保持 P；考古已完成或水印后退回则整链联合重跑", async () => {
@@ -3268,9 +3308,21 @@ test("资金与权限硬门：分级列出 user_gate 的票交还用户，不起
 
   h.comments.push({ author: { login: "xy7365527-lang" }, body: "退回：用户签署 cap=5000 USDT，有效域 BTC 实盘 V0" });
   h.replies.push(fence({ class: "P", reason: "共同 cap（用户已签）", user_gate: [] }), goodDraft, fence(pass()));
+  h.label(["wayfinder:grilling", HUMAN_LABEL]);
   const signed = await processTicket(1565, h.d);
   assert.equal(signed.phase, "land_t", signed.error ?? "");
   assert.ok(h.comments.some((c) => c.body.startsWith(P_AUTH_LINE)), "用户签署后按 P 类落地");
+  assert.ok(h.ghCalls.some((a) => a[3] === "--remove-label" && a[4] === HUMAN_LABEL), "落地摘掉本流程挂的待签标签");
+  assert.ok(!h.labels().includes(HUMAN_LABEL));
+});
+
+test("资金与权限硬门：别处挂的 ready-for-human（票上没有本流程的待签暂停评论）落地时不摘", async () => {
+  const h = liveDeps([fence({ class: "P", reason: "离线研究方法", user_gate: [] }), goodDraft, fence(pass())]);
+  h.label(["wayfinder:grilling", HUMAN_LABEL]);
+  const s = await processTicket(1565, h.d);
+  assert.equal(s.phase, "land_t", s.error ?? "");
+  assert.ok(!h.ghCalls.some((a) => a[3] === "--remove-label" && a[4] === HUMAN_LABEL));
+  assert.ok(h.labels().includes(HUMAN_LABEL));
 });
 
 test("资金与权限硬门：普通 P 类（user_gate 为空）照常由代理裁定落地；分级缺 user_gate 一律交还用户", async () => {
