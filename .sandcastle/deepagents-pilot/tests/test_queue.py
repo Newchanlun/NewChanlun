@@ -768,6 +768,25 @@ def test_release_after_unobserved_merge_is_not_redispatched(queued):
     assert rows[TICKET]['phase'] == 'awaiting_human' and '已合入' in rows[TICKET]['reason']
 
 
+def test_registered_rerun_is_not_executed_after_earlier_delivery_merges(queued):
+    from conftest import FAKE, MODELS
+
+    from pilot1742.executor import load_unit, open_v2_run, release_claim
+    v2, cutover, intake, signer = queued
+    unit = intake.register(TICKET)
+    authorize(v2, cutover, unit, signer)
+    run = open_v2_run(v2.home, unit, load_unit(v2.home, unit.run_id)[1], executor(v2, cutover, unit), MODELS,
+                      launcher=FAKE, source_repo=v2.source)
+    v2.to_pass(run)
+    pr = run.publish_candidate()['pr']['number']
+    run.release()
+    release_claim(intake.claims, v2.gateway(), TICKET, unit.run_id, '主控退回')
+    assert intake.register(TICKET).run_id == f't{TICKET}-2'
+    v2.github.merge_pull(pr)
+    rows = intake.once(lambda _unit: pytest.fail('registered rerun executed after earlier delivery merged'))
+    assert rows[TICKET]['phase'] == 'awaiting_human' and '已合入' in rows[TICKET]['reason']
+
+
 def test_release_keeps_mirror_until_drained_and_old_release_cannot_strip_new_generation(queued):
     import fcntl
     import os

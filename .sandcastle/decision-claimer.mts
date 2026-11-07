@@ -8,6 +8,7 @@
  *   → PASS（T/P 同，#1909）：decision/<票号> 分支落正本 + resolution 评论。
  *   其他 BLOCK：同一 MAIN 会话由本轮实际作者模型带审查意见重做一次；仍 BLOCK：held（不放行，退回评论才重开）。
  *   考古有 research/probe 事实缺口：held，不起草、不落地。
+ *   分级列出资金与权限硬门事项（user_gate，ADR 0041）：held 交还用户签署，挂 ready-for-human，不起草、不落地。
  *
  *   只有 R1 引用类 BLOCK：同一会话一次只改引用的修订轮；总轮次上限 MAX_ROUNDS。起草后先查正本落点，越界退回重写一次。
  * 模式：默认 --dry-run，只写 /Volumes/AgentStorage/decisions/<票号>/，不写 GitHub。
@@ -57,6 +58,8 @@ export function authLine(klass: Klass): string {
 }
 /** 旧影子模式的待批标签。不再添加；票进入新流程的终态（落地或 held）时摘掉。 */
 export const LEGACY_APPROVAL_LABEL = "needs-approval";
+/** 资金与权限硬门交还用户时挂的标签；执行器队列把它列为 hold 标签。 */
+export const HUMAN_LABEL = "ready-for-human";
 export const RULES = ["R1", "R2", "R3", "R4", "R5", "R6", "R7", "R8"] as const;
 export type Rule = (typeof RULES)[number];
 export const DRAFT_SECTIONS = [
@@ -158,15 +161,31 @@ export function extractJson(text: string): unknown {
 }
 
 export type Klass = "T" | "P";
-export interface Classification { klass: Klass; reason: string; parsed: boolean }
+/** ADR 0041「独立资金与权限硬门」上须用户本人签署的一项：字段或决策，及其依据。 */
+export interface UserGateItem { field: string; basis: string }
+/** userGate 非空的票不由代理裁定，交还用户签署（held: user_authorization）。 */
+export interface Classification { klass: Klass; reason: string; parsed: boolean; userGate: UserGateItem[] }
 
-/** 分级解析：拿不准一律判 P。 */
+function userGateItems(v: unknown): UserGateItem[] | null {
+  if (!Array.isArray(v)) return null;
+  const items = v.map((x) => ({ field: String(x?.field ?? "").trim(), basis: String(x?.basis ?? "").trim() }));
+  return items.every((x) => x.field && x.basis) ? items : null;
+}
+
+/** 落盘分级记录早于硬门字段时没有 userGate：按无硬门读，起草与独审提示仍拦签署值。 */
+export function storedUserGate(v: unknown): UserGateItem[] {
+  return userGateItems(v) ?? [];
+}
+
+/** 分级解析：拿不准一律判 P；硬门判定缺失或不成形一律交还用户。 */
 export function parseClassification(text: string): Classification {
-  const j = extractJson(text) as { class?: unknown; klass?: unknown; reason?: unknown } | undefined;
+  const j = extractJson(text) as { class?: unknown; klass?: unknown; reason?: unknown; user_gate?: unknown } | undefined;
   const raw = String(j?.class ?? j?.klass ?? "").trim().toUpperCase();
   const reason = typeof j?.reason === "string" ? j.reason.trim() : "";
-  if ((raw === "T" || raw === "P") && reason) return { klass: raw, reason, parsed: true };
-  return { klass: "P", reason: `分级输出无法解析，按「拿不准一律判 P」处理${reason ? `：${reason}` : ""}`, parsed: false };
+  const userGate = userGateItems(j?.user_gate) ??
+    [{ field: "分级输出缺可解析的 user_gate", basis: "ADR 0041「授权来源与生效边界」节：硬门拿不准时交还用户，不由代理裁定" }];
+  if ((raw === "T" || raw === "P") && reason) return { klass: raw, reason, parsed: true, userGate };
+  return { klass: "P", reason: `分级输出无法解析，按「拿不准一律判 P」处理${reason ? `：${reason}` : ""}`, parsed: false, userGate };
 }
 
 export type Verdict = "PASS" | "BLOCK";
@@ -354,8 +373,8 @@ export function renumberDraft(draft: string, from: string, a: AdrAllocation): st
 
 /** land_t 为落地（历史名，#1909 起 T/P 同用）；held 为不放行终态，见 HeldReason。 */
 export type Phase = "classify" | "draft" | "review" | "land_t" | "held" | "review_parse_error" | "done" | "error" | "skipped";
-/** 不放行的原因：独审轮次用尽仍 BLOCK、考古事实缺口、获审草稿缺合法落点。 */
-export type HeldReason = "review_blocked" | "fact_gap" | "invalid_landing";
+/** 不放行的原因：独审轮次用尽仍 BLOCK、考古事实缺口、获审草稿缺合法落点、触及资金与权限硬门待用户签署。 */
+export type HeldReason = "review_blocked" | "fact_gap" | "invalid_landing" | "user_authorization";
 /** 起草/审查总轮次上限（含重做与只改引用的修订轮）。 */
 export const MAX_ROUNDS = scheduler.decisionMaxRounds;
 /** 起草方式：首稿、重做、只改引用的修订。 */
@@ -891,11 +910,15 @@ export function triagePrompt(t: TicketContext, o: { feedback?: string; fixed?: C
 按 .sandcastle/docs/graph-engineering.md「1. 分级」判本票属于哪一类：
 - T 类（技术取舍）：数据结构、接口与 seam、owner 落点、状态机与事件 schema、测试锁、迁移步骤、恢复语义；有权威源或本仓判例可援引。
 - P 类（政策）：资金与费用参数（本金、量档、cap、分配）、风险偏好、真实场所/账户/权限、关图与 #1279 去向、Destination 改写、产品 taste、本仓无先例的新取舍。
-拿不准一律判 P。分级只看票面性质，不因考古查到或查不到先例改判；考古发现的事实缺口由编排逻辑处置。T/P 两类都经起草与非作者独审 PASS 由代理裁定（#1909），分级决定授权引用与审查口径，不决定是否需要用户批准。`
+拿不准一律判 P。分级只看票面性质，不因考古查到或查不到先例改判；考古发现的事实缺口由编排逻辑处置。T/P 两类都经起草与非作者独审 PASS 由代理裁定（#1909），分级决定授权引用与审查口径；是否交还用户只看下面的 user_gate。
+
+### 资金与权限硬门（user_gate）
+${USER_GATE_SCOPE}。本票要给出这类事项的具体值或授权时，逐项列进 user_gate：field 写字段或决策，basis 写 ADR 0041 条款与票面出处。这类事项不由代理裁定，宿主把整票交还用户签署，不起草、不落地。只定方法、推荐值或实现方案而不签具体值的不列；票上已有用户本人对该项在同一有效域给出的签署值也不列（已授权值不重复索要）。拿不准就列。没有则写空数组。`
     : `你是 NewChanlun 仓裁决面的考古子代理，替起草者把本票的「事实」查完，只把「决定」留下。当前目录是 origin/main 的只读检出；禁止修改任何文件。
 ${FIXED_CLASS_LINE}${fixed === "none" ? "（只验考古）" : `：分级已定为 ${fixed.klass} 类 —— ${fixed.reason}`}。`;
   const json = fixed === undefined
     ? `{"class":"T|P","reason":"一句中文分级理由，点名依据",
+ "user_gate":[{"field":"须用户签署的字段或决策","basis":"ADR 0041 条款与票面出处"}],
  "points":[${POINT_SHAPE}]}`
     : `{"points":[${POINT_SHAPE}]}`;
   return `${head}
@@ -918,6 +941,9 @@ C 类 gap 只能逐字填写 decision、research、probe 中的一个；缺口�
 最后只输出一个 JSON 代码块：
 ${json}`;
 }
+
+/** ADR 0041「独立资金与权限硬门」的范围；分级、起草、独审三处提示同用此句。 */
+export const USER_GATE_SCOPE = "docs/adr/0041-degrees-of-freedom-configurable-not-excluded.md「授权来源与生效边界」节的独立资金与权限硬门：真实资金投入/取出/改额、账户/场所激活、真实交易的量档与容量、成本/风险阈值，以及凭据和权限授予，须用户本人授权；独审 PASS 不代签";
 
 /** 已定分级重跑考古时提示里的固定句；假模型据此区分联合调用与只补考古。 */
 export const FIXED_CLASS_LINE = "本次不再分级";
@@ -950,11 +976,11 @@ ${DRAFT_SECTIONS.map((s) => `## ${s}`).join("\n")}
 4. 验收清单每项必须是以下之一：可执行命令、测试名、文件存在、票状态；判据二值。
 5. 不越出 #1323 Destination；T 类草稿不得夹带 P 类取舍；不得新增同一判断的宽严两档或失败兜底。
 6. 「受影响票与 blocking 边变化」列出全部受影响票号和每条要增删的 blocking 边。
-7. 「授权引用」段：${c.klass === "T" ? `写「${AUTH_LINE}」并引用户 2026-10-18 原话` : `写「${P_AUTH_LINE}」并引 #1909（用户授权 P 类经起草与非作者独审 PASS 由代理裁定），不得写 T 类预授权句`}。本稿就是裁定，不得把任何待决点留给用户批复。
+7. 「授权引用」段：${c.klass === "T" ? `写「${AUTH_LINE}」并引用户 2026-10-18 原话` : `写「${P_AUTH_LINE}」并引 #1909（用户授权 P 类经起草与非作者独审 PASS 由代理裁定），不得写 T 类预授权句`}。本稿就是裁定，除第 11 条的硬门事项外，不得把任何待决点留给用户批复。
 8. 「${CITATION_SECTION}」段是一张 Markdown 表，表头为 \`| 引用 | 核实命令 | 结果摘要 |\`，草稿里每一条引用（文件:行、ADR、定义文件条款、票号、评论 id）各占一行：写出你实际执行的核实命令与看到的结果摘要。表里没有的引用视为未核实。自证表里写不出亲眼看到的原文就整条删掉（连同正文里那条引用），不许写「未直接看到但结构确认」之类。
 9. 按 /grill-with-docs 的做法用考古结论（.agents/skills/grilling/SKILL.md、.agents/skills/domain-modeling/SKILL.md）：A 类沿用其出处写进「权威依据」与「裁定」，不再列为待决；B 类在「候选」写出默认值与出处，推理链照考古重过，「裁定」段采纳该默认值，否决须写出依据与替代值；C 类 decision 在「候选」列出候选与推荐答案的推导，「裁定」段给出裁定值，不留待决。C 类 research/probe 是事实缺口（编排逻辑会在起草前拦下，不应出现在草稿里）。考古标出的冲突写进「问题」段。
 10. 「${ARCH_SECTION}」段是一张表 \`| 点 | 归类 | 出处 | 草稿处置 |\`，考古里每个点号（Q1、Q2…）各占一行。
-11. 自由度通则（docs/adr/0041-degrees-of-freedom-configurable-not-excluded.md）：待决点在缠师原文无定论、有多个可行候选，且属 [新缠论:选择] 或参数类时，优先裁为「可调字段 + 默认值」——落进具名版本化记录，写默认值及出处、可选值集合与各值代价，改值即新版本；另一种合法取值保留为可选值，不写成「被否」。已裁定签署前不得代填的字段（资金、量档、容量、成本门 θ、风险阈值等，ADR 0029/0034/0035/0036），默认值写 AwaitingPolicy（不签不跑、不回退备用值），数值只以「推荐值＋出处」写进签署单，不自动生效；只有本票正是该字段的签署票时，才按考古出处与推导给出签署值，交独审核对（#1909：签署走 P 类起草与非作者独审裁定）。只有违反原文、违反已裁推论、被实测否证或属 #799 兜底的候选才排除，并写明排除依据。缠师原文语义与已裁推论不改为可调；同一判断的松紧两档不是自由度，事前单选也不得落为可调字段；运行中按判定结果换值是 #799 违规，不算可调。
+11. 自由度通则（docs/adr/0041-degrees-of-freedom-configurable-not-excluded.md）：待决点在缠师原文无定论、有多个可行候选，且属 [新缠论:选择] 或参数类时，优先裁为「可调字段 + 默认值」——落进具名版本化记录，写默认值及出处、可选值集合与各值代价，改值即新版本；另一种合法取值保留为可选值，不写成「被否」。已裁定签署前不得代填的字段（资金、量档、容量、成本门 θ、风险阈值等，ADR 0029/0034/0035/0036），默认值写 AwaitingPolicy（不签不跑、不回退备用值），数值只以「推荐值＋出处」写进签署单，不自动生效。${USER_GATE_SCOPE}：这类事项代理不得给出签署值，也不得把来源写成 UserSigned；在「问题」段写明交还用户签署的字段与依据，这是正确结论，不算留待决点。票上已有用户本人签署值时照引该评论，不改值、不扩域。只有违反原文、违反已裁推论、被实测否证或属 #799 兜底的候选才排除，并写明排除依据。缠师原文语义与已裁推论不改为可调；同一判断的松紧两档不是自由度，事前单选也不得落为可调字段；运行中按判定结果换值是 #799 违规，不算可调。
 12. 七段及流程表之后必须附且仅附一个 canonical_edit 代码块，JSON 必须逐字表达最终正本编辑，不是 resolution 整稿追加。新建用 {"version":1,"operation":"create","path":"与正本落点相同","content":"完整最终正文"}。修订已有文件用 {"version":1,"operation":"edit","path":"与正本落点相同","replacements":[{"before":"原件中非空且唯一的精确文本","after":"替换文本"}]}，多项按顺序应用。先读原件，保留未改章节和换行。教义正文含 AGENTS 三行头，更新票号、日期与代码清单。最终正文不得含引用自证、考古对照或 canonical_edit 流程段。宿主在独审前固定新 ADR 编号，之后不再改写。T/P 两类的这份编辑在独审 PASS 后都由宿主落地。
 只输出草稿正文，不要前言或结语。`;
 }
@@ -984,17 +1010,17 @@ export function reviewPrompt(t: TicketContext, c: Classification, draft: string,
 
 被审票：#${t.number} ${t.title}
 分级器结论：${c.klass} 类 —— ${c.reason}
-你的 PASS 就是放行：T/P 两类都在全 PASS 后由宿主直接落地正本，没有后续用户批准（#1909）。
+你的 PASS 就是放行：T/P 两类都在全 PASS 后由宿主直接落地正本，没有后续用户批准（#1909）。例外是 ${USER_GATE_SCOPE}。
 
 逐条给 PASS 或 BLOCK，每条必须写依据（BLOCK 写清要改什么）：
 R1 每条引用回查成立（路径存在、行号与逐字内容一致、作者归属正确、评论 id 存在且内容相符）。先对照草稿末尾「${CITATION_SECTION}」表：表缺失或为空，R1 直接 BLOCK；表在，则逐条对照表中引用与草稿正文是否一一对应（正文有而表里没有的引用记 BLOCK），并至少亲自重跑其中三条（不足三条则全跑）核实命令，结果与表述不符即 BLOCK。
-R2 不与 .chanlun/definitions/、docs/adr/、#799 收敛通则、#804 总缝规则、ADR 0041 自由度通则冲突。草稿把原文无定论的合法候选（[新缠论:选择] 或参数类、不违原文与已裁推论、无实测否证）当错误排除或写成代码常数，而没有落为带默认值的可调字段，判 BLOCK；反过来把缠师原文语义或已裁推论改成可调、把同一判断的宽严两档做成可调字段，或让可调字段在运行中按判定结果换值，也判 BLOCK。
+R2 不与 .chanlun/definitions/、docs/adr/、#799 收敛通则、#804 总缝规则、ADR 0041 自由度通则冲突。草稿把原文无定论的合法候选（[新缠论:选择] 或参数类、不违原文与已裁推论、无实测否证）当错误排除或写成代码常数，而没有落为带默认值的可调字段，判 BLOCK；反过来把缠师原文语义或已裁推论改成可调、把同一判断的宽严两档做成可调字段，或让可调字段在运行中按判定结果换值，也判 BLOCK。草稿给硬门事项写出签署值（不是照引票上用户本人的签署），或把代理裁定记成 UserSigned，判 BLOCK。
 R3 验收项全部可执行、判据二值。
 R4 不越出 Destination；T 类草稿里没有夹带 P 类取舍。正本落点越界（不在 ${LANDING_ROOTS.join("、")} 内）即 BLOCK。核对下方最终正本 diff 与完整 before/after，确认语义、三行头、日期、代码清单符合裁定且未丢失无关章节。最终正文与草稿裁定不一致、误删原文、或编辑合同缺失均 BLOCK。
 R5 不新增同一判断的宽严两档或失败兜底。
 R6 受影响票与 blocking 边清单完整。
 R7 分级器结论（${c.klass} 类）正确。只审上面这条分级器结论；草稿内对分级的表述或「改判建议」不是审查对象。
-R8 考古成立。从下方 ${ARCHAEOLOGY_FILE} 抽查至少三条命中（不足三条全查），亲自复跑对应查询命令，命中与表述不符即 BLOCK；另对任一 B/C 点换一个说法再搜一次，搜出更早或相冲突的在案先例即 BLOCK。草稿把 A 类点当待决、把任何待决点留给用户批复而不裁定、B/C 类点缺查询证据、「${ARCH_SECTION}」段漏点，或 C 类 decision 的裁定值没有推导依据而在案先例（考古 B 类或你复搜到的值）未列出，均 BLOCK。考古缺失按 BLOCK。
+R8 考古成立。从下方 ${ARCHAEOLOGY_FILE} 抽查至少三条命中（不足三条全查），亲自复跑对应查询命令，命中与表述不符即 BLOCK；另对任一 B/C 点换一个说法再搜一次，搜出更早或相冲突的在案先例即 BLOCK。草稿把 A 类点当待决、把硬门以外的待决点留给用户批复而不裁定（硬门事项交还用户签署是正确结论，不判 BLOCK）、B/C 类点缺查询证据、「${ARCH_SECTION}」段漏点，或 C 类 decision 的裁定值没有推导依据而在案先例（考古 B 类或你复搜到的值）未列出，均 BLOCK。考古缺失按 BLOCK。
 
 材料缺失（引用文件不存在、票读不到、工具调用失败）也必须照常输出：对受影响的条目判 BLOCK 并在依据里写明缺什么，其余条目照常审。任何情况下都要输出 R1–R8 全部八项。
 
@@ -1082,7 +1108,7 @@ export interface Summary {
 export type ResumeStage = "reviewed_pass" | "held_pending";
 /** resumedFrom 额外取值 triaged：沿用已落盘分级只补考古（不是 stage，不跳过起草与独审）。 */
 export type ResumedFrom = ResumeStage | "triaged" | "main_session";
-export const HELD_STEPS = ["comment", "unlabel", "unassign"] as const;
+export const HELD_STEPS = ["comment", "human", "unlabel", "unassign"] as const;
 export type HeldStep = (typeof HELD_STEPS)[number];
 
 /**
@@ -1361,7 +1387,7 @@ export async function runTriage(
     const c = (k: ArchClass) => arch!.points.filter((p) => p.klass === k).length;
     summary.archaeology = { A: c("A"), B: c("B"), C: c("C"), problems };
   }
-  return { cls: cls ?? { klass: "P", reason: "只验考古，未分级", parsed: false }, ar: { arch, md, problems } };
+  return { cls: cls ?? { klass: "P", reason: "只验考古，未分级", parsed: false, userGate: [] }, ar: { arch, md, problems } };
 }
 
 /**
@@ -1377,9 +1403,9 @@ export function loadTriaged(dir: string): Classification | null {
     try { if ((JSON.parse(readFileSync(ap, "utf8")) as { parsed?: boolean }).parsed) return null; } catch { /* 坏考古记录视为未完成 */ }
   }
   try {
-    const j = JSON.parse(readFileSync(cp, "utf8")) as { klass?: unknown; reason?: unknown; parsed?: unknown };
+    const j = JSON.parse(readFileSync(cp, "utf8")) as { klass?: unknown; reason?: unknown; parsed?: unknown; userGate?: unknown };
     if ((j.klass !== "T" && j.klass !== "P") || typeof j.reason !== "string" || !j.reason) return null;
-    return { klass: j.klass, reason: j.reason, parsed: j.parsed === true };
+    return { klass: j.klass, reason: j.reason, parsed: j.parsed === true, userGate: storedUserGate(j.userGate) };
   } catch { return null; }
 }
 
@@ -1389,12 +1415,12 @@ export function loadTriaged(dir: string): Classification | null {
  */
 export function loadTriageDone(dir: string, snapshot?: ArchaeologySnapshot): TriageRun | null {
   try {
-    const c = JSON.parse(readFileSync(join(dir, "classify.json"), "utf8")) as { klass?: unknown; reason?: unknown; parsed?: unknown };
+    const c = JSON.parse(readFileSync(join(dir, "classify.json"), "utf8")) as { klass?: unknown; reason?: unknown; parsed?: unknown; userGate?: unknown };
     const a = (snapshot?.record ?? JSON.parse(readFileSync(join(dir, "archaeology.json"), "utf8"))) as { parsed?: boolean; points?: ArchPoint[]; problems?: unknown };
     if ((c.klass !== "T" && c.klass !== "P") || typeof c.reason !== "string" || !c.reason) return null;
     if (!a.parsed || !Array.isArray(a.points) || !Array.isArray(a.problems)) return null;
     const md = snapshot?.md ?? readFileSync(join(dir, ARCHAEOLOGY_FILE), "utf8");
-    return { cls: { klass: c.klass, reason: c.reason, parsed: c.parsed === true }, ar: { arch: { points: a.points }, md, problems: a.problems as string[] } };
+    return { cls: { klass: c.klass, reason: c.reason, parsed: c.parsed === true, userGate: storedUserGate(c.userGate) }, ar: { arch: { points: a.points }, md, problems: a.problems as string[] } };
   } catch { return null; }
 }
 
@@ -1681,7 +1707,9 @@ async function processTicketLocked(n: number, raw: Deps): Promise<Summary> {
       // 检查点先于可读原件发布；中断重入时补齐别名，不重新发放轮次。
       if (draft) writeFileSync(join(dir, "draft.md"), draft);
     }
-    gapGate();
+    // 资金与权限硬门（ADR 0041）：整票交还用户签署，不起草、不落地；先于事实缺口门。
+    if (cls.userGate.length) s = { ...s, phase: "held", held: "user_authorization" };
+    else gapGate();
     const saveRound = () => {
       const ms = main.current();
       if (!ms) throw new Error("MAIN 轮次缺会话身份");
@@ -1860,7 +1888,7 @@ async function processTicketLocked(n: number, raw: Deps): Promise<Summary> {
       const done = new Set<HeldStep>(summary.heldDone ?? []);
       if (!summary.held) {
         const reason = s.held ?? "review_blocked";
-        summary.held = { reason, comment: heldComment(n, reason, dir, summary, review, loadArchaeology(dir)) };
+        summary.held = { reason, comment: heldComment(n, reason, dir, summary, review, loadArchaeology(dir), loadUserGate(dir)) };
         // 水印在本票写入之前：其后的退回评论才重开。
         summary.commentsSeen = t.comments.length;
       }
@@ -1869,6 +1897,7 @@ async function processTicketLocked(n: number, raw: Deps): Promise<Summary> {
       persist();
       const steps: Record<HeldStep, [string, string[], string?] | null> = {
         comment: [`评论 #${n}：裁决暂停（${summary.held.reason}）`, ["issue", "comment", String(n), "--body-file", "-"], summary.held.comment],
+        human: summary.held.reason === "user_authorization" ? [`标签 #${n}：+${HUMAN_LABEL}`, ["issue", "edit", String(n), "--add-label", HUMAN_LABEL]] : null,
         unlabel: t.labels.includes(LEGACY_APPROVAL_LABEL) ? [`标签 #${n}：-${LEGACY_APPROVAL_LABEL}`, ["issue", "edit", String(n), "--remove-label", LEGACY_APPROVAL_LABEL]] : null,
         unassign: [`取消认领 #${n}`, ["issue", "edit", String(n), "--remove-assignee", "@me"]],
       };
@@ -1877,13 +1906,17 @@ async function processTicketLocked(n: number, raw: Deps): Promise<Summary> {
         if (done.has(step) && !(step === "unassign" && claimed)) continue;
         const w = steps[step];
         if (w) write(w[0], w[1], w[2]);
+        // dry-run 只登记意图：断点留在 held_pending，同一输出目录的 live 轮照补全部写入。
+        if (d.mode === "dry-run") continue;
         done.add(step);
         summary.heldDone = [...done];
         persist();
         if (step === "unassign") claimed = false;
       }
-      delete summary.stage;
-      delete summary.heldDone;
+      if (d.mode !== "dry-run") {
+        delete summary.stage;
+        delete summary.heldDone;
+      }
     }
     if (s.phase === "review_parse_error") write(`取消认领 #${n}（审查解析失败，待重跑）`, ["issue", "edit", String(n), "--remove-assignee", "@me"]);
     summary.phase = s.phase === "land_t" || s.phase === "held" || s.phase === "review_parse_error" ? s.phase : "done";
@@ -1913,6 +1946,12 @@ function lastReviewer(s: Pick<Summary, "rounds">): string {
   return s.rounds?.at(-1)?.reviewer ?? MODEL_REVIEW;
 }
 
+/** 读本地 classify.json 的硬门清单（held 评论列待签事项用）。 */
+function loadUserGate(dir: string): UserGateItem[] {
+  try { return storedUserGate((JSON.parse(readFileSync(join(dir, "classify.json"), "utf8")) as { userGate?: unknown }).userGate); }
+  catch { return []; }
+}
+
 /** 读本地 archaeology.json（held 评论列事实缺口用）。 */
 function loadArchaeology(dir: string): Archaeology | null {
   try {
@@ -1925,7 +1964,14 @@ function loadArchaeology(dir: string): Archaeology | null {
 const HELD_REOPEN_HINT = "返修：把要补的材料或改法写成本票评论，首行以「退回：」开头；decision-claimer 下一轮作废旧 MAIN 会话并整链重跑（新分级、考古、起草、非作者独审）。";
 
 /** held 终态的票面说明。首行不以退回 / resolution / 用户批复开头，不改变票的裁定状态。 */
-export function heldComment(n: number, reason: HeldReason, dir: string, s: Pick<Summary, "attempts" | "rounds">, r?: Review, arch: Archaeology | null = null): string {
+export function heldComment(n: number, reason: HeldReason, dir: string, s: Pick<Summary, "attempts" | "rounds">, r?: Review, arch: Archaeology | null = null, gate: UserGateItem[] = []): string {
+  if (reason === "user_authorization") {
+    const items = gate.map((g) => `- ${g.field}（依据：${g.basis}）`).join("\n") || "（清单见分级原件）";
+    return `**裁决暂停（待用户签署）**：本票触及 ADR 0041「授权来源与生效边界」节的独立资金与权限硬门，代理不裁定；本票未起草、未落地，已标 ${HUMAN_LABEL}。\n\n` +
+      `需要用户签署：\n${items}\n\n` +
+      `签署：用户本人在本票评论首行写「退回：」，随后逐项写签署值与有效域；decision-claimer 下一轮整链重跑，分级器读到签署后不再交还，起草照引该评论。\n\n` +
+      `分级原件：\`${dir}/classify.json\``;
+  }
   if (reason === "fact_gap") {
     const gaps = arch ? factGapLines(arch) : [];
     return `**裁决暂停（未放行）**：考古有事实缺口，决定等事实；本票未起草、未落地。\n\n` +
