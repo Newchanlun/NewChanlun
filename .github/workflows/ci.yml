@@ -1315,8 +1315,18 @@ jobs:
           if [ "$CACHE_HIT" = true ] && [ -x "$HOME/.elan/bin/elan" ]; then
             echo "elan from cache: $("$HOME/.elan/bin/elan" --version)"
           else
-            curl --retry 5 --retry-all-errors --retry-delay 10 -sSf https://raw.githubusercontent.com/leanprover/elan/master/elan-init.sh \
-              | bash -s -- -y --default-toolchain none
+            # elan-init 内部再下载 elan 二进制且不重试，所以整段安装重试 3 次（#2002 独审 Nit 1）。先落盘再执行：
+            #   `curl | bash` 在无 pipefail 时只看 bash 的退出码，curl 失败也会被当成成功。
+            init="${RUNNER_TEMP:-/tmp}/elan-init.sh"
+            for i in 1 2 3; do
+              if curl --retry 5 --retry-all-errors --retry-delay 10 -sSf -o "$init" \
+                   https://raw.githubusercontent.com/leanprover/elan/master/elan-init.sh \
+                 && bash "$init" -y --default-toolchain none; then
+                break
+              fi
+              [ "$i" -lt 3 ] || exit 1
+              sleep 30
+            done
           fi
           echo "$HOME/.elan/bin" >> "$GITHUB_PATH"
 
