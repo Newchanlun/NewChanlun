@@ -11,7 +11,7 @@
 ## 纪律（commit 与引用）
 
 - commit message：`<type>(<scope>): #<GitHubIssue号>——<一句话>`；编号只指 GitHub Issue（编号声明行必备）。
-- 引用缠论课原文须回查 `docs/chanlun/text/blog/` 正本，核验步骤见 AGENTS.md「缠论教义正本」节；任何「课号:行号」形式的引用都不算已核实，援引方须自己回查那一课。
+- 引用缠论课原文须回查 `docs/chanlun/text/blog/` 正本，核验步骤见 AGENTS.md「文档层名分」节（行号未漂、逐字无删改、作者归属三查，逐字摘引须目视避开行内注，行号以 `docs/chanlun/text/blog/` 为准）；任何「课号:行号」形式的引用都不算已核实，援引方须自己回查那一课。
 - 代码注释登记口径分歧必须带票号。
 
 ## 架构

@@ -12,7 +12,7 @@
 | 验收面 | `harvest.sh`（#1660 PR 模式）+ main 必需检查（`deepagents/review`、`ci-ok`） | 15 分钟 | 评审完成的分支推远端、基于 main 开 PR、票面登记；不合入不关票 |
 | 观测面 | `health-monitor` + 进度页（新） | 5 分钟 / 1 分钟 | 停摆即 _red_、自愈、进度 |
 
-人只守三闸：spec 批准、P 类决策、合入 main。
+人只守两闸：spec 批准、P 类决策。合入 main 不设人工批准步骤，由必需检查 `deepagents/review` 与 `ci-ok` 把关；涉及实盘下单/资金或密钥/凭证的改动仍须人确认（[#1742 裁定](https://github.com/Newchanlun/NewChanlun/issues/1742#issuecomment-6719202631)）。
 
 ## 裁决流程（每张 grilling 票）
 

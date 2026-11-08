@@ -31,7 +31,7 @@
 ## 硬性规则
 
 - 只做这一张票；做不完或做不了都如实说。
-- **不关 issue、不 merge、不 push、不动 main**——验收与合入是编排层人工闸。
+- **不关 issue、不 merge、不 push、不动 main**——验收归编排层；合入 main 由分支保护的必需检查 `deepagents/review` 与 `ci-ok` 把关（[#1742 裁定](https://github.com/Newchanlun/NewChanlun/issues/1742#issuecomment-6719202631)）。
 - 被卡住（缺上下文/测试修不好/外部依赖）：容器内不能评论票面。最终答复写 `status":"blocked"`，并把卡点说明（复现证据 + 解除条件 + 续跑命令）放进 `verification` 数组，由宿主回写票面；然后给完成信号收工，不硬闯。
 - 密钥永不写入任何文件。
 - 本机禁 cargo / rustc（见 Verify）；Rust 验证 = nc-remote 远端或编排层 CI。

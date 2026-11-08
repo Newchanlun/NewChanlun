@@ -1,6 +1,6 @@
 # 用新执行器交付一张首证专用票
 
-新执行器把专用票或切流后的引擎放行票从持有跑到 `awaiting_merge`。Deep Agents 主控按 poteto-mode 派 Sandcastle 工蜂，作者与异家族独审都经现役 `codex-child`。独审对某个 head 判 PASS 后，执行器用 GitHub App 身份把这个冻结 SHA 发布到 `codex/deepagents/t<票号>`，开目标为 main 的 draft PR，写 `deepagents/review` 状态和票面交付标记。执行器不合入 main；合入由分支保护的必需检查 `deepagents/review` 与 `ci-ok` 把关，不等人批（[#1742 裁定](https://github.com/Newchanlun/NewChanlun/issues/1742#issuecomment-6719202631)）。
+新执行器把专用票或切流后的引擎放行票从持有跑到 `awaiting_merge`。Deep Agents 主控按 poteto-mode 派 Sandcastle 工蜂，作者与异家族独审都经现役 `codex-child`。独审对某个 head 判 PASS 后，执行器用 GitHub App 身份把这个冻结 SHA 发布到 `codex/deepagents/t<票号>`，开目标为 main 的 draft PR，写 `deepagents/review` 状态和票面交付标记。执行器只开 draft PR，不转 ready、不合入 main。main 的合入不设人工批准步骤，由分支保护的必需检查 `deepagents/review` 与 `ci-ok` 把关；涉及实盘下单/资金或密钥/凭证的改动仍须人确认（口径与 `pilot1742/domain.py` 的 `MERGE_GATE` 一致，[#1742 裁定](https://github.com/Newchanlun/NewChanlun/issues/1742#issuecomment-6719202631)）。
 
 `register` 保留首证专用票入口。`serve` 接收切流后的引擎放行队列，见文末。接管旧 owner 手里的票仍一律拒绝。
 
