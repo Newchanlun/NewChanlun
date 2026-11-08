@@ -4,11 +4,11 @@ import { spawnSync } from 'node:child_process';
 import { mkdtempSync, mkdirSync, readFileSync, writeFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { specBodyDigest, specRulingBody } from './wayfinder_engine.mts';
+import { specBodyDigest, specRulingBody, splitTicketBody } from './wayfinder_engine.mts';
 
 const repo = new URL('../', import.meta.url);
 for (const label of ['sandcastle', 'deepagents:queue']) {
-  for (const fault of ['create', 'link', 'link-ack', 'edge', 'edge-ack', 'block', 'receipt', 'publish', 'title-only', 'title-only-edge', 'title-only-held', 'unknown-dependency', 'cycle', 'none']) {
+  for (const fault of ['create', 'link', 'link-ack', 'edge', 'edge-ack', 'block', 'receipt', 'publish', 'title-only', 'title-only-edge', 'title-only-held', 'stale-body', 'unknown-dependency', 'cycle', 'none']) {
     test(`${label} 拆票事务：${fault} 中断后恢复，依赖完整才发布且不重复创建`, () => {
       const root = mkdtempSync(join(tmpdir(), 'split-publication-'));
       try {
@@ -18,7 +18,7 @@ for (const label of ['sandcastle', 'deepagents:queue']) {
         for (const f of ['scripts/wayfinder_engine.mts', '.sandcastle/cliproxy-env.mts', '.sandcastle/main-model.mts', '.sandcastle/scheduler-config.mts', '.sandcastle/scheduler-config.json']) writeFileSync(join(root, f), readFileSync(f === 'scripts/wayfinder_engine.mts' && process.env.SPLIT_ENGINE_SOURCE ? process.env.SPLIT_ENGINE_SOURCE : new URL(f, repo)));
         const body = '<!-- wayfinder-split -->\n```json\n'+JSON.stringify({tickets:[{id:'S1',title:'first',depends_on:fault==='cycle'?['S2']:[]},{id:'S2',title:'second',depends_on:[fault==='unknown-dependency'?'missing':'S1']}]})+'\n```';
         const ruling = (verdict: 'PASS'|'BLOCK') => ({user:{login:'fixture'}, body:specRulingBody({specNumber:2,verdict,author:'draft',reviewer:'review',digest:specBodyDigest(body),evidence:'/fake/review'}),created_at:verdict==='PASS'?'2026-11-07T01:00:00Z':'2026-11-07T02:00:00Z'});
-        writeFileSync(join(root, 'state.json'), JSON.stringify({body,pass:ruling('PASS'),block:ruling('BLOCK'),issues:fault.startsWith('title-only')?[{number:101,title:'[impl] S1 first',body:'原实施票的额外验收条件',labels:fault==='title-only-held'?['deepagents','deepagents:queue']:[]},{number:102,title:'[impl] S2 second',body:'',labels:[]}]:[],links:fault.startsWith('title-only')?[101,102]:[],edges:fault==='title-only-held'?[[102,101]]:[],fault:fault==='title-only-edge'?'edge':fault,used:false,blocked:false,violations:[]}));
+        writeFileSync(join(root, 'state.json'), JSON.stringify({body,pass:ruling('PASS'),block:ruling('BLOCK'),issues:fault==='stale-body'?[{number:101,title:'[impl] S1 first',body:'<!-- wayfinder-ticket:2:S1 -->\nPart of [SPEC #9](https://github.com/fixture/repo/issues/9)（map [#1](https://github.com/fixture/repo/issues/1) 图内实施票）。\n\n## 目标（spec S1）\n\n旧版 SPEC 的过期目标\n',labels:[]}]:fault.startsWith('title-only')?[{number:101,title:'[impl] S1 first',body:'原实施票的额外验收条件',labels:fault==='title-only-held'?['deepagents','deepagents:queue']:[]},{number:102,title:'[impl] S2 second',body:'',labels:[]}]:[],links:fault.startsWith('title-only')?[101,102]:fault==='stale-body'?[101]:[],edges:fault==='title-only-held'?[[102,101]]:[],fault:fault==='title-only-edge'?'edge':fault,used:false,blocked:false,violations:[]}));
         writeFileSync(join(root, 'gh'), `#!${process.execPath}
 const fs=require('node:fs'), p=process.env.FIXTURE+'/state.json', s=JSON.parse(fs.readFileSync(p)), a=process.argv.slice(2), cmd=a.join(' ');
 const val=k=>a[a.indexOf(k)+1], save=()=>fs.writeFileSync(p,JSON.stringify(s));
@@ -59,6 +59,8 @@ else if(a[0]==='api') {
           for(let n=0;n<3;n++) run();
           assert.equal(read().issues.length,2,'释放后恢复迁移，不重复建票');
           assert.match(read().issues[0].body,/wayfinder-published:/,'释放后完成发布');
+          assert.deepEqual([...read().issues[0].body.matchAll(/Part of \[SPEC #(\d+)\]/g)].map((m: RegExpMatchArray)=>m[1]),['2'],'释放后迁移补上当前 SPEC 链接');
+          assert.match(read().issues[0].body,/原实施票的额外验收条件/);
           return;
         }
 
@@ -72,6 +74,9 @@ else if(a[0]==='api') {
         for(let n=0;n<3;n++){const r=run();assert.equal(r.status,0,r.stderr);assert.doesNotMatch(r.stderr,/unexpected|执行失败|释放失败|拉取 tracker 状态失败/);}
         const done=read(); assert.equal(done.issues.length,2,'创建后失联不能重复建票');
         if (fault.startsWith('title-only')) assert.match(done.issues[0].body,/原实施票的额外验收条件/);
+        // 准入只认全文唯一的 Part of [SPEC #n]；迁移或恢复后的票必须指向当前 SPEC #2，且不带旧版计划内容。
+        for (const i of done.issues as Array<{body:string}>) assert.deepEqual([...i.body.matchAll(/Part of \[SPEC #(\d+)\]/g)].map(m=>m[1]),['2'],i.body);
+        if (fault==='stale-body') assert.doesNotMatch(done.issues[0].body,/旧版 SPEC 的过期目标/,'恢复时须按当前 SPEC 重写计划内容');
         assert.deepEqual(done.links.sort(),[101,102]);
         assert.deepEqual(done.edges,[[102,101]],'恢复补边且不重复加边');
         assert.deepEqual(done.violations,[]);
@@ -82,3 +87,17 @@ else if(a[0]==='api') {
     });
   }
 }
+
+test('未发布票正文：按当前 SPEC 重写引擎部分，保留票上其他文字，重复调用不变', () => {
+  const id = '<!-- wayfinder-ticket:2:S1 -->';
+  const planned = `${id}\nPart of [SPEC #2](u)。\n\n## 目标（spec S1）\n\n新目标\n`;
+  const fromLegacy = splitTicketBody(id, planned, '手写验收：Part of [SPEC #7](x) 里的条件');
+  assert.ok(fromLegacy.startsWith(planned.trimEnd()));
+  assert.match(fromLegacy, /## 迁移前原票正文\n\n手写验收：（迁移前记载：SPEC #7） 里的条件/);
+  assert.equal(splitTicketBody(id, planned, fromLegacy), fromLegacy);
+  const stale = `${id}\nPart of [SPEC #2](u)。\n\n## 目标（spec S1）\n\n旧目标\n`;
+  assert.equal(splitTicketBody(id, planned, stale), splitTicketBody(id, planned, null));
+  assert.doesNotMatch(splitTicketBody(id, planned, stale), /旧目标/);
+  const appended = splitTicketBody(id, planned, null) + '\n后补说明\n';
+  assert.match(splitTicketBody(id, planned.replace('新目标', '再新目标'), appended), /再新目标[\s\S]*## 迁移前原票正文\n\n后补说明/);
+});

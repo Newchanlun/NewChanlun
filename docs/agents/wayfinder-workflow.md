@@ -33,7 +33,7 @@ SPEC 由非作者独审。有效放行记录为编排者账号发布的结构化
 
 有效 SPEC 裁定后拆 tracer-bullet 实施票、接 blocking 边并逐票执行。只有符合票型、未认领、无 open blocker 且满足所属 SPEC/DAG 条件的票获得 `sandcastle` 标签；不把历史 `ready-for-agent` 全部放行。SPEC 裁定沿子树递归，控制面从 tracker 重算 ready 集。
 
-Sandcastle 使用既有隔离执行与独审入口；LangChain Deep Agents 队列沿 `pilot1742 executor serve` 与 ClaimStore 运行，不转交旧 swarm，也不重复认领已有任务。模型和路由以各入口配置为准。main 的合入不设人工批准：分支保护的 `deepagents/review`（正式非作者双审 success）与 `ci-ok`（适用 CI 全绿）满足、追平 main 后由代理合入，工蜂与执行器不合入；人工确认只留实盘下单与资金、密钥与凭证两类；服务与发布变更仍按相应任务范围执行。
+Sandcastle 使用既有隔离执行与独审入口；LangChain Deep Agents 队列沿 `pilot1742 executor serve` 与 ClaimStore 运行，不转交旧 swarm，也不重复认领已有任务。模型和路由以各入口配置为准。main 的合入不设人工批准：分支保护的 `deepagents/review`（正式非作者双审 success）与 `ci-ok`（适用 CI 全绿）满足、追平 main 后由代理合入，工蜂与执行器不合入；人工确认只留实盘下单与资金、密钥与凭证两类（范围与原话出处见 `.sandcastle/docs/graph-engineering.md`「人工确认只保留两类」）；服务与发布变更仍按相应任务范围执行。
 
 过程证据落 `/Volumes/AgentStorage/<任务>/`，票与 PR 记录精确 head、实际结果及证据位置。产品文档、源代码、许可证和实际测试输入入 Git。SPEC 随对应交付完成而关闭，长期语义由代码、ADR 与教义正本维护。
 

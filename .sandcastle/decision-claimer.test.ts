@@ -1041,6 +1041,27 @@ test("旧影子模式恢复：本地正在处理（有 .lock）时不改名；�
   assert.equal(resolvedReason({ comments: [{ author: "xy7365527-lang", body: "用户 2026-10-28 批复：同意" }] }), "票上已有用户批复");
 });
 
+test("残留锁：持有进程已不存在的 .<n>.lock 与 <n>/.lock 被清掉后照常处理；进程仍在或内容不是 pid 时保持", () => {
+  const root = mkdtempSync(join(tmpdir(), "decision-stale-lock-"));
+  // 已退出子进程的 pid：模拟 SIGKILL 或宿主崩溃后留下、再无人清理的锁。
+  const dead = String(execFileSync(process.execPath, ["-e", "process.stdout.write(String(process.pid))"]));
+  mkdirSync(join(root, "9"));
+  writeFileSync(join(root, "9", "summary.json"), JSON.stringify({ phase: "shadow_p" }));
+  writeFileSync(join(root, ".9.lock"), dead);
+  writeFileSync(join(root, "9", ".lock"), dead);
+  assert.equal(retireLegacyShadow(root, 9), join(root, "9.shadow-p-retired-1"));
+  assert.ok(!existsSync(join(root, ".9.lock")), "处理完释放外层锁");
+  for (const held of [String(process.pid), "1", "", "not-a-pid"]) {
+    mkdirSync(join(root, "10"), { recursive: true });
+    writeFileSync(join(root, "10", "summary.json"), JSON.stringify({ phase: "shadow_p" }));
+    writeFileSync(join(root, ".10.lock"), held);
+    assert.equal(retireLegacyShadow(root, 10), null, `锁内容 ${JSON.stringify(held)} 按仍被持有处理`);
+    assert.equal(readFileSync(join(root, ".10.lock"), "utf8"), held, "不清理仍可能被持有的锁");
+    rmSync(join(root, ".10.lock"));
+  }
+  rmSync(root, { recursive: true, force: true });
+});
+
 test("heldWaiting：只有 held 终态且水印后无退回才等待；断点与退回都放行", () => {
   const c = (body: string) => ({ author: "xy7365527-lang", body });
   const held = { phase: "held" as const, commentsSeen: 1 };

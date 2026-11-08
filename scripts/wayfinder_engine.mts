@@ -1183,6 +1183,35 @@ function splitReceipt(spec: number, body: string, id: string): string {
   return `<!-- wayfinder-published:${spec}:${specBodyDigest(body)}:${encodeURIComponent(id)} -->`;
 }
 
+const SPLIT_BODY_END = "<!-- wayfinder-ticket-end -->";
+const SPLIT_LEGACY_HEAD = "## 迁移前原票正文";
+
+/**
+ * 未发布实施票的正文（纯函数）。引擎写的部分（身份、SPEC 链接、决策链、目标）每次都按当前 SPEC 重写，
+ * 不沿用旧版 SPEC 留下的计划内容；票上不属于引擎的文字放到「迁移前原票正文」节下保留，
+ * 其中的 SPEC 链接改成纯文字，保证全文只有当前这一个 `Part of [SPEC #n]`（DeepAgents 准入要求唯一）。
+ * 已发布（带当前版回执）的票不经过本函数。
+ */
+export function splitTicketBody(identity: string, plannedBody: string, current: string | null | undefined): string {
+  const head = `${plannedBody.replace(/\n+$/, "")}\n${SPLIT_BODY_END}\n`;
+  const text = (current ?? "").replace(/\r\n/g, "\n");
+  let kept: string;
+  const end = text.indexOf(SPLIT_BODY_END);
+  if (end >= 0) {
+    kept = text.slice(end + SPLIT_BODY_END.length);
+  } else {
+    const lines = text.split("\n");
+    if (lines[0] === identity) lines.shift();
+    // 早期引擎整份写出的计划正文（身份行后紧跟 SPEC 链接）全部属于引擎，按当前 SPEC 重写。
+    kept = /^Part of \[SPEC #\d+\]/.test(lines[0] ?? "") ? "" : lines.join("\n");
+  }
+  kept = kept.replace(/^\s+|\s+$/g, "");
+  if (kept.startsWith(SPLIT_LEGACY_HEAD)) kept = kept.slice(SPLIT_LEGACY_HEAD.length).replace(/^\s+/, "");
+  kept = kept.replace(/Part of \[SPEC #(\d+)\]\([^)]*\)/g, "（迁移前记载：SPEC #$1）")
+    .replace(/Part of \[SPEC #(\d+)\]/g, "（迁移前记载：SPEC #$1）");
+  return kept ? `${head}\n${SPLIT_LEGACY_HEAD}\n\n${kept}\n` : head;
+}
+
 /**
  * 旧票迁移前的持有判定（纯函数），输入是票级动作锁内的新鲜读数。已关票执行器不会再动，不算持有。
  * 本机持有记录覆盖写 intent 后、挂镜像前的空窗；票面镜像在释放排空后才摘，是 GitHub 上可见的持有。
@@ -1249,9 +1278,7 @@ async function actSplitImpl(a: Extract<Action, { kind: "split_impl_tickets" }>, 
     const rulings = t.rulings.map(n => `[#${n}](${issueUrl(n)})`).join(" + ");
     const plannedBody = `${identity}\nPart of [SPEC #${a.spec}](${issueUrl(a.spec)})（map [#${a.map}](${issueUrl(a.map)}) 图内实施票）。` +
       (rulings ? `决策链：${rulings}。` : "") + `\n\n## 目标（spec ${t.id}）\n\n${t.summary ?? "（见 spec 对应条目）"}\n`;
-    const bodyFor = (current: string | null | undefined) => current
-      ? (current.includes(identity) ? current : `${identity}\n${current}`)
-      : plannedBody;
+    const bodyFor = (current: string | null | undefined) => splitTicketBody(identity, plannedBody, current);
     let body = bodyFor(existing?.body);
     const found = existing !== undefined;
     if (!existing) {
