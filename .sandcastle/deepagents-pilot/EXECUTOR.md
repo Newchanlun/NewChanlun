@@ -128,7 +128,7 @@ executor run --run-id t<票号>-1 --private-key "$PEM"
 
 ## 身份与发布方式
 
-执行器只用 App installation token，权限为 metadata 读，contents、issues、pull_requests、statuses 写，限定到本仓库。token 只在控制进程内存，工蜂的环境是白名单，不含任何 GitHub 凭据。队列、准入和发布不调用 gh、git 凭据、SSH 或 keychain。`cutover verify/record` 的运维屏障单独调用只读 `gh variable get` 核对冻结变量，记录来源为 `user-token-readonly`，不生成批准、不执行 GitHub 写，也不在 App 失败时改用用户身份。
+执行器只用 App installation token，权限为 metadata 读，contents、issues、pull_requests、statuses 写，限定到本仓库。token 只在控制进程内存，工蜂的环境是白名单，不含任何 GitHub 凭据。队列、准入和发布不调用 gh、git 凭据、SSH 或 keychain。`cutover verify/record` 的运维屏障单独调用只读 `gh variable get` 核对冻结变量，记录来源为 `user-token-readonly`，不生成批准、不执行 GitHub 写，也不在 App 失败时改用用户身份。`serve --review-sweep` 是第二个例外：sweep 用宿主 `gh` 登录读开放 PR、PR 状态、检查与分支保护，并经 `gh auth git-credential` 把缺失对象 fetch 到 `FETCH_HEAD`；只读、不在 App 失败时改用用户身份。只有显式开 `--review-sweep-auto-merge`（模板不开）才用同一登录写：带 sha 合入、带 expected_head_sha 追平、撤原生 auto-merge。
 
 推送不走 `git push`。执行器经 GitHub git 数据 API 逐个重建 `base..h` 的 blob、tree 与 commit，每个返回的 SHA 必须等于本地 SHA，全部对上才非强推地创建分支 ref。v2 的本地提交用 UTC 时间且不签名，以便原样重建。重建对不上时不创建任何 ref，报 `Unpublishable`。
 
@@ -190,3 +190,9 @@ launchd 模板在 `.sandcastle/launchd/com.newchanlun.deepagents-executor.plist`
 `tests/test_spec_ruling.py` 和队列 release 测试直接导入 `scripts/wayfinder_engine.mts`。默认检查当前检出；PR1915 尚未集成时，可将 `WAYFINDER_ENGINE_PATH` 指向从精确提交导出的真实 engine，连同其实际导入文件，并使用本候选的 `.sandcastle/queue-policy.json` 组成联合候选。不能用协议副本替代生产源码。
 
 从 `.sandcastle/deepagents-pilot` 运行 `python -m pytest -q tests/test_spec_ruling.py tests/test_queue.py`。队列测试保留 SIGKILL 后同 run 恢复与精确交付断言；运行记录须注明生产者 SHA、消费者 SHA 和共享策略来源。
+
+### 附带正式审查（review_sweep）
+
+`serve --review-sweep` 在每轮派票之前附带跑一次 `pilot1742.review_sweep`，两轮至少相隔 180 秒，时间记在审查状态根的 `sweep/serve-round.last`。它给指向 main 的开放 PR 派正式审查（`deepagents/review`），HOST 同时只跑一个审查，操作员手动起的 `external_review review-pr` 也算在内。base、head 不在本机对象库时只 fetch 到 `FETCH_HEAD`，不动 HEAD 与工作区。每个动作写一行 `review-sweep {…}` 到 serve 的标准输出；GitHub 读不到或 `gh` 调用超时（60 秒）时写一行 `round-skipped` 并注明读不到的源，serve 不退出。sweep 用宿主 `gh` 登录，不用 App 私钥，私钥路径只转交审查子进程。派票子进程同步运行，票在跑时 sweep 等这一轮结束；没有有效切流记录时 serve 退出，sweep 也随之停。
+
+部署模板只开 `--review-sweep`：只派审查，不追平、不合入，合入 main 仍按现行规定由人完成。`--review-sweep-auto-merge`（追平队首、在精确 head 双门全绿时带 `sha=<head>` 合入）在代码里默认关，模板也不带；等改写合入人闸口径的 #1915 合入后，由单独的后续 PR 打开，并同步改那些规定文件。开了以后：只剩实盘下单或资金、密钥或凭证两类要人确认（用户裁定留痕 https://github.com/Newchanlun/NewChanlun/issues/1742#issuecomment-6719202631）；证据读不到或超时时不合入、不追平，并撤掉相关 PR 的 GitHub 原生 auto-merge。唯一的自动合入路径是 sweep 带 `sha=<head>` 的 REST 合入：仓库设置 `allow_auto_merge` 已关（`gh api repos/Newchanlun/NewChanlun --jq .allow_auto_merge` 为 `false`），GitHub 原生 auto-merge 挂不上，有写权限的人也无法在两轮之间给触及两类的 PR 挂上、等检查转绿由 GitHub 合入。sweep 每轮读这个设置，为 `true` 或读不到时本轮不合入、不追平并记 `native-auto-merge-enabled`；撤原生 auto-merge 的逻辑保留作纵深防御。已接受的风险：改 CI 的 PR 在自己的合并 ref 上运行自己定义的 `ci-ok` 与 DevSkim，能把它们改成恒成功或放宽 DevSkim 基线；审查提示词没有针对这一点的专门条款，所以这类 PR 只受通用的双模型独审约束。规则全文见 `pilot1742/review_sweep.py` 模块说明。审查私钥单独给：`--review-private-key`（模板占位符 `__REVIEW_PRIVATE_KEY_PATH__`，由 HOST 部署填仓外绝对路径），不复用 serve 自己的 `--private-key`。没给时，若 `external_review.IDENTITY_CONFIG` 不存在，审查沿用执行器 App 并记一行 `review-key-fallback`；若它存在（已换审查专用 App），serve 记一行 `refused-no-review-key` 并以退出码 2 退出。换用审查专用 App 时：把 `__REVIEW_PRIVATE_KEY_PATH__` 填成审查 App 私钥再重新加载 serve；不要同时跑 serve 的 sweep 和独立的 `review_sweep` 循环，两者共用审查状态根下的 `sweep/*.launched` 标记，一边派出的必败子进程会让另一边对同一 attempt 退避 10 分钟。关掉审查就删掉已安装 plist 里的 `--review-sweep`，再 `launchctl bootout gui/$UID/com.newchanlun.deepagents-executor` 与 `launchctl bootstrap gui/$UID ~/Library/LaunchAgents/com.newchanlun.deepagents-executor.plist` 重新加载（`kickstart -k` 不重读 plist）。

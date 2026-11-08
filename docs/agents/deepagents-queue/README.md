@@ -44,7 +44,7 @@
    - 挂着 `deepagents:queue` 的其他票：核对票面和它正文里写的父 SPEC 都能读到，SPEC 没被删除或转移。
 4. 这张票交主控裁决：已交付票释放持有或修正交付记录，新票摘掉 `deepagents:queue` 或修正父 SPEC。执行器不会自动跳过它。
 
-依据为 `.sandcastle/deepagents-pilot/EXECUTOR.md:182`，`.sandcastle/launchd/com.newchanlun.deepagents-executor.plist:15`、`:17`、`:29`，`.sandcastle/deepagents-pilot/pilot1742/queue.py:250`、`:302`、`:317`、`:326`、`:400`、`:427`，`.sandcastle/deepagents-pilot/pilot1742/executor.py:857`、`:858`、`:863`、`:865`。
+依据为 `.sandcastle/deepagents-pilot/EXECUTOR.md:182`，`.sandcastle/launchd/com.newchanlun.deepagents-executor.plist:15`、`:17`、`:29`，`.sandcastle/deepagents-pilot/pilot1742/queue.py:250`、`:302`、`:317`、`:326`、`:400`、`:427`，`.sandcastle/deepagents-pilot/pilot1742/executor.py:883`、`:884`、`:889`、`:891`。
 
 ## 只读诊断
 
