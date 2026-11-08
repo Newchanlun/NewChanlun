@@ -307,3 +307,93 @@ fn confirmed_first_segment_publishes_only_its_own_members() {
         }
     }
 }
+
+/// 流首段的已确认段（笔号区间）与未确认尾段起点；两种 parser 入口同判。
+fn first_spans(strokes: &[Stroke]) -> (Vec<(usize, usize)>, Option<usize>, SegmentFacts) {
+    let config = ThetaConfig::for_s_structure_writer().unwrap();
+    let (segments, pending, facts) = divide_segments_with_facts(strokes, &config.parse);
+    let (stored, stored_pending, stored_facts, _) = divide_segments_with_facts_store(
+        strokes,
+        &config.parse,
+        SecondFoldStore::from_parse_config(&config.parse),
+    );
+    assert_eq!((&segments, pending), (&stored, stored_pending));
+    assert_eq!(facts.candidates, stored_facts.candidates);
+    let spans = facts
+        .candidates
+        .iter()
+        .filter_map(|c| c.end_stroke.map(|e| (c.start_stroke, e)))
+        .collect();
+    (spans, pending, facts)
+}
+
+/// 独审（doctrine-review.md §2.2）的 10 笔序列：种子 0；候选起点 p₀ = 0（起 100）、p₁ = 4（起 90）。
+/// p₀ 的 b = 第 3 笔 [90,220]，第 5、7、9 笔都落在窗内，第一种情况候选 OPEN；p₁ 自己的特征序列
+/// [95,130]、[120,180]、[110,170] 在第 9 笔确认段 [4,6]。
+const REVIEW_2_2: [i64; 11] = [100, 200, 150, 220, 90, 130, 95, 180, 120, 170, 110];
+
+/// §7.1 第 9 条：较晚起点 p₁ 已确认，较早起点 p₀ 的候选 b < p₁ 仍 OPEN ⟹ 封住，不发布 [4,6]。
+/// 等待原因 `earlier_first_start_undecided`；发布的候选是 p₀ 的开窗候选（窗成员 5、7、9）。
+#[test]
+fn review_2_2_waits_while_the_earlier_start_is_open() {
+    let (spans, pending, facts) = first_spans(&chain(&REVIEW_2_2));
+    assert_eq!(spans, vec![], "p₀ 未出局，p₁ 的 [4,6] 不得发布");
+    assert_eq!(pending, Some(4), "未确认流首段的尾部起点仍按第 5 条取 [0,9] 内最低");
+    assert!(
+        facts
+            .waiting_reasons
+            .contains(&"earlier_first_start_undecided"),
+        "{:?}",
+        facts.waiting_reasons
+    );
+    let c = &facts.candidates[0];
+    assert_eq!(
+        (c.start_stroke, c.result, c.window_members.as_slice()),
+        (0, "PENDING_CASE_ONE", &[5, 7, 9][..])
+    );
+}
+
+/// 延续 (i)：第 10 笔 ↑110→230 越过 P = 220，p₀ 的候选作废、p₀ 出局 ⟹ 当笔发布 p₁ 的 [4,6]。
+#[test]
+fn review_2_2_publishes_the_later_start_once_the_earlier_is_out() {
+    let mut points = REVIEW_2_2.to_vec();
+    points.push(230);
+    let (spans, _, facts) = first_spans(&chain(&points));
+    assert_eq!(spans.first(), Some(&(4, 6)));
+    let c = &facts.candidates[0];
+    assert_eq!((c.result, c.trigger_stroke), ("CASE_ONE", Some(9)));
+    assert!(!facts
+        .waiting_reasons
+        .contains(&"earlier_first_start_undecided"));
+}
+
+/// 延续 (ii)：第 10 笔 ↑110→150、第 11 笔 ↓150→85 先破 b 终点 90 ⟹ p₀ 确认段 [0,2]，p₁ 作废。
+/// 第 3 笔起的那一跌破坏 [0,2]（`078:22`），不是前缀。
+#[test]
+fn review_2_2_publishes_the_earlier_start_when_it_confirms() {
+    let mut points = REVIEW_2_2.to_vec();
+    points.extend([150, 85]);
+    let (spans, _, _) = first_spans(&chain(&points));
+    assert_eq!(spans.first(), Some(&(0, 2)));
+    assert!(!spans.contains(&(4, 6)));
+}
+
+/// 延续 (iii)：价格在 [90,220] 内震荡、不再创新低也不越过 220 ⟹ p₀ 一直 OPEN，每个前缀都等待。
+/// 等待可以持续到前缀末端（与第 8 条同属一类代价）。
+#[test]
+fn review_2_2_keeps_waiting_while_price_stays_inside_the_window() {
+    let mut points = REVIEW_2_2.to_vec();
+    points.extend([200, 100, 210, 95, 205, 120, 215, 92]);
+    let strokes = chain(&points);
+    for n in REVIEW_2_2.len() - 1..=strokes.len() {
+        let (spans, _, facts) = first_spans(&strokes[..n]);
+        assert_eq!(spans, vec![], "前缀 {n} 不得发布");
+        assert!(
+            facts
+                .waiting_reasons
+                .contains(&"earlier_first_start_undecided"),
+            "前缀 {n}：{:?}",
+            facts.waiting_reasons
+        );
+    }
+}
