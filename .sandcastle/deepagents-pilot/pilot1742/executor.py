@@ -80,6 +80,7 @@ from .run import (
 from .workunit import (
     MIRROR_LABEL,
     REPO,
+    REPO_NAMES,
     DedicatedPilot,
     Ineligible,
     Playbook,
@@ -373,7 +374,7 @@ class TicketExecutor:
             # 取消是撤回既有能力，不要求仍可派工；票级锁仍防止与换代交错。
             with self.claims.locked(self.unit.ticket) as txn:
                 claim = txn.record
-                if (claim is None or claim.repo != REPO or claim.ticket != self.unit.ticket
+                if (claim is None or claim.repo not in REPO_NAMES or claim.ticket != self.unit.ticket
                         or claim.run_id != self.unit.run_id or claim.run_dir != str(run_dir.resolve())
                         or claim.generation != generation):
                     raise Fenced("取消身份不符：须为原 run、状态目录与持有代次")
@@ -782,7 +783,7 @@ def _sigkill_at(point: str | None) -> Callable[[str], None]:
 
 def _client(args: argparse.Namespace) -> GitHubAppClient:
     """登记只要读权限；run 与 release（摘镜像）才申请写权限。两者都先核 App、安装与仓库身份。"""
-    identity = AppIdentity(5486877, 175617978, 1150335160, REPO, "newchanlun-deepagents-1742", args.private_key)
+    identity = AppIdentity(5486877, 179444545, 1150335160, REPO, "newchanlun-deepagents-1742", args.private_key)
     client = GitHubAppClient(identity, permissions=WRITE_PERMISSIONS if args.command in ("run", "release") else None)
     client.verify()
     return client
