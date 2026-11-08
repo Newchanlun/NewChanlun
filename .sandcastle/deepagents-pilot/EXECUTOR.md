@@ -1,6 +1,6 @@
 # 用新执行器交付一张首证专用票
 
-新执行器把专用票或切流后的引擎放行票从持有跑到 `awaiting_merge`。Deep Agents 主控按 poteto-mode 派 Sandcastle 工蜂，作者与异家族独审都经现役 `codex-child`。独审对某个 head 判 PASS 后，执行器用 GitHub App 身份把这个冻结 SHA 发布到 `codex/deepagents/t<票号>`，开目标为 main 的 draft PR，写 `deepagents/review` 状态和票面交付标记。执行器本身不合入 main。draft 转成 ready 之后，开了 `serve --review-sweep-auto-merge` 的部署会由 review_sweep 在必需检查全绿时合入（见「运行队列」）；没开时由人在 GitHub 上合入。
+新执行器把专用票或切流后的引擎放行票从持有跑到 `awaiting_merge`。Deep Agents 主控按 poteto-mode 派 Sandcastle 工蜂，作者与异家族独审都经现役 `codex-child`。独审对某个 head 判 PASS 后，执行器用 GitHub App 身份把这个冻结 SHA 发布到 `codex/deepagents/t<票号>`，开目标为 main 的 draft PR，写 `deepagents/review` 状态和票面交付标记。合入 main 由人在 GitHub 上完成。
 
 `register` 保留首证专用票入口。`serve` 接收切流后的引擎放行队列，见文末。接管旧 owner 手里的票仍一律拒绝。
 
@@ -162,7 +162,7 @@ D8 的请求绑定 `ticket`、`run_id`、`claim_generation`、`spec_authorizatio
 
 首次 `serve --once` 会登记 `t<票号>-1`，在任何票面写入前生成 `runs/<run>/approvals/spec_authorization.request`。状态页列出请求路径及签批命令。由批准人在受管签批工具中核对、签名并发布该请求，再运行下一轮。签名未发布、拒绝或已过期时保持等待。每个动作都重读权威决定链和 SPEC 正文。正文变化时暂停并生成新请求，模型恢复载荷不算批准。
 
-这条要求只作用于新的 `Queued` 准入。v1 账本、已持有 `DedicatedPilot` run 与原来的专用票交付条件不变。队列默认不要求 `candidate_head` 签批。队列本身只交付到 `awaiting_merge(h)`，不合 main；合入由 review_sweep 或人完成（见「运行队列」）。
+这条要求只作用于新的 `Queued` 准入。v1 账本、已持有 `DedicatedPilot` run 与原来的专用票交付条件不变。队列默认不要求 `candidate_head` 签批。它只交付到 `awaiting_merge(h)`，不合 main。
 
 ### 运行队列
 
@@ -170,8 +170,6 @@ D8 的请求绑定 `ticket`、`run_id`、`claim_generation`、`spec_authorizatio
 executor serve --once --workers-log "$PWD/.sandcastle/logs/workers.jsonl" --private-key "$PEM"
 executor serve --loop --poll-seconds 60 --workers-log "$PWD/.sandcastle/logs/workers.jsonl" --private-key "$PEM"
 ```
-
-`serve --review-sweep` 在每轮派票之前附带跑一次 `pilot1742.review_sweep`（两轮至少相隔 180 秒，时间记在审查状态根的 `sweep/serve-round.last`）：给指向 main 的开放 PR 派正式审查，HOST 同时只跑一个审查，操作员手动起的 `external_review review-pr` 也算在内；base、head 不在本机对象库时只 fetch 到 `FETCH_HEAD`，不动 HEAD 与工作区。自动合入在代码里默认关，只有再加 `--review-sweep-auto-merge` 才开；开了以后它只给队首追平，并在精确 head 的 `deepagents/review`、`ci-ok`、`DevSkim` 全绿且 main 的必需检查含前两项时带 `sha=<head>` 合入；触及实盘下单或资金、密钥或凭证的 PR 不合入（只剩这两类要人确认，出处见用户裁定留痕 https://github.com/Newchanlun/NewChanlun/issues/1742#issuecomment-6719202631）。改 CI 的 PR 自己定义 `ci-ok` 与 DevSkim，所以对它们只有精确 head 上的双模型独审是独立把关，这是裁定接受的风险。文件清单、检查、PR 状态或 main 必需检查读不到时一律不合入、不追平，并撤掉该 PR 的 GitHub 原生 auto-merge。每个 `gh` 调用 60 秒超时，超时整轮作废并记 `round-skipped`；补对象的 fetch 120 秒超时，一轮只试一次。每个动作写一行 `review-sweep {…}` 到 serve 的标准输出；GitHub 读不到时写一行 `round-skipped` 并注明读不到的源，serve 不退出。sweep 用宿主 `gh` 登录，不用 App 私钥（私钥路径只转交审查子进程）。规则全文见 `pilot1742/review_sweep.py` 模块说明。部署模板两个开关都开着；关自动合入就删掉已安装 plist 里的 `--review-sweep-auto-merge`，再 `launchctl bootout gui/$UID/com.newchanlun.deepagents-executor` 与 `launchctl bootstrap gui/$UID ~/Library/LaunchAgents/com.newchanlun.deepagents-executor.plist` 重新加载（`kickstart -k` 不重读 plist）；连审查一起关就把 `--review-sweep` 也删掉。派票子进程同步运行，票在跑时 sweep 等这一轮结束；没有有效切流记录时 serve 退出，sweep 也随之停。
 
 `serve` 沿用旧 claim-loop 单票在飞的上限。票级 ClaimStore 和全局 serve 锁防止两个控制进程重复持有。返回 75 或被 SIGKILL 的子进程在下一轮恢复同一 run 和代次；返回 0 或 2 也不代表工蜂结束。队列在派下一票前只读原 run 的工蜂事实，也枚举没有 intent 的 Boat 绑定。`Running`、`EffectUnknown` 或无法读取的工蜂状态继续占槽，包括已中断、halted、released 或已摘队列标签的票；已满足 [失败排空条件](BOAT.md#取消后释放队列槽或换代) 的绑定可释放槽位。队列的检查不访问 Boat，不收集或重派工蜂；原控制入口负责恢复和收集。完成的 run 不重新派工，发布沿用逐效果 Journal 的读回去重。
 
@@ -184,3 +182,9 @@ executor serve --loop --poll-seconds 60 --workers-log "$PWD/.sandcastle/logs/wor
 launchd 模板在 `.sandcastle/launchd/com.newchanlun.deepagents-executor.plist`。部署 owner 把 `__REPO__`、`__VENV__`、`__PRIVATE_KEY_PATH__`、`__BOAT_CONFIG__` 和 `__BOAT_API_KEY_FILE__` 全部替换为已核对的绝对路径后安装。后两个占位符分别设置 `PILOT_BOAT_CONFIG` 与 `PILOT_BOAT_API_KEY_FILE`。配置和控制端 key 文件的要求见 [Boat 受管配置](BOAT.md#受管配置)。
 
 使用模板的 `PATH` 执行 `command -v boat`，确认服务能找到已登录的 CLI。模板默认包含 `/Users/silencehan/.local/bin`。App 私钥路径在参数中，Boat key 文件路径在环境中，两种密钥的内容都不进入 plist。
+
+### 附带正式审查（review_sweep）
+
+`serve --review-sweep` 在每轮派票之前附带跑一次 `pilot1742.review_sweep`，两轮至少相隔 180 秒，时间记在审查状态根的 `sweep/serve-round.last`。它给指向 main 的开放 PR 派正式审查（`deepagents/review`），HOST 同时只跑一个审查，操作员手动起的 `external_review review-pr` 也算在内。base、head 不在本机对象库时只 fetch 到 `FETCH_HEAD`，不动 HEAD 与工作区。每个动作写一行 `review-sweep {…}` 到 serve 的标准输出；GitHub 读不到或 `gh` 调用超时（60 秒）时写一行 `round-skipped` 并注明读不到的源，serve 不退出。sweep 用宿主 `gh` 登录，不用 App 私钥，私钥路径只转交审查子进程。派票子进程同步运行，票在跑时 sweep 等这一轮结束；没有有效切流记录时 serve 退出，sweep 也随之停。
+
+部署模板只开 `--review-sweep`：只派审查，不追平、不合入，合入 main 仍按现行规定由人完成。`--review-sweep-auto-merge`（追平队首、在精确 head 双门全绿时带 `sha=<head>` 合入）在代码里默认关，模板也不带；等改写合入人闸口径的 #1915 合入后，由单独的后续 PR 打开，并同步改那些规定文件。开了以后：只剩实盘下单或资金、密钥或凭证两类要人确认（用户裁定留痕 https://github.com/Newchanlun/NewChanlun/issues/1742#issuecomment-6719202631）；证据读不到或超时时不合入、不追平，并撤掉相关 PR 的 GitHub 原生 auto-merge。已接受的风险：改 CI 的 PR 在自己的合并 ref 上运行自己定义的 `ci-ok` 与 DevSkim，能把它们改成恒成功或放宽 DevSkim 基线；审查提示词没有针对这一点的专门条款，所以这类 PR 只受通用的双模型独审约束。规则全文见 `pilot1742/review_sweep.py` 模块说明。关掉审查就删掉已安装 plist 里的 `--review-sweep`，再 `launchctl bootout gui/$UID/com.newchanlun.deepagents-executor` 与 `launchctl bootstrap gui/$UID ~/Library/LaunchAgents/com.newchanlun.deepagents-executor.plist` 重新加载（`kickstart -k` 不重读 plist）。

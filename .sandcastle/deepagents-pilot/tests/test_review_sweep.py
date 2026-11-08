@@ -767,13 +767,15 @@ def test_executor_serve_without_flag_has_no_sweep_and_auto_merge_needs_sweep(mon
     assert cli.main(argv + ["--review-sweep-auto-merge"]) == 2
 
 
-def test_deployed_executor_plist_turns_sweep_and_auto_merge_on():
+def test_deployed_executor_plist_turns_sweep_on_but_not_auto_merge():
+    """opus 第三轮：main 上现行规定仍是人合入 main（改口径的 #1915 未合入），部署模板只开审查；
+    --review-sweep-auto-merge 由 #1915 合入后的单独 PR 打开。"""
     import plistlib
     from pathlib import Path
     plist = Path(module.__file__).resolve().parents[2] / "launchd" / "com.newchanlun.deepagents-executor.plist"
     args = plistlib.loads(plist.read_bytes())["ProgramArguments"]
     assert args[args.index("serve"):args.index("serve") + 2] == ["serve", "--loop"]
-    assert "--review-sweep" in args and "--review-sweep-auto-merge" in args
+    assert "--review-sweep" in args and "--review-sweep-auto-merge" not in args
 
 
 def test_auto_merge_is_off_unless_explicitly_enabled(monkeypatch, tmp_path):
@@ -904,3 +906,81 @@ def test_failed_fetch_is_tried_once_per_round(lane):
     assert acts(actions, 1810) == ["error"] and acts(actions, 1811) == ["needs-source-sync"]
     sweep.tick()
     assert fetches == [1810, 1810]                      # 下一轮重新试
+
+
+# ---- 第三轮独审（0225a3e6，run 15477252）：超时也要撤原生 auto-merge；中止前的动作照常写日志 ----
+
+def _hang(*args, **kwargs):
+    raise SourceUnreadable("github (repos/x) timed out after 60s", TimeoutError())
+
+
+def _armed_sensitive_and_green_neighbour(lane, github):
+    """1810 触及实盘交易且挂着原生 auto-merge（开放 PR 列表里就带着 auto_merge 字段）；1805 是可合入的普通 PR。"""
+    lane.gateway.pr["auto_merge"] = {"merge_method": "merge"}
+    _sensitive_armed(lane, github)
+    _more_pulls(lane, github, [1805])
+    github.extra_pulls[0]["auto_merge"] = None
+    green(github, f"{1805:040d}")
+
+
+@pytest.mark.parametrize("where", ["pr", "pr_files", "checks", "required_checks"])
+def test_timeout_withdraws_native_auto_merge_and_merges_nothing(lane, capsys, where):
+    """kimi 阻断：gh 超时也不能留下原生 auto-merge 的旁路。超时后凡没能确认不触及两类、又挂着（或不知道挂没挂）
+    auto-merge 的 PR 都尽力撤掉并记一行；本轮一个 PR 也不合入（读阶段超时发生在任何写之前）。"""
+    github = FakeGitHub(lane)
+    _armed_sensitive_and_green_neighbour(lane, github)
+    if where == "required_checks" or where == "checks":
+        setattr(github, where, _hang)
+    else:
+        original = getattr(github, where)
+        setattr(github, where, lambda number, *a: _hang() if number == 1810 else original(number, *a))
+    sweep, _, _ = make(lane, run=False, github=github, auto_merge=True)
+    assert ServeRound(sweep, clock=Clock())() is None
+    lines = [json.loads(line.removeprefix("review-sweep ")) for line in capsys.readouterr().out.splitlines()]
+    assert lines[-1]["action"] == "round-skipped"
+    assert {"pr": 1810, "action": "fail-closed-withdraw", "auto_merge_withdrawn": True}.items() <= next(
+        a for a in lines if a.get("pr") == 1810 and a["action"] == "fail-closed-withdraw").items()
+    assert github.calls == [("disable", 1810)]          # 只撤 auto-merge；1805 也没合入
+
+
+def test_auto_merge_state_missing_from_pull_list_counts_as_armed(lane):
+    github = FakeGitHub(lane)
+    github.states[1810] = {}
+    sweep, _, _ = make(lane, run=False, github=github, auto_merge=True)
+    github.pr = _hang
+    with pytest.raises(SourceUnreadable) as caught:
+        sweep.tick()
+    assert github.calls == [("disable", 1810)]
+    assert caught.value.actions[-1]["action"] == "fail-closed-withdraw"
+
+
+def test_withdraw_timeout_stops_the_fail_closed_sweep(lane):
+    github = FakeGitHub(lane)
+    _armed_sensitive_and_green_neighbour(lane, github)
+    github.required_checks = _hang
+    github.disable_auto_merge = _hang
+    sweep, _, _ = make(lane, run=False, github=github, auto_merge=True)
+    with pytest.raises(SourceUnreadable) as caught:
+        sweep.tick()
+    assert [a["action"] for a in caught.value.actions][-2:] == ["fail-closed-withdraw", "fail-closed-aborted"]
+
+
+def test_actions_done_before_a_timeout_are_still_logged(lane, capsys):
+    """opus 中：本轮先合入了一个 PR、后一个写超时，已合入那条照样写日志，写超时那条记 write-unknown。"""
+    github = FakeGitHub(lane)
+    _more_pulls(lane, github, [1805])
+    green(github, f"{1805:040d}")
+    green(github, lane.gateway.pr["head"]["sha"])
+    merges = []
+    def merge(number, head):
+        if number == 1810:
+            _hang()
+        merges.append(number)
+    github.merge = merge
+    sweep, _, _ = make(lane, run=False, github=github, auto_merge=True)
+    assert ServeRound(sweep, clock=Clock())() is None
+    lines = [json.loads(line.removeprefix("review-sweep ")) for line in capsys.readouterr().out.splitlines()]
+    assert merges == [1805]
+    assert any(a.get("pr") == 1805 and a["action"] == "merged" for a in lines)
+    assert any(a.get("pr") == 1810 and a["action"] == "write-unknown" for a in lines)
+    assert lines[-1]["action"] == "round-skipped"

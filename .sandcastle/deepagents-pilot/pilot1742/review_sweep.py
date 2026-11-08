@@ -21,14 +21,19 @@ sync(number, base, head)，未注入报 needs-source-sync。
 - 该精确 head 上 deepagents/review、ci-ok、DevSkim 都是 success，且 GitHub 判定可合入（clean/unstable）；
 - 该 head 的完整改动清单可判定且不触及人工确认两类（HUMAN_GATED：实盘下单或资金、密钥或凭证）。
 两类的出处：用户裁定留痕 https://github.com/Newchanlun/NewChanlun/issues/1742#issuecomment-6719202631
+合入在代码里默认关；部署模板也只开 --review-sweep（只派审）。--review-sweep-auto-merge 等改写合入人闸口径的 #1915 合入后
+由单独的后续 PR 打开。
 完整清单：files 接口最多 3000 个且需与 changed_files 相符；否则用本地精确 diff；两者都拿不到报 evidence-insufficient
 （下轮重试），不合入，也不升级成人工确认。
 触及两类的报 needs-human-confirm，不合入、不追平；这类 PR 上若挂着 GitHub 原生 auto-merge 会撤掉。
 证据不全一律按失败关闭（fail closed）：该 PR 的状态、文件清单或检查读不到，main 的必需检查读不到，或处理中出任何异常，
 都不合入、不追平，并撤掉它的原生 auto-merge（状态读不到、不知道挂没挂时也撤）——否则一个读失败的敏感 PR
 会靠原生 auto-merge 在检查转绿后绕过 HUMAN_GATED。
+合入阶段分两段：先把所有 PR 的证据读完、定好动作，再按序执行写（合入、追平、撤 auto-merge）。
 每个 gh 调用都有 GH_TIMEOUT_SECONDS 上限；超时按输入源读不到处理（SourceUnreadable），整轮作废、下轮重试，
-所以一轮最多卡一个超时，不会无限期拖住 executor serve 的派票循环。补对象的 fetch 另有 FETCH_TIMEOUT_SECONDS，
+所以一轮最多卡一个超时，不会无限期拖住 executor serve 的派票循环。读阶段超时发生在任何写之前，本轮一个 PR 也不合入、
+不追平；随后对每个本轮没能确认不触及两类、又挂着（或不知道挂没挂）原生 auto-merge 的 PR 尽力撤掉（fail_closed），
+撤销本身也超时就停下、下轮再撤。写本身超时记 write-unknown，余下的写不做。本轮中止前已做的动作随异常带出，照常写日志。补对象的 fetch 另有 FETCH_TIMEOUT_SECONDS，
 一轮里失败一次后其余 PR 不再 fetch。
 追平只给队首（CI 节流：同一时刻只让一个 PR 占一整轮 CI）。队首是按 PR 号排第一个仍可能合入的 PR；冲突（dirty）、本 head
 已有失败的独审结论、审查卡在要操作员处理的状态（STUCK_REVIEW）、不落后却有合入检查失败、或不落后且三项检查全绿
@@ -72,8 +77,9 @@ GH_TIMEOUT_SECONDS = 60
 #   https://github.com/Newchanlun/NewChanlun/issues/1742#issuecomment-6719202631
 # CI 与分支保护配置（workflows、actions、DevSkim 门脚本、基线与误报清单）不再交人工确认。已接受的风险：改 CI 的 PR
 # 在自己的合并 ref 上运行自己定义的 ci-ok 与 DevSkim，必需检查的 app 绑定挡不住它把这两项改成恒成功或放宽扫描准入，
-# 所以对这类 PR，精确 head 上的双模型非作者独审（deepagents/review）是唯一独立的把关。裁定同时划定边界：代理不得借改
-# CI 关闭或放宽必需检查 deepagents/review、ci-ok；独审按这条边界判。
+# 所以对这类 PR 只剩精确 head 上的双模型非作者独审（deepagents/review）。审查提示词（external_review.PROMPT）是通用
+# 审阅提示，没有专门要求拦截放宽必需检查或 DevSkim 基线的改动；原来按内容判基线放宽的检测随 CI 类一起删掉，没有替代。
+# 这是接受的风险，不是已实现的缓解：要补，须改审查提示词（会改变 REVIEW_CONTRACT，旧结论不能沿用），不在本模块。
 # 两类的边界按仓库实际入口定（2026-11-07 逐个核对用途），不按名字猜；新增同类入口时更新本表。
 #   实盘下单或资金：X 执行域、E 经济、B 域、唯一生产 launcher（会话命名约定 x_/e_/b_/production_），E/B 经济事实库
 #     （账本 book、allocation、finance……）、trading、funding_record；Python 实盘 runner、执行器与券商/交易所配置
@@ -106,6 +112,7 @@ class SourceUnreadable(RuntimeError):
     def __init__(self, source: str, error: BaseException):
         super().__init__(f"{source}: {type(error).__name__}: {error}")
         self.source = source
+        self.actions: list[dict[str, Any]] = []  # 本轮中止前已经做过的动作，照常写日志
 
 
 def human_gated(files: list[str]) -> dict[str, list[str]]:
@@ -317,37 +324,48 @@ class Sweep:
         states: dict[int, dict[str, Any]] = {}
         unreadable: set[int] = set()
         review_actions: dict[int, str] = {}
-        for pr in pulls:
-            entry: dict[str, Any] = {"pr": pr["number"], "head": pr["head"]["sha"]}
-            try:
-                skip = self._eligible(pr)
-                if skip:  # 闲置超过活动窗的 PR 整个跳过：不读接口、不追平（不在闲置分支上压合并提交、触发整套 CI）
-                    actions.append({**entry, "action": skip})
-                    continue
-                behind = False
-                if self.auto_merge:
-                    try:
-                        states[pr["number"]] = self.github.pr(pr["number"])
-                    except SourceUnreadable:
-                        raise
-                    except Exception:  # 状态读不到：不派审，合入阶段按失败关闭处理（撤原生 auto-merge）
-                        unreadable.add(pr["number"])
-                        raise
-                    behind = states[pr["number"]]["mergeable_state"] == "behind"
-                action, record = self.decide(pr, busy, running, behind)
-                started = action in ("launch", "resume-review", "resume-publish")
-                running += started
-                if started:
-                    reviewing_now.add(pr["number"])
-                actions.append({**entry, "action": action, **(record or {})})
-            except SourceUnreadable:  # gh 超时：整轮作废
-                raise
-            except Exception as error:  # 单个 PR 隔离：记下，继续处理其他 PR
-                action = "error"
-                actions.append({**entry, "action": action, "reason": f"{type(error).__name__}: {error}"})
-            review_actions[pr["number"]] = action
-        if self.auto_merge:
-            actions += self.merge_actions(pulls, states, reviewing_now, review_actions, unreadable)
+        clean: set[int] = set()       # 本轮已确认不触及两类的 PR
+        withdrawn: set[int] = set()   # 本轮已撤掉原生 auto-merge 的 PR
+        try:
+            for pr in pulls:
+                entry: dict[str, Any] = {"pr": pr["number"], "head": pr["head"]["sha"]}
+                try:
+                    skip = self._eligible(pr)
+                    if skip:  # 闲置超过活动窗的 PR 整个跳过：不读接口、不追平（不在闲置分支上压合并提交、触发整套 CI）
+                        actions.append({**entry, "action": skip})
+                        continue
+                    behind = False
+                    if self.auto_merge:
+                        try:
+                            states[pr["number"]] = self.github.pr(pr["number"])
+                        except SourceUnreadable:
+                            raise
+                        except Exception:  # 状态读不到：不派审，合入阶段按失败关闭处理（撤原生 auto-merge）
+                            unreadable.add(pr["number"])
+                            raise
+                        behind = states[pr["number"]]["mergeable_state"] == "behind"
+                    action, record = self.decide(pr, busy, running, behind)
+                    started = action in ("launch", "resume-review", "resume-publish")
+                    running += started
+                    if started:
+                        reviewing_now.add(pr["number"])
+                    actions.append({**entry, "action": action, **(record or {})})
+                except SourceUnreadable:  # gh 超时：整轮作废
+                    raise
+                except Exception as error:  # 单个 PR 隔离：记下，继续处理其他 PR
+                    action = "error"
+                    actions.append({**entry, "action": action, "reason": f"{type(error).__name__}: {error}"})
+                review_actions[pr["number"]] = action
+            if self.auto_merge:
+                self.merge_actions(pulls, states, reviewing_now, review_actions, unreadable,
+                                   out=actions, clean=clean, withdrawn=withdrawn)
+        except SourceUnreadable as error:
+            # 超时（或整轮输入源读不到）：本轮不再合入、不再追平；凡不能确认不触及两类的 PR 都撤原生 auto-merge，
+            # 否则它会在检查转绿后由 GitHub 自己合入、绕过 HUMAN_GATED。已做的动作随异常带出，照常写日志。
+            if self.auto_merge:
+                actions += self.fail_closed(pulls, states, clean, withdrawn)
+            error.actions = actions
+            raise
         return actions
 
     def complete_files(self, number: int, state: dict[str, Any]) -> list[str]:
@@ -369,17 +387,17 @@ class Sweep:
                                        "本地也缺对象") from None
         return sorted(p for p in raw.decode().split("\0") if p)
 
-    def _merge_one(self, pr: dict[str, Any], state: dict[str, Any], gate_ok: bool, head_free: bool,
-                   reviewing_now: bool = False, review_action: str | None = None) -> tuple[dict[str, Any], bool]:
-        """返回（动作，是否占队首）。只有 head_free（前面没有 PR 占队首）且本 PR 仍可能合入时才可能追平。"""
+    def _plan_one(self, pr: dict[str, Any], state: dict[str, Any], gate_ok: bool, head_free: bool,
+                  reviewing_now: bool = False, review_action: str | None = None
+                  ) -> tuple[dict[str, Any], bool, str | None]:
+        """只读、不写：返回（动作，是否占队首，要做的写：merge / update / disable / None）。
+        只有 head_free（前面没有 PR 占队首）且本 PR 仍可能合入时才可能追平。"""
         number, head = pr["number"], pr["head"]["sha"]
         if state["head"] != head:
-            return {"action": "head-moved"}, False
+            return {"action": "head-moved"}, False, None
         gated = human_gated(self.complete_files(number, state))  # 证据不足抛出，由 merge_actions 失败关闭
         if gated:
-            if state["auto_merge"]:
-                self.github.disable_auto_merge(number)
-            return {"action": "needs-human-confirm", "gated": gated}, False
+            return {"action": "needs-human-confirm", "gated": gated}, False, ("disable" if state["auto_merge"] else None)
         try:
             checks = self.github.checks(head)
         except SourceUnreadable:
@@ -397,16 +415,14 @@ class Sweep:
         is_head = candidate and head_free
         if behind:
             if is_head and not reviewing_now:  # 本地有在途审查时不追平
-                self.github.update_branch(number, head)
-                return {"action": "update-branch"}, True
+                return {"action": "update-branch"}, True, "update"
             return {"action": "behind-waiting", "review": review, "reviewing": reviewing_now,
-                    "queue_head": is_head}, candidate
+                    "queue_head": is_head}, candidate, None
         if gate_ok and state["mergeable_state"] in ("clean", "unstable") and all_green:
-            self.github.merge(number, head)
-            return {"action": "merged"}, candidate
+            return {"action": "merged"}, candidate, "merge"
         return {"action": "waiting", "checks": {name: checks.get(name) for name in MERGE_CHECKS},
                 "mergeable_state": state["mergeable_state"], "queue_head": is_head,
-                **({} if gate_ok else {"gate": "ci-ok 未设为必需检查"})}, candidate
+                **({} if gate_ok else {"gate": "ci-ok 未设为必需检查"})}, candidate, None
 
     def _withdraw(self, number: int, armed: bool) -> dict[str, Any]:
         """失败关闭：撤掉原生 auto-merge。armed 为真（挂着或不知道挂没挂）才撤；撤失败如实记下，不影响其他 PR。"""
@@ -420,11 +436,39 @@ class Sweep:
             return {"auto_merge_withdrawn": False, "withdraw_error": f"{type(error).__name__}: {error}"}
         return {"auto_merge_withdrawn": True}
 
+    def fail_closed(self, pulls: list[dict[str, Any]], states: dict[int, dict[str, Any]], clean: set[int],
+                    withdrawn: set[int]) -> list[dict[str, Any]]:
+        """本轮中途超时后的兜底：对每个仍在活动窗内、本轮没能确认不触及两类、且挂着（或不知道挂没挂）原生
+        auto-merge 的 PR 尽力撤掉，每个一行日志。撤销本身也超时就停下（GitHub 不通，后面的照样会超时），下轮重试。"""
+        actions: list[dict[str, Any]] = []
+        for pr in pulls:
+            number = pr["number"]
+            if number in clean or number in withdrawn or self._eligible(pr):
+                continue
+            state = states.get(number)
+            armed = bool(state["auto_merge"]) if state else pr.get("auto_merge", True) is not None
+            if not armed:
+                continue
+            entry = {"pr": number, "head": pr["head"]["sha"], "action": "fail-closed-withdraw"}
+            try:
+                actions.append({**entry, **self._withdraw(number, True)})
+            except SourceUnreadable as error:
+                actions.append({**entry, "auto_merge_withdrawn": False, "withdraw_error": str(error)})
+                actions.append({"action": "fail-closed-aborted", "reason": "撤销也超时，余下的下轮再撤"})
+                break
+        return actions
+
     def merge_actions(self, pulls: list[dict[str, Any]], states: dict[int, dict[str, Any]],
                       reviewing_now: set[int] | frozenset[int] = frozenset(),
                       review_actions: dict[int, str] | None = None,
-                      unreadable: set[int] | frozenset[int] = frozenset()) -> list[dict[str, Any]]:
-        actions: list[dict[str, Any]] = []
+                      unreadable: set[int] | frozenset[int] = frozenset(), *,
+                      out: list[dict[str, Any]] | None = None, clean: set[int] | None = None,
+                      withdrawn: set[int] | None = None) -> list[dict[str, Any]]:
+        """两段：先把每个 PR 的证据读完并定好动作（只读），全部读完才按序执行写（合入、追平、撤 auto-merge）。
+        读阶段任何超时都在写之前抛出，本轮一个 PR 也不合入、不追平。动作逐条追加到 out，超时时已做的也不丢。"""
+        actions = [] if out is None else out
+        clean = set() if clean is None else clean
+        withdrawn = set() if withdrawn is None else withdrawn
         review_actions = review_actions or {}
         evidence_ok = True
         try:
@@ -437,28 +481,49 @@ class Sweep:
         if evidence_ok and not gate_ok:
             actions.append({"action": "auto-merge-unsafe",
                             "reason": f"main 须 strict 且必需检查含绑定来源 app 的 {sorted(GATE)}，不合入"})
+        plan: list[tuple[dict[str, Any], dict[str, Any], str | None, bool]] = []
         head_free = True
         for pr in pulls:  # 与 tick 同序（PR 号升序）：队首是第一个仍可能合入的 PR
             number = pr["number"]
             entry = {"pr": number, "head": pr["head"]["sha"]}
             if number in unreadable:  # 状态读不到，不知道挂没挂原生 auto-merge：照撤
-                actions.append({**entry, "action": "evidence-insufficient", "reason": "读取 PR 状态失败",
-                                **self._withdraw(number, True)})
+                plan.append((entry, {"action": "evidence-insufficient", "reason": "读取 PR 状态失败"}, "disable", True))
                 continue
             if number not in states:
                 continue
+            armed = states[number].get("auto_merge") is not False
             claimed = False
+            write: str | None
             try:
-                result, claimed = self._merge_one(pr, states[number], gate_ok, head_free and evidence_ok,
-                                                  number in reviewing_now, review_actions.get(number))
+                result, claimed, write = self._plan_one(pr, states[number], gate_ok, head_free and evidence_ok,
+                                                        number in reviewing_now, review_actions.get(number))
+                if result["action"] not in ("head-moved", "needs-human-confirm"):
+                    clean.add(number)
             except SourceUnreadable:
                 raise
             except Exception as error:  # 单个 PR 隔离；不明即不合入，并撤原生 auto-merge（失败关闭）
                 kind = "evidence-insufficient" if isinstance(error, EvidenceInsufficient) else "error"
                 reason = str(error) if kind == "evidence-insufficient" else f"{type(error).__name__}: {error}"
-                result = {"action": kind, "reason": reason,
-                          **self._withdraw(number, states[number].get("auto_merge") is not False)}
+                result, write = {"action": kind, "reason": reason}, ("disable" if armed else None)
             head_free = head_free and not claimed
+            plan.append((entry, result, write, armed))
+        for entry, result, write, armed in plan:
+            number, head = entry["pr"], entry["head"]
+            try:
+                if write == "merge":
+                    self.github.merge(number, head)
+                elif write == "update":
+                    self.github.update_branch(number, head)
+                elif write == "disable":
+                    result = {**result, **self._withdraw(number, True)}
+                    if result.get("auto_merge_withdrawn"):
+                        withdrawn.add(number)
+            except SourceUnreadable as error:  # 写超时：结果不明，本轮余下的写不再做
+                actions.append({**entry, "action": "write-unknown", "write": write, "reason": str(error)})
+                raise
+            except Exception as error:  # 写失败：不明即撤原生 auto-merge
+                result = {"action": "error", "reason": f"{type(error).__name__}: {error}",
+                          **(self._withdraw(number, armed) if write != "disable" else {})}
             actions.append({**entry, **result})
         return actions
 
@@ -493,7 +558,8 @@ class ServeRound:
             self.stamp.write_text(repr(now))  # 先记时间：本轮失败也按间隔重试，不每轮重打接口
             actions = self.sweep.tick()
         except SourceUnreadable as error:
-            report([{"action": "round-skipped", "unreadable": error.source, "reason": str(error)}], "review-sweep ")
+            report([*error.actions, {"action": "round-skipped", "unreadable": error.source, "reason": str(error)}],
+                   "review-sweep ")
             return None
         except Exception as error:
             report([{"action": "tick-error", "reason": f"{type(error).__name__}: {error}"}], "review-sweep ")

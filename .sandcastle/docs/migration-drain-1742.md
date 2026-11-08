@@ -167,7 +167,7 @@ executor cutover audit-release --workers-log "$WORKERS_LOG" \
 
 启动新 engine 后，先运行 `--once --dry-run` 检查新放行标签。`executor serve --once` 是实际执行入口，不是 dry-run。它会为缺签批的票生成请求，只有有效 SPEC 签批才进行票面写入。写集与签批登记方法见 [新执行器队列操作](../deepagents-pilot/EXECUTOR.md#接收引擎放行队列)。
 
-安装 `.sandcastle/launchd/com.newchanlun.deepagents-executor.plist` 前，把 `__REPO__`、`__VENV__`、`__PRIVATE_KEY_PATH__`、`__BOAT_CONFIG__` 和 `__BOAT_API_KEY_FILE__` 替换为已核对的绝对路径。确认模板的 `PATH` 能找到 Boat CLI。模板只保存配置和密钥文件的路径，不保存密钥内容。由部署 owner 加载服务并核对真实队列交付到精确 `awaiting_merge(h)`，代码和离线夹具不代替这一步。模板显式开着 `--review-sweep --review-sweep-auto-merge`（代码默认关），加载后核对 serve 标准输出里的 `review-sweep` 行；不想自动合入就在安装前删掉 `--review-sweep-auto-merge`。
+安装 `.sandcastle/launchd/com.newchanlun.deepagents-executor.plist` 前，把 `__REPO__`、`__VENV__`、`__PRIVATE_KEY_PATH__`、`__BOAT_CONFIG__` 和 `__BOAT_API_KEY_FILE__` 替换为已核对的绝对路径。确认模板的 `PATH` 能找到 Boat CLI。模板只保存配置和密钥文件的路径，不保存密钥内容。由部署 owner 加载服务并核对真实队列交付到精确 `awaiting_merge(h)`，代码和离线夹具不代替这一步。
 
 `drain-control resume --generation <当前代次>` 使既有切流记录立即失效。共享动作锁保证 resume 等当前动作完成再开放旧入口，新执行器的下一动作会停下。先让新执行器到安全边界，再完成或正式释放已持有的票，最后恢复旧服务和 health-monitor 自愈。不要同时启动两套消费者。
 
