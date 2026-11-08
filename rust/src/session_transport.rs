@@ -855,7 +855,7 @@ mod tests {
     }
 
     // #1895/#2008：另一线程持续 spawn 子进程时，process_lock 释放后立即重新获取必须成功。
-    //   只统计真正启动成功的子进程，避免 /bin/true 缺失时退化成无并发；总时长设上限，防挂死。
+    //   只统计真正启动成功的子进程，避免 `true` 不可执行时退化成无并发（走 PATH：Linux 是 /bin/true，macOS 只有 /usr/bin/true）；总时长设上限，防挂死。
     #[test]
     fn process_lock_reacquire_after_drop_survives_concurrent_spawn() {
         use std::sync::atomic::{AtomicBool, Ordering};
@@ -877,7 +877,7 @@ mod tests {
             let spawned = spawned.clone();
             std::thread::spawn(move || {
                 while !stop.load(Ordering::Relaxed) {
-                    if std::process::Command::new("/bin/true").status().is_ok() {
+                    if std::process::Command::new("true").status().is_ok() {
                         spawned.fetch_add(1, Ordering::Relaxed);
                     }
                 }

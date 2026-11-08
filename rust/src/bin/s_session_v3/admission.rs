@@ -847,8 +847,8 @@ mod lock_release_tests {
             let spawned = spawned.clone();
             std::thread::spawn(move || {
                 while !stop.load(Ordering::Relaxed) {
-                    // 只统计真正启动成功的子进程，避免 /bin/true 缺失时退化成无并发（#2007 独审 Nit）。
-                    if std::process::Command::new("/bin/true").status().is_ok() {
+                    // 只统计真正启动成功的子进程，避免 `true` 不可执行时退化成无并发（走 PATH：Linux 是 /bin/true，macOS 只有 /usr/bin/true）（#2007 独审 Nit）。
+                    if std::process::Command::new("true").status().is_ok() {
                         spawned.fetch_add(1, Ordering::Relaxed);
                     }
                 }
