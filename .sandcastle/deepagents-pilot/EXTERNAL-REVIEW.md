@@ -26,7 +26,7 @@ export PYTHONPATH=.sandcastle/approval-signing:.sandcastle/deepagents-pilot
 
 POLICY 与模型都进了 `REVIEW_CONTRACT`，换组合后旧组合的 PASS 不能沿用，旧组合的 STALE 也不能 `migrate-stale`，都须在新组合下重审。旧 run 里已退役 reviewer 留下的派发与 BLOCK 证据仍计入完结与否决判断：控制器按 run 目录里实有的 worker 读，不只读当前 `MODELS`。
 
-kimi 不带 `--output-schema`（#1968）。带 schema 时它把开场白（「我先读 diff」）当成终答，零工具调用就结束回合；PR #1966 上实测带 schema 3/3 零调用，不带 schema、提示词要求只输出 JSON 时 3/3 执行 9–17 条只读命令并给出可解析的结论。名单在 `../external-review-worker.mts` 的 `PROMPT_JSON_MODELS`，表内模型的提示词末尾追加 `PROMPT_JSON_INSTRUCTION`，回执的 `output_contract` 记 `prompt` 或 `schema`。opus 照旧带 schema。kimi 的最终消息若带 Markdown 围栏，现有解析读不出，记 FAILED（fail closed）。
+kimi 不带 `--output-schema`（#1968）。带 schema 时它把开场白（「我先读 diff」）当成终答，零工具调用就结束回合；PR #1966 上实测带 schema 3/3 零调用，不带 schema、提示词要求只输出 JSON 时 3/3 执行 9–17 条只读命令并给出可解析的结论。名单在 `../external-review-worker.mts` 的 `PROMPT_JSON_MODELS`，表内模型的提示词末尾追加 `PROMPT_JSON_INSTRUCTION`，回执的 `output_contract` 记 `prompt` 或 `schema`。opus 照旧带 schema。最终消息若整段恰好是一个 ```json（或无语言标注）围栏，先剥掉围栏再解析，TS（`unwrapJsonFence`）与 Python（`unwrap_json_fence`）同一规则；围栏外有其他文字、有多个围栏或 text 不是字符串，仍记 FAILED（fail closed）。
 
 部署：Sandcastle 主模型另行切换，设 `SANDCASTLE_MAIN_MODEL=kimi-k3.1-pro`。审查员派发不依赖主模型取值，`.sandcastle/codex-child.ts` 的 `EXTERNAL_REVIEW_MODELS` 总在 `ALLOWED_MODELS` 里。部署后照常先跑 `review_preflight.py`，它探测的就是当前两位。
 
@@ -153,6 +153,14 @@ HOST 切换步骤：
 源码和 Git 全只读挂入容器。宿主 home、PEM、GitHub token、状态和 session 目录不挂入。session 从容器临时目录经 SDK 收取，不给 reviewer 可写宿主回执目录。
 
 App token 只申请 metadata/read、contents/read、pull_requests/read、statuses/write（审查专用 App 的安装权限也正是这四项）；token 留在宿主发布进程内存。GitHub 的 statuses/write 不按 context 缩权，宿主发布器及 OS 因此属于受信边界。
+
+## 成本上限与每日额度闸
+
+单次独审最多执行 250 条命令（`REVIEW_COMMAND_CAP`，实测 Opus 中位 47、p90 98、最大 143），墙钟最长 45 分钟（实测最大 23 分钟）。触顶即关容器，回执 `status=failed` 并写 `failure_code`：`budget_exceeded`（命令数）、`timeout`、`cancelled`、`model_exit`（Codex 非零退出）或 `model_error`（模型阶段的其他异常）；容器被关后 SDK 的 exec 无论正常返回还是抛错，原因码都会写上。宿主汇总把它记进该 reviewer 的 reason（`failure_code=…`），`status` 子命令能直接看到，整轮按 FAILED 发布 `error`，不当作通过。
+
+回执的 `usage` 记 `input_tokens`、`cached_input_tokens`、`output_tokens`、`reasoning_output_tokens`、`commands` 和 `reported`。codex exec 只在整轮结束（`turn.completed`）时报用量，被中途关停的独审 `reported=false`，token 数未知，不是 0。
+
+设置环境变量 `NEWCHANLUN_REVIEW_DAILY_INPUT_CAP`（正整数 token 数，可写 `400_000_000`）后启用每日额度闸；不设则不启用。近 24 小时（按回执 mtime）各 reviewer 回执的输入 token 合计达到上限时，本 run 只要还要派发新模型（任一 reviewer 尚无 `launch.json`，包括恢复时 prepare 中断、只有目录的情形），就抛 `quota-paused` 待处理（退出码 2），不派模型；本 run 尚未发 `pending` 时也不发。已派发的 reviewer 在自己的进程里照常跑到终态，额度回落后用同一 attempt 重跑即收养它并派发剩下的。`reported=false` 的回执按命令数估算：每条命令计窗口内已报用量回执的「输入/命令」均值，没有样本时每条 10 万 token，零命令也至少计一条。没有 `usage` 字段的旧回执记 0。变量值无效（0、负数、`1e9`、`0.5G` 等）时报出变量名并拒绝派发，退出码 2。
 
 ## 运行靶向检查
 
