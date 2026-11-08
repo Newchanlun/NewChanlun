@@ -492,6 +492,11 @@ jobs:
       CARGO_INCREMENTAL: "0"
       OWNED_SPLIT: "1"
       CI_TEST_PART: ${{ endsWith(matrix.group, '-a') && '0/2' || endsWith(matrix.group, '-b') && '1/2' || '0/1' }}
+      # #1875：economic 组只编一次（一个 cargo test 步骤），测试执行远大于编译，按 R4 规则开本仓 crate opt-level 1
+      #   （断言与溢出检查保持开启）。Belay 同机：最慢三条测试 CPU 时间 151.7/171.0/143.4 s → 23.1/23.6/21.6 s，
+      #   O1 下 312 条全过；本仓 crate 冷编译 CPU 时间 190 → 977 s。R4c（run 41991335406）O1 全轮指纹与 O0 逐条相同。
+      #   其余组多特性反复编译，仍为 opt-level 0（R4c）。墙钟收益以首轮 PR 运行实测为准，economic 组没变快就撤掉。
+      CI_OWN_OPT_LEVEL1: ${{ startsWith(matrix.group, 'economic') && '1' || '' }}
     defaults:
       run:
         working-directory: rust
