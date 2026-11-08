@@ -57,24 +57,29 @@ jobs:
           count=$(tr -cd '\0' < "$changed" | wc -c | tr -d ' ')
           [ "$count" -lt 3000 ] || full "$count changed files"
           # 不用管道：grep -q 提前退出会让上游收到 SIGPIPE，pipefail 下整条判为不匹配。
-          if grep -qzE '^(\.github/devskim/.*|\.github/workflows/devskim\.yml|\.github/devskim-baseline\.json|\.github/devskim-reviewed-1488\.json|scripts/devskim_sarif_gate\.sh|scripts/devskim_reviewed_false_positives\.py)$' "$changed"; then
-            full "scanner, workflow, baseline, allowlist or gate changed"
-          fi
+          rc=0
+          grep -qzE '^(\.github/devskim/.*|\.github/workflows/devskim\.yml|\.github/devskim-baseline\.json|\.github/devskim-reviewed-1488\.json|scripts/devskim_sarif_gate\.sh|scripts/devskim_reviewed_false_positives\.py)$' "$changed" || rc=$?
+          [ "$rc" -ne 0 ] || full "scanner, workflow, baseline, allowlist or gate changed"
+          [ "$rc" -eq 1 ] || full "guard check failed (grep exit $rc)"
           # 全量扫描会跟进被跟踪的软链（如 .claude/skills/* -> .agents/skills/*）：改动落在某个软链目标上或其下时，
           #   该软链路径的结果也会变，子集扫描看不到，走全量。
           if ! linked=$(git ls-files -s -z | python3 -c '
           import os, sys
           changed = [p for p in open(sys.argv[1], "rb").read().decode().split("\0") if p]
+          root = os.path.realpath(".")
           targets = set()
           for rec in sys.stdin.buffer.read().decode().split("\0"):
               if not rec.startswith("120000 "):
                   continue
-              path = rec.split("\t", 1)[1]
-              targets.add(os.path.normpath(os.path.join(os.path.dirname(path), os.readlink(path))))
+              target = os.path.realpath(rec.split("\t", 1)[1])
+              if target == root or not target.startswith(root + os.sep):
+                  print("<link to repo root or outside: " + rec.split("\t", 1)[1] + ">")
+                  sys.exit(0)
+              targets.add(os.path.relpath(target, root))
           hits = [p for p in changed if any(p == t or p.startswith(t + "/") for t in targets)]
           print(hits[0] if hits else "")
           ' "$changed"); then full "symlink target lookup failed"; fi
-          [ -z "$linked" ] || full "changed path under a tracked symlink target: $linked"
+          [ -z "$linked" ] || full "tracked symlink check: $linked"
           run=$(gh api "repos/$GITHUB_REPOSITORY/actions/workflows/devskim.yml/runs?event=push&status=success&head_sha=$base&per_page=1" \
             --jq '.workflow_runs[0].html_url // empty') || full "run lookup failed"
           [ -n "$run" ] || full "no successful push scan of base $base"
