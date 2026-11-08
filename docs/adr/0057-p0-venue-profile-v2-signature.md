@@ -1,7 +1,7 @@
-# ADR 0057：P0 场所 profile v2 四字段签署（tick_size / slippage_bps / tax_bps / entry_delay_bars）
+# ADR 0057：P0 场所 profile 四字段签署（v2 起；现行 replay v4：tick_size / slippage_bps / tax_bps / entry_delay_bars）
 
 > 正本：本文件是 P0 场所 profile v2 中 `tick_size`、`slippage_bps`、`tax_bps`、`entry_delay_bars` 四字段的签署状态、来源与生效日期的正本。
-> 最后裁定：#1774（2026-10-28，用户批 P 类）
+> 最后裁定：#1774（2026-11-08，用户签署 replay 的 `entry_delay_bars`、`tax_bps`（v3）与 `slippage_bps`（v4），主控代发，[评论 6723858747](https://github.com/Newchanlun/NewChanlun/issues/1774#issuecomment-6723858747)，首发记录为[评论 6723284739](https://github.com/Newchanlun/NewChanlun/issues/1774#issuecomment-6723284739)；此前 2026-10-31、2026-10-28 用户批 P 类）
 > 受影响代码清单：见本文「受影响代码清单」节（实施归 #1640 owner 消费；本 ADR 不改代码）
 
 **状态**：P 类裁定，用户已批，文书待 main 合入。本 ADR 只签字段状态与来源；`venue-profile-P0.json` v2 落盘、解析器与测试锁更新归下游实施，不以本 ADR 声称实现完成。Part of #1323。
@@ -177,3 +177,104 @@ synthetic 记录头 `symbol: null`、`usage: "s_structure_writer"`、继承 `not
 
 - 裁定七三项零值：`[新缠论:选择]`（用户 2026-10-31 批）；`commission_bps` 继承：裁定一既有口径，非新签。
 - 裁定八 B1+B2 与 P0 别名归属：`[新缠论:选择]`（用户 2026-10-31 批）。
+
+
+## 追加修订：replay v3 的延迟与税模型选择（#1774，2026-11-07）
+
+> 本节依据以文末「第九、十节的裁定依据（2026-11-08 用户签署）」为准。第九节首句所写的「自主裁定及非作者修订稿独审 PASS」只是起草与审查经过，不是签署依据。
+
+### 九、两个具名选择；v3 的滑点仍为 AwaitingPolicy
+
+本节依据 [#1774 评论 6697804941](https://github.com/xy7365527-lang/NewChanlun/issues/1774#issuecomment-6697804941) 的自主裁定及非作者修订稿独审 PASS，追加而不改写历史裁定。生效日为 2026-11-08（用户签署日，见文末裁定依据节）。记录 `venue-profile-P0` 从 v2 升为 v3，仍以 `profile_id=P0`、`symbol=BTC` 绑定 `replay_binance_spot_1m`，不加 `usage` 头。
+
+| 字段 | v3 状态或值 | 来源与代价 |
+|---|---|---|
+| `tick_size`、`commission_bps` | 0.01、10 bp/side | 维持既有值和来源，未扩大快照日的事实射程 |
+| `entry_delay_bars` | 1 根 | `[新缠论:选择]`。批量模型从信号后第一根可交易 bar 成交的假设，不是真实场所延迟。保留非负整数的版本化可配置性，改值出新版本，不允许失败后换值兜底；夹具值和 #907 测量不作签值证据 |
+| `tax_bps` | 0 bp/side | `[新缠论:选择]`。该无账户主体模拟 profile 不建模逐笔税，不是 Binance 或账户辖区的税务事实；`fee_schedule` 互斥约束不是来源。有账户主体的 profile 须按辖区另行签值 |
+| `slippage_bps` | `AwaitingPolicy` | 缺少具名测量依据；不得借 synthetic 零值、诊断夹具或成本门数值补齐。具名测量须先核识别范围，或另行裁定为具名模型假设并写明代价。slippage_bps=2 已由用户 2026-11-08 签署，在 v4（#1947）落地；v3 记录中仍为 AwaitingPolicy |
+
+slippage_bps=2 已由用户 2026-11-08 签署，在 v4（#1947）落地；v3 记录中仍为 AwaitingPolicy，故 v3 下 P0 仍拒启，symbol 与 profile 两路只报 `cost_inputs`，缺字段恰为 `slippage_bps`。影子臂尚不能使用此 profile；本节不宣称正式完整历史回放已具备。synthetic、B1+B2、准入门、成本门及 `research-override` 边界不变。
+
+### 十、正式回放合同与实际实现分开验收
+
+ADR 0052/0056 要求的正式输入、X 受控撮合、费用来源及整数规则仍由 #1381 实现。基线 `9b436af2d2` 的 `production_session` 启动 S/E/B/X；S 经 `for_s_structure_writer` 选择 synthetic，而 X 的 submit/cancel 仍固定返回 `UnsupportedCapability`。P0 签值不解除这些缺口。费用模型的 `fee_profile` 引用属于 #1381 原有合同，#1418 消费模型和报告证据，不另建重复实现线。
+
+本节影响 `policy_records/venue-profile-P0.json` 的记录及 `run_records.rs`、`config.rs`、`tests/test_theta_pyo3_bridge.py` 的测试；不改成交、策略、流式、NT 或 FFI 实现。实际选择链、原 synthetic 锁及旧已签记录兼容锁继续保留。
+
+Linux 验收分别运行 `cargo test --release --locked --lib theta_v0::run_records` 与 `cargo test --release --locked --lib theta_v0::config`。Python 按既有 CI 的 `pip install ./rust` 入口构建精确候选扩展，记录候选 SHA 和加载路径，目标测试实际执行、零 skip。测试临时补入的滑点数值只验证记录读回，不构成签值。实施精确 head 的非作者独审、必要 CI、主线合入和 #1640 原运行义务仍分别验收。
+
+### 第九、十节的裁定依据（2026-11-08 用户签署）
+
+> 本节只追加，不改写第九、十节和上文各裁定的原文。被取代的条款在下文逐条点明，原文保留作历史。
+
+**裁定依据**：用户签署。用户 2026-11-08 在主图会话中先看过三个值的含义和局限，然后明确指示「同意签字 你帮我签」。签署由主图主控代发，签署依据为 [#1774 评论 6723858747](https://github.com/Newchanlun/NewChanlun/issues/1774#issuecomment-6723858747)，首行为「用户 2026-11-08 批复：P0 回放 profile 签 entry_delay_bars=1、tax_bps=0、slippage_bps=2（均为模型假设，仅历史回放，不用于实盘与真实资金；适用范围按 #1774 评论 6697804941 与 6702153508 的限制条件）」，符合 main 现行 `.agents/skills/graph-approve/SKILL.md` 第 3 步的批复首行格式。同一签署的首发记录是 [#1774 评论 6723284739](https://github.com/Newchanlun/NewChanlun/issues/1774#issuecomment-6723284739)（2026-11-08），签署内容相同，但首行写作「退回：」；按 main 现行口径（`.sandcastle/docs/graph-engineering.md:118`）首行「退回」表示打回重写，所以主控按现行格式补发了 6723858747，两条是同一次签署。代理与用户共用同一 GitHub 账号，该评论写明是代发、依据是用户原话。[#1774 评论 6697804941](https://github.com/Newchanlun/NewChanlun/issues/1774#issuecomment-6697804941) 的主控裁定与非作者独审 PASS 是起草与审查经过，不是签署来源。
+
+本 PR 落 v3 的两项：`entry_delay_bars = 1`、`tax_bps = 0`，取值与第九节表格一致。同一签署中的 `slippage_bps = 2` 不进 v3，按 [#1774 评论 6702153508](https://github.com/Newchanlun/NewChanlun/issues/1774#issuecomment-6702153508) 的落地次序在 v4（#1947）另落。slippage_bps=2 已由用户 2026-11-08 签署，在 v4（#1947）落地；v3 记录中仍为 AwaitingPolicy，第九节所述 v3 下 P0 拒启照旧成立。
+
+**适用范围**：只限历史回放。两项均为模型假设，不用于实盘，不用于真实资金。限制条件按 #1774 评论 6697804941：延迟 1 根是批量模型从信号后首根可交易 bar 成交的假设，不是真实场所延迟；税 0 是无账户主体模拟 profile 不建模逐笔税的范围选择，不是 Binance 或账户辖区的税务事实；有账户主体的 profile 须按辖区另行签值；签值不使影子臂可用 P0，不证明正式完整历史回放完成；synthetic、B1+B2、`require_admissible`、成本门与 `research-override` 边界不变。
+
+**本次签署取代的既有条款**：
+
+| 条款 | 原文要点 | 取代后 |
+|---|---|---|
+| 裁定四 `:60`，`tax_bps` 退场条件 | 只认账户所在辖区的税务权威来源，或 Binance 官方明文页 | 增加一条途径：用户按 `[新缠论:选择]` 签署模型假设。本次即走此途径，对 `replay_binance_spot_1m` 签 0 bp/side。`fee_schedule` 互斥约束仍不是来源；原两条途径仍有效 |
+| 裁定五 `:71`，「本 ADR 不预签」 | `entry_delay_bars` 由使用方提请用户签，本 ADR 不预签 | 对 `replay_binance_spot_1m` 已由用户签 1 根，即该条所述「提请用户签」的结果。其他 profile 仍不预签 |
+| 追加修订裁定八 `:155`，「仍因三项 `AwaitingPolicy` 拒启」 | P0 别名因 slippage、tax、delay 三项未签拒启 | v3 只剩 `slippage_bps` 未落（slippage_bps=2 已由用户 2026-11-08 签署，在 v4（#1947）落地；v3 记录中仍为 AwaitingPolicy），v3 下 P0 仍拒启，缺口只报 `cost_inputs` 中的 `slippage_bps` |
+| 追加修订不变项 `:162`，「replay 三项保持 `AwaitingPolicy`」 | replay 三项成本均不签 | v3 起 `tax_bps`、`entry_delay_bars` 已签，只有 `slippage_bps` 保持 `AwaitingPolicy`；该行其余不变项照旧 |
+
+### 溯源标签
+
+- 第九节 `entry_delay_bars = 1`、`tax_bps = 0`：`[新缠论:选择]`（用户 2026-11-08 签，主控代发，#1774 评论 6723858747，首发记录 6723284739）。均为模型假设，仅用于历史回放。
+- 第十节合同与实现分开验收：沿用 ADR 0052/0056 与 #1381 既有合同，本节不新签。
+
+## 追加修订：replay v4 的滑点模型假设（#1774，2026-11-07）
+
+> 本节依据以文末「第十一节的裁定依据（2026-11-08 用户签署）」为准。第十一节首句所写的「自主裁定（采纳补稿方案 S1）」只是起草与审查经过，不是签署依据。
+
+### 十一、slippage_bps 签为 2 bp/side 模型假设，NT 路径先拆成本标签
+
+本节依据 [#1774 评论 6702153508](https://github.com/Newchanlun/NewChanlun/issues/1774#issuecomment-6702153508) 的自主裁定（采纳补稿方案 S1），追加而不改写历史裁定。补稿为 `/Volumes/AgentStorage/issue1774-replay-policy/slippage-addendum/draft.md`（sha256 `3440d88ee6f8d48ed16269248adf583af7430398f05409af4fecc9f9425f8058`），非作者独审为同目录 `review.md`（VERDICT: PASS，sha256 `fe9a7e32073340e1540754c0f1c8c658867709a6d01aaa288144b80e7f61f8bc`）。生效日为 2026-11-08（用户签署日，见第十一节的裁定依据节）。记录 `venue-profile-P0` 从 v3 升为 v4，仍以 `profile_id=P0`、`symbol=BTC` 绑定 `replay_binance_spot_1m`，不加 `usage` 头；`tick_size`、`commission_bps`、`tax_bps`、`entry_delay_bars` 的值与来源与 v3 逐字节相同。
+
+| 字段 | v4 值 | 来源与代价 |
+|---|---|---|
+| `slippage_bps` | 2 bp/side | `[新缠论:选择]` 模型假设，非测量、非场所事实。#917 平方根律 `Y·σ_日·sqrt(Q/V_日)`：Y=0.9（Donier & Bonart 2015 §4.3），δ=0.5，σ_日=GK 中位 2.531%，V_日=中位 1.2255e9 USDT（本仓 1m 全史），Q=100,000 USDC（ADR 0040 裁定三、四，P0 单重 L0 开局批），得 2.057，取最近整数为 2。与 ADR 0040 C(L0)=1,110,000 同公式同输入。半价差已评估，2020 年以后约 1 tick，不单列 |
+
+依据是裁定四退场条件的第二路：「按 `[新缠论:选择]` 单独签一个回放撮合假设值并写明代价」。不签的现状不是「未知」，而是影子臂经诊断夹具无来源地用 2 bp 滑点和 1 bp 佣金；签值后三项成本都有具名来源。
+
+四条限制写进记录 source，读数须一并携带：
+
+1. P0 的 Q/V_日 ≈ 8.2e-5，低于平方根律已测下界 1e-3（Bucci 等 2019），属外推；按线性外推只有 0.59 bp，所以 2 bp 是偏保守的一侧。
+2. Binance 现货 aggTrades 四个样本日只作量级核对：2025、2026 年约 0.07 bp，2022 年压力日 1.43 bp，2018 年约 3.5 bp（VWAP 落差均值加半价差中位，口径混合）。
+3. 逐日代入的年中位从 2017 年约 39 bp 到 2025 年约 1.2 bp。常数表达不了逐年变化；按时间变化的冲击模型需要新的模型身份并改 `fill.rs`，不在本节（U-2）。
+4. 2 bp 只描述 P0 规模（10 万 USDC）的成本。批量臂起始 NAV 为首价 × 1e4（BTC 约 4,260 万），是 sizing 尺度匹配值，不得据此把 2 bp 读成该规模下的成本。规模增长或换向合单不触发改签（U-4）。
+
+不变项：ADR 0018 裁定五照旧，限价被动成交与开盘越过成交不扣本值；成本门 slippage 仍为 `Missing`，本值不是成本门数值（裁定二）；诊断夹具、synthetic 零值与成本门数值都不是来源（裁定四）。准入门与 `admissible()` 判定逻辑、synthetic 记录及 B1+B2、诊断夹具记录、ADR 0044 成本门四项不变。正式完整回放在成本口径上的前置仍是 #1381 的 `fee_profile` 与 G-2；本推导可作 #1381 的候选来源，不代替它。I-4 测量票的范围改为在 Binance 上自标 Y（U-3），不再是签值前置。
+
+**I-3 处置（同一 PR，排在签值之前）**。NT/Python 路径（`trading_system/backtest/theta_backtest_py.py`）的撮合成本来自 NT instrument（`BTC-USD-PERP.HYPERLIQUID`，maker 1 bp、taker 3.5 bp、tick 0.001）、NT 默认费用模型与 `FillModel(prob_slippage=0.0)`，不读 venue profile 的成本项。P0 变为 admissible 后，原「记录:」行会让读者以为成本按 P0 计算。处置为只改标签：输出拆成「准入记录」与「撮合成本来源」两行，后者无论 admissible 与否都打印，取值来自实际传给 `add_venue` 与 `add_instrument` 的对象；`ThetaRecStrategyConfig.venue_profile` 文档写明 NT 不读其成本项。撮合、策略、流式、NT 与 FFI 实现零改动。Rust ⑥段已标 `research-override`，本节不改；为它补一行成本来源标签登记为非阻塞建议（U-7）。
+
+本节影响 `policy_records/venue-profile-P0.json` 的记录，`run_records.rs`、`config.rs`、`tests/test_theta_pyo3_bridge.py` 的测试，`theta_backtest_py.py` 的输出标签与新增 `tests/test_theta_nt_cost_provenance.py`。Linux 验收命令同第十节。实施精确 head 的非作者独审、必要 CI 与主线合入分别验收。
+
+### 第十一节的裁定依据（2026-11-08 用户签署）
+
+> 本节只追加，不改写第十一节和上文各裁定的原文。被取代的条款在下文逐条点明，原文保留作历史。
+
+**裁定依据**：用户签署，与第九、十节同一条签署。用户 2026-11-08 在主图会话中明确指示「同意签字 你帮我签」，主图主控代发，签署依据为 [#1774 评论 6723858747](https://github.com/Newchanlun/NewChanlun/issues/1774#issuecomment-6723858747)，首行为「用户 2026-11-08 批复：P0 回放 profile 签 entry_delay_bars=1、tax_bps=0、slippage_bps=2（均为模型假设，仅历史回放，不用于实盘与真实资金；适用范围按 #1774 评论 6697804941 与 6702153508 的限制条件）」。首发记录 [#1774 评论 6723284739](https://github.com/Newchanlun/NewChanlun/issues/1774#issuecomment-6723284739) 内容相同、首行写作「退回：」，补发原因见第九、十节裁定依据节。[#1774 评论 6702153508](https://github.com/Newchanlun/NewChanlun/issues/1774#issuecomment-6702153508) 的主控裁定、补稿与非作者独审 PASS 是推导、起草与审查经过，不是签署来源。
+
+**适用范围**：只限历史回放。`slippage_bps = 2` 是模型假设，不用于实盘，不用于真实资金。限制条件按 #1774 评论 6702153508，即第十一节列出的四条限制；第九、十节裁定依据节所列 6697804941 的限制照旧适用于 `tax_bps`、`entry_delay_bars`。P0 v4 admissible 只表示回放记录准入，不使影子臂可用 P0，不证明正式完整历史回放完成；正式回放成本口径的前置仍是 #1381 的 `fee_profile` 与 G-2。
+
+**本次签署取代的既有条款**：
+
+| 条款 | 原文要点 | 取代后 |
+|---|---|---|
+| 裁定四 `:59`，`slippage_bps` 退场条件 | 实测来源，或用户按 `[新缠论:选择]` 单独签回放撮合假设值并写明代价 | 第二条途径由用户签署满足，对 `replay_binance_spot_1m` 签 2 bp/side，代价见第十一节四条限制。第十一节 `:243` 把这条途径写成主控自主裁定可满足，以本节为准 |
+| 后果照实 `:116`，「还须由用户……签」 | replay 三项待用户签 | 对 `replay_binance_spot_1m` 三项均已由用户签署（v3 两项、v4 一项） |
+| 追加修订裁定八 `:155`，「仍因三项 `AwaitingPolicy` 拒启」 | P0 别名因三项未签拒启 | v4 起 P0 不再因成本项拒启，`admissible()` 为真；不放宽 `require_admissible` |
+| 追加修订不变项 `:162`，「replay 三项保持 `AwaitingPolicy`」 | replay 三项成本均不签 | v4 起 replay 三项均已签；该行其余不变项照旧 |
+| 第九节 `:195`、`:197`，`slippage_bps` 为 `AwaitingPolicy`、「v3 下 P0 仍拒启」 | v3 记录中 slippage 为 `AwaitingPolicy`，P0 拒启 | 只对 v3 成立；v4 已落用户 2026-11-08 签署的 2 bp/side，P0 不再因滑点拒启。「影子臂尚不能使用此 profile」照旧 |
+| 第九、十节裁定依据节 `:213`，「v3 记录中仍为 AwaitingPolicy」 | 同上 | 只对 v3 成立；v4 按本节另落 |
+
+### 溯源标签
+
+- 第十一节 `slippage_bps = 2`：`[新缠论:选择]`（用户 2026-11-08 签，主控代发，#1774 评论 6723858747，首发记录 6723284739）。模型假设，仅用于历史回放；推导来源为 #917 平方根律，限制见第十一节。
+- 第十一节 I-3 成本标签拆分：只改输出标签与测试，不是签值，沿用 #1774 评论 6702153508 的实施安排。

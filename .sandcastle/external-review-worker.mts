@@ -17,6 +17,12 @@ export interface ReviewLaunch {
   checkout: string; prompt: string; mode: "review";
 }
 export const REVIEW_IMAGE = "sandcastle:newchanlun";
+/** #1968：kimi 在 codex exec --output-schema 下把开场白当成终答、零工具调用就结束（PR #1966 实测 3/3）；
+ *  不带 schema、改由提示词约束 JSON 时 3/3 正常读代码。表内模型不传 schema，提示词末尾追加下面这句。 */
+export const PROMPT_JSON_MODELS: ReadonlySet<string> = new Set(["kimi-k3.1-pro"]);
+export const PROMPT_JSON_INSTRUCTION = "\n最终消息只输出一个 JSON 对象，不加 Markdown 代码围栏、不加其它文字。"
+  + "键恰为 status、summary、findings、validation：status 取 completed、blocked、failed 之一；"
+  + "summary 为字符串；findings、validation 为字符串数组。";
 const inside = (root: string, path: string) => path === root || path.startsWith(root + sep);
 
 export function readLaunch(folder: string): ReviewLaunch {
@@ -98,7 +104,12 @@ export interface WorkerDependencies {
   inspect(id: string): { Id: string; Image: string; Mounts: Array<{ Source: string; Destination: string; RW: boolean }>; Config: { Env: string[] } };
   imageEnv(image: string): string[];
   timeoutMs: number;
+  /** 单次独审的命令数上限；超出即停并记 failure_code=budget_exceeded。缺省见 REVIEW_COMMAND_CAP。 */
+  commandCap?: number;
 }
+// 实测（2026-11-01..08，247 次完成的独审）：Opus 命令数中位 47、p90 98、最大 143；墙钟最大 23 分钟。
+// 上限约取正常一次的 3–5 倍，并高于实测最大值，只拦失控，不拦正常审查。
+export const REVIEW_COMMAND_CAP = 250;
 const dependencies: WorkerDependencies = {
   ready: (image) => assertSwarmExecutionReady(image, { rows: [], verify: verifyReviewAdmission }),
   sandbox: (image) => swarmSandbox(image, dockerCliProxyEnv()) as DockerProvider,
@@ -106,7 +117,7 @@ const dependencies: WorkerDependencies = {
   inspect: (id) => JSON.parse(execFileSync("docker", ["inspect", id], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }))[0],
   imageEnv: (image) => JSON.parse(execFileSync("docker", ["image", "inspect", image, "--format", "{{json .Config.Env}}"],
     { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] })) ?? [],
-  timeoutMs: 5_400_000,
+  timeoutMs: 2_700_000,
 };
 
 export async function runExternalReview(folder: string, deps: WorkerDependencies = dependencies): Promise<void> {
@@ -119,6 +130,11 @@ export async function runExternalReview(folder: string, deps: WorkerDependencies
   let creationStarted = false;
   let timer: ReturnType<typeof setTimeout> | undefined;
   let cancelled = false;
+  // 主动停机标志放在外层：exec 在容器被关后可能 reject 而不是返回，catch 里也要据此补齐原因码。
+  let timedOut = false;
+  let overBudget = false;
+  const stopCode = (): string | undefined =>
+    cancelled ? "cancelled" : overBudget ? "budget_exceeded" : timedOut ? "timeout" : undefined;
   const cancel = () => { cancelled = true; void handle?.close(); };
   process.once("SIGTERM", cancel); process.once("SIGINT", cancel);
   try {
@@ -162,13 +178,24 @@ export async function runExternalReview(folder: string, deps: WorkerDependencies
     writeFileSync(schema, JSON.stringify(OUTPUT_SCHEMA), { mode: 0o600 });
     await handle.copyFileIn(schema, "/tmp/external-review-schema.json");
     if (cancelled) throw new Error("监督已取消");
-    const built = provider.buildPrintCommand({ prompt: launch.prompt, dangerouslySkipPermissions: false });
-    if (built.stdin !== launch.prompt || !built.command.includes("--disable multi_agent")) throw new Error("Codex 命令协议已漂移");
-    const command = built.command + " --skip-git-repo-check --output-schema /tmp/external-review-schema.json -c 'features.apps=false' -c 'features.plugins=false'"
-      + " -c 'web_search=\"disabled\"' -c 'shell_environment_policy.inherit=\"core\"' -";
+    const promptJson = PROMPT_JSON_MODELS.has(launch.model);
+    record.output_contract = promptJson ? "prompt" : "schema";
+    const prompt = promptJson ? launch.prompt + PROMPT_JSON_INSTRUCTION : launch.prompt;
+    const built = provider.buildPrintCommand({ prompt, dangerouslySkipPermissions: false });
+    if (built.stdin !== prompt || !built.command.includes("--disable multi_agent")) throw new Error("Codex 命令协议已漂移");
+    // project_doc_max_bytes=0：不把候选仓 AGENTS.md 当指令自动注入每次请求（实测约 13k 字符，随每轮请求重发）；
+    // 候选 AGENTS 本就是不可信审阅材料，审查员需要时可用 cat 读取。
+    const command = built.command + " --skip-git-repo-check"
+      + (promptJson ? "" : " --output-schema /tmp/external-review-schema.json") + " -c 'features.apps=false' -c 'features.plugins=false'"
+      + " -c 'web_search=\"disabled\"' -c 'shell_environment_policy.inherit=\"core\"' -c 'project_doc_max_bytes=0' -";
     const transcript = new CodexTranscript(provider);
     const events = openSync(join(folder, "events.jsonl"), "wx", 0o600);
-    let timedOut = false;
+    const cap = deps.commandCap ?? REVIEW_COMMAND_CAP;
+    // reported：是否收到过带 usage 的 turn.completed。codex exec 只在整轮结束时报用量，被中途关停的独审
+    // token 数未知（不是 0），额度闸据 reported=false 按命令数估算，不把失控的独审算成零。
+    const usage = { input_tokens: 0, cached_input_tokens: 0, output_tokens: 0, reasoning_output_tokens: 0, commands: 0,
+      reported: false };
+    record.usage = usage;
     timer = setTimeout(() => { timedOut = true; void handle?.close(); }, deps.timeoutMs);
     let execution;
     record.phase = "model";
@@ -176,13 +203,29 @@ export async function runExternalReview(folder: string, deps: WorkerDependencies
       execution = await handle.exec(command, { cwd: "/review", stdin: built.stdin, onLine(line) {
         writeFileSync(events, line + "\n");
         transcript.accept(line);
+        try {
+          const event = JSON.parse(line);
+          if (event?.type === "turn.completed" && event.usage) {
+            usage.reported = true;
+            for (const key of ["input_tokens", "cached_input_tokens", "output_tokens", "reasoning_output_tokens"] as const) {
+              usage[key] += Number(event.usage[key]) || 0;
+            }
+          }
+          if (event?.type === "item.completed" && event.item?.type === "command_execution" && ++usage.commands > cap && !overBudget) {
+            overBudget = true; void handle?.close();
+          }
+        } catch { /* 非 JSON 行由 transcript 判失败，这里只计量 */ }
       } });
     } finally { closeSync(events); }
     record.exit_code = execution.exitCode;
     record.turn_completed = transcript.turnCompleted;
     record.session_id = transcript.sessionId;
     writeFileSync(join(folder, "stderr.log"), execution.stderr, { mode: 0o600 });
-    if (cancelled || timedOut || execution.exitCode !== 0) throw new Error(cancelled ? "监督已取消" : timedOut ? "独审超时" : "Codex 退出失败");
+    if (cancelled || timedOut || overBudget || execution.exitCode !== 0) {
+      // 显式原因码：触顶是「暂停待人看」，不是静默失败。
+      record.failure_code = stopCode() ?? "model_exit";
+      throw new Error(cancelled ? "监督已取消" : overBudget ? `独审命令数超过上限 ${cap}` : timedOut ? "独审超时" : "Codex 退出失败");
+    }
     record.phase = "transcript";
     const output = transcript.output();
     if (!provider.sessionStorage) throw new Error("模型未提供 session storage");
@@ -202,6 +245,9 @@ export async function runExternalReview(folder: string, deps: WorkerDependencies
     record.status = cancelled ? "cancelled" : "failed";
     // SDK 传输异常可能含 Docker argv/env，只持久化错误类别，不记录其原始消息。
     record.failure_reason = error instanceof Error ? error.name : "SupervisionError";
+    // 主动停机（取消、命令数触顶、超时）无论 exec 是返回还是 reject 都留下显式原因码；模型阶段的其他异常记 model_error。
+    const code = record.failure_code ?? stopCode() ?? (record.phase === "model" ? "model_error" : undefined);
+    if (code !== undefined) record.failure_code = code;
     try { record.after = launch ? snapshot(launch.checkout) : null; } catch { record.after = null; }
   } finally {
     if (timer) clearTimeout(timer);
@@ -217,7 +263,19 @@ export async function runExternalReview(folder: string, deps: WorkerDependencies
   if (!ownsLock) throw new Error("独审监督启动失败，终态已保存");
 }
 
+/** 沿用旧 PASS 前的部署准入：与正式派发同一组检查（controller 已提交、ready() 核当前镜像的 accepted 记录并做容器隔离合同观测），不建审阅容器、不调模型。 */
+export function checkReviewAdmission(deps: Pick<WorkerDependencies, "identity" | "ready"> = dependencies):
+  { controller_code_head: string; image_id: string } {
+  const identity = deps.identity();
+  if (identity.dirty) throw new Error("controller 代码未提交");
+  return { controller_code_head: identity.head, image_id: deps.ready(REVIEW_IMAGE) };
+}
+
 async function main(): Promise<void> {
+  if (process.argv.length === 3 && process.argv[2] === "--admission-only") {
+    process.stdout.write(JSON.stringify(checkReviewAdmission()) + "\n");
+    return;
+  }
   if (process.argv.length !== 4 || process.argv[2] !== "--output-dir") throw new Error("只接受宿主 --output-dir");
   const folder = resolve(process.argv[3]!);
   if (folder !== realpathSync(folder)) throw new Error("回执目录含符号链接");

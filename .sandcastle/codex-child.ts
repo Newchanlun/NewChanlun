@@ -17,8 +17,11 @@ const scheduler = useScheduler("codex-child", ["childEffort", "opusModel", "chil
 
 /** 与主控同型，经本机 CLIProxyLocal 的 OAuth 订阅路由；不带中转前缀（#1617）。缺省调用者使用它。 */
 export const MODEL = MAIN_MODEL;
+/** deepagents/review 的两位审查员，与 deepagents-pilot/pilot1742/external_review.py 的 MODELS 相同（测试核对）。
+ *  单列出来，主模型被 SANDCASTLE_MAIN_MODEL 换成别的值时审查员仍能派发。 */
+export const EXTERNAL_REVIEW_MODELS: readonly string[] = ["kimi-k3.1-pro", "claude-opus-5-5"];
 /** #1742：调用者可显式选的模型；缺省仍是 MODEL。GPT 作者配 Opus 独审需要两个家族同走本入口。 */
-export const ALLOWED_MODELS: readonly string[] = [MODEL, scheduler.opusModel];
+export const ALLOWED_MODELS: readonly string[] = [...new Set([MODEL, scheduler.opusModel, ...EXTERNAL_REVIEW_MODELS])];
 export type ChildModel = string;
 export const EFFORT = scheduler.childEffort;
 /** 命令带 --ignore-user-config，不读用户 config.toml；provider 由下方具名定义经 -c 显式给出。 */
@@ -318,6 +321,13 @@ export async function boundedCodex(mode: ChildMode, schemaPath: string, env = wo
   };
 }
 
+/** 模型偶尔把最终 JSON 整段包进一个 ```json 围栏（#1912 run 75aad755）。只剥这一种整段包裹；
+ *  围栏外有任何其他文字仍原样返回，交给 JSON.parse 按无效 JSON 拒绝。Python 侧 unwrap_json_fence 同一规则。 */
+export function unwrapJsonFence(text: string): string {
+  const fenced = /^```(?:json)?[ \t]*\r?\n([\s\S]*?)\r?\n```$/.exec(text.trim());
+  return fenced ? fenced[1]! : text;
+}
+
 export class CodexTranscript {
   sessionId: string | null = null;
   finalText: string | null = null;
@@ -341,7 +351,7 @@ export class CodexTranscript {
       return;
     }
     const reconnect = event.type === "error" && typeof event.message === "string"
-      ? /^Reconnecting\.\.\. ([1-9]\d*)\/([1-9]\d*) \(stream disconnected before completion(?:: [^\r\n]+)?\)$/.exec(event.message) : null;
+      ? /^Reconnecting\.\.\. ([1-9]\d*)\/([1-9]\d*) \([^\r\n]+\)$/.exec(event.message) : null;
     if (reconnect && BigInt(reconnect[1]) <= BigInt(reconnect[2])) {
       this.reconnectPending = true;
       this.turnCompleted = false;
@@ -371,7 +381,7 @@ export class CodexTranscript {
     if (this.reconnectPending) throw new Error("Codex 重连后未完成");
     if (!this.sessionId || !this.turnCompleted || !this.finalText?.trim()) throw new Error("缺少 session_id、turn.completed 或最终结果");
     let value: unknown;
-    try { value = JSON.parse(this.finalText); } catch { throw new Error("Codex 最终结果不是有效 JSON"); }
+    try { value = JSON.parse(unwrapJsonFence(this.finalText)); } catch { throw new Error("Codex 最终结果不是有效 JSON"); }
     const result = value as Partial<DeepAgentsWorkerOutput> | null;
     const selfReport = this.protocol === DEEPAGENTS_OUTPUT_PROTOCOL;
     if (!result || typeof result !== "object" || Array.isArray(result)
