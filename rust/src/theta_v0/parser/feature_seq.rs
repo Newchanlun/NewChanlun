@@ -540,6 +540,10 @@ pub struct FeatureSeqState {
     /// 截断不能把它挪出去（尾窗是调度截断，不截断未决阻断）。`reset` 清零，增量层每次 append 新建
     /// 状态机，故不跨段、不跨扫描。
     unresolved_blocked: bool,
+    /// #1978（§7.1 第 1 条）：末标准元素之后已有段方向笔严格越过它的 P。末元素若是峰候选，它已
+    /// `KILLED_BY_NEW_EXTREME`；准入在下一反向笔进序列时按同一事实作废它，本标志让流首段多起点的
+    /// 「出局」判定（§7.1 第 9 条）在该笔当下就看到作废。每次追加与 `reset` 清零。
+    last_beyond: bool,
     /// #1420：S 层的每候选游标簿（K1，跨轮续扫）；`None` = 按 `second_seq_window` 无中断折叠。
     second_store: Option<super::second_fold::SecondFoldStore>,
     facts: Option<FeatureSequenceFacts>,
@@ -575,6 +579,7 @@ impl FeatureSeqState {
             second_seq_window,
             skipped_secondkind: false,
             unresolved_blocked: false,
+            last_beyond: false,
             second_store: None,
             facts: None,
             second: None,
@@ -595,6 +600,7 @@ impl FeatureSeqState {
         self.seg_dir = seg_dir;
         self.skipped_secondkind = false;
         self.unresolved_blocked = false;
+        self.last_beyond = false;
         self.probed_upto = 0;
         self.tail_truncated = false;
         self.second = None;
@@ -663,6 +669,7 @@ impl FeatureSeqState {
     /// v1「先试不合并、以当下有无分型决定合并」已删除（#1487 E1/E2）；Python v1 为历史参考。
     pub fn append(&mut self, stroke_idx: usize, high: Tick, low: Tick, strokes: &[Stroke]) {
         let _ = strokes;
+        self.last_beyond = false;
         let incoming = FeatureElement {
             high,
             low,
@@ -843,6 +850,35 @@ impl FeatureSeqState {
                 });
             }
         }
+    }
+
+    /// #1978：段方向笔进来——准入面记下它是否在末标准元素之后严格越过其 P（`last_beyond`），事实面同
+    /// [`Self::observe_trend_stroke`]。只给流首段多起点的「出局」判定读（§7.1 第 9 条），不改 `scan_trigger`。
+    pub fn note_trend_stroke(&mut self, stroke_idx: usize, high: Tick, low: Tick) {
+        if let Some(b) = self.std.last() {
+            let beyond = match self.seg_dir {
+                Direction::Up => high > b.high,
+                Direction::Down => low < b.low,
+            };
+            self.last_beyond |= stroke_idx > b.stroke_idx && beyond;
+        }
+        self.observe_trend_stroke(stroke_idx, high, low);
+    }
+
+    /// #1978（§7.1 第 9 条「出局」）：最早一个尚未定的候选 b 的笔号。第二种候选未决封段时就是封住处的 b；
+    /// 否则末标准元素若是未被跳过、也未被段方向笔越过 P 的峰候选（第一种情况开窗，或有缺口尚无第三元素），
+    /// 就是它。其余候选都已按序判过：确认即命中，作废与跳过不复活。
+    pub fn undecided_candidate(&self) -> Option<usize> {
+        if self.unresolved_blocked {
+            return self.second.as_ref().map(|s| s.from_stroke - 1);
+        }
+        let n = self.std.len();
+        let b = *self.std.last()?;
+        (n >= 2
+            && is_peak(self.std[n - 2], b, self.seg_dir)
+            && (b.stroke_idx as i64) > self.skip_until_stroke
+            && !self.last_beyond)
+            .then_some(b.stroke_idx)
     }
 
     fn record_step(

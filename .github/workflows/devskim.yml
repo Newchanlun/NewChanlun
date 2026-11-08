@@ -35,9 +35,9 @@ jobs:
           # PR 事件检出 refs/pull/N/merge；深度 2 才能拿到第一父（运行时的 main）做增量判定。
           fetch-depth: 2
 
-      # #1875：DevSkim 规则逐文件匹配，一个文件的结果只取决于它自己的路径与内容。基线提交在 push 上已全量扫描通过、
-      #   且 PR 不改扫描器、本工作流、基线、误报清单与两个门脚本时，只扫 PR 改动的文件，门判定与全量扫描相同：
-      #   未改文件的结果与基线提交逐条一致，而那次已通过同一份基线与误报清单。Belay 实测（2026-11-08）：
+      # #1875：DevSkim 规则逐文件匹配，一个文件的结果只取决于它自己的路径与内容。锚点提交（base 或其最近的已扫祖先）
+      #   在 push 上已全量扫描通过、且锚点..HEAD 不改扫描器、本工作流、基线、误报清单与两个门脚本时，只扫这段改动的文件，
+      #   门判定与全量扫描相同：未改文件的结果与锚点逐条一致，而那次已通过同一份基线与误报清单。Belay 实测（2026-11-08）：
       #   PR #1969 改动文件 5 条结果、全部 628 个有发现的文件加随机 1415 个文件（43478 条结果），子集扫描与全量扫描逐条 JSON 相同。
       #   push、定时任务、任何条件不满足或查询出错，一律全量扫描。
       - name: Choose full or incremental scan
@@ -52,8 +52,20 @@ jobs:
           full() { note "scope=full ($1)"; echo "dir=$GITHUB_WORKSPACE" >> "$GITHUB_OUTPUT"; exit 0; }
           [ "$EVENT" = pull_request ] || full "event $EVENT"
           base=$(git rev-parse HEAD^1 2>/dev/null) || full "no first parent"
+          # 锚点：base 沿第一父往回最近 30 个提交里，最近一个 push 全量扫描已成功的提交。main 合得比全量扫描快
+          #   （扫描 11–23 min），只认 base 本身时多数 PR 找不到已扫基线、退回全量。锚点之后 main 与 PR 改过的
+          #   文件都进入 changed，下面的守卫与软链检查同样作用在锚点..HEAD 上，故判定仍与全量扫描相同。
+          scanned=$(gh api "repos/$GITHUB_REPOSITORY/actions/workflows/devskim.yml/runs?event=push&status=success&branch=main&per_page=30" \
+            --jq '.workflow_runs[] | .head_sha + " " + .html_url') || full "run lookup failed"
+          git fetch -q --no-tags --deepen=30 origin "$base" 2>/dev/null || full "history deepen failed"
+          anchor="" run=""
+          for c in $(git rev-list --first-parent -n 30 "$base"); do
+            run=$(awk -v c="$c" '$1 == c { print $2; exit }' <<< "$scanned")
+            if [ -n "$run" ]; then anchor=$c; break; fi
+          done
+          [ -n "$anchor" ] || full "no successful push scan within 30 first-parent commits of base $base"
           changed="$RUNNER_TEMP/changed"
-          git diff --name-only --no-renames -z "$base" HEAD > "$changed" || full "diff failed"
+          git diff --name-only --no-renames -z "$anchor" HEAD > "$changed" || full "diff failed"
           count=$(tr -cd '\0' < "$changed" | wc -c | tr -d ' ')
           [ "$count" -lt 3000 ] || full "$count changed files"
           # 不用管道：grep -q 提前退出会让上游收到 SIGPIPE，pipefail 下整条判为不匹配。
@@ -80,9 +92,6 @@ jobs:
           print(hits[0] if hits else "")
           ' "$changed"); then full "symlink target lookup failed"; fi
           [ -z "$linked" ] || full "tracked symlink check: $linked"
-          run=$(gh api "repos/$GITHUB_REPOSITORY/actions/workflows/devskim.yml/runs?event=push&status=success&head_sha=$base&per_page=1" \
-            --jq '.workflow_runs[0].html_url // empty') || full "run lookup failed"
-          [ -n "$run" ] || full "no successful push scan of base $base"
           sub="$RUNNER_TEMP/devskim-subset"
           mkdir -p -- "$sub"
           copied=0
@@ -91,7 +100,7 @@ jobs:
             if [ -f "$f" ]; then mkdir -p -- "$sub/$(dirname -- "$f")"; cp -p -- "$f" "$sub/$f"; copied=$((copied + 1)); fi
           done < "$changed"
           [ "$copied" -gt 0 ] || full "no surviving changed file to scan"
-          note "scope=incremental: $copied of $count changed file(s); base $base fully scanned in $run"
+          note "scope=incremental: $copied of $count changed file(s) since anchor $anchor (base $base); anchor fully scanned in $run"
           echo "dir=$sub" >> "$GITHUB_OUTPUT"
 
       - name: Build reproducible DevSkim scanner image
