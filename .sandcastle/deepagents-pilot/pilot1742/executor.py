@@ -70,7 +70,7 @@ from .github_app import (
     AppIdentity,
     GitHubAppClient,
     IdentityError,
-    PrivateKeyError,
+    LocalConfigError,
 )
 from .run import (
     SOURCE_REPO,
@@ -777,7 +777,11 @@ def _client(args: argparse.Namespace) -> GitHubAppClient:
     """登记只要读权限；run 才申请写权限。两者都先核 App、安装与仓库身份。"""
     identity = AppIdentity(5486877, 179444545, 1150335160, REPO, "newchanlun-deepagents-1742", args.private_key)
     client = GitHubAppClient(identity, permissions=WRITE_PERMISSIONS if args.command == "run" else None)
-    client.verify()
+    try:
+        client.verify()
+    except BaseException:
+        client.close()
+        raise
     return client
 
 
@@ -785,7 +789,7 @@ def _serve(args: argparse.Namespace, store: ClaimStore, cutover_store: CutoverSt
     """队列轮询。读不到 GitHub（含启动时的 App 身份核验）：
     `--once` 让 IdentityError 照旧冒到 main → 退出码 2（runbook 拿它当检查步骤）；
     `--loop` 写明哪个源读不到、标到状态页，等一个轮询间隔再从头核身份，进程不退出（launchd 不重启）。
-    本机私钥配置错误（PrivateKeyError）不是读不到源，两种模式都冒到 main → 退出码 2。"""
+    本机配置错误（LocalConfigError，含私钥 PrivateKeyError）不是读不到源，两种模式都冒到 main → 退出码 2。"""
     from .queue import QueueIntake, mark_source_unreadable
 
     def child(unit: WorkUnit) -> int:
@@ -809,8 +813,11 @@ def _serve(args: argparse.Namespace, store: ClaimStore, cutover_store: CutoverSt
                     intake = QueueIntake(args.state_root, RepoGateway(client), store, cutover_store, source_repo)
                 print(json.dumps(intake.once(child), ensure_ascii=False, indent=2), flush=True)
             except IdentityError as error:
-                if args.once or isinstance(error, PrivateKeyError):
+                if args.once or isinstance(error, LocalConfigError):
                     raise
+                if client is not None:
+                    client.close()
+                    client = None
                 print(f"round skipped, source unreadable (github): {type(error).__name__}: {error}",
                       file=sys.stderr, flush=True)
                 mark_source_unreadable(source_repo, f"github: {type(error).__name__}: {error}")

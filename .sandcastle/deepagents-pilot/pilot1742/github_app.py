@@ -44,8 +44,12 @@ class WriteRejected(IdentityError):
     """GitHub 对这一次写请求明确返回 4xx：请求被拒，没有副作用。"""
 
 
-class PrivateKeyError(IdentityError):
-    """本机私钥文件不可读、位置或权限不对、不是可用 RSA 私钥：本机配置错误，不是 GitHub 读不到，重试不会自愈。"""
+class LocalConfigError(IdentityError):
+    """本机配置错误（身份常量、token 权限范围、私钥路径或文件）：不是 GitHub 读不到，重试不会自愈。"""
+
+
+class PrivateKeyError(LocalConfigError):
+    """本机私钥路径不是绝对路径、文件不可读、位置或权限不对、不是可用 RSA 私钥。"""
 
 
 @dataclass(frozen=True)
@@ -73,13 +77,13 @@ class AppIdentity:
     def __post_init__(self) -> None:
         if any(type(value) is not int or value <= 0 for value in
                (self.app_id, self.installation_id, self.repository_id)):
-            raise IdentityError("App、installation 和 repository ID 必须为正整数")
+            raise LocalConfigError("App、installation 和 repository ID 必须为正整数")
         if not re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", self.repository):
-            raise IdentityError("repository 必须是 owner/name")
+            raise LocalConfigError("repository 必须是 owner/name")
         if not re.fullmatch(r"[a-z0-9-]+", self.app_slug):
-            raise IdentityError("App slug 格式不正确")
+            raise LocalConfigError("App slug 格式不正确")
         if not self.private_key_path.is_absolute():
-            raise IdentityError("私钥必须通过绝对文件路径明确指定")
+            raise PrivateKeyError("私钥必须通过绝对文件路径明确指定")
 
 
 def _read_private_key(path: Path) -> bytes:
@@ -106,7 +110,7 @@ class GitHubAppClient:
         grantable = {"read": ("read", "write"), "write": ("write",)}
         if any(INSTALLATION_PERMISSIONS.get(name) not in grantable.get(level, ())
                for name, level in self._permissions.items()):
-            raise IdentityError("请求的 token 权限超出 App 安装权限")
+            raise LocalConfigError("请求的 token 权限超出 App 安装权限")
         tls = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
         tls.minimum_version = ssl.TLSVersion.TLSv1_2
         tls.load_verify_locations(cafile=certifi.where())

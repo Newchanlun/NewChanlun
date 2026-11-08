@@ -179,7 +179,6 @@ class QueueIntake:
             delivery_status,
             load_unit,
         )
-        from .github_app import IdentityError
         from .run import Busy, Halted
         try:
             self.cutover.load()
@@ -270,10 +269,6 @@ class QueueIntake:
                     if state['phase'] in ('awaiting_merge', 'merged', 'stale'):
                         try:
                             state = TicketExecutor(unit, self.gateway, claims=self.claims).reconcile_delivery(run_dir)
-                        except IdentityError as error:
-                            results[ticket] = {'phase': 'awaiting_human', 'run_id': unit.run_id,
-                                               'reason': f'delivery read failed; retry next round: {error}'}
-                            continue
                         except Halted as error:
                             results[ticket] = {'phase': 'halted', 'run_id': unit.run_id, 'reason': str(error)}
                             continue
