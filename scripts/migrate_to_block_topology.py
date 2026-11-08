@@ -348,11 +348,21 @@ def migrate_edges(
     return count
 
 
+class RebuildRefused(RuntimeError):
+    """Full rebuild would overwrite an existing meta.json; pass force=True."""
+
+
 def run_migration(
     project_root: Path | None = None,
     base: Path | None = None,
+    force: bool = False,
 ) -> dict:
-    """Execute full migration.
+    """Execute full migration (destructive: rewrites meta.json).
+
+    Refuses when meta.json already exists unless force=True. Since #1952 most
+    settled genealogy files and dag.yaml are out of the repo, so a rebuild
+    from what is on disk would drop most of id_mapping plus
+    content_enrichment / last_mapped_genealogy. Use --incremental instead.
 
     Returns meta dict with migration results.
     """
@@ -363,6 +373,12 @@ def run_migration(
 
     settled_dir = project_root / ".chanlun" / "genealogy" / "settled"
     dag_path = project_root / ".chanlun" / "genealogy" / "dag.yaml"
+
+    if not force and read_meta(base) is not None:
+        raise RebuildRefused(
+            f"{base / 'meta.json'} already exists; a full rebuild would replace "
+            "its id_mapping and drop content_enrichment. Use --incremental, or "
+            "pass --force to rebuild anyway.")
 
     print(f"[migration] Project root: {project_root}")
     print(f"[migration] Target: {base}")
@@ -650,6 +666,9 @@ if __name__ == "__main__":
         "--dry-run", action="store_true",
         help="With --incremental: print the migration plan (target ids, "
              "549 edge-skip status) without writing anything")
+    parser.add_argument(
+        "--force", action="store_true",
+        help="Allow the destructive full rebuild even when meta.json exists")
     args = parser.parse_args()
 
     if args.incremental:
@@ -661,7 +680,10 @@ if __name__ == "__main__":
             else:
                 print(f"  {k}: {v}")
     else:
-        meta = run_migration()
+        try:
+            meta = run_migration(force=args.force)
+        except RebuildRefused as exc:
+            raise SystemExit(f"[migration] refused: {exc}")
         print(f"\nMigration complete.")
         print(f"  Blocks: {meta['block_count']}")
         print(f"  Relations: {meta['relation_count']}")

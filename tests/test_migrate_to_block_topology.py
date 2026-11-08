@@ -479,3 +479,25 @@ def test_full_migration_without_dag_yaml(mock_project, mock_base):
 
     assert meta["relation_count"] == 0
     assert set(meta["id_mapping"]) == {"001", "002", "003"}
+
+
+def test_full_rebuild_refuses_to_overwrite_existing_meta(mock_project, mock_base):
+    """With meta.json present, full rebuild must not silently drop id_mapping
+    entries or content_enrichment; it needs force=True."""
+    from scripts.block_topology import read_meta, write_meta
+    from scripts.migrate_to_block_topology import RebuildRefused, run_migration
+
+    run_migration(mock_project, mock_base)
+    meta = read_meta(mock_base)
+    meta["id_mapping"]["999"] = "f" * 64  # entry whose settled file is not on disk
+    meta["content_enrichment"] = {"blocks_created": 7}
+    write_meta(meta, mock_base)
+
+    with pytest.raises(RebuildRefused):
+        run_migration(mock_project, mock_base)
+    kept = read_meta(mock_base)
+    assert kept["id_mapping"]["999"] == "f" * 64
+    assert kept["content_enrichment"] == {"blocks_created": 7}
+
+    rebuilt = run_migration(mock_project, mock_base, force=True)
+    assert "999" not in rebuilt["id_mapping"]

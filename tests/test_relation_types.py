@@ -30,6 +30,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
 from extract_relation_types import (
     _normalize_id,
     _to_list,
+    extract_relations,
     deduplicate_relations,
     load_existing_relations,
     load_id_mapping,
@@ -96,6 +97,57 @@ class TestToList:
 
     def test_integer(self):
         assert _to_list(215) == ["215"]
+
+
+# --- extract_relations on a synthetic genealogy dir ---
+# The old tests ran on the real settled/ directory; most of the entries they
+# named left the repo with #1952, so a tmp fixture now pins the mapping.
+
+
+def _settled(dir_: Path, name: str, frontmatter: str) -> None:
+    (dir_ / name).write_text(f"---\n{frontmatter}\n---\n\nbody\n", encoding="utf-8")
+
+
+class TestExtractRelationsFixture:
+    def setup_method(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        d = Path(self._tmp.name)
+        _settled(d, "087-a.md", 'id: "087"\nnegates: ["086号（旧口径）"]')
+        _settled(d, "065-b.md", 'id: "065"\nnegated_by: "068"')
+        _settled(d, "100-c.md",
+                 'id: "100"\nreplaces: [99]\nreopens: ["050"]\nmodifies: ["040"]\namends: "041"')
+        _settled(d, "137-d.md", 'id: "137"\nnegates: [{target: "136", content: "x"}]')
+        (d / "200-e.md").write_text("no frontmatter here\n", encoding="utf-8")
+        (d / "notes.txt").write_text("ignored\n", encoding="utf-8")
+        self.relations = extract_relations(d)
+
+    def teardown_method(self):
+        self._tmp.cleanup()
+
+    def _has(self, frm, to, rel):
+        return any(r["from_num"] == frm and r["to_num"] == to and r["relation"] == rel
+                   for r in self.relations)
+
+    def test_negates_maps_to_supersedes(self):
+        assert self._has("087", "086", "supersedes")
+
+    def test_negated_by_maps_to_reverse_supersedes(self):
+        assert self._has("068", "065", "supersedes")
+
+    def test_replaces_maps_to_supersedes(self):
+        assert self._has("100", "099", "supersedes")
+
+    def test_reopens_and_modifies(self):
+        assert self._has("100", "050", "reopens")
+        assert self._has("100", "040", "modifies")
+        assert self._has("100", "041", "modifies")
+
+    def test_dict_target_form(self):
+        assert self._has("137", "136", "supersedes")
+
+    def test_skips_files_without_frontmatter_or_md_suffix(self):
+        assert {r["source_file"] for r in self.relations} == {
+            "087-a.md", "065-b.md", "100-c.md", "137-d.md"}
 
 
 # --- deduplicate_relations tests ---

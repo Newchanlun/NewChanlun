@@ -2,7 +2,7 @@
   "epoch": 2,
   "session_id": "2026-03-10-2038",
   "status": "retired",
-  "retired_reason": "2026-11-08 #1952 / PR #1955: handoff 机制随早年蜂群退役结束；写入方 topological-computation/handoff_schema.py 无调用方，所引 ceremony_scan / downstream_audit / .chanlun/sessions 已删除。本文件仅作历史记录。",
+  "retired_reason": "2026-11-08 #1952 / PR #1955: handoff 机制随早年蜂群退役结束；写入方 topological-computation/handoff_schema.py 已无调用方并随之删除，所引 ceremony_scan / downstream_audit / .chanlun/sessions 已删除。本文件仅作历史记录。",
   "created_at": "2026-03-10T20:38:04.769070+00:00",
   "completed_at": "",
   "input": {

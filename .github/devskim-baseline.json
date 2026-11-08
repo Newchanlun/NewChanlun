@@ -109,7 +109,7 @@
     "DS162092|scripts/dev.ps1|53",
     "DS162092|scripts/hk_index_cdp_fetch.py|33",
     "DS162092|scripts/ipfs_deploy.py|250",
-    "DS162092|scripts/openclaw_scheduler.py|137",
+    "DS162092|scripts/openclaw_scheduler.py|136",
     "DS162092|scripts/realtime_server.py|237",
     "DS162092|scripts/realtime_server.py|238",
     "DS162092|scripts/start_claude_via_sanitizer.ps1|19",
@@ -52442,10 +52442,10 @@
         "topological-computation/daemon_loop.py",
         "topological-computation/gateway_bridge.py"
       ],
-      "reason": "#1952 退役改了这些文件，行号漂移：按 base 上该键所在行的原文在新文件里逐字找到同一行后换成新行号（旧键随之删除，不再保留），只差行尾续行符的一行（下一行被删）同样认作同一行；行被删的键、指向已删文件的键一并删除。本地没有 DevSkim，未实际扫描；DS162092 命中的本机地址 URL 在 base 上与这些文件的键一一对应，新文件里每个这样的行都有键。自引用键跟随第 860 行原文移到新行。删除的键：DS162092|scripts/start_with_gateway.sh|119、DS162092|scripts/start_with_gateway.sh|145、DS162092|scripts/start_with_gateway.sh|157、DS162092|topological-computation/daemon_loop.py|123、DS162092|topological-computation/gateway_bridge.py|58。",
+      "reason": "#1952 退役改了这些文件，行号漂移：按 base 上该键所在行的原文在新文件里逐字找到同一行后换成新行号（旧键随之删除，不再保留），只差行尾续行符的一行（下一行被删）同样认作同一行；行被删的键、指向已删文件的键一并删除。本地没有 DevSkim，未实际扫描；DS162092 命中的本机地址 URL 在 base 上与这些文件的键一一对应，新文件里每个这样的行都有键。自引用键跟随第 860 行原文移到新行。删除的键（均为 base 行号，所在行已删或文件已删）：DS162092|scripts/start_with_gateway.sh|119、DS162092|scripts/start_with_gateway.sh|145、DS162092|scripts/start_with_gateway.sh|157、DS162092|topological-computation/daemon_loop.py|123、DS162092|topological-computation/gateway_bridge.py|58。注意 start_with_gateway.sh|145 这个键名在新基线里仍然存在，但它是 base 第 152 行漂移过来的新键（见 entries），与被删的 base 第 145 行不是同一行。后续去掉 scripts/openclaw_scheduler.py 中未使用的 import sys 后，该文件的键由 137 再移到 136，行文本不变。",
       "entries": {
         "DS148264|.github/devskim-baseline.json|855": "与 base 键 DS148264|.github/devskim-baseline.json|860 同一行文本，行号漂移，逐行比对内容不变。",
-        "DS162092|scripts/openclaw_scheduler.py|137": "与 base 键 DS162092|scripts/openclaw_scheduler.py|138 同一行文本，行号漂移，逐行比对内容不变。",
+        "DS162092|scripts/openclaw_scheduler.py|136": "与 base 键 DS162092|scripts/openclaw_scheduler.py|138 同一行文本，行号漂移，逐行比对内容不变。",
         "DS162092|scripts/start_with_gateway.sh|113": "与 base 键 DS162092|scripts/start_with_gateway.sh|118 同一行文本，行号漂移，逐行比对内容不变。",
         "DS162092|scripts/start_with_gateway.sh|136": "与 base 键 DS162092|scripts/start_with_gateway.sh|142 同一行文本，行号漂移，逐行比对内容不变。",
         "DS162092|scripts/start_with_gateway.sh|137": "与 base 键 DS162092|scripts/start_with_gateway.sh|143 同一行文本，行号漂移，逐行比对内容不变。",

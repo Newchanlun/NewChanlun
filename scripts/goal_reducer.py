@@ -1,5 +1,20 @@
 """D′ goal reducer：纯函数 (events + facts) → ready workstations projection。
-确定性：同输入同输出（无 IO、无时间、无随机）。这是 RTAS 蜂群递归展开的确定性规则。"""
+确定性：同输入同输出（无 IO、无时间、无随机）。这是 RTAS 蜂群递归展开的确定性规则。
+
+reduce_goal 及其辅助函数保持纯函数；IO 只在文件末尾的命令行入口里
+（load_events / current_goal_state / main）。命令行用法：
+
+    python scripts/goal_reducer.py                      # 读 .chanlun/goals/events.jsonl
+    python scripts/goal_reducer.py --events PATH        # 指定事件文件
+
+输出 reduce_goal 的 JSON 投影（current_goal / ready_workstations / blocked …）。
+退出码：0 = 全部事件行可解析；1 = 有损坏行被跳过（结果里带 skipped_event_lines）；
+2 = 事件文件不存在或没有任何可解析事件。该入口接替了随 #1952 删除的
+scripts/ceremony_scan.py 里的 _load_current_goal。"""
+import json
+import os
+import subprocess
+import sys
 
 def _validate_acceptance(acceptance: list[dict]) -> None:
     """校验每个 acceptance 项必须 falsifiable（lesson 0011 锋利问题②：验收不可证伪则 goal 永动空转）。"""
@@ -270,3 +285,73 @@ def reduce_goal(events: list[dict], facts: dict) -> dict:
         goal["status"] = "blocked"
     return {"current_goal": goal, "ready_workstations": sorted(ready),
             "ready_details": ready_details, "blocked": blocked, "terminated": terminated}
+
+
+# ── 命令行入口（IO 边界；上面的 reducer 仍是纯函数）─────────────────────────────
+DEFAULT_EVENTS = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                              "..", ".chanlun", "goals", "events.jsonl")
+
+
+def load_events(ev_path: str) -> tuple[list[dict], int]:
+    """容错读取 events.jsonl：返回 (可解析事件, 跳过的损坏行数)。
+
+    空行忽略；单行 JSON 损坏写 stderr 并计数，不崩溃。文件不存在时抛 FileNotFoundError。"""
+    events: list[dict] = []
+    skipped = 0
+    with open(ev_path, encoding="utf-8") as f:
+        for lineno, line in enumerate(f, 1):
+            if not line.strip():
+                continue
+            try:
+                events.append(json.loads(line))
+            except ValueError as exc:
+                skipped += 1
+                print(f"[goal_reducer] WARNING: {ev_path} line {lineno} JSON 损坏，跳过: {exc}",
+                      file=sys.stderr)
+    return events, skipped
+
+
+def _git_head(cwd: str) -> str:
+    """当前 git HEAD；不在 git 仓库内时返回空串（base_head_stale 随之为 True）。"""
+    try:
+        proc = subprocess.run(["git", "rev-parse", "HEAD"], capture_output=True,
+                              text=True, cwd=cwd, check=False)
+    except OSError:
+        return ""
+    return proc.stdout.strip() if proc.returncode == 0 else ""
+
+
+def current_goal_state(ev_path: str = DEFAULT_EVENTS, git_head: str | None = None) -> dict | None:
+    """读事件 → reduce_goal 投影。无事件文件或无可解析事件时返回 None。
+
+    git_head 可注入（测试用）；None 时取事件文件所在仓库的 HEAD。"""
+    if not os.path.isfile(ev_path):
+        return None
+    events, skipped = load_events(ev_path)
+    if not events:
+        return None
+    if git_head is None:
+        git_head = _git_head(os.path.dirname(os.path.abspath(ev_path)))
+    facts = {"git_head": git_head, "genealogy_pending": [], "genealogy_settled": [], "roadmap": []}
+    out = reduce_goal(events, facts)
+    if skipped:
+        out["skipped_event_lines"] = skipped
+    return out
+
+
+def main(argv: list[str] | None = None) -> int:
+    import argparse
+    ap = argparse.ArgumentParser(description="读 goal 事件并打印 reduce_goal 投影")
+    ap.add_argument("--events", default=DEFAULT_EVENTS,
+                    help="事件文件路径（默认 .chanlun/goals/events.jsonl）")
+    args = ap.parse_args(argv)
+    state = current_goal_state(args.events)
+    if state is None:
+        print(f"[goal_reducer] ERROR: {args.events} 不存在或没有可解析的事件", file=sys.stderr)
+        return 2
+    print(json.dumps(state, ensure_ascii=False, indent=2))
+    return 1 if state.get("skipped_event_lines") else 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

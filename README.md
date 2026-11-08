@@ -230,21 +230,25 @@ K4 六条边中，背驰方向的分歧率稳定在 22.2%（±2%）。这是结�
 
 ## 项目现状
 
-| 指标 | 数值 |
-|------|------|
-| 源文件 | 162 个 Python 模块 |
-| 测试文件 | 163 个 |
-| 核心定义 | 15 条（已结算） |
-| 已结算谱系 | 在仓 231 条 + 5 条生成态（#1952 后只保留被现役层引用的条目，口径见「谱系」节） |
-| 规则规范 | 16 份（8 蜂群规则 + 8 ECC 通用规则）+ 10 份 spec |
-| Agent 定义 | 21 个 |
-| Hook | 27 个 |
-| Skill | 14 个 |
-| 脚本 | 84 个 |
-| 区块拓扑 | 1194 区块 / 6650 关系 / 1148 概念 |
+2026-11-08（#1952 退役后）按仓内跟踪文件实数：
+
+| 指标 | 数值 | 计数口径 |
+|------|------|----------|
+| 源文件 | 200 个 Python 模块 | `src/newchan/**/*.py` |
+| 测试文件 | 255 个 | `tests/**/test_*.py` |
+| 定义文件 | 19 份 | `.chanlun/definitions/*.md` |
+| 已结算谱系 | 在仓 231 条 + 5 条生成态（#1952 后只保留被现役层引用的条目，口径见「谱系」节） | `.chanlun/genealogy/{settled,pending}/` |
+| spec | 13 份 | `spec/**/*.md` |
+| Agent 定义 | 0 个（仓内不再跟踪 `.claude/agents/`） | `.claude/agents/*.md` |
+| Hook | 1 个 | `.claude/settings.json` 的 hooks 条目 |
+| Skill | 22 个 | `.claude/skills/*/SKILL.md` |
+| 命令 | 7 个 | `.claude/commands/*.md` |
+| 脚本 | 198 个 | `scripts/**/*.{py,sh}`，不含测试 |
+| 区块拓扑 | 1194 区块 / 6650 关系 / 1148 概念 | `.chanlun/block-topology/meta.json`（未随退役重算） |
 
 早年蜂群机制退役（#1952）移除了 dispatch-dag.yaml、谱系 DAG（genealogy/dag.yaml）、
-.chanlun/sessions/ 与纲目（gangmu.yaml），上表不再列这四项。
+.chanlun/sessions/ 与纲目（gangmu.yaml），上表不再列这四项；蜂群规则文件
+（原「8 蜂群规则 + 8 ECC 通用规则」）也已不在仓内。
 
 ### 定义基底
 
