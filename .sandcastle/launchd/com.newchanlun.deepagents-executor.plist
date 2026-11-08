@@ -10,6 +10,8 @@
         <string>serve</string><string>--loop</string>
         <string>--private-key</string><string>__PRIVATE_KEY_PATH__</string>
         <string>--workers-log</string><string>__REPO__/.sandcastle/logs/workers.jsonl</string>
+        <string>--review-sweep</string>
+        <string>--review-sweep-auto-merge</string>
     </array>
     <key>WorkingDirectory</key><string>__REPO__</string>
     <key>KeepAlive</key><true/>

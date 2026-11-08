@@ -10,9 +10,8 @@ from conftest import git
 from pilot1742 import review_sweep as module
 from pilot1742.external_review import ReviewTarget
 from pilot1742.review_sweep import (
-    EvidenceInsufficient,
+    ServeRound,
     Sweep,
-    admission_keys,
     human_gated,
     reviewing,
 )
@@ -21,12 +20,12 @@ lane = _external_review.lane  # 复用真实审查 lane 与 PR 替身
 
 
 class FakeGitHub:
-    """GitHub 端口替身：PR、检查、文件、内容与写操作记录。"""
+    """GitHub 端口替身：PR、检查、文件与写操作记录。"""
     def __init__(self, lane, *, required=("deepagents/review", "ci-ok")):
         self.lane = lane
         self.required = set(required)
         self.extra_pulls = []
-        self.states, self.checks_by_head, self.files, self.contents, self.calls, self.fail = {}, {}, {}, {}, [], {}
+        self.states, self.checks_by_head, self.files, self.calls, self.fail = {}, {}, {}, [], {}
 
     def open_pulls(self):
         return copy.deepcopy([self.lane.gateway.pr, *self.extra_pulls])
@@ -51,12 +50,6 @@ class FakeGitHub:
 
     def pr_files(self, number):
         return copy.deepcopy(self.files.get(number, [{"filename": ".sandcastle/x.py", "status": "modified", "changes": 1}]))
-
-    def file_at(self, ref, path):
-        value = self.contents.get((ref, path))
-        if isinstance(value, Exception):
-            raise value
-        return value
 
     def merge(self, number, head):
         self.calls.append(("merge", number, head))
@@ -291,10 +284,10 @@ def test_moved_head_is_not_merged(lane):
     ("rust/src/economic_session/book.rs", "live-trading-or-funds"),     # 账本
     ("trading_system/config/broker_config.py", "live-trading-or-funds"),  # F3：IBKR/Hyperliquid 实盘配置
     ("analysis/buy_28316_warrant.py", "live-trading-or-funds"),         # F3：TWS 7496 下单脚本
-    (".github/workflows/ci.yml", "ci-or-branch-protection"),
-    ("scripts/devskim_sarif_gate.sh", "ci-or-branch-protection"),       # F3：DevSkim 门本体
-    ("scripts/devskim_reviewed_false_positives.py", "ci-or-branch-protection"),
+    ("trading_system/live/runner.py", "live-trading-or-funds"),
     ("deploy/.env.production", "secrets-or-credentials"),
+    ("keys/newchanlun-app.pem", "secrets-or-credentials"),
+    ("config/credentials.json", "secrets-or-credentials"),
 ])
 def test_human_gated_pr_is_never_merged_and_armed_auto_merge_is_withdrawn(lane, path, category):
     github = FakeGitHub(lane)
@@ -320,10 +313,10 @@ def test_ordinary_code_and_docs_are_not_human_gated(path):
 
 def test_truncated_file_list_falls_back_to_exact_local_diff(lane):
     """F2：接口清单达到 3000 上限或与 changed_files 不符时不放行；用本地精确 diff 看到排在后面的人工确认类文件。"""
-    (lane.source / ".github" / "workflows").mkdir(parents=True)
-    (lane.source / ".github" / "workflows" / "ci.yml").write_text("on: push\n")
+    (lane.source / "trading_system" / "live").mkdir(parents=True)
+    (lane.source / "trading_system" / "live" / "runner.py").write_text("ORDER = 1\n")
     git(lane.source, "add", ".")
-    git(lane.source, "commit", "-qm", "touch ci")
+    git(lane.source, "commit", "-qm", "touch live runner")
     head = git(lane.source, "rev-parse", "HEAD")
     lane.gateway.pr["head"]["sha"] = head
     github = FakeGitHub(lane)
@@ -333,7 +326,7 @@ def test_truncated_file_list_falls_back_to_exact_local_diff(lane):
     green(github, head)
     sweep, _, _ = make(lane, github=github, auto_merge=True)
     result = next(a for a in sweep.tick() if a.get("pr") == 1810 and a["action"] == "needs-human-confirm")
-    assert ".github/workflows/ci.yml" in result["gated"]["ci-or-branch-protection"]
+    assert "trading_system/live/runner.py" in result["gated"]["live-trading-or-funds"]
     assert not [c for c in github.calls if c[0] == "merge"]
 
 
@@ -346,63 +339,6 @@ def test_incomplete_file_list_without_local_objects_is_evidence_insufficient(lan
     result = next(a for a in sweep.tick() if a["action"] == "evidence-insufficient")
     assert "文件清单不全" in result["reason"]
     assert github.calls == [("disable", 1810)]  # 不合入；挂着的 auto-merge 撤掉；不升级成人工确认
-
-
-def _baseline(keys):
-    return json.dumps({"schema": "devskim-baseline/v1", "findings": keys})
-
-
-@pytest.mark.parametrize(("base_keys", "head_keys", "gated"), [
-    (["A|x|1", "B|y|2"], ["A|x|1"], False),        # 只删条目（文件出仓）：不放宽
-    (["A|x|1"], ["A|x|1", "C|z|3"], True),         # 新增被放行的发现：放宽，须确认
-    (["A|x|139"], ["A|x|138"], False),             # 同一发现行号迁移：不放宽
-    (["A|x|1"], ["A|x|1", "A|x|9"], True),         # 同一文件同一规则多放行一条：放宽
-])
-def test_devskim_baseline_is_gated_only_when_admission_widens(lane, base_keys, head_keys, gated):
-    github = FakeGitHub(lane)
-    head, base = lane.gateway.pr["head"]["sha"], lane.gateway.pr["base"]["sha"]
-    path = ".github/devskim-baseline.json"
-    github.files[1810] = [{"filename": path, "status": "modified", "changes": 1}]
-    github.contents = {(head, path): _baseline(head_keys), (base, path): _baseline(base_keys)}
-    green(github, head)
-    sweep, _, _ = make(lane, github=github, auto_merge=True)
-    actions = acts(sweep.tick())
-    assert ("needs-human-confirm" in actions) == gated and ("merged" in actions) == (not gated)
-
-
-@pytest.mark.parametrize(("status", "changes", "gated"), [("renamed", 0, False), ("renamed", 3, True)])
-def test_baseline_identity_follows_only_provably_equivalent_renames(lane, status, changes, gated):
-    """F7：内容完全相同的纯改名，基线条目跟随新路径、不算放宽；改名且改了内容的照常算新增。"""
-    github = FakeGitHub(lane)
-    head, base = lane.gateway.pr["head"]["sha"], lane.gateway.pr["base"]["sha"]
-    path = ".github/devskim-baseline.json"
-    github.states[1810] = {"changed_files": 2}
-    github.files[1810] = [{"filename": path, "status": "modified", "changes": 1},
-                          {"filename": "new/a.py", "previous_filename": "old/a.py", "status": status, "changes": changes}]
-    github.contents = {(head, path): _baseline(["DS1|new/a.py|5"]), (base, path): _baseline(["DS1|old/a.py|5"])}
-    green(github, head)
-    sweep, _, _ = make(lane, github=github, auto_merge=True)
-    assert ("needs-human-confirm" in acts(sweep.tick())) == gated
-
-
-@pytest.mark.parametrize("failure", ["read-error", "malformed"])
-def test_unreadable_or_malformed_admission_files_never_merge(lane, failure):
-    """F2b：读取失败（非 404）是证据不足，不当作文件不存在；内容读不懂按放宽交人工确认。"""
-    github = FakeGitHub(lane)
-    head, base = lane.gateway.pr["head"]["sha"], lane.gateway.pr["base"]["sha"]
-    path = ".github/devskim-reviewed-1488.json"
-    github.files[1810] = [{"filename": path, "status": "modified", "changes": 1}]
-    github.contents = {(base, path): json.dumps({"files": []}),
-                       (head, path): EvidenceInsufficient("HTTP 502") if failure == "read-error" else '{"schema": 1}'}
-    green(github, head)
-    sweep, _, _ = make(lane, github=github, auto_merge=True)
-    expected = "evidence-insufficient" if failure == "read-error" else "needs-human-confirm"
-    assert expected in acts(sweep.tick())
-    assert not [c for c in github.calls if c[0] == "merge"]
-
-
-def test_404_admission_file_is_absent():
-    assert admission_keys(".github/devskim-baseline.json", None) == {}
 
 
 def test_one_prs_failure_does_not_stop_others(lane):
@@ -562,3 +498,277 @@ def test_loop_interval_must_respect_api_rate_limit(loop):
                                   "keys/AuthKey_ABC.p8"])
 def test_more_credential_files_are_human_gated(path):
     assert human_gated([path]) == {"secrets-or-credentials": [path]}
+
+
+# ---- 人工确认只剩两类（用户 2026-11-07、11-08 裁定：CI 与分支保护配置不再要人工确认） ----
+
+CI_ONLY = [".github/workflows/ci.yml", ".github/workflows/devskim.yml", ".github/actions/setup/action.yml",
+           ".github/scripts/ci_plan.py", ".github/devskim-baseline.json", ".github/devskim-reviewed-1488.json",
+           ".github/ci-manifest.txt", "scripts/devskim_sarif_gate.sh", "scripts/devskim_reviewed_false_positives.py"]
+
+
+@pytest.mark.parametrize("path", CI_ONLY)
+def test_ci_only_pr_auto_merges(lane, path):
+    """负控（在 #1939 的 main 上失败：那里这些路径报 needs-human-confirm）：只改 CI 或 DevSkim 配置的 PR，
+    精确 head 双门全绿时和普通代码一样带 sha 合入，不撤 auto-merge，不交人工确认。"""
+    github = FakeGitHub(lane)
+    head = lane.gateway.pr["head"]["sha"]
+    github.files[1810] = [{"filename": path, "status": "modified", "changes": 3}]
+    green(github, head)
+    sweep, _, _ = make(lane, github=github, auto_merge=True)
+    actions = acts(sweep.tick())
+    assert "needs-human-confirm" not in actions and "merged" in actions
+    assert github.calls == [("merge", 1810, head)]
+    assert human_gated([path]) == {}
+
+
+def test_ci_change_next_to_live_funds_or_credentials_still_blocks(lane):
+    """CI 不再拦，但同一 PR 里夹带的另两类照样拦，且只列这两类。"""
+    github = FakeGitHub(lane)
+    github.states[1810] = {"changed_files": 3, "auto_merge": True}
+    github.files[1810] = [{"filename": p, "status": "modified", "changes": 1}
+                          for p in (".github/workflows/ci.yml", "rust/src/trading/order.rs", "deploy/.env")]
+    green(github, lane.gateway.pr["head"]["sha"])
+    sweep, _, _ = make(lane, github=github, auto_merge=True)
+    result = next(a for a in sweep.tick() if a["action"] == "needs-human-confirm")
+    assert result["gated"] == {"live-trading-or-funds": ["rust/src/trading/order.rs"],
+                               "secrets-or-credentials": ["deploy/.env"]}
+    assert github.calls == [("disable", 1810)]
+
+
+def test_only_two_categories_remain():
+    assert set(module.HUMAN_GATED) == {"live-trading-or-funds", "secrets-or-credentials"}
+
+
+# ---- 只给队首追平（CI 节流） ----
+
+def _more_pulls(lane, github, numbers):
+    """同仓的其他 PR，各有自己的 head（f"{号码:040d}"），检查结论互不串。"""
+    for number in numbers:
+        other = copy.deepcopy(lane.gateway.pr)
+        other["number"] = number
+        other["head"]["sha"] = f"{number:040d}"
+        github.extra_pulls.append(other)
+
+
+def updates(github):
+    return [c for c in github.calls if c[0] == "update"]
+
+
+def test_only_queue_head_is_caught_up(lane):
+    """三个落后的 PR：只追平号码最小的那个；队首追平后在等 CI（不落后）时，后面的仍不追平。"""
+    github = FakeGitHub(lane)
+    _more_pulls(lane, github, [1811, 1812])
+    head = lane.gateway.pr["head"]["sha"]
+    for number in (1810, 1811, 1812):
+        github.states[number] = {"mergeable_state": "behind"}
+    sweep, _, _ = make(lane, run=False, github=github, auto_merge=True)
+    actions = sweep.tick()
+    assert updates(github) == [("update", 1810, head)]
+    assert acts(actions, 1811)[-1] == "behind-waiting" and acts(actions, 1812)[-1] == "behind-waiting"
+    github.calls.clear()
+    github.states[1810] = {"mergeable_state": "blocked"}  # 队首已追平，CI 在跑
+    actions = sweep.tick()
+    assert updates(github) == []
+    assert next(a for a in actions if a.get("pr") == 1810 and a["action"] == "waiting")["queue_head"] is True
+
+
+@pytest.mark.parametrize("stuck", ["review-failure", "dirty", "ci-failure", "needs-operator"])
+def test_stuck_pr_does_not_hold_the_queue_head(lane, stuck):
+    """队首卡住（独审已判失败、冲突、不落后却 CI 失败、审查要操作员处理）时，下一个落后的 PR 接替队首被追平。"""
+    github = FakeGitHub(lane)
+    _more_pulls(lane, github, [1811])
+    head = lane.gateway.pr["head"]["sha"]
+    github.states[1811] = {"mergeable_state": "behind"}
+    github.states[1810] = {"mergeable_state": {"review-failure": "behind", "dirty": "dirty"}.get(stuck, "blocked")}
+    if stuck == "review-failure":
+        github.checks_by_head[head] = {"deepagents/review": "failure"}
+    elif stuck == "ci-failure":
+        github.checks_by_head[head] = {"ci-ok": "failure"}
+    sweep, _, _ = make(lane, run=False, github=github, auto_merge=True)
+    if stuck == "needs-operator":
+        sweep.decide = lambda pr, *rest: (("needs-operator", None) if pr["number"] == 1810
+                                          else ("behind-awaiting-update", None))
+    sweep.tick()
+    assert updates(github) == [("update", 1811, f"{1811:040d}")]
+
+
+def test_never_merges_without_both_required_checks_green_on_exact_head(lane):
+    github = FakeGitHub(lane)
+    head = lane.gateway.pr["head"]["sha"]
+    sweep, _, _ = make(lane, github=github, auto_merge=True)
+    for missing in ({"ci-ok": "pending"}, {"ci-ok": None}, {"deepagents/review": "pending"},
+                    {"deepagents/review": None}):
+        green(github, head, **missing)
+        github.checks_by_head[head] = {k: v for k, v in github.checks_by_head[head].items() if v is not None}
+        assert "merged" not in acts(sweep.tick())
+    del github.checks_by_head[head]
+    green(github, "9" * 40)  # 别的 head 全绿不算
+    assert "merged" not in acts(sweep.tick()) and github.calls == []
+
+
+# ---- executor serve 每轮钩子 ----
+
+class Clock:
+    def __init__(self):
+        self.now = 1_000_000.0
+
+    def __call__(self):
+        return self.now
+
+
+def _counting(sweep):
+    ticks = []
+    original = sweep.tick
+    def tick():
+        ticks.append(1)
+        return original()
+    sweep.tick = tick
+    return ticks
+
+
+def test_serve_round_runs_one_sweep_per_round_and_logs_one_line_per_action(lane, capsys):
+    clock = Clock()
+    github = FakeGitHub(lane)
+    green(github, lane.gateway.pr["head"]["sha"])
+    sweep, _, _ = make(lane, github=github, auto_merge=True)
+    ticks = _counting(sweep)
+    hook = ServeRound(sweep, clock=clock)
+    logged = []
+    for _ in range(3):
+        actions = hook()
+        assert actions is not None
+        logged += [a for a in actions if a["action"] not in module.QUIET]
+        clock.now += module.MIN_LOOP_SECONDS
+    assert len(ticks) == 3
+    lines = capsys.readouterr().out.splitlines()
+    assert [json.loads(line.removeprefix("review-sweep ")) for line in lines] == logged
+    assert all(line.startswith("review-sweep {") for line in lines) and "merged" in [a["action"] for a in logged]
+
+
+def test_serve_round_respects_interval_across_restarts(lane):
+    """serve 每 60 秒一轮、launchd 还会重启进程：两次 sweep 至少相隔 MIN_LOOP_SECONDS，时间记在磁盘上。"""
+    clock = Clock()
+    sweep, _, _ = make(lane, run=False)
+    ticks = _counting(sweep)
+    assert ServeRound(sweep, clock=clock)() is not None
+    clock.now += 60
+    assert ServeRound(sweep, clock=clock)() is None   # 新进程、同一状态目录：未到间隔，不跑
+    clock.now += module.MIN_LOOP_SECONDS
+    assert ServeRound(sweep, clock=clock)() is not None
+    assert len(ticks) == 2
+
+
+@pytest.mark.parametrize(("broken", "source"), [("open_pulls", "github open pulls"),
+                                                 ("rows", "host process table")])
+def test_serve_round_survives_unreadable_source_and_names_it(lane, capsys, broken, source):
+    import subprocess
+    clock = Clock()
+    github = FakeGitHub(lane)
+    sweep, host, _ = make(lane, github=github, auto_merge=True)
+    healthy = getattr(github if broken == "open_pulls" else sweep, broken)
+    def boom():
+        raise subprocess.CalledProcessError(1, ["gh", "api"], stderr="HTTP 502")
+    setattr(github if broken == "open_pulls" else sweep, broken, boom)
+    hook = ServeRound(sweep, clock=clock)
+    assert hook() is None                              # 不抛出：serve 循环照常
+    line = json.loads(capsys.readouterr().out.strip().removeprefix("review-sweep "))
+    assert line["action"] == "round-skipped" and line["unreadable"] == source
+    assert host.spawned == [] and github.calls == []   # 读不到就什么都不做
+    setattr(github if broken == "open_pulls" else sweep, broken, healthy)
+    clock.now += module.MIN_LOOP_SECONDS
+    assert hook() is not None and host.spawned        # 源恢复后下一轮照常派审
+
+
+def test_serve_round_hook_is_single_flight_with_sync(tmp_path):
+    """serve 的钩子：HOST 同时只跑一个审查（reviewing 也认操作员手动起的 review-pr），并注入补对象的 sync。"""
+    hook = module.serve_round(tmp_path / "k.pem", auto_merge=True)
+    assert hook.sweep.max_running == 1 and hook.sweep.auto_merge is True and hook.sweep.sync is not None
+    assert module.serve_round(tmp_path / "k.pem", auto_merge=False).sweep.auto_merge is False
+
+
+def test_manual_review_pr_on_host_holds_the_single_flight(lane):
+    github = FakeGitHub(lane)
+    _more_pulls(lane, github, [1811])
+    sweep, host, _ = make(lane, run=False, github=github, max_running=1)
+    host.rows.append((7, 7, "S", "python -m pilot1742.external_review review-pr --pr 1999 --attempt 1 --private-key x"))
+    actions = sweep.tick()
+    assert acts(actions, 1810) == ["queued"] and acts(actions, 1811) == ["queued"] and host.spawned == []
+
+
+def test_fetcher_fills_objects_without_touching_refs(lane, tmp_path):
+    """sync 把 main 与 PR head 取进对象库，只写 FETCH_HEAD，不建分支、不动 HEAD。"""
+    base, head = lane.gateway.pr["base"]["sha"], lane.gateway.pr["head"]["sha"]
+    upstream, fresh = tmp_path / "upstream.git", tmp_path / "host"
+    git(tmp_path, "init", "-q", "--bare", str(upstream))
+    git(lane.source, "push", "-q", str(upstream), f"{base}:refs/heads/main", f"{head}:refs/pull/1810/head")
+    git(tmp_path, "init", "-q", str(fresh))
+    module.fetcher(fresh, str(upstream))(1810, base, head)
+    for sha in (base, head):
+        git(fresh, "cat-file", "-e", f"{sha}^{{commit}}")
+    assert git(fresh, "for-each-ref") == ""
+
+
+class _StopServe(Exception):
+    pass
+
+
+def _fake_serve(monkeypatch, tmp_path, *, rounds):
+    from contextlib import nullcontext
+    from types import SimpleNamespace
+
+    from pilot1742 import executor as cli
+    from pilot1742 import queue as queue_module
+
+    class Cutover:
+        def __init__(self, *args, **kwargs):
+            self.drain_root = tmp_path
+        def load(self):
+            return None
+
+    class Intake:
+        def __init__(self, *args, **kwargs):
+            pass
+        def once(self, child):
+            rounds.append("intake")
+            return {}
+
+    client = SimpleNamespace(identity=SimpleNamespace(repository="Newchanlun/NewChanlun"), bot_login="bot[bot]")
+    monkeypatch.setattr(cli, "CutoverStore", Cutover)
+    monkeypatch.setattr(cli, "_client", lambda args: nullcontext(client))
+    monkeypatch.setattr(queue_module, "QueueIntake", Intake)
+    def sleep(seconds):
+        if rounds.count("intake") >= 3:
+            raise _StopServe
+    monkeypatch.setattr(cli.time, "sleep", sleep)
+    return cli, ["--state-root", str(tmp_path / "state"), "serve", "--loop", "--private-key", str(tmp_path / "k.pem")]
+
+
+def test_executor_serve_runs_one_sweep_round_per_serve_round(monkeypatch, tmp_path):
+    rounds, built = [], []
+    cli, argv = _fake_serve(monkeypatch, tmp_path, rounds=rounds)
+    monkeypatch.setattr(module, "serve_round",
+                        lambda key, auto_merge: built.append((key, auto_merge)) or (lambda: rounds.append("sweep")))
+    with pytest.raises(_StopServe):
+        cli.main(argv + ["--review-sweep", "--review-sweep-auto-merge"])
+    assert rounds == ["sweep", "intake"] * 3                      # 每轮一次，排在派票前
+    assert built == [(tmp_path / "k.pem", True)]
+
+
+def test_executor_serve_without_flag_has_no_sweep_and_auto_merge_needs_sweep(monkeypatch, tmp_path):
+    rounds = []
+    cli, argv = _fake_serve(monkeypatch, tmp_path, rounds=rounds)
+    monkeypatch.setattr(module, "serve_round", lambda *a, **k: pytest.fail("sweep wired without --review-sweep"))
+    with pytest.raises(_StopServe):
+        cli.main(argv)
+    assert rounds == ["intake"] * 3
+    assert cli.main(argv + ["--review-sweep-auto-merge"]) == 2
+
+
+def test_deployed_executor_plist_turns_sweep_and_auto_merge_on():
+    import plistlib
+    from pathlib import Path
+    plist = Path(module.__file__).resolve().parents[2] / "launchd" / "com.newchanlun.deepagents-executor.plist"
+    args = plistlib.loads(plist.read_bytes())["ProgramArguments"]
+    assert args[args.index("serve"):args.index("serve") + 2] == ["serve", "--loop"]
+    assert "--review-sweep" in args and "--review-sweep-auto-merge" in args

@@ -807,6 +807,10 @@ def main(argv: list[str] | None = None) -> int:
     serve.add_argument("--poll-seconds", type=float, default=60)
     serve.add_argument("--workers-log", type=Path, default=WORKERS_LOG)
     serve.add_argument("--private-key", type=Path, required=True)
+    serve.add_argument("--review-sweep", action="store_true",
+                       help="每轮附带一次 review_sweep：给开放 PR 派正式审查（宿主 gh 凭据，HOST 同时只跑一个审查）")
+    serve.add_argument("--review-sweep-auto-merge", action="store_true",
+                       help="review_sweep 追平队首，并在精确 head 双门全绿时带 sha 合入；须与 --review-sweep 同用")
     cutover = sub.add_parser("cutover", help="全局冻结排空证据；不执行生产切换")
     cutover.add_argument("operation", choices=("snapshot", "pending", "audit-release", "verify", "record"))
     cutover.add_argument("--snapshot", type=Path)
@@ -854,6 +858,8 @@ def main(argv: list[str] | None = None) -> int:
         if args.command == "serve":
             if args.poll_seconds <= 0:
                 raise ValueError("poll-seconds 须为正数")
+            if args.review_sweep_auto_merge and not args.review_sweep:
+                raise ValueError("--review-sweep-auto-merge 须与 --review-sweep 同用")
             try:
                 cutover_store.load()
             except CutoverError as error:
@@ -909,12 +915,18 @@ def main(argv: list[str] | None = None) -> int:
                                "--workers-log", str(args.workers_log), "--private-key", str(args.private_key),
                                "--recheck-approval"]
                     return subprocess.run(command, check=False).returncode
+                sweep_round = None
+                if args.review_sweep:
+                    from .review_sweep import serve_round
+                    sweep_round = serve_round(args.private_key, auto_merge=args.review_sweep_auto_merge)
                 while True:
                     try:
                         cutover_store.load()
                     except CutoverError as error:
                         print(f"queue inactive: {error}")
                         return 0
+                    if sweep_round is not None:  # 排在派票前：本轮派票子进程再久、再失败，sweep 也已跑过
+                        sweep_round()
                     print(json.dumps(intake.once(child), ensure_ascii=False, indent=2), flush=True)
                     if args.once:
                         return 0

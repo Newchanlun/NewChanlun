@@ -171,6 +171,8 @@ executor serve --once --workers-log "$PWD/.sandcastle/logs/workers.jsonl" --priv
 executor serve --loop --poll-seconds 60 --workers-log "$PWD/.sandcastle/logs/workers.jsonl" --private-key "$PEM"
 ```
 
+`serve --review-sweep` 在每轮派票之前附带跑一次 `pilot1742.review_sweep`（两轮至少相隔 180 秒，时间记在审查状态根的 `sweep/serve-round.last`）：给指向 main 的开放 PR 派正式审查，HOST 同时只跑一个审查，操作员手动起的 `external_review review-pr` 也算在内；base、head 不在本机对象库时只 fetch 到 `FETCH_HEAD`，不动 HEAD 与工作区。再加 `--review-sweep-auto-merge` 时，它只给队首追平，并在精确 head 的 `deepagents/review`、`ci-ok`、`DevSkim` 全绿且 main 的必需检查含前两项时带 `sha=<head>` 合入；触及实盘下单或资金、密钥或凭证的 PR 不合入。每个动作写一行 `review-sweep {…}` 到 serve 的标准输出；GitHub 读不到时写一行 `round-skipped` 并注明读不到的源，serve 不退出。sweep 用宿主 `gh` 登录，不用 App 私钥（私钥路径只转交审查子进程）。规则全文见 `pilot1742/review_sweep.py` 模块说明。部署模板两个开关都开着；关自动合入就删掉已安装 plist 里的 `--review-sweep-auto-merge`，再 `launchctl bootout gui/$UID/com.newchanlun.deepagents-executor` 与 `launchctl bootstrap gui/$UID ~/Library/LaunchAgents/com.newchanlun.deepagents-executor.plist` 重新加载（`kickstart -k` 不重读 plist）；连审查一起关就把 `--review-sweep` 也删掉。派票子进程同步运行，票在跑时 sweep 等这一轮结束。
+
 `serve` 沿用旧 claim-loop 单票在飞的上限。票级 ClaimStore 和全局 serve 锁防止两个控制进程重复持有。返回 75 或被 SIGKILL 的子进程在下一轮恢复同一 run 和代次；返回 0 或 2 也不代表工蜂结束。队列在派下一票前只读原 run 的工蜂事实，也枚举没有 intent 的 Boat 绑定。`Running`、`EffectUnknown` 或无法读取的工蜂状态继续占槽，包括已中断、halted、released 或已摘队列标签的票；已满足 [失败排空条件](BOAT.md#取消后释放队列槽或换代) 的绑定可释放槽位。队列的检查不访问 Boat，不收集或重派工蜂；原控制入口负责恢复和收集。完成的 run 不重新派工，发布沿用逐效果 Journal 的读回去重。
 
 旧 claim 已 `released` 且工蜂已排空时，仍在队列内的票登记或收养下一个 run；旧 run 的终态不阻止新 run 进入票级锁内的排空核验和换代。新 run 仍须取得绑定新 run 与代次的 SPEC 签批，之后才增加持有代次。未排空的旧 run 继续占槽，不登记下一代。
