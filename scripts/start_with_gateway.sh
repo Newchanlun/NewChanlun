@@ -99,8 +99,8 @@ for i in $(seq 1 30); do
 done
 
 # CC Daemon Loop webhook（体系路由）已随早年蜂群机制退役（#1952）移除：
-# topological-computation/daemon_loop.py 已删除，不再启动，Gateway Bridge
-# 不再传 --daemon-webhook-url。
+# topological-computation/daemon_loop.py 已删除，不再启动；Gateway Bridge
+# 对体系命令直接回复已退役，不再转发。
 
 # ---------------------------------------------------------------------------
 # 启动 Gateway Bridge
@@ -136,7 +136,6 @@ echo "=== 组件状态 ==="
 echo "  逢亮 daemon:       http://localhost:8080/status"
 echo "  逢亮 WebSocket:    ws://localhost:8765/ws"
 echo "  Gateway Bridge:    http://localhost:8081/bridge/health"
-echo "  CC Daemon webhook: http://localhost:9800/webhook/"
 if [ "${1:-}" = "--openclaw" ]; then
     echo "  OpenClaw gateway:  http://localhost:18789"
 fi
@@ -146,11 +145,6 @@ echo "  # 给逢亮发消息（→ 穿越引擎 /present）"
 echo "  curl -X POST http://localhost:8081/bridge \\"
 echo "    -H 'Content-Type: application/json' \\"
 echo "    -d '{\"text\": \"你好逢亮\", \"sender\": \"test\"}'"
-echo ""
-echo "  # 给体系发命令（→ CC daemon webhook）"
-echo "  curl -X POST http://localhost:8081/bridge \\"
-echo "    -H 'Content-Type: application/json' \\"
-echo "    -d '{\"text\": \"/ceremony\", \"sender\": \"operator\"}'"
 echo ""
 echo "  # 查看逢亮穿越状态"
 echo "  curl http://localhost:8081/bridge/status"
