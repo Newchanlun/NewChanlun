@@ -393,22 +393,26 @@ jobs:
   #   下方 macos-session 作业一并执行；push main 由该文件自身的 paths 过滤触发）。
   # #1588：按测试名分片。全集每片现场 `--list` 动态生成（不维护静态清单），按
   #   .github/scripts/s-session-test-weights.tsv 的实测耗时做 LPT 分配；权重只管均衡、不管覆盖，
-  #   表外新测试取中位数权重照常入片。改片数须同时改 matrix.shard 与 S_SESSION_SHARDS。
+  #   表外新测试取中位数权重照常入片。改片数须同时改 matrix.shard 与本作业及 coverage 作业的 S_SESSION_SHARDS。
+  # #1875：Boat 上分 2 片、托管机分 4 片（两者用与 runs-on 相同的判断式）。最慢一片都由单条 tb02c 决定
+  #   （Boat 9950X 约 258 s、托管约 553 s），同片其余测试摊在另外 3 个线程上；按实测权重 LPT，2 片为 [1086, 1086]、
+  #   4 片为 [841, 444, 444, 444]（Belay 串行秒），最长片仍是 tb02c 那条。Boat 每轮因此少起 2 台机器
+  #   （每小时 210 次启动上限下，一轮 CI 约 19 次）。
   rust-test-s-session:
     needs: changes
     if: needs.changes.outputs.rust == 'true'
     name: rust-test-s-session (shard ${{ matrix.shard }})
     runs-on: ${{ (vars.CI_BOAT_RUNNERS != 'off' && github.actor == 'xy7365527-lang' && github.triggering_actor == 'xy7365527-lang' && (github.event_name != 'pull_request' || github.event.pull_request.user.login == 'xy7365527-lang')) && 'boat-large/from=hc-ci-slim' || 'ubuntu-latest' }}
-    # 最慢那片只含 tb02w 一条长测试：独占 runner 实测 31 分钟（EPYC 9V45）到 67 分钟（EPYC 7763，已见最慢机型），含编译。
-    # 上限只作挂死保护，按最慢机型读数留约 40% 余量（「有余量」看实测时长，不看本值）。
+    # 最慢那片由单条 tb02c 决定（#1976 之后 tb02w 已降到约 150–270 s）：Boat 9950X 约 258 s、托管 7763 约 553 s，
+    #   作业整体 7–15 分钟。上限只作挂死保护（「有余量」看实测时长，不看本值）。
     timeout-minutes: 110
     strategy:
       fail-fast: false
       matrix:
-        shard: [0, 1, 2, 3]
+        shard: ${{ fromJSON((vars.CI_BOAT_RUNNERS != 'off' && github.actor == 'xy7365527-lang' && github.triggering_actor == 'xy7365527-lang' && (github.event_name != 'pull_request' || github.event.pull_request.user.login == 'xy7365527-lang')) && '[0, 1]' || '[0, 1, 2, 3]') }}
     env:
       CARGO_INCREMENTAL: "0"
-      S_SESSION_SHARDS: "4"
+      S_SESSION_SHARDS: ${{ (vars.CI_BOAT_RUNNERS != 'off' && github.actor == 'xy7365527-lang' && github.triggering_actor == 'xy7365527-lang' && (github.event_name != 'pull_request' || github.event.pull_request.user.login == 'xy7365527-lang')) && '2' || '4' }}
       CI_OWN_OPT_LEVEL1: "1"
     defaults:
       run:
@@ -448,7 +452,8 @@ jobs:
     if: ${{ !cancelled() && needs.changes.outputs.rust == 'true' }}
     timeout-minutes: 10
     env:
-      S_SESSION_SHARDS: "4"
+      # 与 rust-test-s-session 同一判断式：分片作业在 Boat 上是 2 片，托管机上是 4 片。
+      S_SESSION_SHARDS: ${{ (vars.CI_BOAT_RUNNERS != 'off' && github.actor == 'xy7365527-lang' && github.triggering_actor == 'xy7365527-lang' && (github.event_name != 'pull_request' || github.event.pull_request.user.login == 'xy7365527-lang')) && '2' || '4' }}
 
     steps:
       - uses: actions/checkout@v4
