@@ -8,7 +8,7 @@ patch_id 是 merge_base..head 每个改动路径的（路径、前后 mode、前
 即补丁内容逐字相同时才相等。不用 `git patch-id`：它忽略空白，缩进改动会被误判为同一补丁。
 main 前进而 PR 改动的文件在 main 侧未变时 patch_id 不变；冲突解决或 main 也改了同一文件时会变，必须重审。
 残余风险：同一补丁在新 base 上语义可能不同（例如 main 改了被调用方）。重审时模型会读新 base 上的相关源码，
-沿用时不读。CI 会在新 head 上重跑，但 CI 不是 main 的必需检查，失败不拦合入；要靠 CI 兜住这一点，需把 CI 设为必需检查。
+沿用时不读。CI 会在新 head 上重跑；汇总门 ci-ok 是 main 的必需检查（#1742 裁定），CI 失败会拦住合入。
 """
 from __future__ import annotations
 

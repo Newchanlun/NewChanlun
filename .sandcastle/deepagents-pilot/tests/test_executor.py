@@ -11,7 +11,7 @@ from langgraph.checkpoint.sqlite import SqliteSaver
 from test_agent import call, scripted
 from v2env import DEMO, TICKET, V2_TASK, SimulatedCrash, V2Env, crash_at
 
-from pilot1742.agent import build_agent
+from pilot1742.agent import build_agent, build_tools, system_prompt
 from pilot1742.approval import SpecAuthorization
 from pilot1742.claims import ClaimRefused, ClaimStore, Fenced
 from pilot1742.delivery import EffectPending
@@ -232,6 +232,20 @@ def test_happy_path_publishes_exact_head_and_replay_adds_nothing(v2):
     v2.github.merge_pull(pr["number"])
     assert run.publish_candidate()["phase"] == "merged" and v2.writes() == before
     assert run.status()["phase"] == "merged"
+
+
+def test_agent_prompt_and_pr_body_state_the_same_merge_gate(v2):
+    # #1984 独审：agent 提示改为必需检查把关后，执行器写的 PR 正文仍写「合入 main 由人决定」，同一 run 自相矛盾。
+    # 口径以 #1742 裁定为准：合入 main 由必需检查 deepagents/review 与 ci-ok 把关，不等人批。
+    run = v2.run(v2.register())
+    v2.to_pass(run)
+    run.publish_candidate()
+    (pr,) = v2.github.pulls.values()
+    publish = next(t for t in build_tools(run) if t.name == "publish_candidate")
+    surfaces = {"pr_body": pr["body"], "tool": publish.description, "system_prompt": system_prompt(run)}
+    for name, text in surfaces.items():
+        assert "deepagents/review" in text and "ci-ok" in text, name
+        assert "由人决定" not in text and "人闸" not in text, name
 
 
 def test_pull_request_closed_after_delivery_halts_on_replay(v2):

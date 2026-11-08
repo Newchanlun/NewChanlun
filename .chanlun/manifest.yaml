@@ -13,12 +13,6 @@ skills:
     crystallized_from: "scan-state-unobservable"
     gemini_decide: "A（独立新建），CONFIDENCE: HIGH，2026-06-23"
 
-  - name: build-fix
-    type: command
-    file: .claude/commands/build-fix.md
-    description: "Incrementally fix build and type errors with minimal, safe changes"
-    status: active
-
   - name: ceremony
     type: command
     file: .claude/commands/ceremony.md
@@ -37,12 +31,6 @@ skills:
     description: "Create or verify a checkpoint in your workflow"
     status: active
 
-  - name: code-review
-    type: command
-    file: .claude/commands/code-review.md
-    description: "Comprehensive security and quality review of uncommitted changes"
-    status: active
-
   - name: escalate
     type: command
     file: .claude/commands/escalate.md
@@ -53,12 +41,6 @@ skills:
     type: command
     file: .claude/commands/inquire.md
     description: "质询序列——对一个结果包执行四步质询"
-    status: active
-
-  - name: plan
-    type: command
-    file: .claude/commands/plan.md
-    description: "Restate requirements, assess risks, and create step-by-step implementation plan"
     status: active
 
   - name: refactor-clean
@@ -73,12 +55,6 @@ skills:
     description: "定义广播仪式——分离是自治的，结算是仪式"
     status: active
 
-  - name: tdd
-    type: command
-    file: .claude/commands/tdd.md
-    description: "Enforce test-driven development workflow with 80%+ coverage"
-    status: active
-
   - name: update-docs
     type: command
     file: .claude/commands/update-docs.md
@@ -88,7 +64,7 @@ skills:
   - name: verify
     type: command
     file: .claude/commands/verify.md
-    description: "Run comprehensive verification on current codebase state"
+    description: "提交前只跑覆盖本次改动的检查并照实报告；macOS 本机不跑 cargo"
     status: active
 
 agents:

@@ -397,7 +397,7 @@ export function analyzeMap(map: MapState, opts: WalkOptions): Analysis {
         actions: [],
       };
     }
-    return { phase: "实装中（工蜂拾取 / 评审 / 人工闸合入）", actions: [] };
+    return { phase: "实装中（工蜂拾取 / 评审 / 必需检查把关合入）", actions: [] };
   }
 
   // 有 spec、无实装票、且 spec 已关（异常）。

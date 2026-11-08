@@ -16,4 +16,6 @@ python3 scripts/check_fixture_drift.py
 - 覆盖 fixture：`rust/tests/fixtures/theta_v0_parity.json`（导出器 `formal/Origin/ParityFixtureExport.lean`）、
   `rust/tests/fixtures/theta_v0_center_parity.json`（导出器 `formal/Origin/CenterConstruct.lean:634`）。
   改了对应 Lean 源后用 `cd formal && lake env lean <导出器> > ../rust/tests/fixtures/<fixture>` 重落盘；fixture 只由机器导出，不手编。
-- CI 的 `fixture-drift` job 跑同一脚本，漂移即红并打出再生命令。cargo 入口 `theta_v0_fixture_drift` 只在 CI 或远端环境跑，macOS 本机不跑 cargo。
+- CI 的 `fixture-drift` job 跑同一脚本，漂移即红并打出再生命令。
+- 另有 cargo 入口 `rust/tests/theta_v0_fixture_drift.rs`，标了 `#[ignore]`，CI 不跑它（`ci.yml` 保持 ignore）。需要时在远端环境用
+  `cd rust && cargo test --release --test theta_v0_fixture_drift -- --ignored --nocapture` 触发；macOS 本机不跑 cargo。

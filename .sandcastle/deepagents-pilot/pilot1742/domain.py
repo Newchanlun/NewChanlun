@@ -66,6 +66,9 @@ def parse_key_name(run_id: RunId, name: str) -> WorkerKey:
 
 
 DEEPAGENTS_OUTPUT_PROTOCOL = "deepagents-self-report-v1"
+# 合入 main 的唯一口径（#1742 裁定 https://github.com/Newchanlun/NewChanlun/issues/1742#issuecomment-6719202631）。
+# agent 的 publish_candidate 工具描述、v2 系统提示和执行器写的 draft PR 正文共用这一句，避免各写各的。
+MERGE_GATE = "main 的合入由分支保护的必需检查（deepagents/review 与 ci-ok）把关，本 run 与执行器不合入。"
 LEGACY_CAVEAT = "旧工蜂协议未单独采集 confidence 与 caveats；low 是适配器保守标记，不是模型自报。"
 Confidence = Literal["high", "medium", "low"]
 
