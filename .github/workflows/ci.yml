@@ -35,7 +35,7 @@ jobs:
   # #1875 push 去重：合入 main 的 merge commit 若与 PR head（第二父）同树，且 PR 在该 head 上已有成功的 ci.yml run，
   #   push 不再重跑 Rust 作业。strict 下 PR run 检出的 refs/pull/N/merge 与 head 同树，所以那次 run 测的正是这棵树。
   #   rust/Cargo.lock 有变时仍全跑，让 main 作用域写入新的 cargo 缓存（PR 作用域的缓存别的 PR 读不到）。
-  #   单父提交、直接推送、查询出错一律全跑。
+  #   单父提交、直接推送、查询出错一律全跑。去重后 main 的 push run 多数没有 Rust 作业耗时，CI 计时请看 PR run。
   changes:
     runs-on: ubuntu-latest
     timeout-minutes: 5
@@ -64,7 +64,11 @@ jobs:
               [ -n "$tree" ] && [ "$tree" = "$head_tree" ] || { echo "tree differs from parent2"; return 1; }
               files=$(gh api "$R/compare/$1...$GITHUB_SHA" --jq '.files | length, (.[] | .filename, (.previous_filename // empty))') || return 1
               [ "$(head -n1 <<<"$files")" -lt 300 ] || { echo "compare truncated"; return 1; }
-              ! tail -n +2 <<<"$files" | grep -qx 'rust/Cargo.lock' || { echo "Cargo.lock changed"; return 1; }
+              # 不用管道：grep -q 提前退出会让上游收到 SIGPIPE，判定被翻转。
+              tail -n +2 <<<"$files" > "$RUNNER_TEMP/push-files"
+              rc=0; grep -qx 'rust/Cargo.lock' "$RUNNER_TEMP/push-files" || rc=$?
+              if [ "$rc" -eq 0 ]; then echo "Cargo.lock changed"; return 1; fi
+              if [ "$rc" -ne 1 ]; then echo "file check failed (grep exit $rc)"; return 1; fi
               run=$(gh api "$R/actions/workflows/ci.yml/runs?event=pull_request&status=success&head_sha=$2&per_page=20" \
                 --jq '[.workflow_runs[] | select(.head_repository.id == .repository.id)][0].html_url // empty') || return 1
               [ -n "$run" ] || { echo "no green PR run for $2"; return 1; }
