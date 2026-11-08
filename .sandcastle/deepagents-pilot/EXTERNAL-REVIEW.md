@@ -47,7 +47,46 @@ POLICY 与模型都进了 `REVIEW_CONTRACT`，换组合后旧组合的 PASS 不�
 - 一个非执行器拥有的 PR 走通双 PASS、同 head 的 App success 和读回。
 - 在隔离临时分支验证普通用户同名 success 不能满足 App 来源绑定，App 正控及新 head 负控成立。
 
-main 的 D5 检查启用由主控另行执行，保留已有保护。所需来源绑定为 `deepagents/review`、App id `5486877`，并保留 strict、enforce_admins；本 CLI 不修改 branch protection。首版仅接 main 目标，临时目标分支的来源测试需要主控独立受控测试工具。
+main 的 D5 检查启用由主控另行执行，保留已有保护。所需来源绑定为 `deepagents/review` 与发布它的 App id（缺省 `5486877`；换用审查专用 App 后为该 App 的 id，见下节），并保留 strict、enforce_admins；本 CLI 不修改 branch protection。首版仅接 main 目标，临时目标分支的来源测试需要主控独立受控测试工具。
+
+## 换用审查专用 App
+
+缺省时入口用执行器同一个 App（`newchanlun-deepagents-1742`，app_id `5486877`，installation `179444545`）发布 `deepagents/review`，执行器因此也持有能写这个必需状态的身份。审查专用 App `newchanlun-review-gate` 只给审查入口用，安装权限恰为 `TOKEN_PERMISSIONS`：metadata/read、contents/read、pull_requests/read、statuses/write。
+
+`review-pr` 与 `migrate-stale` 接受 `--app-identity <JSON绝对路径>`。不传时行为与之前完全相同。执行器、Studio、`github_app` 核验 CLI 和 `deepagents-remote-facts.py` 不读这个参数，仍用执行器 App。
+
+JSON 不含秘密，字段恰为以下四个，多一个或少一个都拒绝：
+
+```json
+{
+  "app_id": <审查 App 的 app_id>,
+  "installation_id": <它在 Newchanlun/NewChanlun 上的 installation id>,
+  "app_slug": "newchanlun-review-gate",
+  "installation_permissions": {"metadata": "read", "contents": "read", "pull_requests": "read", "statuses": "write"}
+}
+```
+
+核验时 GitHub 读回的安装权限必须与 `installation_permissions` 逐项相等，宽了、窄了、同名升级都拒绝，不发任何状态。仓库固定为 `Newchanlun/NewChanlun`（id `1150335160`），不能由 JSON 改。JSON 必须用绝对路径给出，且不在任何 Git 检出内；私钥规则不变（仓库外、属主为当前用户、权限 600 或 400）。
+
+HOST 切换步骤：
+
+1. App 安装到仓库后，在 App 设置页记下 app_id，在安装页 URL 记下 installation id。确认安装方式为 Only select repositories，只选本仓库。
+2. 在仓库外写好上面的 JSON（例如与审查 App 私钥同目录），私钥另存为 600。
+3. 先让在途 run 收尾：`status` 里没有 pending 的状态写，也没有在跑的 reviewer。原因是读回认领按发布者 bot 匹配 `creator.login`，切换后旧 App 发过的状态不再算本入口发的；在途写要么先完成，要么在切换后用 `reconcile` 按事实登记。
+4. 选一张非执行器拥有的 PR，带新身份审一次：
+
+   ```sh
+   "$VENV/bin/python" -m pilot1742.external_review review-pr \
+     --pr <PR号> --private-key <审查App私钥绝对路径> --app-identity <JSON绝对路径>
+   ```
+
+   入口先核验身份再做任何事：app_id、slug、installation、仓库范围或权限集任一不符即退出码 2，不发状态。成功后在该 head 上读回 `deepagents/review`，`creator.login` 应为 `newchanlun-review-gate[bot]`。
+5. 由主控把 main 必需检查 `deepagents/review` 的来源 App 改为审查 App 的 app_id，保留 strict 与 enforce_admins。改完后执行器 App 写的 `deepagents/review`（包括 `publish_candidate` 写的）不再满足必需检查，这正是切换的目的。改 branch protection 不由本 CLI 做。
+6. 之后所有 `review-pr`、`migrate-stale` 调用都带 `--app-identity`。漏传会以执行器 App 发布，发出的状态不满足第 5 步之后的必需检查，PR 不会因此被放行。
+
+已沿用、已发布的旧 PASS 记录仍在本地历史里；同补丁新 head 沿用时以新 App 在新 head 上发布，不读旧状态的发布者。
+
+回退：去掉 `--app-identity`，并把必需检查来源改回 `5486877`。
 
 ## 看结果与恢复
 
@@ -109,7 +148,7 @@ main 的 D5 检查启用由主控另行执行，保留已有保护。所需来�
 
 源码和 Git 全只读挂入容器。宿主 home、PEM、GitHub token、状态和 session 目录不挂入。session 从容器临时目录经 SDK 收取，不给 reviewer 可写宿主回执目录。
 
-App token 只申请 metadata/read、contents/read、pull_requests/read、statuses/write；token 留在宿主发布进程内存。GitHub 的 statuses/write 不按 context 缩权，宿主发布器及 OS 因此属于受信边界。
+App token 只申请 metadata/read、contents/read、pull_requests/read、statuses/write（审查专用 App 的安装权限也正是这四项）；token 留在宿主发布进程内存。GitHub 的 statuses/write 不按 context 缩权，宿主发布器及 OS 因此属于受信边界。
 
 ## 运行靶向检查
 

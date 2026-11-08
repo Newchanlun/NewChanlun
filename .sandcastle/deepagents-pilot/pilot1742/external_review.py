@@ -36,6 +36,7 @@ from typing import Any
 from .delivery import EffectPending, Journal, RepoGateway, Stale
 from .domain import parse_sha
 from .github_app import (
+    INSTALLATION_PERMISSIONS,
     AppIdentity,
     GitHubAppClient,
     IdentityError,
@@ -48,6 +49,11 @@ MODELS = ("kimi-k3.1-pro", "claude-opus-5-5")
 POLICY = "external-pr-v1-kimi"
 CONTEXT = "deepagents/review"
 TOKEN_PERMISSIONS = {"metadata": "read", "contents": "read", "pull_requests": "read", "statuses": "write"}
+REPOSITORY_ID = 1150335160
+REPOSITORY = "Newchanlun/NewChanlun"
+# 未给 --app-identity 时沿用执行器 App；HOST 换审查专用 App 的步骤见 EXTERNAL-REVIEW.md「换用审查专用 App」。
+DEFAULT_IDENTITY = {"app_id": 5486877, "installation_id": 179444545, "app_slug": "newchanlun-deepagents-1742",
+                    "installation_permissions": INSTALLATION_PERMISSIONS}
 STATE_ROOT = DEFAULT_HOME / "external-review"
 STATUS_LOCKS = STATE_ROOT / "status-locks"
 CHECKOUT_ROOT = DEFAULT_HOME / "checkouts" / "external-review"
@@ -1013,6 +1019,27 @@ class ExternalReview:
             return journal.reconcile_not_applied(pending[0], note)
 
 
+def load_identity(config: Path | None, private_key: Path) -> AppIdentity:
+    """发布状态所用的 App 身份。config 是仓库外的非秘密 JSON，字段恰为 DEFAULT_IDENTITY 的四个；缺省用 DEFAULT_IDENTITY。"""
+    values: Any = DEFAULT_IDENTITY
+    if config is not None:
+        if not config.is_absolute():
+            raise IdentityError("App 身份配置必须通过绝对文件路径明确指定")
+        directory = config.resolve().parent
+        if any((ancestor / ".git").exists() for ancestor in (directory, *directory.parents)):
+            raise IdentityError("App 身份配置必须保存在所有 Git 检出之外")
+        try:
+            values = json.loads(config.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            raise IdentityError("无法读取 App 身份配置") from None
+        if not isinstance(values, dict) or set(values) != set(DEFAULT_IDENTITY):
+            raise IdentityError("App 身份配置字段必须恰为 " + ", ".join(sorted(DEFAULT_IDENTITY)))
+        if type(values["app_slug"]) is not str:
+            raise IdentityError("App slug 格式不正确")
+    return AppIdentity(values["app_id"], values["installation_id"], REPOSITORY_ID, REPOSITORY,
+                       values["app_slug"], private_key, values["installation_permissions"])
+
+
 def _positive(value: str) -> int:
     number = int(value)
     if number <= 0:
@@ -1027,10 +1054,12 @@ def main(argv: list[str] | None = None) -> int:
     review.add_argument("--pr", required=True, type=_positive)
     review.add_argument("--attempt", type=_positive, default=1)
     review.add_argument("--private-key", required=True, type=Path)
+    review.add_argument("--app-identity", type=Path, help="仓库外非秘密 JSON 的绝对路径；缺省为执行器 App 身份")
     migrate = sub.add_parser("migrate-stale", help="新部署补发旧 controller 下双审完整却未发布终态的 STALE run")
     migrate.add_argument("--pr", required=True, type=_positive)
     migrate.add_argument("--attempt", type=_positive, default=1)
     migrate.add_argument("--private-key", required=True, type=Path)
+    migrate.add_argument("--app-identity", type=Path, help="仓库外非秘密 JSON 的绝对路径；缺省为执行器 App 身份")
     status_cmd = sub.add_parser("status")
     status_cmd.add_argument("--pr", required=True, type=_positive)
     reconcile = sub.add_parser("reconcile")
@@ -1040,8 +1069,7 @@ def main(argv: list[str] | None = None) -> int:
     result: dict | list[dict]
     try:
         if args.command in ("review-pr", "migrate-stale"):
-            identity = AppIdentity(5486877, 179444545, 1150335160, "Newchanlun/NewChanlun",
-                                   "newchanlun-deepagents-1742", args.private_key)
+            identity = load_identity(args.app_identity, args.private_key)
             with GitHubAppClient(identity, permissions=TOKEN_PERMISSIONS) as client:
                 client.verify()
                 lane = ExternalReview(RepoGateway(client))
