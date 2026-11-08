@@ -40,6 +40,7 @@
 
     <key>EnvironmentVariables</key>
     <dict>
+        <key>TZ</key><string>Asia/Shanghai</string>
         <key>PATH</key>
         <string>/Users/silencehan/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
         <key>GH_REPO</key>

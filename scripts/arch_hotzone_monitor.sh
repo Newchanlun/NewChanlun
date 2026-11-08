@@ -181,7 +181,8 @@ refresh_host_main() {
     echo "[arch_hotzone] automation host 非干净 main（branch=${branch:-HEAD}, dirty=$([ -n "$dirty" ] && echo true || echo false)）→ fail-closed" >&2
     return 1
   fi
-  git fetch origin main --quiet && git reset --hard origin/main --quiet
+  # #1979：只快进；HEAD 领先或分叉（部署候选）时 ff-only 失败 → 上层 fail-closed，不撤销部署。
+  git fetch origin main --quiet && git merge --ff-only --quiet origin/main
 }
 
 scan_once() {

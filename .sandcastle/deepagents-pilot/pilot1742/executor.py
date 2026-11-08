@@ -914,7 +914,11 @@ def main(argv: list[str] | None = None) -> int:
                     except CutoverError as error:
                         print(f"queue inactive: {error}")
                         return 0
-                    print(json.dumps(intake.once(child), ensure_ascii=False, indent=2), flush=True)
+                    try:
+                        print(json.dumps(intake.once(child), ensure_ascii=False, indent=2), flush=True)
+                    except IdentityError as error:
+                        # 读不到 GitHub 不是「没活」：本轮跳过、本机账本不动，写明哪个源读不到，下轮重试。
+                        print(f"round skipped, source unreadable (github): {type(error).__name__}: {error}", flush=True)
                     if args.once:
                         return 0
                     time.sleep(args.poll_seconds)

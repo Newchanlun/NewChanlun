@@ -165,7 +165,8 @@ function refreshHostMain(): boolean {
       return false;
     }
     execSync("git fetch origin main --quiet", { stdio: "inherit", env: GH_CLEAN_ENV });
-    execSync("git reset --hard origin/main --quiet", { stdio: "inherit", env: GH_CLEAN_ENV });
+    // #1979：只快进；HEAD 领先或分叉（部署候选）时抛错 → 下方 catch fail-closed，不撤销部署。
+    execSync("git merge --ff-only --quiet origin/main", { stdio: "inherit", env: GH_CLEAN_ENV });
     return true;
   } catch (e) {
     console.error(`[claim-loop] automation host 同步 origin/main 失败 → fail-closed：${String(e).slice(0, 300)}`);
@@ -323,7 +324,12 @@ async function main(): Promise<void> {
     return;
   }
   for (;;) {
-    if (drainRequested()) { console.log("旧入口冻结，本轮不再领新工作"); return; }
+    if (drainRequested()) {
+      // 冻结=暂停不是退出：return 会让 launchd KeepAlive 每 10s 重启一次（实测 >1000 次）。
+      console.log("旧入口冻结，本轮不再领新工作（暂停中，下轮再查）");
+      await sleep(cfg.pollSeconds * 1000);
+      continue;
+    }
     try {
       await runOnce(cfg);
     } catch (e) {
