@@ -11,6 +11,7 @@ from pilot1742 import review_sweep as module
 from pilot1742.external_review import ReviewTarget
 from pilot1742.review_sweep import (
     ServeRound,
+    SourceUnreadable,
     Sweep,
     human_gated,
     reviewing,
@@ -352,7 +353,8 @@ def test_one_prs_failure_does_not_stop_others(lane):
     green(github, head)
     sweep, _, _ = make(lane, github=github, auto_merge=True)
     actions = sweep.tick()
-    assert acts(actions, 1805) == ["error"]
+    assert acts(actions, 1805) == ["error", "evidence-insufficient"]   # 状态读不到：失败关闭
+    assert ("disable", 1805) in github.calls
     assert "merged" in acts(actions, 1810)
 
 
@@ -772,3 +774,133 @@ def test_deployed_executor_plist_turns_sweep_and_auto_merge_on():
     args = plistlib.loads(plist.read_bytes())["ProgramArguments"]
     assert args[args.index("serve"):args.index("serve") + 2] == ["serve", "--loop"]
     assert "--review-sweep" in args and "--review-sweep-auto-merge" in args
+
+
+def test_auto_merge_is_off_unless_explicitly_enabled(monkeypatch, tmp_path):
+    """代码里默认关：只给 --review-sweep 时 sweep 只派审不合入；合入要部署模板显式加 --review-sweep-auto-merge。"""
+    rounds, built = [], []
+    real_serve_round = module.serve_round
+    cli, argv = _fake_serve(monkeypatch, tmp_path, rounds=rounds)
+    monkeypatch.setattr(module, "serve_round",
+                        lambda key, **kw: built.append(kw) or (lambda: rounds.append("sweep")))
+    with pytest.raises(_StopServe):
+        cli.main(argv + ["--review-sweep"])
+    assert built == [{"auto_merge": False}]
+    assert real_serve_round(tmp_path / "k.pem").sweep.auto_merge is False
+    assert module.Sweep(FakeGitHub(None), None, lambda *a: 0).auto_merge is False
+
+
+# ---- 第二轮独审（9f0876cf，run dbd3c612）：证据读失败一律失败关闭；gh 调用有超时 ----
+
+def _sensitive_armed(lane, github):
+    github.states[1810] = {"auto_merge": True}
+    github.files[1810] = [{"filename": "rust/src/trading/order.rs", "status": "modified", "changes": 1}]
+    green(github, lane.gateway.pr["head"]["sha"])
+
+
+def _raise(*args, **kwargs):
+    raise RuntimeError("HTTP 502")
+
+
+@pytest.mark.parametrize("broken", ["pr_files", "checks", "pr"])
+def test_evidence_read_failure_withdraws_native_auto_merge(lane, broken):
+    """kimi 高 1：读文件清单、检查或 PR 状态失败时，挂着原生 auto-merge 的 PR 不能靠它绕过 HUMAN_GATED：
+    不合入、不追平，并撤掉 auto-merge（PR 状态读不到、不知道挂没挂时照撤）。"""
+    github = FakeGitHub(lane)
+    _sensitive_armed(lane, github)
+    if broken == "pr":
+        github.fail[1810] = {"pr"}
+    else:
+        setattr(github, broken, _raise)
+    if broken == "checks":  # 检查在人工确认类判定之后读；读不到时普通 PR 同样失败关闭
+        github.files[1810] = [{"filename": "src/x.py", "status": "modified", "changes": 1}]
+    sweep, _, _ = make(lane, github=github, auto_merge=True)
+    result = next(a for a in sweep.tick() if a.get("pr") == 1810 and a["action"] == "evidence-insufficient")
+    assert result["auto_merge_withdrawn"] is True
+    assert github.calls == [("disable", 1810)]
+
+
+def test_required_checks_read_failure_still_withdraws_and_never_merges_or_updates(lane):
+    """kimi 高 1 后半：main 必需检查读不到时不再直接返回；照常逐个 PR 判人工确认类并撤原生 auto-merge，
+    但谁都不合入、不追平。"""
+    github = FakeGitHub(lane)
+    _sensitive_armed(lane, github)
+    _more_pulls(lane, github, [1811, 1812])
+    github.states[1811] = {"mergeable_state": "behind"}
+    green(github, f"{1812:040d}")
+    github.required_checks = _raise
+    sweep, _, _ = make(lane, run=False, github=github, auto_merge=True)
+    actions = sweep.tick()
+    assert any(a["action"] == "evidence-insufficient" and "必需检查" in a["reason"] for a in actions)
+    assert github.calls == [("disable", 1810)]
+
+
+def test_gh_calls_have_a_timeout_and_a_timeout_is_an_unreadable_source(monkeypatch):
+    """kimi 高 2：每个 gh 调用带超时；超时转成 SourceUnreadable，写明是哪个接口。"""
+    import subprocess
+    seen = []
+    def run(command, **kwargs):
+        seen.append(kwargs.get("timeout"))
+        raise subprocess.TimeoutExpired(command, kwargs["timeout"])
+    monkeypatch.setattr(module.subprocess, "run", run)
+    cli = module.GhCli("Newchanlun/NewChanlun", timeout=7)
+    for call in (cli.open_pulls, lambda: cli.pr(5), lambda: cli.checks("a" * 40), cli.required_checks,
+                 lambda: cli.pr_files(5), lambda: cli.merge(5, "a" * 40), lambda: cli.update_branch(5, "a" * 40),
+                 lambda: cli.disable_auto_merge(5)):
+        with pytest.raises(SourceUnreadable) as caught:
+            call()
+        assert "timed out after 7s" in str(caught.value) and caught.value.source.startswith("github")
+    assert seen and all(t == 7 for t in seen)
+    assert module.GhCli().timeout == module.GH_TIMEOUT_SECONDS > 0
+
+
+@pytest.mark.parametrize("where", ["pr", "checks", "required_checks"])
+def test_timeout_mid_round_skips_the_round_without_merging(lane, capsys, where):
+    """超时发生在本轮中途：整轮作废、记一行写明哪个源，不合入；serve 钩子不抛出，下一轮照常。"""
+    clock = Clock()
+    github = FakeGitHub(lane)
+    green(github, lane.gateway.pr["head"]["sha"])
+    def hang(*args, **kwargs):
+        raise SourceUnreadable(f"github ({where}) timed out after 60s", TimeoutError())
+    healthy = getattr(github, where)
+    setattr(github, where, hang)
+    sweep, _, _ = make(lane, github=github, auto_merge=True)
+    hook = ServeRound(sweep, clock=clock)
+    assert hook() is None
+    line = json.loads(capsys.readouterr().out.strip().splitlines()[-1].removeprefix("review-sweep "))
+    assert line["action"] == "round-skipped" and where in line["unreadable"]
+    assert not [c for c in github.calls if c[0] == "merge"]
+    setattr(github, where, healthy)
+    clock.now += module.MIN_LOOP_SECONDS
+    assert "merged" in [a["action"] for a in hook()]
+
+
+def test_green_but_unmergeable_pr_does_not_hold_the_queue_head(lane):
+    """opus 低：不落后、三项全绿却停在 blocked（main 另有未满足的规则）的 PR 不占队首，下一个落后的照常追平。"""
+    github = FakeGitHub(lane)
+    _more_pulls(lane, github, [1811])
+    github.states[1810] = {"mergeable_state": "blocked"}
+    github.states[1811] = {"mergeable_state": "behind"}
+    green(github, lane.gateway.pr["head"]["sha"])
+    sweep, _, _ = make(lane, run=False, github=github, auto_merge=True)
+    actions = sweep.tick()
+    assert updates(github) == [("update", 1811, f"{1811:040d}")]
+    assert next(a for a in actions if a.get("pr") == 1810 and a["action"] == "waiting")["queue_head"] is False
+
+
+def test_failed_fetch_is_tried_once_per_round(lane):
+    """opus 低：fetch 每次最多 FETCH_TIMEOUT_SECONDS；一轮里失败一次后其余 PR 不再 fetch，超时不逐个累加。"""
+    github = FakeGitHub(lane)
+    _more_pulls(lane, github, [1811])
+    lane.gateway.pr["head"]["sha"] = "e" * 40
+    github.extra_pulls[0]["head"]["sha"] = "d" * 40
+    fetches = []
+    def sync(number, base, head):
+        fetches.append(number)
+        raise RuntimeError("fetch timed out")
+    sweep, _, _ = make(lane, run=False, github=github, sync=sync)
+    actions = sweep.tick()
+    assert fetches == [1810]
+    assert acts(actions, 1810) == ["error"] and acts(actions, 1811) == ["needs-source-sync"]
+    sweep.tick()
+    assert fetches == [1810, 1810]                      # 下一轮重新试
