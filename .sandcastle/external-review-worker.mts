@@ -17,6 +17,12 @@ export interface ReviewLaunch {
   checkout: string; prompt: string; mode: "review";
 }
 export const REVIEW_IMAGE = "sandcastle:newchanlun";
+/** #1968：kimi 在 codex exec --output-schema 下把开场白当成终答、零工具调用就结束（PR #1966 实测 3/3）；
+ *  不带 schema、改由提示词约束 JSON 时 3/3 正常读代码。表内模型不传 schema，提示词末尾追加下面这句。 */
+export const PROMPT_JSON_MODELS: ReadonlySet<string> = new Set(["kimi-k3.1-pro"]);
+export const PROMPT_JSON_INSTRUCTION = "\n最终消息只输出一个 JSON 对象，不加 Markdown 代码围栏、不加其它文字。"
+  + "键恰为 status、summary、findings、validation：status 取 completed、blocked、failed 之一；"
+  + "summary 为字符串；findings、validation 为字符串数组。";
 const inside = (root: string, path: string) => path === root || path.startsWith(root + sep);
 
 export function readLaunch(folder: string): ReviewLaunch {
@@ -172,11 +178,15 @@ export async function runExternalReview(folder: string, deps: WorkerDependencies
     writeFileSync(schema, JSON.stringify(OUTPUT_SCHEMA), { mode: 0o600 });
     await handle.copyFileIn(schema, "/tmp/external-review-schema.json");
     if (cancelled) throw new Error("监督已取消");
-    const built = provider.buildPrintCommand({ prompt: launch.prompt, dangerouslySkipPermissions: false });
-    if (built.stdin !== launch.prompt || !built.command.includes("--disable multi_agent")) throw new Error("Codex 命令协议已漂移");
+    const promptJson = PROMPT_JSON_MODELS.has(launch.model);
+    record.output_contract = promptJson ? "prompt" : "schema";
+    const prompt = promptJson ? launch.prompt + PROMPT_JSON_INSTRUCTION : launch.prompt;
+    const built = provider.buildPrintCommand({ prompt, dangerouslySkipPermissions: false });
+    if (built.stdin !== prompt || !built.command.includes("--disable multi_agent")) throw new Error("Codex 命令协议已漂移");
     // project_doc_max_bytes=0：不把候选仓 AGENTS.md 当指令自动注入每次请求（实测约 13k 字符，随每轮请求重发）；
     // 候选 AGENTS 本就是不可信审阅材料，审查员需要时可用 cat 读取。
-    const command = built.command + " --skip-git-repo-check --output-schema /tmp/external-review-schema.json -c 'features.apps=false' -c 'features.plugins=false'"
+    const command = built.command + " --skip-git-repo-check"
+      + (promptJson ? "" : " --output-schema /tmp/external-review-schema.json") + " -c 'features.apps=false' -c 'features.plugins=false'"
       + " -c 'web_search=\"disabled\"' -c 'shell_environment_policy.inherit=\"core\"' -c 'project_doc_max_bytes=0' -";
     const transcript = new CodexTranscript(provider);
     const events = openSync(join(folder, "events.jsonl"), "wx", 0o600);

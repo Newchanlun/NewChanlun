@@ -147,5 +147,5 @@ def test_failure_code_is_visible_in_review_outcome(lane):
     launch = json.loads((folder / "launch.json").read_text())
     receipt = json.loads((folder / "receipt.json").read_text())
     receipt.update(status="failed", failure_code="budget_exceeded")
-    outcome = validate_review(target, launch, receipt, folder)
+    outcome = validate_review(target, launch, receipt, folder, lane.source)
     assert outcome.verdict == "FAILED" and "failure_code=budget_exceeded" in outcome.reason
