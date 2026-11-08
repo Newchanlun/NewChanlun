@@ -49,6 +49,9 @@ class FakeGitHub:
     def required_checks(self):
         return set(self.required)
 
+    def allow_auto_merge(self):
+        return False
+
     def pr_files(self, number):
         return copy.deepcopy(self.files.get(number, [{"filename": ".sandcastle/x.py", "status": "modified", "changes": 1}]))
 
@@ -1080,3 +1083,53 @@ def test_fetch_authenticates_with_the_hosts_gh_credential_helper(monkeypatch, tm
     assert seen["timeout"] == module.FETCH_TIMEOUT_SECONDS == 120
     assert seen["env"]["HOME"] == str(tmp_path) and seen["env"]["GIT_TERMINAL_PROMPT"] == "0"
     assert not {"GH_TOKEN", "GITHUB_TOKEN"} & set(seen["env"])
+
+
+# ---- 第五轮（9ab8a495，run ba9fcac2）：原生 auto-merge 在仓库层关掉，sweep 每轮核对 ----
+
+@pytest.mark.parametrize("setting", ["enabled", "unreadable"])
+def test_repo_allowing_native_auto_merge_blocks_all_merges_and_updates(lane, setting):
+    """有写权限的人能在两轮之间给触及两类的 PR 挂原生 auto-merge，sweep 看不见。所以仓库设置 allow_auto_merge
+    必须是 false：为 true 或读不到时本轮谁都不合入、不追平，记 native-auto-merge-enabled；撤 auto-merge 照常做。"""
+    github = FakeGitHub(lane)
+    _more_pulls(lane, github, [1805, 1811])
+    green(github, f"{1805:040d}")                                   # 本可合入
+    github.states[1811] = {"mergeable_state": "behind"}             # 本可追平
+    _sensitive_armed(lane, github)                                  # 1810：须撤 auto-merge
+    if setting == "enabled":
+        github.allow_auto_merge = lambda: True
+    else:
+        github.allow_auto_merge = _raise
+    sweep, _, _ = make(lane, run=False, github=github, auto_merge=True)
+    actions = sweep.tick()
+    flagged = next(a for a in actions if a["action"] == "native-auto-merge-enabled")
+    assert ("allow_auto_merge=true" in flagged["reason"]) == (setting == "enabled")
+    assert github.calls == [("disable", 1810)]                     # 只撤，不合入、不追平
+
+
+def test_repo_with_native_auto_merge_disabled_merges_normally(lane):
+    github = FakeGitHub(lane)
+    green(github, lane.gateway.pr["head"]["sha"])
+    sweep, _, _ = make(lane, github=github, auto_merge=True)
+    actions = sweep.tick()
+    assert "native-auto-merge-enabled" not in [a["action"] for a in actions] and "merged" in acts(actions)
+
+
+@pytest.mark.parametrize(("payload", "allowed"), [({"allow_auto_merge": False}, False), ({"allow_auto_merge": True}, True),
+                                                  ({}, True), ({"allow_auto_merge": None}, True)])
+def test_gh_reads_allow_auto_merge_and_only_trusts_explicit_false(monkeypatch, payload, allowed):
+    cli = module.GhCli("Newchanlun/NewChanlun")
+    calls = []
+    monkeypatch.setattr(cli, "_gh", lambda *args: calls.append(args) or json.dumps(payload))
+    assert cli.allow_auto_merge() is allowed and calls == [("api", "repos/Newchanlun/NewChanlun")]
+
+
+def test_allow_auto_merge_timeout_skips_the_round(lane):
+    github = FakeGitHub(lane)
+    _sensitive_armed(lane, github)
+    github.allow_auto_merge = _hang
+    sweep, _, _ = make(lane, run=False, github=github, auto_merge=True)
+    with pytest.raises(SourceUnreadable) as caught:
+        sweep.tick()
+    assert github.calls == [("disable", 1810)]                     # 超时：整轮作废，失败关闭照撤
+    assert caught.value.actions[-1]["action"] == "fail-closed-withdraw"

@@ -21,6 +21,10 @@ sync(number, base, head)，未注入报 needs-source-sync。
 - 该精确 head 上 deepagents/review、ci-ok、DevSkim 都是 success，且 GitHub 判定可合入（clean/unstable）；
 - 该 head 的完整改动清单可判定且不触及人工确认两类（HUMAN_GATED：实盘下单或资金、密钥或凭证）。
 两类的出处：用户裁定留痕 https://github.com/Newchanlun/NewChanlun/issues/1742#issuecomment-6719202631
+唯一的自动合入路径是本模块带 sha 的 REST 合入：仓库设置 allow_auto_merge 已关（GET /repos/{owner}/{repo} 的
+allow_auto_merge=false，2026-11-09 由主控关闭），GitHub 原生 auto-merge 根本挂不上，所以有写权限的人也不能在两轮之间给
+触及两类的 PR 挂原生 auto-merge、等检查转绿由 GitHub 自己合入。sweep 每轮读这个设置：为 true 或读不到时本轮一律不合入、
+不追平，记 native-auto-merge-enabled；撤原生 auto-merge 的逻辑保留，作为纵深防御。
 合入在代码里默认关；部署模板也只开 --review-sweep（只派审）。--review-sweep-auto-merge 等改写合入人闸口径的 #1915 合入后
 由单独的后续 PR 打开。
 完整清单：files 接口最多 3000 个且需与 changed_files 相符；否则用本地精确 diff；两者都拿不到报 evidence-insufficient
@@ -137,6 +141,7 @@ class GitHubPort(Protocol):
     def pr(self, number: int) -> dict[str, Any]: ...
     def checks(self, head: str) -> dict[str, str]: ...
     def required_checks(self) -> set[str]: ...
+    def allow_auto_merge(self) -> bool: ...
     def pr_files(self, number: int) -> list[dict[str, Any]]: ...
     def merge(self, number: int, head: str) -> None: ...
     def update_branch(self, number: int, head: str) -> None: ...
@@ -190,6 +195,11 @@ class GhCli:
             return set()
         return {c["context"] for c in rules.get("checks", [])
                 if type(c.get("app_id")) is int and c["app_id"] > 0}  # bool 是 int 的子类，排除
+
+    def allow_auto_merge(self) -> bool:
+        """仓库设置：是否允许挂 GitHub 原生 auto-merge。只认明确的 false；字段缺失或不是布尔值都按开着算。"""
+        value = json.loads(self._gh("api", f"repos/{self.repository}")).get("allow_auto_merge")
+        return value is not False
 
     def pr_files(self, number: int) -> list[dict[str, Any]]:
         return self._json_lines("api", "--paginate", f"repos/{self.repository}/pulls/{number}/files?per_page=100",
@@ -503,6 +513,17 @@ class Sweep:
         except Exception as error:  # 不合入、不追平，但照常逐个 PR 判人工确认类并撤原生 auto-merge
             gate_ok = evidence_ok = False
             actions.append({"action": "evidence-insufficient", "reason": f"读取 main 必需检查失败：{error}"})
+        try:
+            native = self.github.allow_auto_merge()
+        except SourceUnreadable:
+            raise
+        except Exception as error:
+            native, why = True, f"读取仓库设置 allow_auto_merge 失败：{type(error).__name__}: {error}"
+        else:
+            why = "仓库设置 allow_auto_merge=true：原生 auto-merge 可在两轮之间被挂上，绕过人工确认两类"
+        if native:  # 本轮不合入、不追平；撤原生 auto-merge 照常做
+            gate_ok = evidence_ok = False
+            actions.append({"action": "native-auto-merge-enabled", "reason": why})
         if evidence_ok and not gate_ok:
             actions.append({"action": "auto-merge-unsafe",
                             "reason": f"main 须 strict 且必需检查含绑定来源 app 的 {sorted(GATE)}，不合入"})
