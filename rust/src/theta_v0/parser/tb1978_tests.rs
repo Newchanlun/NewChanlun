@@ -1,12 +1,14 @@
 //! #1978：流首段的起点按 xianduan §7.1 第 5 条越过扫描种子时，候选发布的特征事实只能来自本段起点之后
 //! （起点之前的笔是未分段前缀）。S 写者按 `[start_stroke, observed_through]` 投影 CC-012 `stroke_refs`、
 //! 按 `raw_elements` 投影 CC-055 `member_of`；事实越界即发布自相矛盾的两条事实（S86 第 75 代被来源核拒收）。
-use super::super::config::ThetaConfig;
+use super::super::config::{ParseConfig, ThetaConfig};
 use super::super::types::{Bar, Direction, Stroke};
+use super::feature_seq::{stroke_high_low, ExtendMode, FeatureSeqState};
 use super::second_fold::{SecondCandidateId, SecondFoldStore};
 use super::segment::{
-    divide_segments_with_facts, divide_segments_with_facts_store, SegmentCandidateFact,
-    SegmentFacts,
+    construction, divide_segments_with_facts, divide_segments_with_facts_store,
+    divide_segments_with_tail, IncrSegments, SegmentCandidateFact, SegmentFacts,
+    FIRST_START_SEALED,
 };
 
 /// `.chanlun/review-results/1488-acceptance/s86/bars.s86.json`（开、高、低、收）。前 75 根只有三笔：
@@ -310,12 +312,21 @@ fn confirmed_first_segment_publishes_only_its_own_members() {
 
 /// 流首段的已确认段（笔号区间）与未确认尾段起点；两种 parser 入口同判。
 fn first_spans(strokes: &[Stroke]) -> (Vec<(usize, usize)>, Option<usize>, SegmentFacts) {
-    let config = ThetaConfig::for_s_structure_writer().unwrap();
-    let (segments, pending, facts) = divide_segments_with_facts(strokes, &config.parse);
+    first_spans_with(
+        strokes,
+        &ThetaConfig::for_s_structure_writer().unwrap().parse,
+    )
+}
+
+fn first_spans_with(
+    strokes: &[Stroke],
+    config: &ParseConfig,
+) -> (Vec<(usize, usize)>, Option<usize>, SegmentFacts) {
+    let (segments, pending, facts) = divide_segments_with_facts(strokes, config);
     let (stored, stored_pending, stored_facts, _) = divide_segments_with_facts_store(
         strokes,
-        &config.parse,
-        SecondFoldStore::from_parse_config(&config.parse),
+        config,
+        SecondFoldStore::from_parse_config(config),
     );
     assert_eq!((&segments, pending), (&stored, stored_pending));
     assert_eq!(facts.candidates, stored_facts.candidates);
@@ -338,11 +349,13 @@ const REVIEW_2_2: [i64; 11] = [100, 200, 150, 220, 90, 130, 95, 180, 120, 170, 1
 fn review_2_2_waits_while_the_earlier_start_is_open() {
     let (spans, pending, facts) = first_spans(&chain(&REVIEW_2_2));
     assert_eq!(spans, vec![], "p₀ 未出局，p₁ 的 [4,6] 不得发布");
-    assert_eq!(pending, Some(4), "未确认流首段的尾部起点仍按第 5 条取 [0,9] 内最低");
+    assert_eq!(
+        pending,
+        Some(4),
+        "未确认流首段的尾部起点仍按第 5 条取 [0,9] 内最低"
+    );
     assert!(
-        facts
-            .waiting_reasons
-            .contains(&"earlier_first_start_undecided"),
+        facts.waiting_reasons.contains(&FIRST_START_SEALED),
         "{:?}",
         facts.waiting_reasons
     );
@@ -362,9 +375,7 @@ fn review_2_2_publishes_the_later_start_once_the_earlier_is_out() {
     assert_eq!(spans.first(), Some(&(4, 6)));
     let c = &facts.candidates[0];
     assert_eq!((c.result, c.trigger_stroke), ("CASE_ONE", Some(9)));
-    assert!(!facts
-        .waiting_reasons
-        .contains(&"earlier_first_start_undecided"));
+    assert!(!facts.waiting_reasons.contains(&FIRST_START_SEALED));
 }
 
 /// 延续 (ii)：第 10 笔 ↑110→150、第 11 笔 ↓150→85 先破 b 终点 90 ⟹ p₀ 确认段 [0,2]，p₁ 作废。
@@ -389,11 +400,272 @@ fn review_2_2_keeps_waiting_while_price_stays_inside_the_window() {
         let (spans, _, facts) = first_spans(&strokes[..n]);
         assert_eq!(spans, vec![], "前缀 {n} 不得发布");
         assert!(
-            facts
-                .waiting_reasons
-                .contains(&"earlier_first_start_undecided"),
+            facts.waiting_reasons.contains(&FIRST_START_SEALED),
             "前缀 {n}：{:?}",
             facts.waiting_reasons
         );
     }
+}
+
+enum Fate {
+    Confirmed(usize),
+    Out,
+    Undecided,
+}
+
+fn reference_feat(dir: Direction, config: &ParseConfig) -> FeatureSeqState {
+    FeatureSeqState::new(
+        dir,
+        ExtendMode::Strict,
+        config.tail_window,
+        config.second_seq_scan_window,
+        config.tangency,
+    )
+}
+
+fn gate_ok(strokes: &[Stroke], start: usize, end: usize, config: &ParseConfig) -> bool {
+    end >= start
+        && end - start + 1 >= config.seg_min_strokes as usize
+        && construction(strokes, start, end + 1, config.tangency).vector == Some([true; 4])
+}
+
+/// §7.1 第 1 条 `KILLED_BY_NEW_EXTREME`：b 之后到 `through`（含）某笔在段方向严格越过 b 的 P。
+fn beyond_p(strokes: &[Stroke], b: usize, through: usize, dir: Direction) -> bool {
+    let (ph, pl) = stroke_high_low(&strokes[b]);
+    strokes[b + 1..=through].iter().any(|s| {
+        let (h, l) = stroke_high_low(s);
+        match dir {
+            Direction::Up => h > ph,
+            Direction::Down => l < pl,
+        }
+    })
+}
+
+/// 起点 p 单独从头扫完整个前缀的终局（§7.1 第 9 条）：可接受的终结过门 ⟹ 确认；光标到下一起点后再无
+/// b 早于它、未作废的候选 ⟹ 出局。作废按笔价直接判，不读实现的准入标志。
+fn reference_fate(strokes: &[Stroke], config: &ParseConfig, p: usize, next: Option<usize>) -> Fate {
+    let dir = strokes[p].direction;
+    let mut feat = reference_feat(dir, config);
+    for cursor in p..strokes.len() {
+        if strokes[cursor].direction != dir {
+            let (h, l) = stroke_high_low(&strokes[cursor]);
+            feat.append(cursor, h, l, strokes);
+            if let Some(hit) = feat.scan_trigger(strokes) {
+                let end = hit.k - 1;
+                if next.is_some_and(|next| end >= next) {
+                    return Fate::Out;
+                }
+                if gate_ok(strokes, p, end, config) {
+                    return Fate::Confirmed(hit.k);
+                }
+                feat.skip_trigger(hit.k);
+            }
+        }
+        if let Some(next) = next.filter(|&next| cursor >= next) {
+            let open = feat
+                .undecided_candidate()
+                .is_some_and(|b| b < next && !beyond_p(strokes, b, cursor, dir));
+            if !open {
+                return Fate::Out;
+            }
+        }
+    }
+    Fate::Undecided
+}
+
+fn reference_next_end(strokes: &[Stroke], config: &ParseConfig, from: usize) -> Option<usize> {
+    let dir = strokes[from].direction;
+    let mut feat = reference_feat(dir, config);
+    for cursor in from..strokes.len() {
+        if strokes[cursor].direction == dir {
+            continue;
+        }
+        let (h, l) = stroke_high_low(&strokes[cursor]);
+        feat.append(cursor, h, l, strokes);
+        if let Some(hit) = feat.scan_trigger(strokes) {
+            if gate_ok(strokes, from, hit.k - 1, config) {
+                return Some(hit.k);
+            }
+            feat.skip_trigger(hit.k);
+        }
+    }
+    None
+}
+
+/// 独立参照（§7.1 第 5／9 条）：每个起点取值点各自扫完整个前缀、定出终局，按起点先后取最早一个未出局者；
+/// 不交错、不提前停。其后的段按单一起点逐段扫。返回段的笔号区间与未确认尾段起点。
+fn reference_spans(
+    strokes: &[Stroke],
+    config: &ParseConfig,
+) -> (Vec<(usize, usize)>, Option<usize>) {
+    let n = strokes.len();
+    let Some(seed) = (0..n.saturating_sub(2)).find(|&i| {
+        construction(strokes, i, i + 3, config.tangency)
+            .vector
+            .is_some_and(|v| v[1])
+    }) else {
+        return (vec![], (n > 0).then_some(0));
+    };
+    let dir = strokes[seed].direction;
+    let mut starts = vec![seed];
+    for j in seed + 1..n {
+        let best = strokes[*starts.last().unwrap()].start_price;
+        let refreshes = match dir {
+            Direction::Up => strokes[j].start_price < best,
+            Direction::Down => strokes[j].start_price > best,
+        };
+        if strokes[j].direction == dir && refreshes {
+            starts.push(j);
+        }
+    }
+    let decided = starts
+        .iter()
+        .enumerate()
+        .map(|(i, &p)| {
+            (
+                p,
+                reference_fate(strokes, config, p, starts.get(i + 1).copied()),
+            )
+        })
+        .find(|(_, fate)| !matches!(fate, Fate::Out));
+    let Some((p, Fate::Confirmed(k))) = decided else {
+        return (vec![], starts.last().copied());
+    };
+    let mut spans = vec![(p, k - 1)];
+    let mut from = k;
+    while let Some(k) = reference_next_end(strokes, config, from) {
+        spans.push((from, k - 1));
+        from = k;
+    }
+    (spans, (from < n).then_some(from))
+}
+
+fn random_polylines(base: u64, count: u64) -> Vec<Vec<Stroke>> {
+    (0..count)
+        .flat_map(|g| {
+            [true, false]
+                .map(|distinct| chain(&super::tb02c_tests::tb1493_polyline(base + g, 60, distinct)))
+        })
+        .collect()
+}
+
+/// 逐前缀：全量无观察入口、观察入口（无簿与 K1 簿）、逐笔增量 `IncrSegments` 的段与尾部起点都等于参照。
+/// 语料须实际走到「起点越过种子的已确认流首段」与「第 9 条封住」两类。
+#[test]
+fn first_start_scans_match_the_independent_reference() {
+    let theta = ThetaConfig::for_s_structure_writer().unwrap();
+    let config = &theta.parse;
+    let mut corpora = random_polylines(0x1978_0000, 300);
+    corpora.push(chain(&REVIEW_2_2));
+    corpora.push(super::parse_layer(&bars(&S86), &theta).strokes.to_vec());
+    for series in 0..40u64 {
+        corpora.push(super::parse_layer(&zigzag(series), &theta).strokes.to_vec());
+    }
+    let (mut moved, mut sealed) = (0, 0);
+    for all in &corpora {
+        let mut incr = IncrSegments::empty();
+        for n in 1..=all.len() {
+            let strokes = &all[..n];
+            let want = reference_spans(strokes, config);
+            let (spans, pending, facts) = first_spans_with(strokes, config);
+            assert_eq!((&spans, pending), (&want.0, want.1), "前缀 {n} 与参照不同");
+            let batch = divide_segments_with_tail(strokes, config);
+            assert_eq!(batch.1, pending);
+            assert_eq!(batch.0.len(), spans.len());
+            incr = incr.append(strokes, config);
+            assert_eq!(incr.to_result_vec(), batch, "前缀 {n} 增量与全量不同");
+            let seed = facts.seeds.last().map(|s| s.start_stroke);
+            moved += usize::from(spans.first().is_some_and(|f| Some(f.0) > seed));
+            sealed += usize::from(facts.waiting_reasons.contains(&FIRST_START_SEALED));
+        }
+    }
+    println!("tb1978 参照对拍：起点越过种子的已确认流首段前缀 {moved}，封住前缀 {sealed}");
+    assert!(moved > 100 && sealed > 0, "语料覆盖不足：{moved}／{sealed}");
+}
+
+/// 第 9 条的结构保证：已确认的段不随前缀改写——逐笔前缀上，前一前缀的段序列总是后一前缀的前缀，
+/// 包括封住之后再发布的那一代。
+#[test]
+fn confirmed_segments_are_never_rewritten_on_random_polylines() {
+    let config = &ThetaConfig::for_s_structure_writer().unwrap().parse;
+    let mut released = 0;
+    for all in random_polylines(0x1978_1000, 1000) {
+        let (mut prev, mut was_sealed) = (vec![], false);
+        for n in 1..=all.len() {
+            let (spans, _, facts) = first_spans_with(&all[..n], config);
+            assert!(
+                spans.starts_with(&prev),
+                "前缀 {n} 改写了已确认段：{prev:?} → {spans:?}"
+            );
+            let sealed = facts.waiting_reasons.contains(&FIRST_START_SEALED);
+            released += usize::from(was_sealed && !sealed && !spans.is_empty());
+            (prev, was_sealed) = (spans, sealed);
+        }
+    }
+    println!("tb1978 封住后发布 {released} 次");
+    assert!(released > 0, "语料须走到封住后再发布");
+}
+
+/// S 写者路径：观察模式 + 跨代游标簿（每代新簿登记上一代 checkpoint，同 `tb02c::restore_cursors`）。
+/// 发布的第二种候选游标都在返回的簿里（PR #1987 审查第 1 条），候选成员不越出本段，已确认段不改写。
+/// 签署预算 0 时逐代等于参照；每轮 2 笔时游标跨代续扫，末代在同一输入上续足预算后收敛到参照。
+#[test]
+fn s_writer_cursor_book_path_matches_the_reference_across_generations() {
+    let config = &ThetaConfig::for_s_structure_writer().unwrap().parse;
+    let mut carried = 0;
+    for budget in [0u32, 2] {
+        for all in random_polylines(0x1978_2000, 150) {
+            let (mut checkpoint, mut prev) = (Vec::new(), vec![]);
+            let round = |strokes: &[Stroke], checkpoint: &mut Vec<serde_json::Value>| {
+                let mut store = SecondFoldStore::new(budget, config.scan_budget);
+                for wire in checkpoint.iter() {
+                    store.restore(wire);
+                }
+                let (_, pending, facts, store) =
+                    divide_segments_with_facts_store(strokes, config, store);
+                for c in &facts.candidates {
+                    assert_eq!(outside_own_range(c), Vec::<usize>::new());
+                    let Some(second) = &c.second else { continue };
+                    let id = SecondCandidateId {
+                        seg_dir: strokes[c.start_stroke].direction,
+                        b_stroke: second.from_stroke - 1,
+                        candidate_extreme: second.candidate_extreme,
+                    };
+                    assert!(
+                        store.cursor(&id).is_some(),
+                        "第二种候选不在返回的簿：{id:?}"
+                    );
+                }
+                *checkpoint = store.checkpoint();
+                let spans: Vec<(usize, usize)> = facts
+                    .candidates
+                    .iter()
+                    .filter_map(|c| c.end_stroke.map(|e| (c.start_stroke, e)))
+                    .collect();
+                (spans, pending)
+            };
+            for n in 1..=all.len() {
+                let got = round(&all[..n], &mut checkpoint);
+                carried += checkpoint.len();
+                assert!(
+                    got.0.starts_with(&prev),
+                    "预算 {budget} 前缀 {n} 改写了已确认段"
+                );
+                if budget == 0 {
+                    assert_eq!(got, reference_spans(&all[..n], config), "前缀 {n}");
+                }
+                prev = got.0;
+            }
+            let mut last = round(&all, &mut checkpoint);
+            for _ in 0..all.len() {
+                last = round(&all, &mut checkpoint);
+            }
+            assert_eq!(
+                last,
+                reference_spans(&all, config),
+                "预算 {budget} 续足后须收敛到参照"
+            );
+        }
+    }
+    assert!(carried > 0, "每轮 2 笔时须有游标跨代带入");
 }
