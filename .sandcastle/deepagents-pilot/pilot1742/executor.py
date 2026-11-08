@@ -773,6 +773,25 @@ def _sigkill_at(point: str | None) -> Callable[[str], None]:
     return crash
 
 
+def review_sweep_key(executor_key: Path, review_key: Path | None) -> Path | None:
+    """serve --review-sweep 交给审查子进程的私钥。给了 --review-private-key 就用它。没给时：审查身份文件不存在，
+    审查本来就用执行器 App 签名（external_review 的缺省），沿用执行器私钥并记一行；身份文件存在（已换审查专用
+    App），执行器私钥签不出审查 App 的 JWT，每次派审都会退出码 2，于是失败关闭：记一行，返回 None。"""
+    from . import external_review
+    if review_key is not None:
+        return review_key
+    if external_review.IDENTITY_CONFIG.exists():
+        print("review-sweep " + json.dumps({
+            "action": "refused-no-review-key",
+            "reason": f"{external_review.IDENTITY_CONFIG} 指定了审查专用 App，serve 须给 --review-private-key"},
+            ensure_ascii=False), flush=True)
+        return None
+    print("review-sweep " + json.dumps({
+        "action": "review-key-fallback",
+        "reason": "未给 --review-private-key 且没有审查身份文件：审查沿用执行器 App"}, ensure_ascii=False), flush=True)
+    return executor_key
+
+
 def _client(args: argparse.Namespace) -> GitHubAppClient:
     """登记只要读权限；run 才申请写权限。两者都先核 App、安装与仓库身份。"""
     identity = AppIdentity(5486877, 179444545, 1150335160, REPO, "newchanlun-deepagents-1742", args.private_key)
@@ -785,7 +804,8 @@ def _client(args: argparse.Namespace) -> GitHubAppClient:
     return client
 
 
-def _serve(args: argparse.Namespace, store: ClaimStore, cutover_store: CutoverStore, source_repo: Path) -> int:
+def _serve(args: argparse.Namespace, store: ClaimStore, cutover_store: CutoverStore, source_repo: Path,
+           review_key: Path | None = None) -> int:
     """队列轮询。读不到 GitHub（含启动时的 App 身份核验）：
     `--once` 让 IdentityError 照旧冒到 main → 退出码 2（runbook 拿它当检查步骤）；
     `--loop` 写明哪个源读不到、标到状态页，等一个轮询间隔再从头核身份，进程不退出（launchd 不重启）。
@@ -799,6 +819,10 @@ def _serve(args: argparse.Namespace, store: ClaimStore, cutover_store: CutoverSt
                    "--recheck-approval"]
         return subprocess.run(command, check=False).returncode
 
+    sweep_round = None
+    if args.review_sweep and review_key is not None:
+        from .review_sweep import serve_round
+        sweep_round = serve_round(review_key, auto_merge=args.review_sweep_auto_merge)
     client: GitHubAppClient | None = None
     try:
         while True:
@@ -807,6 +831,8 @@ def _serve(args: argparse.Namespace, store: ClaimStore, cutover_store: CutoverSt
             except CutoverError as error:
                 print(f"queue inactive: {error}")
                 return 0
+            if sweep_round is not None:  # 排在派票前、App 核身份前：派票子进程再久、App 再读不到，sweep 也已跑过
+                sweep_round()
             try:
                 if client is None:
                     client = _client(args)
@@ -862,6 +888,13 @@ def main(argv: list[str] | None = None) -> int:
     serve.add_argument("--poll-seconds", type=float, default=60)
     serve.add_argument("--workers-log", type=Path, default=WORKERS_LOG)
     serve.add_argument("--private-key", type=Path, required=True)
+    serve.add_argument("--review-sweep", action="store_true",
+                       help="每轮附带一次 review_sweep：给开放 PR 派正式审查（宿主 gh 凭据，HOST 同时只跑一个审查）")
+    serve.add_argument("--review-private-key", type=Path,
+                       help="审查 App 私钥，只原样转给 sweep 派的 review-pr；不复用 --private-key（执行器 App）。"
+                            "审查身份文件（external_review.IDENTITY_CONFIG）存在时必须给")
+    serve.add_argument("--review-sweep-auto-merge", action="store_true",
+                       help="review_sweep 追平队首，并在精确 head 双门全绿时带 sha 合入；须与 --review-sweep 同用")
     cutover = sub.add_parser("cutover", help="全局冻结排空证据；不执行生产切换")
     cutover.add_argument("operation", choices=("snapshot", "pending", "audit-release", "verify", "record"))
     cutover.add_argument("--snapshot", type=Path)
@@ -909,12 +942,19 @@ def main(argv: list[str] | None = None) -> int:
         if args.command == "serve":
             if args.poll_seconds <= 0:
                 raise ValueError("poll-seconds 须为正数")
+            if args.review_sweep_auto_merge and not args.review_sweep:
+                raise ValueError("--review-sweep-auto-merge 须与 --review-sweep 同用")
+            review_key = None
+            if args.review_sweep:
+                review_key = review_sweep_key(args.private_key, args.review_private_key)
+                if review_key is None:
+                    return 2
             try:
                 cutover_store.load()
             except CutoverError as error:
                 print(f"queue inactive: {error}")
                 return 0
-            return _serve(args, store, cutover_store, source_repo)
+            return _serve(args, store, cutover_store, source_repo, review_key)
         if args.command == "cutover":
             snapshot_path = args.snapshot or args.state_root / "cutover-snapshot.json"
             if args.operation == "pending":
