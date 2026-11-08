@@ -593,12 +593,28 @@ class ServeRound:
         return actions
 
 
+FETCH_CREDENTIAL = ("-c", "credential.helper=", "-c", "credential.helper=!gh auth git-credential")
+
+
+def fetch_command(source: Path, url: str, number: int) -> list[str]:
+    # 先清空再只挂 gh 自己的凭据助手：与 sweep 其余 GitHub 读写同一份宿主 gh 登录。仓库私有时也能取；
+    # 本进程不读、不打印 token（由 gh 直接交给 git），也不引入新的密钥。
+    return ["git", "-c", "core.hooksPath=/dev/null", *FETCH_CREDENTIAL, "-C", str(source), "fetch", "--no-tags",
+            "--quiet", url, "main", f"pull/{number}/head"]
+
+
+def fetch_environment() -> dict[str, str]:
+    """external_review 的 git 环境（关全局/系统配置、不弹终端提示），外加 gh 找到自己登录状态所需的 HOME 与 GH_CONFIG_DIR。"""
+    env = git_environment()
+    env.update({k: os.environ[k] for k in ("HOME", "GH_CONFIG_DIR") if k in os.environ})
+    return env
+
+
 def fetcher(source: Path, url: str = f"https://github.com/{REPO}.git") -> Sync:
     """sweep 的 sync：把 main 与 PR head 取进宿主对象库，只写 FETCH_HEAD，不动 HEAD、分支与工作区（controller
-    身份不变）。仓库公开，用 external_review 的无凭据 git 环境。"""
+    身份不变）。认证走宿主 gh 的凭据助手（见 fetch_command）；失败由 decide 记 source-unreadable。"""
     def sync(number: int, base: str, head: str) -> None:
-        subprocess.run(["git", "-c", "core.hooksPath=/dev/null", "-C", str(source), "fetch", "--no-tags", "--quiet",
-                        url, "main", f"pull/{number}/head"], env=git_environment(), check=True, capture_output=True,
+        subprocess.run(fetch_command(source, url, number), env=fetch_environment(), check=True, capture_output=True,
                        timeout=FETCH_TIMEOUT_SECONDS)
     return sync
 

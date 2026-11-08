@@ -1058,3 +1058,25 @@ def test_fetch_failure_is_an_unreadable_source_and_never_reviewed(lane, tmp_path
     assert result["action"] == "source-unreadable" and result["unreadable"].endswith("pull/1810/head")
     assert "CalledProcessError" in result["reason"] and host.spawned == []
     assert "source-unreadable" in module.STUCK_REVIEW
+
+
+def test_fetch_authenticates_with_the_hosts_gh_credential_helper(monkeypatch, tmp_path):
+    """kimi 第四轮：私有仓也要取得到。fetch 只挂 gh 自己的凭据助手（先清空其他助手），与 sweep 其余 GitHub 读写
+    同一份宿主 gh 登录；保留 120 秒超时；环境只多 HOME/GH_CONFIG_DIR 让 gh 找到登录状态，不带任何 token 变量。"""
+    seen = {}
+    def run(command, **kwargs):
+        seen.update(command=command, **kwargs)
+    monkeypatch.setattr(module.subprocess, "run", run)
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("GH_TOKEN", "must-not-leak")
+    monkeypatch.setenv("GITHUB_TOKEN", "must-not-leak")
+    module.fetcher(tmp_path, "https://github.com/Newchanlun/NewChanlun.git")(7, "a" * 40, "b" * 40)
+    command = seen["command"]
+    helpers = [command[i + 1] for i, part in enumerate(command) if part == "-c" and
+               command[i + 1].startswith("credential.helper=")]
+    assert helpers == ["credential.helper=", "credential.helper=!gh auth git-credential"]
+    assert command[command.index("fetch"):] == ["fetch", "--no-tags", "--quiet",
+                                                "https://github.com/Newchanlun/NewChanlun.git", "main", "pull/7/head"]
+    assert seen["timeout"] == module.FETCH_TIMEOUT_SECONDS == 120
+    assert seen["env"]["HOME"] == str(tmp_path) and seen["env"]["GIT_TERMINAL_PROMPT"] == "0"
+    assert not {"GH_TOKEN", "GITHUB_TOKEN"} & set(seen["env"])
