@@ -836,6 +836,27 @@ NOT_A_PATCH_READ = {
     "for-loop-show": [lambda t: _command(f"H={t.head_sha}; for f in changed-0 changed-1; do git show $H:$f | nl -ba; done",
                                          output="     1\t0\n     1\t1\n")],
     "and-then-true": _diff(tail=" && true"),
+    # #1969 正式审查（01a6038a）opus BLOCK：`$'…'` 解码出换行、U+2028 被 splitlines 切开，git 报错里的参数成了一行证据
+    "ansi-c-quote-newline": [lambda t: _command(
+        f"git show {t.head_sha}:$'x\\n+0\\n' | cat", output=f"fatal: path 'x\n+0\n' does not exist in '{t.head_sha}'\n")],
+    "locale-quote-path": [lambda t: _command(f'git show {t.head_sha}:$"changed-0"')],
+    "u2028-in-single-quotes": [lambda t: _command(
+        f"git show {t.head_sha}:'x\u2028+0\u2028' | cat",
+        output=f"fatal: path 'x\u2028+0\u2028' does not exist in '{t.head_sha}'\n")],
+    "u2029-in-output-only": [lambda t: _command(
+        f"git diff {t.merge_base_sha} {t.head_sha} -- nope", output="x\u2029+0\n")],
+    # 同一轮 kimi BLOCK：git 自己印出审查员写的文字、外部 diff 被后面的 --ext-diff 重新打开、grep 输出的不是 git 的行
+    "show-format-text": [lambda t: _command(f"git show --format='+0' {t.head_sha} -- nope", output="+0\n")],
+    "show-pretty-format-text": [lambda t: _command(f"git show --pretty=tformat:+0 {t.head_sha} -- nope", output="+0\n")],
+    "show-line-prefix": [lambda t: _command(f"git show --line-prefix=+0 {t.head_sha} -- nope", output="+0\n")],
+    "config-format-pretty": [lambda t: _command(f"git -c format.pretty=format:+0 show {t.head_sha} -- nope", output="+0\n")],
+    "ext-diff-reenabled": [lambda t: _command(
+        f"git -c diff.external='printf +0' diff --no-ext-diff --ext-diff {t.merge_base_sha} {t.head_sha}", output="+0\n")],
+    "config-textconv": [lambda t: _command(
+        f"git -c diff.lfs.textconv='printf +0' diff {t.merge_base_sha} {t.head_sha}", output="+0\n")],
+    "grep-count": [lambda t: _command(f"git diff {t.merge_base_sha} {t.head_sha} -- nope | grep -c . | cat", output="0\n")],
+    "grep-only-matching": [lambda t: _command(
+        f"git show {t.head_sha}:'x+0' 2>&1 | grep -o '+0'", output="+0\n")],
 }
 PATCH_READ = {
     "range": [lambda t: _command(f"cd /review && git diff --no-ext-diff --no-textconv {t.merge_base_sha} {t.head_sha} | head")],
@@ -861,6 +882,11 @@ PATCH_READ = {
         f"GIT_PAGER=cat git --no-pager -c core.quotepath=false --git-dir=/review/.git --work-tree /review "
         f"diff {t.merge_base_sha} {t.head_sha}")],
     "stat-then-patch": _diff("--stat -p"),
+    "show-named-pretty": [lambda t: _command(f"git show --pretty=fuller {t.head_sha}")],
+    "hooks-path-config": [lambda t: _command(
+        f"git -c core.hooksPath=/dev/null diff --no-ext-diff --no-textconv {t.merge_base_sha} {t.head_sha}")],
+    "dollar-at-end-of-double-quotes": [lambda t: _command(
+        f'git show {t.head_sha}:changed-0 | grep -n -B2 "^0$" | grep -v "^--$"', output="1:0\n")],
     "command-in-variable": [lambda t: _command(
         f'cd /review && D="git diff --no-ext-diff --no-textconv {t.merge_base_sha} {t.head_sha}"; $D -- changed-0')],
     "stderr-dropped": _diff(tail=" 2>/dev/null"),
@@ -880,6 +906,8 @@ def test_frozen_patch_evidence_is_its_distinct_changed_lines():
     assert patch.shown_in("    12\t    new_value = compute_new()\n")  # git show <head>:f.py | nl -ba
     assert not patch.shown_in("}\n")
     assert not patch.shown_in("diff --git a/f.py b/f.py\n@@ -1,2 +1,2 @@\n+X /tmp/git-blob-ksCWK9/f.py\n")  # textconv
+    assert not patch.shown_in("fatal: path 'x\u2028+    new_value = compute_new()\u2028' does not exist\n")
+    assert patch.shown_in("+    new_value = compute_new()\r\n")
     binary = FrozenPatch.from_diff("a" * 40, (), "diff --git a/p.png b/p.png\nBinary files a/p.png and b/p.png differ\n")
     assert binary.shown_in("diff --git a/p.png b/p.png\n") and not binary.shown_in("")
 

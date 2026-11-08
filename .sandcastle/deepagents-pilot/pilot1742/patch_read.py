@@ -1,11 +1,18 @@
 """审查员的一条 command_execution 是否把冻结候选补丁读进了输出（#1968，#1969 kimi BLOCK）。
 
+防护边界：这道门防的是审查员没读补丁就给结论，包括零工具、只读无关文件、空输出、输出被丢掉或吞掉、
+同一条命令里别的段拼出伪造的改动行这类无意或低成本的情形。它不是沙箱，不对抗刻意构造 shell 来骗过这里的
+静态分析的审查员；那要在执行层隔离（审查容器只读 home、专用的补丁读取工具），见 #1971。判断一个写法该不该拦，
+先看它属于哪一边：审查员顺手写出来的命令会碰到的，在这里拦；只有存心伪造才会写出来的，记进 #1971。
+在这个边界内，看不懂的写法一律判未读取，不猜：`$'…'`、`$"…"`、命令替换、未知变量、含换行或其他行终止符的参数。
+
 Codex 记录的命令形如 `/bin/bash -lc '<脚本>'`。这里按 bash 语法静态切开脚本，不执行：引号、注释、heredoc 正文、
 `$(...)` 按 shell 的含义处理；变量按执行顺序代回（同名取最后一次赋值，单引号里不代回，子 shell 与多段管道里的赋值
 不外泄，`H=x cmd $H` 的前缀赋值不影响本命令的展开，未加引号的变量按空白分词）。求不出值的部分记为 _OPAQUE。
 整条命令须是这个形状，其中恰好一个简单命令是 git 读取：
 - git 读取：去掉保留字 `do`/`then`/`else`/`{`/`time` 与 `NAME=val` 前缀后，第一个词就是 `git`（或 `/usr/bin/git`），
-  之后只有全局选项 `-C <dir>`、`-c <k=v>`、`--no-pager`/`-P`、`--git-dir`、`--work-tree`，紧跟子命令 diff 或 show；
+  之后只有全局选项 `-C <dir>`、`-c <k=v>`（只认 _CONFIG_KEYS）、`--no-pager`/`-P`、`--git-dir`、`--work-tree`，
+  紧跟子命令 diff 或 show，且不带会印出自定文字的选项（`--format=<格式串>`、`--line-prefix`）；
   按 git 的实际输出规则会输出补丁：diff 两侧一边是冻结 head（`HEAD` 也算，审阅 checkout 已证实停在 head 且干净）、
   另一边是别的已知提交，只给一个提交时另一边是工作区；show 指名 head 的提交、`<other>..<head>` 范围，
   或 `<head>:<path>` 文件内容；stdout 没被丢掉（/dev/null、关闭、写进文件）。
@@ -16,7 +23,7 @@ Codex 记录的命令形如 `/bin/bash -lc '<脚本>'`。这里按 bash 语法�
 命令文本只说明脚本打算让 git 输出补丁，不说明它真的输出了：`if false; then git diff …; fi` 没执行，
 `exec >/dev/null`、`export GIT_EXTERNAL_DIFF=true` 改的是之后命令的环境，textconv 保留 `diff --git`/`@@` 头而把内容
 换掉（#1969 kimi BLOCK）。所以还要看这条事件实际记录的输出（Codex `aggregated_output`，约 1 MiB 截断、保留前部）：
-其中须有一行就是冻结补丁的真实内容，见 FrozenPatch。
+其中须有一行就是冻结补丁的真实内容，见 FrozenPatch。输出只按 `\n` 切行，含其他行终止符的行不当证据。
 """
 from __future__ import annotations
 
@@ -36,6 +43,10 @@ _PATCH_ON = re.compile(r"-p|-u|--patch|-U\d*|--unified(?:=\d+)?|--patch-with-(?:
 _SUMMARY = re.compile(r"--(?:stat|numstat|shortstat|dirstat|dirstat-by-file|summary|compact-summary|raw)(?:=.*)?|-X.*")
 _NO_OUTPUT = re.compile(r"--(?:name-only|name-status|check|output=.*)")
 _VALUE_OPTIONS = frozenset({"-O", "-S", "-G", "-I"})
+_CONFIG_KEYS = frozenset({"core.quotepath", "core.hookspath", "core.excludesfile"})  # 不改 diff/show 输出的配置
+_NAMED_FORMAT = r"oneline|short|medium|full|fuller|reference|email|raw|mboxrd"
+_PRINTS_TEXT = re.compile(rf"--(?:pretty|format)=(?!(?:{_NAMED_FORMAT})$).*|--format|--line-prefix(?:=.*)?")
+_BREAK = re.compile("[\r\x0b\x0c\x1c-\x1e\x85\u2028\u2029]")  # str.splitlines 认作换行、而 `\n` 切行不认的字符
 
 Part = tuple[str, str]  # (kind, text)，kind ∈ lit（未加引号）/ q（加引号）/ var（未加引号，展开后按空白分词）/ qvar / opaque
 
@@ -77,6 +88,9 @@ def _dollar(s: str, i: int, word: list[Part], quoted: bool = False) -> int:
     if i + 1 < len(s) and (s[i + 1].isdigit() or s[i + 1] in "@*#?$!-"):
         word.append(("opaque", ""))
         return i + 2
+    if not quoted and s[i + 1:i + 2] in ("'", '"'):
+        word.append(("opaque", ""))  # `$'…'` 会解码 `\n` 等转义，`$"…"` 按语言环境翻译；合法审查用不到，整条拒绝
+        return i + 1
     word.append(("lit", "$"))
     return i + 1
 
@@ -374,9 +388,10 @@ def _git_patch_read(command: _Expanded, revisions: _Revisions) -> bool:
             positional.append(arg)
     if "--no-index" in options or (subcommand == "show" and "--output" in " ".join(options)):
         return False
-    external = "GIT_EXTERNAL_DIFF" in command.env_names or any(
-        re.match(r"diff\.(?:external|[^=]*\.command)=", c, re.IGNORECASE) for c in config)
-    if external and "--no-ext-diff" not in options:
+    # `-c` 能换掉 git 的输出（diff.external、textconv、core.pager、format.pretty……），只认不影响输出的几项；
+    # 补丁旁边能印出审查员自己写的文字的选项（`--format='+<改动行>'`、`--line-prefix`）也不认（#1969 kimi BLOCK）
+    if any(c.partition("=")[0].lower() not in _CONFIG_KEYS for c in config) or any(
+            _PRINTS_TEXT.fullmatch(o) for o in options):
         return False
     # 补丁走 stdout 的前提下，blob 内容不受输出格式选项影响；提交和范围要看格式选项，且不能混进求不出值的参数
     # （`$X` 可能就是 `-s`）。diff 在 `--` 之前只接受认识的提交：像 `'$H'`、`<head>x` 这样的词 git 会当路径，
@@ -419,6 +434,12 @@ def _script(command: str) -> str | None:
     return command
 
 
+def _lines(text: str) -> list[str]:
+    """只按 `\n`（及 `\r\n`）切行。git 与过滤器把参数原样写进报错，`str.splitlines` 还会在 U+2028 等处切开，
+    参数里的这些字符就成了一行伪造的证据（#1969 opus BLOCK）。"""
+    return [line.removesuffix("\r") for line in text.split("\n")]
+
+
 _LINE_NUMBER = re.compile(r"\d+[\t:]")  # `nl -ba`、`cat -n`、`grep -n` 加在行首的行号
 _DISTINCT = 12  # 够长的改动行才当证据；`}`、`return` 这类短行在任何文件里都可能出现
 
@@ -434,16 +455,19 @@ class FrozenPatch:
 
     @classmethod
     def from_diff(cls, head_sha: str, other_shas: tuple[str, ...], diff: str) -> FrozenPatch:
-        changed = {line[1:].strip() for line in diff.splitlines()
-                   if line[:1] in "+-" and not line.startswith(("+++ ", "--- "))} - {""}
-        headers = {line for line in diff.splitlines() if line.startswith("diff --git ")}
+        changed = {line[1:].strip() for line in _lines(diff)
+                   if line[:1] in "+-" and not line.startswith(("+++ ", "--- ")) and not _BREAK.search(line)} - {""}
+        headers = {line for line in _lines(diff) if line.startswith("diff --git ")}
         return cls(head_sha, other_shas,
                    frozenset({line for line in changed if len(line) >= _DISTINCT} or changed or headers))
 
     def shown_in(self, output: str) -> bool:
         """输出里有一行（去掉行号前缀、diff 的 `+`/`-`/空格标记后）是冻结补丁的改动内容。
-        `git show <head>:<path>` 输出的是新文件，加进来的行同样在其中。"""
-        for raw in output.splitlines():
+        `git show <head>:<path>` 输出的是新文件，加进来的行同样在其中。含 _BREAK 字符的行不当证据：
+        它在别的切行规则下可能是两行。"""
+        for raw in _lines(output):
+            if _BREAK.search(raw):
+                continue
             line = raw.strip()
             if match := _LINE_NUMBER.match(line):
                 line = line[match.end():].strip()
@@ -460,7 +484,8 @@ def reads_candidate_patch(command: str, output: str, patch: FrozenPatch) -> bool
 def _would_print_patch(command: str, head_sha: str, other_shas: tuple[str, ...]) -> bool:
     """`other_shas` 是同一冻结目标里别的已知提交（merge-base、base）；diff 另一侧须是它们或 head 的祖先写法，
     写一个不存在的 SHA 再接管道（`git diff <bad> <head> | head`，无 pipefail 时退出码为 0）不算读取。
-    命令替换会执行别的命令，含换行的参数会被 git 或过滤器的报错原样带进输出（`git show <head>:$'x\n+<改动行>'`），
+    命令替换会执行别的命令，含换行或其他行终止符（U+2028 等）的参数会被 git 或过滤器的报错原样带进输出
+    （`git show <head>:'x<U+2028>+<改动行>'`；`$'x\n+<改动行>'` 在词法上就判为求不出值），
     _SPECIAL_NAME 里的变量改的是跑哪个 git、读哪份配置和 shell 怎么分词，这三样都不算。"""
     script = _script(command)
     if script is None:
@@ -471,7 +496,7 @@ def _would_print_patch(command: str, head_sha: str, other_shas: tuple[str, ...])
                            for word in [*c.words, *(t for _, t in c.redirects)] for kind, _ in word):
         return False
     expanded = _evaluate(items)
-    if any("\n" in arg or "\r" in arg for e in expanded for arg in e.argv):
+    if any("\n" in arg or _BREAK.search(arg) for e in expanded for arg in e.argv):
         return False
     revisions = _Revisions(head_sha, other_shas)
     reads = [k for k, e in enumerate(expanded) if _git_patch_read(e, revisions)]
@@ -522,7 +547,7 @@ _FILTERS = {
     "tail": _FilterSpec(rf"-(?:{_COUNT})|-[nc](?:{_COUNT})|--(?:lines|bytes)=(?:{_COUNT})", {"-n": _COUNT, "-c": _COUNT}),
     "cat": _FilterSpec(r"-[nbsuvetAET]+|-"),
     "sed": _FilterSpec(r"-n", {"-e": _SED_SCRIPT.pattern}, _SED_SCRIPT.pattern),
-    "grep": _FilterSpec(r"-[nivEFwxcaoh]+|-[ABCm]\d+|--colou?r=never",
+    "grep": _FilterSpec(r"-[nivEFwxah]+|-[ABCm]\d+|--colou?r=never",
                         {"-e": r"(?s:.*)", "-A": r"\d+", "-B": r"\d+", "-C": r"\d+", "-m": r"\d+"}, r"(?s:.*)"),
 }
 
