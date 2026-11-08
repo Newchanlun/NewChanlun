@@ -42,11 +42,14 @@ test("新标签分类、复核与释放使用同一标签，旧标签不混领",
   assert.equal(classifyTicket({ ...t, labels: ["sandcastle"] }, QUEUE_LABEL), "held");
   assert.match(recheckBeforeRelease({ labels: [{ name: "sandcastle" }] }, QUEUE_LABEL)!, /另一放行标签/);
   const writes: string[] = [];
-  assert.equal(releaseTicket(1, { specs: [2], orchestrator: "fixture" }, { read: args => JSON.stringify(
-    args.startsWith("issue view 1") ? { labels: [], assignees: [], state: "OPEN" }
-      : args.startsWith("issue view 2") ? { number: 2, title: "SPEC: fixture", body: "", state: "OPEN" }
+  // 放行只认当前 SPEC 计划内、带当前发布凭据的票。
+  const plan = '<!-- wayfinder-split -->\n```json\n{"tickets":[{"id":"Q1","title":"q"}]}\n```';
+  const body = `<!-- wayfinder-ticket:2:Q1 -->\n<!-- wayfinder-published:2:${specBodyDigest(plan)}:Q1 -->\n`;
+  assert.equal(releaseTicket(1, { specs: [2], orchestrator: "fixture", via: "plan" }, { read: args => JSON.stringify(
+    args.startsWith("issue view 1") ? { title: "[impl] Q1 q", body, labels: [], assignees: [], state: "OPEN" }
+      : args.startsWith("issue view 2") ? { number: 2, title: "SPEC: fixture", body: plan, state: "OPEN" }
       : [{ user: { login: "fixture" }, created_at: "2026-11-07", body: specRulingBody({ specNumber: 2,
-        verdict: "PASS", author: "draft", reviewer: "review", digest: specBodyDigest(""), evidence: "/fixture/review.json" }) }]),
+        verdict: "PASS", author: "draft", reviewer: "review", digest: specBodyDigest(plan), evidence: "/fixture/review.json" }) }]),
     write: cmd => { writes.push(cmd); return ""; } }, QUEUE_LABEL), null);
   assert.deepEqual(writes, ["issue edit 1 --add-label deepagents:queue"]);
 });

@@ -62,7 +62,7 @@ class ParallelRunTest(unittest.TestCase):
         self.tmp = pathlib.Path(tempfile.mkdtemp())
         self.order = []
         self.lock = threading.Lock()
-        self.fail = set()
+        self.failing = set()
         self.saved = {k: getattr(MODULE, k, None) for k in
                       ("required_locks", "select_binary", "same_binary", "sha256", "run_logged", "ESTIMATED_SECONDS")}
         self.env = os.environ.get("CI_1488_TEST_JOBS")
@@ -82,7 +82,7 @@ class ParallelRunTest(unittest.TestCase):
                 name = argv[1]
                 with self.lock:
                     self.order.append(name)
-                if name in self.fail:
+                if name in self.failing:
                     log_path.write_text(f"test {name} ... FAILED\n")
                     return 101
                 log_path.write_text(f"test {name} ... ok\n"
@@ -153,7 +153,7 @@ class ParallelRunTest(unittest.TestCase):
         self.assertEqual([t["name"] for t in result["tests"]], [lock["name"] for lock in self.LOCKS])
 
     def test_parallel_single_failure_is_reported_in_plan_order(self):
-        self.fail = {"m::d_mid", "m::a_short"}
+        self.failing = {"m::d_mid", "m::a_short"}
         ok, result = self.run_with(4)
         self.assertFalse(ok)
         self.assertIn("['m::a_short', 'm::d_mid']", result["error"])

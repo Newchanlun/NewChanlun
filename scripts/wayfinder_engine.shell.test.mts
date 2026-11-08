@@ -18,6 +18,11 @@ import { MAIN_MODEL } from "../.sandcastle/main-model.mts";
 
 const repoRoot = join(dirname(fileURLToPath(import.meta.url)), "..");
 
+// 放行只认当前获审 SPEC 计划内、带当前发布凭据的票；壳层夹具用一张已发布的计划票。
+const PLAN_SPEC = '<!-- wayfinder-split -->\n```json\n{"tickets":[{"id":"S1","title":"shell fixture"}]}\n```';
+const planTicketBody = (spec: number) =>
+  `<!-- wayfinder-ticket:${spec}:S1 -->\n<!-- wayfinder-published:${spec}:${specBodyDigest(PLAN_SPEC)}:S1 -->\n`;
+
 function fakeGhScript(stateFile: string, failCount: number): string {
   return `#!/usr/bin/env bash
 n=$(cat "${stateFile}" 2>/dev/null || echo 0)
@@ -124,11 +129,11 @@ test("切流壳：draining 下引擎向假 gh 发出新队列标签，不经过�
       legacy_services_unloaded: ["com.newchanlun.sandcastle-claimer", "com.newchanlun.sandcastle-harvest"] }));
     writeFileSync(join(root, "gh"), `#!/usr/bin/env bash
 if [ "$1 $2 $3" = "issue view 2" ]; then
-  echo '{"number":2,"title":"SPEC: fixture","body":"","state":"OPEN"}'
+  cat "$D6_FIXTURE_LOG.spec"
 elif [ "$1 $2" = "api --paginate" ]; then
   cat "$D6_FIXTURE_LOG.comments"
 elif [ "$1 $2" = "issue view" ]; then
-  echo '{"state":"OPEN","labels":[],"assignees":[]}'
+  cat "$D6_FIXTURE_LOG.ticket"
 elif [ "$1 $2" = "issue edit" ]; then
   printf '%s\\n' "$*" >> "$D6_FIXTURE_LOG"
 else
@@ -136,13 +141,15 @@ else
 fi
 `, { mode: 0o755 });
     writeFileSync(log + ".comments", JSON.stringify([{ user: { login: "fixture" }, created_at: "2026-11-07",
-      body: specRulingBody({ specNumber: 2, verdict: "PASS", author: "draft", reviewer: "review", digest: specBodyDigest(""), evidence: "/fixture/review.json" }) }]));
+      body: specRulingBody({ specNumber: 2, verdict: "PASS", author: "draft", reviewer: "review", digest: specBodyDigest(PLAN_SPEC), evidence: "/fixture/review.json" }) }]));
+    writeFileSync(log + ".spec", JSON.stringify({ number: 2, title: "SPEC: fixture", body: PLAN_SPEC, state: "OPEN" }));
+    writeFileSync(log + ".ticket", JSON.stringify({ title: "[impl] S1 shell fixture", body: planTicketBody(2), state: "OPEN", labels: [], assignees: [] }));
     const script = `import {execFileSync} from 'node:child_process';
       const m = await import(process.argv[1]);
       const roots = {stateRoot: process.argv[2], drainRoot: process.argv[3]};
       const io = {read: args => execFileSync('gh', args.split(' '), {encoding:'utf8'}),
                   write: args => execFileSync('gh', args.split(' '), {encoding:'utf8'})};
-      await m.withEngineAdmission(() => m.releaseTicket(99, {specs:[2], orchestrator:"fixture"}, io, m.releaseLabel(roots.stateRoot, roots.drainRoot)), roots);`;
+      await m.withEngineAdmission(() => m.releaseTicket(99, {specs:[2], orchestrator:"fixture", via:"plan"}, io, m.releaseLabel(roots.stateRoot, roots.drainRoot)), roots);`;
     const result = spawnSync(process.execPath, ["--experimental-strip-types", "--input-type=module", "-e", script,
       new URL("./wayfinder_engine.mts", import.meta.url).href, state, drain], {
       cwd: repoRoot, env: { ...process.env, PATH: `${root}:${process.env.PATH}`, D6_FIXTURE_LOG: log },
@@ -180,13 +187,16 @@ async function runLiveLoop(record: "valid" | "missing" | "malformed" | "stale", 
       legacy_services_unloaded: ["com.newchanlun.sandcastle-claimer", "com.newchanlun.sandcastle-harvest"] };
     if (record !== "missing") writeFileSync(join(state, "cutover.json"),
       record === "malformed" ? "{" : JSON.stringify(cutover));
-    const ticket = { number: 99, title: "[impl] shell fixture", state: "OPEN",
+    const ticket = { number: 99, title: "[impl] S1 shell fixture", body: planTicketBody(2), state: "OPEN",
       labels: [{ name: "ready-for-agent" }], assignees: [] };
     for (const [name, value] of Object.entries({
       maps: [{ number: 1, title: "fixture map", state: "OPEN", labels: [] }],
-      children: [{ number: 2, title: "SPEC: fixture", state: "OPEN" }, ticket],
-      comments: [{ user: { login: "fixture-orchestrator" }, body: specRulingBody({ specNumber: 2, verdict: "PASS", author: "fixture-draft", reviewer: "fixture-review", digest: specBodyDigest(""), evidence: "/fixtures/review.json" }), created_at: "2026-01-01" }],
+      children: [{ number: 2, title: "SPEC: fixture", body: PLAN_SPEC, state: "OPEN" }, ticket],
+      comments: [{ user: { login: "fixture-orchestrator" }, body: specRulingBody({ specNumber: 2, verdict: "PASS", author: "fixture-draft", reviewer: "fixture-review", digest: specBodyDigest(PLAN_SPEC), evidence: "/fixtures/review.json" }), created_at: "2026-01-01" }],
       tickets: [ticket],
+      spec: { number: 2, title: "SPEC: fixture", body: PLAN_SPEC, state: "OPEN" },
+      ticketView: { title: ticket.title, body: ticket.body, state: "OPEN", labels: [], assignees: [] },
+      ticketViewQueued: { title: ticket.title, body: ticket.body, state: "OPEN", labels: [{ name: "deepagents:queue" }], assignees: [] },
     })) writeFileSync(join(root, name), JSON.stringify(value));
     writeFileSync(log, "");
     writeFileSync(join(root, "calls"), "");
@@ -206,10 +216,10 @@ case "$1 $2" in
     esac ;;
   "issue view")
     if [ "$3" = "2" ]; then
-      echo '{"number":2,"title":"SPEC: fixture","body":"","state":"OPEN"}'
+      cat "$WFE_FIXTURE/spec"
     elif [ -s "$WFE_FIXTURE/writes" ]; then
-      echo '{"state":"OPEN","labels":[{"name":"deepagents:queue"}],"assignees":[]}'
-    else echo '{"state":"OPEN","labels":[],"assignees":[]}'; fi ;;
+      cat "$WFE_FIXTURE/ticketViewQueued"
+    else cat "$WFE_FIXTURE/ticketView"; fi ;;
   "issue edit") printf '%s\\n' "$*" >> "$WFE_FIXTURE/writes" ;;
   *) exit 71 ;;
 esac

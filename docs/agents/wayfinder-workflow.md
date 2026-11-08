@@ -21,7 +21,7 @@ blocking 边只表达必要依赖。可以独立开始的票不串成链；优�
 
 T/P 两类决策均经过考古、起草和非作者独审，全 PASS 后由代理裁定（#1909 / PR1915）。不再要求“agent 不得替人答”、`needs-approval` 或 `/graph-approve`。起草者提供推荐答案与推导，独审核对真实材料，不以撤标签代替通过。
 
-`decision-claimer` 负责决策票，`wayfinder_engine` 不替它裁决。BLOCK 用尽、`fact_gap` 或 `invalid_landing` 进入 held：事实缺口开 research/探针票并接 blocking 边；材料补齐后在原票发「退回：…」，整链重跑。触及资金、账户、凭据硬门（ADR 0041）的票进 held `user_authorization`，挂 `ready-for-human` 交还用户；用户本人以首行「退回：」评论给出签署值与有效域后重跑，落地时摘掉该标签，主控不代发。代理与用户共用同一 GitHub 账号，「退回：」评论的作者无法机器区分（现有信任模型，未改变）。旧 shadow 产物先原件归档，旧 PASS 不复用。旧 `needs-approval` grilling 票由 claimer 按新流程处理；实施票逐张核依赖、owner 和 SPEC 裁定，不批量摘标签。
+`decision-claimer` 负责决策票，`wayfinder_engine` 不替它裁决。BLOCK 用尽、`fact_gap` 或 `invalid_landing` 进入 held：事实缺口开 research/探针票并接 blocking 边；材料补齐后在原票发「退回：…」，整链重跑。触及资金、账户、凭据硬门（ADR 0041）的票进 held `user_authorization`，挂 `ready-for-human` 交还用户；用户本人以首行「退回：签署」评论逐项写字段名、签署值与有效域后重跑（返修用的其他「退回：…」不算签署），落地时摘掉该标签，主控不代发。代理与用户共用同一 GitHub 账号，这条签署评论的作者无法机器区分（现有信任模型，未改变）。旧 shadow 产物先原件归档，旧 PASS 不复用。旧 `needs-approval` grilling 票由 claimer 按新流程处理；实施票逐张核依赖、owner 和 SPEC 裁定，不批量摘标签。
 
 ## 从决策到实施
 
