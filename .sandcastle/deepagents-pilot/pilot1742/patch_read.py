@@ -14,8 +14,8 @@ Codex 记录的命令形如 `/bin/bash -lc '<脚本>'`。这里按 bash 语法�
   之后只有全局选项 `-C <dir>`、`-c <k=v>`（只认 _CONFIG_KEYS）、`--no-pager`/`-P`、`--git-dir`、`--work-tree`，
   紧跟子命令 diff 或 show，且不带会印出自定文字的选项（`--format=<格式串>`、`--line-prefix`）；
   按 git 的实际输出规则会输出补丁：diff 两侧一边是冻结 head（`HEAD` 也算，审阅 checkout 已证实停在 head 且干净）、
-  另一边是别的已知提交，只给一个提交时另一边是工作区；show 指名 head 的提交、`<other>..<head>` 范围，
-  或 `<head>:<path>` 文件内容；stdout 没被丢掉（/dev/null、关闭、写进文件）。
+  另一边是别的已知提交，只给一个提交时另一边是工作区；show 的位置参数全是 head 的提交、`<other>..<head>` 范围，
+  或全是 `<head>:<path>` 文件内容（path 须是本 PR 改动的文件）；stdout 没被丢掉（/dev/null、关闭、写进文件）。
 - git 之前只有不输出的段（_setup），用 `&&`、`;` 或换行接上；git 之后只有经管道串联的纯过滤器（_FILTERS），
   管道就是脚本的结尾。别的命令（echo、printf、cat 文件、tee、python、另一条 git……）只要出现，整条命令就不算：
   aggregated_output 是整条命令的输出，那些段印出的改动行与 git 印出的分不开（#1969 正式审查 kimi BLOCK）。
@@ -24,9 +24,13 @@ Codex 记录的命令形如 `/bin/bash -lc '<脚本>'`。这里按 bash 语法�
 `exec >/dev/null`、`export GIT_EXTERNAL_DIFF=true` 改的是之后命令的环境，textconv 保留 `diff --git`/`@@` 头而把内容
 换掉（#1969 kimi BLOCK）。所以还要看这条事件实际记录的输出（Codex `aggregated_output`，约 1 MiB 截断、保留前部）：
 其中须有一行就是冻结补丁的真实内容，见 FrozenPatch。输出只按 `\n` 切行，含其他行终止符的行不当证据。
+证据按文件存，出处须与命令读的对象一致（_Read）：`git show <head>:<path>` 的 path 须是本 PR 改动的文件，证据只取
+该文件加进来的行；不是 merge-base 对 head 的 diff 与 show 提交、范围，只认冻结文件头之后属于该文件的行
+（#1969 正式审查 bb8aa92e opus BLOCK：没改的模块里的 `from __future__ import annotations` 曾被当成读到了补丁）。
 """
 from __future__ import annotations
 
+import posixpath
 import re
 from dataclasses import dataclass, field
 
@@ -328,20 +332,39 @@ def _discards_stdout(command: _Expanded, later: list[_Expanded]) -> bool:
 
 
 class _Revisions:
-    def __init__(self, head: str, others: tuple[str, ...]) -> None:
-        self.head, self.others = head.lower(), tuple(o.lower() for o in others if o)
+    def __init__(self, head: str, merge_base: str, base: str) -> None:
+        self.head, self.merge_base, self.base = head.lower(), merge_base.lower(), base.lower()
 
     def kind(self, token: str) -> str:
-        """head / other（别的已知提交，或 head 的祖先写法）/ unknown（像 SHA 但不认识）/ path。"""
+        """head / merge-base / base（恰好是该提交，不带 `~`/`^`）/ other（这三个提交的祖先写法）/
+        unknown（像 SHA 但不认识）/ path。"""
         match = _REV.fullmatch(token)
         if not match:
             return "path"
         base, suffix = match.group(1), match.group(2)
         if base in ("HEAD", "@") or self.head.startswith(base.lower()):
             return "other" if suffix else "head"
-        if any(o.startswith(base.lower()) for o in self.others):
-            return "other"
+        for name, sha in (("merge-base", self.merge_base), ("base", self.base)):
+            if sha and sha.startswith(base.lower()):
+                return "other" if suffix else name
         return "unknown"
+
+
+_KNOWN = ("merge-base", "base", "other")
+
+
+@dataclass(frozen=True)
+class _Read:
+    """合格读取让 git 输出的是什么，决定输出里哪些行能当证据（#1969 正式审查 bb8aa92e opus BLOCK）。
+    patch：merge-base 与 head 之间的 diff（可带 pathspec），输出的每一行都出自冻结补丁；
+    diff：别的 diff，或 show 提交、范围，输出里可能有本 PR 没改的文件，只认落在冻结补丁某个文件的
+    `diff --git` 头之后、且是该文件改动内容的行；
+    blobs：`git show <head>:<path>`，paths 须全是本 PR 改动的文件，证据只取这些文件在 head 上加进来的行。"""
+    kind: str
+    paths: tuple[str, ...] = ()
+
+
+WHOLE_PATCH = _Read("patch")
 
 
 def _emits_patch(subcommand: str, options: list[str]) -> bool:
@@ -360,21 +383,22 @@ def _emits_patch(subcommand: str, options: list[str]) -> bool:
     return not silent and (explicit or not summary)
 
 
-def _git_patch_read(command: _Expanded, revisions: _Revisions) -> bool:
+def _git_patch_read(command: _Expanded, revisions: _Revisions) -> _Read | None:
     argv = command.argv
     if not argv or argv[0].rsplit("/", 1)[-1] != "git":
-        return False
-    i, config = 1, []
+        return None
+    i, config, moved = 1, [], False
     while i < len(argv):
         if argv[i] in ("-C", "-c", "--git-dir", "--work-tree"):
             config += argv[i + 1:i + 2] if argv[i] == "-c" else []
+            moved = moved or argv[i] == "-C"
             i += 2
         elif argv[i] in ("--no-pager", "-P") or argv[i].startswith(("--git-dir=", "--work-tree=")):
             i += 1
         else:
             break
     if i >= len(argv) or argv[i] not in ("diff", "show"):
-        return False
+        return None
     subcommand, rest = argv[i], argv[i + 1:]
     separator = rest.index("--") if "--" in rest else len(rest)
     options, positional, skip = [], [], False
@@ -387,40 +411,64 @@ def _git_patch_read(command: _Expanded, revisions: _Revisions) -> bool:
         else:
             positional.append(arg)
     if "--no-index" in options or (subcommand == "show" and "--output" in " ".join(options)):
-        return False
+        return None
     # `-c` 能换掉 git 的输出（diff.external、textconv、core.pager、format.pretty……），只认不影响输出的几项；
     # 补丁旁边能印出审查员自己写的文字的选项（`--format='+<改动行>'`、`--line-prefix`）也不认（#1969 kimi BLOCK）
     if any(c.partition("=")[0].lower() not in _CONFIG_KEYS for c in config) or any(
             _PRINTS_TEXT.fullmatch(o) for o in options):
-        return False
+        return None
     # 补丁走 stdout 的前提下，blob 内容不受输出格式选项影响；提交和范围要看格式选项，且不能混进求不出值的参数
     # （`$X` 可能就是 `-s`）。diff 在 `--` 之前只接受认识的提交：像 `'$H'`、`<head>x` 这样的词 git 会当路径，
     # 路径不存在就报错，接了管道后退出码仍是 0。
     unresolved = any(_OPAQUE in arg for arg in rest[:separator])
+    if subcommand == "show":
+        return _show_read(positional, options, unresolved, moved, revisions)
     kinds: list[str] = []
+    whole = False
     for arg in positional:
-        if subcommand == "show":
-            base, colon, path = arg.partition(":")
-            if colon:
-                if path and revisions.kind(base) == "head":
-                    return True
-            elif not unresolved and _emits_patch(subcommand, options):
-                left, dots, right = arg.partition("..")
-                pair = [revisions.kind(left or "HEAD"), revisions.kind(right.lstrip(".") or "HEAD")]
-                if (pair == ["other", "head"] if dots else revisions.kind(arg) == "head"):
-                    return True
-            continue
         left, dots, right = arg.partition("..")
         sides = [left or "HEAD", right.lstrip(".") or "HEAD"] if dots else [arg]
         resolved = [revisions.kind(side) for side in sides]
-        if not all(kind in ("head", "other") for kind in resolved):
-            return False
+        if not all(kind == "head" or kind in _KNOWN for kind in resolved):
+            return None
+        # `<base>...<head>` 比的是 merge-base(base, head) 与 head，就是冻结补丁
+        whole = whole or (right.startswith(".") and resolved in (["merge-base", "head"], ["base", "head"]))
         kinds += resolved
-    if subcommand == "show" or unresolved:
-        return False
+    if unresolved:
+        return None
     if len(kinds) == 1:
         kinds.append("head")  # 一个提交对工作区或索引；审阅 checkout 已证实停在 head 且干净
-    return "head" in kinds and "other" in kinds and _emits_patch(subcommand, options)
+    if "head" not in kinds or not any(k in _KNOWN for k in kinds) or not _emits_patch(subcommand, options):
+        return None
+    return WHOLE_PATCH if whole or sorted(kinds) == ["head", "merge-base"] else _Read("diff")
+
+
+def _show_read(positional: list[str], options: list[str], unresolved: bool, moved: bool,
+               revisions: _Revisions) -> _Read | None:
+    """show 的位置参数须全部指名 head：要么都是 `<head>:<path>`（blobs），要么都是 head 提交或
+    `<known>..<head>` 范围（diff）。混进别的提交或 blob，输出里就有与本 PR 无关的内容。"""
+    paths: list[str] = []
+    commits = 0
+    for arg in positional:
+        base, colon, path = arg.partition(":")
+        if colon:
+            if path.startswith(("./", "../")) or path in (".", ".."):
+                # `<rev>:./x` 相对当前目录（就是 /review 根）；`-C` 换了目录就不知道指的是哪个文件
+                path = "" if moved else posixpath.normpath(path)
+            if not path or path == "." or path == ".." or path.startswith("../") or revisions.kind(base) != "head":
+                return None
+            paths.append(path)
+            continue
+        left, dots, right = arg.partition("..")
+        pair = [revisions.kind(left or "HEAD"), revisions.kind(right.lstrip(".") or "HEAD")]
+        if not (pair[0] in _KNOWN and pair[1] == "head" if dots else revisions.kind(arg) == "head"):
+            return None
+        commits += 1
+    if paths and not commits:
+        return _Read("blobs", tuple(paths))
+    if commits and not paths and not unresolved and _emits_patch("show", options):
+        return _Read("diff")
+    return None
 
 
 def _script(command: str) -> str | None:
@@ -444,74 +492,153 @@ _LINE_NUMBER = re.compile(r"\d+[\t:]")  # `nl -ba`、`cat -n`、`grep -n` 加在
 _DISTINCT = 12  # 够长的改动行才当证据；`}`、`return` 这类短行在任何文件里都可能出现
 
 
+_C_ESCAPES = {"a": 7, "b": 8, "t": 9, "n": 10, "v": 11, "f": 12, "r": 13, '"': 34, "\\": 92}
+
+
+def _unquote(name: str) -> str:
+    """git 给特殊字符路径加的 C 风格引号（`"b/\\303\\244.py"`）解回原文。"""
+    if not (len(name) >= 2 and name[0] == name[-1] == '"'):
+        return name
+    out, i, body = bytearray(), 0, name[1:-1]
+    while i < len(body):
+        if body[i] == "\\" and re.match(r"[0-7]{3}", body[i + 1:i + 4]):
+            out.append(int(body[i + 1:i + 4], 8))
+            i += 4
+        elif body[i] == "\\" and body[i + 1:i + 2] in _C_ESCAPES:
+            out.append(_C_ESCAPES[body[i + 1]])
+            i += 2
+        else:
+            out += body[i].encode()
+            i += 1
+    return out.decode(errors="replace")
+
+
+@dataclass(frozen=True)
+class FrozenFile:
+    """冻结补丁里的一个文件。header 是 controller 侧的 `diff --git a/… b/…` 行，path 是它在 head 上的路径
+    （删除的文件为 None）；evidence 是这个文件的证据行，added 是其中由 `+` 加进来、head 上这个文件里有的。"""
+    header: str
+    path: str | None
+    evidence: frozenset[str]
+    added: frozenset[str]
+
+
+def _split_files(diff: str) -> list[tuple[str, str | None, list[tuple[str, str]]]]:
+    """按文件切开 `-U<n>` 补丁：(header, head 上的路径, [(`+`/`-`, 改动行去掉首尾空白)])。
+    hunk 按 `@@ -a,b +c,d @@` 的行数走完，所以内容里形如 `+++ x`、`diff --git` 的改动行不会被当成文件头。"""
+    files: list[tuple[str, str | None, list[tuple[str, str]]]] = []
+    old = new = 0
+    for line in _lines(diff):
+        if old > 0 or new > 0:
+            sign = line[:1]
+            old -= sign in ("-", " ")
+            new -= sign in ("+", " ")
+            if sign in ("+", "-") and not _BREAK.search(line) and (text := line[1:].strip()):
+                files[-1][2].append((sign, text))
+        elif line.startswith("diff --git "):
+            files.append((line, None, []))
+        elif files and line.startswith("+++ "):
+            target = _unquote(line[4:])
+            files[-1] = (files[-1][0], target[2:] if target.startswith("b/") else None, files[-1][2])
+        elif files and (hunk := re.match(r"@@ -\d+(?:,(\d+))? \+\d+(?:,(\d+))? @@", line)):
+            old, new = (int(n) if n is not None else 1 for n in hunk.groups())
+    return files
+
+
 @dataclass(frozen=True)
 class FrozenPatch:
-    """controller 侧取得的冻结候选补丁。`evidence` 是审查员输出里须出现的行（去掉首尾空白）：
-    改动行（`+`/`-` 之后的内容）里至少 _DISTINCT 个字符的；没有这样的行就取全部非空改动行；
-    纯二进制、改名、改权限的补丁没有改动行，取 `diff --git` 头。"""
+    """controller 侧取得的冻结候选补丁，按文件存证据（#1969 正式审查 bb8aa92e opus BLOCK：不分文件时，
+    `git show <head>:<本 PR 没改的文件>` 里的 `from __future__ import annotations` 就能冒充读到了改动行）。
+    证据是审查员输出里须出现的行（去掉首尾空白）：改动行（`+`/`-` 之后的内容）里至少 _DISTINCT 个字符的；
+    整个补丁都没有这样的行就取全部非空改动行；纯二进制、改名、改权限的补丁没有改动行，取 `diff --git` 头。"""
     head_sha: str
-    other_shas: tuple[str, ...]
-    evidence: frozenset[str]
+    merge_base_sha: str
+    base_sha: str
+    files: tuple[FrozenFile, ...]
 
     @classmethod
-    def from_diff(cls, head_sha: str, other_shas: tuple[str, ...], diff: str) -> FrozenPatch:
-        changed = {line[1:].strip() for line in _lines(diff)
-                   if line[:1] in "+-" and not line.startswith(("+++ ", "--- ")) and not _BREAK.search(line)} - {""}
-        headers = {line for line in _lines(diff) if line.startswith("diff --git ")}
-        return cls(head_sha, other_shas,
-                   frozenset({line for line in changed if len(line) >= _DISTINCT} or changed or headers))
+    def from_diff(cls, head_sha: str, merge_base_sha: str, base_sha: str, diff: str) -> FrozenPatch:
+        """diff 须是 controller 用固定 `a/`、`b/` 前缀取的 `git diff -U0 <merge_base> <head>`。"""
+        split = _split_files(diff)
+        changed = {text for _, _, lines in split for _, text in lines}
+        least = _DISTINCT if any(len(text) >= _DISTINCT for text in changed) else 0
+        files = tuple(FrozenFile(header, path,
+                                 frozenset({t for _, t in lines if len(t) >= least} if changed else {header}),
+                                 frozenset({t for sign, t in lines if sign == "+" and len(t) >= least}))
+                      for header, path, lines in split)
+        return cls(head_sha, merge_base_sha, base_sha, files)
 
-    def shown_in(self, output: str) -> bool:
-        """输出里有一行（去掉行号前缀、diff 的 `+`/`-`/空格标记后）是冻结补丁的改动内容。
-        `git show <head>:<path>` 输出的是新文件，加进来的行同样在其中。含 _BREAK 字符的行不当证据：
-        它在别的切行规则下可能是两行。"""
+    @property
+    def evidence(self) -> frozenset[str]:
+        return frozenset().union(*(f.evidence for f in self.files))
+
+    def shown_in(self, output: str, read: _Read = WHOLE_PATCH) -> bool:
+        """输出里有一行（去掉行号前缀、diff 的 `+`/`-`/空格标记后）是冻结补丁的改动内容，按 read 限定出处：
+        patch 认整个补丁的证据；diff 只认跟在冻结补丁某个文件的 `diff --git` 头之后、属于该文件的证据；
+        blobs 只认所指文件（须全是本 PR 改动的文件）在 head 上加进来的行。
+        含 _BREAK 字符的行不当证据：它在别的切行规则下可能是两行。"""
+        by_header = {f.header: f.evidence for f in self.files}
+        if read.kind == "blobs":
+            by_path = {f.path: f.added for f in self.files if f.path is not None}
+            if not all(path in by_path for path in read.paths):
+                return False
+            evidence: frozenset[str] = frozenset().union(*(by_path[path] for path in read.paths))
+        else:
+            evidence = self.evidence if read.kind == "patch" else frozenset()
         for raw in _lines(output):
             if _BREAK.search(raw):
                 continue
             line = raw.strip()
+            unstripped = raw
             if match := _LINE_NUMBER.match(line):
-                line = line[match.end():].strip()
-            if line in self.evidence or (line[:1] in "+-" and line[1:].strip() in self.evidence):
+                unstripped = line[match.end():]
+                line = unstripped.strip()
+            if read.kind == "diff" and unstripped.startswith("diff --git "):
+                # 未加行号时原样比对：diff 的上下文行带一个前导空格，不会被当成文件头
+                evidence = by_header.get(unstripped, frozenset())
+            if line in evidence or (line[:1] in "+-" and line[1:].strip() in evidence):
                 return True
         return False
 
 
 def reads_candidate_patch(command: str, output: str, patch: FrozenPatch) -> bool:
-    """命令按 bash 语义会让 git 输出冻结补丁，且记录的输出里真有冻结补丁的内容。"""
-    return _would_print_patch(command, patch.head_sha, patch.other_shas) and patch.shown_in(output)
+    """命令按 bash 语义会让 git 输出冻结补丁，且记录的输出里真有冻结补丁的内容，出处与命令读的对象一致。"""
+    read = _patch_read(command, patch.head_sha, patch.merge_base_sha, patch.base_sha)
+    return read is not None and patch.shown_in(output, read)
 
 
-def _would_print_patch(command: str, head_sha: str, other_shas: tuple[str, ...]) -> bool:
-    """`other_shas` 是同一冻结目标里别的已知提交（merge-base、base）；diff 另一侧须是它们或 head 的祖先写法，
-    写一个不存在的 SHA 再接管道（`git diff <bad> <head> | head`，无 pipefail 时退出码为 0）不算读取。
+def _patch_read(command: str, head_sha: str, merge_base_sha: str, base_sha: str) -> _Read | None:
+    """diff 另一侧须是 merge-base、base 或这几个提交的祖先写法，写一个不存在的 SHA 再接管道
+    （`git diff <bad> <head> | head`，无 pipefail 时退出码为 0）不算读取。
     命令替换会执行别的命令，含换行或其他行终止符（U+2028 等）的参数会被 git 或过滤器的报错原样带进输出
     （`git show <head>:'x<U+2028>+<改动行>'`；`$'x\n+<改动行>'` 在词法上就判为求不出值），
     _SPECIAL_NAME 里的变量改的是跑哪个 git、读哪份配置和 shell 怎么分词，这三样都不算。"""
     script = _script(command)
     if script is None:
-        return False
+        return None
     items = _parse(_lex(script))
     commands = [x for x in items if isinstance(x, _Command)]
     if not commands or any(kind == "opaque" for c in commands
                            for word in [*c.words, *(t for _, t in c.redirects)] for kind, _ in word):
-        return False
+        return None
     expanded = _evaluate(items)
     if any("\n" in arg or _BREAK.search(arg) for e in expanded for arg in e.argv):
-        return False
-    revisions = _Revisions(head_sha, other_shas)
-    reads = [k for k, e in enumerate(expanded) if _git_patch_read(e, revisions)]
+        return None
+    revisions = _Revisions(head_sha, merge_base_sha, base_sha)
+    reads = [(k, read) for k, e in enumerate(expanded) if (read := _git_patch_read(e, revisions)) is not None]
     if len(reads) != 1:
-        return False
-    k = reads[0]
+        return None
+    k, read = reads[0]
     if (expanded[k].argv[0] not in ("git", "/usr/bin/git") or _discards_stdout(expanded[k], [])
             or (k and commands[k - 1].op not in ("&&", ";", "\n"))
             or commands[-1].op not in ("", ";", "\n")
             or any(_SPECIAL_NAME.fullmatch(name) for e in expanded for name in e.env_names)):
-        return False
+        return None
     before, pipeline = expanded[:k], expanded[k + 1:]
-    return (all(_setup(e) and c.op in ("&&", ";", "\n") for c, e in zip(commands[:k], before, strict=True))
-            and all(commands[j].op in _PIPE for j in range(k, len(commands) - 1))
-            and all(_filter(e) for e in pipeline))
+    ok = (all(_setup(e) and c.op in ("&&", ";", "\n") for c, e in zip(commands[:k], before, strict=True))
+          and all(commands[j].op in _PIPE for j in range(k, len(commands) - 1))
+          and all(_filter(e) for e in pipeline))
+    return read if ok else None
 
 
 def _setup(command: _Expanded) -> bool:

@@ -30,7 +30,7 @@ from pilot1742.github_app import (
     IdentityError,
     OutcomeUnknown,
 )
-from pilot1742.patch_read import FrozenPatch
+from pilot1742.patch_read import FrozenPatch, reads_candidate_patch
 
 
 class Gateway:
@@ -789,6 +789,21 @@ NOT_A_PATCH_READ = {
     "empty-output-exit-0": [lambda t: _command(f"git diff {t.merge_base_sha} {t.head_sha} -- README", output="")],
     "output-not-logged": [lambda t: _command(f"git diff {t.merge_base_sha} {t.head_sha}", output=None)],
     "show-unchanged-file": [lambda t: _command(f"git show {t.head_sha}:README", output="x\n")],
+    # #1969 正式审查（bb8aa92e）opus BLOCK：本 PR 没改的文件里有一行与改动行相同（真实仓库里是
+    # `from __future__ import annotations` 这类通用行），读它不等于读了补丁；证据须出自所读的改动文件
+    "show-unchanged-file-common-line": [lambda t: _command(f"git show {t.head_sha}:README", output="1\n")],
+    "show-unchanged-file-numbered": [lambda t: _command("git show HEAD:README | nl -ba", output="     1\t0\n")],
+    "show-changed-and-unchanged-file": [lambda t: _command(
+        f"git show {t.head_sha}:changed-0 {t.head_sha}:README", output="x\n1\n")],
+    "show-changed-file-other-files-line": [lambda t: _command(f"git show {t.head_sha}:changed-0", output="1\n")],
+    "show-commit-unrelated-file": [lambda t: _command(
+        f"git show {t.head_sha}", output="diff --git a/README b/README\n--- a/README\n+++ b/README\n@@ -1 +1 @@\n-x\n+0\n")],
+    "diff-parent-unrelated-file": [lambda t: _command(
+        f"git diff {t.head_sha}~1 {t.head_sha}", output="diff --git a/README b/README\n@@ -1 +1 @@\n+1\n")],
+    "diff-parent-lines-before-header": [lambda t: _command(
+        f"git diff {t.head_sha}~1 {t.head_sha} | grep -n 0", output="5:+0\n")],
+    "show-other-commit-and-head": [lambda t: _command(f"git show {t.merge_base_sha} {t.head_sha}")],
+    "show-file-dot-slash-after-C": [lambda t: _command(f"git -C /review/sub show {t.head_sha}:./changed-0", output="0\n")],
     "show-missing-path-masked": [lambda t: _command(
         f"git show {t.head_sha}:nope | head", output=f"fatal: path 'nope' does not exist in '{t.head_sha}'\n")],
     # #1969 正式审查 kimi BLOCK（f566ce6b）：输出是整条命令的合并输出，git 之外的段可以印出冻结补丁的改动行
@@ -873,6 +888,11 @@ PATCH_READ = {
     "merge-base-dotdot-HEAD": [lambda t: _command(f"cd /review && B={t.merge_base_sha}; git diff $B..HEAD -- changed-0")],
     "triple-dot": [lambda t: _command(f"git diff {t.merge_base_sha}...{t.head_sha}")],
     "show-HEAD-file": [lambda t: _command("cd /review && git show HEAD:changed-0 | sed -n 1,60p", output="0\n")],
+    "show-file-dot-slash": [lambda t: _command("git show HEAD:./changed-1", output="1\n")],
+    "show-two-changed-files": [lambda t: _command(f"git show {t.head_sha}:changed-0 {t.head_sha}:changed-1",
+                                                  output="0\n1\n")],
+    "diff-parent-attributed": [lambda t: _command(f"git diff {t.head_sha}~1 {t.head_sha} | nl -ba")],
+    "triple-dot-base": [lambda t: _command(f"git diff {t.base_sha}...{t.head_sha} | grep -n -e 1")],
     "show-file-numbered": [lambda t: _command(f"git show {t.head_sha}:changed-1 | nl -ba | sed -n '1,200p'",
                                               output="     1\t1\n")],
     "show-commit-oneline": [lambda t: _command(f"git show --oneline {t.head_sha}")],
@@ -900,7 +920,7 @@ PATCH_READ = {
 def test_frozen_patch_evidence_is_its_distinct_changed_lines():
     diff = ("diff --git a/f.py b/f.py\n--- a/f.py\n+++ b/f.py\n@@ -1,2 +1,2 @@\n"
             "-    old_value = compute_old()\n+    new_value = compute_new()\n+}\n")
-    patch = FrozenPatch.from_diff("a" * 40, (), diff)
+    patch = FrozenPatch.from_diff("a" * 40, "b" * 40, "", diff)
     assert patch.evidence == {"old_value = compute_old()", "new_value = compute_new()"}
     assert patch.shown_in("+    new_value = compute_new()\n")
     assert patch.shown_in("    12\t    new_value = compute_new()\n")  # git show <head>:f.py | nl -ba
@@ -908,8 +928,59 @@ def test_frozen_patch_evidence_is_its_distinct_changed_lines():
     assert not patch.shown_in("diff --git a/f.py b/f.py\n@@ -1,2 +1,2 @@\n+X /tmp/git-blob-ksCWK9/f.py\n")  # textconv
     assert not patch.shown_in("fatal: path 'x\u2028+    new_value = compute_new()\u2028' does not exist\n")
     assert patch.shown_in("+    new_value = compute_new()\r\n")
-    binary = FrozenPatch.from_diff("a" * 40, (), "diff --git a/p.png b/p.png\nBinary files a/p.png and b/p.png differ\n")
+    binary = FrozenPatch.from_diff("a" * 40, "b" * 40, "", "diff --git a/p.png b/p.png\nBinary files a/p.png and b/p.png differ\n")
     assert binary.shown_in("diff --git a/p.png b/p.png\n") and not binary.shown_in("")
+
+
+# \u771f\u5b9e\u5f62\u72b6\uff1a\u672c PR \u65b0\u589e\u4e00\u4e2a Python \u6a21\u5757\uff0c\u9996\u884c\u662f\u5230\u5904\u90fd\u6709\u7684 `from __future__ import annotations`
+COMMON_LINE_DIFF = (
+    "diff --git a/pkg/new_gate.py b/pkg/new_gate.py\nnew file mode 100644\nindex 0000000..1111111\n"
+    "--- /dev/null\n+++ b/pkg/new_gate.py\n@@ -0,0 +1,3 @@\n+from __future__ import annotations\n+\n"
+    "+def gate_reads_the_patch() -> bool:\n"
+    "diff --git a/pkg/old.py b/pkg/old.py\nindex 2222222..3333333 100644\n--- a/pkg/old.py\n+++ b/pkg/old.py\n"
+    "@@ -4 +3,0 @@\n-    removed_only_line = 1\n"
+    "diff --git \"a/pkg/\\303\\244 x.py\" \"b/pkg/\\303\\244 x.py\"\n--- \"a/pkg/\\303\\244 x.py\"\n"
+    "+++ \"b/pkg/\\303\\244 x.py\"\n@@ -1 +1 @@\n-+++ looks like a header\n+++++ also looks like one\n")
+UNCHANGED_MODULE = "from __future__ import annotations\n\nfrom pathlib import Path\n\ndef unrelated() -> None:\n"
+
+
+def test_common_line_in_unchanged_file_is_not_a_patch_read():
+    """#1969 \u6b63\u5f0f\u5ba1\u67e5\uff08bb8aa92e\uff09opus BLOCK \u7684\u8d1f\u5bf9\u7167\uff1a`git show <head>:<\u672c PR \u6ca1\u6539\u7684\u6587\u4ef6>` \u7684\u8f93\u51fa\u91cc\u6709\u4e0e\u6539\u52a8\u884c
+    \u76f8\u540c\u7684\u901a\u7528\u884c\uff0c\u4e0d\u7b97\u8bfb\u53d6\uff1b\u540c\u4e00\u884c\u51fa\u81ea\u6539\u52a8\u6587\u4ef6\u624d\u7b97\u3002\u65e7 head \u4e0a\u8fd9\u91cc\u7684\u7b2c\u4e00\u6761\u65ad\u8a00\u4e0d\u6210\u7acb\u3002"""
+    head, merge_base = "a" * 40, "b" * 40
+    patch = FrozenPatch.from_diff(head, merge_base, "", COMMON_LINE_DIFF)
+    assert "from __future__ import annotations" in patch.evidence
+    assert not reads_candidate_patch(f"/bin/bash -lc 'git show {head}:pkg/approval.py'", UNCHANGED_MODULE, patch)
+    assert not reads_candidate_patch("/bin/bash -lc 'git show HEAD:pkg/approval.py | nl -ba'",
+                                     "     1\tfrom __future__ import annotations\n", patch)
+    assert reads_candidate_patch(f"/bin/bash -lc 'git show {head}:pkg/new_gate.py'", UNCHANGED_MODULE, patch)
+    # \u53ea\u5220\u4e86\u884c\u7684\u6587\u4ef6\uff0chead \u4e0a\u7684\u5185\u5bb9\u91cc\u6ca1\u6709\u5b83\u7684\u6539\u52a8
+    assert not reads_candidate_patch(f"/bin/bash -lc 'git show {head}:pkg/old.py'",
+                                     "    removed_only_line = 1\n", patch)
+    # \u52a0\u5f15\u53f7\u7684\u8def\u5f84\u3001\u5185\u5bb9\u5f62\u5982 `+++ ` \u7684\u6539\u52a8\u884c\u90fd\u6309\u6587\u4ef6\u5f52\u5c5e
+    assert reads_candidate_patch(f"/bin/bash -lc 'git show {head}:\"pkg/\u00e4 x.py\"'", "++++ also looks like one\n", patch)
+    assert patch.files[2].evidence == {"+++ looks like a header", "++++ also looks like one"}
+    # diff \u4e24\u7aef\u4e0d\u662f merge-base \u4e0e head \u65f6\uff0c\u8f93\u51fa\u53ef\u80fd\u542b\u672c PR \u6ca1\u6539\u7684\u6587\u4ef6\uff1a\u53ea\u8ba4\u51bb\u7ed3\u6587\u4ef6\u5934\u4e4b\u540e\u7684\u884c
+    other = "diff --git a/pkg/approval.py b/pkg/approval.py\n@@ -0,0 +1 @@\n+from __future__ import annotations\n"
+    assert not reads_candidate_patch(f"/bin/bash -lc 'git diff {head}~1 {head}'", other, patch)
+    mine = "diff --git a/pkg/new_gate.py b/pkg/new_gate.py\n@@ -0,0 +1 @@\n+from __future__ import annotations\n"
+    assert reads_candidate_patch(f"/bin/bash -lc 'git diff {head}~1 {head}'", other + mine, patch)
+    # merge-base..head \u7684\u8f93\u51fa\u5168\u51fa\u81ea\u51bb\u7ed3\u8865\u4e01\uff08\u4e0a\u4e0b\u6587\u884c\u4e5f\u662f\u6539\u52a8\u6587\u4ef6\u7684\u5185\u5bb9\uff09
+    assert reads_candidate_patch(f"/bin/bash -lc 'git diff {merge_base} {head} | grep -n annotations'",
+                                 "7:+from __future__ import annotations\n", patch)
+
+
+def test_unreadable_frozen_patch_is_failed_not_raised(lane, monkeypatch):
+    """#1969 正式审查（bb8aa92e）opus 非阻断项：来源对象库取不出冻结补丁时记 FAILED，不把 git 的异常抛出去。"""
+    target = ReviewTarget(**lane.review_pr(1810)["target"])
+    folder = lane.state_root / "runs" / target.key / MODELS[0]
+    launch, receipt = json.loads((folder / "launch.json").read_text()), json.loads((folder / "receipt.json").read_text())
+    assert validate_review(target, launch, receipt, folder, lane.source).verdict == "PASS"
+    def missing(*_):
+        raise subprocess.CalledProcessError(128, ["git", "diff"])
+    monkeypatch.setattr(module, "frozen_patch", missing)
+    outcome = validate_review(target, launch, receipt, folder, lane.source)
+    assert outcome.verdict == "FAILED" and "取不出冻结候选补丁" in outcome.reason
 
 
 @pytest.mark.parametrize("claim", ["PASS", "BLOCK"])

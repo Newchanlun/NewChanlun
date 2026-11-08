@@ -308,7 +308,7 @@ def frozen_patch(source: Path, target: ReviewTarget) -> FrozenPatch:
     """controller 自己从对象库取冻结补丁（不跑审查员的命令）：关掉外部 diff 与 textconv，固定 a/ b/ 前缀。"""
     diff = _git(source, "diff", "--no-ext-diff", "--no-textconv", "--no-color", "-U0", "--src-prefix=a/",
                 "--dst-prefix=b/", target.merge_base_sha, target.head_sha)
-    return FrozenPatch.from_diff(target.head_sha, (target.merge_base_sha, target.base_sha),
+    return FrozenPatch.from_diff(target.head_sha, target.merge_base_sha, target.base_sha,
                                  diff.decode(errors="replace"))
 
 
@@ -396,6 +396,9 @@ def validate_review(target: ReviewTarget, launch: dict, receipt: dict, folder: P
         if output["status"] in ("completed", "blocked") and line == "VERDICT: BLOCK":
             return ReviewOutcome(model, "BLOCK", session, output["summary"])
         return failed("审阅未完成或 VERDICT 不符")
+    except subprocess.CalledProcessError:
+        # 来源对象库取不出冻结补丁（如旧 run 的 head 已被 gc）：证不了审查员读过补丁，记 FAILED，不中断流程
+        return failed("取不出冻结候选补丁，无法核验审查员是否读取")
     except (OSError, KeyError, ValueError, TypeError, IndexError):
         return failed("缺日志、解析失败或日志不符")
 
