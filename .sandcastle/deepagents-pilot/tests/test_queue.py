@@ -929,15 +929,17 @@ def test_typescript_release_and_python_intake_share_hold_policy(queued, label, w
     module = wayfinder_engine_path
     script = """const m = await import(process.argv[1]);
       let wrote = false;
-      const body = 'fixture SPEC', specNumber = 7;
+      // 只比较两侧的 hold 策略：票是 map SPEC 计划内、带当前发布凭据的直挂票（#1915 a2 的放行前提）。
+      const body = 'fixture SPEC\\n<!-- wayfinder-split -->\\n```json\\n{"tickets":[{"id":"S1","title":"queue fixture"}]}\\n```', specNumber = 7;
       const ruling = m.specRulingBody({specNumber, verdict:'PASS', author:'fixture-author',
         reviewer:'fixture-reviewer', digest:m.specBodyDigest(body), evidence:'/fixture/review.json'});
+      const ticketBody = '<!-- wayfinder-ticket:7:S1 -->\\n<!-- wayfinder-published:7:' + m.specBodyDigest(body) + ':S1 -->\\n';
       const read = cmd => JSON.stringify(cmd.includes('/comments')
         ? [{user:{login:'fixture'}, body:ruling, created_at:'2026-11-07T00:00:00Z'}]
         : cmd.startsWith('issue view 7 ')
           ? {number:7, title:'SPEC: fixture', body, state:'OPEN'}
-          : {title:'[impl] queue fixture', body:'', state:'OPEN', labels:[{name:process.argv[2]}], assignees:[]});
-      m.releaseTicket(4242, {specs:[specNumber], orchestrator:'fixture'}, {read,
+          : {title:'[impl] S1 queue fixture', body:ticketBody, state:'OPEN', labels:[{name:process.argv[2]}], assignees:[]});
+      m.releaseTicket(4242, {specs:[specNumber], orchestrator:'fixture', via:'plan'}, {read,
         write: () => {wrote = true; return ''; }}, 'deepagents:queue');
       console.log(JSON.stringify(wrote));"""
     result = subprocess.run(['node', '--experimental-strip-types', '--input-type=module', '-e', script,
