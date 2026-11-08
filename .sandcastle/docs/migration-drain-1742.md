@@ -34,7 +34,7 @@ python3 .sandcastle/drain-control.py status
 
 单独列出 workers.jsonl 中有 `phase:claim` 却没有 implementer started 的票，并对照 GitHub 当前认领、标签与本地 checkpoint。认领后、启动前失败的票在冻结下不会自动回队列，不能把“没有工蜂进程”计为完成。逐票记录旧 owner、最后一个已证实步骤、分支和未执行副作用。由旧 owner 在批准范围内选择从原 checkpoint 收尾，或保留冻结认领并登记给新执行器的交接方案。需要释放认领或重新排队时，先核该动作属于 D6 批准范围，再按交接方案执行。全部遗留票有去向及接收记录后，才能确认排空。
 
-冻结后 claim-loop 不退出：它在进程内按轮询间隔等待，每轮只打印「旧入口冻结」，不领新工作（#1988；原先 return 退出 0 后被 launchd `KeepAlive=true` 每 10 秒重拉）。因此不要等它自然退出，它和 engine 一样是要由部署 owner 卸载的常驻父进程。卸载判据：日志里最近一轮已是冻结提示、它名下没有在飞的 main.mts 子进程、inventory 已对账，此时 bootout 对应 plist。不能在子进程仍在飞时卸载父服务。核对 health-monitor 的 KeepAlive 和定时任务，保持 heal 禁用直到恢复步骤最后。
+冻结后 engine（`scripts/wayfinder_engine.mts`）和 decision-claimer（`.sandcastle/decision-claimer.mts`）的循环照旧正常退出，但 launchd 的 `KeepAlive=true` 可能继续节流重拉，形成启动后立即退出的日志噪音。门禁仍拒绝新选择，这些启动记录不算新增工蜂。claim-loop 例外：冻结后不退出，在进程内按轮询间隔等待，每轮只打印「旧入口冻结」，不领新工作（#1988；原先 return 退出 0 后被 launchd 每 10 秒重拉），所以不要等它自然退出。这三个服务都要由部署 owner bootout 对应 plist。卸载判据：该循环已达安全边界（claim-loop 看日志最近一轮已是冻结提示），名下没有在飞的子进程（claim-loop 即 main.mts），inventory 已对账。不能在子进程仍在飞时卸载父服务。核对 health-monitor 的 KeepAlive 和定时任务，保持 heal 禁用直到恢复步骤最后。
 
 未知版本、坏 JSON、读取失败或错误 generation 都失败关闭。控制进程崩溃后 helper 的 stdin 关闭，内核释放 flock，不靠 PID 年龄猜锁是否陈旧。持久状态保持 draining，不自动恢复 open。
 
