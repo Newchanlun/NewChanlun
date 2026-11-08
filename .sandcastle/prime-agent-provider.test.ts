@@ -45,6 +45,13 @@ test("transferPrimeSession 空串与同 cwd 是 no-op", () => {
   assert.equal(transferPrimeSession(jsonl, "/x", "/x"), jsonl);
 });
 
+// #1002 Kimi 禁入锁：原在 verify-workflows.py 第 3 节。该脚本随 agent-*.yml 一起退役（#1992），
+// 第 3 节里只有这条检查指向仍在役的文件，迁到这里随 CI 的 sandcastle-ts 作业运行。
+test("prime-agent-provider.ts 不复活 #1002 旧 Kimi provider 常量 kimi-coding", async () => {
+  const source = await readFile(join(__dirname, "prime-agent-provider.ts"), "utf8");
+  assert.equal(source.includes("kimi-coding"), false);
+});
+
 // ── buildPrintCommand ─────────────────────────────────────────────────────
 
 test("buildPrintCommand 新会话无续跑旗标；续跑用 -r 绝对路径；fork 用 --fork", () => {

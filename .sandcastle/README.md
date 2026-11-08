@@ -102,9 +102,9 @@ bash .sandcastle/install-sandcastle-claimer.sh uninstall # 卸载
 
 手工调试（仓库根，不写 tracker）：`npx tsx .sandcastle/claim-loop.mts --once --dry-run`。
 
-## GitHub-hosted 旧 workflow
+## GitHub-hosted 旧 workflow（已退役）
 
-`agent-explore/implement/implement-pr/review/update-branch` 的 runner 是 `ubuntu-latest`，当前没有获批的 Astra 凭据或可达 CLIProxy 端点。无标签 Claude 默认已在模型调用前退役并回写 blocked；`agent:model:deepseek-v4-pro` 仅为 implement / implement-pr / review 的显式 legacy opt-in，不是默认或失败回退。本机受管默认不经过这些 hosted workflow（#1617）。
+`agent-explore/implement/implement-pr/review/update-branch` 五个 hosted workflow 在 #1992 删除，此前已被仓库变量 `SANDCASTLE_LEGACY_FREEZE=1` 冻结；本机受管默认从未经过它们（#1617）。专门校验它们的 `verify-workflows.py` 一并删除。`.sandcastle/agent-workflows/` 下的 TS 源码不再有 workflow 入口，仍由 `update-branch-entry.test.ts` 和 `tsconfig.sandcastle.json` 引用，留待单独清理。
 
 ## 文件地图
 

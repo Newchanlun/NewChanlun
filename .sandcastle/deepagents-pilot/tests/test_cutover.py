@@ -135,6 +135,89 @@ def test_remote_barrier_reads_actions_and_variable_without_github_writes(monkeyp
         remote_barrier(gateway)
 
 
+def _remote_gateway(workflows, runs_by_id):
+    from types import SimpleNamespace
+
+    def api(method, path, params):
+        assert method == 'GET'
+        if path.endswith('/actions/workflows'):
+            return SimpleNamespace(data={'workflows': workflows}, has_next=False)
+        workflow_id = int(path.split('/')[-2])
+        return SimpleNamespace(data={'workflow_runs': runs_by_id[workflow_id]}, has_next=False)
+
+    return SimpleNamespace(repo='Newchanlun/NewChanlun', client=SimpleNamespace(api=api), _p=lambda p: p)
+
+
+def _readonly_commands(monkeypatch):
+    from types import SimpleNamespace
+
+    def command(args, **kwargs):
+        if args[0] == 'gh':
+            return SimpleNamespace(stdout='1\n', stderr='', returncode=0)
+        return SimpleNamespace(stdout='', stderr='Could not find service', returncode=113)
+
+    monkeypatch.setattr('pilot1742.cutover.subprocess.run', command)
+
+
+@pytest.mark.parametrize('missing', ['agent-explore.yml', 'agent-update-branch.yml'])
+def test_remote_barrier_rejects_inventory_missing_one_legacy_workflow(monkeypatch, missing):
+    from pilot1742.cutover import LEGACY_WORKFLOWS, remote_barrier
+
+    _readonly_commands(monkeypatch)
+    names = sorted(LEGACY_WORKFLOWS - {missing})
+    workflows = [{'id': i, 'path': f'.github/workflows/{n}', 'state': 'active'} for i, n in enumerate(names, 1)]
+    gateway = _remote_gateway(workflows, {i: [{'status': 'completed'}] for i in range(1, len(names) + 1)})
+    with pytest.raises(CutoverError, match='inventory incomplete'):
+        remote_barrier(gateway)
+
+
+@pytest.mark.parametrize('state', ['active', 'deleted', 'disabled_manually'])
+def test_remote_barrier_checks_runs_of_retired_workflows_whatever_their_listed_state(monkeypatch, state):
+    # 文件删除后 GitHub 仍列出这些工作流（实测 state=active，REST 文档另列 deleted 等取值）。
+    # 无论 state 是什么，barrier 都要逐个读它们的 run，有未结束的就拒绝放行。
+    from pilot1742.cutover import LEGACY_WORKFLOWS, remote_barrier
+
+    _readonly_commands(monkeypatch)
+    names = sorted(LEGACY_WORKFLOWS)
+    workflows = [{'id': i, 'path': f'.github/workflows/{n}', 'state': state} for i, n in enumerate(names, 1)]
+    runs = {i: [{'status': 'completed'}] for i in range(1, len(names) + 1)}
+    assert remote_barrier(_remote_gateway(workflows, runs)).remote_jobs_idle
+    runs[len(names)] = [{'status': 'completed'}, {'status': 'queued'}]
+    with pytest.raises(CutoverError, match='still running'):
+        remote_barrier(_remote_gateway(workflows, runs))
+
+
+RETIRED_WORKFLOW_FILES = ('agent-explore.yml', 'agent-implement.yml', 'agent-implement-pr.yml',
+                          'agent-review.yml', 'agent-update-branch.yml', 'history36h.yml',
+                          'issue-1640-diagnostic39g.yml', 'p6-ledger35y.yml', 's4-source-proof31k.yml')
+
+
+def test_no_tracked_code_still_depends_on_a_retired_workflow_file():
+    # #1992：删掉工作流文件后，verify-workflows.py 仍按固定清单读它们，一跑就 FileNotFoundError。
+    # 这里扫所有受跟踪代码的非注释行，除 cutover.py（只按名字核对远端 inventory，不读本地文件）外，
+    # 不允许再出现这些文件名。
+    from pilot1742.cutover import LEGACY_WORKFLOWS
+
+    assert LEGACY_WORKFLOWS <= set(RETIRED_WORKFLOW_FILES)
+    repo = Path(__file__).resolve().parents[3]
+    for name in RETIRED_WORKFLOW_FILES:
+        assert not (repo / '.github' / 'workflows' / name).exists(), name
+    tracked = subprocess.run(
+        ['git', 'ls-files', '-z', '--', '*.py', '*.ts', '*.mts', '*.js', '*.mjs', '*.sh', '*.yml', '*.yaml', '*.toml'],
+        cwd=repo, check=True, capture_output=True).stdout.decode().split('\0')
+    allowed = {'.sandcastle/deepagents-pilot/pilot1742/cutover.py', '.sandcastle/deepagents-pilot/tests/test_cutover.py'}
+    offenders = []
+    for rel in filter(None, tracked):
+        if rel in allowed or not (repo / rel).is_file():
+            continue
+        for lineno, line in enumerate((repo / rel).read_text(errors='replace').splitlines(), 1):
+            code = line.strip()
+            if code.startswith(('#', '//', '*', '/*')):
+                continue
+            offenders += [f'{rel}:{lineno}: {name}' for name in RETIRED_WORKFLOW_FILES if name in code]
+    assert offenders == []
+
+
 def test_reclaimed_lifecycle_needs_a_terminal_not_perfect_historical_pairing():
     rows = [{'ticket': 1, 'phase': 'claim', 'status': 'claimed'},
             {'ticket': 1, 'phase': 'claim', 'status': 'claimed'}]
