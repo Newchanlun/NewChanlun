@@ -352,10 +352,11 @@ export async function allocateAdr(
   const sleep = o.sleep ?? ((ms) => new Promise((r) => setTimeout(r, ms)));
   mkdirSync(o.stateDir, { recursive: true });
   for (let i = 0; ; i++) {
-    try { writeFileSync(lock, String(process.pid), { flag: "wx" }); break; } catch {
-      if (i >= scheduler.adrLockMaxWaits) throw new Error(`ADR 编号锁 ${lock} 被占用超时`);
-      await sleep(scheduler.adrLockPollMs);
-    }
+    let locked = false;
+    try { locked = takePidLock(lock); } catch { /* 按占用处理，继续等 */ }
+    if (locked) break;
+    if (i >= scheduler.adrLockMaxWaits) throw new Error(`ADR 编号锁 ${lock} 被占用超时`);
+    await sleep(scheduler.adrLockPollMs);
   }
   try {
     const res: Record<string, number> = existsSync(resFile) ? JSON.parse(readFileSync(resFile, "utf8")) : {};
@@ -1184,12 +1185,39 @@ export function heldWaiting(prev: Partial<Pick<Summary, "phase" | "stage" | "com
   return prev.phase === "held" && !prev.stage && !resumeStaleBecauseReopen(prev, comments);
 }
 
+/**
+ * 锁文件记着持有进程的 pid。只有能确认该进程已不存在（ESRCH）才算残留锁：
+ * 内容读不出或不是 pid、进程仍在或无权探测（EPERM）都按仍被持有处理。
+ */
+export function pidLockHeld(path: string): boolean {
+  let text: string;
+  try { text = readFileSync(path, "utf8").trim(); }
+  catch (e) { if ((e as NodeJS.ErrnoException).code === "ENOENT") return false; return true; }
+  const pid = Number(text);
+  if (!/^\d+$/.test(text) || !Number.isSafeInteger(pid) || pid <= 0) return true;
+  try { process.kill(pid, 0); return true; }
+  catch (e) { return (e as NodeJS.ErrnoException).code !== "ESRCH"; }
+}
+
+/** 以 wx 建锁并写入本进程 pid；被 SIGKILL 或宿主崩溃留下的残留锁（持有进程已不存在）先清掉再试一次。 */
+export function takePidLock(path: string): boolean {
+  for (let attempt = 0; attempt < 2; attempt++) {
+    try { writeFileSync(path, String(process.pid), { flag: "wx" }); return true; }
+    catch (e) {
+      if ((e as NodeJS.ErrnoException).code !== "EEXIST") throw e;
+      if (attempt > 0 || pidLockHeld(path)) return false;
+      log(`清掉残留锁 ${path}（持有进程已不存在）`);
+      rmSync(path, { force: true });
+    }
+  }
+  return false;
+}
+
 function acquireTicketLock(outRoot: string, n: number): (() => void) | null {
   mkdirSync(outRoot, { recursive: true });
   // 锁留在不会被退役的父目录，覆盖迁移、重建、处理和最终持久化。
   const path = join(outRoot, `.${n}.lock`);
-  try { writeFileSync(path, String(process.pid), { flag: "wx" }); }
-  catch (e) { if ((e as NodeJS.ErrnoException).code === "EEXIST") return null; throw e; }
+  if (!takePidLock(path)) return null;
   return () => rmSync(path);
 }
 
@@ -1208,7 +1236,7 @@ function retireLegacyShadowLocked(outRoot: string, n: number): string | null {
   const dir = join(outRoot, String(n));
   const prev = prevSummary(dir) as { phase?: string; stage?: string };
   if (prev.phase !== "shadow_p" && prev.stage !== "shadow_p_pending") return null;
-  if (existsSync(join(dir, ".lock"))) return null;
+  if (pidLockHeld(join(dir, ".lock"))) return null;
   let k = 1;
   while (existsSync(`${dir}.shadow-p-retired-${k}`)) k++;
   const to = `${dir}.shadow-p-retired-${k}`;
@@ -1505,7 +1533,9 @@ async function archaeologyOnlyLocked(n: number, d: Deps): Promise<{ ticket: numb
   const dir = join(d.outRoot, String(n));
   mkdirSync(dir, { recursive: true });
   const lock = join(dir, ".lock");
-  try { writeFileSync(lock, String(process.pid), { flag: "wx" }); } catch { throw new Error(`${lock} 已存在，另一进程正在处理`); }
+  let locked = false;
+  try { locked = takePidLock(lock); } catch { /* 同上 */ }
+  if (!locked) throw new Error(`${lock} 已存在，另一进程正在处理`);
   let r: ArchRun;
   try {
     const switches: ModelSwitch[] = [];
@@ -1537,11 +1567,9 @@ async function processTicketLocked(n: number, raw: Deps): Promise<Summary> {
   const lock = join(dir, ".lock");
   const summary: Summary = { ticket: n, mode: raw.mode, phase: "classify", attempts: 0, durationsMs: {}, plannedWrites: [] };
   const d: Deps = { ...raw, model: fallbackRunner(n, raw.model, (sw) => (summary.modelSwitches ??= []).push(sw)) };
-  try {
-    writeFileSync(lock, String(process.pid), { flag: "wx" });
-  } catch {
-    return { ...summary, phase: "error", error: "本地锁已存在，另一进程正在处理" };
-  }
+  let locked = false;
+  try { locked = takePidLock(lock); } catch { /* 与旧行为一致：建锁出错按已被占用处理 */ }
+  if (!locked) return { ...summary, phase: "error", error: "本地锁已存在，另一进程正在处理" };
   const t0 = d.now();
   let claimed = false;
   let skipPersist = false;
