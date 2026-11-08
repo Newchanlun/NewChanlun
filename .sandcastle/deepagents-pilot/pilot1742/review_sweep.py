@@ -35,7 +35,11 @@ allow_auto_merge=false，2026-11-09 由主控关闭），GitHub 原生 auto-merg
 会靠原生 auto-merge 在检查转绿后绕过 HUMAN_GATED。
 合入阶段分两段：先把所有 PR 的证据读完、定好动作，再按序执行写（合入、追平、撤 auto-merge）。
 每个 gh 调用都有 GH_TIMEOUT_SECONDS 上限；超时按输入源读不到处理（SourceUnreadable），整轮作废、下轮重试，
-所以一轮最多卡一个超时，不会无限期拖住 executor serve 的派票循环。
+读阶段最多卡一个超时；之后 fail_closed 撤 auto-merge 时最多再卡一个，补对象的 fetch 另有自己的上限，
+所以一轮的耗时有界，不会无限期拖住 executor serve 的派票循环。
+检查结论绑定发布来源：必需检查只认 main 分支保护为它绑定的 app_id（status 按该 App 的 bot 账号、check run 按
+app.id），DevSkim 不是必需检查，只认 GitHub Actions（GATED_APP_IDS）；同名但出自别的 App 的结论一律不算。
+分支保护须 strict 与 enforce_admins 都开、两项必需检查都绑定了 app，否则本轮不合入、不追平。
 分类绑定到读到的那个 head SHA：文件清单接口不按 SHA 取，所以读完清单后再读一次 PR，head 未变才算数；开放 PR 列表、
 实时状态与复核三者的 head 有任何不一致都报 head-moved，不合入、不追平，并撤掉原生 auto-merge（新 head 没分类过）。
 写操作里合入带 sha、追平带 expected_head_sha，由 GitHub 服务端拒绝 head 不符；撤 auto-merge 的接口不收 SHA，
@@ -81,6 +85,11 @@ MIN_LOOP_SECONDS = 180
 MERGE_CHECKS = ("deepagents/review", "ci-ok", "DevSkim")
 FILES_CAP = 3000
 FETCH_TIMEOUT_SECONDS = 120
+# 不在分支保护里、但合入前也要看的检查：只认这里登记的来源 App（DevSkim 由 GitHub Actions 跑）。
+GATED_APP_IDS = {"DevSkim": 15368}
+# 发 commit status 的 App 在接口里只露出 bot 账号，不露 app_id：按已知 slug 求 bot 账号，并用 GET /apps/{slug}
+# 现场核对 id；不在表里的 App 发的 status 一律不算（失败关闭）。
+APP_SLUGS = {5486877: "newchanlun-deepagents-1742", 5664795: "newchanlun-review-gate", 15368: "github-actions"}
 GH_TIMEOUT_SECONDS = 60
 
 # 人工确认只剩两类：实盘下单或资金、密钥或凭证。出处：用户 2026-11-07、2026-11-08 的裁定，原话留痕在
@@ -139,8 +148,8 @@ class GitHubPort(Protocol):
     """读写 GitHub 的端口（宿主 gh 凭据）。写操作只在 --auto-merge 时调用。"""
     def open_pulls(self) -> list[dict[str, Any]]: ...
     def pr(self, number: int) -> dict[str, Any]: ...
-    def checks(self, head: str) -> dict[str, str]: ...
-    def required_checks(self) -> set[str]: ...
+    def checks(self, head: str, bindings: dict[str, int]) -> dict[str, str]: ...
+    def required_checks(self) -> dict[str, int]: ...
     def allow_auto_merge(self) -> bool: ...
     def pr_files(self, number: int) -> list[dict[str, Any]]: ...
     def merge(self, number: int, head: str) -> None: ...
@@ -151,6 +160,7 @@ class GitHubPort(Protocol):
 class GhCli:
     def __init__(self, repository: str = REPO, timeout: float = GH_TIMEOUT_SECONDS):
         self.repository, self.timeout = repository, timeout
+        self._bots: dict[int, str | None] = {}
 
     def _gh(self, *args: str) -> str:
         try:
@@ -173,27 +183,43 @@ class GhCli:
         return {"head": data["head"]["sha"], "base": data["base"]["sha"], "changed_files": data["changed_files"],
                 "mergeable_state": data["mergeable_state"], "auto_merge": data["auto_merge"] is not None}
 
-    def checks(self, head: str) -> dict[str, str]:
-        """该 head 上每个检查名的最新结论：success / failure / pending。"""
+    def _bot(self, app_id: int) -> str | None:
+        """App 发 commit status 时用的 bot 账号；slug 不在表里或 GET /apps/{slug} 的 id 对不上时返回 None。"""
+        if app_id not in self._bots:
+            slug = APP_SLUGS.get(app_id)
+            self._bots[app_id] = (f"{slug}[bot]" if slug is not None
+                                  and json.loads(self._gh("api", f"apps/{slug}")).get("id") == app_id else None)
+        return self._bots[app_id]
+
+    def checks(self, head: str, bindings: dict[str, int]) -> dict[str, str]:
+        """该 head 上每个受绑定检查名的最新结论（success / failure / pending），只认 bindings 给出的来源 App；
+        同名但出自别的 App 的 status 或 check run 不算，没有绑定 App 的结论就当没有。"""
         result: dict[str, str] = {}
-        status = json.loads(self._gh("api", f"repos/{self.repository}/commits/{head}/status"))
-        for item in status["statuses"]:  # 合并接口已按 context 取最新
-            result[item["context"]] = {"success": "success", "pending": "pending"}.get(item["state"], "failure")
+        statuses = self._json_lines("api", "--paginate", f"repos/{self.repository}/commits/{head}/statuses?per_page=100",
+                                    "--jq", ".[] | @json")
+        for item in statuses:  # 列表接口新的在前：每个名字只取绑定 App 发的最新一条
+            name = item["context"]
+            if name in bindings and name not in result and \
+                    (item.get("creator") or {}).get("login") == self._bot(bindings[name]):
+                result[name] = {"success": "success", "pending": "pending"}.get(item["state"], "failure")
         runs = self._json_lines("api", "--paginate", f"repos/{self.repository}/commits/{head}/check-runs?per_page=100",
                                 "--jq", ".check_runs[] | @json")
         for run in sorted(runs, key=lambda r: (r.get("started_at") or "", r["id"])):  # 重跑时后者覆盖前者
+            if run["name"] not in bindings or (run.get("app") or {}).get("id") != bindings[run["name"]]:
+                continue
             result[run["name"]] = ("pending" if run["status"] != "completed" else
                                    "success" if run["conclusion"] in ("success", "skipped", "neutral") else "failure")
         return result
 
-    def required_checks(self) -> set[str]:
-        """main 上可信的必需检查。strict（要求 PR 先与 base 追平）关着就一个都不算：审查结论只对 (base, head)
-        成立，不追平就会拿旧 base 上的结论合入。没绑定来源 app 的检查，任何有 statuses:write 的人都能发一条同名
-        success，也不算。"""
-        rules = json.loads(self._gh("api", f"repos/{self.repository}/branches/main/protection/required_status_checks"))
-        if rules.get("strict") is not True:
-            return set()
-        return {c["context"] for c in rules.get("checks", [])
+    def required_checks(self) -> dict[str, int]:
+        """main 上可信的必需检查及其绑定的来源 app_id。strict（要求 PR 先与 base 追平）或 enforce_admins 关着就
+        一个都不算：前者会拿旧 base 上的结论合入，后者让管理员身份（宿主 gh 可能就是）绕过保护。没绑定来源 app
+        的检查，任何有 statuses:write 的人都能发一条同名 success，也不算。"""
+        rules = json.loads(self._gh("api", f"repos/{self.repository}/branches/main/protection"))
+        checks = rules.get("required_status_checks") or {}
+        if checks.get("strict") is not True or (rules.get("enforce_admins") or {}).get("enabled") is not True:
+            return {}
+        return {c["context"]: c["app_id"] for c in checks.get("checks", [])
                 if type(c.get("app_id")) is int and c["app_id"] > 0}  # bool 是 int 的子类，排除
 
     def allow_auto_merge(self) -> bool:
@@ -410,8 +436,8 @@ class Sweep:
         return sorted(p for p in raw.decode().split("\0") if p)
 
     def _plan_one(self, pr: dict[str, Any], state: dict[str, Any], gate_ok: bool, head_free: bool,
-                  reviewing_now: bool = False, review_action: str | None = None
-                  ) -> tuple[dict[str, Any], bool, str | None]:
+                  reviewing_now: bool = False, review_action: str | None = None,
+                  bindings: dict[str, int] | None = None) -> tuple[dict[str, Any], bool, str | None]:
         """只读、不写：返回（动作，是否占队首，要做的写：merge / update / disable / None）。
         只有 head_free（前面没有 PR 占队首）且本 PR 仍可能合入时才可能追平。"""
         number, head = pr["number"], pr["head"]["sha"]
@@ -434,7 +460,7 @@ class Sweep:
             return ({"action": "needs-human-confirm", "gated": gated}, False,
                     "disable" if state["auto_merge"] or again["auto_merge"] else None)
         try:
-            checks = self.github.checks(head)
+            checks = self.github.checks(head, bindings or {})
         except SourceUnreadable:
             raise
         except Exception as error:
@@ -506,13 +532,21 @@ class Sweep:
         withdrawn = set() if withdrawn is None else withdrawn
         review_actions = review_actions or {}
         evidence_ok = True
+        required: dict[str, int] = {}
         try:
-            gate_ok = GATE <= self.github.required_checks()
+            required = self.github.required_checks()
+            gate_ok = GATE <= set(required)
         except SourceUnreadable:
             raise
         except Exception as error:  # 不合入、不追平，但照常逐个 PR 判人工确认类并撤原生 auto-merge
             gate_ok = evidence_ok = False
             actions.append({"action": "evidence-insufficient", "reason": f"读取 main 必需检查失败：{error}"})
+        # 合入看的每项检查都绑定来源 App：必需检查用分支保护的绑定，其余用 GATED_APP_IDS
+        bindings: dict[str, int] = {}
+        for name in MERGE_CHECKS:
+            app = required.get(name, GATED_APP_IDS.get(name))
+            if app is not None:
+                bindings[name] = app
         try:
             native = self.github.allow_auto_merge()
         except SourceUnreadable:
@@ -526,7 +560,7 @@ class Sweep:
             actions.append({"action": "native-auto-merge-enabled", "reason": why})
         if evidence_ok and not gate_ok:
             actions.append({"action": "auto-merge-unsafe",
-                            "reason": f"main 须 strict 且必需检查含绑定来源 app 的 {sorted(GATE)}，不合入"})
+                            "reason": f"main 须 strict、enforce_admins 且必需检查含绑定来源 app 的 {sorted(GATE)}，不合入"})
         plan: list[tuple[dict[str, Any], dict[str, Any], str | None, bool]] = []
         head_free = True
         for pr in pulls:  # 与 tick 同序（PR 号升序）：队首是第一个仍可能合入的 PR
@@ -542,7 +576,7 @@ class Sweep:
             write: str | None
             try:
                 result, claimed, write = self._plan_one(pr, states[number], gate_ok, head_free and evidence_ok,
-                                                        number in reviewing_now, review_actions.get(number))
+                                                        number in reviewing_now, review_actions.get(number), bindings)
                 if result["action"] not in ("head-moved", "needs-human-confirm"):
                     clean.add(number)
             except SourceUnreadable:
@@ -568,8 +602,14 @@ class Sweep:
                 actions.append({**entry, "action": "write-unknown", "write": write, "reason": str(error)})
                 raise
             except Exception as error:  # 写失败：不明即撤原生 auto-merge
-                result = {"action": "error", "reason": f"{type(error).__name__}: {error}",
-                          **(self._withdraw(number, armed) if write != "disable" else {})}
+                result = {"action": "error", "reason": f"{type(error).__name__}: {error}"}
+                if write != "disable":
+                    try:
+                        result.update(self._withdraw(number, armed))
+                    except SourceUnreadable as timeout:  # 撤销也超时：这一行先记下再整轮作废
+                        actions.append({**entry, **result, "auto_merge_withdrawn": False,
+                                        "withdraw_error": str(timeout)})
+                        raise
             actions.append({**entry, **result})
         return actions
 
@@ -692,6 +732,8 @@ def main(argv: list[str] | None = None) -> int:
     while True:
         try:
             report(sweep.tick())
+        except SourceUnreadable as error:  # 与 ServeRound 一致：本轮已做的动作照常写日志
+            report([*error.actions, {"action": "round-skipped", "unreadable": error.source, "reason": str(error)}])
         except Exception:  # 整轮失败（例如列 PR 失败）：记下，下轮重试，不退出
             print(json.dumps({"action": "tick-error", "reason": traceback.format_exc(limit=3)}, ensure_ascii=False),
                   flush=True)

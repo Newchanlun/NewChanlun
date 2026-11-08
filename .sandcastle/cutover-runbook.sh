@@ -34,7 +34,7 @@ print_command "${executor[@]}" cutover pending --workers-log "$repo/.sandcastle/
 print_command "${executor[@]}" cutover verify --workers-log "$repo/.sandcastle/logs/workers.jsonl" --private-key "$key"
 print_command "${executor[@]}" cutover record --workers-log "$repo/.sandcastle/logs/workers.jsonl" --private-key "$key"
 printf '%s\n' '# 必须先完成 verify/record，再 bootstrap 新服务；arch-hotzone 是否重启由部署 owner 在 record 后决定。' \
-  '# 把 plist 模板的 __REPO__、__VENV__、__PRIVATE_KEY_PATH__、__BOAT_CONFIG__、__BOAT_API_KEY_FILE__ 渲染成已核对的绝对路径。' \
+  '# 把 plist 模板的 __REPO__、__VENV__、__PRIVATE_KEY_PATH__、__REVIEW_PRIVATE_KEY_PATH__、__BOAT_CONFIG__、__BOAT_API_KEY_FILE__ 渲染成已核对的绝对路径。' \
   '# 确认 plist 的 PATH 能找到 Boat CLI；密钥只填仓外文件路径，不填内容。' \
   '# 确认新执行器的 main 基线对象已在源检出中；先只读核对队列及逐 run 待批请求。'
 print_command launchctl bootstrap "gui/$UID" "$HOME/Library/LaunchAgents/com.newchanlun.wayfinder-engine.plist"

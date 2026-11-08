@@ -24,7 +24,7 @@ class FakeGitHub:
     """GitHub 端口替身：PR、检查、文件与写操作记录。"""
     def __init__(self, lane, *, required=("deepagents/review", "ci-ok")):
         self.lane = lane
-        self.required = set(required)
+        self.required = {name: {"deepagents/review": 5486877, "ci-ok": 15368}[name] for name in required}
         self.extra_pulls = []
         self.states, self.checks_by_head, self.files, self.calls, self.fail = {}, {}, {}, [], {}
 
@@ -43,11 +43,12 @@ class FakeGitHub:
         state.update(self.states.get(number, {}))
         return state
 
-    def checks(self, head):
+    def checks(self, head, bindings):
+        assert bindings.get("DevSkim") == 15368 and all(bindings.get(k) == v for k, v in self.required.items())
         return dict(self.checks_by_head.get(head, {}))
 
     def required_checks(self):
-        return set(self.required)
+        return dict(self.required)
 
     def allow_auto_merge(self):
         return False
@@ -463,20 +464,25 @@ def test_live_local_reviewer_still_blocks_catch_up(lane):
     assert result["reviewing"] is True and github.calls == []
 
 
+BOUND = [{"context": "deepagents/review", "app_id": 5486877}, {"context": "ci-ok", "app_id": 15368}]
+
+
 @pytest.mark.parametrize(("rules", "trusted"), [
-    ({"strict": True, "checks": [{"context": "deepagents/review", "app_id": 5486877},
-                                 {"context": "ci-ok", "app_id": 15368}]}, {"deepagents/review", "ci-ok"}),
-    ({"strict": False, "checks": [{"context": "deepagents/review", "app_id": 5486877},
-                                  {"context": "ci-ok", "app_id": 15368}]}, set()),
-    ({"strict": True, "checks": [{"context": "deepagents/review", "app_id": 5486877},
-                                 {"context": "ci-ok", "app_id": None}, {"context": "x", "app_id": -1}]},
-     {"deepagents/review"}),
+    ({"strict": True, "checks": BOUND}, {"deepagents/review": 5486877, "ci-ok": 15368}),
+    ({"strict": False, "checks": BOUND}, {}),
+    ({"strict": True, "checks": [BOUND[0], {"context": "ci-ok", "app_id": None}, {"context": "x", "app_id": -1}]},
+     {"deepagents/review": 5486877}),
 ])
-def test_required_checks_count_only_strict_and_app_bound(monkeypatch, rules, trusted):
-    """I2：strict 关着一个都不算（会拿旧 base 上的结论合入）；没绑定来源 app 的检查谁都能伪造，不算。"""
+@pytest.mark.parametrize("enforce_admins", [True, False])
+def test_required_checks_count_only_strict_enforced_and_app_bound(monkeypatch, rules, trusted, enforce_admins):
+    """I2：strict 关着一个都不算（会拿旧 base 上的结论合入）；enforce_admins 关着也不算（管理员身份可绕过保护）；
+    没绑定来源 app 的检查谁都能伪造，不算。"""
     cli = module.GhCli("Newchanlun/NewChanlun")
-    monkeypatch.setattr(cli, "_gh", lambda *args: json.dumps(rules))
-    assert cli.required_checks() == trusted
+    protection = {"required_status_checks": rules, "enforce_admins": {"enabled": enforce_admins}}
+    calls = []
+    monkeypatch.setattr(cli, "_gh", lambda *args: calls.append(args) or json.dumps(protection))
+    assert cli.required_checks() == (trusted if enforce_admins else {})
+    assert calls == [("api", "repos/Newchanlun/NewChanlun/branches/main/protection")]
 
 
 def test_child_dying_before_registration_backs_off(lane):
@@ -849,7 +855,7 @@ def test_gh_calls_have_a_timeout_and_a_timeout_is_an_unreadable_source(monkeypat
         raise subprocess.TimeoutExpired(command, kwargs["timeout"])
     monkeypatch.setattr(module.subprocess, "run", run)
     cli = module.GhCli("Newchanlun/NewChanlun", timeout=7)
-    for call in (cli.open_pulls, lambda: cli.pr(5), lambda: cli.checks("a" * 40), cli.required_checks,
+    for call in (cli.open_pulls, lambda: cli.pr(5), lambda: cli.checks("a" * 40, BINDINGS), cli.required_checks,
                  lambda: cli.pr_files(5), lambda: cli.merge(5, "a" * 40), lambda: cli.update_branch(5, "a" * 40),
                  lambda: cli.disable_auto_merge(5)):
         with pytest.raises(SourceUnreadable) as caught:
@@ -1133,3 +1139,133 @@ def test_allow_auto_merge_timeout_skips_the_round(lane):
         sweep.tick()
     assert github.calls == [("disable", 1810)]                     # 超时：整轮作废，失败关闭照撤
     assert caught.value.actions[-1]["action"] == "fail-closed-withdraw"
+
+
+# ---- 第六轮（1354bc7c，run cfbc868b）：检查结论绑定来源 App；serve 的审查私钥单独给 ----
+
+def _gh_fake(statuses, runs, apps=None):
+    apps = apps or {"newchanlun-deepagents-1742": 5486877, "github-actions": 15368}
+    def gh(*args):
+        path = next(a for a in args if a.startswith(("repos/", "apps/")))
+        if path.startswith("apps/"):
+            return json.dumps({"id": apps.get(path.removeprefix("apps/"), -1)})
+        if "/statuses" in path:
+            return "\n".join(json.dumps(x) for x in statuses)
+        return "\n".join(json.dumps(x) for x in runs)
+    return gh
+
+
+def _status(context, state, login):
+    return {"context": context, "state": state, "creator": {"login": login, "type": "Bot"}}
+
+
+def _run(name, conclusion, app_id, run_id=1):
+    return {"name": name, "status": "completed", "conclusion": conclusion, "app": {"id": app_id},
+            "id": run_id, "started_at": f"2026-11-09T00:00:0{run_id}Z"}
+
+
+BINDINGS = {"deepagents/review": 5486877, "ci-ok": 15368, "DevSkim": 15368}
+
+
+def test_spoofed_same_name_checks_from_other_apps_do_not_count(monkeypatch):
+    """opus 中：同仓 PR 可加一个叫 deepagents/review 或 DevSkim 的 job、或用别的身份发同名 status。
+    只认分支保护（DevSkim 为 GATED_APP_IDS）绑定的来源 App，同名伪造的 success 不算。"""
+    cli = module.GhCli("Newchanlun/NewChanlun")
+    statuses = [_status("deepagents/review", "success", "someone-else[bot]"),   # 最新一条是伪造
+                _status("deepagents/review", "failure", "newchanlun-deepagents-1742[bot]")]
+    runs = [_run("deepagents/review", "success", 15368, 1),   # Actions 里的同名 job
+            _run("DevSkim", "success", 99999, 2),             # 别的 App 跑的 DevSkim
+            _run("ci-ok", "success", 15368, 3)]
+    monkeypatch.setattr(cli, "_gh", _gh_fake(statuses, runs))
+    assert cli.checks("a" * 40, BINDINGS) == {"deepagents/review": "failure", "ci-ok": "success"}
+
+
+def test_genuine_checks_from_bound_apps_count(monkeypatch):
+    cli = module.GhCli("Newchanlun/NewChanlun")
+    statuses = [_status("deepagents/review", "success", "newchanlun-deepagents-1742[bot]")]
+    runs = [_run("DevSkim", "success", 15368, 1), _run("ci-ok", "success", 15368, 2)]
+    monkeypatch.setattr(cli, "_gh", _gh_fake(statuses, runs))
+    assert cli.checks("a" * 40, BINDINGS) == {name: "success" for name in BINDINGS}
+
+
+@pytest.mark.parametrize("apps", [{"newchanlun-deepagents-1742": 1, "github-actions": 15368}, None])
+def test_status_from_unknown_or_mismatched_app_slug_fails_closed(monkeypatch, apps):
+    """status 只露 bot 账号：bot 由 APP_SLUGS 推出并经 GET /apps/{slug} 核对 id；对不上或不在表里都不算。"""
+    cli = module.GhCli("Newchanlun/NewChanlun")
+    statuses = [_status("deepagents/review", "success", "newchanlun-deepagents-1742[bot]")]
+    monkeypatch.setattr(cli, "_gh", _gh_fake(statuses, [], apps))
+    bindings = BINDINGS if apps else {**BINDINGS, "deepagents/review": 424242}
+    assert "deepagents/review" not in cli.checks("a" * 40, bindings)
+
+
+@pytest.mark.parametrize("missing", ["enforce_admins", "strict", "binding"])
+def test_protection_mismatch_never_merges(lane, missing):
+    """分支保护任一不符（enforce_admins 关、strict 关、必需检查没绑定 app）：失败关闭，不合入、不追平。"""
+    github = FakeGitHub(lane, required=() if missing != "binding" else ("deepagents/review",))
+    green(github, lane.gateway.pr["head"]["sha"])
+    if missing != "binding":
+        github.checks = lambda head, bindings: dict(github.checks_by_head.get(head, {}))
+    sweep, _, _ = make(lane, github=github, auto_merge=True)
+    actions = sweep.tick()
+    assert any(a["action"] == "auto-merge-unsafe" for a in actions) and github.calls == []
+
+
+def test_serve_passes_the_review_key_not_the_executor_key(monkeypatch, tmp_path):
+    """kimi 阻断：serve 的 sweep 用 --review-private-key，不把执行器 App 私钥转给 review-pr。"""
+    rounds, built = [], []
+    cli, argv = _fake_serve(monkeypatch, tmp_path, rounds=rounds)
+    monkeypatch.setattr(module, "serve_round", lambda key, **kw: built.append(key) or (lambda: rounds.append("sweep")))
+    with pytest.raises(_StopServe):
+        cli.main(argv + ["--review-sweep", "--review-private-key", str(tmp_path / "review.pem")])
+    assert built == [tmp_path / "review.pem"]
+
+
+def test_serve_refuses_without_review_key_once_review_app_identity_exists(monkeypatch, tmp_path, capsys):
+    """身份文件已指向审查专用 App 而没给 --review-private-key：失败关闭，退出码 2，记一行，sweep 不起。"""
+    from pilot1742 import external_review
+    identity = tmp_path / "app-identity.json"
+    identity.write_text("{}")
+    monkeypatch.setattr(external_review, "IDENTITY_CONFIG", identity)
+    rounds = []
+    cli, argv = _fake_serve(monkeypatch, tmp_path, rounds=rounds)
+    monkeypatch.setattr(module, "serve_round", lambda *a, **k: pytest.fail("sweep started without review key"))
+    monkeypatch.setattr(cli, "_client", lambda args: pytest.fail("App opened"))
+    assert cli.main(argv + ["--review-sweep"]) == 2
+    lines = [line for line in capsys.readouterr().out.splitlines() if line.startswith("review-sweep ")]
+    assert len(lines) == 1 and json.loads(lines[0].removeprefix("review-sweep "))["action"] == "refused-no-review-key"
+    assert rounds == []
+
+
+def test_serve_without_review_key_falls_back_only_without_review_identity(monkeypatch, tmp_path, capsys):
+    from pilot1742 import external_review
+    monkeypatch.setattr(external_review, "IDENTITY_CONFIG", tmp_path / "absent.json")
+    rounds, built = [], []
+    cli, argv = _fake_serve(monkeypatch, tmp_path, rounds=rounds)
+    monkeypatch.setattr(module, "serve_round", lambda key, **kw: built.append(key) or (lambda: rounds.append("sweep")))
+    with pytest.raises(_StopServe):
+        cli.main(argv + ["--review-sweep"])
+    assert built == [tmp_path / "k.pem"] and "review-key-fallback" in capsys.readouterr().out
+
+
+def test_plist_gives_the_review_key_its_own_placeholder():
+    import plistlib
+    from pathlib import Path
+    plist = Path(module.__file__).resolve().parents[2] / "launchd" / "com.newchanlun.deepagents-executor.plist"
+    args = plistlib.loads(plist.read_bytes())["ProgramArguments"]
+    assert args[args.index("--review-private-key") + 1] == "__REVIEW_PRIVATE_KEY_PATH__"
+    assert args[args.index("--private-key") + 1] == "__PRIVATE_KEY_PATH__"
+
+
+def test_manual_loop_logs_actions_taken_before_a_timeout(lane, monkeypatch, capsys):
+    """opus 低：手动单跑的 main 循环遇超时也先写本轮已做的动作，再写 round-skipped。"""
+    error = SourceUnreadable("github (repos/x) timed out after 60s", TimeoutError())
+    error.actions = [{"pr": 1805, "action": "merged"}]
+    class Boom(Sweep):
+        def __init__(self, *args, **kwargs):
+            pass
+        def tick(self):
+            raise error
+    monkeypatch.setattr(module, "Sweep", Boom)
+    assert module.main(["--private-key", "/k"]) == 0
+    lines = [json.loads(line) for line in capsys.readouterr().out.splitlines()]
+    assert [a["action"] for a in lines] == ["merged", "round-skipped"]
