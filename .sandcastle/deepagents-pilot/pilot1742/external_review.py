@@ -111,9 +111,8 @@ class ReviewOutcome:
 def _message_blocks(text: str) -> bool:
     """最终消息是否为 BLOCK：能解析成结果对象就按 status 与 summary 首行判定（与 validate_review 同口径，
     说明里引用「VERDICT: BLOCK」不算）；解析不了才退回整段文本匹配（fail closed）。"""
-    fenced = re.fullmatch(r"```(?:json)?[ \t]*\r?\n(.*?)\r?\n```", text.strip(), re.DOTALL)
     try:
-        value = json.loads(fenced[1] if fenced else text)
+        value = json.loads(unwrap_json_fence(text))
     except ValueError:
         return re.search(r"VERDICT:\s*BLOCK", text) is not None
     if not isinstance(value, dict):
@@ -304,6 +303,12 @@ def review_prompt(target: ReviewTarget, names: tuple[str, ...]) -> str:
                          head=target.head_sha, names=json.dumps(names, ensure_ascii=False))
 
 
+def unwrap_json_fence(text: str) -> str:
+    """与 codex-child.ts unwrapJsonFence 同一规则：只剥整段一个 ```json 围栏，围栏外有其他文字原样返回。"""
+    fenced = re.fullmatch(r"```(?:json)?[ \t]*\r?\n(.*?)\r?\n```", text.strip(), re.DOTALL)
+    return fenced[1] if fenced else text
+
+
 def frozen_patch(source: Path, target: ReviewTarget) -> FrozenPatch:
     """controller 自己从对象库取冻结补丁（不跑审查员的命令）：关掉外部 diff 与 textconv，固定 a/ b/ 前缀。"""
     diff = _git(source, "diff", "--no-ext-diff", "--no-textconv", "--no-color", "-U0", "--src-prefix=a/",
@@ -355,7 +360,7 @@ def validate_review(target: ReviewTarget, launch: dict, receipt: dict, folder: P
             kind = event.get("type")
             if kind == "error":
                 reconnect = re.fullmatch(
-                    r"Reconnecting\.\.\. ([1-9]\d*)/([1-9]\d*) \(stream disconnected before completion(?:: [^\r\n]+)?\)",
+                    r"Reconnecting\.\.\. ([1-9]\d*)/([1-9]\d*) \([^\r\n]+\)",  # 原因可为限流、401 等（#1913 run f19adb21）
                     event.get("message", ""), re.ASCII)
                 if not reconnect or int(reconnect[1]) > int(reconnect[2]):
                     return failed("stdout 有失败终态")
@@ -365,7 +370,8 @@ def validate_review(target: ReviewTarget, launch: dict, receipt: dict, folder: P
             elif kind == "turn.completed":
                 turn_completed = True
             elif kind == "item.completed" and event.get("item", {}).get("type") == "agent_message":
-                final_text = event["item"].get("text")
+                text = event["item"].get("text")
+                final_text = text if isinstance(text, str) else None  # 非字符串最终消息不可比对，按不符失败
             elif kind == "item.completed" and event.get("item", {}).get("type") == "command_execution":
                 item = event["item"]
                 patch_reads += (item.get("status") == "completed" and item.get("exit_code") == 0
@@ -383,7 +389,7 @@ def validate_review(target: ReviewTarget, launch: dict, receipt: dict, folder: P
             return failed("审查员未读取冻结候选补丁（无成功的 git diff/show 指名 head 并在输出里出现冻结补丁内容），"
                           "PASS/BLOCK 均不采信")
         output = receipt["result"]
-        if final_text is None or json.loads(final_text) != output:
+        if final_text is None or json.loads(unwrap_json_fence(final_text)) != output:
             return failed("结果与监督 stdout 不符")
         if (set(output) != {"status", "summary", "findings", "validation"}
                 or not isinstance(output["summary"], str)

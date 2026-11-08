@@ -26,7 +26,7 @@ export PYTHONPATH=.sandcastle/approval-signing:.sandcastle/deepagents-pilot
 
 POLICY 与模型都进了 `REVIEW_CONTRACT`，换组合后旧组合的 PASS 不能沿用，旧组合的 STALE 也不能 `migrate-stale`，都须在新组合下重审。旧 run 里已退役 reviewer 留下的派发与 BLOCK 证据仍计入完结与否决判断：控制器按 run 目录里实有的 worker 读，不只读当前 `MODELS`。
 
-kimi 不带 `--output-schema`（#1968）。带 schema 时它把开场白（「我先读 diff」）当成终答，零工具调用就结束回合；PR #1966 上实测带 schema 3/3 零调用，不带 schema、提示词要求只输出 JSON 时 3/3 执行 9–17 条只读命令并给出可解析的结论。名单在 `../external-review-worker.mts` 的 `PROMPT_JSON_MODELS`，表内模型的提示词末尾追加 `PROMPT_JSON_INSTRUCTION`，回执的 `output_contract` 记 `prompt` 或 `schema`。opus 照旧带 schema。kimi 的最终消息若带 Markdown 围栏，现有解析读不出，记 FAILED（fail closed）。
+kimi 不带 `--output-schema`（#1968）。带 schema 时它把开场白（「我先读 diff」）当成终答，零工具调用就结束回合；PR #1966 上实测带 schema 3/3 零调用，不带 schema、提示词要求只输出 JSON 时 3/3 执行 9–17 条只读命令并给出可解析的结论。名单在 `../external-review-worker.mts` 的 `PROMPT_JSON_MODELS`，表内模型的提示词末尾追加 `PROMPT_JSON_INSTRUCTION`，回执的 `output_contract` 记 `prompt` 或 `schema`。opus 照旧带 schema。最终消息若整段恰好是一个 ```json（或无语言标注）围栏，先剥掉围栏再解析，TS（`unwrapJsonFence`）与 Python（`unwrap_json_fence`）同一规则；围栏外有其他文字、有多个围栏或 text 不是字符串，仍记 FAILED（fail closed）。
 
 部署：Sandcastle 主模型另行切换，设 `SANDCASTLE_MAIN_MODEL=kimi-k3.1-pro`。审查员派发不依赖主模型取值，`.sandcastle/codex-child.ts` 的 `EXTERNAL_REVIEW_MODELS` 总在 `ALLOWED_MODELS` 里。部署后照常先跑 `review_preflight.py`，它探测的就是当前两位。
 
