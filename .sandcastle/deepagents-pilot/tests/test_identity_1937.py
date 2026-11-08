@@ -1,6 +1,7 @@
 """#1937：仓库迁到组织 Newchanlun 后，所有写死的 App 身份必须一致，旧账号下的批准记录仍然有效。"""
 import ast
 import json
+import subprocess
 from pathlib import Path
 
 from pilot1742.run import parse_approval_ledger
@@ -9,10 +10,14 @@ SANDCASTLE = Path(__file__).resolve().parents[2]
 EXPECTED = (5486877, 179444545, 1150335160, "Newchanlun/NewChanlun")
 
 
+def _tracked_sources():
+    listed = subprocess.run(["git", "ls-files", "-z", "--", "*.py"], cwd=SANDCASTLE, check=True,
+                            capture_output=True, text=True).stdout
+    return sorted(SANDCASTLE / name for name in listed.split("\0") if name and "tests" not in Path(name).parts)
+
+
 def _literal_identities():
-    for path in sorted(SANDCASTLE.rglob("*.py")):
-        if "tests" in path.parts or "node_modules" in path.parts:
-            continue
+    for path in _tracked_sources():
         for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
             if isinstance(node, ast.Call) and getattr(node.func, "id", None) == "AppIdentity":
                 values = [a.value for a in node.args[:4] if isinstance(a, ast.Constant)]

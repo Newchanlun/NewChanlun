@@ -10,6 +10,8 @@ from .approval import SpecAuthorization
 from .domain import RunId, Sha, parse_run_id, parse_sha
 
 REPO = "Newchanlun/NewChanlun"
+# 仓库 1150335160 从个人账号转到组织（#1937）。转移前写下的持有记录仍存旧全名，核对时视为同一仓库。
+REPO_NAMES = frozenset({REPO, "xy7365527-lang/NewChanlun"})
 FORBIDDEN_LABELS = frozenset({"sandcastle", "ready-for-agent", "wayfinder:impl", "wayfinder:grilling"})
 FORBIDDEN_PREFIX = "agent:"
 MIRROR_LABEL = "deepagents"
