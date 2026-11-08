@@ -308,6 +308,124 @@ fn partial_market_residual_is_explicit_not_reexecuted_in_next_bar() {
         .fills
         .is_empty());
 }
+fn closing(transitions: &[serde_json::Value], epoch: &str) -> serde_json::Value {
+    let found: Vec<_> = transitions
+        .iter()
+        .filter(|t| t["previous"]["manifest"]["capacity_epoch"] == epoch)
+        .collect();
+    assert_eq!(found.len(), 1, "{epoch} 在本批恰好关闭一次");
+    assert_eq!(found[0]["successor"], serde_json::Value::Null);
+    found[0].clone()
+}
+#[test]
+fn partial_and_zero_fill_market_epochs_close_in_their_exec_batch() {
+    let s = seed(vec![
+        order("bl", Side::Buy, 1, OrderKind::Limit { price: 100 }),
+        order("bm", Side::Buy, 2, OrderKind::Market { exec_index: 1 }),
+        order("sm", Side::Sell, 5, OrderKind::Market { exec_index: 1 }),
+    ]);
+    let later = order("later", Side::Buy, 3, OrderKind::Market { exec_index: 2 });
+    let mut b = batch(1, vec![Change::Submit { order: later }]);
+    b.capacity = Capacity::Scenario {
+        reference: "limit-takes-buy-budget".into(),
+        buy: 1,
+        sell: 2,
+    };
+    let r = advance(&model(), &s, &b).unwrap();
+    let fills: Vec<_> = r
+        .fills
+        .iter()
+        .map(|f| (f.family_id.as_str(), f.quantity))
+        .collect();
+    assert_eq!(fills, vec![("bl", 1), ("sm", 2)]);
+    assert_eq!(
+        r.unfilled_market,
+        std::collections::BTreeMap::from([("bm".to_owned(), 2), ("sm".to_owned(), 3)])
+    );
+    for (epoch, cumulative) in [("capacity:1:buy:close", 0), ("capacity:1:sell:close", 2)] {
+        let closed = &r.next_state.capacity_state.epochs[epoch];
+        assert_eq!((closed.closed_at, closed.cumulative), (Some(1), cumulative));
+        let t = closing(&r.capacity_transitions, epoch);
+        assert_eq!(t["previous"], serde_json::to_value(closed).unwrap());
+        assert_eq!(
+            (&t["effective_bar"]["index"], &t["originals_frontier"]),
+            (&serde_json::json!(1), &serde_json::json!("b1"))
+        );
+    }
+    assert_eq!(r.next_state.capacity_state.active, Default::default());
+    let mut b = batch(2, vec![]);
+    b.capacity = Capacity::Scenario {
+        reference: "fresh-market-slot".into(),
+        buy: 5,
+        sell: 5,
+    };
+    let next = advance(&model(), &r.next_state, &b).unwrap();
+    assert_eq!(next.capacity_transitions.len(), 2);
+    let formed = &next.capacity_transitions[0];
+    assert_eq!(formed["previous"], serde_json::Value::Null);
+    assert_eq!(
+        formed["successor"]["participants"],
+        serde_json::json!([{"family_id":"later","chong_id":"later","requested_q":3,"base_filled":0,"authorized_limit":3}])
+    );
+    assert_eq!(
+        (next.fills.len(), next.fills[0].family_id.as_str()),
+        (1, "later")
+    );
+    closing(&next.capacity_transitions, "capacity:2:buy:close");
+}
+#[test]
+fn market_epoch_close_is_persisted_with_its_batch_and_survives_cold_replay() {
+    let dir = std::env::temp_dir().join(format!("issue1381-market-close-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let db = dir.join("x.sqlite");
+    let mut c = Connection::open(&db).unwrap();
+    store::initialize(&mut c, &model(), "x", "market-close").unwrap();
+    let markets = vec![
+        order("bm", Side::Buy, 10, OrderKind::Market { exec_index: 1 }),
+        order("sm", Side::Sell, 2, OrderKind::Market { exec_index: 1 }),
+    ];
+    store::commit_batch(
+        &mut c,
+        &batch(
+            0,
+            markets
+                .into_iter()
+                .map(|order| Change::Submit { order })
+                .collect(),
+        ),
+    )
+    .unwrap();
+    let mut b1 = batch(1, vec![]);
+    b1.capacity = Capacity::Scenario {
+        reference: "partial-buy-zero-sell".into(),
+        buy: 4,
+        sell: 0,
+    };
+    let r1 = store::commit_batch(&mut c, &b1).unwrap();
+    drop(c);
+    let mut c = Connection::open(&db).unwrap();
+    store::audit_history(&c).unwrap();
+    let raw: String = c
+        .query_row("SELECT v FROM x_sim_meta WHERE k='state'", [], |r| r.get(0))
+        .unwrap();
+    let persisted: State = serde_json::from_str(&raw).unwrap();
+    assert_eq!(persisted.capacity_state.active, Default::default());
+    let transitions = r1["capacity_transitions"].as_array().unwrap();
+    for (epoch, cumulative) in [("capacity:1:buy:close", 4), ("capacity:1:sell:close", 0)] {
+        let closed = &persisted.capacity_state.epochs[epoch];
+        assert_eq!((closed.closed_at, closed.cumulative), (Some(1), cumulative));
+        assert_eq!(
+            closing(transitions, epoch)["previous"],
+            serde_json::to_value(closed).unwrap()
+        );
+    }
+    assert_eq!(store::read_batch(&c, "b1").unwrap(), r1);
+    assert_eq!(store::commit_batch(&mut c, &b1).unwrap(), r1);
+    let r2 = store::commit_batch(&mut c, &batch(2, vec![])).unwrap();
+    assert_eq!(r2["capacity_transitions"], serde_json::json!([]));
+    drop(c);
+    std::fs::remove_dir_all(dir).unwrap();
+}
 #[test]
 fn subprocess_fixture() {
     let Ok(dir) = std::env::var("ISSUE1381_CONTROLLED_PROCESS_FIXTURE") else {
