@@ -16,7 +16,8 @@
  *   3. 实装票全关 + 图关判据满足 → 自动起草图关 comment + close map。
  *
  * 不碰决策票（v1）：决策票（含 Notes N-k 预授权）一律人工；纯决策图（spec 出图）也人工。
- * 人工闸三处不动：spec 批准（闸一）/ 不预授权决策票 / 合入 main（闸二，本引擎不碰 main）。
+ * 人工闸两处不动：spec 批准（闸一）/ 不预授权决策票。合入 main 由必需检查 deepagents/review 与 ci-ok 把关
+ *   （#1742 裁定 https://github.com/Newchanlun/NewChanlun/issues/1742#issuecomment-6719202631），本引擎不碰 main。
  *
  * #1084 追加（2026-08-19 打回复核）——常驻控制面成为活机制：
  *   - 每轮区分五桶：全仓 ready-for-agent / 已获 ${releaseLabel()} 拾取权 / blocked / claimed / running；
@@ -1134,7 +1135,7 @@ function actSplitImpl(a: Extract<Action, { kind: "split_impl_tickets" }>, _cfg: 
   }
 }
 
-/** 动作 3：实装票全关 + 判据满足 → 起草图关 comment + close map（合入 main 人工闸不动）。 */
+/** 动作 3：实装票全关 + 判据满足 → 起草图关 comment + close map（不碰 main；合入由必需检查把关）。 */
 function actCloseGraph(a: Extract<Action, { kind: "close_graph" }>, _cfg: EngineConfig): void {
   const mapNumber = a.map;
   const ctx = fetchMapContext(mapNumber);
@@ -1157,7 +1158,7 @@ function actCloseGraph(a: Extract<Action, { kind: "close_graph" }>, _cfg: Engine
   lines.push(`- **实装票全关**：${impl.map((c) => `[#${c.number}](${issueUrl(c.number)})`).join(" / ") || "（无）"}`);
   lines.push(`- **残雾去向核实**：${fog.length === 0 ? "无残留（Not yet specified 已清空或全部有去向）" : `⚠ 仍有 ${fog.length} 条（不应发生）`}`);
   lines.push("");
-  lines.push("（本提交由 wayfinder_engine 自动起草；合入 main 为人工闸【闸二】，本引擎不碰。）");
+  lines.push("（本提交由 wayfinder_engine 自动起草；本引擎不碰 main，合入由必需检查 deepagents/review 与 ci-ok 把关，见 #1742 裁定 https://github.com/Newchanlun/NewChanlun/issues/1742#issuecomment-6719202631。）");
 
   const comment = lines.join("\n");
   // spec 非持久：实装落地即关。
