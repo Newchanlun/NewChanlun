@@ -52,10 +52,13 @@ CONTEXT = "deepagents/review"
 TOKEN_PERMISSIONS = {"metadata": "read", "contents": "read", "pull_requests": "read", "statuses": "write"}
 REPOSITORY_ID = 1150335160
 REPOSITORY = "Newchanlun/NewChanlun"
-# 未给 --app-identity 时沿用执行器 App；HOST 换审查专用 App 的步骤见 EXTERNAL-REVIEW.md「换用审查专用 App」。
+# IDENTITY_CONFIG 不存在时沿用执行器 App；HOST 换审查专用 App 的步骤见 EXTERNAL-REVIEW.md「换用审查专用 App」。
 DEFAULT_IDENTITY = {"app_id": 5486877, "installation_id": 179444545, "app_slug": "newchanlun-deepagents-1742",
                     "installation_permissions": INSTALLATION_PERMISSIONS}
 STATE_ROOT = DEFAULT_HOME / "external-review"
+# 发布 deepagents/review 的 App 身份的唯一来源。手动 review-pr、migrate-stale 与 review_sweep 派出的审查都读它，
+# 没有命令行开关可漏传。
+IDENTITY_CONFIG = STATE_ROOT / "app-identity.json"
 STATUS_LOCKS = STATE_ROOT / "status-locks"
 CHECKOUT_ROOT = DEFAULT_HOME / "checkouts" / "external-review"
 SPACE_RESERVE = 256 * 1024 * 1024
@@ -1105,12 +1108,13 @@ class ExternalReview:
             return journal.reconcile_not_applied(pending[0], note)
 
 
-def load_identity(config: Path | None, private_key: Path) -> AppIdentity:
-    """发布状态所用的 App 身份。config 是仓库外的非秘密 JSON，字段恰为 DEFAULT_IDENTITY 的四个；缺省用 DEFAULT_IDENTITY。"""
+def load_identity(config: Path, private_key: Path) -> AppIdentity:
+    """发布状态所用的 App 身份。config 是仓库外的非秘密 JSON，字段恰为 DEFAULT_IDENTITY 的四个；
+    config 不存在时用 DEFAULT_IDENTITY；存在（含悬空符号链接）但读不了或不合格就拒绝，不回退缺省。"""
+    if not config.is_absolute():
+        raise IdentityError("App 身份配置必须通过绝对文件路径明确指定")
     values: Any = DEFAULT_IDENTITY
-    if config is not None:
-        if not config.is_absolute():
-            raise IdentityError("App 身份配置必须通过绝对文件路径明确指定")
+    if os.path.lexists(config):
         directory = config.resolve().parent
         if any((ancestor / ".git").exists() for ancestor in (directory, *directory.parents)):
             raise IdentityError("App 身份配置必须保存在所有 Git 检出之外")
@@ -1140,12 +1144,10 @@ def main(argv: list[str] | None = None) -> int:
     review.add_argument("--pr", required=True, type=_positive)
     review.add_argument("--attempt", type=_positive, default=1)
     review.add_argument("--private-key", required=True, type=Path)
-    review.add_argument("--app-identity", type=Path, help="仓库外非秘密 JSON 的绝对路径；缺省为执行器 App 身份")
     migrate = sub.add_parser("migrate-stale", help="新部署补发旧 controller 下双审完整却未发布终态的 STALE run")
     migrate.add_argument("--pr", required=True, type=_positive)
     migrate.add_argument("--attempt", type=_positive, default=1)
     migrate.add_argument("--private-key", required=True, type=Path)
-    migrate.add_argument("--app-identity", type=Path, help="仓库外非秘密 JSON 的绝对路径；缺省为执行器 App 身份")
     status_cmd = sub.add_parser("status")
     status_cmd.add_argument("--pr", required=True, type=_positive)
     reconcile = sub.add_parser("reconcile")
@@ -1155,7 +1157,7 @@ def main(argv: list[str] | None = None) -> int:
     result: dict | list[dict]
     try:
         if args.command in ("review-pr", "migrate-stale"):
-            identity = load_identity(args.app_identity, args.private_key)
+            identity = load_identity(IDENTITY_CONFIG, args.private_key)
             with GitHubAppClient(identity, permissions=TOKEN_PERMISSIONS) as client:
                 client.verify()
                 lane = ExternalReview(RepoGateway(client))

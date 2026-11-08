@@ -1,5 +1,6 @@
-"""external_review 可换用审查专用 App：身份来自显式 JSON，安装权限按该身份的期望集合精确比较。"""
+"""external_review 可换用审查专用 App：身份只来自 IDENTITY_CONFIG，安装权限按该身份的期望集合精确比较。"""
 import json
+import os
 from pathlib import Path
 
 import httpx
@@ -7,6 +8,7 @@ import pytest
 
 import pilot1742.github_app as app
 from pilot1742 import external_review as module
+from pilot1742 import review_sweep
 from pilot1742.external_review import DEFAULT_IDENTITY, TOKEN_PERMISSIONS, load_identity
 from pilot1742.github_app import (
     INSTALLATION_PERMISSIONS,
@@ -79,8 +81,8 @@ def test_reviewer_identity_rejects_mismatched_installation(tmp_path, installed):
             client.verify()
 
 
-def test_default_identity_unchanged_and_rejects_narrow_installation():
-    identity = load_identity(None, KEY)
+def test_default_identity_unchanged_and_rejects_narrow_installation(tmp_path):
+    identity = load_identity(tmp_path / "absent.json", KEY)
     assert identity == AppIdentity(5486877, 179444545, 1150335160, "Newchanlun/NewChanlun",
                                    "newchanlun-deepagents-1742", KEY)
     assert identity.installation_permissions == INSTALLATION_PERMISSIONS
@@ -108,6 +110,8 @@ def test_identity_permissions_are_copied():
                            KEY, source)
     source["administration"] = "write"
     assert identity.installation_permissions == TOKEN_PERMISSIONS
+    with pytest.raises(TypeError):
+        identity.installation_permissions["administration"] = "write"  # type: ignore[index]
     assert DEFAULT_IDENTITY["installation_permissions"] == INSTALLATION_PERMISSIONS
 
 
@@ -133,29 +137,57 @@ def test_config_path_must_be_absolute_and_outside_git(tmp_path):
     (tmp_path / ".git").mkdir()
     with pytest.raises(IdentityError, match="Git"):
         load_identity(write(tmp_path, REVIEWER), KEY)
+    dangling = tmp_path / "outside" / "dangling.json"
+    dangling.parent.mkdir()
+    os.symlink(tmp_path / "missing-target.json", dangling)
+    (tmp_path / ".git").rmdir()
     with pytest.raises(IdentityError, match="无法读取"):
-        load_identity(Path("/nonexistent-review-identity/x.json"), KEY)
+        load_identity(dangling, KEY)  # 存在但读不了：拒绝，不回退缺省
+
+
+def capture_clients(monkeypatch):
+    seen = []
+    def client(identity, **kwargs):
+        seen.append((identity.app_id, identity.app_slug, identity.installation_permissions, kwargs["permissions"]))
+        raise IdentityError("stop before network")
+    monkeypatch.setattr(module, "GitHubAppClient", client)
+    return seen
+
+
+DEFAULT_SEEN = (5486877, "newchanlun-deepagents-1742", INSTALLATION_PERMISSIONS, TOKEN_PERMISSIONS)
+REVIEWER_SEEN = (5664795, "newchanlun-review-gate", TOKEN_PERMISSIONS, TOKEN_PERMISSIONS)
 
 
 @pytest.mark.parametrize("command", ["review-pr", "migrate-stale"])
-def test_cli_passes_selected_identity(tmp_path, monkeypatch, command):
-    seen = []
-    class Stop(IdentityError):
-        pass
-    def client(identity, **kwargs):
-        seen.append((identity, kwargs["permissions"]))
-        raise Stop("stop before network")
-    monkeypatch.setattr(module, "GitHubAppClient", client)
+def test_cli_reads_identity_config(tmp_path, monkeypatch, command):
+    seen = capture_clients(monkeypatch)
     assert module.main([command, "--pr", "1810", "--private-key", str(KEY)]) == 2
-    assert module.main([command, "--pr", "1810", "--private-key", str(KEY),
-                        "--app-identity", str(write(tmp_path, REVIEWER))]) == 2
-    assert [(i.app_id, i.app_slug, i.installation_permissions, p) for i, p in seen] == [
-        (5486877, "newchanlun-deepagents-1742", INSTALLATION_PERMISSIONS, TOKEN_PERMISSIONS),
-        (5664795, "newchanlun-review-gate", TOKEN_PERMISSIONS, TOKEN_PERMISSIONS),
-    ]
+    monkeypatch.setattr(module, "IDENTITY_CONFIG", write(tmp_path, REVIEWER))
+    assert module.main([command, "--pr", "1810", "--private-key", str(KEY)]) == 2
+    assert seen == [DEFAULT_SEEN, REVIEWER_SEEN]
+
+
+def test_cli_has_no_identity_override_flag(tmp_path):
+    with pytest.raises(SystemExit) as caught:
+        module.main(["review-pr", "--pr", "1810", "--private-key", str(KEY),
+                     "--app-identity", str(write(tmp_path, REVIEWER))])
+    assert caught.value.code == 2
 
 
 def test_cli_bad_config_fails_before_client(tmp_path, monkeypatch):
     monkeypatch.setattr(module, "GitHubAppClient", lambda *a, **kw: pytest.fail("must not build client"))
-    path = write(tmp_path, {**REVIEWER, "extra": 1})
-    assert module.main(["review-pr", "--pr", "1810", "--private-key", str(KEY), "--app-identity", str(path)]) == 2
+    monkeypatch.setattr(module, "IDENTITY_CONFIG", write(tmp_path, {**REVIEWER, "extra": 1}))
+    assert module.main(["review-pr", "--pr", "1810", "--private-key", str(KEY)]) == 2
+
+
+def test_sweep_review_uses_configured_reviewer_identity(tmp_path, monkeypatch):
+    """review_sweep 派出的审查（run-review 子进程入口）与手动 review-pr 读同一个身份文件。"""
+    seen = capture_clients(monkeypatch)
+    class GitHub:
+        def pr(self, number):
+            return {"head": "a" * 40}
+    argv = ["--pr", "1810", "--attempt", "1", "--expect-head", "a" * 40, "--private-key", str(KEY)]
+    assert review_sweep.run_review(argv, GitHub()) == 2
+    monkeypatch.setattr(module, "IDENTITY_CONFIG", write(tmp_path, REVIEWER))
+    assert review_sweep.run_review(argv, GitHub()) == 2
+    assert seen == [DEFAULT_SEEN, REVIEWER_SEEN]
