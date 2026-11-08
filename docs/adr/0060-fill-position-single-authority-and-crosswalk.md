@@ -1,11 +1,10 @@
 # ADR 0060：成交/持仓唯一写者分工与 crosswalk
 
-> #1742 引用迁移：本文旧 AGENTS 章节/行号保留为历史取证坐标（`git show 3d61fb7294:AGENTS.md`）；当前 #799/#804 完整限定与例外见 `docs/adr/0047-level-isomorphism-and-no-fallback-locks.md`，引文核验及教义三行头见 `docs/adr/0012-inference-layer-document-naming.md`「引用核验与教义正本」。
-
-
 > 正本：本文件是成交/持仓唯一写者分工与 crosswalk 的正本。
 > 最后裁定：#1539（2026-11-02，用户 P 类批准，[批复评论](https://github.com/xy7365527-lang/NewChanlun/issues/1539#issuecomment-6564138279)）
 > 受影响代码清单：见「受影响票与 blocking 边变化」节
+
+> #1742 引用迁移：本文旧 AGENTS 章节/行号保留为历史取证坐标（`git show 3d61fb7294:AGENTS.md`）；当前 #799/#804 完整限定与例外见 `docs/adr/0047-level-isomorphism-and-no-fallback-locks.md`，引文核验及教义三行头见 `docs/adr/0012-inference-layer-document-naming.md`「引用核验与教义正本」。
 
 **状态**：已采纳（P 类，用户批准）。用户批准的版本是 [影子评论 6551181286](https://github.com/xy7365527-lang/NewChanlun/issues/1539#issuecomment-6551181286) 的问表及同版草稿、考古（Q4、Q12 两项 C 类推荐答案；Q9、Q10、Q11、Q13、Q15 五项 B 类默认值；ADR 0038、ADR 0039 文末 append-only 修订授权）。本 ADR 只定写者、证据载体、恢复读法与 crosswalk 结构；实现与运行证据归消费票，不以本 ADR 声称实现完成。
 **裁定依据**：两轮独审 BLOCK 后按 `.sandcastle/docs/graph-engineering.md:73` 转 P；40R 返修经 40Y 独审 BLOCK（B1–B4），41F 返修经 41K 非作者独审 PASS（R1–R8），41P 只做 41K 列出的三项同义文书订正。原件存档于 `.chanlun/review-results/issue1539-decision-20261102/`（源 `/Volumes/AgentStorage/decisions/1539/`、`fu17-review40y/`、`fu17-review41k/`、`fu17-publish41p/`）。

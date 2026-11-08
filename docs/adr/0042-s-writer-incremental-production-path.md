@@ -1,11 +1,10 @@
 # ADR 0042：S 写者增量路径为唯一生产生成路径
 
-> #1742 引用迁移：本文旧 AGENTS 章节/行号保留为历史取证坐标（`git show 3d61fb7294:AGENTS.md`）；当前 #799/#804 完整限定与例外见 `docs/adr/0047-level-isomorphism-and-no-fallback-locks.md`，引文核验及教义三行头见 `docs/adr/0012-inference-layer-document-naming.md`「引用核验与教义正本」。
-
-
 > 正本：本文件是 S 写者生成路径的生产资格、冷启动与恢复、迁移开关、性能约束与完整重算路径退役的正本。
 > 最后裁定：#1612（2026-10-21）
 > 受影响代码清单：见「受影响代码与票」节
+
+> #1742 引用迁移：本文旧 AGENTS 章节/行号保留为历史取证坐标（`git show 3d61fb7294:AGENTS.md`）；当前 #799/#804 完整限定与例外见 `docs/adr/0047-level-isomorphism-and-no-fallback-locks.md`，引文核验及教义三行头见 `docs/adr/0012-inference-layer-document-naming.md`「引用核验与教义正本」。
 
 **日期**：2026-10-21　**裁定人**：用户（[#1612 评论 6307519196](https://github.com/xy7365527-lang/NewChanlun/issues/1612#issuecomment-6307519196)）　**驱动票**：[#1612](https://github.com/xy7365527-lang/NewChanlun/issues/1612)　**过渡与性能细则**：主控裁定 [#1612 评论 6307840577](https://github.com/xy7365527-lang/NewChanlun/issues/1612#issuecomment-6307840577)（切片 1 准备计划 0081 的 D1–D8，依用户批复）
 
