@@ -209,10 +209,13 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
-        # #1875：Boat large 上 sparse/全量 checkout 的耗时主要花在逐个写出文件；git 默认单线程写。
-        #   同机配对实测（2026-11-08，6 台全新沙箱交替先后顺序）：Ryzen 9950X 上 workers=1→8 省 48/90 s
-        #   （108→60、140→50 s），EPYC 9455/4585PX 上 ±2 s 不变；历史 Boat CI 作业 65/96 落在 9950X。
-        #   只作用于本步的 git，不影响作业里后续步骤。并行 checkout 写出的内容与串行相同。
+        # #1875 试验性：git 默认单线程写出工作区，这里开 checkout.workers=8。只作用于本步的 git，不影响后续步骤；
+        #   并行写出的内容与串行相同（eval 正确性门 6/6）。证据不足以预测收益：eval 预注册指标（同机配对节省中位数）
+        #   未过；按 CPU 分层是探索性结果——Ryzen 9950X 上热盘时 1 worker ~124 s、并行 26–70 s，但每台机器第一次
+        #   checkout 常有约 100 s 的随机冷盘惩罚（并行也会碰上，最高 157 s），而 CI 每个作业恰好只 checkout 一次。
+        #   回退判据（预先写死）：合入后前 20 个落在 9950X 的 Boat 作业，checkout 步骤中位数若不低于 134 s
+        #   （基线 154 s 少 20 s）即回退。基线 11-07 六轮 Boat CI：9950X n=65 中位 154 s，EPYC 4585PX n=19 中位 33 s，
+        #   EPYC 9455 n=12 中位 21.5 s。eval 与基线数据：AgentStorage hillclimb-ci-gate/evals/boat-checkout/。
         env: &checkout-workers
           GIT_CONFIG_COUNT: "1"
           GIT_CONFIG_KEY_0: checkout.workers
