@@ -430,10 +430,11 @@ export function analyzeMap(map: MapState, opts: WalkOptions): Analysis {
           };
         }
       } else {
+        // 与 actSplitImpl 同口径：按身份标记（旧票按标题）对上计划项；hold 标签停放的已发布票也算拆齐。
         const complete = plan.every((t) =>
-          impl.some((i) => i.title.startsWith(`[impl] ${t.id} `) &&
+          impl.some((i) => (i.body.includes(splitIdentity(s.number, t.id)) || i.title.startsWith(`[impl] ${t.id} `)) &&
             i.body.includes(splitReceipt(s.number, s.body, t.id)) &&
-            (i.state === "CLOSED" || i.labels.includes("ready-for-agent"))),
+            (i.state === "CLOSED" || i.labels.includes("ready-for-agent") || i.labels.some((l) => HOLD_LABELS.includes(l)))),
         );
         if (!complete) {
           return {
@@ -740,6 +741,9 @@ interface RawChild {
   number: number;
   title: string;
   body?: string | null;
+  /** REST 列举时才有：作者与是否为 PR，拆票恢复据此只认编排账号自己建的 issue。 */
+  user?: { login?: string } | null;
+  pull_request?: unknown;
   state: string;
   labels?: Array<{ name: string }>;
   assignees?: Array<{ login: string }>;
@@ -1201,11 +1205,14 @@ function splitReceipt(spec: number, body: string, id: string): string {
 
 const SPLIT_BODY_END = "<!-- wayfinder-ticket-end -->";
 const SPLIT_LEGACY_HEAD = "## 迁移前原票正文";
+const SPLIT_LEGACY_GOAL = "### 迁移前的目标（旧版计划，以上方当前目标为准）";
 
 /**
- * 未发布实施票的正文（纯函数）。引擎写的部分（身份、SPEC 链接、决策链、目标）每次都按当前 SPEC 重写，
- * 不沿用旧版 SPEC 留下的计划内容；票上不属于引擎的文字放到「迁移前原票正文」节下保留，
+ * 未发布实施票的正文（纯函数）。引擎写的部分（身份、SPEC 链接、决策链、目标，到 `wayfinder-ticket-end`
+ * 标记为止）每次都按当前 SPEC 重写；标记以下是票上不属于引擎的文字，逐行保留在「迁移前原票正文」节下，
  * 其中的 SPEC 链接改成纯文字，保证全文只有当前这一个 `Part of [SPEC #n]`（DeepAgents 准入要求唯一）。
+ * 早期引擎的票没有结束标记：只去掉身份行与那一行 SPEC 链接（它们由上方当前版本取代），旧的「目标」标题
+ * 改成「迁移前的目标」，其后所有文字（旧目标与后来追加的验收条件、范围、人工说明）原样保留。
  * 已发布（带当前版回执）的票不经过本函数。
  */
 export function splitTicketBody(identity: string, plannedBody: string, current: string | null | undefined): string {
@@ -1218,8 +1225,12 @@ export function splitTicketBody(identity: string, plannedBody: string, current: 
   } else {
     const lines = text.split("\n");
     if (lines[0] === identity) lines.shift();
-    // 早期引擎整份写出的计划正文（身份行后紧跟 SPEC 链接）全部属于引擎，按当前 SPEC 重写。
-    kept = /^Part of \[SPEC #\d+\]/.test(lines[0] ?? "") ? "" : lines.join("\n");
+    if (/^Part of \[SPEC #\d+\]/.test(lines[0] ?? "")) {
+      lines.shift();
+      const goal = lines.findIndex(l => /^## 目标（spec [^）]*）$/.test(l));
+      if (goal >= 0) lines[goal] = SPLIT_LEGACY_GOAL;
+    }
+    kept = lines.join("\n");
   }
   kept = kept.replace(/^\s+|\s+$/g, "");
   if (kept.startsWith(SPLIT_LEGACY_HEAD)) kept = kept.slice(SPLIT_LEGACY_HEAD.length).replace(/^\s+/, "");
@@ -1282,7 +1293,8 @@ async function actSplitImpl(a: Extract<Action, { kind: "split_impl_tickets" }>, 
   const tickets = new Map<string, { number: number; id: number; body: string; state: string; labels: string[] }>();
   for (const t of plan) {
     const identity = splitIdentity(a.spec, t.id);
-    const marked = allIssues.filter(i => (i.body ?? "").includes(identity));
+    // 身份标记只认编排账号自己建的 issue：外部账号预建的同标记票或 PR 不能冒充引擎的实施票，也不能让恢复因「多张票」卡死。
+    const marked = allIssues.filter(i => !i.pull_request && i.user?.login === cfg.orchestrator && (i.body ?? "").includes(identity));
     const legacy = linked.filter(i => i.title.startsWith(`[impl] ${t.id} `) && !i.body.includes("<!-- wayfinder-ticket:"));
     const candidates = [...new Map([...marked, ...legacy].map(i => [i.number, i])).values()];
     if (candidates.length > 1) throw new Error(`拆票身份 ${t.id} 对应多张票，不能自动选择`);
@@ -1315,8 +1327,8 @@ async function actSplitImpl(a: Extract<Action, { kind: "split_impl_tickets" }>, 
         names = (fresh.labels ?? []).map(l => l.name);
         state = fresh.state;
         body = bodyFor(fresh.body);
-        // 回收旧版本留下的提前发布标签；不引入另一套 consumer 准入规则。
-        const exposed = names.filter(l => ["ready-for-agent", "sandcastle", QUEUE_LABEL, IMPL_LABEL].includes(l));
+        // 回收旧版本留下的提前发布标签；票型标签 wayfinder:impl 保留（未发布票缺发布凭据，releaseTicket 不放行）。
+        const exposed = names.filter(l => ["ready-for-agent", "sandcastle", QUEUE_LABEL].includes(l));
         if (exposed.length) ghOnce(`issue edit ${number} --remove-label ${shellQuote(exposed.join(","))}`);
         names = names.filter(l => !exposed.includes(l));
         if ((fresh.body ?? "") !== body) ghOnce(`issue edit ${number} --body ${shellQuote(body)}`);
@@ -1344,6 +1356,8 @@ async function actSplitImpl(a: Extract<Action, { kind: "split_impl_tickets" }>, 
     if (!child.body.includes(receipt)) ghOnce(`issue edit ${child.number} --body ${shellQuote(`${child.body}\n${receipt}\n`)}`);
     if (normalizeState(child.state) === "CLOSED") continue;
     if (!stillApproved()) return;
+    // 维护者用 hold 标签停放的已发布票不再补 ready-for-agent；只摘掉 ready-for-agent 而不挂 hold 的，按发布中断补回。
+    if (child.labels.some(l => HOLD_LABELS.includes(l))) continue;
     if (!child.labels.includes("ready-for-agent")) ghOnce(`issue edit ${child.number} --add-label ready-for-agent`);
   }
 }
