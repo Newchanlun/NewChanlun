@@ -6,12 +6,12 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { randomUUID } from "node:crypto";
 import { codexWorker } from "./codex-route.mts";
-import { REVIEW_IMAGE, checkReviewAdmission, readLaunch, reviewMounts, runExternalReview, verifyReviewAdmission, type ReviewLaunch, type WorkerDependencies } from "./external-review-worker.mts";
+import { PROMPT_JSON_INSTRUCTION, REVIEW_IMAGE, checkReviewAdmission, readLaunch, reviewMounts, runExternalReview, verifyReviewAdmission, type ReviewLaunch, type WorkerDependencies } from "./external-review-worker.mts";
 import type { BindMountSandboxHandle } from "@ai-hero/sandcastle";
 
 const image = "sha256:" + "1".repeat(64);
 const container = "a".repeat(64);
-function fixture() {
+function fixture(model = "gpt-6.1-sol") {
   const root = realpathSync(mkdtempSync(join(tmpdir(), "external-review-test-")));
   const checkout = join(root, "source"), folder = join(root, "receipt");
   mkdirSync(checkout); mkdirSync(folder);
@@ -19,7 +19,7 @@ function fixture() {
   git("init", "-q"); git("-c", "user.name=Fixture", "-c", "user.email=f@example.invalid", "commit", "--allow-empty", "-qm", "base");
   git("checkout", "--detach", "-q");
   const head = git("rev-parse", "HEAD");
-  const launch: ReviewLaunch = { run_id: randomUUID(), launch_id: randomUUID(), pr_number: 1810, model: "gpt-6.1-sol",
+  const launch: ReviewLaunch = { run_id: randomUUID(), launch_id: randomUUID(), pr_number: 1810, model,
     head_sha: head, base_sha: head, merge_base_sha: head, controller_code_head: "b".repeat(40), checkout, prompt: "完整 PR 独审", mode: "review" };
   writeFileSync(join(folder, "launch.json"), JSON.stringify(launch), { mode: 0o600 });
   return { root, checkout, folder, launch };
@@ -52,9 +52,12 @@ test("显式两家族模型保留旧默认并拒绝路由外模型", () => {
   assert.throws(() => verifyReviewAdmission({ imageId: image, consume() {} }));
 });
 
-for (const mode of ["PASS", "BLOCK", "failed", "missing-log", "missing-completed", "write", "bad-mount", "secret-env", "bad-filesystem"] as const) {
-  test(`宿主监督 ${mode} 不把缺证据转为通过`, async () => {
-    const f = fixture(); const session = randomUUID();
+const modes = ["PASS", "BLOCK", "failed", "missing-log", "missing-completed", "write", "bad-mount", "secret-env", "bad-filesystem"] as const;
+for (const [mode, model] of [...modes.map((m) => [m, "gpt-6.1-sol"] as const),
+  ["PASS", "kimi-k3.1-pro"], ["BLOCK", "kimi-k3.1-pro"], ["PASS", "claude-opus-5-5"]] as const) {
+  test(`宿主监督 ${model} ${mode} 不把缺证据转为通过`, async () => {
+    const f = fixture(model); const session = randomUUID();
+    const schemaless = model === "kimi-k3.1-pro";
     let closed = false, creates = 0;
     let modelCommand = "";
     const output = { status: mode === "BLOCK" ? "blocked" : "completed", summary: `VERDICT: ${mode}`, findings: [], validation: [] };
@@ -68,9 +71,9 @@ for (const mode of ["PASS", "BLOCK", "failed", "missing-log", "missing-completed
           return { stdout: `${sessionsDir}/2026/10/29/rollout-2026-10-29-${session}.jsonl\n`, stderr: "", exitCode: 0 };
         }
         modelCommand = command;
-        assert(command.includes("--output-schema /tmp/external-review-schema.json"));
+        assert.equal(command.includes("--output-schema"), !schemaless);
         assert(command.includes("--disable multi_agent"));
-        assert.equal(options?.stdin, f.launch.prompt);
+        assert.equal(options?.stdin, schemaless ? f.launch.prompt + PROMPT_JSON_INSTRUCTION : f.launch.prompt);
         const events = [{ type: "thread.started", thread_id: session },
           { type: "item.completed", item: { type: "agent_message", text: JSON.stringify(output) } },
           ...(mode === "missing-completed" ? [] : [{ type: "turn.completed" }])];
@@ -113,6 +116,7 @@ for (const mode of ["PASS", "BLOCK", "failed", "missing-log", "missing-completed
         assert.equal(receipt.session_id, session);
         assert(receipt.turn_completed);
         assert.equal(receipt.container_id, container);
+        assert.equal(receipt.output_contract, schemaless ? "prompt" : "schema");
       }
       await assert.rejects(runExternalReview(f.folder, deps));
       assert.equal(creates, 1);

@@ -1,12 +1,12 @@
 """独审监督进程替身。只生成测试协议，不发模型请求。"""
 import json
 import os
+import subprocess
 import sys
 import uuid
 from pathlib import Path
 
 if sys.argv[1:] == ["--admission-only"]:  # 部署准入替身：controller=cwd 的 HEAD；.git/fake-admission 可注入失败或换镜像
-    import subprocess
     head = subprocess.run(["git", "rev-parse", "HEAD"], capture_output=True, text=True, check=True).stdout.strip()
     override = Path(".git/fake-admission").read_text().strip() if Path(".git/fake-admission").exists() else ""
     if override == "fail":
@@ -19,11 +19,17 @@ with open(folder.parents[1] / "launches", "a") as log:
     log.write(launch["model"] + "\n")
 per_model = folder.parents[1] / f"fake-mode-{launch['model']}"  # 按模型覆盖，造混合结论
 mode_file = per_model if per_model.exists() else folder.parents[1] / "fake-mode"
-mode = mode_file.read_text().strip() if mode_file.exists() else "PASS"
+mode, _, flag = (mode_file.read_text().strip() if mode_file.exists() else "PASS").partition(":")
 session = str(uuid.uuid4())
+diff = ["diff", "--no-ext-diff", "--no-textconv", launch["merge_base_sha"], launch["head_sha"]]
+read = f"/bin/bash -lc 'git {' '.join(diff)}'"
+patch = subprocess.run(["git", "-C", launch["checkout"], *diff], capture_output=True, text=True, check=True).stdout
+tool = [] if flag == "notool" else [  # 「BLOCK:notool」等：零工具调用的审查员（#1968）
+    {"type": "item.completed", "item": {"type": "command_execution", "command": read, "aggregated_output": patch,
+                                        "status": "completed", "exit_code": 0}}]
 output = {"status": "blocked" if mode == "BLOCK" else "completed", "summary": f"VERDICT: {mode}",
           "findings": [], "validation": ["测试替身"]}
-events = [{"type": "thread.started", "thread_id": session},
+events = [{"type": "thread.started", "thread_id": session}, *tool,
           {"type": "item.completed", "item": {"type": "agent_message", "text": json.dumps(output)}},
           {"type": "turn.completed"}]
 (folder / "events.jsonl").write_text("\n".join(json.dumps(e) for e in events) + "\n")
