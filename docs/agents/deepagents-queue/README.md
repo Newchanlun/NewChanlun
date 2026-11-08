@@ -17,12 +17,33 @@
 | 状态名 | 含义 | 操作员看什么（只读命令或文件） | 操作员能做什么或恢复动作 | 依据（仓内相对路径:行号） |
 | --- | --- | --- | --- | --- |
 | `queued` | 队列等待处理。 | 部署检出的 `.sandcastle/logs/deepagents-status.md`、状态根的 `queue-status.json`。 | 核对准入前提。已有工蜂运行或结果不明时，先处理原 run，不重派。 | `.sandcastle/deepagents-pilot/EXECUTOR.md:174`、`:180` |
-| `active` | 原 run 仍占队列槽：run 正在推进；子进程以 75 退出或被信号终止（退出码为负），下一轮恢复同一 run；或持有已是 `halted`、`released` 或单元已损坏，但工蜂尚未排空或观察无法完成。控制进程退出码 0 或 2 不证明工蜂结束。 | 队列状态页 `reason`、`executor status --run-id t<票号>-1` 与原 run 的持有记录。 | 工蜂仍为 `Running` 时等待。持有仍有效时，`EffectUnknown` 或状态无法读取由原控制入口恢复和收集。持有已是 `halted`、`released` 时，`executor run` 会被拒绝，改走“取消原工蜂与核对排空”。 | `.sandcastle/deepagents-pilot/EXECUTOR.md:80`、`:83`、`:174`、`:180`，`.sandcastle/deepagents-pilot/pilot1742/queue.py:252`、`:253`、`:267`、`:301`、`:302`、`:318`、`:331`、`:351`、`:353`，`.sandcastle/deepagents-pilot/pilot1742/executor.py:300`、`:301` |
-| `awaiting_human` | 等待人工处理，常见原因包括缺 D8 签批、缺 `deepagents-scope`，或 `runs/<run>/interrupt.request` 有停点。停点来源是操作员中断、`execution_unknown` 或 `brain_stopped_early`。此状态也会显示两类不需要签批的原因：`delivery read failed; retry next round` 是交付读回暂时失败，下一轮自动重试；`source checkout lacks main commit` 要求部署或 fetch main。工蜂未排空时，此状态仍占槽。 | 状态页原因、`runs/<run>/approvals/spec_authorization.request`、`runs/<run>/interrupt.request` 的 `by` 与 `reason`。 | 批准人核对并发布绑定当前 run 和正文的签批。缺写集先补 SPEC 正文，再签批。停点按下文“恢复同一 run”处理。封包 SPEC 与当前签批不符造成的 `execution_unknown` 不走 `--resume`，走“取消原工蜂与核对排空”。 | `.sandcastle/deepagents-pilot/EXECUTOR.md:65`、`:70`、`:71`、`:73`、`:151`、`:159`、`:163`，`.sandcastle/deepagents-pilot/pilot1742/queue.py:148`、`:274`、`:318` |
-| `awaiting_merge` | 冻结 head 已发布，draft PR 的 head 与它一致，状态和交付标记齐备。人已合入（发布 `merged`）也显示为此状态。 | 原 run 的 `delivery.state.pr.url` 与 PR 的 head；是否已合入以 `executor status` 的 `phase` 为准。 | 队列交付终点为 `awaiting_merge(h)`。由人在 GitHub 合入 main，执行器不自动合入。 | `.sandcastle/deepagents-pilot/EXECUTOR.md:3`、`:96`、`:97`、`:165`，`.sandcastle/deepagents-pilot/pilot1742/queue.py:284`、`:306` |
-| `halted` | 已停止推进。来源包括持有复核失败、远端 PR 不合交付合同、发布 `stale`，以及子进程结束后既无停点也无待签批、退出码不是 75 也不为负、发布 `phase` 不是 `awaiting_merge` 或 `merged`（含退出码 0）。 | 原 run 的持有记录、`executor status` 的 `phase`、队列状态页 `reason` 与本地工蜂记录。 | 交主控裁决，只有主控能释放。停止不证明排空；工蜂未排空时状态页显示为 `active`，按 `active` 行处置。 | `.sandcastle/deepagents-pilot/EXECUTOR.md:98`、`:99`、`:174`，`.sandcastle/deepagents-pilot/pilot1742/queue.py:284`、`:297`、`:299`、`:301`、`:303`、`:304` |
+| `active` | 原 run 仍占队列槽：run 正在推进；子进程以 75 退出或被信号终止（退出码为负），下一轮恢复同一 run；或持有已是 `halted`、`released` 或单元已损坏，但工蜂尚未排空或观察无法完成。控制进程退出码 0 或 2 不证明工蜂结束。 | 队列状态页 `reason`、`executor status --run-id t<票号>-1` 与原 run 的持有记录。 | 工蜂仍为 `Running` 时等待。持有仍有效时，`EffectUnknown` 或状态无法读取由原控制入口恢复和收集。持有已是 `halted`、`released` 时，`executor run` 会被拒绝，改走“取消原工蜂与核对排空”。 | `.sandcastle/deepagents-pilot/EXECUTOR.md:80`、`:83`、`:174`、`:180`，`.sandcastle/deepagents-pilot/pilot1742/queue.py:268`、`:269`、`:283`、`:330`、`:331`、`:250`、`:349`、`:369`、`:371`，`.sandcastle/deepagents-pilot/pilot1742/executor.py:307`、`:308` |
+| `awaiting_human` | 等待人工处理，常见原因包括缺 D8 签批、缺 `deepagents-scope`，或 `runs/<run>/interrupt.request` 有停点。停点来源是操作员中断、`execution_unknown` 或 `brain_stopped_early`。此状态也会显示一类不需要签批的原因：`source checkout lacks main commit` 要求部署或 fetch main。已交付 run 的 PR 对账读不到 GitHub 不再落到这里，见下文「本页未刷新」。工蜂未排空时，此状态仍占槽。 | 状态页原因、`runs/<run>/approvals/spec_authorization.request`、`runs/<run>/interrupt.request` 的 `by` 与 `reason`。 | 批准人核对并发布绑定当前 run 和正文的签批。缺写集先补 SPEC 正文，再签批。停点按下文“恢复同一 run”处理。封包 SPEC 与当前签批不符造成的 `execution_unknown` 不走 `--resume`，走“取消原工蜂与核对排空”。 | `.sandcastle/deepagents-pilot/EXECUTOR.md:65`、`:70`、`:71`、`:73`、`:151`、`:159`、`:163`，`.sandcastle/deepagents-pilot/pilot1742/queue.py:149`、`:250` |
+| `awaiting_merge` | 冻结 head 已发布，draft PR 的 head 与它一致，状态和交付标记齐备。人已合入（发布 `merged`）也显示为此状态。 | 原 run 的 `delivery.state.pr.url` 与 PR 的 head；是否已合入以 `executor status` 的 `phase` 为准。 | 队列交付终点为 `awaiting_merge(h)`。由人在 GitHub 合入 main，执行器不自动合入。 | `.sandcastle/deepagents-pilot/EXECUTOR.md:3`、`:96`、`:97`、`:165`，`.sandcastle/deepagents-pilot/pilot1742/queue.py:296`、`:335` |
+| `halted` | 已停止推进。来源包括持有复核失败、远端 PR 不合交付合同、发布 `stale`，以及子进程结束后既无停点也无待签批、退出码不是 75 也不为负、发布 `phase` 不是 `awaiting_merge` 或 `merged`（含退出码 0）。 | 原 run 的持有记录、`executor status` 的 `phase`、队列状态页 `reason` 与本地工蜂记录。 | 交主控裁决，只有主控能释放。停止不证明排空；工蜂未排空时状态页显示为 `active`，按 `active` 行处置。 | `.sandcastle/deepagents-pilot/EXECUTOR.md:98`、`:99`、`:174`，`.sandcastle/deepagents-pilot/pilot1742/queue.py:296`、`:326`、`:328`、`:330`、`:332`、`:333` |
 
 `stale` 表示远端分支或 PR 的 head 不再等于冻结 head，后代也算；`delivery.stale.observed` 记录观察到的 SHA。执行器不覆盖或收养，由主控决定重新评审还是释放。`merged` 表示人已合入，执行器不再写入。见 [读懂结果](../../../.sandcastle/deepagents-pilot/EXECUTOR.md#读懂结果)，依据为 `.sandcastle/deepagents-pilot/EXECUTOR.md:97`、`:98`。
+
+## 本页未刷新
+
+状态页标题下出现 `> 本页未刷新：<时间> 读不到 github: <错误类型>: <信息>；以下为上一轮成功读取时的状态。`，表示这一轮读 GitHub 失败，整轮作废。读取包括启动时的 App 身份核验、拉队列、登记票，以及已交付 run 的 PR 对账。每一轮先把这些读取全部做完，再开始派工，所以作废的那一轮一个子进程都没起，也没有写 GitHub。读失败之前已经读成功的票，可能已经留下了本机记录：新登记的 `units/<run>.json`、已交付 run 的对账结果（`delivery/state.json` 转 `merged`、`delivery/stale.json`），或者远端 PR 不合交付合同时持有记录转 `halted`。这些记录在作废轮不会出现在状态页上，下一次成功的轮次会显示。横幅下面是上一轮成功时的内容，`queue-status.json` 保持上一轮的值。
+
+- `serve --loop`（launchd 常驻）：stderr 写 `round skipped, source unreadable (github): ...`，等一个轮询间隔，关掉旧客户端、重新核身份后再读，进程不退出。下一轮读取成功后整页重写，横幅消失。
+- `serve --once`（runbook 检查步骤）：同样的失败退出码为 2，不写横幅。
+- 本机配置错误（`LocalConfigError`，如私钥不是绝对路径、不可读或权限不对）不算读不到源：两种模式都退出 2，不写横幅；常驻服务的 plist 是 `KeepAlive=true`、`ThrottleInterval=10`，launchd 会每 10 秒重启它一次，重启后再次退出 2。改好配置就恢复。
+
+设计取舍：读失败不按票隔离。只要有一张票一直读不到，队列就每一轮都作废，所有票都派不出去，包括优先级比它高的票。一直读不到的可能是已交付票的 PR（比如持续的 4xx），也可能是新票登记时读的票面或父 SPEC（比如父 SPEC 一直 404）。旧行为是只把这张票标 `awaiting_human`，其余票照常推进。现在这样做，是为了不在读不全 GitHub 时给出看似正常的状态页，也不在一轮读到一半时派工。
+
+横幅连续出现多轮时，按这个顺序排查：
+
+1. 看 `.sandcastle/logs/deepagents-executor.stderr.log` 里最近几行 `round skipped`：错误类型和信息是否每轮都一样。`RequestNotSent`、`OutcomeUnknown` 或 HTTP 5xx 多为网络或 GitHub 故障，等它恢复；同一个 HTTP 4xx 反复出现，说明是某个请求本身有问题。
+2. 用 `executor serve --once` 手动跑一轮，确认退出码是 2，错误与日志一致。
+3. 找出卡住整轮的票。日志里的错误信息带着读失败的请求。也可以逐张核对：
+   - `queue-status.json` 里每张 `awaiting_merge` 票：用 `executor status --run-id <run>` 取 `delivery.state.pr`，在 GitHub 上核对这个 PR 还在、号码和仓库都对，App 有权读取。
+   - 挂着 `deepagents:queue` 的其他票：核对票面和它正文里写的父 SPEC 都能读到，SPEC 没被删除或转移。
+4. 这张票交主控裁决：已交付票释放持有或修正交付记录，新票摘掉 `deepagents:queue` 或修正父 SPEC。执行器不会自动跳过它。
+
+依据为 `.sandcastle/deepagents-pilot/EXECUTOR.md:182`，`.sandcastle/launchd/com.newchanlun.deepagents-executor.plist:15`、`:17`、`:29`，`.sandcastle/deepagents-pilot/pilot1742/queue.py:236`、`:287`、`:302`、`:311`、`:376`、`:403`，`.sandcastle/deepagents-pilot/pilot1742/executor.py:815`、`:816`、`:821`、`:823`。
 
 ## 只读诊断
 
@@ -75,7 +96,7 @@ python3 .sandcastle/drain-control.py status
 
 3. 按原 run 的持有状态选择入口：持有仍有效时，使用上面的 `executor run --resume` 推进原 run；持有已是 `halted` 或 `released` 时，按下节重跑原 `cancel-worker`，不走 `run --resume`。原监督进程仍在时等待；已结束且无回执时保留 `EffectUnknown`。
 
-回执已缓存且删除证据已落盘时，原控制入口沿原绑定确认停止即可，无须恢复 VM。已取消的 `creating`、`prepared` 绑定不走 `run --resume`；VM 已停止但缺 key 删除证据时，恢复同一 VM 后再次调用原 `cancel-worker`。依据为 `.sandcastle/deepagents-pilot/BOAT.md:46`、`:48`、`:64`、`:67`、`:68`、`:92`、`:94`、`:98`、`:106`，`.sandcastle/deepagents-pilot/pilot1742/executor.py:300`、`:301`。完整原文见 [启动、观察和恢复](../../../.sandcastle/deepagents-pilot/BOAT.md#启动观察和恢复)。
+回执已缓存且删除证据已落盘时，原控制入口沿原绑定确认停止即可，无须恢复 VM。已取消的 `creating`、`prepared` 绑定不走 `run --resume`；VM 已停止但缺 key 删除证据时，恢复同一 VM 后再次调用原 `cancel-worker`。依据为 `.sandcastle/deepagents-pilot/BOAT.md:46`、`:48`、`:64`、`:67`、`:68`、`:92`、`:94`、`:98`、`:106`，`.sandcastle/deepagents-pilot/pilot1742/executor.py:307`、`:308`。完整原文见 [启动、观察和恢复](../../../.sandcastle/deepagents-pilot/BOAT.md#启动观察和恢复)。
 
 ## 取消原工蜂与核对排空
 

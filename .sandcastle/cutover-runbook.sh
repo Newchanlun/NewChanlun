@@ -22,7 +22,7 @@ printf '%s\n' '# 先停健康监控的周期自愈；已在飞的 monitor 由后
 print_command launchctl bootout "gui/$UID/com.newchanlun.health-monitor"
 print_command "${executor[@]}" cutover snapshot --workers-log "$repo/.sandcastle/logs/workers.jsonl"
 printf '%s\n' '# 等所有旧工蜂、远端 agent-* job 及 harvest 单轮自然收尾。' \
-  '# 核 snapshot 内进程均退出；engine 等常驻父进程只能在无在飞子进程的轮次边界卸载。' \
+  '# 核 snapshot 内子进程均退出；engine、claim-loop（冻结后常驻等待，不自然退出）等常驻父进程只能在无在飞子进程的轮次边界卸载。' \
   '# 由 owner 逐个确认后才执行下面的 bootout，不使用 kill。'
 for label in sandcastle-claimer sandcastle-harvest wayfinder-engine decision-claimer arch-hotzone; do
   print_command launchctl bootout "gui/$UID/com.newchanlun.$label"
