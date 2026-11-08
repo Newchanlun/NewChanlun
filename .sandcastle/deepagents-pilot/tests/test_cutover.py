@@ -102,13 +102,11 @@ def test_pid_reuse_is_not_the_snapshot_process(barrier, legacy_inventory):
 
 
 def test_remote_barrier_reads_actions_and_variable_without_github_writes(monkeypatch):
-    from pathlib import Path
     from types import SimpleNamespace
 
-    from pilot1742.cutover import LEGACY_SERVICES, remote_barrier
+    from pilot1742.cutover import LEGACY_SERVICES, LEGACY_WORKFLOWS, remote_barrier
 
-    workflows = [{'id': i, 'path': str(path)} for i, path in enumerate(
-        Path(__file__).resolve().parents[3].joinpath('.github/workflows').glob('agent-*.yml'), 1)]
+    workflows = [{'id': i, 'path': f'.github/workflows/{name}'} for i, name in enumerate(sorted(LEGACY_WORKFLOWS), 1)]
     requests, commands = [], []
 
     def api(method, path, params):
