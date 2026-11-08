@@ -547,9 +547,11 @@ jobs:
       #   （glibc 2.36 容器）实跑：74 过、7 忽略（需 HFS 载体或外部夹具）、0 败，无需 --skip；只在 macOS
       #   编译的 1 条（half_close_during_large_frame_drain_observes_actual_eof）与各 macOS 专属分支由
       #   ci-macos.yml 作业覆盖。
-      - name: cargo test — economic_session / session_transport / session_protocol 库测试（#1394 G-1）
+      #   #1381：history_simulation（X 逐 bar 模拟原件与恢复状态机，s_session 下编译）的库测试同在本步；
+      #   与上述模块同一个 lib 测试二进制，不多编译。Belay release 实测 27 条合计 1.7 s。
+      - name: cargo test — economic_session / session_transport / session_protocol / history_simulation 库测试（#1394 G-1、#1381）
         if: ${{ !cancelled() && startsWith(matrix.group, 'economic') }}
-        run: ../.github/scripts/run-cargo-with-telemetry.sh ../.github/scripts/cargo-test-part.sh --locked --features s_session --lib --jobs "${CI_CARGO_JOBS:-1}" -- economic_session session_transport session_protocol
+        run: ../.github/scripts/run-cargo-with-telemetry.sh ../.github/scripts/cargo-test-part.sh --locked --features s_session --lib --jobs "${CI_CARGO_JOBS:-1}" -- economic_session session_transport session_protocol history_simulation
 
       # #1394/#1481：s_capture_native_testonly 特性下才编译的测试（2026-10-14 计：lib 26、S bin 174）此前从未编译、
       #   从未执行（state.rs 测试调用漏传 cfg 参数，开特性即 E0061）。只跑「开特性后新增」的测试，其余同名同体测试
@@ -781,8 +783,10 @@ jobs:
       # 纯生产构建（只开 production_session，#1769 返修 M-3/M-4）：编译生产 launcher、X 骨架与 S bin 的生产 cfg
       #   （含 S_PASS 不转交 TestOnly 开关的分支），并真实执行拒绝类子集：P0 未签拒启两条、生产 S 遇
       #   S_THETA_DIAGNOSTIC_TESTONLY=1 即拒启、生产 launcher 不转交该开关。需 S 开门的测试在此构建由 cfg 排除。
-      - name: cargo test — production_session_entry（纯生产构建）
-        run: ../.github/scripts/run-cargo-with-telemetry.sh cargo test --release --locked --features production_session --test production_session_entry --jobs "${CI_CARGO_JOBS:-1}" -- --test-threads 1
+      #   #1381：history_simulation_entry 用 python3 受控 E/S authority 驱动真实 x_execution_session 进程
+      #   （入口、重启、S 唯一授权、epoch2 拒绝、首次初始化原子），文件 cfg 为 production_session，同在纯生产构建执行。
+      - name: cargo test — production_session_entry / history_simulation_entry（纯生产构建）
+        run: ../.github/scripts/run-cargo-with-telemetry.sh cargo test --release --locked --features production_session --test production_session_entry --test history_simulation_entry --jobs "${CI_CARGO_JOBS:-1}" -- --test-threads 1
 
   rust-test-backtest-bin:
     needs: changes
