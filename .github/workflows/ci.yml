@@ -223,7 +223,8 @@ jobs:
   #   rust-test-default               cargo test 默认目标
   #   rust-test-s-session (shard i)   s_session bin 测试按测试名分片（test-shard.py，并集 == 全集当场断言）
   #   rust-test-s-session-coverage    汇总各片产物，再断言一次并集 == 全集、各片执行集 == 分配集
-  #   rust-test-s-session-extras      s_session 的 TB-02-C、库/集成测试、TestOnly 特性增量、v3 history
+  #   rust-test-s-session-extras (组) s_session 的 TB-02-C、库/集成测试、TestOnly 特性增量、v3 history（矩阵作业
+  #                                   rust-test-s-session-extra-groups，结论由 ci-ok 直接判定）
   #   rust-test-backtest-bin          backtest_bin feature 的库测试
   # 拆前 s_session bin 一步 89 分钟里，执行占 88 分钟、编译约 1 分钟；其中两条测试独占尾部
   # （tb02w_killed_case_two_scan_budget_resume_and_recover 约 69 分钟、tb02c_persistent_first_kind_and_normal_recovery
@@ -393,22 +394,26 @@ jobs:
   #   下方 macos-session 作业一并执行；push main 由该文件自身的 paths 过滤触发）。
   # #1588：按测试名分片。全集每片现场 `--list` 动态生成（不维护静态清单），按
   #   .github/scripts/s-session-test-weights.tsv 的实测耗时做 LPT 分配；权重只管均衡、不管覆盖，
-  #   表外新测试取中位数权重照常入片。改片数须同时改 matrix.shard 与 S_SESSION_SHARDS。
+  #   表外新测试取中位数权重照常入片。改片数须同时改 matrix.shard 与本作业及 coverage 作业的 S_SESSION_SHARDS。
+  # #1875：Boat 上分 2 片、托管机分 4 片（两者用与 runs-on 相同的判断式）。最慢一片都由单条 tb02c 决定
+  #   （Boat 9950X 约 258 s、托管约 553 s），同片其余测试摊在另外 3 个线程上；按实测权重 LPT，2 片为 [1086, 1086]、
+  #   4 片为 [841, 444, 444, 444]（Belay 串行秒），最长片仍是 tb02c 那条。Boat 每轮因此少起 2 台机器
+  #   （每小时 210 次启动上限下，一轮 CI 约 19 次）。
   rust-test-s-session:
     needs: changes
     if: needs.changes.outputs.rust == 'true'
     name: rust-test-s-session (shard ${{ matrix.shard }})
     runs-on: ${{ (vars.CI_BOAT_RUNNERS != 'off' && github.actor == 'xy7365527-lang' && github.triggering_actor == 'xy7365527-lang' && (github.event_name != 'pull_request' || github.event.pull_request.user.login == 'xy7365527-lang')) && 'boat-large/from=hc-ci-slim' || 'ubuntu-latest' }}
-    # 最慢那片只含 tb02w 一条长测试：独占 runner 实测 31 分钟（EPYC 9V45）到 67 分钟（EPYC 7763，已见最慢机型），含编译。
-    # 上限只作挂死保护，按最慢机型读数留约 40% 余量（「有余量」看实测时长，不看本值）。
+    # 最慢那片由单条 tb02c 决定（#1976 之后 tb02w 已降到约 150–270 s）：Boat 9950X 约 258 s、托管 7763 约 553 s，
+    #   作业整体 7–15 分钟。上限只作挂死保护（「有余量」看实测时长，不看本值）。
     timeout-minutes: 110
     strategy:
       fail-fast: false
       matrix:
-        shard: [0, 1, 2, 3]
+        shard: ${{ fromJSON((vars.CI_BOAT_RUNNERS != 'off' && github.actor == 'xy7365527-lang' && github.triggering_actor == 'xy7365527-lang' && (github.event_name != 'pull_request' || github.event.pull_request.user.login == 'xy7365527-lang')) && '[0, 1]' || '[0, 1, 2, 3]') }}
     env:
       CARGO_INCREMENTAL: "0"
-      S_SESSION_SHARDS: "4"
+      S_SESSION_SHARDS: ${{ (vars.CI_BOAT_RUNNERS != 'off' && github.actor == 'xy7365527-lang' && github.triggering_actor == 'xy7365527-lang' && (github.event_name != 'pull_request' || github.event.pull_request.user.login == 'xy7365527-lang')) && '2' || '4' }}
       CI_OWN_OPT_LEVEL1: "1"
     defaults:
       run:
@@ -448,7 +453,8 @@ jobs:
     if: ${{ !cancelled() && needs.changes.outputs.rust == 'true' }}
     timeout-minutes: 10
     env:
-      S_SESSION_SHARDS: "4"
+      # 与 rust-test-s-session 同一判断式：分片作业在 Boat 上是 2 片，托管机上是 4 片。
+      S_SESSION_SHARDS: ${{ (vars.CI_BOAT_RUNNERS != 'off' && github.actor == 'xy7365527-lang' && github.triggering_actor == 'xy7365527-lang' && (github.event_name != 'pull_request' || github.event.pull_request.user.login == 'xy7365527-lang')) && '2' || '4' }}
 
     steps:
       - uses: actions/checkout@v4
@@ -490,9 +496,11 @@ jobs:
       max-parallel: ${{ (vars.CI_BOAT_RUNNERS != 'off' && github.actor == 'xy7365527-lang' && github.triggering_actor == 'xy7365527-lang' && (github.event_name != 'pull_request' || github.event.pull_request.user.login == 'xy7365527-lang')) && 8 || 5 }}
       matrix:
         # 按托管路径实测时长从长到短排，空出的槽先给长的（#1875 R12）。
-        # #1875 P353-5/7：Boat 上把 owned 的 release 档 H1 各步拆到 owned-h1；native、economic 的测试按名字分成 a/b 两份
-        #   （CI_TEST_PART），各占一台机器，同机负载与不拆时相同。托管路径只拆 owned/owned-h1，native、economic 不拆（20 并发上限）。
-        group: ${{ fromJSON((vars.CI_BOAT_RUNNERS != 'off' && github.actor == 'xy7365527-lang' && github.triggering_actor == 'xy7365527-lang' && (github.event_name != 'pull_request' || github.event.pull_request.user.login == 'xy7365527-lang')) && '["native-a","native-b","release-locks","owned","owned-h1","economic-a","economic-b","content"]' || '["native","release-locks","owned","owned-h1","economic","content"]') }}
+        # #1875 P353-5/7：Boat 上把 owned 的 release 档 H1 各步拆到 owned-h1；native 的测试按名字分成 a/b 两份
+        #   （CI_TEST_PART），各占一台机器，同机负载与不拆时相同。托管路径只拆 owned/owned-h1，native 不拆（20 并发上限）。
+        #   economic 开 opt-level 1 后不再拆：run 42452395669（9950X）a/b 各编译约 90 s、测试 182/267 s，合并后估约 10 min，
+        #   仍短于 release-locks（13.0 min，run 42454217164）；每轮少 1 次 Boat 启动和 1 次重复编译。
+        group: ${{ fromJSON((vars.CI_BOAT_RUNNERS != 'off' && github.actor == 'xy7365527-lang' && github.triggering_actor == 'xy7365527-lang' && (github.event_name != 'pull_request' || github.event.pull_request.user.login == 'xy7365527-lang')) && '["native-a","native-b","release-locks","owned","owned-h1","economic","content"]' || '["native","release-locks","owned","owned-h1","economic","content"]') }}
     runs-on: ${{ (vars.CI_BOAT_RUNNERS != 'off' && github.actor == 'xy7365527-lang' && github.triggering_actor == 'xy7365527-lang' && (github.event_name != 'pull_request' || github.event.pull_request.user.login == 'xy7365527-lang')) && 'boat-large/from=hc-ci-slim' || 'ubuntu-latest' }}
     timeout-minutes: ${{ startsWith(matrix.group, 'native') && 90 || 60 }}
     env:
@@ -748,20 +756,6 @@ jobs:
             artifact.log
           if-no-files-found: warn
 
-  # #1722：保留原 check 名称。仅全矩阵成功可绿；失败、取消、跳过或无结果均拒绝。
-  rust-test-s-session-extras:
-    runs-on: ubuntu-latest
-    needs: [changes, rust-test-s-session-extra-groups]
-    if: ${{ always() }}
-    timeout-minutes: 5
-    steps:
-      - name: Require all extras groups to succeed (#1722)
-        # 只在 changes 明确判定不需要 Rust 时才接受 skipped；changes 失败时 RUST 为空，这里照样失败。
-        env:
-          EXTRAS_RESULT: ${{ needs.rust-test-s-session-extra-groups.result }}
-          RUST: ${{ needs.changes.outputs.rust }}
-        run: test "$EXTRAS_RESULT" = success || { test "$EXTRAS_RESULT" = skipped && test "$RUST" = false; }
-
   # #1769（ADR 0039 迁移步骤 1，C-L 验收第 4 项）：唯一生产 launcher 与 X 骨架入口测试。
   rust-test-production-session:
     needs: changes
@@ -845,7 +839,7 @@ jobs:
             features: s_session
           - mode: Owned
             features: s_session,s_allocation_json_testonly
-    # #1588 约定：每个 Rust job 设上限兼作挂死保护；单 feature 组编 S bin 测试 + 精确锁，对齐 rust-test-s-session-extras。
+    # #1588 约定：每个 Rust job 设上限兼作挂死保护；单 feature 组编 S bin 测试 + 精确锁，对齐 rust-test-s-session-extras 各组。
     timeout-minutes: 60
     env:
       CARGO_INCREMENTAL: "0"
@@ -1267,6 +1261,17 @@ jobs:
       #   其 setUpClass 要用 --binary 传入的 S 写者二进制建库，本 job 不构建 Rust，故不进 CI，
       #   由本机以 --binary 单独实跑留收据。两个 test_tb02d_*.cjs 是需外部归档参数的离线对照探针，
       #   tb02d_{harness,runtime,verify}.py 与 tb02d_browser.cjs 是正式运行验收脚本，均不在 CI 执行。
+      # 3.14.6 不在 runner 镜像的 toolcache 里，setup-python 每次都去 GitHub Releases 下载；11-08 下载持续 504，
+      #   s-observer 两天内 6 次因此失败（run 42464517221 等）。把下载好的 toolcache 目录按镜像版本缓存，
+      #   setup-python 先查 toolcache，命中即不联网；解释器仍是同一个 3.14.6 构建（下载包按 Ubuntu 版本区分，故键含镜像）。
+      - name: Runner image identity for the CPython cache (#1414)
+        id: image
+        run: echo "id=${ImageOS:-unknown}-${ImageVersion:-unknown}" >> "$GITHUB_OUTPUT"
+      - name: Cache CPython 3.14.6 toolcache (#1414)
+        uses: actions/cache@v4
+        with:
+          path: ${{ runner.tool_cache }}/Python/3.14.6
+          key: cpython-3.14.6-${{ runner.os }}-${{ runner.arch }}-${{ steps.image.outputs.id }}
       - name: Set up CPython 3.14.6 for TB-02-D (#1414)
         uses: actions/setup-python@v5
         with:
@@ -1400,7 +1405,6 @@ jobs:
       - rust-test-s-session
       - rust-test-s-session-coverage
       - rust-test-s-session-extra-groups
-      - rust-test-s-session-extras
       - rust-test-production-session
       - rust-test-backtest-bin
       - s-sequence-1488
