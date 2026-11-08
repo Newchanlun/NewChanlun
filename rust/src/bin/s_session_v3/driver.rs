@@ -8816,9 +8816,10 @@ mod tests {
                 );
                 // complete 全量对拍 + 来源审计跨代增量状态（不进入产物）与独立全量来源审计 Counts 六字段对拍；
                 // 两者在同一只读快照上共用一次冷 state::audit（#1890）。
-                let counts = super::super::audit_owner::construction_tests::assert_complete_and_b2_counts(
-                    &native.conn,
-                );
+                let counts =
+                    super::super::audit_owner::construction_tests::assert_complete_and_b2_counts(
+                        &native.conn,
+                    );
                 assert_eq!(
                     native.handle(receipt_request(&e)).unwrap(),
                     reader.handle(receipt_request(&e)).unwrap(),
