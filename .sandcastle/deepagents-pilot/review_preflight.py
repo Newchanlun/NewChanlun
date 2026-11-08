@@ -336,7 +336,8 @@ def _error_info(body: str) -> dict:
 
 
 def round_trip(url: str, key: str, model: str, session: str, deadline: Deadline) -> dict:
-    """一次最小往返，请求形状对齐正式独审：responses + tools + tool_choice=auto + JSON 输出格式。"""
+    """一次最小往返，只探连通：responses + tools + tool_choice=auto + json_schema 输出格式。
+    不代表 kimi 的生产请求形状（正式独审对 kimi 不带 --output-schema），也不验证回合内真实工具调用。"""
     body = {"model": model, "stream": True, "store": False, "reasoning": {"effort": "low"},
             "instructions": "Preflight connectivity check. Do not call tools.",
             "input": [{"role": "user", "content": [{"type": "input_text", "text": 'Return {"ok": true}.'}]}],
