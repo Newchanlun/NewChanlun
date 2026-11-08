@@ -15,7 +15,9 @@
 
 ## 三种 Ceremony 的区分
 
-### CC 蜂群 Ceremony（原有语义，`/ceremony` 命令）
+### CC 蜂群 Ceremony（原有语义，`/ceremony` 命令；已随 #1952 退役）
+
+> `/ceremony` 命令与 `scripts/ceremony_scan.py` 已随早年蜂群机制退役（#1952）删除。下面保留的是历史语义，用来和逢亮的两种 ceremony 对照。
 
 Claude Code 蜂群的创世序列——在每个 CC session 开始时执行：
 

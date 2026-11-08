@@ -5550,8 +5550,6 @@
     "DS176209|rust/src/theta_v0/nautilus/strategy.rs|317",
     "DS176209|rust/src/theta_v0/nautilus/strategy.rs|320",
     "DS176209|rust/src/theta_v0/nautilus/strategy.rs|52",
-    "DS176209|scripts/async_self_reference.py|13",
-    "DS176209|scripts/async_self_reference.py|368",
     "DS176209|src/newchan/b_chart.py|440",
     "DS176209|topological-computation/engine.py|31",
     "DS176209|trading_system/backtest_unn_stream.py|20",

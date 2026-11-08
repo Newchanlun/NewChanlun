@@ -65,8 +65,8 @@ Copilot 三入口都**没有** Claude Code 的以下机制，对应协议降级�
 
 | Claude Code 机制 | Copilot 现状 | 降级方式 |
 |------------------|--------------|----------|
-| hooks（session-start 注入 ceremony、Stop-Guard 推动 goal 循环） | 无 hooks 机制 | **人工触发**：每个新会话手动发 §2 第 3 步的启动指令；goal 循环靠人盯或让模型自述"完成一轮后自动继续" |
-| slash 命令（`/ceremony` `/goal` `/inquire` `/ritual` 等，`.claude/commands/*.md`） | 不识别该目录 | 人工让模型"读 `.claude/commands/<x>.md` 并按其执行"；CLI 可把常用命令固化为 `.github/skills/` 或 `~/.copilot/skills/` 下的 skill（未实测） |
+| hooks（Stop-Guard 推动 goal 循环；早年 session-start 注入 ceremony 的 hook 已随 #1952 退役） | 无 hooks 机制 | **人工触发**：每个新会话手动发 §2 第 3 步的启动指令；goal 循环靠人盯或让模型自述"完成一轮后自动继续" |
+| slash 命令（`.claude/commands/*.md`，如 `/plan` `/code-review` `/verify`；早年的 `/ceremony` 已退役） | 不识别该目录 | 人工让模型"读 `.claude/commands/<x>.md` 并按其执行"；CLI 可把常用命令固化为 `.github/skills/` 或 `~/.copilot/skills/` 下的 skill（未实测） |
 | Task 蜂群（并行 teammate、工位真封、子蜂群 ceremony） | CLI 有单发 `task` 子代理（general-purpose/explore + `.github/agents/` 自定义 agent）；VS Code/云端无等价物 | 蜂群并行度降为"Lead 单工位 + 少量子代理"；`.claude/agents/` 下的 22 个 agent 定义**不会被自动发现**，如需要须手工镜像为 `.github/agents/*.agent.md`（frontmatter 支持 `model`/`tools`/`skills` 预载） |
 | CLAUDE.md 自动先验（CLI 场景） | CLI 文档未列 CLAUDE.md | 已由 `AGENTS.md` + `.github/copilot-instructions.md` 桥接指回 |
 | MCP（tradingview-mcp 经 `~/.claude/.mcp.json` 注册） | Copilot 有自己的 MCP 配置（CLI：`/mcp add`；VS Code：`mcp.json`） | 需在 Copilot 侧重新注册 tradingview-mcp，**未实测** |

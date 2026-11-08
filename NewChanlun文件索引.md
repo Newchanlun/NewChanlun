@@ -28,9 +28,8 @@
 
 ## 概念谱系
 
-- `.chanlun/genealogy/settled/` — 486条已结算谱系
+- `.chanlun/genealogy/settled/` — 仍被代码/定义/ADR 引用的已结算谱系（其余随 #1952 移出仓库，按编号到 git 历史 `f049256` 查）
 - `.chanlun/genealogy/pending/` — 生成态谱系
-- `.chanlun/genealogy/dag.yaml` — 谱系DAG
 
 ### 关键已结算谱系
 - 001号：退化段（degenerate-segment）
