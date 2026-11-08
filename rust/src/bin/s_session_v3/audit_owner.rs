@@ -3719,7 +3719,11 @@ impl AuditConnection {
     }
     /// 与 `assert_complete_matches_cold` 相同的全部对拍；冷审计由调用方在同一只读事务内给出，
     /// 供同一快照上紧接着还要做 b2 来源对拍的调用方共用一次 `state::audit`（#1890：S4 每代省一次完整审计）。
-    pub(super) fn assert_complete_matches_audited(&self, tx: &Transaction<'_>, cold: &state::AuditedState) {
+    pub(super) fn assert_complete_matches_audited(
+        &self,
+        tx: &Transaction<'_>,
+        cold: &state::AuditedState,
+    ) {
         fn view(a: &state::AuditedState) -> Value {
             json!({"raw":a.raw,"cuts":a.cuts.iter().map(|c|format!("{:?}|{:?}|{:?}|{:?}|{:?}",c.metadata,c.roots,c.batch_id,c.snapshot,c.delta)).collect::<Vec<_>>(),
                 "objects":format!("{:?}",a.objects),"auxiliary":format!("{:?}",a.auxiliary)})
@@ -6153,7 +6157,9 @@ pub(super) mod construction_tests {
 
     /// 同一只读快照上先做 complete 全量对拍、再做 b2 独立来源审计对拍；两者的冷 `state::audit`
     /// 在同一事务里必然相同，只算一次（#1890：S4 每代省约 8%）。两套对拍的内容不变。
-    pub(in crate::v3) fn assert_complete_and_b2_counts(owner: &AuditConnection) -> source_audit::Counts {
+    pub(in crate::v3) fn assert_complete_and_b2_counts(
+        owner: &AuditConnection,
+    ) -> source_audit::Counts {
         let active = owner.begin(TransactionBehavior::Deferred).unwrap();
         let audited = state::audit(active.tx()).unwrap();
         owner.assert_complete_matches_audited(active.tx(), &audited);
