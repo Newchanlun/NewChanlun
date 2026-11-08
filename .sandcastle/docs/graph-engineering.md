@@ -206,7 +206,7 @@ claude -p --bare --model gpt-6.1-sol --output-format json --no-session-persisten
 
 ## 宿主约束
 
-Sandcastle 宿主 `NewChanlun-sandcastle-host` 开启 `SANDCASTLE_HOST_AUTO_UPDATE=1`：每次派工前 `reset --hard origin/main`，工作区脏则拒绝派工。因此执行面的任何改动都必须经 PR 合入 origin/main，宿主上不保留本地提交。
+Sandcastle 宿主 `NewChanlun-sandcastle-host` 开启 `SANDCASTLE_HOST_AUTO_UPDATE=1`：每次派工前把宿主 main 快进到 origin/main（`git merge --ff-only`）；工作区脏、不在 main 分支，或 HEAD 上有 origin/main 没有的提交（领先=部署候选，或分叉）时 fail-closed：不派工，也不撤销这些提交（#1979，`scripts/arch_hotzone_monitor.sh` 的 `ARCH_HOTZONE_AUTO_UPDATE=1` 同一判据）。宿主 HEAD 领先期间队列停摆，直到提交合入 origin/main 或部署 owner 把宿主改回 origin/main。执行面的任何改动仍必须经 PR 合入 origin/main，工蜂分支只从等于 origin/main 的宿主 main 切出。
 
 ## 并行度
 
