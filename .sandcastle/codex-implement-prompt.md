@@ -15,9 +15,8 @@
 1. **Explore**——细读 issue 全文与评论；引用了父票/图/PRD 就一并读。写码前先读相关源码与测试。
 2. **Plan**——定最小改动面，不做范围外的事。
 3. **Execute**——实现。遵循 @.sandcastle/CODING_STANDARDS.md。
-4. **Verify**——Rust 改动 `cargo check` 必须过（必要时相关子集 `cargo test`）；文档改动核对事实。失败修到过。
-   **本机禁 cargo / rustc**（本机 = macOS 宿主；#1588：沙盒已在 PATH 前置垫片，`cargo`/`rustc`/`rustup`/`cargo-*` 调用即打印指引并非零退出）。
-   Rust 验证只走远端；工蜂不要 git add/commit，也不要用旧 ref 验未提交改动。记录所需远端检查，由宿主封包后运行 nc-remote 或 CI；没有真实结果写明“Rust 未验证”。
+4. **Verify**——Rust 改动须通过 `cargo check`（必要时相关子集 `cargo test`），但只在远端跑：本机是 macOS 宿主，PATH 垫片会让 `cargo`/`rustc`/`rustup`/`cargo-*` 直接非零退出。文档改动核对事实。失败修到过。
+   工蜂不要 git add/commit，也不要用旧 ref 验未提交改动。记录所需远端检查，由宿主封包后运行 nc-remote 或 CI；没有真实结果写明“Rust 未验证”。
 5. **交付文件清单**——源码编辑后输出阶段报告，由受管宿主核验实际变更并提交。不要尝试写 Git metadata 或受保护的 .agents/.codex/.aws。
 
 最终答复仅包含一个结构化块（files 为全部变更/新增/删除的仓库相对路径；没有变更用空数组；verification 为实际结果或明确未验证项）：
@@ -32,10 +31,6 @@
 - 密钥永不写入任何文件。
 - 本机禁 cargo / rustc（见 Verify）；Rust 验证 = nc-remote 远端或编排层 CI。
 
-## 卡点即报（2026-08-18 #1066 增补）
-
-外部依赖缺失（无 key / 无数据 / 网络不可达）或工作无法推进时：**不空转、不硬凑**——
-在票面留卡点报告（复现证据 + 解除条件 + 续跑命令），然后发 `<promise>COMPLETE</promise>` 收工。
-无进展空转到预算耗尽是最贵的失败形态（#1044 第一次空转 24 分钟实录）。
+卡点说明写明复现证据、解除条件和续跑命令；外部依赖缺失（无 key、无数据、网络不可达）时同样立即报卡点收工，不空转等待。
 
 完成后输出：<promise>COMPLETE</promise>
