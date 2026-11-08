@@ -1,6 +1,6 @@
 # #1742：审阅已有 PR 并发布 App 状态
 
-原业务、harvest 或人工创建 PR 后，用此入口审阅整个 PR。原 owner 继续拥有代码、分支和 PR；入口不认领票、不提交、不 push、不改 PR，也不代替 main 的合入批准。
+原业务、harvest 或人工创建 PR 后，用此入口审阅整个 PR。原 owner 继续拥有代码、分支和 PR；入口不认领票、不提交、不 push、不改 PR，也不合入 main（合入由分支保护的必需检查 `deepagents/review` 与 `ci-ok` 把关，见 `.sandcastle/docs/graph-engineering.md`「main 的合入」）。
 
 ## 部署后审一张 PR
 

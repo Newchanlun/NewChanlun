@@ -776,19 +776,19 @@ def test_executor_serve_without_flag_has_no_sweep_and_auto_merge_needs_sweep(mon
     assert cli.main(argv + ["--review-sweep-auto-merge"]) == 2
 
 
-def test_deployed_executor_plist_turns_sweep_on_but_not_auto_merge():
-    """opus 第三轮：main 上现行规定仍是人合入 main（改口径的 #1915 未合入），部署模板只开审查；
-    --review-sweep-auto-merge 由 #1915 合入后的单独 PR 打开。"""
+def test_deployed_executor_plist_turns_sweep_and_auto_merge_on():
+    """#1915 合入后 main 的合入不设人工批准，部署模板同时开审查与自动合入；
+    代码默认仍关，见 test_auto_merge_is_off_unless_explicitly_enabled。"""
     import plistlib
     from pathlib import Path
     plist = Path(module.__file__).resolve().parents[2] / "launchd" / "com.newchanlun.deepagents-executor.plist"
     args = plistlib.loads(plist.read_bytes())["ProgramArguments"]
     assert args[args.index("serve"):args.index("serve") + 2] == ["serve", "--loop"]
-    assert "--review-sweep" in args and "--review-sweep-auto-merge" not in args
+    assert "--review-sweep" in args and "--review-sweep-auto-merge" in args
 
 
 def test_auto_merge_is_off_unless_explicitly_enabled(monkeypatch, tmp_path):
-    """代码里默认关：只给 --review-sweep 时 sweep 只派审不合入；合入要部署模板显式加 --review-sweep-auto-merge。"""
+    """代码里默认关：只给 --review-sweep 时 sweep 只派审不合入；合入要显式加 --review-sweep-auto-merge（部署模板已加）。"""
     rounds, built = [], []
     real_serve_round = module.serve_round
     cli, argv = _fake_serve(monkeypatch, tmp_path, rounds=rounds)

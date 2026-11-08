@@ -25,8 +25,8 @@ sync(number, base, head)，未注入报 needs-source-sync。
 allow_auto_merge=false，2026-11-09 由主控关闭），GitHub 原生 auto-merge 根本挂不上，所以有写权限的人也不能在两轮之间给
 触及两类的 PR 挂原生 auto-merge、等检查转绿由 GitHub 自己合入。sweep 每轮读这个设置：为 true 或读不到时本轮一律不合入、
 不追平，记 native-auto-merge-enabled；撤原生 auto-merge 的逻辑保留，作为纵深防御。
-合入在代码里默认关；部署模板也只开 --review-sweep（只派审）。--review-sweep-auto-merge 等改写合入人闸口径的 #1915 合入后
-由单独的后续 PR 打开。
+合入在代码里默认关；只给 --review-sweep 时只派审。#1915 合入后（main 的合入不设人工批准），部署模板加了
+--review-sweep-auto-merge；关掉的方法见 EXECUTOR.md「附带正式审查」。
 完整清单：files 接口最多 3000 个且需与 changed_files 相符；否则用本地精确 diff；两者都拿不到报 evidence-insufficient
 （下轮重试），不合入，也不升级成人工确认。
 触及两类的报 needs-human-confirm，不合入、不追平；这类 PR 上若挂着 GitHub 原生 auto-merge 会撤掉。
