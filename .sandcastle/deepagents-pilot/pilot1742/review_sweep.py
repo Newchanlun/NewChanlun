@@ -31,7 +31,13 @@ sync(number, base, head)，未注入报 needs-source-sync。
 会靠原生 auto-merge 在检查转绿后绕过 HUMAN_GATED。
 合入阶段分两段：先把所有 PR 的证据读完、定好动作，再按序执行写（合入、追平、撤 auto-merge）。
 每个 gh 调用都有 GH_TIMEOUT_SECONDS 上限；超时按输入源读不到处理（SourceUnreadable），整轮作废、下轮重试，
-所以一轮最多卡一个超时，不会无限期拖住 executor serve 的派票循环。读阶段超时发生在任何写之前，本轮一个 PR 也不合入、
+所以一轮最多卡一个超时，不会无限期拖住 executor serve 的派票循环。
+分类绑定到读到的那个 head SHA：文件清单接口不按 SHA 取，所以读完清单后再读一次 PR，head 未变才算数；开放 PR 列表、
+实时状态与复核三者的 head 有任何不一致都报 head-moved，不合入、不追平，并撤掉原生 auto-merge（新 head 没分类过）。
+写操作里合入带 sha、追平带 expected_head_sha，由 GitHub 服务端拒绝 head 不符；撤 auto-merge 的接口不收 SHA，
+它只会让 PR 更难合入，任何 head 上撤都安全。
+补对象的 fetch 失败（网络、超时、无权限）记 source-unreadable 并写明读不到的源，这个 PR 本轮不派审、不算通过，
+也不占队首。读阶段超时发生在任何写之前，本轮一个 PR 也不合入、
 不追平；随后对每个本轮没能确认不触及两类、又挂着（或不知道挂没挂）原生 auto-merge 的 PR 尽力撤掉（fail_closed），
 撤销本身也超时就停下、下轮再撤。写本身超时记 write-unknown，余下的写不做。本轮中止前已做的动作随异常带出，照常写日志。补对象的 fetch 另有 FETCH_TIMEOUT_SECONDS，
 一轮里失败一次后其余 PR 不再 fetch。
@@ -98,7 +104,7 @@ HUMAN_GATED: dict[str, re.Pattern[str]] = {
         r"|(^|/)(secrets?|credentials?)\.(json|ya?ml|toml|ini)$",
         re.IGNORECASE),
 }
-STUCK_REVIEW = frozenset({"needs-operator", "needs-reconcile", "needs-source-sync", "error"})
+STUCK_REVIEW = frozenset({"needs-operator", "needs-reconcile", "needs-source-sync", "source-unreadable", "error"})
 QUIET = frozenset({"done", "draft", "stale-pr"})  # 没有动作的状态，不写日志
 
 
@@ -281,13 +287,19 @@ class Sweep:
         if behind:  # 先追平再审：不审一个合入前必然被替换的 head
             return "behind-awaiting-update", None
         if not self._has_commits(base, head):
-            if self.sync is None or self._sync_failed:  # 一轮里 fetch 失败过就不再试，免得超时逐个累加
+            if self.sync is None:
                 return "needs-source-sync", None
+            source = f"git fetch {REPO} main pull/{number}/head"
+            if self._sync_failed:  # 一轮里 fetch 失败过就不再试，免得超时逐个累加
+                return "source-unreadable", {"unreadable": source, "reason": "本轮 fetch 已失败过，下轮再试"}
             try:
                 self.sync(number, base, head)
-            except Exception:
+            except Exception as error:  # 读不到对象：不派审、不算通过，写明读不到哪个源
                 self._sync_failed = True
-                raise
+                detail = getattr(error, "stderr", b"") or b""
+                detail = detail.decode(errors="replace") if isinstance(detail, bytes) else str(detail)
+                return "source-unreadable", {"unreadable": source,
+                                             "reason": f"{type(error).__name__}: {detail.strip()[:200] or error}"}
             if not self._has_commits(base, head):
                 return "needs-source-sync", None
         current = [r for r in runs if r["target"].get("base_sha") == base]
@@ -393,11 +405,24 @@ class Sweep:
         """只读、不写：返回（动作，是否占队首，要做的写：merge / update / disable / None）。
         只有 head_free（前面没有 PR 占队首）且本 PR 仍可能合入时才可能追平。"""
         number, head = pr["number"], pr["head"]["sha"]
-        if state["head"] != head:
-            return {"action": "head-moved"}, False, None
-        gated = human_gated(self.complete_files(number, state))  # 证据不足抛出，由 merge_actions 失败关闭
+        if state["head"] != head:  # 列表上的 head 与实时状态不符：新 head 没分类过，挂着的原生 auto-merge 撤掉
+            return ({"action": "head-moved", "listed": head, "now": state["head"]}, False,
+                    "disable" if state["auto_merge"] else None)
+        files = self.complete_files(number, state)  # 证据不足抛出，由 merge_actions 失败关闭
+        # 文件清单接口不按 SHA 取：读完后再读一次 PR，head 仍是读之前那个才算这份清单属于它（分类绑定到这个 SHA）。
+        try:
+            again = self.github.pr(number)
+        except SourceUnreadable:
+            raise
+        except Exception as error:
+            raise EvidenceInsufficient(f"复核 head 失败：{type(error).__name__}: {error}") from None
+        if again["head"] != head:
+            return ({"action": "head-moved", "classified": head, "now": again["head"]}, False,
+                    "disable" if state["auto_merge"] or again["auto_merge"] else None)
+        gated = human_gated(files)
         if gated:
-            return {"action": "needs-human-confirm", "gated": gated}, False, ("disable" if state["auto_merge"] else None)
+            return ({"action": "needs-human-confirm", "gated": gated}, False,
+                    "disable" if state["auto_merge"] or again["auto_merge"] else None)
         try:
             checks = self.github.checks(head)
         except SourceUnreadable:

@@ -903,7 +903,8 @@ def test_failed_fetch_is_tried_once_per_round(lane):
     sweep, _, _ = make(lane, run=False, github=github, sync=sync)
     actions = sweep.tick()
     assert fetches == [1810]
-    assert acts(actions, 1810) == ["error"] and acts(actions, 1811) == ["needs-source-sync"]
+    assert acts(actions, 1810) == ["source-unreadable"] and acts(actions, 1811) == ["source-unreadable"]
+    assert next(a for a in actions if a.get("pr") == 1810)["unreadable"].endswith("main pull/1810/head")
     sweep.tick()
     assert fetches == [1810, 1810]                      # 下一轮重新试
 
@@ -984,3 +985,76 @@ def test_actions_done_before_a_timeout_are_still_logged(lane, capsys):
     assert any(a.get("pr") == 1805 and a["action"] == "merged" for a in lines)
     assert any(a.get("pr") == 1810 and a["action"] == "write-unknown" for a in lines)
     assert lines[-1]["action"] == "round-skipped"
+
+
+# ---- 第四轮独审（7b477efd，run 52055f21）：分类绑定到读到的 head；fetch 失败明说读不到 ----
+
+def _ordinary_armed(lane, github):
+    github.states[1810] = {"auto_merge": True}
+    github.files[1810] = [{"filename": "src/x.py", "status": "modified", "changes": 1}]
+    green(github, lane.gateway.pr["head"]["sha"])
+
+
+def test_head_change_mid_round_withdraws_auto_merge_and_never_merges(lane):
+    """kimi 阻断：读完文件清单后 head 被推走（清单接口不按 SHA 取，读到的可能已是新 head 的内容，也可能是旧的）。
+    分类不再算数：报 head-moved，不合入，撤掉原生 auto-merge，免得没分类过的新 head 靠它合入。"""
+    github = FakeGitHub(lane)
+    _ordinary_armed(lane, github)
+    head, pushed = lane.gateway.pr["head"]["sha"], "c" * 40
+    original, reads = github.pr, []
+    def pr(number):
+        reads.append(number)
+        state = original(number)
+        if len(reads) > 1:                       # 第二次读（复核）时 head 已变
+            state.update(head=pushed)
+        return state
+    github.pr = pr
+    sweep, _, _ = make(lane, run=False, github=github, auto_merge=True)
+    result = next(a for a in sweep.tick() if a.get("pr") == 1810 and a["action"] == "head-moved")
+    assert result["classified"] == head and result["now"] == pushed
+    assert result["auto_merge_withdrawn"] is True
+    assert github.calls == [("disable", 1810)]
+
+
+def test_listed_head_differs_from_live_state_withdraws_armed_auto_merge(lane):
+    github = FakeGitHub(lane)
+    _ordinary_armed(lane, github)
+    github.states[1810].update(head="c" * 40)
+    sweep, _, _ = make(lane, run=False, github=github, auto_merge=True)
+    result = next(a for a in sweep.tick() if a.get("pr") == 1810 and a["action"] == "head-moved")
+    assert result["now"] == "c" * 40 and github.calls == [("disable", 1810)]
+
+
+def test_head_recheck_read_failure_fails_closed(lane):
+    github = FakeGitHub(lane)
+    _ordinary_armed(lane, github)
+    original, reads = github.pr, []
+    def pr(number):
+        reads.append(number)
+        if len(reads) > 1:
+            raise RuntimeError("HTTP 502")
+        return original(number)
+    github.pr = pr
+    sweep, _, _ = make(lane, run=False, github=github, auto_merge=True)
+    result = next(a for a in sweep.tick() if a.get("pr") == 1810 and a["action"] == "evidence-insufficient")
+    assert "复核 head" in result["reason"] and github.calls == [("disable", 1810)]
+
+
+def test_writes_carry_the_classified_head():
+    """合入带 sha、追平带 expected_head_sha：head 已变时由 GitHub 服务端拒绝。"""
+    sent = []
+    cli = module.GhCli("Newchanlun/NewChanlun")
+    cli._gh = lambda *args: sent.append(args) or ""
+    cli.merge(5, "a" * 40)
+    cli.update_branch(5, "b" * 40)
+    assert f"sha={'a' * 40}" in sent[0] and f"expected_head_sha={'b' * 40}" in sent[1]
+
+
+def test_fetch_failure_is_an_unreadable_source_and_never_reviewed(lane, tmp_path):
+    """kimi 阻断 2：fetch 失败（私有仓无认证、网络、超时）写明读不到哪个源，不派审、不算通过。"""
+    lane.gateway.pr["head"]["sha"] = "e" * 40
+    sweep, host, _ = make(lane, run=False, sync=module.fetcher(lane.source, str(tmp_path / "no-such-repo.git")))
+    result = next(a for a in sweep.tick() if a.get("pr") == 1810)
+    assert result["action"] == "source-unreadable" and result["unreadable"].endswith("pull/1810/head")
+    assert "CalledProcessError" in result["reason"] and host.spawned == []
+    assert "source-unreadable" in module.STUCK_REVIEW
