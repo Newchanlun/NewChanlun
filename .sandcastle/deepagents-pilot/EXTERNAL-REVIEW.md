@@ -59,8 +59,8 @@ JSON 不含秘密，字段恰为以下四个，多一个或少一个都拒绝：
 
 ```json
 {
-  "app_id": <审查 App 的 app_id>,
-  "installation_id": <它在 Newchanlun/NewChanlun 上的 installation id>,
+  "app_id": 5664795,
+  "installation_id": 179776757,
   "app_slug": "newchanlun-review-gate",
   "installation_permissions": {"metadata": "read", "contents": "read", "pull_requests": "read", "statuses": "write"}
 }
@@ -70,8 +70,8 @@ JSON 不含秘密，字段恰为以下四个，多一个或少一个都拒绝：
 
 HOST 切换步骤：
 
-1. App 安装到仓库后，在 App 设置页记下 app_id，在安装页 URL 记下 installation id。确认安装方式为 Only select repositories，只选本仓库。
-2. 在仓库外写好上面的 JSON（例如与审查 App 私钥同目录），私钥另存为 600。
+1. 审查 App 已建好：app_id `5664795`，installation `179776757`，安装方式为 selected，只含本仓库，安装权限恰为上面四项。私钥是 `~/.config/newchanlun-review-gate/` 下的 600 文件。
+2. 把上面的 JSON 写成 `~/.config/newchanlun-review-gate/review-identity.json`。同目录已有的 `app.json` 是建 App 时的记录，字段格式不同，不能直接传给 `--app-identity`。
 3. 先让在途 run 收尾：`status` 里没有 pending 的状态写，也没有在跑的 reviewer。原因是读回认领按发布者 bot 匹配 `creator.login`，切换后旧 App 发过的状态不再算本入口发的；在途写要么先完成，要么在切换后用 `reconcile` 按事实登记。
 4. 选一张非执行器拥有的 PR，带新身份审一次：
 
@@ -81,7 +81,7 @@ HOST 切换步骤：
    ```
 
    入口先核验身份再做任何事：app_id、slug、installation、仓库范围或权限集任一不符即退出码 2，不发状态。成功后在该 head 上读回 `deepagents/review`，`creator.login` 应为 `newchanlun-review-gate[bot]`。
-5. 由主控把 main 必需检查 `deepagents/review` 的来源 App 改为审查 App 的 app_id，保留 strict 与 enforce_admins。改完后执行器 App 写的 `deepagents/review`（包括 `publish_candidate` 写的）不再满足必需检查，这正是切换的目的。改 branch protection 不由本 CLI 做。
+5. HOST 部署完成、并用新 App 发出至少一个真实状态之后，再由主控把 main 必需检查 `deepagents/review` 的来源 App 改为 `5664795`。顺序不能反：先改保护会让所有 PR 都卡在这项检查上。改的时候保留 strict 与 enforce_admins。改完后执行器 App 写的 `deepagents/review`（包括 `publish_candidate` 写的）不再满足必需检查，这正是切换的目的。改 branch protection 不由本 CLI 做。
 6. 之后所有 `review-pr`、`migrate-stale` 调用都带 `--app-identity`。漏传会以执行器 App 发布，发出的状态不满足第 5 步之后的必需检查，PR 不会因此被放行。
 
 已沿用、已发布的旧 PASS 记录仍在本地历史里；同补丁新 head 沿用时以新 App 在新 head 上发布，不读旧状态的发布者。

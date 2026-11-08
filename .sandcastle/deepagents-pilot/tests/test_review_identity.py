@@ -15,7 +15,7 @@ from pilot1742.github_app import (
     IdentityError,
 )
 
-REVIEWER = {"app_id": 7000001, "installation_id": 8000001, "app_slug": "newchanlun-review-gate",
+REVIEWER = {"app_id": 5664795, "installation_id": 179776757, "app_slug": "newchanlun-review-gate",
             "installation_permissions": TOKEN_PERMISSIONS}
 KEY = Path("/unused-fixture.pem")
 
@@ -56,14 +56,14 @@ def no_key(monkeypatch):
 
 def test_reviewer_identity_with_narrow_permissions_verifies(tmp_path):
     identity = load_identity(write(tmp_path, REVIEWER), KEY)
-    assert (identity.app_id, identity.installation_id, identity.app_slug) == (7000001, 8000001,
+    assert (identity.app_id, identity.installation_id, identity.app_slug) == (5664795, 179776757,
                                                                                "newchanlun-review-gate")
     assert identity.installation_permissions == TOKEN_PERMISSIONS
     with GitHubAppClient(identity, permissions=TOKEN_PERMISSIONS,
                          transport=fake_github(identity, TOKEN_PERMISSIONS)) as client:
         result = client.verify()
         assert client.bot_login == "newchanlun-review-gate[bot]"
-    assert result["app_id"] == 7000001 and result["token_permissions"] == TOKEN_PERMISSIONS
+    assert result["app_id"] == 5664795 and result["token_permissions"] == TOKEN_PERMISSIONS
 
 
 @pytest.mark.parametrize("installed", [
@@ -94,7 +94,7 @@ def test_default_identity_unchanged_and_rejects_narrow_installation():
 
 
 def test_token_request_cannot_exceed_identity_permissions():
-    identity = AppIdentity(7000001, 8000001, 1150335160, "Newchanlun/NewChanlun", "newchanlun-review-gate",
+    identity = AppIdentity(5664795, 179776757, 1150335160, "Newchanlun/NewChanlun", "newchanlun-review-gate",
                            KEY, dict(TOKEN_PERMISSIONS))
     with pytest.raises(IdentityError, match="超出"):
         GitHubAppClient(identity, permissions={**TOKEN_PERMISSIONS, "contents": "write"})
@@ -104,7 +104,7 @@ def test_token_request_cannot_exceed_identity_permissions():
 
 def test_identity_permissions_are_copied():
     source = dict(TOKEN_PERMISSIONS)
-    identity = AppIdentity(7000001, 8000001, 1150335160, "Newchanlun/NewChanlun", "newchanlun-review-gate",
+    identity = AppIdentity(5664795, 179776757, 1150335160, "Newchanlun/NewChanlun", "newchanlun-review-gate",
                            KEY, source)
     source["administration"] = "write"
     assert identity.installation_permissions == TOKEN_PERMISSIONS
@@ -117,7 +117,7 @@ def test_identity_permissions_are_copied():
     {**REVIEWER, "installation_permissions": {}},
     {**REVIEWER, "installation_permissions": {"statuses": "admin"}},
     {**REVIEWER, "installation_permissions": ["statuses"]},
-    {**REVIEWER, "app_id": "7000001"},
+    {**REVIEWER, "app_id": "5664795"},
     {**REVIEWER, "app_id": True},
     {**REVIEWER, "app_slug": 7},
     [REVIEWER],
@@ -151,7 +151,7 @@ def test_cli_passes_selected_identity(tmp_path, monkeypatch, command):
                         "--app-identity", str(write(tmp_path, REVIEWER))]) == 2
     assert [(i.app_id, i.app_slug, i.installation_permissions, p) for i, p in seen] == [
         (5486877, "newchanlun-deepagents-1742", INSTALLATION_PERMISSIONS, TOKEN_PERMISSIONS),
-        (7000001, "newchanlun-review-gate", TOKEN_PERMISSIONS, TOKEN_PERMISSIONS),
+        (5664795, "newchanlun-review-gate", TOKEN_PERMISSIONS, TOKEN_PERMISSIONS),
     ]
 
 
