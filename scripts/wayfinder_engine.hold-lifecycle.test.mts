@@ -42,14 +42,20 @@ else if(a[0]==='api') {
 } else {console.error('unexpected '+cmd);process.exit(74);}
 `;
 
-function fixture(issues: Issue[], o: { claim?: Claim; onScan?: "mirror" | "intent" } = {}) {
+function fixture(issues: Issue[], o: { claim?: Claim; onScan?: "mirror" | "intent"; legacyOpen?: boolean } = {}) {
   const root = mkdtempSync(join(tmpdir(), "wfe-hold-"));
   const drain = join(root, "drain"), exec = join(root, "exec");
-  for (const dir of [join(root, "scripts"), join(root, ".sandcastle"), drain, join(exec, "claims")]) mkdirSync(dir, { recursive: true });
-  writeFileSync(join(drain, "state.json"), JSON.stringify({ v: 1, mode: "open", generation: 1 }));
+  for (const dir of [join(root, "scripts"), join(root, ".sandcastle/deepagents-pilot/pilot1742"), drain, join(exec, "claims")]) mkdirSync(dir, { recursive: true });
+  // 执行器持有只在切流后存在：缺省夹具是有效切流（旧入口 draining，引擎走新队列准入）；legacyOpen 模拟旧入口未冻结。
+  writeFileSync(join(drain, "state.json"), JSON.stringify({ v: 1, mode: o.legacyOpen ? "open" : "draining", generation: 1 }));
+  if (!o.legacyOpen) writeFileSync(join(exec, "cutover.json"), JSON.stringify({ v: 1, drain_generation: 1, frozen_at: "fixture",
+    legacy_snapshot: [], workers_log_length: 0, workers_log_path: "/fixture/workers.jsonl", open_claims: [], remote_jobs_idle: true,
+    remote_freeze_var: "1", variable_source: "user-token-readonly", release_label: "deepagents:queue", engine_head: "a".repeat(40),
+    legacy_services_unloaded: ["com.newchanlun.sandcastle-claimer", "com.newchanlun.sandcastle-harvest"] }));
   for (const file of ["scripts/wayfinder_engine.mts", ".sandcastle/cliproxy-env.mts", ".sandcastle/main-model.mts",
     ".sandcastle/scheduler-config.mts", ".sandcastle/scheduler-config.json", ".sandcastle/drain-control.mts",
-    ".sandcastle/drain-control.py", ".sandcastle/deepagents-cutover.mts", ".sandcastle/queue-policy.json"]) {
+    ".sandcastle/drain-control.py", ".sandcastle/deepagents-cutover.mts", ".sandcastle/queue-policy.json",
+    ".sandcastle/deepagents-pilot/pilot1742/cutover.py"]) {
     let text = readFileSync(new URL(file, repo), "utf8");
     if (file.endsWith("drain-control.mts")) text = text.replace('"/Volumes/AgentStorage/newchanlun-legacy-drain"', JSON.stringify(drain));
     if (file.endsWith("deepagents-cutover.mts")) text = text.replace('"/Volumes/AgentStorage/deepagents-exec"', JSON.stringify(exec));
@@ -109,6 +115,30 @@ test("N1 开着的旧票：释放排空前镜像在、每轮等待且零写入�
     const s = f.read();
     assert.equal(s.issues.length, 2, "不重复建票");
     assert.ok(published(s.issues[0]!) && published(s.issues[1]!));
+    assert.match(s.issues[0]!.body, /原实施票的额外验收条件/);
+  } finally { f.done(); }
+});
+
+test("旧入口未冻结：带 sandcastle 的旧票不迁移、零写入；旧消费者照常可领，冻结切流后才迁移", () => {
+  const f = fixture(legacy(["sandcastle"]), { legacyOpen: true });
+  try {
+    for (let n = 0; n < 2; n++) {
+      const r = f.run();
+      assert.equal(r.status, 0, r.stderr);
+      assert.match(r.stderr, /#101 迁移要改票面，但旧 Sandcastle 入口未冻结/);
+    }
+    assert.deepEqual(f.read().writes.filter(w => w.n === 101), [], "未冻结时不改写、不摘标签");
+    assert.equal(f.read().issues[0]!.body, "原实施票的额外验收条件");
+    // 冻结旧入口并写入有效切流记录：引擎改走新队列准入，旧消费者领不到票，迁移完成。
+    writeFileSync(join(f.root, "drain", "state.json"), JSON.stringify({ v: 1, mode: "draining", generation: 1 }));
+    writeFileSync(join(f.exec, "cutover.json"), JSON.stringify({ v: 1, drain_generation: 1, frozen_at: "fixture",
+      legacy_snapshot: [], workers_log_length: 0, workers_log_path: "/fixture/workers.jsonl", open_claims: [], remote_jobs_idle: true,
+      remote_freeze_var: "1", variable_source: "user-token-readonly", release_label: "deepagents:queue", engine_head: "a".repeat(40),
+      legacy_services_unloaded: ["com.newchanlun.sandcastle-claimer", "com.newchanlun.sandcastle-harvest"] }));
+    for (let n = 0; n < 3; n++) assert.doesNotMatch(f.run().stderr, /执行失败/);
+    const s = f.read();
+    assert.ok(published(s.issues[0]!), "切流后完成迁移与发布");
+    assert.ok(!s.issues[0]!.labels.includes("sandcastle"), "迁移摘掉旧放行标签");
     assert.match(s.issues[0]!.body, /原实施票的额外验收条件/);
   } finally { f.done(); }
 });
