@@ -16,7 +16,11 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 # #1875：耗时的 Rust 作业跑在 Boat 自托管 runner 上（boat-large = 8 vCPU / 16 GB，Ryzen 9950X；
-#   from=hc-gate-base 是预装 Rust 依赖 registry、Python/Node/elan 工具链的保存快照，见
+#   from=hc-ci-slim 是 CI 专用的保存快照：预装 cargo registry 与 rustup；去掉了离线 gate.sh 才用的 py、.elan、
+#   bun、.nvm、nc（含 2 GB+ 的 .git pack）与 .pi（3.07 GB，hc-gate-base 为 8.35 GB）。新机器 ready 后会在后台下载快照
+#   内容（hydration），下载尾段的大文件会挤占写盘：9950X 宿主上 hc-gate-base 卡 80–156 s，hc-ci-slim 最长 24 s
+#   （2026-11-08 同时段实测，evals/boat-checkout/v6）。Python/Node 由 setup-python/setup-node 装进 toolcache，
+#   Lean 只在托管机的 fixture-drift 用。gate.sh 仍从 hc-gate-base 起机，见
 #   /Volumes/AgentStorage/hillclimb-ci-gate/GATE-USAGE.md）。自托管 runner 不占 GitHub 托管 runner 的
 #   20 并发池，所以 extras 五组不再需要 max-parallel 串行（#1723 设它只为不扩大托管 runner 占用）。
 #   对 fsync 时延敏感的 s-observer / sandcastle-ts（Boat 新机首次写盘 fsync p50 约 0.3 s）与轻量作业留在
@@ -230,7 +234,7 @@ jobs:
   rust-check:
     needs: changes
     if: needs.changes.outputs.rust == 'true'
-    runs-on: ${{ (vars.CI_BOAT_RUNNERS != 'off' && github.actor == 'xy7365527-lang' && github.triggering_actor == 'xy7365527-lang' && (github.event_name != 'pull_request' || github.event.pull_request.user.login == 'xy7365527-lang')) && 'boat-large/from=hc-gate-base' || 'ubuntu-latest' }}
+    runs-on: ${{ (vars.CI_BOAT_RUNNERS != 'off' && github.actor == 'xy7365527-lang' && github.triggering_actor == 'xy7365527-lang' && (github.event_name != 'pull_request' || github.event.pull_request.user.login == 'xy7365527-lang')) && 'boat-large/from=hc-ci-slim' || 'ubuntu-latest' }}
     # #1406 防遥测采样进程挂死的上限；本 job 拆后只剩检查类步骤，正常约 3 分钟。
     timeout-minutes: 30
     env:
@@ -359,7 +363,7 @@ jobs:
   rust-test-default:
     needs: changes
     if: needs.changes.outputs.rust == 'true'
-    runs-on: ${{ (vars.CI_BOAT_RUNNERS != 'off' && github.actor == 'xy7365527-lang' && github.triggering_actor == 'xy7365527-lang' && (github.event_name != 'pull_request' || github.event.pull_request.user.login == 'xy7365527-lang')) && 'boat-large/from=hc-gate-base' || 'ubuntu-latest' }}
+    runs-on: ${{ (vars.CI_BOAT_RUNNERS != 'off' && github.actor == 'xy7365527-lang' && github.triggering_actor == 'xy7365527-lang' && (github.event_name != 'pull_request' || github.event.pull_request.user.login == 'xy7365527-lang')) && 'boat-large/from=hc-ci-slim' || 'ubuntu-latest' }}
     # 拆前本步约 8.8 分钟（run 39358379553）。
     timeout-minutes: 45
     env:
@@ -394,7 +398,7 @@ jobs:
     needs: changes
     if: needs.changes.outputs.rust == 'true'
     name: rust-test-s-session (shard ${{ matrix.shard }})
-    runs-on: ${{ (vars.CI_BOAT_RUNNERS != 'off' && github.actor == 'xy7365527-lang' && github.triggering_actor == 'xy7365527-lang' && (github.event_name != 'pull_request' || github.event.pull_request.user.login == 'xy7365527-lang')) && 'boat-large/from=hc-gate-base' || 'ubuntu-latest' }}
+    runs-on: ${{ (vars.CI_BOAT_RUNNERS != 'off' && github.actor == 'xy7365527-lang' && github.triggering_actor == 'xy7365527-lang' && (github.event_name != 'pull_request' || github.event.pull_request.user.login == 'xy7365527-lang')) && 'boat-large/from=hc-ci-slim' || 'ubuntu-latest' }}
     # 最慢那片只含 tb02w 一条长测试：独占 runner 实测 31 分钟（EPYC 9V45）到 67 分钟（EPYC 7763，已见最慢机型），含编译。
     # 上限只作挂死保护，按最慢机型读数留约 40% 余量（「有余量」看实测时长，不看本值）。
     timeout-minutes: 110
@@ -489,7 +493,7 @@ jobs:
         # #1875 P353-5/7：Boat 上把 owned 的 release 档 H1 各步拆到 owned-h1；native、economic 的测试按名字分成 a/b 两份
         #   （CI_TEST_PART），各占一台机器，同机负载与不拆时相同。托管路径只拆 owned/owned-h1，native、economic 不拆（20 并发上限）。
         group: ${{ fromJSON((vars.CI_BOAT_RUNNERS != 'off' && github.actor == 'xy7365527-lang' && github.triggering_actor == 'xy7365527-lang' && (github.event_name != 'pull_request' || github.event.pull_request.user.login == 'xy7365527-lang')) && '["native-a","native-b","release-locks","owned","owned-h1","economic-a","economic-b","content"]' || '["native","release-locks","owned","owned-h1","economic","content"]') }}
-    runs-on: ${{ (vars.CI_BOAT_RUNNERS != 'off' && github.actor == 'xy7365527-lang' && github.triggering_actor == 'xy7365527-lang' && (github.event_name != 'pull_request' || github.event.pull_request.user.login == 'xy7365527-lang')) && 'boat-large/from=hc-gate-base' || 'ubuntu-latest' }}
+    runs-on: ${{ (vars.CI_BOAT_RUNNERS != 'off' && github.actor == 'xy7365527-lang' && github.triggering_actor == 'xy7365527-lang' && (github.event_name != 'pull_request' || github.event.pull_request.user.login == 'xy7365527-lang')) && 'boat-large/from=hc-ci-slim' || 'ubuntu-latest' }}
     timeout-minutes: ${{ startsWith(matrix.group, 'native') && 90 || 60 }}
     env:
       CARGO_INCREMENTAL: "0"
@@ -762,7 +766,7 @@ jobs:
   rust-test-production-session:
     needs: changes
     if: needs.changes.outputs.rust == 'true'
-    runs-on: ${{ (vars.CI_BOAT_RUNNERS != 'off' && github.actor == 'xy7365527-lang' && github.triggering_actor == 'xy7365527-lang' && (github.event_name != 'pull_request' || github.event.pull_request.user.login == 'xy7365527-lang')) && 'boat-large/from=hc-gate-base' || 'ubuntu-latest' }}
+    runs-on: ${{ (vars.CI_BOAT_RUNNERS != 'off' && github.actor == 'xy7365527-lang' && github.triggering_actor == 'xy7365527-lang' && (github.event_name != 'pull_request' || github.event.pull_request.user.login == 'xy7365527-lang')) && 'boat-large/from=hc-ci-slim' || 'ubuntu-latest' }}
     timeout-minutes: 45
     env:
       CARGO_INCREMENTAL: "0"
@@ -789,7 +793,7 @@ jobs:
   rust-test-backtest-bin:
     needs: changes
     if: needs.changes.outputs.rust == 'true'
-    runs-on: ${{ (vars.CI_BOAT_RUNNERS != 'off' && github.actor == 'xy7365527-lang' && github.triggering_actor == 'xy7365527-lang' && (github.event_name != 'pull_request' || github.event.pull_request.user.login == 'xy7365527-lang')) && 'boat-large/from=hc-gate-base' || 'ubuntu-latest' }}
+    runs-on: ${{ (vars.CI_BOAT_RUNNERS != 'off' && github.actor == 'xy7365527-lang' && github.triggering_actor == 'xy7365527-lang' && (github.event_name != 'pull_request' || github.event.pull_request.user.login == 'xy7365527-lang')) && 'boat-large/from=hc-ci-slim' || 'ubuntu-latest' }}
     # 拆前本步约 9.3 分钟（run 39358379553）。
     timeout-minutes: 45
     env:
@@ -832,7 +836,7 @@ jobs:
     needs: changes
     if: needs.changes.outputs.rust == 'true'
     name: "#1488 序列与真实 memo (${{ matrix.mode }})"
-    runs-on: ${{ (vars.CI_BOAT_RUNNERS != 'off' && github.actor == 'xy7365527-lang' && github.triggering_actor == 'xy7365527-lang' && (github.event_name != 'pull_request' || github.event.pull_request.user.login == 'xy7365527-lang')) && 'boat-large/from=hc-gate-base' || 'ubuntu-latest' }}
+    runs-on: ${{ (vars.CI_BOAT_RUNNERS != 'off' && github.actor == 'xy7365527-lang' && github.triggering_actor == 'xy7365527-lang' && (github.event_name != 'pull_request' || github.event.pull_request.user.login == 'xy7365527-lang')) && 'boat-large/from=hc-ci-slim' || 'ubuntu-latest' }}
     strategy:
       fail-fast: false
       matrix:
@@ -1078,7 +1082,7 @@ jobs:
     needs: changes
     if: needs.changes.outputs.rust == 'true'
     name: "#1488 固定字段共享核 (Native)"
-    runs-on: ${{ (vars.CI_BOAT_RUNNERS != 'off' && github.actor == 'xy7365527-lang' && github.triggering_actor == 'xy7365527-lang' && (github.event_name != 'pull_request' || github.event.pull_request.user.login == 'xy7365527-lang')) && 'boat-large/from=hc-gate-base' || 'ubuntu-latest' }}
+    runs-on: ${{ (vars.CI_BOAT_RUNNERS != 'off' && github.actor == 'xy7365527-lang' && github.triggering_actor == 'xy7365527-lang' && (github.event_name != 'pull_request' || github.event.pull_request.user.login == 'xy7365527-lang')) && 'boat-large/from=hc-ci-slim' || 'ubuntu-latest' }}
     # #1588 约定：同上，Native 组编译 + 精确锁。
     timeout-minutes: 60
     env:
