@@ -24,12 +24,16 @@ def test_only_a_whole_single_fence_is_unwrapped(text, expected):
     assert unwrap_json_fence(text) == expected
 
 
-@pytest.mark.parametrize(("fence", "verdict"), [("whole", "PASS"), ("prose", "FAILED"), ("nonstring", "FAILED")])
-def test_fenced_final_message_is_validated_like_plain_json(lane, fence, verdict):
+@pytest.mark.parametrize(("fence", "verdict", "reason"), [
+    ("whole", "PASS", None),
+    ("prose", "FAILED", "缺日志、解析失败或日志不符"),  # 围栏外有文字：json.loads 抛 ValueError
+    ("nonstring", "FAILED", "结果与监督 stdout 不符"),  # text 不是字符串：按缺最终消息
+])
+def test_fenced_final_message_is_validated_like_plain_json(lane, fence, verdict, reason):
     (lane.state_root / "runs").mkdir(parents=True, exist_ok=True)
     (lane.state_root / "runs" / "fake-fence").write_text(fence)
     result = lane.review_pr(1810)
     assert result["verdict"] == verdict
-    if verdict == "FAILED":
-        assert "不符" in result["reviews"][0]["reason"]
+    if reason is not None:
+        assert result["reviews"][0]["reason"] == reason
         json.dumps(result)  # 失败结论原样可序列化

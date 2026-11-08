@@ -111,9 +111,8 @@ class ReviewOutcome:
 def _message_blocks(text: str) -> bool:
     """最终消息是否为 BLOCK：能解析成结果对象就按 status 与 summary 首行判定（与 validate_review 同口径，
     说明里引用「VERDICT: BLOCK」不算）；解析不了才退回整段文本匹配（fail closed）。"""
-    fenced = re.fullmatch(r"```(?:json)?[ \t]*\r?\n(.*?)\r?\n```", text.strip(), re.DOTALL)
     try:
-        value = json.loads(fenced[1] if fenced else text)
+        value = json.loads(unwrap_json_fence(text))
     except ValueError:
         return re.search(r"VERDICT:\s*BLOCK", text) is not None
     if not isinstance(value, dict):
