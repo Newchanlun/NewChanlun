@@ -360,7 +360,8 @@ def validate_review(target: ReviewTarget, launch: dict, receipt: dict, folder: P
             elif kind == "turn.completed":
                 turn_completed = True
             elif kind == "item.completed" and event.get("item", {}).get("type") == "agent_message":
-                final_text = event["item"].get("text")
+                text = event["item"].get("text")
+                final_text = text if isinstance(text, str) else None  # 非字符串最终消息不可比对，按不符失败
         if not turn_completed:
             return failed("stdout 缺少重连后 turn.completed")
         sessions = {e.get("thread_id") for e in events if e.get("type") == "thread.started"}

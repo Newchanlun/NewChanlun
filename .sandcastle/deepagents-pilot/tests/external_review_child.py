@@ -25,7 +25,9 @@ output = {"status": "blocked" if mode == "BLOCK" else "completed", "summary": f"
           "findings": [], "validation": ["测试替身"]}
 fence = (folder.parents[1] / "fake-fence").read_text().strip() if (folder.parents[1] / "fake-fence").exists() else ""
 text = json.dumps(output)
-if fence:  # whole：整段一个围栏；prose：围栏前有说明文字
+if fence == "nonstring":  # agent_message.text 不是字符串（结构化内容）
+    text = output  # type: ignore[assignment]
+elif fence:  # whole：整段一个围栏；prose：围栏前有说明文字
     text = ("结论如下\n" if fence == "prose" else "") + "```json\n" + text + "\n```"
 events = [{"type": "thread.started", "thread_id": session},
           {"type": "item.completed", "item": {"type": "agent_message", "text": text}},

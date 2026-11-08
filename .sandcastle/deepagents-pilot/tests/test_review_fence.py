@@ -24,7 +24,7 @@ def test_only_a_whole_single_fence_is_unwrapped(text, expected):
     assert unwrap_json_fence(text) == expected
 
 
-@pytest.mark.parametrize(("fence", "verdict"), [("whole", "PASS"), ("prose", "FAILED")])
+@pytest.mark.parametrize(("fence", "verdict"), [("whole", "PASS"), ("prose", "FAILED"), ("nonstring", "FAILED")])
 def test_fenced_final_message_is_validated_like_plain_json(lane, fence, verdict):
     (lane.state_root / "runs").mkdir(parents=True, exist_ok=True)
     (lane.state_root / "runs" / "fake-fence").write_text(fence)
