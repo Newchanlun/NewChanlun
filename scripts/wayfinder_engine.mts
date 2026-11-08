@@ -15,9 +15,10 @@
  *      （blocking 边 + 票面逐条挂裁定票）+ 挂 sandcastle 标签 → 工蜂拾取；
  *   3. 实装票全关 + 图关判据满足 → 自动起草图关 comment + close map。
  *
- * 不碰决策票（v1）：决策票（含 Notes N-k 预授权）一律人工；纯决策图（spec 出图）也人工。
- * 人工闸两处不动：spec 批准（闸一）/ 不预授权决策票。合入 main 由必需检查 deepagents/review 与 ci-ok 把关
- *   （#1742 裁定 https://github.com/Newchanlun/NewChanlun/issues/1742#issuecomment-6719202631），本引擎不碰 main。
+ * 不碰决策票（v1）：决策票（含 Notes N-k 预授权）和纯决策图（spec 出图）本引擎都不裁，交裁决面
+ *   （.sandcastle/decision-claimer.mts）。本引擎只认编排者对 spec 的批准 comment（闸一），不碰 main：
+ *   合入 main 由必需检查 deepagents/review 与 ci-ok 把关。spec、决策与合入都没有人工步骤；人确认只剩
+ *   实盘下单/资金与密钥/凭证两类（#1742 裁定 https://github.com/Newchanlun/NewChanlun/issues/1742#issuecomment-6719202631）。
  *
  * #1084 追加（2026-08-19 打回复核）——常驻控制面成为活机制：
  *   - 每轮区分五桶：全仓 ready-for-agent / 已获 ${releaseLabel()} 拾取权 / blocked / claimed / running；
@@ -59,7 +60,7 @@ export const DEFAULT_SPEC_MODEL = MAIN_MODEL;
 export const DEFAULT_SPEC_PROVIDER = "claude-cliproxy";
 /** WAYFINDER_SPEC_MODEL 只接受主控同型；非法值 fail-loud，不回退旧模型。 */
 export const SUPPORTED_SPEC_MODELS = SUPPORTED_MAIN_MODELS;
-// 闸一待批的 spec 票标签：编排者需人工批，故挂 ready-for-human（三态 triage 标签之一）。
+// 闸一待批的 spec 票标签：等编排者 comment 批准期间挂 ready-for-human（三态 triage 标签之一，沿用旧标签名）。
 const SPEC_AWAIT_LABEL = "ready-for-human";
 // 实装票标签：ready-for-agent（已就绪）+ sandcastle（工蜂拾取闸，main.mts 读取）。
 export function implLabels(label = releaseLabel()): string[] {

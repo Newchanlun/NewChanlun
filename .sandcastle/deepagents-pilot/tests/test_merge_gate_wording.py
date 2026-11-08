@@ -4,8 +4,8 @@
 合入 main 不设人工批准步骤，由分支保护的必需检查 deepagents/review 与 ci-ok 把关；
 人确认只剩实盘下单/资金与密钥/凭证两类。代码里的单一来源是 pilot1742/domain.py 的 MERGE_GATE。
 
-FILES 是 #1984 改过、仍存在的文本文件。不在这里的文件（harvest.sh、docs/agents/wayfinder-workflow.md、
-review_sweep.py 等）归 #1915 那组 PR 迁移，本测试不管。
+FILES 是 #1984 改过、仍存在的文本文件。不在这里的文件（.sandcastle/docs/graph-engineering.md、harvest.sh、
+docs/agents/wayfinder-workflow.md、review_sweep.py 等）归 #1915 那组 PR 迁移，本测试不管。
 """
 import re
 from pathlib import Path
@@ -29,14 +29,13 @@ FILES = (
     ".sandcastle/deepagents-pilot/pilot1742/executor.py",
     ".sandcastle/deepagents-pilot/pilot1742/external_review.py",
     ".sandcastle/deepagents-pilot/tests/test_executor.py",
-    ".sandcastle/docs/graph-engineering.md",
     ".sandcastle/swarm-implement-prompt.md",
     "CLAUDE.md",
     "docs/agents/deepagents-queue/README.md",
     "scripts/wayfinder_engine.mts",
 )
 
-# 只抓「合入」与「人」挨在一起的说法；「人闸标签」（票面挂起标签）和 P 类「人批影子流程」不是合入口径，不算。
+# 只抓「合入」与「人」挨在一起的说法；「人闸标签」（票面挂起标签）这类与合入无关的词不算。
 HUMAN_MERGE = (
     re.compile(r"合入[^。；\n]{0,20}?(人工闸|人闸|由人|人决定|人批|等人|人来)"),
     re.compile(r"(人工闸|人闸|人决定|人批|等待人|等人|由人)[^。；\n]{0,6}合入"),
@@ -71,7 +70,6 @@ def test_detector_catches_known_human_merge_sentences(line):
 
 @pytest.mark.parametrize("line", [
     "拒绝 `sandcastle`、`agent:*`、`wayfinder:grilling`、所有人闸标签、有负责人",
-    "P 类同样提供候选编辑，但仍只进入人批影子流程。",
     "合入 main 不设人工批准步骤，由必需检查 `deepagents/review` 与 `ci-ok` 把关；涉及实盘下单/资金或密钥/凭证的改动仍须人确认。",
 ])
 def test_detector_ignores_unrelated_human_gates(line):

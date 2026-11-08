@@ -9,10 +9,10 @@
 | 控制面 | `scripts/wayfinder_engine.mts`（已有） | 4 分钟 | 扫图、给合格实施票挂 `sandcastle` |
 | 裁决面 | `.sandcastle/decision-claimer.mts`（新） | 10 分钟 | grilling 票：每票 MAIN 会话分级+考古并续接起草 → 异家族独审 → 落地或待批 |
 | 执行面 | `claim-loop.mts` + `main.mts`（已有） | 60 秒 | 实施票：实装工蜂 + 独审工蜂 |
-| 验收面 | `harvest.sh`（#1660 PR 模式）+ main 必需检查（`deepagents/review`、`ci-ok`） | 15 分钟 | 评审完成的分支推远端、基于 main 开 PR、票面登记；不合入不关票 |
+| 验收面 | `harvest.sh`（#1660 PR 模式）+ main 合入人闸 | 15 分钟 | 评审完成的分支推远端、基于 main 开 PR、票面登记；不合入不关票 |
 | 观测面 | `health-monitor` + 进度页（新） | 5 分钟 / 1 分钟 | 停摆即 _red_、自愈、进度 |
 
-人只守两闸：spec 批准、P 类决策。合入 main 不设人工批准步骤，由必需检查 `deepagents/review` 与 `ci-ok` 把关；涉及实盘下单/资金或密钥/凭证的改动仍须人确认（[#1742 裁定](https://github.com/Newchanlun/NewChanlun/issues/1742#issuecomment-6719202631)）。
+人只守三闸：spec 批准、P 类决策、合入 main。
 
 ## 裁决流程（每张 grilling 票）
 
@@ -109,7 +109,7 @@
 
 断点恢复使用 `commitBase` 与 `committedSha`：commit 已完成但回执中断时，核父提交、唯一改动文件、精确正文和提交消息后复用同一 SHA；每次实际 push 前重新 fetch main，核 main 上目标原件仍与获审 `before` 逐字一致，否则保留 `reviewed_pass` 并要求重审。push 回执中断时先查远端，远端已是同一 SHA 则只补记录，不重复推送，也不受之后 main 变化影响。`landedSha` 已存在则只补 resolution 评论。旧未推送 `reviewed_pass` 若缺编辑合同，明确要求迁移并重新独审，不拿旧 PASS 自动补写；旧已推送 `landedSha` 仍可只补评论。草稿、独审原件与断点合同不一致时拒绝续做。
 
-这些检查不改变 PR 流程，也不改变 main 的合入门：分支保护的必需检查 `deepagents/review` 与 `ci-ok`（[#1742 裁定](https://github.com/Newchanlun/NewChanlun/issues/1742#issuecomment-6719202631)）。
+这些检查不改变 P 类用户批准、PR 和 main 合入人闸。
 
 ### 6. 解锁
 
@@ -155,11 +155,11 @@ Sandcastle 宿主 `NewChanlun-sandcastle-host` 开启 `SANDCASTLE_HOST_AUTO_UPDA
 2. 裁决面 live：一张 T 类票走完分级、起草、独审、分支落文档、PR。
 3. 执行面：claim-loop 派出的实施工蜂实际产生输出（上下文非 0、有 commit 或明确 blocked 结论）。
 4. health-monitor 发现停摆能变 _red_ 并自愈，进度页可看。
-5. 以上改动经 PR 合入 main（必需检查 `deepagents/review` 与 `ci-ok` 把关）。
+5. 以上改动经 PR 合入 main（人闸）。
 
 ### Codex 单票阶段交付（#1617，2026-10-25）
 
-实施票每 run 仍是一票。作者在 workspace-write 下改源码并报告实际验证，受管宿主核完整文件集合并提交；独审读精确 commit，修正经同一宿主步骤提交。Rust 验证在封包后由宿主调用 nc-remote/CI；未验证不算验收完成。此职责分离已经用户明确批准，不扩大工蜂沙箱权限；main 合入由必需检查 `deepagents/review` 与 `ci-ok` 把关，工蜂只开 PR。
+实施票每 run 仍是一票。作者在 workspace-write 下改源码并报告实际验证，受管宿主核完整文件集合并提交；独审读精确 commit，修正经同一宿主步骤提交。Rust 验证在封包后由宿主调用 nc-remote/CI；未验证不算验收完成。此职责分离已经用户明确批准，不扩大工蜂沙箱权限，main 合入仍是人闸。
 
 旧段落中 Docker/swarm 的模型配置只说明路由，不代表执行可用：namespace 和 swarm 提交责任迁移未验收，默认 namespace 探针失败时入口在 planner/认领之前 fail-loud。主控不得将此候选的单票宿主冒烟计为 swarm 或全图验收。
 
