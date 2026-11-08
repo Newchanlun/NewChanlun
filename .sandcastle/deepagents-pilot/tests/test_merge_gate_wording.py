@@ -4,8 +4,9 @@
 合入 main 不设人工批准步骤，由分支保护的必需检查 deepagents/review 与 ci-ok 把关；
 人确认只剩实盘下单/资金与密钥/凭证两类。代码里的单一来源是 pilot1742/domain.py 的 MERGE_GATE。
 
-FILES 是 #1984 改过、仍存在的文本文件。不在这里的文件（.sandcastle/docs/graph-engineering.md、harvest.sh、
-docs/agents/wayfinder-workflow.md、review_sweep.py 等）归 #1915 那组 PR 迁移，本测试不管。
+FILES 是 #1984 相对 main 仍改动、仍存在的文本文件。#1915 已重写的文件（graph-engineering.md、EXECUTOR.md、
+wayfinder_engine.mts、codex/swarm 工蜂提示、deepagents-queue/README.md）以及 harvest.sh、wayfinder-workflow.md、
+review_sweep.py 等都归 #1915，本测试不管。
 """
 import re
 from pathlib import Path
@@ -20,19 +21,14 @@ FILES = (
     ".claude/commands/verify.md",
     ".github/workflows/ci.yml",
     ".sandcastle/CODING_STANDARDS.md",
-    ".sandcastle/codex-implement-prompt.md",
     ".sandcastle/codex-review-prompt.md",
-    ".sandcastle/deepagents-pilot/EXECUTOR.md",
     ".sandcastle/deepagents-pilot/EXTERNAL-REVIEW.md",
     ".sandcastle/deepagents-pilot/pilot1742/agent.py",
     ".sandcastle/deepagents-pilot/pilot1742/domain.py",
     ".sandcastle/deepagents-pilot/pilot1742/executor.py",
     ".sandcastle/deepagents-pilot/pilot1742/external_review.py",
     ".sandcastle/deepagents-pilot/tests/test_executor.py",
-    ".sandcastle/swarm-implement-prompt.md",
     "CLAUDE.md",
-    "docs/agents/deepagents-queue/README.md",
-    "scripts/wayfinder_engine.mts",
 )
 
 # 只抓「合入」与「人」挨在一起的说法；「人闸标签」（票面挂起标签）这类与合入无关的词不算。

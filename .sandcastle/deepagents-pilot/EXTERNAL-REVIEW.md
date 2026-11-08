@@ -12,6 +12,8 @@ export PYTHONPATH=.sandcastle/approval-signing:.sandcastle/deepagents-pilot
   --pr <PR号> --private-key <仓库外PEM绝对路径>
 ```
 
+发布 `deepagents/review` 用哪个 App 由 `IDENTITY_CONFIG` 文件决定（见「换用审查专用 App」），`--private-key` 必须是该 App 的私钥。本文其余命令示例同理。
+
 入口读取固定仓库 `Newchanlun/NewChanlun` 的 PR 身份，接受以 main 为目标的同仓库 open PR，包括 draft 和非 App 作者。fork 返回 `unsupported_head_repository`。
 
 审阅冻结 base、head 和 merge-base，范围为 `merge_base..head` 的完整修改，不只审最后一次提交。对象必须已在当前 controller 的本地对象库；缺失时返回 `needs_source_sync`，由原 owner 按其既有同步授权补齐。入口和 reviewer 都不 fetch。
@@ -49,7 +51,46 @@ kimi 不带 `--output-schema`（#1968）。带 schema 时它把开场白（「�
 - 一个非执行器拥有的 PR 走通双 PASS、同 head 的 App success 和读回。
 - 在隔离临时分支验证普通用户同名 success 不能满足 App 来源绑定，App 正控及新 head 负控成立。
 
-main 的 D5 检查启用由主控另行执行，保留已有保护。所需来源绑定为 `deepagents/review`、App id `5486877`，并保留 strict、enforce_admins；本 CLI 不修改 branch protection。首版仅接 main 目标，临时目标分支的来源测试需要主控独立受控测试工具。
+main 的 D5 检查启用由主控另行执行，保留已有保护。所需来源绑定为 `deepagents/review` 与发布它的 App id（缺省 `5486877`；换用审查专用 App 后为该 App 的 id，见下节），并保留 strict、enforce_admins；本 CLI 不修改 branch protection。首版仅接 main 目标，临时目标分支的来源测试需要主控独立受控测试工具。
+
+## 换用审查专用 App
+
+缺省时入口用执行器同一个 App（`newchanlun-deepagents-1742`，app_id `5486877`，installation `179444545`）发布 `deepagents/review`，执行器因此也持有能写这个必需状态的身份。审查专用 App `newchanlun-review-gate` 只给审查入口用，安装权限恰为 `TOKEN_PERMISSIONS`：metadata/read、contents/read、pull_requests/read、statuses/write。
+
+发布身份只有一个来源：固定文件 `external_review.IDENTITY_CONFIG`，即 `/Volumes/AgentStorage/issue1742-deepagents-pilot-20261027/external-review/app-identity.json`。没有命令行开关可以覆盖或漏传。凡是走 `review-pr` 的路径都读这个文件：手动 `review-pr`、`migrate-stale`，以及 `review_sweep` 派出的审查（它的 `run-review` 子进程在同一进程里调用 `external_review.main(["review-pr", ...])`）。`executor serve --review-sweep`（#2000）走的也是这一条。文件不存在时用执行器 App，行为与之前完全相同。文件存在但读不了（含悬空符号链接）、字段不合格或在 Git 检出内，入口一律以退出码 2 拒绝，不回退到执行器 App。执行器、Studio、`github_app` 核验 CLI 和 `deepagents-remote-facts.py` 不读这个文件，仍用执行器 App。
+
+文件不含秘密，字段恰为以下四个，多一个或少一个都拒绝：
+
+```json
+{
+  "app_id": 5664795,
+  "installation_id": 179776757,
+  "app_slug": "newchanlun-review-gate",
+  "installation_permissions": {"metadata": "read", "contents": "read", "pull_requests": "read", "statuses": "write"}
+}
+```
+
+核验时 GitHub 读回的安装权限必须与 `installation_permissions` 逐项相等，宽了、窄了、同名升级都拒绝，不发任何状态。仓库固定为 `Newchanlun/NewChanlun`（id `1150335160`），文件改不了。私钥规则不变（仓库外、属主为当前用户、权限 600 或 400）。身份文件只决定用哪个 App 签名，私钥仍由各入口的 `--private-key` 给出，两者必须属于同一个 App：身份文件指向审查 App 时，所有审查入口都要给审查 App 私钥，否则 GitHub 拒绝 JWT，入口退出码 2，不发状态。
+
+HOST 切换步骤：
+
+1. 审查 App 已建好：app_id `5664795`，installation `179776757`，安装方式为 selected，只含本仓库，安装权限恰为上面四项。私钥是 `~/.config/newchanlun-review-gate/` 下的 600 文件。同目录的 `app.json` 是建 App 时的记录，字段格式不同，不能当身份文件用。
+2. 先让在途 run 收尾：`status` 里没有 pending 的状态写，也没有在跑的 reviewer（手动的和 sweep 派的都算）。原因是读回认领按发布者 bot 匹配 `creator.login`，切换后旧 App 发过的状态不再算本入口发的；在途写要么先完成，要么在切换后用 `reconcile` 按事实登记。切换期间先停掉 `review_sweep` 循环（或 `executor serve --review-sweep`），免得它在文件和私钥换好之前派出审查。
+3. 把所有审查入口的 `--private-key` 换成审查 App 私钥：手动 `review-pr`、`migrate-stale`，以及 `review_sweep --private-key`（它只把这个路径原样转给审查子进程）。`executor serve --review-sweep` 用单独的 `--review-private-key`（不复用执行器的 `--private-key`）；身份文件存在而没给它时 serve 以退出码 2 失败关闭。serve 的 sweep 与独立 `review_sweep` 循环不要同时跑（共用 `sweep/*.launched` 标记）。
+4. 把上面的 JSON 写到 `IDENTITY_CONFIG` 路径。从这一刻起，所有审查入口都用审查 App。
+5. 选一张非执行器拥有的 PR 审一次：
+
+   ```sh
+   "$VENV/bin/python" -m pilot1742.external_review review-pr \
+     --pr <PR号> --private-key <审查App私钥绝对路径>
+   ```
+
+   入口先核验身份再做任何事：app_id、slug、installation、仓库范围或权限集任一不符即退出码 2，不发状态。成功后在该 head 上读回 `deepagents/review`，`creator.login` 应为 `newchanlun-review-gate[bot]`。然后重启 `review_sweep` 循环，确认它派出的下一次审查发出的状态也是这个 bot。
+6. HOST 部署完成、并用新 App 发出至少一个真实状态之后，再由主控把 main 必需检查 `deepagents/review` 的来源 App 改为 `5664795`。顺序不能反：先改保护会让所有 PR 都卡在这项检查上。改的时候保留 strict 与 enforce_admins。改完后执行器 App 写的 `deepagents/review`（包括 `publish_candidate` 写的）不再满足必需检查，这正是切换的目的。改 branch protection 不由本 CLI 做。
+
+已沿用、已发布的旧 PASS 记录仍在本地历史里；同补丁新 head 沿用时以新 App 在新 head 上发布，不读旧状态的发布者。
+
+回退：删掉 `IDENTITY_CONFIG` 文件，审查入口的 `--private-key` 换回执行器私钥，并把必需检查来源改回 `5486877`。
 
 ## 看结果与恢复
 
@@ -113,7 +154,7 @@ main 的 D5 检查启用由主控另行执行，保留已有保护。所需来�
 
 源码和 Git 全只读挂入容器。宿主 home、PEM、GitHub token、状态和 session 目录不挂入。session 从容器临时目录经 SDK 收取，不给 reviewer 可写宿主回执目录。
 
-App token 只申请 metadata/read、contents/read、pull_requests/read、statuses/write；token 留在宿主发布进程内存。GitHub 的 statuses/write 不按 context 缩权，宿主发布器及 OS 因此属于受信边界。
+App token 只申请 metadata/read、contents/read、pull_requests/read、statuses/write（审查专用 App 的安装权限也正是这四项）；token 留在宿主发布进程内存。GitHub 的 statuses/write 不按 context 缩权，宿主发布器及 OS 因此属于受信边界。
 
 ## 成本上限与每日额度闸
 

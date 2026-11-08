@@ -34,6 +34,18 @@ def test_every_hardcoded_app_identity_points_at_the_org_installation():
             assert values[3] == EXPECTED[3], f"{path} 仍写着旧仓库名 {values[3]}"
 
 
+def test_external_review_default_identity_points_at_the_org_installation():
+    """external_review 的缺省身份是字典常量、用变量构造 AppIdentity，上面的 AST 扫描认不出，这里单独锁。"""
+    from pilot1742 import external_review
+    from pilot1742.github_app import INSTALLATION_PERMISSIONS
+
+    identity = external_review.DEFAULT_IDENTITY
+    assert (identity["app_id"], identity["installation_id"], external_review.REPOSITORY_ID,
+            external_review.REPOSITORY) == EXPECTED
+    assert identity["app_slug"] == "newchanlun-deepagents-1742"
+    assert identity["installation_permissions"] == INSTALLATION_PERMISSIONS
+
+
 def _row(owner):
     return json.dumps({"ticket": 1742, "scope": "pilot_acceptance", "decision": "approve", "head": "a" * 40,
                        "source": {"kind": "tracker_comment", "registered_by": "controller",
