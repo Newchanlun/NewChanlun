@@ -98,7 +98,12 @@ export interface WorkerDependencies {
   inspect(id: string): { Id: string; Image: string; Mounts: Array<{ Source: string; Destination: string; RW: boolean }>; Config: { Env: string[] } };
   imageEnv(image: string): string[];
   timeoutMs: number;
+  /** 单次独审的命令数上限；超出即停并记 failure_code=budget_exceeded。缺省见 REVIEW_COMMAND_CAP。 */
+  commandCap?: number;
 }
+// 实测（2026-11-01..08，247 次完成的独审）：Opus 命令数中位 47、p90 98、最大 143；墙钟最大 23 分钟。
+// 上限约取正常一次的 3–5 倍，并高于实测最大值，只拦失控，不拦正常审查。
+export const REVIEW_COMMAND_CAP = 250;
 const dependencies: WorkerDependencies = {
   ready: (image) => assertSwarmExecutionReady(image, { rows: [], verify: verifyReviewAdmission }),
   sandbox: (image) => swarmSandbox(image, dockerCliProxyEnv()) as DockerProvider,
@@ -106,7 +111,7 @@ const dependencies: WorkerDependencies = {
   inspect: (id) => JSON.parse(execFileSync("docker", ["inspect", id], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }))[0],
   imageEnv: (image) => JSON.parse(execFileSync("docker", ["image", "inspect", image, "--format", "{{json .Config.Env}}"],
     { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] })) ?? [],
-  timeoutMs: 5_400_000,
+  timeoutMs: 2_700_000,
 };
 
 export async function runExternalReview(folder: string, deps: WorkerDependencies = dependencies): Promise<void> {
@@ -164,11 +169,17 @@ export async function runExternalReview(folder: string, deps: WorkerDependencies
     if (cancelled) throw new Error("监督已取消");
     const built = provider.buildPrintCommand({ prompt: launch.prompt, dangerouslySkipPermissions: false });
     if (built.stdin !== launch.prompt || !built.command.includes("--disable multi_agent")) throw new Error("Codex 命令协议已漂移");
+    // project_doc_max_bytes=0：不把候选仓 AGENTS.md 当指令自动注入每次请求（实测约 13k 字符，随每轮请求重发）；
+    // 候选 AGENTS 本就是不可信审阅材料，审查员需要时可用 cat 读取。
     const command = built.command + " --skip-git-repo-check --output-schema /tmp/external-review-schema.json -c 'features.apps=false' -c 'features.plugins=false'"
-      + " -c 'web_search=\"disabled\"' -c 'shell_environment_policy.inherit=\"core\"' -";
+      + " -c 'web_search=\"disabled\"' -c 'shell_environment_policy.inherit=\"core\"' -c 'project_doc_max_bytes=0' -";
     const transcript = new CodexTranscript(provider);
     const events = openSync(join(folder, "events.jsonl"), "wx", 0o600);
     let timedOut = false;
+    let overBudget = false;
+    const cap = deps.commandCap ?? REVIEW_COMMAND_CAP;
+    const usage = { input_tokens: 0, cached_input_tokens: 0, output_tokens: 0, reasoning_output_tokens: 0, commands: 0 };
+    record.usage = usage;
     timer = setTimeout(() => { timedOut = true; void handle?.close(); }, deps.timeoutMs);
     let execution;
     record.phase = "model";
@@ -176,13 +187,28 @@ export async function runExternalReview(folder: string, deps: WorkerDependencies
       execution = await handle.exec(command, { cwd: "/review", stdin: built.stdin, onLine(line) {
         writeFileSync(events, line + "\n");
         transcript.accept(line);
+        try {
+          const event = JSON.parse(line);
+          if (event?.type === "turn.completed" && event.usage) {
+            for (const key of ["input_tokens", "cached_input_tokens", "output_tokens", "reasoning_output_tokens"] as const) {
+              usage[key] += Number(event.usage[key]) || 0;
+            }
+          }
+          if (event?.type === "item.completed" && event.item?.type === "command_execution" && ++usage.commands > cap && !overBudget) {
+            overBudget = true; void handle?.close();
+          }
+        } catch { /* 非 JSON 行由 transcript 判失败，这里只计量 */ }
       } });
     } finally { closeSync(events); }
     record.exit_code = execution.exitCode;
     record.turn_completed = transcript.turnCompleted;
     record.session_id = transcript.sessionId;
     writeFileSync(join(folder, "stderr.log"), execution.stderr, { mode: 0o600 });
-    if (cancelled || timedOut || execution.exitCode !== 0) throw new Error(cancelled ? "监督已取消" : timedOut ? "独审超时" : "Codex 退出失败");
+    if (cancelled || timedOut || overBudget || execution.exitCode !== 0) {
+      // 显式原因码：触顶是「暂停待人看」，不是静默失败。
+      record.failure_code = cancelled ? "cancelled" : overBudget ? "budget_exceeded" : timedOut ? "timeout" : "model_exit";
+      throw new Error(cancelled ? "监督已取消" : overBudget ? `独审命令数超过上限 ${cap}` : timedOut ? "独审超时" : "Codex 退出失败");
+    }
     record.phase = "transcript";
     const output = transcript.output();
     if (!provider.sessionStorage) throw new Error("模型未提供 session storage");
