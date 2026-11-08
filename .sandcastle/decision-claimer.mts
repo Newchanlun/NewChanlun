@@ -752,18 +752,56 @@ function isOrchestratorReturn(c: { author: string; body: string } | undefined, o
 export const SIGN_HEAD = "退回：签署";
 const SIGN_HEAD_RE = /^退回[：:]\s*签署/;
 
+/** 签署行的固定格式（每项一行）：`- <字段>=<签署值>；有效域=<有效域>`。 */
+export const SIGN_LINE_FORMAT = "- <字段>=<签署值>；有效域=<有效域>";
+const SIGN_DOMAIN_SEP = "；有效域=";
+/** 否定、空占位或待定词：出现在签署值或有效域里一律不算签署。 */
+const SIGN_NEGATION_RE = /(不签|未签|拒签|拒绝|不同意|不批准|否决|撤回|暂不|待定|待签|未定|再议|n\/a|\bnone\b|\bnull\b|\btbd\b|\btodo\b)/i;
+const SIGN_EMPTY_RE = /^(无|否|空|-+|—+|\?+|？+|x+)$/i;
+/** 签署值：一个不含空白的值（数字、比例、标识符等），可带一个字母单位，如 `5000 USDT`、`0.5%`、`BTC-PERP`。 */
+const SIGN_VALUE_RE = /^[^\s=；;，,。：:]+(?: [A-Za-z%]{1,12})?$/;
+/** 有效域：非空、不含句读（，。；）的一个短语，如 `BTC 实盘 V0`。 */
+const SIGN_DOMAIN_RE = /^[^，,。；;=]{1,80}$/;
+
+/**
+ * 解析签署评论首行之后的签署行，返回「字段 → 签署值与有效域」；格式不符、值或域为空、带否定词、
+ * 像一句话而不是一个值的行都不收。同一字段出现多行（无论是否合规）视为有歧义，整项不收。
+ */
+export function parseSignatureLines(body: string): Map<string, { value: string; domain: string }> {
+  const seen = new Map<string, number>();
+  const ok = new Map<string, { value: string; domain: string }>();
+  for (const raw of body.replace(/\r\n/g, "\n").split("\n").slice(1)) {
+    const line = raw.trim();
+    if (!line.startsWith("- ")) continue;
+    const eq = line.indexOf("=", 2);
+    if (eq < 0) continue;
+    const field = line.slice(2, eq).trim();
+    if (!field) continue;
+    seen.set(field, (seen.get(field) ?? 0) + 1);
+    const rest = line.slice(eq + 1);
+    const sep = rest.indexOf(SIGN_DOMAIN_SEP);
+    if (sep < 0) continue;
+    const value = rest.slice(0, sep).trim(), domain = rest.slice(sep + SIGN_DOMAIN_SEP.length).trim();
+    if (!SIGN_VALUE_RE.test(value) || !SIGN_DOMAIN_RE.test(domain)) continue;
+    if ([value, domain].some((x) => SIGN_EMPTY_RE.test(x) || SIGN_NEGATION_RE.test(x))) continue;
+    ok.set(field, { value, domain });
+  }
+  for (const [field, n] of seen) if (n > 1) ok.delete(field);
+  return ok;
+}
+
 /**
  * 硬门清单里仍待用户签署的项：signature 指向的评论必须由编排账号发出、首行以「退回：签署」开头，
- * 且正文逐字写着该项的字段名（字段名后跟签署值与有效域）。返修用的「退回：…」、其他账号的同形评论、
- * 没写该字段的签署评论、编号越界或缺编号都按未签署处理。
+ * 且首行之后有一行恰为 `- <该字段>=<签署值>；有效域=<有效域>`（字段逐字一致，值与域非空、不是否定或一句话）。
+ * 只在正文里提到字段名、写了字段却没有值或有效域、写的是否定、同一字段写了多行，都按未签署处理；
+ * 返修用的「退回：…」、其他账号的同形评论、编号越界或缺编号同样未签。
  */
 export function unsignedUserGate(items: UserGateItem[], comments: Array<{ author: string; body: string }>, orchestrator = ORCHESTRATOR): UserGateItem[] {
   return items.filter((g) => {
     const c = g.signature === undefined ? undefined : comments[g.signature - 1];
     if (!c || c.author !== orchestrator || !SIGN_HEAD_RE.test(firstLine(c.body))) return true;
     const field = g.field.trim();
-    const rest = c.body.split("\n").slice(1).join("\n");
-    return !field || !rest.includes(field);
+    return !field || !parseSignatureLines(c.body).has(field);
   });
 }
 
@@ -950,7 +988,7 @@ export function triagePrompt(t: TicketContext, o: { feedback?: string; fixed?: C
 拿不准一律判 P。分级只看票面性质，不因考古查到或查不到先例改判；考古发现的事实缺口由编排逻辑处置。T/P 两类都经起草与非作者独审 PASS 由代理裁定（#1909），分级决定授权引用与审查口径；是否交还用户只看下面的 user_gate。
 
 ### 资金与权限硬门（user_gate）
-${USER_GATE_SCOPE}。本票要给出这类事项的具体值或授权时，逐项列进 user_gate：field 写字段或决策，basis 写 ADR 0041 条款与票面出处。这类事项不由代理裁定，宿主把整票交还用户签署，不起草、不落地。只定方法、推荐值或实现方案而不签具体值的不列。票上已有签署的事项照样列出，在 signature 写该签署评论的编号（下文「评论 [k]」的 k），field 逐字照抄签署评论里写的字段名；签署只认编排账号（${ORCHESTRATOR}）发的、首行以「${SIGN_HEAD}」开头、正文写着该字段名与签署值的评论，返修用的其他「退回：…」评论不是签署，宿主逐项核对编号指向的评论，其他账号评论里的签署值一律无效，不得据此省略该项。拿不准就列。没有则写空数组。`
+${USER_GATE_SCOPE}。本票要给出这类事项的具体值或授权时，逐项列进 user_gate：field 写字段或决策，basis 写 ADR 0041 条款与票面出处。这类事项不由代理裁定，宿主把整票交还用户签署，不起草、不落地。只定方法、推荐值或实现方案而不签具体值的不列。票上已有签署的事项照样列出，在 signature 写该签署评论的编号（下文「评论 [k]」的 k），field 逐字照抄签署评论里写的字段名；签署只认编排账号（${ORCHESTRATOR}）发的、首行以「${SIGN_HEAD}」开头、其后有一行恰为「${SIGN_LINE_FORMAT}」（字段逐字一致，值与有效域非空，不是否定或一句话）的评论，返修用的其他「退回：…」评论不是签署，宿主逐项核对编号指向的评论，其他账号评论里的签署值一律无效，不得据此省略该项。拿不准就列。没有则写空数组。`
     : `你是 NewChanlun 仓裁决面的考古子代理，替起草者把本票的「事实」查完，只把「决定」留下。当前目录是 origin/main 的只读检出；禁止修改任何文件。
 ${FIXED_CLASS_LINE}${fixed === "none" ? "（只验考古）" : `：分级已定为 ${fixed.klass} 类 —— ${fixed.reason}`}。`;
   const json = fixed === undefined
@@ -2072,7 +2110,7 @@ export function heldComment(n: number, reason: HeldReason, dir: string, s: Pick<
     const items = gate.map((g) => `- ${g.field}（依据：${g.basis}）`).join("\n") || "（清单见分级原件）";
     return `${USER_GATE_HELD_HEAD}：本票触及 ADR 0041「授权来源与生效边界」节的独立资金与权限硬门，代理不裁定；本票未起草、未落地，已标 ${HUMAN_LABEL}。\n\n` +
       `需要用户签署：\n${items}\n\n` +
-      `签署：用户本人用编排账号在本票评论首行写「${SIGN_HEAD}」，随后每项一行，逐字写上面列出的字段名，再写签署值与有效域（例：「- 字段名：签署值（有效域：…）」）；返修用的其他「退回：…」评论不算签署，其他账号的评论也不算。decision-claimer 下一轮整链重跑，分级器逐项指认签署评论、宿主核对后不再交还，起草照引该评论。\n\n` +
+      `签署：用户本人用编排账号在本票评论首行写「${SIGN_HEAD}」，随后每项一行，严格按「${SIGN_LINE_FORMAT}」写（字段逐字照抄上面的清单；签署值是一个值，可带单位，如「5000 USDT」；有效域是一个短语，如「BTC 实盘 V0」）；只提到字段名、缺值或缺有效域、写否定都不算签署；返修用的其他「退回：…」评论不算签署，其他账号的评论也不算。decision-claimer 下一轮整链重跑，分级器逐项指认签署评论、宿主核对后不再交还，起草照引该评论。\n\n` +
       `分级原件：\`${dir}/classify.json\``;
   }
   if (reason === "fact_gap") {
