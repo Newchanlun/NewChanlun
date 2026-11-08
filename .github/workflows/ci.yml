@@ -340,8 +340,8 @@ jobs:
   #   .github/scripts/s-session-test-weights.tsv 的实测耗时做 LPT 分配；权重只管均衡、不管覆盖，
   #   表外新测试取中位数权重照常入片。改片数须同时改 matrix.shard 与本作业及 coverage 作业的 S_SESSION_SHARDS。
   # #1875：Boat 上分 2 片、托管机分 4 片（两者用与 runs-on 相同的判断式）。最慢一片都由单条 tb02c 决定
-  #   （Boat 9950X 约 258 s、托管约 553 s），同片其余测试摊在另外 3 个线程上；按实测权重 LPT，2 片为 [1082, 1082]、
-  #   4 片为 [841, 441, 441, 441]（Belay 串行秒），最长片仍是 tb02c 那条。Boat 每轮因此少起 2 台机器
+  #   （Boat 9950X 约 258 s、托管约 553 s），同片其余测试摊在另外 3 个线程上；按实测权重 LPT，2 片为 [1086, 1086]、
+  #   4 片为 [841, 444, 444, 444]（Belay 串行秒），最长片仍是 tb02c 那条。Boat 每轮因此少起 2 台机器
   #   （每小时 210 次启动上限下，一轮 CI 约 19 次）。
   rust-test-s-session:
     needs: changes
