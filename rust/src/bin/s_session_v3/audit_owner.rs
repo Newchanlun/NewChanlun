@@ -6144,17 +6144,6 @@ pub(super) mod construction_tests {
         begun.token
     }
 
-    pub(in crate::v3) fn b2_assert_counts_match_independent_full_source(
-        owner: &AuditConnection,
-    ) -> source_audit::Counts {
-        let active = owner.begin(TransactionBehavior::Deferred).unwrap();
-        let audited = state::audit(active.tx()).unwrap();
-        let actual = b2_assert_counts_match_audited(owner, active.tx(), &audited);
-        drop(audited);
-        active.read_end().unwrap();
-        actual
-    }
-
     /// 同一只读快照上先做 complete 全量对拍、再做 b2 独立来源审计对拍；两者的冷 `state::audit`
     /// 在同一事务里必然相同，只算一次（#1890：S4 每代省约 8%）。两套对拍的内容不变。
     pub(in crate::v3) fn assert_complete_and_b2_counts(
