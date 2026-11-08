@@ -445,19 +445,22 @@ jobs:
     name: rust-test-s-session-extras (${{ matrix.group }})
     strategy:
       fail-fast: false
+      # #1875：托管路径也把 owned 拆成 owned + owned-h1（与 Boat 同口径），槽数随之由 4 改为 5。按 run 42378095259 实测时长模拟：
+      #   native 落在快机（9V45）时墙钟 22.4 → 17.3 min，落在慢机（7763）时仍由 native 决定，不变；只拆不加槽反而 22.4 → 26.3。
+      #   单次 CI 托管作业峰值 21 → 22，仍在 20 并发上限内排队消化。下面是 R12 的原注释。
       # Boat 上五组同时开工；退回 ubuntu-latest 时取 4（#1875 R12：3 槽时 release-locks 要排队约 19 分钟，任何顺序下界都约 48 分钟；
       #   4 槽按实测时长模拟约 40 分钟，单次 CI 托管 Linux 作业峰值 20，不超过 20，见 run 42019882083）。
-      max-parallel: ${{ (vars.CI_BOAT_RUNNERS != 'off' && github.actor == 'xy7365527-lang' && github.triggering_actor == 'xy7365527-lang' && (github.event_name != 'pull_request' || github.event.pull_request.user.login == 'xy7365527-lang')) && 8 || 4 }}
+      max-parallel: ${{ (vars.CI_BOAT_RUNNERS != 'off' && github.actor == 'xy7365527-lang' && github.triggering_actor == 'xy7365527-lang' && (github.event_name != 'pull_request' || github.event.pull_request.user.login == 'xy7365527-lang')) && 8 || 5 }}
       matrix:
         # 按托管路径实测时长从长到短排，空出的槽先给长的（#1875 R12）。
         # #1875 P353-5/7：Boat 上把 owned 的 release 档 H1 各步拆到 owned-h1；native、economic 的测试按名字分成 a/b 两份
-        #   （CI_TEST_PART），各占一台机器，同机负载与不拆时相同。托管路径不拆（20 并发上限）。
-        group: ${{ fromJSON((vars.CI_BOAT_RUNNERS != 'off' && github.actor == 'xy7365527-lang' && github.triggering_actor == 'xy7365527-lang' && (github.event_name != 'pull_request' || github.event.pull_request.user.login == 'xy7365527-lang')) && '["native-a","native-b","release-locks","owned","owned-h1","economic-a","economic-b","content"]' || '["native","release-locks","owned","economic","content"]') }}
+        #   （CI_TEST_PART），各占一台机器，同机负载与不拆时相同。托管路径只拆 owned/owned-h1，native、economic 不拆（20 并发上限）。
+        group: ${{ fromJSON((vars.CI_BOAT_RUNNERS != 'off' && github.actor == 'xy7365527-lang' && github.triggering_actor == 'xy7365527-lang' && (github.event_name != 'pull_request' || github.event.pull_request.user.login == 'xy7365527-lang')) && '["native-a","native-b","release-locks","owned","owned-h1","economic-a","economic-b","content"]' || '["native","release-locks","owned","owned-h1","economic","content"]') }}
     runs-on: ${{ (vars.CI_BOAT_RUNNERS != 'off' && github.actor == 'xy7365527-lang' && github.triggering_actor == 'xy7365527-lang' && (github.event_name != 'pull_request' || github.event.pull_request.user.login == 'xy7365527-lang')) && 'boat-large/from=hc-gate-base' || 'ubuntu-latest' }}
     timeout-minutes: ${{ startsWith(matrix.group, 'native') && 90 || 60 }}
     env:
       CARGO_INCREMENTAL: "0"
-      OWNED_SPLIT: ${{ (vars.CI_BOAT_RUNNERS != 'off' && github.actor == 'xy7365527-lang' && github.triggering_actor == 'xy7365527-lang' && (github.event_name != 'pull_request' || github.event.pull_request.user.login == 'xy7365527-lang')) && '1' || '0' }}
+      OWNED_SPLIT: "1"
       CI_TEST_PART: ${{ endsWith(matrix.group, '-a') && '0/2' || endsWith(matrix.group, '-b') && '1/2' || '0/1' }}
     defaults:
       run:
