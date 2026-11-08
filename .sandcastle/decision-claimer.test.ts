@@ -3321,7 +3321,7 @@ test("资金与权限硬门：分级列出 user_gate 的票交还用户，不起
   assert.equal(resolvedReason({ state: "OPEN", comments: h.comments.map((c) => ({ author: c.author.login, body: c.body })) }), null, "交还用户不算已裁定");
   assert.equal((await processTicket(1565, h.d)).phase, "skipped", "等用户签署，不重跑");
 
-  h.comments.push({ author: { login: "xy7365527-lang" }, body: "退回：用户签署 cap=5000 USDT，有效域 BTC 实盘 V0" });
+  h.comments.push({ author: { login: "xy7365527-lang" }, body: "退回：签署\n- 真实账户共同 cap 签署值：5000 USDT（有效域：BTC 实盘 V0）" });
   h.replies.push(fence({ class: "P", reason: "共同 cap（用户已签）", user_gate: [] }), goodDraft, fence(pass()));
   h.label(["wayfinder:grilling", HUMAN_LABEL]);
   const signed = await processTicket(1565, h.d);
@@ -3401,7 +3401,7 @@ test("资金与权限硬门：非编排账号的「退回：」签署既不能�
   assert.match(h.modelCalls.at(-1)!.prompt, /评论 \[\d+\] @someone ---/);
 
   // 编排账号的签署评论被指认：宿主核对通过，照常起草落地。
-  h.comments.push({ author: { login: "xy7365527-lang" }, body: "退回：用户签署 cap=5000 USDT，有效域 BTC 实盘 V0" });
+  h.comments.push({ author: { login: "xy7365527-lang" }, body: "退回：签署\n- 真实账户共同 cap 签署值：5000 USDT（有效域：BTC 实盘 V0）" });
   const signedAt = h.comments.length;
   h.replies.push(fence({ class: "P", reason: "共同 cap（用户已签）", user_gate: [{ ...capGate[0], signature: signedAt }] }), goodDraft, fence(pass()));
   const signed = await processTicket(1565, h.d);
@@ -3409,11 +3409,22 @@ test("资金与权限硬门：非编排账号的「退回：」签署既不能�
   assert.ok(!h.labels().includes(HUMAN_LABEL));
 });
 
-test("unsignedUserGate：签署编号只认编排账号首行「退回」的评论；缺编号、越界、外部账号都算未签", () => {
+test("unsignedUserGate：签署编号只认编排账号首行「退回：签署」且写着该字段的评论；缺编号、越界、外部账号都算未签", () => {
   const gate = [{ field: "a", basis: "x", signature: 1 }, { field: "b", basis: "x", signature: 2 }, { field: "c", basis: "x", signature: 9 }, { field: "d", basis: "x" }];
-  const comments = [{ author: "xy7365527-lang", body: "退回：签 a" }, { author: "someone", body: "退回：签 b" }];
+  const comments = [{ author: "xy7365527-lang", body: "退回：签署\n- a：1（有效域：x）" }, { author: "someone", body: "退回：签署\n- b：2" }];
   assert.deepEqual(unsignedUserGate(gate, comments).map((g) => g.field), ["b", "c", "d"]);
   assert.deepEqual(parseClassification(fence({ class: "P", reason: "r", user_gate: [{ field: "a", basis: "x", signature: "1" }] })).userGate, [{ field: "a", basis: "x" }], "编号不成形按未签");
+});
+
+test("unsignedUserGate：返修用的「退回：…」评论、没写该字段的签署评论都不能顶替签署", () => {
+  const field = "真实账户共同 cap 签署值";
+  const at = (body: string) => unsignedUserGate([{ field, basis: "x", signature: 1 }], [{ author: "xy7365527-lang", body }]).length;
+  assert.equal(at("退回：事实已补 #12"), 1, "主控返修评论不是签署");
+  assert.equal(at(`退回：补材料\n- ${field}：5000 USDT`), 1, "首行不是「退回：签署」");
+  assert.equal(at("退回：签署\n- 另一字段：1"), 1, "签署评论里没写该字段");
+  assert.equal(at(`退回：签署 ${field}：5000 USDT`), 1, "字段名须在首行之后逐项写");
+  assert.equal(at(`退回：签署\n- ${field}：5000 USDT（有效域：BTC 实盘 V0）`), 0);
+  assert.equal(at(`退回:签署\n- ${field}：5000 USDT`), 0, "半角冒号同样认");
 });
 
 test("资金与权限硬门：分级、起草、独审三处提示同口径，交还用户不判 BLOCK，代签判 BLOCK", () => {
@@ -3429,6 +3440,6 @@ test("资金与权限硬门：分级、起草、独审三处提示同口径，�
   assert.doesNotMatch(dp, /才按考古出处与推导给出签署值/);
   const rp = reviewPrompt(t, c, "草稿");
   assert.ok(rp.includes(USER_GATE_SCOPE));
-  assert.match(rp, /R2 [^\n]*草稿给硬门事项写出签署值（不是照引票上编排账号首行「退回：」评论里的签署），或把代理裁定记成 UserSigned，判 BLOCK/);
+  assert.match(rp, /R2 [^\n]*草稿给硬门事项写出签署值（不是照引票上编排账号首行「退回：签署」评论里的签署），或把代理裁定记成 UserSigned，判 BLOCK/);
   assert.match(rp, /R8 [^\n]*硬门事项交还用户签署是正确结论，不判 BLOCK/);
 });
