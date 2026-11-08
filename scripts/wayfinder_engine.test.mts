@@ -604,6 +604,8 @@ test("buildSpecTreeFacts：嵌套 SPEC 不能绕过上层未批准 / 驳回；un
   assert.equal(g.underSpec.has(911), true);
   assert.equal(g.underSpec.has(912), false);
   assert.equal(g.approved.get(912), true); // map 直挂继承 map 的 SPEC（外层即 map 直挂 SPEC）
+  assert.equal(g.planBound.has(912), true, "map 直挂票放行时须在 map SPEC 拆票计划内");
+  assert.equal(g.planBound.has(911), false, "SPEC 子树里的票由祖先链 PASS 授权");
 });
 
 test("buildOpenChildIndex：递归截断时用 sub_issues_summary 判汇总票", () => {
@@ -674,18 +676,22 @@ test("已有负责人：不论 assignee 最近是否活跃，引擎都不放行�
   assert.deepEqual(planReleases([t]), []);
 });
 
+const RELEASE_PLAN = '<!-- wayfinder-split -->\n```json\n{"tickets":[{"id":"S1","title":"a"}]}\n```';
+const releasedBody = `<!-- wayfinder-ticket:7:S1 -->\n<!-- wayfinder-published:7:${specBodyDigest(RELEASE_PLAN)}:S1 -->\n`;
+function releaseWith(view: object, specBody = RELEASE_PLAN, via: "plan" | "tree" = "plan") {
+  const writes: string[] = [];
+  const why = releaseTicket(1524, { specs: [7], orchestrator: "fixture", via },  {
+    read: args => JSON.stringify(args.startsWith("issue view 1524") ? view : args.startsWith("issue view 7")
+      ? { number: 7, title: "SPEC: fixture", body: specBody, state: "OPEN" }
+      : [{ user: { login: "fixture" }, created_at: "2026-11-07", body: specRulingBody({ specNumber: 7,
+        verdict: "PASS", author: "draft", reviewer: "review", digest: specBodyDigest(specBody), evidence: "/fixture/review.json" }) }]),
+    write: (a) => (writes.push(a), ""),
+  }, "sandcastle");
+  return { why, writes };
+}
+
 test("releaseTicket：写前复核读到负责人 / blocker 不发 --add-label；干净才发", () => {
-  const run = (view: object) => {
-    const writes: string[] = [];
-    const why = releaseTicket(1524, { specs: [7], orchestrator: "fixture" }, {
-      read: args => JSON.stringify(args.startsWith("issue view 1524") ? view : args.startsWith("issue view 7")
-        ? { number: 7, title: "SPEC: fixture", body: "", state: "OPEN" }
-        : [{ user: { login: "fixture" }, created_at: "2026-11-07", body: specRulingBody({ specNumber: 7,
-          verdict: "PASS", author: "draft", reviewer: "review", digest: specBodyDigest(""), evidence: "/fixture/review.json" }) }]),
-      write: (a) => (writes.push(a), ""),
-    }, "sandcastle");
-    return { why, writes };
-  };
+  const run = (view: object) => releaseWith({ title: "[impl] S1 a", body: releasedBody, ...view });
   const busy = run({ state: "OPEN", labels: [], assignees: [{ login: "xy7365527-lang" }], blockedBy: { nodes: [] } });
   assert.match(busy.why!, /已有负责人/);
   assert.deepEqual(busy.writes, []);
@@ -694,6 +700,24 @@ test("releaseTicket：写前复核读到负责人 / blocker 不发 --add-label�
   const ok = run({ state: "OPEN", labels: [{ name: "wayfinder:impl" }], assignees: [], blockedBy: { nodes: [] } });
   assert.equal(ok.why, null);
   assert.deepEqual(ok.writes, ["issue edit 1524 --add-label sandcastle"]);
+});
+
+test("releaseTicket：不在当前获审 SPEC 计划内的旧票、手工票一律不放行", () => {
+  const clean = { state: "OPEN", labels: [{ name: "ready-for-agent" }], assignees: [], blockedBy: { nodes: [] } };
+  const stray = releaseWith({ ...clean, title: "[impl] S9 计划外旧票", body: "手工写的实施票" });
+  assert.match(stray.why!, /不在 SPEC #7 当前拆票计划内/);
+  assert.deepEqual(stray.writes, []);
+  const untitled = releaseWith({ ...clean, title: "随手开的票", body: "" });
+  assert.match(untitled.why!, /不在 SPEC #7 当前拆票计划内/);
+  const noPlan = releaseWith({ ...clean, title: "[impl] S1 a", body: "" }, "SPEC 正文里没有拆票节");
+  assert.match(noPlan.why!, /没有机器可读拆票计划/);
+  assert.deepEqual(noPlan.writes, []);
+  const ok = releaseWith({ ...clean, title: "[impl] S1 a", body: releasedBody });
+  assert.equal(ok.why, null);
+  // SPEC 子树里的票由祖先链 PASS 授权：未带拆票标记的不要求在计划内；标题对上计划项或带标记的仍须凭据。
+  assert.equal(releaseWith({ ...clean, title: "TB 汇总下的纵片", body: "" }, "SPEC 正文里没有拆票节", "tree").why, null);
+  assert.match(releaseWith({ ...clean, title: "[impl] S1 a", body: "" }, RELEASE_PLAN, "tree").why!, /拆票尚未完整发布/);
+  assert.match(releaseWith({ ...clean, title: "x", body: "<!-- wayfinder-ticket:7:S9 -->" }, RELEASE_PLAN, "tree").why!, /不再包含该拆票身份/);
 });
 
 // ── #1617：spec 起草子代理与主控同型（经 CLIProxyLocal） ─────────────────
@@ -755,7 +779,7 @@ test("releaseTicket：计划票只有标题与 ready 标签，未补完整依赖
   const body = '<!-- wayfinder-split -->\n```json\n{"tickets":[{"id":"S1","title":"a"}]}\n```';
   const approval = approvalComment(7, body);
   const writes: string[] = [];
-  const result = releaseTicket(1524, { specs: [7], orchestrator: OPTS.orchestrator }, {
+  const result = releaseTicket(1524, { specs: [7], orchestrator: OPTS.orchestrator, via: "plan" }, {
     read: args => args.includes('/comments') ? JSON.stringify([{ user: { login: approval.author }, body: approval.body, created_at: approval.createdAt }])
       : args.startsWith('issue view 7 ') ? JSON.stringify({ number: 7, title: 'SPEC: test', body, state: 'OPEN' })
       : JSON.stringify({ title: '[impl] S1 a', body: '', state: 'OPEN', labels: [{name:'ready-for-agent'}], assignees: [], blockedBy: {nodes:[]} }),

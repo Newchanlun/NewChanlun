@@ -38,7 +38,7 @@
  *   npx tsx scripts/wayfinder_engine.mts --live --once      真实执行一轮
  */
 
-import { HOLD_LABELS, MIRROR_LABEL, QUEUE_LABEL, releaseLabel, graphAdmissionFrozen, withGraphAdmission as withEngineAdmission, withTicketHold, type LocalClaim } from "../.sandcastle/deepagents-cutover.mts";
+import { HOLD_LABELS, MIRROR_LABEL, ORCHESTRATOR_LOGIN, QUEUE_LABEL, releaseLabel, graphAdmissionFrozen, withGraphAdmission as withEngineAdmission, withTicketHold, type LocalClaim } from "../.sandcastle/deepagents-cutover.mts";
 export { releaseLabel, HOLD_LABELS, withEngineAdmission };
 import { execFileSync, execSync } from "node:child_process";
 import { createHash } from "node:crypto";
@@ -52,7 +52,8 @@ import { MAIN_MODEL, SUPPORTED_MAIN_MODELS } from "../.sandcastle/main-model.mts
 // 环境变量覆盖：WAYFINDER_ORCHESTRATOR / WAYFINDER_POLL_SECONDS /
 //               WAYFINDER_SPEC_MODEL / WAYFINDER_SPEC_PROVIDER。
 // 默认 dry-run（安全默认）；真实执行须显式 --live。
-const DEFAULT_ORCHESTRATOR = "xy7365527-lang";
+// 编排账号与 decision-claimer、执行器同源：.sandcastle/queue-policy.json 的 orchestrator_login。
+const DEFAULT_ORCHESTRATOR = ORCHESTRATOR_LOGIN;
 const DEFAULT_POLL_SECONDS = 240; // 4 分钟（dispatcher 先例）
 // 起草子代理与当前主控同型（用户 2026-10-24，#1617）：Claude Code CLI 经本机
 // CLIProxyLocal 自动路由；实际模型只在 main-model.mts 配置，独立评审不靠异模型。
@@ -420,8 +421,8 @@ export function analyzeMap(map: MapState, opts: WalkOptions): Analysis {
       const plan = parseSplitPlan(s.body);
       if (plan === null) {
         // 无机器可读拆票计划：actor 拿不到计划就不建票（只报「留人工」），impl 恒空 ⟹
-        // 每轮重触发（stateless 无「已触发过」记忆），直到人工把计划补进 spec 正文或
-        // 手动拆出实装票（impl 非空后本分支不再命中）——诚实标注，非「触发一次即停」。
+        // 每轮重触发（stateless 无「已触发过」记忆），直到人工把计划补进 spec 正文。
+        // 手动拆出的 map 直挂票能让本分支不再命中，但 releaseTicket 不放行计划外的直挂票，须补计划后经拆票迁移。
         if (impl.length === 0) {
           return {
             phase: "spec 已裁定 PASS → 拆 tracer-bullet 实装票",
@@ -568,6 +569,8 @@ export interface SpecTreeFacts {
   underSpec: Set<number>;
   /** 本票批准态依赖的 SPEC 身份；执行时重新读取，不复用批准布尔值。 */
   requiredSpecs: Map<number, number[]>;
+  /** 授权来自 map 直挂 SPEC（祖先链上无 SPEC 节点）的票：放行时须是该 SPEC 拆票计划里的票。 */
+  planBound: Set<number>;
 }
 
 /**
@@ -583,6 +586,7 @@ export function buildSpecTreeFacts(maps: MapState[], orchestrator: string): Spec
   const approved = new Map<number, boolean>();
   const underSpec = new Set<number>();
   const requiredSpecs = new Map<number, number[]>();
+  const planBound = new Set<number>();
   const specOk = (s: ChildIssue) => currentSpecApproved(s, s.number, orchestrator);
   for (const m of maps) {
     if (m.state !== "OPEN") continue;
@@ -600,12 +604,14 @@ export function buildSpecTreeFacts(maps: MapState[], orchestrator: string): Spec
       const required = chain === null ? (spec ? [spec.number] : []) : ancestors;
       requiredSpecs.set(node.number, [...new Set([...(requiredSpecs.get(node.number) ?? []), ...required])]);
       if (chain !== null) underSpec.add(node.number);
+      else planBound.add(node.number);
       const next = isSpecTicket(node) ? (chain === null ? specOk(node) : chain && specOk(node)) : chain;
       for (const c of node.children ?? []) visit(c, next, isSpecTicket(node) ? [...ancestors, node.number] : ancestors);
     };
     for (const c of m.children) visit(c, null, []);
   }
-  return { approved, underSpec, requiredSpecs };
+  // 同一票若另有一条 SPEC 子树路径，仍按须在计划内处理（宁严勿宽）。
+  return { approved, underSpec, requiredSpecs, planBound };
 }
 
 /** 兼容旧签名：只要批准态。 */
@@ -888,10 +894,12 @@ export function recheckBeforeRelease(v: {
 /**
  * 释放一张合资格实装票：挂 sandcastle（add-label 幂等，写路径 ghOnce）。
  * 挂前重读单票与批准态依赖的全部 SPEC；身份来自同一遍子树遍历，批准布尔值不跨写入复用。返回 null = 已挂。
+ * via = "plan"：授权来自 map 直挂 SPEC，票必须是该 SPEC 当前拆票计划里的票并带当前发布凭据；
+ * via = "tree"：票在 SPEC 节点的子树里，授权来自祖先链上每张 SPEC 的当前 PASS。两种都核拆票身份标记。
  */
 export function releaseTicket(
   number: number,
-  authorization: { specs: number[]; orchestrator: string },
+  authorization: { specs: number[]; orchestrator: string; via: "plan" | "tree" },
   io: { read: (args: string) => string; write: (args: string) => string } = { read: gh, write: ghOnce },
   label = releaseLabel(),
 ): string | null {
@@ -904,12 +912,20 @@ export function releaseTicket(
     if (!currentSpecApproved(current, spec, authorization.orchestrator)) {
       return `SPEC #${spec} 当前无有效 PASS`;
     }
+    // map 直挂 SPEC 授权的票只认它当前获审拆票计划里的票：有标记的按身份、旧票按标题对上计划项，
+    // 且都须带当前正文的发布凭据。计划外的旧票、手工票或 SPEC 没有机器可读拆票节时不放行
+    // （旧票先经拆票迁移补身份与凭据）。SPEC 子树里的票由祖先链 PASS 授权，带拆票标记的同样核计划。
     const tagged = (v.body ?? "").includes(`<!-- wayfinder-ticket:${spec}:`);
-    const item = parseSplitPlan(current.body)?.find(t => tagged
+    const plan = parseSplitPlan(current.body);
+    const item = plan?.find(t => tagged
       ? (v.body ?? "").includes(splitIdentity(spec, t.id))
       : v.title?.startsWith(`[impl] ${t.id} `));
-    if (tagged && !item) return `SPEC #${spec} 不再包含该拆票身份`;
-    if (item && !(v.body ?? "").includes(splitReceipt(spec, current.body, item.id))) {
+    if (!item) {
+      if (authorization.via === "tree" && !tagged) continue;
+      if (tagged) return `SPEC #${spec} 不再包含该拆票身份`;
+      return plan ? `不在 SPEC #${spec} 当前拆票计划内` : `SPEC #${spec} 没有机器可读拆票计划，不放行计划外的票`;
+    }
+    if (!(v.body ?? "").includes(splitReceipt(spec, current.body, item.id))) {
       return `SPEC #${spec} 拆票尚未完整发布`;
     }
   }
@@ -1443,7 +1459,8 @@ async function runOnce(cfg: EngineConfig): Promise<void> {
       console.log(`    [dry-run] 将释放（挂 ${releaseLabel()}）：#${n}`);
     } else {
       try {
-        const why = await withEngineAdmission(() => releaseTicket(n, { specs: facts.requiredSpecs.get(n) ?? [], orchestrator: cfg.orchestrator }));
+        const why = await withEngineAdmission(() => releaseTicket(n, { specs: facts.requiredSpecs.get(n) ?? [], orchestrator: cfg.orchestrator,
+          via: facts.planBound.has(n) ? "plan" : "tree" }));
         if (why) console.log(`    · 写前复核不放行 #${n}：${why}`);
         else console.log(`    ✓ 已释放（挂 ${releaseLabel()}）：#${n}`);
       } catch (e) {

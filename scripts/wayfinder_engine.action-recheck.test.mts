@@ -26,11 +26,15 @@ function run(path: "split" | "queue", change: "body" | "block" | "closed" | "val
     const body = path === "split" ? '<!-- wayfinder-split -->\n```json\n' + JSON.stringify({ tickets: [
       { id: "S1", title: "first", summary: "reviewed A", depends_on: [], rulings: [8] },
       { id: "S2", title: "second", summary: "reviewed A", depends_on: ["S1"], rulings: [8] },
-    ] }) + '\n```' : "reviewed A";
+    ] }) + '\n```'
+      // map 直挂票只放行 map SPEC 拆票计划里的票；嵌套路径的票在 SPEC 子树里，由祖先链 PASS 授权。
+      : nested ? "reviewed A" : '<!-- wayfinder-split -->\n```json\n' + JSON.stringify({ tickets: [
+        { id: "S1", title: "existing", summary: "reviewed A", depends_on: [] }] }) + '\n```';
+    const ticketBody = `<!-- wayfinder-ticket:2:S1 -->\n<!-- wayfinder-published:2:${specBodyDigest(body)}:S1 -->\n`;
     const ruling = (spec: number, verdict: "PASS" | "BLOCK") => ({ user: { login: "fixture" },
       body: specRulingBody({ specNumber: spec, verdict, author: "draft", reviewer: "review", digest: specBodyDigest(body), evidence: "/fixture/review.json" }),
       created_at: verdict === "PASS" ? "2026-11-07T01:00:00Z" : "2026-11-07T02:00:00Z" });
-    writeFileSync(join(root, "fixture.json"), JSON.stringify({ path, change, nested, body,
+    writeFileSync(join(root, "fixture.json"), JSON.stringify({ path, change, nested, body, ticketBody,
       pass: ruling(2, "PASS"), block: ruling(2, "BLOCK"), innerPass: ruling(3, "PASS") }));
     writeFileSync(join(root, "writes"), "");
     writeFileSync(join(root, "gh"), `#!${process.execPath}
@@ -40,7 +44,7 @@ const args = process.argv.slice(2), cmd = args.join(' ');
 const read = p => fs.existsSync(root+'/'+p) ? fs.readFileSync(root+'/'+p, 'utf8') : '';
 const write = () => fs.appendFileSync(root+'/writes', JSON.stringify(args)+'\\n');
 const out = x => console.log(JSON.stringify(x));
-const ticket = {number:99,title:'[impl] existing',state:'OPEN',labels:[{name:'ready-for-agent'}],assignees:[]};
+const ticket = {number:99,title:'[impl] S1 existing',body:f.nested?'':f.ticketBody,state:'OPEN',labels:[{name:'ready-for-agent'}],assignees:[]};
 const spec = n => ({number:n,title:'SPEC: fixture',state:'OPEN',body:f.body,sub_issues_summary:{total:f.nested ? 1 : 0,completed:0}});
 const changed = read('scanned') && (f.change !== 'second-create' || read('created'));
 if(args[0]==='issue' && args[1]==='list') {
