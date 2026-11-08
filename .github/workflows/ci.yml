@@ -1267,6 +1267,17 @@ jobs:
       #   其 setUpClass 要用 --binary 传入的 S 写者二进制建库，本 job 不构建 Rust，故不进 CI，
       #   由本机以 --binary 单独实跑留收据。两个 test_tb02d_*.cjs 是需外部归档参数的离线对照探针，
       #   tb02d_{harness,runtime,verify}.py 与 tb02d_browser.cjs 是正式运行验收脚本，均不在 CI 执行。
+      # 3.14.6 不在 runner 镜像的 toolcache 里，setup-python 每次都去 GitHub Releases 下载；11-08 下载持续 504，
+      #   s-observer 两天内 6 次因此失败（run 42464517221 等）。把下载好的 toolcache 目录按镜像版本缓存，
+      #   setup-python 先查 toolcache，命中即不联网；解释器仍是同一个 3.14.6 构建（下载包按 Ubuntu 版本区分，故键含镜像）。
+      - name: Runner image identity for the CPython cache (#1414)
+        id: image
+        run: echo "id=${ImageOS:-unknown}-${ImageVersion:-unknown}" >> "$GITHUB_OUTPUT"
+      - name: Cache CPython 3.14.6 toolcache (#1414)
+        uses: actions/cache@v4
+        with:
+          path: ${{ runner.tool_cache }}/Python/3.14.6
+          key: cpython-3.14.6-${{ runner.os }}-${{ runner.arch }}-${{ steps.image.outputs.id }}
       - name: Set up CPython 3.14.6 for TB-02-D (#1414)
         uses: actions/setup-python@v5
         with:
