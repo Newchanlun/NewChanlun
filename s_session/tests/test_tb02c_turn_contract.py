@@ -18,6 +18,7 @@ ROOT = Path(__file__).resolve().parents[1]
 CLIENT = ROOT / "browser/tb01c-client.js"
 RULE_V4 = "s2-axis-quantifiers+new-bi/2+segment-second/2+segment-turn/1"
 RULE_V5 = RULE_V4 + "+second-seq-scan-budget/2"
+RULE_FIRST_OWN = RULE_V5 + "+segment-first-own/1"
 SEQ, SEG, VER = "CC-012.feature_sequence", "CC-013.segment", "CC-056.segment_version"
 PRICES = [0, 10, 4, 20, 5, 18, 7, 15, 3]
 NODE = ("const a=require(process.argv[1]);let s='';process.stdin.on('data',x=>s+=x);process.stdin.on('end',()=>{"
@@ -211,6 +212,17 @@ class TB02XContractTest(unittest.TestCase):
     def test_rule_binds_v5_schema(self):
         self.assertEqual(c.RULE_CONTRACTS[RULE_V5], ("s-new-bi/2", "s-segment/5", c.KNOWLEDGE_DOMAIN_V2))
         self.assertEqual(c.RULE_CONTRACTS[RULE_V4][1], "s-segment/4", "历史规则仍绑 /4")
+
+    # ── #1978：流首段终结按本段自己的特征序列判（§7.1 第 5／9 条）⟹ 规则加 segment-first-own/1；每代仍只发布
+    #    一个流首段候选，段合同形状不变，新规则与 #1604 规则同绑 s-segment/5。Rust 写者常量、Python 与浏览器表同一。
+    def test_rule_first_own_binds_v5_schema(self):
+        self.assertEqual(c.RULE_CONTRACTS[RULE_FIRST_OWN], ("s-new-bi/2", "s-segment/5", c.KNOWLEDGE_DOMAIN_V2))
+        rust = (ROOT.parent / "rust/src/bin/s_structure_session.rs").read_text(encoding="utf-8")
+        self.assertIn(f'"{RULE_FIRST_OWN}";', rust, "v2 写者当前规则须是 segment-first-own/1 那一代")
+        script = ("const a=require(process.argv[1]);process.stdout.write(JSON.stringify(a.ruleContract(process.argv[2])))")
+        typed = ROOT / "browser/q3-typed.js"  # tb01c-client.js 逐字捆绑它，漂移由 build_tb01c_browser.cjs --check 锁
+        out = subprocess.run(["node", "-e", script, str(typed), RULE_FIRST_OWN], capture_output=True, text=True, check=True).stdout
+        self.assertEqual(json.loads(out)[:2], ["s-new-bi/2", "s-segment/5"])
 
     def test_v4_with_budget_v1_still_accepted(self):
         self.assertEqual(version()["data"]["scan_budget"]["policy"], "second-seq-scan-budget/1")
