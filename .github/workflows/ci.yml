@@ -800,12 +800,28 @@ jobs:
 
       - uses: ./.github/actions/rust-job-setup
 
-      - name: cargo test — backtest_bin feature（econ_oddeven_diagnosis.rs 仅在此 feature 下编译）
+      - name: cargo test — backtest_bin feature 新增的库测试
         # 2026-08-16 磁盘实撞（#993 收口轮）：三轮 runner 爆盘（No space left on device）——
         # --all-targets 在 feature 下额外编 56 个探针 bin 的 test 目标（各链 nautilus 套件，
-        # 本地实测 debug 全 target 55G ⟹ 14G 盘必爆）。改 --lib：backtest 模块测试（含
-        # econ_oddeven_diagnosis）全在 lib 内；tests/ 与 bins 已由 default 步覆盖——零覆盖损失。
-        run: ../.github/scripts/run-cargo-with-telemetry.sh cargo test --lib --features backtest_bin --jobs "${CI_CARGO_JOBS:-1}"
+        # 本地实测 debug 全 target 55G ⟹ 14G 盘必爆）。改 --lib；tests/ 与 bins 由 default 步覆盖。
+        # #1875：不带特性的 3151 条库测试 rust-test-default 已跑过；开 backtest_bin 后新增的 11 条全在
+        #   theta_v0::nautilus 下（Belay 两份 --list 对比，0 条消失）。backtest-feature-scope.py 核对
+        #   nautilus/ 之外的特性门控只有不改变测试构建的两种写法时，只跑 theta_v0::nautilus；否则全跑。
+        #   只跑的那条路径上，过滤后为 0 条即失败。
+        run: |
+          set -euo pipefail
+          tel=../.github/scripts/run-cargo-with-telemetry.sh
+          args=(--locked --lib --features backtest_bin --jobs "${CI_CARGO_JOBS:-1}")
+          if ! python3 ../.github/scripts/backtest-feature-scope.py; then
+            "$tel" cargo test "${args[@]}"
+            exit 0
+          fi
+          "$tel" cargo test "${args[@]}" --no-run
+          cargo test "${args[@]}" -- --list theta_v0::nautilus:: > "$RUNNER_TEMP/backtest-list"
+          n=$(grep -c ': test$' "$RUNNER_TEMP/backtest-list" || true)
+          echo "backtest_bin nautilus tests: $n"
+          [ "$n" -gt 0 ] || { echo "::error title=Empty backtest_bin scope::no theta_v0::nautilus tests listed" >&2; exit 1; }
+          "$tel" cargo test "${args[@]}" -- theta_v0::nautilus::
 
   # #1488：独立运行两种构建的序列与真实 memo 锁，不等待 rust-check 的完整回归。
   # 依赖预取单列为联网步骤；后续 --offline 只约束测试阶段，不代表全程离线。
