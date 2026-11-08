@@ -368,13 +368,17 @@ function tryParsePlan(text: string): ImplTicketPlan[] | null {
 /**
  * 从 spec 正文解析机器可读拆票计划（由 spec 起草子代理在
  * 「## 实施票拆分（机器可读）」节内用 wayfinder-split 标记 + json 围栏产出）。
- * 有标记取标记后的第一个围栏；无标记才兜底扫全文 json 围栏。解析不出或含畸形项返回 null（不建票）。
+ * 有标记只取标记后的第一个围栏，标记后没有完整围栏也返回 null；无标记才兜底扫全文 json 围栏。解析不出或含畸形项返回 null（不建票）。
  */
 export function parseSplitPlan(specBody: string): ImplTicketPlan[] | null {
   // 有标记就只认标记后的第一个围栏：它畸形时不退回别的围栏（可能是示例），整份计划按无效处理。
+  // 有标记但其后没有完整围栏：同样按无效处理，不退回扫全文（标记前的围栏可能是示例）。
   const marker = specBody.indexOf("wayfinder-split");
-  const marked = marker >= 0 ? extractJsonFences(specBody.slice(marker))[0] : undefined;
-  const candidates = marked !== undefined ? [marked] : extractJsonFences(specBody);
+  if (marker >= 0) {
+    const marked = extractJsonFences(specBody.slice(marker))[0];
+    return marked === undefined ? null : tryParsePlan(marked);
+  }
+  const candidates = extractJsonFences(specBody);
   for (const text of candidates) {
     const plan = tryParsePlan(text);
     if (plan) return plan;
@@ -1329,6 +1333,15 @@ async function actSplitImpl(a: Extract<Action, { kind: "split_impl_tickets" }>, 
         body = bodyFor(fresh.body);
         // 回收旧版本留下的提前发布标签；票型标签 wayfinder:impl 保留（未发布票缺发布凭据，releaseTicket 不放行）。
         const exposed = names.filter(l => ["ready-for-agent", "sandcastle", QUEUE_LABEL].includes(l));
+        // 票级动作锁只挡 DeepAgents 执行器；旧 Sandcastle 消费者（main.mts、main-swarm、claim-loop、health-monitor）
+        // 不认这把锁，只在旧入口冻结（drain 处于 draining）时被挡住。本动作运行在引擎准入内：旧入口未冻结时走的是
+        // 旧准入（共享锁、drain open），冻结后走新队列准入（共享锁、drain draining 且切流记录有效），持锁期间状态不会翻转。
+        // 所以只有新队列准入（releaseLabel() === QUEUE_LABEL）下旧消费者确定领不到票；旧入口未冻结时，
+        // 需要改票面的迁移一律不做，免得旧消费者凭先前读到的票面在复核之后领走正在改写的票。不改任何东西的恢复照常。
+        const writes = exposed.length > 0 || (fresh.body ?? "") !== body;
+        if (writes && releaseLabel() !== QUEUE_LABEL) {
+          throw new Error(`#${number} 迁移要改票面，但旧 Sandcastle 入口未冻结（未切到 ${QUEUE_LABEL}）；冻结旧入口并完成切流后重跑`);
+        }
         if (exposed.length) ghOnce(`issue edit ${number} --remove-label ${shellQuote(exposed.join(","))}`);
         names = names.filter(l => !exposed.includes(l));
         if ((fresh.body ?? "") !== body) ghOnce(`issue edit ${number} --body ${shellQuote(body)}`);
