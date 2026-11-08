@@ -841,31 +841,44 @@ mod lock_release_tests {
         std::fs::create_dir_all(&dir).unwrap();
         let db = dir.join("state.sqlite");
         let stop = Arc::new(AtomicBool::new(false));
+        let spawned = Arc::new(std::sync::atomic::AtomicU32::new(0));
         let spawner = {
             let stop = stop.clone();
+            let spawned = spawned.clone();
             std::thread::spawn(move || {
-                let mut n = 0u32;
                 while !stop.load(Ordering::Relaxed) {
-                    let _ = std::process::Command::new("/bin/true").status();
-                    n += 1;
+                    // 只统计真正启动成功的子进程，避免 `true` 不可执行时退化成无并发（走 PATH：Linux 是 /bin/true，macOS 只有 /usr/bin/true）（#2007 独审 Nit）。
+                    if std::process::Command::new("true").status().is_ok() {
+                        spawned.fetch_add(1, Ordering::Relaxed);
+                    }
                 }
-                n
             })
         };
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
         let mut failures = 0u32;
-        for _ in 0..2000 {
+        let mut rounds = 0u32;
+        // 至少 2000 轮且期间真正 spawn 过 200 个子进程才停：只数轮次时快路径可能根本撞不上 fork 窗口。
+        while (rounds < 2000 || spawned.load(Ordering::Relaxed) < 200)
+            && std::time::Instant::now() < deadline
+        {
             match Lock::acquire(&db, ".writer.lock") {
                 Ok(lock) => drop(lock),
                 Err(_) => failures += 1,
             }
+            rounds += 1;
         }
         stop.store(true, Ordering::Relaxed);
-        let spawned = spawner.join().unwrap();
+        spawner.join().unwrap();
+        let spawned = spawned.load(Ordering::Relaxed);
         let _ = std::fs::remove_dir_all(&dir);
-        assert!(spawned > 0, "spawner thread never ran");
+        assert!(
+            rounds >= 2000 && spawned >= 200,
+            "time limit hit: {rounds} rounds, {spawned} spawns"
+        );
+        assert!(spawned > 0, "no child process was actually spawned");
         assert_eq!(
             failures, 0,
-            "reacquire failed {failures}/2000 times with {spawned} concurrent spawns"
+            "reacquire failed {failures}/{rounds} times with {spawned} concurrent spawns"
         );
     }
 }
