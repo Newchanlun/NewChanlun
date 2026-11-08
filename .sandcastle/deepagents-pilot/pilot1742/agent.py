@@ -281,7 +281,7 @@ def build_tools(run: PilotRun) -> list:
     def publish_candidate() -> str:
         """当前候选有同 head 异家族独审 PASS 时，由宿主用 App 身份把这个冻结 SHA 精确发布到本票专属分支，开 draft PR，
         写 deepagents/review 状态与票面交付标记，停在 awaiting_merge。远端出现任何其他 head 时返回 stale，不覆盖。
-        重复调用会先读回已有结果，不会重复推送、开 PR 或发评论。合入 main 由人决定。"""
+        重复调用会先读回已有结果，不会重复推送、开 PR 或发评论。合入 main 由分支保护把关：deepagents/review 与 ci-ok 两项必需检查通过后才能合入，本工具不合入。"""
         try:
             result = run.publish_candidate()
             while result.get("decision") == "awaiting_approval":
@@ -352,7 +352,7 @@ def _v2_ending(run: PilotRun) -> str:
     return (f"- 同 head 异家族独审 PASS 后调用 publish_candidate：宿主用 GitHub App 身份把该冻结 SHA 发布到 `{unit.branch}`、"
             "开 draft PR、写状态与票面交付标记，awaiting_merge 是合法终点。返回 stale 或 halted 时停下汇报，不要绕过。\n"
             "- 你没有其他 push、PR、评论或合 main 的途径；playbook 的 Opening a PR 步骤由 publish_candidate 完成，"
-            "合入 main 写 skip（由人决定）。不能改写集外文件。\n"
+            "合入 main 写 skip（由分支保护的 deepagents/review 与 ci-ok 必需检查把关，工蜂与执行器只开 PR、不合入）。不能改写集外文件。\n"
             f"- 本 run 属于 #{unit.ticket}，登记的 playbook 为 {unit.playbook}。\n")
 
 
