@@ -2,9 +2,12 @@
 //! （起点之前的笔是未分段前缀）。S 写者按 `[start_stroke, observed_through]` 投影 CC-012 `stroke_refs`、
 //! 按 `raw_elements` 投影 CC-055 `member_of`；事实越界即发布自相矛盾的两条事实（S86 第 75 代被来源核拒收）。
 use super::super::config::ThetaConfig;
-use super::super::types::Bar;
-use super::second_fold::SecondFoldStore;
-use super::segment::{SegmentCandidateFact, SegmentFacts};
+use super::super::types::{Bar, Direction, Stroke};
+use super::second_fold::{SecondCandidateId, SecondFoldStore};
+use super::segment::{
+    divide_segments_with_facts, divide_segments_with_facts_store, SegmentCandidateFact,
+    SegmentFacts,
+};
 
 /// `.chanlun/review-results/1488-acceptance/s86/bars.s86.json`（开、高、低、收）。前 75 根只有三笔：
 /// 向下 2248→1551、向上 1551→2990、向下 2990→792，流首段起点从种子（第 0 笔）挪到第 2 笔。
@@ -331,4 +334,86 @@ fn rescan_keeps_segments_and_confirmed_terminations() {
         "语料须覆盖两类：已确认 {confirmed_moved}、未确认 {pending_moved}"
     );
     println!("tb1978 起点越过种子的流首段：已确认 {confirmed_moved}，未确认 {pending_moved}");
+}
+
+/// 按端点价连成笔，方向由价差定；bar 下标只占位。
+fn chain(points: &[i64]) -> Vec<Stroke> {
+    points
+        .windows(2)
+        .enumerate()
+        .map(|(i, p)| Stroke {
+            direction: if p[1] > p[0] {
+                Direction::Up
+            } else {
+                Direction::Down
+            },
+            start_index: 4 * i,
+            end_index: 4 * i + 4,
+            start_price: p[0],
+            end_price: p[1],
+        })
+        .collect()
+}
+
+/// PR #1987 正式审查 a2（opus）反例一，前缀 8。种子第 0 笔；主扫描里第 1 笔 [50,400] 先后并进第 3、5 笔，
+/// 标准序列只剩两个元素，没有折叠。流首段起点 2 越过种子，从起点重扫得 [80,120]、[150,300]、[130,250]，
+/// b 处有缺口且 c 没有封闭，折出第二种候选 (UP, 5, 300)。S 写者拿发布的身份到返回的游标簿查游标
+/// （`tb02c::build`），查不到即 IdentityConflict；不在簿里的游标也进不了 checkpoint。前缀 9 的第 8 笔
+/// 新高 350 作废该候选，作废态同样要能在簿里查到。
+#[test]
+fn published_second_candidate_cursor_is_in_the_returned_store() {
+    let config = ThetaConfig::for_s_structure_writer().unwrap();
+    let strokes = chain(&[100, 400, 50, 120, 80, 300, 150, 250, 130, 350]);
+    for n in 3..=strokes.len() {
+        let (_, _, facts, store) = divide_segments_with_facts_store(
+            &strokes[..n],
+            &config.parse,
+            SecondFoldStore::from_parse_config(&config.parse),
+        );
+        for c in &facts.candidates {
+            let Some(second) = &c.second else { continue };
+            let id = SecondCandidateId {
+                seg_dir: strokes[c.start_stroke].direction,
+                b_stroke: second.from_stroke - 1,
+                candidate_extreme: second.candidate_extreme,
+            };
+            assert!(
+                store.cursor(&id).is_some(),
+                "前缀 {n}：候选 start={} 发布的第二种候选不在返回的游标簿：{id:?}",
+                c.start_stroke
+            );
+        }
+    }
+}
+
+/// 反例二（同一审查）。主扫描把起点之前的第 1 笔 [50,200] 与第 3 笔并成 [80,200]，窗口
+/// ([80,200],[150,300],[130,250]) 无缺口，按第一种情况在第 7 笔确认段 [2,4]。从起点重扫 a=[80,120]
+/// 有缺口、c 未封闭，走第二种情况：前缀 8 停在 OPEN，前缀 9 第 8 笔新高 350 作废候选，都复现不出终结，
+/// 于是退回种子事实（含第 1 笔），S 写者守卫 `candidate_members_inside` 拒写；段已确认、不随前缀变，
+/// 此后每一代都拒写。本锁按 §7.1 第 5 条现行口径断言候选成员不早于本段起点；若裁定改判第 5 条，
+/// 本锁随写者守卫一起改。
+#[test]
+fn confirmed_first_segment_publishes_only_its_own_members() {
+    let config = ThetaConfig::for_s_structure_writer().unwrap();
+    let strokes = chain(&[100, 200, 50, 120, 80, 300, 150, 250, 130, 350]);
+    for n in 3..=strokes.len() {
+        let prefix = &strokes[..n];
+        let (_, _, plain) = divide_segments_with_facts(prefix, &config.parse);
+        let (_, _, stored, _) = divide_segments_with_facts_store(
+            prefix,
+            &config.parse,
+            SecondFoldStore::from_parse_config(&config.parse),
+        );
+        for facts in [plain, stored] {
+            for c in &facts.candidates {
+                assert_eq!(
+                    outside_own_range(c),
+                    Vec::<usize>::new(),
+                    "前缀 {n}：候选 start={} end={:?} 的特征元素越出本段",
+                    c.start_stroke,
+                    c.end_stroke
+                );
+            }
+        }
+    }
 }
