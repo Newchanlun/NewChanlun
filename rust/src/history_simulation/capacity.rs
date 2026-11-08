@@ -296,24 +296,27 @@ pub(super) fn allocate(
     Ok((allocated, next, transitions, evidence))
 }
 
-pub(super) fn close_completed(state: &mut State, batch: &Batch, transitions: &mut Vec<Value>) {
-    let completed: Vec<_> = state
+pub(super) fn close_unfillable(state: &mut State, batch: &Batch, transitions: &mut Vec<Value>) {
+    let closing: Vec<_> = state
         .capacity_state
         .active
         .iter()
-        .filter(|(_, id)| {
-            state.capacity_state.epochs[*id]
+        .filter_map(|(key, id)| {
+            let still_active: Vec<_> = state.capacity_state.epochs[id]
                 .manifest
                 .participants
                 .iter()
-                .all(|p| state.families[&p.family_id].filled == p.authorized_limit)
+                .filter(|p| state.families[&p.family_id].filled < p.authorized_limit)
+                .map(|p| state.families[&p.family_id].active)
+                .collect();
+            (!still_active.contains(&true))
+                .then(|| (key.clone(), id.clone(), still_active.is_empty()))
         })
-        .map(|(k, id)| (k.clone(), id.clone()))
         .collect();
-    for (key, id) in completed {
+    for (key, id, completion) in closing {
         let e = state.capacity_state.epochs.get_mut(&id).unwrap();
         e.closed_at = Some(batch.bar.index);
-        transitions.push(json!({"previous":e,"successor":null,"completion":true,"effective_bar":batch.bar,"known_frontier_cut":batch.known_frontier_cut,"complete_known_commands":state.families,"originals_frontier":batch.request_id}));
+        transitions.push(json!({"previous":e,"successor":null,"completion":completion,"effective_bar":batch.bar,"known_frontier_cut":batch.known_frontier_cut,"complete_known_commands":state.families,"originals_frontier":batch.request_id}));
         state.capacity_state.active.remove(&key);
     }
 }

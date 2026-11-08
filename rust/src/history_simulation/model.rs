@@ -428,7 +428,6 @@ pub fn advance(model: &Model, state: &State, batch: &Batch) -> Result<ResultBatc
             .checked_add(quantity)
             .ok_or("InvalidDomain：累计成交溢出")?;
     }
-    super::capacity::close_completed(&mut next, batch, &mut capacity_transitions);
     let mut unfilled_market = BTreeMap::new();
     for (family, working) in &mut next.families {
         if matches!(working.order.kind, OrderKind::Market { exec_index } if exec_index == b.index) {
@@ -439,6 +438,7 @@ pub fn advance(model: &Model, state: &State, batch: &Batch) -> Result<ResultBatc
             working.active = false;
         }
     }
+    super::capacity::close_unfillable(&mut next, batch, &mut capacity_transitions);
     let mut close_changes = batch.close_changes.clone();
     close_changes.sort_by(|a, b| change_id(a).cmp(change_id(b)));
     let mut changed_families = BTreeSet::new();

@@ -351,7 +351,12 @@ fn partial_and_zero_fill_market_epochs_close_in_their_exec_batch() {
             (&t["effective_bar"]["index"], &t["originals_frontier"]),
             (&serde_json::json!(1), &serde_json::json!("b1"))
         );
+        assert_eq!(t["completion"], false);
     }
+    assert_eq!(
+        closing(&r.capacity_transitions, "capacity:1:buy:limit_interval")["completion"],
+        true
+    );
     assert_eq!(r.next_state.capacity_state.active, Default::default());
     let mut b = batch(2, vec![]);
     b.capacity = Capacity::Scenario {
