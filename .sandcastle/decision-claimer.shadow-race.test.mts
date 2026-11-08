@@ -54,3 +54,29 @@ test('残留锁并发回收：两个回收者都判定旧 pid 已不存在时，
     assert.equal(fs.existsSync(`${lock}.takeover`),false,'接管门用完即清');
   } finally {fs.readFileSync=original;syncBuiltinESMExports();fs.rmSync(root,{recursive:true,force:true});}
 });
+
+test('残留锁回收：持门后锁已被别人释放并由第三方新建，不得删掉第三方的锁', () => {
+  const root=fs.mkdtempSync(join(tmpdir(),'stale-lock-gone-')), lock=join(root,'.9.lock');
+  const dead=String(execFileSync(process.execPath,['-e','process.stdout.write(String(process.pid))']));
+  fs.writeFileSync(lock,dead);
+  const original=fs.readFileSync, other=String(process.ppid);
+  let reads=0;
+  fs.readFileSync=((path: fs.PathOrFileDescriptor, ...rest: unknown[]) => {
+    if(String(path)!==lock) return (original as (...a: unknown[]) => unknown)(path, ...rest);
+    reads++;
+    try { return (original as (...a: unknown[]) => unknown)(path, ...rest); }
+    finally {
+      // 第一次读到残留 pid 后：另一个回收者接管、处理完并释放（锁文件消失）。
+      if(reads===1) fs.rmSync(lock);
+      // 持门后重读发现锁已不在的那一刻：第三方走快速路径以 wx 新建了自己的锁。
+      if(reads===2) fs.writeFileSync(lock, other, {flag:'wx'});
+    }
+  }) as typeof fs.readFileSync;
+  syncBuiltinESMExports();
+  try {
+    assert.equal(takePidLock(lock),false,'第三方已持锁，本进程不得再拿到');
+    assert.ok(reads>=2,'交错钩子必须真正触发');
+    assert.equal(original(lock,'utf8'),other,'第三方的锁原样保留');
+    assert.equal(fs.existsSync(`${lock}.takeover`),false);
+  } finally {fs.readFileSync=original;syncBuiltinESMExports();fs.rmSync(root,{recursive:true,force:true});}
+});
