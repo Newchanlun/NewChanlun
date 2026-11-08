@@ -17,6 +17,12 @@ export interface ReviewLaunch {
   checkout: string; prompt: string; mode: "review";
 }
 export const REVIEW_IMAGE = "sandcastle:newchanlun";
+/** #1968：kimi 在 codex exec --output-schema 下把开场白当成终答、零工具调用就结束（PR #1966 实测 3/3）；
+ *  不带 schema、改由提示词约束 JSON 时 3/3 正常读代码。表内模型不传 schema，提示词末尾追加下面这句。 */
+export const PROMPT_JSON_MODELS: ReadonlySet<string> = new Set(["kimi-k3.1-pro"]);
+export const PROMPT_JSON_INSTRUCTION = "\n最终消息只输出一个 JSON 对象，不加 Markdown 代码围栏、不加其它文字。"
+  + "键恰为 status、summary、findings、validation：status 取 completed、blocked、failed 之一；"
+  + "summary 为字符串；findings、validation 为字符串数组。";
 const inside = (root: string, path: string) => path === root || path.startsWith(root + sep);
 
 export function readLaunch(folder: string): ReviewLaunch {
@@ -162,9 +168,13 @@ export async function runExternalReview(folder: string, deps: WorkerDependencies
     writeFileSync(schema, JSON.stringify(OUTPUT_SCHEMA), { mode: 0o600 });
     await handle.copyFileIn(schema, "/tmp/external-review-schema.json");
     if (cancelled) throw new Error("监督已取消");
-    const built = provider.buildPrintCommand({ prompt: launch.prompt, dangerouslySkipPermissions: false });
-    if (built.stdin !== launch.prompt || !built.command.includes("--disable multi_agent")) throw new Error("Codex 命令协议已漂移");
-    const command = built.command + " --skip-git-repo-check --output-schema /tmp/external-review-schema.json -c 'features.apps=false' -c 'features.plugins=false'"
+    const promptJson = PROMPT_JSON_MODELS.has(launch.model);
+    record.output_contract = promptJson ? "prompt" : "schema";
+    const prompt = promptJson ? launch.prompt + PROMPT_JSON_INSTRUCTION : launch.prompt;
+    const built = provider.buildPrintCommand({ prompt, dangerouslySkipPermissions: false });
+    if (built.stdin !== prompt || !built.command.includes("--disable multi_agent")) throw new Error("Codex 命令协议已漂移");
+    const command = built.command + " --skip-git-repo-check"
+      + (promptJson ? "" : " --output-schema /tmp/external-review-schema.json") + " -c 'features.apps=false' -c 'features.plugins=false'"
       + " -c 'web_search=\"disabled\"' -c 'shell_environment_policy.inherit=\"core\"' -";
     const transcript = new CodexTranscript(provider);
     const events = openSync(join(folder, "events.jsonl"), "wx", 0o600);
@@ -217,7 +227,19 @@ export async function runExternalReview(folder: string, deps: WorkerDependencies
   if (!ownsLock) throw new Error("独审监督启动失败，终态已保存");
 }
 
+/** 沿用旧 PASS 前的部署准入：与正式派发同一组检查（controller 已提交、ready() 核当前镜像的 accepted 记录并做容器隔离合同观测），不建审阅容器、不调模型。 */
+export function checkReviewAdmission(deps: Pick<WorkerDependencies, "identity" | "ready"> = dependencies):
+  { controller_code_head: string; image_id: string } {
+  const identity = deps.identity();
+  if (identity.dirty) throw new Error("controller 代码未提交");
+  return { controller_code_head: identity.head, image_id: deps.ready(REVIEW_IMAGE) };
+}
+
 async function main(): Promise<void> {
+  if (process.argv.length === 3 && process.argv[2] === "--admission-only") {
+    process.stdout.write(JSON.stringify(checkReviewAdmission()) + "\n");
+    return;
+  }
   if (process.argv.length !== 4 || process.argv[2] !== "--output-dir") throw new Error("只接受宿主 --output-dir");
   const folder = resolve(process.argv[3]!);
   if (folder !== realpathSync(folder)) throw new Error("回执目录含符号链接");
