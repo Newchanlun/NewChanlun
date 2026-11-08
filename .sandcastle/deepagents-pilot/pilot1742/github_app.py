@@ -8,9 +8,11 @@ import ssl
 import stat
 import sys
 import time
-from dataclasses import dataclass
+from collections.abc import Mapping
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
+from types import MappingProxyType
 from typing import Any
 
 import certifi
@@ -65,6 +67,10 @@ class AppIdentity:
     repository: str
     app_slug: str
     private_key_path: Path
+    # 该 App 安装应有的权限全集，核验时与 GitHub 读回值精确比较；缺省为执行器 App 的权限。
+    # 构造时复制成只读映射，实例创建后不能原地改写。
+    installation_permissions: Mapping[str, str] = field(
+        default_factory=lambda: MappingProxyType(dict(INSTALLATION_PERMISSIONS)), hash=False)
 
     def __post_init__(self) -> None:
         if any(type(value) is not int or value <= 0 for value in
@@ -76,6 +82,12 @@ class AppIdentity:
             raise IdentityError("App slug 格式不正确")
         if not self.private_key_path.is_absolute():
             raise IdentityError("私钥必须通过绝对文件路径明确指定")
+        permissions = self.installation_permissions
+        if (not isinstance(permissions, Mapping) or not permissions
+                or any(type(name) is not str or not re.fullmatch(r"[a-z_]+", name)
+                       or level not in ("read", "write") for name, level in permissions.items())):
+            raise IdentityError("安装权限必须是非空的 权限名→read/write 映射")
+        object.__setattr__(self, "installation_permissions", MappingProxyType(dict(permissions)))
 
 
 def _read_private_key(path: Path) -> bytes:
@@ -100,7 +112,7 @@ class GitHubAppClient:
         self.identity = identity
         self._permissions = dict(permissions or READ_PERMISSIONS)
         grantable = {"read": ("read", "write"), "write": ("write",)}
-        if any(INSTALLATION_PERMISSIONS.get(name) not in grantable.get(level, ())
+        if any(identity.installation_permissions.get(name) not in grantable.get(level, ())
                for name, level in self._permissions.items()):
             raise IdentityError("请求的 token 权限超出 App 安装权限")
         tls = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
@@ -175,7 +187,7 @@ class GitHubAppClient:
             "account.login": isinstance(account, dict) and account.get("login") == identity.repository.split("/")[0],
             "repository_selection": installation.get("repository_selection") == "selected",
             "suspended_at": installation.get("suspended_at") is None,
-            "permissions": installation.get("permissions") == INSTALLATION_PERMISSIONS,
+            "permissions": installation.get("permissions") == identity.installation_permissions,
         })
         grant = self._request(
             "POST", f"/app/installations/{identity.installation_id}/access_tokens", signed,
