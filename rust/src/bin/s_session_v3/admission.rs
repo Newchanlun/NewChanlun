@@ -56,6 +56,14 @@ impl Lock {
         Ok(())
     }
 }
+// #1895：flock 挂在打开文件描述上。同进程其他线程 spawn 子进程时，子进程在 exec 之前复制着这个描述
+//   （O_CLOEXEC 到 exec 才关），只 close 的话锁会延续到子进程 exec，紧接着重新获取就报 StaleWriter。
+//   drop 时先显式解锁，释放时刻与 drop 一致，不再取决于别的线程正在 spawn 什么。
+impl Drop for Lock {
+    fn drop(&mut self) {
+        let _ = self.file.unlock();
+    }
+}
 struct Inner {
     lease: Arc<BudgetLease>,
     source: MeasuredDomain,
@@ -809,5 +817,68 @@ mod mixed_writer_tests {
             let output: serde_json::Value = serde_json::from_slice(&output).unwrap();
             assert_eq!(output["code"], "MixedSourceChanged");
         });
+    }
+}
+
+#[cfg(test)]
+mod lock_release_tests {
+    use super::Lock;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::Arc;
+
+    // #1895：另一线程持续 spawn 子进程时，同一把锁 drop 后立即重新获取必须成功。
+    //   修复前在 Linux 上约一半的重新获取失败（evals/stalewriter，Belay 20078/40000）。
+    #[test]
+    fn lock_reacquire_after_drop_survives_concurrent_spawn() {
+        let dir = std::env::temp_dir().join(format!(
+            "s-lock-release-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let db = dir.join("state.sqlite");
+        let stop = Arc::new(AtomicBool::new(false));
+        let spawned = Arc::new(std::sync::atomic::AtomicU32::new(0));
+        let spawner = {
+            let stop = stop.clone();
+            let spawned = spawned.clone();
+            std::thread::spawn(move || {
+                while !stop.load(Ordering::Relaxed) {
+                    // 只统计真正启动成功的子进程，避免 `true` 不可执行时退化成无并发（走 PATH：Linux 是 /bin/true，macOS 只有 /usr/bin/true）（#2007 独审 Nit）。
+                    if std::process::Command::new("true").status().is_ok() {
+                        spawned.fetch_add(1, Ordering::Relaxed);
+                    }
+                }
+            })
+        };
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+        let mut failures = 0u32;
+        let mut rounds = 0u32;
+        // 至少 2000 轮且期间真正 spawn 过 200 个子进程才停：只数轮次时快路径可能根本撞不上 fork 窗口。
+        while (rounds < 2000 || spawned.load(Ordering::Relaxed) < 200)
+            && std::time::Instant::now() < deadline
+        {
+            match Lock::acquire(&db, ".writer.lock") {
+                Ok(lock) => drop(lock),
+                Err(_) => failures += 1,
+            }
+            rounds += 1;
+        }
+        stop.store(true, Ordering::Relaxed);
+        spawner.join().unwrap();
+        let spawned = spawned.load(Ordering::Relaxed);
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(
+            rounds >= 2000 && spawned >= 200,
+            "time limit hit: {rounds} rounds, {spawned} spawns"
+        );
+        assert!(spawned > 0, "no child process was actually spawned");
+        assert_eq!(
+            failures, 0,
+            "reacquire failed {failures}/{rounds} times with {spawned} concurrent spawns"
+        );
     }
 }

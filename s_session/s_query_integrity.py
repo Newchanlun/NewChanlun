@@ -412,6 +412,8 @@ def _published_axes(rule_revision):
         "s2-axis-quantifiers+new-bi/2+segment-second/2+segment-turn/1": tb02.AXES,
         # #1604：预算 token 进规则（段合同 s-segment/5），不新增轴。
         "s2-axis-quantifiers+new-bi/2+segment-second/2+segment-turn/1+second-seq-scan-budget/2": tb02.AXES,
+        # #1978：流首段规则 token 不新增轴，段合同仍 s-segment/5。
+        "s2-axis-quantifiers+new-bi/2+segment-second/2+segment-turn/1+second-seq-scan-budget/2+segment-first-own/1": tb02.AXES,
     }
     if rule_revision not in known:
         raise ValueError("cut规则修订未声明")
