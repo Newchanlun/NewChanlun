@@ -863,6 +863,9 @@ mod lock_release_tests {
         let spawned = spawner.join().unwrap();
         let _ = std::fs::remove_dir_all(&dir);
         assert!(spawned > 0, "spawner thread never ran");
-        assert_eq!(failures, 0, "reacquire failed {failures}/2000 times with {spawned} concurrent spawns");
+        assert_eq!(
+            failures, 0,
+            "reacquire failed {failures}/2000 times with {spawned} concurrent spawns"
+        );
     }
 }
