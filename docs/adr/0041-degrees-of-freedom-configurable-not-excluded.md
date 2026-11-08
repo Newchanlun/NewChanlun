@@ -68,7 +68,7 @@ ADR 0029 的 cap、0034 的资金/容量来源、0035 的交易成本阈值与 0
 
 - 流程：`.sandcastle/docs/graph-engineering.md`（起草与 R2）、`.sandcastle/decision-claimer.mts`（分级 `user_gate` 与 `held: user_authorization`、起草提示第 11 条、审查 R2/R8，三处同用 `USER_GATE_SCOPE`）。原呈现步 `.agents/skills/graph-approve/SKILL.md` 已随 #1909 删除。
 - 正本：ADR 0029 裁定四、0034 裁定一/四、0035 裁定一/四、0036 裁定九；`CONTEXT.md`「量档 policy」「成本停止 policy」「共同资金上限」「可调字段」。
-- 控制面：`scripts/wayfinder_engine.mts:256`（`isSpecApproved`）、`:1210`（`actSplitImpl`）、`:894`（`releaseTicket`）；普通 SPEC 用同一裁定合同，拆票与挂队列前重读当前版本。
+- 控制面：`scripts/wayfinder_engine.mts:257`（`isSpecApproved`）、`:1237`（`actSplitImpl`）、`:892`（`releaseTicket`）；普通 SPEC 用同一裁定合同，拆票与挂队列前重读当前版本。
 - 执行面依赖：#1742 Queued owner 的独立 PR 负责 `deepagents-pilot/pilot1742/executor.py` 与 `approval.py` 的普通 SPEC 准入迁移。PR #1915 不改这两处的 SPEC 准入（它只改执行器释放与队列的已合入不重派）；宿主从 `origin/main` 自动更新，合入即部署，依赖 PR 合入前队列路径的 SPEC 准入仍是原签署门。该依赖通过集成验收前，不能声称首次队列执行已贯通。
 - 交易政策来源类型与资金消费代码本次不改；`UserSigned` 仍只记录用户实际授权，不新增可冒充用户签名的分支。
 - 既有裁定与代码：候选清单见 `.chanlun/review-results/dof-audit-20261020/candidates.md`，为 #1586 初稿输入。
