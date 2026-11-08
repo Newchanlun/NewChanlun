@@ -35,7 +35,14 @@ from pydantic import BaseModel, ConfigDict, SecretStr, ValidationError, field_va
 from .approval import spec_section
 from .boat_execution import ExecutionUnknown
 from .cloud_package import MANUALS_DIR, PROJECT_TARGET, PSTACK_TARGET, RULES_TARGET
-from .domain import LEGACY_CAVEAT, MERGE_GATE, Awaiting, CommitReceipt, Terminal, WorkerReceipt
+from .domain import (
+    LEGACY_CAVEAT,
+    MERGE_GATE,
+    Awaiting,
+    CommitReceipt,
+    Terminal,
+    WorkerReceipt,
+)
 from .run import PSTACK_MODELS, SKILLS_ROOT, Halted, PilotRun, ToolRefusal, gate_json
 
 TOOL_ERRORS: tuple[type[Exception], ...] = (ToolRefusal, Halted, ExecutionUnknown)
