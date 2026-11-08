@@ -211,7 +211,7 @@ Clamp 与迁移后 `data_version` 连续性复核还会以 `HistoricalAuditStale
 > 下文记录的是解除前的实测状态。replay `P0` 三项成本仍 `AwaitingPolicy{cost_inputs}`，
 > 原八项生产验收与五项 TestOnly cfg 的去除仍归 #1769。
 > #1774 v3 现状（2026-11-08，ADR 0057 第九、十节及其裁定依据节）：用户签署 replay `P0` 的 `entry_delay_bars=1`、`tax_bps=0`
-> （模型假设，仅用于历史回放），只剩 `slippage_bps` 未签，P0 仍拒启于 `AwaitingPolicy{cost_inputs}`。下文「解除条件」中的
+> （模型假设，仅用于历史回放），只剩 `slippage_bps` 未落（slippage_bps=2 已由用户 2026-11-08 签署，在 v4（#1947）落地；v3 记录中仍为 AwaitingPolicy），v3 下 P0 仍拒启于 `AwaitingPolicy{cost_inputs}`。下文「解除条件」中的
 > `tax_bps`、`entry_delay_bars` 两项对 replay P0 已满足。
 
 非 test 构建下 S 写者（v3 `serve`/`advance`、v1 `advance`）启动即因
