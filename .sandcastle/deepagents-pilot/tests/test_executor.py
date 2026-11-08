@@ -756,7 +756,8 @@ def test_new_generation_refuses_previous_boat_worker(v2, monkeypatch, remote_sta
 
 
 @pytest.mark.parametrize('field,value', [('generation', 2), ('run_id', 'other-run'), ('run_dir', '/other'),
-                                         ('ticket', 99), ('repo', 'other/repo')])
+                                         ('ticket', 99), ('repo', 'other/repo'),
+                                         ('repo', 'someone-else/NewChanlun')])
 def test_cancel_action_rejects_another_claim_identity(v2, field, value):
     from dataclasses import replace
 
@@ -768,6 +769,21 @@ def test_cancel_action_rejects_another_claim_identity(v2, field, value):
     with pytest.raises(Fenced, match='取消身份不符'):
         with run._fence('cancel'):
             pytest.fail('foreign identity reached cancellation body')
+
+
+@pytest.mark.parametrize('repo', ['Newchanlun/NewChanlun', 'xy7365527-lang/NewChanlun'])
+def test_cancel_action_accepts_claims_written_before_and_after_the_transfer(v2, repo):
+    from dataclasses import replace
+
+    unit = v2.register()
+    run = v2.run(unit)
+    run.release()
+    with ClaimStore(v2.claims_root).locked(TICKET) as txn:
+        txn.write(replace(txn.record, repo=repo, state='released'))
+    reached = []
+    with run._fence('cancel'):
+        reached.append(repo)
+    assert reached == [repo]
 
 
 def test_new_generation_accepts_collected_boat_worker_without_remote_calls(v2, monkeypatch):
