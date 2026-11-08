@@ -205,13 +205,17 @@ def test_engine_emission_to_queue_child_sigkill_recovery_and_exact_delivery(queu
     module = Path(__file__).resolve().parents[3] / 'scripts' / 'wayfinder_engine.mts'
     script = '''const m = await import(process.argv[1]);
       const label = m.releaseLabel(process.argv[2], process.argv[3]);
-      const spec = {number: 1340, title: 'SPEC: fixture', body: '# SPEC', state: 'OPEN'};
+      // map 直挂票只放行 map SPEC 拆票计划里、带当前发布凭据的票（#1915 a2）。
+      const plan = '# SPEC\\n<!-- wayfinder-split -->\\n```json\\n{"tickets":[{"id":"S1","title":"fixture"}]}\\n```';
+      const spec = {number: 1340, title: 'SPEC: fixture', body: plan, state: 'OPEN'};
       const pass = {user: {login: 'fixture'}, created_at: '2026-11-07T01:00:00Z', body: m.specRulingBody({specNumber: 1340,
         verdict: 'PASS', author: 'draft', reviewer: 'review', digest: m.specBodyDigest(spec.body), evidence: '/fake/review'})};
+      const ticketBody = '<!-- wayfinder-ticket:1340:S1 -->\\nPart of [SPEC #1340]\\n<!-- wayfinder-published:1340:'
+        + m.specBodyDigest(spec.body) + ':S1 -->\\n';
       const read = args => args.startsWith('issue view 1340 ') ? JSON.stringify(spec)
         : args.includes('/issues/1340/comments') ? JSON.stringify([pass])
-        : JSON.stringify({title: '[impl] fixture', body: 'Part of [SPEC #1340]', state: 'OPEN', labels: [], assignees: []});
-      const why = m.releaseTicket(4242, {specs: [1340], orchestrator: 'fixture'},
+        : JSON.stringify({title: '[impl] S1 fixture', body: ticketBody, state: 'OPEN', labels: [], assignees: []});
+      const why = m.releaseTicket(4242, {specs: [1340], orchestrator: 'fixture', via: 'plan'},
         {read, write: cmd => { console.log(cmd); return ''; }}, label);
       if (why !== null) throw new Error(why);'''
     emitted = subprocess.run(['node', '--experimental-strip-types', '--input-type=module', '-e', script,
