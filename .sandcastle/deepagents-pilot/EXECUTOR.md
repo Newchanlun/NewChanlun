@@ -1,6 +1,6 @@
 # 用新执行器交付一张首证专用票
 
-新执行器把专用票或切流后的引擎放行票从持有跑到 `awaiting_merge`。Deep Agents 主控按 poteto-mode 派 Sandcastle 工蜂，作者与异家族独审都经现役 `codex-child`。独审对某个 head 判 PASS 后，执行器用 GitHub App 身份把这个冻结 SHA 发布到 `codex/deepagents/t<票号>`，开目标为 main 的 draft PR，写 `deepagents/review` 状态和票面交付标记。合入 main 由人在 GitHub 上完成。
+新执行器把专用票或切流后的引擎放行票从持有跑到 `awaiting_merge`。Deep Agents 主控按 poteto-mode 派 Sandcastle 工蜂，作者与异家族独审都经现役 `codex-child`。独审对某个 head 判 PASS 后，执行器用 GitHub App 身份把这个冻结 SHA 发布到 `codex/deepagents/t<票号>`，开目标为 main 的 draft PR，写 `deepagents/review` 状态和票面交付标记。执行器不合入 main。main 的合入不设人工批准：main 分支保护要求 `deepagents/review` 与 `ci-ok` 两项必需检查通过并追平 main，满足后由代理合入（口径见 `.sandcastle/docs/graph-engineering.md`「main 的合入」）。
 
 `register` 保留首证专用票入口。`serve` 接收切流后的引擎放行队列，见文末。接管旧 owner 手里的票仍一律拒绝。
 
@@ -82,8 +82,10 @@ executor status --run-id t<票号>-1
 
 **释放。** 主控退回一张票。释放会等正在执行的那一个外部写入做完，旧控制进程之后的派工、提交与发布都会停下，原工蜂仍可经 `cancel-worker` 取消。释放本身不代表远端工蜂已退出。重新持有要登记新的 run id；票级锁内确认旧控制锁、本机工蜂和所有旧 Boat 绑定均已排空后，代次才加一。`Running`、`EffectUnknown` 或不可读的 Boat 绑定通常阻止换代。唯一的失败排空路径要求原绑定已有 `stop_id`、回执身份完全匹配且明确证明失败退出或取消，详见 [取消后释放队列槽或换代](BOAT.md#取消后释放队列槽或换代)。手工入口与队列共享这一判定。检查只读本地冻结记录，不访问 Boat、不补提交，也不收集旧产物。
 
+释放先在本机记 `released`，再用同一排空判定决定能否摘票面的 `deepagents` 镜像。排空了就在同一把票级锁内摘掉并读回，持有结束由此在 GitHub 上可见，wayfinder 引擎据此恢复旧票迁移。没排空时镜像保留，命令退出 75，排空后重跑同一命令即可。本机记录已换成新 run 时释放被拒绝，旧 run 的重试碰不到新代次的镜像。交付 PR 已合入的票释放后不会被队列重派，状态页报 `awaiting_human`，由主控关票。
+
 ```sh
-executor release --ticket <票号> --run-id t<票号>-1 --reason "主控退回：……"
+executor release --ticket <票号> --run-id t<票号>-1 --reason "主控退回：……" --private-key "$PEM"
 executor register --ticket <票号> --run-id t<票号>-2 --base "$BASE" ...
 ```
 
@@ -94,7 +96,7 @@ executor register --ticket <票号> --run-id t<票号>-2 --base "$BASE" ...
 `status` 的 `phase` 在发布后取以下值。
 
 - `awaiting_merge`。冻结 head 已在远端分支，draft PR 的 head 等于它，状态与交付标记都在。PR 链接在 `delivery.state.pr.url`。
-- `merged`。人已合入该 PR，执行器不再写任何东西。
+- `merged`。该 PR 已合入 main，执行器不再写任何东西。
 - `stale`。远端分支或 PR 的 head 不是冻结 head，后代也算。执行器不覆盖、不收养，`delivery.stale.observed` 是观察到的 SHA。由主控决定重新评审还是释放。
 - `halted`（持有记录）。锁内复核发现票被关、`deepagents` 标签被摘、票或 PR 被加了禁用标签，或持有 post-check 失败。远端 PR 不合交付合同时也转 halted：已关闭未合入、目标不是 main、open 时不是 draft、不是本 App 所开、正文缺本票 PR 标记。执行器不改动这个 PR，不重开、不改目标、不改回 draft。只有主控能释放。
 

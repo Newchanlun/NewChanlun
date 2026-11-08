@@ -8,11 +8,16 @@ disable-model-invocation: true
 
 ## 一轮
 
-1. **对账**。读图正文的 Destination、Notes、Decisions so far，再查子票实况（`gh api --paginate repos/xy7365527-lang/NewChanlun/issues/<图号>/sub_issues`，必要时下钻 SPEC 与 TB 汇总票）。完成标准：open 票按「frontier / 被阻塞 / 已认领 / needs-approval」四桶列出计数与票号。
+1. **对账**。读图正文的 Destination、Notes、Decisions so far，再查子票实况（`gh api --paginate repos/xy7365527-lang/NewChanlun/issues/<图号>/sub_issues`，必要时下钻 SPEC 与 TB 汇总票）。完成标准：open 票按「frontier / 被阻塞 / 已认领 / 裁决暂停（held）」四桶列出计数与票号；仍挂旧 `needs-approval` 的票单列。
 
 2. **修 red**。读宿主 `NewChanlun-sandcastle-host/.sandcastle/logs/health-report.json`。服务停摆由 `--heal` 重启的，核对日志确认恢复；宿主脏树、外盘不足、凭据失效这类 `--heal` 不碰的，主控处理或列给用户。完成标准：每个 red 有处置或明确的待用户事项。
 
-3. **查放行**。对每张该放没放的票，对照 `.sandcastle/logs/wayfinder-status.md` 与 `scripts/wayfinder_engine.mts` 的 `classifyTicket`，指出卡在哪一条：open blocker、assignee、票型、spec 批准。真阻塞留着；缺 blocking 边、缺决策票、FU 未建的当场补，建票前先搜重（`gh issue list --search "<词>" --state all` 加 `grep -rn` 推论层）。已有负责人在做的票保留 assignee，不挂 `sandcastle`。完成标准：每张未放行票一个原因。
+3. **查放行**。对每张该放没放的票，对照 `.sandcastle/logs/wayfinder-status.md` 与 `scripts/wayfinder_engine.mts` 的 `classifyTicket`，指出卡在哪一条：open blocker、assignee、票型、SPEC 裁定。真阻塞留着；缺 blocking 边、缺决策票、FU 未建的当场补，建票前先搜重（`gh issue list --search "<词>" --state all` 加 `grep -rn` 推论层）。已有负责人在做的票保留 assignee，不挂 `sandcastle`。完成标准：每张未放行票一个原因。
+
+   - **SPEC 待裁定**：派一个不是起草者的独审进程，只给 SPEC 正文、所引决策票 resolution 与仓内源文件，按 graph-engineering「SPEC 裁定」逐条给结论，原件 JSON 落 `/Volumes/AgentStorage/`，必须含 `specNumber`、所审正文的 `digest`、作者与独审进程身份 `author`/`reviewer`、`verdict`，格式见 graph-engineering「SPEC 裁定」。用 `npx tsx scripts/wayfinder_engine.mts --spec-ruling <号> --review-file <独审原件.json> > <仓外裁定.md> && gh issue comment <号> --body-file <仓外裁定.md>` 校验原件并发布。正文或票号不匹配须重审，不能在发布时重算原件摘要；BLOCK 同样发记录，把意见交回起草者返修后重审。不发自由文本「批准」，引擎不认。
+   - **held 决策票**：`fact_gap` 按评论里的清单在同图开 research/探针票并接 blocking 边，缺口票关后发「退回：事实已补 #…」；`review_blocked` / `invalid_landing` 把要补的材料或改法写成「退回：…」评论。claimer 下一轮整链重跑，仍须非作者独审 PASS 才落地。
+   - **held `user_authorization`（资金、账户、凭据硬门）**：引擎已挂 `ready-for-human`，票上列出待签事项。主控不发「退回：签署」、不代填签署值，只把票列进收尾的「用户要做什么」。用户本人在票上以首行「退回：签署」评论、每项一行写 `- <字段>=<签署值>；有效域=<有效域>` 后（格式与拒收规则见 `.sandcastle/docs/graph-engineering.md`「资金与权限硬门」），claimer 下一轮整链重跑，落地时摘掉该标签。代理与用户共用同一 GitHub 账号，这条签署评论的作者无法机器区分（现有信任模型，未改变），所以主控代发等于代签。
+   - **旧 `needs-approval`**：grilling 票由 claimer 按新流程处理后自动摘。实施票逐张核依赖、owner 与所属 SPEC 裁定后由主控摘，不批量摘。
 
 4. **派工**。决策票仍走 decision-claimer。先确认服务在跑，未跑就在宿主前台跑 `node --import tsx .sandcastle/decision-claimer.mts --ticket <号>`，默认 dry-run。实施票先区分持有者。D6 的 `deepagents:queue` 队列沿用 `pilot1742 executor serve` 与 ClaimStore，不转交旧 swarm。已有 claim-loop 或 main-swarm 在消费 `sandcastle` 队列时，只登记在跑，不重复认领。
 
@@ -23,10 +28,10 @@ disable-model-invocation: true
 
    不设置 `SANDCASTLE_SWARM_PLAN` 的无人值守入口仍兼容旧 planner，不能把它用于本轮折叠路径。主控自己的整理工作派子代理，写清归属与验收。完成标准仍是每张 frontier 票有在跑的处理者，或写明不派原因。
 
-5. **验收**。查完成的封包（`/Volumes/AgentStorage/issue*-*/`、`sandcastle/issue-*` 与 `decision/*` 分支），按 `docs/agents/delivery-discipline.md` 关票门逐子句核。合格的开 PR 列给用户批合入；不合格的把缺项写回对应票。
+5. **验收**。查完成的封包（`/Volumes/AgentStorage/issue*-*/`、`sandcastle/issue-*` 与 `decision/*` 分支），按 `docs/agents/delivery-discipline.md` 关票门逐子句核。合格的开 PR；main 的合入不设人工批准，分支保护的 `deepagents/review`（正式非作者双审 success）与 `ci-ok`（适用 CI 全绿）满足且追平 main 后由主控合入，工蜂与执行器不合入。不合格的把缺项写回对应票。T/P 决策分支同样只需非作者独审 PASS，不再等用户批复。
 
 6. **记账**。已关决策票在图正文 Decisions so far 加一行（名字带链接 + 一句要点）；可具体化的雾毕业成票；本轮结论发一条图评论：四桶计数、red 处置、新票、待用户事项。完成标准：评论链接。
 
 ## 收尾
 
-向用户报三件事：本轮推进了什么（票名带链接）、什么在跑、用户要做什么。用户要做的只会是 spec 批准、`/graph-approve`、批合入。
+向用户报三件事：本轮推进了什么（票名带链接）、什么在跑、用户要做什么。用户要做的只有两类人工确认：实盘下单与资金、密钥与凭证（CI 与分支保护配置不需要人工确认，范围与原话出处见 `.sandcastle/docs/graph-engineering.md`「人工确认只保留两类」）；落在本流程里的是 held `user_authorization` 票的签署（资金、账户、凭据硬门，票名带链接与待签事项）。普通合入由主控在分支保护的必需检查通过后完成，spec 与 T/P 决策由非作者独审 PASS 后代理裁定（#1909）。

@@ -11,7 +11,7 @@
 1. **Phase 1 · 实装工蜂（implementer）**——host 侧先按专属拾取闸 label `sandcastle` 取一张未认领的 open issue 并 claim（摘 label + assign @me），然后 `createSandbox({ branch: sandcastle/issue-<号>, baseBranch: main })` 起沙盒，实装工蜂在分支上干活、commit；
 2. **Phase 2 · 独立评审工蜂（reviewer）**——同一沙盒里换一个独立 invocation 的评审工蜂，对照分支 diff 与原始 issue 评审，**直接在分支上修正**（评审面 == 关票面）。
 
-两段结束后**不合 main**——验收与合入是编排层人工闸（#1003 裁 3）。实装无 commit 即跳评审、留票待查（视为 backlog 空/被卡）。
+两段结束后**不合 main**——验收与开 PR 在编排层，合入 main 由分支保护的 `deepagents/review` 与 `ci-ok` 必需检查把关（#1003 裁 3）。实装无 commit 即跳评审、留票待查（视为 backlog 空/被卡）。
 
 两段收尾后由 `harvest.sh` 收割（#1660）：对评审工蜂已完成、票仍 open 且无 open blocker 的分支，推分支 → 基于 main 开 PR（`Refs #n`）→ 在票上登记一条交付评论。它不合入、不推 main、不关票、不删分支；构建测试交 CI。提交说明含 GitHub 关闭关键词（close/fix/resolve + `#号`）的分支 fail-loud、不推。定时任务：`bash .sandcastle/install-sandcastle-harvest.sh install`（每 15 分钟，宿主侧由编排者安装）；手工预演：`HARVEST_DRY_RUN=1 bash .sandcastle/harvest.sh`。
 
@@ -64,11 +64,11 @@ node --import tsx --test .sandcastle/scheduler-config.test.mts
 `scripts/wayfinder_engine.mts` 是图清自动汇入主干的常驻控制面（tracker 即账本，stateless）：
 每 4 分钟一轮，跑三件事——
 
-1. **DAG 走查**：图清 → 起草 spec 草案开票（@编排者批【闸一】）；spec 批准 → 拆实装票（blocking 边 + 逐条挂裁定票）；实装全关 → 起草图关 comment + close map。
+1. **DAG 走查**：图清 → 起草 spec 草案开票（待非作者独审）；当前 spec 有绑定正文的有效 PASS → 拆实装票（blocking 边 + 逐条挂裁定票）；实装全关 → 起草图关 comment + close map。
 2. **队列交棒**：只给合资格实装票（已批准 spec/DAG + 未 assign + 无 open blocker）挂 `sandcastle`，不把全部历史 `ready-for-agent` 无差别放行；每轮五桶分明（ready-for-agent / sandcastle 拾取权 / blocked / claimed / running）。
 3. **状态页**：写 `.sandcastle/logs/wayfinder-status.md`，不再把 `sandcastle` 空误写成 `ready-for-agent` 全空。
 
-gh 查询有限重试 + 指数退避 + fail-loud；无 runnable 票 sleep 后重查、不退出。人工闸三处不动（spec 批准 / 不预授权决策票 / 合入 main）。
+gh 查询有限重试 + 指数退避 + fail-loud；无 runnable 票 sleep 后重查、不退出。普通 P/SPEC 已由 #1909 改为起草 + 非作者独审 PASS 代理裁定，main 的合入不设人工批准：分支保护的 `deepagents/review`（正式非作者双审 success）与 `ci-ok`（适用 CI 全绿）满足、分支追平后代理可合入，工蜂与执行器不合入；人工确认只留实盘下单与资金、密钥与凭证两类（范围见 `.sandcastle/docs/graph-engineering.md`「人工确认只保留两类」），资金、账户、凭据硬门票挂 `ready-for-human` 交还用户签署（ADR 0041，口径见 `docs/graph-engineering.md`「main 的合入」）。拆票与排队前重读当前 SPEC 裁定；DeepAgents 执行器迁移仍依赖 Queued PR，见 graph-engineering.md「#1742 执行面依赖」。
 
 **部署成受管常驻服务**（launchd KeepAlive，默认真实执行 `--live`）：
 
