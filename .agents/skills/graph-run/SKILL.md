@@ -28,10 +28,10 @@ disable-model-invocation: true
 
    不设置 `SANDCASTLE_SWARM_PLAN` 的无人值守入口仍兼容旧 planner，不能把它用于本轮折叠路径。主控自己的整理工作派子代理，写清归属与验收。完成标准仍是每张 frontier 票有在跑的处理者，或写明不派原因。
 
-5. **验收**。查完成的封包（`/Volumes/AgentStorage/issue*-*/`、`sandcastle/issue-*` 与 `decision/*` 分支），核对候选 head、适用验证、非作者独审结果与外卷证据路径。合格的开 PR，正式 `deepagents/review` 双审 success 后由代理合入，并遵守当前任务的合入授权；不合格的把缺项写回对应票。
+5. **验收**。查完成的封包（`/Volumes/AgentStorage/issue*-*/`、`sandcastle/issue-*` 与 `decision/*` 分支），核对候选 head、适用验证、非作者独审结果与外卷证据路径。合格的开 PR；main 的合入不设人工批准，分支保护的 `deepagents/review`（正式非作者双审 success）与 `ci-ok`（适用 CI 全绿）满足且追平 main 后由主控合入，工蜂与执行器不合入。不合格的把缺项写回对应票。
 
 6. **记账**。已关决策票在图正文 Decisions so far 加一行（名字带链接 + 一句要点）；可具体化的雾毕业成票；本轮结论发一条图评论：四桶计数、red 处置、新票、待用户事项。完成标准：评论链接。
 
 ## 收尾
 
-向用户报三件事：本轮推进了什么（票名带链接）、什么在跑、用户要做什么。仅列确需用户处理的事项：held `user_authorization` 票的签署（票名带链接与待签事项）及其他权限或外部操作；普通合入由代理在正式双审 success 后完成。spec 与 T/P 类决策由非作者独审 PASS 后代理裁定（#1909）。
+向用户报三件事：本轮推进了什么（票名带链接）、什么在跑、用户要做什么。用户要做的只有三类人工确认：实盘下单与资金、密钥与凭证、CI 与分支保护配置；落在本流程里的是 held `user_authorization` 票的签署（票名带链接与待签事项）。普通合入由主控在分支保护的必需检查通过后完成，spec 与 T/P 类决策由非作者独审 PASS 后代理裁定（#1909）。

@@ -46,4 +46,4 @@ Boat 派工按 run 冻结的 `runtime_head` 中 `codex-child.ts` 的协议声明
 
 旧 `delivery-bundle.mts` 的 schema 要求报告在 Git 中，它不支持这条外卷交付路径。本入口不再要求调用它；既有封包仍按原 schema 读取，仍需调用旧封包的任务由 #1742 根协调后续兼容工作。
 
-主控按当前任务授权处理合入；本入口不授予合入权限。提交推远端、无未保存工作或活跃进程后，用 `git worktree remove` 回收本任务工位。失败任务先保全未提交内容与恢复信息。
+本入口不合入；main 的合入由分支保护的 `deepagents/review` 与 `ci-ok` 把关，满足后由主控执行。提交推远端、无未保存工作或活跃进程后，用 `git worktree remove` 回收本任务工位。失败任务先保全未提交内容与恢复信息。
