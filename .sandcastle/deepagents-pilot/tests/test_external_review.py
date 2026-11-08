@@ -1,6 +1,7 @@
 import copy
 import hashlib
 import json
+import shlex
 import subprocess
 import sys
 from dataclasses import asdict
@@ -29,6 +30,7 @@ from pilot1742.github_app import (
     IdentityError,
     OutcomeUnknown,
 )
+from pilot1742.patch_read import FrozenPatch, reads_candidate_patch
 
 
 class Gateway:
@@ -189,7 +191,7 @@ def test_terminal_receipt_requires_supervision_evidence(lane, mutation):
     launch = json.loads((folder / "launch.json").read_text())
     receipt = json.loads((folder / "receipt.json").read_text())
     mutation(receipt)
-    assert validate_review(target, launch, receipt, folder).verdict == "FAILED"
+    assert validate_review(target, launch, receipt, folder, lane.source).verdict == "FAILED"
 
 
 RECONNECT_CASES = json.loads((Path(__file__).parent / "fixtures" / "codex-reconnect.json").read_text())
@@ -203,11 +205,12 @@ def test_reconnect_protocol_matches_child_supervision(lane, scenario):
     launch = json.loads((folder / "launch.json").read_text())
     receipt = json.loads((folder / "receipt.json").read_text())
     session = RECONNECT_CASES["session_id"]
-    events = [{"type": "thread.started", "thread_id": session}, *scenario["events"]]
+    events = [{"type": "thread.started", "thread_id": session},
+              _command(f"git diff {target.merge_base_sha} {target.head_sha}"), *scenario["events"]]
     (folder / "events.jsonl").write_text("\n".join(json.dumps(e) for e in events) + "\n")
     (folder / "session.jsonl").write_text(json.dumps({"type": "session_meta", "payload": {"id": session}}) + "\n")
     receipt.update(session_id=session, result=scenario["result"], exit_code=scenario["exit_code"])
-    outcome = validate_review(target, launch, receipt, folder)
+    outcome = validate_review(target, launch, receipt, folder, lane.source)
     assert outcome.verdict == scenario["verdict"], outcome.reason
     assert outcome.session_id == (None if scenario["verdict"] == "FAILED" else session)
 
@@ -221,7 +224,7 @@ def test_symlink_session_cannot_prove_pass(lane, tmp_path):
     session.rename(other)
     session.symlink_to(other)
     assert validate_review(target, json.loads((folder / "launch.json").read_text()),
-                           json.loads((folder / "receipt.json").read_text()), folder).verdict == "FAILED"
+                           json.loads((folder / "receipt.json").read_text()), folder, lane.source).verdict == "FAILED"
 
 
 def test_status_pagination_error_cannot_mean_absent_or_publish(lane):
@@ -658,6 +661,351 @@ def test_non_pass_conclusion_is_not_reused(lane, env, first_verdict):
     result = lane.review_pr(1810)
     assert result["verdict"] == "PASS" and "reused_from" not in result
     assert len(result["reviews"]) == len(MODELS)
+
+
+@pytest.mark.parametrize("claim", ["PASS", "BLOCK"])
+def test_zero_tool_conclusion_is_error_not_verdict(lane, claim):
+    """#1968：没跑过任何命令的审查员说 PASS 不能放行，说 BLOCK 也不能否决；两种都只能是 error。"""
+    _modes(lane, **{MODELS[0]: f"{claim}:notool", MODELS[1]: "PASS"})
+    result = lane.review_pr(1810)
+    assert result["verdict"] == "FAILED" and result["state"] == "error"
+    assert lane.gateway.sent == ["pending", "error"]
+    kimi, opus = result["reviews"]
+    assert kimi["verdict"] == "FAILED" and "未读取冻结候选补丁" in kimi["reason"]
+    assert opus["verdict"] == "PASS"
+
+
+# lane 的冻结补丁在审查员日志里的样子（git diff merge-base head 的输出）
+LANE_PATCH = "".join(f"diff --git a/changed-{i} b/changed-{i}\nnew file mode 100644\n--- /dev/null\n+++ b/changed-{i}\n"
+                     f"@@ -0,0 +1 @@\n+{i}\n\\ No newline at end of file\n" for i in range(2))
+
+
+def _command(script: str, exit_code: int = 0, output: str | None = LANE_PATCH) -> dict:
+    """Codex 记录 command_execution 的真实形状：`/bin/bash -lc <shell 引号包好的脚本>`，输出在 aggregated_output；
+    `output=None` 是这个字段没进日志。"""
+    item = {"type": "command_execution", "command": f"/bin/bash -lc {shlex.quote(script)}",
+            "status": "completed" if exit_code == 0 else "failed", "exit_code": exit_code}
+    return {"type": "item.completed", "item": item if output is None else {**item, "aggregated_output": output}}
+
+
+def _verdicts_with_commands(lane, claim: str, cases: dict) -> dict[str, module.ReviewOutcome]:
+    """跑一次 PASS/BLOCK 审查，再把 events.jsonl 依次换成每个用例的命令序列重新判定。"""
+    _modes(lane, **{model: claim for model in MODELS})
+    target = ReviewTarget(**lane.review_pr(1810)["target"])
+    folder = lane.state_root / "runs" / target.key / MODELS[0]
+    events = [json.loads(line) for line in (folder / "events.jsonl").read_text().splitlines()]
+    events = [e for e in events if e.get("item", {}).get("type") != "command_execution"]
+    launch, receipt = json.loads((folder / "launch.json").read_text()), json.loads((folder / "receipt.json").read_text())
+    outcomes = {}
+    for case, commands in cases.items():
+        (folder / "events.jsonl").write_text("\n".join(json.dumps(e) for e in [
+            events[0], *(c(target) for c in commands), *events[1:]]) + "\n")
+        outcomes[case] = validate_review(target, launch, receipt, folder, lane.source)
+    return outcomes
+
+
+def _diff(flags: str = "", tail: str = "") -> list:
+    return [lambda t: _command(f"git diff {flags}{' ' if flags else ''}{t.merge_base_sha} {t.head_sha}{tail}")]
+
+
+FAKE = "f" * 40
+NOT_A_PATCH_READ = {
+    "echo": [lambda t: _command("echo hi")],
+    "ls": [lambda t: _command("ls -la /review")],
+    "unrelated-file": [lambda t: _command("cat /review/.agents/skills/code-review/SKILL.md")],
+    "git-log": [lambda t: _command(f"git log --oneline {t.merge_base_sha}..{t.head_sha}")],
+    "wrong-sha": [lambda t: _command(f"git diff {t.merge_base_sha} {FAKE}")],
+    "stat-only": _diff("--stat"),
+    "failed-diff": [lambda t: _command(f"git diff {t.merge_base_sha} {t.head_sha}", exit_code=128)],
+    "sha-outside-diff": [lambda t: _command(f"git log -1 {t.head_sha}; git diff")],
+    "var-wrong-sha": [lambda t: _command(f"H={FAKE}; git diff {t.merge_base_sha} $H")],
+    "var-echo-not-diff": [lambda t: _command(f"H={t.head_sha}; echo $H")],
+    "var-stat-only": [lambda t: _command(f"B={t.merge_base_sha}; H={t.head_sha}; git diff --stat $B $H")],
+    # #1969 kimi BLOCK 与准入独审：命令文本里有 git diff 字样，但不是 git 本身在执行
+    "echo-diff-text": [lambda t: _command(f"echo git diff {t.merge_base_sha} {t.head_sha}")],
+    "printf-diff-text": [lambda t: _command(f"printf '%s\\n' 'git diff {t.merge_base_sha} {t.head_sha}'")],
+    "heredoc-diff-text": [lambda t: _command(f"cat <<EOF\ngit diff {t.merge_base_sha} {t.head_sha}\nEOF")],
+    "comment-diff-text": [lambda t: _command(f"ls /review # git diff {t.merge_base_sha} {t.head_sha}")],
+    "grep-for-diff-text": [lambda t: _command(f'rg -n "git show {t.head_sha}" /review')],
+    "diff-tree-raw": [lambda t: _command(f"git diff-tree {t.merge_base_sha} {t.head_sha}")],
+    "nested-shell": [lambda t: _command(f'bash -c "git diff {t.merge_base_sha} {t.head_sha}"')],
+    "command-substitution": [lambda t: _command(f"x=$(git diff {t.merge_base_sha} {t.head_sha})")],
+    # kimi BLOCK：变量代回必须按 shell 语义
+    "var-used-before-assign": [lambda t: _command(f"git diff $H; H={t.head_sha}")],
+    "var-reassigned-last-wins": [lambda t: _command(f"H={t.head_sha}; H={FAKE}; git diff {t.merge_base_sha} $H")],
+    "var-single-quoted": [lambda t: _command(f"H={t.head_sha}; git diff {t.merge_base_sha} '$H' | cat")],
+    "var-subshell": [lambda t: _command(f"(H={t.head_sha}); git diff {t.merge_base_sha} $H")],
+    "var-suffix": [lambda t: _command(f"H={t.head_sha}; git diff {t.merge_base_sha} ${{H}}x | cat")],
+    "var-prefix-assignment": [lambda t: _command(f"H={t.head_sha} git diff {t.merge_base_sha} $H")],
+    # 不输出补丁的形式（git 2.50 实测）
+    "empty-range": [lambda t: _command(f"git diff {t.head_sha}..{t.head_sha}")],
+    "same-commit": [lambda t: _command(f"git diff {t.head_sha} {t.head_sha}")],
+    "head-vs-clean-worktree": [lambda t: _command(f"git diff {t.head_sha}")],
+    "show-q": [lambda t: _command(f"git show -q {t.head_sha}")],
+    "show-quiet": [lambda t: _command(f"git show --quiet {t.head_sha}")],
+    "show-s-format": [lambda t: _command(f"git show -s --format=%H {t.head_sha}")],
+    "show-no-patch": [lambda t: _command(f"git show --no-patch {t.head_sha}")],
+    "show-patch-then-no-patch": [lambda t: _command(f"git show -p --no-patch {t.head_sha}")],
+    "show-name-only": [lambda t: _command(f"git show --name-only -p {t.head_sha}")],
+    "show-tree-root": [lambda t: _command(f"git show {t.head_sha}:")],
+    **{f"diff{flag}": _diff(flag) for flag in ("--name-only", "--name-status", "--numstat", "--shortstat",
+                                               "--summary", "--check", "--quiet", "--exit-code", "--raw", "-s",
+                                               "--no-patch", "--output=/tmp/p.diff")},
+    "trailing-stat": _diff(tail=" --stat"),
+    "trailing-name-only": _diff(tail=" --name-only"),
+    "ext-diff": [lambda t: _command(f"GIT_EXTERNAL_DIFF=true git diff {t.merge_base_sha} {t.head_sha}")],
+    "unknown-sha-piped": [lambda t: _command(f"git diff {'e' * 40} {t.head_sha} | head")],
+    # 输出被吞或退出码被掩盖
+    "pipe-true": _diff(tail=" | true"),
+    "pipe-colon": _diff(tail=" | :"),
+    "pipe-cat-devnull": _diff(tail=" | cat >/dev/null"),
+    "pipe-head-0": _diff(tail=" | head -0"),
+    "pipe-head-n-0": _diff(tail=" | head -n 0"),
+    "pipe-grep-q": _diff(tail=" | grep -q x"),
+    "or-true": _diff(tail=" || true"),
+    "semicolon-true": _diff(tail="; true"),
+    "newline-exit-0": _diff(tail="\nexit 0"),
+    "background": _diff(tail=" &"),
+    "or-guarded": [lambda t: _command(f"true || git diff {t.merge_base_sha} {t.head_sha}")],
+    "stdout-devnull": _diff(tail=" >/dev/null"),
+    "stdout-devnull-after-dup": _diff(tail=" 2>&1 >/dev/null"),
+    "stdout-closed": _diff(tail=" >&-"),
+    "unread-file": _diff(tail=" > /tmp/p.diff"),
+    # #1969 正式审查 kimi BLOCK 与 #1971：命令文本像读取，记录的输出里却没有冻结补丁
+    "if-false-never-runs": [lambda t: _command(f"if false; then git diff {t.merge_base_sha} {t.head_sha}; fi", output="")],
+    "file-then-echo-name": [lambda t: _command(f"git diff {t.merge_base_sha} {t.head_sha} >/tmp/p; echo /tmp/p",
+                                               output="/tmp/p\n")],
+    "file-then-wc": [lambda t: _command(f"git diff {t.merge_base_sha} {t.head_sha} >/tmp/p; wc -l /tmp/p",
+                                        output="      14 /tmp/p\n")],
+    "exec-stdout-devnull": [lambda t: _command(f"exec >/dev/null; git diff {t.merge_base_sha} {t.head_sha}", output="")],
+    "export-external-diff": [lambda t: _command(
+        f"export GIT_EXTERNAL_DIFF=true; git diff {t.merge_base_sha} {t.head_sha}", output="")],
+    "ext-diff-from-config": [lambda t: _command(f"git diff --ext-diff {t.merge_base_sha} {t.head_sha}",
+                                                output="changed-0 is different\nchanged-1 is different\n")],
+    "textconv-replaces-content": [lambda t: _command(
+        f"git -c diff.t.textconv='echo X' diff {t.merge_base_sha} {t.head_sha}",
+        output="diff --git a/changed-0 b/changed-0\n--- /dev/null\n+++ b/changed-0\n@@ -0,0 +1 @@\n"
+               "+X /tmp/git-blob-ksCWK9/changed-0\n")],
+    "empty-output-exit-0": [lambda t: _command(f"git diff {t.merge_base_sha} {t.head_sha} -- README", output="")],
+    "output-not-logged": [lambda t: _command(f"git diff {t.merge_base_sha} {t.head_sha}", output=None)],
+    "show-unchanged-file": [lambda t: _command(f"git show {t.head_sha}:README", output="x\n")],
+    # #1969 正式审查（bb8aa92e）opus BLOCK：本 PR 没改的文件里有一行与改动行相同（真实仓库里是
+    # `from __future__ import annotations` 这类通用行），读它不等于读了补丁；证据须出自所读的改动文件
+    "show-unchanged-file-common-line": [lambda t: _command(f"git show {t.head_sha}:README", output="1\n")],
+    "show-unchanged-file-numbered": [lambda t: _command("git show HEAD:README | nl -ba", output="     1\t0\n")],
+    "show-changed-and-unchanged-file": [lambda t: _command(
+        f"git show {t.head_sha}:changed-0 {t.head_sha}:README", output="x\n1\n")],
+    "show-changed-file-other-files-line": [lambda t: _command(f"git show {t.head_sha}:changed-0", output="1\n")],
+    "show-commit-unrelated-file": [lambda t: _command(
+        f"git show {t.head_sha}", output="diff --git a/README b/README\n--- a/README\n+++ b/README\n@@ -1 +1 @@\n-x\n+0\n")],
+    "diff-parent-unrelated-file": [lambda t: _command(
+        f"git diff {t.head_sha}~1 {t.head_sha}", output="diff --git a/README b/README\n@@ -1 +1 @@\n+1\n")],
+    "diff-parent-lines-before-header": [lambda t: _command(
+        f"git diff {t.head_sha}~1 {t.head_sha} | grep -n 0", output="5:+0\n")],
+    "show-other-commit-and-head": [lambda t: _command(f"git show {t.merge_base_sha} {t.head_sha}")],
+    "show-file-dot-slash-after-C": [lambda t: _command(f"git -C /review/sub show {t.head_sha}:./changed-0", output="0\n")],
+    "show-missing-path-masked": [lambda t: _command(
+        f"git show {t.head_sha}:nope | head", output=f"fatal: path 'nope' does not exist in '{t.head_sha}'\n")],
+    # #1969 正式审查 kimi BLOCK（f566ce6b）：输出是整条命令的合并输出，git 之外的段可以印出冻结补丁的改动行
+    "kimi-printf-after-empty-diff": [lambda t: _command(
+        f"git diff {t.merge_base_sha} {t.head_sha} -- nope; printf '%s\\n' '+0'", output="+0\n")],
+    "echo-before-empty-diff": [lambda t: _command(f"echo +0 && git diff {t.merge_base_sha} {t.head_sha} -- nope",
+                                                  output="+0\n")],
+    "cat-file-before-diff": [lambda t: _command(f"cat /tmp/fake; git diff {t.merge_base_sha} {t.head_sha} -- nope",
+                                                output="+0\n")],
+    "second-git-prints-text": [lambda t: _command(
+        f"git log -1 --format=+0 {t.head_sha}; git diff {t.merge_base_sha} {t.head_sha} -- nope", output="+0\n")],
+    "two-patch-reads": [lambda t: _command(f"git diff {t.merge_base_sha} {t.head_sha}; git show {t.head_sha}:changed-0")],
+    "git-then-and-echo": _diff(tail=" -- nope | head && echo +0"),
+    "pipe-into-python": [lambda t: _command(
+        f"git diff {t.merge_base_sha} {t.head_sha} -- nope | python3 -c 'print(\"+0\")'", output="+0\n")],
+    "pipe-into-tee": _diff(tail=" | tee /tmp/p"),
+    "pipe-into-less": _diff(tail=" | less -R"),
+    "filter-reads-file": _diff(tail=" -- nope | grep . /tmp/fake"),
+    "filter-stdin-from-file": _diff(tail=" -- nope | cat </tmp/fake"),
+    "filter-here-string": _diff(tail=" -- nope | cat <<< +0"),
+    "sed-rewrites-lines": [lambda t: _command(f"git show {t.head_sha}:README | sed -n 's/.*/+0/p'", output="+0\n")],
+    "sed-inserts-text": [lambda t: _command(f"git show {t.head_sha}:README | sed -n '1i +0'", output="+0\nx\n")],
+    "nl-separator-text": [lambda t: _command(f"git show {t.head_sha}:README | nl -ba -s '\t+0'", output="     1\t+0\n")],
+    "grep-label-text": [lambda t: _command(f"git show {t.head_sha}:README | grep -H --label=+0 ''", output="+0:x\n")],
+    "filter-by-path": _diff(tail=" | /tmp/cat"),
+    "newline-arg-in-error": [lambda t: _command(
+        f"git show {t.head_sha}:'x\n+0\n' | cat", output=f"fatal: path 'x\n+0\n' does not exist in '{t.head_sha}'\n")],
+    "command-substitution-stderr": [lambda t: _command(
+        f"H=$(echo +0 >&2); git diff {t.merge_base_sha} {t.head_sha} -- nope", output="+0\n")],
+    "export-external-diff-prints": [lambda t: _command(
+        f"export GIT_EXTERNAL_DIFF=/tmp/x.sh; git diff {t.merge_base_sha} {t.head_sha}", output="+0\n")],
+    "path-assignment": [lambda t: _command(f"PATH=/tmp; git diff {t.merge_base_sha} {t.head_sha}")],
+    "git-by-path": [lambda t: _command(f"/tmp/git diff {t.merge_base_sha} {t.head_sha}")],
+    "cd-elsewhere": [lambda t: _command(f"cd /tmp/clone && git diff {t.merge_base_sha}")],
+    "export-prints": [lambda t: _command(f"export -p; git diff {t.merge_base_sha} {t.head_sha}")],
+    # 原先算读取、现在不算：git 之外还有段（真实日志里有这些形式，见 PR 正文的重放）
+    "skill-then-diff": [lambda t: _command(
+        f"cat /review/.agents/skills/code-review/SKILL.md && git diff --no-ext-diff --no-textconv {t.merge_base_sha} {t.head_sha}")],
+    "stat-then-diff": [lambda t: _command(
+        f"git diff --stat {t.merge_base_sha} {t.head_sha} && git diff {t.merge_base_sha} {t.head_sha} -- changed-0")],
+    "file-then-read": _diff(tail=" > /tmp/p.diff; wc -l /tmp/p.diff; sed -n 1,200p /tmp/p.diff"),
+    "file-read-by-heredoc": [lambda t: _command(
+        f"git show {t.head_sha}:changed-0 > /tmp/r.md; python3 - <<'EOF'\nprint(open('/tmp/r.md').read())\nEOF",
+        output="0\n")],
+    "for-loop-show": [lambda t: _command(f"H={t.head_sha}; for f in changed-0 changed-1; do git show $H:$f | nl -ba; done",
+                                         output="     1\t0\n     1\t1\n")],
+    "and-then-true": _diff(tail=" && true"),
+    # #1969 正式审查（01a6038a）opus BLOCK：`$'…'` 解码出换行、U+2028 被 splitlines 切开，git 报错里的参数成了一行证据
+    "ansi-c-quote-newline": [lambda t: _command(
+        f"git show {t.head_sha}:$'x\\n+0\\n' | cat", output=f"fatal: path 'x\n+0\n' does not exist in '{t.head_sha}'\n")],
+    "locale-quote-path": [lambda t: _command(f'git show {t.head_sha}:$"changed-0"')],
+    "u2028-in-single-quotes": [lambda t: _command(
+        f"git show {t.head_sha}:'x\u2028+0\u2028' | cat",
+        output=f"fatal: path 'x\u2028+0\u2028' does not exist in '{t.head_sha}'\n")],
+    "u2029-in-output-only": [lambda t: _command(
+        f"git diff {t.merge_base_sha} {t.head_sha} -- nope", output="x\u2029+0\n")],
+    # 同一轮 kimi BLOCK：git 自己印出审查员写的文字、外部 diff 被后面的 --ext-diff 重新打开、grep 输出的不是 git 的行
+    "show-format-text": [lambda t: _command(f"git show --format='+0' {t.head_sha} -- nope", output="+0\n")],
+    "show-pretty-format-text": [lambda t: _command(f"git show --pretty=tformat:+0 {t.head_sha} -- nope", output="+0\n")],
+    "show-line-prefix": [lambda t: _command(f"git show --line-prefix=+0 {t.head_sha} -- nope", output="+0\n")],
+    "config-format-pretty": [lambda t: _command(f"git -c format.pretty=format:+0 show {t.head_sha} -- nope", output="+0\n")],
+    "ext-diff-reenabled": [lambda t: _command(
+        f"git -c diff.external='printf +0' diff --no-ext-diff --ext-diff {t.merge_base_sha} {t.head_sha}", output="+0\n")],
+    "config-textconv": [lambda t: _command(
+        f"git -c diff.lfs.textconv='printf +0' diff {t.merge_base_sha} {t.head_sha}", output="+0\n")],
+    "grep-count": [lambda t: _command(f"git diff {t.merge_base_sha} {t.head_sha} -- nope | grep -c . | cat", output="0\n")],
+    "grep-only-matching": [lambda t: _command(
+        f"git show {t.head_sha}:'x+0' 2>&1 | grep -o '+0'", output="+0\n")],
+}
+PATCH_READ = {
+    "range": [lambda t: _command(f"cd /review && git diff --no-ext-diff --no-textconv {t.merge_base_sha} {t.head_sha} | head")],
+    "dotdot": [lambda t: _command(f"git -C /review diff {t.merge_base_sha[:7]}..{t.head_sha[:7]}")],
+    "show-file": [lambda t: _command("echo hi", output="hi\n"),
+                  lambda t: _command(f"git --no-pager show {t.head_sha[:8]}:changed-0", output="0")],
+    "var-assign": [lambda t: _command(f"B={t.merge_base_sha}; H={t.head_sha}; git diff $B $H")],
+    "var-export-quoted-show": [lambda t: _command(f'export H={t.head_sha} && git show "$H":changed-1', output="1")],
+    "var-braces": [lambda t: _command(f"B={t.merge_base_sha}; H={t.head_sha}; git diff ${{B}} ${{H}}")],
+    "var-last-assignment-wins": [lambda t: _command(f"H={FAKE}; H={t.head_sha}; git diff {t.merge_base_sha} $H")],
+    # 真实审查日志里的形式（opus、kimi、gpt-6.1-sol，166 位审查员 6512 条命令）
+    "merge-base-vs-clean-worktree": [lambda t: _command(f"git diff {t.merge_base_sha}")],
+    "merge-base-HEAD": [lambda t: _command(f"git diff {t.merge_base_sha} HEAD")],
+    "merge-base-dotdot-HEAD": [lambda t: _command(f"cd /review && B={t.merge_base_sha}; git diff $B..HEAD -- changed-0")],
+    "triple-dot": [lambda t: _command(f"git diff {t.merge_base_sha}...{t.head_sha}")],
+    "show-HEAD-file": [lambda t: _command("cd /review && git show HEAD:changed-0 | sed -n 1,60p", output="0\n")],
+    "show-file-dot-slash": [lambda t: _command("git show HEAD:./changed-1", output="1\n")],
+    "show-two-changed-files": [lambda t: _command(f"git show {t.head_sha}:changed-0 {t.head_sha}:changed-1",
+                                                  output="0\n1\n")],
+    "diff-parent-attributed": [lambda t: _command(f"git diff {t.head_sha}~1 {t.head_sha} | nl -ba")],
+    "triple-dot-base": [lambda t: _command(f"git diff {t.base_sha}...{t.head_sha} | grep -n -e 1")],
+    "show-file-numbered": [lambda t: _command(f"git show {t.head_sha}:changed-1 | nl -ba | sed -n '1,200p'",
+                                              output="     1\t1\n")],
+    "show-commit-oneline": [lambda t: _command(f"git show --oneline {t.head_sha}")],
+    "show-range": [lambda t: _command(f"git show {t.merge_base_sha}..{t.head_sha}")],
+    "git-P": [lambda t: _command(f"git -P diff {t.merge_base_sha} {t.head_sha}")],
+    "env-and-global-options": [lambda t: _command(
+        f"GIT_PAGER=cat git --no-pager -c core.quotepath=false --git-dir=/review/.git --work-tree /review "
+        f"diff {t.merge_base_sha} {t.head_sha}")],
+    "stat-then-patch": _diff("--stat -p"),
+    "show-named-pretty": [lambda t: _command(f"git show --pretty=fuller {t.head_sha}")],
+    "hooks-path-config": [lambda t: _command(
+        f"git -c core.hooksPath=/dev/null diff --no-ext-diff --no-textconv {t.merge_base_sha} {t.head_sha}")],
+    "dollar-at-end-of-double-quotes": [lambda t: _command(
+        f'git show {t.head_sha}:changed-0 | grep -n -B2 "^0$" | grep -v "^--$"', output="1:0\n")],
+    "command-in-variable": [lambda t: _command(
+        f'cd /review && D="git diff --no-ext-diff --no-textconv {t.merge_base_sha} {t.head_sha}"; $D -- changed-0')],
+    "stderr-dropped": _diff(tail=" 2>/dev/null"),
+    "stderr-merged-piped": _diff(tail=" 2>&1 | head -200"),
+    "filter-chain": [lambda t: _command(
+        f"cd /review && B={t.merge_base_sha}; export H={t.head_sha}; git diff --no-ext-diff $B $H 2>&1 "
+        "| nl -ba | grep -n -v -e zzz | sed -n '1,400p' | head -n 400 | tail -n +1 | cat -n")],
+}
+
+
+def test_frozen_patch_evidence_is_its_distinct_changed_lines():
+    diff = ("diff --git a/f.py b/f.py\n--- a/f.py\n+++ b/f.py\n@@ -1,2 +1,2 @@\n"
+            "-    old_value = compute_old()\n+    new_value = compute_new()\n+}\n")
+    patch = FrozenPatch.from_diff("a" * 40, "b" * 40, "", diff)
+    assert patch.evidence == {"old_value = compute_old()", "new_value = compute_new()"}
+    assert patch.shown_in("+    new_value = compute_new()\n")
+    assert patch.shown_in("    12\t    new_value = compute_new()\n")  # git show <head>:f.py | nl -ba
+    assert not patch.shown_in("}\n")
+    assert not patch.shown_in("diff --git a/f.py b/f.py\n@@ -1,2 +1,2 @@\n+X /tmp/git-blob-ksCWK9/f.py\n")  # textconv
+    assert not patch.shown_in("fatal: path 'x\u2028+    new_value = compute_new()\u2028' does not exist\n")
+    assert patch.shown_in("+    new_value = compute_new()\r\n")
+    binary = FrozenPatch.from_diff("a" * 40, "b" * 40, "", "diff --git a/p.png b/p.png\nBinary files a/p.png and b/p.png differ\n")
+    assert binary.shown_in("diff --git a/p.png b/p.png\n") and not binary.shown_in("")
+
+
+# \u771f\u5b9e\u5f62\u72b6\uff1a\u672c PR \u65b0\u589e\u4e00\u4e2a Python \u6a21\u5757\uff0c\u9996\u884c\u662f\u5230\u5904\u90fd\u6709\u7684 `from __future__ import annotations`
+COMMON_LINE_DIFF = (
+    "diff --git a/pkg/new_gate.py b/pkg/new_gate.py\nnew file mode 100644\nindex 0000000..1111111\n"
+    "--- /dev/null\n+++ b/pkg/new_gate.py\n@@ -0,0 +1,3 @@\n+from __future__ import annotations\n+\n"
+    "+def gate_reads_the_patch() -> bool:\n"
+    "diff --git a/pkg/old.py b/pkg/old.py\nindex 2222222..3333333 100644\n--- a/pkg/old.py\n+++ b/pkg/old.py\n"
+    "@@ -4 +3,0 @@\n-    removed_only_line = 1\n"
+    "diff --git \"a/pkg/\\303\\244 x.py\" \"b/pkg/\\303\\244 x.py\"\n--- \"a/pkg/\\303\\244 x.py\"\n"
+    "+++ \"b/pkg/\\303\\244 x.py\"\n@@ -1 +1 @@\n-+++ looks like a header\n+++++ also looks like one\n")
+UNCHANGED_MODULE = "from __future__ import annotations\n\nfrom pathlib import Path\n\ndef unrelated() -> None:\n"
+
+
+def test_common_line_in_unchanged_file_is_not_a_patch_read():
+    """#1969 \u6b63\u5f0f\u5ba1\u67e5\uff08bb8aa92e\uff09opus BLOCK \u7684\u8d1f\u5bf9\u7167\uff1a`git show <head>:<\u672c PR \u6ca1\u6539\u7684\u6587\u4ef6>` \u7684\u8f93\u51fa\u91cc\u6709\u4e0e\u6539\u52a8\u884c
+    \u76f8\u540c\u7684\u901a\u7528\u884c\uff0c\u4e0d\u7b97\u8bfb\u53d6\uff1b\u540c\u4e00\u884c\u51fa\u81ea\u6539\u52a8\u6587\u4ef6\u624d\u7b97\u3002\u65e7 head \u4e0a\u8fd9\u91cc\u7684\u7b2c\u4e00\u6761\u65ad\u8a00\u4e0d\u6210\u7acb\u3002"""
+    head, merge_base = "a" * 40, "b" * 40
+    patch = FrozenPatch.from_diff(head, merge_base, "", COMMON_LINE_DIFF)
+    assert "from __future__ import annotations" in patch.evidence
+    assert not reads_candidate_patch(f"/bin/bash -lc 'git show {head}:pkg/approval.py'", UNCHANGED_MODULE, patch)
+    assert not reads_candidate_patch("/bin/bash -lc 'git show HEAD:pkg/approval.py | nl -ba'",
+                                     "     1\tfrom __future__ import annotations\n", patch)
+    assert reads_candidate_patch(f"/bin/bash -lc 'git show {head}:pkg/new_gate.py'", UNCHANGED_MODULE, patch)
+    # \u53ea\u5220\u4e86\u884c\u7684\u6587\u4ef6\uff0chead \u4e0a\u7684\u5185\u5bb9\u91cc\u6ca1\u6709\u5b83\u7684\u6539\u52a8
+    assert not reads_candidate_patch(f"/bin/bash -lc 'git show {head}:pkg/old.py'",
+                                     "    removed_only_line = 1\n", patch)
+    # \u52a0\u5f15\u53f7\u7684\u8def\u5f84\u3001\u5185\u5bb9\u5f62\u5982 `+++ ` \u7684\u6539\u52a8\u884c\u90fd\u6309\u6587\u4ef6\u5f52\u5c5e
+    assert reads_candidate_patch(f"/bin/bash -lc 'git show {head}:\"pkg/\u00e4 x.py\"'", "++++ also looks like one\n", patch)
+    assert patch.files[2].evidence == {"+++ looks like a header", "++++ also looks like one"}
+    # diff \u4e24\u7aef\u4e0d\u662f merge-base \u4e0e head \u65f6\uff0c\u8f93\u51fa\u53ef\u80fd\u542b\u672c PR \u6ca1\u6539\u7684\u6587\u4ef6\uff1a\u53ea\u8ba4\u51bb\u7ed3\u6587\u4ef6\u5934\u4e4b\u540e\u7684\u884c
+    other = "diff --git a/pkg/approval.py b/pkg/approval.py\n@@ -0,0 +1 @@\n+from __future__ import annotations\n"
+    assert not reads_candidate_patch(f"/bin/bash -lc 'git diff {head}~1 {head}'", other, patch)
+    mine = "diff --git a/pkg/new_gate.py b/pkg/new_gate.py\n@@ -0,0 +1 @@\n+from __future__ import annotations\n"
+    assert reads_candidate_patch(f"/bin/bash -lc 'git diff {head}~1 {head}'", other + mine, patch)
+    # merge-base..head \u7684\u8f93\u51fa\u5168\u51fa\u81ea\u51bb\u7ed3\u8865\u4e01\uff08\u4e0a\u4e0b\u6587\u884c\u4e5f\u662f\u6539\u52a8\u6587\u4ef6\u7684\u5185\u5bb9\uff09
+    assert reads_candidate_patch(f"/bin/bash -lc 'git diff {merge_base} {head} | grep -n annotations'",
+                                 "7:+from __future__ import annotations\n", patch)
+
+
+def test_unreadable_frozen_patch_is_failed_not_raised(lane, monkeypatch):
+    """#1969 正式审查（bb8aa92e）opus 非阻断项：来源对象库取不出冻结补丁时记 FAILED，不把 git 的异常抛出去。"""
+    target = ReviewTarget(**lane.review_pr(1810)["target"])
+    folder = lane.state_root / "runs" / target.key / MODELS[0]
+    launch, receipt = json.loads((folder / "launch.json").read_text()), json.loads((folder / "receipt.json").read_text())
+    assert validate_review(target, launch, receipt, folder, lane.source).verdict == "PASS"
+    def missing(*_):
+        raise subprocess.CalledProcessError(128, ["git", "diff"])
+    monkeypatch.setattr(module, "frozen_patch", missing)
+    outcome = validate_review(target, launch, receipt, folder, lane.source)
+    assert outcome.verdict == "FAILED" and "取不出冻结候选补丁" in outcome.reason
+
+
+@pytest.mark.parametrize("claim", ["PASS", "BLOCK"])
+def test_conclusion_without_frozen_patch_read_is_failed(lane, claim):
+    """#1968/#1969：跑过命令但没有让 git 把冻结候选补丁输出到日志的，PASS、BLOCK 都不采信。"""
+    outcomes = _verdicts_with_commands(lane, claim, NOT_A_PATCH_READ)
+    assert {case: o.verdict for case, o in outcomes.items()
+            if o.verdict != "FAILED" or "未读取冻结候选补丁" not in (o.reason or "")} == {}
+
+
+@pytest.mark.parametrize("claim", ["PASS", "BLOCK"])
+def test_conclusion_after_frozen_patch_read_stands(lane, claim):
+    outcomes = _verdicts_with_commands(lane, claim, PATCH_READ)
+    assert {case: o.reason for case, o in outcomes.items() if o.verdict != claim} == {}
+
+
+def test_zero_tool_pass_is_never_reused(lane, env):
+    _modes(lane, **{model: "PASS:notool" for model in MODELS})
+    assert lane.review_pr(1810)["state"] == "error"
+    _clear_modes(lane)
+    _advance_main(lane, env)
+    result = lane.review_pr(1810)
+    assert result["verdict"] == "PASS" and "reused_from" not in result
+    assert _launches(lane) == 2 * len(MODELS)
+    assert lane.gateway.sent == ["pending", "error", "pending", "success"]
 
 
 @pytest.mark.parametrize("field", ["POLICY", "REVIEW_CONTRACT"])
