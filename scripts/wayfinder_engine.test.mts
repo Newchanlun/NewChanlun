@@ -394,6 +394,23 @@ test("parseSplitPlan：无标记时兜底扫全文；无票时返回 null", () =
   assert.equal(parseSplitPlan("```json\n{\"other\":1}\n```"), null);
 });
 
+test("parseSplitPlan：依赖或裁定票号含畸形项时整份计划无效，不退回其他围栏", () => {
+  const plan = (s2: string) => [
+    "<!-- wayfinder-split -->",
+    "```json",
+    `{"tickets":[{"id":"S1","title":"a","depends_on":[],"rulings":[1057]},${s2}]}`,
+    "```",
+    "示例：",
+    "```json",
+    '{"tickets":[{"id":"X1","title":"示例"}]}',
+    "```",
+  ].join("\n");
+  assert.equal(parseSplitPlan(plan('{"id":"S2","title":"b","depends_on":["S1",7]}')), null, "数字依赖不得被静默丢弃");
+  assert.equal(parseSplitPlan(plan('{"id":"S2","title":"b","depends_on":"S1"}')), null);
+  assert.equal(parseSplitPlan(plan('{"id":"S2","title":"b","rulings":["1058"]}')), null);
+  assert.deepEqual(parseSplitPlan(plan('{"id":"S2","title":"b","depends_on":["S1"]}'))!.map((t) => t.id), ["S1", "S2"]);
+});
+
 // ── #1084 追加：队列分类与 sandcastle 释放规划 ─────────────────────────────────
 
 function ready(partial: Partial<ReadyTicket> & { number: number }): ReadyTicket {

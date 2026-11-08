@@ -1,7 +1,7 @@
 // Sequential Reviewer（Codex/Astra 版，#1617）—— #1001/#1002/#1003 裁定落地。
 // 每票：host 侧 frontier 取票 + claim → createSandbox（确定性分支，baseBranch=main）
 //   → Phase 1 实装工蜂 → Phase 2 独立评审工蜂（直接在分支上修正）
-//   → 不合 main（人工闸，#1003 裁 3）。
+//   → 不合 main（工蜂只交分支；合入由分支保护的 deepagents/review 与 ci-ok 把关，#1003 裁 3）。
 // 跑法：npx tsx .sandcastle/main.mts
 
 import { useScheduler } from "./scheduler-config.mts";
@@ -331,7 +331,7 @@ if (REVIEW_ONLY) {
     if (e instanceof ReviewPromptTooLargeError) process.exit(e.exitCode);
     throw e;
   }
-  console.log(`REVIEW_ONLY 完成：${branch} 待验收合入（人工闸）。`);
+  console.log(`REVIEW_ONLY 完成：${branch} 待验收开 PR（不合 main）。`);
   await sandbox.close();
   process.exit(0);
 }
@@ -408,7 +408,7 @@ for (let iter = 1; iter <= MAX_TICKETS_PER_RUN; iter++) {
       process.exitCode = e.exitCode;
       break;
     }
-    console.log(`两段完成：${branch} 待验收合入（人工闸）。`);
+    console.log(`两段完成：${branch} 待验收开 PR（不合 main）。`);
   } catch (error) {
     logWorker({ ticket: issue, branch, phase: "managed-stage", status: "failed", reason: String(error).slice(0, 500) });
     throw error;

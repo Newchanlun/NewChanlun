@@ -1,6 +1,6 @@
 # 用新执行器交付一张首证专用票
 
-新执行器把专用票或切流后的引擎放行票从持有跑到 `awaiting_merge`。Deep Agents 主控按 poteto-mode 派 Sandcastle 工蜂，作者与异家族独审都经现役 `codex-child`。独审对某个 head 判 PASS 后，执行器用 GitHub App 身份把这个冻结 SHA 发布到 `codex/deepagents/t<票号>`，开目标为 main 的 draft PR，写 `deepagents/review` 状态和票面交付标记。后续精确 head 独审使用 [external_review review-pr](EXTERNAL-REVIEW.md)。执行器没有自动合入消费者，主控按当前授权完成合入。
+新执行器把专用票或切流后的引擎放行票从持有跑到 `awaiting_merge`。Deep Agents 主控按 poteto-mode 派 Sandcastle 工蜂，作者与异家族独审都经现役 `codex-child`。独审对某个 head 判 PASS 后，执行器用 GitHub App 身份把这个冻结 SHA 发布到 `codex/deepagents/t<票号>`，开目标为 main 的 draft PR，写 `deepagents/review` 状态和票面交付标记。后续精确 head 独审使用 [external_review review-pr](EXTERNAL-REVIEW.md)。执行器不合入 main。main 的合入不设人工批准：main 分支保护要求 `deepagents/review` 与 `ci-ok` 两项必需检查通过并追平 main，满足后由代理合入（口径见 `.sandcastle/docs/graph-engineering.md`「main 的合入」）。
 
 `register` 保留首证专用票入口。`serve` 接收切流后的引擎放行队列，见文末。接管旧 owner 手里的票仍一律拒绝。
 
