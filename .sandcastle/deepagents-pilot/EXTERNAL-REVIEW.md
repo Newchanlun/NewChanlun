@@ -115,6 +115,14 @@ main 的 D5 检查启用由主控另行执行，保留已有保护。所需来�
 
 App token 只申请 metadata/read、contents/read、pull_requests/read、statuses/write；token 留在宿主发布进程内存。GitHub 的 statuses/write 不按 context 缩权，宿主发布器及 OS 因此属于受信边界。
 
+## 成本上限与每日额度闸
+
+单次独审最多执行 250 条命令（`REVIEW_COMMAND_CAP`，实测 Opus 中位 47、p90 98、最大 143），墙钟最长 45 分钟（实测最大 23 分钟）。触顶即关容器，回执 `status=failed` 并写 `failure_code`：`budget_exceeded`（命令数）、`timeout`、`cancelled`、`model_exit`（Codex 非零退出）或 `model_error`（模型阶段的其他异常）；容器被关后 SDK 的 exec 无论正常返回还是抛错，原因码都会写上。宿主汇总把它记进该 reviewer 的 reason（`failure_code=…`），`status` 子命令能直接看到，整轮按 FAILED 发布 `error`，不当作通过。
+
+回执的 `usage` 记 `input_tokens`、`cached_input_tokens`、`output_tokens`、`reasoning_output_tokens`、`commands` 和 `reported`。codex exec 只在整轮结束（`turn.completed`）时报用量，被中途关停的独审 `reported=false`，token 数未知，不是 0。
+
+设置环境变量 `NEWCHANLUN_REVIEW_DAILY_INPUT_CAP`（正整数 token 数，可写 `400_000_000`）后启用每日额度闸；不设则不启用。近 24 小时（按回执 mtime）各 reviewer 回执的输入 token 合计达到上限时，本 run 只要还要派发新模型（任一 reviewer 尚无 `launch.json`，包括恢复时 prepare 中断、只有目录的情形），就抛 `quota-paused` 待处理（退出码 2），不派模型；本 run 尚未发 `pending` 时也不发。已派发的 reviewer 在自己的进程里照常跑到终态，额度回落后用同一 attempt 重跑即收养它并派发剩下的。`reported=false` 的回执按命令数估算：每条命令计窗口内已报用量回执的「输入/命令」均值，没有样本时每条 10 万 token，零命令也至少计一条。没有 `usage` 字段的旧回执记 0。变量值无效（0、负数、`1e9`、`0.5G` 等）时报出变量名并拒绝派发，退出码 2。
+
 ## 运行靶向检查
 
 ```sh
