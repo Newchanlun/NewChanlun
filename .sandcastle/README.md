@@ -68,7 +68,7 @@ node --import tsx --test .sandcastle/scheduler-config.test.mts
 2. **队列交棒**：只给合资格实装票（已批准 spec/DAG + 未 assign + 无 open blocker）挂 `sandcastle`，不把全部历史 `ready-for-agent` 无差别放行；每轮五桶分明（ready-for-agent / sandcastle 拾取权 / blocked / claimed / running）。
 3. **状态页**：写 `.sandcastle/logs/wayfinder-status.md`，不再把 `sandcastle` 空误写成 `ready-for-agent` 全空。
 
-gh 查询有限重试 + 指数退避 + fail-loud；无 runnable 票 sleep 后重查、不退出。普通 P/SPEC 已由 #1909 改为起草 + 非作者独审 PASS 代理裁定，main 的合入不设人工批准：分支保护的 `deepagents/review`（正式非作者双审 success）与 `ci-ok`（适用 CI 全绿）满足、分支追平后代理可合入，工蜂与执行器不合入；人工确认只留实盘下单与资金、密钥与凭证、CI 与分支保护配置三类，资金、账户、凭据硬门票挂 `ready-for-human` 交还用户签署（ADR 0041，口径见 `docs/graph-engineering.md`「main 的合入」）。拆票与排队前重读当前 SPEC 裁定；DeepAgents 执行器迁移仍依赖 Queued PR，见 graph-engineering.md「#1742 执行面依赖」。
+gh 查询有限重试 + 指数退避 + fail-loud；无 runnable 票 sleep 后重查、不退出。普通 P/SPEC 已由 #1909 改为起草 + 非作者独审 PASS 代理裁定，main 的合入不设人工批准：分支保护的 `deepagents/review`（正式非作者双审 success）与 `ci-ok`（适用 CI 全绿）满足、分支追平后代理可合入，工蜂与执行器不合入；人工确认只留实盘下单与资金、密钥与凭证两类，资金、账户、凭据硬门票挂 `ready-for-human` 交还用户签署（ADR 0041，口径见 `docs/graph-engineering.md`「main 的合入」）。拆票与排队前重读当前 SPEC 裁定；DeepAgents 执行器迁移仍依赖 Queued PR，见 graph-engineering.md「#1742 执行面依赖」。
 
 **部署成受管常驻服务**（launchd KeepAlive，默认真实执行 `--live`）：
 
