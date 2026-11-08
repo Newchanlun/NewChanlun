@@ -1,7 +1,7 @@
-# ADR 0057：P0 场所 profile 四字段签署（v2 起；现行 replay v3：tick_size / slippage_bps / tax_bps / entry_delay_bars）
+# ADR 0057：P0 场所 profile 四字段签署（v2 起；现行 replay v4：tick_size / slippage_bps / tax_bps / entry_delay_bars）
 
 > 正本：本文件是 P0 场所 profile v2 中 `tick_size`、`slippage_bps`、`tax_bps`、`entry_delay_bars` 四字段的签署状态、来源与生效日期的正本。
-> 最后裁定：#1774（2026-11-08，用户签署 replay v3 的 `entry_delay_bars`、`tax_bps`，主控代发，[评论 6723858747](https://github.com/Newchanlun/NewChanlun/issues/1774#issuecomment-6723858747)，首发记录为[评论 6723284739](https://github.com/Newchanlun/NewChanlun/issues/1774#issuecomment-6723284739)；此前 2026-10-31、2026-10-28 用户批 P 类）
+> 最后裁定：#1774（2026-11-08，用户签署 replay 的 `entry_delay_bars`、`tax_bps`（v3）与 `slippage_bps`（v4），主控代发，[评论 6723858747](https://github.com/Newchanlun/NewChanlun/issues/1774#issuecomment-6723858747)，首发记录为[评论 6723284739](https://github.com/Newchanlun/NewChanlun/issues/1774#issuecomment-6723284739)；此前 2026-10-31、2026-10-28 用户批 P 类）
 > 受影响代码清单：见本文「受影响代码清单」节（实施归 #1640 owner 消费；本 ADR 不改代码）
 
 **状态**：P 类裁定，用户已批，文书待 main 合入。本 ADR 只签字段状态与来源；`venue-profile-P0.json` v2 落盘、解析器与测试锁更新归下游实施，不以本 ADR 声称实现完成。Part of #1323。
@@ -227,3 +227,54 @@ Linux 验收分别运行 `cargo test --release --locked --lib theta_v0::run_reco
 
 - 第九节 `entry_delay_bars = 1`、`tax_bps = 0`：`[新缠论:选择]`（用户 2026-11-08 签，主控代发，#1774 评论 6723858747，首发记录 6723284739）。均为模型假设，仅用于历史回放。
 - 第十节合同与实现分开验收：沿用 ADR 0052/0056 与 #1381 既有合同，本节不新签。
+
+## 追加修订：replay v4 的滑点模型假设（#1774，2026-11-07）
+
+> 本节依据以文末「第十一节的裁定依据（2026-11-08 用户签署）」为准。第十一节首句所写的「自主裁定（采纳补稿方案 S1）」只是起草与审查经过，不是签署依据。
+
+### 十一、slippage_bps 签为 2 bp/side 模型假设，NT 路径先拆成本标签
+
+本节依据 [#1774 评论 6702153508](https://github.com/Newchanlun/NewChanlun/issues/1774#issuecomment-6702153508) 的自主裁定（采纳补稿方案 S1），追加而不改写历史裁定。补稿为 `/Volumes/AgentStorage/issue1774-replay-policy/slippage-addendum/draft.md`（sha256 `3440d88ee6f8d48ed16269248adf583af7430398f05409af4fecc9f9425f8058`），非作者独审为同目录 `review.md`（VERDICT: PASS，sha256 `fe9a7e32073340e1540754c0f1c8c658867709a6d01aaa288144b80e7f61f8bc`）。生效日为 2026-11-08（用户签署日，见第十一节的裁定依据节）。记录 `venue-profile-P0` 从 v3 升为 v4，仍以 `profile_id=P0`、`symbol=BTC` 绑定 `replay_binance_spot_1m`，不加 `usage` 头；`tick_size`、`commission_bps`、`tax_bps`、`entry_delay_bars` 的值与来源与 v3 逐字节相同。
+
+| 字段 | v4 值 | 来源与代价 |
+|---|---|---|
+| `slippage_bps` | 2 bp/side | `[新缠论:选择]` 模型假设，非测量、非场所事实。#917 平方根律 `Y·σ_日·sqrt(Q/V_日)`：Y=0.9（Donier & Bonart 2015 §4.3），δ=0.5，σ_日=GK 中位 2.531%，V_日=中位 1.2255e9 USDT（本仓 1m 全史），Q=100,000 USDC（ADR 0040 裁定三、四，P0 单重 L0 开局批），得 2.057，取最近整数为 2。与 ADR 0040 C(L0)=1,110,000 同公式同输入。半价差已评估，2020 年以后约 1 tick，不单列 |
+
+依据是裁定四退场条件的第二路：「按 `[新缠论:选择]` 单独签一个回放撮合假设值并写明代价」。不签的现状不是「未知」，而是影子臂经诊断夹具无来源地用 2 bp 滑点和 1 bp 佣金；签值后三项成本都有具名来源。
+
+四条限制写进记录 source，读数须一并携带：
+
+1. P0 的 Q/V_日 ≈ 8.2e-5，低于平方根律已测下界 1e-3（Bucci 等 2019），属外推；按线性外推只有 0.59 bp，所以 2 bp 是偏保守的一侧。
+2. Binance 现货 aggTrades 四个样本日只作量级核对：2025、2026 年约 0.07 bp，2022 年压力日 1.43 bp，2018 年约 3.5 bp（VWAP 落差均值加半价差中位，口径混合）。
+3. 逐日代入的年中位从 2017 年约 39 bp 到 2025 年约 1.2 bp。常数表达不了逐年变化；按时间变化的冲击模型需要新的模型身份并改 `fill.rs`，不在本节（U-2）。
+4. 2 bp 只描述 P0 规模（10 万 USDC）的成本。批量臂起始 NAV 为首价 × 1e4（BTC 约 4,260 万），是 sizing 尺度匹配值，不得据此把 2 bp 读成该规模下的成本。规模增长或换向合单不触发改签（U-4）。
+
+不变项：ADR 0018 裁定五照旧，限价被动成交与开盘越过成交不扣本值；成本门 slippage 仍为 `Missing`，本值不是成本门数值（裁定二）；诊断夹具、synthetic 零值与成本门数值都不是来源（裁定四）。准入门与 `admissible()` 判定逻辑、synthetic 记录及 B1+B2、诊断夹具记录、ADR 0044 成本门四项不变。正式完整回放在成本口径上的前置仍是 #1381 的 `fee_profile` 与 G-2；本推导可作 #1381 的候选来源，不代替它。I-4 测量票的范围改为在 Binance 上自标 Y（U-3），不再是签值前置。
+
+**I-3 处置（同一 PR，排在签值之前）**。NT/Python 路径（`trading_system/backtest/theta_backtest_py.py`）的撮合成本来自 NT instrument（`BTC-USD-PERP.HYPERLIQUID`，maker 1 bp、taker 3.5 bp、tick 0.001）、NT 默认费用模型与 `FillModel(prob_slippage=0.0)`，不读 venue profile 的成本项。P0 变为 admissible 后，原「记录:」行会让读者以为成本按 P0 计算。处置为只改标签：输出拆成「准入记录」与「撮合成本来源」两行，后者无论 admissible 与否都打印，取值来自实际传给 `add_venue` 与 `add_instrument` 的对象；`ThetaRecStrategyConfig.venue_profile` 文档写明 NT 不读其成本项。撮合、策略、流式、NT 与 FFI 实现零改动。Rust ⑥段已标 `research-override`，本节不改；为它补一行成本来源标签登记为非阻塞建议（U-7）。
+
+本节影响 `policy_records/venue-profile-P0.json` 的记录，`run_records.rs`、`config.rs`、`tests/test_theta_pyo3_bridge.py` 的测试，`theta_backtest_py.py` 的输出标签与新增 `tests/test_theta_nt_cost_provenance.py`。Linux 验收命令同第十节。实施精确 head 的非作者独审、必要 CI 与主线合入分别验收。
+
+### 第十一节的裁定依据（2026-11-08 用户签署）
+
+> 本节只追加，不改写第十一节和上文各裁定的原文。被取代的条款在下文逐条点明，原文保留作历史。
+
+**裁定依据**：用户签署，与第九、十节同一条签署。用户 2026-11-08 在主图会话中明确指示「同意签字 你帮我签」，主图主控代发，签署依据为 [#1774 评论 6723858747](https://github.com/Newchanlun/NewChanlun/issues/1774#issuecomment-6723858747)，首行为「用户 2026-11-08 批复：P0 回放 profile 签 entry_delay_bars=1、tax_bps=0、slippage_bps=2（均为模型假设，仅历史回放，不用于实盘与真实资金；适用范围按 #1774 评论 6697804941 与 6702153508 的限制条件）」。首发记录 [#1774 评论 6723284739](https://github.com/Newchanlun/NewChanlun/issues/1774#issuecomment-6723284739) 内容相同、首行写作「退回：」，补发原因见第九、十节裁定依据节。[#1774 评论 6702153508](https://github.com/Newchanlun/NewChanlun/issues/1774#issuecomment-6702153508) 的主控裁定、补稿与非作者独审 PASS 是推导、起草与审查经过，不是签署来源。
+
+**适用范围**：只限历史回放。`slippage_bps = 2` 是模型假设，不用于实盘，不用于真实资金。限制条件按 #1774 评论 6702153508，即第十一节列出的四条限制；第九、十节裁定依据节所列 6697804941 的限制照旧适用于 `tax_bps`、`entry_delay_bars`。P0 v4 admissible 只表示回放记录准入，不使影子臂可用 P0，不证明正式完整历史回放完成；正式回放成本口径的前置仍是 #1381 的 `fee_profile` 与 G-2。
+
+**本次签署取代的既有条款**：
+
+| 条款 | 原文要点 | 取代后 |
+|---|---|---|
+| 裁定四 `:59`，`slippage_bps` 退场条件 | 实测来源，或用户按 `[新缠论:选择]` 单独签回放撮合假设值并写明代价 | 第二条途径由用户签署满足，对 `replay_binance_spot_1m` 签 2 bp/side，代价见第十一节四条限制。第十一节 `:243` 把这条途径写成主控自主裁定可满足，以本节为准 |
+| 后果照实 `:116`，「还须由用户……签」 | replay 三项待用户签 | 对 `replay_binance_spot_1m` 三项均已由用户签署（v3 两项、v4 一项） |
+| 追加修订裁定八 `:155`，「仍因三项 `AwaitingPolicy` 拒启」 | P0 别名因三项未签拒启 | v4 起 P0 不再因成本项拒启，`admissible()` 为真；不放宽 `require_admissible` |
+| 追加修订不变项 `:162`，「replay 三项保持 `AwaitingPolicy`」 | replay 三项成本均不签 | v4 起 replay 三项均已签；该行其余不变项照旧 |
+| 第九节 `:195`、`:197`，`slippage_bps` 为 `AwaitingPolicy`、「v3 下 P0 仍拒启」 | v3 记录中 slippage 为 `AwaitingPolicy`，P0 拒启 | 只对 v3 成立；v4 已落用户 2026-11-08 签署的 2 bp/side，P0 不再因滑点拒启。「影子臂尚不能使用此 profile」照旧 |
+| 第九、十节裁定依据节 `:213`，「v3 记录中仍为 AwaitingPolicy」 | 同上 | 只对 v3 成立；v4 按本节另落 |
+
+### 溯源标签
+
+- 第十一节 `slippage_bps = 2`：`[新缠论:选择]`（用户 2026-11-08 签，主控代发，#1774 评论 6723858747，首发记录 6723284739）。模型假设，仅用于历史回放；推导来源为 #917 平方根律，限制见第十一节。
+- 第十一节 I-3 成本标签拆分：只改输出标签与测试，不是签值，沿用 #1774 评论 6702153508 的实施安排。
