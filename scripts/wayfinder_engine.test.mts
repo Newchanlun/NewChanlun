@@ -394,6 +394,14 @@ test("parseSplitPlan：无标记时兜底扫全文；无票时返回 null", () =
   assert.equal(parseSplitPlan("```json\n{\"other\":1}\n```"), null);
 });
 
+test("parseSplitPlan：有标记但其后没有完整围栏时返回 null，不退回标记前的示例围栏", () => {
+  const example = ["示例：", "```json", '{"tickets":[{"id":"X1","title":"示例"}]}', "```"];
+  assert.equal(parseSplitPlan([...example, "<!-- wayfinder-split -->", "（计划待补）"].join("\n")), null, "标记后无围栏");
+  assert.equal(parseSplitPlan([...example, "<!-- wayfinder-split -->", "```json", '{"tickets":[{"id":"S1"'].join("\n")), null, "标记后围栏未闭合");
+  const real = [...example, "<!-- wayfinder-split -->", "```json", '{"tickets":[{"id":"S1","title":"a"}]}', "```"].join("\n");
+  assert.deepEqual(parseSplitPlan(real)!.map((t) => t.id), ["S1"], "标记后的围栏照常解析");
+});
+
 test("parseSplitPlan：依赖或裁定票号含畸形项时整份计划无效，不退回其他围栏", () => {
   const plan = (s2: string) => [
     "<!-- wayfinder-split -->",

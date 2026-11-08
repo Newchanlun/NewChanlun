@@ -67,8 +67,15 @@ from .domain import (
     parse_sha,
 )
 from .external_review import STATUS_LOCKS, head_status, latest_status
-from .github_app import WRITE_PERMISSIONS, AppIdentity, GitHubAppClient, IdentityError
+from .github_app import (
+    WRITE_PERMISSIONS,
+    AppIdentity,
+    GitHubAppClient,
+    IdentityError,
+    LocalConfigError,
+)
 from .run import (
+    SOURCE_REPO,
     Busy,
     Halted,
     InsufficientSpace,
@@ -812,8 +819,56 @@ def _client(args: argparse.Namespace) -> GitHubAppClient:
     """登记只要读权限；run 与 release（摘镜像）才申请写权限。两者都先核 App、安装与仓库身份。"""
     identity = AppIdentity(5486877, 179444545, 1150335160, REPO, "newchanlun-deepagents-1742", args.private_key)
     client = GitHubAppClient(identity, permissions=WRITE_PERMISSIONS if args.command in ("run", "release") else None)
-    client.verify()
+    try:
+        client.verify()
+    except BaseException:
+        client.close()
+        raise
     return client
+
+
+def _serve(args: argparse.Namespace, store: ClaimStore, cutover_store: CutoverStore, source_repo: Path) -> int:
+    """队列轮询。读不到 GitHub（含启动时的 App 身份核验）：
+    `--once` 让 IdentityError 照旧冒到 main → 退出码 2（runbook 拿它当检查步骤）；
+    `--loop` 写明哪个源读不到、标到状态页，等一个轮询间隔再从头核身份，进程不退出（launchd 不重启）。
+    本机配置错误（LocalConfigError，含私钥 PrivateKeyError）不是读不到源，两种模式都冒到 main → 退出码 2。"""
+    from .queue import QueueIntake, mark_source_unreadable
+
+    def child(unit: WorkUnit) -> int:
+        command = [sys.executable, "-m", "pilot1742.executor", "--state-root", str(args.state_root),
+                   "--drain-root", str(args.drain_root), "run", "--run-id", unit.run_id,
+                   "--workers-log", str(args.workers_log), "--private-key", str(args.private_key),
+                   "--recheck-approval"]
+        return subprocess.run(command, check=False).returncode
+
+    client: GitHubAppClient | None = None
+    try:
+        while True:
+            try:
+                cutover_store.load()
+            except CutoverError as error:
+                print(f"queue inactive: {error}")
+                return 0
+            try:
+                if client is None:
+                    client = _client(args)
+                    intake = QueueIntake(args.state_root, RepoGateway(client), store, cutover_store, source_repo)
+                print(json.dumps(intake.once(child), ensure_ascii=False, indent=2), flush=True)
+            except IdentityError as error:
+                if args.once or isinstance(error, LocalConfigError):
+                    raise
+                if client is not None:
+                    client.close()
+                    client = None
+                print(f"round skipped, source unreadable (github): {type(error).__name__}: {error}",
+                      file=sys.stderr, flush=True)
+                mark_source_unreadable(source_repo, f"github: {type(error).__name__}: {error}")
+            if args.once:
+                return 0
+            time.sleep(args.poll_seconds)
+    finally:
+        if client is not None:
+            client.close()
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -892,7 +947,7 @@ def main(argv: list[str] | None = None) -> int:
         if args.command == "release":
             # 本机先记 released，GitHub 或 App 凭据不可用也能让旧控制进程停下；摘镜像在下面联网后做。
             release_claim(store, None, args.ticket, args.run_id, args.reason)
-        source_repo = Path(__file__).resolve().parents[3]
+        source_repo = SOURCE_REPO
         cutover_store = CutoverStore(args.state_root, args.drain_root, getattr(args, "workers_log", WORKERS_LOG))
         if args.command == "serve":
             if args.poll_seconds <= 0:
@@ -902,6 +957,7 @@ def main(argv: list[str] | None = None) -> int:
             except CutoverError as error:
                 print(f"queue inactive: {error}")
                 return 0
+            return _serve(args, store, cutover_store, source_repo)
         if args.command == "cutover":
             snapshot_path = args.snapshot or args.state_root / "cutover-snapshot.json"
             if args.operation == "pending":
@@ -951,25 +1007,6 @@ def main(argv: list[str] | None = None) -> int:
                         cutover_store.record(cutover_record)
                 print(json.dumps(asdict(cutover_record), ensure_ascii=False, indent=2))
                 return 0
-            if args.command == "serve":
-                from .queue import QueueIntake
-                intake = QueueIntake(args.state_root, gateway, store, cutover_store, source_repo)
-                def child(unit: WorkUnit) -> int:
-                    command = [sys.executable, "-m", "pilot1742.executor", "--state-root", str(args.state_root),
-                               "--drain-root", str(args.drain_root), "run", "--run-id", unit.run_id,
-                               "--workers-log", str(args.workers_log), "--private-key", str(args.private_key),
-                               "--recheck-approval"]
-                    return subprocess.run(command, check=False).returncode
-                while True:
-                    try:
-                        cutover_store.load()
-                    except CutoverError as error:
-                        print(f"queue inactive: {error}")
-                        return 0
-                    print(json.dumps(intake.once(child), ensure_ascii=False, indent=2), flush=True)
-                    if args.once:
-                        return 0
-                    time.sleep(args.poll_seconds)
             if args.command == "register":
                 unit = register(args.state_root, gateway, ticket=args.ticket, run_id=args.run_id, base=args.base,
                                 task=parse_task(args.task.read_text()), playbook=args.playbook,
