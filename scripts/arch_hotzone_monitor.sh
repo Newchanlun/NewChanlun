@@ -181,8 +181,16 @@ refresh_host_main() {
     echo "[arch_hotzone] automation host 非干净 main（branch=${branch:-HEAD}, dirty=$([ -n "$dirty" ] && echo true || echo false)）→ fail-closed" >&2
     return 1
   fi
-  # #1979：只快进；HEAD 领先或分叉（部署候选）时 ff-only 失败 → 上层 fail-closed，不撤销部署。
-  git fetch origin main --quiet && git merge --ff-only --quiet origin/main
+  git fetch origin main --quiet || return 1
+  # #1979：HEAD 有 origin/main 没有的提交（领先=部署候选，或分叉）→ fail-closed，不扫描、不撤销。
+  # 不能只靠 ff-only：HEAD 领先时 `git merge --ff-only` 返回 0，所以先显式数领先提交。
+  local ahead
+  ahead="$(git rev-list --count origin/main..HEAD)" || return 1
+  if [ "$ahead" != "0" ]; then
+    echo "[arch_hotzone] automation host HEAD 有 ${ahead} 个提交不在 origin/main 上（部署候选或分叉，#1979）→ fail-closed" >&2
+    return 1
+  fi
+  git merge --ff-only --quiet origin/main
 }
 
 scan_once() {
@@ -283,7 +291,7 @@ LOCKEOF
     if [ "$actual" -eq "$expected" ]; then
       echo "  PASS  $desc"
     else
-      echo "  FAIL  $desc（实际 $actual，期望 $expected）"
+      echo "  FAIL  ${desc}（实际 ${actual}，期望 ${expected}）"
       fails=$((fails + 1))
     fi
   }
@@ -329,6 +337,46 @@ LOCKEOF
   assert "在飞图 1 张 → 不命中" $? 1
   evaluate_file 100 11 rust/free.rs "$lockfile" 0
   assert "摩擦不足 → 不命中" $? 1
+
+  echo "  宿主自刷新（refresh_host_main，#1979）"
+  local gitdir host before
+  gitdir="$(mktemp -d)"
+  # 临时仓：bare origin + host 克隆；$1=领先提交数 $2=origin 新提交数（两者都>0=分叉）
+  host_fixture() {
+    rm -rf "$gitdir/origin.git" "$gitdir/host" "$gitdir/seed"
+    git init -q --bare -b main "$gitdir/origin.git"
+    git init -q -b main "$gitdir/seed"
+    hf_commit "$gitdir/seed" base
+    git -C "$gitdir/seed" push -q "$gitdir/origin.git" main
+    git clone -q "$gitdir/origin.git" "$gitdir/host" 2>/dev/null
+    local i=0
+    while [ "$i" -lt "$1" ]; do i=$((i + 1)); hf_commit "$gitdir/host" "deploy$i"; done
+    i=0
+    while [ "$i" -lt "$2" ]; do i=$((i + 1)); hf_commit "$gitdir/seed" "upstream$i"; done
+    git -C "$gitdir/seed" push -q "$gitdir/origin.git" main
+  }
+  hf_commit() {
+    git -C "$1" -c user.name=selftest -c user.email=selftest@example.invalid -c commit.gpgsign=false \
+      commit -q --allow-empty -m "$2"
+  }
+  hf_refresh() { (cd "$gitdir/host" && ARCH_HOTZONE_AUTO_UPDATE=1 refresh_host_main) >/dev/null 2>&1; }
+  hf_head() { git -C "$gitdir/host" rev-parse HEAD; }
+
+  host_fixture 0 0; hf_refresh
+  assert "HEAD = origin/main → 放行" $? 0
+  host_fixture 0 1; hf_refresh
+  assert "HEAD 落后 origin/main → 放行" $? 0
+  [ "$(hf_head)" = "$(git -C "$gitdir/seed" rev-parse HEAD)" ]
+  assert "HEAD 落后 → 快进到 origin/main" $? 0
+  host_fixture 1 0; before="$(hf_head)"; hf_refresh
+  assert "HEAD 领先 origin/main（部署候选）→ fail-closed" $? 1
+  [ "$(hf_head)" = "$before" ]
+  assert "HEAD 领先 → 部署提交原样保留" $? 0
+  host_fixture 1 1; before="$(hf_head)"; hf_refresh
+  assert "HEAD 与 origin/main 分叉 → fail-closed" $? 1
+  [ "$(hf_head)" = "$before" ]
+  assert "分叉 → HEAD 原样保留" $? 0
+  rm -rf "$gitdir"
 
   rm -f "$tmp" "$lockfile"
   set -e

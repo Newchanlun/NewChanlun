@@ -282,6 +282,91 @@ def test_serve_modes_do_not_open_app_without_cutover(tmp_path, monkeypatch, caps
     assert not (tmp_path / 'absent').exists()
 
 
+def _serve_argv(v2, tmp_path, mode):
+    return ['--state-root', str(v2.home), '--drain-root', str(tmp_path / 'drain'), 'serve', mode,
+            '--poll-seconds', '1', '--workers-log', str(v2.workers_log),
+            '--private-key', str(tmp_path / 'absent.pem')]
+
+
+class _StopLoop(Exception):
+    pass
+
+
+def test_serve_once_keeps_exit_2_when_github_unreadable(queued, tmp_path, monkeypatch, capsys):
+    """#1988：`serve --once` 是 cutover-runbook 的检查步骤，读不到 GitHub 必须非零退出，不能报成功。"""
+    from pilot1742 import executor as cli
+    from pilot1742.github_app import RequestNotSent
+    v2 = queued[0]
+
+    def unreadable(_args):
+        raise RequestNotSent('连接未建立')
+    monkeypatch.setattr(cli, 'SOURCE_REPO', v2.source)
+    monkeypatch.setattr(cli, '_client', unreadable)
+    assert cli.main(_serve_argv(v2, tmp_path, '--once')) == 2
+    assert 'RequestNotSent' in capsys.readouterr().err
+
+    gateway = v2.gateway()
+    monkeypatch.setattr(cli, '_client', lambda _args: gateway.client)
+
+    def round_unreadable(self, _run):
+        raise RequestNotSent('连接中断')
+    monkeypatch.setattr(QueueIntake, 'once', round_unreadable)
+    assert cli.main(_serve_argv(v2, tmp_path, '--once')) == 2
+
+
+def test_serve_loop_retries_unreadable_github_in_process_and_marks_status(queued, tmp_path, monkeypatch, capsys):
+    """#1988：`--loop` 下启动核身份与单轮读取失败都在进程内重试，不退出（launchd KeepAlive 不再每 10s 重启）。"""
+    from pilot1742 import executor as cli
+    from pilot1742.github_app import OutcomeUnknown, RequestNotSent
+    from pilot1742.queue import UNREADABLE_NOTICE
+    v2 = queued[0]
+    gateway = v2.gateway()
+    page = v2.source / '.sandcastle' / 'logs' / 'deepagents-status.md'
+    opened, rounds, sleeps = [], [], []
+
+    def client(_args):
+        opened.append(1)
+        if len(opened) == 1:
+            raise RequestNotSent('启动时读不到 App')
+        return gateway.client
+
+    def once(self, _run):
+        rounds.append(1)
+        if len(rounds) == 1:
+            raise OutcomeUnknown('GitHub 返回 HTTP 502')
+        return self._status({})
+
+    def sleep(_seconds):
+        sleeps.append(1)
+        if len(sleeps) == 1:
+            assert UNREADABLE_NOTICE in page.read_text() and 'RequestNotSent' in page.read_text()
+        if len(sleeps) == 2:
+            assert 'OutcomeUnknown' in page.read_text()
+        if len(sleeps) == 3:
+            raise _StopLoop
+    monkeypatch.setattr(cli, 'SOURCE_REPO', v2.source)
+    monkeypatch.setattr(cli, '_client', client)
+    monkeypatch.setattr(QueueIntake, 'once', once)
+    monkeypatch.setattr(cli.time, 'sleep', sleep)
+    with pytest.raises(_StopLoop):
+        cli.main(_serve_argv(v2, tmp_path, '--loop'))
+    assert (len(opened), len(rounds), len(sleeps)) == (2, 2, 3)
+    assert UNREADABLE_NOTICE not in page.read_text()
+    err = capsys.readouterr().err
+    assert err.count('round skipped, source unreadable (github)') == 2
+
+
+def test_serve_loop_exits_2_on_local_private_key_error(queued, tmp_path, monkeypatch, capsys):
+    """本机私钥读不到是配置错误，不是 GitHub 读不到：`--loop` 也不吞，退出码 2，状态页不标「读不到源」。"""
+    from pilot1742 import executor as cli
+    v2 = queued[0]
+    monkeypatch.setattr(cli, 'SOURCE_REPO', v2.source)
+    monkeypatch.setattr(cli.time, 'sleep', lambda _s: pytest.fail('private key error retried in-process'))
+    assert cli.main(_serve_argv(v2, tmp_path, '--loop')) == 2
+    assert 'PrivateKeyError' in capsys.readouterr().err
+    assert not (v2.source / '.sandcastle' / 'logs' / 'deepagents-status.md').exists()
+
+
 def test_spec_recheck_interrupts_graph_and_resume_payload_does_not_authorize(queued):
     import sqlite3
 

@@ -44,6 +44,10 @@ class WriteRejected(IdentityError):
     """GitHub 对这一次写请求明确返回 4xx：请求被拒，没有副作用。"""
 
 
+class PrivateKeyError(IdentityError):
+    """本机私钥文件不可读、位置或权限不对、不是可用 RSA 私钥：本机配置错误，不是 GitHub 读不到，重试不会自愈。"""
+
+
 @dataclass(frozen=True)
 class ApiResponse:
     status: int
@@ -82,16 +86,16 @@ def _read_private_key(path: Path) -> bytes:
     try:
         directory = path.resolve().parent
         if any((ancestor / ".git").exists() for ancestor in (directory, *directory.parents)):
-            raise IdentityError("私钥必须保存在所有 Git 检出之外")
+            raise PrivateKeyError("私钥必须保存在所有 Git 检出之外")
         descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
         with os.fdopen(descriptor, "rb") as stream:
             info = os.fstat(stream.fileno())
             if (not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid()
                     or stat.S_IMODE(info.st_mode) not in (0o600, 0o400)):
-                raise IdentityError("私钥须由当前用户持有且权限为 600 或 400")
+                raise PrivateKeyError("私钥须由当前用户持有且权限为 600 或 400")
             return stream.read()
     except OSError:
-        raise IdentityError("无法读取明确指定的私钥文件") from None
+        raise PrivateKeyError("无法读取明确指定的私钥文件") from None
 
 
 class GitHubAppClient:
@@ -160,7 +164,7 @@ class GitHubAppClient:
                 _read_private_key(identity.private_key_path), algorithm="RS256",
             )
         except (ValueError, TypeError, jwt.PyJWTError):
-            raise IdentityError("指定文件不是可用的 GitHub App RSA 私钥") from None
+            raise PrivateKeyError("指定文件不是可用的 GitHub App RSA 私钥") from None
         app = self._request("GET", "/app", signed)
         _require_fields("GitHub App 身份", {
             "id": app.get("id") == identity.app_id,

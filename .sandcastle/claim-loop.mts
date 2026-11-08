@@ -154,19 +154,28 @@ function isMainMtsRunning(): boolean {
   }
 }
 
-/** 专用 automation host 在 spawn 前快进到 origin/main；非 main/脏树/网络失败一律 fail-closed。 */
-function refreshHostMain(): boolean {
+/**
+ * 专用 automation host 在 spawn 前快进到 origin/main；非 main/脏树/网络失败一律 fail-closed。
+ * #1979：HEAD 上有 origin/main 没有的提交（领先=部署候选，或分叉）也 fail-closed——不撤销部署，也不派工
+ * （否则工蜂分支会从含未合入提交的本地 main 切出）。`git merge --ff-only` 在领先时返回 0，所以先显式数领先提交。
+ */
+export function refreshHostMain(cwd: string = process.cwd()): boolean {
   if (process.env.SANDCASTLE_HOST_AUTO_UPDATE !== "1") return true;
+  const git = (args: string) => execSync(`git ${args}`, { encoding: "utf8", env: GH_CLEAN_ENV, cwd }).trim();
   try {
-    const branch = execSync("git branch --show-current", { encoding: "utf8", env: GH_CLEAN_ENV }).trim();
-    const dirty = execSync("git status --porcelain", { encoding: "utf8", env: GH_CLEAN_ENV }).trim();
+    const branch = git("branch --show-current");
+    const dirty = git("status --porcelain");
     if (branch !== "main" || dirty) {
       console.error(`[claim-loop] automation host 非干净 main（branch=${branch || "HEAD"}, dirty=${Boolean(dirty)}）→ fail-closed`);
       return false;
     }
-    execSync("git fetch origin main --quiet", { stdio: "inherit", env: GH_CLEAN_ENV });
-    // #1979：只快进；HEAD 领先或分叉（部署候选）时抛错 → 下方 catch fail-closed，不撤销部署。
-    execSync("git merge --ff-only --quiet origin/main", { stdio: "inherit", env: GH_CLEAN_ENV });
+    git("fetch origin main --quiet");
+    const ahead = git("rev-list --count origin/main..HEAD");
+    if (ahead !== "0") {
+      console.error(`[claim-loop] automation host HEAD 有 ${ahead} 个提交不在 origin/main 上（部署候选或分叉，#1979）→ fail-closed，不派工、不撤销`);
+      return false;
+    }
+    git("merge --ff-only --quiet origin/main");
     return true;
   } catch (e) {
     console.error(`[claim-loop] automation host 同步 origin/main 失败 → fail-closed：${String(e).slice(0, 300)}`);
@@ -323,20 +332,30 @@ async function main(): Promise<void> {
     await runOnce(cfg);
     return;
   }
+  await pollForever(cfg);
+}
+
+/**
+ * 常驻轮询。冻结=暂停不是退出：return 会让 launchd KeepAlive 每 10s 重启一次（实测 >1000 次）。
+ * 冻结期间不领新工作，进程常驻；cutover 由部署 owner 在轮次边界 bootout（migration-drain-1742.md）。
+ */
+export async function pollForever(
+  cfg: { dryRun: boolean; pollSeconds: number },
+  deps: { frozen?: () => boolean; round?: (cfg: { dryRun: boolean }) => Promise<void>; wait?: (ms: number) => Promise<void> } = {},
+): Promise<never> {
+  const { frozen = () => drainRequested(), round = runOnce, wait = sleep } = deps;
   for (;;) {
-    if (drainRequested()) {
-      // 冻结=暂停不是退出：return 会让 launchd KeepAlive 每 10s 重启一次（实测 >1000 次）。
+    if (frozen()) {
       console.log("旧入口冻结，本轮不再领新工作（暂停中，下轮再查）");
-      await sleep(cfg.pollSeconds * 1000);
-      continue;
+    } else {
+      try {
+        await round(cfg);
+      } catch (e) {
+        // 单次 gh 网络失败不永久停摆：记日志后按周期重试（wayfinder_engine 同款口径）。
+        console.error(`[claim-loop] 一轮异常（不退出，下轮重试）：${String(e).slice(0, 300)}`);
+      }
     }
-    try {
-      await runOnce(cfg);
-    } catch (e) {
-      // 单次 gh 网络失败不永久停摆：记日志后按周期重试（wayfinder_engine 同款口径）。
-      console.error(`[claim-loop] 一轮异常（不退出，下轮重试）：${String(e).slice(0, 300)}`);
-    }
-    await sleep(cfg.pollSeconds * 1000);
+    await wait(cfg.pollSeconds * 1000);
   }
 }
 
