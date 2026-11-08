@@ -454,3 +454,11 @@ ADR 0048 编号写死：origin/main `66c409e7e3` 最大 0046，预留表 adr-res
 ## 授权引用
 
 本条依 #1323 Notes N-2 由主控代裁（#1323 评论 6310866929：P 类问表中有先例的 B 类默认值确认由主控按推荐值裁定，经独审后落地；本票不涉真钱、风险偏好、已批方向或 spec）。另依 N-1 预授权判定。用户 2026-10-18 原话（#1323 评论 6261281111，xy7365527-lang 2026-10-19 记录；#1323 票面 :41 Notes N-1）：「其实很多技术的东西 完全不需要我来做 我完全信任你的判断」。分级评论 6284962135、6311051879 判 T；主控重写评论 6310613611 裁定 `recursive_t` 走路径 (a)，并要求按 T 类重跑。本稿据此起草，没有夹带 P 类取舍：不替 #1096/#1304 定退役，不删 `recursive_t`，不代答 #808 D2，不裁资金、场所、账户、权限或阈值。
+
+## 修订（#1540，凭据来源改名，2026-11-07）
+
+（append-only：以上各节原文不改。依据 #1540 主控裁定 [裁定评论 6702983888](https://github.com/Newchanlun/NewChanlun/issues/1540#issuecomment-6702983888)，正本 [ADR 0061](0061-fu18-venue-account-permission-binding.md) 裁定二与 [ADR 0039](0039-production-entry-inventory-and-unique-launcher.md)「修订（#1540）」第 1 条。）
+
+1. **凭据来源。** :97 引文与 :309「凭据只经 launcher 从 profile `credential_scope` 注入 X」中的 `credential_scope`，读作 X 执行 profile 的 `credential_source.{env,file}`（由 `credential_scope.{env,file}` 改名），只管部署管道。`credential_scope` 只指 ADR 0028:22 的作用域政策字段，记在场所 profile 记录里，不含凭据来源路径。
+2. **引用行号。** :97、:309 所引「ADR 0039:277」那一句现址为 ADR 0039:285，文义按上条读。
+3. **处置不变。** :309 对 `config/broker_config.py:79` 的终态（冻结影子、不收编为凭据源）与退场条件不变。

@@ -507,4 +507,4 @@ ADR 0039 的编号按 main 顺序分配：落地时取 `docs/adr/` 现有最大�
 （append-only：裁定一至七与 #1523、#1539 修订节原文不改。依据 #1540 主控裁定 [裁定评论 6702983888](https://github.com/Newchanlun/NewChanlun/issues/1540#issuecomment-6702983888)，正本 [ADR 0061](0061-fu18-venue-account-permission-binding.md)。）
 
 1. **凭据来源。** :285 的「profile 的 `credential_scope` 指向的来源」读作 X 执行 profile 的 `credential_source.{env,file}`（由 `credential_scope.{env,file}` 改名）。`credential_scope` 只指 ADR 0028:22 的作用域政策字段（ADR 0061 裁定二）。
-2. **启动门。** :287-288 对 `experiment` profile 同样生效（ADR 0061 裁定五）。X 按 ADR 0061「发送门（8 步）」核验，拒发在当前 `writer_epoch` 内为终态并拦截一切写请求（ADR 0061 裁定六、七）。
+2. **启动门。** :287-288 对 `experiment` profile 同样生效（ADR 0061 裁定五），作为独立的发送前置件，不是 ADR 0045 SR-3 的失效触发，拒发不产生 SR-3 记录。X 按 ADR 0061「发送门（8 步）」核验，拒发在当前 `writer_epoch` 内为终态并拦截一切写请求（ADR 0061 裁定六、七）。

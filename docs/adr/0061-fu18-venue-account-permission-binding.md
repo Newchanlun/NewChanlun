@@ -34,6 +34,7 @@
 - ADR 0028 十个字段落成一份具名版本化**场所 profile 记录**（`venue-profile/1`，形状同 ADR 0057:43-51 的版本化记录）。它是政策记录，不含任何凭据值。
 - X 执行 profile 升到 `x-execution-profile/2`：按 `{path, profile_id, version, sha256}` 引用场所 profile 记录，按 `{path, version, sha256}` 引用 #1770 能力记录；原 `credential_scope.{env,file}` 改名 **`credential_source.{env,file}`**，只管部署管道。挪凭据文件路径不改场所 profile 记录，因而不改作用域版本。
 - X 库**绑定行按 `(profile_id, version)` 追加**，不做单键覆盖（取代 `x_execution_session.rs:127-130` 的 upsert 读法）。同 `profile_id@version` 而哈希不同 → `IdentityConflict`，不覆盖，进程非 0 退出（INTERFACE-CONTRACTS:11）。合法升版本时旧行保留，库里能看出曾经绑过哪些账户与钥匙。
+- 能力记录同样进持久身份：绑定行存 `capability_record_version` 与 `capability_record_sha256`。每次启动与库内全部已持久绑定行逐项比较，同 `capability_record_version` 而 `capability_record_sha256` 不同 → `IdentityConflict`，规则与场所 profile 相同。只比 X profile 里的声明不够：同版本改了 `session_permission` 或挂单限制，再把 X profile 的 sha256 一并改掉，第 1 步照样通过，只有库里的旧哈希能认出替换。
 - 排除：十个字段直接塞进 X profile（部署路径与政策同一哈希，失效触发被噪声触发）；只按 `profile_id@version` 绑定不校验哈希（改值不升版本发现不了，违反 ADR 0028:52）。
 
 ### 三、权限证据三层（Q3 = A，吸收必改 2、3）
@@ -69,12 +70,28 @@
 
 授权写在场所 profile 记录的 `authorization` 行（ADR 0028:26 原位）：`{authorization_id, authorizer, authorized_at}`，随 profile 版本签，计入 `venue_profile_sha256`。任何字段变更出新版本后须重签。X 核的是声明存在且 `authorizer` 等于约定的用户标识，不是签名验证。P1 授权先于机器层签署；ADR 0028:48 只约束 P2 的顺序，P1 不搬用 ADR 0028:72 的 P2 元组。
 
-### 五、P1 同强度机器层（Q5 = A，C 类选择）
+### 五、P1 同强度发送前置件（Q5 = A，C 类选择）
 
-- `experiment` 与 `production` 走同一发送门：四项组成（旧 writer 禁入证据、X 排他锁、profile 身份绑定、凭据作用域版本）同样核验，同样在 ADR 0028:46 五类失效触发后首发前重核，同样失败即拒发。
-- P1 产出的指纹、绑定行、核验记录都标 `experiment`，永不作为生产证据（ADR 0028:48、:71；CONTEXT.md「证据类」）。P2 首发前仍须在目标部署重核。
-- ADR 0045 签署的值不变：SR-3 在 P1 上仍不触发，发送门拒发是发送前件，不生成退出授权记录。改的是 ADR 0045:24 自标 `[新缠论:推论]` 那句的前提读法：ADR 0028:46 的机器层不再只限 production。修订指针落在 ADR 0045 文末。
-- 回退：用户如果要维持「机器层只限 production」的读法，说一句即可回退成 B（只在 production 核验）。代价是 TB-09 无法在 P1 上满足 AT-09「被真实部署阻止」。
+- `experiment` 与 `production` 走同一发送门：X 每次启动（每个新 `writer_epoch`）后、构造任何写传输之前，按「发送门（8 步）」核验 ADR 0028:46 列出的四项组成（旧 writer 禁入证据、X 排他锁、profile 身份绑定、凭据作用域版本），失败即拒发。
+- **发送门是一个独立的发送前置件，不是 SR-3 的失效触发。** 它不判定、不登记 ADR 0028:46 的五项失效触发是否发生，只核当前输入是否一致。现行 X 在 `serve` 启动时一次性读入 profile、库路径、`writer_epoch` 与凭据（`x_execution_session.rs:173-188`），五项失效触发都只能经一次重启生效，所以「每次启动都核」已覆盖「任一失效触发后的首次发送前」，不需要识别触发种类（`[新缠论:推论]`）。
+- **SR-3 与发送门的边界。** ADR 0045 的 SR-3 v1 签署原样保留，不升版重签：
+
+| | SR-3 | 发送门 |
+|---|---|---|
+| 管它的签署 | ADR 0045 SR 清单 v1（用户，#1560 2026-10-21 批复） | 本 ADR 裁定五（#1540 主控裁定，C 类，用户可一句话回退） |
+| 触发条件 | ADR 0028:46 五项失效触发之一发生，且 profile 为 `production`；P1 签为 `P1_experiment_never_fires` | 每次 X 启动后、首个写传输前；不看证据类，不看有没有失效触发 |
+| 回答的问题 | 这次变更是否构成系统风险条件，要不要冻结新发送 | 本 epoch 手里这把钥匙、这份 profile 现在能不能发 |
+| 产物 | SR 条件记录、`freeze_new_send` 冻结态、退出授权记录（#1380 实施，ADR 0030:18-21） | X 库绑定行与 `send_state`；拒发带 `send_refusal_class` / `send_refusal_detail`；装配失败则进程非 0 退出、不写库 |
+| 解除 | 按 ADR 0030 退出授权 | 修正输入后以新 `writer_epoch` 重走 8 步（裁定七） |
+
+- 两者不共用记录。发送门拒发不写 SR 条件记录、冻结态或退出授权记录；SR-3 五项触发的定义、范围、动作与 P1 签署值都不因本 ADR 改变。ADR 0045:24 的读法（五项失效触发只在 `production` profile 下构成 SR-3 条件）照旧成立。
+- **最小例子。** P1 上 `P1-hl-testnet` 从 v1 升到 v2（换钥匙，`public_id` 变了），X 以 `writer_epoch` 7 → 8 重启，但 X 执行 profile 里的 `tb09_fingerprint` 仍是按 v1 算的值。这一次事件命中五项触发中的两项（profile 版本变更、恢复/重启）。
+  - SR-3 判：`evidence_class = experiment`，v1 签署值 `P1_experiment_never_fires`，不触发。SR 条件记录 0 条，冻结态 0 条，退出授权记录 0 条。
+  - 发送门判：epoch 8 启动，第 1–5 步通过，第 6 步本次计算的指纹 ≠ 声明值。绑定行 `(P1-hl-testnet, 2)` 写 `send_state=refused`、`IdentityConflict` / `Tb09Fingerprint`，写请求 0 个，只读查询照常。
+  - 同一事件若用户先按 v2 重算指纹再重启：SR-3 仍是 0 条记录；发送门 8 步全过，进入可发送状态。
+  - 两者不冲突：SR-3 在 P1 上对任何事件都答「不构成风险条件」，发送门按当前输入答「能发 / 不能发」。两个答案同时成立，各自落在自己的记录里。P2 激活时 SR-3 生效，两者各写各的记录、各按各的路径解除，具体次序随 P2 另签版本时裁定（#1561）。
+- P1 产出的指纹、绑定行、核验记录都标 `experiment`，永不作为生产证据（ADR 0028:48、:71；CONTEXT.md「证据类」）。P2 首发前仍须在目标部署重核。修订指针落在 ADR 0045 文末。
+- 回退：用户如果要维持「四项核验只在 production 做」，说一句即可回退成 B（发送门只在 production 核验）。代价是 TB-09 无法在 P1 上满足 AT-09「被真实部署阻止」。
 - 排期：P1 发送要等 #1383 交付指纹算法；#1340:380 的切片顺序 TB-04 → TB-09 → TB-08 本就如此，不新增排程边。
 
 ### 六、拒发词汇与持久化（Q6 = A）
@@ -118,7 +135,7 @@
 
 X 执行 profile `x-execution-profile/2`：`mode`；`venue_profile: {path, profile_id, version, sha256}`；`capability_record: {path, version, sha256}`；`credential_source: {env, file}`；`tb09_fingerprint`（TB-09 算法产出，#1383）。
 
-X 库绑定行（按 `(profile_id, version)` 追加，与 `send_state` 同一事务）：`profile_id、profile_version、venue_profile_sha256、capability_record_version、authorization_id、evidence_class、credential_public_id_verified、session_permission_verified、writer_epoch、send_state、send_refusal_class、send_refusal_detail`。凭据作用域版本由 `(profile_id@profile_version, venue_profile_sha256)` 读出，不另存一列。
+X 库绑定行（按 `(profile_id, version)` 追加，与 `send_state` 同一事务）：`profile_id、profile_version、venue_profile_sha256、capability_record_version、capability_record_sha256、authorization_id、evidence_class、credential_public_id_verified、session_permission_verified、writer_epoch、send_state、send_refusal_class、send_refusal_detail`。凭据作用域版本由 `(profile_id@profile_version, venue_profile_sha256)` 读出，不另存一列。
 
 ## 发送门（8 步）
 
@@ -127,7 +144,7 @@ X 库绑定行（按 `(profile_id, version)` 追加，与 `send_state` 同一事
 | 步 | 检查 | 不满足时（类别 / 细分） | 处置 |
 |---|---|---|---|
 | 1 | 两份引用记录存在、版本可认、哈希与声明一致；`public_id ≠ account`；`evidence_class` 与 `mode` 一致 | 缺记录 `MissingDependency`；版本不认 `SchemaUnsupported`；哈希不符 `IdentityConflict`；`public_id == account` 或证据类不一致 `InvalidDomain` | 进程非 0 退出，不写库 |
-| 2 | 与已持久绑定行比对 | `IdentityConflict`（同版本异内容） | 进程非 0 退出，不覆盖 |
+| 2 | 与全部已持久绑定行逐项比对：同 `profile_id@version` 的 `venue_profile_sha256`、同 `capability_record_version` 的 `capability_record_sha256` 均须相同 | `IdentityConflict`（同版本异内容，场所 profile 或能力记录任一） | 进程非 0 退出，不覆盖 |
 | 3 | 凭据存在 | `MissingDependency`（既有，`x_execution_session.rs:180-188`） | 进程非 0 退出 |
 | 4 | X 在内存中由凭据推出的公开地址 = `credential_scope.public_id` | `IdentityConflict` / `CredentialPublicId` | 持久化 refused，只读服务 |
 | 5 | `authorization` 行完整，`authorizer` 为用户 | `AwaitingPolicy` / `Authorization` | 同上 |
@@ -143,7 +160,7 @@ X 库绑定行（按 `(profile_id, version)` 追加，与 `send_state` 同一事
 
 | # | C10.5 能力项 | success 证据与载体 | Unsupported | fault（不重裁） | 下游 |
 |---|---|---|---|---|---|
-| 1 | 身份与代际 | X 库绑定行（profile_id@version、`venue_profile_sha256`、能力记录版本、`writer_epoch`）；X 观测记录带 `source_namespace`、`source_epoch`（#1770 第 5 项） | 不适用：身份是发送前件，缺失或冲突走拒发 | `StaleWriter`（`x_execution_session.rs:101-107`）；`IdentityConflict`（INTERFACE-CONTRACTS:11） | #1769 后续叶 / #1383；#1401 |
+| 1 | 身份与代际 | X 库绑定行（profile_id@version、`venue_profile_sha256`、能力记录版本与 `capability_record_sha256`、`writer_epoch`）；X 观测记录带 `source_namespace`、`source_epoch`（#1770 第 5 项） | 不适用：身份是发送前件，缺失或冲突走拒发 | `StaleWriter`（`x_execution_session.rs:101-107`）；`IdentityConflict`（INTERFACE-CONTRACTS:11） | #1769 后续叶 / #1383；#1401 |
 | 2a | 取消 | 撤单金样与观测记录（#1770 `hl_adapter_maps_order_cancel_query_to_golden_requests`）；P1 真实撤单回执（#1412） | 能力记录 `order_target_form` 未知值 → X 启动 `InvalidDomain` | 失响应 `DeliveryUnknown`，按目标查询，不重发（#1340:310） | #1770、#1412 |
 | 2b | 改单 | 无 | `Unsupported{原子改单合同未证（C07.8）}`；改价走撤单后再下单 | 不发请求 | #1770；#1412:11 |
 | 3 | 累计完整性 | E 已 Recorded 的场所 adapter 原件，种类由能力记录声明（ADR 0060:44） | 场所给不出某类所需证据 → 该子项 Unsupported，减少责任保原潜量 | 源游标缺口进 Pending 或封闸（ADR 0060:42；#1340:297） | #1425、#1400、#1412 |
@@ -170,10 +187,13 @@ ADR 0028:24 的动作维度：
 
 随本 ADR 同一 PR 落地，均为 append-only，不改原文：
 
-1. [ADR 0028](0028-first-capability-verification-profile.md) 文末「修订（#1540）」：`credential_scope` 三项与作用域版本构成；`trade_no_transfer` 按三条叠加读；机器层（:46）对 `experiment` 同样生效；`authorization` 行（:26）为 P1 授权记录；`account` 与 `public_id` 不入仓。
+1. [ADR 0028](0028-first-capability-verification-profile.md) 文末「修订（#1540）」：`credential_scope` 三项与作用域版本构成；`trade_no_transfer` 按三条叠加读；:46 的四项核验在 `experiment` 上由本 ADR 发送门作为发送前置件执行，:46 的五项失效触发不变；`authorization` 行（:26）为 P1 授权记录；`account` 与 `public_id` 不入仓。
 2. [ADR 0039](0039-production-entry-inventory-and-unique-launcher.md) 文末「修订（#1540）」：:285 的凭据来源读作 `credential_source`；:287-288 启动门对 `experiment` 同样生效，并按本 ADR 发送门 8 步与拒发终态执行。
-3. [ADR 0045](0045-sr-v1-policy-signed.md) 文末「修订（#1540）」：SR-3 签署值不变；:24 前提读法改为机器层不限 production；回退方式。
-4. `CONTEXT.md`「运行边界」节新增两条词条：「凭据作用域版本」「权限证据三层」。
+3. [ADR 0045](0045-sr-v1-policy-signed.md) 文末「修订（#1540）」：SR-3 v1 签署原样保留、不升版重签；发送门是独立发送前置件，不是 SR-3 的失效触发；两者的触发条件、产物与所属签署；回退方式。
+4. [ADR 0048](0048-legacy-engine-module-level-dispositions.md) 文末「修订（#1540）」：:97 与 :309 所称 launcher 从 profile 的 `credential_scope` 读取并注入凭据，读作 X 执行 profile 的 `credential_source.{env,file}`。
+5. `CONTEXT.md`「运行边界」节新增两条词条：「凭据作用域版本」「权限证据三层」。
+
+全仓 `rg -n credential_scope` 的其余命中：ADR 0028:22、ADR 0038:23/:127、ADR 0039:25/:426、`CONTEXT.md:370` 用的是作用域政策字段本义，不需改；`docs/runbook_production_session.md`、`rust/` 下的命中描述现行 `/1` 代码，随「受影响代码清单」由实施票一并改。
 
 ## 受影响代码清单
 
@@ -183,7 +203,7 @@ ADR 0028:24 的动作维度：
 |---|---|---|
 | `rust/src/bin/x_execution_session.rs:21` | `x-execution-profile/1` | 升 `/2` |
 | 同 `:28-34`、`:36-79` | 五项 profile | 引用场所 profile 记录与能力记录；`credential_source` |
-| 同 `:98-135` | upsert，无冲突检查 | 按 `(profile_id, version)` 追加绑定行；同版本异内容 `IdentityConflict`；拒发类别与细分 |
+| 同 `:98-135` | upsert，无冲突检查 | 按 `(profile_id, version)` 追加绑定行，含 `capability_record_sha256`；场所 profile 或能力记录同版本异内容 `IdentityConflict`；拒发类别与细分 |
 | 同 `:109-114` | 只 production 缺指纹拒发 | 发送门第 4-7 步，`experiment` 同强度 |
 | 同 `:180-188` | 缺凭据 `MissingDependency` | 不变，第 4 步紧随其后 |
 | `rust/src/bin/production_session.rs:177-192` | 读 `credential_scope.env/file` | 读 `credential_source.env/file`；校验两份引用记录哈希 |
@@ -196,6 +216,7 @@ ADR 0028:24 的动作维度：
 | 票 | 测试 | 断言 |
 |---|---|---|
 | #1769 后续叶 / #1383 | `x_binds_profile_version_and_rejects_same_version_other_content` | 同 `profile_id@version` 改一个字段重启 → `IdentityConflict` 非 0 退出，既有绑定行不变 |
+| 同上 | `x_rejects_same_capability_record_version_with_other_content` | 能力记录同 `version` 改 `session_permission` 一项，X profile 的 `capability_record.sha256` 同步改成新值，重启 → 第 2 步 `IdentityConflict` 非 0 退出，既有绑定行不变 |
 | 同上 | `binding_rows_append_on_profile_version_bump` | 升版本重启后新旧两行都在 |
 | 同上 | `credential_source_path_change_is_not_scope_change` | 只改 `credential_source.file` → 作用域版本不变 |
 | 同上 | `x_refuses_send_when_credential_public_id_mismatches` | 现场生成的测试钥匙推出的地址 ≠ `public_id` → refused、`IdentityConflict`，本地监听器 0 连接 |
@@ -211,7 +232,7 @@ ADR 0028:24 的动作维度：
 
 - **#1365 TB-09**：本 ADR 交出指纹两项组成的定义（profile 身份绑定 = 绑定行；凭据作用域版本 = 裁定一）与拒发词汇。指纹算法、旧 writer 禁入与 X 排他锁的取证归 #1383（`/Volumes/AgentStorage/decisions/1523/draft-28G.md:101`）。#1383 在 P1 上的负对照对 `experiment` 门成立，记录带 `experiment`。#1401 消费「拒发在 epoch 内终态、新 epoch 重走全部步骤」。
 - **#1368 TB-10**（经 #1365、#1367 传递）：迁移或回退后 X 新 epoch 必须重走发送门，绑定行不回退。P2 授权记录格式不变（ADR 0028:72）。
-- **#1369 TB-11**：整体验收的「能力 hash」取能力记录版本与 `venue_profile_sha256`；P1 证据与 production 分列。
+- **#1369 TB-11**：整体验收的「能力 hash」取 `(capability_record_version, capability_record_sha256, venue_profile_sha256)` 三项，同版本异内容的两份能力记录得出不同的能力 hash；P1 证据与 production 分列。
 - **#1551 FU-20（AT-18）**：Destination ⑤「目标部署的隔离和权限证据」按裁定三的三层核，缺一不得记权限证据成立。
 - **#1367 / #1382 / #1400 / #1412（TB-08）**：#1400 落地第 7 步的真实只读核验与账户级查询；#1412「逐动作核其明确授权」读作 profile `authorization` 行；能力矩阵是 TB-08 的逐项对账表。
 - **#1770 / #1769**：#1770 能力记录补九项与 `session_permission` 来源栏；#1769 后续叶（经 #1365 系列）改 X profile 到 `/2`、加绑定行与发送门第 1-7 步。
@@ -233,10 +254,12 @@ ADR 0028:24 的动作维度：
 ## 验收
 
 1. 本文件存在于 main，且下列四条各自 `grep -c` ≥ 1：`credential_scope_version` 或「凭据作用域版本」、`send_refusal_class`、`SessionPermission`、`AwaitingPolicy`。
-2. `grep -c '修订（#1540' docs/adr/0028-*.md docs/adr/0039-*.md docs/adr/0045-*.md` 每个文件 ≥ 1。
+2. `grep -c '修订（#1540' docs/adr/0028-*.md docs/adr/0039-*.md docs/adr/0045-*.md docs/adr/0048-*.md` 每个文件 ≥ 1。
 3. `grep -c '凭据作用域版本' CONTEXT.md` ≥ 1。
-4. `gh api repos/Newchanlun/NewChanlun/issues/1540/dependencies/blocking --jq 'map(.number)|sort|map(tostring)|join(",")'` 输出 `1365,1367,1369,1382,1551`。
-5. #1540 在本 ADR 的 PR 合入后关闭，resolution 评论含本文件路径、独审原件路径与裁定评论链接。
+4. 能力记录进持久身份：本文件「数据形状」节的绑定行含 `capability_record_sha256`，发送门第 2 步写明按 `capability_record_version` 逐项比较，「对下游的接口」的能力 hash 含 `capability_record_sha256`；下游测试表含 `x_rejects_same_capability_record_version_with_other_content`（同版本异内容 → `IdentityConflict`）。核法：`grep -c 'capability_record_sha256' docs/adr/0061-*.md` ≥ 4，`grep -c 'x_rejects_same_capability_record_version_with_other_content' docs/adr/0061-*.md` ≥ 1。
+5. SR-3 与发送门分界：`grep -c '不是 SR-3 的失效触发' docs/adr/0045-*.md docs/adr/0061-*.md` 每个文件 ≥ 1。
+6. `gh api repos/Newchanlun/NewChanlun/issues/1540/dependencies/blocking --jq 'map(.number)|sort|map(tostring)|join(",")'` 输出 `1365,1367,1369,1382,1551`。
+7. #1540 在本 ADR 的 PR 合入后关闭，resolution 评论含本文件路径、独审原件路径与裁定评论链接。
 
 ## 溯源标签
 

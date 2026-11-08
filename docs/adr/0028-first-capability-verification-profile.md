@@ -94,6 +94,6 @@ TB-08-A/B/C [#1382](https://github.com/xy7365527-lang/NewChanlun/issues/1382)/[#
 
 1. **credential_scope**（:22）在场所 profile 记录里写三项：`class`（`trade_no_transfer`）、`source`（来源类别）、`public_id`（API wallet 公开地址）。:46 所称「凭据作用域版本」= `(profile_id@version, venue_profile_sha256)`，取整份记录的 sha256（ADR 0061 裁定一）。
 2. **`trade_no_transfer` 不是场所保证。** HL 的 agent 钥匙可签 `agentSendAsset` 与 `vaultTransfer`；本字段值成立靠三条叠加：钥匙是 agent、对外提现与转他人需主钱包签名、X 写代码无 transfer 变体（ADR 0061 裁定三）。
-3. **机器层**（:46）对 `experiment` 同样生效，P1 产出的记录标 `experiment`，不读作生产有效（ADR 0061 裁定五）。
+3. **机器层**（:46）的四项核验在 `experiment` 上同样执行，由 ADR 0061 发送门作为独立的发送前置件承担：每次 X 启动后、首个写传输前核，失败即拒发。:46 的五项失效触发列表与 ADR 0045 SR-3 对它的读法不变，发送门拒发不产生 SR-3 记录。P1 产出的记录标 `experiment`，不读作生产有效（ADR 0061 裁定五）。
 4. **authorization**（:26）即 P1 授权记录，随 profile 版本签并计入记录哈希（ADR 0061 裁定四）。
 5. **account 与 public_id 不入仓**：仓内只放 `profile_id@version` 加 sha256，记录本体存部署状态目录（ADR 0061 裁定八）。
