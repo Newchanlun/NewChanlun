@@ -1196,18 +1196,28 @@ export function heldWaiting(prev: Partial<Pick<Summary, "phase" | "stage" | "com
   return prev.phase === "held" && !prev.stage && !resumeStaleBecauseReopen(prev, comments);
 }
 
+/** 锁文件内容；不存在返回 undefined，读不出（权限等）返回 null。 */
+function lockText(path: string): string | null | undefined {
+  try { return readFileSync(path, "utf8").trim(); }
+  catch (e) { return (e as NodeJS.ErrnoException).code === "ENOENT" ? undefined : null; }
+}
+
+/** 锁内容是否仍可能被持有：只有内容是 pid 且能确认该进程已不存在（ESRCH）才算残留。 */
+function pidTextHeld(text: string | null): boolean {
+  if (text === null || !/^\d+$/.test(text)) return true;
+  const pid = Number(text);
+  if (!Number.isSafeInteger(pid) || pid <= 0) return true;
+  try { process.kill(pid, 0); return true; }
+  catch (e) { return (e as NodeJS.ErrnoException).code !== "ESRCH"; }
+}
+
 /**
  * 锁文件记着持有进程的 pid。只有能确认该进程已不存在（ESRCH）才算残留锁：
  * 内容读不出或不是 pid、进程仍在或无权探测（EPERM）都按仍被持有处理。
  */
 export function pidLockHeld(path: string): boolean {
-  let text: string;
-  try { text = readFileSync(path, "utf8").trim(); }
-  catch (e) { if ((e as NodeJS.ErrnoException).code === "ENOENT") return false; return true; }
-  const pid = Number(text);
-  if (!/^\d+$/.test(text) || !Number.isSafeInteger(pid) || pid <= 0) return true;
-  try { process.kill(pid, 0); return true; }
-  catch (e) { return (e as NodeJS.ErrnoException).code !== "ESRCH"; }
+  const text = lockText(path);
+  return text === undefined ? false : pidTextHeld(text);
 }
 
 function createPidFile(path: string): boolean {
@@ -1217,18 +1227,23 @@ function createPidFile(path: string): boolean {
 
 /**
  * 以 wx 建锁并写入本进程 pid。被 SIGKILL 或宿主崩溃留下的残留锁（持有进程已不存在）只在接管门
- * `<锁>.takeover`（同样以 wx 独占创建）内回收：持门后重读锁文件，确认仍是已不存在的进程才删，
- * 新锁仍以 wx 创建。删锁只发生在持门期间，而残留锁的原主已不在，持门者删掉的只可能是那份残留锁，
+ * `<锁>.takeover`（同样以 wx 独占创建）内回收：持门后重读锁文件，只有内容仍是先前读到的那个已不存在
+ * 的 pid 才删，再以 wx 建新锁；锁文件已不存在（别的回收者接管后已释放）时不删任何东西，直接 wx 建锁。
+ * 锁文件只能由 wx 新建或由持门者删除，残留锁的原主又已不在，所以持门期间内容未变即证明它仍是那份残留锁，
  * 不会删到别人刚建的新锁；两个回收者也不能同时持门。接管门本身若因持门者崩溃而残留，
  * 回收就停在旧行为（按仍被持有处理），不会出现两个持锁者。
  */
 export function takePidLock(path: string): boolean {
   if (createPidFile(path)) return true;
-  if (pidLockHeld(path)) return false;
+  const seen = lockText(path);
+  if (seen === undefined) return createPidFile(path);
+  if (pidTextHeld(seen)) return false;
   const gate = `${path}.takeover`;
   if (!createPidFile(gate)) return false;
   try {
-    if (pidLockHeld(path)) return false;
+    const now = lockText(path);
+    if (now === undefined) return createPidFile(path);
+    if (now !== seen || pidTextHeld(now)) return false;
     log(`清掉残留锁 ${path}（持有进程已不存在）`);
     rmSync(path, { force: true });
     return createPidFile(path);
