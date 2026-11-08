@@ -179,7 +179,7 @@ executor serve --loop --poll-seconds 60 --workers-log "$PWD/.sandcastle/logs/wor
 
 状态分为 `queued`、`active`、`awaiting_human`、`awaiting_merge` 和 `halted`，写入部署检出的 `.sandcastle/logs/deepagents-status.md` 与状态根的 `queue-status.json`。队列子进程使用 `executor run --recheck-approval` 重读权威签批链。即使人工中断发生在队列检查之后，它也只恢复批准核验，不清除中断请求，本轮状态仍为 `awaiting_human`。CLI 中只有显式 `executor run --resume` 清除人工中断请求，再按权威签批链恢复同一 run。普通 `executor run` 不清除人工中断。Studio 的人工 Continue 入口保持不变。没有有效切流记录时 `serve` 退出码为 0，说明停用原因，不读取 App、不登记单元、不改票面。
 
-读不到 GitHub（`IdentityError` 及其子类，含启动时的 App 身份核验和已交付 run 的 PR 对账读取）时：`serve --once` 退出码为 2，供 runbook 当检查步骤用；`serve --loop` 在 stderr 写 `round skipped, source unreadable (github): <错误类型>: <信息>`，在状态页标题下加一行「本页未刷新」，写明时间和读不到的源，保留上一轮内容，`queue-status.json` 不动。等一个轮询间隔后关掉旧客户端、重新核身份再读，进程不退出，launchd 不重启。下一轮读取成功后状态页整页重写，这行提示随之消失。本机配置错误（`LocalConfigError`：身份常量非法、token 权限超出安装权限、私钥不是绝对路径或不可读等）两种模式都退出 2，不重试。
+每一轮先做完本轮要读的 GitHub（登记票、已交付 run 的 PR 对账），再派工；所以读失败的那一轮不起子进程，只可能留下读失败前已读成功的票的本机记录（新登记的单元、对账结果、持有转 halted），下一次成功轮次才显示。读不到 GitHub（`IdentityError` 及其子类，含启动时的 App 身份核验和已交付 run 的 PR 对账读取）时：`serve --once` 退出码为 2，供 runbook 当检查步骤用；`serve --loop` 在 stderr 写 `round skipped, source unreadable (github): <错误类型>: <信息>`，在状态页标题下加一行「本页未刷新」，写明时间和读不到的源，保留上一轮内容，`queue-status.json` 不动。等一个轮询间隔后关掉旧客户端、重新核身份再读，进程不退出，launchd 不重启。下一轮读取成功后状态页整页重写，这行提示随之消失。本机配置错误（`LocalConfigError`：身份常量非法、token 权限超出安装权限、私钥不是绝对路径或不可读等）两种模式都退出 2，不重试。
 
 launchd 模板在 `.sandcastle/launchd/com.newchanlun.deepagents-executor.plist`。部署 owner 把 `__REPO__`、`__VENV__`、`__PRIVATE_KEY_PATH__`、`__BOAT_CONFIG__` 和 `__BOAT_API_KEY_FILE__` 全部替换为已核对的绝对路径后安装。后两个占位符分别设置 `PILOT_BOAT_CONFIG` 与 `PILOT_BOAT_API_KEY_FILE`。配置和控制端 key 文件的要求见 [Boat 受管配置](BOAT.md#受管配置)。
 

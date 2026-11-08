@@ -237,13 +237,29 @@ class QueueIntake:
                 holder = self.claims.read(ticket)
                 return (ticket not in occupied, holder is None or holder.state == 'released', ticket)
 
+            # 两段式：先把本轮要读的 GitHub（登记、已交付票对账）全部读完，再派工。
+            # 读失败（IdentityError）在派工前就抛出，本轮不会有已起的子进程。
+            # 读阶段按「待派票都会空出槽位」乐观放行后面的票，派工阶段再按真实占槽判断。
+            planned: list[tuple[int, WorkUnit, Path]] = []
+
+            def finish(ticket: int) -> None:
+                activity = self._worker_activity(runs.get(ticket, set()))
+                if activity is not None:
+                    occupied[ticket] = activity
+                    previous = results[ticket].get('reason')
+                    phase = 'awaiting_human' if results[ticket].get('phase') == 'awaiting_human' else 'active'
+                    results[ticket].update(phase=phase, reason=f'{previous}; {activity}' if previous else activity)
+                else:
+                    occupied.pop(ticket, None)
+
             for ticket in sorted(tickets, key=priority):
-                if occupied and ticket not in occupied:
+                if ticket not in occupied and set(occupied) - {t for t, _, _ in planned}:
                     continue
                 try:
                     self.cutover.load()
                 except CutoverError:
                     break
+                deferred = False
                 try:
                     if ticket in invalid:
                         results[ticket] = {'phase': 'halted', 'reason': invalid[ticket]}
@@ -283,6 +299,23 @@ class QueueIntake:
                         results[ticket] = {'phase': 'awaiting_human', 'run_id': unit.run_id,
                                            'reason': _stop_reason(run_dir)}
                         continue
+                    planned.append((ticket, unit, run_dir))
+                    deferred = True
+                except QueueWaiting as error:
+                    results[ticket] = {'phase': 'awaiting_human', 'reason': str(error)}
+                except (AdmissionRefused, CutoverError) as error:
+                    results[ticket] = {'phase': 'halted', 'reason': str(error)}
+                finally:
+                    if not deferred:
+                        finish(ticket)
+            for ticket, unit, run_dir in planned:
+                if occupied and ticket not in occupied:
+                    continue
+                try:
+                    self.cutover.load()
+                except CutoverError:
+                    break
+                try:
                     code = run(unit)
                     state = delivery_status(run_dir)
                     phase = state['phase']
@@ -302,19 +335,8 @@ class QueueIntake:
                                        'phase': 'awaiting_merge' if phase == 'merged' else phase}
                     if code == 75 or code < 0:
                         break
-                except QueueWaiting as error:
-                    results[ticket] = {'phase': 'awaiting_human', 'reason': str(error)}
-                except (AdmissionRefused, CutoverError) as error:
-                    results[ticket] = {'phase': 'halted', 'reason': str(error)}
                 finally:
-                    activity = self._worker_activity(runs.get(ticket, set()))
-                    if activity is not None:
-                        occupied[ticket] = activity
-                        previous = results[ticket].get('reason')
-                        phase = 'awaiting_human' if results[ticket].get('phase') == 'awaiting_human' else 'active'
-                        results[ticket].update(phase=phase, reason=f'{previous}; {activity}' if previous else activity)
-                    else:
-                        occupied.pop(ticket, None)
+                    finish(ticket)
             return self._status(results)
         finally:
             os.close(fd)

@@ -636,6 +636,54 @@ def test_serve_surfaces_delivery_read_failure(delivered, tmp_path, monkeypatch, 
     assert 'round skipped, source unreadable (github)' in capsys.readouterr().err
 
 
+def test_read_failure_after_higher_priority_ticket_aborts_before_any_dispatch(queued):
+    """#1988：本轮读 GitHub 失败时不能已经起了子进程。优先级更高的票本可派工，
+    排在后面的票登记读失败：整轮抛出，子进程一次都没起；读恢复后照常派工。"""
+    import copy
+
+    from pilot1742.github_app import IdentityError
+
+    v2, _, intake, _ = queued
+    later = TICKET + 1
+    v2.github.issues[later] = {**copy.deepcopy(v2.github.issues[TICKET]), 'number': later}
+    dispatched = []
+
+    def child(unit):
+        dispatched.append(unit.ticket)
+        return 0
+    v2.github.fault('GET', rf'.*/issues/{later}', 'status_500')
+    with pytest.raises(IdentityError):
+        intake.once(child)
+    assert dispatched == [], 'child started before the round finished reading GitHub'
+    assert not (v2.home / 'queue-status.json').exists()
+    rows = intake.once(child)
+    assert dispatched == [TICKET, later]
+    assert rows[TICKET]['phase'] == rows[later]['phase'] == 'halted'
+
+
+def test_dispatch_phase_rechecks_slot_after_read_phase(queued, monkeypatch):
+    """读阶段乐观登记了后面的票；派工阶段前一张票仍占槽时，后面的票本轮不派（单票在飞上限不变）。"""
+    import copy
+
+    v2, _, intake, _ = queued
+    later = TICKET + 1
+    v2.github.issues[later] = {**copy.deepcopy(v2.github.issues[TICKET]), 'number': later}
+    dispatched = []
+
+    def activity(folders):
+        if TICKET in dispatched and any(f.name.startswith(f't{TICKET}-') for f in folders):
+            return 'worker slot retained: implementer: running'
+        return None
+    monkeypatch.setattr(intake, '_worker_activity', activity)
+
+    def child(unit):
+        dispatched.append(unit.ticket)
+        return 0
+    rows = intake.once(child)
+    assert dispatched == [TICKET]
+    assert rows[TICKET]['phase'] == 'active' and rows[later]['phase'] == 'queued'
+
+
 def test_registration_never_publishes_partial_json(queued, monkeypatch):
     from pilot1742 import queue as module
 
