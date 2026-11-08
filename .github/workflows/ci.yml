@@ -1302,14 +1302,24 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Cache elan toolchain
+        id: elan-cache
         uses: actions/cache@v4
         with:
           path: ~/.elan
           key: elan-${{ hashFiles('formal/lean-toolchain') }}
 
+      # 缓存命中时 ~/.elan 已含 elan 与 lean-toolchain 钉住的工具链，不再联网下载：11-08 GitHub Releases
+      #   持续 504，命中缓存的作业也在这一步失败（run 42467231009 等）。未命中时照旧安装，curl 带重试。
       - name: Install elan
+        env:
+          CACHE_HIT: ${{ steps.elan-cache.outputs.cache-hit }}
         run: |
-          curl https://raw.githubusercontent.com/leanprover/elan/master/elan-init.sh -sSf | bash -s -- -y --default-toolchain none
+          if [ "$CACHE_HIT" = true ] && [ -x "$HOME/.elan/bin/elan" ]; then
+            echo "elan from cache: $("$HOME/.elan/bin/elan" --version)"
+          else
+            curl --retry 5 --retry-all-errors --retry-delay 10 -sSf https://raw.githubusercontent.com/leanprover/elan/master/elan-init.sh \
+              | bash -s -- -y --default-toolchain none
+          fi
           echo "$HOME/.elan/bin" >> "$GITHUB_PATH"
 
       - name: Build formal (lake build)
