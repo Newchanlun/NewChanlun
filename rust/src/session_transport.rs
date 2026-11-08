@@ -43,6 +43,7 @@ pub struct TransportBounds {
 /// #1895/#2008：flock 挂在打开文件描述上，同进程其他线程 spawn 的子进程在 exec 前复制着这个描述；
 ///   只靠 close 时锁会延续到那个子进程 exec。析构时先显式解锁，释放时刻与 drop 一致。
 #[derive(Debug)]
+#[must_use = "锁在 guard 析构时释放；`let _ = process_lock(..)` 会立刻放锁"]
 pub struct ProcessLock {
     file: File,
 }
