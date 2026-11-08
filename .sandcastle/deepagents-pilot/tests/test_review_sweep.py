@@ -725,7 +725,6 @@ class _StopServe(Exception):
 
 
 def _fake_serve(monkeypatch, tmp_path, *, rounds):
-    from contextlib import nullcontext
     from types import SimpleNamespace
 
     from pilot1742 import executor as cli
@@ -744,9 +743,10 @@ def _fake_serve(monkeypatch, tmp_path, *, rounds):
             rounds.append("intake")
             return {}
 
-    client = SimpleNamespace(identity=SimpleNamespace(repository="Newchanlun/NewChanlun"), bot_login="bot[bot]")
+    client = SimpleNamespace(identity=SimpleNamespace(repository="Newchanlun/NewChanlun"), bot_login="bot[bot]",
+                             close=lambda: None)
     monkeypatch.setattr(cli, "CutoverStore", Cutover)
-    monkeypatch.setattr(cli, "_client", lambda args: nullcontext(client))
+    monkeypatch.setattr(cli, "_client", lambda args: client)
     monkeypatch.setattr(queue_module, "QueueIntake", Intake)
     def sleep(seconds):
         if rounds.count("intake") >= 3:
