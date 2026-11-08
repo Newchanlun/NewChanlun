@@ -36,7 +36,7 @@ Five **state** roles:
 - `ready-for-human` — needs human implementation
 - `wontfix` — will not be actioned
 
-For a PR, the same states read against the attached code: `ready-for-agent` means a brief is attached and an agent should take the next step on the diff; `ready-for-human` means it's ready for a human to merge.
+For a PR, the same states read against the attached code: `ready-for-agent` means a brief is attached and an agent should take the next step on the diff; `ready-for-human` means a human must act before it moves on. In this repo that is only one of the three human-confirmation categories (live orders and funds, keys and credentials, CI and branch-protection configuration); an ordinary PR merges once main's required checks `deepagents/review` and `ci-ok` pass, with no human approval.
 
 Every triaged issue should carry exactly one category role and one state role. If state roles conflict, flag it and ask the maintainer before doing anything else.
 
