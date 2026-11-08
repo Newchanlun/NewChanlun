@@ -1,4 +1,5 @@
 import copy
+import hashlib
 import json
 import subprocess
 import sys
@@ -244,7 +245,7 @@ def test_set_status_retains_old_success_api():
 
 
 def test_token_requests_only_external_review_permissions(tmp_path, monkeypatch):
-    identity = AppIdentity(5486877, 175617978, 1150335160, "xy7365527-lang/NewChanlun",
+    identity = AppIdentity(5486877, 179444545, 1150335160, "Newchanlun/NewChanlun",
                            "newchanlun-deepagents-1742", tmp_path / "unused.pem")
     captured = []
     import pilot1742.github_app as app
@@ -258,7 +259,7 @@ def test_token_requests_only_external_review_permissions(tmp_path, monkeypatch):
             value = {"token": "fixture", "permissions": TOKEN_PERMISSIONS, "expires_at": "2099-01-01T00:00:00Z"}
         else:
             value = {"id": identity.installation_id, "app_id": identity.app_id, "app_slug": identity.app_slug,
-                     "account": {"login": "xy7365527-lang"}, "repository_selection": "selected",
+                     "account": {"login": "Newchanlun"}, "repository_selection": "selected",
                      "suspended_at": None, "permissions": app.INSTALLATION_PERMISSIONS}
         return httpx.Response(200, json=value)
     with GitHubAppClient(identity, permissions=TOKEN_PERMISSIONS, transport=httpx.MockTransport(transport)) as client:
@@ -303,7 +304,7 @@ def test_new_attempt_supersedes_inflight_old_run(lane):
 def test_status_transport_pages_are_complete_and_failure_does_not_publish(lane):
     requests = []
     pr = lane.gateway.pr
-    identity = AppIdentity(5486877, 175617978, 1150335160, "xy7365527-lang/NewChanlun",
+    identity = AppIdentity(5486877, 179444545, 1150335160, "Newchanlun/NewChanlun",
                            "newchanlun-deepagents-1742", Path("/unused-fixture.pem"))
     def transport(request):
         requests.append(request)
@@ -1441,3 +1442,74 @@ def test_migration_of_contractless_legacy_target_checks_dispatched_prompt(lane, 
         lane.migrate_stale(1810, 1)
     monkeypatch.setattr(module, "PROMPT", original)
     assert lane.migrate_stale(1810, 1)["publication"]["state"] == "success"
+
+
+# ---------------- Codex 额度耗尽时的临时组合（Kimi + Opus） ----------------
+
+LEGACY_MODELS = ("gpt-6.1-sol", "claude-opus-5-5")
+LEGACY_POLICY = "external-pr-v1"
+
+
+def _contract(policy, models):
+    return "sha256:" + hashlib.sha256(json.dumps([policy, models, module.PROMPT]).encode()).hexdigest()
+
+
+def _use_contract(monkeypatch, models, policy):
+    monkeypatch.setattr(module, "MODELS", models)
+    monkeypatch.setattr(module, "POLICY", policy)
+    monkeypatch.setattr(module, "REVIEW_CONTRACT", _contract(policy, models))
+
+
+def test_fallback_pair_is_two_families_under_its_own_contract():
+    assert MODELS == ("kimi-k3.1-pro", "claude-opus-5-5")
+    assert len({model.split("-")[0] for model in MODELS}) == len(MODELS) == 2
+    assert module.POLICY == "external-pr-v1-kimi" != LEGACY_POLICY
+    assert module.REVIEW_CONTRACT == _contract(module.POLICY, MODELS) != _contract(LEGACY_POLICY, LEGACY_MODELS)
+
+
+def test_pass_under_legacy_contract_is_not_reused_after_switch(lane, env, monkeypatch):
+    current = (module.MODELS, module.POLICY)
+    _use_contract(monkeypatch, LEGACY_MODELS, LEGACY_POLICY)
+    first = lane.review_pr(1810)
+    assert first["verdict"] == "PASS" and [r["model"] for r in first["reviews"]] == list(LEGACY_MODELS)
+    _use_contract(monkeypatch, *current)
+    _advance_main(lane, env)
+    result = lane.review_pr(1810)
+    assert "reused_from" not in result and [r["model"] for r in result["reviews"]] == list(MODELS)
+    assert result["target"]["policy_version"] == "external-pr-v1-kimi"
+    assert sorted((lane.state_root / "runs" / "launches").read_text().splitlines()[2:]) == sorted(MODELS)
+
+
+@pytest.mark.parametrize("recorded_contract", [True, False])
+def test_legacy_contract_stale_is_not_migrated(lane, monkeypatch, recorded_contract):
+    current = (module.MODELS, module.POLICY)
+    _use_contract(monkeypatch, LEGACY_MODELS, LEGACY_POLICY)
+    folder = _legacy_auth_stale(lane)
+    if not recorded_contract:  # 旧 controller 登记的 target 未记合同
+        target = json.loads((folder / "target.json").read_text())
+        target["review_contract"] = ""
+        (folder / "target.json").write_text(json.dumps(target))
+    _use_contract(monkeypatch, *current)
+    git(lane.source, "commit", "--allow-empty", "-qm", "controller redeployed with fallback pair")
+    sent = list(lane.gateway.sent)
+    with pytest.raises(IdentityError, match="policy"):
+        lane.migrate_stale(1810, 1)
+    assert lane.gateway.sent == sent
+    assert json.loads((folder / "outcome.json").read_text())["verdict"] == "STALE"
+
+
+def test_block_left_by_retired_reviewer_still_vetoes_reuse(lane, env, monkeypatch):
+    """换组合后，旧 run 里已退役 reviewer 留下的 BLOCK 证据仍算同补丁 BLOCK。"""
+    current = (module.MODELS, module.POLICY)
+    _use_contract(monkeypatch, LEGACY_MODELS, LEGACY_POLICY)
+    _modes(lane, **{LEGACY_MODELS[0]: "BLOCK"})
+    legacy = lane.review_pr(1810)
+    _clear_modes(lane)
+    folder = lane.state_root / "runs" / ReviewTarget(**legacy["target"]).key
+    assert (folder / LEGACY_MODELS[0] / "receipt.json").exists()
+    (folder / "outcome.json").write_text(json.dumps({**legacy, "verdict": "FAILED", "state": "error", "reviews": []}))
+    _use_contract(monkeypatch, *current)
+    assert lane.review_pr(1810, 2)["verdict"] == "PASS"
+    _advance_main(lane, env)
+    result = lane.review_pr(1810)
+    assert "reused_from" not in result and [r["model"] for r in result["reviews"]] == list(MODELS)
