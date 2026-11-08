@@ -209,6 +209,14 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
+        # #1875：Boat large 上 sparse/全量 checkout 的耗时主要花在逐个写出文件；git 默认单线程写。
+        #   同机配对实测（2026-11-08，6 台全新沙箱交替先后顺序）：Ryzen 9950X 上 workers=1→8 省 48/90 s
+        #   （108→60、140→50 s），EPYC 9455/4585PX 上 ±2 s 不变；历史 Boat CI 作业 65/96 落在 9950X。
+        #   只作用于本步的 git，不影响作业里后续步骤。并行 checkout 写出的内容与串行相同。
+        env: &checkout-workers
+          GIT_CONFIG_COUNT: "1"
+          GIT_CONFIG_KEY_0: checkout.workers
+          GIT_CONFIG_VALUE_0: "8"
 
       - name: Test cargo telemetry wrapper (#1141)
         run: ../.github/scripts/test-run-cargo-with-telemetry.sh
@@ -320,6 +328,7 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
+        env: *checkout-workers
 
       - uses: ./.github/actions/rust-job-setup
 
@@ -359,6 +368,7 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
+        env: *checkout-workers
 
       - uses: ./.github/actions/rust-job-setup
 
@@ -445,6 +455,7 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
+        env: *checkout-workers
 
       - uses: ./.github/actions/rust-job-setup
 
@@ -694,6 +705,7 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
+        env: *checkout-workers
 
       - uses: ./.github/actions/rust-job-setup
 
@@ -722,6 +734,7 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
+        env: *checkout-workers
 
       - uses: ./.github/actions/rust-job-setup
 
@@ -760,6 +773,7 @@ jobs:
         working-directory: rust
     steps:
       - uses: actions/checkout@v4
+        env: *checkout-workers
       - uses: actions/setup-python@v5
         with:
           python-version: "3.13"
@@ -995,6 +1009,7 @@ jobs:
         working-directory: rust
     steps:
       - uses: actions/checkout@v4
+        env: *checkout-workers
       - uses: actions/setup-python@v5
         with:
           python-version: "3.13"
