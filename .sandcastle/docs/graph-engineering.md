@@ -9,14 +9,16 @@
 | 控制面 | `scripts/wayfinder_engine.mts`（已有） | 4 分钟 | 扫图、给合格实施票挂 `sandcastle` |
 | 裁决面 | `.sandcastle/decision-claimer.mts`（新） | 10 分钟 | grilling 票：每票 MAIN 会话分级+考古并续接起草 → 异家族独审 → PASS 落地，否则 held |
 | 执行面 | `claim-loop.mts` + `main.mts`（已有） | 60 秒 | 实施票：实装工蜂 + 独审工蜂 |
-| 验收面 | `harvest.sh`（#1660 PR 模式） | 15 分钟 | 评审完成的分支推远端、基于 main 开 PR、票面登记；正式 `deepagents/review` 双审 success 后由代理合入 |
+| 验收面 | `harvest.sh`（#1660 PR 模式） | 15 分钟 | 评审完成的分支推远端、基于 main 开 PR、票面登记；不合入（合入见下文「main 的合入」） |
 | 观测面 | `health-monitor` + 进度页（新） | 5 分钟 / 1 分钟 | 停摆即 _red_、自愈、进度 |
 
-普通研发流程不设人闸：普通 PR 在正式 `deepagents/review` 双审 success 后由代理合入。只有真实资金、账户/交易激活和凭据权限按 ADR 0041「授权来源与生效边界」交还用户签署（见「1. 分级」的资金与权限硬门）。spec 与 P 类决策同 T 类一样，起草后经非作者独审 PASS 由代理裁定并记账（#1909，用户直接授权）；BLOCK 返修，缺有效独审不放行。
+**main 的合入**：不设人工批准。main 分支保护强制两项必需检查，`deepagents/review`（正式非作者双审 success）与 `ci-ok`（适用 CI 全绿），并要求分支先追平 main（strict）；两项都满足后代理可以执行合入。工蜂、执行器与 Sandcastle 实施者自身不合入，只开 PR。授权边界在分支保护，不在某个自动合入程序。
+
+**人工确认只保留三类**：实盘下单与资金（含账户/交易激活，按 ADR 0041「授权来源与生效边界」交还用户签署，见「1. 分级」的资金与权限硬门）、密钥与凭证、CI 与分支保护配置。其余普通研发流程不设等人批准的门。spec 与 P 类决策同 T 类一样，起草后经非作者独审 PASS 由代理裁定并记账（#1909，用户直接授权）；BLOCK 返修，缺有效独审不放行。
 
 ### #1742 执行面依赖（PR #1915）
 
-保留 DeepAgents。本文的普通 SPEC 代理裁定合同是目标准入合同；现役 `deepagents-pilot/pilot1742/executor.py` / `approval.py` 仍有 SPEC_AUTHORIZATION 用户签署门，迁移由 Queued owner 的独立依赖 PR 交付。PR #1915 改了控制面写前重验、decision-claimer 的 T/P 代理裁定与资金硬门，以及执行器的释放（本机先记 `released`，排空后摘镜像）和队列的已合入不重派；`executor.py` / `approval.py` 的 SPEC 准入不改。宿主从 `origin/main` 自动更新（见「宿主约束」），合入即部署这些改动；在依赖 PR 合入前，DeepAgents 队列路径的 SPEC 准入仍是原签署门。依赖 PR 合入、精确集成版本通过首次队列执行验收后，才可声明新 PASS 贯通执行器。
+保留 DeepAgents。本文的普通 SPEC 代理裁定合同是目标准入合同；现役 `deepagents-pilot/pilot1742/executor.py` / `approval.py` 仍有 SPEC_AUTHORIZATION 用户签署门，迁移由 Queued owner 的独立依赖 PR #1921 交付（删除该签署门，改认编排账号发布的结构化 SPEC 裁定）。在 #1921 合入前，这是三类人工确认之外仅存的等人签署的门，只作用于 DeepAgents 队列路径。PR #1915 改了控制面写前重验、decision-claimer 的 T/P 代理裁定与资金硬门，以及执行器的释放（本机先记 `released`，排空后摘镜像）和队列的已合入不重派；`executor.py` / `approval.py` 的 SPEC 准入不改。宿主从 `origin/main` 自动更新（见「宿主约束」），合入即部署这些改动；在依赖 PR 合入前，DeepAgents 队列路径的 SPEC 准入仍是原签署门。依赖 PR 合入、精确集成版本通过首次队列执行验收后，才可声明新 PASS 贯通执行器。
 
 ## 裁决流程（每张 grilling 票）
 
@@ -118,7 +120,7 @@
 
 断点恢复使用 `commitBase` 与 `committedSha`：commit 已完成但回执中断时，核父提交、唯一改动文件、精确正文和提交消息后复用同一 SHA；每次实际 push 前重新 fetch main，核 main 上目标原件仍与获审 `before` 逐字一致，否则保留 `reviewed_pass` 并要求重审。push 回执中断时先查远端，远端已是同一 SHA 则只补记录，不重复推送，也不受之后 main 变化影响。`landedSha` 已存在则只补 resolution 评论。旧未推送 `reviewed_pass` 若缺编辑合同，明确要求迁移并重新独审，不拿旧 PASS 自动补写；旧已推送 `landedSha` 仍可只补评论。草稿、独审原件与断点合同不一致时拒绝续做。
 
-这些检查不改变 PR 与 main 合入人闸。
+这些检查只管决策文档的落地；PR 合入 main 按上文「main 的合入」。
 
 ### 6. 解锁
 
@@ -174,7 +176,7 @@ wayfinder_engine 只认编排者账号的结构化评论，消费时再次核对
 
 全部依赖写完后，每票重验当前正文和 PASS，写入绑定该正文的发布凭据，再加 ready-for-agent。实际拾取标签仍由既有释放流程依据 open blocker 与当前 SPEC 授予，旧 sandcastle 和新队列走同一顺序。发布中断后补剩余凭据和标签，已发布到旧正文的票遇到 SPEC 改版会明确拒绝，须先修订实施合同，不能静默改写已交消费者的工作。
 
-GitHub 不提供跨评论读取与写操作的原子事务，最后一次读取与标签写入之间仍可能出现裁定变化。消费者仍须使用当前授权，不能把发布凭据当作执行授权。按时间序最新一条结构化记录生效：BLOCK 或无效 PASS 都不放行，后续驳回评论撤销 PASS。自由文本批准没有日期兼容层，存量 SPEC 也须补齐真实独审绑定。
+GitHub 不提供跨评论读取与写操作的原子事务，最后一次读取与标签写入之间仍可能出现裁定变化。消费者仍须使用当前授权，不能把发布凭据当作执行授权。按时间序最新一条结构化记录生效：BLOCK 或无效 PASS 都不放行，后续驳回评论撤销 PASS。自由文本批准没有日期兼容层，存量 SPEC 也须补齐真实独审绑定：合入即部署后，只有自由文本批准的 open SPEC 停止拆票与放行，直到对其当前正文跑非作者独审，再用上面的 `--spec-ruling` 命令生成记录、由编排账号发布。
 
 独审者只拿 SPEC 正文、被引用的决策票 resolution 与仓内源文件，看不到起草推理；按 R1–R6（引用、教义冲突、验收可执行、Destination、宽严两档与兜底、受影响票与边）逐条给结论，原件落 `/Volumes/AgentStorage/`。引擎起草的 SPEC 不再挂 `ready-for-human`。
 
@@ -184,7 +186,7 @@ GitHub 不提供跨评论读取与写操作的原子事务，最后一次读取�
 
 > **N-1 技术类决策预授权**（用户 2026-10-18 原话：「其实很多技术的东西 完全不需要我来做 我完全信任你的判断」）：本图 T 类 grilling 票由代理起草、独立审查通过后直接裁定。依此判定的 resolution 首行注明「本条依 #1323 Notes N-1 预授权判定」。
 
-**#1909 扩展**（用户直接授权本次流程改变）：P 类与 SPEC 同样经起草与非作者独审 PASS 由代理裁定并记账，删除普通用户审批门与 `/graph-approve`（真实资金与权限边界见 ADR 0041）；P 类 resolution 首行「本条依 #1909 代理独审裁定」。普通 PR 在正式 `deepagents/review` 双审 success 后由代理合入；资金、账户、凭据类硬门票交还用户签署。
+**#1909 扩展**（用户直接授权本次流程改变）：P 类与 SPEC 同样经起草与非作者独审 PASS 由代理裁定并记账，删除普通用户审批门与 `/graph-approve`（真实资金与权限边界见 ADR 0041）；P 类 resolution 首行「本条依 #1909 代理独审裁定」。main 的合入与人工确认范围见上文「main 的合入」「人工确认只保留三类」。
 
 `wayfinder-workflow.md` 的「不碰决策票（v1）」只约束 wayfinder_engine 本体，裁决面是独立组件；该文同步加一行指向本文。
 
@@ -218,11 +220,11 @@ Sandcastle 宿主 `NewChanlun-sandcastle-host` 开启 `SANDCASTLE_HOST_AUTO_UPDA
 2. 裁决面 live：一张 T 类票走完分级、起草、独审、分支落文档、PR。
 3. 执行面：claim-loop 派出的实施工蜂实际产生输出（上下文非 0、有 commit 或明确 blocked 结论）。
 4. health-monitor 发现停摆能变 _red_ 并自愈，进度页可看。
-5. 以上改动经 PR 合入 main（正式 `deepagents/review` 双审 success 后由代理合入）。
+5. 以上改动经 PR 合入 main（分支保护的 `deepagents/review` 与 `ci-ok` 满足后由代理合入）。
 
 ### Codex 单票阶段交付（#1617，2026-10-25）
 
-实施票每 run 仍是一票。作者在 workspace-write 下改源码并报告实际验证，受管宿主核完整文件集合并提交；独审读精确 commit，修正经同一宿主步骤提交。Rust 验证在封包后由宿主调用 nc-remote/CI；未验证不算验收完成。此职责分离已经用户明确批准，不扩大工蜂沙箱权限，main 合入仍是人闸。
+实施票每 run 仍是一票。作者在 workspace-write 下改源码并报告实际验证，受管宿主核完整文件集合并提交；独审读精确 commit，修正经同一宿主步骤提交。Rust 验证在封包后由宿主调用 nc-remote/CI；未验证不算验收完成。此职责分离已经用户明确批准，不扩大工蜂沙箱权限；工蜂与宿主都不合入 main，合入按上文「main 的合入」。
 
 旧段落中 Docker/swarm 的模型配置只说明路由，不代表执行可用：namespace 和 swarm 提交责任迁移未验收，默认 namespace 探针失败时入口在 planner/认领之前 fail-loud。主控不得将此候选的单票宿主冒烟计为 swarm 或全图验收。
 

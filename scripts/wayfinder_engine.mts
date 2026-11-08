@@ -16,7 +16,8 @@
  *   3. 实装票全关 + 图关判据满足 → 自动起草图关 comment + close map。
  *
  * 本引擎不裁决策票，也不处理纯决策图；决策票由 decision-claimer 起草并经非作者独审裁定。
- * 合入 main 按当前任务授权、非作者独审与适用 CI（本引擎不碰 main）；spec 与 P 类决策改为起草 + 非作者独审 PASS 由代理裁定（#1909）。
+ * 本引擎不碰 main：main 的合入不设人工批准，由分支保护的 deepagents/review 与 ci-ok 必需检查把关，满足后代理合入；
+ * spec 与 P 类决策改为起草 + 非作者独审 PASS 由代理裁定（#1909）。
  *
  * #1084 追加（2026-08-19 打回复核）——常驻控制面成为活机制：
  *   - 每轮区分五桶：全仓 ready-for-agent / 已获 ${releaseLabel()} 拾取权 / blocked / claimed / running；
@@ -347,16 +348,17 @@ function tryParsePlan(text: string): ImplTicketPlan[] | null {
     if (!t || typeof t !== "object") return null;
     const o = t as Record<string, unknown>;
     if (typeof o.id !== "string" || typeof o.title !== "string") return null;
+    // 依赖与裁定票号有一项畸形就整份计划无效：丢掉一项会少一条 blocking 边或一条裁定挂接。
+    const dependsOn = o.depends_on ?? [];
+    const rulings = o.rulings ?? [];
+    if (!Array.isArray(dependsOn) || !dependsOn.every((x) => typeof x === "string")) return null;
+    if (!Array.isArray(rulings) || !rulings.every((x) => Number.isSafeInteger(x) && x > 0)) return null;
     out.push({
       id: o.id,
       title: o.title,
       summary: typeof o.summary === "string" ? o.summary : undefined,
-      dependsOn: Array.isArray(o.depends_on)
-        ? (o.depends_on as unknown[]).filter((x): x is string => typeof x === "string")
-        : [],
-      rulings: Array.isArray(o.rulings)
-        ? (o.rulings as unknown[]).filter((x): x is number => typeof x === "number")
-        : [],
+      dependsOn: dependsOn as string[],
+      rulings: rulings as number[],
     });
   }
   return out;
@@ -365,17 +367,13 @@ function tryParsePlan(text: string): ImplTicketPlan[] | null {
 /**
  * 从 spec 正文解析机器可读拆票计划（由 spec 起草子代理在
  * 「## 实施票拆分（机器可读）」节内用 wayfinder-split 标记 + json 围栏产出）。
- * 优先取标记后的围栏；兜底扫全文 json 围栏。解析不出返回 null（拆票走人工）。
+ * 有标记取标记后的第一个围栏；无标记才兜底扫全文 json 围栏。解析不出或含畸形项返回 null（不建票）。
  */
 export function parseSplitPlan(specBody: string): ImplTicketPlan[] | null {
-  const candidates: string[] = [];
+  // 有标记就只认标记后的第一个围栏：它畸形时不退回别的围栏（可能是示例），整份计划按无效处理。
   const marker = specBody.indexOf("wayfinder-split");
-  if (marker >= 0) {
-    const after = specBody.slice(marker);
-    const first = extractJsonFences(after)[0];
-    if (first) candidates.push(first);
-  }
-  candidates.push(...extractJsonFences(specBody));
+  const marked = marker >= 0 ? extractJsonFences(specBody.slice(marker))[0] : undefined;
+  const candidates = marked !== undefined ? [marked] : extractJsonFences(specBody);
   for (const text of candidates) {
     const plan = tryParsePlan(text);
     if (plan) return plan;
@@ -387,7 +385,7 @@ export function parseSplitPlan(specBody: string): ImplTicketPlan[] | null {
 
 /**
  * 单张图的走查。状态机（带实装图的完整生命周期）：
- *   走图中 → 图清(draft_spec) → spec 待批 → spec 批准(split) → 实装中 → 实装全关(close)。
+ *   走图中 → 图清(draft_spec) → spec 待独审 → spec 独审裁定 PASS(split) → 实装中 → 实装全关(close)。
  * 每个动作的触发条件在该动作执行后必然失效（stateless 幂等的根基）：
  *   draft_spec 后 spec 子票出现；split 后实装票出现；close 后图变 CLOSED。
  */
@@ -465,7 +463,7 @@ export function analyzeMap(map: MapState, opts: WalkOptions): Analysis {
         actions: [],
       };
     }
-    return { phase: "实装中（工蜂拾取 / 评审 / 人工闸合入）", actions: [] };
+    return { phase: "实装中（工蜂拾取 / 评审 / 双审与 CI 通过后合入）", actions: [] };
   }
 
   // 有 spec、无实装票、且 spec 已关（异常）。
@@ -1307,7 +1305,7 @@ async function actSplitImpl(a: Extract<Action, { kind: "split_impl_tickets" }>, 
   }
 }
 
-/** 动作 3：实装票全关 + 判据满足 → 起草图关 comment + close map（合入 main 人工闸不动）。 */
+/** 动作 3：实装票全关 + 判据满足 → 起草图关 comment + close map（不碰 main）。 */
 function actCloseGraph(a: Extract<Action, { kind: "close_graph" }>, _cfg: EngineConfig): void {
   const mapNumber = a.map;
   const ctx = fetchMapContext(mapNumber);
@@ -1330,7 +1328,7 @@ function actCloseGraph(a: Extract<Action, { kind: "close_graph" }>, _cfg: Engine
   lines.push(`- **实装票全关**：${impl.map((c) => `[#${c.number}](${issueUrl(c.number)})`).join(" / ") || "（无）"}`);
   lines.push(`- **残雾去向核实**：${fog.length === 0 ? "无残留（Not yet specified 已清空或全部有去向）" : `⚠ 仍有 ${fog.length} 条（不应发生）`}`);
   lines.push("");
-  lines.push("（本提交由 wayfinder_engine 自动起草；合入 main 为人工闸【闸二】，本引擎不碰。）");
+  lines.push("（本评论由 wayfinder_engine 自动起草；本引擎不碰 main，合入由分支保护的 deepagents/review 与 ci-ok 把关。）");
 
   const comment = lines.join("\n");
   // spec 非持久：实装落地即关。
