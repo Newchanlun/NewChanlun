@@ -523,71 +523,6 @@ fn end_gate(
     }
 }
 
-#[cfg(test)]
-thread_local! {
-    /// TestOnly（#1978）：候选事实退回种子扫描（修复前口径），供「重扫不改段端与终结」的对照锁。
-    pub(super) static SEED_SCAN_FACTS: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
-    /// TestOnly（#1978）：重扫复现不了种子扫描终结判定的次数。
-    pub(super) static RESCAN_MISMATCHES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
-}
-
-/// #1978：§7.1 第 5 条把流首段起点挪到种子之后时，起点之前的笔是未分段前缀，候选发布的特征事实
-/// 须从 `start` 重扫 `strokes[start..=cursor]` 导出。段在哪里结束仍由种子扫描判定：重扫须在同一笔、
-/// 同一段端复现终结，且不得在种子扫描未终结处过段端门。`store` 是本轮扫描前的游标簿副本，重扫不动
-/// 共享簿。复现不了返回 `None`，调用方保留种子扫描事实，由 S 写者的构造期守卫拒写。
-fn rescan_from_first_start(
-    strokes: &[Stroke],
-    start: usize,
-    cursor: usize,
-    end: Option<usize>,
-    config: &ParseConfig,
-    store: Option<super::second_fold::SecondFoldStore>,
-) -> Option<FeatureSeqState> {
-    #[cfg(test)]
-    if SEED_SCAN_FACTS.with(|c| c.get()) {
-        return None;
-    }
-    let t = config.tangency;
-    let seg_dir = strokes[start].direction;
-    let mut feat = FeatureSeqState::new(
-        seg_dir,
-        ExtendMode::Strict,
-        config.tail_window,
-        config.second_seq_scan_window,
-        t,
-    );
-    feat.set_second_store(store);
-    feat.observe();
-    let reproduced = 'scan: {
-        for (j, sk) in strokes.iter().enumerate().take(cursor + 1).skip(start) {
-            let (h, l) = super::feature_seq::stroke_high_low(sk);
-            if sk.direction == seg_dir {
-                feat.observe_trend_stroke(j, h, l);
-                continue;
-            }
-            feat.append(j, h, l, strokes);
-            let Some(hit) = feat.scan_trigger(strokes) else {
-                continue;
-            };
-            let end_stroke = hit.k - 1;
-            if j == cursor && end == Some(end_stroke) {
-                break 'scan true;
-            }
-            let min_seg = config.seg_min_strokes as usize;
-            if end_gate(strokes, start, end_stroke, min_seg, t) == EndGate::Emit {
-                break 'scan false;
-            }
-            feat.skip_trigger(hit.k);
-        }
-        end.is_none()
-    };
-    #[cfg(test)]
-    if !reproduced {
-        RESCAN_MISMATCHES.with(|c| c.set(c.get() + 1));
-    }
-    reproduced.then_some(feat)
-}
-
 fn record_candidate(
     facts: &mut SegmentFacts,
     strokes: &[Stroke],
@@ -1101,8 +1036,6 @@ fn divide_segments_core(
         config.second_seq_scan_window,
         t,
     );
-    // #1978：流首段重扫从本轮扫描前的游标簿出发，不动共享簿。
-    let pristine_store = if observe { store.clone() } else { None };
     feat.set_second_store(store.take());
     if observe {
         feat.observe();
@@ -1173,24 +1106,12 @@ fn divide_segments_core(
             }
         }
         if observe {
-            let rescan = (segments.is_empty() && start > seed)
-                .then(|| {
-                    rescan_from_first_start(
-                        strokes,
-                        start,
-                        cursor,
-                        Some(end_stroke),
-                        config,
-                        pristine_store.clone(),
-                    )
-                })
-                .flatten();
             record_candidate(
                 &mut facts,
                 strokes,
                 start,
                 cursor,
-                rescan.as_ref().unwrap_or(&feat),
+                &feat,
                 Some(end_stroke),
                 std::mem::take(&mut attempts),
                 min_seg,
@@ -1212,15 +1133,12 @@ fn divide_segments_core(
     let pending_start = pending_segment_start(strokes, &segments, seed, seg_start, seg_dir);
     if observe {
         if let Some(p) = pending_start {
-            let rescan = (segments.is_empty() && p > seed)
-                .then(|| rescan_from_first_start(strokes, p, n - 1, None, config, pristine_store))
-                .flatten();
             record_candidate(
                 &mut facts,
                 strokes,
                 p,
                 n - 1,
-                rescan.as_ref().unwrap_or(&feat),
+                &feat,
                 None,
                 attempts,
                 min_seg,
