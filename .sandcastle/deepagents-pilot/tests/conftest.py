@@ -119,3 +119,11 @@ def local_execution_fixture(monkeypatch):
 def wayfinder_engine_path():
     return Path(os.environ.get("WAYFINDER_ENGINE_PATH", str(
         Path(__file__).resolve().parents[3] / "scripts/wayfinder_engine.mts"))).resolve()
+
+
+@pytest.fixture(autouse=True)
+def isolated_review_identity(tmp_path, monkeypatch):
+    """HOST 上可能已有真实的审查 App 身份文件；测试一律从不存在的路径起步（即缺省执行器身份）。"""
+    from pilot1742 import external_review
+
+    monkeypatch.setattr(external_review, "IDENTITY_CONFIG", tmp_path / "absent-app-identity.json")

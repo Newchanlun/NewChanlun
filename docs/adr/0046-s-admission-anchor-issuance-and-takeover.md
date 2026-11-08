@@ -1,11 +1,10 @@
 # ADR 0046：s-admission 锚是 S 资源准入合同——首签主体、签发与撤销程序、无锚库接管
 
-> #1742 引用迁移：本文旧 AGENTS 章节/行号保留为历史取证坐标（`git show 3d61fb7294:AGENTS.md`）；当前 #799/#804 完整限定与例外见 `docs/adr/0047-level-isomorphism-and-no-fallback-locks.md`，引文核验及教义三行头见 `docs/adr/0012-inference-layer-document-naming.md`「引用核验与教义正本」。
-
-
 > 正本：本文件是 S 结构服务持久准入锚 `s-admission` 的名分、首份锚数值来源与签发主体、签发/撤销前置与拒绝条件、过期含义的正本。
 > 最后裁定：#1567（2026-10-21，用户批复）
 > 受影响代码清单：见「受影响代码与票」节（实施票 #1657）
+
+> #1742 引用迁移：本文旧 AGENTS 章节/行号保留为历史取证坐标（`git show 3d61fb7294:AGENTS.md`）；当前 #799/#804 完整限定与例外见 `docs/adr/0047-level-isomorphism-and-no-fallback-locks.md`，引文核验及教义三行头见 `docs/adr/0012-inference-layer-document-naming.md`「引用核验与教义正本」。
 
 **日期**：2026-10-21
 **裁定人**：用户（2026-10-21 批复 [#1567 评论 6310847303](https://github.com/xy7365527-lang/NewChanlun/issues/1567#issuecomment-6310847303)，原话「不重要你自己定吧」，委托主控按推荐默认值逐项确认）；代理起草，非作者独审

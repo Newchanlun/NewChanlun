@@ -1,11 +1,10 @@
 # ADR 0051：逐 bar 域事件外壳、身份与生命周期合同
 
-> #1742 引用迁移：本文旧 AGENTS 章节/行号保留为历史取证坐标（`git show 3d61fb7294:AGENTS.md`）；当前 #799/#804 完整限定与例外见 `docs/adr/0047-level-isomorphism-and-no-fallback-locks.md`，引文核验及教义三行头见 `docs/adr/0012-inference-layer-document-naming.md`「引用核验与教义正本」。
-
-
 > 正本：本文件是逐 bar 域事件外壳、身份、epoch 分词、去重与因果、撤回与恢复幂等、snapshot/delta 续接与持久边界的教义正本。
 > 最后裁定：#1534（FU-11，2026-10-28 落地；用户 2026-10-27 批复）
 > 受影响代码清单：见本文「受影响票与 blocking 边变化」节
+
+> #1742 引用迁移：本文旧 AGENTS 章节/行号保留为历史取证坐标（`git show 3d61fb7294:AGENTS.md`）；当前 #799/#804 完整限定与例外见 `docs/adr/0047-level-isomorphism-and-no-fallback-locks.md`，引文核验及教义三行头见 `docs/adr/0012-inference-layer-document-naming.md`「引用核验与教义正本」。
 
 **状态**：用户已批准，文书待 main 合入。本 ADR 定逐 bar 域事件的外壳、身份与生命周期规则；B/E 的外壳映射与 delta/Gap 读口由「要开的票」所列实施票落地，本文不宣称已实现。
 **批准**：[用户 2026-10-27 原话「批准」](https://github.com/xy7365527-lang/NewChanlun/issues/1534#issuecomment-6446727344)。对象是返修候选稿及其异家族独审 PASS；两轮 BLOCK 后按 `.sandcastle/docs/graph-engineering.md` 第 4 步升为 P，本条依用户批复落地，不以 #1323 Notes N-1 代替。
