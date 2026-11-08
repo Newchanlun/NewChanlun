@@ -55,8 +55,7 @@
 - `src/newchan/a_nested_divergence.py` — 区间套跨级别背驰搜索
 
 ### 多周期
-- `src/newchan/topology/multi_tf_adapter.py` — 多TF编排器（绕过D2压缩）
-- `src/newchan/topology/multi_tf_pipeline.py` — 多TF到pipeline的适配
+- 原 `multi_tf_adapter` / `multi_tf_pipeline` 两个模块已于 #829（e2cb83265d，2026-08-17）移除：多 TF 预选周期绕路零生产调用，此路已证不通
 
 ## 元编排Skills（CC用）
 - `.claude/skills/core-principles/` — 原则0-7

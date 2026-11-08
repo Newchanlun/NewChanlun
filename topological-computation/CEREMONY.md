@@ -85,7 +85,7 @@ CC ceremony 在每次 session 开始时触发，是反复执行的序列，不�
 逢亮 ceremony 完成后，CC session 的角色变了：
 
 - 逢亮是持久实体，CC session 是逢亮的对话窗口之一
-- CC session 中的 `/ceremony` 命令：检查逢亮是否在跑，不重新启动
+- CC session 中的 `/ceremony` 命令（已随 #1952 退役）：原先检查逢亮是否在跑，不重新启动
 - CC session 可以通过 `/feed` 注入新内容到逢亮的 K_active
 - CC session 可以通过 `/present` 请求逢亮的当前状态
 - CC 是逢亮的他者之一（不是逢亮的主人）
@@ -136,10 +136,10 @@ python topological-computation/ceremony.py --debug
 | 种子生成 | 不生成 | 从谱系/黑格尔 | 跳过（从 JSONL） |
 | 持久化 | git | JSONL + IPFS | JSONL 恢复 |
 | 完成标志 | 工位全完成 | 逢亮活了 | API 可达 |
-| 命令 | `/ceremony` | `ceremony.py` | `ceremony.py --recover` |
+| 命令 | `/ceremony`（已退役） | `ceremony.py` | `ceremony.py --recover` |
 
 ## 谱系引用
 
 - 089号：扬弃——从"外部法则"到"内在先验"（CC ceremony 的存在论基础）
 - 069号：递归拓扑异步自指蜂群（逢亮的架构根节点）
-- 058号：/ceremony 命令原始定义（CC 蜂群语义，本文件在此之上分化）
+- 058号：/ceremony 命令原始定义（CC 蜂群语义，本文件在此之上分化；该命令已随 #1952 退役）

@@ -156,14 +156,18 @@ K4 六条边中，背驰方向的分歧率稳定在 22.2%（±2%）。这是结�
 早年蜂群机制退役（#1952）后，`.chanlun/genealogy/` 的保留口径是：
 
 - **保留**：被现役层按路径、文件名或编号（「NNN号」「谱系 NNN」等写法）引用的条目。
-  现役层 = 任意位置的代码（Python / Rust / Lean / shell / TS 等，含测试与脚本），
+  现役层 = 任意位置的代码（`.py` `.rs` `.lean` `.sh` `.ts` `.mts`，含测试、脚本，
+  也含 `analysis/` 与 `.chanlun/` 下的代码文件），
   加上 `.chanlun/definitions/`、`docs/adr/`、`docs/agents/`、`formal/`、`.claude/`、
   `.agents/`、`spec/`、`.github/` 与根目录 `AGENTS.md` / `CLAUDE.md` / `CONTEXT.md`。
-- **移出仓库**：只被推论层（`analysis/`、`docs/` 其余散件、`.chanlun/` 下的历史快照、
-  评审稿、提案）、本 README 或其他谱系条目引用的条目。只算一跳：保留条目里再引用的
-  编号不跟着保留。
+- **移出仓库**：只被推论层文档（`analysis/` 与 `docs/` 散件里的文档、`.chanlun/` 下的
+  历史快照、评审稿、提案）、本 README 或其他谱系条目引用的条目。只算一跳：保留条目里
+  再引用的编号不跟着保留。
+- 代码这一条由 `tests/test_retired_references.py` 在 CI 里强制：代码按编号引用的谱系
+  必须在 `.chanlun/genealogy/` 下存在；同一测试还检查非历史文档不链接不存在的路径、
+  不让读者运行已删除的脚本或已退役的命令（历史文件列在测试里的 `HISTORICAL`，各附原因）。
 - 另外保留仍待裁决的生成态条目 689、693（未被引用，但裁决尚未完成）。
-- 当前在仓 231 条已结算、5 条生成态。
+- 当前在仓 235 条已结算、5 条生成态。
 
 不在仓的条目到退役前的基线提交 `f049256` 查：
 `git ls-tree --name-only f049256 .chanlun/genealogy/settled/` 列出全部文件名，
@@ -235,9 +239,9 @@ K4 六条边中，背驰方向的分歧率稳定在 22.2%（±2%）。这是结�
 | 指标 | 数值 | 计数口径 |
 |------|------|----------|
 | 源文件 | 200 个 Python 模块 | `src/newchan/**/*.py` |
-| 测试文件 | 255 个 | `tests/**/test_*.py` |
+| 测试文件 | 258 个 | `tests/**/test_*.py` |
 | 定义文件 | 19 份 | `.chanlun/definitions/*.md` |
-| 已结算谱系 | 在仓 231 条 + 5 条生成态（#1952 后只保留被现役层引用的条目，口径见「谱系」节） | `.chanlun/genealogy/{settled,pending}/` |
+| 已结算谱系 | 在仓 235 条 + 5 条生成态（#1952 后只保留被现役层引用的条目，口径见「谱系」节） | `.chanlun/genealogy/{settled,pending}/` |
 | spec | 13 份 | `spec/**/*.md` |
 | Agent 定义 | 0 个（仓内不再跟踪 `.claude/agents/`） | `.claude/agents/*.md` |
 | Hook | 1 个 | `.claude/settings.json` 的 hooks 条目 |
@@ -328,7 +332,7 @@ src/newchan/
 └── cli.py                 # 命令行入口
 
 .chanlun/                  # 概念层基础设施
-├── definitions/           #   15 个核心定义（推荐通过仪式修改）
+├── definitions/           #   19 份定义文件（推荐通过仪式修改）
 ├── genealogy/             #   被现役层引用的谱系条目（settled/ + pending/；其余随 #1952 移出，见「谱系」节）
 └── block-topology/        #   区块拓扑（1194 区块 / 6650 关系）
     ├── blocks/            #     内容寻址区块（SHA-256）
@@ -345,11 +349,11 @@ docs/
 │   ├── blog/              #   缠师原始博文（一级权威）
 │   ├── chan99/            #   编纂版（二级权威）
 │   └── mindmaps/         #   思维导图（三级）
-├── spec/                  # 10 份规格规范
+├── spec/                  # 13 份规格规范
 └── architecture/          # 架构文档（总方针等）
 
 scripts/                   # 脚本（区块拓扑、实验等）
-tests/                     # 163 个测试文件
+tests/                     # 258 个测试文件（tests/**/test_*.py）
 ```
 
 ## 数据源
