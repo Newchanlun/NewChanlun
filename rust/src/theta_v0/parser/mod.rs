@@ -590,6 +590,8 @@ mod tb1493_replay_tests;
 pub(crate) mod tb1581_tests;
 #[cfg(test)]
 mod tb1604_tests;
+#[cfg(test)]
+mod tb1978_tests;
 
 #[cfg(test)]
 mod tests {
