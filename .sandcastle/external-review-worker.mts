@@ -124,6 +124,11 @@ export async function runExternalReview(folder: string, deps: WorkerDependencies
   let creationStarted = false;
   let timer: ReturnType<typeof setTimeout> | undefined;
   let cancelled = false;
+  // 主动停机标志放在外层：exec 在容器被关后可能 reject 而不是返回，catch 里也要据此补齐原因码。
+  let timedOut = false;
+  let overBudget = false;
+  const stopCode = (): string | undefined =>
+    cancelled ? "cancelled" : overBudget ? "budget_exceeded" : timedOut ? "timeout" : undefined;
   const cancel = () => { cancelled = true; void handle?.close(); };
   process.once("SIGTERM", cancel); process.once("SIGINT", cancel);
   try {
@@ -175,10 +180,11 @@ export async function runExternalReview(folder: string, deps: WorkerDependencies
       + " -c 'web_search=\"disabled\"' -c 'shell_environment_policy.inherit=\"core\"' -c 'project_doc_max_bytes=0' -";
     const transcript = new CodexTranscript(provider);
     const events = openSync(join(folder, "events.jsonl"), "wx", 0o600);
-    let timedOut = false;
-    let overBudget = false;
     const cap = deps.commandCap ?? REVIEW_COMMAND_CAP;
-    const usage = { input_tokens: 0, cached_input_tokens: 0, output_tokens: 0, reasoning_output_tokens: 0, commands: 0 };
+    // reported：是否收到过带 usage 的 turn.completed。codex exec 只在整轮结束时报用量，被中途关停的独审
+    // token 数未知（不是 0），额度闸据 reported=false 按命令数估算，不把失控的独审算成零。
+    const usage = { input_tokens: 0, cached_input_tokens: 0, output_tokens: 0, reasoning_output_tokens: 0, commands: 0,
+      reported: false };
     record.usage = usage;
     timer = setTimeout(() => { timedOut = true; void handle?.close(); }, deps.timeoutMs);
     let execution;
@@ -190,6 +196,7 @@ export async function runExternalReview(folder: string, deps: WorkerDependencies
         try {
           const event = JSON.parse(line);
           if (event?.type === "turn.completed" && event.usage) {
+            usage.reported = true;
             for (const key of ["input_tokens", "cached_input_tokens", "output_tokens", "reasoning_output_tokens"] as const) {
               usage[key] += Number(event.usage[key]) || 0;
             }
@@ -206,7 +213,7 @@ export async function runExternalReview(folder: string, deps: WorkerDependencies
     writeFileSync(join(folder, "stderr.log"), execution.stderr, { mode: 0o600 });
     if (cancelled || timedOut || overBudget || execution.exitCode !== 0) {
       // 显式原因码：触顶是「暂停待人看」，不是静默失败。
-      record.failure_code = cancelled ? "cancelled" : overBudget ? "budget_exceeded" : timedOut ? "timeout" : "model_exit";
+      record.failure_code = stopCode() ?? "model_exit";
       throw new Error(cancelled ? "监督已取消" : overBudget ? `独审命令数超过上限 ${cap}` : timedOut ? "独审超时" : "Codex 退出失败");
     }
     record.phase = "transcript";
@@ -228,6 +235,9 @@ export async function runExternalReview(folder: string, deps: WorkerDependencies
     record.status = cancelled ? "cancelled" : "failed";
     // SDK 传输异常可能含 Docker argv/env，只持久化错误类别，不记录其原始消息。
     record.failure_reason = error instanceof Error ? error.name : "SupervisionError";
+    // 主动停机（取消、命令数触顶、超时）无论 exec 是返回还是 reject 都留下显式原因码；模型阶段的其他异常记 model_error。
+    const code = record.failure_code ?? stopCode() ?? (record.phase === "model" ? "model_error" : undefined);
+    if (code !== undefined) record.failure_code = code;
     try { record.after = launch ? snapshot(launch.checkout) : null; } catch { record.after = null; }
   } finally {
     if (timer) clearTimeout(timer);

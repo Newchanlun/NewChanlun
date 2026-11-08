@@ -52,7 +52,8 @@ test("显式两家族模型保留旧默认并拒绝路由外模型", () => {
   assert.throws(() => verifyReviewAdmission({ imageId: image, consume() {} }));
 });
 
-for (const mode of ["PASS", "BLOCK", "failed", "missing-log", "missing-completed", "write", "bad-mount", "secret-env", "bad-filesystem", "over-budget"] as const) {
+for (const mode of ["PASS", "BLOCK", "failed", "missing-log", "missing-completed", "write", "bad-mount", "secret-env", "bad-filesystem", "over-budget",
+  "over-budget-reject", "timeout-reject"] as const) {
   test(`宿主监督 ${mode} 不把缺证据转为通过`, async () => {
     const f = fixture(); const session = randomUUID();
     let closed = false, creates = 0;
@@ -71,12 +72,24 @@ for (const mode of ["PASS", "BLOCK", "failed", "missing-log", "missing-completed
         assert(command.includes("--output-schema /tmp/external-review-schema.json"));
         assert(command.includes("--disable multi_agent"));
         assert.equal(options?.stdin, f.launch.prompt);
-        const commands = mode === "over-budget"
+        if (mode === "timeout-reject") {
+          // 真实 SDK 在容器被关后可能让 exec reject：等超时关容器，再以传输异常结束。
+          while (!closed) await new Promise((r) => setTimeout(r, 5));
+          throw new Error("container closed");
+        }
+        const commands = mode.startsWith("over-budget")
           ? [1, 2, 3].map((n) => ({ type: "item.completed", item: { id: `c${n}`, type: "command_execution", command: "git diff", exit_code: 0 } })) : [];
         const events = [{ type: "thread.started", thread_id: session }, ...commands,
           { type: "item.completed", item: { type: "agent_message", text: JSON.stringify(output) } },
-          ...(mode === "missing-completed" ? [] : [{ type: "turn.completed" }])];
-        for (const e of events) options?.onLine?.(JSON.stringify(e));
+          ...(mode === "missing-completed" ? [] : [{ type: "turn.completed",
+            usage: { input_tokens: 100, cached_input_tokens: 40, output_tokens: 7, reasoning_output_tokens: 3 } }])];
+        for (const e of events) {
+          options?.onLine?.(JSON.stringify(e));
+          if (mode.startsWith("over-budget") && closed) {  // 容器已关：不再有输出，exec 返回非零或 reject
+            if (mode === "over-budget-reject") throw new Error("container closed");
+            return { stdout: "", stderr: "", exitCode: 137 };
+          }
+        }
         if (mode === "write") writeFileSync(join(f.checkout, "changed"), "write simulated");
         return { stdout: "", stderr: "", exitCode: mode === "failed" ? 1 : 0 };
       },
@@ -102,7 +115,7 @@ for (const mode of ["PASS", "BLOCK", "failed", "missing-log", "missing-completed
         Mounts: reviewMounts([{ hostPath: f.checkout, sandboxPath: "/review" }], f.checkout)
           .map((m) => ({ Source: m.hostPath, Destination: m.sandboxPath, RW: mode === "bad-mount" })),
         Config: { Env: mode === "secret-env" ? ["GH_TOKEN=fixture"] : [] } }),
-      imageEnv: () => [], timeoutMs: 10000, commandCap: 2,
+      imageEnv: () => [], timeoutMs: mode === "timeout-reject" ? 20 : 10000, commandCap: 2,
     };
     try {
       await runExternalReview(f.folder, deps);
@@ -112,13 +125,19 @@ for (const mode of ["PASS", "BLOCK", "failed", "missing-log", "missing-completed
       if (receipt.status === "completed") {
         assert.match(modelCommand, /(?:^|\s)--skip-git-repo-check(?:\s|$)/);
         assert(modelCommand.includes("-c 'project_doc_max_bytes=0'"));
-        assert.equal(typeof receipt.usage.commands, "number");
+        assert.deepEqual(receipt.usage, { input_tokens: 100, cached_input_tokens: 40, output_tokens: 7,
+          reasoning_output_tokens: 3, commands: 0, reported: true });
         assert.equal(receipt.result.summary, `VERDICT: ${mode}`);
         assert.equal(receipt.session_id, session);
         assert(receipt.turn_completed);
         assert.equal(receipt.container_id, container);
       }
-      if (mode === "over-budget") assert.equal(receipt.failure_code, "budget_exceeded");
+      if (mode.startsWith("over-budget")) {
+        assert.equal(receipt.failure_code, "budget_exceeded");
+        assert.equal(receipt.usage.commands, 3);
+        assert.equal(receipt.usage.reported, false);  // 被关停的独审没报用量：标为未知，不是 0
+      }
+      if (mode === "timeout-reject") assert.equal(receipt.failure_code, "timeout");
       if (mode === "failed") assert.equal(receipt.failure_code, "model_exit");
       await assert.rejects(runExternalReview(f.folder, deps));
       assert.equal(creates, 1);
