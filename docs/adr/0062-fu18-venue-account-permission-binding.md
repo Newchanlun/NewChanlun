@@ -38,7 +38,7 @@
 
 - ADR 0028 十个字段落成一份具名版本化**场所 profile 记录**（`venue-profile/1`，形状同 ADR 0057:43-51 的版本化记录）。它是政策记录，不含任何凭据值。
 - X 执行 profile 升到 `x-execution-profile/2`：按 `{path, profile_id, version, sha256}` 引用场所 profile 记录，按 `{path, version, sha256}` 引用 #1770 能力记录；原 `credential_scope.{env,file}` 改名 **`credential_source.{env,file}`**，只管部署管道。挪凭据文件路径不改场所 profile 记录，因而不改作用域版本。
-- X 库**绑定行按 `(profile_id, version)` 追加**，不做单键覆盖（取代 `x_execution_session.rs:127-130` 的 upsert 读法）。同 `profile_id@version` 而哈希不同 → `IdentityConflict`，不覆盖，进程非 0 退出（INTERFACE-CONTRACTS:11）。合法升版本时旧行保留，库里能看出曾经绑过哪些 `profile_id@version` 及其哈希；账户与钥匙本体不进库（裁定八），要还原须对照部署状态目录里同哈希的记录。同 `profile_id@version` 且哈希相同时，新 `writer_epoch` 启动复用原绑定行、不追加；`send_state` 按 `writer_epoch` 记录，每个新 epoch 重新经发送门判定（裁定七：拒发只在当前 epoch 内为终态）。
+- X 库**绑定行每个 `writer_epoch` 追加一行**（键为 `writer_epoch`），只追加、不覆盖（取代 `x_execution_session.rs:127-130` 的 upsert 读法）。一行记下该 epoch 绑定的 `profile_id@version` 与 `venue_profile_sha256`、能力记录版本与 `capability_record_sha256`、核验结果与 `send_state`；场所 profile 与能力记录各自独立升版都只是新 epoch 的新行，互不阻塞。同 `profile_id@version` 而 `venue_profile_sha256` 与任一已持久行不同 → `IdentityConflict`，不写新行，进程非 0 退出（INTERFACE-CONTRACTS:11）。旧行全部保留，库里能看出曾经绑过哪些 `profile_id@version`、能力记录版本及其哈希；账户与钥匙本体不进库（裁定八），要还原须对照部署状态目录里同哈希的记录。`send_state` 随所在 epoch 的行记录，每个新 epoch 重新经发送门判定（裁定七：拒发只在当前 epoch 内为终态）。
 - 能力记录同样进持久身份：绑定行存 `capability_record_version` 与 `capability_record_sha256`。每次启动与库内全部已持久绑定行逐项比较，同 `capability_record_version` 而 `capability_record_sha256` 不同 → `IdentityConflict`，规则与场所 profile 相同。只比 X profile 里的声明不够：同版本改了 `session_permission` 或挂单限制，再把 X profile 的 sha256 一并改掉，第 1 步照样通过，只有库里的旧哈希能认出替换。
 - 排除：十个字段直接塞进 X profile（部署路径与政策同一哈希，失效触发被噪声触发）；只按 `profile_id@version` 绑定不校验哈希（改值不升版本发现不了，违反 ADR 0028:52）。
 
@@ -75,7 +75,7 @@
 
 授权写在场所 profile 记录的 `authorization` 行（ADR 0028:26 原位）：`{authorization_id, authorizer, authorized_at}`，随 profile 版本签，计入 `venue_profile_sha256`。任何字段变更出新版本后须重签。X 核的是声明存在且 `authorizer` 等于约定的用户标识，不是签名验证。P1 授权先于机器层签署；ADR 0028:48 只约束 P2 的顺序，P1 不搬用 ADR 0028:72 的 P2 元组。
 
-### 五、P1 同强度发送前置件（Q5 = A，C 类选择）
+### 五、P1 同强度发送前置件（Q5 = A，P 类选择）
 
 - `experiment` 与 `production` 走同一发送门：X 每次启动（每个新 `writer_epoch`）后、构造任何写传输之前，按「发送门（8 步）」核验 ADR 0028:46 列出的四项组成（旧 writer 禁入证据、X 排他锁、profile 身份绑定、凭据作用域版本），失败即拒发。
 - **发送门是一个独立的发送前置件，不是 SR-3 的失效触发。** 它不判定、不登记 ADR 0028:46 的五项失效触发是否发生，只核当前输入是否一致。现行 X 在 `serve` 启动时一次性读入 profile、库路径、`writer_epoch` 与凭据（`x_execution_session.rs:173-188`），X 读入的那几项输入（profile、库路径、epoch、凭据）一旦变化，只能经一次重启进入 X，所以「每次启动都核」已覆盖这类变化之后的首次发送，不需要识别触发种类（`[新缠论:推论]`）。场所侧的变化（例如 agent key 在场所端被撤销）不经重启，也不由发送门发现，由场所拒绝回报兜底。
@@ -83,16 +83,16 @@
 
 | | SR-3 | 发送门 |
 |---|---|---|
-| 管它的签署 | ADR 0045 SR 清单 v1（用户，#1560 2026-10-21 批复） | 本 ADR 裁定五（#1540 主控裁定，C 类，用户可一句话回退） |
+| 管它的签署 | ADR 0045 SR 清单 v1（用户，#1560 2026-10-21 批复） | 本 ADR 裁定五（#1540，依 #1909 代理独审裁定，P 类，用户可一句话回退） |
 | 触发条件 | ADR 0028:46 五项失效触发之一发生，且 profile 为 `production`；P1 签为 `P1_experiment_never_fires` | 每次 X 启动后、首个写传输前；不看证据类，不看有没有失效触发 |
 | 回答的问题 | 这次变更是否构成系统风险条件，要不要冻结新发送 | 本 epoch 手里这把钥匙、这份 profile 现在能不能发 |
 | 产物 | SR 条件记录、`freeze_new_send` 冻结态、退出授权记录（#1380 实施，ADR 0030:18-21） | X 库绑定行与 `send_state`；拒发带 `send_refusal_class` / `send_refusal_detail`；装配失败则进程非 0 退出、不写库 |
 | 解除 | 按 ADR 0030 退出授权 | 修正输入后以新 `writer_epoch` 重走 8 步（裁定七） |
 
 - 两者不共用记录。发送门拒发不写 SR 条件记录、冻结态或退出授权记录；SR-3 五项触发的定义、范围、动作与 P1 签署值都不因本 ADR 改变。ADR 0045:24 的读法（五项失效触发只在 `production` profile 下构成 SR-3 条件）照旧成立。
-- **最小例子。** P1 上 `P1-hl-testnet` 从 v1 升到 v2（换钥匙，`public_id` 变了），X 以 `writer_epoch` 7 → 8 重启，但 X 执行 profile 里的 `tb09_fingerprint` 仍是按 v1 算的值。这一次事件命中五项触发中的两项（profile 版本变更、恢复/重启）。
+- **最小例子。** P1 上 `P1-hl-testnet` 从 v1 升到 v2（换钥匙，`public_id` 变了），X 以 `writer_epoch` 7 → 8 重启，但 X 执行 profile 里的 `tb09_fingerprint` 仍是按 v1 算的值。这一次事件命中五项触发中的三项（凭据轮换、profile 版本变更、恢复/重启；ADR 0028:46）。
   - SR-3 判：`evidence_class = experiment`，v1 签署值 `P1_experiment_never_fires`，不触发。SR 条件记录 0 条，冻结态 0 条，退出授权记录 0 条。
-  - 发送门判：epoch 8 启动，第 1–5 步通过，第 6 步本次计算的指纹 ≠ 声明值。绑定行 `(P1-hl-testnet, 2)` 写 `send_state=refused`、`IdentityConflict` / `Tb09Fingerprint`，写请求 0 个，只读查询照常。
+  - 发送门判：epoch 8 启动，第 1–5 步通过，第 6 步本次计算的指纹 ≠ 声明值。epoch 8 的绑定行（`P1-hl-testnet@2`）写 `send_state=refused`、`IdentityConflict` / `Tb09Fingerprint`，写请求 0 个，只读查询照常。
   - 同一事件若用户先按 v2 重算指纹再重启：SR-3 仍是 0 条记录；发送门 8 步全过，进入可发送状态。
   - 两者不冲突：SR-3 在 P1 上对任何事件都答「不构成风险条件」，发送门按当前输入答「能发 / 不能发」。两个答案同时成立，各自落在自己的记录里。P2 激活时 SR-3 生效，两者各写各的记录、各按各的路径解除，具体次序随 P2 另签版本时裁定（#1561）。
 - P1 产出的指纹、绑定行、核验记录都标 `experiment`，永不作为生产证据（ADR 0028:48、:71；CONTEXT.md「证据类」）。P2 首发前仍须在目标部署重核。修订指针落在 ADR 0045 文末。
@@ -105,7 +105,7 @@
 - 启动前就无法装配的错误（引用记录缺失、版本不认、哈希不符、同版本异内容、缺凭据）进程非 0 退出、不写库。装配成功但不满足发送前件的，持久化 `send_state=refused` 后继续只读服务。
 - 现有值 `MissingTb09Fingerprint` 读作类别 `MissingDependency`、细分 `Tb09Fingerprint`。可保留 `send_refusal_reason` 原字段原值，另加 `send_refusal_class` 列；选哪种由实施票定，对外可读的类别必须来自共同错误集。
 
-### 七、拒发覆盖范围（Q7 = A，C 类选择，只对 P1 签署）
+### 七、拒发覆盖范围（Q7 = A，P 类选择，只对 P1 签署）
 
 拒发在当前 `writer_epoch` 内为终态，拦截一切写请求：下单、撤单、reduce-only 平仓，以及急停展开出的命令。只读查询与恢复对账（ADR 0030:48「先只读对账在途订单」）照常。
 
@@ -113,7 +113,7 @@
 
 离开拒发只有一条路：修正输入后以新 `writer_epoch` 重启，重走全部步骤。不自动重试，不回退旧 writer（ADR 0028:46），不因失败换值放行（ADR 0041:15）。修正若改了 profile 字段，即新版本，属失效触发。
 
-### 八、公开地址不入仓（C 类选择）
+### 八、公开地址不入仓（P 类选择）
 
 仓库里只放 `profile_id@version` 加 sha256。场所 profile 记录本体（含 `account` 与 `public_id`）放部署状态目录。ADR 0028:20 说地址不是凭据，入仓不违反凭据纪律；但 testnet 与 mainnet 共用地址，`account` 就是用户主网钱包的公开地址，写进仓库会把用户的主网身份与代码库关联。仓内测试只用现场生成的非敏感测试地址。
 
@@ -140,7 +140,7 @@
 
 X 执行 profile `x-execution-profile/2`：`mode`；`venue_profile: {path, profile_id, version, sha256}`；`capability_record: {path, version, sha256}`；`credential_source: {env, file}`；`tb09_fingerprint`（TB-09 算法产出，#1383）。
 
-X 库绑定行（按 `(profile_id, version)` 追加，与 `send_state` 同一事务）：`profile_id、profile_version、venue_profile_sha256、capability_record_version、capability_record_sha256、authorization_id、evidence_class、credential_public_id_verified、session_permission_verified、writer_epoch、send_state、send_refusal_class、send_refusal_detail`。凭据作用域版本由 `(profile_id@profile_version, venue_profile_sha256)` 读出，不另存一列。
+X 库绑定行（每个 `writer_epoch` 追加一行，键 `writer_epoch`，与 `send_state` 同一事务；身份唯一性靠发送门第 2 步与全部已持久行比对，不靠主键）：`profile_id、profile_version、venue_profile_sha256、capability_record_version、capability_record_sha256、authorization_id、evidence_class、credential_public_id_verified、session_permission_verified、writer_epoch、send_state、send_refusal_class、send_refusal_detail`。凭据作用域版本由 `(profile_id@profile_version, venue_profile_sha256)` 读出，不另存一列。
 
 ## 发送门（8 步）
 
@@ -208,7 +208,7 @@ ADR 0028:24 的动作维度：
 |---|---|---|
 | `rust/src/bin/x_execution_session.rs:21` | `x-execution-profile/1` | 升 `/2` |
 | 同 `:28-34`、`:36-79` | 五项 profile | 引用场所 profile 记录与能力记录；`credential_source` |
-| 同 `:98-135` | upsert，无冲突检查 | 按 `(profile_id, version)` 追加绑定行，含 `capability_record_sha256`；场所 profile 或能力记录同版本异内容 `IdentityConflict`；拒发类别与细分 |
+| 同 `:98-135` | upsert，无冲突检查 | 按 `writer_epoch` 追加绑定行，含 `capability_record_sha256`；场所 profile 或能力记录同版本异内容 `IdentityConflict`；拒发类别与细分 |
 | 同 `:109-114` | 只 production 缺指纹拒发 | 发送门第 4-7 步，`experiment` 同强度 |
 | 同 `:180-188` | 缺凭据 `MissingDependency`；base 在 :178 先 `persist` 写 x_meta，再查凭据 | 凭据检查前移到任何持久化之前（裁定六：缺凭据不写库）；第 4 步紧随其后 |
 | `rust/src/bin/production_session.rs:177-192` | 读 `credential_scope.env/file` | 读 `credential_source.env/file`；校验两份引用记录哈希 |
