@@ -1,59 +1,19 @@
 # Verification Command
 
-Run comprehensive verification on current codebase state.
+提交前核验当前改动。只跑覆盖本次改动的检查，每项照实报告：通过、失败，或未跑及原因。
 
-## Instructions
+- `.sandcastle/`、`scripts/` 下的 TypeScript：`npm run typecheck`，再跑改动模块旁的测试，例如 `npx tsx --test .sandcastle/<模块>.test.mts`。
+- Deep Agents 执行器（`.sandcastle/deepagents-pilot/`）：在该目录跑 `python -m pytest -q tests`，可加 `-k` 只跑相关用例。
+- 其余 Python：`python -m pytest -q <相关测试>`。
+- Rust：macOS 本机不跑 cargo 或 rustc。先提交，再用 `NC_REPO="$(git rev-parse --show-toplevel)" NC_TARGET=<唯一名> ~/.local/bin/nc-remote <已提交分支> rust cargo check --locked`，或推分支交 CI。拿不到真实结果就写「Rust 未验证」。
+- 改了 `formal/`：`python3 scripts/check_fixture_drift.py`。
+- `git status` 与 `git diff --cached --stat`：确认只暂存了本次要提交的文件。
 
-Execute verification in this exact order:
-
-1. **Build Check**
-   - Run the build command for this project
-   - If it fails, report errors and STOP
-
-2. **Type Check**
-   - Run TypeScript/type checker
-   - Report all errors with file:line
-
-3. **Lint Check**
-   - Run linter
-   - Report warnings and errors
-
-4. **Test Suite**
-   - Run all tests
-   - Report pass/fail count
-   - Report coverage percentage
-
-5. **Console.log Audit**
-   - Search for console.log in source files
-   - Report locations
-
-6. **Git Status**
-   - Show uncommitted changes
-   - Show files modified since last commit
-
-## Output
-
-Produce a concise verification report:
+输出：
 
 ```
-VERIFICATION: [PASS/FAIL]
-
-Build:    [OK/FAIL]
-Types:    [OK/X errors]
-Lint:     [OK/X issues]
-Tests:    [X/Y passed, Z% coverage]
-Secrets:  [OK/X found]
-Logs:     [OK/X console.logs]
-
-Ready for PR: [YES/NO]
+VERIFICATION: PASS / FAIL
+<检查>: 通过 / 失败（原因） / 未跑（原因）
 ```
 
-If any critical issues, list them with fix suggestions.
-
-## Arguments
-
-$ARGUMENTS can be:
-- `quick` - Only build + types
-- `full` - All checks (default)
-- `pre-commit` - Checks relevant for commits
-- `pre-pr` - Full checks plus security scan
+$ARGUMENTS 可写要核验的路径或检查名；不写时按 `git status` 列出的改动选检查。
