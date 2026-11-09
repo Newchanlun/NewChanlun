@@ -130,6 +130,9 @@ class QueueIntake:
             for path in sorted(units.glob(f't{ticket}-*.json')):
                 unit = load_unit(self.state_root, path.stem)[0]
                 existing.append(unit)
+            merged = self._merged_run(existing)
+            if merged is not None:
+                raise QueueWaiting(f'awaiting_human: run {merged} 的交付 PR 已合入，不重派；请关闭本票')
             unreleased = [u for u in existing if txn.record is None
                           or int(u.run_id.rsplit('-', 1)[1]) > int(txn.record.run_id.rsplit('-', 1)[1])]
             if unreleased:
@@ -171,6 +174,17 @@ class QueueIntake:
             finally:
                 os.unlink(temporary)
             return unit
+
+    def _merged_run(self, units: list[WorkUnit]) -> str | None:
+        """已合入的交付不因释放而重派。释放可能早于队列观察到合入，所以本机未记 merged 时也读 PR。"""
+        from .executor import delivery_status
+        for unit in units:
+            delivery = delivery_status(PilotRun.run_dir(self.state_root, unit.run_id))
+            number = ((delivery['state'] or {}).get('pr') or {}).get('number')
+            if delivery['phase'] == 'merged' or (type(number) is int
+                                                 and self.gateway.get_pr(number).get('merged') is True):
+                return unit.run_id
+        return None
 
     def once(self, run: Callable[[WorkUnit], int]) -> dict[int, dict[str, Any]]:
         from .executor import (

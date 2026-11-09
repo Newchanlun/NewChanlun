@@ -5,8 +5,10 @@
  * 设计正本：.sandcastle/docs/graph-engineering.md「裁决流程」。每张 grilling 票：
  *   每票 MAIN 会话（#1742 F4，main-session.mts）：分级+考古（主控模型，判 T/P，并两路搜、逐点 A/B/C）
  *   → 宿主校验后同一会话续接起草 → 独审（与实际起草者异家族，新的无状态进程，只读草稿与源）
- *   → T 类 PASS：decision/<票号> 分支落正本 + resolution 评论；P 类：挂 needs-approval。
- *   其他 BLOCK：同一 MAIN 会话由本轮实际作者模型带审查意见重做一次；仍 BLOCK：转 P 类。
+ *   → PASS（T/P 同，#1909）：decision/<票号> 分支落正本 + resolution 评论。
+ *   其他 BLOCK：同一 MAIN 会话由本轮实际作者模型带审查意见重做一次；仍 BLOCK：held（不放行，退回评论才重开）。
+ *   考古有 research/probe 事实缺口：held，不起草、不落地。
+ *   分级列出资金与权限硬门事项（user_gate，ADR 0041）：held 交还用户签署，挂 ready-for-human，不起草、不落地。
  *
  *   只有 R1 引用类 BLOCK：同一会话一次只改引用的修订轮；总轮次上限 MAX_ROUNDS。起草后先查正本落点，越界退回重写一次。
  * 模式：默认 --dry-run，只写 /Volumes/AgentStorage/decisions/<票号>/，不写 GitHub。
@@ -30,7 +32,7 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import { MAIN_MODEL } from "./main-model.mts";
 import { canonicalPath, parseCanonicalEdit, applyCanonicalEdit, readCanonicalTarget, canonicalDiff, validateCanonicalPlan, writeCanonicalPlan, type CanonicalPlan } from "./canonical-edit.mts";
 import { DRAIN_ROOT, DrainFrozenError } from "./drain-control.mts";
-import { graphAdmissionFrozen, withGraphAdmission } from "./deepagents-cutover.mts";
+import { ORCHESTRATOR_LOGIN, graphAdmissionFrozen, withGraphAdmission } from "./deepagents-cutover.mts";
 import { randomUUID } from "node:crypto";
 import { loadMainSession, openMainSession, type MainSession, type SessionRef } from "./main-session.mts";
 
@@ -49,6 +51,15 @@ export const DEFAULT_MAPS = scheduler.decisionMaps;
 export const MAX_CONCURRENT = scheduler.decisionMaxConcurrent;
 export const LOOP_INTERVAL_MS = scheduler.decisionLoopMs;
 export const AUTH_LINE = "本条依 #1323 Notes N-1 预授权判定";
+/** P 类 resolution 首行（#1909 用户授权：P 类经起草与非作者独审 PASS 由代理裁定）。 */
+export const P_AUTH_LINE = "本条依 #1909 代理独审裁定";
+export function authLine(klass: Klass): string {
+  return klass === "T" ? AUTH_LINE : P_AUTH_LINE;
+}
+/** 旧影子模式的待批标签。不再添加；票进入新流程的终态（落地或 held）时摘掉。 */
+export const LEGACY_APPROVAL_LABEL = "needs-approval";
+/** 资金与权限硬门交还用户时挂的标签；执行器队列把它列为 hold 标签。 */
+export const HUMAN_LABEL = "ready-for-human";
 export const RULES = ["R1", "R2", "R3", "R4", "R5", "R6", "R7", "R8"] as const;
 export type Rule = (typeof RULES)[number];
 export const DRAFT_SECTIONS = [
@@ -150,15 +161,40 @@ export function extractJson(text: string): unknown {
 }
 
 export type Klass = "T" | "P";
-export interface Classification { klass: Klass; reason: string; parsed: boolean }
+/**
+ * ADR 0041「独立资金与权限硬门」上须用户本人签署的一项：字段或决策，及其依据。
+ * signature 是分级器指认的签署评论编号（票面评论从 1 起的序号）；宿主只认编排账号首行「退回：签署」且写着该字段的评论，见 unsignedUserGate。
+ */
+export interface UserGateItem { field: string; basis: string; signature?: number }
+/** userGate 非空的票不由代理裁定，交还用户签署（held: user_authorization）。 */
+export interface Classification { klass: Klass; reason: string; parsed: boolean; userGate: UserGateItem[] }
 
-/** 分级解析：拿不准一律判 P。 */
+function userGateItems(v: unknown): UserGateItem[] | null {
+  if (!Array.isArray(v)) return null;
+  const items = v.map((x): UserGateItem => {
+    const item: UserGateItem = { field: String(x?.field ?? "").trim(), basis: String(x?.basis ?? "").trim() };
+    // 编号不成形按未签署处理（交还用户），不让坏编号挡住整份清单的解析。
+    if (Number.isSafeInteger(x?.signature) && x.signature > 0) item.signature = x.signature;
+    return item;
+  });
+  return items.every((x) => x.field && x.basis) ? items : null;
+}
+
+const MISSING_USER_GATE: UserGateItem[] = [{ field: "分级输出缺可解析的 user_gate", basis: "ADR 0041「授权来源与生效边界」节：硬门拿不准时交还用户，不由代理裁定" }];
+
+/** 落盘分级记录缺 userGate（含硬门字段之前的旧记录）与新分级输出同口径：交还用户。 */
+export function storedUserGate(v: unknown): UserGateItem[] {
+  return userGateItems(v) ?? MISSING_USER_GATE;
+}
+
+/** 分级解析：拿不准一律判 P；硬门判定缺失或不成形一律交还用户。 */
 export function parseClassification(text: string): Classification {
-  const j = extractJson(text) as { class?: unknown; klass?: unknown; reason?: unknown } | undefined;
+  const j = extractJson(text) as { class?: unknown; klass?: unknown; reason?: unknown; user_gate?: unknown } | undefined;
   const raw = String(j?.class ?? j?.klass ?? "").trim().toUpperCase();
   const reason = typeof j?.reason === "string" ? j.reason.trim() : "";
-  if ((raw === "T" || raw === "P") && reason) return { klass: raw, reason, parsed: true };
-  return { klass: "P", reason: `分级输出无法解析，按「拿不准一律判 P」处理${reason ? `：${reason}` : ""}`, parsed: false };
+  const userGate = storedUserGate(j?.user_gate);
+  if ((raw === "T" || raw === "P") && reason) return { klass: raw, reason, parsed: true, userGate };
+  return { klass: "P", reason: `分级输出无法解析，按「拿不准一律判 P」处理${reason ? `：${reason}` : ""}`, parsed: false, userGate };
 }
 
 export type Verdict = "PASS" | "BLOCK";
@@ -316,10 +352,11 @@ export async function allocateAdr(
   const sleep = o.sleep ?? ((ms) => new Promise((r) => setTimeout(r, ms)));
   mkdirSync(o.stateDir, { recursive: true });
   for (let i = 0; ; i++) {
-    try { writeFileSync(lock, String(process.pid), { flag: "wx" }); break; } catch {
-      if (i >= scheduler.adrLockMaxWaits) throw new Error(`ADR 编号锁 ${lock} 被占用超时`);
-      await sleep(scheduler.adrLockPollMs);
-    }
+    let locked = false;
+    try { locked = takePidLock(lock); } catch { /* 按占用处理，继续等 */ }
+    if (locked) break;
+    if (i >= scheduler.adrLockMaxWaits) throw new Error(`ADR 编号锁 ${lock} 被占用超时`);
+    await sleep(scheduler.adrLockPollMs);
   }
   try {
     const res: Record<string, number> = existsSync(resFile) ? JSON.parse(readFileSync(resFile, "utf8")) : {};
@@ -344,7 +381,10 @@ export function renumberDraft(draft: string, from: string, a: AdrAllocation): st
 
 // ───────────────────────── 状态转移 ─────────────────────────
 
-export type Phase = "classify" | "draft" | "review" | "land_t" | "shadow_p" | "review_parse_error" | "done" | "error" | "skipped";
+/** land_t 为落地（历史名，#1909 起 T/P 同用）；held 为不放行终态，见 HeldReason。 */
+export type Phase = "classify" | "draft" | "review" | "land_t" | "held" | "review_parse_error" | "done" | "error" | "skipped";
+/** 不放行的原因：独审轮次用尽仍 BLOCK、考古事实缺口、获审草稿缺合法落点、触及资金与权限硬门待用户签署。 */
+export type HeldReason = "review_blocked" | "fact_gap" | "invalid_landing" | "user_authorization";
 /** 起草/审查总轮次上限（含重做与只改引用的修订轮）。 */
 export const MAX_ROUNDS = scheduler.decisionMaxRounds;
 /** 起草方式：首稿、重做、只改引用的修订。 */
@@ -360,6 +400,7 @@ export interface RunState {
   upgraded: boolean;
   revised: boolean;
   reviewFeedback?: string;
+  held?: HeldReason;
 }
 
 /** 首稿由 MAIN 会话当前模型写（F4）；重做与引用专修沿用该轮实际作者模型。 */
@@ -378,17 +419,17 @@ export function isCitationOnlyBlock(r: Review): boolean {
 }
 
 /**
- * 审查后的转移：PASS→落地；只有 R1 引用类 BLOCK→一次只改引用的修订轮；
- * 其他 BLOCK→一次重做，均沿用实际作者模型；修订与重做都用过或总轮次到 MAX_ROUNDS 仍 BLOCK→转 P。
+ * 审查后的转移：PASS→落地（T/P 同）；只有 R1 引用类 BLOCK→一次只改引用的修订轮；
+ * 其他 BLOCK→一次重做，均沿用实际作者模型；修订与重做都用过或总轮次到 MAX_ROUNDS 仍 BLOCK→held，不放行。
  */
 export function nextAfterReview(s: RunState, r: Review): RunState {
-  if (r.verdict === "PASS") return { ...s, phase: s.klass === "T" ? "land_t" : "shadow_p" };
-  const toP: RunState = { ...s, phase: "shadow_p", convertedToP: s.convertedToP || s.klass === "T", klass: "P" };
-  if (s.attempt >= MAX_ROUNDS) return toP;
+  if (r.verdict === "PASS") return { ...s, phase: "land_t" };
+  const held: RunState = { ...s, phase: "held", held: "review_blocked" };
+  if (s.attempt >= MAX_ROUNDS) return held;
   const next = { ...s, phase: "draft" as const, attempt: s.attempt + 1, reviewFeedback: formatFeedback(r) };
   if (isCitationOnlyBlock(r) && !s.revised) return { ...next, draftMode: "revise", revised: true };
   if (!s.upgraded) return { ...next, draftMode: "redo", upgraded: true };
-  return toP;
+  return held;
 }
 
 export function formatFeedback(r: Review): string {
@@ -653,7 +694,7 @@ export function loadTicket(gh: GhRunner, n: number): TicketContext {
 }
 
 /** 用户批复与 resolution 只认编排者账号的评论（全仓代理与用户共用此账号，外部账号的评论不算）。 */
-export const ORCHESTRATOR = process.env.DECISION_ORCHESTRATOR ?? "xy7365527-lang";
+export const ORCHESTRATOR = process.env.DECISION_ORCHESTRATOR ?? ORCHESTRATOR_LOGIN;
 
 /**
  * 去掉评论首行的 Markdown 前缀（引用、标题、强调、列表），只留正文。
@@ -683,7 +724,7 @@ function isUserResolution(line: string): boolean {
 /**
  * 已裁定 / 已关闭的票不得再进裁决面（图审计 2026-10-20 第 13 条：#1565 已按用户批复落正本，
  * claimer live 仍把它选进本轮）。按时间序扫编排者评论，最新一条有效：
- *   - 首行是 AUTH_LINE 或「**resolution**：」→ 已裁定；
+ *   - 首行是 AUTH_LINE / P_AUTH_LINE 或「**resolution**：」→ 已裁定；
  *   - 首行「用户 … 批复」→ 已裁定；但若同一首行或之后的评论首行带退回 / 驳回 / 重写，则重新打开。
  * 返回跳过原因；null = 可处理。纯函数。
  */
@@ -694,7 +735,7 @@ export function resolvedReason(t: Pick<TicketContext, "state" | "comments">, orc
     if (c.author !== orchestrator) continue;
     const line = firstLine(c.body);
     if (line.startsWith("P 类影子模式")) continue;
-    if (c.body.trimStart().startsWith(AUTH_LINE) || /^resolution(?:\*{1,3}|_{1,3})?\s*[：:]/i.test(line)) reason = "票上已有 resolution";
+    if (c.body.trimStart().startsWith(AUTH_LINE) || c.body.trimStart().startsWith(P_AUTH_LINE) || /^resolution(?:\*{1,3}|_{1,3})?\s*[：:]/i.test(line)) reason = "票上已有 resolution";
     else if (REOPEN_RE.test(line)) reason = null;
     else if (isUserResolution(line)) reason = "票上已有用户批复";
     // 其余评论（簿记、进度）不改变结论。
@@ -702,8 +743,73 @@ export function resolvedReason(t: Pick<TicketContext, "state" | "comments">, orc
   return reason;
 }
 
+/** 编排账号首行以「退回」开头的评论：返修与重跑只认这一种；硬门签署另需「退回：签署」首行，见 unsignedUserGate。 */
+function isOrchestratorReturn(c: { author: string; body: string } | undefined, orchestrator: string): boolean {
+  return !!c && c.author === orchestrator && /^退回/.test(firstLine(c.body));
+}
+
+/** 硬门签署评论的专用首行。返修用的「退回：…」（事实已补、补材料、改法）不带「签署」，不能顶替签署。 */
+export const SIGN_HEAD = "退回：签署";
+const SIGN_HEAD_RE = /^退回[：:]\s*签署/;
+
+/** 签署行的固定格式（每项一行）：`- <字段>=<签署值>；有效域=<有效域>`。 */
+export const SIGN_LINE_FORMAT = "- <字段>=<签署值>；有效域=<有效域>";
+const SIGN_DOMAIN_SEP = "；有效域=";
+/** 否定、空占位或待定词：出现在签署值或有效域里一律不算签署。 */
+const SIGN_NEGATION_RE = /(不签|未签|拒签|拒绝|不同意|不批准|否决|撤回|暂不|待定|待签|未定|再议|n\/a|\bnone\b|\bnull\b|\btbd\b|\btodo\b)/i;
+const SIGN_EMPTY_RE = /^(无|否|空|-+|—+|\?+|？+|x+)$/i;
+/** 签署值：一个不含空白的值（数字、比例、标识符等），可带一个字母单位，如 `5000 USDT`、`0.5%`、`BTC-PERP`。 */
+const SIGN_VALUE_RE = /^[^\s=；;，,。：:]+(?: [A-Za-z%]{1,12})?$/;
+/** 有效域：非空、不含句读（，。；）的一个短语，如 `BTC 实盘 V0`。 */
+const SIGN_DOMAIN_RE = /^[^，,。；;=]{1,80}$/;
+
+/**
+ * 解析签署评论首行之后的签署行，返回「字段 → 签署值与有效域」；格式不符、值或域为空、带否定词、
+ * 像一句话而不是一个值的行都不收。同一字段出现多行（无论是否合规）视为有歧义，整项不收。
+ */
+export function parseSignatureLines(body: string): Map<string, { value: string; domain: string }> {
+  const seen = new Map<string, number>();
+  const ok = new Map<string, { value: string; domain: string }>();
+  for (const raw of body.replace(/\r\n/g, "\n").split("\n").slice(1)) {
+    const line = raw.trim();
+    if (!line.startsWith("- ")) continue;
+    const eq = line.indexOf("=", 2);
+    if (eq < 0) continue;
+    const field = line.slice(2, eq).trim();
+    if (!field) continue;
+    seen.set(field, (seen.get(field) ?? 0) + 1);
+    const rest = line.slice(eq + 1);
+    const sep = rest.indexOf(SIGN_DOMAIN_SEP);
+    if (sep < 0) continue;
+    const value = rest.slice(0, sep).trim(), domain = rest.slice(sep + SIGN_DOMAIN_SEP.length).trim();
+    if (!SIGN_VALUE_RE.test(value) || !SIGN_DOMAIN_RE.test(domain)) continue;
+    if ([value, domain].some((x) => SIGN_EMPTY_RE.test(x) || SIGN_NEGATION_RE.test(x))) continue;
+    ok.set(field, { value, domain });
+  }
+  for (const [field, n] of seen) if (n > 1) ok.delete(field);
+  return ok;
+}
+
+/**
+ * 硬门清单里仍待用户签署的项：signature 指向的评论必须由编排账号发出、首行以「退回：签署」开头，
+ * 且首行之后有一行恰为 `- <该字段>=<签署值>；有效域=<有效域>`（字段逐字一致，值与域非空、不是否定或一句话）。
+ * 只在正文里提到字段名、写了字段却没有值或有效域、写的是否定、同一字段写了多行，都按未签署处理；
+ * 返修用的「退回：…」、其他账号的同形评论、编号越界或缺编号同样未签。
+ */
+export function unsignedUserGate(items: UserGateItem[], comments: Array<{ author: string; body: string }>, orchestrator = ORCHESTRATOR): UserGateItem[] {
+  return items.filter((g) => {
+    const c = g.signature === undefined ? undefined : comments[g.signature - 1];
+    if (!c || c.author !== orchestrator || !SIGN_HEAD_RE.test(firstLine(c.body))) return true;
+    const field = g.field.trim();
+    return !field || !parseSignatureLines(c.body).has(field);
+  });
+}
+
+/** 最近 12 条评论，加上更早的编排账号「退回」评论（签署不被挤出窗口）。编号是票面从 1 起的序号。 */
 function renderTicket(t: TicketContext): string {
-  const comments = t.comments.slice(-12).map((c) => `--- 评论 @${c.author} ---\n${c.body.slice(0, 4000)}`).join("\n\n");
+  const shown = t.comments.map((c, i) => ({ c, k: i + 1 }))
+    .filter(({ c, k }) => k > t.comments.length - 12 || isOrchestratorReturn(c, ORCHESTRATOR));
+  const comments = shown.map(({ c, k }) => `--- 评论 [${k}] @${c.author}${c.author === ORCHESTRATOR ? "（编排账号）" : ""} ---\n${c.body.slice(0, 4000)}`).join("\n\n");
   const blockers = t.blockers.map((b) => `- #${b.number} [${b.state}] ${b.title}`).join("\n") || "（无）";
   return `# #${t.number} ${t.title}\n标签：${t.labels.join(", ")}\n\n## 票面\n${t.body}\n\n## 阻塞本票的票\n${blockers}\n\n## 最近评论\n${comments || "（无）"}`;
 }
@@ -808,13 +914,13 @@ export function archaeologyProblems(a: Archaeology): string[] {
   return out;
 }
 
-const GAP_LABEL: Record<ArchGap, string> = { decision: "交用户决定", research: "开 research 票", probe: "派探针票测数" };
+const GAP_LABEL: Record<ArchGap, string> = { decision: "起草者按推荐答案裁定", research: "开 research 票", probe: "派探针票测数" };
 const cell = (s: string) => s.replace(/\|/g, "\\|").replace(/\n/g, " ");
 
 /** archaeology.md：逐点 查询词 / 命中 / 归类，末尾附机械校验结果。 */
 export function renderArchaeology(t: Pick<TicketContext, "number" | "title">, a: Archaeology, problems: string[]): string {
   const count = (k: ArchClass) => a.points.filter((p) => p.klass === k).length;
-  const head = `# #${t.number} 考古\n\n${t.title}\n\n归类：A 已裁 ${count("A")} · B 有先例未正式裁 ${count("B")} · C 确未设计 ${count("C")}。只有 C 类可列为真正待决；B 类以「默认值，确认或否决」呈现；A 类直接沿用。\n`;
+  const head = `# #${t.number} 考古\n\n${t.title}\n\n归类：A 已裁 ${count("A")} · B 有先例未正式裁 ${count("B")} · C 确未设计 ${count("C")}。C 类 decision 由起草者按推荐答案裁定；B 类默认值由起草者采纳或附依据否决；A 类直接沿用。\n`;
   const body = a.points.map((p) => {
     const qs = p.queries.map((q) => `| ${q.channel} | ${cell(q.query)} | \`${cell(q.command)}\` | ${q.hits} |`).join("\n");
     const hs = p.hits.map((h) => `- ${h.source}${h.excerpt ? `：${h.excerpt}` : ""}`).join("\n") || "- （无）";
@@ -858,22 +964,10 @@ export function archaeologyCoverageProblems(draft: string, a: Archaeology): stri
   return missing.length ? [`「${ARCH_SECTION}」段漏了考古点 ${missing.join("、")}`] : [];
 }
 
-/**
- * 呈现给用户的部分（/grilling：决定才问人，每问附推荐答案）：只问 B 类确认与 C 类 decision；
- * A 类列为已沿用；C 类 research/probe 是事实缺口，列为要开的票，不问用户。
- */
-export function archaeologyAsks(a: Archaeology): string {
-  const adopted = a.points.filter((p) => p.klass === "A").map((p) => `${p.id}（${p.citation}）`);
-  const asks = a.points.filter((p) => p.klass === "B" || (p.klass === "C" && p.gap === "decision"));
-  const gaps = a.points.filter((p) => p.klass === "C" && p.gap !== "decision");
-  const rows = asks.map((p) => p.klass === "B"
-    ? `| ${p.id} | B 确认或否决 | ${cell(p.question)} | ${cell(p.citation)} | ${cell(p.recommended)} |`
-    : `| ${p.id} | C 待决 | ${cell(p.question)} | 已搜：${cell(p.searchedKeywords.join("、"))} | ${cell(p.recommended)} |`);
-  const conflicts = a.points.filter((p) => p.conflict).map((p) => `- ${p.id} 冲突：${p.conflict}`);
-  return `**考古**：A 已裁 ${adopted.length} 点直接沿用${adopted.length ? `（${adopted.join("；")}）` : ""}；需要你回答的只有下表。\n\n` +
-    (rows.length ? `| 点 | 问法 | 待决点 | 出处 | 推荐值 |\n|---|---|---|---|---|\n${rows.join("\n")}` : "（无需用户回答的点）") +
-    (gaps.length ? `\n\n事实缺口（不问你，开票补）：\n${gaps.map((p) => `- ${p.id} ${p.question} → ${GAP_LABEL[p.gap as ArchGap] ?? p.gap}`).join("\n")}` : "") +
-    (conflicts.length ? `\n\n${conflicts.join("\n")}` : "");
+/** held（fact_gap）评论里的事实缺口清单：每条要开的 research / 探针票。 */
+export function factGapLines(a: Archaeology): string[] {
+  return a.points.filter((p) => p.klass === "C" && (p.gap === "research" || p.gap === "probe"))
+    .map((p) => `- ${p.id} ${p.question} → ${GAP_LABEL[p.gap as ArchGap] ?? p.gap}（已搜：${p.searchedKeywords.join("、")}）`);
 }
 
 // ───────────────────────── 提示词 ─────────────────────────
@@ -891,11 +985,15 @@ export function triagePrompt(t: TicketContext, o: { feedback?: string; fixed?: C
 按 .sandcastle/docs/graph-engineering.md「1. 分级」判本票属于哪一类：
 - T 类（技术取舍）：数据结构、接口与 seam、owner 落点、状态机与事件 schema、测试锁、迁移步骤、恢复语义；有权威源或本仓判例可援引。
 - P 类（政策）：资金与费用参数（本金、量档、cap、分配）、风险偏好、真实场所/账户/权限、关图与 #1279 去向、Destination 改写、产品 taste、本仓无先例的新取舍。
-拿不准一律判 P。分级只看票面性质，不因考古查到或查不到先例改判；考古发现的事实缺口由编排逻辑处置。`
+拿不准一律判 P。分级只看票面性质，不因考古查到或查不到先例改判；考古发现的事实缺口由编排逻辑处置。T/P 两类都经起草与非作者独审 PASS 由代理裁定（#1909），分级决定授权引用与审查口径；是否交还用户只看下面的 user_gate。
+
+### 资金与权限硬门（user_gate）
+${USER_GATE_SCOPE}。本票要给出这类事项的具体值或授权时，逐项列进 user_gate：field 写字段或决策，basis 写 ADR 0041 条款与票面出处。这类事项不由代理裁定，宿主把整票交还用户签署，不起草、不落地。只定方法、推荐值或实现方案而不签具体值的不列。票上已有签署的事项照样列出，在 signature 写该签署评论的编号（下文「评论 [k]」的 k），field 逐字照抄签署评论里写的字段名；签署只认编排账号（${ORCHESTRATOR}）发的、首行以「${SIGN_HEAD}」开头、其后有一行恰为「${SIGN_LINE_FORMAT}」（字段逐字一致，值与有效域非空，不是否定或一句话）的评论，返修用的其他「退回：…」评论不是签署，宿主逐项核对编号指向的评论，其他账号评论里的签署值一律无效，不得据此省略该项。拿不准就列。没有则写空数组。`
     : `你是 NewChanlun 仓裁决面的考古子代理，替起草者把本票的「事实」查完，只把「决定」留下。当前目录是 origin/main 的只读检出；禁止修改任何文件。
 ${FIXED_CLASS_LINE}${fixed === "none" ? "（只验考古）" : `：分级已定为 ${fixed.klass} 类 —— ${fixed.reason}`}。`;
   const json = fixed === undefined
     ? `{"class":"T|P","reason":"一句中文分级理由，点名依据",
+ "user_gate":[{"field":"须用户签署的字段或决策","basis":"ADR 0041 条款与票面出处","signature":3}],
  "points":[${POINT_SHAPE}]}`
     : `{"points":[${POINT_SHAPE}]}`;
   return `${head}
@@ -912,12 +1010,15 @@ ${o.feedback ? `\n## 上一次考古的机械校验或独审反馈，必须逐�
 考古要你交的（胶水，以上 skill 没规定的部分）：
 1. 把票面与评论里的待决点逐个列出，编号 Q1、Q2…，一点一问。
 2. 每点两路各至少一条查询，记下实际命令与命中数。tracker 路用 \`gh search issues "<词>" --repo ${GH_REPO}\` 或 \`gh issue list --repo ${GH_REPO} --state all --search "<词> in:comments"\`（覆盖已关闭票与评论）；仓内路用 rg -n 搜正本层 docs/adr/、.chanlun/definitions/、CONTEXT.md，推论层 analysis/、docs/、.chanlun/，以及代码常量与测试夹具（rust/、src/、tests/、trading_system/、scripts/）。同一概念换中文词、英文标识符、票号各搜一次。
-3. 归类：A 已裁（正本层或已关票 resolution 明写）→ citation；B 有先例未正式裁（推论层、票评论、代码常量或夹具在用）→ citation + reasoning（ADR 0012 标签开头的推理链）+ recommended 默认值；C 确未设计 → searched_keywords（至少两个）+ gap：decision（交用户决定，recommended 必填推荐答案及推导依据）、research（仓外事实，开 research 票）、probe（缺读数推不出推荐值，派探针票）。先例互相冲突或与代码不符时写 conflict，该点不归 A。
+3. 归类：A 已裁（正本层或已关票 resolution 明写）→ citation；B 有先例未正式裁（推论层、票评论、代码常量或夹具在用）→ citation + reasoning（ADR 0012 标签开头的推理链）+ recommended 默认值；C 确未设计 → searched_keywords（至少两个）+ gap：decision（由起草者按推荐答案裁定，recommended 必填推荐答案及推导依据）、research（仓外事实，开 research 票）、probe（缺读数推不出推荐值，派探针票）。先例互相冲突或与代码不符时写 conflict，该点不归 A。
 
 C 类 gap 只能逐字填写 decision、research、probe 中的一个；缺口说明写 reasoning，不拼进 gap。A/B 类可省略 gap。
 最后只输出一个 JSON 代码块：
 ${json}`;
 }
+
+/** ADR 0041「独立资金与权限硬门」的范围；分级、起草、独审三处提示同用此句。 */
+export const USER_GATE_SCOPE = "docs/adr/0041-degrees-of-freedom-configurable-not-excluded.md「授权来源与生效边界」节的独立资金与权限硬门：真实资金投入/取出/改额、账户/场所激活、真实交易的量档与容量、成本/风险阈值，以及凭据和权限授予，须用户本人授权；独审 PASS 不代签";
 
 /** 已定分级重跑考古时提示里的固定句；假模型据此区分联合调用与只补考古。 */
 export const FIXED_CLASS_LINE = "本次不再分级";
@@ -950,12 +1051,12 @@ ${DRAFT_SECTIONS.map((s) => `## ${s}`).join("\n")}
 4. 验收清单每项必须是以下之一：可执行命令、测试名、文件存在、票状态；判据二值。
 5. 不越出 #1323 Destination；T 类草稿不得夹带 P 类取舍；不得新增同一判断的宽严两档或失败兜底。
 6. 「受影响票与 blocking 边变化」列出全部受影响票号和每条要增删的 blocking 边。
-7. 「授权引用」段：${c.klass === "T" ? `写「${AUTH_LINE}」并引用户 2026-10-18 原话` : "写「待用户批复（影子模式）」，不得写 T 类预授权句"}。
+7. 「授权引用」段：${c.klass === "T" ? `写「${AUTH_LINE}」并引用户 2026-10-18 原话` : `写「${P_AUTH_LINE}」并引 #1909（用户授权 P 类经起草与非作者独审 PASS 由代理裁定），不得写 T 类预授权句`}。本稿就是裁定，除第 11 条的硬门事项外，不得把任何待决点留给用户批复。
 8. 「${CITATION_SECTION}」段是一张 Markdown 表，表头为 \`| 引用 | 核实命令 | 结果摘要 |\`，草稿里每一条引用（文件:行、ADR、定义文件条款、票号、评论 id）各占一行：写出你实际执行的核实命令与看到的结果摘要。表里没有的引用视为未核实。自证表里写不出亲眼看到的原文就整条删掉（连同正文里那条引用），不许写「未直接看到但结构确认」之类。
-9. 按 /grill-with-docs 的做法用考古结论（.agents/skills/grilling/SKILL.md、.agents/skills/domain-modeling/SKILL.md）：A 类沿用其出处写进「权威依据」与「裁定」，不再列为待决；B 类在「候选」写成「默认值 <值>（出处 <位置>）——确认或否决」，推理链照考古重过；只有 C 类 decision 列为真正待决，每问附推荐答案。C 类 research/probe 是事实缺口，写进「受影响票与 blocking 边变化」作为要开的 research 票或探针票，不交用户填数。考古标出的冲突写进「问题」段。
+9. 按 /grill-with-docs 的做法用考古结论（.agents/skills/grilling/SKILL.md、.agents/skills/domain-modeling/SKILL.md）：A 类沿用其出处写进「权威依据」与「裁定」，不再列为待决；B 类在「候选」写出默认值与出处，推理链照考古重过，「裁定」段采纳该默认值，否决须写出依据与替代值；C 类 decision 在「候选」列出候选与推荐答案的推导，「裁定」段给出裁定值，不留待决。C 类 research/probe 是事实缺口（编排逻辑会在起草前拦下，不应出现在草稿里）。考古标出的冲突写进「问题」段。
 10. 「${ARCH_SECTION}」段是一张表 \`| 点 | 归类 | 出处 | 草稿处置 |\`，考古里每个点号（Q1、Q2…）各占一行。
-11. 自由度通则（docs/adr/0041-degrees-of-freedom-configurable-not-excluded.md）：待决点在缠师原文无定论、有多个可行候选，且属 [新缠论:选择] 或参数类时，优先裁为「可调字段 + 默认值」——落进具名版本化记录，写默认值及出处、可选值集合与各值代价，改值即新版本；另一种合法取值保留为可选值，不写成「被否」。已裁定签署前不得代填的字段（资金、量档、容量、成本门 θ、风险阈值等，ADR 0029/0034/0035/0036），默认值写 AwaitingPolicy（不签不跑、不回退备用值），数值只以「推荐值＋出处」写进签署单待用户确认，不自动生效。只有违反原文、违反已裁推论、被实测否证或属 #799 兜底的候选才排除，并写明排除依据。缠师原文语义与已裁推论不改为可调；同一判断的松紧两档不是自由度，事前单选也不得落为可调字段；运行中按判定结果换值是 #799 违规，不算可调。
-12. 七段及流程表之后必须附且仅附一个 canonical_edit 代码块，JSON 必须逐字表达最终正本编辑，不是 resolution 整稿追加。新建用 {"version":1,"operation":"create","path":"与正本落点相同","content":"完整最终正文"}。修订已有文件用 {"version":1,"operation":"edit","path":"与正本落点相同","replacements":[{"before":"原件中非空且唯一的精确文本","after":"替换文本"}]}，多项按顺序应用。先读原件，保留未改章节和换行。教义正文含 AGENTS 三行头，更新票号、日期与代码清单。最终正文不得含引用自证、考古对照或 canonical_edit 流程段。宿主在独审前固定新 ADR 编号，之后不再改写。P 类也给候选编辑，但不获得落地授权。
+11. 自由度通则（docs/adr/0041-degrees-of-freedom-configurable-not-excluded.md）：待决点在缠师原文无定论、有多个可行候选，且属 [新缠论:选择] 或参数类时，优先裁为「可调字段 + 默认值」——落进具名版本化记录，写默认值及出处、可选值集合与各值代价，改值即新版本；另一种合法取值保留为可选值，不写成「被否」。已裁定签署前不得代填的字段（资金、量档、容量、成本门 θ、风险阈值等，ADR 0029/0034/0035/0036），默认值写 AwaitingPolicy（不签不跑、不回退备用值），数值只以「推荐值＋出处」写进签署单，不自动生效。${USER_GATE_SCOPE}：这类事项代理不得给出签署值，也不得把来源写成 UserSigned；在「问题」段写明交还用户签署的字段与依据，这是正确结论，不算留待决点。票上已有用户本人签署值时照引该评论，不改值、不扩域；签署只认编排账号（${ORCHESTRATOR}）首行「${SIGN_HEAD}」的评论，返修用的其他「退回：…」评论和其他账号评论里的签署值都不得引用。只有违反原文、违反已裁推论、被实测否证或属 #799 兜底的候选才排除，并写明排除依据。缠师原文语义与已裁推论不改为可调；同一判断的松紧两档不是自由度，事前单选也不得落为可调字段；运行中按判定结果换值是 #799 违规，不算可调。
+12. 七段及流程表之后必须附且仅附一个 canonical_edit 代码块，JSON 必须逐字表达最终正本编辑，不是 resolution 整稿追加。新建用 {"version":1,"operation":"create","path":"与正本落点相同","content":"完整最终正文"}。修订已有文件用 {"version":1,"operation":"edit","path":"与正本落点相同","replacements":[{"before":"原件中非空且唯一的精确文本","after":"替换文本"}]}，多项按顺序应用。先读原件，保留未改章节和换行。教义正文含 AGENTS 三行头，更新票号、日期与代码清单。最终正文不得含引用自证、考古对照或 canonical_edit 流程段。宿主在独审前固定新 ADR 编号，之后不再改写。T/P 两类的这份编辑在独审 PASS 后都由宿主落地。
 只输出草稿正文，不要前言或结语。`;
 }
 
@@ -984,16 +1085,17 @@ export function reviewPrompt(t: TicketContext, c: Classification, draft: string,
 
 被审票：#${t.number} ${t.title}
 分级器结论：${c.klass} 类 —— ${c.reason}
+你的 PASS 就是放行：T/P 两类都在全 PASS 后由宿主直接落地正本，没有后续用户批准（#1909）。例外是 ${USER_GATE_SCOPE}。
 
 逐条给 PASS 或 BLOCK，每条必须写依据（BLOCK 写清要改什么）：
 R1 每条引用回查成立（路径存在、行号与逐字内容一致、作者归属正确、评论 id 存在且内容相符）。先对照草稿末尾「${CITATION_SECTION}」表：表缺失或为空，R1 直接 BLOCK；表在，则逐条对照表中引用与草稿正文是否一一对应（正文有而表里没有的引用记 BLOCK），并至少亲自重跑其中三条（不足三条则全跑）核实命令，结果与表述不符即 BLOCK。
-R2 不与 .chanlun/definitions/、docs/adr/、#799 收敛通则、#804 总缝规则、ADR 0041 自由度通则冲突。草稿把原文无定论的合法候选（[新缠论:选择] 或参数类、不违原文与已裁推论、无实测否证）当错误排除或写成代码常数，而没有落为带默认值的可调字段，判 BLOCK；反过来把缠师原文语义或已裁推论改成可调、把同一判断的宽严两档做成可调字段，或让可调字段在运行中按判定结果换值，也判 BLOCK。
+R2 不与 .chanlun/definitions/、docs/adr/、#799 收敛通则、#804 总缝规则、ADR 0041 自由度通则冲突。草稿把原文无定论的合法候选（[新缠论:选择] 或参数类、不违原文与已裁推论、无实测否证）当错误排除或写成代码常数，而没有落为带默认值的可调字段，判 BLOCK；反过来把缠师原文语义或已裁推论改成可调、把同一判断的宽严两档做成可调字段，或让可调字段在运行中按判定结果换值，也判 BLOCK。草稿给硬门事项写出签署值（不是照引票上编排账号首行「${SIGN_HEAD}」评论里的签署），或把代理裁定记成 UserSigned，判 BLOCK。
 R3 验收项全部可执行、判据二值。
 R4 不越出 Destination；T 类草稿里没有夹带 P 类取舍。正本落点越界（不在 ${LANDING_ROOTS.join("、")} 内）即 BLOCK。核对下方最终正本 diff 与完整 before/after，确认语义、三行头、日期、代码清单符合裁定且未丢失无关章节。最终正文与草稿裁定不一致、误删原文、或编辑合同缺失均 BLOCK。
 R5 不新增同一判断的宽严两档或失败兜底。
 R6 受影响票与 blocking 边清单完整。
 R7 分级器结论（${c.klass} 类）正确。只审上面这条分级器结论；草稿内对分级的表述或「改判建议」不是审查对象。
-R8 考古成立。从下方 ${ARCHAEOLOGY_FILE} 抽查至少三条命中（不足三条全查），亲自复跑对应查询命令，命中与表述不符即 BLOCK；另对任一 B/C 点换一个说法再搜一次，搜出更早或相冲突的在案先例即 BLOCK。草稿把 A 类点当待决或交用户选、B/C 类点缺查询证据、「${ARCH_SECTION}」段漏点、C 类 research/probe 事实缺口被当成问题交给用户，或 P 类问题要求用户凭空提供数值而在案先例（考古 B 类或你复搜到的值）未列出，均 BLOCK。考古缺失按 BLOCK。
+R8 考古成立。从下方 ${ARCHAEOLOGY_FILE} 抽查至少三条命中（不足三条全查），亲自复跑对应查询命令，命中与表述不符即 BLOCK；另对任一 B/C 点换一个说法再搜一次，搜出更早或相冲突的在案先例即 BLOCK。草稿把 A 类点当待决、把硬门以外的待决点留给用户批复而不裁定（硬门事项交还用户签署是正确结论，不判 BLOCK）、B/C 类点缺查询证据、「${ARCH_SECTION}」段漏点，或 C 类 decision 的裁定值没有推导依据而在案先例（考古 B 类或你复搜到的值）未列出，均 BLOCK。考古缺失按 BLOCK。
 
 材料缺失（引用文件不存在、票读不到、工具调用失败）也必须照常输出：对受影响的条目判 BLOCK 并在依据里写明缺什么，其余条目照常审。任何情况下都要输出 R1–R8 全部八项。
 
@@ -1048,8 +1150,8 @@ export interface Summary {
   mainSession?: { sessionId?: string; sourceCommit: string; resumed: boolean; turns: number; retired?: string };
   /** 因安全拦截改派模型的记录（#1785）。 */
   modelSwitches?: ModelSwitch[];
-  /** T 类因考古事实缺口转 P 的说明（影子评论首行用）。 */
-  factGapNote?: string;
+  /** 不放行终态：原因与已写好的票面说明（held_pending 续做时原样补发）。 */
+  held?: { reason: HeldReason; comment: string };
   /** 考古归类计数与机械校验问题。 */
   archaeology?: { A: number; B: number; C: number; problems: string[] };
   /** 落点硬检查退回记录。 */
@@ -1058,8 +1160,8 @@ export interface Summary {
   error?: string;
   /**
    * 断点：审查已过、写 GitHub 前落盘，写完才清。
-   * reviewed_pass —— T 类审查全 PASS，落地未完成；下一轮跳过分级/起草/审查，从落地续做。
-   * shadow_p_pending —— P 类结论已定，评论/贴标签/取消认领未全部完成；下一轮只补没做完的写入。
+   * reviewed_pass —— 审查全 PASS（T/P 同），落地未完成；下一轮跳过分级/起草/审查，从落地续做。
+   * held_pending —— 不放行结论已定，评论/摘旧待批标签/取消认领未全部完成；下一轮只补没做完的写入。
    */
   stage?: ResumeStage;
   /** 落地已推送的 commit；续做时只补 resolution 评论。 */
@@ -1067,8 +1169,8 @@ export interface Summary {
   canonicalPlan?: CanonicalPlan;
   committedSha?: string;
   commitBase?: string;
-  /** shadow_p_pending 下已完成的写入步。 */
-  pDone?: PStep[];
+  /** held_pending 下已完成的写入步。 */
+  heldDone?: HeldStep[];
   /** 本次从哪个断点续做。 */
   resumedFrom?: ResumedFrom;
   /**
@@ -1078,25 +1180,29 @@ export interface Summary {
   commentsSeen?: number;
 }
 
-export type ResumeStage = "reviewed_pass" | "shadow_p_pending";
+export type ResumeStage = "reviewed_pass" | "held_pending";
 /** resumedFrom 额外取值 triaged：沿用已落盘分级只补考古（不是 stage，不跳过起草与独审）。 */
 export type ResumedFrom = ResumeStage | "triaged" | "main_session";
-export const P_STEPS = ["comment", "label", "unassign"] as const;
-export type PStep = (typeof P_STEPS)[number];
+export const HELD_STEPS = ["comment", "human", "unlabel", "unassign"] as const;
+export type HeldStep = (typeof HELD_STEPS)[number];
 
-/** 读上次 summary.json 的断点；草稿或审查原件缺失、审查不是 PASS 的 reviewed_pass 一律不认。 */
-export function loadResume(dir: string): { prev: Summary; draft: string; review: Review } | null {
+/**
+ * 读上次 summary.json 的断点。held_pending 只需 summary 里的原因与评论正文；
+ * reviewed_pass 的草稿或审查原件缺失、审查不是 PASS 一律不认。
+ */
+export function loadResume(dir: string): { prev: Summary; draft: string; review?: Review } | null {
   const sp = join(dir, "summary.json");
   if (!existsSync(sp)) return null;
   let prev: Summary;
   try { prev = JSON.parse(readFileSync(sp, "utf8")) as Summary; } catch { return null; }
-  if (prev.stage !== "reviewed_pass" && prev.stage !== "shadow_p_pending") return null;
+  if (prev.stage === "held_pending") return prev.held?.comment ? { prev, draft: "" } : null;
+  if (prev.stage !== "reviewed_pass") return null;
   const dp = join(dir, "draft.md");
   const rp = join(dir, "review.json");
   if (!existsSync(dp) || !existsSync(rp)) return null;
   let rv: { verdict?: string; items?: ReviewItem[]; problems?: string[]; klass?: Klass };
   try { rv = JSON.parse(readFileSync(rp, "utf8")); } catch { return null; }
-  if (prev.stage === "reviewed_pass" && (rv.verdict !== "PASS" || prev.klass !== "T")) return null;
+  if (rv.verdict !== "PASS" || (prev.klass !== "T" && prev.klass !== "P")) return null;
   const review: Review = { items: rv.items ?? [], verdict: rv.verdict === "PASS" ? "PASS" : "BLOCK", problems: rv.problems ?? [], parseError: false };
   return { prev, draft: readFileSync(dp, "utf8"), review };
 }
@@ -1118,9 +1224,101 @@ export function resumeStaleBecauseReopen(
   return false;
 }
 
-/** 上次 summary.json 的水印与旧轮次；缺失或坏文件按无记录。 */
-function prevSummary(dir: string): Pick<Summary, "commentsSeen" | "rounds"> {
+/** 上次 summary.json；缺失或坏文件按无记录。 */
+function prevSummary(dir: string): Partial<Summary> {
   try { return JSON.parse(readFileSync(join(dir, "summary.json"), "utf8")) as Summary; } catch { return {}; }
+}
+
+/** held 终态在水印后出现退回 / 驳回 / 否决评论之前保持不动：不重跑、不消耗模型。 */
+export function heldWaiting(prev: Partial<Pick<Summary, "phase" | "stage" | "commentsSeen">>, comments: Array<{ author: string; body: string }>): boolean {
+  return prev.phase === "held" && !prev.stage && !resumeStaleBecauseReopen(prev, comments);
+}
+
+/** 锁文件内容；不存在返回 undefined，读不出（权限等）返回 null。 */
+function lockText(path: string): string | null | undefined {
+  try { return readFileSync(path, "utf8").trim(); }
+  catch (e) { return (e as NodeJS.ErrnoException).code === "ENOENT" ? undefined : null; }
+}
+
+/** 锁内容是否仍可能被持有：只有内容是 pid 且能确认该进程已不存在（ESRCH）才算残留。 */
+function pidTextHeld(text: string | null): boolean {
+  if (text === null || !/^\d+$/.test(text)) return true;
+  const pid = Number(text);
+  if (!Number.isSafeInteger(pid) || pid <= 0) return true;
+  try { process.kill(pid, 0); return true; }
+  catch (e) { return (e as NodeJS.ErrnoException).code !== "ESRCH"; }
+}
+
+/**
+ * 锁文件记着持有进程的 pid。只有能确认该进程已不存在（ESRCH）才算残留锁：
+ * 内容读不出或不是 pid、进程仍在或无权探测（EPERM）都按仍被持有处理。
+ */
+export function pidLockHeld(path: string): boolean {
+  const text = lockText(path);
+  return text === undefined ? false : pidTextHeld(text);
+}
+
+function createPidFile(path: string): boolean {
+  try { writeFileSync(path, String(process.pid), { flag: "wx" }); return true; }
+  catch (e) { if ((e as NodeJS.ErrnoException).code === "EEXIST") return false; throw e; }
+}
+
+/**
+ * 以 wx 建锁并写入本进程 pid。被 SIGKILL 或宿主崩溃留下的残留锁（持有进程已不存在）只在接管门
+ * `<锁>.takeover`（同样以 wx 独占创建）内回收：持门后重读锁文件，只有内容仍是先前读到的那个已不存在
+ * 的 pid 才删，再以 wx 建新锁；锁文件已不存在（别的回收者接管后已释放）时不删任何东西，直接 wx 建锁。
+ * 锁文件只能由 wx 新建或由持门者删除，残留锁的原主又已不在，所以持门期间内容未变即证明它仍是那份残留锁，
+ * 不会删到别人刚建的新锁；两个回收者也不能同时持门。接管门本身若因持门者崩溃而残留，
+ * 回收就停在旧行为（按仍被持有处理），不会出现两个持锁者。
+ */
+export function takePidLock(path: string): boolean {
+  if (createPidFile(path)) return true;
+  const seen = lockText(path);
+  if (seen === undefined) return createPidFile(path);
+  if (pidTextHeld(seen)) return false;
+  const gate = `${path}.takeover`;
+  if (!createPidFile(gate)) return false;
+  try {
+    const now = lockText(path);
+    if (now === undefined) return createPidFile(path);
+    if (now !== seen || pidTextHeld(now)) return false;
+    log(`清掉残留锁 ${path}（持有进程已不存在）`);
+    rmSync(path, { force: true });
+    return createPidFile(path);
+  } finally {
+    rmSync(gate, { force: true });
+  }
+}
+
+function acquireTicketLock(outRoot: string, n: number): (() => void) | null {
+  mkdirSync(outRoot, { recursive: true });
+  // 锁留在不会被退役的父目录，覆盖迁移、重建、处理和最终持久化。
+  const path = join(outRoot, `.${n}.lock`);
+  if (!takePidLock(path)) return null;
+  return () => rmSync(path);
+}
+
+/**
+ * 旧影子模式（shadow_p / shadow_p_pending，#1909 前）的本地原件整目录改名留档，票按新流程整链重跑。
+ * 旧 P 稿把 C 类决定留给用户批复，不能当作代理裁定直接落地。正在处理（有 .lock）时不动。
+ */
+export function retireLegacyShadow(outRoot: string, n: number): string | null {
+  const release = acquireTicketLock(outRoot, n);
+  if (!release) return null;
+  try { return retireLegacyShadowLocked(outRoot, n); }
+  finally { release(); }
+}
+
+function retireLegacyShadowLocked(outRoot: string, n: number): string | null {
+  const dir = join(outRoot, String(n));
+  const prev = prevSummary(dir) as { phase?: string; stage?: string };
+  if (prev.phase !== "shadow_p" && prev.stage !== "shadow_p_pending") return null;
+  if (pidLockHeld(join(dir, ".lock"))) return null;
+  let k = 1;
+  while (existsSync(`${dir}.shadow-p-retired-${k}`)) k++;
+  const to = `${dir}.shadow-p-retired-${k}`;
+  renameSync(dir, to);
+  return to;
 }
 
 function writeJson(path: string, v: unknown) {
@@ -1157,7 +1355,7 @@ interface RoundCheckpoint {
   /** 本轮实际消费的考古原件；先提交检查点，再发布 json/md 别名。 */
   archaeology?: ArchaeologySnapshot;
   progress: Pick<Summary, "attempts" | "klass" | "convertedToP" | "durationsMs" | "reviewCounts" | "rounds" |
-    "reclassNotes" | "landingRedrafts" | "canonicalPlan" | "landing" | "factGapNote" | "modelSwitches">;
+    "reclassNotes" | "landingRedrafts" | "canonicalPlan" | "landing" | "modelSwitches">;
 }
 
 function loadRoundCheckpoint(dir: string, sessionId: string): RoundCheckpoint | null {
@@ -1165,7 +1363,7 @@ function loadRoundCheckpoint(dir: string, sessionId: string): RoundCheckpoint | 
   if (!existsSync(path)) return null;
   const value = JSON.parse(readFileSync(path, "utf8")) as RoundCheckpoint;
   if (value.version !== 1 || value.sessionId !== sessionId || !value.state ||
-      !["draft", "review", "land_t", "shadow_p"].includes(value.state.phase) ||
+      !["draft", "review", "land_t", "held"].includes(value.state.phase) ||
       !Number.isSafeInteger(value.state.attempt) || value.state.attempt < 1 || value.state.attempt > MAX_ROUNDS ||
       typeof value.draft !== "string" || !Array.isArray(value.progress?.rounds) ||
       (value.state.phase === "review" && !value.reviewInput)) {
@@ -1319,7 +1517,7 @@ export async function runTriage(
     const c = (k: ArchClass) => arch!.points.filter((p) => p.klass === k).length;
     summary.archaeology = { A: c("A"), B: c("B"), C: c("C"), problems };
   }
-  return { cls: cls ?? { klass: "P", reason: "只验考古，未分级", parsed: false }, ar: { arch, md, problems } };
+  return { cls: cls ?? { klass: "P", reason: "只验考古，未分级", parsed: false, userGate: [] }, ar: { arch, md, problems } };
 }
 
 /**
@@ -1335,9 +1533,9 @@ export function loadTriaged(dir: string): Classification | null {
     try { if ((JSON.parse(readFileSync(ap, "utf8")) as { parsed?: boolean }).parsed) return null; } catch { /* 坏考古记录视为未完成 */ }
   }
   try {
-    const j = JSON.parse(readFileSync(cp, "utf8")) as { klass?: unknown; reason?: unknown; parsed?: unknown };
+    const j = JSON.parse(readFileSync(cp, "utf8")) as { klass?: unknown; reason?: unknown; parsed?: unknown; userGate?: unknown };
     if ((j.klass !== "T" && j.klass !== "P") || typeof j.reason !== "string" || !j.reason) return null;
-    return { klass: j.klass, reason: j.reason, parsed: j.parsed === true };
+    return { klass: j.klass, reason: j.reason, parsed: j.parsed === true, userGate: storedUserGate(j.userGate) };
   } catch { return null; }
 }
 
@@ -1347,12 +1545,12 @@ export function loadTriaged(dir: string): Classification | null {
  */
 export function loadTriageDone(dir: string, snapshot?: ArchaeologySnapshot): TriageRun | null {
   try {
-    const c = JSON.parse(readFileSync(join(dir, "classify.json"), "utf8")) as { klass?: unknown; reason?: unknown; parsed?: unknown };
+    const c = JSON.parse(readFileSync(join(dir, "classify.json"), "utf8")) as { klass?: unknown; reason?: unknown; parsed?: unknown; userGate?: unknown };
     const a = (snapshot?.record ?? JSON.parse(readFileSync(join(dir, "archaeology.json"), "utf8"))) as { parsed?: boolean; points?: ArchPoint[]; problems?: unknown };
     if ((c.klass !== "T" && c.klass !== "P") || typeof c.reason !== "string" || !c.reason) return null;
     if (!a.parsed || !Array.isArray(a.points) || !Array.isArray(a.problems)) return null;
     const md = snapshot?.md ?? readFileSync(join(dir, ARCHAEOLOGY_FILE), "utf8");
-    return { cls: { klass: c.klass, reason: c.reason, parsed: c.parsed === true }, ar: { arch: { points: a.points }, md, problems: a.problems as string[] } };
+    return { cls: { klass: c.klass, reason: c.reason, parsed: c.parsed === true, userGate: storedUserGate(c.userGate) }, ar: { arch: { points: a.points }, md, problems: a.problems as string[] } };
   } catch { return null; }
 }
 
@@ -1400,22 +1598,21 @@ export function factGaps(a: Archaeology): string[] {
   return a.points.filter((p) => p.klass === "C" && (p.gap === "research" || p.gap === "probe")).map((p) => p.id);
 }
 
-/** 读本地 archaeology.json（续做时给影子评论用）。 */
-function loadArchaeology(dir: string): Archaeology | null {
-  const p = join(dir, "archaeology.json");
-  if (!existsSync(p)) return null;
-  try {
-    const j = JSON.parse(readFileSync(p, "utf8")) as { parsed?: boolean; points?: ArchPoint[] };
-    return j.parsed && Array.isArray(j.points) ? { points: j.points } : null;
-  } catch { return null; }
-}
-
 /** 只跑考古（不分级、不起草、不写 GitHub），不看票是否已关：用来对已关决策票验证考古产物形状。 */
 export async function archaeologyOnly(n: number, d: Deps): Promise<{ ticket: number; dir: string; problems: string[]; counts: Record<ArchClass, number> }> {
+  const release = acquireTicketLock(d.outRoot, n);
+  if (!release) throw new Error("本地锁已存在，另一进程正在处理");
+  try { return await archaeologyOnlyLocked(n, d); }
+  finally { release(); }
+}
+
+async function archaeologyOnlyLocked(n: number, d: Deps): Promise<{ ticket: number; dir: string; problems: string[]; counts: Record<ArchClass, number> }> {
   const dir = join(d.outRoot, String(n));
   mkdirSync(dir, { recursive: true });
   const lock = join(dir, ".lock");
-  try { writeFileSync(lock, String(process.pid), { flag: "wx" }); } catch { throw new Error(`${lock} 已存在，另一进程正在处理`); }
+  let locked = false;
+  try { locked = takePidLock(lock); } catch { /* 同上 */ }
+  if (!locked) throw new Error(`${lock} 已存在，另一进程正在处理`);
   let r: ArchRun;
   try {
     const switches: ModelSwitch[] = [];
@@ -1433,16 +1630,23 @@ export async function archaeologyOnlyAdmission(n: number, d: Deps) {
 }
 
 export async function processTicket(n: number, raw: Deps): Promise<Summary> {
+  const release = acquireTicketLock(raw.outRoot, n);
+  if (!release) return { ticket: n, mode: raw.mode, phase: "error", attempts: 0, durationsMs: {}, plannedWrites: [], error: "本地锁已存在，另一进程正在处理" };
+  try { return await processTicketLocked(n, raw); }
+  finally { release(); }
+}
+
+async function processTicketLocked(n: number, raw: Deps): Promise<Summary> {
   const dir = join(raw.outRoot, String(n));
+  const retiredShadow = retireLegacyShadowLocked(raw.outRoot, n);
+  if (retiredShadow) log(`#${n} 旧影子模式原件已留档 ${retiredShadow}，按新流程整链重跑`);
   mkdirSync(dir, { recursive: true });
   const lock = join(dir, ".lock");
   const summary: Summary = { ticket: n, mode: raw.mode, phase: "classify", attempts: 0, durationsMs: {}, plannedWrites: [] };
   const d: Deps = { ...raw, model: fallbackRunner(n, raw.model, (sw) => (summary.modelSwitches ??= []).push(sw)) };
-  try {
-    writeFileSync(lock, String(process.pid), { flag: "wx" });
-  } catch {
-    return { ...summary, phase: "error", error: "本地锁已存在，另一进程正在处理" };
-  }
+  let locked = false;
+  try { locked = takePidLock(lock); } catch { /* 与旧行为一致：建锁出错按已被占用处理 */ }
+  if (!locked) return { ...summary, phase: "error", error: "本地锁已存在，另一进程正在处理" };
   const t0 = d.now();
   let claimed = false;
   let skipPersist = false;
@@ -1474,6 +1678,12 @@ export async function processTicket(n: number, raw: Deps): Promise<Summary> {
       summary.phase = "skipped";
       summary.error = resolved;
       log(`#${n} 跳过：${resolved}`);
+      return summary;
+    }
+    if (heldWaiting(prevSummary(dir), t.comments)) {
+      skipPersist = true;
+      summary.phase = "skipped";
+      summary.error = "held 未放行，待票上退回评论返修";
       return summary;
     }
     let resume = loadResume(dir);
@@ -1535,14 +1745,15 @@ export async function processTicket(n: number, raw: Deps): Promise<Summary> {
       Object.assign(summary, {
         klass: p.klass, convertedToP: p.convertedToP, attempts: p.attempts, durationsMs: { ...p.durationsMs },
         reclassNotes: p.reclassNotes, reviewCounts: p.reviewCounts, rounds: p.rounds, landingRedrafts: p.landingRedrafts,
-        stage: p.stage, landedSha: p.landedSha, canonicalPlan: p.canonicalPlan, committedSha: p.committedSha, commitBase: p.commitBase, pDone: p.pDone ?? [], resumedFrom: p.stage, factGapNote: p.factGapNote,
-        modelSwitches: p.modelSwitches,
+        stage: p.stage, landedSha: p.landedSha, canonicalPlan: p.canonicalPlan, committedSha: p.committedSha, commitBase: p.commitBase, heldDone: p.heldDone ?? [], resumedFrom: p.stage, held: p.held, commentsSeen: p.commentsSeen,
+        modelSwitches: p.modelSwitches, archaeology: p.archaeology,
       });
       delete summary.durationsMs.total;
       draft = resume.draft;
       review = resume.review;
-      const klass: Klass = p.stage === "reviewed_pass" ? "T" : "P";
-      s = { ...initialState(klass), phase: p.stage === "reviewed_pass" ? "land_t" : "shadow_p", attempt: p.attempts, convertedToP: !!p.convertedToP };
+      s = { ...initialState(p.klass ?? "P"), phase: p.stage === "reviewed_pass" ? "land_t" : "held", held: p.held?.reason, attempt: p.attempts, convertedToP: !!p.convertedToP };
+      // 未推送的获审断点照样过硬门：分级原件缺 userGate（硬门字段之前的旧记录）或非空即交还用户。
+      if (p.stage === "reviewed_pass" && !p.landedSha && unsignedUserGate(loadUserGate(dir), t.comments).length) s = { ...s, phase: "held", held: "user_authorization" };
       log(`#${n} 从断点 ${p.stage} 续做${p.landedSha ? `（已推送 ${p.landedSha.slice(0, 10)}）` : ""}`);
     } else {
     // 1. 分级+考古：一次联合调用（#1742 M1）。考古解析不出时两次后抛错，此前分级已落 classify.json；
@@ -1594,18 +1805,12 @@ export async function processTicket(n: number, raw: Deps): Promise<Summary> {
     const counts = { pass: 0, block: 0, parseError: 0 };
     summary.reviewCounts = counts;
     summary.reclassNotes = [];
-    // 决定等事实（/wayfinder Ticket Types「a fact a decision waits on」）：有 research/probe 缺口的 T 类票不自动落地，
-    // 转 P，由 /graph-approve 开票补事实。首轮考古与每次重跑考古之后都过这道门。
-    const gapGate = () => {
-      const ids = factGaps(ar.arch);
-      if (s.klass !== "T" || ids.length === 0) return;
-      const note = `考古有事实缺口 ${ids.join("、")}（research/probe），T 类不自动落地，转 P`;
-      s = { ...s, klass: "P", convertedToP: true };
-      effCls = { ...effCls, klass: "P", reason: `${effCls.reason}（${note}）` };
-      summary.reclassNotes!.push(note);
-      summary.factGapNote = note;
-      markP();
-      write(`评论 #${n}：${note}`, ["issue", "comment", String(n), "--body-file", "-"], note);
+    // 决定等事实（/wayfinder Ticket Types「a fact a decision waits on」）：有 research/probe 缺口的票（T/P 同）
+    // 不起草、不落地，held 交主控开缺口票。首轮考古与每次重跑考古之后都过这道门。
+    const gapGate = (): boolean => {
+      if (factGaps(ar.arch).length === 0) return false;
+      s = { ...s, phase: "held", held: "fact_gap" };
+      return true;
     };
     summary.rounds = [];
     summary.landingRedrafts = [];
@@ -1634,7 +1839,9 @@ export async function processTicket(n: number, raw: Deps): Promise<Summary> {
       // 检查点先于可读原件发布；中断重入时补齐别名，不重新发放轮次。
       if (draft) writeFileSync(join(dir, "draft.md"), draft);
     }
-    gapGate();
+    // 资金与权限硬门（ADR 0041）：整票交还用户签署，不起草、不落地；先于事实缺口门。
+    if (unsignedUserGate(cls.userGate, t.comments).length) s = { ...s, phase: "held", held: "user_authorization" };
+    else gapGate();
     const saveRound = () => {
       const ms = main.current();
       if (!ms) throw new Error("MAIN 轮次缺会话身份");
@@ -1642,7 +1849,7 @@ export async function processTicket(n: number, raw: Deps): Promise<Summary> {
         attempts: summary.attempts, klass: s.klass, convertedToP: s.convertedToP,
         durationsMs: summary.durationsMs, reviewCounts: counts, rounds: summary.rounds,
         reclassNotes: summary.reclassNotes, landingRedrafts: summary.landingRedrafts,
-        canonicalPlan: summary.canonicalPlan, landing: summary.landing, factGapNote: summary.factGapNote,
+        canonicalPlan: summary.canonicalPlan, landing: summary.landing,
         modelSwitches: summary.modelSwitches,
       };
       writeJson(join(dir, ROUND_CHECKPOINT), { version: 1, sessionId: ms.sessionId, state: s, draft, review, reviewRecord, reviewInput, archaeology, progress });
@@ -1662,16 +1869,18 @@ export async function processTicket(n: number, raw: Deps): Promise<Summary> {
           archaeology = { ...readArchaeologySnapshot(repairDir, s.attempt), reviewedRepair: true };
           saveRound();
           publishArchaeology(dir, archaeology);
-          gapGate();
+          const gapped = gapGate();
           saveRound();
+          if (gapped) break;
         } else if (s.draftMode === "redo" && !r8Feedback && ar.problems.length) {
           // 机械返修缓存已返回回执，封住别名发布到 checkpoint 的重复调用窗口；无回执仍沿用原恢复条件。
           const generation = (archaeology.mechanicalGeneration ?? 0) + 1;
           ar = (await runTriage(t, md, dir, summary, { feedback: archFeedback, fixed: effCls, round: s.attempt, receiptDir: join(dir, `archaeology.mechanical${s.attempt}-${generation}`), stopOnUnknown: false })).ar;
           archaeology = { ...readArchaeologySnapshot(dir, s.attempt), mechanicalGeneration: generation };
-          gapGate();
+          const gapped = gapGate();
           saveRound();
           publishArchaeology(dir, archaeology);
+          if (gapped) break;
         }
         const prompt = (fb?: string) =>
           s.draftMode === "revise" ? revisePrompt(t, effCls, draft, fb ?? s.reviewFeedback ?? "", ar.md) : draftPrompt(t, effCls, fb ?? s.reviewFeedback, ar.md);
@@ -1784,10 +1993,7 @@ export async function processTicket(n: number, raw: Deps): Promise<Summary> {
     if (s.phase === "land_t") {
       const declared = landingTarget(draft);
       if (!declared) {
-        s = { ...s, phase: "shadow_p", klass: "P", convertedToP: true };
-        summary.klass = "P";
-        summary.convertedToP = true;
-        summary.error = "草稿未声明合法正本落点，转 P";
+        s = { ...s, phase: "held", held: "invalid_landing" };
       } else {
         const target = summary.canonicalPlan?.edit.path ?? declared;
         summary.landing = target;
@@ -1798,7 +2004,10 @@ export async function processTicket(n: number, raw: Deps): Promise<Summary> {
         summary.commentsSeen = t.comments.length;
         persist();
         if (d.mode === "dry-run") {
-          summary.plannedWrites.push(`分支 decision/${n}：写 ${target} 并推送`, `评论 #${n}：resolution（首行「${AUTH_LINE}」）`);
+          summary.plannedWrites.push(`分支 decision/${n}：写 ${target} 并推送`,
+            ...(t.labels.includes(LEGACY_APPROVAL_LABEL) ? [`标签 #${n}：-${LEGACY_APPROVAL_LABEL}`] : []),
+            ...(ownHumanLabel(t) ? [`标签 #${n}：-${HUMAN_LABEL}`] : []),
+            `评论 #${n}：resolution（首行「${authLine(s.klass)}」）`);
         } else {
           await landT(t, draft, target, dir, d, summary, persist);
         }
@@ -1808,31 +2017,43 @@ export async function processTicket(n: number, raw: Deps): Promise<Summary> {
         delete summary.commitBase;
       }
     }
-    if (s.phase === "shadow_p") {
-      const done = new Set<PStep>(summary.pDone ?? []);
-      summary.stage = "shadow_p_pending";
-      summary.pDone = [...done];
-      summary.commentsSeen = t.comments.length;
+    if (s.phase === "held") {
+      const done = new Set<HeldStep>(summary.heldDone ?? []);
+      if (!summary.held) {
+        const reason = s.held ?? "review_blocked";
+        summary.held = { reason, comment: heldComment(n, reason, dir, summary, review, loadArchaeology(dir), unsignedUserGate(loadUserGate(dir), t.comments)) };
+        // 水印在本票写入之前：其后的退回评论才重开。
+        summary.commentsSeen = t.comments.length;
+      }
+      summary.stage = "held_pending";
+      summary.heldDone = [...done];
       persist();
-      const steps: Record<PStep, [string, string[], string?]> = {
-        comment: [`评论 #${n}：P 类草稿与审查结论`, ["issue", "comment", String(n), "--body-file", "-"], shadowComment(n, draft, review!, dir, summary, loadArchaeology(dir))],
-        label: [`标签 #${n}：+needs-approval`, ["issue", "edit", String(n), "--add-label", "needs-approval"]],
+      const steps: Record<HeldStep, [string, string[], string?] | null> = {
+        comment: [`评论 #${n}：裁决暂停（${summary.held.reason}）`, ["issue", "comment", String(n), "--body-file", "-"], summary.held.comment],
+        human: summary.held.reason === "user_authorization" ? [`标签 #${n}：+${HUMAN_LABEL}`, ["issue", "edit", String(n), "--add-label", HUMAN_LABEL]]
+          : ownHumanLabel(t) ? [`标签 #${n}：-${HUMAN_LABEL}（用户已签署，转 ${summary.held.reason}）`, ["issue", "edit", String(n), "--remove-label", HUMAN_LABEL]] : null,
+        unlabel: t.labels.includes(LEGACY_APPROVAL_LABEL) ? [`标签 #${n}：-${LEGACY_APPROVAL_LABEL}`, ["issue", "edit", String(n), "--remove-label", LEGACY_APPROVAL_LABEL]] : null,
         unassign: [`取消认领 #${n}`, ["issue", "edit", String(n), "--remove-assignee", "@me"]],
       };
-      for (const step of P_STEPS) {
-        if (done.has(step)) continue;
-        const [desc, args, input] = steps[step];
-        write(desc, args, input);
+      for (const step of HELD_STEPS) {
+        // 本轮重新认领过（断点续做时 assign 已回到自己名下），取消认领必须再做一次。
+        if (done.has(step) && !(step === "unassign" && claimed)) continue;
+        const w = steps[step];
+        if (w) write(w[0], w[1], w[2]);
+        // dry-run 只登记意图：断点留在 held_pending，同一输出目录的 live 轮照补全部写入。
+        if (d.mode === "dry-run") continue;
         done.add(step);
-        summary.pDone = [...done];
+        summary.heldDone = [...done];
         persist();
         if (step === "unassign") claimed = false;
       }
-      delete summary.stage;
-      delete summary.pDone;
+      if (d.mode !== "dry-run") {
+        delete summary.stage;
+        delete summary.heldDone;
+      }
     }
     if (s.phase === "review_parse_error") write(`取消认领 #${n}（审查解析失败，待重跑）`, ["issue", "edit", String(n), "--remove-assignee", "@me"]);
-    summary.phase = s.phase === "land_t" || s.phase === "shadow_p" || s.phase === "review_parse_error" ? s.phase : "done";
+    summary.phase = s.phase === "land_t" || s.phase === "held" || s.phase === "review_parse_error" ? s.phase : "done";
   } catch (e) {
     if (e instanceof DrainFrozenError) {
       // 冻结不覆盖既有断点：排空后解冻由下一轮续做。
@@ -1859,15 +2080,53 @@ function lastReviewer(s: Pick<Summary, "rounds">): string {
   return s.rounds?.at(-1)?.reviewer ?? MODEL_REVIEW;
 }
 
-export function shadowComment(n: number, draft: string, r: Review, dir: string, s: Summary, arch: Archaeology | null = null): string {
-  const table = r.items.map((i) => `| ${i.rule} | ${i.verdict} | ${i.basis.replace(/\|/g, "\\|").replace(/\n/g, " ")} |`).join("\n");
-  const why = s.factGapNote ? `（原判 T，${s.factGapNote}）` : s.convertedToP ? `（原判 T，${s.attempts} 轮审查仍 BLOCK 后转 P）` : "";
-  return `**P 类影子模式，待用户批复**${why}\n\n` +
-    (arch
-      ? `${archaeologyAsks(arch)}\n\n考古原件：\`${dir}/${ARCHAEOLOGY_FILE}\`\n\n`
-      : `**本票无考古**（旧流程产物）：批复前先跑 \`node --import tsx .sandcastle/decision-claimer.mts --archaeology-only --ticket ${n} --out ${dirname(dir)}\`。\n\n`) +
-    `独立审查（${lastReviewer(s)}）：**${r.verdict}**\n\n| 条 | 结论 | 依据 |\n|---|---|---|\n${table}\n\n` +
-    `草稿与审查原件：\`${dir}/\`\n\n<details><summary>草稿全文</summary>\n\n${draft}\n</details>`;
+/** 读本地 classify.json 的硬门清单（held 评论列待签事项用）。 */
+function loadUserGate(dir: string): UserGateItem[] {
+  try { return storedUserGate((JSON.parse(readFileSync(join(dir, "classify.json"), "utf8")) as { userGate?: unknown }).userGate); }
+  catch { return MISSING_USER_GATE; }
+}
+
+const USER_GATE_HELD_HEAD = "**裁决暂停（待用户签署）**";
+
+/** 本流程挂过的待签标签：票上有编排账号发的本流程待签暂停评论。别处挂的 ready-for-human 不动，其他账号的同形评论不算。 */
+function ownHumanLabel(t: TicketContext): boolean {
+  return t.labels.includes(HUMAN_LABEL) && t.comments.some((c) => c.author === ORCHESTRATOR && c.body.startsWith(USER_GATE_HELD_HEAD));
+}
+
+/** 读本地 archaeology.json（held 评论列事实缺口用）。 */
+function loadArchaeology(dir: string): Archaeology | null {
+  try {
+    const j = JSON.parse(readFileSync(join(dir, "archaeology.json"), "utf8")) as { parsed?: boolean; points?: ArchPoint[] };
+    return j.parsed && Array.isArray(j.points) ? { points: j.points } : null;
+  } catch { return null; }
+}
+
+/** 返修入口：评论首行以「退回」开头（见 REOPEN_RE），水印之后出现即整链重跑。 */
+const HELD_REOPEN_HINT = "返修：把要补的材料或改法写成本票评论，首行以「退回：」开头；decision-claimer 下一轮作废旧 MAIN 会话并整链重跑（新分级、考古、起草、非作者独审）。";
+
+/** held 终态的票面说明。首行不以退回 / resolution / 用户批复开头，不改变票的裁定状态。 */
+export function heldComment(n: number, reason: HeldReason, dir: string, s: Pick<Summary, "attempts" | "rounds">, r?: Review, arch: Archaeology | null = null, gate: UserGateItem[] = []): string {
+  if (reason === "user_authorization") {
+    const items = gate.map((g) => `- ${g.field}（依据：${g.basis}）`).join("\n") || "（清单见分级原件）";
+    return `${USER_GATE_HELD_HEAD}：本票触及 ADR 0041「授权来源与生效边界」节的独立资金与权限硬门，代理不裁定；本票未起草、未落地，已标 ${HUMAN_LABEL}。\n\n` +
+      `需要用户签署：\n${items}\n\n` +
+      `签署：用户本人用编排账号在本票评论首行写「${SIGN_HEAD}」，随后每项一行，严格按「${SIGN_LINE_FORMAT}」写（字段逐字照抄上面的清单；签署值是一个值，可带单位，如「5000 USDT」；有效域是一个短语，如「BTC 实盘 V0」）；只提到字段名、缺值或缺有效域、写否定都不算签署；返修用的其他「退回：…」评论不算签署，其他账号的评论也不算。decision-claimer 下一轮整链重跑，分级器逐项指认签署评论、宿主核对后不再交还，起草照引该评论。\n\n` +
+      `分级原件：\`${dir}/classify.json\``;
+  }
+  if (reason === "fact_gap") {
+    const gaps = arch ? factGapLines(arch) : [];
+    return `**裁决暂停（未放行）**：考古有事实缺口，决定等事实；本票未起草、未落地。\n\n` +
+      `${gaps.join("\n") || "（缺口清单见考古原件）"}\n\n` +
+      `处置：按 wayfinder 在同一张图下开 research 票或探针票，接 blocking 边挡住本票；缺口票关闭后按下述返修重跑。\n${HELD_REOPEN_HINT}\n\n` +
+      `考古原件：\`${dir}/${ARCHAEOLOGY_FILE}\``;
+  }
+  if (reason === "invalid_landing") {
+    return `**裁决暂停（未放行）**：获审草稿缺合法正本落点，未落地。\n\n${HELD_REOPEN_HINT}\n\n草稿与审查原件：\`${dir}/\``;
+  }
+  const table = (r?.items ?? []).map((i) => `| ${i.rule} | ${i.verdict} | ${i.basis.replace(/\|/g, "\\|").replace(/\n/g, " ")} |`).join("\n");
+  return `**裁决暂停（未放行）**：独审 ${s.attempts} 轮仍 BLOCK，修订与重做额度已用尽，未落地。\n\n` +
+    `最后一轮独审（${lastReviewer(s)}）：**${r?.verdict ?? "BLOCK"}**\n\n| 条 | 结论 | 依据 |\n|---|---|---|\n${table}\n${(r?.problems ?? []).map((p) => `\n- ${p}`).join("")}\n\n` +
+    `${HELD_REOPEN_HINT}\n\n草稿与审查原件：\`${dir}/\``;
 }
 
 /** 正本里不该出现的流程段标题。 */
@@ -1937,7 +2196,9 @@ async function landT(t: TicketContext, draft: string, target: string, dir: strin
     s.landedSha = sha;
     persist();
   }
-  d.gh(["issue", "comment", String(n), "--body-file", "-"], resolutionBody(n, target, branch, s.landedSha, dir, draft));
+  if (t.labels.includes(LEGACY_APPROVAL_LABEL)) d.gh(["issue", "edit", String(n), "--remove-label", LEGACY_APPROVAL_LABEL]);
+  if (ownHumanLabel(t)) d.gh(["issue", "edit", String(n), "--remove-label", HUMAN_LABEL]);
+  d.gh(["issue", "comment", String(n), "--body-file", "-"], resolutionBody(n, s.klass ?? "T", target, branch, s.landedSha, dir, draft));
 }
 
 function verifyDecisionCommit(t: TicketContext, s: Summary, sha: string, plan: CanonicalPlan, d: Deps): void {
@@ -1950,11 +2211,11 @@ function verifyDecisionCommit(t: TicketContext, s: Summary, sha: string, plan: C
 }
 
 function decisionCommitMessage(t: TicketContext, s: Summary): string {
-  return `decision(#${t.number}): ${t.title}\n\n${AUTH_LINE}；独审 ${lastReviewer(s)} R1–R8 PASS。`;
+  return `decision(#${t.number}): ${t.title}\n\n${authLine(s.klass ?? "T")}；独审 ${lastReviewer(s)} R1–R8 PASS。`;
 }
 
-function resolutionBody(n: number, target: string, branch: string, sha: string, dir: string, draft: string): string {
-  return `${AUTH_LINE}\n\n**resolution**：T 类，独立审查 R1–R8 全 PASS。正本 \`${target}\` 已写入分支 \`${branch}\`（${sha.slice(0, 10)}），待按日批量 PR 合入 main 后关票。\n\n` +
+function resolutionBody(n: number, klass: Klass, target: string, branch: string, sha: string, dir: string, draft: string): string {
+  return `${authLine(klass)}\n\n**resolution**：${klass} 类，非作者独审 R1–R8 全 PASS。正本 \`${target}\` 已写入分支 \`${branch}\`（${sha.slice(0, 10)}），待按日批量 PR 合入 main 后关票。\n\n` +
     `草稿：\`${dir}/draft.md\`；审查：\`${dir}/review.json\`\n\n<details><summary>草稿全文</summary>\n\n${draft}\n</details>`;
 }
 
@@ -1966,13 +2227,15 @@ interface RawChild {
   issue_dependencies_summary?: { blocked_by?: number };
 }
 
-/** frontier 上的 grilling 票：open、未认领、无 open blocker、未挂 needs-approval。 */
+/**
+ * frontier 上的 grilling 票：open、未认领、无 open blocker。
+ * 带旧 needs-approval 的票照常入选（#1909），按新流程裁定后摘标签。
+ */
 export function selectCandidates(children: RawChild[], skip: Set<number>): number[] {
   const seen = new Set<number>();
   return children
     .filter((c) => c.state.toLowerCase() === "open")
     .filter((c) => (c.labels ?? []).some((l) => l.name === "wayfinder:grilling"))
-    .filter((c) => !(c.labels ?? []).some((l) => l.name === "needs-approval"))
     .filter((c) => (c.assignees ?? []).length === 0)
     .filter((c) => (c.issue_dependencies_summary?.blocked_by ?? 0) === 0)
     .map((c) => c.number)
@@ -1980,10 +2243,10 @@ export function selectCandidates(children: RawChild[], skip: Set<number>): numbe
 }
 
 /**
- * 本地已走完的终态：落地、影子待批。带断点（stage）的一律不算，留给续做。
- * 要重跑一张已到终态的票（例如主控退回重写），先把本地目录改名（先例 decisions/1530.returned-20261020）。
+ * 本地已走完的终态：落地。带断点（stage）的一律不算，留给续做。held 不在此列：它等票上的退回评论，
+ * 由 pickUnresolved 读票判断（heldWaiting）。要重跑一张已落地的票，先把本地目录改名（先例 decisions/1530.returned-20261020）。
  */
-const FINISHED_PHASES: Phase[] = ["done", "land_t", "shadow_p"];
+const FINISHED_PHASES: Phase[] = ["done", "land_t"];
 
 /** 本地 summary.json 已到终态的票（dry-run 与 live 都跳过）。 */
 export function finishedTickets(outRoot: string, children: Array<{ number: number }>): Set<number> {
@@ -2000,15 +2263,18 @@ export function finishedTickets(outRoot: string, children: Array<{ number: numbe
 }
 
 /**
- * 从候选里逐张读票面，跳过已关闭 / 已有 resolution 或用户批复的票，凑满 limit 张。
+ * 从候选里逐张读票面，跳过已关闭 / 已有 resolution 或用户批复的票，以及本地 held 且尚无退回评论的票，凑满 limit 张。
  * 读票失败的候选本轮跳过（下一轮重试），不占并发槽。
  */
-export function pickUnresolved(gh: GhRunner, candidates: number[], limit: number, onSkip: (n: number, why: string) => void): number[] {
+export function pickUnresolved(gh: GhRunner, candidates: number[], limit: number, onSkip: (n: number, why: string) => void, outRoot?: string): number[] {
   const out: number[] = [];
   for (const n of candidates) {
     if (out.length >= limit) break;
     let why: string | null;
-    try { why = resolvedReason(loadTicket(gh, n)); } catch (e) { why = `读票失败：${e instanceof Error ? e.message.split("\n")[0] : String(e)}`; }
+    try {
+      const t = loadTicket(gh, n);
+      why = resolvedReason(t) ?? (outRoot && heldWaiting(prevSummary(join(outRoot, String(n))), t.comments) ? "held 未放行，待票上退回评论返修" : null);
+    } catch (e) { why = `读票失败：${e instanceof Error ? e.message.split("\n")[0] : String(e)}`; }
     if (why) onSkip(n, why);
     else out.push(n);
   }
@@ -2058,9 +2324,9 @@ async function round(a: Args, d: Deps) {
   let tickets = a.tickets;
   if (tickets.length === 0) {
     const children = a.maps.flatMap((m) => JSON.parse(d.gh(["api", "--paginate", `repos/${GH_REPO}/issues/${m}/sub_issues`])) as RawChild[]);
-    // live 与 dry-run 同口径：本地已到终态的票、已关闭或已有 resolution/用户批复的票都不再选。
+    // live 与 dry-run 同口径：本地已落地的票、held 待退回的票、已关闭或已有 resolution/用户批复的票都不再选。
     const candidates = selectCandidates(children, finishedTickets(a.outRoot, children));
-    tickets = pickUnresolved(d.gh, candidates, a.concurrency, (n, why) => log(`#${n} 跳过：${why}`));
+    tickets = pickUnresolved(d.gh, candidates, a.concurrency, (n, why) => log(`#${n} 跳过：${why}`), a.outRoot);
   }
   if (tickets.length === 0) {
     log("frontier 上没有可裁决的 grilling 票");

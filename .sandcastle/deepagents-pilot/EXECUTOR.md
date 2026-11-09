@@ -1,6 +1,6 @@
 # 用新执行器交付一张首证专用票
 
-新执行器把专用票或切流后的引擎放行票从持有跑到 `awaiting_merge`。Deep Agents 主控按 poteto-mode 派 Sandcastle 工蜂，作者与异家族独审都经现役 `codex-child`。独审对某个 head 判 PASS 后，执行器用 GitHub App 身份把这个冻结 SHA 发布到 `codex/deepagents/t<票号>`，开目标为 main 的 draft PR，写 `deepagents/review` 状态和票面交付标记。合入 main 由人在 GitHub 上完成。
+新执行器把专用票或切流后的引擎放行票从持有跑到 `awaiting_merge`。Deep Agents 主控按 poteto-mode 派 Sandcastle 工蜂，作者与异家族独审都经现役 `codex-child`。独审对某个 head 判 PASS 后，执行器用 GitHub App 身份把这个冻结 SHA 发布到 `codex/deepagents/t<票号>`，开目标为 main 的 draft PR，写 `deepagents/review` 状态和票面交付标记。执行器不合入 main。main 的合入不设人工批准：main 分支保护要求 `deepagents/review` 与 `ci-ok` 两项必需检查通过并追平 main，满足后由代理合入（口径见 `.sandcastle/docs/graph-engineering.md`「main 的合入」）。
 
 `register` 保留首证专用票入口。`serve` 接收切流后的引擎放行队列，见文末。接管旧 owner 手里的票仍一律拒绝。
 
@@ -82,8 +82,10 @@ executor status --run-id t<票号>-1
 
 **释放。** 主控退回一张票。释放会等正在执行的那一个外部写入做完，旧控制进程之后的派工、提交与发布都会停下，原工蜂仍可经 `cancel-worker` 取消。释放本身不代表远端工蜂已退出。重新持有要登记新的 run id；票级锁内确认旧控制锁、本机工蜂和所有旧 Boat 绑定均已排空后，代次才加一。`Running`、`EffectUnknown` 或不可读的 Boat 绑定通常阻止换代。唯一的失败排空路径要求原绑定已有 `stop_id`、回执身份完全匹配且明确证明失败退出或取消，详见 [取消后释放队列槽或换代](BOAT.md#取消后释放队列槽或换代)。手工入口与队列共享这一判定。检查只读本地冻结记录，不访问 Boat、不补提交，也不收集旧产物。
 
+释放先在本机记 `released`，再用同一排空判定决定能否摘票面的 `deepagents` 镜像。排空了就在同一把票级锁内摘掉并读回，持有结束由此在 GitHub 上可见，wayfinder 引擎据此恢复旧票迁移。没排空时镜像保留，命令退出 75，排空后重跑同一命令即可。本机记录已换成新 run 时释放被拒绝，旧 run 的重试碰不到新代次的镜像。交付 PR 已合入的票释放后不会被队列重派，状态页报 `awaiting_human`，由主控关票。
+
 ```sh
-executor release --ticket <票号> --run-id t<票号>-1 --reason "主控退回：……"
+executor release --ticket <票号> --run-id t<票号>-1 --reason "主控退回：……" --private-key "$PEM"
 executor register --ticket <票号> --run-id t<票号>-2 --base "$BASE" ...
 ```
 
@@ -94,7 +96,7 @@ executor register --ticket <票号> --run-id t<票号>-2 --base "$BASE" ...
 `status` 的 `phase` 在发布后取以下值。
 
 - `awaiting_merge`。冻结 head 已在远端分支，draft PR 的 head 等于它，状态与交付标记都在。PR 链接在 `delivery.state.pr.url`。
-- `merged`。人已合入该 PR，执行器不再写任何东西。
+- `merged`。该 PR 已合入 main，执行器不再写任何东西。
 - `stale`。远端分支或 PR 的 head 不是冻结 head，后代也算。执行器不覆盖、不收养，`delivery.stale.observed` 是观察到的 SHA。由主控决定重新评审还是释放。
 - `halted`（持有记录）。锁内复核发现票被关、`deepagents` 标签被摘、票或 PR 被加了禁用标签，或持有 post-check 失败。远端 PR 不合交付合同时也转 halted：已关闭未合入、目标不是 main、open 时不是 draft、不是本 App 所开、正文缺本票 PR 标记。执行器不改动这个 PR，不重开、不改目标、不改回 draft。只有主控能释放。
 
@@ -126,7 +128,7 @@ executor run --run-id t<票号>-1 --private-key "$PEM"
 
 ## 身份与发布方式
 
-执行器只用 App installation token，权限为 metadata 读，contents、issues、pull_requests、statuses 写，限定到本仓库。token 只在控制进程内存，工蜂的环境是白名单，不含任何 GitHub 凭据。队列、准入和发布不调用 gh、git 凭据、SSH 或 keychain。`cutover verify/record` 的运维屏障单独调用只读 `gh variable get` 核对冻结变量，记录来源为 `user-token-readonly`，不生成批准、不执行 GitHub 写，也不在 App 失败时改用用户身份。
+执行器只用 App installation token，权限为 metadata 读，contents、issues、pull_requests、statuses 写，限定到本仓库。token 只在控制进程内存，工蜂的环境是白名单，不含任何 GitHub 凭据。队列、准入和发布不调用 gh、git 凭据、SSH 或 keychain。`cutover verify/record` 的运维屏障单独调用只读 `gh variable get` 核对冻结变量，记录来源为 `user-token-readonly`，不生成批准、不执行 GitHub 写，也不在 App 失败时改用用户身份。`serve --review-sweep` 是第二个例外：sweep 用宿主 `gh` 登录读开放 PR、PR 状态、检查与分支保护，并经 `gh auth git-credential` 把缺失对象 fetch 到 `FETCH_HEAD`；只读、不在 App 失败时改用用户身份。只有显式开 `--review-sweep-auto-merge`（模板不开）才用同一登录写：带 sha 合入、带 expected_head_sha 追平、撤原生 auto-merge。
 
 推送不走 `git push`。执行器经 GitHub git 数据 API 逐个重建 `base..h` 的 blob、tree 与 commit，每个返回的 SHA 必须等于本地 SHA，全部对上才非强推地创建分支 ref。v2 的本地提交用 UTC 时间且不签名，以便原样重建。重建对不上时不创建任何 ref，报 `Unpublishable`。
 
@@ -184,3 +186,9 @@ executor serve --loop --poll-seconds 60 --workers-log "$PWD/.sandcastle/logs/wor
 launchd 模板在 `.sandcastle/launchd/com.newchanlun.deepagents-executor.plist`。部署 owner 把 `__REPO__`、`__VENV__`、`__PRIVATE_KEY_PATH__`、`__BOAT_CONFIG__` 和 `__BOAT_API_KEY_FILE__` 全部替换为已核对的绝对路径后安装。后两个占位符分别设置 `PILOT_BOAT_CONFIG` 与 `PILOT_BOAT_API_KEY_FILE`。配置和控制端 key 文件的要求见 [Boat 受管配置](BOAT.md#受管配置)。
 
 使用模板的 `PATH` 执行 `command -v boat`，确认服务能找到已登录的 CLI。模板默认包含 `/Users/silencehan/.local/bin`。App 私钥路径在参数中，Boat key 文件路径在环境中，两种密钥的内容都不进入 plist。
+
+### 附带正式审查（review_sweep）
+
+`serve --review-sweep` 在每轮派票之前附带跑一次 `pilot1742.review_sweep`，两轮至少相隔 180 秒，时间记在审查状态根的 `sweep/serve-round.last`。它给指向 main 的开放 PR 派正式审查（`deepagents/review`），HOST 同时只跑一个审查，操作员手动起的 `external_review review-pr` 也算在内。base、head 不在本机对象库时只 fetch 到 `FETCH_HEAD`，不动 HEAD 与工作区。每个动作写一行 `review-sweep {…}` 到 serve 的标准输出；GitHub 读不到或 `gh` 调用超时（60 秒）时写一行 `round-skipped` 并注明读不到的源，serve 不退出。sweep 用宿主 `gh` 登录，不用 App 私钥，私钥路径只转交审查子进程。派票子进程同步运行，票在跑时 sweep 等这一轮结束；没有有效切流记录时 serve 退出，sweep 也随之停。
+
+部署模板只开 `--review-sweep`：只派审查，不追平、不合入，合入 main 仍按现行规定由人完成。`--review-sweep-auto-merge`（追平队首、在精确 head 双门全绿时带 `sha=<head>` 合入）在代码里默认关，模板也不带；等改写合入人闸口径的 #1915 合入后，由单独的后续 PR 打开，并同步改那些规定文件。开了以后：只剩实盘下单或资金、密钥或凭证两类要人确认（用户裁定留痕 https://github.com/Newchanlun/NewChanlun/issues/1742#issuecomment-6719202631）；证据读不到或超时时不合入、不追平，并撤掉相关 PR 的 GitHub 原生 auto-merge。唯一的自动合入路径是 sweep 带 `sha=<head>` 的 REST 合入：仓库设置 `allow_auto_merge` 已关（`gh api repos/Newchanlun/NewChanlun --jq .allow_auto_merge` 为 `false`），GitHub 原生 auto-merge 挂不上，有写权限的人也无法在两轮之间给触及两类的 PR 挂上、等检查转绿由 GitHub 合入。sweep 每轮读这个设置，为 `true` 或读不到时本轮不合入、不追平并记 `native-auto-merge-enabled`；撤原生 auto-merge 的逻辑保留作纵深防御。已接受的风险：改 CI 的 PR 在自己的合并 ref 上运行自己定义的 `ci-ok` 与 DevSkim，能把它们改成恒成功或放宽 DevSkim 基线；审查提示词没有针对这一点的专门条款，所以这类 PR 只受通用的双模型独审约束。规则全文见 `pilot1742/review_sweep.py` 模块说明。审查私钥单独给：`--review-private-key`（模板占位符 `__REVIEW_PRIVATE_KEY_PATH__`，由 HOST 部署填仓外绝对路径），不复用 serve 自己的 `--private-key`。没给时，若 `external_review.IDENTITY_CONFIG` 不存在，审查沿用执行器 App 并记一行 `review-key-fallback`；若它存在（已换审查专用 App），serve 记一行 `refused-no-review-key` 并以退出码 2 退出。换用审查专用 App 时：把 `__REVIEW_PRIVATE_KEY_PATH__` 填成审查 App 私钥再重新加载 serve；不要同时跑 serve 的 sweep 和独立的 `review_sweep` 循环，两者共用审查状态根下的 `sweep/*.launched` 标记，一边派出的必败子进程会让另一边对同一 attempt 退避 10 分钟。关掉审查就删掉已安装 plist 里的 `--review-sweep`，再 `launchctl bootout gui/$UID/com.newchanlun.deepagents-executor` 与 `launchctl bootstrap gui/$UID ~/Library/LaunchAgents/com.newchanlun.deepagents-executor.plist` 重新加载（`kickstart -k` 不重读 plist）。
