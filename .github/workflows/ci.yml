@@ -41,7 +41,7 @@ jobs:
   # #1875 push 去重：合入 main 的 merge commit 若与 PR head（第二父）同树，且 PR 在该 head 上已有成功的 ci.yml run，
   #   push 不再重跑 Rust 作业。strict 下 PR run 检出的 refs/pull/N/merge 与 head 同树，所以那次 run 测的正是这棵树。
   #   rust/Cargo.lock 有变时仍全跑，让 main 作用域写入新的 cargo 缓存（PR 作用域的缓存别的 PR 读不到）。
-  #   单父提交、直接推送、查询出错一律全跑。去重后 main 的 push run 多数没有 Rust 作业耗时，CI 计时请看 PR run。
+  #   单父提交、查询出错一律全跑；直接推送到 main 由分支保护（必须经 PR）挡住，不在本判定里另查。去重后 main 的 push run 多数没有 Rust 作业耗时，CI 计时请看 PR run。
   #   那次 PR run 必须真跑过 Rust（rust-green 作业 success）；走了同 PR 复用的 run 不算，main 上照常全跑（#2027），
   #   用来兜住复用判定的非恶意误判。合入改动全在跳过集里时直接不跑 Rust（与 PR 侧 p2m 同一依据）。
   # #1875 同 PR 复用：PR run 的检出树去掉上面的跳过集后，与本分支上一次全绿 run 相同、且两边 .github 相同时，
@@ -94,6 +94,8 @@ jobs:
               if [ "$rc" -eq 0 ]; then echo "Cargo.lock changed"; return 1; fi
               if [ "$rc" -ne 1 ]; then echo "file check failed (grep exit $rc)"; return 1; fi
               # 合入的改动全在跳过集里（只改 .sandcastle / DevSkim 的 PR）：Rust 输入与 main 上一提交相同，与 PR 侧 p2m 同一依据。
+              #   改动清单为空时与 PR 侧一致按全跑处理。
+              [ -s "$RUNNER_TEMP/push-files" ] || { echo "empty file list"; return 1; }
               rc=0; grep -v -E -q "$SKIP_RE" "$RUNNER_TEMP/push-files" || rc=$?
               if [ "$rc" -eq 1 ]; then echo "only skip-set files changed"; return 0; fi
               if [ "$rc" -ne 0 ]; then echo "skip-set check failed (grep exit $rc)"; return 1; fi
@@ -1508,7 +1510,7 @@ jobs:
   #   指纹来自 changes 作业的输出，其他作业里的 PR 代码写不了它，也改不了作业名。判定脚本 ci-rust-reuse.py 用 jobs API 读这个
   #   作业名与结论作证据（不用 artifact：同一 run 里任何先于上传执行的 PR 代码都拿得到运行时令牌，#2027 独审）。不进 ci-ok。
   rust-green:
-    name: rust-green ${{ needs.changes.outputs.rust_key }}
+    name: rust-green ${{ needs.changes.outputs.rust_key || 'nokey' }}
     runs-on: ubuntu-latest
     timeout-minutes: 2
     if: github.event_name == 'pull_request' && needs.changes.outputs.rust == 'true'
