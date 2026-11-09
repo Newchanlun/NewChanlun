@@ -847,3 +847,49 @@ fn old_contracts_do_not_know_exact_operations_or_commands() {
         assert!(e.contains("操作权限未知"), "{op}: {e}");
     }
 }
+
+/// 正式入口造不出「grant 责任缺失」：Reserve 总是先增责，C1 没有降责入口。故直接把已 Dispatchable 的 E 图像中
+/// 该 grant 的责任改小再调用 Release 归约，对照原图像可 Release。
+#[test]
+fn release_refuses_when_e_no_longer_holds_the_full_grant_responsibility() {
+    let mut f = fixture(None);
+    committed(&mut f);
+    dispatch(&mut f, "alpha");
+    let d = input(&f.configs[0], &pinned_raw(&f.configs[0]).unwrap()).unwrap();
+    let p = release_payload(&f, "alpha");
+    let (seq, _, _, image) = latest(&f.dbs[0]).unwrap();
+    let mut next = image.clone();
+    let ok = release_exact(&f.configs[0], &image, &mut next, &d, &p, seq + 1, "162").unwrap();
+    assert_eq!(ok["state"], "ReleasedExact");
+    let grant = grant_id(&f, "alpha");
+    let mut reduced = image.clone();
+    for r in reduced["finance"]["responsibilities"]
+        .as_array_mut()
+        .unwrap()
+    {
+        if r["responsibility_id"] == grant.as_str() {
+            r["amount"] = json!("1");
+        }
+    }
+    let mut next = reduced.clone();
+    let e = release_exact(&f.configs[0], &reduced, &mut next, &d, &p, seq + 1, "162").unwrap_err();
+    assert!(
+        e.starts_with("MissingDependency") && e.contains("完整责任"),
+        "{e}"
+    );
+}
+
+/// 同一逻辑族的 revision 1 只能有一个首次提交（IC「不同 revision 不另造首次量」）。
+#[test]
+fn frozen_input_refuses_two_first_submits_in_one_family() {
+    let f = fixture(None);
+    let mut d = f.data.clone();
+    crate::economic_session::exact_command::validate_section(&d).unwrap();
+    d["plans"][1]["exact"]["logical_order_family"] =
+        d["plans"][0]["exact"]["logical_order_family"].clone();
+    let e = crate::economic_session::exact_command::validate_section(&d).unwrap_err();
+    assert!(
+        e.starts_with("IdentityConflict") && e.contains("逻辑族"),
+        "{e}"
+    );
+}
