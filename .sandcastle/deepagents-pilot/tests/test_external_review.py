@@ -13,8 +13,8 @@ import httpx
 import pytest
 from conftest import git
 
+from pilot1742 import delivery, patch_read
 from pilot1742 import external_review as module
-from pilot1742 import patch_read
 from pilot1742.delivery import EffectPending, RepoGateway, Stale
 from pilot1742.external_review import (
     CONTEXT,
@@ -754,6 +754,26 @@ def test_same_patch_on_new_base_reuses_pass_without_model(lane, env):
     assert len(row["description"]) <= 140
     assert lane.review_pr(1810)["publication"]["id"] == row["id"]  # 重跑只读回，不重发
     assert lane.gateway.sent == ["pending", "success", "pending", "success"]
+
+
+def test_success_recovered_by_same_attempt_records_publication_and_is_reusable(lane, env, monkeypatch):
+    # #1942 attempt 49285：终态 success 已送达但读回一直看不到，同一 attempt 重跑认回后 outcome 缺 publication，
+    # 追平后同补丁没法沿用、整轮重审。
+    monkeypatch.setattr(delivery, "READBACK_DELAYS", ())
+    gateway = lane.gateway
+    gateway.after_write = lambda: setattr(gateway, "hide", gateway.sent[-1] == "success")
+    with pytest.raises(EffectPending):
+        lane.review_pr(1810)
+    gateway.hide, gateway.after_write = False, None
+    first = lane.review_pr(1810)
+    assert gateway.sent == ["pending", "success"]
+    folder = lane.state_root / "runs" / ReviewTarget(**first["target"]).key
+    saved = json.loads((folder / "outcome.json").read_text())
+    assert saved["publication"]["state"] == "success" and saved["publication"]["id"] == gateway.rows[0]["id"]
+    _advance_main(lane, env)
+    result = lane.review_pr(1810)
+    assert result["reused_from"]["run_id"] == first["run_id"] and result["reviews"] == []
+    assert _launches(lane) == len(MODELS)
 
 
 # 只改空白也必须重审：git patch-id 会忽略空白，所以补丁身份不用它。
