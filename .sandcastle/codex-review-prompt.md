@@ -7,8 +7,7 @@
 
 # CONTEXT
 
-> 本提示由宿主侧 `.sandcastle/review-context.mts` 渲染（#1588）：**只含变更摘要，不含 diff 正文**。
-> 整段 diff 曾把提示撑爆（#1406：~39 万 token →「Prompt is too long」）。diff 请在工作区里按需读取，见「读 diff 的方法」。
+> 本提示只含变更摘要，不含 diff 正文；diff 在工作区里按需读取，见「读 diff 的方法」。
 
 ## 改动统计（git diff --stat {{BASE}}...{{BRANCH}}）
 
@@ -60,6 +59,5 @@
 - 不改功能语义；不过度简化到伤可读性。
 - 不 merge、不 push、不关 issue、不动 {{TARGET_BRANCH}}。
 - 本机禁 cargo / rustc（见上）。
-- 无修正也要在最终答复显式写「评审通过：无修正」。
 
 完成后输出：<promise>COMPLETE</promise>
