@@ -6,7 +6,12 @@ PR run 的 Rust 输入（检出树去掉跳过集里的路径）与本 PR 分支
 全绿的 run 由 ci-ok 上传名为 rust-green-<指纹> 的 artifact，本脚本按名字找它。
 
 为什么还要比 .github：artifact 由那次 run 的 workflow 上传，只有那份 workflow 与本次相同，才能信它测过的就是
-这个指纹（被改过的 workflow 可以不跑测试就上传）。只认本仓库分支上的 run；fork 的 run 不认。
+这个指纹（被改过的 workflow 可以不跑测试就上传）。那次 run 检出的是 merge(head, 当时的 base)，GitHub 不给出这个
+merge 提交，artifact 内容又是那份 workflow 自己写的，不能拿来证明。所以只用 GitHub 给的数据证明：
+  1. 那次 run 的 head 的 .github 与本次检出的 .github 相同；
+  2. 从那个 head 与本次 base 的分叉点到本次 base，base 一侧没有改动 .github 下任何文件。
+当时的 base 位于分叉点之前或之后、本次 base 之前，按第 2 条，它的 .github 改动都已在 head 里，所以那次 merge 提交的
+.github 就是 head 的 .github，也就是本次的。只认本仓库分支上的 run；fork 的 run 不认。
 
 用法：ci-rust-reuse.py <仓库> <检出 commit> <PR 分支> <本次 run id> <跳过集正则>
 标准输出逐行打印 key=value（rust、rust_key、reuse），调用方追加进 GITHUB_OUTPUT。
@@ -45,18 +50,37 @@ def github_tree(api, repo: str, sha: str) -> str:
     raise RuntimeError(f"{sha} has no .github tree")
 
 
-def find_reuse(api, repo: str, branch: str, run_id: int, key: str, ours: str):
+def base_of(api, repo: str, sha: str) -> str:
+    parents = api(f"repos/{repo}/git/commits/{sha}")["parents"]
+    if len(parents) != 2:
+        raise RuntimeError(f"{sha} is not a PR merge commit")
+    return parents[0]["sha"]
+
+
+def base_side_touches_github(api, repo: str, head: str, base: str) -> bool:
+    cmp = api(f"repos/{repo}/compare/{head}...{base}?per_page=100")
+    files = cmp.get("files")
+    if files is None or len(files) >= 300 or cmp.get("total_commits", 0) > 250:
+        return True  # 列表可能被截断：当作改过
+    return any(f["filename"].startswith(".github/") or (f.get("previous_filename") or "").startswith(".github/")
+               for f in files)
+
+
+def find_reuse(api, repo: str, branch: str, run_id: int, key: str, ours: str, base: str):
     name = ARTIFACT_PREFIX + key
     runs = api(f"repos/{repo}/actions/workflows/ci.yml/runs?event=pull_request&status=success"
                f"&branch={urllib.parse.quote(branch, safe='')}&per_page=30")["workflow_runs"]
     for run in runs:
         head_repo = run.get("head_repository") or {}
-        if run["id"] == run_id or head_repo.get("id") != run["repository"]["id"]:
+        # 只认比本次早创建的 run（run id 单调递增；重跑沿用原 id）：它当时的 base 不晚于本次 base，上面第 2 条才覆盖得到。
+        if run["id"] >= run_id or head_repo.get("id") != run["repository"]["id"]:
             continue
         artifacts = api(f"repos/{repo}/actions/runs/{run['id']}/artifacts?name={name}")["artifacts"]
         if not any(a["name"] == name and not a["expired"] for a in artifacts):
             continue
         if github_tree(api, repo, run["head_sha"]) != ours:
+            continue
+        if base_side_touches_github(api, repo, run["head_sha"], base):
             continue
         return run["html_url"]
     return None
@@ -68,7 +92,7 @@ def decide(api, repo: str, sha: str, branch: str, run_id: int, skip: re.Pattern)
     except Exception as e:  # noqa: BLE001 — 算不出指纹就全跑、不上传
         return {"rust": "true", "rust_key": "", "reuse": f"no key: {e}"}
     try:
-        url = find_reuse(api, repo, branch, run_id, key, github_tree(api, repo, sha))
+        url = find_reuse(api, repo, branch, run_id, key, github_tree(api, repo, sha), base_of(api, repo, sha))
     except Exception as e:  # noqa: BLE001 — 查询出错全跑
         return {"rust": "true", "rust_key": key, "reuse": f"lookup failed: {e}"}
     if url is None:
