@@ -778,11 +778,12 @@ jobs:
       - *rust-checkout
 
       - uses: ./.github/actions/rust-job-setup
+        id: setup
 
       # production_session_testonly：入口测试显式走 S 的 TestOnly 诊断 theta 臂（P0 未签期间正式配置必拒，
       #   由 unsigned_p0_refuses_s_serve_* 两条测试锁住）；生产构建不含该臂，遇开关即拒绝启动。
       - name: cargo test — production_session_entry
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && steps.setup.outcome == 'success' }}
         run: ../.github/scripts/run-cargo-with-telemetry.sh cargo test --release --locked --features production_session_testonly --test production_session_entry --jobs "${CI_CARGO_JOBS:-1}" -- --test-threads 1
 
       # 纯生产构建（只开 production_session，#1769 返修 M-3/M-4）：编译生产 launcher、X 骨架与 S bin 的生产 cfg
@@ -791,13 +792,14 @@ jobs:
       #   #1381：history_simulation_entry 用 python3 受控 E/S authority 驱动真实 x_execution_session 进程
       #   （入口、重启、S 唯一授权、epoch2 拒绝、首次初始化原子），文件 cfg 为 production_session，同在纯生产构建执行。
       - name: cargo test — production_session_entry / history_simulation_entry（纯生产构建）
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && steps.setup.outcome == 'success' }}
         run: ../.github/scripts/run-cargo-with-telemetry.sh cargo test --release --locked --features production_session --test production_session_entry --test history_simulation_entry --jobs "${CI_CARGO_JOBS:-1}" -- --test-threads 1
 
-      # #1875：原 rust-test-backtest-bin 作业并入本作业（各约 2 min，Boat 上每轮少起 1 台机器）；三步都带 !cancelled()，
-      #   前一步失败不跳过后一步，失败照样使本作业失败。
+      # #1875：原 rust-test-backtest-bin 作业并入本作业（各约 2 min，Boat 上每轮少起 1 台机器）。三个测试步都带
+      #   `!cancelled() && steps.setup.outcome == 'success'`：前一个测试步失败不跳过后面的（失败照样使本作业失败），
+      #   准备步骤失败时则全部跳过，不刷连带报错。托管机上合并前两作业合计 9–12 min，距 45 min 上限远。
       - name: cargo test — backtest_bin feature 新增的库测试
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && steps.setup.outcome == 'success' }}
         # 2026-08-16 磁盘实撞（#993 收口轮）：三轮 runner 爆盘（No space left on device）——
         # --all-targets 在 feature 下额外编 56 个探针 bin 的 test 目标（各链 nautilus 套件，
         # 本地实测 debug 全 target 55G ⟹ 14G 盘必爆）。改 --lib；tests/ 与 bins 由 default 步覆盖。

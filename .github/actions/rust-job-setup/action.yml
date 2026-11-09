@@ -107,7 +107,8 @@ runs:
     # run 32315548218 在 rust-lld signal 7 后明确报 ENOSPC。根因是磁盘耗尽，
     # 不是已证实的固定对象损坏或 rust-lld regression。处置只压低磁盘峰值：
     # 不恢复 target、不生成 incremental、测试串行编译；runner/toolchain/linker 不钉死。
-    # #1588：拆 job 后每个 job 在独立 runner 上，各自只编自己那档 feature，磁盘峰值低于拆前单 job。
+    # #1588：拆 job 后各 job 在独立 runner 上编译，磁盘峰值低于拆前单 job。#2018 起 production-session 作业依次编
+    #   production_session 与 backtest_bin 两档（Boat 实测 target 约 2.4 GB，作业内空闲 14 GB 以上）。
     # #1875 R10：Boat 快照（hc-ci-slim）已预装 cargo registry；Boat 到 GitHub cache 上传约 0.3 MB/s，
     #   新分支首轮保存 100 MB 要在作业尾部多耗 5 分多钟（run 42004333964），故自托管 runner 不用此缓存。
     - name: Cache cargo registry + git only (#1141)
