@@ -827,16 +827,33 @@ def test_executor_serve_runs_one_sweep_round_per_serve_round(monkeypatch, tmp_pa
     assert built == [(tmp_path / "k.pem", True, 3)]
 
 
-def test_executor_serve_without_flag_has_no_sweep_and_auto_merge_needs_sweep(monkeypatch, tmp_path):
+def test_executor_serve_without_flag_has_no_sweep(monkeypatch, tmp_path, capsys):
     rounds = []
     cli, argv = _fake_serve(monkeypatch, tmp_path, rounds=rounds)
     monkeypatch.setattr(module, "serve_round", lambda *a, **k: pytest.fail("sweep wired without --review-sweep"))
     with pytest.raises(_StopServe):
         cli.main(argv)
     assert rounds == ["intake"] * 3
-    assert cli.main(argv + ["--review-sweep-auto-merge"]) == 2
-    assert cli.main(argv + ["--review-sweep-max-running", "3"]) == 2      # 也须与 --review-sweep 同用
+    assert "ignored-without-review-sweep" not in capsys.readouterr().out
     assert cli.main(argv + ["--review-sweep", "--review-sweep-max-running", "0"]) == 2
+
+
+@pytest.mark.parametrize("extra", [["--review-sweep-auto-merge"], ["--review-sweep-max-running", "3"],
+                                   ["--review-sweep-max-running", "1"],
+                                   ["--review-sweep-auto-merge", "--review-sweep-max-running", "3"]])
+def test_sweep_flags_without_review_sweep_are_ignored_with_one_warning(monkeypatch, tmp_path, capsys, extra):
+    """关审查只删 --review-sweep、其余 sweep 参数留在 plist 里时：serve 照常派票（不以退出码 2 退出，免得 launchd
+    反复重启、派票停摆），不接 sweep，记一行警告点名被忽略的参数。"""
+    rounds = []
+    cli, argv = _fake_serve(monkeypatch, tmp_path, rounds=rounds)
+    monkeypatch.setattr(module, "serve_round", lambda *a, **k: pytest.fail("sweep wired without --review-sweep"))
+    with pytest.raises(_StopServe):
+        cli.main(argv + extra)
+    assert rounds == ["intake"] * 3
+    warnings = [json.loads(line.split(" ", 1)[1]) for line in capsys.readouterr().out.splitlines()
+                if line.startswith("review-sweep ")]
+    assert warnings == [{"action": "ignored-without-review-sweep", "flags": [f for f in extra if f.startswith("--")],
+                         "reason": "没有 --review-sweep，这些参数不生效"}]
 
 
 def test_deployed_executor_plist_turns_sweep_and_auto_merge_on():

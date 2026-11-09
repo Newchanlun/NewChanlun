@@ -595,7 +595,7 @@ class TicketExecutor:
             if observed == "open":
                 text = self._marker("deliver", spec.run_id, generation, head)
                 body = (f"[deepagents run={spec.run_id} gen={generation}]\n\n交付冻结 head `{head}` 到 "
-                        f"`{branch}`，PR {pr.get('url')}，等待必需检查 deepagents/review 与 ci-ok 通过后由 review_sweep 合入。\n\n{text}")
+                        f"`{branch}`，PR {pr.get('url')}。PR 保持 draft：验收后由主控或代理标为 ready for review，review_sweep 才审查，并在必需检查 deepagents/review 与 ci-ok 通过后合入。\n\n{text}")
                 with self.action("deliver", run.dir, generation, pr_number=number, head=head) as boundary:
                     self._require_review_spec(run, head)
                     observed = self._checked(boundary, head, number)
@@ -807,6 +807,24 @@ def review_sweep_key(executor_key: Path, review_key: Path | None) -> Path | None
     return executor_key
 
 
+def _ignore_orphan_sweep_flags(args: argparse.Namespace) -> None:
+    """关审查只删 --review-sweep 时，留在 plist 里的 sweep 子参数不能让 serve 起不来（launchd 会反复重启、派票停摆）：
+    记一行警告并忽略。有 --review-sweep 时只补默认值。"""
+    orphans = []
+    if not args.review_sweep:
+        if args.review_sweep_auto_merge:
+            orphans.append("--review-sweep-auto-merge")
+        if args.review_sweep_max_running is not None:
+            orphans.append("--review-sweep-max-running")
+        args.review_sweep_auto_merge, args.review_sweep_max_running = False, None
+    if args.review_sweep_max_running is None:
+        args.review_sweep_max_running = 1
+    if orphans:
+        print("review-sweep " + json.dumps({"action": "ignored-without-review-sweep", "flags": orphans,
+                                            "reason": "没有 --review-sweep，这些参数不生效"}, ensure_ascii=False),
+              flush=True)
+
+
 def _client(args: argparse.Namespace) -> GitHubAppClient:
     """登记只要读权限；run 与 release（摘镜像）才申请写权限。两者都先核 App、安装与仓库身份。"""
     identity = AppIdentity(5486877, 179444545, 1150335160, REPO, "newchanlun-deepagents-1742", args.private_key)
@@ -905,14 +923,16 @@ def main(argv: list[str] | None = None) -> int:
     serve.add_argument("--workers-log", type=Path, default=WORKERS_LOG)
     serve.add_argument("--private-key", type=Path, required=True)
     serve.add_argument("--review-sweep", action="store_true",
-                       help="每轮附带一次 review_sweep：给开放 PR 派正式审查（宿主 gh 凭据，HOST 同时只跑一个审查）")
+                       help="每轮附带一次 review_sweep：给非 draft 的开放 PR 派正式审查（宿主 gh 凭据；"
+                            "HOST 上同时在跑的审查数见 --review-sweep-max-running）")
     serve.add_argument("--review-private-key", type=Path,
                        help="审查 App 私钥，只原样转给 sweep 派的 review-pr；不复用 --private-key（执行器 App）。"
                             "审查身份文件（external_review.IDENTITY_CONFIG）存在时必须给")
     serve.add_argument("--review-sweep-auto-merge", action="store_true",
-                       help="review_sweep 追平队首，并在精确 head 双门全绿时带 sha 合入；须与 --review-sweep 同用")
-    serve.add_argument("--review-sweep-max-running", type=int, default=1,
-                       help="HOST 上同时在跑的审查上限（默认 1；操作员手动起的 review-pr 也算）；须与 --review-sweep 同用")
+                       help="review_sweep 追平队首，并在精确 head 双门全绿时带 sha 合入；没有 --review-sweep 时记一行警告并忽略")
+    serve.add_argument("--review-sweep-max-running", type=int, default=None,
+                       help="HOST 上同时在跑的审查上限（默认 1；操作员手动起的 review-pr 也算）；"
+                            "没有 --review-sweep 时记一行警告并忽略")
     cutover = sub.add_parser("cutover", help="全局冻结排空证据；不执行生产切换")
     cutover.add_argument("operation", choices=("snapshot", "pending", "audit-release", "verify", "record"))
     cutover.add_argument("--snapshot", type=Path)
@@ -961,12 +981,9 @@ def main(argv: list[str] | None = None) -> int:
         if args.command == "serve":
             if args.poll_seconds <= 0:
                 raise ValueError("poll-seconds 须为正数")
-            if args.review_sweep_auto_merge and not args.review_sweep:
-                raise ValueError("--review-sweep-auto-merge 须与 --review-sweep 同用")
+            _ignore_orphan_sweep_flags(args)
             if args.review_sweep_max_running < 1:
                 raise ValueError("--review-sweep-max-running 须为正整数")
-            if args.review_sweep_max_running != 1 and not args.review_sweep:
-                raise ValueError("--review-sweep-max-running 须与 --review-sweep 同用")
             review_key = None
             if args.review_sweep:
                 review_key = review_sweep_key(args.private_key, args.review_private_key)

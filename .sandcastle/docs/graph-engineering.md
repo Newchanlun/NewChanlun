@@ -12,7 +12,7 @@
 | 验收面 | `harvest.sh`（#1660 PR 模式） | 15 分钟 | 评审完成的分支推远端、基于 main 开 PR、票面登记；不合入（合入见下文「main 的合入」） |
 | 观测面 | `health-monitor` + 进度页（新） | 5 分钟 / 1 分钟 | 停摆即 _red_、自愈、进度 |
 
-**main 的合入**：不设人工批准。main 分支保护强制两项必需检查，`deepagents/review`（正式非作者双审 success）与 `ci-ok`（适用 CI 全绿），并要求分支先追平 main（strict）；工蜂、执行器派票 run 与 Sandcastle 实施者只开 PR，不合入。`executor serve` 内的 review_sweep 循环只在 PR 精确 head 上 `deepagents/review`（审查 App 发出）与 `ci-ok` 都为 success 时合入，合入请求带 `sha=<head>`；触及人工确认两类（实盘下单或资金、密钥或凭证）的 PR 它不合入。代理也可按同一规则手动合入。授权边界在分支保护，review_sweep 只是按它执行（用户裁定留痕 https://github.com/Newchanlun/NewChanlun/issues/1742#issuecomment-6719202631）。
+**main 的合入**：不设人工批准。main 分支保护强制两项必需检查，`deepagents/review`（正式非作者双审 success）与 `ci-ok`（适用 CI 全绿），并要求分支先追平 main（strict）；工蜂、执行器派票 run 与 Sandcastle 实施者只开 PR，不合入。执行器交付的 PR 以 draft 开出并保持 draft，review_sweep 不审、不合 draft；主控、代理或主图验收后把它标为 ready for review，sweep 才审查它并按下面的规则合入。标 ready 后，执行器下一轮对账按交付合同把这次持有转 halted（`not_draft`），不再写这个 PR；合入后由主控释放持有。`executor serve` 内的 review_sweep 循环只在 PR 精确 head 上 `deepagents/review`（审查 App 发出）与 `ci-ok` 都为 success 时合入，合入请求带 `sha=<head>`；触及人工确认两类（实盘下单或资金、密钥或凭证）的 PR 它不合入。代理也可按同一规则手动合入。授权边界在分支保护，review_sweep 只是按它执行（用户裁定留痕 https://github.com/Newchanlun/NewChanlun/issues/1742#issuecomment-6719202631）。
 
 **人工确认只保留两类**：实盘下单与资金（含账户/交易激活，按 ADR 0041「授权来源与生效边界」交还用户签署，见「1. 分级」的资金与权限硬门）、密钥与凭证。CI 与分支保护配置由代理决定、事后报告，不需要人工确认（2026-11-08 用户裁定，原话与范围见 [#1742 裁定留痕](https://github.com/Newchanlun/NewChanlun/issues/1742#issuecomment-6719202631)）。授权范围的边界：代理可以改 CI 与分支保护的配置，但不能借此关闭或放宽必需检查 `deepagents/review`、`ci-ok`，不能取消 strict，也不能用管理员权限绕过；这是「合入前有非作者独审」这条底线的执行机制。其余普通研发流程不设等人批准的门。spec 与 P 类决策同 T 类一样，起草后经非作者独审 PASS 由代理裁定并记账（#1909，用户直接授权）；BLOCK 返修，缺有效独审不放行。
 
