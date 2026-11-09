@@ -6,7 +6,7 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { randomUUID } from "node:crypto";
 import { codexWorker } from "./codex-route.mts";
-import { PROMPT_JSON_INSTRUCTION, REVIEW_IMAGE, REVIEW_VOLUME_LABEL, VOLUME_SNAPSHOT, checkReviewAdmission, dockerReviewVolumes, rateLimitSignal, readLaunch, reviewMounts, reviewSandbox, reviewVolumeName, runExternalReview, snapshot, verifyReviewAdmission, type ReviewLaunch, type ReviewVolumes, type WorkerDependencies } from "./external-review-worker.mts";
+import { PROMPT_JSON_INSTRUCTION, REVIEW_IMAGE, REVIEW_VOLUME_LABEL, VM_SPACE_RESERVE, VOLUME_SNAPSHOT, checkReviewAdmission, dockerReviewVolumes, rateLimitSignal, readLaunch, reviewMounts, reviewSandbox, reviewVolumeName, runExternalReview, snapshot, verifyReviewAdmission, type ReviewLaunch, type ReviewVolumes, type WorkerDependencies } from "./external-review-worker.mts";
 import type { BindMountSandboxHandle } from "@ai-hero/sandcastle";
 
 const image = "sha256:" + "1".repeat(64);
@@ -25,18 +25,22 @@ function fixture(model = "gpt-6.1-sol") {
   return { root, checkout, folder, launch };
 }
 
-/** 替身审阅卷：populate 记下灌入来源，容器里的 Git 读取按该宿主 checkout 作答（卷内容 = 灌入时的 checkout）。 */
-function fakeVolumes(options: { removeFails?: boolean } = {}) {
+/** 替身审阅卷：populate 记下灌入来源；卷的 Git 读取按该宿主 checkout 作答（卷内容 = 灌入时的 checkout）。 */
+function fakeVolumes(options: { removeFails?: boolean; mismatch?: boolean } = {}) {
   const calls: string[] = [];
+  let checkout = "";
   const volumes: ReviewVolumes = {
-    populate(volume, img, checkout, launchId) { calls.push(`populate ${volume} ${img} ${checkout} ${launchId}`); },
+    populate(volume, img, source, launchId) { checkout = source; calls.push(`populate ${volume} ${img} ${source} ${launchId}`); },
+    snapshot(volume, img, launchId) {
+      assert.equal(img, image); assert.equal(volume, reviewVolumeName(launchId));
+      return options.mismatch ? { head: "f".repeat(40), branch: "HEAD", status: "" } : snapshot(checkout);
+    },
     remove(volume) { calls.push(`remove ${volume}`); if (options.removeFails) throw new Error("volume in use"); },
   };
   return { calls, volumes };
 }
 const volumeMount = (launch: ReviewLaunch, rw = false) =>
   ({ Type: "volume", Name: reviewVolumeName(launch.launch_id), Source: `/var/lib/docker/volumes/${reviewVolumeName(launch.launch_id)}/_data`, Destination: "/review", RW: rw });
-const snapshotOutput = (checkout: string) => { const s = snapshot(checkout); return [s.head, s.branch, s.status].join("\n") + "\n"; };
 
 test("review 挂载只接受本次 launch 的只读审阅卷，不接受宿主路径", () => {
   const f = fixture();
@@ -62,23 +66,29 @@ test("审阅 provider 拒绝宿主 bind mount、可写卷与多挂载，并校�
   }
 });
 
-test("审阅卷经 docker cp 灌入（不经 bind mount）、改属主为容器用户，已存在的卷不复用", () => {
+test("审阅卷先核 VM 磁盘，再经 docker cp 灌入（不经 bind mount）、改属主；容器与卷都带 launch 标签；已存在的卷不复用", () => {
   const launchId = randomUUID(); const volume = reviewVolumeName(launchId);
+  const label = ["--label", `${REVIEW_VOLUME_LABEL}=${launchId}`];
   const calls: string[][] = [];
-  let present = false;
+  let present = false, availableKb = 100 * 1024 * 1024, holders = "";
   const run = (args: string[]) => {
     calls.push(args);
+    if (args[0] === "run" && args.includes("/bin/df")) return `Filesystem 1024-blocks Used Available Capacity Mounted on\noverlay 102400000 1 ${availableKb} 1% /`;
     if (args[0] === "volume" && args[1] === "inspect") { if (!present) throw new Error("no such volume"); return "[]"; }
     if (args[0] === "create") return "c".repeat(64);
     if (args[0] === "inspect") return "0";
+    if (args[0] === "ps") return holders;
+    if (args[0] === "run") return "a".repeat(40) + "\nHEAD\n M x";
     return "";
   };
-  dockerReviewVolumes(run).populate(volume, image, "/checkouts/run/model", launchId);
+  const checkoutKb = 1024 * 1024;  // 1 GiB
+  dockerReviewVolumes(run, () => checkoutKb).populate(volume, image, "/checkouts/run/model", launchId);
   const owner = `${process.getuid!()}:${process.getgid!()}`;
   assert.deepEqual(calls, [
+    ["run", "--rm", "--network", "none", ...label, "--entrypoint", "/bin/df", image, "-Pk", "/"],
     ["volume", "inspect", volume],
-    ["volume", "create", "--label", `${REVIEW_VOLUME_LABEL}=${launchId}`, volume],
-    ["create", "--network", "none", "--user", "0:0", "-v", `${volume}:/review`, "--entrypoint", "chown", image, "-R", "-h", owner, "/review"],
+    ["volume", "create", ...label, volume],
+    ["create", "--network", "none", ...label, "--user", "0:0", "-v", `${volume}:/review`, "--entrypoint", "chown", image, "-R", "-h", owner, "/review"],
     ["cp", "/checkouts/run/model/.", `${"c".repeat(64)}:/review`],
     ["start", "-a", "c".repeat(64)],
     ["inspect", "--format", "{{.State.ExitCode}}", "c".repeat(64)],
@@ -86,12 +96,24 @@ test("审阅卷经 docker cp 灌入（不经 bind mount）、改属主为容器�
   ]);
   // 只有辅助容器挂卷，且不带任何宿主路径挂载。
   assert(calls.every((a) => !a.includes("-v") || a[a.indexOf("-v") + 1] === `${volume}:/review`));
+  // VM 磁盘不够「checkout + 2 GiB」就不建卷。
+  calls.length = 0; availableKb = checkoutKb + VM_SPACE_RESERVE / 1024 - 1;
+  assert.throws(() => dockerReviewVolumes(run, () => checkoutKb).populate(volume, image, "/checkouts/run/model", launchId), /VM 磁盘空间不足/);
+  assert.equal(calls.length, 1);
+  availableKb = 100 * 1024 * 1024;
   present = true; calls.length = 0;
-  assert.throws(() => dockerReviewVolumes(run).populate(volume, image, "/checkouts/run/model", launchId), /已存在/);
-  assert.deepEqual(calls, [["volume", "inspect", volume]]);
+  assert.throws(() => dockerReviewVolumes(run, () => checkoutKb).populate(volume, image, "/checkouts/run/model", launchId), /已存在/);
+  assert.deepEqual(calls.map((a) => a.slice(0, 2)), [["run", "--rm"], ["volume", "inspect"]]);
+  // 快照在一次性容器里只读挂卷执行，不经审查员容器；脚本只用绝对路径的 env 与 git。
   calls.length = 0;
+  assert.deepEqual(dockerReviewVolumes(run).snapshot(volume, image, launchId), { head: "a".repeat(40), branch: "HEAD", status: "M x" });
+  assert.deepEqual(calls, [["run", "--rm", "--network", "none", ...label, "--user", owner, "-v", `${volume}:/review:ro`,
+    "--entrypoint", "/bin/sh", image, "-c", VOLUME_SNAPSHOT]]);
+  assert.doesNotMatch(VOLUME_SNAPSHOT.replaceAll("/usr/bin/env", "").replaceAll("/usr/bin/git", ""), /\b(env|git) /);
+  // 删卷先删仍引用它的容器（Sandcastle close 吞错、残留的辅助容器），再删卷。
+  calls.length = 0; holders = "d1\nd2";
   dockerReviewVolumes(run).remove(volume);
-  assert.deepEqual(calls, [["volume", "rm", volume]]);
+  assert.deepEqual(calls, [["ps", "-a", "-q", "--filter", `volume=${volume}`], ["rm", "-f", "d1"], ["rm", "-f", "d2"], ["volume", "rm", volume]]);
   assert.throws(() => dockerReviewVolumes(run).remove("/Volumes/AgentStorage"));
 });
 
@@ -123,7 +145,7 @@ for (const [mode, model] of [...modes.map((m) => [m, "gpt-6.1-sol"] as const),
     const schemaless = model === "kimi-k3.1-pro";
     let closed = false, creates = 0;
     let modelCommand = "";
-    const fake = fakeVolumes({ removeFails: mode === "volume-remove-fails" });
+    const fake = fakeVolumes({ removeFails: mode === "volume-remove-fails", mismatch: mode === "volume-mismatch" });
     const volume = reviewVolumeName(f.launch.launch_id);
     const output = { status: mode === "BLOCK" ? "blocked" : "completed", summary: `VERDICT: ${mode}`, findings: [], validation: [] };
     const handle: BindMountSandboxHandle = {
@@ -131,9 +153,6 @@ for (const [mode, model] of [...modes.map((m) => [m, "gpt-6.1-sol"] as const),
       async exec(command, options) {
         if (command === "cat /etc/hostname") return { stdout: container.slice(0, 12), stderr: "", exitCode: 0 };
         if (command.startsWith("node -e ")) return { stdout: JSON.stringify({ source_write: mode === "bad-filesystem" ? "ALLOWED" : "EROFS", git_write: "EROFS", host_read: "ENOENT", state_write: "ENOENT" }), stderr: "", exitCode: 0 };
-        if (command === VOLUME_SNAPSHOT) {
-          return { stdout: mode === "volume-mismatch" ? "f".repeat(40) + "\nHEAD\n" : snapshotOutput(f.checkout), stderr: "", exitCode: 0 };
-        }
         if (command.includes("find ")) {
           const sessionsDir = JSON.parse(command.match(/^find (".*?") /)![1]!);
           return { stdout: `${sessionsDir}/2026/10/29/rollout-2026-10-29-${session}.jsonl\n`, stderr: "", exitCode: 0 };
@@ -227,7 +246,7 @@ for (const [mode, model] of [...modes.map((m) => [m, "gpt-6.1-sol"] as const),
       await runExternalReview(f.folder, deps);
       const elapsed = Date.now() - started;
       const receipt = JSON.parse(readFileSync(join(f.folder, "receipt.json"), "utf8"));
-      assert.equal(creates, 1); assert(closed);
+      assert.equal(creates, mode === "volume-mismatch" ? 0 : 1); assert.equal(closed, mode !== "volume-mismatch");
       assert.equal(receipt.status, ["PASS", "BLOCK", "reconnect-429-recovers", "volume-remove-fails"].includes(mode) ? "completed" : "failed");
       // 每次 launch 恰灌一个卷；容器关闭后删卷，删不掉只记 volume_removed=false，不改结论。
       assert.deepEqual(fake.calls, [`populate ${volume} ${image} ${f.checkout} ${f.launch.launch_id}`, `remove ${volume}`]);
@@ -262,7 +281,7 @@ for (const [mode, model] of [...modes.map((m) => [m, "gpt-6.1-sol"] as const),
       if (mode === "reconnect-429-recovers") assert(elapsed >= 300, "事件持续到达的审查要跑完，总时长超过静默窗口");
       if (mode === "failed") assert.equal(receipt.failure_code, "model_exit");
       await assert.rejects(runExternalReview(f.folder, deps));
-      assert.equal(creates, 1);
+      assert.equal(creates, mode === "volume-mismatch" ? 0 : 1);
     } finally { rmSync(f.root, { recursive: true, force: true }); }
   });
 }
