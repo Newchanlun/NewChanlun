@@ -528,19 +528,7 @@ class ExternalReview:
             raise ValueError("attempt 必须为正整数")
         if self.gateway is None:
             raise IdentityError("在线独审需要宿主 App 客户端")
-        data = load_target(self.gateway, number)
-        try:
-            merge_base = _git(self.source, "merge-base", "--all", data["base_sha"], data["head_sha"]).decode().splitlines()
-            if len(merge_base) != 1:
-                raise IdentityError("merge-base 不唯一")
-            _git(self.source, "cat-file", "-e", f'{data["head_sha"]}^{{commit}}')
-            patch = patch_identity(self.source, merge_base[0], data["head_sha"])
-        except subprocess.CalledProcessError:
-            raise IdentityError("needs_source_sync") from None
-        head = check_controller()
-        target = ReviewTarget(**data, merge_base_sha=str(parse_sha(merge_base[0])), run_id=str(uuid.uuid4()),
-                              attempt=attempt, policy_version=POLICY, controller_code_head=head,
-                              registered_at_ns=time.time_ns(), patch_id=patch, review_contract=REVIEW_CONTRACT)
+        target = self._frozen(load_target(self.gateway, number), attempt)
         folder = self.state_root / "runs" / target.key
         # 以有效 target.json 判断是否已登记：_lock 会先建目录，建目录后、写 target.json 前中断时仍须准入。
         if not (folder / "target.json").exists():
@@ -558,6 +546,30 @@ class ExternalReview:
             with self._pr_lock(target.pr_number):
                 _save(folder / "target.json", asdict(target))
         return target
+
+    def _frozen(self, data: dict[str, Any], attempt: int) -> ReviewTarget:
+        """按 load_target 的结果冻结出 ReviewTarget（merge-base、补丁身份、controller 身份），不登记。"""
+        try:
+            merge_base = _git(self.source, "merge-base", "--all", data["base_sha"], data["head_sha"]).decode().splitlines()
+            if len(merge_base) != 1:
+                raise IdentityError("merge-base 不唯一")
+            _git(self.source, "cat-file", "-e", f'{data["head_sha"]}^{{commit}}')
+            patch = patch_identity(self.source, merge_base[0], data["head_sha"])
+        except subprocess.CalledProcessError:
+            raise IdentityError("needs_source_sync") from None
+        head = check_controller()
+        return ReviewTarget(**data, merge_base_sha=str(parse_sha(merge_base[0])), run_id=str(uuid.uuid4()),
+                            attempt=attempt, policy_version=POLICY, controller_code_head=head,
+                            registered_at_ns=time.time_ns(), patch_id=patch, review_contract=REVIEW_CONTRACT)
+
+    def would_reuse(self, data: dict[str, Any]) -> bool:
+        """这个 head 现在登记新 attempt 时，reuse_source 能否找到可沿用的 PASS（同 patch_id、policy、contract）。
+        只读：不登记、不跑部署准入，供 sweep 排派发先后；沿不沿用仍由子进程登记与发布时判定。
+        对象不在本机库、controller 不干净或任何读失败都返回 False。"""
+        try:
+            return self.reuse_source(self._frozen(data, 0)) is not None  # attempt 0 从不登记，撞不上已有 run 目录
+        except (OSError, ValueError, KeyError, TypeError, IdentityError, subprocess.CalledProcessError):
+            return False
 
     @contextmanager
     def _pr_lock(self, number: int) -> Iterator[None]:

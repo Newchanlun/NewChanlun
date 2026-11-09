@@ -22,14 +22,19 @@ lane = _external_review.lane  # 复用真实审查 lane 与 PR 替身
 
 class FakeGitHub:
     """GitHub 端口替身：PR、检查、文件与写操作记录。"""
-    def __init__(self, lane, *, required=("deepagents/review", "ci-ok")):
+    def __init__(self, lane, *, required=("deepagents/review", "ci-ok"), review_app=5664795):
         self.lane = lane
-        self.required = {name: {"deepagents/review": 5486877, "ci-ok": 15368}[name] for name in required}
+        self.required = {name: {"deepagents/review": review_app, "ci-ok": 15368}[name] for name in required}
         self.extra_pulls = []
         self.states, self.checks_by_head, self.files, self.calls, self.fail = {}, {}, {}, [], {}
+        self.committed = {}  # head → committer 时间；没登记的 head 都按建替身时刚推送（同一时刻，按号码排）
+        self.pushed = datetime.now(timezone.utc).isoformat()
 
     def open_pulls(self):
         return copy.deepcopy([self.lane.gateway.pr, *self.extra_pulls])
+
+    def committed_at(self, head):
+        return self.committed.get(head, self.pushed)
 
     def _pr(self, number):
         return next(p for p in [self.lane.gateway.pr, *self.extra_pulls] if p["number"] == number)
@@ -85,6 +90,7 @@ class Host:
 def make(lane, *, run=True, github=None, **kwargs):
     host = Host(lane, run=run)
     github = github or FakeGitHub(lane)
+    kwargs.setdefault("review_app", lambda: 5664795)  # HOST 现状：审查专用 App，main 的必需检查也绑它
     sweep = Sweep(github, lane, host.spawn, state_root=lane.state_root, rows=lambda: list(host.rows), **kwargs)
     return sweep, host, github
 
@@ -780,9 +786,11 @@ def test_serve_round_survives_unreadable_source_and_names_it(lane, capsys, broke
 
 
 def test_serve_round_hook_is_single_flight_with_sync(tmp_path):
-    """serve 的钩子：HOST 同时只跑一个审查（reviewing 也认操作员手动起的 review-pr），并注入补对象的 sync。"""
+    """serve 的钩子：代码默认 HOST 同时只跑一个审查（reviewing 也认操作员手动起的 review-pr），并注入补对象的 sync；
+    上限由 --review-sweep-max-running 传入。"""
     hook = module.serve_round(tmp_path / "k.pem", auto_merge=True)
     assert hook.sweep.max_running == 1 and hook.sweep.auto_merge is True and hook.sweep.sync is not None
+    assert module.serve_round(tmp_path / "k.pem", max_running=3).sweep.max_running == 3
     assert module.serve_round(tmp_path / "k.pem", auto_merge=False).sweep.auto_merge is False
 
 
@@ -793,6 +801,193 @@ def test_manual_review_pr_on_host_holds_the_single_flight(lane):
     host.rows.append((7, 7, "S", "python -m pilot1742.external_review review-pr --pr 1999 --attempt 1 --private-key x"))
     actions = sweep.tick()
     assert acts(actions, 1810) == ["queued"] and acts(actions, 1811) == ["queued"] and host.spawned == []
+
+
+def _same_head_pulls(lane, github, numbers):
+    """同仓、同 head 的其他 PR（对象都在本机库里，可直接派审）。"""
+    for number in numbers:
+        other = copy.deepcopy(lane.gateway.pr)
+        other["number"] = number
+        github.extra_pulls.append(other)
+
+
+def test_concurrent_cap_launches_at_most_n_and_never_twice_for_one_pr(lane):
+    """max_running=3：一轮最多派 3 个；下一轮在跑的报 running、不重派，其余仍排队，同一 PR 始终至多一个进程。"""
+    github = FakeGitHub(lane)
+    _same_head_pulls(lane, github, [1811, 1812, 1813, 1814])
+    sweep, host, _ = make(lane, run=False, github=github, max_running=3)
+    first = sweep.tick()
+    assert [a["pr"] for a in first if a["action"] == "launch"] == [1810, 1811, 1812]
+    assert [a["pr"] for a in first if a["action"] == "queued"] == [1813, 1814]
+    second = sweep.tick()
+    assert [a["pr"] for a in second if a["action"] == "running"] == [1810, 1811, 1812]
+    assert [a["pr"] for a in second if a["action"] == "queued"] == [1813, 1814]
+    assert [number for number, _, _ in host.spawned] == [1810, 1811, 1812]
+    host.rows = [row for row in host.rows if " --pr 1811 " not in row[3] + " "]  # 1811 审完退出：让出一个名额
+    third = sweep.tick()
+    assert acts(third, 1813) == ["launch"] and acts(third, 1814) == ["queued"]
+    assert len({number for number, _, _ in host.spawned}) == len(host.spawned) == 4
+
+
+def test_concurrent_cap_counts_manual_review_pr(lane):
+    github = FakeGitHub(lane)
+    _same_head_pulls(lane, github, [1811, 1812])
+    sweep, host, _ = make(lane, run=False, github=github, max_running=3)
+    host.rows.append((7, 7, "S", "python -m pilot1742.external_review review-pr --pr 1999 --attempt 1 --private-key x"))
+    actions = sweep.tick()
+    assert [a["pr"] for a in actions if a["action"] == "launch"] == [1810, 1811]
+    assert acts(actions, 1812) == ["queued"]
+
+
+def test_concurrent_cap_counts_processes_not_prs(lane):
+    """并发上限按审查进程数算（kimi 审 aa117154）：同一 PR 的两个手动 review-pr（不同 attempt）占两个名额。"""
+    github = FakeGitHub(lane)
+    _same_head_pulls(lane, github, [1811, 1812])
+    sweep, host, _ = make(lane, run=False, github=github, max_running=3)
+    host.rows.append((7, 7, "S", "python -m pilot1742.external_review review-pr --pr 1999 --attempt 1 --private-key x"))
+    host.rows.append((8, 8, "S", "python -m pilot1742.external_review review-pr --pr 1999 --attempt 2 --private-key x"))
+    actions = sweep.tick()
+    assert [a["pr"] for a in actions if a["action"] == "launch"] == [1810]
+    assert acts(actions, 1811) == ["queued"] and acts(actions, 1812) == ["queued"]
+
+
+# ---- 派发先后：沿用优先、新推送优先、闲置超 48 小时的垫底 ----
+
+def _ago(hours):
+    return (datetime.now(timezone.utc) - module.timedelta(hours=hours)).isoformat()
+
+
+def _pull_pushed(lane, github, number, hours_ago):
+    """同仓 PR，head 是本机库里一个独立的新提交（可直接派审），committer 时间记为 hours_ago 小时前。"""
+    restore = git(lane.source, "rev-parse", "HEAD")
+    git(lane.source, "checkout", "-q", "--detach", lane.gateway.pr["head"]["sha"])
+    (lane.source / f"pr-{number}").write_text(f"{number}\n")
+    git(lane.source, "add", ".")
+    git(lane.source, "commit", "-qm", f"pr {number}")
+    head = git(lane.source, "rev-parse", "HEAD")
+    git(lane.source, "checkout", "-q", restore)  # controller 身份（SOURCE_REPO 的 HEAD）不变
+    other = copy.deepcopy(lane.gateway.pr)
+    other["number"], other["head"]["sha"] = number, head
+    github.extra_pulls.append(other)
+    github.committed[head] = _ago(hours_ago)
+    return head
+
+
+def launched(actions):
+    return [a["pr"] for a in actions if a["action"] == "launch"]
+
+
+@pytest.mark.skipif(not hasattr(_external_review, "_advance_main"), reason="需要 #1913 的补丁沿用与 _advance_main")
+def test_reuse_eligible_pr_launches_before_fresh_full_review(lane, env):
+    """1810 追平后补丁不变、可沿用已发布的 PASS（约 1 分钟）：排在号码更小、推送更新、要完整双审的 1809 前面。"""
+    sweep, _, _ = make(lane)
+    assert acts(sweep.tick()) == ["launch"]           # 1810 在旧 head 上完整双审、发布 PASS
+    reviewed = lane.gateway.pr["head"]["sha"]
+    _external_review._advance_main(lane, env)          # main 前进、PR 追平：新 head，补丁不变
+    github = FakeGitHub(lane)
+    full = copy.deepcopy(lane.gateway.pr)
+    full["number"], full["head"]["sha"] = 1809, reviewed  # 1809 从没审过：完整双审
+    github.extra_pulls.append(full)
+    github.committed = {reviewed: _ago(1), lane.gateway.pr["head"]["sha"]: _ago(10)}
+    sweep, host, _ = make(lane, run=False, github=github, max_running=1)
+    actions = sweep.tick()
+    assert launched(actions) == [1810] and acts(actions, 1809) == ["queued"]
+    assert [a["pr"] for a in actions if a.get("pr")] == [1810, 1809]
+
+
+def test_fresh_pr_launches_before_old_one(lane):
+    """号码大但刚推送的 1811 先于号码小、30 小时前推送的 1810。"""
+    github = FakeGitHub(lane)
+    github.committed[lane.gateway.pr["head"]["sha"]] = _ago(30)
+    _pull_pushed(lane, github, 1811, 1)
+    sweep, host, _ = make(lane, run=False, github=github, max_running=1)
+    actions = sweep.tick()
+    assert launched(actions) == [1811] and acts(actions, 1810) == ["queued"]
+
+
+def test_pr_idle_over_48h_launches_only_when_nothing_else_is_queued(lane):
+    """1810 有新评论（updated_at 新、仍在活动窗）但 72 小时没推送：比它旧的 47 小时 PR 也排在它前面；
+    前面的审完、不再排队后它照样被派（不饿死）。"""
+    github = FakeGitHub(lane)
+    lane.gateway.pr["updated_at"] = datetime.now(timezone.utc).isoformat()
+    github.committed[lane.gateway.pr["head"]["sha"]] = _ago(72)
+    _pull_pushed(lane, github, 1811, 47)
+    sweep, host, _ = make(lane, run=False, github=github, max_running=1)
+    actions = sweep.tick()
+    assert launched(actions) == [1811] and acts(actions, 1810) == ["queued"]
+    assert acts(sweep.tick(), 1810) == ["queued"]    # 1811 还在审：1810 继续等
+    github.extra_pulls.clear()                       # 1811 审完合入、不再开放
+    host.rows.clear()
+    assert launched(sweep.tick()) == [1810]
+
+
+def test_free_slot_goes_to_stale_pr_in_the_same_round(lane):
+    """名额够时 48 小时前的 PR 同一轮就派，只是排在后面。"""
+    github = FakeGitHub(lane)
+    github.committed[lane.gateway.pr["head"]["sha"]] = _ago(72)
+    _pull_pushed(lane, github, 1811, 1)
+    sweep, _, _ = make(lane, run=False, github=github, max_running=2)
+    assert launched(sweep.tick()) == [1811, 1810]
+
+
+def test_ordering_keeps_concurrency_cap_and_per_pr_dedup(lane):
+    """新顺序下并发上限与单 PR 去重照旧：一轮最多派 max_running 个，在审的报 running、不重派，名额让出才轮到下一个。"""
+    github = FakeGitHub(lane)
+    github.committed[lane.gateway.pr["head"]["sha"]] = _ago(72)
+    _pull_pushed(lane, github, 1811, 5)
+    _pull_pushed(lane, github, 1812, 1)
+    sweep, host, _ = make(lane, run=False, github=github, max_running=2)
+    first = sweep.tick()
+    assert launched(first) == [1812, 1811] and acts(first, 1810) == ["queued"]
+    second = sweep.tick()
+    assert launched(second) == [] and acts(second, 1812) == ["running"] and acts(second, 1811) == ["running"]
+    assert acts(second, 1810) == ["queued"]
+    host.rows = [row for row in host.rows if " --pr 1812 " not in row[3] + " "]
+    third = sweep.tick()
+    assert launched(third) == [1810] and acts(third, 1811) == ["running"]
+    assert sorted(number for number, _, _ in host.spawned) == [1810, 1811, 1812]
+
+
+def test_unreadable_commit_time_only_moves_pr_to_the_back(lane):
+    """head 提交时间读不到（非超时）：不影响派不派，只排到最后一组。"""
+    github = FakeGitHub(lane)
+    _pull_pushed(lane, github, 1811, 72)
+    first = lane.gateway.pr["head"]["sha"]
+    real = github.committed_at
+    github.committed_at = lambda head: (_ for _ in ()).throw(RuntimeError("HTTP 404")) if head == first else real(head)
+    sweep, _, _ = make(lane, run=False, github=github, max_running=2)
+    assert launched(sweep.tick()) == [1811, 1810]
+
+
+def test_commit_time_timeout_voids_the_round(lane):
+    github = FakeGitHub(lane)
+    github.committed_at = lambda head: (_ for _ in ()).throw(SourceUnreadable("github (git/commits)", TimeoutError()))
+    sweep, host, _ = make(lane, run=False, github=github)
+    with pytest.raises(SourceUnreadable):
+        sweep.tick()
+    assert host.spawned == []
+
+
+def test_space_admission_refusal_holds_with_concurrency(lane, monkeypatch):
+    """并发不绕过准入：子进程在登记前被空间准入拒绝时，不登记 attempt、不写状态；下一轮同一 attempt 退避、不重派。"""
+    from pilot1742.external_review import IdentityError
+    refused = []
+
+    def no_space(target):
+        refused.append(target.pr_number)
+        raise IdentityError("空间不足：测试")
+    monkeypatch.setattr(lane, "admit_space", no_space)
+    host = Host(lane)
+
+    def child(number, attempt, head, log):  # 子进程：review-pr 失败即退出，sweep 只拿到 pid
+        host.spawned.append((number, attempt, head))
+        with pytest.raises(IdentityError):
+            lane.review_pr(number, attempt)
+        return 4000 + len(host.spawned)
+    sweep = Sweep(FakeGitHub(lane), lane, child, state_root=lane.state_root, rows=lambda: [], max_running=3)
+    assert acts(sweep.tick()) == ["launch"]
+    assert refused == [1810] and lane.status(1810) == [] and lane.gateway.sent == []
+    assert acts(sweep.tick()) == ["launch-backoff"] and len(host.spawned) == 1
 
 
 def test_fetcher_fills_objects_without_touching_refs(lane, tmp_path):
@@ -847,36 +1042,57 @@ def test_executor_serve_runs_one_sweep_round_per_serve_round(monkeypatch, tmp_pa
     rounds, built = [], []
     cli, argv = _fake_serve(monkeypatch, tmp_path, rounds=rounds)
     monkeypatch.setattr(module, "serve_round",
-                        lambda key, auto_merge: built.append((key, auto_merge)) or (lambda: rounds.append("sweep")))
+                        lambda key, auto_merge, max_running: built.append((key, auto_merge, max_running))
+                        or (lambda: rounds.append("sweep")))
     with pytest.raises(_StopServe):
-        cli.main(argv + ["--review-sweep", "--review-sweep-auto-merge"])
+        cli.main(argv + ["--review-sweep", "--review-sweep-auto-merge", "--review-sweep-max-running", "3"])
     assert rounds == ["sweep", "intake"] * 3                      # 每轮一次，排在派票前
-    assert built == [(tmp_path / "k.pem", True)]
+    assert built == [(tmp_path / "k.pem", True, 3)]
 
 
-def test_executor_serve_without_flag_has_no_sweep_and_auto_merge_needs_sweep(monkeypatch, tmp_path):
+def test_executor_serve_without_flag_has_no_sweep(monkeypatch, tmp_path, capsys):
     rounds = []
     cli, argv = _fake_serve(monkeypatch, tmp_path, rounds=rounds)
     monkeypatch.setattr(module, "serve_round", lambda *a, **k: pytest.fail("sweep wired without --review-sweep"))
     with pytest.raises(_StopServe):
         cli.main(argv)
     assert rounds == ["intake"] * 3
-    assert cli.main(argv + ["--review-sweep-auto-merge"]) == 2
+    assert "ignored-without-review-sweep" not in capsys.readouterr().out
+    assert cli.main(argv + ["--review-sweep", "--review-sweep-max-running", "0"]) == 2
 
 
-def test_deployed_executor_plist_turns_sweep_on_but_not_auto_merge():
-    """opus 第三轮：main 上现行规定仍是人合入 main（改口径的 #1915 未合入），部署模板只开审查；
-    --review-sweep-auto-merge 由 #1915 合入后的单独 PR 打开。"""
+@pytest.mark.parametrize("extra", [["--review-sweep-auto-merge"], ["--review-sweep-max-running", "3"],
+                                   ["--review-sweep-max-running", "1"],
+                                   ["--review-sweep-auto-merge", "--review-sweep-max-running", "3"]])
+def test_sweep_flags_without_review_sweep_are_ignored_with_one_warning(monkeypatch, tmp_path, capsys, extra):
+    """关审查只删 --review-sweep、其余 sweep 参数留在 plist 里时：serve 照常派票（不以退出码 2 退出，免得 launchd
+    反复重启、派票停摆），不接 sweep，记一行警告点名被忽略的参数。"""
+    rounds = []
+    cli, argv = _fake_serve(monkeypatch, tmp_path, rounds=rounds)
+    monkeypatch.setattr(module, "serve_round", lambda *a, **k: pytest.fail("sweep wired without --review-sweep"))
+    with pytest.raises(_StopServe):
+        cli.main(argv + extra)
+    assert rounds == ["intake"] * 3
+    warnings = [json.loads(line.split(" ", 1)[1]) for line in capsys.readouterr().out.splitlines()
+                if line.startswith("review-sweep ")]
+    assert warnings == [{"action": "ignored-without-review-sweep", "flags": [f for f in extra if f.startswith("--")],
+                         "reason": "没有 --review-sweep，这些参数不生效"}]
+
+
+def test_deployed_executor_plist_turns_sweep_and_auto_merge_on():
+    """#1915 合入后 main 的合入不设人工批准，部署模板同时开审查与自动合入；
+    代码默认仍关，见 test_auto_merge_is_off_unless_explicitly_enabled。"""
     import plistlib
     from pathlib import Path
     plist = Path(module.__file__).resolve().parents[2] / "launchd" / "com.newchanlun.deepagents-executor.plist"
     args = plistlib.loads(plist.read_bytes())["ProgramArguments"]
     assert args[args.index("serve"):args.index("serve") + 2] == ["serve", "--loop"]
-    assert "--review-sweep" in args and "--review-sweep-auto-merge" not in args
+    assert "--review-sweep" in args and "--review-sweep-auto-merge" in args
+    assert args[args.index("--review-sweep-max-running") + 1] == "3"
 
 
 def test_auto_merge_is_off_unless_explicitly_enabled(monkeypatch, tmp_path):
-    """代码里默认关：只给 --review-sweep 时 sweep 只派审不合入；合入要部署模板显式加 --review-sweep-auto-merge。"""
+    """代码里默认关：只给 --review-sweep 时 sweep 只派审不合入；合入要显式加 --review-sweep-auto-merge（部署模板已加）。"""
     rounds, built = [], []
     real_serve_round = module.serve_round
     cli, argv = _fake_serve(monkeypatch, tmp_path, rounds=rounds)
@@ -884,7 +1100,7 @@ def test_auto_merge_is_off_unless_explicitly_enabled(monkeypatch, tmp_path):
                         lambda key, **kw: built.append(kw) or (lambda: rounds.append("sweep")))
     with pytest.raises(_StopServe):
         cli.main(argv + ["--review-sweep"])
-    assert built == [{"auto_merge": False}]
+    assert built == [{"auto_merge": False, "max_running": 1}]
     assert real_serve_round(tmp_path / "k.pem").sweep.auto_merge is False
     assert module.Sweep(FakeGitHub(None), None, lambda *a: 0).auto_merge is False
 
@@ -1296,6 +1512,52 @@ def test_protection_mismatch_never_merges(lane, missing):
     sweep, _, _ = make(lane, github=github, auto_merge=True)
     actions = sweep.tick()
     assert any(a["action"] == "auto-merge-unsafe" for a in actions) and github.calls == []
+
+
+# ---- #2015 opus 阻断（247f128b，run 6ac0b428）：必需检查绑定执行器 App 时不合入 ----
+
+@pytest.mark.parametrize("bound, configured", [(5486877, 5486877), (5486877, None), (5664795, None), (5664795, 4242)])
+def test_review_binding_not_the_configured_reviewer_app_never_merges(lane, bound, configured):
+    """执行器交付时用执行器 App 自写 deepagents/review=success。必需检查绑定执行器 App（缺省身份）时，
+    draft 一标 ready，同一轮里 sweep 刚派出正式审查、FakeGitHub 已报三项全绿，也不得合入；
+    绑定与审查身份文件配的 App 不符、或身份文件缺失时同样不合入。"""
+    github = FakeGitHub(lane, review_app=bound)
+    green(github, lane.gateway.pr["head"]["sha"])
+    sweep, host, _ = make(lane, run=False, github=github, auto_merge=True, review_app=lambda: configured)
+    actions = sweep.tick()
+    assert acts(actions) == ["launch", "waiting"] and len(host.spawned) == 1   # 本轮刚派出正式审查
+    assert [a for a in actions if a["action"] == "auto-merge-unsafe"]
+    assert github.calls == []
+
+
+def test_reviewer_app_binding_merges_when_green(lane):
+    """对照：绑定审查专用 App 且与身份文件一致时，精确 head 双门全绿照常合入。"""
+    github = FakeGitHub(lane)
+    head = lane.gateway.pr["head"]["sha"]
+    green(github, head)
+    sweep, _, _ = make(lane, github=github, auto_merge=True)
+    sweep.tick()
+    assert ("merge", 1810, head) in github.calls
+
+
+def test_executor_app_status_alone_does_not_satisfy_reviewer_binding(monkeypatch):
+    """绑定审查 App 5664795 时，执行器 App 发的 deepagents/review=success 不算（合入看的检查只认绑定来源）。"""
+    cli = module.GhCli("Newchanlun/NewChanlun")
+    statuses = [_status("deepagents/review", "success", "newchanlun-deepagents-1742[bot]")]
+    runs = [_run("DevSkim", "success", 15368, 1), _run("ci-ok", "success", 15368, 2)]
+    apps = {"newchanlun-deepagents-1742": 5486877, "newchanlun-review-gate": 5664795, "github-actions": 15368}
+    monkeypatch.setattr(cli, "_gh", _gh_fake(statuses, runs, apps))
+    assert cli.checks("a" * 40, {**BINDINGS, "deepagents/review": 5664795}) == {"ci-ok": "success", "DevSkim": "success"}
+
+
+def test_configured_review_app_reads_identity_file(tmp_path):
+    config = tmp_path / "app-identity.json"
+    assert module.configured_review_app(config) is None                      # 没有身份文件：审查沿用执行器 App
+    config.write_text(json.dumps({"app_id": 5664795, "installation_id": 1, "app_slug": "x",
+                                  "installation_permissions": {}}))
+    assert module.configured_review_app(config) == 5664795
+    config.write_text("not json")
+    assert module.configured_review_app(config) is None
 
 
 def test_serve_passes_the_review_key_not_the_executor_key(monkeypatch, tmp_path):

@@ -10,6 +10,8 @@
 - 本 head 上有结论但没发布（outcome 已存、publication 缺失）：同一 attempt 续跑一次走受管对账与发布，再不成交操作员；
 - 本 head 上有登记、无结论、进程已不在（中断）：同一 attempt 续跑一次，再不成交操作员；
 - 其余（没有 run，或本 head 上只有 STALE）：派发下一个 attempt；子进程登记前就退出的同一 attempt 退避 10 分钟再派。
+派发先后（launch_order，并发上限内谁先拿名额）：能沿用已发布 PASS 的 head 先，其余按 head 提交的 committer 时间从新到旧，
+head 提交早于 48 小时的垫底；只改先后，不改派不派。合入、追平与兜底撤销仍按 PR 号。
 限流退避：最近 2 个已完结的审查 run 都有 reviewer 以 failure_code=rate_limited 失败时，30 分钟内不派新审查
 （launch、resume-review），每轮记一行 rate-limit-backoff；发布续跑、追平、合入与撤原生 auto-merge 照常。
 派发的子进程绑定决策时的 head：先核对 PR 仍是这个 head，不是就不审（run-review --expect-head）。
@@ -20,6 +22,9 @@ sync(number, base, head)，未注入报 needs-source-sync。
 合入（--auto-merge，用宿主 gh 凭据；本模块不构造 App 身份，审查身份归 external_review）：不预先挂 auto-merge。
 只有同时满足下列条件才合入，用 REST PUT /pulls/{n}/merge 并带 sha=<该 head>，由 GitHub 服务端拒绝 head 不符（409）：
 - main 的分支保护 strict 开着，且必需检查同时含 deepagents/review 与 ci-ok，两者都绑定了来源 app（没绑定的谁都能发同名 success）；
+- deepagents/review 绑定的是 IDENTITY_CONFIG 配的审查专用 App，且不是执行器 App 5486877（执行器交付时自写
+  deepagents/review=success；绑定它时 draft 一标 ready，同一轮刚派出的正式审查还没发 pending 就会被合入）；
+  不满足或身份文件缺失、读不了时记 auto-merge-unsafe，本轮不合入；
 - 该精确 head 上 deepagents/review、ci-ok、DevSkim 都是 success，且 GitHub 判定可合入（clean/unstable）；
 - 该 head 的完整改动清单可判定且不触及人工确认两类（HUMAN_GATED：实盘下单或资金、密钥或凭证）。
 两类的出处：用户裁定留痕 https://github.com/Newchanlun/NewChanlun/issues/1742#issuecomment-6719202631
@@ -27,8 +32,8 @@ sync(number, base, head)，未注入报 needs-source-sync。
 allow_auto_merge=false，2026-11-09 由主控关闭），GitHub 原生 auto-merge 根本挂不上，所以有写权限的人也不能在两轮之间给
 触及两类的 PR 挂原生 auto-merge、等检查转绿由 GitHub 自己合入。sweep 每轮读这个设置：为 true 或读不到时本轮一律不合入、
 不追平，记 native-auto-merge-enabled；撤原生 auto-merge 的逻辑保留，作为纵深防御。
-合入在代码里默认关；部署模板也只开 --review-sweep（只派审）。--review-sweep-auto-merge 等改写合入人闸口径的 #1915 合入后
-由单独的后续 PR 打开。
+合入在代码里默认关；只给 --review-sweep 时只派审。#1915 合入后（main 的合入不设人工批准），部署模板加了
+--review-sweep-auto-merge；关掉的方法见 EXECUTOR.md「附带正式审查」。
 完整清单：files 接口最多 3000 个且需与 changed_files 相符；否则用本地精确 diff；两者都拿不到报 evidence-insufficient
 （下轮重试），不合入，也不升级成人工确认。
 触及两类的报 needs-human-confirm，不合入、不追平；这类 PR 上若挂着 GitHub 原生 auto-merge 会撤掉。
@@ -74,7 +79,14 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Protocol
 
-from .external_review import STATE_ROOT, ExternalReview, _git, git_environment
+from .external_review import (
+    DEFAULT_IDENTITY,
+    IDENTITY_CONFIG,
+    STATE_ROOT,
+    ExternalReview,
+    _git,
+    git_environment,
+)
 from .run import _ps_rows
 from .workunit import REPO
 
@@ -88,6 +100,8 @@ LAUNCH_BACKOFF_SECONDS = 600
 RATE_LIMIT_RUNS = 2
 RATE_LIMIT_BACKOFF_SECONDS = 1800
 MIN_LOOP_SECONDS = 180
+# 派发先后：head 提交早于这么久的 PR 排在最后（只在没有更新的 PR 等着时才轮到）。
+STALE_PUSH = timedelta(hours=48)
 MERGE_CHECKS = ("deepagents/review", "ci-ok", "DevSkim")
 FILES_CAP = 3000
 FETCH_TIMEOUT_SECONDS = 120
@@ -97,6 +111,18 @@ GATED_APP_IDS = {"DevSkim": 15368}
 # 现场核对 id；不在表里的 App 发的 status 一律不算（失败关闭）。
 APP_SLUGS = {5486877: "newchanlun-deepagents-1742", 5664795: "newchanlun-review-gate", 15368: "github-actions"}
 GH_TIMEOUT_SECONDS = 60
+# 执行器 App：交付时在冻结 head 上自写 deepagents/review=success（作者侧独审，不是正式非作者双审）。
+EXECUTOR_APP_ID = DEFAULT_IDENTITY["app_id"]
+
+
+def configured_review_app(config: Path = IDENTITY_CONFIG) -> int | None:
+    """审查专用 App 的 app_id（external_review.IDENTITY_CONFIG，非秘密 JSON）。文件不存在时审查沿用执行器 App，
+    读不了或字段不对时不知道是谁：都返回 None，合入按不安全处理。"""
+    try:
+        app_id = json.loads(config.read_text(encoding="utf-8")).get("app_id")
+    except (OSError, ValueError, AttributeError):
+        return None
+    return app_id if type(app_id) is int and app_id > 0 else None
 
 # 人工确认只剩两类：实盘下单或资金、密钥或凭证。出处：用户 2026-11-07、2026-11-08 的裁定，原话留痕在
 #   https://github.com/Newchanlun/NewChanlun/issues/1742#issuecomment-6719202631
@@ -154,6 +180,7 @@ def human_gated(files: list[str]) -> dict[str, list[str]]:
 class GitHubPort(Protocol):
     """读写 GitHub 的端口（宿主 gh 凭据）。写操作只在 --auto-merge 时调用。"""
     def open_pulls(self) -> list[dict[str, Any]]: ...
+    def committed_at(self, head: str) -> str: ...
     def pr(self, number: int) -> dict[str, Any]: ...
     def checks(self, head: str, bindings: dict[str, int]) -> dict[str, str]: ...
     def required_checks(self) -> dict[str, int]: ...
@@ -168,6 +195,14 @@ class GhCli:
     def __init__(self, repository: str = REPO, timeout: float = GH_TIMEOUT_SECONDS):
         self.repository, self.timeout = repository, timeout
         self._bots: dict[int, str | None] = {}
+        self._committed: dict[str, str] = {}
+
+    def committed_at(self, head: str) -> str:
+        """head 提交的 committer 时间（ISO 8601）。同一 SHA 的提交不可变，按 SHA 缓存，每个新 head 只读一次接口。"""
+        if head not in self._committed:
+            self._committed[head] = json.loads(self._gh("api", f"repos/{self.repository}/git/commits/{head}"))[
+                "committer"]["date"]
+        return self._committed[head]
 
     def _gh(self, *args: str) -> str:
         try:
@@ -261,6 +296,11 @@ _REVIEWER = re.compile(r"pilot1742\.(review_sweep run-review|external_review rev
 _ADVISORY = re.compile(r"pilot1742\.external_review advisory --run (\S+)")
 
 
+def reviewer_processes(rows: Rows) -> int:
+    """活着（非僵尸）的审查进程数：并发上限按进程数算，同一 PR 的多个 attempt/head 各占一个名额（kimi 审 aa117154）。"""
+    return sum(1 for _, _, stat, command in rows if not stat.startswith("Z") and _REVIEWER.search(command + " "))
+
+
 def reviewing(rows: Rows) -> set[int]:
     """正在审查的 PR 号：活着（非僵尸）的 run-review 或 review-pr 进程，含操作员手动起的 review-pr。"""
     return {int(m.group(2)) for _, _, stat, command in rows if not stat.startswith("Z")
@@ -278,8 +318,10 @@ class Sweep:
     def __init__(self, github: GitHubPort, lane: ExternalReview, spawn: Spawn, *,
                  state_root: Path = STATE_ROOT, max_running: int = 2, rows: Callable[[], Rows] = _ps_rows,
                  sync: Sync | None = None, auto_merge: bool = False, max_age: timedelta = timedelta(hours=24),
-                 now: Callable[[], datetime] = lambda: datetime.now(timezone.utc)):
+                 now: Callable[[], datetime] = lambda: datetime.now(timezone.utc),
+                 review_app: Callable[[], int | None] = configured_review_app):
         self.github, self.lane, self.spawn, self.rows, self.sync = github, lane, spawn, rows, sync
+        self.review_app = review_app
         self.folder = state_root / "sweep"
         self._sync_failed = False
         self._backoff: dict[str, Any] | None = None
@@ -297,6 +339,32 @@ class Sweep:
         if updated is not None and datetime.fromisoformat(updated.replace("Z", "+00:00")) < self.now() - self.max_age:
             return "stale-pr"
         return None
+
+    def launch_order(self, pulls: list[dict[str, Any]], busy: set[int]) -> list[dict[str, Any]]:
+        """审查派发的先后（并发上限内谁先拿到名额）。只改先后，不改每个 PR 派不派、怎么审。
+        1. 当前 head 能沿用同 patch_id/policy/contract 的已发布 PASS 的（ExternalReview.would_reuse，约 1 分钟、不调模型）；
+        2. 其余按 head 提交的 committer 时间从新到旧；
+        3. head 提交早于 STALE_PUSH（48 小时）或时间读不到的排最后，组内同样从新到旧。
+        同组同时间按 PR 号升序。不进活动窗的 PR 本轮跳过，不读接口，排在末尾；已在审的 PR 不探沿用。
+        排在后面的不会被饿死：前面的 PR 已完成、在等追平、在退避或要操作员处理时都不占名额，名额空着就轮到它。"""
+        def key(pr: dict[str, Any]) -> tuple[int, float, int]:
+            number = pr["number"]
+            if self._eligible(pr):
+                return 3, 0.0, number
+            try:
+                pushed = datetime.fromisoformat(self.github.committed_at(pr["head"]["sha"]).replace("Z", "+00:00"))
+            except SourceUnreadable:  # gh 超时：与其他读接口一样整轮作废
+                raise
+            except Exception:  # 时间读不到只影响先后：按最旧一组排，照样会轮到
+                return 2, 0.0, number
+            if number not in busy and self.lane.would_reuse({
+                    "repository_id": pr["base"]["repo"]["id"], "pr_number": number,
+                    "base_repository_id": pr["base"]["repo"]["id"], "base_ref": pr["base"]["ref"],
+                    "base_sha": pr["base"]["sha"], "head_repository_id": pr["head"]["repo"]["id"],
+                    "head_ref": pr["head"]["ref"], "head_sha": pr["head"]["sha"]}):
+                return 0, -pushed.timestamp(), number
+            return (2 if pushed < self.now() - STALE_PUSH else 1), -pushed.timestamp(), number
+        return sorted(pulls, key=key)
 
     def rate_limit_backoff(self) -> dict[str, Any] | None:
         """限流退避是否生效：按 outcome.json 的写入时间取最近 RATE_LIMIT_RUNS 个已完结且真派过模型的 run（有逐位结论、
@@ -410,8 +478,8 @@ class Sweep:
             rows = self.rows()
         except Exception as error:  # 不知道谁在审就不能派审：整轮作废
             raise SourceUnreadable("host process table", error) from error
-        busy = reviewing(rows)
-        running = len(busy) + advisory_running(rows)
+        busy = reviewing(rows)  # 单 PR 去重：已在审的 PR 不再派
+        running = reviewer_processes(rows) + advisory_running(rows)  # 并发上限：按进程数，旁听进程也占名额
         try:  # 每轮回收一次遗留快照（#1986）；失败不影响本轮
             self.lane.reap()
         except Exception:
@@ -433,7 +501,7 @@ class Sweep:
         clean: set[int] = set()       # 本轮已确认不触及两类的 PR
         withdrawn: set[int] = set()   # 本轮已撤掉原生 auto-merge 的 PR
         try:
-            for pr in pulls:
+            for pr in self.launch_order(pulls, busy):  # 审查按 launch_order；合入、追平、兜底撤销仍按 PR 号
                 entry: dict[str, Any] = {"pr": pr["number"], "head": pr["head"]["sha"]}
                 try:
                     skip = self._eligible(pr)
@@ -476,6 +544,21 @@ class Sweep:
             error.actions = actions
             raise
         return actions
+
+    def _review_binding_unsafe(self, bound: int) -> str | None:
+        """必需检查 deepagents/review 须绑定审查专用 App（IDENTITY_CONFIG 配的那个），且它不是执行器 App。
+        绑定执行器 App 时，执行器交付时自写的 success 就能满足必需检查：draft 一标 ready，sweep 可能在同一轮
+        刚派出正式审查、还没发 pending 时就合入。"""
+        try:
+            reviewer = self.review_app()
+        except Exception:  # 读不了审查身份：不知道绑定对不对，按不安全处理
+            reviewer = None
+        if bound == EXECUTOR_APP_ID:
+            return f"必需检查 deepagents/review 绑定执行器 App {bound}：执行器交付时自写的 success 会被当成正式审查，不合入"
+        if reviewer is None or bound != reviewer:
+            return (f"必需检查 deepagents/review 绑定 App {bound}，与审查身份文件配的审查 App {reviewer} 不符"
+                    "（或身份文件缺失、读不了），不合入")
+        return None
 
     def complete_files(self, number: int, state: dict[str, Any]) -> list[str]:
         """该 head 的完整改动路径（含改名前路径）；读不全时用本地精确 diff，仍不行就证据不足。"""
@@ -622,6 +705,11 @@ class Sweep:
         if evidence_ok and not gate_ok:
             actions.append({"action": "auto-merge-unsafe",
                             "reason": f"main 须 strict、enforce_admins 且必需检查含绑定来源 app 的 {sorted(GATE)}，不合入"})
+        elif gate_ok:
+            unsafe = self._review_binding_unsafe(required["deepagents/review"])
+            if unsafe:  # 执行器自写的 success 会满足必需检查，正式审查可能还没跑完就合入：本轮不合入
+                gate_ok = False
+                actions.append({"action": "auto-merge-unsafe", "reason": unsafe})
         plan: list[tuple[dict[str, Any], dict[str, Any], str | None, bool]] = []
         head_free = True
         for pr in pulls:  # 与 tick 同序（PR 号升序）：队首是第一个仍可能合入的 PR
@@ -741,10 +829,14 @@ def fetcher(source: Path, url: str = f"https://github.com/{REPO}.git") -> Sync:
     return sync
 
 
-def serve_round(private_key: Path, *, auto_merge: bool = False) -> ServeRound:
-    """executor serve 用的钩子。max_running=1：HOST 上同时只跑一个审查，操作员手动起的 review-pr 也算（reviewing）。"""
+def serve_round(private_key: Path, *, auto_merge: bool = False, max_running: int = 1) -> ServeRound:
+    """executor serve 用的钩子。max_running 默认 1：HOST 上同时在跑的审查不超过它，操作员手动起的 review-pr 也算
+    （reviewing）。同一 PR 有活进程就不再派（decide 的 running）；各审查子进程照常各自过空间与额度准入。
+    风险：两道准入都按单个 run 算，不是总量。空间准入只看本 run 的快照，不给同时在跑、还没铺开快照的 run 预留；
+    额度准入只统计已结束 run 的回执。上限 N 时最多 N 个 run（每个 2 个模型）同时铺快照、同时耗额度，
+    可能集体超占外盘或超出每日上限。调高 N 前先查外盘剩余空间（df -h /Volumes/AgentStorage）。"""
     lane = ExternalReview(None)
-    return ServeRound(Sweep(GhCli(), lane, spawner(private_key), max_running=1, auto_merge=auto_merge,
+    return ServeRound(Sweep(GhCli(), lane, spawner(private_key), max_running=max_running, auto_merge=auto_merge,
                             sync=fetcher(lane.source)))
 
 
