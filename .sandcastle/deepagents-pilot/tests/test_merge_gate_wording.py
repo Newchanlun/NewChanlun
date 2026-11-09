@@ -16,7 +16,6 @@ import pytest
 REPO = Path(__file__).resolve().parents[3]
 
 FILES = (
-    ".chanlun/manifest.yaml",
     ".claude/commands/refactor-clean.md",
     ".claude/commands/verify.md",
     ".github/workflows/ci.yml",
