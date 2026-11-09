@@ -2,6 +2,9 @@
 # on origin/main (f4f03cade5) before #1955 -- each path below is absent on main too.
 # Do not add entries: fix the reference or list the file in HISTORICAL. Delete entries
 # as they get fixed (the test fails while a fixed entry is still listed).
+# #1921: AGENTS.md stays at origin/main's text (#2030 rewrites it); its pointer to
+# docs/agents/generation-constitution.md breaks only because this stack retires that
+# file into ADR 0004. Drop the entry when #2030 lands.
 .agents/skills/code-review/ADVERSARIAL-MODE.md|references/code-quality-review.md
 .agents/skills/code-review/ADVERSARIAL-MODE.md|references/lead-judgment.md
 .agents/skills/code-review/ADVERSARIAL-MODE.md|references/reviewer-prompt.md
@@ -123,6 +126,8 @@
 .sandcastle/deepagents-pilot/EXECUTOR.md|rust/tests/example/
 .sandcastle/deepagents-pilot/demo-task.md|experiments/pilot1742_demo/
 .sandcastle/swarm-implement-prompt.md|.agents/.codex/.aws
+AGENTS.md|.claude/rules/
+AGENTS.md|docs/agents/generation-constitution.md
 NewChanlun文件索引.md|.claude/skills/core-principles/
 NewChanlun文件索引.md|.claude/skills/meta-orchestration/
 README.md|chanlun/text/
