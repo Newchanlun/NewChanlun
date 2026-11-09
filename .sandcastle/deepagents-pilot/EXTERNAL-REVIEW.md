@@ -49,7 +49,7 @@ kimi 不带 `--output-schema`（#1968）。带 schema 时它把开场白（「�
 - 证据：`runs/<运行键>/advisory/<模型>/` 下的文件与 gating 审查员相同；`runs/<运行键>/advisory/outcome.json` 记它的结论（`PASS`、`BLOCK`、`FAILED` 或 `SKIPPED` 及原因）。
 - 隔离：它的结论不进 `outcome.json`、整轮结论和 `deepagents/review` 状态，也不进 `REVIEW_CONTRACT`，所以开关它不会让已有 PASS 失去沿用资格。沿用判断、完结判断和 BLOCK 否决都不读 `advisory/` 目录（`_reviewers` 排除它），`review_sweep` 的限流退避也不读它的回执。它失败、超时或被跳过时整轮照常。
 - 成本：它的回执计入每日额度闸（`recent_input_tokens` 也统计 `advisory/*/receipt.json`）。派发前已超上限（或上限变量无效）时跳过它，记 `SKIPPED`，gating 照常。
-- 等待：整轮结论发布后，controller 仍持本 run 的锁，等它结束再回收它的快照，最长是 worker 的 45 分钟上限；整轮中断时不等它，它的快照留到下次同键重跑时回收。
+- 等待：整轮结论发布后，controller 仍持本 run 的锁等它收尾，以便回收它的快照。等待有上限：从旁听启动起最多 `ADVISORY_TIMEOUT_SECONDS`（50 分钟，即 worker 模型阶段的 45 分钟再加 5 分钟给 prepare、准入和建容器；worker 的计时只从模型阶段起算，卡在之前的阶段不受它约束）。到时仍未结束就放弃：置旁听自己的中断标志（不碰 gating 的），向已登记的监督进程发 SIGTERM（worker 的取消路径会关容器），在 `advisory/outcome.json` 记 `TIMEOUT`，然后照常返回、释放锁。卡住的线程之后醒来也不再派发、不覆盖 `TIMEOUT`。回收不了的快照（进程还在）记 `checkout-cleanup.json` 为 retained，留给下次同键重跑回收。整轮中断时同样置旁听中断标志，不等它。
 - 路由：与 gating 相同，走 CLIProxyLocal（`cliproxy-local` provider，`CLIPROXY_LOCAL_KEY`）。2026-11-09 实测，`gemini-4-argon-high` 在 CLIProxy 的模型目录里，经 `antigravity@daily-cloudcode-pa.googleapis.com` 完成 responses、工具调用和 json_schema 往返。`review_preflight.py` 只探测 gating 两位，不探测它。
 - 对照：`/Volumes/AgentStorage/restart-20261107/slim/gate-ops/compare_reviewers.py`（仓库外）按 run 并列三位的结论与发现，并统计标注后的真问题、误报和独有真问题。
 - 名单：`../codex-child.ts` 的 `ADVISORY_REVIEW_MODELS` 与这里相同（测试核对），列在 `ALLOWED_MODELS` 里，只是为了让 worker 放行它的 launch。

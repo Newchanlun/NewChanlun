@@ -23,6 +23,10 @@ mode_file = per_model if per_model.exists() else runs / "fake-mode"
 mode, _, flag = (mode_file.read_text().strip() if mode_file.exists() else "PASS").partition(":")
 if mode == "CRASH":  # 监督进程不写回执就退出
     sys.exit(3)
+if mode == "HANG":  # 监督进程卡住不出回执（SIGTERM 默认即结束）
+    import time
+    time.sleep(300)
+    sys.exit(4)
 session = str(uuid.uuid4())
 diff = ["diff", "--no-ext-diff", "--no-textconv", launch["merge_base_sha"], launch["head_sha"]]
 read = f"/bin/bash -lc 'git {' '.join(diff)}'"

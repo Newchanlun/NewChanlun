@@ -1973,3 +1973,54 @@ def test_advisory_is_outside_review_contract():
     assert module.REVIEW_CONTRACT == "sha256:f412d17f29e863a2ed4c5fd317fc78c5d1a31608aa8fdf5e2a4151b6164f4383"
     assert module.REVIEW_CONTRACT == "sha256:" + hashlib.sha256(
         json.dumps([module.POLICY, MODELS, module.PROMPT]).encode()).hexdigest()
+
+
+def test_advisory_hanging_before_model_phase_is_bounded(lane, monkeypatch):
+    """旁听卡在 prepare（模型阶段之前，worker 的 45 分钟计时还没开始）：review_pr 在上限内返回，发布不变，锁释放。"""
+    import threading
+    import time
+    monkeypatch.setenv(module.ADVISORY_ENV, "1")
+    lane.advisory_timeout = 1.0
+    release, real = threading.Event(), module.prepare_review
+    def prepare(target, source, checkout):
+        if checkout.name == ADVISORY:
+            release.wait(60)
+        return real(target, source, checkout)
+    monkeypatch.setattr(module, "prepare_review", prepare)
+    started = time.monotonic()
+    result = lane.review_pr(1810)
+    assert time.monotonic() - started < 20
+    assert result["verdict"] == "PASS" and lane.gateway.sent == ["pending", "success"]
+    folder, advisory = _advisory(lane, result)
+    assert [(r["model"], r["verdict"]) for r in advisory["reviews"]] == [(ADVISORY, "TIMEOUT")]
+    assert lane.review_pr(1810)["run_id"] == result["run_id"]  # 锁已释放：同键重跑只读回
+    assert lane.gateway.sent == ["pending", "success"]
+    release.set()  # 卡住的线程醒来后不再派发，也不覆盖 TIMEOUT 记录
+    time.sleep(1)
+    assert _launched_models(lane) == sorted(MODELS)
+    assert not (folder / ADVISORY / "launch.json").exists()
+    assert _advisory(lane, result)[1]["reviews"][0]["verdict"] == "TIMEOUT"
+
+
+def test_advisory_hanging_supervisor_is_terminated(lane, monkeypatch):
+    import os
+    import time
+    monkeypatch.setenv(module.ADVISORY_ENV, "1")
+    lane.advisory_timeout = 3.0
+    _modes(lane, **{ADVISORY: "HANG"})
+    started = time.monotonic()
+    result = lane.review_pr(1810)
+    assert time.monotonic() - started < 30
+    assert result["verdict"] == "PASS" and lane.gateway.sent == ["pending", "success"]
+    folder, advisory = _advisory(lane, result)
+    assert advisory["reviews"][0]["verdict"] == "TIMEOUT" and "SIGTERM" in advisory["reviews"][0]["reason"]
+    pid = json.loads((folder / ADVISORY / "process.json").read_text())["pid"]
+    for _ in range(100):
+        try:
+            if os.waitpid(pid, os.WNOHANG)[0] == pid:
+                break
+        except ChildProcessError:
+            break
+        time.sleep(0.05)
+    else:
+        raise AssertionError("旁听监督进程未被结束")

@@ -19,6 +19,7 @@ import json
 import os
 import re
 import shutil
+import signal
 import stat
 import subprocess
 import sys
@@ -29,7 +30,7 @@ import uuid
 from collections.abc import Iterator
 from concurrent.futures import ThreadPoolExecutor, wait
 from contextlib import contextmanager
-from dataclasses import asdict, dataclass, replace
+from dataclasses import asdict, dataclass, field, replace
 from pathlib import Path
 from typing import Any
 
@@ -54,6 +55,9 @@ POLICY = "external-pr-v1-kimi"
 ADVISORY_REVIEW_MODELS = ("gemini-4-argon-high",)
 ADVISORY_ENV = "NEWCHANLUN_REVIEW_ADVISORY"
 ADVISORY_DIR = "advisory"
+# 旁听从启动到收尾的总上限：worker 的 45 分钟墙钟只从模型阶段起算，prepare、准入、建容器另留 5 分钟。
+# 超时即放弃（TIMEOUT），给它的监督进程发 SIGTERM（与取消同一路径），整轮照常返回并释放锁。
+ADVISORY_TIMEOUT_SECONDS = 50 * 60
 CONTEXT = "deepagents/review"
 TOKEN_PERMISSIONS = {"metadata": "read", "contents": "read", "pull_requests": "read", "statuses": "write"}
 REPOSITORY_ID = 1150335160
@@ -494,15 +498,27 @@ class StatusPublisher:
             return result
 
 
+@dataclass
+class AdvisoryRun:
+    """一次旁听派发：线程、它自己的中断标志、截止时刻（monotonic）、与 controller 共用的记录锁。"""
+    deadline: float
+    stop: threading.Event = field(default_factory=threading.Event)
+    lock: threading.Lock = field(default_factory=threading.Lock)
+    thread: threading.Thread | None = None
+    abandoned: bool = False
+
+
 class ExternalReview:
     def __init__(self, gateway: RepoGateway | None, *, state_root: Path = STATE_ROOT,
                  checkout_root: Path = CHECKOUT_ROOT, source: Path = SOURCE_REPO,
-                 launcher: list[str] | None = None, poll_seconds: float = 1):
+                 launcher: list[str] | None = None, poll_seconds: float = 1,
+                 advisory_timeout: float = ADVISORY_TIMEOUT_SECONDS):
         self.gateway, self.state_root, self.checkout_root, self.source = gateway, state_root, checkout_root, source
         # worker 与 controller 同源：都取正在执行的代码所在仓库（SOURCE_REPO），不随对象来源 source 变化。
         self.launcher = launcher or [str(SOURCE_REPO / "node_modules" / ".bin" / "tsx"),
                                      str(SOURCE_REPO / ".sandcastle" / "external-review-worker.mts")]
         self.poll_seconds = poll_seconds
+        self.advisory_timeout = advisory_timeout
         self._stop = threading.Event()
 
     def target(self, number: int, attempt: int) -> ReviewTarget:
@@ -796,7 +812,10 @@ class ExternalReview:
         _save(worker / "checkout-cleanup.json", {"state": "removed", "checkout": str(checkout)})
         return True
 
-    def run_review(self, target: ReviewTarget, model: str, folder: Path) -> ReviewOutcome:
+    def run_review(self, target: ReviewTarget, model: str, folder: Path,
+                   stop: threading.Event | None = None) -> ReviewOutcome:
+        """stop：中断标志，缺省为 gating 共用的 self._stop；旁听用自己的，放弃它不影响 gating。"""
+        stop = stop or self._stop
         worker = folder / model
         if worker.is_symlink():
             raise IdentityError("工蜂目录不能是符号链接")
@@ -807,7 +826,7 @@ class ExternalReview:
                 raise EffectPending("prepare 仍有活动进程，不回收或重复派工")
             _save(worker / "prepare.json", {"run_id": target.run_id, "checkout": str(checkout)})
             frozen = prepare_review(target, self.source, checkout)
-            if self._stop.is_set():
+            if stop.is_set():
                 raise EffectPending("控制器中断：未派发，prepare 留待同键重跑回收")
             if shutil.disk_usage(checkout).free < SPACE_RESERVE:
                 raise IdentityError("空间不足：模型启动前剩余空间低于 256 MiB；未启动模型")
@@ -831,7 +850,7 @@ class ExternalReview:
             process = None
         launch = _read(worker / "launch.json")
         while not (worker / "receipt.json").exists():
-            if self._stop.is_set():
+            if stop.is_set():
                 raise EffectPending("控制器中断：已派发的 reviewer 留待按 launch 收养")
             rows = _ps_rows()
             if not supervisor_alive(worker, rows):
@@ -961,14 +980,16 @@ class ExternalReview:
     def advisory_enabled() -> bool:
         return os.environ.get(ADVISORY_ENV, "").strip() == "1"
 
-    def run_advisory(self, target: ReviewTarget, folder: Path, gating_done: threading.Event) -> list[dict]:
+    def run_advisory(self, target: ReviewTarget, folder: Path, gating_done: threading.Event,
+                     run: AdvisoryRun) -> list[dict]:
         """旁听审查员。等全部 gating reviewer 已派发（各自快照已建、空间复查已过）才建自己的快照，不与 gating 抢空间；
         gating 没能全部派发就结束时跳过。额度闸超出或配置无效时跳过（gating 照常）。任何异常只记进
-        advisory/outcome.json，不上抛，不改整轮结论或发布。已有 launch 的照常收养。"""
+        advisory/outcome.json，不上抛，不改整轮结论或发布。已有 launch 的照常收养。用自己的中断标志 run.stop：
+        controller 放弃它（超时或整轮中断）时不再派发、不再等回执，也不覆盖 controller 写下的 TIMEOUT 记录。"""
         advisory = folder / ADVISORY_DIR
         def launched() -> bool:
             return all((folder / model / "launch.json").exists() for model in MODELS)
-        while not launched() and not gating_done.is_set() and not self._stop.is_set():
+        while not launched() and not gating_done.is_set() and not run.stop.is_set():
             gating_done.wait(self.poll_seconds)
         results: list[dict] = []
         for model in ADVISORY_REVIEW_MODELS:
@@ -976,26 +997,60 @@ class ExternalReview:
             try:
                 if not (advisory / model / "launch.json").exists():
                     skip = ("gating reviewer 未全部派发" if not launched() else
-                            "控制器中断" if self._stop.is_set() else self._quota_exceeded())
+                            "控制器中断" if run.stop.is_set() else self._quota_exceeded())
                     if skip:
                         results.append({**entry, "reason": skip})
                         continue
                 advisory.mkdir(mode=0o700, exist_ok=True)
-                entry.update(asdict(self.run_review(target, model, advisory)))
+                entry.update(asdict(self.run_review(target, model, advisory, stop=run.stop)))
             except Exception as error:  # 旁听失败不影响整轮
                 entry.update(verdict="FAILED", reason=f"{type(error).__name__}: {error}")
             results.append(entry)
-        try:
-            _save(advisory / "outcome.json", {"run_id": target.run_id, "advisory": True, "reviews": results})
-        except OSError:
-            pass
+        with run.lock:
+            if not run.abandoned:
+                try:
+                    _save(advisory / "outcome.json", {"run_id": target.run_id, "advisory": True, "reviews": results})
+                except OSError:
+                    pass
         return results
+
+    def _finish_advisory(self, target: ReviewTarget, folder: Path, run: AdvisoryRun) -> None:
+        """有界等待旁听收尾；到 run.deadline 仍未结束就放弃：置中断标志、给已登记的监督进程发 SIGTERM（worker 的取消
+        路径会关容器），记 TIMEOUT，不再等。快照回收由 review_pr 的 finally 尝试一次，回收不了的留给同键重跑。"""
+        if run.thread is None:
+            return
+        run.thread.join(max(0.0, run.deadline - time.monotonic()))
+        if not run.thread.is_alive():
+            return
+        run.stop.set()
+        advisory = folder / ADVISORY_DIR
+        results = []
+        for model in ADVISORY_REVIEW_MODELS:
+            worker = advisory / model
+            signalled = False
+            try:
+                rows = _ps_rows()
+                pid = (_read(worker / "process.json") if (worker / "process.json").exists() else {}).get("pid")
+                if isinstance(pid, int) and supervisor_alive(worker, rows) and any(p == pid for p, _, _, _ in rows):
+                    os.kill(pid, signal.SIGTERM)
+                    signalled = True
+            except (OSError, ValueError, IdentityError):
+                pass
+            results.append({"model": model, "verdict": "TIMEOUT", "session_id": None,
+                            "reason": f"旁听超过 {self.advisory_timeout:g} 秒未结束，已放弃"
+                                      + ("，已向监督进程发 SIGTERM" if signalled else "")})
+        with run.lock:
+            run.abandoned = True
+            try:
+                _save(advisory / "outcome.json", {"run_id": target.run_id, "advisory": True, "reviews": results})
+            except OSError:
+                pass
 
     def review_pr(self, number: int, attempt: int = 1) -> dict:
         target = self.target(number, attempt)
         assert self.gateway is not None
         folder = self.state_root / "runs" / target.key
-        advisory: threading.Thread | None = None
+        advisory: AdvisoryRun | None = None
         gating_done = threading.Event()
         with _lock(folder):
             publisher = StatusPublisher(self.gateway, target, folder, self.state_root / "status-locks")
@@ -1026,13 +1081,15 @@ class ExternalReview:
                     self.admit_quota()
                 publisher.publish("pending")
                 if self.advisory_enabled():
-                    advisory = threading.Thread(target=self.run_advisory, args=(target, folder, gating_done), daemon=True)
-                    advisory.start()
+                    advisory = AdvisoryRun(time.monotonic() + self.advisory_timeout)
+                    advisory.thread = threading.Thread(target=self.run_advisory, daemon=True,
+                                                       args=(target, folder, gating_done, advisory))
+                    advisory.thread.start()
                 try:
                     outcomes = self.run_reviewers(target, folder)
                 except BaseException:
                     if advisory is not None:
-                        self._stop.set()  # 整轮中断或待对账：旁听也不再等回执，已派发的留待收养
+                        advisory.stop.set()  # 整轮中断或待对账：旁听也不再派发、不再等回执，已派发的留待收养
                     raise
                 finally:
                     gating_done.set()
@@ -1055,8 +1112,11 @@ class ExternalReview:
                 return result
             finally:
                 gating_done.set()
-                if advisory is not None:
-                    advisory.join()  # 结论已发布；只等旁听收尾（worker 自有 45 分钟上限），以便回收其快照
+                if advisory is not None:  # 结论已发布；有界等待旁听收尾，超时即放弃，锁照常释放
+                    try:
+                        self._finish_advisory(target, folder, advisory)
+                    except Exception:  # 旁听收尾失败不影响整轮
+                        advisory.stop.set()
                 for model in MODELS:
                     worker = folder / model
                     if (worker / "prepare.json").exists():
