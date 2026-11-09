@@ -8730,28 +8730,7 @@ mod tests {
 
     /// 跑 S4 序列；`cold` 为 false 时只跑增量臂（S5 大样本测量）。返回每代 JSON 行。
     #[cfg(feature = "s_incremental")]
-    /// #1875/#1890：冷臂与增量臂分在两个线程后，bundled SQLite 默认的内存统计（MEMSTATUS=1，SQLITE_THREADSAFE=1）
-    /// 让每次 sqlite3_malloc 争同一把进程级互斥锁。S4 路径不读 sqlite3_memory_used，须在本进程首次初始化 SQLite 之前关闭；
-    /// 已初始化（同进程先跑过别的测试）时 SQLite 返回 MISUSE，只打印、照常运行。
-    fn s4_disable_sqlite_memstatus() {
-        if std::env::var_os("S4_KEEP_MEMSTATUS").is_some() {
-            return;
-        }
-        // SAFETY: SQLITE_CONFIG_MEMSTATUS 只接一个 int 参数；未初始化时生效，已初始化时返回 SQLITE_MISUSE 且不改状态。
-        let rc = unsafe {
-            rusqlite::ffi::sqlite3_config(
-                rusqlite::ffi::SQLITE_CONFIG_MEMSTATUS,
-                0 as std::os::raw::c_int,
-            )
-        };
-        if rc != rusqlite::ffi::SQLITE_OK {
-            eprintln!("S4 sqlite memstatus off skipped rc={rc}");
-        }
-    }
     fn s4_run(steps: &[S4Step], cold: bool) -> Vec<Value> {
-        if cold {
-            s4_disable_sqlite_memstatus();
-        }
         let plan = s4_clock(steps.len());
         let f = Fixture::with_clock(plan.clone());
         let o = Fixture::with_clock(plan);
@@ -8854,11 +8833,12 @@ mod tests {
                     // 单线程时冷臂进入与退出都会清本线程的热车道，时点在增量臂之后、native 侧对拍之前；这里在同一时点清，
                     //   保持增量臂与对拍所见的车道状态不变（冷臂线程里的两次清只作用于该线程）。
                     s_fact_cache::warm_lane_reset();
-                    native.conn.assert_complete_matches_cold();
-                    // 来源审计跨代增量状态不进入产物，单独与独立全量来源审计 Counts 六字段对拍。
-                    let counts = super::super::audit_owner::construction_tests::b2_assert_counts_match_independent_full_source(
-                    &native.conn,
-                );
+                    // complete 全量对拍 + 来源审计跨代增量状态（不进入产物）与独立全量来源审计 Counts 六字段对拍；
+                    // 两者在同一只读快照上共用一次冷 state::audit（#1890 / #2032）。只读 native，与冷臂线程并行。
+                    let counts =
+                        super::super::audit_owner::construction_tests::assert_complete_and_b2_counts(
+                            &native.conn,
+                        );
                     let (expected, cold_events, cold_receipt) =
                         from_cold.recv().expect("冷臂线程提前退出");
                     // 回复、回执、全表（含全部节点）逐位相同；owner complete 与冷审计一致。
