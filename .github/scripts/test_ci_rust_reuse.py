@@ -100,23 +100,36 @@ class ReuseTest(unittest.TestCase):
         self.trees["M"]["tree"][0] = blob("rust/a.rs", "changed")
         self.assertEqual(self.decide(self.fake())["rust"], "true")
 
-    def test_github_change_runs_but_skip_set_inside_github_does_not(self):
+    def test_github_change_runs_even_with_matching_green_job(self):
+        """opus #2027 第五轮：作业名用本次指纹，只有 head 的 .github 不同，必须由第 2 条拒绝（不能靠作业名对不上顺带拒绝）。"""
         self.trees["H1"]["tree"][1] = blob(".github/workflows/ci.yml", "evil")
-        self.assertEqual(self.decide(self.fake(jobs=self.green(key=M.digest(M.tree_entries(
-            lambda p: self.trees["H1"], R, "H1", SKIP)))))["rust"], "true")
-        self.setUp()
+        self.assertEqual(self.decide(self.fake(jobs=self.green(key=self.key)))["rust"], "true")
+
+    def test_skip_set_inside_github_does_not_block_reuse(self):
         self.trees["H1"]["tree"].append(blob(".github/devskim/x.json"))
         self.trees["M"]["tree"].append(blob(".github/devskim/x.json", "other"))
         self.assertEqual(self.decide(self.fake())["rust"], "false")
+
+    def test_skip_set_uses_fullmatch(self):
+        """Python 的 $ 在末尾换行符前也匹配；文件名 'package.json\\n' 不在跳过集里，必须计入指纹。"""
+        skip = re.compile(r"^(package\.json)$")
+        entries = M.tree_entries(lambda p: {"truncated": False, "tree": [blob("package.json\n")]}, R, "X", skip)
+        self.assertEqual([e[0] for e in entries], ["package.json\n"])
 
     def test_any_pr_of_branch_not_targeting_main_runs(self):
         """opus #2027：run.pull_requests 是查询时现算的；按分支列全部 PR（含已关闭），任一不指向本仓 main 就不复用。"""
         for prs in ([pr(), pr(2, base_ref="evil-base")], [pr(base_repo=2)], []):
             self.assertEqual(self.decide(self.fake(prs=prs))["rust"], "true", prs)
 
-    def test_base_ref_changed_runs(self):
-        fake = self.fake(events={1: [{"event": "labeled"}, {"event": "base_ref_changed"}]})
-        self.assertEqual(self.decide(fake)["rust"], "true")
+    def test_any_base_change_event_runs(self):
+        """栈式 PR 的目标分支被合入删除后，GitHub 自动改指 main，记的是 automatic_base_change_*，不是 base_ref_changed。"""
+        for ev in ("base_ref_changed", "automatic_base_change_succeeded", "automatic_base_change_failed"):
+            fake = self.fake(events={1: [{"event": "labeled"}, {"event": ev}]})
+            self.assertEqual(self.decide(fake)["rust"], "true", ev)
+
+    def test_deadline_runs_full(self):
+        d = self.decide(M.deadline_api(0))
+        self.assertEqual((d["rust"], d["rust_key"]), ("true", ""))
 
     def test_run_filters(self):
         for r in (run(head_repo_id=2), run(age_days=8)):

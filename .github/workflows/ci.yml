@@ -42,6 +42,7 @@ jobs:
   #   push 不再重跑 Rust 作业。strict 下 PR run 检出的 refs/pull/N/merge 与 head 同树，所以那次 run 测的正是这棵树。
   #   rust/Cargo.lock 有变时仍全跑，让 main 作用域写入新的 cargo 缓存（PR 作用域的缓存别的 PR 读不到）。
   #   单父提交、直接推送、查询出错一律全跑。去重后 main 的 push run 多数没有 Rust 作业耗时，CI 计时请看 PR run。
+  #   那次 PR run 必须真跑过 Rust（rust-green 作业 success）；走了同 PR 复用的 run 不算，main 上照常全跑（#2027）。
   # #1875 同 PR 复用：PR run 的检出树去掉上面的跳过集后，与本分支上一次全绿 run 相同、且两边 .github 相同时，
   #   不再跑 Rust 作业（典型是列车追平的 main 只多了 .sandcastle 改动）。凭据是那次 run 里服务端渲染的
   #   `rust-green <指纹>` 作业的结论（见文件末尾 rust-green 作业），不是 artifact：同一 run 里的 PR 代码拿得到运行时令牌，
@@ -91,10 +92,18 @@ jobs:
               rc=0; grep -qx 'rust/Cargo.lock' "$RUNNER_TEMP/push-files" || rc=$?
               if [ "$rc" -eq 0 ]; then echo "Cargo.lock changed"; return 1; fi
               if [ "$rc" -ne 1 ]; then echo "file check failed (grep exit $rc)"; return 1; fi
-              run=$(gh api "$R/actions/workflows/ci.yml/runs?event=pull_request&status=success&head_sha=$2&per_page=20" \
-                --jq '[.workflow_runs[] | select(.head_repository.id == .repository.id)][0].html_url // empty') || return 1
-              [ -n "$run" ] || { echo "no green PR run for $2"; return 1; }
-              echo "green PR run on same tree: $run"
+              # #2027：只认 Rust 作业在那次 PR run 里真跑过的（rust-green 作业 success）。同 PR 复用命中的 run 跳过了 Rust，
+              #   不能再让 main 也跳过：这样复用凭据即使被伪造，main 合入后仍完整跑一次 Rust（docstring「接受的风险」）。
+              ids=$(gh api "$R/actions/workflows/ci.yml/runs?event=pull_request&status=success&head_sha=$2&per_page=20" \
+                --jq '.workflow_runs[] | select(.head_repository.id == .repository.id) | .id') || return 1
+              run=
+              for id in $ids; do
+                green=$(gh api "$R/actions/runs/$id/jobs?filter=latest&per_page=100" \
+                  --jq '[.jobs[] | select((.name | startswith("rust-green ")) and .conclusion == "success")] | length') || return 1
+                if [ "$green" -gt 0 ]; then run=$id; break; fi
+              done
+              [ -n "$run" ] || { echo "no PR run for $2 that actually ran Rust"; return 1; }
+              echo "PR run on same tree that ran Rust: $run"
             }
             if dedup; then rust=false; else rust=true; fi
             echo "push dedup: rust=$rust"
