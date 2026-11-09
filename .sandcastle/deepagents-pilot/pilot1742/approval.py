@@ -5,6 +5,7 @@ import json
 import os
 import re
 import secrets
+import unicodedata
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -229,13 +230,21 @@ def _js_pattern(pattern: str) -> str:
 
 
 def _ruling_line(line: str) -> str:
+    """字段行去掉行首 Markdown 前缀与行尾强调（同 wayfinder_engine.mts 的 strip）；只用于字段，不用于首行。"""
     line = re.sub(_js_pattern(r"^(?:\s*(?:>|#{1,6}|[-*]\s|\*{1,3}|_{1,3}))+\s*"), "", line)
     return re.sub(_js_pattern(r"(?:\*{1,3}|_{1,3})\s*$"), "", line).strip(_JS_SPACE)
 
 
+# 首行（去掉行尾空白后）必须整行恰为这两种写法之一，同 wayfinder_engine.mts parseSpecRuling。
+_RULING_HEAD = re.compile(r"\*\*SPEC 独审裁定：(PASS|BLOCK)\*\*|SPEC 独审裁定：(PASS|BLOCK)")
+# 撤销探测，同 isSpecRulingHeadLine：NFKC 归一后全文任意位置出现「SPEC…独审裁定」。
+_RULING_MENTION = re.compile(_js_pattern(r"SPEC\s*独审裁定"), re.IGNORECASE | re.ASCII)
+
+
 def parse_spec_ruling(body: str) -> dict[str, Any] | None:
-    lines = body.strip(_JS_SPACE).split("\n")
-    head = re.match(_js_pattern(r"^SPEC 独审裁定(?:\*{1,3}|_{1,3})?\s*[：:]\s*(?:\*{1,3}|_{1,3})?(PASS|BLOCK)(?![A-Za-z0-9_])"), _ruling_line(lines[0]))
+    """严格解析，逐条对应 wayfinder_engine.mts parseSpecRuling：不剥首行前缀，不容许半角冒号或结论后缀。"""
+    lines = body.replace("\r\n", "\n").split("\n")
+    head = _RULING_HEAD.fullmatch(lines[0].rstrip(_JS_SPACE))
     if head is None:
         return None
     def field(name: str) -> str:
@@ -244,46 +253,59 @@ def parse_spec_ruling(body: str) -> dict[str, Any] | None:
             if match:
                 return re.sub(r"^`|`$", "", match[1]).strip(_JS_SPACE)
         return ""
-    return {"verdict": head[1], "specNumber": field("SPEC"), "author": field("作者"),
+    return {"verdict": head[1] or head[2], "specNumber": field("SPEC"), "author": field("作者"),
             "reviewer": field("独审"), "digest": field("正文 sha256").lower(), "evidence": field("证据")}
+
+
+def _js_number(raw: str) -> float | None:
+    """ECMAScript Number(raw) 在本协议用到的子集；认不出返回 None（NaN）。"""
+    try:
+        if re.fullmatch(r"0[xX][0-9a-fA-F]+|0[bB][01]+|0[oO][0-7]+", raw):
+            return float(int(raw, 0))
+        if re.fullmatch(r"[+-]?(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+)(?:[eE][+-]?[0-9]+)?", raw):
+            return float(raw)
+    except (ValueError, OverflowError):
+        pass
+    return None
+
+
+def _ruling_problem(spec_issue: int, body: str, ruling: dict[str, Any]) -> str | None:
+    """同 specRulingProblem：只有绑定当前正文、非作者、证据齐的 PASS 才合规。"""
+    if ruling["verdict"] != "PASS":
+        return "review_block: 裁定为 BLOCK"
+    number = _js_number(ruling["specNumber"])
+    identities = (ruling["author"], ruling["reviewer"])
+    if (not ruling["evidence"] or re.search(r"[\r\n]", ruling["evidence"])
+            or number is None or number != spec_issue or not 0 < number <= 9007199254740991
+            or not all(v and not re.search(r"[\r\n]", v) for v in identities)
+            or identities[0].lower() == identities[1].lower()
+            or ruling["digest"] != spec_ruling_digest(body)):
+        return "awaiting_review: 独审裁定缺证据、身份不独立或正文已变"
+    return None
 
 
 def spec_ruling(spec_issue: int, body: str, comments: list[dict[str, Any]],
                 orchestrator: str) -> tuple[dict[str, Any] | None, str]:
-    """与 PR1915 isSpecApproved 同序消费可信评论；无效新裁定也撤销旧 PASS。"""
+    """与 wayfinder_engine.mts isSpecApproved 同一判定，按时间序消费可信账号评论，规则不对称：
+    放行要严——首行恰为合规 PASS、绑定当前正文的非作者裁定、全文不含驳回词；
+    撤销要松——NFKC 归一后全文任意位置出现「SPEC 独审裁定」（引用块、代码块、非首行、全角都算）
+    而不是合规 PASS，或命中驳回词，一律撤销旧 PASS；其余自由文本不改变状态。
+    两端用 tests/fixtures/spec-ruling-vectors.json 对拍。"""
     selected = None
     reason = "awaiting_review: 缺可信账号的当前正文非作者裁定"
     mine = [c for c in comments if (c.get("user") or {}).get("login") == orchestrator]
     for comment in sorted(mine, key=lambda c: c["created_at"]):
         text = comment["body"]
         ruling = parse_spec_ruling(text)
-        if ruling is None:
-            if _REJECT.search(text):
-                selected, reason = None, "review_block: 可信账号已撤回裁定"
-            continue
-        selected = None
-        reason = "review_block: 裁定为 BLOCK"
-        if ruling["verdict"] != "PASS":
-            continue
-        reason = "awaiting_review: 独审裁定缺证据、身份不独立或正文已变"
-        identities = (ruling["author"], ruling["reviewer"])
-        try:
-            raw_number = ruling["specNumber"]
-            if re.fullmatch(r"0[xX][0-9a-fA-F]+|0[bB][01]+|0[oO][0-7]+", raw_number):
-                number = float(int(raw_number, 0))
-            elif re.fullmatch(r"[+-]?(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+)(?:[eE][+-]?[0-9]+)?", raw_number):
-                number = float(raw_number)
-            else:
-                continue
-        except (ValueError, OverflowError):
-            continue
-        if (number != spec_issue or not 0 < number <= 9007199254740991
-                or not all(v and not re.search(r"[\r\n]", v) for v in identities)
-                or identities[0].lower() == identities[1].lower()
-                or not ruling["evidence"] or re.search(r"[\r\n]", ruling["evidence"])
-                or ruling["digest"] != spec_ruling_digest(body)):
-            continue
-        selected = {"source": "spec_ruling", "comment_id": comment["id"],
-                    "orchestrator": orchestrator, **ruling}
-        reason = "当前正文非作者独审 PASS"
+        problem = _ruling_problem(spec_issue, body, ruling) if ruling is not None else None
+        if ruling is not None and problem is None and not _REJECT.search(text):
+            selected = {"source": "spec_ruling", "comment_id": comment["id"],
+                        "orchestrator": orchestrator, **ruling}
+            reason = "当前正文非作者独审 PASS"
+        elif ruling is not None:
+            selected, reason = None, problem or "review_block: 合规 PASS 正文含驳回词"
+        elif _RULING_MENTION.search(unicodedata.normalize("NFKC", text)):
+            selected, reason = None, "review_block: 可信账号发出不合规裁定，撤回旧裁定"
+        elif _REJECT.search(text):
+            selected, reason = None, "review_block: 可信账号已撤回裁定"
     return selected, reason

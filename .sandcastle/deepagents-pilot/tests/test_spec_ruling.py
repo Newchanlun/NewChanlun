@@ -1,8 +1,11 @@
 
 import json
 import subprocess
+from pathlib import Path
 
 from pilot1742.approval import spec_ruling, spec_ruling_digest
+
+VECTORS = Path(__file__).with_name('fixtures') / 'spec-ruling-vectors.json'
 
 
 def test_ts_python_ruling_protocol(wayfinder_engine_path):
@@ -44,3 +47,33 @@ def test_engine_and_consumer_default_to_the_same_orchestrator_login(wayfinder_en
     result = subprocess.run(['node', '--experimental-strip-types', '--input-type=module', '-e', runner,
                              wayfinder_engine_path.as_uri()], text=True, capture_output=True, check=True)
     assert json.loads(result.stdout) == ORCHESTRATOR_LOGIN == 'xy7365527-lang'
+
+
+def _vector_cases():
+    data = json.loads(VECTORS.read_text(encoding='utf-8'))
+    digest = spec_ruling_digest(data['spec_body'])
+    cases = []
+    for vector in data['vectors']:
+        comments = [{'id': i + 1, 'created_at': f'2026-11-09T{i:02d}:00:00Z', 'user': {'login': c['author']},
+                     'body': c['body'].replace('{DIGEST}', digest)} for i, c in enumerate(vector['comments'])]
+        cases.append((vector['name'], vector['expected'], comments))
+    return data, cases
+
+
+def test_shared_vectors_hold_on_both_sides(wayfinder_engine_path):
+    """放行要严、撤销要松：两端对同一份向量文件都得出预期结论（#1921 正式审查 57410 两份 BLOCK 的全部变体）。"""
+    data, cases = _vector_cases()
+    runner = """import {readFileSync} from 'node:fs';
+      const m = await import(process.argv[1]);
+      const d = JSON.parse(readFileSync(0).toString('utf8'));
+      console.log(JSON.stringify(d.cases.map(c => m.isSpecApproved({number: d.number, body: d.body,
+        comments: c.map(x => ({body: x.body, author: x.user.login, createdAt: x.created_at}))}, d.orchestrator))));"""
+    payload = {'number': data['spec_number'], 'body': data['spec_body'], 'orchestrator': data['orchestrator'],
+               'cases': [comments for _, _, comments in cases]}
+    result = subprocess.run(['node', '--experimental-strip-types', '--input-type=module', '-e', runner,
+                             wayfinder_engine_path.as_uri()], input=json.dumps(payload), text=True,
+                            capture_output=True, check=True)
+    ts = json.loads(result.stdout)
+    for (name, expected, comments), ts_approved in zip(cases, ts, strict=True):
+        py_approved = spec_ruling(data['spec_number'], data['spec_body'], comments, data['orchestrator'])[0] is not None
+        assert (ts_approved, py_approved) == (expected, expected), name
