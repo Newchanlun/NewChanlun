@@ -236,4 +236,13 @@ run_retry_case eacces-always 101 2 yes
 run_retry_case other-error 101 1 no
 run_retry_case success 0 1 no
 
-printf 'PASS: 16 status-priority cells, guard boundaries, defaults, configuration validation, argv preservation, and 4 EACCES-retry cases\n'
+# 直接调用共用的 cargo-eacces-retry.sh（#1488 作业与 release-locks 循环不经过包装器，直接用它）。
+direct_calls="$tmp_dir/retry-direct.calls"; direct_log="$tmp_dir/retry-direct.log"
+set +e
+STUB_RETRY_MODE=eacces-once STUB_CALLS="$direct_calls" PATH="$retry_dir:$PATH" "$script_dir/cargo-eacces-retry.sh" cargo test >"$direct_log" 2>&1
+direct_status=$?
+set -e
+assert_status 0 "$direct_status" retry-direct "$direct_log"
+[[ "$(cat "$direct_calls")" == 2 ]] || { echo "FAIL retry-direct: expected 2 calls" >&2; exit 1; }
+
+printf 'PASS: 16 status-priority cells, guard boundaries, defaults, configuration validation, argv preservation, and 5 EACCES-retry cases\n'

@@ -1305,7 +1305,8 @@ def run_target(rust: Path, target_dir: Path, output: Path, target: str, mode: st
     try:
         args = ["--lib"] if target == "lib" else ["--bin", "s_structure_session"]
         build_log = output / f"{target}-build.log"
-        command = ["cargo", "test", "--offline", "--locked", "-j", "6", "--features",
+        # #1875：经 cargo-eacces-retry.sh 执行，Boat 上 build-script EACCES 偶发时只重试一次（其余失败原样返回）。
+        command = [str(rust.parent / ".github/scripts/cargo-eacces-retry.sh"), "cargo", "test", "--offline", "--locked", "-j", "6", "--features",
                    FEATURES[mode], "--no-run", "--message-format=json", *args]
         if run_logged(command, rust, build_log, result["commands"]) != 0:
             raise ValueError("cargo编译失败；不得寻找或执行旧二进制")
