@@ -1,5 +1,9 @@
 #!/usr/bin/env python3
-"""#1381: 真实 X binary + 明确受控 E/S authority；非真实 producer/财务闭环。"""
+"""#1381: 真实 X binary + 明确受控 E/S authority；非真实 producer/财务闭环。
+
+本文件是 X 接口的故障注入夹具（E/S 回错、帧界、回复丢失等），受控 E 只为能注入真 E 不会产生的错误回复。
+真 E 放行 → X 接纳 → S → X 占有的端到端链与 #1621 对拍在 economic_session 的 exact_x_e2e_tests.rs（#1407 C2）。
+"""
 import copy, hashlib, json, os, socket, sqlite3, subprocess, sys, tempfile, threading, time
 from pathlib import Path
 BIN=Path(sys.argv[1]).resolve()
@@ -8,6 +12,14 @@ def canonical(x): return json.dumps(x,sort_keys=True,separators=(',',':'),ensure
 def digest(x): return hashlib.sha256(canonical(x).encode()).hexdigest()
 # logical-bar/1: the open bar index X has reached (last committed bar + 1), the only clock E/S may report.
 CLOCK={'bar':0}
+# #1407 C2：x-exact-authority/1 走 IC:9 共同信封；回复须等于由原请求重建的 reply_envelope。
+SIM={}
+def x_envelope(role,payload,epoch=1):
+    a=SIM[role]; h=digest(payload)
+    return dict(schema_revision=a['schema_revision'],session_id=SIM['session_id'],session_generation=SIM['session_generation'],source_namespace=SIM['source_namespace'],source_epoch=SIM['source_epoch'],message_id='x-authority-'+h,producer_id=SIM['x_id'],producer_epoch=str(epoch),payload_hash=h,causal_refs=[],payload=payload)
+def reply_envelope(request,payload,a):
+    h=digest(payload); mid='reply-'+digest([request['source_namespace'],request['source_epoch'],request['message_id'],h])
+    return dict(schema_revision=a['schema_revision'],session_id=request['session_id'],session_generation=request['session_generation'],source_namespace=a['reply_namespace'],source_epoch=a['authority_epoch'],message_id=mid,producer_id=a['producer_id'],producer_epoch=a['authority_epoch'],payload_hash=h,causal_refs=[{k:request[k] for k in ['source_namespace','source_epoch','message_id','payload_hash']}],payload=payload)
 def request(path,op,payload):
     with socket.socket(socket.AF_UNIX) as s:
         s.settimeout(5); s.connect(str(path)); s.sendall((canonical({'protocol':'x-exact-simulation/1','op':op,'payload':payload})+'\n').encode())
@@ -17,7 +29,7 @@ def request(path,op,payload):
     return r
 class Authority:
     def __init__(self,path,role):
-        self.path=path; self.role=role; self.calls=[]; self.bad=None; self.records={}; self.authorizations={}; self.drop_after=None; self.swallow=None; self.compact={}; self.replies=[]
+        self.path=path; self.role=role; self.calls=[]; self.bad=None; self.records={}; self.authorizations={}; self.drop_after=None; self.swallow=None; self.compact={}; self.replies=[]; self.frames=[]
         self.sock=socket.socket(socket.AF_UNIX); self.sock.bind(str(path)); self.sock.listen(16)
         self.thread=threading.Thread(target=self.run,daemon=True); self.thread.start()
     def run(self):
@@ -25,7 +37,7 @@ class Authority:
             try: c,_=self.sock.accept()
             except OSError: return
             with c:
-                q=json.loads(c.makefile('rb').readline()); self.calls.append(q)
+                envelope=json.loads(c.makefile('rb').readline()); q=envelope['payload']; self.calls.append(q)
                 r={k:q[k] for k in ['protocol','session_id','session_generation','authority_id','authority_epoch','command_id','command_hash','command']}
                 r.update(state='ReleasedExact' if self.role=='E' else 'ExecuteCommitted',receipt_id=self.role+':'+q['command_id'],release_receipt_id=q['release_receipt_id'],commit_ns=CLOCK['bar'])
                 if q['command_id'] in self.compact:
@@ -45,15 +57,17 @@ class Authority:
                 if self.bad=='content': r['command']['symbol']='wrong'
                 if self.bad=='future': r['commit_ns']=9_000_000_000_000_000_000
                 if self.bad=='missing': r['state']='NoRecord'
-                self.replies.append(r); c.sendall((canonical(r)+'\n').encode())
+                reply=reply_envelope(envelope,r,SIM[self.role.lower()])
+                self.replies.append(reply); c.sendall((canonical(reply)+'\n').encode())
 def model():
     return dict(model_id='history-sim/bar-batch-known-frontier/1',revision='oracle-1',symbol='TEST',quantity_unit='TEST-UNIT',currency='TEST-CASH',tick_value=1,rd11_policy='controlled-fixture-rd11',rd12_policy='per-leg-source-attribution/1',projection_kind='per_leg',seed='none',fee_profile=dict(reference='controlled-fee/1',role_source='controlled-role-map/1',limit_role='maker',market_role='taker',maker=dict(numerator=1,denominator=100,rounding='ceiling'),taker=dict(numerator=2,denominator=100,rounding='ceiling'),market_slippage_ticks=1,market_slippage_source='controlled-oracle/1'))
 def order(name,side='buy',quantity=100,price=100):
     return dict(command_id=name,family_id='f-'+name,chong_id='ch-'+name,revision=1,side=side,quantity=quantity,kind=dict(kind='limit',price=price),eligibility_ref='S:'+name,projection_manifest='controlled-projection-'+name)
+# The approved list frozen in both E's exact_release and X's profile (#1407 C2 item 1), model_coverage included.
+CONDITIONS=[dict(condition_id=cid,authority_revision=cap,dependency_set=['controlled-dependency'],invalidation_sources=['controlled-invalidation'],required_check_stages=[stage],evidence_refs=['controlled-evidence'],coverage_proof='controlled-coverage',validator_capability=cap,failure_result='Denied') for cid,cap,stage in [('released-exact/1','released-exact/1','E.ReleaseExact'),('execute-committed/1','execute-committed/1','S.RequestConditionalExecution'),('simulation-local-transaction/1','simulation-local-transaction/1','X.OwnAttemptAndCall'),('model_coverage','model-coverage/1','E.ReleaseExact')]]
 def command(change):
     o=change.get('order',change); cid=o['command_id']; family=o['family_id']
-    caps=[('released-exact/1','E.ReleaseExact'),('execute-committed/1','S.RequestConditionalExecution'),('simulation-local-transaction/1','X.OwnAttemptAndCall')]
-    cert=dict(rd11_policy='controlled-fixture-rd11',responsibility_refs=['controlled-responsibility'],structure_dependencies=['controlled-structure'],market_dependencies=['controlled-market'],rule_revision='controlled-rule',conditions=[dict(condition_id=cap,authority_revision=cap,dependency_set=['controlled-dependency'],invalidation_sources=['controlled-invalidation'],required_check_stages=[stage],evidence_refs=['controlled-evidence'],coverage_proof='controlled-coverage',validator_capability=cap,failure_result='Denied') for cap,stage in caps])
+    cert=dict(rd11_policy='controlled-fixture-rd11',responsibility_refs=['controlled-responsibility'],structure_dependencies=['controlled-structure'],market_dependencies=['controlled-market'],rule_revision='controlled-rule',conditions=copy.deepcopy(CONDITIONS))
     return dict(command_id=cid,logical_order_family=family,session_id='session',session_generation='g1',x_id='X',x_epoch=1,symbol='TEST',projection_kind='per_leg',change=change,plan_hash=digest(change),certificate_hash=digest(cert),certificate=cert)
 def batch(i,changes=[]):
     return dict(request_id='b'+str(i),known_frontier_cut='frontier'+str(i),bar=dict(index=i,open=100,low=90,high=110,close=105),capacity=dict(kind='none'),close_changes=changes,scenario_busts=[])
@@ -63,7 +77,9 @@ def run(name):
     # Same socket paths for both runs: they are frozen in authority_profile, which the full-table comparison covers.
     CLOCK['bar']=0; sockets=Path(tempfile.gettempdir())/('i1381-'+str(os.getpid())); sockets.mkdir()
     e=Authority(sockets/'e','E'); s=Authority(sockets/'s','S'); xp=sockets/'x'
-    sim=dict(model=model(),session_id='session',session_generation='g1',x_id='X',source_namespace='x-sim',source_epoch='epoch1',socket=str(xp),e=dict(socket=str(e.path),authority_id='E',authority_epoch='e1'),s=dict(socket=str(s.path),authority_id='S',authority_epoch='s1'),timeout_ms=500,max_frame_bytes=262144)
+    # S's long schema_revision keeps every S request larger than the matching E reply (oversized-frame case below).
+    sim=dict(model=model(),session_id='session',session_generation='g1',x_id='X',source_namespace='x-sim',source_epoch='epoch1',socket=str(xp),e=dict(socket=str(e.path),authority_id='E',authority_epoch='e1',schema_revision='e-authority-fixture/1',reply_namespace='e/replies',producer_id='E:session'),s=dict(socket=str(s.path),authority_id='S',authority_epoch='s1',schema_revision='s-authority-fixture/1#'+'s'*512,reply_namespace='s/replies',producer_id='S:session'),conditions=CONDITIONS,timeout_ms=500,max_frame_bytes=262144)
+    SIM.clear(); SIM.update(sim)
     profile=dict(profile_revision='x-execution-profile/1',mode='simulation',credential_scope=dict(env='UNUSED_SIMULATION_CREDENTIAL'),history_simulation=sim)
     pp=directory/'profile.json'; pp.write_text(canonical(profile)); db=directory/'x.sqlite'
     log=open(directory/'x.log','ab')
@@ -179,12 +195,12 @@ def run(name):
         e.compact={'big-p':'Ep','big-x':'Ex'}
         assert request(xp,'AcceptExact',sized('big-p'))['state']=='Accepted'
         probe=e.calls[-1]; reply=e.replies[-1]
-        s_request=dict(probe,op='RequestConditionalExecution',authority_id='S',authority_epoch='s1',release_receipt_id='Ep')
-        reply_len=len(canonical(reply))+1; s_len=len(canonical(s_request))+1
+        s_payload=dict(probe,op='RequestConditionalExecution',authority_id='S',authority_epoch='s1',release_receipt_id='Ep')
+        reply_len=len(canonical(reply))+1; s_len=len(canonical(x_envelope('s',s_payload)))+1
         assert s_len>reply_len,(s_len,reply_len)
         big=sized('big-x',limit-reply_len)
         assert request(xp,'AcceptExact',big)['state']=='Accepted'
-        assert len(canonical(dict(s_request,command=big,command_hash=digest(big),command_id='big-x',release_receipt_id='Ex')))+1>limit
+        assert len(canonical(x_envelope('s',dict(s_payload,command=big,command_hash=digest(big),command_id='big-x',release_receipt_id='Ex'))))+1>limit
         before=len(s.calls)
         oversized=request(xp,'AdvanceBar',batch(0,[big['change']]))
         assert oversized['kind']=='Error' and '帧界' in canonical(oversized),oversized

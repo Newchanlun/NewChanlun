@@ -1172,6 +1172,8 @@ fn reduce_with_budget(
     } else {
         number(&d["policy"], "valid_through_ns")?
     };
+    // 豁免只给收缩敞口或自核新版本的写口。MakeDispatchable 与 ReleaseExact 不豁免：Release 是交付 X 前的
+    // 最后一个授权点，共同界或能力证据过期时必须关闭（CE-S09），责任原样保留。
     if !matches!(
         op,
         "AbortDecision" | "CloseApplicants" | "ActivateCapPolicy"
@@ -1568,7 +1570,8 @@ fn replace_command(next: &mut Value, r: &Value) {
         .unwrap() = r.clone();
 }
 /// IC E.MakeDispatchable：B 本地 Commit 原收据、E 自己的 grant 与冻结计划三者一致才保存可交付财务状态。
-/// Dispatchable 不是执行许可，也不算在途（C07.1）。
+/// Dispatchable 不是执行许可，也不算在途（C07.1）。Pending 覆盖与申请代际关闭只在 ReleaseExact 的同一事务里核：
+/// IC:30 写明旧状态不能代替随后 Release 的当前条件核验，两步之间状态可变，在这里多核一次不挡任何交付。
 #[allow(clippy::too_many_arguments)]
 fn make_dispatchable(
     c: &Connection,

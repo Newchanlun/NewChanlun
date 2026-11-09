@@ -49,11 +49,15 @@ pub(super) fn decorate_input(data: &mut Value) {
         q["exact"] = json!({"command_id":format!("cmd-{name}"),"logical_order_family":format!("family-{name}"),"chong_id":name,"revision":"1","first_quantity":q["quantity"],"allocation_id":format!("alloc-{name}"),"side":"buy","symbol":name,"projection_manifest":format!("TestOnly-projection/{name}"),"eligibility_ref":format!("S:cmd-{name}"),"concurrency":if name == "alpha" {"single"} else {"batched"}});
     }
 }
+/// X 的来源身份（`x-exact-authority/1` 共同信封的 source/producer）；E 只授它 QueryReleasedExact。
+pub(super) const X_SOURCE: (&str, &str, &str, &str) = ("x-sim", "epoch1", "X", "1");
 pub(super) fn decorate_manifest(manifest: &mut Value) {
     manifest["authorized_sources"][0]["operations"]
         .as_array_mut()
         .unwrap()
         .extend(EXACT_OPS.iter().map(|op| json!(op)));
+    let (namespace, epoch, producer, producer_epoch) = X_SOURCE;
+    manifest["authorized_sources"].as_array_mut().unwrap().push(json!({"source_namespace":namespace,"source_epoch":epoch,"producer_id":producer,"producer_epoch":producer_epoch,"operations":["QueryReleasedExact"]}));
     let clocks = &mut manifest["clock"]["plan"]["messages"];
     for (message, t) in [
         ("MakeDispatchable-alpha", 140),
@@ -63,6 +67,7 @@ pub(super) fn decorate_manifest(manifest: &mut Value) {
         ("close-late", 175),
         ("capture-late", 180),
         ("ReleaseExact-alpha-late", 190),
+        ("ReleaseExact-alpha-expired", 100001),
     ] {
         clocks[message] = json!({"received_ns":t.to_string(),"first_known_ns":(t+1).to_string(),"commit_ns":(t+2).to_string()});
     }
@@ -376,87 +381,11 @@ fn l7_model_coverage_out_of_domain_persists_unsupported_without_release() {
 
 /// #1942 head 40bf421fc3 `rust/src/history_simulation/{runtime.rs:85-122,210-222, model.rs:7-31,186-198}`
 /// 的线上类型原样镜像（含 `deny_unknown_fields`）。E 的回复必须能被它们严格解码，且再编码后逐字段相等。
+/// 回复十二字段仍是 X 私有的 `AuthorityReply` 形状；命令体直接用 X 的 `ExactCommand`（`deny_unknown_fields`），
+/// E 产出的命令多一个或少一个字段都解不开。
 mod wire_1942 {
+    pub use crate::history_simulation::runtime::ExactCommand;
     use serde::{Deserialize, Serialize};
-    #[derive(Debug, Serialize, Deserialize, PartialEq, Eq)]
-    #[serde(rename_all = "snake_case")]
-    pub enum Side {
-        Buy,
-        Sell,
-    }
-    #[derive(Debug, Serialize, Deserialize, PartialEq, Eq)]
-    #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
-    pub enum OrderKind {
-        Limit { price: i64 },
-        Market { exec_index: i64 },
-    }
-    #[derive(Debug, Serialize, Deserialize, PartialEq, Eq)]
-    #[serde(deny_unknown_fields)]
-    pub struct Order {
-        pub command_id: String,
-        pub family_id: String,
-        pub chong_id: String,
-        pub revision: i64,
-        pub side: Side,
-        pub quantity: i64,
-        pub kind: OrderKind,
-        pub eligibility_ref: String,
-        pub projection_manifest: String,
-    }
-    #[derive(Debug, Serialize, Deserialize, PartialEq, Eq)]
-    #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
-    pub enum Change {
-        Submit {
-            order: Order,
-        },
-        Cancel {
-            family_id: String,
-            command_id: String,
-            eligibility_ref: String,
-        },
-        Replace {
-            order: Order,
-        },
-    }
-    #[derive(Debug, Serialize, Deserialize, PartialEq, Eq)]
-    #[serde(deny_unknown_fields)]
-    pub struct Condition {
-        pub condition_id: String,
-        pub authority_revision: String,
-        pub dependency_set: Vec<String>,
-        pub invalidation_sources: Vec<String>,
-        pub required_check_stages: Vec<String>,
-        pub evidence_refs: Vec<String>,
-        pub coverage_proof: String,
-        pub validator_capability: String,
-        pub failure_result: String,
-    }
-    #[derive(Debug, Serialize, Deserialize, PartialEq, Eq)]
-    #[serde(deny_unknown_fields)]
-    pub struct Certificate {
-        pub rd11_policy: String,
-        pub responsibility_refs: Vec<String>,
-        pub structure_dependencies: Vec<String>,
-        pub market_dependencies: Vec<String>,
-        pub rule_revision: String,
-        pub conditions: Vec<Condition>,
-    }
-    #[derive(Debug, Serialize, Deserialize, PartialEq, Eq)]
-    #[serde(deny_unknown_fields)]
-    pub struct ExactCommand {
-        pub command_id: String,
-        pub logical_order_family: String,
-        pub session_id: String,
-        pub session_generation: String,
-        pub x_id: String,
-        pub x_epoch: i64,
-        pub symbol: String,
-        pub projection_kind: String,
-        pub change: Change,
-        pub plan_hash: String,
-        pub certificate_hash: String,
-        pub certificate: Certificate,
-    }
     #[derive(Debug, Serialize, Deserialize)]
     #[serde(deny_unknown_fields)]
     pub struct AuthorityReply {
@@ -1091,3 +1020,50 @@ fn frozen_command_id_cannot_take_stage_or_receipt_key_form() {
         );
     }
 }
+
+/// domain-event/1 的 identity_key 让 fact_key 与 command_id 共用命名空间；64 位十六进制形状留给 fact_key。
+#[test]
+fn frozen_command_id_cannot_take_the_fact_key_digest_form() {
+    let f = fixture(None);
+    let plan = plan_of(&f, "alpha");
+    crate::economic_session::exact_command::validate_plan(&plan).unwrap();
+    let digest = hash(&json!("any fact"));
+    let mut q = plan.clone();
+    q["exact"]["command_id"] = json!(digest);
+    let e = crate::economic_session::exact_command::validate_plan(&q).unwrap_err();
+    assert!(
+        e.starts_with("IdentityConflict") && e.contains("fact_key"),
+        "{e}"
+    );
+    let mut upper = plan.clone();
+    upper["exact"]["command_id"] = json!(digest.to_uppercase());
+    crate::economic_session::exact_command::validate_plan(&upper).unwrap();
+}
+
+/// 过期豁免不含 ReleaseExact：共同界过期后 Release 关闭，命令停在 Dispatchable，责任不变；同一时刻之前的放行照常。
+#[test]
+fn expired_policy_closes_release_and_keeps_the_liability() {
+    let mut f = fixture(None);
+    committed(&mut f);
+    dispatch(&mut f, "alpha");
+    let before = snapshot(&f);
+    let liability = responsibility_total(&latest(&f.dbs[0]).unwrap().3);
+    let r = f.handle(
+        0,
+        "ReleaseExact-alpha-expired",
+        release_payload(&f, "alpha"),
+    );
+    c4a_error(&r, "MissingDependency");
+    assert!(r["error"].as_str().unwrap().contains("过期"), "{r}");
+    assert_eq!(snapshot(&f), before, "E/B 不变");
+    assert_eq!(query_command(&mut f, "alpha")["state"], "Dispatchable");
+    assert_eq!(
+        responsibility_total(&latest(&f.dbs[0]).unwrap().3),
+        liability
+    );
+    let ok = f.handle(0, "ReleaseExact-alpha", release_payload(&f, "alpha"));
+    assert_eq!(ok["record"]["state"], "ReleasedExact", "{ok}");
+}
+
+#[path = "exact_x_e2e_tests.rs"]
+mod x_e2e;

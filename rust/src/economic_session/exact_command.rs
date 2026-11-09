@@ -207,6 +207,18 @@ pub(super) fn validate_plan(q: &Value) -> Result<(), String> {
     if required(x, "command_id")?.contains(':') {
         return Err("IdentityConflict：command_id 不得含冒号（保留给阶段身份与回执键）".into());
     }
+    // domain-event/1 的 identity_key 先取 fact_key 再取 command_id，二者共用一个去重命名空间；fact_key 是
+    // 64 位小写十六进制摘要，command_id 不取这个形状就不会与任何事实身份同形。
+    let id = required(x, "command_id")?;
+    if id.len() == 64
+        && id
+            .bytes()
+            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+    {
+        return Err(
+            "IdentityConflict：command_id 不得取 64 位十六进制摘要形状（保留给 fact_key）".into(),
+        );
+    }
     positive(required(x, "revision")?, "revision")?;
     positive(required(x, "first_quantity")?, "first_quantity")?;
     if q["owner"].as_str().and_then(|o| o.strip_prefix("B:")) != x["chong_id"].as_str() {
