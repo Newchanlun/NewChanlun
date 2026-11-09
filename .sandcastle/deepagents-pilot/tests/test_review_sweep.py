@@ -27,9 +27,14 @@ class FakeGitHub:
         self.required = {name: {"deepagents/review": review_app, "ci-ok": 15368}[name] for name in required}
         self.extra_pulls = []
         self.states, self.checks_by_head, self.files, self.calls, self.fail = {}, {}, {}, [], {}
+        self.committed = {}  # head → committer 时间；没登记的 head 都按建替身时刚推送（同一时刻，按号码排）
+        self.pushed = datetime.now(timezone.utc).isoformat()
 
     def open_pulls(self):
         return copy.deepcopy([self.lane.gateway.pr, *self.extra_pulls])
+
+    def committed_at(self, head):
+        return self.committed.get(head, self.pushed)
 
     def _pr(self, number):
         return next(p for p in [self.lane.gateway.pr, *self.extra_pulls] if p["number"] == number)
@@ -844,6 +849,123 @@ def test_concurrent_cap_counts_processes_not_prs(lane):
     actions = sweep.tick()
     assert [a["pr"] for a in actions if a["action"] == "launch"] == [1810]
     assert acts(actions, 1811) == ["queued"] and acts(actions, 1812) == ["queued"]
+
+
+# ---- 派发先后：沿用优先、新推送优先、闲置超 48 小时的垫底 ----
+
+def _ago(hours):
+    return (datetime.now(timezone.utc) - module.timedelta(hours=hours)).isoformat()
+
+
+def _pull_pushed(lane, github, number, hours_ago):
+    """同仓 PR，head 是本机库里一个独立的新提交（可直接派审），committer 时间记为 hours_ago 小时前。"""
+    restore = git(lane.source, "rev-parse", "HEAD")
+    git(lane.source, "checkout", "-q", "--detach", lane.gateway.pr["head"]["sha"])
+    (lane.source / f"pr-{number}").write_text(f"{number}\n")
+    git(lane.source, "add", ".")
+    git(lane.source, "commit", "-qm", f"pr {number}")
+    head = git(lane.source, "rev-parse", "HEAD")
+    git(lane.source, "checkout", "-q", restore)  # controller 身份（SOURCE_REPO 的 HEAD）不变
+    other = copy.deepcopy(lane.gateway.pr)
+    other["number"], other["head"]["sha"] = number, head
+    github.extra_pulls.append(other)
+    github.committed[head] = _ago(hours_ago)
+    return head
+
+
+def launched(actions):
+    return [a["pr"] for a in actions if a["action"] == "launch"]
+
+
+@pytest.mark.skipif(not hasattr(_external_review, "_advance_main"), reason="需要 #1913 的补丁沿用与 _advance_main")
+def test_reuse_eligible_pr_launches_before_fresh_full_review(lane, env):
+    """1810 追平后补丁不变、可沿用已发布的 PASS（约 1 分钟）：排在号码更小、推送更新、要完整双审的 1809 前面。"""
+    sweep, _, _ = make(lane)
+    assert acts(sweep.tick()) == ["launch"]           # 1810 在旧 head 上完整双审、发布 PASS
+    reviewed = lane.gateway.pr["head"]["sha"]
+    _external_review._advance_main(lane, env)          # main 前进、PR 追平：新 head，补丁不变
+    github = FakeGitHub(lane)
+    full = copy.deepcopy(lane.gateway.pr)
+    full["number"], full["head"]["sha"] = 1809, reviewed  # 1809 从没审过：完整双审
+    github.extra_pulls.append(full)
+    github.committed = {reviewed: _ago(1), lane.gateway.pr["head"]["sha"]: _ago(10)}
+    sweep, host, _ = make(lane, run=False, github=github, max_running=1)
+    actions = sweep.tick()
+    assert launched(actions) == [1810] and acts(actions, 1809) == ["queued"]
+    assert [a["pr"] for a in actions if a.get("pr")] == [1810, 1809]
+
+
+def test_fresh_pr_launches_before_old_one(lane):
+    """号码大但刚推送的 1811 先于号码小、30 小时前推送的 1810。"""
+    github = FakeGitHub(lane)
+    github.committed[lane.gateway.pr["head"]["sha"]] = _ago(30)
+    _pull_pushed(lane, github, 1811, 1)
+    sweep, host, _ = make(lane, run=False, github=github, max_running=1)
+    actions = sweep.tick()
+    assert launched(actions) == [1811] and acts(actions, 1810) == ["queued"]
+
+
+def test_pr_idle_over_48h_launches_only_when_nothing_else_is_queued(lane):
+    """1810 有新评论（updated_at 新、仍在活动窗）但 72 小时没推送：比它旧的 47 小时 PR 也排在它前面；
+    前面的审完、不再排队后它照样被派（不饿死）。"""
+    github = FakeGitHub(lane)
+    lane.gateway.pr["updated_at"] = datetime.now(timezone.utc).isoformat()
+    github.committed[lane.gateway.pr["head"]["sha"]] = _ago(72)
+    _pull_pushed(lane, github, 1811, 47)
+    sweep, host, _ = make(lane, run=False, github=github, max_running=1)
+    actions = sweep.tick()
+    assert launched(actions) == [1811] and acts(actions, 1810) == ["queued"]
+    assert acts(sweep.tick(), 1810) == ["queued"]    # 1811 还在审：1810 继续等
+    github.extra_pulls.clear()                       # 1811 审完合入、不再开放
+    host.rows.clear()
+    assert launched(sweep.tick()) == [1810]
+
+
+def test_free_slot_goes_to_stale_pr_in_the_same_round(lane):
+    """名额够时 48 小时前的 PR 同一轮就派，只是排在后面。"""
+    github = FakeGitHub(lane)
+    github.committed[lane.gateway.pr["head"]["sha"]] = _ago(72)
+    _pull_pushed(lane, github, 1811, 1)
+    sweep, _, _ = make(lane, run=False, github=github, max_running=2)
+    assert launched(sweep.tick()) == [1811, 1810]
+
+
+def test_ordering_keeps_concurrency_cap_and_per_pr_dedup(lane):
+    """新顺序下并发上限与单 PR 去重照旧：一轮最多派 max_running 个，在审的报 running、不重派，名额让出才轮到下一个。"""
+    github = FakeGitHub(lane)
+    github.committed[lane.gateway.pr["head"]["sha"]] = _ago(72)
+    _pull_pushed(lane, github, 1811, 5)
+    _pull_pushed(lane, github, 1812, 1)
+    sweep, host, _ = make(lane, run=False, github=github, max_running=2)
+    first = sweep.tick()
+    assert launched(first) == [1812, 1811] and acts(first, 1810) == ["queued"]
+    second = sweep.tick()
+    assert launched(second) == [] and acts(second, 1812) == ["running"] and acts(second, 1811) == ["running"]
+    assert acts(second, 1810) == ["queued"]
+    host.rows = [row for row in host.rows if " --pr 1812 " not in row[3] + " "]
+    third = sweep.tick()
+    assert launched(third) == [1810] and acts(third, 1811) == ["running"]
+    assert sorted(number for number, _, _ in host.spawned) == [1810, 1811, 1812]
+
+
+def test_unreadable_commit_time_only_moves_pr_to_the_back(lane):
+    """head 提交时间读不到（非超时）：不影响派不派，只排到最后一组。"""
+    github = FakeGitHub(lane)
+    _pull_pushed(lane, github, 1811, 72)
+    first = lane.gateway.pr["head"]["sha"]
+    real = github.committed_at
+    github.committed_at = lambda head: (_ for _ in ()).throw(RuntimeError("HTTP 404")) if head == first else real(head)
+    sweep, _, _ = make(lane, run=False, github=github, max_running=2)
+    assert launched(sweep.tick()) == [1811, 1810]
+
+
+def test_commit_time_timeout_voids_the_round(lane):
+    github = FakeGitHub(lane)
+    github.committed_at = lambda head: (_ for _ in ()).throw(SourceUnreadable("github (git/commits)", TimeoutError()))
+    sweep, host, _ = make(lane, run=False, github=github)
+    with pytest.raises(SourceUnreadable):
+        sweep.tick()
+    assert host.spawned == []
 
 
 def test_space_admission_refusal_holds_with_concurrency(lane, monkeypatch):

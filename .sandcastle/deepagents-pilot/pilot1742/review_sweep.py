@@ -10,6 +10,8 @@
 - 本 head 上有结论但没发布（outcome 已存、publication 缺失）：同一 attempt 续跑一次走受管对账与发布，再不成交操作员；
 - 本 head 上有登记、无结论、进程已不在（中断）：同一 attempt 续跑一次，再不成交操作员；
 - 其余（没有 run，或本 head 上只有 STALE）：派发下一个 attempt；子进程登记前就退出的同一 attempt 退避 10 分钟再派。
+派发先后（launch_order，并发上限内谁先拿名额）：能沿用已发布 PASS 的 head 先，其余按 head 提交的 committer 时间从新到旧，
+head 提交早于 48 小时的垫底；只改先后，不改派不派。合入、追平与兜底撤销仍按 PR 号。
 限流退避：最近 2 个已完结的审查 run 都有 reviewer 以 failure_code=rate_limited 失败时，30 分钟内不派新审查
 （launch、resume-review），每轮记一行 rate-limit-backoff；发布续跑、追平、合入与撤原生 auto-merge 照常。
 派发的子进程绑定决策时的 head：先核对 PR 仍是这个 head，不是就不审（run-review --expect-head）。
@@ -98,6 +100,8 @@ LAUNCH_BACKOFF_SECONDS = 600
 RATE_LIMIT_RUNS = 2
 RATE_LIMIT_BACKOFF_SECONDS = 1800
 MIN_LOOP_SECONDS = 180
+# 派发先后：head 提交早于这么久的 PR 排在最后（只在没有更新的 PR 等着时才轮到）。
+STALE_PUSH = timedelta(hours=48)
 MERGE_CHECKS = ("deepagents/review", "ci-ok", "DevSkim")
 FILES_CAP = 3000
 FETCH_TIMEOUT_SECONDS = 120
@@ -176,6 +180,7 @@ def human_gated(files: list[str]) -> dict[str, list[str]]:
 class GitHubPort(Protocol):
     """读写 GitHub 的端口（宿主 gh 凭据）。写操作只在 --auto-merge 时调用。"""
     def open_pulls(self) -> list[dict[str, Any]]: ...
+    def committed_at(self, head: str) -> str: ...
     def pr(self, number: int) -> dict[str, Any]: ...
     def checks(self, head: str, bindings: dict[str, int]) -> dict[str, str]: ...
     def required_checks(self) -> dict[str, int]: ...
@@ -190,6 +195,14 @@ class GhCli:
     def __init__(self, repository: str = REPO, timeout: float = GH_TIMEOUT_SECONDS):
         self.repository, self.timeout = repository, timeout
         self._bots: dict[int, str | None] = {}
+        self._committed: dict[str, str] = {}
+
+    def committed_at(self, head: str) -> str:
+        """head 提交的 committer 时间（ISO 8601）。同一 SHA 的提交不可变，按 SHA 缓存，每个新 head 只读一次接口。"""
+        if head not in self._committed:
+            self._committed[head] = json.loads(self._gh("api", f"repos/{self.repository}/git/commits/{head}"))[
+                "committer"]["date"]
+        return self._committed[head]
 
     def _gh(self, *args: str) -> str:
         try:
@@ -318,6 +331,32 @@ class Sweep:
         if updated is not None and datetime.fromisoformat(updated.replace("Z", "+00:00")) < self.now() - self.max_age:
             return "stale-pr"
         return None
+
+    def launch_order(self, pulls: list[dict[str, Any]], busy: set[int]) -> list[dict[str, Any]]:
+        """审查派发的先后（并发上限内谁先拿到名额）。只改先后，不改每个 PR 派不派、怎么审。
+        1. 当前 head 能沿用同 patch_id/policy/contract 的已发布 PASS 的（ExternalReview.would_reuse，约 1 分钟、不调模型）；
+        2. 其余按 head 提交的 committer 时间从新到旧；
+        3. head 提交早于 STALE_PUSH（48 小时）或时间读不到的排最后，组内同样从新到旧。
+        同组同时间按 PR 号升序。不进活动窗的 PR 本轮跳过，不读接口，排在末尾；已在审的 PR 不探沿用。
+        排在后面的不会被饿死：前面的 PR 已完成、在等追平、在退避或要操作员处理时都不占名额，名额空着就轮到它。"""
+        def key(pr: dict[str, Any]) -> tuple[int, float, int]:
+            number = pr["number"]
+            if self._eligible(pr):
+                return 3, 0.0, number
+            try:
+                pushed = datetime.fromisoformat(self.github.committed_at(pr["head"]["sha"]).replace("Z", "+00:00"))
+            except SourceUnreadable:  # gh 超时：与其他读接口一样整轮作废
+                raise
+            except Exception:  # 时间读不到只影响先后：按最旧一组排，照样会轮到
+                return 2, 0.0, number
+            if number not in busy and self.lane.would_reuse({
+                    "repository_id": pr["base"]["repo"]["id"], "pr_number": number,
+                    "base_repository_id": pr["base"]["repo"]["id"], "base_ref": pr["base"]["ref"],
+                    "base_sha": pr["base"]["sha"], "head_repository_id": pr["head"]["repo"]["id"],
+                    "head_ref": pr["head"]["ref"], "head_sha": pr["head"]["sha"]}):
+                return 0, -pushed.timestamp(), number
+            return (2 if pushed < self.now() - STALE_PUSH else 1), -pushed.timestamp(), number
+        return sorted(pulls, key=key)
 
     def rate_limit_backoff(self) -> dict[str, Any] | None:
         """限流退避是否生效：按 outcome.json 的写入时间取最近 RATE_LIMIT_RUNS 个已完结且真派过模型的 run（有逐位结论、
@@ -450,7 +489,7 @@ class Sweep:
         clean: set[int] = set()       # 本轮已确认不触及两类的 PR
         withdrawn: set[int] = set()   # 本轮已撤掉原生 auto-merge 的 PR
         try:
-            for pr in pulls:
+            for pr in self.launch_order(pulls, busy):  # 审查按 launch_order；合入、追平、兜底撤销仍按 PR 号
                 entry: dict[str, Any] = {"pr": pr["number"], "head": pr["head"]["sha"]}
                 try:
                     skip = self._eligible(pr)
