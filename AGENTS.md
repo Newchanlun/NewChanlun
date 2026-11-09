@@ -53,7 +53,7 @@
 
 1. **不同判断**：判的对象本就不同（中枢构造 vs 背驰确认），各自独立成立，互不兜底；
 2. **诊断模式 vs 生产模式**：诊断口径可更宽（多打日志、多记候选），但**不得参与准入**；
-3. **已声明的独立对照臂**：见 [ADR-0005](../docs/adr/0005-nest-import-ban-clause9-ruling.md) —— 对照臂不产生交易决策，不在「生产判定路径」管辖内（[#799](https://github.com/xy7365527-lang/NewChanlun/issues/799) 裁定六）。
+3. **已声明的独立对照臂**：见 [ADR-0005](docs/adr/0005-nest-import-ban-clause9-ruling.md) —— 对照臂不产生交易决策，不在「生产判定路径」管辖内（[#799](https://github.com/xy7365527-lang/NewChanlun/issues/799) 裁定六）。
 
 **判别一句话**：看两套判据**是不是接在同一个 if-else 上**。是 ⟹ 系统自己声明了二者可互换 ⟹ 违规；不是 ⟹ 按上面三条限定词逐条对。
 
@@ -166,7 +166,7 @@
 - **执行分工**：实装与独立评审可与主控同型；评审独立性来自非作者、独立进程和只读证据，不靠异模型。评审打回后由同模型带具体意见重做，保留原有轮次与转 P 规则（#1617）。
 - **工作线**：涉及 branch/worktree 基线、远端默认分支、CI/自动化基线或历史镜像名分时，先读 `docs/agents/generation-constitution.md` §2「现役线名单」；该处是唯一正本。
 - **Stop-Guard**：其注入内容可能反映过期状态（已结算谱系仍列为 pending）；重复执行前先核实际状态。
-- **goal 事件**：正式 GOAL_SET/SUPERSEDE 由 Lead 直接 append 到 `.chanlun/goals/events.jsonl`（`scripts/goal_events.py` 只出草稿），随后用 reducer/scan 验证。
+- **goal 事件**：正式 GOAL_SET/SUPERSEDE 由 Lead 直接 append 到 `.chanlun/goals/events.jsonl`（`scripts/goal_events.py` 只出草稿），随后运行 `python scripts/goal_reducer.py` 验证：它读取 events.jsonl，打印当前 goal 投影（JSON）。退出码 0 = 正常，1 = 有损坏行被跳过，2 = 文件缺失或没有可解析事件。
 - **裁定文档**：编排者钦定的裁定 PDF 先归档到 `docs/formal-chain/` 再登记为 goal 权威。
 - **测试指纹**：共享 worktree 取 cargo test 计数时，先核并行线未提交面是否含测试——含则计数被污染（#475 HIGH-4 实锤：1966 vs 干净快照 1957，差 ~9），须注明污染常量或取干净快照；失败集指纹通常不受影响（2026-07-27 在案）。
 - **入仓名分**：新文件入仓前先判名分四态（宪法 §1）；会话导出/备份/工具残留一律禁入仓（.gitignore 已立模式）；review-results 是工作草稿，活期绑定票（宪法 §5）。
