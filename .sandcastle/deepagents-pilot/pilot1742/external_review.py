@@ -904,7 +904,8 @@ class ExternalReview:
     def _announce_failure(self, target: ReviewTarget, folder: Path, result: dict) -> None:
         """终态 failure 已发布后，在 PR 上贴一条各审查员理由（#1932）。走本 run 的 effect journal：
         先按标记读回 PR 评论，读到即认领，同一 run 重跑不重发；结果不明的留 pending 等读回或 reconcile。
-        评论失败不改变 verdict、state 与已发布的状态，只记在 result["comment"]；PASS 与 error 不发。"""
+        评论失败（含正文生成、journal 读写出错）不改变 verdict、state、退出码与已发布的状态，只记在
+        result["comment"]；PASS 与 error 不发。"""
         if result.get("state") != "failure" or "publication" not in result:
             return
         journal = Journal(folder / "effects")
@@ -919,13 +920,14 @@ class ExternalReview:
             found = commenter.find_marker(target.pr_number, marker)
             return {**found, "marker": marker} if found else None
         try:
+            # 正文在 converge 写 pending 之前生成：生成失败时 journal 不留 pending。
+            body = failure_comment(target, folder, result["reviews"])
             result["comment"] = journal.converge(
-                effect, probe,
-                lambda: commenter.post_comment(target.pr_number, failure_comment(target, folder, result["reviews"])),
+                effect, probe, lambda: commenter.post_comment(target.pr_number, body),
                 idempotent=False, what={"pr": target.pr_number, "run_id": target.run_id, "head_sha": target.head_sha,
                                         "marker": marker})
-        except (IdentityError, EffectPending) as error:
-            result["comment"] = {"error": str(error)}
+        except (IdentityError, EffectPending, ValueError, OSError, KeyError, TypeError) as error:
+            result["comment"] = {"error": f"{type(error).__name__}: {error}"}
 
     def _resume_publication(self, target: ReviewTarget, folder: Path, publisher: StatusPublisher, saved: dict) -> dict:
         """outcome 已存在时：终态已发布的只对账（不重新判定、不改写）；尚未发布的按来源分别过门——
@@ -938,10 +940,13 @@ class ExternalReview:
             # 等同未发布，下面照常过门（取代检查、沿用重做准入），不直接重发。publish 先读回远端，读到即认领；pending 读不到
             # 上抛待对账、不重发；done 被覆盖也上抛待对账。不重新过门，免得把远端已有的 success 记成「未发布」。
             saved["publication"] = publisher.publish(saved["state"], reused.get("run_id"))
-            # 终态发出后、评论前中断的 run 在这里补发评论；已发的按标记读回认领，不重发。
+            # 同一 controller 下终态发出后、评论前中断（或评论暂时失败）的 run 在这里补发；已发的按标记读回认领，
+            # 不重发。comment 没变就不重写 outcome.json（它的 mtime 是 review_sweep 限流退避的时钟）。
             if saved["state"] == "failure":
+                before = saved.get("comment")
                 self._announce_failure(target, folder, saved)
-                _save(folder / "outcome.json", saved)
+                if saved.get("comment") != before:
+                    _save(folder / "outcome.json", saved)
             return saved
         if not reused:
             return self._publish_final(target, folder, publisher, saved)
@@ -1196,6 +1201,14 @@ def load_identity(config: Path, private_key: Path) -> AppIdentity:
                        values["app_slug"], private_key, values["installation_permissions"])
 
 
+def open_commenter(identity: AppIdentity, stack: ExitStack) -> RepoGateway | None:
+    """发布 App 的安装权限含 pull_requests/write 时，返回只带 COMMENT_PERMISSIONS 的评论 gateway；否则 None（不发评论）。
+    token 惰性换取：只有真要发 failure 评论时才向 GitHub 申请。"""
+    if identity.installation_permissions.get("pull_requests") != "write":
+        return None
+    return RepoGateway(stack.enter_context(GitHubAppClient(identity, permissions=COMMENT_PERMISSIONS)))
+
+
 def _positive(value: str) -> int:
     number = int(value)
     if number <= 0:
@@ -1227,12 +1240,7 @@ def main(argv: list[str] | None = None) -> int:
             with ExitStack() as stack:
                 client = stack.enter_context(GitHubAppClient(identity, permissions=TOKEN_PERMISSIONS))
                 client.verify()
-                commenter = None
-                if identity.installation_permissions.get("pull_requests") == "write":
-                    # 评论 token 惰性换取：只有真要发 failure 评论时才向 GitHub 申请。
-                    commenter = RepoGateway(stack.enter_context(
-                        GitHubAppClient(identity, permissions=COMMENT_PERMISSIONS)))
-                lane = ExternalReview(RepoGateway(client), commenter=commenter)
+                lane = ExternalReview(RepoGateway(client), commenter=open_commenter(identity, stack))
                 result = (lane.review_pr(args.pr, args.attempt) if args.command == "review-pr"
                           else lane.migrate_stale(args.pr, args.attempt))
         else:

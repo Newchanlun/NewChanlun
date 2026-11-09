@@ -157,9 +157,57 @@ def test_failure_posts_reasons_once_and_replay_does_not_repost(lane):
     assert result["comment"]["id"] == 1
     saved = json.loads((lane.state_root / "runs" / target.key / "outcome.json").read_text())
     assert saved["comment"]["id"] == 1 and saved["publication"]["state"] == "failure"
+    outcome = lane.state_root / "runs" / target.key / "outcome.json"
+    stamp = outcome.stat().st_mtime_ns
     for _ in range(2):  # 同一 run 重放：状态与评论都只读回认领
         assert lane.review_pr(1810)["comment"]["id"] == 1
     assert len(lane.commenter.posts) == 1 and lane.gateway.sent == ["pending", "failure"]
+    assert outcome.stat().st_mtime_ns == stamp  # comment 未变不重写（outcome mtime 是 sweep 限流退避的时钟）
+
+
+def test_failure_comment_body_error_leaves_no_pending(lane, monkeypatch):
+    lane.commenter = Comments()
+    lane.target(1810, 1)
+    (lane.state_root / "runs" / "fake-mode").write_text("BLOCK")
+    real = module.failure_comment
+    broken = [True]
+    def body(*args):
+        if broken[0]:
+            raise ValueError("正文坏")
+        return real(*args)
+    monkeypatch.setattr(module, "failure_comment", body)
+    result = lane.review_pr(1810)
+    assert result["state"] == "failure" and "正文坏" in result["comment"]["error"]
+    target = ReviewTarget(**result["target"])
+    assert not (lane.state_root / "runs" / target.key / "effects" / "comment-failure.json").exists()
+    broken[0] = False
+    assert lane.review_pr(1810)["comment"]["id"] == 1 and len(lane.commenter.posts) == 1
+
+
+def test_corrupt_comment_journal_is_recorded_not_raised(lane):
+    lane.commenter = Comments()
+    lane.target(1810, 1)
+    (lane.state_root / "runs" / "fake-mode").write_text("BLOCK")
+    target = ReviewTarget(**lane.review_pr(1810)["target"])
+    (lane.state_root / "runs" / target.key / "effects" / "comment-failure.json").write_text("{坏")
+    result = lane.review_pr(1810)
+    assert result["verdict"] == "BLOCK" and "error" in result["comment"]
+    assert len(lane.commenter.posts) == 1 and lane.gateway.sent == ["pending", "failure"]
+
+
+@pytest.mark.parametrize("permissions,expected", [
+    (None, True),  # 执行器 App（INSTALLATION_PERMISSIONS，pull_requests/write）
+    ({"metadata": "read", "contents": "read", "pull_requests": "read", "statuses": "write"}, False)])  # 审查专用 App
+def test_commenter_only_when_installation_grants_pull_request_write(tmp_path, permissions, expected):
+    extra = {} if permissions is None else {"installation_permissions": permissions}
+    identity = AppIdentity(5486877, 179444545, 1150335160, "Newchanlun/NewChanlun",
+                           "newchanlun-deepagents-1742", tmp_path / "unused.pem", **extra)
+    with module.ExitStack() as stack:
+        commenter = module.open_commenter(identity, stack)
+        assert (commenter is not None) == expected
+        if commenter is not None:
+            assert commenter.client._permissions == module.COMMENT_PERMISSIONS
+            assert commenter.client._token == ""  # 惰性：未发评论不换 token
 
 
 def test_failure_comment_lost_journal_is_claimed_by_marker(lane):
