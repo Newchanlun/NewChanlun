@@ -152,7 +152,7 @@ HOST 切换步骤：
 
 宿主在终态、进程结束且容器已确认关闭后回收本 run 创建的 checkout，证据目录保持不动。仍有活动进程、PID 身份不明或容器创建与关闭结果不明时保留 checkout，并记录 `checkout-cleanup.json`。同键重跑会再次尝试安全回收。旧版本没有 prepare intent 的 checkout 不自动回收。
 
-源码和 Git 全只读挂入容器。宿主 home、PEM、GitHub token、状态和 session 目录不挂入。session 从容器临时目录经 SDK 收取，不给 reviewer 可写宿主回执目录。
+源码和 Git 全只读进容器，但不直接挂宿主 checkout（#1986）。Colima 经 virtiofs 共享宿主目录，VM 会为容器读过的每个文件一直开着宿主句柄：容器删了、宿主删了 checkout 也不关，在容器里删也不关，空间只有重启 VM 才还（实测每轮约 1.3–2.6 GiB）。所以监督每次 launch 建一个 Docker 命名卷 `newchanlun-external-review-<launch_id>`，用 `docker cp` 把 checkout（含 `.git`）经 Docker API 灌进卷，把属主改成容器用户，再把这一个卷只读挂到 `/review`。容器 inspect 必须恰有这一个只读卷挂载。模型启动前在容器里读一次卷的 head、分支和 `git status`，与宿主 checkout 的快照一致才继续；结束后的 `after` 快照也在容器里读卷。容器关闭后删卷，回执记 `volume` 和 `volume_removed`。删卷失败不改结论；宿主回收 checkout 时按 launch 的卷名补删，结果记进 `checkout-cleanup.json` 的 `volume_state`。卷占 VM 磁盘，不占 AgentStorage。宿主 home、PEM、GitHub token、状态和 session 目录不挂入。session 从容器临时目录经 SDK 收取，不给 reviewer 可写宿主回执目录。
 
 App token 只申请 metadata/read、contents/read、pull_requests/read、statuses/write（审查专用 App 的安装权限也正是这四项）；token 留在宿主发布进程内存。GitHub 的 statuses/write 不按 context 缩权，宿主发布器及 OS 因此属于受信边界。
 

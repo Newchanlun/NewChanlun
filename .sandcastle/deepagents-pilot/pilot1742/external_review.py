@@ -26,7 +26,7 @@ import tempfile
 import threading
 import time
 import uuid
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from concurrent.futures import ThreadPoolExecutor, wait
 from contextlib import contextmanager
 from dataclasses import asdict, dataclass, replace
@@ -62,6 +62,8 @@ IDENTITY_CONFIG = STATE_ROOT / "app-identity.json"
 STATUS_LOCKS = STATE_ROOT / "status-locks"
 CHECKOUT_ROOT = DEFAULT_HOME / "checkouts" / "external-review"
 SPACE_RESERVE = 256 * 1024 * 1024
+# #1986：监督把 checkout 经 docker cp 灌进 VM 内的命名卷再只读挂载（不经 virtiofs），卷名与 worker 的 reviewVolumeName 一致。
+REVIEW_VOLUME_PREFIX = "newchanlun-external-review-"
 # 每日额度闸：近 24 小时各 reviewer 回执记下的输入 token 合计超过此值时，新派发暂停并显式报出（不发 pending、不调模型）。
 # 实测（2026-11-01..08）正常一天 0.06–0.43 G；未设环境变量时不启用，取值由用户按订阅额度定。
 DAILY_INPUT_CAP_ENV = "NEWCHANLUN_REVIEW_DAILY_INPUT_CAP"
@@ -314,6 +316,18 @@ def prepare_review(target: ReviewTarget, source: Path, checkout: Path) -> Frozen
     return FrozenReviewInput(checkout, names, review_prompt(target, names))
 
 
+def remove_review_volume(name: str) -> bool:
+    """删监督没删掉的审阅卷；卷已不存在也算删掉。docker 不可用、超时或卷仍被占用时返回 False。"""
+    if not re.fullmatch(re.escape(REVIEW_VOLUME_PREFIX) + r"[a-f0-9-]{36}", name):
+        raise IdentityError("审阅卷名不合规")
+    env = {k: os.environ[k] for k in ("PATH", "HOME", "DOCKER_HOST", "DOCKER_CONTEXT", "DOCKER_CONFIG") if k in os.environ}
+    try:
+        done = subprocess.run(["docker", "volume", "rm", name], env=env, capture_output=True, text=True, timeout=120)
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+    return done.returncode == 0 or "no such volume" in done.stderr.lower()
+
+
 def review_prompt(target: ReviewTarget, names: tuple[str, ...]) -> str:
     return PROMPT.format(pr=target.pr_number, base=target.base_sha, merge_base=target.merge_base_sha,
                          head=target.head_sha, names=json.dumps(names, ensure_ascii=False))
@@ -491,8 +505,10 @@ class StatusPublisher:
 class ExternalReview:
     def __init__(self, gateway: RepoGateway | None, *, state_root: Path = STATE_ROOT,
                  checkout_root: Path = CHECKOUT_ROOT, source: Path = SOURCE_REPO,
-                 launcher: list[str] | None = None, poll_seconds: float = 1):
+                 launcher: list[str] | None = None, poll_seconds: float = 1,
+                 volume_remover: Callable[[str], bool] = remove_review_volume):
         self.gateway, self.state_root, self.checkout_root, self.source = gateway, state_root, checkout_root, source
+        self.volume_remover = volume_remover
         # worker 与 controller 同源：都取正在执行的代码所在仓库（SOURCE_REPO），不随对象来源 source 变化。
         self.launcher = launcher or [str(SOURCE_REPO / "node_modules" / ".bin" / "tsx"),
                                      str(SOURCE_REPO / ".sandcastle" / "external-review-worker.mts")]
@@ -781,7 +797,15 @@ class ExternalReview:
         if checkout.exists():
             shutil.rmtree(checkout)
         # 父目录 <run_id> 由同 run 的 reviewer 共用，等全部 reviewer 结束后由 review_pr 收走。
-        _save(worker / "checkout-cleanup.json", {"state": "removed", "checkout": str(checkout)})
+        cleanup: dict[str, Any] = {"state": "removed", "checkout": str(checkout)}
+        # #1986：监督删卷失败（回执 volume_removed=false）时这里补删。卷名只认本次 launch 的，不信回执里别的名字。
+        launch = _read(worker / "launch.json") if (worker / "launch.json").exists() else {}
+        volume = (receipt or {}).get("volume")
+        if volume is not None and (receipt or {}).get("volume_removed") is not True:
+            if volume != REVIEW_VOLUME_PREFIX + str(launch.get("launch_id")):
+                raise IdentityError("回执里的审阅卷不属于本次 launch")
+            cleanup.update(volume=volume, volume_state="removed" if self.volume_remover(volume) else "retained")
+        _save(worker / "checkout-cleanup.json", cleanup)
         return True
 
     def run_review(self, target: ReviewTarget, model: str, folder: Path) -> ReviewOutcome:

@@ -548,6 +548,49 @@ def test_cleanup_preserves_unconfirmed_container(lane):
     assert checkout.exists()
 
 
+@pytest.mark.parametrize("removed", [True, False])
+def test_cleanup_removes_review_volume_the_supervisor_left(lane, removed):
+    """#1986：监督删卷失败（volume_removed=false）时，宿主回收 checkout 时补删本 launch 的卷；删不掉记 retained，checkout 照删。"""
+    result = lane.review_pr(1810)
+    target = ReviewTarget(**result["target"])
+    folder = lane.state_root / "runs" / target.key
+    worker = folder / MODELS[0]
+    checkout = lane.checkout_root / target.run_id / MODELS[0]
+    checkout.mkdir(parents=True)
+    volume = module.REVIEW_VOLUME_PREFIX + module._read(worker / "launch.json")["launch_id"]
+    receipt = module._read(worker / "receipt.json")
+    module._save(worker / "receipt.json", {**receipt, "volume": volume, "volume_removed": False})
+    calls = []
+    lane.volume_remover = lambda name: calls.append(name) or removed
+    assert lane.cleanup_checkout(target, MODELS[0], folder)
+    assert calls == [volume] and not checkout.exists()
+    assert module._read(worker / "checkout-cleanup.json") == {
+        "state": "removed", "checkout": str(checkout), "volume": volume, "volume_state": "removed" if removed else "retained"}
+    # 监督已删掉的卷不再删；回执里不属于本 launch 的卷名拒绝，不删别的卷。
+    calls.clear()
+    module._save(worker / "receipt.json", {**receipt, "volume": volume, "volume_removed": True})
+    assert lane.cleanup_checkout(target, MODELS[0], folder) and calls == []
+    module._save(worker / "receipt.json", {**receipt, "volume": module.REVIEW_VOLUME_PREFIX + "0" * 36, "volume_removed": False})
+    with pytest.raises(IdentityError, match="不属于本次 launch"):
+        lane.cleanup_checkout(target, MODELS[0], folder)
+    assert calls == []
+
+
+def test_remove_review_volume_only_accepts_review_volume_names(monkeypatch):
+    with pytest.raises(IdentityError):
+        module.remove_review_volume("f3-controller-data")
+    seen = []
+    def run(argv, **kwargs):
+        seen.append(argv)
+        return SimpleNamespace(returncode=1, stderr="Error response from daemon: get x: no such volume")
+    monkeypatch.setattr(module.subprocess, "run", run)
+    name = module.REVIEW_VOLUME_PREFIX + "a" * 36
+    assert module.remove_review_volume(name)
+    assert seen == [["docker", "volume", "rm", name]]
+    monkeypatch.setattr(module.subprocess, "run", lambda argv, **kw: SimpleNamespace(returncode=1, stderr="volume is in use"))
+    assert not module.remove_review_volume(name)
+
+
 def test_multiple_attempts_reclaim_each_checkout(lane):
     for attempt in (1, 2, 3):
         assert lane.review_pr(1810, attempt)["verdict"] == "PASS"

@@ -4,11 +4,11 @@ import { closeSync, existsSync, lstatSync, openSync, readFileSync, realpathSync,
 import { join, resolve, sep } from "node:path";
 import { pathToFileURL } from "node:url";
 import { CodexTranscript, OUTPUT_SCHEMA, assertRoute, type ChildModel } from "./codex-child.ts";
+import { docker } from "@ai-hero/sandcastle/sandboxes/docker";
 import { codexWorker } from "./codex-route.mts";
-import { assertSwarmExecutionReady, dockerCliProxyEnv, swarmSandbox } from "./swarm-route.mts";
-import { codeIdentity, type Admission } from "./docker-acceptance.mts";
-import { containerEnvLeaks, declaredContainerEnv, hardenMounts, type MountSpec } from "./docker-isolation.mts";
-import { assertMountsExcludeAcceptance } from "./acceptance-dir.mts";
+import { assertSwarmExecutionReady, dockerCliProxyEnv } from "./swarm-route.mts";
+import { IMAGE_ID, codeIdentity, type Admission } from "./docker-acceptance.mts";
+import { containerEnvLeaks, declaredContainerEnv, type MountSpec } from "./docker-isolation.mts";
 import { gitEnvironment } from "./git-environment.ts";
 
 export interface ReviewLaunch {
@@ -44,23 +44,90 @@ export function readLaunch(folder: string): ReviewLaunch {
   return launch;
 }
 
-export function reviewMounts(mounts: readonly MountSpec[], checkout: string): MountSpec[] {
-  assertMountsExcludeAcceptance(mounts);
-  if (mounts.length !== 1 || mounts[0]!.hostPath !== checkout || mounts[0]!.sandboxPath !== "/review") {
-    throw new Error("review 只允许候选 clone 一个挂载，不接收宿主 home、Git、session 或状态目录挂载");
+/** #1986：宿主 checkout 不再 bind mount 进容器。Colima（vz）经 virtiofs 共享宿主目录，VM 为容器读过的每个文件
+ *  开一个宿主句柄；容器删了、宿主删了 checkout 也不关（实测在容器里 rm 同样不关），空间只有重启 VM 才还。
+ *  现在每次独审建一个 Docker 命名卷，用 docker cp（Docker API 的 tar 流，不经 virtiofs）灌入 checkout，
+ *  只读挂到 /review；容器关闭后删卷。卷名带 launch_id，一次 launch 一个卷。 */
+export const REVIEW_VOLUME_LABEL = "newchanlun.external-review.launch";
+const REVIEW_VOLUME = /^newchanlun-external-review-[a-f0-9-]{36}$/;
+export function reviewVolumeName(launchId: string): string {
+  const name = `newchanlun-external-review-${launchId}`;
+  if (!REVIEW_VOLUME.test(name)) throw new Error("launch_id 不能构成审阅卷名");
+  return name;
+}
+
+export function reviewMounts(volume: string): MountSpec[] {
+  if (!REVIEW_VOLUME.test(volume)) {
+    throw new Error("review 只允许本次 launch 的审阅卷一个挂载，不接收宿主 home、Git、session 或状态目录挂载");
   }
-  return hardenMounts([{ hostPath: checkout, sandboxPath: "/review", readonly: true }], checkout)
-    .map((m) => ({ ...m, readonly: true }));
+  return [{ hostPath: volume, sandboxPath: "/review", readonly: true }];
 }
 
 type CreateOptions = { worktreePath: string; hostRepoPath: string; mounts: MountSpec[]; env: Record<string, string> };
 type DockerProvider = SandboxProvider & { create(options: CreateOptions): Promise<BindMountSandboxHandle> };
 
-export function snapshot(checkout: string): { head: string; branch: string; status: string } {
+/** 审阅容器的 provider：与 swarmSandbox 同一 Sandcastle docker()、同一镜像 Id 校验和 env 白名单，但只接受
+ *  reviewMounts 给出的单个只读卷。hardenMounts 为可写的宿主 worktree 补挂只读 .git 等子路径；审阅卷整卷只读，
+ *  补挂宿主子路径反而会把 .git 重新经 virtiofs 带进 VM，所以这里不走它。 */
+export function reviewSandbox(image: string, env: Record<string, string> = dockerCliProxyEnv()): DockerProvider {
+  if (!IMAGE_ID.test(image)) throw new Error("审阅容器必须以准入核对过的 sha256 镜像 Id 启动");
+  const base = docker({ imageName: image, env }) as unknown as DockerProvider;
+  const declared = declaredContainerEnv(base.env);
+  return { ...base, create: (options: CreateOptions) => {
+    const [mount, ...rest] = options.mounts;
+    if (rest.length || !mount || !REVIEW_VOLUME.test(mount.hostPath) || mount.sandboxPath !== "/review" || mount.readonly !== true
+      || options.worktreePath !== mount.hostPath) throw new Error("审阅容器只接受本次 launch 的只读审阅卷");
+    return base.create.call(base, { ...options, mounts: [{ ...mount }], env: declared });
+  } };
+}
+
+export interface ReviewVolumes {
+  /** 新建卷并灌入宿主 checkout（含 .git），属主改成容器用户；卷已存在即拒绝，不复用旧内容。 */
+  populate(volume: string, image: string, checkout: string, launchId: string): void;
+  /** 删卷；卷仍被容器占用或删不掉时抛错。 */
+  remove(volume: string): void;
+}
+
+const dockerCli = (args: string[]) => execFileSync("docker", args, { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }).trim();
+export function dockerReviewVolumes(run: (args: string[]) => string = dockerCli): ReviewVolumes {
+  return {
+    populate(volume, image, checkout, launchId) {
+      reviewMounts(volume);
+      let exists = true;
+      try { run(["volume", "inspect", volume]); } catch { exists = false; }
+      if (exists) throw new Error("审阅卷已存在，不复用旧内容");
+      run(["volume", "create", "--label", `${REVIEW_VOLUME_LABEL}=${launchId}`, volume]);
+      // docker cp 进卷的文件属 root；容器以宿主 uid:gid 运行（Sandcastle docker() 的缺省），属主不符时 git 拒读。
+      const owner = `${process.getuid?.() ?? 1000}:${process.getgid?.() ?? 1000}`;
+      const helper = run(["create", "--network", "none", "--user", "0:0", "-v", `${volume}:/review`,
+        "--entrypoint", "chown", image, "-R", "-h", owner, "/review"]);
+      try {
+        run(["cp", `${checkout}/.`, `${helper}:/review`]);
+        run(["start", "-a", helper]);
+        if (run(["inspect", "--format", "{{.State.ExitCode}}", helper]) !== "0") throw new Error("审阅卷属主设置失败");
+      } finally { try { run(["rm", "-f", helper]); } catch { /* 辅助容器残留不影响卷内容 */ } }
+    },
+    remove(volume) { reviewMounts(volume); run(["volume", "rm", volume]); },
+  };
+}
+
+type Snapshot = { head: string; branch: string; status: string };
+export function snapshot(checkout: string): Snapshot {
   const env = { ...gitEnvironment(), GIT_CONFIG_NOSYSTEM: "1", GIT_CONFIG_GLOBAL: "/dev/null", GIT_NO_REPLACE_OBJECTS: "1" };
   const git = (...args: string[]) => execFileSync("git", ["-c", "core.hooksPath=/dev/null", "-c", "core.fsmonitor=false", "-C", checkout, ...args],
     { env, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }).trim();
   return { head: git("rev-parse", "HEAD"), branch: git("rev-parse", "--abbrev-ref", "HEAD"), status: git("status", "--porcelain", "--untracked-files=all") };
+}
+
+/** 与 snapshot 同一组 Git 读取，在审阅容器里对 /review 执行。env -i：容器 env（含路由密钥）不进 git；hooks 与 fsmonitor 关闭。 */
+export const VOLUME_SNAPSHOT = "g() { env -i PATH=/usr/bin:/bin GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null GIT_NO_REPLACE_OBJECTS=1"
+  + " GIT_OPTIONAL_LOCKS=0 git -c core.hooksPath=/dev/null -c core.fsmonitor=false -C /review \"$@\"; };"
+  + " g rev-parse HEAD && g rev-parse --abbrev-ref HEAD && g status --porcelain --untracked-files=all";
+export async function volumeSnapshot(handle: BindMountSandboxHandle): Promise<Snapshot> {
+  const result = await handle.exec(VOLUME_SNAPSHOT);
+  if (result.exitCode) throw new Error("容器内读不到审阅卷的 Git 状态");
+  const [head = "", branch = "", ...status] = result.stdout.split("\n");
+  return { head: head.trim(), branch: branch.trim(), status: status.join("\n").trim() };
 }
 
 export function verifyReviewAdmission(admission: Admission): void {
@@ -101,7 +168,9 @@ export interface WorkerDependencies {
   ready(image: string): string;
   sandbox(image: string): DockerProvider;
   identity(): { head: string; dirty: string };
-  inspect(id: string): { Id: string; Image: string; Mounts: Array<{ Source: string; Destination: string; RW: boolean }>; Config: { Env: string[] } };
+  inspect(id: string): { Id: string; Image: string; Mounts: Array<{ Type?: string; Name?: string; Source: string; Destination: string; RW: boolean }>; Config: { Env: string[] } };
+  /** #1986：审阅卷的灌入与删除。 */
+  volumes: ReviewVolumes;
   imageEnv(image: string): string[];
   timeoutMs: number;
   /** 单次独审的命令数上限；超出即停并记 failure_code=budget_exceeded。缺省见 REVIEW_COMMAND_CAP。 */
@@ -132,7 +201,8 @@ export function rateLimitSignal(event: unknown): "terminal" | "retry" | null {
 }
 const dependencies: WorkerDependencies = {
   ready: (image) => assertSwarmExecutionReady(image, { rows: [], verify: verifyReviewAdmission }),
-  sandbox: (image) => swarmSandbox(image, dockerCliProxyEnv()) as DockerProvider,
+  sandbox: (image) => reviewSandbox(image),
+  volumes: dockerReviewVolumes(),
   identity: () => codeIdentity(),
   inspect: (id) => JSON.parse(execFileSync("docker", ["inspect", id], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }))[0],
   imageEnv: (image) => JSON.parse(execFileSync("docker", ["image", "inspect", image, "--format", "{{json .Config.Env}}"],
@@ -148,6 +218,7 @@ export async function runExternalReview(folder: string, deps: WorkerDependencies
     phase: "launch", exit_code: null, turn_completed: false, session_id: null, result: null, container_closed: false };
   let handle: BindMountSandboxHandle | undefined;
   let creationStarted = false;
+  let volume: string | undefined;
   let timer: ReturnType<typeof setTimeout> | undefined;
   let cancelled = false;
   // 主动停机标志放在外层：exec 在容器被关后可能 reject 而不是返回，catch 里也要据此补齐原因码。
@@ -176,22 +247,29 @@ export async function runExternalReview(folder: string, deps: WorkerDependencies
     record.phase = "admission";
     const image = deps.ready(REVIEW_IMAGE); record.image_id = image;
     const sandbox = deps.sandbox(image);
-    const mounts = reviewMounts([{ hostPath: launch.checkout, sandboxPath: "/review" }], launch.checkout);
+    record.phase = "volume";
+    volume = reviewVolumeName(launch.launch_id); record.volume = volume; record.volume_removed = false;
+    deps.volumes.populate(volume, image, launch.checkout, launch.launch_id);
+    if (cancelled) throw new Error("监督已取消");
+    const mounts = reviewMounts(volume);
     record.phase = "container";
     creationStarted = true;
-    handle = await sandbox.create({ worktreePath: launch.checkout, hostRepoPath: launch.checkout,
+    handle = await sandbox.create({ worktreePath: volume, hostRepoPath: launch.checkout,
       mounts, env: declaredContainerEnv(sandbox.env) });
     if (cancelled) throw new Error("监督已取消");
     const hostname = await handle.exec("cat /etc/hostname");
     const id = hostname.stdout.trim();
     if (hostname.exitCode || !/^[a-f0-9]{12,64}$/.test(id)) throw new Error("无法确认真实容器身份");
     const inspected = deps.inspect(id);
-    if (inspected.Image !== image || !inspected.Id.startsWith(id) || inspected.Mounts.length !== mounts.length
-      || mounts.some((m) => !inspected.Mounts.some((actual) => actual.Source === m.hostPath
-        && actual.Destination === m.sandboxPath && !actual.RW)) || containerEnvLeaks(inspected.Config.Env, deps.imageEnv(image)).length) {
+    const [actual, ...extra] = inspected.Mounts;
+    if (inspected.Image !== image || !inspected.Id.startsWith(id) || !actual || extra.length || actual.Type !== "volume"
+      || actual.Name !== volume || actual.Destination !== "/review" || actual.RW
+      || containerEnvLeaks(inspected.Config.Env, deps.imageEnv(image)).length) {
       throw new Error("实际容器挂载、镜像或 env 不符合只读合同");
     }
     record.container_id = inspected.Id;
+    // 卷内容须与宿主 checkout 一致：同一 head、detached、工作树与 head 无差异且无多余文件。
+    if (JSON.stringify(await volumeSnapshot(handle)) !== JSON.stringify(before)) throw new Error("审阅卷与宿主 checkout 不一致");
     record.phase = "filesystem";
     record.filesystem = await probeReviewFilesystem(handle, folder);
     save(folder, "supervisor.json", record);
@@ -271,7 +349,7 @@ export async function runExternalReview(folder: string, deps: WorkerDependencies
     if (first.type !== "session_meta" || first.payload?.id !== transcript.sessionId) throw new Error("session 日志身份不符");
     writeFileSync(join(folder, "session.jsonl"), log, { mode: 0o600, flag: "wx" });
     record.phase = "checkout-after";
-    record.after = snapshot(launch.checkout);
+    record.after = await volumeSnapshot(handle);
     if (JSON.stringify(record.before) !== JSON.stringify(record.after)) throw new Error("只读 review 后 checkout 变化");
     record.status = "completed"; record.result = output; record.phase = "completed";
   } catch (error) {
@@ -290,6 +368,10 @@ export async function runExternalReview(folder: string, deps: WorkerDependencies
       await handle?.close();
       record.container_closed = handle !== undefined || !creationStarted;
     } catch { record.status = "failed"; record.failure_reason = "ContainerCleanupError"; }
+    // 删卷失败不改审阅结论（容器已关、内容只读）；回执记 volume_removed=false，宿主回收 checkout 时再删。
+    if (volume !== undefined && record.container_closed) {
+      try { deps.volumes.remove(volume); record.volume_removed = true; } catch { record.volume_removed = false; }
+    }
     record.ended_at = new Date().toISOString();
     save(folder, ownsLock || !existsSync(join(folder, "supervisor.lock"))
       ? "receipt.json" : `startup-failure-${process.pid}.json`, record);

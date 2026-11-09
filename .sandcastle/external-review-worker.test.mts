@@ -6,7 +6,7 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { randomUUID } from "node:crypto";
 import { codexWorker } from "./codex-route.mts";
-import { PROMPT_JSON_INSTRUCTION, REVIEW_IMAGE, checkReviewAdmission, rateLimitSignal, readLaunch, reviewMounts, runExternalReview, verifyReviewAdmission, type ReviewLaunch, type WorkerDependencies } from "./external-review-worker.mts";
+import { PROMPT_JSON_INSTRUCTION, REVIEW_IMAGE, REVIEW_VOLUME_LABEL, VOLUME_SNAPSHOT, checkReviewAdmission, dockerReviewVolumes, rateLimitSignal, readLaunch, reviewMounts, reviewSandbox, reviewVolumeName, runExternalReview, snapshot, verifyReviewAdmission, type ReviewLaunch, type ReviewVolumes, type WorkerDependencies } from "./external-review-worker.mts";
 import type { BindMountSandboxHandle } from "@ai-hero/sandcastle";
 
 const image = "sha256:" + "1".repeat(64);
@@ -25,15 +25,74 @@ function fixture(model = "gpt-6.1-sol") {
   return { root, checkout, folder, launch };
 }
 
-test("review 挂载只接受独立 clone，源码与 Git 全部只读", () => {
+/** 替身审阅卷：populate 记下灌入来源，容器里的 Git 读取按该宿主 checkout 作答（卷内容 = 灌入时的 checkout）。 */
+function fakeVolumes(options: { removeFails?: boolean } = {}) {
+  const calls: string[] = [];
+  const volumes: ReviewVolumes = {
+    populate(volume, img, checkout, launchId) { calls.push(`populate ${volume} ${img} ${checkout} ${launchId}`); },
+    remove(volume) { calls.push(`remove ${volume}`); if (options.removeFails) throw new Error("volume in use"); },
+  };
+  return { calls, volumes };
+}
+const volumeMount = (launch: ReviewLaunch, rw = false) =>
+  ({ Type: "volume", Name: reviewVolumeName(launch.launch_id), Source: `/var/lib/docker/volumes/${reviewVolumeName(launch.launch_id)}/_data`, Destination: "/review", RW: rw });
+const snapshotOutput = (checkout: string) => { const s = snapshot(checkout); return [s.head, s.branch, s.status].join("\n") + "\n"; };
+
+test("review 挂载只接受本次 launch 的只读审阅卷，不接受宿主路径", () => {
   const f = fixture();
   try {
-    const mounts = reviewMounts([{ hostPath: f.checkout, sandboxPath: "/review" }], f.checkout);
-    assert(mounts.every((m) => m.readonly));
-    assert(mounts.some((m) => m.sandboxPath === "/review/.git"));
-    assert.throws(() => reviewMounts([{ hostPath: f.checkout, sandboxPath: "/review" }, { hostPath: f.root, sandboxPath: "/host" }], f.checkout));
+    const volume = reviewVolumeName(f.launch.launch_id);
+    assert.deepEqual(reviewMounts(volume), [{ hostPath: volume, sandboxPath: "/review", readonly: true }]);
+    assert.throws(() => reviewMounts(f.checkout));
+    assert.throws(() => reviewMounts("newchanlun-external-review-../x"));
+    assert.throws(() => reviewVolumeName("../../etc"));
     assert.equal(readLaunch(f.folder).model, "gpt-6.1-sol");
   } finally { rmSync(f.root, { recursive: true, force: true }); }
+});
+
+test("审阅 provider 拒绝宿主 bind mount、可写卷与多挂载，并校验镜像 Id", async () => {
+  const volume = reviewVolumeName(randomUUID());
+  assert.throws(() => reviewSandbox("sandcastle:newchanlun", {}), /sha256/);
+  const sandbox = reviewSandbox(image, {});
+  for (const mounts of [[{ hostPath: "/Volumes/AgentStorage/checkout", sandboxPath: "/review", readonly: true }],
+    [{ hostPath: volume, sandboxPath: "/review", readonly: false }],
+    [{ hostPath: volume, sandboxPath: "/review", readonly: true }, { hostPath: "/tmp", sandboxPath: "/host", readonly: true }],
+    [{ hostPath: volume, sandboxPath: "/elsewhere", readonly: true }]]) {
+    assert.throws(() => sandbox.create({ worktreePath: mounts[0]!.hostPath, hostRepoPath: "/x", mounts, env: {} }), /只读审阅卷/);
+  }
+});
+
+test("审阅卷经 docker cp 灌入（不经 bind mount）、改属主为容器用户，已存在的卷不复用", () => {
+  const launchId = randomUUID(); const volume = reviewVolumeName(launchId);
+  const calls: string[][] = [];
+  let present = false;
+  const run = (args: string[]) => {
+    calls.push(args);
+    if (args[0] === "volume" && args[1] === "inspect") { if (!present) throw new Error("no such volume"); return "[]"; }
+    if (args[0] === "create") return "c".repeat(64);
+    if (args[0] === "inspect") return "0";
+    return "";
+  };
+  dockerReviewVolumes(run).populate(volume, image, "/checkouts/run/model", launchId);
+  const owner = `${process.getuid!()}:${process.getgid!()}`;
+  assert.deepEqual(calls, [
+    ["volume", "inspect", volume],
+    ["volume", "create", "--label", `${REVIEW_VOLUME_LABEL}=${launchId}`, volume],
+    ["create", "--network", "none", "--user", "0:0", "-v", `${volume}:/review`, "--entrypoint", "chown", image, "-R", "-h", owner, "/review"],
+    ["cp", "/checkouts/run/model/.", `${"c".repeat(64)}:/review`],
+    ["start", "-a", "c".repeat(64)],
+    ["inspect", "--format", "{{.State.ExitCode}}", "c".repeat(64)],
+    ["rm", "-f", "c".repeat(64)],
+  ]);
+  // 只有辅助容器挂卷，且不带任何宿主路径挂载。
+  assert(calls.every((a) => !a.includes("-v") || a[a.indexOf("-v") + 1] === `${volume}:/review`));
+  present = true; calls.length = 0;
+  assert.throws(() => dockerReviewVolumes(run).populate(volume, image, "/checkouts/run/model", launchId), /已存在/);
+  assert.deepEqual(calls, [["volume", "inspect", volume]]);
+  calls.length = 0;
+  dockerReviewVolumes(run).remove(volume);
+  assert.deepEqual(calls, [["volume", "rm", volume]]);
+  assert.throws(() => dockerReviewVolumes(run).remove("/Volumes/AgentStorage"));
 });
 
 test("显式两家族模型保留旧默认并拒绝路由外模型", () => {
@@ -52,7 +111,8 @@ test("显式两家族模型保留旧默认并拒绝路由外模型", () => {
   assert.throws(() => verifyReviewAdmission({ imageId: image, consume() {} }));
 });
 
-const modes = ["PASS", "BLOCK", "failed", "missing-log", "missing-completed", "write", "bad-mount", "secret-env", "bad-filesystem",
+const modes = ["PASS", "BLOCK", "failed", "missing-log", "missing-completed", "write", "bad-mount", "bind-mount", "volume-mismatch",
+  "volume-remove-fails", "secret-env", "bad-filesystem",
   "over-budget", "over-budget-reject", "timeout-reject", "rate-limited-hang", "rate-limited-final", "rate-limited-exit", "rate-limited-stderr",
   "reconnect-429-recovers"] as const;
 const RECONNECT_429 = "Reconnecting... 1/5 (exceeded retry limit, last status: 429 Too Many Requests)";
@@ -63,12 +123,17 @@ for (const [mode, model] of [...modes.map((m) => [m, "gpt-6.1-sol"] as const),
     const schemaless = model === "kimi-k3.1-pro";
     let closed = false, creates = 0;
     let modelCommand = "";
+    const fake = fakeVolumes({ removeFails: mode === "volume-remove-fails" });
+    const volume = reviewVolumeName(f.launch.launch_id);
     const output = { status: mode === "BLOCK" ? "blocked" : "completed", summary: `VERDICT: ${mode}`, findings: [], validation: [] };
     const handle: BindMountSandboxHandle = {
       worktreePath: "/review",
       async exec(command, options) {
         if (command === "cat /etc/hostname") return { stdout: container.slice(0, 12), stderr: "", exitCode: 0 };
         if (command.startsWith("node -e ")) return { stdout: JSON.stringify({ source_write: mode === "bad-filesystem" ? "ALLOWED" : "EROFS", git_write: "EROFS", host_read: "ENOENT", state_write: "ENOENT" }), stderr: "", exitCode: 0 };
+        if (command === VOLUME_SNAPSHOT) {
+          return { stdout: mode === "volume-mismatch" ? "f".repeat(40) + "\nHEAD\n" : snapshotOutput(f.checkout), stderr: "", exitCode: 0 };
+        }
         if (command.includes("find ")) {
           const sessionsDir = JSON.parse(command.match(/^find (".*?") /)![1]!);
           return { stdout: `${sessionsDir}/2026/10/29/rollout-2026-10-29-${session}.jsonl\n`, stderr: "", exitCode: 0 };
@@ -145,15 +210,16 @@ for (const [mode, model] of [...modes.map((m) => [m, "gpt-6.1-sol"] as const),
       ready: () => image,
       sandbox: () => ({ name: "fixture", env: {}, create: async (options) => {
         creates++;
-        assert(options.mounts.every((m) => m.readonly));
-        assert(options.mounts.every((m) => m.hostPath.startsWith(f.checkout)));
+        assert.deepEqual(options.mounts, [{ hostPath: volume, sandboxPath: "/review", readonly: true }]);
+        assert.equal(options.worktreePath, volume);
+        assert.deepEqual(fake.calls, [`populate ${volume} ${image} ${f.checkout} ${f.launch.launch_id}`], "卷在建容器前灌好");
         assert.deepEqual(options.env, {});
         return handle;
       } }),
       inspect: () => ({ Id: container, Image: image,
-        Mounts: reviewMounts([{ hostPath: f.checkout, sandboxPath: "/review" }], f.checkout)
-          .map((m) => ({ Source: m.hostPath, Destination: m.sandboxPath, RW: mode === "bad-mount" })),
+        Mounts: mode === "bind-mount" ? [{ Type: "bind", Source: f.checkout, Destination: "/review", RW: false }] : [volumeMount(f.launch, mode === "bad-mount")],
         Config: { Env: mode === "secret-env" ? ["GH_TOKEN=fixture"] : [] } }),
+      volumes: fake.volumes,
       imageEnv: () => [], timeoutMs: mode === "timeout-reject" ? 20 : 10000, commandCap: 2, rateLimitStallMs: 100,
     };
     try {
@@ -162,7 +228,12 @@ for (const [mode, model] of [...modes.map((m) => [m, "gpt-6.1-sol"] as const),
       const elapsed = Date.now() - started;
       const receipt = JSON.parse(readFileSync(join(f.folder, "receipt.json"), "utf8"));
       assert.equal(creates, 1); assert(closed);
-      assert.equal(receipt.status, ["PASS", "BLOCK", "reconnect-429-recovers"].includes(mode) ? "completed" : "failed");
+      assert.equal(receipt.status, ["PASS", "BLOCK", "reconnect-429-recovers", "volume-remove-fails"].includes(mode) ? "completed" : "failed");
+      // 每次 launch 恰灌一个卷；容器关闭后删卷，删不掉只记 volume_removed=false，不改结论。
+      assert.deepEqual(fake.calls, [`populate ${volume} ${image} ${f.checkout} ${f.launch.launch_id}`, `remove ${volume}`]);
+      assert.equal(receipt.volume, volume);
+      assert.equal(receipt.volume_removed, mode !== "volume-remove-fails");
+      if (["bind-mount", "bad-mount", "volume-mismatch"].includes(mode)) assert.equal(modelCommand, "", "挂载或卷内容不符时不启动模型");
       if (receipt.status === "completed") {
         assert.match(modelCommand, /(?:^|\s)--skip-git-repo-check(?:\s|$)/);
         assert(modelCommand.includes("-c 'project_doc_max_bytes=0'"));
@@ -235,13 +306,15 @@ test("已有 supervisor 锁时保留原回执并保存本进程启动终态", as
 });
 
 
-test("创建容器结果不明时不能声明已关闭", async () => {
+test("创建容器结果不明时不能声明已关闭，也不删仍可能被占用的卷", async () => {
   const f = fixture();
+  const fake = fakeVolumes();
   const deps: WorkerDependencies = {
     identity: () => ({ head: f.launch.controller_code_head, dirty: "" }),
     ready: () => image,
     sandbox: () => ({ name: "unknown-create", env: {}, create: async () => { throw new Error("unknown create"); } }),
     inspect: () => { throw new Error("must not inspect"); },
+    volumes: fake.volumes,
     imageEnv: () => [], timeoutMs: 10000,
   };
   try {
@@ -250,6 +323,8 @@ test("创建容器结果不明时不能声明已关闭", async () => {
     assert.equal(receipt.status, "failed");
     assert.equal(receipt.phase, "container");
     assert.equal(receipt.container_closed, false);
+    assert.equal(receipt.volume_removed, false);
+    assert.deepEqual(fake.calls.map((c) => c.split(" ")[0]), ["populate"]);
   } finally { rmSync(f.root, { recursive: true, force: true }); }
 });
 
@@ -257,6 +332,7 @@ test("创建容器结果不明时不能声明已关闭", async () => {
 for (const signal of ["SIGTERM", "SIGINT"] as const) {
   test(`容器 create 等待期间 ${signal} 不得启动模型`, async () => {
     const f = fixture();
+    const fake = fakeVolumes();
     let resolveCreate!: (handle: BindMountSandboxHandle) => void;
     let entered!: () => void;
     const creating = new Promise<void>((resolve) => { entered = resolve; });
@@ -276,8 +352,8 @@ for (const signal of ["SIGTERM", "SIGINT"] as const) {
     const deps: WorkerDependencies = {
       identity: () => ({ head: f.launch.controller_code_head, dirty: "" }), ready: () => image,
       sandbox: () => ({ name: "cancel-create", env: {}, create: async () => { entered(); return created; } }),
-      inspect: () => ({ Id: container, Image: image, Mounts: reviewMounts([{ hostPath: f.checkout, sandboxPath: "/review" }], f.checkout)
-        .map((m) => ({ Source: m.hostPath, Destination: m.sandboxPath, RW: false })), Config: { Env: [] } }),
+      inspect: () => ({ Id: container, Image: image, Mounts: [volumeMount(f.launch)], Config: { Env: [] } }),
+      volumes: fake.volumes,
       imageEnv: () => [], timeoutMs: 10000,
     };
     try {
@@ -292,6 +368,7 @@ for (const signal of ["SIGTERM", "SIGINT"] as const) {
       assert.equal(receipt.status, "cancelled");
       assert.equal(receipt.container_closed, true);
       assert.equal(receipt.phase, "container");
+      assert.equal(receipt.volume_removed, true, "取消后容器已关，卷随之删除");
     } finally { rmSync(f.root, { recursive: true, force: true }); }
   });
 }
