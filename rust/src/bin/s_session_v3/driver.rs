@@ -8814,11 +8814,12 @@ mod tests {
                     [json!("startup")],
                     "第{k}代冷臂完整分支入口"
                 );
-                native.conn.assert_complete_matches_cold();
-                // 来源审计跨代增量状态不进入产物，单独与独立全量来源审计 Counts 六字段对拍。
-                let counts = super::super::audit_owner::construction_tests::b2_assert_counts_match_independent_full_source(
-                    &native.conn,
-                );
+                // complete 全量对拍 + 来源审计跨代增量状态（不进入产物）与独立全量来源审计 Counts 六字段对拍；
+                // 两者在同一只读快照上共用一次冷 state::audit（#1890）。
+                let counts =
+                    super::super::audit_owner::construction_tests::assert_complete_and_b2_counts(
+                        &native.conn,
+                    );
                 assert_eq!(
                     native.handle(receipt_request(&e)).unwrap(),
                     reader.handle(receipt_request(&e)).unwrap(),
@@ -8875,7 +8876,7 @@ mod tests {
     /// 与「新 Runtime + 清车道 + oracle」冷全量重算逐位相同；六阶段标记逐代齐全。
     ///
     /// release-only（fix-0089 负责人裁定）：debug 下 O(N²) 超 50 分钟，release 约 1000–1200 s；
-    /// 不缩代数、不削弱比较，由 issue-1488-uo-iter.yml 的 Native 组 release 步与
+    /// 不缩代数、不削弱比较，由 ci.yml 的 release-locks 组与
     /// `.github/1488-uo-release-locks.txt` 以 `--release --ignored --exact` 执行。
     #[cfg(feature = "s_incremental")]
     #[test]
