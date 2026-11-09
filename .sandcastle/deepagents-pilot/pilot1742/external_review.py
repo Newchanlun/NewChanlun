@@ -8,7 +8,7 @@ patch_id 是 merge_base..head 每个改动路径的（路径、前后 mode、前
 即补丁内容逐字相同时才相等。不用 `git patch-id`：它忽略空白，缩进改动会被误判为同一补丁。
 main 前进而 PR 改动的文件在 main 侧未变时 patch_id 不变；冲突解决或 main 也改了同一文件时会变，必须重审。
 残余风险：同一补丁在新 base 上语义可能不同（例如 main 改了被调用方）。重审时模型会读新 base 上的相关源码，
-沿用时不读。CI 会在新 head 上重跑，但 CI 不是 main 的必需检查，失败不拦合入；要靠 CI 兜住这一点，需把 CI 设为必需检查。
+沿用时不读。CI 会在新 head 上重跑；汇总门 ci-ok 是 main 的必需检查（#1742 裁定），CI 失败会拦住合入。
 """
 from __future__ import annotations
 
@@ -504,19 +504,7 @@ class ExternalReview:
             raise ValueError("attempt 必须为正整数")
         if self.gateway is None:
             raise IdentityError("在线独审需要宿主 App 客户端")
-        data = load_target(self.gateway, number)
-        try:
-            merge_base = _git(self.source, "merge-base", "--all", data["base_sha"], data["head_sha"]).decode().splitlines()
-            if len(merge_base) != 1:
-                raise IdentityError("merge-base 不唯一")
-            _git(self.source, "cat-file", "-e", f'{data["head_sha"]}^{{commit}}')
-            patch = patch_identity(self.source, merge_base[0], data["head_sha"])
-        except subprocess.CalledProcessError:
-            raise IdentityError("needs_source_sync") from None
-        head = check_controller()
-        target = ReviewTarget(**data, merge_base_sha=str(parse_sha(merge_base[0])), run_id=str(uuid.uuid4()),
-                              attempt=attempt, policy_version=POLICY, controller_code_head=head,
-                              registered_at_ns=time.time_ns(), patch_id=patch, review_contract=REVIEW_CONTRACT)
+        target = self._frozen(load_target(self.gateway, number), attempt)
         folder = self.state_root / "runs" / target.key
         # 以有效 target.json 判断是否已登记：_lock 会先建目录，建目录后、写 target.json 前中断时仍须准入。
         if not (folder / "target.json").exists():
@@ -533,6 +521,30 @@ class ExternalReview:
             with self._pr_lock(target.pr_number):
                 _save(folder / "target.json", asdict(target))
         return target
+
+    def _frozen(self, data: dict[str, Any], attempt: int) -> ReviewTarget:
+        """按 load_target 的结果冻结出 ReviewTarget（merge-base、补丁身份、controller 身份），不登记。"""
+        try:
+            merge_base = _git(self.source, "merge-base", "--all", data["base_sha"], data["head_sha"]).decode().splitlines()
+            if len(merge_base) != 1:
+                raise IdentityError("merge-base 不唯一")
+            _git(self.source, "cat-file", "-e", f'{data["head_sha"]}^{{commit}}')
+            patch = patch_identity(self.source, merge_base[0], data["head_sha"])
+        except subprocess.CalledProcessError:
+            raise IdentityError("needs_source_sync") from None
+        head = check_controller()
+        return ReviewTarget(**data, merge_base_sha=str(parse_sha(merge_base[0])), run_id=str(uuid.uuid4()),
+                            attempt=attempt, policy_version=POLICY, controller_code_head=head,
+                            registered_at_ns=time.time_ns(), patch_id=patch, review_contract=REVIEW_CONTRACT)
+
+    def would_reuse(self, data: dict[str, Any]) -> bool:
+        """这个 head 现在登记新 attempt 时，reuse_source 能否找到可沿用的 PASS（同 patch_id、policy、contract）。
+        只读：不登记、不跑部署准入，供 sweep 排派发先后；沿不沿用仍由子进程登记与发布时判定。
+        对象不在本机库、controller 不干净或任何读失败都返回 False。"""
+        try:
+            return self.reuse_source(self._frozen(data, 0)) is not None  # attempt 0 从不登记，撞不上已有 run 目录
+        except (OSError, ValueError, KeyError, TypeError, IdentityError, subprocess.CalledProcessError):
+            return False
 
     @contextmanager
     def _pr_lock(self, number: int) -> Iterator[None]:

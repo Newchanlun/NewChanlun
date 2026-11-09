@@ -13,6 +13,7 @@ import pytest
 from conftest import git
 
 from pilot1742 import external_review as module
+from pilot1742 import patch_read
 from pilot1742.delivery import EffectPending, RepoGateway, Stale
 from pilot1742.external_review import (
     CONTEXT,
@@ -30,7 +31,7 @@ from pilot1742.github_app import (
     IdentityError,
     OutcomeUnknown,
 )
-from pilot1742.patch_read import FrozenPatch, reads_candidate_patch
+from pilot1742.patch_read import WHOLE_PATCH, FrozenPatch, reads_candidate_patch
 
 
 class Gateway:
@@ -708,6 +709,11 @@ def _diff(flags: str = "", tail: str = "") -> list:
     return [lambda t: _command(f"git diff {flags}{' ' if flags else ''}{t.merge_base_sha} {t.head_sha}{tail}")]
 
 
+def _meta(t) -> str:
+    """`git show --no-patch --format='%H%n%an%n%B' <head>` 的输出；提交说明里恰好有改动行 `+0`、`1`。"""
+    return f"{t.head_sha}\nSmoke\nfix: quote the change\n\n+0\n1\n"
+
+
 FAKE = "f" * 40
 NOT_A_PATCH_READ = {
     "echo": [lambda t: _command("echo hi")],
@@ -872,6 +878,82 @@ NOT_A_PATCH_READ = {
     "grep-count": [lambda t: _command(f"git diff {t.merge_base_sha} {t.head_sha} -- nope | grep -c . | cat", output="0\n")],
     "grep-only-matching": [lambda t: _command(
         f"git show {t.head_sha}:'x+0' 2>&1 | grep -o '+0'", output="+0\n")],
+    # PR #2018 run 45a4c22b：整个 PR 的 diff 之后接只印提交元数据的 git 段可以算，证据只在开头那段 diff 里找
+    "diff-empty-then-show-metadata": [lambda t: _command(
+        f"git diff {t.merge_base_sha} {t.head_sha} -- nope; git show --no-patch --format='%H%n%an%n%B' {t.head_sha}",
+        output=_meta(t))],
+    "diff-failed-then-show-metadata": [lambda t: _command(
+        f"git diff {t.merge_base_sha} {t.head_sha}; git show --no-patch --format='%H%n%B' {t.head_sha}",
+        output=f"fatal: unable to read {t.head_sha}\n{_meta(t)}{LANE_PATCH}")],
+    # #2022 kimi BLOCK：pathspec 让 diff 什么都不印，提交说明写成补丁的样子就成了「开头那段 diff」
+    "kimi-pathspec-then-patch-shaped-body": [lambda t: _command(
+        f"git diff {t.merge_base_sha} {t.head_sha} -- nope; git show --no-patch --format=%B {t.head_sha}",
+        output=LANE_PATCH)],
+    # #2022 第二轮 kimi BLOCK：前一段 diff 悄悄失败（全局选项指错仓库、报错被丢），开头就成了 `%B` 的输出
+    "kimi-git-dir-stderr-dropped-then-show": [lambda t: _command(
+        f"git --git-dir=/nonexistent diff {t.merge_base_sha} {t.head_sha} 2>/dev/null; "
+        f"git show -s --format=%B {t.head_sha}", output=LANE_PATCH)],
+    "diff-stderr-dropped-then-show": [lambda t: _command(
+        f"git diff {t.merge_base_sha} {t.head_sha} 2>/dev/null; git show -s --format=%B {t.head_sha}",
+        output=LANE_PATCH)],
+    "diff-elsewhere-then-show": [lambda t: _command(
+        f"git -C /tmp diff {t.merge_base_sha} {t.head_sha}; git show -s --format=%B {t.head_sha}", output=LANE_PATCH)],
+    "diff-work-tree-then-show": [lambda t: _command(
+        f"git --work-tree=/tmp diff {t.merge_base_sha}; git show -s --format=%B {t.head_sha}", output=LANE_PATCH)],
+    "diff-stderr-merged-then-show": [lambda t: _command(
+        f"git diff {t.merge_base_sha} {t.head_sha} 2>&1; git show -s --format=%B {t.head_sha}", output=LANE_PATCH)],
+    # #2022 第三轮 opus BLOCK：只有「左 merge-base、右 head」才是整份补丁；别的形状在复合形式里不算
+    **{f"compound-{name}": [lambda t, rev=rev: _command(
+        f"git diff {rev(t)}; git show -s --format=%B {t.head_sha}", output=LANE_PATCH)] for name, rev in {
+        "reversed": lambda t: f"{t.head_sha} {t.merge_base_sha}",
+        "HEAD-triple-dot": lambda t: "HEAD...",
+        "at-triple-dot": lambda t: "@...",
+        "triple-dot-mb": lambda t: f"...{t.merge_base_sha}",
+    }.items()},
+    "diff-option-then-show": [lambda t: _command(
+        f"git diff -R {t.merge_base_sha} {t.head_sha}; git show -s --format=%B {t.head_sha}", output=LANE_PATCH)],
+    "diff-parent-then-show": [lambda t: _command(
+        f"git diff {t.head_sha}~1 {t.head_sha}; git show -s --format=%B {t.head_sha}", output=LANE_PATCH)],
+    # #2022 opus BLOCK：后一段按黑名单放行时未知选项默认通过；下面这些在整个 PR 的 diff 之后也一律不认
+    "opus-log-binary": [lambda t: _command(
+        f"git diff {t.merge_base_sha} {t.head_sha}; git log --format= --binary {t.merge_base_sha}", output=LANE_PATCH)],
+    "opus-show-linear-break": [lambda t: _command(
+        f"git diff {t.merge_base_sha} {t.head_sha}; git log -s --format=%H --show-linear-break=+0 {t.head_sha}",
+        output=LANE_PATCH)],
+    **{f"trailing-{name}": [lambda t, tail=tail: _command(
+        f"git diff {t.merge_base_sha} {t.head_sha}; git {tail.format(h=t.head_sha, b=t.merge_base_sha)}",
+        output=LANE_PATCH)] for name, tail in {
+        "format-literal-text": "show -s --format='diff --git a/changed-0 b/changed-0' {h}",
+        "format-hex-char": "show -s --format=%x2b0 {h}",
+        "date-format-text": "log -1 -s --format=%ad --date=format:+0 {h}",
+        "show-blob": "show --no-patch --format=%H {h}:changed-0",
+        "unknown-object": "show --no-patch --format=%H " + "e" * 40,
+        "ancestor": "show --no-patch --format=%B {h}~1",
+        "range": "log -s --format=%B {b}..{h}",
+        "log-patch": "log -p -s --format=%B {h}",
+        "show-cc": "show --no-patch --cc --format=%B {h}",
+        "stat": "show --stat --format=%B {h}",
+        "name-only": "show -s --name-only --format=%B {h}",
+        "count": "log -1 -s --format=%B {h}",
+        "config": "-c format.pretty=format:+0 show -s --format=%B {h}",
+        "no-quiet": "show --format=%B {h}",
+        "no-format": "show -s {h}",
+        "two-formats": "show -s --format=%H --format=%B {h}",
+        "named-pretty": "show -s --pretty=fuller {h}",
+        "redirected-in": "log -s --format=%B --stdin </tmp/revs",
+        "piped": "show -s --format=%B {h} | head",
+        "then-echo": "show -s --format=%B {h}; echo +0",
+    }.items()},
+    "diff-or-show": [lambda t: _command(
+        f"git diff {t.merge_base_sha} {t.head_sha} || git show --no-patch --format=%B {t.head_sha}", output=_meta(t))],
+    "piped-diff-then-show": [lambda t: _command(
+        f"git diff {t.merge_base_sha} {t.head_sha} | cat; git show --no-patch --format=%B {t.head_sha}",
+        output=LANE_PATCH)],
+    "show-blob-then-log": [lambda t: _command(
+        f"git show {t.head_sha}:changed-0; git log -1 --format=%B {t.head_sha}", output="0\n")],
+    "diff-and-log-range-piped": [lambda t: _command(
+        f"git diff {t.merge_base_sha} {t.head_sha} && git log --format='%H %s' --date=iso "
+        f"{t.merge_base_sha}..{t.head_sha} 2>&1 | head -40", output=LANE_PATCH + _meta(t))],
 }
 PATCH_READ = {
     "range": [lambda t: _command(f"cd /review && git diff --no-ext-diff --no-textconv {t.merge_base_sha} {t.head_sha} | head")],
@@ -914,6 +996,13 @@ PATCH_READ = {
     "filter-chain": [lambda t: _command(
         f"cd /review && B={t.merge_base_sha}; export H={t.head_sha}; git diff --no-ext-diff $B $H 2>&1 "
         "| nl -ba | grep -n -v -e zzz | sed -n '1,400p' | head -n 400 | tail -n +1 | cat -n")],
+    # PR #2018 run 45a4c22b opus 的原样命令（之前 13 条同形读取都被判未读，见 PR 正文的重放）
+    "diff-then-show-metadata": [lambda t: _command(
+        f"cd /review && git diff --no-ext-diff --no-textconv {t.merge_base_sha} {t.head_sha}; "
+        f"git show --no-patch --format='%H%n%an%n%B' {t.head_sha}", output=LANE_PATCH + _meta(t))],
+    "diff-and-show-short-sha": [lambda t: _command(
+        f"git diff --no-color -U5 {t.merge_base_sha} {t.head_sha} && git log -s --pretty=tformat:'%h %an %s' "
+        f"{t.head_sha[:8]}", output=LANE_PATCH + _meta(t))],
 }
 
 
@@ -968,6 +1057,77 @@ def test_common_line_in_unchanged_file_is_not_a_patch_read():
     # merge-base..head \u7684\u8f93\u51fa\u5168\u51fa\u81ea\u51bb\u7ed3\u8865\u4e01\uff08\u4e0a\u4e0b\u6587\u884c\u4e5f\u662f\u6539\u52a8\u6587\u4ef6\u7684\u5185\u5bb9\uff09
     assert reads_candidate_patch(f"/bin/bash -lc 'git diff {merge_base} {head} | grep -n annotations'",
                                  "7:+from __future__ import annotations\n", patch)
+
+
+# PR #2018 run 45a4c22b a1：opus 的读取被判未读、两个 PASS 整轮记 error。冻结补丁与输出取自真实日志（截短）
+PR2018_HEAD, PR2018_MB = "0b07c6b0" * 5, "83c4d9c9" * 5  # 真实 SHA 的前缀；整串 40 位十六进制会被 DevSkim DS173237 当成密钥
+PR2018_CHANGED = "  #   rust-test-production-session    生产入口测试 + backtest_bin feature 的库测试（#1875 合并）"
+PR2018_FROZEN = (
+    "diff --git a/.github/workflows/ci.yml b/.github/workflows/ci.yml\nindex 1992713934..cd7c2277d1 100644\n"
+    "--- a/.github/workflows/ci.yml\n+++ b/.github/workflows/ci.yml\n@@ -228 +228 @@ jobs:\n"
+    "-  #   rust-test-backtest-bin          backtest_bin feature 的库测试\n"
+    f"+{PR2018_CHANGED}\n")
+PR2018_COMMAND = (f"/bin/bash -lc \"cd /review && git diff --no-ext-diff --no-textconv {PR2018_MB} {PR2018_HEAD}; "
+                  f"git show --no-patch --format='%H%n%an%n%B' {PR2018_HEAD}\"")
+PR2018_DIFF = (
+    "diff --git a/.github/workflows/ci.yml b/.github/workflows/ci.yml\nindex 1992713..cd7c227 100644\n"
+    "--- a/.github/workflows/ci.yml\n+++ b/.github/workflows/ci.yml\n@@ -226,3 +226,3 @@ jobs:\n"
+    "   #   rust-test-s-session-extras (组) s_session 的 TB-02-C、库/集成测试、TestOnly 特性增量、v3 history（矩阵作业\n"
+    "   #                                   rust-test-s-session-extra-groups，结论由 ci-ok 直接判定）\n"
+    "-  #   rust-test-backtest-bin          backtest_bin feature 的库测试\n"
+    f"+{PR2018_CHANGED}\n")
+# 提交说明原样引用了改动行：diff 没印出东西时，这一行只出现在 git show 的输出里
+PR2018_SHOW = f"{PR2018_HEAD}\nSmoke\nci(#1875): rust-test-backtest-bin 并入 rust-test-production-session\n\n{PR2018_CHANGED}\n"
+
+
+def test_diff_then_commit_metadata_reads_patch_from_diff_segment_only():
+    """`git diff <mb> <head>; git show --no-patch --format=… <head>`：输出是两段按序拼接，证据只认开头那段 diff。"""
+    patch = FrozenPatch.from_diff(PR2018_HEAD, PR2018_MB, PR2018_MB, PR2018_FROZEN)
+    assert reads_candidate_patch(PR2018_COMMAND, PR2018_DIFF + PR2018_SHOW, patch)
+    # 只有第二段跑出了东西（diff 报错或没印内容，`;` 让整条命令照样 exit 0）：提交说明里的改动行不算读到补丁
+    assert not reads_candidate_patch(PR2018_COMMAND, PR2018_SHOW, patch)
+    assert not reads_candidate_patch(PR2018_COMMAND, f"fatal: bad object {PR2018_HEAD}\n{PR2018_SHOW}", patch)
+    only_show = f"/bin/bash -lc \"cd /review && git show --no-patch --format='%H%n%an%n%B' {PR2018_HEAD}\""
+    assert not reads_candidate_patch(only_show, PR2018_DIFF + PR2018_SHOW, patch)
+    # #2022 kimi BLOCK：带 pathspec 的 diff 可以什么都不印，提交说明里写成补丁样子的文字就会排在开头
+    kimi = (f"/bin/bash -lc \"git diff {PR2018_MB} {PR2018_HEAD} -- nope; "
+            f"git show --no-patch --format=%B {PR2018_HEAD}\"")
+    assert not reads_candidate_patch(kimi, PR2018_DIFF, patch)
+    # #2022 opus BLOCK：`--binary` 隐含 `--patch`，`--show-linear-break` 印审查员写的文字；后一段只认白名单
+    for tail in (f"git log --format= --binary {PR2018_MB}",
+                 f"git log -s --format=%H --show-linear-break=+x {PR2018_HEAD}"):
+        command = f"/bin/bash -lc \"git diff {PR2018_MB} {PR2018_HEAD}; {tail}\""
+        assert not reads_candidate_patch(command, PR2018_DIFF, patch)
+    # #2022 第二轮 kimi BLOCK：diff 指错仓库、报错丢进 /dev/null，开头只剩 `%B`（这里让提交说明长成补丁的样子）
+    for leading in (f"git --git-dir=/nonexistent diff {PR2018_MB} {PR2018_HEAD} 2>/dev/null",
+                    f"git diff {PR2018_MB} {PR2018_HEAD} 2>/dev/null", f"git -C /tmp diff {PR2018_MB} {PR2018_HEAD}"):
+        command = f"/bin/bash -lc \"{leading}; git show -s --format=%B {PR2018_HEAD}\""
+        assert not reads_candidate_patch(command, PR2018_DIFF, patch)
+    allowed_config = (f"/bin/bash -lc \"git -c core.quotepath=false diff {PR2018_MB} {PR2018_HEAD}; "
+                      f"git show -s --format=%B {PR2018_HEAD}\"")
+    assert reads_candidate_patch(allowed_config, PR2018_DIFF + PR2018_SHOW, patch)
+    # 没有后一段时照旧按整段输出判
+    alone = f"/bin/bash -lc 'git diff --no-ext-diff --no-textconv {PR2018_MB} {PR2018_HEAD}'"
+    assert reads_candidate_patch(alone, PR2018_DIFF, patch)
+
+
+@pytest.mark.parametrize("shape", ["reversed", "HEAD...", "@...", "...mb"])
+def test_only_merge_base_left_head_right_is_whole_patch(shape):
+    """#2022 第三轮 opus BLOCK：反向、`HEAD...`、`@...`、`...<mb>` 不是整份冻结补丁的读取，复合形式里也不算。"""
+    rev = {"reversed": f"{PR2018_HEAD} {PR2018_MB}", "HEAD...": "HEAD...", "@...": "@...", "...mb": f"...{PR2018_MB}"}[shape]
+    assert patch_read._patch_read(f"/bin/bash -lc 'git diff {rev}'", PR2018_HEAD, PR2018_MB, PR2018_MB) != WHOLE_PATCH
+    patch = FrozenPatch.from_diff(PR2018_HEAD, PR2018_MB, PR2018_MB, PR2018_FROZEN)
+    command = f"/bin/bash -lc \"git diff {rev}; git show -s --format=%B {PR2018_HEAD}\""
+    assert not reads_candidate_patch(command, PR2018_DIFF, patch)
+
+
+@pytest.mark.parametrize("rev", [f"{PR2018_MB} {PR2018_HEAD}", PR2018_MB, f"{PR2018_MB}..{PR2018_HEAD}",
+                                 f"{PR2018_MB}...{PR2018_HEAD}", f"{PR2018_MB[:8]}..HEAD"])
+def test_merge_base_left_head_right_is_whole_patch(rev):
+    assert patch_read._patch_read(f"/bin/bash -lc 'git diff {rev}'", PR2018_HEAD, PR2018_MB, PR2018_MB) == WHOLE_PATCH
+    patch = FrozenPatch.from_diff(PR2018_HEAD, PR2018_MB, PR2018_MB, PR2018_FROZEN)
+    command = f"/bin/bash -lc \"git diff {rev}; git show -s --format=%B {PR2018_HEAD}\""
+    assert reads_candidate_patch(command, PR2018_DIFF + PR2018_SHOW, patch)
 
 
 def test_unreadable_frozen_patch_is_failed_not_raised(lane, monkeypatch):

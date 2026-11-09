@@ -28,6 +28,14 @@ mod tb03c_transfer;
 mod voice;
 pub use service::cli;
 
+/// 单写者持久库的打开前件（本地文件系统、WAL、synchronous=FULL、fullfsync 及核验）。
+/// X 模拟库保存「S 只授权一次」的状态，与 E 共用同一实现，返回实际读到的存储证据。
+pub fn open_durable_db(
+    db: &std::path::Path,
+) -> Result<(rusqlite::Connection, serde_json::Value), String> {
+    store::open(db, false)
+}
+
 #[cfg(test)]
 mod domain_event_tests;
 #[cfg(test)]
@@ -62,6 +70,16 @@ mod tb03c_kill_tests;
 mod tb03c_rf01_tests;
 #[cfg(test)]
 mod tb03c_v2_kill_tests;
+
+/// 容量 epoch 的累计差量复用 ADR0032 唯一配额算法；不复用 E 的投影清单名分。
+pub(crate) fn simulation_increment(
+    from: i64,
+    to: i64,
+    weights: &[i64],
+    ranks: &[usize],
+) -> Result<Vec<i64>, String> {
+    allocation::increments(from, to, weights, ranks)
+}
 
 /// 测试专用：写出桩脚本并设为可执行。内容先在本进程写到暂存文件，再由 `/bin/cp` 子进程复制成
 /// 真正被执行的文件：本进程从不持有该文件的写句柄，并行测试线程 fork 出的子进程就不会继承它，
