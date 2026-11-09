@@ -837,7 +837,8 @@ def _serve(args: argparse.Namespace, store: ClaimStore, cutover_store: CutoverSt
     sweep_round = None
     if args.review_sweep and review_key is not None:
         from .review_sweep import serve_round
-        sweep_round = serve_round(review_key, auto_merge=args.review_sweep_auto_merge)
+        sweep_round = serve_round(review_key, auto_merge=args.review_sweep_auto_merge,
+                                  max_running=args.review_sweep_max_running)
     client: GitHubAppClient | None = None
     try:
         while True:
@@ -910,6 +911,8 @@ def main(argv: list[str] | None = None) -> int:
                             "审查身份文件（external_review.IDENTITY_CONFIG）存在时必须给")
     serve.add_argument("--review-sweep-auto-merge", action="store_true",
                        help="review_sweep 追平队首，并在精确 head 双门全绿时带 sha 合入；须与 --review-sweep 同用")
+    serve.add_argument("--review-sweep-max-running", type=int, default=1,
+                       help="HOST 上同时在跑的审查上限（默认 1；操作员手动起的 review-pr 也算）；须与 --review-sweep 同用")
     cutover = sub.add_parser("cutover", help="全局冻结排空证据；不执行生产切换")
     cutover.add_argument("operation", choices=("snapshot", "pending", "audit-release", "verify", "record"))
     cutover.add_argument("--snapshot", type=Path)
@@ -960,6 +963,10 @@ def main(argv: list[str] | None = None) -> int:
                 raise ValueError("poll-seconds 须为正数")
             if args.review_sweep_auto_merge and not args.review_sweep:
                 raise ValueError("--review-sweep-auto-merge 须与 --review-sweep 同用")
+            if args.review_sweep_max_running < 1:
+                raise ValueError("--review-sweep-max-running 须为正整数")
+            if args.review_sweep_max_running != 1 and not args.review_sweep:
+                raise ValueError("--review-sweep-max-running 须与 --review-sweep 同用")
             review_key = None
             if args.review_sweep:
                 review_key = review_sweep_key(args.private_key, args.review_private_key)

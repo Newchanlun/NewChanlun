@@ -680,10 +680,11 @@ def fetcher(source: Path, url: str = f"https://github.com/{REPO}.git") -> Sync:
     return sync
 
 
-def serve_round(private_key: Path, *, auto_merge: bool = False) -> ServeRound:
-    """executor serve 用的钩子。max_running=1：HOST 上同时只跑一个审查，操作员手动起的 review-pr 也算（reviewing）。"""
+def serve_round(private_key: Path, *, auto_merge: bool = False, max_running: int = 1) -> ServeRound:
+    """executor serve 用的钩子。max_running 默认 1：HOST 上同时在跑的审查不超过它，操作员手动起的 review-pr 也算
+    （reviewing）。同一 PR 有活进程就不再派（decide 的 running）；各审查子进程照常各自过空间与额度准入。"""
     lane = ExternalReview(None)
-    return ServeRound(Sweep(GhCli(), lane, spawner(private_key), max_running=1, auto_merge=auto_merge,
+    return ServeRound(Sweep(GhCli(), lane, spawner(private_key), max_running=max_running, auto_merge=auto_merge,
                             sync=fetcher(lane.source)))
 
 

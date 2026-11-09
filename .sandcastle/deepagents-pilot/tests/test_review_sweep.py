@@ -692,9 +692,11 @@ def test_serve_round_survives_unreadable_source_and_names_it(lane, capsys, broke
 
 
 def test_serve_round_hook_is_single_flight_with_sync(tmp_path):
-    """serve 的钩子：HOST 同时只跑一个审查（reviewing 也认操作员手动起的 review-pr），并注入补对象的 sync。"""
+    """serve 的钩子：代码默认 HOST 同时只跑一个审查（reviewing 也认操作员手动起的 review-pr），并注入补对象的 sync；
+    上限由 --review-sweep-max-running 传入。"""
     hook = module.serve_round(tmp_path / "k.pem", auto_merge=True)
     assert hook.sweep.max_running == 1 and hook.sweep.auto_merge is True and hook.sweep.sync is not None
+    assert module.serve_round(tmp_path / "k.pem", max_running=3).sweep.max_running == 3
     assert module.serve_round(tmp_path / "k.pem", auto_merge=False).sweep.auto_merge is False
 
 
@@ -705,6 +707,64 @@ def test_manual_review_pr_on_host_holds_the_single_flight(lane):
     host.rows.append((7, 7, "S", "python -m pilot1742.external_review review-pr --pr 1999 --attempt 1 --private-key x"))
     actions = sweep.tick()
     assert acts(actions, 1810) == ["queued"] and acts(actions, 1811) == ["queued"] and host.spawned == []
+
+
+def _same_head_pulls(lane, github, numbers):
+    """同仓、同 head 的其他 PR（对象都在本机库里，可直接派审）。"""
+    for number in numbers:
+        other = copy.deepcopy(lane.gateway.pr)
+        other["number"] = number
+        github.extra_pulls.append(other)
+
+
+def test_concurrent_cap_launches_at_most_n_and_never_twice_for_one_pr(lane):
+    """max_running=3：一轮最多派 3 个；下一轮在跑的报 running、不重派，其余仍排队，同一 PR 始终至多一个进程。"""
+    github = FakeGitHub(lane)
+    _same_head_pulls(lane, github, [1811, 1812, 1813, 1814])
+    sweep, host, _ = make(lane, run=False, github=github, max_running=3)
+    first = sweep.tick()
+    assert [a["pr"] for a in first if a["action"] == "launch"] == [1810, 1811, 1812]
+    assert [a["pr"] for a in first if a["action"] == "queued"] == [1813, 1814]
+    second = sweep.tick()
+    assert [a["pr"] for a in second if a["action"] == "running"] == [1810, 1811, 1812]
+    assert [a["pr"] for a in second if a["action"] == "queued"] == [1813, 1814]
+    assert [number for number, _, _ in host.spawned] == [1810, 1811, 1812]
+    host.rows = [row for row in host.rows if " --pr 1811 " not in row[3] + " "]  # 1811 审完退出：让出一个名额
+    third = sweep.tick()
+    assert acts(third, 1813) == ["launch"] and acts(third, 1814) == ["queued"]
+    assert len({number for number, _, _ in host.spawned}) == len(host.spawned) == 4
+
+
+def test_concurrent_cap_counts_manual_review_pr(lane):
+    github = FakeGitHub(lane)
+    _same_head_pulls(lane, github, [1811, 1812])
+    sweep, host, _ = make(lane, run=False, github=github, max_running=3)
+    host.rows.append((7, 7, "S", "python -m pilot1742.external_review review-pr --pr 1999 --attempt 1 --private-key x"))
+    actions = sweep.tick()
+    assert [a["pr"] for a in actions if a["action"] == "launch"] == [1810, 1811]
+    assert acts(actions, 1812) == ["queued"]
+
+
+def test_space_admission_refusal_holds_with_concurrency(lane, monkeypatch):
+    """并发不绕过准入：子进程在登记前被空间准入拒绝时，不登记 attempt、不写状态；下一轮同一 attempt 退避、不重派。"""
+    from pilot1742.external_review import IdentityError
+    refused = []
+
+    def no_space(target):
+        refused.append(target.pr_number)
+        raise IdentityError("空间不足：测试")
+    monkeypatch.setattr(lane, "admit_space", no_space)
+    host = Host(lane)
+
+    def child(number, attempt, head, log):  # 子进程：review-pr 失败即退出，sweep 只拿到 pid
+        host.spawned.append((number, attempt, head))
+        with pytest.raises(IdentityError):
+            lane.review_pr(number, attempt)
+        return 4000 + len(host.spawned)
+    sweep = Sweep(FakeGitHub(lane), lane, child, state_root=lane.state_root, rows=lambda: [], max_running=3)
+    assert acts(sweep.tick()) == ["launch"]
+    assert refused == [1810] and lane.status(1810) == [] and lane.gateway.sent == []
+    assert acts(sweep.tick()) == ["launch-backoff"] and len(host.spawned) == 1
 
 
 def test_fetcher_fills_objects_without_touching_refs(lane, tmp_path):
@@ -759,11 +819,12 @@ def test_executor_serve_runs_one_sweep_round_per_serve_round(monkeypatch, tmp_pa
     rounds, built = [], []
     cli, argv = _fake_serve(monkeypatch, tmp_path, rounds=rounds)
     monkeypatch.setattr(module, "serve_round",
-                        lambda key, auto_merge: built.append((key, auto_merge)) or (lambda: rounds.append("sweep")))
+                        lambda key, auto_merge, max_running: built.append((key, auto_merge, max_running))
+                        or (lambda: rounds.append("sweep")))
     with pytest.raises(_StopServe):
-        cli.main(argv + ["--review-sweep", "--review-sweep-auto-merge"])
+        cli.main(argv + ["--review-sweep", "--review-sweep-auto-merge", "--review-sweep-max-running", "3"])
     assert rounds == ["sweep", "intake"] * 3                      # 每轮一次，排在派票前
-    assert built == [(tmp_path / "k.pem", True)]
+    assert built == [(tmp_path / "k.pem", True, 3)]
 
 
 def test_executor_serve_without_flag_has_no_sweep_and_auto_merge_needs_sweep(monkeypatch, tmp_path):
@@ -774,6 +835,8 @@ def test_executor_serve_without_flag_has_no_sweep_and_auto_merge_needs_sweep(mon
         cli.main(argv)
     assert rounds == ["intake"] * 3
     assert cli.main(argv + ["--review-sweep-auto-merge"]) == 2
+    assert cli.main(argv + ["--review-sweep-max-running", "3"]) == 2      # 也须与 --review-sweep 同用
+    assert cli.main(argv + ["--review-sweep", "--review-sweep-max-running", "0"]) == 2
 
 
 def test_deployed_executor_plist_turns_sweep_and_auto_merge_on():
@@ -785,6 +848,7 @@ def test_deployed_executor_plist_turns_sweep_and_auto_merge_on():
     args = plistlib.loads(plist.read_bytes())["ProgramArguments"]
     assert args[args.index("serve"):args.index("serve") + 2] == ["serve", "--loop"]
     assert "--review-sweep" in args and "--review-sweep-auto-merge" in args
+    assert args[args.index("--review-sweep-max-running") + 1] == "3"
 
 
 def test_auto_merge_is_off_unless_explicitly_enabled(monkeypatch, tmp_path):
@@ -796,7 +860,7 @@ def test_auto_merge_is_off_unless_explicitly_enabled(monkeypatch, tmp_path):
                         lambda key, **kw: built.append(kw) or (lambda: rounds.append("sweep")))
     with pytest.raises(_StopServe):
         cli.main(argv + ["--review-sweep"])
-    assert built == [{"auto_merge": False}]
+    assert built == [{"auto_merge": False, "max_running": 1}]
     assert real_serve_round(tmp_path / "k.pem").sweep.auto_merge is False
     assert module.Sweep(FakeGitHub(None), None, lambda *a: 0).auto_merge is False
 

@@ -12,6 +12,7 @@
         <string>--workers-log</string><string>__REPO__/.sandcastle/logs/workers.jsonl</string>
         <string>--review-sweep</string>
         <string>--review-sweep-auto-merge</string>
+        <string>--review-sweep-max-running</string><string>3</string>
         <string>--review-private-key</string><string>__REVIEW_PRIVATE_KEY_PATH__</string>
     </array>
     <key>WorkingDirectory</key><string>__REPO__</string>
