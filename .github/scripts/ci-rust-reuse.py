@@ -75,6 +75,10 @@ def find_reuse(api, repo: str, branch: str, run_id: int, key: str, ours: str, ba
         # 只认比本次早创建的 run（run id 单调递增；重跑沿用原 id）：它当时的 base 不晚于本次 base，上面第 2 条才覆盖得到。
         if run["id"] >= run_id or head_repo.get("id") != run["repository"]["id"]:
             continue
+        # 那次 run 的 workflow 来自 merge(head, 目标分支)：目标分支必须是本仓库 main，否则改过 ci.yml 的旁路 base 能伪造凭据。
+        prs = run.get("pull_requests") or []
+        if not prs or any(p["base"]["ref"] != "main" or p["base"]["repo"]["id"] != run["repository"]["id"] for p in prs):
+            continue
         artifacts = api(f"repos/{repo}/actions/runs/{run['id']}/artifacts?name={name}")["artifacts"]
         if not any(a["name"] == name and not a["expired"] for a in artifacts):
             continue

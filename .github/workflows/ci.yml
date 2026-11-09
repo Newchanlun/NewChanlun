@@ -1469,14 +1469,14 @@ jobs:
               sys.exit(f"CI 未通过：{bad}，changes={results.get('changes')}，rust={rust}")
           PY
       # #1875 同 PR 复用：全绿时记下这次 Rust 输入的指纹，后续同分支 run 指纹相同就不重跑（见 ci-rust-reuse.py）。
-      #   rust_key 只在 Rust 作业真跑了或复用了时非空；p2m 跳过 Rust 的 run 不记。
+      #   只在 Rust 作业真跑过时记：复用的 run 不再续传，凭据最多活 7 天（stable 工具链不在指纹里，不能无限续命）。
       - name: Record green Rust inputs
-        if: github.event_name == 'pull_request' && needs.changes.outputs.rust_key != ''
+        if: github.event_name == 'pull_request' && needs.changes.outputs.rust == 'true' && needs.changes.outputs.rust_key != ''
         env:
           KEY: ${{ needs.changes.outputs.rust_key }}
         run: printf '%s\n' "$KEY" > "$RUNNER_TEMP/rust-green"
       - uses: actions/upload-artifact@v4
-        if: github.event_name == 'pull_request' && needs.changes.outputs.rust_key != ''
+        if: github.event_name == 'pull_request' && needs.changes.outputs.rust == 'true' && needs.changes.outputs.rust_key != ''
         with:
           name: rust-green-${{ needs.changes.outputs.rust_key }}
           path: ${{ runner.temp }}/rust-green

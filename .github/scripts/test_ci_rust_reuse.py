@@ -40,9 +40,10 @@ class Fake:
         raise AssertionError(path)
 
 
-def run(i, head="H1", repo_id=1, head_repo_id=1):
+def run(i, head="H1", repo_id=1, head_repo_id=1, base_ref="main", base_repo_id=1):
     return {"id": i, "head_sha": head, "html_url": f"u/{i}", "repository": {"id": repo_id},
-            "head_repository": {"id": head_repo_id}}
+            "head_repository": {"id": head_repo_id},
+            "pull_requests": [{"base": {"ref": base_ref, "repo": {"id": base_repo_id}}}]}
 
 
 class ReuseTest(unittest.TestCase):
@@ -86,6 +87,11 @@ class ReuseTest(unittest.TestCase):
     def test_truncated_compare_runs(self):
         fake = self.fake([run(7)], base_files=["a"] * 300)
         self.assertEqual(M.decide(fake, R, "M", "br", 99, SKIP)["rust"], "true")
+
+    def test_non_main_base_ignored(self):
+        """#2027 独审 Nit：H→evil-base 的 PR run 用的是 evil-base 上的 workflow，不能当凭据。"""
+        for r in (run(7, base_ref="evil-base"), run(7, base_repo_id=2), {**run(7), "pull_requests": []}):
+            self.assertEqual(M.decide(self.fake([r]), R, "M", "br", 99, SKIP)["rust"], "true")
 
     def test_fork_run_ignored(self):
         self.assertEqual(M.decide(self.fake([run(7, head_repo_id=2)]), R, "M", "br", 99, SKIP)["rust"], "true")
