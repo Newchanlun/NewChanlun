@@ -15,4 +15,12 @@ lane = module.ExternalReview(None, state_root=Path(config["state_root"]), checko
                              source=Path(config["source"]), launcher=config["launcher"], poll_seconds=0.01)
 lane.advisory_timeout = config.get("timeout", lane.advisory_timeout)
 lane.advisory_term_grace = config.get("grace", lane.advisory_term_grace)
+lane.advisory_watchdog_margin = config.get("margin", lane.advisory_watchdog_margin)
+lane.advisory_hard_exit = True  # 与生产入口相同：看门狗触发时结束本进程组
+if config.get("hang_prepare"):  # 模拟 prepare 里的 git 卡住（worker 的 45 分钟计时还没开始）
+    import time
+
+    def hang(*args):
+        time.sleep(3600)
+    module.prepare_review = hang
 print(json.dumps(lane.run_advisory(sys.argv[4]), ensure_ascii=False))

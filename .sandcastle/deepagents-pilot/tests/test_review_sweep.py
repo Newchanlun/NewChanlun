@@ -1357,3 +1357,27 @@ def test_manual_loop_logs_actions_taken_before_a_timeout(lane, monkeypatch, caps
     assert module.main(["--private-key", "/k"]) == 0
     lines = [json.loads(line) for line in capsys.readouterr().out.splitlines()]
     assert [a["action"] for a in lines] == ["merged", "round-skipped"]
+
+
+# ---- 旁听进程占并发名额；每轮回收一次 ----
+ADVISORY_ROW = (9, 9, "S", "python -m pilot1742.external_review advisory --run r1150335160-p1999-x-y-z-a1")
+
+
+def test_live_advisory_takes_a_running_slot_but_does_not_mark_its_pr_busy(lane):
+    assert module.advisory_running([ADVISORY_ROW, (10, 10, "Z", ADVISORY_ROW[3])]) == 1
+    assert module.reviewing([ADVISORY_ROW]) == set()
+    sweep, host, _ = make(lane, run=False, max_running=1)
+    host.rows.append(ADVISORY_ROW)
+    assert acts(sweep.tick()) == ["queued"] and host.spawned == []
+    sweep, host, _ = make(lane, run=False, max_running=2)
+    host.rows.append(ADVISORY_ROW)
+    assert acts(sweep.tick()) == ["launch"]
+
+
+def test_sweep_reaps_once_per_tick(lane, monkeypatch):
+    calls = []
+    monkeypatch.setattr(lane, "reap", lambda: calls.append(1) or {})
+    sweep, _, _ = make(lane, run=False)
+    sweep.tick()
+    sweep.tick()
+    assert calls == [1, 1]

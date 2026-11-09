@@ -45,8 +45,9 @@ kimi 不带 `--output-schema`（#1968）。带 schema 时它把开场白（「�
 `external_review.ADVISORY_REVIEW_MODELS`（目前是 `gemini-4-argon-high`）是第三位审查员，只用来积累对照数据：看它在接下来的若干张 PR 上能多找出几条真问题、误报多少。它不参与把关，也不在 gating 的生命周期里运行。
 
 - 开关：controller 进程的环境变量 `NEWCHANLUN_REVIEW_ADVISORY=1`。不设或设成别的值时不派发，行为与没有它时完全相同。`review_sweep` 的 `run-review` 子进程继承这个变量。
-- 派发：`review-pr` 的 gating 双审照旧。只有真派过 gating 模型、终态（PASS/BLOCK/FAILED）已发布的 run，`review-pr` 才在释放 run 锁之后起一个脱离的进程 `python -m pilot1742.external_review advisory --run <运行键>`（新会话，stdin 关闭，输出进 `advisory/advisory.log`，pid 记在 `advisory/spawn.json`），然后直接返回，不等它，也不与它共享锁或中断标志。沿用、STALE 和恢复发布的 run 不派新旁听；对同一键再跑 `review-pr` 会再起一次，已有结论或锁被持有时它立即退出。
-- 旁听进程自管生命周期：先拿 `runs/<运行键>/advisory/.lock`（排他、不阻塞，已被持有就退出），回收遗留快照（见下），然后对每个旁听模型依次 prepare、派发 worker、有界等待。上限 `ADVISORY_TIMEOUT_SECONDS`（50 分钟：worker 模型阶段的 45 分钟再加 5 分钟给 prepare、准入、建容器）。到时向监督进程发 SIGTERM（worker 的取消路径会关容器），再最多等 `ADVISORY_TERM_GRACE_SECONDS`（120 秒），等回执出现或进程退出，然后 `cleanup_checkout`。无论成败都写 `advisory/outcome.json`：每个模型一条，`verdict` 为 `PASS`、`BLOCK`、`FAILED`、`TIMEOUT` 或 `SKIPPED`，`checkout` 为 `removed` 或 `retained`。它不写任何 gating 文件，不发状态。旁听进程中途崩溃时，worker 照常跑到终态写回执；对同一键再起旁听会收养已有 launch。
+- 派发：`review-pr` 的 gating 双审照旧。只有真派过 gating 模型、终态（PASS/BLOCK/FAILED）已发布的 run，`review-pr` 才在释放 run 锁之后起一个脱离的进程 `python -m pilot1742.external_review advisory --run <运行键>`（新会话，stdin 关闭，输出进 `advisory/advisory.log`，pid 记在 `advisory/spawn.json`），然后直接返回，不等它，也不与它共享锁或中断标志。沿用、STALE 和恢复发布的 run 不派新旁听。对同一键再跑 `review-pr` 时，若旁听已有结论或旁听锁正被持有就不再派；否则再起一次，收养已有 launch。
+- 旁听进程自管生命周期：先拿 `runs/<运行键>/advisory/.lock`（排他、不阻塞，已被持有就退出），回收遗留快照（见下），然后对每个旁听模型依次 prepare、派发 worker、有界等待。prepare 之前先查空间：可用空间要够 gating 两份快照再加旁听一份（`snapshot_plan` 的单份需求乘 3），再加其他正在 prepare 的旁听预留；不够就记 `SKIPPED`，原因以 `no space` 开头。上限 `ADVISORY_TIMEOUT_SECONDS`（50 分钟：worker 模型阶段的 45 分钟再加 5 分钟给 prepare、准入、建容器）。到时向监督进程发 SIGTERM（worker 的取消路径会关容器），再最多等 `ADVISORY_TERM_GRACE_SECONDS`（120 秒），等回执出现或进程退出，然后 `cleanup_checkout`。看门狗给整个旁听进程一个硬墙钟：超时、宽限再加 `ADVISORY_WATCHDOG_MARGIN_SECONDS`（60 秒）之后仍未收尾（例如卡在 prepare 的 git 里，此时 worker 的 45 分钟计时还没开始），就写 `TIMEOUT`（`"watchdog": true`），向已登记的监督进程发 SIGTERM，并结束旁听进程自己的进程组。锁随进程释放，快照留给回收。无论成败都写 `advisory/outcome.json`：每个模型一条，`verdict` 为 `PASS`、`BLOCK`、`FAILED`、`TIMEOUT` 或 `SKIPPED`，`checkout` 为 `removed` 或 `retained`。它不写任何 gating 文件，不发状态。旁听进程中途崩溃时，worker 照常跑到终态写回执；对同一键再起旁听会收养已有 launch。
+- 并发与空间：`review_sweep` 把活着的 `external_review advisory --run` 进程算进 `max_running` 名额，但不把所属 PR 标成审查中，追平与合入照常。gating 的总准入 `admit_space` 也为正在 prepare 的旁听留出空间：凡旁听锁被持有、已写 `prepare.json`、还没 `launch.json` 的，按其 `required_bytes` 预留。launch 之后快照已落盘，`disk_usage` 自然算进去。
 - 证据：`runs/<运行键>/advisory/<模型>/` 下的文件与 gating 审查员相同，`launch.json` 多一个 `"advisory": true`。
 - 隔离：它的结论不进 `outcome.json`、整轮结论和 `deepagents/review` 状态，也不进 `REVIEW_CONTRACT`，所以开关它不会让已有 PASS 失去沿用资格。沿用判断、完结判断和 BLOCK 否决都不读 `advisory/` 目录（`_reviewers` 排除它），`review_sweep` 的限流退避也不读它的回执。
 - 成本：它的回执计入每日额度闸（`recent_input_tokens` 也统计 `advisory/*/receipt.json`）。派发前已超上限时记 `SKIPPED`，不暂停任何东西。上限变量无效时记 `FAILED`。
@@ -56,11 +57,11 @@ kimi 不带 `--output-schema`（#1968）。带 schema 时它把开场白（「�
 
 ### 遗留快照回收（#1986）
 
-每次 `review-pr`（拿到自己的 run 锁之后）和每次旁听进程（拿到旁听锁之后）开头都扫一遍 `checkouts/external-review/<run_id>/<模型>`，按 `target.json` 的 `run_id` 找到所属 run。满足以下任一条件就删除：所属 run 的 `outcome.json` 是终态（PASS/BLOCK/FAILED/STALE），或者旁听快照对应的 `advisory/outcome.json` 已存在，或者 `process.json` 登记过监督进程而该进程已不在。
+回收持全 HOST 一把锁 `external-review/reaper.lock`（被持有就跳过本次），不持任何 run 锁。它在三处运行：`review-pr` 登记新 attempt 的总准入之前，所以遗留快照不会挡住自己的回收；旁听进程拿到旁听锁之后；`review_sweep` 每轮一次。每次扫一遍 `checkouts/external-review/<run_id>/<模型>`，按 `target.json` 的 `run_id` 找到所属 run。满足以下任一条件就删除：所属 run 的 `outcome.json` 是终态（PASS/BLOCK/FAILED/STALE），或者旁听快照对应的 `advisory/outcome.json` 已存在，或者 `process.json` 登记过监督进程而该进程已不在。此外，凡派发过（有 `launch.json`）的，还要确认容器不在运行：回执 `container_closed: true`，或者用回执、`supervisor.json` 里的 `container_id` 跑 `docker inspect`，查得容器不存在或未运行。只是监督进程死了不够。容器状态查不清（没有 id、docker 不可用、输出看不懂）的快照保留，日志记 `retained-unknown`，汇总行记 `retained_unknown` 个数。
 
 以下情况一律不动：该 run 的 `owner.lock` 或 `advisory/.lock` 正被持有（包括调用者自己的），还有进程的命令行含该快照路径或该 worker 的 `--output-dir`，找不到所属 run，或者从未派发、也没有终态（prepare 中断，留给 run 自己恢复）。
 
-删除时，在锁内把目录改名为 `.reaped-*`，在 worker 目录写 `checkout-cleanup.json`（`"by": "reaper"`），释放锁之后再删。上次没删完的 `.reaped-*` 下次继续删。每次扫描在 stderr 记一行 `external-review reaper {"removed": N, "bytes_freed": B}`。扫描时会短暂拿别的 run 的锁，只覆盖改名这一下；这期间对那个 run 的 `review-pr` 会照常以「已有宿主控制进程持锁」退出，重跑即可。
+删除时，在锁内把目录改名为 `.reaped-*`，在 worker 目录写 `checkout-cleanup.json`（`"by": "reaper"`），释放锁之后再删。上次没删完的 `.reaped-*` 下次继续删。每次扫描在 stderr 记一行 `external-review reaper {"removed": N, "bytes_freed": B, "retained_unknown": U}`。扫描时会短暂拿 run 锁和旁听锁，只覆盖改名这一下；这期间对那个 run 的 `review-pr` 会照常以「已有宿主控制进程持锁」退出，重跑即可。
 
 ## 启用前完成部署验收
 

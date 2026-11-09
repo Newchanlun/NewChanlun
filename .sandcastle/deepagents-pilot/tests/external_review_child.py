@@ -23,6 +23,8 @@ mode_file = per_model if per_model.exists() else runs / "fake-mode"
 mode, _, flag = (mode_file.read_text().strip() if mode_file.exists() else "PASS").partition(":")
 if mode == "CRASH":  # 监督进程不写回执就退出
     sys.exit(3)
+if mode.startswith("HANG"):  # 卡住前已登记容器（与真实 worker 一样，supervisor.json 记 container_id）
+    (folder / "supervisor.json").write_text(json.dumps({"container_id": "c" * 64}))
 if mode == "HANGTERM":  # 卡住且忽略 SIGTERM：取消路径失效，快照只能留给回收
     import signal
     import time

@@ -1898,11 +1898,29 @@ def _kill_advisory(lane, result):
     import os
     import signal
     advisory = _run_folder(lane, result) / module.ADVISORY_DIR
-    for path in [advisory / "spawn.json", *advisory.glob("*/process.json")]:
+    import time
+
+    def kill(pid):
+        for how in (os.killpg, os.kill):
+            try:
+                how(pid, signal.SIGKILL)
+            except OSError:
+                pass
+    try:  # 先结束旁听进程本身，它就不会再派新 worker
+        kill(json.loads((advisory / "spawn.json").read_text())["pid"])
+    except (OSError, ValueError, KeyError):
+        pass
+    time.sleep(0.2)
+    pids = set()
+    for path in advisory.glob("*/process.json"):
         try:
-            os.killpg(json.loads(path.read_text())["pid"], signal.SIGKILL)
+            pids.add(json.loads(path.read_text())["pid"])
         except (OSError, ValueError, KeyError):
             pass
+    # 兜底：命令行里带本测试状态目录的进程（旁听进程的配置 JSON、worker 的 --output-dir）
+    pids.update(pid for pid, _, _, command in module._ps_rows() if str(lane.state_root) in command)
+    for pid in pids:
+        kill(pid)
 
 
 def _launched_models(lane):
@@ -2039,6 +2057,7 @@ def test_advisory_timeout_snapshot_is_reclaimed_by_reaper_on_next_run(lane, monk
     pid = json.loads((worker / "process.json").read_text())["pid"]
     os.killpg(pid, signal.SIGKILL)
     os.waitpid(pid, 0)
+    lane.container_state = lambda container: "absent"  # 监督进程死了还不够：容器确认不在了才删
     lane.review_pr(1810, 2)  # 下一次 run 开头的回收
     assert not checkout.exists()
     assert json.loads((worker / "checkout-cleanup.json").read_text())["by"] == "reaper"
@@ -2074,7 +2093,7 @@ def test_reaper_never_removes_a_checkout_in_use(lane, capfd):
         user.kill()
         user.wait()
     stats = lane.reap()
-    assert not checkout.exists() and stats == {"removed": 1, "bytes_freed": 1000}
+    assert not checkout.exists() and stats == {"removed": 1, "bytes_freed": 1000, "retained_unknown": 0}
     assert not (lane.checkout_root / result["run_id"]).exists()
     assert "external-review reaper" in capfd.readouterr().err
 
@@ -2109,3 +2128,129 @@ def test_advisory_is_outside_review_contract():
     assert module.REVIEW_CONTRACT == "sha256:f412d17f29e863a2ed4c5fd317fc78c5d1a31608aa8fdf5e2a4151b6164f4383"
     assert module.REVIEW_CONTRACT == "sha256:" + hashlib.sha256(
         json.dumps([module.POLICY, MODELS, module.PROMPT]).encode()).hexdigest()
+
+
+# ---- 第四轮：空间、prepare 硬墙钟、回收的容器核实与先后 ----
+
+
+def test_advisory_skipped_when_no_room_for_an_extra_snapshot(lane, monkeypatch):
+    result = lane.review_pr(1810)  # 旁听关闭
+    target = ReviewTarget(**result["target"])
+    single = module.snapshot_plan(lane.source, target)[1]
+    monkeypatch.setattr(module.shutil, "disk_usage",
+                        lambda path: SimpleNamespace(free=single * (len(MODELS) + 1) - 1))
+    advisory = lane.run_advisory(target.key)
+    assert advisory["reviews"][0]["verdict"] == "SKIPPED" and advisory["reviews"][0]["reason"].startswith("no space")
+    assert not (_run_folder(lane, result) / module.ADVISORY_DIR / ADVISORY).exists()
+    assert lane.gateway.sent == ["pending", "success"]
+
+
+def test_gating_admission_leaves_room_for_a_live_advisory_snapshot(lane, monkeypatch):
+    import fcntl
+    import os
+    result = lane.review_pr(1810)
+    target = ReviewTarget(**result["target"])
+    single = module.snapshot_plan(lane.source, target)[1]
+    worker = _run_folder(lane, result) / module.ADVISORY_DIR / ADVISORY
+    worker.mkdir(parents=True, mode=0o700)
+    module._save(worker / "prepare.json", {"run_id": target.run_id, "checkout": "x", "required_bytes": 5000})
+    monkeypatch.setattr(module.shutil, "disk_usage", lambda path: SimpleNamespace(free=single * len(MODELS) + 4999))
+    lock = os.open(worker.parent / ".lock", os.O_CREAT | os.O_RDWR, 0o600)
+    fcntl.flock(lock, fcntl.LOCK_EX)  # 旁听正在 prepare（锁被持有、尚无 launch）
+    try:
+        with pytest.raises(IdentityError, match="空间不足"):
+            lane.admit_space(target)
+    finally:
+        os.close(lock)
+    lane.admit_space(target)  # 旁听不在了：预留随之释放
+
+
+def test_advisory_hanging_in_prepare_is_bounded_by_watchdog(lane, monkeypatch):
+    import os
+    import time
+    monkeypatch.setenv(module.ADVISORY_ENV, "1")
+    _detached(lane, timeout=0.5, grace=0.2, margin=0.5, hang_prepare=True)
+    started = time.monotonic()
+    result = lane.review_pr(1810)
+    assert lane.gateway.sent == ["pending", "success"]
+    try:
+        advisory = _wait_advisory(lane, result, seconds=30)
+        assert advisory["watchdog"] and advisory["reviews"][0]["verdict"] == "TIMEOUT"
+        assert time.monotonic() - started < 30
+        lock = _run_folder(lane, result) / module.ADVISORY_DIR / ".lock"
+        for _ in range(200):  # 看门狗结束了旁听进程组，锁随之释放
+            if not _lock_held(lock):
+                break
+            time.sleep(0.05)
+        assert not _lock_held(lock)
+        pid = json.loads((lock.parent / "spawn.json").read_text())["pid"]
+        for _ in range(200):
+            if os.waitpid(pid, os.WNOHANG)[0] == pid:
+                break
+            time.sleep(0.05)
+        else:
+            raise AssertionError("旁听进程未结束")
+    finally:
+        _kill_advisory(lane, result)
+
+
+def _leaked(lane, result, *, closed, pid=None):
+    """在已完结 run 上造一份遗留 gating 快照：回执 container_closed 按参数，supervisor.json 记容器。"""
+    folder = _run_folder(lane, result)
+    worker = folder / MODELS[0]
+    receipt = json.loads((worker / "receipt.json").read_text())
+    receipt["container_closed"] = closed
+    module._save(worker / "receipt.json", receipt)
+    if pid is not None:
+        module._save(worker / "process.json", {"pid": pid, "launch_id": "x"})
+    checkout = lane.checkout_root / result["run_id"] / MODELS[0]
+    checkout.mkdir(parents=True)
+    (checkout / "f").write_text("x" * 100)
+    return checkout
+
+
+@pytest.mark.parametrize("state, kept", [("running", True), ("unknown", True), ("absent", False), ("stopped", False)])
+def test_reaper_requires_container_gone_not_just_dead_supervisor(lane, state, kept):
+    import subprocess
+    result = lane.review_pr(1810)
+    dead = subprocess.Popen([sys.executable, "-c", "pass"])
+    dead.wait()  # 监督进程已不在
+    checkout = _leaked(lane, result, closed=False, pid=dead.pid)
+    seen = []
+    lane.container_state = lambda container: seen.append(container) or state
+    stats = lane.reap()
+    assert seen == ["a" * 64]  # 回执里的容器 id
+    assert checkout.exists() is kept
+    assert stats["retained_unknown"] == (1 if state == "unknown" else 0)
+
+
+def test_reaper_trusts_closed_receipt_without_docker(lane):
+    result = lane.review_pr(1810)
+    checkout = _leaked(lane, result, closed=True)
+    lane.container_state = lambda container: pytest.fail("回执已确认关容器，不应再查 docker")
+    assert lane.reap()["removed"] == 1 and not checkout.exists()
+
+
+def test_reaper_runs_before_admission_so_leaks_never_block_their_own_cleanup(lane, monkeypatch):
+    result = lane.review_pr(1810)
+    checkout = _leaked(lane, result, closed=True)
+    # 遗留快照占着空间时总准入不过；回收在准入之前、不持 run 锁运行，所以本次登记照常通过。
+    monkeypatch.setattr(module.shutil, "disk_usage",
+                        lambda path: SimpleNamespace(free=1 if checkout.exists() else 10**15))
+    second = lane.review_pr(1810, 2)
+    assert not checkout.exists() and second["verdict"] == "PASS"
+    assert lane.gateway.sent[-2:] == ["pending", "success"]
+
+
+def test_reaper_skips_when_another_reaper_holds_the_host_lock(lane):
+    import fcntl
+    import os
+    result = lane.review_pr(1810)
+    checkout = _leaked(lane, result, closed=True)
+    fd = os.open(lane.state_root / module.REAPER_LOCK, os.O_CREAT | os.O_RDWR, 0o600)
+    fcntl.flock(fd, fcntl.LOCK_EX)
+    try:
+        assert lane.reap()["removed"] == 0 and checkout.exists()
+    finally:
+        os.close(fd)
+    assert lane.reap()["removed"] == 1
