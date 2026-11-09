@@ -595,7 +595,7 @@ class TicketExecutor:
             if observed == "open":
                 text = self._marker("deliver", spec.run_id, generation, head)
                 body = (f"[deepagents run={spec.run_id} gen={generation}]\n\n交付冻结 head `{head}` 到 "
-                        f"`{branch}`，PR {pr.get('url')}，等待人合入。\n\n{text}")
+                        f"`{branch}`，PR {pr.get('url')}，等待必需检查 deepagents/review 与 ci-ok 通过后由 review_sweep 合入。\n\n{text}")
                 with self.action("deliver", run.dir, generation, pr_number=number, head=head) as boundary:
                     self._require_review_spec(run, head)
                     observed = self._checked(boundary, head, number)
