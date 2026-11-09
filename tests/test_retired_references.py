@@ -81,6 +81,11 @@ SLASH = re.compile(r"(?<![\w/.:'\"-])/(" + "|".join(RETIRED_COMMANDS) + r")(?![\
 LINK = re.compile(r"\]\(([^)\s]+)\)|href=\"([^\"]+)\"")
 # A line that itself says the thing is gone is a historical note, not an
 # instruction to run it.
+# Top-level directories moved out of the repo whole (#1945). _repo_path_re only
+# knows directories that still have tracked files, so without these a live doc
+# naming topological-computation/... would never be checked.
+RETIRED_TOP_DIRS = {"topological-computation", "prototypes"}
+
 RETIRED_NOTE = re.compile(r"退役|已删除|已删|不再|retired|removed|no longer", re.I)
 
 # Missing-path findings that already existed on main before #1955 (review drafts
@@ -108,8 +113,6 @@ HISTORICAL = {
     "chanlun/review-results/": "review drafts",
     "chanlun/harness/vendor/": "vendored third-party text",
     ".auto-memory-snapshot/": "memory snapshot export",
-    "docs/adr/0039-production-entry-inventory-and-unique-launcher.md":
-        "entry inventory as of #1413; scripts/*.service left the repo in #1945",
     ".claude/skills/writing-skills/anthropic-best-practices.md":
         "vendored copy of Anthropic docs (site-relative links)",
     ".agents/skills/domain-modeling/CONTEXT-FORMAT.md": "vendored skill; example paths",
@@ -271,7 +274,7 @@ def _git_ignored(paths: list[str]) -> set[str]:
 
 def broken_doc_refs(files: list[str], tree: tuple[set[str], set[str]] | None = None) -> list[str]:
     tree = tree or _tree(files)
-    path_re = _repo_path_re(tree[1])
+    path_re = _repo_path_re(tree[1] | RETIRED_TOP_DIRS)
     pending: list[tuple[str, str]] = []  # (finding, path) checked against .gitignore last
     bad = []
     for f in files:

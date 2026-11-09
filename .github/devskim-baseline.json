@@ -5505,7 +5505,7 @@
     "DS176209|trading_system/strategy/signal_bridge.py|184",
     "DS197836|rust/src/lav_seal/bundle.rs|299",
     "DS197836|rust/src/lav_seal/comparison_set.rs|227",
-    "DS148264|.github/devskim-baseline.json|855",
+    "DS148264|.github/devskim-baseline.json|792",
     "DS117838|.chanlun/review-results/issue1370-tb01-a/acceptance/payload/evidence/native-r5/bigint/launcher-run.json|18",
     "DS117838|.chanlun/review-results/issue1370-tb01-a/acceptance/payload/evidence/native-r5/bigint/state-verified.json|1",
     "DS117838|.chanlun/review-results/issue1370-tb01-a/acceptance/payload/evidence/native-r5/fault-ui/healthy-http-state.json|1",
@@ -52390,6 +52390,32 @@
         "DS162092|scripts/start_with_gateway.sh|94": "与 base 键 DS162092|scripts/start_with_gateway.sh|92 同一行文本，行号漂移，逐行比对内容不变。",
         "DS162092|topological-computation/gateway_bridge.py|387": "与 base 键 DS162092|topological-computation/gateway_bridge.py|451 同一行文本，行号漂移，逐行比对内容不变。",
         "DS162092|topological-computation/gateway_bridge.py|52": "与 base 键 DS162092|topological-computation/gateway_bridge.py|57 同一行文本，行号漂移，逐行比对内容不变。"
+      }
+    },
+    {
+      "pull_request": 1945,
+      "source_head": "91dc1c5a60",
+      "removed_findings": 66,
+      "rule_counts": {
+        "DS137138": 1,
+        "DS148264": 8,
+        "DS162092": 50,
+        "DS172411": 4,
+        "DS173237": 2,
+        "DS176209": 1
+      },
+      "scope": [
+        ".github/devskim-baseline.json",
+        "topological-computation/**",
+        "scripts/ipfs_deploy.py",
+        "scripts/openclaw_scheduler.py",
+        "scripts/start_with_gateway.sh",
+        "prototypes/task68-ledger-adopt/**",
+        "prototypes/task72-gap-connector/**"
+      ],
+      "reason": "slim/out-of-repo-batch2（#1945）整体出仓 topological-computation/ 及其专属部署脚本、.scratch/、prototypes/、仓根个人文件；原样归档于 /Volumes/AgentStorage/repo-archive/f43fac8f46-batch2/，可逐字节恢复。删掉指向这些已删文件的 66 条存量键；gate 只拦基线外新发现，存量多删不改变门槛。自引用键跟随 base 第 855 行原文移到第 792 行：被删的 66 行里有 63 行在它前面。",
+      "entries": {
+        "DS148264|.github/devskim-baseline.json|792": "与 base 键 DS148264|.github/devskim-baseline.json|855 同一行文本，行号漂移，逐行比对内容不变。"
       }
     }
   ]

@@ -155,6 +155,7 @@ docs/adr/0001-graded-exit-and-shortdiff-doctrine.md|chanlun/review-results/short
 docs/adr/0006-n0-native-cand-and-sub-edge.md|.chanlun/review-results/issue1258-adr-pdf-mapping-research-20260826.md
 docs/adr/0008-bsp-bridge-object-and-structural-key-v2.md|chanlun/CONTEXT.md
 docs/adr/0013-partition-machine-bidirectional-form.md|.chanlun/review-results/l2-depth-distribution-20260702.md
+docs/adr/0039-production-entry-inventory-and-unique-launcher.md|trading_system/execution/hl_paper_launcher.py
 docs/adr/0041-degrees-of-freedom-configurable-not-excluded.md|.agents/skills/graph-approve/SKILL.md
 docs/adr/0048-legacy-engine-module-level-dispositions.md|rust/src/nautilus/mod.rs
 docs/adr/0050-s-resource-admission-contract-v1.md|docs/adr/0049-s-resource-admission-contract-v1.md
