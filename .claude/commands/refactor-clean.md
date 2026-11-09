@@ -13,7 +13,7 @@ Run analysis tools based on project type:
 | ts-prune | Unused TypeScript exports | `npx ts-prune` |
 | vulture | Unused Python code | `vulture src/` |
 | deadcode | Unused Go code | `deadcode ./...` |
-| cargo-udeps | Unused Rust dependencies | Remote only (no cargo on macOS): commit, then run it through `nc-remote` or CI as `/verify` describes |
+| cargo-udeps | Unused Rust dependencies | Remote only (no cargo on macOS): commit, then run it through CI, Boat or `nc-remote` as `/verify` describes |
 
 If no tool is available, use Grep to find exports with zero imports:
 ```
@@ -34,7 +34,7 @@ Sort findings into safety tiers:
 
 For each SAFE item:
 
-1. **Run the checks `/verify` lists for the affected area** — Establish baseline (Rust goes through `nc-remote` or CI, never local cargo)
+1. **Run the checks `/verify` lists for the affected area** — Establish baseline (Rust goes through CI, Boat or `nc-remote`, never local cargo)
 2. **Delete the dead code** — Use Edit tool for surgical removal
 3. **Re-run the same checks** — Verify nothing broke
 4. **If tests fail** — Immediately revert with `git checkout -- <file>` and skip this item
