@@ -817,3 +817,29 @@ test("SPEC 裁定首行必须恰为「SPEC 独审裁定：PASS|BLOCK」：结论
   assert.equal(isSpecApproved(spec(`${good}附注：不通过，打回重写`), ORCH), false, "合规 PASS 正文里另写驳回词仍撤销");
   assert.equal(parseSpecRuling(withHead("SPEC 独审裁定：BLOCK"))!.verdict, "BLOCK");
 });
+
+test("SPEC 裁定撤销（opus 审 e2d7660a / PR #2016 跟进）：撤销要松，不能让格式偏差的 BLOCK 退化成放行", () => {
+  // 把合规 BLOCK 评论的首行改成不合规变体，其余字段不变。
+  const malformed = (head: string) => {
+    const blockBody = ruling({ verdict: "BLOCK" }, after(6)).body;
+    const rest = blockBody.split("\n").slice(1).join("\n");
+    return { author: ORCH, body: `${head}\n${rest}`, createdAt: after(6) };
+  };
+  for (const head of [
+    "SPEC 独审裁定：BLOCK。", "SPEC 独审裁定: BLOCK", "## SPEC 独审裁定：BLOCK", "**SPEC 独审裁定**：BLOCK",
+    "> SPEC 独审裁定：BLOCK", "SPEC 独审裁定：BLOCK（证据不足，需重审）",
+  ]) {
+    assert.equal(parseSpecRuling(malformed(head).body), null, `首行「${head}」不是合规裁定`);
+    assert.equal(
+      isSpecApproved(specWith([ruling(), malformed(head)]), ORCH),
+      false,
+      `有效 PASS 之后的不合规 BLOCK「${head}」必须撤销`,
+    );
+  }
+  // 后缀 PASS（「SPEC 独审裁定：PASS不通过」）同样撤销前面的有效 PASS。
+  const suffixedPass = { author: ORCH, body: ruling().body.replace("**SPEC 独审裁定：PASS**", "SPEC 独审裁定：PASS不通过"), createdAt: after(6) };
+  assert.equal(parseSpecRuling(suffixedPass.body), null, "后缀 PASS 不是合规裁定");
+  assert.equal(isSpecApproved(specWith([ruling(), suffixedPass]), ORCH), false, "有效 PASS 之后的后缀 PASS 必须撤销");
+  // 恰为合规 PASS 的首行继续放行（对照组，确认放行路径未被改动）。
+  assert.equal(isSpecApproved(specWith([ruling()]), ORCH), true, "恰为合规 PASS 仍放行");
+});
