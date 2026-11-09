@@ -4,10 +4,6 @@
 > 最后裁定：#1550（FU-19，2026-10-31，#1323 Notes N-1 预授权 T 类判定）
 > 受影响代码清单：见本文「受影响票与 blocking 边变化」节（`rust/src/bin/production_session.rs:25-26`、`rust/src/bin/x_execution_session.rs:22/:55`、`rust/src/bin/replay_compare.rs:94`、`rust/src/trading/replay_comparator.rs:151`、`rust/src/trading/replay.rs`、`rust/tests/replay_compare_test.rs`、`scripts/replay_compare.sh`、`.github/workflows/ci.yml:516-523`；实施归 #1769、#1381、#1411、#1413、#1418）
 
-> #1742 引用迁移：本文旧 AGENTS 章节/行号保留为历史取证坐标（`git show 3d61fb7294:AGENTS.md`）；所引 `docs/agents/generation-constitution.md`、`docs/agents/delivery-discipline.md` 已随 #1917 退役，行号同为历史坐标（`git show 3d61fb7294:<路径>`）；当前 #799/#804 完整限定与例外见 `docs/adr/0047-level-isomorphism-and-no-fallback-locks.md`，引文核验及教义三行头见 `docs/adr/0012-inference-layer-document-naming.md`「引用核验与教义正本」。
-
-> #1742 归档指针：本文引用的历史纪律原件位于 `/Volumes/AgentStorage/restart-20261107/slim/docs-archive/before-3d61fb/docs/agents/`，保留原文件名及行号。当前开发与证据归档按 `AGENTS.md`；本次归档不改变本文产品裁定。
-
 **状态**：T 类裁定，文书待 main 合入。本 ADR 只裁映射与终态，不产运行证据（同 ADR 0052:7、ADR 0033:5）。
 **行号基线**：草稿行号以起草时 main 为准；本文照搬草稿行号，不重定位。落地基线 main `457902e3c3`。
 

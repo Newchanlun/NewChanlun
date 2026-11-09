@@ -1157,12 +1157,6 @@ test("dry-run 全流程：分级后先考古，archaeology.md 落盘，起草与
   assert.ok(existsSync(join(dir, "archaeology.json")));
   const [draftCall, reviewCall] = [modelCalls.find((c) => c.role === "draft")!, modelCalls.find((c) => c.role === "review")!];
   assert.match(draftCall.prompt, /## Q3 \[C\] 多空共用容量/);
-  assert.match(draftCall.prompt, /docs\/adr\/0012-inference-layer-document-naming\.md「引用核验与教义正本」/);
-  assert.match(draftCall.prompt, /docs\/adr\/0047-level-isomorphism-and-no-fallback-locks\.md/);
-  assert.doesNotMatch(draftCall.prompt, /AGENTS 三行头|AGENTS\.md（教义正本/);
-  assert.match(archCalls[0].prompt, /wayfinder-workflow\.md「票型与代理裁定」/);
-  assert.doesNotMatch(archCalls[0].prompt, /反面判据③|开之前先搜（两路|决定才问人/);
-
   assert.match(draftCall.prompt, /C 类 decision .*「裁定」段给出裁定值，不留待决/);
   assert.match(draftCall.prompt, /不得把任何待决点留给用户批复/);
   assert.doesNotMatch(draftCall.prompt, /待用户确认|交用户决定|影子模式/);

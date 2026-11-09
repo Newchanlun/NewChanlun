@@ -1003,10 +1003,10 @@ ${FIXED_CLASS_LINE}${fixed === "none" ? "（只验考古）" : `：分级已定�
 
 ### ${fixed === undefined ? "二、" : ""}考古
 用户 2026-10-20 令：「所有的裁决票都要先考古」。先读这几处，按它们做：
-- .agents/skills/grilling/SKILL.md：事实先查环境，候选附推荐答案与推导；开发决策按本仓 T/P 起草加非作者独审流程由代理裁定，不等人答；真实资金、交易与凭据权限不由本流程授予。
+- .agents/skills/grilling/SKILL.md：事实查环境，决定才问人；每个要问的决定附推荐答案。
 - .agents/skills/domain-modeling/SKILL.md：对照 CONTEXT.md 与 docs/adr；「Challenge against the glossary」「Cross-reference with code」发现的冲突当场写出。
-- .agents/skills/wayfinder/SKILL.md「Ticket Types」：仓外事实缺口是 research 票；docs/agents/wayfinder-workflow.md「票型与代理裁定」：缺数字派探针票。
-- AGENTS.md「派发与开工纪律」的两路搜索与 docs/adr/0012-inference-layer-document-naming.md 裁定一、四：推论层主张可援引，推理链必须搬进来重过并现场打溯源标签。
+- .agents/skills/wayfinder/SKILL.md「Ticket Types」：仓外事实缺口是 research 票；docs/agents/wayfinder-workflow.md 反面判据③：缺数字派探针票。
+- AGENTS.md「开之前先搜（两路，缺一不可）」与 docs/adr/0012-inference-layer-document-naming.md 裁定一、四：推论层主张可援引，推理链必须搬进来重过并现场打溯源标签。
 
 ${renderTicket(t)}
 ${o.feedback ? `\n## 上一次考古的机械校验或独审反馈，必须逐条回查更正：\n${o.feedback}\n` : ""}
@@ -1036,7 +1036,7 @@ export const MAIN_CONTINUE_LINE = "本轮在本票 MAIN 会话中续接：上文
 export function draftPrompt(t: TicketContext, c: Classification, feedback?: string, arch?: string): string {
   return `你是 NewChanlun 仓 #1323 图的裁决起草者。当前目录是 origin/main 的只读检出；禁止修改任何文件，只读取证。
 ${MAIN_CONTINUE_LINE}
-先读 AGENTS.md、docs/adr/0012-inference-layer-document-naming.md「引用核验与教义正本」、docs/adr/0047-level-isomorphism-and-no-fallback-locks.md（#799 / #804 完整限定及例外）、CONTEXT.md、.sandcastle/docs/graph-engineering.md，以及票面点名的票（gh issue view <号> --comments）。评论 id 用 gh api repos/${GH_REPO}/issues/comments/<id> 或 gh api repos/${GH_REPO}/issues/<号>/comments 取，只读。
+先读 AGENTS.md（教义正本、#799 收敛通则、#804 总缝规则、引原文四步核验）、CONTEXT.md、.sandcastle/docs/graph-engineering.md，以及票面点名的票（gh issue view <号> --comments）。评论 id 用 gh api repos/${GH_REPO}/issues/comments/<id> 或 gh api repos/${GH_REPO}/issues/<号>/comments 取，只读。
 本票分级：${c.klass} 类 —— ${c.reason}
 分级由分级器决定，你无权改判：按 ${c.klass} 类起草。若你认为分级有误，在「授权引用」段末另起一行写 \`改判建议：T 或 P — 理由\`，由编排逻辑处置；其余部分仍按 ${c.klass} 类写。
 
@@ -1059,7 +1059,7 @@ ${DRAFT_SECTIONS.map((s) => `## ${s}`).join("\n")}
 9. 按 /grill-with-docs 的做法用考古结论（.agents/skills/grilling/SKILL.md、.agents/skills/domain-modeling/SKILL.md）：A 类沿用其出处写进「权威依据」与「裁定」，不再列为待决；B 类在「候选」写出默认值与出处，推理链照考古重过，「裁定」段采纳该默认值，否决须写出依据与替代值；C 类 decision 在「候选」列出候选与推荐答案的推导，「裁定」段给出裁定值，不留待决。C 类 research/probe 是事实缺口（编排逻辑会在起草前拦下，不应出现在草稿里）。考古标出的冲突写进「问题」段。
 10. 「${ARCH_SECTION}」段是一张表 \`| 点 | 归类 | 出处 | 草稿处置 |\`，考古里每个点号（Q1、Q2…）各占一行。
 11. 自由度通则（docs/adr/0041-degrees-of-freedom-configurable-not-excluded.md）：待决点在缠师原文无定论、有多个可行候选，且属 [新缠论:选择] 或参数类时，优先裁为「可调字段 + 默认值」——落进具名版本化记录，写默认值及出处、可选值集合与各值代价，改值即新版本；另一种合法取值保留为可选值，不写成「被否」。已裁定签署前不得代填的字段（资金、量档、容量、成本门 θ、风险阈值等，ADR 0029/0034/0035/0036），默认值写 AwaitingPolicy（不签不跑、不回退备用值），数值只以「推荐值＋出处」写进签署单，不自动生效。${USER_GATE_SCOPE}：这类事项代理不得给出签署值，也不得把来源写成 UserSigned；在「问题」段写明交还用户签署的字段与依据，这是正确结论，不算留待决点。票上已有用户本人签署值时照引该评论，不改值、不扩域；签署只认编排账号（${ORCHESTRATOR}）首行「${SIGN_HEAD}」的评论，返修用的其他「退回：…」评论和其他账号评论里的签署值都不得引用。只有违反原文、违反已裁推论、被实测否证或属 #799 兜底的候选才排除，并写明排除依据。缠师原文语义与已裁推论不改为可调；同一判断的松紧两档不是自由度，事前单选也不得落为可调字段；运行中按判定结果换值是 #799 违规，不算可调。
-12. 七段及流程表之后必须附且仅附一个 canonical_edit 代码块，JSON 必须逐字表达最终正本编辑，不是 resolution 整稿追加。新建用 {"version":1,"operation":"create","path":"与正本落点相同","content":"完整最终正文"}。修订已有文件用 {"version":1,"operation":"edit","path":"与正本落点相同","replacements":[{"before":"原件中非空且唯一的精确文本","after":"替换文本"}]}，多项按顺序应用。先读原件，保留未改章节和换行。教义正文含 ADR 0012「引用核验与教义正本」规定的三行头，更新票号、日期与代码清单。最终正文不得含引用自证、考古对照或 canonical_edit 流程段。宿主在独审前固定新 ADR 编号，之后不再改写。T/P 两类的这份编辑在独审 PASS 后都由宿主落地。
+12. 七段及流程表之后必须附且仅附一个 canonical_edit 代码块，JSON 必须逐字表达最终正本编辑，不是 resolution 整稿追加。新建用 {"version":1,"operation":"create","path":"与正本落点相同","content":"完整最终正文"}。修订已有文件用 {"version":1,"operation":"edit","path":"与正本落点相同","replacements":[{"before":"原件中非空且唯一的精确文本","after":"替换文本"}]}，多项按顺序应用。先读原件，保留未改章节和换行。教义正文含 AGENTS 三行头，更新票号、日期与代码清单。最终正文不得含引用自证、考古对照或 canonical_edit 流程段。宿主在独审前固定新 ADR 编号，之后不再改写。T/P 两类的这份编辑在独审 PASS 后都由宿主落地。
 只输出草稿正文，不要前言或结语。`;
 }
 

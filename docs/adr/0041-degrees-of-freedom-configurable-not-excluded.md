@@ -1,8 +1,5 @@
 # 自由度通则：原文无定论的合法候选落为可调字段，不作排除
 
-> #1742 引用迁移：本文旧 AGENTS 章节/行号保留为历史取证坐标（`git show 3d61fb7294:AGENTS.md`）；当前 #799/#804 完整限定与例外见 `docs/adr/0047-level-isomorphism-and-no-fallback-locks.md`，引文核验及教义三行头见 `docs/adr/0012-inference-layer-document-naming.md`「引用核验与教义正本」。
-
-
 **日期**：2026-10-20　**裁定人**：用户（三条边界同日确认；签署门字段默认值同日批复 B-10）　**驱动票**：[#1586](https://github.com/xy7365527-lang/NewChanlun/issues/1586)
 
 用户 2026-10-20 在 [#1557](https://github.com/xy7365527-lang/NewChanlun/issues/1557) 走票起始操作级别 ℓ_start 时立通则，原话：「A和B都可以，其实我们未必需要二选一，这个具有自由度的东西我们都应当可以调可以选，而不是写死」；同日在 /root 汇总时重申为「让很多有自由度的选择可以调、可以选，而不是单纯的排除」。三条边界由用户同日确认。本 ADR 是该通则的正本；逐项改造由审计票 [#1586](https://github.com/xy7365527-lang/NewChanlun/issues/1586) 驱动。

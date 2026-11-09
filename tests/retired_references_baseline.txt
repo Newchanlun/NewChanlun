@@ -2,9 +2,6 @@
 # on origin/main (f4f03cade5) before #1955 -- each path below is absent on main too.
 # Do not add entries: fix the reference or list the file in HISTORICAL. Delete entries
 # as they get fixed (the test fails while a fixed entry is still listed).
-# #1921: AGENTS.md stays at origin/main's text (#2030 rewrites it); its pointer to
-# docs/agents/generation-constitution.md breaks only because this stack retires that
-# file into ADR 0004. Drop the entry when #2030 lands.
 .agents/skills/code-review/ADVERSARIAL-MODE.md|references/code-quality-review.md
 .agents/skills/code-review/ADVERSARIAL-MODE.md|references/lead-judgment.md
 .agents/skills/code-review/ADVERSARIAL-MODE.md|references/reviewer-prompt.md
@@ -127,7 +124,6 @@
 .sandcastle/deepagents-pilot/demo-task.md|experiments/pilot1742_demo/
 .sandcastle/swarm-implement-prompt.md|.agents/.codex/.aws
 AGENTS.md|.claude/rules/
-AGENTS.md|docs/agents/generation-constitution.md
 NewChanlun文件索引.md|.claude/skills/core-principles/
 NewChanlun文件索引.md|.claude/skills/meta-orchestration/
 README.md|chanlun/text/
@@ -202,13 +198,63 @@ docs/adr/0001-graded-exit-and-shortdiff-doctrine.md|chanlun/review-results/short
 docs/adr/0006-n0-native-cand-and-sub-edge.md|.chanlun/review-results/issue1258-adr-pdf-mapping-research-20260826.md
 docs/adr/0008-bsp-bridge-object-and-structural-key-v2.md|chanlun/CONTEXT.md
 docs/adr/0013-partition-machine-bidirectional-form.md|.chanlun/review-results/l2-depth-distribution-20260702.md
+docs/adr/0039-production-entry-inventory-and-unique-launcher.md|trading_system/execution/hl_paper_launcher.py
 docs/adr/0041-degrees-of-freedom-configurable-not-excluded.md|.agents/skills/graph-approve/SKILL.md
+docs/adr/0048-legacy-engine-module-level-dispositions.md|rust/src/nautilus/mod.rs
 docs/adr/0050-s-resource-admission-contract-v1.md|docs/adr/0049-s-resource-admission-contract-v1.md
 docs/adr/0057-p0-venue-profile-v2-signature.md|.agents/skills/graph-approve/SKILL.md
+docs/adr/0058-replay-shell-mapping-and-legacy-replay-dispositions.md|tests/replay_compare_test.rs
 docs/adr/0061-s-writer-audit-ledger-delta-reading.md|.chanlun/review-results/issue1644-p6-audit-ledger-20261021/
 docs/adr/0061-s-writer-audit-ledger-delta-reading.md|.chanlun/review-results/issue1644-p6-audit-ledger-20261021/AMENDMENT.md
+docs/agents/delivery-discipline.md|chanlun/review-results/issue450-bypass-census-20260727.md
+docs/agents/pstack-lite/E2E-1131.md|rust/src/theta_v0/classifier/chain_cert.rs
+docs/agents/pstack-lite/PILOT-1139.md|.sandcastle/pilot-1139/task-01/prime-sessions/01a01fa6-9a43-758d-b4c3-dfb7d29434a5.jsonl
+docs/agents/pstack-lite/PILOT-1139.md|.sandcastle/pilot-1139/task-01/report.md
+docs/agents/pstack-lite/PILOT-1139.md|.sandcastle/pilot-1139/task-02/prime-external-artifacts/judge-prime-session/01a01fbd-69d3-768e-9234-c46b771a9f74.jsonl
+docs/agents/pstack-lite/PILOT-1139.md|.sandcastle/pilot-1139/task-02/report.md
+docs/agents/pstack-lite/PILOT-1139.md|.sandcastle/pilot-1139/task-02/sessions/01a01fa6-76a8-7214-87c5-9b6e4046f321.jsonl
+docs/agents/pstack-lite/PILOT-1139.md|.sandcastle/pilot-1139/task-03/report.md
+docs/agents/pstack-lite/PILOT-1139.md|.sandcastle/pilot-1139/task-03/sessions/01a01fa6-5cbf-70e6-ae92-43bb13a415cf.jsonl
+docs/agents/pstack-lite/PILOT-1139.md|.sandcastle/pilot-1139/task-04/child-artifacts/codex-sessions/
+docs/agents/pstack-lite/PILOT-1139.md|.sandcastle/pilot-1139/task-04/report.md
+docs/agents/pstack-lite/PILOT-1139.md|.sandcastle/pilot-1139/task-04/sessions/01a01fca-7ed0-73ee-b5da-ecf2749af881.jsonl
+docs/agents/pstack-lite/PILOT-1139.md|.sandcastle/pilot-1139/task-05/report.md
+docs/agents/pstack-lite/PILOT-1139.md|.sandcastle/pilot-1139/task-05/sessions/01a01fc9-a915-711f-916d-e11bce0de634.jsonl
+docs/agents/pstack-lite/PILOT-1139.md|.sandcastle/pilot-1139/task-06/external-child/rollout-01a01fcb-3c8b-7b22-a7e4-fb5d2f9e8ed4.jsonl
+docs/agents/pstack-lite/PILOT-1139.md|.sandcastle/pilot-1139/task-06/external-child/subagent-rollout-01a01fcc-c47d-74d0-b78c-148da13d7bc2.jsonl
+docs/agents/pstack-lite/PILOT-1139.md|.sandcastle/pilot-1139/task-06/prime-sessions/01a01fca-5ced-710c-b70e-7d6a15c438e7.jsonl
+docs/agents/pstack-lite/PILOT-1139.md|.sandcastle/pilot-1139/task-06/report.md
+docs/agents/pstack-lite/PILOT-1139.md|.sandcastle/pilot-1139/task-07/report.md
+docs/agents/pstack-lite/PILOT-1139.md|.sandcastle/pilot-1139/task-07/sessions/01a01feb-d8bc-7239-a6d8-a3fa276de07c.jsonl
+docs/agents/pstack-lite/PILOT-1139.md|.sandcastle/pilot-1139/task-08/report.md
+docs/agents/pstack-lite/PILOT-1139.md|.sandcastle/pilot-1139/task-08/sessions/01a01feb-a791-722e-90d1-b17fc31bc210.jsonl
+docs/agents/pstack-lite/PILOT-1139.md|.sandcastle/pilot-1139/task-09/external-codex/rollout-2026-08-21T00-09-47-01a01fef-8bd4-7223-943f-e606304fd3bd.jsonl
+docs/agents/pstack-lite/PILOT-1139.md|.sandcastle/pilot-1139/task-09/report.md
+docs/agents/pstack-lite/PILOT-1139.md|.sandcastle/pilot-1139/task-09/sessions/01a01fec-42ea-772b-9c2c-6b3bd87bcd89.jsonl
+docs/agents/pstack-lite/PILOT-1139.md|.sandcastle/pilot-1139/task-10/report.md
+docs/agents/pstack-lite/PILOT-1139.md|.sandcastle/pilot-1139/task-10/sessions/01a01fff-ebe2-704c-8476-40ce265dde3c.jsonl
 docs/agents/pstack-lite/TRIGGER-FIXTURES.md|docs/agents/pstack-lite/results/
+docs/agents/pstack-lite/VERIFICATION-1138.md|.sandcastle/acceptance-1138/
+docs/agents/pstack-lite/VERIFICATION-1138.md|.sandcastle/acceptance-1138/architect/report-behavior-openai3.md
+docs/agents/pstack-lite/VERIFICATION-1138.md|.sandcastle/acceptance-1138/arena/e2e-openai-cli.json
+docs/agents/pstack-lite/VERIFICATION-1138.md|.sandcastle/acceptance-1138/arena/report-behavior-openai.md
+docs/agents/pstack-lite/VERIFICATION-1138.md|.sandcastle/acceptance-1138/arena/report-fanin-openai.md
+docs/agents/pstack-lite/VERIFICATION-1138.md|.sandcastle/acceptance-1138/blast/report.md
+docs/agents/pstack-lite/VERIFICATION-1138.md|.sandcastle/acceptance-1138/code-review/report-degraded-openai.md
+docs/agents/pstack-lite/VERIFICATION-1138.md|.sandcastle/acceptance-1138/create-verification/report-behavior-openai.md
+docs/agents/pstack-lite/VERIFICATION-1138.md|.sandcastle/acceptance-1138/how/report-behavior-openai2.md
+docs/agents/pstack-lite/VERIFICATION-1138.md|.sandcastle/acceptance-1138/technical-writing/report.md
+docs/agents/pstack-lite/VERIFICATION-1138.md|.sandcastle/acceptance-1138/trigger-success/architect-merge-codebase-design.json
+docs/agents/pstack-lite/VERIFICATION-1138.md|.sandcastle/acceptance-1138/trigger-success/architect-merge-design-an-interface.json
+docs/agents/pstack-lite/VERIFICATION-1138.md|.sandcastle/acceptance-1138/trigger-success/manifest.json
+docs/agents/pstack-lite/VERIFICATION-1138.md|.sandcastle/acceptance-1138/trigger-success/pstack-arena.json
+docs/agents/pstack-lite/VERIFICATION-1138.md|.sandcastle/acceptance-1138/trigger-success/pstack-create-verification.json
+docs/agents/pstack-lite/VERIFICATION-1138.md|.sandcastle/acceptance-1138/trigger-success/pstack-how.json
+docs/agents/pstack-lite/VERIFICATION-1138.md|.sandcastle/acceptance-1138/trigger-success/pstack-technical-writing.json
+docs/agents/pstack-lite/VERIFICATION-1138.md|.sandcastle/acceptance-1138/unslop/report.md
 docs/agents/skill-local-customizations.md|references/feature-map-example/
+docs/agents/stat-provenance.md|.chanlun/review-results/codex-oddeven-permtest-audit-20260727.md
+docs/agents/wayfinder-workflow.md|rust/src/theta_v0/bi_engine.rs
 docs/canonical-coverage-pdf-package.md|formal/NewChanlunEngineAudit.lean
 docs/canonical-coverage-rust-impl.md|.chanlun/review-results/center-strict-single-point-impl-20260726.md
 docs/canonical-coverage-rust-impl.md|.chanlun/review-results/center-tangency-blast-radius-20260726.md

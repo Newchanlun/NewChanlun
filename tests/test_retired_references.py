@@ -91,7 +91,6 @@ RETIRED_NOTE = re.compile(r"退役|已删除|已删|不再|retired|removed|no lo
 BASELINE = Path(__file__).with_name("retired_references_baseline.txt")
 
 INFERENCE = "inference layer, historical record (AGENTS.md 文档层名分: 不追溯更新)"
-RETIRED_AGENT_DOCS = "decision record citing agent docs retired by #1917 (git show 3d61fb7294:<path>)"
 HISTORICAL = {
     # whole trees
     "analysis/": INFERENCE,
@@ -140,12 +139,6 @@ HISTORICAL = {
     "docs/spiral_completeness_and_course_coverage.md": INFERENCE,
     "docs/three_stages_accounting_design.md": INFERENCE,
     "docs/architecture/complete_fugue_design.md": INFERENCE,
-    # ADRs whose line-anchored citations of docs/agents/{generation-constitution,
-    # delivery-discipline}.md are kept as historical coordinates after #1917 retired
-    # those files; each ADR's header note gives `git show 3d61fb7294:<path>`.
-    "docs/adr/0039-production-entry-inventory-and-unique-launcher.md": RETIRED_AGENT_DOCS,
-    "docs/adr/0048-legacy-engine-module-level-dispositions.md": RETIRED_AGENT_DOCS,
-    "docs/adr/0058-replay-shell-mapping-and-legacy-replay-dispositions.md": RETIRED_AGENT_DOCS,
 }
 
 
