@@ -986,15 +986,17 @@ class ExternalReview:
         return outcomes
 
     def review_pr(self, number: int, attempt: int = 1) -> dict:
-        """gating 双审（_review_pr，与旁听无关）。终态已发布、且真派过 gating 模型时，按开关另起脱离的旁听进程后返回：
-        不等它、不共享锁或中断标志；旁听失败与否都不影响本函数的返回与已发布状态。"""
-        result = self._review_pr(number, attempt)
-        if (self.advisory_enabled() and result.get("reviews") and "publication" in result
+        """gating 双审（_review_pr，与旁听无关）。本次调用真派过 gating 模型、终态已发布时，按开关另起脱离的旁听进程
+        后返回：不等它、不共享锁或中断标志；旁听失败与否都不影响本函数的返回与已发布状态。恢复发布（outcome 已存在，
+        含 STALE 受管恢复）、沿用和 STALE 都不派。"""
+        result, dispatched = self._review_pr(number, attempt)
+        if (dispatched and self.advisory_enabled() and result.get("reviews") and "publication" in result
                 and result.get("verdict") in ("PASS", "BLOCK", "FAILED")):
             self._spawn_advisory(ReviewTarget(**result["target"]).key)
         return result
 
-    def _review_pr(self, number: int, attempt: int = 1) -> dict:
+    def _review_pr(self, number: int, attempt: int = 1) -> tuple[dict, bool]:
+        """返回 (结论, 本次是否走了派发 gating 模型再汇总发布的路径)。"""
         target = self.target(number, attempt)
         assert self.gateway is not None
         folder = self.state_root / "runs" / target.key
@@ -1006,8 +1008,8 @@ class ExternalReview:
                     saved = _read(folder / "outcome.json")
                     if saved["verdict"] == "STALE":
                         # 不看原因文案：recover_stale 重验目标、controller、取代关系与全部回执，任何一项不满足原样返回。
-                        return self.recover_stale(target, folder, publisher, saved)
-                    return self._resume_publication(target, folder, publisher, saved)
+                        return self.recover_stale(target, folder, publisher, saved), False
+                    return self._resume_publication(target, folder, publisher, saved), False
                 reuse = self.reusable(target) if target.reuse_planned else None
                 if reuse is not None:
                     source, admission = reuse
@@ -1015,7 +1017,7 @@ class ExternalReview:
                         # 部署准入在锁外，可能耗时；锁内重读历史，来源仍是同一个才发布。
                         current = self.reuse_source(target)
                         if current is not None and current["run_id"] == source["run_id"]:
-                            return self._publish_reuse(target, folder, publisher, source, admission)
+                            return self._publish_reuse(target, folder, publisher, source, admission), False
                 if target.reuse_planned and not any((folder / model).exists() for model in MODELS):
                     self.admit_space(target)  # 登记时因可沿用跳过了总准入，现在退回双审，补做
                 if self._superseded_on_head(target):  # 已被同 head 更晚的 attempt 取代：不发 pending、不派模型
@@ -1038,12 +1040,12 @@ class ExternalReview:
                 result = {"run_id": target.run_id, "verdict": verdict, "state": state,
                           "target": asdict(target), "reviews": [asdict(o) for o in outcomes]}
                 _save(folder / "outcome.json", result)
-                return self._publish_final(target, folder, publisher, result)
+                return self._publish_final(target, folder, publisher, result), True
             except Stale as error:
                 result = _read(folder / "outcome.json") if (folder / "outcome.json").exists() else {}
                 result.update(run_id=target.run_id, verdict="STALE", reason=str(error), target=asdict(target))
                 _save(folder / "outcome.json", result)
-                return result
+                return result, False
             finally:
                 for model in MODELS:
                     worker = folder / model
@@ -1155,7 +1157,8 @@ class ExternalReview:
                 try:
                     self.admit_quota()
                 except EffectPending as error:  # 超出额度：跳过旁听，不暂停任何东西
-                    return {**entry, "reason": str(error)}
+                    entry["reason"] = str(error)
+                    return entry  # 原对象返回：finally 补的 checkout 字段要进返回值
                 checkout = self.checkout_root / target.run_id / model
                 # 空间：只有总准入多算一份快照仍能通过时才派（给之后的 gating 双审留够两份）；否则跳过。
                 _, single = snapshot_plan(self.source, target)
@@ -1165,11 +1168,13 @@ class ExternalReview:
                 need = single * (len(MODELS) + 1) + self._advisory_reserved_bytes()
                 free = shutil.disk_usage(volume).free
                 if free < need:
-                    return {**entry, "reason": f"no space：需 {need} bytes（gating {len(MODELS)} 份 + 旁听 1 份），"
-                                               f"{volume} 可用 {free} bytes"}
+                    entry["reason"] = (f"no space：需 {need} bytes（gating {len(MODELS)} 份 + 旁听 1 份），"
+                                       f"{volume} 可用 {free} bytes")
+                    return entry
                 worker.mkdir(mode=0o700, exist_ok=True)
                 if (worker / "prepare.json").exists() and not self.cleanup_checkout(target, model, advisory, preparing=True):
-                    return {**entry, "verdict": "FAILED", "reason": "旧 prepare 仍有活动进程，未派发"}
+                    entry.update(verdict="FAILED", reason="旧 prepare 仍有活动进程，未派发")
+                    return entry
                 _save(worker / "prepare.json", {"run_id": target.run_id, "checkout": str(checkout),
                                                  "required_bytes": single})
                 frozen = prepare_review(target, self.source, checkout)
@@ -1183,8 +1188,16 @@ class ExternalReview:
                 env = {k: os.environ[k] for k in ("PATH", "HOME", "USER", "LOGNAME", "TMPDIR", "LANG", "CLIPROXY_LOCAL_KEY")
                        if k in os.environ}
                 with open(worker / "supervisor.log", "ab", opener=lambda p, f: os.open(p, f, 0o600)) as log:
-                    process = subprocess.Popen([*self.launcher, "--output-dir", str(worker)], env=env,
-                                               stdin=subprocess.DEVNULL, stdout=log, stderr=log, start_new_session=True)
+                    try:
+                        process = subprocess.Popen([*self.launcher, "--output-dir", str(worker)], env=env,
+                                                   stdin=subprocess.DEVNULL, stdout=log, stderr=log,
+                                                   start_new_session=True)
+                    except OSError:
+                        # 与 run_review 相同：监督进程没起来，容器也不会有；写 container_closed 的失败回执，
+                        # 下面 finally 的 cleanup_checkout 与回收据此删快照。
+                        _save(worker / "receipt.json", {**launch, "prompt": None, "status": "failed",
+                              "failure_reason": "SupervisorNotStarted", "container_closed": True})
+                        raise
                 _save(worker / "process.json", {"pid": process.pid, "launch_id": launch["launch_id"]})
             launch = _read(worker / "launch.json")
             timed_out = self._await_advisory(worker, launch, process, deadline)

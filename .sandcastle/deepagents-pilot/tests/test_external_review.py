@@ -2254,3 +2254,71 @@ def test_reaper_skips_when_another_reaper_holds_the_host_lock(lane):
     finally:
         os.close(fd)
     assert lane.reap()["removed"] == 1
+
+
+# ---- 第五轮（kimi BLOCK）：旁听 Popen 失败、提前返回的 checkout 字段、恢复发布不派旁听 ----
+
+
+@pytest.mark.parametrize("by", ["cleanup", "reaper"])
+def test_advisory_popen_failure_snapshot_is_reclaimed(lane, monkeypatch, by):
+    result = lane.review_pr(1810)  # 旁听关闭
+    key = ReviewTarget(**result["target"]).key
+    lane.launcher = [str(lane.state_root / "no-such-launcher")]  # launch.json 写入后 Popen 失败
+    if by == "reaper":  # 本次收尾没删掉（例如删除时出错），留给回收
+        monkeypatch.setattr(lane, "cleanup_checkout", lambda *args, **kwargs: False)
+    entry = lane.run_advisory(key)["reviews"][0]
+    worker = _run_folder(lane, result) / module.ADVISORY_DIR / ADVISORY
+    checkout = Path(json.loads((worker / "launch.json").read_text())["checkout"])
+    assert entry["verdict"] == "FAILED"
+    receipt = json.loads((worker / "receipt.json").read_text())
+    assert (receipt["status"], receipt["failure_reason"], receipt["container_closed"]) == (
+        "failed", "SupervisorNotStarted", True)
+    lane.container_state = lambda container: pytest.fail("worker 从未启动，不应查 docker")
+    if by == "cleanup":
+        assert entry["checkout"] == "removed" and not checkout.exists()
+    else:
+        assert entry["checkout"] == "retained" and checkout.is_dir()
+        stats = lane.reap()
+        assert (stats["removed"], stats["retained_unknown"]) == (1, 0) and not checkout.exists()
+
+
+@pytest.mark.parametrize("cause", ["quota", "space", "active_prepare"])
+def test_advisory_early_returns_carry_checkout_field(lane, monkeypatch, cause):
+    import subprocess
+    result = lane.review_pr(1810)  # 旁听关闭
+    target = ReviewTarget(**result["target"])
+    holder = None
+    if cause == "quota":
+        monkeypatch.setenv(module.DAILY_INPUT_CAP_ENV, "1000")
+        monkeypatch.setattr(lane, "recent_input_tokens", lambda: 1000)
+    elif cause == "space":
+        single = module.snapshot_plan(lane.source, target)[1]
+        monkeypatch.setattr(module.shutil, "disk_usage",
+                            lambda path: SimpleNamespace(free=single * (len(MODELS) + 1) - 1))
+    else:  # 旧 prepare 仍有进程在用快照
+        worker = _run_folder(lane, result) / module.ADVISORY_DIR / ADVISORY
+        worker.mkdir(parents=True, mode=0o700)
+        checkout = lane.checkout_root / target.run_id / ADVISORY
+        module._save(worker / "prepare.json", {"run_id": target.run_id, "checkout": str(checkout),
+                                               "required_bytes": 1})
+        holder = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)", str(checkout)])
+    try:
+        entry = lane.run_advisory(target.key)["reviews"][0]
+    finally:
+        if holder is not None:
+            holder.kill()
+            holder.wait()
+    assert entry["verdict"] == ("FAILED" if cause == "active_prepare" else "SKIPPED")
+    assert entry["checkout"] in ("removed", "retained")
+    assert set(entry) >= {"model", "verdict", "session_id", "reason", "checkout"}
+
+
+def test_resumed_publication_does_not_spawn_advisory(lane, monkeypatch):
+    monkeypatch.setenv(module.ADVISORY_ENV, "1")
+    spawned = []
+    monkeypatch.setattr(lane, "_spawn_advisory", spawned.append)
+    first = lane.review_pr(1810)
+    assert first["verdict"] == "PASS" and spawned == [ReviewTarget(**first["target"]).key]
+    again = lane.review_pr(1810)  # outcome 已存在：恢复发布（只对账）
+    assert again["run_id"] == first["run_id"] and "publication" in again
+    assert len(spawned) == 1
