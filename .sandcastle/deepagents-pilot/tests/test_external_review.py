@@ -888,6 +888,19 @@ NOT_A_PATCH_READ = {
     "kimi-pathspec-then-patch-shaped-body": [lambda t: _command(
         f"git diff {t.merge_base_sha} {t.head_sha} -- nope; git show --no-patch --format=%B {t.head_sha}",
         output=LANE_PATCH)],
+    # #2022 第二轮 kimi BLOCK：前一段 diff 悄悄失败（全局选项指错仓库、报错被丢），开头就成了 `%B` 的输出
+    "kimi-git-dir-stderr-dropped-then-show": [lambda t: _command(
+        f"git --git-dir=/nonexistent diff {t.merge_base_sha} {t.head_sha} 2>/dev/null; "
+        f"git show -s --format=%B {t.head_sha}", output=LANE_PATCH)],
+    "diff-stderr-dropped-then-show": [lambda t: _command(
+        f"git diff {t.merge_base_sha} {t.head_sha} 2>/dev/null; git show -s --format=%B {t.head_sha}",
+        output=LANE_PATCH)],
+    "diff-elsewhere-then-show": [lambda t: _command(
+        f"git -C /tmp diff {t.merge_base_sha} {t.head_sha}; git show -s --format=%B {t.head_sha}", output=LANE_PATCH)],
+    "diff-work-tree-then-show": [lambda t: _command(
+        f"git --work-tree=/tmp diff {t.merge_base_sha}; git show -s --format=%B {t.head_sha}", output=LANE_PATCH)],
+    "diff-stderr-merged-then-show": [lambda t: _command(
+        f"git diff {t.merge_base_sha} {t.head_sha} 2>&1; git show -s --format=%B {t.head_sha}", output=LANE_PATCH)],
     "diff-option-then-show": [lambda t: _command(
         f"git diff -R {t.merge_base_sha} {t.head_sha}; git show -s --format=%B {t.head_sha}", output=LANE_PATCH)],
     "diff-parent-then-show": [lambda t: _command(
@@ -1076,6 +1089,14 @@ def test_diff_then_commit_metadata_reads_patch_from_diff_segment_only():
                  f"git log -s --format=%H --show-linear-break=+x {PR2018_HEAD}"):
         command = f"/bin/bash -lc \"git diff {PR2018_MB} {PR2018_HEAD}; {tail}\""
         assert not reads_candidate_patch(command, PR2018_DIFF, patch)
+    # #2022 第二轮 kimi BLOCK：diff 指错仓库、报错丢进 /dev/null，开头只剩 `%B`（这里让提交说明长成补丁的样子）
+    for leading in (f"git --git-dir=/nonexistent diff {PR2018_MB} {PR2018_HEAD} 2>/dev/null",
+                    f"git diff {PR2018_MB} {PR2018_HEAD} 2>/dev/null", f"git -C /tmp diff {PR2018_MB} {PR2018_HEAD}"):
+        command = f"/bin/bash -lc \"{leading}; git show -s --format=%B {PR2018_HEAD}\""
+        assert not reads_candidate_patch(command, PR2018_DIFF, patch)
+    allowed_config = (f"/bin/bash -lc \"git -c core.quotepath=false diff {PR2018_MB} {PR2018_HEAD}; "
+                      f"git show -s --format=%B {PR2018_HEAD}\"")
+    assert reads_candidate_patch(allowed_config, PR2018_DIFF + PR2018_SHOW, patch)
     # 没有后一段时照旧按整段输出判
     alone = f"/bin/bash -lc 'git diff --no-ext-diff --no-textconv {PR2018_MB} {PR2018_HEAD}'"
     assert reads_candidate_patch(alone, PR2018_DIFF, patch)

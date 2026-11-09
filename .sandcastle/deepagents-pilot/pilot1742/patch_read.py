@@ -19,8 +19,8 @@ Codex 记录的命令形如 `/bin/bash -lc '<脚本>'`。这里按 bash 语法�
 - git 之前只有不输出的段（_setup），用 `&&`、`;` 或换行接上；git 之后只有经管道串联的纯过滤器（_FILTERS），
   管道就是脚本的结尾。别的命令（echo、printf、cat 文件、tee、python、另一条 git……）只要出现，整条命令就不算：
   aggregated_output 是整条命令的输出，那些段印出的改动行与 git 印出的分不开（#1969 正式审查 kimi BLOCK）。
-  唯一的例外（PR #2018 run 45a4c22b）：整个 PR 的 git diff（merge-base 对 head，不带 pathspec、不接管道，
-  选项只在 _PLAIN_DIFF 里）之后，用 `;`/`&&`/换行接白名单里只印提交元数据的 `git show`/`git log`（_trailing）。
+  唯一的例外（PR #2018 run 45a4c22b）：整个 PR 的 git diff（merge-base 对 head，不带 pathspec、不接管道、
+  没有任何重定向，全局选项只许白名单 `-c`，选项只在 _PLAIN_DIFF 里）之后，用 `;`/`&&`/换行接白名单里只印提交元数据的 `git show`/`git log`（_trailing）。
   PR 非空，真实补丁必定先印出；证据只在输出开头、合 git diff 格式的那段里找（_leading_diff），diff 失败时
   开头是报错，后一段的输出当不了证据（#2022 kimi、opus BLOCK）。
 
@@ -695,8 +695,14 @@ def _patch_read(command: str, head_sha: str, merge_base_sha: str, base_sha: str)
     # 只带 _PLAIN_DIFF 里的选项）：PR 非空，真实补丁就必定先于后一段印出；diff 失败时开头是报错。证据只在开头
     # 那段 diff 里找（leading）。#2022 两位审查 BLOCK：带 `-- nope` 时 diff 什么都不印，`%B` 印出的提交说明就成了
     # 开头那段；后一段按黑名单放行时，`--binary` 隐含 `--patch`、`--show-linear-break=<文字>` 印审查员写的字。
+    # 第二轮 kimi BLOCK：`git --git-dir=/nonexistent diff … 2>/dev/null; git show -s --format=%B …` 里 diff 悄悄失败、
+    # 报错又被丢掉，开头就成了 `%B`。所以前一段不许有任何重定向，全局选项只许 _CONFIG_KEYS 里的 `-c`。
     call = _git_call(expanded[k].argv)
-    if (call is None or call.subcommand != "diff" or read.kind != "patch" or "--" in call.rest
+    if call is None or call.subcommand != "diff":
+        return None
+    globals_ = expanded[k].argv[1:len(expanded[k].argv) - len(call.rest) - 1]
+    if (read.kind != "patch" or "--" in call.rest or expanded[k].redirects
+            or globals_[::2] != ["-c"] * len(globals_[::2]) or len(globals_) % 2
             or not all(_PLAIN_DIFF.fullmatch(o) for o in call.options) or commands[k].op not in ("&&", ";", "\n")):
         return None
     for j in range(k + 1, len(commands)):
