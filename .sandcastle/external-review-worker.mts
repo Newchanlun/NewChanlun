@@ -1,7 +1,7 @@
 import type { BindMountSandboxHandle, SandboxProvider } from "@ai-hero/sandcastle";
 import { execFileSync } from "node:child_process";
-import { closeSync, existsSync, lstatSync, openSync, readFileSync, realpathSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
-import { join, resolve, sep } from "node:path";
+import { closeSync, existsSync, lstatSync, mkdirSync, openSync, readFileSync, realpathSync, renameSync, rmSync, statSync, unlinkSync, writeFileSync } from "node:fs";
+import { dirname, join, resolve, sep } from "node:path";
 import { pathToFileURL } from "node:url";
 import { CodexTranscript, OUTPUT_SCHEMA, assertRoute, type ChildModel } from "./codex-child.ts";
 import { docker } from "@ai-hero/sandcastle/sandboxes/docker";
@@ -108,13 +108,43 @@ export const VOLUME_SNAPSHOT = "g() { /usr/bin/env -i PATH=/usr/bin:/bin GIT_CON
 
 const dockerCli = (args: string[]) => execFileSync("docker", args, { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }).trim();
 const hostKilobytes = (path: string) => Number(execFileSync("du", ["-sk", path], { encoding: "utf8" }).split(/\s/, 1)[0]);
-export function dockerReviewVolumes(run: (args: string[]) => string = dockerCli, checkoutKilobytes = hostKilobytes): ReviewVolumes {
+
+/** 建卷准入锁：checkout 在 <checkout_root>/<run_id>/<model>，锁放 checkout_root 下，本机所有监督共用一把。 */
+export const volumeAdmissionLock = (checkout: string): string => join(dirname(dirname(checkout)), ".vm-volume-admission.lock");
+const pidAlive = (pid: number) => {
+  try { process.kill(pid, 0); return true; } catch (error) { return (error as NodeJS.ErrnoException).code === "EPERM"; }
+};
+/** 跨进程互斥：mkdir 原子建锁目录，owner 文件记 pid。持有者进程已死（SIGKILL、OOM），或建了目录却在
+ *  60 秒内没写成 owner，即视为陈旧锁并接管。populate 是同步调用，SIGTERM 要等它返回才处理，finally 一定放锁。 */
+export function withVolumeAdmissionLock<T>(lock: string, body: () => T, waitMs = 30 * 60_000): T {
+  const owner = join(lock, "owner");
+  const deadline = Date.now() + waitMs;
+  for (;;) {
+    try { mkdirSync(lock, { mode: 0o700 }); } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+      let pid = NaN;
+      try { pid = Number(readFileSync(owner, "utf8")); } catch { /* 持有者可能刚建目录、还没写 owner */ }
+      let stale = Number.isSafeInteger(pid) && pid > 0 ? !pidAlive(pid) : false;
+      if (!Number.isSafeInteger(pid) || pid <= 0) {
+        try { stale = Date.now() - statSync(lock).mtimeMs > 60_000; } catch { continue; }
+      }
+      if (stale) { rmSync(lock, { recursive: true, force: true }); continue; }
+      if (Date.now() > deadline) throw new Error("等待 VM 建卷准入锁超时");
+      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 200);
+      continue;
+    }
+    writeFileSync(owner, String(process.pid), { mode: 0o600 });
+    break;
+  }
+  try { return body(); } finally { rmSync(lock, { recursive: true, force: true }); }
+}
+
+export function dockerReviewVolumes(run: (args: string[]) => string = dockerCli, checkoutKilobytes = hostKilobytes,
+  lockFor: (checkout: string) => string = volumeAdmissionLock): ReviewVolumes {
   // 本次 launch 起的每个容器和卷都带同一标签，宿主 reaper 据此回收崩溃、被杀或重启后留下的孤儿。
   const label = (launchId: string) => ["--label", `${REVIEW_VOLUME_LABEL}=${launchId}`];
   const owner = `${process.getuid?.() ?? 1000}:${process.getgid?.() ?? 1000}`;
-  return {
-    populate(volume, image, checkout, launchId) {
-      reviewMounts(volume);
+  const fill = (volume: string, image: string, checkout: string, launchId: string) => {
       const df = run(["run", "--rm", "--network", "none", ...label(launchId), "--entrypoint", "/bin/df", image, "-Pk", "/"]);
       const available = Number(df.split("\n").at(-1)?.trim().split(/\s+/)[3]) * 1024;
       const needed = checkoutKilobytes(checkout) * 1024 + VM_SPACE_RESERVE;
@@ -131,6 +161,13 @@ export function dockerReviewVolumes(run: (args: string[]) => string = dockerCli,
         run(["start", "-a", helper]);
         if (run(["inspect", "--format", "{{.State.ExitCode}}", helper]) !== "0") throw new Error("审阅卷属主设置失败");
       } finally { run(["rm", "-f", helper]); }
+  };
+  return {
+    populate(volume, image, checkout, launchId) {
+      reviewMounts(volume);
+      // 并发的 reviewer（同一 run 的两位、别的 PR 的 run）各读 df 再各自灌卷会超卖余量：从读 df 到灌完卷串行进行，
+      // 后来者读到的 df 已扣掉前者的卷。
+      withVolumeAdmissionLock(lockFor(checkout), () => fill(volume, image, checkout, launchId));
     },
     snapshot(volume, image, launchId) {
       reviewMounts(volume);

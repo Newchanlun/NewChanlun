@@ -1,12 +1,13 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { execFileSync } from "node:child_process";
-import { mkdtempSync, mkdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { execFileSync, spawn } from "node:child_process";
+import { mkdtempSync, mkdirSync, readFileSync, readdirSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { randomUUID } from "node:crypto";
+import { pathToFileURL } from "node:url";
 import { codexWorker } from "./codex-route.mts";
-import { PROMPT_JSON_INSTRUCTION, REVIEW_IMAGE, REVIEW_VOLUME_LABEL, VM_SPACE_RESERVE, VOLUME_SNAPSHOT, checkReviewAdmission, dockerReviewVolumes, rateLimitSignal, readLaunch, reviewMounts, reviewSandbox, reviewVolumeName, runExternalReview, snapshot, verifyReviewAdmission, type ReviewLaunch, type ReviewVolumes, type WorkerDependencies } from "./external-review-worker.mts";
+import { PROMPT_JSON_INSTRUCTION, REVIEW_IMAGE, REVIEW_VOLUME_LABEL, VM_SPACE_RESERVE, VOLUME_SNAPSHOT, checkReviewAdmission, dockerReviewVolumes, rateLimitSignal, readLaunch, reviewMounts, reviewSandbox, reviewVolumeName, runExternalReview, snapshot, verifyReviewAdmission, withVolumeAdmissionLock, type ReviewLaunch, type ReviewVolumes, type WorkerDependencies } from "./external-review-worker.mts";
 import type { BindMountSandboxHandle } from "@ai-hero/sandcastle";
 
 const image = "sha256:" + "1".repeat(64);
@@ -82,7 +83,9 @@ test("审阅卷先核 VM 磁盘，再经 docker cp 灌入（不经 bind mount）
     return "";
   };
   const checkoutKb = 1024 * 1024;  // 1 GiB
-  dockerReviewVolumes(run, () => checkoutKb).populate(volume, image, "/checkouts/run/model", launchId);
+  const lockRoot = mkdtempSync(join(tmpdir(), "volume-lock-"));
+  const lockFor = () => join(lockRoot, "lock");
+  dockerReviewVolumes(run, () => checkoutKb, lockFor).populate(volume, image, "/checkouts/run/model", launchId);
   const owner = `${process.getuid!()}:${process.getgid!()}`;
   assert.deepEqual(calls, [
     ["run", "--rm", "--network", "none", ...label, "--entrypoint", "/bin/df", image, "-Pk", "/"],
@@ -98,11 +101,11 @@ test("审阅卷先核 VM 磁盘，再经 docker cp 灌入（不经 bind mount）
   assert(calls.every((a) => !a.includes("-v") || a[a.indexOf("-v") + 1] === `${volume}:/review`));
   // VM 磁盘不够「checkout + 2 GiB」就不建卷。
   calls.length = 0; availableKb = checkoutKb + VM_SPACE_RESERVE / 1024 - 1;
-  assert.throws(() => dockerReviewVolumes(run, () => checkoutKb).populate(volume, image, "/checkouts/run/model", launchId), /VM 磁盘空间不足/);
+  assert.throws(() => dockerReviewVolumes(run, () => checkoutKb, lockFor).populate(volume, image, "/checkouts/run/model", launchId), /VM 磁盘空间不足/);
   assert.equal(calls.length, 1);
   availableKb = 100 * 1024 * 1024;
   present = true; calls.length = 0;
-  assert.throws(() => dockerReviewVolumes(run, () => checkoutKb).populate(volume, image, "/checkouts/run/model", launchId), /已存在/);
+  assert.throws(() => dockerReviewVolumes(run, () => checkoutKb, lockFor).populate(volume, image, "/checkouts/run/model", launchId), /已存在/);
   assert.deepEqual(calls.map((a) => a.slice(0, 2)), [["run", "--rm"], ["volume", "inspect"]]);
   // 快照在一次性容器里只读挂卷执行，不经审查员容器；脚本只用绝对路径的 env 与 git。
   calls.length = 0;
@@ -115,6 +118,67 @@ test("审阅卷先核 VM 磁盘，再经 docker cp 灌入（不经 bind mount）
   dockerReviewVolumes(run).remove(volume);
   assert.deepEqual(calls, [["ps", "-a", "-q", "--filter", `volume=${volume}`], ["rm", "-f", "d1"], ["rm", "-f", "d2"], ["volume", "rm", volume]]);
   assert.throws(() => dockerReviewVolumes(run).remove("/Volumes/AgentStorage"));
+  assert.deepEqual(readdirSync(lockRoot), [], "成功与失败后都放锁");
+  rmSync(lockRoot, { recursive: true, force: true });
+});
+
+/** 两个监督进程同时灌卷：共享一个替身 VM（文件里记可用 KB，docker cp 扣减），只够一份卷加余量。 */
+async function racePopulate(sharedLock: boolean): Promise<string[]> {
+  const root = realpathSync(mkdtempSync(join(tmpdir(), "volume-race-")));
+  try {
+    const vm = join(root, "vm-available-kb");
+    const checkoutKb = 2.5 * 1024 * 1024;  // 2.5 GiB：各需 4.5 GiB，可用 5 GiB 只够一份（kimi 在 68e4778e 上的反例）
+    writeFileSync(vm, String(5 * 1024 * 1024));
+    const child = join(root, "child.mts");
+    writeFileSync(child, `
+      import { readdirSync, readFileSync, writeFileSync } from "node:fs";
+      import { dirname, join } from "node:path";
+      const w = await import(${JSON.stringify(pathToFileURL(join(import.meta.dirname, "external-review-worker.mts")).href)});
+      const [vm, lock, launchId] = process.argv.slice(2);
+      const sleep = (ms) => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+      // 起跑线：两个进程都加载完才开始，免得启动快慢不一把竞态窗口错开。
+      writeFileSync(join(dirname(vm), "ready-" + launchId), "");
+      while (readdirSync(dirname(vm)).filter((f) => f.startsWith("ready-")).length < 2) sleep(10);
+      const run = (args) => {
+        if (args.includes("/bin/df")) return "Filesystem 1024-blocks Used Available Capacity Mounted on\\noverlay 1 1 " + readFileSync(vm, "utf8") + " 1% /";
+        if (args[0] === "volume" && args[1] === "inspect") throw new Error("no such volume");
+        if (args[0] === "create") return "c".repeat(64);
+        if (args[0] === "inspect") return "0";
+        if (args[0] === "cp") { sleep(400); writeFileSync(vm, String(Number(readFileSync(vm, "utf8")) - ${checkoutKb})); }
+        return "";
+      };
+      try {
+        w.dockerReviewVolumes(run, () => ${checkoutKb}, () => lock).populate(w.reviewVolumeName(launchId), "${image}", "/x/run/model", launchId);
+        console.log("admitted");
+      } catch (e) { console.log(/VM 磁盘空间不足/.test(String(e)) ? "refused" : "error " + e); }
+    `);
+    const runOne = (n: number) => new Promise<string>((done, fail) => {
+      const proc = spawn(process.execPath, ["--import", "tsx", child, vm, join(root, sharedLock ? "lock" : `lock-${n}`), randomUUID()],
+        { cwd: dirname(import.meta.dirname), stdio: ["ignore", "pipe", "inherit"] });
+      let out = ""; proc.stdout.on("data", (c) => { out += c; });
+      proc.on("error", fail); proc.on("close", () => done(out.trim()));
+    });
+    return (await Promise.all([runOne(1), runOne(2)])).sort();
+  } finally { rmSync(root, { recursive: true, force: true }); }
+}
+
+test("并发灌卷：可用空间只够一份时只有一份通过准入（跨进程准入锁）；不共用锁时两份都过，证明这道竞态真实存在", async () => {
+  assert.deepEqual(await racePopulate(true), ["admitted", "refused"]);
+  assert.deepEqual(await racePopulate(false), ["admitted", "admitted"]);
+});
+
+test("准入锁：持有者已死的陈旧锁被接管，活着的持有者让后来者等待直到超时", () => {
+  const root = mkdtempSync(join(tmpdir(), "volume-lock-"));
+  try {
+    const lock = join(root, "lock");
+    mkdirSync(lock); writeFileSync(join(lock, "owner"), "99999999");  // 不存在的 pid
+    assert.equal(withVolumeAdmissionLock(lock, () => "ran"), "ran");
+    mkdirSync(lock); writeFileSync(join(lock, "owner"), String(process.pid));  // 活着的持有者
+    assert.throws(() => withVolumeAdmissionLock(lock, () => "ran", 300), /准入锁超时/);
+    rmSync(lock, { recursive: true });
+    assert.throws(() => withVolumeAdmissionLock(lock, () => { throw new Error("body failed"); }), /body failed/);
+    assert.deepEqual(readdirSync(root), [], "body 抛错也放锁");
+  } finally { rmSync(root, { recursive: true, force: true }); }
 });
 
 test("显式两家族模型保留旧默认并拒绝路由外模型", () => {
