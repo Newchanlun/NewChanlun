@@ -1,6 +1,6 @@
 # #1742：审阅已有 PR 并发布 App 状态
 
-原业务、harvest 或人工创建 PR 后，用此入口审阅整个 PR。原 owner 继续拥有代码、分支和 PR；入口不认领票、不提交、不 push、不改 PR，也不代替 main 的合入批准。
+原业务、harvest 或人工创建 PR 后，用此入口审阅整个 PR。原 owner 继续拥有代码、分支和 PR；入口不认领票、不提交、不 push、不改 PR，也不合入 main（合入由分支保护的必需检查 `deepagents/review` 与 `ci-ok` 把关，见 `.sandcastle/docs/graph-engineering.md`「main 的合入」）。
 
 ## 部署后审一张 PR
 
@@ -141,10 +141,11 @@ HOST 切换步骤：
 | `<model>/events.jsonl`、`session.jsonl` | 实际 stdout 事件与独立 session 日志 |
 | `<model>/supervisor.log`、`stderr.log` | 宿主入口和模型诊断；SDK 异常仅记类别与阶段 |
 | `outcome.json`、`effects/*.json` | 双审结论与状态写入、读回、对账证据 |
+| `volume-reaper.jsonl`（state_root 下） | 派发前回收孤儿审阅卷与容器的记录 |
 
 无凭据 detached checkout 位于外盘 `/Volumes/AgentStorage/issue1742-deepagents-pilot-20261027/checkouts/external-review/<run-id>/<model>`。每份对象库只保存 base、head、merge-base 的源码树及祖先 commit 元数据，不带无关历史版本的树和 blob。`git merge-base`、完整 PR diff、三端源码和提交元数据可用。其它历史提交的源码不在快照内。Git config、hooks、alternates 和凭据不从源仓复制。
 
-登记 attempt（以有效的 `target.json` 是否存在为准，不以目录是否存在为准，目录建好但 target.json 未写时中断也要重新准入）之前先做总准入：单份快照需要导入对象未压缩大小、head 文件大小再加 256 MiB 余量，乘以 reviewer 数（目前是 2，按并发同时存在两份计算），与 checkout_root 所在卷的可用空间比较。不够就不登记 attempt、不写任何状态，报出总需求、单份需求和可用字节数。能沿用旧 PASS 时不建快照，跳过准入，并把「登记时判定可沿用」记进 target.json 的 `reuse_planned`；派发时只在它为真时才考虑沿用，届时若已不能沿用就先补做总准入再双审。每位 reviewer 在 prepare 前仍按单份需求复查一次，模型启动前再核对 256 MiB 余量，防止排队期间空间被占用；复查不通过时明确失败，不启动模型。
+登记 attempt（以有效的 `target.json` 是否存在为准，不以目录是否存在为准，目录建好但 target.json 未写时中断也要重新准入）之前先做总准入：单份快照需要导入对象未压缩大小、head 文件大小再加 256 MiB 余量，乘以 reviewer 数（目前是 2，按并发同时存在两份计算），与 checkout_root 所在卷的可用空间比较。不够就不登记 attempt、不写任何状态，报出总需求、单份需求和可用字节数。能沿用旧 PASS 时不建快照，跳过准入，并把「登记时判定可沿用」记进 target.json 的 `reuse_planned`；派发时只在它为真时才考虑沿用，届时若已不能沿用就先补做总准入再双审。每位 reviewer 在 prepare 前仍按单份需求复查一次，模型启动前再核对 256 MiB 余量，防止排队期间空间被占用；复查不通过时明确失败，不启动模型。审阅卷占的是 VM 磁盘（Colima 的 `/var/lib/docker`，在 macOS 系统盘的稀疏镜像上），不是 AgentStorage：监督建卷前在一次性容器里读 VM 磁盘可用空间，不够「宿主 checkout 大小 + 2 GiB」（`VM_SPACE_RESERVE`）就不建卷、不启动模型，回执记失败。并发的监督（同一 run 的两位 reviewer、别的 PR 的 run）从读 df 到灌完卷持有同一把跨进程锁（`<checkout_root>/.vm-volume-admission.lock` 上的内核 `flock`，由监督起的一个 `python3` 子进程持有；放锁就是结束这个子进程，监督被 SIGKILL 时管道断开、子进程退出，内核随之释放锁；锁文件从不删除，没有陈旧锁接管），后来者读到的可用空间已扣掉前者的卷，不会两份都按同一个余量通过。
 
 宿主先保存 `prepare.json`，再构造 checkout。prepare 中断且尚无 launch 时，同键重跑只回收本 run 的未启动 checkout 并重建。`launch.json` 之后沿用原收养协议，不自动重复派工。监督在读取 launch、获取锁等启动阶段失败也保存失败终态。已记录的监督进程退出却未写终态时，controller 生成 FAILED 记录并发布 error，不永久停留在 pending。
 
@@ -152,7 +153,14 @@ HOST 切换步骤：
 
 宿主在终态、进程结束且容器已确认关闭后回收本 run 创建的 checkout，证据目录保持不动。仍有活动进程、PID 身份不明或容器创建与关闭结果不明时保留 checkout，并记录 `checkout-cleanup.json`。同键重跑会再次尝试安全回收。旧版本没有 prepare intent 的 checkout 不自动回收。
 
-源码和 Git 全只读挂入容器。宿主 home、PEM、GitHub token、状态和 session 目录不挂入。session 从容器临时目录经 SDK 收取，不给 reviewer 可写宿主回执目录。
+源码和 Git 全只读进容器，但不直接挂宿主 checkout（#1986）。Colima 经 virtiofs 共享宿主目录，VM 会为容器读过的每个文件一直开着宿主句柄：容器删了、宿主删了 checkout 也不关，在容器里删也不关，空间只有重启 VM 才还（实测每轮约 1.3–2.6 GiB）。所以监督每次 launch 建一个 Docker 命名卷 `newchanlun-external-review-<launch_id>`，用 `docker cp` 把 checkout（含 `.git`）经 Docker API 灌进卷，把属主改成容器用户，再把这一个卷只读挂到 `/review`。容器 inspect 必须恰有这一个只读卷挂载。卷的 head、分支和 `git status` 在另起的一次性容器里读（`--network none`、卷 `:ro`、`/bin/sh`、`/usr/bin/env -i`、`/usr/bin/git` 全用绝对路径），不在审查员容器里读：审查员容器的 PATH 前几段可被审查员写入，在那里取的 `after` 可以伪造。建审查容器前先读一次，与宿主 checkout 的快照一致才继续；模型结束后再读一次作 `after`。
+
+本次 launch 起的卷和每个辅助容器（灌卷、改属主、df、快照）都带标签 `newchanlun.external-review.launch=<launch_id>`。删卷先删仍引用它的容器（Sandcastle 关容器时吞掉 rm 的错误，残留容器会让删卷一直报 in use），再删卷。三层回收：
+1. 监督的 finally：容器关闭后删卷，回执记 `volume` 和 `volume_removed`；删卷失败不改结论。
+2. 监督的退出钩子：收到 SIGTERM/SIGINT 时 Sandcastle 的 shutdown 钩子同步删容器后 `process.exit(1)`，finally 跑不到、回执也不写；退出钩子同步删卷。
+3. 宿主 reaper（`ExternalReview.reap_review_volumes`）：每位 reviewer 派发前按标签列出卷和容器，凡 launch_id 在本 state_root 登记过、监督进程（`--output-dir` 身份）已不在的，先 `rm -f` 容器再删卷；未登记的 launch_id 不碰。被 SIGKILL、OOM、Mac 或 Colima 重启打断的 launch 由它收。结果追加到 `external-review/volume-reaper.jsonl`；docker 不可用时只记 `skipped`，不挡派发。
+
+宿主回收 checkout 时若回执写着 `volume_removed=false`，也按 launch 的卷名补删，结果记进 `checkout-cleanup.json` 的 `volume_state`。宿主 home、PEM、GitHub token、状态和 session 目录不挂入。session 从容器临时目录经 SDK 收取，不给 reviewer 可写宿主回执目录。
 
 App token 只申请 metadata/read、contents/read、pull_requests/read、statuses/write（审查专用 App 的安装权限也正是这四项）；token 留在宿主发布进程内存。GitHub 的 statuses/write 不按 context 缩权，宿主发布器及 OS 因此属于受信边界。
 
