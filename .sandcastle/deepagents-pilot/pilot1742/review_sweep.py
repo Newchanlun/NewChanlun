@@ -10,6 +10,8 @@
 - 本 head 上有结论但没发布（outcome 已存、publication 缺失）：同一 attempt 续跑一次走受管对账与发布，再不成交操作员；
 - 本 head 上有登记、无结论、进程已不在（中断）：同一 attempt 续跑一次，再不成交操作员；
 - 其余（没有 run，或本 head 上只有 STALE）：派发下一个 attempt；子进程登记前就退出的同一 attempt 退避 10 分钟再派。
+限流退避：最近 2 个已完结的审查 run 都有 reviewer 以 failure_code=rate_limited 失败时，30 分钟内不派新审查
+（launch、resume-review），每轮记一行 rate-limit-backoff；发布续跑、追平、合入与撤原生 auto-merge 照常。
 派发的子进程绑定决策时的 head：先核对 PR 仍是这个 head，不是就不审（run-review --expect-head）。
 启用合入时，strict 下落后的 PR 先追平、再审新 head（不审一个合入前必然被替换的 head）。
 发起前 base、head 提交须已在宿主对象库（EXTERNAL-REVIEW.md：入口和 reviewer 都不 fetch）；缺失时调用 owner 注入的
@@ -81,6 +83,10 @@ Spawn = Callable[[int, int, str, Path], int]
 Sync = Callable[[int, str, str], None]
 GATE = frozenset({"deepagents/review", "ci-ok"})
 LAUNCH_BACKOFF_SECONDS = 600
+# 限流退避：最近 RATE_LIMIT_RUNS 个已完结的审查 run 都有 reviewer 以 failure_code=rate_limited 失败时，自最后一个完结起
+# RATE_LIMIT_BACKOFF_SECONDS 内不派新审查（不派 launch、不续跑 resume-review）；发布续跑、合入、撤 auto-merge 照常。
+RATE_LIMIT_RUNS = 2
+RATE_LIMIT_BACKOFF_SECONDS = 1800
 MIN_LOOP_SECONDS = 180
 MERGE_CHECKS = ("deepagents/review", "ci-ok", "DevSkim")
 FILES_CAP = 3000
@@ -118,7 +124,8 @@ HUMAN_GATED: dict[str, re.Pattern[str]] = {
         re.IGNORECASE),
 }
 STUCK_REVIEW = frozenset({"needs-operator", "needs-reconcile", "needs-source-sync", "source-unreadable", "error"})
-QUIET = frozenset({"done", "draft", "stale-pr"})  # 没有动作的状态，不写日志
+# 没有动作的状态，不写日志。review-backoff 由本轮一行 rate-limit-backoff 汇总，不逐个 PR 记。
+QUIET = frozenset({"done", "draft", "stale-pr", "review-backoff"})
 
 
 class EvidenceInsufficient(RuntimeError):
@@ -267,6 +274,7 @@ class Sweep:
         self.github, self.lane, self.spawn, self.rows, self.sync = github, lane, spawn, rows, sync
         self.folder = state_root / "sweep"
         self._sync_failed = False
+        self._backoff: dict[str, Any] | None = None
         self.max_running, self.auto_merge, self.max_age, self.now = max_running, auto_merge, max_age, now
 
     def open_pulls(self) -> list[dict[str, Any]]:
@@ -281,6 +289,41 @@ class Sweep:
         if updated is not None and datetime.fromisoformat(updated.replace("Z", "+00:00")) < self.now() - self.max_age:
             return "stale-pr"
         return None
+
+    def rate_limit_backoff(self) -> dict[str, Any] | None:
+        """限流退避是否生效：按 outcome.json 的写入时间取最近 RATE_LIMIT_RUNS 个已完结且真派过模型的 run（有逐位结论、
+        不是 STALE；沿用 run 不调模型，不算），都有 reviewer 回执记 failure_code=rate_limited、且最后一个完结不足
+        RATE_LIMIT_BACKOFF_SECONDS 时返回日志行，否则 None。读不了的 run 跳过。"""
+        found: list[tuple[float, str, bool]] = []
+        stamped: list[tuple[float, Path]] = []
+        for path in (self.lane.state_root / "runs").glob("*/outcome.json"):
+            try:
+                stamped.append((path.stat().st_mtime, path))
+            except OSError:
+                continue
+        for mtime, path in sorted(stamped, reverse=True):
+            try:
+                outcome = json.loads(path.read_text())
+                if outcome.get("verdict") not in ("PASS", "BLOCK", "FAILED") or not outcome.get("reviews"):
+                    continue
+                limited = False
+                for receipt in path.parent.glob("*/receipt.json"):
+                    try:
+                        limited = limited or json.loads(receipt.read_text()).get("failure_code") == "rate_limited"
+                    except (OSError, ValueError, AttributeError):
+                        continue
+            except (OSError, ValueError, AttributeError):
+                continue
+            found.append((mtime, str(outcome.get("run_id")), limited))
+            if len(found) == RATE_LIMIT_RUNS:
+                break
+        if len(found) < RATE_LIMIT_RUNS or not all(limited for _, _, limited in found):
+            return None
+        until = found[0][0] + RATE_LIMIT_BACKOFF_SECONDS
+        if self.now().timestamp() >= until:
+            return None
+        return {"action": "rate-limit-backoff", "runs": [run for _, run, _ in found],
+                "until": datetime.fromtimestamp(until, timezone.utc).isoformat()}
 
     def _resumes(self, number: int, head: str, attempt: int) -> Path:
         return self.folder / f"p{number}-{head}-a{attempt}.resumes"
@@ -322,6 +365,8 @@ class Sweep:
             return self._resume_once(number, head, row["target"]["attempt"], "publish")
         if behind:  # 先追平再审：不审一个合入前必然被替换的 head
             return "behind-awaiting-update", None
+        if self._backoff is not None:  # 限流退避：不派新审查（含续跑审查），本轮汇总一行日志
+            return "review-backoff", None
         if not self._has_commits(base, head):
             if self.sync is None:
                 return "needs-source-sync", None
@@ -368,6 +413,7 @@ class Sweep:
         except Exception as error:
             raise SourceUnreadable("github open pulls", error) from error
         self._sync_failed = False
+        self._backoff = self.rate_limit_backoff()
         actions: list[dict[str, Any]] = []
         states: dict[int, dict[str, Any]] = {}
         unreadable: set[int] = set()
@@ -404,6 +450,9 @@ class Sweep:
                     action = "error"
                     actions.append({**entry, "action": action, "reason": f"{type(error).__name__}: {error}"})
                 review_actions[pr["number"]] = action
+            if self._backoff is not None:
+                actions.append({**self._backoff,
+                                "held": [n for n, a in review_actions.items() if a == "review-backoff"]})
             if self.auto_merge:
                 self.merge_actions(pulls, states, reviewing_now, review_actions, unreadable,
                                    out=actions, clean=clean, withdrawn=withdrawn)
