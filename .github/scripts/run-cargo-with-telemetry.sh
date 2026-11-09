@@ -114,7 +114,8 @@ finish() {
 }
 trap finish EXIT
 
-# #1875：Boat 上 build-script EACCES 偶发的单次重试，逻辑在 cargo-eacces-retry.sh（所有 cargo 调用点共用一份）。
+# #1875：Boat 上 build-script EACCES 偶发的单次重试，逻辑在 cargo-eacces-retry.sh。接入它的只有：本脚本、ci.yml 的 #1488 两段 run_suite
+#   与 run_logged 构建、run-1488-delta-ci.py 的构建命令；其余 cargo 调用点（如 run-1488-driver-ci.py、ci.yml 其他步骤）仍直接调 cargo。
 set +e
 ("$(dirname -- "${BASH_SOURCE[0]}")/cargo-eacces-retry.sh" "${command_argv[@]}")
 COMMAND_STATUS=$?
