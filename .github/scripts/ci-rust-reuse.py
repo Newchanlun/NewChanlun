@@ -24,8 +24,10 @@ main 上经独审合入的，不是攻击者可控的，最坏是那一次测得
 接受的风险（#2027 第五轮独审）：第 1 条按分支「现在的名字」查 PR 历史。有本仓写权限的人可以先让 PR 指向一个改过 ci.yml 的
 旁路分支、凭那份 workflow 渲染出 rust-green 作业，再借分支改名之类 API 不留可靠证据的操作，让这次 run 看起来属于一个只指向
 main 的分支。前提是攻击者能在本仓推分支、开 PR，而本仓只有用户本人与受控代理有这个权限——同样的人今天已经能用旁路 base 的
-PR run 让 push 去重认下一次「全绿」。后果上限：这个 PR 的 ci-ok 少跑一次 Rust；main 合入后的 push run 只认真跑过 Rust 的
-PR run（ci.yml push 去重），复用命中的 run 不算，所以 main 上仍完整跑一次 Rust，问题在合入后立即暴露，不会被悄悄放过。
+PR run 让 push 去重认下一次「全绿」，本复用不比这条基线更宽（#2027 威胁模型独审）。对这样的攻击者，没有 GitHub 在合入后
+仍保留的证据能把同一 head 上「指向 main 的 run」与「指向旁路 base 的 run」区分开（合入后 run 的 pull_requests 为空），
+所以 push 去重也兜不住，后果与基线相同：一次 PR 与其合入后的 main 都可能没真跑 Rust，直到下一次改 Rust 输入的合入全跑。
+push 去重只认 rust-green 作业 success 的 PR run，兜的是复用判定的**非恶意**误判：复用命中的 run 不算，合入后 main 照常全跑。
 
 总时限：整次判定最多 DEADLINE_SECONDS 秒（changes 作业上限 5 分钟）；超时与其他查询错误一样按全跑处理。
 
@@ -48,14 +50,16 @@ MAX_CANDIDATES = 20
 MAX_AGE = datetime.timedelta(days=7)  # stable 工具链不在指纹里：凭据只管 7 天
 
 
-def deadline_api(seconds: float = DEADLINE_SECONDS):
-    """gh api 调用，整体超过 seconds 秒即抛错（调用方按全跑处理）。"""
-    end = time.monotonic() + seconds
+def deadline_api(seconds: float = DEADLINE_SECONDS, clock=time.monotonic, call=None):
+    """gh api 调用，整体超过 seconds 秒即抛错（调用方按全跑处理）。clock / call 供测试注入。"""
+    end = clock() + seconds
 
     def api(path: str):
-        left = end - time.monotonic()
+        left = end - clock()
         if left <= 0:
             raise TimeoutError("reuse lookup deadline exceeded")
+        if call is not None:
+            return call(path)
         out = subprocess.run(["gh", "api", path], check=True, capture_output=True, text=True,
                              timeout=min(60, left)).stdout
         return json.loads(out)

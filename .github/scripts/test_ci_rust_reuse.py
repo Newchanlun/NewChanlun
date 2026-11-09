@@ -128,8 +128,19 @@ class ReuseTest(unittest.TestCase):
             self.assertEqual(self.decide(fake)["rust"], "true", ev)
 
     def test_deadline_runs_full(self):
-        d = self.decide(M.deadline_api(0))
-        self.assertEqual((d["rust"], d["rust_key"]), ("true", ""))
+        """总时限：假时钟在指纹算完后走过时限，后续查询必须抛错、按全跑（删掉 left<=0 判断时本例失败）。"""
+        fake, now = self.fake(), [0.0]
+
+        def call(path):
+            now[0] += 100  # 每次查询耗 100 s
+            return fake(path)
+        d = self.decide(M.deadline_api(120, clock=lambda: now[0], call=call))
+        self.assertEqual((d["rust"], d["rust_key"]), ("true", self.key))
+        self.assertIn("deadline", d["reuse"])
+
+    def test_within_deadline_reuses(self):
+        fake = self.fake()
+        self.assertEqual(self.decide(M.deadline_api(120, clock=lambda: 0.0, call=fake))["rust"], "false")
 
     def test_run_filters(self):
         for r in (run(head_repo_id=2), run(age_days=8)):
@@ -143,6 +154,12 @@ class ReuseTest(unittest.TestCase):
         fake = self.fake(base_files=[".sandcastle/x.ts", ".github/workflows/ci.yml"])
         self.assertEqual(self.decide(fake)["rust"], "true")
         self.assertIn("/compare/H1...B", fake.compare)
+
+    def test_base_side_check_uses_fullmatch(self):
+        """base 一侧改了名为 '.github/devskim/x\\n' 之外的 .github 文件：用 match 会被 $ 在换行前匹配误判为跳过集。"""
+        skip = re.compile(r"^(\.sandcastle/.+|package\.json|\.github/devskim/x)$")
+        fake = self.fake(base_files=[".github/devskim/x\n"])
+        self.assertTrue(M.base_side_touches_github(fake, R, "H1", "B", skip))
 
     def test_base_side_skip_set_or_non_github_change_reuses(self):
         fake = self.fake(base_files=[".sandcastle/x.ts", "rust/b.rs", ".github/devskim/y.json"])
