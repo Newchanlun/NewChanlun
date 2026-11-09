@@ -282,6 +282,11 @@ def run_review_command(number: int, attempt: int, head: str, private_key: Path) 
 _REVIEWER = re.compile(r"pilot1742\.(review_sweep run-review|external_review review-pr) --pr (\d+) ")
 
 
+def reviewer_processes(rows: Rows) -> int:
+    """活着（非僵尸）的审查进程数：并发上限按进程数算，同一 PR 的多个 attempt/head 各占一个名额（kimi 审 aa117154）。"""
+    return sum(1 for _, _, stat, command in rows if not stat.startswith("Z") and _REVIEWER.search(command + " "))
+
+
 def reviewing(rows: Rows) -> set[int]:
     """正在审查的 PR 号：活着（非僵尸）的 run-review 或 review-pr 进程，含操作员手动起的 review-pr。"""
     return {int(m.group(2)) for _, _, stat, command in rows if not stat.startswith("Z")
@@ -426,8 +431,8 @@ class Sweep:
             rows = self.rows()
         except Exception as error:  # 不知道谁在审就不能派审：整轮作废
             raise SourceUnreadable("host process table", error) from error
-        busy = reviewing(rows)
-        running = len(busy)
+        busy = reviewing(rows)  # 单 PR 去重：已在审的 PR 不再派
+        running = reviewer_processes(rows)  # 并发上限：按进程数，不按 PR 数
         # 追平只看本地真实在途（活进程或本轮刚派出），不信 GitHub 上的 pending：审查进行中 main 前进时终态判 Stale，
         # GitHub 上该 head 会一直停在 pending；若以它为准，decide 等追平、合入等审查，两边互等。中断后残留的
         # 无结论 run 审的是旧 base，追平后自然作废，也不挡追平。

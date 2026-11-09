@@ -834,6 +834,18 @@ def test_concurrent_cap_counts_manual_review_pr(lane):
     assert acts(actions, 1812) == ["queued"]
 
 
+def test_concurrent_cap_counts_processes_not_prs(lane):
+    """并发上限按审查进程数算（kimi 审 aa117154）：同一 PR 的两个手动 review-pr（不同 attempt）占两个名额。"""
+    github = FakeGitHub(lane)
+    _same_head_pulls(lane, github, [1811, 1812])
+    sweep, host, _ = make(lane, run=False, github=github, max_running=3)
+    host.rows.append((7, 7, "S", "python -m pilot1742.external_review review-pr --pr 1999 --attempt 1 --private-key x"))
+    host.rows.append((8, 8, "S", "python -m pilot1742.external_review review-pr --pr 1999 --attempt 2 --private-key x"))
+    actions = sweep.tick()
+    assert [a["pr"] for a in actions if a["action"] == "launch"] == [1810]
+    assert acts(actions, 1811) == ["queued"] and acts(actions, 1812) == ["queued"]
+
+
 def test_space_admission_refusal_holds_with_concurrency(lane, monkeypatch):
     """并发不绕过准入：子进程在登记前被空间准入拒绝时，不登记 attempt、不写状态；下一轮同一 attempt 退避、不重派。"""
     from pilot1742.external_review import IdentityError
