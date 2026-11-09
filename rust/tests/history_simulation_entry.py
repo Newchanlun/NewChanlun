@@ -13,7 +13,7 @@ def request(path,op,payload):
         return json.loads(s.makefile('rb').readline())
 class Authority:
     def __init__(self,path,role):
-        self.path=path; self.role=role; self.calls=[]; self.bad=None; self.records={}; self.authorizations={}; self.drop_after=None
+        self.path=path; self.role=role; self.calls=[]; self.bad=None; self.records={}; self.authorizations={}; self.drop_after=None; self.swallow=None; self.compact={}
         self.sock=socket.socket(socket.AF_UNIX); self.sock.bind(str(path)); self.sock.listen(16)
         self.thread=threading.Thread(target=self.run,daemon=True); self.thread.start()
     def run(self):
@@ -24,8 +24,11 @@ class Authority:
                 q=json.loads(c.makefile('rb').readline()); self.calls.append(q)
                 r={k:q[k] for k in ['protocol','session_id','session_generation','authority_id','authority_epoch','command_id','command_hash','command']}
                 r.update(state='ReleasedExact' if self.role=='E' else 'ExecuteCommitted',receipt_id=self.role+':'+q['command_id'],release_receipt_id=q['release_receipt_id'],commit_ns=100)
+                if q['command_id'] in self.compact:
+                    r['receipt_id']=self.compact[q['command_id']]; r.pop('release_receipt_id')
                 if self.role=='S':
                     key=q['command_id']
+                    if key==self.swallow and q['op']=='RequestConditionalExecution': continue
                     if q['op']=='RequestConditionalExecution':
                         assert key not in self.records, 'X tried to authorize twice'
                         self.records[key]=copy.deepcopy(r); self.authorizations[key]=self.authorizations.get(key,0)+1
@@ -154,6 +157,30 @@ def run(name):
             with sqlite3.connect(db) as c:
                 assert c.execute('select attempt_batch from x_exact_commands where id=?',('a',)).fetchone()==(None,)
                 assert c.execute('select count(*) from x_sim_batches').fetchone()==(0,)
+        # Oversized S frame is known unsent: refuse before PendingBatch, never touch S, stay Accepted.
+        # Compact E replies leave a few bytes where the E reply fits but the S request does not.
+        limit=sim['max_frame_bytes']
+        def sized(name,pad=0):
+            cmd=command(dict(kind='submit',order=order(name)))
+            cmd['certificate']['responsibility_refs']=['controlled-responsibility'+'x'*pad]; cmd['certificate_hash']=digest(cmd['certificate'])
+            return cmd
+        e.compact={'big-p':'Ep','big-x':'Ex'}
+        assert request(xp,'AcceptExact',sized('big-p'))['state']=='Accepted'
+        probe=e.calls[-1]
+        reply=dict({k:probe[k] for k in ['protocol','session_id','session_generation','authority_id','authority_epoch','command_id','command_hash','command']},state='ReleasedExact',receipt_id='Ep',commit_ns=100)
+        s_request=dict(probe,op='RequestConditionalExecution',authority_id='S',authority_epoch='s1',release_receipt_id='Ep')
+        reply_len=len(canonical(reply))+1; s_len=len(canonical(s_request))+1
+        assert s_len>reply_len,(s_len,reply_len)
+        big=sized('big-x',limit-reply_len)
+        assert request(xp,'AcceptExact',big)['state']=='Accepted'
+        assert len(canonical(dict(s_request,command=big,command_hash=digest(big),command_id='big-x',release_receipt_id='Ex')))+1>limit
+        before=len(s.calls)
+        oversized=request(xp,'AdvanceBar',batch(0,[big['change']]))
+        assert oversized['kind']=='Error' and '帧界' in canonical(oversized),oversized
+        assert request(xp,'QueryCommand','big-x')['state']=='Accepted'
+        assert len(s.calls)==before, 'oversized frame reached S'
+        with sqlite3.connect(db) as c:
+            assert c.execute("select count(*) from x_sim_meta where k='pending_batch'").fetchone()==(0,)
         for bad in ['denied','identity','content','future']:
             s.bad=bad; assert request(xp,'AdvanceBar',batch(0,[a]))['kind']=='Error'
             assert request(xp,'QueryCommand','a')['state']=='ExecutionRequested'
@@ -173,7 +200,15 @@ def run(name):
         r2=request(xp,'AdvanceBar',batch(2)); fill=r2['originals'][0]['event']['fill']; assert (fill['quantity'],fill['price'])==(60,95)
         pending=dict(kind='submit',order=order('cancel-me',quantity=10))
         assert request(xp,'AcceptExact',command(pending))['state']=='Accepted'
+        # S socket absent is known unsent: stay Accepted, then retry against a reachable S authorizes once.
+        before=len(s.calls); moved=s.path.with_name('s-unavailable'); s.path.rename(moved)
+        assert request(xp,'AdvanceBar',batch(3,[pending]))['kind']=='Error'
+        assert request(xp,'QueryCommand','cancel-me')['state']=='Accepted'
+        assert len(s.calls)==before
+        moved.rename(s.path)
         assert request(xp,'AdvanceBar',batch(3,[pending]))['originals']==[]
+        assert [q['op'] for q in s.calls[before:]]==['RequestConditionalExecution']
+        assert s.authorizations['cancel-me']==1
         cancel=dict(kind='cancel',command_id='cancel',family_id='f-cancel-me',eligibility_ref='S:cancel')
         market_order=order('market',side='sell',quantity=2); market_order['kind']=dict(kind='market',exec_index=5)
         market=dict(kind='submit',order=market_order)
@@ -312,13 +347,26 @@ def run(name):
         blocked=subprocess.run(argv(),env=env(),capture_output=True,timeout=5)
         assert blocked.returncode!=0 and (fixture or b'IdentityConflict' in blocked.stderr)
         pp.write_text(canonical(profile))
+        # S received the frame but committed nothing: possibly sent, so stay pending and only query, never resend.
+        p=start()
+        stuck=dict(kind='submit',order=order('stuck',quantity=1))
+        assert request(xp,'AcceptExact',command(stuck))['state']=='Accepted'
+        before=len(s.calls); s.swallow='stuck'
+        assert request(xp,'AdvanceBar',batch(12,[stuck]))['kind']=='Error'
+        assert request(xp,'QueryCommand','stuck')['state']=='ExecutionRequested'
+        s.swallow=None
+        assert request(xp,'AdvanceBar',batch(12,[stuck]))['kind']=='Error'
+        assert request(xp,'QueryCommand','stuck')['state']=='ExecutionRequested'
+        assert [q['op'] for q in s.calls[before:]]==['RequestConditionalExecution','QueryExecuteCommitted']
+        assert 'stuck' not in s.authorizations
+        p.terminate(); p.wait(5); xp.unlink(missing_ok=True)
         # Recovery uses the same clock predicate and refuses a corrupted earlier-than-release record.
         with sqlite3.connect(db) as c:
             clock=json.loads(clocks[0][0]); clock.update(received_ns=98,first_known_ns=99,commit_ns=101)
             c.execute('update x_exact_commands set accept_clock=? where id=?',(canonical(clock),'a'))
         blocked=subprocess.run(argv(),env=env(),capture_output=True,timeout=5)
         assert blocked.returncode!=0 and b'InvalidDomain' in blocked.stderr
-        print(name+': PASS '+('test runtime with post-claim exit43' if fixture else 'production X binary')+', invalid input stays Accepted, S reply loss/query-only recovery, unique S authorization, pending epoch2 rejected without writes, full fee/bust replay, frozen binding, atomic first initialization recovery')
+        print(name+': PASS '+('test runtime with post-claim exit43' if fixture else 'production X binary')+', invalid input stays Accepted, unsent S failures stay Accepted, sent-but-unknown stays query-only, S reply loss/query-only recovery, unique S authorization, pending epoch2 rejected without writes, full fee/bust replay, frozen binding, atomic first initialization recovery')
         return originals
     finally:
         if p.poll() is None: p.terminate(); p.wait(5)

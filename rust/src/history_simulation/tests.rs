@@ -560,8 +560,15 @@ fn scenario_bust_is_immutable_causal_and_never_reissues_order() {
 }
 #[test]
 fn killed_transaction_recovers_without_duplicate_originals() {
-    let dir = std::env::temp_dir().join(format!("issue1381-kill-{}", std::process::id()));
-    std::fs::create_dir_all(&dir).unwrap();
+    let dir = std::env::temp_dir().join(format!(
+        "issue1381-kill-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    std::fs::create_dir(&dir).unwrap();
     let invoke = |crash| {
         let mut c = std::process::Command::new(std::env::current_exe().unwrap());
         c.args([
