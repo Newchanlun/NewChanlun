@@ -103,9 +103,12 @@ use serde_json::{json, Value};
 /// （`/3` 已被 #1420 占用），`CONSTRUCTION_RULE` 不改。
 /// #1604：段线形的预算 token 由常数 `second-seq-scan-budget/1` 改为本次所读记录（签署 v2），合同必填值变
 /// ⟹ 会话级规则加 `second-seq-scan-budget/2`；段合同升 `s-segment/5`（形状同 `/4`），`/4` 留作历史合同。
+/// #1978：流首段的终结按本段自己从起点开始的特征序列判、多候选起点按第 9 条发布（`xianduan.md` §7.1
+/// 第 5／9 条）⟹ 已确认段在流首处可变，会话级规则加 `segment-first-own/1`；每代仍只发布一个流首段候选，
+/// 段合同形状不变，仍用 `s-segment/5`。
 /// 旧规则会话只读（AsKnown），同一 rule_revision 下不混两代笔/段对象。
 const RULE_REVISION: &str =
-    "s2-axis-quantifiers+new-bi/2+segment-second/2+segment-turn/1+second-seq-scan-budget/2";
+    "s2-axis-quantifiers+new-bi/2+segment-second/2+segment-turn/1+second-seq-scan-budget/2+segment-first-own/1";
 
 /// #1405：v3 只发布 TB-02-A/B（13 轴），新写者显式迁至新笔 /2。
 /// 历史 /1 规则仅用于读取/验证，不由新 parser 续写或回填。
@@ -6622,8 +6625,56 @@ mod tests {
         assert_killed_published(&snaps, false, "0");
         let rows = design_rows(KILLED, true, 6);
         let (_, base) = run_design(&rows, None, &[rows.len()]);
-        let counts: Vec<usize> = (25..rows.len()).step_by(2).chain([rows.len()]).collect();
+        // #1875 TB-02-W 负责人裁定：预算轮只在设计点推进（27 耗尽、29 追加后 OPEN、31 再耗尽、33 判失效、
+        // 35 A 终结）加终点，并把四个设计点的状态逐项钉死。原先 25..len 每 2 根推进一次（16 代），37–53
+        // 只是把已判定的游标逐代后带；逐前缀不复活另由 tb02w_tests.rs 的 parser 层测试覆盖。
+        let counts: Vec<usize> = vec![25, 27, 29, 31, 33, 35, rows.len()];
         let (files, budgeted) = run_design(&rows, Some(1), &counts);
+        for (count, coverage, granted, semantic, result) in [
+            (
+                27,
+                "INCOMPLETE_RESOURCE_BOUND",
+                "1",
+                Value::Null,
+                "PENDING_CASE_TWO",
+            ),
+            (
+                29,
+                "COMPLETE",
+                "2",
+                json!("OPEN_AT_PREFIX_END"),
+                "PENDING_CASE_TWO",
+            ),
+            (
+                31,
+                "INCOMPLETE_RESOURCE_BOUND",
+                "2",
+                Value::Null,
+                "PENDING_CASE_TWO",
+            ),
+            (
+                33,
+                "COMPLETE",
+                "3",
+                json!("KILLED_BY_NEW_EXTREME"),
+                "KILLED_CASE_TWO",
+            ),
+        ] {
+            let snap = &budgeted[counts.iter().position(|&c| c == count).unwrap()];
+            let scan = &segment_data(snap, "CC-012.feature_sequence", "second:segment:1:1")
+                .unwrap_or_else(|| panic!("设计点 {count} 须有 second 序列"))["scan"];
+            assert_eq!(scan["coverage"], coverage, "设计点 {count} coverage");
+            assert_eq!(scan["budget"]["granted"], granted, "设计点 {count} granted");
+            assert_eq!(
+                scan["semantic_state"], semantic,
+                "设计点 {count} semantic_state"
+            );
+            assert_eq!(
+                segment_data(snap, "CC-013.segment", "segment:1:1").unwrap()["result"],
+                result,
+                "设计点 {count} 段结果"
+            );
+        }
         assert_killed_published(&budgeted, true, "1");
         let mut bound_seen = false;
         let mut granted_max = 0u64;
@@ -8750,6 +8801,8 @@ mod tests {
             "s2-axis-quantifiers+new-bi/2+segment-second/2",
             // #1604：#1493 的段规则在 second-seq-scan-budget/2 之后同样是旧规则。
             "s2-axis-quantifiers+new-bi/2+segment-second/2+segment-turn/1",
+            // #1978：#1604 的段规则在 segment-first-own/1 之后同样是旧规则。
+            "s2-axis-quantifiers+new-bi/2+segment-second/2+segment-turn/1+second-seq-scan-budget/2",
             "unknown-rule",
         ] {
             let files = TestFiles::new();

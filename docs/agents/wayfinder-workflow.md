@@ -35,7 +35,7 @@ tracker 物理操作（map/子票/blocking/frontier/claim/resolve 的 gh 命令�
 1. **开图**（编排层，占一个 session）：grilling 定 destination → 广度优先烤 frontier（扇形铺开，不深挖单线）→ 建 map（`wayfinder:map`，Destination/Notes 填好，雾写进 Not yet specified）→ 建可具体化的票 → 第二 pass 接 blocking 边。**research 票当场并发发 subagent 解决**，不等后续 session。开图 session 不解决任何票。第二轮广度烤 frontier 时，顺带把「本图红线 / 默认取舍」当成其中几题一起问，答案落 Notes（见「Notes 预授权」）。
 2. **走图**（一票一 session）：**开头先跑对账**（见「图正文的写入协议」）→ 取 frontier 第一票（open + 无 open blocker + 未 assign；用户点名则从其点名）→ **claim 先行**（assign 是 session 首写）→ 按票型解决（见下）→ resolution comment 写答案 → close → map 的 Decisions-so-far 加一行（gist + 链接，详情只留在票内）→ 毕业因此具体化的雾、新开浮出的票、把越出 destination 的票关票并登记 Out of scope。frontier 上无阻塞的票可并行多 session 走。
 3. **图闭环出 spec**：见「`/to-spec` 交棒边界」。
-4. **实施票链（图内，当场走）**：spec 批准后 `/to-tickets` 切实装票（挂图内、blocking 边）→ `/implement` 逐票（内部 `/tdd` 红绿切片 + `/code-review` 两轴收尾）→ 逐票评审合入，关票走 `delivery-discipline.md` 关票门全子句。**决策了就实装**——不停在 spec、不攒批、不走图外实施线。实施票落在图里还是图外，由图的实装声明决定（见下）。
+4. **实施票链（图内，当场走）**：spec 独审裁定 PASS 后 `/to-tickets` 切实装票（挂图内、blocking 边）→ `/implement` 逐票（内部 `/tdd` 红绿切片 + `/code-review` 两轴收尾）→ 逐票开 PR，分支保护的必需检查通过后合入，关票走 `delivery-discipline.md` 关票门全子句。**决策了就实装**——不停在 spec、不攒批、不走图外实施线。实施票落在图里还是图外，由图的实装声明决定（见下）。
 5. **spec 非持久**：实装落地后 spec 票关闭，不作长期维护的真理源。真理源是代码 + 决策票；spec 从落地那刻起是历史记录。
 
 ## 图的两行声明
@@ -100,17 +100,17 @@ tracker 物理操作（map/子票/blocking/frontier/claim/resolve 的 gh 命令�
 
 ## 管线自动化（2026-08-18，[#1078](https://github.com/xy7365527-lang/NewChanlun/issues/1078) 裁定）
 
-图清后管道自动汇入主干：**机器走管道，人守三闸**（spec 批准 / 不预授权决策 / 合入 main）。
+图清后管道自动汇入主干：**机器走管道；main 的合入不设人工批准，分支保护的 `deepagents/review`（正式非作者双审 success）与 `ci-ok`（适用 CI 全绿）满足后由代理合入；人工确认只留实盘下单与资金、密钥与凭证两类（范围与原话出处见 `.sandcastle/docs/graph-engineering.md`「人工确认只保留两类」），资金、账户、凭据硬门票交还用户签署**。spec 与决策（T/P）经起草与非作者独审 PASS 由代理裁定（[#1909](https://github.com/xy7365527-lang/NewChanlun/issues/1909)，用户直接授权；原「spec 批准 / 不预授权决策」两闸删除）。
 
 - **形态**：graph 语义 + loop 壳。DAG 走查器 = 纯函数（tracker 状态 → 触发动作）；壳 = 4 分钟轮询（watcher.sh / dispatcher 子代理先例）；日后可换事件驱动不动内核。
 - **宿主**：独立件 `scripts/wayfinder_engine`（控制面）；spec 草案 = 主控同型起草子代理（Claude Code CLI 无头、`--bare`、禁工具，经 CLIProxyLocal；默认与唯一允许值均为 `gpt-6.1-sol`，其它值启动即 fail-loud；只读文书，#1000 例外类；#1588 / #1617 更新）；实装票派 sandcastle 工蜂（既有两段式通道）。
 - **状态**：stateless——tracker 即账本，每轮重算 ready 集、天然幂等，不建状态库。
 - **自动动作边界**：
-  1. 图清（子票全关、frontier 空）→ 自动起草 spec 草案、开图内 spec 票、@编排者批【闸一】；
-  2. spec 批准 → 自动拆 tracer-bullet 实装票（blocking 边 + 票面逐条挂裁定票）+ `sandcastle` 标签 → 工蜂拾取 `/implement`；合入 main 人工闸不动【闸二】；
+  1. 图清（子票全关、frontier 空）→ 自动起草 spec 草案、开图内 spec 票，待非作者独审；
+  2. spec 有效「SPEC 独审裁定：PASS」记录（从独审 JSON 原件生成，非作者、绑定 SPEC 票号及所审正文摘要，任何日期的自由文本批准均无效，格式见 `.sandcastle/docs/graph-engineering.md`「SPEC 裁定」）→ 自动拆 tracer-bullet 实装票（blocking 边 + 票面逐条挂裁定票），发布后挂 `ready-for-agent`；拾取标签由释放循环按依赖、经写前复核后再挂（`sandcastle`，切流后为 `deepagents:queue`）→ 工蜂拾取 `/implement`；PR 经正式 `deepagents/review` 双审 success 后由代理合入；
   3. 实装票全关 + 图关判据满足（destination 达成、残雾三去处核实）→ 自动起草图关 comment + close。
-- **不碰决策票（v1）**：决策票（含 Notes N-k 预授权照判）一律人工——机器不替人裁；v2 观察项 = 预授权影子模式（自动起草 resolution、不关票，人批才发）。
-  - **v2 裁决面**（[#1547](https://github.com/xy7365527-lang/NewChanlun/issues/1547)）：本条只约束 wayfinder_engine 本体。图在 Notes 写明技术类预授权时，由独立组件 decision-claimer 分级（T/P）、考古、起草、独审：T 类审查通过即按预授权裁定，P 类走影子模式待人批。起草前先考古（用户 2026-10-20 令「所有的裁决票都要先考古」）：每个待决点两路搜，已裁的沿用，只把真没设计过的决定交给人，每问附出处与推荐值。流程正本 `.sandcastle/docs/graph-engineering.md`「2. 考古」。
+- **engine 不碰决策票**：wayfinder_engine 本体不裁决策票。
+  - **裁决面**（[#1547](https://github.com/xy7365527-lang/NewChanlun/issues/1547)，#1909 更新）：独立组件 decision-claimer 分级（T/P）、考古、起草、非作者独审；T/P 两类审查全 PASS 即由代理裁定落地，BLOCK 用尽或考古有事实缺口则暂停（held）不放行，票上「退回：…」评论后整链重跑。触及资金、账户、凭据硬门（ADR 0041）的票进 held `user_authorization`、挂 `ready-for-human` 交还用户，由用户本人以首行「退回：签署」评论、每项一行写 `- <字段>=<签署值>；有效域=<有效域>` 后重跑（返修用的其他「退回：…」不算签署），主控不代发；代理与用户共用同一 GitHub 账号，该评论的作者无法机器区分（现有信任模型，未改变）。起草前先考古（用户 2026-10-20 令「所有的裁决票都要先考古」）：每个待决点两路搜，已裁的沿用，真没设计过的决定由起草者按推荐答案与推导裁定、交独审核对。流程正本 `.sandcastle/docs/graph-engineering.md`「2. 考古」。
 - **队列交棒（#1084 追加）**：控制面每轮只给合资格实装票（已批准 spec/DAG + 未 assign + 无 open blocker）挂 `sandcastle`，不把全部历史 `ready-for-agent` 无差别放行；每轮五桶分明（扫描集 `ready-for-agent` ∪ `wayfinder:impl` / 已获 `sandcastle` 拾取权 / blocked / claimed / running）；批准态沿 SPEC 子树递归（2026-10-20 修正，判据细则见 `.sandcastle/docs/graph-engineering.md`「解锁」）。控制面为受管常驻服务（launchd KeepAlive，`.sandcastle/install-wayfinder-engine.sh`），gh 查询有限重试 + 指数退避 + fail-loud，无 runnable 票 sleep 后重查、不退出。
 - 实装票：[#1084](https://github.com/xy7365527-lang/NewChanlun/issues/1084)（sandcastle 通道）。
 
@@ -122,7 +122,7 @@ tracker 物理操作（map/子票/blocking/frontier/claim/resolve 的 gh 命令�
 
 ### AFK 票的载体与派发
 
-- **载体**（2026-08-16 [#1000](https://github.com/xy7365527-lang/NewChanlun/issues/1000) 裁定更新）= **sandcastle 沙盒为默认执行面**（`.sandcastle/main.mts` 两段式 / `main-swarm.mts` 蜂群；工蜂 = Claude Code CLI 经 CLIProxyLocal，模型统一为 `.sandcastle/main-model.mts` 的 `gpt-6.1-sol`，与当前主控同型；Docker 用 `host.docker.internal:8318` 并在领票前验连通性，#1547 / #1617 更新）；rlm 子代理退为轻量补充（只读研究、快速查证）。GitHub-hosted 五条旧 workflow 没有获批的 Astra 凭据与可达端点，其无标签 Claude 默认已在模型调用前退役；显式 DeepSeek 只保留为 legacy opt-in，不是默认或失败回退。例外三类（只读簿记对话 / 单条小操作 / 沙盒不可行）按 #1000 Destination 举证登记。结果回流本体验收后写回 tracker 不变；合入 main 走人工闸（#1003 裁 3）。
+- **载体**（2026-08-16 [#1000](https://github.com/xy7365527-lang/NewChanlun/issues/1000) 裁定更新）= **sandcastle 沙盒为默认执行面**（`.sandcastle/main.mts` 两段式 / `main-swarm.mts` 蜂群；工蜂 = Claude Code CLI 经 CLIProxyLocal，模型统一为 `.sandcastle/main-model.mts` 的 `gpt-6.1-sol`，与当前主控同型；Docker 用 `host.docker.internal:8318` 并在领票前验连通性，#1547 / #1617 更新）；rlm 子代理退为轻量补充（只读研究、快速查证）。GitHub-hosted 五条旧 workflow 没有获批的 Astra 凭据与可达端点，其无标签 Claude 默认已在模型调用前退役；显式 DeepSeek 只保留为 legacy opt-in，不是默认或失败回退。例外三类（只读簿记对话 / 单条小操作 / 沙盒不可行）按 #1000 Destination 举证登记。结果回流本体验收后写回 tracker 不变；main 的合入由分支保护的 `deepagents/review`（正式非作者双审 success）与 `ci-ok`（适用 CI 全绿）必需检查把关，满足后由代理完成（取代 #1003 裁 3 原先的人工把关）。
 - **模型** = 原生派发默认继承当前主控；本机受管后台统一读 `.sandcastle/main-model.mts`。实装、起草与独审不再按角色分模型档；独审仍须非作者独立进程，打回重做带具体审查意见（#1617）。
 - **工作区隔离**：**写仓的 AFK 子代理强制开独立 worktree**（`Agent` 工具 `isolation: "worktree"`），**只读的不强制**（[#772](https://github.com/xy7365527-lang/NewChanlun/issues/772) 裁定⑤）。本仓事实上已跑过几十个 worktree，成本只有零点几秒；而主仓撞车有 `git stash` 抹掉未提交改动的实伤前例。只读子代理开 worktree 纯属浪费。
 - **git 层冲突**：走 `/resolving-merge-conflicts`，本文只挂指针。git 会把冲突显式标出来、拒绝静默丢改动，不需要额外口径。
@@ -133,10 +133,10 @@ tracker 物理操作（map/子票/blocking/frontier/claim/resolve 的 gh 命令�
 
 - **节奏：一次一问。** grilling 票默认入口 = `/grill-with-docs`。#776 裁定①曾把默认改成 `/batch-grill-me` 的一轮一 frontier 节奏，**已被 #779 覆盖作废**（连带其「超 4 题拆两轮」一并归零）。代价如实记：一次一问的 HITL 吞吐低于 batch，瓶颈是真的；但 #776 自己就是 batch 节奏的一次实证失败——它在疲劳上下文里一轮裁六条，其中一条直接与仓内正本冲突而无人察觉。
 - **票内查事实：按代价分。** 单条 read/grep、一两个文件 → 主控自查；多文件扫描、跨仓调研、要读大量上下文 → **强制派子代理**。
-- **push right：按可逆性分界，不按工作量。** 改代码 / 写入仓库的合入点，逐次批准不动（不可逆，错了要回滚）；纯决策、纯读的环节（事实查证、选项整理、多票结论汇总）右移，攒成一份 brief 一次递上。
+- **push right：按可逆性分界，不按工作量。** 改代码 / 写入仓库的合入点逐次把关不动（不可逆，错了要回滚）：每次合入都须分支保护的 `deepagents/review` 与 `ci-ok` 通过，不再逐次人工批准；纯决策、纯读的环节（事实查证、选项整理、多票结论汇总）右移，攒成一份 brief 一次递上。
 - **Notes 预授权**（真杠杆，四条子规则）：
   - **沉淀时机**：并入开图第二轮广度烤 frontier，不单开一轮；此外，走图中任何一次「这个答案对后续每张票都成立」的裁定，**当场回写 Notes**。沉淀是持续动作，不是开图一锤子买卖。
-  - **边界：按有无先例分。** 可预授权 = 本仓已发生过、有落地判例的同类取舍（例：同类机制优先声明制自执行、不设 CI 硬门）——代理是在套用判例，不是新创。仍须本人当场拍 = **新取舍（本仓无先例）/ 风险偏好 / taste** 三类，写进 Notes 也只算参考。
+  - **边界：按有无先例分。** 可预授权 = 本仓已发生过、有落地判例的同类取舍（例：同类机制优先声明制自执行、不设 CI 硬门）——代理是在套用判例，不是新创。原规则要求本人当场拍的 **新取舍（本仓无先例）/ 风险偏好 / taste** 三类，普通研发部分已由 #1909 的 P 类非作者独审裁定取代；真实资金与权限仍按 ADR 0041 的独立硬门，Notes 不代签。
   - **判错痕迹落 comment 不落 body**：Notes 每条预授权**编号 + 注明据哪张票的判例**；代理照它判时，resolution comment 必须写一行「本条依 Notes N-k 预授权判定」。GitHub issue body 的编辑历史 API 取不到，Notes 被覆盖永远不知道；comment 是追加的，回查即搜字符串。
   - **膨胀控制：按归属分流，不按字数。** 一条沉淀若对未来每张图都成立，它就不属于 Notes——外移到本文档，Notes 只留指针；只对本图成立的才留 Notes。软信号：超约 10 条就回头筛一遍哪几条已跨图通用。
 

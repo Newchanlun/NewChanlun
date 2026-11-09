@@ -635,7 +635,7 @@ def test_release_waits_for_the_inflight_effect_then_old_controller_stops(v2):
             outcome["publish"] = error
 
     def release():
-        outcome["release"] = release_claim(ClaimStore(v2.claims_root, lock_timeout=30), TICKET, unit.run_id, "主控退回")
+        outcome["release"] = release_claim(ClaimStore(v2.claims_root, lock_timeout=30), v2.gateway(), TICKET, unit.run_id, "主控退回")
         released.set()
 
     worker = threading.Thread(target=publish)
@@ -662,13 +662,33 @@ def test_reclaim_after_release_needs_a_new_run_and_bumps_generation(v2):
     unit = v2.register()
     run = v2.run(unit)
     run.release()
-    release_claim(ClaimStore(v2.claims_root), TICKET, unit.run_id, "主控退回")
+    release_claim(ClaimStore(v2.claims_root), v2.gateway(), TICKET, unit.run_id, "主控退回")
     with pytest.raises(ClaimRefused, match="released"):
         v2.run(unit)
     second = v2.run(v2.register(f"t{TICKET}-2"))
     assert second.generation == 2 and v2.claim_record()["run_id"] == f"t{TICKET}-2"
     markers = [c["body"] for c in v2.github.issues[TICKET]["comments"] if "deepagents:claim" in c["body"]]
     assert len(markers) == 2 and "gen=2" in markers[1]
+
+
+def test_release_records_released_locally_before_github(v2, monkeypatch, tmp_path):
+    from pilot1742 import executor as cli
+
+    unit = v2.register()
+    v2.run(unit).release()
+    assert v2.claim_record()["state"] == "active"
+
+    def offline(_args):
+        raise OSError("GitHub unreachable")
+
+    monkeypatch.setattr(cli, "ClaimStore", lambda: ClaimStore(v2.claims_root))
+    monkeypatch.setattr(cli, "_client", offline)
+    code = cli.main(["--state-root", str(v2.home), "--drain-root", str(tmp_path / "drain"), "release",
+                     "--ticket", str(TICKET), "--run-id", unit.run_id, "--reason", "主控退回",
+                     "--private-key", str(tmp_path / "absent.pem")])
+    assert code != 0
+    assert v2.claim_record()["state"] == "released", "GitHub 不可用时本机仍记 released"
+    assert "deepagents" in v2.github.issues[TICKET]["labels"], "离线释放不碰镜像"
 
 
 def test_registration_is_idempotent_and_frozen(v2):
@@ -706,7 +726,7 @@ def test_new_generation_refuses_previous_boat_worker(v2, monkeypatch, remote_sta
                                          sandbox_id='bx_abc'))
     if remote_state == 'receipt':
         old.execution._path(key, '.remote.json').write_text('{}')
-    release_claim(ClaimStore(v2.claims_root), TICKET, unit.run_id, 'controller exited')
+    release_claim(ClaimStore(v2.claims_root), v2.gateway(), TICKET, unit.run_id, 'controller exited')
     second = v2.register(f't{TICKET}-2')
     before = v2.writes()
     with pytest.raises(ClaimRefused, match='Boat'):
@@ -718,7 +738,8 @@ def test_new_generation_refuses_previous_boat_worker(v2, monkeypatch, remote_sta
 
 
 @pytest.mark.parametrize('field,value', [('generation', 2), ('run_id', 'other-run'), ('run_dir', '/other'),
-                                         ('ticket', 99), ('repo', 'other/repo')])
+                                         ('ticket', 99), ('repo', 'other/repo'),
+                                         ('repo', 'someone-else/NewChanlun')])
 def test_cancel_action_rejects_another_claim_identity(v2, field, value):
     from dataclasses import replace
 
@@ -730,6 +751,21 @@ def test_cancel_action_rejects_another_claim_identity(v2, field, value):
     with pytest.raises(Fenced, match='取消身份不符'):
         with run._fence('cancel'):
             pytest.fail('foreign identity reached cancellation body')
+
+
+@pytest.mark.parametrize('repo', ['Newchanlun/NewChanlun', 'xy7365527-lang/NewChanlun'])
+def test_cancel_action_accepts_claims_written_before_and_after_the_transfer(v2, repo):
+    from dataclasses import replace
+
+    unit = v2.register()
+    run = v2.run(unit)
+    run.release()
+    with ClaimStore(v2.claims_root).locked(TICKET) as txn:
+        txn.write(replace(txn.record, repo=repo, state='released'))
+    reached = []
+    with run._fence('cancel'):
+        reached.append(repo)
+    assert reached == [repo]
 
 
 def test_new_generation_accepts_collected_boat_worker_without_remote_calls(v2, monkeypatch):
@@ -752,7 +788,7 @@ def test_new_generation_accepts_collected_boat_worker_without_remote_calls(v2, m
     old.execution._store(key, BoatBinding(old.execution._identity(key), 'vm', 'p1', '/home/user/x/p1',
                                          'submitted', sandbox_id='bx_abc'))
     old.execution.collect(key, payload(old, old.execution, key, []))
-    release_claim(ClaimStore(v2.claims_root), TICKET, unit.run_id, 'worker finished')
+    release_claim(ClaimStore(v2.claims_root), v2.gateway(), TICKET, unit.run_id, 'worker finished')
     second = v2.run(v2.register(f't{TICKET}-2'))
     assert second.generation == 2
     assert cli.calls == []

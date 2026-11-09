@@ -6,12 +6,12 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { randomUUID } from "node:crypto";
 import { codexWorker } from "./codex-route.mts";
-import { REVIEW_IMAGE, checkReviewAdmission, readLaunch, reviewMounts, runExternalReview, verifyReviewAdmission, type ReviewLaunch, type WorkerDependencies } from "./external-review-worker.mts";
+import { PROMPT_JSON_INSTRUCTION, REVIEW_IMAGE, checkReviewAdmission, readLaunch, reviewMounts, runExternalReview, verifyReviewAdmission, type ReviewLaunch, type WorkerDependencies } from "./external-review-worker.mts";
 import type { BindMountSandboxHandle } from "@ai-hero/sandcastle";
 
 const image = "sha256:" + "1".repeat(64);
 const container = "a".repeat(64);
-function fixture() {
+function fixture(model = "gpt-6.1-sol") {
   const root = realpathSync(mkdtempSync(join(tmpdir(), "external-review-test-")));
   const checkout = join(root, "source"), folder = join(root, "receipt");
   mkdirSync(checkout); mkdirSync(folder);
@@ -19,7 +19,7 @@ function fixture() {
   git("init", "-q"); git("-c", "user.name=Fixture", "-c", "user.email=f@example.invalid", "commit", "--allow-empty", "-qm", "base");
   git("checkout", "--detach", "-q");
   const head = git("rev-parse", "HEAD");
-  const launch: ReviewLaunch = { run_id: randomUUID(), launch_id: randomUUID(), pr_number: 1810, model: "gpt-6.1-sol",
+  const launch: ReviewLaunch = { run_id: randomUUID(), launch_id: randomUUID(), pr_number: 1810, model,
     head_sha: head, base_sha: head, merge_base_sha: head, controller_code_head: "b".repeat(40), checkout, prompt: "完整 PR 独审", mode: "review" };
   writeFileSync(join(folder, "launch.json"), JSON.stringify(launch), { mode: 0o600 });
   return { root, checkout, folder, launch };
@@ -52,9 +52,13 @@ test("显式两家族模型保留旧默认并拒绝路由外模型", () => {
   assert.throws(() => verifyReviewAdmission({ imageId: image, consume() {} }));
 });
 
-for (const mode of ["PASS", "BLOCK", "failed", "missing-log", "missing-completed", "write", "bad-mount", "secret-env", "bad-filesystem"] as const) {
-  test(`宿主监督 ${mode} 不把缺证据转为通过`, async () => {
-    const f = fixture(); const session = randomUUID();
+const modes = ["PASS", "BLOCK", "failed", "missing-log", "missing-completed", "write", "bad-mount", "secret-env", "bad-filesystem",
+  "over-budget", "over-budget-reject", "timeout-reject"] as const;
+for (const [mode, model] of [...modes.map((m) => [m, "gpt-6.1-sol"] as const),
+  ["PASS", "kimi-k3.1-pro"], ["BLOCK", "kimi-k3.1-pro"], ["PASS", "claude-opus-5-5"]] as const) {
+  test(`宿主监督 ${model} ${mode} 不把缺证据转为通过`, async () => {
+    const f = fixture(model); const session = randomUUID();
+    const schemaless = model === "kimi-k3.1-pro";
     let closed = false, creates = 0;
     let modelCommand = "";
     const output = { status: mode === "BLOCK" ? "blocked" : "completed", summary: `VERDICT: ${mode}`, findings: [], validation: [] };
@@ -68,13 +72,27 @@ for (const mode of ["PASS", "BLOCK", "failed", "missing-log", "missing-completed
           return { stdout: `${sessionsDir}/2026/10/29/rollout-2026-10-29-${session}.jsonl\n`, stderr: "", exitCode: 0 };
         }
         modelCommand = command;
-        assert(command.includes("--output-schema /tmp/external-review-schema.json"));
+        assert.equal(command.includes("--output-schema"), !schemaless);
         assert(command.includes("--disable multi_agent"));
-        assert.equal(options?.stdin, f.launch.prompt);
-        const events = [{ type: "thread.started", thread_id: session },
+        assert.equal(options?.stdin, schemaless ? f.launch.prompt + PROMPT_JSON_INSTRUCTION : f.launch.prompt);
+        if (mode === "timeout-reject") {
+          // 真实 SDK 在容器被关后可能让 exec reject：等超时关容器，再以传输异常结束。
+          while (!closed) await new Promise((r) => setTimeout(r, 5));
+          throw new Error("container closed");
+        }
+        const commands = mode.startsWith("over-budget")
+          ? [1, 2, 3].map((n) => ({ type: "item.completed", item: { id: `c${n}`, type: "command_execution", command: "git diff", exit_code: 0 } })) : [];
+        const events = [{ type: "thread.started", thread_id: session }, ...commands,
           { type: "item.completed", item: { type: "agent_message", text: JSON.stringify(output) } },
-          ...(mode === "missing-completed" ? [] : [{ type: "turn.completed" }])];
-        for (const e of events) options?.onLine?.(JSON.stringify(e));
+          ...(mode === "missing-completed" ? [] : [{ type: "turn.completed",
+            usage: { input_tokens: 100, cached_input_tokens: 40, output_tokens: 7, reasoning_output_tokens: 3 } }])];
+        for (const e of events) {
+          options?.onLine?.(JSON.stringify(e));
+          if (mode.startsWith("over-budget") && closed) {  // 容器已关：不再有输出，exec 返回非零或 reject
+            if (mode === "over-budget-reject") throw new Error("container closed");
+            return { stdout: "", stderr: "", exitCode: 137 };
+          }
+        }
         if (mode === "write") writeFileSync(join(f.checkout, "changed"), "write simulated");
         return { stdout: "", stderr: "", exitCode: mode === "failed" ? 1 : 0 };
       },
@@ -100,7 +118,7 @@ for (const mode of ["PASS", "BLOCK", "failed", "missing-log", "missing-completed
         Mounts: reviewMounts([{ hostPath: f.checkout, sandboxPath: "/review" }], f.checkout)
           .map((m) => ({ Source: m.hostPath, Destination: m.sandboxPath, RW: mode === "bad-mount" })),
         Config: { Env: mode === "secret-env" ? ["GH_TOKEN=fixture"] : [] } }),
-      imageEnv: () => [], timeoutMs: 10000,
+      imageEnv: () => [], timeoutMs: mode === "timeout-reject" ? 20 : 10000, commandCap: 2,
     };
     try {
       await runExternalReview(f.folder, deps);
@@ -109,11 +127,22 @@ for (const mode of ["PASS", "BLOCK", "failed", "missing-log", "missing-completed
       assert.equal(receipt.status, ["PASS", "BLOCK"].includes(mode) ? "completed" : "failed");
       if (receipt.status === "completed") {
         assert.match(modelCommand, /(?:^|\s)--skip-git-repo-check(?:\s|$)/);
+        assert(modelCommand.includes("-c 'project_doc_max_bytes=0'"));
+        assert.deepEqual(receipt.usage, { input_tokens: 100, cached_input_tokens: 40, output_tokens: 7,
+          reasoning_output_tokens: 3, commands: 0, reported: true });
         assert.equal(receipt.result.summary, `VERDICT: ${mode}`);
         assert.equal(receipt.session_id, session);
         assert(receipt.turn_completed);
         assert.equal(receipt.container_id, container);
+        assert.equal(receipt.output_contract, schemaless ? "prompt" : "schema");
       }
+      if (mode.startsWith("over-budget")) {
+        assert.equal(receipt.failure_code, "budget_exceeded");
+        assert.equal(receipt.usage.commands, 3);
+        assert.equal(receipt.usage.reported, false);  // 被关停的独审没报用量：标为未知，不是 0
+      }
+      if (mode === "timeout-reject") assert.equal(receipt.failure_code, "timeout");
+      if (mode === "failed") assert.equal(receipt.failure_code, "model_exit");
       await assert.rejects(runExternalReview(f.folder, deps));
       assert.equal(creates, 1);
     } finally { rmSync(f.root, { recursive: true, force: true }); }
