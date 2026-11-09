@@ -849,7 +849,7 @@ class ExternalReview:
                 workers[str(_read(path)["launch_id"])] = path.parent
             except (OSError, ValueError, KeyError, TypeError, IdentityError):
                 continue
-        entries = []
+        entries: list[dict[str, Any]] = []
         live_volumes = 0
         for launch_id, items in sorted(owned.items()):
             worker = workers.get(launch_id)
