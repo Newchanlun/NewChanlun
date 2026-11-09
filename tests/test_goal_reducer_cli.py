@@ -62,3 +62,12 @@ def test_script_runs_as_command(tmp_path):
                           capture_output=True, text=True, check=False)
     assert proc.returncode == 0, proc.stderr
     assert json.loads(proc.stdout)["current_goal"]["goal_id"] == "g1"
+
+
+def test_non_object_and_non_utf8_lines_count_as_corrupt(tmp_path, capsys):
+    p = tmp_path / "events.jsonl"
+    p.write_bytes(GOAL_SET.encode() + b'[]\n"x"\n{"no_event": 1}\n\xff\xfe bad\n')
+    out = current_goal_state(str(p), git_head="abc")
+    assert out["current_goal"]["goal_id"] == "g1"
+    assert out["skipped_event_lines"] == 4
+    assert capsys.readouterr().err.count("损坏") == 4

@@ -163,11 +163,14 @@ K4 六条边中，背驰方向的分歧率稳定在 22.2%（±2%）。这是结�
 - **移出仓库**：只被推论层文档（`analysis/` 与 `docs/` 散件里的文档、`.chanlun/` 下的
   历史快照、评审稿、提案）、本 README 或其他谱系条目引用的条目。只算一跳：保留条目里
   再引用的编号不跟着保留。
-- 代码这一条由 `tests/test_retired_references.py` 在 CI 里强制：代码按编号引用的谱系
-  必须在 `.chanlun/genealogy/` 下存在；同一测试还检查非历史文档不链接不存在的路径、
-  不让读者运行已删除的脚本或已退役的命令（历史文件列在测试里的 `HISTORICAL`，各附原因）。
+- 这条口径由 `tests/test_retired_references.py` 在 CI 里强制：上面列的现役层（代码和文档）
+  按编号引用的谱系，必须在 `.chanlun/genealogy/settled/` 或 `pending/` 下存在。引用里列出的
+  每个编号都查（「谱系：598 → 603 → 615」「谱系 256/264」「谱系引用：…」整行），`#NNN` 视为
+  工单号不查。同一测试还检查非历史文档里写的仓内路径（链接、反引号或裸写）都存在、不让读者
+  运行已退役的命令（历史文件列在测试里的 `HISTORICAL`，各附原因；主线上原有的断路径冻结在
+  `tests/retired_references_baseline.txt`，只减不增）。
 - 另外保留仍待裁决的生成态条目 689、693（未被引用，但裁决尚未完成）。
-- 当前在仓 235 条已结算、5 条生成态。
+- 当前在仓 245 条已结算、6 条生成态。
 
 不在仓的条目到退役前的基线提交 `f049256` 查：
 `git ls-tree --name-only f049256 .chanlun/genealogy/settled/` 列出全部文件名，
@@ -241,12 +244,12 @@ K4 六条边中，背驰方向的分歧率稳定在 22.2%（±2%）。这是结�
 | 源文件 | 200 个 Python 模块 | `src/newchan/**/*.py` |
 | 测试文件 | 258 个 | `tests/` 下文件名为 `test_*.py` 的文件（git pathspec `tests/*test_*.py` 会多算 `tests/test_*/` 目录里的 5 个 `__init__.py`，得 263） |
 | 定义文件 | 19 份 | `.chanlun/definitions/*.md` |
-| 已结算谱系 | 在仓 235 条 + 5 条生成态（#1952 后只保留被现役层引用的条目，口径见「谱系」节） | `.chanlun/genealogy/{settled,pending}/` |
+| 已结算谱系 | 在仓 245 条 + 6 条生成态（#1952 后只保留被现役层引用的条目，口径见「谱系」节） | `.chanlun/genealogy/{settled,pending}/` |
 | spec | 13 份 | `spec/**/*.md` |
 | Agent 定义 | 0 个（仓内不再跟踪 `.claude/agents/`） | `.claude/agents/*.md` |
 | Hook | 1 个 | `.claude/settings.json` 的 hooks 条目 |
-| Skill | 22 个 | `.claude/skills/*/SKILL.md` |
-| 命令 | 7 个 | `.claude/commands/*.md` |
+| Skill | 21 个 | `.claude/skills/*/SKILL.md`（git 跟踪的文件；经符号链接展开更多） |
+| 命令 | 3 个 | `.claude/commands/*.md` |
 | 脚本 | 198 个 | `scripts/**/*.{py,sh}`，不含测试 |
 | 区块拓扑 | 1194 区块 / 6650 关系 / 1148 概念 | `.chanlun/block-topology/meta.json`（未随退役重算） |
 

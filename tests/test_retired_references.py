@@ -31,16 +31,38 @@ ROOT = Path(__file__).resolve().parent.parent
 CODE_EXT = {".py", ".rs", ".lean", ".sh", ".ts", ".mts"}
 DOC_EXT = {".md", ".html"}
 
-GENEALOGY_NUM = [
-    re.compile(r"(?<![0-9#.\w])(\d{3}[a-z]?)\s*号"),
-    re.compile(r"谱系\s*[#＃]?\s*(\d{3}[a-z]?)(?![0-9])"),
-    re.compile(r"(?i)genealogy[\s/#-]*(\d{3}[a-z]?)(?![0-9a-z])"),
+# One genealogy id, and a list of ids joined by / 、 , → + (e.g. "256/264",
+# "598 → 603 → 615", "615/616/617"). Ranges like 189-215 are not expanded.
+# "#NNN" is a ticket/issue number in this repo, never a genealogy id.
+# Not part of a version tag (v198) and not a count (106 例 / 300 个 / 120 条).
+_ID = r"(?<![0-9#＃A-Za-z])\d{3}[a-z]?(?![0-9a-z])(?!\s*(?:例|个|条|次|行|根|笔|段|%|×))"
+_NOTE = r"(?:\s*(?:（[^）]{0,80}）|\([^)]{0,80}\)))?"   # 597（仓位塔 payoff 纤维）/601
+_SEP = r"\s*(?:/|、|,|，|→|->|\+|&)\s*"
+_LIST = rf"{_ID}{_NOTE}(?:{_SEP}{_ID}{_NOTE})*"
+GENEALOGY_CITE = [
+    re.compile(rf"(?<![#＃.\w])({_LIST})\s*号"),                     # 603号 / 007/008号
+    # 谱系 603 / 谱系：598 → 603 / 谱系引用**：663
+    re.compile(rf"谱系(?:引用|编号|依据|条目)?[\s*：:（(]*({_LIST})"),
+    # an explicit label "谱系引用：…" / "谱系：…": every id on the rest of the line
+    re.compile(r"谱系(?:引用|编号|依据|条目)?\**\s*[：:](.*)$"),
+    re.compile(rf"(?i)genealogy(?:\s+(?:ref|refs|id|entry|entries))?[\s/#:：*-]*({_LIST})"),
     re.compile(r"(?i)settled/(\d{3}[a-z]?)[-_.]"),
 ]
+_ID_RE = re.compile(_ID)
+
+# Docs in the live layer README.md「谱系」defines; their genealogy citations are
+# checked like code. Anything under HISTORICAL is still skipped.
+LIVE_DOC_PREFIXES = (".chanlun/definitions/", "docs/adr/", "docs/agents/", "formal/",
+                     ".claude/", ".agents/", "spec/", ".github/")
+LIVE_DOC_FILES = {"AGENTS.md", "CLAUDE.md", "CONTEXT.md"}
 
 # (path prefix, number) pairs that are deliberately not real entries.
 FAKE_GENEALOGY_IDS = {
     ("tests/", "999"): "fixtures that test the missing-entry path on purpose",
+    **{("tests/test_retired_references.py", n): "negative-control fixture ids"
+       for n in ("801", "802", "803", "804", "805")},
+    ("rust/src/theta_v0/strategy/overlay_state.rs", "146"):
+        "cites 146 next to entry 646; 146 never existed as a genealogy entry",
 }
 
 # Slash commands whose machinery was retired. /ritual, /escalate and /inquire
@@ -139,8 +161,10 @@ def _lines(f: str):
 
 
 def _present_genealogy() -> set[str]:
+    """Ids of entries in settled/ and pending/. archive/ holds pending-NNN drafts,
+    a separate numbering, so it does not satisfy a genealogy citation."""
     nums = set()
-    for sub in ("settled", "pending", "archive"):
+    for sub in ("settled", "pending"):
         d = ROOT / ".chanlun" / "genealogy" / sub
         if d.is_dir():
             for p in d.iterdir():
@@ -193,20 +217,35 @@ def _repo_path_tokens(line: str, pat: re.Pattern):
         yield tok
 
 
+def _checks_genealogy(f: str) -> bool:
+    if Path(f).suffix in CODE_EXT:
+        return True
+    if Path(f).suffix in DOC_EXT and not _historical(f):
+        return f in LIVE_DOC_FILES or f.startswith(LIVE_DOC_PREFIXES)
+    return False
+
+
+def cited_ids(line: str) -> list[str]:
+    """Every genealogy id a line cites, including each id in a cited list."""
+    out = []
+    for pat in GENEALOGY_CITE:
+        for m in pat.finditer(line):
+            out += _ID_RE.findall(m.group(1))
+    return list(dict.fromkeys(out))
+
+
 def missing_genealogy_refs(files: list[str]) -> list[str]:
     present = _present_genealogy()
     bad = []
     for f in files:
-        if Path(f).suffix not in CODE_EXT:
+        if not _checks_genealogy(f):
             continue
         for ln, line in enumerate(_lines(f), 1):
-            for pat in GENEALOGY_NUM:
-                for m in pat.finditer(line):
-                    n = m.group(1)
-                    if n in present or any(f.startswith(p) and n == k
-                                           for (p, k) in FAKE_GENEALOGY_IDS):
-                        continue
-                    bad.append(f"{f}:{ln}: cites genealogy {n}, not under .chanlun/genealogy/")
+            for n in cited_ids(line):
+                if n in present or any(f.startswith(p) and n == k
+                                       for (p, k) in FAKE_GENEALOGY_IDS):
+                    continue
+                bad.append(f"{f}:{ln}: cites genealogy {n}, not under .chanlun/genealogy/")
     return bad
 
 
@@ -312,9 +351,18 @@ def test_checker_catches_known_bad_cases(tmp_path, monkeypatch):
         "bare .chanlun/genealogy/pending/also-gone.md here\n"
         "ok `scripts/real.py`, `.chanlun/genealogy/`, and `scripts/<name>.py`\n",
         encoding="utf-8")
+    (tmp_path / "b.lean").write_text(
+        "-- 谱系：001 → 801 → 802\n"            # colon label + arrow list
+        "-- 谱系 001/803\n"                      # slash list after 谱系
+        "-- 谱系引用**：Q1（x）；804（σ_p）\n"   # label, non-numeric first item
+        "-- 谱系引用：001（a）/805（b）\n"        # annotated list
+        "-- 谱系：#806 task id, v807-swarm, 808 例\n",  # ticket / version / count: ignored
+        encoding="utf-8")
     monkeypatch.setattr(sys.modules[__name__], "ROOT", tmp_path)
     assert [b.split(": ")[1] for b in missing_genealogy_refs(["a.py"])] == [
         "cites genealogy 999, not under .chanlun/genealogy/"]
+    cited = [b.split("genealogy ")[1].split(",")[0] for b in missing_genealogy_refs(["b.lean"])]
+    assert cited == ["801", "802", "803", "804", "805"]
     files = ["g.md", "scripts/real.py", ".chanlun/genealogy/settled/001-x.md"]
     found = [b.split(": ", 1)[1] for b in broken_doc_refs(["g.md"], _tree(files))]
     assert sorted(found) == sorted([

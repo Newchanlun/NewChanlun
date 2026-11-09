@@ -295,19 +295,36 @@ DEFAULT_EVENTS = os.path.join(os.path.dirname(os.path.abspath(__file__)),
 def load_events(ev_path: str) -> tuple[list[dict], int]:
     """容错读取 events.jsonl：返回 (可解析事件, 跳过的损坏行数)。
 
-    空行忽略；单行 JSON 损坏写 stderr 并计数，不崩溃。文件不存在时抛 FileNotFoundError。"""
+    空行忽略；以下三种行都算损坏，写 stderr 并计数，不崩溃：不是合法 UTF-8、不是合法 JSON、
+    JSON 不是带 "event" 键的对象（如 `[]`、`"x"`，否则 reduce_goal 会抛 AttributeError）。
+    文件不存在时抛 FileNotFoundError。"""
     events: list[dict] = []
     skipped = 0
-    with open(ev_path, encoding="utf-8") as f:
-        for lineno, line in enumerate(f, 1):
+
+    def _skip(lineno: int, why: str) -> None:
+        nonlocal skipped
+        skipped += 1
+        print(f"[goal_reducer] WARNING: {ev_path} line {lineno} 损坏，跳过: {why}",
+              file=sys.stderr)
+
+    with open(ev_path, "rb") as f:
+        for lineno, raw in enumerate(f, 1):
+            try:
+                line = raw.decode("utf-8")
+            except UnicodeDecodeError as exc:
+                _skip(lineno, f"非 UTF-8: {exc}")
+                continue
             if not line.strip():
                 continue
             try:
-                events.append(json.loads(line))
+                ev = json.loads(line)
             except ValueError as exc:
-                skipped += 1
-                print(f"[goal_reducer] WARNING: {ev_path} line {lineno} JSON 损坏，跳过: {exc}",
-                      file=sys.stderr)
+                _skip(lineno, f"JSON 损坏: {exc}")
+                continue
+            if not isinstance(ev, dict) or "event" not in ev:
+                _skip(lineno, "不是带 event 键的 JSON 对象")
+                continue
+            events.append(ev)
     return events, skipped
 
 
