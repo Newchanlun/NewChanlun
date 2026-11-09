@@ -110,6 +110,16 @@ export interface WorkerDependencies {
 // 实测（2026-11-01..08，247 次完成的独审）：Opus 命令数中位 47、p90 98、最大 143；墙钟最大 23 分钟。
 // 上限约取正常一次的 3–5 倍，并高于实测最大值，只拦失控，不拦正常审查。
 export const REVIEW_COMMAND_CAP = 250;
+/** codex 对单个请求的重试用尽、最后一次是 429 时报出的文字（2026-11-09 #1917/#1920/#1921/#1935/#1942 的 opus 实测：
+ *  `error` 事件「Reconnecting... 1/5 (exceeded retry limit, last status: 429 Too Many Requests)」后多数不再有输出，
+ *  干等到 45 分钟超时；也有 `turn.failed` 带同一句后退出）。只看 error、turn.failed 事件和 stderr，不看命令输出。 */
+export const RATE_LIMIT_EXHAUSTED = /exceeded retry limit, last status: 429\b|\b429 Too Many Requests\b/;
+export function rateLimitExhausted(event: unknown): boolean {
+  if (typeof event !== "object" || event === null) return false;
+  const e = event as { type?: unknown; message?: unknown; error?: { message?: unknown } };
+  const message = e.type === "error" ? e.message : e.type === "turn.failed" ? e.error?.message : undefined;
+  return typeof message === "string" && RATE_LIMIT_EXHAUSTED.test(message);
+}
 const dependencies: WorkerDependencies = {
   ready: (image) => assertSwarmExecutionReady(image, { rows: [], verify: verifyReviewAdmission }),
   sandbox: (image) => swarmSandbox(image, dockerCliProxyEnv()) as DockerProvider,
@@ -133,8 +143,10 @@ export async function runExternalReview(folder: string, deps: WorkerDependencies
   // 主动停机标志放在外层：exec 在容器被关后可能 reject 而不是返回，catch 里也要据此补齐原因码。
   let timedOut = false;
   let overBudget = false;
+  // 限流重试已用尽：立即关停记 rate_limited，不再等超时。结论规则不变（FAILED，整轮照发 error）。
+  let rateLimited = false;
   const stopCode = (): string | undefined =>
-    cancelled ? "cancelled" : overBudget ? "budget_exceeded" : timedOut ? "timeout" : undefined;
+    cancelled ? "cancelled" : overBudget ? "budget_exceeded" : rateLimited ? "rate_limited" : timedOut ? "timeout" : undefined;
   const cancel = () => { cancelled = true; void handle?.close(); };
   process.once("SIGTERM", cancel); process.once("SIGINT", cancel);
   try {
@@ -214,6 +226,7 @@ export async function runExternalReview(folder: string, deps: WorkerDependencies
           if (event?.type === "item.completed" && event.item?.type === "command_execution" && ++usage.commands > cap && !overBudget) {
             overBudget = true; void handle?.close();
           }
+          if (rateLimitExhausted(event) && !rateLimited && !timedOut) { rateLimited = true; void handle?.close(); }
         } catch { /* 非 JSON 行由 transcript 判失败，这里只计量 */ }
       } });
     } finally { closeSync(events); }
@@ -221,10 +234,12 @@ export async function runExternalReview(folder: string, deps: WorkerDependencies
     record.turn_completed = transcript.turnCompleted;
     record.session_id = transcript.sessionId;
     writeFileSync(join(folder, "stderr.log"), execution.stderr, { mode: 0o600 });
-    if (cancelled || timedOut || overBudget || execution.exitCode !== 0) {
+    if (!rateLimited && !timedOut && execution.exitCode !== 0 && RATE_LIMIT_EXHAUSTED.test(execution.stderr)) rateLimited = true;
+    if (cancelled || timedOut || overBudget || rateLimited || execution.exitCode !== 0) {
       // 显式原因码：触顶是「暂停待人看」，不是静默失败。
       record.failure_code = stopCode() ?? "model_exit";
-      throw new Error(cancelled ? "监督已取消" : overBudget ? `独审命令数超过上限 ${cap}` : timedOut ? "独审超时" : "Codex 退出失败");
+      throw new Error(cancelled ? "监督已取消" : overBudget ? `独审命令数超过上限 ${cap}`
+        : rateLimited ? "限流重试已用尽" : timedOut ? "独审超时" : "Codex 退出失败");
     }
     record.phase = "transcript";
     const output = transcript.output();

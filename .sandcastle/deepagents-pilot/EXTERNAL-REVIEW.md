@@ -158,7 +158,9 @@ App token 只申请 metadata/read、contents/read、pull_requests/read、statuse
 
 ## 成本上限与每日额度闸
 
-单次独审最多执行 250 条命令（`REVIEW_COMMAND_CAP`，实测 Opus 中位 47、p90 98、最大 143），墙钟最长 45 分钟（实测最大 23 分钟）。触顶即关容器，回执 `status=failed` 并写 `failure_code`：`budget_exceeded`（命令数）、`timeout`、`cancelled`、`model_exit`（Codex 非零退出）或 `model_error`（模型阶段的其他异常）；容器被关后 SDK 的 exec 无论正常返回还是抛错，原因码都会写上。宿主汇总把它记进该 reviewer 的 reason（`failure_code=…`），`status` 子命令能直接看到，整轮按 FAILED 发布 `error`，不当作通过。
+单次独审最多执行 250 条命令（`REVIEW_COMMAND_CAP`，实测 Opus 中位 47、p90 98、最大 143），墙钟最长 45 分钟（实测最大 23 分钟）。触顶即关容器，回执 `status=failed` 并写 `failure_code`：`budget_exceeded`（命令数）、`timeout`、`cancelled`、`rate_limited`、`model_exit`（Codex 非零退出）或 `model_error`（模型阶段的其他异常）；容器被关后 SDK 的 exec 无论正常返回还是抛错，原因码都会写上。宿主汇总把它记进该 reviewer 的 reason（`failure_code=…`），`status` 子命令能直接看到，整轮按 FAILED 发布 `error`，不当作通过。
+
+`rate_limited`：Codex 报出对 429 的重试已用尽（`error` 或 `turn.failed` 事件里的 `exceeded retry limit, last status: 429`，或非零退出时 stderr 里的同一句）时立即关容器，不等 45 分钟超时；2026-11-09 #1917/#1920/#1921/#1935/#1942 的 opus 都是这句之后停在原地直到超时。结论规则不变，只是更早失败。review_sweep 看最近 2 个已完结、真派过模型的 run（按 `outcome.json` 写入时间；STALE 与沿用不算），都有 reviewer 记 `rate_limited` 时，自后一个完结起 30 分钟内不派新审查（`launch`、`resume-review`），每轮记一行 `review-sweep {"action": "rate-limit-backoff", ...}`；发布续跑、追平、合入与撤原生 auto-merge 照常。
 
 回执的 `usage` 记 `input_tokens`、`cached_input_tokens`、`output_tokens`、`reasoning_output_tokens`、`commands` 和 `reported`。codex exec 只在整轮结束（`turn.completed`）时报用量，被中途关停的独审 `reported=false`，token 数未知，不是 0。
 
