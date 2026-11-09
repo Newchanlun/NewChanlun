@@ -23,6 +23,10 @@ from .github_app import (
 
 EffectResult = dict[str, Any]
 
+# 请求确认送达后读回仍未见效时的补读间隔（秒）。GitHub 部分接口读后写最终一致（如 commit statuses），
+# 刚写完读不到；共约 15 秒，仍不见才留 pending。只补读，不重发。
+READBACK_DELAYS: tuple[float, ...] = (1, 2, 4, 8)
+
 
 class EffectPending(Exception):
     """一次外部写的结果不明，读回也没看到它生效。待认回记录保留，不自动重发，等读回确证或主控对账。"""
@@ -48,10 +52,16 @@ class Journal:
     其他任何异常，包括响应不可读、写后读回失败、读回内容不合合同，都保留 pending。之后幂等效果
     （同名标签、非强推建 ref）可以再发；非幂等效果（评论、PR、状态）只认读回，不因等待或空读回重发，
     只有主控对账写下 reconciled_not_applied 后才允许再发一次。
+
+    send 正常返回（请求确认送达）而首次读回为空时，按 readback_delays 退避补读，仍为空才留 pending；
+    OutcomeUnknown（结果不明）只读一次，照旧。sleep 缺省为 time.sleep，测试可注入。
     """
 
-    def __init__(self, folder: Path):
+    def __init__(self, folder: Path, *, sleep: Callable[[float], None] | None = None,
+                 readback_delays: tuple[float, ...] = READBACK_DELAYS):
         self.folder = folder
+        self._sleep = sleep
+        self.readback_delays = readback_delays
 
     def path(self, effect: str) -> Path:
         return self.folder / f"{effect}.json"
@@ -94,15 +104,23 @@ class Journal:
         history = (record or {}).get("history", []) + ([record] if record is not None else [])
         self._save(effect, {"state": "pending", "sent_at": time.time(), "pid": os.getpid(), "what": what,
                             "history": history})
+        delivered = True
         try:
             send()
         except (RequestNotSent, WriteRejected):
             self._restore(effect, record)
             raise
         except OutcomeUnknown:
-            pass
+            delivered = False
         crash(f"after_{effect.split('-')[0]}_before_receipt")
         found = probe()
+        if found is None and delivered:
+            sleep = self._sleep or time.sleep
+            for delay in self.readback_delays:
+                sleep(delay)
+                found = probe()
+                if found is not None:
+                    break
         if found is None:
             raise EffectPending(f"{effect} 已发出，读回未见生效，已留待认回：{self.path(effect)}")
         self._save(effect, {"state": "done", "result": found, "recovered": False, "what": what})
