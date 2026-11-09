@@ -1194,10 +1194,18 @@ def checkout_identity(repo: Path) -> dict:
     }
 
 
+# cargo-eacces-retry.sh 重试前打出的标记行；构建日志里出现时，只认最后一个标记之后那次 cargo 的输出（#2025 独审）。
+EACCES_RETRY_MARKER = "::warning title=Boat build-script EACCES retry::"
+
+
 def select_binary(log: str, rust: Path, target_dir: Path, target: str, mode: str) -> dict:
     """只接受本次成功 cargo JSON 指出的唯一当前包测试二进制。"""
+    lines = log.splitlines()
+    retried = [i for i, line in enumerate(lines) if line.startswith(EACCES_RETRY_MARKER)]
+    if retried:
+        lines = lines[retried[-1] + 1:]
     messages = []
-    for line in log.splitlines():
+    for line in lines:
         try:
             value = json.loads(line)
         except json.JSONDecodeError:
