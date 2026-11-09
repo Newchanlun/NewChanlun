@@ -500,7 +500,11 @@ jobs:
         #   （CI_TEST_PART），各占一台机器，同机负载与不拆时相同。托管路径只拆 owned/owned-h1，native 不拆（20 并发上限）。
         #   economic 开 opt-level 1 后不再拆：run 42452395669（9950X）a/b 各编译约 90 s、测试 182/267 s，合并后估约 10 min，
         #   仍短于 release-locks（13.0 min，run 42454217164）；每轮少 1 次 Boat 启动和 1 次重复编译。
-        group: ${{ fromJSON((vars.CI_BOAT_RUNNERS != 'off' && github.actor == 'xy7365527-lang' && github.triggering_actor == 'xy7365527-lang' && (github.event_name != 'pull_request' || github.event.pull_request.user.login == 'xy7365527-lang')) && '["native-a","native-b","release-locks","owned","owned-h1","economic","content"]' || '["native","release-locks","owned","owned-h1","economic","content"]') }}
+        #   content 并入 owned-h1（两条路径都是）：两组都是 opt-level 0，hc-ci-slim 上 content 3.5 min、owned-h1 4.9 min
+        #   （run 42462233357），合并约 8.4 min，仍短于 release-locks 12.4 min，Boat 每轮少 1 次启动；托管机上两组合计
+        #   12–17 min，短于同轮最长作业 22–31 min（11-08 五轮）。content 步骤只看 matrix.group，不再按 runner 重新判定：
+        #   单个作业重跑时 runner 判定会重新求值，而矩阵不会重新展开，按 runner 判定会让 content 被整组跳过（#2005 独审）。
+        group: ${{ fromJSON((vars.CI_BOAT_RUNNERS != 'off' && github.actor == 'xy7365527-lang' && github.triggering_actor == 'xy7365527-lang' && (github.event_name != 'pull_request' || github.event.pull_request.user.login == 'xy7365527-lang')) && '["native-a","native-b","release-locks","owned","owned-h1","economic"]' || '["native","release-locks","owned","owned-h1","economic"]') }}
     runs-on: ${{ (vars.CI_BOAT_RUNNERS != 'off' && github.actor == 'xy7365527-lang' && github.triggering_actor == 'xy7365527-lang' && (github.event_name != 'pull_request' || github.event.pull_request.user.login == 'xy7365527-lang')) && 'boat-large/from=hc-ci-slim' || 'ubuntu-latest' }}
     timeout-minutes: ${{ startsWith(matrix.group, 'native') && 90 || 60 }}
     env:
@@ -524,22 +528,22 @@ jobs:
       # #1404：成员来源回归单列先执行，避免已登记的默认域失败使本片新锁被跳过。
       #   #1588：该用例同时在 S bin 分片里执行（拆前即两处执行），本步保留其独立可见的信号。
       - name: cargo test — TB-02-C member source binding
-        if: ${{ !cancelled() && matrix.group == 'content' }}
+        if: ${{ !cancelled() && matrix.group == 'owned-h1' }}
         run: ../.github/scripts/run-cargo-with-telemetry.sh cargo test --locked --features s_session --bin s_structure_session tb02c_member_relations_bind_only_the_member_sources --jobs "${CI_CARGO_JOBS:-1}"
 
       # #1608：#1394 的两个编译负例只在 --cfg 下编译；此处断言它们仍被类型边界拒绝（E0308 落在负例块内）。
       #   放在 TB-02-C 单测之后复用已编好的 s_session 依赖；负例在类型检查阶段即失败，不做代码生成。
       - name: 编译负例 — #1394 类型边界仍拒绝旧写法（#1608）
-        if: ${{ !cancelled() && matrix.group == 'content' }}
+        if: ${{ !cancelled() && matrix.group == 'owned-h1' }}
         run: ../.github/scripts/check-compile-negatives-1394.sh
 
       # #1394 C：内容编码在 s_session feature 下供多个 owner 共用；只测 S bin 不会执行库测试。
       - name: cargo test — 完整内容编码与共享图校验（#1394）
-        if: ${{ !cancelled() && matrix.group == 'content' }}
+        if: ${{ !cancelled() && matrix.group == 'owned-h1' }}
         run: ../.github/scripts/run-cargo-with-telemetry.sh cargo test --locked --features s_session --lib --jobs "${CI_CARGO_JOBS:-1}" s_content
 
       - name: cargo test — 内容向量、持久序列与累计资源（#1394）
-        if: ${{ !cancelled() && matrix.group == 'content' }}
+        if: ${{ !cancelled() && matrix.group == 'owned-h1' }}
         run: ../.github/scripts/run-cargo-with-telemetry.sh cargo test --locked --features s_session --test s_content_contract --test s_content_sequence --test s_content_job --test s_content_path --jobs "${CI_CARGO_JOBS:-1}"
 
       # #1394 G-1：economic_session（含 P-14 读法锁、finance、content_store、store、finance_transport）
@@ -547,9 +551,11 @@ jobs:
       #   （glibc 2.36 容器）实跑：74 过、7 忽略（需 HFS 载体或外部夹具）、0 败，无需 --skip；只在 macOS
       #   编译的 1 条（half_close_during_large_frame_drain_observes_actual_eof）与各 macOS 专属分支由
       #   ci-macos.yml 作业覆盖。
-      - name: cargo test — economic_session / session_transport / session_protocol 库测试（#1394 G-1）
+      #   #1381：history_simulation（X 逐 bar 模拟原件与恢复状态机，s_session 下编译）的库测试同在本步；
+      #   与上述模块同一个 lib 测试二进制，不多编译。Belay release 实测 27 条合计 1.7 s。
+      - name: cargo test — economic_session / session_transport / session_protocol / history_simulation 库测试（#1394 G-1、#1381）
         if: ${{ !cancelled() && startsWith(matrix.group, 'economic') }}
-        run: ../.github/scripts/run-cargo-with-telemetry.sh ../.github/scripts/cargo-test-part.sh --locked --features s_session --lib --jobs "${CI_CARGO_JOBS:-1}" -- economic_session session_transport session_protocol
+        run: ../.github/scripts/run-cargo-with-telemetry.sh ../.github/scripts/cargo-test-part.sh --locked --features s_session --lib --jobs "${CI_CARGO_JOBS:-1}" -- economic_session session_transport session_protocol history_simulation
 
       # #1394/#1481：s_capture_native_testonly 特性下才编译的测试（2026-10-14 计：lib 26、S bin 174）此前从未编译、
       #   从未执行（state.rs 测试调用漏传 cfg 参数，开特性即 E0061）。只跑「开特性后新增」的测试，其余同名同体测试
@@ -722,7 +728,7 @@ jobs:
             total=$((total + 1))
             log="../out-release-$(echo $t | tr ':/' '__').log"
             if ! grep -qx "$t: test" ../list-release.txt; then echo -e "$t\tNOT_LISTED_RELEASE" >> ../locks.tsv; fail=1; continue; fi
-            timeout 2700 cargo test --release --locked --features s_session,s_incremental --bin s_structure_session -- --ignored --exact "$t" --test-threads 1 > "$log" 2>&1
+            timeout 2700 ../.github/scripts/cargo-eacces-retry.sh cargo test --release --locked --features s_session,s_incremental --bin s_structure_session -- --ignored --exact "$t" --test-threads 1 > "$log" 2>&1
             rc=$?
             cat "$log"
             if [ $rc -eq 0 ] && grep -q "test result: ok. 1 passed" "$log"; then echo -e "$t\tPASS_RELEASE" >> ../locks.tsv; else echo -e "$t\tFAIL_RELEASE($rc)" >> ../locks.tsv; fail=1; fi
@@ -782,9 +788,11 @@ jobs:
       # 纯生产构建（只开 production_session，#1769 返修 M-3/M-4）：编译生产 launcher、X 骨架与 S bin 的生产 cfg
       #   （含 S_PASS 不转交 TestOnly 开关的分支），并真实执行拒绝类子集：P0 未签拒启两条、生产 S 遇
       #   S_THETA_DIAGNOSTIC_TESTONLY=1 即拒启、生产 launcher 不转交该开关。需 S 开门的测试在此构建由 cfg 排除。
-      - name: cargo test — production_session_entry（纯生产构建）
+      #   #1381：history_simulation_entry 用 python3 受控 E/S authority 驱动真实 x_execution_session 进程
+      #   （入口、重启、S 唯一授权、epoch2 拒绝、首次初始化原子），文件 cfg 为 production_session，同在纯生产构建执行。
+      - name: cargo test — production_session_entry / history_simulation_entry（纯生产构建）
         if: ${{ !cancelled() }}
-        run: ../.github/scripts/run-cargo-with-telemetry.sh cargo test --release --locked --features production_session --test production_session_entry --jobs "${CI_CARGO_JOBS:-1}" -- --test-threads 1
+        run: ../.github/scripts/run-cargo-with-telemetry.sh cargo test --release --locked --features production_session --test production_session_entry --test history_simulation_entry --jobs "${CI_CARGO_JOBS:-1}" -- --test-threads 1
 
       # #1875：原 rust-test-backtest-bin 作业并入本作业（各约 2 min，Boat 上每轮少起 1 台机器）；三步都带 !cancelled()，
       #   前一步失败不跳过后一步，失败照样使本作业失败。
@@ -863,8 +871,13 @@ jobs:
           rustc -vV
           cargo -V
           rustup show active-toolchain
-          echo "CARGO_TARGET_DIR=$RUNNER_TEMP/1488-sequence-target" >> "$GITHUB_ENV"
-          echo "features=$FEATURES target=$RUNNER_TEMP/1488-sequence-target"
+          # #1875：target 不放 $RUNNER_TEMP。Boat 上两次在 _work/_temp 下执行 cargo 刚编出的 build-script 被拒
+          #   （Permission denied os 13，never executed：run 42488695417、42570217355），别的作业 target 不在 _temp，从未出现。
+          #   只换目录，编译与测试不变；顺带记下两处挂载参数，再出现时可定位。
+          findmnt -no TARGET,FSTYPE,OPTIONS -T "$RUNNER_TEMP" || true
+          findmnt -no TARGET,FSTYPE,OPTIONS -T "$HOME" || true
+          echo "CARGO_TARGET_DIR=$HOME/1488-sequence-target" >> "$GITHUB_ENV"
+          echo "features=$FEATURES target=$HOME/1488-sequence-target"
       - name: Fetch locked dependencies (network allowed, #1488)
         run: cargo fetch --locked
       - name: Run sequence API, real memo, oracle and nonempty source locks (#1488)
@@ -874,7 +887,7 @@ jobs:
             local suite=$1
             shift
             set +e
-            cargo test --offline --locked -j 6 --features "$FEATURES" "$@" -- --format pretty --color never 2>&1 | tee "$RUNNER_TEMP/1488-$suite.log"
+            ../.github/scripts/cargo-eacces-retry.sh cargo test --offline --locked -j 6 --features "$FEATURES" "$@" -- --format pretty --color never 2>&1 | tee "$RUNNER_TEMP/1488-$suite.log"
             local statuses=("${PIPESTATUS[@]}")
             set -e
             echo "suite=$suite cargo_exit_code=${statuses[0]} tee_exit_code=${statuses[1]}"
@@ -970,7 +983,7 @@ jobs:
           run_suite() {
             local suite=$1 filter=$2 binary
             shift 2
-            run_logged "$suite-build" cargo test --offline --locked -j 6 --features "$FEATURES" --no-run --message-format=json "$@"
+            run_logged "$suite-build" ../.github/scripts/cargo-eacces-retry.sh cargo test --offline --locked -j 6 --features "$FEATURES" --no-run --message-format=json "$@"
             binary=$(python3 - "$RUNNER_TEMP/1488-$suite-build.log" <<'PY'
           import json, os, pathlib, sys
           artifacts = set()
@@ -1100,8 +1113,13 @@ jobs:
           rustc -vV
           cargo -V
           rustup show active-toolchain
-          echo "CARGO_TARGET_DIR=$RUNNER_TEMP/1488-native-target" >> "$GITHUB_ENV"
-          echo "features=$FEATURES target=$RUNNER_TEMP/1488-native-target"
+          # #1875：target 不放 $RUNNER_TEMP。Boat 上两次在 _work/_temp 下执行 cargo 刚编出的 build-script 被拒
+          #   （Permission denied os 13，never executed：run 42488695417、42570217355），别的作业 target 不在 _temp，从未出现。
+          #   只换目录，编译与测试不变；顺带记下两处挂载参数，再出现时可定位。
+          findmnt -no TARGET,FSTYPE,OPTIONS -T "$RUNNER_TEMP" || true
+          findmnt -no TARGET,FSTYPE,OPTIONS -T "$HOME" || true
+          echo "CARGO_TARGET_DIR=$HOME/1488-native-target" >> "$GITHUB_ENV"
+          echo "features=$FEATURES target=$HOME/1488-native-target"
       - name: Fetch locked dependencies (network allowed, #1488 Native)
         run: cargo fetch --locked
       - name: Run Native candidate fields, union and shared path locks (#1488)
@@ -1122,7 +1140,7 @@ jobs:
           run_suite() {
             local suite=$1 filter=$2 binary
             shift 2
-            run_logged "$suite-build" cargo test --offline --locked -j 6 --features "$FEATURES" --no-run --message-format=json "$@"
+            run_logged "$suite-build" ../.github/scripts/cargo-eacces-retry.sh cargo test --offline --locked -j 6 --features "$FEATURES" --no-run --message-format=json "$@"
             binary=$(python3 - "$RUNNER_TEMP/1488-$suite-build.log" <<'PY'
           import json, os, pathlib, sys
           artifacts = set()
@@ -1299,8 +1317,18 @@ jobs:
           if [ "$CACHE_HIT" = true ] && [ -x "$HOME/.elan/bin/elan" ]; then
             echo "elan from cache: $("$HOME/.elan/bin/elan" --version)"
           else
-            curl --retry 5 --retry-all-errors --retry-delay 10 -sSf https://raw.githubusercontent.com/leanprover/elan/master/elan-init.sh \
-              | bash -s -- -y --default-toolchain none
+            # elan-init 内部再下载 elan 二进制且不重试，所以整段安装重试 3 次（#2002 独审 Nit 1）。先落盘再执行：
+            #   `curl | bash` 在无 pipefail 时只看 bash 的退出码，curl 失败也会被当成成功。
+            init="${RUNNER_TEMP:-/tmp}/elan-init.sh"
+            for i in 1 2 3; do
+              if curl --retry 5 --retry-all-errors --retry-delay 10 -sSf -o "$init" \
+                   https://raw.githubusercontent.com/leanprover/elan/master/elan-init.sh \
+                 && bash "$init" -y --default-toolchain none; then
+                break
+              fi
+              [ "$i" -lt 3 ] || exit 1
+              sleep 30
+            done
           fi
           echo "$HOME/.elan/bin" >> "$GITHUB_PATH"
 
@@ -1380,7 +1408,7 @@ jobs:
 
   # #1875 p2m：唯一汇总门。依赖本 workflow 全部作业（macos-session 只在手动触发时跑，不计入）；
   #   任一作业 failure 或 cancelled 即失败，被 changes 正确跳过的 Rust 作业（skipped）不算失败。
-  #   设为 main 的必需检查后，GitHub auto-merge 会同时等 deepagents/review 和整轮 CI，不会因审查单绿绕过 CI。
+  #   已是 main 的必需检查（与 deepagents/review 并列，#1742 裁定），auto-merge 会同时等审查和整轮 CI，不会因审查单绿绕过 CI。
   ci-ok:
     runs-on: ubuntu-latest
     if: ${{ always() }}

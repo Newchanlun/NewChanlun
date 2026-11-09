@@ -7,6 +7,7 @@ SPEC = importlib.util.spec_from_file_location(
 )
 MODULE = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(MODULE)
+SELECT_BINARY = MODULE.select_binary  # 其他测试会替换 MODULE.select_binary，这里保留原函数
 
 NATIVE = ["default", "s_capture_native_testonly", "s_incremental", "s_session"]
 
@@ -168,3 +169,36 @@ class ParallelRunTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class EaccesRetryLogTest(unittest.TestCase):
+    """#2025：cargo-eacces-retry.sh 重试成功后，构建日志里先失败、后成功；只认重试标记之后那次。"""
+
+    def _fixture(self):
+        import json, os, stat, tempfile
+        root = pathlib.Path(tempfile.mkdtemp())
+        rust = root / "rust"
+        target = rust / "target"
+        (target / "debug" / "deps").mkdir(parents=True)
+        exe = target / "debug" / "deps" / "s_structure_session-abc"
+        exe.write_bytes(b"#!/bin/sh\n")
+        exe.chmod(exe.stat().st_mode | stat.S_IXUSR)
+        artifact = {"reason": "compiler-artifact", "profile": {"test": True}, "executable": str(exe),
+                    "features": ["default", "s_session"], "fresh": False,
+                    "target": {"name": "s_structure_session", "kind": ["bin"],
+                               "src_path": str(rust / "src/bin/s_structure_session.rs")},
+                    "manifest_path": str(rust / "Cargo.toml")}
+        failed = json.dumps({"reason": "build-finished", "success": False})
+        ok = "\n".join([json.dumps(artifact), json.dumps({"reason": "build-finished", "success": True})])
+        return rust, target, failed, ok
+
+    def test_retry_marker_keeps_only_last_attempt(self):
+        rust, target, failed, ok = self._fixture()
+        marker = MODULE.EACCES_RETRY_MARKER + "host=box could not execute process `x/build-script-build`"
+        log = "\n".join([failed, marker, ok])
+        self.assertEqual(SELECT_BINARY(log, rust, target, "bin", "Plain")["features"], ["default", "s_session"])
+
+    def test_two_attempts_without_marker_still_rejected(self):
+        rust, target, failed, ok = self._fixture()
+        with self.assertRaisesRegex(ValueError, "未唯一声明成功完成"):
+            SELECT_BINARY("\n".join([failed, ok]), rust, target, "bin", "Plain")
