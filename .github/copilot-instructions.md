@@ -20,9 +20,9 @@
 
 速查入口：`缠论知识库.md`。总纲领：`docs/ROADMAP.md`。
 
-## 第三条：蜂群工作流入口
+## 第三条：goal 事件账本
 
-- **Lead/goal 协议**：协议文本在 `.claude/commands/goal.md`，goal 事件账本在 `.chanlun/goals/events.jsonl`。Copilot 无 Claude Code 的 slash 命令机制——需人工把 goal.md 作为指令读入后按协议执行。
+- goal 事件账本在 `.chanlun/goals/events.jsonl`。早年蜂群 ceremony 启动序与 Lead/goal 协议随 #1952 退役；本节不再有专门的启动入口文档。
 - 平台能力差异与降级说明：`docs/copilot-runbook.md`。
 
 ## 第四条：090 号无条件严格纪律

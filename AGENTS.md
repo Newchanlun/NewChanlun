@@ -53,7 +53,7 @@
 
 1. **不同判断**：判的对象本就不同（中枢构造 vs 背驰确认），各自独立成立，互不兜底；
 2. **诊断模式 vs 生产模式**：诊断口径可更宽（多打日志、多记候选），但**不得参与准入**；
-3. **已声明的独立对照臂**：见 [ADR-0005](../docs/adr/0005-nest-import-ban-clause9-ruling.md) —— 对照臂不产生交易决策，不在「生产判定路径」管辖内（[#799](https://github.com/xy7365527-lang/NewChanlun/issues/799) 裁定六）。
+3. **已声明的独立对照臂**：见 [ADR-0005](docs/adr/0005-nest-import-ban-clause9-ruling.md) —— 对照臂不产生交易决策，不在「生产判定路径」管辖内（[#799](https://github.com/xy7365527-lang/NewChanlun/issues/799) 裁定六）。
 
 **判别一句话**：看两套判据**是不是接在同一个 if-else 上**。是 ⟹ 系统自己声明了二者可互换 ⟹ 违规；不是 ⟹ 按上面三条限定词逐条对。
 
@@ -137,8 +137,8 @@
 ## 协作设施
 
 - **Issue tracker**：GitHub `xy7365527-lang/NewChanlun`（private，`gh` 已认证）；操作口径 `docs/agents/issue-tracker.md`。
-- **Sandcastle 执行面**（[#1000](https://github.com/xy7365527-lang/NewChanlun/issues/1000) 裁定，2026-08-16）：执行类工作（AFK 探针/跑批/实施票链）默认走 `.sandcastle/` 沙盒（工蜂跨进程不在宿主 harness 子代理列表——**可见性以 `.sandcastle/logs/workers.jsonl` + `STATUS.md`（watcher.sh 滚报，launchd 每 10 分钟）+ `.chanlun/agent-roster-*.md` 为准**；harvest.sh 自动验收合入）——两段式 `main.mts`（实装+独立评审双工蜂）与蜂群 `main-swarm.mts`（planner+扇出+merger 归并），工蜂 = Sandcastle `codex` 经本机 CLIProxy 统一路由，与当前主控同为 `gpt-6.1-sol`（唯一配置 `.sandcastle/main-model.mts`，[#1547](https://github.com/xy7365527-lang/NewChanlun/issues/1547) / #1617）；拾取闸 = 专属 label `sandcastle`，已有负责人（assignee）的票不挂；例外三类与全貌见图 #1000 与 `.sandcastle/README.md`。
-- **Graph engineering**（[#1547](https://github.com/xy7365527-lang/NewChanlun/issues/1547)）：图从决策票到合入的自动化流程正本 = `.sandcastle/docs/graph-engineering.md`（决策票 T/P 分级、起草+独审、P 类 `needs-approval` 待批）。主控巡航用 `/graph-run <图号>`，用户批 P 类用 `/graph-approve`。
+- **Sandcastle 执行面**（[#1000](https://github.com/xy7365527-lang/NewChanlun/issues/1000) 裁定，2026-08-16）：执行类工作（AFK 探针/跑批/实施票链）默认走 `.sandcastle/` 沙盒（工蜂跨进程不在宿主 harness 子代理列表——**可见性以 `.sandcastle/logs/workers.jsonl` + `STATUS.md`（watcher.sh 滚报，launchd 每 10 分钟）+ `.chanlun/agent-roster-*.md` 为准**；harvest.sh 自动推分支开 PR，不合入）——两段式 `main.mts`（实装+独立评审双工蜂）与蜂群 `main-swarm.mts`（planner+扇出+merger 归并），工蜂 = Sandcastle `codex` 经本机 CLIProxy 统一路由，与当前主控同为 `gpt-6.1-sol`（唯一配置 `.sandcastle/main-model.mts`，[#1547](https://github.com/xy7365527-lang/NewChanlun/issues/1547) / #1617）；拾取闸 = 专属 label `sandcastle`，已有负责人（assignee）的票不挂；例外三类与全貌见图 #1000 与 `.sandcastle/README.md`。
+- **Graph engineering**（[#1547](https://github.com/xy7365527-lang/NewChanlun/issues/1547)）：图从决策票到合入的自动化流程正本 = `.sandcastle/docs/graph-engineering.md`（决策票 T/P 分级、起草+非作者独审；T/P 决策与 SPEC 均在独审 PASS 后由代理裁定，BLOCK 返修、缺有效独审不放行，#1909）。主控巡航用 `/graph-run <图号>`。**main 的合入不设人工批准**：由 main 分支保护强制的必需检查把关，`deepagents/review`（正式非作者双审 success）与 `ci-ok`（适用 CI 全绿），strict 追平；满足后代理可执行合入，工蜂、执行器与 Sandcastle 实施者自身不合入，只开 PR。**人工确认只保留两类**：实盘下单与资金、密钥与凭证；CI 与分支保护配置的改动不需要人工确认（2026-11-08 用户裁定；范围与原话出处见 `.sandcastle/docs/graph-engineering.md`「人工确认只保留两类」）。资金、账户、凭据类硬门票（ADR 0041「授权来源与生效边界」）由引擎挂 `ready-for-human` 交还用户，用户在票上以首行「退回：签署」评论、每项一行写 `- <字段>=<签署值>；有效域=<有效域>`，下一轮整链重跑（格式见 `.sandcastle/docs/graph-engineering.md`）；返修用的其他「退回：…」评论不算签署；主控不代发。签署、退回与待签标签的归属只认编排账号（`.sandcastle/queue-policy.json` 的 `orchestrator_login`）发的评论，其他账号的同形评论无效；代理与用户共用这一个账号，所以编排账号内是用户还是代理发的无法机器区分（现有信任模型，本流程未改变）。
 - **Triage labels**：`needs-triage` / `needs-info` / `ready-for-agent` / `ready-for-human` / `wontfix`。
 - **Domain docs**：单 context——根 `CONTEXT.md` + `docs/adr/`（惰性创建）。
 - **纪律族**（docs/agents/）：`generation-constitution.md`（名分四态+现役线名单+开票门）、`delivery-discipline.md`（关票门五子句+开票门+豁免+编号）、`stat-provenance.md`（统计口径两档）、`wayfinder-workflow.md`（**本仓 wayfinder 唯一正本**：入流判据+五段管线+四票型口径+图的两行声明+一票一会话与并行纪律+HITL 吞吐纪律+图正文写入协议+`/to-spec` 交棒边界+开票手续）。
@@ -166,7 +166,7 @@
 - **执行分工**：实装与独立评审可与主控同型；评审独立性来自非作者、独立进程和只读证据，不靠异模型。评审打回后由同模型带具体意见重做，保留原有轮次与转 P 规则（#1617）。
 - **工作线**：涉及 branch/worktree 基线、远端默认分支、CI/自动化基线或历史镜像名分时，先读 `docs/agents/generation-constitution.md` §2「现役线名单」；该处是唯一正本。
 - **Stop-Guard**：其注入内容可能反映过期状态（已结算谱系仍列为 pending）；重复执行前先核实际状态。
-- **goal 事件**：正式 GOAL_SET/SUPERSEDE 由 Lead 直接 append 到 `.chanlun/goals/events.jsonl`（`scripts/goal_events.py` 只出草稿），随后用 `scripts/goal_reducer.py` 验证。
+- **goal 事件**：正式 GOAL_SET/SUPERSEDE 由 Lead 直接 append 到 `.chanlun/goals/events.jsonl`（`scripts/goal_events.py` 只出草稿），随后运行 `python scripts/goal_reducer.py` 验证：它读取 events.jsonl，打印当前 goal 投影（JSON）。退出码 0 = 正常，1 = 有损坏行被跳过，2 = 文件缺失或没有可解析事件。
 - **裁定文档**：编排者钦定的裁定 PDF 先归档到 `docs/formal-chain/` 再登记为 goal 权威。
 - **测试指纹**：共享 worktree 取 cargo test 计数时，先核并行线未提交面是否含测试——含则计数被污染（#475 HIGH-4 实锤：1966 vs 干净快照 1957，差 ~9），须注明污染常量或取干净快照；失败集指纹通常不受影响（2026-07-27 在案）。
 - **入仓名分**：新文件入仓前先判名分四态（宪法 §1）；会话导出/备份/工具残留一律禁入仓（.gitignore 已立模式）；review-results 是工作草稿，活期绑定票（宪法 §5）。

@@ -9,13 +9,15 @@ from typing import Any, Literal, cast
 from .approval import SpecAuthorization
 from .domain import RunId, Sha, parse_run_id, parse_sha
 
-REPO = "xy7365527-lang/NewChanlun"
+REPO = "Newchanlun/NewChanlun"
+# 仓库 1150335160 从个人账号转到组织（#1937）。转移前写下的持有记录仍存旧全名，核对时视为同一仓库。
+REPO_NAMES = frozenset({REPO, "xy7365527-lang/NewChanlun"})
 FORBIDDEN_LABELS = frozenset({"sandcastle", "ready-for-agent", "wayfinder:impl", "wayfinder:grilling"})
 FORBIDDEN_PREFIX = "agent:"
-MIRROR_LABEL = "deepagents"
 DEDICATED_MARKER = "deepagents:dedicated-pilot #1742"
 QUEUE_POLICY = json.loads((Path(__file__).resolve().parents[2] / "queue-policy.json").read_text())
 RELEASE_LABEL = str(QUEUE_POLICY["release_label"])
+MIRROR_LABEL = str(QUEUE_POLICY["mirror_label"])
 HOLD_LABELS = frozenset(QUEUE_POLICY["hold_labels"])
 PARENT_EVENTS = frozenset({"parent_issue_added", "parent_issue_removed"})
 

@@ -38,6 +38,9 @@ use super::feature_seq::{
 use super::second_kind;
 use std::rc::Rc;
 
+#[path = "first_start.rs"]
+mod first_start;
+
 // ════════════════════════════════════════════════════════════
 // #246 相切探针（票 #248 裁定影响量化）——thread_local 计数器
 // ════════════════════════════════════════════════════════════
@@ -156,6 +159,10 @@ fn find_overlap_start(strokes: &[Stroke], from: usize, t: Tangency) -> Option<us
 
 /// #1420：第二种候选三态终点（078:52 失效）改变段语义 ⟹ 新语义版本；旧版对象不回改。
 pub const CONSTRUCTION_RULE: &str = "segment-second/2";
+
+/// #1978（§7.1 第 9 条）：较晚候选起点上的流首段已确认，最早一个未出局的起点仍未定 ⟹ 封住不发布。
+/// 段事实级等待原因，与该起点候选自己的等待原因并列。
+pub const FIRST_START_SEALED: &str = "earlier_first_start_undecided";
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct ConstructionFact {
@@ -469,7 +476,8 @@ impl ParseInvalid {
 
 /// #1490 §7.1 第 5 条：流首段（无前段可破）的起点 = `[seed, end]` 内与段同向的笔中，起点在段方向
 /// 反向最极端者（向上段取起点最低的向上笔，向下段镜像；并列取最早）。`078:22`／`:24`。
-/// 种子 `seed` 只定扫描起点；非流首段一律不适用。
+/// 种子 `seed` 只定起点的搜索范围与各候选起点扫描的下界；流首段的终结由 [`first_start`] 按每个起点
+/// 自己的特征序列判（§7.1 第 5／9 条，#1978）。本函数只给未确认流首段的尾部起点；非流首段一律不适用。
 fn first_segment_start(strokes: &[Stroke], seed: usize, end: usize, seg_dir: Direction) -> usize {
     #[cfg(test)]
     if FIRST_START_AT_SEED.with(|c| c.get()) {
@@ -532,7 +540,6 @@ fn record_candidate(
     end: Option<usize>,
     mut attempts: Vec<SegmentEndCheck>,
     min_seg: usize,
-    first_seed: Option<usize>,
     invalid_from: Option<usize>,
 ) {
     let t = feat.tangency();
@@ -542,16 +549,13 @@ fn record_candidate(
     // CC-013 的 FAILED_GEOMETRY 优先于第二种等待，不能用等待掩盖已知失败。
     if let Some(check) = active_check {
         let apex = check.elements[1].stroke_idx;
-        // #1490 §7.1 第 5 条：流首段的起点按定义随终结尝试而定。
-        let s = first_seed.map_or(start, |seed| {
-            first_segment_start(strokes, seed, apex - 1, strokes[seed].direction)
-        });
-        if apex > s && attempts.last().is_none_or(|a| a.end_stroke != apex - 1) {
+        // #1978：流首段的事实来自它自己从起点扫的特征序列，候选 b 都在起点之后、段端处的起点就是 `start`。
+        if apex > start && attempts.last().is_none_or(|a| a.end_stroke != apex - 1) {
             attempts.push(SegmentEndCheck {
                 end_stroke: apex - 1,
                 trigger_stroke: cursor,
-                minimum_count_met: apex - s >= min_seg,
-                construction: construction(strokes, s, apex, t),
+                minimum_count_met: apex - start >= min_seg,
+                construction: construction(strokes, start, apex, t),
             });
         }
     }
@@ -1020,15 +1024,70 @@ fn divide_segments_core(
             facts.seeds.push(construction(strokes, i, i + 3, t));
         }
     }
-    let Some(mut seg_start) = start else {
+    let Some(seed) = start else {
         if observe {
             facts.waiting_reasons.push("no_valid_three_stroke_seed");
         }
         return (segments, Some(0), facts);
     };
     let min_seg = config.seg_min_strokes as usize;
-    let seed = seg_start;
-    let mut seg_dir = strokes[seg_start].direction;
+    // #1978（§7.1 第 5／9 条）：流首段按每个候选起点自己的特征序列判终结，按起点先后发布。
+    let first = first_start::scan(strokes, seed, config, observe, store.take());
+    if observe {
+        if let Some((start, end, hit)) = &first.invalid {
+            facts.parse_invalid_from = Some(ParseInvalid::new(strokes, *start, *end, hit, t));
+        }
+        if let Some(from) = first.tail_truncated_from {
+            facts.tail_window_bound = Some(TailWindowBound::new(from, config));
+        }
+        if first.sealed {
+            facts.waiting_reasons.push(FIRST_START_SEALED);
+        }
+    }
+    let first_start::FirstSegment {
+        published,
+        deciding,
+        store: first_store,
+        ..
+    } = first;
+    let Some((hit, at)) = published else {
+        // 尾部起点仍按第 5 条取 `[seed, n−1]` 内极值；发布的候选是第 9 条决定发不发布的那个起点（最早一个
+        // 未出局者），封住时二者不同。
+        let pending_start = first_segment_start(strokes, seed, n - 1, strokes[seed].direction);
+        if observe {
+            record_candidate(
+                &mut facts,
+                strokes,
+                deciding.start,
+                n - 1,
+                &deciding.feat,
+                None,
+                deciding.attempts,
+                min_seg,
+                deciding.invalid_from,
+            );
+        }
+        *store = first_store;
+        return (segments, Some(pending_start), facts);
+    };
+    let first_dir = strokes[seed].direction;
+    if observe {
+        record_candidate(
+            &mut facts,
+            strokes,
+            deciding.start,
+            at,
+            &deciding.feat,
+            Some(hit.k - 1),
+            deciding.attempts,
+            min_seg,
+            deciding.invalid_from,
+        );
+    }
+    segments.push(make_segment(strokes, deciding.start, hit.k - 1, first_dir));
+    // 新段从 k（分型中心反向笔）起，方向反转（Python :608-610）。
+    let mut seg_start = hit.k;
+    let mut seg_dir = first_dir.flip();
     let mut feat = FeatureSeqState::new(
         seg_dir,
         ExtendMode::Strict,
@@ -1036,7 +1095,7 @@ fn divide_segments_core(
         config.second_seq_scan_window,
         t,
     );
-    feat.set_second_store(store.take());
+    feat.set_second_store(first_store);
     if observe {
         feat.observe();
     }
@@ -1045,7 +1104,7 @@ fn divide_segments_core(
     // #1490 §7.1 第 6 条：本候选扫描中的段端门失败起点（候选级）。
     let mut cand_invalid: Option<usize> = None;
 
-    // 主循环（#1493：第一种情况按 #1490 §7.1；Python `segments_from_strokes_v1` 为历史参考）。
+    // 主循环：流首段之后的段（#1493：第一种情况按 #1490 §7.1；Python `segments_from_strokes_v1` 为历史参考）。
     while cursor < n {
         let sk = &strokes[cursor];
         let opposite = seg_dir.flip();
@@ -1074,12 +1133,7 @@ fn divide_segments_core(
         };
         let k = hit.k;
         let end_stroke = k - 1;
-        // #1490 §7.1 第 5 条：流首段起点按定义（随每次终结尝试），其余段即 seg_start。
-        let start = if segments.is_empty() {
-            first_segment_start(strokes, seed, end_stroke, seg_dir)
-        } else {
-            seg_start
-        };
+        let start = seg_start;
         if observe && end_stroke >= start {
             attempts.push(SegmentEndCheck {
                 end_stroke,
@@ -1115,22 +1169,20 @@ fn divide_segments_core(
                 Some(end_stroke),
                 std::mem::take(&mut attempts),
                 min_seg,
-                segments.is_empty().then_some(seed),
                 cand_invalid.take(),
             );
         }
         cand_invalid = None;
         // 发射旧段（end_stroke = k-1）。
         segments.push(make_segment(strokes, start, end_stroke, seg_dir));
-        // 新段从 k（分型中心反向笔）起，方向反转（Python :608-610）。
         seg_start = k;
         seg_dir = opposite;
         feat.reset(seg_dir);
         cursor = k;
     }
 
-    // 末段（未触发终结）= active 尾部。流首段未确认时其起点按定义随前缀变化（§7.1 第 5 条，不发布）。
-    let pending_start = pending_segment_start(strokes, &segments, seed, seg_start, seg_dir);
+    // 末段（未触发终结）= active 尾部。
+    let pending_start = (seg_start < n).then_some(seg_start);
     if observe {
         if let Some(p) = pending_start {
             record_candidate(
@@ -1142,31 +1194,12 @@ fn divide_segments_core(
                 None,
                 attempts,
                 min_seg,
-                segments.is_empty().then_some(seed),
                 cand_invalid,
             );
         }
     }
     *store = feat.take_second_store();
     (segments, pending_start, facts)
-}
-
-/// 未确认尾段的起点：流首段未确认 ⟹ 按 §7.1 第 5 条定义（`[seed, n-1]`），否则即 seg_start。
-fn pending_segment_start(
-    strokes: &[Stroke],
-    segments: &[Segment],
-    seed: usize,
-    seg_start: usize,
-    seg_dir: Direction,
-) -> Option<usize> {
-    let n = strokes.len();
-    (seg_start < n).then(|| {
-        if segments.is_empty() {
-            first_segment_start(strokes, seed, n - 1, seg_dir)
-        } else {
-            seg_start
-        }
-    })
 }
 
 /// 线段划分（reference-theta-v0.md:22）——只取确认段（薄封装 `divide_segments_with_tail`）。
@@ -1458,9 +1491,46 @@ impl IncrSegments {
         // 保留前缀内（< resume）的门失败记录不随重扫改变；重扫区间内的重算。
         let mut parse_invalid_from = invalid_persisted.filter(|&p| p < resume_seg_start);
         let mut resource_bound_from = bound_persisted.filter(|&p| p < resume_seg_start);
-        let seed = resume_seg_start;
+        // #88：本次重扫区间内跳过过 SecondKind 候选的最早 seg_start（含 pending 尾段）。
+        let mut euf_rescan: Option<usize> = None;
         let mut seg_start = resume_seg_start;
         let mut seg_dir = resume_seg_dir;
+        if new_segments.is_empty() {
+            // 流首段：与全量主循环同一扫描（#804；§7.1 第 5／9 条，#1978）。
+            let seed = resume_seg_start;
+            let first = first_start::scan(strokes, seed, config, false, None);
+            if first.unsealed {
+                euf_rescan = Some(seed);
+            }
+            if let Some(from) = first.tail_truncated_from {
+                resource_bound_from.get_or_insert(from);
+            }
+            if let Some((start, ..)) = first.invalid {
+                parse_invalid_from.get_or_insert(start);
+            }
+            let Some((hit, _)) = first.published else {
+                return IncrSegments {
+                    segments_rc,
+                    end_indices,
+                    pending_start: Some(first_segment_start(strokes, seed, n - 1, seg_dir)),
+                    strokes_len: n,
+                    confirmed_len: keep,
+                    last_stroke,
+                    earliest_unsealed_from: euf_rescan,
+                    parse_invalid_from,
+                    resource_bound_from,
+                };
+            };
+            new_segments.push(make_segment(
+                strokes,
+                first.deciding.start,
+                hit.k - 1,
+                seg_dir,
+            ));
+            end_indices.push(hit.k - 1);
+            seg_start = hit.k;
+            seg_dir = seg_dir.flip();
+        }
         let mut feat = FeatureSeqState::new(
             seg_dir,
             ExtendMode::Strict,
@@ -1469,8 +1539,6 @@ impl IncrSegments {
             config.tangency,
         );
         let mut cursor = seg_start;
-        // #88：本次重扫区间内跳过过 SecondKind 候选的最早 seg_start（含 pending 尾段）。
-        let mut euf_rescan: Option<usize> = None;
 
         while cursor < n {
             let sk = &strokes[cursor];
@@ -1500,24 +1568,19 @@ impl IncrSegments {
             };
             let k = hit.k;
             let end_stroke = k - 1;
-            // 与全量主循环同一判定（#804）：流首段起点按定义，门失败 fail-closed。
-            let start = if new_segments.is_empty() {
-                first_segment_start(strokes, seed, end_stroke, seg_dir)
-            } else {
-                seg_start
-            };
-            match end_gate(strokes, start, end_stroke, min_seg, config.tangency) {
+            // 与全量主循环同一判定（#804）：门失败 fail-closed。
+            match end_gate(strokes, seg_start, end_stroke, min_seg, config.tangency) {
                 EndGate::Emit => {}
                 gate => {
                     if gate == EndGate::Invalid {
-                        parse_invalid_from.get_or_insert(start);
+                        parse_invalid_from.get_or_insert(seg_start);
                     }
                     feat.skip_trigger(k);
                     cursor += 1;
                     continue;
                 }
             }
-            let seg = make_segment(strokes, start, end_stroke, seg_dir);
+            let seg = make_segment(strokes, seg_start, end_stroke, seg_dir);
             new_segments.push(seg);
             end_indices.push(end_stroke);
             seg_start = k;
@@ -1526,7 +1589,7 @@ impl IncrSegments {
             cursor = k;
         }
 
-        let pending_start = pending_segment_start(strokes, new_segments, seed, seg_start, seg_dir);
+        let pending_start = (seg_start < n).then_some(seg_start);
         // #93 advancing 变体（codex #91 补充裁定 §五）：直接持久化本轮重扫的新鲜 euf，**不**与历史取 min。
         // #1344：确认/失效由非末笔决定后即终局（逐笔左折叠，先到者定），故下句对三态同样成立。
         // soundness（§二）：second_seq_has_fractal 一旦真则永真（构建由既定前缀决定，追加笔不改已算

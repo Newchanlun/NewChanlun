@@ -33,6 +33,8 @@ RULE_CONTRACTS = {
     "s2-axis-quantifiers+new-bi/2+segment-second/2+segment-turn/1": ("s-new-bi/2", "s-segment/4", KNOWLEDGE_DOMAIN_V2),
     # #1604：预算 token 改写本次所读记录 `second-seq-scan-budget/2`（合同必填值变）⟹ 会话级规则加该 token、段合同升 s-segment/5（形状同 /4）。
     "s2-axis-quantifiers+new-bi/2+segment-second/2+segment-turn/1+second-seq-scan-budget/2": ("s-new-bi/2", "s-segment/5", KNOWLEDGE_DOMAIN_V2),
+    # #1978（xianduan.md §7.1 第 5／9 条）：流首段按本段自己的特征序列判终结 ⟹ 规则加 token；每代仍只一个流首段候选，段合同形状不变。
+    "s2-axis-quantifiers+new-bi/2+segment-second/2+segment-turn/1+second-seq-scan-budget/2+segment-first-own/1": ("s-new-bi/2", "s-segment/5", KNOWLEDGE_DOMAIN_V2),
 }
 # #1493 §7.1：第一种情况候选三态（检查只出已决两态与「不是第一种情况候选」；前缀末端开窗另记 open_turn）。
 TURN_CHECK_STATES = ("CONFIRMED", "KILLED_BY_NEW_EXTREME", "NOT_CASE_ONE")
