@@ -875,8 +875,13 @@ jobs:
           rustc -vV
           cargo -V
           rustup show active-toolchain
-          echo "CARGO_TARGET_DIR=$RUNNER_TEMP/1488-sequence-target" >> "$GITHUB_ENV"
-          echo "features=$FEATURES target=$RUNNER_TEMP/1488-sequence-target"
+          # #1875：target 不放 $RUNNER_TEMP。Boat 上两次在 _work/_temp 下执行 cargo 刚编出的 build-script 被拒
+          #   （Permission denied os 13，never executed：run 42488695417、42570217355），别的作业 target 不在 _temp，从未出现。
+          #   只换目录，编译与测试不变；顺带记下两处挂载参数，再出现时可定位。
+          findmnt -no TARGET,FSTYPE,OPTIONS -T "$RUNNER_TEMP" || true
+          findmnt -no TARGET,FSTYPE,OPTIONS -T "$HOME" || true
+          echo "CARGO_TARGET_DIR=$HOME/1488-sequence-target" >> "$GITHUB_ENV"
+          echo "features=$FEATURES target=$HOME/1488-sequence-target"
       - name: Fetch locked dependencies (network allowed, #1488)
         run: cargo fetch --locked
       - name: Run sequence API, real memo, oracle and nonempty source locks (#1488)
@@ -1112,8 +1117,13 @@ jobs:
           rustc -vV
           cargo -V
           rustup show active-toolchain
-          echo "CARGO_TARGET_DIR=$RUNNER_TEMP/1488-native-target" >> "$GITHUB_ENV"
-          echo "features=$FEATURES target=$RUNNER_TEMP/1488-native-target"
+          # #1875：target 不放 $RUNNER_TEMP。Boat 上两次在 _work/_temp 下执行 cargo 刚编出的 build-script 被拒
+          #   （Permission denied os 13，never executed：run 42488695417、42570217355），别的作业 target 不在 _temp，从未出现。
+          #   只换目录，编译与测试不变；顺带记下两处挂载参数，再出现时可定位。
+          findmnt -no TARGET,FSTYPE,OPTIONS -T "$RUNNER_TEMP" || true
+          findmnt -no TARGET,FSTYPE,OPTIONS -T "$HOME" || true
+          echo "CARGO_TARGET_DIR=$HOME/1488-native-target" >> "$GITHUB_ENV"
+          echo "features=$FEATURES target=$HOME/1488-native-target"
       - name: Fetch locked dependencies (network allowed, #1488 Native)
         run: cargo fetch --locked
       - name: Run Native candidate fields, union and shared path locks (#1488)
