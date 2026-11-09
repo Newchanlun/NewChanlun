@@ -1356,6 +1356,9 @@ fn read(
             json!({"kind":"EconomicChanges","domain_id":config.domain,"cut":cut(config,s,&h),"changes":changes,"writer_epoch":epoch.to_string()})
         }
         "QueryDecision" | "QueryGrant" => super::finance::query(&tx, config, p)?,
+        "QueryCommand" | "QueryReleasedExact" => {
+            super::finance::query_command(&tx, config, epoch, p)?
+        }
         super::sr_expansion::QUERY => super::sr_expansion::query(&tx, config, p)?,
         "QueryFact" => {
             exact(p, &["op", "fact_key"])?;
@@ -1434,7 +1437,12 @@ fn handle_with_deadline(
             {
                 super::finance::write_with_ingress(c, config, epoch, e, ingress_response_deadline)
             }
-            "ImportResponsibility" | "Reserve" | "CloseApplicants" | "ActivateCapPolicy"
+            "ImportResponsibility"
+            | "Reserve"
+            | "CloseApplicants"
+            | "ActivateCapPolicy"
+            | "MakeDispatchable"
+            | "ReleaseExact"
                 if config.domain == "E" =>
             {
                 super::finance::write_with_ingress(c, config, epoch, e, ingress_response_deadline)
@@ -1474,6 +1482,8 @@ fn handle_with_deadline(
             | "QueryVoice"
             | "QueryDecision"
             | "QueryGrant"
+            | "QueryCommand"
+            | "QueryReleasedExact"
             | super::sr_expansion::QUERY => read(c, config, epoch, runtime, &e["payload"]),
             _ => Err("SchemaUnsupported：操作不属于本域".into()),
         }

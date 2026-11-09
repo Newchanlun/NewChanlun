@@ -8,6 +8,7 @@ mod content_store;
 #[cfg_attr(not(test), allow(dead_code))]
 mod domain_event;
 mod evidence;
+mod exact_command;
 mod finance;
 mod finance_transport;
 mod financial_reader_resources;

@@ -1648,7 +1648,8 @@ fn old_finance_contracts_refuse_cap_activation() {
             (REV, false, false),
             (REV_V2, true, false),
             (REV_V3, false, true),
-            (REV_V4, true, true)
+            (REV_V4, true, true),
+            (REV_V5, false, false)
         ]
     );
     m["finance"] = Value::Null;
@@ -2261,7 +2262,7 @@ fn cap_activation_sigkill_recovers_whole_old_or_new_version() {
 #[path = "finance_real_s_tests.rs"]
 mod real_s;
 
-#[path = "sr_expansion_tests.rs"]
-mod sr_expansion;
 #[path = "exact_release_tests.rs"]
 mod exact_release;
+#[path = "sr_expansion_tests.rs"]
+mod sr_expansion;
