@@ -523,19 +523,7 @@ class ExternalReview:
             raise ValueError("attempt 必须为正整数")
         if self.gateway is None:
             raise IdentityError("在线独审需要宿主 App 客户端")
-        data = load_target(self.gateway, number)
-        try:
-            merge_base = _git(self.source, "merge-base", "--all", data["base_sha"], data["head_sha"]).decode().splitlines()
-            if len(merge_base) != 1:
-                raise IdentityError("merge-base 不唯一")
-            _git(self.source, "cat-file", "-e", f'{data["head_sha"]}^{{commit}}')
-            patch = patch_identity(self.source, merge_base[0], data["head_sha"])
-        except subprocess.CalledProcessError:
-            raise IdentityError("needs_source_sync") from None
-        head = check_controller()
-        target = ReviewTarget(**data, merge_base_sha=str(parse_sha(merge_base[0])), run_id=str(uuid.uuid4()),
-                              attempt=attempt, policy_version=POLICY, controller_code_head=head,
-                              registered_at_ns=time.time_ns(), patch_id=patch, review_contract=REVIEW_CONTRACT)
+        target = self._frozen(load_target(self.gateway, number), attempt)
         folder = self.state_root / "runs" / target.key
         # 以有效 target.json 判断是否已登记：_lock 会先建目录，建目录后、写 target.json 前中断时仍须准入。
         if not (folder / "target.json").exists():
@@ -552,6 +540,30 @@ class ExternalReview:
             with self._pr_lock(target.pr_number):
                 _save(folder / "target.json", asdict(target))
         return target
+
+    def _frozen(self, data: dict[str, Any], attempt: int) -> ReviewTarget:
+        """按 load_target 的结果冻结出 ReviewTarget（merge-base、补丁身份、controller 身份），不登记。"""
+        try:
+            merge_base = _git(self.source, "merge-base", "--all", data["base_sha"], data["head_sha"]).decode().splitlines()
+            if len(merge_base) != 1:
+                raise IdentityError("merge-base 不唯一")
+            _git(self.source, "cat-file", "-e", f'{data["head_sha"]}^{{commit}}')
+            patch = patch_identity(self.source, merge_base[0], data["head_sha"])
+        except subprocess.CalledProcessError:
+            raise IdentityError("needs_source_sync") from None
+        head = check_controller()
+        return ReviewTarget(**data, merge_base_sha=str(parse_sha(merge_base[0])), run_id=str(uuid.uuid4()),
+                            attempt=attempt, policy_version=POLICY, controller_code_head=head,
+                            registered_at_ns=time.time_ns(), patch_id=patch, review_contract=REVIEW_CONTRACT)
+
+    def would_reuse(self, data: dict[str, Any]) -> bool:
+        """这个 head 现在登记新 attempt 时，reuse_source 能否找到可沿用的 PASS（同 patch_id、policy、contract）。
+        只读：不登记、不跑部署准入，供 sweep 排派发先后；沿不沿用仍由子进程登记与发布时判定。
+        对象不在本机库、controller 不干净或任何读失败都返回 False。"""
+        try:
+            return self.reuse_source(self._frozen(data, 0)) is not None  # attempt 0 从不登记，撞不上已有 run 目录
+        except (OSError, ValueError, KeyError, TypeError, IdentityError, subprocess.CalledProcessError):
+            return False
 
     @contextmanager
     def _pr_lock(self, number: int) -> Iterator[None]:
@@ -1112,24 +1124,31 @@ class ExternalReview:
                       migration: dict | None = None) -> dict:
         """受管恢复：旧版本把 GitHub 认证/传输失败误记为 STALE（双审完整却没发布终态）。
         不重跑模型、不改旧记录：确认 PR 与 controller 仍是冻结目标，逐个重验已有回执且与原记录一致，
-        原 STALE 记录另存为历史，再发布终态。任何一项不满足就原样返回 STALE。"""
+        原 STALE 记录另存为历史，再发布终态。任何一项不满足就返回 STALE，
+        并把磁盘 outcome 写回这份 STALE（带上本次拒绝原因 `recovery_refused`）——重试分支可能先把 `saved` 换成历史里更早的
+        STALE 记录（见 migrate_stale 的 history 回退），这时磁盘上留着的是上一次迁移写下、未发布的终态，
+        原样 `return saved` 不会动磁盘，返回值与磁盘就此分叉（#1944）。"""
+        def refuse(reason: str) -> dict:
+            refused = {**saved, "recovery_refused": reason}
+            _save(folder / "outcome.json", refused)
+            return refused
         try:
             publisher.check_current()  # 精确 head、base、目标与 controller；认证仍坏会上抛 EffectPending
-        except Stale:
-            return saved
+        except Stale as error:
+            return refuse(str(error))
         recorded = [(r.get("model"), r.get("verdict")) for r in saved.get("reviews", [])]
         outcomes = []
         for model in MODELS:
             worker = folder / model
             if not (worker / "launch.json").exists() or not (worker / "receipt.json").exists():
-                return saved
+                return refuse(f"{model} 缺少 launch.json 或 receipt.json，无法重验")
             outcomes.append(validate_review(target, _read(worker / "launch.json"), _read(worker / "receipt.json"), worker,
                                             self.source))
         if [(o.model, o.verdict) for o in outcomes] != recorded:
-            return saved
+            return refuse("重验结果与原记录不一致")
         sessions = [o.session_id for o in outcomes if o.session_id]
         if len(sessions) != len(set(sessions)):
-            return saved
+            return refuse("两独审复用了 session")
         verdict = ("FAILED" if any(o.verdict == "FAILED" for o in outcomes) else
                    "BLOCK" if any(o.verdict == "BLOCK" for o in outcomes) else "PASS")
         state = {"PASS": "success", "BLOCK": "failure", "FAILED": "error"}[verdict]
