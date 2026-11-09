@@ -3711,11 +3711,23 @@ impl AuditConnection {
         )
     }
     pub(super) fn assert_complete_matches_cold(&self) {
+        let active = self.begin(TransactionBehavior::Deferred).unwrap();
+        let cold = state::audit(active.tx()).unwrap();
+        self.assert_complete_matches_audited(active.tx(), &cold);
+        drop(cold);
+        active.read_end().unwrap();
+    }
+    /// 与 `assert_complete_matches_cold` 相同的全部对拍；冷审计由调用方在同一只读事务内给出，
+    /// 供同一快照上紧接着还要做 b2 来源对拍的调用方共用一次 `state::audit`（#1890：S4 每代省一次完整审计）。
+    pub(super) fn assert_complete_matches_audited(
+        &self,
+        tx: &Transaction<'_>,
+        cold: &state::AuditedState,
+    ) {
         fn view(a: &state::AuditedState) -> Value {
             json!({"raw":a.raw,"cuts":a.cuts.iter().map(|c|format!("{:?}|{:?}|{:?}|{:?}|{:?}",c.metadata,c.roots,c.batch_id,c.snapshot,c.delta)).collect::<Vec<_>>(),
                 "objects":format!("{:?}",a.objects),"auxiliary":format!("{:?}",a.auxiliary)})
         }
-        let active = self.begin(TransactionBehavior::Deferred).unwrap();
         let candidate = self.complete.borrow();
         let c = candidate.as_ref().unwrap();
         use super::audit_retention::Retained;
@@ -3739,17 +3751,14 @@ impl AuditConnection {
         if let Some(sweep) = &c.audited.object_facts {
             sweep.assert_owner_projection_oracle(c.audited.cuts.len() as i64);
         }
-        let cold = state::audit(active.tx()).unwrap();
-        assert_eq!(view(&c.audited), view(&cold));
+        assert_eq!(view(&c.audited), view(cold));
         for original in &c.originals {
             assert_eq!(
                 *original,
-                request_audit::ExactRows::read(active.tx(), &original.sql, [], vec![]).unwrap()
+                request_audit::ExactRows::read(tx, &original.sql, [], vec![]).unwrap()
             );
         }
-        drop(cold);
         drop(candidate);
-        active.read_end().unwrap();
     }
 }
 
@@ -6135,8 +6144,24 @@ pub(super) mod construction_tests {
         begun.token
     }
 
-    pub(in crate::v3) fn b2_assert_counts_match_independent_full_source(
+    /// 同一只读快照上先做 complete 全量对拍、再做 b2 独立来源审计对拍；两者的冷 `state::audit`
+    /// 在同一事务里必然相同，只算一次（#1890：S4 每代省约 8%）。两套对拍的内容不变。
+    pub(in crate::v3) fn assert_complete_and_b2_counts(
         owner: &AuditConnection,
+    ) -> source_audit::Counts {
+        let active = owner.begin(TransactionBehavior::Deferred).unwrap();
+        let audited = state::audit(active.tx()).unwrap();
+        owner.assert_complete_matches_audited(active.tx(), &audited);
+        let actual = b2_assert_counts_match_audited(owner, active.tx(), &audited);
+        drop(audited);
+        active.read_end().unwrap();
+        actual
+    }
+
+    fn b2_assert_counts_match_audited(
+        owner: &AuditConnection,
+        tx: &Transaction<'_>,
+        audited: &state::AuditedState,
     ) -> source_audit::Counts {
         let actual = owner
             .construction
@@ -6145,10 +6170,8 @@ pub(super) mod construction_tests {
             .unwrap()
             .source_counts()
             .unwrap();
-        let active = owner.begin(TransactionBehavior::Deferred).unwrap();
-        let audited = state::audit(active.tx()).unwrap();
         let cut = audited.cuts.last().unwrap();
-        let mut source = crate::content_store::TxStore::new(active.tx()).unwrap();
+        let mut source = crate::content_store::TxStore::new(tx).unwrap();
         let mut reader = super::super::history::HashReader::new(&mut source);
         let expected = source_audit::audit_generated_for_audit(
             &mut reader,
@@ -6167,8 +6190,6 @@ pub(super) mod construction_tests {
         assert_eq!(actual, expected, "来源Counts六字段逐项对拍");
         drop(reader);
         drop(source);
-        drop(audited);
-        active.read_end().unwrap();
         actual
     }
 
@@ -6297,10 +6318,8 @@ pub(super) mod construction_tests {
                     "{scenario} gen{n}warm/ordinary全表含原件逐字"
                 );
                 runtime_root_compare_reachable_bytes(&warm.conn, &ordinary.conn);
-                owner.assert_complete_matches_cold();
-                cold_owner.assert_complete_matches_cold();
-                b2_assert_counts_match_independent_full_source(&owner);
-                b2_assert_counts_match_independent_full_source(&cold_owner);
+                assert_complete_and_b2_counts(&owner);
+                assert_complete_and_b2_counts(&cold_owner);
                 // ready/receipt和已发布消息重试均只读，不能推进raw/source游标。
                 let before = {
                     let state = owner.construction.borrow();
@@ -6516,10 +6535,8 @@ pub(super) mod construction_tests {
                         "{rule} gen{n}warm/ordinary全表含原件逐字"
                     );
                     runtime_root_compare_reachable_bytes(&warm.conn, &ordinary.conn);
-                    owner.assert_complete_matches_cold();
-                    cold_owner.assert_complete_matches_cold();
-                    b2_assert_counts_match_independent_full_source(&owner);
-                    b2_assert_counts_match_independent_full_source(&cold_owner);
+                    assert_complete_and_b2_counts(&owner);
+                    assert_complete_and_b2_counts(&cold_owner);
                 }
             });
             assert_eq!(Layout::of_library(&warm.conn).unwrap(), layout);
