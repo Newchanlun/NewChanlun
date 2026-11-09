@@ -42,6 +42,9 @@ jobs:
   #   push 不再重跑 Rust 作业。strict 下 PR run 检出的 refs/pull/N/merge 与 head 同树，所以那次 run 测的正是这棵树。
   #   rust/Cargo.lock 有变时仍全跑，让 main 作用域写入新的 cargo 缓存（PR 作用域的缓存别的 PR 读不到）。
   #   单父提交、直接推送、查询出错一律全跑。去重后 main 的 push run 多数没有 Rust 作业耗时，CI 计时请看 PR run。
+  # #1875 同 PR 复用：PR run 的检出树去掉上面的跳过集后，与本分支上一次全绿 run 相同、且两边 .github 相同时，
+  #   不再跑 Rust 作业（典型是列车追平的 main 只多了 .sandcastle 改动）。凭据是那次 run 的 ci-ok 上传的
+  #   rust-green-<指纹> artifact（保留 7 天）；只认本仓库分支，查询出错一律全跑。判定见 .github/scripts/ci-rust-reuse.py。
   changes:
     runs-on: ubuntu-latest
     timeout-minutes: 5
@@ -51,12 +54,24 @@ jobs:
       pull-requests: read
     outputs:
       rust: ${{ steps.filter.outputs.rust }}
+      rust_key: ${{ steps.filter.outputs.rust_key }}
     steps:
+      # 稀疏检出 .github/scripts，供同 PR 复用判定（ci-rust-reuse.py）使用。
+      #   检出失败不让本作业失败：脚本不存在时下面按全跑处理。
+      - uses: actions/checkout@v4
+        if: github.event_name == 'pull_request'
+        continue-on-error: true
+        with:
+          sparse-checkout: .github/scripts
+          persist-credentials: false
       - id: filter
         env:
           GH_TOKEN: ${{ github.token }}
           EVENT: ${{ github.event_name }}
           PR: ${{ github.event.pull_request.number }}
+          HEAD_REF: ${{ github.head_ref }}
+          # p2m 跳过集；同 PR 复用的输入指纹也排除同一组路径。
+          SKIP_RE: '^(\.sandcastle/.+|package\.json|package-lock\.json|tsconfig\.sandcastle\.json|\.github/devskim-reviewed-1488\.json|\.github/devskim-baseline\.json|\.github/devskim/.+|\.github/workflows/devskim\.yml|scripts/devskim_[a-z_]+\.(sh|py))$'
         run: |
           set -euo pipefail
           if [ "$EVENT" = push ]; then
@@ -88,10 +103,15 @@ jobs:
           gh api --paginate "repos/$GITHUB_REPOSITORY/pulls/$PR/files?per_page=100" \
             --jq '.[] | .filename, (.previous_filename // empty)' > "$RUNNER_TEMP/files"
           total=$(gh api "repos/$GITHUB_REPOSITORY/pulls/$PR" --jq .changed_files)
-          other=$(grep -c -v -E '^(\.sandcastle/.+|package\.json|package-lock\.json|tsconfig\.sandcastle\.json|\.github/devskim-reviewed-1488\.json|\.github/devskim-baseline\.json|\.github/devskim/.+|\.github/workflows/devskim\.yml|scripts/devskim_[a-z_]+\.(sh|py))$' "$RUNNER_TEMP/files" || true)
+          other=$(grep -c -v -E "$SKIP_RE" "$RUNNER_TEMP/files" || true)
           if [ "$total" -ge 3000 ] || [ ! -s "$RUNNER_TEMP/files" ] || [ "$other" -ne 0 ]; then rust=true; else rust=false; fi
           echo "changed=$total other=$other rust=$rust"
-          echo "rust=$rust" >> "$GITHUB_OUTPUT"
+          if [ "$rust" = false ]; then echo "rust=false" >> "$GITHUB_OUTPUT"; exit 0; fi
+          # 同 PR 复用：Rust 输入与本分支上一次全绿 run 相同就不重跑；出错按全跑（脚本只会输出 rust=true）。
+          python3 .github/scripts/ci-rust-reuse.py "$GITHUB_REPOSITORY" "$GITHUB_SHA" "$HEAD_REF" "$GITHUB_RUN_ID" "$SKIP_RE" \
+            > "$RUNNER_TEMP/reuse" || echo "rust=true" > "$RUNNER_TEMP/reuse"
+          cat "$RUNNER_TEMP/reuse"
+          grep -E '^(rust|rust_key)=' "$RUNNER_TEMP/reuse" >> "$GITHUB_OUTPUT"
 
   test:
     runs-on: ubuntu-latest
@@ -341,6 +361,11 @@ jobs:
       - name: 生产增量构建无测试钩子检查器单测（#1640）
         working-directory: .
         run: python3 -m unittest discover -s .github/scripts -p 'test_check_prod_no_test_hooks*.py'
+
+      # #1875 同 PR 复用判定的单测。改这份脚本会改 .github，本身就不会命中复用，所以放在 Rust 作业里也一定会跑到。
+      - name: 同 PR Rust 复用判定单测（#1875）
+        working-directory: .
+        run: python3 -m unittest discover -s .github/scripts -p 'test_ci_rust_reuse.py' -v
 
       - name: cargo fmt --check（#611：归零后防回潮）
         run: |
@@ -1443,3 +1468,17 @@ jobs:
           if bad or results.get("changes") != "success" or rust not in ("true", "false"):
               sys.exit(f"CI 未通过：{bad}，changes={results.get('changes')}，rust={rust}")
           PY
+      # #1875 同 PR 复用：全绿时记下这次 Rust 输入的指纹，后续同分支 run 指纹相同就不重跑（见 ci-rust-reuse.py）。
+      #   rust_key 只在 Rust 作业真跑了或复用了时非空；p2m 跳过 Rust 的 run 不记。
+      - name: Record green Rust inputs
+        if: github.event_name == 'pull_request' && needs.changes.outputs.rust_key != ''
+        env:
+          KEY: ${{ needs.changes.outputs.rust_key }}
+        run: printf '%s\n' "$KEY" > "$RUNNER_TEMP/rust-green"
+      - uses: actions/upload-artifact@v4
+        if: github.event_name == 'pull_request' && needs.changes.outputs.rust_key != ''
+        with:
+          name: rust-green-${{ needs.changes.outputs.rust_key }}
+          path: ${{ runner.temp }}/rust-green
+          retention-days: 7
+          overwrite: true
