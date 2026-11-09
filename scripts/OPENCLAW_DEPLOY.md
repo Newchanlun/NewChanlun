@@ -6,13 +6,13 @@
 fengliang.service (fold 端)          openclaw.service (切分端)
 ├── 3 daemon instances               ├── git pull (同步)
 ├── perpetual traversal               ├── query daemon /status
-├── HTTP API :9765                    ├── ceremony_scan
-├── WebSocket :8765                   ├── topo_indicators
-└── Dashboard 前端                    ├── escalate 队列
-                                      └── git push (同步)
+├── HTTP API :9765                    └── git push (同步)
+├── WebSocket :8765
+└── Dashboard 前端
 ```
 
-daemon 是持久进程（一次启动，永久穿越）。scheduler 定期查询 daemon 状态 + 运行 scan + 同步。
+daemon 是持久进程（一次启动，永久穿越）。scheduler 定期查询 daemon 状态 + 同步。
+原先 scheduler 里的 ceremony_scan 异常检测与 `.chanlun/escalate/` 队列已随早年蜂群机制退役（#1952）移除。
 
 ## 第一步：启动逢亮 daemon（fold 端）
 
@@ -126,10 +126,6 @@ tail -f topological-computation/.chanlun/traversal-events.jsonl
 # scheduler 日志
 tail -f tmp/openclaw-scheduler.log
 
-# escalate 队列（你不在时机器检测到的异常）
-ls -la .chanlun/escalate/
-cat .chanlun/escalate/cycle-*.json | python3 -m json.tool
-
 # S_net 统计（语料摄入成果）
 curl http://localhost:9765/topology | python3 -m json.tool
 
@@ -151,13 +147,8 @@ scheduler (切分端-机器部分, 定期循环)
   → git pull (拉取你 push 的新指令)
   → query daemon /status (读取穿越状态)
   → git push (同步穿越产物)
-  → ceremony_scan (topo_indicators 检测异常)
-  → L1: 自动闭环处理
-  → L2/L3: → .chanlun/escalate/ 队列
-  → git push (同步 escalate)
 
 你 (切分端-人的部分)
-  → 查看 escalate 队列
   → 在 Dashboard 观察逢亮穿越实况
   → 在 claude.ai 中做理论加工
   → git push 新指令 → 下一轮 scheduler 拉取

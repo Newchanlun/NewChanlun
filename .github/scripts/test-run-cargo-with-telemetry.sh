@@ -190,4 +190,73 @@ actual_status=$?
 set -e
 assert_status 64 "$actual_status" no-command "$log_file"
 
-printf 'PASS: 16 status-priority cells, guard boundaries, defaults, configuration validation, and argv preservation\n'
+# #1875 EACCES 重试：只认「build-script never executed + os error 13」这一特征，最多重试一次。
+retry_dir="$tmp_dir/retry-stubs"
+mkdir -p "$retry_dir"
+cat > "$retry_dir/cargo" <<'STUB'
+#!/usr/bin/env bash
+n=0; [[ -f "$STUB_CALLS" ]] && n="$(cat "$STUB_CALLS")"; n=$((n + 1)); printf '%s\n' "$n" > "$STUB_CALLS"
+mode="${STUB_RETRY_MODE:?}"
+if [[ "$mode" == eacces-once && $n -eq 1 ]] || [[ "$mode" == eacces-always ]]; then
+  printf 'error: failed to run custom build command for `serde_json v1.0.0`\n' >&2
+  printf 'Caused by:\n  could not execute process `/w/rust/target/debug/build/serde_json-1/build-script-build` (never executed)\n' >&2
+  printf 'Caused by:\n  Permission denied (os error 13)\n' >&2
+  exit 101
+fi
+if [[ "$mode" == other-error ]]; then
+  printf 'error[E0308]: mismatched types\nPermission denied (os error 13)\n' >&2
+  exit 101
+fi
+exit 0
+STUB
+chmod +x "$retry_dir/cargo"
+run_retry_case() {
+  local mode=$1 expected_status=$2 expected_calls=$3 expect_warning=$4 log_file calls_file actual_status calls
+  log_file="$tmp_dir/retry-$mode.log"; calls_file="$tmp_dir/retry-$mode.calls"
+  set +e
+  STUB_RETRY_MODE="$mode" STUB_CALLS="$calls_file" STUB_DU_COUNTER="$tmp_dir/retry-$mode.du" \
+    CARGO_TELEMETRY_TEST_SAMPLE_SECONDS=0.05 PATH="$retry_dir:$stub_dir:$PATH" \
+    bash -c 'cd "$1" && "$2" cargo test' _ "$work_dir" "$helper" >"$log_file" 2>&1
+  actual_status=$?
+  set -e
+  assert_status "$expected_status" "$actual_status" "retry-$mode" "$log_file"
+  calls="$(cat "$calls_file")"
+  if [[ "$calls" != "$expected_calls" ]]; then
+    echo "FAIL retry-$mode: expected $expected_calls cargo calls, got $calls" >&2; cat "$log_file" >&2; exit 1
+  fi
+  if [[ "$expect_warning" == yes ]] && ! grep -q 'Boat build-script EACCES retry::host=' "$log_file"; then
+    echo "FAIL retry-$mode: missing retry warning" >&2; exit 1
+  fi
+  if [[ "$expect_warning" == no ]] && grep -q 'Boat build-script EACCES retry' "$log_file"; then
+    echo "FAIL retry-$mode: unexpected retry warning" >&2; exit 1
+  fi
+}
+run_retry_case eacces-once 0 2 yes
+run_retry_case eacces-always 101 2 yes
+run_retry_case other-error 101 1 no
+run_retry_case success 0 1 no
+
+# 阴性：TMPDIR 不可用时也必须如实反映命令结论（#2025 独审 BLOCK：mktemp 失败不得把失败改成成功、不得不跑命令）。
+for case in other-error:101:1 success:0:1; do
+  IFS=: read -r mode want calls_want <<<"$case"
+  calls_file="$tmp_dir/notmp-$mode.calls"; log_file="$tmp_dir/notmp-$mode.log"
+  set +e
+  TMPDIR="$tmp_dir/does-not-exist" STUB_RETRY_MODE="$mode" STUB_CALLS="$calls_file" STUB_DU_COUNTER="$tmp_dir/notmp-$mode.du" \
+    CARGO_TELEMETRY_TEST_SAMPLE_SECONDS=0.05 PATH="$retry_dir:$stub_dir:$PATH" \
+    bash -c 'cd "$1" && "$2" cargo test' _ "$work_dir" "$helper" >"$log_file" 2>&1
+  actual_status=$?
+  set -e
+  assert_status "$want" "$actual_status" "notmp-$mode" "$log_file"
+  [[ "$(cat "$calls_file")" == "$calls_want" ]] || { echo "FAIL notmp-$mode: expected $calls_want cargo calls" >&2; cat "$log_file" >&2; exit 1; }
+done
+
+# 直接调用共用的 cargo-eacces-retry.sh（#1488 作业与 release-locks 循环不经过包装器，直接用它）。
+direct_calls="$tmp_dir/retry-direct.calls"; direct_log="$tmp_dir/retry-direct.log"
+set +e
+STUB_RETRY_MODE=eacces-once STUB_CALLS="$direct_calls" PATH="$retry_dir:$PATH" "$script_dir/cargo-eacces-retry.sh" cargo test >"$direct_log" 2>&1
+direct_status=$?
+set -e
+assert_status 0 "$direct_status" retry-direct "$direct_log"
+[[ "$(cat "$direct_calls")" == 2 ]] || { echo "FAIL retry-direct: expected 2 calls" >&2; exit 1; }
+
+printf 'PASS: 16 status-priority cells, guard boundaries, defaults, configuration validation, argv preservation, 5 EACCES-retry cases, and 2 no-TMPDIR fail-closed cases\n'
