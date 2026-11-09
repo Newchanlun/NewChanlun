@@ -125,6 +125,111 @@ def test_complete_block_maps_failure_and_is_not_retried(lane):
     assert lane.gateway.sent == ["pending", "failure"]
 
 
+class Comments:
+    """PR 评论的替身：按 bot + 标记读回，post 计数。"""
+    bot = Gateway.bot
+    def __init__(self):
+        self.rows, self.posts, self.fault = [], [], None
+    def find_marker(self, number, text):
+        for row in self.rows:
+            if row["number"] == number and text in row["body"]:
+                return {"id": row["id"], "url": f"https://example.invalid/{row['id']}"}
+        return None
+    def post_comment(self, number, body):
+        self.posts.append((number, body))
+        if self.fault:
+            raise self.fault
+        self.rows.append({"id": len(self.rows) + 1, "number": number, "body": body})
+
+
+def test_failure_posts_reasons_once_and_replay_does_not_repost(lane):
+    lane.commenter = Comments()
+    lane.target(1810, 1)
+    (lane.state_root / "runs" / f"fake-mode-{MODELS[1]}").write_text("BLOCK")
+    (lane.state_root / "runs" / f"fake-mode-{MODELS[0]}").write_text("PASS")
+    result = lane.review_pr(1810)
+    assert result["state"] == "failure" and lane.gateway.sent == ["pending", "failure"]
+    target = ReviewTarget(**result["target"])
+    [(number, body)] = lane.commenter.posts
+    assert number == 1810 and body.startswith(module.failure_marker(target))
+    assert target.run_id in body and target.head_sha in body
+    assert f"### {MODELS[0]}：PASS" in body and f"### {MODELS[1]}：BLOCK" in body
+    assert result["comment"]["id"] == 1
+    saved = json.loads((lane.state_root / "runs" / target.key / "outcome.json").read_text())
+    assert saved["comment"]["id"] == 1 and saved["publication"]["state"] == "failure"
+    for _ in range(2):  # 同一 run 重放：状态与评论都只读回认领
+        assert lane.review_pr(1810)["comment"]["id"] == 1
+    assert len(lane.commenter.posts) == 1 and lane.gateway.sent == ["pending", "failure"]
+
+
+def test_failure_comment_lost_journal_is_claimed_by_marker(lane):
+    lane.commenter = Comments()
+    lane.target(1810, 1)
+    (lane.state_root / "runs" / "fake-mode").write_text("BLOCK")
+    target = ReviewTarget(**lane.review_pr(1810)["target"])
+    (lane.state_root / "runs" / target.key / "effects" / "comment-failure.json").unlink()
+    assert lane.review_pr(1810)["comment"]["id"] == 1
+    assert len(lane.commenter.posts) == 1
+
+
+def test_failure_comment_unknown_outcome_keeps_verdict_and_does_not_resend(lane):
+    lane.commenter = Comments()
+    lane.commenter.fault = OutcomeUnknown("结果不明")
+    lane.target(1810, 1)
+    (lane.state_root / "runs" / "fake-mode").write_text("BLOCK")
+    result = lane.review_pr(1810)
+    assert result["verdict"] == "BLOCK" and result["publication"]["state"] == "failure"
+    assert "comment-failure" in result["comment"]["error"]
+    lane.commenter.fault = None
+    assert "error" in lane.review_pr(1810)["comment"]  # pending 不自动重发
+    assert len(lane.commenter.posts) == 1
+    lane.reconcile(result["run_id"], "已核 PR 上确无该评论")
+    assert lane.review_pr(1810)["comment"]["id"] == 1
+    assert len(lane.commenter.posts) == 2 and lane.gateway.sent == ["pending", "failure"]
+
+
+@pytest.mark.parametrize("mode,state", [(None, "success"), ("BLOCK:notool", "error")])
+def test_success_and_error_post_no_comment(lane, mode, state):
+    lane.commenter = Comments()
+    if mode:
+        lane.target(1810, 1)
+        (lane.state_root / "runs" / "fake-mode").write_text(mode)
+    assert lane.review_pr(1810)["state"] == state
+    assert "comment" not in lane.review_pr(1810)
+    assert lane.commenter.posts == []
+
+
+def test_failure_without_comment_permission_only_records_skip(lane):
+    lane.target(1810, 1)
+    (lane.state_root / "runs" / "fake-mode").write_text("BLOCK")
+    result = lane.review_pr(1810)
+    assert result["state"] == "failure" and "skipped" in result["comment"]
+    assert lane.gateway.sent == ["pending", "failure"]
+
+
+def test_failure_comment_lists_full_findings(lane, tmp_path):
+    target = lane.target(1810, 1)
+    worker = tmp_path / MODELS[1]
+    worker.mkdir()
+    (worker / "receipt.json").write_text(json.dumps({"result": {"findings": ["[阻断] a.py:1 原因全文"]}}))
+    body = module.failure_comment(target, tmp_path, [
+        {"model": MODELS[0], "verdict": "PASS", "reason": "VERDICT: PASS\n无问题"},
+        {"model": MODELS[1], "verdict": "BLOCK", "reason": "VERDICT: BLOCK\n摘要"}])
+    assert "VERDICT: PASS\n无问题" in body and "VERDICT: BLOCK\n摘要" in body
+    assert "- [阻断] a.py:1 原因全文" in body
+    long = module.failure_comment(target, tmp_path, [{"model": "m", "verdict": "BLOCK", "reason": "x" * 70000}])
+    assert len(long) < 65536 and long.startswith(module.failure_marker(target))
+
+
+def test_comment_token_requests_only_pull_request_write():
+    assert module.COMMENT_PERMISSIONS == {"metadata": "read", "pull_requests": "write"}
+    requests = []
+    client = SimpleNamespace(identity=SimpleNamespace(repository="owner/repo"), bot_login="app[bot]",
+                             api=lambda method, path, **kw: requests.append((method, path, kw)))
+    RepoGateway(client).post_comment(7, "body")
+    assert requests == [("POST", "/repos/owner/repo/issues/7/comments", {"json": {"body": "body"}})]
+
+
 @pytest.mark.parametrize("field", ["base", "head"])
 def test_drift_prevents_publish_even_if_done(lane, field):
     target = lane.target(1810, 1)

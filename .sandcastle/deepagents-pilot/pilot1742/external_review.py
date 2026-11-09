@@ -28,7 +28,7 @@ import time
 import uuid
 from collections.abc import Iterator
 from concurrent.futures import ThreadPoolExecutor, wait
-from contextlib import contextmanager
+from contextlib import ExitStack, contextmanager
 from dataclasses import asdict, dataclass, replace
 from pathlib import Path
 from typing import Any
@@ -50,6 +50,10 @@ MODELS = ("kimi-k3.1-pro", "claude-opus-5-5")
 POLICY = "external-pr-v1-kimi"
 CONTEXT = "deepagents/review"
 TOKEN_PERMISSIONS = {"metadata": "read", "contents": "read", "pull_requests": "read", "statuses": "write"}
+# failure 时在 PR 上贴各审查员理由（#1932）。单独一枚 token，只在要发评论时才换取；
+# 发布 App 的安装权限没有 pull_requests/write 时不发评论，outcome.json 的 comment 字段记跳过原因。
+COMMENT_PERMISSIONS = {"metadata": "read", "pull_requests": "write"}
+COMMENT_LIMIT = 60000  # GitHub 评论正文上限 65536 字符，留出余量
 REPOSITORY_ID = 1150335160
 REPOSITORY = "Newchanlun/NewChanlun"
 # IDENTITY_CONFIG 不存在时沿用执行器 App；HOST 换审查专用 App 的步骤见 EXTERNAL-REVIEW.md「换用审查专用 App」。
@@ -426,6 +430,33 @@ def validate_review(target: ReviewTarget, launch: dict, receipt: dict, folder: P
         return failed("缺日志、解析失败或日志不符")
 
 
+def failure_marker(target: ReviewTarget) -> str:
+    return f"<!-- deepagents:review-failure run={target.run_id} head={target.head_sha} -->"
+
+
+def failure_comment(target: ReviewTarget, folder: Path, reviews: list[dict]) -> str:
+    """failure 评论正文：每位审查员的 verdict、summary 全文与 findings 全文，注明 run_id 与 head。
+    findings 取自该审查员已通过 validate_review 的回执 result；读不到时只列 summary。"""
+    lines = [failure_marker(target), f"**{CONTEXT}：failure**（至少一位审查员 BLOCK）", "",
+             f"- run_id：`{target.run_id}`", f"- head：`{target.head_sha}`", f"- base：`{target.base_sha}`",
+             f"- attempt：{target.attempt}", ""]
+    for review in reviews:
+        lines += [f"### {review.get('model')}：{review.get('verdict')}", "", str(review.get("reason", "")), ""]
+        findings: list = []
+        try:
+            result = _read(folder / str(review.get("model")) / "receipt.json").get("result") or {}
+            if isinstance(result.get("findings"), list):
+                findings = [x for x in result["findings"] if isinstance(x, str)]
+        except (OSError, ValueError, IdentityError):
+            pass
+        if findings:
+            lines += ["发现：", *(f"- {x}" for x in findings), ""]
+    body = "\n".join(lines)
+    if len(body) > COMMENT_LIMIT:
+        body = body[:COMMENT_LIMIT] + "\n\n（超出 GitHub 评论长度，已截断；完整内容见本 run 的 outcome.json 与各审查员回执）"
+    return body
+
+
 class StatusPublisher:
     def __init__(self, gateway: RepoGateway, target: ReviewTarget, folder: Path, locks: Path,
                  controller: str | None = None):
@@ -491,8 +522,11 @@ class StatusPublisher:
 class ExternalReview:
     def __init__(self, gateway: RepoGateway | None, *, state_root: Path = STATE_ROOT,
                  checkout_root: Path = CHECKOUT_ROOT, source: Path = SOURCE_REPO,
-                 launcher: list[str] | None = None, poll_seconds: float = 1):
+                 launcher: list[str] | None = None, poll_seconds: float = 1,
+                 commenter: RepoGateway | None = None):
+        """commenter：同一 App、带 COMMENT_PERMISSIONS 的 gateway，用于 failure 时贴理由；None 表示不发评论。"""
         self.gateway, self.state_root, self.checkout_root, self.source = gateway, state_root, checkout_root, source
+        self.commenter = commenter
         # worker 与 controller 同源：都取正在执行的代码所在仓库（SOURCE_REPO），不随对象来源 source 变化。
         self.launcher = launcher or [str(SOURCE_REPO / "node_modules" / ".bin" / "tsx"),
                                      str(SOURCE_REPO / ".sandcastle" / "external-review-worker.mts")]
@@ -862,8 +896,36 @@ class ExternalReview:
             if self._superseded_on_head(target):
                 raise Stale("同 head 已有更晚登记的 attempt，本 run 结论不再发布")
             result["publication"] = publisher.publish(result["state"])
+            _save(folder / "outcome.json", result)
+            self._announce_failure(target, folder, result)
         _save(folder / "outcome.json", result)
         return result
+
+    def _announce_failure(self, target: ReviewTarget, folder: Path, result: dict) -> None:
+        """终态 failure 已发布后，在 PR 上贴一条各审查员理由（#1932）。走本 run 的 effect journal：
+        先按标记读回 PR 评论，读到即认领，同一 run 重跑不重发；结果不明的留 pending 等读回或 reconcile。
+        评论失败不改变 verdict、state 与已发布的状态，只记在 result["comment"]；PASS 与 error 不发。"""
+        if result.get("state") != "failure" or "publication" not in result:
+            return
+        journal = Journal(folder / "effects")
+        effect = "comment-failure"
+        if self.commenter is None:
+            if journal.load(effect) is None:
+                result["comment"] = {"skipped": "发布 App 无 pull_requests/write，未发 failure 评论"}
+            return
+        marker = failure_marker(target)
+        commenter = self.commenter
+        def probe() -> dict | None:
+            found = commenter.find_marker(target.pr_number, marker)
+            return {**found, "marker": marker} if found else None
+        try:
+            result["comment"] = journal.converge(
+                effect, probe,
+                lambda: commenter.post_comment(target.pr_number, failure_comment(target, folder, result["reviews"])),
+                idempotent=False, what={"pr": target.pr_number, "run_id": target.run_id, "head_sha": target.head_sha,
+                                        "marker": marker})
+        except (IdentityError, EffectPending) as error:
+            result["comment"] = {"error": str(error)}
 
     def _resume_publication(self, target: ReviewTarget, folder: Path, publisher: StatusPublisher, saved: dict) -> dict:
         """outcome 已存在时：终态已发布的只对账（不重新判定、不改写）；尚未发布的按来源分别过门——
@@ -876,6 +938,10 @@ class ExternalReview:
             # 等同未发布，下面照常过门（取代检查、沿用重做准入），不直接重发。publish 先读回远端，读到即认领；pending 读不到
             # 上抛待对账、不重发；done 被覆盖也上抛待对账。不重新过门，免得把远端已有的 success 记成「未发布」。
             saved["publication"] = publisher.publish(saved["state"], reused.get("run_id"))
+            # 终态发出后、评论前中断的 run 在这里补发评论；已发的按标记读回认领，不重发。
+            if saved["state"] == "failure":
+                self._announce_failure(target, folder, saved)
+                _save(folder / "outcome.json", saved)
             return saved
         if not reused:
             return self._publish_final(target, folder, publisher, saved)
@@ -1158,9 +1224,15 @@ def main(argv: list[str] | None = None) -> int:
     try:
         if args.command in ("review-pr", "migrate-stale"):
             identity = load_identity(IDENTITY_CONFIG, args.private_key)
-            with GitHubAppClient(identity, permissions=TOKEN_PERMISSIONS) as client:
+            with ExitStack() as stack:
+                client = stack.enter_context(GitHubAppClient(identity, permissions=TOKEN_PERMISSIONS))
                 client.verify()
-                lane = ExternalReview(RepoGateway(client))
+                commenter = None
+                if identity.installation_permissions.get("pull_requests") == "write":
+                    # 评论 token 惰性换取：只有真要发 failure 评论时才向 GitHub 申请。
+                    commenter = RepoGateway(stack.enter_context(
+                        GitHubAppClient(identity, permissions=COMMENT_PERMISSIONS)))
+                lane = ExternalReview(RepoGateway(client), commenter=commenter)
                 result = (lane.review_pr(args.pr, args.attempt) if args.command == "review-pr"
                           else lane.migrate_stale(args.pr, args.attempt))
         else:
