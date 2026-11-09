@@ -8730,7 +8730,25 @@ mod tests {
 
     /// 跑 S4 序列；`cold` 为 false 时只跑增量臂（S5 大样本测量）。返回每代 JSON 行。
     #[cfg(feature = "s_incremental")]
+    /// #1875/#1890：冷臂与增量臂分在两个线程后，bundled SQLite 默认的内存统计（MEMSTATUS=1，SQLITE_THREADSAFE=1）
+    /// 让每次 sqlite3_malloc 争同一把进程级互斥锁。S4 路径不读 sqlite3_memory_used，须在本进程首次初始化 SQLite 之前关闭；
+    /// 已初始化（同进程先跑过别的测试）时 SQLite 返回 MISUSE，只打印、照常运行。
+    fn s4_disable_sqlite_memstatus() {
+        if std::env::var_os("S4_KEEP_MEMSTATUS").is_some() {
+            return;
+        }
+        // SAFETY: SQLITE_CONFIG_MEMSTATUS 只接一个 int 参数；未初始化时生效，已初始化时返回 SQLITE_MISUSE 且不改状态。
+        let rc = unsafe {
+            rusqlite::ffi::sqlite3_config(rusqlite::ffi::SQLITE_CONFIG_MEMSTATUS, 0 as std::os::raw::c_int)
+        };
+        if rc != rusqlite::ffi::SQLITE_OK {
+            eprintln!("S4 sqlite memstatus off skipped rc={rc}");
+        }
+    }
     fn s4_run(steps: &[S4Step], cold: bool) -> Vec<Value> {
+        if cold {
+            s4_disable_sqlite_memstatus();
+        }
         let plan = s4_clock(steps.len());
         let f = Fixture::with_clock(plan.clone());
         let o = Fixture::with_clock(plan);
@@ -8766,9 +8784,36 @@ mod tests {
         }
         let mut prior = s4_reachable(&native.conn);
         let mut rows = Vec::new();
+        // #1875/#1890：冷臂（每代新 Runtime 冷全量重算，约占 S4 的 63%）在独立线程逐代推进，与本线程的增量臂和
+        //   只读 native 的两项对拍并行；每代在双边对拍前汇合，冷臂线程等到下一代消息才再写冷库。
+        //   冷链数据来源不变（第 k 代冷算只消费冷库第 k−1 代），对拍内容与次数不变。Driver 含 Rc 不能跨线程，
+        //   冷臂线程只交回回复、事件与回执；双边对拍由本线程另开普通连接读停在第 k 代的冷库。
+        std::thread::scope(|scope| {
+        // 通道建在 scope 闭包内：本线程断言失败展开时先丢掉发送端，冷臂线程的接收循环随即结束，scope 才能汇合，
+        //   测试立即报出断言而不是挂到超时；冷臂线程 panic 时它的发送端被丢，本线程 recv 立即失败。
+        let (to_cold, cold_inbox) = std::sync::mpsc::channel::<Value>();
+        let (cold_outbox, from_cold) = std::sync::mpsc::channel::<(Value, Vec<Value>, Value)>();
+        if cold {
+            let o = &o;
+            scope.spawn(move || {
+                for e in cold_inbox {
+                    let (mut reader, expected, cold_events) = s4_cold_handle(o, &e);
+                    let receipt = reader.handle(receipt_request(&e)).unwrap();
+                    drop(reader);
+                    if cold_outbox.send((expected, cold_events, receipt)).is_err() {
+                        break;
+                    }
+                }
+            });
+        } else {
+            drop((cold_inbox, cold_outbox));
+        }
         for (index, step) in steps.iter().enumerate() {
             let k = index + 1;
             let e = s4_message(k, step);
+            if cold {
+                to_cold.send(e.clone()).expect("冷臂线程已退出");
+            }
             let nodes_before = count(&native.conn, "s_content_nodes");
             let probe = native.conn.sql_read_probe();
             let (actual, events, work) = state::traced(true, || native.handle(e.clone()));
@@ -8803,7 +8848,16 @@ mod tests {
                 "raw_events":count(&native.conn, "raw_events"),"delta_r":delta_r,"reachable":reachable.len(),
                 "new_stored_nodes":new_nodes,"delta":delta,"work":work});
             if cold {
-                let (mut reader, expected, cold_events) = s4_cold_handle(&o, &e);
+                // 单线程时冷臂进入与退出都会清本线程的热车道，时点在增量臂之后、native 侧对拍之前；这里在同一时点清，
+                //   保持增量臂与对拍所见的车道状态不变（冷臂线程里的两次清只作用于该线程）。
+                s_fact_cache::warm_lane_reset();
+                native.conn.assert_complete_matches_cold();
+                // 来源审计跨代增量状态不进入产物，单独与独立全量来源审计 Counts 六字段对拍。
+                let counts = super::super::audit_owner::construction_tests::b2_assert_counts_match_independent_full_source(
+                    &native.conn,
+                );
+                let (expected, cold_events, cold_receipt) =
+                    from_cold.recv().expect("冷臂线程提前退出");
                 // 回复、回执、全表（含全部节点）逐位相同；owner complete 与冷审计一致。
                 assert_eq!(actual, expected, "第{k}代回复分叉");
                 let full = state::stage_rows(&cold_events);
@@ -8814,19 +8868,15 @@ mod tests {
                     [json!("startup")],
                     "第{k}代冷臂完整分支入口"
                 );
-                native.conn.assert_complete_matches_cold();
-                // 来源审计跨代增量状态不进入产物，单独与独立全量来源审计 Counts 六字段对拍。
-                let counts = super::super::audit_owner::construction_tests::b2_assert_counts_match_independent_full_source(
-                    &native.conn,
-                );
                 assert_eq!(
                     native.handle(receipt_request(&e)).unwrap(),
-                    reader.handle(receipt_request(&e)).unwrap(),
+                    cold_receipt,
                     "第{k}代回执分叉"
                 );
+                let reader = Connection::open(&o.db).unwrap();
                 // 非节点表逐表逐位；节点表按公共根可达闭包逐位（存储了但不可达的节点
                 // 不是产物，只记差集计数供诊断）。
-                let tables = prepared::tests::runtime_root_tables(&reader.conn, false);
+                let tables = prepared::tests::runtime_root_tables(&reader, false);
                 for (left, right) in prepared::tests::runtime_root_tables(&native.conn, false)
                     .iter()
                     .zip(&tables)
@@ -8839,7 +8889,7 @@ mod tests {
                         left.0
                     );
                 }
-                prepared::tests::runtime_root_compare_reachable_bytes(&native.conn, &reader.conn);
+                prepared::tests::runtime_root_compare_reachable_bytes(&native.conn, &reader);
                 let stored = |c: &Connection| {
                     c.prepare("SELECT digest FROM s_content_nodes")
                         .unwrap()
@@ -8848,8 +8898,8 @@ mod tests {
                         .collect::<Result<std::collections::BTreeSet<_>, _>>()
                         .unwrap()
                 };
-                let (delta_nodes, cold_nodes) = (stored(&native.conn), stored(&reader.conn));
-                let cold_reachable = s4_reachable(&reader.conn);
+                let (delta_nodes, cold_nodes) = (stored(&native.conn), stored(&reader));
+                let cold_reachable = s4_reachable(&reader);
                 assert_eq!(reachable, cold_reachable, "第{k}代可达节点集分叉");
                 row["stored_only_delta"] = json!(delta_nodes.difference(&cold_nodes).count());
                 row["stored_only_cold"] = json!(cold_nodes.difference(&delta_nodes).count());
@@ -8861,6 +8911,8 @@ mod tests {
             eprintln!("S4_STAGE_ROW {row}");
             rows.push(row);
         }
+        drop(to_cold);
+        });
         rows
     }
     #[cfg(feature = "s_incremental")]
