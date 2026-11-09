@@ -1,10 +1,10 @@
 # ADR 0062：受控场所、账户、权限——P1 凭据作用域版本、profile 绑定、发送门与拒发终态
 
 > 正本：本文件是 `P1-hl-testnet` 上凭据作用域版本、场所 profile 绑定、X 发送门与拒发终态的正本。
-> 最后裁定：#1540 [修订裁定 6717784668](https://github.com/Newchanlun/NewChanlun/issues/1540#issuecomment-6717784668)（2026-11-08，Q5 的实现机制：0045:24 读法照旧，P1 机器层核验改为独立的发送前置件）；原裁定 [裁定评论 6702983888](https://github.com/Newchanlun/NewChanlun/issues/1540#issuecomment-6702983888)（2026-11-07）其余各条不变
+> 最后裁定：以合入 head 的正式门 `deepagents/review` 双审 PASS 为准（依 #1909 代理独审裁定）。裁定链：#1540 原裁定 [6702983888](https://github.com/Newchanlun/NewChanlun/issues/1540#issuecomment-6702983888)（2026-11-07）→ [修订裁定 6717784668](https://github.com/Newchanlun/NewChanlun/issues/1540#issuecomment-6717784668)（2026-11-08，Q5 机制：0045:24 读法照旧，P1 机器层核验为独立的发送前置件）→ 2026-11-09 正式门各轮处置（P 类改判与授权边界、绑定行按 `writer_epoch` 设键与启动记录、四种重启路径、指纹输入清单、`authorizer == account`、P1 范围限定、ADR 0030 修订），逐轮见 PR #1949 处置评论
 > 受影响代码清单：见「受影响代码清单」节（实施归 #1365 系列，等 #1942 合入后承接）
 
-**日期**：2026-11-07（Q5 机制修订 2026-11-08）
+**日期**：2026-11-07（Q5 机制修订 2026-11-08；正式门处置 2026-11-09）
 **裁定人**：本条依 #1909 代理独审裁定。**分级：P 类**——主题是真实场所、账户与权限（`.sandcastle/docs/graph-engineering.md` 分级节；裁定五、七、八为政策取舍）。作者 #1323 主控（Opus）。
 **授权边界**：按 [ADR 0041](0041-degrees-of-freedom-configurable-not-excluded.md)「授权来源与生效边界」，本 ADR 只裁定方案、形状与拒发语义，不是 `UserSigned`，不代签任何外部操作。凭据与权限授予、场所/账户激活仍是独立硬门，须对应用户授权；本 ADR 不撤销、不放宽这道门。
 **状态**：已采纳（P 类，代理独审裁定）。获审版本链：
@@ -56,7 +56,7 @@
 |---|---|---|---|
 | 授权声明 | 用户签的 `credential_scope.class` 与 `authorization` 行 | 场所 profile 记录 | 钥匙实际有什么权限 |
 | 场所权限事实 | 场所协议对这一类钥匙允许签什么动作 | #1770 能力记录 `session_permission` 项的来源栏：URL、取回日期、sha256 | 手里这把钥匙属于哪一类 |
-| 运行时核验 | X 启动后、任何写请求前，核对手里这把钥匙属于声明的那一类、绑在声明的账户上 | X 库绑定行与 X 观测记录 | 场所规则本身 |
+| 运行时核验 | X 启动后、任何写请求前，核对手里这把钥匙属于声明的那一类、绑在声明的账户上 | X 库启动记录（第 4–7 步核验结果）与 X 观测记录 | 场所规则本身 |
 
 **Hyperliquid 场所权限事实**（不开 research 票；2026-11-07T05:49Z 重新抓取公开文档，原件存 `/Volumes/AgentStorage/issue1540-fu18-draft/venue-docs/`，抓取日志 `FETCH-LOG.tsv`）：
 
@@ -101,7 +101,7 @@
   - 发送门判：epoch 8 启动，第 1–5 步通过，第 6 步本次计算的指纹 ≠ 声明值。epoch 8 的绑定行（`P1-hl-testnet@2`）写入，本次启动记录 `(8, 1)` 写 `send_state=refused`、`IdentityConflict` / `Tb09Fingerprint`，写请求 0 个，只读查询照常。
   - 同一事件若用户先按 v2 重算指纹再重启：SR-3 仍是 0 条记录；发送门 8 步全过，进入可发送状态。
   - 两者不冲突：SR-3 在 P1 上对任何事件都答「不构成风险条件」，发送门按当前输入答「能发 / 不能发」。两个答案同时成立，各自落在自己的记录里。P2 激活时 SR-3 生效，两者各写各的记录、各按各的路径解除，具体次序随 P2 另签版本时裁定（#1561）。
-- P1 产出的指纹、绑定行、核验记录都标 `experiment`，永不作为生产证据（ADR 0028:48、:71；CONTEXT.md「证据类」）。P2 首发前仍须在目标部署重核。修订指针落在 ADR 0045 文末。
+- P1 产出的指纹、绑定行、启动记录都标 `experiment`，永不作为生产证据（ADR 0028:48、:71；CONTEXT.md「证据类」）。P2 首发前仍须在目标部署重核。修订指针落在 ADR 0045 文末。
 - 回退：用户如果要维持「四项核验只在 production 做」，说一句即可回退成 B（发送门只在 production 核验）。代价是 TB-09 无法在 P1 上满足 AT-09「被真实部署阻止」。
 - 排期：P1 发送要等 #1383 交付指纹算法；#1340:380 的切片顺序 TB-04 → TB-09 → TB-08 本就如此，不新增排程边。
 
@@ -240,7 +240,7 @@ ADR 0028:24 的动作维度：
 | 同上 | `x_refuses_send_without_authorization` | 缺 `authorization` → refused、`AwaitingPolicy`，0 连接 |
 | 同上 | `x_refuses_send_when_authorizer_differs_from_account` | `authorizer` 填成非 `account` 的值（含 `public_id`）→ refused、`IdentityConflict` / `Authorization`，0 连接 |
 | 同上 | `experiment_profile_without_tb09_fingerprint_refuses_send` | experiment 缺指纹 → refused、`MissingDependency` |
-| 同上 | `refused_send_blocks_place_cancel_and_reduce_only_but_serves_query` | refused 下三种写变体 0 写请求；`query` 返回绑定行与拒发原因 |
+| 同上 | `refused_send_blocks_place_cancel_and_reduce_only_but_serves_query` | refused 下三种写变体 0 写请求；`query` 返回当前 epoch 的绑定行、最新启动记录与拒发原因 |
 | 同上 | `send_refusal_class_is_from_common_error_set` | 所有 refused 启动记录的类别 ∈ INTERFACE-CONTRACTS:15 八类 |
 | 同上 | `x_same_epoch_same_identity_restart_reruns_gate` | 路径 2：同 epoch 同 I 重启 → 绑定行数不变，启动记录 +1，8 步全部重跑 |
 | 同上 | `x_same_epoch_key_swap_is_refused_and_sticky` | 路径 2：epoch 8 已可发送，换钥匙同 epoch 重启 → refused / `CredentialPublicId`，0 连接；再换回原钥匙同 epoch 重启仍 refused |
@@ -258,7 +258,7 @@ ADR 0028:24 的动作维度：
 - **#1369 TB-11**：整体验收的「能力 hash」取 `(capability_record_version, capability_record_sha256, venue_profile_sha256)` 三项，同版本异内容的两份能力记录得出不同的能力 hash；P1 证据与 production 分列。
 - **#1551 FU-20（AT-18）**：Destination ⑤「目标部署的隔离和权限证据」按裁定三的三层核，缺一不得记权限证据成立。
 - **#1367 / #1382 / #1400 / #1412（TB-08）**：#1400 落地第 7 步的真实只读核验与账户级查询；#1412「逐动作核其明确授权」读作 profile `authorization` 行；能力矩阵是 TB-08 的逐项对账表。
-- **#1770 / #1769**：#1770 能力记录补九项与 `session_permission` 来源栏；#1769 后续叶（经 #1365 系列）改 X profile 到 `/2`、加绑定行与发送门第 1-7 步。
+- **#1770 / #1769**：#1770 能力记录补九项与 `session_permission` 来源栏；#1769 后续叶（经 #1365 系列）改 X profile 到 `/2`、加绑定行、启动记录与发送门第 1-7 步。
 
 ## 不在范围
 
