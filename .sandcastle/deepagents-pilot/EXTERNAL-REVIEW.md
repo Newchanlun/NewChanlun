@@ -164,6 +164,12 @@ HOST 切换步骤：
 
 App token 只申请 metadata/read、contents/read、pull_requests/read、statuses/write（审查专用 App 的安装权限也正是这四项）；token 留在宿主发布进程内存。GitHub 的 statuses/write 不按 context 缩权，宿主发布器及 OS 因此属于受信边界。
 
+failure 评论（#1932）：终态 `failure` 发布后，入口在 PR 上发一条评论，列出每位审查员的 verdict、summary 全文和回执里的 findings 全文，注明 run_id、head、base 与 attempt。评论首行是标记 `<!-- deepagents:review-failure run=<run_id> head=<head_sha> -->`，写入走本 run 的 effect journal（`effects/comment-failure.json`）：先按「发布 App 的 bot + 标记」读回 PR 评论，读到即认领，同一 run 重跑不重发；结果不明的留 pending，不自动重发，等读回确证或 `reconcile`。评论在状态之后写，状态的写入顺序不变；评论失败（含正文生成、journal 读写出错）或待对账只记在 `outcome.json` 的 `comment` 字段，不改 verdict、state 与退出码。`success` 和 `error` 不发评论。
+
+补发范围很窄：只有**同一 controller 下**终态已发、评论没发（发评论前中断，或评论失败）的 run，手动用同一 attempt 再跑 `review-pr` 且 PR 仍在原 head 时才补发。controller 一变，`review-pr` 在登记阶段就以「controller 已变更」拒绝（退出码 2），走不到补发；`migrate-stale` 只处理 STALE run，也不补。所以本功能上线前已发布的 failure run 不会补评论，要看理由仍查本机 run 目录。`review_sweep` 见到 `publication` 就把该 head 记为完成，不会为评论失败重跑；评论记 `error` 时需人工排除原因后手动 `review-pr` 同一 attempt（待对账的先 `reconcile`）。
+
+评论用单独的 token，只申请 metadata/read、pull_requests/write，仅在要发评论时才向 GitHub 换取。发布 App 的安装权限里 pull_requests 不是 write 时不建这枚 token、不发评论，`comment` 记 `skipped`。执行器 App 有该权限；审查专用 App 目前只有上面四项，要启用评论须由 owner 在 GitHub 上把它的 pull_requests 升为 write，并同步改 `IDENTITY_CONFIG` 里的 `installation_permissions`（核验按逐项相等，只改一边入口会以退出码 2 拒绝）。pull_requests/write 还能改 PR 标题、正文、开关 PR；合入要 contents/write，这枚 token 没有。
+
 ## 成本上限与每日额度闸
 
 单次独审最多执行 250 条命令（`REVIEW_COMMAND_CAP`，实测 Opus 中位 47、p90 98、最大 143），墙钟最长 45 分钟（实测最大 23 分钟）。触顶即关容器，回执 `status=failed` 并写 `failure_code`：`budget_exceeded`（命令数）、`timeout`、`cancelled`、`rate_limited`、`model_exit`（Codex 非零退出）或 `model_error`（模型阶段的其他异常）；容器被关后 SDK 的 exec 无论正常返回还是抛错，原因码都会写上。宿主汇总把它记进该 reviewer 的 reason（`failure_code=…`），`status` 子命令能直接看到，整轮按 FAILED 发布 `error`，不当作通过。
