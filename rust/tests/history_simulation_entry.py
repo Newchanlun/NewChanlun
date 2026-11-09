@@ -54,7 +54,7 @@ def command(change):
 def batch(i,changes=[]):
     return dict(request_id='b'+str(i),known_frontier_cut='frontier'+str(i),bar=dict(index=i,open=100,low=90,high=110,close=105),capacity=dict(kind='none'),close_changes=changes,scenario_busts=[])
 def run(name):
-    directory=ROOT/name; directory.mkdir()
+    directory=ROOT/f'{name}-{os.getpid()}-{time.time_ns()}'; directory.mkdir()
     # Unix socket path stays below sockaddr_un limit; data remains under task root.
     sockets=Path(tempfile.mkdtemp(prefix='i1381-'))
     e=Authority(sockets/'e','E'); s=Authority(sockets/'s','S'); xp=sockets/'x'

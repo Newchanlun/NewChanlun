@@ -1031,7 +1031,14 @@ fn runtime_process_fixture() {
 
 #[test]
 fn runtime_pending_claim_crash_and_authority_reply_loss_recover_without_reauthorization() {
-    let dir = std::env::temp_dir().join(format!("issue1381-runtime-{}", std::process::id()));
+    let dir = std::env::temp_dir().join(format!(
+        "issue1381-runtime-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
     let output = std::process::Command::new("python3")
         .arg(concat!(
             env!("CARGO_MANIFEST_DIR"),

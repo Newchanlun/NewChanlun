@@ -126,6 +126,9 @@ pub(crate) fn verify_capture(manifest: &Value, envelope: &Value, raw: &str) -> R
         return Err("InvalidDomain：X 原件库须为冻结绝对路径".into());
     }
     let c = Connection::open_with_flags(db, OpenFlags::SQLITE_OPEN_READ_ONLY).map_err(failure)?;
+    // 与 economic_session::store 的打开取值一致：X 正在提交时等锁，而非立即报原件不可核。
+    c.busy_timeout(std::time::Duration::from_secs(2))
+        .map_err(failure)?;
     let contract: String = c
         .query_row("SELECT v FROM x_sim_meta WHERE k='contract'", [], |r| {
             r.get(0)

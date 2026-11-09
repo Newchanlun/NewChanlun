@@ -119,3 +119,19 @@ PendingBatch 与 pending_epoch 同事务保存。尚有 pending 时，任何不�
 内建立。X launcher还将自身x_meta/初始writer_epoch放入同一事务；提交前中断只留下
 未初始化状态，提交后中断留下完整冻结绑定。已有模拟库仍严格拒绝缺profile，不能
 按表为空补绑。事务内初始化函数接收Transaction类型，不接受裸Connection。
+
+
+## 已知缺口（#1381 R6 正式门登记，本片不改行为）
+
+- 回复超帧静默断开：批结果与原件内嵌完整 families 与 model，并随历史增长。
+  AdvanceBar/QueryBatch 回复超过 `max_frame_bytes` 时，`session_transport` 的 serve 循环
+  不报错、直接关连接；批已提交，调用方只见 EOF。长历史下会出现。
+- 确定 Denied 永久停住 pending：S 返回 Denied 被当作 MissingDependency，命令停在
+  ExecutionRequested，pending 批不清除；其后异批 AdvanceBar、新 AcceptExact、换 writer epoch
+  全被拒绝。需区分「确定拒绝且未调用」与「结果不确定」；换代接管政策另开票。
+- 同重多 family：接纳收盘变化时不限制同一 chong 同时挂多个活动 family，要到后续 bar
+  两者同时可成才报 ModelOrderUnspecified；bar 须连续，此时模拟不可恢复。
+- Model 尚缺 ADR 0033「版本合同字段（v1）」要求的字段（input_domain、带条款 id 的
+  price_rules、capacity_source、unsupported_domains、clock/known_frontier_cut 等）。#1381 不关。
+- 启动重放两次：`x_execution_session` 的 persist 与 `runtime::serve` 各调用一次
+  initialize_in_transaction，两次都经 validate_existing 从空状态重放全部历史批。

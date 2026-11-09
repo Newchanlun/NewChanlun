@@ -430,7 +430,10 @@ pub fn advance(model: &Model, state: &State, batch: &Batch) -> Result<ResultBatc
     }
     let mut unfilled_market = BTreeMap::new();
     for (family, working) in &mut next.families {
-        if matches!(working.order.kind, OrderKind::Market { exec_index } if exec_index == b.index) {
+        // 只计本 bar 开始时仍在可成集合的市价单；上一边界已撤销的不留残量。
+        if working.active
+            && matches!(working.order.kind, OrderKind::Market { exec_index } if exec_index == b.index)
+        {
             let remaining = working.order.quantity - working.filled;
             if remaining > 0 {
                 unfilled_market.insert(family.clone(), remaining);
