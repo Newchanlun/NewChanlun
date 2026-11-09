@@ -15,11 +15,14 @@ if sys.argv[1:] == ["--admission-only"]:  # 部署准入替身：controller=cwd 
     sys.exit(0)
 folder = Path(sys.argv[sys.argv.index("--output-dir") + 1])
 launch = json.loads((folder / "launch.json").read_text())
-with open(folder.parents[1] / "launches", "a") as log:
+runs = next(p for p in folder.parents if p.name == "runs")  # 旁听 worker 在 runs/<键>/advisory/<模型>/
+with open(runs / "launches", "a") as log:
     log.write(launch["model"] + "\n")
-per_model = folder.parents[1] / f"fake-mode-{launch['model']}"  # 按模型覆盖，造混合结论
-mode_file = per_model if per_model.exists() else folder.parents[1] / "fake-mode"
+per_model = runs / f"fake-mode-{launch['model']}"  # 按模型覆盖，造混合结论
+mode_file = per_model if per_model.exists() else runs / "fake-mode"
 mode, _, flag = (mode_file.read_text().strip() if mode_file.exists() else "PASS").partition(":")
+if mode == "CRASH":  # 监督进程不写回执就退出
+    sys.exit(3)
 session = str(uuid.uuid4())
 diff = ["diff", "--no-ext-diff", "--no-textconv", launch["merge_base_sha"], launch["head_sha"]]
 read = f"/bin/bash -lc 'git {' '.join(diff)}'"
@@ -29,7 +32,7 @@ tool = [] if flag == "notool" else [  # 「BLOCK:notool」等：零工具调用�
                                         "status": "completed", "exit_code": 0}}]
 output = {"status": "blocked" if mode == "BLOCK" else "completed", "summary": f"VERDICT: {mode}",
           "findings": [], "validation": ["测试替身"]}
-fence = (folder.parents[1] / "fake-fence").read_text().strip() if (folder.parents[1] / "fake-fence").exists() else ""
+fence = (runs / "fake-fence").read_text().strip() if (runs / "fake-fence").exists() else ""
 text = json.dumps(output)
 if fence == "nonstring":  # agent_message.text 不是字符串（结构化内容）
     text = output  # type: ignore[assignment]

@@ -1861,3 +1861,115 @@ def test_block_left_by_retired_reviewer_still_vetoes_reuse(lane, env, monkeypatc
     _advance_main(lane, env)
     result = lane.review_pr(1810)
     assert "reused_from" not in result and [r["model"] for r in result["reviews"]] == list(MODELS)
+
+
+# ---- 旁听审查员（ADVISORY_REVIEW_MODELS）：不进结论、状态与合同 ----
+ADVISORY = module.ADVISORY_REVIEW_MODELS[0]
+
+
+def _advisory(lane, result):
+    folder = lane.state_root / "runs" / ReviewTarget(**result["target"]).key / module.ADVISORY_DIR
+    return folder, json.loads((folder / "outcome.json").read_text())
+
+
+def _launched_models(lane):
+    return sorted((lane.state_root / "runs" / "launches").read_text().splitlines())
+
+
+def test_advisory_is_off_by_default(lane, monkeypatch):
+    monkeypatch.delenv(module.ADVISORY_ENV, raising=False)
+    result = lane.review_pr(1810)
+    assert result["verdict"] == "PASS" and lane.gateway.sent == ["pending", "success"]
+    assert _launched_models(lane) == sorted(MODELS)
+    assert not (lane.state_root / "runs" / ReviewTarget(**result["target"]).key / module.ADVISORY_DIR).exists()
+
+
+def test_advisory_block_with_gating_pass_still_publishes_success(lane, monkeypatch):
+    monkeypatch.setenv(module.ADVISORY_ENV, "1")
+    _modes(lane, **{ADVISORY: "BLOCK"})
+    result = lane.review_pr(1810)
+    assert result["verdict"] == "PASS" and result["state"] == "success"
+    assert lane.gateway.sent == ["pending", "success"]
+    assert [r["model"] for r in result["reviews"]] == list(MODELS)
+    run = lane.state_root / "runs" / ReviewTarget(**result["target"]).key
+    assert json.loads((run / "outcome.json").read_text())["reviews"] == result["reviews"]
+    folder, advisory = _advisory(lane, result)
+    assert [(r["model"], r["verdict"]) for r in advisory["reviews"]] == [(ADVISORY, "BLOCK")]
+    assert (folder / ADVISORY / "receipt.json").is_file()
+    assert _launched_models(lane) == sorted([*MODELS, ADVISORY])
+    launch = json.loads((folder / ADVISORY / "launch.json").read_text())
+    assert not Path(launch["checkout"]).exists()  # 旁听快照同样回收
+    assert not (lane.checkout_root / result["run_id"]).exists()
+    # 旁听 BLOCK 不算同补丁 BLOCK 证据，也不算已派发未完结的 reviewer。
+    assert not lane._reviewer_blocked({"target": result["target"], "outcome": result})
+    assert lane._reviewers(run) == list(MODELS)
+
+
+def test_advisory_block_does_not_veto_reuse(lane, env, monkeypatch):
+    monkeypatch.setenv(module.ADVISORY_ENV, "1")
+    _modes(lane, **{ADVISORY: "BLOCK"})
+    first = lane.review_pr(1810)
+    _advance_main(lane, env)
+    result = lane.review_pr(1810)
+    assert result["verdict"] == "PASS" and result["reused_from"]["run_id"] == first["run_id"]
+    assert lane.gateway.sent == ["pending", "success", "pending", "success"]
+
+
+@pytest.mark.parametrize("mode", ["CRASH", "PASS:notool"])
+def test_advisory_failure_is_ignored(lane, monkeypatch, mode):
+    monkeypatch.setenv(module.ADVISORY_ENV, "1")
+    _modes(lane, **{ADVISORY: mode})
+    result = lane.review_pr(1810)
+    assert result["verdict"] == "PASS" and lane.gateway.sent == ["pending", "success"]
+    _, advisory = _advisory(lane, result)
+    assert [(r["model"], r["verdict"]) for r in advisory["reviews"]] == [(ADVISORY, "FAILED")]
+
+
+def test_advisory_never_rescues_gating_block(lane, monkeypatch):
+    monkeypatch.setenv(module.ADVISORY_ENV, "1")
+    _modes(lane, **{MODELS[0]: "BLOCK", ADVISORY: "PASS"})
+    result = lane.review_pr(1810)
+    assert result["verdict"] == "BLOCK" and lane.gateway.sent == ["pending", "failure"]
+    assert _advisory(lane, result)[1]["reviews"][0]["verdict"] == "PASS"
+
+
+def test_advisory_over_quota_is_skipped_not_failed(lane, monkeypatch):
+    monkeypatch.setenv(module.ADVISORY_ENV, "1")
+    monkeypatch.setenv(module.DAILY_INPUT_CAP_ENV, "1000")
+    calls = iter([0])  # gating 派发时未超；旁听派发前已超
+    monkeypatch.setattr(lane, "recent_input_tokens", lambda: next(calls, 1000))
+    result = lane.review_pr(1810)
+    assert result["verdict"] == "PASS" and lane.gateway.sent == ["pending", "success"]
+    folder, advisory = _advisory(lane, result)
+    assert advisory["reviews"][0]["verdict"] == "SKIPPED" and "上限 1000" in advisory["reviews"][0]["reason"]
+    assert not (folder / ADVISORY).exists()
+    assert _launched_models(lane) == sorted(MODELS)
+
+
+def test_advisory_receipts_count_toward_daily_cap(lane, monkeypatch):
+    monkeypatch.setenv(module.ADVISORY_ENV, "1")
+    result = lane.review_pr(1810)
+    folder, _ = _advisory(lane, result)
+    receipt = json.loads((folder / ADVISORY / "receipt.json").read_text())
+    receipt["usage"] = {"input_tokens": 777, "commands": 1, "reported": True}
+    module._save(folder / ADVISORY / "receipt.json", receipt)
+    assert lane.recent_input_tokens() == 777
+
+
+def test_advisory_skipped_when_gating_never_launched(lane, monkeypatch):
+    monkeypatch.setenv(module.ADVISORY_ENV, "1")
+    def no_space(*args):
+        raise IdentityError("空间不足")
+    monkeypatch.setattr(module, "prepare_review", no_space)
+    result = lane.review_pr(1810)
+    assert result["verdict"] == "FAILED" and lane.gateway.sent == ["pending", "error"]
+    assert _advisory(lane, result)[1]["reviews"][0]["verdict"] == "SKIPPED"
+
+
+def test_advisory_is_outside_review_contract():
+    assert not set(module.ADVISORY_REVIEW_MODELS) & set(MODELS)
+    assert module.ADVISORY_DIR not in MODELS and module.ADVISORY_DIR != "effects"
+    # 合同值与加旁听之前逐字相同：沿用、迁移的合同判断不受旁听影响。
+    assert module.REVIEW_CONTRACT == "sha256:f412d17f29e863a2ed4c5fd317fc78c5d1a31608aa8fdf5e2a4151b6164f4383"
+    assert module.REVIEW_CONTRACT == "sha256:" + hashlib.sha256(
+        json.dumps([module.POLICY, MODELS, module.PROMPT]).encode()).hexdigest()

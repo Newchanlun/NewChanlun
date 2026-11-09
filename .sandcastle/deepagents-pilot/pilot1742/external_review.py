@@ -48,6 +48,12 @@ from .run import DEFAULT_HOME, SOURCE_REPO, _ps_rows, supervisor_alive
 # 常规组合为 ("gpt-6.1-sol", "claude-opus-5-5") 与 POLICY "external-pr-v1"。两位须属不同家族。
 MODELS = ("kimi-k3.1-pro", "claude-opus-5-5")
 POLICY = "external-pr-v1-kimi"
+# 旁听审查员（EXTERNAL-REVIEW.md「旁听审查员」）：与 MODELS 同 run 派发、同一提示词和 worker，回执写在
+# runs/<键>/advisory/<模型>/。不进结论、不进 deepagents/review 状态、不进 REVIEW_CONTRACT；失败、超时、
+# 被额度闸或空间跳过都不影响整轮。缺省关闭，设 ADVISORY_ENV=1 才派发。
+ADVISORY_REVIEW_MODELS = ("gemini-4-argon-high",)
+ADVISORY_ENV = "NEWCHANLUN_REVIEW_ADVISORY"
+ADVISORY_DIR = "advisory"
 CONTEXT = "deepagents/review"
 TOKEN_PERMISSIONS = {"metadata": "read", "contents": "read", "pull_requests": "read", "statuses": "write"}
 REPOSITORY_ID = 1150335160
@@ -553,7 +559,8 @@ class ExternalReview:
         不记 0——额度闸最要拦的正是这类失控的独审。"""
         cutoff = time.time() - window_seconds
         reported, unreported_commands, reported_commands = 0, 0, 0
-        for path in (self.state_root / "runs").glob("*/*/receipt.json"):
+        runs = self.state_root / "runs"
+        for path in [*runs.glob("*/*/receipt.json"), *runs.glob(f"*/{ADVISORY_DIR}/*/receipt.json")]:
             try:
                 if path.stat().st_mtime < cutoff:
                     continue
@@ -571,12 +578,11 @@ class ExternalReview:
         rate = reported // reported_commands if reported_commands else UNREPORTED_TOKENS_PER_COMMAND
         return reported + unreported_commands * rate
 
-    def admit_quota(self) -> None:
-        """每日额度闸：超出即暂停（EffectPending，显式原因），同一 attempt 之后可原样续跑。
-        配置写错（非正整数）同样不派发，并报出变量名，而不是原生 ValueError 文案。"""
+    def _quota_exceeded(self) -> str | None:
+        """额度闸判定：未设上限或未超返回 None，超出返回原因；配置写错抛 ValueError（报出变量名）。"""
         raw = os.environ.get(DAILY_INPUT_CAP_ENV, "").strip()
         if not raw:
-            return
+            return None
         try:
             cap = int(raw.replace("_", ""))
         except ValueError:
@@ -584,9 +590,14 @@ class ExternalReview:
         if cap <= 0:
             raise ValueError(f"{DAILY_INPUT_CAP_ENV} 必须是正整数 token 数（如 400000000），当前值无效；未派模型")
         used = self.recent_input_tokens()
-        if used >= cap:
-            raise EffectPending(f"quota-paused：近 24 小时独审输入 {used} tokens ≥ 上限 {cap}（{DAILY_INPUT_CAP_ENV}）；"
-                                "本 run 未派新模型，额度回落后用同一 attempt 重跑")
+        return f"近 24 小时独审输入 {used} tokens ≥ 上限 {cap}（{DAILY_INPUT_CAP_ENV}）" if used >= cap else None
+
+    def admit_quota(self) -> None:
+        """每日额度闸：超出即暂停（EffectPending，显式原因），同一 attempt 之后可原样续跑。
+        配置写错（非正整数）同样不派发，并报出变量名，而不是原生 ValueError 文案。"""
+        exceeded = self._quota_exceeded()
+        if exceeded:
+            raise EffectPending(f"quota-paused：{exceeded}；本 run 未派新模型，额度回落后用同一 attempt 重跑")
 
     def admit_space(self, target: ReviewTarget) -> None:
         """登记前总准入：所有 reviewer 并发，各要一份快照。不够就不登记 attempt、不写状态。"""
@@ -603,8 +614,9 @@ class ExternalReview:
     @staticmethod
     def _reviewers(folder: Path) -> list[str]:
         """run 目录下的全部 reviewer：当前 MODELS 加上目录里实有的 worker。换过审查员组合后，
-        旧 run 里已退役 reviewer 的派发与 BLOCK 证据仍要算进完结与否决判断。"""
-        present = {p.name for p in folder.iterdir() if p.name != "effects" and p.is_dir()} if folder.is_dir() else set()
+        旧 run 里已退役 reviewer 的派发与 BLOCK 证据仍要算进完结与否决判断。旁听目录（ADVISORY_DIR）不算 reviewer。"""
+        present = ({p.name for p in folder.iterdir() if p.name not in ("effects", ADVISORY_DIR) and p.is_dir()}
+                   if folder.is_dir() else set())
         return [*MODELS, *sorted(present - set(MODELS))]
 
     @classmethod
@@ -945,10 +957,46 @@ class ExternalReview:
             outcomes.append(future.result() if failure is None else ReviewOutcome(model, "FAILED", None, str(failure)))
         return outcomes
 
+    @staticmethod
+    def advisory_enabled() -> bool:
+        return os.environ.get(ADVISORY_ENV, "").strip() == "1"
+
+    def run_advisory(self, target: ReviewTarget, folder: Path, gating_done: threading.Event) -> list[dict]:
+        """旁听审查员。等全部 gating reviewer 已派发（各自快照已建、空间复查已过）才建自己的快照，不与 gating 抢空间；
+        gating 没能全部派发就结束时跳过。额度闸超出或配置无效时跳过（gating 照常）。任何异常只记进
+        advisory/outcome.json，不上抛，不改整轮结论或发布。已有 launch 的照常收养。"""
+        advisory = folder / ADVISORY_DIR
+        def launched() -> bool:
+            return all((folder / model / "launch.json").exists() for model in MODELS)
+        while not launched() and not gating_done.is_set() and not self._stop.is_set():
+            gating_done.wait(self.poll_seconds)
+        results: list[dict] = []
+        for model in ADVISORY_REVIEW_MODELS:
+            entry: dict[str, Any] = {"model": model, "verdict": "SKIPPED", "session_id": None}
+            try:
+                if not (advisory / model / "launch.json").exists():
+                    skip = ("gating reviewer 未全部派发" if not launched() else
+                            "控制器中断" if self._stop.is_set() else self._quota_exceeded())
+                    if skip:
+                        results.append({**entry, "reason": skip})
+                        continue
+                advisory.mkdir(mode=0o700, exist_ok=True)
+                entry.update(asdict(self.run_review(target, model, advisory)))
+            except Exception as error:  # 旁听失败不影响整轮
+                entry.update(verdict="FAILED", reason=f"{type(error).__name__}: {error}")
+            results.append(entry)
+        try:
+            _save(advisory / "outcome.json", {"run_id": target.run_id, "advisory": True, "reviews": results})
+        except OSError:
+            pass
+        return results
+
     def review_pr(self, number: int, attempt: int = 1) -> dict:
         target = self.target(number, attempt)
         assert self.gateway is not None
         folder = self.state_root / "runs" / target.key
+        advisory: threading.Thread | None = None
+        gating_done = threading.Event()
         with _lock(folder):
             publisher = StatusPublisher(self.gateway, target, folder, self.state_root / "status-locks")
             try:
@@ -977,7 +1025,17 @@ class ExternalReview:
                     # 已派发的 reviewer 在自己的进程里照常跑到终态，额度回落后的重跑收养它。
                     self.admit_quota()
                 publisher.publish("pending")
-                outcomes = self.run_reviewers(target, folder)
+                if self.advisory_enabled():
+                    advisory = threading.Thread(target=self.run_advisory, args=(target, folder, gating_done), daemon=True)
+                    advisory.start()
+                try:
+                    outcomes = self.run_reviewers(target, folder)
+                except BaseException:
+                    if advisory is not None:
+                        self._stop.set()  # 整轮中断或待对账：旁听也不再等回执，已派发的留待收养
+                    raise
+                finally:
+                    gating_done.set()
                 if self._dispatched_unfinished(folder):  # 不变量：已派发 reviewer 全部到终态才汇总
                     raise EffectPending("仍有已派发 reviewer 未到终态，不汇总")
                 sessions = [o.session_id for o in outcomes if o.session_id]
@@ -996,6 +1054,9 @@ class ExternalReview:
                 _save(folder / "outcome.json", result)
                 return result
             finally:
+                gating_done.set()
+                if advisory is not None:
+                    advisory.join()  # 结论已发布；只等旁听收尾（worker 自有 45 分钟上限），以便回收其快照
                 for model in MODELS:
                     worker = folder / model
                     if (worker / "prepare.json").exists():
@@ -1003,6 +1064,16 @@ class ExternalReview:
                             self.cleanup_checkout(target, model, folder)
                         elif not (worker / "launch.json").exists():
                             self.cleanup_checkout(target, model, folder, preparing=True)
+                for model in ADVISORY_REVIEW_MODELS:
+                    worker = folder / ADVISORY_DIR / model
+                    try:
+                        if (worker / "prepare.json").exists():
+                            if (worker / "receipt.json").exists():
+                                self.cleanup_checkout(target, model, folder / ADVISORY_DIR)
+                            elif not (worker / "launch.json").exists():
+                                self.cleanup_checkout(target, model, folder / ADVISORY_DIR, preparing=True)
+                    except Exception:  # 旁听快照回收失败不影响整轮
+                        pass
                 run_checkouts = self.checkout_root / target.run_id
                 if run_checkouts.is_dir() and not run_checkouts.is_symlink() and not any(run_checkouts.iterdir()):
                     run_checkouts.rmdir()

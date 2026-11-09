@@ -40,6 +40,20 @@ kimi 不带 `--output-schema`（#1968）。带 schema 时它把开场白（「�
 
 同时改回测试里写死的临时组合（`tests/test_external_review.py` 的 `test_fallback_pair_*`、`tests/test_review_preflight.py` 的 `KIMI`/`OFFICIAL`、`../codex-child.test.ts` 的审查员用例）。换回同样会改变合同：本组合下的 PASS 不沿用，本组合的 STALE 不迁移。
 
+## 旁听审查员（试用，缺省关闭）
+
+`external_review.ADVISORY_REVIEW_MODELS`（目前是 `gemini-4-argon-high`）是第三位审查员，只用来积累对照数据：看它在接下来的若干张 PR 上能多找出几条真问题、误报多少。它不参与把关。
+
+- 开关：controller 进程的环境变量 `NEWCHANLUN_REVIEW_ADVISORY=1`。不设或设成别的值时不派发，行为与没有它时完全相同。`review_sweep` 的 `run-review` 子进程继承这个变量。
+- 派发：只在本 run 要派 gating 审查员时（发出 `pending` 之后）启动。它等两位 gating 审查员都写下 `launch.json`（快照已建、空间已复查）之后才建自己的快照，不和 gating 抢空间；gating 没能全部派发就结束时跳过。沿用的 run 不派发它。提示词、worker、容器、命令数上限和 45 分钟墙钟都与 gating 相同。
+- 证据：`runs/<运行键>/advisory/<模型>/` 下的文件与 gating 审查员相同；`runs/<运行键>/advisory/outcome.json` 记它的结论（`PASS`、`BLOCK`、`FAILED` 或 `SKIPPED` 及原因）。
+- 隔离：它的结论不进 `outcome.json`、整轮结论和 `deepagents/review` 状态，也不进 `REVIEW_CONTRACT`，所以开关它不会让已有 PASS 失去沿用资格。沿用判断、完结判断和 BLOCK 否决都不读 `advisory/` 目录（`_reviewers` 排除它），`review_sweep` 的限流退避也不读它的回执。它失败、超时或被跳过时整轮照常。
+- 成本：它的回执计入每日额度闸（`recent_input_tokens` 也统计 `advisory/*/receipt.json`）。派发前已超上限（或上限变量无效）时跳过它，记 `SKIPPED`，gating 照常。
+- 等待：整轮结论发布后，controller 仍持本 run 的锁，等它结束再回收它的快照，最长是 worker 的 45 分钟上限；整轮中断时不等它，它的快照留到下次同键重跑时回收。
+- 路由：与 gating 相同，走 CLIProxyLocal（`cliproxy-local` provider，`CLIPROXY_LOCAL_KEY`）。2026-11-09 实测，`gemini-4-argon-high` 在 CLIProxy 的模型目录里，经 `antigravity@daily-cloudcode-pa.googleapis.com` 完成 responses、工具调用和 json_schema 往返。`review_preflight.py` 只探测 gating 两位，不探测它。
+- 对照：`/Volumes/AgentStorage/restart-20261107/slim/gate-ops/compare_reviewers.py`（仓库外）按 run 并列三位的结论与发现，并统计标注后的真问题、误报和独有真问题。
+- 名单：`../codex-child.ts` 的 `ADVISORY_REVIEW_MODELS` 与这里相同（测试核对），列在 `ALLOWED_MODELS` 里，只是为了让 worker 放行它的 launch。
+
 ## 启用前完成部署验收
 
 此入口要求当前部署代码 head 已有正式 accepted Docker 记录。代码、镜像或合同改变后旧记录不再适用；不借用旧受控验收行，也不回退宿主执行。
