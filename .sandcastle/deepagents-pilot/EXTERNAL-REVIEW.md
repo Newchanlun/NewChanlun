@@ -76,7 +76,7 @@ HOST 切换步骤：
 
 1. 审查 App 已建好：app_id `5664795`，installation `179776757`，安装方式为 selected，只含本仓库，安装权限恰为上面四项。私钥是 `~/.config/newchanlun-review-gate/` 下的 600 文件。同目录的 `app.json` 是建 App 时的记录，字段格式不同，不能当身份文件用。
 2. 先让在途 run 收尾：`status` 里没有 pending 的状态写，也没有在跑的 reviewer（手动的和 sweep 派的都算）。原因是读回认领按发布者 bot 匹配 `creator.login`，切换后旧 App 发过的状态不再算本入口发的；在途写要么先完成，要么在切换后用 `reconcile` 按事实登记。切换期间先停掉 `review_sweep` 循环（或 `executor serve --review-sweep`），免得它在文件和私钥换好之前派出审查。
-3. 把所有审查入口的 `--private-key` 换成审查 App 私钥：手动 `review-pr`、`migrate-stale`，以及 `review_sweep --private-key`（它只把这个路径原样转给审查子进程）。`executor serve --review-sweep` 若按 #2000 把 serve 自己的 `--private-key`（执行器私钥）转给 sweep，切换后它派出的审查会以退出码 2 失败、不发状态，直到 serve 能为 sweep 单独接收审查 App 私钥；在那之前用独立的 `review_sweep` 循环跑自动审查。
+3. 把所有审查入口的 `--private-key` 换成审查 App 私钥：手动 `review-pr`、`migrate-stale`，以及 `review_sweep --private-key`（它只把这个路径原样转给审查子进程）。`executor serve --review-sweep` 用单独的 `--review-private-key`（不复用执行器的 `--private-key`）；身份文件存在而没给它时 serve 以退出码 2 失败关闭。serve 的 sweep 与独立 `review_sweep` 循环不要同时跑（共用 `sweep/*.launched` 标记）。
 4. 把上面的 JSON 写到 `IDENTITY_CONFIG` 路径。从这一刻起，所有审查入口都用审查 App。
 5. 选一张非执行器拥有的 PR 审一次：
 
@@ -100,7 +100,7 @@ HOST 切换步骤：
 
 新 head 可以沿用旧 PASS，不调用模型。条件：同 PR 某个旧 head 的正式双审为 PASS 且已发布 success；`patch_id`、`policy_version`、`review_contract`、`controller_code_head` 都相同；并且沿用前通过与正式派发同一组的部署准入（`external-review-worker.mts --admission-only`：controller 已提交且 head 相符、当前镜像有 accepted 记录），准入镜像与原 run 两份回执的 `image_id` 相同。并发合同：同一 PR 的登记（写 target.json）与沿用发布用同一把跨进程 PR 锁串行化；部署准入在锁外先做，锁内重读历史、确认来源仍是同一个 run 后才发布，所以发布时所依据的历史在读后不可能再出现同 PR 的新登记；历史变了就退回双审（补做总准入）。这时新 run 在新 head 上先写 pending 再写 success，描述带 `reuse=<原 run_id> p=<patch_id 前 12 位>`，`outcome.json` 的 `reused_from` 留原 run 的 SHA、patch_id、双审结论、原发布记录和本次准入。以下情况照常双审：当前 head 上已经有过别的 run（对同一 head 再发 attempt 就是要求重新独审）；补丁不同；原结论是 BLOCK、FAILED 或 STALE；本 run 已有任何 worker 状态（双审已经开始，只能恢复双审）；同一补丁的任何其他 run 尚未完结——完结指顶层 outcome 存在，并且所有已派发（有 launch.json）的 reviewer 都有可读回执；outcome 存在本身不算完结，它可能写于另一位 reviewer 仍在运行时（包括在途的显式重审、STALE）；作为沿用来源的 PASS run 也必须已完结；来源只取同补丁最晚登记的那次真实双 PASS，在它之后登记的同补丁 run 只要有一个不是 PASS（例如以 FAILED 或 STALE 收场的显式重审），旧 PASS 就被视为已被取代，不得在追平后复活（由该来源沿用出来的 PASS 不算推翻）；同一补丁的任何 run 里任一 reviewer 留下过 BLOCK 证据——不看整轮结论，逐个读 outcome 的逐位结论、各 worker 的 receipt 结果，以及 events 里的最终消息（receipt 未能消费结果或汇总前中断时 BLOCK 只在这里；能解析成结果对象就按 status 与 summary 首行判定，说明里引用「VERDICT: BLOCK」不算，解析不了才按整段文本匹配），证据读不了（含 `_read` 的权限、属主、符号链接拒绝）按 BLOCK 处理，退回双审，不影响登记；历史 outcome 读不了（JSON 损坏、权限）时不沿用，登记与双审照常；以上判断中，补丁身份算不出的旧 run 一律按同补丁处理（没有 `patch_id` 的旧 run 先按其冻结 SHA 现场重算，`patch_id` 用 plumbing `git diff-tree`，不受本地 diff 配置影响）；policy、模型、提示词或 controller 有变；部署准入不通过或镜像不同；找不到可重算补丁身份的原 run；原 run 本身就是沿用来的。
 
-`patch_id` 是 `merge_base..head` 每个改动路径的路径、前后 mode、前后 blob 清单的 sha256，补丁逐字相同时才相等。不用 `git patch-id`，因为它忽略空白。main 只改了 PR 没碰的文件时 `patch_id` 不变；冲突解决，或 main 也改了 PR 碰过的文件，都会让它变化并触发重审。残余风险：同一补丁放到新 base 上语义可能变（例如 main 改了被调用的函数）。重审时模型会读新 base 上的相关源码，沿用时不读。CI 会在新 head 上重跑，但目前 CI 不是 main 的必需检查，失败不拦合入；要让 CI 兜住这一点，需要把它设为必需检查。
+`patch_id` 是 `merge_base..head` 每个改动路径的路径、前后 mode、前后 blob 清单的 sha256，补丁逐字相同时才相等。不用 `git patch-id`，因为它忽略空白。main 只改了 PR 没碰的文件时 `patch_id` 不变；冲突解决，或 main 也改了 PR 碰过的文件，都会让它变化并触发重审。残余风险：同一补丁放到新 base 上语义可能变（例如 main 改了被调用的函数）。重审时模型会读新 base 上的相关源码，沿用时不读。CI 会在新 head 上重跑；汇总门 `ci-ok` 是 main 的必需检查（#1742 裁定），CI 失败会拦住合入。
 
 退出码：PASS 或离线命令成功为 0，BLOCK/FAILED/STALE 为 1，输入、身份或待对账错误为 2。
 
@@ -158,7 +158,9 @@ App token 只申请 metadata/read、contents/read、pull_requests/read、statuse
 
 ## 成本上限与每日额度闸
 
-单次独审最多执行 250 条命令（`REVIEW_COMMAND_CAP`，实测 Opus 中位 47、p90 98、最大 143），墙钟最长 45 分钟（实测最大 23 分钟）。触顶即关容器，回执 `status=failed` 并写 `failure_code`：`budget_exceeded`（命令数）、`timeout`、`cancelled`、`model_exit`（Codex 非零退出）或 `model_error`（模型阶段的其他异常）；容器被关后 SDK 的 exec 无论正常返回还是抛错，原因码都会写上。宿主汇总把它记进该 reviewer 的 reason（`failure_code=…`），`status` 子命令能直接看到，整轮按 FAILED 发布 `error`，不当作通过。
+单次独审最多执行 250 条命令（`REVIEW_COMMAND_CAP`，实测 Opus 中位 47、p90 98、最大 143），墙钟最长 45 分钟（实测最大 23 分钟）。触顶即关容器，回执 `status=failed` 并写 `failure_code`：`budget_exceeded`（命令数）、`timeout`、`cancelled`、`rate_limited`、`model_exit`（Codex 非零退出）或 `model_error`（模型阶段的其他异常）；容器被关后 SDK 的 exec 无论正常返回还是抛错，原因码都会写上。宿主汇总把它记进该 reviewer 的 reason（`failure_code=…`），`status` 子命令能直接看到，整轮按 FAILED 发布 `error`，不当作通过。
+
+`rate_limited`：限流终态时立即关容器，不等 45 分钟超时。终态指 `turn.failed` 带 `exceeded retry limit, last status: 429`、最后一次重连（`Reconnecting... 5/5 (… 429 …)`，n 等于上限）仍是 429，或非零退出时 stderr 里有同一句。中途的 429 重连（如 `1/5`）只是重试：之后 5 分钟（`RATE_LIMIT_STALL_MS`）内没有任何新事件才按 `rate_limited` 关停，有新事件就继续审。2026-11-09 实测：#1920/#1921/#1935 的 opus 在 `1/5` 之后再无输出、干等到超时；#1942 在 `1/5` 之后又跑了约 190 个事件；#1917 以 `turn.failed` 结束。结论规则不变，只是更早失败。review_sweep 看最近 2 个已完结、真派过模型的 run（按 `outcome.json` 写入时间；STALE 与沿用不算），都有 reviewer 记 `rate_limited` 时，自后一个完结起 30 分钟内不派新审查（`launch`、`resume-review`），每轮记一行 `review-sweep {"action": "rate-limit-backoff", ...}`；发布续跑、追平、合入与撤原生 auto-merge 照常。
 
 回执的 `usage` 记 `input_tokens`、`cached_input_tokens`、`output_tokens`、`reasoning_output_tokens`、`commands` 和 `reported`。codex exec 只在整轮结束（`turn.completed`）时报用量，被中途关停的独审 `reported=false`，token 数未知，不是 0。
 
