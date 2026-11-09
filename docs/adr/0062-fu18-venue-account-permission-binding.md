@@ -1,12 +1,17 @@
 # ADR 0062：受控场所、账户、权限——P1 凭据作用域版本、profile 绑定、发送门与拒发终态
 
 > 正本：本文件是 `P1-hl-testnet` 上凭据作用域版本、场所 profile 绑定、X 发送门与拒发终态的正本。
-> 最后裁定：#1540（2026-11-07，主控裁定，[裁定评论 6702983888](https://github.com/Newchanlun/NewChanlun/issues/1540#issuecomment-6702983888)）；Q5 的实现机制按 [修订裁定 6717784668](https://github.com/Newchanlun/NewChanlun/issues/1540#issuecomment-6717784668)（2026-11-08）：0045:24 读法照旧，P1 机器层核验改为独立的发送前置件
+> 最后裁定：#1540 [修订裁定 6717784668](https://github.com/Newchanlun/NewChanlun/issues/1540#issuecomment-6717784668)（2026-11-08，Q5 的实现机制：0045:24 读法照旧，P1 机器层核验改为独立的发送前置件）；原裁定 [裁定评论 6702983888](https://github.com/Newchanlun/NewChanlun/issues/1540#issuecomment-6702983888)（2026-11-07）其余各条不变
 > 受影响代码清单：见「受影响代码清单」节（实施归 #1365 系列，等 #1942 合入后承接）
 
-**日期**：2026-11-07
-**裁定人**：#1323 主控（Opus）代理裁定。用户 2026-11-07 明确取消授权门（「我现在也不需要什么授权了」）。
-**状态**：已采纳（T 类）。代理起草 → 非作者独审（Fable，VERDICT: PASS，四条必改）→ 主控裁定。起草稿、独审与场所文档原件：`/Volumes/AgentStorage/issue1540-fu18-draft/{draft.md,review.md,venue-docs/}`。本 ADR 只定形状、顺序、词汇与证据载体；代码实施与运行证据归下游票，不声称实现完成。
+**日期**：2026-11-07（Q5 机制修订 2026-11-08）
+**裁定人**：本条依 #1909 代理独审裁定。**分级：P 类**——主题是真实场所、账户与权限（`.sandcastle/docs/graph-engineering.md` 分级节；裁定五、七、八为政策取舍）。作者 #1323 主控（Opus）。
+**授权边界**：按 [ADR 0041](0041-degrees-of-freedom-configurable-not-excluded.md)「授权来源与生效边界」，本 ADR 只裁定方案、形状与拒发语义，不是 `UserSigned`，不代签任何外部操作。凭据与权限授予、场所/账户激活仍是独立硬门，须对应用户授权；本 ADR 不撤销、不放宽这道门。
+**状态**：已采纳（P 类，代理独审裁定）。获审版本链：
+- 起草稿：非作者独审 Fable，VERDICT: PASS（四条必改，已吸收）。原件 `/Volumes/AgentStorage/issue1540-fu18-draft/{draft.md,review.md,venue-docs/}`。
+- PR head `c3625f2182`：非作者复审 Fable，技术内容 PASS，溯源 BLOCK（已由修订裁定 6717784668 与 `8570c75cd8` 处置）。原件 `/Users/silencehan/agentstorage-offload/issue1540/review-1949-c3625f2.md`。
+- 正式门 `deepagents/review`（kimi + opus）：`8570c75cd8`、`9be2b4a71a`、`ebaf52fbe9` 各轮结论与原件见 PR #1949 处置评论；宿主原件在 `/Volumes/AgentStorage/issue1742-deepagents-pilot-20261027/external-review/runs/` 下对应 head 的 run 目录。
+- **生效绑定**：本 ADR 以合入时精确 head 的正式门双审 PASS 为准；正文在该 head 之后的任何改动都不继承此前的 PASS。本 ADR 只定形状、顺序、词汇与证据载体；代码实施与运行证据归下游票，不声称实现完成。
 **行号基线**：仓内文件引文按 main `0b3e7f3cf5`（2026-11-07）。SPEC 行号按 `gh issue view 1340 --json body --jq .body` 输出；INTERFACE-CONTRACTS 指 `.chanlun/review-results/issue1339-r2-spec-20260909/view/spec/INTERFACE-CONTRACTS.md`。
 
 ## 问题
@@ -33,7 +38,7 @@
 
 - ADR 0028 十个字段落成一份具名版本化**场所 profile 记录**（`venue-profile/1`，形状同 ADR 0057:43-51 的版本化记录）。它是政策记录，不含任何凭据值。
 - X 执行 profile 升到 `x-execution-profile/2`：按 `{path, profile_id, version, sha256}` 引用场所 profile 记录，按 `{path, version, sha256}` 引用 #1770 能力记录；原 `credential_scope.{env,file}` 改名 **`credential_source.{env,file}`**，只管部署管道。挪凭据文件路径不改场所 profile 记录，因而不改作用域版本。
-- X 库**绑定行按 `(profile_id, version)` 追加**，不做单键覆盖（取代 `x_execution_session.rs:127-130` 的 upsert 读法）。同 `profile_id@version` 而哈希不同 → `IdentityConflict`，不覆盖，进程非 0 退出（INTERFACE-CONTRACTS:11）。合法升版本时旧行保留，库里能看出曾经绑过哪些账户与钥匙。
+- X 库**绑定行按 `(profile_id, version)` 追加**，不做单键覆盖（取代 `x_execution_session.rs:127-130` 的 upsert 读法）。同 `profile_id@version` 而哈希不同 → `IdentityConflict`，不覆盖，进程非 0 退出（INTERFACE-CONTRACTS:11）。合法升版本时旧行保留，库里能看出曾经绑过哪些 `profile_id@version` 及其哈希；账户与钥匙本体不进库（裁定八），要还原须对照部署状态目录里同哈希的记录。同 `profile_id@version` 且哈希相同时，新 `writer_epoch` 启动复用原绑定行、不追加；`send_state` 按 `writer_epoch` 记录，每个新 epoch 重新经发送门判定（裁定七：拒发只在当前 epoch 内为终态）。
 - 能力记录同样进持久身份：绑定行存 `capability_record_version` 与 `capability_record_sha256`。每次启动与库内全部已持久绑定行逐项比较，同 `capability_record_version` 而 `capability_record_sha256` 不同 → `IdentityConflict`，规则与场所 profile 相同。只比 X profile 里的声明不够：同版本改了 `session_permission` 或挂单限制，再把 X profile 的 sha256 一并改掉，第 1 步照样通过，只有库里的旧哈希能认出替换。
 - 排除：十个字段直接塞进 X profile（部署路径与政策同一哈希，失效触发被噪声触发）；只按 `profile_id@version` 绑定不校验哈希（改值不升版本发现不了，违反 ADR 0028:52）。
 
@@ -263,4 +268,4 @@ ADR 0028:24 的动作维度：
 
 ## 溯源标签
 
-全部 `[新缠论:选择]` 或 `[新缠论:推论]`。缠师原文对程序化执行场所无论述（同 ADR 0028）。Q5、Q7、公开地址存放为 `[新缠论:选择]`（C 类，主控裁定，用户可一句话回退 Q5）；`trade_no_transfer` 三条叠加读法、拒发类别映射为 `[新缠论:推论]`（出处见各条）。
+全部 `[新缠论:选择]` 或 `[新缠论:推论]`。缠师原文对程序化执行场所无论述（同 ADR 0028）。Q5、Q7、公开地址存放为 `[新缠论:选择]`（P 类政策取舍，依 #1909 代理独审裁定，用户可一句话回退 Q5）；`trade_no_transfer` 三条叠加读法、拒发类别映射为 `[新缠论:推论]`（出处见各条）。
