@@ -1,6 +1,7 @@
 import type { BindMountSandboxHandle, SandboxProvider } from "@ai-hero/sandcastle";
-import { execFileSync } from "node:child_process";
-import { closeSync, existsSync, lstatSync, mkdirSync, openSync, readFileSync, realpathSync, renameSync, rmSync, statSync, unlinkSync, writeFileSync } from "node:fs";
+import { execFileSync, spawn } from "node:child_process";
+import { closeSync, existsSync, lstatSync, openSync, readFileSync, realpathSync, renameSync, rmSync, unlinkSync, writeFileSync } from "node:fs";
+import { randomUUID } from "node:crypto";
 import { dirname, join, resolve, sep } from "node:path";
 import { pathToFileURL } from "node:url";
 import { CodexTranscript, OUTPUT_SCHEMA, assertRoute, type ChildModel } from "./codex-child.ts";
@@ -111,32 +112,31 @@ const hostKilobytes = (path: string) => Number(execFileSync("du", ["-sk", path],
 
 /** 建卷准入锁：checkout 在 <checkout_root>/<run_id>/<model>，锁放 checkout_root 下，本机所有监督共用一把。 */
 export const volumeAdmissionLock = (checkout: string): string => join(dirname(dirname(checkout)), ".vm-volume-admission.lock");
-const pidAlive = (pid: number) => {
-  try { process.kill(pid, 0); return true; } catch (error) { return (error as NodeJS.ErrnoException).code === "EPERM"; }
-};
-/** 跨进程互斥：mkdir 原子建锁目录，owner 文件记 pid。持有者进程已死（SIGKILL、OOM），或建了目录却在
- *  60 秒内没写成 owner，即视为陈旧锁并接管。populate 是同步调用，SIGTERM 要等它返回才处理，finally 一定放锁。 */
+/** 锁持有进程：拿到 flock 后写信号文件，然后阻塞读 stdin。父进程正常放锁时杀掉它；父进程被 SIGKILL、OOM 或
+ *  重启打断时管道断开，它读到 EOF 退出。两种情况都由内核在它退出时释放 flock，没有陈旧锁，也没有「接管」。 */
+const LOCK_HOLDER = "import fcntl, sys\n"
+  + "lock = open(sys.argv[1], 'a')\n"
+  + "fcntl.flock(lock, fcntl.LOCK_EX)\n"
+  + "open(sys.argv[2], 'w').close()\n"
+  + "sys.stdin.read()\n";
+/** 跨进程互斥用内核 flock（Node 没有内置 flock，借 python3 的一个子进程持有）。锁文件本身从不删除，
+ *  放锁就是结束自己起的那个持有进程，所以任何一方都删不掉、也放不掉别人的锁。
+ *  populate 是同步调用，SIGTERM 要等它返回才处理，finally 一定放锁。 */
 export function withVolumeAdmissionLock<T>(lock: string, body: () => T, waitMs = 30 * 60_000): T {
-  const owner = join(lock, "owner");
-  const deadline = Date.now() + waitMs;
-  for (;;) {
-    try { mkdirSync(lock, { mode: 0o700 }); } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
-      let pid = NaN;
-      try { pid = Number(readFileSync(owner, "utf8")); } catch { /* 持有者可能刚建目录、还没写 owner */ }
-      let stale = Number.isSafeInteger(pid) && pid > 0 ? !pidAlive(pid) : false;
-      if (!Number.isSafeInteger(pid) || pid <= 0) {
-        try { stale = Date.now() - statSync(lock).mtimeMs > 60_000; } catch { continue; }
-      }
-      if (stale) { rmSync(lock, { recursive: true, force: true }); continue; }
+  execFileSync("python3", ["-c", "import fcntl"], { stdio: "ignore" });  // 先确认持有进程起得来，免得白等到超时
+  const acquired = `${lock}.${process.pid}.${randomUUID()}.acquired`;
+  const holder = spawn("python3", ["-c", LOCK_HOLDER, lock, acquired], { stdio: ["pipe", "ignore", "ignore"] });
+  try {
+    const deadline = Date.now() + waitMs;
+    while (!existsSync(acquired)) {
       if (Date.now() > deadline) throw new Error("等待 VM 建卷准入锁超时");
-      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 200);
-      continue;
+      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 20);
     }
-    writeFileSync(owner, String(process.pid), { mode: 0o600 });
-    break;
+    return body();
+  } finally {
+    holder.kill("SIGKILL");
+    rmSync(acquired, { force: true });
   }
-  try { return body(); } finally { rmSync(lock, { recursive: true, force: true }); }
 }
 
 export function dockerReviewVolumes(run: (args: string[]) => string = dockerCli, checkoutKilobytes = hostKilobytes,
