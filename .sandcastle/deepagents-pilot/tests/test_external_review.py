@@ -1211,6 +1211,37 @@ def test_conclusion_stands_when_visible_output_covers_whole_patch(lane, case):
         assert "未读取冻结候选补丁" in outcome.reason
 
 
+DELETION_DIFF = (
+    "diff --git a/old/gone.md b/old/gone.md\ndeleted file mode 100644\nindex 1111111..0000000\n--- a/old/gone.md\n"
+    "+++ /dev/null\n@@ -1,2 +0,0 @@\n-first deleted line of the retired doc\n-second deleted line of the retired doc\n"
+    "diff --git \"a/old/\\303\\244.bin\" \"b/old/\\303\\244.bin\"\ndeleted file mode 100644\nindex 2222222..0000000\n"
+    "Binary files \"a/old/\\303\\244.bin\" and /dev/null differ\n"
+    "diff --git a/keep.py b/keep.py\nindex 3333333..4444444 100644\n--- a/keep.py\n+++ b/keep.py\n@@ -1 +1 @@\n"
+    "-value = compute_old_value()\n+value = compute_new_value()\n")
+KEEP = "diff --git a/keep.py b/keep.py\n@@ -1 +1 @@\n-value = compute_old_value()\n+value = compute_new_value()\n"
+DELETIONS_LISTED = "D\told/gone.md\nD\t\"old/\\303\\244.bin\"\nM\tkeep.py\n"
+
+
+@pytest.mark.parametrize("outputs, covered", [
+    ([DELETIONS_LISTED, KEEP], True),  # 删除清单（name-status）+ 修改文件逐行
+    (["   7\tD\told/gone.md\n   8\tD\t\"old/\\303\\244.bin\"\n", KEEP], True),  # 带行号
+    ([DELETION_DIFF.split("diff --git a/keep.py")[0], KEEP], True),  # 只见到删除条目的文件头
+    (["diff --git a/old/gone.md b/old/gone.md\n", "D\t\"old/\\303\\244.bin\"\n", KEEP], True),
+    ([DELETIONS_LISTED], False),  # 修改的文件仍须逐行读到
+    ([DELETIONS_LISTED, KEEP.replace("+value = compute_new_value()\n", "")], False),
+    (["M\tkeep.py\n", KEEP], False),  # #1920 a60360 opus：`--name-status | grep -v '^D'`，删除清单被滤掉
+    ([" old/gone.md | 2 --\n old/ä.bin | Bin 9 -> 0 bytes\n", KEEP], False),  # --stat 行不是 name-status
+    (["D\told/gone.md\n", KEEP], False),  # 少列一个被删文件
+    (["D\told/gone.md\nD\t\"old/\\303\\244…12 chars truncated….bin\"\n", KEEP], False),  # 截断行不算
+    (["A\told/gone.md\nR100\told/ä.bin\tnew.bin\n", KEEP], False),  # 不是 D
+])
+def test_deleted_files_need_only_the_deletion_list(outputs, covered):
+    """总控裁定（#2037）：整文件删除的条目只要求删除清单（`D<TAB><path>`）或文件头出现过；其余条目照旧逐行。"""
+    patch = FrozenPatch.from_diff("a" * 40, "b" * 40, "", DELETION_DIFF)
+    assert [f.deleted for f in patch.files] == ["old/gone.md", "old/ä.bin", None]
+    assert patch.covered_by(outputs) is covered
+
+
 def test_visible_outputs_are_what_the_model_saw(tmp_path):
     log = tmp_path / "session.jsonl"
     log.write_text("\n".join([

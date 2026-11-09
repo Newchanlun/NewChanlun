@@ -592,12 +592,20 @@ class FrozenFile:
     evidence: frozenset[str]
     added: frozenset[str]
     changes: frozenset[str] = frozenset()  # 全部非空改动行，带 `+`/`-` 号（去掉首尾空白），供 FrozenPatch.covered_by
+    deleted: str | None = None  # 整文件删除时它在 merge-base 上的路径；covered_by 只要求见过删除清单或文件头
 
 
 def _split_files(diff: str) -> list[tuple[str, str | None, list[tuple[str, str]]]]:
     """按文件切开 `-U<n>` 补丁：(header, head 上的路径, [(`+`/`-`, 改动行去掉首尾空白)])。
     hunk 按 `@@ -a,b +c,d @@` 的行数走完，所以内容里形如 `+++ x`、`diff --git` 的改动行不会被当成文件头。"""
-    files: list[tuple[str, str | None, list[tuple[str, str]]]] = []
+    return [(header, path, lines) for header, path, lines, _ in _split_files_deleted(diff)]
+
+
+def _split_files_deleted(diff: str) -> list[tuple[str, str | None, list[tuple[str, str]], str | None]]:
+    """同 _split_files，另给第四项：整文件删除（有 `deleted file mode` 行）的条目在 merge-base 上的路径，其余为 None。"""
+    files: list[tuple[str, str | None, list[tuple[str, str]], str | None]] = []
+    deleted: set[int] = set()
+    old_paths: dict[int, str] = {}
     old = new = 0
     for line in _lines(diff):
         if old > 0 or new > 0:
@@ -607,13 +615,32 @@ def _split_files(diff: str) -> list[tuple[str, str | None, list[tuple[str, str]]
             if sign in ("+", "-") and not _BREAK.search(line) and (text := line[1:].strip()):
                 files[-1][2].append((sign, text))
         elif line.startswith("diff --git "):
-            files.append((line, None, []))
+            files.append((line, None, [], None))
+        elif files and line.startswith("deleted file mode "):
+            deleted.add(len(files) - 1)
+        elif files and line.startswith("--- "):
+            source = _unquote(line[4:])
+            if source.startswith("a/"):
+                old_paths[len(files) - 1] = source[2:]
         elif files and line.startswith("+++ "):
             target = _unquote(line[4:])
-            files[-1] = (files[-1][0], target[2:] if target.startswith("b/") else None, files[-1][2])
+            files[-1] = (files[-1][0], target[2:] if target.startswith("b/") else None, files[-1][2], None)
         elif files and (hunk := re.match(r"@@ -\d+(?:,(\d+))? \+\d+(?:,(\d+))? @@", line)):
             old, new = (int(n) if n is not None else 1 for n in hunk.groups())
-    return files
+    return [(header, path, lines, (old_paths.get(i) or _header_path(header)) if i in deleted else None)
+            for i, (header, path, lines, _) in enumerate(files)]
+
+
+def _header_path(header: str) -> str | None:
+    """`diff --git a/<p> b/<p>`（两侧同名，删除文件就是这样，含 git 给特殊字符加的 C 风格引号）里的 <p>；
+    两侧不同名时给 None。二进制删除没有 `--- a/<p>` 行，只能从这里取。"""
+    rest = header.removeprefix("diff --git ")
+    if quoted := re.fullmatch(r'("(?:[^"\\]|\\.)*") ("(?:[^"\\]|\\.)*")', rest):
+        left, right = _unquote(quoted.group(1)), _unquote(quoted.group(2))
+    else:
+        half = (len(rest) - 1) // 2
+        left, right = rest[:half], rest[half + 1:]
+    return left[2:] if left.startswith("a/") and right.startswith("b/") and left[2:] == right[2:] else None
 
 
 @dataclass(frozen=True)
@@ -630,14 +657,14 @@ class FrozenPatch:
     @classmethod
     def from_diff(cls, head_sha: str, merge_base_sha: str, base_sha: str, diff: str) -> FrozenPatch:
         """diff 须是 controller 用固定 `a/`、`b/` 前缀取的 `git diff -U0 <merge_base> <head>`。"""
-        split = _split_files(diff)
-        changed = {text for _, _, lines in split for _, text in lines}
+        split = _split_files_deleted(diff)
+        changed = {text for _, _, lines, _ in split for _, text in lines}
         least = _DISTINCT if any(len(text) >= _DISTINCT for text in changed) else 0
         files = tuple(FrozenFile(header, path,
                                  frozenset({t for _, t in lines if len(t) >= least} if changed else {header}),
                                  frozenset({t for sign, t in lines if sign == "+" and len(t) >= least}),
-                                 frozenset({sign + t for sign, t in lines}))
-                      for header, path, lines in split)
+                                 frozenset({sign + t for sign, t in lines}), deleted)
+                      for header, path, lines, deleted in split)
         return cls(head_sha, merge_base_sha, base_sha, files)
 
     @property
@@ -679,12 +706,14 @@ class FrozenPatch:
         跟在这个文件头之后。输出须是模型实际看到的（Codex 给模型的输出会从中间截掉，含截断标记的行与
         _BREAK 行不算，截断标记之后的行不再归属前面的文件头）。行号前缀（`nl -ba`、`grep -n`）照常去掉。
         这是「读全了」的判定：一行没出现就不算，分段读、换着写法读都能认；只看 `--stat`、只读 head 上的文件
-        （没有 `+`/`-` 号）、只读了一部分文件都不算。"""
+        （没有 `+`/`-` 号）、只读了一部分文件都不算。整文件删除的条目例外（总控裁定，#2037）：它的路径以
+        `D<TAB><path>`（`--name-status`）出现过、或它的 `diff --git` 头出现过就算覆盖，不要求读到被删的内容。"""
         if not self.files:
             return False
         wanted = {f.header: f.changes for f in self.files}
         seen: dict[str, set[str]] = {header: set() for header in wanted}
         headers: set[str] = set()
+        listed: set[str] = set()  # name-status 里 `D<TAB><path>` 出现过的路径
         for output in outputs:
             current: str | None = None
             for raw in _lines(output):
@@ -694,15 +723,19 @@ class FrozenPatch:
                 line = raw
                 if match := _LINE_NUMBER.match(raw.strip()):
                     line = raw.strip()[match.end():]
+                if (status := _DELETED_STATUS.fullmatch(line)) is not None:
+                    listed.add(_unquote(status.group(1)))
                 if line.startswith("diff --git "):
                     current = line if line in wanted else None
                     if current is not None:
                         headers.add(current)
                 elif current is not None and line[:1] in ("+", "-") and line[1:].strip():
                     seen[current].add(line[0] + line[1:].strip())
-        return all(header in headers and changes <= seen[header] for header, changes in wanted.items())
+        return all(f.header in headers or f.deleted in listed if f.deleted is not None
+                   else f.header in headers and f.changes <= seen[f.header] for f in self.files)
 
 
+_DELETED_STATUS = re.compile(r"D\t(.+)")  # `git diff --name-status` 的整文件删除行
 _TRUNCATED = re.compile(r"…\d+ (?:chars|tokens) truncated…")
 
 
