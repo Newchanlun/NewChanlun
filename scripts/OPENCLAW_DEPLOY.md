@@ -12,8 +12,7 @@ fengliang.service (fold 端)          openclaw.service (切分端)
 ```
 
 daemon 是持久进程（一次启动，永久穿越）。scheduler 定期查询 daemon 状态 + 同步。
-原先 scheduler 里的 ceremony_scan 异常检测与 `.chanlun/escalate/` 队列已随早年蜂群
-机制退役（#1952）移除。
+原先 scheduler 里的 ceremony_scan 异常检测与 `.chanlun/escalate/` 队列已随早年蜂群机制退役（#1952）移除。
 
 ## 第一步：启动逢亮 daemon（fold 端）
 
