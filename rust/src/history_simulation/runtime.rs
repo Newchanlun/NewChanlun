@@ -422,6 +422,42 @@ fn validate_frame(v: Value) -> Result<Value, String> {
 fn json_frame(v: Value) -> Result<Value, String> {
     Ok(v)
 }
+/// 已通过帧界检查、尚未连接的权威请求帧。编码或帧界失败时 S 一个字节都没收到。
+fn authority_frame(
+    p: &Profile,
+    a: &Authority,
+    op: &str,
+    command: &ExactCommand,
+    release: Option<&str>,
+) -> Result<Vec<u8>, String> {
+    let mut bytes=canonical_json(&json!({"protocol":AUTHORITY_WIRE,"op":op,"session_id":p.session_id,"session_generation":p.session_generation,"authority_id":a.authority_id,"authority_epoch":a.authority_epoch,"command_id":command.command_id,"command_hash":hash(command),"command":command,"release_receipt_id":release})).into_bytes();
+    bytes.push(b'\n');
+    if bytes.len() > p.max_frame_bytes {
+        return Err("Unsupported：权威请求超过帧界".into());
+    }
+    Ok(bytes)
+}
+/// 连接失败时同样确定未发出；只有返回的连接写出帧后才进入可能已发出的窗口。
+fn authority_connect(p: &Profile, a: &Authority) -> Result<(UnixStream, Instant), String> {
+    let deadline = Instant::now() + Duration::from_millis(p.timeout_ms);
+    Ok((UnixStream::connect(&a.socket).map_err(io)?, deadline))
+}
+fn authority_exchange(
+    p: &Profile,
+    a: &Authority,
+    op: &str,
+    command: &ExactCommand,
+    release: Option<&str>,
+    (mut stream, deadline): (UnixStream, Instant),
+    bytes: &[u8],
+) -> Result<AuthorityReply, String> {
+    write_frame_observed(&mut stream, bytes, deadline, &mut NoObserver)?;
+    stream.shutdown(std::net::Shutdown::Write).map_err(io)?;
+    let reply = read_frame(&mut stream, p.max_frame_bytes, deadline, json_frame)?;
+    let r: AuthorityReply = serde_json::from_value(reply).map_err(error)?;
+    validate_authority_reply(p, a, op, command, release, &r)?;
+    Ok(r)
+}
 fn authority(
     p: &Profile,
     a: &Authority,
@@ -429,19 +465,9 @@ fn authority(
     command: &ExactCommand,
     release: Option<&str>,
 ) -> Result<AuthorityReply, String> {
-    let deadline = Instant::now() + Duration::from_millis(p.timeout_ms);
-    let mut stream = UnixStream::connect(&a.socket).map_err(io)?;
-    let mut bytes=canonical_json(&json!({"protocol":AUTHORITY_WIRE,"op":op,"session_id":p.session_id,"session_generation":p.session_generation,"authority_id":a.authority_id,"authority_epoch":a.authority_epoch,"command_id":command.command_id,"command_hash":hash(command),"command":command,"release_receipt_id":release})).into_bytes();
-    bytes.push(b'\n');
-    if bytes.len() > p.max_frame_bytes {
-        return Err("Unsupported：权威请求超过帧界".into());
-    }
-    write_frame_observed(&mut stream, &bytes, deadline, &mut NoObserver)?;
-    stream.shutdown(std::net::Shutdown::Write).map_err(io)?;
-    let reply = read_frame(&mut stream, p.max_frame_bytes, deadline, json_frame)?;
-    let r: AuthorityReply = serde_json::from_value(reply).map_err(error)?;
-    validate_authority_reply(p, a, op, command, release, &r)?;
-    Ok(r)
+    let bytes = authority_frame(p, a, op, command, release)?;
+    let connection = authority_connect(p, a)?;
+    authority_exchange(p, a, op, command, release, connection, &bytes)
 }
 
 fn validate_authority_reply(
@@ -583,36 +609,44 @@ fn execute(c: &mut Connection, p: &Profile, epoch: i64, mut batch: Batch) -> Res
         if command.change != *change {
             return Err("IdentityConflict：批次改变精确命令".into());
         }
-        commands.push((command, release, state));
+        let op = match state.as_str() {
+            "Accepted" => Some("RequestConditionalExecution"),
+            "ExecutionRequested" => Some("QueryExecuteCommitted"),
+            _ => None,
+        };
+        // 帧界超限是确定未发出的失败，须在持久 PendingBatch 前拒绝，否则同批恢复永远超限。
+        let call = match op {
+            Some(op) => Some((op, authority_frame(p, &p.s, op, &command, Some(&release))?)),
+            None => None,
+        };
+        commands.push((command, release, call));
     }
     let pending_tx = c.transaction().map_err(error)?;
     pending_tx.execute("INSERT INTO x_sim_meta(k,v) VALUES('pending_batch',?1) ON CONFLICT(k) DO UPDATE SET v=excluded.v",[&encoded]).map_err(error)?;
     pending_tx.execute("INSERT INTO x_sim_meta(k,v) VALUES('pending_epoch',?1) ON CONFLICT(k) DO UPDATE SET v=excluded.v",[epoch.to_string()]).map_err(error)?;
     pending_tx.commit().map_err(error)?;
     let mut executed_records = Vec::new();
-    for (command, release, state) in commands {
+    for (command, release, call) in commands {
         // AcceptExact 不产生调用权；在真正模型动作前才取得本命令 S 终态。
-        let executed = if state == "MayHaveCalled" || state == "ExecutionReady" {
-            let raw: String = c
-                .query_row(
-                    "SELECT execute_evidence FROM x_exact_commands WHERE id=?1",
-                    [&command.command_id],
-                    |r| r.get(0),
-                )
-                .map_err(error)?;
-            let evidence: Value = serde_json::from_str(&raw).map_err(error)?;
-            validate_execution_record(p, &command, &release, &evidence)?
-        } else if state == "ExecutionRequested" {
-            authority(p, &p.s, "QueryExecuteCommitted", &command, Some(&release))?
-        } else {
-            c.execute("UPDATE x_exact_commands SET state='ExecutionRequested',attempt_batch=?2 WHERE id=?1 AND state='Accepted'",params![command.command_id,encoded]).map_err(error)?;
-            authority(
-                p,
-                &p.s,
-                "RequestConditionalExecution",
-                &command,
-                Some(&release),
-            )?
+        let executed = match call {
+            Some((op, frame)) => {
+                let connection = authority_connect(p, &p.s)?;
+                if op == "RequestConditionalExecution" {
+                    c.execute("UPDATE x_exact_commands SET state='ExecutionRequested',attempt_batch=?2 WHERE id=?1 AND state='Accepted'",params![command.command_id,encoded]).map_err(error)?;
+                }
+                authority_exchange(p, &p.s, op, &command, Some(&release), connection, &frame)?
+            }
+            None => {
+                let raw: String = c
+                    .query_row(
+                        "SELECT execute_evidence FROM x_exact_commands WHERE id=?1",
+                        [&command.command_id],
+                        |r| r.get(0),
+                    )
+                    .map_err(error)?;
+                let evidence: Value = serde_json::from_str(&raw).map_err(error)?;
+                validate_execution_record(p, &command, &release, &evidence)?
+            }
         };
         let eligibility = match &command.change {
             Change::Submit { order } | Change::Replace { order } => &order.eligibility_ref,

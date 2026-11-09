@@ -76,17 +76,26 @@ capacity_evidence；不可变fill、fee、bust保留原容量/投影因果引用
 ## 调用前验证与不确定窗口恢复
 
 AdvanceBar 在取得任何 S 资格前完成同一模型的完整只读计算及全部精确命令核对；
-非法 OHLC、close 变化、容量、金额或 bust 不消费 Accepted。随后先持久唯一 PendingBatch，
-再将各命令置 ExecutionRequested、调用 S、逐条保存实际 ExecuteCommitted 回执为
-ExecutionReady。全部回执保存后才置 MayHaveCalled；模型状态、原件、Observed 与清除
-PendingBatch 同事务提交。pending 期间只接受同完整批内容恢复或只读，不能用空 close 异批绕过。
+非法 OHLC、close 变化、容量、金额或 bust 不消费 Accepted。各命令的 S 请求帧也在此时编码并核帧界，
+超限按 Unsupported 拒绝整批，不写 PendingBatch。随后先持久唯一 PendingBatch，再逐条调用 S、
+保存实际 ExecuteCommitted 回执为 ExecutionReady。全部回执保存后才置 MayHaveCalled；模型状态、
+原件、Observed 与清除 PendingBatch 同事务提交。pending 期间只接受同完整批内容恢复或只读，
+不能用空 close 异批绕过。
+
+对每条 Accepted 命令，X 先连接 S，连接成功后才置 ExecutionRequested，再写请求帧。
+两类失败以此为界：
+
+- 确定未发出：编码失败、帧界超限、连接失败。S 一个字节都没收到，命令保持 Accepted；
+  同批重试照常调用 RequestConditionalExecution。
+- 可能已发出：置 ExecutionRequested 之后的任何失败，包括写帧中途、关写半边、读回复、
+  回执校验失败，以及置 ExecutionRequested 之后、写帧之前崩溃。这是不确定窗口，按下段恢复。
 
 ExecutionRequested 的恢复只调用 x-exact-authority/1 的 QueryExecuteCommitted，要求返回
 同精确 command/content/session/epoch/E release 的既有不可变 ExecuteCommitted 原件。
 NoRecord、未知、不可达或没有确定结果时保持 pending；不得重新调用 RequestConditionalExecution
-或把未查到当作再授权许可。已持久回执直接复用，不重复 S 授权。请求发出前崩溃也属于该
-不确定窗口；没有 S 确定原件就不能自动前进，不清占有、不补发。正式 S producer 尚未实现
-本查询接缝，#1407 / TB04-D/E 必须真实消费；受控 fixture 的唯一授权计数不替代该实证。
+或把未查到当作再授权许可。已持久回执直接复用，不重复 S 授权。没有 S 确定原件就不能自动前进，
+不清占有、不补发。正式 S producer 尚未实现本查询接缝，#1407 / TB04-D/E 必须真实消费；
+受控 fixture 的唯一授权计数不替代该实证。
 
 冷启动核批请求/结果、模型重演状态、不可变原件表、bust 账及 command/E/S 引用闭合；
 缺 command、缺原件、缺实际 S 回执均拒绝恢复，不从剩余表补造证据。
