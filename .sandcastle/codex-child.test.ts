@@ -6,7 +6,7 @@ import { appendFileSync, chmodSync, existsSync, mkdirSync, mkdtempSync, readFile
 import { tmpdir } from "node:os";
 import { join, resolve, sep } from "node:path";
 import {
-  ALLOWED_MODELS, assertRoute, boundedCodex, CodexTranscript, EXTERNAL_REVIEW_MODELS, unwrapJsonFence, MODEL, MODEL_PROVIDER,
+  ADVISORY_REVIEW_MODELS, ALLOWED_MODELS, assertRoute, boundedCodex, CodexTranscript, EXTERNAL_REVIEW_MODELS, unwrapJsonFence, MODEL, MODEL_PROVIDER,
   preflightCheckout, providerEnvironment,
   providerOverrides, PROVIDER_KEY_ENV, runCodexChild, snapshotCheckout, workerEnvironment,
   DEEPAGENTS_OUTPUT_PROTOCOL, outputProtocol, workerOutputSchema, type OutputProtocol,
@@ -118,6 +118,17 @@ test("路由门：模型不得带 mf/、yd/ 等中转前缀，provider 只能是
   for (const provider of ["openai", "mf", "cliproxy"]) assert.throws(() => assertRoute(MODEL, provider), /cliproxy-local/);
   assert.equal(providerOverrides()[0], 'model_provider="cliproxy-local"');
   assert.ok(providerOverrides().every((item) => !item.includes(fixtureKey)));
+});
+
+test("旁听审查员与控制器 ADVISORY_REVIEW_MODELS 相同、不在审查员名单里，worker 能放行其 launch", () => {
+  const source = readFileSync(join(__dirname, "deepagents-pilot/pilot1742/external_review.py"), "utf8");
+  const declared = /^ADVISORY_REVIEW_MODELS = \(([^)]*)\)$/m.exec(source)?.[1].split(",").map((item) => item.trim().replace(/^"|"$/g, "")).filter(Boolean);
+  assert.deepEqual(declared, [...ADVISORY_REVIEW_MODELS]);
+  assert.deepEqual(ADVISORY_REVIEW_MODELS, ["gemini-4-argon-high"]);
+  for (const model of ADVISORY_REVIEW_MODELS) {
+    assert.ok(!EXTERNAL_REVIEW_MODELS.includes(model) && ALLOWED_MODELS.includes(model));
+    assert.doesNotThrow(() => assertRoute(model));
+  }
 });
 
 test("deepagents/review 审查员与控制器 MODELS 相同、两家族不同，且无论主模型是否被覆盖都能派发", () => {

@@ -78,8 +78,10 @@ def legacy_boat_runtime(env):
 def no_real_docker(monkeypatch):
     """#1986：外部独审的孤儿卷 reaper 会调 docker；测试一律走空替身，不碰本机真实的卷和容器。"""
     from pilot1742 import external_review
-    monkeypatch.setattr(external_review, "docker_cli",
-                        lambda args: subprocess.CompletedProcess(["docker", *args], 0, "", ""))
+    def stub(args, timeout=120):
+        return subprocess.CompletedProcess(["docker", *args], 0, "", "")
+    stub.real = external_review.docker_cli  # 需要验证真实 docker_cli 参数（env 白名单）的测试用
+    monkeypatch.setattr(external_review, "docker_cli", stub)
 
 
 @pytest.fixture(autouse=True)
