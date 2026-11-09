@@ -5,7 +5,7 @@
  */
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { findStaleClaims, hasRunnableIssue, isRunnable, needsRollback } from "./claim-loop.mts";
+import { findStaleClaims, hasRunnableIssue, isRunnable, needsRollback, pollForever } from "./claim-loop.mts";
 import type { FrontierCandidate, WorkerEvent } from "./claim-loop.mts";
 
 function cand(partial: Partial<FrontierCandidate> & { number: number }): FrontierCandidate {
@@ -102,4 +102,27 @@ test("findStaleClaims：跨票聚合、跳过已开工票、分支名取 claim �
 test("findStaleClaims：claim 事件缺 branch 时按确定性分支名补齐", () => {
   const events = [ev({ ts: "2026-08-25T11:00:00Z", ticket: 3, phase: "claim", status: "claimed" })];
   assert.deepEqual(findStaleClaims(events, { now: NOW }), [{ ticket: 3, branch: "sandcastle/issue-3" }]);
+});
+
+test("pollForever：冻结时进程内等待、不领工作、不退出；解冻后恢复领工作（#1988）", async () => {
+  const states = [true, true, false];
+  const rounds: number[] = [];
+  const waits: number[] = [];
+  class Stop extends Error {}
+  const log = console.log;
+  console.log = () => {};
+  try {
+    await assert.rejects(
+      pollForever({ dryRun: true, pollSeconds: 7 }, {
+        frozen: () => states[waits.length] ?? false,
+        round: async () => { rounds.push(waits.length); },
+        wait: async (ms) => { waits.push(ms); if (waits.length === 3) throw new Stop(); },
+      }),
+      Stop,
+    );
+  } finally {
+    console.log = log;
+  }
+  assert.deepEqual(waits, [7000, 7000, 7000]);
+  assert.deepEqual(rounds, [2]);
 });

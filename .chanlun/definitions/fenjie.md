@@ -15,7 +15,7 @@
 | 口径 | 正本 | 管什么 |
 |---|---|---|
 | 构造口径（塔扫描） | [zhongshu.md](zhongshu.md) Z/S 全组（#812） | 中枢构造全程：seed 三段 / 中心定理一延伸 / 九段重切 / 续扫锚 C（Z-5） |
-| 读法口径（同级别分解） | [ADR 0011](../docs/adr/0011-operation-decomposition-layer.md)（#827） | 口径 S 扫描：条件 seed、恒三格、禁延伸、允许盘整+盘整、唯一性不变式 |
+| 读法口径（同级别分解） | [ADR 0011](../../docs/adr/0011-operation-decomposition-layer.md)（#827） | 口径 S 扫描：条件 seed、恒三格、禁延伸、允许盘整+盘整、唯一性不变式 |
 | 语义基（「唯一」的形式化） | `formal/Origin/CanonicalQuotientTower.lean` | 商化基础层；`∃!` 是推论非公理（`canonical_representative_unique`） |
 
 ## 2. 边界条款（已裁归位表）

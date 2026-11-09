@@ -56,8 +56,8 @@ DEPLOY_MANIFEST = [
     "topological-computation/pyproject.toml",
     # Scripts
     "scripts/topo_indicators.py",
-    "scripts/ceremony_scan.py",
-    # Genealogy (419 settled records)
+    # scripts/ceremony_scan.py retired with the early swarm mechanism (#1952)
+    # Genealogy (settled records still cited in-repo; the rest left with #1952)
     ".chanlun/genealogy/settled/",
     # Block topology
     ".chanlun/block-topology/",

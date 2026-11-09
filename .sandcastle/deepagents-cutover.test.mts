@@ -3,9 +3,11 @@ import assert from "node:assert/strict";
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { QUEUE_LABEL, releaseLabel, withQueueAdmission, graphAdmissionFrozen, withGraphAdmission } from "./deepagents-cutover.mts";
+import { execFileSync } from "node:child_process";
+import { fileURLToPath } from "node:url";
+import { QUEUE_LABEL, releaseLabel, withQueueAdmission, graphAdmissionFrozen, withGraphAdmission, withTicketHold } from "./deepagents-cutover.mts";
 import { withFileLock, withLegacyAdmission, DrainFrozenError } from "./drain-control.mts";
-import { classifyTicket, implLabels, releaseTicket, recheckBeforeRelease, withEngineAdmission } from "../scripts/wayfinder_engine.mts";
+import { specRulingBody, specBodyDigest, classifyTicket, releaseTicket, recheckBeforeRelease, withEngineAdmission } from "../scripts/wayfinder_engine.mts";
 
 function fixture() {
   const root = mkdtempSync(join(tmpdir(), "cutover-1742-"));
@@ -39,10 +41,15 @@ test("新标签分类、复核与释放使用同一标签，旧标签不混领",
   assert.equal(classifyTicket(t, QUEUE_LABEL), "released");
   assert.equal(classifyTicket({ ...t, labels: ["sandcastle"] }, QUEUE_LABEL), "held");
   assert.match(recheckBeforeRelease({ labels: [{ name: "sandcastle" }] }, QUEUE_LABEL)!, /另一放行标签/);
-  assert.deepEqual(implLabels(QUEUE_LABEL), ["ready-for-agent"]);
-  assert.deepEqual(implLabels("sandcastle"), ["ready-for-agent", "sandcastle"]);
   const writes: string[] = [];
-  assert.equal(releaseTicket(1, { read: () => JSON.stringify({ labels: [], assignees: [], state: "OPEN" }),
+  // 放行只认当前 SPEC 计划内、带当前发布凭据的票。
+  const plan = '<!-- wayfinder-split -->\n```json\n{"tickets":[{"id":"Q1","title":"q"}]}\n```';
+  const body = `<!-- wayfinder-ticket:2:Q1 -->\n<!-- wayfinder-published:2:${specBodyDigest(plan)}:Q1 -->\n`;
+  assert.equal(releaseTicket(1, { specs: [2], orchestrator: "fixture", via: "plan" }, { read: args => JSON.stringify(
+    args.startsWith("issue view 1") ? { title: "[impl] Q1 q", body, labels: [], assignees: [], state: "OPEN" }
+      : args.startsWith("issue view 2") ? { number: 2, title: "SPEC: fixture", body: plan, state: "OPEN" }
+      : [{ user: { login: "fixture" }, created_at: "2026-11-07", body: specRulingBody({ specNumber: 2,
+        verdict: "PASS", author: "draft", reviewer: "review", digest: specBodyDigest(plan), evidence: "/fixture/review.json" }) }]),
     write: cmd => { writes.push(cmd); return ""; } }, QUEUE_LABEL), null);
   assert.deepEqual(writes, ["issue edit 1 --add-label deepagents:queue"]);
 });
@@ -90,4 +97,21 @@ test("选定切流到取得 admission 锁之间记录失效：锁内拒绝，不
     await pending;
     assert.equal(writes, 0);
   } finally { rmSync(f.root, { recursive: true, force: true }); }
+});
+
+test("执行器状态根尚不存在时，迁移的票级判定仍与 ClaimStore 领取互斥", async () => {
+  const root = mkdtempSync(join(tmpdir(), "ticket-hold-1742-"));
+  const claims = join(root, "exec", "claims");
+  const pilot = fileURLToPath(new URL("./deepagents-pilot", import.meta.url));
+  const claimer = `import sys; from pathlib import Path; from pilot1742.claims import ClaimStore, LockTimeout
+try:
+    with ClaimStore(Path(sys.argv[1]), lock_timeout=0.5).locked(42): print("claimed")
+except LockTimeout: print("waited")`;
+  try {
+    const seen = await withTicketHold(42, (claim) => {
+      assert.equal(claim, null);
+      return execFileSync("python3", ["-c", claimer, claims], { cwd: pilot, encoding: "utf8" }).trim();
+    }, claims);
+    assert.equal(seen, "waited", "迁移判定期间执行器不得在同一票上领取");
+  } finally { rmSync(root, { recursive: true, force: true }); }
 });

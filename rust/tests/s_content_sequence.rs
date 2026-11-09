@@ -1,7 +1,7 @@
 #![cfg(feature = "s_session")]
 //! #1394 采纳 C §5.9(1)「内容公共 API 缝」下的序列算子靶向验收。
 //!
-//! 两路对拍 oracle：① 已批准独立向量 `inputs/content-format-vectors.json`（Python 与独立
+//! 两路对拍 oracle：① 已批准独立向量 `s_session/tests/fixtures/s-content-v3/content-format-vectors.json`（Python 与独立
 //! Node 实现共同产出，不是本实现自证）；② 基线已有的 `write_sequence`（同仓既有静态编码）。
 //!
 //! 资源门是**测试仪表**，不是生产默认值：对 2^50 个同叶的重复压缩子树设读/写硬上限，

@@ -8,9 +8,11 @@ import ssl
 import stat
 import sys
 import time
-from dataclasses import dataclass
+from collections.abc import Mapping
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
+from types import MappingProxyType
 from typing import Any
 
 import certifi
@@ -44,6 +46,14 @@ class WriteRejected(IdentityError):
     """GitHub 对这一次写请求明确返回 4xx：请求被拒，没有副作用。"""
 
 
+class LocalConfigError(IdentityError):
+    """本机配置错误（身份常量、token 权限范围、私钥路径或文件）：不是 GitHub 读不到，重试不会自愈。"""
+
+
+class PrivateKeyError(LocalConfigError):
+    """本机私钥路径不是绝对路径、文件不可读、位置或权限不对、不是可用 RSA 私钥。"""
+
+
 @dataclass(frozen=True)
 class ApiResponse:
     status: int
@@ -65,33 +75,43 @@ class AppIdentity:
     repository: str
     app_slug: str
     private_key_path: Path
+    # 该 App 安装应有的权限全集，核验时与 GitHub 读回值精确比较；缺省为执行器 App 的权限。
+    # 构造时复制成只读映射，实例创建后不能原地改写。
+    installation_permissions: Mapping[str, str] = field(
+        default_factory=lambda: MappingProxyType(dict(INSTALLATION_PERMISSIONS)), hash=False)
 
     def __post_init__(self) -> None:
         if any(type(value) is not int or value <= 0 for value in
                (self.app_id, self.installation_id, self.repository_id)):
-            raise IdentityError("App、installation 和 repository ID 必须为正整数")
+            raise LocalConfigError("App、installation 和 repository ID 必须为正整数")
         if not re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", self.repository):
-            raise IdentityError("repository 必须是 owner/name")
+            raise LocalConfigError("repository 必须是 owner/name")
         if not re.fullmatch(r"[a-z0-9-]+", self.app_slug):
-            raise IdentityError("App slug 格式不正确")
+            raise LocalConfigError("App slug 格式不正确")
         if not self.private_key_path.is_absolute():
-            raise IdentityError("私钥必须通过绝对文件路径明确指定")
+            raise PrivateKeyError("私钥必须通过绝对文件路径明确指定")
+        permissions = self.installation_permissions
+        if (not isinstance(permissions, Mapping) or not permissions
+                or any(type(name) is not str or not re.fullmatch(r"[a-z_]+", name)
+                       or level not in ("read", "write") for name, level in permissions.items())):
+            raise LocalConfigError("安装权限必须是非空的 权限名→read/write 映射")
+        object.__setattr__(self, "installation_permissions", MappingProxyType(dict(permissions)))
 
 
 def _read_private_key(path: Path) -> bytes:
     try:
         directory = path.resolve().parent
         if any((ancestor / ".git").exists() for ancestor in (directory, *directory.parents)):
-            raise IdentityError("私钥必须保存在所有 Git 检出之外")
+            raise PrivateKeyError("私钥必须保存在所有 Git 检出之外")
         descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
         with os.fdopen(descriptor, "rb") as stream:
             info = os.fstat(stream.fileno())
             if (not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid()
                     or stat.S_IMODE(info.st_mode) not in (0o600, 0o400)):
-                raise IdentityError("私钥须由当前用户持有且权限为 600 或 400")
+                raise PrivateKeyError("私钥须由当前用户持有且权限为 600 或 400")
             return stream.read()
     except OSError:
-        raise IdentityError("无法读取明确指定的私钥文件") from None
+        raise PrivateKeyError("无法读取明确指定的私钥文件") from None
 
 
 class GitHubAppClient:
@@ -100,9 +120,9 @@ class GitHubAppClient:
         self.identity = identity
         self._permissions = dict(permissions or READ_PERMISSIONS)
         grantable = {"read": ("read", "write"), "write": ("write",)}
-        if any(INSTALLATION_PERMISSIONS.get(name) not in grantable.get(level, ())
+        if any(identity.installation_permissions.get(name) not in grantable.get(level, ())
                for name, level in self._permissions.items()):
-            raise IdentityError("请求的 token 权限超出 App 安装权限")
+            raise LocalConfigError("请求的 token 权限超出 App 安装权限")
         tls = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
         tls.minimum_version = ssl.TLSVersion.TLSv1_2
         tls.load_verify_locations(cafile=certifi.where())
@@ -160,7 +180,7 @@ class GitHubAppClient:
                 _read_private_key(identity.private_key_path), algorithm="RS256",
             )
         except (ValueError, TypeError, jwt.PyJWTError):
-            raise IdentityError("指定文件不是可用的 GitHub App RSA 私钥") from None
+            raise PrivateKeyError("指定文件不是可用的 GitHub App RSA 私钥") from None
         app = self._request("GET", "/app", signed)
         _require_fields("GitHub App 身份", {
             "id": app.get("id") == identity.app_id,
@@ -175,7 +195,7 @@ class GitHubAppClient:
             "account.login": isinstance(account, dict) and account.get("login") == identity.repository.split("/")[0],
             "repository_selection": installation.get("repository_selection") == "selected",
             "suspended_at": installation.get("suspended_at") is None,
-            "permissions": installation.get("permissions") == INSTALLATION_PERMISSIONS,
+            "permissions": installation.get("permissions") == identity.installation_permissions,
         })
         grant = self._request(
             "POST", f"/app/installations/{identity.installation_id}/access_tokens", signed,

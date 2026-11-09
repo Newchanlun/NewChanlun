@@ -1,11 +1,19 @@
-import { readFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
-import { DRAIN_ROOT, drainRequested, withAdmission, withLegacyAdmission } from "./drain-control.mts";
+import { DRAIN_ROOT, LockBusyError, drainRequested, withAdmission, withFileLock, withLegacyAdmission } from "./drain-control.mts";
 
 export const EXECUTOR_ROOT = "/Volumes/AgentStorage/deepagents-exec";
 const POLICY = JSON.parse(readFileSync(new URL("./queue-policy.json", import.meta.url), "utf8"));
 export const QUEUE_LABEL: string = POLICY.release_label;
 export const HOLD_LABELS: string[] = POLICY.hold_labels;
+/** 执行器持有期间挂在票上的镜像标签（workunit.py 读同一策略）。 */
+export const MIRROR_LABEL: string = POLICY.mirror_label;
+/** 编排账号的 GitHub 登录名，与仓库 owner 无关；裁决面的签署、退回与待签标签归属只认它发的评论。 */
+export const ORCHESTRATOR_LOGIN: string = POLICY.orchestrator_login;
+if (typeof ORCHESTRATOR_LOGIN !== "string" || ORCHESTRATOR_LOGIN === "") {
+  throw new Error(`queue-policy.json orchestrator_login 须为非空字符串，实为 ${JSON.stringify(ORCHESTRATOR_LOGIN)}`);
+}
+export const CLAIMS_ROOT = `${EXECUTOR_ROOT}/claims`;
 const SERVICES = ["com.newchanlun.sandcastle-claimer", "com.newchanlun.sandcastle-harvest"];
 const HELPER = fileURLToPath(new URL("./deepagents-pilot/pilot1742/cutover.py", import.meta.url));
 
@@ -55,4 +63,31 @@ export async function withGraphAdmission<T>(action: () => T | Promise<T>,
   return releaseLabel(roots.stateRoot, roots.drainRoot) === QUEUE_LABEL
     ? withQueueAdmission(action, roots.stateRoot, roots.drainRoot)
     : withLegacyAdmission(action, roots.drainRoot);
+}
+
+const CLAIM_STATES = ["intent", "mirrored", "active", "halted", "released"] as const;
+export interface LocalClaim { state: (typeof CLAIM_STATES)[number]; run_id: string; generation: number }
+
+/**
+ * 在执行器的票级动作锁（claims.py ClaimStore 的同一把 flock）内读本机持有记录再执行 action。
+ * 领取从写 intent 到挂镜像、释放从记 released 到摘镜像都在这把锁内，迁移因此看不到半途状态。
+ * 锁忙即抛错，由调用方下一轮重试。状态根缺失时与 ClaimStore.locked 一样先建目录再取锁，
+ * 否则首次领取与迁移会各自建根、互不见锁。
+ */
+export async function withTicketHold<T>(ticket: number, action: (claim: LocalClaim | null) => T | Promise<T>,
+  claimsRoot = CLAIMS_ROOT): Promise<T> {
+  if (!Number.isSafeInteger(ticket) || ticket <= 0) throw new Error(`票号无效：${ticket}`);
+  mkdirSync(claimsRoot, { recursive: true });
+  try {
+    return await withFileLock(`${claimsRoot}/${ticket}.lock`, () => {
+      const path = `${claimsRoot}/${ticket}.json`;
+      if (!existsSync(path)) return action(null);
+      const claim = JSON.parse(readFileSync(path, "utf8")) as LocalClaim;
+      if (!CLAIM_STATES.includes(claim.state)) throw new Error(`#${ticket} 本机持有记录状态无效：${String(claim.state)}`);
+      return action(claim);
+    }, { nonblock: true });
+  } catch (error) {
+    if (error instanceof LockBusyError) throw new Error(`#${ticket} 的票级动作锁正被执行器持有（领取或释放进行中），下一轮重试`);
+    throw error;
+  }
 }
