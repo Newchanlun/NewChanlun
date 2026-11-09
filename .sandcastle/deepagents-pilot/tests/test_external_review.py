@@ -61,6 +61,14 @@ class Gateway:
             self.after_write()
 
 
+@pytest.fixture(autouse=True)
+def vm_trims(monkeypatch):
+    """#1986：测试里不碰真实 Colima。缺省 trim 换成记录器；需要别的行为的用例直接改 lane.vm_trim。"""
+    calls = []
+    monkeypatch.setattr(module, "trim_vm_disk", lambda root: calls.append(root) or {"state": "trimmed", "fixture": True})
+    return calls
+
+
 @pytest.fixture
 def lane(env, monkeypatch):
     for i in range(2):
@@ -660,6 +668,47 @@ def test_reaper_removes_dead_launch_volume_and_containers_before_next_dispatch(l
                             "live_volumes": 1}
     # 两位 reviewer 并发派发，各跑一轮 reaper，可能都看见同一个死卷；重复删除无害。
     assert all(s["retained_volumes"] == 1 and s["live_volumes"] == 1 for s in summaries)
+
+
+def _dead_launch(lane, run):
+    launch_id = str(uuid.uuid4())
+    worker = lane.state_root / "runs" / run / MODELS[0]
+    worker.mkdir(parents=True)
+    module._save(worker / "launch.json", {"launch_id": launch_id})
+    return launch_id, module.REVIEW_VOLUME_PREFIX + launch_id
+
+
+def test_reaper_trims_vm_only_after_removing_a_volume(lane, vm_trims):
+    """#1986：本轮删掉了卷才 trim，trim 以 checkout_root 为节流根、结果记进 reaper 日志；没删卷不 trim。"""
+    dead, name = _dead_launch(lane, "dead-run")
+    unknown = str(uuid.uuid4())
+    lane.docker = FakeDocker({name: dead, module.REVIEW_VOLUME_PREFIX + unknown: unknown}, {"c1": (dead, name)})
+    entries = lane.reap_review_volumes()
+    assert vm_trims == [lane.checkout_root]
+    assert entries[-1] == {"action": "vm_trim", "state": "trimmed", "fixture": True}
+    # 再跑一轮：死卷已删，只剩未登记 launch 的卷（不碰）——没有删卷，不 trim。
+    assert not any(e["action"] == "vm_trim" for e in lane.reap_review_volumes())
+    # 卷删不掉（in use）也不 trim。
+    stuck, stuck_name = _dead_launch(lane, "stuck-run")
+    lane.docker = FakeDocker({stuck_name: stuck}, volume_rm_stderr="volume is in use")
+    assert not any(e["action"] == "vm_trim" for e in lane.reap_review_volumes())
+    assert vm_trims == [lane.checkout_root]
+    log = [json.loads(line) for line in (lane.state_root / "volume-reaper.jsonl").read_text().splitlines()]
+    assert [e["state"] for e in log if e["action"] == "vm_trim"] == ["trimmed"]
+
+
+def test_vm_trim_failure_never_blocks_dispatch_or_changes_verdict(lane):
+    """trim 抛错只记日志；派发照常、结论不变。"""
+    dead, name = _dead_launch(lane, "dead-run")
+    lane.docker = FakeDocker({name: dead})
+    def broken(root):
+        raise TimeoutError("colima hung")
+    lane.vm_trim = broken
+    assert lane.review_pr(1810)["verdict"] == "PASS"
+    log = [json.loads(line) for line in (lane.state_root / "volume-reaper.jsonl").read_text().splitlines()]
+    trims = [e for e in log if e["action"] == "vm_trim"]
+    assert trims and trims[0]["state"] == "failed" and trims[0]["reason"] == "TimeoutError"
+    assert name not in lane.docker.volumes
 
 
 def test_reaper_failure_never_blocks_dispatch(lane):
