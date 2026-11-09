@@ -818,6 +818,30 @@ test("SPEC 裁定首行必须恰为「SPEC 独审裁定：PASS|BLOCK」：结论
   assert.equal(parseSpecRuling(withHead("SPEC 独审裁定：BLOCK"))!.verdict, "BLOCK");
 });
 
+test("SPEC 裁定撤销不受首行位置与前缀影响（审 ee229448 / PR #2016 二次跟进）", () => {
+  const prefixed = [
+    "\n\nSPEC 独审裁定：BLOCK",
+    "   \nSPEC 独审裁定：BLOCK",
+    "<!-- note -->\nSPEC 独审裁定：BLOCK",
+    "1. SPEC 独审裁定：BLOCK",
+    "+ SPEC 独审裁定：BLOCK",
+    "~~~\nSPEC 独审裁定：BLOCK\n~~~",
+    "| SPEC 独审裁定：BLOCK |",
+    "`SPEC 独审裁定：BLOCK`",
+    "说明在先。\nSPEC 独审裁定：BLOCK",
+    "SPEC独审裁定：BLOCK",
+    "ＳＰＥＣ 独审裁定：BLOCK",
+  ];
+  for (const body of prefixed) {
+    assert.equal(
+      isSpecApproved(specWith([ruling(), { author: ORCH, body, createdAt: after(9) }]), ORCH),
+      false,
+      `有效 PASS 之后的裁定类评论 ${JSON.stringify(body)} 必须撤销`,
+    );
+  }
+  assert.equal(isSpecApproved(specWith([ruling()]), ORCH), true, "对照：仅合规 PASS 仍放行");
+});
+
 test("SPEC 裁定撤销（opus 审 e2d7660a / PR #2016 跟进）：撤销要松，不能让格式偏差的 BLOCK 退化成放行", () => {
   // 把合规 BLOCK 评论的首行改成不合规变体，其余字段不变。
   const malformed = (head: string) => {

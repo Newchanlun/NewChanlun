@@ -255,22 +255,24 @@ export function specRulingBody(r: SpecRuling): string {
 }
 
 /**
- * 首行（去 CRLF、Markdown 前缀/强调后）是否以「SPEC 独审裁定」起首：用于撤销判定的宽松探测。
- * 不要求整行恰为合规 PASS/BLOCK——半角冒号、引用/标题/列表前缀、结论后缀（「PASS不通过」）、
- * 不成形的 BLOCK（「SPEC 独审裁定：BLOCK。」）都算命中。放行判定不用这个函数，只用严格的 parseSpecRuling。
+ * 评论是否为「裁定类」：全文任意位置（NFKC 归一后）出现「SPEC 独审裁定」即命中，用于撤销判定的宽松探测。
+ * 不看首行位置与前缀——开头空行、HTML 注释、代码块、列表/表格前缀、半角冒号、结论后缀（「PASS不通过」）、
+ * 不成形的 BLOCK 都算命中。放行判定不用这个函数，只用严格的 parseSpecRuling。
  */
 function isSpecRulingHeadLine(body: string): boolean {
-  const line = body.replace(/\r\n/g, "\n").split("\n")[0] ?? "";
-  return strip(line).startsWith(SPEC_RULING_HEAD);
+  // 撤销要松（opus / kimi 审 ee229448）：只看首行会被开头空行、HTML 注释、未覆盖的 Markdown 前缀绕过。
+  // 改为全文任意位置出现「SPEC…独审裁定」（容许中间空白、全/半角）即视为裁定类评论；
+  // 它若不是合规 PASS，就撤销。宁可多撤，不可漏撤。
+  return /SPEC\s*独审裁定/i.test(body.normalize("NFKC"));
 }
 
 /**
  * spec 是否已裁定放行。只认 orchestrator 的评论，按时间序推进，规则不对称：
  *   - 放行要严：首行必须恰为 parseSpecRuling 认的合规 PASS，且有效（非作者、证据齐、摘要等于当前正文），
  *     正文其余处也不含驳回词，才放行；
- *   - 撤销要松：首行只要起手「SPEC 独审裁定」（不论是否合规 PASS/BLOCK、半角冒号、前缀、后缀）
- *     或正文任意处命中驳回词，一律撤销——不合规的 BLOCK 也撤销，不能让格式稍有偏差的撤销退化成放行；
- *   - 其余自由文本（既不起手「SPEC 独审裁定」也不含驳回词）不改变当前状态，不区分票或评论的创建日期。
+ *   - 撤销要松：正文任意处出现「SPEC 独审裁定」（不论位置、前缀、是否合规 PASS/BLOCK）
+ *     或命中驳回词，一律撤销——不合规的 BLOCK 也撤销，不能让格式稍有偏差的撤销退化成放行；
+ *   - 其余自由文本（既不含「SPEC 独审裁定」也不含驳回词）不改变当前状态，不区分票或评论的创建日期。
  * 拿不准（既不是合规 PASS 也不确定是否该撤销）一律按未放行处理。
  */
 export function isSpecApproved(spec: ChildIssue, orchestrator: string): boolean {
