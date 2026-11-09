@@ -333,6 +333,32 @@ def frozen_patch(source: Path, target: ReviewTarget) -> FrozenPatch:
                                  diff.decode(errors="replace"))
 
 
+def visible_outputs(session_log: Path, *, exit_zero_only: bool = False) -> list[str]:
+    """模型实际看到的工具输出：session.jsonl 里 Codex `exec_command` 的 function_call_output，只取进程已退出的
+    （退出码不限：`git diff … && printf … && git status` 整条链 exit 128 时，前面 diff 印出的内容模型照样看到了，
+    #2036 attempt 59600 kimi；还在运行的分块不取），去掉 `Chunk ID`/`Wall time`/退出码/`Original token count` 这段头。events.jsonl 的
+    aggregated_output 是原始输出（约 1 MiB 截断），模型看到的是 Codex 从中间截掉过的（`…N chars truncated…`），
+    所以按内容判定读全时只能用这里。审查容器写不了这个日志（文件隔离探针）。"""
+    outputs: list[str] = []
+    with open(session_log, opener=lambda p, f: os.open(p, f | os.O_NOFOLLOW)) as stream:
+        for line in stream:
+            try:
+                entry = json.loads(line)
+            except ValueError:
+                continue
+            payload = entry.get("payload") if isinstance(entry, dict) else None
+            if (not isinstance(payload, dict) or entry.get("type") != "response_item"
+                    or payload.get("type") != "function_call_output" or not isinstance(payload.get("output"), str)):
+                continue
+            header, marker, body = payload["output"].partition("\nOutput:\n")
+            lines = header.split("\n")
+            exited = [line for line in lines if re.fullmatch(r"Process exited with code -?\d+", line)]
+            if (marker and header.startswith("Chunk ID: ") and exited
+                    and (not exit_zero_only or exited == ["Process exited with code 0"])):
+                outputs.append(body)
+    return outputs
+
+
 def validate_review(target: ReviewTarget, launch: dict, receipt: dict, folder: Path, source: Path) -> ReviewOutcome:
     model = launch["model"]
     def failed(reason: str) -> ReviewOutcome:
@@ -402,6 +428,10 @@ def validate_review(target: ReviewTarget, launch: dict, receipt: dict, folder: P
         # #1968：审查容器里读代码的唯一手段是只读 shell。没有一条成功的 git diff/show 读到冻结候选、且记录的输出里
         # 有冻结补丁内容的结论（#1940 的 kimi BLOCK 零调用即编造；跑一次 echo 再编同理；#1969 未执行的 git、
         # 被外部 diff 或 textconv 换掉的输出同理）PASS、BLOCK 都不采信，记 FAILED，整轮发 error。
+        # 合格的单条读取命令之外，按内容认：模型实际看到的输出（退出码不限）合起来覆盖了整份冻结补丁（每个文件头、每条改动行）
+        # 也算读过，不看命令怎么写（#2018 attempt 40343、#2025 kimi 两次被误判未读）。只会多认，不会多拒。
+        if not patch_reads and patch.covered_by(visible_outputs(folder / "session.jsonl")):
+            patch_reads = 1
         if not patch_reads:
             return failed("审查员未读取冻结候选补丁（无成功的 git diff/show 指名 head 并在输出里出现冻结补丁内容），"
                           "PASS/BLOCK 均不采信")

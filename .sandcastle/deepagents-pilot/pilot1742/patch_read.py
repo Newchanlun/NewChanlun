@@ -31,6 +31,9 @@ Codex 记录的命令形如 `/bin/bash -lc '<脚本>'`。这里按 bash 语法�
 证据按文件存，出处须与命令读的对象一致（_Read）：`git show <head>:<path>` 的 path 须是本 PR 改动的文件，证据只取
 该文件加进来的行；不是 merge-base 对 head 的 diff 与 show 提交、范围，只认冻结文件头之后属于该文件的行
 （#1969 正式审查 bb8aa92e opus BLOCK：没改的模块里的 `from __future__ import annotations` 曾被当成读到了补丁）。
+
+按命令写法判定之外，另有按内容的判定 FrozenPatch.covered_by：模型实际看到的输出合起来含整份冻结补丁（每个文件头、
+每条改动行），也算读过；external_review 两者满足其一即可。
 """
 from __future__ import annotations
 
@@ -588,6 +591,7 @@ class FrozenFile:
     path: str | None
     evidence: frozenset[str]
     added: frozenset[str]
+    changes: frozenset[str] = frozenset()  # 全部非空改动行，带 `+`/`-` 号（去掉首尾空白），供 FrozenPatch.covered_by
 
 
 def _split_files(diff: str) -> list[tuple[str, str | None, list[tuple[str, str]]]]:
@@ -631,7 +635,8 @@ class FrozenPatch:
         least = _DISTINCT if any(len(text) >= _DISTINCT for text in changed) else 0
         files = tuple(FrozenFile(header, path,
                                  frozenset({t for _, t in lines if len(t) >= least} if changed else {header}),
-                                 frozenset({t for sign, t in lines if sign == "+" and len(t) >= least}))
+                                 frozenset({t for sign, t in lines if sign == "+" and len(t) >= least}),
+                                 frozenset({sign + t for sign, t in lines}))
                       for header, path, lines in split)
         return cls(head_sha, merge_base_sha, base_sha, files)
 
@@ -666,6 +671,39 @@ class FrozenPatch:
             if line in evidence or (line[:1] in "+-" and line[1:].strip() in evidence):
                 return True
         return False
+
+
+    def covered_by(self, outputs: list[str]) -> bool:
+        """审查员看到的输出合起来覆盖了整份冻结补丁（#2018 attempt 40343、#2025 的误判，不看命令怎么写）：
+        每个文件的 `diff --git` 头都出现过，且该文件的每一条改动行（带 `+`/`-` 号）都出现在某段输出里、
+        跟在这个文件头之后。输出须是模型实际看到的（Codex 给模型的输出会从中间截掉，含截断标记的行与
+        _BREAK 行不算，截断标记之后的行不再归属前面的文件头）。行号前缀（`nl -ba`、`grep -n`）照常去掉。
+        这是「读全了」的判定：一行没出现就不算，分段读、换着写法读都能认；只看 `--stat`、只读 head 上的文件
+        （没有 `+`/`-` 号）、只读了一部分文件都不算。"""
+        if not self.files:
+            return False
+        wanted = {f.header: f.changes for f in self.files}
+        seen: dict[str, set[str]] = {header: set() for header in wanted}
+        headers: set[str] = set()
+        for output in outputs:
+            current: str | None = None
+            for raw in _lines(output):
+                if _BREAK.search(raw) or _TRUNCATED.search(raw):
+                    current = None
+                    continue
+                line = raw
+                if match := _LINE_NUMBER.match(raw.strip()):
+                    line = raw.strip()[match.end():]
+                if line.startswith("diff --git "):
+                    current = line if line in wanted else None
+                    if current is not None:
+                        headers.add(current)
+                elif current is not None and line[:1] in ("+", "-") and line[1:].strip():
+                    seen[current].add(line[0] + line[1:].strip())
+        return all(header in headers and changes <= seen[header] for header, changes in wanted.items())
+
+
+_TRUNCATED = re.compile(r"…\d+ (?:chars|tokens) truncated…")
 
 
 def reads_candidate_patch(command: str, output: str, patch: FrozenPatch) -> bool:

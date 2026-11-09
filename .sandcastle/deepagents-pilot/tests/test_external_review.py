@@ -1157,6 +1157,73 @@ def test_conclusion_after_frozen_patch_read_stands(lane, claim):
     assert {case: o.reason for case, o in outcomes.items() if o.verdict != claim} == {}
 
 
+def _exec_output(body: str, exit_code: int | None = 0) -> dict:
+    """Codex `exec_command` 给模型的工具输出（session.jsonl 的 function_call_output）。"""
+    state = f"Process exited with code {exit_code}" if exit_code is not None else "Process running with session ID 7"
+    text = f"Chunk ID: 0a1b2c\nWall time: 0.0100 seconds\n{state}\nOriginal token count: 42\nOutput:\n{body}"
+    return {"type": "response_item", "payload": {"type": "function_call_output", "call_id": "c", "output": text}}
+
+
+LANE_DIFF_0, LANE_DIFF_1 = (LANE_PATCH[:LANE_PATCH.index("diff --git a/changed-1")],
+                            LANE_PATCH[LANE_PATCH.index("diff --git a/changed-1"):])
+COVERAGE = {
+    # #2018 attempt 40343 opus：diff 后接 `git log --format=… -4`，命令写法不合格，但模型看到了整份补丁
+    "whole-diff-then-log": ([lambda t: _command(
+        f"cd /review && git diff --no-ext-diff --no-textconv {t.merge_base_sha} {t.head_sha}; "
+        f"git log --format='%H %P %s' -4 {t.head_sha}", output=LANE_PATCH + _meta(t))],
+        [_exec_output(LANE_PATCH + "abc def subject\n")], True),
+    # #2025 kimi：前面先 cat 技能文件、printf 分隔串
+    "prefix-cat-printf": ([], [_exec_output("# skill\n\n--- FULL DIFF ---\n" + LANE_PATCH)], True),
+    "per-file-numbered": ([], [_exec_output("".join(f"{n:6}\t{x}\n" for n, x in enumerate(LANE_DIFF_0.splitlines(), 1))),
+                               _exec_output(LANE_DIFF_1)], True),
+    "one-file-only": ([], [_exec_output(LANE_DIFF_0)], False),
+    # #2036 attempt 59600 kimi：`git diff … && printf … && git status …` 整条链 exit 128，diff 照样印出、模型照样看到
+    "nonzero-exit-still-seen": ([], [_exec_output(LANE_DIFF_0), _exec_output(LANE_DIFF_1 + "fatal: x\n", exit_code=128)],
+                                True),
+    "still-running": ([], [_exec_output(LANE_DIFF_0), _exec_output(LANE_DIFF_1, exit_code=None)], False),
+    "lines-without-header": ([], [_exec_output("+0\n+1\n")], False),
+    "head-file-contents": ([], [_exec_output("diff --git a/changed-0 b/changed-0\n0\n"
+                                             "diff --git a/changed-1 b/changed-1\n1\n")], False),
+    "line-under-wrong-header": ([], [_exec_output(LANE_PATCH.replace("+1\n", "") + "diff --git a/README b/README\n+1\n")],
+                                False),
+    "truncated-for-model": ([], [_exec_output(LANE_DIFF_0 + "diff --git a/changed-1 b/changed-1\nnew…812 chars truncated…"
+                                              "\n+1\n")], False),
+}
+
+
+@pytest.mark.parametrize("case", sorted(COVERAGE))
+def test_conclusion_stands_when_visible_output_covers_whole_patch(lane, case):
+    """命令写法不合格时按内容认：模型实际看到的、退出码 0 的输出合起来有整份冻结补丁（每个文件头、每条改动行）。"""
+    commands, outputs, stands = COVERAGE[case]
+    _modes(lane, **{model: "PASS" for model in MODELS})
+    target = ReviewTarget(**lane.review_pr(1810)["target"])
+    folder = lane.state_root / "runs" / target.key / MODELS[0]
+    events = [json.loads(line) for line in (folder / "events.jsonl").read_text().splitlines()]
+    events = [e for e in events if e.get("item", {}).get("type") != "command_execution"]
+    (folder / "events.jsonl").write_text("\n".join(json.dumps(e) for e in [
+        events[0], *(c(target) for c in commands or [lambda t: _command("echo hi", output="hi\n")]), *events[1:]]) + "\n")
+    first = (folder / "session.jsonl").read_text().splitlines()[0]
+    (folder / "session.jsonl").write_text("\n".join([first, *map(json.dumps, outputs)]) + "\n")
+    launch, receipt = json.loads((folder / "launch.json").read_text()), json.loads((folder / "receipt.json").read_text())
+    outcome = validate_review(target, launch, receipt, folder, lane.source)
+    assert (outcome.verdict == "PASS") is stands, outcome.reason
+    if not stands:
+        assert "未读取冻结候选补丁" in outcome.reason
+
+
+def test_visible_outputs_are_what_the_model_saw(tmp_path):
+    log = tmp_path / "session.jsonl"
+    log.write_text("\n".join([
+        json.dumps({"type": "session_meta", "payload": {"id": "s"}}), "not json", json.dumps([1]),
+        json.dumps(_exec_output("seen\n")), json.dumps(_exec_output("failed\n", exit_code=2)),
+        json.dumps(_exec_output("running\n", exit_code=None)),
+        json.dumps({"type": "response_item", "payload": {"type": "function_call_output", "output": "Output:\nno header\n"}}),
+        json.dumps({"type": "event_msg", "payload": {"type": "function_call_output", "output": _exec_output("x")["payload"]["output"]}}),
+    ]) + "\n")
+    assert module.visible_outputs(log) == ["seen\n", "failed\n"]
+    assert module.visible_outputs(log, exit_zero_only=True) == ["seen\n"]
+
+
 def test_zero_tool_pass_is_never_reused(lane, env):
     _modes(lane, **{model: "PASS:notool" for model in MODELS})
     assert lane.review_pr(1810)["state"] == "error"
