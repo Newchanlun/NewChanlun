@@ -1863,107 +1863,243 @@ def test_block_left_by_retired_reviewer_still_vetoes_reuse(lane, env, monkeypatc
     assert "reused_from" not in result and [r["model"] for r in result["reviews"]] == list(MODELS)
 
 
-# ---- 旁听审查员（ADVISORY_REVIEW_MODELS）：不进结论、状态与合同 ----
+# ---- 旁听审查员（ADVISORY_REVIEW_MODELS）：脱离的独立进程，不进结论、状态与合同 ----
 ADVISORY = module.ADVISORY_REVIEW_MODELS[0]
 
 
-def _advisory(lane, result):
-    folder = lane.state_root / "runs" / ReviewTarget(**result["target"]).key / module.ADVISORY_DIR
-    return folder, json.loads((folder / "outcome.json").read_text())
+def _detached(lane, **config):
+    """让 review_pr 派出的旁听进程用本测试的目录与 worker 替身。"""
+    config = {"state_root": str(lane.state_root), "checkout_root": str(lane.checkout_root),
+              "source": str(lane.source), "launcher": lane.launcher, **config}
+    lane.advisory_launcher = [sys.executable, str(Path(__file__).with_name("external_review_advisory.py")),
+                              json.dumps(config)]
+
+
+def _run_folder(lane, result):
+    return lane.state_root / "runs" / ReviewTarget(**result["target"]).key
+
+
+def _wait_advisory(lane, result, seconds=60):
+    import time
+    path = _run_folder(lane, result) / module.ADVISORY_DIR / "outcome.json"
+    end = time.monotonic() + seconds
+    while time.monotonic() < end:
+        if path.exists():
+            try:
+                return json.loads(path.read_text())
+            except ValueError:
+                pass
+        time.sleep(0.05)
+    log = path.with_name("advisory.log")
+    raise AssertionError("旁听结论未落盘：" + (log.read_text() if log.exists() else "无日志"))
+
+
+def _kill_advisory(lane, result):
+    import os
+    import signal
+    advisory = _run_folder(lane, result) / module.ADVISORY_DIR
+    for path in [advisory / "spawn.json", *advisory.glob("*/process.json")]:
+        try:
+            os.killpg(json.loads(path.read_text())["pid"], signal.SIGKILL)
+        except (OSError, ValueError, KeyError):
+            pass
 
 
 def _launched_models(lane):
     return sorted((lane.state_root / "runs" / "launches").read_text().splitlines())
 
 
+def _lock_held(path):
+    import fcntl
+    import os
+    fd = os.open(path, os.O_RDWR)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        return False
+    except BlockingIOError:
+        return True
+    finally:
+        os.close(fd)
+
+
 def test_advisory_is_off_by_default(lane, monkeypatch):
     monkeypatch.delenv(module.ADVISORY_ENV, raising=False)
+    _detached(lane)
     result = lane.review_pr(1810)
     assert result["verdict"] == "PASS" and lane.gateway.sent == ["pending", "success"]
     assert _launched_models(lane) == sorted(MODELS)
-    assert not (lane.state_root / "runs" / ReviewTarget(**result["target"]).key / module.ADVISORY_DIR).exists()
+    assert not (_run_folder(lane, result) / module.ADVISORY_DIR).exists()
 
 
 def test_advisory_block_with_gating_pass_still_publishes_success(lane, monkeypatch):
     monkeypatch.setenv(module.ADVISORY_ENV, "1")
+    _detached(lane)
     _modes(lane, **{ADVISORY: "BLOCK"})
     result = lane.review_pr(1810)
     assert result["verdict"] == "PASS" and result["state"] == "success"
     assert lane.gateway.sent == ["pending", "success"]
-    assert [r["model"] for r in result["reviews"]] == list(MODELS)
-    run = lane.state_root / "runs" / ReviewTarget(**result["target"]).key
-    assert json.loads((run / "outcome.json").read_text())["reviews"] == result["reviews"]
-    folder, advisory = _advisory(lane, result)
-    assert [(r["model"], r["verdict"]) for r in advisory["reviews"]] == [(ADVISORY, "BLOCK")]
-    assert (folder / ADVISORY / "receipt.json").is_file()
+    advisory = _wait_advisory(lane, result)
+    assert [(r["model"], r["verdict"], r["checkout"]) for r in advisory["reviews"]] == [(ADVISORY, "BLOCK", "removed")]
+    run = _run_folder(lane, result)
+    assert json.loads((run / "outcome.json").read_text()) == result  # 旁听不写 gating 文件
+    assert (run / module.ADVISORY_DIR / ADVISORY / "receipt.json").is_file()
     assert _launched_models(lane) == sorted([*MODELS, ADVISORY])
-    launch = json.loads((folder / ADVISORY / "launch.json").read_text())
-    assert not Path(launch["checkout"]).exists()  # 旁听快照同样回收
     assert not (lane.checkout_root / result["run_id"]).exists()
-    # 旁听 BLOCK 不算同补丁 BLOCK 证据，也不算已派发未完结的 reviewer。
+    assert lane.gateway.sent == ["pending", "success"]
     assert not lane._reviewer_blocked({"target": result["target"], "outcome": result})
     assert lane._reviewers(run) == list(MODELS)
 
 
 def test_advisory_block_does_not_veto_reuse(lane, env, monkeypatch):
     monkeypatch.setenv(module.ADVISORY_ENV, "1")
+    _detached(lane)
     _modes(lane, **{ADVISORY: "BLOCK"})
     first = lane.review_pr(1810)
+    assert _wait_advisory(lane, first)["reviews"][0]["verdict"] == "BLOCK"
     _advance_main(lane, env)
     result = lane.review_pr(1810)
     assert result["verdict"] == "PASS" and result["reused_from"]["run_id"] == first["run_id"]
     assert lane.gateway.sent == ["pending", "success", "pending", "success"]
+    assert not (_run_folder(lane, result) / module.ADVISORY_DIR).exists()  # 沿用不派旁听
 
 
 @pytest.mark.parametrize("mode", ["CRASH", "PASS:notool"])
 def test_advisory_failure_is_ignored(lane, monkeypatch, mode):
     monkeypatch.setenv(module.ADVISORY_ENV, "1")
+    _detached(lane)
     _modes(lane, **{ADVISORY: mode})
     result = lane.review_pr(1810)
     assert result["verdict"] == "PASS" and lane.gateway.sent == ["pending", "success"]
-    _, advisory = _advisory(lane, result)
-    assert [(r["model"], r["verdict"]) for r in advisory["reviews"]] == [(ADVISORY, "FAILED")]
+    assert [(r["model"], r["verdict"]) for r in _wait_advisory(lane, result)["reviews"]] == [(ADVISORY, "FAILED")]
 
 
 def test_advisory_never_rescues_gating_block(lane, monkeypatch):
     monkeypatch.setenv(module.ADVISORY_ENV, "1")
+    _detached(lane)
     _modes(lane, **{MODELS[0]: "BLOCK", ADVISORY: "PASS"})
     result = lane.review_pr(1810)
     assert result["verdict"] == "BLOCK" and lane.gateway.sent == ["pending", "failure"]
-    assert _advisory(lane, result)[1]["reviews"][0]["verdict"] == "PASS"
+    assert _wait_advisory(lane, result)["reviews"][0]["verdict"] == "PASS"
+
+
+def test_gating_returns_even_if_advisory_hangs_forever(lane, monkeypatch):
+    import time
+    monkeypatch.setenv(module.ADVISORY_ENV, "1")
+    _detached(lane)  # 生产上限（50 分钟）：测试期间旁听一直挂着
+    _modes(lane, **{ADVISORY: "HANG"})
+    started = time.monotonic()
+    result = lane.review_pr(1810)
+    try:
+        assert time.monotonic() - started < 30
+        assert result["verdict"] == "PASS" and lane.gateway.sent == ["pending", "success"]
+        lock = _run_folder(lane, result) / module.ADVISORY_DIR / ".lock"
+        for _ in range(400):
+            if lock.exists() and _lock_held(lock):
+                break
+            time.sleep(0.05)
+        assert _lock_held(lock)  # 旁听进程仍在跑、持自己的锁
+        assert not _lock_held(_run_folder(lane, result) / "owner.lock")  # gating 的锁已释放
+        assert lane.review_pr(1810)["run_id"] == result["run_id"]  # 同键重跑不被旁听挡住
+        assert lane.gateway.sent == ["pending", "success"]
+    finally:
+        _kill_advisory(lane, result)
+
+
+def test_controller_crash_leaves_advisory_running_and_outcome_lands(lane, monkeypatch):
+    monkeypatch.setenv(module.ADVISORY_ENV, "1")
+    _detached(lane)
+    spawn = lane._spawn_advisory
+    def crash_after_spawn(key):
+        spawn(key)
+        raise KeyboardInterrupt  # controller 在派出旁听后立刻崩溃
+    monkeypatch.setattr(lane, "_spawn_advisory", crash_after_spawn)
+    with pytest.raises(KeyboardInterrupt):
+        lane.review_pr(1810)
+    assert lane.gateway.sent == ["pending", "success"]
+    result = lane.status(1810)[0]["outcome"]
+    assert _wait_advisory(lane, result)["reviews"][0]["verdict"] == "PASS"
+
+
+def test_advisory_timeout_snapshot_is_reclaimed_by_reaper_on_next_run(lane, monkeypatch):
+    import os
+    import signal
+    monkeypatch.setenv(module.ADVISORY_ENV, "1")
+    _detached(lane)
+    monkeypatch.setattr(lane, "_spawn_advisory", lambda key: None)  # 本测试在进程内跑旁听，便于计时
+    result = lane.review_pr(1810)
+    key = ReviewTarget(**result["target"]).key
+    _modes(lane, **{ADVISORY: "HANGTERM"})  # 忽略 SIGTERM：取消路径失效
+    lane.advisory_timeout, lane.advisory_term_grace = 0.5, 0.5
+    advisory = lane.run_advisory(key)
+    entry = advisory["reviews"][0]
+    assert (entry["verdict"], entry["checkout"]) == ("TIMEOUT", "retained")
+    worker = _run_folder(lane, result) / module.ADVISORY_DIR / ADVISORY
+    checkout = Path(json.loads((worker / "launch.json").read_text())["checkout"])
+    assert checkout.is_dir()
+    pid = json.loads((worker / "process.json").read_text())["pid"]
+    os.killpg(pid, signal.SIGKILL)
+    os.waitpid(pid, 0)
+    lane.review_pr(1810, 2)  # 下一次 run 开头的回收
+    assert not checkout.exists()
+    assert json.loads((worker / "checkout-cleanup.json").read_text())["by"] == "reaper"
+    assert lane.gateway.sent[-2:] == ["pending", "success"]
+
+
+def test_reaper_never_removes_a_checkout_in_use(lane, capfd):
+    import subprocess
+    result = lane.review_pr(1810)
+    folder = _run_folder(lane, result)
+    checkout = lane.checkout_root / result["run_id"] / MODELS[0]
+    checkout.mkdir(parents=True)
+    (checkout / "file").write_text("x" * 1000)
+    with module._lock(folder):  # run 锁被持有
+        assert lane.reap()["removed"] == 0 and checkout.exists()
+    advisory_checkout = lane.checkout_root / result["run_id"] / ADVISORY
+    advisory_checkout.mkdir()
+    (folder / module.ADVISORY_DIR).mkdir(mode=0o700)
+    (folder / module.ADVISORY_DIR / "outcome.json").write_text("{}")
+    import fcntl
+    import os
+    fd = os.open(folder / module.ADVISORY_DIR / ".lock", os.O_CREAT | os.O_RDWR, 0o600)
+    fcntl.flock(fd, fcntl.LOCK_EX)
+    try:  # 旁听锁被持有：两份快照都不动
+        assert lane.reap()["removed"] == 0 and checkout.exists() and advisory_checkout.exists()
+    finally:
+        os.close(fd)
+    user = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)", str(checkout)])
+    try:  # 仍有进程在用该快照
+        stats = lane.reap()
+        assert checkout.exists() and not advisory_checkout.exists() and stats["removed"] == 1
+    finally:
+        user.kill()
+        user.wait()
+    stats = lane.reap()
+    assert not checkout.exists() and stats == {"removed": 1, "bytes_freed": 1000}
+    assert not (lane.checkout_root / result["run_id"]).exists()
+    assert "external-review reaper" in capfd.readouterr().err
 
 
 def test_advisory_over_quota_is_skipped_not_failed(lane, monkeypatch):
-    monkeypatch.setenv(module.ADVISORY_ENV, "1")
     monkeypatch.setenv(module.DAILY_INPUT_CAP_ENV, "1000")
-    calls = iter([0])  # gating 派发时未超；旁听派发前已超
-    monkeypatch.setattr(lane, "recent_input_tokens", lambda: next(calls, 1000))
-    result = lane.review_pr(1810)
-    assert result["verdict"] == "PASS" and lane.gateway.sent == ["pending", "success"]
-    folder, advisory = _advisory(lane, result)
+    result = lane.review_pr(1810)  # 旁听关闭
+    monkeypatch.setattr(lane, "recent_input_tokens", lambda: 1000)
+    advisory = lane.run_advisory(ReviewTarget(**result["target"]).key)
     assert advisory["reviews"][0]["verdict"] == "SKIPPED" and "上限 1000" in advisory["reviews"][0]["reason"]
-    assert not (folder / ADVISORY).exists()
-    assert _launched_models(lane) == sorted(MODELS)
+    assert not (_run_folder(lane, result) / module.ADVISORY_DIR / ADVISORY).exists()
+    assert lane.gateway.sent == ["pending", "success"]
 
 
-def test_advisory_receipts_count_toward_daily_cap(lane, monkeypatch):
-    monkeypatch.setenv(module.ADVISORY_ENV, "1")
+def test_advisory_receipts_count_toward_daily_cap(lane):
     result = lane.review_pr(1810)
-    folder, _ = _advisory(lane, result)
-    receipt = json.loads((folder / ADVISORY / "receipt.json").read_text())
+    key = ReviewTarget(**result["target"]).key
+    assert lane.run_advisory(key)["reviews"][0]["verdict"] == "PASS"
+    assert lane.run_advisory(key)["reviews"][0]["verdict"] == "PASS"  # 已有结论：只读回，不再派发
+    assert _launched_models(lane).count(ADVISORY) == 1
+    worker = _run_folder(lane, result) / module.ADVISORY_DIR / ADVISORY
+    receipt = json.loads((worker / "receipt.json").read_text())
     receipt["usage"] = {"input_tokens": 777, "commands": 1, "reported": True}
-    module._save(folder / ADVISORY / "receipt.json", receipt)
+    module._save(worker / "receipt.json", receipt)
     assert lane.recent_input_tokens() == 777
-
-
-def test_advisory_skipped_when_gating_never_launched(lane, monkeypatch):
-    monkeypatch.setenv(module.ADVISORY_ENV, "1")
-    def no_space(*args):
-        raise IdentityError("空间不足")
-    monkeypatch.setattr(module, "prepare_review", no_space)
-    result = lane.review_pr(1810)
-    assert result["verdict"] == "FAILED" and lane.gateway.sent == ["pending", "error"]
-    assert _advisory(lane, result)[1]["reviews"][0]["verdict"] == "SKIPPED"
 
 
 def test_advisory_is_outside_review_contract():
@@ -1973,54 +2109,3 @@ def test_advisory_is_outside_review_contract():
     assert module.REVIEW_CONTRACT == "sha256:f412d17f29e863a2ed4c5fd317fc78c5d1a31608aa8fdf5e2a4151b6164f4383"
     assert module.REVIEW_CONTRACT == "sha256:" + hashlib.sha256(
         json.dumps([module.POLICY, MODELS, module.PROMPT]).encode()).hexdigest()
-
-
-def test_advisory_hanging_before_model_phase_is_bounded(lane, monkeypatch):
-    """旁听卡在 prepare（模型阶段之前，worker 的 45 分钟计时还没开始）：review_pr 在上限内返回，发布不变，锁释放。"""
-    import threading
-    import time
-    monkeypatch.setenv(module.ADVISORY_ENV, "1")
-    lane.advisory_timeout = 1.0
-    release, real = threading.Event(), module.prepare_review
-    def prepare(target, source, checkout):
-        if checkout.name == ADVISORY:
-            release.wait(60)
-        return real(target, source, checkout)
-    monkeypatch.setattr(module, "prepare_review", prepare)
-    started = time.monotonic()
-    result = lane.review_pr(1810)
-    assert time.monotonic() - started < 20
-    assert result["verdict"] == "PASS" and lane.gateway.sent == ["pending", "success"]
-    folder, advisory = _advisory(lane, result)
-    assert [(r["model"], r["verdict"]) for r in advisory["reviews"]] == [(ADVISORY, "TIMEOUT")]
-    assert lane.review_pr(1810)["run_id"] == result["run_id"]  # 锁已释放：同键重跑只读回
-    assert lane.gateway.sent == ["pending", "success"]
-    release.set()  # 卡住的线程醒来后不再派发，也不覆盖 TIMEOUT 记录
-    time.sleep(1)
-    assert _launched_models(lane) == sorted(MODELS)
-    assert not (folder / ADVISORY / "launch.json").exists()
-    assert _advisory(lane, result)[1]["reviews"][0]["verdict"] == "TIMEOUT"
-
-
-def test_advisory_hanging_supervisor_is_terminated(lane, monkeypatch):
-    import os
-    import time
-    monkeypatch.setenv(module.ADVISORY_ENV, "1")
-    lane.advisory_timeout = 3.0
-    _modes(lane, **{ADVISORY: "HANG"})
-    started = time.monotonic()
-    result = lane.review_pr(1810)
-    assert time.monotonic() - started < 30
-    assert result["verdict"] == "PASS" and lane.gateway.sent == ["pending", "success"]
-    folder, advisory = _advisory(lane, result)
-    assert advisory["reviews"][0]["verdict"] == "TIMEOUT" and "SIGTERM" in advisory["reviews"][0]["reason"]
-    pid = json.loads((folder / ADVISORY / "process.json").read_text())["pid"]
-    for _ in range(100):
-        try:
-            if os.waitpid(pid, os.WNOHANG)[0] == pid:
-                break
-        except ChildProcessError:
-            break
-        time.sleep(0.05)
-    else:
-        raise AssertionError("旁听监督进程未被结束")

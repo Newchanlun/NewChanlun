@@ -42,17 +42,25 @@ kimi 不带 `--output-schema`（#1968）。带 schema 时它把开场白（「�
 
 ## 旁听审查员（试用，缺省关闭）
 
-`external_review.ADVISORY_REVIEW_MODELS`（目前是 `gemini-4-argon-high`）是第三位审查员，只用来积累对照数据：看它在接下来的若干张 PR 上能多找出几条真问题、误报多少。它不参与把关。
+`external_review.ADVISORY_REVIEW_MODELS`（目前是 `gemini-4-argon-high`）是第三位审查员，只用来积累对照数据：看它在接下来的若干张 PR 上能多找出几条真问题、误报多少。它不参与把关，也不在 gating 的生命周期里运行。
 
 - 开关：controller 进程的环境变量 `NEWCHANLUN_REVIEW_ADVISORY=1`。不设或设成别的值时不派发，行为与没有它时完全相同。`review_sweep` 的 `run-review` 子进程继承这个变量。
-- 派发：只在本 run 要派 gating 审查员时（发出 `pending` 之后）启动。它等两位 gating 审查员都写下 `launch.json`（快照已建、空间已复查）之后才建自己的快照，不和 gating 抢空间；gating 没能全部派发就结束时跳过。沿用的 run 不派发它。提示词、worker、容器、命令数上限和 45 分钟墙钟都与 gating 相同。
-- 证据：`runs/<运行键>/advisory/<模型>/` 下的文件与 gating 审查员相同；`runs/<运行键>/advisory/outcome.json` 记它的结论（`PASS`、`BLOCK`、`FAILED` 或 `SKIPPED` 及原因）。
-- 隔离：它的结论不进 `outcome.json`、整轮结论和 `deepagents/review` 状态，也不进 `REVIEW_CONTRACT`，所以开关它不会让已有 PASS 失去沿用资格。沿用判断、完结判断和 BLOCK 否决都不读 `advisory/` 目录（`_reviewers` 排除它），`review_sweep` 的限流退避也不读它的回执。它失败、超时或被跳过时整轮照常。
-- 成本：它的回执计入每日额度闸（`recent_input_tokens` 也统计 `advisory/*/receipt.json`）。派发前已超上限（或上限变量无效）时跳过它，记 `SKIPPED`，gating 照常。
-- 等待：整轮结论发布后，controller 仍持本 run 的锁等它收尾，以便回收它的快照。等待有上限：从旁听启动起最多 `ADVISORY_TIMEOUT_SECONDS`（50 分钟，即 worker 模型阶段的 45 分钟再加 5 分钟给 prepare、准入和建容器；worker 的计时只从模型阶段起算，卡在之前的阶段不受它约束）。到时仍未结束就放弃：置旁听自己的中断标志（不碰 gating 的），向已登记的监督进程发 SIGTERM（worker 的取消路径会关容器），在 `advisory/outcome.json` 记 `TIMEOUT`，然后照常返回、释放锁。卡住的线程之后醒来也不再派发、不覆盖 `TIMEOUT`。回收不了的快照（进程还在）记 `checkout-cleanup.json` 为 retained，留给下次同键重跑回收。整轮中断时同样置旁听中断标志，不等它。
+- 派发：`review-pr` 的 gating 双审照旧。只有真派过 gating 模型、终态（PASS/BLOCK/FAILED）已发布的 run，`review-pr` 才在释放 run 锁之后起一个脱离的进程 `python -m pilot1742.external_review advisory --run <运行键>`（新会话，stdin 关闭，输出进 `advisory/advisory.log`，pid 记在 `advisory/spawn.json`），然后直接返回，不等它，也不与它共享锁或中断标志。沿用、STALE 和恢复发布的 run 不派新旁听；对同一键再跑 `review-pr` 会再起一次，已有结论或锁被持有时它立即退出。
+- 旁听进程自管生命周期：先拿 `runs/<运行键>/advisory/.lock`（排他、不阻塞，已被持有就退出），回收遗留快照（见下），然后对每个旁听模型依次 prepare、派发 worker、有界等待。上限 `ADVISORY_TIMEOUT_SECONDS`（50 分钟：worker 模型阶段的 45 分钟再加 5 分钟给 prepare、准入、建容器）。到时向监督进程发 SIGTERM（worker 的取消路径会关容器），再最多等 `ADVISORY_TERM_GRACE_SECONDS`（120 秒），等回执出现或进程退出，然后 `cleanup_checkout`。无论成败都写 `advisory/outcome.json`：每个模型一条，`verdict` 为 `PASS`、`BLOCK`、`FAILED`、`TIMEOUT` 或 `SKIPPED`，`checkout` 为 `removed` 或 `retained`。它不写任何 gating 文件，不发状态。旁听进程中途崩溃时，worker 照常跑到终态写回执；对同一键再起旁听会收养已有 launch。
+- 证据：`runs/<运行键>/advisory/<模型>/` 下的文件与 gating 审查员相同，`launch.json` 多一个 `"advisory": true`。
+- 隔离：它的结论不进 `outcome.json`、整轮结论和 `deepagents/review` 状态，也不进 `REVIEW_CONTRACT`，所以开关它不会让已有 PASS 失去沿用资格。沿用判断、完结判断和 BLOCK 否决都不读 `advisory/` 目录（`_reviewers` 排除它），`review_sweep` 的限流退避也不读它的回执。
+- 成本：它的回执计入每日额度闸（`recent_input_tokens` 也统计 `advisory/*/receipt.json`）。派发前已超上限时记 `SKIPPED`，不暂停任何东西。上限变量无效时记 `FAILED`。
 - 路由：与 gating 相同，走 CLIProxyLocal（`cliproxy-local` provider，`CLIPROXY_LOCAL_KEY`）。2026-11-09 实测，`gemini-4-argon-high` 在 CLIProxy 的模型目录里，经 `antigravity@daily-cloudcode-pa.googleapis.com` 完成 responses、工具调用和 json_schema 往返。`review_preflight.py` 只探测 gating 两位，不探测它。
 - 对照：`/Volumes/AgentStorage/restart-20261107/slim/gate-ops/compare_reviewers.py`（仓库外）按 run 并列三位的结论与发现，并统计标注后的真问题、误报和独有真问题。
 - 名单：`../codex-child.ts` 的 `ADVISORY_REVIEW_MODELS` 与这里相同（测试核对），列在 `ALLOWED_MODELS` 里，只是为了让 worker 放行它的 launch。
+
+### 遗留快照回收（#1986）
+
+每次 `review-pr`（拿到自己的 run 锁之后）和每次旁听进程（拿到旁听锁之后）开头都扫一遍 `checkouts/external-review/<run_id>/<模型>`，按 `target.json` 的 `run_id` 找到所属 run。满足以下任一条件就删除：所属 run 的 `outcome.json` 是终态（PASS/BLOCK/FAILED/STALE），或者旁听快照对应的 `advisory/outcome.json` 已存在，或者 `process.json` 登记过监督进程而该进程已不在。
+
+以下情况一律不动：该 run 的 `owner.lock` 或 `advisory/.lock` 正被持有（包括调用者自己的），还有进程的命令行含该快照路径或该 worker 的 `--output-dir`，找不到所属 run，或者从未派发、也没有终态（prepare 中断，留给 run 自己恢复）。
+
+删除时，在锁内把目录改名为 `.reaped-*`，在 worker 目录写 `checkout-cleanup.json`（`"by": "reaper"`），释放锁之后再删。上次没删完的 `.reaped-*` 下次继续删。每次扫描在 stderr 记一行 `external-review reaper {"removed": N, "bytes_freed": B}`。扫描时会短暂拿别的 run 的锁，只覆盖改名这一下；这期间对那个 run 的 `review-pr` 会照常以「已有宿主控制进程持锁」退出，重跑即可。
 
 ## 启用前完成部署验收
 

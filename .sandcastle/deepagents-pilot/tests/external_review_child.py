@@ -23,6 +23,12 @@ mode_file = per_model if per_model.exists() else runs / "fake-mode"
 mode, _, flag = (mode_file.read_text().strip() if mode_file.exists() else "PASS").partition(":")
 if mode == "CRASH":  # 监督进程不写回执就退出
     sys.exit(3)
+if mode == "HANGTERM":  # 卡住且忽略 SIGTERM：取消路径失效，快照只能留给回收
+    import signal
+    import time
+    signal.signal(signal.SIGTERM, signal.SIG_IGN)
+    time.sleep(300)
+    sys.exit(4)
 if mode == "HANG":  # 监督进程卡住不出回执（SIGTERM 默认即结束）
     import time
     time.sleep(300)
