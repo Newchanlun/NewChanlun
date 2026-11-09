@@ -106,19 +106,29 @@ export interface WorkerDependencies {
   timeoutMs: number;
   /** 单次独审的命令数上限；超出即停并记 failure_code=budget_exceeded。缺省见 REVIEW_COMMAND_CAP。 */
   commandCap?: number;
+  /** 429 重连之后多久没有新事件就按限流停下，记 failure_code=rate_limited。缺省见 RATE_LIMIT_STALL_MS。 */
+  rateLimitStallMs?: number;
 }
 // 实测（2026-11-01..08，247 次完成的独审）：Opus 命令数中位 47、p90 98、最大 143；墙钟最大 23 分钟。
 // 上限约取正常一次的 3–5 倍，并高于实测最大值，只拦失控，不拦正常审查。
 export const REVIEW_COMMAND_CAP = 250;
-/** codex 对单个请求的重试用尽、最后一次是 429 时报出的文字（2026-11-09 #1917/#1920/#1921/#1935/#1942 的 opus 实测：
- *  `error` 事件「Reconnecting... 1/5 (exceeded retry limit, last status: 429 Too Many Requests)」后多数不再有输出，
- *  干等到 45 分钟超时；也有 `turn.failed` 带同一句后退出）。只看 error、turn.failed 事件和 stderr，不看命令输出。 */
+/** codex 对单个请求的重试用尽、最后一次是 429 时报出的文字。只看 error、turn.failed 事件和 stderr，不看命令输出。
+ *  2026-11-09 opus 实测（#1917/#1920/#1921/#1935/#1942）：「Reconnecting... 1/5 (exceeded retry limit, last status: 429 …)」
+ *  只是一次重连，不是终态——#1942 之后又跑了约 190 个事件；#1920/#1921/#1935 在这句之后不再有任何输出，干等到 45 分钟超时；
+ *  #1917 以 turn.failed 带同一句结束。 */
 export const RATE_LIMIT_EXHAUSTED = /exceeded retry limit, last status: 429\b|\b429 Too Many Requests\b/;
-export function rateLimitExhausted(event: unknown): boolean {
-  if (typeof event !== "object" || event === null) return false;
+/** 429 重连之后静默这么久即判限流卡死。正常审查两个事件之间远短于此（命令执行另有 item.started 在前）。 */
+export const RATE_LIMIT_STALL_MS = 300_000;
+/** terminal：立即停（turn.failed 带 429，或最后一次重连 n==max 带 429）；retry：429 重连，后续静默才停；null：无关。 */
+export function rateLimitSignal(event: unknown): "terminal" | "retry" | null {
+  if (typeof event !== "object" || event === null) return null;
   const e = event as { type?: unknown; message?: unknown; error?: { message?: unknown } };
-  const message = e.type === "error" ? e.message : e.type === "turn.failed" ? e.error?.message : undefined;
-  return typeof message === "string" && RATE_LIMIT_EXHAUSTED.test(message);
+  if (e.type === "turn.failed") {
+    return typeof e.error?.message === "string" && RATE_LIMIT_EXHAUSTED.test(e.error.message) ? "terminal" : null;
+  }
+  if (e.type !== "error" || typeof e.message !== "string" || !RATE_LIMIT_EXHAUSTED.test(e.message)) return null;
+  const reconnect = /^Reconnecting\.\.\. ([1-9]\d*)\/([1-9]\d*) \(/.exec(e.message);
+  return reconnect && BigInt(reconnect[1]!) >= BigInt(reconnect[2]!) ? "terminal" : "retry";
 }
 const dependencies: WorkerDependencies = {
   ready: (image) => assertSwarmExecutionReady(image, { rows: [], verify: verifyReviewAdmission }),
@@ -143,8 +153,9 @@ export async function runExternalReview(folder: string, deps: WorkerDependencies
   // 主动停机标志放在外层：exec 在容器被关后可能 reject 而不是返回，catch 里也要据此补齐原因码。
   let timedOut = false;
   let overBudget = false;
-  // 限流重试已用尽：立即关停记 rate_limited，不再等超时。结论规则不变（FAILED，整轮照发 error）。
+  // 限流终态或 429 重连后静默：关停记 rate_limited，不再等超时。结论规则不变（FAILED，整轮照发 error）。
   let rateLimited = false;
+  let stall: ReturnType<typeof setTimeout> | undefined;
   const stopCode = (): string | undefined =>
     cancelled ? "cancelled" : overBudget ? "budget_exceeded" : rateLimited ? "rate_limited" : timedOut ? "timeout" : undefined;
   const cancel = () => { cancelled = true; void handle?.close(); };
@@ -214,6 +225,7 @@ export async function runExternalReview(folder: string, deps: WorkerDependencies
     try {
       execution = await handle.exec(command, { cwd: "/review", stdin: built.stdin, onLine(line) {
         writeFileSync(events, line + "\n");
+        if (stall) { clearTimeout(stall); stall = undefined; }  // 429 重连后又有事件：没卡死，继续审
         transcript.accept(line);
         try {
           const event = JSON.parse(line);
@@ -226,7 +238,13 @@ export async function runExternalReview(folder: string, deps: WorkerDependencies
           if (event?.type === "item.completed" && event.item?.type === "command_execution" && ++usage.commands > cap && !overBudget) {
             overBudget = true; void handle?.close();
           }
-          if (rateLimitExhausted(event) && !rateLimited && !timedOut) { rateLimited = true; void handle?.close(); }
+          const signal = rateLimitSignal(event);
+          if (signal === "retry" && !rateLimited) {
+            stall = setTimeout(() => {
+              if (!timedOut && !rateLimited) { rateLimited = true; void handle?.close(); }
+            }, deps.rateLimitStallMs ?? RATE_LIMIT_STALL_MS);
+          }
+          if (signal === "terminal" && !rateLimited && !timedOut) { rateLimited = true; void handle?.close(); }
         } catch { /* 非 JSON 行由 transcript 判失败，这里只计量 */ }
       } });
     } finally { closeSync(events); }
@@ -266,6 +284,7 @@ export async function runExternalReview(folder: string, deps: WorkerDependencies
     try { record.after = launch ? snapshot(launch.checkout) : null; } catch { record.after = null; }
   } finally {
     if (timer) clearTimeout(timer);
+    if (stall) clearTimeout(stall);
     process.removeListener("SIGTERM", cancel); process.removeListener("SIGINT", cancel);
     try {
       await handle?.close();

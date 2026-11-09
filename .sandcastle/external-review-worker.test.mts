@@ -6,7 +6,7 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { randomUUID } from "node:crypto";
 import { codexWorker } from "./codex-route.mts";
-import { PROMPT_JSON_INSTRUCTION, REVIEW_IMAGE, checkReviewAdmission, rateLimitExhausted, readLaunch, reviewMounts, runExternalReview, verifyReviewAdmission, type ReviewLaunch, type WorkerDependencies } from "./external-review-worker.mts";
+import { PROMPT_JSON_INSTRUCTION, REVIEW_IMAGE, checkReviewAdmission, rateLimitSignal, readLaunch, reviewMounts, runExternalReview, verifyReviewAdmission, type ReviewLaunch, type WorkerDependencies } from "./external-review-worker.mts";
 import type { BindMountSandboxHandle } from "@ai-hero/sandcastle";
 
 const image = "sha256:" + "1".repeat(64);
@@ -53,7 +53,8 @@ test("显式两家族模型保留旧默认并拒绝路由外模型", () => {
 });
 
 const modes = ["PASS", "BLOCK", "failed", "missing-log", "missing-completed", "write", "bad-mount", "secret-env", "bad-filesystem",
-  "over-budget", "over-budget-reject", "timeout-reject", "rate-limited-hang", "rate-limited-exit", "rate-limited-stderr"] as const;
+  "over-budget", "over-budget-reject", "timeout-reject", "rate-limited-hang", "rate-limited-final", "rate-limited-exit", "rate-limited-stderr",
+  "reconnect-429-recovers"] as const;
 const RECONNECT_429 = "Reconnecting... 1/5 (exceeded retry limit, last status: 429 Too Many Requests)";
 for (const [mode, model] of [...modes.map((m) => [m, "gpt-6.1-sol"] as const),
   ["PASS", "kimi-k3.1-pro"], ["BLOCK", "kimi-k3.1-pro"], ["PASS", "claude-opus-5-5"]] as const) {
@@ -81,10 +82,12 @@ for (const [mode, model] of [...modes.map((m) => [m, "gpt-6.1-sol"] as const),
           while (!closed) await new Promise((r) => setTimeout(r, 5));
           throw new Error("container closed");
         }
-        if (mode === "rate-limited-hang") {
-          // 2026-11-09 opus 实测：重试用尽于 429 后 stdout 不再有输出，进程挂着直到被关停。
+        if (mode === "rate-limited-hang" || mode === "rate-limited-final") {
+          // hang：#1920/#1921/#1935 实测，1/5 的 429 重连后 stdout 不再有输出，进程挂着直到被关停（等静默窗口）。
+          // final：最后一次重连 5/5 仍是 429，立即停。
+          const message = mode === "rate-limited-final" ? RECONNECT_429.replace("1/5", "5/5") : RECONNECT_429;
           for (const e of [{ type: "thread.started", thread_id: session }, { type: "turn.started" },
-            { type: "error", message: RECONNECT_429 }]) options?.onLine?.(JSON.stringify(e));
+            { type: "error", message }]) options?.onLine?.(JSON.stringify(e));
           while (!closed) await new Promise((r) => setTimeout(r, 5));
           throw new Error("container closed");
         }
@@ -97,6 +100,21 @@ for (const [mode, model] of [...modes.map((m) => [m, "gpt-6.1-sol"] as const),
         if (mode === "rate-limited-stderr") {
           options?.onLine?.(JSON.stringify({ type: "thread.started", thread_id: session }));
           return { stdout: "", stderr: "ERROR: exceeded retry limit, last status: 429 Too Many Requests\n", exitCode: 1 };
+        }
+        if (mode === "reconnect-429-recovers") {
+          // #1942 实测：1/5 的 429 重连后继续产出事件。事件间隔短于静默窗口，总时长超过它，也不能被提前停。
+          options?.onLine?.(JSON.stringify({ type: "thread.started", thread_id: session }));
+          options?.onLine?.(JSON.stringify({ type: "error", message: RECONNECT_429 }));
+          for (let n = 0; n < 8; n++) {
+            await new Promise((r) => setTimeout(r, 40));
+            if (closed) throw new Error("container closed");
+            options?.onLine?.(JSON.stringify({ type: "item.completed", item: { id: `r${n}`, type: "reasoning", text: "…" } }));
+          }
+          for (const e of [{ type: "item.completed", item: { type: "agent_message", text: JSON.stringify(output) } },
+            { type: "turn.completed", usage: { input_tokens: 100, cached_input_tokens: 40, output_tokens: 7, reasoning_output_tokens: 3 } }]) {
+            options?.onLine?.(JSON.stringify(e));
+          }
+          return { stdout: "", stderr: "", exitCode: 0 };
         }
         const commands = mode.startsWith("over-budget")
           ? [1, 2, 3].map((n) => ({ type: "item.completed", item: { id: `c${n}`, type: "command_execution", command: "git diff", exit_code: 0 } })) : [];
@@ -136,7 +154,7 @@ for (const [mode, model] of [...modes.map((m) => [m, "gpt-6.1-sol"] as const),
         Mounts: reviewMounts([{ hostPath: f.checkout, sandboxPath: "/review" }], f.checkout)
           .map((m) => ({ Source: m.hostPath, Destination: m.sandboxPath, RW: mode === "bad-mount" })),
         Config: { Env: mode === "secret-env" ? ["GH_TOKEN=fixture"] : [] } }),
-      imageEnv: () => [], timeoutMs: mode === "timeout-reject" ? 20 : 10000, commandCap: 2,
+      imageEnv: () => [], timeoutMs: mode === "timeout-reject" ? 20 : 10000, commandCap: 2, rateLimitStallMs: 100,
     };
     try {
       const started = Date.now();
@@ -144,13 +162,14 @@ for (const [mode, model] of [...modes.map((m) => [m, "gpt-6.1-sol"] as const),
       const elapsed = Date.now() - started;
       const receipt = JSON.parse(readFileSync(join(f.folder, "receipt.json"), "utf8"));
       assert.equal(creates, 1); assert(closed);
-      assert.equal(receipt.status, ["PASS", "BLOCK"].includes(mode) ? "completed" : "failed");
+      assert.equal(receipt.status, ["PASS", "BLOCK", "reconnect-429-recovers"].includes(mode) ? "completed" : "failed");
       if (receipt.status === "completed") {
         assert.match(modelCommand, /(?:^|\s)--skip-git-repo-check(?:\s|$)/);
         assert(modelCommand.includes("-c 'project_doc_max_bytes=0'"));
         assert.deepEqual(receipt.usage, { input_tokens: 100, cached_input_tokens: 40, output_tokens: 7,
           reasoning_output_tokens: 3, commands: 0, reported: true });
         assert.equal(receipt.result.summary, `VERDICT: ${mode}`);
+        assert.equal(receipt.failure_code, undefined);
         assert.equal(receipt.session_id, session);
         assert(receipt.turn_completed);
         assert.equal(receipt.container_id, container);
@@ -163,11 +182,13 @@ for (const [mode, model] of [...modes.map((m) => [m, "gpt-6.1-sol"] as const),
       }
       if (mode === "timeout-reject") assert.equal(receipt.failure_code, "timeout");
       if (mode.startsWith("rate-limited")) {
-        // 限流重试用尽：立即停，记 rate_limited，不等 timeoutMs（这里 10 秒）。
+        // 限流终态立即停、429 重连后静默过窗口（这里 100 ms）即停，记 rate_limited，不等 timeoutMs（这里 10 秒）。
         assert.equal(receipt.failure_code, "rate_limited");
-        assert(elapsed < 5000, `rate_limited 应立即结束，实际 ${elapsed} ms`);
+        assert(elapsed < 5000, `rate_limited 应及时结束，实际 ${elapsed} ms`);
+        if (mode === "rate-limited-hang") assert(elapsed >= 100, `静默窗口未到就停了：${elapsed} ms`);
         assert.equal(receipt.turn_completed, false);
       }
+      if (mode === "reconnect-429-recovers") assert(elapsed >= 300, "事件持续到达的审查要跑完，总时长超过静默窗口");
       if (mode === "failed") assert.equal(receipt.failure_code, "model_exit");
       await assert.rejects(runExternalReview(f.folder, deps));
       assert.equal(creates, 1);
@@ -176,14 +197,16 @@ for (const [mode, model] of [...modes.map((m) => [m, "gpt-6.1-sol"] as const),
 }
 
 
-test("只有 error / turn.failed 里的 429 重试用尽算限流；其他重连原因与命令输出不算", () => {
-  assert(rateLimitExhausted({ type: "error", message: RECONNECT_429 }));
-  assert(rateLimitExhausted({ type: "turn.failed", error: { message: "exceeded retry limit, last status: 429 Too Many Requests" } }));
-  assert(!rateLimitExhausted({ type: "error", message: "Reconnecting... 1/5 (stream disconnected before completion: unexpected EOF)" }));
-  assert(!rateLimitExhausted({ type: "turn.failed", error: { message: "exceeded retry limit, last status: 500 Internal Server Error" } }));
-  assert(!rateLimitExhausted({ type: "item.completed", item: { type: "command_execution", aggregated_output: RECONNECT_429 } }));
-  assert(!rateLimitExhausted(null));
+test("限流信号：turn.failed 带 429 与最后一次 429 重连是终态，中途 429 重连只是重试；其他原因与命令输出不算", () => {
+  assert.equal(rateLimitSignal({ type: "error", message: RECONNECT_429 }), "retry");
+  assert.equal(rateLimitSignal({ type: "error", message: RECONNECT_429.replace("1/5", "5/5") }), "terminal");
+  assert.equal(rateLimitSignal({ type: "turn.failed", error: { message: "exceeded retry limit, last status: 429 Too Many Requests" } }), "terminal");
+  assert.equal(rateLimitSignal({ type: "error", message: "Reconnecting... 5/5 (stream disconnected before completion: unexpected EOF)" }), null);
+  assert.equal(rateLimitSignal({ type: "turn.failed", error: { message: "exceeded retry limit, last status: 500 Internal Server Error" } }), null);
+  assert.equal(rateLimitSignal({ type: "item.completed", item: { type: "command_execution", aggregated_output: RECONNECT_429 } }), null);
+  assert.equal(rateLimitSignal(null), null);
 });
+
 
 test("损坏 launch 在读取阶段也保存失败终态", async () => {
   const f = fixture();
