@@ -76,6 +76,14 @@ def legacy_boat_runtime(env):
 
 
 @pytest.fixture(autouse=True)
+def no_real_docker(monkeypatch):
+    """#1986：外部独审的孤儿卷 reaper 会调 docker；测试一律走空替身，不碰本机真实的卷和容器。"""
+    from pilot1742 import external_review
+    monkeypatch.setattr(external_review, "docker_cli",
+                        lambda args: subprocess.CompletedProcess(["docker", *args], 0, "", ""))
+
+
+@pytest.fixture(autouse=True)
 def no_operator_credential(monkeypatch):
     """测试从不读取操作员的 CLIProxy 凭据（本机 launchctl 里是真值，CI 上没有 launchctl）。
     需要构造生产模型时拿到占位值；真去调用模型会失败。"""
