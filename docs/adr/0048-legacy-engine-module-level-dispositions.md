@@ -457,7 +457,7 @@ ADR 0048 编号写死：origin/main `66c409e7e3` 最大 0046，预留表 adr-res
 
 ## 修订（#1540，凭据来源改名，2026-11-07）
 
-（append-only：以上各节原文不改。依据 #1540 主控裁定 [裁定评论 6702983888](https://github.com/Newchanlun/NewChanlun/issues/1540#issuecomment-6702983888)，正本 [ADR 0061](0061-fu18-venue-account-permission-binding.md) 裁定二与 [ADR 0039](0039-production-entry-inventory-and-unique-launcher.md)「修订（#1540）」第 1 条。）
+（append-only：以上各节原文不改。依据 #1540 主控裁定 [裁定评论 6702983888](https://github.com/Newchanlun/NewChanlun/issues/1540#issuecomment-6702983888)，正本 [ADR 0062](0062-fu18-venue-account-permission-binding.md) 裁定二与 [ADR 0039](0039-production-entry-inventory-and-unique-launcher.md)「修订（#1540）」第 1 条。）
 
 1. **凭据来源。** :97 引文与 :309「凭据只经 launcher 从 profile `credential_scope` 注入 X」中的 `credential_scope`，读作 X 执行 profile 的 `credential_source.{env,file}`（由 `credential_scope.{env,file}` 改名），只管部署管道。`credential_scope` 只指 ADR 0028:22 的作用域政策字段，记在场所 profile 记录里，不含凭据来源路径。
 2. **引用行号。** :97、:309 所引「ADR 0039:277」那一句现址为 ADR 0039:285，文义按上条读。

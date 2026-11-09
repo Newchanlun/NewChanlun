@@ -1,4 +1,4 @@
-# ADR 0061：受控场所、账户、权限——P1 凭据作用域版本、profile 绑定、发送门与拒发终态
+# ADR 0062：受控场所、账户、权限——P1 凭据作用域版本、profile 绑定、发送门与拒发终态
 
 > 正本：本文件是 `P1-hl-testnet` 上凭据作用域版本、场所 profile 绑定、X 发送门与拒发终态的正本。
 > 最后裁定：#1540（2026-11-07，主控裁定，[裁定评论 6702983888](https://github.com/Newchanlun/NewChanlun/issues/1540#issuecomment-6702983888)）；Q5 的实现机制按 [修订裁定 6717784668](https://github.com/Newchanlun/NewChanlun/issues/1540#issuecomment-6717784668)（2026-11-08）：0045:24 读法照旧，P1 机器层核验改为独立的发送前置件
@@ -256,8 +256,8 @@ ADR 0028:24 的动作维度：
 1. 本文件存在于 main，且下列四条各自 `grep -c` ≥ 1：`credential_scope_version` 或「凭据作用域版本」、`send_refusal_class`、`SessionPermission`、`AwaitingPolicy`。
 2. `grep -c '修订（#1540' docs/adr/0028-*.md docs/adr/0039-*.md docs/adr/0045-*.md docs/adr/0048-*.md` 每个文件 ≥ 1。
 3. `grep -c '凭据作用域版本' CONTEXT.md` ≥ 1。
-4. 能力记录进持久身份：本文件「数据形状」节的绑定行含 `capability_record_sha256`，发送门第 2 步写明按 `capability_record_version` 逐项比较，「对下游的接口」的能力 hash 含 `capability_record_sha256`；下游测试表含 `x_rejects_same_capability_record_version_with_other_content`（同版本异内容 → `IdentityConflict`）。核法：`grep -c 'capability_record_sha256' docs/adr/0061-*.md` ≥ 4，`grep -c 'x_rejects_same_capability_record_version_with_other_content' docs/adr/0061-*.md` ≥ 1。
-5. SR-3 与发送门分界：`grep -c '不是 SR-3 的失效触发' docs/adr/0045-*.md docs/adr/0061-*.md` 每个文件 ≥ 1。
+4. 能力记录进持久身份：本文件「数据形状」节的绑定行含 `capability_record_sha256`，发送门第 2 步写明按 `capability_record_version` 逐项比较，「对下游的接口」的能力 hash 含 `capability_record_sha256`；下游测试表含 `x_rejects_same_capability_record_version_with_other_content`（同版本异内容 → `IdentityConflict`）。核法：`grep -c 'capability_record_sha256' docs/adr/0062-*.md` ≥ 4，`grep -c 'x_rejects_same_capability_record_version_with_other_content' docs/adr/0062-*.md` ≥ 1。
+5. SR-3 与发送门分界：`grep -c '不是 SR-3 的失效触发' docs/adr/0045-*.md docs/adr/0062-*.md` 每个文件 ≥ 1。
 6. `gh api repos/Newchanlun/NewChanlun/issues/1540/dependencies/blocking --jq 'map(.number)|sort|map(tostring)|join(",")'` 输出 `1365,1367,1369,1382,1551`。
 7. #1540 在本 ADR 的 PR 合入后关闭，resolution 评论含本文件路径、独审原件路径与裁定评论链接。
 
