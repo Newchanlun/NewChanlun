@@ -12,6 +12,8 @@ export PYTHONPATH=.sandcastle/approval-signing:.sandcastle/deepagents-pilot
   --pr <PR号> --private-key <仓库外PEM绝对路径>
 ```
 
+发布 `deepagents/review` 用哪个 App 由 `IDENTITY_CONFIG` 文件决定（见「换用审查专用 App」），`--private-key` 必须是该 App 的私钥。本文其余命令示例同理。
+
 入口读取固定仓库 `Newchanlun/NewChanlun` 的 PR 身份，接受以 main 为目标的同仓库 open PR，包括 draft 和非 App 作者。fork 返回 `unsupported_head_repository`。
 
 审阅冻结 base、head 和 merge-base，范围为 `merge_base..head` 的完整修改，不只审最后一次提交。对象必须已在当前 controller 的本地对象库；缺失时返回 `needs_source_sync`，由原 owner 按其既有同步授权补齐。入口和 reviewer 都不 fetch。
@@ -26,7 +28,7 @@ export PYTHONPATH=.sandcastle/approval-signing:.sandcastle/deepagents-pilot
 
 POLICY 与模型都进了 `REVIEW_CONTRACT`，换组合后旧组合的 PASS 不能沿用，旧组合的 STALE 也不能 `migrate-stale`，都须在新组合下重审。旧 run 里已退役 reviewer 留下的派发与 BLOCK 证据仍计入完结与否决判断：控制器按 run 目录里实有的 worker 读，不只读当前 `MODELS`。
 
-kimi 不带 `--output-schema`（#1968）。带 schema 时它把开场白（「我先读 diff」）当成终答，零工具调用就结束回合；PR #1966 上实测带 schema 3/3 零调用，不带 schema、提示词要求只输出 JSON 时 3/3 执行 9–17 条只读命令并给出可解析的结论。名单在 `../external-review-worker.mts` 的 `PROMPT_JSON_MODELS`，表内模型的提示词末尾追加 `PROMPT_JSON_INSTRUCTION`，回执的 `output_contract` 记 `prompt` 或 `schema`。opus 照旧带 schema。kimi 的最终消息若带 Markdown 围栏，现有解析读不出，记 FAILED（fail closed）。
+kimi 不带 `--output-schema`（#1968）。带 schema 时它把开场白（「我先读 diff」）当成终答，零工具调用就结束回合；PR #1966 上实测带 schema 3/3 零调用，不带 schema、提示词要求只输出 JSON 时 3/3 执行 9–17 条只读命令并给出可解析的结论。名单在 `../external-review-worker.mts` 的 `PROMPT_JSON_MODELS`，表内模型的提示词末尾追加 `PROMPT_JSON_INSTRUCTION`，回执的 `output_contract` 记 `prompt` 或 `schema`。opus 照旧带 schema。最终消息若整段恰好是一个 ```json（或无语言标注）围栏，先剥掉围栏再解析，TS（`unwrapJsonFence`）与 Python（`unwrap_json_fence`）同一规则；围栏外有其他文字、有多个围栏或 text 不是字符串，仍记 FAILED（fail closed）。
 
 部署：Sandcastle 主模型另行切换，设 `SANDCASTLE_MAIN_MODEL=kimi-k3.1-pro`。审查员派发不依赖主模型取值，`.sandcastle/codex-child.ts` 的 `EXTERNAL_REVIEW_MODELS` 总在 `ALLOWED_MODELS` 里。部署后照常先跑 `review_preflight.py`，它探测的就是当前两位。
 
@@ -49,7 +51,46 @@ kimi 不带 `--output-schema`（#1968）。带 schema 时它把开场白（「�
 - 一个非执行器拥有的 PR 走通双 PASS、同 head 的 App success 和读回。
 - 在隔离临时分支验证普通用户同名 success 不能满足 App 来源绑定，App 正控及新 head 负控成立。
 
-main 的 D5 检查启用由主控另行执行，保留已有保护。所需来源绑定为 `deepagents/review`、App id `5486877`，并保留 strict、enforce_admins；本 CLI 不修改 branch protection。首版仅接 main 目标，临时目标分支的来源测试需要主控独立受控测试工具。
+main 的 D5 检查启用由主控另行执行，保留已有保护。所需来源绑定为 `deepagents/review` 与发布它的 App id（缺省 `5486877`；换用审查专用 App 后为该 App 的 id，见下节），并保留 strict、enforce_admins；本 CLI 不修改 branch protection。首版仅接 main 目标，临时目标分支的来源测试需要主控独立受控测试工具。
+
+## 换用审查专用 App
+
+缺省时入口用执行器同一个 App（`newchanlun-deepagents-1742`，app_id `5486877`，installation `179444545`）发布 `deepagents/review`，执行器因此也持有能写这个必需状态的身份。审查专用 App `newchanlun-review-gate` 只给审查入口用，安装权限恰为 `TOKEN_PERMISSIONS`：metadata/read、contents/read、pull_requests/read、statuses/write。
+
+发布身份只有一个来源：固定文件 `external_review.IDENTITY_CONFIG`，即 `/Volumes/AgentStorage/issue1742-deepagents-pilot-20261027/external-review/app-identity.json`。没有命令行开关可以覆盖或漏传。凡是走 `review-pr` 的路径都读这个文件：手动 `review-pr`、`migrate-stale`，以及 `review_sweep` 派出的审查（它的 `run-review` 子进程在同一进程里调用 `external_review.main(["review-pr", ...])`）。`executor serve --review-sweep`（#2000）走的也是这一条。文件不存在时用执行器 App，行为与之前完全相同。文件存在但读不了（含悬空符号链接）、字段不合格或在 Git 检出内，入口一律以退出码 2 拒绝，不回退到执行器 App。执行器、Studio、`github_app` 核验 CLI 和 `deepagents-remote-facts.py` 不读这个文件，仍用执行器 App。
+
+文件不含秘密，字段恰为以下四个，多一个或少一个都拒绝：
+
+```json
+{
+  "app_id": 5664795,
+  "installation_id": 179776757,
+  "app_slug": "newchanlun-review-gate",
+  "installation_permissions": {"metadata": "read", "contents": "read", "pull_requests": "read", "statuses": "write"}
+}
+```
+
+核验时 GitHub 读回的安装权限必须与 `installation_permissions` 逐项相等，宽了、窄了、同名升级都拒绝，不发任何状态。仓库固定为 `Newchanlun/NewChanlun`（id `1150335160`），文件改不了。私钥规则不变（仓库外、属主为当前用户、权限 600 或 400）。身份文件只决定用哪个 App 签名，私钥仍由各入口的 `--private-key` 给出，两者必须属于同一个 App：身份文件指向审查 App 时，所有审查入口都要给审查 App 私钥，否则 GitHub 拒绝 JWT，入口退出码 2，不发状态。
+
+HOST 切换步骤：
+
+1. 审查 App 已建好：app_id `5664795`，installation `179776757`，安装方式为 selected，只含本仓库，安装权限恰为上面四项。私钥是 `~/.config/newchanlun-review-gate/` 下的 600 文件。同目录的 `app.json` 是建 App 时的记录，字段格式不同，不能当身份文件用。
+2. 先让在途 run 收尾：`status` 里没有 pending 的状态写，也没有在跑的 reviewer（手动的和 sweep 派的都算）。原因是读回认领按发布者 bot 匹配 `creator.login`，切换后旧 App 发过的状态不再算本入口发的；在途写要么先完成，要么在切换后用 `reconcile` 按事实登记。切换期间先停掉 `review_sweep` 循环（或 `executor serve --review-sweep`），免得它在文件和私钥换好之前派出审查。
+3. 把所有审查入口的 `--private-key` 换成审查 App 私钥：手动 `review-pr`、`migrate-stale`，以及 `review_sweep --private-key`（它只把这个路径原样转给审查子进程）。`executor serve --review-sweep` 用单独的 `--review-private-key`（不复用执行器的 `--private-key`）；身份文件存在而没给它时 serve 以退出码 2 失败关闭。serve 的 sweep 与独立 `review_sweep` 循环不要同时跑（共用 `sweep/*.launched` 标记）。
+4. 把上面的 JSON 写到 `IDENTITY_CONFIG` 路径。从这一刻起，所有审查入口都用审查 App。
+5. 选一张非执行器拥有的 PR 审一次：
+
+   ```sh
+   "$VENV/bin/python" -m pilot1742.external_review review-pr \
+     --pr <PR号> --private-key <审查App私钥绝对路径>
+   ```
+
+   入口先核验身份再做任何事：app_id、slug、installation、仓库范围或权限集任一不符即退出码 2，不发状态。成功后在该 head 上读回 `deepagents/review`，`creator.login` 应为 `newchanlun-review-gate[bot]`。然后重启 `review_sweep` 循环，确认它派出的下一次审查发出的状态也是这个 bot。
+6. HOST 部署完成、并用新 App 发出至少一个真实状态之后，再由主控把 main 必需检查 `deepagents/review` 的来源 App 改为 `5664795`。顺序不能反：先改保护会让所有 PR 都卡在这项检查上。改的时候保留 strict 与 enforce_admins。改完后执行器 App 写的 `deepagents/review`（包括 `publish_candidate` 写的）不再满足必需检查，这正是切换的目的。改 branch protection 不由本 CLI 做。
+
+已沿用、已发布的旧 PASS 记录仍在本地历史里；同补丁新 head 沿用时以新 App 在新 head 上发布，不读旧状态的发布者。
+
+回退：删掉 `IDENTITY_CONFIG` 文件，审查入口的 `--private-key` 换回执行器私钥，并把必需检查来源改回 `5486877`。
 
 ## 看结果与恢复
 
@@ -59,7 +100,7 @@ main 的 D5 检查启用由主控另行执行，保留已有保护。所需来�
 
 新 head 可以沿用旧 PASS，不调用模型。条件：同 PR 某个旧 head 的正式双审为 PASS 且已发布 success；`patch_id`、`policy_version`、`review_contract`、`controller_code_head` 都相同；并且沿用前通过与正式派发同一组的部署准入（`external-review-worker.mts --admission-only`：controller 已提交且 head 相符、当前镜像有 accepted 记录），准入镜像与原 run 两份回执的 `image_id` 相同。并发合同：同一 PR 的登记（写 target.json）与沿用发布用同一把跨进程 PR 锁串行化；部署准入在锁外先做，锁内重读历史、确认来源仍是同一个 run 后才发布，所以发布时所依据的历史在读后不可能再出现同 PR 的新登记；历史变了就退回双审（补做总准入）。这时新 run 在新 head 上先写 pending 再写 success，描述带 `reuse=<原 run_id> p=<patch_id 前 12 位>`，`outcome.json` 的 `reused_from` 留原 run 的 SHA、patch_id、双审结论、原发布记录和本次准入。以下情况照常双审：当前 head 上已经有过别的 run（对同一 head 再发 attempt 就是要求重新独审）；补丁不同；原结论是 BLOCK、FAILED 或 STALE；本 run 已有任何 worker 状态（双审已经开始，只能恢复双审）；同一补丁的任何其他 run 尚未完结——完结指顶层 outcome 存在，并且所有已派发（有 launch.json）的 reviewer 都有可读回执；outcome 存在本身不算完结，它可能写于另一位 reviewer 仍在运行时（包括在途的显式重审、STALE）；作为沿用来源的 PASS run 也必须已完结；来源只取同补丁最晚登记的那次真实双 PASS，在它之后登记的同补丁 run 只要有一个不是 PASS（例如以 FAILED 或 STALE 收场的显式重审），旧 PASS 就被视为已被取代，不得在追平后复活（由该来源沿用出来的 PASS 不算推翻）；同一补丁的任何 run 里任一 reviewer 留下过 BLOCK 证据——不看整轮结论，逐个读 outcome 的逐位结论、各 worker 的 receipt 结果，以及 events 里的最终消息（receipt 未能消费结果或汇总前中断时 BLOCK 只在这里；能解析成结果对象就按 status 与 summary 首行判定，说明里引用「VERDICT: BLOCK」不算，解析不了才按整段文本匹配），证据读不了（含 `_read` 的权限、属主、符号链接拒绝）按 BLOCK 处理，退回双审，不影响登记；历史 outcome 读不了（JSON 损坏、权限）时不沿用，登记与双审照常；以上判断中，补丁身份算不出的旧 run 一律按同补丁处理（没有 `patch_id` 的旧 run 先按其冻结 SHA 现场重算，`patch_id` 用 plumbing `git diff-tree`，不受本地 diff 配置影响）；policy、模型、提示词或 controller 有变；部署准入不通过或镜像不同；找不到可重算补丁身份的原 run；原 run 本身就是沿用来的。
 
-`patch_id` 是 `merge_base..head` 每个改动路径的路径、前后 mode、前后 blob 清单的 sha256，补丁逐字相同时才相等。不用 `git patch-id`，因为它忽略空白。main 只改了 PR 没碰的文件时 `patch_id` 不变；冲突解决，或 main 也改了 PR 碰过的文件，都会让它变化并触发重审。残余风险：同一补丁放到新 base 上语义可能变（例如 main 改了被调用的函数）。重审时模型会读新 base 上的相关源码，沿用时不读。CI 会在新 head 上重跑，但目前 CI 不是 main 的必需检查，失败不拦合入；要让 CI 兜住这一点，需要把它设为必需检查。
+`patch_id` 是 `merge_base..head` 每个改动路径的路径、前后 mode、前后 blob 清单的 sha256，补丁逐字相同时才相等。不用 `git patch-id`，因为它忽略空白。main 只改了 PR 没碰的文件时 `patch_id` 不变；冲突解决，或 main 也改了 PR 碰过的文件，都会让它变化并触发重审。残余风险：同一补丁放到新 base 上语义可能变（例如 main 改了被调用的函数）。重审时模型会读新 base 上的相关源码，沿用时不读。CI 会在新 head 上重跑；汇总门 `ci-ok` 是 main 的必需检查（#1742 裁定），CI 失败会拦住合入。
 
 退出码：PASS 或离线命令成功为 0，BLOCK/FAILED/STALE 为 1，输入、身份或待对账错误为 2。
 
@@ -113,7 +154,17 @@ main 的 D5 检查启用由主控另行执行，保留已有保护。所需来�
 
 源码和 Git 全只读挂入容器。宿主 home、PEM、GitHub token、状态和 session 目录不挂入。session 从容器临时目录经 SDK 收取，不给 reviewer 可写宿主回执目录。
 
-App token 只申请 metadata/read、contents/read、pull_requests/read、statuses/write；token 留在宿主发布进程内存。GitHub 的 statuses/write 不按 context 缩权，宿主发布器及 OS 因此属于受信边界。
+App token 只申请 metadata/read、contents/read、pull_requests/read、statuses/write（审查专用 App 的安装权限也正是这四项）；token 留在宿主发布进程内存。GitHub 的 statuses/write 不按 context 缩权，宿主发布器及 OS 因此属于受信边界。
+
+## 成本上限与每日额度闸
+
+单次独审最多执行 250 条命令（`REVIEW_COMMAND_CAP`，实测 Opus 中位 47、p90 98、最大 143），墙钟最长 45 分钟（实测最大 23 分钟）。触顶即关容器，回执 `status=failed` 并写 `failure_code`：`budget_exceeded`（命令数）、`timeout`、`cancelled`、`rate_limited`、`model_exit`（Codex 非零退出）或 `model_error`（模型阶段的其他异常）；容器被关后 SDK 的 exec 无论正常返回还是抛错，原因码都会写上。宿主汇总把它记进该 reviewer 的 reason（`failure_code=…`），`status` 子命令能直接看到，整轮按 FAILED 发布 `error`，不当作通过。
+
+`rate_limited`：限流终态时立即关容器，不等 45 分钟超时。终态指 `turn.failed` 带 `exceeded retry limit, last status: 429`、最后一次重连（`Reconnecting... 5/5 (… 429 …)`，n 等于上限）仍是 429，或非零退出时 stderr 里有同一句。中途的 429 重连（如 `1/5`）只是重试：之后 5 分钟（`RATE_LIMIT_STALL_MS`）内没有任何新事件才按 `rate_limited` 关停，有新事件就继续审。2026-11-09 实测：#1920/#1921/#1935 的 opus 在 `1/5` 之后再无输出、干等到超时；#1942 在 `1/5` 之后又跑了约 190 个事件；#1917 以 `turn.failed` 结束。结论规则不变，只是更早失败。review_sweep 看最近 2 个已完结、真派过模型的 run（按 `outcome.json` 写入时间；STALE 与沿用不算），都有 reviewer 记 `rate_limited` 时，自后一个完结起 30 分钟内不派新审查（`launch`、`resume-review`），每轮记一行 `review-sweep {"action": "rate-limit-backoff", ...}`；发布续跑、追平、合入与撤原生 auto-merge 照常。
+
+回执的 `usage` 记 `input_tokens`、`cached_input_tokens`、`output_tokens`、`reasoning_output_tokens`、`commands` 和 `reported`。codex exec 只在整轮结束（`turn.completed`）时报用量，被中途关停的独审 `reported=false`，token 数未知，不是 0。
+
+设置环境变量 `NEWCHANLUN_REVIEW_DAILY_INPUT_CAP`（正整数 token 数，可写 `400_000_000`）后启用每日额度闸；不设则不启用。近 24 小时（按回执 mtime）各 reviewer 回执的输入 token 合计达到上限时，本 run 只要还要派发新模型（任一 reviewer 尚无 `launch.json`，包括恢复时 prepare 中断、只有目录的情形），就抛 `quota-paused` 待处理（退出码 2），不派模型；本 run 尚未发 `pending` 时也不发。已派发的 reviewer 在自己的进程里照常跑到终态，额度回落后用同一 attempt 重跑即收养它并派发剩下的。`reported=false` 的回执按命令数估算：每条命令计窗口内已报用量回执的「输入/命令」均值，没有样本时每条 10 万 token，零命令也至少计一条。没有 `usage` 字段的旧回执记 0。变量值无效（0、负数、`1e9`、`0.5G` 等）时报出变量名并拒绝派发，退出码 2。
 
 ## 运行靶向检查
 

@@ -205,8 +205,19 @@ def test_engine_emission_to_queue_child_sigkill_recovery_and_exact_delivery(queu
     module = Path(__file__).resolve().parents[3] / 'scripts' / 'wayfinder_engine.mts'
     script = '''const m = await import(process.argv[1]);
       const label = m.releaseLabel(process.argv[2], process.argv[3]);
-      m.releaseTicket(4242, {read: () => JSON.stringify({state:'OPEN',labels:[],assignees:[]}),
-        write: cmd => { console.log(cmd); return ''; }}, label);'''
+      // map 直挂票只放行 map SPEC 拆票计划里、带当前发布凭据的票（#1915 a2）。
+      const plan = '# SPEC\\n<!-- wayfinder-split -->\\n```json\\n{"tickets":[{"id":"S1","title":"fixture"}]}\\n```';
+      const spec = {number: 1340, title: 'SPEC: fixture', body: plan, state: 'OPEN'};
+      const pass = {user: {login: 'fixture'}, created_at: '2026-11-07T01:00:00Z', body: m.specRulingBody({specNumber: 1340,
+        verdict: 'PASS', author: 'draft', reviewer: 'review', digest: m.specBodyDigest(spec.body), evidence: '/fake/review'})};
+      const ticketBody = '<!-- wayfinder-ticket:1340:S1 -->\\nPart of [SPEC #1340]\\n<!-- wayfinder-published:1340:'
+        + m.specBodyDigest(spec.body) + ':S1 -->\\n';
+      const read = args => args.startsWith('issue view 1340 ') ? JSON.stringify(spec)
+        : args.includes('/issues/1340/comments') ? JSON.stringify([pass])
+        : JSON.stringify({title: '[impl] S1 fixture', body: ticketBody, state: 'OPEN', labels: [], assignees: []});
+      const why = m.releaseTicket(4242, {specs: [1340], orchestrator: 'fixture', via: 'plan'},
+        {read, write: cmd => { console.log(cmd); return ''; }}, label);
+      if (why !== null) throw new Error(why);'''
     emitted = subprocess.run(['node', '--experimental-strip-types', '--input-type=module', '-e', script,
                               module.as_uri(), str(v2.home), str(cutover.drain_root)],
                              check=True, capture_output=True, text=True).stdout.strip()
@@ -280,6 +291,133 @@ def test_serve_modes_do_not_open_app_without_cutover(tmp_path, monkeypatch, caps
                          '--private-key', str(tmp_path / 'absent.pem')]) == 0
     assert 'queue inactive' in capsys.readouterr().out
     assert not (tmp_path / 'absent').exists()
+
+
+def _serve_argv(v2, tmp_path, mode):
+    return ['--state-root', str(v2.home), '--drain-root', str(tmp_path / 'drain'), 'serve', mode,
+            '--poll-seconds', '1', '--workers-log', str(v2.workers_log),
+            '--private-key', str(tmp_path / 'absent.pem')]
+
+
+class _StopLoop(Exception):
+    pass
+
+
+def test_serve_once_keeps_exit_2_when_github_unreadable(queued, tmp_path, monkeypatch, capsys):
+    """#1988：`serve --once` 是 cutover-runbook 的检查步骤，读不到 GitHub 必须非零退出，不能报成功。"""
+    from pilot1742 import executor as cli
+    from pilot1742.github_app import RequestNotSent
+    v2 = queued[0]
+
+    def unreadable(_args):
+        raise RequestNotSent('连接未建立')
+    monkeypatch.setattr(cli, 'SOURCE_REPO', v2.source)
+    monkeypatch.setattr(cli, '_client', unreadable)
+    assert cli.main(_serve_argv(v2, tmp_path, '--once')) == 2
+    assert 'RequestNotSent' in capsys.readouterr().err
+
+    gateway = v2.gateway()
+    monkeypatch.setattr(cli, '_client', lambda _args: gateway.client)
+
+    def round_unreadable(self, _run):
+        raise RequestNotSent('连接中断')
+    monkeypatch.setattr(QueueIntake, 'once', round_unreadable)
+    assert cli.main(_serve_argv(v2, tmp_path, '--once')) == 2
+
+
+def test_serve_loop_retries_unreadable_github_in_process_and_marks_status(queued, tmp_path, monkeypatch, capsys):
+    """#1988：`--loop` 下启动核身份与单轮读取失败都在进程内重试，不退出（launchd KeepAlive 不再每 10s 重启）。"""
+    from pilot1742 import executor as cli
+    from pilot1742.github_app import OutcomeUnknown, RequestNotSent
+    from pilot1742.queue import UNREADABLE_NOTICE
+    v2 = queued[0]
+    gateway = v2.gateway()
+    page = v2.source / '.sandcastle' / 'logs' / 'deepagents-status.md'
+    opened, rounds, sleeps = [], [], []
+
+    def client(_args):
+        opened.append(1)
+        if len(opened) == 1:
+            raise RequestNotSent('启动时读不到 App')
+        return gateway.client
+
+    def once(self, _run):
+        rounds.append(1)
+        if len(rounds) == 1:
+            raise OutcomeUnknown('GitHub 返回 HTTP 502')
+        return self._status({})
+
+    def sleep(_seconds):
+        sleeps.append(1)
+        if len(sleeps) == 1:
+            assert UNREADABLE_NOTICE in page.read_text() and 'RequestNotSent' in page.read_text()
+        if len(sleeps) == 2:
+            assert 'OutcomeUnknown' in page.read_text()
+        if len(sleeps) == 3:
+            raise _StopLoop
+    monkeypatch.setattr(cli, 'SOURCE_REPO', v2.source)
+    monkeypatch.setattr(cli, '_client', client)
+    monkeypatch.setattr(QueueIntake, 'once', once)
+    monkeypatch.setattr(cli.time, 'sleep', sleep)
+    with pytest.raises(_StopLoop):
+        cli.main(_serve_argv(v2, tmp_path, '--loop'))
+    assert (len(opened), len(rounds), len(sleeps)) == (3, 2, 3), 'failed round must drop the client and re-verify'
+    assert UNREADABLE_NOTICE not in page.read_text()
+    err = capsys.readouterr().err
+    assert err.count('round skipped, source unreadable (github)') == 2
+
+
+def test_serve_loop_exits_2_on_local_private_key_error(queued, tmp_path, monkeypatch, capsys):
+    """本机私钥读不到是配置错误，不是 GitHub 读不到：`--loop` 也不吞，退出码 2，状态页不标「读不到源」。"""
+    from pilot1742 import executor as cli
+    v2 = queued[0]
+    monkeypatch.setattr(cli, 'SOURCE_REPO', v2.source)
+    monkeypatch.setattr(cli.time, 'sleep', lambda _s: pytest.fail('private key error retried in-process'))
+    assert cli.main(_serve_argv(v2, tmp_path, '--loop')) == 2
+    assert 'PrivateKeyError' in capsys.readouterr().err
+    assert not (v2.source / '.sandcastle' / 'logs' / 'deepagents-status.md').exists()
+
+
+def test_serve_loop_exits_2_on_relative_private_key_path(queued, tmp_path, monkeypatch, capsys):
+    """#1988：相对私钥路径是本机配置错误，`--loop` 不当成 GitHub 读不到去重试，退出码 2。"""
+    from pilot1742 import executor as cli
+    v2 = queued[0]
+    monkeypatch.setattr(cli, 'SOURCE_REPO', v2.source)
+    monkeypatch.setattr(cli.time, 'sleep', lambda _s: pytest.fail('relative key path retried in-process'))
+    argv = _serve_argv(v2, tmp_path, '--loop')
+    argv[argv.index('--private-key') + 1] = 'relative.pem'
+    assert cli.main(argv) == 2
+    assert 'PrivateKeyError' in capsys.readouterr().err
+    assert not (v2.source / '.sandcastle' / 'logs' / 'deepagents-status.md').exists()
+
+
+def test_local_config_errors_are_not_github_read_failures(tmp_path):
+    """身份常量、token 权限范围都是本机配置：归 LocalConfigError，serve --loop 不会当成读不到源去重试。"""
+    from pilot1742.github_app import AppIdentity, GitHubAppClient, LocalConfigError
+
+    key = tmp_path / 'key.pem'
+    for bad in ((0, 1, 1, 'o/r', 'slug', key), (1, 1, 1, 'bad', 'slug', key), (1, 1, 1, 'o/r', 'Bad', key)):
+        with pytest.raises(LocalConfigError):
+            AppIdentity(*bad)
+    with pytest.raises(LocalConfigError):
+        GitHubAppClient(AppIdentity(1, 1, 1, 'o/r', 'slug', key), permissions={'administration': 'write'})
+
+
+def test_client_closes_when_identity_verification_fails(tmp_path, monkeypatch):
+    """`--loop` 每轮都可能重建客户端：核身份失败要关掉连接池，不靠 GC 回收。"""
+    import argparse
+
+    from pilot1742 import executor as cli
+    from pilot1742.github_app import GitHubAppClient, RequestNotSent
+    closed = []
+
+    def verify(_self):
+        raise RequestNotSent('连接未建立')
+    monkeypatch.setattr(GitHubAppClient, 'verify', verify)
+    monkeypatch.setattr(GitHubAppClient, 'close', lambda _self: closed.append(1))
+    with pytest.raises(RequestNotSent):
+        cli._client(argparse.Namespace(private_key=tmp_path / 'key.pem', command='serve'))
+    assert closed == [1]
 
 
 def test_spec_recheck_interrupts_graph_and_resume_payload_does_not_authorize(queued):
@@ -448,14 +586,20 @@ def test_delivered_queue_observes_merge_even_after_ticket_closes(delivered, tick
 
 @pytest.mark.parametrize('fault', ['status_500', 'drop_before'])
 def test_delivery_read_failure_is_retryable_not_stale(delivered, fault):
+    """#1988：对账读不到 GitHub 不在票内吞成 awaiting_human，整轮失败交给 serve 处理；本机状态一概不动。"""
+    from pilot1742.github_app import IdentityError
+
     v2, intake, unit, head, run_dir = delivered
     (number,) = v2.github.pulls
+    intake.once(lambda _: pytest.fail('delivered run dispatched again'))
+    queue_status = v2.home / 'queue-status.json'
     state_path = run_dir / 'delivery' / 'state.json'
     before_state, before_writes = state_path.read_bytes(), v2.writes()
+    before_queue = queue_status.read_bytes()
     v2.github.fault('GET', rf'.*/pulls/{number}', fault)
-    rows = intake.once(lambda _: pytest.fail('delivered run dispatched again'))
-    assert rows[TICKET]['phase'] == 'awaiting_human'
-    assert rows[TICKET]['run_id'] == unit.run_id and rows[TICKET]['reason']
+    with pytest.raises(IdentityError):
+        intake.once(lambda _: pytest.fail('delivered run dispatched again'))
+    assert queue_status.read_bytes() == before_queue
     assert state_path.read_bytes() == before_state
     assert not (run_dir / 'delivery' / 'stale.json').exists()
     assert v2.claim_record()['state'] == 'active'
@@ -464,6 +608,91 @@ def test_delivery_read_failure_is_retryable_not_stale(delivered, fault):
     assert rows[TICKET]['head'] == head and rows[TICKET]['run_id'] == unit.run_id
     assert v2.writes() == before_writes
 
+
+
+def test_serve_surfaces_delivery_read_failure(delivered, tmp_path, monkeypatch, capsys):
+    """#1988：真实对账路径读不到 GitHub 时，`--once` 退出 2；`--loop` 标状态页、不动 queue-status.json，下一轮恢复。"""
+    from pilot1742 import executor as cli
+    from pilot1742.queue import UNREADABLE_NOTICE
+
+    v2, intake, unit, head, run_dir = delivered
+    (number,) = v2.github.pulls
+    intake.once(lambda _: pytest.fail('delivered run dispatched again'))
+    queue_status = v2.home / 'queue-status.json'
+    page = v2.source / '.sandcastle' / 'logs' / 'deepagents-status.md'
+    before = queue_status.read_bytes()
+    monkeypatch.setattr(cli, 'SOURCE_REPO', v2.source)
+    monkeypatch.setattr(cli, 'ClaimStore', lambda: intake.claims)
+    monkeypatch.setattr(cli, '_client', lambda _args: v2.gateway().client)
+
+    v2.github.fault('GET', rf'.*/pulls/{number}', 'status_500')
+    assert cli.main(_serve_argv(v2, tmp_path, '--once')) == 2
+    assert queue_status.read_bytes() == before
+
+    v2.github.fault('GET', rf'.*/pulls/{number}', 'status_500')
+    sleeps = []
+
+    def sleep(_seconds):
+        sleeps.append(1)
+        if len(sleeps) == 1:
+            assert UNREADABLE_NOTICE in page.read_text()
+            assert queue_status.read_bytes() == before
+        else:
+            raise _StopLoop
+    monkeypatch.setattr(cli.time, 'sleep', sleep)
+    with pytest.raises(_StopLoop):
+        cli.main(_serve_argv(v2, tmp_path, '--loop'))
+    assert UNREADABLE_NOTICE not in page.read_text()
+    assert json.loads(queue_status.read_text())[str(TICKET)]['phase'] == 'awaiting_merge'
+    assert 'round skipped, source unreadable (github)' in capsys.readouterr().err
+
+
+def test_read_failure_after_higher_priority_ticket_aborts_before_any_dispatch(queued):
+    """#1988：本轮读 GitHub 失败时不能已经起了子进程。优先级更高的票本可派工，
+    排在后面的票登记读失败：整轮抛出，子进程一次都没起；读恢复后照常派工。"""
+    import copy
+
+    from pilot1742.github_app import IdentityError
+
+    v2, _, intake, _ = queued
+    later = TICKET + 1
+    v2.github.issues[later] = {**copy.deepcopy(v2.github.issues[TICKET]), 'number': later}
+    dispatched = []
+
+    def child(unit):
+        dispatched.append(unit.ticket)
+        return 0
+    v2.github.fault('GET', rf'.*/issues/{later}', 'status_500')
+    with pytest.raises(IdentityError):
+        intake.once(child)
+    assert dispatched == [], 'child started before the round finished reading GitHub'
+    assert not (v2.home / 'queue-status.json').exists()
+    rows = intake.once(child)
+    assert dispatched == [TICKET, later]
+    assert rows[TICKET]['phase'] == rows[later]['phase'] == 'halted'
+
+
+def test_dispatch_phase_rechecks_slot_after_read_phase(queued, monkeypatch):
+    """读阶段乐观登记了后面的票；派工阶段前一张票仍占槽时，后面的票本轮不派（单票在飞上限不变）。"""
+    import copy
+
+    v2, _, intake, _ = queued
+    later = TICKET + 1
+    v2.github.issues[later] = {**copy.deepcopy(v2.github.issues[TICKET]), 'number': later}
+    dispatched = []
+
+    def activity(folders):
+        if TICKET in dispatched and any(f.name.startswith(f't{TICKET}-') for f in folders):
+            return 'worker slot retained: implementer: running'
+        return None
+    monkeypatch.setattr(intake, '_worker_activity', activity)
+
+    def child(unit):
+        dispatched.append(unit.ticket)
+        return 0
+    rows = intake.once(child)
+    assert dispatched == [TICKET]
+    assert rows[TICKET]['phase'] == 'active' and rows[later]['phase'] == 'queued'
 
 
 def test_registration_never_publishes_partial_json(queued, monkeypatch):
@@ -691,3 +920,129 @@ def test_background_approval_recheck_preserves_operator_interrupt(queued, monkey
     assert invoke(common + ['run', '--run-id', unit.run_id, '--resume'] + resources) == 0
     assert v2.claims() == [f'author-{v2.base}']
     assert v2.claim_record()['run_id'] == unit.run_id
+
+
+def engine_hold(v2):
+    """引擎迁移旧票时的持有判定：真实 withTicketHold 读本机持有记录，migrationHold 读当前票面。"""
+    import subprocess
+    from pathlib import Path
+    root = Path(__file__).resolve().parents[3]
+    issue = v2.github.issues[TICKET]
+    view = {'state': issue['state'].upper(), 'labels': [{'name': n} for n in issue['labels']],
+            'assignees': issue.get('assignees') or []}
+    script = '''const e = await import(process.argv[1]); const c = await import(process.argv[2]);
+      const why = await c.withTicketHold(Number(process.argv[3]),
+        claim => e.migrationHold(JSON.parse(process.argv[4]), claim), process.argv[5]);
+      console.log(JSON.stringify(why));'''
+    out = subprocess.run(['node', '--experimental-strip-types', '--input-type=module', '-e', script,
+                          (root / 'scripts' / 'wayfinder_engine.mts').as_uri(),
+                          (root / '.sandcastle' / 'deepagents-cutover.mts').as_uri(),
+                          str(TICKET), json.dumps(view), str(v2.claims_root)],
+                         check=True, capture_output=True, text=True).stdout
+    return json.loads(out.strip().splitlines()[-1])
+
+
+def test_release_after_merge_ends_hold_on_github_and_is_not_redispatched(queued):
+    from conftest import FAKE, MODELS
+
+    from pilot1742.executor import load_unit, open_v2_run, release_claim
+    v2, cutover, intake, signer = queued
+    unit = intake.register(TICKET)
+    authorize(v2, cutover, unit, signer)
+    run = open_v2_run(v2.home, unit, load_unit(v2.home, unit.run_id)[1], executor(v2, cutover, unit), MODELS,
+                      launcher=FAKE, source_repo=v2.source)
+    v2.to_pass(run)
+    pr = run.publish_candidate()['pr']['number']
+    run.release()
+    assert 'deepagents' in v2.github.issues[TICKET]['labels']
+    assert '正由' in engine_hold(v2), 'awaiting_merge 期间引擎仍视为持有'
+    v2.github.merge_pull(pr)
+    assert intake.once(lambda _unit: pytest.fail('merged run restarted'))[TICKET]['delivery_phase'] == 'merged'
+    assert '正由' in engine_hold(v2), '合入不等于释放'
+
+    released = release_claim(intake.claims, v2.gateway(), TICKET, unit.run_id, '已合入')
+    assert released.state == 'released' and not released.mirror_label
+    assert 'deepagents' not in v2.github.issues[TICKET]['labels'], '释放摘镜像，持有结束在 GitHub 上可见'
+    assert 'deepagents:queue' in v2.github.issues[TICKET]['labels'], '释放只摘镜像'
+    assert engine_hold(v2) is None, '真实释放之后引擎可迁移'
+    again = release_claim(intake.claims, v2.gateway(), TICKET, unit.run_id, '重试')
+    assert again.state == 'released' and not again.mirror_label, '释放可重试'
+
+    rows = intake.once(lambda _unit: pytest.fail('merged delivery re-dispatched after release'))
+    assert rows[TICKET]['phase'] == 'awaiting_human' and '已合入' in rows[TICKET]['reason']
+    assert len(list((v2.home / 'units').glob('*.json'))) == 1
+
+
+def test_release_after_unobserved_merge_is_not_redispatched(queued):
+    from conftest import FAKE, MODELS
+
+    from pilot1742.executor import load_unit, open_v2_run, release_claim
+    v2, cutover, intake, signer = queued
+    unit = intake.register(TICKET)
+    authorize(v2, cutover, unit, signer)
+    run = open_v2_run(v2.home, unit, load_unit(v2.home, unit.run_id)[1], executor(v2, cutover, unit), MODELS,
+                      launcher=FAKE, source_repo=v2.source)
+    v2.to_pass(run)
+    v2.github.merge_pull(run.publish_candidate()['pr']['number'])
+    run.release()
+    release_claim(intake.claims, v2.gateway(), TICKET, unit.run_id, '释放早于队列观察到合入')
+    rows = intake.once(lambda _unit: pytest.fail('merged delivery re-dispatched after release'))
+    assert rows[TICKET]['phase'] == 'awaiting_human' and '已合入' in rows[TICKET]['reason']
+
+
+def test_registered_rerun_is_not_executed_after_earlier_delivery_merges(queued):
+    from conftest import FAKE, MODELS
+
+    from pilot1742.executor import load_unit, open_v2_run, release_claim
+    v2, cutover, intake, signer = queued
+    unit = intake.register(TICKET)
+    authorize(v2, cutover, unit, signer)
+    run = open_v2_run(v2.home, unit, load_unit(v2.home, unit.run_id)[1], executor(v2, cutover, unit), MODELS,
+                      launcher=FAKE, source_repo=v2.source)
+    v2.to_pass(run)
+    pr = run.publish_candidate()['pr']['number']
+    run.release()
+    release_claim(intake.claims, v2.gateway(), TICKET, unit.run_id, '主控退回')
+    assert intake.register(TICKET).run_id == f't{TICKET}-2'
+    v2.github.merge_pull(pr)
+    rows = intake.once(lambda _unit: pytest.fail('registered rerun executed after earlier delivery merged'))
+    assert rows[TICKET]['phase'] == 'awaiting_human' and '已合入' in rows[TICKET]['reason']
+
+
+def test_release_keeps_mirror_until_drained_and_old_release_cannot_strip_new_generation(queued):
+    import fcntl
+    import os
+
+    from pilot1742.claims import ClaimRefused
+    from pilot1742.executor import release_claim
+    v2, cutover, intake, signer = queued
+    unit = intake.register(TICKET)
+    authorize(v2, cutover, unit, signer)
+    run_dir = PilotRun.run_dir(v2.home, unit.run_id)
+    assert executor(v2, cutover, unit).claim(run_dir).state == 'active'
+    controller = os.open(run_dir / 'owner.lock', os.O_RDWR | os.O_CREAT, 0o600)
+    fcntl.flock(controller, fcntl.LOCK_EX)
+    try:
+        pending = release_claim(intake.claims, v2.gateway(), TICKET, unit.run_id, '主控退回')
+        assert pending.state == 'released' and pending.mirror_label, '控制进程未排空：记 released 但镜像保留'
+        assert 'deepagents' in v2.github.issues[TICKET]['labels']
+        assert '镜像' in engine_hold(v2), '释放未完成时引擎继续等待'
+    finally:
+        os.close(controller)
+    done = release_claim(intake.claims, v2.gateway(), TICKET, unit.run_id, '主控退回')
+    assert not done.mirror_label and 'deepagents' not in v2.github.issues[TICKET]['labels'], '排空后重试完成释放'
+    assert engine_hold(v2) is None
+
+    second = intake.register(TICKET)
+    assert second.run_id == f't{TICKET}-2'
+    second_dir = PilotRun.run_dir(v2.home, second.run_id)
+    with pytest.raises(ApprovalRequired):
+        executor(v2, cutover, second).claim(second_dir)
+    signer.publish(second_dir / 'approvals' / 'spec_authorization.request', Decision.APPROVE)
+    assert executor(v2, cutover, second).claim(second_dir).generation == 2
+    assert 'deepagents' in v2.github.issues[TICKET]['labels']
+    before = v2.writes()
+    with pytest.raises(ClaimRefused):
+        release_claim(intake.claims, v2.gateway(), TICKET, unit.run_id, '旧释放重试')
+    assert v2.writes() == before and 'deepagents' in v2.github.issues[TICKET]['labels'], '旧释放不碰新代次镜像'
+    assert '正由' in engine_hold(v2)
