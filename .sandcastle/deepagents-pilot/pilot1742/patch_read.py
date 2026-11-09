@@ -19,9 +19,10 @@ Codex 记录的命令形如 `/bin/bash -lc '<脚本>'`。这里按 bash 语法�
 - git 之前只有不输出的段（_setup），用 `&&`、`;` 或换行接上；git 之后只有经管道串联的纯过滤器（_FILTERS），
   管道就是脚本的结尾。别的命令（echo、printf、cat 文件、tee、python、另一条 git……）只要出现，整条命令就不算：
   aggregated_output 是整条命令的输出，那些段印出的改动行与 git 印出的分不开（#1969 正式审查 kimi BLOCK）。
-  唯一的例外（PR #2018 run 45a4c22b）：不接管道的 git diff 之后，用 `;`/`&&`/换行接只印提交元数据的
-  `git show`/`git log`（_trailing）。这时证据只在输出开头、合 git diff 格式的那段里找（_leading_diff），
-  diff 失败或没印东西时后一段的输出当不了证据。
+  唯一的例外（PR #2018 run 45a4c22b）：整个 PR 的 git diff（merge-base 对 head，不带 pathspec、不接管道，
+  选项只在 _PLAIN_DIFF 里）之后，用 `;`/`&&`/换行接白名单里只印提交元数据的 `git show`/`git log`（_trailing）。
+  PR 非空，真实补丁必定先印出；证据只在输出开头、合 git diff 格式的那段里找（_leading_diff），diff 失败时
+  开头是报错，后一段的输出当不了证据（#2022 kimi、opus BLOCK）。
 
 命令文本只说明脚本打算让 git 输出补丁，不说明它真的输出了：`if false; then git diff …; fi` 没执行，
 `exec >/dev/null`、`export GIT_EXTERNAL_DIFF=true` 改的是之后命令的环境，textconv 保留 `diff --git`/`@@` 头而把内容
@@ -690,52 +691,50 @@ def _patch_read(command: str, head_sha: str, merge_base_sha: str, base_sha: str)
               and all(_filter(e) for e in expanded[k + 1:]))
         return read if ok else None
     # git diff 之后用 `;`/`&&`/换行接上只印提交元数据的 git 段（PR #2018 run 45a4c22b opus：
-    # `git diff <mb> <head>; git show --no-patch --format=… <head>`）。diff 自己不接管道，输出原样在最前面，
-    # 证据只在开头那段 diff 里找（leading）；diff 失败或没印东西时，后一段的输出当不了证据。
+    # `git diff <mb> <head>; git show --no-patch --format=… <head>`）。前一段须是整个 PR 的 diff（不带 pathspec、
+    # 只带 _PLAIN_DIFF 里的选项）：PR 非空，真实补丁就必定先于后一段印出；diff 失败时开头是报错。证据只在开头
+    # 那段 diff 里找（leading）。#2022 两位审查 BLOCK：带 `-- nope` 时 diff 什么都不印，`%B` 印出的提交说明就成了
+    # 开头那段；后一段按黑名单放行时，`--binary` 隐含 `--patch`、`--show-linear-break=<文字>` 印审查员写的字。
     call = _git_call(expanded[k].argv)
-    if call is None or call.subcommand != "diff" or commands[k].op not in ("&&", ";", "\n"):
+    if (call is None or call.subcommand != "diff" or read.kind != "patch" or "--" in call.rest
+            or not all(_PLAIN_DIFF.fullmatch(o) for o in call.options) or commands[k].op not in ("&&", ";", "\n")):
         return None
-    j = k + 1
-    while j < len(commands):
-        if not _trailing(expanded[j], revisions):
+    for j in range(k + 1, len(commands)):
+        if commands[j].op not in ("&&", ";", "\n", "") or not _trailing(expanded[j], revisions):
             return None
-        while commands[j].op in _PIPE and j + 1 < len(commands):
-            j += 1
-            if not _filter(expanded[j]):
-                return None
-        if commands[j].op not in ("&&", ";", "\n", ""):
-            return None
-        j += 1
     return replace(read, leading=True)
 
 
-_NO_PATCH_DIFF = re.compile(r"--cc|-c|-m|--remerge-diff(?:=.*)?|--diff-merges(?:=.*)?|-L.*|--full-diff|--output(?:=.*)?|"
-                            r"--line-prefix(?:=.*)?|--format|--pretty|--ext-diff|--textconv|--no-index|--date=(?:format|format-local):.*")
-# 只由占位符拼成的格式串：印出的只有 git 生成的提交元数据，没有审查员能写进去的字面文字（`%x2b` 这类按码点印字符的不认）
-_PLACEHOLDER_FORMAT = re.compile(r"(?:t?format:)?(?:%(?:[HhTtPpsbBNnfdD%]|[ac][nNeElLdDrtiIsh])|[ \t:,|/()\[\]-])*")
+# 复合形式里前一段 diff 只认的选项：都不改补丁的范围与内容（外部 diff、textconv、颜色关掉；上下文行数、显式 -p）
+_PLAIN_DIFF = re.compile(r"--no-ext-diff|--no-textconv|--no-color|--color=never|-U\d+|--unified=\d+|-p|-u|--patch")
+# 后一段格式串只能由这些占位符和分隔符拼成：印出的只有 git 生成的提交元数据，没有审查员能写进去的字面文字
+_PLACEHOLDER_FORMAT = re.compile(r"(?:%(?:[HhTtPpsbBn%]|[ac](?:n|e|d|I|i))|[ \t:,|/()\[\]-])*")
 
 
 def _trailing(command: _Expanded, revisions: _Revisions) -> bool:
-    """冻结补丁的 git diff 之后接的段：`git show`/`git log`，不输出补丁，位置参数只能是 head、merge-base、base
-    及其祖先写法或它们之间的范围（不认识的 SHA 可能是 blob，`git show <blob>` 照印内容），格式串只用占位符，
-    stdout 不转向。印的是提交号、作者、提交说明这些 git 自己的元数据。"""
-    call = _git_call(command.argv)
-    if (call is None or call.subcommand not in ("show", "log") or any(not op.startswith("2") for op, _ in command.redirects)
-            or _OPAQUE in "".join(call.rest)):
+    """冻结补丁的 git diff 之后接的段，白名单：`git show|log`，不带全局选项、重定向与管道；选项只有 `-s`/`--no-patch`
+    （至少一个）和恰好一个 `--format=<占位符>`/`--pretty=[t]format:<占位符>`；位置参数只能是 head、merge-base、base
+    本身。别的选项（`--binary`、`--show-linear-break`、`-p`、`--stat`、`-c` 覆盖……）一律整条不认。"""
+    argv = command.argv
+    if command.redirects or len(argv) < 3 or argv[0] not in ("git", "/usr/bin/git") or argv[1] not in ("show", "log"):
         return False
-    for arg in call.positional:
-        left, dots, right = arg.partition("..")
-        sides = [left or "HEAD", right.lstrip(".") or "HEAD"] if dots else [arg]
-        if not all(revisions.kind(side) == "head" or revisions.kind(side) in _KNOWN for side in sides):
-            return False
-    for option in call.options:
-        name, eq, value = option.partition("=")
-        if name in ("--format", "--pretty") and eq:
-            if not (re.fullmatch(_NAMED_FORMAT, value) or _PLACEHOLDER_FORMAT.fullmatch(value)):
+    formats, quiet, revs = 0, False, 0
+    for arg in argv[2:]:
+        name, eq, value = arg.partition("=")
+        if arg in ("-s", "--no-patch"):
+            quiet = True
+        elif eq and name in ("--format", "--pretty"):
+            body = re.sub(r"^t?format:", "", value) if name == "--format" else value.removeprefix("t").removeprefix("format:")
+            if name == "--pretty" and not value.startswith(("format:", "tformat:")):
                 return False
-        elif _NO_PATCH_DIFF.fullmatch(option) or _PATCH_ON.fullmatch(option):
+            if not _PLACEHOLDER_FORMAT.fullmatch(body):
+                return False
+            formats += 1
+        elif revisions.kind(arg) in ("head", "merge-base", "base"):
+            revs += 1
+        else:
             return False
-    return call.subcommand == "log" or not _emits_patch("show", call.options)
+    return quiet and formats == 1 and revs >= 1
 
 
 def _setup(command: _Expanded) -> bool:

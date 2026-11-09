@@ -877,41 +877,61 @@ NOT_A_PATCH_READ = {
     "grep-count": [lambda t: _command(f"git diff {t.merge_base_sha} {t.head_sha} -- nope | grep -c . | cat", output="0\n")],
     "grep-only-matching": [lambda t: _command(
         f"git show {t.head_sha}:'x+0' 2>&1 | grep -o '+0'", output="+0\n")],
-    # PR #2018 run 45a4c22b：diff 之后接只印提交元数据的 git 段可以算，但证据只在开头那段 diff 里找
+    # PR #2018 run 45a4c22b：整个 PR 的 diff 之后接只印提交元数据的 git 段可以算，证据只在开头那段 diff 里找
     "diff-empty-then-show-metadata": [lambda t: _command(
         f"git diff {t.merge_base_sha} {t.head_sha} -- nope; git show --no-patch --format='%H%n%an%n%B' {t.head_sha}",
         output=_meta(t))],
     "diff-failed-then-show-metadata": [lambda t: _command(
         f"git diff {t.merge_base_sha} {t.head_sha}; git show --no-patch --format='%H%n%B' {t.head_sha}",
         output=f"fatal: unable to read {t.head_sha}\n{_meta(t)}{LANE_PATCH}")],
-    "diff-then-format-literal-text": [lambda t: _command(
-        f"git diff {t.merge_base_sha} {t.head_sha} -- nope; git show -s --format='diff --git a/changed-0 b/changed-0%n"
-        f"@@ -0,0 +1 @@%n+0' {t.head_sha}", output=LANE_PATCH)],
-    "diff-then-format-hex-char": [lambda t: _command(
-        f"git diff {t.merge_base_sha} {t.head_sha} -- nope; git log -1 --format=%x2b0 {t.head_sha}", output="+0\n")],
-    "diff-then-date-format-text": [lambda t: _command(
-        f"git diff {t.merge_base_sha} {t.head_sha} -- nope; git log -1 --date=format:+0 {t.head_sha}", output="+0\n")],
-    "diff-then-show-blob": [lambda t: _command(
-        f"git diff {t.merge_base_sha} {t.head_sha} -- nope; git show --no-patch {t.head_sha}:changed-0", output="0\n")],
-    "diff-then-show-unknown-object": [lambda t: _command(
-        f"git diff {t.merge_base_sha} {t.head_sha} -- nope; git show --no-patch {'e' * 40}", output="0\n")],
-    "diff-then-log-patch": [lambda t: _command(
-        f"git diff {t.merge_base_sha} {t.head_sha} -- nope; git log -p -1 {t.head_sha}", output=LANE_PATCH)],
-    "diff-then-show-cc": [lambda t: _command(
-        f"git diff {t.merge_base_sha} {t.head_sha} -- nope; git show --no-patch --cc {t.head_sha}", output=LANE_PATCH)],
-    "diff-then-show-config": [lambda t: _command(
-        f"git diff {t.merge_base_sha} {t.head_sha} -- nope; git -c format.pretty=format:+0 log -1 {t.head_sha}",
-        output="+0\n")],
-    "diff-then-show-redirected-in": [lambda t: _command(
-        f"git diff {t.merge_base_sha} {t.head_sha} -- nope; git log --stdin -1 </tmp/revs", output="+0\n")],
+    # #2022 kimi BLOCK：pathspec 让 diff 什么都不印，提交说明写成补丁的样子就成了「开头那段 diff」
+    "kimi-pathspec-then-patch-shaped-body": [lambda t: _command(
+        f"git diff {t.merge_base_sha} {t.head_sha} -- nope; git show --no-patch --format=%B {t.head_sha}",
+        output=LANE_PATCH)],
+    "diff-option-then-show": [lambda t: _command(
+        f"git diff -R {t.merge_base_sha} {t.head_sha}; git show -s --format=%B {t.head_sha}", output=LANE_PATCH)],
+    "diff-parent-then-show": [lambda t: _command(
+        f"git diff {t.head_sha}~1 {t.head_sha}; git show -s --format=%B {t.head_sha}", output=LANE_PATCH)],
+    # #2022 opus BLOCK：后一段按黑名单放行时未知选项默认通过；下面这些在整个 PR 的 diff 之后也一律不认
+    "opus-log-binary": [lambda t: _command(
+        f"git diff {t.merge_base_sha} {t.head_sha}; git log --format= --binary {t.merge_base_sha}", output=LANE_PATCH)],
+    "opus-show-linear-break": [lambda t: _command(
+        f"git diff {t.merge_base_sha} {t.head_sha}; git log -s --format=%H --show-linear-break=+0 {t.head_sha}",
+        output=LANE_PATCH)],
+    **{f"trailing-{name}": [lambda t, tail=tail: _command(
+        f"git diff {t.merge_base_sha} {t.head_sha}; git {tail.format(h=t.head_sha, b=t.merge_base_sha)}",
+        output=LANE_PATCH)] for name, tail in {
+        "format-literal-text": "show -s --format='diff --git a/changed-0 b/changed-0' {h}",
+        "format-hex-char": "show -s --format=%x2b0 {h}",
+        "date-format-text": "log -1 -s --format=%ad --date=format:+0 {h}",
+        "show-blob": "show --no-patch --format=%H {h}:changed-0",
+        "unknown-object": "show --no-patch --format=%H " + "e" * 40,
+        "ancestor": "show --no-patch --format=%B {h}~1",
+        "range": "log -s --format=%B {b}..{h}",
+        "log-patch": "log -p -s --format=%B {h}",
+        "show-cc": "show --no-patch --cc --format=%B {h}",
+        "stat": "show --stat --format=%B {h}",
+        "name-only": "show -s --name-only --format=%B {h}",
+        "count": "log -1 -s --format=%B {h}",
+        "config": "-c format.pretty=format:+0 show -s --format=%B {h}",
+        "no-quiet": "show --format=%B {h}",
+        "no-format": "show -s {h}",
+        "two-formats": "show -s --format=%H --format=%B {h}",
+        "named-pretty": "show -s --pretty=fuller {h}",
+        "redirected-in": "log -s --format=%B --stdin </tmp/revs",
+        "piped": "show -s --format=%B {h} | head",
+        "then-echo": "show -s --format=%B {h}; echo +0",
+    }.items()},
     "diff-or-show": [lambda t: _command(
-        f"git diff {t.merge_base_sha} {t.head_sha} || git show --no-patch {t.head_sha}", output=_meta(t))],
+        f"git diff {t.merge_base_sha} {t.head_sha} || git show --no-patch --format=%B {t.head_sha}", output=_meta(t))],
     "piped-diff-then-show": [lambda t: _command(
-        f"git diff {t.merge_base_sha} {t.head_sha} -- nope | cat; git show --no-patch {t.head_sha}", output=_meta(t))],
+        f"git diff {t.merge_base_sha} {t.head_sha} | cat; git show --no-patch --format=%B {t.head_sha}",
+        output=LANE_PATCH)],
     "show-blob-then-log": [lambda t: _command(
-        f"git show {t.head_sha}:README; git log -1 --format=%B {t.head_sha}", output=_meta(t))],
-    "diff-then-show-then-echo": [lambda t: _command(
-        f"git diff {t.merge_base_sha} {t.head_sha} -- nope; git show -s {t.head_sha}; echo +0", output="+0\n")],
+        f"git show {t.head_sha}:changed-0; git log -1 --format=%B {t.head_sha}", output="0\n")],
+    "diff-and-log-range-piped": [lambda t: _command(
+        f"git diff {t.merge_base_sha} {t.head_sha} && git log --format='%H %s' --date=iso "
+        f"{t.merge_base_sha}..{t.head_sha} 2>&1 | head -40", output=LANE_PATCH + _meta(t))],
 }
 PATCH_READ = {
     "range": [lambda t: _command(f"cd /review && git diff --no-ext-diff --no-textconv {t.merge_base_sha} {t.head_sha} | head")],
@@ -958,9 +978,9 @@ PATCH_READ = {
     "diff-then-show-metadata": [lambda t: _command(
         f"cd /review && git diff --no-ext-diff --no-textconv {t.merge_base_sha} {t.head_sha}; "
         f"git show --no-patch --format='%H%n%an%n%B' {t.head_sha}", output=LANE_PATCH + _meta(t))],
-    "diff-and-log-range-piped": [lambda t: _command(
-        f"git diff {t.merge_base_sha} {t.head_sha} && git log --format='%H %s' --date=iso "
-        f"{t.merge_base_sha}..{t.head_sha} 2>&1 | head -40", output=LANE_PATCH + _meta(t))],
+    "diff-and-show-short-sha": [lambda t: _command(
+        f"git diff --no-color -U5 {t.merge_base_sha} {t.head_sha} && git log -s --pretty=tformat:'%h %an %s' "
+        f"{t.head_sha[:8]}", output=LANE_PATCH + _meta(t))],
 }
 
 
@@ -1047,6 +1067,15 @@ def test_diff_then_commit_metadata_reads_patch_from_diff_segment_only():
     assert not reads_candidate_patch(PR2018_COMMAND, f"fatal: bad object {PR2018_HEAD}\n{PR2018_SHOW}", patch)
     only_show = f"/bin/bash -lc \"cd /review && git show --no-patch --format='%H%n%an%n%B' {PR2018_HEAD}\""
     assert not reads_candidate_patch(only_show, PR2018_DIFF + PR2018_SHOW, patch)
+    # #2022 kimi BLOCK：带 pathspec 的 diff 可以什么都不印，提交说明里写成补丁样子的文字就会排在开头
+    kimi = (f"/bin/bash -lc \"git diff {PR2018_MB} {PR2018_HEAD} -- nope; "
+            f"git show --no-patch --format=%B {PR2018_HEAD}\"")
+    assert not reads_candidate_patch(kimi, PR2018_DIFF, patch)
+    # #2022 opus BLOCK：`--binary` 隐含 `--patch`，`--show-linear-break` 印审查员写的文字；后一段只认白名单
+    for tail in (f"git log --format= --binary {PR2018_MB}",
+                 f"git log -s --format=%H --show-linear-break=+x {PR2018_HEAD}"):
+        command = f"/bin/bash -lc \"git diff {PR2018_MB} {PR2018_HEAD}; {tail}\""
+        assert not reads_candidate_patch(command, PR2018_DIFF, patch)
     # 没有后一段时照旧按整段输出判
     alone = f"/bin/bash -lc 'git diff --no-ext-diff --no-textconv {PR2018_MB} {PR2018_HEAD}'"
     assert reads_candidate_patch(alone, PR2018_DIFF, patch)
