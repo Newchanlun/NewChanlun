@@ -66,3 +66,11 @@ X1（安全缺口，与 `026:26` 相悖）；X2（缺操作者最终权）；一
 ## #1599 批复与受影响清单
 
 [用户批复](https://github.com/xy7365527-lang/NewChanlun/issues/1599#issuecomment-6403278294)；[受影响清单](../../.chanlun/review-results/issue1599-policy-20261026/affected-code.md)含固定基线、Rust/Python/Lean 接缝及下游未承接项。本次为政策文书，不声称实现或关票；新增自由度为 `[新缠论:选择]`，既裁不变量不变。
+
+## 修订（#1540，拒发期间的续做，2026-11-09）
+
+（append-only：以上各节原文不改。依 #1909 代理独审裁定，正本 [ADR 0062](0062-fu18-venue-account-permission-binding.md) 裁定七。）
+
+**适用范围：仅 `P1-hl-testnet`（`experiment`）。** production（P2）下已持久的退出授权（含风险条件与手动急停）在拒发期间如何处理，随 P2 激活另裁（#1561 后继，P 类），本条不适用。
+
+在上述范围内，裁定五（:48）「再于同一授权 id 下续做」在 X 发送门拒发期间不执行：已持久的退出授权保持待续，不撤销、不改判据；只读对账照常。到下一个通过发送门的 `writer_epoch` 再以同一授权 id 续做。
