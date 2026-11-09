@@ -225,7 +225,7 @@ jobs:
   #   rust-test-s-session-coverage    汇总各片产物，再断言一次并集 == 全集、各片执行集 == 分配集
   #   rust-test-s-session-extras (组) s_session 的 TB-02-C、库/集成测试、TestOnly 特性增量、v3 history（矩阵作业
   #                                   rust-test-s-session-extra-groups，结论由 ci-ok 直接判定）
-  #   rust-test-backtest-bin          backtest_bin feature 的库测试
+  #   rust-test-production-session    生产入口测试 + backtest_bin feature 的库测试（#1875 合并）
   # 拆前 s_session bin 一步 89 分钟里，执行占 88 分钟、编译约 1 分钟；其中两条测试独占尾部
   # （tb02w_killed_case_two_scan_budget_resume_and_recover 约 69 分钟、tb02c_persistent_first_kind_and_normal_recovery
   # 约 49 分钟），其余 505 条在开跑 41 分钟内全部结束。分片后最长 job 的下限即最慢那条测试本身。
@@ -776,32 +776,20 @@ jobs:
       # production_session_testonly：入口测试显式走 S 的 TestOnly 诊断 theta 臂（P0 未签期间正式配置必拒，
       #   由 unsigned_p0_refuses_s_serve_* 两条测试锁住）；生产构建不含该臂，遇开关即拒绝启动。
       - name: cargo test — production_session_entry
+        if: ${{ !cancelled() }}
         run: ../.github/scripts/run-cargo-with-telemetry.sh cargo test --release --locked --features production_session_testonly --test production_session_entry --jobs "${CI_CARGO_JOBS:-1}" -- --test-threads 1
 
       # 纯生产构建（只开 production_session，#1769 返修 M-3/M-4）：编译生产 launcher、X 骨架与 S bin 的生产 cfg
       #   （含 S_PASS 不转交 TestOnly 开关的分支），并真实执行拒绝类子集：P0 未签拒启两条、生产 S 遇
       #   S_THETA_DIAGNOSTIC_TESTONLY=1 即拒启、生产 launcher 不转交该开关。需 S 开门的测试在此构建由 cfg 排除。
       - name: cargo test — production_session_entry（纯生产构建）
+        if: ${{ !cancelled() }}
         run: ../.github/scripts/run-cargo-with-telemetry.sh cargo test --release --locked --features production_session --test production_session_entry --jobs "${CI_CARGO_JOBS:-1}" -- --test-threads 1
 
-  rust-test-backtest-bin:
-    needs: changes
-    if: needs.changes.outputs.rust == 'true'
-    runs-on: ${{ (vars.CI_BOAT_RUNNERS != 'off' && github.actor == 'xy7365527-lang' && github.triggering_actor == 'xy7365527-lang' && (github.event_name != 'pull_request' || github.event.pull_request.user.login == 'xy7365527-lang')) && 'boat-large/from=hc-ci-slim' || 'ubuntu-latest' }}
-    # 拆前本步约 9.3 分钟（run 39358379553）。
-    timeout-minutes: 45
-    env:
-      CARGO_INCREMENTAL: "0"
-    defaults:
-      run:
-        working-directory: rust
-
-    steps:
-      - *rust-checkout
-
-      - uses: ./.github/actions/rust-job-setup
-
+      # #1875：原 rust-test-backtest-bin 作业并入本作业（各约 2 min，Boat 上每轮少起 1 台机器）；三步都带 !cancelled()，
+      #   前一步失败不跳过后一步，失败照样使本作业失败。
       - name: cargo test — backtest_bin feature 新增的库测试
+        if: ${{ !cancelled() }}
         # 2026-08-16 磁盘实撞（#993 收口轮）：三轮 runner 爆盘（No space left on device）——
         # --all-targets 在 feature 下额外编 56 个探针 bin 的 test 目标（各链 nautilus 套件，
         # 本地实测 debug 全 target 55G ⟹ 14G 盘必爆）。改 --lib；tests/ 与 bins 由 default 步覆盖。
@@ -1406,7 +1394,6 @@ jobs:
       - rust-test-s-session-coverage
       - rust-test-s-session-extra-groups
       - rust-test-production-session
-      - rust-test-backtest-bin
       - s-sequence-1488
       - s-fields-native-1488
       - s-observer
@@ -1425,7 +1412,7 @@ jobs:
           rust = (needs.get("changes") or {}).get("outputs", {}).get("rust")
           # 只有 Rust 作业可以 skipped，且必须是 changes 明确判定 rust=false。
           rust_jobs = {"rust-check", "rust-test-default", "rust-test-s-session", "rust-test-s-session-coverage",
-                       "rust-test-s-session-extra-groups", "rust-test-production-session", "rust-test-backtest-bin",
+                       "rust-test-s-session-extra-groups", "rust-test-production-session",
                        "s-sequence-1488", "s-fields-native-1488"}
           bad = {name: r for name, r in results.items()
                  if not (r == "success" or (r == "skipped" and name in rust_jobs and rust == "false"))}
