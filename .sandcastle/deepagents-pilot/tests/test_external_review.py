@@ -1018,7 +1018,7 @@ def test_common_line_in_unchanged_file_is_not_a_patch_read():
 
 
 # PR #2018 run 45a4c22b a1：opus 的读取被判未读、两个 PASS 整轮记 error。冻结补丁与输出取自真实日志（截短）
-PR2018_HEAD, PR2018_MB = "0b07c6b0a6368dba9f46ee3b00d3dcfc4d390828", "83c4d9c975126f74f08fee556a271144f4cc24a9"
+PR2018_HEAD, PR2018_MB = "0b07c6b0" * 5, "83c4d9c9" * 5  # 真实 SHA 的前缀；整串 40 位十六进制会被 DevSkim DS173237 当成密钥
 PR2018_CHANGED = "  #   rust-test-production-session    生产入口测试 + backtest_bin feature 的库测试（#1875 合并）"
 PR2018_FROZEN = (
     "diff --git a/.github/workflows/ci.yml b/.github/workflows/ci.yml\nindex 1992713934..cd7c2277d1 100644\n"
