@@ -213,7 +213,36 @@ impl Fixture {
         real_s: Option<&Value>,
         s_refs: Option<&Value>,
     ) -> Self {
+        Self::build_with(
+            cap,
+            fault,
+            slot_spec,
+            c4a,
+            v3,
+            sr_expansion,
+            carriers,
+            real_s,
+            s_refs,
+            false,
+        )
+    }
+    /// `exact` 选 `tb03b-finance/5`（#1407 C1）：在 `/1` 夹具上加冻结 `exact_release`、计划 `exact`、
+    /// 单位 S 桩（B Prepare 与 E Reserve 可经 `service::handle`）、精确命令操作权限与消息时钟。
+    #[allow(clippy::too_many_arguments)]
+    fn build_with(
+        cap: &str,
+        fault: Option<(&str, &str)>,
+        slot_spec: &[(&str, &[&str])],
+        c4a: Option<(bool, bool)>,
+        v3: Option<(&str, bool)>,
+        sr_expansion: Option<Value>,
+        carriers: Option<&[PathBuf]>,
+        real_s: Option<&Value>,
+        s_refs: Option<&Value>,
+        exact: bool,
+    ) -> Self {
         let rev = match (carriers.is_some(), v3.is_some()) {
+            _ if exact => "tb03b-finance/5",
             (false, false) => REV,
             (false, true) => REV_V3,
             (true, false) => REV_V2,
@@ -348,6 +377,9 @@ impl Fixture {
         if v3.is_some() {
             data["policy"]["profile_id"] = json!(TEST_PROFILE);
         }
+        if exact {
+            exact_release::decorate_input(&mut data);
+        }
         let (ip, ih) = save(&dir, "input.json", &data);
         let source = json!({"source_namespace":"test","source_epoch":"one","producer_id":"unit","producer_epoch":"1"});
         let mut auth = source.clone();
@@ -417,7 +449,7 @@ impl Fixture {
                 json!({"received_ns":"93","first_known_ns":"94","commit_ns":"94"});
         }
         let mut manifest = json!({"schema_revision":"economic-manifest/1","session_id":"tb03b-unit","session_generation":"1","e":{"db":db_of("e", 0),"socket":dir.join("e.sock")},"chongs":routes,"authorized_sources":[auth],"resources":{"max_frame_bytes":"16777216","read_timeout_ms":"1000","write_timeout_ms":"1000","response_timeout_ms":"3000","queue_capacity":"4","max_connections":"4"},"clock":{"kind":"TestOnly","plan":{"init_ns":"1","recover_ns":["1000","2000"],"messages":clocks}},"voice_binding":{"schema_revision":"voice-binding/1","authorities":authorities},"finance":{"schema_revision":rev,"input_path":ip,"input_sha256":ih,"coordinator_source":source,"structure":{"binary":"/unit-unavailable-S-binary","binary_sha256":hash(&json!("unit")),"db":dir.join("s.db"),"session_id":"tb03b-unit","session_generation":"1","writer_epoch":"1"}}});
-        if v3.is_some() {
+        if v3.is_some() || exact {
             let (basis_path, _) = save(&dir, "s-unit-basis-stub.json", &basis);
             let stub = dir.join("s-unit-stub.sh");
             crate::economic_session::write_test_executable(
@@ -510,6 +542,9 @@ impl Fixture {
                     clocks[format!("{prefix}-{}", k + 1)] = json!({"received_ns":n.to_string(),"first_known_ns":n.to_string(),"commit_ns":(n+1).to_string()});
                 }
             }
+        }
+        if exact {
+            exact_release::decorate_manifest(&mut manifest);
         }
         if let Some((message, phase)) = fault {
             manifest["test_only_fault"] = json!({"message_id":message,"phase":phase,"marker_path":dir.join("fault-marker.json")});
@@ -2228,3 +2263,5 @@ mod real_s;
 
 #[path = "sr_expansion_tests.rs"]
 mod sr_expansion;
+#[path = "exact_release_tests.rs"]
+mod exact_release;
