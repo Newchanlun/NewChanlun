@@ -10,6 +10,7 @@
 - 资金、账户、凭据类硬门票（ADR 0041「授权来源与生效边界」）由引擎挂 `ready-for-human` 交还用户；用户在票上以首行「退回：签署」评论、每项一行写 `- <字段>=<签署值>；有效域=<有效域>`，下一轮整链重跑（格式见 `.sandcastle/docs/graph-engineering.md`）；返修用的其他「退回：…」评论不算签署；主控不代发。签署、退回与待签标签归属只认编排账号（`.sandcastle/queue-policy.json` 的 `orchestrator_login`）的评论，其他账号的同形评论无效；代理与用户共用这个账号，账号内是谁发的无法机器区分（现有信任模型，未改变）。
 - main 的合入不设人工批准：分支保护强制 `deepagents/review`（正式非作者双审 success）与 `ci-ok`（适用 CI 全绿）并要求追平 main，满足后代理可合入；工蜂、执行器与 Sandcastle 实施者不合入，只开 PR。人工确认只保留两类：实盘下单与资金、密钥与凭证；CI 与分支保护配置的改动不需要人工确认（2026-11-08 用户裁定；范围与原话出处见 `.sandcastle/docs/graph-engineering.md`「人工确认只保留两类」）。Deep Agents 生产链使用异家族独审与 `deepagents/review`。审查依据候选补丁和有效上下文，显式重审不得被历史 PASS 覆盖。
 - 实施、审查和发布沿现有入口；恢复沿同一任务身份对账，不重复派工或提交。不要另造批准门、状态板或平行调度器。
+- goal 事件：正式 GOAL_SET/SUPERSEDE 由 Lead 直接 append 到 `.chanlun/goals/events.jsonl`（`scripts/goal_events.py` 只出草稿），随后运行 `python scripts/goal_reducer.py` 验证：它读取 events.jsonl，打印当前 goal 投影（JSON）。退出码 0 = 正常，1 = 有损坏行被跳过，2 = 文件缺失或没有可解析事件。
 
 ## 运行边界
 

@@ -36,7 +36,7 @@
 
 - 上游同步（`setup-matt-pocock-skills`）后必须重新跑一遍本清单的 diff 核验，把「现行」与「已追平」两表更新到最新事实；新钦定的定制同步登记到「现行」表。
 - 上游形态参照物（2026-08-06 全局同步副本）现备份于 `~/.agents/skill-conflict-backup-20260818/`（不入仓）。
-- 同步来源与流程见 #2026-08-14 roster 记录（`.chanlun/agent-roster-20260814.md`「Matt Pocock skills 更新」行）。
+- 同步来源与流程见 2026-08-14 roster 记录「Matt Pocock skills 更新」行（第 10 行）。该 roster 已随 #1920 归档出仓，原件按原路径存于 `/Volumes/AgentStorage/restart-20261107/slim/remaining-archive/implementation/historical-178-f43fac8f.tar`（解包副本 `unpacked/.chanlun/agent-roster-20260814.md`），也可用 `git show 18c8569c9d:.chanlun/agent-roster-20260814.md` 从固定提交恢复。
 
 ## pstack-lite 适配登记（#1130）
 

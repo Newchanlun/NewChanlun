@@ -14,14 +14,14 @@ blocking 边只表达必要依赖。可以独立开始的票不串成链；优�
 
 ## 票型与代理裁定
 
-- **grilling**：由既有证据和推理决定“该是什么”。裁定及必要正本文档一起落地。
+- **grilling**：由既有证据和推理决定“该是什么”。裁定及必要正本文档一起落地。缺数字、读数推不出推荐值时派探针票去测，grilling 票只消费数字。
 - **research**：补充仓外事实或源材料，结论供决策票使用。
 - **prototype**：答案必须造出来才知道。一次性原型保存在 `proto/<票号>` 分支，票内留指针；长期测试 fixture 和可复用探针保留在产品测试链。
 - **task**：实施、测量或解阻塞。有已知方案的工作直接执行；不属于图目标的欠账另走 triage。
 
 T/P 两类决策均经过考古、起草和非作者独审，全 PASS 后由代理裁定（#1909 / PR1915）。不再要求“agent 不得替人答”、`needs-approval` 或 `/graph-approve`。起草者提供推荐答案与推导，独审核对真实材料，不以撤标签代替通过。
 
-`decision-claimer` 负责决策票，`wayfinder_engine` 不替它裁决。BLOCK 用尽、`fact_gap` 或 `invalid_landing` 进入 held：事实缺口开 research/探针票并接 blocking 边；材料补齐后在原票发「退回：…」，整链重跑。触及资金、账户、凭据硬门（ADR 0041）的票进 held `user_authorization`，挂 `ready-for-human` 交还用户；用户本人以首行「退回：签署」评论、每项一行写 `- <字段>=<签署值>；有效域=<有效域>` 后重跑（返修用的其他「退回：…」不算签署），落地时摘掉该标签，主控不代发。代理与用户共用同一 GitHub 账号，这条签署评论的作者无法机器区分（现有信任模型，未改变）。旧 shadow 产物先原件归档，旧 PASS 不复用。旧 `needs-approval` grilling 票由 claimer 按新流程处理；实施票逐张核依赖、owner 和 SPEC 裁定，不批量摘标签。
+`decision-claimer` 负责决策票，`wayfinder_engine` 不替它裁决。BLOCK 用尽、`fact_gap` 或 `invalid_landing` 进入 held：事实缺口开 research/探针票并接 blocking 边；材料补齐后在原票发「退回：…」，整链重跑。触及资金、账户、凭据硬门（ADR 0041）的票进 held `user_authorization`，挂 `ready-for-human` 交还用户；用户本人以首行「退回：签署」评论、每项一行写 `- <字段>=<签署值>；有效域=<有效域>` 后重跑（返修用的其他「退回：…」不算签署），落地时摘掉该标签，主控不代发。代理与用户共用同一 GitHub 账号，这条签署评论的作者无法机器区分（现有信任模型，未改变）。旧 shadow 产物先原件归档，旧 PASS 不复用。旧 `needs-approval` grilling 票由 claimer 按新流程处理；实施票逐张核依赖、owner 和 SPEC 裁定后由主控摘（该标签仍在 `.sandcastle/queue-policy.json` 的 `hold_labels` 里，不摘则引擎一直判 held），不批量摘。
 
 ## 从决策到实施
 

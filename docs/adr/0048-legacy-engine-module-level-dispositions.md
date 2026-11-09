@@ -132,7 +132,7 @@ SPEC C11.4 要求每个条目「附替代入口、失去的生产写权、保留
     - :68 #804「① 规则落在语义，不落在代码形状」。
     - :89「**写得出退场条件**——举证书**必须回答『这条缝在什么条件下消失』**」。
     - :100「代码注释只留一行指路且必须带票号」。
-12. **`docs/agents/generation-constitution.md:35`**「**π 是唯一现役引擎**。锚定方式 = 家族根函数名（`pi_theta_fill_loop_overlay`），不锚行号（行号随版本漂移）。v1/dual = deprecated 待退役，处置见 #499。」
+12. **`/Volumes/AgentStorage/restart-20261107/slim/docs-archive/before-3d61fb/docs/agents/generation-constitution.md:35`**「**π 是唯一现役引擎**。锚定方式 = 家族根函数名（`pi_theta_fill_loop_overlay`），不锚行号（行号随版本漂移）。v1/dual = deprecated 待退役，处置见 #499。」
 13. **`.sandcastle/docs/graph-engineering.md:23`**：T 类 =「数据结构、接口与 seam、owner 落点、状态机与事件 schema、测试锁、迁移步骤、恢复语义」。
 14. **OLD-ENTRY-DISPOSITIONS.md**（`.chanlun/review-results/issue1339-r2-spec-20260909/view/sources/newchanlun-1339-architecture-20260908/author/`）
     - :25 X6「旧观察/隔离对照可长期保留；文件删除是后续逐依赖验收事项，不由本候选自动授权」。
@@ -204,7 +204,7 @@ SPEC C11.4 要求每个条目「附替代入口、失去的生产写权、保留
 
 **B-Q8 时间表形式**：默认值 **顺序闸门 T0-T5，不写日期**。（出处：ADR 0039:312-318；#1413:14「不因测试通过或归档合入自动切换」）——确认或否决。
 
-**B-Q9 注释与锚点订正的措辞和落点**：默认值 **随本 ADR 落地 PR 一并提交**（ADR 0039:299「一并提交」）。订正对象为 `rust/Cargo.toml:68/:85`、`rust/src/theta_v0/mod.rs:118`、`docs/agents/generation-constitution.md:35`、`CONTEXT.md:364`；`recursive_t` 的两处指路行也一并加。新文字一律不锚 ADR 行号，写「ADR 0039 裁定二」。（出处：ADR 0039:299/:307；AGENTS.md:100；domain-modeling SKILL.md:44「Challenge against the glossary」）——确认或否决。
+**B-Q9 注释与锚点订正的措辞和落点**：默认值 **随本 ADR 落地 PR 一并提交**（ADR 0039:299「一并提交」）。订正对象为 `rust/Cargo.toml:68/:85`、`rust/src/theta_v0/mod.rs:118`、`/Volumes/AgentStorage/restart-20261107/slim/docs-archive/before-3d61fb/docs/agents/generation-constitution.md:35`、`CONTEXT.md:364`；`recursive_t` 的两处指路行也一并加。新文字一律不锚 ADR 行号，写「ADR 0039 裁定二」。（出处：ADR 0039:299/:307；AGENTS.md:100；domain-modeling SKILL.md:44「Challenge against the glossary」）——确认或否决。
 
 推理链：上一轮独审 R1 指出，把行号写进正本和注释会带入漂移错误；generation-constitution.md:35 自己也写「不锚行号」。`generation-constitution.md:35` 管的是谱系名分（ADR 0039:299），所以保留「π 是唯一现役引擎」这句，只补「不是生产 owner 裁定」的指路，并订正 v1/dual 的状态。
 
@@ -352,7 +352,7 @@ ADR 0048 编号写死：origin/main `66c409e7e3` 最大 0046，预留表 adr-res
 1. `rust/Cargo.toml:68` → `# 历史名「CLI 生产入口」（theta_backtest 为 π 组件证据 CLI、冻结影子，非生产 launcher；ADR 0039 裁定二、ADR 0048，#1532）：解 theta_v0::backtest 的 #[cfg(test)] 门控为公开 API，链接 run_theta_v0_pi/load_by_symbol。`
 2. `rust/Cargo.toml:85` → `# ── theta_backtest：π 组件证据 CLI（历史名「CLI 生产入口」；冻结影子，非生产 launcher；ADR 0048，#1532） ──`
 3. `rust/src/theta_v0/mod.rs:118` → `/// 历史名「CLI 生产入口」解门控（theta_backtest 为冻结影子，ADR 0048，#1532）：let theta_backtest bin 链接 run_theta_v0_pi/load_by_symbol）。`
-4. `docs/agents/generation-constitution.md:35` → `- **引擎层**：**π 是唯一现役引擎**（代码谱系名分，相对 v1/dual；不是生产 owner 裁定——π 结构核收编为 S 的唯一计算者，π 回路经济部分为冻结影子，见 ADR 0039 裁定二与 ADR 0048，#1532）。锚定方式 = 家族根函数名（`pi_theta_fill_loop_overlay`），不锚行号（行号随版本漂移）。v1/dual 已按 #499 删除。`
+4. `/Volumes/AgentStorage/restart-20261107/slim/docs-archive/before-3d61fb/docs/agents/generation-constitution.md:35` → `- **引擎层**：**π 是唯一现役引擎**（代码谱系名分，相对 v1/dual；不是生产 owner 裁定——π 结构核收编为 S 的唯一计算者，π 回路经济部分为冻结影子，见 ADR 0039 裁定二与 ADR 0048，#1532）。锚定方式 = 家族根函数名（`pi_theta_fill_loop_overlay`），不锚行号（行号随版本漂移）。v1/dual 已按 #499 删除。`
 5. `CONTEXT.md:364` 中的「**最小生产路径 CLI** 指 `theta_backtest` 用仓内数据加载、π 引擎与内部 fill 串成的可运行闭环，它证明 CLI 可驱动引擎，但不等于交易场所集成」改为「**π 组件证据 CLI**（历史名「最小生产路径 CLI」）指 `theta_backtest` 用仓内数据加载、π 引擎与内部 fill 串成的可运行闭环，只产组件证据，不是生产入口，也不等于交易场所集成」。其余两义不动。
 6. `rust/src/recursive_t/DEPRECATED.md` 在 `:3` 之后加一行：`**生产终态**：冻结影子（ADR 0039 裁定二、ADR 0048，#1532）；名分轴与删除取舍归 #1096。`「已退役」字样属名分轴，本票不改（ADR 0039:299）。
 7. `rust/src/lib.rs` 在 `:66` `#[cfg(not(test))]` 之前加一行：`// 生产终态：冻结影子（ADR 0048，#1532）；删除取舍归 #1096。``:29`「已判现役」属名分轴，不改文字，由这一指路行覆盖。
@@ -394,7 +394,7 @@ ADR 0048 编号写死：origin/main `66c409e7e3` 最大 0046，预留表 adr-res
   ```
 - A4 可执行命令（CONTEXT.md 词义订正）：`rg -c "π 组件证据 CLI" CONTEXT.md` 输出 `1`，且 `! rg -q -F "**最小生产路径 CLI** 指" CONTEXT.md` 退出码 `0`。
 - A5 可执行命令（注释订正），输出为空：`rg -n "CLI 生产入口" rust/Cargo.toml rust/src/theta_v0/mod.rs | rg -v "历史名"`。
-- A6 可执行命令：`rg -c -F "v1/dual 已按 #499 删除" docs/agents/generation-constitution.md` 输出 `1`。
+- A6 可执行命令：`rg -c -F "v1/dual 已按 #499 删除" /Volumes/AgentStorage/restart-20261107/slim/docs-archive/before-3d61fb/docs/agents/generation-constitution.md` 输出 `1`。
 - A7 可执行命令：`rg -q "#1532" rust/src/recursive_t/DEPRECATED.md && rg -B2 "^pub mod recursive_t;" rust/src/lib.rs | rg -q "#1532"` 退出码 `0`。
 - A8 可执行命令（写权闭包未因本票变动），输出为空：ADR 0039:336 的 `diff` 命令原样执行。
 - A9 可执行命令（本票不删任何文件）：`test -e trading_system/live/runner.py && test -d rust/src/recursive_t && test -e trading_system/backtest_t_fugue.py` 退出码 `0`。
@@ -459,3 +459,11 @@ ADR 0048 编号写死：origin/main `66c409e7e3` 最大 0046，预留表 adr-res
 ## 授权引用
 
 本条依 #1323 Notes N-2 由主控代裁（#1323 评论 6310866929：P 类问表中有先例的 B 类默认值确认由主控按推荐值裁定，经独审后落地；本票不涉真钱、风险偏好、已批方向或 spec）。另依 N-1 预授权判定。用户 2026-10-18 原话（#1323 评论 6261281111，xy7365527-lang 2026-10-19 记录；#1323 票面 :41 Notes N-1）：「其实很多技术的东西 完全不需要我来做 我完全信任你的判断」。分级评论 6284962135、6311051879 判 T；主控重写评论 6310613611 裁定 `recursive_t` 走路径 (a)，并要求按 T 类重跑。本稿据此起草，没有夹带 P 类取舍：不替 #1096/#1304 定退役，不删 `recursive_t`，不代答 #808 D2，不裁资金、场所、账户、权限或阈值。
+
+## 修订（#1540，凭据来源改名，2026-11-07）
+
+（append-only：以上各节原文不改。依据 #1540 主控裁定 [裁定评论 6702983888](https://github.com/Newchanlun/NewChanlun/issues/1540#issuecomment-6702983888)，正本 [ADR 0062](0062-fu18-venue-account-permission-binding.md) 裁定二与 [ADR 0039](0039-production-entry-inventory-and-unique-launcher.md)「修订（#1540）」第 1 条。）
+
+1. **凭据来源。** :97 引文与 :309「凭据只经 launcher 从 profile `credential_scope` 注入 X」中的 `credential_scope`，读作 X 执行 profile 的 `credential_source.{env,file}`（由 `credential_scope.{env,file}` 改名），只管部署管道。`credential_scope` 只指 ADR 0028:22 的作用域政策字段，记在场所 profile 记录里，不含凭据来源路径。
+2. **引用行号。** :97、:309 所引「ADR 0039:277」那一句现址为 ADR 0039:285，文义按上条读。
+3. **处置不变。** :309 对 `config/broker_config.py:79` 的终态（冻结影子、不收编为凭据源）与退场条件不变。

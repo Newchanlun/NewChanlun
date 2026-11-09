@@ -58,7 +58,7 @@
 - ADR 0052 `:288-291`：FU-14 判据 (a)–(d)，四条都是二值。
 - #1340 body `:434`：「现有对拍仅信号面硬断言、PASS 可含 inconclusive、同进程第二实例恢复、忽略测试或缺依赖跳过，都不能计作本 SPEC 通过」。`:436`：「新增一个从正式 launcher 启动的完整会话测试夹具……使用两个独立新进程双跑及真正杀进程/重启……不继承旧 expected/advisory 规则掩盖差异」。`:438`：「运行报告保存输入/schema/构建/政策/能力 hash、实际负载、故障与调度序列、完整输出、未执行项以及独评绑定面」。`:426` 是 AT-14 行。
 - #1418 body :11：「报告至少含输入/schema/构建/规则/模型/政策/能力hash、实际负载、故障与调度、三面及完整域差异、未跑项、证据与独评绑定，不能只输出信号计数」。:12：「验收报告器和生产改动触发的回归锁有真实代码/CI或项目既定载体及失败负对照」。:13：「报告明确只证明有界受测域」。
-- `docs/agents/delivery-discipline.md:16`（第 6 项）：「关票时本票报告……已入 git，以仓内相对路径引用（如 `chanlun/review-results/`）……引 `/tmp` 或绝对路径视同未入仓」。`:15`（第 5 项）：「有在制品未合入的不得关票，先处置在制品」。`docs/agents/generation-constitution.md:52`：「review-results / handoff = **工作草稿**……**活期绑定票**——关联票 open 期间留仓，票关后月度归档」。
+- `/Volumes/AgentStorage/restart-20261107/slim/docs-archive/before-3d61fb/docs/agents/delivery-discipline.md:16`（第 6 项）：「关票时本票报告……已入 git，以仓内相对路径引用（如 `chanlun/review-results/`）……引 `/tmp` 或绝对路径视同未入仓」。`:15`（第 5 项）：「有在制品未合入的不得关票，先处置在制品」。`/Volumes/AgentStorage/restart-20261107/slim/docs-archive/before-3d61fb/docs/agents/generation-constitution.md:52`：「review-results / handoff = **工作草稿**……**活期绑定票**——关联票 open 期间留仓，票关后月度归档」。
 - `.github/workflows/ci.yml:516-523`：已有 `cargo test … --features production_session_testonly --test production_session_entry`（:517）和纯生产构建 `--features production_session`（:523）两段。
 - `rust/src/bin/theta_accept.rs:27`：「`--out DIR` 报告写盘（每品种一份 <SYMBOL>.md + summary.md；默认只打 stdout）」。这是影子工具的先例。
 

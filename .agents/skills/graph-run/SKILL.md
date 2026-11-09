@@ -17,7 +17,7 @@ disable-model-invocation: true
    - **SPEC 待裁定**：派一个不是起草者的独审进程，只给 SPEC 正文、所引决策票 resolution 与仓内源文件，按 graph-engineering「SPEC 裁定」逐条给结论，原件 JSON 落 `/Volumes/AgentStorage/`，必须含 `specNumber`、所审正文的 `digest`、作者与独审进程身份 `author`/`reviewer`、`verdict`，格式见 graph-engineering「SPEC 裁定」。用 `npx tsx scripts/wayfinder_engine.mts --spec-ruling <号> --review-file <独审原件.json> > <仓外裁定.md> && gh issue comment <号> --body-file <仓外裁定.md>` 校验原件并发布。正文或票号不匹配须重审，不能在发布时重算原件摘要；BLOCK 同样发记录，把意见交回起草者返修后重审。不发自由文本「批准」，引擎不认。
    - **held 决策票**：`fact_gap` 按缺口清单开 research/探针票并接 blocking 边，补齐后发「退回：事实已补 #…」；`review_blocked` / `invalid_landing` 写明改法后发「退回：…」。claimer 整链重跑，非作者独审 PASS 才落地。
    - **held `user_authorization`（资金、账户、凭据硬门）**：引擎已挂 `ready-for-human` 并列出待签事项。主控不发「退回：签署」、不代填签署值，只列进收尾的「用户要做什么」；用户本人以首行「退回：签署」评论、每项一行写 `- <字段>=<签署值>；有效域=<有效域>` 后 claimer 整链重跑（格式见 `.sandcastle/docs/graph-engineering.md`「资金与权限硬门」），落地时摘标签。代理与用户共用同一 GitHub 账号，这条签署评论的作者无法机器区分（现有信任模型，未改变），主控代发即代签。
-   - **旧 `needs-approval`**：grilling 票由 claimer 按新流程处理后摘。实施票逐张核依赖、owner 与所属 SPEC 裁定，不批量摘标签。
+   - **旧 `needs-approval`**：grilling 票由 claimer 按新流程处理后摘。实施票逐张核依赖、owner 与所属 SPEC 裁定后由主控摘，不批量摘。
 
 4. **派工**。决策票仍走 decision-claimer。先确认服务在跑，未跑就在宿主前台跑 `node --import tsx .sandcastle/decision-claimer.mts --ticket <号>`，默认 dry-run。实施票先区分持有者。D6 的 `deepagents:queue` 队列沿用 `pilot1742 executor serve` 与 ClaimStore，不转交旧 swarm。已有 claim-loop 或 main-swarm 在消费 `sandcastle` 队列时，只登记在跑，不重复认领。
 
