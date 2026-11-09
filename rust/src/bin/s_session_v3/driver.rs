@@ -8814,11 +8814,12 @@ mod tests {
                     [json!("startup")],
                     "第{k}代冷臂完整分支入口"
                 );
-                native.conn.assert_complete_matches_cold();
-                // 来源审计跨代增量状态不进入产物，单独与独立全量来源审计 Counts 六字段对拍。
-                let counts = super::super::audit_owner::construction_tests::b2_assert_counts_match_independent_full_source(
-                    &native.conn,
-                );
+                // complete 全量对拍 + 来源审计跨代增量状态（不进入产物）与独立全量来源审计 Counts 六字段对拍；
+                // 两者在同一只读快照上共用一次冷 state::audit（#1890）。
+                let counts =
+                    super::super::audit_owner::construction_tests::assert_complete_and_b2_counts(
+                        &native.conn,
+                    );
                 assert_eq!(
                     native.handle(receipt_request(&e)).unwrap(),
                     reader.handle(receipt_request(&e)).unwrap(),
