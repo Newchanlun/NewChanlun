@@ -203,7 +203,8 @@ fn run() -> Result<(), String> {
             let profile = Profile::load(Path::new(get("--profile")?))?;
             let epoch = positive(get("--writer-epoch")?, "writer_epoch")?;
             let _lock = process_lock(db, "X")?;
-            let mut conn = Connection::open(db).map_err(err)?;
+            let (mut conn, storage) = newchan_rust::economic_session::open_durable_db(db)?;
+            eprintln!("x_execution_session storage {storage}");
             let state = persist(&mut conn, &profile, epoch)?;
             if let Some(simulation) = &profile.history_simulation {
                 return newchan_rust::history_simulation::runtime::serve(

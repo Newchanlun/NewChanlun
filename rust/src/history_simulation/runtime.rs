@@ -11,7 +11,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::os::unix::net::UnixStream;
 use std::path::Path;
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant};
 
 pub const WIRE: &str = "x-exact-simulation/1";
 pub const AUTHORITY_WIRE: &str = "x-exact-authority/1";
@@ -237,14 +237,17 @@ struct AcceptClock {
     first_known_ns: i64,
     commit_ns: i64,
 }
-fn now_ns() -> Result<i64, String> {
-    i64::try_from(
-        SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map_err(error)?
-            .as_nanos(),
-    )
-    .map_err(error)
+/// simulation 证据类的 `logical-bar/1` 接纳读数（ADR 0052:296、ADR 0056:52）：已提交前沿
+/// last_bar+1，空历史为 0。X 不读系统时钟；*_ns 字段在本域存 bar_index 读数。
+fn logical_now(c: &Connection) -> Result<i64, String> {
+    let raw: String = c
+        .query_row("SELECT v FROM x_sim_meta WHERE k='state'", [], |r| r.get(0))
+        .map_err(error)?;
+    let state: super::model::State = serde_json::from_str(&raw).map_err(error)?;
+    state
+        .last_bar
+        .map_or(Some(0), |bar| bar.checked_add(1))
+        .ok_or_else(|| "InvalidDomain：逻辑 bar 时钟溢出".into())
 }
 fn validate_accept_clock(clock: &AcceptClock, release_commit_ns: i64) -> Result<(), String> {
     if release_commit_ns < 0
@@ -550,7 +553,7 @@ fn accept(
     if store::pending_batch(c)?.is_some() {
         return Err("PendingBatch：未完成批次只允许同内容恢复或只读".into());
     }
-    let received_ns = now_ns()?;
+    let received_ns = logical_now(c)?;
     let raw = canonical_json(&serde_json::to_value(&command).map_err(error)?);
     if let Some((old, _, _, _)) = get(c, &command.command_id)? {
         if raw != old {
@@ -562,8 +565,8 @@ fn accept(
     let released = authority(p, &p.e, "QueryReleasedExact", &command, None)?;
     let clock = AcceptClock {
         received_ns,
-        first_known_ns: now_ns()?,
-        commit_ns: now_ns()?,
+        first_known_ns: received_ns,
+        commit_ns: received_ns,
     };
     validate_accept_clock(&clock, released.commit_ns)?;
     c.execute("INSERT INTO x_exact_commands(id,command,release_receipt,state,attempt_batch,accept_clock,release_evidence) VALUES(?1,?2,?3,'Accepted',NULL,?4,?5)",params![command.command_id,raw,released.receipt_id,canonical_json(&serde_json::to_value(&clock).map_err(error)?),canonical_json(&serde_json::to_value(&released).map_err(error)?)]).map_err(error)?;
@@ -657,7 +660,7 @@ fn execute(c: &mut Connection, p: &Profile, epoch: i64, mut batch: Batch) -> Res
         if eligibility != &executed.receipt_id {
             return Err("IdentityConflict：命令资格引用未绑定 S 实际提交收据".into());
         }
-        let claimed_ns = now_ns()?;
+        let claimed_ns = batch.bar.index;
         if claimed_ns < executed.commit_ns {
             return Err("InvalidDomain：X 调用占有早于 S 持久提交".into());
         }

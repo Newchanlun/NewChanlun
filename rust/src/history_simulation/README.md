@@ -42,8 +42,14 @@ simulation-local-transaction/1 三种能力。每项必须携带完整权威、�
 
 ## 时间、恢复与消费边界
 
-X 接纳取系统 ns，要求 received <= first_known <= commit 且 first_known >=
-E release_commit_ns；写入与启动冷审计共用判据。提交前调用占有也不得早于 S commit_ns。
+X 不读系统时钟。simulation 证据类的时钟固定为 `logical-bar/1`（ADR 0056:52，定义见
+ADR 0052:296）：checkpoint 与前沿只认 bar_index。接纳三相 received/first_known/commit 都取
+已提交前沿 last_bar+1（空历史为 0）；AdvanceBar 的调用占有 claimed_ns 取本批 bar.index。
+批须连续，故占有读数不早于其命令的接纳读数。字段名沿用 `*_ns`，
+在本域存的是该 bar_index 读数，不是纳秒。E release 与 S 执行回执的 commit_ns 须在同一时钟域：
+要求 received <= first_known <= commit、first_known >= E release_commit_ns，调用占有不得早于
+S commit_ns；写入与启动冷审计共用判据，早 1 个读数即拒（#1621）。同一输入的两个独立进程因此
+留下逐字节相同的全部 X 表（ADR 0038）。
 同 ID 同内容重送读原结果；改内容冲突。MayHaveCalled 只允许同一完整批内容恢复，
 这是本地 SQLite 模拟 adapter 的幂等合同，不授权网络场所重发。
 
@@ -112,6 +118,13 @@ PendingBatch 与 pending_epoch 同事务保存。尚有 pending 时，任何不�
 必须在 launcher 写 writer_epoch 之前拒绝；旧 epoch 仍可查既有 S 终态并完成原批。
 本片不提供 pending 换代接管政策，不改旧命令/回执，不以重发 S 解锁。
 
+
+## 持久化前件
+
+X 库保存 PendingBatch、ExecutionRequested、MayHaveCalled 等「S 只授权一次」的状态。
+`x_execution_session serve` 与 E 共用 `economic_session::open_durable_db`：本地文件系统、
+WAL、synchronous=FULL、fullfsync=ON，并核验读回值（macOS 上 fullfsync 须为 1）；不满足即
+StorageUnavailable 拒启。启动时把实际读到的存储证据写到 stderr。
 
 ## 首次初始化也是一次发布
 

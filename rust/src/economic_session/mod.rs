@@ -27,6 +27,14 @@ mod tb03c_transfer;
 mod voice;
 pub use service::cli;
 
+/// 单写者持久库的打开前件（本地文件系统、WAL、synchronous=FULL、fullfsync 及核验）。
+/// X 模拟库保存「S 只授权一次」的状态，与 E 共用同一实现，返回实际读到的存储证据。
+pub fn open_durable_db(
+    db: &std::path::Path,
+) -> Result<(rusqlite::Connection, serde_json::Value), String> {
+    store::open(db, false)
+}
+
 #[cfg(test)]
 mod domain_event_tests;
 #[cfg(test)]

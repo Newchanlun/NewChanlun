@@ -1018,9 +1018,7 @@ fn runtime_process_fixture() {
     let profile: serde_json::Value = serde_json::from_str(&profile).unwrap();
     let p: super::runtime::Profile =
         serde_json::from_value(profile["history_simulation"].clone()).unwrap();
-    let mut c = Connection::open(db).unwrap();
-    c.execute_batch("PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL;")
-        .unwrap();
+    let (mut c, _) = crate::economic_session::open_durable_db(std::path::Path::new(&db)).unwrap();
     let epoch: i64 = std::env::var("ISSUE1381_FIXTURE_EPOCH")
         .unwrap_or_else(|_| "1".into())
         .parse()
