@@ -13,6 +13,7 @@ import pytest
 from conftest import git
 
 from pilot1742 import external_review as module
+from pilot1742 import patch_read
 from pilot1742.delivery import EffectPending, RepoGateway, Stale
 from pilot1742.external_review import (
     CONTEXT,
@@ -30,7 +31,7 @@ from pilot1742.github_app import (
     IdentityError,
     OutcomeUnknown,
 )
-from pilot1742.patch_read import FrozenPatch, reads_candidate_patch
+from pilot1742.patch_read import WHOLE_PATCH, FrozenPatch, reads_candidate_patch
 
 
 class Gateway:
@@ -901,6 +902,14 @@ NOT_A_PATCH_READ = {
         f"git --work-tree=/tmp diff {t.merge_base_sha}; git show -s --format=%B {t.head_sha}", output=LANE_PATCH)],
     "diff-stderr-merged-then-show": [lambda t: _command(
         f"git diff {t.merge_base_sha} {t.head_sha} 2>&1; git show -s --format=%B {t.head_sha}", output=LANE_PATCH)],
+    # #2022 第三轮 opus BLOCK：只有「左 merge-base、右 head」才是整份补丁；别的形状在复合形式里不算
+    **{f"compound-{name}": [lambda t, rev=rev: _command(
+        f"git diff {rev(t)}; git show -s --format=%B {t.head_sha}", output=LANE_PATCH)] for name, rev in {
+        "reversed": lambda t: f"{t.head_sha} {t.merge_base_sha}",
+        "HEAD-triple-dot": lambda t: "HEAD...",
+        "at-triple-dot": lambda t: "@...",
+        "triple-dot-mb": lambda t: f"...{t.merge_base_sha}",
+    }.items()},
     "diff-option-then-show": [lambda t: _command(
         f"git diff -R {t.merge_base_sha} {t.head_sha}; git show -s --format=%B {t.head_sha}", output=LANE_PATCH)],
     "diff-parent-then-show": [lambda t: _command(
@@ -1100,6 +1109,25 @@ def test_diff_then_commit_metadata_reads_patch_from_diff_segment_only():
     # 没有后一段时照旧按整段输出判
     alone = f"/bin/bash -lc 'git diff --no-ext-diff --no-textconv {PR2018_MB} {PR2018_HEAD}'"
     assert reads_candidate_patch(alone, PR2018_DIFF, patch)
+
+
+@pytest.mark.parametrize("shape", ["reversed", "HEAD...", "@...", "...mb"])
+def test_only_merge_base_left_head_right_is_whole_patch(shape):
+    """#2022 第三轮 opus BLOCK：反向、`HEAD...`、`@...`、`...<mb>` 不是整份冻结补丁的读取，复合形式里也不算。"""
+    rev = {"reversed": f"{PR2018_HEAD} {PR2018_MB}", "HEAD...": "HEAD...", "@...": "@...", "...mb": f"...{PR2018_MB}"}[shape]
+    assert patch_read._patch_read(f"/bin/bash -lc 'git diff {rev}'", PR2018_HEAD, PR2018_MB, PR2018_MB) != WHOLE_PATCH
+    patch = FrozenPatch.from_diff(PR2018_HEAD, PR2018_MB, PR2018_MB, PR2018_FROZEN)
+    command = f"/bin/bash -lc \"git diff {rev}; git show -s --format=%B {PR2018_HEAD}\""
+    assert not reads_candidate_patch(command, PR2018_DIFF, patch)
+
+
+@pytest.mark.parametrize("rev", [f"{PR2018_MB} {PR2018_HEAD}", PR2018_MB, f"{PR2018_MB}..{PR2018_HEAD}",
+                                 f"{PR2018_MB}...{PR2018_HEAD}", f"{PR2018_MB[:8]}..HEAD"])
+def test_merge_base_left_head_right_is_whole_patch(rev):
+    assert patch_read._patch_read(f"/bin/bash -lc 'git diff {rev}'", PR2018_HEAD, PR2018_MB, PR2018_MB) == WHOLE_PATCH
+    patch = FrozenPatch.from_diff(PR2018_HEAD, PR2018_MB, PR2018_MB, PR2018_FROZEN)
+    command = f"/bin/bash -lc \"git diff {rev}; git show -s --format=%B {PR2018_HEAD}\""
+    assert reads_candidate_patch(command, PR2018_DIFF + PR2018_SHOW, patch)
 
 
 def test_unreadable_frozen_patch_is_failed_not_raised(lane, monkeypatch):

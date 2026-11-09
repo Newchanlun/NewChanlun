@@ -446,15 +446,12 @@ def _git_patch_read(command: _Expanded, revisions: _Revisions) -> _Read | None:
     if subcommand == "show":
         return _show_read(positional, options, unresolved, moved, revisions)
     kinds: list[str] = []
-    whole = False
     for arg in positional:
         left, dots, right = arg.partition("..")
         sides = [left or "HEAD", right.lstrip(".") or "HEAD"] if dots else [arg]
         resolved = [revisions.kind(side) for side in sides]
         if not all(kind == "head" or kind in _KNOWN for kind in resolved):
             return None
-        # `<base>...<head>` 比的是 merge-base(base, head) 与 head，就是冻结补丁
-        whole = whole or (right.startswith(".") and resolved in (["merge-base", "head"], ["base", "head"]))
         kinds += resolved
     if unresolved:
         return None
@@ -462,7 +459,27 @@ def _git_patch_read(command: _Expanded, revisions: _Revisions) -> _Read | None:
         kinds.append("head")  # 一个提交对工作区或索引；审阅 checkout 已证实停在 head 且干净
     if "head" not in kinds or not any(k in _KNOWN for k in kinds) or not _emits_patch(subcommand, options):
         return None
-    return WHOLE_PATCH if whole or sorted(kinds) == ["head", "merge-base"] else _Read("diff")
+    return WHOLE_PATCH if _whole_range(positional, revisions) else _Read("diff")
+
+
+def _whole_range(positional: list[str], revisions: _Revisions) -> bool:
+    """diff 的位置参数恰好是「左 merge-base、右 head」：`<mb> <head>`、`<mb>`（对工作区）、`<mb>..<head>`，
+    或 `<mb>...<head>`、`<base>...<head>`（比的是 merge-base(左, head) 与 head）。区间两侧都须写出；
+    反向（`<head> <mb>`）、`HEAD...`、`@...`、`...<mb>` 这类形状输出的不是冻结补丁或是空的，不算整份补丁读取
+    （#2022 第三轮 opus BLOCK）。"""
+    if len(positional) == 2 and ".." not in "".join(positional):
+        return [revisions.kind(arg) for arg in positional] == ["merge-base", "head"]
+    if len(positional) != 1:
+        return False
+    left, dots, right = positional[0].partition("..")
+    if not dots:
+        return revisions.kind(left) == "merge-base"
+    triple = right.startswith(".")
+    right = right[1:] if triple else right
+    if not left or not right:
+        return False
+    pair = [revisions.kind(left), revisions.kind(right)]
+    return pair == ["merge-base", "head"] or (triple and pair == ["base", "head"])
 
 
 def _show_read(positional: list[str], options: list[str], unresolved: bool, moved: bool,
