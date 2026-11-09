@@ -1,4 +1,5 @@
-"""ci-rust-reuse.py 的判定：指纹只排除跳过集；同 PR 分支、本仓库、未过期 artifact、.github 相同才复用；出错一律全跑。"""
+"""ci-rust-reuse.py 的判定：指纹只排除跳过集；本分支全部 PR 都只指向本仓 main、未改过目标分支，候选 run 为本仓库、
+更早、全绿的 ci.yml pull_request run，head 的 .github 相同且 base 一侧未改 .github 才复用；任何出错一律全跑。"""
 import importlib.util
 import pathlib
 import re
@@ -15,13 +16,29 @@ def blob(path, sha="b1"):
     return {"path": path, "mode": "100644", "type": "blob", "sha": sha}
 
 
+def pr(number=1, base_ref="main", base_repo=1, head_repo=1):
+    return {"number": number, "base": {"ref": base_ref, "repo": {"id": base_repo}}, "head": {"repo": {"id": head_repo}}}
+
+
+def run(i=7, head="H1", event="pull_request", conclusion="success", head_repo_id=1, path=".github/workflows/ci.yml"):
+    return {"id": i, "head_sha": head, "html_url": f"u/{i}", "event": event, "conclusion": conclusion, "path": path,
+            "repository": {"id": 1}, "head_repository": {"id": head_repo_id}}
+
+
+def art(key, run_id=7, branch="br", expired=False, head_repo=1):
+    return {"name": M.ARTIFACT_PREFIX + key, "expired": expired,
+            "workflow_run": {"id": run_id, "head_branch": branch, "repository_id": 1, "head_repository_id": head_repo}}
+
+
 class Fake:
-    def __init__(self, trees, roots, runs, artifacts, base_files=()):
-        self.trees, self.roots, self.runs, self.artifacts, self.calls = trees, roots, runs, artifacts, []
+    def __init__(self, trees, runs, artifacts, prs, events=None, roots=None, base_files=()):
+        self.trees, self.runs, self.artifacts, self.prs = trees, {r["id"]: r for r in runs}, artifacts, prs
+        self.events = events or {}
+        self.roots = roots or {"M": "G", "H1": "G"}
         self.base_files = list(base_files)
+        self.compare = None
 
     def __call__(self, path):
-        self.calls.append(path)
         if "/git/trees/" in path:
             sha = path.split("/git/trees/")[1].split("?")[0]
             if path.endswith("?recursive=1"):
@@ -32,18 +49,16 @@ class Fake:
         if "/compare/" in path:
             self.compare = path
             return {"total_commits": 1, "files": [{"filename": f} for f in self.base_files]}
-        if "/actions/workflows/" in path:
-            return {"workflow_runs": self.runs}
-        if "/artifacts?name=" in path:
-            run_id = int(path.split("/runs/")[1].split("/")[0])
-            return {"artifacts": self.artifacts.get(run_id, [])}
+        if "/pulls?head=" in path:
+            return self.prs if "page=1" in path else []
+        if "/events" in path:
+            n = int(path.split("/issues/")[1].split("/")[0])
+            return self.events.get(n, []) if "page=1" in path else []
+        if "/actions/artifacts?name=" in path:
+            return {"artifacts": self.artifacts}
+        if "/actions/runs/" in path:
+            return self.runs[int(path.split("/actions/runs/")[1])]
         raise AssertionError(path)
-
-
-def run(i, head="H1", repo_id=1, head_repo_id=1, base_ref="main", base_repo_id=1):
-    return {"id": i, "head_sha": head, "html_url": f"u/{i}", "repository": {"id": repo_id},
-            "head_repository": {"id": head_repo_id},
-            "pull_requests": [{"base": {"ref": base_ref, "repo": {"id": base_repo_id}}}]}
 
 
 class ReuseTest(unittest.TestCase):
@@ -53,9 +68,13 @@ class ReuseTest(unittest.TestCase):
                       "OLD": {"truncated": False, "tree": base + [blob(".sandcastle/x.ts", "old")]}}
         self.key = M.tree_key(lambda p: self.trees["OLD"], R, "OLD", SKIP)
 
-    def fake(self, runs, artifacts=None, roots=None, base_files=()):
-        art = artifacts if artifacts is not None else {7: [{"name": M.ARTIFACT_PREFIX + self.key, "expired": False}]}
-        return Fake(self.trees, roots or {"M": "G", "H1": "G"}, runs, art, base_files)
+    def fake(self, runs=None, artifacts=None, prs=None, **kw):
+        return Fake(self.trees, runs if runs is not None else [run()],
+                    artifacts if artifacts is not None else [art(self.key)],
+                    prs if prs is not None else [pr()], **kw)
+
+    def decide(self, api, current=99):
+        return M.decide(api, R, "M", "br", current, SKIP)
 
     def test_key_ignores_skip_set_only(self):
         self.assertEqual(M.tree_key(lambda p: self.trees["M"], R, "M", SKIP), self.key)
@@ -63,57 +82,68 @@ class ReuseTest(unittest.TestCase):
         self.assertNotEqual(M.tree_key(lambda p: self.trees["M"], R, "M", SKIP), self.key)
 
     def test_reuses_matching_green_run(self):
-        d = M.decide(self.fake([run(7)]), R, "M", "br", 99, SKIP)
-        self.assertEqual(d, {"rust": "false", "rust_key": self.key, "reuse": "u/7"})
+        self.assertEqual(self.decide(self.fake()), {"rust": "false", "rust_key": self.key, "reuse": "u/7"})
 
     def test_rust_change_runs(self):
         self.trees["M"]["tree"][0] = blob("rust/a.rs", "changed")
-        self.assertEqual(M.decide(self.fake([run(7)]), R, "M", "br", 99, SKIP)["rust"], "true")
+        self.assertEqual(self.decide(self.fake())["rust"], "true")
 
     def test_different_github_tree_runs(self):
-        d = M.decide(self.fake([run(7)], roots={"M": "G", "H1": "OTHER"}), R, "M", "br", 99, SKIP)
-        self.assertEqual(d["rust"], "true")
+        self.assertEqual(self.decide(self.fake(roots={"M": "G", "H1": "OTHER"}))["rust"], "true")
 
-    def test_base_side_github_change_runs(self):
-        """kimi #2027：那次 run 测的是 merge(head, 当时 base)；base 一侧改过 .github 时不能用 head 的 .github 代表它。"""
-        fake = self.fake([run(7)], base_files=[".sandcastle/x.ts", ".github/workflows/ci.yml"])
-        self.assertEqual(M.decide(fake, R, "M", "br", 99, SKIP)["rust"], "true")
-        self.assertIn("/compare/H1...B", fake.compare)
+    def test_any_pr_of_branch_not_targeting_main_runs(self):
+        """opus #2027：run.pull_requests 是查询时现算的；按分支列全部 PR（含已关闭），任一不指向本仓 main 就不复用。"""
+        for prs in ([pr(), pr(2, base_ref="evil-base")], [pr(base_repo=2)], []):
+            self.assertEqual(self.decide(self.fake(prs=prs))["rust"], "true", prs)
 
-    def test_base_side_non_github_change_reuses(self):
-        fake = self.fake([run(7)], base_files=[".sandcastle/x.ts", "rust/b.rs"])
-        self.assertEqual(M.decide(fake, R, "M", "br", 99, SKIP)["rust"], "false")
+    def test_base_ref_changed_runs(self):
+        fake = self.fake(events={1: [{"event": "labeled"}, {"event": "base_ref_changed"}]})
+        self.assertEqual(self.decide(fake)["rust"], "true")
 
-    def test_truncated_compare_runs(self):
-        fake = self.fake([run(7)], base_files=["a"] * 300)
-        self.assertEqual(M.decide(fake, R, "M", "br", 99, SKIP)["rust"], "true")
+    def test_candidate_run_must_be_green_pr_ci_run_of_this_repo(self):
+        for r in (run(event="push"), run(conclusion="failure"), run(head_repo_id=2), run(path=".github/workflows/x.yml")):
+            self.assertEqual(self.decide(self.fake(runs=[r]))["rust"], "true", r)
 
-    def test_non_main_base_ignored(self):
-        """#2027 独审 Nit：H→evil-base 的 PR run 用的是 evil-base 上的 workflow，不能当凭据。"""
-        for r in (run(7, base_ref="evil-base"), run(7, base_repo_id=2), {**run(7), "pull_requests": []}):
-            self.assertEqual(M.decide(self.fake([r]), R, "M", "br", 99, SKIP)["rust"], "true")
-
-    def test_fork_run_ignored(self):
-        self.assertEqual(M.decide(self.fake([run(7, head_repo_id=2)]), R, "M", "br", 99, SKIP)["rust"], "true")
-
-    def test_expired_or_missing_artifact_runs(self):
-        for art in ({7: [{"name": M.ARTIFACT_PREFIX + self.key, "expired": True}]}, {7: []}):
-            self.assertEqual(M.decide(self.fake([run(7)], art), R, "M", "br", 99, SKIP)["rust"], "true")
+    def test_artifact_filters(self):
+        for a in (art(self.key, expired=True), art(self.key, branch="other"), art(self.key, head_repo=2), art("other")):
+            self.assertEqual(self.decide(self.fake(artifacts=[a]))["rust"], "true", a)
 
     def test_own_or_newer_run_not_reused(self):
         for current in (7, 6):
-            self.assertEqual(M.decide(self.fake([run(7)]), R, "M", "br", current, SKIP)["rust"], "true")
+            self.assertEqual(self.decide(self.fake(), current)["rust"], "true")
+
+    def test_base_side_github_change_runs(self):
+        fake = self.fake(base_files=[".sandcastle/x.ts", ".github/workflows/ci.yml"])
+        self.assertEqual(self.decide(fake)["rust"], "true")
+        self.assertIn("/compare/H1...B", fake.compare)
+
+    def test_base_side_non_github_change_reuses(self):
+        self.assertEqual(self.decide(self.fake(base_files=[".sandcastle/x.ts", "rust/b.rs"]))["rust"], "false")
+
+    def test_truncated_compare_runs(self):
+        self.assertEqual(self.decide(self.fake(base_files=["a"] * 300))["rust"], "true")
 
     def test_truncated_tree_runs_without_key(self):
         self.trees["M"]["truncated"] = True
-        self.assertEqual(M.decide(self.fake([run(7)]), R, "M", "br", 99, SKIP)["rust_key"], "")
+        self.assertEqual(self.decide(self.fake())["rust_key"], "")
+
+    def test_too_many_pages_runs(self):
+        fake = self.fake()
+        many = [pr(i) for i in range(100)]
+
+        def endless(path):
+            return many if "/pulls?head=" in path else fake(path)
+        d = self.decide(endless)
+        self.assertEqual((d["rust"], d["rust_key"]), ("true", self.key))
 
     def test_api_error_runs(self):
+        fake = self.fake()
+
         def boom(path):
             if "/actions/" in path:
                 raise RuntimeError("HTTP 502\nbody")
-            return self.fake([])(path)
-        d = M.decide(boom, R, "M", "br", 99, SKIP)
+            return fake(path)
+        d = self.decide(boom)
         self.assertEqual((d["rust"], d["rust_key"]), ("true", self.key))
 
 

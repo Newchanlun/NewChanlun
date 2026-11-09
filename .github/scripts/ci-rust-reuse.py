@@ -6,12 +6,18 @@ PR run 的 Rust 输入（检出树去掉跳过集里的路径）与本 PR 分支
 全绿的 run 由 ci-ok 上传名为 rust-green-<指纹> 的 artifact，本脚本按名字找它。
 
 为什么还要比 .github：artifact 由那次 run 的 workflow 上传，只有那份 workflow 与本次相同，才能信它测过的就是
-这个指纹（被改过的 workflow 可以不跑测试就上传）。那次 run 检出的是 merge(head, 当时的 base)，GitHub 不给出这个
-merge 提交，artifact 内容又是那份 workflow 自己写的，不能拿来证明。所以只用 GitHub 给的数据证明：
-  1. 那次 run 的 head 的 .github 与本次检出的 .github 相同；
-  2. 从那个 head 与本次 base 的分叉点到本次 base，base 一侧没有改动 .github 下任何文件。
-当时的 base 位于分叉点之前或之后、本次 base 之前，按第 2 条，它的 .github 改动都已在 head 里，所以那次 merge 提交的
-.github 就是 head 的 .github，也就是本次的。只认本仓库分支上的 run；fork 的 run 不认。
+这个指纹（被改过的 workflow 可以不跑测试就上传）。那次 run 检出的是 merge(head, 当时的目标分支)；GitHub 不给出这个
+merge 提交，artifact 内容和 run 对象的 pull_requests 字段（查询时按分支现算，不一定是触发它的 PR）也都不能作证。
+所以只用 GitHub 记录的历史证明：
+  1. 本分支作为 head 的全部 PR（含已关闭）目标分支都是本仓库 main，且都没改过目标分支（无 base_ref_changed 事件）：
+     那次 run 的目标分支只能是 main；
+  2. 那次 run 的 head 的 .github 与本次检出的 .github 相同；
+  3. 从那个 head 与本次 base 的分叉点到本次 base，base 一侧没有改动 .github 下任何文件（compare 的净改动）；
+  4. 只认比本次早创建的 run，所以它当时的 base 不晚于本次 base。
+当时的 base 要么是 head 的祖先，要么落在第 3 条的区间里，所以那次 merge 提交的 .github 就是 head 的 .github，也就是本次的。
+只认本仓库分支上的 run；fork 的 run 不认。任何一条查不全（分页上限、截断）都当作不满足。
+已知局限：第 3 条只看净改动。main 在区间内先改 .github 再改回去时，那次 run 可能用的是中间那版 workflow；那一版同样是
+main 上经独审合入的，不是攻击者可控的，最坏是那一次测得不如现在全（#2027 独审 Nit）。
 
 用法：ci-rust-reuse.py <仓库> <检出 commit> <PR 分支> <本次 run id> <跳过集正则>
 标准输出逐行打印 key=value（rust、rust_key、reuse），调用方追加进 GITHUB_OUTPUT。
@@ -57,6 +63,31 @@ def base_of(api, repo: str, sha: str) -> str:
     return parents[0]["sha"]
 
 
+def pages(api, path: str, field=None, limit: int = 10) -> list:
+    """逐页取完；超过 limit 页当作查不全，抛错（调用方按全跑处理）。"""
+    out = []
+    for page in range(1, limit + 1):
+        got = api(f"{path}{'&' if '?' in path else '?'}per_page=100&page={page}")
+        items = got[field] if field else got
+        out += items
+        if len(items) < 100:
+            return out
+    raise RuntimeError(f"too many pages: {path}")
+
+
+def branch_only_targets_main(api, repo: str, branch: str) -> bool:
+    owner = repo.split("/")[0]
+    prs = pages(api, f"repos/{repo}/pulls?head={owner}:{urllib.parse.quote(branch, safe='')}&state=all")
+    if not prs:
+        return False
+    for pr in prs:
+        if pr["base"]["ref"] != "main" or pr["base"]["repo"]["id"] != pr["head"]["repo"]["id"]:
+            return False
+        if any(e.get("event") == "base_ref_changed" for e in pages(api, f"repos/{repo}/issues/{pr['number']}/events")):
+            return False
+    return True
+
+
 def base_side_touches_github(api, repo: str, head: str, base: str) -> bool:
     cmp = api(f"repos/{repo}/compare/{head}...{base}?per_page=100")
     files = cmp.get("files")
@@ -68,19 +99,18 @@ def base_side_touches_github(api, repo: str, head: str, base: str) -> bool:
 
 def find_reuse(api, repo: str, branch: str, run_id: int, key: str, ours: str, base: str):
     name = ARTIFACT_PREFIX + key
-    runs = api(f"repos/{repo}/actions/workflows/ci.yml/runs?event=pull_request&status=success"
-               f"&branch={urllib.parse.quote(branch, safe='')}&per_page=30")["workflow_runs"]
-    for run in runs:
-        head_repo = run.get("head_repository") or {}
-        # 只认比本次早创建的 run（run id 单调递增；重跑沿用原 id）：它当时的 base 不晚于本次 base，上面第 2 条才覆盖得到。
-        if run["id"] >= run_id or head_repo.get("id") != run["repository"]["id"]:
+    if not branch_only_targets_main(api, repo, branch):
+        return None
+    artifacts = api(f"repos/{repo}/actions/artifacts?name={name}&per_page=100")["artifacts"]
+    for art in sorted(artifacts, key=lambda a: -a["workflow_run"]["id"]):
+        wr = art["workflow_run"]
+        # 只认比本次早创建的 run（run id 单调递增；重跑沿用原 id）。
+        if (art["name"] != name or art["expired"] or wr["id"] >= run_id or wr.get("head_branch") != branch
+                or wr.get("head_repository_id") != wr.get("repository_id")):
             continue
-        # 那次 run 的 workflow 来自 merge(head, 目标分支)：目标分支必须是本仓库 main，否则改过 ci.yml 的旁路 base 能伪造凭据。
-        prs = run.get("pull_requests") or []
-        if not prs or any(p["base"]["ref"] != "main" or p["base"]["repo"]["id"] != run["repository"]["id"] for p in prs):
-            continue
-        artifacts = api(f"repos/{repo}/actions/runs/{run['id']}/artifacts?name={name}")["artifacts"]
-        if not any(a["name"] == name and not a["expired"] for a in artifacts):
+        run = api(f"repos/{repo}/actions/runs/{wr['id']}")
+        if (run["event"] != "pull_request" or run["conclusion"] != "success" or run["path"] != ".github/workflows/ci.yml"
+                or (run.get("head_repository") or {}).get("id") != run["repository"]["id"]):
             continue
         if github_tree(api, repo, run["head_sha"]) != ours:
             continue
