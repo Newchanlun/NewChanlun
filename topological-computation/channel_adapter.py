@@ -4,7 +4,7 @@
 枚举性复杂度不构成主体——WhatsApp/Telegram/Webhook 的格式差异
 用 codec 穷举，不产生否定运动。
 
-架构位置：逢亮内部模块，注入 daemon_loop 的 pending_events 队列。
+架构位置：逢亮内部模块，向宿主事件循环的 pending_events 队列注入事件（原宿主 daemon_loop.py 已随 #1952 退役）。
 不是独立进程（409号原则6：进程边界是工程投机，模块边界是充分回应）。
 
 纯 Python，零外部依赖。
@@ -234,7 +234,7 @@ class WebhookAdapter(ChannelAdapter):
 class EventSourceManager:
     """管理所有 channel adapter 实例 + 提供统一事件队列。
 
-    daemon_loop 通过此管理器：
+    宿主事件循环通过此管理器：
     1. 注册 adapter 实例
     2. 启动/停止所有 adapter
     3. drain() 从队列取出所有待处理事件
