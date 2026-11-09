@@ -1,20 +1,16 @@
-"""Gateway Bridge — OpenClaw gateway 与逢亮 daemon / CC daemon 的桥接层。
+"""Gateway Bridge — OpenClaw gateway 与逢亮 daemon 的桥接层。
 
 无状态 HTTP 转发器：
 - 接收 OpenClaw hooks 转发的消息
-- 路由判断：给逢亮（穿越引擎）还是给体系（CC ceremony）
 - 给逢亮 → POST /present 或 /feed（逢亮 daemon: daemon.py + daemon_server.py）
-- 给体系 → POST /webhook/system（CC daemon: daemon_loop.py --webhook）
 - 将处理结果格式化为 OpenClaw 期望的回复格式返回
 
-两个 daemon 的区分：
-- 逢亮 daemon (daemon.py)：穿越引擎，持续运行，暴露 /present /feed /status /topology 等
-  默认端口 8080（daemon_server.py）或通过 daemon_multiproc.py 启动
-- CC daemon (daemon_loop.py)：CC session 调度器，暴露 webhook adapter
-  通过 --webhook PORT 启用（如 --webhook 9800）
+逢亮 daemon (daemon.py)：穿越引擎，持续运行，暴露 /present /feed /status /topology 等，
+默认端口 8080（daemon_server.py）或通过 daemon_multiproc.py 启动。
 
 路由规则（简单前缀命令，不做"智能"判断）：
-- /ceremony, /scan, /escalate, /inquire 等 → 体系（CC daemon webhook）
+- /ceremony, /scan, /escalate, /inquire 等体系命令：原先转给 CC daemon（daemon_loop.py），
+  它已随 RTAS 蜂群退役（#1952）删除，现在直接回复已退役、不转发，也不当普通消息发给逢亮
 - 其他所有消息 → 逢亮（穿越引擎 /present）
 
 纯 Python，零外部依赖。
@@ -28,7 +24,6 @@ import logging
 import sys
 import urllib.request
 import urllib.error
-from datetime import datetime, timezone
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from pathlib import Path
 
@@ -55,9 +50,8 @@ log = logging.getLogger("gateway_bridge")
 
 DEFAULT_BRIDGE_PORT = 8081
 DEFAULT_FENGLIANG_URL = "http://localhost:8080"
-DEFAULT_DAEMON_WEBHOOK_URL = "http://localhost:9800"
 
-# 体系命令前缀 — 以这些开头的消息路由到体系（CC session）
+# 体系命令前缀 — 原先路由到 CC daemon，已随 #1952 退役；保留前缀以免这些命令被当普通消息发给逢亮
 SYSTEM_COMMAND_PREFIXES = (
     "/ceremony",
     "/status",
@@ -136,52 +130,6 @@ def forward_to_fengliang(
             "ok": False,
             "target": "fengliang",
             "error": f"逢亮不可达: {exc}",
-        }
-
-
-def forward_to_system(
-    text: str,
-    sender: str,
-    daemon_webhook_url: str,
-) -> dict:
-    """转发消息给体系（daemon_loop 的 webhook adapter）。"""
-    payload = json.dumps({
-        "text": text,
-        "sender": sender,
-        "source": "openclaw",
-        "timestamp": datetime.now(timezone.utc).isoformat(),
-    }, ensure_ascii=False).encode("utf-8")
-
-    url = f"{daemon_webhook_url}/webhook/system"
-    req = urllib.request.Request(
-        url,
-        data=payload,
-        headers={"Content-Type": "application/json; charset=utf-8"},
-        method="POST",
-    )
-
-    try:
-        with urllib.request.urlopen(req, timeout=15) as resp:
-            data = json.loads(resp.read().decode("utf-8"))
-            return {
-                "ok": True,
-                "target": "system",
-                "response": data,
-            }
-    except urllib.error.HTTPError as exc:
-        body = exc.read().decode("utf-8", errors="replace")[:500]
-        log.error("体系 webhook 请求失败 (HTTP %d): %s", exc.code, body)
-        return {
-            "ok": False,
-            "target": "system",
-            "error": f"HTTP {exc.code}: {body}",
-        }
-    except (urllib.error.URLError, OSError) as exc:
-        log.error("Daemon webhook 不可达: %s", exc)
-        return {
-            "ok": False,
-            "target": "system",
-            "error": f"Daemon webhook 不可达: {exc}",
         }
 
 
@@ -327,16 +275,10 @@ class _BridgeHandler(BaseHTTPRequestHandler):
                 "raw": result.get("response"),
             })
         else:
-            result = forward_to_system(
-                text=text,
-                sender=sender,
-                daemon_webhook_url=cfg.get("daemon_webhook_url", DEFAULT_DAEMON_WEBHOOK_URL),
-            )
             self._respond(200, {
-                "ok": result["ok"],
+                "ok": False,
                 "target": "system",
-                "reply": f"[体系] 已提交: {text[:80]}",
-                "raw": result.get("response"),
+                "reply": f"[体系] 体系命令已随 RTAS 蜂群退役（#1952），未提交: {text[:80]}",
             })
 
     def _handle_feed(self, data: dict) -> None:
@@ -367,20 +309,16 @@ class _BridgeHandler(BaseHTTPRequestHandler):
             self._respond(502, {"ok": False, "error": f"逢亮不可达: {exc}"})
 
     def _handle_health(self) -> None:
-        """健康检查 — 探测逢亮和 daemon webhook 是否可达。"""
+        """健康检查 — 探测逢亮是否可达。"""
         cfg = self.bridge_config
         fengliang_url = cfg.get("fengliang_url", DEFAULT_FENGLIANG_URL)
-        daemon_webhook_url = cfg.get("daemon_webhook_url", DEFAULT_DAEMON_WEBHOOK_URL)
 
         fengliang_ok = _probe_url(f"{fengliang_url}/status")
-        daemon_ok = _probe_url(f"{daemon_webhook_url}/webhook/")
 
         self._respond(200, {
             "bridge": "ok",
             "fengliang": "ok" if fengliang_ok else "unreachable",
-            "daemon_webhook": "ok" if daemon_ok else "unreachable",
             "fengliang_url": fengliang_url,
-            "daemon_webhook_url": daemon_webhook_url,
         })
 
     def _handle_status_proxy(self) -> None:
@@ -439,19 +377,16 @@ def _probe_url(url: str) -> bool:
 def start_bridge(
     port: int = DEFAULT_BRIDGE_PORT,
     fengliang_url: str = DEFAULT_FENGLIANG_URL,
-    daemon_webhook_url: str = DEFAULT_DAEMON_WEBHOOK_URL,
 ) -> None:
     """启动 Gateway Bridge HTTP 服务器。"""
     _BridgeHandler.bridge_config = {
         "fengliang_url": fengliang_url,
-        "daemon_webhook_url": daemon_webhook_url,
     }
 
     server = HTTPServer(("0.0.0.0", port), _BridgeHandler)
     log.info("Gateway Bridge 启动: http://localhost:%d/bridge", port)
     log.info("  逢亮 URL: %s", fengliang_url)
-    log.info("  Daemon Webhook URL: %s", daemon_webhook_url)
-    log.info("  路由规则: 体系命令 %s → system, 其他 → fengliang",
+    log.info("  路由规则: 体系命令 %s 已退役不转发, 其他 → fengliang",
              ", ".join(SYSTEM_COMMAND_PREFIXES))
 
     try:
@@ -463,7 +398,7 @@ def start_bridge(
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="Gateway Bridge — OpenClaw gateway 与逢亮/体系的桥接层",
+        description="Gateway Bridge — OpenClaw gateway 与逢亮的桥接层",
     )
     parser.add_argument(
         "--port", type=int, default=DEFAULT_BRIDGE_PORT,
@@ -473,16 +408,11 @@ def main() -> None:
         "--fengliang-url", default=DEFAULT_FENGLIANG_URL,
         help=f"逢亮 HTTP API 地址（默认 {DEFAULT_FENGLIANG_URL}）",
     )
-    parser.add_argument(
-        "--daemon-webhook-url", default=DEFAULT_DAEMON_WEBHOOK_URL,
-        help=f"Daemon webhook 地址（默认 {DEFAULT_DAEMON_WEBHOOK_URL}）",
-    )
     args = parser.parse_args()
 
     start_bridge(
         port=args.port,
         fengliang_url=args.fengliang_url,
-        daemon_webhook_url=args.daemon_webhook_url,
     )
 
 
