@@ -324,3 +324,9 @@ def test_parse_result_preserves_supported_model(tmp_path, model):
     parsed = parse_result(key, data, tmp_path)
     assert parsed.model == model
     assert parsed.key == key and parsed.status == "completed"
+
+
+def test_production_local_poll_interval_stays_two_seconds():
+    """#2034：生产轮询间隔锁定为 2 s；conftest 的 fast_local_poll 只在测试进程里缩短它。"""
+    from conftest import PRODUCTION_LOCAL_POLL_SECONDS
+    assert PRODUCTION_LOCAL_POLL_SECONDS == 2
