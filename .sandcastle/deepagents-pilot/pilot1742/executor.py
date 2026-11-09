@@ -10,7 +10,7 @@ import sys
 import time
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager, nullcontext
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from pathlib import Path
 from typing import Any
 
@@ -53,6 +53,7 @@ from .delivery import (
     marker,
 )
 from .domain import (
+    MERGE_GATE,
     EffectUnknown,
     NotStarted,
     RunFacts,
@@ -65,8 +66,15 @@ from .domain import (
     parse_sha,
 )
 from .external_review import STATUS_LOCKS, head_status, latest_status
-from .github_app import WRITE_PERMISSIONS, AppIdentity, GitHubAppClient, IdentityError
+from .github_app import (
+    WRITE_PERMISSIONS,
+    AppIdentity,
+    GitHubAppClient,
+    IdentityError,
+    LocalConfigError,
+)
 from .run import (
+    SOURCE_REPO,
     Busy,
     Halted,
     PilotRun,
@@ -251,44 +259,6 @@ class TicketExecutor:
         if any(not any(prefix.startswith(allowed) for allowed in scope) for prefix in self.unit.allowed_prefixes):
             raise AdmissionRefused("registered scope exceeds current signed SPEC deepagents-scope")
 
-    def _previous_run_quiet(self, previous: TicketClaim) -> None:
-        run_dir = Path(previous.run_dir)
-        lock = run_dir / "owner.lock"
-        if lock.exists():
-            fd = os.open(lock, os.O_RDWR)
-            try:
-                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-            except BlockingIOError:
-                raise ClaimRefused(f"上一代次 run {previous.run_id} 的控制进程仍持锁") from None
-            finally:
-                os.close(fd)
-        needle = f"--output-dir {run_dir}/workers/"
-        if any(needle in cmd and not stat.startswith("Z") for _, _, stat, cmd in _ps_rows()):
-            raise ClaimRefused(f"上一代次 run {previous.run_id} 仍有工蜂在运行")
-        # Boat 工蜂不在本机 PID 表；仅观察冻结绑定，不恢复、收集或补提交旧工蜂。
-        try:
-            if not (run_dir / "run.json").exists():
-                if (run_dir / "boat").exists():
-                    raise ExecutionUnknown("缺少旧 run 清单")
-                return
-            run = PilotRun.open(run_dir.parent.parent, previous.run_id)
-            if run.execution is None:
-                if (run_dir / "boat").exists():
-                    raise ExecutionUnknown("旧执行后端与 Boat 绑定不符")
-                return
-            if (run.spec.run_id != previous.run_id or run.dir.resolve() != run_dir.resolve()
-                    or run.spec.ticket != previous.ticket or run.generation != previous.generation):
-                raise ExecutionUnknown("旧 run 的票号或持有代次不符")
-            keys = set(run._keys())
-            keys.update(parse_key_name(previous.run_id, p.stem) for p in (run_dir / "boat").glob("*.json")
-                        if "." not in p.stem)
-            for key in keys:
-                fact = run.execution.observe(key, reconcile=False)
-                if isinstance(fact, (NotStarted, Running, EffectUnknown)) and not run.execution.is_drained(key):
-                    raise ExecutionUnknown(f"{key.name}: {fact}")
-        except (ExecutionUnknown, OSError, ValueError, TypeError, KeyError) as error:
-            raise ClaimRefused(f"上一代次 run {previous.run_id} 的 Boat 工蜂尚未排空：{error}") from None
-
     def claim(self, run_dir: Path) -> TicketClaim:
         """SPEC 7.4：intent → 镜像 → post-check → active，全程在票级动作锁内；崩溃后同 run 从记录处续做。"""
         unit = self.unit
@@ -305,7 +275,7 @@ class TicketExecutor:
                 if record is not None and record.state != "released":
                     raise ClaimRefused(f"票 #{unit.ticket} 已由 {record.run_id} 持有（{record.state}）")
                 if record is not None:
-                    self._previous_run_quiet(record)
+                    run_quiet(record)
                 self.admit(run_dir, record.generation + 1 if record else 1)
                 labels = self.gateway.label_names(self.gateway.issue(unit.ticket))
                 if record is None and MIRROR_LABEL in labels:
@@ -514,7 +484,7 @@ class TicketExecutor:
     def _pr_body(self, run: PilotRun, head: Sha, generation: int) -> str:
         spec = run.spec
         return (f"Refs #{self.unit.ticket}\n\n新执行器交付冻结 head `{head}`。作者 {spec.author_model}，"
-                f"异家族独审 {spec.reviewer_model} 对该 head 判 PASS。合入 main 由人决定。\n\n"
+                f"异家族独审 {spec.reviewer_model} 对该 head 判 PASS。{MERGE_GATE}\n\n"
                 + self._marker("pr", spec.run_id, generation, head))
 
     def _verify(self, head: Sha, number: int) -> str:
@@ -626,7 +596,7 @@ class TicketExecutor:
             if observed == "open":
                 text = self._marker("deliver", spec.run_id, generation, head)
                 body = (f"[deepagents run={spec.run_id} gen={generation}]\n\n交付冻结 head `{head}` 到 "
-                        f"`{branch}`，PR {pr.get('url')}，等待人合入。\n\n{text}")
+                        f"`{branch}`，PR {pr.get('url')}。{MERGE_GATE}\n\n{text}")
                 with self.action("deliver", run.dir, generation, pr_number=number, head=head) as boundary:
                     self._require_review_spec(run, head)
                     observed = self._checked(boundary, head, number)
@@ -662,17 +632,70 @@ class TicketExecutor:
             raise boundary.halt(f"pr:{refused}") from None
 
 
+def run_quiet(previous: TicketClaim) -> None:
+    """持有的执行者已排空：控制锁空闲、本机无工蜂、Boat 绑定全部排空。换代与释放摘镜像共用这一判定。"""
+    run_dir = Path(previous.run_dir)
+    lock = run_dir / "owner.lock"
+    if lock.exists():
+        fd = os.open(lock, os.O_RDWR)
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            raise ClaimRefused(f"持有的 run {previous.run_id} 的控制进程仍持锁") from None
+        finally:
+            os.close(fd)
+    needle = f"--output-dir {run_dir}/workers/"
+    if any(needle in cmd and not stat.startswith("Z") for _, _, stat, cmd in _ps_rows()):
+        raise ClaimRefused(f"持有的 run {previous.run_id} 仍有工蜂在运行")
+    # Boat 工蜂不在本机 PID 表；仅观察冻结绑定，不恢复、收集或补提交旧工蜂。
+    try:
+        if not (run_dir / "run.json").exists():
+            if (run_dir / "boat").exists():
+                raise ExecutionUnknown("缺少旧 run 清单")
+            return
+        run = PilotRun.open(run_dir.parent.parent, previous.run_id)
+        if run.execution is None:
+            if (run_dir / "boat").exists():
+                raise ExecutionUnknown("旧执行后端与 Boat 绑定不符")
+            return
+        if (run.spec.run_id != previous.run_id or run.dir.resolve() != run_dir.resolve()
+                or run.spec.ticket != previous.ticket or run.generation != previous.generation):
+            raise ExecutionUnknown("旧 run 的票号或持有代次不符")
+        keys = set(run._keys())
+        keys.update(parse_key_name(previous.run_id, p.stem) for p in (run_dir / "boat").glob("*.json")
+                    if "." not in p.stem)
+        for key in keys:
+            fact = run.execution.observe(key, reconcile=False)
+            if isinstance(fact, (NotStarted, Running, EffectUnknown)) and not run.execution.is_drained(key):
+                raise ExecutionUnknown(f"{key.name}: {fact}")
+    except (ExecutionUnknown, OSError, ValueError, TypeError, KeyError) as error:
+        raise ClaimRefused(f"持有的 run {previous.run_id} 的 Boat 工蜂尚未排空：{error}") from None
+
+
 def claim_effects(store: ClaimStore, ticket: int, run_id: str, generation: int) -> Path:
     return store.root / f"{ticket}.effects" / f"{run_id}-g{generation}"
 
 
-def release_claim(store: ClaimStore, ticket: int, run_id: str, reason: str) -> TicketClaim:
-    """主控释放。等在飞副作用做完才拿到锁；旧控制进程此后在下一次锁内复核时停下。"""
+def release_claim(store: ClaimStore, gateway: RepoGateway | None, ticket: int, run_id: str, reason: str) -> TicketClaim:
+    """主控释放。等在飞副作用做完才拿到锁，先记 released 让旧控制进程在下一次锁内复核时停下；
+    执行者排空后才在同一把锁内摘票面镜像，持有结束由此在 GitHub 上可见。返回记录 mirror_label 仍为真
+    表示镜像保留，排空后重跑同一命令即可。记录已换成新 run 时拒绝，旧释放碰不到新代次的镜像。
+    gateway 为 None 时只在本机记 released，不碰镜像。"""
     with store.locked(ticket) as txn:
         record = txn.record
         if record is None or record.run_id != run_id:
             raise ClaimRefused(f"票 #{ticket} 当前不由 {run_id} 持有")
-        return txn.write(advance(record, "release", reason=reason))
+        if gateway is None:
+            return txn.write(advance(record, "release", reason=reason))
+        try:
+            run_quiet(record)
+        except ClaimRefused:
+            return txn.write(advance(record, "release", reason=reason, mirror_label=True))
+        released = txn.write(advance(record, "release", reason=reason))
+        gateway.remove_label(ticket, MIRROR_LABEL)
+        if MIRROR_LABEL in gateway.label_names(gateway.issue(ticket)):
+            return txn.write(replace(released, mirror_label=True))
+        return txn.write(replace(released, mirror_label=False))
 
 
 def reconcile_effect(state_root: Path, store: ClaimStore, run_id: str, effect: str, note: str) -> dict[str, Any]:
@@ -766,12 +789,86 @@ def _sigkill_at(point: str | None) -> Callable[[str], None]:
     return crash
 
 
+def review_sweep_key(executor_key: Path, review_key: Path | None) -> Path | None:
+    """serve --review-sweep 交给审查子进程的私钥。给了 --review-private-key 就用它。没给时：审查身份文件不存在，
+    审查本来就用执行器 App 签名（external_review 的缺省），沿用执行器私钥并记一行；身份文件存在（已换审查专用
+    App），执行器私钥签不出审查 App 的 JWT，每次派审都会退出码 2，于是失败关闭：记一行，返回 None。"""
+    from . import external_review
+    if review_key is not None:
+        return review_key
+    if external_review.IDENTITY_CONFIG.exists():
+        print("review-sweep " + json.dumps({
+            "action": "refused-no-review-key",
+            "reason": f"{external_review.IDENTITY_CONFIG} 指定了审查专用 App，serve 须给 --review-private-key"},
+            ensure_ascii=False), flush=True)
+        return None
+    print("review-sweep " + json.dumps({
+        "action": "review-key-fallback",
+        "reason": "未给 --review-private-key 且没有审查身份文件：审查沿用执行器 App"}, ensure_ascii=False), flush=True)
+    return executor_key
+
+
 def _client(args: argparse.Namespace) -> GitHubAppClient:
-    """登记只要读权限；run 才申请写权限。两者都先核 App、安装与仓库身份。"""
+    """登记只要读权限；run 与 release（摘镜像）才申请写权限。两者都先核 App、安装与仓库身份。"""
     identity = AppIdentity(5486877, 179444545, 1150335160, REPO, "newchanlun-deepagents-1742", args.private_key)
-    client = GitHubAppClient(identity, permissions=WRITE_PERMISSIONS if args.command == "run" else None)
-    client.verify()
+    client = GitHubAppClient(identity, permissions=WRITE_PERMISSIONS if args.command in ("run", "release") else None)
+    try:
+        client.verify()
+    except BaseException:
+        client.close()
+        raise
     return client
+
+
+def _serve(args: argparse.Namespace, store: ClaimStore, cutover_store: CutoverStore, source_repo: Path,
+           review_key: Path | None = None) -> int:
+    """队列轮询。读不到 GitHub（含启动时的 App 身份核验）：
+    `--once` 让 IdentityError 照旧冒到 main → 退出码 2（runbook 拿它当检查步骤）；
+    `--loop` 写明哪个源读不到、标到状态页，等一个轮询间隔再从头核身份，进程不退出（launchd 不重启）。
+    本机配置错误（LocalConfigError，含私钥 PrivateKeyError）不是读不到源，两种模式都冒到 main → 退出码 2。"""
+    from .queue import QueueIntake, mark_source_unreadable
+
+    def child(unit: WorkUnit) -> int:
+        command = [sys.executable, "-m", "pilot1742.executor", "--state-root", str(args.state_root),
+                   "--drain-root", str(args.drain_root), "run", "--run-id", unit.run_id,
+                   "--workers-log", str(args.workers_log), "--private-key", str(args.private_key),
+                   "--recheck-approval"]
+        return subprocess.run(command, check=False).returncode
+
+    sweep_round = None
+    if args.review_sweep and review_key is not None:
+        from .review_sweep import serve_round
+        sweep_round = serve_round(review_key, auto_merge=args.review_sweep_auto_merge)
+    client: GitHubAppClient | None = None
+    try:
+        while True:
+            try:
+                cutover_store.load()
+            except CutoverError as error:
+                print(f"queue inactive: {error}")
+                return 0
+            if sweep_round is not None:  # 排在派票前、App 核身份前：派票子进程再久、App 再读不到，sweep 也已跑过
+                sweep_round()
+            try:
+                if client is None:
+                    client = _client(args)
+                    intake = QueueIntake(args.state_root, RepoGateway(client), store, cutover_store, source_repo)
+                print(json.dumps(intake.once(child), ensure_ascii=False, indent=2), flush=True)
+            except IdentityError as error:
+                if args.once or isinstance(error, LocalConfigError):
+                    raise
+                if client is not None:
+                    client.close()
+                    client = None
+                print(f"round skipped, source unreadable (github): {type(error).__name__}: {error}",
+                      file=sys.stderr, flush=True)
+                mark_source_unreadable(source_repo, f"github: {type(error).__name__}: {error}")
+            if args.once:
+                return 0
+            time.sleep(args.poll_seconds)
+    finally:
+        if client is not None:
+            client.close()
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -807,6 +904,13 @@ def main(argv: list[str] | None = None) -> int:
     serve.add_argument("--poll-seconds", type=float, default=60)
     serve.add_argument("--workers-log", type=Path, default=WORKERS_LOG)
     serve.add_argument("--private-key", type=Path, required=True)
+    serve.add_argument("--review-sweep", action="store_true",
+                       help="每轮附带一次 review_sweep：给开放 PR 派正式审查（宿主 gh 凭据，HOST 同时只跑一个审查）")
+    serve.add_argument("--review-private-key", type=Path,
+                       help="审查 App 私钥，只原样转给 sweep 派的 review-pr；不复用 --private-key（执行器 App）。"
+                            "审查身份文件（external_review.IDENTITY_CONFIG）存在时必须给")
+    serve.add_argument("--review-sweep-auto-merge", action="store_true",
+                       help="review_sweep 追平队首，并在精确 head 双门全绿时带 sha 合入；须与 --review-sweep 同用")
     cutover = sub.add_parser("cutover", help="全局冻结排空证据；不执行生产切换")
     cutover.add_argument("operation", choices=("snapshot", "pending", "audit-release", "verify", "record"))
     cutover.add_argument("--snapshot", type=Path)
@@ -828,12 +932,10 @@ def main(argv: list[str] | None = None) -> int:
     release.add_argument("--ticket", type=int, required=True)
     release.add_argument("--run-id", required=True)
     release.add_argument("--reason", required=True)
+    release.add_argument("--private-key", type=Path, required=True)
     args = parser.parse_args(argv)
     store = ClaimStore()
     try:
-        if args.command == "release":
-            print(json.dumps(asdict(release_claim(store, args.ticket, args.run_id, args.reason)), ensure_ascii=False))
-            return 0
         if args.command == "reconcile":
             try:
                 result = reconcile_effect(args.state_root, store, args.run_id, args.effect, args.note)
@@ -849,16 +951,27 @@ def main(argv: list[str] | None = None) -> int:
             print(json.dumps({"claim": asdict(record) if record else None, "status": report}, ensure_ascii=False,
                              indent=2))
             return 0
-        source_repo = Path(__file__).resolve().parents[3]
+        if args.command == "release":
+            # 本机先记 released，GitHub 或 App 凭据不可用也能让旧控制进程停下；摘镜像在下面联网后做。
+            release_claim(store, None, args.ticket, args.run_id, args.reason)
+        source_repo = SOURCE_REPO
         cutover_store = CutoverStore(args.state_root, args.drain_root, getattr(args, "workers_log", WORKERS_LOG))
         if args.command == "serve":
             if args.poll_seconds <= 0:
                 raise ValueError("poll-seconds 须为正数")
+            if args.review_sweep_auto_merge and not args.review_sweep:
+                raise ValueError("--review-sweep-auto-merge 须与 --review-sweep 同用")
+            review_key = None
+            if args.review_sweep:
+                review_key = review_sweep_key(args.private_key, args.review_private_key)
+                if review_key is None:
+                    return 2
             try:
                 cutover_store.load()
             except CutoverError as error:
                 print(f"queue inactive: {error}")
                 return 0
+            return _serve(args, store, cutover_store, source_repo, review_key)
         if args.command == "cutover":
             snapshot_path = args.snapshot or args.state_root / "cutover-snapshot.json"
             if args.operation == "pending":
@@ -882,6 +995,14 @@ def main(argv: list[str] | None = None) -> int:
                 raise ValueError("cutover verify/record/audit-release 需要 --private-key 显式路径")
         with _client(args) as client:
             gateway = RepoGateway(client)
+            if args.command == "release":
+                released = release_claim(store, gateway, args.ticket, args.run_id, args.reason)
+                print(json.dumps(asdict(released), ensure_ascii=False))
+                if released.mirror_label:
+                    print("已记 released，旧控制进程在下一动作边界停下；执行者未排空或镜像未读回，"
+                          f"票面 {MIRROR_LABEL} 保留。排空后重跑同一 release 命令。", file=sys.stderr)
+                    return 75
+                return 0
             if args.command == "cutover":
                 data = json.loads(snapshot_path.read_text())
                 data["legacy_snapshot"] = tuple(LegacyProcess(**p) for p in data["legacy_snapshot"])
@@ -900,25 +1021,6 @@ def main(argv: list[str] | None = None) -> int:
                         cutover_store.record(cutover_record)
                 print(json.dumps(asdict(cutover_record), ensure_ascii=False, indent=2))
                 return 0
-            if args.command == "serve":
-                from .queue import QueueIntake
-                intake = QueueIntake(args.state_root, gateway, store, cutover_store, source_repo)
-                def child(unit: WorkUnit) -> int:
-                    command = [sys.executable, "-m", "pilot1742.executor", "--state-root", str(args.state_root),
-                               "--drain-root", str(args.drain_root), "run", "--run-id", unit.run_id,
-                               "--workers-log", str(args.workers_log), "--private-key", str(args.private_key),
-                               "--recheck-approval"]
-                    return subprocess.run(command, check=False).returncode
-                while True:
-                    try:
-                        cutover_store.load()
-                    except CutoverError as error:
-                        print(f"queue inactive: {error}")
-                        return 0
-                    print(json.dumps(intake.once(child), ensure_ascii=False, indent=2), flush=True)
-                    if args.once:
-                        return 0
-                    time.sleep(args.poll_seconds)
             if args.command == "register":
                 unit = register(args.state_root, gateway, ticket=args.ticket, run_id=args.run_id, base=args.base,
                                 task=parse_task(args.task.read_text()), playbook=args.playbook,

@@ -16,7 +16,11 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 # #1875：耗时的 Rust 作业跑在 Boat 自托管 runner 上（boat-large = 8 vCPU / 16 GB，Ryzen 9950X；
-#   from=hc-gate-base 是预装 Rust 依赖 registry、Python/Node/elan 工具链的保存快照，见
+#   from=hc-ci-slim 是 CI 专用的保存快照：预装 cargo registry 与 rustup；去掉了离线 gate.sh 才用的 py、.elan、
+#   bun、.nvm、nc（含 2 GB+ 的 .git pack）与 .pi（3.07 GB，hc-gate-base 为 8.35 GB）。新机器 ready 后会在后台下载快照
+#   内容（hydration），下载尾段的大文件会挤占写盘：9950X 宿主上 hc-gate-base 卡 80–156 s，hc-ci-slim 最长 24 s
+#   （2026-11-08 同时段实测，evals/boat-checkout/v6）。Python/Node 由 setup-python/setup-node 装进 toolcache，
+#   Lean 只在托管机的 fixture-drift 用。gate.sh 仍从 hc-gate-base 起机，见
 #   /Volumes/AgentStorage/hillclimb-ci-gate/GATE-USAGE.md）。自托管 runner 不占 GitHub 托管 runner 的
 #   20 并发池，所以 extras 五组不再需要 max-parallel 串行（#1723 设它只为不扩大托管 runner 占用）。
 #   对 fsync 时延敏感的 s-observer / sandcastle-ts（Boat 新机首次写盘 fsync p50 约 0.3 s）与轻量作业留在
@@ -33,11 +37,16 @@ jobs:
   #   Rust 侧只有行内 `devskim: ignore` 注释）的 PR 跳过 Rust 作业。Sandcastle PR 常顺带登记误报。
   #   依据（2026-11-07 全量核对）：rust/、s_session/、.github/scripts 与 Rust 作业步骤不引用这些路径；
   #   遍历目录的测试只遍历 rust/src、formal/Origin、s_session。docs/、.chanlun/ 有 Rust 测试读取，不在跳过集。
-  #   push main、手动触发总是全跑；重命名同时计旧路径；文件数达到 API 上限（3000）按需跑处理。
+  #   手动触发总是全跑；重命名同时计旧路径；文件数达到 API 上限（3000）按需跑处理。
+  # #1875 push 去重：合入 main 的 merge commit 若与 PR head（第二父）同树，且 PR 在该 head 上已有成功的 ci.yml run，
+  #   push 不再重跑 Rust 作业。strict 下 PR run 检出的 refs/pull/N/merge 与 head 同树，所以那次 run 测的正是这棵树。
+  #   rust/Cargo.lock 有变时仍全跑，让 main 作用域写入新的 cargo 缓存（PR 作用域的缓存别的 PR 读不到）。
+  #   单父提交、直接推送、查询出错一律全跑。去重后 main 的 push run 多数没有 Rust 作业耗时，CI 计时请看 PR run。
   changes:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     permissions:
+      actions: read
       contents: read
       pull-requests: read
     outputs:
@@ -50,6 +59,31 @@ jobs:
           PR: ${{ github.event.pull_request.number }}
         run: |
           set -euo pipefail
+          if [ "$EVENT" = push ]; then
+            R="repos/$GITHUB_REPOSITORY"
+            dedup() {
+              parents=$(gh api "$R/commits/$GITHUB_SHA" --jq '[.parents[].sha] | join(" ")') || return 1
+              set -- $parents
+              [ "$#" -eq 2 ] || { echo "parents=$#"; return 1; }
+              tree=$(gh api "$R/git/commits/$GITHUB_SHA" --jq .tree.sha) || return 1
+              head_tree=$(gh api "$R/git/commits/$2" --jq .tree.sha) || return 1
+              [ -n "$tree" ] && [ "$tree" = "$head_tree" ] || { echo "tree differs from parent2"; return 1; }
+              files=$(gh api "$R/compare/$1...$GITHUB_SHA" --jq '.files | length, (.[] | .filename, (.previous_filename // empty))') || return 1
+              [ "$(head -n1 <<<"$files")" -lt 300 ] || { echo "compare truncated"; return 1; }
+              # 不用管道：grep -q 提前退出会让上游收到 SIGPIPE，判定被翻转。
+              tail -n +2 <<<"$files" > "$RUNNER_TEMP/push-files"
+              rc=0; grep -qx 'rust/Cargo.lock' "$RUNNER_TEMP/push-files" || rc=$?
+              if [ "$rc" -eq 0 ]; then echo "Cargo.lock changed"; return 1; fi
+              if [ "$rc" -ne 1 ]; then echo "file check failed (grep exit $rc)"; return 1; fi
+              run=$(gh api "$R/actions/workflows/ci.yml/runs?event=pull_request&status=success&head_sha=$2&per_page=20" \
+                --jq '[.workflow_runs[] | select(.head_repository.id == .repository.id)][0].html_url // empty') || return 1
+              [ -n "$run" ] || { echo "no green PR run for $2"; return 1; }
+              echo "green PR run on same tree: $run"
+            }
+            if dedup; then rust=false; else rust=true; fi
+            echo "push dedup: rust=$rust"
+            echo "rust=$rust" >> "$GITHUB_OUTPUT"; exit 0
+          fi
           if [ "$EVENT" != pull_request ]; then echo rust=true >> "$GITHUB_OUTPUT"; exit 0; fi
           gh api --paginate "repos/$GITHUB_REPOSITORY/pulls/$PR/files?per_page=100" \
             --jq '.[] | .filename, (.previous_filename // empty)' > "$RUNNER_TEMP/files"
@@ -189,7 +223,8 @@ jobs:
   #   rust-test-default               cargo test 默认目标
   #   rust-test-s-session (shard i)   s_session bin 测试按测试名分片（test-shard.py，并集 == 全集当场断言）
   #   rust-test-s-session-coverage    汇总各片产物，再断言一次并集 == 全集、各片执行集 == 分配集
-  #   rust-test-s-session-extras      s_session 的 TB-02-C、库/集成测试、TestOnly 特性增量、v3 history
+  #   rust-test-s-session-extras (组) s_session 的 TB-02-C、库/集成测试、TestOnly 特性增量、v3 history（矩阵作业
+  #                                   rust-test-s-session-extra-groups，结论由 ci-ok 直接判定）
   #   rust-test-backtest-bin          backtest_bin feature 的库测试
   # 拆前 s_session bin 一步 89 分钟里，执行占 88 分钟、编译约 1 分钟；其中两条测试独占尾部
   # （tb02w_killed_case_two_scan_budget_resume_and_recover 约 69 分钟、tb02c_persistent_first_kind_and_normal_recovery
@@ -200,7 +235,7 @@ jobs:
   rust-check:
     needs: changes
     if: needs.changes.outputs.rust == 'true'
-    runs-on: ${{ (vars.CI_BOAT_RUNNERS != 'off' && github.actor == 'xy7365527-lang' && github.triggering_actor == 'xy7365527-lang' && (github.event_name != 'pull_request' || github.event.pull_request.user.login == 'xy7365527-lang')) && 'boat-large/from=hc-gate-base' || 'ubuntu-latest' }}
+    runs-on: ${{ (vars.CI_BOAT_RUNNERS != 'off' && github.actor == 'xy7365527-lang' && github.triggering_actor == 'xy7365527-lang' && (github.event_name != 'pull_request' || github.event.pull_request.user.login == 'xy7365527-lang')) && 'boat-large/from=hc-ci-slim' || 'ubuntu-latest' }}
     # #1406 防遥测采样进程挂死的上限；本 job 拆后只剩检查类步骤，正常约 3 分钟。
     timeout-minutes: 30
     env:
@@ -210,13 +245,31 @@ jobs:
         working-directory: rust
 
     steps:
-      - uses: actions/checkout@v4
+      # #1875：Rust 作业用 sparse checkout，不拉 Rust 构建与测试从不读取的大目录（topological-computation 约 620 MB
+      #   的词典语料与运行日志、根目录与 docs 下的 PDF、p7_inputs）。核对过 rust/、s_session/、.github/scripts 与本作业步骤
+      #   均不引用这些路径（formal/ 里只在注释中提到 PDF 文件名）；只拉需要的 blob（filter: blob:none）。
+      - &rust-checkout
+        uses: actions/checkout@v4
+        with:
+          filter: blob:none
+          sparse-checkout-cone-mode: false
+          sparse-checkout: |
+            /*
+            !/topological-computation*/
+            !/p7_inputs/
+            !/docs/chanlun/
+            !/docs/pdfs/
+            !/docs/formal-chain/
+            !/*.pdf
 
       - name: Test cargo telemetry wrapper (#1141)
         run: ../.github/scripts/test-run-cargo-with-telemetry.sh
 
       - name: Test s_session shard planner (#1588)
         run: python3 ../.github/scripts/test_test_shard.py -v
+
+      - name: "Test #1488 named-lock runner (#1875)"
+        run: python3 -m unittest discover -s ../.github/scripts -p 'test_run_1488_delta_ci.py' -v
 
       - uses: ./.github/actions/rust-job-setup
 
@@ -311,17 +364,20 @@ jobs:
   rust-test-default:
     needs: changes
     if: needs.changes.outputs.rust == 'true'
-    runs-on: ${{ (vars.CI_BOAT_RUNNERS != 'off' && github.actor == 'xy7365527-lang' && github.triggering_actor == 'xy7365527-lang' && (github.event_name != 'pull_request' || github.event.pull_request.user.login == 'xy7365527-lang')) && 'boat-large/from=hc-gate-base' || 'ubuntu-latest' }}
+    runs-on: ${{ (vars.CI_BOAT_RUNNERS != 'off' && github.actor == 'xy7365527-lang' && github.triggering_actor == 'xy7365527-lang' && (github.event_name != 'pull_request' || github.event.pull_request.user.login == 'xy7365527-lang')) && 'boat-large/from=hc-ci-slim' || 'ubuntu-latest' }}
     # 拆前本步约 8.8 分钟（run 39358379553）。
     timeout-minutes: 45
     env:
       CARGO_INCREMENTAL: "0"
+      # #1875：本作业测试执行（lib 约 8.8 min，长尾为 a3_oracle_minparts_reentry 与 inclusion completeness）远大于编译，
+      #   按 R4 的规则开本仓 crate opt-level 1（断言与溢出检查保持开启），与 s_session 分片相同。
+      CI_OWN_OPT_LEVEL1: "1"
     defaults:
       run:
         working-directory: rust
 
     steps:
-      - uses: actions/checkout@v4
+      - *rust-checkout
 
       - uses: ./.github/actions/rust-job-setup
 
@@ -338,29 +394,33 @@ jobs:
   #   下方 macos-session 作业一并执行；push main 由该文件自身的 paths 过滤触发）。
   # #1588：按测试名分片。全集每片现场 `--list` 动态生成（不维护静态清单），按
   #   .github/scripts/s-session-test-weights.tsv 的实测耗时做 LPT 分配；权重只管均衡、不管覆盖，
-  #   表外新测试取中位数权重照常入片。改片数须同时改 matrix.shard 与 S_SESSION_SHARDS。
+  #   表外新测试取中位数权重照常入片。改片数须同时改 matrix.shard 与本作业及 coverage 作业的 S_SESSION_SHARDS。
+  # #1875：Boat 上分 2 片、托管机分 4 片（两者用与 runs-on 相同的判断式）。最慢一片都由单条 tb02c 决定
+  #   （Boat 9950X 约 258 s、托管约 553 s），同片其余测试摊在另外 3 个线程上；按实测权重 LPT，2 片为 [1086, 1086]、
+  #   4 片为 [841, 444, 444, 444]（Belay 串行秒），最长片仍是 tb02c 那条。Boat 每轮因此少起 2 台机器
+  #   （每小时 210 次启动上限下，一轮 CI 约 19 次）。
   rust-test-s-session:
     needs: changes
     if: needs.changes.outputs.rust == 'true'
     name: rust-test-s-session (shard ${{ matrix.shard }})
-    runs-on: ${{ (vars.CI_BOAT_RUNNERS != 'off' && github.actor == 'xy7365527-lang' && github.triggering_actor == 'xy7365527-lang' && (github.event_name != 'pull_request' || github.event.pull_request.user.login == 'xy7365527-lang')) && 'boat-large/from=hc-gate-base' || 'ubuntu-latest' }}
-    # 最慢那片只含 tb02w 一条长测试：独占 runner 实测 31 分钟（EPYC 9V45）到 67 分钟（EPYC 7763，已见最慢机型），含编译。
-    # 上限只作挂死保护，按最慢机型读数留约 40% 余量（「有余量」看实测时长，不看本值）。
+    runs-on: ${{ (vars.CI_BOAT_RUNNERS != 'off' && github.actor == 'xy7365527-lang' && github.triggering_actor == 'xy7365527-lang' && (github.event_name != 'pull_request' || github.event.pull_request.user.login == 'xy7365527-lang')) && 'boat-large/from=hc-ci-slim' || 'ubuntu-latest' }}
+    # 最慢那片由单条 tb02c 决定（#1976 之后 tb02w 已降到约 150–270 s）：Boat 9950X 约 258 s、托管 7763 约 553 s，
+    #   作业整体 7–15 分钟。上限只作挂死保护（「有余量」看实测时长，不看本值）。
     timeout-minutes: 110
     strategy:
       fail-fast: false
       matrix:
-        shard: [0, 1, 2, 3]
+        shard: ${{ fromJSON((vars.CI_BOAT_RUNNERS != 'off' && github.actor == 'xy7365527-lang' && github.triggering_actor == 'xy7365527-lang' && (github.event_name != 'pull_request' || github.event.pull_request.user.login == 'xy7365527-lang')) && '[0, 1]' || '[0, 1, 2, 3]') }}
     env:
       CARGO_INCREMENTAL: "0"
-      S_SESSION_SHARDS: "4"
+      S_SESSION_SHARDS: ${{ (vars.CI_BOAT_RUNNERS != 'off' && github.actor == 'xy7365527-lang' && github.triggering_actor == 'xy7365527-lang' && (github.event_name != 'pull_request' || github.event.pull_request.user.login == 'xy7365527-lang')) && '2' || '4' }}
       CI_OWN_OPT_LEVEL1: "1"
     defaults:
       run:
         working-directory: rust
 
     steps:
-      - uses: actions/checkout@v4
+      - *rust-checkout
 
       - uses: ./.github/actions/rust-job-setup
 
@@ -393,7 +453,8 @@ jobs:
     if: ${{ !cancelled() && needs.changes.outputs.rust == 'true' }}
     timeout-minutes: 10
     env:
-      S_SESSION_SHARDS: "4"
+      # 与 rust-test-s-session 同一判断式：分片作业在 Boat 上是 2 片，托管机上是 4 片。
+      S_SESSION_SHARDS: ${{ (vars.CI_BOAT_RUNNERS != 'off' && github.actor == 'xy7365527-lang' && github.triggering_actor == 'xy7365527-lang' && (github.event_name != 'pull_request' || github.event.pull_request.user.login == 'xy7365527-lang')) && '2' || '4' }}
 
     steps:
       - uses: actions/checkout@v4
@@ -427,48 +488,62 @@ jobs:
     name: rust-test-s-session-extras (${{ matrix.group }})
     strategy:
       fail-fast: false
+      # #1875：托管路径也把 owned 拆成 owned + owned-h1（与 Boat 同口径），槽数随之由 4 改为 5。按 run 42378095259 实测时长模拟：
+      #   native 落在快机（9V45）时墙钟 22.4 → 17.3 min，落在慢机（7763）时仍由 native 决定，不变；只拆不加槽反而 22.4 → 26.3。
+      #   单次 CI 托管作业峰值 21 → 22，仍在 20 并发上限内排队消化。下面是 R12 的原注释。
       # Boat 上五组同时开工；退回 ubuntu-latest 时取 4（#1875 R12：3 槽时 release-locks 要排队约 19 分钟，任何顺序下界都约 48 分钟；
       #   4 槽按实测时长模拟约 40 分钟，单次 CI 托管 Linux 作业峰值 20，不超过 20，见 run 42019882083）。
-      max-parallel: ${{ (vars.CI_BOAT_RUNNERS != 'off' && github.actor == 'xy7365527-lang' && github.triggering_actor == 'xy7365527-lang' && (github.event_name != 'pull_request' || github.event.pull_request.user.login == 'xy7365527-lang')) && 8 || 4 }}
+      max-parallel: ${{ (vars.CI_BOAT_RUNNERS != 'off' && github.actor == 'xy7365527-lang' && github.triggering_actor == 'xy7365527-lang' && (github.event_name != 'pull_request' || github.event.pull_request.user.login == 'xy7365527-lang')) && 8 || 5 }}
       matrix:
         # 按托管路径实测时长从长到短排，空出的槽先给长的（#1875 R12）。
-        # #1875 P353-5/7：Boat 上把 owned 的 release 档 H1 各步拆到 owned-h1；native、economic 的测试按名字分成 a/b 两份
-        #   （CI_TEST_PART），各占一台机器，同机负载与不拆时相同。托管路径不拆（20 并发上限）。
-        group: ${{ fromJSON((vars.CI_BOAT_RUNNERS != 'off' && github.actor == 'xy7365527-lang' && github.triggering_actor == 'xy7365527-lang' && (github.event_name != 'pull_request' || github.event.pull_request.user.login == 'xy7365527-lang')) && '["native-a","native-b","release-locks","owned","owned-h1","economic-a","economic-b","content"]' || '["native","release-locks","owned","economic","content"]') }}
-    runs-on: ${{ (vars.CI_BOAT_RUNNERS != 'off' && github.actor == 'xy7365527-lang' && github.triggering_actor == 'xy7365527-lang' && (github.event_name != 'pull_request' || github.event.pull_request.user.login == 'xy7365527-lang')) && 'boat-large/from=hc-gate-base' || 'ubuntu-latest' }}
+        # #1875 P353-5/7：Boat 上把 owned 的 release 档 H1 各步拆到 owned-h1；native 的测试按名字分成 a/b 两份
+        #   （CI_TEST_PART），各占一台机器，同机负载与不拆时相同。托管路径只拆 owned/owned-h1，native 不拆（20 并发上限）。
+        #   economic 开 opt-level 1 后不再拆：run 42452395669（9950X）a/b 各编译约 90 s、测试 182/267 s，合并后估约 10 min，
+        #   仍短于 release-locks（13.0 min，run 42454217164）；每轮少 1 次 Boat 启动和 1 次重复编译。
+        #   content 并入 owned-h1（两条路径都是）：两组都是 opt-level 0，hc-ci-slim 上 content 3.5 min、owned-h1 4.9 min
+        #   （run 42462233357），合并约 8.4 min，仍短于 release-locks 12.4 min，Boat 每轮少 1 次启动；托管机上两组合计
+        #   12–17 min，短于同轮最长作业 22–31 min（11-08 五轮）。content 步骤只看 matrix.group，不再按 runner 重新判定：
+        #   单个作业重跑时 runner 判定会重新求值，而矩阵不会重新展开，按 runner 判定会让 content 被整组跳过（#2005 独审）。
+        group: ${{ fromJSON((vars.CI_BOAT_RUNNERS != 'off' && github.actor == 'xy7365527-lang' && github.triggering_actor == 'xy7365527-lang' && (github.event_name != 'pull_request' || github.event.pull_request.user.login == 'xy7365527-lang')) && '["native-a","native-b","release-locks","owned","owned-h1","economic"]' || '["native","release-locks","owned","owned-h1","economic"]') }}
+    runs-on: ${{ (vars.CI_BOAT_RUNNERS != 'off' && github.actor == 'xy7365527-lang' && github.triggering_actor == 'xy7365527-lang' && (github.event_name != 'pull_request' || github.event.pull_request.user.login == 'xy7365527-lang')) && 'boat-large/from=hc-ci-slim' || 'ubuntu-latest' }}
     timeout-minutes: ${{ startsWith(matrix.group, 'native') && 90 || 60 }}
     env:
       CARGO_INCREMENTAL: "0"
-      OWNED_SPLIT: ${{ (vars.CI_BOAT_RUNNERS != 'off' && github.actor == 'xy7365527-lang' && github.triggering_actor == 'xy7365527-lang' && (github.event_name != 'pull_request' || github.event.pull_request.user.login == 'xy7365527-lang')) && '1' || '0' }}
+      OWNED_SPLIT: "1"
       CI_TEST_PART: ${{ endsWith(matrix.group, '-a') && '0/2' || endsWith(matrix.group, '-b') && '1/2' || '0/1' }}
+      # #1875：economic 组只编一次（一个 cargo test 步骤），测试执行远大于编译，按 R4 规则开本仓 crate opt-level 1
+      #   （断言与溢出检查保持开启）。Belay 同机：最慢三条测试 CPU 时间 151.7/171.0/143.4 s → 23.1/23.6/21.6 s，
+      #   O1 下 312 条全过；本仓 crate 冷编译 CPU 时间 190 → 977 s。R4c（run 41991335406）O1 全轮指纹与 O0 逐条相同。
+      #   其余组多特性反复编译，仍为 opt-level 0（R4c）。墙钟收益以首轮 PR 运行实测为准，economic 组没变快就撤掉。
+      CI_OWN_OPT_LEVEL1: ${{ startsWith(matrix.group, 'economic') && '1' || '' }}
     defaults:
       run:
         working-directory: rust
 
     steps:
-      - uses: actions/checkout@v4
+      - *rust-checkout
 
       - uses: ./.github/actions/rust-job-setup
 
       # #1404：成员来源回归单列先执行，避免已登记的默认域失败使本片新锁被跳过。
       #   #1588：该用例同时在 S bin 分片里执行（拆前即两处执行），本步保留其独立可见的信号。
       - name: cargo test — TB-02-C member source binding
-        if: ${{ !cancelled() && matrix.group == 'content' }}
+        if: ${{ !cancelled() && matrix.group == 'owned-h1' }}
         run: ../.github/scripts/run-cargo-with-telemetry.sh cargo test --locked --features s_session --bin s_structure_session tb02c_member_relations_bind_only_the_member_sources --jobs "${CI_CARGO_JOBS:-1}"
 
       # #1608：#1394 的两个编译负例只在 --cfg 下编译；此处断言它们仍被类型边界拒绝（E0308 落在负例块内）。
       #   放在 TB-02-C 单测之后复用已编好的 s_session 依赖；负例在类型检查阶段即失败，不做代码生成。
       - name: 编译负例 — #1394 类型边界仍拒绝旧写法（#1608）
-        if: ${{ !cancelled() && matrix.group == 'content' }}
+        if: ${{ !cancelled() && matrix.group == 'owned-h1' }}
         run: ../.github/scripts/check-compile-negatives-1394.sh
 
       # #1394 C：内容编码在 s_session feature 下供多个 owner 共用；只测 S bin 不会执行库测试。
       - name: cargo test — 完整内容编码与共享图校验（#1394）
-        if: ${{ !cancelled() && matrix.group == 'content' }}
+        if: ${{ !cancelled() && matrix.group == 'owned-h1' }}
         run: ../.github/scripts/run-cargo-with-telemetry.sh cargo test --locked --features s_session --lib --jobs "${CI_CARGO_JOBS:-1}" s_content
 
       - name: cargo test — 内容向量、持久序列与累计资源（#1394）
-        if: ${{ !cancelled() && matrix.group == 'content' }}
+        if: ${{ !cancelled() && matrix.group == 'owned-h1' }}
         run: ../.github/scripts/run-cargo-with-telemetry.sh cargo test --locked --features s_session --test s_content_contract --test s_content_sequence --test s_content_job --test s_content_path --jobs "${CI_CARGO_JOBS:-1}"
 
       # #1394 G-1：economic_session（含 P-14 读法锁、finance、content_store、store、finance_transport）
@@ -485,7 +560,16 @@ jobs:
       #   已在 rust-test-s-session 各分片执行；新增集合为空即失败。拆前 CI 实测 15.4 分钟（run 39358379553）。
       - name: cargo test — s_capture_native_testonly 特性新增的测试（#1394）
         if: ${{ !cancelled() && startsWith(matrix.group, 'native') }}
-        run: ../.github/scripts/run-cargo-with-telemetry.sh ../.github/scripts/test-feature-delta.sh s_capture_native_testonly
+        # #1875：#1488 Native 作业已用相同 features 逐名执行的锁（同为 dev 档，但它的依赖优化级别与进程模型不同：每条单独进程、
+        #   --exact），这里不再重跑。清单按「目标 测试名」取自该作业自己的计划（run-1488-delta-ci.py --print-plan），两边不会漂移。
+        #   实测重叠 59 条，其中含约 455 s 的 b2_native_warm_cold。两个作业的 if/needs/paths 门控须同步，见 s-fields-native-1488。
+        run: |
+          python3 ../.github/scripts/run-1488-delta-ci.py --mode Native --print-plan \
+            | python3 -c 'import json, sys; print("\n".join(lock["target"] + " " + lock["name"] for lock in json.load(sys.stdin)["locks"]))' \
+            > "$RUNNER_TEMP/native-1488-locks.txt"
+          echo "skip list: $(wc -l < "$RUNNER_TEMP/native-1488-locks.txt") Native locks run by #1488"
+          CI_DELTA_SKIP_FILE="$RUNNER_TEMP/native-1488-locks.txt" \
+            ../.github/scripts/run-cargo-with-telemetry.sh ../.github/scripts/test-feature-delta.sh s_capture_native_testonly
 
       # #1640：生产增量构建的编译期模式、`/2` 资源档与出生锁在无测试钩子 feature 下另跑一遍（env 选择臂只在 testonly）。
       #   D-A：pager_probe 锁在此步设缓存实验输入执行，生产构建须不读、不生效（requested_cache_kib 为 null）。
@@ -545,8 +629,6 @@ jobs:
           do
             grep -Fx "test v3::admission_provider::control_lock_tests::$test ... ok" "$RUNNER_TEMP/1481-ledger.log"
           done
-          cargo test --release --locked --features s_session,s_incremental,s_capture_native_testonly --bin s_structure_session --jobs "${CI_CARGO_JOBS_RELEASE:-4}" h1_admission_ordinary_prepolicy_bad_history_rejected_before_migration -- --test-threads 1 --show-output --format pretty --color never 2>&1 | tee "$RUNNER_TEMP/1481-ordinary.log"
-          grep -Fx "test v3::audit_owner::construction_tests::h1_admission_ordinary_prepolicy_bad_history_rejected_before_migration ... ok" "$RUNNER_TEMP/1481-ordinary.log"
           grep -Fx "test v3::writer_cli::tests::h1_admission_one_shot_requires_explicit_retention_resource_file ... ok" "$RUNNER_TEMP/1481-admission.log"
           cargo test --release --locked --features s_session,s_incremental --bin s_structure_session --jobs "${CI_CARGO_JOBS_RELEASE:-4}" -- --exact v3::admission_anchor::native_n1::tests::native_n1_s3_real_audit_charges_original_job_and_keeps_s2_accept_version_gate v3::admission_anchor::native_n1::tests::native_n1_vfs32f_real_s3_audit_seal_destroy_finish_stays_same_job --test-threads 1 --show-output --format pretty --color never 2>&1 | tee "$RUNNER_TEMP/1481-e6.log"
           grep -Fx "test v3::admission_anchor::native_n1::tests::native_n1_s3_real_audit_charges_original_job_and_keeps_s2_accept_version_gate ... ok" "$RUNNER_TEMP/1481-e6.log"
@@ -566,6 +648,16 @@ jobs:
           do
             grep -Fx "test $test ... ok" "$RUNNER_TEMP/1481-sqlite-commit-failure.log"
           done
+
+      # #1875：带 s_capture_native_testonly 的 release 构建单独放在所有 s_session,s_incremental release 命令之后。
+      #   原先它夹在 H1 三层对拍步骤中间，后面的 release 命令只好把 s_session,s_incremental 重新编一遍
+      #   （托管机 run 42340127421 实测多编 3m27s）。只调整顺序，覆盖面、features、档位与逐名核对不变。
+      - name: H1 Native-feature release lock（#1481 S1）
+        if: ${{ !cancelled() && (matrix.group == 'owned-h1' || (matrix.group == 'owned' && env.OWNED_SPLIT != '1')) }}
+        run: |
+          set -o pipefail
+          cargo test --release --locked --features s_session,s_incremental,s_capture_native_testonly --bin s_structure_session --jobs "${CI_CARGO_JOBS_RELEASE:-4}" h1_admission_ordinary_prepolicy_bad_history_rejected_before_migration -- --test-threads 1 --show-output --format pretty --color never 2>&1 | tee "$RUNNER_TEMP/1481-ordinary.log"
+          grep -Fx "test v3::audit_owner::construction_tests::h1_admission_ordinary_prepolicy_bad_history_rejected_before_migration ... ok" "$RUNNER_TEMP/1481-ordinary.log"
 
       - name: H1 Native debug source suffix and receipt expiry locks（#1481 S1K）
         if: ${{ !cancelled() && matrix.group == 'owned' }}
@@ -634,7 +726,7 @@ jobs:
             total=$((total + 1))
             log="../out-release-$(echo $t | tr ':/' '__').log"
             if ! grep -qx "$t: test" ../list-release.txt; then echo -e "$t\tNOT_LISTED_RELEASE" >> ../locks.tsv; fail=1; continue; fi
-            timeout 2700 cargo test --release --locked --features s_session,s_incremental --bin s_structure_session -- --ignored --exact "$t" --test-threads 1 > "$log" 2>&1
+            timeout 2700 ../.github/scripts/cargo-eacces-retry.sh cargo test --release --locked --features s_session,s_incremental --bin s_structure_session -- --ignored --exact "$t" --test-threads 1 > "$log" 2>&1
             rc=$?
             cat "$log"
             if [ $rc -eq 0 ] && grep -q "test result: ok. 1 passed" "$log"; then echo -e "$t\tPASS_RELEASE" >> ../locks.tsv; else echo -e "$t\tFAIL_RELEASE($rc)" >> ../locks.tsv; fail=1; fi
@@ -668,25 +760,11 @@ jobs:
             artifact.log
           if-no-files-found: warn
 
-  # #1722：保留原 check 名称。仅全矩阵成功可绿；失败、取消、跳过或无结果均拒绝。
-  rust-test-s-session-extras:
-    runs-on: ubuntu-latest
-    needs: [changes, rust-test-s-session-extra-groups]
-    if: ${{ always() }}
-    timeout-minutes: 5
-    steps:
-      - name: Require all extras groups to succeed (#1722)
-        # 只在 changes 明确判定不需要 Rust 时才接受 skipped；changes 失败时 RUST 为空，这里照样失败。
-        env:
-          EXTRAS_RESULT: ${{ needs.rust-test-s-session-extra-groups.result }}
-          RUST: ${{ needs.changes.outputs.rust }}
-        run: test "$EXTRAS_RESULT" = success || { test "$EXTRAS_RESULT" = skipped && test "$RUST" = false; }
-
   # #1769（ADR 0039 迁移步骤 1，C-L 验收第 4 项）：唯一生产 launcher 与 X 骨架入口测试。
   rust-test-production-session:
     needs: changes
     if: needs.changes.outputs.rust == 'true'
-    runs-on: ${{ (vars.CI_BOAT_RUNNERS != 'off' && github.actor == 'xy7365527-lang' && github.triggering_actor == 'xy7365527-lang' && (github.event_name != 'pull_request' || github.event.pull_request.user.login == 'xy7365527-lang')) && 'boat-large/from=hc-gate-base' || 'ubuntu-latest' }}
+    runs-on: ${{ (vars.CI_BOAT_RUNNERS != 'off' && github.actor == 'xy7365527-lang' && github.triggering_actor == 'xy7365527-lang' && (github.event_name != 'pull_request' || github.event.pull_request.user.login == 'xy7365527-lang')) && 'boat-large/from=hc-ci-slim' || 'ubuntu-latest' }}
     timeout-minutes: 45
     env:
       CARGO_INCREMENTAL: "0"
@@ -695,7 +773,7 @@ jobs:
         working-directory: rust
 
     steps:
-      - uses: actions/checkout@v4
+      - *rust-checkout
 
       - uses: ./.github/actions/rust-job-setup
 
@@ -713,7 +791,7 @@ jobs:
   rust-test-backtest-bin:
     needs: changes
     if: needs.changes.outputs.rust == 'true'
-    runs-on: ${{ (vars.CI_BOAT_RUNNERS != 'off' && github.actor == 'xy7365527-lang' && github.triggering_actor == 'xy7365527-lang' && (github.event_name != 'pull_request' || github.event.pull_request.user.login == 'xy7365527-lang')) && 'boat-large/from=hc-gate-base' || 'ubuntu-latest' }}
+    runs-on: ${{ (vars.CI_BOAT_RUNNERS != 'off' && github.actor == 'xy7365527-lang' && github.triggering_actor == 'xy7365527-lang' && (github.event_name != 'pull_request' || github.event.pull_request.user.login == 'xy7365527-lang')) && 'boat-large/from=hc-ci-slim' || 'ubuntu-latest' }}
     # 拆前本步约 9.3 分钟（run 39358379553）。
     timeout-minutes: 45
     env:
@@ -723,16 +801,32 @@ jobs:
         working-directory: rust
 
     steps:
-      - uses: actions/checkout@v4
+      - *rust-checkout
 
       - uses: ./.github/actions/rust-job-setup
 
-      - name: cargo test — backtest_bin feature（econ_oddeven_diagnosis.rs 仅在此 feature 下编译）
+      - name: cargo test — backtest_bin feature 新增的库测试
         # 2026-08-16 磁盘实撞（#993 收口轮）：三轮 runner 爆盘（No space left on device）——
         # --all-targets 在 feature 下额外编 56 个探针 bin 的 test 目标（各链 nautilus 套件，
-        # 本地实测 debug 全 target 55G ⟹ 14G 盘必爆）。改 --lib：backtest 模块测试（含
-        # econ_oddeven_diagnosis）全在 lib 内；tests/ 与 bins 已由 default 步覆盖——零覆盖损失。
-        run: ../.github/scripts/run-cargo-with-telemetry.sh cargo test --lib --features backtest_bin --jobs "${CI_CARGO_JOBS:-1}"
+        # 本地实测 debug 全 target 55G ⟹ 14G 盘必爆）。改 --lib；tests/ 与 bins 由 default 步覆盖。
+        # #1875：不带特性的 3151 条库测试 rust-test-default 已跑过；开 backtest_bin 后新增的 11 条全在
+        #   theta_v0::nautilus 下（Belay 两份 --list 对比，0 条消失）。backtest-feature-scope.py 核对
+        #   nautilus/ 之外的特性门控只有不改变测试构建的两种写法时，只跑 theta_v0::nautilus；否则全跑。
+        #   只跑的那条路径上，过滤后为 0 条即失败。
+        run: |
+          set -euo pipefail
+          tel=../.github/scripts/run-cargo-with-telemetry.sh
+          args=(--locked --lib --features backtest_bin --jobs "${CI_CARGO_JOBS:-1}")
+          if ! python3 ../.github/scripts/backtest-feature-scope.py; then
+            "$tel" cargo test "${args[@]}"
+            exit 0
+          fi
+          "$tel" cargo test "${args[@]}" --no-run
+          cargo test "${args[@]}" -- --list theta_v0::nautilus:: > "$RUNNER_TEMP/backtest-list"
+          n=$(grep -c ': test$' "$RUNNER_TEMP/backtest-list" || true)
+          echo "backtest_bin nautilus tests: $n"
+          [ "$n" -gt 0 ] || { echo "::error title=Empty backtest_bin scope::no theta_v0::nautilus tests listed" >&2; exit 1; }
+          "$tel" cargo test "${args[@]}" -- theta_v0::nautilus::
 
   # #1488：独立运行两种构建的序列与真实 memo 锁，不等待 rust-check 的完整回归。
   # 依赖预取单列为联网步骤；后续 --offline 只约束测试阶段，不代表全程离线。
@@ -740,7 +834,7 @@ jobs:
     needs: changes
     if: needs.changes.outputs.rust == 'true'
     name: "#1488 序列与真实 memo (${{ matrix.mode }})"
-    runs-on: ${{ (vars.CI_BOAT_RUNNERS != 'off' && github.actor == 'xy7365527-lang' && github.triggering_actor == 'xy7365527-lang' && (github.event_name != 'pull_request' || github.event.pull_request.user.login == 'xy7365527-lang')) && 'boat-large/from=hc-gate-base' || 'ubuntu-latest' }}
+    runs-on: ${{ (vars.CI_BOAT_RUNNERS != 'off' && github.actor == 'xy7365527-lang' && github.triggering_actor == 'xy7365527-lang' && (github.event_name != 'pull_request' || github.event.pull_request.user.login == 'xy7365527-lang')) && 'boat-large/from=hc-ci-slim' || 'ubuntu-latest' }}
     strategy:
       fail-fast: false
       matrix:
@@ -749,19 +843,20 @@ jobs:
             features: s_session
           - mode: Owned
             features: s_session,s_allocation_json_testonly
-    # #1588 约定：每个 Rust job 设上限兼作挂死保护；单 feature 组编 S bin 测试 + 精确锁，对齐 rust-test-s-session-extras。
+    # #1588 约定：每个 Rust job 设上限兼作挂死保护；单 feature 组编 S bin 测试 + 精确锁，对齐 rust-test-s-session-extras 各组。
     timeout-minutes: 60
     env:
       CARGO_INCREMENTAL: "0"
       FEATURES: ${{ matrix.features }}
-      # #1875：具名锁在 Boat 上 4 路并行（run-1488-delta-ci.py 每条仍是独立进程 --exact）；托管 runner 保持 1 路串行。
-      CI_1488_TEST_JOBS: ${{ (vars.CI_BOAT_RUNNERS != 'off' && github.actor == 'xy7365527-lang' && github.triggering_actor == 'xy7365527-lang' && (github.event_name != 'pull_request' || github.event.pull_request.user.login == 'xy7365527-lang')) && '4' || '1' }}
+      # #1875：具名锁 4 路并行（run-1488-delta-ci.py 每条仍是独立进程、--exact，逐条核对哈希与日志、结果按计划顺序）。
+      #   托管 runner 也取 4，与同类 4 核托管机上 extras 的 RUST_TEST_THREADS=4 同口径；串行时 A/B/C 锁曾是托管路径的关键路径（run 42373511176：22.1 min）。
+      CI_1488_TEST_JOBS: "4"
     defaults:
       run:
         shell: bash
         working-directory: rust
     steps:
-      - uses: actions/checkout@v4
+      - *rust-checkout
       - uses: actions/setup-python@v5
         with:
           python-version: "3.13"
@@ -784,8 +879,13 @@ jobs:
           rustc -vV
           cargo -V
           rustup show active-toolchain
-          echo "CARGO_TARGET_DIR=$RUNNER_TEMP/1488-sequence-target" >> "$GITHUB_ENV"
-          echo "features=$FEATURES target=$RUNNER_TEMP/1488-sequence-target"
+          # #1875：target 不放 $RUNNER_TEMP。Boat 上两次在 _work/_temp 下执行 cargo 刚编出的 build-script 被拒
+          #   （Permission denied os 13，never executed：run 42488695417、42570217355），别的作业 target 不在 _temp，从未出现。
+          #   只换目录，编译与测试不变；顺带记下两处挂载参数，再出现时可定位。
+          findmnt -no TARGET,FSTYPE,OPTIONS -T "$RUNNER_TEMP" || true
+          findmnt -no TARGET,FSTYPE,OPTIONS -T "$HOME" || true
+          echo "CARGO_TARGET_DIR=$HOME/1488-sequence-target" >> "$GITHUB_ENV"
+          echo "features=$FEATURES target=$HOME/1488-sequence-target"
       - name: Fetch locked dependencies (network allowed, #1488)
         run: cargo fetch --locked
       - name: Run sequence API, real memo, oracle and nonempty source locks (#1488)
@@ -795,7 +895,7 @@ jobs:
             local suite=$1
             shift
             set +e
-            cargo test --offline --locked -j 6 --features "$FEATURES" "$@" -- --format pretty --color never 2>&1 | tee "$RUNNER_TEMP/1488-$suite.log"
+            ../.github/scripts/cargo-eacces-retry.sh cargo test --offline --locked -j 6 --features "$FEATURES" "$@" -- --format pretty --color never 2>&1 | tee "$RUNNER_TEMP/1488-$suite.log"
             local statuses=("${PIPESTATUS[@]}")
             set -e
             echo "suite=$suite cargo_exit_code=${statuses[0]} tee_exit_code=${statuses[1]}"
@@ -891,7 +991,7 @@ jobs:
           run_suite() {
             local suite=$1 filter=$2 binary
             shift 2
-            run_logged "$suite-build" cargo test --offline --locked -j 6 --features "$FEATURES" --no-run --message-format=json "$@"
+            run_logged "$suite-build" ../.github/scripts/cargo-eacces-retry.sh cargo test --offline --locked -j 6 --features "$FEATURES" --no-run --message-format=json "$@"
             binary=$(python3 - "$RUNNER_TEMP/1488-$suite-build.log" <<'PY'
           import json, os, pathlib, sys
           artifacts = set()
@@ -979,24 +1079,27 @@ jobs:
           if-no-files-found: error
 
   # #1488：共享 path 遍历核的 Native 消费者独立回归，不依赖 rust-check 的整套 feature delta。
+  # #1875：rust-test-s-session-extras (native) 不再重跑本作业 A/B/C 锁单里的测试（CI_DELTA_SKIP_FILE）。
+  #   两个作业的 if/needs/paths 等门控必须同步修改：只有本作业被跳过、extras 照跑时，这批锁在该轮 CI 里就一次都没执行。
   s-fields-native-1488:
     needs: changes
     if: needs.changes.outputs.rust == 'true'
     name: "#1488 固定字段共享核 (Native)"
-    runs-on: ${{ (vars.CI_BOAT_RUNNERS != 'off' && github.actor == 'xy7365527-lang' && github.triggering_actor == 'xy7365527-lang' && (github.event_name != 'pull_request' || github.event.pull_request.user.login == 'xy7365527-lang')) && 'boat-large/from=hc-gate-base' || 'ubuntu-latest' }}
+    runs-on: ${{ (vars.CI_BOAT_RUNNERS != 'off' && github.actor == 'xy7365527-lang' && github.triggering_actor == 'xy7365527-lang' && (github.event_name != 'pull_request' || github.event.pull_request.user.login == 'xy7365527-lang')) && 'boat-large/from=hc-ci-slim' || 'ubuntu-latest' }}
     # #1588 约定：同上，Native 组编译 + 精确锁。
     timeout-minutes: 60
     env:
       CARGO_INCREMENTAL: "0"
       FEATURES: s_session,s_capture_native_testonly
-      # #1875：具名锁在 Boat 上 4 路并行（run-1488-delta-ci.py 每条仍是独立进程 --exact）；托管 runner 保持 1 路串行。
-      CI_1488_TEST_JOBS: ${{ (vars.CI_BOAT_RUNNERS != 'off' && github.actor == 'xy7365527-lang' && github.triggering_actor == 'xy7365527-lang' && (github.event_name != 'pull_request' || github.event.pull_request.user.login == 'xy7365527-lang')) && '4' || '1' }}
+      # #1875：具名锁 4 路并行（run-1488-delta-ci.py 每条仍是独立进程、--exact，逐条核对哈希与日志、结果按计划顺序）。
+      #   托管 runner 也取 4，与同类 4 核托管机上 extras 的 RUST_TEST_THREADS=4 同口径；串行时 A/B/C 锁曾是托管路径的关键路径（run 42373511176：22.1 min）。
+      CI_1488_TEST_JOBS: "4"
     defaults:
       run:
         shell: bash
         working-directory: rust
     steps:
-      - uses: actions/checkout@v4
+      - *rust-checkout
       - uses: actions/setup-python@v5
         with:
           python-version: "3.13"
@@ -1018,8 +1121,13 @@ jobs:
           rustc -vV
           cargo -V
           rustup show active-toolchain
-          echo "CARGO_TARGET_DIR=$RUNNER_TEMP/1488-native-target" >> "$GITHUB_ENV"
-          echo "features=$FEATURES target=$RUNNER_TEMP/1488-native-target"
+          # #1875：target 不放 $RUNNER_TEMP。Boat 上两次在 _work/_temp 下执行 cargo 刚编出的 build-script 被拒
+          #   （Permission denied os 13，never executed：run 42488695417、42570217355），别的作业 target 不在 _temp，从未出现。
+          #   只换目录，编译与测试不变；顺带记下两处挂载参数，再出现时可定位。
+          findmnt -no TARGET,FSTYPE,OPTIONS -T "$RUNNER_TEMP" || true
+          findmnt -no TARGET,FSTYPE,OPTIONS -T "$HOME" || true
+          echo "CARGO_TARGET_DIR=$HOME/1488-native-target" >> "$GITHUB_ENV"
+          echo "features=$FEATURES target=$HOME/1488-native-target"
       - name: Fetch locked dependencies (network allowed, #1488 Native)
         run: cargo fetch --locked
       - name: Run Native candidate fields, union and shared path locks (#1488)
@@ -1040,7 +1148,7 @@ jobs:
           run_suite() {
             local suite=$1 filter=$2 binary
             shift 2
-            run_logged "$suite-build" cargo test --offline --locked -j 6 --features "$FEATURES" --no-run --message-format=json "$@"
+            run_logged "$suite-build" ../.github/scripts/cargo-eacces-retry.sh cargo test --offline --locked -j 6 --features "$FEATURES" --no-run --message-format=json "$@"
             binary=$(python3 - "$RUNNER_TEMP/1488-$suite-build.log" <<'PY'
           import json, os, pathlib, sys
           artifacts = set()
@@ -1167,6 +1275,17 @@ jobs:
       #   其 setUpClass 要用 --binary 传入的 S 写者二进制建库，本 job 不构建 Rust，故不进 CI，
       #   由本机以 --binary 单独实跑留收据。两个 test_tb02d_*.cjs 是需外部归档参数的离线对照探针，
       #   tb02d_{harness,runtime,verify}.py 与 tb02d_browser.cjs 是正式运行验收脚本，均不在 CI 执行。
+      # 3.14.6 不在 runner 镜像的 toolcache 里，setup-python 每次都去 GitHub Releases 下载；11-08 下载持续 504，
+      #   s-observer 两天内 6 次因此失败（run 42464517221 等）。把下载好的 toolcache 目录按镜像版本缓存，
+      #   setup-python 先查 toolcache，命中即不联网；解释器仍是同一个 3.14.6 构建（下载包按 Ubuntu 版本区分，故键含镜像）。
+      - name: Runner image identity for the CPython cache (#1414)
+        id: image
+        run: echo "id=${ImageOS:-unknown}-${ImageVersion:-unknown}" >> "$GITHUB_OUTPUT"
+      - name: Cache CPython 3.14.6 toolcache (#1414)
+        uses: actions/cache@v4
+        with:
+          path: ${{ runner.tool_cache }}/Python/3.14.6
+          key: cpython-3.14.6-${{ runner.os }}-${{ runner.arch }}-${{ steps.image.outputs.id }}
       - name: Set up CPython 3.14.6 for TB-02-D (#1414)
         uses: actions/setup-python@v5
         with:
@@ -1191,14 +1310,34 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Cache elan toolchain
+        id: elan-cache
         uses: actions/cache@v4
         with:
           path: ~/.elan
           key: elan-${{ hashFiles('formal/lean-toolchain') }}
 
+      # 缓存命中时 ~/.elan 已含 elan 与 lean-toolchain 钉住的工具链，不再联网下载：11-08 GitHub Releases
+      #   持续 504，命中缓存的作业也在这一步失败（run 42467231009 等）。未命中时照旧安装，curl 带重试。
       - name: Install elan
+        env:
+          CACHE_HIT: ${{ steps.elan-cache.outputs.cache-hit }}
         run: |
-          curl https://raw.githubusercontent.com/leanprover/elan/master/elan-init.sh -sSf | bash -s -- -y --default-toolchain none
+          if [ "$CACHE_HIT" = true ] && [ -x "$HOME/.elan/bin/elan" ]; then
+            echo "elan from cache: $("$HOME/.elan/bin/elan" --version)"
+          else
+            # elan-init 内部再下载 elan 二进制且不重试，所以整段安装重试 3 次（#2002 独审 Nit 1）。先落盘再执行：
+            #   `curl | bash` 在无 pipefail 时只看 bash 的退出码，curl 失败也会被当成成功。
+            init="${RUNNER_TEMP:-/tmp}/elan-init.sh"
+            for i in 1 2 3; do
+              if curl --retry 5 --retry-all-errors --retry-delay 10 -sSf -o "$init" \
+                   https://raw.githubusercontent.com/leanprover/elan/master/elan-init.sh \
+                 && bash "$init" -y --default-toolchain none; then
+                break
+              fi
+              [ "$i" -lt 3 ] || exit 1
+              sleep 30
+            done
+          fi
           echo "$HOME/.elan/bin" >> "$GITHUB_PATH"
 
       - name: Build formal (lake build)
@@ -1267,15 +1406,17 @@ jobs:
         run: python -m ruff check --select F,E9,B,I .
       - name: Mypy
         run: python -m mypy pilot1742
+      # #1875：本步串行约 9.3 min，是只改 .sandcastle 的 PR 的 CI 下限。-n 4 与托管 runner 4 核一致；
+      #   Belay 上串行与两轮 -n 4 的失败/错误集合逐项相同（84 项，均为环境依赖），耗时 655 → 252/209 s。
       - name: Test pilot and Studio without external workers
-        run: python -m pytest -q tests
+        run: python -m pytest -q -n 4 tests
       - name: Test approval-signing reader
         working-directory: .sandcastle/approval-signing
         run: python -m pytest -q tests
 
   # #1875 p2m：唯一汇总门。依赖本 workflow 全部作业（macos-session 只在手动触发时跑，不计入）；
   #   任一作业 failure 或 cancelled 即失败，被 changes 正确跳过的 Rust 作业（skipped）不算失败。
-  #   设为 main 的必需检查后，GitHub auto-merge 会同时等 deepagents/review 和整轮 CI，不会因审查单绿绕过 CI。
+  #   已是 main 的必需检查（与 deepagents/review 并列，#1742 裁定），auto-merge 会同时等审查和整轮 CI，不会因审查单绿绕过 CI。
   ci-ok:
     runs-on: ubuntu-latest
     if: ${{ always() }}
@@ -1288,7 +1429,6 @@ jobs:
       - rust-test-s-session
       - rust-test-s-session-coverage
       - rust-test-s-session-extra-groups
-      - rust-test-s-session-extras
       - rust-test-production-session
       - rust-test-backtest-bin
       - s-sequence-1488

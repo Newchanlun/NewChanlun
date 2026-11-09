@@ -1194,10 +1194,18 @@ def checkout_identity(repo: Path) -> dict:
     }
 
 
+# cargo-eacces-retry.sh 重试前打出的标记行；构建日志里出现时，只认最后一个标记之后那次 cargo 的输出（#2025 独审）。
+EACCES_RETRY_MARKER = "::warning title=Boat build-script EACCES retry::"
+
+
 def select_binary(log: str, rust: Path, target_dir: Path, target: str, mode: str) -> dict:
     """只接受本次成功 cargo JSON 指出的唯一当前包测试二进制。"""
+    lines = log.splitlines()
+    retried = [i for i, line in enumerate(lines) if line.startswith(EACCES_RETRY_MARKER)]
+    if retried:
+        lines = lines[retried[-1] + 1:]
     messages = []
-    for line in log.splitlines():
+    for line in lines:
         try:
             value = json.loads(line)
         except json.JSONDecodeError:
@@ -1279,6 +1287,23 @@ def run_logged(argv: list[str], cwd: Path, log_path: Path, receipts: list[dict])
     return code
 
 
+# #1875：并行执行时按估计耗时从长到短提交（LPT），让最长的锁最先开跑，不在末尾单独拖出尾巴。
+#   只影响提交顺序；报告里 tests 的顺序、失败列表顺序与串行时一致。数值为托管 runner 4 路并行时的实测量级
+#   （run 42376006945：最长锁原排在 bin 第 66 位，晚 94 s 开跑，成了这一步最后结束的锁），只用来排序，不参与任何判定；未列出的锁按 0 处理，保持计划顺序。
+ESTIMATED_SECONDS = {
+    "v3::audit_owner::construction_tests::b2_native_warm_cold_and_ordinary_match_all_rows_nodes_roots_receipts_and_counts": 624,
+    "v3::audit_owner::construction_tests::b2_native_source_global_dependencies_match_full_oracle_and_rollback": 305,
+    "v3::audit_owner::construction_tests::b2_native_source_phase_errors_precede_later_bad_material": 261,
+    "v3::audit_owner::construction_tests::b2_native_source_future_duplicates_preserve_earlier_actual_fault": 141,
+    "v3::generation::tests::delta_full_bi_prior_tail_revision_and_reactivated_windows_match_full": 100,
+}
+
+
+def submission_order(planned: list) -> list:
+    """线程池的提交顺序：估计耗时降序，同值保持计划顺序（sorted 稳定）。"""
+    return sorted(planned, key=lambda item: -ESTIMATED_SECONDS.get(item[1]["name"], 0))
+
+
 def run_target(rust: Path, target_dir: Path, output: Path, target: str, mode: str,
                report: dict) -> bool:
     locks = required_locks(mode, target)
@@ -1288,7 +1313,8 @@ def run_target(rust: Path, target_dir: Path, output: Path, target: str, mode: st
     try:
         args = ["--lib"] if target == "lib" else ["--bin", "s_structure_session"]
         build_log = output / f"{target}-build.log"
-        command = ["cargo", "test", "--offline", "--locked", "-j", "6", "--features",
+        # #1875：经 cargo-eacces-retry.sh 执行，Boat 上 build-script EACCES 偶发时只重试一次（其余失败原样返回）。
+        command = [str(rust.parent / ".github/scripts/cargo-eacces-retry.sh"), "cargo", "test", "--offline", "--locked", "-j", "6", "--features",
                    FEATURES[mode], "--no-run", "--message-format=json", *args]
         if run_logged(command, rust, build_log, result["commands"]) != 0:
             raise ValueError("cargo编译失败；不得寻找或执行旧二进制")
@@ -1338,7 +1364,7 @@ def run_target(rust: Path, target_dir: Path, output: Path, target: str, mode: st
                 run_one(*item)
         else:
             with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as pool:
-                for future in [pool.submit(run_one, *item) for item in planned]:
+                for future in [pool.submit(run_one, *item) for item in submission_order(planned)]:
                     future.result()
         failures.sort(key=[lock["name"] for lock in locks].index)
         same_binary(binary)

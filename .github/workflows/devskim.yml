@@ -26,10 +26,83 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     permissions:
+      actions: read
       contents: read
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
+        with:
+          # PR 事件检出 refs/pull/N/merge；深度 2 才能拿到第一父（运行时的 main）做增量判定。
+          fetch-depth: 2
+
+      # #1875：DevSkim 规则逐文件匹配，一个文件的结果只取决于它自己的路径与内容。锚点提交（base 或其最近的已扫祖先）
+      #   在 push 上已全量扫描通过、且锚点..HEAD 不改扫描器、本工作流、基线、误报清单与两个门脚本时，只扫这段改动的文件，
+      #   门判定与全量扫描相同：未改文件的结果与锚点逐条一致，而那次已通过同一份基线与误报清单。Belay 实测（2026-11-08）：
+      #   PR #1969 改动文件 5 条结果、全部 628 个有发现的文件加随机 1415 个文件（43478 条结果），子集扫描与全量扫描逐条 JSON 相同。
+      #   push、定时任务、任何条件不满足或查询出错，一律全量扫描。
+      - name: Choose full or incremental scan
+        id: scope
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          EVENT: ${{ github.event_name }}
+        run: |
+          set -euo pipefail
+          note() { echo "$1"; echo "DevSkim $1" >> "$GITHUB_STEP_SUMMARY"; }
+          full() { note "scope=full ($1)"; echo "dir=$GITHUB_WORKSPACE" >> "$GITHUB_OUTPUT"; exit 0; }
+          [ "$EVENT" = pull_request ] || full "event $EVENT"
+          base=$(git rev-parse HEAD^1 2>/dev/null) || full "no first parent"
+          # 锚点：base 沿第一父往回最近 30 个提交里，最近一个 push 全量扫描已成功的提交。main 合得比全量扫描快
+          #   （扫描 11–23 min），只认 base 本身时多数 PR 找不到已扫基线、退回全量。锚点之后 main 与 PR 改过的
+          #   文件都进入 changed，下面的守卫与软链检查同样作用在锚点..HEAD 上，故判定仍与全量扫描相同。
+          scanned=$(gh api "repos/$GITHUB_REPOSITORY/actions/workflows/devskim.yml/runs?event=push&status=success&branch=main&per_page=30" \
+            --jq '.workflow_runs[] | .head_sha + " " + .html_url') || full "run lookup failed"
+          err=$(git fetch -q --no-tags --deepen=30 origin "$base" 2>&1) || full "history deepen failed: $(tail -n 1 <<< "$err")"
+          commits=$(git rev-list --first-parent -n 30 "$base") || full "rev-list failed for base $base"
+          anchor="" run=""
+          for c in $commits; do
+            run=$(awk -v c="$c" '$1 == c { print $2; exit }' <<< "$scanned")
+            if [ -n "$run" ]; then anchor=$c; break; fi
+          done
+          [ -n "$anchor" ] || full "no successful push scan within 30 first-parent commits of base $base"
+          changed="$RUNNER_TEMP/changed"
+          git diff --name-only --no-renames -z "$anchor" HEAD > "$changed" || full "diff failed"
+          count=$(tr -cd '\0' < "$changed" | wc -c | tr -d ' ')
+          [ "$count" -lt 3000 ] || full "$count changed files"
+          # 不用管道：grep -q 提前退出会让上游收到 SIGPIPE，pipefail 下整条判为不匹配。
+          rc=0
+          grep -qzE '^(\.github/devskim/.*|\.github/workflows/devskim\.yml|\.github/devskim-baseline\.json|\.github/devskim-reviewed-1488\.json|scripts/devskim_sarif_gate\.sh|scripts/devskim_reviewed_false_positives\.py)$' "$changed" || rc=$?
+          [ "$rc" -ne 0 ] || full "scanner, workflow, baseline, allowlist or gate changed"
+          [ "$rc" -eq 1 ] || full "guard check failed (grep exit $rc)"
+          # 全量扫描会跟进被跟踪的软链（如 .claude/skills/* -> .agents/skills/*）：改动落在某个软链目标上或其下时，
+          #   该软链路径的结果也会变，子集扫描看不到，走全量。
+          if ! linked=$(git ls-files -s -z | python3 -c '
+          import os, sys
+          changed = [p for p in open(sys.argv[1], "rb").read().decode().split("\0") if p]
+          root = os.path.realpath(".")
+          targets = set()
+          for rec in sys.stdin.buffer.read().decode().split("\0"):
+              if not rec.startswith("120000 "):
+                  continue
+              target = os.path.realpath(rec.split("\t", 1)[1])
+              if target == root or not target.startswith(root + os.sep):
+                  print("<link to repo root or outside: " + rec.split("\t", 1)[1] + ">")
+                  sys.exit(0)
+              targets.add(os.path.relpath(target, root))
+          hits = [p for p in changed if any(p == t or p.startswith(t + "/") for t in targets)]
+          print(hits[0] if hits else "")
+          ' "$changed"); then full "symlink target lookup failed"; fi
+          [ -z "$linked" ] || full "tracked symlink check: $linked"
+          sub="$RUNNER_TEMP/devskim-subset"
+          mkdir -p -- "$sub"
+          copied=0
+          while IFS= read -r -d '' f; do
+            if [ -L "$f" ]; then full "symlink $f"; fi
+            if [ -f "$f" ]; then mkdir -p -- "$sub/$(dirname -- "$f")"; cp -p -- "$f" "$sub/$f"; copied=$((copied + 1)); fi
+          done < "$changed"
+          [ "$copied" -gt 0 ] || full "no surviving changed file to scan"
+          note "scope=incremental: $copied of $count changed file(s) since anchor $anchor (base $base); anchor fully scanned in $run"
+          echo "dir=$sub" >> "$GITHUB_OUTPUT"
 
       - name: Build reproducible DevSkim scanner image
         id: build_scanner
@@ -61,12 +134,14 @@ jobs:
         shell: bash
         run: |
           docker run --rm \
-            --volume "$GITHUB_WORKSPACE:/workspace" \
+            --volume "${{ steps.scope.outputs.dir }}:/workspace" \
             --workdir /workspace \
             devskim-scanner:1.0.90 \
             /workspace \
             /workspace/devskim-results.sarif \
             "**/.git/**,**/bin/**,**/.chanlun/block-topology/concept_registry.json,**/.chanlun/block-topology/morse_landscape.json,**/.chanlun/block-topology/meta.json,**/.chanlun/concept_registry.json,**/topological-computation/experiment_long_run_2000.json,**/topological-computation/experiment_real_result.json,**/topological-computation/experiment_f_criterion_2000.json,**/topological-computation/signifier_net/.dialogue_ingest_state.json,**/skills-lock.json,**/chanlun/review-results/treasury-reverify-t1-armR-trades-golden-20260727.json,**/tmp/**,**/.claude/skills/brainstorming/**,**/.agents/skills/diagnosing-bugs/**,**/.claude/skills/diagnosing-bugs/**"
+          dir='${{ steps.scope.outputs.dir }}'
+          if [ "$dir" != "$GITHUB_WORKSPACE" ]; then cp "$dir/devskim-results.sarif" "$GITHUB_WORKSPACE/devskim-results.sarif"; fi
 
       - name: Upload DevSkim SARIF as an ordinary Actions artifact
         id: upload_devskim_artifact
