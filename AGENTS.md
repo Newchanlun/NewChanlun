@@ -1,172 +1,55 @@
-# AGENTS.md（唯一正本基因组）
+# AGENTS.md
 
-**语言**：一律用简体中文回复与产出文档。
+一律用简体中文回复和写文档。本文件是所有 harness 的正本入口；`CLAUDE.md` 只是指向本文件的兼容指针。skills 正本在 `.agents/skills/`，`.claude/skills` 是它的投影。
 
-**正本声明**（2026-07-28 #517 裁定）：本文件是全 harness 唯一正本入口。Kimi 为主力运行时（K1：编排/文档层主力；实施层 codex/claude 分工不变）。CLAUDE.md 仅留指针；`.claude/rules/`（ECC 注入机制）已归档下线；skills canonical = `.agents/skills/`（`.claude/skills` 为 symlink 投影，`agent/` 为生成物）。
+## 项目
 
-## 项目总纲领
+NewChanlun 是以缠论（缠中说禅博文）为核心的量化交易系统，四大支柱为缠论引擎、PH 拓扑、K4 选股、IBKR 执行，路线图见 `docs/ROADMAP.md`。`rust/` 是结构引擎与回测，`formal/` 是 Lean 形式化，`.chanlun/definitions/` 是教义正本，词汇见 `CONTEXT.md`，架构决策见 `docs/adr/`。
 
-顶层路线图见 `docs/ROADMAP.md`：四大支柱（缠论引擎 / PH 拓扑 / K4 选股 / IBKR 执行）+ 五里程碑（M1 回测验证 → M5 生产加固）。
+## 开发基础设施（只有三样）
 
-## 缠论权威链（递减）
+新需求接到这三样的现有入口上。
 
-1. **缠师原始博文**（`docs/chanlun/text/blog/INDEX.md`，108课+答疑）— **最终权威**；
-2. **《股市技术理论》编纂版**（`docs/chanlun/text/chan99/INDEX.md`）— 主要参考，已知遗漏 67/71/77/78 课与新笔定义（已由博文补录）；
-3. **思维导图/第三方总结**（`docs/chanlun/text/mindmaps/INDEX.md`）— 辅助，不作定义依据。
+- **pstack**：工作方法（poteto-mode、architect、arena、blast-radius 等），仓内适配版在 `.agents/skills/pstack-*`。持续优化走 pstack 的 Hillclimb：先立基线和可重复测量，一次验证一项改动。
+- **Matt 的工作流**：wayfinder 管票与图，正本 `docs/agents/wayfinder-workflow.md`，巡航用 `/graph-run <图号>`；决策票从分级、起草、独审到落地的流程见 `.sandcastle/docs/graph-engineering.md`。Sandcastle 在隔离沙盒里跑实施票，入口 `.sandcastle/README.md`，受管后台的模型只在 `.sandcastle/main-model.mts` 配置。
+- **LangChain Deep Agents**：生产执行 loop，入口 `.sandcastle/deepagents-pilot/README.md`。executor（`EXECUTOR.md`）把票从领取跑到实施、异家族独审、发布 PR；`deepagents/review`（`EXTERNAL-REVIEW.md`）审已有 PR 并发布同名必需检查。
 
-层级间有出入以更高层为准。速查：`缠论知识库.md`。
+## 合入与人工确认
 
-## 缠论教义正本（[#793](https://github.com/xy7365527-lang/NewChanlun/issues/793) 裁定，2026-07-30）
+- **合入 main 没有人工门**：分支保护要求 `deepagents/review`（正式非作者审查）与 `ci-ok`（适用 CI 全绿）都通过并追平 main（strict），满足后代理可以合入。工蜂、执行器和 Sandcastle 实施者只开 PR。
+- **T 类、P 类决策与 spec 同一流程**：起草，非作者独审 PASS，由代理裁定并记账；BLOCK 就返修，缺有效独审不放行（#1909）。
+- **仍要人确认的只有两类**：实盘下单与资金、密钥与凭证。资金、账户、凭据类硬门票挂 `ready-for-human` 交还用户签署，签署格式见 `.sandcastle/docs/graph-engineering.md`「1. 分级」。CI 与分支保护配置由代理决定、事后报告，但不得借此关闭或放宽两项必需检查、取消 strict 或用管理员权限绕过。
 
-**`.chanlun/definitions/`（一概念一份）是缠论教义的唯一正本入口。** 与上一节的关系：**权威链管「证据从哪来」，本目录管「裁完的结果是什么」**——权威链是裁定时取证的次序，本目录是裁定落地后各实现（Rust / Lean / Python）应当对齐的那一份。
+## 底线
 
-**权威分层**（三方各管一段，不排名次）：
+- 行为正确性不变：不为迁就基础设施改缠论或交易判据。验证按差异面靶向做，全量只在重型验证窗口跑并照实标注（`docs/agents/delivery-discipline.md`「验证范围与测试计数」）。
+- 合入前必须有非作者独审：独立进程、只读证据，可以与作者同模型。
+- macOS 本机不跑 `cargo`、`rustc`；Rust 验证走 CI、Boat 或远端环境。
+- 不读、不复制、不打印密钥；不伪造签名、权限或审查状态。破坏性 git 操作前先备份并只读预检；用户粘贴的 shell 命令逐字执行。
+- 过程证据、临时文件、大型构建放 `/Volumes/AgentStorage`，不入仓。新文件入仓前按 `docs/agents/generation-constitution.md` §1 判名分；碰分支、worktree、CI 基线前先读同文件 §2「现役线名单」。
 
-- **缠师原文管语义**——「这个概念是什么」，不可推翻；
-- **Lean 形式化管边界**——原文没讲的端点与退化情形（如中枢核心退化成单点算不算中枢），`formal/Origin/` 的定义式即该类问题的正本；
-- **生产代码没有发言权、只有否决权**——不得以「现在就这么跑的」为由支持一条口径，但可用实测读数打回一条裁定（例：按此定义跑出来信号恒为零）。
+## 文档层级与名分
 
-推论：一条端点问题只裁了 Rust 侧而 Lean 未跟（`rust/src/theta_v0/classifier/center.rs:13` 的 [#321](https://github.com/xy7365527-lang/NewChanlun/issues/321) 分歧登记即实例），性质是**裁错了层**，不是跟进不及时。
-
-**教义裁定的关票判据**（两件缺一不可）：
-
-1. 文字正本落 `.chanlun/definitions/` 对应文件；
-2. 附一份**受影响代码清单**，点名到文件行号（Rust 哪几处、Lean 哪几处、Python 哪几处）。真改码进下游实施链，由该清单驱动。
-
-**「在代码注释里登记口径分歧」不再算合规收尾**——注释可以写，但**必须带票号**；分歧只能存在于已开的票里，不能只存在于注释里。
-
-**每份定义文件固定三行头**（由该概念的裁定票落地时填；不预落空壳头）：
-
-```
-> 正本：本文件是 <概念> 的教义正本。
-> 最后裁定：#<票号>（<日期>）
-> 受影响代码清单：<指针>
-```
-
-### 收敛通则：同一判断不得有宽严两档（[#799](https://github.com/xy7365527-lang/NewChanlun/issues/799) 裁定，2026-07-30）
-
-> **同一个判断不得存在宽严两档实现，更不得让宽松的那档接管严格那档的失败。**
-
-「严格版判不出来 ⟹ 换宽松版再判一次 ⟹ 放行」不是合法的通道分派——它把**判据失败**当成了**换判据重判**的触发器。收敛一个概念时，凡发现该概念底下有两套判据且其中一套在给另一套兜底的，**先判违规、再谈收敛到哪一套**，两件事分开做。
-
-**限定词（防误伤正当的分档）**：本条管的是**同一个判断的两个宽严档位**，不管以下三类正当分化——
-
-1. **不同判断**：判的对象本就不同（中枢构造 vs 背驰确认），各自独立成立，互不兜底；
-2. **诊断模式 vs 生产模式**：诊断口径可更宽（多打日志、多记候选），但**不得参与准入**；
-3. **已声明的独立对照臂**：见 [ADR-0005](docs/adr/0005-nest-import-ban-clause9-ruling.md) —— 对照臂不产生交易决策，不在「生产判定路径」管辖内（[#799](https://github.com/xy7365527-lang/NewChanlun/issues/799) 裁定六）。
-
-**判别一句话**：看两套判据**是不是接在同一个 if-else 上**。是 ⟹ 系统自己声明了二者可互换 ⟹ 违规；不是 ⟹ 按上面三条限定词逐条对。
-
-**在案实例**（本通则的来源，非举例）：次级别背驰确认存在两份实现——`div_cand`（`rust/src/theta_v0/classifier/cand_predicate.rs:107`，四条件含 **Extreme**）与 `sublevel_diverges`（`rust/src/theta_v0/classifier/mod.rs:1929`，**无 Extreme**，其余同族）；`econ_positive.rs:1687` 的 C1 规定前者失败（`descend anchor None`）才走后者所在的小转大通道。[#796](https://github.com/xy7365527-lang/NewChanlun/issues/796) 实测 52 个候选中 **51 个**经此降级放行。
-
-**⟹ 已裁（2026-08-03，[背驰的教义正本 #814](https://github.com/xy7365527-lang/NewChanlun/issues/814) D-2）**：两者判的是**同一个东西**（次级别一类点），**收成一份，且保留 Extreme**——「创新高/新低」在次级别走势内部判。决定性依据是 `014-第14课.md:34`【正文】的**缠中说禅买点定律**「大级别的第二类买点由次一级别相应走势的第一类买点构成」，其上文明写降级的成因是「对于第一类买点的背弛走法就无法出现」⟹ 降级是判据失效后的**补救**，不是另立一套判据。正本落 `.chanlun/definitions/beichi.md`「次级别背驰的 Extreme 条件」节。**行号订正**：`sublevel_diverges` 实际在 `mod.rs:1931`（本处旧记 1929）。
-
-### 总缝规则：同一判定每级必须是同一个（[#804](https://github.com/xy7365527-lang/NewChanlun/issues/804) 裁定，2026-07-30）
-
-> **同一个判定，每一级必须跑同一个判定；级别的差异只准以传进去的值出现，不准是另一套判据。**
-
-#### ① 规则落在语义，不落在代码形状
-
-**判别式**：把两级的输入换成同一份数据喂进去，**两边输出必须逐位相同**——不同就是两个判断，即违规。
-
-**故意不落在形状上**，理由三条：
-
-1. **上位约束已排除形状口径**——[#799](https://github.com/xy7365527-lang/NewChanlun/issues/799) 裁定十一原话：grep 挡不住「另写一份同义代码」，`div_cand` 与 `sublevel_diverges` 之间**零共同标识符**，任何语法扫描都抓不到；
-2. **实测四个病灶只有一个是形状病**（`is_l0` 36 处），而它恰恰是最容易改写成合规外形的那个——`if level == 0 { A } else { B }` 改写成 `TABLE[level]` 即可让 `level ==` 的 grep 归零，而两级用的仍是两套中枢定义（[#794](https://github.com/xy7365527-lang/NewChanlun/issues/794)），分歧一点没变；
-3. 拿产出的外形当分类维度是本仓已撞三次的错误。承重的是「它在系统里干什么」，不是「它长什么样」。
-
-**grep 降级为分诊线索，不是判据**：`level ==` 命中不等于违规，零命中也不等于合规，它只提示「这里值得看一眼」。
-
-**机械锁照 [#799](https://github.com/xy7365527-lang/NewChanlun/issues/799) 裁定十一分派**：本条属**行为不变式**类 ⟹ 载体只能是**测试锁**（同输入同输出对拍），不能靠 grep gate。据 #799 附带原则「只编译不执行的锁按无锁计」，本条落地的前置是**先让 CI 跑 `cargo test`**（已定为下游实施链第一条动作）。
-
-**明写代价（090 照实）**：语义口径贵——每条判据都得配一个对拍测试，写不出对拍就立不住；形状口径一条 grep 即可。取贵的那条是因为便宜那条抓不到本仓实际有的病，不是因为它没缺点。
-
-#### ② 举证门：例外可以有，但必须自带退场条件
-
-**「上级输入缺这个维度」这类理由算数**，但举证成立须同时满足三件：
-
-1. **指得出实质**——不是「这样比较方便」，而是能指出上级输入确实不含该维度，并有权威源背书（原文 / Lean 定义式）；
-2. **写得出退场条件**——举证书**必须回答「这条缝在什么条件下消失」**。答不出退场条件的举证一律不算数。这是本图「另起一套必须配退场条款」同一条纪律的教义层版本（成因：`theta_v0/mod.rs:13-18` 当年只写了「我不复用旧的」、没写「旧的什么时候死」，`recursive_t` 因此挂到今天）；
-3. **不超上限**——按 [#799](https://github.com/xy7365527-lang/NewChanlun/issues/799) 裁定二，此类缝**全仓上限 3 条**，触顶即必须回去做强版（把缺的维度上载进数据类型），不得再新增。
-
-**为什么不一刀砍掉**：实测现役只有 1 条缝，且它有 Lean 侧背书（上级发展态本就用外缘判据）；砍它要动数据类型、成本从未估过，且可能与形式化那边打架。**数量上封顶、时间上写死到期**，是比「全放」和「全收」都稳的中间态。
-
-**明写代价**：~~中枢那两套算法因此还要并存一段时间，等第二批的中枢概念票来收。~~（已由 [#812](https://github.com/xy7365527-lang/NewChanlun/issues/812) Z-3 结清：E1 伪分歧撤销，并存不违规，见上方在案实例段的撤销记录。）
-
-#### ③ 举证书的载体：随概念走，不另建台账
-
-- **正本**写进该概念的 `.chanlun/definitions/<概念>.md`，作**例外条款**段（含退场条件 + 票号）；
-- **谁点头**＝裁该概念的那张票，**不为每处例外单开票**；
-- **代码注释只留一行指路且必须带票号**（[#793](https://github.com/xy7365527-lang/NewChanlun/issues/793) 关票判据：光写在注释里不算合规收尾）；
-- **不建总清单**——上限 3 处小到数一遍就知道。**代价照实**：清单是散的，想知道用掉几处得翻定义文件；真逼近 3 处时可能要回头补一份汇总。
-
-#### 在案实例（本规则的来源，非举例）
-
-同一座塔的中枢构造有两份实现，**签名逐字相同**（`(&UnitRange,&UnitRange,&UnitRange) -> Option<Center>`）：`center_from_segments`（`rust/src/theta_v0/classifier/center.rs:210`，含 `dir_alternates` 方向交替）与 `center_from_window`（同文件 `:252`，**无方向交替**，其余同族）；`recursive_tower.rs:304` 的 `compose_level`（另 `:859` `compose_level_resume` 同款） 以 `let build = if is_l0 {..} else {..}` 分派——**踩在 #799 判别式「接在同一个 if-else 上」的正面**。
-
-**⟹ 已撤销（[#812](https://github.com/xy7365527-lang/NewChanlun/issues/812) Z-3，2026-08）：** 本例判为**伪分歧**——`dir_alternates` 在 L0 生产输入上恒真，`center_from_segments` 与 `center_from_window` 可达输入域恒等、输出恒等（`recursive_tower.rs:772` 自陈上级「方向交替均无保证」为反向佐证）。E1（`compose_level` 的 `is_l0` 分派）**不占总缝规则例外配额，全仓配额回「用 0 剩 3」**；两函数并存不构成违规。恒等性的对拍测试锁尚缺（#1278 ⑧列 ❌），补锁归 frontier 实施链。
-
-## 文档层名分：权威链 → 推论层 → 正本层（[#845](https://github.com/xy7365527-lang/NewChanlun/issues/845) 裁定，2026-08-01）
-
-正本 = [ADR 0012](docs/adr/0012-inference-layer-document-naming.md)。**上面两节是这条轴的两端，本节补中间那格**：
-
-| 段 | 管什么 | 载体 |
+| 层 | 管什么 | 载体 |
 |---|---|---|
-| **权威链** | 证据从哪来 | 缠师博文 → chan99 → 思维导图（全是语料，见本文首节） |
-| **推论层** | **还没裁的推理** | `analysis/`（343 份 `.md`）+ `docs/` 无名分散件（137 份），**实测合计 480 份** |
-| **正本层** | 裁完的结果是什么 | `.chanlun/definitions/`（缠论教义）／ `docs/adr/`（架构决策）／ `CONTEXT.md`（词） |
+| 权威链 | 证据从哪来 | 缠师博文 `docs/chanlun/text/blog/`（最终权威）→ 编纂版 `docs/chanlun/text/chan99/` → 思维导图 `docs/chanlun/text/mindmaps/`，有出入以前者为准 |
+| 推论层 | 还没裁的推理 | `analysis/` 与 `docs/` 下没有名分的散件 |
+| 正本层 | 裁完的结果 | `.chanlun/definitions/`（教义，一概念一份）、`docs/adr/`（架构）、`CONTEXT.md`（词） |
 
-**范围 ＝ 不在既有五类名分（词汇表／ADR／教义正本／纪律文本／工作草稿）内的所有 `.md`**，不按目录列举——目录是外形，会漂。
-
-**三条口径**：
-
-1. **文档无名分，主张有名分。** 能不能援引，看被援引的那条主张有没有完整推理链，不看它写在哪个目录。四级溯源标签（`[旧缠论]` ／ `[新缠论:推论]` ／ `[新缠论:选择]` ／ `[新缠论:候选]`）**在援引那一刻现场打**，不预先批量标注；**援引方必须把推理链搬进票内重过一遍，搬不出来就不算依据**。
-2. **单向流动**：推论层可被援引进裁定票，裁完的结论落正本层；**正本层不回头引推论层**。
-3. **不追溯更新**：推论被裁定覆盖之后，推论层那份原文**不动、不改、不加批注**——它是历史记录不是活文档（同款判例：`docs/agents/wayfinder-workflow.md:172`「spec 是非持久件……从落地那刻起是历史记录」）。要写的话写进正本层。
-
-**⚠️ 已知代价**：推论层长期存在**已被裁定推翻却无任何标记**的主张（例：`docs/three_phase_unified_design.md:11`「全局单例」已被 [ADR 0010](docs/adr/0010-chong-persistent-operating-unit.md) 顶上，从文档本身看不出来）。唯一缓解是口径 1 的「重过推理链」，**是薄的一层保护，不是硬门**。
-
-**⚠️ 引原文必须查三项，第三项不止一步**（2026-08-05 走 [#817](https://github.com/xy7365527-lang/NewChanlun/issues/817) 两件时坐实，此前口径不足）：引缠论 110 课任何一行，须核 ① 行号未漂、② 逐字无删改、③ **作者归属**。第三项原先只查「该行在该课 `↑正文` 标记之前还是之后」（#815 首例定），**该判据不足**——**界内也可能是注不是正文本体**：`043-第43课.md:14` 在界（`:52`）之内，行首却是「（注：小转大的情况在29课已经表达清楚，此处再细化）」；同型另有 `039:34`、`044:52`／`:54`、`069:38`、`098:18`（行首「（注：」或「(娇注：」）。⟹ **第三项 ＝ 界前/界后 ＋ 行首有无「（注：」「(娇注：」一类标记**，两步都过才算【正文】。
-**⟹ 追加第四步：行内注这两步都查不出来**（2026-08-06 走 [#914](https://github.com/xy7365527-lang/NewChanlun/issues/914) 落 ADR 0017 时坐实）：`049-第49课.md:52` 在界（`:78`）之内、行首无标记，**但句子中间嵌着**「中枢向上移动时**(娇注：3买后非背驰向上，或者中枢后非盘背向上)**，就应该满仓」。该行三步全过、却含非作者文字 ⟹ **逐字摘引时须目视避开行内注**，不能靠前三步的机械判据兜住。
-**⟹ 博文正本路径钉死为 `docs/chanlun/text/blog/`**（同上）：同一课在 `topological-computation/signifier_net/corpora/chanlun/` 有第二份副本，**行号体系完全不同**（`031` 课「绝对不往上加码」一句在正本是 `:24`、在副本是 `:11`）。`CONTEXT.md`、ADR 0016、ADR 0017 的既有引用全部对齐正本路径，但此前**仓内无一处明写**，全靠惯例。**「课号:行号」形式的引用一律以 `docs/chanlun/text/blog/` 为准**；引副本路径的行号视同引错。
-
-**⚠️ 伪引文有在案实例，援引前必须回查原课**（同上，2026-08-05）：`rust/src/trading/positional.rs:458` 写「026:80：如果有更大级别的单边上扬，短线的可以不必坚持小转大的原则」——**第 26 课全文「小转大」命中数 ＝ 0**，`:80` 逐字讲的是「级别必须配套来看，最好不要单纯的短线……」。**内容完全编造**，而它是 `TrendScope::Ancestor` 这个可配置生产判据的**唯一溯源**。此前查出的引文问题都是行号偏差或出处标错，**这是第一处内容编造** ⟹ 「课号:行号」形式的引用**不构成已核实**，援引方须自己 grep 那一课确认该说法真的存在。
-
-**⚠️ 同名异物先对词**：推论层文档里的「声部（voice）」多指本仓的**「重」**（持久筹码层，锚 `040-第40课.md:20`「每一重」），非 `CONTEXT.md` 那个一次性实体——[#844](https://github.com/xy7365527-lang/NewChanlun/issues/844) 曾据此误报一处冲突。详见 `CONTEXT.md` 声部词条与 [ADR 0012](docs/adr/0012-inference-layer-document-naming.md) 裁定五。
-
-## 协作设施
-
-- **Issue tracker**：GitHub `xy7365527-lang/NewChanlun`（private，`gh` 已认证）；操作口径 `docs/agents/issue-tracker.md`。
-- **Sandcastle 执行面**（[#1000](https://github.com/xy7365527-lang/NewChanlun/issues/1000) 裁定，2026-08-16）：执行类工作（AFK 探针/跑批/实施票链）默认走 `.sandcastle/` 沙盒（工蜂跨进程不在宿主 harness 子代理列表——**可见性以 `.sandcastle/logs/workers.jsonl` + `STATUS.md`（watcher.sh 滚报，launchd 每 10 分钟）+ `.chanlun/agent-roster-*.md` 为准**；harvest.sh 自动推分支开 PR，不合入）——两段式 `main.mts`（实装+独立评审双工蜂）与蜂群 `main-swarm.mts`（planner+扇出+merger 归并），工蜂 = Sandcastle `codex` 经本机 CLIProxy 统一路由，与当前主控同为 `gpt-6.1-sol`（唯一配置 `.sandcastle/main-model.mts`，[#1547](https://github.com/xy7365527-lang/NewChanlun/issues/1547) / #1617）；拾取闸 = 专属 label `sandcastle`，已有负责人（assignee）的票不挂；例外三类与全貌见图 #1000 与 `.sandcastle/README.md`。
-- **Graph engineering**（[#1547](https://github.com/xy7365527-lang/NewChanlun/issues/1547)）：图从决策票到合入的自动化流程正本 = `.sandcastle/docs/graph-engineering.md`（决策票 T/P 分级、起草+非作者独审；T/P 决策与 SPEC 均在独审 PASS 后由代理裁定，BLOCK 返修、缺有效独审不放行，#1909）。主控巡航用 `/graph-run <图号>`。**main 的合入不设人工批准**：由 main 分支保护强制的必需检查把关，`deepagents/review`（正式非作者双审 success）与 `ci-ok`（适用 CI 全绿），strict 追平；满足后代理可执行合入，工蜂、执行器与 Sandcastle 实施者自身不合入，只开 PR。**人工确认只保留两类**：实盘下单与资金、密钥与凭证；CI 与分支保护配置的改动不需要人工确认（2026-11-08 用户裁定；范围与原话出处见 `.sandcastle/docs/graph-engineering.md`「人工确认只保留两类」）。资金、账户、凭据类硬门票（ADR 0041「授权来源与生效边界」）由引擎挂 `ready-for-human` 交还用户，用户在票上以首行「退回：签署」评论、每项一行写 `- <字段>=<签署值>；有效域=<有效域>`，下一轮整链重跑（格式见 `.sandcastle/docs/graph-engineering.md`）；返修用的其他「退回：…」评论不算签署；主控不代发。签署、退回与待签标签的归属只认编排账号（`.sandcastle/queue-policy.json` 的 `orchestrator_login`）发的评论，其他账号的同形评论无效；代理与用户共用这一个账号，所以编排账号内是用户还是代理发的无法机器区分（现有信任模型，本流程未改变）。
-- **Triage labels**：`needs-triage` / `needs-info` / `ready-for-agent` / `ready-for-human` / `wontfix`。
-- **Domain docs**：单 context——根 `CONTEXT.md` + `docs/adr/`（惰性创建）。
-- **纪律族**（docs/agents/）：`generation-constitution.md`（名分四态+现役线名单+开票门）、`delivery-discipline.md`（关票门五子句+开票门+豁免+编号）、`stat-provenance.md`（统计口径两档）、`wayfinder-workflow.md`（**本仓 wayfinder 唯一正本**：入流判据+五段管线+四票型口径+图的两行声明+一票一会话与并行纪律+HITL 吞吐纪律+图正文写入协议+`/to-spec` 交棒边界+开票手续）。
-- **TradingView MCP**（Claude Code 专用，`~/.claude/.mcp.json`）：TV Desktop 须 debug 模式；工具映射与约束见 git 历史版 CLAUDE.md 或 `docs/chanlun/README.md`。
+- **名分归主张，不归文档**：援引推论层要把推理链搬进票里重过，并在援引时现场打溯源标签。正本层不回头引推论层；推论被裁定覆盖后原文不改（[ADR 0012](docs/adr/0012-inference-layer-document-naming.md)）。
+- **缠论教义正本**：原文管语义，`formal/Origin/` 管原文没讲的边界，生产代码只有否决权。教义裁定落 `.chanlun/definitions/` 并附点名到行号的受影响代码清单；代码注释里的口径分歧必须带票号。
+- **收敛通则**（#799）：同一判断不得有宽严两档，宽松那档更不得接管严格那档的失败。**总缝规则**（#804）：同一判定每级跑同一个，级别差异只以传入的值出现；用同输入同输出的对拍测试锁证明，不靠 grep。
+- **博文正本路径钉死为 `docs/chanlun/text/blog/`**：「课号:行号」一律以它为准，`topological-computation/signifier_net/` 下的副本行号体系不同。这类引用不算已核实，援引方自己回查那一课，核行号、逐字、作者归属（避开「（注：」「(娇注：」和行内注）。
+- 以上各条的完整条文、限定词、举证门、在案实例与引文核验四步见 [`docs/agents/doctrine-rules.md`](docs/agents/doctrine-rules.md)。开票、关票与统计口径的纪律见 `docs/agents/delivery-discipline.md`、`docs/agents/stat-provenance.md`。
 
 ## 派发与开工纪律（全 harness 等效口径）
 
-本节把 Claude Code 侧全局 `~/.claude/CLAUDE.md` 的三段要点复写为仓内口径——那份文件在 CC 里自动注入，但主力运行时 Kimi 读不到（[#779](https://github.com/xy7365527-lang/NewChanlun/issues/779) 裁定④查实）。两个 harness 从此取得等效口径。
+本节是 Claude Code 全局 `~/.claude/CLAUDE.md` 里「角色定位」「派发授权」「动手前先挂 ticket」三段的刻意副本：那份文件只在 Claude Code 里自动注入，Kimi 读不到（#779）。**改任一处必须同步另一处**，只改一半会让两个 harness 静默分叉。
 
-**⚠️ 这是刻意的双写，不是冗余**：本节三条（角色定位／派发授权／先挂 ticket）与 `~/.claude/CLAUDE.md` 同名三段是同一条规矩的两个副本。**改任一处必须同步另一处**——只改一半的后果是两个 harness 口径分叉，而分叉不报错、只会静默产生不同行为。
-
-- **角色定位**：主控本体（当前会话所用模型）= 战略级调度器，只做规划、任务拆解、路由决策、prompt 翻译、验收裁决、簿记维护；代码、实验、回测、批处理一律派发给战术级模型。与「Kimi 只做编排，不下场写码」同源，此处扩到全 harness。
-- **派发授权常驻**：使用 Agent / 子代理已获用户永久授权，适用于所有任务、所有会话，**不必逐次征求同意**，也不要反过来问用户「要不要派子代理」。若 harness 默认提示「除非用户要求否则不要调用 Agent」，该条件已由本条满足。唯一例外：单条一目了然的操作（改一行配置、读一个文件、回答一个已知事实）本体直接做完更快。
-- **动手前先挂 ticket**：任何实质工作开始前必须先有 ticket——不限于改代码，研究、原型、质询、文档、调查、配置变更同样要挂。识别出这是实质工作时先停，说清三件事（属哪类 ticket / 建议走哪条流程 / 等用户点头），这道闸门在模型路由之前。**开之前先搜（两路，缺一不可）**：创建任何 issue / map / ticket 前，① **tracker**——`gh issue list --search "<关键词>" --state all`，**包括已关闭的**；② **仓内推论层**——`grep -rn "<关键词>" analysis/ docs/ .chanlun/`。命中就接着已有那条走，不另起炉灶。
-  第二路的成因：**不在 tracker 里的东西，搜 tracker 一万遍也照不到**——推论层那 480 份对 tracker 结构性不可见（名分见「文档层名分」节）。标本：`analysis/bidirectional_nested_accounting.md`（534 行，2026-06-12 编排者指令产出，被 `trading/{ledger,types,positional}.rs` 5 处引用）逐条答了 [#839](https://github.com/xy7365527-lang/NewChanlun/issues/839) 三问、早 7 周，[#839](https://github.com/xy7365527-lang/NewChanlun/issues/839) 开票时不知道、[#844](https://github.com/xy7365527-lang/NewChanlun/issues/844) 的开票清单又漏了它。**它已站在最显眼处仍漏两次 ⟹ 补的是搜索动作，不是索引。**（[#845](https://github.com/xy7365527-lang/NewChanlun/issues/845) 裁定，2026-08-01；[ADR 0012](docs/adr/0012-inference-layer-document-naming.md) 裁定四已把「建白名单」这条路的反证记全。）
-  **代价照实**：挡不住「搜了但词没想对」——上例讲的是「双向嵌套记账」而 [#839](https://github.com/xy7365527-lang/NewChanlun/issues/839) 问的是「分区比例／总账口径」，**词根本对不上**；本条降低漏检率，**不消除**。480 份跨目录多关键词扫描按代价派子代理。
-  例外（不必挂）：回答已知事实、读文件、单条配置修改、查询状态。
-- **票型口径**以 `docs/agents/issue-tracker.md` 与 `docs/agents/wayfinder-workflow.md` 为准。
-
-## 记忆（高信号持久事实，continual-learning 维护）
-
-- **偏好**：编排者粘贴 shell 命令时期望逐字执行；破坏性 git 操作前先备份 + 只读预检，且不打印任何密钥值。
-- **harness**：主控为当前会话实际模型；原生 `spawn_agent` 默认继承主控模型与推理强度，需显式选择时只传当前工具支持的 slug。本机受管后台（Sandcastle 实装/独审、decision-claimer、wayfinder spec、main-swarm、Codex child）统一使用 `.sandcastle/main-model.mts` 的 `gpt-6.1-sol`，经 CLIProxyLocal 自动路由（用户 2026-10-24，#1617）。旧四档与换模型升档规则不再作为现役默认；切换主控时同步修改这一处并验真实路由。
-- **验证口径**：不全量重放——验证用靶向/原型级（差异面先全枚举再对拍，秒级）；全量仅留重型验证窗口并照实标注（用户 2026-07-26 裁定，效率纪律）。
-- **执行分工**：实装与独立评审可与主控同型；评审独立性来自非作者、独立进程和只读证据，不靠异模型。评审打回后由同模型带具体意见重做，保留原有轮次与转 P 规则（#1617）。
-- **工作线**：涉及 branch/worktree 基线、远端默认分支、CI/自动化基线或历史镜像名分时，先读 `docs/agents/generation-constitution.md` §2「现役线名单」；该处是唯一正本。
-- **Stop-Guard**：其注入内容可能反映过期状态（已结算谱系仍列为 pending）；重复执行前先核实际状态。
-- **goal 事件**：正式 GOAL_SET/SUPERSEDE 由 Lead 直接 append 到 `.chanlun/goals/events.jsonl`（`scripts/goal_events.py` 只出草稿），随后运行 `python scripts/goal_reducer.py` 验证：它读取 events.jsonl，打印当前 goal 投影（JSON）。退出码 0 = 正常，1 = 有损坏行被跳过，2 = 文件缺失或没有可解析事件。
-- **裁定文档**：编排者钦定的裁定 PDF 先归档到 `docs/formal-chain/` 再登记为 goal 权威。
-- **测试指纹**：共享 worktree 取 cargo test 计数时，先核并行线未提交面是否含测试——含则计数被污染（#475 HIGH-4 实锤：1966 vs 干净快照 1957，差 ~9），须注明污染常量或取干净快照；失败集指纹通常不受影响（2026-07-27 在案）。
-- **入仓名分**：新文件入仓前先判名分四态（宪法 §1）；会话导出/备份/工具残留一律禁入仓（.gitignore 已立模式）；review-results 是工作草稿，活期绑定票（宪法 §5）。
+- **角色定位**（2026-08-18 退役「本体不下场」，#1047）：主控本体是当前会话所用的模型，负责规划、任务拆解、验收裁决、簿记维护，也可以直接执行研究、查证、文档、代码、批处理等战术任务；派不派子代理按任务形态现场定，子代理默认与会话同模型。research 票等 AFK 活按 wayfinder 流程照旧派子代理。
+- **派发授权常驻**：用户已永久授权使用 Agent、子代理，适用于所有任务和会话，不逐次征求同意，也不反问「要不要派子代理」。harness 默认提示「除非用户要求否则不要调用 Agent」时，该条件已由本条满足。单条一目了然的操作（改一行配置、读一个文件、回答已知事实）本体直接做。
+- **动手前先挂 ticket**：任何实质工作前先有 ticket，研究、原型、质询、文档、调查、配置变更都算。开工授权只确认一次：先识别已有 ticket 和授权，说明票型与流程；用户已明确要求执行当前工作、指定票继续或批准同范围计划，就视为开工点头，不再问「是否开始」。缺授权的新工作先备好票面与流程建议，等用户点头；查重、读文件、准备建议可以先做。开工授权不替代项目设置的后续门（本仓见「合入与人工确认」）。
+- **开之前先搜（两路，缺一不可）**：创建任何 issue、map、ticket 前，先查 tracker `gh issue list --search "<关键词>" --state all`（含已关闭），再查仓内推论层 `rg -n "<关键词>" analysis/ docs/ .chanlun/`。命中先核对是否同一工作，是就接着已有条目走；查重本身不授权发布评论或子 issue。第二路的成因与代价见 `docs/agents/doctrine-rules.md` 文末附节。
+- **票型**：tracker 是 GitHub `Newchanlun/NewChanlun`，操作见 `docs/agents/issue-tracker.md`。wayfinder 票 `wayfinder:research` / `wayfinder:prototype` / `wayfinder:grilling` / `wayfinder:task` 作为子 issue 挂在 `wayfinder:map` 下；triage 类别 `bug` / `enhancement`，状态 `needs-triage` / `needs-info` / `ready-for-agent` / `ready-for-human` / `wontfix`。
+- **点头之后走完全程**：`to-spec`、`to-tickets`、`triage`、`wayfinder`、`implement` 等流程 skill 不会自动出现，需要时打开 `.agents/skills/<名字>/SKILL.md` 照做，不凭记忆复述。
+- **例外**（不必挂票）：回答已知事实、读文件、单条配置修改、查询状态。

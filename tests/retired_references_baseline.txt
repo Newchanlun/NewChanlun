@@ -123,7 +123,6 @@
 .sandcastle/deepagents-pilot/EXECUTOR.md|rust/tests/example/
 .sandcastle/deepagents-pilot/demo-task.md|experiments/pilot1742_demo/
 .sandcastle/swarm-implement-prompt.md|.agents/.codex/.aws
-AGENTS.md|.claude/rules/
 NewChanlun文件索引.md|.claude/skills/core-principles/
 NewChanlun文件索引.md|.claude/skills/meta-orchestration/
 README.md|chanlun/text/
