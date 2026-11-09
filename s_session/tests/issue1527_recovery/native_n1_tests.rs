@@ -96,6 +96,40 @@ fn fd_open(fd: c_int) -> bool {
     unsafe { libc::fcntl(fd, libc::F_GETFD) != -1 }
 }
 
+/// 打开时记下的 (dev, ino)。只看 FD 号判「已关」会被同进程并行测试误伤：号码关掉后可能立刻被别的测试线程
+/// 复用（11-05 FL1、11-09 run 42575994015 实测）。「已关」改判为「这个号不再指向原来那个文件」。
+fn fd_ident(fd: c_int) -> Option<DevIno> {
+    let mut st: libc::stat = unsafe { std::mem::zeroed() };
+    (unsafe { libc::fstat(fd, &mut st) } == 0).then(|| ident(&st))
+}
+
+fn fd_refers_to(fd: c_int, original: Option<DevIno>) -> bool {
+    original.is_some() && fd_ident(fd) == original
+}
+
+/// 阴性对照：FD 号被复用时，旧写法（只看号）误判为「未关」，新写法判对。dup2 原子地把 fa 号换成 B，
+/// 只动本测试自己的 FD，不会碰到并行测试的描述符。
+#[test]
+fn native_n1_fd_closed_check_survives_fd_number_reuse() {
+    let a = Temp::new("reuse-a");
+    let b = Temp::new("reuse-b");
+    let fa = unsafe { libc::open(a.c().as_ptr(), libc::O_RDONLY) };
+    let fb = unsafe { libc::open(b.c().as_ptr(), libc::O_RDONLY) };
+    assert!(fa >= 0 && fb >= 0);
+    let fa_orig = fd_ident(fa);
+    assert_eq!(fa_orig, Some(a.id()));
+    assert_eq!(unsafe { libc::dup2(fb, fa) }, fa, "A 被关闭，fa 号改指 B");
+    assert!(
+        fd_open(fa),
+        "旧写法：号被复用后仍判为未关（这就是误报的来源）"
+    );
+    assert!(!fd_refers_to(fa, fa_orig), "新写法：号已不再指向 A");
+    unsafe {
+        libc::close(fa);
+        libc::close(fb);
+    }
+}
+
 fn limits(elapsed_ms: u64, store: u64) -> JobLimits {
     JobLimits {
         max_total_wire_bytes: 1 << 20,
@@ -267,10 +301,11 @@ fn native_n1_l1c_no_owner_open_close_keep_original_result_and_errno() {
 
     let file = Temp::new("plain");
     let fd = unsafe { h.open(file.c().as_ptr(), libc::O_RDWR | libc::O_CREAT, 0o600) };
+    let fd_orig = fd_ident(fd);
     assert!(fd >= 0, "无 owner 时 O_CREAT 等 flags 原样透传");
     assert_eq!(h.lock().fds.get(&fd), Some(&FdEntry::Known(file.id())));
     assert_eq!(unsafe { h.close(fd) }, 0);
-    assert!(!fd_open(fd), "无 owner：真实 close");
+    assert!(!fd_refers_to(fd, fd_orig), "无 owner：真实 close");
     {
         let reg = h.lock();
         assert!(reg.fds.is_empty() && reg.closing.is_empty());
@@ -311,10 +346,11 @@ fn native_n1_l1e_non_pin_close_during_active_passes_through() {
     let file = Temp::new("nonpin");
     let h = hooks();
     let fd = unsafe { h.open(file.c().as_ptr(), libc::O_RDWR, 0) };
+    let fd_orig = fd_ident(fd);
     assert!(fd >= 0);
     let _token = h.begin_for_test([(1, 1), (0, 1), (0, 2)]).unwrap();
     assert_eq!(unsafe { h.close(fd) }, 0);
-    assert!(!fd_open(fd), "可证明非 pin 的 FD 照常关闭");
+    assert!(!fd_refers_to(fd, fd_orig), "可证明非 pin 的 FD 照常关闭");
     assert!(h.deferred_for_test().is_empty());
 }
 
@@ -861,6 +897,7 @@ fn native_n1_peer_thread_cannot_use_or_close_owner_receipt_fd() {
     let owner =
         NativeOwner::begin(h, gate, [file.id(), (0, 1), (0, 2)], 0, identity_bound()).unwrap();
     let fd = owner.open_scope(|| unsafe { h.open(file.c().as_ptr(), libc::O_RDWR, 0) });
+    let fd_orig = fd_ident(fd);
     assert!(fd >= 0);
     write_lock(fd);
     let (read_rc, close_rc) = std::thread::spawn(move || {
@@ -884,7 +921,7 @@ fn native_n1_peer_thread_cannot_use_or_close_owner_receipt_fd() {
         "owner 同一 FD 不排入双关队列"
     );
     assert_eq!(unsafe { h.close(fd) }, 0);
-    assert!(!fd_open(fd));
+    assert!(!fd_refers_to(fd, fd_orig));
     let _ = owner.destroy(&mut NativeErrors::default());
 }
 
@@ -1110,6 +1147,7 @@ fn native_n1_l3a_close_busy_keeps_callback_context_then_destroys() {
     );
     assert!(!other_process_can_lock(&file.0), "真实SQLite读锁先存在");
     let peer = close_peer(&file, h);
+    let peer_orig = fd_ident(peer);
     with_owner(|tls| tls.budget.cover(&tls.gate, 32768).unwrap());
     assert_eq!(account.borrow().snapshot().open_reservations, 1);
     let mut errors = NativeErrors::default();
@@ -1139,7 +1177,7 @@ fn native_n1_l3a_close_busy_keeps_callback_context_then_destroys() {
         2,
         "仅成功close后释放两个回调上下文"
     );
-    assert!(!fd_open(peer));
+    assert!(!fd_refers_to(peer, peer_orig));
     assert!(other_process_can_lock(&file.0));
     assert!(with_owner(|_| ()).is_none() && !h.active_any.load(Ordering::SeqCst));
 }
@@ -1167,6 +1205,7 @@ fn native_n1_close_blob_busy_keeps_real_callbacks() {
     // SQLite 3.53.2 的blob内部statement可见；另用backup覆盖next_stmt看不到的BUSY。
     assert!(!other_process_can_lock(&file.0));
     let peer = close_peer(&file, h);
+    let peer_orig = fd_ident(peer);
     let mut errors = NativeErrors::default();
     errors.record_first(NativeCode::TrackingLost.into());
     let session = match session.close(&mut errors) {
@@ -1197,7 +1236,7 @@ fn native_n1_close_blob_busy_keeps_real_callbacks() {
     hold_sqlite_lock_until_close(&session, &file);
     assert!(matches!(session.close(&mut errors), Teardown::Destroyed(_)));
     assert_eq!(drops.load(Ordering::Relaxed), 2);
-    assert!(!fd_open(peer) && other_process_can_lock(&file.0));
+    assert!(!fd_refers_to(peer, peer_orig) && other_process_can_lock(&file.0));
 }
 
 #[test]
@@ -1376,6 +1415,7 @@ fn native_n1_close_backup_busy_preserves_callbacks_where_31v_loses_them() {
         "backup源连接显式读事务持有SQLite锁"
     );
     let peer = close_peer(&file, h);
+    let peer_orig = fd_ident(peer);
     let mut errors = NativeErrors::default();
     let session = match session.close(&mut errors) {
         Teardown::Alive(s) => s,
@@ -1411,7 +1451,7 @@ fn native_n1_close_backup_busy_preserves_callbacks_where_31v_loses_them() {
     hold_sqlite_lock_until_close(&session, &file);
     assert!(matches!(session.close(&mut errors), Teardown::Destroyed(_)));
     assert_eq!(drops.load(Ordering::Relaxed), 2);
-    assert!(!fd_open(peer) && other_process_can_lock(&file.0));
+    assert!(!fd_refers_to(peer, peer_orig) && other_process_can_lock(&file.0));
 }
 
 fn native_child(name: &str) -> bool {
@@ -2203,6 +2243,7 @@ fn native_n1_vfs32f_close_borrowed_job_keeps_mapping_grant_and_callbacks() {
     let tx = session.begin().unwrap();
     tx.rollback().unwrap();
     let fd = shm_fd32f(h);
+    let fd_orig = fd_ident(fd);
     let held = account.borrow_mut();
     let grants = held.snapshot().open_reservations;
     assert!(grants > 0);
@@ -2223,7 +2264,7 @@ fn native_n1_vfs32f_close_borrowed_job_keeps_mapping_grant_and_callbacks() {
         Some(Reported::First(NativeError::Code(NativeCode::GateBorrowed)))
     ));
     assert_eq!(account.borrow().snapshot().open_reservations, 0);
-    assert!(!fd_open(fd));
+    assert!(!fd_refers_to(fd, fd_orig));
     assert_sidecars32f(&file.0);
 }
 
@@ -2394,6 +2435,7 @@ fn native_n1_vfs32f_rejected_peer_and_deferred_close_keep_real_wal_writer_lock()
     );
     let shm = CString::new(format!("{}-shm", file.0.display())).unwrap();
     let peer = unsafe { libc::open(shm.as_ptr(), libc::O_RDWR) };
+    let peer_orig = fd_ident(peer);
     assert!(peer >= 0);
     assert_eq!(unsafe { h.close(peer) }, 0);
     assert!(fd_open(peer) && h.deferred_for_test().contains(&peer));
@@ -2404,7 +2446,7 @@ fn native_n1_vfs32f_rejected_peer_and_deferred_close_keep_real_wal_writer_lock()
     drop(tx);
     let mut errors = NativeErrors::default();
     assert!(matches!(session.close(&mut errors), Teardown::Destroyed(_)));
-    assert!(!fd_open(peer));
+    assert!(!fd_refers_to(peer, peer_orig));
     assert!(!wal_writer_locked32f(&file.0));
     assert_sidecars32f(&file.0);
 }

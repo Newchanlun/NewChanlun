@@ -8,7 +8,7 @@ import test_external_review as _external_review
 from conftest import git
 
 from pilot1742 import review_sweep as module
-from pilot1742.external_review import ReviewTarget
+from pilot1742.external_review import MODELS, ReviewTarget
 from pilot1742.review_sweep import (
     ServeRound,
     SourceUnreadable,
@@ -194,6 +194,94 @@ def test_concurrency_cap_counts_every_live_reviewer(lane):
     sweep, host, _ = make(lane, run=False, github=github, max_running=1)
     actions = sweep.tick()
     assert acts(actions, 1810) == ["launch"] and acts(actions, 1811) == ["queued"]
+
+
+# ---- 限流退避 ----
+
+T0 = datetime(2026, 11, 9, 4, 30, tzinfo=timezone.utc).timestamp()
+
+
+def finished_run(lane, name, ended, *, rate_limited=True, verdict=None, reviews=True):
+    """另一个 PR 的已完结审查 run（不与 1810 的 status 混淆）：opus 回执按需记 failure_code=rate_limited。"""
+    folder = lane.state_root / "runs" / f"r1150335160-p9{name}-x-a1"
+    for model in MODELS:
+        (folder / model).mkdir(parents=True)
+        limited = rate_limited and model == MODELS[-1]
+        (folder / model / "receipt.json").write_text(json.dumps(
+            {"status": "failed" if limited else "completed", **({"failure_code": "rate_limited"} if limited else {})}))
+    verdict = verdict or ("FAILED" if rate_limited else "PASS")
+    outcome = folder / "outcome.json"
+    outcome.write_text(json.dumps({"run_id": f"run-{name}", "verdict": verdict,
+                                   "reviews": [{"model": m} for m in MODELS] if reviews else []}))
+    os.utime(outcome, (ended, ended))
+
+
+def test_two_rate_limited_runs_hold_new_reviews_for_30_minutes_with_one_log_line(lane, capsys):
+    github = FakeGitHub(lane)
+    second = copy.deepcopy(lane.gateway.pr)
+    second["number"] = 1811
+    github.extra_pulls = [second]
+    clock = {"t": T0}
+    sweep, host, _ = make(lane, run=False, github=github, now=lambda: datetime.fromtimestamp(clock["t"], timezone.utc))
+    finished_run(lane, "01", T0 - 600)
+    finished_run(lane, "02", T0 - 300)
+    actions = sweep.tick()
+    assert acts(actions, 1810) == acts(actions, 1811) == ["review-backoff"] and host.spawned == []
+    module.report(actions, "review-sweep ")
+    lines = capsys.readouterr().out.splitlines()
+    assert len(lines) == 1 and lines[0].startswith('review-sweep {"action": "rate-limit-backoff"')
+    logged = json.loads(lines[0].removeprefix("review-sweep "))
+    assert logged["runs"] == ["run-02", "run-01"] and logged["held"] == [1810, 1811]
+    assert logged["until"] == datetime.fromtimestamp(T0 - 300 + 1800, timezone.utc).isoformat()
+    clock["t"] = T0 - 300 + 1799
+    assert acts(sweep.tick(), 1810) == ["review-backoff"] and host.spawned == []
+    clock["t"] = T0 - 300 + 1800  # 自最后一个限流 run 完结满 30 分钟：解除
+    actions = sweep.tick()
+    assert acts(actions, 1810) == ["launch"] and not any(a["action"] == "rate-limit-backoff" for a in actions)
+    assert [s[0] for s in host.spawned] == [1810, 1811]
+
+
+@pytest.mark.parametrize("history", ["one-limited", "latest-ok", "only-one-run"])
+def test_backoff_needs_the_last_two_completed_runs_both_rate_limited(lane, history):
+    sweep, host, _ = make(lane, run=False, now=lambda: datetime.fromtimestamp(T0, timezone.utc))
+    if history == "one-limited":
+        finished_run(lane, "01", T0 - 600, rate_limited=False)
+        finished_run(lane, "02", T0 - 300)
+    elif history == "latest-ok":
+        finished_run(lane, "01", T0 - 900)
+        finished_run(lane, "02", T0 - 600)
+        finished_run(lane, "03", T0 - 300, rate_limited=False)
+    else:
+        finished_run(lane, "01", T0 - 300)
+    assert acts(sweep.tick()) == ["launch"]
+
+
+def test_stale_and_reused_runs_are_not_completed_reviews_for_backoff(lane):
+    sweep, host, _ = make(lane, run=False, now=lambda: datetime.fromtimestamp(T0, timezone.utc))
+    finished_run(lane, "01", T0 - 900)
+    finished_run(lane, "02", T0 - 600)
+    finished_run(lane, "03", T0 - 300, rate_limited=False, verdict="STALE")
+    finished_run(lane, "04", T0 - 200, rate_limited=False, reviews=False)  # 沿用 PASS：没派模型
+    assert acts(sweep.tick()) == ["review-backoff"] and host.spawned == []
+
+
+def test_merges_and_withdrawals_continue_during_rate_limit_backoff(lane):
+    github = FakeGitHub(lane)
+    head = lane.gateway.pr["head"]["sha"]
+    gated = copy.deepcopy(lane.gateway.pr)
+    gated["number"] = 1811
+    github.extra_pulls = [gated]
+    github.files[1811] = [{"filename": ".env", "status": "modified", "changes": 1}]
+    github.states[1811] = {"auto_merge": True}
+    sweep, host, _ = make(lane, run=False, github=github, auto_merge=True,
+                          now=lambda: datetime.fromtimestamp(T0, timezone.utc))
+    green(github, head)
+    finished_run(lane, "01", T0 - 600)
+    finished_run(lane, "02", T0 - 300)
+    actions = sweep.tick()
+    assert any(a["action"] == "rate-limit-backoff" for a in actions) and host.spawned == []
+    assert "merged" in acts(actions, 1810) and "needs-human-confirm" in acts(actions, 1811)
+    assert github.calls == [("merge", 1810, head), ("disable", 1811)]
 
 
 @pytest.mark.parametrize("change", ["draft", "foreign", "stale"])

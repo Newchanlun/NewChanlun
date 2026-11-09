@@ -9,9 +9,10 @@ from conftest import git
 from langchain_core.messages import AIMessage
 from langgraph.checkpoint.sqlite import SqliteSaver
 from test_agent import call, scripted
+from test_merge_gate_wording import human_merge_lines
 from v2env import DEMO, TICKET, V2_TASK, SimulatedCrash, V2Env, crash_at
 
-from pilot1742.agent import build_agent
+from pilot1742.agent import build_agent, build_tools, system_prompt
 from pilot1742.approval import SpecAuthorization
 from pilot1742.claims import ClaimRefused, ClaimStore, Fenced
 from pilot1742.delivery import EffectPending
@@ -250,6 +251,28 @@ def test_happy_path_publishes_exact_head_and_replay_adds_nothing(v2):
     v2.github.merge_pull(pr["number"])
     assert run.publish_candidate()["phase"] == "merged" and v2.writes() == before
     assert run.status()["phase"] == "merged"
+
+
+def test_agent_prompt_and_pr_body_state_the_same_merge_gate(v2, tmp_path, monkeypatch):
+    # #1984 独审：同一 publish_candidate 流程里，agent 提示说必需检查把关，执行器写的 PR 正文和票面交付评论
+    # 却说等人来合，自相矛盾。四处都必须原样带上 MERGE_GATE（#1742 裁定）。
+    import pilot1742.agent as agent_module
+    from pilot1742.domain import MERGE_GATE
+    # system_prompt 会读宿主 ~/.agents/pstack-models.md；钉成固定内容，结果不随宿主文件变。
+    models = tmp_path / "pstack-models.md"
+    models.write_text("# fixture models\n")
+    monkeypatch.setattr(agent_module, "PSTACK_MODELS", models)
+    run = v2.run(v2.register())
+    v2.to_pass(run)
+    run.publish_candidate()
+    (pr,) = v2.github.pulls.values()
+    (deliver,) = [c["body"] for c in v2.github.issues[TICKET]["comments"] if "deepagents:deliver" in c["body"]]
+    publish = next(t for t in build_tools(run) if t.name == "publish_candidate")
+    surfaces = {"pr_body": pr["body"], "deliver_comment": deliver, "tool": publish.description,
+                "system_prompt": system_prompt(run)}
+    for name, text in surfaces.items():
+        assert MERGE_GATE in text, name
+        assert not human_merge_lines(text), name
 
 
 def test_pull_request_closed_after_delivery_halts_on_replay(v2):
