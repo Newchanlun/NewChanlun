@@ -76,7 +76,7 @@ HOST 切换步骤：
 
 1. 审查 App 已建好：app_id `5664795`，installation `179776757`，安装方式为 selected，只含本仓库，安装权限恰为上面四项。私钥是 `~/.config/newchanlun-review-gate/` 下的 600 文件。同目录的 `app.json` 是建 App 时的记录，字段格式不同，不能当身份文件用。
 2. 先让在途 run 收尾：`status` 里没有 pending 的状态写，也没有在跑的 reviewer（手动的和 sweep 派的都算）。原因是读回认领按发布者 bot 匹配 `creator.login`，切换后旧 App 发过的状态不再算本入口发的；在途写要么先完成，要么在切换后用 `reconcile` 按事实登记。切换期间先停掉 `review_sweep` 循环（或 `executor serve --review-sweep`），免得它在文件和私钥换好之前派出审查。
-3. 把所有审查入口的 `--private-key` 换成审查 App 私钥：手动 `review-pr`、`migrate-stale`，以及 `review_sweep --private-key`（它只把这个路径原样转给审查子进程）。`executor serve --review-sweep` 若按 #2000 把 serve 自己的 `--private-key`（执行器私钥）转给 sweep，切换后它派出的审查会以退出码 2 失败、不发状态，直到 serve 能为 sweep 单独接收审查 App 私钥；在那之前用独立的 `review_sweep` 循环跑自动审查。
+3. 把所有审查入口的 `--private-key` 换成审查 App 私钥：手动 `review-pr`、`migrate-stale`，以及 `review_sweep --private-key`（它只把这个路径原样转给审查子进程）。`executor serve --review-sweep` 用单独的 `--review-private-key`（不复用执行器的 `--private-key`）；身份文件存在而没给它时 serve 以退出码 2 失败关闭。serve 的 sweep 与独立 `review_sweep` 循环不要同时跑（共用 `sweep/*.launched` 标记）。
 4. 把上面的 JSON 写到 `IDENTITY_CONFIG` 路径。从这一刻起，所有审查入口都用审查 App。
 5. 选一张非执行器拥有的 PR 审一次：
 
