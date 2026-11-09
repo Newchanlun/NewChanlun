@@ -12,7 +12,6 @@ tests/test_relation_types.py
 - 编号规范化（带后缀、带注释文本）
 - 去重逻辑
 - 格式正确性
-- 至少 5 个已知 supersedes 关系
 """
 
 from __future__ import annotations
@@ -100,125 +99,55 @@ class TestToList:
         assert _to_list(215) == ["215"]
 
 
-# --- extract_relations tests with real genealogy ---
+# --- extract_relations on a synthetic genealogy dir ---
+# The old tests ran on the real settled/ directory; most of the entries they
+# named left the repo with #1952, so a tmp fixture now pins the mapping.
 
 
-REAL_GENEALOGY = Path(".chanlun/genealogy/settled")
+def _settled(dir_: Path, name: str, frontmatter: str) -> None:
+    (dir_ / name).write_text(f"---\n{frontmatter}\n---\n\nbody\n", encoding="utf-8")
 
 
-@pytest.mark.skipif(
-    not REAL_GENEALOGY.exists(),
-    reason="Genealogy directory not available",
-)
-class TestExtractRelationsReal:
-    """在真实谱系目录上测试提取逻辑。"""
-
+class TestExtractRelationsFixture:
     def setup_method(self):
-        self.relations = extract_relations(REAL_GENEALOGY)
+        self._tmp = tempfile.TemporaryDirectory()
+        d = Path(self._tmp.name)
+        _settled(d, "087-a.md", 'id: "087"\nnegates: ["086号（旧口径）"]')
+        _settled(d, "065-b.md", 'id: "065"\nnegated_by: "068"')
+        _settled(d, "100-c.md",
+                 'id: "100"\nreplaces: [99]\nreopens: ["050"]\nmodifies: ["040"]\namends: "041"')
+        _settled(d, "137-d.md", 'id: "137"\nnegates: [{target: "136", content: "x"}]')
+        (d / "200-e.md").write_text("no frontmatter here\n", encoding="utf-8")
+        (d / "notes.txt").write_text("ignored\n", encoding="utf-8")
+        self.relations = extract_relations(d)
 
-    def test_extracts_nonzero_relations(self):
-        assert len(self.relations) > 0
+    def teardown_method(self):
+        self._tmp.cleanup()
 
-    def test_known_supersedes_087_negates_086(self):
-        """087号 negates 086号 → supersedes (may appear from both negates and negated_by)."""
-        matches = [
-            r for r in self.relations
-            if r["from_num"] == "087" and r["to_num"] == "086"
-            and r["relation"] == "supersedes"
-        ]
-        assert len(matches) >= 1
+    def _has(self, frm, to, rel):
+        return any(r["from_num"] == frm and r["to_num"] == to and r["relation"] == rel
+                   for r in self.relations)
 
-    def test_known_supersedes_068_negates_065(self):
-        """068号 negates 065号 → supersedes (may appear from both negates and negated_by)."""
-        matches = [
-            r for r in self.relations
-            if r["from_num"] == "068" and r["to_num"] == "065"
-            and r["relation"] == "supersedes"
-        ]
-        assert len(matches) >= 1
+    def test_negates_maps_to_supersedes(self):
+        assert self._has("087", "086", "supersedes")
 
-    def test_known_supersedes_068_negates_066(self):
-        """068号 negates 066号 → supersedes (may appear from both negates and negated_by)."""
-        matches = [
-            r for r in self.relations
-            if r["from_num"] == "068" and r["to_num"] == "066"
-            and r["relation"] == "supersedes"
-        ]
-        assert len(matches) >= 1
+    def test_negated_by_maps_to_reverse_supersedes(self):
+        assert self._has("068", "065", "supersedes")
 
-    def test_known_supersedes_088_negates_032(self):
-        """088号 negates 032号 → supersedes (may appear from both negates and negated_by)."""
-        matches = [
-            r for r in self.relations
-            if r["from_num"] == "088" and r["to_num"] == "032"
-            and r["relation"] == "supersedes"
-        ]
-        assert len(matches) >= 1
+    def test_replaces_maps_to_supersedes(self):
+        assert self._has("100", "099", "supersedes")
 
-    def test_known_supersedes_073a_negates_073(self):
-        """073a号 negates 073号 → supersedes (may appear from both negates and negated_by)."""
-        matches = [
-            r for r in self.relations
-            if r["from_num"] == "073a" and r["to_num"] == "073"
-            and r["relation"] == "supersedes"
-        ]
-        assert len(matches) >= 1
+    def test_reopens_and_modifies(self):
+        assert self._has("100", "050", "reopens")
+        assert self._has("100", "040", "modifies")
+        assert self._has("100", "041", "modifies")
 
-    def test_known_supersedes_from_negated_by_086(self):
-        """086号 negated_by 087号 → 087 supersedes 086（与 negates 方向一致）。"""
-        # 应只有 1 条（去重后）：无论从 negates 还是 negated_by 提取
-        matches = [
-            r for r in self.relations
-            if r["from_num"] == "087" and r["to_num"] == "086"
-            and r["relation"] == "supersedes"
-        ]
-        # extract_relations 可能从 087.negates 和 086.negated_by 各提取一条
-        # 但 deduplicate_relations 会合并。这里验证提取阶段至少有 1 条。
-        assert len(matches) >= 1
+    def test_dict_target_form(self):
+        assert self._has("137", "136", "supersedes")
 
-    def test_known_supersedes_replaces_329(self):
-        """329号 replaces 323号 → supersedes。"""
-        matches = [
-            r for r in self.relations
-            if r["from_num"] == "329" and r["to_num"] == "323"
-            and r["relation"] == "supersedes"
-        ]
-        assert len(matches) == 1
-
-    def test_all_relations_have_required_fields(self):
-        """所有提取的关系都有必要字段。"""
-        for rel in self.relations:
-            assert "from_num" in rel
-            assert "to_num" in rel
-            assert "relation" in rel
-            assert "source_file" in rel
-            assert rel["relation"] in ("supersedes", "reopens", "modifies")
-
-    def test_no_self_referencing_relations(self):
-        """不应存在自引用关系。"""
-        for rel in self.relations:
-            assert rel["from_num"] != rel["to_num"], (
-                f"Self-reference: {rel['from_num']} → {rel['to_num']} "
-                f"({rel['relation']}) in {rel['source_file']}"
-            )
-
-    def test_at_least_five_supersedes(self):
-        """至少有 5 个 supersedes 关系。"""
-        supersedes = [r for r in self.relations if r["relation"] == "supersedes"]
-        assert len(supersedes) >= 5, f"Only {len(supersedes)} supersedes found"
-
-    def test_dedup_collapses_dual_sources(self):
-        """negates + negated_by 双向提取的同一关系在 dedup 后只剩 1 条。"""
-        id_mapping = load_id_mapping()
-        existing: set[tuple[str, str, str]] = set()
-        deduped = deduplicate_relations(self.relations, id_mapping, existing)
-        # 087→086 should appear only once after dedup
-        matches = [
-            r for r in deduped
-            if r["from_num"] == "087" and r["to_num"] == "086"
-            and r["relation"] == "supersedes"
-        ]
-        assert len(matches) == 1
+    def test_skips_files_without_frontmatter_or_md_suffix(self):
+        assert {r["source_file"] for r in self.relations} == {
+            "087-a.md", "065-b.md", "100-c.md", "137-d.md"}
 
 
 # --- deduplicate_relations tests ---
