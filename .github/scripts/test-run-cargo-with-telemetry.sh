@@ -236,6 +236,20 @@ run_retry_case eacces-always 101 2 yes
 run_retry_case other-error 101 1 no
 run_retry_case success 0 1 no
 
+# 阴性：TMPDIR 不可用时也必须如实反映命令结论（#2025 独审 BLOCK：mktemp 失败不得把失败改成成功、不得不跑命令）。
+for case in other-error:101:1 success:0:1; do
+  IFS=: read -r mode want calls_want <<<"$case"
+  calls_file="$tmp_dir/notmp-$mode.calls"; log_file="$tmp_dir/notmp-$mode.log"
+  set +e
+  TMPDIR="$tmp_dir/does-not-exist" STUB_RETRY_MODE="$mode" STUB_CALLS="$calls_file" STUB_DU_COUNTER="$tmp_dir/notmp-$mode.du" \
+    CARGO_TELEMETRY_TEST_SAMPLE_SECONDS=0.05 PATH="$retry_dir:$stub_dir:$PATH" \
+    bash -c 'cd "$1" && "$2" cargo test' _ "$work_dir" "$helper" >"$log_file" 2>&1
+  actual_status=$?
+  set -e
+  assert_status "$want" "$actual_status" "notmp-$mode" "$log_file"
+  [[ "$(cat "$calls_file")" == "$calls_want" ]] || { echo "FAIL notmp-$mode: expected $calls_want cargo calls" >&2; cat "$log_file" >&2; exit 1; }
+done
+
 # 直接调用共用的 cargo-eacces-retry.sh（#1488 作业与 release-locks 循环不经过包装器，直接用它）。
 direct_calls="$tmp_dir/retry-direct.calls"; direct_log="$tmp_dir/retry-direct.log"
 set +e
@@ -245,4 +259,4 @@ set -e
 assert_status 0 "$direct_status" retry-direct "$direct_log"
 [[ "$(cat "$direct_calls")" == 2 ]] || { echo "FAIL retry-direct: expected 2 calls" >&2; exit 1; }
 
-printf 'PASS: 16 status-priority cells, guard boundaries, defaults, configuration validation, argv preservation, and 5 EACCES-retry cases\n'
+printf 'PASS: 16 status-priority cells, guard boundaries, defaults, configuration validation, argv preservation, 5 EACCES-retry cases, and 2 no-TMPDIR fail-closed cases\n'

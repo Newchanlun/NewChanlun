@@ -7,7 +7,11 @@ set -uo pipefail
 #   (never executed)」时，才把同一命令重跑一次，并打一行 ::warning（主机名与被拒路径）；其余失败原样返回、不重试。
 #   失败发生在 build-script 执行阶段，测试尚未开始；cargo 重跑是幂等的。
 if (( $# == 0 )); then echo "usage: $0 <command> [arg ...]" >&2; exit 64; fi
-log="$(mktemp)"
+# 终端里手动跑（runbook）时不截获输出：保留 TTY 的进度条与颜色，也不需要 Boat 偶发重试。
+if [[ -t 1 || -t 2 ]]; then exec "$@"; fi
+# 截获输出用的临时文件建不出来（TMPDIR 不存在、只读、inode 用尽）时，退化为直接执行、不重试；
+#   绝不因为本脚本自身失败而让命令不执行或把结论改成成功（#2025 独审）。
+log="$(mktemp 2>/dev/null)" || exec "$@"
 trap 'rm -f "$log"' EXIT
 run() { "$@" 2>&1 | tee "$log"; return "${PIPESTATUS[0]}"; }
 run "$@"; status=$?
