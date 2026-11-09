@@ -210,15 +210,20 @@ const field = (lines: string[], name: string) => {
   return "";
 };
 
-/** 解析结构化 SPEC 裁定评论；首行不是「SPEC 独审裁定：PASS|BLOCK」返回 null。 */
+/**
+ * 解析结构化 SPEC 裁定评论。首行（去掉行尾空白后）必须恰为「SPEC 独审裁定：PASS」或「…：BLOCK」，
+ * 只容许 specRulingBody 写出的整行加粗 `**…**`；结论后多一个字（如「PASS不通过」「PASS (draft)」）、
+ * 半角冒号、引用或列表前缀都不算裁定，返回 null，交由 isSpecApproved 按普通评论（含驳回词判定）处理。
+ */
 export function parseSpecRuling(body: string): SpecRuling | null {
-  const lines = body.trim().split("\n");
-  const m = new RegExp(`^${SPEC_RULING_HEAD}(?:\\*{1,3}|_{1,3})?\\s*[：:]\\s*(?:\\*{1,3}|_{1,3})?(PASS|BLOCK)\\b`).exec(strip(lines[0] ?? ""));
+  const lines = body.replace(/\r\n/g, "\n").split("\n");
+  const m = new RegExp(`^(?:\\*\\*${SPEC_RULING_HEAD}：(PASS|BLOCK)\\*\\*|${SPEC_RULING_HEAD}：(PASS|BLOCK))$`)
+    .exec((lines[0] ?? "").replace(/\s+$/, ""));
   if (!m) return null;
   const rest = lines.slice(1);
   return {
     specNumber: Number(field(rest, "SPEC")),
-    verdict: m[1] as SpecRuling["verdict"],
+    verdict: (m[1] ?? m[2]) as SpecRuling["verdict"],
     author: field(rest, "作者"),
     reviewer: field(rest, "独审"),
     digest: field(rest, "正文 sha256").toLowerCase(),
@@ -250,10 +255,25 @@ export function specRulingBody(r: SpecRuling): string {
 }
 
 /**
- * spec 是否已裁定放行。只认 orchestrator 的评论，按时间序推进：
- *   - 结构化「SPEC 独审裁定」：PASS 且有效（非作者、证据齐、摘要等于当前正文）→ 放行；BLOCK 或无效 PASS → 不放行；
- *   - 其他评论含驳回词 → 不放行（REJECT 先判，避免「不通过」被「通过」子串误命中）；
- *   - 自由文本批准不放行，不区分票或评论的创建日期。
+ * 评论是否为「裁定类」：全文任意位置（NFKC 归一后）出现「SPEC 独审裁定」即命中，用于撤销判定的宽松探测。
+ * 不看首行位置与前缀——开头空行、HTML 注释、代码块、列表/表格前缀、半角冒号、结论后缀（「PASS不通过」）、
+ * 不成形的 BLOCK 都算命中。放行判定不用这个函数，只用严格的 parseSpecRuling。
+ */
+function isSpecRulingHeadLine(body: string): boolean {
+  // 撤销要松（opus / kimi 审 ee229448）：只看首行会被开头空行、HTML 注释、未覆盖的 Markdown 前缀绕过。
+  // 改为全文任意位置出现「SPEC…独审裁定」（容许中间空白、全/半角）即视为裁定类评论；
+  // 它若不是合规 PASS，就撤销。宁可多撤，不可漏撤。
+  return /SPEC\s*独审裁定/i.test(body.normalize("NFKC"));
+}
+
+/**
+ * spec 是否已裁定放行。只认 orchestrator 的评论，按时间序推进，规则不对称：
+ *   - 放行要严：首行必须恰为 parseSpecRuling 认的合规 PASS，且有效（非作者、证据齐、摘要等于当前正文），
+ *     正文其余处也不含驳回词，才放行；
+ *   - 撤销要松：正文任意处出现「SPEC 独审裁定」（不论位置、前缀、是否合规 PASS/BLOCK）
+ *     或命中驳回词，一律撤销——不合规的 BLOCK 也撤销，不能让格式稍有偏差的撤销退化成放行；
+ *   - 其余自由文本（既不含「SPEC 独审裁定」也不含驳回词）不改变当前状态，不区分票或评论的创建日期。
+ * 拿不准（既不是合规 PASS 也不确定是否该撤销）一律按未放行处理。
  */
 export function isSpecApproved(spec: ChildIssue, orchestrator: string): boolean {
   const mine = spec.comments
@@ -262,8 +282,9 @@ export function isSpecApproved(spec: ChildIssue, orchestrator: string): boolean 
   let approved = false;
   for (const c of mine) {
     const ruling = parseSpecRuling(c.body);
-    if (ruling) approved = specRulingProblem(ruling, spec.number, spec.body) === null;
-    else if (REJECT_RE.test(c.body)) approved = false;
+    const compliantPass = ruling !== null && ruling.verdict === "PASS" && specRulingProblem(ruling, spec.number, spec.body) === null && !REJECT_RE.test(c.body);
+    if (compliantPass) approved = true;
+    else if (isSpecRulingHeadLine(c.body) || REJECT_RE.test(c.body)) approved = false;
   }
   return approved;
 }
