@@ -52394,7 +52394,7 @@
     },
     {
       "pull_request": 1945,
-      "source_head": "91dc1c5a60",
+      "source_head": "f494f66498",
       "removed_findings": 66,
       "rule_counts": {
         "DS137138": 1,
@@ -52413,7 +52413,7 @@
         "prototypes/task68-ledger-adopt/**",
         "prototypes/task72-gap-connector/**"
       ],
-      "reason": "slim/out-of-repo-batch2（#1945）整体出仓 topological-computation/ 及其专属部署脚本、.scratch/、prototypes/、仓根个人文件；原样归档于 /Volumes/AgentStorage/repo-archive/f43fac8f46-batch2/，可逐字节恢复。删掉指向这些已删文件的 66 条存量键；gate 只拦基线外新发现，存量多删不改变门槛。自引用键跟随 base 第 855 行原文移到第 792 行：被删的 66 行里有 63 行在它前面。",
+      "reason": "slim/out-of-repo-batch2（#1945）整体出仓 topological-computation/ 及其专属部署脚本、.scratch/、prototypes/、仓根个人文件；原样归档于 /Volumes/AgentStorage/repo-archive/f43fac8f46-batch2/，可逐字节恢复；git 历史里 #1945 合入前的 main（如 2267aa75）也能取回。删掉指向这些已删文件的 66 条存量键；gate 只拦基线外新发现，存量多删不改变门槛。自引用键跟随 base 第 855 行原文移到第 792 行：被删的 66 行里有 63 行在它前面。",
       "entries": {
         "DS148264|.github/devskim-baseline.json|792": "与 base 键 DS148264|.github/devskim-baseline.json|855 同一行文本，行号漂移，逐行比对内容不变。"
       }

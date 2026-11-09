@@ -48,7 +48,7 @@
   --cwd /Users/silencehan/Projects/NewChanlun-1139-pilot \
   --session-dir /Users/silencehan/Projects/NewChanlun-1139-pilot/.sandcastle/pilot-1139/task-01/prime-sessions \
   --print -- \
-  '请解释 NewChanlun `topological-computation/snet_cache.py` 与 `snet_persistence.py` 的缓存写入、校验、读回和恢复运行机制：从公开入口到落盘格式、完整性检查、懒加载边界和失败路径串起来，并说明各模块归属。必须引用实际代码，只读，不改文件。'  # topological-computation/ 已删除（#1945 移出仓库）
+  '请解释 NewChanlun `topological-computation/snet_cache.py` 与 `snet_persistence.py` 的缓存写入、校验、读回和恢复运行机制：从公开入口到落盘格式、完整性检查、懒加载边界和失败路径串起来，并说明各模块归属。必须引用实际代码，只读，不改文件。'
 ```
 
 - 命令/退出：`.sandcastle/pilot-1139/task-01/codex.log:1806,2082`。

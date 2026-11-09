@@ -79,13 +79,16 @@ PATH_CHARS = r"[^\s`'\"<>()\[\]{}|*,;:，。、；：（）「」【】]"
 PLACEHOLDER = re.compile(r"NNN|XXX|\.\.\.|…|\$|%|<|>|\{|\}|\*")
 SLASH = re.compile(r"(?<![\w/.:'\"-])/(" + "|".join(RETIRED_COMMANDS) + r")(?![\w/-])")
 LINK = re.compile(r"\]\(([^)\s]+)\)|href=\"([^\"]+)\"")
-# A line that itself says the thing is gone is a historical note, not an
-# instruction to run it.
 # Top-level directories moved out of the repo whole (#1945). _repo_path_re only
 # knows directories that still have tracked files, so without these a live doc
-# naming topological-computation/... would never be checked.
-RETIRED_TOP_DIRS = {"topological-computation", "prototypes"}
+# naming topological-computation/... would never be checked. .scratch/ is also
+# gitignored local scratch space (Matt's skills write there): paths under it are
+# matched here and then dropped by _git_ignored, so a later tracked file cannot
+# turn old references into new failures.
+RETIRED_TOP_DIRS = {"topological-computation", "prototypes", ".scratch"}
 
+# A line that itself says the thing is gone is a historical note, not an
+# instruction to run it.
 RETIRED_NOTE = re.compile(r"退役|已删除|已删|不再|retired|removed|no longer", re.I)
 
 # Missing-path findings that already existed on main before #1955 (review drafts
@@ -113,6 +116,8 @@ HISTORICAL = {
     "chanlun/review-results/": "review drafts",
     "chanlun/harness/vendor/": "vendored third-party text",
     ".auto-memory-snapshot/": "memory snapshot export",
+    "docs/agents/pstack-lite/PILOT-1139.md":
+        "record of the #1139 pilot run; its commands are quoted verbatim",
     ".claude/skills/writing-skills/anthropic-best-practices.md":
         "vendored copy of Anthropic docs (site-relative links)",
     ".agents/skills/domain-modeling/CONTEXT-FORMAT.md": "vendored skill; example paths",
