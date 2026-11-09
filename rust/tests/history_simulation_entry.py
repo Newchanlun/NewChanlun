@@ -6,14 +6,18 @@ BIN=Path(sys.argv[1]).resolve()
 ROOT=Path(sys.argv[2]).resolve(); ROOT.mkdir(parents=True,exist_ok=True)
 def canonical(x): return json.dumps(x,sort_keys=True,separators=(',',':'),ensure_ascii=False)
 def digest(x): return hashlib.sha256(canonical(x).encode()).hexdigest()
+# logical-bar/1: the open bar index X has reached (last committed bar + 1), the only clock E/S may report.
+CLOCK={'bar':0}
 def request(path,op,payload):
     with socket.socket(socket.AF_UNIX) as s:
         s.settimeout(5); s.connect(str(path)); s.sendall((canonical({'protocol':'x-exact-simulation/1','op':op,'payload':payload})+'\n').encode())
         s.shutdown(socket.SHUT_WR)
-        return json.loads(s.makefile('rb').readline())
+        r=json.loads(s.makefile('rb').readline())
+    if r.get('kind')=='SimulationBatch': CLOCK['bar']=max(CLOCK['bar'],r['bar_index']+1)
+    return r
 class Authority:
     def __init__(self,path,role):
-        self.path=path; self.role=role; self.calls=[]; self.bad=None; self.records={}; self.authorizations={}; self.drop_after=None; self.swallow=None; self.compact={}
+        self.path=path; self.role=role; self.calls=[]; self.bad=None; self.records={}; self.authorizations={}; self.drop_after=None; self.swallow=None; self.compact={}; self.replies=[]
         self.sock=socket.socket(socket.AF_UNIX); self.sock.bind(str(path)); self.sock.listen(16)
         self.thread=threading.Thread(target=self.run,daemon=True); self.thread.start()
     def run(self):
@@ -23,7 +27,7 @@ class Authority:
             with c:
                 q=json.loads(c.makefile('rb').readline()); self.calls.append(q)
                 r={k:q[k] for k in ['protocol','session_id','session_generation','authority_id','authority_epoch','command_id','command_hash','command']}
-                r.update(state='ReleasedExact' if self.role=='E' else 'ExecuteCommitted',receipt_id=self.role+':'+q['command_id'],release_receipt_id=q['release_receipt_id'],commit_ns=100)
+                r.update(state='ReleasedExact' if self.role=='E' else 'ExecuteCommitted',receipt_id=self.role+':'+q['command_id'],release_receipt_id=q['release_receipt_id'],commit_ns=CLOCK['bar'])
                 if q['command_id'] in self.compact:
                     r['receipt_id']=self.compact[q['command_id']]; r.pop('release_receipt_id')
                 if self.role=='S':
@@ -41,7 +45,7 @@ class Authority:
                 if self.bad=='content': r['command']['symbol']='wrong'
                 if self.bad=='future': r['commit_ns']=9_000_000_000_000_000_000
                 if self.bad=='missing': r['state']='NoRecord'
-                c.sendall((canonical(r)+'\n').encode())
+                self.replies.append(r); c.sendall((canonical(r)+'\n').encode())
 def model():
     return dict(model_id='history-sim/bar-batch-known-frontier/1',revision='oracle-1',symbol='TEST',quantity_unit='TEST-UNIT',currency='TEST-CASH',tick_value=1,rd11_policy='controlled-fixture-rd11',rd12_policy='per-leg-source-attribution/1',projection_kind='per_leg',seed='none',fee_profile=dict(reference='controlled-fee/1',role_source='controlled-role-map/1',limit_role='maker',market_role='taker',maker=dict(numerator=1,denominator=100,rounding='ceiling'),taker=dict(numerator=2,denominator=100,rounding='ceiling'),market_slippage_ticks=1,market_slippage_source='controlled-oracle/1'))
 def order(name,side='buy',quantity=100,price=100):
@@ -56,7 +60,8 @@ def batch(i,changes=[]):
 def run(name):
     directory=ROOT/f'{name}-{os.getpid()}-{time.time_ns()}'; directory.mkdir()
     # Unix socket path stays below sockaddr_un limit; data remains under task root.
-    sockets=Path(tempfile.mkdtemp(prefix='i1381-'))
+    # Same socket paths for both runs: they are frozen in authority_profile, which the full-table comparison covers.
+    CLOCK['bar']=0; sockets=Path(tempfile.gettempdir())/('i1381-'+str(os.getpid())); sockets.mkdir()
     e=Authority(sockets/'e','E'); s=Authority(sockets/'s','S'); xp=sockets/'x'
     sim=dict(model=model(),session_id='session',session_generation='g1',x_id='X',source_namespace='x-sim',source_epoch='epoch1',socket=str(xp),e=dict(socket=str(e.path),authority_id='E',authority_epoch='e1'),s=dict(socket=str(s.path),authority_id='S',authority_epoch='s1'),timeout_ms=500,max_frame_bytes=262144)
     profile=dict(profile_revision='x-execution-profile/1',mode='simulation',credential_scope=dict(env='UNUSED_SIMULATION_CREDENTIAL'),history_simulation=sim)
@@ -125,6 +130,13 @@ def run(name):
     p=start()
     try:
         a=dict(kind='submit',order=order('a')); ca=command(a)
+        # The production open path holds the S-authorize-once state: WAL and synchronous=FULL, as E's store.
+        with sqlite3.connect(db) as c: assert c.execute('PRAGMA journal_mode').fetchone()==('wal',)
+        if not fixture:
+            lines=[l for l in (directory/'x.log').read_text().splitlines() if l.startswith('x_execution_session storage ')]
+            assert lines, 'X did not report its storage preconditions'
+            storage=json.loads(lines[-1].split(' ',2)[2])
+            assert (storage['journal_mode'],storage['synchronous'])==('wal','2'),storage
         before=len(s.calls)
         for bad in ['denied','identity','content','future']:
             e.bad=bad
@@ -166,8 +178,7 @@ def run(name):
             return cmd
         e.compact={'big-p':'Ep','big-x':'Ex'}
         assert request(xp,'AcceptExact',sized('big-p'))['state']=='Accepted'
-        probe=e.calls[-1]
-        reply=dict({k:probe[k] for k in ['protocol','session_id','session_generation','authority_id','authority_epoch','command_id','command_hash','command']},state='ReleasedExact',receipt_id='Ep',commit_ns=100)
+        probe=e.calls[-1]; reply=e.replies[-1]
         s_request=dict(probe,op='RequestConditionalExecution',authority_id='S',authority_epoch='s1',release_receipt_id='Ep')
         reply_len=len(canonical(reply))+1; s_len=len(canonical(s_request))+1
         assert s_len>reply_len,(s_len,reply_len)
@@ -278,15 +289,16 @@ def run(name):
             rr=request(xp,'AdvanceBar',bb); assert rr['kind']=='SimulationBatch',rr
             assert len(rr['originals'])==1 and rr['originals'][0]['event']['kind']=='bust'
             bust_batches.append(rr)
-        # Raw immutable originals are the double-run comparison, not nondeterministic process clocks.
+        # Two independent processes must leave every X table byte-identical, clocks included.
         with sqlite3.connect(db) as c:
-            originals=c.execute('select id,raw from x_sim_originals order by id').fetchall()
+            assert c.execute('PRAGMA journal_mode').fetchone()==('wal',), 'X store not opened in WAL'
+            tables='\n'.join(c.iterdump())
             clocks=c.execute('select accept_clock,release_evidence from x_exact_commands').fetchall()
             for clock,release in clocks:
                 clock=json.loads(clock); release=json.loads(release)
                 assert clock['received_ns']<=clock['first_known_ns']<=clock['commit_ns']
                 assert clock['first_known_ns']>=release['commit_ns']
-        (directory/'originals.json').write_text(canonical(originals))
+        (directory/'tables.sql').write_text(tables)
         p.terminate(); p.wait(5); xp.unlink(missing_ok=True)
         # Cold recovery refuses missing authority/original evidence; exact restoration resumes.
         original_id=r7['originals'][0]['event']['source']['external_fact_id']
@@ -362,16 +374,19 @@ def run(name):
         p.terminate(); p.wait(5); xp.unlink(missing_ok=True)
         # Recovery uses the same clock predicate and refuses a corrupted earlier-than-release record.
         with sqlite3.connect(db) as c:
-            clock=json.loads(clocks[0][0]); clock.update(received_ns=98,first_known_ns=99,commit_ns=101)
-            c.execute('update x_exact_commands set accept_clock=? where id=?',(canonical(clock),'a'))
+            clock,release=c.execute('select accept_clock,release_evidence from x_exact_commands where id=?',('r',)).fetchone()
+            clock=json.loads(clock); early=json.loads(release)['commit_ns']-1
+            assert early>=0
+            clock.update(received_ns=early,first_known_ns=early,commit_ns=early)
+            c.execute('update x_exact_commands set accept_clock=? where id=?',(canonical(clock),'r'))
         blocked=subprocess.run(argv(),env=env(),capture_output=True,timeout=5)
         assert blocked.returncode!=0 and b'InvalidDomain' in blocked.stderr
         print(name+': PASS '+('test runtime with post-claim exit43' if fixture else 'production X binary')+', invalid input stays Accepted, unsent S failures stay Accepted, sent-but-unknown stays query-only, S reply loss/query-only recovery, unique S authorization, pending epoch2 rejected without writes, full fee/bust replay, frozen binding, atomic first initialization recovery')
-        return originals
+        return tables
     finally:
         if p.poll() is None: p.terminate(); p.wait(5)
         log.close(); e.sock.close(); s.sock.close()
         for file in sockets.iterdir(): file.unlink()
         sockets.rmdir()
-a=run('run-a'); b=run('run-b'); assert a==b, 'fresh process raw originals differ'
-print('PASS two fresh processes: byte-identical raw fill+fee originals')
+a=run('run-a'); b=run('run-b'); assert a==b, 'fresh process X tables differ'
+print('PASS two fresh processes: byte-identical X tables')
