@@ -52461,7 +52461,7 @@
       "scope": [
         ".github/devskim-baseline.json"
       ],
-      "reason": "#1952 第二批退役删除 scripts/optimal_morse.py、scripts/add_263_relations.py、scripts/update_meta_263.py、scripts/verify_263.py，指向这些已删文件的 8 个键一并删除：DS148264|scripts/optimal_morse.py|441、DS148264|scripts/optimal_morse.py|447、DS173237|scripts/add_263_relations.py|4、DS173237|scripts/add_263_relations.py|6、DS173237|scripts/add_263_relations.py|7、DS173237|scripts/add_263_relations.py|8、DS173237|scripts/update_meta_263.py|12、DS173237|scripts/verify_263.py|20。其中 optimal_morse 两键位于自引用目标行之前，自引用键因此跟随 base 第 855 行原文（DS173237|…/EXISTING-CLASSIFICATION-INTEGRATION.json|18273 这一行）移到第 853 行，旧键 855 删除。本次改动的其它文件（README.md、scripts/ipfs_deploy.py 改一行为同行数注释、rust/src/theta_v0/strategy/coverage/element.rs 只改注释一行）在基线中除 DS162092|scripts/ipfs_deploy.py|250 外没有键，该行行号和原文均未变。本地没有 DevSkim，未实际扫描。",
+      "reason": "#1952 第二批退役删除 scripts/optimal_morse.py、scripts/add_263_relations.py、scripts/update_meta_263.py、scripts/verify_263.py，指向这些已删文件的 8 个键一并删除：DS148264|scripts/optimal_morse.py|441、DS148264|scripts/optimal_morse.py|447、DS173237|scripts/add_263_relations.py|4、DS173237|scripts/add_263_relations.py|6、DS173237|scripts/add_263_relations.py|7、DS173237|scripts/add_263_relations.py|8、DS173237|scripts/update_meta_263.py|12、DS173237|scripts/verify_263.py|20。其中 optimal_morse 两键位于自引用目标行之前，自引用键因此跟随 base 第 855 行原文移到第 853 行（逐字比对为同一行），旧键 855 删除。本次改动的其它文件（README.md、scripts/ipfs_deploy.py 改一行为同行数注释、rust/src/theta_v0/strategy/coverage/element.rs 只改注释一行）在基线中除 DS162092|scripts/ipfs_deploy.py|250 外没有键，该行行号和原文均未变。本地没有 DevSkim，未实际扫描。",
       "entries": {
         "DS148264|.github/devskim-baseline.json|853": "与 base 键 DS148264|.github/devskim-baseline.json|855 同一行文本，行号漂移，逐行比对内容不变。"
       }
