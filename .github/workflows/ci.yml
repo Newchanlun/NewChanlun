@@ -500,7 +500,11 @@ jobs:
         #   （CI_TEST_PART），各占一台机器，同机负载与不拆时相同。托管路径只拆 owned/owned-h1，native 不拆（20 并发上限）。
         #   economic 开 opt-level 1 后不再拆：run 42452395669（9950X）a/b 各编译约 90 s、测试 182/267 s，合并后估约 10 min，
         #   仍短于 release-locks（13.0 min，run 42454217164）；每轮少 1 次 Boat 启动和 1 次重复编译。
-        group: ${{ fromJSON((vars.CI_BOAT_RUNNERS != 'off' && github.actor == 'xy7365527-lang' && github.triggering_actor == 'xy7365527-lang' && (github.event_name != 'pull_request' || github.event.pull_request.user.login == 'xy7365527-lang')) && '["native-a","native-b","release-locks","owned","owned-h1","economic","content"]' || '["native","release-locks","owned","owned-h1","economic","content"]') }}
+        #   content 并入 owned-h1（两条路径都是）：两组都是 opt-level 0，hc-ci-slim 上 content 3.5 min、owned-h1 4.9 min
+        #   （run 42462233357），合并约 8.4 min，仍短于 release-locks 12.4 min，Boat 每轮少 1 次启动；托管机上两组合计
+        #   12–17 min，短于同轮最长作业 22–31 min（11-08 五轮）。content 步骤只看 matrix.group，不再按 runner 重新判定：
+        #   单个作业重跑时 runner 判定会重新求值，而矩阵不会重新展开，按 runner 判定会让 content 被整组跳过（#2005 独审）。
+        group: ${{ fromJSON((vars.CI_BOAT_RUNNERS != 'off' && github.actor == 'xy7365527-lang' && github.triggering_actor == 'xy7365527-lang' && (github.event_name != 'pull_request' || github.event.pull_request.user.login == 'xy7365527-lang')) && '["native-a","native-b","release-locks","owned","owned-h1","economic"]' || '["native","release-locks","owned","owned-h1","economic"]') }}
     runs-on: ${{ (vars.CI_BOAT_RUNNERS != 'off' && github.actor == 'xy7365527-lang' && github.triggering_actor == 'xy7365527-lang' && (github.event_name != 'pull_request' || github.event.pull_request.user.login == 'xy7365527-lang')) && 'boat-large/from=hc-ci-slim' || 'ubuntu-latest' }}
     timeout-minutes: ${{ startsWith(matrix.group, 'native') && 90 || 60 }}
     env:
@@ -524,22 +528,22 @@ jobs:
       # #1404：成员来源回归单列先执行，避免已登记的默认域失败使本片新锁被跳过。
       #   #1588：该用例同时在 S bin 分片里执行（拆前即两处执行），本步保留其独立可见的信号。
       - name: cargo test — TB-02-C member source binding
-        if: ${{ !cancelled() && matrix.group == 'content' }}
+        if: ${{ !cancelled() && matrix.group == 'owned-h1' }}
         run: ../.github/scripts/run-cargo-with-telemetry.sh cargo test --locked --features s_session --bin s_structure_session tb02c_member_relations_bind_only_the_member_sources --jobs "${CI_CARGO_JOBS:-1}"
 
       # #1608：#1394 的两个编译负例只在 --cfg 下编译；此处断言它们仍被类型边界拒绝（E0308 落在负例块内）。
       #   放在 TB-02-C 单测之后复用已编好的 s_session 依赖；负例在类型检查阶段即失败，不做代码生成。
       - name: 编译负例 — #1394 类型边界仍拒绝旧写法（#1608）
-        if: ${{ !cancelled() && matrix.group == 'content' }}
+        if: ${{ !cancelled() && matrix.group == 'owned-h1' }}
         run: ../.github/scripts/check-compile-negatives-1394.sh
 
       # #1394 C：内容编码在 s_session feature 下供多个 owner 共用；只测 S bin 不会执行库测试。
       - name: cargo test — 完整内容编码与共享图校验（#1394）
-        if: ${{ !cancelled() && matrix.group == 'content' }}
+        if: ${{ !cancelled() && matrix.group == 'owned-h1' }}
         run: ../.github/scripts/run-cargo-with-telemetry.sh cargo test --locked --features s_session --lib --jobs "${CI_CARGO_JOBS:-1}" s_content
 
       - name: cargo test — 内容向量、持久序列与累计资源（#1394）
-        if: ${{ !cancelled() && matrix.group == 'content' }}
+        if: ${{ !cancelled() && matrix.group == 'owned-h1' }}
         run: ../.github/scripts/run-cargo-with-telemetry.sh cargo test --locked --features s_session --test s_content_contract --test s_content_sequence --test s_content_job --test s_content_path --jobs "${CI_CARGO_JOBS:-1}"
 
       # #1394 G-1：economic_session（含 P-14 读法锁、finance、content_store、store、finance_transport）
@@ -1325,8 +1329,18 @@ jobs:
           if [ "$CACHE_HIT" = true ] && [ -x "$HOME/.elan/bin/elan" ]; then
             echo "elan from cache: $("$HOME/.elan/bin/elan" --version)"
           else
-            curl --retry 5 --retry-all-errors --retry-delay 10 -sSf https://raw.githubusercontent.com/leanprover/elan/master/elan-init.sh \
-              | bash -s -- -y --default-toolchain none
+            # elan-init 内部再下载 elan 二进制且不重试，所以整段安装重试 3 次（#2002 独审 Nit 1）。先落盘再执行：
+            #   `curl | bash` 在无 pipefail 时只看 bash 的退出码，curl 失败也会被当成成功。
+            init="${RUNNER_TEMP:-/tmp}/elan-init.sh"
+            for i in 1 2 3; do
+              if curl --retry 5 --retry-all-errors --retry-delay 10 -sSf -o "$init" \
+                   https://raw.githubusercontent.com/leanprover/elan/master/elan-init.sh \
+                 && bash "$init" -y --default-toolchain none; then
+                break
+              fi
+              [ "$i" -lt 3 ] || exit 1
+              sleep 30
+            done
           fi
           echo "$HOME/.elan/bin" >> "$GITHUB_PATH"
 
