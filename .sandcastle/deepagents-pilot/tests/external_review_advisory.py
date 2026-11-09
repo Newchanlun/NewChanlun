@@ -1,6 +1,7 @@
 """旁听进程替身入口：用测试的状态目录、快照目录、对象来源和 worker 替身运行真实的 run_advisory。
 argv：<配置 JSON> advisory --run <运行键>（后三项与生产入口相同）。"""
 import json
+import subprocess
 import sys
 from pathlib import Path
 
@@ -8,8 +9,6 @@ HERE = Path(__file__).resolve().parent
 sys.path[:0] = [str(HERE.parent), str(HERE.parent.parent / "approval-signing")]
 
 from pilot1742 import external_review as module  # noqa: E402
-
-import subprocess  # noqa: E402
 
 # 与 conftest 的 no_real_docker 相同：脱离的旁听进程也不碰本机真实的卷和容器。
 module.docker_cli = lambda args, timeout=120: subprocess.CompletedProcess(["docker", *args], 0, "", "")
