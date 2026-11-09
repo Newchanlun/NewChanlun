@@ -195,6 +195,29 @@ def test_corrupt_comment_journal_is_recorded_not_raised(lane):
     assert len(lane.commenter.posts) == 1 and lane.gateway.sent == ["pending", "failure"]
 
 
+def test_corrupt_journal_without_commenter_keeps_verdict_and_exit_code(lane, monkeypatch, capsys):
+    lane.target(1810, 1)
+    (lane.state_root / "runs" / "fake-mode").write_text("BLOCK")
+    target = ReviewTarget(**lane.review_pr(1810)["target"])
+    effects = lane.state_root / "runs" / target.key / "effects"
+    (effects / "comment-failure.json").write_text("{坏")
+    class Client:  # main() 只经这些入口取凭据；替身不碰任何密钥
+        def __init__(self, *a, **kw): pass
+        def __enter__(self): return self
+        def __exit__(self, *a): pass
+        def verify(self): return {}
+    monkeypatch.setattr(module, "load_identity", lambda *a: None)
+    monkeypatch.setattr(module, "GitHubAppClient", Client)
+    monkeypatch.setattr(module, "RepoGateway", lambda client: None)
+    monkeypatch.setattr(module, "open_commenter", lambda *a: None)
+    monkeypatch.setattr(module, "ExternalReview", lambda *a, **kw: lane)
+    assert module.main(["review-pr", "--pr", "1810", "--private-key", "/nonexistent/key"]) == 1  # BLOCK 的退出码
+    result = json.loads(capsys.readouterr().out)
+    assert result["verdict"] == "BLOCK" and result["state"] == "failure"
+    assert result["comment"]["error"].startswith("JSONDecodeError")
+    assert lane.gateway.sent == ["pending", "failure"]
+
+
 @pytest.mark.parametrize("permissions,expected", [
     (None, True),  # 执行器 App（INSTALLATION_PERMISSIONS，pull_requests/write）
     ({"metadata": "read", "contents": "read", "pull_requests": "read", "statuses": "write"}, False)])  # 审查专用 App

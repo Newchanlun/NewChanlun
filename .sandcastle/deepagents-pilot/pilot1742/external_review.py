@@ -910,16 +910,17 @@ class ExternalReview:
             return
         journal = Journal(folder / "effects")
         effect = "comment-failure"
-        if self.commenter is None:
-            if journal.load(effect) is None:
-                result["comment"] = {"skipped": "发布 App 无 pull_requests/write，未发 failure 评论"}
-            return
         marker = failure_marker(target)
         commenter = self.commenter
         def probe() -> dict | None:
+            assert commenter is not None
             found = commenter.find_marker(target.pr_number, marker)
             return {**found, "marker": marker} if found else None
         try:
+            if commenter is None:
+                if journal.load(effect) is None:
+                    result["comment"] = {"skipped": "发布 App 无 pull_requests/write，未发 failure 评论"}
+                return
             # 正文在 converge 写 pending 之前生成：生成失败时 journal 不留 pending。
             body = failure_comment(target, folder, result["reviews"])
             result["comment"] = journal.converge(
