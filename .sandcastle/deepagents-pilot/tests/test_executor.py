@@ -858,3 +858,23 @@ def test_executor_run_maps_mid_graph_low_disk_to_retryable_exit(tmp_path, monkey
     code = module.main(["--state-root", str(tmp_path), "--drain-root", str(tmp_path), "run", "--run-id", "t1-1",
                         "--private-key", str(tmp_path / "unused.pem")])
     assert code == 75 and "派工门槛" in capsys.readouterr().err
+
+
+def test_v1_cli_run_maps_mid_graph_low_disk_to_retryable_exit(tmp_path, monkeypatch, capsys):
+    """v1 入口与 executor 一致：drive() 中途低盘返回 75，不抛 traceback。"""
+    from types import SimpleNamespace
+
+    from pilot1742 import cli
+
+    def low_disk(*_args, **_kwargs):
+        raise InsufficientSpace("派工门槛")
+
+    run_dir = tmp_path / "runs" / "t1-1"
+    run_dir.mkdir(parents=True)
+    (run_dir / "run.json").write_text("{}")
+    fake = SimpleNamespace(spec=SimpleNamespace(v=1), acquire=lambda: None, ensure_checkouts=lambda: None)
+    monkeypatch.setattr(cli, "PilotRun", SimpleNamespace(run_dir=lambda _home, _run_id: run_dir,
+                                                         open=lambda *_args, **_kwargs: fake))
+    monkeypatch.setattr(cli, "drive", low_disk)
+    code = cli.main(["run", "--home", str(tmp_path), "--run-id", "t1-1"])
+    assert code == 75 and "派工门槛" in capsys.readouterr().err

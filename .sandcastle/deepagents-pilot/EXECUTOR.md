@@ -154,7 +154,7 @@ deepagents-scope: rust/src/example/ rust/tests/example/
 
 ### 为新队列 run 提供 SPEC 授权
 
-依据 #1742 最新用户授权，保留 pstack、Matt 与 DeepAgents，普通 SPEC 不再要求人工批准。Queued 消费可信编排账号发布的「SPEC 独审裁定」。可信账号是发裁定评论的 GitHub 用户登录名，与仓库 owner 无关；Wayfinder 引擎和本消费者都从 `.sandcastle/queue-policy.json` 的 `orchestrator_login` 读默认值，`WAYFINDER_ORCHESTRATOR` 可覆盖，两侧须设同一个值。非作者独审原件包含 `specNumber`、`digest`、`author`、`reviewer`、`verdict`，由 PR1915 的 `--spec-ruling <号> --review-file <原件>` helper 核对当前正文后发布，并附证据位置。部署消费者前须一并集成该生产者。裁定摘要按 CRLF→LF、trimEnd 后的 UTF-8 计算。无效 PASS、后续 BLOCK 或可信撤回都阻止动作，不回退旧签名。
+依据 #1742 最新用户授权，保留 pstack、Matt 与 DeepAgents，普通 SPEC 不再要求人工批准。Queued 消费可信编排账号发布的「SPEC 独审裁定」。可信账号是发裁定评论的 GitHub 用户登录名，与仓库 owner 无关；Wayfinder 引擎和本消费者都从 `.sandcastle/queue-policy.json` 的 `orchestrator_login` 读默认值，`WAYFINDER_ORCHESTRATOR` 可覆盖，两侧须设同一个值。非作者独审原件包含 `specNumber`、`digest`、`author`、`reviewer`、`verdict`，由 `scripts/wayfinder_engine.mts` 的 `--spec-ruling <号> --review-file <原件>` helper 核对当前正文后发布，并附证据位置。裁定摘要按 CRLF→LF、trimEnd 后的 UTF-8 计算。无效 PASS、后续 BLOCK 或可信撤回都阻止动作，不回退旧签名。
 
 每次领取、派工、提交、推送、PR、状态和交付边界重新读取当前正文与完整评论。授权通过才冻结 `runs/<run>/spec/<号>.md` 原始 UTF-8 字节。旁注保留原始 `target`、代次及裁定 comment id、账号、作者、独审、证据和规范化 digest，不生成 nonce 或签批命令。worker 封包及 `_require_review_spec` 仍使用原始 target，不能改用规范化 digest。两个冻结文件间崩溃时，下一次有效裁定会重写收敛。
 
@@ -187,7 +187,7 @@ launchd 模板在 `.sandcastle/launchd/com.newchanlun.deepagents-executor.plist`
 
 ### 组合生产者回归
 
-`tests/test_spec_ruling.py` 和队列 release 测试直接导入 `scripts/wayfinder_engine.mts`。默认检查当前检出；PR1915 尚未集成时，可将 `WAYFINDER_ENGINE_PATH` 指向从精确提交导出的真实 engine，连同其实际导入文件，并使用本候选的 `.sandcastle/queue-policy.json` 组成联合候选。不能用协议副本替代生产源码。
+`tests/test_spec_ruling.py` 和队列 release 测试直接导入 `scripts/wayfinder_engine.mts`。默认检查当前检出；需要对另一版本的 engine 对拍时，可将 `WAYFINDER_ENGINE_PATH` 指向从精确提交导出的真实 engine，连同其实际导入文件。不能用协议副本替代生产源码。
 
 从 `.sandcastle/deepagents-pilot` 运行 `python -m pytest -q tests/test_spec_ruling.py tests/test_queue.py`。队列测试保留 SIGKILL 后同 run 恢复与精确交付断言；运行记录须注明生产者 SHA、消费者 SHA 和共享策略来源。
 

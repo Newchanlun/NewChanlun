@@ -61,7 +61,12 @@ def _run(args: argparse.Namespace) -> int:
     except (Busy, InsufficientSpace) as error:
         print(str(error), file=sys.stderr)
         return EXIT_BUSY
-    return drive(run, recheck_approval=args.recheck_approval)
+    try:
+        return drive(run, recheck_approval=args.recheck_approval)
+    except InsufficientSpace as error:
+        # 同 executor.py：图运行中派工建 checkout 时低盘，检查点停在该工具调用之前，下一轮恢复同一 run 重做。
+        print(str(error), file=sys.stderr)
+        return EXIT_BUSY
 
 
 SETTLED_PHASES = frozenset({"gate", "halted", "awaiting_merge", "merged", "stale", "conflict"})

@@ -110,7 +110,7 @@ def test_queue_roundtrip_does_not_change_dedicated_rules(queued):
     assert parse_work_unit(unit.to_json()) == unit
     assert forbidden_for(unit.admission, {'ready-for-agent', 'wayfinder:impl'}) == ()
     assert forbidden_for(unit.admission, {'needs-approval', 'agent:explore', 'sandcastle'}) == (
-        'agent:explore', 'sandcastle')
+        'agent:explore', 'needs-approval', 'sandcastle')
     proof = v2.github.issues[TICKET]
     proof.update(body='deepagents:dedicated-pilot #1742', parent=None, labels=[])
     dedicated = v2.register(f't{TICKET}-99')
@@ -118,7 +118,8 @@ def test_queue_roundtrip_does_not_change_dedicated_rules(queued):
     assert forbidden_for(dedicated.admission, {'ready-for-agent'}) == ('ready-for-agent',)
 
 
-@pytest.mark.parametrize('bad', ['sandcastle', 'agent:explore', 'ready-for-human', 'needs-info', 'needs-triage', 'wontfix', 'assignee', 'parent', 'tail',
+@pytest.mark.parametrize('bad', ['sandcastle', 'agent:explore', 'needs-approval', 'ready-for-human', 'needs-info',
+                                 'needs-triage', 'wontfix', 'assignee', 'parent', 'tail',
                                  'scope', 'ticket_scope_only'])
 def test_queue_refuses_missing_contract_without_writes(queued, bad):
     v2, cutover, intake, signer = queued
@@ -1162,19 +1163,11 @@ def test_typescript_release_and_python_intake_share_hold_policy(queued, label, w
       console.log(JSON.stringify(wrote));"""
     result = subprocess.run(['node', '--experimental-strip-types', '--input-type=module', '-e', script,
                              module.as_uri(), label], text=True, capture_output=True, check=True)
-    allowed = label == 'needs-approval'
-    assert json.loads(result.stdout) == allowed
+    assert json.loads(result.stdout) is False  # needs-approval 仍是 hold 标签，与 graph-run「逐张核后再摘」一致
     v2.github.issues[TICKET]['labels'].append(label)
-    if allowed:
-        unit = intake.register(TICKET)
-        with pytest.raises(ApprovalRequired):
-            executor(v2, cutover, unit).claim(PilotRun.run_dir(v2.home, unit.run_id))
-        publish_ruling(v2)
-        assert executor(v2, cutover, unit).claim(PilotRun.run_dir(v2.home, unit.run_id)).state == 'active'
-    else:
-        with pytest.raises(AdmissionRefused):
-            intake.register(TICKET)
-        assert not v2.writes()
+    with pytest.raises(AdmissionRefused):
+        intake.register(TICKET)
+    assert not v2.writes()
 
 
 @pytest.mark.parametrize('body', ['# SPEC\ndeepagents-scope: other/\n', '# SPEC\n'])
