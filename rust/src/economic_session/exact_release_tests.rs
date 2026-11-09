@@ -43,7 +43,7 @@ pub(super) fn decorate_input(data: &mut Value) {
         .map(|(id, capability, stage)| json!({"condition_id":id,"authority_revision":capability,"dependency_set":["controlled-dependency"],"invalidation_sources":["controlled-invalidation"],"required_check_stages":[stage],"evidence_refs":["controlled-evidence"],"coverage_proof":"controlled-coverage","validator_capability":capability,"failure_result":"Denied"}))
         .collect();
     let domain = |concurrency: &str| json!({"order_kind":"limit","concurrency":concurrency,"allocation_model":"#1349/atomic-slot-wait/v1"});
-    data["exact_release"] = json!({"x_target":{"x_id":"X","x_epoch":"1"},"projection_kind":"per_leg","rd11_policy":"controlled-fixture-rd11","rule_revision":"TestOnly-rule/1407-c1","market_dependencies":["TestOnly-market/1407-c1"],"conditions":conditions,"model_coverage":{"model_ref":"history-sim/bar-batch-known-frontier/1","domain_id":"TestOnly-domain/1407-c1","input_domain":[domain("single")],"unsupported_domains":[domain("batched")]}});
+    data["exact_release"] = json!({"x_target":{"x_id":"X","x_epoch":"1"},"projection_kind":"per_leg","rd11_policy":"controlled-fixture-rd11","rule_revision":"TestOnly-rule/1407-c1","market_dependencies":["TestOnly-market/1407-c1"],"conditions":conditions,"model_coverage":{"model_ref":{"model_id":"history-sim/bar-batch-known-frontier/1","revision":"oracle-1","content_hash":hash(&json!("history-sim/bar-batch-known-frontier/1@oracle-1"))},"domain_id":"TestOnly-domain/1407-c1","input_domain":[domain("single")],"unsupported_domains":[domain("batched")]}});
     for q in data["plans"].as_array_mut().unwrap() {
         let name = q["decision_id"].as_str().unwrap().to_owned();
         q["exact"] = json!({"command_id":format!("cmd-{name}"),"logical_order_family":format!("family-{name}"),"chong_id":name,"revision":"1","first_quantity":q["quantity"],"allocation_id":format!("alloc-{name}"),"side":"buy","symbol":name,"projection_manifest":format!("TestOnly-projection/{name}"),"eligibility_ref":format!("S:cmd-{name}"),"concurrency":if name == "alpha" {"single"} else {"batched"}});
@@ -360,7 +360,7 @@ fn l7_model_coverage_out_of_domain_persists_unsupported_without_release() {
     assert_eq!(r["record"]["state"], "Unsupported");
     assert_eq!(
         r["record"]["unsupported"],
-        json!({"reason":"ModelOrderUnspecified","model_ref":"history-sim/bar-batch-known-frontier/1","domain_id":"TestOnly-domain/1407-c1","command_id":"cmd-beta"})
+        json!({"reason":"ModelOrderUnspecified","model_ref":f.data["exact_release"]["model_coverage"]["model_ref"],"domain_id":"TestOnly-domain/1407-c1","command_id":"cmd-beta"})
     );
     assert!(r["record"].get("release_commit_ns").is_none());
     assert_eq!(latest(&f.dbs[0]).unwrap().0, seq + 1, "终态持久");
@@ -892,4 +892,40 @@ fn frozen_input_refuses_two_first_submits_in_one_family() {
         e.starts_with("IdentityConflict") && e.contains("逻辑族"),
         "{e}"
     );
+}
+
+/// ADR 0052 裁定二.4：经正式入口产生的 Release 结果读回 domain-event/1 外壳。identity 是真实 command_id，
+/// cause[] 指向命令身份，model_ref 是本次对照的模型引用；域外终态与域内交付各一例。
+#[test]
+fn release_results_project_to_domain_events_with_command_cause_and_model() {
+    let mut f = fixture(None);
+    committed(&mut f);
+    dispatch(&mut f, "alpha");
+    dispatch(&mut f, "beta");
+    let model = f.data["exact_release"]["model_coverage"]["model_ref"].clone();
+    for (name, state) in [("alpha", "ReleasedExact"), ("beta", "Unsupported")] {
+        let p = release_payload(&f, name);
+        let r = f.handle(0, &format!("ReleaseExact-{name}"), p);
+        assert_eq!(r["record"]["state"], state, "{r}");
+        let seq = positive(required(&r["cut"], "commit_seq").unwrap(), "seq").unwrap();
+        let events =
+            crate::economic_session::domain_event::events_at(&f.dbs[0], &f.configs[0], seq)
+                .unwrap();
+        let e = &events[0];
+        assert_eq!(e["contract"], "domain-event/1");
+        assert_eq!(e["kind"], "ReleaseExact");
+        assert_eq!(e["identity"]["command_id"], format!("cmd-{name}"), "{e}");
+        assert_eq!(
+            e["cause"],
+            json!([{"command_id":format!("cmd-{name}")}]),
+            "{e}"
+        );
+        assert_eq!(e["model_ref"], model, "{e}");
+        assert_eq!(e["payload"]["record"]["state"], state);
+    }
+    let all = crate::economic_session::domain_event::events(&f.dbs[0], &f.configs[0]).unwrap();
+    assert!(all
+        .iter()
+        .filter(|e| e["kind"] != "ReleaseExact" && e["kind"] != "MakeDispatchable")
+        .all(|e| e["model_ref"].is_null()));
 }

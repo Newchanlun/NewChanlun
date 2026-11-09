@@ -151,6 +151,8 @@ pub(super) fn validate(v: &Value) -> Result<(), String> {
     for c in v["cause"].as_array().ok_or("InvalidDomain：cause须数组")? {
         let k = if c.get("event_id").is_some() {
             "event_id"
+        } else if c.get("command_id").is_some() {
+            "command_id"
         } else {
             "fact_key"
         };
@@ -362,8 +364,16 @@ fn events_in(
     } else {
         Value::Null
     };
+    // #1407 C1：`tb03b-finance/5` 的命令事件以真实 command_id 为身份；其余事件逐字沿用回执键。
+    let command = matches!(
+        event["kind"].as_str(),
+        Some("MakeDispatchable" | "ReleaseExact")
+    );
     let identity = match &fact {
         Some((k, _)) => json!({"chong_id":context.chong_id,"voice":voice,"fact_key":k}),
+        None if command => {
+            json!({"chong_id":context.chong_id,"voice":voice,"command_id":event["record"]["command_id"]})
+        }
         None => json!({"chong_id":context.chong_id,"voice":voice,"command_id":receipt_key}),
     };
     let source = match &fact {
@@ -389,7 +399,10 @@ fn events_in(
         }
         _ => Vec::new(),
     };
-    let cause = if event["kind"] == "ResolveEvidence" {
+    let cause = if event["kind"] == "ReleaseExact" {
+        // ADR 0052 裁定二.4：Release 结果（含 Unsupported 终态）的前件指向命令身份。
+        vec![json!({"command_id":event["record"]["command_id"]})]
+    } else if event["kind"] == "ResolveEvidence" {
         event["covered"]
             .as_array()
             .map(|a| a.iter().map(|k| json!({"fact_key":k})).collect())
@@ -414,6 +427,13 @@ fn events_in(
         );
         (from != to).then(|| json!({"field":"latch","from":from,"to":to}))
     };
+    let model_ref = match event["kind"].as_str() {
+        Some("ReleaseExact") if event["record"]["state"] == "Unsupported" => {
+            event["record"]["unsupported"]["model_ref"].clone()
+        }
+        Some("ReleaseExact") => event["record"]["model_ref"].clone(),
+        _ => Value::Null,
+    };
     let envelope = |ordinal: usize,
                     kind: &Value,
                     payload: &Value,
@@ -422,7 +442,7 @@ fn events_in(
         json!({"contract":CONTRACT,"domain_id":config.domain,"event_id":event_id(&config.domain,seq,ordinal),
             "writer_epoch":writer_epoch,"cut":cut(config,seq,&root),"structure_cut":null,"structure_generation":null,
             "prev_root":prev_root,"root":root,"identity":identity,"source":source,"policy_refs":policy_refs,
-            "model_ref":null,"transition":transition,"cause":cause,"kind":kind,"payload":payload})
+            "model_ref":model_ref,"transition":transition,"cause":cause,"kind":kind,"payload":payload})
     };
     let first = envelope(0, &event["kind"], event, transition, cause);
     let mut out = vec![first];

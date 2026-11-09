@@ -1702,6 +1702,7 @@ fn release_exact(
         r["responsibility_ref"] = json!(grant_id);
         r["release_seq"] = json!(seq.to_string());
         r["release_commit_ns"] = json!(ns);
+        r["model_ref"] = super::exact_command::model_ref(d);
         r["execution_eligibility"] = json!("ReleasedExact");
     }
     replace_command(next, &r);

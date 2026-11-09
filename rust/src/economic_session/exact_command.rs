@@ -128,7 +128,11 @@ pub(super) fn validate_section(d: &Value) -> Result<(), String> {
             "unsupported_domains",
         ],
     )?;
-    required(m, "model_ref")?;
+    // domain-event/1 的 model_ref 形状（domain_event.rs validate），终态外壳原样引用。
+    exact(&m["model_ref"], &["model_id", "revision", "content_hash"])?;
+    for k in ["model_id", "revision", "content_hash"] {
+        required(&m["model_ref"], k)?;
+    }
     required(m, "domain_id")?;
     model_domain(&m["input_domain"])?;
     model_domain(&m["unsupported_domains"])?;
@@ -269,6 +273,10 @@ pub(super) fn check_certificate(given: &Value, expected: &Value) -> Result<(), S
         return Err("IdentityConflict：证书内容与 E 组装的责任/依赖/条件不同".into());
     }
     Ok(())
+}
+/// 本次对照的模型引用；ReleasedExact 与 Unsupported 记录都带它，domain-event/1 外壳从记录读出。
+pub(super) fn model_ref(d: &Value) -> Value {
+    d["exact_release"]["model_coverage"]["model_ref"].clone()
 }
 /// ADR 0052 裁定二：命令的订单种类、并发形态与分配模型对照 profile 的 `input_domain`；落在
 /// `unsupported_domains` 或两边都不含即域外，返回需持久的 `Unsupported{ModelOrderUnspecified,…}`。
