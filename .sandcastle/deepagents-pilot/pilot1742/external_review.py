@@ -64,6 +64,8 @@ ADVISORY_TERM_GRACE_SECONDS = 120
 ADVISORY_WATCHDOG_MARGIN_SECONDS = 60
 # 全 HOST 一把回收锁：回收在登记前、不持任何 run 锁时运行，遗留快照不会挡住自己的回收。
 REAPER_LOCK = "reaper.lock"
+# run 锁与旁听锁被别的进程「短暂」持有时（回收复核改名、旁听锁探测）等这么久再判忙；真被控制进程长期持有的照旧判忙。
+LOCK_WAIT_SECONDS = 3.0
 CONTEXT = "deepagents/review"
 TOKEN_PERMISSIONS = {"metadata": "read", "contents": "read", "pull_requests": "read", "statuses": "write"}
 REPOSITORY_ID = 1150335160
@@ -182,6 +184,19 @@ def _save(path: Path, value: dict) -> None:
     os.replace(tmp, path)
 
 
+def _flock_wait(fd: int, seconds: float) -> bool:
+    """非阻塞地反复尝试排他 flock，最多等 seconds 秒；拿到返回 True。"""
+    end = time.monotonic() + seconds
+    while True:
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            return True
+        except BlockingIOError:
+            if time.monotonic() >= end:
+                return False
+            time.sleep(0.02)
+
+
 @contextmanager
 def _lock(folder: Path):
     folder.mkdir(parents=True, exist_ok=True, mode=0o700)
@@ -192,10 +207,8 @@ def _lock(folder: Path):
         raise IdentityError("宿主状态目录必须归当前用户且权限为 0700")
     fd = os.open(folder / "owner.lock", os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
     try:
-        try:
-            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except BlockingIOError:
-            raise EffectPending("已有宿主控制进程持锁") from None
+        if not _flock_wait(fd, LOCK_WAIT_SECONDS):
+            raise EffectPending("已有宿主控制进程持锁")
         yield
     finally:
         os.close(fd)
@@ -303,11 +316,18 @@ def prepare_review(target: ReviewTarget, source: Path, checkout: Path) -> Frozen
     if checkout.exists():
         raise IdentityError("review checkout 已存在，不覆盖旧证据")
     object_ids, required = snapshot_plan(source, target)
-    checkout.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-    free = shutil.disk_usage(checkout.parent).free
-    if free < required:
-        raise IdentityError(f"空间不足：快照需要 {required} bytes，可用 {free} bytes；未启动模型")
-    checkout.mkdir(mode=0o700)
+    # 共用父目录 <run_id> 空着时可能被回收或同 run 的收尾 rmdir（不持本锁）；在建 checkout 前被删就重建再试。
+    for attempt in range(3):
+        try:
+            checkout.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+            free = shutil.disk_usage(checkout.parent).free
+            if free < required:
+                raise IdentityError(f"空间不足：快照需要 {required} bytes，可用 {free} bytes；未启动模型")
+            checkout.mkdir(mode=0o700)
+            break
+        except FileNotFoundError:
+            if attempt == 2:
+                raise
     _git(checkout, "init", "-q", "--template=", "-b", "review")
     with tempfile.TemporaryFile(dir=checkout.parent) as ids:
         ids.write(object_ids)
@@ -338,11 +358,12 @@ def prepare_review(target: ReviewTarget, source: Path, checkout: Path) -> Frozen
 _DOCKER_ENV = ("PATH", "HOME", "USER", "LOGNAME", "TMPDIR", "LANG")
 
 
-def docker_cli(args: list[str]) -> subprocess.CompletedProcess:
+def docker_cli(args: list[str], timeout: float = 120) -> subprocess.CompletedProcess:
     """跑一条 docker 命令；docker 不可用或超时记 returncode=125，不抛错。"""
     env = {k: os.environ[k] for k in _DOCKER_ENV if k in os.environ}
     try:
-        return subprocess.run(["docker", *args], env=env, capture_output=True, text=True, timeout=120)
+        return subprocess.run(["docker", *args], env=env, capture_output=True, text=True, timeout=timeout,
+                              stdin=subprocess.DEVNULL)
     except (OSError, subprocess.TimeoutExpired):
         return subprocess.CompletedProcess(["docker", *args], 125, "", "docker unavailable")
 
@@ -896,7 +917,9 @@ class ExternalReview:
             return []
         rows = _ps_rows()
         workers: dict[str, Path] = {}
-        for path in (self.state_root / "runs").glob("*/*/launch.json"):
+        launches = [*(self.state_root / "runs").glob("*/*/launch.json"),
+                    *(self.state_root / "runs").glob(f"*/{ADVISORY_DIR}/*/launch.json")]
+        for path in launches:
             try:
                 workers[str(_read(path)["launch_id"])] = path.parent
             except (OSError, ValueError, KeyError, TypeError, IdentityError):
@@ -1207,11 +1230,11 @@ class ExternalReview:
         advisory.mkdir(mode=0o700, exist_ok=True)
         fd = os.open(advisory / ".lock", os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
         try:
-            try:
-                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-            except BlockingIOError:
+            # _lock_held、回收和空间预留的探测会瞬间拿这把锁；撞上时等一会儿，免得这次旁听静默丢掉。
+            if not _flock_wait(fd, LOCK_WAIT_SECONDS):
                 return {"run_id": target.run_id, "advisory": True, "busy": True}
             self.reap()
+            self._reap_volumes_logged()
             if (advisory / "outcome.json").exists():
                 return _read(advisory / "outcome.json")
             guard, written = threading.Lock(), threading.Event()
@@ -1222,7 +1245,9 @@ class ExternalReview:
                     written.set()
                     _save(advisory / "outcome.json", outcome)
                     return True
-            limit = self.advisory_timeout + self.advisory_term_grace + self.advisory_watchdog_margin
+            # 各旁听模型顺序执行、各有自己的上限与宽限，硬墙钟按模型数累加。
+            limit = (len(ADVISORY_REVIEW_MODELS) * (self.advisory_timeout + self.advisory_term_grace)
+                     + self.advisory_watchdog_margin)
             watchdog = threading.Timer(limit, self._advisory_watchdog, args=(target, advisory, write, limit))
             watchdog.daemon = True
             watchdog.start()
@@ -1275,6 +1300,7 @@ class ExternalReview:
                     entry["reason"] = str(error)
                     return entry  # 原对象返回：finally 补的 checkout 字段要进返回值
                 checkout = self.checkout_root / target.run_id / model
+                self._reap_volumes_logged()  # 与 run_review 相同：派发前回收已死 launch 的孤儿卷与容器
                 # 空间：只有总准入多算一份快照仍能通过时才派（给之后的 gating 双审留够两份）；否则跳过。
                 _, single = snapshot_plan(self.source, target)
                 volume = self.checkout_root
@@ -1324,11 +1350,25 @@ class ExternalReview:
         except Exception as error:  # 旁听失败只记进旁听结论
             entry.update(verdict="FAILED", reason=f"{type(error).__name__}: {error}")
         finally:
+            receipt = _read(worker / "receipt.json") if (worker / "receipt.json").exists() else {}
+            if (worker / "launch.json").exists() and receipt.get("container_closed") is not True:
+                # 监督没有确认关容器（崩溃、被杀、超时）：按标签回收已死 launch 的卷与容器，不等下一次派发。
+                self._reap_volumes_logged()
             try:
-                entry["checkout"] = "removed" if self.cleanup_checkout(target, model, advisory) else "retained"
+                if not (worker / "prepare.json").exists() and not (self.checkout_root / target.run_id / model).exists():
+                    entry["checkout"] = "none"  # 没走到 prepare（额度、空间），从未建过快照
+                else:
+                    entry["checkout"] = "removed" if self.cleanup_checkout(target, model, advisory) else "retained"
             except Exception:
                 entry["checkout"] = "retained"
         return entry
+
+    def _reap_volumes_logged(self) -> None:
+        """卷回收是兜底：失败只记日志，不挡派发与收尾。"""
+        try:
+            self.reap_review_volumes()
+        except Exception as error:  # noqa: BLE001
+            self._reaper_log([{"action": "failed", "reason": type(error).__name__}])
 
     def _await_advisory(self, worker: Path, launch: dict, process: subprocess.Popen | None, deadline: float) -> bool:
         """等回执到 deadline。监督进程退出却没写回执时补一份 failed 回执（与 run_review 同一规则）。超时返回 True：
@@ -1344,8 +1384,10 @@ class ExternalReview:
                 break
             if not supervisor_alive(worker, _ps_rows()) and exited():
                 if not (worker / "receipt.json").exists():
+                    # 卷名由 launch_id 决定：补写回执也记上，留作证据并与 worker 回执同一形状。
                     _save(worker / "receipt.json", {**launch, "prompt": None, "status": "failed",
-                          "failure_reason": "SupervisorExitedWithoutReceipt", "container_closed": False})
+                          "failure_reason": "SupervisorExitedWithoutReceipt", "container_closed": False,
+                          "volume": REVIEW_VOLUME_PREFIX + str(launch["launch_id"]), "volume_removed": False})
                 return False
             time.sleep(self.poll_seconds)
         else:
@@ -1454,40 +1496,65 @@ class ExternalReview:
         if not container and (worker / "supervisor.json").exists():
             container = _read(worker / "supervisor.json").get("container_id")
         if not isinstance(container, str) or not re.fullmatch(r"[a-f0-9]{12,64}", container):
-            return "unknown"
+            # 没记下容器 id（监督在建容器前后被杀）：本次 launch 起的容器都带 REVIEW_LABEL=<launch_id>，
+            # 按标签一个都查不到才算不在；docker 查不了照旧 unknown。
+            launch_id = str(_read(worker / "launch.json").get("launch_id", ""))
+            if not re.fullmatch(r"[a-f0-9-]{36}", launch_id):
+                return "unknown"
+            listed = self.docker(["ps", "-a", "-q", "--filter", f"label={REVIEW_LABEL}={launch_id}"])
+            if listed.returncode:
+                return "unknown"
+            return "safe" if not listed.stdout.split() else "running"
         state = self.container_state(container)
         return "safe" if state in ("absent", "stopped") else "running" if state == "running" else "unknown"
 
+    @staticmethod
+    def _reap_fingerprint(folder: Path, worker: Path, checkout: Path) -> tuple:
+        """决定删除所依据的文件状态（inode、mtime、大小；_save 原子替换必换 inode）。锁外判断、锁内复核用。"""
+        def stat(path: Path) -> tuple | None:
+            try:
+                info = os.lstat(path)
+            except FileNotFoundError:
+                return None
+            return (info.st_ino, info.st_mtime_ns, info.st_size)
+        names = ("prepare.json", "launch.json", "process.json", "receipt.json", "supervisor.json")
+        return tuple(stat(path) for path in (*(worker / n for n in names), folder / "outcome.json",
+                                              folder / ADVISORY_DIR / "outcome.json", checkout))
+
     def _reap_one(self, folder: Path, run_dir: Path, checkout: Path) -> tuple[str, int]:
+        """慢的判断（进程表、docker、体积）都在锁外；只有在 run 锁与旁听锁都空闲、且所依据的文件自判断以来没变时，
+        才在锁内改名。持锁只覆盖几次 lstat、一次改名和一次写 checkout-cleanup.json。"""
         model = checkout.name
         advisory = model in ADVISORY_REVIEW_MODELS
         worker = (folder / ADVISORY_DIR if advisory else folder) / model
+        before = self._reap_fingerprint(folder, worker, checkout)
+        rows = _ps_rows()
+        pid = (_read(worker / "process.json") if (worker / "process.json").exists() else {}).get("pid")
+        if supervisor_alive(worker, rows) or any(
+                not state.startswith("Z") and (str(checkout) in command or process == pid)
+                for process, _, state, command in rows):
+            return "kept", 0
+        if advisory:
+            done = (folder / ADVISORY_DIR / "outcome.json").exists()
+        else:
+            saved = _read(folder / "outcome.json") if (folder / "outcome.json").exists() else {}
+            done = saved.get("verdict") in ("PASS", "BLOCK", "FAILED", "STALE")
+        if not (done or isinstance(pid, int)):  # 既无终态、也从未派发（prepare 中断）：留给 run 自己恢复
+            return "kept", 0
+        container = self._container_safe(worker)
+        if container != "safe":  # 容器可能仍挂着这份快照：不删
+            if container == "unknown":
+                print(f"external-review reaper retained-unknown {checkout}", file=sys.stderr)
+            return ("unknown" if container == "unknown" else "kept"), 0
         with self._locks_free([folder / "owner.lock", folder / ADVISORY_DIR / ".lock"]) as free:
-            if not free:
+            # 锁内只复核：run 或旁听此刻不在跑，且判断以来没有新的 prepare、launch、进程、回执或结论。
+            if not free or self._reap_fingerprint(folder, worker, checkout) != before:
                 return "kept", 0
-            rows = _ps_rows()
-            pid = (_read(worker / "process.json") if (worker / "process.json").exists() else {}).get("pid")
-            if supervisor_alive(worker, rows) or any(
-                    not state.startswith("Z") and (str(checkout) in command or process == pid)
-                    for process, _, state, command in rows):
-                return "kept", 0
-            if advisory:
-                done = (folder / ADVISORY_DIR / "outcome.json").exists()
-            else:
-                saved = _read(folder / "outcome.json") if (folder / "outcome.json").exists() else {}
-                done = saved.get("verdict") in ("PASS", "BLOCK", "FAILED", "STALE")
-            if not (done or isinstance(pid, int)):  # 既无终态、也从未派发（prepare 中断）：留给 run 自己恢复
-                return "kept", 0
-            container = self._container_safe(worker)
-            if container != "safe":  # 容器可能仍挂着这份快照：不删
-                if container == "unknown":
-                    print(f"external-review reaper retained-unknown {checkout}", file=sys.stderr)
-                return ("unknown" if container == "unknown" else "kept"), 0
-            size = _tree_bytes(checkout)
             trash = run_dir / f".reaped-{model}-{uuid.uuid4().hex[:8]}"
             checkout.rename(trash)
             if worker.is_dir():
                 _save(worker / "checkout-cleanup.json", {"state": "removed", "checkout": str(checkout), "by": "reaper"})
+        size = _tree_bytes(trash)
         shutil.rmtree(trash, ignore_errors=True)
         return "removed", size
 
@@ -1614,12 +1681,9 @@ def _lock_held(path: Path) -> bool:
 
 
 def _docker_container_state(container: str) -> str:
-    """running / stopped / absent / unknown；docker 本身不可用或输出看不懂时一律 unknown（不删快照）。"""
-    try:
-        done = subprocess.run(["docker", "inspect", "-f", "{{.State.Running}}", container], capture_output=True,
-                              text=True, timeout=20, stdin=subprocess.DEVNULL)
-    except (OSError, subprocess.TimeoutExpired):
-        return "unknown"
+    """running / stopped / absent / unknown；docker 本身不可用或输出看不懂时一律 unknown（不删快照）。
+    与 docker_cli 同一 env 白名单：controller 环境里的 DOCKER_HOST / DOCKER_CONTEXT 不能把查询带到别的 daemon。"""
+    done = docker_cli(["inspect", "-f", "{{.State.Running}}", container], timeout=20)
     if done.returncode == 0:
         return {"true": "running", "false": "stopped"}.get(done.stdout.strip(), "unknown")
     error = done.stderr.lower()

@@ -9,6 +9,10 @@ sys.path[:0] = [str(HERE.parent), str(HERE.parent.parent / "approval-signing")]
 
 from pilot1742 import external_review as module  # noqa: E402
 
+import subprocess  # noqa: E402
+
+# 与 conftest 的 no_real_docker 相同：脱离的旁听进程也不碰本机真实的卷和容器。
+module.docker_cli = lambda args, timeout=120: subprocess.CompletedProcess(["docker", *args], 0, "", "")
 config = json.loads(sys.argv[1])
 assert sys.argv[2:4] == ["advisory", "--run"], sys.argv
 lane = module.ExternalReview(None, state_root=Path(config["state_root"]), checkout_root=Path(config["checkout_root"]),

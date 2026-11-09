@@ -593,6 +593,9 @@ class FakeDocker:
             return ok("".join(f"{n}\t{l}\n" for n, l in self.volumes.items()))
         if args[:2] == ["ps", "-a"] and "--format" in args:
             return ok("".join(f"{c}\t{l}\n" for c, (l, _) in self.containers.items()))
+        if args[:2] == ["ps", "-a"] and args[-1].startswith("label="):
+            launch = args[-1].rpartition("=")[2]
+            return ok("".join(f"{c}\n" for c, (l, _) in self.containers.items() if l == launch))
         if args[:2] == ["ps", "-a"]:
             volume = args[-1].removeprefix("volume=")
             return ok("".join(f"{c}\n" for c, (_, v) in self.containers.items() if v == volume))
@@ -2642,7 +2645,8 @@ def test_advisory_early_returns_carry_checkout_field(lane, monkeypatch, cause):
             holder.kill()
             holder.wait()
     assert entry["verdict"] == ("FAILED" if cause == "active_prepare" else "SKIPPED")
-    assert entry["checkout"] in ("removed", "retained")
+    # 没走到 prepare 的从未建过快照，记 none，不记 retained（会误导对照统计）。
+    assert entry["checkout"] == ("retained" if cause == "active_prepare" else "none")
     assert set(entry) >= {"model", "verdict", "session_id", "reason", "checkout"}
 
 
@@ -2655,3 +2659,180 @@ def test_resumed_publication_does_not_spawn_advisory(lane, monkeypatch):
     again = lane.review_pr(1810)  # outcome 已存在：恢复发布（只对账）
     assert again["run_id"] == first["run_id"] and "publication" in again
     assert len(spawned) == 1
+
+
+
+# ---- 第六轮（kimi + opus BLOCK）：回收不在锁内做慢事、旁听卷可回收、几处竞争 ----
+
+
+def _reapable(lane):
+    """已完结 run 上一份可删的遗留 gating 快照（回执未确认关容器，supervisor.json 记了容器 id）。"""
+    result = lane.review_pr(1810)
+    checkout = _leaked(lane, result, closed=False)
+    return _run_folder(lane, result), checkout
+
+
+def test_reaper_does_slow_checks_outside_the_run_lock(lane, monkeypatch):
+    folder, checkout = _reapable(lane)
+    seen = []
+
+    def gating_can_lock(step):
+        with module._lock(folder):  # gating 此刻取 run 锁：不应撞上回收
+            seen.append(step)
+    real_rows, real_bytes = module._ps_rows, module._tree_bytes
+    monkeypatch.setattr(module, "LOCK_WAIT_SECONDS", 0)  # 只看锁是否被回收占着，不靠等
+    monkeypatch.setattr(module, "_ps_rows", lambda: gating_can_lock("ps") or real_rows())
+    monkeypatch.setattr(module, "_tree_bytes", lambda root: gating_can_lock("bytes") or real_bytes(root))
+    lane.container_state = lambda container: gating_can_lock("docker") or "absent"
+    assert lane.reap()["removed"] == 1 and not checkout.exists()
+    assert {"ps", "docker", "bytes"} <= set(seen)
+
+
+def test_reaper_keeps_snapshot_when_run_changes_during_its_checks(lane):
+    folder, checkout = _reapable(lane)
+    worker = folder / MODELS[0]
+
+    def run_resumed(container):  # 回收在锁外查 docker 时，run 写了新的回执
+        receipt = module._read(worker / "receipt.json")
+        module._save(worker / "receipt.json", {**receipt, "note": "changed"})
+        return "absent"
+    lane.container_state = run_resumed
+    assert lane.reap()["removed"] == 0 and checkout.exists()
+    lane.container_state = lambda container: "absent"
+    assert lane.reap()["removed"] == 1 and not checkout.exists()
+
+
+def test_gating_lock_waits_out_a_brief_hold(lane):
+    import fcntl
+    import os
+    import threading
+    folder = lane.state_root / "runs" / "brief"
+    folder.mkdir(parents=True, mode=0o700)
+    fd = os.open(folder / "owner.lock", os.O_CREAT | os.O_RDWR, 0o600)
+    fcntl.flock(fd, fcntl.LOCK_EX)
+    threading.Timer(0.3, os.close, args=(fd,)).start()  # 回收的复核改名：短暂持锁后放开
+    with module._lock(folder):
+        pass
+
+
+def test_advisory_waits_out_a_probe_on_its_lock(lane):
+    import fcntl
+    import os
+    import threading
+    result = lane.review_pr(1810)
+    key = ReviewTarget(**result["target"]).key
+    advisory = _run_folder(lane, result) / module.ADVISORY_DIR
+    advisory.mkdir(mode=0o700)
+    fd = os.open(advisory / ".lock", os.O_CREAT | os.O_RDWR, 0o600)
+    fcntl.flock(fd, fcntl.LOCK_EX)  # _lock_held / 空间预留的探测此刻正拿着旁听锁
+    threading.Timer(0.3, os.close, args=(fd,)).start()
+    outcome = lane.run_advisory(key)
+    assert "busy" not in outcome and outcome["reviews"][0]["verdict"] == "PASS"
+
+
+class _CrashLeftovers(FakeDocker):
+    """旁听 worker 在建好卷和辅助容器后被杀：launch.json 出现后，docker 里就有带它 launch_id 标签的卷和容器。"""
+
+    def __init__(self, worker):
+        super().__init__()
+        self.worker, self.seeded = worker, False
+
+    def __call__(self, args):
+        launch = self.worker / "launch.json"
+        if launch.exists() and not self.seeded:
+            launch_id = module._read(launch)["launch_id"]
+            volume = module.REVIEW_VOLUME_PREFIX + launch_id
+            self.volumes[volume] = launch_id
+            self.containers["helper-advisory"] = (launch_id, volume)
+            self.seeded = True
+        return super().__call__(args)
+
+
+def test_advisory_crash_leaves_no_volume_container_or_snapshot(lane):
+    result = lane.review_pr(1810)  # 旁听关闭
+    key = ReviewTarget(**result["target"]).key
+    worker = _run_folder(lane, result) / module.ADVISORY_DIR / ADVISORY
+    lane.docker = _CrashLeftovers(worker)
+    lane.launcher = [sys.executable, "-c", "raise SystemExit(3)"]  # 监督没写回执就退出（被杀、OOM）
+    entry = lane.run_advisory(key)["reviews"][0]
+    assert entry["verdict"] == "FAILED" and lane.docker.seeded
+    launch_id = module._read(worker / "launch.json")["launch_id"]
+    receipt = module._read(worker / "receipt.json")
+    assert (receipt["failure_reason"], receipt["container_closed"]) == ("SupervisorExitedWithoutReceipt", False)
+    assert (receipt["volume"], receipt["volume_removed"]) == (module.REVIEW_VOLUME_PREFIX + launch_id, False)
+    # 卷回收认得旁听 launch：卷和容器在旁听收尾时就按标签删掉。
+    assert lane.docker.volumes == {} and lane.docker.containers == {}
+    log = [json.loads(line) for line in (lane.state_root / "volume-reaper.jsonl").read_text().splitlines()]
+    assert any(e["action"] == "reaped" and e["launch_id"] == launch_id for e in log)
+    assert not any(e.get("reason") == "unknown_launch" for e in log)
+    # 快照：没有容器 id，按标签查不到容器即确认不在，回收删掉，不再永久 retained-unknown。
+    checkout = lane.checkout_root / result["run_id"] / ADVISORY
+    assert entry["checkout"] == "retained" and checkout.is_dir()
+    lane.container_state = lambda container: pytest.fail("没有容器 id，不应 docker inspect")
+    stats = lane.reap()
+    assert (stats["removed"], stats["retained_unknown"]) == (1, 0) and not checkout.exists()
+
+
+def test_reaper_keeps_snapshot_while_a_labelled_container_remains(lane):
+    result = lane.review_pr(1810)
+    key = ReviewTarget(**result["target"]).key
+    worker = _run_folder(lane, result) / module.ADVISORY_DIR / ADVISORY
+    lane.launcher = [sys.executable, "-c", "raise SystemExit(3)"]
+    lane.docker = lambda args: subprocess.CompletedProcess(args, 125, "", "docker unavailable")
+    lane.run_advisory(key)
+    checkout = lane.checkout_root / result["run_id"] / ADVISORY
+    assert lane.reap()["retained_unknown"] == 1 and checkout.is_dir()  # docker 查不了：保留
+    launch_id = module._read(worker / "launch.json")["launch_id"]
+    lane.docker = FakeDocker(containers={"stuck": (launch_id, None)})
+    assert lane.reap()["removed"] == 0 and checkout.is_dir()  # 标签容器还在：保留
+    lane.docker = FakeDocker()
+    assert lane.reap()["removed"] == 1 and not checkout.exists()
+
+
+def test_prepare_survives_parent_removed_by_concurrent_reaper(lane, monkeypatch):
+    result = lane.review_pr(1810)
+    target = ReviewTarget(**result["target"])
+    checkout = lane.checkout_root / "race" / "m"
+    real = module.shutil.disk_usage
+    removed = []
+
+    def usage(path):
+        value = real(path)
+        if Path(path) == checkout.parent and not removed:
+            Path(path).rmdir()  # 回收在 mkdir 父目录与 mkdir checkout 之间删掉了空的 <run_id>
+            removed.append(path)
+        return value
+    monkeypatch.setattr(module.shutil, "disk_usage", usage)
+    frozen = module.prepare_review(target, lane.source, checkout)
+    assert removed and frozen.checkout == checkout and (checkout / ".git").exists()
+
+
+def test_advisory_watchdog_covers_every_advisory_model(lane, monkeypatch):
+    result = lane.review_pr(1810)
+    limits = []
+
+    class Timer:
+        def __init__(self, limit, *args, **kwargs):
+            limits.append(limit)
+            self.daemon = False
+        start = cancel = lambda self: None
+    monkeypatch.setattr(module.threading, "Timer", Timer)
+    monkeypatch.setattr(module, "ADVISORY_REVIEW_MODELS", ("m1", "m2"))
+    monkeypatch.setattr(lane, "_advisory_one", lambda target, model, advisory: {"model": model})
+    lane.advisory_timeout, lane.advisory_term_grace, lane.advisory_watchdog_margin = 10, 2, 1
+    lane.run_advisory(ReviewTarget(**result["target"]).key)
+    assert limits == [2 * (10 + 2) + 1]
+
+
+def test_container_state_uses_the_docker_env_allowlist(monkeypatch):
+    monkeypatch.setenv("DOCKER_HOST", "tcp://elsewhere:2375")
+    monkeypatch.setenv("DOCKER_CONTEXT", "elsewhere")
+    seen = []
+
+    def run(args, **kwargs):
+        seen.append(kwargs.get("env"))
+        return subprocess.CompletedProcess(args, 1, "", "Error: No such object: x")
+    monkeypatch.setattr(module, "docker_cli", module.docker_cli.real)
+    monkeypatch.setattr(module.subprocess, "run", run)
+    assert module._docker_container_state("a" * 12) == "absent"
+    assert seen and seen[0] is not None and not {"DOCKER_HOST", "DOCKER_CONTEXT"} & set(seen[0])
