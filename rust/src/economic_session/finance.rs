@@ -1620,7 +1620,7 @@ fn make_dispatchable(
         return Err("IdentityConflict：B Commit 的 grant 不是 E 原授信".into());
     }
     let liability = item(list(f, "responsibilities")?, "responsibility_id", grant_id)?;
-    if liability["grant"] != *g {
+    if liability["grant"] != *g || liability["amount"] != g["amount"] {
         return Err("MissingDependency：E 未保留该 grant 的完整责任".into());
     }
     let r = json!({"decision_id":id,"command_id":q["exact"]["command_id"],"state":"Dispatchable","owner":q["owner"],"plan_hash":hash(q),"grant_id":grant_id,"local_commit_receipt":committed["local_commit_receipt"],"commit_cut":cp["receipt"]["cut"],"dispatchable_seq":seq.to_string(),"dispatchable_ns":ns,"execution_eligibility":"None"});

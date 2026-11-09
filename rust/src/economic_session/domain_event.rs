@@ -364,17 +364,17 @@ fn events_in(
     } else {
         Value::Null
     };
-    // #1407 C1：`tb03b-finance/5` 的命令事件以真实 command_id 为身份；其余事件逐字沿用回执键。
-    let command = matches!(
-        event["kind"].as_str(),
-        Some("MakeDispatchable" | "ReleaseExact")
-    );
+    // #1407 C1（`tb03b-finance/5`）：命令身份由 MakeDispatchable 事件铸出，即真实 command_id；同一命令
+    // 后续生命周期事件的身份带阶段前缀，裁定二按身份去重时不与前一阶段相撞。其余事件逐字沿用回执键。
+    let command_id = event["record"]["command_id"].as_str().unwrap_or_default();
+    let identity_command = match event["kind"].as_str() {
+        Some("MakeDispatchable") => json!(command_id),
+        Some("ReleaseExact") => json!(format!("ReleaseExact:{command_id}")),
+        _ => json!(receipt_key),
+    };
     let identity = match &fact {
         Some((k, _)) => json!({"chong_id":context.chong_id,"voice":voice,"fact_key":k}),
-        None if command => {
-            json!({"chong_id":context.chong_id,"voice":voice,"command_id":event["record"]["command_id"]})
-        }
-        None => json!({"chong_id":context.chong_id,"voice":voice,"command_id":receipt_key}),
+        None => json!({"chong_id":context.chong_id,"voice":voice,"command_id":identity_command}),
     };
     let source = match &fact {
         Some((_, f)) => {
@@ -400,8 +400,9 @@ fn events_in(
         _ => Vec::new(),
     };
     let cause = if event["kind"] == "ReleaseExact" {
-        // ADR 0052 裁定二.4：Release 结果（含 Unsupported 终态）的前件指向命令身份。
-        vec![json!({"command_id":event["record"]["command_id"]})]
+        // ADR 0052 裁定二.4：Release 结果（含 Unsupported 终态）的前件指向命令身份，
+        // 也就是该命令 MakeDispatchable 事件的身份。
+        vec![json!({"command_id":command_id})]
     } else if event["kind"] == "ResolveEvidence" {
         event["covered"]
             .as_array()

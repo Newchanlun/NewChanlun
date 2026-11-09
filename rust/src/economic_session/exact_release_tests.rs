@@ -914,7 +914,11 @@ fn release_results_project_to_domain_events_with_command_cause_and_model() {
         let e = &events[0];
         assert_eq!(e["contract"], "domain-event/1");
         assert_eq!(e["kind"], "ReleaseExact");
-        assert_eq!(e["identity"]["command_id"], format!("cmd-{name}"), "{e}");
+        assert_eq!(
+            e["identity"]["command_id"],
+            format!("ReleaseExact:cmd-{name}"),
+            "{e}"
+        );
         assert_eq!(
             e["cause"],
             json!([{"command_id":format!("cmd-{name}")}]),
@@ -928,4 +932,138 @@ fn release_results_project_to_domain_events_with_command_cause_and_model() {
         .iter()
         .filter(|e| e["kind"] != "ReleaseExact" && e["kind"] != "MakeDispatchable")
         .all(|e| e["model_ref"].is_null()));
+}
+
+/// ADR 0051 裁定二：经正式入口跑 MakeDispatchable → ReleaseExact（域内）与 MakeDispatchable → Unsupported（域外），
+/// E 的全部 domain-event/1 首条事件按身份逐条准入都是 New，重投都是 Noop；Release 的 cause 回溯到该命令的
+/// Dispatchable 事件，其载荷就是该命令。
+#[test]
+fn command_lifecycle_events_are_all_admitted_and_release_cause_reaches_the_command() {
+    use crate::economic_session::domain_event::{admit, events, Admission};
+    let mut f = fixture(None);
+    committed(&mut f);
+    dispatch(&mut f, "alpha");
+    dispatch(&mut f, "beta");
+    for name in ["alpha", "beta"] {
+        let p = release_payload(&f, name);
+        let r = f.handle(0, &format!("ReleaseExact-{name}"), p);
+        assert!(r["kind"].as_str().unwrap().starts_with("Release"), "{r}");
+    }
+    let all: Vec<Value> = events(&f.dbs[0], &f.configs[0])
+        .unwrap()
+        .into_iter()
+        .filter(|e| e["event_id"]["ordinal"] == "0")
+        .collect();
+    let mut admitted: Vec<Value> = vec![];
+    for e in &all {
+        assert_eq!(admit(&admitted, e), Admission::New, "{e}");
+        admitted.push(e.clone());
+        assert_eq!(admit(&admitted, e), Admission::Noop, "{e}");
+    }
+    let releases: Vec<&Value> = all.iter().filter(|e| e["kind"] == "ReleaseExact").collect();
+    assert_eq!(releases.len(), 2);
+    for (release, name) in releases.into_iter().zip(["alpha", "beta"]) {
+        let cause = &release["cause"][0]["command_id"];
+        let origin = all
+            .iter()
+            .find(|e| e["identity"]["command_id"] == *cause)
+            .unwrap_or_else(|| panic!("cause 不可回溯：{release}"));
+        assert_eq!(origin["kind"], "MakeDispatchable", "{origin}");
+        assert_eq!(
+            origin["payload"]["record"]["command_id"],
+            format!("cmd-{name}")
+        );
+        assert_eq!(*cause, format!("cmd-{name}"), "cause 指向命令身份");
+    }
+}
+
+#[test]
+fn frozen_model_coverage_needs_nonempty_disjoint_domains() {
+    let f = fixture(None);
+    let check = crate::economic_session::exact_command::validate_section;
+    check(&f.data).unwrap();
+    let mut empty = f.data.clone();
+    empty["exact_release"]["model_coverage"]["input_domain"] = json!([]);
+    let e = check(&empty).unwrap_err();
+    assert!(
+        e.starts_with("MissingDependency") && e.contains("input_domain"),
+        "{e}"
+    );
+    let mut overlap = f.data.clone();
+    let supported = overlap["exact_release"]["model_coverage"]["input_domain"][0].clone();
+    overlap["exact_release"]["model_coverage"]["unsupported_domains"]
+        .as_array_mut()
+        .unwrap()
+        .push(supported);
+    let e = check(&overlap).unwrap_err();
+    assert!(e.starts_with("InvalidDomain") && e.contains("互斥"), "{e}");
+}
+
+#[test]
+fn frozen_input_refuses_shared_allocation_or_eligibility_across_plans() {
+    let f = fixture(None);
+    let check = crate::economic_session::exact_command::validate_section;
+    check(&f.data).unwrap();
+    for field in ["allocation_id", "eligibility_ref"] {
+        let mut d = f.data.clone();
+        d["plans"][1]["exact"][field] = d["plans"][0]["exact"][field].clone();
+        let e = check(&d).unwrap_err();
+        assert!(
+            e.starts_with("IdentityConflict") && e.contains(field),
+            "{field}: {e}"
+        );
+    }
+}
+
+/// 正式入口造不出「grant 在而金额不同」的责任；直接改小 E 图像中该责任的金额再调 MakeDispatchable 归约，对照原图像可通过。
+#[test]
+fn make_dispatchable_refuses_when_responsibility_amount_differs_from_grant() {
+    let mut f = fixture(None);
+    committed(&mut f);
+    let config = f.configs[0].clone();
+    let d = input(&config, &pinned_raw(&config).unwrap()).unwrap();
+    let p = dispatch_payload(&f, "alpha");
+    let w = json!({"input_raw":pinned_raw(&config).unwrap(),"commit_proof":proof(&config, "B:alpha", &receipt_key_for(&config, "CommitDecision", "alpha").unwrap()).unwrap()});
+    let (seq, _, _, image) = latest(&f.dbs[0]).unwrap();
+    let mut next = image.clone();
+    let ok = make_dispatchable(
+        &f.dbs[0],
+        &config,
+        &image,
+        &mut next,
+        &d,
+        &p,
+        &w,
+        seq + 1,
+        "142",
+    )
+    .unwrap();
+    assert_eq!(ok["state"], "Dispatchable");
+    let grant = grant_id(&f, "alpha");
+    let mut reduced = image.clone();
+    for r in reduced["finance"]["responsibilities"]
+        .as_array_mut()
+        .unwrap()
+    {
+        if r["responsibility_id"] == grant.as_str() {
+            r["amount"] = json!("1");
+        }
+    }
+    let mut next = reduced.clone();
+    let e = make_dispatchable(
+        &f.dbs[0],
+        &config,
+        &reduced,
+        &mut next,
+        &d,
+        &p,
+        &w,
+        seq + 1,
+        "142",
+    )
+    .unwrap_err();
+    assert!(
+        e.starts_with("MissingDependency") && e.contains("完整责任"),
+        "{e}"
+    );
 }

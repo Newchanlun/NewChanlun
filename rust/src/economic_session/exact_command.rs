@@ -136,8 +136,21 @@ pub(super) fn validate_section(d: &Value) -> Result<(), String> {
     required(m, "domain_id")?;
     model_domain(&m["input_domain"])?;
     model_domain(&m["unsupported_domains"])?;
+    // ADR 0052:266：input_domain 必填且与 unsupported_domains 互斥。
+    let supported = m["input_domain"].as_array().map_or(&[][..], Vec::as_slice);
+    if supported.is_empty() {
+        return Err("MissingDependency：model_coverage.input_domain 不得为空".into());
+    }
+    let unsupported = m["unsupported_domains"]
+        .as_array()
+        .map_or(&[][..], Vec::as_slice);
+    if supported.iter().any(|x| unsupported.contains(x)) {
+        return Err("InvalidDomain：input_domain 与 unsupported_domains 须互斥".into());
+    }
     let mut commands = BTreeSet::new();
     let mut revisions = BTreeSet::new();
+    let mut allocations = BTreeSet::new();
+    let mut eligibilities = BTreeSet::new();
     for q in d["plans"].as_array().into_iter().flatten() {
         let x = &q["exact"];
         if !commands.insert(required(x, "command_id")?)
@@ -147,6 +160,11 @@ pub(super) fn validate_section(d: &Value) -> Result<(), String> {
             ))
         {
             return Err("IdentityConflict：command_id 或（逻辑族, revision）跨计划重复".into());
+        }
+        if !allocations.insert(required(x, "allocation_id")?)
+            || !eligibilities.insert(required(x, "eligibility_ref")?)
+        {
+            return Err("IdentityConflict：allocation_id 或 eligibility_ref 跨计划重复".into());
         }
     }
     Ok(())
