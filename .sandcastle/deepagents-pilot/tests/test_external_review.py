@@ -1952,6 +1952,38 @@ def test_migration_of_contractless_legacy_target_checks_dispatched_prompt(lane, 
     assert lane.migrate_stale(1810, 1)["publication"]["state"] == "success"
 
 
+def test_nb_residual_retry_early_return_leaves_disk_pass(lane, monkeypatch):
+    """#1944（#1913 独审 N-b' 残余，移植自非作者独审反例）：迁移瞬态失败后重试，`migrate_stale` 把
+    `saved` 换成历史里更早的 STALE 记录；如果这次 `recover_stale` 重验又提前返回（这里用回执重验结果
+    与原记录不一致模拟早退），磁盘此前仍留着上一轮迁移写下、未发布的 PASS。返回值须与磁盘一致地回到
+    STALE，不能一个说 STALE、另一个仍是未发布的 PASS。"""
+    folder = _legacy_auth_stale(lane)
+    git(lane.source, "commit", "--allow-empty", "-qm", "controller redeployed")
+    real_get = lane.gateway.get_pr
+    calls = {"n": 0}
+    def get_pr(number):
+        calls["n"] += 1
+        if calls["n"] == 3:
+            raise IdentityError("GitHub 返回 HTTP 401")
+        return real_get(number)
+    monkeypatch.setattr(lane.gateway, "get_pr", get_pr)
+    with pytest.raises(EffectPending):
+        lane.migrate_stale(1810, 1)
+    monkeypatch.setattr(lane.gateway, "get_pr", real_get)
+    real_validate = module.validate_review
+    def flip(*args, **kwargs):
+        o = real_validate(*args, **kwargs)
+        return module.ReviewOutcome(o.model, "BLOCK", o.session_id, o.reason) if o.model == module.MODELS[0] else o
+    monkeypatch.setattr(module, "validate_review", flip)  # 模拟重验与原记录不一致 → recover_stale 早退
+    sent_before = len(lane.gateway.sent)
+    result = lane.migrate_stale(1810, 1)
+    on_disk = json.loads((folder / "outcome.json").read_text())
+    assert result["verdict"] == on_disk["verdict"] == "STALE", (result["verdict"], on_disk["verdict"], "publication" in on_disk)
+    assert on_disk["recovery_refused"] == "重验结果与原记录不一致"
+    assert "publication" not in on_disk
+    assert len(lane.gateway.sent) == sent_before
+
+
 # ---------------- Codex 额度耗尽时的临时组合（Kimi + Opus） ----------------
 
 LEGACY_MODELS = ("gpt-6.1-sol", "claude-opus-5-5")
