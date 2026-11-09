@@ -133,9 +133,16 @@ pub(super) fn validate_section(d: &Value) -> Result<(), String> {
     model_domain(&m["input_domain"])?;
     model_domain(&m["unsupported_domains"])?;
     let mut commands = BTreeSet::new();
+    let mut revisions = BTreeSet::new();
     for q in d["plans"].as_array().into_iter().flatten() {
-        if !commands.insert(required(&q["exact"], "command_id")?) {
-            return Err("IdentityConflict：command_id 跨计划重复".into());
+        let x = &q["exact"];
+        if !commands.insert(required(x, "command_id")?)
+            || !revisions.insert((
+                required(x, "logical_order_family")?,
+                required(x, "revision")?,
+            ))
+        {
+            return Err("IdentityConflict：command_id 或（逻辑族, revision）跨计划重复".into());
         }
     }
     Ok(())

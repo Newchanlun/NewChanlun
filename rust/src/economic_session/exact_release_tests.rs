@@ -60,6 +60,7 @@ pub(super) fn decorate_manifest(manifest: &mut Value) {
         ("MakeDispatchable-beta", 150),
         ("ReleaseExact-alpha", 160),
         ("ReleaseExact-beta", 170),
+        ("close-late", 175),
         ("capture-late", 180),
         ("ReleaseExact-alpha-late", 190),
     ] {
@@ -517,9 +518,25 @@ fn l8_released_exact_reply_decodes_as_1942_authority_reply() {
             authority_query(&f, &command, "1"),
             "IdentityConflict",
         ),
+        (
+            "query-protocol",
+            authority_query(&f, &command, "1"),
+            "SchemaUnsupported",
+        ),
+        (
+            "query-release-ref",
+            authority_query(&f, &command, "1"),
+            "SchemaUnsupported",
+        ),
     ] {
         if message == "query-hash" {
             q["command_hash"] = json!(hash(&json!("other")));
+        }
+        if message == "query-protocol" {
+            q["protocol"] = json!("x-exact-authority/0");
+        }
+        if message == "query-release-ref" {
+            q["release_receipt_id"] = json!("S:cmd-alpha");
         }
         if message == "query-content" {
             q["command"]["symbol"] = json!("other");
@@ -750,4 +767,83 @@ fn l9_worked_example_matches_independent_oracle_and_fresh_replay() {
     let key = key_for(&f.configs[0], &release_payload(&f, "alpha")).unwrap();
     let replayed = child_result(&f, "replay", json!({"action":"audit","receipt_key":key}));
     assert_eq!(canonical_json(&replayed), canonical_json(&receipt));
+}
+
+#[test]
+fn l2_make_dispatchable_needs_b_commit_and_frozen_plan() {
+    let mut f = fixture(None);
+    for (n, name) in [(1, "alpha"), (2, "beta")] {
+        let p = f.request("PrepareDecision", name)["payload"].clone();
+        f.handle(n, &format!("PrepareDecision-{name}"), p);
+    }
+    reserve_now(&mut f, "Reserve-slot");
+    let p = dispatch_payload(&f, "alpha");
+    let r = assert_rejected(&mut f, "MakeDispatchable-alpha", p, "MissingDependency");
+    assert!(r["error"].as_str().unwrap().contains("尚未持久"), "{r}");
+    let p = f.request("CommitDecision", "alpha")["payload"].clone();
+    f.handle(1, "CommitDecision-alpha", p);
+    let mut wrong = dispatch_payload(&f, "alpha");
+    wrong["plan_hash"] = json!(hash(&json!("another plan")));
+    assert_rejected(
+        &mut f,
+        "MakeDispatchable-alpha",
+        wrong.clone(),
+        "IdentityConflict",
+    );
+    let original = dispatch(&mut f, "alpha");
+    let before = snapshot(&f);
+    let again = f.handle(
+        0,
+        "MakeDispatchable-alpha-resend",
+        dispatch_payload(&f, "alpha"),
+    );
+    assert_eq!(canonical_json(&again), canonical_json(&original));
+    c4a_error(
+        &f.handle(0, "MakeDispatchable-alpha-conflict", wrong),
+        "IdentityConflict",
+    );
+    assert_eq!(before, snapshot(&f));
+}
+
+#[test]
+fn l6_closed_applicant_generation_after_dispatchable_blocks_release() {
+    let mut control = fixture(None);
+    committed(&mut control);
+    dispatch(&mut control, "alpha");
+    let p = release_payload(&control, "alpha");
+    let ok = control.handle(0, "ReleaseExact-alpha-late", p);
+    assert_eq!(ok["record"]["state"], "ReleasedExact", "{ok}");
+
+    let mut f = fixture(None);
+    committed(&mut f);
+    dispatch(&mut f, "alpha");
+    let close = f.request("CloseApplicants", "slot")["payload"].clone();
+    let closed = f.handle(0, "close-late", close);
+    assert_eq!(closed["kind"], "ApplicantsClosedReceipt", "{closed}");
+    let p = release_payload(&f, "alpha");
+    assert_rejected(&mut f, "ReleaseExact-alpha-late", p, "StaleWriter");
+    assert_eq!(responsibility_total(&latest(&f.dbs[0]).unwrap().3), 90);
+    assert_eq!(query_command(&mut f, "alpha")["state"], "Dispatchable");
+}
+
+#[test]
+fn old_contracts_do_not_know_exact_operations_or_commands() {
+    let exact = fixture(None);
+    assert!(latest(&exact.dbs[0]).unwrap().3["finance"]["commands"].is_array());
+    let old = Fixture::new("100");
+    assert!(latest(&old.dbs[0]).unwrap().3["finance"]
+        .get("commands")
+        .is_none());
+    for op in EXACT_OPS {
+        let mut m = old.configs[0].manifest.clone();
+        m["authorized_sources"][0]["operations"]
+            .as_array_mut()
+            .unwrap()
+            .push(json!(op));
+        let (path, _) = save(&old.dir, &format!("manifest-{op}.json"), &m);
+        let e = Config::load(Path::new(&path), &old.dir.join(format!("{op}.db")), None)
+            .err()
+            .expect("旧合同不得认识精确命令操作");
+        assert!(e.contains("操作权限未知"), "{op}: {e}");
+    }
 }

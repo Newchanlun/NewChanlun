@@ -1676,8 +1676,24 @@ fn release_exact(
         for pending in list(previous, "pending")? {
             covered_pending(previous, coverage, pending)?;
         }
+        let closed = f
+            .get("closed_applicants")
+            .and_then(Value::as_array)
+            .is_some_and(|a| {
+                a.iter().any(|x| {
+                    x["slot_id"] == q["slot_id"]
+                        && x["owner"] == q["owner"]
+                        && x["applicant_epoch"] == q["applicant_epoch"]
+                        && x["applicant_generation"] == q["applicant_generation"]
+                })
+            });
+        if closed {
+            return Err("StaleWriter：原申请代际已关闭，不得 Release；全责任保留".into());
+        }
+        let slot = item(list(f, "slots")?, "slot_id", required(q, "slot_id")?)?;
+        let g = item(list(slot, "grants")?, "grant_id", grant_id)?;
         let liability = item(list(f, "responsibilities")?, "responsibility_id", grant_id)?;
-        if liability["grant"]["grant_id"] != grant_id {
+        if liability["grant"] != *g || liability["amount"] != g["amount"] {
             return Err("MissingDependency：E 未保留该 grant 的完整责任".into());
         }
         r["state"] = json!("ReleasedExact");
