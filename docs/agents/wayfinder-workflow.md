@@ -13,8 +13,9 @@ tracker 物理操作（map/子票/blocking/frontier/claim/resolve 的 gh 命令�
 1. `docs/agents/wayfinder-workflow.md`（本文档，本仓 wayfinder 正本）
 2. `docs/agents/issue-tracker.md`「Wayfinding operations」段（tracker 物理操作）
 3. `AGENTS.md`（#517 定的全 harness 唯一正本入口）
+4. `docs/agents/doctrine-rules.md`（教义正本、#799 收敛通则、#804 总缝规则与引原文四步的完整条文，2026-11-09 从 `AGENTS.md` 迁出）
 
-按域追加：纯决策图不必读 `AGENTS.md` 之外的重型文件；**碰代码的图应追加 `AGENTS.md` 指向的域文档**（`delivery-discipline.md`、`generation-constitution.md` 等）。全局 `~/.claude/CLAUDE.md` **不进清单**——它在 Claude Code 里本就自动注入，而主力运行时 Kimi 读不到它；其本仓适用要点已改写进 `AGENTS.md`。
+按域追加：纯决策图读这四份即可，第 4 份不能省，决策的起草与独审要用它的完整判据；**碰代码的图应追加 `AGENTS.md` 指向的域文档**（`delivery-discipline.md`、`generation-constitution.md` 等）。全局 `~/.claude/CLAUDE.md` **不进清单**——它在 Claude Code 里本就自动注入，而主力运行时 Kimi 读不到它；其本仓适用要点已改写进 `AGENTS.md`。
 
 这条纪律的成因就是一次实事故：[并行吞吐：HITL 瓶颈与 batch 化 #776](https://github.com/xy7365527-lang/NewChanlun/issues/776) 那场会话没把本文档读进上下文，裁出了与仓内正本相反的 grilling 节奏口径，当场无人察觉。要固化的不是「开场输什么」，是「哪些文件必须真进上下文」。
 

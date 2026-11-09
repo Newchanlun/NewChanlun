@@ -9,8 +9,8 @@ Two rules, checked over every tracked file:
    that does not exist, name a script/command file that does not exist, or
    tell the reader to run a retired slash command (``RETIRED_COMMANDS``).
 
-``HISTORICAL`` lists files kept as records on purpose. Per AGENTS.md
-「文档层名分」, inference-layer documents are historical records and are not
+``HISTORICAL`` lists files kept as records on purpose. Per
+docs/agents/doctrine-rules.md「文档层名分」, inference-layer documents are historical records and are not
 updated after the fact; review drafts, snapshots and vendored text likewise.
 Each entry says why. An entry that no longer matches any tracked file fails,
 so the list cannot rot.
@@ -90,7 +90,7 @@ RETIRED_NOTE = re.compile(r"退役|已删除|已删|不再|retired|removed|no lo
 # list only shrinks. Keyed "file|path" (line numbers drift).
 BASELINE = Path(__file__).with_name("retired_references_baseline.txt")
 
-INFERENCE = "inference layer, historical record (AGENTS.md 文档层名分: 不追溯更新)"
+INFERENCE = "inference layer, historical record (docs/agents/doctrine-rules.md 文档层名分: 不追溯更新)"
 HISTORICAL = {
     # whole trees
     "analysis/": INFERENCE,

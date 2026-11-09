@@ -11,14 +11,14 @@ NewChanlun 是以缠论（缠中说禅博文）为核心的量化交易系统，
 新需求接到这三样的现有入口上。
 
 - **pstack**：工作方法（poteto-mode、architect、arena、blast-radius 等），仓内适配版在 `.agents/skills/pstack-*`。持续优化走 pstack 的 Hillclimb：先立基线和可重复测量，一次验证一项改动。
-- **Matt 的工作流**：wayfinder 管票与图，正本 `docs/agents/wayfinder-workflow.md`，巡航用 `/graph-run <图号>`；决策票从分级、起草、独审到落地的流程见 `.sandcastle/docs/graph-engineering.md`。Sandcastle 在隔离沙盒里跑实施票，入口 `.sandcastle/README.md`，受管后台的模型只在 `.sandcastle/main-model.mts` 配置。
+- **Matt 的工作流**：wayfinder 管票与图，正本 `docs/agents/wayfinder-workflow.md`，巡航用 `/graph-run <图号>`；决策票从分级、起草、独审到落地的流程见 `.sandcastle/docs/graph-engineering.md`。Sandcastle 在隔离沙盒里跑实施票，入口 `.sandcastle/README.md`；Sandcastle 工蜂与裁决面的模型在 `.sandcastle/main-model.mts` 配置，正式审查的两位 reviewer 另在 `.sandcastle/deepagents-pilot/pilot1742/external_review.py` 的 `MODELS` 配置。
 - **LangChain Deep Agents**：生产执行 loop，入口 `.sandcastle/deepagents-pilot/README.md`。executor（`EXECUTOR.md`）把票从领取跑到实施、异家族独审、发布 PR；`deepagents/review`（`EXTERNAL-REVIEW.md`）审已有 PR 并发布同名必需检查。
 
 ## 合入与人工确认
 
 - **合入 main 没有人工门**：分支保护要求 `deepagents/review`（正式非作者审查）与 `ci-ok`（适用 CI 全绿）都通过并追平 main（strict），满足后代理可以合入。工蜂、执行器和 Sandcastle 实施者只开 PR。
 - **T 类、P 类决策与 spec 同一流程**：起草，非作者独审 PASS，由代理裁定并记账；BLOCK 就返修，缺有效独审不放行（#1909）。
-- **仍要人确认的只有两类**：实盘下单与资金、密钥与凭证。资金、账户、凭据类硬门票挂 `ready-for-human` 交还用户签署，签署格式见 `.sandcastle/docs/graph-engineering.md`「1. 分级」。CI 与分支保护配置由代理决定、事后报告，但不得借此关闭或放宽两项必需检查、取消 strict 或用管理员权限绕过。
+- **仍要人确认的只有两类**：实盘下单与资金、密钥与凭证。资金、账户、凭据类硬门票挂 `ready-for-human` 交还用户签署，签署格式见 `.sandcastle/docs/graph-engineering.md`「2. 考古」节的资金与权限硬门。过渡例外：#1921 合入前，DeepAgents 队列路径（`executor.py` / `approval.py`）还有 SPEC_AUTHORIZATION 签署门，见同文件「#1742 执行面依赖」。CI 与分支保护配置由代理决定、事后报告，但不得借此关闭或放宽两项必需检查、取消 strict 或用管理员权限绕过。
 
 ## 底线
 
@@ -26,7 +26,7 @@ NewChanlun 是以缠论（缠中说禅博文）为核心的量化交易系统，
 - 合入前必须有非作者独审：独立进程、只读证据，可以与作者同模型。
 - macOS 本机不跑 `cargo`、`rustc`；Rust 验证走 CI、Boat 或远端环境。
 - 不读、不复制、不打印密钥；不伪造签名、权限或审查状态。破坏性 git 操作前先备份并只读预检；用户粘贴的 shell 命令逐字执行。
-- 过程证据、临时文件、大型构建放 `/Volumes/AgentStorage`，不入仓。新文件入仓前按 `docs/agents/generation-constitution.md` §1 判名分；碰分支、worktree、CI 基线前先读同文件 §2「现役线名单」。
+- 临时文件、大型构建、快照和运行日志等过程证据放 `/Volumes/AgentStorage`，不入仓。两类例外照旧入仓：关票门要求入 git 的本票报告（测量、调研、评审等，`docs/agents/delivery-discipline.md` 关票第 6 条），以及活期绑定票的 review-results / handoff 工作草稿（`docs/agents/generation-constitution.md` §5）。新文件入仓前按 `docs/agents/generation-constitution.md` §1 判名分；碰分支、worktree、CI 基线前先读同文件 §2「现役线名单」。
 
 ## 文档层级与名分
 
@@ -40,7 +40,7 @@ NewChanlun 是以缠论（缠中说禅博文）为核心的量化交易系统，
 - **缠论教义正本**：原文管语义，`formal/Origin/` 管原文没讲的边界，生产代码只有否决权。教义裁定落 `.chanlun/definitions/` 并附点名到行号的受影响代码清单；代码注释里的口径分歧必须带票号。
 - **收敛通则**（#799）：同一判断不得有宽严两档，宽松那档更不得接管严格那档的失败。**总缝规则**（#804）：同一判定每级跑同一个，级别差异只以传入的值出现；用同输入同输出的对拍测试锁证明，不靠 grep。
 - **博文正本路径钉死为 `docs/chanlun/text/blog/`**：「课号:行号」一律以它为准，`topological-computation/signifier_net/` 下的副本行号体系不同。这类引用不算已核实，援引方自己回查那一课，核行号、逐字、作者归属（避开「（注：」「(娇注：」和行内注）。
-- 以上各条的完整条文、限定词、举证门、在案实例与引文核验四步见 [`docs/agents/doctrine-rules.md`](docs/agents/doctrine-rules.md)。开票、关票与统计口径的纪律见 `docs/agents/delivery-discipline.md`、`docs/agents/stat-provenance.md`。
+- 以上各条的完整条文、限定词、举证门、在案实例与引文核验四步见 [`docs/agents/doctrine-rules.md`](docs/agents/doctrine-rules.md)；ADR 与定义文件里引旧 `AGENTS.md:<行号>` 的地方，按该文件头部的行号换算查。开票、关票与统计口径的纪律见 `docs/agents/delivery-discipline.md`、`docs/agents/stat-provenance.md`。
 
 ## 派发与开工纪律（全 harness 等效口径）
 

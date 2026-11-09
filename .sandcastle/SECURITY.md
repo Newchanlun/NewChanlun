@@ -51,7 +51,7 @@ sandcastle 自动从 `.sandcastle/.env` 与 `process.env` 解析环境变量注�
 2. key 从宿主 `auth.json` **静默迁移**：不打印值、不写任何已跟踪文件（#1006 裁定原文）；
 3. **Dockerfile 与镜像资产不含任何 key**——provider 凭据只在运行时经 env 注入（`image/prime-agent-settings.json` 只登记 MCP server，凭据字段为零）；
 4. 工蜂 prompt 硬性规则「密钥永不写入任何文件」；commit 前评审面含密钥扫描；
-5. 任何会话导出/备份/工具残留按 AGENTS.md 名分四态禁入仓。
+5. 任何会话导出/备份/工具残留按 `docs/agents/generation-constitution.md` §1 名分判定禁入仓。
 
 ## 5. prebake 的 `--change` 清 Env 机制
 

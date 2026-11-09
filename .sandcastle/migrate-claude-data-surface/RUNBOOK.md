@@ -89,7 +89,7 @@ Claude Code 的官方重定位杠杆**只有一个**：环境变量 `CLAUDE_CONF
 | local | `~/.claude.json#projects["<cwd>"].mcpServers` | 不迁（项目路径变了，重加） |
 | project | 仓库根 `.mcp.json` | 随 git checkout，不迁 |
 
-> 本仓 `.mcp.json`（`claude-audit`）随仓库；`~/.claude/.mcp.json`（tradingview-mcp，见 AGENTS.md）在
+> 本仓 `.mcp.json`（`claude-audit`）随仓库；`~/.claude/.mcp.json`（用户级 tradingview-mcp）在
 > `CLAUDE_CONFIG_DIR` 覆盖范围内随迁。**若该文件内嵌明文 token（而非 `${VAR}` 引用），迁移前按 secrets
 > 规则改 `${VAR}` 引用或目标侧重配，不得把明文凭据带进 XFS。** `claude mcp add-from-claude-desktop`
 > （Mac/WSL only）可在迁移时把 Desktop 侧 MCP 显式导入 CLI，不搬 VM。
@@ -290,5 +290,5 @@ claude plugin list                                    # 核对已装插件
   `backups/` 改写到配置目录内部；`mcp add --scope user|local|project` 三档落盘位置；fresh `.claude.json`
   顶层键实测。
 - 本仓事实：`.claude/settings.json`（hook 绝对路径）、`.claude/settings.local.json`、`.mcp.json`
-  （`claude-audit`）、AGENTS.md（`~/.claude/.mcp.json` TradingView MCP、skills 正本口径）。
+  （`claude-audit`）、AGENTS.md（skills 正本口径；`~/.claude/.mcp.json` TradingView MCP 一条已于 2026-11-09 #1742 从 AGENTS.md 删除，配置仍在用户级）。
 - 裁决：`#1244`（dedup off/700GiB/500GiB 红线/400+450GiB 告警）、`#1236`（边界与容量来源）、`#1239`（性能风险）。
