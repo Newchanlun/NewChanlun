@@ -75,6 +75,14 @@ def legacy_boat_runtime(env):
 
 
 @pytest.fixture(autouse=True)
+def fast_local_poll(monkeypatch):
+    """#1875：本地 worker 轮询在生产是 2 s，测试里的假子进程早已结束，整套测试约 44% 的时间花在空等上。
+    逐条测试把间隔缩到 0.05 s（monkeypatch 用完即还原）；先断言生产默认值仍是 2，默认值被改小会在这里失败。"""
+    assert PilotRun.LOCAL_POLL_SECONDS == 2, "生产轮询间隔应为 2 s"
+    monkeypatch.setattr(PilotRun, "LOCAL_POLL_SECONDS", 0.05)
+
+
+@pytest.fixture(autouse=True)
 def no_operator_credential(monkeypatch):
     """测试从不读取操作员的 CLIProxy 凭据（本机 launchctl 里是真值，CI 上没有 launchctl）。
     需要构造生产模型时拿到占位值；真去调用模型会失败。"""

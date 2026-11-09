@@ -418,6 +418,9 @@ def lock_run_dir(run_dir: Path) -> int:
 class PilotRun:
     """一个 run 目录的唯一写者；进程内工具调用经 mutex 串行，进程间经 owner.lock。"""
 
+    # 本地 worker 的轮询间隔（秒）。生产保持 2；测试由 conftest 的 fast_local_poll fixture 逐条缩短（#1875）。
+    LOCAL_POLL_SECONDS: float = 2
+
     def __init__(self, home: Path, spec: RunSpec, *, launcher: list[str] | None = None, crash_at: str | None = None,
                  source_repo: Path = SOURCE_REPO, executor: TicketExecutor | None = None):
         self.home = home
@@ -804,7 +807,7 @@ class PilotRun:
                 return [done[key] for key in keys]
             for child in self._children.values():
                 child.poll()
-            time.sleep(2 if self.execution is None else 15)
+            time.sleep(self.LOCAL_POLL_SECONDS if self.execution is None else 15)
 
     def _proven_terminal(self, key: WorkerKey) -> bool:
         assert self.execution is not None
