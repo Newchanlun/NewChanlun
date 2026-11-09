@@ -4,8 +4,6 @@
 > 最后裁定：[#815](https://github.com/xy7365527-lang/NewChanlun/issues/815)（2026-08-03，M-1 盘整定义 + M-2 同向判据）
 > 受影响代码清单：见本文件末节「#815 受影响代码清单（四组汇总）」——#815 四组（M-1/M-2/M-3/M-4）共用这一份，`level_recursion.md`、`beichi.md` 均指回此处。
 
-> #1742 引用迁移：本文旧 AGENTS 章节/行号保留为历史取证坐标（`git show 3d61fb7294:AGENTS.md`）；当前 #799/#804 完整限定与例外见 `docs/adr/0047-level-isomorphism-and-no-fallback-locks.md`，引文核验及教义三行头见 `docs/adr/0012-inference-layer-document-naming.md`「引用核验与教义正本」。
-
 **版本**: v1.2（v1.1 + #900 例外条款登记）
 **状态**: 已结算
 **最后更新**: 2026-08-18

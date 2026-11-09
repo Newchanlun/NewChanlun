@@ -1,6 +1,6 @@
 # Graph engineering 流程（wayfinder → 裁决 → Sandcastle → 合入）
 
-本文定义 #1323 这类大图从决策票到合入 main 的自动化流程。wayfinder 规则以 `docs/agents/wayfinder-workflow.md` 为准；本文补它「票型与代理裁定」「从决策到实施」两节只写原则的那一层：**决策票与 SPEC 的代理裁决**的具体机制（#1909 起不再有影子待批）。
+本文定义 #1323 这类大图从决策票到合入 main 的自动化流程。wayfinder 规则以 `docs/agents/wayfinder-workflow.md` 为准；本文只补它 v1 明写未覆盖的一层：**决策票与 SPEC 的代理裁决**（该文「v2 观察项」的落地；#1909 起不再有影子待批）。
 
 ## 五个面
 
@@ -12,7 +12,7 @@
 | 验收面 | `harvest.sh`（#1660 PR 模式） | 15 分钟 | 评审完成的分支推远端、基于 main 开 PR、票面登记；不合入（合入见下文「main 的合入」） |
 | 观测面 | `health-monitor` + 进度页（新） | 5 分钟 / 1 分钟 | 停摆即 _red_、自愈、进度 |
 
-**main 的合入**：不设人工批准。main 分支保护强制两项必需检查，`deepagents/review`（正式非作者双审 success）与 `ci-ok`（适用 CI 全绿），并要求分支先追平 main（strict）；两项都满足后代理可以执行合入。工蜂、执行器与 Sandcastle 实施者自身不合入，只开 PR。授权边界在分支保护，不在某个自动合入程序。
+**main 的合入**：不设人工批准。main 分支保护强制两项必需检查，`deepagents/review`（正式非作者双审 success）与 `ci-ok`（适用 CI 全绿），并要求分支先追平 main（strict）；工蜂、执行器派票 run 与 Sandcastle 实施者只开 PR，不合入。执行器交付的 PR 以 draft 开出并保持 draft，review_sweep 不审、不合 draft；主控、代理或主图验收后把它标为 ready for review，sweep 才审查它并按下面的规则合入。标 ready 后，执行器下一轮对账按交付合同把这次持有转 halted（`not_draft`），不再写这个 PR；合入后由主控释放持有。`executor serve` 内的 review_sweep 循环只在 PR 精确 head 上 `deepagents/review`（审查 App 发出）与 `ci-ok` 都为 success 时合入，合入请求带 `sha=<head>`；触及人工确认两类（实盘下单或资金、密钥或凭证）的 PR 它不合入。代理也可按同一规则手动合入。授权边界在分支保护，review_sweep 只是按它执行（用户裁定留痕 https://github.com/Newchanlun/NewChanlun/issues/1742#issuecomment-6719202631）。
 
 **人工确认只保留两类**：实盘下单与资金（含账户/交易激活，按 ADR 0041「授权来源与生效边界」交还用户签署，见「1. 分级」的资金与权限硬门）、密钥与凭证。CI 与分支保护配置由代理决定、事后报告，不需要人工确认（2026-11-08 用户裁定，原话与范围见 [#1742 裁定留痕](https://github.com/Newchanlun/NewChanlun/issues/1742#issuecomment-6719202631)）。授权范围的边界：代理可以改 CI 与分支保护的配置，但不能借此关闭或放宽必需检查 `deepagents/review`、`ci-ok`，不能取消 strict，也不能用管理员权限绕过；这是「合入前有非作者独审」这条底线的执行机制。其余普通研发流程不设等人批准的门。spec 与 P 类决策同 T 类一样，起草后经非作者独审 PASS 由代理裁定并记账（#1909，用户直接授权）；BLOCK 返修，缺有效独审不放行。
 
@@ -37,13 +37,13 @@
 
 - `/grilling`：「If a *fact* can be found by exploring the environment … look it up rather than asking me. The *decisions*, though, are mine」——事实由代理查完，决定才问人，每问附推荐答案。
 - `/grill-with-docs`（= `/grilling` + `/domain-modeling`）：对照 `CONTEXT.md` 与 `docs/adr/`，已裁的直接用，与词汇表或代码冲突的当场指出。
-- AGENTS.md「派发与开工纪律」的两路搜索（新开票前查 tracker 的全部状态及仓内相关材料）与 ADR 0012 裁定一、四：tracker 含已关闭票与评论，仓内含推论层；推论层主张可援引，推理链搬进票内重过。ADR 0012 代价第 4 条「每张裁定票前多一个 AFK 子代理」即本步。
+- AGENTS.md「开之前先搜（两路）」与 ADR 0012 裁定一、四：tracker 含已关闭票与评论，仓内含推论层；推论层主张可援引，推理链搬进票内重过。ADR 0012 代价第 4 条「每张裁定票前多一个 AFK 子代理」即本步。
 
 无人值守下没有人能当场纠正「这个早定过了」，所以胶水只补一件事：把查过的证据落成可复核的文件。主控模型 `gpt-6.1-sol` 只读取证，逐个待决点（Q1、Q2…）两路各至少一条查询，归一类：
 
 - **A 已裁**：正本层或已关票 resolution 明写。写出处，直接沿用，不再列为待决。
 - **B 有先例未正式裁**：推论层、票评论、代码常量或夹具在用。写出处与推理链，作为默认候选，以「默认值，确认或否决」呈现。
-- **C 确未设计**：列出已搜关键词，标缺口去向——`decision` 由起草者按推荐答案裁定，必带推荐答案及推导依据；`research` 是仓外事实，按 wayfinder 开 research 票由 `/research` 子代理解决；`probe` 缺读数推不出推荐值，按 `wayfinder-workflow.md`「票型与代理裁定」缺数字派探针票（grilling 票只消费读数）。
+- **C 确未设计**：列出已搜关键词，标缺口去向——`decision` 由起草者按推荐答案裁定，必带推荐答案及推导依据；`research` 是仓外事实，按 wayfinder 开 research 票由 `/research` 子代理解决；`probe` 缺读数推不出推荐值，按 `wayfinder-workflow.md` 反面判据③派探针票。
 
 决定等事实（`/wayfinder` Ticket Types：research 票「surface a fact a decision waits on」）：考古有 `research`/`probe` 缺口的票（T/P 同）不起草、不落地，进 `held`（`fact_gap`），票上列出要开的缺口票；主控按 `/graph-run` 第 3 步开票并接 blocking 边。
 
@@ -67,7 +67,7 @@
 
 起草不另起上下文（#1742 F4）。分级考古所在的本票 MAIN 会话经宿主校验分级后，用 Claude CLI `--resume <id>` 续接起草，上文的工具调用与结果都留在历史里；首稿用该会话当前模型（默认 `gpt-6.1-sol`）。会话记在 `<票号>/main-session.json`，绑定票号、取证 `sourceCommit` 与开会话时的评论水印；取证提交变化、记录损坏或水印后出现退回时旧会话改名 `main-session.retired-<k>.json` 作废，对应 `classify.json`、`archaeology.json` 与 `archaeology.md` 整组以 `.retired-<k>` 后缀留档，另起新会话重新联合分级考古，不在新检出上续接旧历史。每次重新联合分级都在模型调用前撤下旧组；新分类已落盘而考古写入前中断时，只补本轮考古，不拼接旧考古。起草中断后重入且会话有效时，沿用已落盘分级与考古，在同一会话继续起草。`main-rounds.json` 绑定同一会话保存轮次、重做与引用专修额度、反馈、草稿和独审阶段；独审中断只续审已完成草稿，解析失败不计 BLOCK，也不重发额度。轮次账本随 MAIN 退役，已完成的每轮草稿与独审分别保存在 `draft.attempt<N>.md` 和 `review.attempt<N>.json`；检查点损坏或旧会话已有轮次却缺检查点时保留原件、停止自动续接。live 认领前先校验本票 MAIN 会话；若上次取消认领失败，仅当前唯一 assignee 是本人且存在有效恢复记录时允许续做，不重加 assignee。其他人的认领或别票会话不能据此放行。模型工具仍只读，产出固定结构的 resolution 草稿：问题、权威依据、候选、裁定、验收清单、受影响票与 blocking 边变化、授权引用。
 
-权威依据逐条带可回查位置：`docs/chanlun/text/blog/<课>.md:<行>`、ADR 路径、票评论链接。引原文按 ADR 0012「引用核验与教义正本」四步核行号、逐字、作者归属、行内注。验收清单每项必须是命令、测试名、文件存在或票状态之一。
+权威依据逐条带可回查位置：`docs/chanlun/text/blog/<课>.md:<行>`、ADR 路径、票评论链接。引原文按 AGENTS.md 四步核行号、逐字、作者归属、行内注。验收清单每项必须是命令、测试名、文件存在或票状态之一。
 
 遇缠师原文无定论、有多个可行候选的待决点（`[新缠论:选择]` 或参数类），按 [ADR 0041](../../docs/adr/0041-degrees-of-freedom-configurable-not-excluded.md) 优先裁为「可调字段 + 默认值」：落进具名版本化记录，写默认值与出处、可选值及代价，改值即新版本；另一种合法取值保留为可选值。已裁定签署前不得代填的字段（资金、量档、容量、成本门 θ、风险阈值等），默认值写 `AwaitingPolicy`（不签不跑、无备用值），数值只以「推荐值＋出处」列进签署单；本票正是普通研发字段的授权票时，按考古出处与推导给出裁定值并交独审核对，来源写代理独审裁定，不写 UserSigned。真实资金、交易激活与凭据权限的签署仍须对应用户授权：起草提示第 11 条要求这类事项不给签署值、只写推荐值并在「问题」段写明交还用户，独审 R8 不把交还用户判 BLOCK。违原文、违已裁推论、被实测否证、属 #799 兜底或与现行判据构成同一判断宽严两档的候选照旧排除。
 
@@ -188,7 +188,7 @@ GitHub 不提供跨评论读取与写操作的原子事务，最后一次读取�
 
 **#1909 扩展**（用户直接授权本次流程改变）：P 类与 SPEC 同样经起草与非作者独审 PASS 由代理裁定并记账，删除普通用户审批门与 `/graph-approve`（真实资金与权限边界见 ADR 0041）；P 类 resolution 首行「本条依 #1909 代理独审裁定」。main 的合入与人工确认范围见上文「main 的合入」「人工确认只保留两类」。
 
-`wayfinder-workflow.md`「票型与代理裁定」的「`wayfinder_engine` 不替它裁决」只约束 wayfinder_engine 本体，裁决面是独立组件；该文开头已链接本文。
+`wayfinder-workflow.md` 的「不碰决策票（v1）」只约束 wayfinder_engine 本体，裁决面是独立组件；该文同步加一行指向本文。
 
 ## 调用通道
 

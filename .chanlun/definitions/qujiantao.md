@@ -4,8 +4,6 @@
 > 最后裁定：[#1627](https://github.com/xy7365527-lang/NewChanlun/issues/1627)（2026-10-21，`a₀` 构件值域收敛到 `zhongshu.md` §2.1.1：§14.3 降为字段载体、§4.5.2 构件词订正、复述处对齐；方向与状态不变）；此前 [#1600](https://github.com/xy7365527-lang/NewChanlun/issues/1600)（2026-10-21，三处 `[新缠论:选择]` 落为可调字段：`selector_keys`／`trend_scope`／`tower_base`，§14；默认值 ＝ 现行取值，不改判既有裁定）；此前 [#1354](https://github.com/xy7365527-lang/NewChanlun/issues/1354)（2026-10-14，成本停止 policy 实例，§4.5.3 第 1 条）；[#1345](https://github.com/xy7365527-lang/NewChanlun/issues/1345)、[#1347](https://github.com/xy7365527-lang/NewChanlun/issues/1347)（2026-10-13，NestInterval 价格挂法；整链 NA 的递归合成）；此前 [#817](https://github.com/xy7365527-lang/NewChanlun/issues/817)（[grilling] 区间套的教义正本，map [#787](https://github.com/xy7365527-lang/NewChanlun/issues/787) 第三批）
 > 受影响代码清单：#1627 见 `zhongshu.md` §9.6；#1600 见 §14.4「#1600 受影响代码清单」；#817 六组见 §9「#817 受影响代码清单」（六组共用这一份）；#1345／#1347 见 §9.1「#1345／#1347 受影响代码清单」（工作草稿副本 `.chanlun/review-results/issue1323-grilling-20261013/1345-AFFECTED-CODE.md`、`1347-AFFECTED-CODE.md`，票关后随归档出仓）
 
-> #1742 引用迁移：本文旧 AGENTS 章节/行号保留为历史取证坐标（`git show 3d61fb7294:AGENTS.md`）；当前 #799/#804 完整限定与例外见 `docs/adr/0047-level-isomorphism-and-no-fallback-locks.md`，引文核验及教义三行头见 `docs/adr/0012-inference-layer-document-naming.md`「引用核验与教义正本」。
-
 **版本**: v1.5
 **状态**: **完整正本 —— 6 组全裁**（N-1／N-2／N-3／N-4／N-5／N-6 全部已裁，另含「两件上游归此的」）。**「未裁」段为空**（§10.1）；仍未闭的只有 §10.2 的未测表。
 **最后更新**: 2026-10-21

@@ -4,8 +4,6 @@
 > 最后裁定：#1567（2026-10-21，用户批复）
 > 受影响代码清单：见「受影响代码与票」节（实施票 #1657）
 
-> #1742 引用迁移：本文旧 AGENTS 章节/行号保留为历史取证坐标（`git show 3d61fb7294:AGENTS.md`）；当前 #799/#804 完整限定与例外见 `docs/adr/0047-level-isomorphism-and-no-fallback-locks.md`，引文核验及教义三行头见 `docs/adr/0012-inference-layer-document-naming.md`「引用核验与教义正本」。
-
 **日期**：2026-10-21
 **裁定人**：用户（2026-10-21 批复 [#1567 评论 6310847303](https://github.com/xy7365527-lang/NewChanlun/issues/1567#issuecomment-6310847303)，原话「不重要你自己定吧」，委托主控按推荐默认值逐项确认）；代理起草，非作者独审
 **状态**：已采纳（待 PR 合入）。签署单、考古与独审：`/Volumes/AgentStorage/decisions/1567/{draft.md,archaeology.md,review.attempt3.json}`；落地独审 `.chanlun/review-results/pbatch-land-20261021/`。

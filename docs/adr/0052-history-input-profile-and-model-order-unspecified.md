@@ -4,8 +4,6 @@
 > 最后裁定：#1536（FU-14，2026-10-28，#1323 Notes N-1 预授权 T 类判定）
 > 受影响代码清单：见本文「受影响票与 blocking 边变化」节
 
-> #1742 引用迁移：本文旧 AGENTS 章节/行号保留为历史取证坐标（`git show 3d61fb7294:AGENTS.md`）；当前 #799/#804 完整限定与例外见 `docs/adr/0047-level-isomorphism-and-no-fallback-locks.md`，引文核验及教义三行头见 `docs/adr/0012-inference-layer-document-naming.md`「引用核验与教义正本」。
-
 **状态**：T 类裁定，文书待 main 合入。本 ADR 只定 profile 字段、终态与判据；实现与运行证据归 TB-07 叶票（#1381 等），不以本 ADR 关票声称实现完成（同 ADR 0033:5）。
 
 ## 问题

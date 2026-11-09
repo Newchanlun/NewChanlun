@@ -101,6 +101,7 @@ HISTORICAL = {
     ".chanlun/specs/": "swarm-era design specs, superseded",
     ".chanlun/escalations/": "escalation records",
     ".chanlun/reports/": "point-in-time reports",
+    ".chanlun/agent-roster-2026-09-30.md": "dated roster snapshot",
     ".chanlun/codex-on-breakthrough-verdict-2026-06-30.md": "dated verdict record",
     ".chanlun/.interrupt-point.md": "ENDED snapshot; header explains the retirement",
     "chanlun/review-results/": "review drafts",

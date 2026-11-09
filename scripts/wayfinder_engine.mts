@@ -602,7 +602,7 @@ export interface SpecTreeFacts {
 /**
  * 图内子票 → 批准态（纯函数）。
  *
- * 判据（wayfinder-workflow.md「从决策到实施」：只放行满足所属 SPEC/DAG 条件的实装票）：
+ * 判据（wayfinder-workflow.md「队列交棒」：只放行「已批准 spec/DAG」下的实装票）：
  *   - 祖先链上有 SPEC 节点的票：链上每一张 SPEC 都已批准才算批准（嵌套 SPEC 不能绕过上层驳回）；
  *     #1323 → SPEC #1340 → TB 汇总 → 叶 → 纵片 全链由此拿到 #1340 的批准态（图审计 2026-10-20 第 14 条）；
  *   - 祖先链上没有 SPEC 的票（map 直挂票及其子票）：继承 map 直挂 SPEC 的批准态（#1084 原口径）。
