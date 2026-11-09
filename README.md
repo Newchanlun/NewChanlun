@@ -239,7 +239,7 @@ K4 六条边中，背驰方向的分歧率稳定在 22.2%（±2%）。这是结�
 | 指标 | 数值 | 计数口径 |
 |------|------|----------|
 | 源文件 | 200 个 Python 模块 | `src/newchan/**/*.py` |
-| 测试文件 | 258 个 | `tests/**/test_*.py` |
+| 测试文件 | 258 个 | `tests/` 下文件名为 `test_*.py` 的文件（git pathspec `tests/*test_*.py` 会多算 `tests/test_*/` 目录里的 5 个 `__init__.py`，得 263） |
 | 定义文件 | 19 份 | `.chanlun/definitions/*.md` |
 | 已结算谱系 | 在仓 235 条 + 5 条生成态（#1952 后只保留被现役层引用的条目，口径见「谱系」节） | `.chanlun/genealogy/{settled,pending}/` |
 | spec | 13 份 | `spec/**/*.md` |
