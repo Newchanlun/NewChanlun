@@ -41,7 +41,7 @@
 - X 库持久两种记录，都只追加、不覆盖（取代 `x_execution_session.rs:127-130` 的 upsert 读法）。**绑定行**每个 `writer_epoch` 一行，在该 epoch 首次启动、第 1–3 步通过后，与该次启动记录同一事务写入，记下该 epoch 的身份元组 I =（`profile_id@version`、`venue_profile_sha256`、能力记录版本与 `capability_record_sha256`、声明的 `tb09_fingerprint`、`authorization_id`、`evidence_class`）。**启动记录**每次启动一行，键 `(writer_epoch, launch_seq)`，与发送门结果同一事务，记下本次计算的指纹、第 4–7 步各项核验结果、`send_state` 与拒发类别、细分。场所 profile 与能力记录各自独立升版都是新 epoch 的新绑定行，互不阻塞。同 `profile_id@version` 而 `venue_profile_sha256` 与任一已持久绑定行不同 → `IdentityConflict`，不写，进程非 0 退出（INTERFACE-CONTRACTS:11）。旧行全部保留，库里能看出曾经绑过哪些 `profile_id@version`、能力记录版本、指纹及其哈希；账户与钥匙本体不进库（裁定八），要还原须对照部署状态目录里同哈希的记录。
 - **重启路径（四种，穷尽）。** 记库内最大 epoch 为 E，本次启动的 epoch 为 e、身份元组为 I。
   1. e < E：`StaleWriter`，进程非 0 退出，不写（既有 `x_execution_session.rs:101-107`）。
-  2. e = E 且 I 与 epoch E 的绑定行逐项相同：复用该绑定行；**发送门 8 步全部重跑**，追加一条启动记录。epoch E 内任一更早启动记录为 refused 时，本次 `send_state` 仍为 refused（细分引用首条 refused 记录），裁定七「拒发在 epoch 内为终态」由此落地；可发送状态每次启动都要重新证出，不继承。manifest 静态 `x.writer_epoch`（`production_session.rs:164`、`:444`）下每次重启都走这一条。
+  2. e = E 且 I 与 epoch E 的绑定行逐项相同：复用该绑定行；**发送门 8 步全部重跑**，追加一条启动记录。epoch E 内任一更早启动记录为 refused 时，本次 `send_state` 仍为 refused（细分引用首条 refused 记录），裁定七「拒发在 epoch 内为终态」由此落地（仅 `P1-hl-testnet`；production 下拒发是否在 epoch 内终态随裁定七在 P2 激活时另裁）；可发送状态每次启动都要重新证出，不继承。manifest 静态 `x.writer_epoch`（`production_session.rs:164`、`:444`）下每次重启都走这一条。
   3. e = E 且 I 有任一项不同：`IdentityConflict`，进程非 0 退出，不写。改 profile、能力记录、指纹或授权必须换新 epoch。
   4. e > E（含库为空）：先按第 2 步与全部已持久绑定行比对，再写新绑定行，`launch_seq` 从 1 起。
   例：epoch 8 已判可发送，之后换钥匙、profile 不变、仍以 epoch 8 重启 → 走路径 2，第 4 步推出的地址 ≠ `public_id`，启动记录写 refused、`IdentityConflict` / `CredentialPublicId`，0 写请求；此后 epoch 8 内一律 refused。同时把 profile 也升版、仍用 epoch 8 → 走路径 3，非 0 退出。
@@ -148,6 +148,8 @@ X 执行 profile `x-execution-profile/2`：`mode`；`venue_profile: {path, profi
 
 X 库绑定行（每个 `writer_epoch` 一行，键 `writer_epoch`；身份唯一性靠发送门第 2 步与全部已持久绑定行比对，不靠主键）：`writer_epoch、profile_id、profile_version、venue_profile_sha256、capability_record_version、capability_record_sha256、tb09_fingerprint、authorization_id、evidence_class`。`tb09_fingerprint` 即 ADR 0028:46「与 profile 版本一起持久化」的那份指纹（沿 `x_execution_session.rs:120` 既有字段）。
 
+**指纹输入**（ADR 0028:46 四项中「profile 身份绑定」与「凭据作用域版本」两项由本 ADR 定义；旧 writer 禁入证据与 X 排他锁两项归 #1383）：逐字段为 `profile_id、profile_version、venue_profile_sha256、capability_record_version、capability_record_sha256、authorization_id、evidence_class`。明确排除：`tb09_fingerprint` 自身、`writer_epoch`（指纹在 X profile 里声明，跨 epoch 不变，epoch 换代不应迫使重算）、启动记录的全部字段（核验结果与 `send_state` 是指纹判定的产物，不是输入）。由此计算顺序无环：先由 X profile 与两份引用记录得到上述七个字段，算出指纹，再与声明值比较，最后写绑定行与启动记录。
+
 X 库启动记录（每次启动一行，键 `(writer_epoch, launch_seq)`，与发送门结果同一事务）：`writer_epoch、launch_seq、launched_at、tb09_fingerprint_computed、credential_public_id_verified、session_permission_verified、send_state、send_refusal_class、send_refusal_detail`。路径见裁定二「重启路径」。凭据作用域版本由 `(profile_id@profile_version, venue_profile_sha256)` 读出，不另存一列。
 
 ## 发送门（8 步）
@@ -161,7 +163,7 @@ X 库启动记录（每次启动一行，键 `(writer_epoch, launch_seq)`，与�
 | 3 | 凭据存在 | `MissingDependency`（既有，`x_execution_session.rs:180-188`） | 进程非 0 退出，不写库 |
 | 4 | X 在内存中由凭据推出的公开地址 = `credential_scope.public_id` | `IdentityConflict` / `CredentialPublicId` | 启动记录写 refused，只读服务 |
 | 5 | `authorization` 行完整，`authorizer` 为用户 | `AwaitingPolicy` / `Authorization` | 同上 |
-| 6 | TB-09 指纹存在且与本次计算一致（含本次绑定与作用域版本） | 缺 `MissingDependency` / `Tb09Fingerprint`；不符 `IdentityConflict` / `Tb09Fingerprint` | 同上 |
+| 6 | TB-09 指纹存在且与本次计算一致；「profile 身份绑定」一项的输入按数据形状节「指纹输入」清单，不含指纹自身 | 缺 `MissingDependency` / `Tb09Fingerprint`；不符 `IdentityConflict` / `Tb09Fingerprint` | 同上 |
 | 7 | 会话权限运行时核验：无签名、不携带凭据的 info 查询（HL 为 `userRole(public_id)`），结果须为 `role=agent` 且 `data.user == account` | `UnsupportedCapability` / `SessionPermission`（查询不可用、来源记录缺或结果不符） | 同上；不换口径重试放行（ADR 0041:15） |
 | 8 | 全部通过 | 无 | `send_state` 进入可发送状态（具体值由写代码落地的叶定） |
 
@@ -201,7 +203,7 @@ ADR 0028:24 的动作维度：
 随本 ADR 同一 PR 落地，均为 append-only，不改原文：
 
 1. [ADR 0028](0028-first-capability-verification-profile.md) 文末「修订（#1540）」：`credential_scope` 三项与作用域版本构成；`trade_no_transfer` 按三条叠加读；:46 的四项核验在 `experiment` 上由本 ADR 发送门作为发送前置件执行，:46 的五项失效触发不变；`authorization` 行（:26）为 P1 授权记录；`account` 与 `public_id` 不入仓。
-2. [ADR 0039](0039-production-entry-inventory-and-unique-launcher.md) 文末「修订（#1540）」：:285 的凭据来源读作 `credential_source`；:287-288 启动门对 `experiment` 同样生效，并按本 ADR 发送门 8 步与拒发终态执行。
+2. [ADR 0039](0039-production-entry-inventory-and-unique-launcher.md) 文末「修订（#1540）」：:285 的凭据来源读作 `credential_source`；:287-288 启动门对 `experiment` 同样生效，并按本 ADR 发送门 8 步执行；拒发终态与拦截范围（裁定七）仅对 `P1-hl-testnet`（`experiment`）签署，production 下拒发的覆盖范围在 P2 激活时另裁。
 3. [ADR 0045](0045-sr-v1-policy-signed.md) 文末「修订（#1540）」：SR-3 v1 签署原样保留、不升版重签；发送门是独立发送前置件，不是 SR-3 的失效触发；两者的触发条件、产物与所属签署；回退方式。
 4. [ADR 0048](0048-legacy-engine-module-level-dispositions.md) 文末「修订（#1540）」：:97 与 :309 所称 launcher 从 profile 的 `credential_scope` 读取并注入凭据，读作 X 执行 profile 的 `credential_source.{env,file}`。
 5. `CONTEXT.md`「运行边界」节新增两条词条：「凭据作用域版本」「权限证据三层」。
@@ -249,7 +251,7 @@ ADR 0028:24 的动作维度：
 
 ## 对下游的接口
 
-- **#1365 TB-09**：本 ADR 交出指纹两项组成的定义（profile 身份绑定 = 绑定行；凭据作用域版本 = 裁定一）与拒发词汇。指纹算法、旧 writer 禁入与 X 排他锁的取证归 #1383（`/Volumes/AgentStorage/decisions/1523/draft-28G.md:101`）。#1383 在 P1 上的负对照对 `experiment` 门成立，记录带 `experiment`。#1401 消费「拒发在 epoch 内终态、新 epoch 重走全部步骤」。
+- **#1365 TB-09**：本 ADR 交出指纹两项组成的定义（profile 身份绑定 = 数据形状节「指纹输入」七个字段，不含指纹自身与 `writer_epoch`；凭据作用域版本 = 裁定一）与拒发词汇。指纹算法、旧 writer 禁入与 X 排他锁的取证归 #1383（`/Volumes/AgentStorage/decisions/1523/draft-28G.md:101`）。#1383 在 P1 上的负对照对 `experiment` 门成立，记录带 `experiment`。#1401 消费「新 epoch 重走全部步骤」，以及 P1 上「拒发在 epoch 内终态」（production 范围随裁定七另裁）。
 - **#1368 TB-10**（经 #1365、#1367 传递）：迁移或回退后 X 新 epoch 必须重走发送门，绑定行不回退。P2 授权记录格式不变（ADR 0028:72）。
 - **#1369 TB-11**：整体验收的「能力 hash」取 `(capability_record_version, capability_record_sha256, venue_profile_sha256)` 三项，同版本异内容的两份能力记录得出不同的能力 hash；P1 证据与 production 分列。
 - **#1551 FU-20（AT-18）**：Destination ⑤「目标部署的隔离和权限证据」按裁定三的三层核，缺一不得记权限证据成立。
