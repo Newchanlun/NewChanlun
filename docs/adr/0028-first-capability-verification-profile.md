@@ -90,7 +90,7 @@ TB-08-A/B/C [#1382](https://github.com/xy7365527-lang/NewChanlun/issues/1382)/[#
 
 ## 修订（#1540，受控场所、账户、权限，2026-11-07）
 
-（append-only：裁定一至四与以上各节原文不改。依据 #1540 主控裁定 [裁定评论 6702983888](https://github.com/Newchanlun/NewChanlun/issues/1540#issuecomment-6702983888)，正本 [ADR 0061](0061-fu18-venue-account-permission-binding.md)。）
+（append-only：裁定一至四与以上各节原文不改。依据 #1540 主控裁定 [裁定评论 6702983888](https://github.com/Newchanlun/NewChanlun/issues/1540#issuecomment-6702983888)；Q5 的实现机制按 [修订裁定 6717784668](https://github.com/Newchanlun/NewChanlun/issues/1540#issuecomment-6717784668)（2026-11-08：0045:24 读法照旧，P1 机器层核验改为独立的发送前置件），正本 [ADR 0061](0061-fu18-venue-account-permission-binding.md)。）
 
 1. **credential_scope**（:22）在场所 profile 记录里写三项：`class`（`trade_no_transfer`）、`source`（来源类别）、`public_id`（API wallet 公开地址）。:46 所称「凭据作用域版本」= `(profile_id@version, venue_profile_sha256)`，取整份记录的 sha256（ADR 0061 裁定一）。
 2. **`trade_no_transfer` 不是场所保证。** HL 的 agent 钥匙可签 `agentSendAsset` 与 `vaultTransfer`；本字段值成立靠三条叠加：钥匙是 agent、对外提现与转他人需主钱包签名、X 写代码无 transfer 变体（ADR 0061 裁定三）。

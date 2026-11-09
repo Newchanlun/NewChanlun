@@ -145,7 +145,7 @@ X 库绑定行（按 `(profile_id, version)` 追加，与 `send_state` 同一事
 |---|---|---|---|
 | 1 | 两份引用记录存在、版本可认、哈希与声明一致；`public_id ≠ account`；`evidence_class` 与 `mode` 一致 | 缺记录 `MissingDependency`；版本不认 `SchemaUnsupported`；哈希不符 `IdentityConflict`；`public_id == account` 或证据类不一致 `InvalidDomain` | 进程非 0 退出，不写库 |
 | 2 | 与全部已持久绑定行逐项比对：同 `profile_id@version` 的 `venue_profile_sha256`、同 `capability_record_version` 的 `capability_record_sha256` 均须相同 | `IdentityConflict`（同版本异内容，场所 profile 或能力记录任一） | 进程非 0 退出，不覆盖 |
-| 3 | 凭据存在 | `MissingDependency`（既有，`x_execution_session.rs:180-188`） | 进程非 0 退出 |
+| 3 | 凭据存在 | `MissingDependency`（既有，`x_execution_session.rs:180-188`） | 进程非 0 退出，不写库 |
 | 4 | X 在内存中由凭据推出的公开地址 = `credential_scope.public_id` | `IdentityConflict` / `CredentialPublicId` | 持久化 refused，只读服务 |
 | 5 | `authorization` 行完整，`authorizer` 为用户 | `AwaitingPolicy` / `Authorization` | 同上 |
 | 6 | TB-09 指纹存在且与本次计算一致（含本次绑定与作用域版本） | 缺 `MissingDependency` / `Tb09Fingerprint`；不符 `IdentityConflict` / `Tb09Fingerprint` | 同上 |
@@ -163,7 +163,7 @@ X 库绑定行（按 `(profile_id, version)` 追加，与 `send_state` 同一事
 | 1 | 身份与代际 | X 库绑定行（profile_id@version、`venue_profile_sha256`、能力记录版本与 `capability_record_sha256`、`writer_epoch`）；X 观测记录带 `source_namespace`、`source_epoch`（#1770 第 5 项） | 不适用：身份是发送前件，缺失或冲突走拒发 | `StaleWriter`（`x_execution_session.rs:101-107`）；`IdentityConflict`（INTERFACE-CONTRACTS:11） | #1769 后续叶 / #1383；#1401 |
 | 2a | 取消 | 撤单金样与观测记录（#1770 `hl_adapter_maps_order_cancel_query_to_golden_requests`）；P1 真实撤单回执（#1412） | 能力记录 `order_target_form` 未知值 → X 启动 `InvalidDomain` | 失响应 `DeliveryUnknown`，按目标查询，不重发（#1340:310） | #1770、#1412 |
 | 2b | 改单 | 无 | `Unsupported{原子改单合同未证（C07.8）}`；改价走撤单后再下单 | 不发请求 | #1770；#1412:11 |
-| 3 | 累计完整性 | E 已 Recorded 的场所 adapter 原件，种类由能力记录声明（ADR 0060:44） | 场所给不出某类所需证据 → 该子项 Unsupported，减少责任保原潜量 | 源游标缺口进 Pending 或封闸（ADR 0060:42；#1340:297） | #1425、#1400、#1412 |
+| 3 | 累计完整性 | E 已 Recorded 的场所 adapter 原件，种类由能力记录声明（ADR 0060:44） | 场所给不出某类所需证据 → 该子项 Unsupported，减少责任保原潜量 | 源游标缺口进 Pending 或封闸（#1340:297；同类处置见 ADR 0060:42「账实差异只产生 Pending 或封闸」） | #1425、#1400、#1412 |
 | 4 | 幂等 / 查询范围 | `cloid` 投影单射且跨重启稳定（#1770）；单订单查询（#1770）；账户级查询（#1400） | 同 ID 重投默认 Unsupported（C07.6 要求另有获准且已实证的强幂等合同）；账户级查询在 #1400 落地前 Unsupported | `DeliveryUnknown`；查询 `Unavailable`（INTERFACE-CONTRACTS:41）；无隐式写重试（#1770） | #1770、#1400、#1422 |
 | 5 | 费用 / 更正 | fill 类费用随原 fill 进 E（ADR 0060:52-53） | HL 更正/bust 回报形状实施现场核实，未核前 Unsupported（#1412:13） | 按 ADR 0032 裁定五/六与 ADR 0060:46 | #1425、#1412 |
 | 6 | 会话权限 | 三层记录（裁定三）：`authorization` 行；能力记录 `session_permission` 来源栏（URL、日期、sha256）；绑定行 `session_permission_verified` 与 `userRole` 观测记录 | 第 7 步做不成 → `UnsupportedCapability` / `SessionPermission`，拒发；profile 未声明 reduce-only 时 `reduce_only=true` → `UnsupportedCapability`（#1770） | 核验查询失败 → 本次启动拒发，不换口径重试 | #1769 后续叶 / #1383（门）、#1770（变体）、#1400（真实只读核验） |
@@ -205,7 +205,7 @@ ADR 0028:24 的动作维度：
 | 同 `:28-34`、`:36-79` | 五项 profile | 引用场所 profile 记录与能力记录；`credential_source` |
 | 同 `:98-135` | upsert，无冲突检查 | 按 `(profile_id, version)` 追加绑定行，含 `capability_record_sha256`；场所 profile 或能力记录同版本异内容 `IdentityConflict`；拒发类别与细分 |
 | 同 `:109-114` | 只 production 缺指纹拒发 | 发送门第 4-7 步，`experiment` 同强度 |
-| 同 `:180-188` | 缺凭据 `MissingDependency` | 不变，第 4 步紧随其后 |
+| 同 `:180-188` | 缺凭据 `MissingDependency`；base 在 :178 先 `persist` 写 x_meta，再查凭据 | 凭据检查前移到任何持久化之前（裁定六：缺凭据不写库）；第 4 步紧随其后 |
 | `rust/src/bin/production_session.rs:177-192` | 读 `credential_scope.env/file` | 读 `credential_source.env/file`；校验两份引用记录哈希 |
 | `rust/tests/production_session_entry.rs:233-249`、`:580-607` | `/1` 夹具与既有拒发断言 | 夹具升 `/2`；断言按裁定六保留原值或改类别加细分 |
 | `docs/runbook_production_session.md:67-81` | `/1` 示例 | 更新示例与拒发说明 |

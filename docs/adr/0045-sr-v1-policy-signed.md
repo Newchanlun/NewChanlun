@@ -83,7 +83,7 @@ SR-1 动作取冻结为 `[新缠论:选择]`；SR-1 可观察字段、SR-2 映�
 
 ## 修订（#1540，SR-3 与发送门的边界，2026-11-07）
 
-（append-only：签署值与以上各节原文不改。依据 #1540 主控裁定 [裁定评论 6702983888](https://github.com/Newchanlun/NewChanlun/issues/1540#issuecomment-6702983888)，正本 [ADR 0061](0061-fu18-venue-account-permission-binding.md)。）
+（append-only：签署值与以上各节原文不改。依据 #1540 主控裁定 [裁定评论 6702983888](https://github.com/Newchanlun/NewChanlun/issues/1540#issuecomment-6702983888)；Q5 的实现机制按 [修订裁定 6717784668](https://github.com/Newchanlun/NewChanlun/issues/1540#issuecomment-6717784668)（2026-11-08：0045:24 读法照旧，P1 机器层核验改为独立的发送前置件），正本 [ADR 0061](0061-fu18-venue-account-permission-binding.md)。）
 
 1. **SR-3 v1 签署原样保留，不升版重签。** 判据、范围、动作与 `P1_experiment_never_fires` 都不变。:24 的读法照旧：ADR 0028:46 的五项失效触发只在 `production` profile 下构成 SR-3 条件。
 2. **发送门不是 SR-3 的失效触发。** ADR 0061 裁定五让 X 在 `experiment` 上也核 ADR 0028:46 的四项组成，这是一个独立的发送前置件：触发条件是每次 X 启动后、首个写传输前，不判定、不登记失效触发是否发生；产物是 X 库绑定行与 `send_state`（拒发带 `send_refusal_class` / `send_refusal_detail`）。发送门拒发不写 SR 条件记录、冻结态或退出授权记录，也不改变 SR-3 五项触发的定义。
