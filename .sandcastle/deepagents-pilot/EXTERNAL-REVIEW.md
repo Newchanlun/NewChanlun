@@ -141,7 +141,8 @@ HOST 切换步骤：
 | `<model>/events.jsonl`、`session.jsonl` | 实际 stdout 事件与独立 session 日志 |
 | `<model>/supervisor.log`、`stderr.log` | 宿主入口和模型诊断；SDK 异常仅记类别与阶段 |
 | `outcome.json`、`effects/*.json` | 双审结论与状态写入、读回、对账证据 |
-| `volume-reaper.jsonl`（state_root 下） | 派发前回收孤儿审阅卷与容器的记录 |
+| `<model>/vm-trim.json` | 监督删卷后对 VM 跑 fstrim 的结果（trimmed / throttled / busy / skipped / failed），不进回执 |
+| `volume-reaper.jsonl`（state_root 下） | 派发前回收孤儿审阅卷与容器的记录；删了卷时含一行 `vm_trim` |
 
 无凭据 detached checkout 位于外盘 `/Volumes/AgentStorage/issue1742-deepagents-pilot-20261027/checkouts/external-review/<run-id>/<model>`。每份对象库只保存 base、head、merge-base 的源码树及祖先 commit 元数据，不带无关历史版本的树和 blob。`git merge-base`、完整 PR diff、三端源码和提交元数据可用。其它历史提交的源码不在快照内。Git config、hooks、alternates 和凭据不从源仓复制。
 
@@ -159,6 +160,11 @@ HOST 切换步骤：
 1. 监督的 finally：容器关闭后删卷，回执记 `volume` 和 `volume_removed`；删卷失败不改结论。
 2. 监督的退出钩子：收到 SIGTERM/SIGINT 时 Sandcastle 的 shutdown 钩子同步删容器后 `process.exit(1)`，finally 跑不到、回执也不写；退出钩子同步删卷。
 3. 宿主 reaper（`ExternalReview.reap_review_volumes`）：每位 reviewer 派发前按标签列出卷和容器，凡 launch_id 在本 state_root 登记过、监督进程（`--output-dir` 身份）已不在的，先 `rm -f` 容器再删卷；未登记的 launch_id 不碰。被 SIGKILL、OOM、Mac 或 Colima 重启打断的 launch 由它收。结果追加到 `external-review/volume-reaper.jsonl`；docker 不可用时只记 `skipped`，不挡派发。
+
+删卷之后还要 fstrim。VM 的数据盘是 macOS 系统盘上的稀疏文件，VM 里删卷只把块标成空闲，不 trim 宿主就收不回来，系统盘只会越用越少（11-09 实测一次 `fstrim` 回收 5.8 GiB，系统盘剩余从 22 GiB 回到 27 GiB）。上面第 1 层（监督 finally 删卷成功）和第 3 层（reaper 本轮至少删掉一个卷）之后各调一次 `pilot1742/vm_trim.py`：监督在回执落盘之后以 `python3 -I vm_trim.py <checkout_root>` 调用，结果写 `<model>/vm-trim.json`；reaper 直接调用，结果追加一行 `vm_trim` 到 `volume-reaper.jsonl`。第 2 层退出钩子是同步的，不 trim，留给下一次。checkout 补删不 trim。
+- 做法：`docker context show` 为 `colima` 或 `colima-<p>` 时跑 `colima --profile <p> ssh -- sudo -n fstrim -v /var/lib/docker`；别的 context 记 `skipped`。不用 `--privileged` 一次性容器挂 `/var/lib/docker` 去 trim：容器合同不许特权容器、不许挂 Docker 数据目录，审阅镜像也不保证带 `fstrim`；`colima ssh` 走宿主用户本来就有的 VM 登录，不经 Docker daemon。env 与 `docker_cli` 同一白名单（不传 `DOCKER_HOST`/`DOCKER_CONTEXT`），连的是同一个 context。
+- 失败只记录：colima 不在、`sudo` 要密码、超时（colima 60 s、`docker context show` 10 s，超时杀整个进程组）都记 `failed`，不改回执、结论和退出码，不挡派发。只记返回码和 fstrim 的一行回收量，不记 stderr（ssh 报错可能带 VM 登录密钥路径）。
+- 节流：`<checkout_root>/.vm-trim.lock` 上非阻塞 `flock`，拿不到记 `busy`（另一个 trim 正在跑，监督和 reaper 共用这把锁）；拿到后看 `<checkout_root>/.vm-trim.stamp` 的时间，距上次尝试不足 10 分钟记 `throttled`。时间戳在尝试前写，失败也算一次，免得每轮都去撞坏掉的 VM。两个审查并发结束时只有一个真正 trim。
 
 宿主回收 checkout 时若回执写着 `volume_removed=false`，也按 launch 的卷名补删，结果记进 `checkout-cleanup.json` 的 `volume_state`。宿主 home、PEM、GitHub token、状态和 session 目录不挂入。session 从容器临时目录经 SDK 收取，不给 reviewer 可写宿主回执目录。
 

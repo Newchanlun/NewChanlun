@@ -220,7 +220,7 @@ jobs:
         #   pip install ./rust（maturin 冷编）   11.7s
         run: |
           python -m pip install --upgrade pip
-          pip install -e ".[test]"
+          pip install -e ".[test]" pytest-xdist
           pip install "nautilus_trader==1.229.0"
           CARGO_TARGET_DIR="$HOME/.cache/newchan-rust-target" pip install ./rust
 
@@ -229,7 +229,10 @@ jobs:
 
       - name: Run tests with coverage
         # -rs 是 #324 的 090 要求：显式打印 skip 原因。
-        run: pytest -m "not slow" --tb=short -q -rs --cov=newchan --cov-report=term-missing --cov-report=xml:coverage.xml
+        # #1875：-n 4 与托管 runner 4 核一致。Belay 同机：串行 100.7 s，-n 4 两轮 72.8 / 79.1 s，
+        #   通过数与失败集合逐项相同（4926 passed，3 个环境错误一致）。只改 .sandcastle 的 PR 与同 PR 复用命中的
+        #   run 不跑 Rust，CI 下限取决于本作业和 deepagents-pilot。pytest-cov 支持 xdist，覆盖率在各进程合并。
+        run: pytest -m "not slow" -n 4 --tb=short -q -rs --cov=newchan --cov-report=term-missing --cov-report=xml:coverage.xml
 
       - name: Upload coverage report
         if: ${{ !cancelled() }}
