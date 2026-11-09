@@ -79,7 +79,7 @@
 
 ### 四、P1 授权记录（Q4 = A）
 
-授权写在场所 profile 记录的 `authorization` 行（ADR 0028:26 原位）：`{authorization_id, authorizer, authorized_at}`，随 profile 版本签，计入 `venue_profile_sha256`。任何字段变更出新版本后须重签。X 核的是声明存在且 `authorizer` 等于约定的用户标识，不是签名验证。P1 授权先于机器层签署；ADR 0028:48 只约束 P2 的顺序，P1 不搬用 ADR 0028:72 的 P2 元组。
+授权写在场所 profile 记录的 `authorization` 行（ADR 0028:26 原位）：`{authorization_id, authorizer, authorized_at}`，随 profile 版本签，计入 `venue_profile_sha256`。任何字段变更出新版本后须重签。X 核的是声明存在且 `authorizer == account`，不是签名验证。**可信的用户标识就是 `account`**（主钱包公开地址，用户对场所账户的唯一身份），不另设 `expected_authorizer` 字段：两者都在同一份场所 profile 记录里，整份记录的 sha256 进绑定身份（裁定一、二），改任一项即新版本。`account` 与 `authorization` 行的值由用户提供并签署：账户激活与权限授予属 ADR 0041「授权来源与生效边界」的独立硬门，本 ADR 只定检查方式，代理不得填写、推定或代签这两项。相等检查只证一致，不证用户确实授权；后者靠记录来源本身属于用户签署这一硬门承担。P1 授权先于机器层签署；ADR 0028:48 只约束 P2 的顺序，P1 不搬用 ADR 0028:72 的 P2 元组。
 
 ### 五、P1 同强度发送前置件（Q5 = A，P 类选择）
 
@@ -141,7 +141,7 @@
  "execution_form": "Netting",
  "allowed_actions": ["query", "place", "cancel", "reduce_only_close"],
  "evidence_class": "experiment",
- "authorization": {"authorization_id": "<id>", "authorizer": "<用户>", "authorized_at": "<时间>"}}
+ "authorization": {"authorization_id": "<id>", "authorizer": "<等于 account>", "authorized_at": "<时间>"}}
 ```
 
 X 执行 profile `x-execution-profile/2`：`mode`；`venue_profile: {path, profile_id, version, sha256}`；`capability_record: {path, version, sha256}`；`credential_source: {env, file}`；`tb09_fingerprint`（TB-09 算法产出，#1383）。
@@ -162,7 +162,7 @@ X 库启动记录（每次启动一行，键 `(writer_epoch, launch_seq)`，与�
 | 2 | 与全部已持久绑定行逐项比对：同 `profile_id@version` 的 `venue_profile_sha256`、同 `capability_record_version` 的 `capability_record_sha256` 均须相同 | `IdentityConflict`（同版本异内容，场所 profile 或能力记录任一） | 进程非 0 退出，不覆盖 |
 | 3 | 凭据存在 | `MissingDependency`（既有，`x_execution_session.rs:180-188`） | 进程非 0 退出，不写库 |
 | 4 | X 在内存中由凭据推出的公开地址 = `credential_scope.public_id` | `IdentityConflict` / `CredentialPublicId` | 启动记录写 refused，只读服务 |
-| 5 | `authorization` 行完整，`authorizer` 为用户 | `AwaitingPolicy` / `Authorization` | 同上 |
+| 5 | `authorization` 行完整，且 `authorizer == account`（裁定四） | 缺行或缺字段 `AwaitingPolicy` / `Authorization`；`authorizer ≠ account` `IdentityConflict` / `Authorization` | 同上 |
 | 6 | TB-09 指纹存在且与本次计算一致；「profile 身份绑定」一项的输入按数据形状节「指纹输入」清单，不含指纹自身 | 缺 `MissingDependency` / `Tb09Fingerprint`；不符 `IdentityConflict` / `Tb09Fingerprint` | 同上 |
 | 7 | 会话权限运行时核验：无签名、不携带凭据的 info 查询（HL 为 `userRole(public_id)`），结果须为 `role=agent` 且 `data.user == account` | `UnsupportedCapability` / `SessionPermission`（查询不可用、来源记录缺或结果不符） | 同上；不换口径重试放行（ADR 0041:15） |
 | 8 | 全部通过 | 无 | `send_state` 进入可发送状态（具体值由写代码落地的叶定） |
@@ -238,6 +238,7 @@ ADR 0028:24 的动作维度：
 | 同上 | `x_refuses_send_when_credential_public_id_mismatches` | 现场生成的测试钥匙推出的地址 ≠ `public_id` → refused、`IdentityConflict`，本地监听器 0 连接 |
 | 同上 | `profile_with_public_id_equal_to_account_is_invalid` | `public_id == account` → `InvalidDomain`，不建库 |
 | 同上 | `x_refuses_send_without_authorization` | 缺 `authorization` → refused、`AwaitingPolicy`，0 连接 |
+| 同上 | `x_refuses_send_when_authorizer_differs_from_account` | `authorizer` 填成非 `account` 的值（含 `public_id`）→ refused、`IdentityConflict` / `Authorization`，0 连接 |
 | 同上 | `experiment_profile_without_tb09_fingerprint_refuses_send` | experiment 缺指纹 → refused、`MissingDependency` |
 | 同上 | `refused_send_blocks_place_cancel_and_reduce_only_but_serves_query` | refused 下三种写变体 0 写请求；`query` 返回绑定行与拒发原因 |
 | 同上 | `send_refusal_class_is_from_common_error_set` | 所有 refused 启动记录的类别 ∈ INTERFACE-CONTRACTS:15 八类 |
