@@ -1,28 +1,29 @@
 #!/usr/bin/env python3
 """#1875 同 PR 内复用 Rust 作业结果。
 
-PR run 的 Rust 输入（检出树去掉跳过集里的路径）与本 PR 分支上一次全绿 run 完全相同，且那次 run 的 .github
-与本次相同时，本次不再跑 Rust 作业。典型场景：main 只合入了 .sandcastle 改动，列车把 main 追平进 PR。
-全绿的 run 由 ci-ok 上传名为 rust-green-<指纹> 的 artifact，本脚本按名字找它。
+PR run 的 Rust 输入（检出树去掉跳过集里的路径）与本 PR 分支上一次全绿 run 完全相同时，本次不再跑 Rust 作业。
+典型场景：main 只合入了 .sandcastle 改动，列车把 main 追平进 PR。
 
-为什么还要比 .github：artifact 由那次 run 的 workflow 上传，只有那份 workflow 与本次相同，才能信它测过的就是
-这个指纹（被改过的 workflow 可以不跑测试就上传）。那次 run 检出的是 merge(head, 当时的目标分支)；GitHub 不给出这个
-merge 提交，artifact 内容和 run 对象的 pull_requests 字段（查询时按分支现算，不一定是触发它的 PR）也都不能作证。
-所以只用 GitHub 记录的历史证明：
-  1. 本分支作为 head 的全部 PR（含已关闭）目标分支都是本仓库 main，且都没改过目标分支（无 base_ref_changed 事件）：
-     那次 run 的目标分支只能是 main；
-  2. 那次 run 的 head 的 .github 与本次检出的 .github 相同；
-  3. 从那个 head 与本次 base 的分叉点到本次 base，base 一侧没有改动 .github 下任何文件（compare 的净改动）；
-  4. 只认比本次早创建的 run，所以它当时的 base 不晚于本次 base。
-当时的 base 要么是 head 的祖先，要么落在第 3 条的区间里，所以那次 merge 提交的 .github 就是 head 的 .github，也就是本次的。
-只认本仓库分支上的 run；fork 的 run 不认。任何一条查不全（分页上限、截断）都当作不满足。
+凭据是那次 run 里名为 `rust-green <指纹>` 且结论为 success 的作业（ci.yml 的 rust-green 作业）：
+  - 作业名由 GitHub 服务端渲染，指纹取自 changes 作业的输出；changes 作业只执行 .github/scripts 下的本脚本，其他作业里的
+    PR 代码写不了它的输出，也改不了作业名。artifact 不能当凭据：同一 run 里先于上传执行的 PR 代码（build.rs、conftest.py）
+    拿得到运行时令牌，可以替将来的树预先上传（#2027 独审）。
+  - rust-green 依赖全部 Rust 作业，任一失败或被跳过它就不会成功。
+所以要证明的只剩：那次 run 用的 workflow（含 changes 作业和本脚本）与本次相同。那次 run 检出的是 merge(head, 当时的目标分支)，
+GitHub 不给出这个 merge 提交，run 对象的 pull_requests 字段又是查询时现算的；只用 GitHub 记录的历史证明：
+  1. 本分支作为 head 的全部 PR（含已关闭）目标分支都是本仓库 main，且都没改过目标分支（无 base_ref_changed 事件）；
+  2. 那次 run 的 head 的 .github（去掉跳过集）与本次检出的相同；
+  3. 从那个 head 与本次 base 的分叉点到本次 base，base 一侧没有改动 .github 下跳过集以外的文件（compare 的净改动）；
+  4. 只认比本次早创建的 run，所以它当时的 base 不晚于本次 base；且只认 7 天内的 run（stable 工具链不在指纹里）。
+当时的 base 要么是 head 的祖先，要么落在第 3 条的区间里，所以那次 merge 提交的 .github 就是本次的。只认本仓库分支上的 run。
+任何一条查不全（分页上限、截断）都当作不满足；任何查询出错都按全跑处理（rust=true）。
 已知局限：第 3 条只看净改动。main 在区间内先改 .github 再改回去时，那次 run 可能用的是中间那版 workflow；那一版同样是
-main 上经独审合入的，不是攻击者可控的，最坏是那一次测得不如现在全（#2027 独审 Nit）。
+main 上经独审合入的，不是攻击者可控的，最坏是那一次测得不如现在全。
 
 用法：ci-rust-reuse.py <仓库> <检出 commit> <PR 分支> <本次 run id> <跳过集正则>
-标准输出逐行打印 key=value（rust、rust_key、reuse），调用方追加进 GITHUB_OUTPUT。
-任何查询出错都按全跑处理（rust=true）；指纹算不出时 rust_key 为空，ci-ok 不上传。
+标准输出逐行打印 key=value（rust、rust_key、reuse），调用方追加进 GITHUB_OUTPUT。指纹算不出时 rust_key 为空。
 """
+import datetime
 import hashlib
 import json
 import re
@@ -30,7 +31,9 @@ import subprocess
 import sys
 import urllib.parse
 
-ARTIFACT_PREFIX = "rust-green-"
+GREEN_JOB = "rust-green "
+MAX_CANDIDATES = 20
+MAX_AGE = datetime.timedelta(days=7)  # stable 工具链不在指纹里：凭据只管 7 天
 
 
 def gh_api(path: str):
@@ -38,22 +41,21 @@ def gh_api(path: str):
     return json.loads(out)
 
 
-def tree_key(api, repo: str, sha: str, skip: re.Pattern) -> str:
+def tree_entries(api, repo: str, sha: str, skip: re.Pattern) -> list:
     listing = api(f"repos/{repo}/git/trees/{sha}?recursive=1")
     if listing.get("truncated"):
         raise RuntimeError("tree listing truncated")
-    lines = sorted(f"{e['mode']} {e['type']} {e['sha']}\t{e['path']}"
-                   for e in listing["tree"] if e["type"] != "tree" and not skip.match(e["path"]))
-    if not lines:
-        raise RuntimeError("empty tree")
-    return hashlib.sha256("\n".join(lines).encode()).hexdigest()
+    return sorted([e["path"], e["mode"], e["type"], e["sha"]]
+                  for e in listing["tree"] if e["type"] != "tree" and not skip.match(e["path"]))
 
 
-def github_tree(api, repo: str, sha: str) -> str:
-    for e in api(f"repos/{repo}/git/trees/{sha}")["tree"]:
-        if e["path"] == ".github" and e["type"] == "tree":
-            return e["sha"]
-    raise RuntimeError(f"{sha} has no .github tree")
+def digest(entries: list) -> str:
+    # 每个条目单独 JSON 编码：路径里可以合法地含换行、制表符，拼接编码会有歧义（#2027 独审）。
+    return hashlib.sha256("\n".join(json.dumps(e, ensure_ascii=False) for e in entries).encode()).hexdigest()
+
+
+def github_part(entries: list) -> str:
+    return digest([e for e in entries if e[0].startswith(".github/")])
 
 
 def base_of(api, repo: str, sha: str) -> str:
@@ -63,12 +65,11 @@ def base_of(api, repo: str, sha: str) -> str:
     return parents[0]["sha"]
 
 
-def pages(api, path: str, field=None, limit: int = 10) -> list:
+def pages(api, path: str, limit: int = 10) -> list:
     """逐页取完；超过 limit 页当作查不全，抛错（调用方按全跑处理）。"""
     out = []
     for page in range(1, limit + 1):
-        got = api(f"{path}{'&' if '?' in path else '?'}per_page=100&page={page}")
-        items = got[field] if field else got
+        items = api(f"{path}{'&' if '?' in path else '?'}per_page=100&page={page}")
         out += items
         if len(items) < 100:
             return out
@@ -88,33 +89,42 @@ def branch_only_targets_main(api, repo: str, branch: str) -> bool:
     return True
 
 
-def base_side_touches_github(api, repo: str, head: str, base: str) -> bool:
+def base_side_touches_github(api, repo: str, head: str, base: str, skip: re.Pattern) -> bool:
     cmp = api(f"repos/{repo}/compare/{head}...{base}?per_page=100")
     files = cmp.get("files")
     if files is None or len(files) >= 300 or cmp.get("total_commits", 0) > 250:
         return True  # 列表可能被截断：当作改过
-    return any(f["filename"].startswith(".github/") or (f.get("previous_filename") or "").startswith(".github/")
-               for f in files)
+    names = [n for f in files for n in (f["filename"], f.get("previous_filename")) if n]
+    return any(n.startswith(".github/") and not skip.match(n) for n in names)
 
 
-def find_reuse(api, repo: str, branch: str, run_id: int, key: str, ours: str, base: str):
-    name = ARTIFACT_PREFIX + key
+def green_job(api, repo: str, run_id: int, key: str) -> bool:
+    got = api(f"repos/{repo}/actions/runs/{run_id}/jobs?filter=latest&per_page=100")
+    if got.get("total_count", 0) > len(got["jobs"]):
+        raise RuntimeError("jobs list truncated")
+    return any(j["name"] == GREEN_JOB + key and j["conclusion"] == "success" for j in got["jobs"])
+
+
+def created(run) -> datetime.datetime:
+    return datetime.datetime.fromisoformat(run["created_at"].replace("Z", "+00:00"))
+
+
+def find_reuse(api, repo: str, branch: str, run_id: int, key: str, ours_github: str, base: str, skip: re.Pattern,
+               now: datetime.datetime | None = None):
+    now = now or datetime.datetime.now(datetime.timezone.utc)
     if not branch_only_targets_main(api, repo, branch):
         return None
-    artifacts = api(f"repos/{repo}/actions/artifacts?name={name}&per_page=100")["artifacts"]
-    for art in sorted(artifacts, key=lambda a: -a["workflow_run"]["id"]):
-        wr = art["workflow_run"]
-        # 只认比本次早创建的 run（run id 单调递增；重跑沿用原 id）。
-        if (art["name"] != name or art["expired"] or wr["id"] >= run_id or wr.get("head_branch") != branch
-                or wr.get("head_repository_id") != wr.get("repository_id")):
+    runs = api(f"repos/{repo}/actions/workflows/ci.yml/runs?event=pull_request&status=success"
+               f"&branch={urllib.parse.quote(branch, safe='')}&per_page=50")["workflow_runs"]
+    # 只认比本次早创建的 run（run id 单调递增；重跑沿用原 id），本仓库分支上的。
+    older = [r for r in runs if r["id"] < run_id and now - created(r) <= MAX_AGE
+             and (r.get("head_repository") or {}).get("id") == r["repository"]["id"]][:MAX_CANDIDATES]
+    for run in older:
+        if not green_job(api, repo, run["id"], key):
             continue
-        run = api(f"repos/{repo}/actions/runs/{wr['id']}")
-        if (run["event"] != "pull_request" or run["conclusion"] != "success" or run["path"] != ".github/workflows/ci.yml"
-                or (run.get("head_repository") or {}).get("id") != run["repository"]["id"]):
+        if github_part(tree_entries(api, repo, run["head_sha"], skip)) != ours_github:
             continue
-        if github_tree(api, repo, run["head_sha"]) != ours:
-            continue
-        if base_side_touches_github(api, repo, run["head_sha"], base):
+        if base_side_touches_github(api, repo, run["head_sha"], base, skip):
             continue
         return run["html_url"]
     return None
@@ -122,11 +132,14 @@ def find_reuse(api, repo: str, branch: str, run_id: int, key: str, ours: str, ba
 
 def decide(api, repo: str, sha: str, branch: str, run_id: int, skip: re.Pattern) -> dict:
     try:
-        key = tree_key(api, repo, sha, skip)
-    except Exception as e:  # noqa: BLE001 — 算不出指纹就全跑、不上传
+        entries = tree_entries(api, repo, sha, skip)
+        if not entries:
+            raise RuntimeError("empty tree")
+        key = digest(entries)
+    except Exception as e:  # noqa: BLE001 — 算不出指纹就全跑，也不出凭据
         return {"rust": "true", "rust_key": "", "reuse": f"no key: {e}"}
     try:
-        url = find_reuse(api, repo, branch, run_id, key, github_tree(api, repo, sha), base_of(api, repo, sha))
+        url = find_reuse(api, repo, branch, run_id, key, github_part(entries), base_of(api, repo, sha), skip)
     except Exception as e:  # noqa: BLE001 — 查询出错全跑
         return {"rust": "true", "rust_key": key, "reuse": f"lookup failed: {e}"}
     if url is None:

@@ -1468,20 +1468,25 @@ jobs:
           if bad or results.get("changes") != "success" or rust not in ("true", "false"):
               sys.exit(f"CI 未通过：{bad}，changes={results.get('changes')}，rust={rust}")
           PY
-      # #1875 同 PR 复用：全绿时记下这次 Rust 输入的指纹，后续同分支 run 指纹相同就不重跑（见 ci-rust-reuse.py）。
-      #   只在 Rust 作业真跑过时记：复用的 run 不再续传，凭据最多活 7 天（stable 工具链不在指纹里，不能无限续命）。
-      #   这两步失败不挡 ci-ok：凭据只是加速，记不下来下一轮全跑即可（与判定脚本出错即全跑一致）。
-      - name: Record green Rust inputs
-        if: github.event_name == 'pull_request' && needs.changes.outputs.rust == 'true' && needs.changes.outputs.rust_key != ''
-        continue-on-error: true
-        env:
-          KEY: ${{ needs.changes.outputs.rust_key }}
-        run: printf '%s\n' "$KEY" > "$RUNNER_TEMP/rust-green"
-      - uses: actions/upload-artifact@v4
-        if: github.event_name == 'pull_request' && needs.changes.outputs.rust == 'true' && needs.changes.outputs.rust_key != ''
-        continue-on-error: true
-        with:
-          name: rust-green-${{ needs.changes.outputs.rust_key }}
-          path: ${{ runner.temp }}/rust-green
-          retention-days: 7
-          overwrite: true
+
+  # #1875 同 PR 复用的凭据：Rust 作业全部成功（不是 skipped）时才会运行；作业名带本次 Rust 输入指纹，由 GitHub 服务端渲染，
+  #   指纹来自 changes 作业的输出，其他作业里的 PR 代码写不了它，也改不了作业名。判定脚本 ci-rust-reuse.py 用 jobs API 读这个
+  #   作业名与结论作证据（不用 artifact：同一 run 里任何先于上传执行的 PR 代码都拿得到运行时令牌，#2027 独审）。不进 ci-ok。
+  rust-green:
+    name: rust-green ${{ needs.changes.outputs.rust_key }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    if: github.event_name == 'pull_request' && needs.changes.outputs.rust == 'true' && needs.changes.outputs.rust_key != ''
+    needs:
+      - changes
+      - rust-check
+      - rust-test-default
+      - rust-test-s-session
+      - rust-test-s-session-coverage
+      - rust-test-s-session-extra-groups
+      - rust-test-production-session
+      - rust-test-backtest-bin
+      - s-sequence-1488
+      - s-fields-native-1488
+    steps:
+      - run: echo "全部 Rust 作业成功，输入指纹见作业名"
