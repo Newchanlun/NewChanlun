@@ -38,7 +38,13 @@
 
 - ADR 0028 十个字段落成一份具名版本化**场所 profile 记录**（`venue-profile/1`，形状同 ADR 0057:43-51 的版本化记录）。它是政策记录，不含任何凭据值。
 - X 执行 profile 升到 `x-execution-profile/2`：按 `{path, profile_id, version, sha256}` 引用场所 profile 记录，按 `{path, version, sha256}` 引用 #1770 能力记录；原 `credential_scope.{env,file}` 改名 **`credential_source.{env,file}`**，只管部署管道。挪凭据文件路径不改场所 profile 记录，因而不改作用域版本。
-- X 库**绑定行每个 `writer_epoch` 追加一行**（键为 `writer_epoch`），只追加、不覆盖（取代 `x_execution_session.rs:127-130` 的 upsert 读法）。一行记下该 epoch 绑定的 `profile_id@version` 与 `venue_profile_sha256`、能力记录版本与 `capability_record_sha256`、核验结果与 `send_state`；场所 profile 与能力记录各自独立升版都只是新 epoch 的新行，互不阻塞。同 `profile_id@version` 而 `venue_profile_sha256` 与任一已持久行不同 → `IdentityConflict`，不写新行，进程非 0 退出（INTERFACE-CONTRACTS:11）。旧行全部保留，库里能看出曾经绑过哪些 `profile_id@version`、能力记录版本及其哈希；账户与钥匙本体不进库（裁定八），要还原须对照部署状态目录里同哈希的记录。`send_state` 随所在 epoch 的行记录，每个新 epoch 重新经发送门判定（裁定七：拒发只在当前 epoch 内为终态）。
+- X 库持久两种记录，都只追加、不覆盖（取代 `x_execution_session.rs:127-130` 的 upsert 读法）。**绑定行**每个 `writer_epoch` 一行，在该 epoch 首次启动、第 1–3 步通过后，与该次启动记录同一事务写入，记下该 epoch 的身份元组 I =（`profile_id@version`、`venue_profile_sha256`、能力记录版本与 `capability_record_sha256`、声明的 `tb09_fingerprint`、`authorization_id`、`evidence_class`）。**启动记录**每次启动一行，键 `(writer_epoch, launch_seq)`，与发送门结果同一事务，记下本次计算的指纹、第 4–7 步各项核验结果、`send_state` 与拒发类别、细分。场所 profile 与能力记录各自独立升版都是新 epoch 的新绑定行，互不阻塞。同 `profile_id@version` 而 `venue_profile_sha256` 与任一已持久绑定行不同 → `IdentityConflict`，不写，进程非 0 退出（INTERFACE-CONTRACTS:11）。旧行全部保留，库里能看出曾经绑过哪些 `profile_id@version`、能力记录版本、指纹及其哈希；账户与钥匙本体不进库（裁定八），要还原须对照部署状态目录里同哈希的记录。
+- **重启路径（四种，穷尽）。** 记库内最大 epoch 为 E，本次启动的 epoch 为 e、身份元组为 I。
+  1. e < E：`StaleWriter`，进程非 0 退出，不写（既有 `x_execution_session.rs:101-107`）。
+  2. e = E 且 I 与 epoch E 的绑定行逐项相同：复用该绑定行；**发送门 8 步全部重跑**，追加一条启动记录。epoch E 内任一更早启动记录为 refused 时，本次 `send_state` 仍为 refused（细分引用首条 refused 记录），裁定七「拒发在 epoch 内为终态」由此落地；可发送状态每次启动都要重新证出，不继承。manifest 静态 `x.writer_epoch`（`production_session.rs:164`、`:444`）下每次重启都走这一条。
+  3. e = E 且 I 有任一项不同：`IdentityConflict`，进程非 0 退出，不写。改 profile、能力记录、指纹或授权必须换新 epoch。
+  4. e > E（含库为空）：先按第 2 步与全部已持久绑定行比对，再写新绑定行，`launch_seq` 从 1 起。
+  例：epoch 8 已判可发送，之后换钥匙、profile 不变、仍以 epoch 8 重启 → 走路径 2，第 4 步推出的地址 ≠ `public_id`，启动记录写 refused、`IdentityConflict` / `CredentialPublicId`，0 写请求；此后 epoch 8 内一律 refused。同时把 profile 也升版、仍用 epoch 8 → 走路径 3，非 0 退出。
 - 能力记录同样进持久身份：绑定行存 `capability_record_version` 与 `capability_record_sha256`。每次启动与库内全部已持久绑定行逐项比较，同 `capability_record_version` 而 `capability_record_sha256` 不同 → `IdentityConflict`，规则与场所 profile 相同。只比 X profile 里的声明不够：同版本改了 `session_permission` 或挂单限制，再把 X profile 的 sha256 一并改掉，第 1 步照样通过，只有库里的旧哈希能认出替换。
 - 排除：十个字段直接塞进 X profile（部署路径与政策同一哈希，失效触发被噪声触发）；只按 `profile_id@version` 绑定不校验哈希（改值不升版本发现不了，违反 ADR 0028:52）。
 
@@ -86,13 +92,13 @@
 | 管它的签署 | ADR 0045 SR 清单 v1（用户，#1560 2026-10-21 批复） | 本 ADR 裁定五（#1540，依 #1909 代理独审裁定，P 类，用户可一句话回退） |
 | 触发条件 | ADR 0028:46 五项失效触发之一发生，且 profile 为 `production`；P1 签为 `P1_experiment_never_fires` | 每次 X 启动后、首个写传输前；不看证据类，不看有没有失效触发 |
 | 回答的问题 | 这次变更是否构成系统风险条件，要不要冻结新发送 | 本 epoch 手里这把钥匙、这份 profile 现在能不能发 |
-| 产物 | SR 条件记录、`freeze_new_send` 冻结态、退出授权记录（#1380 实施，ADR 0030:18-21） | X 库绑定行与 `send_state`；拒发带 `send_refusal_class` / `send_refusal_detail`；装配失败则进程非 0 退出、不写库 |
+| 产物 | SR 条件记录、`freeze_new_send` 冻结态、退出授权记录（#1380 实施，ADR 0030:18-21） | X 库绑定行与启动记录（含 `send_state`）；拒发带 `send_refusal_class` / `send_refusal_detail`；装配失败则进程非 0 退出、不写库 |
 | 解除 | 按 ADR 0030 退出授权 | 修正输入后以新 `writer_epoch` 重走 8 步（裁定七） |
 
 - 两者不共用记录。发送门拒发不写 SR 条件记录、冻结态或退出授权记录；SR-3 五项触发的定义、范围、动作与 P1 签署值都不因本 ADR 改变。ADR 0045:24 的读法（五项失效触发只在 `production` profile 下构成 SR-3 条件）照旧成立。
 - **最小例子。** P1 上 `P1-hl-testnet` 从 v1 升到 v2（换钥匙，`public_id` 变了），X 以 `writer_epoch` 7 → 8 重启，但 X 执行 profile 里的 `tb09_fingerprint` 仍是按 v1 算的值。这一次事件命中五项触发中的三项（凭据轮换、profile 版本变更、恢复/重启；ADR 0028:46）。
   - SR-3 判：`evidence_class = experiment`，v1 签署值 `P1_experiment_never_fires`，不触发。SR 条件记录 0 条，冻结态 0 条，退出授权记录 0 条。
-  - 发送门判：epoch 8 启动，第 1–5 步通过，第 6 步本次计算的指纹 ≠ 声明值。epoch 8 的绑定行（`P1-hl-testnet@2`）写 `send_state=refused`、`IdentityConflict` / `Tb09Fingerprint`，写请求 0 个，只读查询照常。
+  - 发送门判：epoch 8 启动，第 1–5 步通过，第 6 步本次计算的指纹 ≠ 声明值。epoch 8 的绑定行（`P1-hl-testnet@2`）写入，本次启动记录 `(8, 1)` 写 `send_state=refused`、`IdentityConflict` / `Tb09Fingerprint`，写请求 0 个，只读查询照常。
   - 同一事件若用户先按 v2 重算指纹再重启：SR-3 仍是 0 条记录；发送门 8 步全过，进入可发送状态。
   - 两者不冲突：SR-3 在 P1 上对任何事件都答「不构成风险条件」，发送门按当前输入答「能发 / 不能发」。两个答案同时成立，各自落在自己的记录里。P2 激活时 SR-3 生效，两者各写各的记录、各按各的路径解除，具体次序随 P2 另签版本时裁定（#1561）。
 - P1 产出的指纹、绑定行、核验记录都标 `experiment`，永不作为生产证据（ADR 0028:48、:71；CONTEXT.md「证据类」）。P2 首发前仍须在目标部署重核。修订指针落在 ADR 0045 文末。
@@ -101,13 +107,13 @@
 
 ### 六、拒发词汇与持久化（Q6 = A）
 
-- 拒发原因 = INTERFACE-CONTRACTS:15 共同错误集八类之一，加一个封闭细分码。与绑定行同一事务写入（沿 `x_execution_session.rs:98-135`）。
-- 启动前就无法装配的错误（引用记录缺失、版本不认、哈希不符、同版本异内容、缺凭据）进程非 0 退出、不写库。装配成功但不满足发送前件的，持久化 `send_state=refused` 后继续只读服务。
+- 拒发原因 = INTERFACE-CONTRACTS:15 共同错误集八类之一，加一个封闭细分码。与启动记录同一事务写入（沿 `x_execution_session.rs:98-135`）。
+- 启动前就无法装配的错误（引用记录缺失、版本不认、哈希不符、同版本异内容、缺凭据）进程非 0 退出、不写库。装配成功但不满足发送前件的，启动记录写 `send_state=refused` 后继续只读服务。
 - 现有值 `MissingTb09Fingerprint` 读作类别 `MissingDependency`、细分 `Tb09Fingerprint`。可保留 `send_refusal_reason` 原字段原值，另加 `send_refusal_class` 列；选哪种由实施票定，对外可读的类别必须来自共同错误集。
 
 ### 七、拒发覆盖范围（Q7 = A，P 类选择，只对 P1 签署）
 
-拒发在当前 `writer_epoch` 内为终态，拦截一切写请求：下单、撤单、reduce-only 平仓，以及急停展开出的命令。只读查询与恢复对账（ADR 0030:48「先只读对账在途订单」）照常。
+拒发在当前 `writer_epoch` 内为终态，拦截一切写请求：下单、撤单、reduce-only 平仓，以及急停展开出的命令。同 epoch 重启时按裁定二路径 2 仍为 refused。只读查询与恢复对账（ADR 0030:48 前半「先只读对账在途订单」）照常。ADR 0030:48 后半「再于同一授权 id 下续做」在拒发期间不执行：已持久的退出授权保持待续、不撤销、不改判据，到下一个通过发送门的 epoch 再以同一授权 id 续做（修订指针在 ADR 0030 文末）。
 
 这是 P1 上的安全语义，不是风险偏好：发送门核的是「发送者是谁、是不是唯一」，撤单与平仓同样是用这把未核身份的钥匙对场所写。放行撤单就等于新立一条「身份未核也免核」的政策。代价是拒发期间系统内急停不可用，用户只能在场所网页端撤单（ADR 0028:38：场外动作是外部事实，系统按回报记账）；P1 是测试币。**本条只对 P1 签署，P2 激活时重裁**：届时「拒发期间真实挂单撤不了」是真金损失，作为 P 类由用户选。
 
@@ -140,7 +146,9 @@
 
 X 执行 profile `x-execution-profile/2`：`mode`；`venue_profile: {path, profile_id, version, sha256}`；`capability_record: {path, version, sha256}`；`credential_source: {env, file}`；`tb09_fingerprint`（TB-09 算法产出，#1383）。
 
-X 库绑定行（每个 `writer_epoch` 追加一行，键 `writer_epoch`，与 `send_state` 同一事务；身份唯一性靠发送门第 2 步与全部已持久行比对，不靠主键）：`profile_id、profile_version、venue_profile_sha256、capability_record_version、capability_record_sha256、authorization_id、evidence_class、credential_public_id_verified、session_permission_verified、writer_epoch、send_state、send_refusal_class、send_refusal_detail`。凭据作用域版本由 `(profile_id@profile_version, venue_profile_sha256)` 读出，不另存一列。
+X 库绑定行（每个 `writer_epoch` 一行，键 `writer_epoch`；身份唯一性靠发送门第 2 步与全部已持久绑定行比对，不靠主键）：`writer_epoch、profile_id、profile_version、venue_profile_sha256、capability_record_version、capability_record_sha256、tb09_fingerprint、authorization_id、evidence_class`。`tb09_fingerprint` 即 ADR 0028:46「与 profile 版本一起持久化」的那份指纹（沿 `x_execution_session.rs:120` 既有字段）。
+
+X 库启动记录（每次启动一行，键 `(writer_epoch, launch_seq)`，与发送门结果同一事务）：`writer_epoch、launch_seq、launched_at、tb09_fingerprint_computed、credential_public_id_verified、session_permission_verified、send_state、send_refusal_class、send_refusal_detail`。路径见裁定二「重启路径」。凭据作用域版本由 `(profile_id@profile_version, venue_profile_sha256)` 读出，不另存一列。
 
 ## 发送门（8 步）
 
@@ -151,7 +159,7 @@ X 库绑定行（每个 `writer_epoch` 追加一行，键 `writer_epoch`，与 `
 | 1 | 两份引用记录存在、版本可认、哈希与声明一致；`public_id ≠ account`；`evidence_class` 与 `mode` 一致 | 缺记录 `MissingDependency`；版本不认 `SchemaUnsupported`；哈希不符 `IdentityConflict`；`public_id == account` 或证据类不一致 `InvalidDomain` | 进程非 0 退出，不写库 |
 | 2 | 与全部已持久绑定行逐项比对：同 `profile_id@version` 的 `venue_profile_sha256`、同 `capability_record_version` 的 `capability_record_sha256` 均须相同 | `IdentityConflict`（同版本异内容，场所 profile 或能力记录任一） | 进程非 0 退出，不覆盖 |
 | 3 | 凭据存在 | `MissingDependency`（既有，`x_execution_session.rs:180-188`） | 进程非 0 退出，不写库 |
-| 4 | X 在内存中由凭据推出的公开地址 = `credential_scope.public_id` | `IdentityConflict` / `CredentialPublicId` | 持久化 refused，只读服务 |
+| 4 | X 在内存中由凭据推出的公开地址 = `credential_scope.public_id` | `IdentityConflict` / `CredentialPublicId` | 启动记录写 refused，只读服务 |
 | 5 | `authorization` 行完整，`authorizer` 为用户 | `AwaitingPolicy` / `Authorization` | 同上 |
 | 6 | TB-09 指纹存在且与本次计算一致（含本次绑定与作用域版本） | 缺 `MissingDependency` / `Tb09Fingerprint`；不符 `IdentityConflict` / `Tb09Fingerprint` | 同上 |
 | 7 | 会话权限运行时核验：无签名、不携带凭据的 info 查询（HL 为 `userRole(public_id)`），结果须为 `role=agent` 且 `data.user == account` | `UnsupportedCapability` / `SessionPermission`（查询不可用、来源记录缺或结果不符） | 同上；不换口径重试放行（ADR 0041:15） |
@@ -171,7 +179,7 @@ X 库绑定行（每个 `writer_epoch` 追加一行，键 `writer_epoch`，与 `
 | 3 | 累计完整性 | E 已 Recorded 的场所 adapter 原件，种类由能力记录声明（ADR 0060:44） | 场所给不出某类所需证据 → 该子项 Unsupported，减少责任保原潜量 | 源游标缺口进 Pending 或封闸（#1340:297；同类处置见 ADR 0060:42「账实差异只产生 Pending 或封闸」） | #1425、#1400、#1412 |
 | 4 | 幂等 / 查询范围 | `cloid` 投影单射且跨重启稳定（#1770）；单订单查询（#1770）；账户级查询（#1400） | 同 ID 重投默认 Unsupported（C07.6 要求另有获准且已实证的强幂等合同）；账户级查询在 #1400 落地前 Unsupported | `DeliveryUnknown`；查询 `Unavailable`（INTERFACE-CONTRACTS:41）；无隐式写重试（#1770） | #1770、#1400、#1422 |
 | 5 | 费用 / 更正 | fill 类费用随原 fill 进 E（ADR 0060:52-53） | HL 更正/bust 回报形状实施现场核实，未核前 Unsupported（#1412:13） | 按 ADR 0032 裁定五/六与 ADR 0060:46 | #1425、#1412 |
-| 6 | 会话权限 | 三层记录（裁定三）：`authorization` 行；能力记录 `session_permission` 来源栏（URL、日期、sha256）；绑定行 `session_permission_verified` 与 `userRole` 观测记录 | 第 7 步做不成 → `UnsupportedCapability` / `SessionPermission`，拒发；profile 未声明 reduce-only 时 `reduce_only=true` → `UnsupportedCapability`（#1770） | 核验查询失败 → 本次启动拒发，不换口径重试 | #1769 后续叶 / #1383（门）、#1770（变体）、#1400（真实只读核验） |
+| 6 | 会话权限 | 三层记录（裁定三）：`authorization` 行；能力记录 `session_permission` 来源栏（URL、日期、sha256）；启动记录 `session_permission_verified` 与 `userRole` 观测记录 | 第 7 步做不成 → `UnsupportedCapability` / `SessionPermission`，拒发；profile 未声明 reduce-only 时 `reduce_only=true` → `UnsupportedCapability`（#1770） | 核验查询失败 → 本次启动拒发，不换口径重试 | #1769 后续叶 / #1383（门）、#1770（变体）、#1400（真实只读核验） |
 | 7 | 挂单限制 | 能力记录声明 tick、lot、最小名义值、在挂单上限，附来源；场所拒单作为观测记录（ADR 0028:32） | 未声明项 Unsupported，依赖该项的事前校验不放行 | 场所拒单是回报不是 fault | #1770、#1412 |
 | 8 | 时间语义 | 原件带 `received_time`（ADR 0056:52）与场所时间戳；能力记录声明其含义 | 场所无时间戳字段 → Unsupported | 按 ADR 0051 外壳与 C08.6 | #1400、#1425 |
 | 9 | 唯一外部事实来源 | 会话一个 `evidence_class`、一个外部事实源（ADR 0056:59） | 不适用（必备项） | `format` 与 `evidence_class` 不一致 → `SchemaUnsupported`，不落行（ADR 0056:46） | #1425 |
@@ -208,7 +216,7 @@ ADR 0028:24 的动作维度：
 |---|---|---|
 | `rust/src/bin/x_execution_session.rs:21` | `x-execution-profile/1` | 升 `/2` |
 | 同 `:28-34`、`:36-79` | 五项 profile | 引用场所 profile 记录与能力记录；`credential_source` |
-| 同 `:98-135` | upsert，无冲突检查 | 按 `writer_epoch` 追加绑定行，含 `capability_record_sha256`；场所 profile 或能力记录同版本异内容 `IdentityConflict`；拒发类别与细分 |
+| 同 `:98-135` | upsert，无冲突检查；同 epoch 可重进（:101-103 只拒更低 epoch） | 绑定行按 `writer_epoch` 追加（含 `capability_record_sha256`、`tb09_fingerprint`），启动记录按 `(writer_epoch, launch_seq)` 追加；按裁定二四种重启路径分派；同版本异内容 `IdentityConflict`；拒发类别与细分 |
 | 同 `:109-114` | 只 production 缺指纹拒发 | 发送门第 4-7 步，`experiment` 同强度 |
 | 同 `:180-188` | 缺凭据 `MissingDependency`；base 在 :178 先 `persist` 写 x_meta，再查凭据 | 凭据检查前移到任何持久化之前（裁定六：缺凭据不写库）；第 4 步紧随其后 |
 | `rust/src/bin/production_session.rs:177-192` | 读 `credential_scope.env/file` | 读 `credential_source.env/file`；校验两份引用记录哈希 |
@@ -229,9 +237,15 @@ ADR 0028:24 的动作维度：
 | 同上 | `x_refuses_send_without_authorization` | 缺 `authorization` → refused、`AwaitingPolicy`，0 连接 |
 | 同上 | `experiment_profile_without_tb09_fingerprint_refuses_send` | experiment 缺指纹 → refused、`MissingDependency` |
 | 同上 | `refused_send_blocks_place_cancel_and_reduce_only_but_serves_query` | refused 下三种写变体 0 写请求；`query` 返回绑定行与拒发原因 |
-| 同上 | `send_refusal_class_is_from_common_error_set` | 所有 refused 行的类别 ∈ INTERFACE-CONTRACTS:15 八类 |
+| 同上 | `send_refusal_class_is_from_common_error_set` | 所有 refused 启动记录的类别 ∈ INTERFACE-CONTRACTS:15 八类 |
+| 同上 | `x_same_epoch_same_identity_restart_reruns_gate` | 路径 2：同 epoch 同 I 重启 → 绑定行数不变，启动记录 +1，8 步全部重跑 |
+| 同上 | `x_same_epoch_key_swap_is_refused_and_sticky` | 路径 2：epoch 8 已可发送，换钥匙同 epoch 重启 → refused / `CredentialPublicId`，0 连接；再换回原钥匙同 epoch 重启仍 refused |
+| 同上 | `x_same_epoch_identity_change_conflicts_without_write` | 路径 3：同 epoch 改 profile 版本、能力记录、指纹或授权任一 → `IdentityConflict` 非 0 退出，两种记录行数均不变 |
+| 同上 | `x_lower_epoch_is_stale_writer` | 路径 1：e < E → `StaleWriter` 非 0 退出，不写 |
+| 同上 | `x_binding_row_persists_declared_tb09_fingerprint` | 绑定行含声明指纹，启动记录含计算指纹，历史 epoch 可逐行回读 |
+| #1380 | `refused_epoch_keeps_exit_authorization_pending` | 拒发 epoch 内退出授权保持待续、0 写请求；下一个通过发送门的 epoch 以同一授权 id 续做 |
 | #1770 | `hl_capability_record_lists_all_c10_5_items` | 九项齐全，每项 `Supported`+来源或 `Unsupported{reason}` |
-| #1400 | `session_permission_verified_by_user_role_or_unsupported` | 授权后真实 `userRole` 核验写入绑定行；不可用时 `UnsupportedCapability` 且拒发 |
+| #1400 | `session_permission_verified_by_user_role_or_unsupported` | 授权后真实 `userRole` 核验写入启动记录；不可用时 `UnsupportedCapability` 且拒发 |
 
 ## 对下游的接口
 
@@ -262,9 +276,10 @@ ADR 0028:24 的动作维度：
 2. `grep -c '修订（#1540' docs/adr/0028-*.md docs/adr/0039-*.md docs/adr/0045-*.md docs/adr/0048-*.md` 每个文件 ≥ 1。
 3. `grep -c '凭据作用域版本' CONTEXT.md` ≥ 1。
 4. 能力记录进持久身份：本文件「数据形状」节的绑定行含 `capability_record_sha256`，发送门第 2 步写明按 `capability_record_version` 逐项比较，「对下游的接口」的能力 hash 含 `capability_record_sha256`；下游测试表含 `x_rejects_same_capability_record_version_with_other_content`（同版本异内容 → `IdentityConflict`）。核法：`grep -c 'capability_record_sha256' docs/adr/0062-*.md` ≥ 4，`grep -c 'x_rejects_same_capability_record_version_with_other_content' docs/adr/0062-*.md` ≥ 1。
-5. SR-3 与发送门分界：`grep -c '不是 SR-3 的失效触发' docs/adr/0045-*.md docs/adr/0062-*.md` 每个文件 ≥ 1。
-6. `gh api repos/Newchanlun/NewChanlun/issues/1540/dependencies/blocking --jq 'map(.number)|sort|map(tostring)|join(",")'` 输出 `1365,1367,1369,1382,1551`。
-7. #1540 在本 ADR 的 PR 合入后关闭，resolution 评论含本文件路径、独审原件路径与裁定评论链接。
+5. 重启路径穷尽：本文件含「重启路径（四种，穷尽）」且下游测试表含 `x_same_epoch_key_swap_is_refused_and_sticky`、`x_same_epoch_identity_change_conflicts_without_write`；核法各 `grep -c` ≥ 1。
+6. SR-3 与发送门分界：`grep -c '不是 SR-3 的失效触发' docs/adr/0045-*.md docs/adr/0062-*.md` 每个文件 ≥ 1。
+7. `gh api repos/Newchanlun/NewChanlun/issues/1540/dependencies/blocking --jq 'map(.number)|sort|map(tostring)|join(",")'` 输出 `1365,1367,1369,1382,1551`。
+8. #1540 在本 ADR 的 PR 合入后关闭，resolution 评论含本文件路径、独审原件路径与裁定评论链接。
 
 ## 溯源标签
 
