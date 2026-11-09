@@ -876,6 +876,8 @@ class ExternalReview:
             # 等同未发布，下面照常过门（取代检查、沿用重做准入），不直接重发。publish 先读回远端，读到即认领；pending 读不到
             # 上抛待对账、不重发；done 被覆盖也上抛待对账。不重新过门，免得把远端已有的 success 记成「未发布」。
             saved["publication"] = publisher.publish(saved["state"], reused.get("run_id"))
+            # 认回后落盘，与正常发布同构；否则 outcome 缺 publication，沿用判定（_reuse_source）永远选不到本 run。
+            _save(folder / "outcome.json", saved)
             return saved
         if not reused:
             return self._publish_final(target, folder, publisher, saved)

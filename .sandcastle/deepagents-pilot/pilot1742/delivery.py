@@ -54,11 +54,12 @@ class Journal:
     只有主控对账写下 reconciled_not_applied 后才允许再发一次。
 
     send 正常返回（请求确认送达）而首次读回为空时，按 readback_delays 退避补读，仍为空才留 pending；
-    OutcomeUnknown（结果不明）只读一次，照旧。sleep 缺省为 time.sleep，测试可注入。
+    OutcomeUnknown（结果不明）只读一次，照旧。sleep 与 readback_delays 缺省在调用时取 time.sleep 与
+    READBACK_DELAYS，测试可注入或打桩。
     """
 
     def __init__(self, folder: Path, *, sleep: Callable[[float], None] | None = None,
-                 readback_delays: tuple[float, ...] = READBACK_DELAYS):
+                 readback_delays: tuple[float, ...] | None = None):
         self.folder = folder
         self._sleep = sleep
         self.readback_delays = readback_delays
@@ -116,7 +117,8 @@ class Journal:
         found = probe()
         if found is None and delivered:
             sleep = self._sleep or time.sleep
-            for delay in self.readback_delays:
+            delays = READBACK_DELAYS if self.readback_delays is None else self.readback_delays
+            for delay in delays:
                 sleep(delay)
                 found = probe()
                 if found is not None:
