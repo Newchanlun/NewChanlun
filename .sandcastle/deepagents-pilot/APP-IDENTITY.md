@@ -25,7 +25,7 @@ PYTHONPATH=.sandcastle/deepagents-pilot "$VENV/bin/python" -m pilot1742.github_a
 
 - `--app-id` 为 `5486877`。
 - `--app-slug` 为 `newchanlun-deepagents-1742`。
-- `--installation-id` 为 `175617978`。
+- `--installation-id` 为 `179444545`。
 - `--repository-id` 为 `1150335160`。
 - `--repository` 为 `Newchanlun/NewChanlun`。
 

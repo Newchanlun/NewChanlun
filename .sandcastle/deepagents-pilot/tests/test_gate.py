@@ -1,3 +1,5 @@
+import pytest
+
 from pilot1742.domain import (
     ApprovalRecord,
     Approved,
@@ -57,8 +59,9 @@ def test_review_must_be_cross_family_pass_at_the_candidate_head():
         == ("verifier_blocked",)
 
 
-def test_ledger_counts_only_registered_human_sources():
-    url = "https://github.com/Newchanlun/NewChanlun/issues/1742#issuecomment-123"
+@pytest.mark.parametrize("owner", ["Newchanlun", "xy7365527-lang"])  # 转移前登记的旧全名批准仍计入（#1937）
+def test_ledger_counts_only_registered_human_sources(owner):
+    url = f"https://github.com/{owner}/NewChanlun/issues/1742#issuecomment-123"
     good = f'{{"ticket":1742,"scope":"pilot_acceptance","head":"{H2}","decision":"approve",' \
            f'"source":{{"kind":"tracker_comment","reference":"{url}","registered_by":"主控"}}}}'
     bad = [

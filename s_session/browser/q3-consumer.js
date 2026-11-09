@@ -717,7 +717,7 @@
     ["s2-axis-quantifiers+new-bi/1+segment-second/1", TB02_AXES],
     ["s2-axis-quantifiers+new-bi/2+segment-second/1", TB02_AXES],
     ["s2-axis-quantifiers+new-bi/2+segment-second/2", TB02_AXES],
-    ["s2-axis-quantifiers+new-bi/2+segment-second/2+segment-turn/1", TB02_AXES], ["s2-axis-quantifiers+new-bi/2+segment-second/2+segment-turn/1+second-seq-scan-budget/2", TB02_AXES],
+    ["s2-axis-quantifiers+new-bi/2+segment-second/2+segment-turn/1", TB02_AXES], ["s2-axis-quantifiers+new-bi/2+segment-second/2+segment-turn/1+second-seq-scan-budget/2", TB02_AXES], ["s2-axis-quantifiers+new-bi/2+segment-second/2+segment-turn/1+second-seq-scan-budget/2+segment-first-own/1", TB02_AXES],
   ]);
   async function axesValidate(axes, active = null) {
     axes = of(axes);

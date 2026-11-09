@@ -14,7 +14,7 @@
 
 178号-2 升格：
   - topology_operator 不再读写 dag.yaml，改为通过 block_topology.py 写入区块+关系
-  - dag.yaml 冻结在迁移时刻的快照，不再更新
+  - dag.yaml 冻结在迁移时刻的快照，不再更新（后随 #1952 移出仓库）
 
 用法:
   # 从谱系文件读取 topo_effect 并执行

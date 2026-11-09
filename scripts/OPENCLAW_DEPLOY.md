@@ -6,13 +6,13 @@
 fengliang.service (fold 端)          openclaw.service (切分端)
 ├── 3 daemon instances               ├── git pull (同步)
 ├── perpetual traversal               ├── query daemon /status
-├── HTTP API :9765                    ├── ceremony_scan
-├── WebSocket :8765                   ├── topo_indicators
-└── Dashboard 前端                    ├── escalate 队列
-                                      └── git push (同步)
+├── HTTP API :9765                    └── git push (同步)
+├── WebSocket :8765
+└── Dashboard 前端
 ```
 
-daemon 是持久进程（一次启动，永久穿越）。scheduler 定期查询 daemon 状态 + 运行 scan + 同步。
+daemon 是持久进程（一次启动，永久穿越）。scheduler 定期查询 daemon 状态 + 同步。
+原先 scheduler 里的 ceremony_scan 异常检测与 `.chanlun/escalate/` 队列已随早年蜂群机制退役（#1952）移除。
 
 ## 第一步：启动逢亮 daemon（fold 端）
 
@@ -24,7 +24,7 @@ python3 ../topological-computation/start_fengliang.py \
   --instances 3 --serve --multiproc --load-experiments
 
 # 或后台运行
-nohup python3 start_fengliang.py \
+mkdir -p ../tmp && nohup python3 start_fengliang.py \
   --instances 3 --serve --multiproc --load-experiments \
   > ../tmp/fengliang-daemon.log 2>&1 &
 
@@ -48,7 +48,7 @@ cd /root/NewChanlun
 # 方式A：cron（简单）
 crontab -e
 # 添加：
-*/30 * * * * cd /root/NewChanlun && python3 scripts/openclaw_scheduler.py >> tmp/openclaw-scheduler.log 2>&1
+*/30 * * * * cd /root/NewChanlun && mkdir -p tmp && python3 scripts/openclaw_scheduler.py >> tmp/openclaw-scheduler.log 2>&1
 
 # 方式B：systemd（推荐，自动依赖 fengliang.service）
 sudo cp scripts/openclaw.service /etc/systemd/system/
@@ -57,7 +57,7 @@ sudo systemctl enable openclaw
 sudo systemctl start openclaw
 
 # 方式C：后台运行
-nohup python3 scripts/openclaw_scheduler.py --loop > tmp/openclaw-scheduler.log 2>&1 &
+mkdir -p tmp && nohup python3 scripts/openclaw_scheduler.py --loop > tmp/openclaw-scheduler.log 2>&1 &
 
 # 方式D：手动单次
 python3 scripts/openclaw_scheduler.py
@@ -126,16 +126,13 @@ tail -f topological-computation/.chanlun/traversal-events.jsonl
 # scheduler 日志
 tail -f tmp/openclaw-scheduler.log
 
-# escalate 队列（你不在时机器检测到的异常）
-ls -la .chanlun/escalate/
-cat .chanlun/escalate/cycle-*.json | python3 -m json.tool
-
 # S_net 统计（语料摄入成果）
 curl http://localhost:9765/topology | python3 -m json.tool
 
-# systemd 日志
+# systemd 日志（服务启停记录在 journal；程序输出按 unit 的 StandardOutput 追加到 /var/log，不放仓内 tmp/：systemd 在启动进程前就要打开该文件，目录不存在会 209/STDOUT）
 journalctl -u fengliang -f
 journalctl -u openclaw -f
+tail -f /var/log/fengliang-daemon.log /var/log/openclaw-scheduler.log
 ```
 
 ## 双重耦合循环
@@ -150,13 +147,8 @@ scheduler (切分端-机器部分, 定期循环)
   → git pull (拉取你 push 的新指令)
   → query daemon /status (读取穿越状态)
   → git push (同步穿越产物)
-  → ceremony_scan (topo_indicators 检测异常)
-  → L1: 自动闭环处理
-  → L2/L3: → .chanlun/escalate/ 队列
-  → git push (同步 escalate)
 
 你 (切分端-人的部分)
-  → 查看 escalate 队列
   → 在 Dashboard 观察逢亮穿越实况
   → 在 claude.ai 中做理论加工
   → git push 新指令 → 下一轮 scheduler 拉取

@@ -6,6 +6,7 @@ import os
 import re
 import subprocess
 import tempfile
+import time
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
@@ -129,6 +130,9 @@ class QueueIntake:
             for path in sorted(units.glob(f't{ticket}-*.json')):
                 unit = load_unit(self.state_root, path.stem)[0]
                 existing.append(unit)
+            merged = self._merged_run(existing)
+            if merged is not None:
+                raise QueueWaiting(f'awaiting_human: run {merged} 的交付 PR 已合入，不重派；请关闭本票')
             unreleased = [u for u in existing if txn.record is None
                           or int(u.run_id.rsplit('-', 1)[1]) > int(txn.record.run_id.rsplit('-', 1)[1])]
             if unreleased:
@@ -171,6 +175,17 @@ class QueueIntake:
                 os.unlink(temporary)
             return unit
 
+    def _merged_run(self, units: list[WorkUnit]) -> str | None:
+        """已合入的交付不因释放而重派。释放可能早于队列观察到合入，所以本机未记 merged 时也读 PR。"""
+        from .executor import delivery_status
+        for unit in units:
+            delivery = delivery_status(PilotRun.run_dir(self.state_root, unit.run_id))
+            number = ((delivery['state'] or {}).get('pr') or {}).get('number')
+            if delivery['phase'] == 'merged' or (type(number) is int
+                                                 and self.gateway.get_pr(number).get('merged') is True):
+                return unit.run_id
+        return None
+
     def once(self, run: Callable[[WorkUnit], int]) -> dict[int, dict[str, Any]]:
         from .executor import (
             AdmissionRefused,
@@ -178,7 +193,6 @@ class QueueIntake:
             delivery_status,
             load_unit,
         )
-        from .github_app import IdentityError
         from .run import Busy, Halted
         try:
             self.cutover.load()
@@ -237,13 +251,29 @@ class QueueIntake:
                 holder = self.claims.read(ticket)
                 return (ticket not in occupied, holder is None or holder.state == 'released', ticket)
 
+            # 两段式：先把本轮要读的 GitHub（登记、已交付票对账）全部读完，再派工。
+            # 读失败（IdentityError）在派工前就抛出，本轮不会有已起的子进程。
+            # 读阶段按「待派票都会空出槽位」乐观放行后面的票，派工阶段再按真实占槽判断。
+            planned: list[tuple[int, WorkUnit, Path]] = []
+
+            def finish(ticket: int) -> None:
+                activity = self._worker_activity(runs.get(ticket, set()))
+                if activity is not None:
+                    occupied[ticket] = activity
+                    previous = results[ticket].get('reason')
+                    phase = 'awaiting_human' if results[ticket].get('phase') == 'awaiting_human' else 'active'
+                    results[ticket].update(phase=phase, reason=f'{previous}; {activity}' if previous else activity)
+                else:
+                    occupied.pop(ticket, None)
+
             for ticket in sorted(tickets, key=priority):
-                if occupied and ticket not in occupied:
+                if ticket not in occupied and set(occupied) - {t for t, _, _ in planned}:
                     continue
                 try:
                     self.cutover.load()
                 except CutoverError:
                     break
+                deferred = False
                 try:
                     if ticket in invalid:
                         results[ticket] = {'phase': 'halted', 'reason': invalid[ticket]}
@@ -269,10 +299,6 @@ class QueueIntake:
                     if state['phase'] in ('awaiting_merge', 'merged', 'stale'):
                         try:
                             state = TicketExecutor(unit, self.gateway, claims=self.claims).reconcile_delivery(run_dir)
-                        except IdentityError as error:
-                            results[ticket] = {'phase': 'awaiting_human', 'run_id': unit.run_id,
-                                               'reason': f'delivery read failed; retry next round: {error}'}
-                            continue
                         except Halted as error:
                             results[ticket] = {'phase': 'halted', 'run_id': unit.run_id, 'reason': str(error)}
                             continue
@@ -287,6 +313,23 @@ class QueueIntake:
                         results[ticket] = {'phase': 'awaiting_human', 'run_id': unit.run_id,
                                            'reason': _stop_reason(run_dir)}
                         continue
+                    planned.append((ticket, unit, run_dir))
+                    deferred = True
+                except QueueWaiting as error:
+                    results[ticket] = {'phase': 'awaiting_human', 'reason': str(error)}
+                except (AdmissionRefused, CutoverError) as error:
+                    results[ticket] = {'phase': 'halted', 'reason': str(error)}
+                finally:
+                    if not deferred:
+                        finish(ticket)
+            for ticket, unit, run_dir in planned:
+                if occupied and ticket not in occupied:
+                    continue
+                try:
+                    self.cutover.load()
+                except CutoverError:
+                    break
+                try:
                     code = run(unit)
                     state = delivery_status(run_dir)
                     phase = state['phase']
@@ -306,19 +349,8 @@ class QueueIntake:
                                        'phase': 'awaiting_merge' if phase == 'merged' else phase}
                     if code == 75 or code < 0:
                         break
-                except QueueWaiting as error:
-                    results[ticket] = {'phase': 'awaiting_human', 'reason': str(error)}
-                except (AdmissionRefused, CutoverError) as error:
-                    results[ticket] = {'phase': 'halted', 'reason': str(error)}
                 finally:
-                    activity = self._worker_activity(runs.get(ticket, set()))
-                    if activity is not None:
-                        occupied[ticket] = activity
-                        previous = results[ticket].get('reason')
-                        phase = 'awaiting_human' if results[ticket].get('phase') == 'awaiting_human' else 'active'
-                        results[ticket].update(phase=phase, reason=f'{previous}; {activity}' if previous else activity)
-                    else:
-                        occupied.pop(ticket, None)
+                    finish(ticket)
             return self._status(results)
         finally:
             os.close(fd)
@@ -356,15 +388,40 @@ class QueueIntake:
     def _status(self, results: dict[int, dict[str, Any]]) -> dict[int, dict[str, Any]]:
         from .executor import _write_json
         _write_json(self.state_root / 'queue-status.json', {str(k): v for k, v in results.items()})
-        status_path = self.source_repo / '.sandcastle' / 'logs' / 'deepagents-status.md'
-        lines = ['# 新执行器队列', '']
+        lines = [STATUS_TITLE, '']
         for phase in ('queued', 'active', 'awaiting_human', 'awaiting_merge', 'halted'):
             lines.extend([f'## {phase}', ''])
             lines.extend(f"- #{ticket} `{row.get('run_id', '')}` {row.get('head', '')} {row.get('reason') or ''}"
                          for ticket, row in results.items() if row['phase'] == phase)
             lines.append('')
-        status_path.parent.mkdir(parents=True, exist_ok=True)
-        tmp = status_path.with_name(f'{status_path.name}.{os.getpid()}.tmp')
-        tmp.write_text('\n'.join(lines))
-        os.replace(tmp, status_path)
+        _write_status_page(self.source_repo, lines)
         return results
+
+
+STATUS_TITLE = '# 新执行器队列'
+UNREADABLE_NOTICE = '> 本页未刷新：'
+
+
+def _status_page(source_repo: Path) -> Path:
+    return source_repo / '.sandcastle' / 'logs' / 'deepagents-status.md'
+
+
+def _write_status_page(source_repo: Path, lines: list[str]) -> None:
+    status_path = _status_page(source_repo)
+    status_path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = status_path.with_name(f'{status_path.name}.{os.getpid()}.tmp')
+    tmp.write_text('\n'.join(lines))
+    os.replace(tmp, status_path)
+
+
+def mark_source_unreadable(source_repo: Path, detail: str) -> None:
+    """本轮读不到源：在状态页标题下写明哪个源、何时读不到，保留上一轮成功读取的内容，不伪造空队列。
+    queue-status.json 不动；下一轮读取成功时 _status 整页重写，这行提示随之消失。"""
+    try:
+        previous = _status_page(source_repo).read_text().split('\n')
+    except FileNotFoundError:
+        previous = [STATUS_TITLE, '']
+    body = [line for line in previous[1:] if not line.startswith(UNREADABLE_NOTICE)]
+    stamp = time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())
+    notice = f'{UNREADABLE_NOTICE}{stamp} 读不到 {detail}；以下为上一轮成功读取时的状态。'
+    _write_status_page(source_repo, [STATUS_TITLE, notice, *body])
