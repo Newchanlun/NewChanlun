@@ -43,8 +43,9 @@ jobs:
   #   rust/Cargo.lock 有变时仍全跑，让 main 作用域写入新的 cargo 缓存（PR 作用域的缓存别的 PR 读不到）。
   #   单父提交、直接推送、查询出错一律全跑。去重后 main 的 push run 多数没有 Rust 作业耗时，CI 计时请看 PR run。
   # #1875 同 PR 复用：PR run 的检出树去掉上面的跳过集后，与本分支上一次全绿 run 相同、且两边 .github 相同时，
-  #   不再跑 Rust 作业（典型是列车追平的 main 只多了 .sandcastle 改动）。凭据是那次 run 的 ci-ok 上传的
-  #   rust-green-<指纹> artifact（保留 7 天）；只认本仓库分支，查询出错一律全跑。判定见 .github/scripts/ci-rust-reuse.py。
+  #   不再跑 Rust 作业（典型是列车追平的 main 只多了 .sandcastle 改动）。凭据是那次 run 里服务端渲染的
+  #   `rust-green <指纹>` 作业的结论（见文件末尾 rust-green 作业），不是 artifact：同一 run 里的 PR 代码拿得到运行时令牌，
+  #   能伪造 artifact（#2027 第三轮独审）。只认本仓库分支、7 天内的 run，查询出错一律全跑。判定见 .github/scripts/ci-rust-reuse.py。
   changes:
     runs-on: ubuntu-latest
     timeout-minutes: 5
