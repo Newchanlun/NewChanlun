@@ -308,6 +308,25 @@ fn partial_market_residual_is_explicit_not_reexecuted_in_next_bar() {
         .fills
         .is_empty());
 }
+#[test]
+fn cancelled_market_order_leaves_no_residual_at_its_exec_bar() {
+    let s = seed(vec![order(
+        "market",
+        Side::Buy,
+        10,
+        OrderKind::Market { exec_index: 2 },
+    )]);
+    let cancel = Change::Cancel {
+        family_id: "market".into(),
+        command_id: "cmd-cancel-market".into(),
+        eligibility_ref: "controlled-execute-cancel-market".into(),
+    };
+    let cancelled = advance(&model(), &s, &batch(1, vec![cancel])).unwrap();
+    assert!(!cancelled.next_state.families["market"].active);
+    let r = advance(&model(), &cancelled.next_state, &batch(2, vec![])).unwrap();
+    assert!(r.fills.is_empty());
+    assert!(r.unfilled_market.is_empty(), "{:?}", r.unfilled_market);
+}
 fn closing(transitions: &[serde_json::Value], epoch: &str) -> serde_json::Value {
     let found: Vec<_> = transitions
         .iter()
