@@ -68,7 +68,7 @@ ADR 0027 定了「结构判定域 / 重操作程序」两个互斥的唯一 owne
     - :3「已有 theta_replay 二进制与单日双跑仅为组件证据」。
     - :23「确认正式生产入口」。
 17. **分级依据**：`.sandcastle/docs/graph-engineering.md:23`「T 类（技术取舍）：数据结构、接口与 seam、owner 落点、状态机与事件 schema、测试锁、迁移步骤、恢复语义。有权威源或本仓判例可援引。→ 自动裁决。」
-18. **`/Volumes/AgentStorage/restart-20261107/slim/docs-archive/before-3d61fb/docs/agents/generation-constitution.md:35`**（属「## 2. 现役线名单」:32）：「**π 是唯一现役引擎**。锚定方式 = 家族根函数名（`pi_theta_fill_loop_overlay`），不锚行号（行号随版本漂移）。」
+18. **`docs/agents/generation-constitution.md:35`**（属「## 2. 现役线名单」:32）：「**π 是唯一现役引擎**。锚定方式 = 家族根函数名（`pi_theta_fill_loop_overlay`），不锚行号（行号随版本漂移）。」
 19. **退回重写约束**：#1530 评论 [6276895863](https://github.com/xy7365527-lang/NewChanlun/issues/1530#issuecomment-6276895863)（xy7365527-lang，2026-10-19）的四条约束。分级评论 [6276984750](https://github.com/xy7365527-lang/NewChanlun/issues/1530#issuecomment-6276984750)：「分级：T」。
 
 **仓内现状（main `b63a3fd586`，逐行核实，作为清单的事实依据）**
@@ -433,7 +433,7 @@ ADR 0039 的编号按 main 顺序分配：落地时取 `docs/adr/` 现有最大�
 | ADR 0038:60/:74 | `cat -n docs/adr/0038-dual-run-determinism-recovery-seek-asknown.md \| sed -n '58,80p'` | :60「**恢复**：launcher 启动时检测上次 checkpoint……」；:74「`evidence_class ∈ {simulation, experiment, production}`……simulation 产出不进 TStage 触闸计数」；:1-3 三行正本头先例 |
 | 当前最大 ADR 编号 0038 | `ls docs/adr/ \| tail -30` | 末项 `0038-dual-run-determinism-recovery-seek-asknown.md` |
 | graph-engineering.md:23、:63 | Read `.sandcastle/docs/graph-engineering.md` | :23 T 类定义原文；:63 N-1 用户原话 |
-| generation-constitution.md:32/:35 | `sed -n '26,36p' /Volumes/AgentStorage/restart-20261107/slim/docs-archive/before-3d61fb/docs/agents/generation-constitution.md` | :32「## 2. 现役线名单」；:35「**π 是唯一现役引擎**。锚定方式 = 家族根函数名（`pi_theta_fill_loop_overlay`），不锚行号（行号随版本漂移）。」 |
+| generation-constitution.md:32/:35 | `sed -n '26,36p' docs/agents/generation-constitution.md` | :32「## 2. 现役线名单」；:35「**π 是唯一现役引擎**。锚定方式 = 家族根函数名（`pi_theta_fill_loop_overlay`），不锚行号（行号随版本漂移）。」 |
 | AGENTS.md #793/#799/#804 | Read `AGENTS.md` | :36 注释须带票号；:58 #799 判别式「接在同一个 if-else 上」；:70-76 #804 ①判别式与不落在形状上 |
 | #1340 票面 :10/:22/:326/:332/:333/:340/:350-355/:359/:372-373/:396-397/:409-411/:424 | `gh issue view 1340 --json body --jq .body > /tmp/fu08_1340.md`；`grep -n` 与 `sed -n '318,362p;390,410p'` | 各行原文如正文所引；state OPEN；标题「SPEC：完整生产程序、结构全分类与逐重经营（#1323，R2）」 |
 | SPEC.md:422 | `sed -n '422p' .chanlun/review-results/issue1339-r2-spec-20260909/view/spec/SPEC.md` | 「\| AT-16 \| 每条入口/preset/feature/服务/直发路径有实际终态；默认启动、影子和带仓迁移不能绕过 owner/X \| C11；Destination 2/3 \|」 |

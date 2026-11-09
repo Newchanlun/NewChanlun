@@ -37,7 +37,7 @@
 
 - `/grilling`：「If a *fact* can be found by exploring the environment … look it up rather than asking me. The *decisions*, though, are mine」——事实由代理查完，决定才问人，每问附推荐答案。
 - `/grill-with-docs`（= `/grilling` + `/domain-modeling`）：对照 `CONTEXT.md` 与 `docs/adr/`，已裁的直接用，与词汇表或代码冲突的当场指出。
-- AGENTS.md「开发流程」的两路搜索（新开票前查 tracker 的全部状态及仓内相关材料）与 ADR 0012 裁定一、四：tracker 含已关闭票与评论，仓内含推论层；推论层主张可援引，推理链搬进票内重过。ADR 0012 代价第 4 条「每张裁定票前多一个 AFK 子代理」即本步。
+- AGENTS.md「派发与开工纪律」的两路搜索（新开票前查 tracker 的全部状态及仓内相关材料）与 ADR 0012 裁定一、四：tracker 含已关闭票与评论，仓内含推论层；推论层主张可援引，推理链搬进票内重过。ADR 0012 代价第 4 条「每张裁定票前多一个 AFK 子代理」即本步。
 
 无人值守下没有人能当场纠正「这个早定过了」，所以胶水只补一件事：把查过的证据落成可复核的文件。主控模型 `gpt-6.1-sol` 只读取证，逐个待决点（Q1、Q2…）两路各至少一条查询，归一类：
 

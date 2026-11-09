@@ -1006,7 +1006,7 @@ ${FIXED_CLASS_LINE}${fixed === "none" ? "（只验考古）" : `：分级已定�
 - .agents/skills/grilling/SKILL.md：事实先查环境，候选附推荐答案与推导；开发决策按本仓 T/P 起草加非作者独审流程由代理裁定，不等人答；真实资金、交易与凭据权限不由本流程授予。
 - .agents/skills/domain-modeling/SKILL.md：对照 CONTEXT.md 与 docs/adr；「Challenge against the glossary」「Cross-reference with code」发现的冲突当场写出。
 - .agents/skills/wayfinder/SKILL.md「Ticket Types」：仓外事实缺口是 research 票；docs/agents/wayfinder-workflow.md「票型与代理裁定」：缺数字派探针票。
-- AGENTS.md「开发流程」的两路搜索与 docs/adr/0012-inference-layer-document-naming.md 裁定一、四：推论层主张可援引，推理链必须搬进来重过并现场打溯源标签。
+- AGENTS.md「派发与开工纪律」的两路搜索与 docs/adr/0012-inference-layer-document-naming.md 裁定一、四：推论层主张可援引，推理链必须搬进来重过并现场打溯源标签。
 
 ${renderTicket(t)}
 ${o.feedback ? `\n## 上一次考古的机械校验或独审反馈，必须逐条回查更正：\n${o.feedback}\n` : ""}
