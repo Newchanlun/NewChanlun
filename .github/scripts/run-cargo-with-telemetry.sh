@@ -114,8 +114,26 @@ finish() {
 }
 trap finish EXIT
 
-set +e
-("${command_argv[@]}")
-COMMAND_STATUS=$?
-set -e
+# #1875：Boat 上偶发「刚编出的 build-script 执行被拒」（execve EACCES，cargo 报 never executed；3 次 / 约 800 作业，
+#   3 台不同机器，与目录、挂载无关，见 /Volumes/AgentStorage/restart-20261107/slim/boat-eacces-report.md）。
+#   只在输出同时含这两行特征时重试同一命令一次，并留一行带机器名与路径的 warning 供统计；其余失败一律原样返回。
+#   失败发生在 build-script 执行阶段，测试尚未开始；cargo 重跑是幂等的。
+command_log="$(mktemp)"
+run_command() {
+  set +e
+  ("${command_argv[@]}") 2>&1 | tee "$command_log"
+  COMMAND_STATUS=${PIPESTATUS[0]}
+  set -e
+}
+is_build_script_eacces() {
+  grep -q 'Permission denied (os error 13)' "$command_log" \
+    && grep -Eq 'could not execute process `[^`]*/build-script-build` \(never executed\)' "$command_log"
+}
+run_command
+if (( COMMAND_STATUS != 0 )) && is_build_script_eacces; then
+  denied="$(grep -Eo 'could not execute process `[^`]*/build-script-build`' "$command_log" | head -n 1)"
+  echo "::warning title=Boat build-script EACCES retry::host=$(hostname) ${denied}"
+  run_command
+fi
+rm -f "$command_log"
 exit "$COMMAND_STATUS"
