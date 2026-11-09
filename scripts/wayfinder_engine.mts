@@ -210,15 +210,20 @@ const field = (lines: string[], name: string) => {
   return "";
 };
 
-/** 解析结构化 SPEC 裁定评论；首行不是「SPEC 独审裁定：PASS|BLOCK」返回 null。 */
+/**
+ * 解析结构化 SPEC 裁定评论。首行（去掉行尾空白后）必须恰为「SPEC 独审裁定：PASS」或「…：BLOCK」，
+ * 只容许 specRulingBody 写出的整行加粗 `**…**`；结论后多一个字（如「PASS不通过」「PASS (draft)」）、
+ * 半角冒号、引用或列表前缀都不算裁定，返回 null，交由 isSpecApproved 按普通评论（含驳回词判定）处理。
+ */
 export function parseSpecRuling(body: string): SpecRuling | null {
-  const lines = body.trim().split("\n");
-  const m = new RegExp(`^${SPEC_RULING_HEAD}(?:\\*{1,3}|_{1,3})?\\s*[：:]\\s*(?:\\*{1,3}|_{1,3})?(PASS|BLOCK)\\b`).exec(strip(lines[0] ?? ""));
+  const lines = body.replace(/\r\n/g, "\n").split("\n");
+  const m = new RegExp(`^(?:\\*\\*${SPEC_RULING_HEAD}：(PASS|BLOCK)\\*\\*|${SPEC_RULING_HEAD}：(PASS|BLOCK))$`)
+    .exec((lines[0] ?? "").replace(/\s+$/, ""));
   if (!m) return null;
   const rest = lines.slice(1);
   return {
     specNumber: Number(field(rest, "SPEC")),
-    verdict: m[1] as SpecRuling["verdict"],
+    verdict: (m[1] ?? m[2]) as SpecRuling["verdict"],
     author: field(rest, "作者"),
     reviewer: field(rest, "独审"),
     digest: field(rest, "正文 sha256").toLowerCase(),
@@ -262,7 +267,8 @@ export function isSpecApproved(spec: ChildIssue, orchestrator: string): boolean 
   let approved = false;
   for (const c of mine) {
     const ruling = parseSpecRuling(c.body);
-    if (ruling) approved = specRulingProblem(ruling, spec.number, spec.body) === null;
+    // 结构化裁定之外多写的任何驳回词同样撤销放行：驳回判定不因裁定解析成功而跳过。
+    if (ruling) approved = specRulingProblem(ruling, spec.number, spec.body) === null && !(ruling.verdict === "PASS" && REJECT_RE.test(c.body));
     else if (REJECT_RE.test(c.body)) approved = false;
   }
   return approved;

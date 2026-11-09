@@ -3424,7 +3424,7 @@ test("unsignedUserGate：返修用的「退回：…」评论、没写该字段�
   assert.equal(at("退回：签署\n- 另一字段：1"), 1, "签署评论里没写该字段");
   assert.equal(at(`退回：签署 ${field}：5000 USDT`), 1, "字段名须在首行之后逐项写");
   assert.equal(at(`退回：签署\n- ${field}=5000 USDT；有效域=BTC 实盘 V0`), 0);
-  assert.equal(at(`退回:签署\n- ${field}=5000 USDT；有效域=BTC 实盘 V0`), 0, "首行半角冒号同样认");
+  assert.equal(at(`退回:签署\n- ${field}=5000 USDT；有效域=BTC 实盘 V0`), 1, "首行须为全角冒号的「退回：签署」");
 });
 
 test("unsignedUserGate：签署行须恰为「- 字段=值；有效域=域」，值与域非空、不是否定或一句话，一项一行", () => {
@@ -3447,6 +3447,19 @@ test("unsignedUserGate：签署行须恰为「- 字段=值；有效域=域」，
   assert.equal(at(`- ${field}=5000 USDT；有效域=BTC 实盘，等下周再看。`), 1, "有效域是一句话");
   assert.equal(at(`- ${field}=5000 USDT；有效域=BTC 实盘 V0\n- ${field}=9000 USDT；有效域=BTC 实盘 V0`), 1, "同一字段两行有歧义");
   assert.equal(at(`> - ${field}=5000 USDT；有效域=BTC 实盘 V0`), 1, "引用里的签署行不算");
+});
+
+test("unsignedUserGate：签署评论首行必须恰为「退回：签署」，多任何字（含否定）都不算签署", () => {
+  const field = "真实账户共同 cap 签署值";
+  const line = `- ${field}=5000 USDT；有效域=BTC 实盘 V0`;
+  const at = (head: string) => unsignedUserGate([{ field, basis: "x", signature: 1 }], [{ author: "xy7365527-lang", body: `${head}\n${line}` }]).length;
+  assert.equal(at("退回：签署"), 0);
+  assert.equal(at("退回：签署   "), 0, "行尾空白不计");
+  for (const head of ["退回：签署但不批准", "退回：签署不批准", "退回：签署 但不批准", "退回：签署（不签）", "退回：签署(draft)",
+                      "退回：签署。暂不生效", "退回：签署 reject", "退回：签署x", "退回: 签署", "退回：签署：", " 退回：签署",
+                      "> 退回：签署", "**退回：签署**", "退回： 签署"]) {
+    assert.equal(at(head), 1, `首行「${head}」不是签署`);
+  }
 });
 
 test("资金与权限硬门：分级、起草、独审三处提示同口径，交还用户不判 BLOCK，代签判 BLOCK", () => {
