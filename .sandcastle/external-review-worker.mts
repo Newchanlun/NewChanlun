@@ -270,6 +270,8 @@ export async function runExternalReview(folder: string, deps: WorkerDependencies
     volume = reviewVolumeName(launch.launch_id); record.volume = volume; record.volume_removed = false;
     // SIGTERM/SIGINT 时 Sandcastle 的 shutdown 钩子同步删容器后 process.exit(1)，finally 跑不到；退出钩子同步删卷。
     // 被 SIGKILL、OOM 或重启打断时退出钩子也跑不到，由宿主派发前的 reaper 按标签回收。
+    // remove() 会强删仍引用卷的容器：进程退出时本 launch 的审阅容器（Sandcastle 的 rm 失败时仍在）和辅助容器都已无用，
+    // 卷名带本次 launch_id，别的 launch 的容器不会挂它；不强删，残留容器会让删卷一直报 in use。
     const reviewVolume = volume;
     removeOnExit = () => { try { deps.volumes.remove(reviewVolume); } catch { /* 留给 reaper */ } };
     process.once("exit", removeOnExit);

@@ -850,9 +850,11 @@ class ExternalReview:
             except (OSError, ValueError, KeyError, TypeError, IdentityError):
                 continue
         entries = []
+        live_volumes = 0
         for launch_id, items in sorted(owned.items()):
             worker = workers.get(launch_id)
             if worker is not None and supervisor_alive(worker, rows):
+                live_volumes += len(items["volumes"])
                 continue
             if worker is None:
                 entries.append({"action": "retained", "reason": "unknown_launch", "launch_id": launch_id, **items})
@@ -863,6 +865,11 @@ class ExternalReview:
                        if v == REVIEW_VOLUME_PREFIX + launch_id and self.remove_review_volume(v)]
             entries.append({"action": "reaped", "launch_id": launch_id, "containers": items["containers"],
                             "volumes": removed, "retained_volumes": [v for v in items["volumes"] if v not in removed]})
+        # 每轮一行计数：留下的卷（未登记 launch、删不掉）与存活 launch 占着的卷都报出来，不只记删掉的。
+        retained = sum(len(e["volumes"]) for e in entries if e["action"] == "retained")
+        retained += sum(len(e["retained_volumes"]) for e in entries if e["action"] == "reaped")
+        entries.append({"action": "summary", "reaped_volumes": sum(len(e["volumes"]) for e in entries if e["action"] == "reaped"),
+                        "retained_volumes": retained, "live_volumes": live_volumes})
         return self._reaper_log(entries)
 
     def _reaper_log(self, entries: list[dict]) -> list[dict]:

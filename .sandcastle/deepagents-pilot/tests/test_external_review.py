@@ -654,6 +654,12 @@ def test_reaper_removes_dead_launch_volume_and_containers_before_next_dispatch(l
     assert reaped and reaped[0]["launch_id"] == dead and reaped[0]["volumes"] == [vol(dead)]
     assert any(e["action"] == "retained" and e["launch_id"] == unknown for e in log)
     assert not any(e.get("launch_id") == live for e in log)
+    # 每轮一行计数：删掉的、留下的（未登记 launch）、存活 launch 占着的卷都报数。
+    summaries = [e for e in log if e["action"] == "summary"]
+    assert summaries[0] == {"at": summaries[0]["at"], "action": "summary", "reaped_volumes": 1, "retained_volumes": 1,
+                            "live_volumes": 1}
+    # 两位 reviewer 并发派发，各跑一轮 reaper，可能都看见同一个死卷；重复删除无害。
+    assert all(s["retained_volumes"] == 1 and s["live_volumes"] == 1 for s in summaries)
 
 
 def test_reaper_failure_never_blocks_dispatch(lane):
