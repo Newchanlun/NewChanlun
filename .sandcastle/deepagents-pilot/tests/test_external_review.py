@@ -1242,6 +1242,26 @@ def test_deleted_files_need_only_the_deletion_list(outputs, covered):
     assert patch.covered_by(outputs) is covered
 
 
+REPEAT_DIFF = ("diff --git a/f.py b/f.py\nindex 1111111..2222222 100644\n--- a/f.py\n+++ b/f.py\n"
+               "@@ -1,0 +2 @@\n+    return\n@@ -9,0 +11 @@\n+    return\n")
+REPEAT_HEADER = "diff --git a/f.py b/f.py\n"
+
+
+@pytest.mark.parametrize("outputs, covered", [
+    ([REPEAT_HEADER + "@@ -1,0 +2 @@\n+    return\n@@ -9,0 +11 @@\n+    return\n"], True),
+    # #2037 kimi BLOCK：同一行改动出现两次，只见到一次不算读全
+    ([REPEAT_HEADER + "@@ -1,0 +2 @@\n+    return\n"], False),
+    # 同一份只含一次的输出看两遍，不能凑成两次（不同输出之间取最大，不相加）
+    ([REPEAT_HEADER + "+    return\n", REPEAT_HEADER + "+    return\n"], False),
+    # 同一条输出里两段（比如按 hunk 分两次 sed）按次数累加
+    ([REPEAT_HEADER + "+    return\n" + REPEAT_HEADER + "+    return\n"], True),
+])
+def test_repeated_change_lines_must_all_be_seen(outputs, covered):
+    patch = FrozenPatch.from_diff("a" * 40, "b" * 40, "", REPEAT_DIFF)
+    assert patch.files[0].changes == (("+return", 2),)
+    assert patch.covered_by(outputs) is covered
+
+
 def test_visible_outputs_are_what_the_model_saw(tmp_path):
     log = tmp_path / "session.jsonl"
     log.write_text("\n".join([

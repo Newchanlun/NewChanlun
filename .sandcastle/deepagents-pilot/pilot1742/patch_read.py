@@ -39,6 +39,7 @@ from __future__ import annotations
 
 import posixpath
 import re
+from collections import Counter
 from dataclasses import dataclass, field, replace
 
 _OPAQUE = "\0"  # 无法静态求值的部分（`$(...)`、未知变量）；含它的词不会匹配任何 SHA 或命令名
@@ -591,7 +592,9 @@ class FrozenFile:
     path: str | None
     evidence: frozenset[str]
     added: frozenset[str]
-    changes: frozenset[str] = frozenset()  # 全部非空改动行，带 `+`/`-` 号（去掉首尾空白），供 FrozenPatch.covered_by
+    # 全部非空改动行（带 `+`/`-` 号、去掉首尾空白）及其在本文件里出现的次数，按行排序；供 FrozenPatch.covered_by。
+    # 存次数：同一文件里两条 `+return` 只见到一条不算读全（#2037 kimi BLOCK）
+    changes: tuple[tuple[str, int], ...] = ()
     deleted: str | None = None  # 整文件删除时它在 merge-base 上的路径；covered_by 只要求见过删除清单或文件头
 
 
@@ -663,7 +666,7 @@ class FrozenPatch:
         files = tuple(FrozenFile(header, path,
                                  frozenset({t for _, t in lines if len(t) >= least} if changed else {header}),
                                  frozenset({t for sign, t in lines if sign == "+" and len(t) >= least}),
-                                 frozenset({sign + t for sign, t in lines}), deleted)
+                                 tuple(sorted(Counter(sign + t for sign, t in lines).items())), deleted)
                       for header, path, lines, deleted in split)
         return cls(head_sha, merge_base_sha, base_sha, files)
 
@@ -705,16 +708,19 @@ class FrozenPatch:
         每个文件的 `diff --git` 头都出现过，且该文件的每一条改动行（带 `+`/`-` 号）都出现在某段输出里、
         跟在这个文件头之后。输出须是模型实际看到的（Codex 给模型的输出会从中间截掉，含截断标记的行与
         _BREAK 行不算，截断标记之后的行不再归属前面的文件头）。行号前缀（`nl -ba`、`grep -n`）照常去掉。
+        同一文件里重复的改动行要见到同样多次：同一条输出里按出现次数累加，不同输出之间取最大、不相加。
         这是「读全了」的判定：一行没出现就不算，分段读、换着写法读都能认；只看 `--stat`、只读 head 上的文件
         （没有 `+`/`-` 号）、只读了一部分文件都不算。整文件删除的条目例外（总控裁定，#2037）：它的路径以
         `D<TAB><path>`（`--name-status`）出现过、或它的 `diff --git` 头出现过就算覆盖，不要求读到被删的内容。"""
         if not self.files:
             return False
-        wanted = {f.header: f.changes for f in self.files}
-        seen: dict[str, set[str]] = {header: set() for header in wanted}
+        wanted = {f.header: Counter(dict(f.changes)) for f in self.files}
+        # 每行见到的次数：同一条输出里按出现次数累加，跨输出取最大（同一份 diff 跑两次不能把一条重复行凑成两条）
+        seen: dict[str, Counter[str]] = {header: Counter() for header in wanted}
         headers: set[str] = set()
         listed: set[str] = set()  # name-status 里 `D<TAB><path>` 出现过的路径
         for output in outputs:
+            counts: dict[str, Counter[str]] = {}
             current: str | None = None
             for raw in _lines(output):
                 if _BREAK.search(raw) or _TRUNCATED.search(raw):
@@ -730,9 +736,11 @@ class FrozenPatch:
                     if current is not None:
                         headers.add(current)
                 elif current is not None and line[:1] in ("+", "-") and line[1:].strip():
-                    seen[current].add(line[0] + line[1:].strip())
+                    counts.setdefault(current, Counter())[line[0] + line[1:].strip()] += 1
+            for header, counted in counts.items():
+                seen[header] |= counted  # Counter 的 `|` 取逐项最大
         return all(f.header in headers or f.deleted in listed if f.deleted is not None
-                   else f.header in headers and f.changes <= seen[f.header] for f in self.files)
+                   else f.header in headers and wanted[f.header] <= seen[f.header] for f in self.files)
 
 
 _DELETED_STATUS = re.compile(r"D\t(.+)")  # `git diff --name-status` 的整文件删除行
