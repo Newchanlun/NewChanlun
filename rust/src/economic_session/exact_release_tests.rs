@@ -1,6 +1,6 @@
 //! #1407 C1：E 侧精确命令生产者测试锁 L1–L9（`tb03b-finance/5`，TestOnly 已定域 slot）。
 //! S/γ 仍是单位信任缝；X 侧 accept 与接纳时钟归 #1942，本文件只锁 E 的生产者与应答者。
-//! 本文件只用 main 已有的符号与字符串操作名，故能在不含实现的 main 上编译并跑红。
+//! 首批 L1–L9 只用 main 已有符号，可在不含实现的 main 上编译跑红；之后各轮补的锁直接调用本 PR 新增的归约与校验。
 use super::*;
 
 const EXACT_OPS: [&str; 4] = [
@@ -894,8 +894,9 @@ fn frozen_input_refuses_two_first_submits_in_one_family() {
     );
 }
 
-/// ADR 0052 裁定二.4：经正式入口产生的 Release 结果读回 domain-event/1 外壳。identity 是真实 command_id，
-/// cause[] 指向命令身份，model_ref 是本次对照的模型引用；域外终态与域内交付各一例。
+/// ADR 0052 裁定二.4：经正式入口产生的 Release 结果读回 domain-event/1 外壳。identity 是阶段身份
+/// `ReleaseExact:<command_id>`，cause[] 是该命令 Dispatchable 事件的 event_id，model_ref 是本次对照的模型引用；
+/// 域外终态与域内交付各一例。
 #[test]
 fn release_results_project_to_domain_events_with_command_cause_and_model() {
     let mut f = fixture(None);
@@ -921,7 +922,7 @@ fn release_results_project_to_domain_events_with_command_cause_and_model() {
         );
         assert_eq!(
             e["cause"],
-            json!([{"command_id":format!("cmd-{name}")}]),
+            json!([{"event_id":{"domain_id":"E","commit_seq":r["record"]["dispatchable_seq"],"ordinal":"0"}}]),
             "{e}"
         );
         assert_eq!(e["model_ref"], model, "{e}");
@@ -963,17 +964,24 @@ fn command_lifecycle_events_are_all_admitted_and_release_cause_reaches_the_comma
     let releases: Vec<&Value> = all.iter().filter(|e| e["kind"] == "ReleaseExact").collect();
     assert_eq!(releases.len(), 2);
     for (release, name) in releases.into_iter().zip(["alpha", "beta"]) {
-        let cause = &release["cause"][0]["command_id"];
+        let cause = &release["cause"];
+        assert_eq!(cause.as_array().unwrap().len(), 1, "{release}");
+        exact(&cause[0], &["event_id"])
+            .unwrap_or_else(|e| panic!("cause 须为 {{event_id}}：{e}: {release}"));
         let origin = all
             .iter()
-            .find(|e| e["identity"]["command_id"] == *cause)
+            .find(|e| e["event_id"] == cause[0]["event_id"])
             .unwrap_or_else(|| panic!("cause 不可回溯：{release}"));
         assert_eq!(origin["kind"], "MakeDispatchable", "{origin}");
+        assert_eq!(
+            origin["identity"]["command_id"],
+            format!("cmd-{name}"),
+            "前件身份即命令身份"
+        );
         assert_eq!(
             origin["payload"]["record"]["command_id"],
             format!("cmd-{name}")
         );
-        assert_eq!(*cause, format!("cmd-{name}"), "cause 指向命令身份");
     }
 }
 
@@ -1066,4 +1074,20 @@ fn make_dispatchable_refuses_when_responsibility_amount_differs_from_grant() {
         e.starts_with("MissingDependency") && e.contains("完整责任"),
         "{e}"
     );
+}
+
+#[test]
+fn frozen_command_id_cannot_take_stage_or_receipt_key_form() {
+    let f = fixture(None);
+    let plan = plan_of(&f, "alpha");
+    crate::economic_session::exact_command::validate_plan(&plan).unwrap();
+    for id in ["ReleaseExact:cmd-alpha", "tb03b-finance/5:ReleaseExact:abc"] {
+        let mut q = plan.clone();
+        q["exact"]["command_id"] = json!(id);
+        let e = crate::economic_session::exact_command::validate_plan(&q).unwrap_err();
+        assert!(
+            e.starts_with("IdentityConflict") && e.contains("冒号"),
+            "{id}: {e}"
+        );
+    }
 }

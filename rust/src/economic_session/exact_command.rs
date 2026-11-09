@@ -202,6 +202,11 @@ pub(super) fn validate_plan(q: &Value) -> Result<(), String> {
     ] {
         required(x, k)?;
     }
+    // 生命周期事件身份 `ReleaseExact:<command_id>` 与回执键 `<revision>:<op>:<hash>` 都含冒号；
+    // command_id 不含冒号，与二者在 domain-event/1 的身份命名空间里不会同形。
+    if required(x, "command_id")?.contains(':') {
+        return Err("IdentityConflict：command_id 不得含冒号（保留给阶段身份与回执键）".into());
+    }
     positive(required(x, "revision")?, "revision")?;
     positive(required(x, "first_quantity")?, "first_quantity")?;
     if q["owner"].as_str().and_then(|o| o.strip_prefix("B:")) != x["chong_id"].as_str() {

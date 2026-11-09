@@ -33,7 +33,8 @@ plan = {
               "symbol": "alpha", "projection_manifest": "TestOnly-projection/alpha",
               "eligibility_ref": "S:cmd-alpha", "concurrency": "single"},
 }
-# Reserve 的 grant_id：hash([REV, session, generation, slot_id, decision_id, hash(plan)])，REV 为 finance.rs 的 `/1` 常量。
+# grant_id 照抄 finance.rs Reserve 的生产公式 hash([REV, session, generation, slot_id, decision_id, hash(plan)])，
+# 其中 REV 是 `/1` 常量，`/5` 也按它派生。故本 oracle 对 grant_id 不是独立证据，只独立核命令其余字段的组装与字节。
 grant_id = sha(["tb03b-finance/1", "tb03b-unit", "1", "slot", "alpha", sha(plan)])
 conditions = [
     {"condition_id": cid, "authority_revision": cap, "dependency_set": ["controlled-dependency"],

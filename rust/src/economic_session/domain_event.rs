@@ -151,8 +151,6 @@ pub(super) fn validate(v: &Value) -> Result<(), String> {
     for c in v["cause"].as_array().ok_or("InvalidDomain：cause须数组")? {
         let k = if c.get("event_id").is_some() {
             "event_id"
-        } else if c.get("command_id").is_some() {
-            "command_id"
         } else {
             "fact_key"
         };
@@ -400,9 +398,13 @@ fn events_in(
         _ => Vec::new(),
     };
     let cause = if event["kind"] == "ReleaseExact" {
-        // ADR 0052 裁定二.4：Release 结果（含 Unsupported 终态）的前件指向命令身份，
-        // 也就是该命令 MakeDispatchable 事件的身份。
-        vec![json!({"command_id":command_id})]
+        // ADR 0052 裁定二.4：Release 结果（含 Unsupported 终态）的前件指向命令身份。命令身份由该命令的
+        // MakeDispatchable 事件铸出，前件按 ADR 0051:248 写成那条事件的 event_id。
+        let seq = nonnegative(
+            required(&event["record"], "dispatchable_seq")?,
+            "dispatchable_seq",
+        )?;
+        vec![json!({"event_id":event_id(&config.domain, seq, 0)})]
     } else if event["kind"] == "ResolveEvidence" {
         event["covered"]
             .as_array()
