@@ -83,7 +83,7 @@
 
 ### 五、P1 同强度发送前置件（Q5 = A，P 类选择）
 
-- `experiment` 与 `production` 走同一发送门：X 每次启动（每个新 `writer_epoch`）后、构造任何写传输之前，按「发送门（8 步）」核验 ADR 0028:46 列出的四项组成（旧 writer 禁入证据、X 排他锁、profile 身份绑定、凭据作用域版本），失败即拒发。
+- `experiment` 与 `production` 走同一发送门：X 每次启动（含同 `writer_epoch` 重启，见裁定二重启路径 2）后、构造任何写传输之前，按「发送门（8 步）」核验 ADR 0028:46 列出的四项组成（旧 writer 禁入证据、X 排他锁、profile 身份绑定、凭据作用域版本），失败即拒发。
 - **发送门是一个独立的发送前置件，不是 SR-3 的失效触发。** 它不判定、不登记 ADR 0028:46 的五项失效触发是否发生，只核当前输入是否一致。现行 X 在 `serve` 启动时一次性读入 profile、库路径、`writer_epoch` 与凭据（`x_execution_session.rs:173-188`），X 读入的那几项输入（profile、库路径、epoch、凭据）一旦变化，只能经一次重启进入 X，所以「每次启动都核」已覆盖这类变化之后的首次发送，不需要识别触发种类（`[新缠论:推论]`）。场所侧的变化（例如 agent key 在场所端被撤销）不经重启，也不由发送门发现，由场所拒绝回报兜底。
 - **SR-3 与发送门的边界。** ADR 0045 的 SR-3 v1 签署原样保留，不升版重签：
 
@@ -115,7 +115,7 @@
 
 拒发在当前 `writer_epoch` 内为终态，拦截一切写请求：下单、撤单、reduce-only 平仓，以及急停展开出的命令。同 epoch 重启时按裁定二路径 2 仍为 refused。只读查询与恢复对账（ADR 0030:48 前半「先只读对账在途订单」）照常。ADR 0030:48 后半「再于同一授权 id 下续做」在拒发期间不执行：已持久的退出授权保持待续、不撤销、不改判据，到下一个通过发送门的 epoch 再以同一授权 id 续做（修订指针在 ADR 0030 文末）。
 
-这是 P1 上的安全语义，不是风险偏好：发送门核的是「发送者是谁、是不是唯一」，撤单与平仓同样是用这把未核身份的钥匙对场所写。放行撤单就等于新立一条「身份未核也免核」的政策。代价是拒发期间系统内急停不可用，用户只能在场所网页端撤单（ADR 0028:38：场外动作是外部事实，系统按回报记账）；P1 是测试币。**本条只对 P1 签署，P2 激活时重裁**：届时「拒发期间真实挂单撤不了」是真金损失，作为 P 类由用户选。
+这是 P1 上的安全语义，不是风险偏好：发送门核的是「发送者是谁、是不是唯一」，撤单与平仓同样是用这把未核身份的钥匙对场所写。放行撤单就等于新立一条「身份未核也免核」的政策。代价是拒发期间系统内急停不可用，用户只能在场所网页端撤单（ADR 0028:38：场外动作是外部事实，系统按回报记账）；P1 是测试币。另一项代价：拒发在 epoch 内粘滞，第 7 步一次瞬时查询失败（如网络抖动）也会让本 epoch 一直拒发，退出授权随之一直待续；manifest 用静态 epoch 时，恢复须人工换新 `writer_epoch` 重启。本条不区分瞬时不可用与来源/结果不符，两者同样处置，理由同上：不换口径重试放行（ADR 0041:15）。**本条只对 P1 签署，P2 激活时重裁**：届时「拒发期间真实挂单撤不了」是真金损失，作为 P 类由用户选。
 
 离开拒发只有一条路：修正输入后以新 `writer_epoch` 重启，重走全部步骤。不自动重试，不回退旧 writer（ADR 0028:46），不因失败换值放行（ADR 0041:15）。修正若改了 profile 字段，即新版本，属失效触发。
 
@@ -181,7 +181,7 @@ X 库启动记录（每次启动一行，键 `(writer_epoch, launch_seq)`，与�
 | 3 | 累计完整性 | E 已 Recorded 的场所 adapter 原件，种类由能力记录声明（ADR 0060:44） | 场所给不出某类所需证据 → 该子项 Unsupported，减少责任保原潜量 | 源游标缺口进 Pending 或封闸（#1340:297；同类处置见 ADR 0060:42「账实差异只产生 Pending 或封闸」） | #1425、#1400、#1412 |
 | 4 | 幂等 / 查询范围 | `cloid` 投影单射且跨重启稳定（#1770）；单订单查询（#1770）；账户级查询（#1400） | 同 ID 重投默认 Unsupported（C07.6 要求另有获准且已实证的强幂等合同）；账户级查询在 #1400 落地前 Unsupported | `DeliveryUnknown`；查询 `Unavailable`（INTERFACE-CONTRACTS:41）；无隐式写重试（#1770） | #1770、#1400、#1422 |
 | 5 | 费用 / 更正 | fill 类费用随原 fill 进 E（ADR 0060:52-53） | HL 更正/bust 回报形状实施现场核实，未核前 Unsupported（#1412:13） | 按 ADR 0032 裁定五/六与 ADR 0060:46 | #1425、#1412 |
-| 6 | 会话权限 | 三层记录（裁定三）：`authorization` 行；能力记录 `session_permission` 来源栏（URL、日期、sha256）；启动记录 `session_permission_verified` 与 `userRole` 观测记录 | 第 7 步做不成 → `UnsupportedCapability` / `SessionPermission`，拒发；profile 未声明 reduce-only 时 `reduce_only=true` → `UnsupportedCapability`（#1770） | 核验查询失败 → 本次启动拒发，不换口径重试 | #1769 后续叶 / #1383（门）、#1770（变体）、#1400（真实只读核验） |
+| 6 | 会话权限 | 三层记录（裁定三）：`authorization` 行；能力记录 `session_permission` 来源栏（URL、日期、sha256）；启动记录 `session_permission_verified` 与 `userRole` 观测记录 | 第 7 步做不成 → `UnsupportedCapability` / `SessionPermission`，拒发；profile 未声明 reduce-only 时 `reduce_only=true` → `UnsupportedCapability`（#1770） | 核验查询失败 → 本 epoch 拒发（裁定二路径 2 粘滞），不换口径重试；离开须换新 `writer_epoch` | #1769 后续叶 / #1383（门）、#1770（变体）、#1400（真实只读核验） |
 | 7 | 挂单限制 | 能力记录声明 tick、lot、最小名义值、在挂单上限，附来源；场所拒单作为观测记录（ADR 0028:32） | 未声明项 Unsupported，依赖该项的事前校验不放行 | 场所拒单是回报不是 fault | #1770、#1412 |
 | 8 | 时间语义 | 原件带 `received_time`（ADR 0056:52）与场所时间戳；能力记录声明其含义 | 场所无时间戳字段 → Unsupported | 按 ADR 0051 外壳与 C08.6 | #1400、#1425 |
 | 9 | 唯一外部事实来源 | 会话一个 `evidence_class`、一个外部事实源（ADR 0056:59） | 不适用（必备项） | `format` 与 `evidence_class` 不一致 → `SchemaUnsupported`，不落行（ADR 0056:46） | #1425 |
@@ -207,6 +207,7 @@ ADR 0028:24 的动作维度：
 3. [ADR 0045](0045-sr-v1-policy-signed.md) 文末「修订（#1540）」：SR-3 v1 签署原样保留、不升版重签；发送门是独立发送前置件，不是 SR-3 的失效触发；两者的触发条件、产物与所属签署；回退方式。
 4. [ADR 0048](0048-legacy-engine-module-level-dispositions.md) 文末「修订（#1540）」：:97 与 :309 所称 launcher 从 profile 的 `credential_scope` 读取并注入凭据，读作 X 执行 profile 的 `credential_source.{env,file}`。
 5. `CONTEXT.md`「运行边界」节新增两条词条：「凭据作用域版本」「权限证据三层」。
+6. [ADR 0030](0030-exit-authorization-and-liability-retirement.md) 文末「修订（#1540，拒发期间的续做）」：仅对 `P1-hl-testnet`（`experiment`）适用，裁定五（:48）的续做在 X 发送门拒发期间不执行，已持久的退出授权保持待续，到下一个通过发送门的 epoch 以同一授权 id 续做；production 随 P2 激活另裁。
 
 全仓 `rg -n credential_scope` 的其余命中：ADR 0028:22、ADR 0038:23/:127、ADR 0039:25/:426、`CONTEXT.md:370` 用的是作用域政策字段本义，不需改；`docs/runbook_production_session.md`、`rust/` 下的命中描述现行 `/1` 代码，随「受影响代码清单」由实施票一并改。
 
@@ -275,7 +276,7 @@ ADR 0028:24 的动作维度：
 ## 验收
 
 1. 本文件存在于 main，且下列四条各自 `grep -c` ≥ 1：`credential_scope_version` 或「凭据作用域版本」、`send_refusal_class`、`SessionPermission`、`AwaitingPolicy`。
-2. `grep -c '修订（#1540' docs/adr/0028-*.md docs/adr/0039-*.md docs/adr/0045-*.md docs/adr/0048-*.md` 每个文件 ≥ 1。
+2. `grep -c '修订（#1540' docs/adr/0028-*.md docs/adr/0030-*.md docs/adr/0039-*.md docs/adr/0045-*.md docs/adr/0048-*.md` 每个文件 ≥ 1。
 3. `grep -c '凭据作用域版本' CONTEXT.md` ≥ 1。
 4. 能力记录进持久身份：本文件「数据形状」节的绑定行含 `capability_record_sha256`，发送门第 2 步写明按 `capability_record_version` 逐项比较，「对下游的接口」的能力 hash 含 `capability_record_sha256`；下游测试表含 `x_rejects_same_capability_record_version_with_other_content`（同版本异内容 → `IdentityConflict`）。核法：`grep -c 'capability_record_sha256' docs/adr/0062-*.md` ≥ 4，`grep -c 'x_rejects_same_capability_record_version_with_other_content' docs/adr/0062-*.md` ≥ 1。
 5. 重启路径穷尽：本文件含「重启路径（四种，穷尽）」且下游测试表含 `x_same_epoch_key_swap_is_refused_and_sticky`、`x_same_epoch_identity_change_conflicts_without_write`；核法各 `grep -c` ≥ 1。
