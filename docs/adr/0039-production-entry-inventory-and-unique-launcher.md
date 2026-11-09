@@ -501,3 +501,10 @@ ADR 0039 的编号按 main 顺序分配：落地时取 `docs/adr/` 现有最大�
 
 1. **恢复读法。** :27、:147、:289 引用的 ADR 0038:60 按 ADR 0038「修订（#1539）」读：`production_session` 启动时检测 checkpoint，加载快照后重放持久日志。experiment/production profile 下不回退 checkpoint 之后已持久的 X/E/Bᵢ 事实，在途订单先只读对账、外部未知按最大责任保留，与 :288「不回退旧 writer」同向；simulation profile 按该修订第 2 条执行。
 2. **引用行号。** :26、:288、:326、:412、:427 所引「ADR 0030:44」现址为 ADR 0030:48（#1599 批复插入观察期段后漂移，提交 `40f11b540f`），文义不变。
+
+## 修订（#1540，凭据来源改名与发送门，2026-11-07）
+
+（append-only：裁定一至七与 #1523、#1539 修订节原文不改。依据 #1540 主控裁定 [裁定评论 6702983888](https://github.com/Newchanlun/NewChanlun/issues/1540#issuecomment-6702983888)；Q5 的实现机制按 [修订裁定 6717784668](https://github.com/Newchanlun/NewChanlun/issues/1540#issuecomment-6717784668)（2026-11-08：0045:24 读法照旧，P1 机器层核验改为独立的发送前置件），正本 [ADR 0062](0062-fu18-venue-account-permission-binding.md)。）
+
+1. **凭据来源。** :285 的「profile 的 `credential_scope` 指向的来源」读作 X 执行 profile 的 `credential_source.{env,file}`（由 `credential_scope.{env,file}` 改名）。`credential_scope` 只指 ADR 0028:22 的作用域政策字段（ADR 0062 裁定二）。
+2. **启动门。** :287-288 对 `experiment` profile 同样生效（ADR 0062 裁定五），作为独立的发送前置件，不是 ADR 0045 SR-3 的失效触发，拒发不产生 SR-3 记录。X 按 ADR 0062「发送门（8 步）」核验，拒发词汇按 ADR 0062 裁定六。拒发在当前 `writer_epoch` 内为终态并拦截一切写请求（ADR 0062 裁定七），**仅对 `P1-hl-testnet`（`experiment`）签署**；production（P2）下拒发期间撤单、reduce-only 平仓与急停是否放行是真金取舍，属 P 类，在 P2 激活时另裁（#1561 后继），本条不预裁。
