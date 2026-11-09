@@ -1511,7 +1511,6 @@ jobs:
       - rust-test-s-session-coverage
       - rust-test-s-session-extra-groups
       - rust-test-production-session
-      - rust-test-backtest-bin
       - s-sequence-1488
       - s-fields-native-1488
     steps:

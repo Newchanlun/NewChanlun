@@ -200,5 +200,25 @@ class ReuseTest(unittest.TestCase):
         self.assertEqual((d["rust"], d["rust_key"]), ("true", self.key))
 
 
+class WorkflowConsistencyTest(unittest.TestCase):
+    """rust-green 必须依赖 ci-ok 认定的全部 Rust 作业（#2018 删 rust-test-backtest-bin 时 needs 悬空过）。"""
+
+    def test_rust_green_needs_match_ci_ok_rust_jobs(self):
+        text = pathlib.Path(__file__).resolve().parents[1].joinpath("workflows/ci.yml").read_text()
+        block = text[text.index("\n  rust-green:\n"):]
+        needs_block = block[block.index("    needs:\n") + len("    needs:\n"):]
+        needs = set()
+        for line in needs_block.splitlines():
+            m = re.match(r"^      - ([A-Za-z0-9_-]+)$", line)
+            if not m:
+                break
+            needs.add(m.group(1))
+        rust_jobs = set(re.findall(r'"([A-Za-z0-9_-]+)"', re.search(r"rust_jobs = \{([^}]*)\}", text).group(1)))
+        jobs = set(re.findall(r"^  ([A-Za-z0-9_-]+):$", text, re.M))
+        self.assertTrue(rust_jobs, "ci-ok 的 rust_jobs 解析为空")
+        self.assertEqual(needs - {"changes"}, rust_jobs)
+        self.assertLessEqual(needs, jobs, "rust-green 依赖了不存在的作业")
+
+
 if __name__ == "__main__":
     unittest.main()
