@@ -4,6 +4,7 @@ import json
 import shlex
 import subprocess
 import sys
+import uuid
 from dataclasses import asdict
 from pathlib import Path
 from types import SimpleNamespace
@@ -12,6 +13,7 @@ import httpx
 import pytest
 from conftest import git
 
+from pilot1742 import delivery, patch_read
 from pilot1742 import external_review as module
 from pilot1742.delivery import EffectPending, RepoGateway, Stale
 from pilot1742.external_review import (
@@ -30,7 +32,7 @@ from pilot1742.github_app import (
     IdentityError,
     OutcomeUnknown,
 )
-from pilot1742.patch_read import FrozenPatch, reads_candidate_patch
+from pilot1742.patch_read import WHOLE_PATCH, FrozenPatch, reads_candidate_patch
 
 
 class Gateway:
@@ -723,6 +725,126 @@ def test_cleanup_preserves_unconfirmed_container(lane):
     assert checkout.exists()
 
 
+@pytest.mark.parametrize("removed", [True, False])
+def test_cleanup_removes_review_volume_the_supervisor_left(lane, removed):
+    """#1986：监督删卷失败（volume_removed=false）时，宿主回收 checkout 时补删本 launch 的卷；删不掉记 retained，checkout 照删。"""
+    result = lane.review_pr(1810)
+    target = ReviewTarget(**result["target"])
+    folder = lane.state_root / "runs" / target.key
+    worker = folder / MODELS[0]
+    checkout = lane.checkout_root / target.run_id / MODELS[0]
+    checkout.mkdir(parents=True)
+    volume = module.REVIEW_VOLUME_PREFIX + module._read(worker / "launch.json")["launch_id"]
+    receipt = module._read(worker / "receipt.json")
+    module._save(worker / "receipt.json", {**receipt, "volume": volume, "volume_removed": False})
+    calls = []
+    lane.remove_review_volume = lambda name: calls.append(name) or removed
+    assert lane.cleanup_checkout(target, MODELS[0], folder)
+    assert calls == [volume] and not checkout.exists()
+    assert module._read(worker / "checkout-cleanup.json") == {
+        "state": "removed", "checkout": str(checkout), "volume": volume, "volume_state": "removed" if removed else "retained"}
+    # 监督已删掉的卷不再删；回执里不属于本 launch 的卷名拒绝，不删别的卷。
+    calls.clear()
+    module._save(worker / "receipt.json", {**receipt, "volume": volume, "volume_removed": True})
+    assert lane.cleanup_checkout(target, MODELS[0], folder) and calls == []
+    module._save(worker / "receipt.json", {**receipt, "volume": module.REVIEW_VOLUME_PREFIX + "0" * 36, "volume_removed": False})
+    with pytest.raises(IdentityError, match="不属于本次 launch"):
+        lane.cleanup_checkout(target, MODELS[0], folder)
+    assert calls == []
+
+
+class FakeDocker:
+    """按标签列出的卷与容器；记录每条 docker 命令。rm/volume rm 真的把对象从列表里删掉。"""
+
+    def __init__(self, volumes=(), containers=(), volume_rm_stderr=None):
+        self.volumes = dict(volumes)        # name -> launch_id
+        self.containers = dict(containers)  # id -> (launch_id, volume or None)
+        self.volume_rm_stderr = volume_rm_stderr
+        self.calls = []
+
+    def __call__(self, args):
+        self.calls.append(args)
+        ok = lambda out="": subprocess.CompletedProcess(args, 0, out, "")
+        if args[:2] == ["volume", "ls"]:
+            return ok("".join(f"{n}\t{l}\n" for n, l in self.volumes.items()))
+        if args[:2] == ["ps", "-a"] and "--format" in args:
+            return ok("".join(f"{c}\t{l}\n" for c, (l, _) in self.containers.items()))
+        if args[:2] == ["ps", "-a"]:
+            volume = args[-1].removeprefix("volume=")
+            return ok("".join(f"{c}\n" for c, (_, v) in self.containers.items() if v == volume))
+        if args[:2] == ["rm", "-f"]:
+            self.containers.pop(args[2], None)
+            return ok()
+        if args[:2] == ["volume", "rm"]:
+            if self.volume_rm_stderr:
+                return subprocess.CompletedProcess(args, 1, "", self.volume_rm_stderr)
+            if any(v == args[2] for _, v in self.containers.values()):
+                return subprocess.CompletedProcess(args, 1, "", "volume is in use")
+            return ok() if self.volumes.pop(args[2], None) else subprocess.CompletedProcess(args, 1, "", "no such volume")
+        raise AssertionError(args)
+
+
+def test_remove_review_volume_removes_holders_first_and_only_accepts_review_names(lane):
+    with pytest.raises(IdentityError):
+        lane.remove_review_volume("f3-controller-data")
+    name = module.REVIEW_VOLUME_PREFIX + "a" * 36
+    # Sandcastle close 吞掉 rm 错误时残留的审阅容器、没删掉的辅助容器都会占住卷。
+    lane.docker = FakeDocker({name: "a" * 36}, {"c1": ("a" * 36, name), "c2": ("x", None)})
+    assert lane.remove_review_volume(name)
+    assert lane.docker.calls == [["ps", "-a", "-q", "--filter", f"volume={name}"], ["rm", "-f", "c1"], ["volume", "rm", name]]
+    assert lane.remove_review_volume(name)  # 已不存在也算删掉
+    lane.docker = FakeDocker(volume_rm_stderr="volume is in use")
+    assert not lane.remove_review_volume(name)
+
+
+def test_reaper_removes_dead_launch_volume_and_containers_before_next_dispatch(lane, monkeypatch):
+    """#1986 BLOCK：监督被 SIGTERM（Sandcastle 钩子 process.exit，finally 不跑、无回执）或 SIGKILL 打断后，
+    合成回执没有 volume 字段、container_closed=false，卷和容器只剩标签。下一次派发前 reaper 必须按标签收掉。"""
+    lane.launcher = [sys.executable, "-c", "raise SystemExit(3)"]  # 监督没写回执就退出
+    assert lane.review_pr(1810)["verdict"] == "FAILED"
+    first = ReviewTarget(**module._read(next((lane.state_root / "runs").glob("*/target.json"))))
+    dead = module._read(lane.state_root / "runs" / first.key / MODELS[0] / "launch.json")["launch_id"]
+    receipt = module._read(lane.state_root / "runs" / first.key / MODELS[0] / "receipt.json")
+    assert "volume" not in receipt and receipt["container_closed"] is False
+    # 存活 launch：别的 run 正在跑的监督（进程表里有它的 --output-dir）；未登记的 launch_id 不属于本 state_root。
+    live_worker = lane.state_root / "runs" / "live-run" / MODELS[1]
+    live_worker.mkdir(parents=True)
+    live = str(uuid.uuid4())
+    module._save(live_worker / "launch.json", {"launch_id": live})
+    unknown = str(uuid.uuid4())
+    vol = lambda launch: module.REVIEW_VOLUME_PREFIX + launch
+    lane.docker = FakeDocker(
+        {vol(dead): dead, vol(live): live, vol(unknown): unknown},
+        {"review-dead": (dead, vol(dead)), "helper-dead": (dead, vol(dead)), "review-live": (live, vol(live)),
+         "helper-unknown": (unknown, vol(unknown))})
+    real_rows = module._ps_rows
+    monkeypatch.setattr(module, "_ps_rows", lambda: [*real_rows(), (4242, 4242, "S", f"tsx worker --output-dir {live_worker}")])
+    lane.launcher = [sys.executable, str(Path(__file__).with_name("external_review_child.py"))]
+    assert lane.review_pr(1810, 2)["verdict"] == "PASS"
+    assert vol(dead) not in lane.docker.volumes
+    assert "review-dead" not in lane.docker.containers and "helper-dead" not in lane.docker.containers
+    assert set(lane.docker.volumes) == {vol(live), vol(unknown)}
+    assert set(lane.docker.containers) == {"review-live", "helper-unknown"}
+    log = [json.loads(line) for line in (lane.state_root / "volume-reaper.jsonl").read_text().splitlines()]
+    reaped = [e for e in log if e["action"] == "reaped"]
+    assert reaped and reaped[0]["launch_id"] == dead and reaped[0]["volumes"] == [vol(dead)]
+    assert any(e["action"] == "retained" and e["launch_id"] == unknown for e in log)
+    assert not any(e.get("launch_id") == live for e in log)
+    # 每轮一行计数：删掉的、留下的（未登记 launch）、存活 launch 占着的卷都报数。
+    summaries = [e for e in log if e["action"] == "summary"]
+    assert summaries[0] == {"at": summaries[0]["at"], "action": "summary", "reaped_volumes": 1, "retained_volumes": 1,
+                            "live_volumes": 1}
+    # 两位 reviewer 并发派发，各跑一轮 reaper，可能都看见同一个死卷；重复删除无害。
+    assert all(s["retained_volumes"] == 1 and s["live_volumes"] == 1 for s in summaries)
+
+
+def test_reaper_failure_never_blocks_dispatch(lane):
+    lane.docker = lambda args: subprocess.CompletedProcess(args, 125, "", "docker unavailable")
+    assert lane.review_pr(1810)["verdict"] == "PASS"
+    log = [json.loads(line) for line in (lane.state_root / "volume-reaper.jsonl").read_text().splitlines()]
+    assert {e["reason"] for e in log} == {"docker_unavailable"}
+
+
 def test_multiple_attempts_reclaim_each_checkout(lane):
     for attempt in (1, 2, 3):
         assert lane.review_pr(1810, attempt)["verdict"] == "PASS"
@@ -810,6 +932,26 @@ def test_same_patch_on_new_base_reuses_pass_without_model(lane, env):
     assert lane.gateway.sent == ["pending", "success", "pending", "success"]
 
 
+def test_success_recovered_by_same_attempt_records_publication_and_is_reusable(lane, env, monkeypatch):
+    # #1942 attempt 49285：终态 success 已送达但读回一直看不到，同一 attempt 重跑认回后 outcome 缺 publication，
+    # 追平后同补丁没法沿用、整轮重审。
+    monkeypatch.setattr(delivery, "READBACK_DELAYS", ())
+    gateway = lane.gateway
+    gateway.after_write = lambda: setattr(gateway, "hide", gateway.sent[-1] == "success")
+    with pytest.raises(EffectPending):
+        lane.review_pr(1810)
+    gateway.hide, gateway.after_write = False, None
+    first = lane.review_pr(1810)
+    assert gateway.sent == ["pending", "success"]
+    folder = lane.state_root / "runs" / ReviewTarget(**first["target"]).key
+    saved = json.loads((folder / "outcome.json").read_text())
+    assert saved["publication"]["state"] == "success" and saved["publication"]["id"] == gateway.rows[0]["id"]
+    _advance_main(lane, env)
+    result = lane.review_pr(1810)
+    assert result["reused_from"]["run_id"] == first["run_id"] and result["reviews"] == []
+    assert _launches(lane) == len(MODELS)
+
+
 # 只改空白也必须重审：git patch-id 会忽略空白，所以补丁身份不用它。
 @pytest.mark.parametrize("change", ["patch", "whitespace", "conflict"])
 def test_changed_patch_or_conflict_resolution_is_reviewed_again(lane, env, change):
@@ -882,6 +1024,11 @@ def _verdicts_with_commands(lane, claim: str, cases: dict) -> dict[str, module.R
 
 def _diff(flags: str = "", tail: str = "") -> list:
     return [lambda t: _command(f"git diff {flags}{' ' if flags else ''}{t.merge_base_sha} {t.head_sha}{tail}")]
+
+
+def _meta(t) -> str:
+    """`git show --no-patch --format='%H%n%an%n%B' <head>` 的输出；提交说明里恰好有改动行 `+0`、`1`。"""
+    return f"{t.head_sha}\nSmoke\nfix: quote the change\n\n+0\n1\n"
 
 
 FAKE = "f" * 40
@@ -1048,6 +1195,82 @@ NOT_A_PATCH_READ = {
     "grep-count": [lambda t: _command(f"git diff {t.merge_base_sha} {t.head_sha} -- nope | grep -c . | cat", output="0\n")],
     "grep-only-matching": [lambda t: _command(
         f"git show {t.head_sha}:'x+0' 2>&1 | grep -o '+0'", output="+0\n")],
+    # PR #2018 run 45a4c22b：整个 PR 的 diff 之后接只印提交元数据的 git 段可以算，证据只在开头那段 diff 里找
+    "diff-empty-then-show-metadata": [lambda t: _command(
+        f"git diff {t.merge_base_sha} {t.head_sha} -- nope; git show --no-patch --format='%H%n%an%n%B' {t.head_sha}",
+        output=_meta(t))],
+    "diff-failed-then-show-metadata": [lambda t: _command(
+        f"git diff {t.merge_base_sha} {t.head_sha}; git show --no-patch --format='%H%n%B' {t.head_sha}",
+        output=f"fatal: unable to read {t.head_sha}\n{_meta(t)}{LANE_PATCH}")],
+    # #2022 kimi BLOCK：pathspec 让 diff 什么都不印，提交说明写成补丁的样子就成了「开头那段 diff」
+    "kimi-pathspec-then-patch-shaped-body": [lambda t: _command(
+        f"git diff {t.merge_base_sha} {t.head_sha} -- nope; git show --no-patch --format=%B {t.head_sha}",
+        output=LANE_PATCH)],
+    # #2022 第二轮 kimi BLOCK：前一段 diff 悄悄失败（全局选项指错仓库、报错被丢），开头就成了 `%B` 的输出
+    "kimi-git-dir-stderr-dropped-then-show": [lambda t: _command(
+        f"git --git-dir=/nonexistent diff {t.merge_base_sha} {t.head_sha} 2>/dev/null; "
+        f"git show -s --format=%B {t.head_sha}", output=LANE_PATCH)],
+    "diff-stderr-dropped-then-show": [lambda t: _command(
+        f"git diff {t.merge_base_sha} {t.head_sha} 2>/dev/null; git show -s --format=%B {t.head_sha}",
+        output=LANE_PATCH)],
+    "diff-elsewhere-then-show": [lambda t: _command(
+        f"git -C /tmp diff {t.merge_base_sha} {t.head_sha}; git show -s --format=%B {t.head_sha}", output=LANE_PATCH)],
+    "diff-work-tree-then-show": [lambda t: _command(
+        f"git --work-tree=/tmp diff {t.merge_base_sha}; git show -s --format=%B {t.head_sha}", output=LANE_PATCH)],
+    "diff-stderr-merged-then-show": [lambda t: _command(
+        f"git diff {t.merge_base_sha} {t.head_sha} 2>&1; git show -s --format=%B {t.head_sha}", output=LANE_PATCH)],
+    # #2022 第三轮 opus BLOCK：只有「左 merge-base、右 head」才是整份补丁；别的形状在复合形式里不算
+    **{f"compound-{name}": [lambda t, rev=rev: _command(
+        f"git diff {rev(t)}; git show -s --format=%B {t.head_sha}", output=LANE_PATCH)] for name, rev in {
+        "reversed": lambda t: f"{t.head_sha} {t.merge_base_sha}",
+        "HEAD-triple-dot": lambda t: "HEAD...",
+        "at-triple-dot": lambda t: "@...",
+        "triple-dot-mb": lambda t: f"...{t.merge_base_sha}",
+    }.items()},
+    "diff-option-then-show": [lambda t: _command(
+        f"git diff -R {t.merge_base_sha} {t.head_sha}; git show -s --format=%B {t.head_sha}", output=LANE_PATCH)],
+    "diff-parent-then-show": [lambda t: _command(
+        f"git diff {t.head_sha}~1 {t.head_sha}; git show -s --format=%B {t.head_sha}", output=LANE_PATCH)],
+    # #2022 opus BLOCK：后一段按黑名单放行时未知选项默认通过；下面这些在整个 PR 的 diff 之后也一律不认
+    "opus-log-binary": [lambda t: _command(
+        f"git diff {t.merge_base_sha} {t.head_sha}; git log --format= --binary {t.merge_base_sha}", output=LANE_PATCH)],
+    "opus-show-linear-break": [lambda t: _command(
+        f"git diff {t.merge_base_sha} {t.head_sha}; git log -s --format=%H --show-linear-break=+0 {t.head_sha}",
+        output=LANE_PATCH)],
+    **{f"trailing-{name}": [lambda t, tail=tail: _command(
+        f"git diff {t.merge_base_sha} {t.head_sha}; git {tail.format(h=t.head_sha, b=t.merge_base_sha)}",
+        output=LANE_PATCH)] for name, tail in {
+        "format-literal-text": "show -s --format='diff --git a/changed-0 b/changed-0' {h}",
+        "format-hex-char": "show -s --format=%x2b0 {h}",
+        "date-format-text": "log -1 -s --format=%ad --date=format:+0 {h}",
+        "show-blob": "show --no-patch --format=%H {h}:changed-0",
+        "unknown-object": "show --no-patch --format=%H " + "e" * 40,
+        "ancestor": "show --no-patch --format=%B {h}~1",
+        "range": "log -s --format=%B {b}..{h}",
+        "log-patch": "log -p -s --format=%B {h}",
+        "show-cc": "show --no-patch --cc --format=%B {h}",
+        "stat": "show --stat --format=%B {h}",
+        "name-only": "show -s --name-only --format=%B {h}",
+        "count": "log -1 -s --format=%B {h}",
+        "config": "-c format.pretty=format:+0 show -s --format=%B {h}",
+        "no-quiet": "show --format=%B {h}",
+        "no-format": "show -s {h}",
+        "two-formats": "show -s --format=%H --format=%B {h}",
+        "named-pretty": "show -s --pretty=fuller {h}",
+        "redirected-in": "log -s --format=%B --stdin </tmp/revs",
+        "piped": "show -s --format=%B {h} | head",
+        "then-echo": "show -s --format=%B {h}; echo +0",
+    }.items()},
+    "diff-or-show": [lambda t: _command(
+        f"git diff {t.merge_base_sha} {t.head_sha} || git show --no-patch --format=%B {t.head_sha}", output=_meta(t))],
+    "piped-diff-then-show": [lambda t: _command(
+        f"git diff {t.merge_base_sha} {t.head_sha} | cat; git show --no-patch --format=%B {t.head_sha}",
+        output=LANE_PATCH)],
+    "show-blob-then-log": [lambda t: _command(
+        f"git show {t.head_sha}:changed-0; git log -1 --format=%B {t.head_sha}", output="0\n")],
+    "diff-and-log-range-piped": [lambda t: _command(
+        f"git diff {t.merge_base_sha} {t.head_sha} && git log --format='%H %s' --date=iso "
+        f"{t.merge_base_sha}..{t.head_sha} 2>&1 | head -40", output=LANE_PATCH + _meta(t))],
 }
 PATCH_READ = {
     "range": [lambda t: _command(f"cd /review && git diff --no-ext-diff --no-textconv {t.merge_base_sha} {t.head_sha} | head")],
@@ -1090,6 +1313,13 @@ PATCH_READ = {
     "filter-chain": [lambda t: _command(
         f"cd /review && B={t.merge_base_sha}; export H={t.head_sha}; git diff --no-ext-diff $B $H 2>&1 "
         "| nl -ba | grep -n -v -e zzz | sed -n '1,400p' | head -n 400 | tail -n +1 | cat -n")],
+    # PR #2018 run 45a4c22b opus 的原样命令（之前 13 条同形读取都被判未读，见 PR 正文的重放）
+    "diff-then-show-metadata": [lambda t: _command(
+        f"cd /review && git diff --no-ext-diff --no-textconv {t.merge_base_sha} {t.head_sha}; "
+        f"git show --no-patch --format='%H%n%an%n%B' {t.head_sha}", output=LANE_PATCH + _meta(t))],
+    "diff-and-show-short-sha": [lambda t: _command(
+        f"git diff --no-color -U5 {t.merge_base_sha} {t.head_sha} && git log -s --pretty=tformat:'%h %an %s' "
+        f"{t.head_sha[:8]}", output=LANE_PATCH + _meta(t))],
 }
 
 
@@ -1144,6 +1374,77 @@ def test_common_line_in_unchanged_file_is_not_a_patch_read():
     # merge-base..head \u7684\u8f93\u51fa\u5168\u51fa\u81ea\u51bb\u7ed3\u8865\u4e01\uff08\u4e0a\u4e0b\u6587\u884c\u4e5f\u662f\u6539\u52a8\u6587\u4ef6\u7684\u5185\u5bb9\uff09
     assert reads_candidate_patch(f"/bin/bash -lc 'git diff {merge_base} {head} | grep -n annotations'",
                                  "7:+from __future__ import annotations\n", patch)
+
+
+# PR #2018 run 45a4c22b a1：opus 的读取被判未读、两个 PASS 整轮记 error。冻结补丁与输出取自真实日志（截短）
+PR2018_HEAD, PR2018_MB = "0b07c6b0" * 5, "83c4d9c9" * 5  # 真实 SHA 的前缀；整串 40 位十六进制会被 DevSkim DS173237 当成密钥
+PR2018_CHANGED = "  #   rust-test-production-session    生产入口测试 + backtest_bin feature 的库测试（#1875 合并）"
+PR2018_FROZEN = (
+    "diff --git a/.github/workflows/ci.yml b/.github/workflows/ci.yml\nindex 1992713934..cd7c2277d1 100644\n"
+    "--- a/.github/workflows/ci.yml\n+++ b/.github/workflows/ci.yml\n@@ -228 +228 @@ jobs:\n"
+    "-  #   rust-test-backtest-bin          backtest_bin feature 的库测试\n"
+    f"+{PR2018_CHANGED}\n")
+PR2018_COMMAND = (f"/bin/bash -lc \"cd /review && git diff --no-ext-diff --no-textconv {PR2018_MB} {PR2018_HEAD}; "
+                  f"git show --no-patch --format='%H%n%an%n%B' {PR2018_HEAD}\"")
+PR2018_DIFF = (
+    "diff --git a/.github/workflows/ci.yml b/.github/workflows/ci.yml\nindex 1992713..cd7c227 100644\n"
+    "--- a/.github/workflows/ci.yml\n+++ b/.github/workflows/ci.yml\n@@ -226,3 +226,3 @@ jobs:\n"
+    "   #   rust-test-s-session-extras (组) s_session 的 TB-02-C、库/集成测试、TestOnly 特性增量、v3 history（矩阵作业\n"
+    "   #                                   rust-test-s-session-extra-groups，结论由 ci-ok 直接判定）\n"
+    "-  #   rust-test-backtest-bin          backtest_bin feature 的库测试\n"
+    f"+{PR2018_CHANGED}\n")
+# 提交说明原样引用了改动行：diff 没印出东西时，这一行只出现在 git show 的输出里
+PR2018_SHOW = f"{PR2018_HEAD}\nSmoke\nci(#1875): rust-test-backtest-bin 并入 rust-test-production-session\n\n{PR2018_CHANGED}\n"
+
+
+def test_diff_then_commit_metadata_reads_patch_from_diff_segment_only():
+    """`git diff <mb> <head>; git show --no-patch --format=… <head>`：输出是两段按序拼接，证据只认开头那段 diff。"""
+    patch = FrozenPatch.from_diff(PR2018_HEAD, PR2018_MB, PR2018_MB, PR2018_FROZEN)
+    assert reads_candidate_patch(PR2018_COMMAND, PR2018_DIFF + PR2018_SHOW, patch)
+    # 只有第二段跑出了东西（diff 报错或没印内容，`;` 让整条命令照样 exit 0）：提交说明里的改动行不算读到补丁
+    assert not reads_candidate_patch(PR2018_COMMAND, PR2018_SHOW, patch)
+    assert not reads_candidate_patch(PR2018_COMMAND, f"fatal: bad object {PR2018_HEAD}\n{PR2018_SHOW}", patch)
+    only_show = f"/bin/bash -lc \"cd /review && git show --no-patch --format='%H%n%an%n%B' {PR2018_HEAD}\""
+    assert not reads_candidate_patch(only_show, PR2018_DIFF + PR2018_SHOW, patch)
+    # #2022 kimi BLOCK：带 pathspec 的 diff 可以什么都不印，提交说明里写成补丁样子的文字就会排在开头
+    kimi = (f"/bin/bash -lc \"git diff {PR2018_MB} {PR2018_HEAD} -- nope; "
+            f"git show --no-patch --format=%B {PR2018_HEAD}\"")
+    assert not reads_candidate_patch(kimi, PR2018_DIFF, patch)
+    # #2022 opus BLOCK：`--binary` 隐含 `--patch`，`--show-linear-break` 印审查员写的文字；后一段只认白名单
+    for tail in (f"git log --format= --binary {PR2018_MB}",
+                 f"git log -s --format=%H --show-linear-break=+x {PR2018_HEAD}"):
+        command = f"/bin/bash -lc \"git diff {PR2018_MB} {PR2018_HEAD}; {tail}\""
+        assert not reads_candidate_patch(command, PR2018_DIFF, patch)
+    # #2022 第二轮 kimi BLOCK：diff 指错仓库、报错丢进 /dev/null，开头只剩 `%B`（这里让提交说明长成补丁的样子）
+    for leading in (f"git --git-dir=/nonexistent diff {PR2018_MB} {PR2018_HEAD} 2>/dev/null",
+                    f"git diff {PR2018_MB} {PR2018_HEAD} 2>/dev/null", f"git -C /tmp diff {PR2018_MB} {PR2018_HEAD}"):
+        command = f"/bin/bash -lc \"{leading}; git show -s --format=%B {PR2018_HEAD}\""
+        assert not reads_candidate_patch(command, PR2018_DIFF, patch)
+    allowed_config = (f"/bin/bash -lc \"git -c core.quotepath=false diff {PR2018_MB} {PR2018_HEAD}; "
+                      f"git show -s --format=%B {PR2018_HEAD}\"")
+    assert reads_candidate_patch(allowed_config, PR2018_DIFF + PR2018_SHOW, patch)
+    # 没有后一段时照旧按整段输出判
+    alone = f"/bin/bash -lc 'git diff --no-ext-diff --no-textconv {PR2018_MB} {PR2018_HEAD}'"
+    assert reads_candidate_patch(alone, PR2018_DIFF, patch)
+
+
+@pytest.mark.parametrize("shape", ["reversed", "HEAD...", "@...", "...mb"])
+def test_only_merge_base_left_head_right_is_whole_patch(shape):
+    """#2022 第三轮 opus BLOCK：反向、`HEAD...`、`@...`、`...<mb>` 不是整份冻结补丁的读取，复合形式里也不算。"""
+    rev = {"reversed": f"{PR2018_HEAD} {PR2018_MB}", "HEAD...": "HEAD...", "@...": "@...", "...mb": f"...{PR2018_MB}"}[shape]
+    assert patch_read._patch_read(f"/bin/bash -lc 'git diff {rev}'", PR2018_HEAD, PR2018_MB, PR2018_MB) != WHOLE_PATCH
+    patch = FrozenPatch.from_diff(PR2018_HEAD, PR2018_MB, PR2018_MB, PR2018_FROZEN)
+    command = f"/bin/bash -lc \"git diff {rev}; git show -s --format=%B {PR2018_HEAD}\""
+    assert not reads_candidate_patch(command, PR2018_DIFF, patch)
+
+
+@pytest.mark.parametrize("rev", [f"{PR2018_MB} {PR2018_HEAD}", PR2018_MB, f"{PR2018_MB}..{PR2018_HEAD}",
+                                 f"{PR2018_MB}...{PR2018_HEAD}", f"{PR2018_MB[:8]}..HEAD"])
+def test_merge_base_left_head_right_is_whole_patch(rev):
+    assert patch_read._patch_read(f"/bin/bash -lc 'git diff {rev}'", PR2018_HEAD, PR2018_MB, PR2018_MB) == WHOLE_PATCH
+    patch = FrozenPatch.from_diff(PR2018_HEAD, PR2018_MB, PR2018_MB, PR2018_FROZEN)
+    command = f"/bin/bash -lc \"git diff {rev}; git show -s --format=%B {PR2018_HEAD}\""
+    assert reads_candidate_patch(command, PR2018_DIFF + PR2018_SHOW, patch)
 
 
 def test_unreadable_frozen_patch_is_failed_not_raised(lane, monkeypatch):
@@ -1966,6 +2267,38 @@ def test_migration_of_contractless_legacy_target_checks_dispatched_prompt(lane, 
         lane.migrate_stale(1810, 1)
     monkeypatch.setattr(module, "PROMPT", original)
     assert lane.migrate_stale(1810, 1)["publication"]["state"] == "success"
+
+
+def test_nb_residual_retry_early_return_leaves_disk_pass(lane, monkeypatch):
+    """#1944（#1913 独审 N-b' 残余，移植自非作者独审反例）：迁移瞬态失败后重试，`migrate_stale` 把
+    `saved` 换成历史里更早的 STALE 记录；如果这次 `recover_stale` 重验又提前返回（这里用回执重验结果
+    与原记录不一致模拟早退），磁盘此前仍留着上一轮迁移写下、未发布的 PASS。返回值须与磁盘一致地回到
+    STALE，不能一个说 STALE、另一个仍是未发布的 PASS。"""
+    folder = _legacy_auth_stale(lane)
+    git(lane.source, "commit", "--allow-empty", "-qm", "controller redeployed")
+    real_get = lane.gateway.get_pr
+    calls = {"n": 0}
+    def get_pr(number):
+        calls["n"] += 1
+        if calls["n"] == 3:
+            raise IdentityError("GitHub 返回 HTTP 401")
+        return real_get(number)
+    monkeypatch.setattr(lane.gateway, "get_pr", get_pr)
+    with pytest.raises(EffectPending):
+        lane.migrate_stale(1810, 1)
+    monkeypatch.setattr(lane.gateway, "get_pr", real_get)
+    real_validate = module.validate_review
+    def flip(*args, **kwargs):
+        o = real_validate(*args, **kwargs)
+        return module.ReviewOutcome(o.model, "BLOCK", o.session_id, o.reason) if o.model == module.MODELS[0] else o
+    monkeypatch.setattr(module, "validate_review", flip)  # 模拟重验与原记录不一致 → recover_stale 早退
+    sent_before = len(lane.gateway.sent)
+    result = lane.migrate_stale(1810, 1)
+    on_disk = json.loads((folder / "outcome.json").read_text())
+    assert result["verdict"] == on_disk["verdict"] == "STALE", (result["verdict"], on_disk["verdict"], "publication" in on_disk)
+    assert on_disk["recovery_refused"] == "重验结果与原记录不一致"
+    assert "publication" not in on_disk
+    assert len(lane.gateway.sent) == sent_before
 
 
 # ---------------- Codex 额度耗尽时的临时组合（Kimi + Opus） ----------------

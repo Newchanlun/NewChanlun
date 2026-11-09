@@ -30,6 +30,7 @@ on:
     paths:
       - 'rust/src/bin/s_session_v3/financial_session*'
       - 'rust/src/economic_session/**'
+      - 'rust/src/history_simulation/**'
       - 'rust/src/session_transport.rs'
       - 'rust/src/session_protocol.rs'
       # #1635：其余含 target_os = "macos" 分支的文件，改动它们也要过下方 macOS 告警门。
@@ -149,9 +150,9 @@ jobs:
 
       # #1875：同一过滤器的测试集合分到五组：financial 跑除 tb03c 三组外的全部；tb03c-a/b/c 各跑 tb03c_kill_tests
       #   按名字排序后的三分之一（CI_TEST_PART）；hfs 跑 tb03c_v2_kill_tests 与 tb03c_allocation_tests。并集恰为原集合，互不重叠。
-      - name: cargo test — economic_session / session_transport / session_protocol 库测试（#1394 G-1）
+      - name: cargo test — economic_session / session_transport / session_protocol / history_simulation 库测试（#1394 G-1、#1381）
         if: ${{ !cancelled() && matrix.group == 'financial' }}
-        run: cargo test --locked --features s_session --lib -- economic_session session_transport session_protocol --skip economic_session::tb03c_kill_tests --skip economic_session::tb03c_v2_kill_tests --skip economic_session::tb03c_allocation_tests
+        run: cargo test --locked --features s_session --lib -- economic_session session_transport session_protocol history_simulation --skip economic_session::tb03c_kill_tests --skip economic_session::tb03c_v2_kill_tests --skip economic_session::tb03c_allocation_tests
 
       - name: cargo test — economic_session::tb03c_kill_tests 按名字三分之一（macOS 存储栈上的 SIGKILL 恢复，#1394 G-1）
         if: ${{ !cancelled() && startsWith(matrix.group, 'tb03c-') }}
