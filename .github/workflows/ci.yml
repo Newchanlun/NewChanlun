@@ -1392,7 +1392,7 @@ jobs:
 
   # #1875 p2m：唯一汇总门。依赖本 workflow 全部作业（macos-session 只在手动触发时跑，不计入）；
   #   任一作业 failure 或 cancelled 即失败，被 changes 正确跳过的 Rust 作业（skipped）不算失败。
-  #   设为 main 的必需检查后，GitHub auto-merge 会同时等 deepagents/review 和整轮 CI，不会因审查单绿绕过 CI。
+  #   已是 main 的必需检查（与 deepagents/review 并列，#1742 裁定），auto-merge 会同时等审查和整轮 CI，不会因审查单绿绕过 CI。
   ci-ok:
     runs-on: ubuntu-latest
     if: ${{ always() }}
