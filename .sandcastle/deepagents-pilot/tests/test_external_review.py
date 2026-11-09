@@ -2836,3 +2836,35 @@ def test_container_state_uses_the_docker_env_allowlist(monkeypatch):
     monkeypatch.setattr(module.subprocess, "run", run)
     assert module._docker_container_state("a" * 12) == "absent"
     assert seen and seen[0] is not None and not {"DOCKER_HOST", "DOCKER_CONTEXT"} & set(seen[0])
+
+
+@pytest.mark.parametrize("damage", ["corrupt", "unreadable"])
+def test_advisory_unreadable_receipt_is_failed_and_volume_reclaimed(lane, monkeypatch, damage):
+    import os
+    result = lane.review_pr(1810)  # 旁听关闭
+    key = ReviewTarget(**result["target"]).key
+    worker = _run_folder(lane, result) / module.ADVISORY_DIR / ADVISORY
+    receipt = worker / "receipt.json"
+    lane.docker = _CrashLeftovers(worker)
+    real_read = module._read
+
+    def read(path):
+        # 旁听第一次读回执前，回执已损坏（写了一半）或权限不对：之后每次读都失败。
+        if Path(path) == receipt and os.access(receipt, os.R_OK) and receipt.read_text() != "{not json":
+            if damage == "corrupt":
+                receipt.write_text("{not json")
+            else:
+                os.chmod(receipt, 0)
+        return real_read(path)
+    monkeypatch.setattr(module, "_read", read)
+    try:
+        advisory = lane.run_advisory(key)
+    finally:
+        if receipt.exists():
+            os.chmod(receipt, 0o600)
+    monkeypatch.setattr(module, "_read", real_read)
+    assert [(r["model"], r["verdict"]) for r in advisory["reviews"]] == [(ADVISORY, "FAILED")]
+    assert module._read(worker.parent / "outcome.json")["reviews"] == advisory["reviews"]
+    assert advisory["reviews"][0]["checkout"] in ("removed", "retained")  # 快照收尾照常跑过
+    # 读不出回执就当监督没确认关容器：按标签收回卷与容器。
+    assert lane.docker.seeded and lane.docker.volumes == {} and lane.docker.containers == {}

@@ -1254,7 +1254,11 @@ class ExternalReview:
             results: list[dict] = []
             try:
                 for model in ADVISORY_REVIEW_MODELS:
-                    results.append(self._advisory_one(target, model, advisory))
+                    try:
+                        results.append(self._advisory_one(target, model, advisory))
+                    except Exception as error:  # 兜底：每个旁听模型都要有条目，outcome 才不会缺项
+                        results.append({"model": model, "verdict": "FAILED", "session_id": None,
+                                        "reason": f"{type(error).__name__}: {error}", "checkout": "retained"})
             finally:
                 watchdog.cancel()
                 outcome = {"run_id": target.run_id, "advisory": True, "reviews": results}
@@ -1350,7 +1354,12 @@ class ExternalReview:
         except Exception as error:  # 旁听失败只记进旁听结论
             entry.update(verdict="FAILED", reason=f"{type(error).__name__}: {error}")
         finally:
-            receipt = _read(worker / "receipt.json") if (worker / "receipt.json").exists() else {}
+            try:
+                receipt = _read(worker / "receipt.json") if (worker / "receipt.json").exists() else {}
+            except Exception as error:  # 回执损坏、权限不符或读不了：本模型记 FAILED，卷与快照照常收尾
+                receipt = {}
+                if entry["verdict"] != "FAILED":
+                    entry.update(verdict="FAILED", reason=f"回执不可读：{type(error).__name__}: {error}")
             if (worker / "launch.json").exists() and receipt.get("container_closed") is not True:
                 # 监督没有确认关容器（崩溃、被杀、超时）：按标签回收已死 launch 的卷与容器，不等下一次派发。
                 self._reap_volumes_logged()
