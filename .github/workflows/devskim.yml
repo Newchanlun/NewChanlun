@@ -57,9 +57,10 @@ jobs:
           #   文件都进入 changed，下面的守卫与软链检查同样作用在锚点..HEAD 上，故判定仍与全量扫描相同。
           scanned=$(gh api "repos/$GITHUB_REPOSITORY/actions/workflows/devskim.yml/runs?event=push&status=success&branch=main&per_page=30" \
             --jq '.workflow_runs[] | .head_sha + " " + .html_url') || full "run lookup failed"
-          git fetch -q --no-tags --deepen=30 origin "$base" 2>/dev/null || full "history deepen failed"
+          err=$(git fetch -q --no-tags --deepen=30 origin "$base" 2>&1) || full "history deepen failed: $(tail -n 1 <<< "$err")"
+          commits=$(git rev-list --first-parent -n 30 "$base") || full "rev-list failed for base $base"
           anchor="" run=""
-          for c in $(git rev-list --first-parent -n 30 "$base"); do
+          for c in $commits; do
             run=$(awk -v c="$c" '$1 == c { print $2; exit }' <<< "$scanned")
             if [ -n "$run" ]; then anchor=$c; break; fi
           done
