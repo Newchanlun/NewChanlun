@@ -483,7 +483,7 @@ class TicketExecutor:
     def _pr_body(self, run: PilotRun, head: Sha, generation: int) -> str:
         spec = run.spec
         return (f"Refs #{self.unit.ticket}\n\n新执行器交付冻结 head `{head}`。作者 {spec.author_model}，"
-                f"异家族独审 {spec.reviewer_model} 对该 head 判 PASS。执行器不合入 main；分支保护的 `deepagents/review` 与 `ci-ok` 通过后由主控合入。\n\n"
+                f"异家族独审 {spec.reviewer_model} 对该 head 判 PASS。执行器不合入 main。本 PR 保持 draft：验收后由主控或代理标为 ready for review，review_sweep 才发起正式审查，并在必需检查 `deepagents/review`（审查 App）与 `ci-ok` 通过后合入。\n\n"
                 + self._marker("pr", spec.run_id, generation, head))
 
     def _verify(self, head: Sha, number: int) -> str:

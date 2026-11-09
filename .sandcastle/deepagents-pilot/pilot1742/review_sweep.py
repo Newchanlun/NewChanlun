@@ -18,6 +18,9 @@ sync(number, base, head)，未注入报 needs-source-sync。
 合入（--auto-merge，用宿主 gh 凭据；本模块不构造 App 身份，审查身份归 external_review）：不预先挂 auto-merge。
 只有同时满足下列条件才合入，用 REST PUT /pulls/{n}/merge 并带 sha=<该 head>，由 GitHub 服务端拒绝 head 不符（409）：
 - main 的分支保护 strict 开着，且必需检查同时含 deepagents/review 与 ci-ok，两者都绑定了来源 app（没绑定的谁都能发同名 success）；
+- deepagents/review 绑定的是 IDENTITY_CONFIG 配的审查专用 App，且不是执行器 App 5486877（执行器交付时自写
+  deepagents/review=success；绑定它时 draft 一标 ready，同一轮刚派出的正式审查还没发 pending 就会被合入）；
+  不满足或身份文件缺失、读不了时记 auto-merge-unsafe，本轮不合入；
 - 该精确 head 上 deepagents/review、ci-ok、DevSkim 都是 success，且 GitHub 判定可合入（clean/unstable）；
 - 该 head 的完整改动清单可判定且不触及人工确认两类（HUMAN_GATED：实盘下单或资金、密钥或凭证）。
 两类的出处：用户裁定留痕 https://github.com/Newchanlun/NewChanlun/issues/1742#issuecomment-6719202631
@@ -72,7 +75,14 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Protocol
 
-from .external_review import STATE_ROOT, ExternalReview, _git, git_environment
+from .external_review import (
+    DEFAULT_IDENTITY,
+    IDENTITY_CONFIG,
+    STATE_ROOT,
+    ExternalReview,
+    _git,
+    git_environment,
+)
 from .run import _ps_rows
 from .workunit import REPO
 
@@ -91,6 +101,18 @@ GATED_APP_IDS = {"DevSkim": 15368}
 # 现场核对 id；不在表里的 App 发的 status 一律不算（失败关闭）。
 APP_SLUGS = {5486877: "newchanlun-deepagents-1742", 5664795: "newchanlun-review-gate", 15368: "github-actions"}
 GH_TIMEOUT_SECONDS = 60
+# 执行器 App：交付时在冻结 head 上自写 deepagents/review=success（作者侧独审，不是正式非作者双审）。
+EXECUTOR_APP_ID = DEFAULT_IDENTITY["app_id"]
+
+
+def configured_review_app(config: Path = IDENTITY_CONFIG) -> int | None:
+    """审查专用 App 的 app_id（external_review.IDENTITY_CONFIG，非秘密 JSON）。文件不存在时审查沿用执行器 App，
+    读不了或字段不对时不知道是谁：都返回 None，合入按不安全处理。"""
+    try:
+        app_id = json.loads(config.read_text(encoding="utf-8")).get("app_id")
+    except (OSError, ValueError, AttributeError):
+        return None
+    return app_id if type(app_id) is int and app_id > 0 else None
 
 # 人工确认只剩两类：实盘下单或资金、密钥或凭证。出处：用户 2026-11-07、2026-11-08 的裁定，原话留痕在
 #   https://github.com/Newchanlun/NewChanlun/issues/1742#issuecomment-6719202631
@@ -263,8 +285,10 @@ class Sweep:
     def __init__(self, github: GitHubPort, lane: ExternalReview, spawn: Spawn, *,
                  state_root: Path = STATE_ROOT, max_running: int = 2, rows: Callable[[], Rows] = _ps_rows,
                  sync: Sync | None = None, auto_merge: bool = False, max_age: timedelta = timedelta(hours=24),
-                 now: Callable[[], datetime] = lambda: datetime.now(timezone.utc)):
+                 now: Callable[[], datetime] = lambda: datetime.now(timezone.utc),
+                 review_app: Callable[[], int | None] = configured_review_app):
         self.github, self.lane, self.spawn, self.rows, self.sync = github, lane, spawn, rows, sync
+        self.review_app = review_app
         self.folder = state_root / "sweep"
         self._sync_failed = False
         self.max_running, self.auto_merge, self.max_age, self.now = max_running, auto_merge, max_age, now
@@ -416,6 +440,21 @@ class Sweep:
             raise
         return actions
 
+    def _review_binding_unsafe(self, bound: int) -> str | None:
+        """必需检查 deepagents/review 须绑定审查专用 App（IDENTITY_CONFIG 配的那个），且它不是执行器 App。
+        绑定执行器 App 时，执行器交付时自写的 success 就能满足必需检查：draft 一标 ready，sweep 可能在同一轮
+        刚派出正式审查、还没发 pending 时就合入。"""
+        try:
+            reviewer = self.review_app()
+        except Exception:  # 读不了审查身份：不知道绑定对不对，按不安全处理
+            reviewer = None
+        if bound == EXECUTOR_APP_ID:
+            return f"必需检查 deepagents/review 绑定执行器 App {bound}：执行器交付时自写的 success 会被当成正式审查，不合入"
+        if reviewer is None or bound != reviewer:
+            return (f"必需检查 deepagents/review 绑定 App {bound}，与审查身份文件配的审查 App {reviewer} 不符"
+                    "（或身份文件缺失、读不了），不合入")
+        return None
+
     def complete_files(self, number: int, state: dict[str, Any]) -> list[str]:
         """该 head 的完整改动路径（含改名前路径）；读不全时用本地精确 diff，仍不行就证据不足。"""
         try:
@@ -561,6 +600,11 @@ class Sweep:
         if evidence_ok and not gate_ok:
             actions.append({"action": "auto-merge-unsafe",
                             "reason": f"main 须 strict、enforce_admins 且必需检查含绑定来源 app 的 {sorted(GATE)}，不合入"})
+        elif gate_ok:
+            unsafe = self._review_binding_unsafe(required["deepagents/review"])
+            if unsafe:  # 执行器自写的 success 会满足必需检查，正式审查可能还没跑完就合入：本轮不合入
+                gate_ok = False
+                actions.append({"action": "auto-merge-unsafe", "reason": unsafe})
         plan: list[tuple[dict[str, Any], dict[str, Any], str | None, bool]] = []
         head_free = True
         for pr in pulls:  # 与 tick 同序（PR 号升序）：队首是第一个仍可能合入的 PR
@@ -682,7 +726,10 @@ def fetcher(source: Path, url: str = f"https://github.com/{REPO}.git") -> Sync:
 
 def serve_round(private_key: Path, *, auto_merge: bool = False, max_running: int = 1) -> ServeRound:
     """executor serve 用的钩子。max_running 默认 1：HOST 上同时在跑的审查不超过它，操作员手动起的 review-pr 也算
-    （reviewing）。同一 PR 有活进程就不再派（decide 的 running）；各审查子进程照常各自过空间与额度准入。"""
+    （reviewing）。同一 PR 有活进程就不再派（decide 的 running）；各审查子进程照常各自过空间与额度准入。
+    风险：两道准入都按单个 run 算，不是总量。空间准入只看本 run 的快照，不给同时在跑、还没铺开快照的 run 预留；
+    额度准入只统计已结束 run 的回执。上限 N 时最多 N 个 run（每个 2 个模型）同时铺快照、同时耗额度，
+    可能集体超占外盘或超出每日上限。调高 N 前先查外盘剩余空间（df -h /Volumes/AgentStorage）。"""
     lane = ExternalReview(None)
     return ServeRound(Sweep(GhCli(), lane, spawner(private_key), max_running=max_running, auto_merge=auto_merge,
                             sync=fetcher(lane.source)))

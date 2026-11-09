@@ -22,9 +22,9 @@ lane = _external_review.lane  # 复用真实审查 lane 与 PR 替身
 
 class FakeGitHub:
     """GitHub 端口替身：PR、检查、文件与写操作记录。"""
-    def __init__(self, lane, *, required=("deepagents/review", "ci-ok")):
+    def __init__(self, lane, *, required=("deepagents/review", "ci-ok"), review_app=5664795):
         self.lane = lane
-        self.required = {name: {"deepagents/review": 5486877, "ci-ok": 15368}[name] for name in required}
+        self.required = {name: {"deepagents/review": review_app, "ci-ok": 15368}[name] for name in required}
         self.extra_pulls = []
         self.states, self.checks_by_head, self.files, self.calls, self.fail = {}, {}, {}, [], {}
 
@@ -85,6 +85,7 @@ class Host:
 def make(lane, *, run=True, github=None, **kwargs):
     host = Host(lane, run=run)
     github = github or FakeGitHub(lane)
+    kwargs.setdefault("review_app", lambda: 5664795)  # HOST 现状：审查专用 App，main 的必需检查也绑它
     sweep = Sweep(github, lane, host.spawn, state_root=lane.state_root, rows=lambda: list(host.rows), **kwargs)
     return sweep, host, github
 
@@ -1289,6 +1290,52 @@ def test_protection_mismatch_never_merges(lane, missing):
     sweep, _, _ = make(lane, github=github, auto_merge=True)
     actions = sweep.tick()
     assert any(a["action"] == "auto-merge-unsafe" for a in actions) and github.calls == []
+
+
+# ---- #2015 opus 阻断（247f128b，run 6ac0b428）：必需检查绑定执行器 App 时不合入 ----
+
+@pytest.mark.parametrize("bound, configured", [(5486877, 5486877), (5486877, None), (5664795, None), (5664795, 4242)])
+def test_review_binding_not_the_configured_reviewer_app_never_merges(lane, bound, configured):
+    """执行器交付时用执行器 App 自写 deepagents/review=success。必需检查绑定执行器 App（缺省身份）时，
+    draft 一标 ready，同一轮里 sweep 刚派出正式审查、FakeGitHub 已报三项全绿，也不得合入；
+    绑定与审查身份文件配的 App 不符、或身份文件缺失时同样不合入。"""
+    github = FakeGitHub(lane, review_app=bound)
+    green(github, lane.gateway.pr["head"]["sha"])
+    sweep, host, _ = make(lane, run=False, github=github, auto_merge=True, review_app=lambda: configured)
+    actions = sweep.tick()
+    assert acts(actions) == ["launch", "waiting"] and len(host.spawned) == 1   # 本轮刚派出正式审查
+    assert [a for a in actions if a["action"] == "auto-merge-unsafe"]
+    assert github.calls == []
+
+
+def test_reviewer_app_binding_merges_when_green(lane):
+    """对照：绑定审查专用 App 且与身份文件一致时，精确 head 双门全绿照常合入。"""
+    github = FakeGitHub(lane)
+    head = lane.gateway.pr["head"]["sha"]
+    green(github, head)
+    sweep, _, _ = make(lane, github=github, auto_merge=True)
+    sweep.tick()
+    assert ("merge", 1810, head) in github.calls
+
+
+def test_executor_app_status_alone_does_not_satisfy_reviewer_binding(monkeypatch):
+    """绑定审查 App 5664795 时，执行器 App 发的 deepagents/review=success 不算（合入看的检查只认绑定来源）。"""
+    cli = module.GhCli("Newchanlun/NewChanlun")
+    statuses = [_status("deepagents/review", "success", "newchanlun-deepagents-1742[bot]")]
+    runs = [_run("DevSkim", "success", 15368, 1), _run("ci-ok", "success", 15368, 2)]
+    apps = {"newchanlun-deepagents-1742": 5486877, "newchanlun-review-gate": 5664795, "github-actions": 15368}
+    monkeypatch.setattr(cli, "_gh", _gh_fake(statuses, runs, apps))
+    assert cli.checks("a" * 40, {**BINDINGS, "deepagents/review": 5664795}) == {"ci-ok": "success", "DevSkim": "success"}
+
+
+def test_configured_review_app_reads_identity_file(tmp_path):
+    config = tmp_path / "app-identity.json"
+    assert module.configured_review_app(config) is None                      # 没有身份文件：审查沿用执行器 App
+    config.write_text(json.dumps({"app_id": 5664795, "installation_id": 1, "app_slug": "x",
+                                  "installation_permissions": {}}))
+    assert module.configured_review_app(config) == 5664795
+    config.write_text("not json")
+    assert module.configured_review_app(config) is None
 
 
 def test_serve_passes_the_review_key_not_the_executor_key(monkeypatch, tmp_path):
