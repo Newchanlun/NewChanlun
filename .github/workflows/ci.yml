@@ -740,8 +740,7 @@ jobs:
           exit $fail
 
       # #1640 §2.3 第 3 层（产物机检）：不 strip 的生产增量 release 构建，nm 子串与禁串（固定＋自动抽取清单）零命中。
-      #   复用 release-only 构建的 rust/target；Cargo.toml 的 release profile 不设 strip，符号表保留。
-      #   构建与检查在上一步后台进行（#1875 R5），此处等其结束并以其退出码为本步结论。
+      #   Cargo.toml 的 release profile 不设 strip，符号表保留。
       # #1875：产物机检原在 release-locks 里与 S4 后台并行（R5，当时 S4 单线程、构建被锁的时长盖住）。#2041 让 S4 冷臂
       #   用上第二个核后，后台构建（rustc/LLVM 代码生成多线程）与它争 CPU：Boat 同机 S4 并行版独占 490–502 s，带后台构建
       #   599–626 s。改在 economic 组前台构建（该组中位 4.3 min，加上构建仍远短于 release-locks），用满核数。
