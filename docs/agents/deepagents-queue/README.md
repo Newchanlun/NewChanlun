@@ -4,7 +4,7 @@
 
 ## 准入前提
 
-全局 `/Volumes/AgentStorage/deepagents-exec/cutover.json` 必须有效，旧入口必须保持同代次 `draining`。引擎给合资格实装票挂 `deepagents:queue`。队列允许 `ready-for-agent`、`wayfinder:impl`，拒绝 `sandcastle`、`agent:*`、`wayfinder:grilling`、`ready-for-human`/`needs-info`/`needs-triage`/`wontfix`、有负责人、有 blocker 或不满足 SPEC 归属要求的票。旧日志有未知事件或未收尾 claim 时也拒绝准入。
+全局 `/Volumes/AgentStorage/deepagents-exec/cutover.json` 必须有效，旧入口必须保持同代次 `draining`。引擎给合资格实装票挂 `deepagents:queue`。队列允许 `ready-for-agent`、`wayfinder:impl`，拒绝 `sandcastle`、`agent:*`、`wayfinder:grilling`、`.sandcastle/queue-policy.json` 的全部 hold 标签（`needs-approval`/`ready-for-human`/`needs-info`/`needs-triage`/`wontfix`）、有负责人、有 blocker 或不满足 SPEC 归属要求的票。旧日志有未知事件或未收尾 claim 时也拒绝准入。
 
 所属 SPEC 当前正文必须声明 `deepagents-scope`。依据 #1742 最新用户授权，普通 SPEC 去除人工批准，Queued 每个动作边界消费可信编排账号的非作者独审裁定，裁定须绑定当前正文并带证据位置。无效 PASS、后续 BLOCK、正文变化都拒绝动作，不使用旧人工签名兜底。协议和发布 helper 见 [SPEC 授权](../../../.sandcastle/deepagents-pilot/EXECUTOR.md#为新队列-run-提供-spec-授权)。普通 Queued 不需候选人工签批，显式开启候选批准时仍须签确切 head。
 

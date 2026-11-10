@@ -142,7 +142,7 @@ executor run --run-id t<票号>-1 --private-key "$PEM"
 
 #1742 D6 的队列入口只在全局 `cutover.json` 有效且旧入口保持同代次 `draining` 时工作。切流准备与回退见 [冻结旧入口并让在飞任务收尾](../docs/migration-drain-1742.md)。切流不改变专用票准入，也不打开 `Takeover`。
 
-引擎只给合资格实装票挂 `deepagents:queue`。队列允许 `ready-for-agent` 和 `wayfinder:impl`，拒绝 `sandcastle`、`agent:*`、`wayfinder:grilling`、`ready-for-human`、`needs-info`、`needs-triage`、`wontfix`、有负责人、有 blocker 或 SPEC 不在票的祖先链上，也不与票同属实际 map的票。旧日志的未知事件和未收尾 claim 也会阻止准入。
+引擎只给合资格实装票挂 `deepagents:queue`。队列允许 `ready-for-agent` 和 `wayfinder:impl`，拒绝 `sandcastle`、`agent:*`、`wayfinder:grilling`、`.sandcastle/queue-policy.json` 的全部 hold 标签（`needs-approval`、`ready-for-human`、`needs-info`、`needs-triage`、`wontfix`）、有负责人、有 blocker 或 SPEC 不在票的祖先链上，也不与票同属实际 map的票。旧日志的未知事件和未收尾 claim 也会阻止准入。
 
 所属 SPEC 正文必须声明写集。多个目录用空格分隔：
 
@@ -154,7 +154,7 @@ deepagents-scope: rust/src/example/ rust/tests/example/
 
 ### 为新队列 run 提供 SPEC 授权
 
-依据 #1742 最新用户授权，保留 pstack、Matt 与 DeepAgents，普通 SPEC 不再要求人工批准。Queued 消费可信编排账号发布的「SPEC 独审裁定」。可信账号是发裁定评论的 GitHub 用户登录名，与仓库 owner 无关；Wayfinder 引擎和本消费者都从 `.sandcastle/queue-policy.json` 的 `orchestrator_login` 读默认值，`WAYFINDER_ORCHESTRATOR` 可覆盖，两侧须设同一个值。非作者独审原件包含 `specNumber`、`digest`、`author`、`reviewer`、`verdict`，由 `scripts/wayfinder_engine.mts` 的 `--spec-ruling <号> --review-file <原件>` helper 核对当前正文后发布，并附证据位置。裁定摘要按 CRLF→LF、trimEnd 后的 UTF-8 计算。无效 PASS、后续 BLOCK 或可信撤回都阻止动作，不回退旧签名。
+依据 #1742 最新用户授权，保留 pstack、Matt 与 DeepAgents，普通 SPEC 不再要求人工批准。Queued 消费可信编排账号发布的「SPEC 独审裁定」。可信账号是发裁定评论的 GitHub 用户登录名，与仓库 owner 无关；Wayfinder 引擎和本消费者都从 `.sandcastle/queue-policy.json` 的 `orchestrator_login` 读默认值，`WAYFINDER_ORCHESTRATOR` 可覆盖，两侧须设同一个值。非作者独审原件包含 `specNumber`、`digest`、`author`、`reviewer`、`verdict`，`scripts/wayfinder_engine.mts` 的 `--spec-ruling <号> --review-file <原件>` helper 核对当前正文后输出裁定评论正文（含证据位置），由编排账号发布；helper 本身不写 GitHub。裁定摘要按 CRLF→LF、trimEnd 后的 UTF-8 计算。无效 PASS、后续 BLOCK 或可信撤回都阻止动作，不回退旧签名。残余风险：裁定只核评论作者和当前正文，GitHub 上有写权限的协作者可以编辑他人评论，所以改过的裁定评论仍会按编排账号发出的评论消费；本门不防有写权限者的篡改。
 
 每次领取、派工、提交、推送、PR、状态和交付边界重新读取当前正文与完整评论。授权通过才冻结 `runs/<run>/spec/<号>.md` 原始 UTF-8 字节。旁注保留原始 `target`、代次及裁定 comment id、账号、作者、独审、证据和规范化 digest，不生成 nonce 或签批命令。worker 封包及 `_require_review_spec` 仍使用原始 target，不能改用规范化 digest。两个冻结文件间崩溃时，下一次有效裁定会重写收敛。
 
