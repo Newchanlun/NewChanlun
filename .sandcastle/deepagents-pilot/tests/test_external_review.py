@@ -905,6 +905,8 @@ def _meta(t) -> str:
 
 
 FAKE = "f" * 40
+# 技能文件开头的样子；用来确认 cat 印出的内容不挡住后面 diff 的证据
+SKILL_TEXT = "---\nname: code-review\ndescription: Review the changes since a fixed point\n---\n\n# Code review\n"
 NOT_A_PATCH_READ = {
     "echo": [lambda t: _command("echo hi")],
     "ls": [lambda t: _command("ls -la /review")],
@@ -1036,8 +1038,6 @@ NOT_A_PATCH_READ = {
     "cd-elsewhere": [lambda t: _command(f"cd /tmp/clone && git diff {t.merge_base_sha}")],
     "export-prints": [lambda t: _command(f"export -p; git diff {t.merge_base_sha} {t.head_sha}")],
     # 原先算读取、现在不算：git 之外还有段（真实日志里有这些形式，见 PR 正文的重放）
-    "skill-then-diff": [lambda t: _command(
-        f"cat /review/.agents/skills/code-review/SKILL.md && git diff --no-ext-diff --no-textconv {t.merge_base_sha} {t.head_sha}")],
     "stat-then-diff": [lambda t: _command(
         f"git diff --stat {t.merge_base_sha} {t.head_sha} && git diff {t.merge_base_sha} {t.head_sha} -- changed-0")],
     "file-then-read": _diff(tail=" > /tmp/p.diff; wc -l /tmp/p.diff; sed -n 1,200p /tmp/p.diff"),
@@ -1193,6 +1193,15 @@ PATCH_READ = {
     "diff-and-show-short-sha": [lambda t: _command(
         f"git diff --no-color -U5 {t.merge_base_sha} {t.head_sha} && git log -s --pretty=tformat:'%h %an %s' "
         f"{t.head_sha[:8]}", output=LANE_PATCH + _meta(t))],
+    # #1968：kimi 先 cat 技能文件、printf 一行分隔，再读整份 diff（PR #2039 等 run 的原样形状）
+    "skill-then-diff": [lambda t: _command(
+        f"cat /review/.agents/skills/code-review/SKILL.md && git diff --no-ext-diff --no-textconv {t.merge_base_sha} {t.head_sha}",
+        output=SKILL_TEXT + LANE_PATCH)],
+    "kimi-skill-printf-diff-check": [lambda t: _command(
+        f"cat /review/.agents/skills/code-review/SKILL.md && printf '\\n--- DIFF ---\\n' && "
+        f"git diff --no-ext-diff --no-textconv {t.merge_base_sha} {t.head_sha} && printf '\\n--- CHECK ---\\n' && "
+        f"git diff --check {t.merge_base_sha} {t.head_sha}",
+        output=SKILL_TEXT + "\n--- DIFF ---\n" + LANE_PATCH + "\n--- CHECK ---\n")],
 }
 
 
@@ -1318,6 +1327,107 @@ def test_merge_base_left_head_right_is_whole_patch(rev):
     patch = FrozenPatch.from_diff(PR2018_HEAD, PR2018_MB, PR2018_MB, PR2018_FROZEN)
     command = f"/bin/bash -lc \"git diff {rev}; git show -s --format=%B {PR2018_HEAD}\""
     assert reads_candidate_patch(command, PR2018_DIFF + PR2018_SHOW, patch)
+
+
+_SKILL = "/review/.agents/skills/code-review/SKILL.md"
+_WHOLE = f"git diff --no-ext-diff --no-textconv {PR2018_MB} {PR2018_HEAD}"
+_CHECK = f"git diff --check {PR2018_MB} {PR2018_HEAD}"
+_SEP = "\n--- DIFF ---\n"
+
+
+@pytest.mark.parametrize("script, output", [
+    # PR #2039 run a95115 等 kimi 的原样形状（#1968）
+    (f"cat {_SKILL} && printf '\\n--- DIFF ---\\n' && {_WHOLE}", SKILL_TEXT + _SEP + PR2018_DIFF),
+    (f"cat {_SKILL} && printf '\\n--- DIFF ---\\n' && {_WHOLE} && printf '\\n--- CHECK ---\\n' && {_CHECK}",
+     SKILL_TEXT + _SEP + PR2018_DIFF + "\n--- CHECK ---\n"),
+    (f"cat {_SKILL} && printf '\\n--- DIFF ---\\n' && {_WHOLE} && "
+     f"git diff --no-ext-diff --no-textconv --check {PR2018_MB} {PR2018_HEAD}", SKILL_TEXT + _SEP + PR2018_DIFF),
+    (f"cat {_SKILL} && {_WHOLE}", SKILL_TEXT + PR2018_DIFF),
+    (f"cat AGENTS.md && {_WHOLE}", "# AGENTS\n" + PR2018_DIFF),
+    (f"printf 'DIFF\\n' && {_WHOLE}", "DIFF\n" + PR2018_DIFF),
+    (f"printf '' && {_WHOLE}", PR2018_DIFF),
+    (f"cd /review && cat AGENTS.md && cat {_SKILL} && printf 'a\\n' && printf 'b\\n' && {_WHOLE}",
+     "x\n" + SKILL_TEXT + "a\nb\n" + PR2018_DIFF),
+    # cat 印的内容里出现过 printf 的那行分隔，diff 从「分隔紧跟 diff --git」处开始
+    (f"cat {_SKILL} && printf '\\n--- DIFF ---\\n' && {_WHOLE}", "--- DIFF ---\n" + SKILL_TEXT + _SEP + PR2018_DIFF),
+    # 没有前置段时，整份 diff 之后也可以接 printf 与 --check（`;` 照现行规则）
+    (f"{_WHOLE}; printf '\\n--- END ---\\n'", PR2018_DIFF + "\n--- END ---\n"),
+    (f"{_WHOLE} && {_CHECK}", PR2018_DIFF),
+    (f"{_WHOLE} && printf 'meta\\n' && git show -s --format=%B {PR2018_HEAD}", PR2018_DIFF + "meta\n" + PR2018_SHOW),
+])
+def test_cat_and_printf_around_whole_diff_read_patch(script, output):
+    """#1968：整份 diff 前面可以有 `cat <路径>`、`printf '<字面>'`，后面可以有 printf 与 `git diff --check`。"""
+    patch = FrozenPatch.from_diff(PR2018_HEAD, PR2018_MB, PR2018_MB, PR2018_FROZEN)
+    assert reads_candidate_patch(f"/bin/bash -lc {shlex.quote(script)}", output, patch)
+
+
+_FULL = SKILL_TEXT + _SEP + PR2018_DIFF
+
+
+@pytest.mark.parametrize("script", [
+    f"echo '--- DIFF ---' && {_WHOLE}",
+    f"cat {_SKILL} | grep name && {_WHOLE}",
+    f"printf \"$X\" && {_WHOLE}",
+    f"X=a && printf \"$X\" && {_WHOLE}",
+    f"printf \"DIFF\" && {_WHOLE}",
+    f"printf '%s\\n' '--- DIFF ---' && {_WHOLE}",
+    f"printf '\\x2b0\\n' && {_WHOLE}",
+    f"printf '--- DIFF ---\\n' && {_WHOLE}",
+    f"cat <(echo +x) && {_WHOLE}",
+    f"cat {_SKILL}; {_WHOLE}",
+    f"cat {_SKILL} && printf '\\n--- DIFF ---\\n'; {_WHOLE}",
+    f"cat {_SKILL} || {_WHOLE}",
+    f"cat {_SKILL} > /tmp/x && {_WHOLE}",
+    f"cat {_SKILL} 2>/dev/null && {_WHOLE}",
+    f"cat < {_SKILL} && {_WHOLE}",
+    f"cat {_SKILL} AGENTS.md && {_WHOLE}",
+    f"cat -n {_SKILL} && {_WHOLE}",
+    f"cat .agents/*/SKILL.md && {_WHOLE}",
+    f"cat ~/x && {_WHOLE}",
+    f"cat ../x && {_WHOLE}",
+    f"cat /etc/passwd && {_WHOLE}",
+    f"cat $F && {_WHOLE}",
+    f"cat \"{_SKILL}\" && {_WHOLE}",
+    f"(cat {_SKILL}) && {_WHOLE}",
+    f"cat {_SKILL} && ({_WHOLE})",
+    f"cat {_SKILL} && $(echo printf) x && {_WHOLE}",
+    f"time cat {_SKILL} && {_WHOLE}",
+    f"sed -n 1,5p {_SKILL} && {_WHOLE}",
+    f"cat {_SKILL} && {_WHOLE} | head",
+    f"cat {_SKILL} && {_WHOLE} -- nope",
+    f"cat {_SKILL} && git diff --stat {PR2018_MB} {PR2018_HEAD} && {_WHOLE}",
+    f"cat {_SKILL} && {_WHOLE}; printf 'x\\n'",
+    f"{_WHOLE} && printf \"$X\"",
+    f"{_WHOLE} && echo done",
+    f"{_WHOLE} && printf '%s' x",
+    f"{_WHOLE} && {_CHECK} -- nope",
+    f"{_WHOLE} && git diff --check {PR2018_HEAD} {PR2018_MB}",
+    f"{_WHOLE} && git diff --check --stat {PR2018_MB} {PR2018_HEAD}",
+    f"{_WHOLE} && {_CHECK} > /tmp/x",
+    f"{_WHOLE} && {_CHECK} | cat",
+])
+def test_other_commands_around_whole_diff_are_not_patch_reads(script):
+    """#1968 只放宽 cat/printf 前置段和 printf/--check 后置段；管道、重定向、`;`、`||`、子 shell、变量展开、
+    别的命令照旧整条不认（输出里即使有完整补丁）。"""
+    patch = FrozenPatch.from_diff(PR2018_HEAD, PR2018_MB, PR2018_MB, PR2018_FROZEN)
+    assert not reads_candidate_patch(f"/bin/bash -lc {shlex.quote(script)}", _FULL, patch)
+    assert not reads_candidate_patch(f"/bin/bash -lc {shlex.quote(script)}", PR2018_DIFF, patch)
+
+
+@pytest.mark.parametrize("script, output", [
+    # 输出里的改动行出自 cat，diff 那段没印出补丁：证据只在前置段输出之后那段 diff 里找
+    (f"cat {_SKILL} && printf '\\n--- DIFF ---\\n' && {_WHOLE}",
+     PR2018_DIFF + _SEP + f"fatal: bad object {PR2018_HEAD}\n"),
+    (f"cat {_SKILL} && printf '\\n--- DIFF ---\\n' && {_WHOLE}", f"+{PR2018_CHANGED}\n" + _SEP),
+    (f"cat {_SKILL} && {_WHOLE}", f"+{PR2018_CHANGED}\nfatal: bad object {PR2018_HEAD}\n"),
+    (f"cat {_SKILL} && {_WHOLE}", f"x diff --git a/f b/f\n@@ -1 +1 @@\n+{PR2018_CHANGED}\n"),
+    # 只有 printf 时输出须以它印出的文字开头
+    (f"printf 'DIFF\\n' && {_WHOLE}", f"+{PR2018_CHANGED}\nDIFF\n"),
+    (f"printf 'DIFF\\n' && {_WHOLE}", PR2018_DIFF),
+])
+def test_patch_lines_outside_the_diff_segment_are_not_evidence(script, output):
+    patch = FrozenPatch.from_diff(PR2018_HEAD, PR2018_MB, PR2018_MB, PR2018_FROZEN)
+    assert not reads_candidate_patch(f"/bin/bash -lc {shlex.quote(script)}", output, patch)
 
 
 def test_unreadable_frozen_patch_is_failed_not_raised(lane, monkeypatch):
