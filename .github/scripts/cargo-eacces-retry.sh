@@ -28,6 +28,24 @@ if (( status != 0 )); then
     cause="EXDEV $(grep -Eo 'failed to build archive at `[^`]*`' "$log" | head -n 1)"
   fi
 fi
+# EACCES 时先记下被拒文件与所在挂载的现场再重试（#1875：同机原地重试也失败过两次，给 Boat 反馈用具体证据）。
+#   只读诊断、每条限时、出错全部忽略，不改变命令结论。
+eacces_diag() {
+  local path=$1
+  echo "::group::Boat EACCES diagnostics ${path}"
+  for c in "ls -l --full-time" "stat" "lsattr" "getfattr -d -m -"; do echo "\$ $c"; timeout 5 $c "$path" 2>&1 | head -n 20; done
+  echo "\$ id; findmnt -T"; id; timeout 5 findmnt -T "$(dirname -- "$path")" 2>&1
+  echo "\$ fuser -v"; timeout 5 fuser -v "$path" 2>&1 | head -n 10
+  echo "\$ exec copy outside target"; local copy; copy="$(mktemp 2>/dev/null)" && cp "$path" "$copy" && chmod +x "$copy" \
+    && { timeout 5 env -i "$copy" >/dev/null 2>&1; echo "copy exec rc=$?"; rm -f "$copy"; }
+  echo "\$ exec in place"; timeout 5 env -i "$path" >/dev/null 2>"${log}.exec"; echo "in-place exec rc=$? $(head -c 200 "${log}.exec")"; rm -f "${log}.exec"
+  echo "\$ dmesg tail"; timeout 5 sudo -n dmesg 2>/dev/null | tail -n 20
+  echo "::endgroup::"
+}
+if [[ "$cause" == EACCES* ]]; then
+  denied_path="$(grep -Eo 'could not execute process `[^`]*/build-script-build`' "$log" | head -n 1 | sed -E 's/^could not execute process `(.*)`$/\1/')"
+  [[ -n "$denied_path" ]] && { eacces_diag "$denied_path" || true; }
+fi
 if [[ -n "$cause" ]]; then
   # 标记行格式是调用方的分界依据（run-1488-delta-ci.py RETRY_MARKER），改动须同步。
   echo "::warning title=Boat transient cargo error retry::cause=${cause} host=$(hostname)"

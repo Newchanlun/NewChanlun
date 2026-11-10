@@ -242,7 +242,11 @@ run_retry_case() {
 }
 run_retry_case eacces-once 0 2 yes
 run_retry_case eacces-always 101 2 yes
+grep -q '::group::Boat EACCES diagnostics /w/rust/target/debug/build/serde_json-1/build-script-build' "$tmp_dir/retry-eacces-once.log" \
+  || { echo "FAIL retry-eacces-once: missing EACCES diagnostics group" >&2; exit 1; }
 run_retry_case exdev-once 0 2 yes
+! grep -q 'Boat EACCES diagnostics' "$tmp_dir/retry-exdev-once.log" \
+  || { echo "FAIL retry-exdev-once: EACCES diagnostics on EXDEV" >&2; exit 1; }
 run_retry_case exdev-in-test 101 1 no
 run_retry_case other-error 101 1 no
 run_retry_case success 0 1 no
