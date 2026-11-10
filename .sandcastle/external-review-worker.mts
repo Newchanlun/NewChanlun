@@ -3,7 +3,7 @@ import { execFileSync, spawn } from "node:child_process";
 import { closeSync, existsSync, lstatSync, openSync, readFileSync, realpathSync, renameSync, rmSync, unlinkSync, writeFileSync } from "node:fs";
 import { randomUUID } from "node:crypto";
 import { dirname, join, resolve, sep } from "node:path";
-import { pathToFileURL } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { CodexTranscript, OUTPUT_SCHEMA, assertRoute, type ChildModel } from "./codex-child.ts";
 import { docker } from "@ai-hero/sandcastle/sandboxes/docker";
 import { codexWorker } from "./codex-route.mts";
@@ -185,6 +185,20 @@ export function dockerReviewVolumes(run: (args: string[]) => string = dockerCli,
   };
 }
 
+/** #1986：删卷后对 Colima VM 跑 fstrim 的辅助脚本（与宿主 reaper 同一份实现、同一把节流锁，见 vm_trim.py 的说明）。 */
+export const VM_TRIM_SCRIPT = join(dirname(fileURLToPath(import.meta.url)), "deepagents-pilot", "pilot1742", "vm_trim.py");
+/** 脚本自身对 colima 限时 60 s、对 docker context 限时 10 s；这里再给整体一个上限，防辅助进程本身卡住。 */
+export const VM_TRIM_HELPER_TIMEOUT_MS = 90_000;
+/** 以 checkout_root（与建卷准入锁同一目录）为节流根跑一次 trim。任何失败都折成一条记录返回，不抛错。 */
+export function trimVmDisk(checkout: string,
+  run: (args: string[]) => string = (args) => execFileSync("python3", args,
+    { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"], timeout: VM_TRIM_HELPER_TIMEOUT_MS })): Record<string, unknown> {
+  try {
+    const result = JSON.parse(run(["-I", VM_TRIM_SCRIPT, dirname(dirname(checkout))]).trim());
+    return typeof result === "object" && result !== null ? result : { state: "failed", reason: "helper_output" };
+  } catch { return { state: "failed", reason: "helper" }; }
+}
+
 export function verifyReviewAdmission(admission: Admission): void {
   if (!admission.accepted) throw new Error("外部独审必须先完成当前代码 head 的 Docker 验收，不能占用旧受控行");
 }
@@ -226,6 +240,8 @@ export interface WorkerDependencies {
   inspect(id: string): { Id: string; Image: string; Mounts: Array<{ Type?: string; Name?: string; Source: string; Destination: string; RW: boolean }>; Config: { Env: string[] } };
   /** #1986：审阅卷的灌入与删除。 */
   volumes: ReviewVolumes;
+  /** #1986：本次删卷成功后对 VM 跑一次 fstrim（节流在实现里）；缺省不 trim。 */
+  trimVm?: (checkout: string) => Record<string, unknown>;
   imageEnv(image: string): string[];
   timeoutMs: number;
   /** 单次独审的命令数上限；超出即停并记 failure_code=budget_exceeded。缺省见 REVIEW_COMMAND_CAP。 */
@@ -258,6 +274,7 @@ const dependencies: WorkerDependencies = {
   ready: (image) => assertSwarmExecutionReady(image, { rows: [], verify: verifyReviewAdmission }),
   sandbox: (image) => reviewSandbox(image),
   volumes: dockerReviewVolumes(),
+  trimVm: (checkout) => trimVmDisk(checkout),
   identity: () => codeIdentity(),
   inspect: (id) => JSON.parse(execFileSync("docker", ["inspect", id], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }))[0],
   imageEnv: (image) => JSON.parse(execFileSync("docker", ["image", "inspect", image, "--format", "{{json .Config.Env}}"],
@@ -441,6 +458,11 @@ export async function runExternalReview(folder: string, deps: WorkerDependencies
     record.ended_at = new Date().toISOString();
     save(folder, ownsLock || !existsSync(join(folder, "supervisor.lock"))
       ? "receipt.json" : `startup-failure-${process.pid}.json`, record);
+    // 删卷释放的块要 fstrim 才还给宿主系统盘。回执已落盘之后才做：trim 最长约 60 s，期间被杀也不丢回执；
+    // 结果另写 vm-trim.json，不改回执与结论。
+    if (record.volume_removed === true && launch && deps.trimVm) {
+      try { save(folder, "vm-trim.json", { at: new Date().toISOString(), ...deps.trimVm(launch.checkout) }); } catch { /* 只记不挡 */ }
+    }
   }
   if (!ownsLock) throw new Error("独审监督启动失败，终态已保存");
 }
