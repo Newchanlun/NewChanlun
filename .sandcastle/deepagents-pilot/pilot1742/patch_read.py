@@ -31,15 +31,11 @@ Codex 记录的命令形如 `/bin/bash -lc '<脚本>'`。这里按 bash 语法�
 证据按文件存，出处须与命令读的对象一致（_Read）：`git show <head>:<path>` 的 path 须是本 PR 改动的文件，证据只取
 该文件加进来的行；不是 merge-base 对 head 的 diff 与 show 提交、范围，只认冻结文件头之后属于该文件的行
 （#1969 正式审查 bb8aa92e opus BLOCK：没改的模块里的 `from __future__ import annotations` 曾被当成读到了补丁）。
-
-按命令写法判定之外，另有按内容的判定 FrozenPatch.covered_by：模型实际看到的输出合起来含整份冻结补丁（每个文件头、
-每条改动行），也算读过；external_review 两者满足其一即可。
 """
 from __future__ import annotations
 
 import posixpath
 import re
-from collections import Counter
 from dataclasses import dataclass, field, replace
 
 _OPAQUE = "\0"  # 无法静态求值的部分（`$(...)`、未知变量）；含它的词不会匹配任何 SHA 或命令名
@@ -592,23 +588,12 @@ class FrozenFile:
     path: str | None
     evidence: frozenset[str]
     added: frozenset[str]
-    # 全部非空改动行（带 `+`/`-` 号、去掉首尾空白）及其在本文件里出现的次数，按行排序；供 FrozenPatch.covered_by。
-    # 存次数：同一文件里两条 `+return` 只见到一条不算读全（#2037 kimi BLOCK）
-    changes: tuple[tuple[str, int], ...] = ()
-    deleted: str | None = None  # 整文件删除时它在 merge-base 上的路径；covered_by 只要求见过删除清单或文件头
 
 
 def _split_files(diff: str) -> list[tuple[str, str | None, list[tuple[str, str]]]]:
     """按文件切开 `-U<n>` 补丁：(header, head 上的路径, [(`+`/`-`, 改动行去掉首尾空白)])。
     hunk 按 `@@ -a,b +c,d @@` 的行数走完，所以内容里形如 `+++ x`、`diff --git` 的改动行不会被当成文件头。"""
-    return [(header, path, lines) for header, path, lines, _ in _split_files_deleted(diff)]
-
-
-def _split_files_deleted(diff: str) -> list[tuple[str, str | None, list[tuple[str, str]], str | None]]:
-    """同 _split_files，另给第四项：整文件删除（有 `deleted file mode` 行）的条目在 merge-base 上的路径，其余为 None。"""
-    files: list[tuple[str, str | None, list[tuple[str, str]], str | None]] = []
-    deleted: set[int] = set()
-    old_paths: dict[int, str] = {}
+    files: list[tuple[str, str | None, list[tuple[str, str]]]] = []
     old = new = 0
     for line in _lines(diff):
         if old > 0 or new > 0:
@@ -618,32 +603,13 @@ def _split_files_deleted(diff: str) -> list[tuple[str, str | None, list[tuple[st
             if sign in ("+", "-") and not _BREAK.search(line) and (text := line[1:].strip()):
                 files[-1][2].append((sign, text))
         elif line.startswith("diff --git "):
-            files.append((line, None, [], None))
-        elif files and line.startswith("deleted file mode "):
-            deleted.add(len(files) - 1)
-        elif files and line.startswith("--- "):
-            source = _unquote(line[4:])
-            if source.startswith("a/"):
-                old_paths[len(files) - 1] = source[2:]
+            files.append((line, None, []))
         elif files and line.startswith("+++ "):
             target = _unquote(line[4:])
-            files[-1] = (files[-1][0], target[2:] if target.startswith("b/") else None, files[-1][2], None)
+            files[-1] = (files[-1][0], target[2:] if target.startswith("b/") else None, files[-1][2])
         elif files and (hunk := re.match(r"@@ -\d+(?:,(\d+))? \+\d+(?:,(\d+))? @@", line)):
             old, new = (int(n) if n is not None else 1 for n in hunk.groups())
-    return [(header, path, lines, (old_paths.get(i) or _header_path(header)) if i in deleted else None)
-            for i, (header, path, lines, _) in enumerate(files)]
-
-
-def _header_path(header: str) -> str | None:
-    """`diff --git a/<p> b/<p>`（两侧同名，删除文件就是这样，含 git 给特殊字符加的 C 风格引号）里的 <p>；
-    两侧不同名时给 None。二进制删除没有 `--- a/<p>` 行，只能从这里取。"""
-    rest = header.removeprefix("diff --git ")
-    if quoted := re.fullmatch(r'("(?:[^"\\]|\\.)*") ("(?:[^"\\]|\\.)*")', rest):
-        left, right = _unquote(quoted.group(1)), _unquote(quoted.group(2))
-    else:
-        half = (len(rest) - 1) // 2
-        left, right = rest[:half], rest[half + 1:]
-    return left[2:] if left.startswith("a/") and right.startswith("b/") and left[2:] == right[2:] else None
+    return files
 
 
 @dataclass(frozen=True)
@@ -660,14 +626,13 @@ class FrozenPatch:
     @classmethod
     def from_diff(cls, head_sha: str, merge_base_sha: str, base_sha: str, diff: str) -> FrozenPatch:
         """diff 须是 controller 用固定 `a/`、`b/` 前缀取的 `git diff -U0 <merge_base> <head>`。"""
-        split = _split_files_deleted(diff)
-        changed = {text for _, _, lines, _ in split for _, text in lines}
+        split = _split_files(diff)
+        changed = {text for _, _, lines in split for _, text in lines}
         least = _DISTINCT if any(len(text) >= _DISTINCT for text in changed) else 0
         files = tuple(FrozenFile(header, path,
                                  frozenset({t for _, t in lines if len(t) >= least} if changed else {header}),
-                                 frozenset({t for sign, t in lines if sign == "+" and len(t) >= least}),
-                                 tuple(sorted(Counter(sign + t for sign, t in lines).items())), deleted)
-                      for header, path, lines, deleted in split)
+                                 frozenset({t for sign, t in lines if sign == "+" and len(t) >= least}))
+                      for header, path, lines in split)
         return cls(head_sha, merge_base_sha, base_sha, files)
 
     @property
@@ -701,50 +666,6 @@ class FrozenPatch:
             if line in evidence or (line[:1] in "+-" and line[1:].strip() in evidence):
                 return True
         return False
-
-
-    def covered_by(self, outputs: list[str]) -> bool:
-        """审查员看到的输出合起来覆盖了整份冻结补丁（#2018 attempt 40343、#2025 的误判，不看命令怎么写）：
-        每个文件的 `diff --git` 头都出现过，且该文件的每一条改动行（带 `+`/`-` 号）都出现在某段输出里、
-        跟在这个文件头之后。输出须是模型实际看到的（Codex 给模型的输出会从中间截掉，含截断标记的行与
-        _BREAK 行不算，截断标记之后的行不再归属前面的文件头）。行号前缀（`nl -ba`、`grep -n`）照常去掉。
-        同一文件里重复的改动行要见到同样多次：同一条输出里按出现次数累加，不同输出之间取最大、不相加。
-        这是「读全了」的判定：一行没出现就不算，分段读、换着写法读都能认；只看 `--stat`、只读 head 上的文件
-        （没有 `+`/`-` 号）、只读了一部分文件都不算。整文件删除的条目例外（总控裁定，#2037）：它的路径以
-        `D<TAB><path>`（`--name-status`）出现过、或它的 `diff --git` 头出现过就算覆盖，不要求读到被删的内容。"""
-        if not self.files:
-            return False
-        wanted = {f.header: Counter(dict(f.changes)) for f in self.files}
-        # 每行见到的次数：同一条输出里按出现次数累加，跨输出取最大（同一份 diff 跑两次不能把一条重复行凑成两条）
-        seen: dict[str, Counter[str]] = {header: Counter() for header in wanted}
-        headers: set[str] = set()
-        listed: set[str] = set()  # name-status 里 `D<TAB><path>` 出现过的路径
-        for output in outputs:
-            counts: dict[str, Counter[str]] = {}
-            current: str | None = None
-            for raw in _lines(output):
-                if _BREAK.search(raw) or _TRUNCATED.search(raw):
-                    current = None
-                    continue
-                line = raw
-                if match := _LINE_NUMBER.match(raw.strip()):
-                    line = raw.strip()[match.end():]
-                if (status := _DELETED_STATUS.fullmatch(line)) is not None:
-                    listed.add(_unquote(status.group(1)))
-                if line.startswith("diff --git "):
-                    current = line if line in wanted else None
-                    if current is not None:
-                        headers.add(current)
-                elif current is not None and line[:1] in ("+", "-") and line[1:].strip():
-                    counts.setdefault(current, Counter())[line[0] + line[1:].strip()] += 1
-            for header, counted in counts.items():
-                seen[header] |= counted  # Counter 的 `|` 取逐项最大
-        return all(f.header in headers or f.deleted in listed if f.deleted is not None
-                   else f.header in headers and wanted[f.header] <= seen[f.header] for f in self.files)
-
-
-_DELETED_STATUS = re.compile(r"D\t(.+)")  # `git diff --name-status` 的整文件删除行
-_TRUNCATED = re.compile(r"…\d+ (?:chars|tokens) truncated…")
 
 
 def reads_candidate_patch(command: str, output: str, patch: FrozenPatch) -> bool:

@@ -41,7 +41,14 @@ from .github_app import (
     GitHubAppClient,
     IdentityError,
 )
-from .patch_read import FrozenPatch, reads_candidate_patch
+from .patch_coverage import (
+    CoveragePatch,
+    coverage_segments,
+    git_spans,
+    seen_pieces,
+    visible_spans,
+)
+from .patch_read import FrozenPatch, _Revisions, _script, reads_candidate_patch
 from .run import DEFAULT_HOME, SOURCE_REPO, _ps_rows, supervisor_alive
 
 # Codex 上游额度耗尽期间的临时组合（EXTERNAL-REVIEW.md「Codex 额度耗尽时的临时组合」）；
@@ -350,13 +357,12 @@ def frozen_patch(source: Path, target: ReviewTarget) -> FrozenPatch:
                                  diff.decode(errors="replace"))
 
 
-def visible_outputs(session_log: Path, *, exit_zero_only: bool = False) -> list[str]:
-    """模型实际看到的工具输出：session.jsonl 里 Codex `exec_command` 的 function_call_output，只取进程已退出的
-    （退出码不限：`git diff … && printf … && git status` 整条链 exit 128 时，前面 diff 印出的内容模型照样看到了，
-    #2036 attempt 59600 kimi；还在运行的分块不取），去掉 `Chunk ID`/`Wall time`/退出码/`Original token count` 这段头。events.jsonl 的
-    aggregated_output 是原始输出（约 1 MiB 截断），模型看到的是 Codex 从中间截掉过的（`…N chars truncated…`），
-    所以按内容判定读全时只能用这里。审查容器写不了这个日志（文件隔离探针）。"""
-    outputs: list[str] = []
+def _model_saw(session_log: Path) -> dict[str, list[tuple[int, str]]]:
+    """session.jsonl 里每条 `exec_command` 的脚本 -> 按出现顺序的 (退出码, 模型看到的正文)，只取进程已退出的。
+    审查员写得了这个文件（rollout 在审查容器 /tmp 下，#2037 opus BLOCK），所以它只用来判断模型看到了多少：
+    正文须能在同一条命令的 aggregated_output 里找到（patch_coverage.visible_spans），证据本身取自 events.jsonl。"""
+    calls: dict[str, str] = {}
+    seen: dict[str, list[tuple[int, str]]] = {}
     with open(session_log, opener=lambda p, f: os.open(p, f | os.O_NOFOLLOW)) as stream:
         for line in stream:
             try:
@@ -364,16 +370,59 @@ def visible_outputs(session_log: Path, *, exit_zero_only: bool = False) -> list[
             except ValueError:
                 continue
             payload = entry.get("payload") if isinstance(entry, dict) else None
-            if (not isinstance(payload, dict) or entry.get("type") != "response_item"
-                    or payload.get("type") != "function_call_output" or not isinstance(payload.get("output"), str)):
+            if not isinstance(payload, dict) or entry.get("type") != "response_item":
                 continue
-            header, marker, body = payload["output"].partition("\nOutput:\n")
-            lines = header.split("\n")
-            exited = [line for line in lines if re.fullmatch(r"Process exited with code -?\d+", line)]
-            if (marker and header.startswith("Chunk ID: ") and exited
-                    and (not exit_zero_only or exited == ["Process exited with code 0"])):
-                outputs.append(body)
-    return outputs
+            if payload.get("type") == "function_call" and payload.get("name") == "exec_command":
+                try:
+                    cmd = json.loads(payload.get("arguments") or "{}").get("cmd")
+                except (ValueError, AttributeError):
+                    continue
+                if isinstance(cmd, str) and isinstance(payload.get("call_id"), str):
+                    calls[payload["call_id"]] = cmd
+            elif payload.get("type") == "function_call_output" and payload.get("call_id") in calls:
+                header, marker, body = str(payload.get("output")).partition("\nOutput:\n")
+                code = re.search(r"^Process exited with code (-?\d+)$", header, re.M)
+                if marker and header.startswith("Chunk ID: ") and code:
+                    seen.setdefault(calls.pop(payload["call_id"]), []).append((int(code.group(1)), body))
+    return seen
+
+
+def _whole_patch_seen(source: Path, target: ReviewTarget, executions: list[dict], session_log: Path) -> bool:
+    """按内容认读全（patch_coverage）：只用 events.jsonl 里已结束、整条由合格段组成的命令，且绑得上 session.jsonl 里
+    同一条命令（脚本逐字相同、退出码相同、按出现顺序）的可见正文；绑不上的不算。"""
+    revisions = _Revisions(target.head_sha, target.merge_base_sha, target.base_sha)
+    blobs: dict[str, str | None] = {}
+
+    def blob(path: str) -> str | None:
+        if path not in blobs:
+            try:
+                blobs[path] = _git(source, "cat-file", "blob", f"{target.head_sha}:{path}").decode(errors="replace")
+            except subprocess.CalledProcessError:
+                blobs[path] = None
+        return blobs[path]
+
+    saw = _model_saw(session_log)
+    outputs: list[list[str]] = []
+    for item in executions:
+        command, code = str(item.get("command", "")), item.get("exit_code")
+        script = _script(command)
+        queue = saw.get(script, []) if script is not None else []
+        if not queue:
+            continue
+        seen_code, body = queue.pop(0)
+        if item.get("status") not in ("completed", "failed") or not isinstance(code, int) or code != seen_code:
+            continue
+        segments = coverage_segments(command, revisions, blob)
+        aggregated = str(item.get("aggregated_output") or "")
+        git = git_spans(aggregated, segments, failed=code != 0) if segments is not None else None
+        visible = visible_spans(aggregated, body)
+        if git is not None and visible is not None:
+            outputs.append(seen_pieces(aggregated, git, visible))
+    if not outputs:
+        return False
+    diff = _git(source, "diff", "--no-ext-diff", "--no-textconv", "--no-color", "-U0", "--src-prefix=a/",
+                "--dst-prefix=b/", target.merge_base_sha, target.head_sha)
+    return CoveragePatch.from_diff(diff.decode(errors="replace")).covered_by(outputs)
 
 
 def validate_review(target: ReviewTarget, launch: dict, receipt: dict, folder: Path, source: Path) -> ReviewOutcome:
@@ -445,9 +494,12 @@ def validate_review(target: ReviewTarget, launch: dict, receipt: dict, folder: P
         # #1968：审查容器里读代码的唯一手段是只读 shell。没有一条成功的 git diff/show 读到冻结候选、且记录的输出里
         # 有冻结补丁内容的结论（#1940 的 kimi BLOCK 零调用即编造；跑一次 echo 再编同理；#1969 未执行的 git、
         # 被外部 diff 或 textconv 换掉的输出同理）PASS、BLOCK 都不采信，记 FAILED，整轮发 error。
-        # 合格的单条读取命令之外，按内容认：模型实际看到的输出（退出码不限）合起来覆盖了整份冻结补丁（每个文件头、每条改动行）
-        # 也算读过，不看命令怎么写（#2018 attempt 40343、#2025 kimi 两次被误判未读）。只会多认，不会多拒。
-        if not patch_reads and patch.covered_by(visible_outputs(folder / "session.jsonl")):
+        # 合格的单条读取命令之外，按内容认（patch_coverage）：宿主采集的合格 git 读取里、模型实际看到的部分合起来覆盖了
+        # 整份冻结补丁，也算读过（#2018 attempt 40343、#2025 kimi 两次被误判未读）。只会多认，不会多拒。
+        if not patch_reads and _whole_patch_seen(source, target, [
+                e["item"] for e in events if e.get("type") == "item.completed"
+                and isinstance(e.get("item"), dict) and e["item"].get("type") == "command_execution"],
+                folder / "session.jsonl"):
             patch_reads = 1
         if not patch_reads:
             return failed("审查员未读取冻结候选补丁（无成功的 git diff/show 指名 head 并在输出里出现冻结补丁内容），"

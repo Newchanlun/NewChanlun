@@ -32,7 +32,18 @@ from pilot1742.github_app import (
     IdentityError,
     OutcomeUnknown,
 )
-from pilot1742.patch_read import WHOLE_PATCH, FrozenPatch, reads_candidate_patch
+from pilot1742.patch_coverage import (
+    CoveragePatch,
+    coverage_segments,
+    git_spans,
+    visible_spans,
+)
+from pilot1742.patch_read import (
+    WHOLE_PATCH,
+    FrozenPatch,
+    _Revisions,
+    reads_candidate_patch,
+)
 
 
 class Gateway:
@@ -1298,53 +1309,98 @@ def test_conclusion_after_frozen_patch_read_stands(lane, claim):
     assert {case: o.reason for case, o in outcomes.items() if o.verdict != claim} == {}
 
 
-def _exec_output(body: str, exit_code: int | None = 0) -> dict:
-    """Codex `exec_command` 给模型的工具输出（session.jsonl 的 function_call_output）。"""
-    state = f"Process exited with code {exit_code}" if exit_code is not None else "Process running with session ID 7"
-    text = f"Chunk ID: 0a1b2c\nWall time: 0.0100 seconds\n{state}\nOriginal token count: 42\nOutput:\n{body}"
-    return {"type": "response_item", "payload": {"type": "function_call_output", "call_id": "c", "output": text}}
+class Run:
+    """一条命令在两份日志里的样子：events.jsonl 的 command_execution（宿主采集，aggregated_output）与 session.jsonl 的
+    exec_command 调用和输出（模型看到的正文，可能被 Codex 从中间截掉）。visible=None 表示与 aggregated_output 相同；
+    in_events/in_session 为 False 表示只出现在另一份日志里（伪造或丢失）。"""
+
+    def __init__(self, script, output, *, code=0, visible=None, in_events=True, in_session=True, running=False):
+        self.script, self.output, self.code = script, output, code
+        self.visible = output if visible is None else visible
+        self.in_events, self.in_session, self.running = in_events, in_session, running
+
+
+def _session_rows(runs, call_ids) -> list[dict]:
+    rows = []
+    for run, call_id in zip(runs, call_ids, strict=True):
+        if not run.in_session:
+            continue
+        rows.append({"type": "response_item", "payload": {
+            "type": "function_call", "name": "exec_command", "call_id": call_id,
+            "arguments": json.dumps({"cmd": run.script, "workdir": "/review"})}})
+        state = "Process running with session ID 7" if run.running else f"Process exited with code {run.code}"
+        rows.append({"type": "response_item", "payload": {
+            "type": "function_call_output", "call_id": call_id,
+            "output": f"Chunk ID: 0a1b2c\nWall time: 0.0100 seconds\n{state}\nOriginal token count: 42\nOutput:\n{run.visible}"}})
+    return rows
+
+
+def _blob(source, rev: str) -> str:
+    return subprocess.run(["git", "-C", str(source), "cat-file", "blob", rev], capture_output=True, check=True).stdout.decode()
 
 
 LANE_DIFF_0, LANE_DIFF_1 = (LANE_PATCH[:LANE_PATCH.index("diff --git a/changed-1")],
                             LANE_PATCH[LANE_PATCH.index("diff --git a/changed-1"):])
+WHOLE = "git diff --no-ext-diff --no-textconv {mb} {h}"
 COVERAGE = {
-    # #2018 attempt 40343 opus：diff 后接 `git log --format=… -4`，命令写法不合格，但模型看到了整份补丁
-    "whole-diff-then-log": ([lambda t: _command(
-        f"cd /review && git diff --no-ext-diff --no-textconv {t.merge_base_sha} {t.head_sha}; "
-        f"git log --format='%H %P %s' -4 {t.head_sha}", output=LANE_PATCH + _meta(t))],
-        [_exec_output(LANE_PATCH + "abc def subject\n")], True),
-    # #2025 kimi：前面先 cat 技能文件、printf 分隔串
-    "prefix-cat-printf": ([], [_exec_output("# skill\n\n--- FULL DIFF ---\n" + LANE_PATCH)], True),
-    "per-file-numbered": ([], [_exec_output("".join(f"{n:6}\t{x}\n" for n, x in enumerate(LANE_DIFF_0.splitlines(), 1))),
-                               _exec_output(LANE_DIFF_1)], True),
-    "one-file-only": ([], [_exec_output(LANE_DIFF_0)], False),
-    # #2036 attempt 59600 kimi：`git diff … && printf … && git status …` 整条链 exit 128，diff 照样印出、模型照样看到
-    "nonzero-exit-still-seen": ([], [_exec_output(LANE_DIFF_0), _exec_output(LANE_DIFF_1 + "fatal: x\n", exit_code=128)],
+    # #2018 attempt 40343 opus：diff 后接 `git log --format=… -4`，命令写法不合格，但整份补丁在合格 git 读取里
+    "whole-diff-then-log": (lambda t, s: [Run(
+        f"cd /review && {WHOLE}; git log --format='%H %P %s' -4 {{h}}", LANE_PATCH + _meta(t))], True),
+    # #2025 kimi：前面先 cat 技能文件、printf 分隔串（输出在 controller 侧能算准，且不含 diff 头）
+    "prefix-cat-printf": (lambda t, s: [Run(
+        f"cat /review/README && printf '\\n--- FULL DIFF ---\\n' && {WHOLE}",
+        _blob(s, f"{t.head_sha}:README") + "\n--- FULL DIFF ---\n" + LANE_PATCH)], True),
+    "per-file-numbered": (lambda t, s: [
+        Run(f"{WHOLE} -- changed-0 | nl -ba", "".join(f"{n:6}\t{x}\n" for n, x in enumerate(LANE_DIFF_0.splitlines(), 1))),
+        Run(f"{WHOLE} -- changed-1", LANE_DIFF_1)], True),
+    # #2036 attempt 59600 kimi：`git diff … && git status …` 整条链 exit 128，diff 照样印出
+    "nonzero-exit-still-seen": (lambda t, s: [Run(f"{WHOLE} && git status --short", LANE_PATCH + "fatal: x\n", code=128)],
                                 True),
-    "still-running": ([], [_exec_output(LANE_DIFF_0), _exec_output(LANE_DIFF_1, exit_code=None)], False),
-    "lines-without-header": ([], [_exec_output("+0\n+1\n")], False),
-    "head-file-contents": ([], [_exec_output("diff --git a/changed-0 b/changed-0\n0\n"
-                                             "diff --git a/changed-1 b/changed-1\n1\n")], False),
-    "line-under-wrong-header": ([], [_exec_output(LANE_PATCH.replace("+1\n", "") + "diff --git a/README b/README\n+1\n")],
-                                False),
-    "truncated-for-model": ([], [_exec_output(LANE_DIFF_0 + "diff --git a/changed-1 b/changed-1\nnew…812 chars truncated…"
-                                              "\n+1\n")], False),
+    "truncated-elsewhere": (lambda t, s: [Run(f"{WHOLE}; git log --oneline -3 {{h}}", LANE_PATCH + "a" * 900 + "\nb\nc\n",
+                                              visible=LANE_PATCH + "a…880 chars truncated…a\nb\nc\n")], True),
+    "one-file-only": (lambda t, s: [Run(f"{WHOLE} -- changed-0; git log -4 --format=%H {{h}}", LANE_DIFF_0)], False),
+    # #2037 opus BLOCK：rollout 在审查容器里可写；session 里伪造一条整份 diff，events 里只有 echo
+    "forged-session-row": (lambda t, s: [Run("echo hi", "hi\n"), Run(WHOLE, LANE_PATCH, in_events=False)], False),
+    "session-body-not-in-events": (lambda t, s: [Run(WHOLE, "", visible=LANE_PATCH)], False),
+    "events-without-session": (lambda t, s: [Run(f"{WHOLE}; git log -4 --format=%H {{h}}", LANE_PATCH, in_session=False)],
+                               False),
+    "still-running": (lambda t, s: [Run(f"{WHOLE}; git log -4 --format=%H {{h}}", LANE_PATCH, running=True)], False),
+    "exit-code-mismatch": (lambda t, s: [Run(f"{WHOLE}; git log -4 --format=%H {{h}}", LANE_PATCH, code=0),
+                                         ], False),
+    "truncated-for-model": (lambda t, s: [Run(f"{WHOLE}; git log -4 --format=%H {{h}}", LANE_PATCH,
+                                              visible=LANE_DIFF_0 + "diff --git a/changed-1 b/changed-1\nnew…80 chars "
+                                                                    "truncated…\\ No newline at end of file\n")], False),
+    # printf 冒充 git 的输出：印出文件头与 hunk，或接在一段真 diff 后面续 hunk
+    "printf-whole-patch": (lambda t, s: [Run(f"{WHOLE} -- nope; printf '%s' '{LANE_PATCH}'", LANE_PATCH)], False),
+    "printf-continues-hunk": (lambda t, s: [Run(
+        f"{WHOLE} -- changed-0; printf '%s\\n' '@@ -0,0 +1 @@' '+1'", LANE_DIFF_0 + "@@ -0,0 +1 @@\n+1\n")], False),
+    "or-true": (lambda t, s: [Run(f"{WHOLE} || true", LANE_PATCH)], False),
+    "unknown-segment": (lambda t, s: [Run(f"{WHOLE}; python3 -c 'print(1)'", LANE_PATCH + "1\n")], False),
+    "cat-tmp-file": (lambda t, s: [Run(f"cat /tmp/p.diff; {WHOLE} -- nope", LANE_PATCH)], False),
 }
 
 
 @pytest.mark.parametrize("case", sorted(COVERAGE))
-def test_conclusion_stands_when_visible_output_covers_whole_patch(lane, case):
-    """命令写法不合格时按内容认：模型实际看到的、退出码 0 的输出合起来有整份冻结补丁（每个文件头、每条改动行）。"""
-    commands, outputs, stands = COVERAGE[case]
+def test_conclusion_stands_when_git_output_the_model_saw_covers_whole_patch(lane, case):
+    """命令写法不合格时按内容认：宿主采集的合格 git 读取里、模型实际看到的部分合起来有整份冻结补丁。"""
+    build, stands = COVERAGE[case]
     _modes(lane, **{model: "PASS" for model in MODELS})
     target = ReviewTarget(**lane.review_pr(1810)["target"])
+    runs = build(target, lane.source)
+    for run in runs:
+        run.script = run.script.format(mb=target.merge_base_sha, h=target.head_sha)
+    if case == "exit-code-mismatch":
+        runs[0].code, runs[0].visible = 0, runs[0].output
     folder = lane.state_root / "runs" / target.key / MODELS[0]
     events = [json.loads(line) for line in (folder / "events.jsonl").read_text().splitlines()]
     events = [e for e in events if e.get("item", {}).get("type") != "command_execution"]
-    (folder / "events.jsonl").write_text("\n".join(json.dumps(e) for e in [
-        events[0], *(c(target) for c in commands or [lambda t: _command("echo hi", output="hi\n")]), *events[1:]]) + "\n")
+    executions = [_command(run.script, exit_code=run.code, output=run.output) for run in runs if run.in_events]
+    if case == "exit-code-mismatch":
+        executions[0]["item"]["exit_code"] = 2
+    (folder / "events.jsonl").write_text("\n".join(json.dumps(e) for e in [events[0], *executions, *events[1:]]) + "\n")
     first = (folder / "session.jsonl").read_text().splitlines()[0]
-    (folder / "session.jsonl").write_text("\n".join([first, *map(json.dumps, outputs)]) + "\n")
+    rows = _session_rows(runs, [f"call_{n}" for n in range(len(runs))])
+    (folder / "session.jsonl").write_text("\n".join([first, *map(json.dumps, rows)]) + "\n")
     launch, receipt = json.loads((folder / "launch.json").read_text()), json.loads((folder / "receipt.json").read_text())
     outcome = validate_review(target, launch, receipt, folder, lane.source)
     assert (outcome.verdict == "PASS") is stands, outcome.reason
@@ -1357,63 +1413,139 @@ DELETION_DIFF = (
     "+++ /dev/null\n@@ -1,2 +0,0 @@\n-first deleted line of the retired doc\n-second deleted line of the retired doc\n"
     "diff --git \"a/old/\\303\\244.bin\" \"b/old/\\303\\244.bin\"\ndeleted file mode 100644\nindex 2222222..0000000\n"
     "Binary files \"a/old/\\303\\244.bin\" and /dev/null differ\n"
+    "diff --git a/old/x y.md b/old/x y.md\ndeleted file mode 100644\nindex 5555555..0000000\n--- a/old/x y.md\t\n"
+    "+++ /dev/null\n@@ -1 +0,0 @@\n-a deleted line in a path with a space\n"
     "diff --git a/keep.py b/keep.py\nindex 3333333..4444444 100644\n--- a/keep.py\n+++ b/keep.py\n@@ -1 +1 @@\n"
     "-value = compute_old_value()\n+value = compute_new_value()\n")
 KEEP = "diff --git a/keep.py b/keep.py\n@@ -1 +1 @@\n-value = compute_old_value()\n+value = compute_new_value()\n"
-DELETIONS_LISTED = "D\told/gone.md\nD\t\"old/\\303\\244.bin\"\nM\tkeep.py\n"
+DELETIONS_LISTED = "D\told/gone.md\nD\t\"old/\\303\\244.bin\"\nD\told/x y.md\nM\tkeep.py\n"
 
 
 @pytest.mark.parametrize("outputs, covered", [
-    ([DELETIONS_LISTED, KEEP], True),  # 删除清单（name-status）+ 修改文件逐行
-    (["   7\tD\told/gone.md\n   8\tD\t\"old/\\303\\244.bin\"\n", KEEP], True),  # 带行号
-    ([DELETION_DIFF.split("diff --git a/keep.py")[0], KEEP], True),  # 只见到删除条目的文件头
-    (["diff --git a/old/gone.md b/old/gone.md\n", "D\t\"old/\\303\\244.bin\"\n", KEEP], True),
-    ([DELETIONS_LISTED], False),  # 修改的文件仍须逐行读到
-    ([DELETIONS_LISTED, KEEP.replace("+value = compute_new_value()\n", "")], False),
-    (["M\tkeep.py\n", KEEP], False),  # #1920 a60360 opus：`--name-status | grep -v '^D'`，删除清单被滤掉
-    ([" old/gone.md | 2 --\n old/ä.bin | Bin 9 -> 0 bytes\n", KEEP], False),  # --stat 行不是 name-status
-    (["D\told/gone.md\n", KEEP], False),  # 少列一个被删文件
-    (["D\told/gone.md\nD\t\"old/\\303\\244…12 chars truncated….bin\"\n", KEEP], False),  # 截断行不算
-    (["A\told/gone.md\nR100\told/ä.bin\tnew.bin\n", KEEP], False),  # 不是 D
+    ([[DELETIONS_LISTED], [KEEP]], True),  # 删除清单（name-status）+ 修改文件逐行
+    ([["   7\tD\told/gone.md\n   8\tD\t\"old/\\303\\244.bin\"\n   9\tD\told/x y.md\n"], [KEEP]], True),  # 带行号
+    ([[DELETION_DIFF.split("diff --git a/keep.py")[0]], [KEEP]], True),  # 只见到删除条目的文件头
+    ([[DELETIONS_LISTED]], False),  # 修改的文件仍须逐行读到
+    ([["M\tkeep.py\n"], [KEEP]], False),  # #1920 a60360 opus：`--name-status | grep -v '^D'`，删除清单被滤掉
+    ([[" old/gone.md | 2 --\n old/ä.bin | Bin 9 -> 0 bytes\n old/x y.md | 1 -\n"], [KEEP]], False),  # --stat 行
+    ([["D\told/gone.md\nD\told/x y.md\n"], [KEEP]], False),  # 少列一个被删文件
+    ([["D\told/gone.md\nD\told/x y.md\nD\t\"old/\\303\\244…12 chars truncated….bin\"\n"], [KEEP]], False),
+    ([["A\told/gone.md\nR100\told/ä.bin\tnew.bin\nA\told/x y.md\n"], [KEEP]], False),  # 不是 D
 ])
 def test_deleted_files_need_only_the_deletion_list(outputs, covered):
-    """总控裁定（#2037）：整文件删除的条目只要求删除清单（`D<TAB><path>`）或文件头出现过；其余条目照旧逐行。"""
-    patch = FrozenPatch.from_diff("a" * 40, "b" * 40, "", DELETION_DIFF)
-    assert [f.deleted for f in patch.files] == ["old/gone.md", "old/ä.bin", None]
+    """总控裁定（#2037）：整文件删除的条目只要求删除清单（`D<TAB><path>`）或文件头出现在合格 git 读取的输出里。
+    路径含空格时 `--- a/` 行尾有 TAB（#2037 opus 非阻断项）。"""
+    patch = CoveragePatch.from_diff(DELETION_DIFF)
+    assert [f.deleted for f in patch.files] == ["old/gone.md", "old/ä.bin", "old/x y.md", None]
     assert patch.covered_by(outputs) is covered
+
+
+ONLY_DELETIONS = DELETION_DIFF.split("diff --git a/keep.py")[0].replace(
+    "@@ -1,2 +0,0 @@\n-first deleted line of the retired doc\n-second deleted line of the retired doc\n", "").replace(
+    "@@ -1 +0,0 @@\n-a deleted line in a path with a space\n", "")
+
+
+def test_patch_without_checkable_lines_needs_one_complete_list():
+    """整份补丁没有一行可逐行核对时（全删除、全二进制），须有一条合格输出单独列全。"""
+    patch = CoveragePatch.from_diff(ONLY_DELETIONS)
+    assert not any(f.keys for f in patch.files)
+    # 被删文件的内容不计入逐行核对：带删除行的全删除补丁同样只认一条列全的输出
+    with_lines = CoveragePatch.from_diff(DELETION_DIFF.split("diff --git a/keep.py")[0])
+    assert not any(f.keys for f in with_lines.files)
+    assert with_lines.covered_by([[DELETIONS_LISTED]])
+    assert not with_lines.covered_by([["D\told/gone.md\n"], ["D\t\"old/\\303\\244.bin\"\nD\told/x y.md\n"]])
+    assert patch.covered_by([[DELETIONS_LISTED]])
+    assert not patch.covered_by([["D\told/gone.md\n"], ["D\t\"old/\\303\\244.bin\"\nD\told/x y.md\n"]])
+
+
+@pytest.mark.parametrize("script", [
+    # #2037 opus BLOCK：照着提示词里的文件清单 printf 出删除清单或文件头
+    "git diff {mb} {h} -- nope; printf 'D\\t%s\\n' old/gone.md old/x.bin",
+    "printf 'diff --git a/%s b/%s\\n' old/gone.md old/gone.md && git diff --stat {mb} {h}",
+    "echo 'D\told/gone.md'; git diff --name-status {mb} {h}",
+    "git diff --name-status {mb} {h} | grep -v '^D'; printf '%s\\n' 'D\told/gone.md'",
+    "git diff --name-status {mb} {h} > /tmp/x; cat /tmp/x",
+    "git log --format='%s' -1 {h}; git diff {mb} {h}",  # 行首是作者能写的提交标题
+    "git show --format=email {h}",
+    "git -C /tmp diff {mb} {h}",
+    "git diff --ext-diff {mb} {h}",
+    "git -c diff.external=x diff {mb} {h}",
+    "git diff {mb} {h} >/dev/null",
+    "for f in a b; do git diff {mb} {h} -- $f; done",
+    "git diff {mb} {h} | tee /tmp/p",
+    "GIT_EXTERNAL_DIFF=x git diff {mb} {h}",
+])
+def test_coverage_segments_reject_non_git_sources(script):
+    revisions = _Revisions("a" * 40, "b" * 40, "")
+    command = "/bin/bash -lc " + shlex.quote(script.format(mb="b" * 40, h="a" * 40))
+    assert coverage_segments(command, revisions, lambda path: None) is None
+
+
+@pytest.mark.parametrize("script", [
+    "cd /review && git diff --no-ext-diff --no-textconv {mb} {h}; git log --format='%H %P %s' -4 {h}",
+    "cat /review/SKILL.md && printf '\\n--- FULL DIFF ---\\n' && git diff --no-ext-diff --no-textconv {mb} {h}",
+    "git diff {mb} {h} -- ci.yml && printf '\\n--- STATUS ---\\n' && git status --short && git log --oneline --no-decorate {mb}..{h}",
+    # #2036 attempt 60826 kimi
+    "git diff {mb} {h} && printf '%s' '--- DIFF CHECK ---' && git diff --check {mb} {h}",
+    "printf '%s\\n' '--- FILES ---' && git diff --name-status {mb} {h} && printf '%s\\n' '--- SMALL DIFF ---'",
+    "git diff -U80 {mb} {h} -- a | nl -ba | sed -n '1,400p'",
+    "git show --stat --format=fuller {h}; git show -p {h} 2>&1 | head -n 300",
+])
+def test_coverage_segments_accept_real_reading_shapes(script):
+    revisions = _Revisions("a" * 40, "b" * 40, "")
+    command = "/bin/bash -lc " + shlex.quote(script.format(mb="b" * 40, h="a" * 40))
+    assert coverage_segments(command, revisions, lambda path: "# skill\n- item\n") is not None
+
+
+def test_git_spans_cut_out_known_outputs():
+    """printf/cat 的输出按执行顺序找到后剔除，剩下的才算 git 的；两个已知段之间没有 git 段的部分不认。"""
+    out = "# skill\n--- FULL DIFF ---\ndiff --git a/f b/f\n+x\n--- NEXT ---\nlog line\n"
+    segments = ["# skill\n", "--- FULL DIFF ---\n", None, "--- NEXT ---\n", None]
+    assert [out[a:b] for a, b in git_spans(out, segments, failed=False)] == ["diff --git a/f b/f\n+x\n", "log line\n"]
+    # printf 的文字接在一段真 diff 后面也不会被当成 diff 的续行
+    tail = "diff --git a/f b/f\n@@ -1 +1 @@\n+y\n"
+    assert [tail[a:b] for a, b in git_spans(tail, [None, "@@ -1 +1 @@\n+y\n"], failed=False)] == ["diff --git a/f b/f\n"]
+    assert git_spans("unexplained\n# skill\n", ["# skill\n", None], failed=False) == [(20, 20)]
+    assert git_spans("x\n", ["missing\n", None], failed=False) is None
+    # `&&` 链中途失败、后面的 printf 没跑：剩下的都算前面的 git 段
+    assert git_spans("diff\nfatal: x\n", [None, "--- B ---\n"], failed=True) == [(0, 14)]
 
 
 REPEAT_DIFF = ("diff --git a/f.py b/f.py\nindex 1111111..2222222 100644\n--- a/f.py\n+++ b/f.py\n"
                "@@ -1,0 +2 @@\n+    return\n@@ -9,0 +11 @@\n+    return\n")
-REPEAT_HEADER = "diff --git a/f.py b/f.py\n"
+FIRST_HUNK = "diff --git a/f.py b/f.py\n@@ -1,0 +2 @@\n+    return\n"
+SECOND_HUNK = "diff --git a/f.py b/f.py\n@@ -9,0 +11 @@\n+    return\n"
 
 
 @pytest.mark.parametrize("outputs, covered", [
-    ([REPEAT_HEADER + "@@ -1,0 +2 @@\n+    return\n@@ -9,0 +11 @@\n+    return\n"], True),
-    # #2037 kimi BLOCK：同一行改动出现两次，只见到一次不算读全
-    ([REPEAT_HEADER + "@@ -1,0 +2 @@\n+    return\n"], False),
-    # 同一份只含一次的输出看两遍，不能凑成两次（不同输出之间取最大，不相加）
-    ([REPEAT_HEADER + "+    return\n", REPEAT_HEADER + "+    return\n"], False),
-    # 同一条输出里两段（比如按 hunk 分两次 sed）按次数累加
-    ([REPEAT_HEADER + "+    return\n" + REPEAT_HEADER + "+    return\n"], True),
+    ([[FIRST_HUNK + SECOND_HUNK.split("\n", 1)[1]]], True),
+    ([[FIRST_HUNK], [SECOND_HUNK]], True),
+    # #2037 kimi BLOCK：两个 hunk 各有一条 `+return`，只看了第一个（看几遍都一样）
+    ([[FIRST_HUNK]], False),
+    ([[FIRST_HUNK], [FIRST_HUNK]], False),
+    ([[FIRST_HUNK + FIRST_HUNK]], False),
+    ([["diff --git a/f.py b/f.py\n+    return\n+    return\n"]], False),  # 没有 hunk 头，推不出行号
+    # 上下文行数不同（默认 -U3）也按行号对得上
+    ([["diff --git a/f.py b/f.py\n@@ -1,2 +1,3 @@\n a\n+    return\n b\n@@ -8,2 +10,3 @@\n c\n+    return\n e\n"]], True),
 ])
-def test_repeated_change_lines_must_all_be_seen(outputs, covered):
-    patch = FrozenPatch.from_diff("a" * 40, "b" * 40, "", REPEAT_DIFF)
-    assert patch.files[0].changes == (("+return", 2),)
+def test_change_lines_are_identified_by_position(outputs, covered):
+    patch = CoveragePatch.from_diff(REPEAT_DIFF)
+    assert patch.files[0].keys == {("diff --git a/f.py b/f.py", "+", 2, "    return"),
+                                   ("diff --git a/f.py b/f.py", "+", 11, "    return")}
     assert patch.covered_by(outputs) is covered
 
 
-def test_visible_outputs_are_what_the_model_saw(tmp_path):
-    log = tmp_path / "session.jsonl"
-    log.write_text("\n".join([
-        json.dumps({"type": "session_meta", "payload": {"id": "s"}}), "not json", json.dumps([1]),
-        json.dumps(_exec_output("seen\n")), json.dumps(_exec_output("failed\n", exit_code=2)),
-        json.dumps(_exec_output("running\n", exit_code=None)),
-        json.dumps({"type": "response_item", "payload": {"type": "function_call_output", "output": "Output:\nno header\n"}}),
-        json.dumps({"type": "event_msg", "payload": {"type": "function_call_output", "output": _exec_output("x")["payload"]["output"]}}),
-    ]) + "\n")
-    assert module.visible_outputs(log) == ["seen\n", "failed\n"]
-    assert module.visible_outputs(log, exit_zero_only=True) == ["seen\n"]
+@pytest.mark.parametrize("aggregated, visible, pieces", [
+    ("a\nb\n", "a\nb\n", ["a\nb\n"]),
+    ("a\nb\n", "a\nX\n", None),  # 正文与宿主采集的输出对不上
+    ("line1\nline2 long\nline3\nline4\n", "line1\nli…20 chars truncated…ne4\n", ["line1\n", ""]),
+    ("line1\nline2\nline3\n", "Warning: truncated output (original token count: 9)\nTotal output lines: 3\n\n"
+                              "line1\n…5 chars truncated…\nline3\n", ["line1\n", "line3\n"]),
+    ("abc\n", "zzz…1 chars truncated…abc\n", None),
+])
+def test_visible_spans_must_come_from_aggregated_output(aggregated, visible, pieces):
+    spans = visible_spans(aggregated, visible)
+    assert (None if spans is None else [aggregated[a:b] for a, b in spans]) == pieces
 
 
 def test_zero_tool_pass_is_never_reused(lane, env):
