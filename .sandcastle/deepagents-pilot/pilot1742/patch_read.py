@@ -16,13 +16,21 @@ Codex 记录的命令形如 `/bin/bash -lc '<脚本>'`。这里按 bash 语法�
   按 git 的实际输出规则会输出补丁：diff 两侧一边是冻结 head（`HEAD` 也算，审阅 checkout 已证实停在 head 且干净）、
   另一边是别的已知提交，只给一个提交时另一边是工作区；show 的位置参数全是 head 的提交、`<other>..<head>` 范围，
   或全是 `<head>:<path>` 文件内容（path 须是本 PR 改动的文件）；stdout 没被丢掉（/dev/null、关闭、写进文件）。
-- git 之前只有不输出的段（_setup），用 `&&`、`;` 或换行接上；git 之后只有经管道串联的纯过滤器（_FILTERS），
-  管道就是脚本的结尾。别的命令（echo、printf、cat 文件、tee、python、另一条 git……）只要出现，整条命令就不算：
-  aggregated_output 是整条命令的输出，那些段印出的改动行与 git 印出的分不开（#1969 正式审查 kimi BLOCK）。
-  唯一的例外（PR #2018 run 45a4c22b）：整个 PR 的 git diff（merge-base 对 head，不带 pathspec、不接管道、
-  没有任何重定向，全局选项只许白名单 `-c`，选项只在 _PLAIN_DIFF 里）之后，用 `;`/`&&`/换行接白名单里只印提交元数据的 `git show`/`git log`（_trailing）。
-  PR 非空，真实补丁必定先印出；证据只在输出开头、合 git diff 格式的那段里找（_leading_diff），diff 失败时
-  开头是报错，后一段的输出当不了证据（#2022 kimi、opus BLOCK）。
+- 一般形状：git 之前只有不输出的段（_setup），用 `&&`、`;` 或换行接上；git 之后只有经管道串联的纯过滤器
+  （_FILTERS），管道就是脚本的结尾。aggregated_output 是整条命令的输出，别的段印出的改动行与 git 印出的分不开
+  （#1969 正式审查 kimi BLOCK），所以除了下面的复合形式，别的命令（echo、printf、cat 文件、tee、python、
+  另一条 git……）只要出现，整条命令就不算。
+- 复合形式只围着整个 PR 的 git diff（merge-base 对 head，不带 pathspec、不接管道、没有任何重定向，全局选项只许
+  白名单 `-c`，选项只在 _PLAIN_DIFF 里）。证据只在这条 diff 自己印出的那段里找（_leading_diff），前后段的输出当不了证据。
+  - 之后（PR #2018 run 45a4c22b，#2022）：用 `;`/`&&`/换行接白名单里只印提交元数据的 `git show`/`git log`（_trailing）、
+    `printf '<字面>'`、`git diff --check <mb> <head>`（只印空白错误，不当证据）。PR 非空，真实补丁必定先印出；
+    diff 失败时开头是报错（#2022 kimi、opus BLOCK）。
+  - 之前（#1968，推翻 #1969 时「printf、cat 不算」的裁定）：`cat <仓内跟踪文件>`、`printf '<字面>'`、
+    `git diff --stat <mb> <head>`（_preamble）。这时整条命令只许 `&&` 连接、没有子 shell；前置段印出的东西须能逐段
+    精确剥掉——printf 是它的字面，cat 是该文件在冻结 head 上的内容（controller 自己从对象库取），--stat 是合格式的
+    统计行加总结行——剥完紧接着就是 `diff --git`，否则不认（_after_preamble，#2047 kimi BLOCK：cat 的文件里可以有
+    伪造的 diff 头）。输出接近截断上限时一律不认：前置段可能把真实补丁挤出日志。CRLF 按 LF 比对。
+    边界：`git diff --check` 在有空白错误时退出码非 0，整条 `&&` 链随之非 0，调用方只数 exit 0，这条仍判未读。
 
 命令文本只说明脚本打算让 git 输出补丁，不说明它真的输出了：`if false; then git diff …; fi` 没执行，
 `exec >/dev/null`、`export GIT_EXTERNAL_DIFF=true` 改的是之后命令的环境，textconv 保留 `diff --git`/`@@` 头而把内容
@@ -36,6 +44,7 @@ from __future__ import annotations
 
 import posixpath
 import re
+from collections.abc import Callable
 from dataclasses import dataclass, field, replace
 
 _OPAQUE = "\0"  # 无法静态求值的部分（`$(...)`、未知变量）；含它的词不会匹配任何 SHA 或命令名
@@ -367,6 +376,8 @@ class _Read:
     kind: str
     paths: tuple[str, ...] = ()
     leading: bool = False  # 后面还接了别的段（_trailing）：证据只在输出开头那段 diff 里找，见 _leading_diff
+    # diff 之前的前置段（_preamble，#1968）按序印出的东西：("text", printf 的字面) / ("cat", 仓内路径) / ("stat", "")
+    preamble: tuple[tuple[str, str], ...] = ()
 
 
 WHOLE_PATCH = _Read("patch")
@@ -580,6 +591,41 @@ def _leading_diff(output: str) -> list[str]:
     return lines
 
 
+_STAT_SUMMARY = re.compile(r" \d+ files? changed(?:, \d+ insertions?\(\+\))?(?:, \d+ deletions?\(-\))?")
+# Codex 把 aggregated_output 截在约 1 MiB（实测最长 1048607 字节，没有截断标记）；接近它就当截断了
+_TRUNCATED_BYTES = 1024 * 1024 - 4096
+
+
+def _after_preamble(output: str, read: _Read, head_file: Callable[[str], str | None]) -> str | None:
+    """逐段精确剥掉 diff 之前那些前置段印出的东西，给出剩下的输出；剥不掉、或剥完不是紧接着 `diff --git ` 时给 None
+    （#2047 kimi BLOCK：只找「第一个 `diff --git`」时，cat 的文件里伪造的 diff 头会被当成 diff 的开头）。
+    printf 印的是它的字面；cat 印的是该文件在冻结 head 上的内容（head_file，取不到就不认）；--stat 印的是若干以
+    空格开头的统计行，最后一行是 ` N files changed…`。CRLF（经 PTY 执行时）按 LF 比对。"""
+    if not read.preamble:
+        return output
+    if len(output.encode()) >= _TRUNCATED_BYTES:
+        return None  # 前置段可能把真实补丁挤出了日志
+    rest = output.replace("\r\n", "\n")
+    for kind, value in read.preamble:
+        if kind == "stat":
+            while True:
+                line, newline, after = rest.partition("\n")
+                if not newline or not line.startswith(" "):
+                    return None
+                rest = after
+                if _STAT_SUMMARY.fullmatch(line):
+                    break
+            continue
+        text = value if kind == "text" else head_file(value)
+        if text is None:
+            return None
+        text = text.replace("\r\n", "\n")
+        if not rest.startswith(text):
+            return None
+        rest = rest[len(text):]
+    return rest if rest.startswith("diff --git ") else None
+
+
 @dataclass(frozen=True)
 class FrozenFile:
     """冻结补丁里的一个文件。header 是 controller 侧的 `diff --git a/… b/…` 行，path 是它在 head 上的路径
@@ -622,9 +668,12 @@ class FrozenPatch:
     merge_base_sha: str
     base_sha: str
     files: tuple[FrozenFile, ...]
+    # 仓内路径在冻结 head 上的普通文件内容（不是普通文件或不存在时给 None）；前置 cat 的输出靠它精确剥掉
+    head_file: Callable[[str], str | None] = field(default=lambda _path: None, compare=False, repr=False)
 
     @classmethod
-    def from_diff(cls, head_sha: str, merge_base_sha: str, base_sha: str, diff: str) -> FrozenPatch:
+    def from_diff(cls, head_sha: str, merge_base_sha: str, base_sha: str, diff: str,
+                  head_file: Callable[[str], str | None] | None = None) -> FrozenPatch:
         """diff 须是 controller 用固定 `a/`、`b/` 前缀取的 `git diff -U0 <merge_base> <head>`。"""
         split = _split_files(diff)
         changed = {text for _, _, lines in split for _, text in lines}
@@ -633,7 +682,9 @@ class FrozenPatch:
                                  frozenset({t for _, t in lines if len(t) >= least} if changed else {header}),
                                  frozenset({t for sign, t in lines if sign == "+" and len(t) >= least}))
                       for header, path, lines in split)
-        return cls(head_sha, merge_base_sha, base_sha, files)
+        if head_file is None:
+            return cls(head_sha, merge_base_sha, base_sha, files)
+        return cls(head_sha, merge_base_sha, base_sha, files, head_file)
 
     @property
     def evidence(self) -> frozenset[str]:
@@ -652,7 +703,13 @@ class FrozenPatch:
             evidence: frozenset[str] = frozenset().union(*(by_path[path] for path in read.paths))
         else:
             evidence = self.evidence if read.kind == "patch" else frozenset()
-        for raw in _leading_diff(output) if read.leading else _lines(output):
+        lines = _lines(output)
+        if read.leading:
+            diff = _after_preamble(output, read, self.head_file)
+            if diff is None:
+                return False
+            lines = _leading_diff(diff)
+        for raw in lines:
             if _BREAK.search(raw):
                 continue
             line = raw.strip()
@@ -701,9 +758,15 @@ def _patch_read(command: str, head_sha: str, merge_base_sha: str, base_sha: str)
             or commands[-1].op not in ("", ";", "\n")
             or any(_SPECIAL_NAME.fullmatch(name) for e in expanded for name in e.env_names)):
         return None
-    if not all(_setup(e) and c.op in ("&&", ";", "\n") for c, e in zip(commands[:k], expanded[:k], strict=True)):
+    preamble = _preamble(commands[:k], expanded[:k], revisions)
+    if preamble is None:
         return None
-    if commands[k].op in _PIPE or k + 1 == len(commands):
+    framed = bool(preamble)
+    # 前置段印出的东西与 diff 的输出只靠位置分开（_after_preamble），所以整条命令须是一串 `&&`、没有子 shell：
+    # 调用方只数 exit 0 的命令，`&&` 链 exit 0 就说明 diff 跑过且成功
+    if framed and (any(x in ("(", ")") for x in items) or any(c.op != "&&" for c in commands[:-1])):
+        return None
+    if not framed and (commands[k].op in _PIPE or k + 1 == len(commands)):
         ok = (all(commands[j].op in _PIPE for j in range(k, len(commands) - 1))
               and all(_filter(e) for e in expanded[k + 1:]))
         return read if ok else None
@@ -720,12 +783,15 @@ def _patch_read(command: str, head_sha: str, merge_base_sha: str, base_sha: str)
     globals_ = expanded[k].argv[1:len(expanded[k].argv) - len(call.rest) - 1]
     if (read.kind != "patch" or "--" in call.rest or expanded[k].redirects
             or globals_[::2] != ["-c"] * len(globals_[::2]) or len(globals_) % 2
-            or not all(_PLAIN_DIFF.fullmatch(o) for o in call.options) or commands[k].op not in ("&&", ";", "\n")):
+            or not all(_PLAIN_DIFF.fullmatch(o) for o in call.options)
+            or (k + 1 < len(commands) and commands[k].op not in ("&&", ";", "\n"))):
         return None
     for j in range(k + 1, len(commands)):
-        if commands[j].op not in ("&&", ";", "\n", "") or not _trailing(expanded[j], revisions):
+        if commands[j].op not in ("&&", ";", "\n", "") or not (
+                _trailing(expanded[j], revisions) or _printf_literal(commands[j]) is not None
+                or _whole_diff_with(expanded[j], revisions, "--check")):
             return None
-    return replace(read, leading=True)
+    return replace(read, leading=True, preamble=preamble)
 
 
 # 复合形式里前一段 diff 只认的选项：都不改补丁的范围与内容（外部 diff、textconv、颜色关掉；上下文行数、显式 -p）
@@ -771,6 +837,74 @@ def _setup(command: _Expanded) -> bool:
         names = [arg.partition("=")[0] for arg in argv[1:]]
         return all(_NAME.fullmatch(n) and not _SPECIAL_NAME.fullmatch(n) for n in names)
     return argv == ["cd", "/review"]
+
+
+_PRINTF_TEXT = re.compile(r"(?:[^\\%\n]|\\n)*")  # 只有字面文字和 `\n`：没有 `%` 指令、别的转义
+_CAT_PATH = re.compile(r"(?!-)[^*?\[\]{}~$`\\\s]+")  # 无通配、无展开、不像选项
+
+
+def _printf_literal(command: _Command) -> str | None:
+    """`printf '<字面>'` 印出的确切文字（#1968）：恰好一个单引号串（词法上只有单引号串是唯一一个 q 段），只含字面
+    文字和 `\\n`，不以 `-` 开头（bash 会当选项报错）；不带重定向。别的写法给 None。"""
+    if command.redirects or len(command.words) != 2 or command.words[0] != [("lit", c) for c in "printf"]:
+        return None
+    word = command.words[1]
+    if len(word) != 1 or word[0][0] != "q" or not _PRINTF_TEXT.fullmatch(word[0][1]) or word[0][1].startswith("-"):
+        return None
+    return word[0][1].replace("\\n", "\n")
+
+
+def _cat_file(command: _Command) -> str | None:
+    """`cat <路径>`（#1968）：恰好一个不加引号的路径，仓内相对路径（cwd 就是 /review）或 /review 下，不含 `..`、
+    通配与展开，不带重定向（`cat <(…)` 在词法上就是重定向）。给出仓内路径，别的写法给 None。
+    文件须是冻结 head 上的普通文件，由 FrozenPatch.head_file 判定。"""
+    if command.redirects or len(command.words) != 2 or command.words[0] != [("lit", c) for c in "cat"]:
+        return None
+    word = command.words[1]
+    path = _text(word)
+    if not all(kind == "lit" for kind, _ in word) or not _CAT_PATH.fullmatch(path):
+        return None
+    if path.startswith("/"):
+        if not path.startswith("/review/"):
+            return None
+        path = path.removeprefix("/review/")
+    if ".." in path.split("/"):
+        return None
+    path = posixpath.normpath(path)
+    return None if path in (".", "") or path.startswith("/") else path
+
+
+def _preamble(commands: list[_Command], expanded: list[_Expanded],
+              revisions: _Revisions) -> tuple[tuple[str, str], ...] | None:
+    """git diff 之前的段：_setup，或 `cat <路径>`、`printf '<字面>'`、`git diff --stat <merge-base> <head>`
+    （#1968，kimi 先 cat 技能文件、printf 一行分隔、有时先看 --stat，再读整份 diff）。按序给出它们印出的东西
+    （见 _Read.preamble）；有别的命令时给 None。"""
+    printed: list[tuple[str, str]] = []
+    for command, e in zip(commands, expanded, strict=True):
+        if command.op not in ("&&", ";", "\n"):
+            return None
+        if (text := _printf_literal(command)) is not None:
+            printed.append(("text", text))
+        elif (path := _cat_file(command)) is not None:
+            printed.append(("cat", path))
+        elif _whole_diff_with(e, revisions, "--stat"):
+            printed.append(("stat", ""))
+        elif not _setup(e):
+            return None
+    return tuple(printed)
+
+
+def _whole_diff_with(command: _Expanded, revisions: _Revisions, mode: str) -> bool:
+    """`git diff <mode> <merge-base> <head>`（可带 --no-ext-diff/--no-textconv/--no-color），不带全局选项、pathspec、
+    重定向（#1968）。mode 是 `--check`（只印空白错误）或 `--stat`（只印统计）：都不出补丁，不当读补丁的证据；
+    --check 只许出现在整份 diff 之后，--stat 只许出现在之前。"""
+    argv = command.argv
+    if command.redirects or len(argv) < 5 or argv[0] not in ("git", "/usr/bin/git") or argv[1] != "diff":
+        return False
+    options = [a for a in argv[2:] if a.startswith("-")]
+    positional = [a for a in argv[2:] if not a.startswith("-")]
+    return (mode in options and set(options) <= {mode, "--no-ext-diff", "--no-textconv", "--no-color"}
+            and [revisions.kind(a) for a in positional] == ["merge-base", "head"])
 
 
 _SPECIAL_NAME = re.compile(r"GIT_(?!PAGER$)\w*|PATH|IFS|CDPATH|HOME|XDG_CONFIG_HOME")
