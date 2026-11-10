@@ -703,11 +703,13 @@ class FrozenPatch:
             evidence: frozenset[str] = frozenset().union(*(by_path[path] for path in read.paths))
         else:
             evidence = self.evidence if read.kind == "patch" else frozenset()
+        lines = _lines(output)
         if read.leading:
             diff = _after_preamble(output, read, self.head_file)
             if diff is None:
                 return False
-        for raw in _leading_diff(diff) if read.leading else _lines(output):
+            lines = _leading_diff(diff)
+        for raw in lines:
             if _BREAK.search(raw):
                 continue
             line = raw.strip()
