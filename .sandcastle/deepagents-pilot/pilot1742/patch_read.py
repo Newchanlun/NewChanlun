@@ -24,8 +24,8 @@ Codex 记录的命令形如 `/bin/bash -lc '<脚本>'`。这里按 bash 语法�
   PR 非空，真实补丁必定先印出；证据只在输出开头、合 git diff 格式的那段里找（_leading_diff），diff 失败时
   开头是报错，后一段的输出当不了证据（#2022 kimi、opus BLOCK）。
   这条整份 diff 之后还可以接 `printf '<字面>'` 与 `git diff --check <mb> <head>`（只印空白错误，不当证据）；
-  之前还可以有 `cat <路径>`、`printf '<字面>'` 这类前置段（_preamble，#1968：kimi 习惯先 cat 技能文件、printf
-  一行分隔再读 diff）。有前置段时整条命令只许 `&&` 连接、没有子 shell；证据只在前置段输出之后那段 diff 里找（_after_preamble）。
+  之前还可以有 `cat <路径>`、`printf '<字面>'`、`git diff --stat <mb> <head>` 这类前置段（_preamble，#1968：kimi 习惯
+  先 cat 技能文件、printf 一行分隔，有时先看 --stat，再读 diff）。有前置段时整条命令只许 `&&` 连接、没有子 shell；证据只在前置段输出之后那段 diff 里找（_after_preamble）。
 
 命令文本只说明脚本打算让 git 输出补丁，不说明它真的输出了：`if false; then git diff …; fi` 没执行，
 `exec >/dev/null`、`export GIT_EXTERNAL_DIFF=true` 改的是之后命令的环境，textconv 保留 `diff --git`/`@@` 头而把内容
@@ -370,9 +370,9 @@ class _Read:
     kind: str
     paths: tuple[str, ...] = ()
     leading: bool = False  # 后面还接了别的段（_trailing）：证据只在输出开头那段 diff 里找，见 _leading_diff
-    # diff 之前的前置段（_preamble，#1968）：printf 印出的确切文字，以及更前面有没有 cat（印的内容不可知）
+    # diff 之前的前置段（_preamble，#1968）：printf 印出的确切文字，以及更前面有没有 cat/--stat（印的内容不可知）
     preamble: str = ""
-    cat: bool = False
+    unknown: bool = False
 
 
 WHOLE_PATCH = _Read("patch")
@@ -588,9 +588,9 @@ def _leading_diff(output: str) -> list[str]:
 
 def _after_preamble(output: str, read: _Read) -> str:
     """去掉 diff 之前那些前置段印出的东西，剩下的从 diff 的输出开始（#1968）。只有 printf 时前面印的是确切文字，
-    输出须以它开头；有 cat 时 cat 印的内容不可知，diff 从「cat 之后那些 printf 的文字紧跟 `diff --git `」第一次出现处开始
-    （没有 printf 时取第一个行首的 `diff --git `）。前置段与 diff 之间全是 `&&`，所以 exit 0 时 diff 一定跑过且成功了。"""
-    if not read.cat:
+    输出须以它开头；有 cat 或 `git diff --stat` 时它们印的内容不可知，diff 从「其后那些 printf 的文字紧跟 `diff --git `」
+    第一次出现处开始（没有 printf 时取第一个行首的 `diff --git `；--stat 的输出里没有这样的行）。前置段与 diff 之间全是 `&&`，所以 exit 0 时 diff 一定跑过且成功了。"""
+    if not read.unknown:
         return output[len(read.preamble):] if output.startswith(read.preamble) else ""
     marker = read.preamble + "diff --git "
     i = output.find(marker)
@@ -720,10 +720,10 @@ def _patch_read(command: str, head_sha: str, merge_base_sha: str, base_sha: str)
             or commands[-1].op not in ("", ";", "\n")
             or any(_SPECIAL_NAME.fullmatch(name) for e in expanded for name in e.env_names)):
         return None
-    preamble = _preamble(commands[:k], expanded[:k])
+    preamble = _preamble(commands[:k], expanded[:k], revisions)
     if preamble is None:
         return None
-    printed, cat = preamble
+    printed, unknown = preamble
     framed = any(not _setup(e) for e in expanded[:k])
     # 前置段印出的东西与 diff 的输出只靠位置分开（_after_preamble），所以整条命令须是一串 `&&`、没有子 shell：
     # 调用方只数 exit 0 的命令，`&&` 链 exit 0 就说明 diff 跑过且成功
@@ -752,9 +752,9 @@ def _patch_read(command: str, head_sha: str, merge_base_sha: str, base_sha: str)
     for j in range(k + 1, len(commands)):
         if commands[j].op not in ("&&", ";", "\n", "") or not (
                 _trailing(expanded[j], revisions) or _printf_literal(commands[j]) is not None
-                or _whitespace_check(expanded[j], revisions)):
+                or _whole_diff_with(expanded[j], revisions, "--check")):
             return None
-    return replace(read, leading=True, preamble=printed, cat=cat)
+    return replace(read, leading=True, preamble=printed, unknown=unknown)
 
 
 # 复合形式里前一段 diff 只认的选项：都不改补丁的范围与内容（外部 diff、textconv、颜色关掉；上下文行数、显式 -p）
@@ -831,31 +831,33 @@ def _cat_file(command: _Command) -> bool:
     return ".." not in path.split("/")
 
 
-def _preamble(commands: list[_Command], expanded: list[_Expanded]) -> tuple[str, bool] | None:
-    """git diff 之前的段：_setup，或 `cat <路径>`、`printf '<字面>'`（#1968，kimi 先 cat 技能文件、printf 一行分隔再读
-    整份 diff）。给出 (最后一个 cat 之后各 printf 印出的文字, 有没有 cat)；有别的命令时给 None。"""
-    printed, cat = "", False
+def _preamble(commands: list[_Command], expanded: list[_Expanded], revisions: _Revisions) -> tuple[str, bool] | None:
+    """git diff 之前的段：_setup，或 `cat <路径>`、`printf '<字面>'`、`git diff --stat <merge-base> <head>`
+    （#1968，kimi 先 cat 技能文件、printf 一行分隔、有时先看 --stat，再读整份 diff）。给出
+    (最后一个 cat/--stat 之后各 printf 印出的文字, 前面有没有内容不可知的 cat/--stat 输出)；有别的命令时给 None。"""
+    printed, unknown = "", False
     for command, e in zip(commands, expanded, strict=True):
         if command.op not in ("&&", ";", "\n"):
             return None
         if (text := _printf_literal(command)) is not None:
             printed += text
-        elif _cat_file(command):
-            printed, cat = "", True
+        elif _cat_file(command) or _whole_diff_with(e, revisions, "--stat"):
+            printed, unknown = "", True
         elif not _setup(e):
             return None
-    return printed, cat
+    return printed, unknown
 
 
-def _whitespace_check(command: _Expanded, revisions: _Revisions) -> bool:
-    """`git diff --check <merge-base> <head>`（可带 --no-ext-diff/--no-textconv/--no-color）：只印空白错误，
-    不当读补丁的证据，只许出现在整份 diff 之后（#1968）。"""
+def _whole_diff_with(command: _Expanded, revisions: _Revisions, mode: str) -> bool:
+    """`git diff <mode> <merge-base> <head>`（可带 --no-ext-diff/--no-textconv/--no-color），不带全局选项、pathspec、
+    重定向（#1968）。mode 是 `--check`（只印空白错误）或 `--stat`（只印统计）：都不出补丁，不当读补丁的证据；
+    --check 只许出现在整份 diff 之后，--stat 只许出现在之前。"""
     argv = command.argv
     if command.redirects or len(argv) < 5 or argv[0] not in ("git", "/usr/bin/git") or argv[1] != "diff":
         return False
     options = [a for a in argv[2:] if a.startswith("-")]
     positional = [a for a in argv[2:] if not a.startswith("-")]
-    return ("--check" in options and set(options) <= {"--check", "--no-ext-diff", "--no-textconv", "--no-color"}
+    return (mode in options and set(options) <= {mode, "--no-ext-diff", "--no-textconv", "--no-color"}
             and [revisions.kind(a) for a in positional] == ["merge-base", "head"])
 
 

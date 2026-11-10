@@ -1333,6 +1333,8 @@ _SKILL = "/review/.agents/skills/code-review/SKILL.md"
 _WHOLE = f"git diff --no-ext-diff --no-textconv {PR2018_MB} {PR2018_HEAD}"
 _CHECK = f"git diff --check {PR2018_MB} {PR2018_HEAD}"
 _SEP = "\n--- DIFF ---\n"
+_STAT = f"git diff --no-ext-diff --no-textconv --stat {PR2018_MB} {PR2018_HEAD}"
+_STAT_OUT = " .github/workflows/ci.yml | 2 +-\n 1 file changed, 1 insertion(+), 1 deletion(-)\n"
 
 
 @pytest.mark.parametrize("script, output", [
@@ -1350,6 +1352,12 @@ _SEP = "\n--- DIFF ---\n"
      "x\n" + SKILL_TEXT + "a\nb\n" + PR2018_DIFF),
     # cat 印的内容里出现过 printf 的那行分隔，diff 从「分隔紧跟 diff --git」处开始
     (f"cat {_SKILL} && printf '\\n--- DIFF ---\\n' && {_WHOLE}", "--- DIFF ---\n" + SKILL_TEXT + _SEP + PR2018_DIFF),
+    # PR #2039 run a95115 kimi 的原样形状：diff 之前先看 --stat，它的输出里没有 `diff --git` 行
+    (f"cat {_SKILL} && printf '\\n--- DIFF STAT ---\\n' && {_STAT} && printf '\\n--- FULL DIFF ---\\n' && {_WHOLE}",
+     SKILL_TEXT + "\n--- DIFF STAT ---\n" + _STAT_OUT + "\n--- FULL DIFF ---\n" + PR2018_DIFF),
+    (f"{_STAT} && {_WHOLE}", _STAT_OUT + PR2018_DIFF),
+    (f"git diff --stat --no-color {PR2018_MB} {PR2018_HEAD} && printf '\\n--- DIFF ---\\n' && {_WHOLE}",
+     _STAT_OUT + _SEP + PR2018_DIFF),
     # 没有前置段时，整份 diff 之后也可以接 printf 与 --check（`;` 照现行规则）
     (f"{_WHOLE}; printf '\\n--- END ---\\n'", PR2018_DIFF + "\n--- END ---\n"),
     (f"{_WHOLE} && {_CHECK}", PR2018_DIFF),
@@ -1395,7 +1403,17 @@ _FULL = SKILL_TEXT + _SEP + PR2018_DIFF
     f"sed -n 1,5p {_SKILL} && {_WHOLE}",
     f"cat {_SKILL} && {_WHOLE} | head",
     f"cat {_SKILL} && {_WHOLE} -- nope",
-    f"cat {_SKILL} && git diff --stat {PR2018_MB} {PR2018_HEAD} && {_WHOLE}",
+    f"{_STAT} -- .github && {_WHOLE}",
+    f"git diff --stat {PR2018_MB} {PR2018_HEAD} .github && {_WHOLE}",
+    f"{_STAT} | tail -1 && {_WHOLE}",
+    f"{_STAT} > /tmp/s && {_WHOLE}",
+    f"{_STAT}; {_WHOLE}",
+    f"({_STAT}) && {_WHOLE}",
+    f"git diff --stat=200 {PR2018_MB} {PR2018_HEAD} && {_WHOLE}",
+    f"git diff --stat -p {PR2018_MB} {PR2018_HEAD} && {_WHOLE}",
+    f"git diff --stat {PR2018_HEAD} {PR2018_MB} && {_WHOLE}",
+    f"git -C /tmp diff --stat {PR2018_MB} {PR2018_HEAD} && {_WHOLE}",
+    f"{_WHOLE} && {_STAT}",
     f"cat {_SKILL} && {_WHOLE}; printf 'x\\n'",
     f"{_WHOLE} && printf \"$X\"",
     f"{_WHOLE} && echo done",
@@ -1421,6 +1439,8 @@ def test_other_commands_around_whole_diff_are_not_patch_reads(script):
     (f"cat {_SKILL} && printf '\\n--- DIFF ---\\n' && {_WHOLE}", f"+{PR2018_CHANGED}\n" + _SEP),
     (f"cat {_SKILL} && {_WHOLE}", f"+{PR2018_CHANGED}\nfatal: bad object {PR2018_HEAD}\n"),
     (f"cat {_SKILL} && {_WHOLE}", f"x diff --git a/f b/f\n@@ -1 +1 @@\n+{PR2018_CHANGED}\n"),
+    # --stat 之后 diff 报错：统计行与报错都不是证据
+    (f"{_STAT} && printf '\\n--- DIFF ---\\n' && {_WHOLE}", _STAT_OUT + _SEP + f"fatal: bad object {PR2018_HEAD}\n"),
     # 只有 printf 时输出须以它印出的文字开头
     (f"printf 'DIFF\\n' && {_WHOLE}", f"+{PR2018_CHANGED}\nDIFF\n"),
     (f"printf 'DIFF\\n' && {_WHOLE}", PR2018_DIFF),
