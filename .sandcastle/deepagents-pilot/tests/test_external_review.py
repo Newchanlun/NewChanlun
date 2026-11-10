@@ -1578,7 +1578,7 @@ BIG_PREAMBLE = _codex_view(BIG, 0, 0).partition("…")[0]
     (BIG, _codex_view(BIG, 6, 12, preamble=BIG_PREAMBLE.replace("lines: 4", "lines: 5")), None),  # 行数对不上
     (BIG, _codex_view(BIG, 9000, 2000), None),  # 可见部分超过上限
     ("a\nb\nc\n", _codex_view("a\nb\nc\n", 2, 2), None),  # 没超过上限的输出 Codex 不截断
-])
+], ids=lambda value: repr(value)[:40] if isinstance(value, str) else None)
 def test_visible_spans_must_come_from_aggregated_output(aggregated, visible, pieces):
     spans = visible_spans(aggregated, visible)
     assert (None if spans is None else [aggregated[a:b] for a, b in spans]) == pieces
