@@ -6,14 +6,15 @@
  *
  * 默认只读：写 .sandcastle/logs/health-report.json 后退出。
  * --heal：wayfinder/claim-loop 停摆 → launchctl kickstart -k，服务未加载则 bootstrap
- * .sandcastle/launchd/<label>.plist 并复判运行态（#1678）；stale claim → 与 claim-loop
+ * .sandcastle/launchd/<label>.plist 并复判运行态（#1678）；SERVICE_MANAGER=systemd 时改为
+ * systemctl --user restart <label>.service（#2048，缺省 launchctl）；stale claim → 与 claim-loop
  * rollbackClaim 同款回滚（unassign @me + 恢复 sandcastle 标签 + workers.jsonl 记 rolled_back）。
  * 宿主脏树不自动清理（需人工或 PR 合入后 reset），外盘只报告不删文件。
  *
  * 跑法：npx tsx .sandcastle/health-monitor.mts [--heal] [--report <path>]
  */
 import { useScheduler } from "./scheduler-config.mts";
-import { drainRequested, withLegacyAdmission, DrainFrozenError } from "./drain-control.mts";
+import { AGENT_STORAGE, drainRequested, withLegacyAdmission, DrainFrozenError } from "./drain-control.mts";
 import { execFileSync } from "node:child_process";
 import { appendFileSync, existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
@@ -31,10 +32,10 @@ const WAYFINDER_LOG = `${MAIN_REPO}/.sandcastle/logs/wayfinder-engine.stdout.log
 const CLAIMER_STDOUT = `${HOST_REPO}/.sandcastle/logs/sandcastle-claimer.stdout.log`;
 const CLAIMER_STDERR = `${HOST_REPO}/.sandcastle/logs/sandcastle-claimer.stderr.log`;
 const WORKERS_LOG = `${HOST_REPO}/.sandcastle/logs/workers.jsonl`;
-const DISK_PATH = process.env.HEALTH_DISK_PATH ?? "/Volumes/AgentStorage";
+const DISK_PATH = process.env.HEALTH_DISK_PATH ?? AGENT_STORAGE;
 const CLIPROXY_URL = process.env.HEALTH_CLIPROXY_URL ?? "http://127.0.0.1:8318/v1/models";
 const CLIPROXY_CONFIG =
-  process.env.HEALTH_CLIPROXY_CONFIG ?? "/Users/silencehan/Library/Application Support/CLIProxyLocal/config.yaml";
+  process.env.HEALTH_CLIPROXY_CONFIG ?? process.env.CLIPROXY_CONFIG ?? "/Users/silencehan/Library/Application Support/CLIProxyLocal/config.yaml";
 const LABEL_WAYFINDER = "com.newchanlun.wayfinder-engine";
 const LABEL_CLAIMER = "com.newchanlun.sandcastle-claimer";
 const PROC_WAYFINDER = "scripts/[w]ayfinder_engine[.]mts";
@@ -190,6 +191,19 @@ function pgrep(pattern: string): boolean {
 }
 
 /** launchd 服务停摆自愈；run 失败即抛（同 execFileSync），isRunning 为加载后复判的运行态。 */
+export type ServiceManager = "launchctl" | "systemd";
+/** #2048：宿主服务管理器，缺省 launchctl（Mac）；Belay 设 SERVICE_MANAGER=systemd。其它取值直接报错。 */
+export function serviceManager(value: string | undefined = process.env.SERVICE_MANAGER): ServiceManager {
+  const v = value || "launchctl";
+  if (v !== "launchctl" && v !== "systemd") throw new Error(`SERVICE_MANAGER 只接受 launchctl 或 systemd，实为 ${v}`);
+  return v;
+}
+
+/** launchd 标签 com.newchanlun.<名> 对应 systemd 用户单元 newchanlun-<名>.service（#2048 迁移方案命名）。 */
+export function systemdUnit(label: string): string {
+  return `${label.replace(/^com\.newchanlun\./, "newchanlun-")}.service`;
+}
+
 export interface HealDeps {
   run: (cmd: string, args: string[]) => string;
   isRunning: () => boolean;
@@ -208,7 +222,17 @@ function errText(e: unknown): string {
  * kickstart -k；若 launchd 报「服务不存在/未加载」（#1678，Could not find service）→ bootstrap 对应 plist
  * 再判一次运行态。其它 kickstart 错误只报告，不叠加重试。
  */
-export function healService(label: string, plist: string, uid: string, deps: HealDeps): HealResult {
+export function healService(label: string, plist: string, uid: string, deps: HealDeps,
+  manager: ServiceManager = serviceManager()): HealResult {
+  if (manager === "systemd") {
+    const unit = systemdUnit(label);
+    try {
+      deps.run("systemctl", ["--user", "restart", unit]);
+    } catch (e) {
+      return { status: "red", action: `systemctl --user restart ${unit} 失败：${errText(e)}` };
+    }
+    return { status: deps.isRunning() ? "healthy" : "red", action: `已 systemctl --user restart ${unit}` };
+  }
   try {
     deps.run("launchctl", ["kickstart", "-k", `gui/${uid}/${label}`]);
     return { status: deps.isRunning() ? "healthy" : "red", action: `已 kickstart ${label}` };

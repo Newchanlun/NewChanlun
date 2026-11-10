@@ -46,7 +46,8 @@ export const MODEL_DRAFTER = MODEL_OPUS;
 export const MODEL_REVIEW = MODEL_MAIN;
 export const PROXY_BASE_URL = CLIPROXY_BASE_URL;
 export { CLIPROXY_CONFIG, CLIPROXY_CONFIG as PROXY_CONFIG, extractFirstApiKey };
-export const DEFAULT_OUT_ROOT = "/Volumes/AgentStorage/decisions";
+/** #2048：AGENT_STORAGE 缺省 /Volumes/AgentStorage。 */
+export const DEFAULT_OUT_ROOT = `${process.env.AGENT_STORAGE || "/Volumes/AgentStorage"}/decisions`;
 export const DEFAULT_MAPS = scheduler.decisionMaps;
 export const MAX_CONCURRENT = scheduler.decisionMaxConcurrent;
 export const LOOP_INTERVAL_MS = scheduler.decisionLoopMs;

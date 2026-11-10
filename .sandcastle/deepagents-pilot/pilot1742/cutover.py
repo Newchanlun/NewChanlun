@@ -15,15 +15,34 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
 
-STATE_ROOT = Path('/Volumes/AgentStorage/deepagents-exec')
-DRAIN_ROOT = Path('/Volumes/AgentStorage/newchanlun-legacy-drain')
+# #2048：本文件也作独立脚本由 deepagents-cutover.mts 拉起（无包上下文），宿主路径在此内联读取，
+# 取值口径与 hostpaths.py 一致：缺省等于 Mac 现役位置，Linux 宿主用环境变量覆盖。
+AGENT_STORAGE = Path(os.environ.get('AGENT_STORAGE') or '/Volumes/AgentStorage')
+WORKERS_LOG = Path(os.environ.get('PILOT1742_WORKERS_LOG')
+                   or '/Users/silencehan/Projects/NewChanlun/.sandcastle/logs/workers.jsonl')
+
+
+def service_manager() -> str:
+    raw = os.environ.get('SERVICE_MANAGER') or 'launchctl'
+    if raw not in ('launchctl', 'systemd'):
+        raise ValueError(f'SERVICE_MANAGER 只接受 launchctl 或 systemd，实为 {raw}')
+    return raw
+
+
+def systemd_unit(label: str) -> str:
+    prefix = 'com.newchanlun.'
+    return ('newchanlun-' + label[len(prefix):] if label.startswith(prefix) else label) + '.service'
+
+
+STATE_ROOT = AGENT_STORAGE / 'deepagents-exec'
+DRAIN_ROOT = AGENT_STORAGE / 'newchanlun-legacy-drain'
 RELEASE_LABEL = str(json.loads((Path(__file__).resolve().parents[2] / 'queue-policy.json').read_text())['release_label'])
 LEGACY_SERVICES = ('com.newchanlun.sandcastle-claimer', 'com.newchanlun.sandcastle-harvest')
-# 与旧 launchd / 受管 launcher 的真实执行 cwd 对齐，不接受调用者路径覆盖。
-LEGACY_HOST_REPO = Path('/Users/silencehan/Projects/NewChanlun-sandcastle-host')
+# 与旧 launchd / 受管 launcher 的真实执行 cwd 对齐，不接受调用者路径覆盖（#2048：宿主级 SANDCASTLE_HOST_REPO 可设）。
+LEGACY_HOST_REPO = Path(os.environ.get('SANDCASTLE_HOST_REPO') or '/Users/silencehan/Projects/NewChanlun-sandcastle-host')
 # #1481：launch[-s1d..s1j].pl 以 sandcastle-host 为 cwd，exec tsx + 绝对 runner 路径。
 # 精确旧入口仅作 cwd/后代结构识别的补充，不作为动态受管写者的完整清单。
-_MANAGED_ROOT = Path('/Volumes/AgentStorage/h1-managed43r')
+_MANAGED_ROOT = AGENT_STORAGE / 'h1-managed43r'
 MANAGED_LEGACY_ENTRYPOINTS = frozenset(
     str(_MANAGED_ROOT / f'{stem}{suffix}.{extension}')
     for stem, extension in (('runner', 'mts'), ('launch', 'pl'))
@@ -308,7 +327,7 @@ class CutoverStore:
                  workers_log: Path | None = None):
         self.state_root, self.drain_root = state_root, drain_root
         self.path = state_root / 'cutover.json'
-        self.workers_log = workers_log or Path('/Users/silencehan/Projects/NewChanlun/.sandcastle/logs/workers.jsonl')
+        self.workers_log = workers_log or WORKERS_LOG
 
     def generation(self) -> int:
         try:
@@ -462,7 +481,15 @@ def remote_barrier(gateway: Any) -> RemoteBarrier:
     variable = subprocess.run(['gh', 'variable', 'get', 'SANDCASTLE_LEGACY_FREEZE', '--repo', gateway.repo],
                               check=True, capture_output=True, text=True).stdout.strip()
     unloaded = []
+    systemd = service_manager() == 'systemd'
     for label in LEGACY_SERVICES:
+        if systemd:
+            # #2048：Linux 宿主上旧服务从未安装为 systemd 单元；is-active 非 0 即视为已卸载（不在跑）。
+            result = subprocess.run(['systemctl', '--user', 'is-active', '--quiet', systemd_unit(label)],
+                                    check=False, capture_output=True, text=True)
+            if result.returncode != 0:
+                unloaded.append(label)
+            continue
         result = subprocess.run(['launchctl', 'print', f'gui/{os.getuid()}/{label}'], check=False, capture_output=True, text=True)
         if result.returncode != 0 and 'Could not find service' in result.stderr:
             unloaded.append(label)

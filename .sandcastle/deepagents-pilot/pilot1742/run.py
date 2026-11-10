@@ -77,15 +77,15 @@ from .domain import (
     reconcile_commit,
     synthesis_refusal,
 )
+from .hostpaths import AGENT_STORAGE, SKILLS_ROOT
 from .workunit import WorkUnit, parse_work_unit
 
 if TYPE_CHECKING:
     from .executor import TicketExecutor
 
 SOURCE_REPO = Path(__file__).resolve().parents[3]
-DEFAULT_HOME = Path("/Volumes/AgentStorage/issue1742-deepagents-pilot-20261027")
+DEFAULT_HOME = AGENT_STORAGE / "issue1742-deepagents-pilot-20261027"
 PSTACK_MODELS = Path.home() / ".agents" / "pstack-models.md"
-SKILLS_ROOT = "/Users/silencehan/.codex/pstack-upstream-source/installed/skills/"
 CRASH_POINTS = ("after_intent_before_spawn", "after_spawn_before_launch_record", "after_commit_before_receipt",
                 "after_boat_submit_before_record")
 WORKER_IDLE_SECONDS = 900

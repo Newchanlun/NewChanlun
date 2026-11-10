@@ -6,6 +6,9 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" && pwd)"
 PLIST_SRC="$SCRIPT_DIR/launchd/com.newchanlun.decision-claimer.plist"
 PLIST_DST="$HOME/Library/LaunchAgents/com.newchanlun.decision-claimer.plist"
+# #2048：SERVICE_MANAGER=systemd 时改走 systemd --user 单元；缺省 launchctl 走下方原逻辑。
+. "$SCRIPT_DIR/service-manager.sh"
+systemd_dispatch com.newchanlun.decision-claimer "${1:-install}"
 
 case "${1:-install}" in
   install)

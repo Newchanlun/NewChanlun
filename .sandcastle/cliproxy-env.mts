@@ -4,7 +4,8 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 
 export const CLIPROXY_BASE_URL = "http://127.0.0.1:8318";
-export const CLIPROXY_CONFIG = join(homedir(), "Library/Application Support/CLIProxyLocal/config.yaml");
+/** #2048：CLIPROXY_CONFIG 环境变量可覆盖；缺省为 Mac 上 CLIProxyLocal 的配置位置。 */
+export const CLIPROXY_CONFIG = process.env.CLIPROXY_CONFIG || join(homedir(), "Library/Application Support/CLIProxyLocal/config.yaml");
 
 function unquote(value: string): string {
   return value.replace(/\s+#.*$/, "").replace(/^["']|["']$/g, "");

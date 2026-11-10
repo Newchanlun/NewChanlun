@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 repo="${1:-/Users/silencehan/Projects/NewChanlun-sandcastle-host}"
-venv="${2:-/Volumes/AgentStorage/issue1742-deepagents-pilot-20261027/venv}"
+venv="${2:-${AGENT_STORAGE:-/Volumes/AgentStorage}/issue1742-deepagents-pilot-20261027/venv}"
 key="${3:-/ABSOLUTE/PATH/TO/APP-PRIVATE-KEY.pem}"
 boat_config="${4:-/ABSOLUTE/PATH/TO/BOAT-CONFIG.json}"
 boat_key="${5:-/ABSOLUTE/PATH/TO/BOAT-CONTROLLER.key}"

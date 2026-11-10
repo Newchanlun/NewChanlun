@@ -70,7 +70,8 @@ type DockerProvider = SandboxProvider & { create(options: CreateOptions): Promis
 /** 审阅容器的 provider：与 swarmSandbox 同一 Sandcastle docker()、同一镜像 Id 校验和 env 白名单，但只接受
  *  reviewMounts 给出的单个只读卷。hardenMounts 为可写的宿主 worktree 补挂只读 .git 等子路径；审阅卷整卷只读，
  *  补挂宿主子路径反而会把 .git 重新经 virtiofs 带进 VM，所以这里不走它。 */
-export function reviewSandbox(image: string, env: Record<string, string> = dockerCliProxyEnv()): DockerProvider {
+export function reviewSandbox(image: string, env: Record<string, string> = dockerCliProxyEnv(),
+  platform: NodeJS.Platform = process.platform, run: (args: string[]) => string = dockerCli): DockerProvider {
   if (!IMAGE_ID.test(image)) throw new Error("审阅容器必须以准入核对过的 sha256 镜像 Id 启动");
   const base = docker({ imageName: image, env }) as unknown as DockerProvider;
   const declared = declaredContainerEnv(base.env);
@@ -78,8 +79,27 @@ export function reviewSandbox(image: string, env: Record<string, string> = docke
     const [mount, ...rest] = options.mounts;
     if (rest.length || !mount || !REVIEW_VOLUME.test(mount.hostPath) || mount.sandboxPath !== "/review" || mount.readonly !== true
       || options.worktreePath !== mount.hostPath) throw new Error("审阅容器只接受本次 launch 的只读审阅卷");
-    return base.create.call(base, { ...options, mounts: [{ ...mount }], env: declared });
+    const created = base.create.call(base, { ...options, mounts: [{ ...mount }], env: declared });
+    if (platform !== "linux") return created;
+    return created.then(async (handle) => {
+      try {
+        const hostname = await handle.exec("cat /etc/hostname");
+        addHostGateway(hostname.stdout.trim(), run);
+      } catch (error) { await handle.close(); throw error; }
+      return handle;
+    });
   } };
+}
+
+/** #2048：Linux 的 Docker 不像 Docker Desktop 自带 host.docker.internal，容器连宿主 CLIProxy 需要
+ *  `--add-host host.docker.internal:host-gateway`。Sandcastle docker()（0.12/0.14）不提供 add-host 选项，
+ *  这里补上同一条映射：host-gateway 在缺省配置下即默认 bridge 网关，按它在容器 /etc/hosts 追加一行。
+ *  macOS（Docker Desktop / colima）不走这里，行为不变。 */
+export function addHostGateway(container: string, run: (args: string[]) => string = dockerCli): void {
+  if (!/^[a-f0-9]{12,64}$/.test(container)) throw new Error("无法确认审阅容器身份，未补 host.docker.internal");
+  const gateway = run(["network", "inspect", "bridge", "--format", "{{(index .IPAM.Config 0).Gateway}}"]).trim();
+  if (!/^\d{1,3}(\.\d{1,3}){3}$/.test(gateway)) throw new Error(`默认 bridge 网关不是 IPv4 地址：${gateway.slice(0, 80)}`);
+  run(["exec", "--user", "0:0", container, "sh", "-c", 'printf "%s host.docker.internal\\n" "$1" >> /etc/hosts', "sh", gateway]);
 }
 
 type Snapshot = { head: string; branch: string; status: string };

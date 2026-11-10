@@ -1,7 +1,7 @@
 #!/bin/sh
 set -eu
 ROOT=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
-HOME1742=/Volumes/AgentStorage/issue1742-deepagents-pilot-20261027
+HOME1742=${AGENT_STORAGE:-/Volumes/AgentStorage}/issue1742-deepagents-pilot-20261027
 VENV=${VENV:-$HOME1742/venv}
 STATE=${STUDIO_STATE:-$HOME1742/studio/server-state}
 mkdir -p "$STATE"

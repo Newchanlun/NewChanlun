@@ -162,7 +162,8 @@ fi
 
 async function runLiveLoop(record: "valid" | "missing" | "malformed" | "stale", once = false) {
   const root = mkdtempSync(join(tmpdir(), "wfe-live-loop-"));
-  const state = join(root, "exec"), drain = join(root, "drain"), log = join(root, "writes");
+  // #2048：引擎经 AGENT_STORAGE 定位 drain 与执行器状态目录，fixture 以环境变量注入，不改源码。
+  const state = join(root, "deepagents-exec"), drain = join(root, "newchanlun-legacy-drain"), log = join(root, "writes");
   try {
     for (const path of [state, drain, join(root, "scripts"), join(root, ".sandcastle/deepagents-pilot/pilot1742")])
       mkdirSync(path, { recursive: true });
@@ -170,12 +171,7 @@ async function runLiveLoop(record: "valid" | "missing" | "malformed" | "stale", 
       ".sandcastle/main-model.mts", ".sandcastle/scheduler-config.mts", ".sandcastle/scheduler-config.json",
       ".sandcastle/drain-control.mts", ".sandcastle/drain-control.py", ".sandcastle/deepagents-cutover.mts",
       ".sandcastle/queue-policy.json", ".sandcastle/deepagents-pilot/pilot1742/cutover.py"]) {
-      const source = readFileSync(join(repoRoot, file), "utf8");
-      const content = file === ".sandcastle/drain-control.mts"
-        ? source.replace('"/Volumes/AgentStorage/newchanlun-legacy-drain"', JSON.stringify(drain))
-        : file === ".sandcastle/deepagents-cutover.mts"
-        ? source.replace('"/Volumes/AgentStorage/deepagents-exec"', JSON.stringify(state)) : source;
-      writeFileSync(join(root, file), content);
+      writeFileSync(join(root, file), readFileSync(join(repoRoot, file), "utf8"));
     }
     const freeze = (generation: number) => writeFileSync(join(drain, "state.json"),
       JSON.stringify({ v: 1, mode: "draining", generation }));
@@ -226,7 +222,7 @@ esac
 `, { mode: 0o755 });
     const child = spawn(process.execPath, ["--experimental-strip-types", "scripts/wayfinder_engine.mts",
       "--live", "--poll-seconds", "0.05", ...(once ? ["--once"] : [])], {
-      cwd: root, env: { ...process.env, PATH: `${root}:${process.env.PATH}`, WFE_FIXTURE: root,
+      cwd: root, env: { ...process.env, PATH: `${root}:${process.env.PATH}`, WFE_FIXTURE: root, AGENT_STORAGE: root,
         WAYFINDER_ORCHESTRATOR: "fixture-orchestrator", WAYFINDER_GH_MAX_ATTEMPTS: "1" },
       stdio: ["ignore", "pipe", "pipe"],
     });

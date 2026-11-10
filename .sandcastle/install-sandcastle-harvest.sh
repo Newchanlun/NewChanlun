@@ -6,11 +6,15 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" && pwd)"
 PLIST_SRC="$SCRIPT_DIR/launchd/com.newchanlun.sandcastle-harvest.plist"
 PLIST_DST="$HOME/Library/LaunchAgents/com.newchanlun.sandcastle-harvest.plist"
+# #2048：SERVICE_MANAGER=systemd 时改走 systemd --user 单元；缺省 launchctl 走下方原逻辑。
+. "$SCRIPT_DIR/service-manager.sh"
+systemd_dispatch com.newchanlun.sandcastle-harvest "${1:-install}"
 
 case "${1:-install}" in
   install)
-    if [ -f "/Users/silencehan/Projects/NewChanlun/.sandcastle/logs/GH_TOKEN_ROTATION_REQUIRED" ]; then
-      echo "拒绝安装：GitHub token 尚未轮换（见 /Users/silencehan/Projects/NewChanlun/.sandcastle/logs/GH_TOKEN_ROTATION_REQUIRED）" >&2
+    MARKER="${GH_TOKEN_ROTATION_MARKER:-/Users/silencehan/Projects/NewChanlun/.sandcastle/logs/GH_TOKEN_ROTATION_REQUIRED}"
+    if [ -f "$MARKER" ]; then
+      echo "拒绝安装：GitHub token 尚未轮换（见 $MARKER）" >&2
       exit 78
     fi
     mkdir -p "$HOME/Library/LaunchAgents"

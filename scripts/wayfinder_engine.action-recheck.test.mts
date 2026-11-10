@@ -12,16 +12,14 @@ function run(path: "split" | "queue", change: "body" | "block" | "closed" | "val
   const root = mkdtempSync(join(tmpdir(), "wfe-recheck-"));
   try {
     mkdirSync(join(root, "scripts")); mkdirSync(join(root, ".sandcastle"));
-    const drain = join(root, "drain"), state = join(root, "exec");
+    // #2048：引擎经 AGENT_STORAGE 定位 drain 与执行器状态目录，fixture 以环境变量注入，不改源码。
+    const drain = join(root, "newchanlun-legacy-drain"), state = join(root, "deepagents-exec");
     mkdirSync(drain); mkdirSync(state);
     writeFileSync(join(drain, "state.json"), JSON.stringify({ v: 1, mode: "open", generation: 1 }));
     for (const file of ["scripts/wayfinder_engine.mts", ".sandcastle/cliproxy-env.mts", ".sandcastle/main-model.mts",
       ".sandcastle/scheduler-config.mts", ".sandcastle/scheduler-config.json", ".sandcastle/drain-control.mts",
       ".sandcastle/drain-control.py", ".sandcastle/deepagents-cutover.mts", ".sandcastle/queue-policy.json"]) {
-      let text = readFileSync(new URL(file, repo), "utf8");
-      if (file.endsWith("drain-control.mts")) text = text.replace('"/Volumes/AgentStorage/newchanlun-legacy-drain"', JSON.stringify(drain));
-      if (file.endsWith("deepagents-cutover.mts")) text = text.replace('"/Volumes/AgentStorage/deepagents-exec"', JSON.stringify(state));
-      writeFileSync(join(root, file), text);
+      writeFileSync(join(root, file), readFileSync(new URL(file, repo), "utf8"));
     }
     const body = path === "split" ? '<!-- wayfinder-split -->\n```json\n' + JSON.stringify({ tickets: [
       { id: "S1", title: "first", summary: "reviewed A", depends_on: [], rulings: [8] },
@@ -72,7 +70,7 @@ else if(args[0]==='api' && /issues\\/(101|102)$/.test(args[1])) {console.log(+ar
 else {console.error('Unexpected fake gh: '+cmd);process.exit(71);}
 `, { mode: 0o755 });
     const result = spawnSync(process.execPath, ["--experimental-strip-types", "scripts/wayfinder_engine.mts", "--live", "--once"], {
-      cwd: root, env: { ...process.env, PATH: `${root}:${process.env.PATH}`, WFE_FIXTURE: root,
+      cwd: root, env: { ...process.env, PATH: `${root}:${process.env.PATH}`, WFE_FIXTURE: root, AGENT_STORAGE: root,
         GH_REPO: "fixture/repo", WAYFINDER_ORCHESTRATOR: "fixture", WAYFINDER_GH_MAX_ATTEMPTS: "1" },
       encoding: "utf8", timeout: 20_000,
     });

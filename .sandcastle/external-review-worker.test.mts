@@ -7,7 +7,7 @@ import { dirname, join } from "node:path";
 import { randomUUID } from "node:crypto";
 import { pathToFileURL } from "node:url";
 import { codexWorker } from "./codex-route.mts";
-import { PROMPT_JSON_INSTRUCTION, REVIEW_IMAGE, REVIEW_VOLUME_LABEL, VM_SPACE_RESERVE, VOLUME_SNAPSHOT, checkReviewAdmission, dockerReviewVolumes, rateLimitSignal, readLaunch, trimVmDisk, VM_TRIM_SCRIPT, reviewMounts, reviewSandbox, reviewVolumeName, runExternalReview, snapshot, verifyReviewAdmission, withVolumeAdmissionLock, type ReviewLaunch, type ReviewVolumes, type WorkerDependencies } from "./external-review-worker.mts";
+import { PROMPT_JSON_INSTRUCTION, REVIEW_IMAGE, addHostGateway, REVIEW_VOLUME_LABEL, VM_SPACE_RESERVE, VOLUME_SNAPSHOT, checkReviewAdmission, dockerReviewVolumes, rateLimitSignal, readLaunch, trimVmDisk, VM_TRIM_SCRIPT, reviewMounts, reviewSandbox, reviewVolumeName, runExternalReview, snapshot, verifyReviewAdmission, withVolumeAdmissionLock, type ReviewLaunch, type ReviewVolumes, type WorkerDependencies } from "./external-review-worker.mts";
 import type { BindMountSandboxHandle } from "@ai-hero/sandcastle";
 
 const image = "sha256:" + "1".repeat(64);
@@ -523,4 +523,15 @@ test("沿用前准入与正式派发同一组检查：controller 未提交或镜
   assert.throws(() => checkReviewAdmission({ identity: () => ({ head, dirty: " M .sandcastle/x" }), ready }), /未提交/);
   assert.throws(() => checkReviewAdmission({ identity: () => ({ head, dirty: "" }),
     ready: () => { throw new Error("外部独审必须先完成当前代码 head 的 Docker 验收"); } }), /Docker 验收/);
+});
+
+test("#2048 Linux：按默认 bridge 网关给审阅容器补 host.docker.internal；身份或网关不合格即拒绝", () => {
+  const calls: string[][] = [];
+  const run = (args: string[]) => { calls.push(args); return args[0] === "network" ? "172.17.0.1\n" : ""; };
+  addHostGateway("a".repeat(64), run);
+  assert.deepEqual(calls[0], ["network", "inspect", "bridge", "--format", "{{(index .IPAM.Config 0).Gateway}}"]);
+  assert.deepEqual(calls[1], ["exec", "--user", "0:0", "a".repeat(64), "sh", "-c",
+    'printf "%s host.docker.internal\\n" "$1" >> /etc/hosts', "sh", "172.17.0.1"]);
+  assert.throws(() => addHostGateway("not-a-container", run), /容器身份/);
+  assert.throws(() => addHostGateway("b".repeat(12), () => "fe80::1"), /IPv4/);
 });
