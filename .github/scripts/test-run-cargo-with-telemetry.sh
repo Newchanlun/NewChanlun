@@ -208,6 +208,11 @@ if [[ "$mode" == exdev-once && $n -eq 1 ]]; then
   printf 'error: could not compile `libc` (lib) due to 1 previous error\n' >&2
   exit 101
 fi
+if [[ "$mode" == exdev-with-build-script && $n -eq 1 ]]; then
+  printf 'could not execute process `/w/rust/target/debug/build/serde_json-1/build-script-build` (never executed)\n' >&2
+  printf 'error: failed to build archive at `/w/1488-target/debug/deps/liblibc-1.rlib`: failed to rename archive file: Invalid cross-device link (os error 18)\n' >&2
+  exit 101
+fi
 if [[ "$mode" == exdev-in-test ]]; then
   printf 'thread main panicked: rename failed: Invalid cross-device link (os error 18)\n' >&2
   exit 101
@@ -247,6 +252,9 @@ grep -q '::group::Boat EACCES diagnostics /w/rust/target/debug/build/serde_json-
 run_retry_case exdev-once 0 2 yes
 ! grep -q 'Boat EACCES diagnostics' "$tmp_dir/retry-exdev-once.log" \
   || { echo "FAIL retry-exdev-once: EACCES diagnostics on EXDEV" >&2; exit 1; }
+run_retry_case exdev-with-build-script 0 2 yes
+! grep -q 'Boat EACCES diagnostics' "$tmp_dir/retry-exdev-with-build-script.log" \
+  || { echo "FAIL retry-exdev-with-build-script: EACCES diagnostics on EXDEV" >&2; exit 1; }
 run_retry_case exdev-in-test 101 1 no
 run_retry_case other-error 101 1 no
 run_retry_case success 0 1 no
@@ -274,4 +282,4 @@ set -e
 assert_status 0 "$direct_status" retry-direct "$direct_log"
 [[ "$(cat "$direct_calls")" == 2 ]] || { echo "FAIL retry-direct: expected 2 calls" >&2; exit 1; }
 
-printf 'PASS: 16 status-priority cells, guard boundaries, defaults, configuration validation, argv preservation, 7 transient-retry cases (EACCES, EXDEV), and 2 no-TMPDIR fail-closed cases\n'
+printf 'PASS: 16 status-priority cells, guard boundaries, defaults, configuration validation, argv preservation, 8 transient-retry cases (EACCES, EXDEV), and 2 no-TMPDIR fail-closed cases\n'
