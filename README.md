@@ -242,7 +242,7 @@ K4 六条边中，背驰方向的分歧率稳定在 22.2%（±2%）。这是结�
 | 指标 | 数值 | 计数口径 |
 |------|------|----------|
 | 源文件 | 200 个 Python 模块 | `src/newchan/**/*.py` |
-| 测试文件 | 233 个 | `tests/` 下文件名为 `test_*.py` 的文件（git pathspec `tests/*test_*.py` 会多算 `tests/test_*/` 目录里的 5 个 `__init__.py`，得 238） |
+| 测试文件 | 231 个 | `tests/` 下文件名为 `test_*.py` 的文件（git pathspec `tests/*test_*.py` 会多算 `tests/test_*/` 目录里的 5 个 `__init__.py`，得 236） |
 | 定义文件 | 19 份 | `.chanlun/definitions/*.md` |
 | 已结算谱系 | 在仓 245 条 + 6 条生成态（#1952 后只保留被现役层引用的条目，口径见「谱系」节） | `.chanlun/genealogy/{settled,pending}/` |
 | spec | 13 份 | `spec/**/*.md` |
@@ -250,7 +250,7 @@ K4 六条边中，背驰方向的分歧率稳定在 22.2%（±2%）。这是结�
 | Hook | 1 个 | `.claude/settings.json` 的 hooks 条目 |
 | Skill | 21 个 | `.claude/skills/*/SKILL.md`（git 跟踪的文件；经符号链接展开更多） |
 | 命令 | 3 个 | `.claude/commands/*.md` |
-| 脚本 | 165 个 | `scripts/**/*.{py,sh}`，不含测试 |
+| 脚本 | 159 个 | `scripts/**/*.{py,sh}`，不含测试 |
 | 区块拓扑 | 1194 区块 / 6650 关系 / 1148 概念 | `.chanlun/block-topology/meta.json`（未随退役重算） |
 
 早年蜂群机制退役（#1952）移除了 dispatch-dag.yaml、谱系 DAG（genealogy/dag.yaml）、
@@ -356,7 +356,7 @@ docs/
 └── architecture/          # 架构文档（总方针等）
 
 scripts/                   # 脚本（区块拓扑、实验等）
-tests/                     # 233 个测试文件（tests/**/test_*.py）
+tests/                     # 231 个测试文件（tests/**/test_*.py）
 ```
 
 ## 数据源

@@ -26,7 +26,7 @@ import tempfile
 import threading
 import time
 import uuid
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from concurrent.futures import ThreadPoolExecutor, wait
 from contextlib import contextmanager
 from dataclasses import asdict, dataclass, replace
@@ -43,6 +43,7 @@ from .github_app import (
 )
 from .patch_read import FrozenPatch, reads_candidate_patch
 from .run import DEFAULT_HOME, SOURCE_REPO, _ps_rows, supervisor_alive
+from .vm_trim import trim_vm_disk
 
 # Codex 上游额度耗尽期间的临时组合（EXTERNAL-REVIEW.md「Codex 额度耗尽时的临时组合」）；
 # 常规组合为 ("gpt-6.1-sol", "claude-opus-5-5") 与 POLICY "external-pr-v1"。两位须属不同家族。
@@ -62,6 +63,10 @@ IDENTITY_CONFIG = STATE_ROOT / "app-identity.json"
 STATUS_LOCKS = STATE_ROOT / "status-locks"
 CHECKOUT_ROOT = DEFAULT_HOME / "checkouts" / "external-review"
 SPACE_RESERVE = 256 * 1024 * 1024
+# #1986：监督把 checkout 经 docker cp 灌进 VM 内的命名卷再只读挂载（不经 virtiofs），卷名与 worker 的 reviewVolumeName 一致。
+REVIEW_VOLUME_PREFIX = "newchanlun-external-review-"
+# worker 给每次 launch 起的卷和容器（辅助、快照、df）都打这个标签，值是 launch_id；reaper 按它回收孤儿。
+REVIEW_LABEL = "newchanlun.external-review.launch"
 # 每日额度闸：近 24 小时各 reviewer 回执记下的输入 token 合计超过此值时，新派发暂停并显式报出（不发 pending、不调模型）。
 # 实测（2026-11-01..08）正常一天 0.06–0.43 G；未设环境变量时不启用，取值由用户按订阅额度定。
 DAILY_INPUT_CAP_ENV = "NEWCHANLUN_REVIEW_DAILY_INPUT_CAP"
@@ -314,6 +319,19 @@ def prepare_review(target: ReviewTarget, source: Path, checkout: Path) -> Frozen
     return FrozenReviewInput(checkout, names, review_prompt(target, names))
 
 
+# 与派工给监督的 env 同一组定位变量（见 run_review），controller 与 worker 连同一个 Docker context。
+_DOCKER_ENV = ("PATH", "HOME", "USER", "LOGNAME", "TMPDIR", "LANG")
+
+
+def docker_cli(args: list[str]) -> subprocess.CompletedProcess:
+    """跑一条 docker 命令；docker 不可用或超时记 returncode=125，不抛错。"""
+    env = {k: os.environ[k] for k in _DOCKER_ENV if k in os.environ}
+    try:
+        return subprocess.run(["docker", *args], env=env, capture_output=True, text=True, timeout=120)
+    except (OSError, subprocess.TimeoutExpired):
+        return subprocess.CompletedProcess(["docker", *args], 125, "", "docker unavailable")
+
+
 def review_prompt(target: ReviewTarget, names: tuple[str, ...]) -> str:
     return PROMPT.format(pr=target.pr_number, base=target.base_sha, merge_base=target.merge_base_sha,
                          head=target.head_sha, names=json.dumps(names, ensure_ascii=False))
@@ -491,8 +509,13 @@ class StatusPublisher:
 class ExternalReview:
     def __init__(self, gateway: RepoGateway | None, *, state_root: Path = STATE_ROOT,
                  checkout_root: Path = CHECKOUT_ROOT, source: Path = SOURCE_REPO,
-                 launcher: list[str] | None = None, poll_seconds: float = 1):
+                 launcher: list[str] | None = None, poll_seconds: float = 1,
+                 docker: Callable[[list[str]], subprocess.CompletedProcess] | None = None,
+                 vm_trim: Callable[[Path], dict] | None = None):
         self.gateway, self.state_root, self.checkout_root, self.source = gateway, state_root, checkout_root, source
+        self.docker = docker if docker is not None else (lambda args: docker_cli(args))
+        # #1986：删卷后对 Colima VM 跑 fstrim；与 TS 监督共用 checkout_root 下的节流锁与时间戳（见 vm_trim）。
+        self.vm_trim = vm_trim if vm_trim is not None else (lambda root: trim_vm_disk(root))
         # worker 与 controller 同源：都取正在执行的代码所在仓库（SOURCE_REPO），不随对象来源 source 变化。
         self.launcher = launcher or [str(SOURCE_REPO / "node_modules" / ".bin" / "tsx"),
                                      str(SOURCE_REPO / ".sandcastle" / "external-review-worker.mts")]
@@ -504,19 +527,7 @@ class ExternalReview:
             raise ValueError("attempt 必须为正整数")
         if self.gateway is None:
             raise IdentityError("在线独审需要宿主 App 客户端")
-        data = load_target(self.gateway, number)
-        try:
-            merge_base = _git(self.source, "merge-base", "--all", data["base_sha"], data["head_sha"]).decode().splitlines()
-            if len(merge_base) != 1:
-                raise IdentityError("merge-base 不唯一")
-            _git(self.source, "cat-file", "-e", f'{data["head_sha"]}^{{commit}}')
-            patch = patch_identity(self.source, merge_base[0], data["head_sha"])
-        except subprocess.CalledProcessError:
-            raise IdentityError("needs_source_sync") from None
-        head = check_controller()
-        target = ReviewTarget(**data, merge_base_sha=str(parse_sha(merge_base[0])), run_id=str(uuid.uuid4()),
-                              attempt=attempt, policy_version=POLICY, controller_code_head=head,
-                              registered_at_ns=time.time_ns(), patch_id=patch, review_contract=REVIEW_CONTRACT)
+        target = self._frozen(load_target(self.gateway, number), attempt)
         folder = self.state_root / "runs" / target.key
         # 以有效 target.json 判断是否已登记：_lock 会先建目录，建目录后、写 target.json 前中断时仍须准入。
         if not (folder / "target.json").exists():
@@ -533,6 +544,30 @@ class ExternalReview:
             with self._pr_lock(target.pr_number):
                 _save(folder / "target.json", asdict(target))
         return target
+
+    def _frozen(self, data: dict[str, Any], attempt: int) -> ReviewTarget:
+        """按 load_target 的结果冻结出 ReviewTarget（merge-base、补丁身份、controller 身份），不登记。"""
+        try:
+            merge_base = _git(self.source, "merge-base", "--all", data["base_sha"], data["head_sha"]).decode().splitlines()
+            if len(merge_base) != 1:
+                raise IdentityError("merge-base 不唯一")
+            _git(self.source, "cat-file", "-e", f'{data["head_sha"]}^{{commit}}')
+            patch = patch_identity(self.source, merge_base[0], data["head_sha"])
+        except subprocess.CalledProcessError:
+            raise IdentityError("needs_source_sync") from None
+        head = check_controller()
+        return ReviewTarget(**data, merge_base_sha=str(parse_sha(merge_base[0])), run_id=str(uuid.uuid4()),
+                            attempt=attempt, policy_version=POLICY, controller_code_head=head,
+                            registered_at_ns=time.time_ns(), patch_id=patch, review_contract=REVIEW_CONTRACT)
+
+    def would_reuse(self, data: dict[str, Any]) -> bool:
+        """这个 head 现在登记新 attempt 时，reuse_source 能否找到可沿用的 PASS（同 patch_id、policy、contract）。
+        只读：不登记、不跑部署准入，供 sweep 排派发先后；沿不沿用仍由子进程登记与发布时判定。
+        对象不在本机库、controller 不干净或任何读失败都返回 False。"""
+        try:
+            return self.reuse_source(self._frozen(data, 0)) is not None  # attempt 0 从不登记，撞不上已有 run 目录
+        except (OSError, ValueError, KeyError, TypeError, IdentityError, subprocess.CalledProcessError):
+            return False
 
     @contextmanager
     def _pr_lock(self, number: int) -> Iterator[None]:
@@ -781,8 +816,92 @@ class ExternalReview:
         if checkout.exists():
             shutil.rmtree(checkout)
         # 父目录 <run_id> 由同 run 的 reviewer 共用，等全部 reviewer 结束后由 review_pr 收走。
-        _save(worker / "checkout-cleanup.json", {"state": "removed", "checkout": str(checkout)})
+        cleanup: dict[str, Any] = {"state": "removed", "checkout": str(checkout)}
+        # #1986：监督删卷失败（回执 volume_removed=false）时这里补删。卷名只认本次 launch 的，不信回执里别的名字。
+        launch = _read(worker / "launch.json") if (worker / "launch.json").exists() else {}
+        volume = (receipt or {}).get("volume")
+        if volume is not None and (receipt or {}).get("volume_removed") is not True:
+            if volume != REVIEW_VOLUME_PREFIX + str(launch.get("launch_id")):
+                raise IdentityError("回执里的审阅卷不属于本次 launch")
+            cleanup.update(volume=volume, volume_state="removed" if self.remove_review_volume(volume) else "retained")
+        _save(worker / "checkout-cleanup.json", cleanup)
         return True
+
+    def remove_review_volume(self, name: str) -> bool:
+        """先删仍引用卷的容器（Sandcastle close 吞掉 rm 错误、残留的辅助容器会让删卷一直报 in use），再删卷。
+        卷已不存在也算删掉；docker 不可用或删不掉返回 False。"""
+        if not re.fullmatch(re.escape(REVIEW_VOLUME_PREFIX) + r"[a-f0-9-]{36}", name):
+            raise IdentityError("审阅卷名不合规")
+        holders = self.docker(["ps", "-a", "-q", "--filter", f"volume={name}"])
+        if holders.returncode:
+            return False
+        for container in holders.stdout.split():
+            self.docker(["rm", "-f", container])
+        done = self.docker(["volume", "rm", name])
+        return done.returncode == 0 or "no such volume" in done.stderr.lower()
+
+    def reap_review_volumes(self) -> list[dict]:
+        """#1986：回收已死 launch 留下的审阅卷与容器。监督被 SIGKILL、OOM、Mac 或 Colima 重启打断时，
+        它自己的删卷（finally 与退出钩子）都跑不到，回执也可能缺 volume 字段，只能按标签找。
+        只动本 state_root 登记过、监督进程已不在的 launch；未登记的 launch_id 一律不碰（可能属于别的 state_root）。
+        先列 Docker 对象再取进程表：列出时已存在的对象，其监督要么仍在进程表里，要么已经退出。"""
+        value = '{{.Label "' + REVIEW_LABEL + '"}}'
+        volumes = self.docker(["volume", "ls", "--filter", f"label={REVIEW_LABEL}", "--format", "{{.Name}}\t" + value])
+        containers = self.docker(["ps", "-a", "--filter", f"label={REVIEW_LABEL}", "--format", "{{.ID}}\t" + value])
+        if volumes.returncode or containers.returncode:
+            return self._reaper_log([{"action": "skipped", "reason": "docker_unavailable"}])
+        owned: dict[str, dict[str, list[str]]] = {}
+        for kind, listing in (("volumes", volumes), ("containers", containers)):
+            for line in listing.stdout.splitlines():
+                name, _, launch_id = line.partition("\t")
+                if name.strip():
+                    owned.setdefault(launch_id.strip(), {"volumes": [], "containers": []})[kind].append(name.strip())
+        if not owned:
+            return []
+        rows = _ps_rows()
+        workers: dict[str, Path] = {}
+        for path in (self.state_root / "runs").glob("*/*/launch.json"):
+            try:
+                workers[str(_read(path)["launch_id"])] = path.parent
+            except (OSError, ValueError, KeyError, TypeError, IdentityError):
+                continue
+        entries: list[dict[str, Any]] = []
+        live_volumes = 0
+        for launch_id, items in sorted(owned.items()):
+            worker = workers.get(launch_id)
+            if worker is not None and supervisor_alive(worker, rows):
+                live_volumes += len(items["volumes"])
+                continue
+            if worker is None:
+                entries.append({"action": "retained", "reason": "unknown_launch", "launch_id": launch_id, **items})
+                continue
+            for container in items["containers"]:
+                self.docker(["rm", "-f", container])
+            removed = [v for v in items["volumes"]
+                       if v == REVIEW_VOLUME_PREFIX + launch_id and self.remove_review_volume(v)]
+            entries.append({"action": "reaped", "launch_id": launch_id, "containers": items["containers"],
+                            "volumes": removed, "retained_volumes": [v for v in items["volumes"] if v not in removed]})
+        # 每轮一行计数：留下的卷（未登记 launch、删不掉）与存活 launch 占着的卷都报出来，不只记删掉的。
+        retained = sum(len(e["volumes"]) for e in entries if e["action"] == "retained")
+        retained += sum(len(e["retained_volumes"]) for e in entries if e["action"] == "reaped")
+        reaped_volumes = sum(len(e["volumes"]) for e in entries if e["action"] == "reaped")
+        entries.append({"action": "summary", "reaped_volumes": reaped_volumes,
+                        "retained_volumes": retained, "live_volumes": live_volumes})
+        # 删掉的卷在 VM 里释放的块要 fstrim 才还给宿主系统盘；本轮没删卷就不 trim。失败只记日志。
+        if reaped_volumes:
+            try:
+                entries.append({"action": "vm_trim", **self.vm_trim(self.checkout_root)})
+            except Exception as error:  # noqa: BLE001 — trim 是回收空间的附带动作，不影响派发
+                entries.append({"action": "vm_trim", "state": "failed", "reason": type(error).__name__})
+        return self._reaper_log(entries)
+
+    def _reaper_log(self, entries: list[dict]) -> list[dict]:
+        if entries:
+            self.state_root.mkdir(parents=True, exist_ok=True)
+            with open(self.state_root / "volume-reaper.jsonl", "a", opener=lambda p, f: os.open(p, f, 0o600)) as log:
+                for entry in entries:
+                    log.write(json.dumps({"at": time.time(), **entry}, ensure_ascii=False) + "\n")
+        return entries
 
     def run_review(self, target: ReviewTarget, model: str, folder: Path) -> ReviewOutcome:
         worker = folder / model
@@ -790,6 +909,11 @@ class ExternalReview:
             raise IdentityError("工蜂目录不能是符号链接")
         if not (worker / "launch.json").exists():
             checkout = self.checkout_root / target.run_id / model
+            # 每次派发前回收已死 launch 的孤儿卷与容器（VM 磁盘在 macOS 系统盘上）；回收失败不挡派发。
+            try:
+                self.reap_review_volumes()
+            except Exception as error:  # noqa: BLE001 — 回收是兜底，失败只记日志
+                self._reaper_log([{"action": "failed", "reason": type(error).__name__}])
             worker.mkdir(mode=0o700, exist_ok=True)
             if (worker / "prepare.json").exists() and not self.cleanup_checkout(target, model, folder, preparing=True):
                 raise EffectPending("prepare 仍有活动进程，不回收或重复派工")
@@ -876,6 +1000,8 @@ class ExternalReview:
             # 等同未发布，下面照常过门（取代检查、沿用重做准入），不直接重发。publish 先读回远端，读到即认领；pending 读不到
             # 上抛待对账、不重发；done 被覆盖也上抛待对账。不重新过门，免得把远端已有的 success 记成「未发布」。
             saved["publication"] = publisher.publish(saved["state"], reused.get("run_id"))
+            # 认回后落盘，与正常发布同构；否则 outcome 缺 publication，沿用判定（_reuse_source）永远选不到本 run。
+            _save(folder / "outcome.json", saved)
             return saved
         if not reused:
             return self._publish_final(target, folder, publisher, saved)
@@ -1011,24 +1137,31 @@ class ExternalReview:
                       migration: dict | None = None) -> dict:
         """受管恢复：旧版本把 GitHub 认证/传输失败误记为 STALE（双审完整却没发布终态）。
         不重跑模型、不改旧记录：确认 PR 与 controller 仍是冻结目标，逐个重验已有回执且与原记录一致，
-        原 STALE 记录另存为历史，再发布终态。任何一项不满足就原样返回 STALE。"""
+        原 STALE 记录另存为历史，再发布终态。任何一项不满足就返回 STALE，
+        并把磁盘 outcome 写回这份 STALE（带上本次拒绝原因 `recovery_refused`）——重试分支可能先把 `saved` 换成历史里更早的
+        STALE 记录（见 migrate_stale 的 history 回退），这时磁盘上留着的是上一次迁移写下、未发布的终态，
+        原样 `return saved` 不会动磁盘，返回值与磁盘就此分叉（#1944）。"""
+        def refuse(reason: str) -> dict:
+            refused = {**saved, "recovery_refused": reason}
+            _save(folder / "outcome.json", refused)
+            return refused
         try:
             publisher.check_current()  # 精确 head、base、目标与 controller；认证仍坏会上抛 EffectPending
-        except Stale:
-            return saved
+        except Stale as error:
+            return refuse(str(error))
         recorded = [(r.get("model"), r.get("verdict")) for r in saved.get("reviews", [])]
         outcomes = []
         for model in MODELS:
             worker = folder / model
             if not (worker / "launch.json").exists() or not (worker / "receipt.json").exists():
-                return saved
+                return refuse(f"{model} 缺少 launch.json 或 receipt.json，无法重验")
             outcomes.append(validate_review(target, _read(worker / "launch.json"), _read(worker / "receipt.json"), worker,
                                             self.source))
         if [(o.model, o.verdict) for o in outcomes] != recorded:
-            return saved
+            return refuse("重验结果与原记录不一致")
         sessions = [o.session_id for o in outcomes if o.session_id]
         if len(sessions) != len(set(sessions)):
-            return saved
+            return refuse("两独审复用了 session")
         verdict = ("FAILED" if any(o.verdict == "FAILED" for o in outcomes) else
                    "BLOCK" if any(o.verdict == "BLOCK" for o in outcomes) else "PASS")
         state = {"PASS": "success", "BLOCK": "failure", "FAILED": "error"}[verdict]
