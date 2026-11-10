@@ -9,6 +9,7 @@ mod content_store;
 mod domain_event;
 mod evidence;
 mod exact_command;
+pub(crate) use exact_command::check_condition_semantics;
 mod finance;
 mod finance_transport;
 mod financial_reader_resources;

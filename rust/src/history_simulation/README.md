@@ -41,7 +41,8 @@ S 回复必须同时绑定原 E release_receipt_id；命令资格引用必须等
 
 ConditionEvidence 清单由 profile 的 `conditions` 冻结，与 E 冻结原件 `exact_release.conditions` 是同一份
 获准清单（含 ADR 0052 裁定二的 `model_coverage`）。命令证书的清单须与它逐项相等，否则 Unsupported。
-每项须带齐九字段；需要在 X 阶段核验的条件，其能力必须是 X 支持的 simulation-local-transaction/1（#1407 C2）。
+每项须带齐九字段，能力与阶段须是 E/X 共用配对表（`economic_session::exact_command::CONDITION_PAIRS`）里的
+已知配对，阶段前缀只能是 E./S./X.，失败语义为 Denied；X 阶段只有 simulation-local-transaction/1（#1407 C2）。
 真实 E/S producer 尚须在 #1407 / TB04-D/E 接此 wire，受控夹具不替代它们。
 
 ## 时间、恢复与消费边界
@@ -93,6 +94,8 @@ AdvanceBar 在取得任何 S 资格前完成同一模型的完整只读计算及
 不能用空 close 异批绕过。
 
 对每条 Accepted 命令，X 先连接 S，连接成功后才置 ExecutionRequested，再写请求帧。
+权威期限（timeout_ms）只从写帧开始计，不含这次 ExecutionRequested 的本地持久写；否则慢盘会在一个字节都没
+发出时超时，把命令误标成可能已发出（#1407 C2）。
 两类失败以此为界：
 
 - 确定未发出：编码失败、帧界超限、连接失败。S 一个字节都没收到，命令保持 Accepted；

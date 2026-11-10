@@ -95,8 +95,6 @@ impl Profile {
     }
 }
 
-/// X 自身持有核验能力的条件；需在 X 阶段核验而能力不在此列的条件，X 无法履行，整份清单 Unsupported。
-const X_CAPABILITIES: [&str; 1] = ["simulation-local-transaction/1"];
 /// 获准清单逐项带齐 IC「ConditionEvidence」九字段；含 ADR 0052 裁定二 E-Release 阶段的 `model_coverage`。
 fn validate_conditions(list: &[Condition]) -> Result<(), String> {
     let mut ids = std::collections::BTreeSet::new();
@@ -125,11 +123,15 @@ fn validate_conditions(list: &[Condition]) -> Result<(), String> {
                 "Unsupported：获准条件缺 ConditionEvidence 字段或 condition_id 重复".into(),
             );
         }
-        if c.required_check_stages.iter().any(|s| s.starts_with("X."))
-            && !X_CAPABILITIES.contains(&c.validator_capability.as_str())
-        {
-            return Err("Unsupported：X 阶段条件的核验能力 X 未支持".into());
-        }
+        // 与 E 冻结原件同一张配对表：X.* 阶段只有 X 支持的能力，失败结果必须 Denied。
+        let stages: Vec<&str> = c.required_check_stages.iter().map(String::as_str).collect();
+        crate::economic_session::check_condition_semantics(
+            &c.condition_id,
+            &c.authority_revision,
+            &stages,
+            &c.validator_capability,
+            &c.failure_result,
+        )?;
     }
     if !list.iter().any(|c| {
         c.condition_id == "model_coverage"
@@ -479,9 +481,8 @@ fn authority_frame(
     Ok(AuthorityFrame { envelope, bytes })
 }
 /// 连接失败时同样确定未发出；只有返回的连接写出帧后才进入可能已发出的窗口。
-fn authority_connect(p: &Profile, a: &Authority) -> Result<(UnixStream, Instant), String> {
-    let deadline = Instant::now() + Duration::from_millis(p.timeout_ms);
-    Ok((UnixStream::connect(&a.socket).map_err(io)?, deadline))
+fn authority_connect(a: &Authority) -> Result<UnixStream, String> {
+    UnixStream::connect(&a.socket).map_err(io)
 }
 fn authority_exchange(
     p: &Profile,
@@ -489,9 +490,13 @@ fn authority_exchange(
     op: &str,
     command: &ExactCommand,
     release: Option<&str>,
-    (mut stream, deadline): (UnixStream, Instant),
+    mut stream: UnixStream,
     frame: &AuthorityFrame,
 ) -> Result<AuthorityReply, String> {
+    // 权威期限只量这次交换。连接之后、写帧之前 X 先持久 ExecutionRequested（synchronous=FULL），
+    // 本地落盘不计入对端期限：否则慢盘会在一个字节都没发出时超时，命令却已标成「可能已发出」，
+    // 只能查询 S 的 NoRecord，永远卡住（#1407 C2，CI run 42772775704）。
+    let deadline = Instant::now() + Duration::from_millis(p.timeout_ms);
     write_frame_observed(&mut stream, &frame.bytes, deadline, &mut NoObserver)?;
     stream.shutdown(std::net::Shutdown::Write).map_err(io)?;
     let reply = read_frame(&mut stream, p.max_frame_bytes, deadline, json_frame)?;
@@ -528,7 +533,7 @@ fn authority(
     release: Option<&str>,
 ) -> Result<AuthorityReply, String> {
     let frame = authority_frame(p, a, epoch, op, command, release)?;
-    let connection = authority_connect(p, a)?;
+    let connection = authority_connect(a)?;
     authority_exchange(p, a, op, command, release, connection, &frame)
 }
 
@@ -695,9 +700,14 @@ fn execute(c: &mut Connection, p: &Profile, epoch: i64, mut batch: Batch) -> Res
         // AcceptExact 不产生调用权；在真正模型动作前才取得本命令 S 终态。
         let executed = match call {
             Some((op, frame)) => {
-                let connection = authority_connect(p, &p.s)?;
+                let connection = authority_connect(&p.s)?;
                 if op == "RequestConditionalExecution" {
                     c.execute("UPDATE x_exact_commands SET state='ExecutionRequested',attempt_batch=?2 WHERE id=?1 AND state='Accepted'",params![command.command_id,encoded]).map_err(error)?;
+                    // 测试钩：把这次持久写拉长到超过对端期限，复现慢盘。
+                    #[cfg(test)]
+                    if std::env::var("ISSUE1381_TEST_SLOW_CLAIM").is_ok() {
+                        std::thread::sleep(Duration::from_millis(p.timeout_ms + 200));
+                    }
                 }
                 authority_exchange(p, &p.s, op, &command, Some(&release), connection, &frame)?
             }

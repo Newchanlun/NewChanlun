@@ -79,13 +79,77 @@ fn conditions_equal_the_approved_list_including_model_coverage() {
     let e = parse::<Profile>(profile(&d, unknown_x))
         .validate()
         .unwrap_err();
-    assert!(e.starts_with("Unsupported：X 阶段条件的核验能力"), "{e}");
+    assert!(
+        e.starts_with("Unsupported：ConditionEvidence 核验能力不在已知配对表"),
+        "{e}"
+    );
     let mut missing_field = approved();
     missing_field[1]["evidence_refs"] = json!([]);
     let e = parse::<Profile>(profile(&d, missing_field))
         .validate()
         .unwrap_err();
     assert!(e.starts_with("Unsupported：获准条件缺"), "{e}");
+}
+
+/// 语义闸与 E 冻结原件共用 `check_condition_semantics`；同一组反例在 E 侧见
+/// `frozen_conditions_refuse_unpaired_or_non_denied_semantics`。
+#[test]
+fn profile_conditions_refuse_unpaired_or_non_denied_semantics() {
+    let d = dir("semantics");
+    for (case, index, field, value, expected) in [
+        (
+            "failure-not-denied",
+            1,
+            "failure_result",
+            json!("Ignore"),
+            "Unsupported：ConditionEvidence 失败语义须为 Denied",
+        ),
+        (
+            "coverage-failure-not-denied",
+            3,
+            "failure_result",
+            json!("Ignore"),
+            "Unsupported：ConditionEvidence 失败语义须为 Denied",
+        ),
+        (
+            "unknown-e-capability",
+            0,
+            "capability",
+            json!("venue-precheck/1"),
+            "Unsupported：ConditionEvidence 核验能力不在已知配对表",
+        ),
+        (
+            "unknown-stage-prefix",
+            1,
+            "required_check_stages",
+            json!(["Q.Inspect"]),
+            "Unsupported：ConditionEvidence 检查阶段前缀未知",
+        ),
+        (
+            "mispaired-stage",
+            1,
+            "required_check_stages",
+            json!(["E.ReleaseExact"]),
+            "Unsupported：ConditionEvidence 能力与阶段",
+        ),
+        (
+            "coverage-wrong-capability",
+            3,
+            "capability",
+            json!("released-exact/1"),
+            "Unsupported：model_coverage 须且只能",
+        ),
+    ] {
+        let mut list = approved();
+        if field == "capability" {
+            list[index]["validator_capability"] = value.clone();
+            list[index]["authority_revision"] = value;
+        } else {
+            list[index][field] = value;
+        }
+        let e = parse::<Profile>(profile(&d, list)).validate().unwrap_err();
+        assert!(e.starts_with(expected), "{case}: {e}");
+    }
 }
 
 /// 权威请求是 IC:9 共同信封（同一 `validate_envelope` 判据）；回复须由原请求经 `reply_envelope` 重建得到。

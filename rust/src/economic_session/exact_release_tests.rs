@@ -1065,5 +1065,80 @@ fn expired_policy_closes_release_and_keeps_the_liability() {
     assert_eq!(ok["record"]["state"], "ReleasedExact", "{ok}");
 }
 
+/// 获准条件清单的语义闸（SPEC C07.2，IC:51）：E 冻结原件与 X profile 共用同一配对表；同一组反例在 X 侧见
+/// `profile_conditions_refuse_unpaired_or_non_denied_semantics`。冻结原件被拒，证书路径也按 Unsupported 拒收。
+#[test]
+fn frozen_conditions_refuse_unpaired_or_non_denied_semantics() {
+    let mut f = fixture(None);
+    committed(&mut f);
+    crate::economic_session::exact_command::validate_section(&f.data).unwrap();
+    for (case, index, field, value, expected) in [
+        (
+            "failure-not-denied",
+            1,
+            "failure_result",
+            json!("Ignore"),
+            "Unsupported：ConditionEvidence 失败语义须为 Denied",
+        ),
+        (
+            "coverage-failure-not-denied",
+            3,
+            "failure_result",
+            json!("Ignore"),
+            "Unsupported：ConditionEvidence 失败语义须为 Denied",
+        ),
+        (
+            "unknown-e-capability",
+            0,
+            "capability",
+            json!("venue-precheck/1"),
+            "Unsupported：ConditionEvidence 核验能力不在已知配对表",
+        ),
+        (
+            "unknown-stage-prefix",
+            1,
+            "required_check_stages",
+            json!(["Q.Inspect"]),
+            "Unsupported：ConditionEvidence 检查阶段前缀未知",
+        ),
+        (
+            "mispaired-stage",
+            1,
+            "required_check_stages",
+            json!(["E.ReleaseExact"]),
+            "Unsupported：ConditionEvidence 能力与阶段",
+        ),
+        (
+            "coverage-wrong-capability",
+            3,
+            "capability",
+            json!("released-exact/1"),
+            "Unsupported：model_coverage 须且只能",
+        ),
+    ] {
+        let mut data = f.data.clone();
+        let list = &mut data["exact_release"]["conditions"];
+        if field == "capability" {
+            list[index]["validator_capability"] = value.clone();
+            list[index]["authority_revision"] = value;
+        } else {
+            list[index][field] = value;
+        }
+        let e = crate::economic_session::exact_command::validate_section(&data).unwrap_err();
+        assert!(e.starts_with(expected), "{case}: {e}");
+        let mut given = expected_command(&f, "alpha")["certificate"].clone();
+        given["conditions"] = data["exact_release"]["conditions"].clone();
+        let e = crate::economic_session::exact_command::check_certificate(
+            &given,
+            &expected_command(&f, "alpha")["certificate"],
+        )
+        .unwrap_err();
+        assert!(e.starts_with("Unsupported："), "{case}: {e}");
+    }
+    dispatch(&mut f, "alpha");
+    let r = f.handle(0, "ReleaseExact-alpha", release_payload(&f, "alpha"));
+    assert_eq!(r["record"]["state"], "ReleasedExact", "{r}");
+}
+
 #[path = "exact_x_e2e_tests.rs"]
 mod x_e2e;

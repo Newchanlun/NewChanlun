@@ -62,9 +62,23 @@ fn economic_tables(f: &Fixture) -> Value {
         .map(|c| (c.domain.clone(), tables(&c.db)))
         .collect::<serde_json::Map<_, _>>())
 }
+/// 就绪是「在 listen」，不是「文件存在」：bind 先建出路径，listen 之前的连接会被拒（Linux /proc/net/unix）。
+fn listening(path: &Path) -> bool {
+    let target = path.to_str().unwrap();
+    std::fs::read_to_string("/proc/net/unix")
+        .unwrap()
+        .lines()
+        .skip(1)
+        .any(|row| {
+            let f: Vec<&str> = row.split_whitespace().collect();
+            f.len() >= 8
+                && f[7..].join(" ") == target
+                && u32::from_str_radix(f[3], 16).is_ok_and(|flags| flags & 0x10000 != 0)
+        })
+}
 fn wait_for(path: &Path) {
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
-    while !path.exists() {
+    while !listening(path) {
         assert!(
             std::time::Instant::now() < deadline,
             "{} 未出现",

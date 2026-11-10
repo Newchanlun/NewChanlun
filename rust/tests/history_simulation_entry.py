@@ -20,6 +20,23 @@ def x_envelope(role,payload,epoch=1):
 def reply_envelope(request,payload,a):
     h=digest(payload); mid='reply-'+digest([request['source_namespace'],request['source_epoch'],request['message_id'],h])
     return dict(schema_revision=a['schema_revision'],session_id=request['session_id'],session_generation=request['session_generation'],source_namespace=a['reply_namespace'],source_epoch=a['authority_epoch'],message_id=mid,producer_id=a['producer_id'],producer_epoch=a['authority_epoch'],payload_hash=h,causal_refs=[{k:request[k] for k in ['source_namespace','source_epoch','message_id','payload_hash']}],payload=payload)
+def listening(path):
+    # Readiness is a listening socket, not a file: bind() creates the path before listen(), and a connect in
+    # between is refused (measured on Belay: refused, then connectable 10ms later with X alive).
+    target=str(path)
+    with open('/proc/net/unix') as table:
+        next(table)
+        for row in table:
+            f=row.split()
+            if len(f)>=8 and ' '.join(f[7:])==target and int(f[3],16)&0x10000: return True
+    return False
+def check_listening_predicate(root):
+    bound=root/'bound-only'; ready=root/'ready'
+    with socket.socket(socket.AF_UNIX) as b, socket.socket(socket.AF_UNIX) as r:
+        b.bind(str(bound)); r.bind(str(ready)); r.listen(1)
+        assert bound.exists() and not listening(bound), 'a bound but not listening socket is not ready'
+        assert listening(ready)
+    bound.unlink(); ready.unlink()
 def request(path,op,payload):
     with socket.socket(socket.AF_UNIX) as s:
         s.settimeout(5); s.connect(str(path)); s.sendall((canonical({'protocol':'x-exact-simulation/1','op':op,'payload':payload})+'\n').encode())
@@ -90,10 +107,12 @@ def run(name):
         e=dict(os.environ,ISSUE1381_FIXTURE_DB=str(db),ISSUE1381_FIXTURE_PROFILE=str(pp),ISSUE1381_FIXTURE_EPOCH=str(epoch))
         if crash: e['ISSUE1381_TEST_CRASH_AFTER_CLAIM']=crash
         return e
-    def start(crash=None,epoch=1):
-        p=subprocess.Popen(argv(epoch),env=env(crash,epoch),stdout=log,stderr=log)
+    def start(crash=None,epoch=1,slow_claim=False):
+        e=env(crash,epoch)
+        if slow_claim: e['ISSUE1381_TEST_SLOW_CLAIM']='1'
+        p=subprocess.Popen(argv(epoch),env=e,stdout=log,stderr=log)
         deadline=time.monotonic()+8
-        while not xp.exists():
+        while not listening(xp):
             assert p.poll() is None, (directory/'x.log').read_text()
             assert time.monotonic()<deadline, 'X socket timeout'
             time.sleep(.02)
@@ -228,6 +247,9 @@ def run(name):
         pending=dict(kind='submit',order=order('cancel-me',quantity=10))
         assert request(xp,'AcceptExact',command(pending))['state']=='Accepted'
         # S socket absent is known unsent: stay Accepted, then retry against a reachable S authorizes once.
+        if fixture:
+            # The durable ExecutionRequested write outlasts timeout_ms; the S deadline must not include it.
+            p.terminate(); p.wait(5); xp.unlink(missing_ok=True); p=start(slow_claim=True)
         before=len(s.calls); moved=s.path.with_name('s-unavailable'); s.path.rename(moved)
         assert request(xp,'AdvanceBar',batch(3,[pending]))['kind']=='Error'
         assert request(xp,'QueryCommand','cancel-me')['state']=='Accepted'
@@ -404,5 +426,6 @@ def run(name):
         log.close(); e.sock.close(); s.sock.close()
         for file in sockets.iterdir(): file.unlink()
         sockets.rmdir()
+check_listening_predicate(Path(tempfile.mkdtemp(prefix='i1381p-')))
 a=run('run-a'); b=run('run-b'); assert a==b, 'fresh process X tables differ'
 print('PASS two fresh processes: byte-identical X tables')

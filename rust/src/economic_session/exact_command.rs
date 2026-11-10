@@ -32,6 +32,50 @@ const CERTIFICATE_FIELDS: [&str; 6] = [
 ];
 /// ADR 0052 裁定二：E-Release 前唯一判定点的条件名。
 const MODEL_COVERAGE: &str = "model_coverage";
+/// 已知「核验能力 ↔ 检查阶段」配对，E 与 X 共用这一张表（#1407 C2）。阶段前缀决定由谁执行：
+/// E.* 只能是 E 真会执行的能力（E-Release 核与 model_coverage 判定点），S.*、X.* 同理。
+/// 表外能力、未知阶段前缀或失败结果不是 Denied，整份清单 Unsupported（SPEC C07.2，IC:51）。
+pub(crate) const CONDITION_PAIRS: [(&str, &str); 4] = [
+    ("released-exact/1", "E.ReleaseExact"),
+    ("model-coverage/1", "E.ReleaseExact"),
+    ("execute-committed/1", "S.RequestConditionalExecution"),
+    ("simulation-local-transaction/1", "X.OwnAttemptAndCall"),
+];
+const STAGE_PREFIXES: [&str; 3] = ["E.", "S.", "X."];
+/// 一项条件的语义闸：阶段前缀已知、能力与阶段是表内配对、authority_revision 即该能力、失败结果为 Denied；
+/// `model_coverage` 只能是 model-coverage/1 @ E.ReleaseExact。
+pub(crate) fn check_condition_semantics(
+    condition_id: &str,
+    authority_revision: &str,
+    stages: &[&str],
+    validator_capability: &str,
+    failure_result: &str,
+) -> Result<(), String> {
+    if stages
+        .iter()
+        .any(|s| !STAGE_PREFIXES.iter().any(|p| s.starts_with(p)))
+    {
+        return Err("Unsupported：ConditionEvidence 检查阶段前缀未知".into());
+    }
+    let Some((_, stage)) = CONDITION_PAIRS
+        .iter()
+        .find(|(c, _)| *c == validator_capability)
+    else {
+        return Err("Unsupported：ConditionEvidence 核验能力不在已知配对表".into());
+    };
+    if stages != [*stage] || authority_revision != validator_capability {
+        return Err("Unsupported：ConditionEvidence 能力与阶段/权威修订不是已知配对".into());
+    }
+    if failure_result != "Denied" {
+        return Err("Unsupported：ConditionEvidence 失败语义须为 Denied".into());
+    }
+    if (condition_id == MODEL_COVERAGE) != (validator_capability == "model-coverage/1") {
+        return Err(
+            "Unsupported：model_coverage 须且只能由 model-coverage/1 在 E.ReleaseExact 判定".into(),
+        );
+    }
+    Ok(())
+}
 const MODEL_DOMAIN_FIELDS: [&str; 3] = ["order_kind", "concurrency", "allocation_model"];
 
 fn text_list(v: &Value, what: &str) -> Result<(), String> {
@@ -63,7 +107,16 @@ fn condition(c: &Value) -> Result<(), String> {
     ] {
         text_list(&c[k], k)?;
     }
-    Ok(())
+    let stages: Vec<&str> = c["required_check_stages"]
+        .as_array()
+        .map_or(vec![], |a| a.iter().filter_map(Value::as_str).collect());
+    check_condition_semantics(
+        required(c, "condition_id")?,
+        required(c, "authority_revision")?,
+        &stages,
+        required(c, "validator_capability")?,
+        required(c, "failure_result")?,
+    )
 }
 fn model_domain(v: &Value) -> Result<(), String> {
     let a = v
