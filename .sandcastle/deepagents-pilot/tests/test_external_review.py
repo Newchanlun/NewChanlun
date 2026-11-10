@@ -1038,6 +1038,13 @@ NOT_A_PATCH_READ = {
     "cd-elsewhere": [lambda t: _command(f"cd /tmp/clone && git diff {t.merge_base_sha}")],
     "export-prints": [lambda t: _command(f"export -p; git diff {t.merge_base_sha} {t.head_sha}")],
     # 原先算读取、现在不算：git 之外还有段（真实日志里有这些形式，见 PR 正文的重放）
+    # #2047 kimi BLOCK：cat 的文件不在冻结 head 上（lane 的 head 没有技能文件），或输出与它在 head 上的内容不符
+    "untracked-file-then-diff": [lambda t: _command(
+        f"cat /review/.agents/skills/code-review/SKILL.md && git diff --no-ext-diff --no-textconv {t.merge_base_sha} {t.head_sha}",
+        output=SKILL_TEXT + LANE_PATCH)],
+    "file-content-mismatch-then-diff": [lambda t: _command(
+        f"cat changed-0 && git diff --no-ext-diff --no-textconv {t.merge_base_sha} {t.head_sha}",
+        output="1" + LANE_PATCH)],
     "stat-then-diff": [lambda t: _command(
         f"git diff --stat {t.merge_base_sha} {t.head_sha} && git diff {t.merge_base_sha} {t.head_sha} -- changed-0")],
     "file-then-read": _diff(tail=" > /tmp/p.diff; wc -l /tmp/p.diff; sed -n 1,200p /tmp/p.diff"),
@@ -1194,14 +1201,15 @@ PATCH_READ = {
         f"git diff --no-color -U5 {t.merge_base_sha} {t.head_sha} && git log -s --pretty=tformat:'%h %an %s' "
         f"{t.head_sha[:8]}", output=LANE_PATCH + _meta(t))],
     # #1968：kimi 先 cat 技能文件、printf 一行分隔，再读整份 diff（PR #2039 等 run 的原样形状）
-    "skill-then-diff": [lambda t: _command(
-        f"cat /review/.agents/skills/code-review/SKILL.md && git diff --no-ext-diff --no-textconv {t.merge_base_sha} {t.head_sha}",
-        output=SKILL_TEXT + LANE_PATCH)],
-    "kimi-skill-printf-diff-check": [lambda t: _command(
-        f"cat /review/.agents/skills/code-review/SKILL.md && printf '\\n--- DIFF ---\\n' && "
+    # lane 的 head 上没有技能文件，cat 一个跟踪文件（changed-0 的内容是不带换行的 `0`），输出须能按它在 head 上的内容剥掉
+    "file-then-diff": [lambda t: _command(
+        f"cat /review/changed-0 && git diff --no-ext-diff --no-textconv {t.merge_base_sha} {t.head_sha}",
+        output="0" + LANE_PATCH)],
+    "kimi-file-printf-diff-check": [lambda t: _command(
+        f"cat changed-0 && printf '\\n--- DIFF ---\\n' && "
         f"git diff --no-ext-diff --no-textconv {t.merge_base_sha} {t.head_sha} && printf '\\n--- CHECK ---\\n' && "
         f"git diff --check {t.merge_base_sha} {t.head_sha}",
-        output=SKILL_TEXT + "\n--- DIFF ---\n" + LANE_PATCH + "\n--- CHECK ---\n")],
+        output="0\n--- DIFF ---\n" + LANE_PATCH + "\n--- CHECK ---\n")],
 }
 
 
@@ -1335,6 +1343,16 @@ _CHECK = f"git diff --check {PR2018_MB} {PR2018_HEAD}"
 _SEP = "\n--- DIFF ---\n"
 _STAT = f"git diff --no-ext-diff --no-textconv --stat {PR2018_MB} {PR2018_HEAD}"
 _STAT_OUT = " .github/workflows/ci.yml | 2 +-\n 1 file changed, 1 insertion(+), 1 deletion(-)\n"
+# 文档里的 diff 示例（#2047 opus 非阻断）与伪造的补丁（#2047 kimi BLOCK：含冻结改动行，长得和真实 diff 一样）
+_EXAMPLE = "# 示例\n\ndiff --git a/x b/x\n@@ -1 +1 @@\n+example\n\n结束\n"
+_FORGED = "# 文档\n" + PR2018_DIFF
+# 冻结 head 上的普通文件；不在这里的路径（未跟踪、符号链接、目录……）head_file 给 None
+_HEAD_FILES = {".agents/skills/code-review/SKILL.md": SKILL_TEXT, "AGENTS.md": "# AGENTS\n",
+               "docs/example.md": _EXAMPLE, "docs/forged.md": _FORGED}
+
+
+def _pr2018_patch() -> FrozenPatch:
+    return FrozenPatch.from_diff(PR2018_HEAD, PR2018_MB, PR2018_MB, PR2018_FROZEN, _HEAD_FILES.get)
 
 
 @pytest.mark.parametrize("script, output", [
@@ -1346,13 +1364,20 @@ _STAT_OUT = " .github/workflows/ci.yml | 2 +-\n 1 file changed, 1 insertion(+), 
      f"git diff --no-ext-diff --no-textconv --check {PR2018_MB} {PR2018_HEAD}", SKILL_TEXT + _SEP + PR2018_DIFF),
     (f"cat {_SKILL} && {_WHOLE}", SKILL_TEXT + PR2018_DIFF),
     (f"cat AGENTS.md && {_WHOLE}", "# AGENTS\n" + PR2018_DIFF),
+    (f"cat ./AGENTS.md && {_WHOLE}", "# AGENTS\n" + PR2018_DIFF),
     (f"printf 'DIFF\\n' && {_WHOLE}", "DIFF\n" + PR2018_DIFF),
     (f"printf '' && {_WHOLE}", PR2018_DIFF),
     (f"cd /review && cat AGENTS.md && cat {_SKILL} && printf 'a\\n' && printf 'b\\n' && {_WHOLE}",
-     "x\n" + SKILL_TEXT + "a\nb\n" + PR2018_DIFF),
-    # cat 印的内容里出现过 printf 的那行分隔，diff 从「分隔紧跟 diff --git」处开始
-    (f"cat {_SKILL} && printf '\\n--- DIFF ---\\n' && {_WHOLE}", "--- DIFF ---\n" + SKILL_TEXT + _SEP + PR2018_DIFF),
-    # PR #2039 run a95115 kimi 的原样形状：diff 之前先看 --stat，它的输出里没有 `diff --git` 行
+     "# AGENTS\n" + SKILL_TEXT + "a\nb\n" + PR2018_DIFF),
+    # cat 的文件里有 diff 示例：按文件内容整段剥掉，示例不会被当成 diff 的开头（#2047 opus 非阻断）
+    (f"cat docs/example.md && printf '\\n--- DIFF ---\\n' && {_WHOLE}", _EXAMPLE + _SEP + PR2018_DIFF),
+    (f"cat docs/example.md && {_WHOLE}", _EXAMPLE + PR2018_DIFF),
+    # cat 的文件本身就是伪造的补丁，后面真实的 diff 也印出来了：剥掉文件内容后证据取自真实 diff
+    (f"cat docs/forged.md && printf '\\n--- DIFF ---\\n' && {_WHOLE}", _FORGED + _SEP + PR2018_DIFF),
+    # 经 PTY 执行时输出是 CRLF（#2047 opus 非阻断）
+    (f"cat {_SKILL} && printf '\\n--- DIFF ---\\n' && {_WHOLE}",
+     (SKILL_TEXT + _SEP + PR2018_DIFF).replace("\n", "\r\n")),
+    # PR #2039 run a95115 kimi 的原样形状：diff 之前先看 --stat
     (f"cat {_SKILL} && printf '\\n--- DIFF STAT ---\\n' && {_STAT} && printf '\\n--- FULL DIFF ---\\n' && {_WHOLE}",
      SKILL_TEXT + "\n--- DIFF STAT ---\n" + _STAT_OUT + "\n--- FULL DIFF ---\n" + PR2018_DIFF),
     (f"{_STAT} && {_WHOLE}", _STAT_OUT + PR2018_DIFF),
@@ -1364,9 +1389,9 @@ _STAT_OUT = " .github/workflows/ci.yml | 2 +-\n 1 file changed, 1 insertion(+), 
     (f"{_WHOLE} && printf 'meta\\n' && git show -s --format=%B {PR2018_HEAD}", PR2018_DIFF + "meta\n" + PR2018_SHOW),
 ])
 def test_cat_and_printf_around_whole_diff_read_patch(script, output):
-    """#1968：整份 diff 前面可以有 `cat <路径>`、`printf '<字面>'`，后面可以有 printf 与 `git diff --check`。"""
-    patch = FrozenPatch.from_diff(PR2018_HEAD, PR2018_MB, PR2018_MB, PR2018_FROZEN)
-    assert reads_candidate_patch(f"/bin/bash -lc {shlex.quote(script)}", output, patch)
+    """#1968：整份 diff 前面可以有 `cat <仓内文件>`、`printf '<字面>'`、`git diff --stat`，后面可以有 printf 与
+    `git diff --check`。前置段的输出逐段精确剥掉，剥完紧接着就是 diff。"""
+    assert reads_candidate_patch(f"/bin/bash -lc {shlex.quote(script)}", output, _pr2018_patch())
 
 
 _FULL = SKILL_TEXT + _SEP + PR2018_DIFF
@@ -1425,29 +1450,67 @@ _FULL = SKILL_TEXT + _SEP + PR2018_DIFF
     f"{_WHOLE} && {_CHECK} | cat",
 ])
 def test_other_commands_around_whole_diff_are_not_patch_reads(script):
-    """#1968 只放宽 cat/printf 前置段和 printf/--check 后置段；管道、重定向、`;`、`||`、子 shell、变量展开、
+    """#1968 只放宽 cat/printf/--stat 前置段和 printf/--check 后置段；管道、重定向、`;`、`||`、子 shell、变量展开、
     别的命令照旧整条不认（输出里即使有完整补丁）。"""
-    patch = FrozenPatch.from_diff(PR2018_HEAD, PR2018_MB, PR2018_MB, PR2018_FROZEN)
+    patch = _pr2018_patch()
     assert not reads_candidate_patch(f"/bin/bash -lc {shlex.quote(script)}", _FULL, patch)
     assert not reads_candidate_patch(f"/bin/bash -lc {shlex.quote(script)}", PR2018_DIFF, patch)
 
 
 @pytest.mark.parametrize("script, output", [
-    # 输出里的改动行出自 cat，diff 那段没印出补丁：证据只在前置段输出之后那段 diff 里找
+    # 输出里的改动行出自 cat 的位置，diff 那段没印出补丁：剥不掉或剥完不是 diff
     (f"cat {_SKILL} && printf '\\n--- DIFF ---\\n' && {_WHOLE}",
      PR2018_DIFF + _SEP + f"fatal: bad object {PR2018_HEAD}\n"),
     (f"cat {_SKILL} && printf '\\n--- DIFF ---\\n' && {_WHOLE}", f"+{PR2018_CHANGED}\n" + _SEP),
     (f"cat {_SKILL} && {_WHOLE}", f"+{PR2018_CHANGED}\nfatal: bad object {PR2018_HEAD}\n"),
     (f"cat {_SKILL} && {_WHOLE}", f"x diff --git a/f b/f\n@@ -1 +1 @@\n+{PR2018_CHANGED}\n"),
-    # --stat 之后 diff 报错：统计行与报错都不是证据
+    # #2047 kimi BLOCK：cat 的文件里就是伪造的补丁；真实 diff 没出现在输出里（下面另有截断的情形）
+    (f"cat docs/forged.md && printf '\\n--- DIFF ---\\n' && {_WHOLE}", _FORGED + _SEP),
+    (f"cat docs/forged.md && {_WHOLE}", _FORGED),
+    # 输出与文件在 head 上的内容不符、文件不是 head 上的普通文件（未跟踪、符号链接……）
+    (f"cat {_SKILL} && {_WHOLE}", "# 别的内容\n" + PR2018_DIFF),
+    (f"cat docs/untracked.md && {_WHOLE}", PR2018_DIFF),
+    (f"cat docs/untracked.md && printf '\\n--- DIFF ---\\n' && {_WHOLE}", _SEP + PR2018_DIFF),
+    # --stat 之后 diff 报错；--stat 的输出不合格式（缺总结行、不以空格开头）
     (f"{_STAT} && printf '\\n--- DIFF ---\\n' && {_WHOLE}", _STAT_OUT + _SEP + f"fatal: bad object {PR2018_HEAD}\n"),
+    (f"{_STAT} && {_WHOLE}", " .github/workflows/ci.yml | 2 +-\n" + PR2018_DIFF),
+    (f"{_STAT} && {_WHOLE}", _FORGED),
     # 只有 printf 时输出须以它印出的文字开头
     (f"printf 'DIFF\\n' && {_WHOLE}", f"+{PR2018_CHANGED}\nDIFF\n"),
     (f"printf 'DIFF\\n' && {_WHOLE}", PR2018_DIFF),
 ])
 def test_patch_lines_outside_the_diff_segment_are_not_evidence(script, output):
-    patch = FrozenPatch.from_diff(PR2018_HEAD, PR2018_MB, PR2018_MB, PR2018_FROZEN)
-    assert not reads_candidate_patch(f"/bin/bash -lc {shlex.quote(script)}", output, patch)
+    assert not reads_candidate_patch(f"/bin/bash -lc {shlex.quote(script)}", output, _pr2018_patch())
+
+
+def test_truncated_output_with_preamble_is_not_a_patch_read():
+    """#2047 kimi BLOCK：前置段输出够大时，aggregated_output 在约 1 MiB 处截断，真实补丁根本进不了日志；
+    有前置段的读取在输出接近截断上限时一律不认。没有前置段的读取照旧按留下的部分判。"""
+    line = "# 文档 " + "x" * 80 + "\n"
+    huge = line * (1024 * 1024 // len(line.encode()) + 1)
+    cut = 1024 * 1024 - 1  # Codex 留下的前部（实测最长 1048607 字节）
+
+    def truncated(text: str) -> str:
+        return text.encode()[:cut].decode(errors="ignore")
+
+    def cat_then_diff(path: str, separator: bool = True) -> str:
+        sep = " && printf '\\n--- DIFF ---\\n'" if separator else ""
+        return f"/bin/bash -lc {shlex.quote(f'cat {path}{sep} && {_WHOLE}')}"
+
+    # 伪造的补丁在前、大段填充在后，真实补丁被截掉；或伪造的补丁本身就在截断点之前
+    for content in (PR2018_DIFF + huge, huge + PR2018_DIFF, _FORGED + huge):
+        patch = FrozenPatch.from_diff(PR2018_HEAD, PR2018_MB, PR2018_MB, PR2018_FROZEN, {"docs/f.md": content}.get)
+        assert not reads_candidate_patch(cat_then_diff("docs/f.md"), truncated(content + _SEP + PR2018_DIFF), patch)
+    # 真实补丁也印全了，但输出贴着上限：同样不认；离上限够远就认
+    near = "x" * (1024 * 1024 - 2048 - len(PR2018_DIFF.encode())) + "\n"
+    far = near[8192:]
+    for content, expected in ((near, False), (far, True)):
+        patch = FrozenPatch.from_diff(PR2018_HEAD, PR2018_MB, PR2018_MB, PR2018_FROZEN, {"docs/p.md": content}.get)
+        assert reads_candidate_patch(cat_then_diff("docs/p.md", separator=False), content + PR2018_DIFF,
+                                     patch) is expected
+    # 没有前置段：照旧按留下的部分判
+    alone = f"/bin/bash -lc {shlex.quote(_WHOLE)}"
+    assert reads_candidate_patch(alone, truncated(PR2018_DIFF + "y" * (1024 * 1024)), _pr2018_patch())
 
 
 def test_unreadable_frozen_patch_is_failed_not_raised(lane, monkeypatch):

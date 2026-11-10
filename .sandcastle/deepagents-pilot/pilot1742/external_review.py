@@ -347,8 +347,26 @@ def frozen_patch(source: Path, target: ReviewTarget) -> FrozenPatch:
     """controller 自己从对象库取冻结补丁（不跑审查员的命令）：关掉外部 diff 与 textconv，固定 a/ b/ 前缀。"""
     diff = _git(source, "diff", "--no-ext-diff", "--no-textconv", "--no-color", "-U0", "--src-prefix=a/",
                 "--dst-prefix=b/", target.merge_base_sha, target.head_sha)
+    files: dict[str, str | None] = {}
+
+    def head_file(path: str) -> str | None:
+        """审查员 `cat <path>` 印出的内容：path 在冻结 head 上须是普通文件（不是符号链接、子模块、目录）。"""
+        if path not in files:
+            files[path] = None
+            try:
+                listing = _git(source, "--literal-pathspecs", "ls-tree", "-z", target.head_sha, "--", path)
+                entries = [e for e in listing.split(b"\0") if e]
+                if len(entries) == 1:
+                    meta, _, name = entries[0].partition(b"\t")
+                    mode, kind, blob = meta.split(b" ")
+                    if name == path.encode() and kind == b"blob" and mode in (b"100644", b"100755"):
+                        files[path] = _git(source, "cat-file", "blob", blob.decode()).decode(errors="replace")
+            except (subprocess.CalledProcessError, ValueError):
+                pass
+        return files[path]
+
     return FrozenPatch.from_diff(target.head_sha, target.merge_base_sha, target.base_sha,
-                                 diff.decode(errors="replace"))
+                                 diff.decode(errors="replace"), head_file)
 
 
 def validate_review(target: ReviewTarget, launch: dict, receipt: dict, folder: Path, source: Path) -> ReviewOutcome:
