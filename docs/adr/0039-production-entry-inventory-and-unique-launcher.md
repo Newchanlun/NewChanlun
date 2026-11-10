@@ -135,8 +135,8 @@ ADR 0027 定了「结构判定域 / 重操作程序」两个互斥的唯一 owne
 - **写权闭包**：`rg -l 'HYPERLIQUID_PRIVATE_KEY|placeOrder\(|submit_order\(|cancel_order\(' trading_system src scripts analysis rust/src tests --glob '*.py' --glob '*.rs'` 恰好命中 10 个文件，下文直发、π、Python 组已逐一列出。其他接 TWS 7496 的脚本只读行情，不在命中集内：`scripts/tws/fetch_1m_tws.py:38`、`analysis/_tencent_warrants_quotes.py:61` 等。
 - **交易外常驻服务**：
   - `.sandcastle/launchd/*.plist` 五个；
-  - `scripts/fengliang.service:9`、`scripts/openclaw.service:10`；
-  - `topological-computation/topo-daemon.service:9`；
+  - `scripts/fengliang.service:9`、`scripts/openclaw.service:10`（已删除：#1945 移出仓库）；
+  - `topological-computation/topo-daemon.service:9`（已删除：#1945 移出仓库）；
   - `external/setup-c/com.junyu.k4-weekly.plist`。
   - 上述服务都不在写权闭包内。
 - **前人勘查**：`.chanlun/review-results/issue1340-publication-20260909/payload/inputs/TB01-ENTRY-RECON.md:31`「前者TradingNode只在docstring，实际:61报尚未实装且:69返回1；后者没有S会话命令。需要真实外部S会话launcher。」
@@ -250,7 +250,7 @@ ADR 0039 的编号按 main 顺序分配：落地时取 `docs/adr/` 现有最大�
 | `server.py:420` overlay 内重算、`gateway.py:855` 进程内 `RecursiveOrchestrator`、`src/newchan/orchestrator/recursive.py` | feature（库） | 冻结影子：外壳内部第二套判定（C11.2） | 只能输出带 provenance 的比较读数；查询壳收编后不得以它作为发布源 | OE03/OE05 |
 | `gateway.py:946` `ws_live`（ASGI 8766）；`dev.ps1:38` | service+preset | 收编：只读查询壳 adapter | 同 `newchan` CLI | OE03 |
 | `scripts/realtime_server.py:67`（进程内 `RecursiveOrchestrator`） | service | 冻结影子 | 不持凭据，不开域库 | OE04 |
-| `.sandcastle/launchd/*.plist`、`scripts/fengliang.service`、`scripts/openclaw.service`、`topological-computation/topo-daemon.service`、`external/setup-c/com.junyu.k4-weekly.plist` | service | 不是生产入口：交易外工具和 topo/K4，不在写权闭包内，按 OUT_OF_SCOPE_PRESERVE 不纳入分母（#1413:12） | — | OE41/42/45 |
+| `.sandcastle/launchd/*.plist`、`scripts/fengliang.service`、`scripts/openclaw.service`、`topological-computation/topo-daemon.service`、`external/setup-c/com.junyu.k4-weekly.plist` | service | 不是生产入口：交易外工具和 topo/K4，不在写权闭包内，按 OUT_OF_SCOPE_PRESERVE 不纳入分母（#1413:12）；两个 `scripts/*.service` 与 `topo-daemon.service` 已删除（#1945 移出仓库） | — | OE41/42/45 |
 
 **直发类**
 
@@ -474,7 +474,7 @@ ADR 0039 的编号按 main 顺序分配：落地时取 `docs/adr/` 现有最大�
 | buy_28316_warrant.py:21/:170/:197 | `grep -n "placeOrder\|cancelOrder\|^PORT"` | `PORT = 7496          # TWS live`；`trade = ib.placeOrder(contract, order)`；`ib.cancelOrder(order)` |
 | 写权闭包 10 个文件 | 验收 A4 的 `diff` 命令实跑 | 退出码 0，无差异 |
 | TWS 只读脚本 | `grep -rl "7496" … --include='*.py'`；`grep -n "PORTS\|7496"` | `scripts/tws/fetch_1m_tws.py:38 PORTS = [7496, …]`、`analysis/_tencent_warrants_quotes.py:61 ib.connect(…7496…)`；均不在下单命中集内 |
-| 交易外 service | `git ls-files \| grep -iE '\.plist$\|\.service$'`；`grep -n "ExecStart"` | `.sandcastle/launchd/` 五个 plist；`fengliang.service:9`、`openclaw.service:10`、`topo-daemon.service:9` 的 ExecStart；`external/setup-c/com.junyu.k4-weekly.plist` |
+| 交易外 service | `git ls-files \| grep -iE '\.plist$\|\.service$'`；`grep -n "ExecStart"` | `.sandcastle/launchd/` 五个 plist；`fengliang.service:9`、`openclaw.service:10`、`topo-daemon.service:9` 的 ExecStart（这三个已删除：#1945 移出仓库）；`external/setup-c/com.junyu.k4-weekly.plist` |
 | `.chanlun/definitions/` 无 launcher 冲突 | `grep -rln "launcher" .chanlun/definitions/` | 零命中 |
 | 基线 commit | `git log -1 --format='%h %H'` | `b63a3fd586`，工作树 clean |
 | #1527/#1523/#1525 边（修订后） | `gh api graphql` 查 `issue(number:N){blockedBy{nodes{number}} blocking{nodes{number}}}` | 1527 blockedBy=1523,1530,1567、blocking=空；1523 blocking=1527,1525；1530 blocking 含 1525、1527；#1525 标题「[impl] TB-04 纵片 C：RiskGate 与订单责任回路接线」，#1567 标题「[grilling] s-admission 首份锚的签发与无锚库接管（#1527）」 |
