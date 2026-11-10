@@ -85,9 +85,15 @@ jobs:
             echo "rust=$rust" >> "$GITHUB_OUTPUT"; exit 0
           fi
           if [ "$EVENT" != pull_request ]; then echo rust=true >> "$GITHUB_OUTPUT"; exit 0; fi
-          gh api --paginate "repos/$GITHUB_REPOSITORY/pulls/$PR/files?per_page=100" \
-            --jq '.[] | .filename, (.previous_filename // empty)' > "$RUNNER_TEMP/files"
-          total=$(gh api "repos/$GITHUB_REPOSITORY/pulls/$PR" --jq .changed_files)
+          # 改动清单取不到（如超大 PR：GitHub 422「diff is taking too long to generate」，#1945 run 42654260412）
+          #   或 changed_files 查询失败时按全跑，不让 changes 失败而连带 ci-ok 变红。
+          if ! gh api --paginate "repos/$GITHUB_REPOSITORY/pulls/$PR/files?per_page=100" \
+            --jq '.[] | .filename, (.previous_filename // empty)' > "$RUNNER_TEMP/files"; then
+            echo "changed-file list unavailable: rust=true"; echo "rust=true" >> "$GITHUB_OUTPUT"; exit 0
+          fi
+          if ! total=$(gh api "repos/$GITHUB_REPOSITORY/pulls/$PR" --jq .changed_files); then
+            echo "changed_files unavailable: rust=true"; echo "rust=true" >> "$GITHUB_OUTPUT"; exit 0
+          fi
           other=$(grep -c -v -E '^(\.sandcastle/.+|package\.json|package-lock\.json|tsconfig\.sandcastle\.json|\.github/devskim-reviewed-1488\.json|\.github/devskim-baseline\.json|\.github/devskim/.+|\.github/workflows/devskim\.yml|scripts/devskim_[a-z_]+\.(sh|py))$' "$RUNNER_TEMP/files" || true)
           if [ "$total" -ge 3000 ] || [ ! -s "$RUNNER_TEMP/files" ] || [ "$other" -ne 0 ]; then rust=true; else rust=false; fi
           echo "changed=$total other=$other rust=$rust"
@@ -175,7 +181,7 @@ jobs:
         #   pip install ./rust（maturin 冷编）   11.7s
         run: |
           python -m pip install --upgrade pip
-          pip install -e ".[test]"
+          pip install -e ".[test]" pytest-xdist
           pip install "nautilus_trader==1.229.0"
           CARGO_TARGET_DIR="$HOME/.cache/newchan-rust-target" pip install ./rust
 
@@ -184,7 +190,10 @@ jobs:
 
       - name: Run tests with coverage
         # -rs 是 #324 的 090 要求：显式打印 skip 原因。
-        run: pytest -m "not slow" --tb=short -q -rs --cov=newchan --cov-report=term-missing --cov-report=xml:coverage.xml
+        # #1875：-n 4 与托管 runner 4 核一致。Belay 同机：串行 100.7 s，-n 4 两轮 72.8 / 79.1 s，
+        #   通过数与失败集合逐项相同（4926 passed，3 个环境错误一致）。只改 .sandcastle 的 PR 与同 PR 复用命中的
+        #   run 不跑 Rust，CI 下限取决于本作业和 deepagents-pilot。pytest-cov 支持 xdist，覆盖率在各进程合并。
+        run: pytest -m "not slow" -n 4 --tb=short -q -rs --cov=newchan --cov-report=term-missing --cov-report=xml:coverage.xml
 
       - name: Upload coverage report
         if: ${{ !cancelled() }}
@@ -225,7 +234,7 @@ jobs:
   #   rust-test-s-session-coverage    汇总各片产物，再断言一次并集 == 全集、各片执行集 == 分配集
   #   rust-test-s-session-extras (组) s_session 的 TB-02-C、库/集成测试、TestOnly 特性增量、v3 history（矩阵作业
   #                                   rust-test-s-session-extra-groups，结论由 ci-ok 直接判定）
-  #   rust-test-backtest-bin          backtest_bin feature 的库测试
+  #   rust-test-production-session    生产入口测试 + backtest_bin feature 的库测试（#1875 合并）
   # 拆前 s_session bin 一步 89 分钟里，执行占 88 分钟、编译约 1 分钟；其中两条测试独占尾部
   # （tb02w_killed_case_two_scan_budget_resume_and_recover 约 69 分钟、tb02c_persistent_first_kind_and_normal_recovery
   # 约 49 分钟），其余 505 条在开跑 41 分钟内全部结束。分片后最长 job 的下限即最慢那条测试本身。
@@ -778,10 +787,12 @@ jobs:
       - *rust-checkout
 
       - uses: ./.github/actions/rust-job-setup
+        id: setup
 
       # production_session_testonly：入口测试显式走 S 的 TestOnly 诊断 theta 臂（P0 未签期间正式配置必拒，
       #   由 unsigned_p0_refuses_s_serve_* 两条测试锁住）；生产构建不含该臂，遇开关即拒绝启动。
       - name: cargo test — production_session_entry
+        if: ${{ !cancelled() && steps.setup.outcome == 'success' }}
         run: ../.github/scripts/run-cargo-with-telemetry.sh cargo test --release --locked --features production_session_testonly --test production_session_entry --jobs "${CI_CARGO_JOBS:-1}" -- --test-threads 1
 
       # 纯生产构建（只开 production_session，#1769 返修 M-3/M-4）：编译生产 launcher、X 骨架与 S bin 的生产 cfg
@@ -790,26 +801,14 @@ jobs:
       #   #1381：history_simulation_entry 用 python3 受控 E/S authority 驱动真实 x_execution_session 进程
       #   （入口、重启、S 唯一授权、epoch2 拒绝、首次初始化原子），文件 cfg 为 production_session，同在纯生产构建执行。
       - name: cargo test — production_session_entry / history_simulation_entry（纯生产构建）
+        if: ${{ !cancelled() && steps.setup.outcome == 'success' }}
         run: ../.github/scripts/run-cargo-with-telemetry.sh cargo test --release --locked --features production_session --test production_session_entry --test history_simulation_entry --jobs "${CI_CARGO_JOBS:-1}" -- --test-threads 1
 
-  rust-test-backtest-bin:
-    needs: changes
-    if: needs.changes.outputs.rust == 'true'
-    runs-on: ${{ (vars.CI_BOAT_RUNNERS != 'off' && github.actor == 'xy7365527-lang' && github.triggering_actor == 'xy7365527-lang' && (github.event_name != 'pull_request' || github.event.pull_request.user.login == 'xy7365527-lang')) && 'boat-large/from=hc-ci-slim' || 'ubuntu-latest' }}
-    # 拆前本步约 9.3 分钟（run 39358379553）。
-    timeout-minutes: 45
-    env:
-      CARGO_INCREMENTAL: "0"
-    defaults:
-      run:
-        working-directory: rust
-
-    steps:
-      - *rust-checkout
-
-      - uses: ./.github/actions/rust-job-setup
-
+      # #1875：原 rust-test-backtest-bin 作业并入本作业（各约 2 min，Boat 上每轮少起 1 台机器）。三个测试步都带
+      #   `!cancelled() && steps.setup.outcome == 'success'`：前一个测试步失败不跳过后面的（失败照样使本作业失败），
+      #   准备步骤失败时则全部跳过，不刷连带报错。托管机上合并前两作业合计 9–12 min，距 45 min 上限远。
       - name: cargo test — backtest_bin feature 新增的库测试
+        if: ${{ !cancelled() && steps.setup.outcome == 'success' }}
         # 2026-08-16 磁盘实撞（#993 收口轮）：三轮 runner 爆盘（No space left on device）——
         # --all-targets 在 feature 下额外编 56 个探针 bin 的 test 目标（各链 nautilus 套件，
         # 本地实测 debug 全 target 55G ⟹ 14G 盘必爆）。改 --lib；tests/ 与 bins 由 default 步覆盖。
@@ -1434,7 +1433,6 @@ jobs:
       - rust-test-s-session-coverage
       - rust-test-s-session-extra-groups
       - rust-test-production-session
-      - rust-test-backtest-bin
       - s-sequence-1488
       - s-fields-native-1488
       - s-observer
@@ -1453,7 +1451,7 @@ jobs:
           rust = (needs.get("changes") or {}).get("outputs", {}).get("rust")
           # 只有 Rust 作业可以 skipped，且必须是 changes 明确判定 rust=false。
           rust_jobs = {"rust-check", "rust-test-default", "rust-test-s-session", "rust-test-s-session-coverage",
-                       "rust-test-s-session-extra-groups", "rust-test-production-session", "rust-test-backtest-bin",
+                       "rust-test-s-session-extra-groups", "rust-test-production-session",
                        "s-sequence-1488", "s-fields-native-1488"}
           bad = {name: r for name, r in results.items()
                  if not (r == "success" or (r == "skipped" and name in rust_jobs and rust == "false"))}
