@@ -16,7 +16,7 @@ NewChanlun 是以缠论（缠中说禅博文）为核心的量化交易系统，
 
 ## 合入与人工确认
 
-- **合入 main 没有人工门**：分支保护要求 `deepagents/review`（正式非作者审查）与 `ci-ok`（适用 CI 全绿）都通过并追平 main（strict），满足后代理可以合入。工蜂、执行器和 Sandcastle 实施者只开 PR。
+- **合入 main 没有人工门**：分支保护要求 `deepagents/review`（正式非作者审查）与 `ci-ok`（适用 CI 全绿）都通过并追平 main（strict），满足后由 `executor serve` 内的 review_sweep 带 `sha=<head>` 合入，代理也可按同一规则手动合入。sweep 不碰 draft，执行器交付的 draft PR 须验收后标 ready for review 才进入审查与合入。工蜂、执行器派票 run 和 Sandcastle 实施者只开 PR（口径见 `.sandcastle/docs/graph-engineering.md`「main 的合入」）。
 - **T 类、P 类决策与 spec 同一流程**：起草，非作者独审 PASS，由代理裁定并记账；BLOCK 就返修，缺有效独审不放行（#1909）。
 - **仍要人确认的只有两类**：实盘下单与资金、密钥与凭证。资金、账户、凭据类硬门票挂 `ready-for-human` 交还用户签署，签署格式见 `.sandcastle/docs/graph-engineering.md`「2. 考古」节的资金与权限硬门。过渡例外：#1921 合入前，DeepAgents 队列路径（`executor.py` / `approval.py`）还有 SPEC_AUTHORIZATION 签署门，见同文件「#1742 执行面依赖」。CI 与分支保护配置由代理决定、事后报告，但不得借此关闭或放宽两项必需检查、取消 strict 或用管理员权限绕过。
 
