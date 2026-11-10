@@ -8,7 +8,7 @@ PLIST_SRC="$SCRIPT_DIR/launchd/com.newchanlun.sandcastle-claimer.plist"
 PLIST_DST="$HOME/Library/LaunchAgents/com.newchanlun.sandcastle-claimer.plist"
 # #2048：SERVICE_MANAGER=systemd 时改走 systemd --user 单元；缺省 launchctl 走下方原逻辑。
 . "$SCRIPT_DIR/service-manager.sh"
-# 两种服务管理器共用：GitHub token 未轮换时拒绝安装（systemd 分支在下一行就会 exit，故门须在它之前）。
+# 两种服务管理器共用：GitHub token 未轮换时拒绝安装（systemd_dispatch 会 exit，故门须在它之前；launchctl 分支同样经过此门）。
 if [ "${1:-install}" = install ] && [ -f "${GH_TOKEN_ROTATION_MARKER:-/Users/silencehan/Projects/NewChanlun/.sandcastle/logs/GH_TOKEN_ROTATION_REQUIRED}" ]; then
   echo "拒绝安装：GitHub token 尚未轮换（见 ${GH_TOKEN_ROTATION_MARKER:-/Users/silencehan/Projects/NewChanlun/.sandcastle/logs/GH_TOKEN_ROTATION_REQUIRED}）" >&2
   exit 78
@@ -17,11 +17,6 @@ systemd_dispatch com.newchanlun.sandcastle-claimer "${1:-install}"
 
 case "${1:-install}" in
   install)
-    MARKER="${GH_TOKEN_ROTATION_MARKER:-/Users/silencehan/Projects/NewChanlun/.sandcastle/logs/GH_TOKEN_ROTATION_REQUIRED}"
-    if [ -f "$MARKER" ]; then
-      echo "拒绝安装：GitHub token 尚未轮换（见 $MARKER）" >&2
-      exit 78
-    fi
     mkdir -p "$HOME/Library/LaunchAgents"
     cp "$PLIST_SRC" "$PLIST_DST"
     launchctl unload "$PLIST_DST" 2>/dev/null || true

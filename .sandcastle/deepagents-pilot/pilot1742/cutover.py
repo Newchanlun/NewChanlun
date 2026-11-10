@@ -18,6 +18,8 @@ from typing import Any
 # #2048：本文件也作独立脚本由 deepagents-cutover.mts 拉起（无包上下文），宿主路径在此内联读取，
 # 取值口径与 hostpaths.py 一致：缺省等于 Mac 现役位置，Linux 宿主用环境变量覆盖。
 AGENT_STORAGE = Path(os.environ.get('AGENT_STORAGE') or '/Volumes/AgentStorage')
+if not AGENT_STORAGE.is_absolute():
+    raise ValueError(f'AGENT_STORAGE 必须是绝对路径，实为 {AGENT_STORAGE}')
 WORKERS_LOG = Path(os.environ.get('PILOT1742_WORKERS_LOG')
                    or '/Users/silencehan/Projects/NewChanlun/.sandcastle/logs/workers.jsonl')
 
@@ -455,6 +457,35 @@ class CutoverStore:
             raise CutoverError('ticket has legacy events after snapshot')
 
 
+_SYSTEMD_ACTIVE = frozenset({'active', 'reloading', 'inactive', 'failed', 'activating', 'deactivating', 'maintenance', 'refreshing'})
+_SYSTEMD_FILE_STATE = frozenset({'enabled', 'enabled-runtime', 'linked', 'linked-runtime', 'masked', 'masked-runtime', 'static',
+                                 'indirect', 'disabled', 'generated', 'transient', 'alias', 'bad', 'not-found', ''})
+
+
+def _systemd_unloaded(unit: str, *, timer: bool) -> bool:
+    """`systemctl --user show` 逐字段判定单元是否已卸载；查询失败或取值异常抛 CutoverError。"""
+    result = subprocess.run(['systemctl', '--user', 'show', '-p', 'LoadState,ActiveState,SubState,UnitFileState', unit],
+                            check=False, capture_output=True, text=True)
+    if result.returncode != 0:
+        raise CutoverError(f'systemctl could not inspect {unit}: rc={result.returncode} {result.stderr.strip()}')
+    fields = {}
+    for line in result.stdout.splitlines():
+        if line.strip():
+            key, sep, value = line.partition('=')
+            if not sep:
+                raise CutoverError(f'systemctl output for {unit} unparsable: {line!r}')
+            fields[key] = value.strip()
+    if not {'LoadState', 'ActiveState', 'SubState'} <= fields.keys():
+        raise CutoverError(f'systemctl output for {unit} missing fields: {sorted(fields)}')
+    load, active, sub, file_state = fields['LoadState'], fields['ActiveState'], fields['SubState'], fields.get('UnitFileState', '')
+    if active not in _SYSTEMD_ACTIVE or file_state not in _SYSTEMD_FILE_STATE:
+        raise CutoverError(f'systemctl reported unexpected state for {unit}: {fields}')
+    if load == 'not-found':
+        return True
+    stopped = active == 'inactive' if timer else (active in ('inactive', 'failed') and sub != 'auto-restart')
+    return stopped and file_state in ('disabled', 'masked', 'masked-runtime', 'not-found', '')
+
+
 def remote_barrier(gateway: Any) -> RemoteBarrier:
     def pages(path: str, field: str) -> list[dict[str, Any]]:
         rows: list[dict[str, Any]] = []
@@ -484,19 +515,14 @@ def remote_barrier(gateway: Any) -> RemoteBarrier:
     systemd = service_manager() == 'systemd'
     for label in LEGACY_SERVICES:
         if systemd:
-            # #2048：旧服务算「已卸载」须同时满足：服务不在运行（is-active 退出码 3=inactive 或 4=无此单元），
-            #   且服务和同名 .timer 都没有启用（is-enabled 非 0）。其余退出码（如用户总线不可达）一律报错，与 launchctl 分支同样失败即关。
+            # #2048：服务与同名 .timer 都用 `systemctl show` 逐字段判定，不用 is-active/is-enabled 的退出码
+            #   （它们对 activating / auto-restart / 总线不可达都返回非 0，会误放行）。
+            #   「已卸载」＝服务 ActiveState∈{inactive,failed} 且 SubState≠auto-restart、定时器 inactive、
+            #   两者 UnitFileState∈{disabled,masked,空,not-found}（LoadState=not-found 视同已卸载）；
+            #   仍在跑/将被拉起/已启用则不记入 unloaded；命令失败、输出不可解析、出现未知取值一律 CutoverError（失败即关）。
             unit = systemd_unit(label)
-            active = subprocess.run(['systemctl', '--user', 'is-active', '--quiet', unit],
-                                    check=False, capture_output=True, text=True)
-            if active.returncode not in (3, 4):
-                raise CutoverError(f'systemctl could not confirm {unit} is stopped: rc={active.returncode} {active.stderr.strip()}')
-            timer = unit.removesuffix('.service') + '.timer'
-            enabled = subprocess.run(['systemctl', '--user', 'is-enabled', '--quiet', unit, timer],
-                                     check=False, capture_output=True, text=True)
-            if enabled.returncode == 0:
-                raise CutoverError(f'{unit} or {timer} is still enabled')
-            unloaded.append(label)
+            if _systemd_unloaded(unit, timer=False) & _systemd_unloaded(unit.removesuffix('.service') + '.timer', timer=True):
+                unloaded.append(label)
             continue
         result = subprocess.run(['launchctl', 'print', f'gui/{os.getuid()}/{label}'], check=False, capture_output=True, text=True)
         if result.returncode != 0 and 'Could not find service' in result.stderr:

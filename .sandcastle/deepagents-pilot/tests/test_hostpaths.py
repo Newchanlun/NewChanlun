@@ -63,3 +63,16 @@ def test_service_manager() -> None:
     with pytest.raises(ValueError, match="SERVICE_MANAGER"):
         service_manager("upstart")
     assert systemd_unit("com.newchanlun.sandcastle-claimer") == "newchanlun-sandcastle-claimer.service"
+
+
+def test_skills_root_gets_trailing_slash() -> None:
+    assert probe(PSTACK_SKILLS_ROOT="/opt/skills")["skills"] == "/opt/skills/"
+    assert probe(PSTACK_SKILLS_ROOT="/opt/skills/")["skills"] == "/opt/skills/"
+
+
+@pytest.mark.parametrize("module", ["pilot1742.hostpaths", "pilot1742.cutover"])
+def test_relative_agent_storage_is_rejected(module: str) -> None:
+    base = {k: v for k, v in os.environ.items() if k not in VARS}
+    res = subprocess.run([sys.executable, "-c", f"import {module}"], cwd=PILOT, env={**base, "AGENT_STORAGE": "rel/dir"},
+                         capture_output=True, text=True)
+    assert res.returncode != 0 and "AGENT_STORAGE 必须是绝对路径" in res.stderr

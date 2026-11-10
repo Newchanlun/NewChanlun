@@ -190,7 +190,6 @@ function pgrep(pattern: string): boolean {
   }
 }
 
-/** launchd 服务停摆自愈；run 失败即抛（同 execFileSync），isRunning 为加载后复判的运行态。 */
 export type ServiceManager = "launchctl" | "systemd";
 /** #2048：宿主服务管理器，缺省 launchctl（Mac）；Belay 设 SERVICE_MANAGER=systemd。其它取值直接报错。 */
 export function serviceManager(value: string | undefined = process.env.SERVICE_MANAGER): ServiceManager {
@@ -204,6 +203,7 @@ export function systemdUnit(label: string): string {
   return `${label.replace(/^com\.newchanlun\./, "newchanlun-")}.service`;
 }
 
+/** launchd 服务停摆自愈；run 失败即抛（同 execFileSync），isRunning 为加载后复判的运行态。 */
 export interface HealDeps {
   run: (cmd: string, args: string[]) => string;
   isRunning: () => boolean;
