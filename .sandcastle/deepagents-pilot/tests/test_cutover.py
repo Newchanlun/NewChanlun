@@ -583,3 +583,40 @@ def test_snapshot_orphan_outside_host_still_blocks(barrier, legacy_inventory):
     with pytest.raises(CutoverError, match='snapshot process still alive'):
         store.verify(snap, remote, legacy_processes(), 'a' * 40)
     assert not store.path.exists()
+
+
+@pytest.mark.parametrize('active_rc,enabled_rc,ok', [
+    (3, 1, True),    # inactive, nothing enabled
+    (4, 1, True),    # unit does not exist
+    (0, 1, False),   # still running
+    (3, 0, False),   # stopped between timer runs but service/timer still enabled
+    (1, 1, False),   # user bus unreachable: fail closed
+])
+def test_remote_barrier_systemd_is_fail_closed(monkeypatch, active_rc, enabled_rc, ok):
+    from pathlib import Path
+    from types import SimpleNamespace
+
+    from pilot1742.cutover import LEGACY_SERVICES, remote_barrier
+
+    workflows = [{'id': i, 'path': str(path)} for i, path in enumerate(
+        Path(__file__).resolve().parents[3].joinpath('.github/workflows').glob('agent-*.yml'), 1)]
+
+    def api(method, path, params):
+        data = {'workflows': workflows} if path.endswith('/workflows') else {'workflow_runs': [{'status': 'completed'}]}
+        return SimpleNamespace(data=data, has_next=False)
+
+    def command(args, **kwargs):
+        if args[0] == 'gh':
+            return SimpleNamespace(stdout='1\n', stderr='', returncode=0)
+        assert args[0] == 'systemctl', args
+        rc = active_rc if args[2] == 'is-active' else enabled_rc
+        return SimpleNamespace(stdout='', stderr='', returncode=rc)
+
+    monkeypatch.setenv('SERVICE_MANAGER', 'systemd')
+    monkeypatch.setattr('pilot1742.cutover.subprocess.run', command)
+    gateway = SimpleNamespace(repo='Newchanlun/NewChanlun', client=SimpleNamespace(api=api), _p=lambda p: p)
+    if ok:
+        assert remote_barrier(gateway).legacy_services_unloaded == LEGACY_SERVICES
+    else:
+        with pytest.raises(CutoverError):
+            remote_barrier(gateway)

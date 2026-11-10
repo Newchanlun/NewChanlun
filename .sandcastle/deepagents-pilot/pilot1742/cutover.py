@@ -484,11 +484,19 @@ def remote_barrier(gateway: Any) -> RemoteBarrier:
     systemd = service_manager() == 'systemd'
     for label in LEGACY_SERVICES:
         if systemd:
-            # #2048：Linux 宿主上旧服务从未安装为 systemd 单元；is-active 非 0 即视为已卸载（不在跑）。
-            result = subprocess.run(['systemctl', '--user', 'is-active', '--quiet', systemd_unit(label)],
+            # #2048：旧服务算「已卸载」须同时满足：服务不在运行（is-active 退出码 3=inactive 或 4=无此单元），
+            #   且服务和同名 .timer 都没有启用（is-enabled 非 0）。其余退出码（如用户总线不可达）一律报错，与 launchctl 分支同样失败即关。
+            unit = systemd_unit(label)
+            active = subprocess.run(['systemctl', '--user', 'is-active', '--quiet', unit],
                                     check=False, capture_output=True, text=True)
-            if result.returncode != 0:
-                unloaded.append(label)
+            if active.returncode not in (3, 4):
+                raise CutoverError(f'systemctl could not confirm {unit} is stopped: rc={active.returncode} {active.stderr.strip()}')
+            timer = unit.removesuffix('.service') + '.timer'
+            enabled = subprocess.run(['systemctl', '--user', 'is-enabled', '--quiet', unit, timer],
+                                     check=False, capture_output=True, text=True)
+            if enabled.returncode == 0:
+                raise CutoverError(f'{unit} or {timer} is still enabled')
+            unloaded.append(label)
             continue
         result = subprocess.run(['launchctl', 'print', f'gui/{os.getuid()}/{label}'], check=False, capture_output=True, text=True)
         if result.returncode != 0 and 'Could not find service' in result.stderr:
