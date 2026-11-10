@@ -190,7 +190,7 @@ actual_status=$?
 set -e
 assert_status 64 "$actual_status" no-command "$log_file"
 
-# #1875 EACCES 重试：只认「build-script never executed + os error 13」这一特征，最多重试一次。
+# #1875 偶发重试：只认 EACCES（build-script never executed + os error 13）与 EXDEV（rlib rename os error 18）两种特征，最多重试一次。
 retry_dir="$tmp_dir/retry-stubs"
 mkdir -p "$retry_dir"
 cat > "$retry_dir/cargo" <<'STUB'
@@ -201,6 +201,15 @@ if [[ "$mode" == eacces-once && $n -eq 1 ]] || [[ "$mode" == eacces-always ]]; t
   printf 'error: failed to run custom build command for `serde_json v1.0.0`\n' >&2
   printf 'Caused by:\n  could not execute process `/w/rust/target/debug/build/serde_json-1/build-script-build` (never executed)\n' >&2
   printf 'Caused by:\n  Permission denied (os error 13)\n' >&2
+  exit 101
+fi
+if [[ "$mode" == exdev-once && $n -eq 1 ]]; then
+  printf 'error: failed to build archive at `/w/1488-target/debug/deps/liblibc-1.rlib`: failed to rename archive file: Invalid cross-device link (os error 18)\n' >&2
+  printf 'error: could not compile `libc` (lib) due to 1 previous error\n' >&2
+  exit 101
+fi
+if [[ "$mode" == exdev-in-test ]]; then
+  printf 'thread main panicked: rename failed: Invalid cross-device link (os error 18)\n' >&2
   exit 101
 fi
 if [[ "$mode" == other-error ]]; then
@@ -224,15 +233,17 @@ run_retry_case() {
   if [[ "$calls" != "$expected_calls" ]]; then
     echo "FAIL retry-$mode: expected $expected_calls cargo calls, got $calls" >&2; cat "$log_file" >&2; exit 1
   fi
-  if [[ "$expect_warning" == yes ]] && ! grep -q 'Boat build-script EACCES retry::host=' "$log_file"; then
+  if [[ "$expect_warning" == yes ]] && ! grep -q 'Boat transient cargo error retry::cause=' "$log_file"; then
     echo "FAIL retry-$mode: missing retry warning" >&2; exit 1
   fi
-  if [[ "$expect_warning" == no ]] && grep -q 'Boat build-script EACCES retry' "$log_file"; then
+  if [[ "$expect_warning" == no ]] && grep -q 'Boat transient cargo error retry' "$log_file"; then
     echo "FAIL retry-$mode: unexpected retry warning" >&2; exit 1
   fi
 }
 run_retry_case eacces-once 0 2 yes
 run_retry_case eacces-always 101 2 yes
+run_retry_case exdev-once 0 2 yes
+run_retry_case exdev-in-test 101 1 no
 run_retry_case other-error 101 1 no
 run_retry_case success 0 1 no
 
@@ -259,4 +270,4 @@ set -e
 assert_status 0 "$direct_status" retry-direct "$direct_log"
 [[ "$(cat "$direct_calls")" == 2 ]] || { echo "FAIL retry-direct: expected 2 calls" >&2; exit 1; }
 
-printf 'PASS: 16 status-priority cells, guard boundaries, defaults, configuration validation, argv preservation, 5 EACCES-retry cases, and 2 no-TMPDIR fail-closed cases\n'
+printf 'PASS: 16 status-priority cells, guard boundaries, defaults, configuration validation, argv preservation, 7 transient-retry cases (EACCES, EXDEV), and 2 no-TMPDIR fail-closed cases\n'

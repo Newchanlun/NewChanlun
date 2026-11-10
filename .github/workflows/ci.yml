@@ -41,7 +41,13 @@ jobs:
   # #1875 push 去重：合入 main 的 merge commit 若与 PR head（第二父）同树，且 PR 在该 head 上已有成功的 ci.yml run，
   #   push 不再重跑 Rust 作业。strict 下 PR run 检出的 refs/pull/N/merge 与 head 同树，所以那次 run 测的正是这棵树。
   #   rust/Cargo.lock 有变时仍全跑，让 main 作用域写入新的 cargo 缓存（PR 作用域的缓存别的 PR 读不到）。
-  #   单父提交、直接推送、查询出错一律全跑。去重后 main 的 push run 多数没有 Rust 作业耗时，CI 计时请看 PR run。
+  #   单父提交、查询出错一律全跑；直接推送到 main 由分支保护（必须经 PR）挡住，不在本判定里另查。去重后 main 的 push run 多数没有 Rust 作业耗时，CI 计时请看 PR run。
+  #   那次 PR run 必须真跑过 Rust（rust-green 作业 success）；走了同 PR 复用的 run 不算，main 上照常全跑（#2027），
+  #   用来兜住复用判定的非恶意误判。合入改动全在跳过集里时直接不跑 Rust（与 PR 侧 p2m 同一依据）。
+  # #1875 同 PR 复用：PR run 的检出树去掉上面的跳过集后，与本分支上一次全绿 run 相同、且两边 .github 相同时，
+  #   不再跑 Rust 作业（典型是列车追平的 main 只多了 .sandcastle 改动）。凭据是那次 run 里服务端渲染的
+  #   `rust-green <指纹>` 作业的结论（见文件末尾 rust-green 作业），不是 artifact：同一 run 里的 PR 代码拿得到运行时令牌，
+  #   能伪造 artifact（#2027 第三轮独审）。只认本仓库分支、7 天内的 run，查询出错一律全跑。判定见 .github/scripts/ci-rust-reuse.py。
   changes:
     runs-on: ubuntu-latest
     timeout-minutes: 5
@@ -51,12 +57,24 @@ jobs:
       pull-requests: read
     outputs:
       rust: ${{ steps.filter.outputs.rust }}
+      rust_key: ${{ steps.filter.outputs.rust_key }}
     steps:
+      # 稀疏检出 .github/scripts，供同 PR 复用判定（ci-rust-reuse.py）使用。
+      #   检出失败不让本作业失败：脚本不存在时下面按全跑处理。
+      - uses: actions/checkout@v4
+        if: github.event_name == 'pull_request'
+        continue-on-error: true
+        with:
+          sparse-checkout: .github/scripts
+          persist-credentials: false
       - id: filter
         env:
           GH_TOKEN: ${{ github.token }}
           EVENT: ${{ github.event_name }}
           PR: ${{ github.event.pull_request.number }}
+          HEAD_REF: ${{ github.head_ref }}
+          # p2m 跳过集；同 PR 复用的输入指纹也排除同一组路径。
+          SKIP_RE: '^(\.sandcastle/.+|package\.json|package-lock\.json|tsconfig\.sandcastle\.json|\.github/devskim-reviewed-1488\.json|\.github/devskim-baseline\.json|\.github/devskim/.+|\.github/workflows/devskim\.yml|scripts/devskim_[a-z_]+\.(sh|py))$'
         run: |
           set -euo pipefail
           if [ "$EVENT" = push ]; then
@@ -75,23 +93,50 @@ jobs:
               rc=0; grep -qx 'rust/Cargo.lock' "$RUNNER_TEMP/push-files" || rc=$?
               if [ "$rc" -eq 0 ]; then echo "Cargo.lock changed"; return 1; fi
               if [ "$rc" -ne 1 ]; then echo "file check failed (grep exit $rc)"; return 1; fi
-              run=$(gh api "$R/actions/workflows/ci.yml/runs?event=pull_request&status=success&head_sha=$2&per_page=20" \
-                --jq '[.workflow_runs[] | select(.head_repository.id == .repository.id)][0].html_url // empty') || return 1
-              [ -n "$run" ] || { echo "no green PR run for $2"; return 1; }
-              echo "green PR run on same tree: $run"
+              # 合入的改动全在跳过集里（只改 .sandcastle / DevSkim 的 PR）：Rust 输入与 main 上一提交相同，与 PR 侧 p2m 同一依据。
+              #   改动清单为空时与 PR 侧一致按全跑处理。
+              [ -s "$RUNNER_TEMP/push-files" ] || { echo "empty file list"; return 1; }
+              rc=0; grep -v -E -q "$SKIP_RE" "$RUNNER_TEMP/push-files" || rc=$?
+              if [ "$rc" -eq 1 ]; then echo "only skip-set files changed"; return 0; fi
+              if [ "$rc" -ne 0 ]; then echo "skip-set check failed (grep exit $rc)"; return 1; fi
+              # #2027：只认 Rust 作业在那次 PR run 里真跑过的（rust-green 作业 success）。同 PR 复用命中的 run 跳过了 Rust，
+              #   main 合入后照常全跑一次：复用判定若有误判（逻辑缺陷，非恶意），在 main 上立即暴露。对有本仓写权限、能用
+              #   旁路 base 跑出 rust-green 的人不构成边界——与本去重原有的信任前提相同（见 ci-rust-reuse.py「接受的风险」）。
+              ids=$(gh api "$R/actions/workflows/ci.yml/runs?event=pull_request&status=success&head_sha=$2&per_page=20" \
+                --jq '.workflow_runs[] | select(.head_repository.id == .repository.id) | .id') || return 1
+              run=
+              for id in $ids; do
+                green=$(gh api "$R/actions/runs/$id/jobs?filter=latest&per_page=100" \
+                  --jq '[.jobs[] | select((.name | startswith("rust-green ")) and .conclusion == "success")] | length') || return 1
+                if [ "$green" -gt 0 ]; then run=$id; break; fi
+              done
+              [ -n "$run" ] || { echo "no PR run for $2 that actually ran Rust"; return 1; }
+              echo "PR run on same tree that ran Rust: $run"
             }
             if dedup; then rust=false; else rust=true; fi
             echo "push dedup: rust=$rust"
             echo "rust=$rust" >> "$GITHUB_OUTPUT"; exit 0
           fi
           if [ "$EVENT" != pull_request ]; then echo rust=true >> "$GITHUB_OUTPUT"; exit 0; fi
-          gh api --paginate "repos/$GITHUB_REPOSITORY/pulls/$PR/files?per_page=100" \
-            --jq '.[] | .filename, (.previous_filename // empty)' > "$RUNNER_TEMP/files"
-          total=$(gh api "repos/$GITHUB_REPOSITORY/pulls/$PR" --jq .changed_files)
-          other=$(grep -c -v -E '^(\.sandcastle/.+|package\.json|package-lock\.json|tsconfig\.sandcastle\.json|\.github/devskim-reviewed-1488\.json|\.github/devskim-baseline\.json|\.github/devskim/.+|\.github/workflows/devskim\.yml|scripts/devskim_[a-z_]+\.(sh|py))$' "$RUNNER_TEMP/files" || true)
+          # 改动清单取不到（如超大 PR：GitHub 422「diff is taking too long to generate」，#1945 run 42654260412）
+          #   或 changed_files 查询失败时按全跑，不让 changes 失败而连带 ci-ok 变红（#2038）。
+          if ! gh api --paginate "repos/$GITHUB_REPOSITORY/pulls/$PR/files?per_page=100" \
+            --jq '.[] | .filename, (.previous_filename // empty)' > "$RUNNER_TEMP/files"; then
+            echo "changed-file list unavailable: rust=true"; echo "rust=true" >> "$GITHUB_OUTPUT"; exit 0
+          fi
+          if ! total=$(gh api "repos/$GITHUB_REPOSITORY/pulls/$PR" --jq .changed_files); then
+            echo "changed_files unavailable: rust=true"; echo "rust=true" >> "$GITHUB_OUTPUT"; exit 0
+          fi
+          other=$(grep -c -v -E "$SKIP_RE" "$RUNNER_TEMP/files" || true)
           if [ "$total" -ge 3000 ] || [ ! -s "$RUNNER_TEMP/files" ] || [ "$other" -ne 0 ]; then rust=true; else rust=false; fi
           echo "changed=$total other=$other rust=$rust"
-          echo "rust=$rust" >> "$GITHUB_OUTPUT"
+          if [ "$rust" = false ]; then echo "rust=false" >> "$GITHUB_OUTPUT"; exit 0; fi
+          # 同 PR 复用：Rust 输入与本分支上一次全绿 run 相同就不重跑；出错按全跑（脚本只会输出 rust=true）。
+          python3 .github/scripts/ci-rust-reuse.py "$GITHUB_REPOSITORY" "$GITHUB_SHA" "$HEAD_REF" "$GITHUB_RUN_ID" "$SKIP_RE" \
+            > "$RUNNER_TEMP/reuse" || echo "rust=true" > "$RUNNER_TEMP/reuse"
+          cat "$RUNNER_TEMP/reuse"
+          { echo "### 同 PR Rust 复用（#1875）"; sed 's/^/- /' "$RUNNER_TEMP/reuse"; } >> "$GITHUB_STEP_SUMMARY"
+          grep -E '^(rust|rust_key)=' "$RUNNER_TEMP/reuse" >> "$GITHUB_OUTPUT"
 
   test:
     runs-on: ubuntu-latest
@@ -175,7 +220,7 @@ jobs:
         #   pip install ./rust（maturin 冷编）   11.7s
         run: |
           python -m pip install --upgrade pip
-          pip install -e ".[test]"
+          pip install -e ".[test]" pytest-xdist
           pip install "nautilus_trader==1.229.0"
           CARGO_TARGET_DIR="$HOME/.cache/newchan-rust-target" pip install ./rust
 
@@ -184,7 +229,10 @@ jobs:
 
       - name: Run tests with coverage
         # -rs 是 #324 的 090 要求：显式打印 skip 原因。
-        run: pytest -m "not slow" --tb=short -q -rs --cov=newchan --cov-report=term-missing --cov-report=xml:coverage.xml
+        # #1875：-n 4 与托管 runner 4 核一致。Belay 同机：串行 100.7 s，-n 4 两轮 72.8 / 79.1 s，
+        #   通过数与失败集合逐项相同（4926 passed，3 个环境错误一致）。只改 .sandcastle 的 PR 与同 PR 复用命中的
+        #   run 不跑 Rust，CI 下限取决于本作业和 deepagents-pilot。pytest-cov 支持 xdist，覆盖率在各进程合并。
+        run: pytest -m "not slow" -n 4 --tb=short -q -rs --cov=newchan --cov-report=term-missing --cov-report=xml:coverage.xml
 
       - name: Upload coverage report
         if: ${{ !cancelled() }}
@@ -225,7 +273,7 @@ jobs:
   #   rust-test-s-session-coverage    汇总各片产物，再断言一次并集 == 全集、各片执行集 == 分配集
   #   rust-test-s-session-extras (组) s_session 的 TB-02-C、库/集成测试、TestOnly 特性增量、v3 history（矩阵作业
   #                                   rust-test-s-session-extra-groups，结论由 ci-ok 直接判定）
-  #   rust-test-backtest-bin          backtest_bin feature 的库测试
+  #   rust-test-production-session    生产入口测试 + backtest_bin feature 的库测试（#1875 合并）
   # 拆前 s_session bin 一步 89 分钟里，执行占 88 分钟、编译约 1 分钟；其中两条测试独占尾部
   # （tb02w_killed_case_two_scan_budget_resume_and_recover 约 69 分钟、tb02c_persistent_first_kind_and_normal_recovery
   # 约 49 分钟），其余 505 条在开跑 41 分钟内全部结束。分片后最长 job 的下限即最慢那条测试本身。
@@ -341,6 +389,11 @@ jobs:
       - name: 生产增量构建无测试钩子检查器单测（#1640）
         working-directory: .
         run: python3 -m unittest discover -s .github/scripts -p 'test_check_prod_no_test_hooks*.py'
+
+      # #1875 同 PR 复用判定的单测。改这份脚本会改 .github，本身就不会命中复用，所以放在 Rust 作业里也一定会跑到。
+      - name: 同 PR Rust 复用判定单测（#1875）
+        working-directory: .
+        run: python3 -m unittest discover -s .github/scripts -p 'test_ci_rust_reuse.py' -v
 
       - name: cargo fmt --check（#611：归零后防回潮）
         run: |
@@ -778,10 +831,12 @@ jobs:
       - *rust-checkout
 
       - uses: ./.github/actions/rust-job-setup
+        id: setup
 
       # production_session_testonly：入口测试显式走 S 的 TestOnly 诊断 theta 臂（P0 未签期间正式配置必拒，
       #   由 unsigned_p0_refuses_s_serve_* 两条测试锁住）；生产构建不含该臂，遇开关即拒绝启动。
       - name: cargo test — production_session_entry
+        if: ${{ !cancelled() && steps.setup.outcome == 'success' }}
         run: ../.github/scripts/run-cargo-with-telemetry.sh cargo test --release --locked --features production_session_testonly --test production_session_entry --jobs "${CI_CARGO_JOBS:-1}" -- --test-threads 1
 
       # 纯生产构建（只开 production_session，#1769 返修 M-3/M-4）：编译生产 launcher、X 骨架与 S bin 的生产 cfg
@@ -790,26 +845,14 @@ jobs:
       #   #1381：history_simulation_entry 用 python3 受控 E/S authority 驱动真实 x_execution_session 进程
       #   （入口、重启、S 唯一授权、epoch2 拒绝、首次初始化原子），文件 cfg 为 production_session，同在纯生产构建执行。
       - name: cargo test — production_session_entry / history_simulation_entry（纯生产构建）
+        if: ${{ !cancelled() && steps.setup.outcome == 'success' }}
         run: ../.github/scripts/run-cargo-with-telemetry.sh cargo test --release --locked --features production_session --test production_session_entry --test history_simulation_entry --jobs "${CI_CARGO_JOBS:-1}" -- --test-threads 1
 
-  rust-test-backtest-bin:
-    needs: changes
-    if: needs.changes.outputs.rust == 'true'
-    runs-on: ${{ (vars.CI_BOAT_RUNNERS != 'off' && github.actor == 'xy7365527-lang' && github.triggering_actor == 'xy7365527-lang' && (github.event_name != 'pull_request' || github.event.pull_request.user.login == 'xy7365527-lang')) && 'boat-large/from=hc-ci-slim' || 'ubuntu-latest' }}
-    # 拆前本步约 9.3 分钟（run 39358379553）。
-    timeout-minutes: 45
-    env:
-      CARGO_INCREMENTAL: "0"
-    defaults:
-      run:
-        working-directory: rust
-
-    steps:
-      - *rust-checkout
-
-      - uses: ./.github/actions/rust-job-setup
-
+      # #1875：原 rust-test-backtest-bin 作业并入本作业（各约 2 min，Boat 上每轮少起 1 台机器）。三个测试步都带
+      #   `!cancelled() && steps.setup.outcome == 'success'`：前一个测试步失败不跳过后面的（失败照样使本作业失败），
+      #   准备步骤失败时则全部跳过，不刷连带报错。托管机上合并前两作业合计 9–12 min，距 45 min 上限远。
       - name: cargo test — backtest_bin feature 新增的库测试
+        if: ${{ !cancelled() && steps.setup.outcome == 'success' }}
         # 2026-08-16 磁盘实撞（#993 收口轮）：三轮 runner 爆盘（No space left on device）——
         # --all-targets 在 feature 下额外编 56 个探针 bin 的 test 目标（各链 nautilus 套件，
         # 本地实测 debug 全 target 55G ⟹ 14G 盘必爆）。改 --lib；tests/ 与 bins 由 default 步覆盖。
@@ -1434,7 +1477,6 @@ jobs:
       - rust-test-s-session-coverage
       - rust-test-s-session-extra-groups
       - rust-test-production-session
-      - rust-test-backtest-bin
       - s-sequence-1488
       - s-fields-native-1488
       - s-observer
@@ -1453,7 +1495,7 @@ jobs:
           rust = (needs.get("changes") or {}).get("outputs", {}).get("rust")
           # 只有 Rust 作业可以 skipped，且必须是 changes 明确判定 rust=false。
           rust_jobs = {"rust-check", "rust-test-default", "rust-test-s-session", "rust-test-s-session-coverage",
-                       "rust-test-s-session-extra-groups", "rust-test-production-session", "rust-test-backtest-bin",
+                       "rust-test-s-session-extra-groups", "rust-test-production-session",
                        "s-sequence-1488", "s-fields-native-1488"}
           bad = {name: r for name, r in results.items()
                  if not (r == "success" or (r == "skipped" and name in rust_jobs and rust == "false"))}
@@ -1461,3 +1503,24 @@ jobs:
           if bad or results.get("changes") != "success" or rust not in ("true", "false"):
               sys.exit(f"CI 未通过：{bad}，changes={results.get('changes')}，rust={rust}")
           PY
+
+  # #1875 同 PR 复用的凭据：Rust 作业全部成功（不是 skipped）时才会运行；作业名带本次 Rust 输入指纹，由 GitHub 服务端渲染，
+  #   指纹来自 changes 作业的输出，其他作业里的 PR 代码写不了它，也改不了作业名。判定脚本 ci-rust-reuse.py 用 jobs API 读这个
+  #   作业名与结论作证据（不用 artifact：同一 run 里任何先于上传执行的 PR 代码都拿得到运行时令牌，#2027 独审）。不进 ci-ok。
+  rust-green:
+    name: rust-green ${{ needs.changes.outputs.rust_key || 'nokey' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    if: github.event_name == 'pull_request' && needs.changes.outputs.rust == 'true'
+    needs:
+      - changes
+      - rust-check
+      - rust-test-default
+      - rust-test-s-session
+      - rust-test-s-session-coverage
+      - rust-test-s-session-extra-groups
+      - rust-test-production-session
+      - s-sequence-1488
+      - s-fields-native-1488
+    steps:
+      - run: echo "全部 Rust 作业成功，输入指纹见作业名"
