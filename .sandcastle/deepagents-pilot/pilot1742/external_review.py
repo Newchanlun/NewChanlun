@@ -43,6 +43,7 @@ from .github_app import (
 )
 from .patch_read import FrozenPatch, reads_candidate_patch
 from .run import DEFAULT_HOME, SOURCE_REPO, _ps_rows, supervisor_alive
+from .vm_trim import trim_vm_disk
 
 # Codex 上游额度耗尽期间的临时组合（EXTERNAL-REVIEW.md「Codex 额度耗尽时的临时组合」）；
 # 常规组合为 ("gpt-6.1-sol", "claude-opus-5-5") 与 POLICY "external-pr-v1"。两位须属不同家族。
@@ -509,9 +510,12 @@ class ExternalReview:
     def __init__(self, gateway: RepoGateway | None, *, state_root: Path = STATE_ROOT,
                  checkout_root: Path = CHECKOUT_ROOT, source: Path = SOURCE_REPO,
                  launcher: list[str] | None = None, poll_seconds: float = 1,
-                 docker: Callable[[list[str]], subprocess.CompletedProcess] | None = None):
+                 docker: Callable[[list[str]], subprocess.CompletedProcess] | None = None,
+                 vm_trim: Callable[[Path], dict] | None = None):
         self.gateway, self.state_root, self.checkout_root, self.source = gateway, state_root, checkout_root, source
         self.docker = docker if docker is not None else (lambda args: docker_cli(args))
+        # #1986：删卷后对 Colima VM 跑 fstrim；与 TS 监督共用 checkout_root 下的节流锁与时间戳（见 vm_trim）。
+        self.vm_trim = vm_trim if vm_trim is not None else (lambda root: trim_vm_disk(root))
         # worker 与 controller 同源：都取正在执行的代码所在仓库（SOURCE_REPO），不随对象来源 source 变化。
         self.launcher = launcher or [str(SOURCE_REPO / "node_modules" / ".bin" / "tsx"),
                                      str(SOURCE_REPO / ".sandcastle" / "external-review-worker.mts")]
@@ -880,8 +884,15 @@ class ExternalReview:
         # 每轮一行计数：留下的卷（未登记 launch、删不掉）与存活 launch 占着的卷都报出来，不只记删掉的。
         retained = sum(len(e["volumes"]) for e in entries if e["action"] == "retained")
         retained += sum(len(e["retained_volumes"]) for e in entries if e["action"] == "reaped")
-        entries.append({"action": "summary", "reaped_volumes": sum(len(e["volumes"]) for e in entries if e["action"] == "reaped"),
+        reaped_volumes = sum(len(e["volumes"]) for e in entries if e["action"] == "reaped")
+        entries.append({"action": "summary", "reaped_volumes": reaped_volumes,
                         "retained_volumes": retained, "live_volumes": live_volumes})
+        # 删掉的卷在 VM 里释放的块要 fstrim 才还给宿主系统盘；本轮没删卷就不 trim。失败只记日志。
+        if reaped_volumes:
+            try:
+                entries.append({"action": "vm_trim", **self.vm_trim(self.checkout_root)})
+            except Exception as error:  # noqa: BLE001 — trim 是回收空间的附带动作，不影响派发
+                entries.append({"action": "vm_trim", "state": "failed", "reason": type(error).__name__})
         return self._reaper_log(entries)
 
     def _reaper_log(self, entries: list[dict]) -> list[dict]:
