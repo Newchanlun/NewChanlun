@@ -25,7 +25,7 @@ from .domain import (
     parse_run_id,
     parse_sha,
 )
-from .run import PilotRun, TaskSpec, _ps_rows
+from .run import InsufficientSpace, PilotRun, TaskSpec, _ps_rows, require_free_space
 from .workunit import (
     RELEASE_LABEL,
     Queued,
@@ -47,11 +47,11 @@ class QueueWaiting(ValueError):
 def approved_scope(body: str) -> tuple[str, ...]:
     declarations = re.findall(r'^deepagents-scope:[ \t]*(.+)$', body, re.MULTILINE)
     if len(declarations) != 1:
-        raise QueueWaiting('awaiting_human: missing or ambiguous deepagents-scope in signed SPEC')
+        raise QueueWaiting('needs_info: missing or ambiguous deepagents-scope in SPEC')
     prefixes = tuple(declarations[0].split())
     if not prefixes or not all(p.endswith('/') and not p.startswith('/') and '..' not in p and p != './'
                                and '\\' not in p and '//' not in p for p in prefixes):
-        raise QueueWaiting('awaiting_human: deepagents-scope must contain explicit relative directory prefixes')
+        raise QueueWaiting('needs_info: deepagents-scope must contain explicit relative directory prefixes')
     return prefixes
 
 
@@ -149,7 +149,7 @@ class QueueIntake:
                 raise AdmissionRefused('main head unreadable')
             if subprocess.run(['git', '-C', str(self.source_repo), 'cat-file', '-e', f'{base}^{{commit}}'],
                               capture_output=True).returncode:
-                raise QueueWaiting(f'awaiting_human: source checkout lacks main commit {base}; deploy/fetch main')
+                raise QueueWaiting(f'environment: source checkout lacks main commit {base}; deploy/fetch main')
             run_id = parse_unit_run_id(ticket, f't{ticket}-{max([int(u.run_id.rsplit("-", 1)[1]) for u in existing], default=0) + 1}')
             labels = self.gateway.label_names(issue)
             graph = self.gateway.parent(proof.spec_issue)
@@ -261,7 +261,8 @@ class QueueIntake:
                 if activity is not None:
                     occupied[ticket] = activity
                     previous = results[ticket].get('reason')
-                    phase = 'awaiting_human' if results[ticket].get('phase') == 'awaiting_human' else 'active'
+                    waiting_phase = results[ticket].get('phase') in ('awaiting_human', 'awaiting_review')
+                    phase = results[ticket]['phase'] if waiting_phase else 'active'
                     results[ticket].update(phase=phase, reason=f'{previous}; {activity}' if previous else activity)
                 else:
                     occupied.pop(ticket, None)
@@ -330,6 +331,14 @@ class QueueIntake:
                 except CutoverError:
                     break
                 try:
+                    if not (run_dir / 'run.json').exists():
+                        require_free_space(self.state_root)
+                except InsufficientSpace as error:
+                    # 低盘只挡新派工：本票留在 queued，后面的票照常处理（已交付票的对账在读阶段已做完）。
+                    results[ticket] = {'phase': 'queued', 'run_id': unit.run_id, 'reason': str(error)}
+                    finish(ticket)
+                    continue
+                try:
                     code = run(unit)
                     state = delivery_status(run_dir)
                     phase = state['phase']
@@ -340,7 +349,8 @@ class QueueIntake:
                     if (run_dir / 'interrupt.request').exists():
                         phase, reason = 'awaiting_human', _stop_reason(run_dir)
                     elif waiting:
-                        phase, reason = 'awaiting_human', waiting[-1]
+                        review = waiting[-1].get('status') == 'awaiting_review'
+                        phase, reason = 'awaiting_review' if review else 'awaiting_human', waiting[-1]
                     elif code == 75 or code < 0:
                         phase, reason = 'active', f'child exit {code}; same run resumes next round'
                     elif phase not in ('awaiting_merge', 'merged'):
@@ -389,7 +399,7 @@ class QueueIntake:
         from .executor import _write_json
         _write_json(self.state_root / 'queue-status.json', {str(k): v for k, v in results.items()})
         lines = [STATUS_TITLE, '']
-        for phase in ('queued', 'active', 'awaiting_human', 'awaiting_merge', 'halted'):
+        for phase in ('queued', 'active', 'awaiting_review', 'awaiting_human', 'awaiting_merge', 'halted'):
             lines.extend([f'## {phase}', ''])
             lines.extend(f"- #{ticket} `{row.get('run_id', '')}` {row.get('head', '')} {row.get('reason') or ''}"
                          for ticket, row in results.items() if row['phase'] == phase)
