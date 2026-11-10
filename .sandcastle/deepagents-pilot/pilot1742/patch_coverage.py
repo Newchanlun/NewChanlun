@@ -50,7 +50,6 @@ from .patch_read import (
 _HUNK = re.compile(r"@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@")
 _DELETED = re.compile(r"D\t(.+)")  # `--name-status` 的整文件删除行
 _NUMBERED = re.compile(r"\s*\d+[\t:]")  # `nl -ba`、`cat -n`、`grep -n` 的行号前缀
-_TRUNCATED = re.compile(r"…\d+ (?:chars|tokens) truncated…")
 _PREAMBLE = re.compile(r"Warning: truncated output \(original token count: (\d+)\)\nTotal output lines: (\d+)\n\n")
 _MARKER = re.compile(r"…(\d+) chars truncated…")
 # Codex 交给模型的单条命令输出上限（UTF-8 字节）。全部 run 目录重放（2026-11-10，23789 条绑上的命令）：完整可见的
@@ -89,9 +88,9 @@ class _Scan:
         in_hunk = False
         old = new = left_old = left_new = 0
         for raw in lines:
-            if _BREAK.search(raw) or _TRUNCATED.search(raw):
-                current = None
-                continue
+            # 含 `\r`、U+2028 或字面 `…N chars truncated…` 的行照常计入（#2037 第二轮正式审查 opus BLOCK：冻结补丁里遇到
+            # 这种行就跳过该文件余下的改动行，覆盖要求被悄悄缩小）。计入的片段都切自 aggregated_output，里面没有 Codex 的
+            # 截断标记；git 段的参数里不许有这些字符（coverage_segments），报错也就带不出伪造的行。
             prefix = _NUMBERED.match(raw) if numbered else None
             line = raw[prefix.end():] if prefix else raw
             if line.startswith("diff --git "):
@@ -223,8 +222,9 @@ def seen_pieces(aggregated: str, git: list[tuple[int, int]], visible: list[tuple
 def git_spans(aggregated: str, segments: list[str | None], *, failed: bool) -> list[tuple[int, int]] | None:
     """按执行顺序把输出切开：segments 里 None 是 git 段，字符串是输出可算准的段（printf、echo、cat）的输出。
     后者逐个按顺序在 aggregated_output 里找到并剔除，两个已知段之间、且其间确有 git 段的部分记为 git 的输出，
-    之间没有 git 段的部分不认。已知段找不到时：整条命令失败（`&&` 链中途断了，之后的段没跑）就把剩下的都算给
-    前面的 git 段，否则对不上，给 None。"""
+    之间没有 git 段的部分不认。已知段找不到时：整条命令成功就是对不上，给 None；整条命令失败（`&&` 链中途断了，
+    之后的段可能没跑）只留此前两头都有已知段夹住的部分，剩下的输出来源不明，不算给 git（#2037 第二轮正式审查 opus
+    BLOCK：已知段的真实输出与模拟不符时，它会混在剩下的输出里冒充 git）。"""
     spans: list[tuple[int, int]] = []
     position, git_since = 0, False
     for segment in segments:
@@ -233,9 +233,7 @@ def git_spans(aggregated: str, segments: list[str | None], *, failed: bool) -> l
             continue
         found = aggregated.find(segment, position)
         if found < 0:
-            if not failed:
-                return None
-            break
+            return spans if failed else None
         if git_since:
             spans.append((position, found))
         position, git_since = found + len(segment), False
@@ -255,9 +253,11 @@ _LOG_OK = re.compile(_DIFF_OPTION + r"|-s|--no-patch|--oneline|--no-decorate|--d
                      r"--abbrev-commit|--reverse|--first-parent|--no-merges|-\d+|--max-count=\d+|"
                      r"--date=(?:iso|iso-strict|short|relative|rfc|raw|unix|default)")
 _STATUS_OK = re.compile(r"-s|--short|--porcelain(?:=v1)?|-b|--branch|-uno|--untracked-files=no")
-_SAFE_NAMED = frozenset({"oneline", "short", "medium", "full", "fuller", "reference"})  # 提交说明缩进或跟在提交号后
+# 命名格式只认不印提交正文的：标题跟在提交号后或缩进（medium、full、fuller 印正文，#2037 第二轮正式审查 kimi BLOCK）
+_SAFE_NAMED = frozenset({"oneline", "short", "reference"})
 _LEAD = re.compile(r"%[HhTtPp]")  # 格式串每行须以提交号类占位符开头：行首不会是作者能写的文字
-_PLACEHOLDERS = re.compile(r"(?:%(?:[HhTtPpsbBn%]|[ac][neEdDrtiIsh])|[ :,|/()\[\]-])*")
+# 占位符只认单行的：`%b`、`%B` 展开成多行正文，后面的行不带提交号前缀（同上 kimi BLOCK：`--format='%H %b'`）
+_PLACEHOLDERS = re.compile(r"(?:%(?:[HhTtPpsn%]|[ac][neEdDrtiIsh])|[ :,|/()\[\]-])*")
 
 
 def _format_ok(value: str) -> bool:
