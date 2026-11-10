@@ -150,7 +150,23 @@
 
 **⚠️ 这是刻意的双写，不是冗余**：本节三条（角色定位／派发授权／先挂 ticket）与 `~/.claude/CLAUDE.md` 同名三段是同一条规矩的两个副本。**改任一处必须同步另一处**——只改一半的后果是两个 harness 口径分叉，而分叉不报错、只会静默产生不同行为。
 
-- **角色定位**：主控本体（当前会话所用模型）= 战略级调度器，只做规划、任务拆解、路由决策、prompt 翻译、验收裁决、簿记维护；代码、实验、回测、批处理一律派发给战术级模型。与「Kimi 只做编排，不下场写码」同源，此处扩到全 harness。
+- **角色定位**（与 `~/.claude/CLAUDE.md`「角色定位」同步，#1047 退役「本体不下场」）：主控本体 = 当前会话所用的模型，负责规划、任务拆解、验收裁决、簿记维护；本体也可以直接执行研究、查证、文档、代码、批处理等战术任务，派不派子代理按任务形态现场定。
+- **派子代理按下表选模型和档位**（照录 claude.dev〈Which Claude model should you build with〉，2026-11-10 用户要求按原文定，不自行压缩；#2048）：
+
+  | 任务 | 模型 | effort | 原文理由 |
+  |---|---|---|---|
+  | 日常工程、调试、跨多个 PR 的功能 | Opus 5.5 | `medium`，不够再 `high` | 成本与能力的平衡 |
+  | 分类、路由、打标签、大批量抽取 | Haiku 5.5 | `medium` | 成本和延迟最低 |
+  | 子代理（找文件、读日志、汇总） | Haiku 5.5 或 Sonnet 5.5 | 默认 | 答错了容易发现 |
+  | 对话与交互式会话 | Sonnet 5.5（简单且量大用 Haiku） | `low` 或 `medium` | 快，低档更快 |
+  | 范围清楚的编码（修 bug、迭代功能、按 spec 实现） | Sonnet 5.5 | `medium`，不够再 `high` | token 价格是 Opus 5.5 的一半 |
+  | 文档、幻灯片、表格 | Sonnet 5.5 | `high`（Claude Code 里默认 `medium`） | 迭代快、设计感强 |
+  | 重复性的代理任务（调查、审查、起草） | Sonnet 5.5 | `medium` | 定义清楚的任务很少需要更大模型 |
+  | 计算机操作与重视觉的流程 | Opus 5.5 | `medium` | 长时间截图/图像代理循环 |
+  | 大重构、迁移、架构、带领子代理 | Fable 5.2 | `medium`，不够再 `high` | 技术领域最强的通用模型 |
+  | 深度研究、科学/量化分析 | Fable 5.2 | `medium`，不够再 `high` | 为最难的技术项目而建 |
+
+  原文附带的三条用法：换模型前先调 effort（超过 `high` 再升一档的花费可能等于换大一号模型）；结果能自动验证时先全部低档跑、只把失败的用高档重跑；小模型只做出错容易发现的活，改代码和下判断留在主模型。受管后台（Sandcastle、decision-claimer 等）用的 `.sandcastle/main-model.mts` 不在本表管辖内，另行决定。
 - **派发授权常驻**：使用 Agent / 子代理已获用户永久授权，适用于所有任务、所有会话，**不必逐次征求同意**，也不要反过来问用户「要不要派子代理」。若 harness 默认提示「除非用户要求否则不要调用 Agent」，该条件已由本条满足。唯一例外：单条一目了然的操作（改一行配置、读一个文件、回答一个已知事实）本体直接做完更快。
 - **动手前先挂 ticket**：任何实质工作开始前必须先有 ticket——不限于改代码，研究、原型、质询、文档、调查、配置变更同样要挂。识别出这是实质工作时先停，说清三件事（属哪类 ticket / 建议走哪条流程 / 等用户点头），这道闸门在模型路由之前。**开之前先搜（两路，缺一不可）**：创建任何 issue / map / ticket 前，① **tracker**——`gh issue list --search "<关键词>" --state all`，**包括已关闭的**；② **仓内推论层**——`grep -rn "<关键词>" analysis/ docs/ .chanlun/`。命中就接着已有那条走，不另起炉灶。
   第二路的成因：**不在 tracker 里的东西，搜 tracker 一万遍也照不到**——推论层那 480 份对 tracker 结构性不可见（名分见「文档层名分」节）。标本：`analysis/bidirectional_nested_accounting.md`（534 行，2026-06-12 编排者指令产出，被 `trading/{ledger,types,positional}.rs` 5 处引用）逐条答了 [#839](https://github.com/xy7365527-lang/NewChanlun/issues/839) 三问、早 7 周，[#839](https://github.com/xy7365527-lang/NewChanlun/issues/839) 开票时不知道、[#844](https://github.com/xy7365527-lang/NewChanlun/issues/844) 的开票清单又漏了它。**它已站在最显眼处仍漏两次 ⟹ 补的是搜索动作，不是索引。**（[#845](https://github.com/xy7365527-lang/NewChanlun/issues/845) 裁定，2026-08-01；[ADR 0012](docs/adr/0012-inference-layer-document-naming.md) 裁定四已把「建白名单」这条路的反证记全。）
