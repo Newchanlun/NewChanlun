@@ -18,7 +18,7 @@
 
 ### #1742 执行面依赖（PR #1915）
 
-保留 DeepAgents。本文的普通 SPEC 代理裁定合同是目标准入合同；现役 `deepagents-pilot/pilot1742/executor.py` / `approval.py` 仍有 SPEC_AUTHORIZATION 用户签署门，迁移由 Queued owner 的独立依赖 PR #1921 交付（删除该签署门，改认编排账号发布的结构化 SPEC 裁定）。在 #1921 合入前，这是两类人工确认之外仅存的等人签署的门，只作用于 DeepAgents 队列路径。PR #1915 改了控制面写前重验、decision-claimer 的 T/P 代理裁定与资金硬门，以及执行器的释放（本机先记 `released`，排空后摘镜像）和队列的已合入不重派；`executor.py` / `approval.py` 的 SPEC 准入不改。宿主从 `origin/main` 自动更新（见「宿主约束」），合入即部署这些改动；在依赖 PR 合入前，DeepAgents 队列路径的 SPEC 准入仍是原签署门。依赖 PR 合入、精确集成版本通过首次队列执行验收后，才可声明新 PASS 贯通执行器。
+保留 DeepAgents。PR #1915 改了控制面写前重验、decision-claimer 的 T/P 代理裁定与资金硬门，以及执行器的释放（本机先记 `released`，排空后摘镜像）和队列的已合入不重派。PR #1921 把 `deepagents-pilot/pilot1742/executor.py` / `approval.py` 的 SPEC 准入从 SPEC_AUTHORIZATION 用户签署门改为认编排账号发布、绑定当前正文的非作者 SPEC 裁定，不再请求人工 SPEC 签名。宿主从 `origin/main` 自动更新（见「宿主约束」），合入即部署；精确集成版本通过首次队列执行验收后，才可声明新 PASS 贯通执行器。
 
 ## 裁决流程（每张 grilling 票）
 

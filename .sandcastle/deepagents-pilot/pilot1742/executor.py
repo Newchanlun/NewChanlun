@@ -18,11 +18,13 @@ from approval_signing.protocol import CommitTarget, Scope, spec_target
 
 from .approval import (
     ApprovalDesk,
+    Approved,
     Pending,
     SignedApprovals,
     decision_json,
     freeze_signed_spec,
     spec_body,
+    spec_ruling,
 )
 from .boat_execution import ExecutionUnknown
 from .claims import (
@@ -77,6 +79,7 @@ from .run import (
     SOURCE_REPO,
     Busy,
     Halted,
+    InsufficientSpace,
     PilotRun,
     TaskSpec,
     ToolRefusal,
@@ -87,6 +90,7 @@ from .run import (
 )
 from .workunit import (
     MIRROR_LABEL,
+    ORCHESTRATOR_LOGIN,
     REPO,
     REPO_NAMES,
     DedicatedPilot,
@@ -114,10 +118,11 @@ class AdmissionRefused(ClaimRefused):
 
 
 class ApprovalRequired(Exception):
-    """动作需要的真人签批此刻不成立。不执行副作用，不转 halted；请求文件路径随异常给出。"""
+    """动作需要的授权此刻不成立。不执行副作用，不转 halted；请求文件路径随异常给出。"""
 
     def __init__(self, decision: Pending):
-        super().__init__(f"{decision.status}：{decision.reason}；请求 {decision.request_path}")
+        super().__init__(f"{decision.status}：{decision.reason}" +
+                         (f"；请求 {decision.request_path}" if decision.request_path else ""))
         self.decision = decision
 
 
@@ -218,13 +223,27 @@ class TicketExecutor:
         return ApprovalDesk(run_dir / "approvals", self.unit.ticket, self.unit.run_id, self.approvals)
 
     def spec_approval(self, run_dir: Path, generation: int) -> Pending | None:
-        """需要 SPEC 授权的准入：目标是 SPEC 票此刻正文的原始字节摘要，正文一变就换请求。"""
+        """Queued 读当前正文裁定，Takeover 保留签批；冻结与 scope 共用这次读取的原始正文。"""
         admission = self.unit.admission
         assert not isinstance(admission, DedicatedPilot)
         issue = admission.spec_auth.spec_issue
         body = spec_body(self.gateway.issue(issue))
-        decision = self.desk(run_dir).check(Scope.SPEC_AUTHORIZATION, generation, spec_target(issue, body))
-        freeze_signed_spec(run_dir, issue, body, decision, generation)
+        if isinstance(admission, Queued):
+            from .queue import approved_scope
+            source, reason = spec_ruling(issue, body.decode("utf-8"), self.gateway.comments(issue),
+                                        os.environ.get("WAYFINDER_ORCHESTRATOR", ORCHESTRATOR_LOGIN))
+            scope = approved_scope(body.decode("utf-8"))
+            if any(not any(prefix.startswith(allowed) for allowed in scope) for prefix in self.unit.allowed_prefixes):
+                raise AdmissionRefused("registered scope exceeds current SPEC deepagents-scope")
+            decision = Approved("", reason) if source else Pending("awaiting_review", "", reason, "spec_ruling")
+            _write_json(run_dir / "approvals" / "spec_authorization.status.json", {
+                "scope": "spec_authorization", "status": "approved" if source else "awaiting_review",
+                "source": "spec_ruling", "reason": reason, "target": spec_target(issue, body).encode(),
+                "claim_generation": generation, "checked_at": _now(), **(source or {})})
+            freeze_signed_spec(run_dir, issue, body, decision, generation, source_meta=source)
+        else:
+            decision = self.desk(run_dir).check(Scope.SPEC_AUTHORIZATION, generation, spec_target(issue, body))
+            freeze_signed_spec(run_dir, issue, body, decision, generation)
         return decision if isinstance(decision, Pending) else None
 
     def candidate_approval(self, run_dir: Path, generation: int, head: Sha) -> Pending | None:
@@ -252,12 +271,9 @@ class TicketExecutor:
         return self.cutover.frozen() if isinstance(self.unit.admission, Queued) else nullcontext()
 
     def _queue_check(self) -> None:
-        from .queue import approved_scope, prove_queue
+        from .queue import prove_queue
         assert isinstance(self.unit.admission, Queued)
         prove_queue(self.gateway, self.unit.ticket, self.cutover, self.unit.admission.proof)
-        scope = approved_scope(str(self.gateway.issue(self.unit.admission.spec_auth.spec_issue).get("body") or ""))
-        if any(not any(prefix.startswith(allowed) for allowed in scope) for prefix in self.unit.allowed_prefixes):
-            raise AdmissionRefused("registered scope exceeds current signed SPEC deepagents-scope")
 
     def claim(self, run_dir: Path) -> TicketClaim:
         """SPEC 7.4：intent → 镜像 → post-check → active，全程在票级动作锁内；崩溃后同 run 从记录处续做。"""
@@ -284,12 +300,18 @@ class TicketExecutor:
                                               record.generation + 1 if record else 1, "intent",
                                               unit.admission.kind, False, None, None, _now()))
             if isinstance(unit.admission, Queued):
-                self.admit(run_dir, claim.generation)
+                try:
+                    self.admit(run_dir, claim.generation)
+                except (ClaimRefused, ValueError) as error:
+                    txn.write(advance(claim, "halt", reason=str(error)))
+                    raise Halted(str(error)) from error
             journal = Journal(claim_effects(self.claims, unit.ticket, claim.run_id, claim.generation))
             if claim.state == "intent":
                 journal.converge("label", lambda: self._label_probe(), lambda: self.gateway.add_label(
                     unit.ticket, MIRROR_LABEL), idempotent=True,
                     what={"kind": "label", "issue": unit.ticket, "name": MIRROR_LABEL}, crash=self.crash)
+                if isinstance(unit.admission, Queued):
+                    self.admit(run_dir, claim.generation)
                 text = self._marker("claim", claim.run_id, claim.generation, unit.base)
                 body = (f"[deepagents run={claim.run_id} gen={claim.generation}]\n\n"
                         f"新执行器（{self.gateway.bot}）持有本票，基线 `{unit.base}`。这是持有标记，不是批准。\n\n{text}")
@@ -366,7 +388,12 @@ class TicketExecutor:
             if pr_hits:
                 return "pr_forbidden_label:" + ",".join(pr_hits)
         if not isinstance(self.unit.admission, DedicatedPilot):
-            pending = self.spec_approval(run_dir, generation)
+            try:
+                pending = self.spec_approval(run_dir, generation)
+            except (ClaimRefused, ValueError) as error:
+                if isinstance(self.unit.admission, Queued):
+                    return str(error)
+                raise
             if pending is not None:
                 if isinstance(self.unit.admission, Queued):
                     raise ApprovalRequired(pending)
@@ -1074,8 +1101,14 @@ def main(argv: list[str] | None = None) -> int:
                 pilot.clear_interrupt()
             return drive(pilot, recheck_approval=args.resume or args.recheck_approval, resume=args.resume)
     except ApprovalRequired as required:
-        print(json.dumps({"phase": "awaiting_human", "approval": decision_json(required.decision)}, ensure_ascii=False))
+        phase = "awaiting_review" if required.decision.status == "awaiting_review" else "awaiting_human"
+        print(json.dumps({"phase": phase, "approval": decision_json(required.decision)}, ensure_ascii=False))
         return 0
+    except InsufficientSpace as error:
+        # 图运行中派工建 checkout 时也会触发；检查点停在该工具调用之前，下一轮恢复同一 run 重做。
+        from .cli import EXIT_BUSY
+        print(str(error), file=sys.stderr)
+        return EXIT_BUSY
     except (*EXECUTOR_ERRORS, Halted, ToolRefusal, ValueError, OSError, subprocess.CalledProcessError) as error:
         print(f"{type(error).__name__}: {error}", file=sys.stderr)
         return 2

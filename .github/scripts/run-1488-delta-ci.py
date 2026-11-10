@@ -1195,13 +1195,13 @@ def checkout_identity(repo: Path) -> dict:
 
 
 # cargo-eacces-retry.sh 重试前打出的标记行；构建日志里出现时，只认最后一个标记之后那次 cargo 的输出（#2025 独审）。
-EACCES_RETRY_MARKER = "::warning title=Boat build-script EACCES retry::"
+RETRY_MARKER = "::warning title=Boat transient cargo error retry::"
 
 
 def select_binary(log: str, rust: Path, target_dir: Path, target: str, mode: str) -> dict:
     """只接受本次成功 cargo JSON 指出的唯一当前包测试二进制。"""
     lines = log.splitlines()
-    retried = [i for i, line in enumerate(lines) if line.startswith(EACCES_RETRY_MARKER)]
+    retried = [i for i, line in enumerate(lines) if line.startswith(RETRY_MARKER)]
     if retried:
         lines = lines[retried[-1] + 1:]
     messages = []
@@ -1313,7 +1313,7 @@ def run_target(rust: Path, target_dir: Path, output: Path, target: str, mode: st
     try:
         args = ["--lib"] if target == "lib" else ["--bin", "s_structure_session"]
         build_log = output / f"{target}-build.log"
-        # #1875：经 cargo-eacces-retry.sh 执行，Boat 上 build-script EACCES 偶发时只重试一次（其余失败原样返回）。
+        # #1875：经 cargo-eacces-retry.sh 执行，Boat 上 build-script EACCES / rlib rename EXDEV 偶发时只重试一次（其余失败原样返回）。
         command = [str(rust.parent / ".github/scripts/cargo-eacces-retry.sh"), "cargo", "test", "--offline", "--locked", "-j", "6", "--features",
                    FEATURES[mode], "--no-run", "--message-format=json", *args]
         if run_logged(command, rust, build_log, result["commands"]) != 0:
