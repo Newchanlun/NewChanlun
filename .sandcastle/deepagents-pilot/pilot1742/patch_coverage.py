@@ -10,7 +10,8 @@ patch_read 按「某一条命令的写法」判定，写法一变就误判未读
    `D<TAB>` 删除行，它们在输出里的位置按执行顺序找到后剔除（git_spans），所以计入的文件头、删除清单和 hunk 行
    只出自 git。审查员写得了 session.jsonl（rollout 在容器 /tmp 下），它只用来判断模型看到了多少：
    同一条命令（脚本逐字相同、退出码相同、按出现顺序）的可见正文须能在 aggregated_output 里找到，绑不上不算；
-   被 Codex 从中间截掉的部分不算，截断处两侧的半行也不算（visible_spans）。
+   被 Codex 从中间截掉的部分不算，截断处两侧的半行也不算；可见量按 aggregated_output 核：超过 Codex 可见上限却声称
+   整段可见的不算，截断标记记下的原始长度须与 aggregated_output 相符（visible_spans）。
 2. 改动行按 (文件头, `+`/`-`, 行号, 行文本) 认：行号按 hunk 头逐行推出（`-` 行取旧文件行号，`+` 行取新文件行号），
    与上下文行数无关。同一行看几遍都是同一个键，两个 hunk 里各一条 `+return` 是两个键（#2037 kimi BLOCK）。
 3. 整文件删除的内容不计入逐行核对，只要求删除清单（`D<TAB><path>`）或文件头出现在合格 git 读取的输出里；整份补丁没有一行可逐行核对的内容时
@@ -50,7 +51,13 @@ _HUNK = re.compile(r"@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@")
 _DELETED = re.compile(r"D\t(.+)")  # `--name-status` 的整文件删除行
 _NUMBERED = re.compile(r"\s*\d+[\t:]")  # `nl -ba`、`cat -n`、`grep -n` 的行号前缀
 _TRUNCATED = re.compile(r"…\d+ (?:chars|tokens) truncated…")
-_PREAMBLE = re.compile(r"Warning: truncated output \(original token count: \d+\)\nTotal output lines: \d+\n\n")
+_PREAMBLE = re.compile(r"Warning: truncated output \(original token count: (\d+)\)\nTotal output lines: (\d+)\n\n")
+_MARKER = re.compile(r"…(\d+) chars truncated…")
+# Codex 交给模型的单条命令输出上限（UTF-8 字节）。全部 run 目录重放（2026-11-10，23789 条绑上的命令）：完整可见的
+# 最长 10000 字节；6761 次截断都只有一个截断标记，可见部分 9996–10000 字节，`…N chars truncated…` 的 N 加可见字符数
+# 恰等于 aggregated_output 的字符数，original token count 恰为字节数除以 4 向上取整，Total output lines 恰为行数。
+# exec_command 的 max_output_tokens（实测 500–120000）不改变这个上限。
+CODEX_VISIBLE_BYTES = 10_000
 
 Key = tuple[str, str, int, str]  # (文件头, `+`/`-`, 行号, 行文本)
 
@@ -185,32 +192,27 @@ def _header_path(header: str) -> str | None:
 
 def visible_spans(aggregated: str, visible: str) -> list[tuple[int, int]] | None:
     """模型看到的正文（session.jsonl）对上宿主采集的 aggregated_output 后，模型看到的那几段在 aggregated_output 里的位置。
-    没截断时须逐字相同；截断时（`…N chars truncated…`）各段须依次出现在 aggregated_output 里、首段是前缀、末段是后缀，
-    截断处两侧的半行去掉。对不上给 None。"""
-    parts = _TRUNCATED.split(visible)
-    if len(parts) == 1:
-        return [(0, len(aggregated))] if visible == aggregated else None
-    parts[0] = _PREAMBLE.sub("", parts[0], count=1)
-    spans: list[tuple[int, int]] = []
-    position, last = 0, len(parts) - 1
-    for index, part in enumerate(parts):
-        if index == 0:
-            start = 0 if aggregated.startswith(part) else -1
-        elif index == last:
-            start = len(aggregated) - len(part) if aggregated.endswith(part) else -1
-        else:
-            start = aggregated.find(part, position)
-        if start < position:
-            return None
-        begin, end = start, start + len(part)
-        position = end
-        if index:  # 截断处之后的半行不算
-            newline = aggregated.find("\n", begin, end)
-            begin = end if newline < 0 else newline + 1
-        if index < last:  # 截断处之前的半行不算
-            end = aggregated.rfind("\n", begin, end) + 1
-        spans.append((begin, max(begin, end)))
-    return spans
+    session.jsonl 审查员写得了，所以可见量按 aggregated_output 核：没截断时须逐字相同，且不超过 Codex 的可见上限
+    （更长的输出 Codex 必定截断，声称整段可见的是伪造，#2037 第二轮独审 BLOCK）；截断时须是 Codex 的原样：开头的
+    警告里 original token count、Total output lines 与 aggregated_output 相符，一个 `…N chars truncated…` 两侧的首段是前缀、
+    末段是后缀、两段字符数加 N 恰为 aggregated_output 的字符数、两段合计不超过上限；截断处两侧的半行去掉。对不上给 None。"""
+    size = len(aggregated.encode())
+    if visible == aggregated:
+        return [(0, len(aggregated))] if size <= CODEX_VISIBLE_BYTES else None
+    preamble = _PREAMBLE.match(visible)
+    lines = aggregated.count("\n") + (not aggregated.endswith("\n") and aggregated != "")
+    if (preamble is None or size <= CODEX_VISIBLE_BYTES
+            or (int(preamble.group(1)), int(preamble.group(2))) != (-(-size // 4), lines)):
+        return None
+    rest = visible[preamble.end():]
+    for marker in _MARKER.finditer(rest):
+        head, tail = rest[:marker.start()], rest[marker.end():]
+        if (len(head) + int(marker.group(1)) + len(tail) == len(aggregated) and aggregated.startswith(head)
+                and aggregated.endswith(tail) and len(head.encode()) + len(tail.encode()) <= CODEX_VISIBLE_BYTES):
+            head_end = aggregated.rfind("\n", 0, len(head)) + 1  # 截断处之前的半行不算
+            newline = aggregated.find("\n", len(aggregated) - len(tail))  # 截断处之后的半行不算
+            return [(0, head_end), (len(aggregated) if newline < 0 else newline + 1, len(aggregated))]
+    return None
 
 
 def seen_pieces(aggregated: str, git: list[tuple[int, int]], visible: list[tuple[int, int]]) -> list[str]:

@@ -33,6 +33,7 @@ from pilot1742.github_app import (
     OutcomeUnknown,
 )
 from pilot1742.patch_coverage import (
+    CODEX_VISIBLE_BYTES,
     CoveragePatch,
     coverage_segments,
     git_spans,
@@ -1339,6 +1340,17 @@ def _blob(source, rev: str) -> str:
     return subprocess.run(["git", "-C", str(source), "cat-file", "blob", rev], capture_output=True, check=True).stdout.decode()
 
 
+def _codex_view(output: str, head: int, tail: int, *, n: int | None = None, preamble: str | None = None) -> str:
+    """Codex 截断后模型看到的样子（全部 run 目录实测的格式）：开头警告记 original token count（字节数除以 4 向上取整）和
+    Total output lines，接着首 head 个字符、`…N chars truncated…`（N 是截掉的字符数）、末 tail 个字符。n、preamble 用来伪造。"""
+    size, lines = len(output.encode()), output.count("\n") + (not output.endswith("\n") and output != "")
+    if preamble is None:
+        preamble = f"Warning: truncated output (original token count: {-(-size // 4)})\nTotal output lines: {lines}\n\n"
+    return (preamble + output[:head] + f"…{len(output) - head - tail if n is None else n} chars truncated…"
+            + output[len(output) - tail:])
+
+
+LONG_TAIL = "a" * 20000 + "\nb\nc\n"  # 接在补丁后面、让整段输出超过 Codex 可见上限的 git log 输出
 LANE_DIFF_0, LANE_DIFF_1 = (LANE_PATCH[:LANE_PATCH.index("diff --git a/changed-1")],
                             LANE_PATCH[LANE_PATCH.index("diff --git a/changed-1"):])
 WHOLE = "git diff --no-ext-diff --no-textconv {mb} {h}"
@@ -1356,8 +1368,9 @@ COVERAGE = {
     # #2036 attempt 59600 kimi：`git diff … && git status …` 整条链 exit 128，diff 照样印出
     "nonzero-exit-still-seen": (lambda t, s: [Run(f"{WHOLE} && git status --short", LANE_PATCH + "fatal: x\n", code=128)],
                                 True),
-    "truncated-elsewhere": (lambda t, s: [Run(f"{WHOLE}; git log --oneline -3 {{h}}", LANE_PATCH + "a" * 900 + "\nb\nc\n",
-                                              visible=LANE_PATCH + "a…880 chars truncated…a\nb\nc\n")], True),
+    "truncated-elsewhere": (lambda t, s: [Run(f"{WHOLE}; git log --oneline -3 {{h}}", LANE_PATCH + LONG_TAIL,
+                                              visible=_codex_view(LANE_PATCH + LONG_TAIL, len(LANE_PATCH) + 1, 5))],
+                            True),
     "one-file-only": (lambda t, s: [Run(f"{WHOLE} -- changed-0; git log -4 --format=%H {{h}}", LANE_DIFF_0)], False),
     # #2037 opus BLOCK：rollout 在审查容器里可写；session 里伪造一条整份 diff，events 里只有 echo
     "forged-session-row": (lambda t, s: [Run("echo hi", "hi\n"), Run(WHOLE, LANE_PATCH, in_events=False)], False),
@@ -1367,9 +1380,18 @@ COVERAGE = {
     "still-running": (lambda t, s: [Run(f"{WHOLE}; git log -4 --format=%H {{h}}", LANE_PATCH, running=True)], False),
     "exit-code-mismatch": (lambda t, s: [Run(f"{WHOLE}; git log -4 --format=%H {{h}}", LANE_PATCH, code=0),
                                          ], False),
-    "truncated-for-model": (lambda t, s: [Run(f"{WHOLE}; git log -4 --format=%H {{h}}", LANE_PATCH,
-                                              visible=LANE_DIFF_0 + "diff --git a/changed-1 b/changed-1\nnew…80 chars "
-                                                                    "truncated…\\ No newline at end of file\n")], False),
+    "truncated-for-model": (lambda t, s: [Run(f"{WHOLE}; git log --oneline -3 {{h}}", LANE_PATCH + LONG_TAIL,
+                                              visible=_codex_view(LANE_PATCH + LONG_TAIL, len(LANE_DIFF_0) + 40, 5))],
+                            False),
+    # #2037 第二轮独审 BLOCK：审查员改写自己的 session.jsonl，把超过 Codex 可见上限的输出写成整段可见、不带截断标记
+    "forged-full-view": (lambda t, s: [Run(f"{WHOLE}; git log --oneline -3 {{h}}", LANE_PATCH + LONG_TAIL)], False),
+    # 截断标记记下的原始长度与 aggregated_output 对不上，或去掉开头警告
+    "forged-truncated-count": (lambda t, s: [Run(f"{WHOLE}; git log --oneline -3 {{h}}", LANE_PATCH + LONG_TAIL,
+                                                 visible=_codex_view(LANE_PATCH + LONG_TAIL, len(LANE_PATCH) + 1, 5,
+                                                                     n=880))], False),
+    "forged-no-preamble": (lambda t, s: [Run(f"{WHOLE}; git log --oneline -3 {{h}}", LANE_PATCH + LONG_TAIL,
+                                             visible=_codex_view(LANE_PATCH + LONG_TAIL, len(LANE_PATCH) + 1, 5,
+                                                                 preamble=""))], False),
     # printf 冒充 git 的输出：印出文件头与 hunk，或接在一段真 diff 后面续 hunk
     "printf-whole-patch": (lambda t, s: [Run(f"{WHOLE} -- nope; printf '%s' '{LANE_PATCH}'", LANE_PATCH)], False),
     "printf-continues-hunk": (lambda t, s: [Run(
@@ -1535,13 +1557,27 @@ def test_change_lines_are_identified_by_position(outputs, covered):
     assert patch.covered_by(outputs) is covered
 
 
+BIG = "line1\nline2 " + "x" * 20000 + "\nline3\nline4"  # 超过 Codex 可见上限，末行没有换行
+BIG_PREAMBLE = _codex_view(BIG, 0, 0).partition("…")[0]
+
+
 @pytest.mark.parametrize("aggregated, visible, pieces", [
     ("a\nb\n", "a\nb\n", ["a\nb\n"]),
     ("a\nb\n", "a\nX\n", None),  # 正文与宿主采集的输出对不上
-    ("line1\nline2 long\nline3\nline4\n", "line1\nli…20 chars truncated…ne4\n", ["line1\n", ""]),
-    ("line1\nline2\nline3\n", "Warning: truncated output (original token count: 9)\nTotal output lines: 3\n\n"
-                              "line1\n…5 chars truncated…\nline3\n", ["line1\n", "line3\n"]),
-    ("abc\n", "zzz…1 chars truncated…abc\n", None),
+    (BIG, _codex_view(BIG, 8, 3), ["line1\n", ""]),  # 截断处两侧的半行不算
+    (BIG, _codex_view(BIG, 6, 12), ["line1\n", "line3\nline4"]),
+    (BIG, BIG_PREAMBLE + "zzz" + _codex_view(BIG, 6, 12)[len(BIG_PREAMBLE) + 3:], None),  # 首段不是前缀
+    # #2037 第二轮独审 BLOCK：可见量按 aggregated_output 核
+    ("x" * CODEX_VISIBLE_BYTES, "x" * CODEX_VISIBLE_BYTES, ["x" * CODEX_VISIBLE_BYTES]),
+    (BIG, BIG, None),  # 超过上限却声称整段可见
+    ("é" * 6000, "é" * 6000, None),  # 上限按 UTF-8 字节，不按字符
+    (BIG, _codex_view(BIG, 6, 12, n=5), None),  # 截断标记记下的原始长度对不上
+    (BIG, _codex_view(BIG, 6, 12, n=len(BIG) - 6 - 12 + 1), None),
+    (BIG, _codex_view(BIG, 6, 12, preamble=""), None),  # 没有 Codex 的开头警告
+    (BIG, _codex_view(BIG, 6, 12, preamble=BIG_PREAMBLE.replace("count: ", "count: 1")), None),  # token 数对不上
+    (BIG, _codex_view(BIG, 6, 12, preamble=BIG_PREAMBLE.replace("lines: 4", "lines: 5")), None),  # 行数对不上
+    (BIG, _codex_view(BIG, 9000, 2000), None),  # 可见部分超过上限
+    ("a\nb\nc\n", _codex_view("a\nb\nc\n", 2, 2), None),  # 没超过上限的输出 Codex 不截断
 ])
 def test_visible_spans_must_come_from_aggregated_output(aggregated, visible, pieces):
     spans = visible_spans(aggregated, visible)
