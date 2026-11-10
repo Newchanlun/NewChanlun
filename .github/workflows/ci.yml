@@ -723,13 +723,6 @@ jobs:
           fail=0
           : > ../locks.tsv
           cargo test --release --locked --features s_session,s_incremental --bin s_structure_session -- --list --format terse --ignored > ../list-release.txt 2>&1
-          # #1875 R5：产物机检的 bin 构建（固定 --jobs 1，约 3 分钟；R5b：已被锁的时长盖住，多核只会与锁争 CPU）与单线程的锁并行：等锁的测试进程起来（cargo 此时已放开
-          #   target 目录锁）再在同一 rust/target 后台构建，结论由下一步「产物无测试钩子」收取并决定成败。
-          rm -f ../artifact.rc
-          setsid nohup bash -c 'for _ in $(seq 120); do pgrep -f "deps/s_structure_session-[0-9a-f]+ --ignored --exact" >/dev/null && break; sleep 1; done
-            ../.github/scripts/run-cargo-with-telemetry.sh cargo build --release --locked --features s_session,s_incremental --bin s_structure_session --jobs 1 \
-              && ../.github/scripts/check-prod-artifact-hooks.sh target/release/s_structure_session
-            echo $? > ../artifact.rc.tmp && mv ../artifact.rc.tmp ../artifact.rc' > ../artifact.log 2>&1 < /dev/null &
           total=0
           while IFS= read -r t; do
             [ -z "$t" ] && continue
@@ -749,14 +742,15 @@ jobs:
       # #1640 §2.3 第 3 层（产物机检）：不 strip 的生产增量 release 构建，nm 子串与禁串（固定＋自动抽取清单）零命中。
       #   复用 release-only 构建的 rust/target；Cargo.toml 的 release profile 不设 strip，符号表保留。
       #   构建与检查在上一步后台进行（#1875 R5），此处等其结束并以其退出码为本步结论。
+      # #1875：产物机检原在 release-locks 里与 S4 后台并行（R5，当时 S4 单线程、构建被锁的时长盖住）。#2041 让 S4 冷臂
+      #   用上第二个核后，后台构建（rustc/LLVM 代码生成多线程）与它争 CPU：Boat 同机 S4 并行版独占 490–502 s，带后台构建
+      #   599–626 s。改在 economic 组前台构建（该组中位 4.3 min，加上构建仍远短于 release-locks），用满核数。
       - name: 生产增量 release 产物无测试钩子（#1640）
-        if: ${{ !cancelled() && matrix.group == 'release-locks' }}
+        if: ${{ !cancelled() && startsWith(matrix.group, 'economic') }}
         timeout-minutes: 30
         run: |
-          for _ in $(seq 330); do [ -f ../artifact.rc ] && break; sleep 5; done
-          cat ../artifact.log
-          if [ ! -f ../artifact.rc ]; then echo "::error title=Artifact build did not finish::no exit status after 27.5 min"; exit 1; fi
-          exit "$(cat ../artifact.rc)"
+          ../.github/scripts/run-cargo-with-telemetry.sh cargo build --release --locked --features s_session,s_incremental --bin s_structure_session --jobs "${CI_CARGO_JOBS_RELEASE:-4}"
+          ../.github/scripts/check-prod-artifact-hooks.sh target/release/s_structure_session
 
       - name: Upload release-only lock logs（#1640）
         if: ${{ always() && matrix.group == 'release-locks' }}
@@ -768,7 +762,6 @@ jobs:
             list-release.txt
             locks.tsv
             out-release-*.log
-            artifact.log
           if-no-files-found: warn
 
   # #1769（ADR 0039 迁移步骤 1，C-L 验收第 4 项）：唯一生产 launcher 与 X 骨架入口测试。
