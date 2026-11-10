@@ -583,3 +583,72 @@ def test_snapshot_orphan_outside_host_still_blocks(barrier, legacy_inventory):
     with pytest.raises(CutoverError, match='snapshot process still alive'):
         store.verify(snap, remote, legacy_processes(), 'a' * 40)
     assert not store.path.exists()
+
+
+def _show(load='loaded', active='inactive', sub='dead', file_state='disabled'):
+    return f'LoadState={load}\nActiveState={active}\nSubState={sub}\nUnitFileState={file_state}\n'
+
+
+NOT_FOUND = _show('not-found', 'inactive', 'dead', '')
+STOPPED = _show()
+TIMER_OFF = _show(sub='dead')
+ERROR = 'error'
+
+# (服务 show 输出, 定时器 show 输出, 期望)：True=全部记为已卸载；False=不记入 unloaded；'raise'=CutoverError
+SYSTEMD_CASES = {
+    'clean_not_found': (NOT_FOUND, NOT_FOUND, True),
+    'inactive_disabled': (STOPPED, TIMER_OFF, True),
+    'failed_disabled': (_show(active='failed', sub='failed'), TIMER_OFF, True),
+    'masked': (_show(file_state='masked'), _show(file_state='masked'), True),
+    'activating': (_show(active='activating', sub='start'), TIMER_OFF, False),
+    'deactivating': (_show(active='deactivating', sub='stop'), TIMER_OFF, False),
+    'reloading': (_show(active='reloading', sub='reload'), TIMER_OFF, False),
+    'running': (_show(active='active', sub='running'), TIMER_OFF, False),
+    'auto_restart': (_show(active='activating', sub='auto-restart'), TIMER_OFF, False),
+    'failed_auto_restart': (_show(active='failed', sub='auto-restart'), TIMER_OFF, False),
+    'active_timer_disabled_unit': (STOPPED, _show(active='active', sub='waiting'), False),
+    'enabled_but_inactive': (_show(file_state='enabled'), _show(file_state='enabled'), False),
+    'timer_only_enabled': (STOPPED, _show(file_state='enabled'), False),
+    'systemctl_error': (ERROR, TIMER_OFF, 'raise'),
+    'timer_systemctl_error': (STOPPED, ERROR, 'raise'),
+    'unparsable': ('garbage without equals\n', TIMER_OFF, 'raise'),
+    'missing_fields': ('LoadState=loaded\n', TIMER_OFF, 'raise'),
+    'unexpected_active_state': (_show(active='bogus'), TIMER_OFF, 'raise'),
+    'unexpected_file_state': (_show(file_state='bogus'), TIMER_OFF, 'raise'),
+}
+
+
+@pytest.mark.parametrize('service_out,timer_out,expected', list(SYSTEMD_CASES.values()), ids=list(SYSTEMD_CASES))
+def test_remote_barrier_systemd_is_fail_closed(monkeypatch, service_out, timer_out, expected):
+    from pathlib import Path
+    from types import SimpleNamespace
+
+    from pilot1742.cutover import LEGACY_SERVICES, remote_barrier
+
+    workflows = [{'id': i, 'path': str(path)} for i, path in enumerate(
+        Path(__file__).resolve().parents[3].joinpath('.github/workflows').glob('agent-*.yml'), 1)]
+
+    def api(method, path, params):
+        data = {'workflows': workflows} if path.endswith('/workflows') else {'workflow_runs': [{'status': 'completed'}]}
+        return SimpleNamespace(data=data, has_next=False)
+
+    def command(args, **kwargs):
+        if args[0] == 'gh':
+            return SimpleNamespace(stdout='1\n', stderr='', returncode=0)
+        assert args[:4] == ['systemctl', '--user', 'show', '-p'], args
+        assert args[4] == 'LoadState,ActiveState,SubState,UnitFileState', args
+        out = timer_out if args[5].endswith('.timer') else service_out
+        if out == ERROR:
+            return SimpleNamespace(stdout='', stderr='Failed to connect to bus', returncode=1)
+        return SimpleNamespace(stdout=out, stderr='', returncode=0)
+
+    monkeypatch.setenv('SERVICE_MANAGER', 'systemd')
+    monkeypatch.setattr('pilot1742.cutover.subprocess.run', command)
+    gateway = SimpleNamespace(repo='Newchanlun/NewChanlun', client=SimpleNamespace(api=api), _p=lambda p: p)
+    if expected == 'raise':
+        with pytest.raises(CutoverError):
+            remote_barrier(gateway)
+    elif expected:
+        assert remote_barrier(gateway).legacy_services_unloaded == LEGACY_SERVICES
+    else:
+        assert remote_barrier(gateway).legacy_services_unloaded == ()

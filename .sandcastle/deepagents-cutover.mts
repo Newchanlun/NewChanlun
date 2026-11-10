@@ -1,8 +1,8 @@
 import { existsSync, mkdirSync, readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
-import { DRAIN_ROOT, LockBusyError, drainRequested, withAdmission, withFileLock, withLegacyAdmission } from "./drain-control.mts";
+import { AGENT_STORAGE, DRAIN_ROOT, LockBusyError, drainRequested, withAdmission, withFileLock, withLegacyAdmission } from "./drain-control.mts";
 
-export const EXECUTOR_ROOT = "/Volumes/AgentStorage/deepagents-exec";
+export const EXECUTOR_ROOT = `${AGENT_STORAGE}/deepagents-exec`;
 const POLICY = JSON.parse(readFileSync(new URL("./queue-policy.json", import.meta.url), "utf8"));
 export const QUEUE_LABEL: string = POLICY.release_label;
 export const HOLD_LABELS: string[] = POLICY.hold_labels;

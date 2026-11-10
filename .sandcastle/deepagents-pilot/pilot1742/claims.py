@@ -12,8 +12,9 @@ from pathlib import Path
 from typing import Literal, cast
 
 from .domain import RunId, parse_run_id
+from .hostpaths import AGENT_STORAGE
 
-CLAIMS_ROOT = Path("/Volumes/AgentStorage/deepagents-exec/claims")
+CLAIMS_ROOT = AGENT_STORAGE / "deepagents-exec" / "claims"
 LOCK_TIMEOUT_SECONDS = 300.0
 
 ClaimState = Literal["intent", "mirrored", "active", "halted", "released"]

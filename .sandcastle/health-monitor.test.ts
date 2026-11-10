@@ -8,6 +8,8 @@ import {
   extractAccessKey,
   findStaleClaims,
   healService,
+  serviceManager,
+  systemdUnit,
   judgeClaimLoop,
   judgeDisk,
   judgeFreshness,
@@ -139,4 +141,24 @@ test("healService：其它 kickstart 错误 → 只报告，不调用 bootstrap"
 test("overall：任一 red 即 red", () => {
   assert.equal(overall([{ name: "a", status: "healthy", message: "" }]), "healthy");
   assert.equal(overall([{ name: "a", status: "healthy", message: "" }, { name: "b", status: "red", message: "" }]), "red");
+});
+
+// ── #2048：SERVICE_MANAGER=systemd 时 heal 走 systemctl --user ─────────────────
+test("healService：systemd → systemctl --user restart <label>.service，不调用 launchctl", () => {
+  const { calls, deps } = fakeDeps({});
+  const r = healService(LABEL, PLIST, "501", deps, "systemd");
+  assert.deepEqual(calls, [["systemctl", "--user", "restart", "newchanlun-sandcastle-claimer.service"]]);
+  assert.equal(r.status, "healthy");
+});
+
+test("serviceManager：缺省 launchctl，只接受 launchctl/systemd", () => {
+  assert.equal(serviceManager(undefined), "launchctl");
+  assert.equal(serviceManager(""), "launchctl");
+  assert.equal(serviceManager("systemd"), "systemd");
+  assert.throws(() => serviceManager("upstart"), /SERVICE_MANAGER/);
+});
+
+test("systemdUnit：com.newchanlun.<名> → newchanlun-<名>.service（与 Belay 预置单元同名）", () => {
+  assert.equal(systemdUnit("com.newchanlun.wayfinder-engine"), "newchanlun-wayfinder-engine.service");
+  assert.equal(systemdUnit("other"), "other.service");
 });

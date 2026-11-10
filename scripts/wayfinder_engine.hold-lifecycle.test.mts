@@ -35,7 +35,7 @@ else if(a[0]==='api') {
  else if(/issues\\?/.test(ep)){
   if(s.onScan&&!s.scanned){s.scanned=true;const t=s.issues.find(x=>x.number===101);
    if(s.onScan==='mirror')t.labels=[...new Set([...t.labels,'deepagents'])];
-   if(s.onScan==='intent'){fs.mkdirSync(root+'/exec/claims',{recursive:true});fs.writeFileSync(root+'/exec/claims/101.json',JSON.stringify({state:'intent',run_id:'t101-1',generation:1}));}}
+   if(s.onScan==='intent'){fs.mkdirSync(root+'/deepagents-exec/claims',{recursive:true});fs.writeFileSync(root+'/deepagents-exec/claims/101.json',JSON.stringify({state:'intent',run_id:'t101-1',generation:1}));}}
   out([[],s.issues.map(raw)]);}
  else if(/issues\\/\\d+$/.test(ep)){save();console.log(+ep.split('/').pop());}
  else {console.error('unexpected '+cmd);process.exit(74);}
@@ -44,7 +44,8 @@ else if(a[0]==='api') {
 
 function fixture(issues: Issue[], o: { claim?: Claim; onScan?: "mirror" | "intent"; legacyOpen?: boolean } = {}) {
   const root = mkdtempSync(join(tmpdir(), "wfe-hold-"));
-  const drain = join(root, "drain"), exec = join(root, "exec");
+  // #2048：引擎经 AGENT_STORAGE 定位 drain 与执行器状态目录，fixture 以环境变量注入，不改源码。
+  const drain = join(root, "newchanlun-legacy-drain"), exec = join(root, "deepagents-exec");
   for (const dir of [join(root, "scripts"), join(root, ".sandcastle/deepagents-pilot/pilot1742"), drain, join(exec, "claims")]) mkdirSync(dir, { recursive: true });
   // 执行器持有只在切流后存在：缺省夹具是有效切流（旧入口 draining，引擎走新队列准入）；legacyOpen 模拟旧入口未冻结。
   writeFileSync(join(drain, "state.json"), JSON.stringify({ v: 1, mode: o.legacyOpen ? "open" : "draining", generation: 1 }));
@@ -57,8 +58,6 @@ function fixture(issues: Issue[], o: { claim?: Claim; onScan?: "mirror" | "inten
     ".sandcastle/drain-control.py", ".sandcastle/deepagents-cutover.mts", ".sandcastle/queue-policy.json",
     ".sandcastle/deepagents-pilot/pilot1742/cutover.py"]) {
     let text = readFileSync(new URL(file, repo), "utf8");
-    if (file.endsWith("drain-control.mts")) text = text.replace('"/Volumes/AgentStorage/newchanlun-legacy-drain"', JSON.stringify(drain));
-    if (file.endsWith("deepagents-cutover.mts")) text = text.replace('"/Volumes/AgentStorage/deepagents-exec"', JSON.stringify(exec));
     if (file === "scripts/wayfinder_engine.mts" && process.env.HOLD_ENGINE_SOURCE) text = readFileSync(process.env.HOLD_ENGINE_SOURCE, "utf8");
     writeFileSync(join(root, file), text);
   }
@@ -72,7 +71,7 @@ function fixture(issues: Issue[], o: { claim?: Claim; onScan?: "mirror" | "inten
   writeFileSync(join(root, "gh"), FAKE_GH, { mode: 0o755 });
   const run = () => spawnSync(process.execPath, ["--experimental-strip-types", "scripts/wayfinder_engine.mts", "--live", "--once"], {
     cwd: root, encoding: "utf8", timeout: 30_000,
-    env: { ...process.env, PATH: `${root}:${process.env.PATH}`, FIXTURE: root, GH_REPO: "fixture/repo",
+    env: { ...process.env, PATH: `${root}:${process.env.PATH}`, FIXTURE: root, AGENT_STORAGE: root, GH_REPO: "fixture/repo",
       WAYFINDER_ORCHESTRATOR: "fixture", WAYFINDER_GH_MAX_ATTEMPTS: "1" } });
   const read = () => JSON.parse(readFileSync(join(root, "state.json"), "utf8")) as { issues: Issue[]; writes: Write[] };
   const edit = (f: (s: { issues: Issue[] }) => void) => { const s = read(); f(s); writeFileSync(join(root, "state.json"), JSON.stringify(s)); };
@@ -130,7 +129,7 @@ test("旧入口未冻结：带 sandcastle 的旧票不迁移、零写入；旧�
     assert.deepEqual(f.read().writes.filter(w => w.n === 101), [], "未冻结时不改写、不摘标签");
     assert.equal(f.read().issues[0]!.body, "原实施票的额外验收条件");
     // 冻结旧入口并写入有效切流记录：引擎改走新队列准入，旧消费者领不到票，迁移完成。
-    writeFileSync(join(f.root, "drain", "state.json"), JSON.stringify({ v: 1, mode: "draining", generation: 1 }));
+    writeFileSync(join(f.root, "newchanlun-legacy-drain", "state.json"), JSON.stringify({ v: 1, mode: "draining", generation: 1 }));
     writeFileSync(join(f.exec, "cutover.json"), JSON.stringify({ v: 1, drain_generation: 1, frozen_at: "fixture",
       legacy_snapshot: [], workers_log_length: 0, workers_log_path: "/fixture/workers.jsonl", open_claims: [], remote_jobs_idle: true,
       remote_freeze_var: "1", variable_source: "user-token-readonly", release_label: "deepagents:queue", engine_head: "a".repeat(40),

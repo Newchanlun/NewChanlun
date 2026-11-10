@@ -75,6 +75,7 @@ from .github_app import (
     IdentityError,
     LocalConfigError,
 )
+from .hostpaths import AGENT_STORAGE, WORKERS_LOG
 from .run import (
     SOURCE_REPO,
     Busy,
@@ -105,8 +106,7 @@ from .workunit import (
     parse_work_unit,
 )
 
-DEFAULT_STATE_ROOT = Path("/Volumes/AgentStorage/deepagents-exec")
-WORKERS_LOG = Path("/Users/silencehan/Projects/NewChanlun/.sandcastle/logs/workers.jsonl")
+DEFAULT_STATE_ROOT = AGENT_STORAGE / "deepagents-exec"
 STATUS_CONTEXT = "deepagents/review"
 V2_CRASH_POINTS = ("after_label_before_receipt", "after_claim_before_receipt", "after_push_before_receipt",
                    "after_pr_before_receipt", "after_status_before_receipt", "after_deliver_before_receipt")

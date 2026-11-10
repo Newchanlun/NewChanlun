@@ -31,7 +31,8 @@ import {
 
 const scheduler = useScheduler("main", ["workerEffort", "mainMaxIterations", "mainMaxTickets", "implementerIdleSeconds", "worktreeMaxAttempts", "worktreeRetryDelayMs", "frontierQueryLimit", "backlogQueryLimit"]);
 
-const TOKEN_ROTATION_MARKER = "/Users/silencehan/Projects/NewChanlun/.sandcastle/logs/GH_TOKEN_ROTATION_REQUIRED";
+const TOKEN_ROTATION_MARKER = process.env.GH_TOKEN_ROTATION_MARKER
+  || "/Users/silencehan/Projects/NewChanlun/.sandcastle/logs/GH_TOKEN_ROTATION_REQUIRED";
 if (existsSync(TOKEN_ROTATION_MARKER)) {
   console.error(`[FAIL-loud #1182] GitHub token 尚未轮换（marker=${TOKEN_ROTATION_MARKER}），拒绝启动`);
   process.exit(78);

@@ -43,6 +43,7 @@ from .domain import (
     Terminal,
     WorkerReceipt,
 )
+from .hostpaths import service_manager
 from .run import PSTACK_MODELS, SKILLS_ROOT, Halted, PilotRun, ToolRefusal, gate_json
 
 TOOL_ERRORS: tuple[type[Exception], ...] = (ToolRefusal, Halted, ExecutionUnknown)
@@ -76,12 +77,14 @@ def disable_external_tracing() -> None:
 
 
 def managed_cliproxy_key() -> SecretStr:
-    """沿用 codex-child 已批准的机制：进程环境优先，否则 launchctl getenv 取一次；值只留在内存。"""
+    """沿用 codex-child 已批准的机制：进程环境优先，否则 launchctl getenv 取一次；值只留在内存。
+    #2048：SERVICE_MANAGER=systemd 的宿主没有 launchctl，密钥只认进程环境（由 unit 的 EnvironmentFile 注入）。"""
     value = os.environ.get(KEY_ENV)
-    if not value:
+    if not value and service_manager() == "launchctl":
         value = subprocess.run(["launchctl", "getenv", KEY_ENV], capture_output=True, text=True).stdout.strip()
     if not value:
-        raise MissingManagedCredential(f"缺少 {KEY_ENV}：进程环境与 launchctl 均未提供")
+        source = "进程环境与 launchctl 均未提供" if service_manager() == "launchctl" else "进程环境未提供（SERVICE_MANAGER=systemd）"
+        raise MissingManagedCredential(f"缺少 {KEY_ENV}：{source}")
     return SecretStr(value)
 
 

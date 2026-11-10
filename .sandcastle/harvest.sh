@@ -73,7 +73,7 @@ note_fail() { echo "FAIL $1 ($2)"; failed=$((failed+1)); fail_list="${fail_list}
 has_close_kw() { LC_ALL=C grep -Eiq "$CLOSE_RE" <<<"$1"; }
 
 # Token-rotation markers (same files main.mts / run-claim-loop.sh honor); overridable for tests.
-TOKEN_MARKERS="${HARVEST_TOKEN_MARKERS:-$REPO/.sandcastle/logs/GH_TOKEN_ROTATION_REQUIRED /Users/silencehan/Projects/NewChanlun/.sandcastle/logs/GH_TOKEN_ROTATION_REQUIRED}"
+TOKEN_MARKERS="${HARVEST_TOKEN_MARKERS:-$REPO/.sandcastle/logs/GH_TOKEN_ROTATION_REQUIRED ${GH_TOKEN_ROTATION_MARKER:-/Users/silencehan/Projects/NewChanlun/.sandcastle/logs/GH_TOKEN_ROTATION_REQUIRED}}"
 for f in $TOKEN_MARKERS; do
   if [ -f "$f" ]; then note_fail "(all)" "GitHub token rotation required: $f"; fi
 done

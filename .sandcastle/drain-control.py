@@ -8,7 +8,11 @@ from pathlib import Path
 import sys
 import tempfile
 
-DEFAULT_ROOT = Path('/Volumes/AgentStorage/newchanlun-legacy-drain')
+# #2048：AGENT_STORAGE 缺省 /Volumes/AgentStorage（与 drain-control.mts 同口径）。
+_AGENT_STORAGE = Path(os.environ.get('AGENT_STORAGE') or '/Volumes/AgentStorage')
+if not _AGENT_STORAGE.is_absolute():
+    raise SystemExit(f'AGENT_STORAGE 必须是绝对路径，实为 {_AGENT_STORAGE}')
+DEFAULT_ROOT = _AGENT_STORAGE / 'newchanlun-legacy-drain'
 
 
 def read_state(root: Path) -> dict:

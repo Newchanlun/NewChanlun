@@ -2,7 +2,10 @@ import { spawn } from "node:child_process";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 
-export const DRAIN_ROOT = "/Volumes/AgentStorage/newchanlun-legacy-drain";
+/** #2048：宿主存储根，缺省为 Mac 外接盘；Belay 等 Linux 宿主经 AGENT_STORAGE 指向本机目录。 */
+export const AGENT_STORAGE = process.env.AGENT_STORAGE || "/Volumes/AgentStorage";
+if (!AGENT_STORAGE.startsWith("/")) throw new Error(`AGENT_STORAGE 必须是绝对路径，实为 ${AGENT_STORAGE}`);
+export const DRAIN_ROOT = `${AGENT_STORAGE}/newchanlun-legacy-drain`;
 const HELPER = fileURLToPath(new URL("./drain-control.py", import.meta.url));
 
 export class DrainFrozenError extends Error {}

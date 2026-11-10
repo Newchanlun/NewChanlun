@@ -28,6 +28,7 @@ from langgraph.checkpoint.base import (
 from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
 
 from .domain import RunId, parse_run_id
+from .hostpaths import AGENT_STORAGE
 
 NAMESPACE = uuid.UUID("5f0c1742-7d1e-4c3a-9a7b-6e1742d0a1b2")
 NAMESPACE_GRAPH = uuid.UUID("6ba7b821-9dad-11d1-80b4-00c04fd430c8")
@@ -40,7 +41,7 @@ def thread_for(run_id: str) -> str:
 
 
 def state_root() -> Path:
-    return Path(os.environ.get("PILOT1742_STATE_ROOT", "/Volumes/AgentStorage/deepagents-exec"))
+    return Path(os.environ.get("PILOT1742_STATE_ROOT") or AGENT_STORAGE / "deepagents-exec")
 
 
 def bound_runs() -> dict[str, RunId]:
