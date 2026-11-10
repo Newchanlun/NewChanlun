@@ -7,7 +7,7 @@ import { dirname, join } from "node:path";
 import { randomUUID } from "node:crypto";
 import { pathToFileURL } from "node:url";
 import { codexWorker } from "./codex-route.mts";
-import { PROMPT_JSON_INSTRUCTION, REVIEW_IMAGE, REVIEW_VOLUME_LABEL, VM_SPACE_RESERVE, VOLUME_SNAPSHOT, checkReviewAdmission, dockerReviewVolumes, rateLimitSignal, readLaunch, reviewMounts, reviewSandbox, reviewVolumeName, runExternalReview, snapshot, verifyReviewAdmission, withVolumeAdmissionLock, type ReviewLaunch, type ReviewVolumes, type WorkerDependencies } from "./external-review-worker.mts";
+import { PROMPT_JSON_INSTRUCTION, REVIEW_IMAGE, REVIEW_VOLUME_LABEL, VM_SPACE_RESERVE, VOLUME_SNAPSHOT, checkReviewAdmission, dockerReviewVolumes, rateLimitSignal, readLaunch, trimVmDisk, VM_TRIM_SCRIPT, reviewMounts, reviewSandbox, reviewVolumeName, runExternalReview, snapshot, verifyReviewAdmission, withVolumeAdmissionLock, type ReviewLaunch, type ReviewVolumes, type WorkerDependencies } from "./external-review-worker.mts";
 import type { BindMountSandboxHandle } from "@ai-hero/sandcastle";
 
 const image = "sha256:" + "1".repeat(64);
@@ -240,6 +240,7 @@ for (const [mode, model] of [...modes.map((m) => [m, "gpt-6.1-sol"] as const),
     let closed = false, creates = 0;
     let modelCommand = "";
     const fake = fakeVolumes({ removeFails: mode === "volume-remove-fails", mismatch: mode === "volume-mismatch" });
+    const trims: string[] = [];
     const volume = reviewVolumeName(f.launch.launch_id);
     const output = { status: mode === "BLOCK" ? "blocked" : "completed", summary: `VERDICT: ${mode}`, findings: [], validation: [] };
     const handle: BindMountSandboxHandle = {
@@ -333,6 +334,12 @@ for (const [mode, model] of [...modes.map((m) => [m, "gpt-6.1-sol"] as const),
         Mounts: mode === "bind-mount" ? [{ Type: "bind", Source: f.checkout, Destination: "/review", RW: false }] : [volumeMount(f.launch, mode === "bad-mount")],
         Config: { Env: mode === "secret-env" ? ["GH_TOKEN=fixture"] : [] } }),
       volumes: fake.volumes,
+      // BLOCK 下 trim 抛错：只能影响 vm-trim.json，不能改回执与结论。
+      trimVm: (checkout) => {
+        trims.push(checkout);
+        if (mode === "BLOCK") throw new Error("colima unavailable");
+        return { state: "trimmed", output: "/var/lib/docker: 1 GiB trimmed" };
+      },
       imageEnv: () => [], timeoutMs: mode === "timeout-reject" ? 20 : 10000, commandCap: 2, rateLimitStallMs: 100,
     };
     try {
@@ -346,6 +353,12 @@ for (const [mode, model] of [...modes.map((m) => [m, "gpt-6.1-sol"] as const),
       assert.deepEqual(fake.calls, [`populate ${volume} ${image} ${f.checkout} ${f.launch.launch_id}`, `remove ${volume}`]);
       assert.equal(receipt.volume, volume);
       assert.equal(receipt.volume_removed, mode !== "volume-remove-fails");
+      // #1986：删卷成功才 trim，且在回执落盘之后；trim 结果另写 vm-trim.json，不进回执。
+      assert.deepEqual(trims, mode === "volume-remove-fails" ? [] : [f.checkout]);
+      assert.equal(receipt.vm_trim, undefined);
+      const trimmed = existsSync(join(f.folder, "vm-trim.json"));
+      assert.equal(trimmed, !["volume-remove-fails", "BLOCK"].includes(mode));
+      if (trimmed) assert.equal(JSON.parse(readFileSync(join(f.folder, "vm-trim.json"), "utf8")).state, "trimmed");
       if (["bind-mount", "bad-mount", "volume-mismatch"].includes(mode)) assert.equal(modelCommand, "", "挂载或卷内容不符时不启动模型");
       if (receipt.status === "completed") {
         assert.match(modelCommand, /(?:^|\s)--skip-git-repo-check(?:\s|$)/);
@@ -485,6 +498,23 @@ for (const signal of ["SIGTERM", "SIGINT"] as const) {
     } finally { rmSync(f.root, { recursive: true, force: true }); }
   });
 }
+
+test("trimVmDisk 以 checkout_root 为节流根调用 vm_trim.py，辅助进程失败或输出异常折成 failed 记录", () => {
+  const root = realpathSync(mkdtempSync(join(tmpdir(), "external-review-trim-")));
+  try {
+    const checkout = join(root, randomUUID(), "gpt-6.1-sol");
+    const seen: string[][] = [];
+    assert.deepEqual(trimVmDisk(checkout, (args) => { seen.push(args); return '{"state":"throttled","seconds_since_last":5}\n'; }),
+      { state: "throttled", seconds_since_last: 5 });
+    assert.deepEqual(seen, [["-I", VM_TRIM_SCRIPT, root]]);
+    assert(existsSync(VM_TRIM_SCRIPT));
+    assert.deepEqual(trimVmDisk(checkout, () => { throw new Error("python3 missing"); }), { state: "failed", reason: "helper" });
+    assert.deepEqual(trimVmDisk(checkout, () => "not json"), { state: "failed", reason: "helper" });
+    assert.deepEqual(trimVmDisk(checkout, () => "null"), { state: "failed", reason: "helper_output" });
+    // 真实辅助脚本：根目录不存在时只报 skipped，不碰 docker 与 colima。
+    assert.deepEqual(trimVmDisk(join(root, "missing", "run", "model")), { state: "skipped", reason: "no_root" });
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
 
 test("沿用前准入与正式派发同一组检查：controller 未提交或镜像未验收即拒绝", () => {
   const head = "c".repeat(40);
