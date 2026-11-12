@@ -6,7 +6,7 @@
 //! - `ingest` 业务形状复用 `v2::validate_ingest`；公共头严格走 `session_protocol::validate_envelope`。
 //! - 接纳 / Begin / Commit / recover 的落库动作复用 `v2::record_*_context` 系列：真实持久
 //!   attempt/ordinal、同一 token 配方、delivery refs 与保留窗口、相位前沿不倒退都只有那一份实现。
-//! - 持久 message 行与回执读取复用 `v2::message_row` / `v2::lookup`；S3 只额外核 clock 绑定。
+//! - 持久 message 行与回执读取复用 `v2::message_row_on` / `v2::lookup_on`；S3 只额外核 clock 绑定。
 //!
 //! 两条边界写清楚，免得被读成「已经接好」：
 //!
@@ -21,15 +21,25 @@
 //! ⚠️ 完成后仍不算 S3 生产提交：完整 S3 writer/发布接线由 root 另行完成，本模块只交付控制行底座。
 
 use super::*;
-use newchan_rust::session_protocol::{required, validate_envelope};
+use newchan_rust::session_protocol::required;
 
-/// 已核验的 `s-session/3` 控制域句柄：只可能由 [`S3Control::attach`] 构造。
+use super::audit_owner::owner_tx::{OwnerOps, OwnerTx};
+use super::business_json::{PlainJson, TextValue};
+use newchan_rust::s_content::{capture_allocation::scratch::WorkScope, ContextError};
+
 pub(super) struct S3Control<'a> {
     conn: &'a Connection,
-    clock: v2::ClockPlan,
-    session_id: String,
-    session_generation: String,
-    writer_epoch: String,
+    commit_reading: Option<&'a v2::CommitReadingSlot>,
+    binding: ControlBinding<'a>,
+}
+
+pub(super) struct ControlBinding<'a> {
+    tx: OwnerTx<'a>,
+    clock: v2::ClockPlanView<'a>,
+    work: Option<&'a WorkScope>,
+    session_id: TextValue,
+    session_generation: TextValue,
+    writer_epoch: TextValue,
 }
 
 /// 单条 ingest 在持久控制行上的真实状态（无第四态：`s_input_messages.status` 只有两个合法值）。
@@ -56,14 +66,14 @@ impl StoredState {
 /// 已核验的 ingest 视图：严格校验后的 envelope + 域绑定 + 持久状态 + 原回执。
 ///
 /// 视图不持有事务借用，可在同一事务内继续交给 [`S3Control`] 的写方法使用。
-pub(super) struct IngestView {
-    envelope: Value,
-    context: v2::InputContext,
+pub(super) struct IngestView<'a> {
+    clock: v2::ClockPlanView<'a>,
+    envelope: PlainJson,
     state: StoredState,
-    receipt: Value,
+    receipt: PlainJson,
 }
 
-impl IngestView {
+impl IngestView<'_> {
     #[cfg(test)]
     pub(super) fn state(&self) -> StoredState {
         self.state
@@ -83,90 +93,74 @@ impl IngestView {
     }
 }
 
-impl<'a> S3Control<'a> {
-    /// 在读事务/连接上核验本域：根 `meta.protocol_revision` 与 `s_protocol_meta.protocol_revision`
-    /// 都必须是 `s-session/3`、五张控制表齐全、持久 clock 计划与本次计划 hash 相同，并快照域身份。
-    ///
-    /// 只读，不写任何行；任何一项不满足即 `Err`（不回落到 v2 语义、不跳过检查）。
-    pub(super) fn attach(conn: &'a Connection, clock: &v2::ClockPlan) -> Result<Self, String> {
-        let meta_marker = meta_get_opt(conn, "protocol_revision")?;
-        let table_marker: Option<String> = conn
-            .query_row(
-                "SELECT protocol_revision FROM s_protocol_meta WHERE singleton=1",
-                [],
-                |r| r.get(0),
-            )
-            .optional()
-            .map_err(|e| format!("StorageUnavailable：读 s_protocol_meta 失败：{e}"))?;
-        let tables: i64=conn.query_row("SELECT COUNT(*) FROM sqlite_schema WHERE type='table' AND name IN ('s_protocol_meta','s_input_messages','s_clock_events','s_delivery_policy','s_delivery_refs')",[],|r|r.get(0)).map_err(|e| format!("StorageUnavailable：读控制表清单失败：{e}"))?;
-        if meta_marker.as_deref() != Some(PROTOCOL_REVISION)
-            || table_marker.as_deref() != Some(PROTOCOL_REVISION)
-            || tables != 5
-        {
-            return Err(format!(
-                "IdentityConflict：控制行只属于已登记的 {PROTOCOL_REVISION} 域（meta标记={meta_marker:?}, 控制表标记={table_marker:?}, 控制表={tables}/5），拒绝写入"
-            ));
-        }
-        v2::check_clock(conn, clock)?;
-        let (session_id, session_generation, writer_epoch) = v2::protocol_identity(conn)?;
-        Ok(Self {
-            conn,
-            clock: clock.clone(),
-            session_id,
-            session_generation,
-            writer_epoch,
+impl<'a> ControlBinding<'a> {
+    pub(super) fn attach(
+        tx: OwnerTx<'a>,
+        clock: impl Into<v2::ClockPlanView<'a>>,
+        work: Option<&'a WorkScope>,
+    ) -> Result<Self, ContextError> {
+        let clock = clock.into();
+        tx.with_ops(work, |ops| {
+            let meta_marker = read_meta(&ops, "protocol_revision", work)?;
+            let table_marker = ops.query_optional("SELECT protocol_revision FROM s_protocol_meta WHERE singleton=1", [],
+                |r| Ok(r.text_admitted(0, work))).map_err(|e| e.context("StorageUnavailable：读 s_protocol_meta 失败：", work))?.transpose()?;
+            let tables: i64 = ops.query_row("SELECT COUNT(*) FROM sqlite_schema WHERE type='table' AND name IN ('s_protocol_meta','s_input_messages','s_clock_events','s_delivery_policy','s_delivery_refs')", [], |r| r.get(0))
+                .map_err(|e| e.context("StorageUnavailable：读控制表清单失败：", work))?;
+            if meta_marker.as_ref().map(TextValue::as_str) != Some(PROTOCOL_REVISION)
+                || table_marker.as_ref().map(TextValue::as_str) != Some(PROTOCOL_REVISION) || tables != 5 {
+                return Err(format!("IdentityConflict：控制行只属于已登记的 {PROTOCOL_REVISION} 域（meta标记={:?}, 控制表标记={:?}, 控制表={tables}/5），拒绝写入",
+                    meta_marker.as_ref().map(TextValue::as_str), table_marker.as_ref().map(TextValue::as_str)).into());
+            }
+            v2::check_clock_in(&ops, clock, work)?;
+            let session_id = read_meta(&ops, "session_id", work)?.ok_or("StorageUnavailable：缺session")?;
+            let session_generation = ops.query_row("SELECT session_generation FROM s_protocol_meta WHERE singleton=1", [],
+                |r| Ok(r.text_admitted(0, work))).map_err(|e| e.context("StorageUnavailable：", work))??;
+            let writer_epoch = read_meta(&ops, "writer_epoch", work)?.ok_or("StorageUnavailable：缺epoch")?;
+            Ok(Self { tx, clock, work, session_id, session_generation, writer_epoch })
         })
     }
-
-    /// 本域当前持久身份：`session_id` / `session_generation` / 持久 `writer_epoch`（回复绑定用）。
     pub(super) fn identity(&self) -> (&str, &str, &str) {
         (
-            &self.session_id,
-            &self.session_generation,
-            &self.writer_epoch,
+            self.session_id.as_str(),
+            self.session_generation.as_str(),
+            self.writer_epoch.as_str(),
         )
     }
-
-    fn require_write_transaction(&self) -> Result<(), String> {
-        if self.conn.is_autocommit() {
-            return Err("InvalidDomain：S3 控制写入必须在事务内".into());
-        }
-        Ok(())
+    #[cfg(all(test, feature = "s_incremental", unix))]
+    pub(super) fn inspect_ingest(&self, envelope: &Value) -> Result<IngestView<'a>, ContextError> {
+        let envelope = PlainJson::try_clone_from(envelope, self.work)
+            .map_err(|e| ContextError::from_codec(e, ""))?;
+        self.inspect_owned(envelope)
     }
-
-    /// 严格校验 `s-session/3` ingest envelope、核域身份与 writer epoch 绑定，并读持久 message 状态。
-    ///
-    /// 只读：不写任何控制行。同 key 同 hash 同 clock 的已持久消息按幂等视图返回（`Committed`
-    /// 由调用方直接回原回执）；hash 不同或 clock 不同一律 `IdentityConflict`。
-    pub(super) fn inspect_ingest(&self, envelope: Value) -> Result<IngestView, String> {
-        let envelope = self.validate_ingest_envelope(envelope)?;
+    fn inspect_owned(&self, envelope: PlainJson) -> Result<IngestView<'a>, ContextError> {
+        self.validate_ingest_envelope(&envelope)?;
         let epoch = required(&envelope["payload"], "writer_epoch")?;
-        if epoch != self.writer_epoch {
-            return Err(format!(
-                "StaleWriter：消息 writer_epoch=`{epoch}`，非本域当前持久 `{}`（换代后旧 writer 拒绝，零写入）",
-                self.writer_epoch
-            ));
+        if epoch != self.writer_epoch.as_str() {
+            return Err(format!("StaleWriter：消息 writer_epoch=`{epoch}`，非本域当前持久 `{}`（换代后旧 writer 拒绝，零写入）", self.writer_epoch).into());
         }
         self.bind_ingest(envelope)
     }
-
-    /// 内部推进只从本库取已经接纳的原件；不接收调用者可改写的旧 epoch envelope。
-    /// 与新外部请求的当前写者准入分开：监督器换代后旧原件必须保持原字节。
     pub(super) fn load_pending(
         &self,
         namespace: &str,
         source_epoch: &str,
         message_id: &str,
-    ) -> Result<IngestView, String> {
-        let (raw,status): (String,String) = self.conn.query_row(
-            "SELECT canonical_envelope,status FROM s_input_messages WHERE source_namespace=?1 AND source_epoch=?2 AND message_id=?3",
-            params![namespace,source_epoch,message_id],|r|Ok((r.get(0)?,r.get(1)?)),
-        ).map_err(|e|format!("StorageUnavailable：读取已接纳原件失败：{e}"))?;
-        if status != "AcceptedPending" {
+    ) -> Result<IngestView<'a>, ContextError> {
+        let (raw, status) = self.tx.with_ops(self.work, |ops| {
+            ops.query_row("SELECT canonical_envelope,status FROM s_input_messages WHERE source_namespace=?1 AND source_epoch=?2 AND message_id=?3",
+                [&namespace, &source_epoch, &message_id], |r| Ok((|| Ok::<_, ContextError>((r.text_admitted(0, self.work)?, r.text_admitted(1, self.work)?)))()))
+                .map_err(|e| e.context("StorageUnavailable：读取已接纳原件失败：", self.work))?
+        })?;
+        if status.as_str() != "AcceptedPending" {
             return Err("InvalidDomain：内部推进只接已接纳未提交原件".into());
         }
-        let envelope = self.validate_ingest_envelope(strict_json(raw.as_bytes())?)?;
-        if canonical_json(&envelope) != raw
+        let envelope = match v2::control_decode_admitted(raw.as_str(), None, false, self.work)? {
+            business_json::JsonOwner::Plain(value) => value,
+            #[cfg(feature = "s_allocation_json_testonly")]
+            business_json::JsonOwner::Owned(_) => unreachable!("None owner 只产 Plain"),
+        };
+        self.validate_ingest_envelope(&envelope)?;
+        if !v2::control_canonical_equal(envelope.as_ref().into(), raw.as_str(), None)?
             || required(&envelope, "source_namespace")? != namespace
             || required(&envelope, "source_epoch")? != source_epoch
             || required(&envelope, "message_id")? != message_id
@@ -179,42 +173,41 @@ impl<'a> S3Control<'a> {
         }
         Ok(view)
     }
-
-    fn validate_ingest_envelope(&self, envelope: Value) -> Result<Value, String> {
-        let envelope = validate_envelope(envelope, PROTOCOL_REVISION)?;
+    fn validate_ingest_envelope(&self, envelope: &PlainJson) -> Result<(), ContextError> {
+        envelope
+            .check_retained_source()
+            .map_err(|e| ContextError::from_codec(e, ""))?;
+        newchan_rust::session_protocol::validate_envelope_view(
+            envelope.as_ref().into(),
+            PROTOCOL_REVISION,
+        )?;
         if required(&envelope["payload"], "op")? != "ingest" {
-            return Err(format!(
-                "SchemaUnsupported：{PROTOCOL_REVISION} 控制入口只受理 ingest"
-            ));
+            return Err(
+                format!("SchemaUnsupported：{PROTOCOL_REVISION} 控制入口只受理 ingest").into(),
+            );
         }
-        v2::validate_ingest(&envelope)?;
-        if required(&envelope, "session_id")? != self.session_id
-            || required(&envelope, "session_generation")? != self.session_generation
+        v2::validate_ingest(envelope)?;
+        if required(envelope, "session_id")? != self.session_id.as_str()
+            || required(envelope, "session_generation")? != self.session_generation.as_str()
         {
             return Err("IdentityConflict：旧session/化身请求".into());
         }
-        Ok(envelope)
+        Ok(())
     }
-
-    fn bind_ingest(&self, envelope: Value) -> Result<IngestView, String> {
-        let payload = &envelope["payload"];
+    fn bind_ingest(&self, envelope: PlainJson) -> Result<IngestView<'a>, ContextError> {
         let key = (
-            required(&envelope, "source_namespace")?.to_string(),
-            required(&envelope, "source_epoch")?.to_string(),
-            required(&envelope, "message_id")?.to_string(),
+            required(&envelope, "source_namespace")?,
+            required(&envelope, "source_epoch")?,
+            required(&envelope, "message_id")?,
         );
         let hash = required(&envelope, "payload_hash")?;
-        let clock_event_id = required(payload, "clock_event_id")?;
-        let stored = v2::message_row(self.conn, &key.0, &key.1, &key.2)?;
+        let clock_event_id = required(&envelope["payload"], "clock_event_id")?;
+        let stored = v2::message_row_on(self.tx, key.0, key.1, key.2, self.work)?;
         let state = match &stored {
             None => StoredState::Fresh,
             Some(row) => {
-                // 同一 message 身份只认同一 clock 事件；换 clock 即换内容证据，不得当重投。
-                if row.clock_event_id != clock_event_id {
-                    return Err(format!(
-                        "IdentityConflict：原message `{}` 绑定 clock事件 `{}`，与本次 `{clock_event_id}` 不同",
-                        key.2, row.clock_event_id
-                    ));
+                if row.clock_event_id.as_str() != clock_event_id {
+                    return Err(format!("IdentityConflict：原message `{}` 绑定 clock事件 `{}`，与本次 `{clock_event_id}` 不同", key.2, row.clock_event_id).into());
                 }
                 match row.status.as_str() {
                     "Committed" => StoredState::Committed,
@@ -222,37 +215,239 @@ impl<'a> S3Control<'a> {
                     other => {
                         return Err(format!(
                             "StorageUnavailable：s_input_messages.status 非法取值 `{other}`"
-                        ))
+                        )
+                        .into())
                     }
                 }
             }
         };
-        // 回执形状与 hash 判据复用 v2 的唯一实现（Fresh 时即 `kind=Unknown`）。
-        let receipt = v2::lookup(self.conn, &key.0, &key.1, &key.2, hash)?;
+        let receipt = v2::lookup_on(self.tx, key.0, key.1, key.2, hash, self.work)?;
         Ok(IngestView {
-            context: v2::InputContext::new(envelope.clone(), self.clock.clone()),
+            clock: self.clock,
             envelope,
             state,
             receipt,
         })
     }
-
-    /// 接纳（仅 `Fresh`）：写 `s_input_messages` 行与 accept clock 事件，入调用方同一事务。
-    ///
-    /// `results` 是调用方实际接纳产出的结果（`status/seq/receipt_id`），本模块不代业务判定。
-    pub(super) fn accept(&self, view: &IngestView, results: &[Value]) -> Result<(), String> {
+    fn require_write_transaction(&self) -> Result<(), ContextError> {
+        if self.tx.is_autocommit() {
+            return Err("InvalidDomain：S3 控制写入必须在事务内".into());
+        }
+        Ok(())
+    }
+    fn require_accept(&self, view: &IngestView) -> Result<(), ContextError> {
         self.require_write_transaction()?;
         if view.state != StoredState::Fresh {
             return Err(format!(
                 "InvalidDomain：消息已持久为 {}，不得重复接纳（控制行不可覆盖）",
                 view.state.name()
-            ));
+            )
+            .into());
         }
-        v2::record_accept_context(self.conn, &view.context, results)
+        Ok(())
+    }
+    #[cfg(all(test, feature = "s_incremental", unix))]
+    pub(super) fn accept_view(
+        &self,
+        view: &IngestView,
+        results: newchan_rust::s_content::capture_allocation::audit_json::JsonView<'_>,
+    ) -> Result<(), ContextError> {
+        self.require_accept(view)?;
+        v2::record_accept_view_on(self.tx, self.context(view), results, self.work)
+    }
+    pub(super) fn begin(
+        &self,
+        view: &IngestView,
+        gen: i64,
+        frontier: i64,
+        base_cut: &str,
+        configured_epoch: &str,
+    ) -> Result<TextValue, ContextError> {
+        self.require_write_transaction()?;
+        verify_writer_epoch_on(self.tx, configured_epoch, self.work)?;
+        if view.state == StoredState::Committed {
+            return Err(
+                "InvalidDomain：已提交消息不得再 Begin（先经 recover/新 generation 走正式入口）"
+                    .into(),
+            );
+        }
+        let token = v2::record_begin_context_on(
+            self.tx,
+            self.context(view),
+            gen,
+            frontier,
+            base_cut,
+            configured_epoch,
+            self.work,
+        )?;
+        persist_begin_state_on(self.tx, token.as_str(), gen, frontier, self.work)?;
+        Ok(token)
+    }
+    pub(super) fn commit_time(
+        &self,
+        view: &IngestView,
+        slot: &v2::CommitReadingSlot,
+    ) -> Result<TextValue, ContextError> {
+        v2::commit_reading_on(self.tx, self.context(view), slot, self.work)
+    }
+    /// Prepare 的 Commit 时刻：owner 带首次读数槽；无 owner 的低层入口沿用旧全局缓存合同，
+    /// 只在普通连接上成立。
+    pub(super) fn commit_time_or_global(
+        &self,
+        view: &IngestView,
+        slot: Option<&v2::CommitReadingSlot>,
+    ) -> Result<Option<TextValue>, ContextError> {
+        if let Some(slot) = slot {
+            return self.commit_time(view, slot).map(Some);
+        }
+        match self.tx {
+            OwnerTx::Legacy(conn) => v2::commit_reading_with_slot(conn, self.context(view), None)?
+                .map(|text| TextValue::from_str_admitted(&text, None, self.work))
+                .transpose(),
+            #[cfg(all(test, feature = "s_incremental", unix))]
+            OwnerTx::Charged(_) => Err("MissingDependency：受管Commit读数缺owner首次读数槽".into()),
+        }
+    }
+    pub(super) fn sealed_commit_matches(
+        &self,
+        view: &IngestView,
+        sealed: &str,
+        slot: &v2::CommitReadingSlot,
+    ) -> Result<bool, ContextError> {
+        v2::sealed_commit_matches_on(self.tx, self.context(view), sealed, slot, self.work)
+    }
+    pub(super) fn commit_sealed(
+        &self,
+        view: &IngestView,
+        gen: i64,
+        frontier: i64,
+        sealed: &str,
+        slot: &v2::CommitReadingSlot,
+    ) -> Result<(), ContextError> {
+        self.require_write_transaction()?;
+        if view.state == StoredState::Committed {
+            return Err("InvalidDomain：消息已提交，控制行不重复写".into());
+        }
+        v2::record_commit_sealed_on(
+            self.tx,
+            self.context(view),
+            gen,
+            frontier,
+            sealed,
+            slot,
+            self.work,
+        )
+    }
+    pub(super) fn recover(&self, id: &str, generation: &str) -> Result<TextValue, ContextError> {
+        self.require_write_transaction()?;
+        v2::record_recover_context_on(self.tx, self.clock, id, generation, self.work)
+    }
+    fn context<'v>(&'v self, view: &'v IngestView) -> v2::InputContextView<'v> {
+        v2::InputContextView::new(&view.envelope, view.clock)
+    }
+}
+pub(super) fn read_meta(
+    ops: &OwnerOps<'_>,
+    key: &str,
+    work: Option<&WorkScope>,
+) -> Result<Option<TextValue>, ContextError> {
+    ops.query_optional(
+        crate::META_GET_SQL,
+        [&key],
+        |r| Ok(r.text_admitted(0, work)),
+    )
+    .map_err(|e| e.context(&format!("读 meta.{key} 失败："), work))?
+    .transpose()
+}
+fn legacy_text(value: TextValue) -> Result<String, String> {
+    match value {
+        TextValue::Plain(value) => value.into_unscoped().map_err(|e| e.to_string()),
+        _ => Err("普通控制返回不可擦除Owned结果".into()),
+    }
+}
+impl<'a> S3Control<'a> {
+    pub(super) fn attach(
+        conn: &'a Connection,
+        clock: impl Into<v2::ClockPlanView<'a>>,
+    ) -> Result<Self, String> {
+        Ok(Self {
+            conn,
+            commit_reading: None,
+            binding: ControlBinding::attach(conn.into(), clock, None)
+                .map_err(ContextError::into_message)?,
+        })
+    }
+    pub(super) fn with_commit_reading(mut self, slot: Option<&'a v2::CommitReadingSlot>) -> Self {
+        self.commit_reading = slot;
+        self
+    }
+    pub(super) fn identity(&self) -> (&str, &str, &str) {
+        self.binding.identity()
+    }
+    fn require_write_transaction(&self) -> Result<(), String> {
+        self.binding
+            .require_write_transaction()
+            .map_err(ContextError::into_message)
+    }
+    pub(super) fn inspect_ingest(&self, envelope: Value) -> Result<IngestView<'a>, String> {
+        self.binding
+            .inspect_owned(envelope.into())
+            .map_err(ContextError::into_message)
+    }
+    pub(super) fn load_pending(
+        &self,
+        namespace: &str,
+        source_epoch: &str,
+        message_id: &str,
+    ) -> Result<IngestView<'a>, String> {
+        self.binding
+            .load_pending(namespace, source_epoch, message_id)
+            .map_err(ContextError::into_message)
+    }
+    /// 接纳（仅 `Fresh`）：写 `s_input_messages` 行与 accept clock 事件，入调用方同一事务。
+    ///
+    /// `results` 是调用方实际接纳产出的结果（`status/seq/receipt_id`），本模块不代业务判定。
+    pub(super) fn accept(&self, view: &IngestView, results: &[Value]) -> Result<(), String> {
+        self.require_accept(view)?;
+        OwnerTx::Legacy(self.conn)
+            .with_ops(None, |ops| {
+                v2::record_accept_receipt(
+                    &ops,
+                    self.binding.context(view),
+                    results.len(),
+                    results.first().map(Into::into),
+                    None,
+                )
+            })
+            .map_err(ContextError::into_message)
+    }
+
+    #[cfg(feature = "s_incremental")]
+    pub(super) fn accept_view(
+        &self,
+        view: &IngestView,
+        results: newchan_rust::s_content::capture_allocation::audit_json::JsonView<'_>,
+        work: Option<&newchan_rust::s_content::capture_allocation::scratch::WorkScope>,
+    ) -> Result<(), String> {
+        self.require_accept(view)?;
+        v2::record_accept_view_on(
+            super::audit_owner::owner_tx::OwnerTx::Legacy(self.conn),
+            self.binding.context(view),
+            results,
+            work,
+        )
+        .map_err(newchan_rust::s_content::ContextError::into_message)
+    }
+    fn require_accept(&self, view: &IngestView) -> Result<(), String> {
+        self.binding
+            .require_accept(view)
+            .map_err(ContextError::into_message)
     }
 
     /// Begin（`Fresh` 刚在本事务内接纳，或持久 `AcceptedPending`）：真实 attempt/ordinal 与同一
     /// token 配方，写 begin clock 事件并推进 attempt 序；返回与 v2 逐字同配方的 token。
+    /// 生产 Begin 改走 [`ControlBinding::begin`]。
+    #[cfg(test)]
     pub(super) fn begin(
         &self,
         view: &IngestView,
@@ -261,33 +456,29 @@ impl<'a> S3Control<'a> {
         base_cut: &str,
         configured_epoch: &str,
     ) -> Result<String, String> {
-        self.require_write_transaction()?;
-        verify_writer_epoch(self.conn, configured_epoch)?;
-        if view.state == StoredState::Committed {
-            return Err(
-                "InvalidDomain：已提交消息不得再 Begin（先经 recover/新 generation 走正式入口）"
-                    .into(),
-            );
-        }
-        let token = v2::record_begin_context(
-            self.conn,
-            &view.context,
-            gen,
-            frontier,
-            base_cut,
-            configured_epoch,
-        )?;
-        persist_begin_state(self.conn, &token, gen, frontier)?;
-        Ok(token)
+        legacy_text(
+            self.binding
+                .begin(view, gen, frontier, base_cut, configured_epoch)
+                .map_err(ContextError::into_message)?,
+        )
     }
 
     /// 本次已持久 Begin 对应的 Commit 时刻；未 Begin 即 `Err`。
     ///
     /// Plan 读同一 attempt 的 `commit_ns`。System（#1769）在此取样一次：只由准备发布调用，
     /// 读数封进批次元数据，发布事务以 [`Self::sealed_commit_matches`]／[`Self::commit_sealed`]
-    /// 沿用该值，不再取样。
+    /// 沿用该值，不再取样。生产 Prepare 改走 [`ControlBinding::commit_time_or_global`]。
+    #[cfg(test)]
     pub(super) fn commit_time(&self, view: &IngestView) -> Result<Option<String>, String> {
-        v2::commit_reading_context(self.conn, &view.context)
+        if let Some(slot) = self.commit_reading {
+            return legacy_text(
+                self.binding
+                    .commit_time(view, slot)
+                    .map_err(ContextError::into_message)?,
+            )
+            .map(Some);
+        }
+        v2::commit_reading_with_slot(self.conn, self.binding.context(view), self.commit_reading)
     }
 
     /// 发布事务内核已封批的 Commit 读数（Plan 等于计划值；System 不早于持久相位前沿）。
@@ -296,7 +487,18 @@ impl<'a> S3Control<'a> {
         view: &IngestView,
         semantic_commit_ns: &str,
     ) -> Result<bool, String> {
-        v2::sealed_commit_matches_context(self.conn, &view.context, semantic_commit_ns)
+        if let Some(slot) = self.commit_reading {
+            return self
+                .binding
+                .sealed_commit_matches(view, semantic_commit_ns, slot)
+                .map_err(ContextError::into_message);
+        }
+        v2::sealed_commit_matches_with_slot(
+            self.conn,
+            self.binding.context(view),
+            semantic_commit_ns,
+            self.commit_reading,
+        )
     }
 
     /// Commit（`AcceptedPending`，或本事务内刚接纳+Begin）：写 commit clock 事件、推进
@@ -307,7 +509,14 @@ impl<'a> S3Control<'a> {
         if view.state == StoredState::Committed {
             return Err("InvalidDomain：消息已提交，控制行不重复写".into());
         }
-        v2::record_commit_context(self.conn, &view.context, gen, frontier)
+        v2::record_commit_context_on(
+            self.conn.into(),
+            self.binding.context(view),
+            gen,
+            frontier,
+            None,
+        )
+        .map_err(ContextError::into_message)
     }
 
     /// 同 [`Self::commit`]，commit clock 读数取自本次已封批元数据（System 不在提交时取样）。
@@ -318,17 +527,33 @@ impl<'a> S3Control<'a> {
         frontier: i64,
         semantic_commit_ns: &str,
     ) -> Result<(), String> {
+        if let Some(slot) = self.commit_reading {
+            return self
+                .binding
+                .commit_sealed(view, gen, frontier, semantic_commit_ns, slot)
+                .map_err(ContextError::into_message);
+        }
         self.require_write_transaction()?;
         if view.state == StoredState::Committed {
             return Err("InvalidDomain：消息已提交，控制行不重复写".into());
         }
-        v2::record_commit_sealed(self.conn, &view.context, gen, frontier, semantic_commit_ns)
+        v2::record_commit_sealed_with_slot(
+            self.conn,
+            self.binding.context(view),
+            gen,
+            frontier,
+            semantic_commit_ns,
+            self.commit_reading,
+        )
     }
 
     /// recover：写 recover clock 事件并推进相位前沿（换代自身状态由调用方在同一事务内完成）。
     pub(super) fn recover(&self, clock_event_id: &str, generation: &str) -> Result<String, String> {
-        self.require_write_transaction()?;
-        v2::record_recover_context(self.conn, &self.clock, clock_event_id, generation)
+        legacy_text(
+            self.binding
+                .recover(clock_event_id, generation)
+                .map_err(ContextError::into_message)?,
+        )
     }
 }
 
@@ -556,6 +781,89 @@ mod tests {
         );
         assert_eq!(count(&tx, "s_clock_events"), 1);
         tx.rollback().unwrap();
+    }
+
+    #[cfg(feature = "s_incremental")]
+    #[test]
+    fn s3_accept_scoped_receipts_cover_control_and_rollback() {
+        use crate::v3::audit_owner::{native, owner_tx::OwnerTx};
+        use newchan_rust::s_content::capture_allocation::scratch::{ScratchFailure, WorkError};
+        for refuse in [false, true] {
+            let temp = Temp::new();
+            let (db, _, clock) = init_domain(&temp, CLOCK_ID);
+            let mut conn = open_db(&db).unwrap();
+            let message = envelope("msg-1", "op-1", "10000", "1");
+            let input: crate::RawInputFile =
+                serde_json::from_value(message["payload"]["raw_input"].clone()).unwrap();
+            let parent = native::Budget::fresh(64 << 20)
+                .unwrap()
+                .bind_frozen(1, 64 << 20, 0, 0)
+                .unwrap();
+            let baseline = parent.live();
+            let tx = conn
+                .transaction_with_behavior(TransactionBehavior::Immediate)
+                .unwrap();
+            let control = S3Control::attach(&tx, &clock).unwrap();
+            let view = control.inspect_ingest(message).unwrap();
+            let result = parent.codec_work().unwrap().run(|work| {
+                let result_baseline = parent.live();
+                let receipts = crate::raw_input::accept_events_on(
+                    OwnerTx::Legacy(&tx),
+                    &input,
+                    None,
+                    Some(work),
+                )
+                .map_err(newchan_rust::s_content::ContextError::into_message)?;
+                let charged = parent.live() - result_baseline;
+                assert!(charged > 0, "业务回执直到控制消费者结束都要持费");
+                control.accept_view(&view, receipts.view(), Some(work))?;
+                assert_eq!(
+                    parent.live() - result_baseline,
+                    charged,
+                    "消费者只借回执不可提前退款"
+                );
+                assert_eq!(count(&tx, "s_input_messages"), 1);
+                assert_eq!(count(&tx, "s_clock_events"), 1);
+                if refuse {
+                    assert_eq!(
+                        work.reserve_native(64 << 20)
+                            .err()
+                            .unwrap()
+                            .scratch_failure(),
+                        Some(ScratchFailure::Budget)
+                    );
+                    drop(receipts);
+                    assert_eq!(parent.live() - result_baseline, 0);
+                    return Err("test rejection after control consumer".to_owned());
+                }
+                drop(receipts);
+                assert_eq!(parent.live() - result_baseline, 0);
+                Ok(())
+            });
+            assert_eq!(
+                parent.live(),
+                baseline,
+                "finish/commit 前局部拥有结果全释放"
+            );
+            drop(control);
+            if refuse {
+                assert!(matches!(
+                    result,
+                    Err(WorkError::Resource(ScratchFailure::Budget))
+                ));
+                tx.rollback().unwrap();
+                assert_eq!(count(&conn, "raw_events"), 0);
+                assert_eq!(count(&conn, "s_input_messages"), 0);
+                assert_eq!(count(&conn, "s_clock_events"), 0);
+            } else {
+                result.unwrap();
+                tx.commit().unwrap();
+                let reader = open_db(&db).unwrap();
+                assert_eq!(count(&reader, "raw_events"), 1);
+                assert_eq!(count(&reader, "s_input_messages"), 1);
+                assert_eq!(count(&reader, "s_clock_events"), 1);
+            }
+        }
     }
 
     #[test]

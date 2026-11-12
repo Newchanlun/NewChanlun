@@ -252,19 +252,35 @@ pub(super) fn canonical(event: &RawEvent, p: &Ohlc) -> String {
         "low":p.low,"close":p.close,"timestamp":event.timestamp,"volume":event.volume}),
     )
 }
-pub(super) fn save_raw(
-    conn: &Connection,
+pub(super) fn save_raw_on(
+    conn: &crate::v3::audit_owner::owner_tx::OwnerOps<'_>,
     identity: &str,
     revision: i64,
     p: &Ohlc,
-) -> Result<(), String> {
+    work: Option<&newchan_rust::s_content::capture_allocation::scratch::WorkScope>,
+) -> Result<(), newchan_rust::s_content::ContextError> {
     conn.execute(
         "INSERT INTO raw_ohlc VALUES(?1,?2,?3,?4,?5,?6,?7)",
-        params![identity, revision, RAW_SCHEMA, p.open, p.high, p.low, p.close],
+        [
+            &identity as &dyn rusqlite::ToSql,
+            &revision,
+            &RAW_SCHEMA,
+            &p.open,
+            &p.high,
+            &p.low,
+            &p.close,
+        ],
     )
-    .map_err(|e| crate::v3::business_json::mixed_diagnostic(format_args!("{e}")))?;
+    .map_err(|error| {
+        if let Some(first) = crate::v3::business_json::mixed_callback_failure() {
+            newchan_rust::s_content::ContextError::from_codec(first, "")
+        } else {
+            error.context("", work)
+        }
+    })?;
     Ok(())
 }
+
 pub(super) fn enrich_raw(conn: &Connection, rows: &mut [Value]) -> Result<(), String> {
     enrich_raw_until(conn, rows, None)
 }
@@ -368,7 +384,8 @@ pub(super) fn enrich_raw_view_admitted(
     use v3::audit_store::{CodecRead, NativeAdmission};
     let admission = NativeAdmission(work);
     if !ohlc {
-        return v3::business_json::json_from_view_admitted(&admission, row);
+        return v3::business_json::json_from_view_admitted(&admission, row)
+            .map_err(newchan_rust::s_content::ContextError::into_message);
     }
     let revision = row
         .get("revision")
@@ -437,7 +454,8 @@ pub(super) fn enrich_raw_view_admitted(
         &admission,
         JsonView::object_fields(&fields)
             .map_err(|e| crate::v3::business_json::mixed_diagnostic(format_args!("{e}")))?,
-    )?;
+    )
+    .map_err(newchan_rust::s_content::ContextError::into_message)?;
     drop(fields);
     drop(sql);
     stmt.finalize().map_err(missing)?;
@@ -463,6 +481,8 @@ pub(crate) fn checked_fact_kind(o: &Value) -> Result<&str, String> {
     if !matches!(
         kind,
         "CC-004.inclusion_step"
+            | "CC-004.initialization"
+            | "CC-004.undetermined_raw"
             | "CC-005.inclusion_group"
             | "CC-007.fractal_description"
             | "CC-054.knowledge_state"

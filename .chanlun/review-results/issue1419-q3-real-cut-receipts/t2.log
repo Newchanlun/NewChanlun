@@ -1,0 +1,36 @@
+TAP version 13
+# Q3-WIRE load 1 30562924 16515 1200816128
+# Q3-WIRE load 2 32778530 17990 1523286016
+# Subtest: 真实S3 W cut0 首根与等待期：AsKnown 对象族逐 kind 与 Rust 同代一致，等待期有 W 两 kind
+ok 1 - 真实S3 W cut0 首根与等待期：AsKnown 对象族逐 kind 与 Rust 同代一致，等待期有 W 两 kind
+  ---
+  duration_ms: 35544.454459
+  type: 'test'
+  ...
+1..1
+# tests 1
+# suites 0
+# pass 1
+# fail 0
+# cancelled 0
+# skipped 0
+# todo 0
+# duration_ms 36159.248166
+       36.20 real        39.21 user         1.30 sys
+          1669300224  maximum resident set size
+                   0  average shared memory size
+                   0  average unshared data size
+                   0  average unshared stack size
+              226898  page reclaims
+                   1  page faults
+                   0  swaps
+                   0  block input operations
+                   0  block output operations
+                  17  messages sent
+                  10  messages received
+                   0  signals received
+                   2  voluntary context switches
+               99870  involuntary context switches
+           533626163  instructions retired
+           226210688  cycles elapsed
+            16975864  peak memory footprint
