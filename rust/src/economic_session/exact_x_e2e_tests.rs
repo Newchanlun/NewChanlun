@@ -5,7 +5,7 @@
 use super::*;
 use crate::history_simulation::runtime::Profile as XProfile;
 use rusqlite::types::ValueRef;
-use std::io::{BufRead, BufReader, Write};
+use std::io::{BufRead, BufReader, Read, Write};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
@@ -62,19 +62,24 @@ fn economic_tables(f: &Fixture) -> Value {
         .map(|c| (c.domain.clone(), tables(&c.db)))
         .collect::<serde_json::Map<_, _>>())
 }
-/// 就绪是「在 listen」，不是「文件存在」：bind 先建出路径，listen 之前的连接会被拒（Linux /proc/net/unix）。
+/// 就绪是「在 listen」，不是「文件存在」：bind 先建出路径，listen 之前的连接会被拒。判据是一次连接成功，
+/// 只用 std，Linux 与 macOS 同一份（ci-macos 跑这条用例）。
+///
+/// 只探走 `session_transport::serve_unix*` 的 E 与 X：那里空连接由 I/O 线程读到 EOF，回输送层自己的
+/// `{"ok":false,…}` 后关闭，不入队、不到域 handler、不碰库。这里读到对端关闭才返回，并核回的正是这条
+/// 输送层拒绝——探测没有变成一条请求。受控 S 不探：它 `bind` 返回时已在 listen，且把每条连接都当请求。
 fn listening(path: &Path) -> bool {
-    let target = path.to_str().unwrap();
-    std::fs::read_to_string("/proc/net/unix")
-        .unwrap()
-        .lines()
-        .skip(1)
-        .any(|row| {
-            let f: Vec<&str> = row.split_whitespace().collect();
-            f.len() >= 8
-                && f[7..].join(" ") == target
-                && u32::from_str_radix(f[3], 16).is_ok_and(|flags| flags & 0x10000 != 0)
-        })
+    let Ok(mut s) = UnixStream::connect(path) else {
+        return false;
+    };
+    s.shutdown(std::net::Shutdown::Write).unwrap();
+    s.set_read_timeout(Some(std::time::Duration::from_secs(5)))
+        .unwrap();
+    let mut reply = String::new();
+    s.read_to_string(&mut reply).unwrap();
+    let reply = strict_json(reply.trim_end().as_bytes()).unwrap();
+    assert_eq!(reply["ok"], false, "空连接须止于输送层：{reply}");
+    true
 }
 fn wait_for(path: &Path) {
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);

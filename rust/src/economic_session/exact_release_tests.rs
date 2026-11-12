@@ -1140,5 +1140,50 @@ fn frozen_conditions_refuse_unpaired_or_non_denied_semantics() {
     assert_eq!(r["record"]["state"], "ReleasedExact", "{r}");
 }
 
+/// 完备闸：冻结原件的清单缺配对表里任一阶段的能力即被拒；同一组反例在 X 侧见
+/// `profile_conditions_refuse_a_missing_or_repeated_required_capability`。只含 model_coverage 的清单曾能通过。
+#[test]
+fn frozen_conditions_refuse_a_missing_or_repeated_required_capability() {
+    let mut f = fixture(None);
+    committed(&mut f);
+    let check = crate::economic_session::exact_command::validate_section;
+    check(&f.data).unwrap();
+    for (index, capability) in [
+        (0, "released-exact/1 @ E.ReleaseExact"),
+        (1, "execute-committed/1 @ S.RequestConditionalExecution"),
+        (2, "simulation-local-transaction/1 @ X.OwnAttemptAndCall"),
+    ] {
+        let mut data = f.data.clone();
+        let list = data["exact_release"]["conditions"].as_array_mut().unwrap();
+        assert_eq!(list[index]["validator_capability"], CONDITIONS[index].1);
+        list.remove(index);
+        assert_eq!(
+            check(&data).unwrap_err(),
+            format!("MissingDependency：获准条件清单缺必备核验能力 {capability}")
+        );
+    }
+    let mut data = f.data.clone();
+    data["exact_release"]["conditions"] = json!([f.data["exact_release"]["conditions"][3].clone()]);
+    let e = check(&data).unwrap_err();
+    assert!(
+        e.starts_with("MissingDependency：获准条件清单缺必备核验能力 released-exact/1"),
+        "{e}"
+    );
+    let mut data = f.data.clone();
+    let mut again = data["exact_release"]["conditions"][1].clone();
+    again["condition_id"] = json!("execute-committed/1#again");
+    data["exact_release"]["conditions"]
+        .as_array_mut()
+        .unwrap()
+        .push(again);
+    assert_eq!(
+        check(&data).unwrap_err(),
+        "Unsupported：获准条件清单重复核验能力 execute-committed/1"
+    );
+    dispatch(&mut f, "alpha");
+    let r = f.handle(0, "ReleaseExact-alpha", release_payload(&f, "alpha"));
+    assert_eq!(r["record"]["state"], "ReleasedExact", "{r}");
+}
+
 #[path = "exact_x_e2e_tests.rs"]
 mod x_e2e;

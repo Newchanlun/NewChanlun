@@ -20,23 +20,36 @@ def x_envelope(role,payload,epoch=1):
 def reply_envelope(request,payload,a):
     h=digest(payload); mid='reply-'+digest([request['source_namespace'],request['source_epoch'],request['message_id'],h])
     return dict(schema_revision=a['schema_revision'],session_id=request['session_id'],session_generation=request['session_generation'],source_namespace=a['reply_namespace'],source_epoch=a['authority_epoch'],message_id=mid,producer_id=a['producer_id'],producer_epoch=a['authority_epoch'],payload_hash=h,causal_refs=[{k:request[k] for k in ['source_namespace','source_epoch','message_id','payload_hash']}],payload=payload)
-def listening(path):
+def connect_probe(path):
     # Readiness is a listening socket, not a file: bind() creates the path before listen(), and a connect in
-    # between is refused (measured on Belay: refused, then connectable 10ms later with X alive).
-    target=str(path)
-    with open('/proc/net/unix') as table:
-        next(table)
-        for row in table:
-            f=row.split()
-            if len(f)>=8 and ' '.join(f[7:])==target and int(f[3],16)&0x10000: return True
-    return False
-def check_listening_predicate(root):
-    bound=root/'bound-only'; ready=root/'ready'
-    with socket.socket(socket.AF_UNIX) as b, socket.socket(socket.AF_UNIX) as r:
-        b.bind(str(bound)); r.bind(str(ready)); r.listen(1)
-        assert bound.exists() and not listening(bound), 'a bound but not listening socket is not ready'
-        assert listening(ready)
-    bound.unlink(); ready.unlink()
+    # between is refused (measured on Belay: refused, then connectable 10ms later with X alive). One successful
+    # connect is the portable test (Linux and macOS alike). Returns None while not listening, otherwise what the
+    # peer wrote before closing. Only X is probed: session_transport reads EOF on the empty connection in its I/O
+    # thread, answers its own {"ok":false,...} and closes, without queueing a job for the handler or touching the
+    # store. The controlled E/S below treat every connection as a request and are never probed (they listen
+    # before their thread starts).
+    with socket.socket(socket.AF_UNIX) as s:
+        s.settimeout(5)
+        try: s.connect(str(path))
+        except (FileNotFoundError,ConnectionRefusedError): return None
+        s.shutdown(socket.SHUT_WR)
+        return s.makefile('rb').read()
+def listening(path): return connect_probe(path) is not None
+def check_listening_predicate():
+    with tempfile.TemporaryDirectory(prefix='i1381p-') as root:
+        bound=Path(root)/'bound-only'; ready=Path(root)/'ready'
+        with socket.socket(socket.AF_UNIX) as b, socket.socket(socket.AF_UNIX) as r:
+            assert not listening(bound), 'a missing socket is not ready'
+            b.bind(str(bound)); r.bind(str(ready))
+            assert bound.exists() and not listening(bound), 'a bound but not listening socket is not ready'
+            assert ready.exists() and not listening(ready)
+            r.listen(1)
+            def serve():
+                c,_=r.accept(); c.close()
+            t=threading.Thread(target=serve,daemon=True); t.start()
+            assert listening(ready)
+            t.join(5)
+    assert not Path(root).exists()
 def request(path,op,payload):
     with socket.socket(socket.AF_UNIX) as s:
         s.settimeout(5); s.connect(str(path)); s.sendall((canonical({'protocol':'x-exact-simulation/1','op':op,'payload':payload})+'\n').encode())
@@ -112,10 +125,12 @@ def run(name):
         if slow_claim: e['ISSUE1381_TEST_SLOW_CLAIM']='1'
         p=subprocess.Popen(argv(epoch),env=e,stdout=log,stderr=log)
         deadline=time.monotonic()+8
-        while not listening(xp):
+        while (refusal:=connect_probe(xp)) is None:
             assert p.poll() is None, (directory/'x.log').read_text()
             assert time.monotonic()<deadline, 'X socket timeout'
             time.sleep(.02)
+        # The probe ended at the transport: it never became a request to X's handler.
+        assert json.loads(refusal).get('ok') is False, refusal
         return p
     def reject_new_epoch(p,crash=None):
         if p.poll() is None: p.kill(); p.wait(5)
@@ -426,6 +441,6 @@ def run(name):
         log.close(); e.sock.close(); s.sock.close()
         for file in sockets.iterdir(): file.unlink()
         sockets.rmdir()
-check_listening_predicate(Path(tempfile.mkdtemp(prefix='i1381p-')))
+check_listening_predicate()
 a=run('run-a'); b=run('run-b'); assert a==b, 'fresh process X tables differ'
 print('PASS two fresh processes: byte-identical X tables')

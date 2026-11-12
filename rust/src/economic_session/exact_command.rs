@@ -76,6 +76,30 @@ pub(crate) fn check_condition_semantics(
     }
     Ok(())
 }
+/// 清单整体的完备闸，E 冻结原件与 X profile 共用：配对表里 E/S/X 各阶段的每项能力都必须在场且只出现一次。
+/// 逐项语义闸只管「出现的项都对」；少了这一步，只含 model_coverage 的清单也能过，证书就不再声明
+/// E 放行核、S 条件执行、X 占有调用这三个阶段的条件（#1407 C2，#2021 审查 opus findings[2]）。
+pub(crate) fn check_required_capabilities<'a>(
+    capabilities: impl IntoIterator<Item = &'a str>,
+) -> Result<(), String> {
+    let given: Vec<&str> = capabilities.into_iter().collect();
+    for (capability, stage) in CONDITION_PAIRS {
+        match given.iter().filter(|c| **c == capability).count() {
+            1 => {}
+            0 => {
+                return Err(format!(
+                    "MissingDependency：获准条件清单缺必备核验能力 {capability} @ {stage}"
+                ))
+            }
+            _ => {
+                return Err(format!(
+                    "Unsupported：获准条件清单重复核验能力 {capability}"
+                ))
+            }
+        }
+    }
+    Ok(())
+}
 const MODEL_DOMAIN_FIELDS: [&str; 3] = ["order_kind", "concurrency", "allocation_model"];
 
 fn text_list(v: &Value, what: &str) -> Result<(), String> {
@@ -171,6 +195,11 @@ pub(super) fn validate_section(d: &Value) -> Result<(), String> {
     }) {
         return Err("MissingDependency：获准条件清单缺 E-Release 阶段的 model_coverage".into());
     }
+    check_required_capabilities(
+        conditions
+            .iter()
+            .filter_map(|c| c["validator_capability"].as_str()),
+    )?;
     let m = &s["model_coverage"];
     exact(
         m,

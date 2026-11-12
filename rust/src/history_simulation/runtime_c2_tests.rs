@@ -152,6 +152,45 @@ fn profile_conditions_refuse_unpaired_or_non_denied_semantics() {
     }
 }
 
+/// 完备闸：配对表里 E/S/X 各阶段的能力缺任何一项，profile 即被拒；同一组反例在 E 侧见
+/// `frozen_conditions_refuse_a_missing_or_repeated_required_capability`。只含 model_coverage 的清单曾能通过。
+#[test]
+fn profile_conditions_refuse_a_missing_or_repeated_required_capability() {
+    let d = dir("required");
+    for (index, capability) in [
+        (0, "released-exact/1 @ E.ReleaseExact"),
+        (1, "execute-committed/1 @ S.RequestConditionalExecution"),
+        (2, "simulation-local-transaction/1 @ X.OwnAttemptAndCall"),
+    ] {
+        let mut list = approved();
+        list.as_array_mut().unwrap().remove(index);
+        let e = parse::<Profile>(profile(&d, list)).validate().unwrap_err();
+        assert_eq!(
+            e,
+            format!("MissingDependency：获准条件清单缺必备核验能力 {capability}")
+        );
+    }
+    let coverage_only = json!([approved()[3].clone()]);
+    let e = parse::<Profile>(profile(&d, coverage_only))
+        .validate()
+        .unwrap_err();
+    assert!(
+        e.starts_with("MissingDependency：获准条件清单缺必备核验能力 released-exact/1"),
+        "{e}"
+    );
+    let mut repeated = approved();
+    let mut again = repeated[1].clone();
+    again["condition_id"] = json!("execute-committed/1#again");
+    repeated.as_array_mut().unwrap().push(again);
+    let e = parse::<Profile>(profile(&d, repeated))
+        .validate()
+        .unwrap_err();
+    assert_eq!(
+        e,
+        "Unsupported：获准条件清单重复核验能力 execute-committed/1"
+    );
+}
+
 /// 权威请求是 IC:9 共同信封（同一 `validate_envelope` 判据）；回复须由原请求经 `reply_envelope` 重建得到。
 #[test]
 fn authority_request_is_a_common_envelope_and_reply_must_bind_it() {

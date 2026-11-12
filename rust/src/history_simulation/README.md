@@ -43,6 +43,9 @@ ConditionEvidence 清单由 profile 的 `conditions` 冻结，与 E 冻结原件
 获准清单（含 ADR 0052 裁定二的 `model_coverage`）。命令证书的清单须与它逐项相等，否则 Unsupported。
 每项须带齐九字段，能力与阶段须是 E/X 共用配对表（`economic_session::exact_command::CONDITION_PAIRS`）里的
 已知配对，阶段前缀只能是 E./S./X.，失败语义为 Denied；X 阶段只有 simulation-local-transaction/1（#1407 C2）。
+清单还须完备：配对表的四项能力（E 的 released-exact/1 与 model-coverage/1、S 的 execute-committed/1、
+X 的 simulation-local-transaction/1）各出现恰一次，缺项按 MissingDependency、重复按 Unsupported 拒绝；
+E 冻结原件与 X profile 走同一个 `check_required_capabilities`。
 真实 E/S producer 尚须在 #1407 / TB04-D/E 接此 wire，受控夹具不替代它们。
 
 ## 时间、恢复与消费边界
@@ -96,6 +99,16 @@ AdvanceBar 在取得任何 S 资格前完成同一模型的完整只读计算及
 对每条 Accepted 命令，X 先连接 S，连接成功后才置 ExecutionRequested，再写请求帧。
 权威期限（timeout_ms）只从写帧开始计，不含这次 ExecutionRequested 的本地持久写；否则慢盘会在一个字节都没
 发出时超时，把命令误标成可能已发出（#1407 C2）。
+
+残余窗口（未消除，归 #1407 C2 后续，与真 S producer 一起处理）：上面只挪了 X 自己的期限。对端若走
+`session_transport`，它的读期限从接受连接起算（`io_connection_inner`），而 X 是连接之后才做这次持久写。
+持久写超过对端的读期限时，对端回输送层的 `{"ok":false,…}` 或直接关连接；X 此时已持久 ExecutionRequested，
+S 却一个字节都没处理。之后只能查 QueryExecuteCommitted，得到 NoRecord，按下段规则保持 pending，没有自动出路。
+本仓现有的受控 S 夹具不设读期限，测试覆盖不到这条路径。没有改成「先持久、再连接、连接失败退回 Accepted」，
+因为那要新增一条 ExecutionRequested → Accepted 的反向迁移：今天「S 不可达时命令保持 Accepted」不依赖任何写入，
+改后要靠第二次持久写成功才成立，写失败就把一条确定未发出的命令留在只能查询的状态；这条迁移没有规格，也没有
+真 S 可以对拍。
+
 两类失败以此为界：
 
 - 确定未发出：编码失败、帧界超限、连接失败。S 一个字节都没收到，命令保持 Accepted；

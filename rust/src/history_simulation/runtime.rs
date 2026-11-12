@@ -141,7 +141,10 @@ fn validate_conditions(list: &[Condition]) -> Result<(), String> {
     }) {
         return Err("MissingDependency：获准条件清单缺 E-Release 阶段的 model_coverage".into());
     }
-    Ok(())
+    // 与 E 同一个完备闸：E/S/X 各阶段的必备能力都在、各一次。
+    crate::economic_session::check_required_capabilities(
+        list.iter().map(|c| c.validator_capability.as_str()),
+    )
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
