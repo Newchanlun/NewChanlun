@@ -4,7 +4,7 @@
 本文件是 X 接口的故障注入夹具（E/S 回错、帧界、回复丢失等），受控 E 只为能注入真 E 不会产生的错误回复。
 真 E 放行 → X 接纳 → S → X 占有的端到端链与 #1621 对拍在 economic_session 的 exact_x_e2e_tests.rs（#1407 C2）。
 """
-import copy, hashlib, json, os, socket, sqlite3, subprocess, sys, tempfile, threading, time
+import copy, errno, hashlib, json, os, socket, sqlite3, subprocess, sys, tempfile, threading, time
 from pathlib import Path
 BIN=Path(sys.argv[1]).resolve()
 ROOT=Path(sys.argv[2]).resolve(); ROOT.mkdir(parents=True,exist_ok=True)
@@ -32,7 +32,9 @@ def connect_probe(path):
         s.settimeout(5)
         try: s.connect(str(path))
         except (FileNotFoundError,ConnectionRefusedError): return None
-        s.shutdown(socket.SHUT_WR)
+        try: s.shutdown(socket.SHUT_WR)
+        except OSError as e:
+            if e.errno!=errno.ENOTCONN: raise
         return s.makefile('rb').read()
 def listening(path): return connect_probe(path) is not None
 def check_listening_predicate():
@@ -43,12 +45,20 @@ def check_listening_predicate():
             b.bind(str(bound)); r.bind(str(ready))
             assert bound.exists() and not listening(bound), 'a bound but not listening socket is not ready'
             assert ready.exists() and not listening(ready)
-            r.listen(1)
-            def serve():
-                c,_=r.accept(); c.close()
-            t=threading.Thread(target=serve,daemon=True); t.start()
-            assert listening(ready)
-            t.join(5)
+            r.listen(2)
+            def serve_eof():
+                with r.accept()[0] as c:
+                    assert c.recv(1)==b''
+                    c.sendall(b'{"ok":false}\n')
+            t=threading.Thread(target=serve_eof,daemon=True); t.start()
+            assert connect_probe(ready)==b'{"ok":false}\n'
+            t.join(5); assert not t.is_alive()
+            def serve_fast_close():
+                r.accept()[0].close()
+            t2=threading.Thread(target=serve_fast_close,daemon=True); t2.start()
+            assert connect_probe(ready)==b''
+            t2.join(5); assert not t2.is_alive()
+        assert ready.exists() and not listening(ready), 'a closed stale socket file is not ready'
     assert not Path(root).exists()
 def request(path,op,payload):
     with socket.socket(socket.AF_UNIX) as s:
