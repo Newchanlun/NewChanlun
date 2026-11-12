@@ -2174,6 +2174,22 @@ def test_nb_residual_retry_early_return_leaves_disk_pass(lane, monkeypatch):
     assert len(lane.gateway.sent) == sent_before
 
 
+def test_prompt_asks_for_standalone_diff_that_patch_read_accepts():
+    """#1968：kimi 常把 diff 串在 cat/printf/--stat/--check 后面，守卫不认；提示词要求单独执行那条 diff，守卫不改。"""
+    required = "git diff --no-ext-diff --no-textconv {merge_base} {head}"
+    assert "先单独执行一条命令 " + required in module.PROMPT
+    assert "不要接 &&、;、|" in module.PROMPT
+    # 按提示词原样写出的那条命令（只替换两个 SHA，不加任何别的段）被现有 patch_read 判为读取
+    command = required.format(merge_base=PR2018_MB, head=PR2018_HEAD)
+    assert command in module.PROMPT.format(pr=1, base=PR2018_MB, merge_base=PR2018_MB, head=PR2018_HEAD, names="[]")
+    patch = FrozenPatch.from_diff(PR2018_HEAD, PR2018_MB, PR2018_MB, PR2018_FROZEN)
+    assert reads_candidate_patch(f"/bin/bash -lc '{command}'", PR2018_DIFF, patch)
+    # 提示词劝阻的串接写法仍判未读（守卫行为不变）
+    for chained in (f"cat SKILL.md && printf '--- DIFF ---' && {command}", f"{command} && git diff --check",
+                    f"git diff --stat && {command}"):
+        assert not reads_candidate_patch(f"/bin/bash -lc \"{chained}\"", PR2018_DIFF, patch)
+
+
 # ---------------- Codex 额度耗尽时的临时组合（Kimi + Opus） ----------------
 
 LEGACY_MODELS = ("gpt-6.1-sol", "claude-opus-5-5")
