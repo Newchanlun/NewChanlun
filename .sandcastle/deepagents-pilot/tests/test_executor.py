@@ -851,11 +851,12 @@ def test_executor_run_maps_mid_graph_low_disk_to_retryable_exit(tmp_path, monkey
     monkeypatch.setattr(run, "PSTACK_MODELS", models)
     monkeypatch.setattr(module, "_client", lambda _args: nullcontext(object()))
     monkeypatch.setattr(module, "RepoGateway", lambda _client: None)
-    monkeypatch.setattr(module, "load_unit", lambda *_args: (SimpleNamespace(run_id="t1-1"), None))
+    monkeypatch.setattr(module, "load_unit", lambda *_args: (SimpleNamespace(run_id="t1-1", ticket=1), None))
     monkeypatch.setattr(module, "TicketExecutor", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(module, "open_v2_run", lambda *_args, **_kwargs: SimpleNamespace())
     monkeypatch.setattr(cli, "drive", low_disk)
     code = module.main(["--state-root", str(tmp_path), "--drain-root", str(tmp_path), "run", "--run-id", "t1-1",
+                        "--maintenance-root", str(tmp_path / "maintenance"),
                         "--private-key", str(tmp_path / "unused.pem")])
     assert code == 75 and "派工门槛" in capsys.readouterr().err
 
