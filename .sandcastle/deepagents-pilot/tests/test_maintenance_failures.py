@@ -127,3 +127,25 @@ def test_unknown_requires_evidence_resolution_not_natural_boolean(tmp_path):
     with pytest.raises(ValueError):
         owner.finish(job, natural=True)
     assert owner.gate.status([])['inflight']
+
+
+def test_dead_owner_handoff_preserves_lineage_and_requires_run_recovery(tmp_path, monkeypatch):
+    owner = Owner('executor', tmp_path / 'gate')
+    job = owner.gate.admit_executor(owner.id, 't1-1', 1, tmp_path / 'state', tmp_path / 'source')
+    old = owner.gate.start_bound(job, 't1-1', tmp_path / 'state')
+    replacement = Owner('executor', tmp_path / 'gate')
+    with pytest.raises(ValueError, match='owner still active'):
+        replacement.gate.admit_executor(replacement.id, 't1-1', 1, tmp_path / 'state', tmp_path / 'source')
+    with owner.gate.tx() as db:
+        db.execute('UPDATE owners SET pid=?,start=? WHERE id=?', (999999, 'dead', owner.id))
+        db.execute('UPDATE witnesses SET pid=?,start=? WHERE id=?', (999999, 'dead', old))
+    owner.gate.request()
+    assert replacement.gate.admit_executor(replacement.id, 't1-1', 1, tmp_path / 'state', tmp_path / 'source') == job
+    monkeypatch.setattr(evidence, 'bound_idle', lambda _: True)
+    assert not replacement.gate.settle_bound(replacement.id, job)
+    current = replacement.gate.start_bound(job, 't1-1', tmp_path / 'state')
+    replacement.gate.complete_bound(current)
+    assert replacement.gate.settle_bound(replacement.id, job)
+    with replacement.gate.tx() as db:
+        assert {r[0] for r in db.execute('SELECT owner FROM lineage WHERE job=?', (job,))} == {owner.id, replacement.id}
+        assert db.execute('SELECT 1 FROM returns WHERE witness=?', (old,)).fetchone() is None

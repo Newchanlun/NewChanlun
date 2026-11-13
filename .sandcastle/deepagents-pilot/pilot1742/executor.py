@@ -884,14 +884,14 @@ def _serve(args: argparse.Namespace, store: ClaimStore, cutover_store: CutoverSt
                    "--drain-root", str(args.drain_root), "run", "--run-id", unit.run_id,
                    "--workers-log", str(args.workers_log), "--private-key", str(args.private_key),
                    "--recheck-approval"]
-        if args.model_rules is not None:
-            command.extend(["--model-rules", str(args.model_rules.resolve())])
         with maintenance.gate.tx() as db:
             permit = db.execute("SELECT jobs.id FROM jobs JOIN bindings ON bindings.job=jobs.id WHERE owner=? AND work=? AND state IN ('active','unknown') AND json_extract(bindings.data,'$.run_id')=? AND jobs.id NOT IN (SELECT job FROM resolutions)",
                                 (maintenance.id, f"ticket:{unit.ticket}", unit.run_id)).fetchone()
         if permit is None:
             raise ValueError("missing maintenance admission")
         command += ["--maintenance-job", permit['id'], "--maintenance-root", str(maintenance.gate.root)]
+        if args.model_rules is not None:
+            command.extend(["--model-rules", str(args.model_rules.resolve())])
         try:
             return subprocess.run(command, check=False).returncode
         except OSError:

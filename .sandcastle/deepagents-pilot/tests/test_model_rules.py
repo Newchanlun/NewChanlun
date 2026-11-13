@@ -77,19 +77,27 @@ def test_serve_forwards_source_without_changing_environment(tmp_path, monkeypatc
     commands = []
     class Intake:
         def __init__(self, *args):
-            pass
+            self.maintenance = args[-1]
 
         def once(self, child):
-            return child(SimpleNamespace(run_id='t1911-1'))
+            self.maintenance.gate.admit_executor(self.maintenance.id, 't1911-1', 1911, tmp_path, tmp_path)
+            return child(SimpleNamespace(run_id='t1911-1', ticket=1911))
 
     monkeypatch.setattr(queue, 'QueueIntake', Intake)
     monkeypatch.setattr(executor, 'RepoGateway', lambda client: client)
     monkeypatch.setattr(executor, '_client', lambda _: SimpleNamespace(close=lambda: None))
-    monkeypatch.setattr(executor.subprocess, 'run',
-                        lambda command, **kw: commands.append((command, kw)) or SimpleNamespace(returncode=0))
+    original_run = executor.subprocess.run
+    def capture(command, **kw):
+        if command[0] == 'ps':
+            return original_run(command, **kw)
+        commands.append((command, kw))
+        return SimpleNamespace(returncode=0)
+    monkeypatch.setattr(executor.subprocess, 'run', capture)
     monkeypatch.setenv('DOCKER_CONTEXT', 'fixture-context')
     assert executor._serve(args, None, SimpleNamespace(load=lambda: None), tmp_path) == 0
     command, kwargs = commands[0]
+    assert command[command.index('--maintenance-root') + 1] == str(tmp_path / 'maintenance')
+    assert command[command.index('--maintenance-job') + 1]
     assert ('--model-rules' in command) == explicit
     if explicit:
         assert command[-2:] == ['--model-rules', str(source.resolve())]

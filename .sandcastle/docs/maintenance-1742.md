@@ -21,7 +21,7 @@ JSON 返回 `v`、`generation`、`state`、请求/观察时间、未确认入口
 - `open`：允许新工作，无维护关闭承诺。
 - `unknown`：有入口未确认本代次、旧进程未覆盖、资源清点未证实，或有异常/失联任务。
 - `draining`：各入口已确认关闭，但仍有已领取工作。
-- `drained`：各入口已确认本代次，已登记工作全部有自然结束记录，且未发现未覆盖的相关进程。
+- `drained`：各入口已确认本代次，已登记工作全部有绑定的返回与资源结束证据（或明确未启动记录），且未发现未覆盖的相关进程。
 
 没有 `READY` 状态。`drained` 是主控汇总的一个输入，不是共享代理可以重启的独立授权。
 
@@ -111,6 +111,8 @@ npm run typecheck
 
 测试使用临时账本、真实 SQLite 多进程竞争与管道同步；fake 工作者不访问模型或生产控制根。
 包括关闸/领取竞争、已领取持续推进、真实 detached 子进程接收与结束、缺入口确认、失联重启、精确代次恢复以及旧 freeze 不变。
+
+双 BLOCK 回归另覆盖普通业务失败与资源不明的区分、等待票不占许可、新 run 不继承旧许可、真实 SIGKILL 后同 run 跨关闭续做、旧 owner 转交历史、Popen/绑定前失败可重试、只读 census 和 dry-run 不落账本。`test_model_rules.py` 同时断言 child 的规则路径、maintenance 参数及原环境继承。
 
 Wayfinder 的临时入口快照通过 `scripts/wayfinder-maintenance-fixture.mts` 复制 TS/Python 准入助手，并显式向 `MaintenanceOwner` 传入快照内的 `maintenance` 目录；不使用生产维护根。构造点变化会使夹具立即报错，不能静默恢复默认根。壳层测试同时验证 dry-run 不生成维护账本，live 快照的准入调用使用临时根，原业务断言保持不变。
 
