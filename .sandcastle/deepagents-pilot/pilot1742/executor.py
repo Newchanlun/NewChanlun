@@ -9,7 +9,7 @@ import subprocess
 import sys
 import time
 from collections.abc import Callable, Iterator
-from contextlib import contextmanager, nullcontext
+from contextlib import ExitStack, contextmanager, nullcontext
 from dataclasses import asdict, dataclass, replace
 from pathlib import Path
 from typing import Any
@@ -1145,11 +1145,59 @@ def _main(argv: list[str] | None = None, *, on_execution: Callable[[], None] | N
         return 2
 
 
+def _manual_main(arguments: list[str]) -> int:
+    """手动 run 先登记进程，在真实执行边界领取；只读/登记命令不创建维护状态。"""
+    from .maintenance import Closed, Owner
+    parser = argparse.ArgumentParser(add_help=False)
+    parser.add_argument("--state-root", type=Path, default=DEFAULT_STATE_ROOT)
+    parser.add_argument("--drain-root", type=Path)
+    parser.add_argument("--maintenance-root", type=Path)
+    parser.add_argument("--run-id")
+    parser.add_argument("command", nargs="?")
+    binding, _ = parser.parse_known_args(arguments)
+    if binding.command != "run" or "--help" in arguments or "-h" in arguments:
+        return _main(arguments)
+    witness = None
+    scope_bound = False
+    code = 75
+    with ExitStack() as stack:
+        owner = Owner("executor", binding.maintenance_root)
+        stack.callback(owner.stop)
+        owner.coverage(False)
+        def coverage():
+            from .maintenance_recovery import executor_scope_idle
+            owner.coverage(not scope_bound or executor_scope_idle(
+                dict(state_root=str(binding.state_root), source_repo=str(SOURCE_REPO))))
+        stack.callback(coverage)
+        stack.enter_context(owner.observing())
+        def entering():
+            nonlocal witness, scope_bound
+            unit, _ = load_unit(binding.state_root, binding.run_id)
+            owner.gate.bind_scope(owner.id, binding.state_root, SOURCE_REPO)
+            scope_bound = True
+            job = owner.gate.admit_executor(owner.id, unit.run_id, unit.ticket, binding.state_root, SOURCE_REPO, manual=True)
+            witness = owner.gate.start_bound(job, unit.run_id, binding.state_root)
+        try:
+            code = _main(arguments, on_execution=entering)
+        except Closed:
+            return 75
+        finally:
+            if witness is not None:
+                owner.gate.returned(witness)
+                if code != 75:
+                    try:
+                        owner.gate.complete_bound(witness)
+                    except (OSError, ValueError, KeyError, TypeError, RuntimeError, subprocess.SubprocessError):
+                        pass  # 保留资源未知，不把退出码当成资源结束证据。
+                owner.gate.settle_current_executor(witness)
+        return code
+
+
 def main(argv: list[str] | None = None) -> int:
     arguments = list(sys.argv[1:] if argv is None else argv)
-    # 新维护绑定只用于 serve 派出的 run；旧手动命令保持原合同。
+    # 手动与 serve 的 run 使用同一绑定协议；只读命令不会触发 execution hook。
     if "--maintenance-job" not in arguments:
-        return _main(arguments)
+        return _manual_main(arguments)
     from .maintenance import Gate
     parser = argparse.ArgumentParser(add_help=False)
     parser.add_argument("--maintenance-job", required=True)

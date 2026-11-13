@@ -409,13 +409,21 @@ class Sweep:
         self.folder.mkdir(parents=True, exist_ok=True, mode=0o700)
         return self.spawn(number, attempt, head, self.folder / "logs" / f"p{number}-{head[:12]}-a{attempt}.log")
 
+    def _launch_marked(self, marker: Path, number: int, head: str, attempt: int) -> int:
+        self.folder.mkdir(parents=True, exist_ok=True, mode=0o700)
+        marker.write_text(str(time.time()))
+        try:
+            return self._launch(number, head, attempt)
+        except Closed:
+            # reserve 拒绝意味着尚未派发；不能消耗唯一续跑机会或制造启动退避。
+            marker.unlink()
+            raise
+
     def _resume_once(self, number: int, head: str, attempt: int, action: str) -> tuple[str, dict | None]:
         marker = self._resumes(number, head, attempt)
         if marker.exists():
             return ("needs-reconcile" if action == "publish" else "needs-operator"), None
-        self.folder.mkdir(parents=True, exist_ok=True, mode=0o700)
-        marker.write_text(str(time.time()))
-        return f"resume-{action}", {"pid": self._launch(number, head, attempt), "attempt": attempt}
+        return f"resume-{action}", {"pid": self._launch_marked(marker, number, head, attempt), "attempt": attempt}
 
     def decide(self, pr: dict[str, Any], busy: set[int], running: int, behind: bool) -> tuple[str, dict | None]:
         number, head, base = pr["number"], pr["head"]["sha"], pr["base"]["sha"]
@@ -462,9 +470,7 @@ class Sweep:
         marker = self.folder / f"p{number}-{head}-{base}-a{attempt}.launched"
         if marker.exists() and time.time() - marker.stat().st_mtime < LAUNCH_BACKOFF_SECONDS:
             return "launch-backoff", None
-        self.folder.mkdir(parents=True, exist_ok=True, mode=0o700)
-        marker.write_text(str(time.time()))
-        return "launch", {"pid": self._launch(number, head, attempt), "attempt": attempt}
+        return "launch", {"pid": self._launch_marked(marker, number, head, attempt), "attempt": attempt}
 
     def tick(self) -> list[dict[str, Any]]:
         try:

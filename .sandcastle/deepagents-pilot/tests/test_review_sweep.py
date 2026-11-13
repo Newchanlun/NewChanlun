@@ -1743,3 +1743,25 @@ def test_maintenance_preflight_gh_error_leaves_no_unknown(tmp_path):
                            '--private-key', str(tmp_path / 'unused'), '--maintenance-root', str(parent.gate.root),
                            '--maintenance-reservation', job], Offline())
     assert parent.gate.status([])['inflight'] == []
+
+
+@pytest.mark.parametrize('resume', [False, True])
+def test_maintenance_close_before_spawn_does_not_consume_retry(lane, tmp_path, monkeypatch, resume):
+    from pilot1742.maintenance import Owner
+    sweep, host, _ = make(lane, run=False)
+    if resume:
+        lane.target(1810, 1)
+    owner = Owner('review', tmp_path / 'gate')
+    assert not owner.poll()
+    generations = []
+    spawn = module.spawner(tmp_path / 'unused-key', owner)
+    def close_then_spawn(*args):
+        generations.append(owner.gate.request())
+        return spawn(*args)
+    sweep.spawn = close_then_spawn
+    assert acts(sweep.tick()) == ['error']
+    assert not list(sweep.folder.glob('*.resumes'))
+    assert not list(sweep.folder.glob('*.launched'))
+    owner.gate.resume(generations[0])
+    sweep.spawn = host.spawn
+    assert acts(sweep.tick()) == ['resume-review' if resume else 'launch']

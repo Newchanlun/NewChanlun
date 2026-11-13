@@ -181,7 +181,7 @@ class Gate:
                            "WHERE work=? AND state!='finished' AND jobs.id NOT IN (SELECT job FROM resolutions)",
                            (f'ticket:{ticket}',)))
 
-    def admit_executor(self, owner: str, run_id: str, ticket: int, state_root: Path, source_repo: Path) -> str:
+    def admit_executor(self, owner: str, run_id: str, ticket: int, state_root: Path, source_repo: Path, *, manual: bool = False) -> str:
         """按真实 run 原子领取并绑定；未派发的计划票不获得跨关闭许可。"""
         data = json.dumps(dict(kind='executor', run_id=token(run_id), work=f'ticket:{ticket}',
                               state_root=str(state_root.resolve()), source_repo=str(source_repo.resolve())), sort_keys=True)
@@ -193,8 +193,11 @@ class Gate:
                 if previous['owner'] != owner:
                     old = db.execute('SELECT * FROM owners WHERE id=?', (previous['owner'],)).fetchone()
                     if not old['stopped'] and alive(old['pid'], old['start']):
+                        if manual:
+                            # 手动续跑保留 serve 的任务所有权；start_bound 原子拒绝并行控制器。
+                            return previous['id']
                         raise ValueError('executor owner still active')
-                    if any(alive(w['pid'], w['start']) for w in db.execute('SELECT * FROM witnesses WHERE job=?', (previous['id'],))):
+                    if any(alive(w['pid'], w['start']) for w in db.execute('SELECT * FROM witnesses WHERE job=? AND id NOT IN (SELECT witness FROM returns)', (previous['id'],))):
                         raise ValueError('executor controller still active')
                     db.execute('UPDATE jobs SET owner=? WHERE id=?', (owner, previous['id']))
                     db.execute('INSERT OR IGNORE INTO lineage VALUES(?,?)', (previous['id'], owner))
@@ -418,6 +421,18 @@ class Gate:
             raise ValueError('executor not naturally closed')
         with self.tx() as db:
             db.execute('UPDATE witnesses SET completed_at=? WHERE id=? AND completed_at IS NULL', (now(), witness))
+
+    def settle_current_executor(self, witness: str) -> None:
+        """手动控制器收尾；可属于仍运行的 serve，但必须是本进程的精确 witness。"""
+        self.returned(witness)
+        with self.tx() as db:
+            row = db.execute('SELECT jobs.id,jobs.owner FROM jobs JOIN witnesses ON jobs.id=witnesses.job '
+                             'WHERE witnesses.id=?', (token(witness),)).fetchone()
+        if not self.settle_bound(row['owner'], row['id']):
+            with self.tx() as db:
+                # serve 可并发完成同一任务；不把已完成或已转交的任务改回 unknown。
+                db.execute("UPDATE jobs SET state='unknown',ended_at=? WHERE id=? AND owner=? AND state='active'",
+                           (now(), row['id'], row['owner']))
 
     def reconcile(self, generation: int, owner: str) -> dict:
         """只处理精确 owner；读取证据在事务外，提交前重验关闭代次并永久 fence 旧 owner。"""

@@ -42,10 +42,21 @@ TS 与 Python 共用 SQLite 账本。`request` 与 `admit` 都使用短 `BEGIN I
 因此不使用 legacy admission.lock 阻塞在途工作，也没有“检查 open 后再无记录 spawn”的间隙。
 
 领取粒度：live decision 单票、live Wayfinder 单图动作/放行动作、executor 精确 run、review 单次 PR/head/attempt。
-dry-run、archaeology-only 与本地只读 status/reconcile 不登记维护 owner，也不依赖生产维护根。
+dry-run、archaeology-only 与 executor 的本地 status/reconcile 不登记维护 owner，也不依赖生产维护根。
+维护 CLI 的 `status` 会持久记下未覆盖进程的精确身份；它不派工、不恢复工作，不是无写入查询。
 executor 的票/计划登记不等于执行准入：完成读取、等待判定与空间检查后，紧邻派工以一个事务领取并绑定 run。
 登记后才关闸的计划不会被派发；awaiting_human、跳过的计划与 break 后的剩余票不占维护记录。
 已经实际领取的同一 run 可以跨轮继续，新的 run-id 必须重新过闸，不能改绑或继承旧 run 的许可。
+
+队列提示手动续跑时，仍使用 `executor run --run-id <原run> --resume`，不必提供内部 maintenance-job。
+新代码在实际执行前登记 owner、绑定原 run 和 witness，执行期间确认维护代次，返回后核对资源终态。
+serve 仍活着时保留其原任务 owner；并行控制器由 witness 原子互斥拒绝。同一已领取 run 可在关闭后续做，
+未领取的新 run 返回 75；这不会 resume 维护代次。无维护时原命令参数、模型规则和业务返回码不变。
+手动 run 收尾也清点完整 executor scope；未知资源仍阻止 drained。
+
+review sweep 若在扫描后、reserve 前遇到关闸，会撤回本次 `.resumes`／`.launched` 标记；
+恢复准入后可以继续原 attempt，不消耗唯一自动续跑名额，也不产生虚假的 600 秒启动退避。
+已成功派出的任务仍保留原标记与重试限制。
 原有 legacy、SPEC、票锁和发布判据仍然生效。
 
 review 父进程先持久预留，再 `Popen(start_new_session=True)`；子进程原子接收这份预留，
@@ -113,7 +124,8 @@ detached review 和手动 review/migrate 在已准入工作执行期间轮询确
 3. 加载全部新入口，保持既有 `--review-sweep --review-sweep-max-running 2`、模型来源、私钥路径与 Boat 参数。
    #2062 已合入的 `--model-rules` 与 Boat 同源规则保持不变；`_serve.child` 同时传递该规则路径及精确 maintenance job/root。
 4. 首次核验 `status` 中四类 owner；request 后各入口须显式确认当前 generation。
-   旧代码进程仍存在、入口未出现或资源核对失败时只能是 unknown，继续等或修复，不卸载活跃服务。
+   入口未出现或资源核对失败时只能是 unknown。若已记录旧代码进程的未覆盖身份，单纯等待其退出不会清除该记录；
+   必须另有精确绑定与资源终态证据，缺证据交主控处理部署边界，不卸载活跃服务。
 5. 取得本线 drained 后交主控；主控还须等待 T3 外部 owner。后续共享代理升级和恢复各需相应授权。
 
 四类入口都需要本代次的确认。尚未登记或没有确认的类别显示 unknown；部署 owner 须核实际服务配置，不能把缺少进程当成已完成接入。
