@@ -22,7 +22,7 @@ NewChanlun 是以缠论为核心的量化交易系统。四大支柱与里程碑
 
 - 不为基础设施改缠论或交易判据。靶向验证差异面，全量仅留重型验证窗口；共享工作区的测试计数注明并行改动影响。独审须非作者、独立进程、只读证据，可与作者同模型。
 - macOS 本机不跑 `cargo`、`rustc`，Rust 验证走 CI、Boat 或远端。保护其他人的未提交工作；破坏性 Git 操作先备份和只读预检。不泄露凭据，不伪造签名、权限或审查结果。
-- 过程证据、运行日志与临时构建放 `/Volumes/AgentStorage`，按 `.sandcastle/CODEX-CHILD.md`「一次收齐交付材料」绑定版本、摘要和可读取实体。旧仓内报告仍可验证；历史纪律批量出仓另行整合，不作为交付前置。产品教义、ADR、操作入口和测试 fixture 留仓。
+- 过程证据、运行日志与临时构建放 `/Volumes/AgentStorage`，按 `.sandcastle/CODEX-CHILD.md`「一次收齐交付材料」绑定版本、摘要和可读取实体。旧仓内报告仍可验证；历史纪律恢复见 `.chanlun/review-results/ARCHIVE-INDEX.md`。产品教义、ADR、操作入口和测试 fixture 留仓。
 
 ## 领域教义与文档层名分
 
@@ -40,4 +40,4 @@ NewChanlun 是以缠论为核心的量化交易系统。四大支柱与里程碑
 - 用户已常驻授权派发，无需逐次询问；当前任务明确禁派或限制角色时遵从该限制。派发写清职责、边界和验收，不覆盖其他 owner 的工作。
 - 实质工作承接已有 ticket 和授权。同范围已获执行授权不再等点头；新工作缺授权时先准备建议。读文件、查状态、回答已知事实和单条配置修改不必挂票。
 - **开之前先搜（两路，缺一不可）**：建票前查 `gh issue list --search "<关键词>" --state all`，再查 `rg -n "<关键词>" analysis/ docs/ .chanlun/`；同一工作复用已有票。tracker 为 `Newchanlun/NewChanlun`，操作和票型见 `docs/agents/issue-tracker.md`。
-- 需要流程 skill 时读 `.agents/skills/<名字>/SKILL.md`。交付精确版本、相关验证和剩余依赖，不把分派或通过局部检查当作完成。分支与自动化以 main 为基线，历史名分见 `docs/agents/generation-constitution.md` §2。
+- 需要流程 skill 时读 `.agents/skills/<名字>/SKILL.md`。交付精确版本、相关验证和剩余依赖，不把分派或通过局部检查当作完成。分支与自动化以 main 为基线，代码名分见 `docs/adr/0004-generation-constitution.md`「现行名分与现役线」。

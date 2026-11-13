@@ -2,7 +2,7 @@
 
 来源：2026-07-30 对照 Matt Pocock wayfinder 视频（"Nothing is too big to plan anymore"）的使用盘点与裁定，编排者批准三项决策：**新图严格两段式**、**启用 prototype 票**、**固化本文档**。2026-08-18 走 [wayfinder 流程修订 #1075](https://github.com/xy7365527-lang/NewChanlun/issues/1075) **反转两段式**：决策与实装不分开——图清即按 ask-matt 主流程当场收口（`/to-spec` → `/to-tickets` → `/implement` 全链，图内），两段式裁定与 #770 声明一保留作历史（见下）。2026-07-30 再次并入地图 [本仓 wayfinder 工作流正本 #767](https://github.com/xy7365527-lang/NewChanlun/issues/767) 的十张裁定票——本文档自此是本仓 wayfinder 路由的唯一正本。
 
-tracker 物理操作（map/子票/blocking/frontier/claim/resolve 的 gh 命令）见 `docs/agents/issue-tracker.md`「Wayfinding operations」，本文只管流程形态与票型口径。交付纪律（关票门、开票门、豁免举证、编号复用）见 `docs/agents/delivery-discipline.md`；入仓名分见 `docs/agents/generation-constitution.md`；统计口径标注见 `docs/agents/stat-provenance.md`。本文对这三份**只挂指针、不复述**。
+tracker 物理操作见 `docs/agents/issue-tracker.md`「Wayfinding operations」。交付与关票见 `.sandcastle/docs/graph-engineering.md`，实体报告见 `.sandcastle/CODEX-CHILD.md`；产品名分见 `docs/adr/0004-generation-constitution.md`「现行名分与现役线」，统计标注和引用责任见 `docs/adr/0022-acceptance-criterion-parameters.md`「统计结论的标注与引用」。
 
 ## 每会话必读
 
@@ -36,12 +36,12 @@ tracker 物理操作（map/子票/blocking/frontier/claim/resolve 的 gh 命令�
 1. **开图**（编排层，占一个 session）：grilling 定 destination → 广度优先烤 frontier（扇形铺开，不深挖单线）→ 建 map（`wayfinder:map`，Destination/Notes 填好，雾写进 Not yet specified）→ 建可具体化的票 → 第二 pass 接 blocking 边。**research 票当场并发发 subagent 解决**，不等后续 session。开图 session 不解决任何票。第二轮广度烤 frontier 时，顺带把「本图红线 / 默认取舍」当成其中几题一起问，答案落 Notes（见「Notes 预授权」）。
 2. **走图**（一票一 session）：**开头先跑对账**（见「图正文的写入协议」）→ 取 frontier 第一票（open + 无 open blocker + 未 assign；用户点名则从其点名）→ **claim 先行**（assign 是 session 首写）→ 按票型解决（见下）→ resolution comment 写答案 → close → map 的 Decisions-so-far 加一行（gist + 链接，详情只留在票内）→ 毕业因此具体化的雾、新开浮出的票、把越出 destination 的票关票并登记 Out of scope。frontier 上无阻塞的票可并行多 session 走。
 3. **图闭环出 spec**：见「`/to-spec` 交棒边界」。
-4. **实施票链（图内，当场走）**：spec 独审裁定 PASS 后 `/to-tickets` 切实装票（挂图内、blocking 边）→ `/implement` 逐票（内部 `/tdd` 红绿切片 + `/code-review` 两轴收尾）→ 逐票开 PR，分支保护的必需检查通过后合入，关票走 `delivery-discipline.md` 关票门全子句。**决策了就实装**——不停在 spec、不攒批、不走图外实施线。实施票落在图里还是图外，由图的实装声明决定（见下）。
+4. **实施票链（图内，当场走）**：spec 独审裁定 PASS 后 `/to-tickets` 切实装票（挂图内、blocking 边）→ `/implement` 逐票（内部 `/tdd` 红绿切片 + `/code-review` 两轴收尾）→ 逐票开 PR，分支保护的必需检查通过后合入，关票按 `.sandcastle/docs/graph-engineering.md`「交付与关票」。**决策了就实装**——不停在 spec、不攒批、不走图外实施线。实施票落在图里还是图外，由图的实装声明决定（见下）。
 5. **spec 非持久**：实装落地后 spec 票关闭，不作长期维护的真理源。真理源是代码 + 决策票；spec 从落地那刻起是历史记录。
 
 ## 图的两行声明
 
-图的性质不靠事后判据推，靠开图人**当时写下的一行声明**。两条声明各占一行，都写在 `## Notes`，都是**声明制自执行——不设巡查、不设 CI 硬门**（与 `delivery-discipline.md` 同款机制）。
+图的性质不靠事后判据推，靠开图人**当时写下的一行声明**。两条声明各占一行，都写在 `## Notes`，都是**声明制自执行——不设巡查、不设 CI 硬门**；main 合入仍受必需检查约束。
 
 ### 声明一：本图带不带实装
 
@@ -229,7 +229,7 @@ tracker 物理操作（map/子票/blocking/frontier/claim/resolve 的 gh 命令�
 
 ## 关票口径
 
-决策票（grilling/research/prototype）按纯裁定关票：resolution comment + close + map 索引一行；有实体产物的（对拍报告、原型文件、`proto/<票号>` 分支指针）按 `.sandcastle/CODEX-CHILD.md` 的交付清单绑定版本、摘要与可读取实体；过程报告留仓外，产品原型代码与分支照常纳入版本控制，无实体产物的写明「无报告」。实施票走关票门全子句，无豁免。
+决策票（grilling/research/prototype）按纯裁定关票：resolution comment + close + map 索引一行；有实体产物的（对拍报告、原型文件、`proto/<票号>` 分支指针）按 `.sandcastle/CODEX-CHILD.md` 的交付清单绑定版本、摘要与可读取实体；过程报告留仓外，产品原型代码与分支照常纳入版本控制，无实体产物的写明「无报告」。实施票按 `.sandcastle/docs/graph-engineering.md`「交付与关票」，不借纯裁定豁免交付。
 
 grilling 票另加一条：resolution 的落文档（含必要的零行为变更代码注释）做完才关票。
 

@@ -229,3 +229,16 @@ Sandcastle 宿主 `NewChanlun-sandcastle-host` 开启 `SANDCASTLE_HOST_AUTO_UPDA
 旧段落中 Docker/swarm 的模型配置只说明路由，不代表执行可用：namespace 和 swarm 提交责任迁移未验收，默认 namespace 探针失败时入口在 planner/认领之前 fail-loud。主控不得将此候选的单票宿主冒烟计为 swarm 或全图验收。
 
 Codex 的受管提交提示使用 codex-implement-prompt.md / codex-review-prompt.md；旧 implement-prompt.md / review-prompt.md 保持原调用合同。swarm namespace 恢复后仍须补完并验证其提交责任迁移，本票该项尚未闭合。
+
+## 交付与关票
+
+#1742 将历史交付纪律的有效约束收在本节；实体报告合同仍以 `.sandcastle/CODEX-CHILD.md`「一次收齐交付材料」为准。
+
+- **实施交付**：resolution 绑定实际落地提交；已进入 origin/main 后才按已交付关票。关票评论只写当时已经成立的结果，附主线 SHA 与对应 CI run。纯决策票沿 wayfinder 的关票口径，不能用纯裁定豁免实施交付。
+- **验证与独审**：最终交付满足票面验收，评审覆盖最终产品差异；评审后新增代码必须补审，不能以“大头已评”放过尾部。纯文档/机械收据尾部能否复用旧证据，按 CODEX-CHILD 的实际产品字节与扫描差异核对。多提交交付仍须交代各提交的可构建性；纯文档豁免编译但不豁免适用检查。合入时用可构建的 squash 提交（#1394/#1488），不能借 squash 掩盖未验证的最终产物。
+- **CI 门**：沿本文「main 的合入」，非作者正式审查、ci-ok 与 strict 不能降低。红灯如实记录缺陷与承接票，不缩测试范围、不加 ignore、不改触发分支来伪造绿灯；已交付声明须指向实际主线，不拿其他树的绿色 CI 作证。
+- **实体与恢复**：报告存在且可读，manifest 绑定 ticket、base/head 和实体摘要；新证据仓外，旧仓内合法调用继续验证 Git blob。无实体报告就写「无报告」。关票前处置本票未交付在制品；工位仅按 ADR 0004 的容器判据清理，保留其他 owner、在途工作及恢复入口，不再执行“关票即删工位”。
+- **验收声明**：对照型验收给出可定位的版本、文件或测试。缺对照时补齐或明确降级为不可按对照独立验收，并写可直接验证的条件；不能把缺口记成通过。豁免须有命题、命令及关键输出，覆盖不到的要求标未检验，不能越过票面明写的 AC。多票共用提交导致某项无法按票独验时，逐项记录该限制。
+- **编号**：`#N` 只指 GitHub 对应票，内部课题用谱系号或日期标签。
+
+`check_main_sync.sh` 仅作本地主线同步提醒，不推送、不授权合入；普通研发按已有授权由代理完成，不增加人工门。历史全文与旧例恢复见 `.chanlun/review-results/ARCHIVE-INDEX.md`「三份历史纪律」。

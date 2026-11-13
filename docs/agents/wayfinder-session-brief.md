@@ -9,7 +9,7 @@
 3. `AGENTS.md` —— 全 harness 唯一正本入口
 4. `docs/agents/doctrine-rules.md` —— 教义正本、#799 收敛通则、#804 总缝规则与引原文四步的完整条文（决策图的起草与独审必读）
 
-碰代码的图再追加 `docs/agents/delivery-discipline.md`。
+碰代码的图再追加 `.sandcastle/docs/graph-engineering.md`「交付与关票」；实体报告读 `.sandcastle/CODEX-CHILD.md`。
 
 ## 五条最容易忘的
 
