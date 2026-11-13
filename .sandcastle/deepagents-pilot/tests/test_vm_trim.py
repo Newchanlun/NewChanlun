@@ -7,6 +7,7 @@ import sys
 from pathlib import Path
 
 import pytest
+
 from pilot1742 import vm_trim
 from pilot1742.vm_trim import (
     LOCK_NAME,

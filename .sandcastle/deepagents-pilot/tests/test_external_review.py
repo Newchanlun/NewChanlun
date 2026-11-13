@@ -12,6 +12,7 @@ from types import SimpleNamespace
 import httpx
 import pytest
 from conftest import git
+
 from pilot1742 import delivery, patch_read
 from pilot1742 import external_review as module
 from pilot1742.delivery import EffectPending, RepoGateway, Stale
