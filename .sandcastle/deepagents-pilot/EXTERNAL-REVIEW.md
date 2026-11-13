@@ -22,11 +22,11 @@ export PYTHONPATH=.sandcastle/approval-signing:.sandcastle/deepagents-pilot
 
 ## 指定 Docker context
 
-需要在 Colima 验收和审阅、但全局默认是 OrbStack 时，在启动 controller 的环境中设置 `DOCKER_CONTEXT=colima`，不修改全局默认。该值沿部署准入、监督、容器/卷检查与回收、VM trim 传递；不存在或不可用的显式 context 按原失败路径处理，不重试默认 daemon。未设置时仍由 Docker 使用原默认 context。
+需要在 Colima 验收和审阅、但全局默认是 OrbStack 时，在启动 controller 的环境中设置 `DOCKER_CONTEXT=colima`，不修改全局默认。该值沿部署准入、监督、容器/卷检查与回收、VM trim 传递；不存在或不可用的显式 context 按原失败路径处理，不重试默认 daemon。未设置时仍由 Docker 使用原默认 context。launchd 托管时，在实际加载的 `com.newchanlun.deepagents-executor.plist` 的 `EnvironmentVariables` 中设置该值；部署验收命令也须显式使用同一 context。
 
 这是宿主进程的定位变量，不进入审阅容器。`DOCKER_HOST`、`DOCKER_CONFIG`、TLS 覆盖和任意 secret env 仍不转发。审查模型由 `MODELS → launch.json.model → codexWorker({model})` 决定，不依赖转发 `SANDCASTLE_MAIN_MODEL`；正式审阅准入不调用主控模型探针。
 
-同一部署的派发、恢复与回收须使用同一 context；旧 run 没有持久化 context 绑定，不能换 daemon 后接管。部署新代码后，部署 owner 必须按新 controller head 重新绑定 Docker 准入，不能沿用 `923d5f1187fefc549f810643390068884c36ba9e` 的验收。隔离 fake 测试不代替这一步。
+同一部署的派发、恢复与回收须使用同一 context；旧 run 没有持久化 context 绑定，不能换 daemon 后接管。部署新代码后，部署 owner 必须按新 controller head 重新绑定 Docker 准入，不能沿用旧 controller head 的验收。隔离 fake 测试不代替这一步。
 
 ## Codex 额度耗尽时的临时组合
 
@@ -170,7 +170,7 @@ HOST 切换步骤：
 3. 宿主 reaper（`ExternalReview.reap_review_volumes`）：每位 reviewer 派发前按标签列出卷和容器，凡 launch_id 在本 state_root 登记过、监督进程（`--output-dir` 身份）已不在的，先 `rm -f` 容器再删卷；未登记的 launch_id 不碰。被 SIGKILL、OOM、Mac 或 Colima 重启打断的 launch 由它收。结果追加到 `external-review/volume-reaper.jsonl`；docker 不可用时只记 `skipped`，不挡派发。
 
 删卷之后还要 fstrim。VM 的数据盘是 macOS 系统盘上的稀疏文件，VM 里删卷只把块标成空闲，不 trim 宿主就收不回来，系统盘只会越用越少（11-09 实测一次 `fstrim` 回收 5.8 GiB，系统盘剩余从 22 GiB 回到 27 GiB）。上面第 1 层（监督 finally 删卷成功）和第 3 层（reaper 本轮至少删掉一个卷）之后各调一次 `pilot1742/vm_trim.py`：监督在回执落盘之后以 `python3 -I vm_trim.py <checkout_root>` 调用，结果写 `<model>/vm-trim.json`；reaper 直接调用，结果追加一行 `vm_trim` 到 `volume-reaper.jsonl`。第 2 层退出钩子是同步的，不 trim，留给下一次。checkout 补删不 trim。
-- 做法：`docker context show` 为 `colima` 或 `colima-<p>` 时跑 `colima --profile <p> ssh -- sudo -n fstrim -v /var/lib/docker`；别的 context 记 `skipped`。不用 `--privileged` 一次性容器挂 `/var/lib/docker` 去 trim：容器合同不许特权容器、不许挂 Docker 数据目录，审阅镜像也不保证带 `fstrim`；`colima ssh` 走宿主用户本来就有的 VM 登录，不经 Docker daemon。env 与 `docker_cli` 同一白名单（不传 `DOCKER_HOST`/`DOCKER_CONTEXT`），连的是同一个 context。
+- 做法：`docker context show` 为 `colima` 或 `colima-<p>` 时跑 `colima --profile <p> ssh -- sudo -n fstrim -v /var/lib/docker`；别的 context 记 `skipped`。不用 `--privileged` 一次性容器挂 `/var/lib/docker` 去 trim：容器合同不许特权容器、不许挂 Docker 数据目录，审阅镜像也不保证带 `fstrim`；`colima ssh` 走宿主用户本来就有的 VM 登录，不经 Docker daemon。env 与 `docker_cli` 使用同一组 `DOCKER_ENV`：转发 `DOCKER_CONTEXT`，不传 `DOCKER_HOST`、`DOCKER_CONFIG`、TLS 覆盖及凭据，连的是同一个 context。
 - 失败只记录：colima 不在、`sudo` 要密码、超时（colima 60 s、`docker context show` 10 s，超时杀整个进程组）都记 `failed`，不改回执、结论和退出码，不挡派发。只记返回码和 fstrim 的一行回收量，不记 stderr（ssh 报错可能带 VM 登录密钥路径）。
 - 节流：`<checkout_root>/.vm-trim.lock` 上非阻塞 `flock`，拿不到记 `busy`（另一个 trim 正在跑，监督和 reaper 共用这把锁）；拿到后看 `<checkout_root>/.vm-trim.stamp` 的时间，距上次尝试不足 10 分钟记 `throttled`。时间戳在尝试前写，失败也算一次，免得每轮都去撞坏掉的 VM。两个审查并发结束时只有一个真正 trim。
 
