@@ -52,6 +52,24 @@ fi
 if [[ -n "$cause" ]]; then
   # 标记行格式是调用方的分界依据（run-1488-delta-ci.py RETRY_MARKER），改动须同步。
   echo "::warning title=Boat transient cargo error retry::cause=${cause} host=$(hostname)"
+  # EACCES 在同一文件上是粘的：原地重跑时 cargo 认为构建脚本已是新的，只会再执行同一个被拒的文件（run 42774135845
+  #   同机同路径连拒 4 次）。重跑前删掉被拒的 build-script-build 及同目录的 build_script_build-*（前者是后者的硬链接，
+  #   cargo 只看后者判新旧，只删前者会把同一 inode 链回来），cargo 判输出缺失、重编出新文件。只删
+  #   …/build/<crate>-<16 位 hash>/ 下这两类普通文件，路径不符时照旧原地重跑。只多一次构建脚本编译，结论不变。
+  if [[ "$cause" == EACCES* ]]; then
+    bad=$(grep -Eo 'could not execute process `[^`]*/build-script-build`' "$log" | sed -E 's/^could not execute process `//; s/`$//' | sort -u)
+    removed=0
+    while IFS= read -r f; do
+      # 只认 cargo 打出的绝对路径；含 /./ 或 /../ 段、或 crate 目录 / build 目录是符号链接时不删（独审加固）。
+      [[ "$f" =~ ^/.*/build/[A-Za-z0-9_.-]+-[0-9a-f]{16}/build-script-build$ && "$f" != */./* && "$f" != */../* ]] || continue
+      d="${f%/build-script-build}"
+      [[ -d "$d" && ! -L "$d" && ! -L "${d%/*}" ]] || continue
+      for g in "$f" "$d"/build_script_build-*; do
+        if [[ -f "$g" && ! -L "$g" ]]; then rm -f -- "$g" && echo "removed rejected build script: $g" && removed=1; fi
+      done
+    done <<<"$bad"
+    (( removed )) || echo "no rejected build script removed; retrying in place"
+  fi
   run "$@"; status=$?
 fi
 exit "$status"
