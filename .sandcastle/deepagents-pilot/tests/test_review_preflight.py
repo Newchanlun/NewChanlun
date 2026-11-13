@@ -461,6 +461,62 @@ def test_non_utf8_legacy_log_is_not_route_evidence(tmp_path):
     assert preflight.route_from_log(tmp_path, session, time.time() - 5, wait=0.5) is None
 
 
+@pytest.mark.parametrize("framing", ("length", "short-length", "chunked", "short-chunked", "drip", "spent-budget"))
+def test_roundtrip_validates_real_http_framing(framing):
+    payload = b'data: {"type":"response.completed","response":{"status":"completed"}}\n\n'
+
+    class Handler(BaseHTTPRequestHandler):
+        protocol_version = "HTTP/1.1"
+
+        def log_message(self, *args):
+            pass
+
+        def do_POST(self):
+            self.rfile.read(int(self.headers["Content-Length"]))
+            if framing == "spent-budget":
+                time.sleep(0.3)
+            self.send_response(200)
+            self.send_header("Connection", "close")
+            if framing in ("length", "short-length"):
+                self.send_header("Content-Length", str(len(payload) + (100 if framing == "short-length" else 0)))
+            else:
+                self.send_header("Transfer-Encoding", "chunked")
+            self.end_headers()
+            self.close_connection = True
+            try:
+                if framing in ("length", "short-length"):
+                    self.wfile.write(payload)
+                else:
+                    self.wfile.write(f"{len(payload):x}\r\n".encode() + payload + b"\r\n")
+                    self.wfile.flush()
+                    if framing in ("drip", "spent-budget"):
+                        # Bytes arrive without a completed SSE line or HTTP end.
+                        for _ in range(30):
+                            time.sleep(0.05)
+                            self.wfile.write(b"1\r\n \r\n")
+                            self.wfile.flush()
+                    if framing != "short-chunked":
+                        self.wfile.write(b"0\r\n\r\n")
+            except (BrokenPipeError, ConnectionResetError):
+                pass
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)  # DevSkim: ignore DS162092 本地隔离 HTTP framing 回归
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    try:
+        url = f"http://127.0.0.1:{server.server_port}"  # DevSkim: ignore DS162092 本地隔离 HTTP framing 回归
+        started = time.monotonic()
+        result = preflight.round_trip(url, KEY, OPUS, "preflight-test", preflight.Deadline(1 if framing in ("drip", "spent-budget") else 3))
+        elapsed = time.monotonic() - started
+        assert result["ok"] is (framing in ("length", "chunked")), result
+        if framing.startswith("short-"):
+            assert result["error"]["exception"] == "IncompleteRead"
+        if framing in ("drip", "spent-budget"):
+            assert elapsed < 0.7, elapsed
+    finally:
+        server.shutdown()
+        server.server_close()
+
+
 @pytest.mark.parametrize("tail", ("eof", "read-error", "second-terminal", "deadline"))
 def test_roundtrip_requires_stream_cleanup_after_terminal(monkeypatch, tail):
     terminal = b'data: {"type":"response.completed","response":{"status":"completed"}}\n'
@@ -489,6 +545,7 @@ def test_roundtrip_requires_stream_cleanup_after_terminal(monkeypatch, tail):
     response = Response()
     deadline = preflight.Deadline(3)
     monkeypatch.setattr(preflight.urllib.request, "urlopen", lambda *a, **kw: response)
+    monkeypatch.setattr(preflight, "_read_complete_response", lambda response, deadline: b"".join(response))
     result = preflight.round_trip(LOCAL, KEY, OPUS, "preflight-test", deadline)
     assert result["ok"] is (tail == "eof")
     if tail == "eof":

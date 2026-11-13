@@ -40,7 +40,7 @@ python3 -I .sandcastle/deepagents-pilot/review_preflight.py \
 
 ### 成功终态之后仍须读到 EOF
 
-预检收到 `response.completed` / `response.incomplete` 后继续读完流，不能立刻关闭连接。CLIProxy v8.0.63 的 Claude 路径仍需完成上游帧与 lifecycle 收尾；提前断开会取消执行，留下 nonce 目录但没有收据。只有读到 EOF、未超总 deadline、无后续错误或冲突终态，往返检查才成功；路由检查仍独立要求完整收据和全部 attempt 通过 allowlist。终态之后一直不结束的流仍按原总 deadline 拦截。
+预检收到 `response.completed` / `response.incomplete` 后继续读完流，不能立刻关闭连接。CLIProxy v8.0.63 的 Claude 路径仍需完成上游帧与 lifecycle 收尾；提前断开会取消执行，留下 nonce 目录但没有收据。消费者使用标准库 `HTTPResponse.read()`（不传 `amt`）验证 Content-Length / chunked 完整性，不把逐行迭代结束当作完整响应。读取期间按原剩余工作期限设置一次取消计时器，通过同一连接的 dup socket 执行 shutdown 唤醒阻塞读取；收尾取消并 join 计时器，不重置 deadline。只有 HTTP 响应体完整读完、未超总 deadline、无后续错误或冲突终态，往返检查才成功；路由检查仍独立要求完整收据和全部 attempt 通过 allowlist。终态之后一直不结束的流仍按原总 deadline 拦截。
 
 #2055 的离线回归使用原生 Claude executor、首次 503 后重试和受控迟到的终态帧尾：客户端读终态行就断开时无收据；读完 EOF 时产生两条 Claude 路线。生产者封口条件未放宽，真实路线仍须以新正式预检的收据为证。
 

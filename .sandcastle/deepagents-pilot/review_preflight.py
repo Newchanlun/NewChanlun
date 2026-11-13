@@ -15,6 +15,7 @@ import os
 import re
 import shutil
 import signal
+import socket
 import subprocess
 import sys
 import threading
@@ -336,6 +337,32 @@ def _error_info(body: str) -> dict:
     return {"class": kind, "length": len(body), "sha256_12": hashlib.sha256(body.encode("utf-8", "replace")).hexdigest()[:12]}
 
 
+def _read_complete_response(response, deadline: Deadline) -> bytes:
+    """read() 校验 HTTP framing；独立 socket 引用在原绝对期限唤醒阻塞读取。"""
+    remaining = deadline.work_left()
+    if remaining <= 0:
+        raise TimeoutError("response deadline")
+    # fileno/dup/shutdown 不解析 HTTP，也不依赖 urllib 的私有 socket 属性。
+    with socket.socket(fileno=os.dup(response.fileno())) as connection:
+        def abort_read():
+            try:
+                connection.shutdown(socket.SHUT_RDWR)
+            except OSError:
+                pass  # 对端可能已关闭；读取异常仍由 read() 向上传播。
+
+        timer = threading.Timer(deadline.work_left(), abort_read)
+        timer.daemon = True
+        timer.start()
+        try:
+            body = response.read()  # 不传 amt：标准库对 Content-Length 短读抛 IncompleteRead。
+            if deadline.work_left() <= 0:
+                raise TimeoutError("response deadline")
+            return body
+        finally:
+            timer.cancel()
+            timer.join()  # 回调退出后才关闭 dup fd，避免与后续请求的 fd 复用竞争。
+
+
 def round_trip(url: str, key: str, model: str, session: str, deadline: Deadline) -> dict:
     """一次最小往返，只探连通：responses + tools + tool_choice=auto + json_schema 输出格式。
     不代表 kimi 的生产请求形状（正式独审对 kimi 不带 --output-schema），也不验证回合内真实工具调用。"""
@@ -358,7 +385,7 @@ def round_trip(url: str, key: str, model: str, session: str, deadline: Deadline)
     try:
         with urllib.request.urlopen(request, timeout=timeout) as response:
             terminal, detail, status = None, "流在终态事件前结束", None
-            for raw in response:
+            for raw in _read_complete_response(response, deadline).splitlines():
                 if deadline.work_left() <= 0:
                     detail = "总时限内无终态事件"
                     break
