@@ -97,6 +97,10 @@ python3 .sandcastle/deepagents-pilot/pilot1742/maintenance.py status
 
 域核验使用同 UID 的内核 PID/精确出生身份/父身份清单（macOS libproc，Linux proc），不是 ps 中父进程无 children 或单一 session 空闲。预派发基线界定无关的既有分支；任何无法沿身份/父链归属到该无关分支的新进程（包括 setsid 后再被 init 接管的后代）阻止证明。不可读、PID 复用、枚举变化、缺 wait 均不放行。原监督器可持久封闭单个已结束域；此后无须依赖它仍在运行。
 
+派发前采集失败与在途收尾失败分别处理：监督器先绑定精确身份，再采集基线。只有原监督器、尚无已封存基线且未进入 Popen 时，才能写 `local_resource_not_started(reason=baseline_unavailable)` 并以退出78返回；不启动命令，也不伪造 wait/自然成功。此证据只结束该次未派发资源，不自动重试。绑定前自身丢失或来不及落证据仍 unknown。已生成基线的资源不能使用此取消路径。
+
+采集仍只接受完整快照，不忽略 ESRCH/ENOENT、不因权限失败接受部分结果。三次失败各自保留固定阶段/errno；终态拒绝写 `local_resource_diagnostics`，区分缺 wait/域、epoch 不符、采集失败与无法归属的新 PID（不含命令/环境）。普通进程在枚举与读取之间退出也能使整次快照失败；它证明本次无法核全，不证明模型仍活。此时已派发任务继续 unknown，后续 poll/reconcile 须取得原合同的完整证据。不能把退出78或一次测试成功当成 HOST 持续可用性保证。
+
 动作退出写 `action_exits`，封住该 job 后续资源预留。资源暂未结束时保留原 unknown；原 owner 后续 poll 或自然退出后的精确 owner reconcile 可消费其完整 wait/域证据，在 `resolutions` 记录 `local-session-ended`，不修改失败与原时间，不 resume。四入口仍须确认当前维护代次。只有 close 的旧适配器仍不足以证明。
 
 此证明限本机同 UID CLI 及其后代，不能用于 Docker/Boat/T3 或会变更执行身份的命令。新生但来源已不可追溯的**无关孤儿**也可能阻止域封闭；不能靠名称、年龄、PID 消失或手填布尔排除。监督器在绑定/wait 之前自身丢失、动作没有返回、或缺可信后代域证据时仍 unknown。它解决可控超时与自然重启，不追认双失联历史。

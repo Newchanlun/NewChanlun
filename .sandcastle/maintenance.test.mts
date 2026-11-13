@@ -96,18 +96,22 @@ test("同 boot 的 decision/Wayfinder 超时 wait + session 清空后释放，�
   const { maintenanceCommand } = await import("./maintenance.mts");
   const root = mkdtempSync(join(tmpdir(), "maintenance-timeout-"));
   try {
+    const stderr: string[] = [];
     for (const lane of ["decision", "wayfinder"] as const) {
       const owner = new MaintenanceOwner(lane, root);
       const result = await owner.work("isolated-timeout", () => new Promise<number>((resolve, reject) => {
         const command = maintenanceCommand("/bin/sh", ["-c", "printf ready; exec /bin/sleep 30"]);
         const child = spawn(command.file, command.args, { stdio: ["ignore", "pipe", "pipe"] });
+        child.stderr.on("data", data => stderr.push(String(data)));
         child.stdout.once("data", () => setTimeout(() => child.kill("SIGTERM"), 20));
         child.once("error", reject);
         child.once("close", code => resolve(code!));
       }));
-      assert.equal(result, 143);
+      assert.equal(result, 143, stderr.join(""));
       owner.stop();
     }
-    assert.equal(control(root, "status").inflight.length, 0);
+    const report = control(root, "status");
+    const evidence = execFileSync("python3", ["-c", "import sqlite3,sys,json; d=sqlite3.connect(sys.argv[1]); d.row_factory=sqlite3.Row; print(json.dumps({t:[dict(r) for r in d.execute('SELECT * FROM '+t)] for t in ['local_resources','local_resource_diagnostics']}))", join(root, "maintenance.sqlite3")], {encoding:"utf8"});
+    assert.equal(report.inflight.length, 0, JSON.stringify({report, stderr, evidence}));
   } finally { rmSync(root, { recursive: true, force: true }); }
 });

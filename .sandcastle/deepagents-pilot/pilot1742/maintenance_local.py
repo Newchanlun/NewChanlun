@@ -13,14 +13,21 @@ if not __package__:
 from pilot1742.maintenance_epoch import local_epoch
 
 
-def resources_idle(rows: list[dict]) -> bool:
+def resources_idle(rows: list[dict], diagnostics: list[str] | None = None) -> bool:
+    def reject(reason: str) -> bool:
+        if diagnostics is not None:
+            diagnostics.append(reason)
+        return False
     if not rows:
         return True
     try:
         from pilot1742.maintenance_processes import stable_snapshot
         epoch = local_epoch()
-        if any(not r['waited_at'] or not r['domain'] or (r['host'], r['boot']) != epoch for r in rows):
-            return False
+        if any((r['host'], r['boot']) != epoch for r in rows):
+            return reject('epoch_or_binding_missing')
+        rows = [r for r in rows if not r.get('not_started')]
+        if any(not r['waited_at'] or not r['domain'] for r in rows):
+            return reject('wait_or_domain_missing')
         pending = [r for r in rows if not r['domain']['sealed_at']]
         if not pending:
             return True
@@ -41,12 +48,16 @@ def resources_idle(rows: list[dict]) -> bool:
                 if more <= outside:
                     break
                 outside.update(more)
-            if any(pid != os.getpid() and pid not in outside and baseline.get(pid, [None])[0] != data[0]
-                   for pid, data in current.items()):
-                return False
+            unclassified = [pid for pid, data in current.items()
+                            if pid != os.getpid() and pid not in outside and baseline.get(pid, [None])[0] != data[0]]
+            if unclassified:
+                return reject('unclassified_process_pids=' + ','.join(map(str, sorted(unclassified))))
         return True
-    except (OSError, ValueError, KeyError, TypeError, subprocess.SubprocessError):
-        return False
+    except OSError as error:
+        from pilot1742.maintenance_processes import UnstableSnapshot
+        return reject(str(error) if isinstance(error, UnstableSnapshot) else f'resource_read errno={error.errno}')
+    except (ValueError, KeyError, TypeError, subprocess.SubprocessError):
+        return reject('resource_evidence_invalid')
 
 
 def main() -> int:
@@ -63,7 +74,13 @@ def main() -> int:
         return 78
     os.setsid()
     gate = Gate(args.root)
-    gate.bind_local_resource(args.resource)  # 此后才允许启动 CLI，无 check/spawn 领取间隙。
+    from pilot1742.maintenance_processes import UnstableSnapshot
+    try:
+        gate.bind_local_resource(args.resource)  # 此后才允许启动 CLI，无 check/spawn 领取间隙。
+    except UnstableSnapshot as error:
+        gate.local_resource_not_started(args.resource)
+        print(str(error), file=sys.stderr)  # 固定原因码/errno，不输出 argv/环境。
+        return 78  # 未派发失败；不能继续执行下面的 Popen。
     received = []
     child = None
     def forward(signum, frame):

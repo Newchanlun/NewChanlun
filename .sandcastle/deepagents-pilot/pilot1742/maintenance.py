@@ -80,6 +80,10 @@ class Gate:
                     pid INTEGER, start TEXT, sid INTEGER, child_pid INTEGER, code INTEGER, waited_at TEXT);
                 CREATE TABLE IF NOT EXISTS local_resource_domains (resource TEXT PRIMARY KEY, baseline TEXT,
                     supervisor TEXT, sealed_at TEXT);
+                CREATE TABLE IF NOT EXISTS local_resource_not_started (resource TEXT PRIMARY KEY,
+                    pid INTEGER, start TEXT, reason TEXT, at TEXT);
+                CREATE TABLE IF NOT EXISTS local_resource_diagnostics (resource TEXT PRIMARY KEY,
+                    reason TEXT, at TEXT);
                 CREATE TABLE IF NOT EXISTS action_exits (job TEXT PRIMARY KEY, owner TEXT, generation INTEGER,
                     pid INTEGER, start TEXT, opaque_clear INTEGER, at TEXT);
                 CREATE TABLE IF NOT EXISTS action_returns (job TEXT PRIMARY KEY, owner TEXT, generation INTEGER,
@@ -200,7 +204,6 @@ class Gate:
         from pilot1742.maintenance_processes import stable_snapshot
         pid = os.getpid()
         host, boot = local_epoch()
-        baseline = stable_snapshot()
         start, sid = identity(pid), os.getsid(0)
         if sid != pid:
             raise ValueError('supervisor must own session')
@@ -211,8 +214,24 @@ class Gate:
             self._owner(db, row['owner'])
             db.execute('UPDATE local_resources SET host=?,boot=?,pid=?,start=?,sid=? WHERE id=?',
                        (host, boot, pid, start, sid, resource))
+        # 先绑定监督身份，再采集基线；基线失败时尚未执行 Popen，可留下精确未派发证据。
+        baseline = stable_snapshot()
+        with self.tx() as db:
+            if db.execute('SELECT 1 FROM local_resource_not_started WHERE resource=?', (resource,)).fetchone():
+                raise ValueError('resource dispatch cancelled')
             db.execute('INSERT INTO local_resource_domains VALUES(?,?,?,NULL)',
                        (resource, json.dumps(baseline), baseline[pid][0]))
+
+    def local_resource_not_started(self, resource: str) -> None:
+        """只供原监督器在基线失败、Popen 之前返回；不是消失证明或通用取消入口。"""
+        with self.tx() as db:
+            row = db.execute('SELECT * FROM local_resources WHERE id=?', (token(resource),)).fetchone()
+            if (row is None or row['pid'] != os.getpid() or row['start'] != identity(os.getpid())
+                    or (row['host'], row['boot']) != local_epoch() or row['waited_at'] is not None
+                    or db.execute('SELECT 1 FROM local_resource_domains WHERE resource=?', (resource,)).fetchone()):
+                raise ValueError('resource may have dispatched')
+            db.execute('INSERT OR IGNORE INTO local_resource_not_started VALUES(?,?,?,?,?)',
+                       (resource, row['pid'], row['start'], 'baseline_unavailable', now()))
 
     def local_resource_waited(self, resource: str, child_pid: int, code: int) -> None:
         if type(child_pid) is not int or child_pid < 1 or type(code) is not int:
@@ -220,7 +239,8 @@ class Gate:
         with self.tx() as db:
             row = db.execute('SELECT * FROM local_resources WHERE id=?', (token(resource),)).fetchone()
             if (row is None or row['pid'] != os.getpid() or row['start'] != identity(os.getpid())
-                    or (row['host'], row['boot']) != local_epoch() or row['waited_at'] is not None):
+                    or (row['host'], row['boot']) != local_epoch() or row['waited_at'] is not None
+                    or not db.execute('SELECT 1 FROM local_resource_domains WHERE resource=?', (resource,)).fetchone()):
                 raise ValueError('wrong resource supervisor')
             db.execute('UPDATE local_resources SET child_pid=?,code=?,waited_at=? WHERE id=?',
                        (child_pid, code, now(), resource))
@@ -232,6 +252,8 @@ class Gate:
             for row in rows:
                 domain = db.execute('SELECT * FROM local_resource_domains WHERE resource=?', (row['id'],)).fetchone()
                 row['domain'] = dict(domain) if domain else None
+                row['not_started'] = bool(db.execute('SELECT 1 FROM local_resource_not_started WHERE resource=? AND pid=? AND start=?',
+                                                    (row['id'], row['pid'], row['start'])).fetchone())
         return resources_idle(rows)
 
     def seal_local_resource(self, resource: str) -> None:
@@ -242,9 +264,14 @@ class Gate:
             domain = db.execute('SELECT * FROM local_resource_domains WHERE resource=?', (resource,)).fetchone()
             proof = dict(row, domain=dict(domain) if domain else None)
         from pilot1742.maintenance_local import resources_idle
-        if resources_idle([proof]):
-            with self.tx() as db:
+        diagnostics: list[str] = []
+        settled = resources_idle([proof], diagnostics)
+        with self.tx() as db:
+            if settled:
                 db.execute('UPDATE local_resource_domains SET sealed_at=? WHERE resource=?', (now(), resource))
+            else:
+                db.execute('INSERT OR REPLACE INTO local_resource_diagnostics VALUES(?,?,?)',
+                           (resource, diagnostics[0], now()))
 
     def settle_local_actions(self, owner: str) -> None:
         with self.tx() as db:
