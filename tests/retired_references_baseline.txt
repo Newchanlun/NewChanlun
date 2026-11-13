@@ -140,11 +140,6 @@ chanlun/escalate/silent-dual-core-c1-seam-ruling-20260715.md|chanlun/review-resu
 chanlun/escalate/type2-dual-caliber-ruling-20260721.md|chanlun/review-results/cert-density-doctrine-research-20260721.md
 chanlun/escalate/v3-lifecycle-r43-review-request-20260720.md|chanlun/review-results/v3-lifecycle-statemachine-impl-20260720.md
 chanlun/escalate/v3-lifecycle-r43-review-request-20260720.md|chanlun/review-results/v3-lifecycle-statemachine-implementation-card-20260720.md
-chanlun/harness/WORKERS.md|chanlun/agent-roster-20260715.md
-chanlun/harness/WORKERS.md|chanlun/plans/mainline-merged-roadmap-20260717.md
-chanlun/harness/WORKERS.md|docs/proof/
-chanlun/harness/WORKERS.md|rust/.cargo/config.toml
-chanlun/harness/harness-ledger-20260719.md|chanlun/review-results/worktree-leftover-inventory-20260719.md
 chanlun/plans/runner-rs-seam-designs-20260721.md|tests/theta_v0_perf_profile.rs
 docs/ROADMAP.md|.chanlun/review-results/filter-spec-71-20260623.md
 docs/adr/0001-graded-exit-and-shortdiff-doctrine.md|.chanlun/review-results/consolidation-termination-research-20260727.md
