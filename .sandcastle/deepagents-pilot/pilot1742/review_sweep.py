@@ -417,8 +417,8 @@ class Sweep:
             pid = self._launch(number, head, attempt)
             self._launch_markers[pid] = (marker, marker.read_text())
             return pid
-        except Closed:
-            # reserve 拒绝意味着尚未派发；不能消耗唯一续跑机会或制造启动退避。
+        except (Closed, NotStarted):
+            # 仅派发边界的未启动证明可释放；已启动异常保留标记。
             marker.unlink()
             raise
 
@@ -869,6 +869,10 @@ def serve_round(private_key: Path, *, auto_merge: bool = False, max_running: int
     return result
 
 
+class NotStarted(OSError):
+    """派发边界证明 Popen 未成功；只用于释放本轮启动标记。"""
+
+
 def spawner(private_key: Path, maintenance: Owner | None = None) -> Spawn:
     owner = maintenance or Owner("review")
     pending: dict[int, tuple[subprocess.Popen, str]] = {}
@@ -882,7 +886,13 @@ def spawner(private_key: Path, maintenance: Owner | None = None) -> Spawn:
                 del pending[pid]
         return cancelled
     def spawn(number: int, attempt: int, head: str, log: Path) -> int:
-        reservation = owner.reserve(f"pr:{number}:{head}:{attempt}")
+        try:
+            reservation = owner.reserve(f"pr:{number}:{head}:{attempt}")
+        except Closed:
+            raise
+        except Exception as error:
+            raise NotStarted('reservation failed before spawn') from error
+        process = None
         try:
             log.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
             with open(log, "ab", opener=lambda p, f: os.open(p, f, 0o600)) as out:
@@ -892,9 +902,13 @@ def spawner(private_key: Path, maintenance: Owner | None = None) -> Spawn:
                                         cwd=Path(__file__).resolve().parents[1])
                 pending[process.pid] = (process, reservation)
                 return process.pid
-        except OSError:
-            owner.gate.cancel_unstarted(owner.id, reservation, 'spawn_failed')
-            raise
+        except OSError as error:
+            if process is not None:
+                raise  # Popen 已返回；即使后续 bookkeeping 失败也不能撤销准入。
+            try:
+                owner.gate.cancel_unstarted(owner.id, reservation, 'spawn_failed')
+            finally:
+                raise NotStarted('spawn failed before exec') from error
     spawn.reap = reap  # type: ignore[attr-defined]
     return spawn
 

@@ -126,13 +126,23 @@ def supervise(args, command: list[str], notify: int | None = None, signal_mask=N
     if received:
         child.send_signal(received[-1])
     code = child.wait()
-    gate.local_resource_waited(args.resource, child.pid, code)
-    gate.seal_local_resource(args.resource)
+    # 业务 wait 已完成；控制账本失败不能改写业务码或放弃内核后代监督。
+    waited = False
+    try:
+        gate.local_resource_waited(args.resource, child.pid, code)
+        waited = True
+        gate.seal_local_resource(args.resource)
+    except Exception:
+        print("local resource evidence write failed", file=sys.stderr, flush=True)
     result = code if code >= 0 else 128 - code
     if notify is not None:
-        # 已记录 primary wait。调用方可返回业务码，守护者保留内核收养域。
-        os.write(notify, f'{result}\n'.encode())
-        os.close(notify)
+        # 返回真实 wait 码与账本提交解耦；即使调用方失联也继续监督后代。
+        try:
+            os.write(notify, f'{result}\n'.encode())
+        except OSError:
+            pass
+        finally:
+            os.close(notify)
         devnull = os.open(os.devnull, os.O_RDWR)
         for fd in (0, 1, 2):
             os.dup2(devnull, fd)
@@ -140,7 +150,11 @@ def supervise(args, command: list[str], notify: int | None = None, signal_mask=N
             os.close(devnull)
         from pilot1742.maintenance_subreaper import wait_remaining
         wait_remaining()
-        gate.seal_local_resource(args.resource)
+        if waited:
+            try:
+                gate.seal_local_resource(args.resource)
+            except Exception:
+                pass  # 不补签失败的 wait；封闭提交失败仍由账本保持 unknown。
     return result
 
 

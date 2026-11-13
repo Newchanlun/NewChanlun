@@ -1139,8 +1139,13 @@ def _main(argv: list[str] | None = None, *, on_execution: Callable[[], None] | N
                 return cancel_worker(run, args.role, args.head)
             executor = TicketExecutor(unit, gateway, claims=store, workers_log=args.workers_log,
                                       crash=_sigkill_at(args.crash_at), cutover=cutover_store)
-            if on_execution is not None:
-                on_execution()
+            from .maintenance import ExecutorBusy
+            try:
+                if on_execution is not None:
+                    on_execution()
+            except ExecutorBusy as error:
+                print(str(error), file=sys.stderr)
+                return EXIT_BUSY
             try:
                 pilot = open_v2_run(args.state_root, unit, task, executor, model_rules=args.model_rules)
             except Busy as error:
@@ -1165,7 +1170,7 @@ def _main(argv: list[str] | None = None, *, on_execution: Callable[[], None] | N
 
 def _manual_main(arguments: list[str]) -> int:
     """手动 run 先登记进程，在真实执行边界领取；只读/登记命令不创建维护状态。"""
-    from .maintenance import Closed, Owner
+    from .maintenance import Closed, ExecutorBusy, Owner
     parser = argparse.ArgumentParser(add_help=False)
     parser.add_argument("--state-root", type=Path, default=DEFAULT_STATE_ROOT)
     parser.add_argument("--drain-root", type=Path)
@@ -1197,7 +1202,7 @@ def _manual_main(arguments: list[str]) -> int:
             witness = owner.gate.start_bound(job, unit.run_id, binding.state_root)
         try:
             code = _main(arguments, on_execution=entering)
-        except Closed:
+        except (Closed, ExecutorBusy):
             return 75
         finally:
             if witness is not None:

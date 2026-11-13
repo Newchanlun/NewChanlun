@@ -23,6 +23,10 @@ ROOT = Path('/Volumes/AgentStorage/newchanlun-maintenance')
 LANES = ('decision', 'wayfinder', 'executor', 'review')
 
 
+class ExecutorBusy(ValueError):
+    """已有活执行见证；保留调用方 Busy75 合同。"""
+
+
 class Closed(RuntimeError):
     pass
 
@@ -365,7 +369,7 @@ class Gate:
                             return previous['id']
                         raise ValueError('executor owner still active')
                     if any(alive(w['pid'], w['start']) for w in db.execute('SELECT * FROM witnesses WHERE job=? AND id NOT IN (SELECT witness FROM returns)', (previous['id'],))):
-                        raise ValueError('executor controller still active')
+                        raise ExecutorBusy('executor controller still active')
                     db.execute('UPDATE jobs SET owner=? WHERE id=?', (owner, previous['id']))
                     db.execute('INSERT OR IGNORE INTO lineage VALUES(?,?)', (previous['id'], owner))
                 return previous['id']
@@ -534,7 +538,7 @@ class Gate:
                 raise ValueError('invalid executor binding')
             previous = list(db.execute('SELECT * FROM witnesses WHERE job=? AND id NOT IN (SELECT witness FROM returns)', (job,)))
             if previous and (binding['kind'] != 'executor' or any(alive(w['pid'], w['start']) for w in previous)):
-                raise ValueError('previous executor unresolved')
+                raise ExecutorBusy('previous executor unresolved')
             db.execute('INSERT INTO witnesses VALUES(?,?,?,?,?,NULL)', (witness, job, pid, start, now()))
             for old in previous:
                 db.execute('INSERT OR REPLACE INTO recoveries VALUES(?,?)', (old['id'], witness))
