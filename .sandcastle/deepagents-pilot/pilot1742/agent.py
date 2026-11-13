@@ -375,7 +375,9 @@ def system_prompt(run: PilotRun) -> str:
         skills_root = PSTACK_TARGET + "/installed/skills/"
         poteto_mode = skills_root + "poteto-mode/SKILL.md"
     else:
-        models = PSTACK_MODELS.read_text() if PSTACK_MODELS.exists() else "(pstack-models.md 缺失)"
+        models = run.spec.model_rules_text
+        if models is None:
+            models = PSTACK_MODELS.read_text() if PSTACK_MODELS.exists() else "(pstack-models.md 缺失)"
         skills_root, poteto_mode = SKILLS_ROOT, POTETO_MODE
     task = run.spec.task
     ending = V1_ENDING if run.spec.v == 1 else _v2_ending(run)
@@ -397,7 +399,7 @@ def system_prompt(run: PilotRun) -> str:
 - 独审结论只认 VERDICT: PASS/BLOCK。BLOCK 时把完整 findings、validation、response.caveats 写进新的 author brief 返修，再 commit_candidate、再 run_worker(review)。
 {ending}- 一条消息只调用一个业务工具，等它返回再决定下一步。
 
-模型角色表（~/.agents/pstack-models.md，本 run 已冻结：作者 {run.spec.author_model}，独审 {run.spec.reviewer_model}，主控 {run.spec.brain_model}）：
+模型角色表（本 run 已冻结：作者 {run.spec.author_model}，独审 {run.spec.reviewer_model}，主控 {run.spec.brain_model}）：
 {models}
 
 任务：{task.title}
@@ -431,7 +433,9 @@ def build_agent(run: PilotRun, checkpointer: Any, model: BaseChatModel | None = 
     else:
         rules_dir = run.dir / "read-only-rules"
         rules_dir.mkdir(exist_ok=True)
-        if PSTACK_MODELS.is_file():
+        if run.spec.model_rules_text is not None:
+            (rules_dir / "pstack-models.md").write_text(run.spec.model_rules_text, encoding="utf-8")
+        elif PSTACK_MODELS.is_file():
             (rules_dir / "pstack-models.md").write_bytes(PSTACK_MODELS.read_bytes())
         rules_root = str(PSTACK_MODELS.parent) + "/"
         project_docs = run.dir / "read-only-project"

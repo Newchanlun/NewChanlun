@@ -47,6 +47,8 @@ fork 使用官方 `POST /sandboxes/{sandboxId}/fork` API，其他操作继续使
 
 VM 已停止且缺回执或缺 `key_erased=true` 删除证据时，观察返回 `EffectUnknown`，提示显式恢复同一 VM，不自动续费或重派。回执已缓存且删除证据已落盘时，沿原绑定确认停止即可完成收尾，无须恢复 VM。恢复后先按原认领和监督进程对账：进程仍在就继续等，已结束且无回执就保持未知。
 
+新建 run 的角色表以 `--model-rules`（未指定时为全局默认）为准，全文随 `run.json` 冻结。Boat 打包直接使用该快照，不另读 `model_rules` 选择角色；配置中的 `model_rules` 仍用于技能内路径重写，以及没有全文快照的历史 run。恢复历史 run 不迁移其角色或执行绑定。
+
 ## 启动、观察和恢复
 
 设置 `PILOT_BOAT_CONFIG` 为上述配置文件的绝对路径，设置 `PILOT_BOAT_API_KEY_FILE` 为控制端 scoped key 文件的绝对路径，再使用原 `python -m pilot1742.executor` 或 `python -m pilot1742 run` 入口。已有 `BOAT_API_KEY` 环境入口继续优先使用。调用方仍调用 `run_worker(role, brief)`，发布与批准入口不变。
