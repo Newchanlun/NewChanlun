@@ -95,11 +95,15 @@ python3 .sandcastle/deepagents-pilot/pilot1742/maintenance.py status
 
 `maintenanceCommand(file, args)` 仅在 `MaintenanceOwner.work` 内启用监督器；旧的无 context 调用原样返回命令。不持锁执行 CLI，stdin/env/stdout 原样透传，不记命令或凭据。decision 的异步 spawn 和 Wayfinder 的同步 execFileSync 共用此入口。监督器转发 SIGTERM/SIGINT，实际 wait 并保存业务退出码，然后记录可验证域封闭；不会自动 kill 逃逸后代。
 
-域核验使用同 UID 的内核 PID/精确出生身份/父身份清单（macOS libproc，Linux proc），不是 ps 中父进程无 children 或单一 session 空闲。预派发基线界定无关的既有分支；任何无法沿身份/父链归属到该无关分支的新进程（包括 setsid 后再被 init 接管的后代）阻止证明。不可读、PID 复用、枚举变化、缺 wait 均不放行。原监督器可持久封闭单个已结束域；此后无须依赖它仍在运行。
+域核验使用同 UID 的内核 PID/精确出生身份/父身份清单（macOS libproc，Linux proc），不是 ps 中父进程无 children 或单一 session 空闲。预派发基线界定无关的既有分支；任何无法沿身份/父链归属到该无关分支的新进程（包括 setsid 后再被 init 接管的后代）阻止证明。权限/身份不可读、PID 复用、无法完成后置枚举、缺 wait 均不放行。原监督器可持久封闭单个已结束域；此后无须依赖它仍在运行。
 
 派发前采集失败与在途收尾失败分别处理：监督器先绑定精确身份，再采集基线。只有原监督器、尚无已封存基线且未进入 Popen 时，才能写 `local_resource_not_started(reason=baseline_unavailable)` 并以退出78返回；不启动命令，也不伪造 wait/自然成功。此证据只结束该次未派发资源，不自动重试。绑定前自身丢失或来不及落证据仍 unknown。已生成基线的资源不能使用此取消路径。
 
-采集仍只接受完整快照，不忽略 ESRCH/ENOENT、不因权限失败接受部分结果。三次失败各自保留固定阶段/errno；终态拒绝写 `local_resource_diagnostics`，区分缺 wait/域、epoch 不符、采集失败与无法归属的新 PID（不含命令/环境）。普通进程在枚举与读取之间退出也能使整次快照失败；它证明本次无法核全，不证明模型仍活。此时已派发任务继续 unknown，后续 poll/reconcile 须取得原合同的完整证据。不能把退出78或一次测试成功当成 HOST 持续可用性保证。
+采集将正常退出竞态与权限/身份失败分开。Linux 用 `/proc/<pid>` 目录 fd 绑定一次读取的 incarnation，再从该 fd 读取 uid/stat；macOS 只把零长度且 ESRCH 识别为已退出。遇 ENOENT/ESRCH 或首次观察 zombie，必须重新枚举并读取后置集合，纳入此间出生及被 init 接管的后代，不能只复查消失 PID 或接受原枚举的部分结果。已成功取得的身份记录保留为保守上界；跨轮同 PID 出生身份不同即拒绝。zombie 的出生身份也参与复用检查。
+
+后置集合允许新增、退出，无需两次 PID 集合相同；但最终一轮的每个在场 PID 必须取得身份或此前已核实的终态。连续三轮仍存在未完成的退出覆盖则返回 `exit_fence_incomplete`，不无限重试；权限错误、短读和身份错配不走退出分支。外层最多三次采集的固定原因仍落 `local_resource_diagnostics`。这不是原子全机快照，而是用于严格资源分类的保守覆盖；未归属存活后代仍阻止封闭。高强度 churn 若持续阻止覆盖仍返回 unknown，不能将这种失败写成已恢复。
+
+回归在独立的持续 fork/wait 发生器运行时执行原 TS/Python 超时入口，保留 143、ETIMEDOUT、自然重启后 drained 及活后代 unknown 断言；定序测试另外锁住退出后出生的孤儿、权限失败、PID 复用和覆盖耗尽。
 
 动作退出写 `action_exits`，封住该 job 后续资源预留。资源暂未结束时保留原 unknown；原 owner 后续 poll 或自然退出后的精确 owner reconcile 可消费其完整 wait/域证据，在 `resolutions` 记录 `local-session-ended`，不修改失败与原时间，不 resume。四入口仍须确认当前维护代次。只有 close 的旧适配器仍不足以证明。
 

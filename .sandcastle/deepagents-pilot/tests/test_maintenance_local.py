@@ -2,6 +2,7 @@
 import json
 import os
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -10,6 +11,30 @@ from pilot1742.maintenance import Gate, Owner
 
 REPO = Path(__file__).resolve().parents[3]
 TSX = REPO / 'node_modules/.bin/tsx'
+
+
+@pytest.fixture
+def process_churn():
+    """独立于被测域的持续 fork/wait；测试结束仅停止自己创建的发生器。"""
+    code = """
+import signal, subprocess, sys, time
+running = True
+def stop(*_):
+    global running
+    running = False
+signal.signal(signal.SIGTERM, stop)
+print('ready', flush=True)
+while running:
+    subprocess.run(['/bin/sleep', '0.003'], check=True)
+"""
+    process = subprocess.Popen([sys.executable, '-c', code], stdout=subprocess.PIPE, text=True)
+    assert process.stdout.readline().strip() == 'ready'
+    try:
+        yield
+    finally:
+        process.terminate()
+        process.wait(timeout=5)
+        process.stdout.close()
 
 
 def run_ts(tmp_path, body):
@@ -34,7 +59,7 @@ def confirm_all(root):
     return gate, generation
 
 
-def test_actual_timeout_and_normal_scheduler_restart_drain_same_boot(tmp_path):
+def test_actual_timeout_and_normal_scheduler_restart_drain_same_boot(tmp_path, process_churn):
     result = run_ts(tmp_path, '''
 for (const lane of ['decision', 'wayfinder']) {
   const owner = new MaintenanceOwner(lane, root);
@@ -62,7 +87,7 @@ for (const lane of ['decision', 'wayfinder']) {
 
 
 @pytest.mark.parametrize('escape', ['group', 'session'])
-def test_primary_wait_with_live_descendant_in_other_group_is_not_drained(tmp_path, escape):
+def test_primary_wait_with_live_descendant_in_other_group_is_not_drained(tmp_path, escape, process_churn):
     fifo = tmp_path / 'release'
     os.mkfifo(fifo)
     child_code = f"with open({str(fifo)!r}) as f: f.read(1)"
@@ -169,7 +194,7 @@ def test_live_owner_poll_can_settle_returned_domain_without_rewriting_failure(tm
         gate.reserve_local_resource(owner, job)
 
 
-def test_sync_wayfinder_timeout_uses_native_wait_not_close(tmp_path):
+def test_sync_wayfinder_timeout_uses_native_wait_not_close(tmp_path, process_churn):
     result = run_ts(tmp_path, '''
 const owner = new MaintenanceOwner('wayfinder', root);
 let code;

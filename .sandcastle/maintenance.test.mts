@@ -95,6 +95,20 @@ test("同 boot 的 decision/Wayfinder 超时 wait + session 清空后释放，�
   const { spawn } = await import("node:child_process");
   const { maintenanceCommand } = await import("./maintenance.mts");
   const root = mkdtempSync(join(tmpdir(), "maintenance-timeout-"));
+  const churn = spawn("python3", ["-c", `import signal,subprocess
+running=True
+def stop(*_):
+    global running
+    running=False
+signal.signal(signal.SIGTERM,stop)
+print('ready',flush=True)
+while running:
+    subprocess.run(['/bin/sleep','0.003'],check=True)
+`], { stdio: ["ignore", "pipe", "inherit"] });
+  await new Promise<void>((resolve, reject) => {
+    churn.once("error", reject);
+    churn.stdout.once("data", () => resolve());
+  });
   try {
     const stderr: string[] = [];
     for (const lane of ["decision", "wayfinder"] as const) {
@@ -113,5 +127,11 @@ test("同 boot 的 decision/Wayfinder 超时 wait + session 清空后释放，�
     const report = control(root, "status");
     const evidence = execFileSync("python3", ["-c", "import sqlite3,sys,json; d=sqlite3.connect(sys.argv[1]); d.row_factory=sqlite3.Row; print(json.dumps({t:[dict(r) for r in d.execute('SELECT * FROM '+t)] for t in ['local_resources','local_resource_diagnostics']}))", join(root, "maintenance.sqlite3")], {encoding:"utf8"});
     assert.equal(report.inflight.length, 0, JSON.stringify({report, stderr, evidence}));
-  } finally { rmSync(root, { recursive: true, force: true }); }
+  } finally {
+    await new Promise<void>(resolve => {
+      churn.once("close", () => resolve());
+      churn.kill("SIGTERM");
+    });
+    rmSync(root, { recursive: true, force: true });
+  }
 });

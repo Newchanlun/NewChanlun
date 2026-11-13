@@ -109,4 +109,103 @@ def test_native_diagnostics_distinguish_disappearance_permission_and_short_read(
     monkeypatch.setattr(ctypes, 'CDLL', lambda *a, **kw: Library())
     with pytest.raises(maintenance_processes.UnstableSnapshot) as result:
         maintenance_processes.stable_snapshot()
-    assert str(result.value).count(f'proc_pidinfo_size errno={number}') == 3
+    assert str(result.value).count('exit_fence_incomplete' if number == 3 else f'proc_pidinfo_size errno={number}') == 3
+
+
+def test_exited_read_is_fenced_and_live_escaped_descendant_is_retained():
+    scans = iter([{10, 20}, {10, 30}])
+    def read(pid):
+        if pid == 20:
+            raise ProcessLookupError(3, 'gone')
+        return [f'{pid}:birth', 1]
+    assert maintenance_processes.collect(lambda: next(scans), read) == {
+        10: ['10:birth', 1], 30: ['30:birth', 1]}
+
+
+def test_fence_does_not_require_unchanged_population():
+    scans = iter([{10, 20}, {10, 30, 40}])
+    def read(pid):
+        if pid == 20:
+            raise FileNotFoundError(2, 'gone')
+        return [f'{pid}:birth', 10]
+    assert set(maintenance_processes.collect(lambda: next(scans), read)) == {10, 30, 40}
+
+
+def test_fence_permission_and_reused_identity_are_not_disappearance():
+    def denied(pid):
+        raise PermissionError(13, 'private')
+    with pytest.raises(PermissionError):
+        maintenance_processes.collect(lambda: {10}, denied)
+    scans = iter([{10, 20}, {10}])
+    births = iter(['old', 'new'])
+    def reused(pid):
+        if pid == 20:
+            raise FileNotFoundError(2, 'gone')
+        return [next(births), 1]
+    with pytest.raises(maintenance_processes.UnstableSnapshot, match='identity_changed'):
+        maintenance_processes.collect(lambda: next(scans), reused)
+
+
+def test_unresolved_disappearances_have_bounded_fences():
+    scans = iter([{20}, {30}, {40}])
+    def gone(pid):
+        raise FileNotFoundError(2, 'gone')
+    with pytest.raises(maintenance_processes.UnstableSnapshot, match='exit_fence_incomplete'):
+        maintenance_processes.collect(lambda: next(scans), gone)
+
+
+def test_mac_exit_fence_uses_new_enumeration_not_just_missing_pid_probe(monkeypatch):
+    import ctypes
+    class Library:
+        round = 0
+        def proc_listpids(self, kind, uid, buffer, size):
+            if buffer is not None:
+                self.round += 1
+                buffer[0] = 20 if self.round == 1 else 30
+            return 4
+        def proc_pidinfo(self, pid, kind, arg, ptr, size):
+            if pid == 20:
+                ctypes.set_errno(3)
+                return 0
+            info = ptr._obj
+            info.pid, info.uid, info.ppid, info.seconds = pid, os.getuid(), 1, 123
+            return size
+    library = Library()
+    monkeypatch.setattr(sys, 'platform', 'darwin')
+    monkeypatch.setattr(ctypes, 'CDLL', lambda *a, **kw: library)
+    assert maintenance_processes.snapshot() == {30: ['30:123:0', 1]}
+    assert library.round == 2
+
+
+def test_linux_enoent_fence_keeps_new_orphan_and_pins_proc_directory(tmp_path, monkeypatch):
+    proc = tmp_path / 'proc'
+    proc.mkdir()
+    (proc / '20').mkdir()
+    real_open = os.open
+    def opening(path, flags, **kwargs):
+        if path == proc / '20':
+            (proc / '20').rmdir()
+            (proc / '30').mkdir()
+            # state + ppid + 17 intervening fields + starttime.
+            (proc / '30' / 'stat').write_text('30 (space name) S 1 ' + '0 ' * 17 + '123')
+        if path == 'stat':
+            assert 'dir_fd' in kwargs
+        return real_open(path, flags, **kwargs)
+    monkeypatch.setattr(maintenance_processes, 'Path', lambda _: proc)
+    monkeypatch.setattr(sys, 'platform', 'linux')
+    monkeypatch.setattr(os, 'open', opening)
+    assert maintenance_processes.snapshot() == {30: ['30:123', 1]}
+
+
+def test_newly_observed_zombie_also_requires_descendant_fence():
+    scans = iter([{20}, {20, 30}])
+    def read(pid):
+        return (maintenance_processes.EndedProcess('20:birth') if pid == 20
+                else ['30:escaped', 1])
+    assert maintenance_processes.collect(lambda: next(scans), read) == {30: ['30:escaped', 1]}
+
+
+def test_zombie_pid_reuse_does_not_inherit_terminal_evidence():
+    reads = iter([maintenance_processes.EndedProcess('old'), ['new', 1]])
+    with pytest.raises(maintenance_processes.UnstableSnapshot, match='identity_changed'):
+        maintenance_processes.collect(lambda: {20}, lambda _: next(reads))
