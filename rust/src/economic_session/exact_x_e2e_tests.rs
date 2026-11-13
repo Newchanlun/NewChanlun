@@ -72,14 +72,57 @@ fn listening(path: &Path) -> bool {
     let Ok(mut s) = UnixStream::connect(path) else {
         return false;
     };
-    s.shutdown(std::net::Shutdown::Write).unwrap();
+    // BSD/macOS 在对端已先接受并关闭连接时，shutdown(SHUT_WR) 可返回 ENOTCONN（ErrorKind::NotConnected）；
+    // 与 history_simulation_entry.py:connect_probe 对齐：忽略 NotConnected，继续读取对端关闭前写入的回复；
+    // 若对端未写任何字节即关闭（如连接数瞬时受限），返回 false 由 wait_for 重试直至期限耗尽。
+    if let Err(err) = s.shutdown(std::net::Shutdown::Write) {
+        assert_eq!(
+            err.kind(),
+            std::io::ErrorKind::NotConnected,
+            "半关闭就绪探针失败：{err}"
+        );
+    }
     s.set_read_timeout(Some(std::time::Duration::from_secs(5)))
         .unwrap();
     let mut reply = String::new();
-    s.read_to_string(&mut reply).unwrap();
-    let reply = strict_json(reply.trim_end().as_bytes()).unwrap();
+    match s.read_to_string(&mut reply) {
+        Ok(_) => {}
+        Err(err) if err.kind() == std::io::ErrorKind::NotConnected => return false,
+        Err(err) => panic!("读取就绪探针回复失败：{err}"),
+    }
+    let trimmed = reply.trim_end();
+    if trimmed.is_empty() {
+        return false;
+    }
+    let reply = strict_json(trimmed.as_bytes()).unwrap();
     assert_eq!(reply["ok"], false, "空连接须止于输送层：{reply}");
     true
+}
+
+#[test]
+fn listening_probe_tolerates_early_peer_close_and_verifies_transport_rejection() {
+    let dir = tempfile::tempdir().unwrap();
+    assert!(!listening(&dir.path().join("missing.sock")));
+
+    let early_path = dir.path().join("early-close.sock");
+    let early_listener = UnixListener::bind(&early_path).unwrap();
+    let early_peer = std::thread::spawn(move || {
+        let (stream, _) = early_listener.accept().unwrap();
+        drop(stream);
+    });
+    assert!(!listening(&early_path));
+    early_peer.join().unwrap();
+
+    let ready_path = dir.path().join("ready.sock");
+    let ready_listener = UnixListener::bind(&ready_path).unwrap();
+    let ready_peer = std::thread::spawn(move || {
+        let (mut stream, _) = ready_listener.accept().unwrap();
+        let mut buf = [0u8; 1];
+        assert_eq!(stream.read(&mut buf).unwrap(), 0);
+        stream.write_all(b"{\"ok\":false}\n").unwrap();
+    });
+    assert!(listening(&ready_path));
+    ready_peer.join().unwrap();
 }
 fn wait_for(path: &Path) {
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
