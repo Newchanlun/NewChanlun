@@ -524,3 +524,60 @@ test("沿用前准入与正式派发同一组检查：controller 未提交或镜
   assert.throws(() => checkReviewAdmission({ identity: () => ({ head, dirty: "" }),
     ready: () => { throw new Error("外部独审必须先完成当前代码 head 的 Docker 验收"); } }), /Docker 验收/);
 });
+
+test("宿主 Docker context 穿过 TS 卷检查、失败回收和 Python trim；不注入容器 env", () => {
+  const root = realpathSync(mkdtempSync(join(tmpdir(), "review-context-")));
+  try {
+    const bin = join(root, "bin"); mkdirSync(bin);
+    const trace = join(root, "docker.jsonl");
+    const fake = `#!/usr/bin/env python3
+import json, os, sys
+from pathlib import Path
+with open(${JSON.stringify(trace)}, "a") as f:
+    f.write(json.dumps({"binary": Path(sys.argv[0]).name, "context": os.environ.get("DOCKER_CONTEXT", "orbstack"), "args": sys.argv[1:]}) + "\\n")
+if os.environ.get("DOCKER_CONTEXT") == "missing-context":
+    sys.exit(7)
+if Path(sys.argv[0]).name == "colima":
+    print("/var/lib/docker: 1 GiB trimmed")
+elif sys.argv[1:] == ["context", "show"]:
+    print(os.environ.get("DOCKER_CONTEXT", "orbstack"))
+elif sys.argv[1] == "run":
+    print("${"a".repeat(40)}\\nHEAD\\n")
+elif sys.argv[1] == "ps":
+    print("${container}")
+`;
+    for (const name of ["docker", "colima"]) writeFileSync(join(bin, name), fake, { mode: 0o700 });
+    for (const context of ["colima", undefined, "missing-context"]) {
+      const checkoutRoot = join(root, context ?? "default"); mkdirSync(checkoutRoot);
+      const env: NodeJS.ProcessEnv = { ...process.env, PATH: `${bin}:${process.env.PATH}` };
+      if (context === undefined) delete env.DOCKER_CONTEXT;
+      else env.DOCKER_CONTEXT = context;
+      const code = `
+        const w = await import(${JSON.stringify(import.meta.url.replace(".test.mts", ".mts"))});
+        const assert = (await import("node:assert/strict")).default;
+        const volume = w.reviewVolumeName("${randomUUID()}");
+        const volumes = w.dockerReviewVolumes();
+        if (${JSON.stringify(context)} === "missing-context") {
+          assert.throws(() => volumes.snapshot(volume, "${image}", "fixture"));
+          assert.throws(() => volumes.remove(volume));
+        } else {
+          assert.equal(volumes.snapshot(volume, "${image}", "fixture").head, "${"a".repeat(40)}");
+          volumes.remove(volume);
+        }
+        const trim = w.trimVmDisk(${JSON.stringify(join(checkoutRoot, "run", "model"))});
+        assert.equal(trim.state, ${JSON.stringify(context === "colima" ? "trimmed" : context ? "failed" : "skipped")});
+        const sandbox = w.reviewSandbox("${image}", {});
+        assert.equal(sandbox.env?.DOCKER_CONTEXT, undefined);
+      `;
+      execFileSync(process.execPath, ["--import", "tsx", "--input-type=module", "-e", code],
+        { env, stdio: ["ignore", "pipe", "pipe"], timeout: 30_000 });
+      const rows = readFileSync(trace, "utf8").trim().split("\n").map((line) => JSON.parse(line));
+      assert.ok(rows.every((row) => row.context === (context ?? "orbstack")));
+      assert.ok(rows.some((row) => row.args[0] === "run"));
+      assert.ok(rows.some((row) => row.args.join(" ") === "context show"));
+      assert.equal(rows.some((row) => row.args[0] === "rm"), context !== "missing-context");
+      assert.equal(rows.some((row) => row.binary === "colima"), context === "colima");
+      rmSync(trace);
+    }
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
