@@ -87,10 +87,14 @@ def test_unbound_legacy_sighting_survives_disappearance_and_next_generation(tmp_
 def test_native_argv_boundaries_for_own_isolated_child(tmp_path):
     import subprocess
     import sys
-    command = [sys.executable, '-c', 'import sys; sys.stdin.read()',
+    command = [sys.executable, '-c', 'import sys; print("ready", flush=True); sys.stdin.read()',
                '--out', 'not a flag --maintenance-root /elsewhere', '--maintenance-root', str(tmp_path)]
-    child = subprocess.Popen(command, stdin=subprocess.PIPE)
+    child = subprocess.Popen(command, stdin=subprocess.PIPE, stdout=subprocess.PIPE)
     try:
+        import select
+        assert select.select([child.stdout], [], [], 5)[0], "child did not reach ready"
+        assert child.stdout.readline() == b'ready\n'
+        assert child.poll() is None
         assert m.process_arguments(child.pid) == command
     finally:
         child.communicate(timeout=5)
@@ -219,3 +223,20 @@ def test_interpreter_options_are_accepted_by_real_python(options):
 ])
 def test_interpreter_stops_before_unrelated_script_arguments(args):
     assert m.python_entry(args) == (None, [])
+
+
+@pytest.mark.parametrize('data', [b'', b'\0', b'python'])
+def test_empty_or_incomplete_proc_argv_cannot_hide_target(tmp_path, monkeypatch, data):
+    monkeypatch.setattr(m.sys, 'platform', 'linux')
+    monkeypatch.setattr(m.Path, 'read_bytes', lambda _: data)
+    monkeypatch.setattr(m, 'identity', lambda _: 'unchanged')
+    monkeypatch.setattr(m.subprocess, 'run', lambda *a, **kw: SimpleNamespace(
+        stdout='123 1 python -m pilot1742.executor serve --maintenance-root /other'))
+    with pytest.raises(ValueError, match='incomplete process argv'):
+        m.Gate(tmp_path).status()
+
+
+def test_proc_argv_preserves_trailing_empty_arguments(monkeypatch):
+    monkeypatch.setattr(m.sys, 'platform', 'linux')
+    monkeypatch.setattr(m.Path, 'read_bytes', lambda _: b'python\0-c\0pass\0\0')
+    assert m.process_arguments(123) == ['python', '-c', 'pass', '']

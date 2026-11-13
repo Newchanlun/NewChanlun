@@ -795,7 +795,9 @@ def process_arguments(pid: int) -> list[str]:
     """读取原生 argv 边界，只返回 argv；不解析或输出环境区。"""
     if sys.platform.startswith('linux'):
         data = Path(f'/proc/{pid}/cmdline').read_bytes()
-        return [part.decode() for part in data.rstrip(b'\0').split(b'\0')]
+        if not data or not data.endswith(b'\0') or not data.split(b'\0', 1)[0]:
+            raise ValueError('incomplete process argv')
+        return [part.decode() for part in data[:-1].split(b'\0')]
     if sys.platform == 'darwin':
         import ctypes
         libc = ctypes.CDLL('/usr/lib/libSystem.B.dylib', use_errno=True)
