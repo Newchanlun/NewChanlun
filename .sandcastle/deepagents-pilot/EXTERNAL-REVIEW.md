@@ -20,6 +20,14 @@ export PYTHONPATH=.sandcastle/approval-signing:.sandcastle/deepagents-pilot
 
 两位 reviewer 固定请求 `external_review.MODELS` 中的两个模型（常规为 `gpt-6.1-sol`、`claude-opus-5-5`；当前是下节的临时组合 `kimi-k3.1-pro`、`claude-opus-5-5`），各自独立 checkout、进程和新 session，不要求作者自报模型。模型字段记录 launcher 所选路由；实际上游模型身份仍须由独立路由证据确认。
 
+## 指定 Docker context
+
+需要在 Colima 验收和审阅、但全局默认是 OrbStack 时，在启动 controller 的环境中设置 `DOCKER_CONTEXT=colima`，不修改全局默认。该值沿部署准入、监督、容器/卷检查与回收、VM trim 传递；不存在或不可用的显式 context 按原失败路径处理，不重试默认 daemon。未设置时仍由 Docker 使用原默认 context。
+
+这是宿主进程的定位变量，不进入审阅容器。`DOCKER_HOST`、`DOCKER_CONFIG`、TLS 覆盖和任意 secret env 仍不转发。审查模型由 `MODELS → launch.json.model → codexWorker({model})` 决定，不依赖转发 `SANDCASTLE_MAIN_MODEL`；正式审阅准入不调用主控模型探针。
+
+同一部署的派发、恢复与回收须使用同一 context；旧 run 没有持久化 context 绑定，不能换 daemon 后接管。部署新代码后，部署 owner 必须按新 controller head 重新绑定 Docker 准入，不能沿用 `923d5f1187fefc549f810643390068884c36ba9e` 的验收。隔离 fake 测试不代替这一步。
+
 ## Codex 额度耗尽时的临时组合
 
 触发条件：CLIProxy 的 Codex/OpenAI 上游没有可用额度，`gpt-6.1-sol` 请求全部失败（2026-11-07 实测 401，唯一账号额度为 0，reset_at=2026-11-11T01:00Z），此时任何新审都无法得到两份 PASS。
