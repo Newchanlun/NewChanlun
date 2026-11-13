@@ -75,6 +75,17 @@ def legacy_boat_runtime(env):
     return env
 
 
+PRODUCTION_LOCAL_POLL_SECONDS = PilotRun.LOCAL_POLL_SECONDS  # 导入时、任何 fixture 改动之前读取
+
+
+@pytest.fixture(autouse=True)
+def fast_local_poll(monkeypatch):
+    """#1875：本地 worker 轮询在生产是 2 s，测试里的假子进程早已结束，整套测试约 44% 的时间花在空等上。
+    只对本 pytest 进程里构造的 PilotRun 生效，把间隔缩到 0.05 s（monkeypatch 用完即还原）；经 env.driver()
+    等方式另起的子进程重新导入模块，仍按 2 s 轮询。生产默认值由 test_run.py 的单独用例锁定。"""
+    monkeypatch.setattr(PilotRun, "LOCAL_POLL_SECONDS", 0.05)
+
+
 @pytest.fixture(autouse=True)
 def no_real_docker(monkeypatch):
     """#1986：外部独审的孤儿卷 reaper 会调 docker；测试一律走空替身，不碰本机真实的卷和容器。"""
