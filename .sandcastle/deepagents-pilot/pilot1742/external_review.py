@@ -1362,7 +1362,18 @@ class ExternalReview:
                     if supervisor_alive(worker, rows):
                         return False
                     if not (worker / "launch.json").exists():
-                        if any(worker.iterdir()):
+                        files = {p.name for p in worker.iterdir()}
+                        if not files:
+                            continue
+                        # prepare 尚未获派发权；只认原回收器的精确 intent/路径终态。
+                        if files != {"prepare.json", "checkout-cleanup.json"}:
+                            return False
+                        prepare = _read(worker / "prepare.json")
+                        cleanup = _read(worker / "checkout-cleanup.json")
+                        checkout = self.checkout_root / actual.run_id / model
+                        if (prepare.get("run_id") != actual.run_id or prepare.get("checkout") != str(checkout)
+                                or cleanup.get("state") != "removed" or cleanup.get("checkout") != str(checkout)
+                                or os.path.lexists(checkout)):
                             return False
                         continue
                     launch = _read(worker / "launch.json")

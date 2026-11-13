@@ -52,7 +52,7 @@ executor 的票/计划登记不等于执行准入：完成读取、等待判定�
 新代码在实际执行前登记 owner、绑定原 run 和 witness，执行期间确认维护代次，返回后核对资源终态。
 serve 仍活着时保留其原任务 owner；并行控制器由 witness 原子互斥拒绝。同一已领取 run 可在关闭后续做，
 未领取的新 run 返回 75；这不会 resume 维护代次。无维护时原命令参数、模型规则和业务返回码不变。
-手动 run 收尾也清点完整 executor scope；未知资源仍阻止 drained。
+手动 run 收尾也清点完整 executor scope；未知资源仍阻止 drained。返回 75 时与 serve 一致保留原 run 许可，不提前 settle；资源返回证据仍照常记录。
 
 review sweep 若在扫描后、reserve 前遇到关闸，会撤回本次 `.resumes`／`.launched` 标记；
 恢复准入后可以继续原 attempt，不消耗唯一自动续跑名额，也不产生虚假的 600 秒启动退避。
@@ -60,13 +60,13 @@ review sweep 若在扫描后、reserve 前遇到关闸，会撤回本次 `.resum
 原有 legacy、SPEC、票锁和发布判据仍然生效。
 
 review 父进程先持久预留，再 `Popen(start_new_session=True)`；子进程原子接收这份预留，
-即使接收前已关闸也能继续。预留只能接收一次。Popen 明确失败时，启动方通过原子撤销记录证明未启动；与 adopt 竞争时只能一方成功，不能撤销已转交的任务。子进程在 gh/身份/target 绑定前返回，则记未启动收尾，可在开闸期间重试。父进程退出或没有 children 不消除预留。
+即使接收前已关闸也能继续。预留只能接收一次。Popen 明确失败时，启动方通过原子撤销记录证明未启动；与 adopt 竞争时只能一方成功，不能撤销已转交的任务。子进程在 gh/身份/target 绑定前返回，则记未启动收尾，可在开闸期间重试。启动方还保留原 Popen 对象：poll/wait 确认子进程退出、且原子核实未 adopt/未产生 witness 时，记录 spawn_exits 与 exited_before_adopt 撤销。关闸期间也收集此证据，并撤回该次精确匹配的启动/续跑标记，不派新任务。adopt 先完成则不得撤销。父进程退出或没有 children 不消除预留；父也在收集 wait 证据前死亡的预留仍 unknown，本版没有可追认的持久 wait 回执。
 正式审查还检查 supervisor 与容器结束回执；缺回执不计完成。`container_closed != true` 的监督退出失败只允许使用下述绑定资源终态证据恢复。
 executor 复用 `_worker_activity` 的本地/Boat 生命周期证据，仍在途或 effect_unknown 的 worker 不释放维护记录。正常轮询与恢复对账都清点整个 `state_root/runs`，包括未被 queued unit/claim 引用的孤儿和非 queued 运行；派工仍只消费原 queued 范围。每轮先撤销旧 coverage，前后两次使用同一完整 scope 判据；目录或资源读取失败保持 unknown。
 
-review 的正常 sweep、已绑定任务结束与 reconcile 共用 `ExternalReview.maintenance_idle`：遍历所有 run 目录，核 target 与目录身份、全部现役/退役 reviewer 的 launch 和 receipt 的 run/head/base/controller/model/launch-id，以及 supervisor 与容器终态。缺 target、孤儿 worker、缺 launch 或错配关闭回执均不能证明覆盖。
+review 的正常 sweep、已绑定任务结束与 reconcile 共用 `ExternalReview.maintenance_idle`：遍历所有 run 目录，核 target 与目录身份、全部现役/退役 reviewer 的 launch 和 receipt 的 run/head/base/controller/model/launch-id，以及 supervisor 与容器终态。缺 target、孤儿 worker、缺 launch 或错配关闭回执均不能证明覆盖。唯一未派发分支：worker 目录仅有 prepare.json 与 checkout-cleanup.json，二者精确匹配 target/run/model 的预期 checkout，cleanup=removed 且路径（含符号链接）已不存在，才证明准备阶段没有模型资源；多余文件或任何启动记录均拒绝。
 
-owner 绑定 PID 与启动时间。业务结果与生命周期终止分开：普通错误返回且资源已收尾，可以结束本次维护工作；退出码本身不是证明。进程消失、未返回的异常与不完整资源回执保留 unknown，
+owner 绑定 PID 与启动时间；ps 读取固定 LC_ALL=C、TZ=UTC，避免终端 locale/TZ 改变同一进程身份。业务结果与生命周期终止分开：普通错误返回且资源已收尾，可以结束本次维护工作；退出码本身不是证明。进程消失、未返回的异常与不完整资源回执保留 unknown，
 没有 TTL、心跳过期自动释放或 TCP 空闲推断。重启会登记新 owner，不能覆盖旧记录。
 失联 owner 使用下面的证据对账入口；保留账本与原任务回执，不删记录绕过 unknown。
 
@@ -89,6 +89,8 @@ python3 .sandcastle/deepagents-pilot/pilot1742/maintenance.py status
 - **decision/Wayfinder**：await 动作返回（包括 gh 失败、锁忙与业务失败）后，须确认该动作登记的模型进程均已明确结束，再记录绑定 job/owner/领取代次/PID 的 `action_returns`，随后 finish。模型资源在启动前登记；信号、超时或未等待的资源保留 unknown，不因异常被业务捕获而消失。若返回记录与 finish 之间父退出，前一条可恢复；未返回的动作仍不能凭父无 children 推断结束。
 - **空闲失联 owner**：须有原进程原子 poll 的准入账本检查点（或本代次关闭确认）、已覆盖记录且没有任何未证实任务。退休不代替新入口对本代次的确认。只见进程消失不能退休。executor/review 还检查事先绑定的 state-root 资源范围；任务转交历史不丢失。
 
+新 TS owner 在登记及每次动作准入前绑定本机 OS host/boot 身份（macOS IOPlatformUUID + kern.bootsessionuuid；Linux machine-id + boot_id）。当前 decision/Wayfinder 动作的模型子进程域限定为本机 CLI，不含 Docker/Boat/T3。若未来扩展资源域，不得沿用该证明。同一 host 的原生 boot 已变化时，reconcile 可用整个旧本机进程域已结束的证据退休该代动作；这证明本地执行生命周期终止，不证明业务或远端请求成功。对账再核 boot，另存 local_actions/epoch_resolutions，保留原 unknown 与时间。不同 host、同 boot、旧任务无预绑定、绑定 executor/review 的任务均不得使用此路径。此入口不会重启机器；重启影响现役任务，必须另由主控安排，不能为清账自行执行。旧 owner 仍被 fence，新一代仍需重新确认。
+
 对账新增 `resolutions/reconciliations`，不改原 jobs 状态、owner stopped 标志或历史时间。旧 owner 被 fence，下一代仍要求当前入口的新确认。`status.reconciled` 给出原 owner 和完成对账代次。
 
 ### 历史 review 监督异常：先核资源来源，再对账终态
@@ -105,13 +107,13 @@ python -m pilot1742.external_review reconcile-resources --run-id <run-uuid> --mo
 
 ### 执行期间的确认与异常隔离
 
-detached review 和手动 review/migrate 在已准入工作执行期间轮询确认维护代次，不阻断工作收尾。`migrate-stale` 在实际发布前绑定原 target/witness，不记录为未启动取消。TS 关闸后停止领取后续票，但保留同轮已完成结果；executor/sweep 初始化或维护调用失败仍执行各自清理，保持 sweep 的异常隔离。tsx 外壳只在观察到同 lane 后代时消重，包含本机验证的 `node_modules/.bin/tsx` 链；无对应后代的进程仍计未覆盖。
+detached review 和手动 review/migrate 在已准入工作执行期间轮询确认维护代次，不阻断工作收尾。`migrate-stale` 在实际发布前绑定原 target/witness，不记录为未启动取消。TS 关闸后停止领取后续票，但保留同轮已完成结果；executor/sweep 轮次内维护调用失败时跳过领取并下轮重试，stop 失败仍关闭 sweep/client；executor 的 sweep 工厂失败不阻断 intake，下轮重试工厂。TS loop 的 poll 失败进入原轮次异常路径并继续轮询，单轮调用返回失败。启动时尚未成功建立 owner 的故障仍由服务启动恢复处理，不宣称已覆盖。tsx 外壳只在观察到同 lane 后代时消重，包含本机验证的 `node_modules/.bin/tsx` 链；无对应后代的进程仍计未覆盖。
 
 ### 仍不能补造的证据
 
 升级前没有预先绑定的旧 owner/job、孤儿 executor，或既没有返回记录、也没有成功同 run 恢复链的调用，没有足够来源证明结束。它们保持 `missing_bound_completion`；旧未覆盖进程的观察也持久保留，退出不自动清除（`missing_prelaunch_binding`）。新代码补上的预执行绑定和执行端返回记录解决后续父失联/孤儿自然完成，不把新协议追认到旧运行。启动后、登记前的同一精确进程身份稍后完成登记，可变为覆盖；原观察历史仍保留。
 
-升级前已经留下、没有 action_returns 的 TS unknown 记录仍缺证据；新代码不能为过去补签。模型被信号/超时中断且资源收尾未证实的 TS 调用也保留 unknown。此入口不从 CLI 日志或单个模型回执推测整项工作结束。缺 witness、目标漂移、旧 PID 被复用、缺少容器/Boat 结束证据均不能恢复。首次加载必须沿自然轮次完成旧运行，不能把切换旧运行的证明交给本命令。
+升级前已经留下、没有 action_returns 的 TS unknown 记录仍缺证据；新代码不能为过去补签。模型被信号/超时中断且资源收尾未证实的 TS 调用在同 boot 下也保留 unknown；仅预绑定的新动作可在上述整机启动代次边界后对账。此入口不从 CLI 日志或单个模型回执推测整项工作结束。缺 witness、目标漂移、旧 PID 被复用、缺少容器/Boat 结束证据均不能恢复。首次加载必须沿自然轮次完成旧运行，不能把切换旧运行的证明交给本命令。
 
 ## 由部署 owner 在自然边界加载
 

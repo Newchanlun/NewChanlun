@@ -17,6 +17,8 @@ from pathlib import Path
 if not __package__:
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+from pilot1742.maintenance_epoch import local_epoch
+
 ROOT = Path('/Volumes/AgentStorage/newchanlun-maintenance')
 LANES = ('decision', 'wayfinder', 'executor', 'review')
 
@@ -32,7 +34,8 @@ def now() -> str:
 def identity(pid: int) -> str:
     if type(pid) is not int or pid < 1:
         raise ValueError('invalid pid')
-    result = subprocess.run(['ps', '-p', str(pid), '-o', 'lstart=', '-o', 'stat='], capture_output=True, text=True)
+    result = subprocess.run(['ps', '-p', str(pid), '-o', 'lstart=', '-o', 'stat='], capture_output=True, text=True,
+                            env={**os.environ, 'LC_ALL': 'C', 'TZ': 'UTC'})
     fields = result.stdout.strip().rsplit(None, 1)
     if result.returncode or len(fields) != 2 or fields[1].startswith('Z'):
         raise ValueError('process unavailable')
@@ -76,6 +79,11 @@ class Gate:
                 CREATE TABLE IF NOT EXISTS action_returns (job TEXT PRIMARY KEY, owner TEXT, generation INTEGER,
                     pid INTEGER, start TEXT, at TEXT);
                 CREATE TABLE IF NOT EXISTS cancellations (job TEXT PRIMARY KEY, owner TEXT, reason TEXT, at TEXT);
+                CREATE TABLE IF NOT EXISTS local_owners (owner TEXT PRIMARY KEY, host TEXT, boot TEXT);
+                CREATE TABLE IF NOT EXISTS local_actions (job TEXT PRIMARY KEY, owner TEXT, host TEXT, boot TEXT);
+                CREATE TABLE IF NOT EXISTS epoch_resolutions (job TEXT PRIMARY KEY, host TEXT, old_boot TEXT,
+                    new_boot TEXT, generation INTEGER, at TEXT);
+                CREATE TABLE IF NOT EXISTS spawn_exits (job TEXT PRIMARY KEY, owner TEXT, pid INTEGER, code INTEGER, at TEXT);
                 CREATE TABLE IF NOT EXISTS preflight_returns (witness TEXT PRIMARY KEY, at TEXT);
                 CREATE TABLE IF NOT EXISTS recoveries (previous TEXT PRIMARY KEY, successor TEXT);
                 CREATE TABLE IF NOT EXISTS returns (witness TEXT PRIMARY KEY, at TEXT);
@@ -103,14 +111,19 @@ class Gate:
         finally:
             db.close()
 
-    def register(self, lane: str, pid: int | None = None) -> str:
+    def register(self, lane: str, pid: int | None = None, *, local_actions: bool = False) -> str:
         if lane not in LANES:
             raise ValueError('invalid lane')
+        if local_actions and lane not in ('decision', 'wayfinder'):
+            raise ValueError('only host-local graph actions support boot evidence')
+        epoch = local_epoch() if local_actions else None
         pid = os.getpid() if pid is None else pid
         start, owner = identity(pid), uuid.uuid4().hex
         with self.tx() as db:
             db.execute('INSERT INTO owners(id,lane,pid,start,registered_at,ack) VALUES(?,?,?,?,?,?)',
                        (owner, lane, pid, start, now(), -1))
+            if epoch is not None:
+                db.execute('INSERT INTO local_owners VALUES(?,?,?)', (owner, *epoch))
         return owner
 
     def _owner(self, db, owner):
@@ -118,6 +131,9 @@ class Gate:
         if (row is None or row['stopped'] or not alive(row['pid'], row['start'])
                 or db.execute('SELECT 1 FROM reconciliations WHERE owner=?', (owner,)).fetchone()):
             raise ValueError('owner unavailable')
+        epoch = db.execute('SELECT host,boot FROM local_owners WHERE owner=?', (owner,)).fetchone()
+        if epoch is not None and tuple(epoch) != local_epoch():
+            raise ValueError('local process domain changed')
         return row
 
     def coverage(self, owner: str, covered: bool) -> None:
@@ -156,9 +172,29 @@ class Gate:
                 db.execute('INSERT INTO jobs VALUES(?,?,?,?,?,?,?,?)',
                            (job, owner, work, state['generation'], now(), None, 'active', int(transferable)))
                 db.execute('INSERT INTO lineage VALUES(?,?)', (job, owner))
+                epoch = db.execute('SELECT host,boot FROM local_owners WHERE owner=?', (owner,)).fetchone()
+                if epoch is not None:
+                    db.execute('INSERT INTO local_actions VALUES(?,?,?,?)', (job, owner, *epoch))
         if job is None:
             raise Closed('maintenance closed')
         return job
+
+    def spawn_exited(self, owner: str, job: str, pid: int, code: int) -> bool:
+        """启动方持有的 Popen.poll/wait 回执；adopt 前代码无工作权限。不是 ps 消失推断。"""
+        if type(pid) is not int or pid <= 0 or type(code) is not int:
+            raise ValueError('invalid spawn exit')
+        with self.tx() as db:
+            self._owner(db, owner)
+            row = db.execute("SELECT * FROM jobs WHERE id=? AND owner=? AND state='active' AND transferable=1",
+                             (token(job), owner)).fetchone()
+            if row is None:
+                return False  # adopt/既有撤销胜出，不改子 owner 的任务。
+            if db.execute('SELECT 1 FROM witnesses WHERE job=?', (job,)).fetchone():
+                return False
+            db.execute('INSERT OR IGNORE INTO spawn_exits VALUES(?,?,?,?,?)', (job, owner, pid, code, now()))
+            db.execute('INSERT INTO cancellations VALUES(?,?,?,?)', (job, owner, 'exited_before_adopt', now()))
+            db.execute("UPDATE jobs SET state='finished',ended_at=? WHERE id=?", (now(), job))
+            return True
 
     def cancel_unstarted(self, owner: str, job: str, reason: str) -> None:
         """只能由尚持有任务的启动方证明未启动；adopt 与撤销竞争同一事务。"""
@@ -454,16 +490,26 @@ class Gate:
             recoveries = dict(db.execute('SELECT previous,successor FROM recoveries'))
             preflight = {r[0] for r in db.execute('SELECT witness FROM preflight_returns')}
             actions = {r['job']: dict(r) for r in db.execute('SELECT * FROM action_returns')}
+            epoch = db.execute('SELECT host,boot FROM local_owners WHERE owner=?', (owner,)).fetchone()
+            action_epochs = {r['job']: dict(r) for r in db.execute('SELECT * FROM local_actions WHERE owner=?', (owner,))}
             scope = db.execute('SELECT data FROM scopes WHERE owner=?', (owner,)).fetchone()
             census = db.execute('SELECT 1 FROM censuses WHERE owner=?', (owner,)).fetchone()
         def unknown(reason):
             return {'owner': owner, 'generation': generation, 'result': 'unknown', 'reason': reason}
-        if alive(row['pid'], row['start']):
+        current_epoch = local_epoch() if epoch is not None else None
+        retired_epoch = (epoch is not None and current_epoch is not None
+                         and epoch['host'] == current_epoch[0] and epoch['boot'] != current_epoch[1])
+        if not retired_epoch and alive(row['pid'], row['start']):
             return unknown('owner_alive')
         # 任务未登记/旧版本没有绑定，不允许从磁盘补一份任意 receipt 解锁。
         verified = []
         for job in jobs:
             if job['state'] == 'finished':
+                continue
+            origin = action_epochs.get(job['id'])
+            if (retired_epoch and row['lane'] in ('decision', 'wayfinder') and job['id'] not in bindings
+                    and origin is not None and origin['host'] == epoch['host'] and origin['boot'] == epoch['boot']):
+                verified.append((job['id'], 'local-boot-ended'))
                 continue
             receipt = actions.get(job['id'])
             if (receipt and receipt['owner'] == owner and receipt['generation'] == job['generation']
@@ -499,10 +545,17 @@ class Gate:
                     or {r[0] for r in db.execute('SELECT witness FROM preflight_returns')} != preflight):
                 return unknown('evidence_changed')
             # 死亡身份不能重新领取；所有正常写入口也检查 fence。历史 job/owner 不改写。
-            if alive(row['pid'], row['start']):
+            if retired_epoch:
+                if local_epoch() != current_epoch:
+                    return unknown('local_epoch_changed')
+            elif alive(row['pid'], row['start']):
                 return unknown('owner_alive')
             for job, witness in verified:
                 db.execute('INSERT OR IGNORE INTO resolutions VALUES(?,?,?,?)', (job, witness, generation, now()))
+                if witness == 'local-boot-ended':
+                    assert current_epoch is not None and epoch is not None
+                    db.execute('INSERT OR IGNORE INTO epoch_resolutions VALUES(?,?,?,?,?,?)',
+                               (job, epoch['host'], epoch['boot'], current_epoch[1], generation, now()))
             db.execute('INSERT OR IGNORE INTO reconciliations VALUES(?,?,?)', (owner, generation, now()))
         return {'owner': owner, 'generation': generation, 'result': 'reconciled'}
 
@@ -651,11 +704,12 @@ def main(argv=None) -> int:
     parser.add_argument('--work')
     parser.add_argument('--job')
     parser.add_argument('--natural', action='store_true')
+    parser.add_argument('--local-actions', action='store_true')
     args = parser.parse_args(argv)
     try:
         gate = Gate(args.root)
         if args.command == 'reconcile': result = gate.reconcile(args.generation, args.owner)
-        elif args.command == 'register': result = {'owner': gate.register(args.lane, args.pid)}
+        elif args.command == 'register': result = {'owner': gate.register(args.lane, args.pid, local_actions=args.local_actions)}
         elif args.command == 'poll': result = {'closed': gate.poll(args.owner)}
         elif args.command == 'admit': result = {'job': gate.admit(args.owner, args.work)}
         elif args.command == 'returned-action': gate.returned_action(args.owner, args.job); result = {'ok': True}

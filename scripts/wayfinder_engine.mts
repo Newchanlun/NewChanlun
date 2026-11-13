@@ -1611,16 +1611,19 @@ async function main(): Promise<void> {
       return;
     }
     for (;;) {
-      if (maintenance?.poll()) { await sleep(cfg.pollSeconds * 1000); continue; }
-      if (graphAdmissionFrozen()) { console.log("旧入口冻结，本轮不再领新工作"); return; }
       try {
-        await runOnce(cfg, maintenance);
+        if (!maintenance?.poll()) {
+          if (graphAdmissionFrozen()) { console.log("旧入口冻结，本轮不再领新工作"); return; }
+          await runOnce(cfg, maintenance);
+        }
       } catch (e) {
         console.error(`[wayfinder_engine] 一轮异常：${e}`);
       }
       await sleep(cfg.pollSeconds * 1000);
     }
-  } finally { maintenance?.stop(); }
+  } finally {
+    try { maintenance?.stop(); } catch { console.error("maintenance stop unavailable，保留未确认状态"); }
+  }
 }
 
 if ((import.meta as { main?: boolean }).main) {

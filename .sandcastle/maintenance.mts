@@ -25,7 +25,7 @@ export class MaintenanceOwner {
   constructor(lane: "decision" | "wayfinder", root?: string) {
     this.lane = lane;
     this.root = root;
-    this.id = this.call("register", ["--lane", lane, "--pid", String(process.pid)]).owner as string;
+    this.id = this.call("register", ["--lane", lane, "--pid", String(process.pid), "--local-actions"]).owner as string;
   }
   private call(command: string, args: string[] = []): Record<string, unknown> {
     const result = spawnSync("python3", [HELPER, ...(this.root ? ["--root", this.root] : []), command, ...args],

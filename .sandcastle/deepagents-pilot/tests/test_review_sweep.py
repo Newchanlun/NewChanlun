@@ -462,6 +462,8 @@ def test_main_loop_survives_tick_errors(monkeypatch, capsys, lane):
     class Boom(Sweep):
         def __init__(self, *args, **kwargs):
             self.lane = lane
+            self.spawn = lambda *args: None
+            self._launch_markers = {}
         def tick(self):
             ticks.append(1)
             if len(ticks) == 1:
@@ -1613,6 +1615,8 @@ def test_manual_loop_logs_actions_taken_before_a_timeout(lane, monkeypatch, caps
     class Boom(Sweep):
         def __init__(self, *args, **kwargs):
             self.lane = lane
+            self.spawn = lambda *args: None
+            self._launch_markers = {}
         def tick(self):
             raise error
     monkeypatch.setattr(module, "Sweep", Boom)

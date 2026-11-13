@@ -5,7 +5,8 @@ import { dirname, join } from "node:path";
 
 export function isolateMaintenance(root: string): void {
   for (const file of [".sandcastle/maintenance.mts",
-    ".sandcastle/deepagents-pilot/pilot1742/maintenance.py"]) {
+    ".sandcastle/deepagents-pilot/pilot1742/maintenance.py",
+    ".sandcastle/deepagents-pilot/pilot1742/maintenance_epoch.py"]) {
     const target = join(root, file);
     mkdirSync(dirname(target), { recursive: true });
     copyFileSync(new URL(`../${file}`, import.meta.url), target);

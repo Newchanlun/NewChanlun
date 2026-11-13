@@ -5,6 +5,7 @@ import fcntl
 import json
 import os
 import signal
+import sqlite3
 import subprocess
 import sys
 import time
@@ -901,12 +902,22 @@ def _serve(args: argparse.Namespace, store: ClaimStore, cutover_store: CutoverSt
     client: GitHubAppClient | None = None
     try:
         maintenance.coverage(False)
-        if args.review_sweep and review_key is not None:
-            from .review_sweep import serve_round
-            sweep_round = serve_round(review_key, auto_merge=args.review_sweep_auto_merge,
-                                      max_running=args.review_sweep_max_running)
         while True:
-            maintenance.poll()  # 关闸确认；intake 仍可推进此前已领取的票。
+            try:
+                maintenance.poll()  # 失败时本轮不得领取，也不重建 owner 掩盖旧记录。
+            except (OSError, ValueError, sqlite3.Error, subprocess.SubprocessError) as error:
+                print(f"round skipped, maintenance unavailable: {type(error).__name__}", file=sys.stderr, flush=True)
+                if args.once:
+                    return 75
+                time.sleep(args.poll_seconds)
+                continue
+            if args.review_sweep and review_key is not None and sweep_round is None:
+                try:
+                    from .review_sweep import serve_round
+                    sweep_round = serve_round(review_key, auto_merge=args.review_sweep_auto_merge,
+                                              max_running=args.review_sweep_max_running)
+                except Exception as error:
+                    print(f"review-sweep initialization unavailable: {type(error).__name__}", file=sys.stderr, flush=True)
             try:
                 cutover_store.load()
             except CutoverError as error:
@@ -928,12 +939,19 @@ def _serve(args: argparse.Namespace, store: ClaimStore, cutover_store: CutoverSt
                 print(f"round skipped, source unreadable (github): {type(error).__name__}: {error}",
                       file=sys.stderr, flush=True)
                 mark_source_unreadable(source_repo, f"github: {type(error).__name__}: {error}")
+            except (OSError, ValueError, sqlite3.Error, subprocess.SubprocessError) as error:
+                if args.once:
+                    raise
+                print(f"round skipped, runtime unavailable: {type(error).__name__}", file=sys.stderr, flush=True)
             if args.once:
                 return 0
             time.sleep(args.poll_seconds)
     finally:
         try:
-            maintenance.stop()
+            try:
+                maintenance.stop()
+            except (OSError, ValueError, sqlite3.Error, subprocess.SubprocessError) as error:
+                print(f"maintenance stop unavailable: {type(error).__name__}", file=sys.stderr, flush=True)
         finally:
             try:
                 if sweep_round is not None:
@@ -1189,7 +1207,8 @@ def _manual_main(arguments: list[str]) -> int:
                         owner.gate.complete_bound(witness)
                     except (OSError, ValueError, KeyError, TypeError, RuntimeError, subprocess.SubprocessError):
                         pass  # 保留资源未知，不把退出码当成资源结束证据。
-                owner.gate.settle_current_executor(witness)
+                if code != 75:
+                    owner.gate.settle_current_executor(witness)
         return code
 
 

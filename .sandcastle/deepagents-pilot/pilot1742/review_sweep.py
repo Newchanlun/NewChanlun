@@ -316,6 +316,7 @@ class Sweep:
         self.github, self.lane, self.spawn, self.rows, self.sync = github, lane, spawn, rows, sync
         self.review_app = review_app
         self.folder = state_root / "sweep"
+        self._launch_markers: dict[int, tuple[Path, str]] = {}
         self._sync_failed = False
         self._backoff: dict[str, Any] | None = None
         self.max_running, self.auto_merge, self.max_age, self.now = max_running, auto_merge, max_age, now
@@ -413,7 +414,9 @@ class Sweep:
         self.folder.mkdir(parents=True, exist_ok=True, mode=0o700)
         marker.write_text(str(time.time()))
         try:
-            return self._launch(number, head, attempt)
+            pid = self._launch(number, head, attempt)
+            self._launch_markers[pid] = (marker, marker.read_text())
+            return pid
         except Closed:
             # reserve 拒绝意味着尚未派发；不能消耗唯一续跑机会或制造启动退避。
             marker.unlink()
@@ -472,7 +475,16 @@ class Sweep:
             return "launch-backoff", None
         return "launch", {"pid": self._launch_marked(marker, number, head, attempt), "attempt": attempt}
 
+    def reap_launches(self) -> None:
+        for pid in getattr(self.spawn, "reap", lambda: [])():
+            saved = self._launch_markers.pop(pid, None)
+            if saved is not None:
+                marker, stamp = saved
+                if marker.exists() and marker.read_text() == stamp:
+                    marker.unlink()  # 已 wait 且未 adopt，未消耗实际执行机会。
+
     def tick(self) -> list[dict[str, Any]]:
+        self.reap_launches()
         try:
             rows = self.rows()
         except Exception as error:  # 不知道谁在审就不能派审：整轮作废
@@ -785,6 +797,8 @@ class ServeRound:
         try:
             if self.maintenance is not None:
                 self.maintenance.coverage(False)
+            self.sweep.reap_launches()
+            if self.maintenance is not None:
                 self.maintenance.gate.bind_scope(self.maintenance.id, self.sweep.lane.state_root,
                                                      self.sweep.lane.source, kind='review')
                 self.maintenance.coverage(self.sweep.lane.maintenance_idle())
@@ -857,18 +871,31 @@ def serve_round(private_key: Path, *, auto_merge: bool = False, max_running: int
 
 def spawner(private_key: Path, maintenance: Owner | None = None) -> Spawn:
     owner = maintenance or Owner("review")
+    pending: dict[int, tuple[subprocess.Popen, str]] = {}
+    def reap() -> list[int]:
+        cancelled = []
+        for pid, (process, reservation) in list(pending.items()):
+            code = process.poll()
+            if code is not None:
+                if owner.gate.spawn_exited(owner.id, reservation, pid, code):
+                    cancelled.append(pid)
+                del pending[pid]
+        return cancelled
     def spawn(number: int, attempt: int, head: str, log: Path) -> int:
         reservation = owner.reserve(f"pr:{number}:{head}:{attempt}")
         try:
             log.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
             with open(log, "ab", opener=lambda p, f: os.open(p, f, 0o600)) as out:
-                return subprocess.Popen(run_review_command(number, attempt, head, private_key) +
+                process = subprocess.Popen(run_review_command(number, attempt, head, private_key) +
                                         ["--maintenance-reservation", reservation, "--maintenance-root", str(owner.gate.root)], stdin=subprocess.DEVNULL,
                                         stdout=out, stderr=out, start_new_session=True,
-                                        cwd=Path(__file__).resolve().parents[1]).pid
+                                        cwd=Path(__file__).resolve().parents[1])
+                pending[process.pid] = (process, reservation)
+                return process.pid
         except OSError:
             owner.gate.cancel_unstarted(owner.id, reservation, 'spawn_failed')
             raise
+    spawn.reap = reap  # type: ignore[attr-defined]
     return spawn
 
 
@@ -926,6 +953,8 @@ def main(argv: list[str] | None = None) -> int:
                   auto_merge=args.auto_merge)
     while True:
         try:
+            owner.coverage(False)
+            sweep.reap_launches()
             owner.gate.bind_scope(owner.id, sweep.lane.state_root, sweep.lane.source, kind='review')
             owner.coverage(sweep.lane.maintenance_idle())
             if not owner.poll():

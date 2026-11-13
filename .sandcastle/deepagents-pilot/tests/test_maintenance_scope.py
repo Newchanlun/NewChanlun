@@ -96,7 +96,7 @@ def test_review_entry_uses_strict_scope(tmp_path, monkeypatch, entry, case):
         monkeypatch.setattr(Path, 'iterdir', unreadable)
     lane = ExternalReview(None, state_root=state, source=tmp_path / 'source')
     owners = closed_owners(tmp_path / 'gate')
-    sweep = SimpleNamespace(folder=tmp_path / 'sweep', lane=lane,
+    sweep = SimpleNamespace(folder=tmp_path / 'sweep', lane=lane, reap_launches=lambda: None,
                             tick=lambda: pytest.fail('closed sweep must not dispatch'))
     if entry == 'serve':
         assert review_sweep.ServeRound(sweep, maintenance=owners['review'])() is None
@@ -148,7 +148,7 @@ def test_run_review_observes_closure_during_already_admitted_work(tmp_path, monk
 
 
 @pytest.mark.parametrize('failure', ['factory', 'stop'])
-def test_executor_cleanup_covers_initialization_and_stop_errors(tmp_path, monkeypatch, failure):
+def test_executor_cleanup_covers_initialization_and_stop_errors(tmp_path, monkeypatch, capsys, failure):
     from pilot1742 import executor, maintenance, queue
     events = []
     def stop():
@@ -168,6 +168,6 @@ def test_executor_cleanup_covers_initialization_and_stop_errors(tmp_path, monkey
     monkeypatch.setattr(queue, 'QueueIntake', lambda *a: SimpleNamespace(once=lambda child: {}))
     args = SimpleNamespace(review_sweep=True, review_sweep_auto_merge=False, review_sweep_max_running=2,
                            state_root=tmp_path, once=True)
-    with pytest.raises(OSError):
-        executor._serve(args, None, SimpleNamespace(load=lambda: None), tmp_path, tmp_path / 'unused')
-    assert events == (['stop'] if failure == 'factory' else ['stop', 'sweep-close', 'client-close'])
+    assert executor._serve(args, None, SimpleNamespace(load=lambda: None), tmp_path, tmp_path / 'unused') == 0
+    assert events == (['stop', 'client-close'] if failure == 'factory' else ['stop', 'sweep-close', 'client-close'])
+    assert ('initialization unavailable' if failure == 'factory' else 'stop unavailable') in capsys.readouterr().err

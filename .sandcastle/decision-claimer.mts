@@ -2394,15 +2394,12 @@ async function main() {
     }
     for (;;) {
       if (graphAdmissionFrozen(d)) { log("旧入口冻结，已领工作收尾后退出"); return; }
-      if (maintenance?.poll()) {
-        if (!a.loop) return;
-        await new Promise((r) => setTimeout(r, LOOP_INTERVAL_MS));
-        continue;
-      }
       try {
-        const sha = ensureSrc(REPO_ROOT, srcDir, git);
-        log(`取证检出对齐远端 main ${sha.slice(0, 10)}`);
-        await round(a, d);
+        if (!maintenance?.poll()) {
+          const sha = ensureSrc(REPO_ROOT, srcDir, git);
+          log(`取证检出对齐远端 main ${sha.slice(0, 10)}`);
+          await round(a, d);
+        }
       } catch (e) {
         if (!(e instanceof MaintenanceClosed)) log(`本轮失败：${e instanceof Error ? e.message : String(e)}`);
         if (!a.loop) process.exitCode = 1;
@@ -2410,7 +2407,9 @@ async function main() {
       if (!a.loop) break;
       await new Promise((r) => setTimeout(r, LOOP_INTERVAL_MS));
     }
-  } finally { maintenance?.stop(); }
+  } finally {
+    try { maintenance?.stop(); } catch { log("maintenance stop unavailable，保留未确认状态"); }
+  }
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1])).href) {
