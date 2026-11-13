@@ -1,5 +1,7 @@
 # 官方 GitHub Actions scaffold 来源与逐文件映射（#1110 AC-1）
 
+> **历史记录（#1992）**：下文的五个 `agent-*.yml` 和 `verify-workflows.py` 已从仓库删除，下文验证表里的 `actionlint .github/workflows/agent-*.yml` 与 `python3 .sandcastle/verify-workflows.py` 不再可运行。本文件只保留 #1110 迁入时的来源映射。
+
 ## upstream 锁定
 
 | 项 | 值 |
