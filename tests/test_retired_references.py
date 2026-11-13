@@ -116,8 +116,6 @@ HISTORICAL = {
     "chanlun/review-results/": "review drafts",
     "chanlun/harness/vendor/": "vendored third-party text",
     ".auto-memory-snapshot/": "memory snapshot export",
-    "docs/agents/pstack-lite/PILOT-1139.md":
-        "record of the #1139 pilot run; its commands are quoted verbatim",
     ".claude/skills/writing-skills/anthropic-best-practices.md":
         "vendored copy of Anthropic docs (site-relative links)",
     ".agents/skills/domain-modeling/CONTEXT-FORMAT.md": "vendored skill; example paths",
