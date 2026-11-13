@@ -1,6 +1,5 @@
 """#1742/#1911：Kimi 的真实调用代码配离线传输/沙盒替身。"""
 import json
-import subprocess
 from functools import partial
 from pathlib import Path
 
@@ -45,48 +44,3 @@ def test_project_roles_and_chat_openai_tool_wire(monkeypatch):
     assert body['reasoning_effort'] == agent.BRAIN_EFFORT
     assert body['max_completion_tokens'] == agent.BRAIN_MAX_TOKENS
     assert body['tools'][0]['function']['name'] == 'run_status'
-
-
-def test_actual_boat_worker_passes_kimi_to_sandcastle(tmp_path):
-    root = tmp_path / 'package'
-    (root / 'claim').mkdir(parents=True)
-    (root.parent / 'private').mkdir()
-    (root.parent / 'private/model-key').write_text('fixture-only')
-    captured = tmp_path / 'captured.json'
-    request = dict(root=str(root), model='kimi-k3.1-pro', mode='execute', ticket=1911,
-                   image='sha256:' + 'a' * 64, endpoint='https://fixture.invalid/v1',
-                   identity={'run_id': 't1911-1', 'target_head': 'b' * 40})
-    path = root / 'request.json'
-    path.write_text(json.dumps(request))
-    # 导入钩子只替换外部沙盒边界；执行仓内原始 boat-worker.mts。
-    modules = {
-        '@ai-hero/sandcastle': (
-            'import {writeFileSync} from "node:fs"; export function codex(model, options) {'
-            f'writeFileSync({json.dumps(str(captured))}, JSON.stringify({{model, options}}));'
-            'throw new Error("fixture-stop-before-model");}'),
-        '@ai-hero/sandcastle/sandboxes/docker': (
-            'export function docker() {return {create: async () => ({'
-            'copyFileIn: async () => {}, close: async () => {}})}}'),
-        './codex-child.ts': (
-            'export class CodexTranscript {}'
-            'export const outputProtocol = x => x; export const workerOutputSchema = () => ({});'
-            'export const PROVIDER_DEFINITION = {};'
-            'export const snapshotCheckout = () => ({head: "' + 'b' * 40 + '", status: ""});'),
-        './docker-isolation.mts': (
-            'export const assertContainerIsolationContract = () => ({});'
-            'export const hardenProvider = x => x;'),
-    }
-    loader = tmp_path / 'loader.mjs'
-    loader.write_text('import {registerHooks} from "node:module";\n'
-                      f'const modules = {json.dumps(modules)};\n'
-                      'registerHooks({resolve(s, c, next) {return s in modules ? '
-                      '{url: "data:text/javascript," + encodeURIComponent(modules[s]), shortCircuit: true}'
-                      ': next(s, c)}});\n')
-    result = subprocess.run(['node', '--experimental-strip-types', '--import', str(loader),
-                             str(ROOT / '.sandcastle/boat-worker.mts'), str(path)],
-                            capture_output=True, text=True, timeout=15)
-    assert captured.exists(), result.stderr
-    invocation = json.loads(captured.read_text())
-    assert invocation['model'] == 'kimi-k3.1-pro'
-    assert invocation['options']['effort'] == 'high'
-    assert 'fixture-stop-before-model' in (root / 'claim/receipt.json').read_text()

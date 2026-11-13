@@ -125,3 +125,20 @@ def test_v1_cli_source_and_existing_run_ignore_new_source(env, tmp_path, monkeyp
     source.unlink()
     assert cli.main(args) == 0
     assert seen[0] == seen[1]
+
+
+def test_local_rules_view_is_frozen_and_does_not_write_run(env, monkeypatch, tmp_path):
+    from pilot1742 import agent
+
+    run = env.create()
+    source = tmp_path / 'global.md'
+    source.write_text('不得使用的新全局表\n')
+    monkeypatch.setattr(agent, 'PSTACK_MODELS', source)
+    monkeypatch.setattr(agent, 'create_deep_agent', lambda **kwargs: kwargs)
+    before = {str(p): p.read_bytes() for p in run.dir.rglob('*') if p.is_file()}
+    built = agent.build_agent(run, None, model=object())
+    source.unlink()
+    result = built['backend'].read(str(source.parent / 'pstack-models.md'))
+    assert result.error is None
+    assert result.file_data['content'] == run.spec.model_rules_text
+    assert {str(p): p.read_bytes() for p in run.dir.rglob('*') if p.is_file()} == before
