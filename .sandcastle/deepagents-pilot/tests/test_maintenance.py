@@ -47,7 +47,7 @@ def test_missing_owner_and_old_process_are_unknown(tmp_path):
     assert gate.status([])['unconfirmed'] == ['review']
     confirm(items[-1:])
     assert gate.status([('decision', 999999, 'old-process')])['state'] == 'unknown'
-    assert gate.status([])['state'] == 'drained'
+    assert gate.status([])['state'] == 'unknown'  # 旧进程消失没有补齐身份绑定的结束证明
 
 
 def _race(root, barrier, pipe, request):
@@ -199,7 +199,7 @@ def test_control_cli_errors_never_echo_untrusted_values(tmp_path, capsys):
 def test_inventory_keeps_python_ancestors_and_orphan_executor(monkeypatch):
     from pilot1742 import maintenance
     from types import SimpleNamespace
-    listing = "11 1 python -m pilot1742.review_sweep --loop 180\n12 11 python -m pilot1742.review_sweep run-review --pr 1\n13 1 python -m pilot1742.executor run --issue 1"
+    listing = "11 1 python -m pilot1742.review_sweep --loop 180\n12 11 python -m pilot1742.review_sweep run-review --pr 1\n13 1 python -m pilot1742.executor --state-root /isolated run --run-id t1-1"
     monkeypatch.setattr(maintenance.subprocess, 'run', lambda *a, **kw: SimpleNamespace(stdout=listing))
     monkeypatch.setattr(maintenance, 'identity', lambda pid: f'process-{pid}')
     assert maintenance.process_inventory() == [('review', 11, 'process-11'), ('review', 12, 'process-12'), ('executor', 13, 'process-13')]

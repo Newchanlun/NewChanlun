@@ -881,6 +881,12 @@ def _serve(args: argparse.Namespace, store: ClaimStore, cutover_store: CutoverSt
                    "--drain-root", str(args.drain_root), "run", "--run-id", unit.run_id,
                    "--workers-log", str(args.workers_log), "--private-key", str(args.private_key),
                    "--recheck-approval"]
+        with maintenance.gate.tx() as db:
+            permit = db.execute("SELECT id FROM jobs WHERE owner=? AND work=? AND state='active'",
+                                (maintenance.id, f"ticket:{unit.ticket}")).fetchone()
+        if permit is None:
+            raise ValueError("missing maintenance admission")
+        command += ["--maintenance-job", permit['id'], "--maintenance-root", str(maintenance.gate.root)]
         return subprocess.run(command, check=False).returncode
 
     sweep_round = None
@@ -924,7 +930,7 @@ def _serve(args: argparse.Namespace, store: ClaimStore, cutover_store: CutoverSt
             client.close()
 
 
-def main(argv: list[str] | None = None) -> int:
+def _main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="pilot1742.executor", description="新执行器：v2 票登记、引擎队列、持有、运行与释放")
     parser.add_argument("--state-root", type=Path, default=DEFAULT_STATE_ROOT)
     parser.add_argument("--drain-root", type=Path, default=DRAIN_ROOT, help="隔离测试用；部署保持缺省全局根")
@@ -942,6 +948,8 @@ def main(argv: list[str] | None = None) -> int:
     reg.add_argument("--private-key", type=Path, required=True)
     run_parser = sub.add_parser("run", help="持有并运行或恢复一个已登记的 v2 run")
     run_parser.add_argument("--run-id", required=True)
+    run_parser.add_argument("--maintenance-job")
+    run_parser.add_argument("--maintenance-root", type=Path)
     run_parser.add_argument("--workers-log", type=Path, default=WORKERS_LOG)
     run_parser.add_argument("--private-key", type=Path, required=True)
     run_parser.add_argument("--crash-at", choices=V2_CRASH_POINTS, help="受控故障注入：在该点对本进程 SIGKILL")
@@ -1119,6 +1127,31 @@ def main(argv: list[str] | None = None) -> int:
     except (*EXECUTOR_ERRORS, Halted, ToolRefusal, ValueError, OSError, subprocess.CalledProcessError) as error:
         print(f"{type(error).__name__}: {error}", file=sys.stderr)
         return 2
+
+
+def main(argv: list[str] | None = None) -> int:
+    arguments = list(sys.argv[1:] if argv is None else argv)
+    # 新维护绑定只用于 serve 派出的 run；旧手动命令保持原合同。
+    if "--maintenance-job" not in arguments:
+        return _main(arguments)
+    from .maintenance import Gate
+    parser = argparse.ArgumentParser(add_help=False)
+    parser.add_argument("--maintenance-job", required=True)
+    parser.add_argument("--maintenance-root", type=Path, required=True)
+    parser.add_argument("--state-root", type=Path, required=True)
+    parser.add_argument("--run-id", required=True)
+    binding, _ = parser.parse_known_args(arguments)
+    gate = Gate(binding.maintenance_root)
+    witness = gate.start_bound(binding.maintenance_job, binding.run_id, binding.state_root)
+    code = _main(arguments)
+    gate.returned(witness)
+    if code != 75:
+        try:
+            gate.complete_bound(witness)
+        except (OSError, ValueError, KeyError, TypeError, RuntimeError, subprocess.SubprocessError):
+            # 不改变旧 run 返回码；证据不足保留 unknown，不能发布自然结束。
+            pass
+    return code
 
 
 if __name__ == "__main__":

@@ -52,7 +52,34 @@ executor 复用 `_worker_activity` 的本地/Boat 生命周期证据，仍在途
 
 owner 绑定 PID 与启动时间。正常退出显式记账；进程消失、非正常失败和不完整回执保留 unknown，
 没有 TTL、心跳过期自动释放或 TCP 空闲推断。重启会登记新 owner，不能覆盖旧记录。
-异常待对账时，保留账本和原任务回执。本版本没有异常对账/恢复入口：补齐原回执不会自动解除持久 unknown，重启也不会清除旧 owner。需要后续实现经证据核验的 reconcile，不能删账本绕过。该限制意味着异常后不能直接用本版本取得 drained，部署评审须明确接受或先补齐恢复能力。
+失联 owner 使用下面的证据对账入口；保留账本与原任务回执，不删记录绕过 unknown。
+
+## 失联后的证据对账
+
+先查看 `status` 的 owner ID 和当前关闭代次。只对该精确 owner 操作：
+
+```sh
+python3 .sandcastle/deepagents-pilot/pilot1742/maintenance.py reconcile --generation 2 --owner <owner-id>
+python3 .sandcastle/deepagents-pilot/pilot1742/maintenance.py status
+```
+
+代次取实际值。返回 `reconciled` 表示旧 owner 已被永久禁止再次领取，其相关任务有可信结束依据；不表示四入口都已确认，更不表示全局 READY。`unknown` 带固定原因码，不输出路径、上游错误或凭据。
+重复对账返回原记账代次；错误代次拒绝。事务提交前重验关闭代次、任务和执行身份快照；并发启动或证据变化返回 `evidence_changed`，重新查状态后再对账。对账从不执行 resume、重派、kill、容器删除或 Boat 回收。
+
+证据链由代码在工作执行前后留下，CLI 没有上传回执或 force 入口：
+
+- **executor**：派工前把 job/票号绑定到精确 run-id、state root 和 source；`run` 在执行前登记 PID/启动身份及唯一 witness。正常返回记录 `returns`，不论是否 busy。随后和对账时读取原 WorkUnit、`run.json`、`_worker_activity` 本地监督/进程组回执及 Boat 的绑定 teardown 证据。原进程必须结束，所有调用均有返回记录，资源仍在运行或 effect_unknown 则不放行。正常 busy 返回允许原任务继续下一轮，不改其合同。
+- **detached review**：保留父→子 job lineage；实际派发前绑定完整 target（PR/head/attempt/run/controller）与 witness。返回后重验 target、每个 model 的 launch-id、run/head/base/controller、supervisor 和 `container_closed`；仅有一份不匹配 launch 的关闭回执不接受。父失联但子自然返回后，可以分别对账父、子 owner。
+- **decision/Wayfinder**：await 动作正常结束、业务自然结束判据成立后，先记录绑定 job/owner/领取代次/PID 的 `action_returns`，再执行普通 finish。若两者间父退出，前一条可恢复；动作尚未返回或异常退出且没有可靠结束记录时仍 unknown，不靠父无 children 推断。
+- **空闲失联 owner**：须有原进程原子 poll 的准入账本检查点（或本代次关闭确认）、已覆盖记录且没有任何未证实任务。退休不代替新入口对本代次的确认。只见进程消失不能退休。executor/review 还检查事先绑定的 state-root 资源范围；任务转交历史不丢失。
+
+对账新增 `resolutions/reconciliations`，不改原 jobs 状态、owner stopped 标志或历史时间。旧 owner 被 fence，下一代仍要求当前入口的新确认。`status.reconciled` 给出原 owner 和完成对账代次。
+
+### 仍不能补造的证据
+
+升级前没有预先绑定的旧 owner/job、孤儿 executor，或在写返回记录前被中断的调用，没有足够来源证明自然结束。它们保持 `missing_bound_completion`；旧未覆盖进程的观察也持久保留，退出不自动清除（`missing_prelaunch_binding`）。新代码补上的预执行绑定和执行端返回记录解决后续父失联/孤儿自然完成，不把新协议追认到旧运行。启动后、登记前的同一精确进程身份稍后完成登记，可变为覆盖；原观察历史仍保留。
+
+现有 TS 异常调用没有独立、覆盖全部后续请求的终态证据；此入口不从 CLI 日志或单个模型回执推测整项工作结束。缺 witness、目标漂移、旧 PID 被复用、缺少容器/Boat 结束证据均不能恢复。首次加载必须沿自然轮次完成旧运行，不能把切换旧运行的证明交给本命令。
 
 ## 由部署 owner 在自然边界加载
 
@@ -74,7 +101,7 @@ owner 绑定 PID 与启动时间。正常退出显式记账；进程消失、非
 
 ```sh
 node --import tsx --test .sandcastle/maintenance.test.mts .sandcastle/drain-control.test.mts
-python -m pytest .sandcastle/deepagents-pilot/tests/test_maintenance.py
+python -m pytest .sandcastle/deepagents-pilot/tests/test_maintenance.py .sandcastle/deepagents-pilot/tests/test_maintenance_recovery.py
 python -m pytest .sandcastle/deepagents-pilot/tests/test_queue.py .sandcastle/deepagents-pilot/tests/test_review_sweep.py -k maintenance
 npm run typecheck
 ```

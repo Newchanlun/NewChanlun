@@ -248,6 +248,7 @@ class QueueIntake:
             occupied = {ticket: reason for ticket, folders in runs.items()
                         if (reason := self._worker_activity(folders)) is not None}
             if self.maintenance is not None:
+                self.maintenance.gate.bind_scope(self.maintenance.id, self.state_root, self.source_repo)
                 self.maintenance.coverage(not occupied)
             for ticket, reason in occupied.items():
                 results[ticket] = {'phase': 'active', 'reason': reason}
@@ -351,6 +352,9 @@ class QueueIntake:
                     finish(ticket)
                     continue
                 try:
+                    if self.maintenance is not None:
+                        self.maintenance.gate.bind_executor(self.maintenance.id, permits[ticket], unit.run_id,
+                                                            self.state_root, self.source_repo)
                     code = run(unit)
                     state = delivery_status(run_dir)
                     phase = state['phase']

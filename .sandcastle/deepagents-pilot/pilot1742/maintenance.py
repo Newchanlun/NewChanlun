@@ -10,7 +10,11 @@ from pathlib import Path
 import re
 import sqlite3
 import subprocess
+import sys
 import uuid
+
+if not __package__:
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 ROOT = Path('/Volumes/AgentStorage/newchanlun-maintenance')
 LANES = ('decision', 'wayfinder', 'executor', 'review')
@@ -62,8 +66,23 @@ class Gate:
                 INSERT OR IGNORE INTO control VALUES (1, 0, 0, NULL);
                 CREATE TABLE IF NOT EXISTS owners (id TEXT PRIMARY KEY, lane TEXT, pid INTEGER, start TEXT,
                     registered_at TEXT, ack INTEGER, ack_at TEXT, stopped INTEGER DEFAULT 0, covered INTEGER DEFAULT 1);
+                CREATE TABLE IF NOT EXISTS censuses (owner TEXT PRIMARY KEY, generation INTEGER, at TEXT);
+                CREATE TABLE IF NOT EXISTS sightings (lane TEXT, pid INTEGER, start TEXT, observed_at TEXT,
+                    PRIMARY KEY(lane,pid,start));
+                CREATE TABLE IF NOT EXISTS lineage (job TEXT, owner TEXT, PRIMARY KEY(job,owner));
+                CREATE TABLE IF NOT EXISTS bindings (job TEXT PRIMARY KEY, data TEXT NOT NULL);
+                CREATE TABLE IF NOT EXISTS scopes (owner TEXT PRIMARY KEY, data TEXT NOT NULL);
+                CREATE TABLE IF NOT EXISTS action_returns (job TEXT PRIMARY KEY, owner TEXT, generation INTEGER,
+                    pid INTEGER, start TEXT, at TEXT);
+                CREATE TABLE IF NOT EXISTS returns (witness TEXT PRIMARY KEY, at TEXT);
+                CREATE TABLE IF NOT EXISTS witnesses (id TEXT PRIMARY KEY, job TEXT, pid INTEGER, start TEXT,
+                    started_at TEXT, completed_at TEXT);
+                CREATE TABLE IF NOT EXISTS reconciliations (owner TEXT, generation INTEGER, at TEXT,
+                    PRIMARY KEY(owner, generation));
+                CREATE TABLE IF NOT EXISTS resolutions (job TEXT PRIMARY KEY, witness TEXT, generation INTEGER, at TEXT);
                 CREATE TABLE IF NOT EXISTS jobs (id TEXT PRIMARY KEY, owner TEXT, work TEXT,
                     generation INTEGER, started_at TEXT, ended_at TEXT, state TEXT, transferable INTEGER DEFAULT 0);
+                INSERT OR IGNORE INTO lineage SELECT id,owner FROM jobs;
             ''')
 
     @contextmanager
@@ -92,7 +111,8 @@ class Gate:
 
     def _owner(self, db, owner):
         row = db.execute('SELECT * FROM owners WHERE id=?', (token(owner),)).fetchone()
-        if row is None or row['stopped'] or not alive(row['pid'], row['start']):
+        if (row is None or row['stopped'] or not alive(row['pid'], row['start'])
+                or db.execute('SELECT 1 FROM reconciliations WHERE owner=?', (owner,)).fetchone()):
             raise ValueError('owner unavailable')
         return row
 
@@ -109,6 +129,7 @@ class Gate:
             state = db.execute('SELECT * FROM control').fetchone()
             if state['closed']:
                 db.execute('UPDATE owners SET ack=?,ack_at=? WHERE id=?', (state['generation'], now(), owner))
+            db.execute('INSERT OR REPLACE INTO censuses VALUES(?,?,?)', (owner, state['generation'], now()))
             return bool(state['closed'])
 
     def admit(self, owner: str, work: str, *, transferable: bool = False) -> str:
@@ -130,6 +151,7 @@ class Gate:
                 job = uuid.uuid4().hex
                 db.execute('INSERT INTO jobs VALUES(?,?,?,?,?,?,?,?)',
                            (job, owner, work, state['generation'], now(), None, 'active', int(transferable)))
+                db.execute('INSERT INTO lineage VALUES(?,?)', (job, owner))
         if job is None:
             raise Closed('maintenance closed')
         return job
@@ -157,6 +179,7 @@ class Gate:
             db.execute('INSERT INTO owners(id,lane,pid,start,registered_at,ack) VALUES(?,?,?,?,?,?)',
                        (owner, lane, pid, start, now(), -1))
             db.execute('UPDATE jobs SET owner=?,transferable=0 WHERE id=?', (owner, job))
+            db.execute('INSERT INTO lineage VALUES(?,?)', (job, owner))
         return owner
 
     def stop(self, owner: str) -> None:
@@ -182,26 +205,197 @@ class Gate:
                 raise ValueError('maintenance generation mismatch')
             db.execute('UPDATE control SET closed=0')
 
+    def bind_executor(self, owner: str, job: str, run_id: str, state_root: Path, source_repo: Path) -> None:
+        """派工前写一次绑定；不接受事后给旧任务附加任意回执。"""
+        with self.tx() as db:
+            self._owner(db, owner)
+            row = db.execute("SELECT * FROM jobs WHERE id=? AND owner=? AND state='active'", (job, owner)).fetchone()
+            if row is None:
+                raise ValueError('unbound job')
+            data = json.dumps(dict(kind='executor', run_id=token(run_id), work=row['work'],
+                                   state_root=str(state_root.resolve()), source_repo=str(source_repo.resolve())), sort_keys=True)
+            previous = db.execute('SELECT data FROM bindings WHERE job=?', (job,)).fetchone()
+            if previous and previous['data'] != data:
+                raise ValueError('binding changed')
+            db.execute('INSERT OR IGNORE INTO bindings VALUES(?,?)', (job, data))
+
+    def bind_review(self, owner: str, job: str, target: dict, state_root: Path, source_repo: Path) -> None:
+        with self.tx() as db:
+            self._owner(db, owner)
+            row = db.execute("SELECT * FROM jobs WHERE id=? AND owner=? AND state='active'", (job, owner)).fetchone()
+            if row is None:
+                raise ValueError('unbound review')
+            expected = f"pr:{target['pr_number']}:{target['head_sha']}:{target['attempt']}"
+            if row['work'] not in (expected, 'manual-review'):
+                raise ValueError('review target mismatch')
+            data = json.dumps(dict(kind='review', run_id=token(target['run_id']), target=target,
+                                   state_root=str(state_root.resolve()), source_repo=str(source_repo.resolve())), sort_keys=True)
+            previous = db.execute('SELECT data FROM bindings WHERE job=?', (job,)).fetchone()
+            if previous and previous['data'] != data:
+                raise ValueError('binding changed')
+            db.execute('INSERT OR IGNORE INTO bindings VALUES(?,?)', (job, data))
+
+    def bind_scope(self, owner: str, state_root: Path, source_repo: Path, *, kind: str = "executor") -> None:
+        if kind not in ('executor', 'review'):
+            raise ValueError('invalid scope')
+        with self.tx() as db:
+            self._owner(db, owner)
+            data = json.dumps(dict(kind=kind, state_root=str(state_root.resolve()), source_repo=str(source_repo.resolve())), sort_keys=True)
+            previous = db.execute('SELECT data FROM scopes WHERE owner=?', (owner,)).fetchone()
+            if previous and previous['data'] != data:
+                raise ValueError('scope changed')
+            db.execute('INSERT OR IGNORE INTO scopes VALUES(?,?)', (owner, data))
+
+    def start_bound(self, job: str, run_id: str, state_root: Path) -> str:
+        pid, start, witness = os.getpid(), identity(os.getpid()), uuid.uuid4().hex
+        with self.tx() as db:
+            row = db.execute('SELECT data FROM bindings WHERE job=?', (token(job),)).fetchone()
+            if row is None:
+                raise ValueError('missing binding')
+            binding = json.loads(row['data'])
+            task = db.execute('SELECT * FROM jobs WHERE id=?', (job,)).fetchone()
+            if (task['state'] != 'active' or binding['run_id'] != run_id
+                    or binding['state_root'] != str(state_root.resolve())
+                    or db.execute('SELECT 1 FROM resolutions WHERE job=?', (job,)).fetchone()
+                    or db.execute('SELECT 1 FROM reconciliations WHERE owner=?', (task['owner'],)).fetchone()):
+                raise ValueError('invalid executor binding')
+            if db.execute('SELECT 1 FROM witnesses WHERE job=? AND id NOT IN (SELECT witness FROM returns)', (job,)).fetchone():
+                raise ValueError('previous executor unresolved')
+            db.execute('INSERT INTO witnesses VALUES(?,?,?,?,?,NULL)', (witness, job, pid, start, now()))
+        return witness
+
+    def returned_action(self, owner: str, job: str) -> None:
+        """TS 同步/await 动作正常返回的窄记录；失联后不能补签。"""
+        with self.tx() as db:
+            source = self._owner(db, owner)
+            row = db.execute("SELECT * FROM jobs WHERE id=? AND owner=? AND state='active'", (token(job), owner)).fetchone()
+            if row is None or source['lane'] not in ('decision', 'wayfinder'):
+                raise ValueError('invalid action receipt')
+            db.execute('INSERT OR IGNORE INTO action_returns VALUES(?,?,?,?,?,?)',
+                       (job, owner, row['generation'], source['pid'], source['start'], now()))
+
+    def returned(self, witness: str) -> None:
+        """执行入口已返回，不等于资源已结束；只能由预先登记的同一进程写入。"""
+        with self.tx() as db:
+            row = db.execute('SELECT * FROM witnesses WHERE id=?', (token(witness),)).fetchone()
+            if row is None or row['pid'] != os.getpid() or row['start'] != identity(os.getpid()):
+                raise ValueError('wrong witness identity')
+            db.execute('INSERT OR IGNORE INTO returns VALUES(?,?)', (witness, now()))
+
+    def returned_current(self, job: str) -> None:
+        with self.tx() as db:
+            ids = [r['id'] for r in db.execute('SELECT id FROM witnesses WHERE job=? AND pid=? AND start=?',
+                                               (token(job), os.getpid(), identity(os.getpid())))]
+        for witness in ids:
+            self.returned(witness)
+
+    def complete_bound(self, witness: str) -> None:
+        self.returned(witness)
+        from pilot1742.maintenance_recovery import bound_idle
+        with self.tx() as db:
+            row = db.execute('SELECT * FROM witnesses WHERE id=?', (token(witness),)).fetchone()
+            binding = json.loads(db.execute('SELECT data FROM bindings WHERE job=?', (row['job'],)).fetchone()['data'])
+        if row['pid'] != os.getpid() or row['start'] != identity(os.getpid()) or not bound_idle(binding):
+            raise ValueError('executor not naturally closed')
+        with self.tx() as db:
+            db.execute('UPDATE witnesses SET completed_at=? WHERE id=? AND completed_at IS NULL', (now(), witness))
+
+    def reconcile(self, generation: int, owner: str) -> dict:
+        """只处理精确 owner；读取证据在事务外，提交前重验关闭代次并永久 fence 旧 owner。"""
+        from pilot1742.maintenance_recovery import bound_idle, scope_idle
+        with self.tx() as db:
+            control = db.execute('SELECT * FROM control').fetchone()
+            if type(generation) is not int or not control['closed'] or control['generation'] != generation:
+                raise ValueError('generation mismatch')
+            row = db.execute('SELECT * FROM owners WHERE id=?', (token(owner),)).fetchone()
+            if row is None:
+                raise ValueError('missing owner')
+            prior = db.execute('SELECT generation FROM reconciliations WHERE owner=?', (owner,)).fetchone()
+            if prior:
+                return {'owner': owner, 'generation': prior['generation'], 'result': 'reconciled'}
+            jobs = [dict(r) for r in db.execute('SELECT * FROM jobs WHERE id IN (SELECT job FROM lineage WHERE owner=?)', (owner,))]
+            bindings = {r['job']: json.loads(r['data']) for r in db.execute('SELECT * FROM bindings')}
+            witnesses = [dict(r) for r in db.execute('SELECT * FROM witnesses')]
+            returned = {r['witness'] for r in db.execute('SELECT * FROM returns')}
+            actions = {r['job']: dict(r) for r in db.execute('SELECT * FROM action_returns')}
+            scope = db.execute('SELECT data FROM scopes WHERE owner=?', (owner,)).fetchone()
+            census = db.execute('SELECT 1 FROM censuses WHERE owner=?', (owner,)).fetchone()
+        def unknown(reason):
+            return {'owner': owner, 'generation': generation, 'result': 'unknown', 'reason': reason}
+        if alive(row['pid'], row['start']):
+            return unknown('owner_alive')
+        # 任务未登记/旧版本没有绑定，不允许从磁盘补一份任意 receipt 解锁。
+        verified = []
+        for job in jobs:
+            if job['state'] == 'finished':
+                continue
+            receipt = actions.get(job['id'])
+            if (receipt and receipt['owner'] == owner and receipt['generation'] == job['generation']
+                    and receipt['pid'] == row['pid'] and receipt['start'] == row['start']):
+                verified.append((job['id'], 'action-return'))
+                continue
+            chain = [w for w in witnesses if w['job'] == job['id']]
+            if (not chain or any(w['id'] not in returned or alive(w['pid'], w['start']) for w in chain)
+                    or job['id'] not in bindings):
+                return unknown('missing_bound_completion')
+            try:
+                if not bound_idle(bindings[job['id']]):
+                    return unknown('resources_unsettled')
+            except (OSError, ValueError, KeyError, TypeError, RuntimeError, subprocess.SubprocessError):
+                return unknown('resources_unverified')
+            verified.append((job['id'], chain[-1]['id']))
+        if scope:
+            try:
+                if not scope_idle(json.loads(scope['data'])):
+                    return unknown('resources_unsettled')
+            except (OSError, ValueError, KeyError, TypeError, RuntimeError, subprocess.SubprocessError):
+                return unknown('resources_unverified')
+        elif not row['covered'] or (not jobs and row['ack'] != generation and not census):
+            return unknown('missing_scope_checkpoint')
+        with self.tx() as db:
+            current = db.execute('SELECT * FROM control').fetchone()
+            if not current['closed'] or current['generation'] != generation:
+                raise ValueError('generation changed')
+            if ([dict(r) for r in db.execute('SELECT * FROM jobs WHERE id IN (SELECT job FROM lineage WHERE owner=?)', (owner,))] != jobs
+                    or [dict(r) for r in db.execute('SELECT * FROM witnesses')] != witnesses
+                    or {r['witness'] for r in db.execute('SELECT * FROM returns')} != returned):
+                return unknown('evidence_changed')
+            # 死亡身份不能重新领取；所有正常写入口也检查 fence。历史 job/owner 不改写。
+            if alive(row['pid'], row['start']):
+                return unknown('owner_alive')
+            for job, witness in verified:
+                db.execute('INSERT OR IGNORE INTO resolutions VALUES(?,?,?,?)', (job, witness, generation, now()))
+            db.execute('INSERT OR IGNORE INTO reconciliations VALUES(?,?,?)', (owner, generation, now()))
+        return {'owner': owner, 'generation': generation, 'result': 'reconciled'}
+
     def status(self, inventory=None) -> dict:
         # inventory 是生产进程身份清单；测试注入固定清单，不靠时间/TTL。
         processes = process_inventory() if inventory is None else inventory
         with self.tx() as db:
             state = dict(db.execute('SELECT * FROM control').fetchone())
             owners = [dict(r) for r in db.execute('SELECT * FROM owners ORDER BY registered_at,id')]
-            jobs = [dict(r) for r in db.execute("SELECT * FROM jobs WHERE state!='finished' ORDER BY started_at,id")]
+            jobs = [dict(r) for r in db.execute("SELECT * FROM jobs WHERE state!='finished' AND id NOT IN (SELECT job FROM resolutions) ORDER BY started_at,id")]
+            retired = {r['owner']: r['generation'] for r in db.execute('SELECT * FROM reconciliations')}
+            witnesses = [dict(r) for r in db.execute('SELECT * FROM witnesses')]
+            for lane, pid, start in processes:
+                if not any(r['lane'] == lane and r['pid'] == pid and r['start'] == start for r in owners) and not any(
+                        w['pid'] == pid and w['start'] == start for w in witnesses):
+                    db.execute('INSERT OR IGNORE INTO sightings VALUES(?,?,?,?)', (lane, pid, start, now()))
+            sightings = [dict(r) for r in db.execute('SELECT * FROM sightings')]
+
         missing = []
         for lane in LANES:
-            records = [r for r in owners if r['lane'] == lane and
+            records = [r for r in owners if r['id'] not in retired and r['lane'] == lane and
                        (not r['stopped'] or r['ack'] == state['generation'])]
             confirmed = [r for r in records if r['ack'] == state['generation'] and
                          (r['stopped'] or alive(r['pid'], r['start']))]
             if not confirmed or any(not r['covered'] or r['ack'] != state['generation'] or
                                    (not r['stopped'] and not alive(r['pid'], r['start'])) for r in records):
                 missing.append(lane)
-        uncovered = []
-        for lane, pid, start in processes:
-            if not any(r['lane'] == lane and r['pid'] == pid and r['start'] == start and not r['stopped'] for r in owners):
-                uncovered.append({'lane': lane, 'pid': pid})
+        uncovered = [{'lane': r['lane'], 'pid': r['pid'], 'observed_at': r['observed_at'],
+                      'reason': 'missing_prelaunch_binding'} for r in sightings
+                     if not any(o['lane'] == r['lane'] and o['pid'] == r['pid'] and o['start'] == r['start'] for o in owners)
+                     and not any(w['pid'] == r['pid'] and w['start'] == r['start'] for w in witnesses)]
         for job in jobs:
             owner = next(r for r in owners if r['id'] == job['owner'])
             if owner['stopped'] or not alive(owner['pid'], owner['start']):
@@ -211,7 +405,7 @@ class Gate:
         return {'v': 1, 'generation': state['generation'], 'state': mode, 'requested_at': state['requested_at'],
                 'observed_at': now(), 'unconfirmed': missing, 'uncovered': uncovered,
                 'owners': [{k: r[k] for k in ('id', 'lane', 'pid', 'registered_at', 'ack', 'ack_at', 'stopped', 'covered')} for r in owners],
-                'inflight': jobs}
+                'inflight': jobs, 'reconciled': [{'owner': key, 'generation': value} for key, value in retired.items()]}
 
 
 def process_inventory() -> list[tuple[str, int, str]]:
@@ -233,7 +427,7 @@ def process_inventory() -> list[tuple[str, int, str]]:
         lanes = []
         if re.search(r'(?:^|\s)\S*decision-claimer\.mts(?:\s|$)', command): lanes.append('decision')
         if re.search(r'(?:^|\s)\S*wayfinder_engine\.mts(?:\s|$)', command): lanes.append('wayfinder')
-        if re.search(r'-m pilot1742\.executor\s+(?:serve|run)(?:\s|$)', command):
+        if re.search(r'-m pilot1742\.executor\b.*\s(?:serve|run)(?:\s|$)', command):
             lanes.append('executor')
             if re.search(r'\bserve\b', command) and '--review-sweep' in command: lanes.append('review')
         if re.search(r'-m pilot1742\.(?:review_sweep|external_review)\b', command): lanes.append('review')
@@ -284,7 +478,7 @@ class Owner:
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument('--root', type=Path, default=ROOT)
-    parser.add_argument('command', choices=('request', 'status', 'resume', 'register', 'poll', 'admit', 'finish', 'stop'))
+    parser.add_argument('command', choices=('request', 'status', 'resume', 'register', 'poll', 'admit', 'finish', 'stop', 'reconcile', 'returned-action'))
     parser.add_argument('--generation', type=int)
     parser.add_argument('--lane', choices=LANES)
     parser.add_argument('--pid', type=int)
@@ -295,9 +489,11 @@ def main(argv=None) -> int:
     args = parser.parse_args(argv)
     try:
         gate = Gate(args.root)
-        if args.command == 'register': result = {'owner': gate.register(args.lane, args.pid)}
+        if args.command == 'reconcile': result = gate.reconcile(args.generation, args.owner)
+        elif args.command == 'register': result = {'owner': gate.register(args.lane, args.pid)}
         elif args.command == 'poll': result = {'closed': gate.poll(args.owner)}
         elif args.command == 'admit': result = {'job': gate.admit(args.owner, args.work)}
+        elif args.command == 'returned-action': gate.returned_action(args.owner, args.job); result = {'ok': True}
         elif args.command == 'finish': gate.finish(args.owner, args.job, natural=args.natural); result = {'ok': True}
         elif args.command == 'stop': gate.stop(args.owner); result = {'ok': True}
         else:

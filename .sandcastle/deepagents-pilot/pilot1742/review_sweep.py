@@ -777,6 +777,8 @@ class ServeRound:
     def __call__(self) -> list[dict[str, Any]] | None:
         """返回本轮动作；本轮不到时间或失败返回 None。"""
         if self.maintenance is not None:
+            self.maintenance.gate.bind_scope(self.maintenance.id, self.sweep.lane.state_root,
+                                                 self.sweep.lane.source, kind='review')
             self.maintenance.coverage(self.sweep.lane.maintenance_idle())
             if self.maintenance.poll():
                 return None
@@ -874,7 +876,7 @@ def run_review(argv: list[str], github: GitHubPort | None = None) -> int:
     natural = False
     try:
         proof = []
-        code = _run_review(args, github, lambda: proof.append(True))
+        code = _run_review(args, github, lambda: proof.append(True), (owner, job))
         natural = code == 3 or bool(proof)
         return code
     finally:
@@ -882,13 +884,13 @@ def run_review(argv: list[str], github: GitHubPort | None = None) -> int:
         owner.stop()
 
 
-def _run_review(args, github, on_natural):
+def _run_review(args, github, on_natural, maintenance=None):
     if (github or GhCli()).pr(args.pr)["head"] != args.expect_head:
         print(json.dumps({"pr": args.pr, "action": "head-moved-not-reviewed", "expected": args.expect_head}))
         return 3
     from . import external_review
     return external_review.main(["review-pr", "--pr", str(args.pr), "--attempt", str(args.attempt),
-                                 "--private-key", str(args.private_key)], admitted=True, on_natural=on_natural)
+                                 "--private-key", str(args.private_key)], admitted=True, on_natural=on_natural, maintenance=maintenance)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -910,6 +912,7 @@ def main(argv: list[str] | None = None) -> int:
                   auto_merge=args.auto_merge)
     while True:
         try:
+            owner.gate.bind_scope(owner.id, sweep.lane.state_root, sweep.lane.source, kind='review')
             owner.coverage(sweep.lane.maintenance_idle())
             if not owner.poll():
                 report(sweep.tick())

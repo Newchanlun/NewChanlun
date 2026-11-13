@@ -30,6 +30,7 @@ export class MaintenanceOwner {
     try {
       const result = await action();
       completed = natural(result);
+      if (completed) this.call("returned-action", ["--owner", this.id, "--job", job]);
       return result;
     } finally {
       this.call("finish", ["--owner", this.id, "--job", job, ...(completed ? ["--natural"] : [])]);

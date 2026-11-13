@@ -1683,3 +1683,29 @@ def test_maintenance_completion_is_scoped_to_its_own_review(lane, monkeypatch):
     monkeypatch.setattr(external_review, 'supervisor_alive', lambda *args: False)
     assert lane.maintenance_idle(target)
     assert not lane.maintenance_idle()
+
+
+def test_recovery_review_requires_exact_launch_and_target_receipts(lane, monkeypatch):
+    from dataclasses import asdict
+    from pilot1742 import external_review, maintenance_recovery
+    target = lane.target(1810, 1)
+    folder = lane.state_root / 'runs' / target.key
+    model = external_review.MODELS[0]
+    worker = folder / model
+    worker.mkdir(parents=True, exist_ok=True)
+    launch = {key: getattr(target, key) for key in
+              ('run_id', 'head_sha', 'base_sha', 'merge_base_sha', 'controller_code_head')}
+    launch.update(model=model, launch_id='unique-launch')
+    (worker / 'launch.json').write_text(json.dumps(launch))
+    receipt = dict(launch, container_closed=True)
+    (worker / 'receipt.json').write_text(json.dumps(receipt))
+    monkeypatch.setattr(external_review, '_ps_rows', lambda: [])
+    monkeypatch.setattr(external_review, 'supervisor_alive', lambda *args: False)
+    binding = dict(kind='review', target=asdict(target), state_root=str(lane.state_root), source_repo=str(lane.source))
+    assert maintenance_recovery.bound_idle(binding)
+    for bad in [dict(receipt, launch_id='other'), dict(receipt, head_sha='0' * 40), {'container_closed': True}]:
+        (worker / 'receipt.json').write_text(json.dumps(bad))
+        assert not maintenance_recovery.bound_idle(binding)
+    (worker / 'receipt.json').write_text(json.dumps(receipt))
+    monkeypatch.setattr(external_review, 'supervisor_alive', lambda *args: True)
+    assert not maintenance_recovery.bound_idle(binding)

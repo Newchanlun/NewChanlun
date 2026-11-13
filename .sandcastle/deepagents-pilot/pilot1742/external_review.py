@@ -518,6 +518,8 @@ class ExternalReview:
                                      str(SOURCE_REPO / ".sandcastle" / "external-review-worker.mts")]
         self.poll_seconds = poll_seconds
         self._stop = threading.Event()
+        self.maintenance = None
+        self.maintenance_witness = None
 
     def target(self, number: int, attempt: int) -> ReviewTarget:
         if type(attempt) is not int or attempt <= 0:
@@ -1070,6 +1072,10 @@ class ExternalReview:
 
     def review_pr(self, number: int, attempt: int = 1) -> dict:
         target = self.target(number, attempt)
+        if self.maintenance is not None:
+            owner, job = self.maintenance
+            owner.gate.bind_review(owner.id, job, asdict(target), self.state_root, self.source)
+            self.maintenance_witness = owner.gate.start_bound(job, target.run_id, self.state_root)
         assert self.gateway is not None
         folder = self.state_root / "runs" / target.key
         with _lock(folder):
@@ -1288,11 +1294,11 @@ def _positive(value: str) -> int:
     return number
 
 
-def main(argv: list[str] | None = None, *, admitted: bool = False, on_natural=None) -> int:
+def main(argv: list[str] | None = None, *, admitted: bool = False, on_natural=None, maintenance=None) -> int:
     from .maintenance import Owner, Closed
     arguments = list(sys.argv[1:] if argv is None else argv)
     if admitted or not arguments or arguments[0] not in ('review-pr', 'migrate-stale'):
-        return _main(arguments, on_natural=on_natural)
+        return _main(arguments, on_natural=on_natural, maintenance=maintenance)
     owner = Owner('review')
     try:
         job = owner.admit('manual-review')
@@ -1302,7 +1308,7 @@ def main(argv: list[str] | None = None, *, admitted: bool = False, on_natural=No
     natural = False
     try:
         proof = []
-        code = _main(arguments, on_natural=lambda: proof.append(True))
+        code = _main(arguments, on_natural=lambda: proof.append(True), maintenance=(owner, job))
         natural = bool(proof)
         return code
     finally:
@@ -1310,7 +1316,14 @@ def main(argv: list[str] | None = None, *, admitted: bool = False, on_natural=No
         owner.stop()
 
 
-def _main(argv: list[str] | None = None, *, on_natural=None) -> int:
+def _main(argv: list[str] | None = None, *, on_natural=None, maintenance=None) -> int:
+    code = _run_main(argv, on_natural=on_natural, maintenance=maintenance)
+    if maintenance is not None:
+        maintenance[0].gate.returned_current(maintenance[1])
+    return code
+
+
+def _run_main(argv: list[str] | None = None, *, on_natural=None, maintenance=None) -> int:
     parser = argparse.ArgumentParser(prog="pilot1742.external_review")
     sub = parser.add_subparsers(dest="command", required=True)
     review = sub.add_parser("review-pr")
@@ -1334,6 +1347,7 @@ def _main(argv: list[str] | None = None, *, on_natural=None) -> int:
             with GitHubAppClient(identity, permissions=TOKEN_PERMISSIONS) as client:
                 client.verify()
                 lane = ExternalReview(RepoGateway(client))
+                lane.maintenance = maintenance
                 result = (lane.review_pr(args.pr, args.attempt) if args.command == "review-pr"
                           else lane.migrate_stale(args.pr, args.attempt))
         else:
@@ -1341,6 +1355,8 @@ def _main(argv: list[str] | None = None, *, on_natural=None) -> int:
             result = lane.status(args.pr) if args.command == "status" else lane.reconcile(args.run_id, args.note)
         if on_natural is not None and isinstance(result, dict) and result.get("target"):
             if lane.maintenance_idle(ReviewTarget(**result["target"])):
+                if maintenance is not None and lane.maintenance_witness is not None:
+                    maintenance[0].gate.complete_bound(lane.maintenance_witness)
                 on_natural()
         print(json.dumps(result, ensure_ascii=False, indent=2))
         return 0 if not isinstance(result, dict) or result.get("verdict", "PASS") == "PASS" else 1
