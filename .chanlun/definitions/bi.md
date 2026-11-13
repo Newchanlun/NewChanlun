@@ -485,7 +485,7 @@ theta_v0 的对应不变式在 `rust/src/theta_v0/parser/stroke.rs:253-267`（`c
 
 ### 11b. ⚠️ 旧记忆条目不可引（#813 主控补条③）
 
-旧快照 [`.auto-memory-snapshot/feedback_chanlun_stroke_types.md`](https://github.com/xy7365527-lang/NewChanlun/blob/f43fac8f4673c605f24e4c69c9184560f118eb34/.auto-memory-snapshot/feedback_chanlun_stroke_types.md)（[外卷归档](file:///Volumes/AgentStorage/restart-20261107/slim/remaining-archive/implementation/historical-178-f43fac8f.tar)，包内保留原路径）写「新笔/**宽笔**（第81课）」并建议「TV 用宽笔」——**它把第 81 课的两件事混成一件**：`081:110`（**新笔定义**，3 根原始K）与 `081:258`（**答疑**「只要独立就行」）。**TV 的宽笔 ＝ 旧笔，不是新笔** ⟹ 该文件的映射结论**错**，不可直接引用（正确处置见 0.1 节：看盘严笔、决策新笔）。
+仓内已删除的旧快照 [`.auto-memory-snapshot/feedback_chanlun_stroke_types.md`](https://github.com/xy7365527-lang/NewChanlun/blob/f43fac8f4673c605f24e4c69c9184560f118eb34/.auto-memory-snapshot/feedback_chanlun_stroke_types.md)（[外卷归档](file:///Volumes/AgentStorage/restart-20261107/slim/remaining-archive/implementation/historical-178-f43fac8f.tar)，包内保留原路径）写「新笔/**宽笔**（第81课）」并建议「TV 用宽笔」——**它把第 81 课的两件事混成一件**：`081:110`（**新笔定义**，3 根原始K）与 `081:258`（**答疑**「只要独立就行」）。**TV 的宽笔 ＝ 旧笔，不是新笔** ⟹ 该文件的映射结论**错**，不可直接引用（正确处置见 0.1 节：看盘严笔、决策新笔）。
 
 ## 12. 未测／查不到表（照实，不写成「不受影响」）
 
