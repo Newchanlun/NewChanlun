@@ -8,8 +8,9 @@ from collections import namedtuple
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import pytest
-import review_preflight as preflight
 from conftest import git
+
+import review_preflight as preflight
 from pilot1742 import external_review
 from pilot1742.github_app import IdentityError
 
