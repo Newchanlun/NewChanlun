@@ -6,6 +6,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+import pytest
+
 from pilot1742 import vm_trim
 from pilot1742.vm_trim import (
     LOCK_NAME,
@@ -97,3 +99,50 @@ def test_cli_prints_one_json_record(tmp_path):
     out = subprocess.run([sys.executable, "-I", str(script), str(tmp_path / "missing")], capture_output=True, text=True,
                          check=True)
     assert json.loads(out.stdout) == {"state": "skipped", "reason": "no_root"}
+
+
+@pytest.mark.parametrize("context, state, profile", [
+    ("colima", "trimmed", "default"), ("colima-review", "trimmed", "review"),
+    (None, "skipped", None), ("missing-context", "failed", None),
+])
+def test_trim_subprocess_context_and_environment_contract(tmp_path, monkeypatch, context, state, profile):
+    """默认假 daemon 是 orbstack；显式 Colima 不能在过滤环境后静默掉回它。"""
+    if context is None:
+        monkeypatch.delenv("DOCKER_CONTEXT", raising=False)
+    else:
+        monkeypatch.setenv("DOCKER_CONTEXT", context)
+    forbidden = ("DOCKER_HOST", "DOCKER_CONFIG", "DOCKER_TLS_VERIFY", "DOCKER_CERT_PATH",
+                 "CLIPROXY_LOCAL_KEY", "SECRET_TOKEN", "SANDCASTLE_MAIN_MODEL")
+    for key in forbidden:
+        monkeypatch.setenv(key, "fixture-not-forwarded")
+    trace = tmp_path / "calls.jsonl"
+    binary = tmp_path / "bin"
+    binary.mkdir()
+    script = f'''#!{sys.executable}
+import json, os, sys
+from pathlib import Path
+assert not any(k in os.environ for k in {forbidden!r})
+assert os.environ.get("DOCKER_CONTEXT") == {context!r}
+with open({str(trace)!r}, "a") as f:
+    f.write(json.dumps([Path(sys.argv[0]).name, *sys.argv[1:]]) + "\\n")
+if Path(sys.argv[0]).name == "docker":
+    if os.environ.get("DOCKER_CONTEXT") == "missing-context":
+        sys.exit(7)
+    print(os.environ.get("DOCKER_CONTEXT", "orbstack"))
+else:
+    print("/var/lib/docker: 1 GiB trimmed")
+'''
+    for name in ("docker", "colima"):
+        path = binary / name
+        path.write_text(script)
+        path.chmod(0o700)
+    monkeypatch.setenv("PATH", str(binary))
+    result = trim_vm_disk(tmp_path)
+    assert result["state"] == state
+    assert result.get("profile") == profile
+    calls = [json.loads(line) for line in trace.read_text().splitlines()]
+    assert calls[0] == ["docker", "context", "show"]
+    if profile:
+        assert calls[1:] == [["colima", "--profile", profile, "ssh", "--", "sudo", "-n", "fstrim", "-v", "/var/lib/docker"]]
+    else:
+        assert len(calls) == 1

@@ -1,6 +1,6 @@
 # review-results 与 tmp/ 归档索引
 
-按 docs/agents/generation-constitution.md §5，review-results 是跟着票走的工作草稿，关票后移出仓库归档。下表目录对应的票都已关闭（2026-11-07 用 gh 逐张读回，44 张票全部 CLOSED）。过程记录出仓；仍约束产品行为的规范留在产品文档：
+按 ADR 0004「过程记录与产品文件」（历史 §5 的现行承接），review-results 是跟着票走的工作草稿，关票后移出仓库归档。下表目录对应的票都已关闭（2026-11-07 用 gh 逐张读回，44 张票全部 CLOSED）。过程记录出仓；仍约束产品行为的规范留在产品文档：
 
 - `issue1644-p6-audit-ledger-20261021/AMENDMENT.md` 是 S 审计台账与写前闭包核验读法的生效修订（#1481、#1645 仍在使用），已逐字迁入 [ADR 0061](../../docs/adr/0061-s-writer-audit-ledger-delta-reading.md)，正文行号不变；ADR 0042 与 `rust/src/bin/s_session_v3/audit_ledger.rs` 已加指向它的正本指针。该目录其余工作件（SPEC-DRAFT、ARCHAEOLOGY、REVIEW-1..3）随目录归档。
 - `issue1550-fu19-closeout-20261101` 只是证据记录；它的规范指针在 ADR 0058 与 `.chanlun/definitions/chong-traceability.md`，#1607 的待办记在 `replay_comparator.rs` 代码处，因此照常归档。
@@ -107,3 +107,17 @@ tar -xpf /Volumes/AgentStorage/restart-20261107/slim/remaining-archive/history14
 ```
 
 单件也可用 `git show 923d5f1187:<原路径>` 取回内容；该批 Git 文件模式均为 `100644`。核验清单与消费者证据随包存于仓外。
+
+## 三份历史纪律（#1742 / #2030，2026-11-13）
+
+仅本批三份历史原文已出仓；不包含 #2057 的 14 件批次或 #1920 的归档，两者保留独立索引与验收。
+
+外卷批次：`/Volumes/AgentStorage/restart-20261107/slim/remaining-archive/discipline-2030-fac7e87-20261113/`，含原相对路径与 `INVENTORY.md`。删除前逐字节比对工作树、Git blob 与归档副本，三份一致。恢复也可用 `git show fac7e87a8876c0f5cff79b27556120d31e65c7c8:<原路径>`；不需要外卷才能读取现役规范。
+
+| 已退役原路径 | 字节数 | 现行入口 |
+|---|---:|---|
+| `docs/agents/generation-constitution.md` | 4773 | `docs/adr/0004-generation-constitution.md`「现行名分与现役线」 |
+| `docs/agents/delivery-discipline.md` | 12334 | `.sandcastle/docs/graph-engineering.md`「交付与关票」与 `.sandcastle/CODEX-CHILD.md` |
+| `docs/agents/stat-provenance.md` | 4096 | `docs/adr/0022-acceptance-criterion-parameters.md`「统计结论的标注与引用」 |
+
+旧报告、roster 与推论中的原路径保持历史原文，按本批来源提交恢复。ADR 0039/0048 的历史引文保留，当前产品名分指向 ADR 0004；ADR 0058 的 AT-14 专用报告 schema、路径及消费者合同不在本批改动范围。移除的是历史纪律原件，不是整个 docs/agents 或产品报告树。
