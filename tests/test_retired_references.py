@@ -116,8 +116,6 @@ HISTORICAL = {
     ".chanlun/codex-on-breakthrough-verdict-2026-06-30.md": "dated verdict record",
     ".chanlun/.interrupt-point.md": "ENDED snapshot; header explains the retirement",
     "chanlun/review-results/": "review drafts",
-    "docs/agents/pstack-lite/PILOT-1139.md":
-        "record of the #1139 pilot run; its commands are quoted verbatim",
     ".claude/skills/writing-skills/anthropic-best-practices.md":
         "vendored copy of Anthropic docs (site-relative links)",
     ".agents/skills/domain-modeling/CONTEXT-FORMAT.md": "vendored skill; example paths",
