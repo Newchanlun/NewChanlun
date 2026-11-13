@@ -95,19 +95,21 @@ python3 .sandcastle/deepagents-pilot/pilot1742/maintenance.py status
 
 `maintenanceCommand(file, args)` 仅在 `MaintenanceOwner.work` 内启用监督器；旧的无 context 调用原样返回命令。不持锁执行 CLI，stdin/env/stdout 原样透传，不记命令或凭据。decision 的异步 spawn 和 Wayfinder 的同步 execFileSync 共用此入口。监督器转发 SIGTERM/SIGINT，实际 wait 并保存业务退出码，然后记录可验证域封闭；不会自动 kill 逃逸后代。
 
-域核验使用同 UID 的内核 PID/精确出生身份/父身份清单（macOS libproc，Linux proc），不是 ps 中父进程无 children 或单一 session 空闲。预派发基线界定无关的既有分支；任何无法沿身份/父链归属到该无关分支的新进程（包括 setsid 后再被 init 接管的后代）阻止证明。权限/身份不可读、PID 复用、无法完成后置枚举、缺 wait 均不放行。原监督器可持久封闭单个已结束域；此后无须依赖它仍在运行。
+Linux 新派发不再依赖全机 census 收敛：专用 guardian 在 Popen 前启用并核实 `PR_SET_CHILD_SUBREAPER`，确认没有既有 children，记录精确 PID、内核出生身份及 `linux-subreaper-v1` 域。primary 的真实 wait/业务码与域封闭分开。primary 已返回但还有后代时，外层仍返回原业务码，guardian 关闭自己的继承输出并继续自然 wait；setsid/换组、双重 fork 或被收养的孤儿不能脱离这个内核后代域。只有原 guardian 在该出生身份、subreaper 标志仍成立且 waitpid 返回 ECHILD 时，才持久封闭资源。其它 status/reconcile 进程不能用自己的 ECHILD 代签。guardian 异常丢失且没有封闭回执时仍 unknown，不能凭后代 PID 消失补签。
+
+macOS 及旧的已绑定 census 域沿用同 UID 内核 PID/精确出生身份/父身份清单（macOS libproc，旧 Linux proc）。预派发基线界定无关既有分支；无法沿身份/父链归属的新进程阻止证明。权限/身份不可读、PID 复用、无法完成后置枚举、缺 wait 均不放行。旧域不能追认为新的 subreaper 域。
 
 派发前采集失败与在途收尾失败分别处理：监督器先绑定精确身份，再采集基线。只有原监督器、尚无已封存基线且未进入 Popen 时，才能写 `local_resource_not_started(reason=baseline_unavailable)` 并以退出78返回；不启动命令，也不伪造 wait/自然成功。此证据只结束该次未派发资源，不自动重试。绑定前自身丢失或来不及落证据仍 unknown。已生成基线的资源不能使用此取消路径。
 
-采集将正常退出竞态与权限/身份失败分开。Linux 用 `/proc/<pid>` 目录 fd 绑定一次读取的 incarnation，再从该 fd 读取 uid/stat；macOS 只把零长度且 ESRCH 识别为已退出。遇 ENOENT/ESRCH 或首次观察 zombie，必须重新枚举并读取后置集合，纳入此间出生及被 init 接管的后代，不能只复查消失 PID 或接受原枚举的部分结果。已成功取得的身份记录保留为保守上界；跨轮同 PID 出生身份不同即拒绝。zombie 的出生身份也参与复用检查。
+旧 census 后端将正常退出竞态与权限/身份失败分开。Linux 用 `/proc/<pid>` 目录 fd 绑定一次读取的 incarnation，再从该 fd 读取 uid/stat；macOS 只把零长度且 ESRCH 识别为已退出。遇 ENOENT/ESRCH 或首次观察 zombie，必须重新枚举并读取后置集合，纳入此间出生及被 init 接管的后代，不能只复查消失 PID 或接受原枚举的部分结果。已成功取得的身份记录保留为保守上界；跨轮同 PID 出生身份不同即拒绝。zombie 的出生身份也参与复用检查。
 
-后置集合允许新增、退出，无需两次 PID 集合相同；但最终一轮的每个在场 PID 必须取得身份或此前已核实的终态。连续三轮仍存在未完成的退出覆盖则返回 `exit_fence_incomplete`，不无限重试；权限错误、短读和身份错配不走退出分支。外层最多三次采集的固定原因仍落 `local_resource_diagnostics`。这不是原子全机快照，而是用于严格资源分类的保守覆盖；未归属存活后代仍阻止封闭。高强度 churn 若持续阻止覆盖仍返回 unknown，不能将这种失败写成已恢复。
+后置集合允许新增、退出，无需两次 PID 集合相同；但最终一轮的每个在场 PID 必须取得身份或此前已核实的终态。连续三轮仍存在未完成的退出覆盖则返回 `exit_fence_incomplete`，不无限重试；权限错误、短读和身份错配不走退出分支。外层最多三次采集的固定原因仍落 `local_resource_diagnostics`。这不是原子全机快照，而是用于严格资源分类的保守覆盖；未归属存活后代仍阻止封闭。高强度 churn 若持续阻止旧后端覆盖仍返回 unknown；Linux 新 guardian 后端通过独立内核后代域避开这个全机收敛前件。macOS 可用性不能由 Linux 验证代替。
 
-回归在独立的持续 fork/wait 发生器运行时执行原 TS/Python 超时入口，保留 143、ETIMEDOUT、自然重启后 drained 及活后代 unknown 断言；定序测试另外锁住退出后出生的孤儿、权限失败、PID 复用和覆盖耗尽。
+Linux 离线回归使用无秘密 Boat VM，保持 pytest -n 4 全工作负载及原 TS 入口并发；另在独立的持续 fork/wait 发生器运行时执行原 TS/Python 超时入口，保留 143、ETIMEDOUT、自然重启后 drained 及活后代 unknown 断言；定序测试另外锁住退出后出生的孤儿、权限失败、PID 复用和覆盖耗尽。
 
 动作退出写 `action_exits`，封住该 job 后续资源预留。资源暂未结束时保留原 unknown；原 owner 后续 poll 或自然退出后的精确 owner reconcile 可消费其完整 wait/域证据，在 `resolutions` 记录 `local-session-ended`，不修改失败与原时间，不 resume。四入口仍须确认当前维护代次。只有 close 的旧适配器仍不足以证明。
 
-此证明限本机同 UID CLI 及其后代，不能用于 Docker/Boat/T3 或会变更执行身份的命令。新生但来源已不可追溯的**无关孤儿**也可能阻止域封闭；不能靠名称、年龄、PID 消失或手填布尔排除。监督器在绑定/wait 之前自身丢失、动作没有返回、或缺可信后代域证据时仍 unknown。它解决可控超时与自然重启，不追认双失联历史。
+此证明限本机同 UID CLI 及其后代，不能用于 Docker/Boat/T3 或会变更执行身份的命令。旧 census 后端中新生但来源已不可追溯的**无关孤儿**也可能阻止域封闭；不能靠名称、年龄、PID 消失或手填布尔排除。监督器在绑定/wait 之前自身丢失、动作没有返回、或缺可信后代域证据时仍 unknown。Linux guardian 支持调度器自然退出后继续收尾并供新 owner 对账；guardian 自身也丢失的情况仍需额外可信证据。六项历史资源退休依赖不受此变更影响。
 
 对账新增 `resolutions/reconciliations`，不改原 jobs 状态、owner stopped 标志或历史时间。旧 owner 被 fence，下一代仍要求当前入口的新确认。`status.reconciled` 给出原 owner 和完成对账代次。
 

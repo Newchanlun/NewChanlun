@@ -31,8 +31,20 @@ def resources_idle(rows: list[dict], diagnostics: list[str] | None = None) -> bo
         pending = [r for r in rows if not r['domain']['sealed_at']]
         if not pending:
             return True
-        current = stable_snapshot()
+        snapshot_rows = []
+        from pilot1742.maintenance_subreaper import KIND, idle
         for row in pending:
+            domain = json.loads(row['domain']['baseline'])
+            if domain.get('kind') == KIND:
+                if (domain.get('pid') != row['pid'] or domain.get('birth') != row['domain']['supervisor']
+                        or not idle(domain)):
+                    return reject('subreaper_pending_or_wrong_supervisor')
+            else:
+                snapshot_rows.append(row)
+        if not snapshot_rows:
+            return True
+        current = stable_snapshot()
+        for row in snapshot_rows:
             baseline = {int(pid): data for pid, data in json.loads(row['domain']['baseline']).items()}
             # 原祖先可能接收 reparent 后代，不能将其当成“无关分支”。
             ancestors = {0, 1, row['pid']}
@@ -62,8 +74,6 @@ def resources_idle(rows: list[dict], diagnostics: list[str] | None = None) -> bo
 
 def main() -> int:
     from pathlib import Path
-
-    from pilot1742.maintenance import Gate
     parser = argparse.ArgumentParser()
     parser.add_argument('--root', type=Path, required=True)
     parser.add_argument('--resource', required=True)
@@ -72,14 +82,24 @@ def main() -> int:
     command = args.command[1:] if args.command[:1] == ['--'] else args.command
     if not command:
         return 78
+    if sys.platform.startswith('linux'):
+        return linux_guardian(args, command)
+    return supervise(args, command)
+
+
+def supervise(args, command: list[str], notify: int | None = None, signal_mask=None) -> int:
+    from pilot1742.maintenance import Gate
     os.setsid()
     gate = Gate(args.root)
     from pilot1742.maintenance_processes import UnstableSnapshot
     try:
-        gate.bind_local_resource(args.resource)  # 此后才允许启动 CLI，无 check/spawn 领取间隙。
+        gate.bind_local_resource(args.resource, subreaper=notify is not None)  # 此后才允许启动 CLI，无 check/spawn 领取间隙。
     except UnstableSnapshot as error:
         gate.local_resource_not_started(args.resource)
-        print(str(error), file=sys.stderr)  # 固定原因码/errno，不输出 argv/环境。
+        print(str(error), file=sys.stderr, flush=True)  # 固定原因码/errno，不输出 argv/环境。
+        if notify is not None:
+            os.write(notify, b'78\n')
+            os.close(notify)
         return 78  # 未派发失败；不能继续执行下面的 Popen。
     received = []
     child = None
@@ -89,6 +109,8 @@ def main() -> int:
             child.send_signal(signum)
     signal.signal(signal.SIGTERM, forward)
     signal.signal(signal.SIGINT, forward)
+    if signal_mask is not None:
+        signal.pthread_sigmask(signal.SIG_SETMASK, signal_mask)
     # 不持有账本锁等待进程；stdout/stderr/stdin 原样透传，不读取凭据或记录命令。
     child = subprocess.Popen(command)
     if received:
@@ -96,7 +118,50 @@ def main() -> int:
     code = child.wait()
     gate.local_resource_waited(args.resource, child.pid, code)
     gate.seal_local_resource(args.resource)
-    return code if code >= 0 else 128 - code
+    result = code if code >= 0 else 128 - code
+    if notify is not None:
+        # 已记录 primary wait。调用方可返回业务码，守护者保留内核收养域。
+        os.write(notify, f'{result}\n'.encode())
+        os.close(notify)
+        devnull = os.open(os.devnull, os.O_RDWR)
+        for fd in (0, 1, 2):
+            os.dup2(devnull, fd)
+        if devnull > 2:
+            os.close(devnull)
+        from pilot1742.maintenance_subreaper import wait_remaining
+        wait_remaining()
+        gate.seal_local_resource(args.resource)
+    return result
+
+
+def linux_guardian(args, command: list[str]) -> int:
+    """外层保留原退出合同；独立 guardian 自然 wait 到最后一个后代结束。"""
+    mask = signal.pthread_sigmask(signal.SIG_BLOCK, {signal.SIGTERM, signal.SIGINT})
+    reader, writer = os.pipe()
+    guardian = None
+    def forward(signum, frame):
+        if guardian is not None and guardian > 0:
+            try:
+                os.kill(guardian, signum)
+            except ProcessLookupError:
+                pass
+    signal.signal(signal.SIGTERM, forward)
+    signal.signal(signal.SIGINT, forward)
+    guardian = os.fork()
+    if guardian == 0:
+        os.close(reader)
+        try:
+            supervise(args, command, writer, mask)
+        except Exception:
+            print("local guardian failed before completion", file=sys.stderr, flush=True)
+        finally:
+            os._exit(0)
+    os.close(writer)
+    signal.pthread_sigmask(signal.SIG_SETMASK, mask)
+    with os.fdopen(reader) as pipe:
+        value = pipe.readline().strip()
+    # Guardian 在可信 wait 前崩溃没有回执；action-exited 仍会保持 unknown。
+    return int(value) if value.isdecimal() and 0 <= int(value) <= 255 else 78
 
 
 if __name__ == '__main__':

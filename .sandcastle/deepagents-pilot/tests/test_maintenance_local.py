@@ -223,3 +223,57 @@ def test_action_exit_cannot_substitute_other_protocol_or_old_unbound_job(tmp_pat
         gate.action_exited(owner, job, opaque_clear=True)
     with gate.tx() as db:
         assert not db.execute('SELECT * FROM action_exits').fetchall()
+
+
+@pytest.mark.skipif(not sys.platform.startswith('linux'), reason='真实 Linux subreaper 内核合同')
+@pytest.mark.parametrize('lose_guardian', [False, True])
+def test_linux_guardian_outlives_scheduler_and_only_real_reap_seals(tmp_path, lose_guardian):
+    import signal
+    import time
+    fifo = tmp_path / 'release'
+    os.mkfifo(fifo)
+    descendant = f"with open({str(fifo)!r}) as f: f.read(1)"
+    command = f"import subprocess,sys; p=subprocess.Popen([sys.executable,'-c',{descendant!r}],stdin=subprocess.DEVNULL,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,start_new_session=True); print(p.pid)"
+    result = run_ts(tmp_path, f'''
+const owner = new MaintenanceOwner('decision', root);
+const pid = await owner.work('orphan', () => {{
+  const cmd = maintenanceCommand('python3', ['-c', {json.dumps(command)}]);
+  return Number(execFileSync(cmd.file,cmd.args,{{encoding:'utf8'}}).trim());
+}});
+owner.stop();
+console.log(JSON.stringify({{owner:owner.id,pid}}));
+''')
+    row = json.loads(result.stdout)
+    gate, generation = confirm_all(tmp_path / 'gate')
+    with gate.tx() as db:
+        resource = dict(db.execute('SELECT * FROM local_resources').fetchone())
+        domain = dict(db.execute('SELECT * FROM local_resource_domains').fetchone())
+    assert json.loads(domain['baseline'])['kind'] == 'linux-subreaper-v1'
+    assert resource['waited_at'] and domain['sealed_at'] is None
+    assert gate.reconcile(generation, row['owner'])['result'] == 'unknown'
+    if lose_guardian:
+        os.kill(resource['pid'], signal.SIGKILL)  # 只杀这个临时测试预绑定的 guardian。
+    try:
+        with open(fifo, 'w') as release:
+            release.write('x')
+        if not lose_guardian:
+            deadline = time.monotonic() + 5
+            while time.monotonic() < deadline:
+                with gate.tx() as db:
+                    sealed = db.execute('SELECT sealed_at FROM local_resource_domains').fetchone()[0]
+                if sealed:
+                    break
+                time.sleep(.01)
+            assert sealed, 'guardian 必须自行等待并持久封闭；不能靠 checker 进程消失推断'
+            assert gate.reconcile(generation, row['owner'])['result'] == 'reconciled'
+            assert gate.status([])['state'] == 'drained'
+        else:
+            assert gate.reconcile(generation, row['owner'])['result'] == 'unknown'
+            assert gate.status([])['state'] == 'unknown'
+            with gate.tx() as db:
+                assert db.execute('SELECT sealed_at FROM local_resource_domains').fetchone()[0] is None
+    finally:
+        try:
+            os.kill(row['pid'], signal.SIGTERM)
+        except ProcessLookupError:
+            pass

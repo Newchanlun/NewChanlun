@@ -8,7 +8,8 @@ export function isolateMaintenance(root: string): void {
     ".sandcastle/deepagents-pilot/pilot1742/maintenance.py",
     ".sandcastle/deepagents-pilot/pilot1742/maintenance_epoch.py",
     ".sandcastle/deepagents-pilot/pilot1742/maintenance_local.py",
-    ".sandcastle/deepagents-pilot/pilot1742/maintenance_processes.py"]) {
+    ".sandcastle/deepagents-pilot/pilot1742/maintenance_processes.py",
+    ".sandcastle/deepagents-pilot/pilot1742/maintenance_subreaper.py"]) {
     const target = join(root, file);
     mkdirSync(dirname(target), { recursive: true });
     copyFileSync(new URL(`../${file}`, import.meta.url), target);

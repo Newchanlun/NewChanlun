@@ -21,11 +21,12 @@ def test_unavailable_baseline_returns_without_dispatch_or_unknown_reservation(tm
     marker = tmp_path / 'must-not-exist'
     code = '''
 import sys
-from pilot1742 import maintenance_local, maintenance_processes
+from pilot1742 import maintenance_local, maintenance_processes, maintenance_subreaper
 reason=sys.argv[3]
 def fail():
     raise maintenance_processes.UnstableSnapshot(reason)
 maintenance_processes.stable_snapshot=fail
+maintenance_subreaper.bind=fail
 root,resource=sys.argv[1:3]
 sys.argv=['helper','--root',root,'--resource',resource,'--',sys.executable,'-c',sys.argv[4]]
 raise SystemExit(maintenance_local.main())

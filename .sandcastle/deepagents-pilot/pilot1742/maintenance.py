@@ -200,7 +200,7 @@ class Gate:
             db.execute('INSERT INTO local_resources(id,job) VALUES(?,?)', (resource, job))
         return resource
 
-    def bind_local_resource(self, resource: str) -> None:
+    def bind_local_resource(self, resource: str, *, subreaper: bool = False) -> None:
         from pilot1742.maintenance_processes import stable_snapshot
         pid = os.getpid()
         host, boot = local_epoch()
@@ -215,12 +215,18 @@ class Gate:
             db.execute('UPDATE local_resources SET host=?,boot=?,pid=?,start=?,sid=? WHERE id=?',
                        (host, boot, pid, start, sid, resource))
         # 先绑定监督身份，再采集基线；基线失败时尚未执行 Popen，可留下精确未派发证据。
-        baseline = stable_snapshot()
+        if subreaper:
+            from pilot1742.maintenance_subreaper import bind
+            baseline = bind()
+            supervisor = baseline['birth']
+        else:
+            baseline = stable_snapshot()
+            supervisor = baseline[pid][0]
         with self.tx() as db:
             if db.execute('SELECT 1 FROM local_resource_not_started WHERE resource=?', (resource,)).fetchone():
                 raise ValueError('resource dispatch cancelled')
             db.execute('INSERT INTO local_resource_domains VALUES(?,?,?,NULL)',
-                       (resource, json.dumps(baseline), baseline[pid][0]))
+                       (resource, json.dumps(baseline), supervisor))
 
     def local_resource_not_started(self, resource: str) -> None:
         """只供原监督器在基线失败、Popen 之前返回；不是消失证明或通用取消入口。"""
