@@ -41,7 +41,13 @@ jobs:
   # #1875 push 去重：合入 main 的 merge commit 若与 PR head（第二父）同树，且 PR 在该 head 上已有成功的 ci.yml run，
   #   push 不再重跑 Rust 作业。strict 下 PR run 检出的 refs/pull/N/merge 与 head 同树，所以那次 run 测的正是这棵树。
   #   rust/Cargo.lock 有变时仍全跑，让 main 作用域写入新的 cargo 缓存（PR 作用域的缓存别的 PR 读不到）。
-  #   单父提交、直接推送、查询出错一律全跑。去重后 main 的 push run 多数没有 Rust 作业耗时，CI 计时请看 PR run。
+  #   单父提交、查询出错一律全跑；直接推送到 main 由分支保护（必须经 PR）挡住，不在本判定里另查。去重后 main 的 push run 多数没有 Rust 作业耗时，CI 计时请看 PR run。
+  #   那次 PR run 必须真跑过 Rust（rust-green 作业 success）；走了同 PR 复用的 run 不算，main 上照常全跑（#2027），
+  #   用来兜住复用判定的非恶意误判。合入改动全在跳过集里时直接不跑 Rust（与 PR 侧 p2m 同一依据）。
+  # #1875 同 PR 复用：PR run 的检出树去掉上面的跳过集后，与本分支上一次全绿 run 相同、且两边 .github 相同时，
+  #   不再跑 Rust 作业（典型是列车追平的 main 只多了 .sandcastle 改动）。凭据是那次 run 里服务端渲染的
+  #   `rust-green <指纹>` 作业的结论（见文件末尾 rust-green 作业），不是 artifact：同一 run 里的 PR 代码拿得到运行时令牌，
+  #   能伪造 artifact（#2027 第三轮独审）。只认本仓库分支、7 天内的 run，查询出错一律全跑。判定见 .github/scripts/ci-rust-reuse.py。
   changes:
     runs-on: ubuntu-latest
     timeout-minutes: 5
@@ -51,12 +57,24 @@ jobs:
       pull-requests: read
     outputs:
       rust: ${{ steps.filter.outputs.rust }}
+      rust_key: ${{ steps.filter.outputs.rust_key }}
     steps:
+      # 稀疏检出 .github/scripts，供同 PR 复用判定（ci-rust-reuse.py）使用。
+      #   检出失败不让本作业失败：脚本不存在时下面按全跑处理。
+      - uses: actions/checkout@v4
+        if: github.event_name == 'pull_request'
+        continue-on-error: true
+        with:
+          sparse-checkout: .github/scripts
+          persist-credentials: false
       - id: filter
         env:
           GH_TOKEN: ${{ github.token }}
           EVENT: ${{ github.event_name }}
           PR: ${{ github.event.pull_request.number }}
+          HEAD_REF: ${{ github.head_ref }}
+          # p2m 跳过集；同 PR 复用的输入指纹也排除同一组路径。
+          SKIP_RE: '^(\.sandcastle/.+|package\.json|package-lock\.json|tsconfig\.sandcastle\.json|\.github/devskim-reviewed-1488\.json|\.github/devskim-baseline\.json|\.github/devskim/.+|\.github/workflows/devskim\.yml|scripts/devskim_[a-z_]+\.(sh|py))$'
         run: |
           set -euo pipefail
           if [ "$EVENT" = push ]; then
@@ -75,10 +93,25 @@ jobs:
               rc=0; grep -qx 'rust/Cargo.lock' "$RUNNER_TEMP/push-files" || rc=$?
               if [ "$rc" -eq 0 ]; then echo "Cargo.lock changed"; return 1; fi
               if [ "$rc" -ne 1 ]; then echo "file check failed (grep exit $rc)"; return 1; fi
-              run=$(gh api "$R/actions/workflows/ci.yml/runs?event=pull_request&status=success&head_sha=$2&per_page=20" \
-                --jq '[.workflow_runs[] | select(.head_repository.id == .repository.id)][0].html_url // empty') || return 1
-              [ -n "$run" ] || { echo "no green PR run for $2"; return 1; }
-              echo "green PR run on same tree: $run"
+              # 合入的改动全在跳过集里（只改 .sandcastle / DevSkim 的 PR）：Rust 输入与 main 上一提交相同，与 PR 侧 p2m 同一依据。
+              #   改动清单为空时与 PR 侧一致按全跑处理。
+              [ -s "$RUNNER_TEMP/push-files" ] || { echo "empty file list"; return 1; }
+              rc=0; grep -v -E -q "$SKIP_RE" "$RUNNER_TEMP/push-files" || rc=$?
+              if [ "$rc" -eq 1 ]; then echo "only skip-set files changed"; return 0; fi
+              if [ "$rc" -ne 0 ]; then echo "skip-set check failed (grep exit $rc)"; return 1; fi
+              # #2027：只认 Rust 作业在那次 PR run 里真跑过的（rust-green 作业 success）。同 PR 复用命中的 run 跳过了 Rust，
+              #   main 合入后照常全跑一次：复用判定若有误判（逻辑缺陷，非恶意），在 main 上立即暴露。对有本仓写权限、能用
+              #   旁路 base 跑出 rust-green 的人不构成边界——与本去重原有的信任前提相同（见 ci-rust-reuse.py「接受的风险」）。
+              ids=$(gh api "$R/actions/workflows/ci.yml/runs?event=pull_request&status=success&head_sha=$2&per_page=20" \
+                --jq '.workflow_runs[] | select(.head_repository.id == .repository.id) | .id') || return 1
+              run=
+              for id in $ids; do
+                green=$(gh api "$R/actions/runs/$id/jobs?filter=latest&per_page=100" \
+                  --jq '[.jobs[] | select((.name | startswith("rust-green ")) and .conclusion == "success")] | length') || return 1
+                if [ "$green" -gt 0 ]; then run=$id; break; fi
+              done
+              [ -n "$run" ] || { echo "no PR run for $2 that actually ran Rust"; return 1; }
+              echo "PR run on same tree that ran Rust: $run"
             }
             if dedup; then rust=false; else rust=true; fi
             echo "push dedup: rust=$rust"
@@ -86,7 +119,7 @@ jobs:
           fi
           if [ "$EVENT" != pull_request ]; then echo rust=true >> "$GITHUB_OUTPUT"; exit 0; fi
           # 改动清单取不到（如超大 PR：GitHub 422「diff is taking too long to generate」，#1945 run 42654260412）
-          #   或 changed_files 查询失败时按全跑，不让 changes 失败而连带 ci-ok 变红。
+          #   或 changed_files 查询失败时按全跑，不让 changes 失败而连带 ci-ok 变红（#2038）。
           if ! gh api --paginate "repos/$GITHUB_REPOSITORY/pulls/$PR/files?per_page=100" \
             --jq '.[] | .filename, (.previous_filename // empty)' > "$RUNNER_TEMP/files"; then
             echo "changed-file list unavailable: rust=true"; echo "rust=true" >> "$GITHUB_OUTPUT"; exit 0
@@ -94,10 +127,16 @@ jobs:
           if ! total=$(gh api "repos/$GITHUB_REPOSITORY/pulls/$PR" --jq .changed_files); then
             echo "changed_files unavailable: rust=true"; echo "rust=true" >> "$GITHUB_OUTPUT"; exit 0
           fi
-          other=$(grep -c -v -E '^(\.sandcastle/.+|package\.json|package-lock\.json|tsconfig\.sandcastle\.json|\.github/devskim-reviewed-1488\.json|\.github/devskim-baseline\.json|\.github/devskim/.+|\.github/workflows/devskim\.yml|scripts/devskim_[a-z_]+\.(sh|py))$' "$RUNNER_TEMP/files" || true)
+          other=$(grep -c -v -E "$SKIP_RE" "$RUNNER_TEMP/files" || true)
           if [ "$total" -ge 3000 ] || [ ! -s "$RUNNER_TEMP/files" ] || [ "$other" -ne 0 ]; then rust=true; else rust=false; fi
           echo "changed=$total other=$other rust=$rust"
-          echo "rust=$rust" >> "$GITHUB_OUTPUT"
+          if [ "$rust" = false ]; then echo "rust=false" >> "$GITHUB_OUTPUT"; exit 0; fi
+          # 同 PR 复用：Rust 输入与本分支上一次全绿 run 相同就不重跑；出错按全跑（脚本只会输出 rust=true）。
+          python3 .github/scripts/ci-rust-reuse.py "$GITHUB_REPOSITORY" "$GITHUB_SHA" "$HEAD_REF" "$GITHUB_RUN_ID" "$SKIP_RE" \
+            > "$RUNNER_TEMP/reuse" || echo "rust=true" > "$RUNNER_TEMP/reuse"
+          cat "$RUNNER_TEMP/reuse"
+          { echo "### 同 PR Rust 复用（#1875）"; sed 's/^/- /' "$RUNNER_TEMP/reuse"; } >> "$GITHUB_STEP_SUMMARY"
+          grep -E '^(rust|rust_key)=' "$RUNNER_TEMP/reuse" >> "$GITHUB_OUTPUT"
 
   test:
     runs-on: ubuntu-latest
@@ -350,6 +389,11 @@ jobs:
       - name: 生产增量构建无测试钩子检查器单测（#1640）
         working-directory: .
         run: python3 -m unittest discover -s .github/scripts -p 'test_check_prod_no_test_hooks*.py'
+
+      # #1875 同 PR 复用判定的单测。改这份脚本会改 .github，本身就不会命中复用，所以放在 Rust 作业里也一定会跑到。
+      - name: 同 PR Rust 复用判定单测（#1875）
+        working-directory: .
+        run: python3 -m unittest discover -s .github/scripts -p 'test_ci_rust_reuse.py' -v
 
       - name: cargo fmt --check（#611：归零后防回潮）
         run: |
@@ -723,13 +767,6 @@ jobs:
           fail=0
           : > ../locks.tsv
           cargo test --release --locked --features s_session,s_incremental --bin s_structure_session -- --list --format terse --ignored > ../list-release.txt 2>&1
-          # #1875 R5：产物机检的 bin 构建（固定 --jobs 1，约 3 分钟；R5b：已被锁的时长盖住，多核只会与锁争 CPU）与单线程的锁并行：等锁的测试进程起来（cargo 此时已放开
-          #   target 目录锁）再在同一 rust/target 后台构建，结论由下一步「产物无测试钩子」收取并决定成败。
-          rm -f ../artifact.rc
-          setsid nohup bash -c 'for _ in $(seq 120); do pgrep -f "deps/s_structure_session-[0-9a-f]+ --ignored --exact" >/dev/null && break; sleep 1; done
-            ../.github/scripts/run-cargo-with-telemetry.sh cargo build --release --locked --features s_session,s_incremental --bin s_structure_session --jobs 1 \
-              && ../.github/scripts/check-prod-artifact-hooks.sh target/release/s_structure_session
-            echo $? > ../artifact.rc.tmp && mv ../artifact.rc.tmp ../artifact.rc' > ../artifact.log 2>&1 < /dev/null &
           total=0
           while IFS= read -r t; do
             [ -z "$t" ] && continue
@@ -747,16 +784,16 @@ jobs:
           exit $fail
 
       # #1640 §2.3 第 3 层（产物机检）：不 strip 的生产增量 release 构建，nm 子串与禁串（固定＋自动抽取清单）零命中。
-      #   复用 release-only 构建的 rust/target；Cargo.toml 的 release profile 不设 strip，符号表保留。
-      #   构建与检查在上一步后台进行（#1875 R5），此处等其结束并以其退出码为本步结论。
+      #   Cargo.toml 的 release profile 不设 strip，符号表保留。
+      # #1875：产物机检原在 release-locks 里与 S4 后台并行（R5，当时 S4 单线程、构建被锁的时长盖住）。#2041 让 S4 冷臂
+      #   用上第二个核后，后台构建（rustc/LLVM 代码生成多线程）与它争 CPU：Boat 同机 S4 并行版独占 490–502 s，带后台构建
+      #   599–626 s。改在 economic 组前台构建（该组中位 4.3 min，加上构建仍远短于 release-locks），用满核数。
       - name: 生产增量 release 产物无测试钩子（#1640）
-        if: ${{ !cancelled() && matrix.group == 'release-locks' }}
+        if: ${{ !cancelled() && startsWith(matrix.group, 'economic') }}
         timeout-minutes: 30
         run: |
-          for _ in $(seq 330); do [ -f ../artifact.rc ] && break; sleep 5; done
-          cat ../artifact.log
-          if [ ! -f ../artifact.rc ]; then echo "::error title=Artifact build did not finish::no exit status after 27.5 min"; exit 1; fi
-          exit "$(cat ../artifact.rc)"
+          ../.github/scripts/run-cargo-with-telemetry.sh cargo build --release --locked --features s_session,s_incremental --bin s_structure_session --jobs "${CI_CARGO_JOBS_RELEASE:-4}"
+          ../.github/scripts/check-prod-artifact-hooks.sh target/release/s_structure_session
 
       - name: Upload release-only lock logs（#1640）
         if: ${{ always() && matrix.group == 'release-locks' }}
@@ -768,7 +805,6 @@ jobs:
             list-release.txt
             locks.tsv
             out-release-*.log
-            artifact.log
           if-no-files-found: warn
 
   # #1769（ADR 0039 迁移步骤 1，C-L 验收第 4 项）：唯一生产 launcher 与 X 骨架入口测试。
@@ -1459,3 +1495,24 @@ jobs:
           if bad or results.get("changes") != "success" or rust not in ("true", "false"):
               sys.exit(f"CI 未通过：{bad}，changes={results.get('changes')}，rust={rust}")
           PY
+
+  # #1875 同 PR 复用的凭据：Rust 作业全部成功（不是 skipped）时才会运行；作业名带本次 Rust 输入指纹，由 GitHub 服务端渲染，
+  #   指纹来自 changes 作业的输出，其他作业里的 PR 代码写不了它，也改不了作业名。判定脚本 ci-rust-reuse.py 用 jobs API 读这个
+  #   作业名与结论作证据（不用 artifact：同一 run 里任何先于上传执行的 PR 代码都拿得到运行时令牌，#2027 独审）。不进 ci-ok。
+  rust-green:
+    name: rust-green ${{ needs.changes.outputs.rust_key || 'nokey' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    if: github.event_name == 'pull_request' && needs.changes.outputs.rust == 'true'
+    needs:
+      - changes
+      - rust-check
+      - rust-test-default
+      - rust-test-s-session
+      - rust-test-s-session-coverage
+      - rust-test-s-session-extra-groups
+      - rust-test-production-session
+      - s-sequence-1488
+      - s-fields-native-1488
+    steps:
+      - run: echo "全部 Rust 作业成功，输入指纹见作业名"

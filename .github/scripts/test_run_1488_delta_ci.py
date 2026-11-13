@@ -194,7 +194,7 @@ class EaccesRetryLogTest(unittest.TestCase):
 
     def test_retry_marker_keeps_only_last_attempt(self):
         rust, target, failed, ok = self._fixture()
-        marker = MODULE.EACCES_RETRY_MARKER + "host=box could not execute process `x/build-script-build`"
+        marker = MODULE.RETRY_MARKER + "cause=EACCES could not execute process `x/build-script-build` host=box"
         log = "\n".join([failed, marker, ok])
         self.assertEqual(SELECT_BINARY(log, rust, target, "bin", "Plain")["features"], ["default", "s_session"])
 
