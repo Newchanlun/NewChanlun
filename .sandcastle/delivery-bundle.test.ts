@@ -374,3 +374,135 @@ test("交付预检的 git 子进程拿不到 CLIProxy 密钥及其他凭据变�
     assert.ok(keys.includes("GIT_OPTIONAL_LOCKS"));
   }
 });
+
+function externalFixture(t: TestContext) {
+  const f = fixture(t);
+  const root = join(f.directory, "evidence");
+  mkdirSync(root);
+  const originals = structuredClone(f.manifest.reports);
+  const reports = originals.map((item, i) => {
+    const path = join(root, `${i}.md`);
+    writeFileSync(path, readFileSync(join(f.repo, item.path)));
+    return { ...item, storage: "external" as const, path, ticket: f.manifest.ticket, base: f.manifest.base, head: f.manifest.head };
+  });
+  // 先移除已提交报告，得到不含过程证据的最终产品提交。
+  f.git("rm", "-r", ".chanlun/review-results");
+  f.manifest.head = f.commit();
+  for (const item of reports) item.head = f.manifest.head;
+  Object.assign(f.manifest, { externalReportsRoot: root, reports, requiredReports: reports.map(item => item.path) });
+  f.manifest.reviews[0].report = reports[1];
+  f.manifest.checks[0].evidence = reports[0];
+  f.manifest.scan.evidence = reports[2];
+  f.manifest.scan.scannedHead = f.manifest.head;
+  return { ...f, root, reports };
+}
+
+test("仓外报告覆盖审查、检查和扫描，Git 无报告也可交付", t => {
+  const f = externalFixture(t);
+  const result = preflightDelivery(f.repo, f.manifest);
+  assert.equal(result.status, "READY_FOR_APPROVAL", JSON.stringify(result));
+  assert.equal(result.mergeAuthorized, false);
+  assert.equal(f.git("ls-files", ".chanlun/review-results"), "");
+});
+
+test("仓外报告必须绑定当前票、base 和 head", t => {
+  for (const field of ["ticket", "base", "head"] as const) {
+    const f = externalFixture(t);
+    Object.assign(f.reports[0], { [field]: field === "ticket" ? 9999 : "0".repeat(40) });
+    assert.ok(preflightDelivery(f.repo, f.manifest).diagnostics.some(d => d.code === "REPORT_VERSION_MISMATCH"), field);
+  }
+});
+
+test("仓外报告缺失、篡改、符号链接或越出证据目录均阻断", t => {
+  for (const variant of ["missing", "changed", "symlink", "outside"] as const) {
+    const f = externalFixture(t);
+    const item = f.reports[0];
+    if (variant === "missing") rmSync(item.path);
+    if (variant === "changed") writeFileSync(item.path, "changed");
+    if (variant === "symlink") { rmSync(item.path); symlinkSync(f.reports[1].path, item.path); }
+    if (variant === "outside") {
+      const outside = join(f.directory, "outside.md");
+      writeFileSync(outside, readFileSync(item.path));
+      f.manifest.requiredReports[0] = outside;
+      item.path = outside;
+    }
+    const result = preflightDelivery(f.repo, f.manifest);
+    assert.equal(result.status, "BLOCKED", variant);
+    const code = { missing: "REPORT_MISSING", changed: "REPORT_HASH_MISMATCH", symlink: "REPORT_NOT_REGULAR_FILE", outside: "INVALID_REPORT_PATH" }[variant];
+    assert.ok(result.diagnostics.some(d => d.code === code), JSON.stringify(result));
+  }
+});
+
+test("仓外协议必须显式选择，仓内失败不能借外卷同名文件兜底", t => {
+  const f = fixture(t);
+  Object.assign(f.manifest, { externalReportsRoot: join(f.directory, "absent") });
+  assert.equal(preflightDelivery(f.repo, f.manifest).status, "READY_FOR_APPROVAL");
+  f.manifest.reports.push({ path: "absent.md", sha256: hash("外卷文件不替代 Git") });
+  assert.ok(preflightDelivery(f.repo, f.manifest).diagnostics.some(d => d.code === "REPORT_NOT_IN_HEAD"));
+});
+
+test("仓外报告不能替代未覆盖的非作者独审或源版本检查", t => {
+  const f = externalFixture(t);
+  f.manifest.reviews[0].covers = [];
+  f.manifest.checks[0].covers = [];
+  const result = preflightDelivery(f.repo, f.manifest);
+  for (const code of ["REVIEW_COVERAGE_MISSING", "CHECK_SOURCE_DRIFT"]) {
+    assert.ok(result.diagnostics.some(d => d.code === code), code);
+  }
+});
+
+test("证据引用须与 reports 的存储类型、版本和摘要一致", t => {
+  const f = externalFixture(t);
+  f.manifest.reviews[0].report = { ...f.reports[1], head: f.manifest.base };
+  assert.ok(preflightDelivery(f.repo, f.manifest).diagnostics.some(d => d.code === "REPORT_DECLARATION_MISMATCH"));
+});
+
+test("仓外协议拒绝缺根目录、缺版本绑定、目录实体、父路径与仓内伪装", t => {
+  for (const variant of ["no-root", "no-binding", "directory", "parent", "in-repo"] as const) {
+    const f = externalFixture(t);
+    if (variant === "no-root") delete f.manifest.externalReportsRoot;
+    if (variant === "no-binding") Reflect.deleteProperty(f.reports[0], "head");
+    if (variant === "directory") { rmSync(f.reports[0].path); mkdirSync(f.reports[0].path); }
+    if (variant === "parent") f.reports[0].path = `${f.root}/../evidence/0.md`;
+    if (variant === "in-repo") {
+      f.manifest.externalReportsRoot = f.repo;
+      f.reports[0].path = join(f.repo, "app.js");
+    }
+    assert.equal(preflightDelivery(f.repo, f.manifest).status, "BLOCKED", variant);
+  }
+});
+
+test("仓内与仓外证据可混用，CLI 使用同一协议且不授予合入权限", t => {
+  const f = externalFixture(t);
+  // 旧仓内 artifact 不因同时存在外部目录配置而改用新合同。
+  f.manifest.reports.push(f.artifact("app.js"));
+  const file = join(f.directory, "manifest.json");
+  writeFileSync(file, JSON.stringify(f.manifest));
+  const cli = join(__dirname, "delivery-bundle.mts");
+  const output = execFileSync(process.execPath, ["--import", "tsx", cli, f.repo, file], { encoding: "utf8" });
+  const result = JSON.parse(output);
+  assert.equal(result.status, "READY_FOR_APPROVAL", output);
+  assert.equal(result.mergeAuthorized, false);
+});
+
+test("仓外扫描分诊仍只得到显式例外，未修产品问题不能放行", t => {
+  const f = externalFixture(t);
+  f.manifest.scan.status = "failed";
+  f.manifest.scan.exitCode = 1;
+  f.manifest.scan.disclosure = {
+    reason: "固定测试材料的误报", triage: f.reports[3], confirmedUnfixedProductFindings: 0, tailChanges: [],
+  };
+  assert.equal(preflightDelivery(f.repo, f.manifest).status, "READY_WITH_EXPLICIT_EXCEPTION");
+  f.manifest.scan.disclosure.confirmedUnfixedProductFindings = 1;
+  assert.ok(preflightDelivery(f.repo, f.manifest).diagnostics.some(d => d.code === "UNFIXED_PRODUCT_FINDINGS"));
+});
+
+test("证据目录中的符号链接子目录不能引入目录外文件", t => {
+  const f = externalFixture(t);
+  symlinkSync(f.directory, join(f.root, "linked"));
+  const outside = join(f.directory, "outside.md");
+  writeFileSync(outside, readFileSync(f.reports[0].path));
+  f.reports[0].path = join(f.root, "linked", "outside.md");
+  f.manifest.requiredReports[0] = f.reports[0].path;
+  assert.ok(preflightDelivery(f.repo, f.manifest).diagnostics.some(d => d.code === "REPORT_NOT_REGULAR_FILE"));
+});
