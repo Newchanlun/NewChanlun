@@ -26,6 +26,9 @@ from pilot1742.external_review import (
     load_target,
     validate_review,
 )
+from pilot1742.external_review import (
+    docker_cli as real_docker_cli,
+)
 from pilot1742.github_app import (
     AppIdentity,
     GitHubAppClient,
@@ -2259,3 +2262,69 @@ def test_block_left_by_retired_reviewer_still_vetoes_reuse(lane, env, monkeypatc
     _advance_main(lane, env)
     result = lane.review_pr(1810)
     assert "reused_from" not in result and [r["model"] for r in result["reviews"]] == list(MODELS)
+
+
+@pytest.mark.parametrize("context", ["colima", None, "missing-context"])
+def test_docker_context_at_admission_supervisor_and_recovery_boundaries(lane, monkeypatch, tmp_path, context):
+    """真实子进程 + PATH 内假 docker：监督、准入、回收必须选同一 daemon，失败不改走默认。"""
+    import os
+
+    selected = context or "orbstack"
+    if context is None:
+        monkeypatch.delenv("DOCKER_CONTEXT", raising=False)
+    else:
+        monkeypatch.setenv("DOCKER_CONTEXT", context)
+    for key in ("DOCKER_HOST", "DOCKER_CONFIG", "DOCKER_TLS_VERIFY", "DOCKER_CERT_PATH", "SECRET_TOKEN"):
+        monkeypatch.setenv(key, "fixture-must-not-pass")
+    monkeypatch.setenv("SANDCASTLE_MAIN_MODEL", "fixture-not-the-review-model")
+    monkeypatch.setenv("CLIPROXY_LOCAL_KEY", "fixture-worker-only")
+    trace = tmp_path / "docker-calls.jsonl"
+    binary = tmp_path / "bin"
+    binary.mkdir()
+    docker = binary / "docker"
+    docker.write_text(f'''#!{sys.executable}
+import json, os, sys
+assert os.environ.get("DOCKER_CONTEXT") == {context!r}
+assert not any(k in os.environ for k in ("DOCKER_HOST", "DOCKER_CONFIG", "DOCKER_TLS_VERIFY", "DOCKER_CERT_PATH", "SECRET_TOKEN", "SANDCASTLE_MAIN_MODEL"))
+with open({str(trace)!r}, "a") as f:
+    f.write(json.dumps({{"context": os.environ.get("DOCKER_CONTEXT", "orbstack"), "args": sys.argv[1:]}}) + "\\n")
+if os.environ.get("DOCKER_CONTEXT") == "missing-context":
+    sys.exit(7)
+if sys.argv[1:4] == ["ps", "-a", "-q"]:
+    print("a" * 64)
+''')
+    docker.chmod(0o700)
+    monkeypatch.setenv("PATH", str(binary) + os.pathsep + os.environ["PATH"])
+    # 绕过 conftest 的空 docker 替身，但只能命中上面的假可执行文件。
+    lane.docker = real_docker_cli
+    worker = tmp_path / "supervisor.py"
+    worker.write_text(f'''
+import json, os, runpy, subprocess, sys
+from pathlib import Path
+assert os.environ.get("DOCKER_CONTEXT") == {context!r}
+assert not any(k in os.environ for k in ("DOCKER_HOST", "DOCKER_CONFIG", "DOCKER_TLS_VERIFY", "DOCKER_CERT_PATH", "SECRET_TOKEN", "SANDCASTLE_MAIN_MODEL"))
+admission = sys.argv[1:] == ["--admission-only"]
+assert os.environ.get("CLIPROXY_LOCAL_KEY") == (None if admission else "fixture-worker-only")
+if not admission:
+    launch = json.loads((Path(sys.argv[-1]) / "launch.json").read_text())
+    assert launch["model"] in {MODELS!r}
+probe = subprocess.run(["docker", "info"], capture_output=True)
+if probe.returncode:
+    sys.exit(2)
+runpy.run_path({lane.launcher[1]!r}, run_name="__main__")
+''')
+    lane.launcher = [sys.executable, str(worker)]
+    controller = git(lane.source, "rev-parse", "HEAD")
+    admission = lane._deployment_admission(controller)
+    assert (admission is None) == (context == "missing-context")
+    result = lane.review_pr(1810)
+    assert result["verdict"] == ("FAILED" if context == "missing-context" else "PASS")
+    volume = module.REVIEW_VOLUME_PREFIX + str(uuid.uuid4())
+    assert lane.remove_review_volume(volume) == (context != "missing-context")
+    rows = [json.loads(line) for line in trace.read_text().splitlines()]
+    assert {row["context"] for row in rows} == {selected}
+    assert sum(row["args"] == ["info"] for row in rows) == 3  # 准入一次、两位监督各一次
+    destructive = [row for row in rows if row["args"][0] == "rm" or row["args"][:2] == ["volume", "rm"]]
+    assert bool(destructive) == (context != "missing-context")
+    if destructive:
+        assert [row["args"] for row in destructive] == [["rm", "-f", "a" * 64], ["volume", "rm", volume]]

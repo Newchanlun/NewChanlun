@@ -31,8 +31,9 @@ TRIM_TIMEOUT_SECONDS = 60
 CONTEXT_TIMEOUT_SECONDS = 10
 LOCK_NAME = ".vm-trim.lock"
 STAMP_NAME = ".vm-trim.stamp"
-# 与 external_review.docker_cli 同一组定位变量：不传 DOCKER_HOST/DOCKER_CONTEXT，与监督、controller 连同一个 context。
-DOCKER_ENV = ("PATH", "HOME", "USER", "LOGNAME", "TMPDIR", "LANG")
+# 宿主 Docker 定位合同：显式 context 贯穿准入、监督、回收与 trim；未指定时仍由 Docker 选默认。
+# 不传 DOCKER_HOST、DOCKER_CONFIG 或任意凭据；这不是审阅容器的环境白名单。
+DOCKER_ENV = ("PATH", "HOME", "USER", "LOGNAME", "TMPDIR", "LANG", "DOCKER_CONTEXT")
 TRIM_TARGET = "/var/lib/docker"
 
 Runner = Callable[[List[str], float], subprocess.CompletedProcess]
