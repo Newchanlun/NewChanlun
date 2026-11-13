@@ -109,6 +109,8 @@ npm run typecheck
 测试使用临时账本、真实 SQLite 多进程竞争与管道同步；fake 工作者不访问模型或生产控制根。
 包括关闸/领取竞争、已领取持续推进、真实 detached 子进程接收与结束、缺入口确认、失联重启、精确代次恢复以及旧 freeze 不变。
 
+Wayfinder 的临时入口快照通过 `scripts/wayfinder-maintenance-fixture.mts` 复制 TS/Python 准入助手，并显式向 `MaintenanceOwner` 传入快照内的 `maintenance` 目录；不使用生产维护根。构造点变化会使夹具立即报错，不能静默恢复默认根。壳层测试验证真实入口在该目录生成 SQLite 账本，原业务断言保持不变。
+
 ## 接入接口与回退边界
 
 Python `Owner(lane)` 提供 `poll/admit/reserve/finish/coverage/stop`；TS 通过 `.sandcastle/maintenance.mts` 调用同一账本。`reserve` 只供 detached review 交接，`finish(natural=False)` 保留 unknown。入口覆盖依赖当前解释器命令识别及本地 PID/启动时间（秒级），不是操作系统级全请求拦截；自定义启动壳与远端/T3 owner 必须另行盘点。

@@ -2,16 +2,16 @@
 from __future__ import annotations
 
 import argparse
-from contextlib import contextmanager
-from datetime import datetime, timezone
 import json
 import os
-from pathlib import Path
 import re
 import sqlite3
 import subprocess
 import sys
 import uuid
+from contextlib import contextmanager
+from datetime import datetime, timezone
+from pathlib import Path
 
 if not __package__:
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -410,7 +410,7 @@ class Gate:
 
 def process_inventory() -> list[tuple[str, int, str]]:
     output = subprocess.run(['ps', '-axo', 'pid=,ppid=,args='], check=True, capture_output=True, text=True).stdout
-    result = []
+    result: list[tuple[str, int, str]] = []
     parents = {}
     wrappers = set()
     for line in output.splitlines():

@@ -1631,7 +1631,7 @@ def _sweep_hook(rounds):
 
 
 def test_maintenance_spawner_cannot_spawn_after_request(tmp_path, monkeypatch):
-    from pilot1742.maintenance import Owner, Closed
+    from pilot1742.maintenance import Closed, Owner
     owner = Owner('review', tmp_path / 'gate')
     spawn = module.spawner(tmp_path / 'not-read.pem', owner)
     owner.gate.request()
@@ -1667,6 +1667,7 @@ def test_maintenance_spawner_reserves_before_detach(tmp_path, monkeypatch):
 
 def test_maintenance_completion_is_scoped_to_its_own_review(lane, monkeypatch):
     from dataclasses import asdict, replace
+
     from pilot1742 import external_review
     target = lane.target(1810, 1)
     other = replace(target, pr_number=999)
@@ -1687,6 +1688,7 @@ def test_maintenance_completion_is_scoped_to_its_own_review(lane, monkeypatch):
 
 def test_recovery_review_requires_exact_launch_and_target_receipts(lane, monkeypatch):
     from dataclasses import asdict
+
     from pilot1742 import external_review, maintenance_recovery
     target = lane.target(1810, 1)
     folder = lane.state_root / 'runs' / target.key

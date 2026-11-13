@@ -1,3 +1,4 @@
+import { isolateMaintenance, copyEngineSnapshot } from "./wayfinder-maintenance-fixture.mts";
 /**
  * wayfinder_engine 壳层测试（#1084 追加验收）：
  *  - 注入一次 GitHub API timeout → 有限重试 + 指数退避后自动恢复并继续（进程不永久停摆）；
@@ -9,7 +10,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { spawn, spawnSync } from "node:child_process";
-import { copyFileSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync, rmSync } from "node:fs";
+import { existsSync, copyFileSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -42,6 +43,7 @@ exit 0
 
 function runEngine(failCount: number, maxAttempts: number): string {
   const dir = mkdtempSync(join(tmpdir(), "wfe-shell-test-"));
+  copyEngineSnapshot(dir);
   const stateFile = join(dir, "state");
   const ghPath = join(dir, "gh");
   writeFileSync(ghPath, fakeGhScript(stateFile, failCount), { mode: 0o755 });
@@ -60,13 +62,14 @@ function runEngine(failCount: number, maxAttempts: number): string {
     const r = spawnSync(
       process.execPath,
       ["--experimental-strip-types", "scripts/wayfinder_engine.mts", "--once", "--dry-run"],
-      { cwd: repoRoot, env, encoding: "utf8", timeout: 30_000 },
+      { cwd: dir, env, encoding: "utf8", timeout: 30_000 },
     );
     if (r.status !== 0) {
       throw new Error(
         `engine --once --dry-run 退出码 ${r.status}\nstdout:\n${r.stdout}\nstderr:\n${r.stderr}`,
       );
     }
+    assert.ok(existsSync(join(dir, "maintenance/maintenance.sqlite3")), "真实入口必须使用临时维护账本");
     return (r.stdout ?? "") + "\n" + (r.stderr ?? "");
   } finally {
     rmSync(dir, { recursive: true, force: true });
@@ -104,6 +107,7 @@ test("无 node_modules：Node 原生类型剥离可 import engine 与主控模�
       [".sandcastle/deepagents-cutover.mts", ".sandcastle/deepagents-cutover.mts"],
       [".sandcastle/queue-policy.json", ".sandcastle/queue-policy.json"],
     ]) copyFileSync(join(repoRoot, source), join(dir, target));
+    isolateMaintenance(dir);
     const result = spawnSync(process.execPath, [
       "--experimental-strip-types", "--input-type=module", "--eval",
       "const m = await import('./scripts/wayfinder_engine.mts'); " +
@@ -177,6 +181,7 @@ async function runLiveLoop(record: "valid" | "missing" | "malformed" | "stale", 
         ? source.replace('"/Volumes/AgentStorage/deepagents-exec"', JSON.stringify(state)) : source;
       writeFileSync(join(root, file), content);
     }
+    isolateMaintenance(root);
     const freeze = (generation: number) => writeFileSync(join(drain, "state.json"),
       JSON.stringify({ v: 1, mode: "draining", generation }));
     freeze(record === "stale" ? 2 : 1);

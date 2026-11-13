@@ -12,7 +12,6 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from .maintenance import Owner, Closed
 from .approval import SpecAuthorization
 from .boat_execution import ExecutionUnknown
 from .claims import ClaimStore
@@ -26,6 +25,7 @@ from .domain import (
     parse_run_id,
     parse_sha,
 )
+from .maintenance import Closed, Owner
 from .run import InsufficientSpace, PilotRun, TaskSpec, _ps_rows, require_free_space
 from .workunit import (
     RELEASE_LABEL,
@@ -273,6 +273,7 @@ class QueueIntake:
                 else:
                     occupied.pop(ticket, None)
                     if ticket in permits and results[ticket].get('phase') in ('awaiting_merge', 'merged', 'halted', 'queued'):
+                        assert self.maintenance is not None
                         self.maintenance.finish(permits.pop(ticket))
 
             for ticket in sorted(tickets, key=priority):
@@ -384,34 +385,7 @@ class QueueIntake:
             os.close(fd)
 
     def _worker_activity(self, folders: set[Path]) -> str | None:
-        for folder in sorted(folders):
-            try:
-                if not (folder / 'run.json').exists():
-                    if any((folder / name).exists() for name in ('workers', 'intents', 'boat')):
-                        return f'{folder.name}: effect_unknown: missing run.json with worker state'
-                    continue
-                run = PilotRun.open(folder.parent.parent, parse_run_id(folder.name), source_repo=self.source_repo)
-                rows = [] if run.execution is not None else _ps_rows()
-                keys = set(run._keys())
-                if run.execution is not None:
-                    keys.update(parse_key_name(run.spec.run_id, p.stem) for p in (folder / 'boat').glob('*.json')
-                                if '.' not in p.stem)
-                workers = {key: run._observe(key, rows, reconcile=False) for key in keys}
-                pending = []
-                for key, fact in workers.items():
-                    if isinstance(fact, NotStarted) and run.execution is None:
-                        continue
-                    if isinstance(fact, (NotStarted, Running, EffectUnknown)):
-                        if run.execution is not None and run.execution.is_drained(key):
-                            continue
-                        reason = ("effect_unknown: " + fact.reason if isinstance(fact, EffectUnknown)
-                                  else "preparing" if isinstance(fact, NotStarted) else "running")
-                        pending.append(f"{key.name}: {reason}")
-                if pending:
-                    return f'{folder.name}: worker slot retained: ' + '; '.join(pending)
-            except (ExecutionUnknown, OSError, ValueError, TypeError, KeyError, subprocess.CalledProcessError) as error:
-                return f'{folder.name}: effect_unknown: worker observation failed: {error}'
-        return None
+        return worker_activity(folders, self.source_repo)
 
     def _status(self, results: dict[int, dict[str, Any]]) -> dict[int, dict[str, Any]]:
         from .executor import _write_json
@@ -453,3 +427,34 @@ def mark_source_unreadable(source_repo: Path, detail: str) -> None:
     stamp = time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())
     notice = f'{UNREADABLE_NOTICE}{stamp} 读不到 {detail}；以下为上一轮成功读取时的状态。'
     _write_status_page(source_repo, [STATUS_TITLE, notice, *body])
+
+
+def worker_activity(folders: set[Path], source_repo: Path) -> str | None:
+    for folder in sorted(folders):
+        try:
+            if not (folder / 'run.json').exists():
+                if any((folder / name).exists() for name in ('workers', 'intents', 'boat')):
+                    return f'{folder.name}: effect_unknown: missing run.json with worker state'
+                continue
+            run = PilotRun.open(folder.parent.parent, parse_run_id(folder.name), source_repo=source_repo)
+            rows = [] if run.execution is not None else _ps_rows()
+            keys = set(run._keys())
+            if run.execution is not None:
+                keys.update(parse_key_name(run.spec.run_id, p.stem) for p in (folder / 'boat').glob('*.json')
+                            if '.' not in p.stem)
+            workers = {key: run._observe(key, rows, reconcile=False) for key in keys}
+            pending = []
+            for key, fact in workers.items():
+                if isinstance(fact, NotStarted) and run.execution is None:
+                    continue
+                if isinstance(fact, (NotStarted, Running, EffectUnknown)):
+                    if run.execution is not None and run.execution.is_drained(key):
+                        continue
+                    reason = ("effect_unknown: " + fact.reason if isinstance(fact, EffectUnknown)
+                              else "preparing" if isinstance(fact, NotStarted) else "running")
+                    pending.append(f"{key.name}: {reason}")
+            if pending:
+                return f'{folder.name}: worker slot retained: ' + '; '.join(pending)
+        except (ExecutionUnknown, OSError, ValueError, TypeError, KeyError, subprocess.CalledProcessError) as error:
+            return f'{folder.name}: effect_unknown: worker observation failed: {error}'
+    return None

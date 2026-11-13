@@ -1,3 +1,4 @@
+import { isolateMaintenance } from "./wayfinder-maintenance-fixture.mts";
 /** #1915：完整单轮入口的扫描后变更反例；假 gh 拒绝所有未声明调用，不接触 GitHub。 */
 import { test } from "node:test";
 import assert from "node:assert/strict";
@@ -23,6 +24,7 @@ function run(path: "split" | "queue", change: "body" | "block" | "closed" | "val
       if (file.endsWith("deepagents-cutover.mts")) text = text.replace('"/Volumes/AgentStorage/deepagents-exec"', JSON.stringify(state));
       writeFileSync(join(root, file), text);
     }
+    isolateMaintenance(root);
     const body = path === "split" ? '<!-- wayfinder-split -->\n```json\n' + JSON.stringify({ tickets: [
       { id: "S1", title: "first", summary: "reviewed A", depends_on: [], rulings: [8] },
       { id: "S2", title: "second", summary: "reviewed A", depends_on: ["S1"], rulings: [8] },

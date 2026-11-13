@@ -1,13 +1,13 @@
 """真实 SQLite/进程边界，所有目录与工作均为离线替身。"""
 import multiprocessing as mp
 import os
-from pathlib import Path
 import subprocess
 import sys
+from pathlib import Path
 
 import pytest
 
-from pilot1742.maintenance import Closed, Gate, LANES, Owner, identity
+from pilot1742.maintenance import LANES, Closed, Gate, Owner
 
 
 def owners(root):
@@ -174,8 +174,9 @@ def test_unverified_old_resources_prevent_drained(tmp_path):
 
 
 def test_process_inventory_reports_old_leaf_not_tsx_wrapper(monkeypatch):
-    from pilot1742 import maintenance
     from types import SimpleNamespace
+
+    from pilot1742 import maintenance
     listing = '\n'.join([
         '11 1 node /tools/tsx/cli.mjs /host/scripts/wayfinder_engine.mts --live',
         '12 11 node --import /tools/tsx/loader.mjs /host/scripts/wayfinder_engine.mts --live',
@@ -197,8 +198,9 @@ def test_control_cli_errors_never_echo_untrusted_values(tmp_path, capsys):
 
 
 def test_inventory_keeps_python_ancestors_and_orphan_executor(monkeypatch):
-    from pilot1742 import maintenance
     from types import SimpleNamespace
+
+    from pilot1742 import maintenance
     listing = "11 1 python -m pilot1742.review_sweep --loop 180\n12 11 python -m pilot1742.review_sweep run-review --pr 1\n13 1 python -m pilot1742.executor --state-root /isolated run --run-id t1-1"
     monkeypatch.setattr(maintenance.subprocess, 'run', lambda *a, **kw: SimpleNamespace(stdout=listing))
     monkeypatch.setattr(maintenance, 'identity', lambda pid: f'process-{pid}')

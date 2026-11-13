@@ -4,7 +4,7 @@ from pathlib import Path
 
 def executor_idle(binding: dict) -> bool:
     from .executor import load_unit
-    from .queue import QueueIntake
+    from .queue import worker_activity
     from .run import PilotRun
     root = Path(binding['state_root'])
     unit, _ = load_unit(root, binding['run_id'])
@@ -14,22 +14,21 @@ def executor_idle(binding: dict) -> bool:
     # 不接受尚未生成 run 的空目录作为已执行证明。
     if not (folder / 'run.json').is_file():
         return False
-    intake = QueueIntake(root, None, None, None, Path(binding['source_repo']))
-    return intake._worker_activity({folder}) is None
+    return worker_activity({folder}, Path(binding['source_repo'])) is None
 
 
 def executor_scope_idle(scope: dict) -> bool:
-    from .queue import QueueIntake
+    from .queue import worker_activity
     root = Path(scope['state_root'])
     if not root.is_dir():
         return False
     folders = {p for p in (root / 'runs').iterdir() if p.is_dir()} if (root / 'runs').is_dir() else set()
-    intake = QueueIntake(root, None, None, None, Path(scope['source_repo']))
-    return intake._worker_activity(folders) is None
+    return worker_activity(folders, Path(scope['source_repo'])) is None
 
 
 def review_idle(binding: dict) -> bool:
     import json
+
     from .external_review import ExternalReview, ReviewTarget
     target = ReviewTarget(**binding['target'])
     lane = ExternalReview(None, state_root=Path(binding['state_root']), source=Path(binding['source_repo']))

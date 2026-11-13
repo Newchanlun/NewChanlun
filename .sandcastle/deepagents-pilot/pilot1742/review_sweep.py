@@ -79,7 +79,6 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Protocol
 
-from .maintenance import Owner, Closed
 from .external_review import (
     DEFAULT_IDENTITY,
     IDENTITY_CONFIG,
@@ -88,6 +87,7 @@ from .external_review import (
     _git,
     git_environment,
 )
+from .maintenance import Closed, Owner
 from .run import _ps_rows
 from .workunit import REPO
 

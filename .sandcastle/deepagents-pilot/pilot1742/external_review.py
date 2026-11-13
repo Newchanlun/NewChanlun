@@ -1295,7 +1295,7 @@ def _positive(value: str) -> int:
 
 
 def main(argv: list[str] | None = None, *, admitted: bool = False, on_natural=None, maintenance=None) -> int:
-    from .maintenance import Owner, Closed
+    from .maintenance import Closed, Owner
     arguments = list(sys.argv[1:] if argv is None else argv)
     if admitted or not arguments or arguments[0] not in ('review-pr', 'migrate-stale'):
         return _main(arguments, on_natural=on_natural, maintenance=maintenance)

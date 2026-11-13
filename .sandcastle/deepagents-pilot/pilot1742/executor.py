@@ -871,8 +871,8 @@ def _serve(args: argparse.Namespace, store: ClaimStore, cutover_store: CutoverSt
     `--once` 让 IdentityError 照旧冒到 main → 退出码 2（runbook 拿它当检查步骤）；
     `--loop` 写明哪个源读不到、标到状态页，等一个轮询间隔再从头核身份，进程不退出（launchd 不重启）。
     本机配置错误（LocalConfigError，含私钥 PrivateKeyError）不是读不到源，两种模式都冒到 main → 退出码 2。"""
-    from .queue import QueueIntake, mark_source_unreadable
     from .maintenance import Owner
+    from .queue import QueueIntake, mark_source_unreadable
     maintenance = Owner("executor")
     maintenance.coverage(False)
 

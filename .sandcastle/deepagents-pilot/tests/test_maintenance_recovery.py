@@ -132,6 +132,7 @@ def test_new_witness_during_verification_invalidates_snapshot(recovery, monkeypa
 
 def test_executor_binding_uses_workunit_and_requires_real_run(tmp_path, monkeypatch):
     from types import SimpleNamespace
+
     from pilot1742 import executor
     monkeypatch.setattr(executor, 'load_unit', lambda *args: (SimpleNamespace(run_id='t1742-1', ticket=1743), None))
     binding = dict(state_root=str(tmp_path), source_repo=str(tmp_path), run_id='t1742-1', work='ticket:1742')
@@ -217,6 +218,7 @@ def test_returned_busy_invocation_can_continue_but_not_reconcile_until_resources
 
 def test_executor_adapter_retains_boat_effect_unknown(tmp_path, monkeypatch):
     from types import SimpleNamespace
+
     from pilot1742 import executor
     from pilot1742.domain import EffectUnknown
     from pilot1742.run import PilotRun
