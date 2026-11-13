@@ -1,4 +1,5 @@
 import json
+import os
 import re
 import subprocess
 import sys
@@ -6,6 +7,7 @@ import threading
 import time
 from collections import namedtuple
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
 
 import pytest
 from conftest import git
@@ -1298,3 +1300,143 @@ def test_container_protocol_allowlist_still_checks_every_attempt(container_reade
     monkeypatch.setattr(preflight, "round_trip", lambda *a: {"ok": True})
     check = preflight.probe_model(args, OPUS, "dummy", preflight.Deadline(5))[0]
     assert check["ok"] is ok and check["detail"]["actual"] == routes
+
+
+RECEIPT_SESSION = "preflight-12345678-1234-4234-8234-123456789abc"
+
+
+def _receipt(tmp_path, routes=None, **changes):
+    now = time.time_ns()
+    payload = {"schema": "cliproxy-preflight-v1", "session": RECEIPT_SESSION,
+               "started_ns": now - 1_000_000, "finished_ns": now, "complete": True,
+               "routes": routes if routes is not None else ["claude@api.anthropic.com", "claude@api.anthropic.com"]}
+    payload.update(changes)
+    directory = tmp_path / RECEIPT_SESSION
+    directory.mkdir(exist_ok=True)
+    path = directory / "receipt.json"
+    path.write_text(json.dumps(payload))
+    return path
+
+
+def test_receipt_ordered_retries_and_legacy_separation(tmp_path):
+    _receipt(tmp_path)
+    expected = [("claude", "api.anthropic.com")] * 2
+    assert preflight._log_module.route_from_receipt(tmp_path, RECEIPT_SESSION, time.time() - 1, 0) == expected
+    assert preflight.route_from_log(tmp_path, RECEIPT_SESSION, time.time() - 1, 0) is None
+    assert preflight.route_from_host_receipt(str(tmp_path), RECEIPT_SESSION, time.time() - 1, 1, preflight.Deadline(3)) == expected
+
+
+@pytest.mark.parametrize("change", [
+    {"complete": False}, {"complete": 1}, {"schema": "unknown"}, {"session": "another"},
+    {"started_ns": True}, {"finished_ns": time.time_ns() + 10**12}, {"started_ns": 1},
+    {"routes": []}, {"routes": ["claude@api.anthropic.com"] * 65},
+    {"routes": ["secret@example.invalid/private"]}, {"auth_id": "secret"},
+])
+def test_receipt_invalid_protocol_fails_closed(tmp_path, change):
+    _receipt(tmp_path, **change)
+    assert preflight._log_module.route_from_receipt(tmp_path, RECEIPT_SESSION, time.time() - 1, 0) is None
+
+
+def test_receipt_other_is_enumeration_only(tmp_path):
+    _receipt(tmp_path, routes=["claude@api.anthropic.com", "other"])
+    assert preflight._log_module.route_from_receipt(tmp_path, RECEIPT_SESSION, time.time() - 1, 0) == [
+        ("claude", "api.anthropic.com"), ("other", "other")]
+
+
+def test_receipt_partial_rotation_and_delayed_publish(tmp_path):
+    directory = tmp_path / RECEIPT_SESSION
+    directory.mkdir()
+    pending = directory / "pending"
+    pending.write_text('{"complete":true,')
+    assert preflight._log_module.route_from_receipt(tmp_path, RECEIPT_SESSION, time.time() - 1, 0) is None
+    # 原子 rename 才可见；迟到但在期限内的完整发布可以通过。
+    path = _receipt(tmp_path)
+    data = path.read_bytes()
+    path.unlink()
+    pending.write_bytes(data)
+    timer = threading.Timer(0.03, lambda: pending.rename(path))
+    timer.start()
+    try:
+        assert len(preflight._log_module.route_from_receipt(tmp_path, RECEIPT_SESSION, time.time() - 1, 0.5)) == 2
+    finally:
+        timer.join()
+    path.write_text('{"complete":true,')
+    assert preflight._log_module.route_from_receipt(tmp_path, RECEIPT_SESSION, time.time() - 1, 0) is None
+
+
+def test_receipt_symlink_fifo_duplicate_fields_and_free_text(tmp_path):
+    path = _receipt(tmp_path)
+    valid = path.read_text()
+    path.write_text(valid[:-1] + ',"complete":true}')
+    assert preflight._log_module.route_from_receipt(tmp_path, RECEIPT_SESSION, time.time() - 1, 0) is None
+    path.unlink()
+    os.mkfifo(path)
+    assert preflight._log_module.route_from_receipt(tmp_path, RECEIPT_SESSION, time.time() - 1, 0) is None
+    path.unlink()
+    target = tmp_path / "secret"
+    target.write_text("=== RESPONSE ===\n=== API REQUEST 99 ===\nauth_id=secret")
+    path.symlink_to(target)
+    assert preflight._log_module.route_from_receipt(tmp_path, RECEIPT_SESSION, time.time() - 1, 0) is None
+
+
+def test_generated_go_receipts_consumed_by_python():
+    root = os.environ.get("CLIPROXY_OFFLINE_RECEIPTS")
+    if not root:
+        pytest.skip("需要 cliproxy/build.py 导出的离线生产者收据")
+    root = Path(root)
+    expected = {"success": [("claude", "api.anthropic.com")] * 2,
+                "other": [("claude", "api.anthropic.com"), ("other", "other")],
+                "native-kimi": [("kimi", "api.kimi.com")] * 2,
+                "native-claude": [("claude", "api.anthropic.com")] * 2}
+    for name, routes in expected.items():
+        payload = json.loads((root / name / RECEIPT_SESSION / "receipt.json").read_text())
+        since = payload["started_ns"] / 1e9
+        assert preflight.route_from_host_receipt(str(root / name), RECEIPT_SESSION, since, 1, preflight.Deadline(3)) == routes
+    for name in ("unfinished", "forgery-tail"):
+        assert preflight.route_from_host_receipt(str(root / name), RECEIPT_SESSION, time.time(), 0.1, preflight.Deadline(3)) is None
+
+
+@pytest.mark.parametrize("failure", [None, "read", "timeout", "text"])
+def test_receipt_container_backend_is_explicit_and_bounded(tmp_path, monkeypatch, failure):
+    from types import SimpleNamespace
+
+    _receipt(tmp_path)
+    args = SimpleNamespace(proxy_docker_context="proxy-orbstack", proxy_receipt_container="fake-proxy",
+                           proxy_container_receipt_dir=str(tmp_path))
+    original = preflight.run_bounded
+    calls = []
+
+    def fake(cmd, timeout, **kwargs):
+        calls.append(cmd)
+        assert cmd[:6] == ["docker", "--context", "proxy-orbstack", "exec", "fake-proxy", "python3"]
+        assert "--receipt" in cmd
+        assert timeout <= 1
+        if failure == "timeout":
+            raise subprocess.TimeoutExpired(cmd, timeout)
+        if failure == "read":
+            return subprocess.CompletedProcess(cmd, 1, b"auth_id=SECRET", b"private/path")
+        if failure == "text":
+            return subprocess.CompletedProcess(cmd, 0, b"arbitrary SECRET stdout", b"")
+        return original([sys.executable, *cmd[6:]], timeout, **kwargs)
+
+    monkeypatch.setattr(preflight, "run_bounded", fake)
+    actual = preflight.route_from_container(args, RECEIPT_SESSION, time.time() - 1, 1, preflight.Deadline(4))
+    assert actual == ([("claude", "api.anthropic.com")] * 2 if failure is None else None)
+    assert len(calls) == 1
+
+
+@pytest.mark.parametrize("routes,ok", [
+    (["claude@api.anthropic.com", "claude@api.anthropic.com"], True),
+    (["claude@api.anthropic.com", "antigravity@daily-cloudcode-pa.googleapis.com"], False),
+    (["other", "claude@api.anthropic.com"], False),
+])
+def test_receipt_probe_checks_every_attempt(tmp_path, monkeypatch, routes, ok):
+    from types import SimpleNamespace
+
+    _receipt(tmp_path, routes=routes)
+    monkeypatch.setattr(preflight.uuid, "uuid4", lambda: RECEIPT_SESSION.removeprefix("preflight-"))
+    monkeypatch.setattr(preflight, "round_trip", lambda *a: {"ok": True})
+    args = SimpleNamespace(proxy_receipt_dir=str(tmp_path), proxy_url=LOCAL)
+    checks = preflight.probe_model(args, OPUS, "offline", preflight.Deadline(4))
+    assert checks[0]["ok"] is ok
+    assert checks[0]["detail"]["actual"] == routes

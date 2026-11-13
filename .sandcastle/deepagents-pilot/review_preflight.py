@@ -400,6 +400,16 @@ def docker_command(context: str | None) -> list[str]:
     return ["docker", "--context", context] if context else ["docker"]
 
 
+def _decode_routes(raw: bytes, session: str, labels: dict) -> list[tuple[str, str]] | None:
+    payload = json.loads(raw, object_pairs_hook=_log_module._unique_object)
+    if (not isinstance(payload, dict) or set(payload) != {"session", "complete_stable", "routes"}
+            or payload["session"] != session or payload["complete_stable"] is not True
+            or not isinstance(payload["routes"], list) or len(payload["routes"]) > 64
+            or any(not isinstance(route, str) or route not in {*labels, "other"} for route in payload["routes"])):
+        return None
+    return [labels.get(route, ("other", "other")) for route in payload["routes"]]
+
+
 def route_from_container(args, session: str, since: float, wait: float,
                          deadline: Deadline) -> list[tuple[str, str]] | None:
     """只接受完整白名单协议；读取失败、超时或多余输出均不能证明路由。"""
@@ -407,21 +417,33 @@ def route_from_container(args, session: str, since: float, wait: float,
     if budget <= 0:
         return None
     labels = {"@".join(route): route for route in KNOWN_ROUTES}
-    cmd = [*docker_command(args.proxy_docker_context), "exec", args.proxy_log_container,
-           "python3", "-I", "-c", _LOG_READER.read_text(), args.proxy_container_log_dir,
+    receipt = getattr(args, "proxy_receipt_container", None)
+    cmd = [*docker_command(args.proxy_docker_context), "exec", receipt or args.proxy_log_container,
+           "python3", "-I", "-c", _LOG_READER.read_text(),
+           *(["--receipt", args.proxy_container_receipt_dir] if receipt else [args.proxy_container_log_dir]),
            session, str(since), str(time.time() + budget), str(budget), json.dumps(sorted(KNOWN_ROUTES))]
     try:
         result = run_bounded(cmd, budget)
         if result.returncode or result.stderr:
             return None
-        payload = json.loads(result.stdout)
-        if (not isinstance(payload, dict) or set(payload) != {"session", "complete_stable", "routes"}
-                or payload["session"] != session or payload["complete_stable"] is not True
-                or not isinstance(payload["routes"], list)
-                or any(not isinstance(route, str) or route not in {*labels, "other"}
-                       for route in payload["routes"])):
+        return _decode_routes(result.stdout, session, labels)
+    except (OSError, ValueError, subprocess.TimeoutExpired):
+        return None
+
+
+def route_from_host_receipt(directory: str, session: str, since: float, wait: float,
+                            deadline: Deadline) -> list[tuple[str, str]] | None:
+    budget = min(wait, deadline.work_left() - 0.25)
+    if budget <= 0:
+        return None
+    labels = {"@".join(route): route for route in KNOWN_ROUTES}
+    try:
+        result = run_bounded([sys.executable, "-I", "-c", _LOG_READER.read_text(), "--receipt", directory,
+                              session, str(since), str(time.time() + budget), str(budget),
+                              json.dumps(sorted(KNOWN_ROUTES))], budget)
+        if result.returncode or result.stderr:
             return None
-        return [labels.get(route, ("other", "other")) for route in payload["routes"]]
+        return _decode_routes(result.stdout, session, labels)
     except (OSError, ValueError, subprocess.TimeoutExpired):
         return None
 
@@ -430,13 +452,14 @@ def probe_model(args, model: str, key: str, deadline: Deadline) -> list[dict]:
     session = f"preflight-{uuid.uuid4()}"
     since = time.time()
     trip = round_trip(args.proxy_url, key, model, session, deadline)
-    # 往返成功时日志一定会写（实测响应后 14–85ms），等到工作时限前 0.25 秒（留给线程交回结果）；
-    # 往返已失败时日志只作诊断，等 0.3 秒。
+    # 成功后等生产者完成收尾并原子发布；往返失败时只给证据读取 0.3 秒。
     wait = max(0.0, deadline.work_left() - 0.25)
     if not trip["ok"]:
         wait = min(wait, 0.3)
-    if getattr(args, "proxy_log_container", None):
+    if getattr(args, "proxy_log_container", None) or getattr(args, "proxy_receipt_container", None):
         attempts = route_from_container(args, session, since, wait, deadline)
+    elif getattr(args, "proxy_receipt_dir", None):
+        attempts = route_from_host_receipt(args.proxy_receipt_dir, session, since, wait, deadline)
     else:
         attempts = route_from_log(Path(args.proxy_log_dir), session, since, wait)
     expected = ROUTES[model]
@@ -494,7 +517,10 @@ def main(argv=None) -> int:
     ap.add_argument("--proxy-url", default="http://127.0.0.1:8318")  # DevSkim: ignore DS162092 有意使用本机回环（本地 CLIProxy / 测试假服务），非调试残留
     logs = ap.add_mutually_exclusive_group()
     logs.add_argument("--proxy-log-dir", default=str(CLIPROXY_LOG_DIR))
-    logs.add_argument("--proxy-log-container", help="在现有代理容器内解析日志；不挂载或复制状态卷")
+    logs.add_argument("--proxy-log-container", help="旧文本日志入口；不可信，不能证明路由")
+    logs.add_argument("--proxy-receipt-dir", help="宿主可信结构化收据目录；不接受旧文本日志")
+    logs.add_argument("--proxy-receipt-container", help="在代理容器内读取可信收据；不读取状态卷")
+    ap.add_argument("--proxy-container-receipt-dir", help="容器内收据目录绝对路径")
     ap.add_argument("--proxy-docker-context", help="容器日志后端的显式 Docker context")
     ap.add_argument("--proxy-container-log-dir", help="代理容器内日志目录的绝对路径")
     ap.add_argument("--review-docker-context", help="审阅挂载探针的 Docker context；默认沿用当前环境")
@@ -503,13 +529,21 @@ def main(argv=None) -> int:
     ap.add_argument("--codex-bin", default="codex", help="宿主使用的 codex 可执行文件，用于离线校验 provider 配置")
     ap.add_argument("--deadline", type=_deadline, default=55.0, help="总墙钟上限（秒，0 < x ≤ 60），超时的检查判失败")
     args = ap.parse_args(argv)
-    if args.proxy_log_container:
+    if args.proxy_receipt_container:
+        if (not args.proxy_docker_context or not args.proxy_container_receipt_dir
+                or not args.proxy_container_receipt_dir.startswith("/") or args.proxy_container_log_dir):
+            ap.error("收据容器须指定 proxy-docker-context 与绝对 proxy-container-receipt-dir，不得混用日志参数")
+        if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]*", args.proxy_receipt_container):
+            ap.error("proxy-receipt-container 必须是容器名称或 ID")
+    elif args.proxy_log_container:
+        if args.proxy_container_receipt_dir:
+            ap.error("旧日志入口不能使用收据目录")
         if (not args.proxy_docker_context or not args.proxy_container_log_dir
                 or not args.proxy_container_log_dir.startswith("/")):
             ap.error("容器日志后端须指定 proxy-docker-context 与绝对 proxy-container-log-dir")
         if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]*", args.proxy_log_container):
             ap.error("proxy-log-container 必须是容器名称或 ID")
-    elif args.proxy_docker_context or args.proxy_container_log_dir:
+    elif args.proxy_docker_context or args.proxy_container_log_dir or args.proxy_container_receipt_dir:
         ap.error("容器日志参数须与 proxy-log-container 一起使用")
     t0 = time.monotonic()
     deadline = Deadline(args.deadline)
