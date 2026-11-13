@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-import { MaintenanceOwner, MaintenanceClosed, maintenanceResource } from "./maintenance.mts";
+import { MaintenanceOwner, MaintenanceClosed, maintenanceCommand } from "./maintenance.mts";
 /**
  * decision-claimer.mts —— graph engineering 裁决面（#1547）。
  *
@@ -606,8 +606,8 @@ function claudeOnce(c: ModelCall, token: string, timeoutMs: number, sessionId?: 
   delete env.ANTHROPIC_API_KEY;
   const args = claudeArgs(c, sessionId);
   return new Promise((res) => {
-    const closed = maintenanceResource();
-    const child = spawn("claude", args, { cwd: c.cwd, env, stdio: ["pipe", "pipe", "pipe"] });
+    const command = maintenanceCommand("claude", args);
+    const child = spawn(command.file, command.args, { cwd: c.cwd, env, stdio: ["pipe", "pipe", "pipe"] });
     let stdout = "";
     let stderr = "";
     let timedOut = false;
@@ -616,7 +616,6 @@ function claudeOnce(c: ModelCall, token: string, timeoutMs: number, sessionId?: 
     child.stderr.on("data", (d) => (stderr += d));
     child.on("error", (e) => (stderr += `\nspawn error: ${e.message}`));
     child.on("close", (code, signal) => {
-      closed(!timedOut && signal === null);
       clearTimeout(timer);
       res({ code: code ?? 1, stdout, stderr: timedOut ? `${stderr}\nclaude 子进程超时（${Math.round(timeoutMs / 1000)}s timed out）` : stderr });
     });

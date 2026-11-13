@@ -89,3 +89,25 @@ test("runPool 关闸保留同轮已完成结果，停止领取后续票", async 
   assert.deepEqual(seen, [1, 2]);
   assert.deepEqual(results, [1]);
 });
+
+// 原 822 反例：真实 sleep 超时，迁移到生产同一监督入口，不把 close 当成资源证明。
+test("同 boot 的 decision/Wayfinder 超时 wait + session 清空后释放，业务仍失败", async () => {
+  const { spawn } = await import("node:child_process");
+  const { maintenanceCommand } = await import("./maintenance.mts");
+  const root = mkdtempSync(join(tmpdir(), "maintenance-timeout-"));
+  try {
+    for (const lane of ["decision", "wayfinder"] as const) {
+      const owner = new MaintenanceOwner(lane, root);
+      const result = await owner.work("isolated-timeout", () => new Promise<number>((resolve, reject) => {
+        const command = maintenanceCommand("/bin/sh", ["-c", "printf ready; exec /bin/sleep 30"]);
+        const child = spawn(command.file, command.args, { stdio: ["ignore", "pipe", "pipe"] });
+        child.stdout.once("data", () => setTimeout(() => child.kill("SIGTERM"), 20));
+        child.once("error", reject);
+        child.once("close", code => resolve(code!));
+      }));
+      assert.equal(result, 143);
+      owner.stop();
+    }
+    assert.equal(control(root, "status").inflight.length, 0);
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});

@@ -76,6 +76,12 @@ class Gate:
                 CREATE TABLE IF NOT EXISTS lineage (job TEXT, owner TEXT, PRIMARY KEY(job,owner));
                 CREATE TABLE IF NOT EXISTS bindings (job TEXT PRIMARY KEY, data TEXT NOT NULL);
                 CREATE TABLE IF NOT EXISTS scopes (owner TEXT PRIMARY KEY, data TEXT NOT NULL);
+                CREATE TABLE IF NOT EXISTS local_resources (id TEXT PRIMARY KEY, job TEXT, host TEXT, boot TEXT,
+                    pid INTEGER, start TEXT, sid INTEGER, child_pid INTEGER, code INTEGER, waited_at TEXT);
+                CREATE TABLE IF NOT EXISTS local_resource_domains (resource TEXT PRIMARY KEY, baseline TEXT,
+                    supervisor TEXT, sealed_at TEXT);
+                CREATE TABLE IF NOT EXISTS action_exits (job TEXT PRIMARY KEY, owner TEXT, generation INTEGER,
+                    pid INTEGER, start TEXT, opaque_clear INTEGER, at TEXT);
                 CREATE TABLE IF NOT EXISTS action_returns (job TEXT PRIMARY KEY, owner TEXT, generation INTEGER,
                     pid INTEGER, start TEXT, at TEXT);
                 CREATE TABLE IF NOT EXISTS cancellations (job TEXT PRIMARY KEY, owner TEXT, reason TEXT, at TEXT);
@@ -144,6 +150,7 @@ class Gate:
             db.execute('UPDATE owners SET covered=? WHERE id=?', (int(covered), owner))
 
     def poll(self, owner: str) -> bool:
+        self.settle_local_actions(owner)
         with self.tx() as db:
             self._owner(db, owner)
             state = db.execute('SELECT * FROM control').fetchone()
@@ -178,6 +185,92 @@ class Gate:
         if job is None:
             raise Closed('maintenance closed')
         return job
+
+    def reserve_local_resource(self, owner: str, job: str) -> str:
+        resource = uuid.uuid4().hex
+        with self.tx() as db:
+            self._owner(db, owner)
+            row = db.execute("SELECT 1 FROM jobs JOIN local_actions ON local_actions.job=jobs.id WHERE jobs.id=? AND jobs.owner=? AND jobs.state='active' AND NOT EXISTS (SELECT 1 FROM action_exits WHERE action_exits.job=jobs.id)", (token(job), owner)).fetchone()
+            if row is None:
+                raise ValueError('missing local action')
+            db.execute('INSERT INTO local_resources(id,job) VALUES(?,?)', (resource, job))
+        return resource
+
+    def bind_local_resource(self, resource: str) -> None:
+        from pilot1742.maintenance_processes import stable_snapshot
+        pid = os.getpid()
+        host, boot = local_epoch()
+        baseline = stable_snapshot()
+        start, sid = identity(pid), os.getsid(0)
+        if sid != pid:
+            raise ValueError('supervisor must own session')
+        with self.tx() as db:
+            row = db.execute("SELECT jobs.owner,local_actions.host,local_actions.boot FROM local_resources JOIN jobs ON jobs.id=local_resources.job JOIN local_actions ON local_actions.job=jobs.id WHERE local_resources.id=? AND local_resources.pid IS NULL AND jobs.state='active'", (token(resource),)).fetchone()
+            if row is None or (row['host'], row['boot']) != (host, boot):
+                raise ValueError('resource binding unavailable')
+            self._owner(db, row['owner'])
+            db.execute('UPDATE local_resources SET host=?,boot=?,pid=?,start=?,sid=? WHERE id=?',
+                       (host, boot, pid, start, sid, resource))
+            db.execute('INSERT INTO local_resource_domains VALUES(?,?,?,NULL)',
+                       (resource, json.dumps(baseline), baseline[pid][0]))
+
+    def local_resource_waited(self, resource: str, child_pid: int, code: int) -> None:
+        if type(child_pid) is not int or child_pid < 1 or type(code) is not int:
+            raise ValueError('invalid native wait')
+        with self.tx() as db:
+            row = db.execute('SELECT * FROM local_resources WHERE id=?', (token(resource),)).fetchone()
+            if (row is None or row['pid'] != os.getpid() or row['start'] != identity(os.getpid())
+                    or (row['host'], row['boot']) != local_epoch() or row['waited_at'] is not None):
+                raise ValueError('wrong resource supervisor')
+            db.execute('UPDATE local_resources SET child_pid=?,code=?,waited_at=? WHERE id=?',
+                       (child_pid, code, now(), resource))
+
+    def local_action_idle(self, job: str) -> bool:
+        from pilot1742.maintenance_local import resources_idle
+        with self.tx() as db:
+            rows = [dict(r) for r in db.execute('SELECT * FROM local_resources WHERE job=?', (job,))]
+            for row in rows:
+                domain = db.execute('SELECT * FROM local_resource_domains WHERE resource=?', (row['id'],)).fetchone()
+                row['domain'] = dict(domain) if domain else None
+        return resources_idle(rows)
+
+    def seal_local_resource(self, resource: str) -> None:
+        with self.tx() as db:
+            row = db.execute('SELECT * FROM local_resources WHERE id=?', (token(resource),)).fetchone()
+            if row is None or row['pid'] != os.getpid() or row['start'] != identity(os.getpid()):
+                raise ValueError('wrong resource supervisor')
+            domain = db.execute('SELECT * FROM local_resource_domains WHERE resource=?', (resource,)).fetchone()
+            proof = dict(row, domain=dict(domain) if domain else None)
+        from pilot1742.maintenance_local import resources_idle
+        if resources_idle([proof]):
+            with self.tx() as db:
+                db.execute('UPDATE local_resource_domains SET sealed_at=? WHERE resource=?', (now(), resource))
+
+    def settle_local_actions(self, owner: str) -> None:
+        with self.tx() as db:
+            self._owner(db, owner)
+            jobs = [r[0] for r in db.execute("SELECT jobs.id FROM jobs JOIN action_exits ON action_exits.job=jobs.id WHERE jobs.owner=? AND jobs.state='unknown' AND action_exits.opaque_clear=1 AND jobs.id NOT IN (SELECT job FROM resolutions)", (owner,))]
+        for job in jobs:
+            if self.local_action_idle(job):
+                with self.tx() as db:
+                    self._owner(db, owner)
+                    generation = db.execute('SELECT generation FROM control').fetchone()[0]
+                    db.execute('INSERT OR IGNORE INTO resolutions VALUES(?,?,?,?)',
+                               (job, 'local-session-ended', generation, now()))
+
+    def action_exited(self, owner: str, job: str, *, opaque_clear: bool) -> bool:
+        with self.tx() as db:
+            row = self._owner(db, owner)
+            task = db.execute("SELECT * FROM jobs WHERE id=? AND owner=? AND state='active'", (token(job), owner)).fetchone()
+            if (task is None or row['lane'] not in ('decision', 'wayfinder')
+                    or not db.execute('SELECT 1 FROM local_actions WHERE job=? AND owner=?', (job, owner)).fetchone()):
+                raise ValueError('missing active local action')
+            db.execute('INSERT INTO action_exits VALUES(?,?,?,?,?,?,?)',
+                       (job, owner, task['generation'], row['pid'], row['start'], int(opaque_clear), now()))
+        settled = opaque_clear and self.local_action_idle(job)
+        if settled:
+            self.returned_action(owner, job)
+        return settled
 
     def spawn_exited(self, owner: str, job: str, pid: int, code: int) -> bool:
         """启动方持有的 Popen.poll/wait 回执；adopt 前代码无工作权限。不是 ps 消失推断。"""
@@ -490,6 +583,7 @@ class Gate:
             recoveries = dict(db.execute('SELECT previous,successor FROM recoveries'))
             preflight = {r[0] for r in db.execute('SELECT witness FROM preflight_returns')}
             actions = {r['job']: dict(r) for r in db.execute('SELECT * FROM action_returns')}
+            exits = {r['job']: dict(r) for r in db.execute('SELECT * FROM action_exits')}
             epoch = db.execute('SELECT host,boot FROM local_owners WHERE owner=?', (owner,)).fetchone()
             action_epochs = {r['job']: dict(r) for r in db.execute('SELECT * FROM local_actions WHERE owner=?', (owner,))}
             scope = db.execute('SELECT data FROM scopes WHERE owner=?', (owner,)).fetchone()
@@ -510,6 +604,12 @@ class Gate:
             if (retired_epoch and row['lane'] in ('decision', 'wayfinder') and job['id'] not in bindings
                     and origin is not None and origin['host'] == epoch['host'] and origin['boot'] == epoch['boot']):
                 verified.append((job['id'], 'local-boot-ended'))
+                continue
+            exit_record = exits.get(job['id'])
+            if (exit_record and exit_record['owner'] == owner and exit_record['generation'] == job['generation']
+                    and exit_record['pid'] == row['pid'] and exit_record['start'] == row['start']
+                    and exit_record['opaque_clear'] == 1 and self.local_action_idle(job['id'])):
+                verified.append((job['id'], 'local-session-ended'))
                 continue
             receipt = actions.get(job['id'])
             if (receipt and receipt['owner'] == owner and receipt['generation'] == job['generation']
@@ -545,10 +645,9 @@ class Gate:
                     or {r[0] for r in db.execute('SELECT witness FROM preflight_returns')} != preflight):
                 return unknown('evidence_changed')
             # 死亡身份不能重新领取；所有正常写入口也检查 fence。历史 job/owner 不改写。
-            if retired_epoch:
-                if local_epoch() != current_epoch:
-                    return unknown('local_epoch_changed')
-            elif alive(row['pid'], row['start']):
+            if current_epoch is not None and local_epoch() != current_epoch:
+                return unknown('local_epoch_changed')
+            if not retired_epoch and alive(row['pid'], row['start']):
                 return unknown('owner_alive')
             for job, witness in verified:
                 db.execute('INSERT OR IGNORE INTO resolutions VALUES(?,?,?,?)', (job, witness, generation, now()))
@@ -696,7 +795,7 @@ class Owner:
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument('--root', type=Path, default=ROOT)
-    parser.add_argument('command', choices=('request', 'status', 'resume', 'register', 'poll', 'admit', 'finish', 'stop', 'reconcile', 'returned-action'))
+    parser.add_argument('command', choices=('request', 'status', 'resume', 'register', 'poll', 'admit', 'finish', 'stop', 'reconcile', 'returned-action', 'reserve-resource', 'action-exited'))
     parser.add_argument('--generation', type=int)
     parser.add_argument('--lane', choices=LANES)
     parser.add_argument('--pid', type=int)
@@ -712,6 +811,8 @@ def main(argv=None) -> int:
         elif args.command == 'register': result = {'owner': gate.register(args.lane, args.pid, local_actions=args.local_actions)}
         elif args.command == 'poll': result = {'closed': gate.poll(args.owner)}
         elif args.command == 'admit': result = {'job': gate.admit(args.owner, args.work)}
+        elif args.command == 'reserve-resource': result = {'resource': gate.reserve_local_resource(args.owner, args.job)}
+        elif args.command == 'action-exited': result = {'settled': gate.action_exited(args.owner, args.job, opaque_clear=args.natural)}
         elif args.command == 'returned-action': gate.returned_action(args.owner, args.job); result = {'ok': True}
         elif args.command == 'finish': gate.finish(args.owner, args.job, natural=args.natural); result = {'ok': True}
         elif args.command == 'stop': gate.stop(args.owner); result = {'ok': True}

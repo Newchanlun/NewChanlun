@@ -82,14 +82,24 @@ python3 .sandcastle/deepagents-pilot/pilot1742/maintenance.py status
 代次取实际值。返回 `reconciled` 表示旧 owner 已被永久禁止再次领取，其相关任务有可信结束依据；不表示四入口都已确认，更不表示全局 READY。`unknown` 带固定原因码，不输出路径、上游错误或凭据。
 重复对账返回原记账代次；错误代次拒绝。事务提交前重验关闭代次、任务和执行身份快照；并发启动或证据变化返回 `evidence_changed`，重新查状态后再对账。对账从不执行 resume、重派、kill、容器删除或 Boat 回收。
 
-证据链由代码在工作执行前后留下，CLI 没有上传回执或 force 入口：
+证据链由代码在工作执行前后留下。CLI 的 returned-action/finish/action-exited 是同用户信任域内的 TS 桥接 RPC，不是供运维手填终态的对账入口；没有接受任意历史回执的 reconcile force 选项：
 
 - **executor**：派工前把 job/票号绑定到精确 run-id、state root 和 source；`run` 在执行前登记 PID/启动身份及唯一 witness。正常返回记录 `returns`，不论是否 busy。随后和对账时读取原 WorkUnit、`run.json`、`_worker_activity` 本地监督/进程组回执及 Boat 的绑定 teardown 证据。对账时原进程必须结束。SIGKILL 后允许按原合同启动同一绑定 run 的恢复调用；旧 witness 不补签返回，而是记录它与恢复 witness 的关联。只有恢复调用实际返回、记下完成并核实所有资源收尾，关联链才成立。资源仍在运行或 effect_unknown 则不放行。退出1/2不自动 natural finish，busy 与信号退出仍保留同 run 续做许可。进入 run 之前的身份错误留下精确 witness 的 preflight_returns；仍核 WorkUnit/票号绑定与本地/Boat遗留状态，不能用一份无绑定回执消除未知任务。
-- **detached review**：保留父→子 job lineage；实际派发前绑定完整 target（PR/head/attempt/run/controller）与 witness。返回后重验 target、每个 model 的 launch-id、run/head/base/controller、supervisor 和 `container_closed`；仅有一份不匹配 launch 的关闭回执不接受。父失联但子自然返回后，可以分别对账父、子 owner。
-- **decision/Wayfinder**：await 动作返回（包括 gh 失败、锁忙与业务失败）后，须确认该动作登记的模型进程均已明确结束，再记录绑定 job/owner/领取代次/PID 的 `action_returns`，随后 finish。模型资源在启动前登记；信号、超时或未等待的资源保留 unknown，不因异常被业务捕获而消失。若返回记录与 finish 之间父退出，前一条可恢复；未返回的动作仍不能凭父无 children 推断结束。
+- **detached review**：保留父→子 job lineage；实际派发前绑定完整 target（PR/head/attempt/run/controller）与 witness。返回后重验 target、每个 model 的 launch-id、run/head/base/controller、supervisor 和 `container_closed`；仅有一份不匹配 launch 的关闭回执不接受。卷删除失败或 checkout 残留同样阻止维护终态；原 prepare 必须有精确路径 removed 收据，卷须有原监督删除记录、绑定卷名的宿主补删记录或严格 resource-closure。业务审阅 verdict 不受删卷失败影响，维护结论则不能沿用业务完成。父失联但子自然返回后，可以分别对账父、子 owner。
+- **decision/Wayfinder**：await 动作返回（包括 gh 失败、锁忙与业务失败）后，须确认该动作登记的模型进程均已明确结束，再记录绑定 job/owner/领取代次/PID 的 `action_returns`，随后 finish。模型通过 `maintenanceCommand` 启动前预留 job/resource，监督器在实际 Popen 前绑定 host/boot、PID 出生身份和进程域基线。实际 wait 后持久记录退出码（包括信号/超时），另核完整本机后代域终态；业务失败不改写成成功。没有 wait、后代仍活或核验不完整则保留 unknown，不因 close 或异常被业务捕获而消失。若返回记录与 finish 之间父退出，前一条可恢复；未返回的动作仍不能凭父无 children 推断结束。
 - **空闲失联 owner**：须有原进程原子 poll 的准入账本检查点（或本代次关闭确认）、已覆盖记录且没有任何未证实任务。退休不代替新入口对本代次的确认。只见进程消失不能退休。executor/review 还检查事先绑定的 state-root 资源范围；任务转交历史不丢失。
 
-新 TS owner 在登记及每次动作准入前绑定本机 OS host/boot 身份（macOS IOPlatformUUID + kern.bootsessionuuid；Linux machine-id + boot_id）。当前 decision/Wayfinder 动作的模型子进程域限定为本机 CLI，不含 Docker/Boat/T3。若未来扩展资源域，不得沿用该证明。同一 host 的原生 boot 已变化时，reconcile 可用整个旧本机进程域已结束的证据退休该代动作；这证明本地执行生命周期终止，不证明业务或远端请求成功。对账再核 boot，另存 local_actions/epoch_resolutions，保留原 unknown 与时间。不同 host、同 boot、旧任务无预绑定、绑定 executor/review 的任务均不得使用此路径。此入口不会重启机器；重启影响现役任务，必须另由主控安排，不能为清账自行执行。旧 owner 仍被 fence，新一代仍需重新确认。
+新 TS owner 在登记及每次动作准入前绑定本机 OS host/boot 身份（macOS IOPlatformUUID + kern.bootsessionuuid；Linux machine-id + boot_id）。当前 decision/Wayfinder 动作的模型子进程域限定为本机 CLI，不含 Docker/Boat/T3。若未来扩展资源域，不得沿用该证明。同一 host 的原生 boot 已变化时，reconcile 可用整个旧本机进程域已结束的证据退休该代动作；这证明本地执行生命周期终止，不证明业务或远端请求成功。对账再核 boot，另存 local_actions/epoch_resolutions，保留原 unknown 与时间。不同 host、同 boot、旧任务无预绑定、绑定 executor/review 的任务均不得使用跨 boot 路径。此入口不会重启机器；重启影响现役任务，必须另由主控安排，不能为清账自行执行。旧 owner 仍被 fence，新一代仍需重新确认。
+
+### 同 boot 的本机 CLI 收尾
+
+`maintenanceCommand(file, args)` 仅在 `MaintenanceOwner.work` 内启用监督器；旧的无 context 调用原样返回命令。不持锁执行 CLI，stdin/env/stdout 原样透传，不记命令或凭据。decision 的异步 spawn 和 Wayfinder 的同步 execFileSync 共用此入口。监督器转发 SIGTERM/SIGINT，实际 wait 并保存业务退出码，然后记录可验证域封闭；不会自动 kill 逃逸后代。
+
+域核验使用同 UID 的内核 PID/精确出生身份/父身份清单（macOS libproc，Linux proc），不是 ps 中父进程无 children 或单一 session 空闲。预派发基线界定无关的既有分支；任何无法沿身份/父链归属到该无关分支的新进程（包括 setsid 后再被 init 接管的后代）阻止证明。不可读、PID 复用、枚举变化、缺 wait 均不放行。原监督器可持久封闭单个已结束域；此后无须依赖它仍在运行。
+
+动作退出写 `action_exits`，封住该 job 后续资源预留。资源暂未结束时保留原 unknown；原 owner 后续 poll 或自然退出后的精确 owner reconcile 可消费其完整 wait/域证据，在 `resolutions` 记录 `local-session-ended`，不修改失败与原时间，不 resume。四入口仍须确认当前维护代次。只有 close 的旧适配器仍不足以证明。
+
+此证明限本机同 UID CLI 及其后代，不能用于 Docker/Boat/T3 或会变更执行身份的命令。新生但来源已不可追溯的**无关孤儿**也可能阻止域封闭；不能靠名称、年龄、PID 消失或手填布尔排除。监督器在绑定/wait 之前自身丢失、动作没有返回、或缺可信后代域证据时仍 unknown。它解决可控超时与自然重启，不追认双失联历史。
 
 对账新增 `resolutions/reconciliations`，不改原 jobs 状态、owner stopped 标志或历史时间。旧 owner 被 fence，下一代仍要求当前入口的新确认。`status.reconciled` 给出原 owner 和完成对账代次。
 
@@ -111,9 +121,11 @@ detached review 和手动 review/migrate 在已准入工作执行期间轮询确
 
 ### 仍不能补造的证据
 
+`on_execution` 已进入但 `open_v2_run` 尚未写出 run.json 就失败的 executor，当前保守保持 resources_unsettled；需要原 same-run 成功恢复生成可信状态。此活性缺口未在本轮改动，不能当作普通已收尾失败放行。
+
 升级前没有预先绑定的旧 owner/job、孤儿 executor，或既没有返回记录、也没有成功同 run 恢复链的调用，没有足够来源证明结束。它们保持 `missing_bound_completion`；旧未覆盖进程的观察也持久保留，退出不自动清除（`missing_prelaunch_binding`）。新代码补上的预执行绑定和执行端返回记录解决后续父失联/孤儿自然完成，不把新协议追认到旧运行。启动后、登记前的同一精确进程身份稍后完成登记，可变为覆盖；原观察历史仍保留。
 
-升级前已经留下、没有 action_returns 的 TS unknown 记录仍缺证据；新代码不能为过去补签。模型被信号/超时中断且资源收尾未证实的 TS 调用在同 boot 下也保留 unknown；仅预绑定的新动作可在上述整机启动代次边界后对账。此入口不从 CLI 日志或单个模型回执推测整项工作结束。缺 witness、目标漂移、旧 PID 被复用、缺少容器/Boat 结束证据均不能恢复。首次加载必须沿自然轮次完成旧运行，不能把切换旧运行的证明交给本命令。
+升级前已经留下、没有 action_returns 或预派发资源绑定的 TS unknown 记录仍缺证据；新代码不能为过去补签。同 boot 的新动作使用下述真实 wait/资源域证据恢复，不要求重启；整机启动代次证明只是额外恢复路径。此入口不从 CLI 日志或单个模型回执推测整项工作结束。缺 witness、目标漂移、旧 PID 被复用、缺少容器/Boat 结束证据均不能恢复。首次加载必须沿自然轮次完成旧运行，不能把切换旧运行的证明交给本命令。
 
 ## 由部署 owner 在自然边界加载
 

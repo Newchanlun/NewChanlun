@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-import { MaintenanceOwner, maintenanceResource } from "../.sandcastle/maintenance.mts";
+import { MaintenanceOwner, maintenanceCommand } from "../.sandcastle/maintenance.mts";
 /**
  * wayfinder_engine.mts —— 图清自动汇入主干管线自动化（#1078 裁定落地，#1084 实装）。
  *
@@ -1114,24 +1114,15 @@ function runSpecDrafter(prompt: string, cfg: EngineConfig): string {
     WAYFINDER_SPEC_MODEL: cfg.specModel,
   });
   const { file, args } = specDrafterCommand(specModel);
-  const closed = maintenanceResource();
-  try {
-    const out = execFileSync(file, args, {
-      encoding: "utf8",
-      input: prompt,
-      cwd: tmpdir(),
-      env: specDrafterEnv(process.env, cliProxyEnv()),
-      maxBuffer: 32 * 1024 * 1024,
-      timeout: 15 * 60 * 1000,
-    });
-    return out.trim();
-  } catch (error) {
-    const failure = error as { signal?: string; code?: string };
-    closed(!failure.signal && failure.code !== "ETIMEDOUT");
-    throw error;
-  } finally {
-    closed(true); // 幂等；不能覆盖上面记录的收尾不明。
-  }
+  const command = maintenanceCommand(file, args);
+  return execFileSync(command.file, command.args, {
+    encoding: "utf8",
+    input: prompt,
+    cwd: tmpdir(),
+    env: specDrafterEnv(process.env, cliProxyEnv()),
+    maxBuffer: 32 * 1024 * 1024,
+    timeout: 15 * 60 * 1000,
+  }).trim();
 }
 
 /** 拉一张图的全量上下文（供起草 spec / 组装图关 comment）。 */

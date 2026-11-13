@@ -17,6 +17,7 @@ def failed_review(tmp_path, monkeypatch):
     target = ReviewTarget(1, 1, 1, 'main', 'a'*40, 1, 'feature', 'b'*40, 'a'*40,
                           '11111111-1111-1111-1111-111111111111', 1, 'test-policy', 'c'*40, 1)
     lane = ExternalReview(None, state_root=tmp_path / 'reviews', source=tmp_path / 'source')
+    lane.checkout_root = tmp_path / 'checkouts'
     folder = lane.state_root / 'runs' / target.key
     worker = folder / MODELS[0]
     worker.mkdir(parents=True)
@@ -153,3 +154,57 @@ def test_existing_reaper_records_origin_then_resource_cli_closes_failed_history(
     lane.reconcile_review_resources(target.run_id, MODELS[0], launch['launch_id'])
     assert lane.maintenance_idle()
     assert (worker / 'receipt.json').read_bytes() == original
+
+@pytest.mark.parametrize('retained', ['volume', 'checkout'])
+def test_closed_container_does_not_hide_retained_resources(failed_review, retained):
+    lane, target, worker, launch, _ = failed_review
+    volume = module.REVIEW_VOLUME_PREFIX + launch['launch_id']
+    receipt = dict(launch, container_closed=True, volume=volume, volume_removed=retained != 'volume')
+    (worker / 'receipt.json').write_text(json.dumps(receipt))
+    checkout = lane.checkout_root / target.run_id / MODELS[0]
+    if retained == 'checkout':
+        checkout.mkdir(parents=True)
+    cleanup = dict(state='removed', checkout=str(checkout), volume=volume,
+                   volume_state='retained' if retained == 'volume' else 'removed')
+    (worker / 'checkout-cleanup.json').write_text(json.dumps(cleanup))
+    assert not lane.maintenance_idle(target)
+    assert not lane.maintenance_idle()
+    if retained == 'checkout':
+        checkout.rmdir()
+    else:
+        cleanup['volume_state'] = 'removed'
+        (worker / 'checkout-cleanup.json').write_text(json.dumps(cleanup))
+    assert lane.maintenance_idle(target) and lane.maintenance_idle()
+    assert json.loads((worker / 'receipt.json').read_text()) == receipt
+
+@pytest.mark.parametrize('damage', ['missing-cleanup', 'wrong-path', 'retained', 'missing-volume-result', 'wrong-volume'])
+def test_resource_terminal_evidence_is_bound_and_complete(failed_review, damage):
+    lane, target, worker, launch, _ = failed_review
+    checkout = lane.checkout_root / target.run_id / MODELS[0]
+    volume = module.REVIEW_VOLUME_PREFIX + launch['launch_id']
+    receipt = dict(launch, container_closed=True, volume=volume, volume_removed=True)
+    cleanup = dict(state='removed', checkout=str(checkout))
+    (worker / 'prepare.json').write_text(json.dumps(dict(run_id=target.run_id, checkout=str(checkout))))
+    if damage == 'wrong-path': cleanup['checkout'] += '-other'
+    if damage == 'retained': cleanup['state'] = 'retained'
+    if damage == 'missing-volume-result': del receipt['volume_removed']
+    if damage == 'wrong-volume': receipt['volume'] += '-other'
+    if damage != 'missing-cleanup':
+        (worker / 'checkout-cleanup.json').write_text(json.dumps(cleanup))
+    (worker / 'receipt.json').write_text(json.dumps(receipt))
+    assert not lane.maintenance_idle(target) and not lane.maintenance_idle()
+
+
+def test_strict_resource_closure_allows_original_checkout_cleanup(failed_review):
+    lane, target, worker, launch, _ = failed_review
+    checkout = lane.checkout_root / target.run_id / MODELS[0]
+    checkout.mkdir(parents=True)
+    (worker / 'prepare.json').write_text(json.dumps(dict(run_id=target.run_id, checkout=str(checkout))))
+    receipt = (worker / 'receipt.json').read_bytes()
+    assert not lane.cleanup_checkout(target, MODELS[0], worker.parent)
+    assert checkout.exists() and not lane.maintenance_idle()
+    lane.reconcile_review_resources(target.run_id, MODELS[0], launch['launch_id'])
+    assert not lane.maintenance_idle()  # closure 不伪造 checkout removed。
+    assert lane.cleanup_checkout(target, MODELS[0], worker.parent)
+    assert lane.maintenance_idle()
+    assert (worker / 'receipt.json').read_bytes() == receipt

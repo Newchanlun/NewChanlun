@@ -807,7 +807,13 @@ class ExternalReview:
         active = supervisor_alive(worker, rows) or any(
             not state.startswith("Z") and (str(checkout) in command or process == pid)
             for process, _, state, command in rows)
-        if active or (not preparing and (receipt is None or not receipt.get("container_closed"))):
+        closed = receipt is not None and receipt.get("container_closed") is True
+        if not closed and receipt and (worker / "launch.json").exists():
+            launch_identity = self._resource_identity(target, model, _read(worker / "launch.json"))
+            closed = (receipt.get("failure_reason") == "SupervisorExitedWithoutReceipt"
+                      and all(receipt.get(key) == value for key, value in launch_identity.items())
+                      and self._resource_closure_matches(worker, launch_identity))
+        if active or (not preparing and not closed):
             _save(worker / "checkout-cleanup.json", {"state": "retained", "reason": "activity_or_container_unknown"})
             return False
         if preparing and ((worker / "launch.json").exists() or (worker / "process.json").exists()):
@@ -1382,6 +1388,29 @@ class ExternalReview:
                     if not expected["launch_id"] or any(
                             launch.get(key) != value or receipt.get(key) != value for key, value in expected.items()):
                         return False
+                    checkout = self.checkout_root / actual.run_id / model
+                    cleanup_path = worker / "checkout-cleanup.json"
+                    cleanup = _read(cleanup_path) if cleanup_path.exists() else {}
+                    if os.path.lexists(checkout):
+                        return False
+                    if (worker / "prepare.json").exists():
+                        prepare = _read(worker / "prepare.json")
+                        if (prepare.get("run_id") != actual.run_id or prepare.get("checkout") != str(checkout)
+                                or not cleanup):
+                            return False
+                    if cleanup and (cleanup.get("state") != "removed"
+                                    or cleanup.get("checkout") != str(checkout)):
+                        return False
+                    # 业务 verdict 不受删卷失败影响；维护终态必须另有精确收尾证据。
+                    volume = receipt.get("volume")
+                    if volume is not None and volume != REVIEW_VOLUME_PREFIX + expected["launch_id"]:
+                        return False
+                    if ((volume is not None and receipt.get("volume_removed") is not True)
+                            or receipt.get("volume_removed") is False or cleanup.get("volume_state") == "retained"):
+                        removed = (volume == REVIEW_VOLUME_PREFIX + expected["launch_id"]
+                                   and cleanup.get("volume") == volume and cleanup.get("volume_state") == "removed")
+                        if not removed and not self._resource_closure_matches(worker, expected):
+                            return False
                     if receipt.get("container_closed") is not True:
                         if (receipt.get("failure_reason") != "SupervisorExitedWithoutReceipt"
                                 or not self._resource_closure_matches(worker, expected)):
