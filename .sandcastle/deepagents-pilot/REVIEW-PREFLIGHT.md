@@ -1,5 +1,7 @@
 # #1742：正式独审 attempt 的启动前预检
 
+**当前阻断：CLIProxy v8.0.63 文本日志不能提供可信路由证明。宿主与容器入口均返回无证明，正式预检不会放行。恢复依赖见“可信证据缺口”。**
+
 每次启动正式 attempt（`ExternalReview.review_pr`）之前运行一次。预检只回答“现在的环境能不能让两位 reviewer 跑完”，**不是审阅结果**：报告固定写 `"is_review_result": false`，不写 App 状态、不进 `external-review/runs`、不占 attempt 号。预检拦下时修环境，修好后再预检，通过了才启动新 attempt。
 
 ## 用法
@@ -32,21 +34,23 @@ python3 -I .sandcastle/deepagents-pilot/review_preflight.py \
 
 日志目录须由部署方确认，不读取代理配置猜路径。代理容器需要 Python 3.11+；Blackhole 的 `Dockerfile.cliproxy` 已安装 Python 3。宿主执行 `docker --context orbstack exec … python3 -I -c …`，使用容器原有用户在代理容器内解析。不启动旁路容器，不新增状态卷挂载，不复制原始日志。审阅的 `run` 和回收的 `rm -f` 都使用 `--review-docker-context`。未指定审阅 context 时沿用原 Docker 环境；原 `--proxy-log-dir` 用法不变。
 
-两种读取入口共享 `_review_preflight_log.py`。只读本次 session、请求起点前一秒以来的普通文件；拒绝符号链接与 FIFO。完整 `RESPONSE` 段出现后，相邻两次轮询的设备、inode、大小与修改时间必须一致，读取期间文件也不得变化。每个 API REQUEST 段保留一次路由，顺序与重复项均保留；响应正文中的同名字段不参与提取。所有尝试都必须通过该模型的 allowlist。
+两种入口保留参数与报告合同，但 `_review_preflight_log.py` 不再解析现有文本。宿主返回 `None`；容器返回 `{"session": "<本次session>", "complete_stable": false, "routes": []}`。宿主据此报告 `route:<model>.ok=false`、`actual=[]`、`log_found=false`。这里的 `log_found` 表示未取得可用证据，不证明文件不存在。未知真实路线不能凭文本猜测为 `other`；`other` 仍是协议中未知路线的唯一允许枚举。
 
-容器只输出以下协议，宿主再次校验字段集合、类型、session 与枚举。非零退出、stderr 非空、协议外输出、未完成或超时均拦截，不退回宿主目录读取。
+容器协议消费端继续校验精确字段集合、session、布尔完成状态和路线白名单，保留全部有序尝试；任何失败不退回宿主目录读取。原始日志、URL 路径、auth_id、Docker stdout/stderr 自由文本都不进报告。容器任务仍受总工作预算与自身到期退出约束，不创建文件、挂载或容器。此版本不会读取代理日志内容。
 
-| 字段 | 来源与允许值 |
-|---|---|
-| `session` | 本次预检生成的 session，必须逐字匹配 |
-| `complete_stable` | 解析器的完成且稳定状态，只有布尔 `true` 可作证明 |
-| `routes` | 有序的 `KNOWN_ROUTES` 枚举数组；未知 provider/hostname 归一为 `other` |
+## 可信证据缺口
 
-原始日志、URL 路径、auth_id、解析异常以及 Docker 的任意 stdout/stderr 都不进入报告。报告沿用 `route:<model>` 的 `actual`、`log_found` 和 `session`，不增加自由文本诊断字段。
+核查版本为 Blackhole Dockerfile 固定的 CLIProxy `v8.0.63`，公开源码提交 `6db7d4b839d86c5b24e17bbe73bcd4db18ef1b1a`：
 
-容器读取共用总 `Deadline` 的工作预算，预留线程返回时间。解析进程自身用绝对到期时间和 `SIGALRM` 限制读取与输出，即使宿主 Docker 客户端超时退出也会自行终止；daemon 迟启动到期任务时立即退出。代理 VM 的时钟应与宿主同步；剩余时长超出宿主给定预算也拦截。该后端不创建文件或容器，因而无需对代理执行删除或停止操作。
+- [logging_helpers.go:175–190](https://github.com/router-for-me/CLIProxyAPI/blob/6db7d4b839d86c5b24e17bbe73bcd4db18ef1b1a/internal/runtime/executor/helps/logging_helpers.go#L175-L190) 写文本段头与 `Body:`；[同文件:247–288](https://github.com/router-for-me/CLIProxyAPI/blob/6db7d4b839d86c5b24e17bbe73bcd4db18ef1b1a/internal/runtime/executor/helps/logging_helpers.go#L247-L288) 将响应 chunk 原样追加，未转义正文中的段头，也没有正文长度帧。
+- [request_logger_format.go:127–166](https://github.com/router-for-me/CLIProxyAPI/blob/6db7d4b839d86c5b24e17bbe73bcd4db18ef1b1a/internal/logging/request_logger_format.go#L127-L166) 原样复制请求正文；空行分隔并不排除正文含相同空行与段头。
+- [request_logger_streaming.go:242–258](https://github.com/router-for-me/CLIProxyAPI/blob/6db7d4b839d86c5b24e17bbe73bcd4db18ef1b1a/internal/logging/request_logger_streaming.go#L242-L258) 直接创建最终文件再写入，不是写完后原子发布；[同文件:306–333](https://github.com/router-for-me/CLIProxyAPI/blob/6db7d4b839d86c5b24e17bbe73bcd4db18ef1b1a/internal/logging/request_logger_streaming.go#L306-L333) 先写全部 API REQUEST，再写全部 API RESPONSE，最后写 RESPONSE。旧 fake 的交错排列不是该版本的完整布局。
 
-离线验收覆盖双 context、读取失败/超时、重试顺序、半写/迟写/轮转、响应体字段伪造、未知枚举与自由文本不回显。上线前仍须由主控完成非作者独审，并在真实双 context、真实日志路径上运行正式预检；fake 测试不能代替该操作门。
+因此正文可生成与结构相同的字节；稳定文件也可能是写入暂停或失败的前缀。正则、编号连续性、末尾段头、两次大小稳定都不能证明完整性或来源。两个独审反例分别伪造最终 RESPONSE 并留下未闭合第二次尝试，以及在响应正文注入 API REQUEST 99。正常多 attempt 文本同样缺少可信完成证据，当前也必须拦截。
+
+**最小恢复路径由代理生产者提供，与正文分离。** 在代理内部收集本次 session 的实际路由尝试，在请求生命周期结束、尝试列表冻结后原子发布一条结构化记录，至少包含版本、session、请求标识/起点、完成状态、attempt 总数及有序 provider/hostname 枚举。记录不得携带正文、URL 路径或 auth_id；不从现有文本重新解析生成。发布失败或记录不完整就没有证明。可以由代理自身提供窄只读接口，或在原状态卷中原子发布、仍仅在代理容器内读取，不扩大挂载权限。
+
+上述生产者改动不在本 PR 的四文件 scope 内，尚未实现或部署。主控需先落实该可信来源及其原子完成合同，再接入当前白名单协议并重新独审。不得手工编造记录、mock 正式预检或跳过操作门恢复生产。当前交付只消除错误放行，未恢复生产部署验收。
 
 ## 检查什么
 
@@ -56,7 +60,7 @@ python3 -I .sandcastle/deepagents-pilot/review_preflight.py \
 |---|---|---|
 | `checkout_root_free_space` | PR1866 A1/A2、PR1868 A3（f9）：快照需 2.60GB，HOME 只剩 1.40–1.65GB | 逐字节复刻 `prepare_review` 的快照字节公式，要求 checkout_root 所在卷剩余 ≥ 2 份（两位 reviewer） |
 | `checkout_root_container_mount` | PR1868 A1：checkout 在未共享进 colima 的路径，容器里看到的是 VM 本地空目录 | 在 checkout_root 写一次性 nonce，用审阅镜像 `--network none --read-only` 只读 bind 挂载 checkout_root 读回；读不到或不一致即拦。探针目录与容器随即删除，删不掉报 `probe_cleanup`；`docker run` 超时或 docker 自身出错（退出 125）时，daemon 可能在 `rm -f` 之后才建出容器，也报 `probe_cleanup`（回收未确认） |
-| `route:<model>` | PR1883 A1：claude-opus-5-5 新会话被选到 Antigravity | 按本次唯一 `Session-Id` 在 CLIProxy request-log 里读每次上游尝试的 `Auth: provider` 与上游主机；要求 Sol=`codex@chatgpt.com`，Kimi=`kimi@api.kimi.com` 或 `kimi-ai@api.kimi.ai`（CLIProxy 在国内、国际两个上游间切换），Opus=`claude@api.anthropic.com`；只探测 `external_review.MODELS` 当前的两位。找不到日志也拦 |
+| `route:<model>` | PR1883 A1：claude-opus-5-5 新会话被选到 Antigravity | 当前拒绝文本日志证明，因此始终拦截；未来可信来源的每次尝试仍要求 Sol=`codex@chatgpt.com`，Kimi=`kimi@api.kimi.com` 或 `kimi-ai@api.kimi.ai`（CLIProxy 在国内、国际两个上游间切换），Opus=`claude@api.anthropic.com`；只探测 `external_review.MODELS` 当前的两位。找不到日志也拦 |
 | `roundtrip:<model>` | 同上，上游 400 `tool_choice ... not supported` | 每家一次最小 `/v1/responses` 往返，带 tools、`tool_choice=auto`、JSON 输出格式、新会话，必须读到 `response.completed`/`incomplete` |
 | `credential:codex-host` | #1323：宿主缺 `CLIPROXY_LOCAL_KEY`，回合在调模型前报 `Missing environment variable` | 去掉该环境变量后，按 `$CODEX_HOME/config.toml` 的 `model_providers.cliproxy-local` 取 key（`auth.command` / `env_key`）。provider 配置是否合法以宿主自己的 codex 为准：先离线跑一次 `codex features list`（约 50ms，不发请求），Codex 拒绝加载就拦（如 `auth` 与 `env_key` 并存），报告只取 Codex 报错里的字段名。两家往返都用这把 key，所以通过即证明没有该变量时 provider 也能完成往返 |
 
@@ -66,7 +70,7 @@ python3 -I .sandcastle/deepagents-pilot/review_preflight.py \
 
 所有子进程（git、`auth.command`、docker）只经过一个有界原语 `run_bounded` 启动：独立进程组、最多等给定秒数、返回前无论成败都杀掉整个进程组（包装脚本留在后台的子进程一并结束）。时间只有一个来源 `Deadline`：检查用到总时限减 min(3 秒, 总时限/2)，余下留给 `docker rm -f` 与输出报告。两次往返不留本地产物，在守护线程里与空间、挂载检查并行，到时未完成即判失败。
 
-不要把 effort 降到 `minimal`：2026-11-05 实测 Sol 在 `minimal` 下返回 400（codex 后端注入的 `image_gen` 工具不能与 `minimal` 同用），预检会因此误报。路由要读 request-log，而 proxy 在响应完成后才写日志（实测 14–85ms）；预检在往返成功后一直等到工作时限前 0.25 秒找日志，往返已失败时只等 0.3 秒。
+不要把 effort 降到 `minimal`：2026-11-05 实测 Sol 在 `minimal` 下返回 400（codex 后端注入的 `image_gen` 工具不能与 `minimal` 同用），预检会因此误报。旧实现等待 request-log 落盘再判定的方式已撤回；当前文本入口立即返回无可信证据。容器协议读取的预算仍不得越过工作期限。
 
 ## 局限
 
