@@ -61,8 +61,6 @@
     "DS148264|analysis/p3_random_gate_control.py|250",
     "DS148264|analysis/verify_holonomy_full_null.py|30",
     "DS148264|analysis/verify_holonomy_full_null.py|33",
-    "DS148264|scripts/optimal_morse.py|441",
-    "DS148264|scripts/optimal_morse.py|447",
     "DS148264|tests/test_buypoint_score.py|20",
     "DS148264|tests/test_dual_merge_tree.py|174",
     "DS148264|tests/test_online_persistence.py|184",
@@ -5440,10 +5438,6 @@
     "DS173237|docs/agents/pstack-lite/fixtures.json|6",
     "DS173237|rust/src/lav_seal/digest.rs|22",
     "DS173237|rust/src/lav_seal/digest.rs|26",
-    "DS173237|scripts/add_263_relations.py|4",
-    "DS173237|scripts/add_263_relations.py|6",
-    "DS173237|scripts/add_263_relations.py|7",
-    "DS173237|scripts/add_263_relations.py|8",
     "DS173237|scripts/tests/test_check_armR_trades_digest.py|124",
     "DS173237|scripts/tests/test_check_armR_trades_digest.py|125",
     "DS173237|scripts/tests/test_check_armR_trades_digest.py|138",
@@ -5451,8 +5445,6 @@
     "DS173237|scripts/tests/test_check_armR_trades_digest.py|140",
     "DS173237|scripts/tests/test_check_armR_trades_digest.py|35",
     "DS173237|scripts/tests/test_check_armR_trades_digest.py|36",
-    "DS173237|scripts/update_meta_263.py|12",
-    "DS173237|scripts/verify_263.py|20",
     "DS176209|.chanlun/archive/pre-rtas-goal-arch-20260627/ceremony_scan.py|470",
     "DS176209|.chanlun/archive/pre-rtas-goal-arch-20260627/dispatch-dag.yaml|726",
     "DS176209|.chanlun/archive/pre-rtas-goal-arch-20260627/dispatch-dag.yaml|774",
@@ -5505,7 +5497,7 @@
     "DS176209|trading_system/strategy/signal_bridge.py|184",
     "DS197836|rust/src/lav_seal/bundle.rs|299",
     "DS197836|rust/src/lav_seal/comparison_set.rs|227",
-    "DS148264|.github/devskim-baseline.json|792",
+    "DS148264|.github/devskim-baseline.json|790",
     "DS117838|.chanlun/review-results/issue1370-tb01-a/acceptance/payload/evidence/native-r5/bigint/launcher-run.json|18",
     "DS117838|.chanlun/review-results/issue1370-tb01-a/acceptance/payload/evidence/native-r5/bigint/state-verified.json|1",
     "DS117838|.chanlun/review-results/issue1370-tb01-a/acceptance/payload/evidence/native-r5/fault-ui/healthy-http-state.json|1",
@@ -52434,6 +52426,27 @@
       "reason": "slim/out-of-repo-batch2（#1945）整体出仓 topological-computation/ 及其专属部署脚本、.scratch/、prototypes/、仓根个人文件；原样归档于 /Volumes/AgentStorage/repo-archive/f43fac8f46-batch2/，可逐字节恢复；git 历史里 #1945 合入前的 main（如 2267aa75）也能取回。删掉指向这些已删文件的 66 条存量键；gate 只拦基线外新发现，存量多删不改变门槛。自引用键跟随 base 第 855 行原文移到第 792 行。",
       "entries": {
         "DS148264|.github/devskim-baseline.json|792": "与 base 键 DS148264|.github/devskim-baseline.json|855 同一行文本，行号漂移，逐行比对内容不变。"
+      }
+    },
+    {
+      "issue": 1952,
+      "pull_request": 1958,
+      "source_head": "3f70f9e8e4",
+      "removed_findings": 8,
+      "rule_counts": {
+        "DS148264": 2,
+        "DS173237": 6
+      },
+      "scope": [
+        ".github/devskim-baseline.json",
+        "scripts/add_263_relations.py",
+        "scripts/optimal_morse.py",
+        "scripts/update_meta_263.py",
+        "scripts/verify_263.py"
+      ],
+      "reason": "#1952 第二批退役（PR #1958）删除的脚本仍有存量键，按行删除指向这些已删文件的键，gate 只拦基线外新发现，存量多删不改变门槛。合入的 main 为 source_head。自引用键跟随 base 第 792 行原文移到第 790 行（逐字比对为同一行）。本 PR 其它改动（README.md、element.rs 一行注释、tests/retired_references_baseline.txt）在基线中没有键。本地没有 DevSkim，未实际扫描。",
+      "entries": {
+        "DS148264|.github/devskim-baseline.json|790": "与 base 键 DS148264|.github/devskim-baseline.json|792 同一行文本，行号漂移，逐行比对内容不变。"
       }
     }
   ]
