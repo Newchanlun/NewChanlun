@@ -790,8 +790,8 @@ def load_unit(state_root: Path, run_id: str) -> tuple[WorkUnit, TaskSpec]:
     return parse_work_unit(data["work_unit"]), task
 
 
-def open_v2_run(state_root: Path, unit: WorkUnit, task: TaskSpec, executor: TicketExecutor, models_text: str,
-                **kw: Any) -> PilotRun:
+def open_v2_run(state_root: Path, unit: WorkUnit, task: TaskSpec, executor: TicketExecutor, models_text: str | None = None,
+                *, model_rules: Path | None = None, **kw: Any) -> PilotRun:
     if (PilotRun.run_dir(state_root, unit.run_id) / "run.json").exists():
         run = PilotRun.open(state_root, unit.run_id, executor=executor, **kw)
         if run.spec.unit != unit:
@@ -806,6 +806,9 @@ def open_v2_run(state_root: Path, unit: WorkUnit, task: TaskSpec, executor: Tick
             run.release()
             raise
         return run
+    from .run import read_model_rules
+    if models_text is None:
+        models_text = read_model_rules(model_rules)
     return PilotRun.create_v2(state_root, unit, task, models_text, executor, **kw)
 
 
@@ -881,6 +884,8 @@ def _serve(args: argparse.Namespace, store: ClaimStore, cutover_store: CutoverSt
                    "--drain-root", str(args.drain_root), "run", "--run-id", unit.run_id,
                    "--workers-log", str(args.workers_log), "--private-key", str(args.private_key),
                    "--recheck-approval"]
+        if args.model_rules is not None:
+            command.extend(["--model-rules", str(args.model_rules.resolve())])
         with maintenance.gate.tx() as db:
             permit = db.execute("SELECT jobs.id FROM jobs JOIN bindings ON bindings.job=jobs.id WHERE owner=? AND work=? AND state IN ('active','unknown') AND json_extract(bindings.data,'$.run_id')=? AND jobs.id NOT IN (SELECT job FROM resolutions)",
                                 (maintenance.id, f"ticket:{unit.ticket}", unit.run_id)).fetchone()
@@ -951,6 +956,7 @@ def _main(argv: list[str] | None = None, *, on_execution: Callable[[], None] | N
                      help="发布前要求对确切候选 head 的真人 Secure Enclave 签批")
     reg.add_argument("--private-key", type=Path, required=True)
     run_parser = sub.add_parser("run", help="持有并运行或恢复一个已登记的 v2 run")
+    run_parser.add_argument("--model-rules", type=Path, help="新 run 的 pstack 角色表；缺省沿用全局表")
     run_parser.add_argument("--run-id", required=True)
     run_parser.add_argument("--maintenance-job")
     run_parser.add_argument("--maintenance-root", type=Path)
@@ -966,6 +972,7 @@ def _main(argv: list[str] | None = None, *, on_execution: Callable[[], None] | N
     modes = serve.add_mutually_exclusive_group(required=True)
     modes.add_argument("--once", action="store_true")
     modes.add_argument("--loop", action="store_true")
+    serve.add_argument("--model-rules", type=Path, help="传给每个新 run 的项目 pstack 角色表")
     serve.add_argument("--poll-seconds", type=float, default=60)
     serve.add_argument("--workers-log", type=Path, default=WORKERS_LOG)
     serve.add_argument("--private-key", type=Path, required=True)
@@ -1100,7 +1107,6 @@ def _main(argv: list[str] | None = None, *, on_execution: Callable[[], None] | N
                 print(json.dumps(unit.to_json(), ensure_ascii=False, indent=2))
                 return 0
             from .cli import EXIT_BUSY, cancel_worker, drive
-            from .run import PSTACK_MODELS
 
             unit, task = load_unit(args.state_root, args.run_id)
             if args.command == "cancel-worker":
@@ -1114,7 +1120,7 @@ def _main(argv: list[str] | None = None, *, on_execution: Callable[[], None] | N
             if on_execution is not None:
                 on_execution()
             try:
-                pilot = open_v2_run(args.state_root, unit, task, executor, PSTACK_MODELS.read_text())
+                pilot = open_v2_run(args.state_root, unit, task, executor, model_rules=args.model_rules)
             except Busy as error:
                 print(str(error), file=sys.stderr)
                 return EXIT_BUSY

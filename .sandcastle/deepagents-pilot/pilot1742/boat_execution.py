@@ -342,7 +342,8 @@ class BoatExecution(WorkerExecution):
         if not (bundle / "bundle.json").exists():
             if bundle.exists():
                 shutil.rmtree(bundle)
-            build_skill_bundle(Path(self.config.pstack_source), Path(self.config.model_rules), bundle)
+            build_skill_bundle(Path(self.config.pstack_source), Path(self.config.model_rules), bundle,
+                               models_text=self.run.spec.model_rules_text)
         return json.loads((bundle / "bundle.json").read_text())["id"]
 
     def controller_context(self) -> Path:

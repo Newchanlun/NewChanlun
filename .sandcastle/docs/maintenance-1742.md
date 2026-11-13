@@ -93,7 +93,7 @@ python3 .sandcastle/deepagents-pilot/pilot1742/maintenance.py status
 2. 旧代码没有可靠全局维护入口。逐个等待原轮次自然完成；确认相应进程及其任务、detached worker/容器已结束后，
    才能由部署 owner 停空闲调度器并加载新代码。不能为安装本入口先杀活跃父服务。
 3. 加载全部新入口，保持既有 `--review-sweep --review-sweep-max-running 2`、模型来源、私钥路径与 Boat 参数。
-   #2062 的 `--model-rules` 传递由其 owner 管理；本补丁不引入或改写该接口。
+   #2062 已合入的 `--model-rules` 与 Boat 同源规则保持不变；`_serve.child` 同时传递该规则路径及精确 maintenance job/root。
 4. 首次核验 `status` 中四类 owner；request 后各入口须显式确认当前 generation。
    旧代码进程仍存在、入口未出现或资源核对失败时只能是 unknown，继续等或修复，不卸载活跃服务。
 5. 取得本线 drained 后交主控；主控还须等待 T3 外部 owner。后续共享代理升级和恢复各需相应授权。
