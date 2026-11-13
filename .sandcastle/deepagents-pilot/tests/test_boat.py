@@ -217,7 +217,7 @@ def payload(run, engine, key, files, status=None):
                             result={'summary': 'done', 'findings': [], 'validation': []}))
 
 
-@pytest.mark.parametrize('model', ['gpt-6.1-sol', 'gpt-6-astra'])
+@pytest.mark.parametrize('model', ['gpt-6.1-sol', 'gpt-6-astra', 'kimi-k3.1-pro'])
 def test_collect_twice_preserves_binary_and_mode(env, model):
     run, engine, key, _ = adapter(env, models=MODELS.replace('gpt-6.1-sol', model))
     files = [dict(path='demo/new', mode='100755', content=base64.b64encode(b'\x00binary').decode())]
@@ -541,7 +541,7 @@ def test_skill_bundle_is_frozen_once_per_run_with_content_identity(env, tmp_path
     rules.write_text('r')
     first = build_skill_bundle(pstack, rules, tmp_path / 'b1')
     (pstack / 'installed/skills/a/SKILL.md').write_text('v2')
-    second = build_skill_bundle(pstack, rules, tmp_path / 'b2')
+    second = build_skill_bundle(pstack, rules, tmp_path / 'b2', models_text=MODELS)
     assert first['id'] != second['id']
     run, engine, key, _ = adapter(env)
     object.__setattr__(engine, 'config', replace(engine.config, pstack_source=str(pstack), model_rules=str(rules)))
@@ -808,6 +808,8 @@ def test_cancel_rejects_foreign_remote_before_any_stop(env, cached):
     ("gpt-6-astra", "gpt-6.1-sol"),
     ("gpt-6.1-sol", "gpt-6-astra"),
     ("gpt-6-astra", None),
+    ("kimi-k3.1-pro", "gpt-6.1-sol"),
+    ("kimi-k3.1-pro", None),
 ])
 def test_collect_rejects_actual_model_drift_before_writing(env, model, actual):
     run, engine, key, _ = adapter(env, models=MODELS.replace("gpt-6.1-sol", model))

@@ -4,7 +4,7 @@ import { closeSync, existsSync, lstatSync, openSync, readFileSync, realpathSync,
 import { randomUUID } from "node:crypto";
 import { dirname, join, resolve, sep } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import { CodexTranscript, OUTPUT_SCHEMA, assertRoute, type ChildModel } from "./codex-child.ts";
+import { CodexTranscript, OUTPUT_SCHEMA, PROMPT_JSON_MODELS, assertRoute, type ChildModel } from "./codex-child.ts";
 import { docker } from "@ai-hero/sandcastle/sandboxes/docker";
 import { codexWorker } from "./codex-route.mts";
 import { assertSwarmExecutionReady, dockerCliProxyEnv } from "./swarm-route.mts";
@@ -20,7 +20,7 @@ export interface ReviewLaunch {
 export const REVIEW_IMAGE = "sandcastle:newchanlun";
 /** #1968：kimi 在 codex exec --output-schema 下把开场白当成终答、零工具调用就结束（PR #1966 实测 3/3）；
  *  不带 schema、改由提示词约束 JSON 时 3/3 正常读代码。表内模型不传 schema，提示词末尾追加下面这句。 */
-export const PROMPT_JSON_MODELS: ReadonlySet<string> = new Set(["kimi-k3.1-pro"]);
+export { PROMPT_JSON_MODELS };
 export const PROMPT_JSON_INSTRUCTION = "\n最终消息只输出一个 JSON 对象，不加 Markdown 代码围栏、不加其它文字。"
   + "键恰为 status、summary、findings、validation：status 取 completed、blocked、failed 之一；"
   + "summary 为字符串；findings、validation 为字符串数组。";

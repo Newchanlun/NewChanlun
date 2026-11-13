@@ -20,6 +20,14 @@ export PYTHONPATH=.sandcastle/approval-signing:.sandcastle/deepagents-pilot
 
 两位 reviewer 固定请求 `external_review.MODELS` 中的两个模型（常规为 `gpt-6.1-sol`、`claude-opus-5-5`；当前是下节的临时组合 `kimi-k3.1-pro`、`claude-opus-5-5`），各自独立 checkout、进程和新 session，不要求作者自报模型。模型字段记录 launcher 所选路由；实际上游模型身份仍须由独立路由证据确认。
 
+## 指定 Docker context
+
+需要在 Colima 验收和审阅、但全局默认是 OrbStack 时，在启动 controller 的环境中设置 `DOCKER_CONTEXT=colima`，不修改全局默认。该值沿部署准入、监督、容器/卷检查与回收、VM trim 传递；不存在或不可用的显式 context 按原失败路径处理，不重试默认 daemon。未设置时仍由 Docker 使用原默认 context。launchd 托管时，在实际加载的 `com.newchanlun.deepagents-executor.plist` 的 `EnvironmentVariables` 中设置该值；部署验收命令也须显式使用同一 context。
+
+这是宿主进程的定位变量，不进入审阅容器。`DOCKER_HOST`、`DOCKER_CONFIG`、TLS 覆盖和任意 secret env 仍不转发。审查模型由 `MODELS → launch.json.model → codexWorker({model})` 决定，不依赖转发 `SANDCASTLE_MAIN_MODEL`；正式审阅准入不调用主控模型探针。
+
+同一部署的派发、恢复与回收须使用同一 context；旧 run 没有持久化 context 绑定，不能换 daemon 后接管。部署新代码后，部署 owner 必须按新 controller head 重新绑定 Docker 准入，不能沿用旧 controller head 的验收。隔离 fake 测试不代替这一步。
+
 ## Codex 额度耗尽时的临时组合
 
 触发条件：CLIProxy 的 Codex/OpenAI 上游没有可用额度，`gpt-6.1-sol` 请求全部失败（2026-11-07 实测 401，唯一账号额度为 0，reset_at=2026-11-11T01:00Z），此时任何新审都无法得到两份 PASS。
@@ -28,7 +36,7 @@ export PYTHONPATH=.sandcastle/approval-signing:.sandcastle/deepagents-pilot
 
 POLICY 与模型都进了 `REVIEW_CONTRACT`，换组合后旧组合的 PASS 不能沿用，旧组合的 STALE 也不能 `migrate-stale`，都须在新组合下重审。旧 run 里已退役 reviewer 留下的派发与 BLOCK 证据仍计入完结与否决判断：控制器按 run 目录里实有的 worker 读，不只读当前 `MODELS`。
 
-kimi 不带 `--output-schema`（#1968）。带 schema 时它把开场白（「我先读 diff」）当成终答，零工具调用就结束回合；PR #1966 上实测带 schema 3/3 零调用，不带 schema、提示词要求只输出 JSON 时 3/3 执行 9–17 条只读命令并给出可解析的结论。名单在 `../external-review-worker.mts` 的 `PROMPT_JSON_MODELS`，表内模型的提示词末尾追加 `PROMPT_JSON_INSTRUCTION`，回执的 `output_contract` 记 `prompt` 或 `schema`。opus 照旧带 schema。最终消息若整段恰好是一个 ```json（或无语言标注）围栏，先剥掉围栏再解析，TS（`unwrapJsonFence`）与 Python（`unwrap_json_fence`）同一规则；围栏外有其他文字、有多个围栏或 text 不是字符串，仍记 FAILED（fail closed）。
+kimi 不带 `--output-schema`（#1968）。带 schema 时它把开场白（「我先读 diff」）当成终答，零工具调用就结束回合；PR #1966 上实测带 schema 3/3 零调用，不带 schema、提示词要求只输出 JSON 时 3/3 执行 9–17 条只读命令并给出可解析的结论。名单统一在 `../codex-child.ts` 的 `PROMPT_JSON_MODELS`（`external-review-worker.mts` 保留再导出），表内模型的提示词末尾追加 `PROMPT_JSON_INSTRUCTION`，回执的 `output_contract` 记 `prompt` 或 `schema`。opus 照旧带 schema。最终消息若整段恰好是一个 ```json（或无语言标注）围栏，先剥掉围栏再解析，TS（`unwrapJsonFence`）与 Python（`unwrap_json_fence`）同一规则；围栏外有其他文字、有多个围栏或 text 不是字符串，仍记 FAILED（fail closed）。
 
 部署：Sandcastle 主模型另行切换，设 `SANDCASTLE_MAIN_MODEL=kimi-k3.1-pro`。审查员派发不依赖主模型取值，`.sandcastle/codex-child.ts` 的 `EXTERNAL_REVIEW_MODELS` 总在 `ALLOWED_MODELS` 里。部署后照常先跑 `review_preflight.py`，它探测的就是当前两位。
 
@@ -162,7 +170,7 @@ HOST 切换步骤：
 3. 宿主 reaper（`ExternalReview.reap_review_volumes`）：每位 reviewer 派发前按标签列出卷和容器，凡 launch_id 在本 state_root 登记过、监督进程（`--output-dir` 身份）已不在的，先 `rm -f` 容器再删卷；未登记的 launch_id 不碰。被 SIGKILL、OOM、Mac 或 Colima 重启打断的 launch 由它收。结果追加到 `external-review/volume-reaper.jsonl`；docker 不可用时只记 `skipped`，不挡派发。
 
 删卷之后还要 fstrim。VM 的数据盘是 macOS 系统盘上的稀疏文件，VM 里删卷只把块标成空闲，不 trim 宿主就收不回来，系统盘只会越用越少（11-09 实测一次 `fstrim` 回收 5.8 GiB，系统盘剩余从 22 GiB 回到 27 GiB）。上面第 1 层（监督 finally 删卷成功）和第 3 层（reaper 本轮至少删掉一个卷）之后各调一次 `pilot1742/vm_trim.py`：监督在回执落盘之后以 `python3 -I vm_trim.py <checkout_root>` 调用，结果写 `<model>/vm-trim.json`；reaper 直接调用，结果追加一行 `vm_trim` 到 `volume-reaper.jsonl`。第 2 层退出钩子是同步的，不 trim，留给下一次。checkout 补删不 trim。
-- 做法：`docker context show` 为 `colima` 或 `colima-<p>` 时跑 `colima --profile <p> ssh -- sudo -n fstrim -v /var/lib/docker`；别的 context 记 `skipped`。不用 `--privileged` 一次性容器挂 `/var/lib/docker` 去 trim：容器合同不许特权容器、不许挂 Docker 数据目录，审阅镜像也不保证带 `fstrim`；`colima ssh` 走宿主用户本来就有的 VM 登录，不经 Docker daemon。env 与 `docker_cli` 同一白名单（不传 `DOCKER_HOST`/`DOCKER_CONTEXT`），连的是同一个 context。
+- 做法：`docker context show` 为 `colima` 或 `colima-<p>` 时跑 `colima --profile <p> ssh -- sudo -n fstrim -v /var/lib/docker`；别的 context 记 `skipped`。不用 `--privileged` 一次性容器挂 `/var/lib/docker` 去 trim：容器合同不许特权容器、不许挂 Docker 数据目录，审阅镜像也不保证带 `fstrim`；`colima ssh` 走宿主用户本来就有的 VM 登录，不经 Docker daemon。env 与 `docker_cli` 使用同一组 `DOCKER_ENV`：转发 `DOCKER_CONTEXT`，不传 `DOCKER_HOST`、`DOCKER_CONFIG`、TLS 覆盖及凭据，连的是同一个 context。
 - 失败只记录：colima 不在、`sudo` 要密码、超时（colima 60 s、`docker context show` 10 s，超时杀整个进程组）都记 `failed`，不改回执、结论和退出码，不挡派发。只记返回码和 fstrim 的一行回收量，不记 stderr（ssh 报错可能带 VM 登录密钥路径）。
 - 节流：`<checkout_root>/.vm-trim.lock` 上非阻塞 `flock`，拿不到记 `busy`（另一个 trim 正在跑，监督和 reaper 共用这把锁）；拿到后看 `<checkout_root>/.vm-trim.stamp` 的时间，距上次尝试不足 10 分钟记 `throttled`。时间戳在尝试前写，失败也算一次，免得每轮都去撞坏掉的 VM。两个审查并发结束时只有一个真正 trim。
 

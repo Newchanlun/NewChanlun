@@ -4,7 +4,7 @@ import { execFileSync } from "node:child_process";
 import { existsSync, lstatSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { randomUUID } from "node:crypto";
-import { CodexTranscript, outputProtocol, workerOutputSchema, PROVIDER_DEFINITION, snapshotCheckout } from "./codex-child.ts";
+import { CodexTranscript, outputProtocol, workerOutputSchema, workerOutputInstruction, PROMPT_JSON_MODELS, PROVIDER_DEFINITION, snapshotCheckout } from "./codex-child.ts";
 import { assertContainerIsolationContract, hardenProvider } from "./docker-isolation.mts";
 
 const quote = (value: string) => "'" + value.replaceAll("'", "'\\''") + "'";
@@ -62,16 +62,18 @@ try {
   await handle.copyFileIn(schema, "/tmp/output.schema.json");
   const home = "/tmp/codex-" + record.run_id;
   const agent = codex(request.model, { effort: "high", sessionStorage: { sandboxSessionsDir: home + "/sessions" } });
+  const promptJson = PROMPT_JSON_MODELS.has(request.model);
+  record.output_contract = promptJson ? "prompt" : "schema";
   const prompt = "先完整读取 /opt/newchanlun/pstack/installed/skills/poteto-mode/SKILL.md、适用playbook和原则叶技能，" +
     "读取 /workspace/repo/AGENTS.md 与任务相关 .agents/skills。只修改授权写集，不提交、不push、不读任何凭据。" +
-    "最终仅输出规定JSON。\n" + request.prompt;
+    "最终仅输出规定JSON。\n" + request.prompt + (promptJson ? workerOutputInstruction(protocol) : "");
   const built = agent.buildPrintCommand({ prompt, dangerouslySkipPermissions: false });
   const bypass = " --dangerously-bypass-approvals-and-sandbox";
   if (!built.command.startsWith("codex exec --json ") || built.command.split(bypass).length !== 2 || built.stdin !== prompt)
     throw new Error("Sandcastle Codex command contract changed");
   const overrides = { ...PROVIDER_DEFINITION, base_url: request.endpoint };
   const command = built.command.replace("codex exec", "codex -a never exec --ignore-user-config --sandbox danger-full-access")
-    .replace(bypass, "") + " --output-schema /tmp/output.schema.json --disable multi_agent" +
+    .replace(bypass, "") + (promptJson ? "" : " --output-schema /tmp/output.schema.json") + " --disable multi_agent" +
     " -c 'features.apps=false' -c 'features.plugins=false' -c 'web_search=\"disabled\"'" +
     " -c 'model_provider=\"cliproxy-local\"'" + Object.entries(overrides).map(([key, value]) =>
       " -c " + quote("model_providers.cliproxy-local." + key + "=" + JSON.stringify(value))).join("") + " -";

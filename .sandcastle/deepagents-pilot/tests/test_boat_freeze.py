@@ -133,7 +133,7 @@ def test_controller_and_worker_read_same_frozen_skills_after_source_and_checkout
              '/opt/newchanlun/pstack/installed/skills/poteto-mode/SKILL.md',
              '/project/AGENTS.md', '/project/docs/agents/old.md',
              '/opt/newchanlun/rules/pstack-models.md', '/opt/newchanlun/pstack/upstream/LICENSE']
-    expected = ['PROJECT_FROZEN', 'PSTACK_FROZEN', 'DOC_FROZEN', 'OLD_FROZEN', 'RULES_FROZEN', 'LICENSE_FROZEN']
+    expected = ['PROJECT_FROZEN', 'PSTACK_FROZEN', 'DOC_FROZEN', 'OLD_FROZEN', 'feature, refactoring: gpt-6.1-sol', 'LICENSE_FROZEN']
     db = SqliteSaver(sqlite3.connect(run.dir / 'graph.sqlite', check_same_thread=False))
     for index in range(2):
         model = scripted(*(call('read_file', file_path=path) for path in roots), AIMessage('done'))
@@ -145,10 +145,11 @@ def test_controller_and_worker_read_same_frozen_skills_after_source_and_checkout
         assert all(value in reply for value, reply in zip(expected, replies, strict=True))
         entry.write_text('PSTACK_DRIFT')
         rules.write_text('RULES_DRIFT')
-    assert 'RULES_FROZEN' in system_prompt(run) and 'RULES_DRIFT' not in system_prompt(run)
+    assert MODELS in system_prompt(run) and 'RULES_DRIFT' not in system_prompt(run)
     assert '/opt/newchanlun/pstack/installed/skills/poteto-mode/SKILL.md' in initial_message(run)
     package = tmp_path / 'worker-package'
     worker = build_package(env.source, base, package, run.dir / 'boat/skill-bundle', pstack, rules)
+    assert (package / 'rules/pstack-models.md').read_text() == MODELS
     controller = json.loads((run.dir / 'boat/controller-context/context.json').read_text())
     assert controller['head'] == base and worker['project_skill_id'] == controller['id']
     assert (package / 'project-skills/project/SKILL.md').read_text() == frozen[skill]

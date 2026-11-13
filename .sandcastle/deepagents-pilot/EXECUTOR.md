@@ -58,6 +58,22 @@ executor register --ticket <票号> --run-id t<票号>-1 --base "$BASE" \
 executor run --run-id t<票号>-1 --private-key "$PEM"
 ```
 
+### 项目角色表与 #1911 恢复
+
+让唯一执行器使用项目表，在现有 `serve` 命令追加 `--model-rules /绝对路径/project-models.md`，其他参数与环境保持不变；单 run 入口也接受同名参数。未传参数仍读全局表。该参数只在创建新 run 时读取；已有 run 直接恢复冻结角色和表内容，即使原文件已删除也不重选角色。
+
+#1742 的项目表已入仓为 `pstack-models.md`。部署时将现有 `serve` 命令追加 `--model-rules "$REPO/.sandcastle/deepagents-pilot/pstack-models.md"`，其中 `$REPO` 为部署 checkout 的绝对路径。该表为：
+
+```text
+feature, refactoring: kimi-k3.1-pro # 作者
+judgment and prose: claude-opus-5-5 # 非作者独审
+hardest tasks: kimi-k3.1-pro # 主控
+architect runners: kimi-k3.1-pro, claude-opus-5-5
+arena cross-judge pool: claude-opus-5-5
+```
+
+验收并部署此补丁后，由部署 owner 为原唯一 `serve` 配置该参数，让其自然重试已登记的 `t1911-1`。不要重新 register、删除 unit 或启动第二个 engine。若只有 unit、尚无 run/claim，文件读取或角色校验失败不会创建 run/claim；修正同一来源后重试原 unit 即可。已创建 run 不会被新配置改写。
+
 退出码 75 表示这个 run 已有控制进程，或状态根所在卷剩余空间低于派工门槛（16 GiB，`run.DISPATCH_FREE_BYTES`）。新 run 在领取持有前检查空间；已有 run 仍可打开、收养工蜂、取回终态并回收 VM。新建 checkout、准备新工蜂、创建 Boat 绑定和启动远端命令各自在新增资源前检查，包括尚未认领的命令补派。空间不足时保留原 run，腾出空间后重跑同一命令。控制进程被杀后直接重跑同一命令，工蜂按原键收养，已做的外部写入先读回再决定。受控故障注入用 `--crash-at`，取值为 `after_label_before_receipt`、`after_claim_before_receipt`、`after_push_before_receipt`、`after_pr_before_receipt`、`after_status_before_receipt`、`after_deliver_before_receipt`，进程在该点被 SIGKILL。
 
 明确决定撤销人工中断并继续运行时才加 `--resume`。恢复 Boat 在途工蜂时也一样：它会清除人工中断，不是只读对账选项；只查看本地事实用 `executor status`。
