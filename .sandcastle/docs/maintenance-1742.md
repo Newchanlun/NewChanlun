@@ -232,3 +232,9 @@ Popen 已返回后的登记/文件异常保留标记与原占用，不能借异�
 
 **发布门仍关闭**：macOS 活性与六项历史资源域缺证据未解决。现役 arch_hotzone/claim-loop 的自动 fast-forward
 与重启路径可能加载 main，因此本候选不得先合入 main 再以“未手工部署”规避验收；发布由主控另行裁决。
+
+### 原生 ES 离线机制
+
+[macos-es-v1 离线合同](maintenance-es-offline-1742.md)实现新动作的精确注册、一次许可和有序生命周期归约。
+证据持久标记 offline，原 Gate 不接受其生产封闭结论；现役 macOS 仍用原判据且发布BLOCK不变。
+`status.observer_faults`另列暂时控制故障：成功poll只恢复入口确认，不能补签资源coverage或旧任务完成。

@@ -84,6 +84,7 @@ class Gate:
                 INSERT OR IGNORE INTO control VALUES (1, 0, 0, NULL);
                 CREATE TABLE IF NOT EXISTS owners (id TEXT PRIMARY KEY, lane TEXT, pid INTEGER, start TEXT,
                     registered_at TEXT, ack INTEGER, ack_at TEXT, stopped INTEGER DEFAULT 0, covered INTEGER DEFAULT 1);
+                CREATE TABLE IF NOT EXISTS observer_faults (owner TEXT PRIMARY KEY, at TEXT);
                 CREATE TABLE IF NOT EXISTS censuses (owner TEXT PRIMARY KEY, generation INTEGER, at TEXT);
                 CREATE TABLE IF NOT EXISTS sightings (lane TEXT, pid INTEGER, start TEXT, observed_at TEXT,
                     PRIMARY KEY(lane,pid,start));
@@ -177,7 +178,15 @@ class Gate:
             if state['closed']:
                 db.execute('UPDATE owners SET ack=?,ack_at=? WHERE id=?', (state['generation'], now(), owner))
             db.execute('INSERT OR REPLACE INTO censuses VALUES(?,?,?)', (owner, state['generation'], now()))
+            db.execute('DELETE FROM observer_faults WHERE owner=?', (owner,))
             return bool(state['closed'])
+
+    def observer_failed(self, owner: str) -> None:
+        # 独立于资源coverage：一次poll失败不能抹掉/补签资源清点结论。
+        with self.tx() as db:
+            if db.execute('SELECT 1 FROM owners WHERE id=?', (token(owner),)).fetchone() is None:
+                raise ValueError('unknown observer')
+            db.execute('INSERT OR REPLACE INTO observer_faults VALUES(?,?)', (owner, now()))
 
     def admit(self, owner: str, work: str, *, transferable: bool = False) -> str:
         token(work)
@@ -753,6 +762,7 @@ class Gate:
                 if not any(r['lane'] == lane and r['pid'] == pid and r['start'] == start for r in owners) and not any(
                         w['pid'] == pid and w['start'] == start for w in witnesses):
                     db.execute('INSERT OR IGNORE INTO sightings VALUES(?,?,?,?)', (lane, pid, start, now()))
+            observer_faults = {r[0] for r in db.execute('SELECT owner FROM observer_faults')}
             sightings = [dict(r) for r in db.execute('SELECT * FROM sightings')]
             sighting_resolutions = [dict(r, owners=json.loads(r['owners'])) for r in db.execute('SELECT * FROM sighting_resolutions')]
 
@@ -762,7 +772,7 @@ class Gate:
                        (not r['stopped'] or r['ack'] == state['generation'])]
             confirmed = [r for r in records if r['ack'] == state['generation'] and
                          (r['stopped'] or alive(r['pid'], r['start']))]
-            if not confirmed or any(not r['covered'] or r['ack'] != state['generation'] or
+            if not confirmed or any(r['id'] in observer_faults or not r['covered'] or r['ack'] != state['generation'] or
                                    (not r['stopped'] and not alive(r['pid'], r['start'])) for r in records):
                 missing.append(lane)
         uncovered = [{'lane': r['lane'], 'pid': r['pid'], 'start': r['start'], 'observed_at': r['observed_at'],
@@ -778,7 +788,7 @@ class Gate:
         return {'v': 1, 'generation': state['generation'], 'state': mode, 'requested_at': state['requested_at'],
                 'observed_at': now(), 'unconfirmed': missing, 'uncovered': uncovered,
                 'owners': [{k: r[k] for k in ('id', 'lane', 'pid', 'registered_at', 'ack', 'ack_at', 'stopped', 'covered')} for r in owners],
-                'inflight': jobs, 'sighting_resolutions': sighting_resolutions, 'reconciled': [{'owner': key, 'generation': value} for key, value in retired.items()]}
+                'observer_faults': sorted(observer_faults), 'inflight': jobs, 'sighting_resolutions': sighting_resolutions, 'reconciled': [{'owner': key, 'generation': value} for key, value in retired.items()]}
 
 
 def process_arguments(pid: int) -> list[str]:
@@ -1025,10 +1035,10 @@ class Owner:
                     self.poll()
                 except (ValueError, OSError, sqlite3.Error, subprocess.SubprocessError):
                     try:
-                        self.coverage(False)
+                        self.gate.observer_failed(self.id)
                     except (ValueError, OSError, sqlite3.Error, subprocess.SubprocessError):
                         pass
-                    return
+                    # 下一周期仍尝试原owner；成功poll只清除控制故障，不改资源coverage。
         watcher = threading.Thread(target=observe, name='maintenance-observer', daemon=True)
         watcher.start()
         try:
