@@ -1,6 +1,7 @@
 # macos-es-v1：离线因果闭包与真实后端接入边界
 
 #1742 保留 HOST 原生 CLI 和 `127.0.0.1:8318`。本模块验证原生 ES 路线的协议，未启用 ES 后端。
+[原生开发适配器](../deepagents-pilot/native-es/README.md)已提供可编译的 collector/helper 和专用管道消费端，尚未进行真实 ES 运行验收。
 它不创建 ES client、socket 或后台服务，不启动 eslogger，不改变现役准入选择。
 
 ## 离线验证入口
@@ -59,7 +60,7 @@ python -m pytest .sandcastle/deepagents-pilot/tests/test_maintenance_poll_recove
 并发或重复 ACK 最多进入一次。消费提交后、派发或绑定之前崩溃不能重用许可，仍需原严格证据恢复。
 注册和许可不是新一套调度：任务ID、owner、代次、关闸原子边界继续由原 Gate 管理。
 
-当前 `Peer` 和 `launch` 回调是明确的离线测试接缝，不是已实现的签名检查、Unix socket 服务或原生 supervisor。
+当前 `Peer` 和 `launch` 回调仍是离线测试接缝；原生开发适配器在 C 层另行做 LOCAL_PEERTOKEN/SecCode 核验，不把 fixture 升级为认证来源。
 真实 helper 必须经受管签名核验；在 ARM 前只做注册与阻塞，不 fork/exec 业务、不调用共享模型。
 将来接入时必须保留这条可测试不变量，不能把任意已有长寿进程作为根。
 
@@ -86,7 +87,7 @@ setsid/reparent不删除已记录归属。旧token、同PID冲突身份和重复
 
 1. 正常 SIP 下，真实开发也需要 Apple 批准的自有 ES entitlement、匹配 provisioning profile 与开发签名；ad-hoc 不能替代。开发批准不自动覆盖 Developer ID 分发，分发类型与对应 profile 需另核。当前无已核可用签名来源，不借第三方签名，真实 backend 默认禁用。
 2. 真实 root/FDA 前件与受管 collector/helper；分别处理 NOT_ENTITLED、NOT_PERMITTED、NOT_PRIVILEGED。
-3. 原生 LOCAL_PEERTOKEN、签名身份、单client覆盖配置与生命周期消息适配器；无原始消息/环境泄露。
+3. 验收已编译的原生 LOCAL_PEERTOKEN、签名身份、单client覆盖配置与消息适配器；接通受管开发调度调用链，无原始消息/环境泄露。
 4. 在受控窗口复用同一轨迹做真实系统验收：fork/exec/setsid、慢consumer丢包、observer丢失和高并发出生退出。
 5. 独立审阅后另行接通生产 Gate 证据适配；不能把本模块的 offline 标志改成布尔 true 就启用。
 

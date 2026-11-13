@@ -1,7 +1,7 @@
 """macos-es-v1 离线协议；无 ES/IPC 后端、无生产启用开关。
 
 与 Gate 共用准入与 SQLite。offline 证据绝不写 local_resource_domains/sealed_at，
-因此生产 Gate 不接受它。真实适配器尚须提供单 client 有序事件、签名核验和 LOCAL_PEERTOKEN。
+因此生产 Gate 不接受它。native-es 提供默认禁用的开发适配器；真实 ES/签名正向链尚待验收。
 """
 from __future__ import annotations
 
@@ -385,7 +385,8 @@ class OfflineES:
                 self._log(db, 'arm', {'resource': resource, 'permit': a.permit})
             return a.permit
 
-    def launch(self, resource: str, permit: str, peer: Peer, dispatch: Callable[[], AuditIdentity]) -> bool:
+    def claim_launch(self, resource: str, permit: str, peer: Peer) -> bool:
+        """在发送原生ARM前持久消费；只允许一次，无业务回调。"""
         with self.gate.tx() as db:
             source, a = self._bound(db, resource)
             if (source.epoch != self.current or not source.ready or a.unknown or a.permit != permit or a.permit is None or
@@ -396,6 +397,20 @@ class OfflineES:
             a.claimed = True
             self._save(db, source, [a])
             self._log(db, 'claim-permit', {'resource': resource})
+        return True
+
+    def bind_primary(self, resource: str, peer: Peer, primary: AuditIdentity) -> None:
+        with self.gate.tx() as db:
+            source, a = self._bound(db, resource)
+            if (a.peer != peer.audit.key or peer.image != a.image or not a.claimed or
+                    a.parents.get(primary.key) != a.root or a.primary not in (None, primary.key)):
+                raise ValueError('unbound primary')
+            a.primary = primary.key
+            self._save(db, source, [a])
+
+    def launch(self, resource: str, permit: str, peer: Peer, dispatch: Callable[[], AuditIdentity]) -> bool:
+        if not self.claim_launch(resource, permit, peer):
+            return False
         # ACK重传、同许可并发、commit后crash都不能第二次进入callback。
         try:
             primary = dispatch()
@@ -406,10 +421,7 @@ class OfflineES:
                     a.unknown = a.unknown or 'dispatch_uncertain'
                     self._save(db, source, [a])
             raise
-        with self.gate.tx() as db:
-            source, a = self._bound(db, resource)
-            a.primary = primary.key
-            self._save(db, source, [a])
+        self.bind_primary(resource, peer, primary)
         return True
 
     def waited(self, resource: str, peer: Peer, primary: AuditIdentity, code: int) -> None:
