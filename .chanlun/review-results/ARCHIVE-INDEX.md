@@ -78,6 +78,32 @@
 | issue1678-closeout-20261026 | #1678 |
 | issue1678-selfheal-20261024 | #1678 |
 
+<a id="closed-decisions-1534-1538"></a>
+
+## #1742：#1534、#1538 已闭票过程稿
+
+两目录的全部 15 件历史原件已归档；原目录仅留 README 恢复入口，ADR 0051、0056 的目录指针仍可使用。正式条款仍在 ADR，不随过程稿迁出。
+
+- 来源提交：`923d5f1187fefc549f810643390068884c36ba9e`。
+- 归档包：`/Volumes/AgentStorage/restart-20261107/slim/remaining-archive/closed-decisions-1534-1538-20261113T122859/originals.tar`。
+- 精确路径、字节数、模式：同目录 `manifest.tsv`；票态、消费者依据与恢复实测：同目录 `DELIVERY.md`。
+- #1534、#1538 已由 GitHub live 核实 CLOSED；全部原件已实际解包到临时空目录，与来源 Git blob 及删除前工作文件逐字节、逐模式核对一致。
+
+| 原目录 | 原件（相对该目录） |
+|---|---|
+| `issue1534-policy-20261027` | `APPROVAL.md`、`LANDING-MAP.md`、`archaeology.md`、`draft-to-adr.diff`、`draft.md`、`review/INDEPENDENT-REVIEW.md` |
+| `issue1538-decision-20261028` | `archaeology.json`、`archaeology.md`、`classify.json`、`closeout-receipts.md`、`draft.md`、`review.json`、`review1796.json`、`review1796.md`、`summary.json` |
+
+在新建空目录恢复，勿覆盖工作区：
+
+```sh
+restore=$(mktemp -d)
+tar -xpf /Volumes/AgentStorage/restart-20261107/slim/remaining-archive/closed-decisions-1534-1538-20261113T122859/originals.tar -C "$restore"
+echo "$restore"
+```
+
+也可用 `git show 923d5f1187fefc549f810643390068884c36ba9e:<manifest 中的原路径>` 读取单件历史原文；完整恢复模式请用 tar 包。
+
 ## #1742：14 件历史记录（2026-11-13）
 
 本批已出仓：两组审阅所属 PR #1649、#1580 已合入；pstack 验收票 #1130、#1131、#1135、#1138、#1139 已关闭。仅迁历史记录，pstack/Matt/DeepAgents 入口、许可证与夹具保留。
