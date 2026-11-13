@@ -9,6 +9,7 @@
 """
 import argparse
 import hashlib
+import importlib.util
 import json
 import os
 import re
@@ -161,7 +162,7 @@ def check_mount(args, deadline: Deadline) -> tuple[dict, list[str]]:
         docker_called = True
         # 与正式审阅容器相同，以宿主 uid:gid 运行（docker-isolation.mts）：探针目录是 0700，镜像用户与宿主不同时
         # 不带 --user 会因 EACCES 误拦健康环境
-        result = run_bounded(["docker", "run", "--rm", "--name", container, "--network", "none", "--read-only",
+        result = run_bounded([*docker_command(getattr(args, "review_docker_context", None)), "run", "--rm", "--name", container, "--network", "none", "--read-only",
                               "--user", f"{os.getuid()}:{os.getgid()}",
                               "--mount", f"type=bind,src={root},dst=/checkouts,readonly",
                               "--entrypoint", "cat", args.image, f"/checkouts/{container}/nonce"],
@@ -180,7 +181,7 @@ def check_mount(args, deadline: Deadline) -> tuple[dict, list[str]]:
     finally:
         # docker run 被杀或非 0 退出时容器可能已建，--rm 不会清：总是 rm -f（容器不存在时也返回 0）。
         try:
-            removed = run_bounded(["docker", "rm", "-f", container], deadline.total_left() - OUTPUT_MARGIN)
+            removed = run_bounded([*docker_command(getattr(args, "review_docker_context", None)), "rm", "-f", container], deadline.total_left() - OUTPUT_MARGIN)
             if removed.returncode:
                 cleanup.append(f"docker rm -f {container} 退出 {removed.returncode}")
         except (OSError, subprocess.TimeoutExpired) as error:
@@ -387,49 +388,42 @@ def round_trip(url: str, key: str, model: str, session: str, deadline: Deadline)
                 "error": {"exception": type(error).__name__, "errno": getattr(reason, "errno", getattr(error, "errno", None))}}
 
 
-def route_from_log(log_dir: Path, session: str, since: float, wait: float) -> list[tuple[str, str]] | None:
-    """按本次唯一 Session-Id 找 CLIProxy request-log，读出每次上游尝试的 (provider, 主机)。
-    proxy 的日志以 `=== RESPONSE ===` 段收尾；只在该段已出现、且相邻两次轮询文件大小不变时解析，
-    避免把写到一半的 `provider=clau` 当成定论。找不到或一直没写完返回 None。"""
-    end = time.monotonic() + wait
-    sizes: dict = {}
-    while time.monotonic() <= end:
-        try:
-            paths = list(log_dir.glob("v1-responses-*.log"))
-        except OSError:  # 日志目录不可读：按找不到日志处理
-            paths = []
-        candidates = []
-        for path in paths:
-            try:  # 其他会话的日志可能在 glob 与 stat 之间被轮转删除
-                candidates.append((path.stat().st_mtime, path))
-            except OSError:
-                continue
-        for mtime, path in sorted(candidates, reverse=True):
-            if mtime < since - 1:
-                break
-            try:
-                raw = path.read_bytes()
-            except OSError:
-                continue
-            text = raw.decode("utf-8", "replace")
-            if f"Session-Id: {session}" not in text:
-                continue
-            stable = sizes.get(path) == len(raw)
-            sizes[path] = len(raw)
-            if "\n=== RESPONSE ===" in text and stable:
-                # 只读各 API REQUEST 段（到下一个 === 段头为止）：响应正文里伪造的同名行不算路由
-                requests = re.findall(r"^=== API REQUEST \d+ ===\n(.*?)(?=^=== )", text, re.M | re.S)
-                attempts = []
-                for section in requests:
-                    provider = re.search(r"^Auth: provider=([\w.-]+)(?=,|\s*$)", section, re.M)
-                    host = re.search(r"^Upstream URL: https?://([^/:?\s]+)", section, re.M)
-                    if not (provider and host):
-                        return []
-                    attempts.append((provider.group(1), host.group(1)))
-                return attempts
-            break
-        time.sleep(0.05)
-    return None
+# -I 不把脚本目录放入 sys.path；按当前脚本的相邻路径加载唯一解析实现。
+_LOG_READER = Path(__file__).with_name("_review_preflight_log.py")
+_log_spec = importlib.util.spec_from_file_location("_review_preflight_log", _LOG_READER)
+_log_module = importlib.util.module_from_spec(_log_spec)
+_log_spec.loader.exec_module(_log_module)
+route_from_log = _log_module.route_from_log
+
+
+def docker_command(context: str | None) -> list[str]:
+    return ["docker", "--context", context] if context else ["docker"]
+
+
+def route_from_container(args, session: str, since: float, wait: float,
+                         deadline: Deadline) -> list[tuple[str, str]] | None:
+    """只接受完整白名单协议；读取失败、超时或多余输出均不能证明路由。"""
+    budget = min(wait, deadline.work_left() - 0.25)
+    if budget <= 0:
+        return None
+    labels = {"@".join(route): route for route in KNOWN_ROUTES}
+    cmd = [*docker_command(args.proxy_docker_context), "exec", args.proxy_log_container,
+           "python3", "-I", "-c", _LOG_READER.read_text(), args.proxy_container_log_dir,
+           session, str(since), str(time.time() + budget), str(budget), json.dumps(sorted(KNOWN_ROUTES))]
+    try:
+        result = run_bounded(cmd, budget)
+        if result.returncode or result.stderr:
+            return None
+        payload = json.loads(result.stdout)
+        if (not isinstance(payload, dict) or set(payload) != {"session", "complete_stable", "routes"}
+                or payload["session"] != session or payload["complete_stable"] is not True
+                or not isinstance(payload["routes"], list)
+                or any(not isinstance(route, str) or route not in {*labels, "other"}
+                       for route in payload["routes"])):
+            return None
+        return [labels.get(route, ("other", "other")) for route in payload["routes"]]
+    except (OSError, ValueError, subprocess.TimeoutExpired):
+        return None
 
 
 def probe_model(args, model: str, key: str, deadline: Deadline) -> list[dict]:
@@ -438,8 +432,13 @@ def probe_model(args, model: str, key: str, deadline: Deadline) -> list[dict]:
     trip = round_trip(args.proxy_url, key, model, session, deadline)
     # 往返成功时日志一定会写（实测响应后 14–85ms），等到工作时限前 0.25 秒（留给线程交回结果）；
     # 往返已失败时日志只作诊断，等 0.3 秒。
-    wait = max(0.0, deadline.work_left() - 0.25) if trip["ok"] else 0.3
-    attempts = route_from_log(Path(args.proxy_log_dir), session, since, wait)
+    wait = max(0.0, deadline.work_left() - 0.25)
+    if not trip["ok"]:
+        wait = min(wait, 0.3)
+    if getattr(args, "proxy_log_container", None):
+        attempts = route_from_container(args, session, since, wait, deadline)
+    else:
+        attempts = route_from_log(Path(args.proxy_log_dir), session, since, wait)
     expected = ROUTES[model]
     return [{"name": f"route:{model}", "class": "route", "ok": bool(attempts) and all(a in expected for a in attempts),
              "detail": {"expected": sorted("@".join(route) for route in expected), "actual": [f"{p}@{h}" if (p, h) in KNOWN_ROUTES else "other" for p, h in attempts or []],
@@ -493,12 +492,25 @@ def main(argv=None) -> int:
     ap.add_argument("--checkout-root", required=True, help="正式 attempt 将传给 ExternalReview 的 checkout_root")
     ap.add_argument("--image", default="sandcastle:newchanlun", help="与 external-review-worker.mts REVIEW_IMAGE 相同")
     ap.add_argument("--proxy-url", default="http://127.0.0.1:8318")  # DevSkim: ignore DS162092 有意使用本机回环（本地 CLIProxy / 测试假服务），非调试残留
-    ap.add_argument("--proxy-log-dir", default=str(CLIPROXY_LOG_DIR))
+    logs = ap.add_mutually_exclusive_group()
+    logs.add_argument("--proxy-log-dir", default=str(CLIPROXY_LOG_DIR))
+    logs.add_argument("--proxy-log-container", help="在现有代理容器内解析日志；不挂载或复制状态卷")
+    ap.add_argument("--proxy-docker-context", help="容器日志后端的显式 Docker context")
+    ap.add_argument("--proxy-container-log-dir", help="代理容器内日志目录的绝对路径")
+    ap.add_argument("--review-docker-context", help="审阅挂载探针的 Docker context；默认沿用当前环境")
     ap.add_argument("--codex-home", default=os.environ.get("CODEX_HOME", str(Path.home() / ".codex")),
                     help="宿主 Codex 配置目录；按其 model_providers.cliproxy-local 取 key")
     ap.add_argument("--codex-bin", default="codex", help="宿主使用的 codex 可执行文件，用于离线校验 provider 配置")
     ap.add_argument("--deadline", type=_deadline, default=55.0, help="总墙钟上限（秒，0 < x ≤ 60），超时的检查判失败")
     args = ap.parse_args(argv)
+    if args.proxy_log_container:
+        if (not args.proxy_docker_context or not args.proxy_container_log_dir
+                or not args.proxy_container_log_dir.startswith("/")):
+            ap.error("容器日志后端须指定 proxy-docker-context 与绝对 proxy-container-log-dir")
+        if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]*", args.proxy_log_container):
+            ap.error("proxy-log-container 必须是容器名称或 ID")
+    elif args.proxy_docker_context or args.proxy_container_log_dir:
+        ap.error("容器日志参数须与 proxy-log-container 一起使用")
     t0 = time.monotonic()
     deadline = Deadline(args.deadline)
     secrets = [os.environ.get(SCRUBBED_ENV)]

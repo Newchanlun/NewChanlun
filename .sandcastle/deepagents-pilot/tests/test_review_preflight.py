@@ -8,9 +8,8 @@ from collections import namedtuple
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import pytest
-from conftest import git
-
 import review_preflight as preflight
+from conftest import git
 from pilot1742 import external_review
 from pilot1742.github_app import IdentityError
 
@@ -1022,3 +1021,246 @@ def test_every_report_field_and_enum_is_in_the_protocol_vocabulary(env, capsys, 
     for report in reports:
         _walk(report, fields, enums)
     assert fields <= preflight.PROTOCOL_FIELDS and enums <= preflight.PROTOCOL_VALUES
+
+
+# ---------------- #1742 容器日志后端：只用 fake Docker / 合成日志 ----------------
+
+@pytest.fixture
+def container_reader(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+
+    args = SimpleNamespace(proxy_docker_context="proxy-orbstack", proxy_log_container="fake-proxy",
+                           proxy_container_log_dir=str(tmp_path), proxy_url=LOCAL)
+    calls, outputs = [], []
+    original = preflight.run_bounded
+
+    def fake(cmd, timeout, **kwargs):
+        calls.append(cmd)
+        assert cmd[:6] == ["docker", "--context", "proxy-orbstack", "exec", "fake-proxy", "python3"]
+        result = original([sys.executable, *cmd[6:]], timeout, **kwargs)
+        outputs.append(result.stdout)
+        return result
+
+    monkeypatch.setattr(preflight, "run_bounded", fake)
+    return args, calls, outputs
+
+
+def _route_log(session, routes):
+    return (f"=== HEADERS ===\nSession-Id: {session}\n\n" + "".join(
+        f"=== API REQUEST {i} ===\nUpstream URL: https://{host}/private-path\n"
+        f"Auth: provider={provider}, auth_id=SECRET-AUTH-ID\n\n"
+        f"=== API RESPONSE {i} ===\nStatus: 400\nBody:\n"
+        "Auth: provider=forged, auth_id=SECRET-BODY\nUpstream URL: https://forged-secret/private\n\n"
+        for i, (provider, host) in enumerate(routes, 1)) + "=== RESPONSE ===\nStatus: 200\n")
+
+
+def test_container_reader_emits_only_ordered_route_enums(tmp_path, container_reader):
+    args, calls, outputs = container_reader
+    session = "preflight-test"
+    routes = [("antigravity", "daily-cloudcode-pa.googleapis.com"),
+              ("claude", "api.anthropic.com"), ("claude", "api.anthropic.com"),
+              ("private-provider", "private-host")]
+    (tmp_path / "v1-responses-test.log").write_text(_route_log(session, routes))
+    actual = preflight.route_from_container(args, session, time.time(), 1, preflight.Deadline(5))
+    assert actual == routes[:3] + [("other", "other")]
+    assert json.loads(outputs[0]) == {"session": session, "complete_stable": True,
+                                     "routes": ["antigravity@daily-cloudcode-pa.googleapis.com",
+                                                "claude@api.anthropic.com", "claude@api.anthropic.com", "other"]}
+    assert len(calls) == 1
+    assert not any(word in outputs[0].decode() for word in ("SECRET", "private", "forged", "Auth:", "https://"))
+
+
+@pytest.mark.parametrize("routes,ok", [
+    ([("claude", "api.anthropic.com"), ("claude", "api.anthropic.com")], True),
+    ([("antigravity", "daily-cloudcode-pa.googleapis.com"), ("claude", "api.anthropic.com")], False),
+    ([("private", "secret")], False),
+])
+def test_container_probe_checks_every_attempt(tmp_path, container_reader, monkeypatch, routes, ok):
+    args, _, _ = container_reader
+    (tmp_path / "v1-responses-test.log").write_text(_route_log("preflight-test", routes))
+    monkeypatch.setattr(preflight.uuid, "uuid4", lambda: "test")
+    monkeypatch.setattr(preflight, "round_trip", lambda *a: {"ok": True})
+    checks = preflight.probe_model(args, OPUS, "dummy", preflight.Deadline(5))
+    assert checks[0]["ok"] is ok
+    assert len(checks[0]["detail"]["actual"]) == len(routes)
+
+
+@pytest.mark.parametrize("mode", ["partial", "late", "rotation"])
+def test_container_reader_waits_for_complete_stable_log(tmp_path, container_reader, mode):
+    import os
+
+    args, _, outputs = container_reader
+    path = tmp_path / "v1-responses-test.log"
+    text = _route_log("preflight-test", [("claude", "api.anthropic.com")])
+    if mode == "partial":
+        path.write_text(text[:text.index("ude, auth_id")])
+    elif mode == "rotation":
+        path.write_text("unrelated")
+
+    def finish():
+        replacement = tmp_path / "new-log"
+        replacement.write_text(text)
+        os.replace(replacement, path)
+
+    timer = threading.Timer(0.2, finish)
+    timer.start()
+    try:
+        assert preflight.route_from_container(args, "preflight-test", time.time(), 1,
+                                               preflight.Deadline(5)) == [("claude", "api.anthropic.com")]
+    finally:
+        timer.join()
+    assert json.loads(outputs[0])["complete_stable"] is True
+
+
+@pytest.mark.parametrize("kind", ["old", "other-session", "incomplete", "symlink", "fifo"])
+def test_container_reader_never_proves_unusable_log(tmp_path, container_reader, kind):
+    import os
+
+    args, _, _ = container_reader
+    path = tmp_path / "v1-responses-test.log"
+    text = _route_log("preflight-test-other" if kind == "other-session" else "preflight-test",
+                      [("claude", "api.anthropic.com")])
+    if kind == "symlink":
+        source = tmp_path / "source"
+        source.write_text(text)
+        path.symlink_to(source)
+    elif kind == "fifo":
+        os.mkfifo(path)
+    else:
+        path.write_text(text.split("=== RESPONSE ===")[0] if kind == "incomplete" else text)
+        if kind == "old":
+            os.utime(path, (1, 1))
+    assert preflight.route_from_container(args, "preflight-test", time.time(), 0.2,
+                                           preflight.Deadline(5)) is None
+
+
+@pytest.mark.parametrize("failure", ["rc", "stderr", "garbage", "extra", "session", "state", "route", "timeout", "missing"])
+def test_container_protocol_failures_are_closed_and_not_echoed(container_reader, monkeypatch, capsys, failure):
+    args, _, _ = container_reader
+    payload = {"session": "preflight-test", "complete_stable": True, "routes": ["claude@api.anthropic.com"]}
+    rc, stderr = 0, b""
+    if failure == "rc":
+        rc = 1
+    elif failure == "stderr":
+        stderr = b"SECRET STDERR"
+    elif failure == "extra":
+        payload["SECRET"] = "SECRET VALUE"
+    elif failure == "session":
+        payload["session"] = "SECRET SESSION"
+    elif failure == "state":
+        payload["complete_stable"] = "SECRET STATE"
+    elif failure == "route":
+        payload["routes"] = ["SECRET ROUTE"]
+
+    def fake(cmd, timeout, **kwargs):
+        if failure == "timeout":
+            raise subprocess.TimeoutExpired(cmd, timeout, output=b"SECRET OUT", stderr=b"SECRET ERR")
+        if failure == "missing":
+            raise OSError("SECRET ERROR")
+        return subprocess.CompletedProcess(cmd, rc, b"SECRET OUT" if failure == "garbage" else json.dumps(payload).encode(), stderr)
+
+    monkeypatch.setattr(preflight, "run_bounded", fake)
+    monkeypatch.setattr(preflight.uuid, "uuid4", lambda: "test")
+    monkeypatch.setattr(preflight, "round_trip", lambda *a: {"ok": True})
+    result = preflight.probe_model(args, OPUS, "dummy", preflight.Deadline(5))
+    preflight._emit({"checks": result})
+    assert "SECRET" not in capsys.readouterr().out
+    assert not result[0]["ok"] and not result[0]["detail"]["log_found"]
+
+
+def test_proxy_and_review_contexts_are_independent(env, tmp_path, capsys):
+    # 真 CLI 参数经过假 Docker，再执行同一容器解析器；没有真实 daemon。
+    docker = tmp_path / "bin" / "docker"
+    docker.write_text(f'''#!{sys.executable}
+import os, sys, json
+args = sys.argv[1:]
+with open({str(tmp_path / 'commands.jsonl')!r}, 'a') as f:
+    f.write(json.dumps(args[:4]) + '\\n')
+assert args[:1] == ['--context']
+context, args = args[1], args[2:]
+if args[0] == 'exec':
+    assert context == 'proxy-orbstack' and args[1:3] == ['fake-proxy', 'python3']
+    os.execv({sys.executable!r}, [{sys.executable!r}, *args[3:]])
+assert context == 'review-colima'
+if args[0] == 'rm':
+    sys.exit(0)
+assert args[0] == 'run'
+src = next(x for x in args if x.startswith('type=bind,src=')).split('src=', 1)[1].split(',dst=')[0]
+print(open(src + args[-1].removeprefix('/checkouts')).read(), end='')
+''')
+    # env 的既有 --proxy-log-dir 与 container 开关互斥；通过其内部 main 参数适配 fake。
+    original = preflight.main
+    def container_main(argv):
+        i = argv.index("--proxy-log-dir")
+        argv = argv[:i] + argv[i + 2:]
+        return original(argv)
+    import unittest.mock as mock
+    with mock.patch.object(preflight, "main", container_main):
+        code, report, *_ = env(capsys=capsys, extra=(
+            "--proxy-log-container", "fake-proxy", "--proxy-docker-context", "proxy-orbstack",
+            "--proxy-container-log-dir", str(tmp_path / "logs"), "--review-docker-context", "review-colima"))
+    assert code == 0 and not failing(report)
+    calls = [json.loads(line) for line in (tmp_path / "commands.jsonl").read_text().splitlines()]
+    assert sum(c[:3] == ["--context", "proxy-orbstack", "exec"] for c in calls) == 2
+    assert any(c[:3] == ["--context", "review-colima", "rm"] for c in calls)
+    assert any(c[:3] == ["--context", "review-colima", "run"] for c in calls)
+
+
+def test_container_helper_exits_even_when_client_is_gone(tmp_path):
+    # 不通过 run_bounded 杀 helper：证明容器端有自己的期限，延迟启动亦无读取。
+    source = preflight._LOG_READER.read_text()
+    for expires in (time.time() + 0.15, time.time() - 1):
+        start = time.monotonic()
+        result = subprocess.run([sys.executable, "-I", "-c", source, str(tmp_path), "preflight-test",
+                                 str(time.time()), str(expires), "0.2", "[]"], capture_output=True, timeout=2)
+        assert result.returncode == 2 and not result.stdout and not result.stderr
+        assert time.monotonic() - start < 1
+
+
+def test_container_read_respects_exhausted_deadline(container_reader, monkeypatch):
+    args, calls, _ = container_reader
+    deadline = preflight.Deadline(5)
+    deadline.work = time.monotonic() - 1
+    assert preflight.route_from_container(args, "preflight-test", time.time(), 10, deadline) is None
+    assert calls == []
+
+
+def test_same_size_rotation_does_not_count_as_stable(tmp_path, monkeypatch):
+    import os
+
+    path = tmp_path / "v1-responses-1.log"
+    good = _route_log("preflight-test", [("claude", "api.anthropic.com")])
+    bad = good.replace("provider=claude", "provider=forged")
+    assert len(good) == len(bad)
+    path.write_text(good)
+    sleeps = []
+    original = time.sleep
+
+    def rotate(seconds):
+        sleeps.append(seconds)
+        if len(sleeps) == 1:
+            replacement = tmp_path / "replacement"
+            replacement.write_text(bad)
+            os.replace(replacement, path)
+        original(seconds)
+
+    monkeypatch.setattr(preflight._log_module.time, "sleep", rotate)
+    assert preflight.route_from_log(tmp_path, "preflight-test", time.time(), 1) == [("forged", "api.anthropic.com")]
+    assert len(sleeps) >= 2
+
+
+@pytest.mark.parametrize("extra", [
+    ("--proxy-log-container", "fake"),
+    ("--proxy-docker-context", "proxy"),
+    ("--proxy-container-log-dir", "/logs"),
+    ("--proxy-log-container", "fake", "--proxy-docker-context", "proxy", "--proxy-container-log-dir", "relative"),
+    ("--proxy-log-container", "--privileged", "--proxy-docker-context", "proxy", "--proxy-container-log-dir", "/logs"),
+    ("--proxy-log-container", "fake", "--proxy-log-dir", "/logs"),
+])
+def test_incomplete_or_mixed_log_backend_arguments_are_rejected(extra, capsys):
+    argv = ["--source", ".", "--base", "a" * 40, "--head", "b" * 40, "--merge-base", "a" * 40,
+            "--checkout-root", "/unused", *extra]
+    with pytest.raises(SystemExit) as error:
+        preflight.main(argv)
+    assert error.value.code == 3
+    assert json.loads(capsys.readouterr().out)["ready"] is False

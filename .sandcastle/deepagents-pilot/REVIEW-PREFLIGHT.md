@@ -19,6 +19,35 @@ python3 -I .sandcastle/deepagents-pilot/review_preflight.py \
 
 退出码：`0` 可以启动；`2` 拦截（看 `checks` 里 `ok:false` 的项）；`3` 用法错误。任何退出路径（含用法错误与 `--help`）stdout 都是一行 ASCII JSON。上游错误正文与 docker/daemon 的 stderr 不进报告，只给 HTTP 状态、终态、固定词表分类（如 `tool_choice_unsupported`、`quota`、`auth`）、长度与 sha256 前 12 位，以免回显的 key 经各种转义漏出；其余来自上游或 proxy 日志的字段也只取已知枚举（响应 status、路由 provider@host，其余记 `other`）；报告其余字段输出前按全部已知 key 的各种形态脱敏。
 
+## 代理与审阅镜像位于不同 Docker context
+
+代理日志只存在状态卷时，在原命令中增加以下参数，替换 `--proxy-log-dir`：
+
+```sh
+  --proxy-log-container blackhole-cliproxy \
+  --proxy-docker-context orbstack \
+  --proxy-container-log-dir <代理容器内日志绝对路径> \
+  --review-docker-context colima
+```
+
+日志目录须由部署方确认，不读取代理配置猜路径。代理容器需要 Python 3.11+；Blackhole 的 `Dockerfile.cliproxy` 已安装 Python 3。宿主执行 `docker --context orbstack exec … python3 -I -c …`，使用容器原有用户在代理容器内解析。不启动旁路容器，不新增状态卷挂载，不复制原始日志。审阅的 `run` 和回收的 `rm -f` 都使用 `--review-docker-context`。未指定审阅 context 时沿用原 Docker 环境；原 `--proxy-log-dir` 用法不变。
+
+两种读取入口共享 `_review_preflight_log.py`。只读本次 session、请求起点前一秒以来的普通文件；拒绝符号链接与 FIFO。完整 `RESPONSE` 段出现后，相邻两次轮询的设备、inode、大小与修改时间必须一致，读取期间文件也不得变化。每个 API REQUEST 段保留一次路由，顺序与重复项均保留；响应正文中的同名字段不参与提取。所有尝试都必须通过该模型的 allowlist。
+
+容器只输出以下协议，宿主再次校验字段集合、类型、session 与枚举。非零退出、stderr 非空、协议外输出、未完成或超时均拦截，不退回宿主目录读取。
+
+| 字段 | 来源与允许值 |
+|---|---|
+| `session` | 本次预检生成的 session，必须逐字匹配 |
+| `complete_stable` | 解析器的完成且稳定状态，只有布尔 `true` 可作证明 |
+| `routes` | 有序的 `KNOWN_ROUTES` 枚举数组；未知 provider/hostname 归一为 `other` |
+
+原始日志、URL 路径、auth_id、解析异常以及 Docker 的任意 stdout/stderr 都不进入报告。报告沿用 `route:<model>` 的 `actual`、`log_found` 和 `session`，不增加自由文本诊断字段。
+
+容器读取共用总 `Deadline` 的工作预算，预留线程返回时间。解析进程自身用绝对到期时间和 `SIGALRM` 限制读取与输出，即使宿主 Docker 客户端超时退出也会自行终止；daemon 迟启动到期任务时立即退出。代理 VM 的时钟应与宿主同步；剩余时长超出宿主给定预算也拦截。该后端不创建文件或容器，因而无需对代理执行删除或停止操作。
+
+离线验收覆盖双 context、读取失败/超时、重试顺序、半写/迟写/轮转、响应体字段伪造、未知枚举与自由文本不回显。上线前仍须由主控完成非作者独审，并在真实双 context、真实日志路径上运行正式预检；fake 测试不能代替该操作门。
+
 ## 检查什么
 
 每项检查对应一次真实发生过的正式 attempt 启动失败。
