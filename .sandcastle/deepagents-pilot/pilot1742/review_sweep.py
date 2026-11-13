@@ -79,6 +79,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Protocol
 
+from .maintenance import Owner, Closed
 from .external_review import (
     DEFAULT_IDENTITY,
     IDENTITY_CONFIG,
@@ -763,12 +764,22 @@ class ServeRound:
     见 MIN_LOOP_SECONDS）。上一轮的时间记在状态目录的文件上，launchd 重启 serve 也不会加密轮次。每个动作一行日志，
     前缀 `review-sweep `；输入源读不到或整轮出错时记一行写明原因，不抛出，serve 循环照常继续。"""
 
-    def __init__(self, sweep: Sweep, *, interval: float = MIN_LOOP_SECONDS, clock: Callable[[], float] = time.time):
+    def __init__(self, sweep: Sweep, *, interval: float = MIN_LOOP_SECONDS, clock: Callable[[], float] = time.time,
+                 maintenance: Owner | None = None):
+        self.maintenance = maintenance
         self.sweep, self.interval, self.clock = sweep, interval, clock
         self.stamp = sweep.folder / "serve-round.last"
 
+    def close(self) -> None:
+        if self.maintenance is not None:
+            self.maintenance.stop()
+
     def __call__(self) -> list[dict[str, Any]] | None:
         """返回本轮动作；本轮不到时间或失败返回 None。"""
+        if self.maintenance is not None:
+            self.maintenance.coverage(self.sweep.lane.maintenance_idle())
+            if self.maintenance.poll():
+                return None
         try:
             last = float(self.stamp.read_text())
         except (OSError, ValueError):
@@ -824,15 +835,21 @@ def serve_round(private_key: Path, *, auto_merge: bool = False, max_running: int
     额度准入只统计已结束 run 的回执。上限 N 时最多 N 个 run（每个 2 个模型）同时铺快照、同时耗额度，
     可能集体超占外盘或超出每日上限。调高 N 前先查外盘剩余空间（df -h /Volumes/AgentStorage）。"""
     lane = ExternalReview(None)
-    return ServeRound(Sweep(GhCli(), lane, spawner(private_key), max_running=max_running, auto_merge=auto_merge,
-                            sync=fetcher(lane.source)))
+    owner = Owner("review")
+    owner.coverage(False)
+    result = ServeRound(Sweep(GhCli(), lane, spawner(private_key, owner), max_running=max_running, auto_merge=auto_merge,
+                             sync=fetcher(lane.source)), maintenance=owner)
+    return result
 
 
-def spawner(private_key: Path) -> Spawn:
+def spawner(private_key: Path, maintenance: Owner | None = None) -> Spawn:
+    owner = maintenance or Owner("review")
     def spawn(number: int, attempt: int, head: str, log: Path) -> int:
+        reservation = owner.reserve(f"pr:{number}:{head}:{attempt}")
         log.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
         with open(log, "ab", opener=lambda p, f: os.open(p, f, 0o600)) as out:
-            return subprocess.Popen(run_review_command(number, attempt, head, private_key), stdin=subprocess.DEVNULL,
+            return subprocess.Popen(run_review_command(number, attempt, head, private_key) +
+                                    ["--maintenance-reservation", reservation, "--maintenance-root", str(owner.gate.root)], stdin=subprocess.DEVNULL,
                                     stdout=out, stderr=out, start_new_session=True,
                                     cwd=Path(__file__).resolve().parents[1]).pid
     return spawn
@@ -845,13 +862,33 @@ def run_review(argv: list[str], github: GitHubPort | None = None) -> int:
     parser.add_argument("--attempt", required=True, type=int)
     parser.add_argument("--expect-head", required=True)
     parser.add_argument("--private-key", required=True, type=Path)
+    parser.add_argument("--maintenance-reservation")
+    parser.add_argument("--maintenance-root", type=Path)
     args = parser.parse_args(argv)
+    owner = Owner("review", args.maintenance_root, args.maintenance_reservation)
+    try:
+        job = args.maintenance_reservation or owner.admit(f"pr:{args.pr}:{args.expect_head}:{args.attempt}")
+    except Closed:
+        owner.stop()
+        return 75
+    natural = False
+    try:
+        proof = []
+        code = _run_review(args, github, lambda: proof.append(True))
+        natural = code == 3 or bool(proof)
+        return code
+    finally:
+        owner.finish(job, natural)
+        owner.stop()
+
+
+def _run_review(args, github, on_natural):
     if (github or GhCli()).pr(args.pr)["head"] != args.expect_head:
         print(json.dumps({"pr": args.pr, "action": "head-moved-not-reviewed", "expected": args.expect_head}))
         return 3
     from . import external_review
     return external_review.main(["review-pr", "--pr", str(args.pr), "--attempt", str(args.attempt),
-                                 "--private-key", str(args.private_key)])
+                                 "--private-key", str(args.private_key)], admitted=True, on_natural=on_natural)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -868,17 +905,21 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     if not math.isfinite(args.loop) or not (args.loop == 0 or args.loop >= MIN_LOOP_SECONDS):  # 挡住负数、nan、inf
         parser.error(f"--loop 须为 0 或至少 {MIN_LOOP_SECONDS:g} 秒")
-    sweep = Sweep(GhCli(), ExternalReview(None), spawner(args.private_key), max_running=args.max_running,
+    owner = Owner("review")
+    sweep = Sweep(GhCli(), ExternalReview(None), spawner(args.private_key, owner), max_running=args.max_running,
                   auto_merge=args.auto_merge)
     while True:
         try:
-            report(sweep.tick())
+            owner.coverage(sweep.lane.maintenance_idle())
+            if not owner.poll():
+                report(sweep.tick())
         except SourceUnreadable as error:  # 与 ServeRound 一致：本轮已做的动作照常写日志
             report([*error.actions, {"action": "round-skipped", "unreadable": error.source, "reason": str(error)}])
         except Exception:  # 整轮失败（例如列 PR 失败）：记下，下轮重试，不退出
             print(json.dumps({"action": "tick-error", "reason": traceback.format_exc(limit=3)}, ensure_ascii=False),
                   flush=True)
         if args.loop <= 0:
+            owner.stop()
             return 0
         time.sleep(args.loop)
 

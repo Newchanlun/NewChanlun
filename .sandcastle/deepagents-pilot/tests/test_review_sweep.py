@@ -324,7 +324,7 @@ def test_reviewer_identity_rejects_other_prs_zombies_and_unrelated_commands():
 def test_run_review_refuses_when_head_moved(monkeypatch):
     """F5：子进程绑定决策时的 head；head 已变就不审（不登记、不派模型）。"""
     called = []
-    monkeypatch.setattr("pilot1742.external_review.main", lambda argv: called.append(argv) or 0)
+    monkeypatch.setattr("pilot1742.external_review.main", lambda argv, **kwargs: called.append(argv) or 0)
     class GitHub:
         def pr(self, number):
             return {"head": "b" * 40}
@@ -1043,7 +1043,7 @@ def test_executor_serve_runs_one_sweep_round_per_serve_round(monkeypatch, tmp_pa
     cli, argv = _fake_serve(monkeypatch, tmp_path, rounds=rounds)
     monkeypatch.setattr(module, "serve_round",
                         lambda key, auto_merge, max_running: built.append((key, auto_merge, max_running))
-                        or (lambda: rounds.append("sweep")))
+                        or _sweep_hook(rounds))
     with pytest.raises(_StopServe):
         cli.main(argv + ["--review-sweep", "--review-sweep-auto-merge", "--review-sweep-max-running", "3"])
     assert rounds == ["sweep", "intake"] * 3                      # 每轮一次，排在派票前
@@ -1097,7 +1097,7 @@ def test_auto_merge_is_off_unless_explicitly_enabled(monkeypatch, tmp_path):
     real_serve_round = module.serve_round
     cli, argv = _fake_serve(monkeypatch, tmp_path, rounds=rounds)
     monkeypatch.setattr(module, "serve_round",
-                        lambda key, **kw: built.append(kw) or (lambda: rounds.append("sweep")))
+                        lambda key, **kw: built.append(kw) or _sweep_hook(rounds))
     with pytest.raises(_StopServe):
         cli.main(argv + ["--review-sweep"])
     assert built == [{"auto_merge": False, "max_running": 1}]
@@ -1564,7 +1564,7 @@ def test_serve_passes_the_review_key_not_the_executor_key(monkeypatch, tmp_path)
     """kimi 阻断：serve 的 sweep 用 --review-private-key，不把执行器 App 私钥转给 review-pr。"""
     rounds, built = [], []
     cli, argv = _fake_serve(monkeypatch, tmp_path, rounds=rounds)
-    monkeypatch.setattr(module, "serve_round", lambda key, **kw: built.append(key) or (lambda: rounds.append("sweep")))
+    monkeypatch.setattr(module, "serve_round", lambda key, **kw: built.append(key) or _sweep_hook(rounds))
     with pytest.raises(_StopServe):
         cli.main(argv + ["--review-sweep", "--review-private-key", str(tmp_path / "review.pem")])
     assert built == [tmp_path / "review.pem"]
@@ -1591,7 +1591,7 @@ def test_serve_without_review_key_falls_back_only_without_review_identity(monkey
     monkeypatch.setattr(external_review, "IDENTITY_CONFIG", tmp_path / "absent.json")
     rounds, built = [], []
     cli, argv = _fake_serve(monkeypatch, tmp_path, rounds=rounds)
-    monkeypatch.setattr(module, "serve_round", lambda key, **kw: built.append(key) or (lambda: rounds.append("sweep")))
+    monkeypatch.setattr(module, "serve_round", lambda key, **kw: built.append(key) or _sweep_hook(rounds))
     with pytest.raises(_StopServe):
         cli.main(argv + ["--review-sweep"])
     assert built == [tmp_path / "k.pem"] and "review-key-fallback" in capsys.readouterr().out
@@ -1619,3 +1619,67 @@ def test_manual_loop_logs_actions_taken_before_a_timeout(lane, monkeypatch, caps
     assert module.main(["--private-key", "/k"]) == 0
     lines = [json.loads(line) for line in capsys.readouterr().out.splitlines()]
     assert [a["action"] for a in lines] == ["merged", "round-skipped"]
+
+
+def _sweep_hook(rounds):
+    class Hook:
+        def __call__(self):
+            rounds.append("sweep")
+        def close(self):
+            pass
+    return Hook()
+
+
+def test_maintenance_spawner_cannot_spawn_after_request(tmp_path, monkeypatch):
+    from pilot1742.maintenance import Owner, Closed
+    owner = Owner('review', tmp_path / 'gate')
+    spawn = module.spawner(tmp_path / 'not-read.pem', owner)
+    owner.gate.request()
+    monkeypatch.setattr('pilot1742.maintenance.identity', lambda pid: 'fixture')
+    with owner.gate.tx() as db:
+        db.execute('UPDATE owners SET start=? WHERE id=?', ('fixture', owner.id))
+    monkeypatch.setattr(module.subprocess, 'Popen', lambda *a, **kw: pytest.fail('spawn after closure'))
+    with pytest.raises(Closed):
+        spawn(10, 1, 'a' * 40, tmp_path / 'review.log')
+    assert not (tmp_path / 'review.log').exists()
+
+
+def test_maintenance_spawner_reserves_before_detach(tmp_path, monkeypatch):
+    from pilot1742.maintenance import Owner
+    owner = Owner('review', tmp_path / 'gate')
+    seen = []
+    def popen(command, **kwargs):
+        assert kwargs['start_new_session'] is True
+        report = owner.gate.status([])
+        assert len(report['inflight']) == 1
+        assert command[command.index('--maintenance-reservation') + 1] == report['inflight'][0]['id']
+        owner.gate.request()  # closure precisely between reservation and actual child startup
+        seen.append(command)
+        return type('Process', (), {'pid': 123})()
+    monkeypatch.setattr(module.subprocess, 'Popen', popen)
+    # Gate.identity itself uses subprocess.run -> Popen; isolate process identity, not the admission transaction.
+    monkeypatch.setattr('pilot1742.maintenance.identity', lambda pid: 'fixture')
+    with owner.gate.tx() as db:
+        db.execute('UPDATE owners SET start=? WHERE id=?', ('fixture', owner.id))
+    assert module.spawner(tmp_path / 'not-read.pem', owner)(10, 1, 'a' * 40, tmp_path / 'review.log') == 123
+    assert len(seen) == 1
+
+
+def test_maintenance_completion_is_scoped_to_its_own_review(lane, monkeypatch):
+    from dataclasses import asdict, replace
+    from pilot1742 import external_review
+    target = lane.target(31, 1)
+    other = replace(target, pr_number=999)
+    for item, closed in [(target, True), (other, False)]:
+        folder = lane.state_root / 'runs' / item.key
+        folder.mkdir(parents=True, exist_ok=True)
+        (folder / 'target.json').write_text(json.dumps(asdict(item)))
+        worker = folder / external_review.MODELS[0]
+        worker.mkdir(exist_ok=True)
+        (worker / 'launch.json').write_text('{}')
+        if closed:
+            (worker / 'receipt.json').write_text('{"container_closed":true}')
+    monkeypatch.setattr(external_review, '_ps_rows', lambda: [])
+    monkeypatch.setattr(external_review, 'supervisor_alive', lambda *args: False)
+    assert lane.maintenance_idle(target)
+    assert not lane.maintenance_idle()

@@ -3479,3 +3479,28 @@ test("资金与权限硬门：分级、起草、独审三处提示同口径，�
   assert.ok(tri.includes(SIGN_LINE_FORMAT), "分级提示写出签署行的固定格式");
   assert.match(rp, /R8 [^\n]*硬门事项交还用户签署是正确结论，不判 BLOCK/);
 });
+
+test("维护：关闸拒绝新单票，已领取单票的后续模型调用自然完成", async () => {
+  const { MaintenanceOwner, MaintenanceClosed } = await import("./maintenance.mts");
+  const root = mkdtempSync(join(tmpdir(), "decision-maintenance-"));
+  const helper = join(process.cwd(), ".sandcastle/deepagents-pilot/pilot1742/maintenance.py");
+  const { d, modelCalls } = fakeDeps("dry-run", [fence({ user_gate: [], class: "T", reason: "测试锁" }), goodDraft, fence(pass())]);
+  const owner = new MaintenanceOwner("decision", root);
+  d.maintenance = owner;
+  const original = d.model;
+  let closed = false;
+  d.model = async c => {
+    if (!closed) {
+      execFileSync("python3", [helper, "--root", root, "request"]);
+      closed = true;
+    }
+    return original(c);
+  };
+  const result = await processTicket(1531, d);
+  assert.notEqual(result.phase, "error");
+  assert.ok(modelCalls.length >= 3, "关闸不截断已领取票的起草与独审");
+  const count = modelCalls.length;
+  await assert.rejects(processTicket(1532, d), MaintenanceClosed);
+  assert.equal(modelCalls.length, count);
+  owner.stop();
+});

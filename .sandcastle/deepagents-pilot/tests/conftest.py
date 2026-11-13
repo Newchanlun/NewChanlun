@@ -135,3 +135,10 @@ def isolated_review_identity(tmp_path, monkeypatch):
     from pilot1742 import external_review
 
     monkeypatch.setattr(external_review, "IDENTITY_CONFIG", tmp_path / "absent-app-identity.json")
+
+
+@pytest.fixture(autouse=True)
+def isolated_maintenance(tmp_path, monkeypatch):
+    """离线测试绝不读写部署维护账本。"""
+    from pilot1742 import maintenance
+    monkeypatch.setattr(maintenance, 'ROOT', tmp_path / 'maintenance')

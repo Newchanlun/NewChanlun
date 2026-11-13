@@ -872,6 +872,9 @@ def _serve(args: argparse.Namespace, store: ClaimStore, cutover_store: CutoverSt
     `--loop` 写明哪个源读不到、标到状态页，等一个轮询间隔再从头核身份，进程不退出（launchd 不重启）。
     本机配置错误（LocalConfigError，含私钥 PrivateKeyError）不是读不到源，两种模式都冒到 main → 退出码 2。"""
     from .queue import QueueIntake, mark_source_unreadable
+    from .maintenance import Owner
+    maintenance = Owner("executor")
+    maintenance.coverage(False)
 
     def child(unit: WorkUnit) -> int:
         command = [sys.executable, "-m", "pilot1742.executor", "--state-root", str(args.state_root),
@@ -888,6 +891,7 @@ def _serve(args: argparse.Namespace, store: ClaimStore, cutover_store: CutoverSt
     client: GitHubAppClient | None = None
     try:
         while True:
+            maintenance.poll()  # 关闸确认；intake 仍可推进此前已领取的票。
             try:
                 cutover_store.load()
             except CutoverError as error:
@@ -898,7 +902,7 @@ def _serve(args: argparse.Namespace, store: ClaimStore, cutover_store: CutoverSt
             try:
                 if client is None:
                     client = _client(args)
-                    intake = QueueIntake(args.state_root, RepoGateway(client), store, cutover_store, source_repo)
+                    intake = QueueIntake(args.state_root, RepoGateway(client), store, cutover_store, source_repo, maintenance)
                 print(json.dumps(intake.once(child), ensure_ascii=False, indent=2), flush=True)
             except IdentityError as error:
                 if args.once or isinstance(error, LocalConfigError):
@@ -913,6 +917,9 @@ def _serve(args: argparse.Namespace, store: ClaimStore, cutover_store: CutoverSt
                 return 0
             time.sleep(args.poll_seconds)
     finally:
+        maintenance.stop()
+        if sweep_round is not None:
+            sweep_round.close()
         if client is not None:
             client.close()
 

@@ -1216,6 +1216,27 @@ class ExternalReview:
                 _save(folder / "outcome.json", refused)  # 已写下的迁移结论作废，磁盘回到 STALE
                 return refused
 
+    def maintenance_idle(self, target: ReviewTarget | None = None) -> bool:
+        """只读监督/容器结束回执；旧 controller 的孤儿也不能凭新服务空闲漏算。"""
+        try:
+            rows = _ps_rows()
+            targets = ([self.state_root / "runs" / target.key / "target.json"] if target is not None
+                       else (self.state_root / "runs").glob("*/target.json"))
+            for target_path in targets:
+                folder = target_path.parent
+                for model in self._reviewers(folder):
+                    worker = folder / model
+                    if not any((worker / name).exists() for name in ("launch.json", "process.json")):
+                        continue
+                    if supervisor_alive(worker, rows):
+                        return False
+                    receipt = _read(worker / "receipt.json")
+                    if receipt.get("container_closed") is not True:
+                        return False
+        except (OSError, ValueError, IdentityError, TypeError, subprocess.SubprocessError):
+            return False
+        return True
+
     def status(self, number: int) -> list[dict]:
         if number <= 0:
             raise ValueError("PR 号必须是正整数")
@@ -1267,7 +1288,29 @@ def _positive(value: str) -> int:
     return number
 
 
-def main(argv: list[str] | None = None) -> int:
+def main(argv: list[str] | None = None, *, admitted: bool = False, on_natural=None) -> int:
+    from .maintenance import Owner, Closed
+    arguments = list(sys.argv[1:] if argv is None else argv)
+    if admitted or not arguments or arguments[0] not in ('review-pr', 'migrate-stale'):
+        return _main(arguments, on_natural=on_natural)
+    owner = Owner('review')
+    try:
+        job = owner.admit('manual-review')
+    except Closed:
+        owner.stop()
+        return 75
+    natural = False
+    try:
+        proof = []
+        code = _main(arguments, on_natural=lambda: proof.append(True))
+        natural = bool(proof)
+        return code
+    finally:
+        owner.finish(job, natural)
+        owner.stop()
+
+
+def _main(argv: list[str] | None = None, *, on_natural=None) -> int:
     parser = argparse.ArgumentParser(prog="pilot1742.external_review")
     sub = parser.add_subparsers(dest="command", required=True)
     review = sub.add_parser("review-pr")
@@ -1296,6 +1339,9 @@ def main(argv: list[str] | None = None) -> int:
         else:
             lane = ExternalReview(None)  # 本地 status、对账不获取或读取任何凭据。
             result = lane.status(args.pr) if args.command == "status" else lane.reconcile(args.run_id, args.note)
+        if on_natural is not None and isinstance(result, dict) and result.get("target"):
+            if lane.maintenance_idle(ReviewTarget(**result["target"])):
+                on_natural()
         print(json.dumps(result, ensure_ascii=False, indent=2))
         return 0 if not isinstance(result, dict) or result.get("verdict", "PASS") == "PASS" else 1
     except (IdentityError, EffectPending, ValueError, OSError) as error:

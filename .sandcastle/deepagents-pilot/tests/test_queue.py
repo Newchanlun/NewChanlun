@@ -1452,3 +1452,35 @@ def test_release_keeps_mirror_until_drained_and_old_release_cannot_strip_new_gen
         release_claim(intake.claims, v2.gateway(), TICKET, unit.run_id, '旧释放重试')
     assert v2.writes() == before and 'deepagents' in v2.github.issues[TICKET]['labels'], '旧释放不碰新代次镜像'
     assert '正由' in engine_hold(v2)
+
+
+def test_maintenance_closes_before_registration_without_queue_writes(queued, tmp_path):
+    from pilot1742.maintenance import Owner
+    v2, cutover, intake, _ = queued
+    owner = Owner('executor', tmp_path / 'gate')
+    intake.maintenance = owner
+    owner.gate.request()
+    intake.once(lambda _: pytest.fail('closed intake started child'))
+    assert v2.writes() == []
+    assert not list((v2.home / 'units').glob('*.json'))
+    assert owner.gate.status([])['inflight'] == []
+
+
+def test_maintenance_close_inside_registration_keeps_admitted_child(queued, tmp_path, monkeypatch):
+    from pilot1742.maintenance import Owner
+    v2, cutover, intake, _ = queued
+    owner = Owner('executor', tmp_path / 'gate')
+    intake.maintenance = owner
+    publish_ruling(v2)
+    original = intake.register
+    def close_after_claim(ticket):
+        unit = original(ticket)
+        owner.gate.request()
+        return unit
+    monkeypatch.setattr(intake, 'register', close_after_claim)
+    calls = []
+    rows = intake.once(lambda unit: calls.append(unit.run_id) or 75)
+    assert len(calls) == 1, rows
+    assert len(owner.gate.status([])['inflight']) == 1
+    intake.once(lambda unit: calls.append(unit.run_id) or 75)
+    assert len(calls) == 2  # same receipt can continue after closure

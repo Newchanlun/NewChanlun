@@ -12,6 +12,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from .maintenance import Owner, Closed
 from .approval import SpecAuthorization
 from .boat_execution import ExecutionUnknown
 from .claims import ClaimStore
@@ -112,6 +113,7 @@ class QueueIntake:
     claims: ClaimStore
     cutover: CutoverStore
     source_repo: Path
+    maintenance: Owner | None = None
 
     def register(self, ticket: int) -> WorkUnit:
         from .executor import AdmissionRefused, _task_json, load_unit, unit_path
@@ -223,6 +225,7 @@ class QueueIntake:
                     invalid[ticket] = f'invalid unit {path}: {error}'
                 tickets.add(ticket)
                 runs.setdefault(ticket, set()).add(PilotRun.run_dir(self.state_root, parse_run_id(path.stem)))
+            permits: dict[int, str] = {}
             results: dict[int, dict[str, Any]] = {ticket: {'phase': 'queued'} for ticket in tickets}
             for ticket, invalid_reason in invalid.items():
                 results[ticket] = {'phase': 'halted', 'reason': invalid_reason}
@@ -244,6 +247,8 @@ class QueueIntake:
                         return self._status(results)
             occupied = {ticket: reason for ticket, folders in runs.items()
                         if (reason := self._worker_activity(folders)) is not None}
+            if self.maintenance is not None:
+                self.maintenance.coverage(not occupied)
             for ticket, reason in occupied.items():
                 results[ticket] = {'phase': 'active', 'reason': reason}
 
@@ -266,6 +271,8 @@ class QueueIntake:
                     results[ticket].update(phase=phase, reason=f'{previous}; {activity}' if previous else activity)
                 else:
                     occupied.pop(ticket, None)
+                    if ticket in permits and results[ticket].get('phase') in ('awaiting_merge', 'merged', 'halted', 'queued'):
+                        self.maintenance.finish(permits.pop(ticket))
 
             for ticket in sorted(tickets, key=priority):
                 if ticket not in occupied and set(occupied) - {t for t, _, _ in planned}:
@@ -279,6 +286,11 @@ class QueueIntake:
                     if ticket in invalid:
                         results[ticket] = {'phase': 'halted', 'reason': invalid[ticket]}
                         continue
+                    if self.maintenance is not None:
+                        try:
+                            permits[ticket] = self.maintenance.admit(f'ticket:{ticket}')
+                        except Closed:
+                            continue
                     claim = self.claims.read(ticket)
                     if claim and claim.state == 'released' and ticket in occupied:
                         results[ticket] = {'phase': 'active', 'run_id': claim.run_id, 'reason': claim.reason}
@@ -361,6 +373,8 @@ class QueueIntake:
                         break
                 finally:
                     finish(ticket)
+            if self.maintenance is not None:
+                self.maintenance.coverage(not occupied)
             return self._status(results)
         finally:
             os.close(fd)

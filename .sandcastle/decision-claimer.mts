@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import { MaintenanceOwner, MaintenanceClosed } from "./maintenance.mts";
 /**
  * decision-claimer.mts —— graph engineering 裁决面（#1547）。
  *
@@ -1119,6 +1120,7 @@ export function reviewRetryPrompt(base: string): string {
 
 export interface Deps {
   mode: Mode;
+  maintenance?: MaintenanceOwner;
   drainRoot?: string;
   /** 切流记录根；缺省与 engine 共用生产根，测试显式给临时目录。 */
   stateRoot?: string;
@@ -1629,13 +1631,18 @@ async function archaeologyOnlyLocked(n: number, d: Deps): Promise<{ ticket: numb
 
 /** --archaeology-only 入口与 engine 共用切流准入；无有效切流时保持冻结。 */
 export async function archaeologyOnlyAdmission(n: number, d: Deps) {
-  return withGraphAdmission(() => archaeologyOnly(n, d), d);
+  const action = () => withGraphAdmission(() => archaeologyOnly(n, d), d);
+  return d.maintenance ? d.maintenance.work(`archaeology:${n}`, action) : action();
 }
 
 export async function processTicket(n: number, raw: Deps): Promise<Summary> {
   const release = acquireTicketLock(raw.outRoot, n);
   if (!release) return { ticket: n, mode: raw.mode, phase: "error", attempts: 0, durationsMs: {}, plannedWrites: [], error: "本地锁已存在，另一进程正在处理" };
-  try { return await processTicketLocked(n, raw); }
+  try {
+    return raw.maintenance
+      ? await raw.maintenance.work(`ticket:${n}`, () => processTicketLocked(n, raw), r => r.phase !== "error")
+      : await processTicketLocked(n, raw);
+  }
   finally { release(); }
 }
 
@@ -2293,7 +2300,9 @@ export async function runPool<T, R>(items: T[], limit: number, fn: (x: T) => Pro
       out[i] = await fn(items[i]);
     }
   };
-  await Promise.all(Array.from({ length: Math.min(limit, items.length) }, worker));
+  const settled = await Promise.allSettled(Array.from({ length: Math.min(limit, items.length) }, worker));
+  const failed = settled.find((result): result is PromiseRejectedResult => result.status === "rejected");
+  if (failed) throw failed.reason;
   return out;
 }
 
@@ -2356,33 +2365,42 @@ async function main() {
     mode: a.mode, drainRoot: DRAIN_ROOT, gh, git, model: makeClaudeRunner(), outRoot: a.outRoot, srcDir, repoRoot: REPO_ROOT, now: Date.now,
     me: a.mode === "live" ? gh(["api", "user", "--jq", ".login"]).trim() : undefined,
   };
-  if (a.archaeologyOnly) {
-    const sha = ensureSrc(REPO_ROOT, srcDir, git);
-    log(`考古 only：取证检出对齐远端 main ${sha.slice(0, 10)}`);
-    for (const n of a.tickets) {
-      try {
-        const r = await archaeologyOnlyAdmission(n, d);
-        log(`#${n} 考古 A ${r.counts.A} / B ${r.counts.B} / C ${r.counts.C}；机械校验${r.problems.length ? `问题 ${r.problems.length} 条：${r.problems.join("；")}` : "通过"}；${r.dir}/${ARCHAEOLOGY_FILE}`);
-      } catch (e) {
-        log(`#${n} 考古失败：${e instanceof Error ? e.message : String(e)}`);
-        process.exitCode = 1;
-      }
-    }
-    return;
-  }
-  for (;;) {
-    if (graphAdmissionFrozen(d)) { log("旧入口冻结，已领工作收尾后退出"); return; }
-    try {
+  const maintenance = new MaintenanceOwner("decision");
+  d.maintenance = maintenance;
+  try {
+    if (a.archaeologyOnly) {
       const sha = ensureSrc(REPO_ROOT, srcDir, git);
-      log(`取证检出对齐远端 main ${sha.slice(0, 10)}`);
-      await round(a, d);
-    } catch (e) {
-      log(`本轮失败：${e instanceof Error ? e.message : String(e)}`);
-      if (!a.loop) process.exitCode = 1;
+      log(`考古 only：取证检出对齐远端 main ${sha.slice(0, 10)}`);
+      for (const n of a.tickets) {
+        try {
+          const r = await archaeologyOnlyAdmission(n, d);
+          log(`#${n} 考古 A ${r.counts.A} / B ${r.counts.B} / C ${r.counts.C}；机械校验${r.problems.length ? `问题 ${r.problems.length} 条：${r.problems.join("；")}` : "通过"}；${r.dir}/${ARCHAEOLOGY_FILE}`);
+        } catch (e) {
+          log(`#${n} 考古失败：${e instanceof Error ? e.message : String(e)}`);
+          process.exitCode = 1;
+        }
+      }
+      return;
     }
-    if (!a.loop) break;
-    await new Promise((r) => setTimeout(r, LOOP_INTERVAL_MS));
-  }
+    for (;;) {
+      if (graphAdmissionFrozen(d)) { log("旧入口冻结，已领工作收尾后退出"); return; }
+      if (maintenance.poll()) {
+        if (!a.loop) return;
+        await new Promise((r) => setTimeout(r, LOOP_INTERVAL_MS));
+        continue;
+      }
+      try {
+        const sha = ensureSrc(REPO_ROOT, srcDir, git);
+        log(`取证检出对齐远端 main ${sha.slice(0, 10)}`);
+        await round(a, d);
+      } catch (e) {
+        if (!(e instanceof MaintenanceClosed)) log(`本轮失败：${e instanceof Error ? e.message : String(e)}`);
+        if (!a.loop) process.exitCode = 1;
+      }
+      if (!a.loop) break;
+      await new Promise((r) => setTimeout(r, LOOP_INTERVAL_MS));
+    }
+  } finally { maintenance.stop(); }
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1])).href) {

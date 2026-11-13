@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import { MaintenanceOwner } from "../.sandcastle/maintenance.mts";
 /**
  * wayfinder_engine.mts —— 图清自动汇入主干管线自动化（#1078 裁定落地，#1084 实装）。
  *
@@ -1454,7 +1455,7 @@ function describeAction(a: Action): string {
 
 // ── 壳：轮询 + 每轮重算 ready 集 ───────────────────────────────────────────────
 
-async function runOnce(cfg: EngineConfig): Promise<void> {
+async function runOnce(cfg: EngineConfig, maintenance?: MaintenanceOwner): Promise<void> {
   if (graphAdmissionFrozen()) return;
   const stamp = new Date().toISOString().slice(0, 19).replace("T", " ");
   console.log(`\n[wayfinder_engine] ${stamp} 一轮开始（${cfg.dryRun ? "dry-run" : "live"}）`);
@@ -1481,7 +1482,9 @@ async function runOnce(cfg: EngineConfig): Promise<void> {
         console.log(`    [dry-run] 将执行：${describeAction(action)}`);
       } else {
         try {
-          await withEngineAdmission(() => executeAction(action, cfg));
+          const execute = () => withEngineAdmission(() => executeAction(action, cfg));
+          if (maintenance) await maintenance.work(`map:${m.number}:${action.kind}`, execute);
+          else await execute();
         } catch (e) {
           console.error(`    ✗ 执行失败（${action.kind}）：${e}`);
         }
@@ -1506,8 +1509,9 @@ async function runOnce(cfg: EngineConfig): Promise<void> {
       console.log(`    [dry-run] 将释放（挂 ${releaseLabel()}）：#${n}`);
     } else {
       try {
-        const why = await withEngineAdmission(() => releaseTicket(n, { specs: facts.requiredSpecs.get(n) ?? [], orchestrator: cfg.orchestrator,
+        const release = () => withEngineAdmission(() => releaseTicket(n, { specs: facts.requiredSpecs.get(n) ?? [], orchestrator: cfg.orchestrator,
           via: facts.planBound.has(n) ? "plan" : "tree" }));
+        const why = maintenance ? await maintenance.work(`release:${n}`, release) : await release();
         if (why) console.log(`    · 写前复核不放行 #${n}：${why}`);
         else console.log(`    ✓ 已释放（挂 ${releaseLabel()}）：#${n}`);
       } catch (e) {
@@ -1591,19 +1595,23 @@ async function main(): Promise<void> {
   console.log(
     `[wayfinder_engine] 启动：dry-run=${cfg.dryRun} poll=${cfg.pollSeconds}s orchestrator=${cfg.orchestrator} spec 起草子代理=${cfg.specProvider}/${cfg.specModel}`,
   );
-  if (cfg.once) {
-    await runOnce(cfg);
-    return;
-  }
-  for (;;) {
-    if (graphAdmissionFrozen()) { console.log("旧入口冻结，本轮不再领新工作"); return; }
-    try {
-      await runOnce(cfg);
-    } catch (e) {
-      console.error(`[wayfinder_engine] 一轮异常：${e}`);
+  const maintenance = new MaintenanceOwner("wayfinder");
+  try {
+    if (cfg.once) {
+      if (!maintenance.poll()) await runOnce(cfg, maintenance);
+      return;
     }
-    await sleep(cfg.pollSeconds * 1000);
-  }
+    for (;;) {
+      if (maintenance.poll()) { await sleep(cfg.pollSeconds * 1000); continue; }
+      if (graphAdmissionFrozen()) { console.log("旧入口冻结，本轮不再领新工作"); return; }
+      try {
+        await runOnce(cfg, maintenance);
+      } catch (e) {
+        console.error(`[wayfinder_engine] 一轮异常：${e}`);
+      }
+      await sleep(cfg.pollSeconds * 1000);
+    }
+  } finally { maintenance.stop(); }
 }
 
 if ((import.meta as { main?: boolean }).main) {
