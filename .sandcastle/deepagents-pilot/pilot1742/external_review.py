@@ -41,6 +41,7 @@ from .github_app import (
     GitHubAppClient,
     IdentityError,
 )
+from .maintenance import evidence_write
 from .patch_read import FrozenPatch, reads_candidate_patch
 from .run import DEFAULT_HOME, SOURCE_REPO, _ps_rows, supervisor_alive
 from .vm_trim import DOCKER_ENV, trim_vm_disk
@@ -1524,10 +1525,9 @@ def main(argv: list[str] | None = None, *, admitted: bool = False, on_natural=No
         with owner.observing():
             return _main(arguments, maintenance=(owner, job))
     finally:
-        try:
+        with evidence_write():
             owner.gate.finish_review(owner.id, job)
-        finally:
-            owner.stop()
+        owner.stop()
 
 
 def _main(argv: list[str] | None = None, *, on_natural=None, maintenance=None) -> int:
@@ -1535,7 +1535,8 @@ def _main(argv: list[str] | None = None, *, on_natural=None, maintenance=None) -
         return _run_main(argv, on_natural=on_natural, maintenance=maintenance)
     finally:
         if maintenance is not None:
-            maintenance[0].gate.returned_current(maintenance[1])
+            with evidence_write():
+                maintenance[0].gate.returned_current(maintenance[1])
 
 
 def _run_main(argv: list[str] | None = None, *, on_natural=None, maintenance=None) -> int:
@@ -1575,11 +1576,12 @@ def _run_main(argv: list[str] | None = None, *, on_natural=None, maintenance=Non
                 result = lane.reconcile_review_resources(args.run_id, args.model, args.launch_id)
             else:
                 result = lane.status(args.pr) if args.command == "status" else lane.reconcile(args.run_id, args.note)
-        if on_natural is not None and isinstance(result, dict) and result.get("target"):
-            if lane.maintenance_idle(ReviewTarget(**result["target"])):
-                if maintenance is not None and lane.maintenance_witness is not None:
-                    maintenance[0].gate.complete_bound(lane.maintenance_witness)
-                on_natural()
+        with evidence_write():
+            if on_natural is not None and isinstance(result, dict) and result.get("target"):
+                if lane.maintenance_idle(ReviewTarget(**result["target"])):
+                    if maintenance is not None and lane.maintenance_witness is not None:
+                        maintenance[0].gate.complete_bound(lane.maintenance_witness)
+                    on_natural()
         print(json.dumps(result, ensure_ascii=False, indent=2))
         return 0 if not isinstance(result, dict) or result.get("verdict", "PASS") == "PASS" else 1
     except (IdentityError, EffectPending, ValueError, OSError) as error:

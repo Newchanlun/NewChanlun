@@ -73,7 +73,7 @@ else if(args[0]==='api' && cmd.includes('--method POST')) {write();out({});}
 else if(args[0]==='api' && /issues\\/(101|102)$/.test(args[1])) {console.log(+args[1].split('/').pop());}
 else {console.error('Unexpected fake gh: '+cmd);process.exit(71);}
 `, { mode: 0o755 });
-    const result = spawnSync(process.execPath, ["--experimental-strip-types", "scripts/wayfinder_engine.mts", "--live", "--once"], {
+    const result = spawnSync(process.execPath, ["--experimental-strip-types", "scripts/wayfinder_engine.mts", "--live", "--maintenance-root", join(root, "maintenance"), "--once"], {
       cwd: root, env: { ...process.env, PATH: `${root}:${process.env.PATH}`, WFE_FIXTURE: root,
         GH_REPO: "fixture/repo", WAYFINDER_ORCHESTRATOR: "fixture", WAYFINDER_GH_MAX_ATTEMPTS: "1" },
       encoding: "utf8", timeout: 20_000,

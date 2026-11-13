@@ -25,7 +25,7 @@ from .domain import (
     parse_run_id,
     parse_sha,
 )
-from .maintenance import Closed, Owner
+from .maintenance import Closed, Owner, evidence_write
 from .run import InsufficientSpace, PilotRun, TaskSpec, _ps_rows, require_free_space
 from .workunit import (
     RELEASE_LABEL,
@@ -275,13 +275,14 @@ class QueueIntake:
                 else:
                     occupied.pop(ticket, None)
                     if self.maintenance is not None and results[ticket].get('phase') != 'active':
-                        with self.maintenance.gate.tx() as db:
-                            jobs = [r[0] for r in db.execute(
-                                "SELECT id FROM jobs WHERE owner=? AND work=? AND state!='finished' "
-                                "AND id NOT IN (SELECT job FROM resolutions)", (self.maintenance.id, f'ticket:{ticket}'))]
-                        for job in jobs:
-                            if not self.maintenance.gate.settle_bound(self.maintenance.id, job):
-                                self.maintenance.finish(job, natural=False)
+                        with evidence_write():
+                            with self.maintenance.gate.tx() as db:
+                                jobs = [r[0] for r in db.execute(
+                                    "SELECT id FROM jobs WHERE owner=? AND work=? AND state!='finished' "
+                                    "AND id NOT IN (SELECT job FROM resolutions)", (self.maintenance.id, f'ticket:{ticket}'))]
+                            for job in jobs:
+                                if not self.maintenance.gate.settle_bound(self.maintenance.id, job):
+                                    self.maintenance.finish(job, natural=False)
                         permits.pop(ticket, None)
 
             for ticket in sorted(tickets, key=priority):
@@ -391,7 +392,8 @@ class QueueIntake:
                 finally:
                     finish(ticket)
             if self.maintenance is not None:
-                self._maintenance_coverage()
+                with evidence_write():
+                    self._maintenance_coverage()
             return self._status(results)
         finally:
             os.close(fd)

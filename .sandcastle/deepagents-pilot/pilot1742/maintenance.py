@@ -5,6 +5,7 @@ import argparse
 import json
 import os
 import re
+import shlex
 import sqlite3
 import subprocess
 import sys
@@ -29,6 +30,15 @@ class ExecutorBusy(ValueError):
 
 class Closed(RuntimeError):
     pass
+
+
+@contextmanager
+def evidence_write():
+    """仅用于业务结束后的证据提交；失败不改变业务结果，也不授权下一动作。"""
+    try:
+        yield
+    except Exception:
+        print('maintenance evidence unavailable', file=sys.stderr, flush=True)
 
 
 def now() -> str:
@@ -77,6 +87,8 @@ class Gate:
                 CREATE TABLE IF NOT EXISTS censuses (owner TEXT PRIMARY KEY, generation INTEGER, at TEXT);
                 CREATE TABLE IF NOT EXISTS sightings (lane TEXT, pid INTEGER, start TEXT, observed_at TEXT,
                     PRIMARY KEY(lane,pid,start));
+                CREATE TABLE IF NOT EXISTS sighting_resolutions (lane TEXT, pid INTEGER, start TEXT,
+                    generation INTEGER, owners TEXT, at TEXT, PRIMARY KEY(lane,pid,start));
                 CREATE TABLE IF NOT EXISTS lineage (job TEXT, owner TEXT, PRIMARY KEY(job,owner));
                 CREATE TABLE IF NOT EXISTS bindings (job TEXT PRIMARY KEY, data TEXT NOT NULL);
                 CREATE TABLE IF NOT EXISTS scopes (owner TEXT PRIMARY KEY, data TEXT NOT NULL);
@@ -700,9 +712,37 @@ class Gate:
             db.execute('INSERT OR IGNORE INTO reconciliations VALUES(?,?,?)', (owner, generation, now()))
         return {'owner': owner, 'generation': generation, 'result': 'reconciled'}
 
+    def reconcile_sighting(self, generation: int, lane: str, pid: int, start: str) -> dict:
+        """只消费账本内原始身份绑定及既有严格 reconcile；不接受人工终态。"""
+        result = dict(lane=lane, pid=pid, start=start, generation=generation, result='unknown')
+        with self.tx() as db:
+            control = db.execute('SELECT * FROM control').fetchone()
+            if not control['closed'] or control['generation'] != generation:
+                raise ValueError('generation mismatch')
+            if not db.execute('SELECT 1 FROM sightings WHERE lane=? AND pid=? AND start=?', (lane, pid, start)).fetchone():
+                raise ValueError('missing sighting')
+            candidates = {r[0] for r in db.execute('SELECT id FROM owners WHERE lane=? AND pid=? AND start=?', (lane, pid, start))}
+            candidates.update(r[0] for r in db.execute(
+                'SELECT DISTINCT jobs.owner FROM witnesses JOIN jobs ON jobs.id=witnesses.job '
+                'JOIN owners ON owners.id=jobs.owner WHERE owners.lane=? AND witnesses.pid=? AND witnesses.start=?',
+                (lane, pid, start)))
+        if not candidates:
+            return dict(result, reason='missing_original_identity_binding')
+        for owner in sorted(candidates):
+            proof = self.reconcile(generation, owner)
+            if proof['result'] != 'reconciled':
+                return dict(result, reason=proof['reason'])
+        with self.tx() as db:
+            control = db.execute('SELECT * FROM control').fetchone()
+            if not control['closed'] or control['generation'] != generation:
+                raise ValueError('generation changed')
+            db.execute('INSERT OR IGNORE INTO sighting_resolutions VALUES(?,?,?,?,?,?)',
+                       (lane, pid, start, generation, json.dumps(sorted(candidates)), now()))
+        return dict(result, result='reconciled', owners=sorted(candidates))
+
     def status(self, inventory=None) -> dict:
         # inventory 是生产进程身份清单；测试注入固定清单，不靠时间/TTL。
-        processes = process_inventory() if inventory is None else inventory
+        processes = process_inventory(self.root) if inventory is None else inventory
         with self.tx() as db:
             state = dict(db.execute('SELECT * FROM control').fetchone())
             owners = [dict(r) for r in db.execute('SELECT * FROM owners ORDER BY registered_at,id')]
@@ -714,6 +754,7 @@ class Gate:
                         w['pid'] == pid and w['start'] == start for w in witnesses):
                     db.execute('INSERT OR IGNORE INTO sightings VALUES(?,?,?,?)', (lane, pid, start, now()))
             sightings = [dict(r) for r in db.execute('SELECT * FROM sightings')]
+            sighting_resolutions = [dict(r, owners=json.loads(r['owners'])) for r in db.execute('SELECT * FROM sighting_resolutions')]
 
         missing = []
         for lane in LANES:
@@ -724,7 +765,7 @@ class Gate:
             if not confirmed or any(not r['covered'] or r['ack'] != state['generation'] or
                                    (not r['stopped'] and not alive(r['pid'], r['start'])) for r in records):
                 missing.append(lane)
-        uncovered = [{'lane': r['lane'], 'pid': r['pid'], 'observed_at': r['observed_at'],
+        uncovered = [{'lane': r['lane'], 'pid': r['pid'], 'start': r['start'], 'observed_at': r['observed_at'],
                       'reason': 'missing_prelaunch_binding'} for r in sightings
                      if not any(o['lane'] == r['lane'] and o['pid'] == r['pid'] and o['start'] == r['start'] for o in owners)
                      and not any(w['pid'] == r['pid'] and w['start'] == r['start'] for w in witnesses)]
@@ -737,10 +778,110 @@ class Gate:
         return {'v': 1, 'generation': state['generation'], 'state': mode, 'requested_at': state['requested_at'],
                 'observed_at': now(), 'unconfirmed': missing, 'uncovered': uncovered,
                 'owners': [{k: r[k] for k in ('id', 'lane', 'pid', 'registered_at', 'ack', 'ack_at', 'stopped', 'covered')} for r in owners],
-                'inflight': jobs, 'reconciled': [{'owner': key, 'generation': value} for key, value in retired.items()]}
+                'inflight': jobs, 'sighting_resolutions': sighting_resolutions, 'reconciled': [{'owner': key, 'generation': value} for key, value in retired.items()]}
 
 
-def process_inventory() -> list[tuple[str, int, str]]:
+def process_arguments(pid: int) -> list[str]:
+    """读取原生 argv 边界，只返回 argv；不解析或输出环境区。"""
+    if sys.platform.startswith('linux'):
+        data = Path(f'/proc/{pid}/cmdline').read_bytes()
+        return [part.decode() for part in data.rstrip(b'\0').split(b'\0')]
+    if sys.platform == 'darwin':
+        import ctypes
+        libc = ctypes.CDLL('/usr/lib/libSystem.B.dylib', use_errno=True)
+        mib = (ctypes.c_int * 3)(1, 49, pid)  # CTL_KERN / KERN_PROCARGS2
+        size = ctypes.c_size_t()
+        if libc.sysctl(mib, 3, None, ctypes.byref(size), None, 0) != 0:
+            raise OSError(ctypes.get_errno(), 'argv unavailable')
+        if not 4 < size.value <= 8 * 1024 * 1024:
+            raise ValueError('invalid argv size')
+        buffer = ctypes.create_string_buffer(size.value)
+        if libc.sysctl(mib, 3, buffer, ctypes.byref(size), None, 0) != 0:
+            raise OSError(ctypes.get_errno(), 'argv unavailable')
+        data = buffer.raw[:size.value]
+        argc = int.from_bytes(data[:4], sys.byteorder, signed=True)
+        if not 0 < argc < 100000:
+            raise ValueError('invalid argc')
+        offset = data.index(b'\0', 4) + 1  # executable path followed by padding
+        while offset < len(data) and data[offset] == 0:
+            offset += 1
+        if offset == len(data):
+            raise ValueError('missing argv')
+        words = []
+        for _ in range(argc):
+            end = data.index(b'\0', offset)
+            words.append(data[offset:end].decode())
+            offset = end + 1
+        return words
+    raise OSError('native argv unavailable')
+
+
+def command_lanes(command: str, root: Path, argv: list[str] | None = None) -> list[str]:
+    """只解析解释器实际入口/子命令；不扫描 reason、提示或参数值里的 run。"""
+    try:
+        words = shlex.split(command)
+    except ValueError:
+        # ps 不保证保留 argv quoting；无法解析仍按旧保守识别，绝不据此排除。
+        words = command.split()
+    if argv is not None:
+        words = argv
+    if not words:
+        return []
+    executable = Path(words[0]).name
+    args = words[1:]
+    module = None
+    if re.fullmatch(r'python[\d.]*', executable):
+        while args and args[0] in ('-u', '-B', '-E', '-s', '-I', '-O', '-OO'):
+            args = args[1:]
+        if len(args) < 2 or args[0] != '-m':
+            return []
+        module, args = args[1], args[2:]
+    elif executable in ('node', 'tsx'):
+        while args and args[0].startswith('-'):
+            skip = 2 if args[0] in ('--import', '--loader', '--require', '-r', '--tsconfig') else 1
+            args = args[skip:]
+        if args and re.search(r'(?:tsx/(?:dist/)?cli\.mjs|node_modules/\.bin/tsx)$', args[0]):
+            args = args[1:]
+        if not args:
+            return []
+        module, args = Path(args[0]).name, args[1:]
+    else:
+        return []
+    # 明确绝对根是调用合同的一部分；缺失/不可解析时仍保守归部署根。
+    scope = None
+    for i, arg in enumerate(args):
+        if arg == '--maintenance-root' and i + 1 < len(args):
+            scope = args[i + 1]
+        elif arg.startswith('--maintenance-root='):
+            scope = arg.split('=', 1)[1]
+    if scope and Path(scope).is_absolute() and Path(scope).resolve() != root.resolve():
+        return []
+    if module == 'decision-claimer.mts':
+        return ['decision']
+    if module == 'wayfinder_engine.mts':
+        modes = [a for a in args if a in ('--live', '--dry-run')]
+        return ['wayfinder'] if modes and modes[-1] == '--live' and '--spec-ruling' not in args else []
+    if module in ('pilot1742.executor', 'pilot1742.review_sweep', 'pilot1742.external_review') and any(a in ('--help', '-h') for a in args):
+        return []
+    if module == 'pilot1742.executor':
+        # executor 全局选项都带单值；第一个位置参数才是子命令。
+        i = 0
+        while i < len(args) and args[i].startswith('-'):
+            if args[i] in ('--state-root', '--drain-root'):
+                i += 2
+            elif args[i].startswith(('--state-root=', '--drain-root=')):
+                i += 1
+            else:
+                return []  # parser 在执行前拒绝未知全局选项。
+        return ['executor'] if i < len(args) and args[i] in ('serve', 'run') else []
+    if module == 'pilot1742.review_sweep':
+        return ['review']
+    if module == 'pilot1742.external_review':
+        return ['review'] if args and args[0] in ('review-pr', 'migrate-stale') else []
+    return []
+
+
+def process_inventory(root: Path = ROOT) -> list[tuple[str, int, str]]:
     output = subprocess.run(['ps', '-axo', 'pid=,ppid=,args='], check=True, capture_output=True, text=True).stdout
     result: list[tuple[str, int, str]] = []
     parents = {}
@@ -756,18 +897,14 @@ def process_inventory() -> list[tuple[str, int, str]]:
             continue
         if re.match(r'\S*node\s+\S*/(?:tsx/(?:dist/)?cli\.mjs|node_modules/\.bin/tsx)(?:\s|$)', command):
             wrappers.add(pid)
-        lanes = []
-        modes = re.findall(r'(?:^|\s)(--live|--dry-run)(?=\s|$)', command)
-        live = bool(modes) and modes[-1] == '--live'
-        # decision CLI 的默认/dry-run 仍调用共享模型；离线测试不是这个脚本入口。
-        if re.search(r'(?:^|\s)\S*decision-claimer\.mts(?:\s|$)', command): lanes.append('decision')
-        if re.search(r'(?:^|\s)\S*wayfinder_engine\.mts(?:\s|$)', command) and live and '--spec-ruling' not in command: lanes.append('wayfinder')
-        if re.search(r'-m pilot1742\.executor\b.*\s(?:serve|run)(?:\s|$)', command):
-            lanes.append('executor')
-            if re.search(r'\bserve\b', command) and '--review-sweep' in command: lanes.append('review')
-        if (re.search(r'-m pilot1742\.review_sweep(?:\s|$)', command)
-                or re.search(r'-m pilot1742\.external_review\s+(?:review-pr|migrate-stale)(?:\s|$)', command)):
-            lanes.append('review')
+        # 作用域排除必须依据内核 argv 边界，不把 reason 字符串里的旗标当成真正选项。
+        argv = None
+        if '--maintenance-root' in command:
+            first_start = identity(pid)
+            argv = process_arguments(pid)
+            if identity(pid) != first_start:
+                raise ValueError('census identity changed')
+        lanes = command_lanes(command, root, argv)
         if lanes:
             try:
                 start = identity(pid)
@@ -832,7 +969,8 @@ class Owner:
         self.gate.finish(self.id, job, natural=natural)
 
     def stop(self) -> None:
-        self.gate.stop(self.id)
+        with evidence_write():
+            self.gate.stop(self.id)
 
 
 def main(argv=None) -> int:
@@ -842,6 +980,7 @@ def main(argv=None) -> int:
     parser.add_argument('--generation', type=int)
     parser.add_argument('--lane', choices=LANES)
     parser.add_argument('--pid', type=int)
+    parser.add_argument('--start')
     parser.add_argument('--owner')
     parser.add_argument('--work')
     parser.add_argument('--job')
@@ -850,7 +989,9 @@ def main(argv=None) -> int:
     args = parser.parse_args(argv)
     try:
         gate = Gate(args.root)
-        if args.command == 'reconcile': result = gate.reconcile(args.generation, args.owner)
+        if args.command == 'reconcile':
+            result = (gate.reconcile(args.generation, args.owner) if args.owner else
+                      gate.reconcile_sighting(args.generation, args.lane, args.pid, args.start))
         elif args.command == 'register': result = {'owner': gate.register(args.lane, args.pid, local_actions=args.local_actions)}
         elif args.command == 'poll': result = {'closed': gate.poll(args.owner)}
         elif args.command == 'admit': result = {'job': gate.admit(args.owner, args.work)}

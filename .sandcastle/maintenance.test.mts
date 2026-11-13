@@ -147,12 +147,15 @@ for (const failedRpc of ["action-exited", "finish"]) test(`收尾 RPC ${failedRp
       return original(command, args);
     };
     let requests = 0;
-    await assert.rejects(owner.work("ticket:1742", () => { requests++; }), /receipt loss/);
+    const summary = {ticket:1742, phase:"business-result"};
+    assert.equal(await owner.work("ticket:1742", () => { requests++; return summary; }), summary);
+    const businessError = new Error("business failure");
+    await assert.rejects(owner.work("ticket:1743", () => { throw businessError; }), e => e === businessError);
     control(root, "request");
     rpc.call = original;
     await assert.rejects(owner.work("ticket:1742", () => { requests++; }), MaintenanceClosed);
     assert.equal(requests, 1);
-    assert.equal(control(root, "status").inflight.length, 1);
+    assert.equal(control(root, "status").inflight.length, 2);
     owner.stop();
   } finally { rmSync(root, { recursive: true, force: true }); }
 });

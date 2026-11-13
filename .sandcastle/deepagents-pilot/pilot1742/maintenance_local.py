@@ -90,14 +90,15 @@ def main() -> int:
 
 
 def supervise(args, command: list[str], notify: int | None = None, signal_mask=None) -> int:
-    from pilot1742.maintenance import Gate
+    from pilot1742.maintenance import Gate, evidence_write
     os.setsid()
     gate = Gate(args.root)
     from pilot1742.maintenance_processes import UnstableSnapshot
     try:
         gate.bind_local_resource(args.resource, subreaper=notify is not None)  # 此后才允许启动 CLI，无 check/spawn 领取间隙。
     except UnstableSnapshot as error:
-        gate.local_resource_not_started(args.resource)
+        with evidence_write():
+            gate.local_resource_not_started(args.resource)
         print(str(error), file=sys.stderr, flush=True)  # 固定原因码/errno，不输出 argv/环境。
         if notify is not None:
             os.write(notify, b'78\n')
@@ -118,7 +119,8 @@ def supervise(args, command: list[str], notify: int | None = None, signal_mask=N
         child = subprocess.Popen(command)
     except OSError:
         # Popen 的 exec-error 通道已同步回收未 exec 的子进程；不伪造业务 wait。
-        gate.local_resource_not_started(args.resource, exec_failed=True)
+        with evidence_write():
+            gate.local_resource_not_started(args.resource, exec_failed=True)
         if notify is not None:
             os.write(notify, b'127\n')
             os.close(notify)

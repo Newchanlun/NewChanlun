@@ -1542,3 +1542,67 @@ def test_maintenance_pre_run_failure_has_bound_not_entered_evidence(queued, tmp_
     assert owner.gate.settle_bound(owner.id, job)
     with owner.gate.tx() as db:
         assert db.execute('SELECT count(*) FROM preflight_returns').fetchone()[0] == 1
+
+
+def test_real_serve_child_busy_keeps_queue_active_and_same_run(queued, tmp_path):
+    import os
+    import subprocess
+    import sys
+    from pathlib import Path
+
+    from pilot1742 import executor as cli
+    from pilot1742.maintenance import Owner
+
+    v2, _, intake, _ = queued
+    owner = Owner('executor', tmp_path / 'gate')
+    intake.maintenance = owner
+    publish_ruling(v2)
+    calls = []
+    def child(unit):
+        with owner.gate.tx() as db:
+            job = db.execute('SELECT id FROM jobs WHERE owner=? AND work=?',
+                             (owner.id, f'ticket:{unit.ticket}')).fetchone()[0]
+            witness = db.execute('SELECT id FROM witnesses WHERE job=?', (job,)).fetchone()
+        if witness is None:
+            owner.gate.start_bound(job, unit.run_id, v2.home)
+        result = subprocess.run([sys.executable, '-m', 'pilot1742.executor', '--state-root', str(v2.home),
+                                 'run', '--run-id', unit.run_id, '--maintenance-job', job,
+                                 '--maintenance-root', str(owner.gate.root)], capture_output=True, text=True,
+                                env={**os.environ, 'PYTHONPATH': str(Path(cli.__file__).parents[1])})
+        assert result.returncode == 75, result.stderr
+        calls.append(unit.run_id)
+        return result.returncode
+    for _ in range(2):
+        assert intake.once(child)[TICKET]['phase'] == 'active'
+    assert len(calls) == 2 and calls[0] == calls[1]
+    with owner.gate.tx() as db:
+        assert db.execute('SELECT count(*) FROM witnesses').fetchone()[0] == 1
+        assert db.execute('SELECT count(*) FROM returns').fetchone()[0] == 0
+
+
+@pytest.mark.parametrize('failure', ['settle', 'final_coverage'])
+def test_queue_cleanup_failure_preserves_business_result(queued, tmp_path, monkeypatch, failure):
+    import sqlite3
+
+    from pilot1742.maintenance import Owner
+
+    v2, _, intake, _ = queued
+    owner = Owner('executor', tmp_path / 'gate')
+    intake.maintenance = owner
+    publish_ruling(v2)
+    calls = []
+    def unavailable(*args, **kwargs):
+        raise sqlite3.OperationalError('injected evidence failure')
+    def child(unit):
+        calls.append(unit.run_id)
+        if failure == 'settle':
+            monkeypatch.setattr(owner.gate, 'settle_bound', unavailable)
+        else:
+            monkeypatch.setattr(intake, '_maintenance_coverage', unavailable)
+        return 23
+    result = intake.once(child)
+    assert result[TICKET]['phase'] == 'halted'
+    assert len(calls) == 1
+    report = owner.gate.status([])
+    assert report['inflight']
+    assert report['state'] != 'drained'

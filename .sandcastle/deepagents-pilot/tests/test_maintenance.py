@@ -193,7 +193,7 @@ def test_process_inventory_reports_old_leaf_not_tsx_wrapper(monkeypatch):
     assert maintenance.process_inventory() == [
         ('wayfinder', 17, 'process-17'), ('wayfinder', 18, 'process-18'),
         ('wayfinder', 12, 'process-12'), ('executor', 13, 'process-13'),
-        ('review', 13, 'process-13'), ('review', 15, 'process-15')]
+        ('review', 15, 'process-15')]
 
 
 def test_control_cli_errors_never_echo_untrusted_values(tmp_path, capsys):

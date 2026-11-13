@@ -45,7 +45,7 @@ import { execFileSync, execSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import { cliProxyEnv } from "../.sandcastle/cliproxy-env.mts";
 import { MAIN_MODEL, SUPPORTED_MAIN_MODELS } from "../.sandcastle/main-model.mts";
 
@@ -1006,6 +1006,7 @@ function writeStatus(
 // ── 动作执行器（IO 层；dry-run 下不调用） ──────────────────────────────────────
 
 export interface EngineConfig {
+  maintenanceRoot?: string;
   orchestrator: string;
   dryRun: boolean;
   pollSeconds: number;
@@ -1526,6 +1527,7 @@ async function runOnce(cfg: EngineConfig, maintenance?: MaintenanceOwner): Promi
 }
 
 function parseArgs(argv: string[]): EngineConfig {
+  let maintenanceRoot: string | undefined;
   let dryRun = true;
   let once = false;
   let explain = false;
@@ -1536,6 +1538,10 @@ function parseArgs(argv: string[]): EngineConfig {
     else if (a === "--dry-run") dryRun = true;
     else if (a === "--once") once = true;
     else if (a === "--explain") explain = true;
+    else if (a === "--maintenance-root") {
+      if (!argv[i + 1]) throw new Error("--maintenance-root 缺参数");
+      maintenanceRoot = resolve(argv[++i]!);
+    }
     else if (a === "--poll-seconds") {
       const n = Number(argv[i + 1]);
       if (Number.isFinite(n) && n > 0) {
@@ -1545,6 +1551,7 @@ function parseArgs(argv: string[]): EngineConfig {
     }
   }
   return {
+    maintenanceRoot,
     orchestrator: process.env.WAYFINDER_ORCHESTRATOR ?? ORCHESTRATOR_LOGIN,
     dryRun,
     pollSeconds,
@@ -1595,7 +1602,7 @@ async function main(): Promise<void> {
   console.log(
     `[wayfinder_engine] 启动：dry-run=${cfg.dryRun} poll=${cfg.pollSeconds}s orchestrator=${cfg.orchestrator} spec 起草子代理=${cfg.specProvider}/${cfg.specModel}`,
   );
-  const maintenance = cfg.dryRun ? undefined : new MaintenanceOwner("wayfinder");
+  const maintenance = cfg.dryRun ? undefined : new MaintenanceOwner("wayfinder", cfg.maintenanceRoot);
   try {
     if (cfg.once) {
       if (!maintenance?.poll()) await runOnce(cfg, maintenance);

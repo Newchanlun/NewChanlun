@@ -72,7 +72,7 @@ function fixture(issues: Issue[], o: { claim?: Claim; onScan?: "mirror" | "inten
   writeFileSync(join(root, "state.json"), JSON.stringify({ body, pass, issues, links: issues.map(i => i.number),
     edges: [[102, 101]], writes: [], onScan: o.onScan ?? null }));
   writeFileSync(join(root, "gh"), FAKE_GH, { mode: 0o755 });
-  const run = () => spawnSync(process.execPath, ["--experimental-strip-types", "scripts/wayfinder_engine.mts", "--live", "--once"], {
+  const run = () => spawnSync(process.execPath, ["--experimental-strip-types", "scripts/wayfinder_engine.mts", "--live", "--maintenance-root", join(root, "maintenance"), "--once"], {
     cwd: root, encoding: "utf8", timeout: 30_000,
     env: { ...process.env, PATH: `${root}:${process.env.PATH}`, FIXTURE: root, GH_REPO: "fixture/repo",
       WAYFINDER_ORCHESTRATOR: "fixture", WAYFINDER_GH_MAX_ATTEMPTS: "1" } });

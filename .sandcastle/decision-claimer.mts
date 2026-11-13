@@ -89,6 +89,7 @@ export const ADR_PLACEHOLDER = "NNNN";
 
 export type Mode = "dry-run" | "live";
 export interface Args {
+  maintenanceRoot?: string;
   mode: Mode;
   loop: boolean;
   tickets: number[];
@@ -114,6 +115,7 @@ export function parseArgs(argv: string[]): Args {
     else if (v === "--archaeology-only") a.archaeologyOnly = true;
     else if (v === "--ticket") a.tickets.push(...next().split(",").map(toTicket));
     else if (v === "--maps") a.maps = next().split(",").map(toTicket);
+    else if (v === "--maintenance-root") a.maintenanceRoot = resolve(next());
     else if (v === "--out") a.outRoot = next();
     else if (v === "--concurrency") a.concurrency = Math.min(MAX_CONCURRENT, Math.max(1, Number(next())));
     else throw new Error(`未知参数 ${v}`);
@@ -2379,10 +2381,11 @@ async function main() {
   const srcDir = join(a.outRoot, ".src");
   const d: Deps = {
     mode: a.mode, drainRoot: DRAIN_ROOT, gh, git, model: makeClaudeRunner(), outRoot: a.outRoot, srcDir, repoRoot: REPO_ROOT, now: Date.now,
-    me: a.mode === "live" ? gh(["api", "user", "--jq", ".login"]).trim() : undefined,
+    me: undefined,
   };
-  const maintenance = attachCliMaintenance(d);
+  const maintenance = attachCliMaintenance(d, a.maintenanceRoot);
   try {
+    d.me = a.mode === "live" ? gh(["api", "user", "--jq", ".login"]).trim() : undefined;
     if (a.archaeologyOnly) {
       const sha = ensureSrc(REPO_ROOT, srcDir, git);
       log(`考古 only：取证检出对齐远端 main ${sha.slice(0, 10)}`);

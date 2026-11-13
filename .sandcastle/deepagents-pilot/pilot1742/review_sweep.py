@@ -87,7 +87,7 @@ from .external_review import (
     _git,
     git_environment,
 )
-from .maintenance import Closed, Owner
+from .maintenance import Closed, Owner, evidence_write
 from .run import _ps_rows
 from .workunit import REPO
 
@@ -855,14 +855,15 @@ def fetcher(source: Path, url: str = f"https://github.com/{REPO}.git") -> Sync:
     return sync
 
 
-def serve_round(private_key: Path, *, auto_merge: bool = False, max_running: int = 1) -> ServeRound:
+def serve_round(private_key: Path, *, auto_merge: bool = False, max_running: int = 1,
+                maintenance_root: Path | None = None) -> ServeRound:
     """executor serve 用的钩子。max_running 默认 1：HOST 上同时在跑的审查不超过它，操作员手动起的 review-pr 也算
     （reviewing）。同一 PR 有活进程就不再派（decide 的 running）；各审查子进程照常各自过空间与额度准入。
     风险：两道准入都按单个 run 算，不是总量。空间准入只看本 run 的快照，不给同时在跑、还没铺开快照的 run 预留；
     额度准入只统计已结束 run 的回执。上限 N 时最多 N 个 run（每个 2 个模型）同时铺快照、同时耗额度，
     可能集体超占外盘或超出每日上限。调高 N 前先查外盘剩余空间（df -h /Volumes/AgentStorage）。"""
     lane = ExternalReview(None)
-    owner = Owner("review")
+    owner = Owner("review") if maintenance_root is None else Owner("review", maintenance_root)
     owner.coverage(False)
     result = ServeRound(Sweep(GhCli(), lane, spawner(private_key, owner), max_running=max_running, auto_merge=auto_merge,
                              sync=fetcher(lane.source)), maintenance=owner)
@@ -933,10 +934,9 @@ def run_review(argv: list[str], github: GitHubPort | None = None) -> int:
         with owner.observing():
             return _run_review(args, github, lambda: None, (owner, job))
     finally:
-        try:
+        with evidence_write():
             owner.gate.finish_review(owner.id, job)
-        finally:
-            owner.stop()
+        owner.stop()
 
 
 def _run_review(args, github, on_natural, maintenance=None):
@@ -953,6 +953,7 @@ def main(argv: list[str] | None = None) -> int:
     if argv[:1] == ["run-review"]:
         return run_review(argv[1:])
     parser = argparse.ArgumentParser(prog="pilot1742.review_sweep")
+    parser.add_argument("--maintenance-root", type=Path)
     parser.add_argument("--private-key", required=True, type=Path, help="只原样交给审查子进程")
     parser.add_argument("--max-running", type=int, default=2)
     parser.add_argument("--loop", type=float, default=0,
@@ -962,7 +963,7 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     if not math.isfinite(args.loop) or not (args.loop == 0 or args.loop >= MIN_LOOP_SECONDS):  # 挡住负数、nan、inf
         parser.error(f"--loop 须为 0 或至少 {MIN_LOOP_SECONDS:g} 秒")
-    owner = Owner("review")
+    owner = Owner("review") if args.maintenance_root is None else Owner("review", args.maintenance_root)
     sweep = Sweep(GhCli(), ExternalReview(None), spawner(args.private_key, owner), max_running=args.max_running,
                   auto_merge=args.auto_merge)
     while True:

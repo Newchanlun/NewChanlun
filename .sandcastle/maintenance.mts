@@ -51,7 +51,10 @@ export class MaintenanceOwner {
     return resource;
   }
   poll(): boolean { return this.call("poll", ["--owner", this.id]).closed === true; }
-  stop(): void { this.call("stop", ["--owner", this.id]); }
+  stop(): void {
+    try { this.call("stop", ["--owner", this.id]); }
+    catch { console.error("maintenance evidence unavailable"); }
+  }
   async work<T>(key: string, action: () => T | Promise<T>, natural: (result: T) => boolean = () => true): Promise<T> {
     const job = this.call("admit", ["--owner", this.id, "--work", key]).job;
     if (typeof job !== "string") throw new Error("maintenance missing receipt");
@@ -65,8 +68,10 @@ export class MaintenanceOwner {
       } finally {
         // 业务成功与生命周期终止分开：gh/锁竞争错误可以返回，模型中断不能冒充收尾。
         const opaqueClear = accepted && scope.pending === 0 && !scope.uncertain;
-        const settled = this.call("action-exited", ["--owner", this.id, "--job", job, ...(opaqueClear ? ["--natural"] : [])]).settled === true;
-        this.call("finish", ["--owner", this.id, "--job", job, ...(settled ? ["--natural"] : [])]);
+        try {
+          const settled = this.call("action-exited", ["--owner", this.id, "--job", job, ...(opaqueClear ? ["--natural"] : [])]).settled === true;
+          this.call("finish", ["--owner", this.id, "--job", job, ...(settled ? ["--natural"] : [])]);
+        } catch { console.error("maintenance evidence unavailable"); }
       }
     });
   }

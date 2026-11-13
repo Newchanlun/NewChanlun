@@ -230,7 +230,7 @@ case "$1 $2" in
 esac
 `, { mode: 0o755 });
     const child = spawn(process.execPath, ["--experimental-strip-types", "scripts/wayfinder_engine.mts",
-      "--live", "--poll-seconds", "0.05", ...(once ? ["--once"] : [])], {
+      "--live", "--maintenance-root", join(root, "maintenance"), "--poll-seconds", "0.05", ...(once ? ["--once"] : [])], {
       cwd: root, env: { ...process.env, PATH: `${root}:${process.env.PATH}`, WFE_FIXTURE: root,
         WAYFINDER_ORCHESTRATOR: "fixture-orchestrator", WAYFINDER_GH_MAX_ATTEMPTS: "1" },
       stdio: ["ignore", "pipe", "pipe"],

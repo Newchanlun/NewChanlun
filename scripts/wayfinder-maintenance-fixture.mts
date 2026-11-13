@@ -16,7 +16,7 @@ export function isolateMaintenance(root: string): void {
   }
   const engine = join(root, "scripts/wayfinder_engine.mts");
   const source = readFileSync(engine, "utf8");
-  const constructor = 'new MaintenanceOwner("wayfinder")';
+  const constructor = 'new MaintenanceOwner("wayfinder", cfg.maintenanceRoot)';
   assert.equal(source.split(constructor).length, 2, "快照必须有且仅有一个维护入口");
   writeFileSync(engine, source.replace(constructor,
     `new MaintenanceOwner("wayfinder", ${JSON.stringify(join(root, "maintenance"))})`));

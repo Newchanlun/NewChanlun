@@ -137,6 +137,24 @@ detached review 和手动 review/migrate 在已准入工作执行期间轮询确
 
 升级前没有预先绑定的旧 owner/job、孤儿 executor，或既没有返回记录、也没有成功同 run 恢复链的调用，没有足够来源证明结束。它们保持 `missing_bound_completion`；旧未覆盖进程的观察也持久保留，退出不自动清除（`missing_prelaunch_binding`）。新代码补上的预执行绑定和执行端返回记录解决后续父失联/孤儿自然完成，不把新协议追认到旧运行。启动后、登记前的同一精确进程身份稍后完成登记，可变为覆盖；原观察历史仍保留。
 
+对 `status.uncovered` 的精确 lane/pid/start，可在当前关闭代次请求身份对账：
+
+```sh
+python .sandcastle/deepagents-pilot/pilot1742/maintenance.py --root <原账本根> reconcile \
+  --generation <当前代次> --lane <lane> --pid <pid> --start '<status中的原始start>'
+```
+
+入口只查原账本已有的 owner/witness 绑定，再复用同一严格 owner reconcile 核全部任务与资源。
+成功另存 `sighting_resolutions`（原身份、代次、已核owner、时间），保留原 sightings；重复调用不重复记录。
+没有原始身份绑定返回 `missing_original_identity_binding`；换PID、进程消失、手填终态和旧代次都不能清除。
+旧版本误识别若只留下 lane/pid/start、没有原 argv 来源或任务绑定，目前仍不能追认成无外效；需要原始绑定与可信终态来源，不能让操作员补一份自述回执。
+
+新 census 区分实际子命令和参数值，不把 `release --reason run` 当执行；serve 的 review flag 也不替代实际 review owner。
+显式 `--maintenance-root` 用原生 argv 边界核作用域，身份/argv读取失败拒绝核验，不靠扁平 ps 文本排除。
+Wayfinder/decision CLI 与 executor serve 支持该参数；隔离 fixture 同时把实际账本和启动参数绑定到临时根。
+executor serve 预检前、decision CLI 的 gh 身份查询前已登记 owner，早退仍有精确身份记录。
+
+
 升级前已经留下、没有 action_returns 或预派发资源绑定的 TS unknown 记录仍缺证据；新代码不能为过去补签。同 boot 的新动作使用下述真实 wait/资源域证据恢复，不要求重启；整机启动代次证明只是额外恢复路径。此入口不从 CLI 日志或单个模型回执推测整项工作结束。缺 witness、目标漂移、旧 PID 被复用、缺少容器/Boat 结束证据均不能恢复。首次加载必须沿自然轮次完成旧运行，不能把切换旧运行的证明交给本命令。
 
 ## 由部署 owner 在自然边界加载
@@ -153,6 +171,11 @@ detached review 和手动 review/migrate 在已准入工作执行期间轮询确
    入口未出现或资源核对失败时只能是 unknown。若已记录旧代码进程的未覆盖身份，单纯等待其退出不会清除该记录；
    必须另有精确绑定与资源终态证据，缺证据交主控处理部署边界，不卸载活跃服务。
 5. 取得本线 drained 后交主控；主控还须等待 T3 外部 owner。后续共享代理升级和恢复各需相应授权。
+
+本机模型监督器使用 `setsid()`，在途进程不再属于调度器进程组。停止 launchd 作业或终端按进程组发信号，
+不等于取消已经准入的模型调用；它们可以继续自然运行，Linux guardian 还会等待其收养后代。
+部署 owner 必须按原任务/资源证据确认终态，不能凭父服务停止认定排空，更不能因此停止共享 proxy。
+本段仅说明停服务语义，不授权本次停止任何服务。
 
 四类入口都需要本代次的确认。尚未登记或没有确认的类别显示 unknown；部署 owner 须核实际服务配置，不能把缺少进程当成已完成接入。
 
@@ -198,6 +221,8 @@ TS `work(key, action)` 每次调用都是新动作，不以同 key 的未完成 
 ### 监督与准入故障的退出合同
 
 本机监督器已取得真实 `wait()` 后，业务退出码和原 stdout/stderr 不依赖维护账本提交成功。
+TS action-exited/finish、Python returned/complete/settle、review finish 及退出时 coverage/stop 均隔离证据提交失败，
+不替换原业务异常、退出码、Summary 或审查结果 JSON。顺序依赖的证据链失败后不继续签后续完成，下一次准入仍检查原未决任务。
 wait/封域记录失败时只输出固定诊断，不重派业务；Linux guardian 仍自然等待内核收养域的所有后代。
 只有真实 wait 已持久化且严格资源判据通过才能封域。缺 wait 或封闭证据的占用仍保留，业务退出不充当 drained。
 

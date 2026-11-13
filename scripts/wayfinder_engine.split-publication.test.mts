@@ -45,7 +45,7 @@ else if(a[0]==='api') {
  else {console.error('unexpected '+cmd);process.exit(74);}
 } else {console.error('unexpected '+cmd);process.exit(74);}
 `, {mode:0o755});
-        const run = () => spawnSync(process.execPath, ['--experimental-strip-types','scripts/wayfinder_engine.mts','--live','--once'],{cwd:root,env:{...process.env,PATH:`${root}:${process.env.PATH}`,FIXTURE:root,GH_REPO:'fixture/repo',WAYFINDER_ORCHESTRATOR:'fixture',WAYFINDER_GH_MAX_ATTEMPTS:'1'},encoding:'utf8',timeout:30000});
+        const run = () => spawnSync(process.execPath, ['--experimental-strip-types','scripts/wayfinder_engine.mts','--live','--maintenance-root',join(root,'maintenance'),'--once'],{cwd:root,env:{...process.env,PATH:`${root}:${process.env.PATH}`,FIXTURE:root,GH_REPO:'fixture/repo',WAYFINDER_ORCHESTRATOR:'fixture',WAYFINDER_GH_MAX_ATTEMPTS:'1'},encoding:'utf8',timeout:30000});
         const read = () => JSON.parse(readFileSync(join(root,'state.json'),'utf8'));
         const initial = JSON.parse(readFileSync(join(root,'state.json'),'utf8'));
         const first=run(); assert.equal(first.status,0,first.stderr);
