@@ -1,5 +1,7 @@
 > 正本：本文件是生产入口清单与唯一正式 launcher 的正本。
 > 最后裁定：#1530（2026-10-20）；修订：#1523（2026-10-28）、#1539（2026-11-02），见文末「修订」节
+> #1742 迁移说明：本文对三份历史纪律的引用已退役，原文及当时行号按 `.chanlun/review-results/ARCHIVE-INDEX.md`「三份历史纪律」恢复。现行产品名分见 ADR 0004「现行名分与现役线」；通用交付见 `.sandcastle/docs/graph-engineering.md`「交付与关票」及 `.sandcastle/CODEX-CHILD.md`。历史取证文字保留，不作为要求新报告入 Git 的现役入口。
+
 > 受影响代码清单：见「二、生产入口完整清单」节
 
 ## 问题
@@ -63,7 +65,7 @@ ADR 0027 定了「结构判定域 / 重操作程序」两个互斥的唯一 owne
     - :3「已有 theta_replay 二进制与单日双跑仅为组件证据」。
     - :23「确认正式生产入口」。
 17. **分级依据**：`.sandcastle/docs/graph-engineering.md:23`「T 类（技术取舍）：数据结构、接口与 seam、owner 落点、状态机与事件 schema、测试锁、迁移步骤、恢复语义。有权威源或本仓判例可援引。→ 自动裁决。」
-18. **`docs/agents/generation-constitution.md:35`**（属「## 2. 现役线名单」:32）：「**π 是唯一现役引擎**。锚定方式 = 家族根函数名（`pi_theta_fill_loop_overlay`），不锚行号（行号随版本漂移）。」
+18. **`docs/agents/generation-constitution.md:35`**（属「## 2. 现役线名单」:32）：「**π 是唯一现役引擎**。锚定方式 = 家族根函数名（`pi_theta_fill_loop_overlay`），不锚行号（行号随版本漂移）。」 （已退役原件。）
 19. **退回重写约束**：#1530 评论 [6276895863](https://github.com/xy7365527-lang/NewChanlun/issues/1530#issuecomment-6276895863)（xy7365527-lang，2026-10-19）的四条约束。分级评论 [6276984750](https://github.com/xy7365527-lang/NewChanlun/issues/1530#issuecomment-6276984750)：「分级：T」。
 
 **仓内现状（main `b63a3fd586`，逐行核实，作为清单的事实依据）**
@@ -304,7 +306,7 @@ ADR 0039 的编号按 main 顺序分配：落地时取 `docs/adr/` 现有最大�
    - `production_session` feature 不含 `backtest_bin` 和 `nautilus`，因此 `theta_backtest` 等 21 个门内 bin 不进生产部署，`theta_strategy`/`theta_pi_strategy`/`backtest_engine` 不编入生产二进制（`nautilus/mod.rs:69-83`）。
    - 生产进程不加载 `newchan_rust` cdylib，所以 `lib.rs:2810-2837` 导出的旧引擎没有进入生产进程的路径。
 4. **影子标记**：影子臂输出必须带 provenance（core id、run id、输入 hash；C11.4）。它的产物不得被 E/B 读为事实，不进 TStage 触闸计数（ADR 0038:74）。标记载体是本 ADR 清单加 FU-12 的模块级清单，不另建台账。
-5. **与 `generation-constitution.md:35` 的关系**：该条在「现役线名单」下，管的是代码谱系名分（π 相对 v1/dual），不是生产 owner 裁定。π 的结构核收编为 S 的唯一计算者，与它一致。π 回路的经济部分按 ADR 0027:64 冻结为影子。锚点 `pi_theta_fill_loop_overlay` 的名分更新，和 `Cargo.toml:54`「CLI 生产入口」旧注释的改写，归 FU-12 落模块级终态时一并提交，注释须带票号（AGENTS.md #793）。本 ADR 不改这两个文件。
+5. **与 `generation-constitution.md:35` 的关系**：该条在「现役线名单」下，管的是代码谱系名分（π 相对 v1/dual），不是生产 owner 裁定。π 的结构核收编为 S 的唯一计算者，与它一致。π 回路的经济部分按 ADR 0027:64 冻结为影子。锚点 `pi_theta_fill_loop_overlay` 的名分更新，和 `Cargo.toml:54`「CLI 生产入口」旧注释的改写，归 FU-12 落模块级终态时一并提交，注释须带票号（AGENTS.md #793）。本 ADR 不改这两个文件。 （已退役原件。）
 6. 本 ADR 不新增任何同一判断的宽严两档。影子臂不接在生产路径的任何 if-else 上（#799 判别式），失败只能是失败（ADR 0027:32），不设 legacy 开关。
 
 ### 五、与 FU-12 #1532 的分工
@@ -312,7 +314,7 @@ ADR 0039 的编号按 main 顺序分配：落地时取 `docs/adr/` 现有最大�
 | | FU-08（本 ADR） | FU-12 #1532 |
 |---|---|---|
 | 粒度 | 入口级：命令、preset、feature、service、直发 | 模块级：旧引擎和简化臂内部函数、FFI 导出逐项 |
-| 产出 | 五类清单、每个入口唯一终态、失去写权的机制、launcher seam、三层锁 | 每个入口的替代入口细节、逐函数收编去向（落进哪个 owner）、退场条件与时间表、删除执行（含 `live/runner.py`）、`generation-constitution.md:35` 锚点与 `Cargo.toml:54` 注释更新 |
+| 产出 | 五类清单、每个入口唯一终态、失去写权的机制、launcher seam、三层锁 | 每个入口的替代入口细节、逐函数收编去向（落进哪个 owner）、退场条件与时间表、删除执行（含 `live/runner.py`）、`generation-constitution.md:35` 锚点与 `Cargo.toml:54` 注释更新 | （已退役原件。）
 | 改动权限 | 定终态 | 只能把「冻结影子」收窄为「删除」，不得让任何入口重新取得 (a)(b)(c) |
 | 默认启动不触发旧核 | 定义：默认启动 = `production_session` | 提供逐条清单；由 TB-10-I #1413 按清单逐条核 |
 | 带仓迁移 | 不涉及 | 不涉及，归 FU-13 #1535 |
@@ -428,7 +430,7 @@ ADR 0039 的编号按 main 顺序分配：落地时取 `docs/adr/` 现有最大�
 | ADR 0038:60/:74 | `cat -n docs/adr/0038-dual-run-determinism-recovery-seek-asknown.md \| sed -n '58,80p'` | :60「**恢复**：launcher 启动时检测上次 checkpoint……」；:74「`evidence_class ∈ {simulation, experiment, production}`……simulation 产出不进 TStage 触闸计数」；:1-3 三行正本头先例 |
 | 当前最大 ADR 编号 0038 | `ls docs/adr/ \| tail -30` | 末项 `0038-dual-run-determinism-recovery-seek-asknown.md` |
 | graph-engineering.md:23、:63 | Read `.sandcastle/docs/graph-engineering.md` | :23 T 类定义原文；:63 N-1 用户原话 |
-| generation-constitution.md:32/:35 | `sed -n '26,36p' docs/agents/generation-constitution.md` | :32「## 2. 现役线名单」；:35「**π 是唯一现役引擎**。锚定方式 = 家族根函数名（`pi_theta_fill_loop_overlay`），不锚行号（行号随版本漂移）。」 |
+| generation-constitution.md:32/:35 | `sed -n '26,36p' docs/agents/generation-constitution.md` | :32「## 2. 现役线名单」；:35「**π 是唯一现役引擎**。锚定方式 = 家族根函数名（`pi_theta_fill_loop_overlay`），不锚行号（行号随版本漂移）。」 | （已退役原件。）
 | AGENTS.md #793/#799/#804 | Read `AGENTS.md` | :36 注释须带票号；:58 #799 判别式「接在同一个 if-else 上」；:70-76 #804 ①判别式与不落在形状上 |
 | #1340 票面 :10/:22/:326/:332/:333/:340/:350-355/:359/:372-373/:396-397/:409-411/:424 | `gh issue view 1340 --json body --jq .body > /tmp/fu08_1340.md`；`grep -n` 与 `sed -n '318,362p;390,410p'` | 各行原文如正文所引；state OPEN；标题「SPEC：完整生产程序、结构全分类与逐重经营（#1323，R2）」 |
 | SPEC.md:422 | `sed -n '422p' .chanlun/review-results/issue1339-r2-spec-20260909/view/spec/SPEC.md` | 「\| AT-16 \| 每条入口/preset/feature/服务/直发路径有实际终态；默认启动、影子和带仓迁移不能绕过 owner/X \| C11；Destination 2/3 \|」 |

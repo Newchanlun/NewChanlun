@@ -80,7 +80,6 @@
 .sandcastle/deepagents-pilot/EXECUTOR.md|rust/tests/example/
 .sandcastle/deepagents-pilot/demo-task.md|experiments/pilot1742_demo/
 .sandcastle/swarm-implement-prompt.md|.agents/.codex/.aws
-AGENTS.md|.claude/rules/
 NewChanlun文件索引.md|.claude/skills/core-principles/
 NewChanlun文件索引.md|.claude/skills/meta-orchestration/
 README.md|chanlun/text/
@@ -158,7 +157,6 @@ docs/adr/0057-p0-venue-profile-v2-signature.md|.agents/skills/graph-approve/SKIL
 docs/adr/0058-replay-shell-mapping-and-legacy-replay-dispositions.md|tests/replay_compare_test.rs
 docs/adr/0061-s-writer-audit-ledger-delta-reading.md|.chanlun/review-results/issue1644-p6-audit-ledger-20261021/
 docs/adr/0061-s-writer-audit-ledger-delta-reading.md|.chanlun/review-results/issue1644-p6-audit-ledger-20261021/AMENDMENT.md
-docs/agents/delivery-discipline.md|chanlun/review-results/issue450-bypass-census-20260727.md
 docs/agents/pstack-lite/E2E-1131.md|rust/src/theta_v0/classifier/chain_cert.rs
 docs/agents/pstack-lite/TRIGGER-FIXTURES.md|docs/agents/pstack-lite/results/
 docs/agents/pstack-lite/VERIFICATION-1138.md|.sandcastle/acceptance-1138/
@@ -180,7 +178,6 @@ docs/agents/pstack-lite/VERIFICATION-1138.md|.sandcastle/acceptance-1138/trigger
 docs/agents/pstack-lite/VERIFICATION-1138.md|.sandcastle/acceptance-1138/trigger-success/pstack-technical-writing.json
 docs/agents/pstack-lite/VERIFICATION-1138.md|.sandcastle/acceptance-1138/unslop/report.md
 docs/agents/skill-local-customizations.md|references/feature-map-example/
-docs/agents/stat-provenance.md|.chanlun/review-results/codex-oddeven-permtest-audit-20260727.md
 docs/agents/wayfinder-workflow.md|rust/src/theta_v0/bi_engine.rs
 docs/canonical-coverage-pdf-package.md|formal/NewChanlunEngineAudit.lean
 docs/canonical-coverage-rust-impl.md|.chanlun/review-results/center-strict-single-point-impl-20260726.md
