@@ -85,7 +85,10 @@ LINK = re.compile(r"\]\(([^)\s]+)\)|href=\"([^\"]+)\"")
 # gitignored local scratch space (Matt's skills write there): paths under it are
 # matched here and then dropped by _git_ignored, so a later tracked file cannot
 # turn old references into new failures.
-RETIRED_TOP_DIRS = {"topological-computation", "prototypes", ".scratch"}
+RETIRED_TOP_DIRS = {
+    "topological-computation", "prototypes", ".scratch",
+    ".rtas", ".auto-memory-snapshot",  # whole directories archived in #1920
+}
 
 # A line that itself says the thing is gone is a historical note, not an
 # instruction to run it.
@@ -112,12 +115,7 @@ HISTORICAL = {
     ".chanlun/agent-roster-2026-09-30.md": "dated roster snapshot",
     ".chanlun/codex-on-breakthrough-verdict-2026-06-30.md": "dated verdict record",
     ".chanlun/.interrupt-point.md": "ENDED snapshot; header explains the retirement",
-    ".rtas/review-results/": "review drafts",
     "chanlun/review-results/": "review drafts",
-    "chanlun/harness/vendor/": "vendored third-party text",
-    ".auto-memory-snapshot/": "memory snapshot export",
-    "docs/agents/pstack-lite/PILOT-1139.md":
-        "record of the #1139 pilot run; its commands are quoted verbatim",
     ".claude/skills/writing-skills/anthropic-best-practices.md":
         "vendored copy of Anthropic docs (site-relative links)",
     ".agents/skills/domain-modeling/CONTEXT-FORMAT.md": "vendored skill; example paths",
@@ -378,3 +376,19 @@ def test_checker_catches_known_bad_cases(tmp_path, monkeypatch):
         "names missing path .chanlun/genealogy/pending/gone-20260624.md",
         "names missing path .chanlun/genealogy/pending/also-gone.md",
     ])
+
+
+@pytest.mark.parametrize("retired", [".rtas", ".auto-memory-snapshot"])
+def test_whole_archived_directories_remain_checked(tmp_path, monkeypatch, retired):
+    """#1920: absent top-level dirs must still produce missing-path findings."""
+    path = f"{retired}/review-results/example.md"
+    (tmp_path / "live.md").write_text(
+        f"read `{path}`\nbare {path} here\n"
+        f"`{path}` 已删除，原件见固定提交\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(sys.modules[__name__], "ROOT", tmp_path)
+    assert broken_doc_refs(["live.md"]) == [
+        f"live.md:1: names missing path {path}",
+        f"live.md:2: names missing path {path}",
+    ]
