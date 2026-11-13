@@ -480,6 +480,15 @@ class Gate:
             db.execute('INSERT INTO lineage VALUES(?,?)', (job, owner))
         return owner
 
+    def abort_initialization(self, owner: str) -> None:
+        """撤销尚未交付的空 owner；保留历史，不声称已清点任何资源域。"""
+        with self.tx() as db:
+            self._owner(db, owner)
+            if any(db.execute(f'SELECT 1 FROM {table} WHERE owner=?', (owner,)).fetchone()
+                   for table in ('lineage', 'scopes', 'censuses', 'local_owners')):
+                raise ValueError('owner already published or accepted work')
+            db.execute('UPDATE owners SET stopped=1,ack=-1,ack_at=? WHERE id=?', (now(), owner))
+
     def stop(self, owner: str) -> None:
         with self.tx() as db:
             self._owner(db, owner)

@@ -864,10 +864,16 @@ def serve_round(private_key: Path, *, auto_merge: bool = False, max_running: int
     可能集体超占外盘或超出每日上限。调高 N 前先查外盘剩余空间（df -h /Volumes/AgentStorage）。"""
     lane = ExternalReview(None)
     owner = Owner("review") if maintenance_root is None else Owner("review", maintenance_root)
-    owner.coverage(False)
-    result = ServeRound(Sweep(GhCli(), lane, spawner(private_key, owner), max_running=max_running, auto_merge=auto_merge,
-                             sync=fetcher(lane.source)), maintenance=owner)
-    return result
+    try:
+        owner.coverage(False)
+        return ServeRound(Sweep(GhCli(), lane, spawner(private_key, owner), max_running=max_running,
+                                auto_merge=auto_merge, sync=fetcher(lane.source)), maintenance=owner)
+    except BaseException:
+        # No tick/dispatch has been handed to the caller. The gate verifies no work or
+        # scope was accepted; failure to persist withdrawal stays conservatively unknown.
+        with evidence_write():
+            owner.gate.abort_initialization(owner.id)
+        raise
 
 
 class NotStarted(OSError):

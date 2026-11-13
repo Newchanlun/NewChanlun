@@ -4,8 +4,10 @@ set -eu
 out=${1:?usage: check.sh /absolute/evidence/build-directory}
 src=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 "$src/build.sh" "$out"
-for test in common_test peer_test; do
-  xcrun clang -std=c11 -Wall -Wextra -Werror -mmacosx-version-min=13.0 \
+for test in common_test peer_test io_test; do
+  injection=""
+  if [ "$test" = io_test ]; then injection="-Dwrite=native_test_write"; fi
+  xcrun clang $injection -std=c11 -Wall -Wextra -Werror -mmacosx-version-min=13.0 \
     "$src/common.c" "$src/$test.c" -framework Security -framework CoreFoundation -o "$out/$test"
   "$out/$test"
 done

@@ -1227,7 +1227,8 @@ def _manual_main(arguments: list[str]) -> int:
                 if witness is not None:
                     owner.gate.returned(witness)
                     if code != 75:
-                        owner.gate.complete_bound(witness)
+                        with evidence_write():
+                            owner.gate.complete_bound(witness)
                         owner.gate.settle_current_executor(witness)
         return code
 

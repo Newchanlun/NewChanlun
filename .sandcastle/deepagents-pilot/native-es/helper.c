@@ -21,22 +21,21 @@ int main(int argc, char **argv) {
         fputs("collector_unverified\n", stderr); return 78;
     }
     signal(SIGPIPE, SIG_IGN);
-    char line[1024], permit[FIELD], extra;
-    snprintf(line, sizeof(line), "REGISTER %s %s %s\n", argv[5], argv[6], argv[7]);
+    char line[1024], parts[1][FIELD];
+    if (!format(line, sizeof(line), "REGISTER %s %s %s\n", argv[5], argv[6], argv[7])) return 78;
     if (!write_all(fd, line) || read_line(fd, line, sizeof(line)) < 0 ||
-        sscanf(line, "ARM %128s %c", permit, &extra) != 1 || !token_ok(permit)) return 78;
+        !fields(line, "ARM", parts, 1)) return 78;
     /* Exactly one ARM is read; never reconnect/retry a consumed execution permit. */
     pid_t child = fork();
     if (child < 0) { write_all(fd, "SPAWN_FAILED\n"); return 71; }
     if (child == 0) { close(fd); signal(SIGPIPE, SIG_DFL); execvp(argv[9], &argv[9]); _exit(127); }
-    snprintf(line, sizeof(line), "START %d\n", child); write_all(fd, line);
+    if (format(line, sizeof(line), "START %d\n", child)) write_all(fd, line);
     int status;
     pid_t waited;
     do { waited = waitpid(child, &status, 0); } while (waited < 0 && errno == EINTR);
     if (waited != child) return 71;
     int code = WIFEXITED(status) ? WEXITSTATUS(status) : 128 + WTERMSIG(status);
-    snprintf(line, sizeof(line), "WAIT %d %d\n", child, code);
-    if (write_all(fd, line)) {
+    if (format(line, sizeof(line), "WAIT %d %d\n", child, code) && write_all(fd, line)) {
         /* Stay alive for audit-token signature validation until durable wait ACK or EOF. */
         (void)read_line(fd, line, sizeof(line));
     }

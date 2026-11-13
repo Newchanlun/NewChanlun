@@ -238,3 +238,11 @@ Popen 已返回后的登记/文件异常保留标记与原占用，不能借异�
 [macos-es-v1 离线合同](maintenance-es-offline-1742.md)实现新动作的精确注册、一次许可和有序生命周期归约。
 证据持久标记 offline，原 Gate 不接受其生产封闭结论；现役 macOS 仍用原判据且发布BLOCK不变。
 `status.observer_faults`另列暂时控制故障：成功poll只恢复入口确认，不能补签资源coverage或旧任务完成。
+
+### 未交付的 review owner 与手动收尾
+
+`serve_round` 工厂在登记后构造失败，会原子撤销本次尚未交付的 owner，保留 stopped/ack=-1 历史。
+仅无 lineage、scope、census、本机动作登记的精确活 owner 可以撤销；已接受任务不适用，也不补签资源清点。
+下一轮新 owner 仍需完成原全域清点和当前代次确认。撤销写入失败仍保留 unknown，不以异常当作退休证据。
+手动 executor 的 complete-bound 失败不再跳过 settle：返回链已持久但资源未闭合时记 unknown，业务结果保留。
+后续仍走原 reconcile：精确身份已退出、原返回链齐全、绑定资源与整个 scope 均闭合才能解除；没有新增 force 通路。
