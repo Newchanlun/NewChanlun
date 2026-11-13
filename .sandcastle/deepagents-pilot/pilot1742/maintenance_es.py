@@ -117,6 +117,7 @@ class Action:
     frontier: int
     candidates: list[str] = field(default_factory=list)
     dirty_candidates: list[str] = field(default_factory=list)
+    startup_execs: dict[str, str | None] = field(default_factory=dict)
     parents: dict[str, str] = field(default_factory=dict)
     root: str | None = None
     peer: str | None = None
@@ -138,6 +139,18 @@ def taint(source: Source, actions: list[Action], reason: str) -> None:
             action.unknown = action.unknown or reason
 
 
+def select_peer(action: Action) -> None:
+    """只选注册身份对应的启动EXEC；同parent其它helper仍是独立候选。"""
+    if action.root is not None or action.peer not in action.startup_execs:
+        return
+    reason = action.startup_execs[action.peer]
+    if reason:
+        action.unknown = reason
+        return
+    action.root = action.peer
+    action.live, action.seen = [action.peer], [action.peer]
+
+
 def reduce_event(source: Source, actions: list[Action], event: Event) -> None:
     """先检查全局序号/来源，随后才处理包括无关进程在内的事件分支。"""
     if not source.ready:
@@ -156,25 +169,27 @@ def reduce_event(source: Source, actions: list[Action], event: Event) -> None:
             a.unknown = 'preexisting_event'
             continue
         if a.root is None:
+            if old in a.startup_execs:
+                # 注册晚到也不能追认已经退出或派生业务的helper。
+                a.startup_execs[old] = a.startup_execs[old] or (
+                    'helper_exited_before_arm' if event.kind == 'EXIT' else 'unauthorized_or_duplicate_fork'
+                )
             if event.kind == 'FORK' and old == a.parent and new is not None:
                 a.candidates.append(new)
             elif event.kind == 'FORK' and old in a.candidates:
                 a.dirty_candidates.append(old)
-            elif event.kind == 'EXEC' and old in a.candidates and event.image != a.image:
-                a.candidates.remove(old)  # 非受信启动EXEC不能作为后续helper启动的历史来源。
-            elif event.kind == 'EXEC' and old in a.candidates and event.image == a.image and new is not None:
-                if old in a.dirty_candidates:
-                    a.unknown = 'helper_had_preexec_descendants'
-                    continue
-                if new.split(':')[5] != old.split(':')[5] or new == old:
-                    a.unknown = 'execution_identity_conflict'
-                    continue
-                a.root = new
-                a.live, a.seen = [new], [new]
-                if a.peer is not None and a.peer != new:
-                    a.unknown = 'peer_exec_mismatch'
+            elif event.kind == 'EXEC' and old in a.candidates:
+                a.candidates.remove(old)
+                if event.image == a.image and new is not None:
+                    reason = None
+                    if old in a.dirty_candidates:
+                        reason = 'helper_had_preexec_descendants'
+                    elif new.split(':')[5] != old.split(':')[5] or new == old:
+                        reason = 'execution_identity_conflict'
+                    a.startup_execs[new] = reason
             elif event.kind == 'EXIT' and old in a.candidates:
                 a.candidates.remove(old)
+            select_peer(a)
             continue
         if old not in a.live:
             # 旧exec token不能释放新token；复用同PID的矛盾事件不能被当成无关。
@@ -218,6 +233,7 @@ class OfflineES:
             raise ValueError('offline source requires isolated ledger')
         self.gate = gate
         self.current: str | None = None
+        self.revoked: dict[str, str] = {}
         with gate.tx() as db:
             db.executescript('''
                 CREATE TABLE IF NOT EXISTS es_sources (epoch TEXT PRIMARY KEY, data TEXT NOT NULL);
@@ -258,6 +274,9 @@ class OfflineES:
     def source(self, epoch: str, host: str, boot: str, coverage: Coverage) -> None:
         for value in (epoch, host, boot):
             token(value)
+        if self.current is not None:
+            self.revoked[self.current] = 'source_replaced'
+            self.current = None
         with self.gate.tx() as db:
             if db.execute('SELECT 1 FROM es_sources WHERE epoch=?', (epoch,)).fetchone():
                 raise ValueError('epoch cannot be reused')
@@ -275,6 +294,9 @@ class OfflineES:
     def lost(self, epoch: str, reason: Literal['source_lost', 'configuration_changed', 'internal_drop']) -> None:
         if reason not in ('source_lost', 'configuration_changed', 'internal_drop'):
             raise ValueError('invalid loss reason')
+        self.revoked[epoch] = reason
+        if self.current == epoch:
+            self.current = None
         with self.gate.tx() as db:
             source, actions = self._source(db, epoch), self._actions(db)
             taint(source, actions, reason)
@@ -294,6 +316,7 @@ class OfflineES:
         except BaseException:
             # 持久化失败也属于来源丢失；不得在下一条消息前继续发许可。
             self.current = None
+            self.revoked[epoch] = 'internal_drop'
             with evidence_write():
                 self.lost(epoch, 'internal_drop')
             raise
@@ -346,8 +369,7 @@ class OfflineES:
             if source.epoch != self.current or not source.ready or a.unknown or a.closed_seq is not None:
                 raise ValueError('registration unavailable')
             a.peer = peer.audit.key
-            if a.root is not None and a.root != a.peer:
-                a.unknown = 'peer_exec_mismatch'
+            select_peer(a)
             self._save(db, source, [a])
             self._log(db, 'register-peer', {'resource': resource, 'peer': a.peer})
 
@@ -406,18 +428,19 @@ class OfflineES:
         with self.gate.tx() as db:
             source, a = self._bound(db, resource)
             binding = db.execute('SELECT data FROM bindings WHERE job=?', (a.job,)).fetchone()
-        process_closed = a.closed_seq is not None and a.unknown is None
+        unknown = a.unknown or (self.revoked.get(a.epoch) if a.closed_seq is None else None)
+        process_closed = a.closed_seq is not None and unknown is None
         resources_closed = process_closed and a.code is not None
         if resources_closed and binding is not None:
             try:
                 resources_closed = self.gate._resources_idle(json.loads(binding[0]), [], set())
             except (OSError, ValueError, KeyError, TypeError, RuntimeError):
                 resources_closed = False
-        phase = ('UNKNOWN' if a.unknown else 'COMPLETE' if resources_closed else
+        phase = ('UNKNOWN' if unknown else 'COMPLETE' if resources_closed else
                  'PROCESS_CLOSED' if process_closed else 'RUNNING' if a.claimed else
                  'ARMED' if a.permit else 'REGISTERING')
         return {'protocol': KIND, 'trust': 'offline', 'offline_phase': phase, 'source_epoch': a.epoch, 'resource': resource,
-                'job': a.job, 'source_ready': source.ready, 'action_armed': a.permit is not None,
+                'job': a.job, 'source_ready': source.ready and self.current == a.epoch, 'action_armed': a.permit is not None,
                 'process_closed': process_closed, 'business_waited': a.code is not None,
-                'resources_closed': resources_closed, 'live': list(a.live), 'unknown': a.unknown,
+                'resources_closed': resources_closed, 'live': list(a.live), 'unknown': unknown,
                 'closed_seq': a.closed_seq, 'business_code': a.code, 'production_accepted': False}

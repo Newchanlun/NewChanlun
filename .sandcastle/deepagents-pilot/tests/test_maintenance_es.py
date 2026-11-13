@@ -85,7 +85,7 @@ def test_exec_without_peer_and_wrong_peer_never_launch(trace):
     trace.es.register_peer(trace.resource, 'nonce1', Peer(ident(201), trace.peer.image))
     assert trace.es.arm(trace.resource, trace.peer) is None
     assert trace.calls == 0
-    assert trace.status()['unknown'] == 'peer_exec_mismatch'
+    assert trace.status()['offline_phase'] == 'REGISTERING'  # 其它helper不等于注册peer；等待精确EXEC。
 
 
 def test_registration_before_exec_waits_and_ack_replay_dispatches_once(trace):
@@ -275,8 +275,7 @@ def test_preexec_fork_cannot_smuggle_an_existing_descendant(trace):
     trace.event('FORK', trace.parent, trace.before)
     trace.event('FORK', trace.before, ident(555))
     trace.event('EXEC', trace.before, trace.helper, trace.peer.image)
-    with pytest.raises(ValueError, match='registration unavailable'):
-        trace.register()
+    trace.register()
     assert trace.es.arm(trace.resource, trace.peer) is None
     assert trace.status()['unknown'] == 'helper_had_preexec_descendants'
 
@@ -352,3 +351,97 @@ def test_event_commit_failure_poisoned_before_any_more_dispatch(trace, monkeypat
     assert trace.calls == 0
     assert trace.status()['unknown'] == 'internal_drop'
     assert OfflineES(trace.gate).status(trace.resource)['unknown'] == 'internal_drop'
+
+
+@pytest.mark.parametrize('early', [(True, True), (True, False), (False, True), (False, False)])
+@pytest.mark.parametrize('reverse_exec', [False, True])
+def test_two_actions_bind_only_their_registered_peer(trace, early, reverse_exec):
+    second = trace.es.prepare('source1', trace.owner, 'work2', trace.parent, trace.peer.image, 'nonce2')
+    peer2 = Peer(ident(201, 2), trace.peer.image)
+    entries = [(trace.resource, 'nonce1', trace.peer, trace.before), (second, 'nonce2', peer2, ident(201))]
+    for index, (resource, nonce, peer, _) in enumerate(entries):
+        if early[index]:
+            trace.es.register_peer(resource, nonce, peer)
+    for _, _, _, before in entries:
+        trace.event('FORK', trace.parent, before)
+    for _, _, peer, before in entries[::(-1 if reverse_exec else 1)]:
+        trace.event('EXEC', before, peer.audit, peer.image)
+    for index, (resource, nonce, peer, _) in enumerate(entries):
+        if not early[index]:
+            trace.es.register_peer(resource, nonce, peer)
+        assert trace.es.arm(resource, peer)
+        assert trace.es.status(resource)['live'] == [peer.audit.key]
+        assert trace.es.status(resource)['unknown'] is None
+    for index, (resource, _, peer, _) in enumerate(entries):
+        primary = ident(500 + index)
+        def dispatch(peer=peer, primary=primary):
+            trace.event('FORK', peer.audit, primary)
+            return primary
+        assert trace.es.launch(resource, trace.es.arm(resource, peer), peer, dispatch)
+        trace.event('EXIT', primary)
+        trace.es.waited(resource, peer, primary, 143)
+        trace.event('EXIT', peer.audit)
+        assert trace.es.status(resource)['resources_closed']
+
+
+@pytest.mark.parametrize('kind', ['FORK', 'EXIT'])
+def test_late_registration_preserves_candidate_prearm_violation(trace, kind):
+    trace.exec_helper()
+    trace.event(kind, trace.helper, trace.child if kind == 'FORK' else None)
+    trace.register()
+    assert trace.es.arm(trace.resource, trace.peer) is None
+    assert trace.status()['unknown'] is not None
+
+
+@pytest.mark.parametrize('entry', ['malformed', 'source_lost', 'configuration_changed', 'internal_drop', 'source_replaced'])
+def test_every_invalidation_revokes_before_failed_persistence(trace, monkeypatch, entry):
+    import sqlite3
+    from contextlib import contextmanager
+
+    permit = trace.arm()
+    original = trace.gate.tx
+    @contextmanager
+    def fail():
+        raise sqlite3.OperationalError('injected unavailable ledger')
+        yield
+    monkeypatch.setattr(trace.gate, 'tx', fail)
+    with pytest.raises(sqlite3.OperationalError):
+        if entry == 'malformed':
+            trace.es.ingest_wire({'unexpected': 'field'})
+        elif entry == 'source_replaced':
+            host, boot = m.local_epoch()
+            trace.es.source('replacement', host, boot, Coverage(5, EVENTS, ()))
+        else:
+            trace.es.lost('source1', entry)
+    monkeypatch.setattr(trace.gate, 'tx', original)
+    assert trace.es.arm(trace.resource, trace.peer) is None
+    with pytest.raises(ValueError, match='launch not permitted'):
+        trace.es.launch(trace.resource, permit, trace.peer, trace.dispatch)
+    assert trace.calls == 0
+    assert not trace.status()['source_ready']
+    assert trace.status()['offline_phase'] == 'UNKNOWN'
+    # 重开持久化旧ready源的失联；新epoch不复活旧许可或代签动作。
+    reopened = OfflineES(trace.gate)
+    assert reopened.status(trace.resource)['unknown'] == 'collector_reopened'
+    host, boot = m.local_epoch()
+    reopened.source('new-source', host, boot, Coverage(5, EVENTS, ()))
+    assert reopened.arm(trace.resource, trace.peer) is None
+    with pytest.raises(ValueError, match='launch not permitted'):
+        reopened.launch(trace.resource, permit, trace.peer, trace.dispatch)
+    assert not reopened.status(trace.resource)['resources_closed']
+
+
+def test_one_action_completes_while_sibling_registration_is_delayed(trace):
+    second = trace.es.prepare('source1', trace.owner, 'work2', trace.parent, trace.peer.image, 'nonce2')
+    peer2 = Peer(ident(201, 2), trace.peer.image)
+    trace.exec_helper()
+    trace.event('FORK', trace.parent, ident(201))
+    trace.event('EXEC', ident(201), peer2.audit, peer2.image)
+    trace.register()
+    permit = trace.es.arm(trace.resource, trace.peer)
+    assert trace.es.launch(trace.resource, permit, trace.peer, trace.dispatch)
+    trace.close()
+    trace.es.register_peer(second, 'nonce2', peer2)
+    assert trace.es.arm(second, peer2)
+    assert trace.es.status(second)['live'] == [peer2.audit.key]
+    assert trace.es.status(second)['unknown'] is None

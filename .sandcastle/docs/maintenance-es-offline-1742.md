@@ -51,6 +51,9 @@ python -m pytest .sandcastle/deepagents-pilot/tests/test_maintenance_poll_recove
 
 `register_peer(resource, nonce, peer)` 可以先于或晚于启动 EXEC；两者精确匹配前 `arm` 不返回许可。
 错误身份、错误image、旧nonce、来源失效或缺EXEC都不会进入派发回调。
+同一调度器可并行 prepare 多个动作；每项保留 prepare 前沿之后的候选启动 EXEC，只有注册 peer 精确匹配的候选才成为该动作根。
+注册早到只选择匹配的后续 EXEC，注册晚到则选择已记录的候选；其它 helper 的正常执行不污染该动作。
+候选在注册前已经退出或 fork 的违规事实仍保留，不能靠迟到注册追认。
 
 许可先在 SQLite 提交，再返回 ACK。`launch` 在同一账本事务中消费许可，提交后才进入离线派发回调；
 并发或重复 ACK 最多进入一次。消费提交后、派发或绑定之前崩溃不能重用许可，仍需原严格证据恢复。
@@ -68,7 +71,10 @@ setsid/reparent不删除已记录归属。旧token、同PID冲突身份和重复
 
 来源缺口、乱序/重复、内部丢包、覆盖变化、事件持久化失败或collector重开都会 taint 未闭合动作。
 重新建立来源必须用新epoch和新动作，不能改写旧unknown；来源与原事件审计保留。
-持久化失败同时废止本实例继续发许可的能力，避免下一条事件到达之前误用旧ready状态。
+所有失效入口（畸形 wire、lost、覆盖变化、内部丢包和来源替换）先撤销本实例对旧 epoch 的准入，再尝试写 taint。
+即使 SQLite 写入失败，恢复数据库后旧 ACK 仍不能 ARM/launch；本实例 status 报告本地撤销原因，不读取旧 ready 冒充可用。
+无法写入的失效事实不能假称已持久化；重开 collector 会先将原有 ready 来源持久标为 collector_reopened，完成后才可建立新 epoch。
+新 epoch 不恢复旧动作或旧许可。
 
 已在完整因果前沿封闭的本地域不会被随后无关事件的缺口重新打开；来源本身仍标失效，不能派新动作。
 这只保留已经成立的过程闭包，缺业务wait或外部资源证据仍不能 COMPLETE。
