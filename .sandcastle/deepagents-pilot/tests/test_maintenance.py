@@ -194,3 +194,12 @@ def test_control_cli_errors_never_echo_untrusted_values(tmp_path, capsys):
     from pilot1742.maintenance import main
     assert main(['--root', str(tmp_path), 'poll', '--owner', 'untrusted/value']) == 78
     assert capsys.readouterr().out == '{"error":"maintenance_unavailable"}\n'
+
+
+def test_inventory_keeps_python_ancestors_and_orphan_executor(monkeypatch):
+    from pilot1742 import maintenance
+    from types import SimpleNamespace
+    listing = "11 1 python -m pilot1742.review_sweep --loop 180\n12 11 python -m pilot1742.review_sweep run-review --pr 1\n13 1 python -m pilot1742.executor run --issue 1"
+    monkeypatch.setattr(maintenance.subprocess, 'run', lambda *a, **kw: SimpleNamespace(stdout=listing))
+    monkeypatch.setattr(maintenance, 'identity', lambda pid: f'process-{pid}')
+    assert maintenance.process_inventory() == [('review', 11, 'process-11'), ('review', 12, 'process-12'), ('executor', 13, 'process-13')]

@@ -456,12 +456,12 @@ def test_one_prs_failure_does_not_stop_others(lane):
     assert "merged" in acts(actions, 1810)
 
 
-def test_main_loop_survives_tick_errors(monkeypatch, capsys):
+def test_main_loop_survives_tick_errors(monkeypatch, capsys, lane):
     """F1b：整轮失败只记下，循环不退出。"""
     ticks = []
     class Boom(Sweep):
         def __init__(self, *args, **kwargs):
-            pass
+            self.lane = lane
         def tick(self):
             ticks.append(1)
             if len(ticks) == 1:
@@ -1612,7 +1612,7 @@ def test_manual_loop_logs_actions_taken_before_a_timeout(lane, monkeypatch, caps
     error.actions = [{"pr": 1805, "action": "merged"}]
     class Boom(Sweep):
         def __init__(self, *args, **kwargs):
-            pass
+            self.lane = lane
         def tick(self):
             raise error
     monkeypatch.setattr(module, "Sweep", Boom)
@@ -1668,7 +1668,7 @@ def test_maintenance_spawner_reserves_before_detach(tmp_path, monkeypatch):
 def test_maintenance_completion_is_scoped_to_its_own_review(lane, monkeypatch):
     from dataclasses import asdict, replace
     from pilot1742 import external_review
-    target = lane.target(31, 1)
+    target = lane.target(1810, 1)
     other = replace(target, pr_number=999)
     for item, closed in [(target, True), (other, False)]:
         folder = lane.state_root / 'runs' / item.key

@@ -218,6 +218,7 @@ def process_inventory() -> list[tuple[str, int, str]]:
     output = subprocess.run(['ps', '-axo', 'pid=,ppid=,args='], check=True, capture_output=True, text=True).stdout
     result = []
     parents = {}
+    wrappers = set()
     for line in output.splitlines():
         parts = line.strip().split(None, 2)
         if len(parts) != 3:
@@ -227,12 +228,14 @@ def process_inventory() -> list[tuple[str, int, str]]:
         # 不输出完整命令（可能含提示或秘密）。仅识别真实解释器入口，不匹配 shell 提示文本。
         if not re.match(r'\S*(?:python[\d.]*|node|tsx)\s', command):
             continue
+        if re.match(r'\S*node\s+\S*/tsx/(?:dist/)?cli\.mjs(?:\s|$)', command):
+            wrappers.add(pid)
         lanes = []
         if re.search(r'(?:^|\s)\S*decision-claimer\.mts(?:\s|$)', command): lanes.append('decision')
         if re.search(r'(?:^|\s)\S*wayfinder_engine\.mts(?:\s|$)', command): lanes.append('wayfinder')
-        if re.search(r'-m pilot1742\.executor\b.*\bserve\b', command):
+        if re.search(r'-m pilot1742\.executor\s+(?:serve|run)(?:\s|$)', command):
             lanes.append('executor')
-            if '--review-sweep' in command: lanes.append('review')
+            if re.search(r'\bserve\b', command) and '--review-sweep' in command: lanes.append('review')
         if re.search(r'-m pilot1742\.(?:review_sweep|external_review)\b', command): lanes.append('review')
         if lanes:
             try:
@@ -240,7 +243,7 @@ def process_inventory() -> list[tuple[str, int, str]]:
             except ValueError:
                 continue
             result.extend((lane, pid, start) for lane in lanes)
-    # tsx 的 CLI 启动壳与执行脚本可能都带脚本名；以同 lane 最内层解释器作为 owner。
+    # 仅消重明确的 tsx CLI 启动壳；普通同 lane 父子进程可能都是独立 scheduler。
     def ancestor(parent, child):
         seen = set()
         while child in parents and child not in seen:
@@ -250,8 +253,8 @@ def process_inventory() -> list[tuple[str, int, str]]:
                 return True
         return False
     return [(lane, pid, start) for lane, pid, start in result
-            if not any(other_lane == lane and ancestor(pid, other_pid)
-                       for other_lane, other_pid, _ in result)]
+            if not (pid in wrappers and lane in ('decision', 'wayfinder') and any(other_lane == lane and ancestor(pid, other_pid)
+                       for other_lane, other_pid, _ in result))]
 
 
 class Owner:

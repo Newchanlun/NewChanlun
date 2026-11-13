@@ -52,7 +52,7 @@ executor 复用 `_worker_activity` 的本地/Boat 生命周期证据，仍在途
 
 owner 绑定 PID 与启动时间。正常退出显式记账；进程消失、非正常失败和不完整回执保留 unknown，
 没有 TTL、心跳过期自动释放或 TCP 空闲推断。重启会登记新 owner，不能覆盖旧记录。
-异常待对账时，保留账本和原任务回执；此版本没有“强制清零”命令，必须修复/补齐原生命周期证据后再评估维护。
+异常待对账时，保留账本和原任务回执。本版本没有异常对账/恢复入口：补齐原回执不会自动解除持久 unknown，重启也不会清除旧 owner。需要后续实现经证据核验的 reconcile，不能删账本绕过。该限制意味着异常后不能直接用本版本取得 drained，部署评审须明确接受或先补齐恢复能力。
 
 ## 由部署 owner 在自然边界加载
 
@@ -81,3 +81,9 @@ npm run typecheck
 
 测试使用临时账本、真实 SQLite 多进程竞争与管道同步；fake 工作者不访问模型或生产控制根。
 包括关闸/领取竞争、已领取持续推进、真实 detached 子进程接收与结束、缺入口确认、失联重启、精确代次恢复以及旧 freeze 不变。
+
+## 接入接口与回退边界
+
+Python `Owner(lane)` 提供 `poll/admit/reserve/finish/coverage/stop`；TS 通过 `.sandcastle/maintenance.mts` 调用同一账本。`reserve` 只供 detached review 交接，`finish(natural=False)` 保留 unknown。入口覆盖依赖当前解释器命令识别及本地 PID/启动时间（秒级），不是操作系统级全请求拦截；自定义启动壳与远端/T3 owner 必须另行盘点。
+
+回退旧代码同样只能在全部在途工作自然结束后，由部署 owner 恢复原版本和原启动参数。保留维护账本及回执；回退后旧进程不具备本协议，不能继续沿用此前 drained 结论。恢复派发用本代次 resume，代码回退、代理升级与全局 READY 均不是该命令的功能。
