@@ -587,13 +587,14 @@ def run_checks(args, deadline: Deadline, secrets: list) -> list[dict]:
     # HTTP 子进程与挂载探针共享工作期限；线程须完成子进程回收后才能返回。
     probes: dict = {}
     threads = []
-    if key is not None:
-        for model in MODELS:
-            def probe(m=model):
-                probes[m] = _guarded(f"roundtrip:{m}", "roundtrip", lambda: probe_model(args, m, key, deadline))
-            threads.append(threading.Thread(target=probe))
-            threads[-1].start()
     try:
+        if key is not None:
+            for model in MODELS:
+                def probe(m=model):
+                    probes[m] = _guarded(f"roundtrip:{m}", "roundtrip", lambda: probe_model(args, m, key, deadline))
+                thread = threading.Thread(target=probe)
+                thread.start()
+                threads.append(thread)
         checks.append(_guarded("checkout_root_free_space", "space", lambda: check_space(args, deadline)))
         mount, cleanup = check_mount(args, deadline)
         checks.append(mount)

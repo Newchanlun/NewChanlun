@@ -1570,11 +1570,13 @@ def test_receipt_probe_checks_every_attempt(tmp_path, monkeypatch, routes, ok):
 
 @pytest.mark.parametrize("phase", ("headers", "error", "success"))
 @pytest.mark.parametrize("mount_error", (False, True))
-def test_run_checks_reaps_http_workers_and_closes_connections(monkeypatch, phase, mount_error):
+@pytest.mark.parametrize("start_error", (False, True))
+def test_run_checks_reaps_http_workers_and_closes_connections(monkeypatch, phase, mount_error, start_error):
     from types import SimpleNamespace
 
     connections = []
     release = threading.Event()
+    connected = threading.Event()
     processes = []
     popen = preflight.subprocess.Popen
 
@@ -1590,6 +1592,7 @@ def test_run_checks_reaps_http_workers_and_closes_connections(monkeypatch, phase
         def do_POST(self):
             self.rfile.read(int(self.headers["Content-Length"]))
             connections.append(self.connection)
+            connected.set()
             code = b"429 Too Many Requests" if phase == "error" else b"200 OK"
             self.connection.sendall(b"HTTP/1.1 " + code + b"\r\nContent-Length: 1000\r\n")
             if phase != "headers":
@@ -1600,6 +1603,20 @@ def test_run_checks_reaps_http_workers_and_closes_connections(monkeypatch, phase
     server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)  # DevSkim: ignore DS162092 隔离回环回收测试
     serving = threading.Thread(target=server.serve_forever)
     serving.start()
+    original_start = threading.Thread.start
+    probes_started = []
+
+    def start_thread(thread):
+        if thread.name.endswith("(probe)"):
+            if start_error and probes_started:
+                assert connected.wait(0.3)
+                raise RuntimeError("probe start fake failure")
+            original_start(thread)
+            probes_started.append(thread)
+        else:
+            original_start(thread)
+
+    monkeypatch.setattr(threading.Thread, "start", start_thread)
     monkeypatch.setattr(preflight.subprocess, "Popen", track)
     monkeypatch.setattr(preflight, "check_credential", lambda *a: ({"ok": True}, KEY))
     monkeypatch.setattr(preflight, "check_space", lambda *a: {"ok": True})
@@ -1615,14 +1632,17 @@ def test_run_checks_reaps_http_workers_and_closes_connections(monkeypatch, phase
     started = time.monotonic()
     try:
         args = SimpleNamespace(proxy_url=f"http://127.0.0.1:{server.server_port}", proxy_log_dir="/unused")  # DevSkim: ignore DS162092 隔离回环回收测试
-        if mount_error:
+        if start_error:
+            with pytest.raises(RuntimeError, match="probe start fake failure"):
+                preflight.run_checks(args, preflight.Deadline(1), [])
+        elif mount_error:
             with pytest.raises(RuntimeError, match="mount fake failure"):
                 preflight.run_checks(args, preflight.Deadline(1), [])
         else:
             checks = preflight.run_checks(args, preflight.Deadline(1), [])
             assert all(not c["ok"] for c in checks if c.get("class") == "roundtrip")
         assert time.monotonic() - started < 0.8
-        assert len(processes) == len(connections) == 2
+        assert len(processes) == len(connections) == (1 if start_error else 2)
         assert all(process.poll() is not None for process in processes)
         assert not [t for t in threading.enumerate() if t not in before and t.name.endswith("(probe)")]
         for connection in connections:
