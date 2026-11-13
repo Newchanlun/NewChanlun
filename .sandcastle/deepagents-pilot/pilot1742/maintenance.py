@@ -168,12 +168,17 @@ class Gate:
         with self.tx() as db:
             self._owner(db, owner)
             state = db.execute('SELECT * FROM control').fetchone()
-            # 同 owner 持有的工作跨轮继续；关闸不改变其后续请求权限。
+            # 非本机动作保留原同 run 续跑合同；TS 回调须另判新工作。
             prior = db.execute("SELECT * FROM jobs WHERE owner=? AND work=? AND state='active'", (owner, work)).fetchone()
             if prior:
-                if transferable:
-                    raise ValueError('reservation already active')
-                return prior['id']
+                local_action = db.execute('SELECT 1 FROM local_actions WHERE job=?', (prior['id'],)).fetchone()
+                if not local_action:
+                    if transferable:
+                        raise ValueError('reservation already active')
+                    return prior['id']
+                # TS work 是新回调，不是原执行的续跑；失败的收尾 RPC 不授予新派发权。
+                if not state['closed']:
+                    raise ValueError('previous local action unresolved')
             if state['closed']:
                 # 拒绝与关闭确认一起提交，不能被异常 rollback 吃掉。
                 db.execute('UPDATE owners SET ack=?,ack_at=? WHERE id=?', (state['generation'], now(), owner))
@@ -228,16 +233,16 @@ class Gate:
             db.execute('INSERT INTO local_resource_domains VALUES(?,?,?,NULL)',
                        (resource, json.dumps(baseline), supervisor))
 
-    def local_resource_not_started(self, resource: str) -> None:
-        """只供原监督器在基线失败、Popen 之前返回；不是消失证明或通用取消入口。"""
+    def local_resource_not_started(self, resource: str, *, exec_failed: bool = False) -> None:
+        """原监督器证明基线失败或 Popen 同步抛 OSError（未 exec 且内部子进程已回收）。"""
         with self.tx() as db:
             row = db.execute('SELECT * FROM local_resources WHERE id=?', (token(resource),)).fetchone()
             if (row is None or row['pid'] != os.getpid() or row['start'] != identity(os.getpid())
                     or (row['host'], row['boot']) != local_epoch() or row['waited_at'] is not None
-                    or db.execute('SELECT 1 FROM local_resource_domains WHERE resource=?', (resource,)).fetchone()):
+                    or bool(db.execute('SELECT 1 FROM local_resource_domains WHERE resource=?', (resource,)).fetchone()) != exec_failed):
                 raise ValueError('resource may have dispatched')
             db.execute('INSERT OR IGNORE INTO local_resource_not_started VALUES(?,?,?,?,?)',
-                       (resource, row['pid'], row['start'], 'baseline_unavailable', now()))
+                       (resource, row['pid'], row['start'], 'exec_failed' if exec_failed else 'baseline_unavailable', now()))
 
     def local_resource_waited(self, resource: str, child_pid: int, code: int) -> None:
         if type(child_pid) is not int or child_pid < 1 or type(code) is not int:
@@ -750,7 +755,7 @@ def process_inventory() -> list[tuple[str, int, str]]:
         lanes = []
         modes = re.findall(r'(?:^|\s)(--live|--dry-run)(?=\s|$)', command)
         live = bool(modes) and modes[-1] == '--live'
-        if re.search(r'(?:^|\s)\S*decision-claimer\.mts(?:\s|$)', command) and live and '--archaeology-only' not in command: lanes.append('decision')
+        if re.search(r'(?:^|\s)\S*decision-claimer\.mts(?:\s|$)', command) and live: lanes.append('decision')
         if re.search(r'(?:^|\s)\S*wayfinder_engine\.mts(?:\s|$)', command) and live and '--spec-ruling' not in command: lanes.append('wayfinder')
         if re.search(r'-m pilot1742\.executor\b.*\s(?:serve|run)(?:\s|$)', command):
             lanes.append('executor')

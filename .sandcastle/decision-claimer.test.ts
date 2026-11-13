@@ -3504,3 +3504,25 @@ test("维护：关闸拒绝新单票，已领取单票的后续模型调用自�
   assert.equal(modelCalls.length, count);
   owner.stop();
 });
+
+test("live archaeology 模型请求受维护许可覆盖，关闸不得再次调用", async () => {
+  const { MaintenanceOwner, MaintenanceClosed } = await import("./maintenance.mts");
+  const root = mkdtempSync(join(tmpdir(), "archaeology-maintenance-"));
+  const h = fakeDeps("live", [fence({ user_gate: [], class: "T", reason: "fixture" })], [goodArch]);
+  cutoverFor(h.d);
+  const owner = new MaintenanceOwner("decision", root);
+  h.d.maintenance = owner;
+  try {
+    const helper = join(process.cwd(), ".sandcastle/deepagents-pilot/pilot1742/maintenance.py");
+    const original = h.d.model;
+    h.d.model = async (...args) => {
+      const report = JSON.parse(execFileSync("python3", [helper, "--root", root, "request"], {encoding:"utf8"}));
+      assert.equal(report.inflight.length, 1);
+      return original(...args);
+    };
+    await archaeologyOnlyAdmission(1355, h.d);
+    const calls = h.modelCalls.length;
+    await assert.rejects(archaeologyOnlyAdmission(1355, h.d), MaintenanceClosed);
+    assert.equal(h.modelCalls.length, calls);
+  } finally { owner.stop(); rmSync(root, {recursive:true, force:true}); }
+});

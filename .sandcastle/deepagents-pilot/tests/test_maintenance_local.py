@@ -277,3 +277,59 @@ console.log(JSON.stringify({{owner:owner.id,pid}}));
             os.kill(row['pid'], signal.SIGTERM)
         except ProcessLookupError:
             pass
+
+
+def test_missing_executable_records_bound_non_dispatch(tmp_path):
+    result = run_ts(tmp_path, '''
+const owner = new MaintenanceOwner('decision', root);
+const code = await owner.work('missing-executable', () => new Promise((resolve, reject) => {
+  const cmd = maintenanceCommand('/nonexistent/maintenance-fixture-executable', []);
+  const child = spawn(cmd.file, cmd.args, {stdio:['ignore','ignore','pipe']});
+  child.once('error', reject);
+  child.once('close', resolve);
+}));
+owner.stop();
+console.log(JSON.stringify({code}));
+''')
+    assert json.loads(result.stdout)['code'] == 127
+    gate, _ = confirm_all(tmp_path / 'gate')
+    assert gate.status([])['state'] == 'drained'
+    with gate.tx() as db:
+        assert db.execute('SELECT reason FROM local_resource_not_started').fetchone()[0] == 'exec_failed'
+        assert db.execute('SELECT waited_at FROM local_resources').fetchone()[0] is None
+
+
+@pytest.mark.skipif(sys.platform != 'darwin', reason='native macOS census domain')
+def test_macos_unrelated_new_sibling_is_conservative_unknown(tmp_path):
+    """真实祖先新增无关分支；记录当前活性边界，不将此 unknown 宣称恢复。"""
+    result = run_ts(tmp_path, '''
+const owner = new MaintenanceOwner('decision', root);
+let unrelated;
+try {
+  const code = await owner.work('sibling', () => new Promise((resolve, reject) => {
+    const cmd = maintenanceCommand('/bin/sh', ['-c', 'printf ready; exec /bin/sleep 30']);
+    const child = spawn(cmd.file, cmd.args, {stdio:['ignore','pipe','inherit']});
+    child.stdout.once('data', () => {
+      unrelated = spawn('/bin/sleep', ['30'], {detached:true, stdio:'ignore'});
+      unrelated.once('spawn', () => child.kill('SIGTERM'));
+    });
+    child.once('error', reject);
+    child.once('close', resolve);
+  }));
+  console.log(JSON.stringify({code, unrelated:unrelated.pid}));
+} finally {
+  if (unrelated) {
+    const exited = new Promise(resolve => unrelated.once('close', resolve));
+    unrelated.kill('SIGTERM'); await exited;
+  }
+  owner.stop();
+}
+''')
+    row = json.loads(result.stdout)
+    assert row['code'] == 143, result.stderr
+    gate = Gate(tmp_path / 'gate')
+    with gate.tx() as db:
+        diagnostic = db.execute('SELECT reason FROM local_resource_diagnostics').fetchone()[0]
+        assert diagnostic.startswith('unclassified_process_pids='), diagnostic
+        assert str(row['unrelated']) in diagnostic.split('=')[1].split(',')
+        assert db.execute('SELECT sealed_at FROM local_resource_domains').fetchone()[0] is None

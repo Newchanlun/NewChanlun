@@ -135,3 +135,24 @@ while running:
     rmSync(root, { recursive: true, force: true });
   }
 });
+
+for (const failedRpc of ["action-exited", "finish"]) test(`收尾 RPC ${failedRpc} 丢失后，同 key 新回调不能借旧许可跨关闸派发`, async () => {
+  const root = mkdtempSync(join(tmpdir(), "maintenance-rpc-"));
+  try {
+    const owner = new MaintenanceOwner("decision", root);
+    const rpc = owner as unknown as { call: (command: string, args?: string[]) => Record<string, unknown> };
+    const original = rpc.call.bind(owner);
+    rpc.call = (command, args) => {
+      if (command === failedRpc) throw new Error("injected receipt loss");
+      return original(command, args);
+    };
+    let requests = 0;
+    await assert.rejects(owner.work("ticket:1742", () => { requests++; }), /receipt loss/);
+    control(root, "request");
+    rpc.call = original;
+    await assert.rejects(owner.work("ticket:1742", () => { requests++; }), MaintenanceClosed);
+    assert.equal(requests, 1);
+    assert.equal(control(root, "status").inflight.length, 1);
+    owner.stop();
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});

@@ -210,3 +210,21 @@ def test_zombie_pid_reuse_does_not_inherit_terminal_evidence():
     reads = iter([maintenance_processes.EndedProcess('old'), ['new', 1]])
     with pytest.raises(maintenance_processes.UnstableSnapshot, match='identity_changed'):
         maintenance_processes.collect(lambda: {20}, lambda _: next(reads))
+
+
+def test_exec_failure_receipt_requires_original_bound_supervisor(tmp_path, monkeypatch):
+    gate = Gate(tmp_path)
+    owner = gate.register('decision', local_actions=True)
+    job = gate.admit(owner, 'exec-failure')
+    resource = gate.reserve_local_resource(owner, job)
+    with pytest.raises(ValueError, match='may have dispatched'):
+        gate.local_resource_not_started(resource, exec_failed=True)
+    monkeypatch.setattr(os, 'getsid', lambda _: os.getpid())
+    monkeypatch.setattr(maintenance_processes, 'stable_snapshot',
+                        lambda: {os.getpid(): ['birth', os.getppid()]})
+    gate.bind_local_resource(resource)
+    gate.local_resource_waited(resource, os.getpid(), 0)
+    with pytest.raises(ValueError, match='may have dispatched'):
+        gate.local_resource_not_started(resource, exec_failed=True)
+    with gate.tx() as db:
+        assert not db.execute('SELECT * FROM local_resource_not_started').fetchall()

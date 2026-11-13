@@ -42,7 +42,7 @@ TS 与 Python 共用 SQLite 账本。`request` 与 `admit` 都使用短 `BEGIN I
 因此不使用 legacy admission.lock 阻塞在途工作，也没有“检查 open 后再无记录 spawn”的间隙。
 
 领取粒度：live decision 单票、live Wayfinder 单图动作/放行动作、executor 精确 run、review 单次 PR/head/attempt。
-dry-run、archaeology-only 与 executor 的本地 status/reconcile 不登记维护 owner，也不依赖生产维护根。
+dry-run 与 executor 的本地 status/reconcile 不登记维护 owner，也不依赖生产维护根。live archaeology-only 会运行共享模型，须登记 decision owner、按 archaeology 工作领取许可，且纳入旧进程 census。
 维护 CLI 的 `status` 会持久记下未覆盖进程的精确身份；它不派工、不恢复工作，不是无写入查询。
 executor 的票/计划登记不等于执行准入：完成读取、等待判定与空间检查后，紧邻派工以一个事务领取并绑定 run。
 登记后才关闸的计划不会被派发；awaiting_human、跳过的计划与 break 后的剩余票不占维护记录。
@@ -177,3 +177,18 @@ executor 的原子准入接口为 `Gate.admit_executor(owner, run_id, ticket, st
 Python `Owner(lane)` 提供 `poll/admit/reserve/finish/coverage/stop`；TS 通过 `.sandcastle/maintenance.mts` 调用同一账本。`reserve` 只供 detached review 交接，`finish(natural=False)` 保留 unknown。入口覆盖依赖当前解释器命令识别及本地 PID/启动时间（秒级），不是操作系统级全请求拦截；自定义启动壳与远端/T3 owner 必须另行盘点。
 
 回退旧代码同样只能在全部在途工作自然结束后，由部署 owner 恢复原版本和原启动参数。保留维护账本及回执；回退后旧进程不具备本协议，不能继续沿用此前 drained 结论。恢复派发用本代次 resume，代码回退、代理升级与全局 READY 均不是该命令的功能。
+
+
+### b6d 后续：新动作与原执行续跑
+
+TS `work(key, action)` 每次调用都是新动作，不以同 key 的未完成 job 作为新回调许可。
+若前次 action-exited/finish RPC 丢失，开闸时拒绝该 key 的未决动作，关闸时拒绝新回调；旧证据保留。
+原回调内部的后续请求仍由它已经领取的 job 覆盖。Python executor 精确 run 绑定恢复合同不变。
+本机监督器的 Popen 同步 OSError 记录原监督身份绑定的 `exec_failed` 未派发证据，返回 127；
+这依赖 Popen 的 exec-error 通道完成未 exec 子进程回收，不制造 wait 或业务成功回执。
+缺失监督器回执、异步崩溃、身份不符仍 unknown。Python 3.9 读取维护模块采用延迟注解。
+
+**macOS 现役可用性仍未验收**：真实隔离反例证明，基线之后由动作祖先启动的无关长寿兄弟进程也会
+阻止当前全机快照域封闭。当前父链不能区别该分支与已经 reparent 的动作后代；不能豁免 PID 1/祖先，
+也不能把这条保守拒绝称为恢复。需要派发前建立、不会因 reparent 丢失且能检测记录丢失的后代归属来源，
+再替换 macOS 快照判据；Linux subreaper 的证据不能替代它。此缺口独立于六项历史资源域退休依赖。

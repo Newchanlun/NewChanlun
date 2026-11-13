@@ -2374,7 +2374,7 @@ async function main() {
     mode: a.mode, drainRoot: DRAIN_ROOT, gh, git, model: makeClaudeRunner(), outRoot: a.outRoot, srcDir, repoRoot: REPO_ROOT, now: Date.now,
     me: a.mode === "live" ? gh(["api", "user", "--jq", ".login"]).trim() : undefined,
   };
-  const maintenance = a.mode === "live" && !a.archaeologyOnly ? new MaintenanceOwner("decision") : undefined;
+  const maintenance = a.mode === "live" ? new MaintenanceOwner("decision") : undefined;
   d.maintenance = maintenance;
   try {
     if (a.archaeologyOnly) {

@@ -1,4 +1,6 @@
 """只读内核 PID/出生身份，不读取 argv、环境、凭据或模型日志。"""
+from __future__ import annotations
+
 import ctypes
 import errno
 import os

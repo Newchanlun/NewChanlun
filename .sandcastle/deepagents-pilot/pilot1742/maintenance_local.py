@@ -1,4 +1,6 @@
 """本机 CLI session 监督：先绑定域，再派发；实际 wait 与域清空分别取证。"""
+from __future__ import annotations
+
 import argparse
 import json
 import os
@@ -112,7 +114,15 @@ def supervise(args, command: list[str], notify: int | None = None, signal_mask=N
     if signal_mask is not None:
         signal.pthread_sigmask(signal.SIG_SETMASK, signal_mask)
     # 不持有账本锁等待进程；stdout/stderr/stdin 原样透传，不读取凭据或记录命令。
-    child = subprocess.Popen(command)
+    try:
+        child = subprocess.Popen(command)
+    except OSError:
+        # Popen 的 exec-error 通道已同步回收未 exec 的子进程；不伪造业务 wait。
+        gate.local_resource_not_started(args.resource, exec_failed=True)
+        if notify is not None:
+            os.write(notify, b'127\n')
+            os.close(notify)
+        return 127
     if received:
         child.send_signal(received[-1])
     code = child.wait()
