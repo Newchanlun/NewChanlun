@@ -31,6 +31,11 @@ def request(req):
 decision.load_trust = lambda path: parse_trust(Path(config['trust']).read_bytes())
 authority.trust_path_problem = lambda path: None
 home = Path(config['home'])
+witness = None
+if 'maintenance_job' in config:
+    from pilot1742.maintenance import Gate
+    gate = Gate(Path(config['maintenance_root']))
+    witness = gate.start_bound(config['maintenance_job'], config['run_id'], home)
 unit, task = load_unit(home, config['run_id'])
 identity = AppIdentity(5486877, 179444545, 1150335160, REPO, 'newchanlun-deepagents-1742', Path(config['pem']))
 gateway = RepoGateway(GitHubAppClient(identity, transport=httpx.MockTransport(request), permissions=WRITE_PERMISSIONS))
@@ -51,3 +56,6 @@ try:
 finally:
     run.release()
     channel.close()
+
+if witness is not None:
+    gate.complete_bound(witness)

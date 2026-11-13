@@ -272,9 +272,15 @@ class QueueIntake:
                     results[ticket].update(phase=phase, reason=f'{previous}; {activity}' if previous else activity)
                 else:
                     occupied.pop(ticket, None)
-                    if ticket in permits and results[ticket].get('phase') in ('awaiting_merge', 'merged', 'halted', 'queued'):
-                        assert self.maintenance is not None
-                        self.maintenance.finish(permits.pop(ticket))
+                    if self.maintenance is not None and results[ticket].get('phase') != 'active':
+                        with self.maintenance.gate.tx() as db:
+                            jobs = [r[0] for r in db.execute(
+                                "SELECT id FROM jobs WHERE owner=? AND work=? AND state!='finished' "
+                                "AND id NOT IN (SELECT job FROM resolutions)", (self.maintenance.id, f'ticket:{ticket}'))]
+                        for job in jobs:
+                            if not self.maintenance.gate.settle_bound(self.maintenance.id, job):
+                                self.maintenance.finish(job, natural=False)
+                        permits.pop(ticket, None)
 
             for ticket in sorted(tickets, key=priority):
                 if ticket not in occupied and set(occupied) - {t for t, _, _ in planned}:
@@ -288,11 +294,9 @@ class QueueIntake:
                     if ticket in invalid:
                         results[ticket] = {'phase': 'halted', 'reason': invalid[ticket]}
                         continue
-                    if self.maintenance is not None:
-                        try:
-                            permits[ticket] = self.maintenance.admit(f'ticket:{ticket}')
-                        except Closed:
-                            continue
+                    if (self.maintenance is not None and self.maintenance.poll()
+                            and not runs.get(ticket) and not self.maintenance.gate.has_execution(ticket, self.state_root)):
+                        continue
                     claim = self.claims.read(ticket)
                     if claim and claim.state == 'released' and ticket in occupied:
                         results[ticket] = {'phase': 'active', 'run_id': claim.run_id, 'reason': claim.reason}
@@ -354,8 +358,14 @@ class QueueIntake:
                     continue
                 try:
                     if self.maintenance is not None:
-                        self.maintenance.gate.bind_executor(self.maintenance.id, permits[ticket], unit.run_id,
-                                                            self.state_root, self.source_repo)
+                        try:
+                            permits[ticket] = self.maintenance.gate.admit_executor(
+                                self.maintenance.id, unit.run_id, ticket, self.state_root, self.source_repo)
+                        except Closed:
+                            continue
+                        except ValueError:
+                            results[ticket] = {'phase': 'active', 'run_id': unit.run_id, 'reason': 'maintenance owner unresolved'}
+                            continue
                     code = run(unit)
                     state = delivery_status(run_dir)
                     phase = state['phase']

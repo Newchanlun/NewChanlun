@@ -74,6 +74,9 @@ class Gate:
                 CREATE TABLE IF NOT EXISTS scopes (owner TEXT PRIMARY KEY, data TEXT NOT NULL);
                 CREATE TABLE IF NOT EXISTS action_returns (job TEXT PRIMARY KEY, owner TEXT, generation INTEGER,
                     pid INTEGER, start TEXT, at TEXT);
+                CREATE TABLE IF NOT EXISTS cancellations (job TEXT PRIMARY KEY, owner TEXT, reason TEXT, at TEXT);
+                CREATE TABLE IF NOT EXISTS preflight_returns (witness TEXT PRIMARY KEY, at TEXT);
+                CREATE TABLE IF NOT EXISTS recoveries (previous TEXT PRIMARY KEY, successor TEXT);
                 CREATE TABLE IF NOT EXISTS returns (witness TEXT PRIMARY KEY, at TEXT);
                 CREATE TABLE IF NOT EXISTS witnesses (id TEXT PRIMARY KEY, job TEXT, pid INTEGER, start TEXT,
                     started_at TEXT, completed_at TEXT);
@@ -156,11 +159,110 @@ class Gate:
             raise Closed('maintenance closed')
         return job
 
+    def cancel_unstarted(self, owner: str, job: str, reason: str) -> None:
+        """只能由尚持有任务的启动方证明未启动；adopt 与撤销竞争同一事务。"""
+        if reason not in ('spawn_failed', 'preflight_return'):
+            raise ValueError('invalid cancellation')
+        with self.tx() as db:
+            self._owner(db, owner)
+            row = db.execute("SELECT * FROM jobs WHERE id=? AND owner=? AND state='active'", (token(job), owner)).fetchone()
+            if row is None or db.execute('SELECT 1 FROM witnesses WHERE job=?', (job,)).fetchone():
+                raise ValueError('work already started')
+            if reason == 'preflight_return' and db.execute('SELECT 1 FROM bindings WHERE job=?', (job,)).fetchone():
+                raise ValueError('work already bound')
+            db.execute('INSERT INTO cancellations VALUES(?,?,?,?)', (job, owner, reason, now()))
+            db.execute("UPDATE jobs SET state='finished',ended_at=? WHERE id=?", (now(), job))
+
+    def has_execution(self, ticket: int, state_root: Path) -> bool:
+        with self.tx() as db:
+            return any(json.loads(r['data']).get('state_root') == str(state_root.resolve())
+                       for r in db.execute("SELECT data FROM bindings JOIN jobs ON jobs.id=bindings.job "
+                           "WHERE work=? AND state!='finished' AND jobs.id NOT IN (SELECT job FROM resolutions)",
+                           (f'ticket:{ticket}',)))
+
+    def admit_executor(self, owner: str, run_id: str, ticket: int, state_root: Path, source_repo: Path) -> str:
+        """按真实 run 原子领取并绑定；未派发的计划票不获得跨关闭许可。"""
+        data = json.dumps(dict(kind='executor', run_id=token(run_id), work=f'ticket:{ticket}',
+                              state_root=str(state_root.resolve()), source_repo=str(source_repo.resolve())), sort_keys=True)
+        with self.tx() as db:
+            self._owner(db, owner)
+            previous = db.execute("SELECT jobs.* FROM jobs JOIN bindings ON bindings.job=jobs.id "
+                "WHERE bindings.data=? AND state!='finished' AND jobs.id NOT IN (SELECT job FROM resolutions)", (data,)).fetchone()
+            if previous:
+                if previous['owner'] != owner:
+                    old = db.execute('SELECT * FROM owners WHERE id=?', (previous['owner'],)).fetchone()
+                    if not old['stopped'] and alive(old['pid'], old['start']):
+                        raise ValueError('executor owner still active')
+                    if any(alive(w['pid'], w['start']) for w in db.execute('SELECT * FROM witnesses WHERE job=?', (previous['id'],))):
+                        raise ValueError('executor controller still active')
+                    db.execute('UPDATE jobs SET owner=? WHERE id=?', (owner, previous['id']))
+                    db.execute('INSERT OR IGNORE INTO lineage VALUES(?,?)', (previous['id'], owner))
+                return previous['id']
+            state = db.execute('SELECT * FROM control').fetchone()
+            if state['closed']:
+                raise Closed('maintenance closed')
+            job = uuid.uuid4().hex
+            db.execute('INSERT INTO jobs VALUES(?,?,?,?,?,?,?,0)',
+                       (job, owner, f'ticket:{ticket}', state['generation'], now(), None, 'active'))
+            db.execute('INSERT INTO lineage VALUES(?,?)', (job, owner))
+            db.execute('INSERT INTO bindings VALUES(?,?)', (job, data))
+            return job
+
+    @staticmethod
+    def _chain_complete(witnesses, returned, recoveries) -> bool:
+        by_id = {w['id']: w for w in witnesses}
+        def complete(w, seen):
+            if w['id'] in returned:
+                return True
+            successor = by_id.get(recoveries.get(w['id']))
+            return (w['id'] not in seen and not alive(w['pid'], w['start']) and successor is not None
+                    and successor['completed_at'] is not None and complete(successor, seen | {w['id']}))
+        return bool(witnesses) and all(complete(w, set()) for w in witnesses)
+
+    def settle_bound(self, owner: str, job: str) -> bool:
+        """业务失败同样可收尾，但必须有入口返回链和资源终态，退出码不是证明。"""
+        with self.tx() as db:
+            self._owner(db, owner)
+            task = db.execute("SELECT * FROM jobs WHERE id=? AND owner=? AND state!='finished'", (job, owner)).fetchone()
+            if task is None:
+                return False
+            binding = db.execute('SELECT data FROM bindings WHERE job=?', (job,)).fetchone()
+            chain = [dict(r) for r in db.execute('SELECT * FROM witnesses WHERE job=?', (job,))]
+            returned = {r[0] for r in db.execute('SELECT witness FROM returns')}
+            recoveries = dict(db.execute('SELECT previous,successor FROM recoveries'))
+            preflight = {r[0] for r in db.execute('SELECT witness FROM preflight_returns')}
+        if not binding or not self._chain_complete(chain, returned, recoveries):
+            return False
+        try:
+            if not self._resources_idle(json.loads(binding['data']), chain, preflight):
+                return False
+        except (OSError, ValueError, KeyError, TypeError, RuntimeError, subprocess.SubprocessError):
+            return False
+        with self.tx() as db:
+            self._owner(db, owner)
+            if ([dict(r) for r in db.execute('SELECT * FROM witnesses WHERE job=?', (job,))] != chain
+                    or dict(db.execute('SELECT * FROM jobs WHERE id=?', (job,)).fetchone()) != dict(task)):
+                return False
+            if task['state'] == 'unknown':
+                generation = db.execute('SELECT generation FROM control').fetchone()[0]
+                db.execute('INSERT OR IGNORE INTO resolutions VALUES(?,?,?,?)', (job, chain[-1]['id'], generation, now()))
+            else:
+                db.execute("UPDATE jobs SET state='finished',ended_at=? WHERE id=?", (now(), job))
+        return True
+
+    def finish_review(self, owner: str, job: str) -> None:
+        with self.tx() as db:
+            bound = db.execute('SELECT 1 FROM bindings WHERE job=?', (job,)).fetchone()
+        if not bound:
+            self.cancel_unstarted(owner, job, 'preflight_return')
+        elif not self.settle_bound(owner, job):
+            self.finish(owner, job, natural=False)
+
     def finish(self, owner: str, job: str, *, natural: bool) -> None:
         with self.tx() as db:
             self._owner(db, owner)
-            result = db.execute("UPDATE jobs SET state=?,ended_at=? WHERE id=? AND owner=? AND state='active'",
-                                ('finished' if natural else 'unknown', now(), token(job), owner))
+            result = db.execute("UPDATE jobs SET state=?,ended_at=? WHERE id=? AND owner=? AND (state='active' OR (state='unknown' AND ?=0))",
+                                ('finished' if natural else 'unknown', now(), token(job), owner, int(natural)))
             if result.rowcount != 1:
                 raise ValueError('job not active for owner')
 
@@ -254,14 +356,17 @@ class Gate:
                 raise ValueError('missing binding')
             binding = json.loads(row['data'])
             task = db.execute('SELECT * FROM jobs WHERE id=?', (job,)).fetchone()
-            if (task['state'] != 'active' or binding['run_id'] != run_id
+            if (task['state'] not in ('active', 'unknown') or binding['run_id'] != run_id
                     or binding['state_root'] != str(state_root.resolve())
                     or db.execute('SELECT 1 FROM resolutions WHERE job=?', (job,)).fetchone()
                     or db.execute('SELECT 1 FROM reconciliations WHERE owner=?', (task['owner'],)).fetchone()):
                 raise ValueError('invalid executor binding')
-            if db.execute('SELECT 1 FROM witnesses WHERE job=? AND id NOT IN (SELECT witness FROM returns)', (job,)).fetchone():
+            previous = list(db.execute('SELECT * FROM witnesses WHERE job=? AND id NOT IN (SELECT witness FROM returns)', (job,)))
+            if previous and (binding['kind'] != 'executor' or any(alive(w['pid'], w['start']) for w in previous)):
                 raise ValueError('previous executor unresolved')
             db.execute('INSERT INTO witnesses VALUES(?,?,?,?,?,NULL)', (witness, job, pid, start, now()))
+            for old in previous:
+                db.execute('INSERT OR REPLACE INTO recoveries VALUES(?,?)', (old['id'], witness))
         return witness
 
     def returned_action(self, owner: str, job: str) -> None:
@@ -281,6 +386,19 @@ class Gate:
             if row is None or row['pid'] != os.getpid() or row['start'] != identity(os.getpid()):
                 raise ValueError('wrong witness identity')
             db.execute('INSERT OR IGNORE INTO returns VALUES(?,?)', (witness, now()))
+
+    def returned_preflight(self, witness: str) -> None:
+        """执行入口在进入 run 生命周期之前返回；由同一预登记身份写入。"""
+        self.returned(witness)
+        with self.tx() as db:
+            db.execute('INSERT OR IGNORE INTO preflight_returns VALUES(?,?)', (token(witness), now()))
+
+    @staticmethod
+    def _resources_idle(binding, chain, preflight) -> bool:
+        from pilot1742.maintenance_recovery import bound_idle, executor_preflight_idle
+        if chain and all(w['id'] in preflight for w in chain) and binding['kind'] == 'executor':
+            return executor_preflight_idle(binding)
+        return bound_idle(binding)
 
     def returned_current(self, job: str) -> None:
         with self.tx() as db:
@@ -302,7 +420,7 @@ class Gate:
 
     def reconcile(self, generation: int, owner: str) -> dict:
         """只处理精确 owner；读取证据在事务外，提交前重验关闭代次并永久 fence 旧 owner。"""
-        from pilot1742.maintenance_recovery import bound_idle, scope_idle
+        from pilot1742.maintenance_recovery import scope_idle
         with self.tx() as db:
             control = db.execute('SELECT * FROM control').fetchone()
             if type(generation) is not int or not control['closed'] or control['generation'] != generation:
@@ -317,6 +435,8 @@ class Gate:
             bindings = {r['job']: json.loads(r['data']) for r in db.execute('SELECT * FROM bindings')}
             witnesses = [dict(r) for r in db.execute('SELECT * FROM witnesses')]
             returned = {r['witness'] for r in db.execute('SELECT * FROM returns')}
+            recoveries = dict(db.execute('SELECT previous,successor FROM recoveries'))
+            preflight = {r[0] for r in db.execute('SELECT witness FROM preflight_returns')}
             actions = {r['job']: dict(r) for r in db.execute('SELECT * FROM action_returns')}
             scope = db.execute('SELECT data FROM scopes WHERE owner=?', (owner,)).fetchone()
             census = db.execute('SELECT 1 FROM censuses WHERE owner=?', (owner,)).fetchone()
@@ -335,11 +455,11 @@ class Gate:
                 verified.append((job['id'], 'action-return'))
                 continue
             chain = [w for w in witnesses if w['job'] == job['id']]
-            if (not chain or any(w['id'] not in returned or alive(w['pid'], w['start']) for w in chain)
+            if (not self._chain_complete(chain, returned, recoveries) or any(alive(w['pid'], w['start']) for w in chain)
                     or job['id'] not in bindings):
                 return unknown('missing_bound_completion')
             try:
-                if not bound_idle(bindings[job['id']]):
+                if not self._resources_idle(bindings[job['id']], chain, preflight):
                     return unknown('resources_unsettled')
             except (OSError, ValueError, KeyError, TypeError, RuntimeError, subprocess.SubprocessError):
                 return unknown('resources_unverified')
@@ -358,7 +478,9 @@ class Gate:
                 raise ValueError('generation changed')
             if ([dict(r) for r in db.execute('SELECT * FROM jobs WHERE id IN (SELECT job FROM lineage WHERE owner=?)', (owner,))] != jobs
                     or [dict(r) for r in db.execute('SELECT * FROM witnesses')] != witnesses
-                    or {r['witness'] for r in db.execute('SELECT * FROM returns')} != returned):
+                    or {r['witness'] for r in db.execute('SELECT * FROM returns')} != returned
+                    or dict(db.execute('SELECT previous,successor FROM recoveries')) != recoveries
+                    or {r[0] for r in db.execute('SELECT witness FROM preflight_returns')} != preflight):
                 return unknown('evidence_changed')
             # 死亡身份不能重新领取；所有正常写入口也检查 fence。历史 job/owner 不改写。
             if alive(row['pid'], row['start']):
@@ -425,12 +547,16 @@ def process_inventory() -> list[tuple[str, int, str]]:
         if re.match(r'\S*node\s+\S*/tsx/(?:dist/)?cli\.mjs(?:\s|$)', command):
             wrappers.add(pid)
         lanes = []
-        if re.search(r'(?:^|\s)\S*decision-claimer\.mts(?:\s|$)', command): lanes.append('decision')
-        if re.search(r'(?:^|\s)\S*wayfinder_engine\.mts(?:\s|$)', command): lanes.append('wayfinder')
+        modes = re.findall(r'(?:^|\s)(--live|--dry-run)(?=\s|$)', command)
+        live = bool(modes) and modes[-1] == '--live'
+        if re.search(r'(?:^|\s)\S*decision-claimer\.mts(?:\s|$)', command) and live and '--archaeology-only' not in command: lanes.append('decision')
+        if re.search(r'(?:^|\s)\S*wayfinder_engine\.mts(?:\s|$)', command) and live and '--spec-ruling' not in command: lanes.append('wayfinder')
         if re.search(r'-m pilot1742\.executor\b.*\s(?:serve|run)(?:\s|$)', command):
             lanes.append('executor')
             if re.search(r'\bserve\b', command) and '--review-sweep' in command: lanes.append('review')
-        if re.search(r'-m pilot1742\.(?:review_sweep|external_review)\b', command): lanes.append('review')
+        if (re.search(r'-m pilot1742\.review_sweep(?:\s|$)', command)
+                or re.search(r'-m pilot1742\.external_review\s+(?:review-pr|migrate-stale)(?:\s|$)', command)):
+            lanes.append('review')
         if lanes:
             try:
                 start = identity(pid)

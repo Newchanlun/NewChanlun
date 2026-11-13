@@ -1711,3 +1711,32 @@ def test_recovery_review_requires_exact_launch_and_target_receipts(lane, monkeyp
     (worker / 'receipt.json').write_text(json.dumps(receipt))
     monkeypatch.setattr(external_review, 'supervisor_alive', lambda *args: True)
     assert not maintenance_recovery.bound_idle(binding)
+
+
+def test_maintenance_spawn_failure_is_retryable_and_recorded(tmp_path, monkeypatch):
+    from pilot1742.maintenance import Owner
+    owner = Owner('review', tmp_path / 'gate')
+    monkeypatch.setattr('pilot1742.maintenance.identity', lambda pid: 'fixture')
+    with owner.gate.tx() as db:
+        db.execute('UPDATE owners SET start=? WHERE id=?', ('fixture', owner.id))
+    def failed(*a, **kw):
+        raise OSError('offline spawn failure')
+    monkeypatch.setattr(module.subprocess, 'Popen', failed)
+    for _ in range(2):
+        with pytest.raises(OSError): module.spawner(tmp_path / 'unused', owner)(10, 1, 'a' * 40, tmp_path / 'log')
+        assert owner.gate.status([])['inflight'] == []
+    with owner.gate.tx() as db:
+        assert db.execute('SELECT count(*) FROM cancellations').fetchone()[0] == 2
+
+
+def test_maintenance_preflight_gh_error_leaves_no_unknown(tmp_path):
+    from pilot1742.maintenance import Owner
+    parent = Owner('review', tmp_path / 'gate')
+    job = parent.reserve('pr:10:' + 'a' * 40 + ':1')
+    class Offline:
+        def pr(self, _): raise OSError('offline github')
+    with pytest.raises(OSError):
+        module.run_review(['--pr', '10', '--attempt', '1', '--expect-head', 'a' * 40,
+                           '--private-key', str(tmp_path / 'unused'), '--maintenance-root', str(parent.gate.root),
+                           '--maintenance-reservation', job], Offline())
+    assert parent.gate.status([])['inflight'] == []

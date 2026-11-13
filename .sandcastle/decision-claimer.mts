@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-import { MaintenanceOwner, MaintenanceClosed } from "./maintenance.mts";
+import { MaintenanceOwner, MaintenanceClosed, maintenanceResource } from "./maintenance.mts";
 /**
  * decision-claimer.mts —— graph engineering 裁决面（#1547）。
  *
@@ -606,6 +606,7 @@ function claudeOnce(c: ModelCall, token: string, timeoutMs: number, sessionId?: 
   delete env.ANTHROPIC_API_KEY;
   const args = claudeArgs(c, sessionId);
   return new Promise((res) => {
+    const closed = maintenanceResource();
     const child = spawn("claude", args, { cwd: c.cwd, env, stdio: ["pipe", "pipe", "pipe"] });
     let stdout = "";
     let stderr = "";
@@ -614,7 +615,8 @@ function claudeOnce(c: ModelCall, token: string, timeoutMs: number, sessionId?: 
     child.stdout.on("data", (d) => (stdout += d));
     child.stderr.on("data", (d) => (stderr += d));
     child.on("error", (e) => (stderr += `\nspawn error: ${e.message}`));
-    child.on("close", (code) => {
+    child.on("close", (code, signal) => {
+      closed(!timedOut && signal === null);
       clearTimeout(timer);
       res({ code: code ?? 1, stdout, stderr: timedOut ? `${stderr}\nclaude 子进程超时（${Math.round(timeoutMs / 1000)}s timed out）` : stderr });
     });
@@ -1640,7 +1642,7 @@ export async function processTicket(n: number, raw: Deps): Promise<Summary> {
   if (!release) return { ticket: n, mode: raw.mode, phase: "error", attempts: 0, durationsMs: {}, plannedWrites: [], error: "本地锁已存在，另一进程正在处理" };
   try {
     return raw.maintenance
-      ? await raw.maintenance.work(`ticket:${n}`, () => processTicketLocked(n, raw), r => r.phase !== "error")
+      ? await raw.maintenance.work(`ticket:${n}`, () => processTicketLocked(n, raw))
       : await processTicketLocked(n, raw);
   }
   finally { release(); }
@@ -2365,7 +2367,7 @@ async function main() {
     mode: a.mode, drainRoot: DRAIN_ROOT, gh, git, model: makeClaudeRunner(), outRoot: a.outRoot, srcDir, repoRoot: REPO_ROOT, now: Date.now,
     me: a.mode === "live" ? gh(["api", "user", "--jq", ".login"]).trim() : undefined,
   };
-  const maintenance = new MaintenanceOwner("decision");
+  const maintenance = a.mode === "live" && !a.archaeologyOnly ? new MaintenanceOwner("decision") : undefined;
   d.maintenance = maintenance;
   try {
     if (a.archaeologyOnly) {
@@ -2384,7 +2386,7 @@ async function main() {
     }
     for (;;) {
       if (graphAdmissionFrozen(d)) { log("旧入口冻结，已领工作收尾后退出"); return; }
-      if (maintenance.poll()) {
+      if (maintenance?.poll()) {
         if (!a.loop) return;
         await new Promise((r) => setTimeout(r, LOOP_INTERVAL_MS));
         continue;
@@ -2400,7 +2402,7 @@ async function main() {
       if (!a.loop) break;
       await new Promise((r) => setTimeout(r, LOOP_INTERVAL_MS));
     }
-  } finally { maintenance.stop(); }
+  } finally { maintenance?.stop(); }
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1])).href) {

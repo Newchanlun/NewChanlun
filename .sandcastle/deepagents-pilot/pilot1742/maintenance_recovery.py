@@ -17,6 +17,18 @@ def executor_idle(binding: dict) -> bool:
     return worker_activity({folder}, Path(binding['source_repo'])) is None
 
 
+def executor_preflight_idle(binding: dict) -> bool:
+    """仅用于入口明确未进入 run 的返回证明；仍不能放过先前遗留的 worker 状态。"""
+    from .executor import load_unit
+    from .queue import worker_activity
+    from .run import PilotRun
+    root = Path(binding['state_root'])
+    unit, _ = load_unit(root, binding['run_id'])
+    if unit.run_id != binding['run_id'] or f'ticket:{unit.ticket}' != binding['work']:
+        return False
+    return worker_activity({PilotRun.run_dir(root, unit.run_id)}, Path(binding['source_repo'])) is None
+
+
 def executor_scope_idle(scope: dict) -> bool:
     from .queue import worker_activity
     root = Path(scope['state_root'])

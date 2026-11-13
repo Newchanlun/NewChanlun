@@ -194,7 +194,10 @@ def test_recovered_history_does_not_ack_new_generation(recovery):
 def test_executor_entry_preserves_return_and_requires_cleanup(recovery, monkeypatch):
     from pilot1742 import executor
     gate, owner, job, _, _ = recovery
-    monkeypatch.setattr(executor, '_main', lambda args: 2)
+    def returned_error(args, *, on_execution):
+        on_execution()
+        return 2
+    monkeypatch.setattr(executor, '_main', returned_error)
     monkeypatch.setattr(evidence, 'bound_idle', lambda binding: False)
     argv = ['--state-root', str(gate.root.parent / 'state'), 'run', '--run-id', 't1742-1',
             '--maintenance-root', str(gate.root), '--maintenance-job', job]

@@ -5,14 +5,14 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import test from "node:test";
-import { MaintenanceOwner, MaintenanceClosed } from "./maintenance.mts";
+import { MaintenanceOwner, MaintenanceClosed, maintenanceResource } from "./maintenance.mts";
 
 const helper = fileURLToPath(new URL("./deepagents-pilot/pilot1742/maintenance.py", import.meta.url));
 function control(root: string, command: string, ...args: string[]) {
   return JSON.parse(execFileSync("python3", [helper, "--root", root, command, ...args], { encoding: "utf8" }));
 }
 
-test("TS 已领取回调完整运行，Python 关闸挡住下一工作；异常留下 unknown", async () => {
+test("TS 已领取回调完整运行，Python 关闸挡住下一工作；已返回普通失败不占在途", async () => {
   const root = mkdtempSync(join(tmpdir(), "maintenance-ts-"));
   try {
     const owner = new MaintenanceOwner("decision", root);
@@ -35,6 +35,12 @@ test("TS 已领取回调完整运行，Python 关闸挡住下一工作；异常�
     assert.equal(control(root, "status").inflight.length, 0);
     control(root, "resume", "--generation", "1");
     await assert.rejects(owner.work("ticket:1744", () => { throw new Error("fixture"); }));
+    assert.equal(control(root, "status").inflight.length, 0);
+    await assert.rejects(owner.work("ticket:1745", () => {
+      const closed = maintenanceResource();
+      closed(false);
+      throw new Error("child cleanup unverified");
+    }));
     assert.equal(control(root, "status").inflight[0].state, "unknown");
     owner.stop();
   } finally { rmSync(root, { recursive: true, force: true }); }

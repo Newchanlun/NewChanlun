@@ -848,12 +848,16 @@ def spawner(private_key: Path, maintenance: Owner | None = None) -> Spawn:
     owner = maintenance or Owner("review")
     def spawn(number: int, attempt: int, head: str, log: Path) -> int:
         reservation = owner.reserve(f"pr:{number}:{head}:{attempt}")
-        log.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-        with open(log, "ab", opener=lambda p, f: os.open(p, f, 0o600)) as out:
-            return subprocess.Popen(run_review_command(number, attempt, head, private_key) +
-                                    ["--maintenance-reservation", reservation, "--maintenance-root", str(owner.gate.root)], stdin=subprocess.DEVNULL,
-                                    stdout=out, stderr=out, start_new_session=True,
-                                    cwd=Path(__file__).resolve().parents[1]).pid
+        try:
+            log.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+            with open(log, "ab", opener=lambda p, f: os.open(p, f, 0o600)) as out:
+                return subprocess.Popen(run_review_command(number, attempt, head, private_key) +
+                                        ["--maintenance-reservation", reservation, "--maintenance-root", str(owner.gate.root)], stdin=subprocess.DEVNULL,
+                                        stdout=out, stderr=out, start_new_session=True,
+                                        cwd=Path(__file__).resolve().parents[1]).pid
+        except OSError:
+            owner.gate.cancel_unstarted(owner.id, reservation, 'spawn_failed')
+            raise
     return spawn
 
 
@@ -873,15 +877,13 @@ def run_review(argv: list[str], github: GitHubPort | None = None) -> int:
     except Closed:
         owner.stop()
         return 75
-    natural = False
     try:
-        proof = []
-        code = _run_review(args, github, lambda: proof.append(True), (owner, job))
-        natural = code == 3 or bool(proof)
-        return code
+        return _run_review(args, github, lambda: None, (owner, job))
     finally:
-        owner.finish(job, natural)
-        owner.stop()
+        try:
+            owner.gate.finish_review(owner.id, job)
+        finally:
+            owner.stop()
 
 
 def _run_review(args, github, on_natural, maintenance=None):

@@ -882,12 +882,16 @@ def _serve(args: argparse.Namespace, store: ClaimStore, cutover_store: CutoverSt
                    "--workers-log", str(args.workers_log), "--private-key", str(args.private_key),
                    "--recheck-approval"]
         with maintenance.gate.tx() as db:
-            permit = db.execute("SELECT id FROM jobs WHERE owner=? AND work=? AND state='active'",
-                                (maintenance.id, f"ticket:{unit.ticket}")).fetchone()
+            permit = db.execute("SELECT jobs.id FROM jobs JOIN bindings ON bindings.job=jobs.id WHERE owner=? AND work=? AND state IN ('active','unknown') AND json_extract(bindings.data,'$.run_id')=? AND jobs.id NOT IN (SELECT job FROM resolutions)",
+                                (maintenance.id, f"ticket:{unit.ticket}", unit.run_id)).fetchone()
         if permit is None:
             raise ValueError("missing maintenance admission")
         command += ["--maintenance-job", permit['id'], "--maintenance-root", str(maintenance.gate.root)]
-        return subprocess.run(command, check=False).returncode
+        try:
+            return subprocess.run(command, check=False).returncode
+        except OSError:
+            maintenance.gate.cancel_unstarted(maintenance.id, permit['id'], 'spawn_failed')
+            raise
 
     sweep_round = None
     if args.review_sweep and review_key is not None:
@@ -930,7 +934,7 @@ def _serve(args: argparse.Namespace, store: ClaimStore, cutover_store: CutoverSt
             client.close()
 
 
-def _main(argv: list[str] | None = None) -> int:
+def _main(argv: list[str] | None = None, *, on_execution: Callable[[], None] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="pilot1742.executor", description="新执行器：v2 票登记、引擎队列、持有、运行与释放")
     parser.add_argument("--state-root", type=Path, default=DEFAULT_STATE_ROOT)
     parser.add_argument("--drain-root", type=Path, default=DRAIN_ROOT, help="隔离测试用；部署保持缺省全局根")
@@ -1107,6 +1111,8 @@ def _main(argv: list[str] | None = None) -> int:
                 return cancel_worker(run, args.role, args.head)
             executor = TicketExecutor(unit, gateway, claims=store, workers_log=args.workers_log,
                                       crash=_sigkill_at(args.crash_at), cutover=cutover_store)
+            if on_execution is not None:
+                on_execution()
             try:
                 pilot = open_v2_run(args.state_root, unit, task, executor, PSTACK_MODELS.read_text())
             except Busy as error:
@@ -1143,8 +1149,17 @@ def main(argv: list[str] | None = None) -> int:
     binding, _ = parser.parse_known_args(arguments)
     gate = Gate(binding.maintenance_root)
     witness = gate.start_bound(binding.maintenance_job, binding.run_id, binding.state_root)
-    code = _main(arguments)
-    gate.returned(witness)
+    entered = False
+    def entering():
+        nonlocal entered
+        entered = True
+    try:
+        code = _main(arguments, on_execution=entering)
+    finally:
+        if entered:
+            gate.returned(witness)
+        else:
+            gate.returned_preflight(witness)
     if code != 75:
         try:
             gate.complete_bound(witness)

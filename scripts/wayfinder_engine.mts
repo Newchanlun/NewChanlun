@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-import { MaintenanceOwner } from "../.sandcastle/maintenance.mts";
+import { MaintenanceOwner, maintenanceResource } from "../.sandcastle/maintenance.mts";
 /**
  * wayfinder_engine.mts —— 图清自动汇入主干管线自动化（#1078 裁定落地，#1084 实装）。
  *
@@ -1114,15 +1114,24 @@ function runSpecDrafter(prompt: string, cfg: EngineConfig): string {
     WAYFINDER_SPEC_MODEL: cfg.specModel,
   });
   const { file, args } = specDrafterCommand(specModel);
-  const out = execFileSync(file, args, {
-    encoding: "utf8",
-    input: prompt,
-    cwd: tmpdir(),
-    env: specDrafterEnv(process.env, cliProxyEnv()),
-    maxBuffer: 32 * 1024 * 1024,
-    timeout: 15 * 60 * 1000,
-  });
-  return out.trim();
+  const closed = maintenanceResource();
+  try {
+    const out = execFileSync(file, args, {
+      encoding: "utf8",
+      input: prompt,
+      cwd: tmpdir(),
+      env: specDrafterEnv(process.env, cliProxyEnv()),
+      maxBuffer: 32 * 1024 * 1024,
+      timeout: 15 * 60 * 1000,
+    });
+    return out.trim();
+  } catch (error) {
+    const failure = error as { signal?: string; code?: string };
+    closed(!failure.signal && failure.code !== "ETIMEDOUT");
+    throw error;
+  } finally {
+    closed(true); // 幂等；不能覆盖上面记录的收尾不明。
+  }
 }
 
 /** 拉一张图的全量上下文（供起草 spec / 组装图关 comment）。 */
@@ -1595,14 +1604,14 @@ async function main(): Promise<void> {
   console.log(
     `[wayfinder_engine] 启动：dry-run=${cfg.dryRun} poll=${cfg.pollSeconds}s orchestrator=${cfg.orchestrator} spec 起草子代理=${cfg.specProvider}/${cfg.specModel}`,
   );
-  const maintenance = new MaintenanceOwner("wayfinder");
+  const maintenance = cfg.dryRun ? undefined : new MaintenanceOwner("wayfinder");
   try {
     if (cfg.once) {
-      if (!maintenance.poll()) await runOnce(cfg, maintenance);
+      if (!maintenance?.poll()) await runOnce(cfg, maintenance);
       return;
     }
     for (;;) {
-      if (maintenance.poll()) { await sleep(cfg.pollSeconds * 1000); continue; }
+      if (maintenance?.poll()) { await sleep(cfg.pollSeconds * 1000); continue; }
       if (graphAdmissionFrozen()) { console.log("旧入口冻结，本轮不再领新工作"); return; }
       try {
         await runOnce(cfg, maintenance);
@@ -1611,7 +1620,7 @@ async function main(): Promise<void> {
       }
       await sleep(cfg.pollSeconds * 1000);
     }
-  } finally { maintenance.stop(); }
+  } finally { maintenance?.stop(); }
 }
 
 if ((import.meta as { main?: boolean }).main) {

@@ -69,7 +69,7 @@ function runEngine(failCount: number, maxAttempts: number): string {
         `engine --once --dry-run 退出码 ${r.status}\nstdout:\n${r.stdout}\nstderr:\n${r.stderr}`,
       );
     }
-    assert.ok(existsSync(join(dir, "maintenance/maintenance.sqlite3")), "真实入口必须使用临时维护账本");
+    assert.equal(existsSync(join(dir, "maintenance/maintenance.sqlite3")), false, "dry-run 不登记维护账本");
     return (r.stdout ?? "") + "\n" + (r.stderr ?? "");
   } finally {
     rmSync(dir, { recursive: true, force: true });

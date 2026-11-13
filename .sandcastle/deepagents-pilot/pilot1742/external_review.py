@@ -1305,22 +1305,21 @@ def main(argv: list[str] | None = None, *, admitted: bool = False, on_natural=No
     except Closed:
         owner.stop()
         return 75
-    natural = False
     try:
-        proof = []
-        code = _main(arguments, on_natural=lambda: proof.append(True), maintenance=(owner, job))
-        natural = bool(proof)
-        return code
+        return _main(arguments, maintenance=(owner, job))
     finally:
-        owner.finish(job, natural)
-        owner.stop()
+        try:
+            owner.gate.finish_review(owner.id, job)
+        finally:
+            owner.stop()
 
 
 def _main(argv: list[str] | None = None, *, on_natural=None, maintenance=None) -> int:
-    code = _run_main(argv, on_natural=on_natural, maintenance=maintenance)
-    if maintenance is not None:
-        maintenance[0].gate.returned_current(maintenance[1])
-    return code
+    try:
+        return _run_main(argv, on_natural=on_natural, maintenance=maintenance)
+    finally:
+        if maintenance is not None:
+            maintenance[0].gate.returned_current(maintenance[1])
 
 
 def _run_main(argv: list[str] | None = None, *, on_natural=None, maintenance=None) -> int:
