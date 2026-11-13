@@ -13,10 +13,10 @@ from pilot1742 import maintenance as m
     ('python -m pilot1742.executor --state-root /state run --run-id x', ['executor']),
     ('python -m pilot1742.executor serve --review-sweep', ['executor']),
     ('node unrelated.mjs decision-claimer.mts --live', []),
-    ('node /tmp/wayfinder_engine.mts --maintenance-root /isolated --live', []),
-    ('node /tmp/decision-claimer.mts --maintenance-root /isolated --dry-run', []),
-    ('python -m pilot1742.executor run --maintenance-root /isolated', []),
-    ('python -m pilot1742.review_sweep run-review --maintenance-root /isolated', []),
+    ('node /tmp/wayfinder_engine.mts --maintenance-root /isolated --live', ['wayfinder']),
+    ('node /tmp/decision-claimer.mts --maintenance-root /isolated --dry-run', ['decision']),
+    ('python -m pilot1742.executor run --maintenance-root /isolated', ['executor']),
+    ('python -m pilot1742.review_sweep run-review --maintenance-root /isolated', ['review']),
 ])
 def test_actual_entry_and_scope(command, expected):
     assert m.command_lanes(command, m.ROOT) == expected
@@ -31,7 +31,7 @@ def test_scope_filter_uses_native_argv_not_flattened_value(monkeypatch):
     assert m.process_inventory() == [('decision', 123, 'exact-start')]
     monkeypatch.setattr(m, 'process_arguments', lambda _: ['node', '/tmp/decision-claimer.mts',
                                                          '--maintenance-root', '/isolated'])
-    assert m.process_inventory() == []
+    assert m.process_inventory() == [('decision', 123, 'exact-start')]
     assert m.process_inventory(m.Path('/isolated')) == [('decision', 123, 'exact-start')]
 
 
@@ -94,3 +94,128 @@ def test_native_argv_boundaries_for_own_isolated_child(tmp_path):
         assert m.process_arguments(child.pid) == command
     finally:
         child.communicate(timeout=5)
+
+
+@pytest.mark.parametrize('options,module,tail,lane', [
+    ('-X dev', 'executor', 'serve', 'executor'),
+    ('-W ignore', 'review_sweep', '', 'review'),
+    ('-uBXdev', 'executor', 'serve', 'executor'),
+    ('-Wignore -OO', 'executor', 'run', 'executor'),
+    ('--check-hash-based-pycs always', 'executor', 'serve', 'executor'),
+    ('--future-option', 'executor', 'serve', 'executor'),
+])
+def test_interpreter_options_cannot_hide_unbound_work(tmp_path, monkeypatch, options, module, tail, lane):
+    gate = m.Gate(tmp_path)
+    owners = [gate.register(name) for name in m.LANES]
+    gate.request()
+    for owner in owners:
+        gate.poll(owner)
+        gate.coverage(owner, True)
+        gate.stop(owner)
+    assert gate.status([])['state'] == 'drained'
+    command = f'python3 {options} -m pilot1742.{module} {tail}'
+    monkeypatch.setattr(m.subprocess, 'run', lambda *a, **kw: SimpleNamespace(stdout=f'999999 1 {command}'))
+    monkeypatch.setattr(m, 'identity', lambda _: 'legacy-live-start')
+    status = gate.status()
+    assert status['state'] == 'unknown'
+    assert status['uncovered'][0]['lane'] == lane
+
+
+def test_foreign_scope_needs_original_live_binding(tmp_path, monkeypatch):
+    local, foreign = tmp_path / 'local', tmp_path / 'foreign'
+    argv = ['node', '/tmp/wayfinder_engine.mts', '--live', '--maintenance-root', str(foreign)]
+    monkeypatch.setattr(m.subprocess, 'run', lambda *a, **kw: SimpleNamespace(stdout=f'123 1 {" ".join(argv)}'))
+    monkeypatch.setattr(m, 'identity', lambda _: 'start')
+    monkeypatch.setattr(m, 'process_arguments', lambda _: argv)
+    assert m.process_inventory(local) == [('wayfinder', 123, 'start')]
+    assert not foreign.exists()  # 清点不得创建另一个账本。
+    gate = m.Gate(foreign)
+    owner = gate.register('wayfinder', 123)
+    assert m.process_inventory(local) == []
+    monkeypatch.setattr(m, 'identity', lambda _: 'reused')
+    assert m.process_inventory(local) == [('wayfinder', 123, 'reused')]
+    monkeypatch.setattr(m, 'identity', lambda _: 'start')
+    gate.stop(owner)
+    assert m.process_inventory(local) == [('wayfinder', 123, 'start')]
+
+
+@pytest.mark.parametrize('tail', [
+    ['--maintenance-root=/elsewhere'],
+    ['--maintenance-root', '/elsewhere'],
+    ['--', '--maintenance-root', '/elsewhere'],
+])
+def test_real_wayfinder_parser_legacy_scope_still_blocks(tmp_path, monkeypatch, tail):
+    """执行源码中的真实parseArgs，不调用main；旧无绑定进程不得从参数推定外域。"""
+    import json
+    import subprocess
+    from pathlib import Path
+
+    repo = Path(__file__).resolve().parents[3]
+    script = """
+const fs = require('fs'), vm = require('vm'), ts = require('esbuild');
+const source = fs.readFileSync('scripts/wayfinder_engine.mts', 'utf8');
+const start = source.indexOf('function parseArgs(');
+const end = source.indexOf('const sleep =', start);
+const code = ts.transformSync(source.slice(start, end), {loader:'ts', target:'es2022'}).code;
+const context = {process:{env:{}}, DEFAULT_POLL_SECONDS:60, ORCHESTRATOR_LOGIN:'fixture',
+ resolve:require('path').resolve, resolveSpecDrafter:()=>({})};
+vm.createContext(context); vm.runInContext(code, context);
+console.log(JSON.stringify(context.parseArgs(JSON.parse(process.argv[1]))));
+"""
+    argv = ['--live', *tail]
+    result = subprocess.run(['node', '-e', script, json.dumps(argv)], cwd=repo,
+                            capture_output=True, text=True, check=False)
+    assert result.returncode == 0, result.stderr
+    parsed = json.loads(result.stdout)
+    assert parsed['dryRun'] is False
+    if tail[0].startswith('--maintenance-root='):
+        assert parsed.get('maintenanceRoot') is None
+    else:
+        assert parsed['maintenanceRoot'] == '/elsewhere'
+    gate = m.Gate(tmp_path)
+    owners = [gate.register(lane) for lane in m.LANES]
+    gate.request()
+    for owner in owners:
+        gate.poll(owner)
+        gate.coverage(owner, True)
+        gate.stop(owner)
+    command = ['node', 'scripts/wayfinder_engine.mts', *argv]
+    monkeypatch.setattr(m.subprocess, 'run', lambda *a, **kw: SimpleNamespace(stdout=f'999999 1 {" ".join(command)}'))
+    monkeypatch.setattr(m, 'identity', lambda _: 'legacy')
+    monkeypatch.setattr(m, 'process_arguments', lambda _: command)
+    assert gate.status()['state'] == 'unknown'
+
+
+@pytest.mark.parametrize('prefix', [
+    ['--out', '--maintenance-root', '/unused'],
+    ['--', '--maintenance-root'],
+    ['--maintenance-root='],
+])
+def test_non_option_scope_text_never_excludes_live_binding(tmp_path, monkeypatch, prefix):
+    foreign = m.Gate(tmp_path / 'foreign')
+    monkeypatch.setattr(m, 'identity', lambda _: 'bound')
+    foreign.register('decision', 123)
+    argv = ['node', 'decision-claimer.mts', *prefix, str(foreign.root)]
+    assert not m.foreign_scope_bound(argv, 'decision', 123, 'bound', tmp_path / 'local')
+
+
+@pytest.mark.parametrize('options', [
+    ['-X', 'dev'], ['-W', 'ignore'], ['-uBXdev'], ['-Wignore', '-OO'],
+    ['--check-hash-based-pycs', 'always'],
+])
+def test_interpreter_options_are_accepted_by_real_python(options):
+    import subprocess
+    import sys
+    result = subprocess.run([sys.executable, *options, '-c', 'print("offline")'],
+                            capture_output=True, text=True, check=True)
+    assert result.stdout.strip() == 'offline'
+    assert m.python_entry([*options, '-m', 'pilot1742.executor', 'serve']) == ('pilot1742.executor', ['serve'])
+
+
+@pytest.mark.parametrize('args', [
+    ['-c', 'print(1)', '-m', 'pilot1742.executor', 'serve'],
+    ['unrelated.py', '-m', 'pilot1742.executor', 'serve'],
+    ['--', '-m', 'pilot1742.executor', 'serve'],
+])
+def test_interpreter_stops_before_unrelated_script_arguments(args):
+    assert m.python_entry(args) == (None, [])

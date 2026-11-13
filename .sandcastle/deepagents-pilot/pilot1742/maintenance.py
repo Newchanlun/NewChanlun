@@ -816,6 +816,101 @@ def process_arguments(pid: int) -> list[str]:
     raise OSError('native argv unavailable')
 
 
+
+def python_entry(args: list[str]) -> tuple[str | None, list[str]]:
+    """CPython interpreter switches, including clustered flags and attached values.
+
+    An unrecognized switch is not proof that a visible target module is unrelated.
+    -c/script/-- terminate interpreter-option parsing; their arguments are not modules.
+    """
+    original = args
+    while args:
+        arg, args = args[0], args[1:]
+        if arg == '--check-hash-based-pycs':
+            args = args[1:]
+            continue
+        if arg in ('--help', '--version', '--help-env', '--help-xoptions', '--help-all'):
+            return None, []
+        if not arg.startswith('-') or arg in ('-', '--'):
+            return None, []
+        flags = arg[1:]
+        while flags:
+            flag, flags = flags[0], flags[1:]
+            if flag in 'bBdEiIOPqRsSuvx':
+                continue
+            if flag in 'hV?c':
+                return None, []
+            if flag in 'WXm':
+                value = flags or (args.pop(0) if args else '')
+                if flag == 'm':
+                    return value, args
+                break
+            # Unknown interpreter syntax: preserve visible relevant module as unknown.
+            for i, word in enumerate(original):
+                if word == '-m' and i + 1 < len(original):
+                    return original[i + 1], original[i + 2:]
+            return None, []
+    return None, []
+
+
+def foreign_scope_bound(argv: list[str], lane: str, pid: int, start: str, root: Path) -> bool:
+    """A root argument is only a hint; the original live owner is the scope proof.
+
+    Old binaries can ignore new options. Never exclude them from argv alone.
+    Only the unambiguous separate option is used as a lookup hint; equals/-- and
+    strings consumed as values cannot prove scope. Missing/unreadable proof stays local.
+    """
+    # Known value-taking options from the four entry parsers; unknown options cannot
+    # establish an external scope. The live identity record remains mandatory.
+    values = {'--out', '--ticket', '--maps', '--concurrency', '--poll-seconds',
+              '--state-root', '--drain-root', '--run-id', '--model-rules', '--workers-log',
+              '--private-key', '--review-private-key', '--review-sweep-max-running',
+              '--maintenance-job', '--crash-at', '--pr', '--attempt', '--expect-head',
+              '--max-running', '--loop', '--reason', '--task', '--note'}
+    switches = {'--live', '--dry-run', '--once', '--explain', '--archaeology-only',
+                '--resume', '--recheck-approval', '--review-sweep', '--review-sweep-auto-merge', '--auto-merge'}
+    if lane != 'review':
+        values.remove('--loop')
+        switches.add('--loop')
+    entries = {'decision-claimer.mts', 'wayfinder_engine.mts', 'pilot1742.executor',
+               'pilot1742.review_sweep', 'pilot1742.external_review'}
+    entry = next((i for i, arg in enumerate(argv) if Path(arg).name in entries), None)
+    if entry is None:
+        return False
+    argv = argv[entry + 1:]
+    if argv and argv[0] in ('serve', 'run', 'run-review', 'review-pr', 'migrate-stale'):
+        argv = argv[1:]
+    scope = None
+    i = 0
+    while i < len(argv):
+        arg = argv[i]
+        if arg == '--':
+            return False
+        if arg == '--maintenance-root':
+            if i + 1 >= len(argv) or argv[i + 1].startswith('-'):
+                return False
+            scope = argv[i + 1]
+            i += 2
+        elif arg in values:
+            i += 2
+        elif arg in switches or ('=' in arg and arg.split('=', 1)[0] in values):
+            i += 1
+        else:
+            return False  # 未核实的参数消费语义不能证明外域。
+    if not scope or not Path(scope).is_absolute() or Path(scope).resolve() == root.resolve():
+        return False
+    path = Path(scope) / 'maintenance.sqlite3'
+    try:
+        db = sqlite3.connect(path.as_uri() + '?mode=ro', uri=True)
+        try:
+            return db.execute('SELECT 1 FROM owners WHERE lane=? AND pid=? AND start=? AND stopped=0',
+                              (lane, pid, start)).fetchone() is not None
+        finally:
+            db.close()
+    except (OSError, ValueError, sqlite3.Error):
+        return False
+
+
 def command_lanes(command: str, root: Path, argv: list[str] | None = None) -> list[str]:
     """只解析解释器实际入口/子命令；不扫描 reason、提示或参数值里的 run。"""
     try:
@@ -831,11 +926,7 @@ def command_lanes(command: str, root: Path, argv: list[str] | None = None) -> li
     args = words[1:]
     module = None
     if re.fullmatch(r'python[\d.]*', executable):
-        while args and args[0] in ('-u', '-B', '-E', '-s', '-I', '-O', '-OO'):
-            args = args[1:]
-        if len(args) < 2 or args[0] != '-m':
-            return []
-        module, args = args[1], args[2:]
+        module, args = python_entry(args)
     elif executable in ('node', 'tsx'):
         while args and args[0].startswith('-'):
             skip = 2 if args[0] in ('--import', '--loader', '--require', '-r', '--tsconfig') else 1
@@ -847,15 +938,7 @@ def command_lanes(command: str, root: Path, argv: list[str] | None = None) -> li
         module, args = Path(args[0]).name, args[1:]
     else:
         return []
-    # 明确绝对根是调用合同的一部分；缺失/不可解析时仍保守归部署根。
-    scope = None
-    for i, arg in enumerate(args):
-        if arg == '--maintenance-root' and i + 1 < len(args):
-            scope = args[i + 1]
-        elif arg.startswith('--maintenance-root='):
-            scope = arg.split('=', 1)[1]
-    if scope and Path(scope).is_absolute() and Path(scope).resolve() != root.resolve():
-        return []
+    # argv 根参数不证明旧二进制实际消费它；外域排除另核原活 owner。
     if module == 'decision-claimer.mts':
         return ['decision']
     if module == 'wayfinder_engine.mts':
@@ -872,7 +955,7 @@ def command_lanes(command: str, root: Path, argv: list[str] | None = None) -> li
             elif args[i].startswith(('--state-root=', '--drain-root=')):
                 i += 1
             else:
-                return []  # parser 在执行前拒绝未知全局选项。
+                return ['executor']  # 未识别选项不能证明旧入口没有执行（含 argparse 缩写）。
         return ['executor'] if i < len(args) and args[i] in ('serve', 'run') else []
     if module == 'pilot1742.review_sweep':
         return ['review']
@@ -910,7 +993,8 @@ def process_inventory(root: Path = ROOT) -> list[tuple[str, int, str]]:
                 start = identity(pid)
             except ValueError:
                 continue
-            result.extend((lane, pid, start) for lane in lanes)
+            result.extend((lane, pid, start) for lane in lanes
+                          if argv is None or not foreign_scope_bound(argv, lane, pid, start, root))
     # 仅消重明确的 tsx CLI 启动壳；普通同 lane 父子进程可能都是独立 scheduler。
     def ancestor(parent, child):
         seen = set()

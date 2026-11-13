@@ -150,7 +150,7 @@ python .sandcastle/deepagents-pilot/pilot1742/maintenance.py --root <原账本�
 旧版本误识别若只留下 lane/pid/start、没有原 argv 来源或任务绑定，目前仍不能追认成无外效；需要原始绑定与可信终态来源，不能让操作员补一份自述回执。
 
 新 census 区分实际子命令和参数值，不把 `release --reason run` 当执行；serve 的 review flag 也不替代实际 review owner。
-显式 `--maintenance-root` 用原生 argv 边界核作用域，身份/argv读取失败拒绝核验，不靠扁平 ps 文本排除。
+外域排除必须同时具备原生 argv 中可判定的分离形式 `--maintenance-root <绝对路径>`，以及该根原账本中同 lane、PID、出生身份且未停止的 owner。参数只提供查证位置，不证明旧二进制消费过它；缺账本、缺绑定或读取失败时仍纳入当前清点。等号形式、`--` 后文字、参数值中的旗标与未知参数消费语义均不作为外域证明。清点只读外域账本，不创建账本；身份/argv读取失败拒绝核验。Python 解释器的 `-X`/`-W` 有参、附着值和组合旗标均按入口语法处理；无法识别语法却可见目标模块时保守计入，不能据此报告 drained。
 Wayfinder/decision CLI 与 executor serve 支持该参数；隔离 fixture 同时把实际账本和启动参数绑定到临时根。
 executor serve 预检前、decision CLI 的 gh 身份查询前已登记 owner，早退仍有精确身份记录。
 
