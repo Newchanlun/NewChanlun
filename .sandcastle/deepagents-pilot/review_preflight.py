@@ -15,7 +15,6 @@ import os
 import re
 import shutil
 import signal
-import socket
 import subprocess
 import sys
 import threading
@@ -89,7 +88,7 @@ class Deadline:
 
 
 def run_bounded(cmd: list[str], timeout: float, *, data: bytes | None = None,
-                env: dict | None = None) -> subprocess.CompletedProcess:
+                env: dict | None = None, deadline: Deadline | None = None) -> subprocess.CompletedProcess:
     """预检里唯一的子进程原语：在独立进程组里运行，最多等 timeout 秒（超时抛 TimeoutExpired）；
     无论成败，返回前都杀掉整个进程组，包装脚本留下的后台子进程也一并结束。"""
     if timeout <= 0:
@@ -97,7 +96,7 @@ def run_bounded(cmd: list[str], timeout: float, *, data: bytes | None = None,
     proc = subprocess.Popen(cmd, stdin=subprocess.PIPE if data is not None else subprocess.DEVNULL,
                             stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=env, start_new_session=True)
     try:
-        out, err = proc.communicate(data, timeout=timeout)
+        out, err = proc.communicate(data, timeout=min(timeout, deadline.work_left()) if deadline else timeout)
     finally:
         try:
             os.killpg(proc.pid, signal.SIGKILL)
@@ -337,33 +336,24 @@ def _error_info(body: str) -> dict:
     return {"class": kind, "length": len(body), "sha256_12": hashlib.sha256(body.encode("utf-8", "replace")).hexdigest()[:12]}
 
 
-def _read_complete_response(response, deadline: Deadline) -> bytes:
-    """read() 校验 HTTP framing；独立 socket 引用在原绝对期限唤醒阻塞读取。"""
-    remaining = deadline.work_left()
-    if remaining <= 0:
-        raise TimeoutError("response deadline")
-    # fileno/dup/shutdown 不解析 HTTP，也不依赖 urllib 的私有 socket 属性。
-    with socket.socket(fileno=os.dup(response.fileno())) as connection:
-        def abort_read():
-            try:
-                connection.shutdown(socket.SHUT_RDWR)
-            except OSError:
-                pass  # 对端可能已关闭；读取异常仍由 read() 向上传播。
-
-        timer = threading.Timer(deadline.work_left(), abort_read)
-        timer.daemon = True
-        timer.start()
-        try:
-            body = response.read()  # 不传 amt：标准库对 Content-Length 短读抛 IncompleteRead。
-            if deadline.work_left() <= 0:
-                raise TimeoutError("response deadline")
-            return body
-        finally:
-            timer.cancel()
-            timer.join()  # 回调退出后才关闭 dup fd，避免与后续请求的 fd 复用竞争。
-
-
 def round_trip(url: str, key: str, model: str, session: str, deadline: Deadline) -> dict:
+    """整个 HTTP 请求在独立进程组中运行，绝对工作期限到达后先回收再返回。"""
+    if deadline.work_left() <= 0:
+        return {"http_status": None, "terminal": None, "ok": False, "error": {"not_sent": "总时限已到"}}
+    try:
+        result = run_bounded(
+            [sys.executable, "-I", str(Path(__file__).resolve()), "--http-worker"],
+            deadline.work_left(), deadline=deadline,
+            data=json.dumps([url, key, model, session, deadline.work, deadline.total]).encode())
+        if result.returncode:
+            raise RuntimeError("HTTP worker failed")
+        return json.loads(result.stdout)
+    except Exception as error:
+        return {"http_status": None, "terminal": None, "ok": False,
+                "error": {"exception": type(error).__name__, "errno": None}}
+
+
+def _round_trip_http(url: str, key: str, model: str, session: str, deadline: Deadline) -> dict:
     """一次最小往返，只探连通：responses + tools + tool_choice=auto + json_schema 输出格式。
     不代表 kimi 的生产请求形状（正式独审对 kimi 不带 --output-schema），也不验证回合内真实工具调用。"""
     body = {"model": model, "stream": True, "store": False, "reasoning": {"effort": "low"},
@@ -385,7 +375,7 @@ def round_trip(url: str, key: str, model: str, session: str, deadline: Deadline)
     try:
         with urllib.request.urlopen(request, timeout=timeout) as response:
             terminal, detail, status = None, "流在终态事件前结束", None
-            for raw in _read_complete_response(response, deadline).splitlines():
+            for raw in response.read().splitlines():
                 if deadline.work_left() <= 0:
                     detail = "总时限内无终态事件"
                     break
@@ -413,7 +403,7 @@ def round_trip(url: str, key: str, model: str, session: str, deadline: Deadline)
                     "error": None if ok else _error_info(text)}
     except urllib.error.HTTPError as error:
         return {"http_status": error.code, "terminal": None, "ok": False,
-                "error": _error_info(error.read(65536).decode("utf-8", "replace"))}
+                "error": _error_info(error.read()[:65536].decode("utf-8", "replace"))}
     except Exception as error:  # 连接、协议等任何异常都只记类型与 errno，不带异常原文
         reason = getattr(error, "reason", None)
         return {"http_status": None, "terminal": None, "ok": False,
@@ -594,22 +584,24 @@ def run_checks(args, deadline: Deadline, secrets: list) -> list[dict]:
     credential, key = check_credential(args, deadline)
     secrets.append(key)
     checks = [credential]
-    # 两次往返不留任何本地产物，放在守护线程里与空间、挂载检查并行；到时未完成即判失败、放弃等待。
+    # HTTP 子进程与挂载探针共享工作期限；线程须完成子进程回收后才能返回。
     probes: dict = {}
     threads = []
     if key is not None:
         for model in MODELS:
             def probe(m=model):
                 probes[m] = _guarded(f"roundtrip:{m}", "roundtrip", lambda: probe_model(args, m, key, deadline))
-            threads.append(threading.Thread(target=probe, daemon=True))
+            threads.append(threading.Thread(target=probe))
             threads[-1].start()
-    checks.append(_guarded("checkout_root_free_space", "space", lambda: check_space(args, deadline)))
-    mount, cleanup = check_mount(args, deadline)
-    checks.append(mount)
-    if cleanup:
-        checks.append({"name": "probe_cleanup", "class": "cleanup", "ok": False, "detail": cleanup})
-    for thread in threads:
-        thread.join(deadline.work_left())
+    try:
+        checks.append(_guarded("checkout_root_free_space", "space", lambda: check_space(args, deadline)))
+        mount, cleanup = check_mount(args, deadline)
+        checks.append(mount)
+        if cleanup:
+            checks.append({"name": "probe_cleanup", "class": "cleanup", "ok": False, "detail": cleanup})
+    finally:
+        for thread in threads:
+            thread.join()  # 各外部操作有界；包括异常出口也须先回收请求。
     for model in MODELS:
         result = probes.get(model)
         if result is None:
@@ -620,4 +612,10 @@ def run_checks(args, deadline: Deadline, secrets: list) -> list[dict]:
 
 
 if __name__ == "__main__":
-    os._exit(main())  # 不等待超时后仍挂住的探测线程
+    if sys.argv[1:] == ["--http-worker"]:
+        url, key, model, session, work, total = json.load(sys.stdin)
+        deadline = Deadline.__new__(Deadline)
+        deadline.work, deadline.total = work, total
+        print(json.dumps(_round_trip_http(url, key, model, session, deadline)))
+    else:
+        sys.exit(main())

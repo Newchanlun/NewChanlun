@@ -461,8 +461,17 @@ def test_non_utf8_legacy_log_is_not_route_evidence(tmp_path):
     assert preflight.route_from_log(tmp_path, session, time.time() - 5, wait=0.5) is None
 
 
-@pytest.mark.parametrize("framing", ("length", "short-length", "chunked", "short-chunked", "drip", "spent-budget"))
-def test_roundtrip_validates_real_http_framing(framing):
+@pytest.mark.parametrize("framing", ("length", "short-length", "chunked", "short-chunked", "drip", "spent-budget", "header-drip", "error-drip"))
+def test_roundtrip_validates_real_http_framing(framing, monkeypatch):
+    processes = []
+    popen = preflight.subprocess.Popen
+
+    def track(*args, **kwargs):
+        process = popen(*args, **kwargs)
+        processes.append(process)
+        return process
+
+    monkeypatch.setattr(preflight.subprocess, "Popen", track)
     payload = b'data: {"type":"response.completed","response":{"status":"completed"}}\n\n'
 
     class Handler(BaseHTTPRequestHandler):
@@ -475,6 +484,17 @@ def test_roundtrip_validates_real_http_framing(framing):
             self.rfile.read(int(self.headers["Content-Length"]))
             if framing == "spent-budget":
                 time.sleep(0.3)
+            if framing in ("header-drip", "error-drip"):
+                try:
+                    self.connection.sendall(b"HTTP/1.1 429 Too Many Requests\r\nContent-Length: 30\r\n")
+                    self.connection.sendall(b"X-Drip: " if framing == "header-drip" else b"\r\n")
+                    for _ in range(30):
+                        time.sleep(0.05)
+                        self.connection.sendall(b"x")
+                except (BrokenPipeError, ConnectionResetError):
+                    pass
+                self.close_connection = True
+                return
             self.send_response(200)
             self.send_header("Connection", "close")
             if framing in ("length", "short-length"):
@@ -489,7 +509,7 @@ def test_roundtrip_validates_real_http_framing(framing):
                 else:
                     self.wfile.write(f"{len(payload):x}\r\n".encode() + payload + b"\r\n")
                     self.wfile.flush()
-                    if framing in ("drip", "spent-budget"):
+                    if framing in ("drip", "spent-budget", "header-drip", "error-drip"):
                         # Bytes arrive without a completed SSE line or HTTP end.
                         for _ in range(30):
                             time.sleep(0.05)
@@ -505,12 +525,13 @@ def test_roundtrip_validates_real_http_framing(framing):
     try:
         url = f"http://127.0.0.1:{server.server_port}"  # DevSkim: ignore DS162092 本地隔离 HTTP framing 回归
         started = time.monotonic()
-        result = preflight.round_trip(url, KEY, OPUS, "preflight-test", preflight.Deadline(1 if framing in ("drip", "spent-budget") else 3))
+        result = preflight.round_trip(url, KEY, OPUS, "preflight-test", preflight.Deadline(1 if framing in ("drip", "spent-budget", "header-drip", "error-drip") else 3))
         elapsed = time.monotonic() - started
+        assert processes and all(process.poll() is not None for process in processes)
         assert result["ok"] is (framing in ("length", "chunked")), result
         if framing.startswith("short-"):
             assert result["error"]["exception"] == "IncompleteRead"
-        if framing in ("drip", "spent-budget"):
+        if framing in ("drip", "spent-budget", "header-drip", "error-drip"):
             assert elapsed < 0.7, elapsed
     finally:
         server.shutdown()
@@ -545,8 +566,8 @@ def test_roundtrip_requires_stream_cleanup_after_terminal(monkeypatch, tail):
     response = Response()
     deadline = preflight.Deadline(3)
     monkeypatch.setattr(preflight.urllib.request, "urlopen", lambda *a, **kw: response)
-    monkeypatch.setattr(preflight, "_read_complete_response", lambda response, deadline: b"".join(response))
-    result = preflight.round_trip(LOCAL, KEY, OPUS, "preflight-test", deadline)
+    response.read = lambda: b"".join(response)
+    result = preflight._round_trip_http(LOCAL, KEY, OPUS, "preflight-test", deadline)
     assert result["ok"] is (tail == "eof")
     if tail == "eof":
         assert response.exhausted
@@ -784,7 +805,7 @@ def test_structured_sse_error_never_reaches_the_report(monkeypatch):
             return False
 
     monkeypatch.setattr(urllib.request, "urlopen", lambda req, timeout=None: FakeResp(line.encode()))
-    trip = preflight.round_trip(LOCAL, key, KIMI, "s", preflight.Deadline(30))
+    trip = preflight._round_trip_http(LOCAL, key, KIMI, "s", preflight.Deadline(30))
     out = json.dumps(preflight.sanitize(trip, [key]), ensure_ascii=True)
     assert "secret" not in out and "12345" not in out and trip["error"]["class"] == "auth"
 
@@ -908,7 +929,7 @@ def test_upstream_status_object_keyed_by_the_key_never_reaches_the_report(monkey
 
     monkeypatch.setattr(urllib.request, "urlopen",
                         lambda req, timeout=None: FakeResp(("data: " + json.dumps(event) + "\n\n").encode()))
-    trip = preflight.round_trip(LOCAL, key, KIMI, "s", preflight.Deadline(5))
+    trip = preflight._round_trip_http(LOCAL, key, KIMI, "s", preflight.Deadline(5))
     preflight._emit(trip, [key])
     assert key not in capsys.readouterr().out and trip["status"] == "other"
 
@@ -963,7 +984,7 @@ def test_unknown_upstream_status_is_normalised_and_never_carries_the_key(monkeyp
 
     monkeypatch.setattr(urllib.request, "urlopen",
                         lambda req, timeout=None: FakeResp(("data: " + json.dumps(event) + "\n\n").encode()))
-    trip = preflight.round_trip(LOCAL, key, KIMI, "s", preflight.Deadline(5))
+    trip = preflight._round_trip_http(LOCAL, key, KIMI, "s", preflight.Deadline(5))
     assert trip["status"] == "other" and "1742" not in json.dumps(preflight.sanitize(trip, [key]))
 
 
@@ -1056,7 +1077,7 @@ def test_slow_but_successful_round_trip_within_the_work_deadline_passes(monkeypa
         return FakeResp(b'data: {"type":"response.completed","response":{"status":"completed"}}\n\n')
 
     monkeypatch.setattr(urllib.request, "urlopen", urlopen)
-    trip = preflight.round_trip(LOCAL, KEY, KIMI, "s", preflight.Deadline(60))
+    trip = preflight._round_trip_http(LOCAL, KEY, KIMI, "s", preflight.Deadline(60))
     assert trip["ok"] and seen["timeout"] > 50
 
 
@@ -1545,3 +1566,70 @@ def test_receipt_probe_checks_every_attempt(tmp_path, monkeypatch, routes, ok):
     checks = preflight.probe_model(args, OPUS, "offline", preflight.Deadline(4))
     assert checks[0]["ok"] is ok
     assert checks[0]["detail"]["actual"] == routes
+
+
+@pytest.mark.parametrize("phase", ("headers", "error", "success"))
+@pytest.mark.parametrize("mount_error", (False, True))
+def test_run_checks_reaps_http_workers_and_closes_connections(monkeypatch, phase, mount_error):
+    from types import SimpleNamespace
+
+    connections = []
+    release = threading.Event()
+    processes = []
+    popen = preflight.subprocess.Popen
+
+    def track(*args, **kwargs):
+        process = popen(*args, **kwargs)
+        processes.append(process)
+        return process
+
+    class Handler(BaseHTTPRequestHandler):
+        def log_message(self, *args):
+            pass
+
+        def do_POST(self):
+            self.rfile.read(int(self.headers["Content-Length"]))
+            connections.append(self.connection)
+            code = b"429 Too Many Requests" if phase == "error" else b"200 OK"
+            self.connection.sendall(b"HTTP/1.1 " + code + b"\r\nContent-Length: 1000\r\n")
+            if phase != "headers":
+                self.connection.sendall(b"\r\n")
+            release.wait(3)
+            self.close_connection = True
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)  # DevSkim: ignore DS162092 隔离回环回收测试
+    serving = threading.Thread(target=server.serve_forever)
+    serving.start()
+    monkeypatch.setattr(preflight.subprocess, "Popen", track)
+    monkeypatch.setattr(preflight, "check_credential", lambda *a: ({"ok": True}, KEY))
+    monkeypatch.setattr(preflight, "check_space", lambda *a: {"ok": True})
+
+    def mount(*args):
+        if mount_error:
+            raise RuntimeError("mount fake failure")
+        return {"ok": True}, []
+
+    monkeypatch.setattr(preflight, "check_mount", mount)
+    monkeypatch.setattr(preflight, "route_from_log", lambda *a: None)
+    before = set(threading.enumerate())
+    started = time.monotonic()
+    try:
+        args = SimpleNamespace(proxy_url=f"http://127.0.0.1:{server.server_port}", proxy_log_dir="/unused")  # DevSkim: ignore DS162092 隔离回环回收测试
+        if mount_error:
+            with pytest.raises(RuntimeError, match="mount fake failure"):
+                preflight.run_checks(args, preflight.Deadline(1), [])
+        else:
+            checks = preflight.run_checks(args, preflight.Deadline(1), [])
+            assert all(not c["ok"] for c in checks if c.get("class") == "roundtrip")
+        assert time.monotonic() - started < 0.8
+        assert len(processes) == len(connections) == 2
+        assert all(process.poll() is not None for process in processes)
+        assert not [t for t in threading.enumerate() if t not in before and t.name.endswith("(probe)")]
+        for connection in connections:
+            connection.settimeout(0.1)
+            assert connection.recv(1) == b""  # 对端 EOF，不能以服务端 write 缓冲成功推断连接存活。
+    finally:
+        release.set()
+        server.shutdown()
+        server.server_close()
+        serving.join()

@@ -40,7 +40,7 @@ python3 -I .sandcastle/deepagents-pilot/review_preflight.py \
 
 ### 成功终态之后仍须读到 EOF
 
-预检收到 `response.completed` / `response.incomplete` 后继续读完流，不能立刻关闭连接。CLIProxy v8.0.63 的 Claude 路径仍需完成上游帧与 lifecycle 收尾；提前断开会取消执行，留下 nonce 目录但没有收据。消费者使用标准库 `HTTPResponse.read()`（不传 `amt`）验证 Content-Length / chunked 完整性，不把逐行迭代结束当作完整响应。读取期间按原剩余工作期限设置一次取消计时器，通过同一连接的 dup socket 执行 shutdown 唤醒阻塞读取；收尾取消并 join 计时器，不重置 deadline。只有 HTTP 响应体完整读完、未超总 deadline、无后续错误或冲突终态，往返检查才成功；路由检查仍独立要求完整收据和全部 attempt 通过 allowlist。终态之后一直不结束的流仍按原总 deadline 拦截。
+预检收到 `response.completed` / `response.incomplete` 后继续读完流，不能立刻关闭连接。CLIProxy v8.0.63 的 Claude 路径仍需完成上游帧与 lifecycle 收尾；提前断开会取消执行，留下 nonce 目录但没有收据。消费者使用标准库 `HTTPResponse.read()`（不传 `amt`）验证 Content-Length / chunked 完整性，不把逐行迭代结束当作完整响应。整个 HTTP 往返在独立子进程组内执行，连接、响应头、成功体和错误体共用父进程传入的绝对工作期限。父进程通过 `run_bounded` 到期终止并 wait 回收进程组，不依赖 socket 空闲超时或成功体阶段的计时器。密钥仅通过 stdin 管道传入，stdout 仅返回固定字段的脱敏结果，stderr 不进入报告。只有 HTTP 响应体完整读完、未超总 deadline、无后续错误或冲突终态，往返检查才成功；路由检查仍独立要求完整收据和全部 attempt 通过 allowlist。终态之后一直不结束的流仍按原总 deadline 拦截。
 
 #2055 的离线回归使用原生 Claude executor、首次 503 后重试和受控迟到的终态帧尾：客户端读终态行就断开时无收据；读完 EOF 时产生两条 Claude 路线。生产者封口条件未放宽，真实路线仍须以新正式预检的收据为证。
 
@@ -99,7 +99,7 @@ Go `-race` 测试包含实际 `/v1/responses` handler、原生 Kimi/Claude execu
 
 ## 时限与回收
 
-所有子进程（git、`auth.command`、docker）只经过一个有界原语 `run_bounded` 启动：独立进程组、最多等给定秒数、返回前无论成败都杀掉整个进程组（包装脚本留在后台的子进程一并结束）。时间只有一个来源 `Deadline`：检查用到总时限减 min(3 秒, 总时限/2)，余下留给 `docker rm -f` 与输出报告。两次往返在守护线程里与空间、挂载检查并行，到时未完成即判失败。
+所有子进程（git、`auth.command`、docker、HTTP 往返）只经过一个有界原语 `run_bounded` 启动：独立进程组、最多等给定秒数、返回前无论成败都杀掉整个进程组（包装脚本留在后台的子进程一并结束）。时间只有一个来源 `Deadline`：检查用到总时限减 min(3 秒, 总时限/2)，余下留给 `docker rm -f` 与输出报告。两次往返在线程里与空间、挂载检查并行。HTTP 进程启动时间计入原工作期限；到期先终止并回收进程，再返回失败。`run_checks` 的正常和异常出口均等待本次探测线程完成回收，不留下活动 HTTP worker，也不靠 daemon 或 `os._exit` 跳过清理。
 
 不要把 effort 降到 `minimal`：2026-11-05 实测 Sol 在 `minimal` 下返回 400（codex 后端注入的 `image_gen` 工具不能与 `minimal` 同用），预检会因此误报。旧实现等待 request-log 落盘再判定的方式已撤回；文本入口立即返回无可信证据。新收据入口等待原子发布，其读取与子进程收尾不得越过工作期限。
 
