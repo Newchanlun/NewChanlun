@@ -41,8 +41,10 @@ TS 与 Python 共用 SQLite 账本。`request` 与 `admit` 都使用短 `BEGIN I
 先提交领取，则完整工作可继续；先提交关闭，则新领取被拒绝。网络、模型、子进程等待均在事务之外。
 因此不使用 legacy admission.lock 阻塞在途工作，也没有“检查 open 后再无记录 spawn”的间隙。
 
-领取粒度：live decision 单票、live Wayfinder 单图动作/放行动作、executor 精确 run、review 单次 PR/head/attempt。
-dry-run 与 executor 的本地 status/reconcile 不登记维护 owner，也不依赖生产维护根。live archaeology-only 会运行共享模型，须登记 decision owner、按 archaeology 工作领取许可，且纳入旧进程 census。
+领取粒度：共享模型 decision 单票/考古、live Wayfinder 单图动作/放行动作、executor 精确 run、review 单次 PR/head/attempt。
+decision CLI 的默认 dry-run、显式 --dry-run 和 --archaeology-only 都会调用共享模型，因此必须登记 decision owner 并领取维护许可；旧版本这些进程也纳入 census。`--archaeology-only` 仍只接受 dry-run、单轮、指定票，GitHub/业务只读合同不变。这里的 dry-run 是“不写业务”，不是“无模型外效”：维护操作账本是新增且必要的控制记录。
+
+纯离线 Deps 预览/测试、Wayfinder 不发模型的 dry-run，以及 executor 本地 status/reconcile 不登记维护 owner，不依赖生产维护根。CLI 的共享 runner 由 `attachCliMaintenance` 装配，离线依赖调用不经过此装配。
 维护 CLI 的 `status` 会持久记下未覆盖进程的精确身份；它不派工、不恢复工作，不是无写入查询。
 executor 的票/计划登记不等于执行准入：完成读取、等待判定与空间检查后，紧邻派工以一个事务领取并绑定 run。
 登记后才关闸的计划不会被派发；awaiting_human、跳过的计划与 break 后的剩余票不占维护记录。
@@ -115,7 +117,7 @@ Linux 离线回归使用无秘密 Boat VM，保持 pytest -n 4 全工作负载�
 
 ### 历史 review 监督异常：先核资源来源，再对账终态
 
-`SupervisorExitedWithoutReceipt` 的失败回执保持原样。现有 reaper 在删资源前，把实际带 launch 标签的对象与 Docker daemon 身份写入 `resource-observation.json`。需要人工发起资源核验时，用目标回执中的精确身份运行：
+`SupervisorExitedWithoutReceipt` 的失败回执保持原样。reaper 先取得 run 锁、重核 launch/target/daemon 与监督状态，持久化实际带标签的对象来源 `resource-observation.json`（文件及目录项同步），再在同一锁区间删除容器和卷。锁忙、身份或持久化失败时保留资源，下一轮再取证。review_pr 的 reviewer 线程可借用同实例仍持有的 run 锁 fd；核进程身份、锁文件 inode，并串行借用。其它进程/实例的锁不能借用，调用方不能用布尔参数绕锁。需要人工发起资源核验时，用目标回执中的精确身份运行：
 
 ```sh
 python -m pilot1742.external_review reconcile-resources --run-id <run-uuid> --model <reviewer> --launch-id <launch-uuid>
@@ -166,7 +168,7 @@ npm run typecheck
 测试使用临时账本、真实 SQLite 多进程竞争与管道同步；fake 工作者不访问模型或生产控制根。
 包括关闸/领取竞争、已领取持续推进、真实 detached 子进程接收与结束、缺入口确认、失联重启、精确代次恢复以及旧 freeze 不变。
 
-双 BLOCK 回归另覆盖普通业务失败与资源不明的区分、等待票不占许可、新 run 不继承旧许可、真实 SIGKILL 后同 run 跨关闭续做、旧 owner 转交历史、Popen/绑定前失败可重试、只读 census 和 dry-run 不落账本。`test_model_rules.py` 同时断言 child 的规则路径、maintenance 参数及原环境继承。
+双 BLOCK 回归另覆盖普通业务失败与资源不明的区分、等待票不占许可、新 run 不继承旧许可、真实 SIGKILL 后同 run 跨关闭续做、旧 owner 转交历史、Popen/绑定前失败可重试、只读 census 和纯离线 dry-run 不落账本。`test_model_rules.py` 同时断言 child 的规则路径、maintenance 参数及原环境继承。
 
 Wayfinder 的临时入口快照通过 `scripts/wayfinder-maintenance-fixture.mts` 复制 TS/Python 准入助手，并显式向 `MaintenanceOwner` 传入快照内的 `maintenance` 目录；不使用生产维护根。构造点变化会使夹具立即报错，不能静默恢复默认根。壳层测试同时验证 dry-run 不生成维护账本，live 快照的准入调用使用临时根，原业务断言保持不变。
 

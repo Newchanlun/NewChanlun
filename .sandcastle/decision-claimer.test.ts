@@ -3526,3 +3526,36 @@ test("live archaeology 模型请求受维护许可覆盖，关闸不得再次调
     assert.equal(h.modelCalls.length, calls);
   } finally { owner.stop(); rmSync(root, {recursive:true, force:true}); }
 });
+
+
+test("可达 archaeology-only CLI 的业务 dry-run 仍受共享模型准入，离线 Deps 不建账本", async () => {
+  const { attachCliMaintenance } = await import("./decision-claimer.mts");
+  const { MaintenanceClosed } = await import("./maintenance.mts");
+  const args = parseArgs(["--archaeology-only", "--ticket", "1355"]);
+  assert.equal(args.mode, "dry-run");
+  const root = mkdtempSync(join(tmpdir(), "cli-archaeology-maintenance-"));
+  const h = fakeDeps(args.mode, [fence({ user_gate: [], class: "T", reason: "fixture" })], [goodArch]);
+  cutoverFor(h.d);
+  const ledger = join(root, "gate");
+  const owner = attachCliMaintenance(h.d, ledger);
+  try {
+    assert.ok(owner, "共享模型 CLI 的 dry-run 也必须登记 owner");
+    const helper = join(process.cwd(), ".sandcastle/deepagents-pilot/pilot1742/maintenance.py");
+    const original = h.d.model;
+    h.d.model = async (...call) => {
+      const status = JSON.parse(execFileSync("python3", [helper, "--root", ledger, "request"], {encoding:"utf8"}));
+      assert.equal(status.inflight.length, 1);
+      return original(...call);
+    };
+    await archaeologyOnlyAdmission(args.tickets[0], h.d);
+    const count = h.modelCalls.length;
+    await assert.rejects(archaeologyOnlyAdmission(args.tickets[0], h.d), MaintenanceClosed);
+    assert.equal(h.modelCalls.length, count);
+    assert.deepEqual(writesOf(h.ghCalls), []);
+    const offline = fakeDeps(args.mode, [fence({user_gate:[], class:"T", reason:"offline"})], [goodArch]);
+    cutoverFor(offline.d);
+    await archaeologyOnlyAdmission(args.tickets[0], offline.d);
+    assert.equal(offline.d.maintenance, undefined);
+    assert.deepEqual(writesOf(offline.ghCalls), []);
+  } finally { owner?.stop(); rmSync(root, {recursive:true, force:true}); }
+});

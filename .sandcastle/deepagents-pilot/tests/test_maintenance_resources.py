@@ -130,7 +130,8 @@ def test_concurrent_resource_reconcile_preserves_receipt(failed_review):
     assert lane.maintenance_idle()
 
 
-def test_existing_reaper_records_origin_then_resource_cli_closes_failed_history(failed_review):
+@pytest.mark.parametrize("owned_lock", [False, True])
+def test_existing_reaper_records_origin_then_resource_cli_closes_failed_history(failed_review, owned_lock):
     lane, target, worker, launch, _ = failed_review
     (worker / 'resource-observation.json').unlink()
     present = True
@@ -138,6 +139,9 @@ def test_existing_reaper_records_origin_then_resource_cli_closes_failed_history(
         nonlocal present
         if args[0] == 'info': return SimpleNamespace(returncode=0, stdout='fixture-daemon')
         if args[0] == 'rm':
+            assert (worker / 'resource-observation.json').exists()
+            with pytest.raises(module.EffectPending), module._lock(worker.parent):
+                pass  # 删除时 run 锁仍然持有。
             present = False
             return SimpleNamespace(returncode=0, stdout='')
         if args[0] == 'ps':
@@ -148,7 +152,11 @@ def test_existing_reaper_records_origin_then_resource_cli_closes_failed_history(
     lane.docker = docker
     original = (worker / 'receipt.json').read_bytes()
     assert not lane.maintenance_idle()
-    lane.reap_review_volumes()
+    if owned_lock:
+        with lane._owned_run_lock(worker.parent), ThreadPoolExecutor(max_workers=1) as pool:
+            pool.submit(lane.reap_review_volumes).result(timeout=5)
+    else:
+        lane.reap_review_volumes()
     assert not present
     assert (worker / 'resource-observation.json').exists()
     lane.reconcile_review_resources(target.run_id, MODELS[0], launch['launch_id'])
@@ -208,3 +216,37 @@ def test_strict_resource_closure_allows_original_checkout_cleanup(failed_review)
     assert lane.cleanup_checkout(target, MODELS[0], worker.parent)
     assert lane.maintenance_idle()
     assert (worker / 'receipt.json').read_bytes() == receipt
+
+
+def test_reaper_busy_lock_does_not_remove_unrecorded_resources(failed_review):
+    lane, _, worker, launch, _ = failed_review
+    (worker / 'resource-observation.json').unlink()
+    removed = []
+    def docker(args):
+        if args[0] == 'info': return SimpleNamespace(returncode=0, stdout='fixture-daemon')
+        if args[0] == 'rm': removed.append(args)
+        out = 'a'*64 + '\t' + launch['launch_id'] if args[0] == 'ps' else ''
+        return SimpleNamespace(returncode=0, stdout=out)
+    lane.docker = docker
+    with module._lock(worker.parent):  # 非 lane 持有的锁不能借用。
+        entries = lane.reap_review_volumes()
+    assert removed == []
+    assert not (worker / 'resource-observation.json').exists()
+    assert any(e['action'] == 'retained' for e in entries)
+
+
+
+def test_reaper_failed_observation_keeps_resources(failed_review, monkeypatch):
+    lane, _, worker, launch, _ = failed_review
+    (worker / 'resource-observation.json').unlink()
+    def docker(args):
+        assert 'rm' not in args, '不得在证据持久化失败后回收'
+        out = 'fixture-daemon' if args[0] == 'info' else ('a'*64 + '\t' + launch['launch_id'] if args[0] == 'ps' else '')
+        return SimpleNamespace(returncode=0, stdout=out)
+    lane.docker = docker
+    def fail(*_):
+        raise OSError('fixture durability failure')
+    monkeypatch.setattr(lane, '_record_resource_observation', fail)
+    entries = lane.reap_review_volumes()
+    assert any(e['action'] == 'retained' for e in entries)
+    assert not (worker / 'resource-observation.json').exists()

@@ -755,7 +755,8 @@ def process_inventory() -> list[tuple[str, int, str]]:
         lanes = []
         modes = re.findall(r'(?:^|\s)(--live|--dry-run)(?=\s|$)', command)
         live = bool(modes) and modes[-1] == '--live'
-        if re.search(r'(?:^|\s)\S*decision-claimer\.mts(?:\s|$)', command) and live: lanes.append('decision')
+        # decision CLI 的默认/dry-run 仍调用共享模型；离线测试不是这个脚本入口。
+        if re.search(r'(?:^|\s)\S*decision-claimer\.mts(?:\s|$)', command): lanes.append('decision')
         if re.search(r'(?:^|\s)\S*wayfinder_engine\.mts(?:\s|$)', command) and live and '--spec-ruling' not in command: lanes.append('wayfinder')
         if re.search(r'-m pilot1742\.executor\b.*\s(?:serve|run)(?:\s|$)', command):
             lanes.append('executor')

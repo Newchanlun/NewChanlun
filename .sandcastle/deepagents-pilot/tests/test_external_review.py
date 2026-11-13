@@ -675,17 +675,21 @@ def test_reaper_removes_dead_launch_volume_and_containers_before_next_dispatch(l
     assert all(s["retained_volumes"] == 1 and s["live_volumes"] == 1 for s in summaries)
 
 
-def _dead_launch(lane, run):
+def _dead_launch(lane, attempt):
+    target = lane.target(1810, attempt)
     launch_id = str(uuid.uuid4())
-    worker = lane.state_root / "runs" / run / MODELS[0]
+    worker = lane.state_root / "runs" / target.key / MODELS[0]
     worker.mkdir(parents=True)
-    module._save(worker / "launch.json", {"launch_id": launch_id})
+    launch = lane._resource_identity(target, MODELS[0], {"launch_id": launch_id})
+    module._save(worker / "launch.json", launch)
+    module._save(worker / "receipt.json", dict(launch, status="failed", container_closed=False,
+                                             failure_reason="SupervisorExitedWithoutReceipt"))
     return launch_id, module.REVIEW_VOLUME_PREFIX + launch_id
 
 
 def test_reaper_trims_vm_only_after_removing_a_volume(lane, vm_trims):
     """#1986：本轮删掉了卷才 trim，trim 以 checkout_root 为节流根、结果记进 reaper 日志；没删卷不 trim。"""
-    dead, name = _dead_launch(lane, "dead-run")
+    dead, name = _dead_launch(lane, 1)
     unknown = str(uuid.uuid4())
     lane.docker = FakeDocker({name: dead, module.REVIEW_VOLUME_PREFIX + unknown: unknown}, {"c1": (dead, name)})
     entries = lane.reap_review_volumes()
@@ -694,7 +698,7 @@ def test_reaper_trims_vm_only_after_removing_a_volume(lane, vm_trims):
     # 再跑一轮：死卷已删，只剩未登记 launch 的卷（不碰）——没有删卷，不 trim。
     assert not any(e["action"] == "vm_trim" for e in lane.reap_review_volumes())
     # 卷删不掉（in use）也不 trim。
-    stuck, stuck_name = _dead_launch(lane, "stuck-run")
+    stuck, stuck_name = _dead_launch(lane, 2)
     lane.docker = FakeDocker({stuck_name: stuck}, volume_rm_stderr="volume is in use")
     assert not any(e["action"] == "vm_trim" for e in lane.reap_review_volumes())
     assert vm_trims == [lane.checkout_root]
@@ -704,12 +708,12 @@ def test_reaper_trims_vm_only_after_removing_a_volume(lane, vm_trims):
 
 def test_vm_trim_failure_never_blocks_dispatch_or_changes_verdict(lane):
     """trim 抛错只记日志；派发照常、结论不变。"""
-    dead, name = _dead_launch(lane, "dead-run")
+    dead, name = _dead_launch(lane, 1)
     lane.docker = FakeDocker({name: dead})
     def broken(root):
         raise TimeoutError("colima hung")
     lane.vm_trim = broken
-    assert lane.review_pr(1810)["verdict"] == "PASS"
+    assert lane.review_pr(1810, 2)["verdict"] == "PASS"
     log = [json.loads(line) for line in (lane.state_root / "volume-reaper.jsonl").read_text().splitlines()]
     trims = [e for e in log if e["action"] == "vm_trim"]
     assert trims and trims[0]["state"] == "failed" and trims[0]["reason"] == "TimeoutError"
@@ -2347,3 +2351,26 @@ def test_maintenance_migrate_stale_is_bound_execution_not_unstarted(lane):
     with owner.gate.tx() as db:
         assert db.execute('SELECT 1 FROM bindings WHERE job=?', (job,)).fetchone()
         assert db.execute('SELECT 1 FROM cancellations WHERE job=?', (job,)).fetchone() is None
+
+
+
+def test_review_pr_reaper_borrows_own_live_run_lock(lane, monkeypatch):
+    dead, name = _dead_launch(lane, 1)
+    target = lane.target(1810, 1)
+    worker = lane.state_root / 'runs' / target.key / MODELS[0]
+    lane.docker = FakeDocker({name: dead}, {'dead-container': (dead, name)})
+    def recover(current, folder):
+        assert current == target
+        with pytest.raises(EffectPending), module._lock(folder):
+            pass
+        with module.ThreadPoolExecutor(max_workers=1) as pool:
+            entries = pool.submit(lane.reap_review_volumes).result(timeout=5)
+        assert any(e['action'] == 'reaped' for e in entries)
+        assert (worker / 'resource-observation.json').exists()
+        return [module.ReviewOutcome(model, 'FAILED', None, 'fixture') for model in MODELS]
+    monkeypatch.setattr(lane, 'run_reviewers', recover)
+    assert lane.review_pr(1810)['verdict'] == 'FAILED'
+    assert name not in lane.docker.volumes
+    assert 'dead-container' not in lane.docker.containers
+    with module._lock(worker.parent):  # review_pr 返回后不残留所有权。
+        assert lane._held_run_locks == {}

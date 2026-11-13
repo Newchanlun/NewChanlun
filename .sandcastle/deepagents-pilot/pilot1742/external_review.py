@@ -182,7 +182,7 @@ def _lock(folder: Path):
             fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError:
             raise EffectPending("已有宿主控制进程持锁") from None
-        yield
+        yield fd
     finally:
         os.close(fd)
 
@@ -518,8 +518,39 @@ class ExternalReview:
                                      str(SOURCE_REPO / ".sandcastle" / "external-review-worker.mts")]
         self.poll_seconds = poll_seconds
         self._stop = threading.Event()
+        self._reaper_guard = threading.RLock()
+        self._held_run_locks: dict[Path, tuple[int, int]] = {}
         self.maintenance = None
         self.maintenance_witness = None
+
+    @contextmanager
+    def _owned_run_lock(self, folder: Path):
+        """review 主线程持有 flock；其 reviewer 线程可借用同一存活 fd，不能仅凭路径绕锁。"""
+        key = folder.absolute()
+        with _lock(folder) as fd:
+            with self._reaper_guard:
+                self._held_run_locks[key] = (os.getpid(), fd)
+            try:
+                yield
+            finally:
+                with self._reaper_guard:
+                    del self._held_run_locks[key]
+
+    @contextmanager
+    def _reaper_run_lock(self, folder: Path):
+        # 同实例 reviewer 并发回收也串行写来源；外层 flock 始终覆盖整个借用区间。
+        with self._reaper_guard:
+            held = self._held_run_locks.get(folder.absolute())
+            if held is None:
+                with _lock(folder):
+                    yield
+            else:
+                pid, fd = held
+                current = os.stat(folder / "owner.lock", follow_symlinks=False)
+                owned = os.fstat(fd)
+                if pid != os.getpid() or (current.st_dev, current.st_ino) != (owned.st_dev, owned.st_ino):
+                    raise IdentityError("run 锁所有权已变化")
+                yield
 
     def target(self, number: int, attempt: int) -> ReviewTarget:
         if type(attempt) is not int or attempt <= 0:
@@ -881,27 +912,29 @@ class ExternalReview:
             if worker is None:
                 entries.append({"action": "retained", "reason": "unknown_launch", "launch_id": launch_id, **items})
                 continue
-            # 资源仍存在时留下 daemon/launch 绑定；删完后不能凭另一个空 daemon 补造来源。
+            # 持锁重验绑定、持久化来源，然后才回收；任一步失败都保留资源供下一轮恢复。
             try:
-                target = ReviewTarget(**_read(worker.parent / "target.json"))
-                launch = _read(worker / "launch.json")
-                expected = self._resource_identity(target, worker.name, launch)
-                daemon = self.docker(["info", "--format", "{{.ID}}"])
-                if (daemon.returncode == 0 and observed_daemon.returncode == 0
-                        and daemon.stdout.strip() == observed_daemon.stdout.strip()
-                        and worker.parent.name == target.key
-                        and all(launch.get(key) == value for key, value in expected.items())):
-                    with _lock(worker.parent):
-                        self._record_resource_observation(worker, expected, daemon.stdout.strip(),
-                                                          items["containers"], items["volumes"])
+                with self._reaper_run_lock(worker.parent):
+                    target = ReviewTarget(**_read(worker.parent / "target.json"))
+                    launch = _read(worker / "launch.json")
+                    expected = self._resource_identity(target, worker.name, launch)
+                    daemon = self.docker(["info", "--format", "{{.ID}}"])
+                    if (daemon.returncode or observed_daemon.returncode
+                            or daemon.stdout.strip() != observed_daemon.stdout.strip()
+                            or worker.parent.name != target.key or expected['launch_id'] != launch_id
+                            or any(launch.get(key) != value for key, value in expected.items())
+                            or supervisor_alive(worker, _ps_rows())):
+                        raise EffectPending("资源来源尚未核实")
+                    self._record_resource_observation(worker, expected, daemon.stdout.strip(),
+                                                      items["containers"], items["volumes"])
+                    for container in items["containers"]:
+                        self.docker(["rm", "-f", container])
+                    removed = [v for v in items["volumes"]
+                               if v == REVIEW_VOLUME_PREFIX + launch_id and self.remove_review_volume(v)]
+                    entries.append({"action": "reaped", "launch_id": launch_id, "containers": items["containers"],
+                                    "volumes": removed, "retained_volumes": [v for v in items["volumes"] if v not in removed]})
             except (OSError, ValueError, TypeError, KeyError, IdentityError, EffectPending):
-                pass  # 不改变旧 reaper 的回收职责；缺来源证据的维护状态仍 unknown。
-            for container in items["containers"]:
-                self.docker(["rm", "-f", container])
-            removed = [v for v in items["volumes"]
-                       if v == REVIEW_VOLUME_PREFIX + launch_id and self.remove_review_volume(v)]
-            entries.append({"action": "reaped", "launch_id": launch_id, "containers": items["containers"],
-                            "volumes": removed, "retained_volumes": [v for v in items["volumes"] if v not in removed]})
+                entries.append({"action": "retained", "reason": "observation_unavailable", "launch_id": launch_id, **items})
         # 每轮一行计数：留下的卷（未登记 launch、删不掉）与存活 launch 占着的卷都报出来，不只记删掉的。
         retained = sum(len(e["volumes"]) for e in entries if e["action"] == "retained")
         retained += sum(len(e["retained_volumes"]) for e in entries if e["action"] == "reaped")
@@ -1100,7 +1133,7 @@ class ExternalReview:
             self.maintenance_witness = owner.gate.start_bound(job, target.run_id, self.state_root)
         assert self.gateway is not None
         folder = self.state_root / "runs" / target.key
-        with _lock(folder):
+        with self._owned_run_lock(folder):
             publisher = StatusPublisher(self.gateway, target, folder, self.state_root / "status-locks")
             try:
                 publisher.check_current()
@@ -1283,8 +1316,14 @@ class ExternalReview:
             previous = _read(path)
             if any(previous.get(key) != value for key, value in {**expected, "daemon_id": daemon_id}.items()):
                 raise IdentityError("资源来源绑定变化")
-            return
-        _save(path, record)
+        else:
+            _save(path, record)
+        # rename 的目录项也须落盘；失败时 reaper 不得删除唯一仍可观察的资源。
+        fd = os.open(worker, os.O_RDONLY | os.O_DIRECTORY)
+        try:
+            os.fsync(fd)
+        finally:
+            os.close(fd)
 
     def reconcile_review_resources(self, run_id: str, model: str, launch_id: str) -> dict:
         """只读 Docker 资源终态并另记精确 launch 证据；不改旧回执、不删资源、不恢复工作。"""

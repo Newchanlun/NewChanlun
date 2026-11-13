@@ -51,16 +51,18 @@ def test_exit_without_witness_is_not_completion(tmp_path):
     assert owner.gate.status([])['inflight']
 
 
-def test_census_excludes_readonly_and_dry_but_includes_live_archaeology(monkeypatch):
+def test_census_distinguishes_shared_model_cli_from_offline_entries(monkeypatch):
     commands = ['python -m pilot1742.external_review status --pr 1',
                 'python -m pilot1742.external_review reconcile --run-id x --note y',
                 'node /tmp/decision-claimer.mts --dry-run',
-                'node /tmp/decision-claimer.mts --live --archaeology-only --ticket 1',
-                'node /tmp/wayfinder_engine.mts --once --dry-run']
+                'node /tmp/decision-claimer.mts --dry-run --archaeology-only --ticket 1',
+                'node /tmp/wayfinder_engine.mts --once --dry-run',
+                'node /tmp/decision-claimer.mts',
+                'node /tmp/decision-claimer.test.ts']
     monkeypatch.setattr(module.subprocess, 'run', lambda *a, **k: type('R', (), {'stdout': '\n'.join(
         f'{100+i} 1 {command}' for i, command in enumerate(commands))})())
     monkeypatch.setattr(module, 'identity', lambda _: 'fixture')
-    assert module.process_inventory() == [('decision', 103, 'fixture')]
+    assert module.process_inventory() == [('decision', 102, 'fixture'), ('decision', 103, 'fixture'), ('decision', 105, 'fixture')]
 
 
 def test_new_run_never_rebinds_old_job_or_inherits_closed_permission(tmp_path):

@@ -2360,6 +2360,13 @@ async function round(a: Args, d: Deps) {
   }
 }
 
+/** CLI 使用共享模型；业务 dry-run 与离线 Deps 测试不是同一执行合同。 */
+export function attachCliMaintenance(d: Deps, root?: string): MaintenanceOwner {
+  const owner = new MaintenanceOwner("decision", root);
+  d.maintenance = owner;
+  return owner;
+}
+
 async function main() {
   const a = parseArgs(process.argv.slice(2));
   if (process.argv.includes("--maps")) console.error(`[配置 #1606] decision-claimer.decisionMaps=${JSON.stringify(a.maps)} source=cli:--maps`);
@@ -2374,8 +2381,7 @@ async function main() {
     mode: a.mode, drainRoot: DRAIN_ROOT, gh, git, model: makeClaudeRunner(), outRoot: a.outRoot, srcDir, repoRoot: REPO_ROOT, now: Date.now,
     me: a.mode === "live" ? gh(["api", "user", "--jq", ".login"]).trim() : undefined,
   };
-  const maintenance = a.mode === "live" ? new MaintenanceOwner("decision") : undefined;
-  d.maintenance = maintenance;
+  const maintenance = attachCliMaintenance(d);
   try {
     if (a.archaeologyOnly) {
       const sha = ensureSrc(REPO_ROOT, srcDir, git);
