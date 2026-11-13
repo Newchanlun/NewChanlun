@@ -1677,9 +1677,12 @@ def test_maintenance_completion_is_scoped_to_its_own_review(lane, monkeypatch):
         (folder / 'target.json').write_text(json.dumps(asdict(item)))
         worker = folder / external_review.MODELS[0]
         worker.mkdir(exist_ok=True)
-        (worker / 'launch.json').write_text('{}')
+        launch = {key: getattr(item, key) for key in
+                  ('run_id', 'head_sha', 'base_sha', 'merge_base_sha', 'controller_code_head')}
+        launch.update(model=external_review.MODELS[0], launch_id='scoped-launch')
+        (worker / 'launch.json').write_text(json.dumps(launch))
         if closed:
-            (worker / 'receipt.json').write_text('{"container_closed":true}')
+            (worker / 'receipt.json').write_text(json.dumps(dict(launch, container_closed=True)))
     monkeypatch.setattr(external_review, '_ps_rows', lambda: [])
     monkeypatch.setattr(external_review, 'supervisor_alive', lambda *args: False)
     assert lane.maintenance_idle(target)

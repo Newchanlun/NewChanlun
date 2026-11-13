@@ -31,42 +31,24 @@ def executor_preflight_idle(binding: dict) -> bool:
 
 def executor_scope_idle(scope: dict) -> bool:
     from .queue import worker_activity
-    root = Path(scope['state_root'])
-    if not root.is_dir():
+    try:
+        root = Path(scope['state_root'])
+        if not root.is_dir():
+            return False
+        runs = root / 'runs'
+        folders = set(runs.iterdir()) if runs.exists() else set()
+        if any(not p.is_dir() for p in folders):
+            return False
+        return worker_activity(folders, Path(scope['source_repo'])) is None
+    except (OSError, ValueError, KeyError, TypeError, RuntimeError):
         return False
-    folders = {p for p in (root / 'runs').iterdir() if p.is_dir()} if (root / 'runs').is_dir() else set()
-    return worker_activity(folders, Path(scope['source_repo'])) is None
 
 
 def review_idle(binding: dict) -> bool:
-    import json
-
     from .external_review import ExternalReview, ReviewTarget
     target = ReviewTarget(**binding['target'])
     lane = ExternalReview(None, state_root=Path(binding['state_root']), source=Path(binding['source_repo']))
-    folder = lane.state_root / 'runs' / target.key
-    if json.loads((folder / 'target.json').read_text()) != binding['target']:
-        return False
-    if not lane.maintenance_idle(target):
-        return False
-    for model in lane._reviewers(folder):
-        worker = folder / model
-        if not worker.exists():
-            continue
-        if not (worker / 'launch.json').exists():
-            if any(worker.iterdir()):
-                return False
-            continue
-        launch = json.loads((worker / 'launch.json').read_text())
-        receipt = json.loads((worker / 'receipt.json').read_text())
-        expected = {key: getattr(target, key) for key in
-                    ('run_id', 'head_sha', 'base_sha', 'merge_base_sha', 'controller_code_head')}
-        expected.update(model=model, launch_id=launch.get('launch_id'))
-        if not expected['launch_id'] or any(launch.get(k) != v or receipt.get(k) != v for k, v in expected.items()):
-            return False
-        if receipt.get('container_closed') is not True:
-            return False
-    return True
+    return lane.maintenance_idle(target)
 
 
 def bound_idle(binding: dict) -> bool:
@@ -81,15 +63,7 @@ def scope_idle(scope: dict) -> bool:
     if scope['kind'] == 'executor':
         return executor_scope_idle(scope)
     if scope['kind'] == 'review':
-        import json
-        root = Path(scope['state_root'])
-        if not root.is_dir():
-            return False
-        for folder in (root / 'runs').iterdir() if (root / 'runs').is_dir() else []:
-            if not folder.is_dir():
-                continue
-            target = json.loads((folder / 'target.json').read_text())
-            if not review_idle(dict(scope, target=target)):
-                return False
-        return True
+        from .external_review import ExternalReview
+        lane = ExternalReview(None, state_root=Path(scope['state_root']), source=Path(scope['source_repo']))
+        return lane.maintenance_idle()
     return False

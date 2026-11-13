@@ -877,7 +877,6 @@ def _serve(args: argparse.Namespace, store: ClaimStore, cutover_store: CutoverSt
     from .maintenance import Owner
     from .queue import QueueIntake, mark_source_unreadable
     maintenance = Owner("executor")
-    maintenance.coverage(False)
 
     def child(unit: WorkUnit) -> int:
         command = [sys.executable, "-m", "pilot1742.executor", "--state-root", str(args.state_root),
@@ -899,12 +898,13 @@ def _serve(args: argparse.Namespace, store: ClaimStore, cutover_store: CutoverSt
             raise
 
     sweep_round = None
-    if args.review_sweep and review_key is not None:
-        from .review_sweep import serve_round
-        sweep_round = serve_round(review_key, auto_merge=args.review_sweep_auto_merge,
-                                  max_running=args.review_sweep_max_running)
     client: GitHubAppClient | None = None
     try:
+        maintenance.coverage(False)
+        if args.review_sweep and review_key is not None:
+            from .review_sweep import serve_round
+            sweep_round = serve_round(review_key, auto_merge=args.review_sweep_auto_merge,
+                                      max_running=args.review_sweep_max_running)
         while True:
             maintenance.poll()  # 关闸确认；intake 仍可推进此前已领取的票。
             try:
@@ -932,11 +932,15 @@ def _serve(args: argparse.Namespace, store: ClaimStore, cutover_store: CutoverSt
                 return 0
             time.sleep(args.poll_seconds)
     finally:
-        maintenance.stop()
-        if sweep_round is not None:
-            sweep_round.close()
-        if client is not None:
-            client.close()
+        try:
+            maintenance.stop()
+        finally:
+            try:
+                if sweep_round is not None:
+                    sweep_round.close()
+            finally:
+                if client is not None:
+                    client.close()
 
 
 def _main(argv: list[str] | None = None, *, on_execution: Callable[[], None] | None = None) -> int:

@@ -2296,16 +2296,24 @@ export function pickUnresolved(gh: GhRunner, candidates: number[], limit: number
 export async function runPool<T, R>(items: T[], limit: number, fn: (x: T) => Promise<R>): Promise<R[]> {
   const out: R[] = new Array(items.length);
   let next = 0;
+  let closed = false;
+  const completed = new Set<number>();
   const worker = async () => {
-    while (next < items.length) {
+    while (!closed && next < items.length) {
       const i = next++;
-      out[i] = await fn(items[i]);
+      try {
+        out[i] = await fn(items[i]);
+        completed.add(i);
+      } catch (error) {
+        if (!(error instanceof MaintenanceClosed)) throw error;
+        closed = true; // 不领取下一票；已启动的同轮动作仍完整等待并保留结果。
+      }
     }
   };
   const settled = await Promise.allSettled(Array.from({ length: Math.min(limit, items.length) }, worker));
   const failed = settled.find((result): result is PromiseRejectedResult => result.status === "rejected");
   if (failed) throw failed.reason;
-  return out;
+  return out.filter((_, i) => completed.has(i));
 }
 
 /** 用 ssh 地址把远端 main 取到 refs/remotes/origin/main，返回取到的 SHA。 */

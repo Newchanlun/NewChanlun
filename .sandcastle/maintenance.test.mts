@@ -76,3 +76,16 @@ test("关闸使一个池工作拒绝时，池仍等其它已领取工作结束",
   await running;
   assert.equal(finished, true);
 });
+
+
+test("runPool 关闸保留同轮已完成结果，停止领取后续票", async () => {
+  const { runPool } = await import("./decision-claimer.mts");
+  const seen: number[] = [];
+  const results = await runPool([1, 2, 3], 1, async n => {
+    seen.push(n);
+    if (n === 2) throw new MaintenanceClosed();
+    return n;
+  });
+  assert.deepEqual(seen, [1, 2]);
+  assert.deepEqual(results, [1]);
+});

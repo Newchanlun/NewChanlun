@@ -179,6 +179,9 @@ def test_process_inventory_reports_old_leaf_not_tsx_wrapper(monkeypatch):
     from pilot1742 import maintenance
     listing = '\n'.join([
         '11 1 node /tools/tsx/cli.mjs /host/scripts/wayfinder_engine.mts --live',
+        '16 1 node /repo/node_modules/.bin/tsx /host/scripts/wayfinder_engine.mts --live',
+        '17 16 node --import /repo/tsx/loader.mjs /host/scripts/wayfinder_engine.mts --live',
+        '18 1 node /repo/node_modules/.bin/tsx /host/scripts/wayfinder_engine.mts --live',
         '12 11 node --import /tools/tsx/loader.mjs /host/scripts/wayfinder_engine.mts --live',
         '13 1 /venv/bin/python -m pilot1742.executor serve --loop --review-sweep --private-key /private/path',
         '14 1 /bin/bash -c echo pilot1742.executor serve',
@@ -187,6 +190,7 @@ def test_process_inventory_reports_old_leaf_not_tsx_wrapper(monkeypatch):
     monkeypatch.setattr(maintenance.subprocess, 'run', lambda *a, **kw: SimpleNamespace(stdout=listing))
     monkeypatch.setattr(maintenance, 'identity', lambda pid: f'process-{pid}')
     assert maintenance.process_inventory() == [
+        ('wayfinder', 17, 'process-17'), ('wayfinder', 18, 'process-18'),
         ('wayfinder', 12, 'process-12'), ('executor', 13, 'process-13'),
         ('review', 13, 'process-13'), ('review', 15, 'process-15')]
 

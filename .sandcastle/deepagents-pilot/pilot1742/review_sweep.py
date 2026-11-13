@@ -776,12 +776,17 @@ class ServeRound:
 
     def __call__(self) -> list[dict[str, Any]] | None:
         """返回本轮动作；本轮不到时间或失败返回 None。"""
-        if self.maintenance is not None:
-            self.maintenance.gate.bind_scope(self.maintenance.id, self.sweep.lane.state_root,
-                                                 self.sweep.lane.source, kind='review')
-            self.maintenance.coverage(self.sweep.lane.maintenance_idle())
-            if self.maintenance.poll():
-                return None
+        try:
+            if self.maintenance is not None:
+                self.maintenance.coverage(False)
+                self.maintenance.gate.bind_scope(self.maintenance.id, self.sweep.lane.state_root,
+                                                     self.sweep.lane.source, kind='review')
+                self.maintenance.coverage(self.sweep.lane.maintenance_idle())
+                if self.maintenance.poll():
+                    return None
+        except Exception as error:
+            report([{"action": "tick-error", "reason": f"maintenance unavailable: {type(error).__name__}"}], "review-sweep ")
+            return None
         try:
             last = float(self.stamp.read_text())
         except (OSError, ValueError):
@@ -878,7 +883,8 @@ def run_review(argv: list[str], github: GitHubPort | None = None) -> int:
         owner.stop()
         return 75
     try:
-        return _run_review(args, github, lambda: None, (owner, job))
+        with owner.observing():
+            return _run_review(args, github, lambda: None, (owner, job))
     finally:
         try:
             owner.gate.finish_review(owner.id, job)

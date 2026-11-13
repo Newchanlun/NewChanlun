@@ -8,6 +8,7 @@ import re
 import sqlite3
 import subprocess
 import sys
+import threading
 import uuid
 from contextlib import contextmanager
 from datetime import datetime, timezone
@@ -544,7 +545,7 @@ def process_inventory() -> list[tuple[str, int, str]]:
         # 不输出完整命令（可能含提示或秘密）。仅识别真实解释器入口，不匹配 shell 提示文本。
         if not re.match(r'\S*(?:python[\d.]*|node|tsx)\s', command):
             continue
-        if re.match(r'\S*node\s+\S*/tsx/(?:dist/)?cli\.mjs(?:\s|$)', command):
+        if re.match(r'\S*node\s+\S*/(?:tsx/(?:dist/)?cli\.mjs|node_modules/\.bin/tsx)(?:\s|$)', command):
             wrappers.add(pid)
         lanes = []
         modes = re.findall(r'(?:^|\s)(--live|--dry-run)(?=\s|$)', command)
@@ -581,6 +582,29 @@ class Owner:
     def __init__(self, lane: str, root: Path | None = None, reservation: str | None = None):
         self.gate = Gate(ROOT if root is None else root)
         self.id = self.gate.adopt(reservation, lane) if reservation else self.gate.register(lane)
+
+    @contextmanager
+    def observing(self):
+        """单次执行入口在工作期间确认新代次；不领取或中断已获许可的工作。"""
+        self.poll()
+        done = threading.Event()
+        def observe():
+            while not done.wait(0.25):
+                try:
+                    self.poll()
+                except (ValueError, OSError, sqlite3.Error, subprocess.SubprocessError):
+                    try:
+                        self.coverage(False)
+                    except (ValueError, OSError, sqlite3.Error, subprocess.SubprocessError):
+                        pass
+                    return
+        watcher = threading.Thread(target=observe, name='maintenance-observer', daemon=True)
+        watcher.start()
+        try:
+            yield
+        finally:
+            done.set()
+            watcher.join()
 
     def coverage(self, covered: bool) -> None:
         self.gate.coverage(self.id, covered)

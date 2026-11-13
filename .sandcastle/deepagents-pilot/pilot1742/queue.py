@@ -196,6 +196,9 @@ class QueueIntake:
             load_unit,
         )
         from .run import Busy, Halted
+        if self.maintenance is not None:
+            self.maintenance.coverage(False)  # 失败读取不能沿用上一轮覆盖结论。
+            self.maintenance.gate.bind_scope(self.maintenance.id, self.state_root, self.source_repo)
         try:
             self.cutover.load()
         except CutoverError:
@@ -248,8 +251,7 @@ class QueueIntake:
             occupied = {ticket: reason for ticket, folders in runs.items()
                         if (reason := self._worker_activity(folders)) is not None}
             if self.maintenance is not None:
-                self.maintenance.gate.bind_scope(self.maintenance.id, self.state_root, self.source_repo)
-                self.maintenance.coverage(not occupied)
+                self._maintenance_coverage()
             for ticket, reason in occupied.items():
                 results[ticket] = {'phase': 'active', 'reason': reason}
 
@@ -389,10 +391,16 @@ class QueueIntake:
                 finally:
                     finish(ticket)
             if self.maintenance is not None:
-                self.maintenance.coverage(not occupied)
+                self._maintenance_coverage()
             return self._status(results)
         finally:
             os.close(fd)
+
+    def _maintenance_coverage(self) -> None:
+        from .maintenance_recovery import executor_scope_idle
+        assert self.maintenance is not None
+        self.maintenance.coverage(executor_scope_idle(
+            dict(state_root=str(self.state_root), source_repo=str(self.source_repo))))
 
     def _worker_activity(self, folders: set[Path]) -> str | None:
         return worker_activity(folders, self.source_repo)

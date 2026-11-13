@@ -600,6 +600,8 @@ class FakeDocker:
     def __call__(self, args):
         self.calls.append(args)
         ok = lambda out="": subprocess.CompletedProcess(args, 0, out, "")
+        if args == ["info", "--format", "{{.ID}}"]:
+            return ok("fixture-daemon")
         if args[:2] == ["volume", "ls"]:
             return ok("".join(f"{n}\t{l}\n" for n, l in self.volumes.items()))
         if args[:2] == ["ps", "-a"] and "--format" in args:
@@ -2328,3 +2330,20 @@ runpy.run_path({lane.launcher[1]!r}, run_name="__main__")
     assert bool(destructive) == (context != "missing-context")
     if destructive:
         assert [row["args"] for row in destructive] == [["rm", "-f", "a" * 64], ["volume", "rm", volume]]
+
+
+def test_maintenance_migrate_stale_is_bound_execution_not_unstarted(lane):
+    from pilot1742.maintenance import Owner
+    _legacy_auth_stale(lane)
+    git(lane.source, "commit", "--allow-empty", "-qm", "controller redeployed")
+    owner = Owner('review', lane.state_root / 'maintenance')
+    job = owner.admit('manual-review')
+    lane.maintenance = (owner, job)
+    result = lane.migrate_stale(1810, 1)
+    assert result['publication']['state'] == 'success'
+    assert lane.maintenance_witness is not None
+    owner.gate.returned_current(job)
+    owner.gate.finish_review(owner.id, job)
+    with owner.gate.tx() as db:
+        assert db.execute('SELECT 1 FROM bindings WHERE job=?', (job,)).fetchone()
+        assert db.execute('SELECT 1 FROM cancellations WHERE job=?', (job,)).fetchone() is None

@@ -844,6 +844,7 @@ class ExternalReview:
         它自己的删卷（finally 与退出钩子）都跑不到，回执也可能缺 volume 字段，只能按标签找。
         只动本 state_root 登记过、监督进程已不在的 launch；未登记的 launch_id 一律不碰（可能属于别的 state_root）。
         先列 Docker 对象再取进程表：列出时已存在的对象，其监督要么仍在进程表里，要么已经退出。"""
+        observed_daemon = self.docker(["info", "--format", "{{.ID}}"])
         value = '{{.Label "' + REVIEW_LABEL + '"}}'
         volumes = self.docker(["volume", "ls", "--filter", f"label={REVIEW_LABEL}", "--format", "{{.Name}}\t" + value])
         containers = self.docker(["ps", "-a", "--filter", f"label={REVIEW_LABEL}", "--format", "{{.ID}}\t" + value])
@@ -874,6 +875,21 @@ class ExternalReview:
             if worker is None:
                 entries.append({"action": "retained", "reason": "unknown_launch", "launch_id": launch_id, **items})
                 continue
+            # 资源仍存在时留下 daemon/launch 绑定；删完后不能凭另一个空 daemon 补造来源。
+            try:
+                target = ReviewTarget(**_read(worker.parent / "target.json"))
+                launch = _read(worker / "launch.json")
+                expected = self._resource_identity(target, worker.name, launch)
+                daemon = self.docker(["info", "--format", "{{.ID}}"])
+                if (daemon.returncode == 0 and observed_daemon.returncode == 0
+                        and daemon.stdout.strip() == observed_daemon.stdout.strip()
+                        and worker.parent.name == target.key
+                        and all(launch.get(key) == value for key, value in expected.items())):
+                    with _lock(worker.parent):
+                        self._record_resource_observation(worker, expected, daemon.stdout.strip(),
+                                                          items["containers"], items["volumes"])
+            except (OSError, ValueError, TypeError, KeyError, IdentityError, EffectPending):
+                pass  # 不改变旧 reaper 的回收职责；缺来源证据的维护状态仍 unknown。
             for container in items["containers"]:
                 self.docker(["rm", "-f", container])
             removed = [v for v in items["volumes"]
@@ -1204,6 +1220,10 @@ class ExternalReview:
             launch = folder / model / "launch.json"
             if not launch.exists() or _read(launch).get("prompt") != expected_prompt:
                 raise IdentityError("原审查不是在当前审查合同下产生（模型或提示词不同），须新审，不迁移")
+        if self.maintenance is not None:
+            owner, job = self.maintenance
+            owner.gate.bind_review(owner.id, job, asdict(target), self.state_root, self.source)
+            self.maintenance_witness = owner.gate.start_bound(job, target.run_id, self.state_root)
         with _lock(folder):
             saved = _read(folder / "outcome.json") if (folder / "outcome.json").exists() else {}
             if saved.get("migrated") and "publication" not in saved:
@@ -1222,24 +1242,140 @@ class ExternalReview:
                 _save(folder / "outcome.json", refused)  # 已写下的迁移结论作废，磁盘回到 STALE
                 return refused
 
+    @staticmethod
+    def _resource_identity(target: ReviewTarget, model: str, launch: dict) -> dict:
+        expected = {key: getattr(target, key) for key in
+                    ("run_id", "head_sha", "base_sha", "merge_base_sha", "controller_code_head")}
+        return dict(expected, model=model, launch_id=launch.get("launch_id"))
+
+    @staticmethod
+    def _resource_closure_matches(worker: Path, expected: dict) -> bool:
+        path = worker / "resource-closure.json"
+        if not path.exists():
+            return False
+        proof = _read(path)
+        observed = _read(worker / "resource-observation.json")
+        if (observed.get("v") != 1 or observed.get("kind") != "docker-labelled-resources"
+                or not (observed.get("containers") or observed.get("volumes"))
+                or observed.get("daemon_id") != proof.get("daemon_id")
+                or any(observed.get(key) != value for key, value in expected.items())):
+            return False
+        return (proof.get("v") == 1 and proof.get("kind") == "docker-label-inventory"
+                and proof.get("container_closed") is True and proof.get("volume_closed") is True
+                and bool(re.fullmatch(r"[a-zA-Z0-9:-]{1,128}", str(proof.get("daemon_id", ""))))
+                and all(proof.get(key) == value for key, value in expected.items()))
+
+    @staticmethod
+    def _record_resource_observation(worker: Path, expected: dict, daemon_id: str,
+                                     containers: list[str], volumes: list[str]) -> None:
+        if not re.fullmatch(r"[a-zA-Z0-9:-]{1,128}", daemon_id) or not (containers or volumes):
+            raise IdentityError("缺少实际资源与 daemon 绑定")
+        path = worker / "resource-observation.json"
+        record = dict(expected, v=1, kind="docker-labelled-resources", daemon_id=daemon_id,
+                      containers=containers, volumes=volumes)
+        if path.exists():
+            previous = _read(path)
+            if any(previous.get(key) != value for key, value in {**expected, "daemon_id": daemon_id}.items()):
+                raise IdentityError("资源来源绑定变化")
+            return
+        _save(path, record)
+
+    def reconcile_review_resources(self, run_id: str, model: str, launch_id: str) -> dict:
+        """只读 Docker 资源终态并另记精确 launch 证据；不改旧回执、不删资源、不恢复工作。"""
+        if (not re.fullmatch(r"[a-f0-9-]{36}", run_id) or not re.fullmatch(r"[a-f0-9-]{36}", launch_id)
+                or not re.fullmatch(r"[a-zA-Z0-9_.-]{1,100}", model)):
+            raise IdentityError("资源对账身份非法")
+        matches = [p for p in (self.state_root / "runs").glob("*/target.json") if _read(p).get("run_id") == run_id]
+        if len(matches) != 1:
+            raise IdentityError("缺少唯一已绑定 review target")
+        folder = matches[0].parent
+        with _lock(folder):
+            target = ReviewTarget(**_read(folder / "target.json"))
+            if folder.name != target.key or model not in self._reviewers(folder):
+                raise IdentityError("资源对账 target 不匹配")
+            worker = folder / model
+            launch, receipt = _read(worker / "launch.json"), _read(worker / "receipt.json")
+            expected = self._resource_identity(target, model, launch)
+            if (expected['launch_id'] != launch_id or any(
+                    launch.get(key) != value or receipt.get(key) != value for key, value in expected.items())
+                    or receipt.get("failure_reason") != "SupervisorExitedWithoutReceipt"
+                    or receipt.get("container_closed") is not False):
+                raise IdentityError("缺少本 launch 的监督退出失败回执")
+            process = _read(worker / "process.json")
+            if process.get("launch_id") != launch_id or type(process.get("pid")) is not int:
+                raise IdentityError("缺少本 launch 的监督登记")
+            if supervisor_alive(worker, _ps_rows()):
+                raise EffectPending("监督仍在运行")
+            daemon = self.docker(["info", "--format", "{{.ID}}"])
+            daemon_id = daemon.stdout.strip()
+            if daemon.returncode or not re.fullmatch(r"[a-zA-Z0-9:-]{1,128}", daemon_id):
+                raise EffectPending("Docker 身份未核实")
+            label = f"label={REVIEW_LABEL}={launch_id}"
+            containers = self.docker(["ps", "-a", "-q", "--filter", label])
+            volumes = self.docker(["volume", "ls", "-q", "--filter", label])
+            final_daemon = self.docker(["info", "--format", "{{.ID}}"])
+            if (containers.returncode or volumes.returncode or final_daemon.returncode
+                    or final_daemon.stdout.strip() != daemon_id or supervisor_alive(worker, _ps_rows())):
+                raise EffectPending("本 launch 资源未证实清空")
+            if containers.stdout.strip() or volumes.stdout.strip():
+                self._record_resource_observation(worker, expected, daemon_id,
+                                                  containers.stdout.split(), volumes.stdout.split())
+                raise EffectPending("本 launch 资源仍存在，已记录来源；由原回收流程处理后再对账")
+            observed_path = worker / "resource-observation.json"
+            if not observed_path.exists():
+                raise EffectPending("缺少回收前的资源来源绑定，不能凭空 daemon 证明历史资源结束")
+            observed = _read(observed_path)
+            if (observed.get("v") != 1 or observed.get("kind") != "docker-labelled-resources"
+                    or not (observed.get("containers") or observed.get("volumes"))
+                    or any(observed.get(key) != value for key, value in {**expected, "daemon_id": daemon_id}.items())):
+                raise IdentityError("资源来源绑定不匹配")
+            # 同一 run 锁排除重派；提交前重验绑定，旧 receipt 原样保留。
+            if _read(worker / "launch.json") != launch or _read(worker / "receipt.json") != receipt:
+                raise EffectPending("资源证据已变化")
+            if not self._resource_closure_matches(worker, expected):
+                _save(worker / "resource-closure.json", dict(expected, v=1, kind="docker-label-inventory",
+                      container_closed=True, volume_closed=True, daemon_id=daemon_id, observed_at=time.time()))
+            return dict(result="resources_reconciled", run_id=run_id, model=model, launch_id=launch_id)
+
     def maintenance_idle(self, target: ReviewTarget | None = None) -> bool:
-        """只读监督/容器结束回执；旧 controller 的孤儿也不能凭新服务空闲漏算。"""
+        """正常清点、绑定任务与恢复对账共用精确 target/launch/资源终态判据。"""
         try:
+            if not self.state_root.is_dir():
+                return False
             rows = _ps_rows()
-            targets = ([self.state_root / "runs" / target.key / "target.json"] if target is not None
-                       else (self.state_root / "runs").glob("*/target.json"))
-            for target_path in targets:
-                folder = target_path.parent
+            runs = self.state_root / "runs"
+            folders = ([runs / target.key] if target is not None else
+                       list(runs.iterdir()) if runs.exists() else [])
+            for folder in folders:
+                if not folder.is_dir():
+                    if target is not None:
+                        return False
+                    continue  # runs 下的日志文件不是执行目录。
+                saved = _read(folder / "target.json")
+                actual = ReviewTarget(**saved)
+                if folder.name != actual.key or (target is not None and saved != asdict(target)):
+                    return False
                 for model in self._reviewers(folder):
                     worker = folder / model
-                    if not any((worker / name).exists() for name in ("launch.json", "process.json")):
+                    if not worker.exists():
                         continue
                     if supervisor_alive(worker, rows):
                         return False
+                    if not (worker / "launch.json").exists():
+                        if any(worker.iterdir()):
+                            return False
+                        continue
+                    launch = _read(worker / "launch.json")
                     receipt = _read(worker / "receipt.json")
-                    if receipt.get("container_closed") is not True:
+                    expected = self._resource_identity(actual, model, launch)
+                    if not expected["launch_id"] or any(
+                            launch.get(key) != value or receipt.get(key) != value for key, value in expected.items()):
                         return False
-        except (OSError, ValueError, IdentityError, TypeError, subprocess.SubprocessError):
+                    if receipt.get("container_closed") is not True:
+                        if (receipt.get("failure_reason") != "SupervisorExitedWithoutReceipt"
+                                or not self._resource_closure_matches(worker, expected)):
+                            return False
+        except (OSError, ValueError, IdentityError, TypeError, KeyError, subprocess.SubprocessError):
             return False
         return True
 
@@ -1306,7 +1442,8 @@ def main(argv: list[str] | None = None, *, admitted: bool = False, on_natural=No
         owner.stop()
         return 75
     try:
-        return _main(arguments, maintenance=(owner, job))
+        with owner.observing():
+            return _main(arguments, maintenance=(owner, job))
     finally:
         try:
             owner.gate.finish_review(owner.id, job)
@@ -1338,6 +1475,10 @@ def _run_main(argv: list[str] | None = None, *, on_natural=None, maintenance=Non
     reconcile = sub.add_parser("reconcile")
     reconcile.add_argument("--run-id", required=True)
     reconcile.add_argument("--note", required=True)
+    resources = sub.add_parser("reconcile-resources", help="核实精确 launch 的 Docker 终态；不删除资源或改写旧回执")
+    resources.add_argument("--run-id", required=True)
+    resources.add_argument("--model", required=True)
+    resources.add_argument("--launch-id", required=True)
     args = parser.parse_args(argv)
     result: dict | list[dict]
     try:
@@ -1351,7 +1492,10 @@ def _run_main(argv: list[str] | None = None, *, on_natural=None, maintenance=Non
                           else lane.migrate_stale(args.pr, args.attempt))
         else:
             lane = ExternalReview(None)  # 本地 status、对账不获取或读取任何凭据。
-            result = lane.status(args.pr) if args.command == "status" else lane.reconcile(args.run_id, args.note)
+            if args.command == "reconcile-resources":
+                result = lane.reconcile_review_resources(args.run_id, args.model, args.launch_id)
+            else:
+                result = lane.status(args.pr) if args.command == "status" else lane.reconcile(args.run_id, args.note)
         if on_natural is not None and isinstance(result, dict) and result.get("target"):
             if lane.maintenance_idle(ReviewTarget(**result["target"])):
                 if maintenance is not None and lane.maintenance_witness is not None:
@@ -1360,7 +1504,10 @@ def _run_main(argv: list[str] | None = None, *, on_natural=None, maintenance=Non
         print(json.dumps(result, ensure_ascii=False, indent=2))
         return 0 if not isinstance(result, dict) or result.get("verdict", "PASS") == "PASS" else 1
     except (IdentityError, EffectPending, ValueError, OSError) as error:
-        print(str(error), file=sys.stderr)
+        if args.command == "reconcile-resources":
+            print(json.dumps({"result": "unknown", "reason": "resource_evidence_unverified"}))
+        else:
+            print(str(error), file=sys.stderr)
         return 2
 
 

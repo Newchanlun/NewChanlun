@@ -50,8 +50,10 @@ executor 的票/计划登记不等于执行准入：完成读取、等待判定�
 
 review 父进程先持久预留，再 `Popen(start_new_session=True)`；子进程原子接收这份预留，
 即使接收前已关闸也能继续。预留只能接收一次。Popen 明确失败时，启动方通过原子撤销记录证明未启动；与 adopt 竞争时只能一方成功，不能撤销已转交的任务。子进程在 gh/身份/target 绑定前返回，则记未启动收尾，可在开闸期间重试。父进程退出或没有 children 不消除预留。
-正式审查还检查 supervisor 与容器结束回执；缺回执或 `container_closed != true` 不计完成。
-executor 复用 `_worker_activity` 的本地/Boat 生命周期证据，仍在途或 effect_unknown 的 worker 不释放维护记录。
+正式审查还检查 supervisor 与容器结束回执；缺回执不计完成。`container_closed != true` 的监督退出失败只允许使用下述绑定资源终态证据恢复。
+executor 复用 `_worker_activity` 的本地/Boat 生命周期证据，仍在途或 effect_unknown 的 worker 不释放维护记录。正常轮询与恢复对账都清点整个 `state_root/runs`，包括未被 queued unit/claim 引用的孤儿和非 queued 运行；派工仍只消费原 queued 范围。每轮先撤销旧 coverage，前后两次使用同一完整 scope 判据；目录或资源读取失败保持 unknown。
+
+review 的正常 sweep、已绑定任务结束与 reconcile 共用 `ExternalReview.maintenance_idle`：遍历所有 run 目录，核 target 与目录身份、全部现役/退役 reviewer 的 launch 和 receipt 的 run/head/base/controller/model/launch-id，以及 supervisor 与容器终态。缺 target、孤儿 worker、缺 launch 或错配关闭回执均不能证明覆盖。
 
 owner 绑定 PID 与启动时间。业务结果与生命周期终止分开：普通错误返回且资源已收尾，可以结束本次维护工作；退出码本身不是证明。进程消失、未返回的异常与不完整资源回执保留 unknown，
 没有 TTL、心跳过期自动释放或 TCP 空闲推断。重启会登记新 owner，不能覆盖旧记录。
@@ -77,6 +79,22 @@ python3 .sandcastle/deepagents-pilot/pilot1742/maintenance.py status
 - **空闲失联 owner**：须有原进程原子 poll 的准入账本检查点（或本代次关闭确认）、已覆盖记录且没有任何未证实任务。退休不代替新入口对本代次的确认。只见进程消失不能退休。executor/review 还检查事先绑定的 state-root 资源范围；任务转交历史不丢失。
 
 对账新增 `resolutions/reconciliations`，不改原 jobs 状态、owner stopped 标志或历史时间。旧 owner 被 fence，下一代仍要求当前入口的新确认。`status.reconciled` 给出原 owner 和完成对账代次。
+
+### 历史 review 监督异常：先核资源来源，再对账终态
+
+`SupervisorExitedWithoutReceipt` 的失败回执保持原样。现有 reaper 在删资源前，把实际带 launch 标签的对象与 Docker daemon 身份写入 `resource-observation.json`。需要人工发起资源核验时，用目标回执中的精确身份运行：
+
+```sh
+python -m pilot1742.external_review reconcile-resources --run-id <run-uuid> --model <reviewer> --launch-id <launch-uuid>
+```
+
+该入口不读凭据、不删 Docker 对象、不启动模型。它核 target/launch/原失败回执/监督登记，在同一 daemon 上清点该 launch 标签的全部容器和卷；有遗留对象时只记录来源并返回未完成，交原回收流程处理。对象已清空且来源绑定完整后，另写 `resource-closure.json`，正常 scope、bound 和 reconcile 共用该证据。并发调用由原 run 锁串行化；旧 launch 证据不能用于替换后的 launch，也不会确认下一维护代次或 resume。
+
+若升级前资源已删且从未记录 daemon/launch 来源，空 Docker 列表不足以证明查的是原 daemon，这类历史仍明确 unknown。新记录只在实际带标签资源仍存在时产生，不能手填布尔补签。监督仍活跃、Docker 不可读、daemon 变化、缺少精确退出回执或资源未清空也不放行。
+
+### 执行期间的确认与异常隔离
+
+detached review 和手动 review/migrate 在已准入工作执行期间轮询确认维护代次，不阻断工作收尾。`migrate-stale` 在实际发布前绑定原 target/witness，不记录为未启动取消。TS 关闸后停止领取后续票，但保留同轮已完成结果；executor/sweep 初始化或维护调用失败仍执行各自清理，保持 sweep 的异常隔离。tsx 外壳只在观察到同 lane 后代时消重，包含本机验证的 `node_modules/.bin/tsx` 链；无对应后代的进程仍计未覆盖。
 
 ### 仍不能补造的证据
 
