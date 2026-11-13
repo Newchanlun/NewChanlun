@@ -78,6 +78,36 @@
 | issue1678-closeout-20261026 | #1678 |
 | issue1678-selfheal-20261024 | #1678 |
 
+## #1742：14 件历史记录（2026-11-13）
+
+本批已出仓：两组审阅所属 PR #1649、#1580 已合入；pstack 验收票 #1130、#1131、#1135、#1138、#1139 已关闭。仅迁历史记录，pstack/Matt/DeepAgents 入口、许可证与夹具保留。
+
+归档包：`/Volumes/AgentStorage/restart-20261107/slim/remaining-archive/history14-20261113-923d5f1187-v2/history14.tar`，14 件均保留原路径与模式。原树提交：`923d5f1187`。包内路径如下（没有整目录删除）：
+
+- `.chanlun/review-results/claimer-emphasis-20261021/review-1-claude-opus-5-5.md`
+- `.chanlun/review-results/claimer-emphasis-20261021/review-2-claude-opus-5-5.md`
+- `.chanlun/review-results/claimer-emphasis-20261021/review-3-tail-claude-opus-5-5-1d1c9c063e.md`
+- `.chanlun/review-results/claimer-emphasis-20261021/review-3-tail-prompt.md`
+- `.chanlun/review-results/decision-archaeology-gate-20261020/dryrun-1355-archaeology.md`
+- `.chanlun/review-results/decision-archaeology-gate-20261020/report.md`
+- `.chanlun/review-results/decision-archaeology-gate-20261020/review-fable-5-1.md`
+- `.chanlun/review-results/decision-archaeology-gate-20261020/review-round2-fable-5-1.md`
+- `.chanlun/review-results/decision-archaeology-gate-20261020/review-round3-fable-5-1.md`
+- `docs/agents/pstack-lite/E2E-1131.md`
+- `docs/agents/pstack-lite/PILOT-1139.md`
+- `docs/agents/pstack-lite/VERIFICATION-1130.md`
+- `docs/agents/pstack-lite/VERIFICATION-1135.md`
+- `docs/agents/pstack-lite/VERIFICATION-1138.md`
+
+恢复到空目录：
+
+```sh
+mkdir -p /tmp/history14-restore
+tar -xpf /Volumes/AgentStorage/restart-20261107/slim/remaining-archive/history14-20261113-923d5f1187-v2/history14.tar -C /tmp/history14-restore
+```
+
+单件也可用 `git show 923d5f1187:<原路径>` 取回内容；该批 Git 文件模式均为 `100644`。核验清单与消费者证据随包存于仓外。
+
 ## 三份历史纪律（#1742 / #2030，2026-11-13）
 
 仅本批三份历史原文已出仓；不包含 #2057 的 14 件批次或 #1920 的归档，两者保留独立索引与验收。
@@ -91,3 +121,135 @@
 | `docs/agents/stat-provenance.md` | 4096 | `docs/adr/0022-acceptance-criterion-parameters.md`「统计结论的标注与引用」 |
 
 旧报告、roster 与推论中的原路径保持历史原文，按本批来源提交恢复。ADR 0039/0048 的历史引文保留，当前产品名分指向 ADR 0004；ADR 0058 的 AT-14 专用报告 schema、路径及消费者合同不在本批改动范围。移除的是历史纪律原件，不是整个 docs/agents 或产品报告树。
+
+
+## 历史层归档（#1920）
+
+本批已删除 **114 件**：`.auto-memory-snapshot/` 48 件、`.rtas/review-results/` 12 件、`chanlun/harness/` 54 件（其中 vendored harness-engineering 51 件）。以下清单是本 PR 相对 main 的精确删除集合；现役 watcher roster 保留。
+
+- 来源版本：`923d5f1187fefc549f810643390068884c36ba9e`。本批文件在后续整合 main `40ce4c56b9780390b5ebaca7c711ca253d0be44b` 时内容未变。
+- 外卷原件：`/Volumes/AgentStorage/restart-20261107/slim/remaining-archive/implementation/historical-178-f43fac8f.tar`。包名的 178 是早期归档全集，包含后来保留或由 main 先行删除的文件；不代表本批删除 178 件。只按下列清单选择恢复，不把整个 tar 覆盖回工作树。
+- 验证：原归档解包已逐文件核对字节、原路径和模式；本批 114 件均在包中，与来源 Git blob 一致。后续整合未改变删除集合，复用该恢复证据。原报告位于同一外卷目录；早期报告的 178 件范围以此处当前清单收窄。
+- 单文件取回（无需外卷）：`git show 923d5f1187fefc549f810643390068884c36ba9e:<原路径> > <恢复目标>`。也可在新建空目录执行 `tar -xf <上述归档包> -C <空目录> <原路径>`，保留原目录结构与模式；不要覆盖现役文件。
+
+<details>
+<summary>114 件原相对路径（模式均为 100644）</summary>
+
+```text
+.auto-memory-snapshot/MEMORY.md
+.auto-memory-snapshot/feedback_bidirectional_always_in.md
+.auto-memory-snapshot/feedback_chanlun_stroke_types.md
+.auto-memory-snapshot/feedback_chunk_long_tasks.md
+.auto-memory-snapshot/feedback_dispatch_as_commander.md
+.auto-memory-snapshot/feedback_docx_editing_rules.md
+.auto-memory-snapshot/feedback_essay_course_materials.md
+.auto-memory-snapshot/feedback_file_write_verification.md
+.auto-memory-snapshot/feedback_necessity_accumulation.md
+.auto-memory-snapshot/feedback_no_asset_specialization.md
+.auto-memory-snapshot/feedback_no_workaround_bsp_lesson.md
+.auto-memory-snapshot/feedback_options_expiry.md
+.auto-memory-snapshot/feedback_options_selector_redesign.md
+.auto-memory-snapshot/feedback_order_pricing.md
+.auto-memory-snapshot/feedback_python_output_pattern.md
+.auto-memory-snapshot/feedback_recursive_nested_fugue.md
+.auto-memory-snapshot/feedback_rubric_scoring.md
+.auto-memory-snapshot/feedback_tutor_rj_dissertation.md
+.auto-memory-snapshot/feedback_use_latest_model.md
+.auto-memory-snapshot/mac_migration.md
+.auto-memory-snapshot/project_alpha_diagnosis.md
+.auto-memory-snapshot/project_c_segment_fix.md
+.auto-memory-snapshot/project_concept_movement.md
+.auto-memory-snapshot/project_crude_oil_options.md
+.auto-memory-snapshot/project_dissertation_genealogy.md
+.auto-memory-snapshot/project_dissertation_status.md
+.auto-memory-snapshot/project_emergent_direction.md
+.auto-memory-snapshot/project_located_direction_discovery.md
+.auto-memory-snapshot/project_m3_capital_flow_milestone.md
+.auto-memory-snapshot/project_mu_short.md
+.auto-memory-snapshot/project_omega_research.md
+.auto-memory-snapshot/project_orbit_enumeration_duality.md
+.auto-memory-snapshot/project_quant_system_progress.md
+.auto-memory-snapshot/project_recursive_regularization.md
+.auto-memory-snapshot/project_rtas_swarm.md
+.auto-memory-snapshot/project_session2_organic_fugue.md
+.auto-memory-snapshot/project_session3_fusion.md
+.auto-memory-snapshot/project_session4_strict_necessity.md
+.auto-memory-snapshot/project_session5_spiral_reinterpretation.md
+.auto-memory-snapshot/project_session_mental_model.md
+.auto-memory-snapshot/project_session_organic_fugue.md
+.auto-memory-snapshot/project_todo_master.md
+.auto-memory-snapshot/project_zombie_short_diagnosis.md
+.auto-memory-snapshot/reference_coil_scan.md
+.auto-memory-snapshot/reference_nautilus_trader.md
+.auto-memory-snapshot/reference_tv_chanlun_colors.md
+.auto-memory-snapshot/trading_setup.md
+.auto-memory-snapshot/user_profile.md
+.rtas/review-results/codex-decide-20260626-1543.md
+.rtas/review-results/codex-diagnose-20260626-0820.md
+.rtas/review-results/codex-diagnose-recursion-20260626-0230.md
+.rtas/review-results/codex-diagnose-recursion-20260626-0231.md
+.rtas/review-results/codex-diagnose-recursion-20260626-0236.md
+.rtas/review-results/codex-review-20260625-2116.md
+.rtas/review-results/codex-review-20260625-accounting-t33-t46.md
+.rtas/review-results/codex-review-20260626-0845.md
+.rtas/review-results/codex-review-20260629-0807.md
+.rtas/review-results/codex-review-20260629-1425.md
+.rtas/review-results/codex-review-oq9-fix-20260626.md
+.rtas/review-results/gemini-decide-cc-direction-20260626-0709.md
+chanlun/harness/WORKERS.md
+chanlun/harness/harness-ledger-20260719.md
+chanlun/harness/runbooks/long-run.md
+chanlun/harness/vendor/harness-engineering/AGENTS.md
+chanlun/harness/vendor/harness-engineering/ARCHITECTURE.md
+chanlun/harness/vendor/harness-engineering/CLAUDE.md
+chanlun/harness/vendor/harness-engineering/COPYING.md
+chanlun/harness/vendor/harness-engineering/LICENSE
+chanlun/harness/vendor/harness-engineering/PROVENANCE.md
+chanlun/harness/vendor/harness-engineering/README.md
+chanlun/harness/vendor/harness-engineering/docs/AGENTS.md
+chanlun/harness/vendor/harness-engineering/docs/CLAUDE.md
+chanlun/harness/vendor/harness-engineering/docs/README.md
+chanlun/harness/vendor/harness-engineering/docs/authority/README.md
+chanlun/harness/vendor/harness-engineering/docs/continuous-maintenance/README.md
+chanlun/harness/vendor/harness-engineering/docs/domain-modeling/README.md
+chanlun/harness/vendor/harness-engineering/docs/domain-modeling/homelab.md
+chanlun/harness/vendor/harness-engineering/docs/domain-modeling/hyperbola.md
+chanlun/harness/vendor/harness-engineering/docs/domain-modeling/implementations.md
+chanlun/harness/vendor/harness-engineering/docs/durable-systems/README.md
+chanlun/harness/vendor/harness-engineering/docs/durable-systems/dependency-ownership.md
+chanlun/harness/vendor/harness-engineering/docs/effectiveness/README.md
+chanlun/harness/vendor/harness-engineering/docs/feedback/README.md
+chanlun/harness/vendor/harness-engineering/docs/feedback/mld.md
+chanlun/harness/vendor/harness-engineering/docs/fixed-worker/README.md
+chanlun/harness/vendor/harness-engineering/docs/fixed-worker/model-native-semantics.md
+chanlun/harness/vendor/harness-engineering/docs/just-in-time-context/README.md
+chanlun/harness/vendor/harness-engineering/docs/last-mile-deployment/README.md
+chanlun/harness/vendor/harness-engineering/docs/lineage/README.md
+chanlun/harness/vendor/harness-engineering/docs/proof/README.md
+chanlun/harness/vendor/harness-engineering/docs/proof/release-integrity.md
+chanlun/harness/vendor/harness-engineering/docs/proof/rustsec.md
+chanlun/harness/vendor/harness-engineering/docs/tool-legibility/README.md
+chanlun/harness/vendor/harness-engineering/docs/whole-job/README.md
+chanlun/harness/vendor/harness-engineering/evals/README.md
+chanlun/harness/vendor/harness-engineering/evals/artichoke-state-modeling.md
+chanlun/harness/vendor/harness-engineering/playbooks/AGENTS.md
+chanlun/harness/vendor/harness-engineering/playbooks/CLAUDE.md
+chanlun/harness/vendor/harness-engineering/playbooks/README.md
+chanlun/harness/vendor/harness-engineering/playbooks/improve-harness.md
+chanlun/harness/vendor/harness-engineering/playbooks/repository-review.md
+chanlun/harness/vendor/harness-engineering/sources/AGENTS.md
+chanlun/harness/vendor/harness-engineering/sources/CLAUDE.md
+chanlun/harness/vendor/harness-engineering/sources/README.md
+chanlun/harness/vendor/harness-engineering/sources/artichoke-state-refactor-ledger.md
+chanlun/harness/vendor/harness-engineering/sources/raw/acp/LICENSE
+chanlun/harness/vendor/harness-engineering/sources/raw/acp/README.md
+chanlun/harness/vendor/harness-engineering/sources/raw/hyperbola/README.md
+chanlun/harness/vendor/harness-engineering/sources/raw/images/README.md
+chanlun/harness/vendor/harness-engineering/sources/ryan-notes.md
+chanlun/harness/vendor/harness-engineering/sources/scripts/AGENTS.md
+chanlun/harness/vendor/harness-engineering/sources/scripts/CLAUDE.md
+chanlun/harness/vendor/harness-engineering/sources/scripts/README.md
+chanlun/harness/vendor/harness-engineering/sources/twitter/README.md
+```
+
+</details>
