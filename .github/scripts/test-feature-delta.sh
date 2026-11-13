@@ -45,6 +45,12 @@ run_delta() {
   cargo test --locked --features "$base_features,$feature" "${sel[@]}" --jobs "${CI_CARGO_JOBS:-1}" -- --exact "${part[@]}"
 }
 
+# #1875：每个阶段成功后打一行公开 annotation（免认证可读）：用时。用来量「只为求差集的无特性构建」占多少。只打日志：
+#   不包在 || 或 if 里调用（那样会关掉被调函数内的 set -e，吞掉 cargo 失败），阶段失败时照旧由 set -e 退出、不打这一行。
+phase_done() {
+  echo "::notice title=feature-delta phase::feature=$feature part=${CI_TEST_PART:-0/1} target=$1 phase=$2 seconds=$((SECONDS - $3))"
+}
+
 total=0
 for target in lib bin; do
   if [[ "$target" == lib ]]; then
@@ -52,8 +58,12 @@ for target in lib bin; do
   else
     selector=(--bin s_structure_session)
   fi
+  t0=$SECONDS
   list_tests "$base_features" "$work/$target.base" "${selector[@]}"
+  phase_done "$target" list-base "$t0"
+  t0=$SECONDS
   list_tests "$base_features,$feature" "$work/$target.feature" "${selector[@]}"
+  phase_done "$target" list-feature "$t0"
   LC_ALL=C comm -13 "$work/$target.base" "$work/$target.feature" >"$work/$target.delta"
   removed="$(LC_ALL=C comm -23 "$work/$target.base" "$work/$target.feature" | wc -l | tr -d ' ')"
   count="$(wc -l <"$work/$target.delta" | tr -d ' ')"
@@ -73,7 +83,9 @@ for target in lib bin; do
       names+=("$name")
     done <"$work/$target.delta"
     echo "feature_delta target=$target skipped_elsewhere=$skipped"
+    t0=$SECONDS
     run_delta "$target" "${names[@]}"
+    phase_done "$target" run "$t0"
   fi
   total=$(( total + count ))
 done
