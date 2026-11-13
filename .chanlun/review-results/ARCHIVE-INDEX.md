@@ -104,6 +104,36 @@ echo "$restore"
 
 也可用 `git show 923d5f1187fefc549f810643390068884c36ba9e:<manifest 中的原路径>` 读取单件历史原文；完整恢复模式请用 tar 包。
 
+## #1742：14 件历史记录（2026-11-13）
+
+本批已出仓：两组审阅所属 PR #1649、#1580 已合入；pstack 验收票 #1130、#1131、#1135、#1138、#1139 已关闭。仅迁历史记录，pstack/Matt/DeepAgents 入口、许可证与夹具保留。
+
+归档包：`/Volumes/AgentStorage/restart-20261107/slim/remaining-archive/history14-20261113-923d5f1187-v2/history14.tar`，14 件均保留原路径与模式。原树提交：`923d5f1187`。包内路径如下（没有整目录删除）：
+
+- `.chanlun/review-results/claimer-emphasis-20261021/review-1-claude-opus-5-5.md`
+- `.chanlun/review-results/claimer-emphasis-20261021/review-2-claude-opus-5-5.md`
+- `.chanlun/review-results/claimer-emphasis-20261021/review-3-tail-claude-opus-5-5-1d1c9c063e.md`
+- `.chanlun/review-results/claimer-emphasis-20261021/review-3-tail-prompt.md`
+- `.chanlun/review-results/decision-archaeology-gate-20261020/dryrun-1355-archaeology.md`
+- `.chanlun/review-results/decision-archaeology-gate-20261020/report.md`
+- `.chanlun/review-results/decision-archaeology-gate-20261020/review-fable-5-1.md`
+- `.chanlun/review-results/decision-archaeology-gate-20261020/review-round2-fable-5-1.md`
+- `.chanlun/review-results/decision-archaeology-gate-20261020/review-round3-fable-5-1.md`
+- `docs/agents/pstack-lite/E2E-1131.md`
+- `docs/agents/pstack-lite/PILOT-1139.md`
+- `docs/agents/pstack-lite/VERIFICATION-1130.md`
+- `docs/agents/pstack-lite/VERIFICATION-1135.md`
+- `docs/agents/pstack-lite/VERIFICATION-1138.md`
+
+恢复到空目录：
+
+```sh
+mkdir -p /tmp/history14-restore
+tar -xpf /Volumes/AgentStorage/restart-20261107/slim/remaining-archive/history14-20261113-923d5f1187-v2/history14.tar -C /tmp/history14-restore
+```
+
+单件也可用 `git show 923d5f1187:<原路径>` 取回内容；该批 Git 文件模式均为 `100644`。核验清单与消费者证据随包存于仓外。
+
 ## 三份历史纪律（#1742 / #2030，2026-11-13）
 
 仅本批三份历史原文已出仓；不包含 #2057 的 14 件批次或 #1920 的归档，两者保留独立索引与验收。
