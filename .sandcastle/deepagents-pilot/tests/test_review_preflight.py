@@ -1,4 +1,5 @@
 import json
+import os
 import re
 import subprocess
 import sys
@@ -6,6 +7,7 @@ import threading
 import time
 from collections import namedtuple
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
 
 import pytest
 from conftest import git
@@ -25,6 +27,7 @@ OFFICIAL = {KIMI: ("kimi", "https://api.kimi.com/coding/v1/responses"),
 ANTIGRAVITY = ("antigravity", "https://daily-cloudcode-pa.googleapis.com/v1internal:streamGenerateContent")
 MODELFLARE = ("openai-compatible-modelflare-codex", "https://modelflare.dev/v1/responses")
 LOCAL = "http://localhost:9"  # DevSkim: ignore DS162092 有意使用本机回环（本地 CLIProxy / 测试假服务），非调试残留
+LEGACY_ROUTE_FAILURES = {f"route:{model}" for model in (KIMI, OPUS)}
 Usage = namedtuple("Usage", "total used free")
 
 
@@ -49,7 +52,7 @@ class FakeProxy:
     """同形 CLIProxy：按模型选 provider，写 request-log，记录收到的请求。"""
 
     def __init__(self, log_dir, routes, *, status=None, write_log=True, hang=False, log_delay=0.0,
-                 echo_auth=False, terminal=None, header_first=0.0, split_at=None, error_body=None):
+                 echo_auth=False, terminal=None, header_first=0.0, split_at=None, error_body=None, terminal_tail_delay=0.0):
         self.requests = []
         proxy = self
 
@@ -101,6 +104,11 @@ class FakeProxy:
                 self.send_response(code)
                 self.send_header("Content-Length", str(len(payload)))
                 self.end_headers()
+                if terminal_tail_delay and code == 200:
+                    self.wfile.write(payload[:-1])
+                    self.wfile.flush()
+                    time.sleep(terminal_tail_delay)
+                    payload = payload[-1:]
                 self.wfile.write(payload)
 
         self.server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)  # DevSkim: ignore DS162092 有意使用本机回环（本地 CLIProxy / 测试假服务），非调试残留
@@ -227,9 +235,9 @@ def test_snapshot_bytes_match_controller_with_replace_refs(repo, tmp_path, monke
     assert preflight.snapshot_bytes(root, base, head, base) == required
 
 
-def test_healthy_environment_is_ready_and_not_a_review(env, capsys):
+def test_healthy_environment_without_trusted_route_evidence_still_blocks(env, capsys):
     code, report, out, proxy = env(capsys=capsys)
-    assert code == 0 and report["ready"] and failing(report) == set()
+    assert code == 2 and not report["ready"] and failing(report) == LEGACY_ROUTE_FAILURES
     assert report["is_review_result"] is False and report["kind"] == "review-preflight"
     assert KEY not in out
     assert sorted(r["body"]["model"] for r in proxy.requests) == sorted([KIMI, OPUS])
@@ -242,9 +250,9 @@ def test_space_below_two_snapshots_blocks(env, capsys, repo, monkeypatch):
     per = preflight.snapshot_bytes(root, base, head, base)
     monkeypatch.setattr(preflight.shutil, "disk_usage", lambda _: Usage(0, 0, 2 * per - 1))
     code, report, *_ = env(capsys=capsys)
-    assert code == 2 and failing(report) == {"checkout_root_free_space"}
+    assert code == 2 and failing(report) == LEGACY_ROUTE_FAILURES | {"checkout_root_free_space"}
     monkeypatch.setattr(preflight.shutil, "disk_usage", lambda _: Usage(0, 0, 2 * per))
-    assert env(capsys=capsys)[0] == 0
+    assert check(env(capsys=capsys)[1], "checkout_root_free_space")["ok"]
 
 
 # ---------------- 挂载：PR1868 A1 ----------------
@@ -252,7 +260,7 @@ def test_space_below_two_snapshots_blocks(env, capsys, repo, monkeypatch):
 def test_container_seeing_empty_mount_blocks(env, capsys, monkeypatch):
     monkeypatch.setenv("FAKE_DOCKER_EMPTY", "1")
     code, report, *_ = env(capsys=capsys)
-    assert code == 2 and failing(report) == {"checkout_root_container_mount"}
+    assert code == 2 and failing(report) == LEGACY_ROUTE_FAILURES | {"checkout_root_container_mount"}
 
 
 def test_probe_leaves_no_files_in_checkout_root(env, capsys, tmp_path):
@@ -263,7 +271,7 @@ def test_probe_leaves_no_files_in_checkout_root(env, capsys, tmp_path):
 def test_relative_checkout_root_is_mounted_as_absolute(env, capsys, tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     code, report, *_ = env(capsys=capsys, extra=("--checkout-root", "checkouts"))
-    assert code == 0 and failing(report) == set()
+    assert code == 2 and failing(report) == LEGACY_ROUTE_FAILURES
 
 
 def test_failed_docker_run_container_is_removed(env, capsys, tmp_path):
@@ -280,7 +288,7 @@ def test_container_command_failing_inside_a_finished_container_is_not_a_cleanup_
     """容器里的命令非 0 退出（如 PR1868 A1 空挂载时 cat 失败）：容器已跑完、--rm 已删，不报回收失败。"""
     (tmp_path / "bin" / "docker").write_text('#!/bin/sh\n[ "$1" = rm ] && exit 0\nexit 1\n')
     code, report, *_ = env(capsys=capsys)
-    assert code == 2 and failing(report) == {"checkout_root_container_mount"}
+    assert code == 2 and failing(report) == LEGACY_ROUTE_FAILURES | {"checkout_root_container_mount"}
 
 
 def test_probe_dir_that_cannot_be_deleted_is_reported(env, capsys, tmp_path, monkeypatch):
@@ -369,33 +377,33 @@ def test_no_probe_dir_is_left_when_credentials_use_up_the_deadline(tmp_path, rep
 
 def test_opus_on_antigravity_with_upstream_400_blocks(env, capsys):
     code, report, *_ = env(routes={**OFFICIAL, OPUS: ANTIGRAVITY}, status={OPUS: 400}, capsys=capsys)
-    assert code == 2 and failing(report) == {f"route:{OPUS}", f"roundtrip:{OPUS}"}
-    assert check(report, f"route:{OPUS}")["detail"]["actual"] == ["antigravity@daily-cloudcode-pa.googleapis.com"]
+    assert code == 2 and failing(report) == LEGACY_ROUTE_FAILURES | {f"roundtrip:{OPUS}"}
+    assert check(report, f"route:{OPUS}")["detail"]["actual"] == []
     assert check(report, f"roundtrip:{OPUS}")["detail"]["error"]["class"] == "tool_choice_unsupported"
 
 
 def test_wrong_provider_blocks_even_when_round_trip_succeeds(env, capsys):
     code, report, *_ = env(routes={**OFFICIAL, OPUS: ANTIGRAVITY}, capsys=capsys)
-    assert code == 2 and failing(report) == {f"route:{OPUS}"}
+    assert code == 2 and failing(report) == LEGACY_ROUTE_FAILURES
 
 
 def test_kimi_on_third_party_route_blocks(env, capsys):
     code, report, *_ = env(routes={**OFFICIAL, KIMI: MODELFLARE}, status={KIMI: 403}, capsys=capsys)
-    assert code == 2 and failing(report) == {f"route:{KIMI}", f"roundtrip:{KIMI}"}
+    assert code == 2 and failing(report) == LEGACY_ROUTE_FAILURES | {f"roundtrip:{KIMI}"}
 
 
 def test_kimi_international_upstream_is_an_official_route(env, capsys):
     """CLIProxy 在国内 kimi 与国际 kimi-ai 之间按同型号候选池切换，两条都是正式路线。"""
     code, report, *_ = env(routes={**OFFICIAL, KIMI: ("kimi-ai", "https://api.kimi.ai/coding/v1/responses")}, capsys=capsys)
-    assert code == 0 and failing(report) == set()
-    assert check(report, f"route:{KIMI}")["detail"]["actual"] == ["kimi-ai@api.kimi.ai"]
+    assert code == 2 and failing(report) == LEGACY_ROUTE_FAILURES
+    assert check(report, f"route:{KIMI}")["detail"]["actual"] == []
     assert check(report, f"route:{KIMI}")["detail"]["expected"] == ["kimi-ai@api.kimi.ai", "kimi@api.kimi.com"]
 
 
 def test_kimi_routed_to_codex_blocks(env, capsys):
     code, report, *_ = env(routes={**OFFICIAL, KIMI: ("codex", "https://chatgpt.com/backend-api/codex/responses")},
                            capsys=capsys)
-    assert code == 2 and failing(report) == {f"route:{KIMI}"}
+    assert code == 2 and failing(report) == LEGACY_ROUTE_FAILURES
 
 
 def test_preflight_probes_the_controller_reviewer_pair():
@@ -409,23 +417,23 @@ def test_route_unknown_without_request_log_blocks(env, capsys):
     assert all(not c["detail"]["log_found"] for c in report["checks"] if c["name"].startswith("route:"))
 
 
-def test_request_log_written_one_second_late_still_passes(env, capsys):
+def test_legacy_log_written_late_cannot_prove_routes(env, capsys):
     code, report, *_ = env(log_delay=1.0, capsys=capsys)
-    assert code == 0 and failing(report) == set()
+    assert code == 2 and failing(report) == LEGACY_ROUTE_FAILURES
 
 
 def test_log_written_in_two_steps_is_not_misread(env, capsys):
     code, report, *_ = env(header_first=0.3, capsys=capsys)
-    assert code == 0 and failing(report) == set()
+    assert code == 2 and failing(report) == LEGACY_ROUTE_FAILURES
 
 
 def test_provider_line_written_halfway_is_not_misread(env, capsys):
-    """日志截在 provider=clau 时不能判失败。"""
+    """半写日志不能成为路由证明。"""
     code, report, *_ = env(split_at="ude, auth_id", capsys=capsys)
-    assert code == 0 and failing(report) == set()
+    assert code == 2 and failing(report) == LEGACY_ROUTE_FAILURES
 
 
-def test_unrelated_log_vanishing_mid_scan_does_not_block(env, capsys, tmp_path, monkeypatch):
+def test_vanishing_legacy_log_does_not_crash(env, capsys, tmp_path, monkeypatch):
     original = preflight.Path.stat
 
     def flaky(self, *a, **k):
@@ -435,7 +443,7 @@ def test_unrelated_log_vanishing_mid_scan_does_not_block(env, capsys, tmp_path, 
     (tmp_path / "logs" / "v1-responses-gone.log").write_text("x")
     monkeypatch.setattr(preflight.Path, "stat", flaky)
     code, report, *_ = env(capsys=capsys)
-    assert code == 0 and failing(report) == set()
+    assert code == 2 and failing(report) == LEGACY_ROUTE_FAILURES
 
 
 def test_unreadable_log_dir_does_not_crash(env, capsys, monkeypatch):
@@ -444,13 +452,126 @@ def test_unreadable_log_dir_does_not_crash(env, capsys, monkeypatch):
     assert code == 2 and {f"route:{KIMI}", f"route:{OPUS}"} <= failing(report)
 
 
-def test_log_with_non_utf8_byte_is_still_read(tmp_path):
+def test_non_utf8_legacy_log_is_not_route_evidence(tmp_path):
     session = "preflight-utf"
     (tmp_path / "v1-responses-1.log").write_bytes(
         f"=== HEADERS ===\nSession-Id: {session}\n\n=== API REQUEST 1 ===\n"
         "Upstream URL: https://chatgpt.com/backend-api/codex/responses\nAuth: provider=codex, auth_id=x\n\n"
         "=== API RESPONSE 1 ===\nStatus: 200\n".encode() + b"# byte \xff\n\n=== RESPONSE ===\nStatus: 200\n")
-    assert preflight.route_from_log(tmp_path, session, time.time() - 5, wait=0.5) == [("codex", "chatgpt.com")]
+    assert preflight.route_from_log(tmp_path, session, time.time() - 5, wait=0.5) is None
+
+
+@pytest.mark.parametrize("framing", ("length", "short-length", "chunked", "short-chunked", "drip", "spent-budget", "header-drip", "error-drip"))
+def test_roundtrip_validates_real_http_framing(framing, monkeypatch):
+    processes = []
+    popen = preflight.subprocess.Popen
+
+    def track(*args, **kwargs):
+        process = popen(*args, **kwargs)
+        processes.append(process)
+        return process
+
+    monkeypatch.setattr(preflight.subprocess, "Popen", track)
+    payload = b'data: {"type":"response.completed","response":{"status":"completed"}}\n\n'
+
+    class Handler(BaseHTTPRequestHandler):
+        protocol_version = "HTTP/1.1"
+
+        def log_message(self, *args):
+            pass
+
+        def do_POST(self):
+            self.rfile.read(int(self.headers["Content-Length"]))
+            if framing == "spent-budget":
+                time.sleep(0.3)
+            if framing in ("header-drip", "error-drip"):
+                try:
+                    self.connection.sendall(b"HTTP/1.1 429 Too Many Requests\r\nContent-Length: 30\r\n")
+                    self.connection.sendall(b"X-Drip: " if framing == "header-drip" else b"\r\n")
+                    for _ in range(30):
+                        time.sleep(0.05)
+                        self.connection.sendall(b"x")
+                except (BrokenPipeError, ConnectionResetError):
+                    pass
+                self.close_connection = True
+                return
+            self.send_response(200)
+            self.send_header("Connection", "close")
+            if framing in ("length", "short-length"):
+                self.send_header("Content-Length", str(len(payload) + (100 if framing == "short-length" else 0)))
+            else:
+                self.send_header("Transfer-Encoding", "chunked")
+            self.end_headers()
+            self.close_connection = True
+            try:
+                if framing in ("length", "short-length"):
+                    self.wfile.write(payload)
+                else:
+                    self.wfile.write(f"{len(payload):x}\r\n".encode() + payload + b"\r\n")
+                    self.wfile.flush()
+                    if framing in ("drip", "spent-budget", "header-drip", "error-drip"):
+                        # Bytes arrive without a completed SSE line or HTTP end.
+                        for _ in range(30):
+                            time.sleep(0.05)
+                            self.wfile.write(b"1\r\n \r\n")
+                            self.wfile.flush()
+                    if framing != "short-chunked":
+                        self.wfile.write(b"0\r\n\r\n")
+            except (BrokenPipeError, ConnectionResetError):
+                pass
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)  # DevSkim: ignore DS162092 本地隔离 HTTP framing 回归
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    try:
+        url = f"http://127.0.0.1:{server.server_port}"  # DevSkim: ignore DS162092 本地隔离 HTTP framing 回归
+        started = time.monotonic()
+        result = preflight.round_trip(url, KEY, OPUS, "preflight-test", preflight.Deadline(1 if framing in ("drip", "spent-budget", "header-drip", "error-drip") else 3))
+        elapsed = time.monotonic() - started
+        assert processes and all(process.poll() is not None for process in processes)
+        assert result["ok"] is (framing in ("length", "chunked")), result
+        if framing.startswith("short-"):
+            assert result["error"]["exception"] == "IncompleteRead"
+        if framing in ("drip", "spent-budget", "header-drip", "error-drip"):
+            assert elapsed < 0.7, elapsed
+    finally:
+        server.shutdown()
+        server.server_close()
+
+
+@pytest.mark.parametrize("tail", ("eof", "read-error", "second-terminal", "deadline"))
+def test_roundtrip_requires_stream_cleanup_after_terminal(monkeypatch, tail):
+    terminal = b'data: {"type":"response.completed","response":{"status":"completed"}}\n'
+
+    class Response:
+        status = 200
+        exhausted = False
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            pass
+
+        def __iter__(self):
+            yield terminal
+            if tail == "read-error":
+                raise TimeoutError("private upstream detail")
+            if tail == "deadline":
+                deadline.work = time.monotonic() - 1
+            if tail == "second-terminal":
+                yield b'data: {"type":"response.failed","response":{"status":"failed"}}\n'
+            yield b"\n"
+            self.exhausted = True
+
+    response = Response()
+    deadline = preflight.Deadline(3)
+    monkeypatch.setattr(preflight.urllib.request, "urlopen", lambda *a, **kw: response)
+    response.read = lambda: b"".join(response)
+    result = preflight._round_trip_http(LOCAL, KEY, OPUS, "preflight-test", deadline)
+    assert result["ok"] is (tail == "eof")
+    if tail == "eof":
+        assert response.exhausted
+    assert "private upstream detail" not in json.dumps(result)
 
 
 def test_completed_event_with_failed_status_is_not_success(env, capsys):
@@ -459,10 +580,18 @@ def test_completed_event_with_failed_status_is_not_success(env, capsys):
     assert code == 2 and {f"roundtrip:{KIMI}", f"roundtrip:{OPUS}"} <= failing(report)
 
 
-def test_incomplete_without_error_still_passes(env, capsys):
+def test_incomplete_without_error_passes_roundtrip_not_route_proof(env, capsys):
     ok = b'data: {"type":"response.incomplete","response":{"status":"incomplete","incomplete_details":{"reason":"max_output_tokens"}}}\n\n'
     code, report, *_ = env(terminal=ok, capsys=capsys)
-    assert code == 0
+    assert code == 2 and failing(report) == LEGACY_ROUTE_FAILURES
+    assert all(check(report, f"roundtrip:{m}")["ok"] for m in preflight.MODELS)
+
+
+def test_terminal_without_eof_is_cut_at_deadline(env, capsys):
+    start = time.monotonic()
+    code, report, *_ = env(terminal_tail_delay=3.0, extra=("--deadline", "2"), capsys=capsys)
+    assert time.monotonic() - start < 4
+    assert code == 2 and {f"roundtrip:{KIMI}", f"roundtrip:{OPUS}"} <= failing(report)
 
 
 def test_hanging_upstream_is_cut_at_deadline(env, capsys, monkeypatch):
@@ -560,10 +689,10 @@ def test_fifo_config_cannot_stretch_past_the_deadline(env, capsys, tmp_path):
     assert code == 2 and "credential:codex-host" in failing(report) and time.monotonic() - start < 1.5
 
 
-def test_request_log_written_late_within_the_deadline_still_passes(env, capsys):
-    """独审二十 B1：日志晚于 2 秒落盘也不是路由失败，等到工作时限为止。"""
+def test_late_legacy_log_within_deadline_still_lacks_trusted_evidence(env, capsys):
+    """及时或迟写都不能修复文本格式缺少可信边界的问题。"""
     code, report, *_ = env(log_delay=2.4, capsys=capsys)
-    assert code == 0 and failing(report) == set()
+    assert code == 2 and failing(report) == LEGACY_ROUTE_FAILURES
 
 
 def test_host_key_rejected_by_proxy_blocks(env, capsys, tmp_path):
@@ -615,7 +744,7 @@ def test_key_crossing_the_truncation_point_leaves_no_prefix(env, capsys):
 def test_host_key_from_file_is_used_for_both_probes_and_never_printed(env, capsys, tmp_path):
     (tmp_path / "key.txt").write_text(OTHER_VALID + "\n")
     code, report, out, proxy = env(capsys=capsys)
-    assert code == 0 and {r["auth"] for r in proxy.requests} == {f"Bearer {OTHER_VALID}"}
+    assert code == 2 and {r["auth"] for r in proxy.requests} == {f"Bearer {OTHER_VALID}"}
     assert OTHER_VALID not in out
 
 
@@ -638,14 +767,15 @@ def test_key_with_inner_control_char_is_rejected_without_leaking(env, capsys, tm
 def test_key_with_surrounding_whitespace_is_stripped_like_a_header_value(env, capsys, tmp_path):
     (tmp_path / "key.txt").write_text(f"  {KEY}  \n\n")
     code, report, out, _ = env(capsys=capsys)
-    assert code == 0 and KEY not in out
+    assert code == 2 and KEY not in out
 
 
 def test_short_valid_key_passes_in_a_healthy_environment(env, capsys, tmp_path):
     """7 字符的有效 key 在健康环境不能被误拦，也不能出现在输出里。"""
     (tmp_path / "key.txt").write_text(SHORT_VALID + "\n")
     code, report, out, proxy = env(capsys=capsys)
-    assert code == 0 and len(proxy.requests) == 2 and SHORT_VALID not in out
+    assert code == 2 and len(proxy.requests) == 2 and SHORT_VALID not in out
+    assert check(report, "credential:codex-host")["ok"]
 
 
 @pytest.mark.parametrize("config", [b"\xff\xfe", b'[model_providers]\ncliproxy-local = 3\n',
@@ -675,7 +805,7 @@ def test_structured_sse_error_never_reaches_the_report(monkeypatch):
             return False
 
     monkeypatch.setattr(urllib.request, "urlopen", lambda req, timeout=None: FakeResp(line.encode()))
-    trip = preflight.round_trip(LOCAL, key, KIMI, "s", preflight.Deadline(30))
+    trip = preflight._round_trip_http(LOCAL, key, KIMI, "s", preflight.Deadline(30))
     out = json.dumps(preflight.sanitize(trip, [key]), ensure_ascii=True)
     assert "secret" not in out and "12345" not in out and trip["error"]["class"] == "auth"
 
@@ -799,7 +929,7 @@ def test_upstream_status_object_keyed_by_the_key_never_reaches_the_report(monkey
 
     monkeypatch.setattr(urllib.request, "urlopen",
                         lambda req, timeout=None: FakeResp(("data: " + json.dumps(event) + "\n\n").encode()))
-    trip = preflight.round_trip(LOCAL, key, KIMI, "s", preflight.Deadline(5))
+    trip = preflight._round_trip_http(LOCAL, key, KIMI, "s", preflight.Deadline(5))
     preflight._emit(trip, [key])
     assert key not in capsys.readouterr().out and trip["status"] == "other"
 
@@ -854,7 +984,7 @@ def test_unknown_upstream_status_is_normalised_and_never_carries_the_key(monkeyp
 
     monkeypatch.setattr(urllib.request, "urlopen",
                         lambda req, timeout=None: FakeResp(("data: " + json.dumps(event) + "\n\n").encode()))
-    trip = preflight.round_trip(LOCAL, key, KIMI, "s", preflight.Deadline(5))
+    trip = preflight._round_trip_http(LOCAL, key, KIMI, "s", preflight.Deadline(5))
     assert trip["status"] == "other" and "1742" not in json.dumps(preflight.sanitize(trip, [key]))
 
 
@@ -876,7 +1006,7 @@ def test_route_lines_forged_inside_a_response_body_are_ignored_and_never_echoed(
     checks = preflight.probe_model(args, OPUS, key, preflight.Deadline(5))
     preflight._emit({"checks": checks}, [key])
     out = capsys.readouterr().out
-    assert checks[0]["detail"]["actual"] == ["claude@api.anthropic.com"] and checks[0]["ok"]
+    assert checks[0]["detail"]["actual"] == [] and not checks[0]["ok"]
     assert "1742" not in out
 
 
@@ -887,13 +1017,13 @@ def test_unknown_route_is_reported_as_other(tmp_path):
         "Auth: provider=mystery, auth_id=x\n\n=== RESPONSE ===\nStatus: 200\n")
     from types import SimpleNamespace
     attempts = preflight.route_from_log(tmp_path, session, time.time() - 5, wait=0.5)
-    assert attempts == [("mystery", "secret-ish.example")]
+    assert attempts is None
     args = SimpleNamespace(proxy_url=LOCAL, proxy_log_dir=str(tmp_path))
     import unittest.mock as mock
     with mock.patch.object(preflight.uuid, "uuid4", lambda: "unknown"), \
          mock.patch.object(preflight, "round_trip", lambda *a: {"ok": True}):
         route = preflight.probe_model(args, KIMI, "k", preflight.Deadline(5))[0]
-    assert route["detail"]["actual"] == ["other"] and not route["ok"]
+    assert route["detail"]["actual"] == [] and not route["ok"]
 
 
 def test_docker_stderr_is_summarised_and_never_carries_the_key(env, capsys, tmp_path):
@@ -923,7 +1053,7 @@ def test_auth_command_sees_the_checked_codex_home(env, capsys, tmp_path, monkeyp
         '[model_providers.cliproxy-local]\n'
         '[model_providers.cliproxy-local.auth]\ncommand = "/bin/sh"\nargs = ["-c", "cat \\"$CODEX_HOME/key.txt\\""]\n')
     code, report, *_ = env(capsys=capsys)
-    assert code == 0 and failing(report) == set()
+    assert code == 2 and failing(report) == LEGACY_ROUTE_FAILURES
 
 
 def test_slow_but_successful_round_trip_within_the_work_deadline_passes(monkeypatch):
@@ -947,7 +1077,7 @@ def test_slow_but_successful_round_trip_within_the_work_deadline_passes(monkeypa
         return FakeResp(b'data: {"type":"response.completed","response":{"status":"completed"}}\n\n')
 
     monkeypatch.setattr(urllib.request, "urlopen", urlopen)
-    trip = preflight.round_trip(LOCAL, KEY, KIMI, "s", preflight.Deadline(60))
+    trip = preflight._round_trip_http(LOCAL, KEY, KIMI, "s", preflight.Deadline(60))
     assert trip["ok"] and seen["timeout"] > 50
 
 
@@ -981,7 +1111,7 @@ def test_mount_probe_runs_as_the_host_user_like_review_containers(env, capsys, t
     docker.write_text(docker.read_text().replace("#!/bin/sh\n", f'#!/bin/sh\necho "$@" >> {calls}\n', 1))
     code, report, *_ = env(capsys=capsys)
     run = next(line for line in calls.read_text().splitlines() if line.startswith("run "))
-    assert code == 0 and f"--user {os.getuid()}:{os.getgid()}" in run
+    assert code == 2 and f"--user {os.getuid()}:{os.getgid()}" in run
 
 
 # ---------------- 正式审查 a4 Sol P2：key 与报告字段名、枚举值重合 ----------------
@@ -1004,8 +1134,8 @@ def test_key_equal_to_a_protocol_token_does_not_rewrite_the_report(env, capsys, 
     code, baseline, *_ = env(capsys=capsys)
     (tmp_path / "key.txt").write_text(key + "\n")
     code, report, _, proxy = env(capsys=capsys)
-    assert code == 0 and {r["auth"] for r in proxy.requests} == {f"Bearer {key}"}
-    assert report["ready"] is True and failing(report) == set()
+    assert code == 2 and {r["auth"] for r in proxy.requests} == {f"Bearer {key}"}
+    assert report["ready"] is False and failing(report) == LEGACY_ROUTE_FAILURES
     fields, enums, base_fields, base_enums = set(), set(), set(), set()
     _walk(report, fields, enums)
     _walk(baseline, base_fields, base_enums)
@@ -1022,3 +1152,504 @@ def test_every_report_field_and_enum_is_in_the_protocol_vocabulary(env, capsys, 
     for report in reports:
         _walk(report, fields, enums)
     assert fields <= preflight.PROTOCOL_FIELDS and enums <= preflight.PROTOCOL_VALUES
+
+
+# ---------------- #1742 容器日志后端：只用 fake Docker / 合成日志 ----------------
+
+@pytest.fixture
+def container_reader(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+
+    args = SimpleNamespace(proxy_docker_context="proxy-orbstack", proxy_log_container="fake-proxy",
+                           proxy_container_log_dir=str(tmp_path), proxy_url=LOCAL)
+    calls, outputs = [], []
+    original = preflight.run_bounded
+
+    def fake(cmd, timeout, **kwargs):
+        calls.append(cmd)
+        assert cmd[:6] == ["docker", "--context", "proxy-orbstack", "exec", "fake-proxy", "python3"]
+        result = original([sys.executable, *cmd[6:]], timeout, **kwargs)
+        outputs.append(result.stdout)
+        return result
+
+    monkeypatch.setattr(preflight, "run_bounded", fake)
+    return args, calls, outputs
+
+
+def _route_log(session, routes):
+    return (f"=== HEADERS ===\nSession-Id: {session}\n\n" + "".join(
+        f"=== API REQUEST {i} ===\nUpstream URL: https://{host}/private-path\n"
+        f"Auth: provider={provider}, auth_id=SECRET-AUTH-ID\n\n"
+        f"=== API RESPONSE {i} ===\nStatus: 400\nBody:\n"
+        "Auth: provider=forged, auth_id=SECRET-BODY\nUpstream URL: https://forged-secret/private\n\n"
+        for i, (provider, host) in enumerate(routes, 1)) + "=== RESPONSE ===\nStatus: 200\n")
+
+
+def test_container_reader_refuses_even_normal_multi_attempt_legacy_log(tmp_path, container_reader):
+    args, calls, outputs = container_reader
+    session = "preflight-test"
+    routes = [("antigravity", "daily-cloudcode-pa.googleapis.com"),
+              ("claude", "api.anthropic.com"), ("claude", "api.anthropic.com"),
+              ("private-provider", "private-host")]
+    (tmp_path / "v1-responses-test.log").write_text(_route_log(session, routes))
+    actual = preflight.route_from_container(args, session, time.time(), 1, preflight.Deadline(5))
+    assert actual is None
+    assert json.loads(outputs[0]) == {"session": session, "complete_stable": False, "routes": []}
+    assert len(calls) == 1
+    assert not any(word in outputs[0].decode() for word in ("SECRET", "private", "forged", "Auth:", "https://"))
+
+
+@pytest.mark.parametrize("routes,ok", [
+    ([("claude", "api.anthropic.com"), ("claude", "api.anthropic.com")], True),
+    ([("antigravity", "daily-cloudcode-pa.googleapis.com"), ("claude", "api.anthropic.com")], False),
+    ([("private", "secret")], False),
+])
+def test_container_probe_rejects_legacy_routes_regardless_of_allowlist(tmp_path, container_reader, monkeypatch, routes, ok):
+    args, _, _ = container_reader
+    (tmp_path / "v1-responses-test.log").write_text(_route_log("preflight-test", routes))
+    monkeypatch.setattr(preflight.uuid, "uuid4", lambda: "test")
+    monkeypatch.setattr(preflight, "round_trip", lambda *a: {"ok": True})
+    checks = preflight.probe_model(args, OPUS, "dummy", preflight.Deadline(5))
+    assert not checks[0]["ok"]
+    assert checks[0]["detail"]["actual"] == []
+
+
+@pytest.mark.parametrize("mode", ["partial", "late", "rotation"])
+def test_container_reader_cannot_trust_partial_late_or_rotated_text(tmp_path, container_reader, mode):
+    import os
+
+    args, _, outputs = container_reader
+    path = tmp_path / "v1-responses-test.log"
+    text = _route_log("preflight-test", [("claude", "api.anthropic.com")])
+    if mode == "partial":
+        path.write_text(text[:text.index("ude, auth_id")])
+    elif mode == "rotation":
+        path.write_text("unrelated")
+
+    def finish():
+        replacement = tmp_path / "new-log"
+        replacement.write_text(text)
+        os.replace(replacement, path)
+
+    timer = threading.Timer(0.2, finish)
+    timer.start()
+    try:
+        assert preflight.route_from_container(args, "preflight-test", time.time(), 1,
+                                               preflight.Deadline(5)) is None
+    finally:
+        timer.join()
+    assert json.loads(outputs[0])["complete_stable"] is False
+
+
+@pytest.mark.parametrize("kind", ["old", "other-session", "incomplete", "symlink", "fifo"])
+def test_container_reader_never_proves_unusable_log(tmp_path, container_reader, kind):
+    import os
+
+    args, _, _ = container_reader
+    path = tmp_path / "v1-responses-test.log"
+    text = _route_log("preflight-test-other" if kind == "other-session" else "preflight-test",
+                      [("claude", "api.anthropic.com")])
+    if kind == "symlink":
+        source = tmp_path / "source"
+        source.write_text(text)
+        path.symlink_to(source)
+    elif kind == "fifo":
+        os.mkfifo(path)
+    else:
+        path.write_text(text.split("=== RESPONSE ===")[0] if kind == "incomplete" else text)
+        if kind == "old":
+            os.utime(path, (1, 1))
+    assert preflight.route_from_container(args, "preflight-test", time.time(), 0.2,
+                                           preflight.Deadline(5)) is None
+
+
+@pytest.mark.parametrize("failure", ["rc", "stderr", "garbage", "extra", "session", "state", "route", "timeout", "missing"])
+def test_container_protocol_failures_are_closed_and_not_echoed(container_reader, monkeypatch, capsys, failure):
+    args, _, _ = container_reader
+    payload = {"session": "preflight-test", "complete_stable": True, "routes": ["claude@api.anthropic.com"]}
+    rc, stderr = 0, b""
+    if failure == "rc":
+        rc = 1
+    elif failure == "stderr":
+        stderr = b"SECRET STDERR"
+    elif failure == "extra":
+        payload["SECRET"] = "SECRET VALUE"
+    elif failure == "session":
+        payload["session"] = "SECRET SESSION"
+    elif failure == "state":
+        payload["complete_stable"] = "SECRET STATE"
+    elif failure == "route":
+        payload["routes"] = ["SECRET ROUTE"]
+
+    def fake(cmd, timeout, **kwargs):
+        if failure == "timeout":
+            raise subprocess.TimeoutExpired(cmd, timeout, output=b"SECRET OUT", stderr=b"SECRET ERR")
+        if failure == "missing":
+            raise OSError("SECRET ERROR")
+        return subprocess.CompletedProcess(cmd, rc, b"SECRET OUT" if failure == "garbage" else json.dumps(payload).encode(), stderr)
+
+    monkeypatch.setattr(preflight, "run_bounded", fake)
+    monkeypatch.setattr(preflight.uuid, "uuid4", lambda: "test")
+    monkeypatch.setattr(preflight, "round_trip", lambda *a: {"ok": True})
+    result = preflight.probe_model(args, OPUS, "dummy", preflight.Deadline(5))
+    preflight._emit({"checks": result})
+    assert "SECRET" not in capsys.readouterr().out
+    assert not result[0]["ok"] and not result[0]["detail"]["log_found"]
+
+
+def test_proxy_and_review_contexts_are_independent(env, tmp_path, capsys):
+    # 真 CLI 参数经过假 Docker，再执行同一容器解析器；没有真实 daemon。
+    docker = tmp_path / "bin" / "docker"
+    docker.write_text(f'''#!{sys.executable}
+import os, sys, json
+args = sys.argv[1:]
+with open({str(tmp_path / 'commands.jsonl')!r}, 'a') as f:
+    f.write(json.dumps(args[:4]) + '\\n')
+assert args[:1] == ['--context']
+context, args = args[1], args[2:]
+if args[0] == 'exec':
+    assert context == 'proxy-orbstack' and args[1:3] == ['fake-proxy', 'python3']
+    os.execv({sys.executable!r}, [{sys.executable!r}, *args[3:]])
+assert context == 'review-colima'
+if args[0] == 'rm':
+    sys.exit(0)
+assert args[0] == 'run'
+src = next(x for x in args if x.startswith('type=bind,src=')).split('src=', 1)[1].split(',dst=')[0]
+print(open(src + args[-1].removeprefix('/checkouts')).read(), end='')
+''')
+    # env 的既有 --proxy-log-dir 与 container 开关互斥；通过其内部 main 参数适配 fake。
+    original = preflight.main
+    def container_main(argv):
+        i = argv.index("--proxy-log-dir")
+        argv = argv[:i] + argv[i + 2:]
+        return original(argv)
+    import unittest.mock as mock
+    with mock.patch.object(preflight, "main", container_main):
+        code, report, *_ = env(capsys=capsys, extra=(
+            "--proxy-log-container", "fake-proxy", "--proxy-docker-context", "proxy-orbstack",
+            "--proxy-container-log-dir", str(tmp_path / "logs"), "--review-docker-context", "review-colima"))
+    assert code == 2 and failing(report) == LEGACY_ROUTE_FAILURES
+    calls = [json.loads(line) for line in (tmp_path / "commands.jsonl").read_text().splitlines()]
+    assert sum(c[:3] == ["--context", "proxy-orbstack", "exec"] for c in calls) == 2
+    assert any(c[:3] == ["--context", "review-colima", "rm"] for c in calls)
+    assert any(c[:3] == ["--context", "review-colima", "run"] for c in calls)
+
+
+def test_container_helper_exits_even_when_client_is_gone(tmp_path):
+    # 不通过 run_bounded 杀 helper：证明容器端有自己的期限，延迟启动亦无读取。
+    source = preflight._LOG_READER.read_text()
+    for expires in (time.time() + 0.15, time.time() - 1):
+        start = time.monotonic()
+        result = subprocess.run([sys.executable, "-I", "-c", source, str(tmp_path), "preflight-test",
+                                 str(time.time()), str(expires), "0.2", "[]"], capture_output=True, timeout=2)
+        assert not result.stderr
+        if expires > time.time():
+            assert result.returncode == 0
+            assert json.loads(result.stdout) == {"session": "preflight-test", "complete_stable": False, "routes": []}
+        else:
+            assert result.returncode == 2 and not result.stdout
+        assert time.monotonic() - start < 1
+
+
+def test_container_read_respects_exhausted_deadline(container_reader, monkeypatch):
+    args, calls, _ = container_reader
+    deadline = preflight.Deadline(5)
+    deadline.work = time.monotonic() - 1
+    assert preflight.route_from_container(args, "preflight-test", time.time(), 10, deadline) is None
+    assert calls == []
+
+
+def test_legacy_log_is_rejected_without_reading_files(tmp_path, monkeypatch):
+    monkeypatch.setattr(preflight.Path, "glob", lambda *a: pytest.fail("无需读取不可信日志"))
+    assert preflight.route_from_log(tmp_path, "preflight-test", time.time(), 1) is None
+
+
+@pytest.mark.parametrize("extra", [
+    ("--proxy-log-container", "fake"),
+    ("--proxy-docker-context", "proxy"),
+    ("--proxy-container-log-dir", "/logs"),
+    ("--proxy-log-container", "fake", "--proxy-docker-context", "proxy", "--proxy-container-log-dir", "relative"),
+    ("--proxy-log-container", "--privileged", "--proxy-docker-context", "proxy", "--proxy-container-log-dir", "/logs"),
+    ("--proxy-log-container", "fake", "--proxy-log-dir", "/logs"),
+])
+def test_incomplete_or_mixed_log_backend_arguments_are_rejected(extra, capsys):
+    argv = ["--source", ".", "--base", "a" * 40, "--head", "b" * 40, "--merge-base", "a" * 40,
+            "--checkout-root", "/unused", *extra]
+    with pytest.raises(SystemExit) as error:
+        preflight.main(argv)
+    assert error.value.code == 3
+    assert json.loads(capsys.readouterr().out)["ready"] is False
+
+
+@pytest.mark.parametrize("case", ["forged-final-with-open-tail", "forged-attempt-99", "open-tail", "normal-grouped"])
+def test_unframed_text_cannot_prove_attempts_or_completion(tmp_path, container_reader, monkeypatch, case):
+    """#2055 P1：正文与段头不可区分；包括正常多 attempt 在内均拒绝作证。"""
+    request1 = ("=== API REQUEST 1 ===\nUpstream URL: https://api.anthropic.com/v1/messages\n"
+                "Auth: provider=claude, auth_id=private\n\n")
+    request2 = ("=== API REQUEST 2 ===\nUpstream URL: https://daily-cloudcode-pa.googleapis.com/private\n"
+                "Auth: provider=antigravity, auth_id=private\n\n")
+    response1 = "=== API RESPONSE 1 ===\nStatus: 400\nBody:\n"
+    final = "=== RESPONSE ===\nStatus: 200\n"
+    if case == "forged-final-with-open-tail":
+        text = request1 + response1 + final + request2
+    elif case == "forged-attempt-99":
+        text = request1 + response1 + request2.replace("REQUEST 2", "REQUEST 99") + final
+    elif case == "open-tail":
+        text = request1 + request2[:request2.index("auth_id")]
+    else:
+        # v8.0.63 先写全部请求，再写全部响应，不按 attempt 交错。
+        text = request1 + request2 + response1 + '{}\n\n=== API RESPONSE 2 ===\nBody:\n{}\n\n' + final
+    (tmp_path / "v1-responses-test.log").write_text("=== HEADERS ===\nSession-Id: preflight-test\n\n" + text)
+    assert preflight.route_from_log(tmp_path, "preflight-test", time.time(), 1) is None
+    args, _, outputs = container_reader
+    monkeypatch.setattr(preflight.uuid, "uuid4", lambda: "test")
+    monkeypatch.setattr(preflight, "round_trip", lambda *a: {"ok": True})
+    checks = preflight.probe_model(args, OPUS, "dummy", preflight.Deadline(5))
+    assert not checks[0]["ok"] and checks[0]["detail"]["actual"] == []
+    assert json.loads(outputs[0]) == {"session": "preflight-test", "complete_stable": False, "routes": []}
+
+
+@pytest.mark.parametrize("routes,ok", [
+    (["claude@api.anthropic.com", "claude@api.anthropic.com"], True),
+    (["claude@api.anthropic.com", "antigravity@daily-cloudcode-pa.googleapis.com"], False),
+    (["other", "claude@api.anthropic.com"], False),
+])
+def test_container_protocol_allowlist_still_checks_every_attempt(container_reader, monkeypatch, routes, ok):
+    """仅测试宿主协议消费端；fake 证明不代表现有文本日志能生成可信证明。"""
+    args, _, _ = container_reader
+    def fake(cmd, timeout, **kwargs):
+        payload = {"session": "preflight-test", "complete_stable": True, "routes": routes}
+        return subprocess.CompletedProcess(cmd, 0, json.dumps(payload).encode(), b"")
+    monkeypatch.setattr(preflight, "run_bounded", fake)
+    monkeypatch.setattr(preflight.uuid, "uuid4", lambda: "test")
+    monkeypatch.setattr(preflight, "round_trip", lambda *a: {"ok": True})
+    check = preflight.probe_model(args, OPUS, "dummy", preflight.Deadline(5))[0]
+    assert check["ok"] is ok and check["detail"]["actual"] == routes
+
+
+RECEIPT_SESSION = "preflight-12345678-1234-4234-8234-123456789abc"
+
+
+def _receipt(tmp_path, routes=None, **changes):
+    now = time.time_ns()
+    payload = {"schema": "cliproxy-preflight-v1", "session": RECEIPT_SESSION,
+               "started_ns": now - 1_000_000, "finished_ns": now, "complete": True,
+               "routes": routes if routes is not None else ["claude@api.anthropic.com", "claude@api.anthropic.com"]}
+    payload.update(changes)
+    directory = tmp_path / RECEIPT_SESSION
+    directory.mkdir(exist_ok=True)
+    path = directory / "receipt.json"
+    path.write_text(json.dumps(payload))
+    return path
+
+
+def test_receipt_ordered_retries_and_legacy_separation(tmp_path):
+    _receipt(tmp_path)
+    expected = [("claude", "api.anthropic.com")] * 2
+    assert preflight._log_module.route_from_receipt(tmp_path, RECEIPT_SESSION, time.time() - 1, 0) == expected
+    assert preflight.route_from_log(tmp_path, RECEIPT_SESSION, time.time() - 1, 0) is None
+    assert preflight.route_from_host_receipt(str(tmp_path), RECEIPT_SESSION, time.time() - 1, 1, preflight.Deadline(3)) == expected
+
+
+@pytest.mark.parametrize("change", [
+    {"complete": False}, {"complete": 1}, {"schema": "unknown"}, {"session": "another"},
+    {"started_ns": True}, {"finished_ns": time.time_ns() + 10**12}, {"started_ns": 1},
+    {"routes": []}, {"routes": ["claude@api.anthropic.com"] * 65},
+    {"routes": ["secret@example.invalid/private"]}, {"auth_id": "secret"},
+])
+def test_receipt_invalid_protocol_fails_closed(tmp_path, change):
+    _receipt(tmp_path, **change)
+    assert preflight._log_module.route_from_receipt(tmp_path, RECEIPT_SESSION, time.time() - 1, 0) is None
+
+
+def test_receipt_other_is_enumeration_only(tmp_path):
+    _receipt(tmp_path, routes=["claude@api.anthropic.com", "other"])
+    assert preflight._log_module.route_from_receipt(tmp_path, RECEIPT_SESSION, time.time() - 1, 0) == [
+        ("claude", "api.anthropic.com"), ("other", "other")]
+
+
+def test_receipt_partial_rotation_and_delayed_publish(tmp_path):
+    directory = tmp_path / RECEIPT_SESSION
+    directory.mkdir()
+    pending = directory / "pending"
+    pending.write_text('{"complete":true,')
+    assert preflight._log_module.route_from_receipt(tmp_path, RECEIPT_SESSION, time.time() - 1, 0) is None
+    # 原子 rename 才可见；迟到但在期限内的完整发布可以通过。
+    path = _receipt(tmp_path)
+    data = path.read_bytes()
+    path.unlink()
+    pending.write_bytes(data)
+    timer = threading.Timer(0.03, lambda: pending.rename(path))
+    timer.start()
+    try:
+        assert len(preflight._log_module.route_from_receipt(tmp_path, RECEIPT_SESSION, time.time() - 1, 0.5)) == 2
+    finally:
+        timer.join()
+    path.write_text('{"complete":true,')
+    assert preflight._log_module.route_from_receipt(tmp_path, RECEIPT_SESSION, time.time() - 1, 0) is None
+
+
+def test_receipt_symlink_fifo_duplicate_fields_and_free_text(tmp_path):
+    path = _receipt(tmp_path)
+    valid = path.read_text()
+    path.write_text(valid[:-1] + ',"complete":true}')
+    assert preflight._log_module.route_from_receipt(tmp_path, RECEIPT_SESSION, time.time() - 1, 0) is None
+    path.unlink()
+    os.mkfifo(path)
+    assert preflight._log_module.route_from_receipt(tmp_path, RECEIPT_SESSION, time.time() - 1, 0) is None
+    path.unlink()
+    target = tmp_path / "secret"
+    target.write_text("=== RESPONSE ===\n=== API REQUEST 99 ===\nauth_id=secret")
+    path.symlink_to(target)
+    assert preflight._log_module.route_from_receipt(tmp_path, RECEIPT_SESSION, time.time() - 1, 0) is None
+
+
+def test_generated_go_receipts_consumed_by_python():
+    root = os.environ.get("CLIPROXY_OFFLINE_RECEIPTS")
+    if not root:
+        pytest.skip("需要 cliproxy/build.py 导出的离线生产者收据")
+    root = Path(root)
+    expected = {"success": [("claude", "api.anthropic.com")] * 2,
+                "other": [("claude", "api.anthropic.com"), ("other", "other")],
+                "native-kimi": [("kimi", "api.kimi.com")] * 2,
+                "native-claude": [("claude", "api.anthropic.com")] * 2,
+                "native-claude-eof": [("claude", "api.anthropic.com")] * 2}
+    for name, routes in expected.items():
+        payload = json.loads((root / name / RECEIPT_SESSION / "receipt.json").read_text())
+        since = payload["started_ns"] / 1e9
+        assert preflight.route_from_host_receipt(str(root / name), RECEIPT_SESSION, since, 1, preflight.Deadline(3)) == routes
+    for name in ("unfinished", "forgery-tail", "native-claude-disconnect"):
+        assert preflight.route_from_host_receipt(str(root / name), RECEIPT_SESSION, time.time(), 0.1, preflight.Deadline(3)) is None
+
+
+@pytest.mark.parametrize("failure", [None, "read", "timeout", "text"])
+def test_receipt_container_backend_is_explicit_and_bounded(tmp_path, monkeypatch, failure):
+    from types import SimpleNamespace
+
+    _receipt(tmp_path)
+    args = SimpleNamespace(proxy_docker_context="proxy-orbstack", proxy_receipt_container="fake-proxy",
+                           proxy_container_receipt_dir=str(tmp_path))
+    original = preflight.run_bounded
+    calls = []
+
+    def fake(cmd, timeout, **kwargs):
+        calls.append(cmd)
+        assert cmd[:6] == ["docker", "--context", "proxy-orbstack", "exec", "fake-proxy", "python3"]
+        assert "--receipt" in cmd
+        assert timeout <= 1
+        if failure == "timeout":
+            raise subprocess.TimeoutExpired(cmd, timeout)
+        if failure == "read":
+            return subprocess.CompletedProcess(cmd, 1, b"auth_id=SECRET", b"private/path")
+        if failure == "text":
+            return subprocess.CompletedProcess(cmd, 0, b"arbitrary SECRET stdout", b"")
+        return original([sys.executable, *cmd[6:]], timeout, **kwargs)
+
+    monkeypatch.setattr(preflight, "run_bounded", fake)
+    actual = preflight.route_from_container(args, RECEIPT_SESSION, time.time() - 1, 1, preflight.Deadline(4))
+    assert actual == ([("claude", "api.anthropic.com")] * 2 if failure is None else None)
+    assert len(calls) == 1
+
+
+@pytest.mark.parametrize("routes,ok", [
+    (["claude@api.anthropic.com", "claude@api.anthropic.com"], True),
+    (["claude@api.anthropic.com", "antigravity@daily-cloudcode-pa.googleapis.com"], False),
+    (["other", "claude@api.anthropic.com"], False),
+])
+def test_receipt_probe_checks_every_attempt(tmp_path, monkeypatch, routes, ok):
+    from types import SimpleNamespace
+
+    _receipt(tmp_path, routes=routes)
+    monkeypatch.setattr(preflight.uuid, "uuid4", lambda: RECEIPT_SESSION.removeprefix("preflight-"))
+    monkeypatch.setattr(preflight, "round_trip", lambda *a: {"ok": True})
+    args = SimpleNamespace(proxy_receipt_dir=str(tmp_path), proxy_url=LOCAL)
+    checks = preflight.probe_model(args, OPUS, "offline", preflight.Deadline(4))
+    assert checks[0]["ok"] is ok
+    assert checks[0]["detail"]["actual"] == routes
+
+
+@pytest.mark.parametrize("phase", ("headers", "error", "success"))
+@pytest.mark.parametrize("mount_error", (False, True))
+@pytest.mark.parametrize("start_error", (False, True))
+def test_run_checks_reaps_http_workers_and_closes_connections(monkeypatch, phase, mount_error, start_error):
+    from types import SimpleNamespace
+
+    connections = []
+    release = threading.Event()
+    connected = threading.Event()
+    processes = []
+    popen = preflight.subprocess.Popen
+
+    def track(*args, **kwargs):
+        process = popen(*args, **kwargs)
+        processes.append(process)
+        return process
+
+    class Handler(BaseHTTPRequestHandler):
+        def log_message(self, *args):
+            pass
+
+        def do_POST(self):
+            self.rfile.read(int(self.headers["Content-Length"]))
+            connections.append(self.connection)
+            connected.set()
+            code = b"429 Too Many Requests" if phase == "error" else b"200 OK"
+            self.connection.sendall(b"HTTP/1.1 " + code + b"\r\nContent-Length: 1000\r\n")
+            if phase != "headers":
+                self.connection.sendall(b"\r\n")
+            release.wait(3)
+            self.close_connection = True
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)  # DevSkim: ignore DS162092 隔离回环回收测试
+    serving = threading.Thread(target=server.serve_forever)
+    serving.start()
+    original_start = threading.Thread.start
+    probes_started = []
+
+    def start_thread(thread):
+        if thread.name.endswith("(probe)"):
+            if start_error and probes_started:
+                assert connected.wait(0.3)
+                raise RuntimeError("probe start fake failure")
+            original_start(thread)
+            probes_started.append(thread)
+        else:
+            original_start(thread)
+
+    monkeypatch.setattr(threading.Thread, "start", start_thread)
+    monkeypatch.setattr(preflight.subprocess, "Popen", track)
+    monkeypatch.setattr(preflight, "check_credential", lambda *a: ({"ok": True}, KEY))
+    monkeypatch.setattr(preflight, "check_space", lambda *a: {"ok": True})
+
+    def mount(*args):
+        if mount_error:
+            raise RuntimeError("mount fake failure")
+        return {"ok": True}, []
+
+    monkeypatch.setattr(preflight, "check_mount", mount)
+    monkeypatch.setattr(preflight, "route_from_log", lambda *a: None)
+    before = set(threading.enumerate())
+    started = time.monotonic()
+    try:
+        args = SimpleNamespace(proxy_url=f"http://127.0.0.1:{server.server_port}", proxy_log_dir="/unused")  # DevSkim: ignore DS162092 隔离回环回收测试
+        if start_error:
+            with pytest.raises(RuntimeError, match="probe start fake failure"):
+                preflight.run_checks(args, preflight.Deadline(1), [])
+        elif mount_error:
+            with pytest.raises(RuntimeError, match="mount fake failure"):
+                preflight.run_checks(args, preflight.Deadline(1), [])
+        else:
+            checks = preflight.run_checks(args, preflight.Deadline(1), [])
+            assert all(not c["ok"] for c in checks if c.get("class") == "roundtrip")
+        assert time.monotonic() - started < 0.8
+        assert len(processes) == len(connections) == (1 if start_error else 2)
+        assert all(process.poll() is not None for process in processes)
+        assert not [t for t in threading.enumerate() if t not in before and t.name.endswith("(probe)")]
+        for connection in connections:
+            connection.settimeout(0.1)
+            assert connection.recv(1) == b""  # 对端 EOF，不能以服务端 write 缓冲成功推断连接存活。
+    finally:
+        release.set()
+        server.shutdown()
+        server.server_close()
+        serving.join()

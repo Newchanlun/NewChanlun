@@ -37,7 +37,9 @@ npm ci   # codex-child.mts 需要仓库根的 node_modules
 
 模型经本机 CLIProxyLocal（`http://127.0.0.1:8318/v1`）。密钥沿用 codex-child 的受管机制：进程环境有 `CLIPROXY_LOCAL_KEY` 就用，否则 `launchctl getenv` 取一次，只留在内存。启动时关闭 LangSmith 外发。
 
-run 创建时从 `~/.agents/pstack-models.md` 冻结六个角色的模型：
+run 创建时默认从 `~/.agents/pstack-models.md` 冻结六个角色的模型。`run --model-rules /绝对路径/project-models.md` 可显式指定项目表；`executor serve` 同名参数传给每个 run 子进程。新 run 同时冻结角色表全文，Boat 技能包和主控提示消费这份快照，源文件之后修改不影响该 run。未指定参数时保留原全局默认；显式文件不可读或角色非法时失败，不回退。支持 `#` 行尾注释。
+
+角色映射：
 
 | 角色 | 取自 |
 |---|---|
@@ -47,7 +49,7 @@ run 创建时从 `~/.agents/pstack-models.md` 冻结六个角色的模型：
 | 设计候选 `design-a`、`design-b` | `architect runners` 前两个 |
 | 交叉裁判 `judge` | `arena cross-judge pool` 中第一个与主控不同家族的 |
 
-模型白名单接受 `gpt-6-astra`、`gpt-6.1-sol` 与 `claude-opus-5-5`。Astra 与 Sol 同属 `gpt` 家族，Opus 属 `claude` 家族。已创建的 run 继续使用冻结模型。
+模型白名单接受 `gpt-6-astra`、`gpt-6.1-sol`、`claude-opus-5-5` 与 `kimi-k3.1-pro`。Astra 与 Sol 同属 `gpt` 家族，Opus 属 `claude` 家族，Kimi 属 `moonshot` 家族。已创建的 run 继续使用冻结模型。
 
 作者与独审同家族、两个设计候选同家族，或裁判池里没有与主控不同家族的模型时，run 拒绝创建。
 

@@ -122,7 +122,7 @@ def export_repository(repo: Path, head: str, destination: Path) -> None:
         raise ValueError("源码包HEAD不符")
 
 
-def build_skill_bundle(pstack: Path, models: Path, destination: Path) -> dict:
+def build_skill_bundle(pstack: Path, models: Path, destination: Path, *, models_text: str | None = None) -> dict:
     """Freeze pstack skills and model rules once per run; every worker package copies this bundle."""
     if destination.exists():
         raise FileExistsError(destination)
@@ -147,7 +147,8 @@ def build_skill_bundle(pstack: Path, models: Path, destination: Path) -> dict:
             text = text.replace(old, new)
         target.write_text(text)
     (destination / "rules").mkdir()
-    (destination / "rules/pstack-models.md").write_bytes(models.read_bytes())
+    (destination / "rules/pstack-models.md").write_bytes(
+        models.read_bytes() if models_text is None else models_text.encode("utf-8"))
     references = []
     for document in (destination / "pstack").rglob("*"):
         if not document.is_file() or document.suffix not in {".md", ".json"}:

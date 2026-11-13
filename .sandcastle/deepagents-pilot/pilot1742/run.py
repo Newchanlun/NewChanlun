@@ -175,11 +175,16 @@ class RolePlan:
     judge: ModelSlug
 
 
+def read_model_rules(source: Path | None = None) -> str:
+    """显式项目来源不回退；未指定时保留全局默认。"""
+    return (source if source is not None else PSTACK_MODELS).read_text(encoding="utf-8")
+
+
 def plan_roles(text: str) -> RolePlan:
     """从 pstack-models.md 派生：feature 行作者、judgment 行独审、hardest 行主控、architect runners 行前两个做设计候选、
     arena cross-judge pool 里第一个与主控不同家族的模型做交叉裁判。"""
     rows = {key.strip(): [m.strip() for m in value.split(",") if m.strip()]
-            for key, value in (line.split(":", 1) for line in text.splitlines()
+            for key, value in (line.split(":", 1) for line in (line.split("#", 1)[0] for line in text.splitlines())
                                if ":" in line and not line.lstrip().startswith("#"))}
     missing = [name for name in ("feature, refactoring", "judgment and prose", "hardest tasks", "architect runners",
                                  "arena cross-judge pool") if not rows.get(name)]
@@ -216,9 +221,12 @@ class RunSpec:
     v: int = 1
     work_unit: dict | None = None
     execution: RunExecution = HistoricalLocal()
+    model_rules_text: str | None = None
 
     def to_json(self) -> dict:
         data = asdict(self)
+        if self.model_rules_text is None:
+            data.pop("model_rules_text")
         if self.v == 1:
             data.pop("v")
             data.pop("work_unit")
@@ -254,7 +262,8 @@ class RunSpec:
                        parse_model(data["author_model"]), parse_model(data["reviewer_model"]),
                        parse_model(data["brain_model"]), data["author_checkout"], data["review_checkout"],
                        data["created_at"], (parse_model(design[0]), parse_model(design[1])) if design else None,
-                       parse_model(judge) if judge else None, version, unit, parse_execution(data.get("execution")))
+                       parse_model(judge) if judge else None, version, unit, parse_execution(data.get("execution")),
+                       data.get("model_rules_text"))
 
     def model_for(self, role: Role) -> ModelSlug:
         if role == "author":
@@ -470,7 +479,7 @@ class PilotRun:
         checkouts = home / "checkouts" / run_id
         spec = RunSpec(run_id, TICKET, "pilot_acceptance", base, task, plan.author, plan.reviewer, plan.brain,
                        str(checkouts / "author"), str(checkouts / "review"), _now(), plan.design, plan.judge,
-                       execution=cls._frozen_execution(root, kw))
+                       execution=cls._frozen_execution(root, kw), model_rules_text=models_text)
         run = cls(home, spec, **kw)
         run.acquire()
         if not (root / "run.json").exists():
@@ -490,7 +499,7 @@ class PilotRun:
         checkouts = home / "checkouts" / unit.run_id
         spec = RunSpec(unit.run_id, unit.ticket, None, unit.base, task, plan.author, plan.reviewer, plan.brain,
                        str(checkouts / "author"), str(checkouts / "review"), _now(), plan.design, plan.judge,
-                       2, unit.to_json(), cls._frozen_execution(cls.run_dir(home, unit.run_id), kw))
+                       2, unit.to_json(), cls._frozen_execution(cls.run_dir(home, unit.run_id), kw), models_text)
         run = cls(home, spec, executor=executor, **kw)
         run.acquire()
         try:
