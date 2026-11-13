@@ -4,6 +4,7 @@ import json
 import shlex
 import subprocess
 import sys
+import uuid
 from dataclasses import asdict
 from pathlib import Path
 from types import SimpleNamespace
@@ -12,8 +13,8 @@ import httpx
 import pytest
 from conftest import git
 
+from pilot1742 import delivery, patch_read
 from pilot1742 import external_review as module
-from pilot1742 import patch_read
 from pilot1742.delivery import EffectPending, RepoGateway, Stale
 from pilot1742.external_review import (
     CONTEXT,
@@ -58,6 +59,14 @@ class Gateway:
                              "description": description, "creator": {"login": self.bot, "type": "Bot"}})
         if self.after_write:
             self.after_write()
+
+
+@pytest.fixture(autouse=True)
+def vm_trims(monkeypatch):
+    """#1986：测试里不碰真实 Colima。缺省 trim 换成记录器；需要别的行为的用例直接改 lane.vm_trim。"""
+    calls = []
+    monkeypatch.setattr(module, "trim_vm_disk", lambda root: calls.append(root) or {"state": "trimmed", "fixture": True})
+    return calls
 
 
 @pytest.fixture
@@ -548,6 +557,167 @@ def test_cleanup_preserves_unconfirmed_container(lane):
     assert checkout.exists()
 
 
+@pytest.mark.parametrize("removed", [True, False])
+def test_cleanup_removes_review_volume_the_supervisor_left(lane, removed):
+    """#1986：监督删卷失败（volume_removed=false）时，宿主回收 checkout 时补删本 launch 的卷；删不掉记 retained，checkout 照删。"""
+    result = lane.review_pr(1810)
+    target = ReviewTarget(**result["target"])
+    folder = lane.state_root / "runs" / target.key
+    worker = folder / MODELS[0]
+    checkout = lane.checkout_root / target.run_id / MODELS[0]
+    checkout.mkdir(parents=True)
+    volume = module.REVIEW_VOLUME_PREFIX + module._read(worker / "launch.json")["launch_id"]
+    receipt = module._read(worker / "receipt.json")
+    module._save(worker / "receipt.json", {**receipt, "volume": volume, "volume_removed": False})
+    calls = []
+    lane.remove_review_volume = lambda name: calls.append(name) or removed
+    assert lane.cleanup_checkout(target, MODELS[0], folder)
+    assert calls == [volume] and not checkout.exists()
+    assert module._read(worker / "checkout-cleanup.json") == {
+        "state": "removed", "checkout": str(checkout), "volume": volume, "volume_state": "removed" if removed else "retained"}
+    # 监督已删掉的卷不再删；回执里不属于本 launch 的卷名拒绝，不删别的卷。
+    calls.clear()
+    module._save(worker / "receipt.json", {**receipt, "volume": volume, "volume_removed": True})
+    assert lane.cleanup_checkout(target, MODELS[0], folder) and calls == []
+    module._save(worker / "receipt.json", {**receipt, "volume": module.REVIEW_VOLUME_PREFIX + "0" * 36, "volume_removed": False})
+    with pytest.raises(IdentityError, match="不属于本次 launch"):
+        lane.cleanup_checkout(target, MODELS[0], folder)
+    assert calls == []
+
+
+class FakeDocker:
+    """按标签列出的卷与容器；记录每条 docker 命令。rm/volume rm 真的把对象从列表里删掉。"""
+
+    def __init__(self, volumes=(), containers=(), volume_rm_stderr=None):
+        self.volumes = dict(volumes)        # name -> launch_id
+        self.containers = dict(containers)  # id -> (launch_id, volume or None)
+        self.volume_rm_stderr = volume_rm_stderr
+        self.calls = []
+
+    def __call__(self, args):
+        self.calls.append(args)
+        ok = lambda out="": subprocess.CompletedProcess(args, 0, out, "")
+        if args[:2] == ["volume", "ls"]:
+            return ok("".join(f"{n}\t{l}\n" for n, l in self.volumes.items()))
+        if args[:2] == ["ps", "-a"] and "--format" in args:
+            return ok("".join(f"{c}\t{l}\n" for c, (l, _) in self.containers.items()))
+        if args[:2] == ["ps", "-a"]:
+            volume = args[-1].removeprefix("volume=")
+            return ok("".join(f"{c}\n" for c, (_, v) in self.containers.items() if v == volume))
+        if args[:2] == ["rm", "-f"]:
+            self.containers.pop(args[2], None)
+            return ok()
+        if args[:2] == ["volume", "rm"]:
+            if self.volume_rm_stderr:
+                return subprocess.CompletedProcess(args, 1, "", self.volume_rm_stderr)
+            if any(v == args[2] for _, v in self.containers.values()):
+                return subprocess.CompletedProcess(args, 1, "", "volume is in use")
+            return ok() if self.volumes.pop(args[2], None) else subprocess.CompletedProcess(args, 1, "", "no such volume")
+        raise AssertionError(args)
+
+
+def test_remove_review_volume_removes_holders_first_and_only_accepts_review_names(lane):
+    with pytest.raises(IdentityError):
+        lane.remove_review_volume("f3-controller-data")
+    name = module.REVIEW_VOLUME_PREFIX + "a" * 36
+    # Sandcastle close 吞掉 rm 错误时残留的审阅容器、没删掉的辅助容器都会占住卷。
+    lane.docker = FakeDocker({name: "a" * 36}, {"c1": ("a" * 36, name), "c2": ("x", None)})
+    assert lane.remove_review_volume(name)
+    assert lane.docker.calls == [["ps", "-a", "-q", "--filter", f"volume={name}"], ["rm", "-f", "c1"], ["volume", "rm", name]]
+    assert lane.remove_review_volume(name)  # 已不存在也算删掉
+    lane.docker = FakeDocker(volume_rm_stderr="volume is in use")
+    assert not lane.remove_review_volume(name)
+
+
+def test_reaper_removes_dead_launch_volume_and_containers_before_next_dispatch(lane, monkeypatch):
+    """#1986 BLOCK：监督被 SIGTERM（Sandcastle 钩子 process.exit，finally 不跑、无回执）或 SIGKILL 打断后，
+    合成回执没有 volume 字段、container_closed=false，卷和容器只剩标签。下一次派发前 reaper 必须按标签收掉。"""
+    lane.launcher = [sys.executable, "-c", "raise SystemExit(3)"]  # 监督没写回执就退出
+    assert lane.review_pr(1810)["verdict"] == "FAILED"
+    first = ReviewTarget(**module._read(next((lane.state_root / "runs").glob("*/target.json"))))
+    dead = module._read(lane.state_root / "runs" / first.key / MODELS[0] / "launch.json")["launch_id"]
+    receipt = module._read(lane.state_root / "runs" / first.key / MODELS[0] / "receipt.json")
+    assert "volume" not in receipt and receipt["container_closed"] is False
+    # 存活 launch：别的 run 正在跑的监督（进程表里有它的 --output-dir）；未登记的 launch_id 不属于本 state_root。
+    live_worker = lane.state_root / "runs" / "live-run" / MODELS[1]
+    live_worker.mkdir(parents=True)
+    live = str(uuid.uuid4())
+    module._save(live_worker / "launch.json", {"launch_id": live})
+    unknown = str(uuid.uuid4())
+    vol = lambda launch: module.REVIEW_VOLUME_PREFIX + launch
+    lane.docker = FakeDocker(
+        {vol(dead): dead, vol(live): live, vol(unknown): unknown},
+        {"review-dead": (dead, vol(dead)), "helper-dead": (dead, vol(dead)), "review-live": (live, vol(live)),
+         "helper-unknown": (unknown, vol(unknown))})
+    real_rows = module._ps_rows
+    monkeypatch.setattr(module, "_ps_rows", lambda: [*real_rows(), (4242, 4242, "S", f"tsx worker --output-dir {live_worker}")])
+    lane.launcher = [sys.executable, str(Path(__file__).with_name("external_review_child.py"))]
+    assert lane.review_pr(1810, 2)["verdict"] == "PASS"
+    assert vol(dead) not in lane.docker.volumes
+    assert "review-dead" not in lane.docker.containers and "helper-dead" not in lane.docker.containers
+    assert set(lane.docker.volumes) == {vol(live), vol(unknown)}
+    assert set(lane.docker.containers) == {"review-live", "helper-unknown"}
+    log = [json.loads(line) for line in (lane.state_root / "volume-reaper.jsonl").read_text().splitlines()]
+    reaped = [e for e in log if e["action"] == "reaped"]
+    assert reaped and reaped[0]["launch_id"] == dead and reaped[0]["volumes"] == [vol(dead)]
+    assert any(e["action"] == "retained" and e["launch_id"] == unknown for e in log)
+    assert not any(e.get("launch_id") == live for e in log)
+    # 每轮一行计数：删掉的、留下的（未登记 launch）、存活 launch 占着的卷都报数。
+    summaries = [e for e in log if e["action"] == "summary"]
+    assert summaries[0] == {"at": summaries[0]["at"], "action": "summary", "reaped_volumes": 1, "retained_volumes": 1,
+                            "live_volumes": 1}
+    # 两位 reviewer 并发派发，各跑一轮 reaper，可能都看见同一个死卷；重复删除无害。
+    assert all(s["retained_volumes"] == 1 and s["live_volumes"] == 1 for s in summaries)
+
+
+def _dead_launch(lane, run):
+    launch_id = str(uuid.uuid4())
+    worker = lane.state_root / "runs" / run / MODELS[0]
+    worker.mkdir(parents=True)
+    module._save(worker / "launch.json", {"launch_id": launch_id})
+    return launch_id, module.REVIEW_VOLUME_PREFIX + launch_id
+
+
+def test_reaper_trims_vm_only_after_removing_a_volume(lane, vm_trims):
+    """#1986：本轮删掉了卷才 trim，trim 以 checkout_root 为节流根、结果记进 reaper 日志；没删卷不 trim。"""
+    dead, name = _dead_launch(lane, "dead-run")
+    unknown = str(uuid.uuid4())
+    lane.docker = FakeDocker({name: dead, module.REVIEW_VOLUME_PREFIX + unknown: unknown}, {"c1": (dead, name)})
+    entries = lane.reap_review_volumes()
+    assert vm_trims == [lane.checkout_root]
+    assert entries[-1] == {"action": "vm_trim", "state": "trimmed", "fixture": True}
+    # 再跑一轮：死卷已删，只剩未登记 launch 的卷（不碰）——没有删卷，不 trim。
+    assert not any(e["action"] == "vm_trim" for e in lane.reap_review_volumes())
+    # 卷删不掉（in use）也不 trim。
+    stuck, stuck_name = _dead_launch(lane, "stuck-run")
+    lane.docker = FakeDocker({stuck_name: stuck}, volume_rm_stderr="volume is in use")
+    assert not any(e["action"] == "vm_trim" for e in lane.reap_review_volumes())
+    assert vm_trims == [lane.checkout_root]
+    log = [json.loads(line) for line in (lane.state_root / "volume-reaper.jsonl").read_text().splitlines()]
+    assert [e["state"] for e in log if e["action"] == "vm_trim"] == ["trimmed"]
+
+
+def test_vm_trim_failure_never_blocks_dispatch_or_changes_verdict(lane):
+    """trim 抛错只记日志；派发照常、结论不变。"""
+    dead, name = _dead_launch(lane, "dead-run")
+    lane.docker = FakeDocker({name: dead})
+    def broken(root):
+        raise TimeoutError("colima hung")
+    lane.vm_trim = broken
+    assert lane.review_pr(1810)["verdict"] == "PASS"
+    log = [json.loads(line) for line in (lane.state_root / "volume-reaper.jsonl").read_text().splitlines()]
+    trims = [e for e in log if e["action"] == "vm_trim"]
+    assert trims and trims[0]["state"] == "failed" and trims[0]["reason"] == "TimeoutError"
+    assert name not in lane.docker.volumes
+
+
+def test_reaper_failure_never_blocks_dispatch(lane):
+    lane.docker = lambda args: subprocess.CompletedProcess(args, 125, "", "docker unavailable")
+    assert lane.review_pr(1810)["verdict"] == "PASS"
+    log = [json.loads(line) for line in (lane.state_root / "volume-reaper.jsonl").read_text().splitlines()]
+    assert {e["reason"] for e in log} == {"docker_unavailable"}
+
+
 def test_multiple_attempts_reclaim_each_checkout(lane):
     for attempt in (1, 2, 3):
         assert lane.review_pr(1810, attempt)["verdict"] == "PASS"
@@ -633,6 +803,26 @@ def test_same_patch_on_new_base_reuses_pass_without_model(lane, env):
     assert len(row["description"]) <= 140
     assert lane.review_pr(1810)["publication"]["id"] == row["id"]  # 重跑只读回，不重发
     assert lane.gateway.sent == ["pending", "success", "pending", "success"]
+
+
+def test_success_recovered_by_same_attempt_records_publication_and_is_reusable(lane, env, monkeypatch):
+    # #1942 attempt 49285：终态 success 已送达但读回一直看不到，同一 attempt 重跑认回后 outcome 缺 publication，
+    # 追平后同补丁没法沿用、整轮重审。
+    monkeypatch.setattr(delivery, "READBACK_DELAYS", ())
+    gateway = lane.gateway
+    gateway.after_write = lambda: setattr(gateway, "hide", gateway.sent[-1] == "success")
+    with pytest.raises(EffectPending):
+        lane.review_pr(1810)
+    gateway.hide, gateway.after_write = False, None
+    first = lane.review_pr(1810)
+    assert gateway.sent == ["pending", "success"]
+    folder = lane.state_root / "runs" / ReviewTarget(**first["target"]).key
+    saved = json.loads((folder / "outcome.json").read_text())
+    assert saved["publication"]["state"] == "success" and saved["publication"]["id"] == gateway.rows[0]["id"]
+    _advance_main(lane, env)
+    result = lane.review_pr(1810)
+    assert result["reused_from"]["run_id"] == first["run_id"] and result["reviews"] == []
+    assert _launches(lane) == len(MODELS)
 
 
 # 只改空白也必须重审：git patch-id 会忽略空白，所以补丁身份不用它。
@@ -1950,6 +2140,54 @@ def test_migration_of_contractless_legacy_target_checks_dispatched_prompt(lane, 
         lane.migrate_stale(1810, 1)
     monkeypatch.setattr(module, "PROMPT", original)
     assert lane.migrate_stale(1810, 1)["publication"]["state"] == "success"
+
+
+def test_nb_residual_retry_early_return_leaves_disk_pass(lane, monkeypatch):
+    """#1944（#1913 独审 N-b' 残余，移植自非作者独审反例）：迁移瞬态失败后重试，`migrate_stale` 把
+    `saved` 换成历史里更早的 STALE 记录；如果这次 `recover_stale` 重验又提前返回（这里用回执重验结果
+    与原记录不一致模拟早退），磁盘此前仍留着上一轮迁移写下、未发布的 PASS。返回值须与磁盘一致地回到
+    STALE，不能一个说 STALE、另一个仍是未发布的 PASS。"""
+    folder = _legacy_auth_stale(lane)
+    git(lane.source, "commit", "--allow-empty", "-qm", "controller redeployed")
+    real_get = lane.gateway.get_pr
+    calls = {"n": 0}
+    def get_pr(number):
+        calls["n"] += 1
+        if calls["n"] == 3:
+            raise IdentityError("GitHub 返回 HTTP 401")
+        return real_get(number)
+    monkeypatch.setattr(lane.gateway, "get_pr", get_pr)
+    with pytest.raises(EffectPending):
+        lane.migrate_stale(1810, 1)
+    monkeypatch.setattr(lane.gateway, "get_pr", real_get)
+    real_validate = module.validate_review
+    def flip(*args, **kwargs):
+        o = real_validate(*args, **kwargs)
+        return module.ReviewOutcome(o.model, "BLOCK", o.session_id, o.reason) if o.model == module.MODELS[0] else o
+    monkeypatch.setattr(module, "validate_review", flip)  # 模拟重验与原记录不一致 → recover_stale 早退
+    sent_before = len(lane.gateway.sent)
+    result = lane.migrate_stale(1810, 1)
+    on_disk = json.loads((folder / "outcome.json").read_text())
+    assert result["verdict"] == on_disk["verdict"] == "STALE", (result["verdict"], on_disk["verdict"], "publication" in on_disk)
+    assert on_disk["recovery_refused"] == "重验结果与原记录不一致"
+    assert "publication" not in on_disk
+    assert len(lane.gateway.sent) == sent_before
+
+
+def test_prompt_asks_for_standalone_diff_that_patch_read_accepts():
+    """#1968：kimi 常把 diff 串在 cat/printf/--stat/--check 后面，守卫不认；提示词要求单独执行那条 diff，守卫不改。"""
+    required = "git diff --no-ext-diff --no-textconv {merge_base} {head}"
+    assert "先单独执行一条命令 " + required in module.PROMPT
+    assert "不要接 &&、;、|" in module.PROMPT
+    # 按提示词原样写出的那条命令（只替换两个 SHA，不加任何别的段）被现有 patch_read 判为读取
+    command = required.format(merge_base=PR2018_MB, head=PR2018_HEAD)
+    assert command in module.PROMPT.format(pr=1, base=PR2018_MB, merge_base=PR2018_MB, head=PR2018_HEAD, names="[]")
+    patch = FrozenPatch.from_diff(PR2018_HEAD, PR2018_MB, PR2018_MB, PR2018_FROZEN)
+    assert reads_candidate_patch(f"/bin/bash -lc '{command}'", PR2018_DIFF, patch)
+    # 提示词劝阻的串接写法仍判未读（守卫行为不变）
+    for chained in (f"cat SKILL.md && printf '--- DIFF ---' && {command}", f"{command} && git diff --check",
+                    f"git diff --stat && {command}"):
+        assert not reads_candidate_patch(f"/bin/bash -lc \"{chained}\"", PR2018_DIFF, patch)
 
 
 # ---------------- Codex 额度耗尽时的临时组合（Kimi + Opus） ----------------

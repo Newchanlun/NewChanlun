@@ -1581,7 +1581,7 @@ ADR-0006 `:7` 的三合取（破中枢 ∧ A 配对 ∧ **映射成立**）与 `
 
 ### 14.4 #1600 受影响代码清单（基线 main `df6e680930`）
 
-行号本轮逐条 `rg`／`sed` 核实。检索覆盖 `rust/src/`、`src/`、`s_session/`、`formal/`；未覆盖 `frontend/`、`trading_system/`、`prototypes/`，「零处」一律指已查范围。
+行号本轮逐条 `rg`／`sed` 核实。检索覆盖 `rust/src/`、`src/`、`s_session/`、`formal/`；未覆盖 `frontend/`、`trading_system/`、`prototypes/`（已删除，#1945），「零处」一律指已查范围。
 
 | # | 字段 | 侧 | 文件:行号 | 要改什么 | 承接 |
 |---|---|---|---|---|---|
