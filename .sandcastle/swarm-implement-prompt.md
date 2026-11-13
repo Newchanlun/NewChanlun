@@ -35,7 +35,7 @@
 - **不关 issue、不 merge、不 push、不动 main**——验收与开 PR 在编排层，合入 main 由分支保护的 `deepagents/review` 与 `ci-ok` 必需检查把关。
 - 被卡住（缺上下文/测试修不好/外部依赖）：容器内不能评论票面。最终答复写 `status":"blocked"`，并把卡点说明（复现证据 + 解除条件 + 续跑命令）放进 `verification` 数组，由宿主回写票面；然后给完成信号收工，不硬闯。
 - 密钥永不写入任何文件。
-- 本机禁 cargo / rustc（见 Verify）；Rust 验证 = nc-remote 远端或编排层 CI。
+- 本机禁 cargo / rustc（见 Verify）；本管线的 Rust 验证走 nc-remote 远端或编排层 CI（全仓口径见 AGENTS.md「底线」：CI、Boat 或远端环境）。
 
 ## 卡点即报（2026-08-18 #1066 增补）
 

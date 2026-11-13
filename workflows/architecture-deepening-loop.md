@@ -1,7 +1,7 @@
 # 架构深化循环（architecture-deepening loop）
 
 > v2，已入仓（#1159，2026-08-21；判停记录 2026-08-22 #1193）。本循环的每轮实体形态 = wayfinder 图（issue tracker 上 `wayfinder:map` 一张）+ 其 handoff（SPEC → impl 票 → sandcastle 拾取）。
-> 纪律正本引用：`docs/agents/wayfinder-workflow.md`（本仓 wayfinder 唯一正本，含开场对账 / 一票一会话 / 图正文写入协议 / 并行纪律）、`docs/agents/delivery-discipline.md`、`docs/agents/issue-tracker.md`。
+> 纪律正本引用：`docs/agents/wayfinder-workflow.md`（本仓 wayfinder 唯一正本，含开场对账 / 一票一会话 / 图正文写入协议 / 并行纪律）、`.sandcastle/docs/graph-engineering.md`、`docs/agents/issue-tracker.md`。
 
 ## 目的
 

@@ -13,7 +13,7 @@
 # It never merges, never pushes main, never closes tickets and never deletes branches:
 # merging is gated by main's branch protection (required checks deepagents/review and ci-ok,
 # #1003 ruling 3) and a partial slice must not close its ticket
-# (docs/agents/delivery-discipline.md). Build and tests run in CI; no local cargo (#1588).
+# (.sandcastle/docs/graph-engineering.md). Build and tests run in CI; no local cargo (#1588).
 # History: #1003 scripted gate -> #1098 rc/ancestor fixes -> #1660 PR mode (host clone,
 # no worktree on main, no auto close/merge).
 #

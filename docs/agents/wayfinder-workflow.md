@@ -2,7 +2,7 @@
 
 来源：2026-07-30 对照 Matt Pocock wayfinder 视频（"Nothing is too big to plan anymore"）的使用盘点与裁定，编排者批准三项决策：**新图严格两段式**、**启用 prototype 票**、**固化本文档**。2026-08-18 走 [wayfinder 流程修订 #1075](https://github.com/xy7365527-lang/NewChanlun/issues/1075) **反转两段式**：决策与实装不分开——图清即按 ask-matt 主流程当场收口（`/to-spec` → `/to-tickets` → `/implement` 全链，图内），两段式裁定与 #770 声明一保留作历史（见下）。2026-07-30 再次并入地图 [本仓 wayfinder 工作流正本 #767](https://github.com/xy7365527-lang/NewChanlun/issues/767) 的十张裁定票——本文档自此是本仓 wayfinder 路由的唯一正本。
 
-tracker 物理操作（map/子票/blocking/frontier/claim/resolve 的 gh 命令）见 `docs/agents/issue-tracker.md`「Wayfinding operations」，本文只管流程形态与票型口径。交付纪律（关票门、开票门、豁免举证、编号复用）见 `docs/agents/delivery-discipline.md`；入仓名分见 `docs/agents/generation-constitution.md`；统计口径标注见 `docs/agents/stat-provenance.md`。本文对这三份**只挂指针、不复述**。
+tracker 物理操作见 `docs/agents/issue-tracker.md`「Wayfinding operations」。交付与关票见 `.sandcastle/docs/graph-engineering.md`，实体报告见 `.sandcastle/CODEX-CHILD.md`；产品名分见 `docs/adr/0004-generation-constitution.md`「现行名分与现役线」，统计标注和引用责任见 `docs/adr/0022-acceptance-criterion-parameters.md`「统计结论的标注与引用」。
 
 ## 每会话必读
 
@@ -13,8 +13,9 @@ tracker 物理操作（map/子票/blocking/frontier/claim/resolve 的 gh 命令�
 1. `docs/agents/wayfinder-workflow.md`（本文档，本仓 wayfinder 正本）
 2. `docs/agents/issue-tracker.md`「Wayfinding operations」段（tracker 物理操作）
 3. `AGENTS.md`（#517 定的全 harness 唯一正本入口）
+4. `docs/agents/doctrine-rules.md`（教义正本、#799 收敛通则、#804 总缝规则与引原文四步的完整条文，2026-11-09 从 `AGENTS.md` 迁出）
 
-按域追加：纯决策图不必读 `AGENTS.md` 之外的重型文件；**碰代码的图应追加 `AGENTS.md` 指向的域文档**（`delivery-discipline.md`、`generation-constitution.md` 等）。全局 `~/.claude/CLAUDE.md` **不进清单**——它在 Claude Code 里本就自动注入，而主力运行时 Kimi 读不到它；其本仓适用要点已改写进 `AGENTS.md`。
+按域追加：纯决策图读这四份即可，第 4 份不能省，决策的起草与独审要用它的完整判据；**碰代码的图追加对应产品域文档；交付报告读 `.sandcastle/CODEX-CHILD.md`「一次收齐交付材料」**，不把旧报告入 Git 的要求作为仓外证据的前置。全局 `~/.claude/CLAUDE.md` **不进清单**——它在 Claude Code 里本就自动注入，而主力运行时 Kimi 读不到它；其本仓适用要点已改写进 `AGENTS.md`。
 
 这条纪律的成因就是一次实事故：[并行吞吐：HITL 瓶颈与 batch 化 #776](https://github.com/xy7365527-lang/NewChanlun/issues/776) 那场会话没把本文档读进上下文，裁出了与仓内正本相反的 grilling 节奏口径，当场无人察觉。要固化的不是「开场输什么」，是「哪些文件必须真进上下文」。
 
@@ -35,12 +36,12 @@ tracker 物理操作（map/子票/blocking/frontier/claim/resolve 的 gh 命令�
 1. **开图**（编排层，占一个 session）：grilling 定 destination → 广度优先烤 frontier（扇形铺开，不深挖单线）→ 建 map（`wayfinder:map`，Destination/Notes 填好，雾写进 Not yet specified）→ 建可具体化的票 → 第二 pass 接 blocking 边。**research 票当场并发发 subagent 解决**，不等后续 session。开图 session 不解决任何票。第二轮广度烤 frontier 时，顺带把「本图红线 / 默认取舍」当成其中几题一起问，答案落 Notes（见「Notes 预授权」）。
 2. **走图**（一票一 session）：**开头先跑对账**（见「图正文的写入协议」）→ 取 frontier 第一票（open + 无 open blocker + 未 assign；用户点名则从其点名）→ **claim 先行**（assign 是 session 首写）→ 按票型解决（见下）→ resolution comment 写答案 → close → map 的 Decisions-so-far 加一行（gist + 链接，详情只留在票内）→ 毕业因此具体化的雾、新开浮出的票、把越出 destination 的票关票并登记 Out of scope。frontier 上无阻塞的票可并行多 session 走。
 3. **图闭环出 spec**：见「`/to-spec` 交棒边界」。
-4. **实施票链（图内，当场走）**：spec 独审裁定 PASS 后 `/to-tickets` 切实装票（挂图内、blocking 边）→ `/implement` 逐票（内部 `/tdd` 红绿切片 + `/code-review` 两轴收尾）→ 逐票开 PR，分支保护的必需检查通过后合入，关票走 `delivery-discipline.md` 关票门全子句。**决策了就实装**——不停在 spec、不攒批、不走图外实施线。实施票落在图里还是图外，由图的实装声明决定（见下）。
+4. **实施票链（图内，当场走）**：spec 独审裁定 PASS 后 `/to-tickets` 切实装票（挂图内、blocking 边）→ `/implement` 逐票（内部 `/tdd` 红绿切片 + `/code-review` 两轴收尾）→ 逐票开 PR，分支保护的必需检查通过后合入，关票按 `.sandcastle/docs/graph-engineering.md`「交付与关票」。**决策了就实装**——不停在 spec、不攒批、不走图外实施线。实施票落在图里还是图外，由图的实装声明决定（见下）。
 5. **spec 非持久**：实装落地后 spec 票关闭，不作长期维护的真理源。真理源是代码 + 决策票；spec 从落地那刻起是历史记录。
 
 ## 图的两行声明
 
-图的性质不靠事后判据推，靠开图人**当时写下的一行声明**。两条声明各占一行，都写在 `## Notes`，都是**声明制自执行——不设巡查、不设 CI 硬门**（与 `delivery-discipline.md` 同款机制）。
+图的性质不靠事后判据推，靠开图人**当时写下的一行声明**。两条声明各占一行，都写在 `## Notes`，都是**声明制自执行——不设巡查、不设 CI 硬门**；main 合入仍受必需检查约束。
 
 ### 声明一：本图带不带实装
 
@@ -228,7 +229,7 @@ tracker 物理操作（map/子票/blocking/frontier/claim/resolve 的 gh 命令�
 
 ## 关票口径
 
-决策票（grilling/research/prototype）按纯裁定关票：resolution comment + close + map 索引一行；有实体产物的（对拍报告、原型文件、`proto/<票号>` 分支指针）按 `delivery-discipline.md` 关票门第 6 子句入仓引用，无实体产物的写明「无报告」。实施票走关票门全子句，无豁免。
+决策票（grilling/research/prototype）按纯裁定关票：resolution comment + close + map 索引一行；有实体产物的（对拍报告、原型文件、`proto/<票号>` 分支指针）按 `.sandcastle/CODEX-CHILD.md` 的交付清单绑定版本、摘要与可读取实体；过程报告留仓外，产品原型代码与分支照常纳入版本控制，无实体产物的写明「无报告」。实施票按 `.sandcastle/docs/graph-engineering.md`「交付与关票」，不借纯裁定豁免交付。
 
 grilling 票另加一条：resolution 的落文档（含必要的零行为变更代码注释）做完才关票。
 
@@ -269,9 +270,9 @@ grilling 票另加一条：resolution 的落文档（含必要的零行为变更
 **★ 其中最危险的一类是「结论正确但论据是假的」**：**引了一个不存在的文件**（`rust/src/theta_v0/bi_engine.rs`，实为族I 自己的 `rust/src/bi_engine.rs` ⟹ 那条论证比的是**同一套实现的两种语言版本**，不是两套引擎）；**把「零 import 连线」读成「跑不起来」**（实测该文件在 `lakefile.toml` 的 `defaultTargets` 里，`lake build` 默认就构建它）。
 **⟹ 结论对，所以没人会去查论据。这类错只能靠工序抓，抓不到就会一直传下去。**
 
-### 附：两条同源的引文纪律已在 `AGENTS.md`
+### 附：两条同源的引文纪律已在 `docs/agents/doctrine-rules.md`
 
-引缠论原文的三项核对（含「界内也可能是注不是正文本体」）与**伪引文首例**（生产代码里一句内容编造的引文，且是某可配置判据的唯一溯源）已外移进 `AGENTS.md`，本文只挂指针。**「课号:行号」形式的在案引用不构成已核实。**
+引缠论原文的三项核对（含「界内也可能是注不是正文本体」）与**伪引文首例**（生产代码里一句内容编造的引文，且是某可配置判据的唯一溯源）已外移进 [`docs/agents/doctrine-rules.md`](doctrine-rules.md)「文档层名分」节，本文只挂指针。**「课号:行号」形式的在案引用不构成已核实。**
 
 ## 只管新图
 
