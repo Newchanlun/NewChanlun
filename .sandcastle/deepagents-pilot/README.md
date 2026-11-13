@@ -122,7 +122,7 @@ PYTHONPATH=.sandcastle/approval-signing:.sandcastle/deepagents-pilot "$VENV/bin/
 试点代码从不写批准账本。人类批准后，由主控逐行登记，`source` 必须指向本票评论 URL 或用户原始消息：
 
 ```json
-{"ticket":1742,"scope":"pilot_acceptance","head":"<40 位 sha>","decision":"approve","source":{"kind":"tracker_comment","reference":"https://github.com/xy7365527-lang/NewChanlun/issues/1742#issuecomment-<id>","registered_by":"<登记人>"}}
+{"ticket":1742,"scope":"pilot_acceptance","head":"<40 位 sha>","decision":"approve","source":{"kind":"tracker_comment","reference":"https://github.com/Newchanlun/NewChanlun/issues/1742#issuecomment-<id>","registered_by":"<登记人>"}}
 ```
 
 `pilot_acceptance` 不推出 `main_merge`。登记后运行 `run --run-id r1 --recheck-approval`，图从 `check_gate` 的暂停点继续。

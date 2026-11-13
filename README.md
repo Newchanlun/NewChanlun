@@ -289,7 +289,7 @@ K4 六条边中，背驰方向的分歧率稳定在 22.2%（±2%）。这是结�
 ### 安装
 
 ```bash
-git clone https://github.com/xy7365527-lang/NewChanlun.git
+git clone https://github.com/Newchanlun/NewChanlun.git
 cd NewChanlun
 
 python -m venv .venv
