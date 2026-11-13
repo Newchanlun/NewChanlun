@@ -877,8 +877,8 @@ def test_background_approval_recheck_preserves_operator_interrupt(queued, monkey
     original_open = cli.open_v2_run
     opened = []
 
-    def open_run(*args):
-        result = original_open(*args, launcher=FAKE, source_repo=v2.source)
+    def open_run(*args, **kwargs):
+        result = original_open(*args, launcher=FAKE, source_repo=v2.source, **kwargs)
         opened.append(result)
         return result
 
