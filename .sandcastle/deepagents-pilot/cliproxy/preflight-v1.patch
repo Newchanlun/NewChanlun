@@ -42,10 +42,11 @@
 +}
 --- a/internal/api/preflight_receipt_test.go
 +++ b/internal/api/preflight_receipt_test.go
-@@ -0,0 +1,221 @@
+@@ -0,0 +1,300 @@
 +package api
 +
 +import (
++	"bufio"
 +	"context"
 +	"crypto/tls"
 +	"crypto/x509"
@@ -144,9 +145,25 @@
 +func (p preflightTransportProvider) RoundTripperFor(*auth.Auth) http.RoundTripper { return p.transport }
 +
 +func TestPreflightReceiptNativeClaudeHTTP(t *testing.T) {
++	testPreflightReceiptNativeClaudeHTTP(t, "recorder")
++}
++
++func TestPreflightReceiptNativeClaudeTerminalDisconnect(t *testing.T) {
++	testPreflightReceiptNativeClaudeHTTP(t, "disconnect")
++}
++
++func TestPreflightReceiptNativeClaudeDrainsEOF(t *testing.T) {
++	testPreflightReceiptNativeClaudeHTTP(t, "eof")
++}
++
++func testPreflightReceiptNativeClaudeHTTP(t *testing.T, mode string) {
 +	root := filepath.Join(t.TempDir(), "receipts")
 +	t.Setenv("CLIPROXY_PREFLIGHT_RECEIPTS", root)
 +	var calls atomic.Int32
++	terminalRead := make(chan struct{})
++	if mode == "recorder" {
++		close(terminalRead)
++	}
 +	upstream := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 +		if r.Host != "api.anthropic.com" {
 +			t.Errorf("unexpected authority %s", r.Host)
@@ -162,7 +179,19 @@
 +			"event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"offline\"}}\n\n"+
 +			"event: content_block_stop\ndata: {\"type\":\"content_block_stop\",\"index\":0}\n\n"+
 +			"event: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":{\"output_tokens\":1}}\n\n"+
-+			"event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n")
++			"event: message_stop\ndata: {\"type\":\"message_stop\"}\n")
++		w.(http.Flusher).Flush()
++		// Separate terminal payload delivery from the executor's final frame/cleanup.
++		if mode == "disconnect" {
++			<-r.Context().Done()
++			return
++		}
++		select {
++		case <-terminalRead:
++		case <-r.Context().Done():
++			return
++		}
++		_, _ = io.WriteString(w, "\n")
 +	}))
 +	defer upstream.Close()
 +	roots := x509.NewCertPool()
@@ -189,7 +218,42 @@
 +	req.Header.Set("Content-Type", "application/json")
 +	req.Header.Set("Session-Id", session)
 +	recorder := httptest.NewRecorder()
-+	server.engine.ServeHTTP(recorder, req)
++	if mode != "recorder" {
++		proxy := httptest.NewServer(server.engine)
++		defer proxy.Close()
++		clientReq, err := http.NewRequest("POST", proxy.URL+"/v1/responses", req.Body)
++		if err != nil {
++			t.Fatal(err)
++		}
++		clientReq.Header = req.Header.Clone()
++		response, err := proxy.Client().Do(clientReq)
++		if err != nil {
++			t.Fatal(err)
++		}
++		scanner := bufio.NewScanner(response.Body)
++		terminal := false
++		for scanner.Scan() {
++			if strings.Contains(scanner.Text(), `"type":"response.completed"`) {
++				if !terminal && mode == "eof" {
++					close(terminalRead)
++				}
++				terminal = true
++				if mode == "disconnect" {
++					break
++				}
++			}
++		}
++		_ = response.Body.Close()
++		if err := scanner.Err(); err != nil {
++			t.Fatal(err)
++		}
++		if !terminal {
++			t.Fatal("no terminal event")
++		}
++		recorder.Code = response.StatusCode
++	} else {
++		server.engine.ServeHTTP(recorder, req)
++	}
 +	if recorder.Code != 200 {
 +		t.Fatalf("HTTP %d: %s", recorder.Code, recorder.Body.String())
 +	}
@@ -202,6 +266,17 @@
 +		}
 +		time.Sleep(time.Millisecond)
 +	}
++	if mode == "disconnect" {
++		if len(data) != 0 {
++			t.Fatal("client canceled before lifecycle finished but receipt published")
++		}
++		if export := os.Getenv("PREFLIGHT_FIXTURES"); export != "" {
++			if err := os.MkdirAll(filepath.Join(export, "native-claude-disconnect", session), 0700); err != nil {
++				t.Fatal(err)
++			}
++		}
++		return
++	}
 +	var receipt preflightreceipt.Receipt
 +	if err := json.Unmarshal(data, &receipt); err != nil {
 +		t.Fatalf("missing receipt calls=%d: %v", calls.Load(), err)
@@ -210,7 +285,11 @@
 +		t.Fatalf("wrong evidence %+v", receipt)
 +	}
 +	if export := os.Getenv("PREFLIGHT_FIXTURES"); export != "" {
-+		dir := filepath.Join(export, "native-claude", session)
++		name := "native-claude"
++		if mode == "eof" {
++			name = "native-claude-eof"
++		}
++		dir := filepath.Join(export, name, session)
 +		if err := os.MkdirAll(dir, 0700); err != nil {
 +			t.Fatal(err)
 +		}

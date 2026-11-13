@@ -52,7 +52,7 @@ class FakeProxy:
     """同形 CLIProxy：按模型选 provider，写 request-log，记录收到的请求。"""
 
     def __init__(self, log_dir, routes, *, status=None, write_log=True, hang=False, log_delay=0.0,
-                 echo_auth=False, terminal=None, header_first=0.0, split_at=None, error_body=None):
+                 echo_auth=False, terminal=None, header_first=0.0, split_at=None, error_body=None, terminal_tail_delay=0.0):
         self.requests = []
         proxy = self
 
@@ -104,6 +104,11 @@ class FakeProxy:
                 self.send_response(code)
                 self.send_header("Content-Length", str(len(payload)))
                 self.end_headers()
+                if terminal_tail_delay and code == 200:
+                    self.wfile.write(payload[:-1])
+                    self.wfile.flush()
+                    time.sleep(terminal_tail_delay)
+                    payload = payload[-1:]
                 self.wfile.write(payload)
 
         self.server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)  # DevSkim: ignore DS162092 有意使用本机回环（本地 CLIProxy / 测试假服务），非调试残留
@@ -456,6 +461,41 @@ def test_non_utf8_legacy_log_is_not_route_evidence(tmp_path):
     assert preflight.route_from_log(tmp_path, session, time.time() - 5, wait=0.5) is None
 
 
+@pytest.mark.parametrize("tail", ("eof", "read-error", "second-terminal", "deadline"))
+def test_roundtrip_requires_stream_cleanup_after_terminal(monkeypatch, tail):
+    terminal = b'data: {"type":"response.completed","response":{"status":"completed"}}\n'
+
+    class Response:
+        status = 200
+        exhausted = False
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            pass
+
+        def __iter__(self):
+            yield terminal
+            if tail == "read-error":
+                raise TimeoutError("private upstream detail")
+            if tail == "deadline":
+                deadline.work = time.monotonic() - 1
+            if tail == "second-terminal":
+                yield b'data: {"type":"response.failed","response":{"status":"failed"}}\n'
+            yield b"\n"
+            self.exhausted = True
+
+    response = Response()
+    deadline = preflight.Deadline(3)
+    monkeypatch.setattr(preflight.urllib.request, "urlopen", lambda *a, **kw: response)
+    result = preflight.round_trip(LOCAL, KEY, OPUS, "preflight-test", deadline)
+    assert result["ok"] is (tail == "eof")
+    if tail == "eof":
+        assert response.exhausted
+    assert "private upstream detail" not in json.dumps(result)
+
+
 def test_completed_event_with_failed_status_is_not_success(env, capsys):
     bad = b'data: {"type":"response.completed","response":{"status":"failed","error":{"message":"overloaded"}}}\n\n'
     code, report, *_ = env(terminal=bad, capsys=capsys)
@@ -467,6 +507,13 @@ def test_incomplete_without_error_passes_roundtrip_not_route_proof(env, capsys):
     code, report, *_ = env(terminal=ok, capsys=capsys)
     assert code == 2 and failing(report) == LEGACY_ROUTE_FAILURES
     assert all(check(report, f"roundtrip:{m}")["ok"] for m in preflight.MODELS)
+
+
+def test_terminal_without_eof_is_cut_at_deadline(env, capsys):
+    start = time.monotonic()
+    code, report, *_ = env(terminal_tail_delay=3.0, extra=("--deadline", "2"), capsys=capsys)
+    assert time.monotonic() - start < 4
+    assert code == 2 and {f"roundtrip:{KIMI}", f"roundtrip:{OPUS}"} <= failing(report)
 
 
 def test_hanging_upstream_is_cut_at_deadline(env, capsys, monkeypatch):
@@ -1387,12 +1434,13 @@ def test_generated_go_receipts_consumed_by_python():
     expected = {"success": [("claude", "api.anthropic.com")] * 2,
                 "other": [("claude", "api.anthropic.com"), ("other", "other")],
                 "native-kimi": [("kimi", "api.kimi.com")] * 2,
-                "native-claude": [("claude", "api.anthropic.com")] * 2}
+                "native-claude": [("claude", "api.anthropic.com")] * 2,
+                "native-claude-eof": [("claude", "api.anthropic.com")] * 2}
     for name, routes in expected.items():
         payload = json.loads((root / name / RECEIPT_SESSION / "receipt.json").read_text())
         since = payload["started_ns"] / 1e9
         assert preflight.route_from_host_receipt(str(root / name), RECEIPT_SESSION, since, 1, preflight.Deadline(3)) == routes
-    for name in ("unfinished", "forgery-tail"):
+    for name in ("unfinished", "forgery-tail", "native-claude-disconnect"):
         assert preflight.route_from_host_receipt(str(root / name), RECEIPT_SESSION, time.time(), 0.1, preflight.Deadline(3)) is None
 
 

@@ -38,6 +38,12 @@ python3 -I .sandcastle/deepagents-pilot/review_preflight.py \
 
 容器外始终只有 `{session, complete_stable, routes}`。`complete_stable=true` 表示生产者收据已封口并原子发布，不再表示两次文件大小相同。routes 是全部有序 HTTP 尝试的白名单枚举或 `other`，保留重复项；每项都必须满足该模型的原 allowlist。宿主继续拒绝多余字段、重复 JSON 字段、不匹配 session、自由文本和异常退出。不存在从失败收据降级回文本的路径。报告的既有 `log_found` 字段表示取得可用路由证据，不证明文本文件存在。
 
+### 成功终态之后仍须读到 EOF
+
+预检收到 `response.completed` / `response.incomplete` 后继续读完流，不能立刻关闭连接。CLIProxy v8.0.63 的 Claude 路径仍需完成上游帧与 lifecycle 收尾；提前断开会取消执行，留下 nonce 目录但没有收据。只有读到 EOF、未超总 deadline、无后续错误或冲突终态，往返检查才成功；路由检查仍独立要求完整收据和全部 attempt 通过 allowlist。终态之后一直不结束的流仍按原总 deadline 拦截。
+
+#2055 的离线回归使用原生 Claude executor、首次 503 后重试和受控迟到的终态帧尾：客户端读终态行就断开时无收据；读完 EOF 时产生两条 Claude 路线。生产者封口条件未放宽，真实路线仍须以新正式预检的收据为证。
+
 ## 固定生产者构建与离线验证
 
 在 `.sandcastle/deepagents-pilot` 下运行：
