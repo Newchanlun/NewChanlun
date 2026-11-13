@@ -9,6 +9,7 @@
 """
 import argparse
 import hashlib
+import importlib.util
 import json
 import os
 import re
@@ -87,7 +88,7 @@ class Deadline:
 
 
 def run_bounded(cmd: list[str], timeout: float, *, data: bytes | None = None,
-                env: dict | None = None) -> subprocess.CompletedProcess:
+                env: dict | None = None, deadline: Deadline | None = None) -> subprocess.CompletedProcess:
     """预检里唯一的子进程原语：在独立进程组里运行，最多等 timeout 秒（超时抛 TimeoutExpired）；
     无论成败，返回前都杀掉整个进程组，包装脚本留下的后台子进程也一并结束。"""
     if timeout <= 0:
@@ -95,7 +96,7 @@ def run_bounded(cmd: list[str], timeout: float, *, data: bytes | None = None,
     proc = subprocess.Popen(cmd, stdin=subprocess.PIPE if data is not None else subprocess.DEVNULL,
                             stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=env, start_new_session=True)
     try:
-        out, err = proc.communicate(data, timeout=timeout)
+        out, err = proc.communicate(data, timeout=min(timeout, deadline.work_left()) if deadline else timeout)
     finally:
         try:
             os.killpg(proc.pid, signal.SIGKILL)
@@ -161,7 +162,7 @@ def check_mount(args, deadline: Deadline) -> tuple[dict, list[str]]:
         docker_called = True
         # 与正式审阅容器相同，以宿主 uid:gid 运行（docker-isolation.mts）：探针目录是 0700，镜像用户与宿主不同时
         # 不带 --user 会因 EACCES 误拦健康环境
-        result = run_bounded(["docker", "run", "--rm", "--name", container, "--network", "none", "--read-only",
+        result = run_bounded([*docker_command(getattr(args, "review_docker_context", None)), "run", "--rm", "--name", container, "--network", "none", "--read-only",
                               "--user", f"{os.getuid()}:{os.getgid()}",
                               "--mount", f"type=bind,src={root},dst=/checkouts,readonly",
                               "--entrypoint", "cat", args.image, f"/checkouts/{container}/nonce"],
@@ -180,7 +181,7 @@ def check_mount(args, deadline: Deadline) -> tuple[dict, list[str]]:
     finally:
         # docker run 被杀或非 0 退出时容器可能已建，--rm 不会清：总是 rm -f（容器不存在时也返回 0）。
         try:
-            removed = run_bounded(["docker", "rm", "-f", container], deadline.total_left() - OUTPUT_MARGIN)
+            removed = run_bounded([*docker_command(getattr(args, "review_docker_context", None)), "rm", "-f", container], deadline.total_left() - OUTPUT_MARGIN)
             if removed.returncode:
                 cleanup.append(f"docker rm -f {container} 退出 {removed.returncode}")
         except (OSError, subprocess.TimeoutExpired) as error:
@@ -336,6 +337,23 @@ def _error_info(body: str) -> dict:
 
 
 def round_trip(url: str, key: str, model: str, session: str, deadline: Deadline) -> dict:
+    """整个 HTTP 请求在独立进程组中运行，绝对工作期限到达后先回收再返回。"""
+    if deadline.work_left() <= 0:
+        return {"http_status": None, "terminal": None, "ok": False, "error": {"not_sent": "总时限已到"}}
+    try:
+        result = run_bounded(
+            [sys.executable, "-I", str(Path(__file__).resolve()), "--http-worker"],
+            deadline.work_left(), deadline=deadline,
+            data=json.dumps([url, key, model, session, deadline.work, deadline.total]).encode())
+        if result.returncode:
+            raise RuntimeError("HTTP worker failed")
+        return json.loads(result.stdout)
+    except Exception as error:
+        return {"http_status": None, "terminal": None, "ok": False,
+                "error": {"exception": type(error).__name__, "errno": None}}
+
+
+def _round_trip_http(url: str, key: str, model: str, session: str, deadline: Deadline) -> dict:
     """一次最小往返，只探连通：responses + tools + tool_choice=auto + json_schema 输出格式。
     不代表 kimi 的生产请求形状（正式独审对 kimi 不带 --output-schema），也不验证回合内真实工具调用。"""
     body = {"model": model, "stream": True, "store": False, "reasoning": {"effort": "low"},
@@ -357,7 +375,7 @@ def round_trip(url: str, key: str, model: str, session: str, deadline: Deadline)
     try:
         with urllib.request.urlopen(request, timeout=timeout) as response:
             terminal, detail, status = None, "流在终态事件前结束", None
-            for raw in response:
+            for raw in response.read().splitlines():
                 if deadline.work_left() <= 0:
                     detail = "总时限内无终态事件"
                     break
@@ -365,13 +383,18 @@ def round_trip(url: str, key: str, model: str, session: str, deadline: Deadline)
                 if line.startswith("data:"):
                     event = json.loads(line[5:]) if line[5:].strip().startswith("{") else {}
                     if event.get("type") in TERMINAL_EVENTS:
+                        if terminal is not None:
+                            detail = "终态事件后出现另一终态"
+                            break
                         terminal = event.get("type")
                         inner = event.get("response") if isinstance(event.get("response"), dict) else {}
                         # 只报已知枚举：上游任意值（可能以各种编码夹带 key）一律归一成 "other"，不进报告
                         status = inner.get("status") if inner.get("status") in RESPONSE_STATUSES else (
                             None if inner.get("status") is None else "other")
                         detail = inner.get("error") or event.get("error") or event.get("message")
-                        break
+                        # 终态数据不等于代理 lifecycle 已收尾；读到 EOF 才关闭连接。
+            if deadline.work_left() <= 0:
+                detail = "总时限内流未收尾"
             # 事件名成功还不够：响应体自报 failed/cancelled 或带 error 也算失败。
             ok = (terminal in ("response.completed", "response.incomplete") and not detail
                   and status not in ("failed", "cancelled"))
@@ -380,66 +403,87 @@ def round_trip(url: str, key: str, model: str, session: str, deadline: Deadline)
                     "error": None if ok else _error_info(text)}
     except urllib.error.HTTPError as error:
         return {"http_status": error.code, "terminal": None, "ok": False,
-                "error": _error_info(error.read(65536).decode("utf-8", "replace"))}
+                "error": _error_info(error.read()[:65536].decode("utf-8", "replace"))}
     except Exception as error:  # 连接、协议等任何异常都只记类型与 errno，不带异常原文
         reason = getattr(error, "reason", None)
         return {"http_status": None, "terminal": None, "ok": False,
                 "error": {"exception": type(error).__name__, "errno": getattr(reason, "errno", getattr(error, "errno", None))}}
 
 
-def route_from_log(log_dir: Path, session: str, since: float, wait: float) -> list[tuple[str, str]] | None:
-    """按本次唯一 Session-Id 找 CLIProxy request-log，读出每次上游尝试的 (provider, 主机)。
-    proxy 的日志以 `=== RESPONSE ===` 段收尾；只在该段已出现、且相邻两次轮询文件大小不变时解析，
-    避免把写到一半的 `provider=clau` 当成定论。找不到或一直没写完返回 None。"""
-    end = time.monotonic() + wait
-    sizes: dict = {}
-    while time.monotonic() <= end:
-        try:
-            paths = list(log_dir.glob("v1-responses-*.log"))
-        except OSError:  # 日志目录不可读：按找不到日志处理
-            paths = []
-        candidates = []
-        for path in paths:
-            try:  # 其他会话的日志可能在 glob 与 stat 之间被轮转删除
-                candidates.append((path.stat().st_mtime, path))
-            except OSError:
-                continue
-        for mtime, path in sorted(candidates, reverse=True):
-            if mtime < since - 1:
-                break
-            try:
-                raw = path.read_bytes()
-            except OSError:
-                continue
-            text = raw.decode("utf-8", "replace")
-            if f"Session-Id: {session}" not in text:
-                continue
-            stable = sizes.get(path) == len(raw)
-            sizes[path] = len(raw)
-            if "\n=== RESPONSE ===" in text and stable:
-                # 只读各 API REQUEST 段（到下一个 === 段头为止）：响应正文里伪造的同名行不算路由
-                requests = re.findall(r"^=== API REQUEST \d+ ===\n(.*?)(?=^=== )", text, re.M | re.S)
-                attempts = []
-                for section in requests:
-                    provider = re.search(r"^Auth: provider=([\w.-]+)(?=,|\s*$)", section, re.M)
-                    host = re.search(r"^Upstream URL: https?://([^/:?\s]+)", section, re.M)
-                    if not (provider and host):
-                        return []
-                    attempts.append((provider.group(1), host.group(1)))
-                return attempts
-            break
-        time.sleep(0.05)
-    return None
+# -I 不把脚本目录放入 sys.path；按当前脚本的相邻路径加载唯一解析实现。
+_LOG_READER = Path(__file__).with_name("_review_preflight_log.py")
+_log_spec = importlib.util.spec_from_file_location("_review_preflight_log", _LOG_READER)
+_log_module = importlib.util.module_from_spec(_log_spec)
+_log_spec.loader.exec_module(_log_module)
+route_from_log = _log_module.route_from_log
+
+
+def docker_command(context: str | None) -> list[str]:
+    return ["docker", "--context", context] if context else ["docker"]
+
+
+def _decode_routes(raw: bytes, session: str, labels: dict) -> list[tuple[str, str]] | None:
+    payload = json.loads(raw, object_pairs_hook=_log_module._unique_object)
+    if (not isinstance(payload, dict) or set(payload) != {"session", "complete_stable", "routes"}
+            or payload["session"] != session or payload["complete_stable"] is not True
+            or not isinstance(payload["routes"], list) or len(payload["routes"]) > 64
+            or any(not isinstance(route, str) or route not in {*labels, "other"} for route in payload["routes"])):
+        return None
+    return [labels.get(route, ("other", "other")) for route in payload["routes"]]
+
+
+def route_from_container(args, session: str, since: float, wait: float,
+                         deadline: Deadline) -> list[tuple[str, str]] | None:
+    """只接受完整白名单协议；读取失败、超时或多余输出均不能证明路由。"""
+    budget = min(wait, deadline.work_left() - 0.25)
+    if budget <= 0:
+        return None
+    labels = {"@".join(route): route for route in KNOWN_ROUTES}
+    receipt = getattr(args, "proxy_receipt_container", None)
+    cmd = [*docker_command(args.proxy_docker_context), "exec", receipt or args.proxy_log_container,
+           "python3", "-I", "-c", _LOG_READER.read_text(),
+           *(["--receipt", args.proxy_container_receipt_dir] if receipt else [args.proxy_container_log_dir]),
+           session, str(since), str(time.time() + budget), str(budget), json.dumps(sorted(KNOWN_ROUTES))]
+    try:
+        result = run_bounded(cmd, budget)
+        if result.returncode or result.stderr:
+            return None
+        return _decode_routes(result.stdout, session, labels)
+    except (OSError, ValueError, subprocess.TimeoutExpired):
+        return None
+
+
+def route_from_host_receipt(directory: str, session: str, since: float, wait: float,
+                            deadline: Deadline) -> list[tuple[str, str]] | None:
+    budget = min(wait, deadline.work_left() - 0.25)
+    if budget <= 0:
+        return None
+    labels = {"@".join(route): route for route in KNOWN_ROUTES}
+    try:
+        result = run_bounded([sys.executable, "-I", "-c", _LOG_READER.read_text(), "--receipt", directory,
+                              session, str(since), str(time.time() + budget), str(budget),
+                              json.dumps(sorted(KNOWN_ROUTES))], budget)
+        if result.returncode or result.stderr:
+            return None
+        return _decode_routes(result.stdout, session, labels)
+    except (OSError, ValueError, subprocess.TimeoutExpired):
+        return None
 
 
 def probe_model(args, model: str, key: str, deadline: Deadline) -> list[dict]:
     session = f"preflight-{uuid.uuid4()}"
     since = time.time()
     trip = round_trip(args.proxy_url, key, model, session, deadline)
-    # 往返成功时日志一定会写（实测响应后 14–85ms），等到工作时限前 0.25 秒（留给线程交回结果）；
-    # 往返已失败时日志只作诊断，等 0.3 秒。
-    wait = max(0.0, deadline.work_left() - 0.25) if trip["ok"] else 0.3
-    attempts = route_from_log(Path(args.proxy_log_dir), session, since, wait)
+    # 成功后等生产者完成收尾并原子发布；往返失败时只给证据读取 0.3 秒。
+    wait = max(0.0, deadline.work_left() - 0.25)
+    if not trip["ok"]:
+        wait = min(wait, 0.3)
+    if getattr(args, "proxy_log_container", None) or getattr(args, "proxy_receipt_container", None):
+        attempts = route_from_container(args, session, since, wait, deadline)
+    elif getattr(args, "proxy_receipt_dir", None):
+        attempts = route_from_host_receipt(args.proxy_receipt_dir, session, since, wait, deadline)
+    else:
+        attempts = route_from_log(Path(args.proxy_log_dir), session, since, wait)
     expected = ROUTES[model]
     return [{"name": f"route:{model}", "class": "route", "ok": bool(attempts) and all(a in expected for a in attempts),
              "detail": {"expected": sorted("@".join(route) for route in expected), "actual": [f"{p}@{h}" if (p, h) in KNOWN_ROUTES else "other" for p, h in attempts or []],
@@ -493,12 +537,36 @@ def main(argv=None) -> int:
     ap.add_argument("--checkout-root", required=True, help="正式 attempt 将传给 ExternalReview 的 checkout_root")
     ap.add_argument("--image", default="sandcastle:newchanlun", help="与 external-review-worker.mts REVIEW_IMAGE 相同")
     ap.add_argument("--proxy-url", default="http://127.0.0.1:8318")  # DevSkim: ignore DS162092 有意使用本机回环（本地 CLIProxy / 测试假服务），非调试残留
-    ap.add_argument("--proxy-log-dir", default=str(CLIPROXY_LOG_DIR))
+    logs = ap.add_mutually_exclusive_group()
+    logs.add_argument("--proxy-log-dir", default=str(CLIPROXY_LOG_DIR))
+    logs.add_argument("--proxy-log-container", help="旧文本日志入口；不可信，不能证明路由")
+    logs.add_argument("--proxy-receipt-dir", help="宿主可信结构化收据目录；不接受旧文本日志")
+    logs.add_argument("--proxy-receipt-container", help="在代理容器内读取可信收据；不读取状态卷")
+    ap.add_argument("--proxy-container-receipt-dir", help="容器内收据目录绝对路径")
+    ap.add_argument("--proxy-docker-context", help="容器日志后端的显式 Docker context")
+    ap.add_argument("--proxy-container-log-dir", help="代理容器内日志目录的绝对路径")
+    ap.add_argument("--review-docker-context", help="审阅挂载探针的 Docker context；默认沿用当前环境")
     ap.add_argument("--codex-home", default=os.environ.get("CODEX_HOME", str(Path.home() / ".codex")),
                     help="宿主 Codex 配置目录；按其 model_providers.cliproxy-local 取 key")
     ap.add_argument("--codex-bin", default="codex", help="宿主使用的 codex 可执行文件，用于离线校验 provider 配置")
     ap.add_argument("--deadline", type=_deadline, default=55.0, help="总墙钟上限（秒，0 < x ≤ 60），超时的检查判失败")
     args = ap.parse_args(argv)
+    if args.proxy_receipt_container:
+        if (not args.proxy_docker_context or not args.proxy_container_receipt_dir
+                or not args.proxy_container_receipt_dir.startswith("/") or args.proxy_container_log_dir):
+            ap.error("收据容器须指定 proxy-docker-context 与绝对 proxy-container-receipt-dir，不得混用日志参数")
+        if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]*", args.proxy_receipt_container):
+            ap.error("proxy-receipt-container 必须是容器名称或 ID")
+    elif args.proxy_log_container:
+        if args.proxy_container_receipt_dir:
+            ap.error("旧日志入口不能使用收据目录")
+        if (not args.proxy_docker_context or not args.proxy_container_log_dir
+                or not args.proxy_container_log_dir.startswith("/")):
+            ap.error("容器日志后端须指定 proxy-docker-context 与绝对 proxy-container-log-dir")
+        if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]*", args.proxy_log_container):
+            ap.error("proxy-log-container 必须是容器名称或 ID")
+    elif args.proxy_docker_context or args.proxy_container_log_dir or args.proxy_container_receipt_dir:
+        ap.error("容器日志参数须与 proxy-log-container 一起使用")
     t0 = time.monotonic()
     deadline = Deadline(args.deadline)
     secrets = [os.environ.get(SCRUBBED_ENV)]
@@ -516,22 +584,25 @@ def run_checks(args, deadline: Deadline, secrets: list) -> list[dict]:
     credential, key = check_credential(args, deadline)
     secrets.append(key)
     checks = [credential]
-    # 两次往返不留任何本地产物，放在守护线程里与空间、挂载检查并行；到时未完成即判失败、放弃等待。
+    # HTTP 子进程与挂载探针共享工作期限；线程须完成子进程回收后才能返回。
     probes: dict = {}
     threads = []
-    if key is not None:
-        for model in MODELS:
-            def probe(m=model):
-                probes[m] = _guarded(f"roundtrip:{m}", "roundtrip", lambda: probe_model(args, m, key, deadline))
-            threads.append(threading.Thread(target=probe, daemon=True))
-            threads[-1].start()
-    checks.append(_guarded("checkout_root_free_space", "space", lambda: check_space(args, deadline)))
-    mount, cleanup = check_mount(args, deadline)
-    checks.append(mount)
-    if cleanup:
-        checks.append({"name": "probe_cleanup", "class": "cleanup", "ok": False, "detail": cleanup})
-    for thread in threads:
-        thread.join(deadline.work_left())
+    try:
+        if key is not None:
+            for model in MODELS:
+                def probe(m=model):
+                    probes[m] = _guarded(f"roundtrip:{m}", "roundtrip", lambda: probe_model(args, m, key, deadline))
+                thread = threading.Thread(target=probe)
+                thread.start()
+                threads.append(thread)
+        checks.append(_guarded("checkout_root_free_space", "space", lambda: check_space(args, deadline)))
+        mount, cleanup = check_mount(args, deadline)
+        checks.append(mount)
+        if cleanup:
+            checks.append({"name": "probe_cleanup", "class": "cleanup", "ok": False, "detail": cleanup})
+    finally:
+        for thread in threads:
+            thread.join()  # 各外部操作有界；包括异常出口也须先回收请求。
     for model in MODELS:
         result = probes.get(model)
         if result is None:
@@ -542,4 +613,10 @@ def run_checks(args, deadline: Deadline, secrets: list) -> list[dict]:
 
 
 if __name__ == "__main__":
-    os._exit(main())  # 不等待超时后仍挂住的探测线程
+    if sys.argv[1:] == ["--http-worker"]:
+        url, key, model, session, work, total = json.load(sys.stdin)
+        deadline = Deadline.__new__(Deadline)
+        deadline.work, deadline.total = work, total
+        print(json.dumps(_round_trip_http(url, key, model, session, deadline)))
+    else:
+        sys.exit(main())
