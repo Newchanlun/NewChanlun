@@ -20,6 +20,8 @@ import {
 import { QUEUE_LABEL, releaseLabel, withQueueAdmission } from "./deepagents-cutover.mts";
 import { withLegacyAdmission } from "./drain-control.mts";
 import { MAIN_SESSION_FILE } from "./main-session.mts";
+// 与静态导入的 caller 共用模块实例；tsx CJS/ESM 混载会产生两个错误类。
+import { MaintenanceOwner, MaintenanceClosed } from "./maintenance.mts";
 
 const pass = (basis = "回查成立") => Object.fromEntries(RULES.map((r) => [r, { verdict: "PASS", basis }]));
 const fence = (v: unknown) => "说明文字\n```json\n" + JSON.stringify(v) + "\n```\n";
@@ -3481,7 +3483,6 @@ test("资金与权限硬门：分级、起草、独审三处提示同口径，�
 });
 
 test("维护：关闸拒绝新单票，已领取单票的后续模型调用自然完成", async () => {
-  const { MaintenanceOwner, MaintenanceClosed } = await import("./maintenance.mts");
   const root = mkdtempSync(join(tmpdir(), "decision-maintenance-"));
   const helper = join(process.cwd(), ".sandcastle/deepagents-pilot/pilot1742/maintenance.py");
   const { d, modelCalls } = fakeDeps("dry-run", [fence({ user_gate: [], class: "T", reason: "测试锁" }), goodDraft, fence(pass())]);
