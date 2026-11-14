@@ -10,7 +10,7 @@ import pytest
 
 from pilot1742 import maintenance as m
 from pilot1742 import maintenance_es_session as session
-from pilot1742.maintenance_es import AuditIdentity
+from pilot1742.maintenance_es import AuditIdentity, Peer
 
 
 def audit(pid, version=1):
@@ -226,3 +226,140 @@ def test_durable_closure_consumption_contract_only(tmp_path, monkeypatch, missin
         assert control['closed'] and control['generation'] == generation
         assert db.execute('SELECT count(*) FROM native_es_audit').fetchone()[0] == (1 if missing is None else 0)
         assert not db.execute('SELECT * FROM action_returns').fetchall()  # 不补造整个callback的return。
+
+
+@pytest.mark.parametrize('trajectory', ['before_register', 'rejected_register', 'delayed_register', 'awaiting_exec'])
+@pytest.mark.parametrize('code', [78, -15])
+def test_helper_terminal_before_arm_returns_without_source_eof(tmp_path, monkeypatch, trajectory, code):
+    """Healthy source must not be required to die to deliver the real wait result."""
+    import threading
+
+    gate = m.Gate(tmp_path)
+    owner = gate.register('decision', local_actions=True)
+    job = gate.admit(owner, 'terminal-helper')
+    resource = gate.reserve_local_resource(owner, job)
+    monkeypatch.setattr(m.os, 'getsid', lambda _: os.getpid())
+    gate.bind_local_resource_identity(resource)
+    read_started = threading.Event()
+    processed = threading.Event()
+    closed = threading.Event()
+
+    class Channel(FixtureChannel):
+        timed_out = False
+        late_delivered = False
+
+        def read(self):
+            read_started.set()
+            if trajectory == 'delayed_register' and not self.late_delivered:
+                # A frame is in flight until local revocation closes the session.
+                assert closed.wait(2), 'helper result waited for source death'
+                self.late_delivered = True
+                return register
+            try:
+                frame = self.frames.get(timeout=2)
+            except queue.Empty:
+                self.timed_out = True
+                raise EOFError('test watchdog, not a successful closure') from None
+            if frame is None:
+                raise EOFError('local close')
+            return frame
+
+        def close(self):
+            closed.set()
+            super().close()
+
+    channel = Channel()
+    reducer = FixtureReducer(gate, channel)
+    register = dict(type='register', resource=resource, nonce='nonce', image='helper', peer=audit(200, 2).words)
+    original_register = reducer.register_peer
+
+    def register_peer(*args):
+        try:
+            if trajectory == 'rejected_register':
+                raise ValueError('isolated registration rejection')
+            return original_register(*args)
+        finally:
+            processed.set()
+
+    monkeypatch.setattr(reducer, 'register_peer', register_peer)
+
+    class Helper:
+        def wait(self):
+            assert read_started.wait(2)
+            if trajectory in ('rejected_register', 'awaiting_exec'):
+                assert processed.wait(2)
+            return code
+
+        def poll(self):
+            return code
+
+    def popen(command):
+        if trajectory in ('rejected_register', 'awaiting_exec'):
+            channel.frames.put(register)
+        return Helper()
+
+    monkeypatch.setattr(session, 'subprocess', SimpleNamespace(Popen=popen))
+    assert session._run_session(reducer, channel, resource, 'nonce', ['unused']) == (code if code >= 0 else 128 - code)
+    assert not channel.timed_out
+    assert closed.is_set()
+    assert channel.late_delivered == (trajectory == 'delayed_register')
+    assert channel.sent == []
+    assert reducer.seal_calls == 0
+    assert reducer.status(resource)['unknown']
+    assert not gate.local_action_idle(job)
+    with gate.tx() as db:
+        assert not db.execute('SELECT * FROM local_resource_not_started').fetchall()
+        assert db.execute('SELECT waited_at FROM local_resources').fetchone()[0] is None
+    # Revoked session cannot authorize a late EXEC/REGISTER or a second dispatch.
+    assert reducer.arm(resource, Peer(audit(200, 2), 'helper')) is None
+
+
+def test_helper_exit_racing_arm_failure_never_reissues_permit(tmp_path, monkeypatch):
+    import threading
+
+    gate = m.Gate(tmp_path)
+    owner = gate.register('decision', local_actions=True)
+    job = gate.admit(owner, 'arm-race')
+    resource = gate.reserve_local_resource(owner, job)
+    monkeypatch.setattr(m.os, 'getsid', lambda _: os.getpid())
+    gate.bind_local_resource_identity(resource)
+    sending = threading.Event()
+    helper_exited = threading.Event()
+
+    class Channel(FixtureChannel):
+        def send(self, message):
+            self.sent.append(message)
+            assert message.startswith('ARM')
+            sending.set()
+            assert helper_exited.wait(2)
+            raise BrokenPipeError('ARM write completion after helper exit')
+
+    channel = Channel()
+    reducer = FixtureReducer(gate, channel)
+
+    class Helper:
+        def wait(self):
+            assert sending.wait(2)
+            helper_exited.set()
+            return 78
+
+        def poll(self):
+            return 78
+
+    def popen(command):
+        channel.event('FORK', audit(os.getpid()), audit(200))
+        channel.event('EXEC', audit(200), audit(200, 2), 'helper')
+        channel.frames.put(dict(type='register', resource=resource, nonce='nonce', image='helper', peer=audit(200, 2).words))
+        return Helper()
+
+    monkeypatch.setattr(session, 'subprocess', SimpleNamespace(Popen=popen))
+    assert session._run_session(reducer, channel, resource, 'nonce', ['unused']) == 78
+    assert len(channel.sent) == 1
+    with gate.tx() as db:
+        _, action = reducer._bound(db, resource)
+        assert action.claimed and action.permit
+        assert not db.execute('SELECT * FROM local_resource_not_started').fetchall()
+    assert reducer.arm(resource, Peer(audit(200, 2), 'helper')) is None
+    assert reducer.status(resource)['unknown']
+    assert reducer.seal_calls == 0
+    assert not gate.local_action_idle(job)

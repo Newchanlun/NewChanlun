@@ -327,10 +327,18 @@ def _run_session(reducer, channel, resource: str, nonce: str, command: list[str]
             helper = subprocess.Popen([config['helper'], '--managed-session', config['socket'], config['collector_requirement'],
                                        config['helper_requirement'], resource, nonce, config['image'], '--', *command])
         code = helper.wait()
-        # Preserve real helper business wait even if evidence writes or source fail.
+        # Preserve real helper wait even if registration or evidence is incomplete.
         with evidence_write():
             with lock:
                 while not consumer.failed:
+                    registration = consumer.registrations.get(resource)
+                    if registration is None or not registration.arm_sent:
+                        # wait() is a business result, not proof of non-dispatch.
+                        # Revoke under the same lock as accept/_progress: a queued
+                        # REGISTER can no longer consume or send a permit. Keep the
+                        # resource unknown; never invent not_started from this race.
+                        consumer.lost()
+                        break
                     status = reducer.status(resource)
                     if status['unknown']:
                         break

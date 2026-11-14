@@ -119,6 +119,15 @@ helper的`--managed-session`验证与原开发helper相同，只fork一次业务
 消费只核原epoch/任务/监督身份及资源，不重开source、不补造callback return、不改变维护代次。监督器在域未闭合期间继续存活；
 来源失效时保留业务退出码而不补签闭包。配置失败、尚未Popen的取消及Popen同步失败分别记录未派发证据，不伪造业务wait。
 
+### helper 提前终止与证据等待
+
+helper 的真实 `wait()` 结果与维护闭包分开处理。若 helper 已终止而本 SESSION 尚未发送 ARM，
+监督器在与 REGISTER/许可消费相同的锁下先撤销本 session，再返回原退出码（信号转为128+信号）。
+这不是“从未启动”的证明：延迟帧仍可能在途，因此不写 not_started、业务 wait 或 seal，原占用保持 unknown。
+已读取但尚未处理的 REGISTER 也不能在撤销后发送 ARM；其他 SESSION 不因该本地决定被主动关闭。
+ARM 已消费/发送的路径仍等待原精确 wait/进程域闭包或来源失效；短写不回滚许可，不重派。
+提前终止不靠退出码78、超时或全局来源EOF作判据，真实来源验证要求不变。
+
 ### 本批验证边界
 
 共享SESSION编排的隔离来源走同一个prepare/register/ARM/wait归约及原reserve，但保持offline表，
