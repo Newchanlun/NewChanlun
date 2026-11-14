@@ -103,7 +103,7 @@ class Source:
     last: int | None = None
     taint: str | None = None
     protocol: Literal['macos-es-v1'] = 'macos-es-v1'
-    trust: Literal['offline'] = 'offline'
+    trust: Literal['offline', 'native'] = 'offline'
 
 
 @dataclass
@@ -228,45 +228,52 @@ class OfflineES:
     launch回调只用于离线轨迹模拟。没有生产fixture信任开关。
     """
 
+    source_table = "es_sources"
+    action_table = "es_actions"
+    audit_table = "es_audit"
+
     def __init__(self, gate: Gate):
         if gate.root.resolve() == ROOT.resolve():
             raise ValueError('offline source requires isolated ledger')
         self.gate = gate
         self.current: str | None = None
         self.revoked: dict[str, str] = {}
-        with gate.tx() as db:
-            db.executescript('''
-                CREATE TABLE IF NOT EXISTS es_sources (epoch TEXT PRIMARY KEY, data TEXT NOT NULL);
-                CREATE TABLE IF NOT EXISTS es_actions (resource TEXT PRIMARY KEY, job TEXT UNIQUE, nonce TEXT UNIQUE, data TEXT NOT NULL);
-                CREATE TABLE IF NOT EXISTS es_audit (id INTEGER PRIMARY KEY, at TEXT, operation TEXT, data TEXT);
-            ''')
+        self._schema()
         with gate.tx() as db:
             actions = self._actions(db)
-            for row in db.execute('SELECT data FROM es_sources').fetchall():
+            for row in db.execute(f'SELECT data FROM {self.source_table}').fetchall():
                 source = Source(**json.loads(row[0]))
                 if source.ready:
                     taint(source, actions, 'collector_reopened')
                     self._save(db, source, actions)
             self._log(db, 'offline-open', {'protocol': KIND})
 
-    @staticmethod
-    def _actions(db) -> list[Action]:
-        return [Action(**json.loads(r[0])) for r in db.execute('SELECT data FROM es_actions')]
+    def _schema(self) -> None:
+        with self.gate.tx() as db:
+            db.executescript(f'''
+                CREATE TABLE IF NOT EXISTS {self.source_table} (epoch TEXT PRIMARY KEY, data TEXT NOT NULL);
+                CREATE TABLE IF NOT EXISTS {self.action_table} (resource TEXT PRIMARY KEY, job TEXT, nonce TEXT UNIQUE, data TEXT NOT NULL);
+                CREATE TABLE IF NOT EXISTS {self.audit_table} (id INTEGER PRIMARY KEY, at TEXT, operation TEXT, data TEXT);
+            ''')
 
-    @staticmethod
-    def _log(db, operation: str, data: dict) -> None:
-        db.execute('INSERT INTO es_audit(at,operation,data) VALUES(?,?,?)', (now(), operation, json.dumps(data)))
+    @classmethod
+    def _actions(cls, db) -> list[Action]:
+        return [Action(**json.loads(r[0])) for r in db.execute(f'SELECT data FROM {cls.action_table}')]
 
-    @staticmethod
-    def _save(db, source: Source, actions: list[Action]) -> None:
-        db.execute('INSERT OR REPLACE INTO es_sources VALUES(?,?)', (source.epoch, json.dumps(asdict(source))))
+    @classmethod
+    def _log(cls, db, operation: str, data: dict) -> None:
+        db.execute(f'INSERT INTO {cls.audit_table}(at,operation,data) VALUES(?,?,?)', (now(), operation, json.dumps(data)))
+
+    @classmethod
+    def _save(cls, db, source: Source, actions: list[Action]) -> None:
+        db.execute(f'INSERT OR REPLACE INTO {cls.source_table} VALUES(?,?)', (source.epoch, json.dumps(asdict(source))))
         for a in actions:
-            db.execute('INSERT INTO es_actions VALUES(?,?,?,?) ON CONFLICT(resource) DO UPDATE SET data=excluded.data',
+            db.execute(f'INSERT INTO {cls.action_table} VALUES(?,?,?,?) ON CONFLICT(resource) DO UPDATE SET data=excluded.data',
                        (a.resource, a.job, a.nonce, json.dumps(asdict(a))))
 
-    @staticmethod
-    def _source(db, epoch: str) -> Source:
-        row = db.execute('SELECT data FROM es_sources WHERE epoch=?', (token(epoch),)).fetchone()
+    @classmethod
+    def _source(cls, db, epoch: str) -> Source:
+        row = db.execute(f'SELECT data FROM {cls.source_table} WHERE epoch=?', (token(epoch),)).fetchone()
         if row is None:
             raise ValueError('unknown source epoch')
         return Source(**json.loads(row[0]))
@@ -278,10 +285,10 @@ class OfflineES:
             self.revoked[self.current] = 'source_replaced'
             self.current = None
         with self.gate.tx() as db:
-            if db.execute('SELECT 1 FROM es_sources WHERE epoch=?', (epoch,)).fetchone():
+            if db.execute(f'SELECT 1 FROM {self.source_table} WHERE epoch=?', (epoch,)).fetchone():
                 raise ValueError('epoch cannot be reused')
             actions = self._actions(db)
-            for row in db.execute('SELECT data FROM es_sources').fetchall():
+            for row in db.execute(f'SELECT data FROM {self.source_table}').fetchall():
                 previous = Source(**json.loads(row[0]))
                 if previous.ready:
                     taint(previous, actions, 'source_replaced')
@@ -339,7 +346,7 @@ class OfflineES:
                 raise ValueError('scheduler peer does not match owner')
             if epoch != self.current or not source.ready or source.last is None:
                 raise ValueError('source not ready')
-            if db.execute('SELECT 1 FROM es_actions WHERE nonce=?', (nonce,)).fetchone():
+            if db.execute(f'SELECT 1 FROM {self.action_table} WHERE nonce=?', (nonce,)).fetchone():
                 raise ValueError('nonce already used')
         # 只有新准入动作可接入；没有attach-old-job接口。中途失败留下未决占用，不派业务。
         job = self.gate.admit(owner, work)
@@ -355,7 +362,7 @@ class OfflineES:
         return resource
 
     def _bound(self, db, resource: str) -> tuple[Source, Action]:
-        row = db.execute('SELECT data FROM es_actions WHERE resource=?', (token(resource),)).fetchone()
+        row = db.execute(f'SELECT data FROM {self.action_table} WHERE resource=?', (token(resource),)).fetchone()
         if row is None:
             raise ValueError('unregistered ES resource')
         a = Action(**json.loads(row[0]))

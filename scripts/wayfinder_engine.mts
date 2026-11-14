@@ -1007,6 +1007,7 @@ function writeStatus(
 
 export interface EngineConfig {
   maintenanceRoot?: string;
+  maintenanceEsConfig?: string;
   orchestrator: string;
   dryRun: boolean;
   pollSeconds: number;
@@ -1528,6 +1529,7 @@ async function runOnce(cfg: EngineConfig, maintenance?: MaintenanceOwner): Promi
 
 function parseArgs(argv: string[]): EngineConfig {
   let maintenanceRoot: string | undefined;
+  let maintenanceEsConfig: string | undefined;
   let dryRun = true;
   let once = false;
   let explain = false;
@@ -1538,6 +1540,10 @@ function parseArgs(argv: string[]): EngineConfig {
     else if (a === "--dry-run") dryRun = true;
     else if (a === "--once") once = true;
     else if (a === "--explain") explain = true;
+    else if (a === "--maintenance-es-config") {
+      if (!argv[i + 1]) throw new Error("--maintenance-es-config 缺参数");
+      maintenanceEsConfig = resolve(argv[++i]!);
+    }
     else if (a === "--maintenance-root") {
       if (!argv[i + 1]) throw new Error("--maintenance-root 缺参数");
       maintenanceRoot = resolve(argv[++i]!);
@@ -1552,6 +1558,7 @@ function parseArgs(argv: string[]): EngineConfig {
   }
   return {
     maintenanceRoot,
+    maintenanceEsConfig,
     orchestrator: process.env.WAYFINDER_ORCHESTRATOR ?? ORCHESTRATOR_LOGIN,
     dryRun,
     pollSeconds,
@@ -1602,7 +1609,7 @@ async function main(): Promise<void> {
   console.log(
     `[wayfinder_engine] 启动：dry-run=${cfg.dryRun} poll=${cfg.pollSeconds}s orchestrator=${cfg.orchestrator} spec 起草子代理=${cfg.specProvider}/${cfg.specModel}`,
   );
-  const maintenance = cfg.dryRun ? undefined : new MaintenanceOwner("wayfinder", cfg.maintenanceRoot);
+  const maintenance = cfg.dryRun ? undefined : new MaintenanceOwner("wayfinder", cfg.maintenanceRoot, cfg.maintenanceEsConfig);
   try {
     if (cfg.once) {
       if (!maintenance?.poll()) await runOnce(cfg, maintenance);

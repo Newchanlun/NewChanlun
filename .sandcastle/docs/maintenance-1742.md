@@ -246,3 +246,23 @@ Popen 已返回后的登记/文件异常保留标记与原占用，不能借异�
 下一轮新 owner 仍需完成原全域清点和当前代次确认。撤销写入失败仍保留 unknown，不以异常当作退休证据。
 手动 executor 的 complete-bound 失败不再跳过 settle：返回链已持久但资源未闭合时记 unknown，业务结果保留。
 后续仍走原 reconcile：精确身份已退出、原返回链齐全、绑定资源与整个 scope 均闭合才能解除；没有新增 force 通路。
+
+
+### 显式原生 ES 候选与本批恢复边界
+
+TS 原本地执行边界现在可显式传 `--maintenance-es-config`；默认未选择，现役配置不变。
+认证与外部启动边界见 [native-es README](../deepagents-pilot/native-es/README.md)。受管collector仍须由后续
+发布owner在签名/root/FDA前件齐备后启动；本候选不安装、不启动来源，不允许offline布尔提升生产证据。
+原worker setsid后接受的业务独立于调度器/来源管道，关闭管道不杀业务；必须等待自然收尾再做后续停服务操作。
+
+macOS本机监督器在耗时绑定之前安装信号处理：绑定期间SIGTERM/SIGINT若尚未Popen，记录精确监督身份的
+`cancelled_before_spawn`并返回128+signal；不启动业务后再杀。真实已Popen任务仍按原wait与资源判据处理。
+
+census的外域证据解析包括review实际`--maintenance-reservation`及新的ES配置参数，但参数自身仍不能证明外域；
+需要另一根账本里原lane/PID/start的活owner。解释器只新增明确的`Python` basename（对应macOS框架入口），
+不泛化任意大小写命令；真实隔离Python可执行入口与两临时Gate测试覆盖该路径。
+
+TS action-exited丢失不能只凭local resource的wait/sealed补造callback return：同一证据也可能出现于模型已退出、
+图回调仍执行后续不透明工作期间。原活caller提交真实action-exited后，已有reconcile链可以消费；若caller已失联且该
+记录及action_returns都不存在，同boot仍明确`missing_bound_completion`。本批没有授予同key重派或人工补签权限，
+此类完全丢失callback return的恢复来源仍是具体缺口，不将local seal误解释为整个graph动作完成。

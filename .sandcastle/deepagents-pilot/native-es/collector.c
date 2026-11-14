@@ -22,17 +22,40 @@ static uint64_t last_seq;
 static char epoch[37], image[FIELD];
 static uid_t helper_uid;
 static int listener;
+static bool managed;
 static es_event_type_t subscribed[] = { ES_EVENT_TYPE_NOTIFY_FORK, ES_EVENT_TYPE_NOTIFY_EXEC, ES_EVENT_TYPE_NOTIFY_EXIT };
 #define CONNECTIONS 64
-struct connection { int fd; bool registered, armed, started, waited, receipt_acked; pid_t primary; audit_token_t peer; char resource[FIELD], nonce[FIELD]; };
+struct connection { int fd; FILE *stream; bool session; char epoch[37]; bool registered, armed, started, waited, receipt_acked; pid_t primary; audit_token_t peer; char resource[FIELD], nonce[FIELD]; };
 static struct connection connections[CONNECTIONS];
 
 static void flush_output(void) { if (ferror(stdout) || fflush(stdout)) _exit(74); }
+static void flush_stream(FILE *stream) { if (ferror(stream) || fflush(stream)) _exit(74); }
+static struct connection *session_for(const char *resource, const char *nonce) {
+    for (size_t i = 0; i < CONNECTIONS; i++) {
+        struct connection *c = &connections[i];
+        if (c->fd >= 0 && c->session && !strcmp(c->resource, resource) && !strcmp(c->nonce, nonce)) return c;
+    }
+    return NULL;
+}
+static FILE *destination(struct connection *helper) {
+    if (!managed) return stdout;
+    struct connection *session = session_for(helper->resource, helper->nonce);
+    return session ? session->stream : NULL;
+}
 static void lost(const char *reason) {
     healthy = false;
-    output(stdout, "{\"type\":\"lost\",\"epoch\":\"%s\",\"reason\":\"%s\"}\n", epoch, reason);
-    flush_output();
+    if (!managed) {
+        output(stdout, "{\"type\":\"lost\",\"epoch\":\"%s\",\"reason\":\"%s\"}\n", epoch, reason);
+        flush_output();
+    } else for (size_t i = 0; i < CONNECTIONS; i++) {
+        struct connection *c = &connections[i];
+        if (c->fd >= 0 && c->session) {
+            output(c->stream, "{\"type\":\"lost\",\"epoch\":\"%s\",\"reason\":\"%s\"}\n", c->epoch, reason);
+            flush_stream(c->stream);
+        }
+    }
 }
+static void command(const char *line, struct connection *session);
 static bool lifecycle(es_event_type_t event) {
     return event == subscribed[0] || event == subscribed[1] || event == subscribed[2];
 }
@@ -83,12 +106,20 @@ static void receive_event(const es_message_t *message) {
     case ES_EVENT_TYPE_NOTIFY_EXIT: kind = "EXIT"; break;
     default: lost("internal_drop"); pthread_mutex_unlock(&lock); return;
     }
-    output(stdout, "{\"type\":\"event\",\"event\":{\"epoch\":\"%s\",\"seq\":%llu,\"version\":%u,\"kind\":\"%s\",\"actor\":", epoch, (unsigned long long)last_seq, message->version, kind);
-    json_token(stdout, message->process->audit_token);
-    fputs(",\"target\":", stdout); if (target) json_token(stdout, *target); else fputs("null", stdout);
-    if (alias) output(stdout, ",\"image\":\"%s\"}}\n", alias); else fputs(",\"image\":null}}\n", stdout);
-    flush_output(); pthread_mutex_unlock(&lock);
+    for (size_t i = 0; i < (managed ? CONNECTIONS : 1); i++) {
+        struct connection *c = &connections[i];
+        if (managed && (c->fd < 0 || !c->session)) continue;
+        FILE *stream = managed ? c->stream : stdout;
+        const char *source_epoch = managed ? c->epoch : epoch;
+    output(stream, "{\"type\":\"event\",\"event\":{\"epoch\":\"%s\",\"seq\":%llu,\"version\":%u,\"kind\":\"%s\",\"actor\":", source_epoch, (unsigned long long)last_seq, message->version, kind);
+    json_token(stream, message->process->audit_token);
+    fputs(",\"target\":", stream); if (target) json_token(stream, *target); else fputs("null", stream);
+    if (alias) output(stream, ",\"image\":\"%s\"}}\n", alias); else fputs(",\"image\":null}}\n", stream);
+        flush_stream(stream);
+    }
+    pthread_mutex_unlock(&lock);
 }
+
 static bool same_peer(struct connection *c) {
     audit_token_t current;
     return peer_token(c->fd, &current) && !memcmp(&current, &c->peer, sizeof(current)) &&
@@ -98,6 +129,29 @@ static void *connection_worker(void *arg) {
     struct connection *c = arg;
     char line[1024], parts[3][FIELD];
     if (read_line(c->fd, line, sizeof(line)) < 0) goto done;
+    if (managed && fields(line, "SESSION", parts, 3)) {
+        pthread_mutex_lock(&lock);
+        bool valid = healthy && !strcmp(parts[2], image) && !session_for(parts[0], parts[1]);
+        if (valid) {
+            strlcpy(c->resource, parts[0], FIELD); strlcpy(c->nonce, parts[1], FIELD);
+            uuid_t id; uuid_generate_random(id); uuid_unparse_lower(id, c->epoch);
+            c->stream = fdopen(dup(c->fd), "w");
+            if (!c->stream) valid = false;
+            else {
+                c->session = true;
+                output(c->stream, "{\"type\":\"session\",\"epoch\":\"%s\",\"protocol\":\"macos-es-v1\",\"parent\":", c->epoch);
+                json_token(c->stream, c->peer); fputs("}\n", c->stream); flush_stream(c->stream);
+            }
+        }
+        pthread_mutex_unlock(&lock);
+        if (!valid) goto done;
+        while (read_line(c->fd, line, sizeof(line)) >= 0) {
+            pthread_mutex_lock(&lock);
+            command(line, c);
+            pthread_mutex_unlock(&lock);
+        }
+        goto done;
+    }
     if (!strcmp(line, "IDENTITY")) {
         /* Read-only caller identity; this grants no helper signature status or ARM. */
         audit_token_t peer;
@@ -116,30 +170,46 @@ static void *connection_worker(void *arg) {
     for (size_t i = 0; i < CONNECTIONS; i++)
         if (&connections[i] != c && connections[i].fd >= 0 && connections[i].registered &&
             (!strcmp(connections[i].resource, c->resource) || !strcmp(connections[i].nonce, c->nonce))) ok = false;
+    FILE *stream = destination(c);
+    if (!stream) ok = false;
     if (ok) {
         c->registered = true;
-        output(stdout, "{\"type\":\"register\",\"resource\":\"%s\",\"nonce\":\"%s\",\"image\":\"%s\",\"peer\":", c->resource, c->nonce, image);
-        json_token(stdout, c->peer); fputs("}\n", stdout); flush_output();
+        output(stream, "{\"type\":\"register\",\"resource\":\"%s\",\"nonce\":\"%s\",\"image\":\"%s\",\"peer\":", c->resource, c->nonce, image);
+        json_token(stream, c->peer); fputs("}\n", stream); flush_stream(stream);
     }
     pthread_mutex_unlock(&lock);
     if (!ok) goto done;
     while (read_line(c->fd, line, sizeof(line)) >= 0) {
         uint32_t pid = 0, code = 0;
         pthread_mutex_lock(&lock);
+        stream = destination(c);
+        if (!stream) { pthread_mutex_unlock(&lock); break; }
         if (!same_peer(c) || !c->armed) { lost("internal_drop"); pthread_mutex_unlock(&lock); break; }
         if (!c->started && fields(line, "START", parts, 1) && decimal(parts[0], INT_MAX, &pid) && pid > 0) {
             c->started = true; c->primary = pid;
-            output(stdout, "{\"type\":\"started\",\"resource\":\"%s\",\"pid\":%u}\n", c->resource, pid);
+            output(stream, "{\"type\":\"started\",\"resource\":\"%s\",\"pid\":%u}\n", c->resource, pid);
         } else if (c->started && !c->waited && fields(line, "WAIT", parts, 2) && decimal(parts[0], INT_MAX, &pid) &&
                    decimal(parts[1], 255, &code) && pid == (uint32_t)c->primary) {
             c->waited = true;
-            output(stdout, "{\"type\":\"waited\",\"resource\":\"%s\",\"pid\":%u,\"code\":%u}\n", c->resource, pid, code);
+            output(stream, "{\"type\":\"waited\",\"resource\":\"%s\",\"pid\":%u,\"code\":%u}\n", c->resource, pid, code);
         } else { lost("internal_drop"); pthread_mutex_unlock(&lock); break; }
-        flush_output(); pthread_mutex_unlock(&lock);
+        flush_stream(stream); pthread_mutex_unlock(&lock);
     }
  done:
     pthread_mutex_lock(&lock);
     if (c->registered && !c->waited) lost("source_lost");
+    if (c->session) {
+        // Source loss never signals accepted helpers. They keep waiting naturally.
+        for (size_t i = 0; i < CONNECTIONS; i++) {
+            struct connection *h = &connections[i];
+            if (h->fd >= 0 && h->registered && !strcmp(h->resource, c->resource) && !strcmp(h->nonce, c->nonce))
+                shutdown(h->fd, SHUT_RDWR);
+        }
+        // Stop further stream writes before reclaiming this slot.
+        c->session = false;
+        if (c->stream) fclose(c->stream);
+        c->stream = NULL;
+    }
     close(c->fd); c->fd = -1; /* Durable replay authority stays in reducer, not this reusable fd slot. */
     pthread_mutex_unlock(&lock);
     return NULL;
@@ -150,6 +220,8 @@ static void *accept_connections(void *unused) {
         int fd = accept(listener, NULL, NULL);
         if (fd < 0) { if (errno == EINTR) continue; break; }
         fcntl(fd, F_SETFD, FD_CLOEXEC);
+        struct timeval timeout = { .tv_sec = 2 };
+        if (setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &timeout, sizeof(timeout))) { close(fd); continue; }
         audit_token_t peer;
         if (!peer_token(fd, &peer) || peer.val[1] != helper_uid) { close(fd); continue; }
         pthread_mutex_lock(&lock);
@@ -167,7 +239,8 @@ static void *accept_connections(void *unused) {
 }
 int main(int argc, char **argv) {
     /* Explicit dev invocation only: socket self.req helper.req alias uid */
-    if (argc != 7 || strcmp(argv[1], "--development-only")) { fputs("maintenance_es_collector: disabled\n", stderr); return 78; }
+    if (argc != 7 || (strcmp(argv[1], "--development-only") && strcmp(argv[1], "--managed-socket"))) { fputs("maintenance_es_collector: disabled\n", stderr); return 78; }
+    managed = !strcmp(argv[1], "--managed-socket");
     if (geteuid() != 0 || !token_ok(argv[5]) || !strcmp(argv[5], "other-executable")) { fputs("privilege_or_config_unverified\n", stderr); return 78; }
     uint32_t uid;
     if (!decimal(argv[6], UINT32_MAX, &uid)) return 78;
@@ -204,31 +277,43 @@ int main(int argc, char **argv) {
         lost("configuration_changed"); pthread_mutex_unlock(&lock); es_delete_client(client); close(listener); unlinkat(directory, socket_name, 0); return 78;
     }
     healthy = true;
-    output(stdout, "{\"type\":\"source\",\"epoch\":\"%s\",\"protocol\":\"macos-es-v1\"}\n", epoch); flush_output();
+    if (!managed) { output(stdout, "{\"type\":\"source\",\"epoch\":\"%s\",\"protocol\":\"macos-es-v1\"}\n", epoch); flush_output(); }
     pthread_mutex_unlock(&lock);
     pthread_t acceptor; if (pthread_create(&acceptor, NULL, accept_connections, NULL)) return 74;
-    char line[1024], parts[3][FIELD];
-    while (read_line(STDIN_FILENO, line, sizeof(line)) >= 0) {
-        pthread_mutex_lock(&lock);
+    if (managed) { pthread_join(acceptor, NULL); }
+    else {
+        char line[1024];
+        while (read_line(STDIN_FILENO, line, sizeof(line)) >= 0) {
+            pthread_mutex_lock(&lock); command(line, NULL); pthread_mutex_unlock(&lock);
+        }
+    }
+    pthread_mutex_lock(&lock); lost("source_lost"); pthread_mutex_unlock(&lock);
+    es_delete_client(client); close(listener); unlinkat(directory, socket_name, 0);
+    /* No child signals: already armed helpers continue natural wait even after IPC EOF. */
+    return 78;
+}
+
+static void command(const char *line, struct connection *session) {
+    char parts[3][FIELD];
         if (fields(line, "WAITED", parts, 2)) {
             bool found = false;
             for (size_t i = 0; i < CONNECTIONS; i++) {
                 struct connection *c = &connections[i];
-                if (c->fd >= 0 && c->waited && !c->receipt_acked && !strcmp(c->resource, parts[0]) && !strcmp(c->nonce, parts[1]) && same_peer(c)) {
+                if ((!session || (!strcmp(c->resource, session->resource) && !strcmp(c->nonce, session->nonce))) && c->fd >= 0 && c->waited && !c->receipt_acked && !strcmp(c->resource, parts[0]) && !strcmp(c->nonce, parts[1]) && same_peer(c)) {
                     c->receipt_acked = true; found = true;
                     if (!write_all(c->fd, "RECORDED\n")) lost("source_lost");
                     break;
                 }
             }
             if (!found) lost("internal_drop");
-            pthread_mutex_unlock(&lock); continue;
+            return;
         }
         bool valid = fields(line, "ARM", parts, 3);
-        if (!valid || !healthy || !have_seq || !coverage()) { lost("configuration_changed"); pthread_mutex_unlock(&lock); break; }
+        if (!valid || !healthy || !have_seq || !coverage()) { lost("configuration_changed"); return; }
         bool found = false;
         for (size_t i = 0; i < CONNECTIONS; i++) {
             struct connection *c = &connections[i];
-            if (c->fd >= 0 && c->registered && !strcmp(c->resource, parts[0]) && !strcmp(c->nonce, parts[1])) {
+            if ((!session || (!strcmp(c->resource, session->resource) && !strcmp(c->nonce, session->nonce))) && c->fd >= 0 && c->registered && !strcmp(c->resource, parts[0]) && !strcmp(c->nonce, parts[1])) {
                 found = true;
                 if (c->armed || !same_peer(c)) { lost("internal_drop"); break; }
                 c->armed = true; /* Record before write. Lost ACK never authorizes reconnect. */
@@ -239,10 +324,5 @@ int main(int argc, char **argv) {
             }
         }
         if (!found) lost("internal_drop");
-        pthread_mutex_unlock(&lock);
-    }
-    pthread_mutex_lock(&lock); lost("source_lost"); pthread_mutex_unlock(&lock);
-    es_delete_client(client); close(listener); unlinkat(directory, socket_name, 0);
-    /* No child signals: already armed helpers continue natural wait even after IPC EOF. */
-    return 78;
+
 }

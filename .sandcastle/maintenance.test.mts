@@ -159,3 +159,21 @@ for (const failedRpc of ["action-exited", "finish"]) test(`收尾 RPC ${failedRp
     owner.stop();
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
+
+test("显式 ES 入口缺可信配置拒绝且不回退；未派发证据不伪造业务 wait", async () => {
+  const { maintenanceCommand } = await import("./maintenance.mts");
+  const { spawnSync } = await import("node:child_process");
+  const root = mkdtempSync(join(tmpdir(), "maintenance-es-selection-"));
+  try {
+    const owner = new MaintenanceOwner("decision", root, join(root, "missing-managed-config"));
+    const result = await owner.work("es-selection", () => {
+      const command = maintenanceCommand("/bin/sh", ["-c", "exit 42"]);
+      assert.ok(command.args.includes("--es-config"));
+      return spawnSync(command.file, command.args, { encoding: "utf8" });
+    });
+    assert.equal(result.status, 78);
+    assert.match(result.stderr, /native ES source unavailable/);
+    assert.equal(control(root, "status").inflight.length, 0);
+    owner.stop();
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});

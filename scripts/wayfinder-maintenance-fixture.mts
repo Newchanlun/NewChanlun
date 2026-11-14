@@ -8,6 +8,9 @@ export function isolateMaintenance(root: string): void {
     ".sandcastle/deepagents-pilot/pilot1742/maintenance.py",
     ".sandcastle/deepagents-pilot/pilot1742/maintenance_epoch.py",
     ".sandcastle/deepagents-pilot/pilot1742/maintenance_local.py",
+    ".sandcastle/deepagents-pilot/pilot1742/maintenance_es.py",
+    ".sandcastle/deepagents-pilot/pilot1742/maintenance_es_native.py",
+    ".sandcastle/deepagents-pilot/pilot1742/maintenance_es_session.py",
     ".sandcastle/deepagents-pilot/pilot1742/maintenance_processes.py",
     ".sandcastle/deepagents-pilot/pilot1742/maintenance_subreaper.py"]) {
     const target = join(root, file);
@@ -16,10 +19,10 @@ export function isolateMaintenance(root: string): void {
   }
   const engine = join(root, "scripts/wayfinder_engine.mts");
   const source = readFileSync(engine, "utf8");
-  const constructor = 'new MaintenanceOwner("wayfinder", cfg.maintenanceRoot)';
+  const constructor = 'new MaintenanceOwner("wayfinder", cfg.maintenanceRoot, cfg.maintenanceEsConfig)';
   assert.equal(source.split(constructor).length, 2, "快照必须有且仅有一个维护入口");
   writeFileSync(engine, source.replace(constructor,
-    `new MaintenanceOwner("wayfinder", ${JSON.stringify(join(root, "maintenance"))})`));
+    `new MaintenanceOwner("wayfinder", ${JSON.stringify(join(root, "maintenance"))}, cfg.maintenanceEsConfig)`));
 }
 
 export function copyEngineSnapshot(root: string): void {

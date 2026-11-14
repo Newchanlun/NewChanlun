@@ -103,3 +103,70 @@ def test_successful_popen_then_bookkeeping_error_keeps_marker(tmp_path, monkeypa
         sweep._launch_marked(marker, 1, 'a' * 40, 1)
     assert marker.exists()
     assert cancellations == []
+
+
+def test_signal_during_prelaunch_binding_records_no_dispatch(tmp_path):
+    import os
+    import subprocess
+    import sys
+
+    gate = maintenance.Gate(tmp_path)
+    owner = gate.register('decision', local_actions=True)
+    job = gate.admit(owner, 'signal-before-spawn')
+    resource = gate.reserve_local_resource(owner, job)
+    script = '''
+import os,signal,sys
+from types import SimpleNamespace
+from pilot1742.maintenance import Gate
+from pilot1742.maintenance_local import supervise
+from pilot1742.maintenance import now
+
+def bind(self, resource, **kwargs):
+    self.bind_local_resource_identity(resource)
+    with self.tx() as db:
+        db.execute('INSERT INTO local_resource_domains VALUES(?,?,?,NULL)', (resource, '{}', 'fixture'))
+    os.kill(os.getpid(), signal.SIGTERM)
+Gate.bind_local_resource = bind
+raise SystemExit(supervise(SimpleNamespace(root=sys.argv[1],resource=sys.argv[2]),
+                          [sys.executable, '-c', 'raise AssertionError("must not spawn")']))
+'''
+    result = subprocess.run([sys.executable, '-c', script, str(tmp_path), resource],
+                            capture_output=True, text=True, timeout=10, env=dict(os.environ))
+    assert result.returncode == 143, result.stderr
+    with gate.tx() as db:
+        assert db.execute('SELECT reason FROM local_resource_not_started').fetchone()[0] == 'cancelled_before_spawn'
+        assert db.execute('SELECT waited_at FROM local_resources').fetchone()[0] is None
+    assert gate.local_action_idle(job)
+
+
+@pytest.mark.parametrize('callback_return_committed', [False, True])
+def test_local_wait_alone_cannot_invent_callback_return(tmp_path, monkeypatch, callback_return_committed):
+    import os
+
+    from pilot1742.maintenance_epoch import local_epoch
+    gate = maintenance.Gate(tmp_path)
+    owner = gate.register('decision', local_actions=True)
+    job = gate.admit(owner, 'rpc-failed')
+    resource = gate.reserve_local_resource(owner, job)
+    # Exact local wait/closure fixture. The graph callback may still be doing opaque work.
+    with gate.tx() as db:
+        db.execute('UPDATE local_resources SET host=?,boot=?,pid=?,start=?,sid=?,child_pid=?,code=?,waited_at=? WHERE id=?',
+                   (*local_epoch(), os.getpid(), maintenance.identity(os.getpid()), os.getsid(0), 123, 0, maintenance.now(), resource))
+        db.execute('INSERT INTO local_resource_domains VALUES(?,?,?,?)', (resource, '{}', 'fixture', maintenance.now()))
+    assert gate.local_action_idle(job)
+    with pytest.raises(ValueError, match='unresolved'):
+        gate.admit(owner, 'rpc-failed')
+    if callback_return_committed:
+        # Only the still-live original caller can submit its actual return/opaque state.
+        assert gate.action_exited(owner, job, opaque_clear=True)
+    gate.stop(owner)
+    generation = gate.request()
+    monkeypatch.setattr(maintenance, 'alive', lambda *a: False)
+    report = gate.reconcile(generation, owner)
+    if callback_return_committed:
+        assert report['result'] == 'reconciled'
+    else:
+        assert report['reason'] == 'missing_bound_completion'
+        assert report['result'] == 'unknown'
+        with gate.tx() as db:
+            assert not db.execute('SELECT * FROM action_returns').fetchall()

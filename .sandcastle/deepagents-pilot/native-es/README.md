@@ -1,7 +1,8 @@
-# 原生 ES 开发适配器（默认禁用）
+# 原生 ES 显式集成候选（默认禁用）
 
 本批把真实平台 API 接到既有 `macos-es-v1` 消费协议。collector/helper、IPC 动态库均可编译；
-未连接现役调度器或生产 Gate。开发消费端仍用 `OfflineES`，证据保持 `trust=offline`，不会签生产 drained。
+新增 TS 本地执行边界的显式选择路径；未启用现役配置。只有 root 保护的签名产物及内核 peer 认证会话
+可写原 Gate 的本机资源封闭记录。开发消费端与隔离测试仍是 `trust=offline`，不能签生产 drained。
 
 ## 编译与不启动 ES 的检查
 
@@ -44,7 +45,8 @@ collector EOF/退出只撤销后续许可；已启动 helper/业务自然继续�
 
 collector stdout 是独立 JSONL 控制管道；不是模型日志。记录有 `source/event/register/started/waited/lost`。
 stdin 只接受 `ARM resource nonce permit`、`WAITED resource nonce`。写端必须属于启动该 collector 的受管消费进程，
-不可把任意文件/网络记录接入后声称它是真实来源。消费端现在仍没有生产信任提升能力。
+不可把任意文件/网络记录接入后声称它是真实来源。此 development 管道仍没有生产信任提升能力；
+新的 managed socket 会话另走下面的认证入口。
 
 `source` 只在签名、订阅及覆盖检查通过后发送；首条 ES 消息仍检查最低版本。原 `prepare` 要求已有有效事件前沿，
 所以只有 source 消息而无事件时不能领取 ES 动作。签名未验证的 EXEC 使用保留别名 `other-executable`，不能配置成 helper 别名。
@@ -54,7 +56,7 @@ collector，核对端 root/signature，再请求只读 IDENTITY。collector 返�
 IDENTITY 不授予 helper 签名状态或 ARM。该身份可传给原 `prepare`，Gate 继续核 owner PID/存活身份；禁止用子进程探针的
 身份冒充调度器。然后调度器创建新的受管 helper，消费端等待该 helper 精确启动 EXEC 与注册身份一致。
 
-当前没有把这一调用加入 TS/Executor 现役入口；开发调度器必须持有专用管道、既有 owner/job 与新 helper 的完整关系。
+独立 development 身份调用仍不自动接入调度器；新 TS 选择入口使用 SESSION，一次绑定既有 owner/job/resource 与新 helper。
 没有自动启用配置。显式 development 参数也不是部署授权，真实运行须完成下列前件。
 
 ### 程序参数合同（仅供后续受控接入，不是本轮执行命令）
@@ -87,3 +89,42 @@ PID/UID/退出码使用逐位十进制解析，在乘加前检查各自上限，
 格式输出使用编译器可检查的字面量 `snprintf`，统一检查负返回值和截断，再写完整片段；不发送截断ACK或JSON。
 流写失败退出74，消费端EOF撤销来源；socket写正确处理EINTR、短写和失败，不重授已消费许可。
 `check.sh`包含确定性的三字节短写/EINTR/中途失败注入，以及截断、超长字段、数值边界和只读流写失败验证。
+
+## 显式调度器选择与原账本消费
+
+decision-claimer 与 Wayfinder 支持 `--maintenance-es-config /absolute/root-protected/config.json`。
+省略时完全保持原本机执行路径；纯离线预览不新增账本前件。TS 的 `maintenanceCommand` 将选择传给原
+`maintenance_local.py --es-config`。Python executor/review 的原同 run 与 Docker/Boat 判据不变；本次不替换其执行器。
+
+配置只接受七个字符串字段：`library`、`library_requirement`、`collector_requirement`、`helper`、
+`helper_requirement`、`socket`、`image`。配置、动态库、helper及requirement文件必须是绝对路径、root所有、
+每级祖先无symlink且不可组/其他用户写。先以系统 codesign 验证精确 requirement 与非ad-hoc，再加载动态库；
+C层重新核对socket对端的root UID、完整LOCAL_PEERTOKEN与动态SecCode。没有fixture/信任布尔或fallback开关。
+签名owner须提供精确的自有产物约束；当前仓库没有可用签名配置，不能启动该路径到真实ES。
+
+后续受管启动方提供 `collector --managed-socket socket self.req helper.req image uid`。
+本候选只连接既有受管collector，不sudo、不安装服务、不自动启动root来源。原local supervisor先setsid并绑定原resource，
+然后由本进程发 `SESSION resource nonce image`。collector返回其内核观察到的peer身份及全新epoch，身份必须匹配该监督器。
+每session独立epoch/nonce/ARM，单ES client广播相同有序事件；双动作不串行。collector最多64连接（session与helper各占一个），
+写端有界超时，短写/失联撤销来源，不重派业务。SESSION初始握手有5秒期限。
+
+`NativeES`复用已审归约器，持久证据放原SQLite的独立native表；不能重开旧epoch或将旧resource追认为新动作。
+离线表与native表分离，原`OfflineES`不升级trust。只有原已领取job的未使用resource可进入SESSION；
+关闸后原动作继续，下一次work仍由原原子admit拒绝。收到精确helper EXEC与REGISTER后先持久消费许可再发送一次ARM。
+helper的`--managed-session`验证与原开发helper相同，只fork一次业务，保留stdio与真实wait码。
+
+消费端等待实际wait及最后归属进程EXIT；绑定的外部资源未闭合则不能seal。只有认证NativeES可把精确epoch、
+监督身份、业务wait及域闭包提交到原`local_resources/local_resource_domains`。来源或消费端死亡、事件丢失、
+持久化失败仍unknown；已接受helper继续自然wait，禁止失败后直接spawn。已持久的native闭包可由原action-exited/poll/reconcile路径消费（包括consumer已退出之后）；
+消费只核原epoch/任务/监督身份及资源，不重开source、不补造callback return、不改变维护代次。监督器在域未闭合期间继续存活；
+来源失效时保留业务退出码而不补签闭包。配置失败、尚未Popen的取消及Popen同步失败分别记录未派发证据，不伪造业务wait。
+
+### 本批验证边界
+
+共享SESSION编排的隔离来源走同一个prepare/register/ARM/wait归约及原reserve，但保持offline表，
+即使模拟轨迹完整也断言原Gate不接受封闭。覆盖关闭后已领取推进、ACK失败、source EOF、seal持久化失败、
+实际无模型子命令退出23、启动同步失败、旧epoch/resource拒绝、缺可信配置拒绝与无fallback。
+现有双动作交错、后代逃逸、外部资源未闭合、序号缺口和短写测试继续适用。
+
+真实认证连接到ES、正向签名来源、完整原生多session负载、consumer死亡后的真实内核闭包仍未运行。
+不能以fixture或编译证明这些门通过；root/FDA/profile/签名及现役验收、六历史域与旧无绑定发布BLOCK保持。

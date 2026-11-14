@@ -240,3 +240,54 @@ def test_proc_argv_preserves_trailing_empty_arguments(monkeypatch):
     monkeypatch.setattr(m.sys, 'platform', 'linux')
     monkeypatch.setattr(m.Path, 'read_bytes', lambda _: b'python\0-c\0pass\0\0')
     assert m.process_arguments(123) == ['python', '-c', 'pass', '']
+
+
+def test_review_reservation_exact_foreign_binding(tmp_path, monkeypatch):
+    import shlex
+    local, foreign = m.Gate(tmp_path / 'local'), m.Gate(tmp_path / 'foreign')
+    from pilot1742 import review_sweep
+    argv = []
+    def capture(command, **kwargs):
+        argv.extend(command)
+        return SimpleNamespace(pid=123)
+    monkeypatch.setattr(review_sweep, 'subprocess', SimpleNamespace(Popen=capture, DEVNULL=-3))
+    spawn = review_sweep.spawner(tmp_path / 'unused-key',
+                                SimpleNamespace(gate=foreign, reserve=lambda _: 'reservation'))
+    assert spawn(2063, 1, 'a' * 40, tmp_path / 'isolated-review.log') == 123
+    monkeypatch.setattr(m.subprocess, 'run', lambda *a, **kw: SimpleNamespace(stdout=f'123 1 {shlex.join(argv)}'))
+    monkeypatch.setattr(m, 'identity', lambda _: 'original-start')
+    monkeypatch.setattr(m, 'process_arguments', lambda _: argv)
+    foreign.register('review', 123)
+    assert local.status()['uncovered'] == []
+    assert foreign.status()['uncovered'] == []
+    monkeypatch.setattr(m, 'identity', lambda _: 'reused-start')
+    assert local.status()['uncovered'][0]['lane'] == 'review'
+
+
+def test_framework_python_executable_is_not_invisible(tmp_path, monkeypatch):
+    command = '/Library/Frameworks/Python.framework/Versions/3.13/Resources/Python.app/Contents/MacOS/Python -m pilot1742.executor serve'
+    monkeypatch.setattr(m.subprocess, 'run', lambda *a, **kw: SimpleNamespace(stdout=f'123 1 {command}'))
+    monkeypatch.setattr(m, 'identity', lambda _: 'original-start')
+    gate = m.Gate(tmp_path)
+    assert gate.status()['uncovered'][0]['lane'] == 'executor'
+
+
+def test_real_capital_python_argv_entry(tmp_path):
+    import subprocess
+    import sys
+    executable = tmp_path / 'Python.app/Contents/MacOS/Python'
+    executable.parent.mkdir(parents=True)
+    executable.symlink_to(sys.executable)
+    package = tmp_path / 'pilot1742'
+    package.mkdir()
+    (package / '__init__.py').write_text('')
+    (package / 'executor.py').write_text('import sys\nprint("ready", flush=True)\nsys.stdin.read()\n')
+    command = [str(executable), '-m', 'pilot1742.executor', 'serve']
+    child = subprocess.Popen(command, cwd=tmp_path, stdin=subprocess.PIPE, stdout=subprocess.PIPE)
+    try:
+        assert child.stdout.readline() == b'ready\n'
+        argv = m.process_arguments(child.pid)
+        assert argv == command
+        assert m.command_lanes('', tmp_path, argv) == ['executor']
+    finally:
+        child.communicate(timeout=5)

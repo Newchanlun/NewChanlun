@@ -230,8 +230,8 @@ class Gate:
             db.execute('INSERT INTO local_resources(id,job) VALUES(?,?)', (resource, job))
         return resource
 
-    def bind_local_resource(self, resource: str, *, subreaper: bool = False) -> None:
-        from pilot1742.maintenance_processes import stable_snapshot
+    def bind_local_resource_identity(self, resource: str) -> None:
+        """先登记唯一监督器；此时未允许调用 Popen 或声明进程域闭合。"""
         pid = os.getpid()
         host, boot = local_epoch()
         start, sid = identity(pid), os.getsid(0)
@@ -244,6 +244,11 @@ class Gate:
             self._owner(db, row['owner'])
             db.execute('UPDATE local_resources SET host=?,boot=?,pid=?,start=?,sid=? WHERE id=?',
                        (host, boot, pid, start, sid, resource))
+
+    def bind_local_resource(self, resource: str, *, subreaper: bool = False) -> None:
+        from pilot1742.maintenance_processes import stable_snapshot
+        self.bind_local_resource_identity(resource)
+        pid = os.getpid()
         # 先绑定监督身份，再采集基线；基线失败时尚未执行 Popen，可留下精确未派发证据。
         if subreaper:
             from pilot1742.maintenance_subreaper import bind
@@ -258,16 +263,16 @@ class Gate:
             db.execute('INSERT INTO local_resource_domains VALUES(?,?,?,NULL)',
                        (resource, json.dumps(baseline), supervisor))
 
-    def local_resource_not_started(self, resource: str, *, exec_failed: bool = False) -> None:
+    def local_resource_not_started(self, resource: str, *, exec_failed: bool = False, cancelled: bool = False) -> None:
         """原监督器证明基线失败或 Popen 同步抛 OSError（未 exec 且内部子进程已回收）。"""
         with self.tx() as db:
             row = db.execute('SELECT * FROM local_resources WHERE id=?', (token(resource),)).fetchone()
             if (row is None or row['pid'] != os.getpid() or row['start'] != identity(os.getpid())
                     or (row['host'], row['boot']) != local_epoch() or row['waited_at'] is not None
-                    or bool(db.execute('SELECT 1 FROM local_resource_domains WHERE resource=?', (resource,)).fetchone()) != exec_failed):
+                    or bool(db.execute('SELECT 1 FROM local_resource_domains WHERE resource=?', (resource,)).fetchone()) != (exec_failed or cancelled)):
                 raise ValueError('resource may have dispatched')
             db.execute('INSERT OR IGNORE INTO local_resource_not_started VALUES(?,?,?,?,?)',
-                       (resource, row['pid'], row['start'], 'exec_failed' if exec_failed else 'baseline_unavailable', now()))
+                       (resource, row['pid'], row['start'], 'cancelled_before_spawn' if cancelled else 'exec_failed' if exec_failed else 'baseline_unavailable', now()))
 
     def local_resource_waited(self, resource: str, child_pid: int, code: int) -> None:
         if type(child_pid) is not int or child_pid < 1 or type(code) is not int:
@@ -290,6 +295,14 @@ class Gate:
                 row['domain'] = dict(domain) if domain else None
                 row['not_started'] = bool(db.execute('SELECT 1 FROM local_resource_not_started WHERE resource=? AND pid=? AND start=?',
                                                     (row['id'], row['pid'], row['start'])).fetchone())
+        # 只消费原native表的既存认证闭包；offline/旧epoch/不完整证据均不能补签。
+        for row in rows:
+            domain = row['domain']
+            if domain and not domain['sealed_at'] and json.loads(domain['baseline']).get('kind') == 'macos-es-v1':
+                from pilot1742.maintenance_es_session import settle_native_resource
+                if settle_native_resource(self, row['id']):
+                    domain['sealed_at'] = now()
+                    row['waited_at'] = now()
         return resources_idle(rows)
 
     def seal_local_resource(self, resource: str) -> None:
@@ -886,7 +899,7 @@ def foreign_scope_bound(argv: list[str], lane: str, pid: int, start: str, root: 
     values = {'--out', '--ticket', '--maps', '--concurrency', '--poll-seconds',
               '--state-root', '--drain-root', '--run-id', '--model-rules', '--workers-log',
               '--private-key', '--review-private-key', '--review-sweep-max-running',
-              '--maintenance-job', '--crash-at', '--pr', '--attempt', '--expect-head',
+              '--maintenance-job', '--maintenance-reservation', '--maintenance-es-config', '--crash-at', '--pr', '--attempt', '--expect-head',
               '--max-running', '--loop', '--reason', '--task', '--note'}
     switches = {'--live', '--dry-run', '--once', '--explain', '--archaeology-only',
                 '--resume', '--recheck-approval', '--review-sweep', '--review-sweep-auto-merge', '--auto-merge'}
@@ -946,7 +959,7 @@ def command_lanes(command: str, root: Path, argv: list[str] | None = None) -> li
     executable = Path(words[0]).name
     args = words[1:]
     module = None
-    if re.fullmatch(r'python[\d.]*', executable):
+    if re.fullmatch(r'(?:python[\d.]*|Python)', executable):
         module, args = python_entry(args)
     elif executable in ('node', 'tsx'):
         while args and args[0].startswith('-'):
@@ -997,7 +1010,7 @@ def process_inventory(root: Path = ROOT) -> list[tuple[str, int, str]]:
         pid, parent, command = int(parts[0]), int(parts[1]), parts[2]
         parents[pid] = parent
         # 不输出完整命令（可能含提示或秘密）。仅识别真实解释器入口，不匹配 shell 提示文本。
-        if not re.match(r'\S*(?:python[\d.]*|node|tsx)\s', command):
+        if not re.match(r'\S*(?:python[\d.]*|Python|node|tsx)\s', command):
             continue
         if re.match(r'\S*node\s+\S*/(?:tsx/(?:dist/)?cli\.mjs|node_modules/\.bin/tsx)(?:\s|$)', command):
             wrappers.add(pid)

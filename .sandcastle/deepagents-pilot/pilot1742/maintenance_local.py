@@ -37,6 +37,8 @@ def resources_idle(rows: list[dict], diagnostics: list[str] | None = None) -> bo
         from pilot1742.maintenance_subreaper import KIND, idle
         for row in pending:
             domain = json.loads(row['domain']['baseline'])
+            if domain.get('kind') == 'macos-es-v1':
+                return reject('native_es_closure_pending')
             if domain.get('kind') == KIND:
                 if (domain.get('pid') != row['pid'] or domain.get('birth') != row['domain']['supervisor']
                         or not idle(domain)):
@@ -79,11 +81,19 @@ def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument('--root', type=Path, required=True)
     parser.add_argument('--resource', required=True)
+    parser.add_argument('--es-config', type=Path)
     parser.add_argument('command', nargs=argparse.REMAINDER)
     args = parser.parse_args()
     command = args.command[1:] if args.command[:1] == ['--'] else args.command
     if not command:
         return 78
+    if args.es_config is not None:
+        from pilot1742.maintenance_es_session import run
+        try:
+            return run(args, command)
+        except (ValueError, OSError, subprocess.SubprocessError):
+            print('native ES source unavailable', file=sys.stderr, flush=True)
+            return 78
     if sys.platform.startswith('linux'):
         return linux_guardian(args, command)
     return supervise(args, command)
@@ -91,6 +101,16 @@ def main() -> int:
 
 def supervise(args, command: list[str], notify: int | None = None, signal_mask=None) -> int:
     from pilot1742.maintenance import Gate, evidence_write
+    received = []
+    child = None
+    def forward(signum, frame):
+        received.append(signum)
+        if child is not None and child.poll() is None:
+            child.send_signal(signum)
+    signal.signal(signal.SIGTERM, forward)
+    signal.signal(signal.SIGINT, forward)
+    if signal_mask is not None:
+        signal.pthread_sigmask(signal.SIG_SETMASK, signal_mask)
     os.setsid()
     gate = Gate(args.root)
     from pilot1742.maintenance_processes import UnstableSnapshot
@@ -104,16 +124,15 @@ def supervise(args, command: list[str], notify: int | None = None, signal_mask=N
             os.write(notify, b'78\n')
             os.close(notify)
         return 78  # 未派发失败；不能继续执行下面的 Popen。
-    received = []
-    child = None
-    def forward(signum, frame):
-        received.append(signum)
-        if child is not None and child.poll() is None:
-            child.send_signal(signum)
-    signal.signal(signal.SIGTERM, forward)
-    signal.signal(signal.SIGINT, forward)
-    if signal_mask is not None:
-        signal.pthread_sigmask(signal.SIG_SETMASK, signal_mask)
+    if received:
+        # 已绑定但尚未调用 Popen；信号取消这次派发，不启动再杀业务。
+        with evidence_write():
+            gate.local_resource_not_started(args.resource, cancelled=True)
+        result = 128 + received[-1]
+        if notify is not None:
+            os.write(notify, f'{result}\n'.encode())
+            os.close(notify)
+        return result
     # 不持有账本锁等待进程；stdout/stderr/stdin 原样透传，不读取凭据或记录命令。
     try:
         child = subprocess.Popen(command)

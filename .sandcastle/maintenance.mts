@@ -11,7 +11,7 @@ export function maintenanceCommand(file: string, args: string[]): { file: string
   if (!scope) return { file, args };
   const resource = scope.owner.reserveResource(scope.job);
   return { file: "python3", args: [LOCAL, "--root", scope.owner.root ?? "/Volumes/AgentStorage/newchanlun-maintenance",
-    "--resource", resource, "--", file, ...args] };
+    "--resource", resource, ...(scope.owner.esConfig ? ["--es-config", scope.owner.esConfig] : []), "--", file, ...args] };
 }
 /** 模型启动前登记，只有进程明确结束且收尾可判定才释放；无 context 的旧调用不变。 */
 export function maintenanceResource(): (settled: boolean) => void {
@@ -31,9 +31,11 @@ export class MaintenanceOwner {
   readonly id: string;
   readonly lane: "decision" | "wayfinder";
   readonly root?: string;
-  constructor(lane: "decision" | "wayfinder", root?: string) {
+  readonly esConfig?: string;
+  constructor(lane: "decision" | "wayfinder", root?: string, esConfig?: string) {
     this.lane = lane;
     this.root = root;
+    this.esConfig = esConfig;
     this.id = this.call("register", ["--lane", lane, "--pid", String(process.pid), "--local-actions"]).owner as string;
   }
   private call(command: string, args: string[] = []): Record<string, unknown> {

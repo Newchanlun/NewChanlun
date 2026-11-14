@@ -152,3 +152,20 @@ int scheduler_identity(const char *socket_path, const char *collector_requiremen
     if (fd >= 0) close(fd);
     return valid ? 0 : -1;
 }
+
+/* The caller loads this signed library only after verifying its exact requirement.
+ * This descriptor is the authenticated event/command channel, not a fixture pipe. */
+int session_connect(const char *socket_path, const char *collector_requirement,
+                    const char *resource, const char *nonce, const char *image) {
+    if (!token_ok(resource) || !token_ok(nonce) || !token_ok(image)) return -1;
+    SecRequirementRef requirement = requirement_file(collector_requirement);
+    if (!requirement) return -1;
+    int fd = socket_connect(socket_path);
+    audit_token_t server;
+    bool valid = fd >= 0 && peer_token(fd, &server) && server.val[1] == 0 && signed_code(&server, requirement);
+    CFRelease(requirement);
+    char frame[1024];
+    if (valid) valid = format(frame, sizeof(frame), "SESSION %s %s %s\n", resource, nonce, image) && write_all(fd, frame);
+    if (!valid && fd >= 0) close(fd);
+    return valid ? fd : -1;
+}

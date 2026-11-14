@@ -26,6 +26,8 @@ bool signed_code(const audit_token_t *token, SecRequirementRef requirement);
 void json_token(FILE *out, audit_token_t token);
 int socket_connect(const char *path);
 int scheduler_identity(const char *socket_path, const char *collector_requirement, audit_token_t *identity);
+int session_connect(const char *socket_path, const char *collector_requirement,
+                    const char *resource, const char *nonce, const char *image);
 bool write_all(int fd, const char *s);
 int read_line(int fd, char *buffer, size_t capacity);
 #endif
