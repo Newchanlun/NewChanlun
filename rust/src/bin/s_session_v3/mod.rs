@@ -125,7 +125,6 @@ pub(super) const PROTOCOL_REVISION: &str = "s-session/3";
 pub(super) const BUILD_PROFILE: &str = "testonly";
 #[cfg(all(feature = "s_incremental", not(feature = "s_capture_native_testonly")))]
 pub(super) const BUILD_PROFILE: &str = "production";
-/// 旧 v2 合同版本号；显式给出时仍由既有 v2 初始化入口执行。
 pub(super) const PREVIOUS_REVISION: &str = "s-session/2";
 const SELECTOR: &str = "--protocol-revision";
 const DELIVERY_POLICY_REVISION: &str = "generation-window/1";
@@ -134,6 +133,16 @@ const V3_INIT_FLAGS: [&str; 9] = [
     SELECTOR,
     // #1769：可选结构源声明文件；给出即作为库固定属性落 meta.structure_source。
     "--structure-source",
+    "--db",
+    "--session",
+    "--catalog",
+    "--profile",
+    "--session-generation",
+    "--clock-plan",
+    "--delivery-retain-generations",
+];
+#[cfg(feature = "s_v2_seed_testonly")]
+const V2_INIT_FLAGS: [&str; 7] = [
     "--db",
     "--session",
     "--catalog",
@@ -290,9 +299,26 @@ fn dispatch_with_policy(args: &[String], production: bool) -> Result<bool, Strin
         return Ok(true);
     }
     if value == PREVIOUS_REVISION {
-        // #1419 裁定②（issuecomment-6265209957）：显式 s-session/2 init 是 v2 写入口，一律拒绝；
-        // 不回落旧 v1 入口（那会静默建错域）。旧 v2 库只读 AsKnown。
-        return Err(crate::V2_WRITER_RETIRED.to_string());
+        #[cfg(feature = "s_v2_seed_testonly")]
+        {
+            for key in V2_INIT_FLAGS {
+                if !args.iter().any(|a| a == key) {
+                    return Err(format!(
+                        "VersionUnsupported：显式 {PREVIOUS_REVISION} 缺 {key}（v2 初始化合同要求全参）"
+                    ));
+                }
+            }
+            if !v2::seed_dispatch(args)? {
+                return Err(format!(
+                    "VersionUnsupported：显式 {PREVIOUS_REVISION} 未进入 v2 初始化分派；拒绝回落旧域"
+                ));
+            }
+            return Ok(true);
+        }
+        #[cfg(not(feature = "s_v2_seed_testonly"))]
+        {
+            return Err(crate::V2_WRITER_RETIRED.to_string());
+        }
     }
     Err(format!(
         "VersionUnsupported：未知协议版本选择 `{value}`；支持 {PREVIOUS_REVISION}（旧合同）与 {PROTOCOL_REVISION}（新域）"

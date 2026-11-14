@@ -822,6 +822,7 @@
 0.01	content_publication::tests::content_publication_rejects_unrelated_manifest_and_source_producer
 0.01	content_producer::tests::same_ohlc_new_revision_moves_refs_and_obj3
 0.01	content_producer::tests::replacing_prepared_raw_content_invalidates_the_previous_view
+0.01	content_producer::tests::raw_prefix_chain_is_full_raw_prefix_for_every_prefix
 0.01	content_producer::tests::parser_fractal_sources_reject_foreign_stale_and_manual_shapes
 0.01	content_producer::tests::obj3_recipe_is_verified_independently
 0.01	content_producer::tests::missing_source_degraded_and_type_errors_are_explicit
