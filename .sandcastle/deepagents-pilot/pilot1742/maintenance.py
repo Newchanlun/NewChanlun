@@ -110,6 +110,8 @@ class Gate:
                 CREATE TABLE IF NOT EXISTS local_actions (job TEXT PRIMARY KEY, owner TEXT, host TEXT, boot TEXT);
                 CREATE TABLE IF NOT EXISTS epoch_resolutions (job TEXT PRIMARY KEY, host TEXT, old_boot TEXT,
                     new_boot TEXT, generation INTEGER, at TEXT);
+                CREATE TABLE IF NOT EXISTS spawn_launches (job TEXT PRIMARY KEY, parent TEXT, owner TEXT,
+                    host TEXT, boot TEXT, pid INTEGER, start TEXT, kind TEXT, prepared_at TEXT, released_at TEXT, confirmed_at TEXT);
                 CREATE TABLE IF NOT EXISTS spawn_exits (job TEXT PRIMARY KEY, owner TEXT, pid INTEGER, code INTEGER, at TEXT);
                 CREATE TABLE IF NOT EXISTS preflight_returns (witness TEXT PRIMARY KEY, at TEXT);
                 CREATE TABLE IF NOT EXISTS recoveries (previous TEXT PRIMARY KEY, successor TEXT);
@@ -193,6 +195,13 @@ class Gate:
         with self.tx() as db:
             self._owner(db, owner)
             state = db.execute('SELECT * FROM control').fetchone()
+            if db.execute('SELECT 1 FROM local_owners WHERE owner=?', (owner,)).fetchone():
+                # 重启不会退休旧动作；跨owner/两种图入口共用同一原子work边界。
+                if db.execute("SELECT 1 FROM jobs JOIN local_actions ON local_actions.job=jobs.id "
+                              "WHERE jobs.work=? AND jobs.state!='finished' "
+                              "AND jobs.id NOT IN (SELECT job FROM resolutions)", (work,)).fetchone():
+                    if not state['closed']:
+                        raise ValueError('previous local action unresolved')
             # 非本机动作保留原同 run 续跑合同；TS 回调须另判新工作。
             prior = db.execute("SELECT * FROM jobs WHERE owner=? AND work=? AND state='active'", (owner, work)).fetchone()
             if prior:
@@ -349,21 +358,36 @@ class Gate:
         return settled
 
     def spawn_exited(self, owner: str, job: str, pid: int, code: int) -> bool:
-        """启动方持有的 Popen.poll/wait 回执；adopt 前代码无工作权限。不是 ps 消失推断。"""
-        if type(pid) is not int or pid <= 0 or type(code) is not int:
-            raise ValueError('invalid spawn exit')
+        """旧PID/退出码接口没有资源域证据，不能取消或清除sighting。"""
+        return False
+
+    def prepare_spawn(self, parent: str, job: str, pid: int) -> str:
+        """仅供受控无fork bootstrap：放行前绑定身份并原子转交原reservation。"""
+        start, child = identity(pid), uuid.uuid4().hex
+        host, boot = local_epoch()
         with self.tx() as db:
-            self._owner(db, owner)
-            row = db.execute("SELECT * FROM jobs WHERE id=? AND owner=? AND state='active' AND transferable=1",
-                             (token(job), owner)).fetchone()
-            if row is None:
-                return False  # adopt/既有撤销胜出，不改子 owner 的任务。
-            if db.execute('SELECT 1 FROM witnesses WHERE job=?', (job,)).fetchone():
-                return False
-            db.execute('INSERT OR IGNORE INTO spawn_exits VALUES(?,?,?,?,?)', (job, owner, pid, code, now()))
-            db.execute('INSERT INTO cancellations VALUES(?,?,?,?)', (job, owner, 'exited_before_adopt', now()))
-            db.execute("UPDATE jobs SET state='finished',ended_at=? WHERE id=?", (now(), job))
-            return True
+            row = self._owner(db, parent)
+            task = db.execute("SELECT * FROM jobs WHERE id=? AND owner=? AND state='active' AND transferable=1",
+                              (token(job), parent)).fetchone()
+            if task is None or row['lane'] != 'review':
+                raise ValueError('missing review reservation')
+            db.execute('INSERT INTO owners(id,lane,pid,start,registered_at,ack) VALUES(?,?,?,?,?,?)',
+                       (child, 'review', pid, start, now(), -1))
+            db.execute('UPDATE jobs SET owner=?,transferable=0 WHERE id=?', (child, job))
+            db.execute('INSERT INTO lineage VALUES(?,?)', (job, child))
+            db.execute('INSERT INTO spawn_launches VALUES(?,?,?,?,?,?,?,?,?,NULL,NULL)',
+                       (job, parent, child, host, boot, pid, start, 'review-bootstrap-v1', now()))
+        return child
+
+    def release_spawn(self, parent: str, job: str) -> None:
+        # 先持久消费，再写一次GO；写失败不能把可能已放行的程序降为未启动。
+        with self.tx() as db:
+            self._owner(db, parent)
+            row = db.execute('SELECT * FROM spawn_launches WHERE job=? AND parent=?', (token(job), parent)).fetchone()
+            if (row is None or row['released_at'] or (row['host'], row['boot']) != local_epoch()
+                    or not alive(row['pid'], row['start'])):
+                raise ValueError('spawn identity unavailable or already released')
+            db.execute('UPDATE spawn_launches SET released_at=? WHERE job=?', (now(), job))
 
     def cancel_unstarted(self, owner: str, job: str, reason: str) -> None:
         """只能由尚持有任务的启动方证明未启动；adopt 与撤销竞争同一事务。"""
@@ -481,6 +505,16 @@ class Gate:
             raise ValueError('invalid lane')
         pid, start, owner = os.getpid(), identity(os.getpid()), uuid.uuid4().hex
         with self.tx() as db:
+            prepared = db.execute('SELECT * FROM spawn_launches WHERE job=?', (token(job),)).fetchone()
+            if prepared is not None:
+                task = db.execute("SELECT * FROM jobs WHERE id=? AND state='active'", (job,)).fetchone()
+                if (task is None or lane != 'review' or task['owner'] != prepared['owner']
+                        or prepared['pid'] != pid or prepared['start'] != start
+                        or (prepared['host'], prepared['boot']) != local_epoch()
+                        or not prepared['released_at'] or prepared['confirmed_at']):
+                    raise ValueError('spawn binding mismatch or already adopted')
+                db.execute('UPDATE spawn_launches SET confirmed_at=? WHERE job=?', (now(), job))
+                return prepared['owner']
             row = db.execute("SELECT * FROM jobs WHERE id=? AND state='active' AND transferable=1", (token(job),)).fetchone()
             if row is None:
                 raise ValueError('missing active reservation')

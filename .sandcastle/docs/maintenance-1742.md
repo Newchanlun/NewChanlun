@@ -61,8 +61,18 @@ review sweep 若在扫描后、reserve 前遇到关闸，会撤回本次 `.resum
 已成功派出的任务仍保留原标记与重试限制。
 原有 legacy、SPEC、票锁和发布判据仍然生效。
 
-review 父进程先持久预留，再 `Popen(start_new_session=True)`；子进程原子接收这份预留，
-即使接收前已关闸也能继续。预留只能接收一次。Popen 明确失败时，启动方通过原子撤销记录证明未启动；与 adopt 竞争时只能一方成功，不能撤销已转交的任务。子进程在 gh/身份/target 绑定前返回，则记未启动收尾，可在开闸期间重试。启动方还保留原 Popen 对象：poll/wait 确认子进程退出、且原子核实未 adopt/未产生 witness 时，记录 spawn_exits 与 exited_before_adopt 撤销。关闸期间也收集此证据，并撤回该次精确匹配的启动/续跑标记，不派新任务。adopt 先完成则不得撤销。父进程退出或没有 children 不消除预留；父也在收集 wait 证据前死亡的预留仍 unknown，本版没有可追认的持久 wait 回执。
+review 父进程先持久预留，再启动 `-I -S` 的固定 Python bootstrap（`start_new_session=True`）。
+bootstrap 在 GO 前只发送 READY 并读私有管道：不导入项目、不 fork/exec、不接外部资源。
+父进程在放行前将精确 host/boot/PID/start、原 reservation、父与子 owner 一起写入 `spawn_launches`，
+并原子转交任务；即使此时已关闸，原领取工作也能继续。先持久消费 release，再写一次 GO，子进程同 PID exec 原 review CLI；
+原 `adopt` 改为精确身份的一次确认，不登记第二个 owner。原 CLI 参数和模型/Boat 来源不变。
+
+若已预绑定但没有 GO，原启动对象的真实 Popen wait、未释放/未确认记录和无额外资源绑定，才能证明固定无fork域结束，
+写 `spawn_exits` 与 `bootstrap_unreleased`；保留原 sighting，并通过已预绑定 owner 供原 `reconcile` 对账。
+关闸期间也回收该证据及精确启动/续跑标记，不派新任务。单独传入 PID/退出码的旧 `spawn_exited` 不再授予取消权。
+Popen 同步失败仍可撤销未启动 reservation。已经发送 GO 或 release 写入结果不确定后，不能回退成未派发；
+后续使用原 review 的 witness/target/资源收尾链。预绑定之前失联、放行后在业务入口确认之前崩溃、父 wait 证据丢失，
+仍明确 unknown，不能用退出码、进程消失或未确认 adopt 补签；旧无绑定记录不能追认为这种新启动域。
 正式审查还检查 supervisor 与容器结束回执；缺回执不计完成。`container_closed != true` 的监督退出失败只允许使用下述绑定资源终态证据恢复。
 executor 复用 `_worker_activity` 的本地/Boat 生命周期证据，仍在途或 effect_unknown 的 worker 不释放维护记录。正常轮询与恢复对账都清点整个 `state_root/runs`，包括未被 queued unit/claim 引用的孤儿和非 queued 运行；派工仍只消费原 queued 范围。每轮先撤销旧 coverage，前后两次使用同一完整 scope 判据；目录或资源读取失败保持 unknown。
 
@@ -206,7 +216,7 @@ Python `Owner(lane)` 提供 `poll/admit/reserve/finish/coverage/stop`；TS 通�
 
 ### b6d 后续：新动作与原执行续跑
 
-TS `work(key, action)` 每次调用都是新动作，不以同 key 的未完成 job 作为新回调许可。
+TS `work(key, action)` 每次调用都是新动作，不以同 key 的未完成 job 作为新回调许可。原子准入也检查所有本机 owner 的同 work 未结清动作；调度器退出/PID票锁重领/新 owner 不绕过它。已完成或经原严格证据 resolution 的动作才允许再次领取，其他 work 不被全局阻塞。
 若前次 action-exited/finish RPC 丢失，开闸时拒绝该 key 的未决动作，关闸时拒绝新回调；旧证据保留。
 原回调内部的后续请求仍由它已经领取的 job 覆盖。Python executor 精确 run 绑定恢复合同不变。
 本机监督器的 Popen 同步 OSError 记录原监督身份绑定的 `exec_failed` 未派发证据，返回 127；

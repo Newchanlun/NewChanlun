@@ -882,13 +882,13 @@ class NotStarted(OSError):
 
 def spawner(private_key: Path, maintenance: Owner | None = None) -> Spawn:
     owner = maintenance or Owner("review")
-    pending: dict[int, tuple[subprocess.Popen, str]] = {}
+    from .maintenance_spawn import Launch
+    pending: dict[int, Launch] = {}
     def reap() -> list[int]:
         cancelled = []
-        for pid, (process, reservation) in list(pending.items()):
-            code = process.poll()
-            if code is not None:
-                if owner.gate.spawn_exited(owner.id, reservation, pid, code):
+        for pid, launch in list(pending.items()):
+            if launch.process.poll() is not None:
+                if launch.reap():
                     cancelled.append(pid)
                 del pending[pid]
         return cancelled
@@ -903,14 +903,17 @@ def spawner(private_key: Path, maintenance: Owner | None = None) -> Spawn:
         try:
             log.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
             with open(log, "ab", opener=lambda p, f: os.open(p, f, 0o600)) as out:
-                process = subprocess.Popen(run_review_command(number, attempt, head, private_key) +
+                process = Launch(owner.gate, owner.id, reservation, run_review_command(number, attempt, head, private_key) +
                                         ["--maintenance-reservation", reservation, "--maintenance-root", str(owner.gate.root)], stdin=subprocess.DEVNULL,
                                         stdout=out, stderr=out, start_new_session=True,
                                         cwd=Path(__file__).resolve().parents[1])
-                pending[process.pid] = (process, reservation)
+                pending[process.pid] = process
+                process.prepare()
+                process.release()
                 return process.pid
-        except OSError as error:
+        except Exception as error:
             if process is not None:
+                process.close()  # EOF only affects unreleased bootstrap, never kills accepted work.
                 raise  # Popen 已返回；即使后续 bookkeeping 失败也不能撤销准入。
             try:
                 owner.gate.cancel_unstarted(owner.id, reservation, 'spawn_failed')

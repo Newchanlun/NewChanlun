@@ -1649,24 +1649,27 @@ def test_maintenance_spawner_cannot_spawn_after_request(tmp_path, monkeypatch):
 
 
 def test_maintenance_spawner_reserves_before_detach(tmp_path, monkeypatch):
+    import sys
+
+    from pilot1742 import maintenance_spawn
     from pilot1742.maintenance import Owner
     owner = Owner('review', tmp_path / 'gate')
     seen = []
-    def popen(command, **kwargs):
-        assert kwargs['start_new_session'] is True
-        report = owner.gate.status([])
-        assert len(report['inflight']) == 1
-        assert command[command.index('--maintenance-reservation') + 1] == report['inflight'][0]['id']
-        owner.gate.request()  # closure precisely between reservation and actual child startup
-        seen.append(command)
-        return type('Process', (), {'pid': 123})()
-    monkeypatch.setattr(module.subprocess, 'Popen', popen)
-    # Gate.identity itself uses subprocess.run -> Popen; isolate process identity, not the admission transaction.
-    monkeypatch.setattr('pilot1742.maintenance.identity', lambda pid: 'fixture')
+    class IsolatedLaunch(maintenance_spawn.Launch):
+        def __init__(self, gate, parent, job, command, **kwargs):
+            assert kwargs['start_new_session'] is True
+            report = gate.status([])
+            assert len(report['inflight']) == 1
+            assert command[command.index('--maintenance-reservation') + 1] == report['inflight'][0]['id']
+            gate.request()  # closure between reservation and actual child startup
+            super().__init__(gate, parent, job, [sys.executable, '-c', 'pass'], **kwargs)
+            seen.append(self)
+    monkeypatch.setattr(maintenance_spawn, 'Launch', IsolatedLaunch)
+    pid = module.spawner(tmp_path / 'not-read.pem', owner)(10, 1, 'a' * 40, tmp_path / 'review.log')
+    assert len(seen) == 1 and seen[0].pid == pid
+    assert seen[0].process.wait(timeout=5) == 0
     with owner.gate.tx() as db:
-        db.execute('UPDATE owners SET start=? WHERE id=?', ('fixture', owner.id))
-    assert module.spawner(tmp_path / 'not-read.pem', owner)(10, 1, 'a' * 40, tmp_path / 'review.log') == 123
-    assert len(seen) == 1
+        assert db.execute('SELECT released_at FROM spawn_launches').fetchone()[0]
 
 
 def test_maintenance_completion_is_scoped_to_its_own_review(lane, monkeypatch):

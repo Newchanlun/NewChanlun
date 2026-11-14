@@ -247,12 +247,11 @@ def test_review_reservation_exact_foreign_binding(tmp_path, monkeypatch):
     local, foreign = m.Gate(tmp_path / 'local'), m.Gate(tmp_path / 'foreign')
     from pilot1742 import review_sweep
     argv = []
-    def capture(command, **kwargs):
+    def capture(gate, parent, job, command, **kwargs):
         argv.extend(command)
-        return SimpleNamespace(pid=123)
-    monkeypatch.setattr(review_sweep, 'subprocess', SimpleNamespace(Popen=capture, DEVNULL=-3))
-    spawn = review_sweep.spawner(tmp_path / 'unused-key',
-                                SimpleNamespace(gate=foreign, reserve=lambda _: 'reservation'))
+        return SimpleNamespace(pid=123, prepare=lambda: None, release=lambda: None)
+    monkeypatch.setattr('pilot1742.maintenance_spawn.Launch', capture)
+    spawn = review_sweep.spawner(tmp_path / 'unused-key', m.Owner('review', foreign.root))
     assert spawn(2063, 1, 'a' * 40, tmp_path / 'isolated-review.log') == 123
     monkeypatch.setattr(m.subprocess, 'run', lambda *a, **kw: SimpleNamespace(stdout=f'123 1 {shlex.join(argv)}'))
     monkeypatch.setattr(m, 'identity', lambda _: 'original-start')

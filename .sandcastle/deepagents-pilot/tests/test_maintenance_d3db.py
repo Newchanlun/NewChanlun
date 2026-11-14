@@ -88,21 +88,23 @@ def test_boot_change_cannot_retrofit_old_unbound_action(tmp_path, monkeypatch):
 
 
 def test_review_reservation_exit_before_adopt_recovers_without_process_disappearance(tmp_path, monkeypatch):
+    from pilot1742 import maintenance_spawn
     from pilot1742.review_sweep import spawner
-    monkeypatch.setattr(maintenance, 'identity', lambda _: 'test-start')
-    monkeypatch.setattr(maintenance, 'alive', lambda *a: True)
     owner = maintenance.Owner('review', tmp_path)
-    code = [None]
-    child = SimpleNamespace(pid=424242, poll=lambda: code[0])
-    monkeypatch.setattr('pilot1742.review_sweep.subprocess.Popen', lambda *a, **kw: child)
+    children = []
+    def withhold(self):
+        children.append(self)
+        self.close()  # deterministic release rejection: real bootstrap exits, no target exec.
+    monkeypatch.setattr(maintenance_spawn.Launch, 'release', withhold)
     spawn = spawner(tmp_path / 'unused', owner)
-    assert spawn(1, 1, 'a'*40, tmp_path / 'log') == child.pid
-    assert spawn.reap() == []
-    code[0] = 1  # Popen 的原子 wait 回执，不是 ps 查不到。
-    assert spawn.reap() == [child.pid]
+    pid = spawn(1, 1, 'a'*40, tmp_path / 'log')
+    assert children[0].process.wait(timeout=5) == 78
+    assert spawn.reap() == [pid]
     assert spawn.reap() == []
     assert owner.gate.status([])['inflight'] == []
     spawn(1, 1, 'a'*40, tmp_path / 'log')  # 原 attempt 可重试。
+    children[1].process.wait(timeout=5)
+    assert spawn.reap() == [children[1].pid]
 
 
 def test_review_adopt_wins_over_parent_exit_cleanup(tmp_path):
@@ -154,12 +156,14 @@ def test_unlaunched_prepare_requires_exact_removed_checkout(failed_review, damag
 
 
 def test_closed_sweep_reaps_unadopted_resume_and_does_not_dispatch(tmp_path, monkeypatch):
+    from pilot1742 import maintenance_spawn
     from pilot1742.review_sweep import ServeRound, Sweep, spawner
-    monkeypatch.setattr(maintenance, 'identity', lambda _: 'test-start')
-    monkeypatch.setattr(maintenance, 'alive', lambda *a: True)
     owner = maintenance.Owner('review', tmp_path / 'gate')
-    child = SimpleNamespace(pid=424242, poll=lambda: 1)
-    monkeypatch.setattr('pilot1742.review_sweep.subprocess.Popen', lambda *a, **kw: child)
+    children = []
+    def withhold(self):
+        children.append(self)
+        self.close()
+    monkeypatch.setattr(maintenance_spawn.Launch, 'release', withhold)
     sweep = object.__new__(Sweep)
     sweep.folder = tmp_path / 'sweep'
     sweep.spawn = spawner(tmp_path / 'unused', owner)
@@ -167,6 +171,7 @@ def test_closed_sweep_reaps_unadopted_resume_and_does_not_dispatch(tmp_path, mon
     sweep._launch = lambda number, head, attempt: sweep.spawn(number, attempt, head, tmp_path / 'log')
     marker = sweep.folder / 'attempt.resumes'
     sweep._launch_marked(marker, 1, 'a'*40, 1)
+    assert children[0].process.wait(timeout=5) == 78
     owner.gate.request()
     sweep.lane = SimpleNamespace(state_root=tmp_path / 'reviews', source=tmp_path,
                                  maintenance_idle=lambda: True)

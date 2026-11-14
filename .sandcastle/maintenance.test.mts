@@ -177,3 +177,21 @@ test("显式 ES 入口缺可信配置拒绝且不回退；未派发证据不伪�
     owner.stop();
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
+
+test("调度器进程退出再创建 owner，同票旧动作未结清不能新派发", async () => {
+  const root = mkdtempSync(join(tmpdir(), "maintenance-restart-"));
+  try {
+    const moduleUrl = new URL("./maintenance.mts", import.meta.url).href;
+    const program = `import {MaintenanceOwner,maintenanceCommand} from ${JSON.stringify(moduleUrl)};
+const owner=new MaintenanceOwner('decision',process.argv[1]);
+await owner.work('ticket:2063',()=>{maintenanceCommand('unused',[]);process.exit(0)});`;
+    execFileSync(process.execPath, ["--import", "tsx", "--input-type=module", "-e", program, root]);
+    const replacement = new MaintenanceOwner("decision", root);
+    let dispatches = 0;
+    await assert.rejects(replacement.work("ticket:2063", () => { dispatches++; }));
+    assert.equal(dispatches, 0);
+    assert.equal(control(root, "status").inflight.length, 1);
+    assert.equal(await replacement.work("ticket:2064", () => 42), 42);
+    replacement.stop();
+  } finally { rmSync(root, {recursive:true,force:true}); }
+});
