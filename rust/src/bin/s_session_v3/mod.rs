@@ -1519,7 +1519,11 @@ mod tests {
         assert!(!db.exists(), "未接线命令带选择器不得创建库");
 
         let incomplete = with_selector(&without(&plain, "--clock-plan"), PREVIOUS_REVISION);
-        assert!(dispatch(&incomplete).is_err());
+        let err = dispatch(&incomplete).unwrap_err();
+        #[cfg(feature = "s_v2_seed_testonly")]
+        assert!(err.contains("缺 --clock-plan"), "{err}");
+        #[cfg(not(feature = "s_v2_seed_testonly"))]
+        assert_eq!(err, crate::V2_WRITER_RETIRED);
         assert!(!db.exists(), "显式 s-session/2 缺参不得回落旧域");
     }
 
@@ -1748,12 +1752,22 @@ mod tests {
         assert_eq!(count(&conn, "s_content_nodes"), 0, "init 不应写内容节点");
         drop(conn);
 
-        // 显式 s-session/2：#1419 裁定②（issuecomment-6265209957）v2 结构写者退役，选择器分派到 v2
-        // 写入口即拒（同 `V2_WRITER_RETIRED`），不创建库；旧库只读 AsKnown 由其它测试覆盖。
         let v2_db = temp.path("explicit-v2.sqlite");
         let v2_args = with_selector(&init_args(&v2_db, &clock), PREVIOUS_REVISION);
-        assert_eq!(dispatch(&v2_args).unwrap_err(), crate::V2_WRITER_RETIRED);
-        assert!(!v2_db.exists(), "退役写入口不得创建新库");
+        #[cfg(not(feature = "s_v2_seed_testonly"))]
+        {
+            assert_eq!(dispatch(&v2_args).unwrap_err(), crate::V2_WRITER_RETIRED);
+            assert!(!v2_db.exists(), "退役写入口不得创建新库");
+        }
+        #[cfg(feature = "s_v2_seed_testonly")]
+        {
+            assert!(dispatch(&v2_args).unwrap());
+            let conn = open_db(&v2_db).unwrap();
+            assert_eq!(
+                meta_get_opt(&conn, "protocol_revision").unwrap().as_deref(),
+                Some(PREVIOUS_REVISION)
+            );
+        }
     }
 
     #[test]

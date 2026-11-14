@@ -6363,6 +6363,92 @@ mod tests {
         assert!(run_with(&["s".to_string(), V2_SEED_INFO.to_string()]).is_ok());
     }
 
+    #[cfg(feature = "s_v2_seed_testonly")]
+    #[test]
+    fn v2_seed_build_routes_explicit_v2_init_and_rejects_incomplete_selector() {
+        let files = TestFiles::new();
+        let clock = files.0.join("clock.json");
+        std::fs::write(
+            &clock,
+            canonical_json(&json!({
+                "schema_revision": "s-clock-plan/1",
+                "clock_plan_id": "s2-seed-route-clock",
+                "origin_utc": "2026-09-18T00:00:00Z",
+                "unit": "ns",
+                "events": {
+                    "op-1": {
+                        "accept_ns": "10",
+                        "attempts": [{"begin_ns": "11", "commit_ns": "12"}]
+                    }
+                }
+            })),
+        )
+        .unwrap();
+        let catalog = fixture("catalog/signed-catalog.json");
+        let profile = fixture("profiles/ohlc_integer_tb02a_v1.json");
+        let ok_db = files.0.join("seed-v2.sqlite");
+        let full_args: Vec<String> = [
+            "s",
+            "init",
+            "--protocol-revision",
+            "s-session/2",
+            "--db",
+            ok_db.to_str().unwrap(),
+            "--session",
+            "s-session-seed-001",
+            "--catalog",
+            catalog.to_str().unwrap(),
+            "--profile",
+            profile.to_str().unwrap(),
+            "--session-generation",
+            "1",
+            "--clock-plan",
+            clock.to_str().unwrap(),
+            "--delivery-retain-generations",
+            "4",
+        ]
+        .into_iter()
+        .map(str::to_string)
+        .collect();
+        run_with(&full_args).unwrap();
+        let conn = open_db(&ok_db).unwrap();
+        assert_eq!(
+            meta_get_opt(&conn, "protocol_revision").unwrap().as_deref(),
+            Some("s-session/2")
+        );
+        assert_eq!(
+            meta_get_opt(&conn, "rule_revision").unwrap().as_deref(),
+            Some(RULE_REVISION)
+        );
+        drop(conn);
+
+        let incomplete_db = files.0.join("incomplete-v2.sqlite");
+        let incomplete_args: Vec<String> = [
+            "s",
+            "init",
+            "--protocol-revision",
+            "s-session/2",
+            "--db",
+            incomplete_db.to_str().unwrap(),
+            "--session",
+            "s-session-seed-002",
+            "--catalog",
+            catalog.to_str().unwrap(),
+            "--profile",
+            profile.to_str().unwrap(),
+            "--session-generation",
+            "1",
+            "--delivery-retain-generations",
+            "4",
+        ]
+        .into_iter()
+        .map(str::to_string)
+        .collect();
+        let err = run_with(&incomplete_args).unwrap_err();
+        assert!(err.contains("缺 --clock-plan"), "{err}");
+        assert!(!incomplete_db.exists());
+    }
+
     #[cfg(not(feature = "s_v2_seed_testonly"))]
     #[test]
     fn v2_writer_retired_rejects_new_and_old_sessions_and_old_stays_readable() {
