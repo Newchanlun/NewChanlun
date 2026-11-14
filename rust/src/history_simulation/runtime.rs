@@ -2,7 +2,7 @@ use super::{
     model::{Batch, Change, Model},
     store,
 };
-use crate::session_protocol::{canonical_json, sha256_hex};
+use crate::session_protocol::{canonical_json, reply_envelope, sha256_hex};
 use crate::session_transport::{
     read_frame, serve_unix, write_frame_observed, NoObserver, TransportBounds,
 };
@@ -31,6 +31,11 @@ pub struct Authority {
     pub socket: String,
     pub authority_id: String,
     pub authority_epoch: String,
+    /// IC:9 共同信封与 ADR 0056:39 同一 `session_transport`：请求带完整信封，回复整帧须等于
+    /// `reply_envelope` 由原请求重建的结果（与 E↔B `finance_transport` 同一判据）。
+    pub schema_revision: String,
+    pub reply_namespace: String,
+    pub producer_id: String,
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -44,6 +49,8 @@ pub struct Profile {
     pub socket: String,
     pub e: Authority,
     pub s: Authority,
+    /// manifest 引用的获准条件清单；与 E 冻结的 `exact_release.conditions` 是同一份（#1407 C2）。
+    pub conditions: Vec<Condition>,
     pub timeout_ms: u64,
     pub max_frame_bytes: usize,
 }
@@ -60,6 +67,12 @@ impl Profile {
             &self.e.authority_epoch,
             &self.s.authority_id,
             &self.s.authority_epoch,
+            &self.e.schema_revision,
+            &self.e.reply_namespace,
+            &self.e.producer_id,
+            &self.s.schema_revision,
+            &self.s.reply_namespace,
+            &self.s.producer_id,
         ] {
             if s.is_empty() {
                 return Err("InvalidDomain：模拟会话/权威身份缺失".into());
@@ -78,8 +91,60 @@ impl Profile {
         {
             return Err("InvalidDomain：模拟端点须独立且资源界为正".into());
         }
-        Ok(())
+        validate_conditions(&self.conditions)
     }
+}
+
+/// 获准清单逐项带齐 IC「ConditionEvidence」九字段；含 ADR 0052 裁定二 E-Release 阶段的 `model_coverage`。
+fn validate_conditions(list: &[Condition]) -> Result<(), String> {
+    let mut ids = std::collections::BTreeSet::new();
+    let filled = |a: &[String]| !a.is_empty() && a.iter().all(|x| !x.is_empty());
+    for c in list {
+        if !ids.insert(&c.condition_id)
+            || [
+                &c.condition_id,
+                &c.authority_revision,
+                &c.coverage_proof,
+                &c.validator_capability,
+                &c.failure_result,
+            ]
+            .iter()
+            .any(|x| x.is_empty())
+            || ![
+                &c.dependency_set,
+                &c.invalidation_sources,
+                &c.required_check_stages,
+                &c.evidence_refs,
+            ]
+            .iter()
+            .all(|a| filled(a))
+        {
+            return Err(
+                "Unsupported：获准条件缺 ConditionEvidence 字段或 condition_id 重复".into(),
+            );
+        }
+        // 与 E 冻结原件同一张配对表：X.* 阶段只有 X 支持的能力，失败结果必须 Denied。
+        let stages: Vec<&str> = c.required_check_stages.iter().map(String::as_str).collect();
+        crate::economic_session::check_condition_semantics(
+            &c.condition_id,
+            &c.authority_revision,
+            &stages,
+            &c.validator_capability,
+            &c.failure_result,
+        )?;
+    }
+    if !list.iter().any(|c| {
+        c.condition_id == "model_coverage"
+            && c.required_check_stages
+                .iter()
+                .any(|s| s == "E.ReleaseExact")
+    }) {
+        return Err("MissingDependency：获准条件清单缺 E-Release 阶段的 model_coverage".into());
+    }
+    // 与 E 同一个完备闸：E/S/X 各阶段的必备能力都在、各一次。
+    crate::economic_session::check_required_capabilities(
+        list.iter().map(|c| c.validator_capability.as_str()),
+    )
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -168,40 +233,8 @@ impl ExactCommand {
         {
             return Err("MissingDependency：精确命令缺责任/结构/市场/规则依赖".into());
         }
-        let expected = [
-            ("released-exact/1", "E.ReleaseExact"),
-            ("execute-committed/1", "S.RequestConditionalExecution"),
-            ("simulation-local-transaction/1", "X.OwnAttemptAndCall"),
-        ];
-        if c.conditions.len() != expected.len() {
-            return Err("Unsupported：不完整或未知条件清单".into());
-        }
-        let mut ids = std::collections::BTreeSet::new();
-        for (capability, stage) in expected {
-            let matching: Vec<_> = c
-                .conditions
-                .iter()
-                .filter(|x| x.validator_capability == capability)
-                .collect();
-            if matching.len() != 1 {
-                return Err("Unsupported：未知或重复 ConditionEvidence 核验能力".into());
-            }
-            let x = matching[0];
-            if x.condition_id.is_empty()
-                || !ids.insert(&x.condition_id)
-                || x.authority_revision != capability
-                || x.required_check_stages != [stage]
-                || x.dependency_set.is_empty()
-                || x.dependency_set.iter().any(String::is_empty)
-                || x.evidence_refs.is_empty()
-                || x.evidence_refs.iter().any(String::is_empty)
-                || x.invalidation_sources.is_empty()
-                || x.invalidation_sources.iter().any(String::is_empty)
-                || x.coverage_proof.is_empty()
-                || x.failure_result != "Denied"
-            {
-                return Err("Unsupported：ConditionEvidence 阶段/覆盖/失败语义未支持".into());
-            }
+        if c.conditions != p.conditions {
+            return Err("Unsupported：条件清单与获准 manifest 清单不逐项相等".into());
         }
         Ok(())
     }
@@ -426,24 +459,33 @@ fn json_frame(v: Value) -> Result<Value, String> {
     Ok(v)
 }
 /// 已通过帧界检查、尚未连接的权威请求帧。编码或帧界失败时 S 一个字节都没收到。
+struct AuthorityFrame {
+    envelope: Value,
+    bytes: Vec<u8>,
+}
+/// 业务请求放在 IC:9 共同信封里：来源是 X 的事实命名空间，producer 是 X 身份与 writer epoch。
+/// message_id 由规范业务字节决定，同一请求重试不换身份。
 fn authority_frame(
     p: &Profile,
     a: &Authority,
+    epoch: i64,
     op: &str,
     command: &ExactCommand,
     release: Option<&str>,
-) -> Result<Vec<u8>, String> {
-    let mut bytes=canonical_json(&json!({"protocol":AUTHORITY_WIRE,"op":op,"session_id":p.session_id,"session_generation":p.session_generation,"authority_id":a.authority_id,"authority_epoch":a.authority_epoch,"command_id":command.command_id,"command_hash":hash(command),"command":command,"release_receipt_id":release})).into_bytes();
+) -> Result<AuthorityFrame, String> {
+    let payload = json!({"op":op,"protocol":AUTHORITY_WIRE,"session_id":p.session_id,"session_generation":p.session_generation,"authority_id":a.authority_id,"authority_epoch":a.authority_epoch,"command_id":command.command_id,"command_hash":hash(command),"command":command,"release_receipt_id":release});
+    let payload_hash = sha256_hex(canonical_json(&payload).as_bytes());
+    let envelope = json!({"schema_revision":a.schema_revision,"session_id":p.session_id,"session_generation":p.session_generation,"source_namespace":p.source_namespace,"source_epoch":p.source_epoch,"message_id":format!("x-authority-{payload_hash}"),"producer_id":p.x_id,"producer_epoch":epoch.to_string(),"payload_hash":payload_hash,"causal_refs":[],"payload":payload});
+    let mut bytes = canonical_json(&envelope).into_bytes();
     bytes.push(b'\n');
     if bytes.len() > p.max_frame_bytes {
         return Err("Unsupported：权威请求超过帧界".into());
     }
-    Ok(bytes)
+    Ok(AuthorityFrame { envelope, bytes })
 }
 /// 连接失败时同样确定未发出；只有返回的连接写出帧后才进入可能已发出的窗口。
-fn authority_connect(p: &Profile, a: &Authority) -> Result<(UnixStream, Instant), String> {
-    let deadline = Instant::now() + Duration::from_millis(p.timeout_ms);
-    Ok((UnixStream::connect(&a.socket).map_err(io)?, deadline))
+fn authority_connect(a: &Authority) -> Result<UnixStream, String> {
+    UnixStream::connect(&a.socket).map_err(io)
 }
 fn authority_exchange(
     p: &Profile,
@@ -451,26 +493,51 @@ fn authority_exchange(
     op: &str,
     command: &ExactCommand,
     release: Option<&str>,
-    (mut stream, deadline): (UnixStream, Instant),
-    bytes: &[u8],
+    mut stream: UnixStream,
+    frame: &AuthorityFrame,
 ) -> Result<AuthorityReply, String> {
-    write_frame_observed(&mut stream, bytes, deadline, &mut NoObserver)?;
+    // 权威期限只量这次交换。连接之后、写帧之前 X 先持久 ExecutionRequested（synchronous=FULL），
+    // 本地落盘不计入对端期限：否则慢盘会在一个字节都没发出时超时，命令却已标成「可能已发出」，
+    // 只能查询 S 的 NoRecord，永远卡住（#1407 C2，CI run 42772775704）。
+    let deadline = Instant::now() + Duration::from_millis(p.timeout_ms);
+    write_frame_observed(&mut stream, &frame.bytes, deadline, &mut NoObserver)?;
     stream.shutdown(std::net::Shutdown::Write).map_err(io)?;
     let reply = read_frame(&mut stream, p.max_frame_bytes, deadline, json_frame)?;
-    let r: AuthorityReply = serde_json::from_value(reply).map_err(error)?;
+    let expected = reply_envelope(
+        &frame.envelope,
+        reply["payload"].clone(),
+        &a.schema_revision,
+        &p.session_id,
+        &p.session_generation,
+        &a.reply_namespace,
+        &a.producer_id,
+        &a.authority_epoch,
+    );
+    if reply != expected {
+        return Err("IdentityConflict：权威回复信封的身份/epoch/因果/规范字节不符".into());
+    }
+    let payload = &reply["payload"];
+    if payload["kind"] == "Error" {
+        return Err(format!(
+            "MissingDependency：权威拒绝：{}",
+            payload["error"].as_str().unwrap_or("未具名错误")
+        ));
+    }
+    let r: AuthorityReply = serde_json::from_value(payload.clone()).map_err(error)?;
     validate_authority_reply(p, a, op, command, release, &r)?;
     Ok(r)
 }
 fn authority(
     p: &Profile,
     a: &Authority,
+    epoch: i64,
     op: &str,
     command: &ExactCommand,
     release: Option<&str>,
 ) -> Result<AuthorityReply, String> {
-    let bytes = authority_frame(p, a, op, command, release)?;
-    let connection = authority_connect(p, a)?;
-    authority_exchange(p, a, op, command, release, connection, &bytes)
+    let frame = authority_frame(p, a, epoch, op, command, release)?;
+    let connection = authority_connect(a)?;
+    authority_exchange(p, a, op, command, release, connection, &frame)
 }
 
 fn validate_authority_reply(
@@ -562,7 +629,7 @@ fn accept(
         return query_command(c, p, &command.command_id);
     }
     command.validate(p, epoch)?;
-    let released = authority(p, &p.e, "QueryReleasedExact", &command, None)?;
+    let released = authority(p, &p.e, epoch, "QueryReleasedExact", &command, None)?;
     let clock = AcceptClock {
         received_ns,
         first_known_ns: received_ns,
@@ -619,7 +686,10 @@ fn execute(c: &mut Connection, p: &Profile, epoch: i64, mut batch: Batch) -> Res
         };
         // 帧界超限是确定未发出的失败，须在持久 PendingBatch 前拒绝，否则同批恢复永远超限。
         let call = match op {
-            Some(op) => Some((op, authority_frame(p, &p.s, op, &command, Some(&release))?)),
+            Some(op) => Some((
+                op,
+                authority_frame(p, &p.s, epoch, op, &command, Some(&release))?,
+            )),
             None => None,
         };
         commands.push((command, release, call));
@@ -633,9 +703,14 @@ fn execute(c: &mut Connection, p: &Profile, epoch: i64, mut batch: Batch) -> Res
         // AcceptExact 不产生调用权；在真正模型动作前才取得本命令 S 终态。
         let executed = match call {
             Some((op, frame)) => {
-                let connection = authority_connect(p, &p.s)?;
+                let connection = authority_connect(&p.s)?;
                 if op == "RequestConditionalExecution" {
                     c.execute("UPDATE x_exact_commands SET state='ExecutionRequested',attempt_batch=?2 WHERE id=?1 AND state='Accepted'",params![command.command_id,encoded]).map_err(error)?;
+                    // 测试钩：把这次持久写拉长到超过对端期限，复现慢盘。
+                    #[cfg(test)]
+                    if std::env::var("ISSUE1381_TEST_SLOW_CLAIM").is_ok() {
+                        std::thread::sleep(Duration::from_millis(p.timeout_ms + 200));
+                    }
                 }
                 authority_exchange(p, &p.s, op, &command, Some(&release), connection, &frame)?
             }
@@ -866,6 +941,9 @@ pub fn serve(c: &mut Connection, p: &Profile, epoch: i64) -> Result<(), String> 
     )
 }
 
+#[cfg(test)]
+#[path = "runtime_c2_tests.rs"]
+mod c2_tests;
 #[cfg(test)]
 mod clock_tests {
     use super::*;

@@ -23,6 +23,9 @@ const REV_V3: &str = "tb03b-finance/3";
 /// #1716 I1-C：`economic-session/2` 内容域上显式选择的新财务子合同 = `/2` 全部内容、预算与恢复语义
 /// + 签署 cap 原子激活。`/1`、`/2` 不接受激活，图像、Reserve 记录与读者形状逐字不变。
 const REV_V4: &str = "tb03b-finance/4";
+/// #1407 C1：`economic-session/1` 域上显式选择的 E 侧精确命令生产者 = `/1` 全部语义 + MakeDispatchable、
+/// ReleaseExact、QueryCommand 与 `x-exact-authority/1` 的 QueryReleasedExact 应答。只跑 TestOnly 已定域 slot。
+const REV_V5: &str = "tb03b-finance/5";
 /// §5.7 `s_ref/2` 的 exact 四字段版本值。
 const S_REF_V2: &str = "s-object-ref/2";
 /// 财务子合同：一个版本串只有一种含义。
@@ -36,32 +39,45 @@ struct Contract {
     content: bool,
     /// 接受签署 cap 原子激活（#1716），输入政策与签署原件须带同一资金 profile。
     cap_activation: bool,
+    /// 接受 E 侧精确命令（#1407）：冻结原件带 `exact_release`、计划带 `exact`，图像带 `commands`。
+    exact_release: bool,
 }
 /// 财务子合同的唯一登记点（§5.8：未知值与跨域混写当场拒绝，旧 manifest 缺省仍按域基础合同读）。
-const CONTRACTS: [Contract; 4] = [
+const CONTRACTS: [Contract; 5] = [
     Contract {
         revision: REV,
         domain: SCHEMA_V1,
         content: false,
         cap_activation: false,
+        exact_release: false,
     },
     Contract {
         revision: REV_V2,
         domain: SCHEMA_V2,
         content: true,
         cap_activation: false,
+        exact_release: false,
     },
     Contract {
         revision: REV_V3,
         domain: SCHEMA_V1,
         content: false,
         cap_activation: true,
+        exact_release: false,
     },
     Contract {
         revision: REV_V4,
         domain: SCHEMA_V2,
         content: true,
         cap_activation: true,
+        exact_release: false,
+    },
+    Contract {
+        revision: REV_V5,
+        domain: SCHEMA_V1,
+        content: false,
+        cap_activation: false,
+        exact_release: true,
     },
 ];
 fn contract(m: &Value) -> Result<Contract, String> {
@@ -75,7 +91,7 @@ fn contract(m: &Value) -> Result<Contract, String> {
     };
     let found = CONTRACTS.iter().find(|c| match declared {
         Some(text) => c.revision == text,
-        None => c.domain == domain && !c.cap_activation,
+        None => c.domain == domain && !c.cap_activation && !c.exact_release,
     });
     match found {
         Some(c) if c.domain == domain => Ok(*c),
@@ -84,7 +100,7 @@ fn contract(m: &Value) -> Result<Contract, String> {
     }
 }
 fn unsupported_contract() -> String {
-    "SchemaUnsupported：财务子合同只有 tb03b-finance/1、/2、/3 与 /4".into()
+    "SchemaUnsupported：财务子合同只有 tb03b-finance/1、/2、/3、/4 与 /5".into()
 }
 fn revision(m: &Value) -> Result<&'static str, String> {
     Ok(contract(m)?.revision)
@@ -173,6 +189,23 @@ fn active_cap_policy(config: &Config, image: &Value, d: &Value) -> Result<Value,
             }
             Ok(genesis)
         }
+    }
+}
+/// #1407：精确命令操作只属于 `/5`；其他子合同的来源权限、图像与入口逐字不变。
+pub(super) const EXACT_OPS: [&str; 4] = [
+    "MakeDispatchable",
+    "ReleaseExact",
+    "QueryCommand",
+    "QueryReleasedExact",
+];
+pub(super) fn exact_release_selected(m: &Value) -> bool {
+    contract(m).is_ok_and(|c| c.exact_release)
+}
+fn exact_release_contract(config: &Config) -> Result<(), String> {
+    if contract(&config.manifest)?.exact_release {
+        Ok(())
+    } else {
+        Err("SchemaUnsupported：精确命令只属于 tb03b-finance/5".into())
     }
 }
 pub(super) fn enabled(config: &Config) -> bool {
@@ -270,6 +303,9 @@ pub(super) fn empty(config: &Config) -> Result<Value, String> {
     if enabled(config) {
         let revision = revision(&config.manifest)?;
         image["finance"] = json!({"schema_revision":revision,"rights":[],"decisions":[],"slots":[],"responsibilities":[]});
+        if contract(&config.manifest)?.exact_release {
+            image["finance"]["commands"] = json!([]);
+        }
     }
     Ok(image)
 }
@@ -320,20 +356,22 @@ fn input(config: &Config, raw: &str) -> Result<Value, String> {
         return Err("IdentityConflict：财务原件不等于冻结摘要".into());
     }
     let d = strict_json(raw.as_bytes())?;
-    exact(
-        &d,
-        &[
-            "schema_revision",
-            "kind",
-            "source_id",
-            "source_epoch",
-            "policy",
-            "baseline",
-            "rights",
-            "plans",
-            "slots",
-        ],
-    )?;
+    let release = contract(&config.manifest)?.exact_release;
+    let mut document = vec![
+        "schema_revision",
+        "kind",
+        "source_id",
+        "source_epoch",
+        "policy",
+        "baseline",
+        "rights",
+        "plans",
+        "slots",
+    ];
+    if release {
+        document.push("exact_release");
+    }
+    exact(&d, &document)?;
     // 输入原件的版本与子合同同版：`/2` 的原始 SHA 必须重新冻结。
     if d["schema_revision"] != revision(&config.manifest)? || d["kind"] != "TestOnly" {
         return Err("UnsupportedCapability：财务输入非具名 TestOnly".into());
@@ -430,30 +468,34 @@ fn input(config: &Config, raw: &str) -> Result<Value, String> {
     let mut attempts = BTreeSet::new();
     let mut plan_ids = BTreeSet::new();
     for q in list(&d, "plans")? {
-        exact(
-            q,
-            &[
-                "decision_id",
-                "attempt_id",
-                "plan_id",
-                "owner",
-                "voice_binding_id",
-                "right_id",
-                "expected_book_version",
-                "expected_rights_version",
-                "applicant_epoch",
-                "applicant_generation",
-                "slot_id",
-                "quantity",
-                "limit_price",
-                "fee_tail",
-                "quantity_source",
-                "price_source",
-                "fee_source",
-                "s_ref",
-                "o_ref",
-            ],
-        )?;
+        let mut fields = vec![
+            "decision_id",
+            "attempt_id",
+            "plan_id",
+            "owner",
+            "voice_binding_id",
+            "right_id",
+            "expected_book_version",
+            "expected_rights_version",
+            "applicant_epoch",
+            "applicant_generation",
+            "slot_id",
+            "quantity",
+            "limit_price",
+            "fee_tail",
+            "quantity_source",
+            "price_source",
+            "fee_source",
+            "s_ref",
+            "o_ref",
+        ];
+        if release {
+            fields.push("exact");
+        }
+        exact(q, &fields)?;
+        if release {
+            super::exact_command::validate_plan(q)?;
+        }
         for k in [
             "quantity_source",
             "price_source",
@@ -563,6 +605,9 @@ fn input(config: &Config, raw: &str) -> Result<Value, String> {
     }
     if assigned.len() != list(&d, "plans")?.len() || assigned.is_empty() {
         return Err("MissingDependency：计划未全部纳入非空关闭集合".into());
+    }
+    if release {
+        super::exact_command::validate_section(&d)?;
     }
     Ok(d)
 }
@@ -675,6 +720,8 @@ pub(super) fn is_event(v: &Value) -> bool {
                 | "AbortDecision"
                 | "CloseApplicants"
                 | "ActivateCapPolicy"
+                | "MakeDispatchable"
+                | "ReleaseExact"
         )
     )
 }
@@ -687,6 +734,8 @@ fn operation_id<'a>(p: &'a Value) -> Result<&'a str, String> {
             "slot_id"
         } else if p["op"] == "ActivateCapPolicy" {
             "activation_id"
+        } else if p["op"] == "ReleaseExact" {
+            "command_id"
         } else {
             "decision_id"
         },
@@ -739,6 +788,25 @@ fn validate_request(p: &Value) -> Result<(), String> {
                 return Err("InvalidDomain：新 cap 签署原件须绝对路径".into());
             }
             digest(required(&p["policy_record"], "sha256")?)
+        }
+        "MakeDispatchable" => exact(p, &["op", "decision_id", "plan_hash", "writer_epoch"]),
+        "ReleaseExact" => {
+            exact(
+                p,
+                &[
+                    "op",
+                    "decision_id",
+                    "command_id",
+                    "plan_hash",
+                    "certificate",
+                    "x_id",
+                    "x_epoch",
+                    "writer_epoch",
+                ],
+            )?;
+            required(p, "command_id")?;
+            required(p, "x_id")?;
+            positive(required(p, "x_epoch")?, "x_epoch").map(|_| ())
         }
         _ => Err("SchemaUnsupported：未知财务操作".into()),
     }?;
@@ -981,8 +1049,10 @@ fn knowledge_floor(witness: &Value, first: &str) -> Result<(), String> {
         return Err("InvalidDomain：获知时刻早于实际 S 提交".into());
     }
     let mut proofs = vec![];
-    if let Some(p) = witness.get("grant_proof") {
-        proofs.push(p);
+    for k in ["grant_proof", "commit_proof"] {
+        if let Some(p) = witness.get(k) {
+            proofs.push(p);
+        }
     }
     if let Some(ps) = witness.get("prepared_proofs") {
         proofs.extend(
@@ -1102,6 +1172,8 @@ fn reduce_with_budget(
     } else {
         number(&d["policy"], "valid_through_ns")?
     };
+    // 豁免只给收缩敞口或自核新版本的写口。MakeDispatchable 与 ReleaseExact 不豁免：Release 是交付 X 前的
+    // 最后一个授权点，共同界或能力证据过期时必须关闭（CE-S09），责任原样保留。
     if !matches!(
         op,
         "AbortDecision" | "CloseApplicants" | "ActivateCapPolicy"
@@ -1480,9 +1552,164 @@ fn reduce_with_budget(
             }
             json!({"slot_id":slot["slot_id"],"state":"ApplicantsClosed","closed":a,"reason":p["reason"],"commit_ns":ns,"responsibility_release":"None"})
         }
+        "MakeDispatchable" => make_dispatchable(c, config, previous, &mut next, &d, p, w, seq, ns)?,
+        "ReleaseExact" => release_exact(config, previous, &mut next, &d, p, seq, ns)?,
         _ => return Err("SchemaUnsupported：未支持财务写入".into()),
     };
     Ok((next, record))
+}
+fn command_entry<'a>(f: &'a Value, decision_id: &Value) -> Result<Option<&'a Value>, String> {
+    Ok(list(f, "commands")?
+        .iter()
+        .find(|x| x["decision_id"] == *decision_id))
+}
+fn replace_command(next: &mut Value, r: &Value) {
+    let a = next["finance"]["commands"].as_array_mut().unwrap();
+    *a.iter_mut()
+        .find(|x| x["decision_id"] == r["decision_id"])
+        .unwrap() = r.clone();
+}
+/// IC E.MakeDispatchable：B 本地 Commit 原收据、E 自己的 grant 与冻结计划三者一致才保存可交付财务状态。
+/// Dispatchable 不是执行许可，也不算在途（C07.1）。Pending 覆盖与申请代际关闭只在 ReleaseExact 的同一事务里核：
+/// IC:30 写明旧状态不能代替随后 Release 的当前条件核验，两步之间状态可变，在这里多核一次不挡任何交付。
+#[allow(clippy::too_many_arguments)]
+fn make_dispatchable(
+    c: &Connection,
+    config: &Config,
+    previous: &Value,
+    next: &mut Value,
+    d: &Value,
+    p: &Value,
+    w: &Value,
+    seq: i64,
+    ns: &str,
+) -> Result<Value, String> {
+    exact_release_contract(config)?;
+    if config.domain != "E" {
+        return Err("InvalidDomain：MakeDispatchable 仅 E".into());
+    }
+    let q = plan(d, p)?;
+    let id = required(q, "decision_id")?;
+    if p["plan_hash"] != hash(q) {
+        return Err("IdentityConflict：MakeDispatchable 原计划不符".into());
+    }
+    let f = finance(config, previous)?;
+    if command_entry(f, &q["decision_id"])?.is_some() {
+        return Err("IdentityConflict：决定已 Dispatchable".into());
+    }
+    let cp = &w["commit_proof"];
+    verify_proof(config, cp, required(q, "owner")?)?;
+    let committed = &cp["receipt"]["record"];
+    if cp["receipt"]["kind"] != "LocalCommitReceipt"
+        || committed["state"] != "Committed"
+        || committed["prepared"]["plan"] != *q
+        || *decision(config, &cp["current_image"], id)? != *committed
+    {
+        return Err("InvalidDomain：B 本地 Commit 原收据或当前状态不符".into());
+    }
+    let g = &committed["grant"]["original"];
+    let grant_id = required(g, "grant_id")?;
+    let slot = item(list(f, "slots")?, "slot_id", required(q, "slot_id")?)?;
+    let reserved = row(
+        c,
+        "receipts",
+        &receipt_key_for(config, "Reserve", required(q, "slot_id")?)?,
+    )?
+    .ok_or("MissingDependency：E 原 Reserve 回执缺失")?;
+    if slot["state"] != "Reserved"
+        || item(list(slot, "grants")?, "grant_id", grant_id)? != g
+        || committed["grant"]["e_cut"] != reserved["cut"]
+    {
+        return Err("IdentityConflict：B Commit 的 grant 不是 E 原授信".into());
+    }
+    let liability = item(list(f, "responsibilities")?, "responsibility_id", grant_id)?;
+    if liability["grant"] != *g || liability["amount"] != g["amount"] {
+        return Err("MissingDependency：E 未保留该 grant 的完整责任".into());
+    }
+    let r = json!({"decision_id":id,"command_id":q["exact"]["command_id"],"state":"Dispatchable","owner":q["owner"],"plan_hash":hash(q),"grant_id":grant_id,"local_commit_receipt":committed["local_commit_receipt"],"commit_cut":cp["receipt"]["cut"],"dispatchable_seq":seq.to_string(),"dispatchable_ns":ns,"execution_eligibility":"None"});
+    push(&mut next["finance"], "commands", r.clone());
+    Ok(r)
+}
+/// IC E.ReleaseExact / SPEC C07.1–2：同一 E 事务核命令全部固定字段、获准条件清单、`model_coverage`、
+/// Pending 与该 grant 的完整责任；成立才写 ReleasedExact 与不可改交付对象。域外命令持久终态 Unsupported。
+fn release_exact(
+    config: &Config,
+    previous: &Value,
+    next: &mut Value,
+    d: &Value,
+    p: &Value,
+    seq: i64,
+    ns: &str,
+) -> Result<Value, String> {
+    exact_release_contract(config)?;
+    if config.domain != "E" {
+        return Err("InvalidDomain：ReleaseExact 仅 E".into());
+    }
+    let q = plan(d, p)?;
+    if p["command_id"] != q["exact"]["command_id"] {
+        return Err("IdentityConflict：command_id 不是该决定冻结的命令身份".into());
+    }
+    let f = finance(config, previous)?;
+    let old = command_entry(f, &q["decision_id"])?
+        .ok_or("InvalidDomain：决定尚未 Dispatchable，不得 Release")?;
+    if old["state"] != "Dispatchable" {
+        return Err("IdentityConflict：该决定已有命令终态".into());
+    }
+    let target = &d["exact_release"]["x_target"];
+    if p["x_id"] != target["x_id"] || p["x_epoch"] != target["x_epoch"] {
+        return Err("IdentityConflict：目标 X/epoch 与冻结目标不同".into());
+    }
+    let grant_id = required(old, "grant_id")?;
+    let command =
+        super::exact_command::command(&config.session, &config.generation, d, q, grant_id)?;
+    if p["plan_hash"] != command["plan_hash"] {
+        return Err("IdentityConflict：plan_hash 不是冻结计划的精确投影".into());
+    }
+    super::exact_command::check_certificate(&p["certificate"], &command["certificate"])?;
+    let mut r = old.clone();
+    r["command_hash"] = json!(hash(&command));
+    r["command"] = command;
+    if let Some(unsupported) = super::exact_command::model_coverage(d, q) {
+        r["state"] = json!("Unsupported");
+        r["unsupported"] = unsupported;
+        r["unsupported_seq"] = json!(seq.to_string());
+        r["unsupported_ns"] = json!(ns);
+    } else {
+        let coverage = list(&d["baseline"], "covered_facts")?;
+        for pending in list(previous, "pending")? {
+            covered_pending(previous, coverage, pending)?;
+        }
+        let closed = f
+            .get("closed_applicants")
+            .and_then(Value::as_array)
+            .is_some_and(|a| {
+                a.iter().any(|x| {
+                    x["slot_id"] == q["slot_id"]
+                        && x["owner"] == q["owner"]
+                        && x["applicant_epoch"] == q["applicant_epoch"]
+                        && x["applicant_generation"] == q["applicant_generation"]
+                })
+            });
+        if closed {
+            return Err("StaleWriter：原申请代际已关闭，不得 Release；全责任保留".into());
+        }
+        let slot = item(list(f, "slots")?, "slot_id", required(q, "slot_id")?)?;
+        let g = item(list(slot, "grants")?, "grant_id", grant_id)?;
+        let liability = item(list(f, "responsibilities")?, "responsibility_id", grant_id)?;
+        if liability["grant"] != *g || liability["amount"] != g["amount"] {
+            return Err("MissingDependency：E 未保留该 grant 的完整责任".into());
+        }
+        r["state"] = json!("ReleasedExact");
+        r["first_quantity"] = q["exact"]["first_quantity"].clone();
+        r["allocation_id"] = q["exact"]["allocation_id"].clone();
+        r["responsibility_ref"] = json!(grant_id);
+        r["release_seq"] = json!(seq.to_string());
+        r["release_commit_ns"] = json!(ns);
+        r["model_ref"] = super::exact_command::model_ref(d);
+        r["execution_eligibility"] = json!("ReleasedExact");
+    }
+    replace_command(next, &r);
+    Ok(r)
 }
 fn latest_proof_seq(p: &Value) -> Result<i64, String> {
     let last = list(&p["current_image"], "history")?
@@ -1499,6 +1726,9 @@ pub(super) fn receipt(config: &Config, event: &Value, cut: Value) -> Result<Valu
         "AbortDecision" => "AbortReceipt",
         "CloseApplicants" => "ApplicantsClosedReceipt",
         "ActivateCapPolicy" => "CapPolicyActivatedReceipt",
+        "MakeDispatchable" => "DispatchableReceipt",
+        "ReleaseExact" if event["record"]["state"] == "Unsupported" => "ReleaseUnsupportedReceipt",
+        "ReleaseExact" => "ReleasedExactReceipt",
         _ => return Err("SchemaUnsupported：未知财务事件".into()),
     };
     Ok(
@@ -1640,6 +1870,9 @@ pub(super) fn write_with_ingress(
     if p["op"] == "ActivateCapPolicy" {
         cap_activation_contract(config)?;
     }
+    if matches!(p["op"].as_str(), Some("MakeDispatchable" | "ReleaseExact")) {
+        exact_release_contract(config)?;
+    }
     let k = key_for(config, p)?;
     let mut shared_job = if contract(&config.manifest)?.content {
         Some(new_content_job(c, config)?)
@@ -1747,7 +1980,15 @@ pub(super) fn write_with_ingress(
                 "新 cap 签署原件"
             )?);
         }
-        "ImportResponsibility" | "AbortDecision" | "CloseApplicants" => (),
+        "MakeDispatchable" => {
+            let q = plan(&d, p)?;
+            w["commit_proof"] = proof(
+                config,
+                required(q, "owner")?,
+                &receipt_key_for(config, "CommitDecision", required(q, "decision_id")?)?,
+            )?;
+        }
+        "ImportResponsibility" | "AbortDecision" | "CloseApplicants" | "ReleaseExact" => (),
         _ => return Err("SchemaUnsupported：财务操作未知".into()),
     }
     persist(c, config, epoch, e, w)
@@ -2057,6 +2298,113 @@ pub(super) fn query(c: &Connection, config: &Config, p: &Value) -> Result<Value,
         }
         Err("MissingDependency：该 cut 尚无原 grant".into())
     }
+}
+/// #1407 E 侧命令查询。QueryCommand 按原 command_id 返回 E 财务状态或 NoRecord，不释放责任也不造新动作；
+/// QueryReleasedExact 是 `x-exact-authority/1` 的应答，请求体即 #1942 X 发出的帧，回复为 AuthorityReply 十二字段。
+pub(super) fn query_command(
+    c: &Connection,
+    config: &Config,
+    epoch: i64,
+    p: &Value,
+) -> Result<Value, String> {
+    exact_release_contract(config)?;
+    if config.domain != "E" {
+        return Err("SchemaUnsupported：精确命令只由 E 应答".into());
+    }
+    if p["op"] == "QueryCommand" {
+        exact(p, &["op", "command_id", "cut", "as_known_ns"])?;
+        let id = required(p, "command_id")?;
+        let (s, h, _, image) = super::service::select_cut(c, config, p)?;
+        let at = cut(config, s, &h);
+        let Some(r) = list(finance(config, &image)?, "commands")?
+            .iter()
+            .find(|x| x["command_id"] == id)
+        else {
+            return Ok(
+                json!({"kind":"EconomicCommand","domain_id":config.domain,"command_id":id,"state":"NoRecord","cut":at}),
+            );
+        };
+        let mut receipts = vec![];
+        for event in list(&image, "history")?.iter().filter(|x| {
+            matches!(
+                x["kind"].as_str(),
+                Some("MakeDispatchable" | "ReleaseExact")
+            ) && x["record"]["decision_id"] == r["decision_id"]
+        }) {
+            receipts.push(
+                row(
+                    c,
+                    "receipts",
+                    &key_for(config, &event["request"]["payload"])?,
+                )?
+                .ok_or("StorageUnavailable：命令缺原回执")?,
+            );
+        }
+        return Ok(
+            json!({"kind":"EconomicCommand","domain_id":config.domain,"command_id":id,"state":r["state"],"record":r,"receipts":receipts,"cut":at}),
+        );
+    }
+    exact(
+        p,
+        &[
+            "op",
+            "protocol",
+            "session_id",
+            "session_generation",
+            "authority_id",
+            "authority_epoch",
+            "command_id",
+            "command_hash",
+            "command",
+            "release_receipt_id",
+        ],
+    )?;
+    if p["protocol"] != super::exact_command::AUTHORITY_WIRE || !p["release_receipt_id"].is_null() {
+        return Err("SchemaUnsupported：只应答 x-exact-authority/1 的 QueryReleasedExact".into());
+    }
+    if p["session_id"] != config.session.as_str()
+        || p["session_generation"] != config.generation.as_str()
+        || p["authority_id"] != config.domain.as_str()
+        || p["command_hash"] != hash(&p["command"])
+        || p["command"]["command_id"] != p["command_id"]
+    {
+        return Err("IdentityConflict：权威查询的会话/权威身份/命令摘要不符".into());
+    }
+    if p["authority_epoch"] != epoch.to_string() {
+        return Err("StaleWriter：权威查询的 E epoch 不是当前 writer".into());
+    }
+    let id = required(p, "command_id")?;
+    let (s, _, frontier_ns, image) = latest(c)?;
+    let entry = list(finance(config, &image)?, "commands")?
+        .iter()
+        .find(|x| x["command_id"] == id && x["state"] != "Dispatchable");
+    let epoch = epoch.to_string();
+    let Some(r) = entry else {
+        return Ok(super::exact_command::authority_reply(
+            p,
+            &p["command"],
+            &epoch,
+            "NoRecord",
+            &format!("NoRecord@{s}"),
+            nonnegative(&frontier_ns, "commit_ns")?,
+        ));
+    };
+    if r["command"] != p["command"] {
+        return Err("IdentityConflict：同 command_id 的命令内容与 E 已交付对象不同".into());
+    }
+    let (state, at) = if r["state"] == "ReleasedExact" {
+        ("ReleasedExact", required(r, "release_commit_ns")?)
+    } else {
+        ("Unsupported", required(r, "unsupported_ns")?)
+    };
+    Ok(super::exact_command::authority_reply(
+        p,
+        &r["command"],
+        &epoch,
+        state,
+        &receipt_key_for(config, "ReleaseExact", id)?,
+        nonnegative(at, "release commit_ns")?,
+    ))
 }
 /// 业务方只给关闭 slot 的原身份。跨重协议排序由 E 模块持有，不由 UI 拼装。
 pub(super) fn advance(
