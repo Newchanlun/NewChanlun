@@ -201,7 +201,8 @@ def report_business_wait(notify: int, result: int) -> None:
         os.close(notify)
 
 
-def guarded_execution(args, command: list[str], supervisor) -> int:
+def guarded_execution(args, command: list[str], supervisor, *,
+                      failure_message: str = "local guardian failed before completion") -> int:
     """外层保留原退出合同；独立 guardian 自然监督到资源闭合。仅在线程启动前 fork。"""
     mask = signal.pthread_sigmask(signal.SIG_BLOCK, {signal.SIGTERM, signal.SIGINT})
     reader, writer = os.pipe()
@@ -220,7 +221,7 @@ def guarded_execution(args, command: list[str], supervisor) -> int:
         try:
             supervisor(args, command, writer, mask)
         except Exception:
-            print("local guardian failed before completion", file=sys.stderr, flush=True)
+            print(failure_message, file=sys.stderr, flush=True)
         finally:
             os._exit(0)
     os.close(writer)

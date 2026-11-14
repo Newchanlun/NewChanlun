@@ -256,7 +256,7 @@ def settle_native_resource(gate: Gate, resource: str) -> bool:
 def run(args, command: list[str]) -> int:
     """Explicit ES entry: reuse the local guardian, never snapshot/unsupervised fallback."""
     from .maintenance_local import guarded_execution
-    return guarded_execution(args, command, _supervise)
+    return guarded_execution(args, command, _supervise, failure_message="native ES source unavailable")
 
 
 def _supervise(args, command: list[str], notify: int | None = None, signal_mask=None) -> int:
