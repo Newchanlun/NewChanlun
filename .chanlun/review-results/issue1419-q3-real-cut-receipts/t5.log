@@ -1,0 +1,35 @@
+TAP version 13
+# Q3-WIRE load 106 1995584735 2476421 9478324224
+# Subtest: 真实S3 W 尾段：中枢对非空，末代 AsKnown 与 Rust 一致
+ok 1 - 真实S3 W 尾段：中枢对非空，末代 AsKnown 与 Rust 一致
+  ---
+  duration_ms: 2529642.763958
+  type: 'test'
+  ...
+1..1
+# tests 1
+# suites 0
+# pass 1
+# fail 0
+# cancelled 0
+# skipped 0
+# todo 0
+# duration_ms 2531550.057459
+     2531.60 real      2706.84 user        44.46 sys
+         13973422080  maximum resident set size
+                   0  average shared memory size
+                   0  average unshared data size
+                   0  average unshared stack size
+             9482135  page reclaims
+                   0  page faults
+                   0  swaps
+                   0  block input operations
+                   0  block output operations
+                  16  messages sent
+                  12  messages received
+                   0  signals received
+                  33  voluntary context switches
+             3824233  involuntary context switches
+           530745542  instructions retired
+           238114593  cycles elapsed
+            17221672  peak memory footprint

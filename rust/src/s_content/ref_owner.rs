@@ -130,8 +130,11 @@ impl RefDiagnostic<'_> {
     }
     fn into_codec(self) -> CodecError {
         if let Self::Decimal(e) = self {
-            let rendered = e.to_string();
             let code = e.code();
+            if super::quiet_diagnostics() {
+                return CodecError::new(code, "");
+            }
+            let rendered = e.to_string();
             return CodecError::new(
                 code,
                 rendered
@@ -147,7 +150,7 @@ impl RefDiagnostic<'_> {
                 self.0.fmt_detail(f)
             }
         }
-        CodecError::new(self.code(), Detail(&self).to_string())
+        CodecError::new(self.code(), codec_detail!("{}", Detail(&self)))
     }
 }
 impl std::fmt::Display for RefDiagnostic<'_> {
@@ -240,6 +243,11 @@ impl RefView<'_> {
             Self::Normal(r) => r.digest(),
             Self::Owned(r) => Ok(r.digest()),
         }
+    }
+}
+impl<'a> From<&RefView<'a>> for RefView<'a> {
+    fn from(r: &RefView<'a>) -> Self {
+        *r
     }
 }
 impl<'a> From<&'a ContentRef> for RefView<'a> {

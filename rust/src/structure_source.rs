@@ -11,6 +11,8 @@ use std::collections::BTreeSet;
 
 /// 声明在 S 库 `meta` 表中的键。
 pub const META_KEY: &str = "structure_source";
+/// 本库结构源声明的唯一读取语句。
+pub const STORED_SQL: &str = "SELECT value FROM meta WHERE key=?1";
 /// 允许作为 S 结构源的类别（封闭集合）。
 pub const CATEGORIES: [&str; 2] = ["UsEquityStockLineTick", "TestOnlyStructure"];
 
@@ -99,11 +101,14 @@ impl Declaration {
 /// 读本库声明；`None` 表示不带声明的旧库。
 pub fn stored(conn: &Connection) -> Result<Option<Declaration>, String> {
     let text: Option<String> = conn
-        .query_row("SELECT value FROM meta WHERE key=?1", [META_KEY], |r| {
-            r.get(0)
-        })
+        .query_row(STORED_SQL, [META_KEY], |r| r.get(0))
         .optional()
         .map_err(|e| format!("StorageUnavailable：读 meta.{META_KEY} 失败：{e}"))?;
+    decode_stored(text.as_deref())
+}
+
+/// 解析从声明读取语句取得的文本；不签发数据库或快照资格。
+pub fn decode_stored(text: Option<&str>) -> Result<Option<Declaration>, String> {
     text.map(|t| {
         let value: Value = serde_json::from_str(&t)
             .map_err(|e| format!("StorageUnavailable：meta.{META_KEY} 损坏：{e}"))?;

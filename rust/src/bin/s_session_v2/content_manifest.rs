@@ -18,6 +18,8 @@ use crate::v3::business_json::TextValue;
 use newchan_rust::s_content::capture_allocation::native_owned::NativeValue;
 #[cfg(feature = "s_incremental")]
 use newchan_rust::s_content::capture_allocation::scratch::WorkScope;
+#[cfg(feature = "s_incremental")]
+use newchan_rust::s_content::ContextError as PublishError;
 #[allow(
     unused_imports,
     reason = "#1488 再合 #1608：8组合实测无调用方，保留不删"
@@ -155,6 +157,26 @@ pub(crate) struct MetadataView<'a> {
     pub catalog_revision: &'a str,
     pub scope: s_content::RefView<'a>,
 }
+/// 元数据消费者只借字段；普通 DTO 与持许可的 NativeMetadata 不改变同一判据。
+pub(crate) trait MetadataSource {
+    fn view(&self) -> MetadataView<'_>;
+}
+impl MetadataSource for ManifestMetadata {
+    fn view(&self) -> MetadataView<'_> {
+        ManifestMetadata::view(self)
+    }
+}
+impl<'a> MetadataView<'a> {
+    pub(crate) fn view(&self) -> MetadataView<'a> {
+        *self
+    }
+}
+impl MetadataSource for MetadataView<'_> {
+    fn view(&self) -> MetadataView<'_> {
+        *self
+    }
+}
+
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct RootsView<'a> {
     pub generated_state: s_content::RefView<'a>,
@@ -228,6 +250,42 @@ impl SourceCommit {
     }
 }
 impl ManifestMetadata {
+    /// 普通（非增量）构建与测试改写用的同一字段拥有副本；增量生产用持许可的 `NativeMetadata`。
+    #[cfg(any(test, not(feature = "s_incremental")))]
+    pub(crate) fn from_view(m: MetadataView<'_>) -> Self {
+        let c = m.source_commit;
+        Self {
+            session_id: m.session_id.to_owned(),
+            session_generation: m.session_generation.to_owned(),
+            writer_epoch: m.writer_epoch.to_owned(),
+            generation: m.generation,
+            base_cut: m.base_cut.to_owned(),
+            structure_cut: m.structure_cut.to_owned(),
+            input_frontier: m.input_frontier,
+            source_commit: SourceCommit {
+                source_namespace: c.source_namespace.to_owned(),
+                source_epoch: c.source_epoch.to_owned(),
+                message_id: c.message_id.to_owned(),
+                payload_hash: c.payload_hash.to_owned(),
+                producer_id: c.producer_id.to_owned(),
+                producer_epoch: c.producer_epoch.to_owned(),
+                clock_event_id: c.clock_event_id.to_owned(),
+                attempt_index: c.attempt_index,
+            },
+            clock_plan_hash: m.clock_plan_hash.to_owned(),
+            semantic_commit_ns: m.semantic_commit_ns.to_owned(),
+            profile_id: m.profile_id.to_owned(),
+            profile_hash: m.profile_hash.to_owned(),
+            rule_revision: m.rule_revision.to_owned(),
+            catalog_revision: m.catalog_revision.to_owned(),
+            scope: ContentRef {
+                format: m.scope.format().to_owned(),
+                root: m.scope.root().to_owned(),
+                kind: m.scope.kind(),
+                extent: m.scope.extent(),
+            },
+        }
+    }
     pub(crate) fn view(&self) -> MetadataView<'_> {
         MetadataView {
             session_id: &self.session_id,
@@ -580,6 +638,38 @@ impl NativeMetadata {
     }
 }
 
+#[cfg(feature = "s_incremental")]
+impl MetadataSource for NativeMetadata {
+    fn view(&self) -> MetadataView<'_> {
+        MetadataView {
+            session_id: &self.session_id,
+            session_generation: &self.session_generation,
+            writer_epoch: &self.writer_epoch,
+            generation: self.generation,
+            base_cut: &self.base_cut,
+            structure_cut: &self.structure_cut,
+            input_frontier: self.input_frontier,
+            source_commit: SourceCommitView {
+                source_namespace: &self.source_namespace,
+                source_epoch: &self.source_epoch,
+                message_id: &self.message_id,
+                payload_hash: &self.payload_hash,
+                producer_id: &self.producer_id,
+                producer_epoch: &self.producer_epoch,
+                clock_event_id: &self.clock_event_id,
+                attempt_index: self.attempt_index,
+            },
+            clock_plan_hash: &self.clock_plan_hash,
+            semantic_commit_ns: &self.semantic_commit_ns,
+            profile_id: &self.profile_id,
+            profile_hash: &self.profile_hash,
+            rule_revision: &self.rule_revision,
+            catalog_revision: &self.catalog_revision,
+            scope: (&self.scope).into(),
+        }
+    }
+}
+
 pub(super) struct UnpublishedManifest {
     pub value: Built,
     pub batch_id: TextValue,
@@ -686,21 +776,23 @@ impl PreparedManifestWorkspace {
         self,
         tx: &mut rusqlite::Transaction<'_>,
         token: &str,
-        metadata: &ManifestMetadata,
+        metadata: &(impl MetadataSource + ?Sized),
         roots: &(impl ManifestRootSource + ?Sized),
         manifest: &UnpublishedManifest,
-    ) -> Result<super::content_publication::ResolvedTemplates, String> {
+    ) -> Result<super::content_publication::ResolvedTemplates, PublishError> {
+        let metadata = &metadata.view();
         self.resolve_in_publication_admitted(tx, token, metadata, roots, manifest, None)
     }
     pub(crate) fn resolve_in_publication_admitted(
         self,
         tx: &mut rusqlite::Transaction<'_>,
         token: &str,
-        metadata: &ManifestMetadata,
+        metadata: &(impl MetadataSource + ?Sized),
         roots: &(impl ManifestRootSource + ?Sized),
         manifest: &UnpublishedManifest,
         work: Option<&s_content::capture_allocation::scratch::WorkScope>,
-    ) -> Result<super::content_publication::ResolvedTemplates, String> {
+    ) -> Result<super::content_publication::ResolvedTemplates, PublishError> {
+        let metadata = &metadata.view();
         self.resolve_in_publication_inner(
             tx,
             token,
@@ -719,26 +811,28 @@ impl PreparedManifestWorkspace {
         self,
         tx: &mut rusqlite::Transaction<'_>,
         token: &str,
-        metadata: &ManifestMetadata,
+        metadata: &(impl MetadataSource + ?Sized),
         roots: &(impl ManifestRootSource + ?Sized),
         manifest: &UnpublishedManifest,
         work: Option<&s_content::capture_allocation::scratch::WorkScope>,
         stage: &super::staged_nodes::StageOwner<'_>,
-    ) -> Result<super::content_publication::ResolvedTemplates, String> {
+    ) -> Result<super::content_publication::ResolvedTemplates, PublishError> {
+        let metadata = &metadata.view();
         self.resolve_in_publication_inner(tx, token, metadata, roots, manifest, work, Some(stage))
     }
     fn resolve_in_publication_inner(
         self,
         tx: &mut rusqlite::Transaction<'_>,
         token: &str,
-        metadata: &ManifestMetadata,
+        metadata: &(impl MetadataSource + ?Sized),
         roots: &(impl ManifestRootSource + ?Sized),
         manifest: &UnpublishedManifest,
         work: Option<&s_content::capture_allocation::scratch::WorkScope>,
         #[cfg(all(test, feature = "s_incremental"))] stage: Option<
             &super::staged_nodes::StageOwner<'_>,
         >,
-    ) -> Result<super::content_publication::ResolvedTemplates, String> {
+    ) -> Result<super::content_publication::ResolvedTemplates, PublishError> {
+        let metadata = &metadata.view();
         // No qualified originals exist across these actual Begin/scope/frontier SELECTs.
         // The issuer itself performs them; callers cannot substitute a scope/frontier token.
         super::content_publication::verify_current_begin_admitted(
@@ -750,7 +844,7 @@ impl PreparedManifestWorkspace {
         let previous_frontier =
             super::content_publication::current_publication_frontier_admitted(tx, work)?;
         NativePublicationLease::new(tx)
-            .map_err(|e| format!("PublicationInvalid：{e}"))?
+            .map_err(|e| PublishError::from(e).context("PublicationInvalid："))?
             .resolve(
                 self,
                 metadata,
@@ -781,7 +875,7 @@ impl<'lease, 'conn> NativePublicationLease<'lease, 'conn> {
     fn resolve(
         self,
         workspace: PreparedManifestWorkspace,
-        metadata: &ManifestMetadata,
+        metadata: &(impl MetadataSource + ?Sized),
         roots: &(impl ManifestRootSource + ?Sized),
         manifest: &UnpublishedManifest,
         previous_frontier: i64,
@@ -789,7 +883,8 @@ impl<'lease, 'conn> NativePublicationLease<'lease, 'conn> {
         #[cfg(all(test, feature = "s_incremental"))] stage: Option<
             &super::staged_nodes::StageOwner<'_>,
         >,
-    ) -> Result<super::content_publication::ResolvedTemplates, String> {
+    ) -> Result<super::content_publication::ResolvedTemplates, PublishError> {
+        let metadata = &metadata.view();
         let budget = workspace.budget;
         let source_cost = workspace.source_cost;
         let before = manifest_workspace_stats();
@@ -813,7 +908,7 @@ impl<'lease, 'conn> NativePublicationLease<'lease, 'conn> {
             // all bytes, even after context/material mismatch. No caller can mint its owner.
             let equal = store
                 .rebind_originals(&workspace.originals)
-                .map_err(|e| format!("PublicationInvalid：{e}"))?
+                .map_err(|e| PublishError::from(e).context("PublicationInvalid："))?
                 && context_equal;
             if equal {
                 record_workspace_stats(|stats| stats.rebound += 1);
@@ -826,7 +921,7 @@ impl<'lease, 'conn> NativePublicationLease<'lease, 'conn> {
                         .get(digest)
                         .expect("recorded successful put");
                     s_content::NodeSink::put(&mut store, *digest, *tag, body)
-                        .map_err(|e| format!("PublicationInvalid：{e}"))?;
+                        .map_err(|e| PublishError::from(e).context("PublicationInvalid："))?;
                     record_workspace_stats(|stats| stats.replay_puts += 1);
                 }
                 if store.bind_after_replay {
@@ -852,7 +947,7 @@ impl<'lease, 'conn> NativePublicationLease<'lease, 'conn> {
             } else {
                 drop(workspace);
                 let computed = assemble_unpublished(&mut store, metadata, roots)
-                    .map_err(|e| format!("PublicationInvalid：{e}"))?;
+                    .map_err(|e| PublishError::from(e).context("PublicationInvalid："))?;
                 if computed.batch_id != manifest.batch_id
                     || computed.value.content_ref() != manifest.value.content_ref()
                 {
@@ -1131,11 +1226,12 @@ fn diagnose_manifest_publication_reuse(
 // metadata fields are i64, budget fields u64; Built is digest/kind/presence/extent.
 #[cfg(feature = "s_incremental")]
 fn workspace_certificate_source_cost(
-    m: &ManifestMetadata,
+    m: &(impl MetadataSource + ?Sized),
     roots: &(impl ManifestRootSource + ?Sized),
     value: Option<&Built>,
     batch: Option<&str>,
 ) -> Option<usize> {
+    let m = &m.view();
     fn text(sum: &mut usize, value: &str) -> Option<()> {
         *sum = sum.checked_add(8)?.checked_add(value.len())?;
         Some(())
@@ -1174,7 +1270,7 @@ fn workspace_certificate_source_cost(
     }
     let roots = roots.view();
     for r in [
-        (&m.scope).into(),
+        m.scope,
         roots.generated_state,
         roots.publication_template,
         roots.delta_template,
@@ -1205,6 +1301,18 @@ struct ManifestRecordingStore<'a> {
     puts: s_content::CodecVec<NodeDigest>,
     tree_permit: Option<s_content::capture_allocation::scratch::NativeReservation>,
 }
+// Rust 1.97.1 alloc/collections/btree/node.rs：B=6，非根至少5键；每层分裂只新增一个右节点，
+// 根分裂另增一个内部根。除稳定节点数外再留 log2(n)+2 个完整内部节点，覆盖插入中途共存。
+// 单节点仍用既有 tree_slots 的11键/12边上界；不重定价其他树或S7来源合同。
+#[cfg(feature = "s_incremental")]
+fn manifest_original_tree_bytes(len: usize) -> usize {
+    if len == 0 {
+        return 0;
+    }
+    let nodes = len.min(len.div_ceil(5).saturating_add(len.ilog2() as usize + 2));
+    crate::v3::audit_retention::tree_slots::<NodeDigest, (u8, s_content::CodecVec<u8>)>(nodes)
+}
+
 #[cfg(feature = "s_incremental")]
 impl ManifestRecordingStore<'_> {
     fn record(&mut self, digest: NodeDigest, tag: u8, body: &[u8]) -> Result<(), CodecError> {
@@ -1230,16 +1338,19 @@ impl ManifestRecordingStore<'_> {
             return Ok(());
         };
         let admission = crate::v3::audit_store::NativeAdmission(self.inner.codec_work());
-        originals
+        let next_len = originals
             .len()
             .checked_add(1)
             .ok_or_else(|| admission.native_overflow())?;
-        // #1488 0035：增量许可——只为新增条目取一份树槽上界并入已持许可；
-        // 不再整树重许可，旧许可不与整树新许可并存（单条上界与整树上界逐条相加相等）。
-        let mut tree_step = super::content_store::native_tree_storage::<
-            NodeDigest,
-            (u8, s_content::CodecVec<u8>),
-        >(self.inner.codec_work(), 1)?;
+        let tree_growth = manifest_original_tree_bytes(next_len)
+            .checked_sub(manifest_original_tree_bytes(originals.len()))
+            .ok_or_else(|| admission.native_overflow())?;
+        let mut tree_step = self
+            .inner
+            .codec_work()
+            .filter(|_| tree_growth != 0)
+            .map(|work| work.reserve_native(tree_growth))
+            .transpose()?;
         let mut owned_body = s_content::CodecVec::default();
         admission.native_codec_room(&mut owned_body, body.len())?;
         owned_body.try_extend_bytes(body)?;
@@ -1338,20 +1449,22 @@ impl s_content::NodeSink for ManifestRecordingStore<'_> {
 #[cfg(feature = "s_incremental")]
 pub(crate) fn assemble_unpublished_with_workspace(
     store: &mut dyn NodeStore,
-    metadata: &ManifestMetadata,
+    metadata: &(impl MetadataSource + ?Sized),
     roots: &(impl ManifestRootSource + ?Sized),
     budget: crate::v3::ManifestWorkspaceBudget,
 ) -> Result<(UnpublishedManifest, Option<PreparedManifestWorkspace>), CodecError> {
+    let metadata = &metadata.view();
     assemble_workspace_units(store, metadata, roots, budget, false)
 }
 #[cfg(feature = "s_incremental")]
 fn assemble_workspace_units(
     store: &mut dyn NodeStore,
-    metadata: &ManifestMetadata,
+    metadata: &(impl MetadataSource + ?Sized),
     roots: &(impl ManifestRootSource + ?Sized),
     budget: crate::v3::ManifestWorkspaceBudget,
     collect_units: bool,
 ) -> Result<(UnpublishedManifest, Option<PreparedManifestWorkspace>), CodecError> {
+    let metadata = &metadata.view();
     let reserved_certificate = workspace_certificate_source_cost(metadata, roots, None, None)
         .filter(|cost| *cost <= budget.allowance());
     let mut recording = ManifestRecordingStore {
@@ -1483,10 +1596,11 @@ pub(crate) struct ManifestSourceReceipt {
 impl ManifestSourceReceipt {
     pub(crate) fn take_verified_units(
         &mut self,
-        metadata: &ManifestMetadata,
+        metadata: &(impl MetadataSource + ?Sized),
         roots: &(impl ManifestRootSource + ?Sized),
         manifest: &UnpublishedManifest,
-    ) -> Result<s_content::closure_delta::VerifiedUnits, String> {
+    ) -> Result<s_content::closure_delta::VerifiedUnits, PublishError> {
+        let metadata = &metadata.view();
         if !self.metadata.matches(metadata.view())
             || !same_roots(self.roots.view(), roots.view())
             || self.manifest_value != manifest.value
@@ -1499,7 +1613,7 @@ impl ManifestSourceReceipt {
             &metadata.profile_id,
             &metadata.rule_revision,
             metadata.input_frontier,
-            (&metadata.scope).into(),
+            metadata.scope,
             roots.view().generated_state,
         )?;
         self.closure_units
@@ -1509,11 +1623,12 @@ impl ManifestSourceReceipt {
     pub(crate) fn consume(
         self,
         token: &str,
-        metadata: &ManifestMetadata,
+        metadata: &(impl MetadataSource + ?Sized),
         roots: &(impl ManifestRootSource + ?Sized),
         manifest: &UnpublishedManifest,
         raw_range: std::ops::Range<usize>,
-    ) -> Result<crate::v3::audit_owner::RawReceipt, String> {
+    ) -> Result<crate::v3::audit_owner::RawReceipt, PublishError> {
+        let metadata = &metadata.view();
         let metadata_view = metadata.view();
         let roots_view = roots.view();
         #[cfg(test)]
@@ -1550,7 +1665,7 @@ impl ManifestSourceReceipt {
             metadata.generation,
             &metadata.rule_revision,
             raw_range,
-            (&metadata.scope).into(),
+            metadata.scope,
             roots.view().generated_state,
         )?;
         Ok(self.source)
@@ -1561,7 +1676,7 @@ impl ManifestSourceReceipt {
 #[cfg(feature = "s_incremental")]
 pub(crate) fn assemble_with_source(
     store: &mut dyn NodeStore,
-    metadata: &ManifestMetadata,
+    metadata: &(impl MetadataSource + ?Sized),
     roots: &(impl ManifestRootSource + ?Sized),
     source: crate::v3::audit_owner::RawReceipt,
     budget: Option<crate::v3::ManifestWorkspaceBudget>,
@@ -1572,37 +1687,38 @@ pub(crate) fn assemble_with_source(
         Option<PreparedManifestWorkspace>,
         ManifestSourceReceipt,
     ),
-    String,
+    PublishError,
 > {
+    let metadata = &metadata.view();
     source.check_manifest(
         metadata.generation,
         &metadata.profile_id,
         &metadata.rule_revision,
         metadata.input_frontier,
-        (&metadata.scope).into(),
+        metadata.scope,
         roots.view().generated_state,
     )?;
     let (mut manifest, workspace) = source.with_store(store, |bounded| match budget {
         Some(budget) => assemble_workspace_units(bounded, metadata, roots, budget, collect_units)
-            .map_err(|e| e.to_string()),
+            .map_err(PublishError::from),
         None => {
             let mut view = crate::v3::audit_store::StoreView::generic(bounded);
             view.collect_manifest_units = collect_units;
             assemble_unpublished_in_store(&mut view, metadata, roots)
                 .map(|manifest| (manifest, None))
-                .map_err(|e| e.to_string())
+                .map_err(PublishError::from)
         }
     })?;
     let work = store.codec_work();
     let proof = ManifestSourceReceipt {
         source,
-        metadata: NativeMetadata::from_view(metadata.view(), work).map_err(|e| e.to_string())?,
-        roots: NativeRoots::from_view(roots.view(), work).map_err(|e| e.to_string())?,
+        metadata: NativeMetadata::from_view(metadata.view(), work).map_err(PublishError::from)?,
+        roots: NativeRoots::from_view(roots.view(), work).map_err(PublishError::from)?,
         manifest_value: manifest.value.clone(),
         closure_units: manifest.closure_units.take(),
         batch_id: TextValue::Plain(
             NativeValue::<String>::try_from_str(&manifest.batch_id, work)
-                .map_err(|e| e.to_string())?,
+                .map_err(PublishError::from)?,
         ),
     };
     Ok((manifest, workspace, proof))
@@ -1610,9 +1726,10 @@ pub(crate) fn assemble_with_source(
 
 pub(super) fn assemble_unpublished(
     store: &mut dyn NodeStore,
-    metadata: &ManifestMetadata,
+    metadata: &(impl MetadataSource + ?Sized),
     roots: &(impl ManifestRootSource + ?Sized),
 ) -> Result<UnpublishedManifest, CodecError> {
+    let metadata = &metadata.view();
     assemble_unpublished_in_store(
         &mut crate::v3::audit_store::StoreView::generic(store),
         metadata,
@@ -1621,9 +1738,10 @@ pub(super) fn assemble_unpublished(
 }
 pub(crate) fn assemble_unpublished_in_store(
     store: &mut crate::v3::audit_store::StoreView<'_, '_>,
-    metadata: &ManifestMetadata,
+    metadata: &(impl MetadataSource + ?Sized),
     roots: &(impl ManifestRootSource + ?Sized),
 ) -> Result<UnpublishedManifest, CodecError> {
+    let metadata = &metadata.view();
     assemble_unpublished_view_in_store(store, metadata.view(), roots.view())
 }
 /// 明确normal输出适配器，借用相同输入核；不创建临时normal元数据DTO。
@@ -1962,7 +2080,8 @@ fn context_error(detail: impl Into<String>) -> CodecError {
     CodecError::new("manifest_context", detail)
 }
 
-fn check_metadata(m: &ManifestMetadata) -> Result<(), CodecError> {
+fn check_metadata(m: &(impl MetadataSource + ?Sized)) -> Result<(), CodecError> {
+    let m = &m.view();
     check_metadata_view(m.view())
 }
 pub(crate) fn check_metadata_view(m: MetadataView<'_>) -> Result<(), CodecError> {
@@ -2109,7 +2228,8 @@ mod tests {
     #[cfg(feature = "s_incremental")]
     #[test]
     fn native_manifest_metadata_and_roots_outlive_scope_and_drop_independently() {
-        let (_, metadata, roots, _, _, _) = fixture();
+        let (mut nodes, metadata, roots, _, _, _) = fixture();
+        let expected = assemble_unpublished(&mut nodes, &metadata, &roots).unwrap();
         let budget = crate::v3::audit_owner::native::Budget::new(1024 * 1024, 0).unwrap();
         let baseline = budget.live();
         for _ in 0..3 {
@@ -2126,6 +2246,25 @@ mod tests {
             assert!(owned_metadata.matches(metadata.view()));
             assert!(same_roots(owned_roots.view(), roots.view()));
             let both = budget.live();
+            let actual = assemble_unpublished(&mut nodes, &owned_metadata, &owned_roots).unwrap();
+            assert_eq!(actual.value, expected.value);
+            assert_eq!(actual.batch_id, expected.batch_id);
+            assert_eq!(
+                workspace_certificate_source_cost(
+                    &owned_metadata,
+                    &owned_roots,
+                    Some(&actual.value),
+                    Some(&actual.batch_id)
+                ),
+                workspace_certificate_source_cost(
+                    &metadata,
+                    &roots,
+                    Some(&expected.value),
+                    Some(&expected.batch_id)
+                ),
+            );
+            drop(actual);
+            assert_eq!(budget.live(), both, "消费者只借字段，不转移元数据许可");
             assert!(both > baseline);
             drop(owned_metadata);
             assert!(budget.live() < both);
@@ -2245,7 +2384,109 @@ mod tests {
         assert_eq!(budget.live(), baseline);
     }
 
-    // #1488 0035：originals 树增量许可——每个新条目只并入一份单条上界，峰值不含整树重复许可。
+    #[cfg(feature = "s_incremental")]
+    #[test]
+    fn native_manifest_tree_bound_covers_actual_split_peaks() {
+        use crate::v3::audit_owner::allocation_probe::{live_bytes, Window};
+        for order in 0..3 {
+            let mut tree = std::collections::BTreeMap::new();
+            let baseline = live_bytes();
+            let mut peak = 0;
+            for index in 0..4096usize {
+                let key = match order {
+                    0 => index,
+                    1 => 4095 - index,
+                    _ => index * 4051 % 4096,
+                };
+                let mut digest = [0; 32];
+                digest[..8].copy_from_slice(&(key as u64).to_be_bytes());
+                let window = Window::start();
+                tree.insert(digest, (7u8, s_content::CodecVec::<u8>::default()));
+                let observed = window.finish();
+                let actual = observed["coexistence_peak"].as_i64().unwrap() - baseline;
+                peak = peak.max(actual);
+                assert!(
+                    actual >= 0 && actual as usize <= manifest_original_tree_bytes(tree.len()),
+                    "order={order} len={} actual={actual} upper={}",
+                    tree.len(),
+                    manifest_original_tree_bytes(tree.len())
+                );
+            }
+            drop(tree);
+            assert_eq!(live_bytes(), baseline);
+            eprintln!(
+                "MANIFEST_BTREE_PEAK order={order} entries=4096 actual={peak} upper={}",
+                manifest_original_tree_bytes(4096)
+            );
+        }
+    }
+
+    #[cfg(feature = "s_incremental")]
+    #[test]
+    fn native_manifest_tree_growth_exact_and_one_less_keep_old_permit() {
+        use s_content::capture_allocation::scratch::{ScratchFailure, WorkError};
+        let mut conn = rusqlite::Connection::open_in_memory().unwrap();
+        conn.execute_batch("CREATE TABLE s_protocol_meta(singleton INTEGER PRIMARY KEY,protocol_revision TEXT NOT NULL); INSERT INTO s_protocol_meta VALUES(1,'s-session/3');").unwrap();
+        let tx = conn.transaction().unwrap();
+        super::super::content_store::init_schema(&tx).unwrap();
+        for short in [true, false] {
+            let budget = crate::v3::audit_owner::native::Budget::new(4 << 20, 0).unwrap();
+            let baseline = budget.live();
+            let result = budget.codec_work().unwrap().run(|work| {
+                let mut inner =
+                    super::super::content_store::TxStore::new(&tx)?.with_work(Some(work));
+                let mut recording = ManifestRecordingStore {
+                    inner: &mut inner,
+                    allowance: 1 << 20,
+                    certificate_cost: 0,
+                    source_cost: 0,
+                    originals: Some(Default::default()),
+                    retained_capacity: 0,
+                    accepted_entries: 0,
+                    accepted_body_len: 0,
+                    puts: Default::default(),
+                    tree_permit: None,
+                };
+                for tag in 0..7u8 {
+                    recording.record(s_content::frame(tag, &[]), tag, &[])?;
+                }
+                let held = recording.tree_permit.as_ref().unwrap().bytes();
+                let growth = manifest_original_tree_bytes(8) - held;
+                assert!(growth > 0);
+                let filler =
+                    work.reserve_native(budget.remaining() - growth + usize::from(short))?;
+                let before = budget.live();
+                let added = recording.record(s_content::frame(7, &[]), 7, &[]);
+                if short {
+                    assert!(added.is_err());
+                    assert_eq!(recording.originals.as_ref().unwrap().len(), 7);
+                    assert_eq!(recording.tree_permit.as_ref().unwrap().bytes(), held);
+                    assert_eq!(budget.live(), before, "差额拒绝不得释放旧许可或新增原件");
+                } else {
+                    assert!(added.is_ok());
+                    assert_eq!(recording.originals.as_ref().unwrap().len(), 8);
+                    assert_eq!(
+                        recording.tree_permit.as_ref().unwrap().bytes(),
+                        held + growth
+                    );
+                    assert_eq!(budget.remaining(), 0, "恰足差额须通过");
+                }
+                drop(filler);
+                added
+            });
+            if short {
+                assert!(matches!(
+                    result,
+                    Err(WorkError::Resource(ScratchFailure::Budget))
+                ));
+            } else {
+                result.unwrap();
+            }
+            assert_eq!(budget.live(), baseline);
+        }
+    }
+
+    // #1488/#1419：插入前只并入新旧峰值上界之差，旧树许可继续持有。
     #[cfg(feature = "s_incremental")]
     #[test]
     fn native_manifest_originals_tree_permit_is_incremental_without_whole_tree_coexistence() {
@@ -2282,7 +2523,11 @@ mod tests {
                     let body = [index as u8 + 10, 1, 2];
                     recording.put(s_content::frame(tag, &body), tag, &body)?;
                     let held = recording.tree_permit.as_ref().map_or(0, |p| p.bytes());
-                    assert_eq!(held, (index + 1) * per, "树许可逐条累加");
+                    assert_eq!(
+                        held,
+                        manifest_original_tree_bytes(index + 1),
+                        "树许可只增峰值上界差额"
+                    );
                     assert!(
                         budget.peak() - budget.live() < per,
                         "峰值不得含整树重复许可：peak={} live={} per={per}",
@@ -2294,7 +2539,11 @@ mod tests {
                 Ok::<_, CodecError>(recording.tree_permit.take())
             })
             .unwrap();
-        assert_eq!(tree_permit.as_ref().map(|p| p.bytes()), Some(entries * per));
+        assert_eq!(
+            tree_permit.as_ref().map(|p| p.bytes()),
+            Some(manifest_original_tree_bytes(entries))
+        );
+        assert!(manifest_original_tree_bytes(entries) < entries * per);
         drop(tree_permit);
         assert_eq!(budget.live(), baseline);
     }

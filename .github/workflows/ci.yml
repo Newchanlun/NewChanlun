@@ -48,6 +48,12 @@ jobs:
   #   不再跑 Rust 作业（典型是列车追平的 main 只多了 .sandcastle 改动）。凭据是那次 run 里服务端渲染的
   #   `rust-green <指纹>` 作业的结论（见文件末尾 rust-green 作业），不是 artifact：同一 run 里的 PR 代码拿得到运行时令牌，
   #   能伪造 artifact（#2027 第三轮独审）。只认本仓库分支、7 天内的 run，查询出错一律全跑。判定见 .github/scripts/ci-rust-reuse.py。
+  # #1855 裁定 2（issuecomment-6732190569）：s_writer 决定四条 W2 冷锁（w2-cold-locks）是否随本 PR 跑。
+  #   S 写者路径由 .github/scripts/s_writer_paths.py 判定：静态集合（rust/ 去掉 S 写者不引用的部分，加 s_session 的
+  #   catalog/profiles/contracts/tests/inputs、rust-job-setup、run-cargo-with-telemetry.sh 及其 EACCES 重试脚本与冷锁 workflow），
+  #   再加从写者源码的 #[path]、include*! 与字符串字面量自动求出的仓内文件（#1855 阻断 2，issuecomment-6741990654）。
+  #   判定样例与负控在 test_s_writer_paths.py，rust-check 执行。手动触发全跑；push 不跑，main 由 w2-cold-locks.yml
+  #   每晚跑；文件数达上限、取不到清单或脚本出错时跑。
   changes:
     runs-on: ubuntu-latest
     timeout-minutes: 5
@@ -58,14 +64,18 @@ jobs:
     outputs:
       rust: ${{ steps.filter.outputs.rust }}
       rust_key: ${{ steps.filter.outputs.rust_key }}
+      s_writer: ${{ steps.filter.outputs.s_writer }}
     steps:
-      # 稀疏检出 .github/scripts，供同 PR 复用判定（ci-rust-reuse.py）使用。
-      #   检出失败不让本作业失败：脚本不存在时下面按全跑处理。
+      # 稀疏检出 .github/scripts（同 PR 复用判定 ci-rust-reuse.py、s_writer_paths.py）与 rust/（s_writer 派生路径要扫写者源码）。
+      #   检出失败不让本作业失败：脚本不存在时复用按全跑、s_writer 按冷锁照跑处理。
       - uses: actions/checkout@v4
         if: github.event_name == 'pull_request'
         continue-on-error: true
         with:
-          sparse-checkout: .github/scripts
+          filter: blob:none
+          sparse-checkout: |
+            rust
+            .github/scripts
           persist-credentials: false
       - id: filter
         env:
@@ -115,23 +125,35 @@ jobs:
             }
             if dedup; then rust=false; else rust=true; fi
             echo "push dedup: rust=$rust"
-            echo "rust=$rust" >> "$GITHUB_OUTPUT"; exit 0
+            # push 事件不在 ci.yml 重跑 270 分钟 W2 冷锁：PR 合入前已由 pull_request 路径门挡住，main 由 w2-cold-locks.yml 每晚定时跑满（#1855）。
+            echo "rust=$rust" >> "$GITHUB_OUTPUT"; echo s_writer=false >> "$GITHUB_OUTPUT"; exit 0
           fi
-          if [ "$EVENT" != pull_request ]; then echo rust=true >> "$GITHUB_OUTPUT"; exit 0; fi
+          if [ "$EVENT" != pull_request ]; then echo rust=true >> "$GITHUB_OUTPUT"; echo s_writer=true >> "$GITHUB_OUTPUT"; exit 0; fi
           # 改动清单取不到（如超大 PR：GitHub 422「diff is taking too long to generate」，#1945 run 42654260412）
-          #   或 changed_files 查询失败时按全跑，不让 changes 失败而连带 ci-ok 变红（#2038）。
+          #   或 changed_files 查询失败时按全跑，不让 changes 失败而连带 ci-ok 变红（#2038）。冷锁同样照跑（#1855）。
           if ! gh api --paginate "repos/$GITHUB_REPOSITORY/pulls/$PR/files?per_page=100" \
             --jq '.[] | .filename, (.previous_filename // empty)' > "$RUNNER_TEMP/files"; then
-            echo "changed-file list unavailable: rust=true"; echo "rust=true" >> "$GITHUB_OUTPUT"; exit 0
+            echo "changed-file list unavailable: rust=true s_writer=true"
+            echo "rust=true" >> "$GITHUB_OUTPUT"; echo "s_writer=true" >> "$GITHUB_OUTPUT"; exit 0
           fi
           if ! total=$(gh api "repos/$GITHUB_REPOSITORY/pulls/$PR" --jq .changed_files); then
-            echo "changed_files unavailable: rust=true"; echo "rust=true" >> "$GITHUB_OUTPUT"; exit 0
+            echo "changed_files unavailable: rust=true s_writer=true"
+            echo "rust=true" >> "$GITHUB_OUTPUT"; echo "s_writer=true" >> "$GITHUB_OUTPUT"; exit 0
           fi
           other=$(grep -c -v -E "$SKIP_RE" "$RUNNER_TEMP/files" || true)
           if [ "$total" -ge 3000 ] || [ ! -s "$RUNNER_TEMP/files" ] || [ "$other" -ne 0 ]; then rust=true; else rust=false; fi
-          echo "changed=$total other=$other rust=$rust"
+          if python3 .github/scripts/s_writer_paths.py "$RUNNER_TEMP/files" > "$RUNNER_TEMP/s-writer-files"; then
+            writer=$(wc -l < "$RUNNER_TEMP/s-writer-files" | tr -d ' ')
+            head -n 20 "$RUNNER_TEMP/s-writer-files"
+          else
+            echo "s_writer_paths.py failed; the cold locks run"; writer=1
+          fi
+          if [ "$rust" = true ] && { [ "$total" -ge 3000 ] || [ ! -s "$RUNNER_TEMP/files" ] || [ "$writer" -ne 0 ]; }; then s_writer=true; else s_writer=false; fi
+          echo "changed=$total other=$other rust=$rust s_writer_files=$writer s_writer=$s_writer"
+          echo "s_writer=$s_writer" >> "$GITHUB_OUTPUT"
           if [ "$rust" = false ]; then echo "rust=false" >> "$GITHUB_OUTPUT"; exit 0; fi
           # 同 PR 复用：Rust 输入与本分支上一次全绿 run 相同就不重跑；出错按全跑（脚本只会输出 rust=true）。
+          #   复用只替 Rust 作业作证（rust-green 不含冷锁），s_writer 仍按本 PR 改动清单定（#1855）。
           python3 .github/scripts/ci-rust-reuse.py "$GITHUB_REPOSITORY" "$GITHUB_SHA" "$HEAD_REF" "$GITHUB_RUN_ID" "$SKIP_RE" \
             > "$RUNNER_TEMP/reuse" || echo "rust=true" > "$RUNNER_TEMP/reuse"
           cat "$RUNNER_TEMP/reuse"
@@ -161,8 +183,9 @@ jobs:
       - name: Fetch LFS objects
         # pull 失败时 relations.jsonl 停留为 pointer；tests/conftest.py 的
         # real_relations_usable 守卫会显式 skip 并打印原因，不会静默通过。
+        # 排除 s-observer 专用的 91.9 MB Q3 夹具，避免两套缓存重复消耗 LFS 流量。
         continue-on-error: true
-        run: git lfs pull
+        run: git lfs pull --exclude="s_session/tests/fixtures/q3-real-s3-w-recover-revise.json"
 
       - name: Grep gate — window-binding artifacts banned (G1)
         run: '! grep -rn "P101_TAG\|P101_MULTI\|cert_bsp_tag" rust/src/theta_v0/'
@@ -318,6 +341,9 @@ jobs:
 
       - name: "Test #1488 named-lock runner (#1875)"
         run: python3 -m unittest discover -s ../.github/scripts -p 'test_run_1488_delta_ci.py' -v
+
+      - name: "Test W2 cold-lock path filter (#1855)"
+        run: python3 -m unittest discover -s ../.github/scripts -p 'test_s_writer_paths.py' -v
 
       - uses: ./.github/actions/rust-job-setup
 
@@ -590,6 +616,34 @@ jobs:
         if: ${{ !cancelled() && matrix.group == 'owned-h1' }}
         run: ../.github/scripts/check-compile-negatives-1394.sh
 
+      # #1419 裁定（issuecomment-6265726014）：v2 写者机械锁，发布构建（只开 s_session）。
+      #   ① 可达性：v2 核心写函数（init/accept/advance/recover_core）在源码以 cfg 条件 expect(dead_code) 标注；
+      #      -D unfulfilled_lint_expectations 让任何新接上的生产调用路径直接编译失败。入口函数（cmd_*、
+      #      v2 init_v2/serve/handle）在非测试、非种子构建里不存在（cfg 门）。
+      #   ② 发布构建未开 s_v2_seed_testonly：release 下该 feature 本就 compile_error；再对产物断言种子自报
+      #      子命令为「未知子命令」，全部 v2 写子命令返回退役错误且不建库。
+      - name: v2 写者机械锁 — 发布构建（#1419）
+        if: ${{ !cancelled() && matrix.group == 'content' }}
+        env:
+          RUSTFLAGS: -D unfulfilled_lint_expectations
+        run: |
+          set -euo pipefail
+          ../.github/scripts/run-cargo-with-telemetry.sh cargo build --locked --release --features s_session --bin s_structure_session --jobs 1
+          bin=target/release/s_structure_session
+          lock_dir=$(mktemp -d)
+          if "$bin" v2-seed-info >"$lock_dir/out" 2>"$lock_dir/err"; then
+            echo "发布构建认 v2-seed-info：s_v2_seed_testonly 被打开"; exit 1
+          fi
+          grep -q '未知子命令' "$lock_dir/err" || { cat "$lock_dir/err"; exit 1; }
+          for sub in init reset accept advance recover serve; do
+            if "$bin" "$sub" --db "$lock_dir/v2.db" --session lock --catalog ../s_session/catalog/signed-catalog.json \
+                >"$lock_dir/out" 2>"$lock_dir/err"; then
+              echo "发布构建 $sub 未拒"; exit 1
+            fi
+            grep -q 'v2 结构写者已退役' "$lock_dir/err" || { echo "$sub:"; cat "$lock_dir/err"; exit 1; }
+          done
+          test ! -e "$lock_dir/v2.db"
+
       # #1394 C：内容编码在 s_session feature 下供多个 owner 共用；只测 S bin 不会执行库测试。
       - name: cargo test — 完整内容编码与共享图校验（#1394）
         if: ${{ !cancelled() && matrix.group == 'owned-h1' }}
@@ -622,7 +676,12 @@ jobs:
           python3 ../.github/scripts/run-1488-delta-ci.py --mode Native --print-plan \
             | python3 -c 'import json, sys; print("\n".join(lock["target"] + " " + lock["name"] for lock in json.load(sys.stdin)["locks"]))' \
             > "$RUNNER_TEMP/native-1488-locks.txt"
-          echo "skip list: $(wc -l < "$RUNNER_TEMP/native-1488-locks.txt") Native locks run by #1488"
+          # #1419：四条 W2 冷锁在签署值下跑满超过本组 90 分钟时限，改由长作业通道 w2-cold-locks.yml 逐条执行。
+          for lock in cd_second_cursor_continuation ef_seed_pair_qualification_and_canonical \
+              w_undetermined_prior_revision bounded2_shape_development_window; do
+            echo "bin v3::audit_owner::construction_tests::w2_h1_cold_${lock}_matches_online"
+          done >> "$RUNNER_TEMP/native-1488-locks.txt"
+          echo "skip list: $(wc -l < "$RUNNER_TEMP/native-1488-locks.txt") Native locks run by #1488 or w2-cold-locks.yml"
           CI_DELTA_SKIP_FILE="$RUNNER_TEMP/native-1488-locks.txt" \
             ../.github/scripts/run-cargo-with-telemetry.sh ../.github/scripts/test-feature-delta.sh s_capture_native_testonly
 
@@ -632,7 +691,7 @@ jobs:
         if: ${{ !cancelled() && matrix.group == 'owned' }}
         env:
           S_NATIVE_SQLITE_CACHE_KIB: "262144"
-        run: '../.github/scripts/run-cargo-with-telemetry.sh cargo test --locked --features s_session,s_incremental --bin s_structure_session --jobs "${CI_CARGO_JOBS:-1}" -- s_allocation:: s3_serve incremental_build_full_branch_only_at_birth build_profile pager_probe history_layout_multicut_ layout_object_index_ b2_native_owner_restore_ r9a_new_cut_manifest_ bounded_layout_cc007_ layout1_generation_'
+        run: '../.github/scripts/run-cargo-with-telemetry.sh cargo test --locked --features s_session,s_incremental --bin s_structure_session --jobs "${CI_CARGO_JOBS:-1}" -- s_allocation:: s3_serve incremental_build_full_branch_only_at_birth build_profile pager_probe history_layout_multicut_ layout_object_index_ b2_native_owner_restore_ r9a_new_cut_manifest_ bounded_layout_cc007_ layout1_generation_ publication_ --show-output'
 
       - name: H1 私有 FD/WAL 授权边界锁（#1481 S1D）
         if: ${{ !cancelled() && (matrix.group == 'owned-h1' || (matrix.group == 'owned' && env.OWNED_SPLIT != '1')) }}
@@ -647,9 +706,11 @@ jobs:
         run: |
           set -o pipefail
           # #1481 S1K：接替 history36h 的全部 h1_ release 锁，保留正式准入逐名收据。
-          cargo test --release --locked --features s_session,s_incremental --bin s_structure_session --jobs "${CI_CARGO_JOBS_RELEASE:-4}" h1_ -- --test-threads 1 --show-output --format pretty --color never 2>&1 | tee "$RUNNER_TEMP/1481-admission.log"
+          # #1855：h1_ 过滤也命中 w2_h1_cold_*，四条 W2 冷锁归长作业通道 w2-cold-locks.yml，此处跳过。
+          cargo test --release --locked --features s_session,s_incremental --bin s_structure_session --jobs "${CI_CARGO_JOBS_RELEASE:-4}" h1_ -- --skip w2_h1_cold_ --test-threads 1 --show-output --format pretty --color never 2>&1 | tee "$RUNNER_TEMP/1481-admission.log"
           for test in \
             h1_admission_cold_prefixes_match_full_canonical \
+            h1_small_cache_publish_two_generations_matches_cold_smoke \
             h1_admission_cold_negative_classes_match_full_oracle \
             h1_admission_online_own_commits_match_full_canonical \
             h1_admission_foreign_sqlite_changes_retire_writer \
@@ -1264,6 +1325,13 @@ jobs:
     if: github.event_name == 'workflow_dispatch'
     uses: ./.github/workflows/ci-macos.yml
 
+  # #1855 裁定 2：不挡合入的锁不算锁（#799 第 11 条、ADR 0047）。PR 改到 S 写者路径（changes.s_writer）时必须跑并进 ci-ok；
+  #   没改到时 skipped，ci-ok 按通过计。作业本体（release 档逐条 --exact，上限 270 分钟）在 w2-cold-locks.yml。
+  w2-cold-locks:
+    needs: changes
+    if: needs.changes.outputs.s_writer == 'true'
+    uses: ./.github/workflows/w2-cold-locks.yml
+
   s-observer:
     # #1372：执行只读观察、生命周期和取证边界回归；完整160输入/浏览器验收另存具名证据。
     runs-on: ubuntu-latest
@@ -1299,6 +1367,44 @@ jobs:
       #   只把这条锁连同其判据（钩子不再验、重载命中重放计费、Reader 根变化必重验）单独成套执行。
       - name: Q3 v3 validate-once lock (#1394)
         run: node --test s_session/tests/test_q3_v3_validate_once.cjs
+      - name: Cache Q3 S3 real fixture LFS object (#1419)
+        uses: actions/cache@v4
+        with:
+          path: .git/lfs
+          key: lfs-q3-${{ runner.os }}-${{ hashFiles('s_session/tests/fixtures/q3-real-s3-w-recover-revise.json') }}
+      - name: Pull and verify Q3 S3 real fixture (#1419)
+        run: |
+          git lfs pull --include="s_session/tests/fixtures/q3-real-s3-w-recover-revise.json"
+          echo "2a83c1808b21fdc6647d37a602d782622b2d74c5bfb4342e16cb69f7d0490a2a  s_session/tests/fixtures/q3-real-s3-w-recover-revise.json" | sha256sum --check
+      - name: Q3 S3 center-family contract (#1419)
+        run: node --test s_session/tests/test_q3_s3_center_contract.cjs
+      # #1419：Q3 沿公开 Client 入口消费真实 S3 W 夹具（fixtures/q3-real-s3-w-recover-revise.json，Git LFS 入仓，
+      #   sha256 2a83c180…0490a2a，91,895,732 B）。只跑第 1、2 条（规则串、cut0 与等待期；约 30 s，峰值 RSS 1.4 GB）。
+      #   第 3–5 条（跨恢复逐代 Watch、首中枢与修订、尾段中枢对）不进 CI：单条峰值 RSS 12–15 GB、耗时 12–75 分钟，
+      #   超出 runner。重型验证窗口在本机或远端逐条单进程跑：
+      #   Q3_WIRE_PROBE=1 node --max-old-space-size=16000 --test --test-name-pattern=<跨真实写者恢复|首中枢|尾段> s_session/tests/test_q3_s3_real_cut.cjs
+      #   收据：.chanlun/review-results/issue1419-q3-real-cut-receipts/（t1..t5.log 与 README.md）。
+      - name: Q3 S3 real cut0 consumption (#1419)
+        run: node --max-old-space-size=4096 --test --test-name-pattern="规则串|cut0" s_session/tests/test_q3_s3_real_cut.cjs
+      - name: Verify Q3 S3 heavy receipt freshness (#1419)
+        run: |
+          python -B - <<'PY'
+          import hashlib, pathlib
+          base = pathlib.Path(".chanlun/review-results/issue1419-q3-real-cut-receipts")
+          readme = (base / "README.md").read_text(encoding="utf-8")
+          for label, rel in (
+              ("bundle_sha256", "s_session/browser/tb01c-client.js"),
+              ("fixture_sha256", "s_session/tests/fixtures/q3-real-s3-w-recover-revise.json"),
+              ("harness_sha256", "s_session/tests/q3_complete_fixture.cjs"),
+              ("test_sha256", "s_session/tests/test_q3_s3_real_cut.cjs"),
+          ):
+              digest = hashlib.sha256(pathlib.Path(rel).read_bytes()).hexdigest()
+              assert f"`{label}` `{digest}`" in readme, f"{label} drifted from {rel}: {digest}"
+          for idx in range(1, 6):
+              log = (base / f"t{idx}.log").read_text(encoding="utf-8")
+              assert "\nok 1 - " in log and "\n# fail 0\n" in log, f"t{idx}.log not green"
+              assert "/Users/" not in log and "/Volumes/" not in log, f"t{idx}.log leaks host path"
+          PY
       - name: TB-02-W terminal and cursor contract tests (#1420)
         if: ${{ !cancelled() }}
         working-directory: s_session/tests
@@ -1382,6 +1488,11 @@ jobs:
       - name: Build formal (lake build)
         # formal/lean-toolchain 固定 leanprover/lean4:v4.31.0，elan 首次调用自动装该工具链
         run: lake build
+        working-directory: formal
+
+      # #1393：此单文件不在 lake 默认 roots；常规 CI 必须持续显式核验。
+      - name: Check raw inclusion initialization (Lean, #1393)
+        run: lake env lean Origin/RawInclusionInitialization.lean
         working-directory: formal
 
       - name: Fixture drift check (Lean → fixtures)
@@ -1475,6 +1586,7 @@ jobs:
       - fixture-drift
       - sandcastle-ts
       - deepagents-pilot
+      - w2-cold-locks
     steps:
       - name: Require every CI job to succeed or be skipped by the path filter
         env:
@@ -1484,16 +1596,18 @@ jobs:
           import json, os, sys
           needs = json.loads(os.environ["RESULTS"])
           results = {name: job["result"] for name, job in needs.items()}
-          rust = (needs.get("changes") or {}).get("outputs", {}).get("rust")
-          # 只有 Rust 作业可以 skipped，且必须是 changes 明确判定 rust=false。
+          outputs = (needs.get("changes") or {}).get("outputs", {})
+          rust, s_writer = outputs.get("rust"), outputs.get("s_writer")
+          # 只有 Rust 作业与 W2 冷锁可以 skipped，且必须是 changes 明确判定 rust=false 或 s_writer=false。
           rust_jobs = {"rust-check", "rust-test-default", "rust-test-s-session", "rust-test-s-session-coverage",
                        "rust-test-s-session-extra-groups", "rust-test-production-session",
                        "s-sequence-1488", "s-fields-native-1488"}
+          skippable = {name: rust == "false" for name in rust_jobs} | {"w2-cold-locks": s_writer == "false"}
           bad = {name: r for name, r in results.items()
-                 if not (r == "success" or (r == "skipped" and name in rust_jobs and rust == "false"))}
-          print(json.dumps({"rust": rust, "results": results}, indent=1, sort_keys=True))
-          if bad or results.get("changes") != "success" or rust not in ("true", "false"):
-              sys.exit(f"CI 未通过：{bad}，changes={results.get('changes')}，rust={rust}")
+                 if not (r == "success" or (r == "skipped" and skippable.get(name, False)))}
+          print(json.dumps({"rust": rust, "s_writer": s_writer, "results": results}, indent=1, sort_keys=True))
+          if bad or results.get("changes") != "success" or rust not in ("true", "false") or s_writer not in ("true", "false"):
+              sys.exit(f"CI 未通过：{bad}，changes={results.get('changes')}，rust={rust}，s_writer={s_writer}")
           PY
 
   # #1875 同 PR 复用的凭据：Rust 作业全部成功（不是 skipped）时才会运行；作业名带本次 Rust 输入指纹，由 GitHub 服务端渲染，

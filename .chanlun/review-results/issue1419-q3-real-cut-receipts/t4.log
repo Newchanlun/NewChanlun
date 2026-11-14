@@ -1,0 +1,37 @@
+TAP version 13
+# Q3-WIRE load 60 718263522 830658 8968781824
+# Q3-WIRE watch 61 1164042296 1742417 10187374592
+# Q3-WIRE watch 62 1234772784 2480417 14222639104
+# Subtest: 真实S3 W 首中枢非空，改价修订撤回与改回恢复两代 Watch 各自与 Rust 同代一致
+ok 1 - 真实S3 W 首中枢非空，改价修订撤回与改回恢复两代 Watch 各自与 Rust 同代一致
+  ---
+  duration_ms: 5134085.474917
+  type: 'test'
+  ...
+1..1
+# tests 1
+# suites 0
+# pass 1
+# fail 0
+# cancelled 0
+# skipped 0
+# todo 0
+# duration_ms 5137759.148125
+     5137.82 real      5447.33 user       129.42 sys
+         15869870080  maximum resident set size
+                   0  average shared memory size
+                   0  average unshared data size
+                   0  average unshared stack size
+            15384444  page reclaims
+                   0  page faults
+                   0  swaps
+                   0  block input operations
+                   0  block output operations
+                  18  messages sent
+                  14  messages received
+                   0  signals received
+                  36  voluntary context switches
+             8839499  involuntary context switches
+           535435424  instructions retired
+           240421112  cycles elapsed
+            16959504  peak memory footprint

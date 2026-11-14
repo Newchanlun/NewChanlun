@@ -481,7 +481,6 @@
 0.02	v3::history::tests::full_array_sql_reads_are_linear_and_never_reuse_previous_bodies
 0.02	v3::writer_cli::tests::fifo_resource_config_is_rejected_before_opening_it
 0.02	v3::tests::reset_does_not_delete_a_database_owned_by_another_writer
-0.02	v3::ordinary_materials::tests::hit_rechecks_f_without_sql_fallback_and_drop_releases_owner
 0.02	evidence_store::metadata_regressions::evidence_graph_parameter_lengths_are_verified_and_conflicts_refused
 0.02	v3::admission_anchor::ram::tests::mixed_ram_all_charge_kinds_share_atomic_caps
 0.02	v3::admission_provider::control_lock_tests::h1_ledger_cache_sidecars_are_pinned_and_physically_counted
@@ -823,7 +822,6 @@
 0.01	content_publication::tests::content_publication_rejects_unrelated_manifest_and_source_producer
 0.01	content_producer::tests::same_ohlc_new_revision_moves_refs_and_obj3
 0.01	content_producer::tests::replacing_prepared_raw_content_invalidates_the_previous_view
-0.01	content_producer::tests::raw_prefix_chain_is_last_step_coords_for_every_prefix
 0.01	content_producer::tests::parser_fractal_sources_reject_foreign_stale_and_manual_shapes
 0.01	content_producer::tests::obj3_recipe_is_verified_independently
 0.01	content_producer::tests::missing_source_degraded_and_type_errors_are_explicit
