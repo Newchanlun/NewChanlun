@@ -194,3 +194,22 @@ def test_boot_evidence_change_during_reconcile_does_not_commit(tmp_path, monkeyp
     assert gate.reconcile(generation, owner)['reason'] == 'local_epoch_changed'
     with gate.tx() as db:
         assert not db.execute('SELECT * FROM resolutions').fetchall()
+
+
+def test_executor_loop_does_not_swallow_intake_business_error(tmp_path, monkeypatch):
+    from pilot1742 import queue
+    events = []
+    owner = SimpleNamespace(coverage=lambda _: None, poll=lambda: False, stop=lambda: events.append('stop'))
+    monkeypatch.setattr(maintenance, 'Owner', lambda _: owner)
+    monkeypatch.setattr(executor, '_client', lambda _: SimpleNamespace(close=lambda: events.append('close')))
+    monkeypatch.setattr(executor, 'RepoGateway', lambda c: c)
+    failure = ValueError('invalid unit filename')
+    def intake(child):
+        raise failure
+    monkeypatch.setattr(queue, 'QueueIntake', lambda *a: SimpleNamespace(once=intake))
+    monkeypatch.setattr(executor.time, 'sleep', lambda _: pytest.fail('business error must not become a silent retry'))
+    args = SimpleNamespace(review_sweep=False, once=False, poll_seconds=1, state_root=tmp_path)
+    with pytest.raises(ValueError) as result:
+        executor._serve(args, None, SimpleNamespace(load=lambda: None), tmp_path)
+    assert result.value is failure
+    assert events == ['stop', 'close']

@@ -10,6 +10,7 @@ import stat
 import subprocess
 import sys
 import threading
+import time
 import uuid
 from pathlib import Path
 from typing import TextIO
@@ -19,6 +20,9 @@ from .maintenance_epoch import local_epoch
 from .maintenance_es import Action, AuditIdentity, Coverage, OfflineES, Source
 from .maintenance_es_native import DevelopmentConsumer
 
+# Only bounds evidence transport after real helper wait AND ES process closure.
+# Expiry revokes the session; it never supplies wait/closure evidence.
+WAIT_EVIDENCE_SECONDS = 5.0
 
 def protected_file(path: str) -> Path:
     """信任配置与可加载代码必须在不可由业务用户改写的root路径中。"""
@@ -330,6 +334,7 @@ def _run_session(reducer, channel, resource: str, nonce: str, command: list[str]
         # Preserve real helper wait even if registration or evidence is incomplete.
         with evidence_write():
             with lock:
+                wait_deadline = None
                 while not consumer.failed:
                     registration = consumer.registrations.get(resource)
                     if registration is None or not registration.arm_sent:
@@ -343,9 +348,21 @@ def _run_session(reducer, channel, resource: str, nonce: str, command: list[str]
                     if status['unknown']:
                         break
                     if status['process_closed']:
-                        reducer.seal(resource)
-                        break
-                    lock.wait()
+                        if status['business_waited']:
+                            reducer.seal(resource)
+                            break
+                        # ES EXIT and socket WAIT are separate ordered streams.
+                        # Keep consuming the bound WAIT after EXIT, but a dead
+                        # helper must not leave an unbounded transport wait.
+                        if wait_deadline is None:
+                            wait_deadline = time.monotonic() + WAIT_EVIDENCE_SECONDS
+                        remaining = wait_deadline - time.monotonic()
+                        if remaining <= 0:
+                            consumer.lost()
+                            break
+                        lock.wait(remaining)
+                    else:
+                        lock.wait()
         return code if code >= 0 else 128 - code
     except OSError:
         if helper is None:

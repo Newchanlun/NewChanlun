@@ -363,3 +363,96 @@ def test_helper_exit_racing_arm_failure_never_reissues_permit(tmp_path, monkeypa
     assert reducer.status(resource)['unknown']
     assert reducer.seal_calls == 0
     assert not gate.local_action_idle(job)
+
+@pytest.mark.parametrize('order', ['wait-first', 'exit-first', 'exit-eof', 'exit-lost', 'exit-no-wait'])
+def test_closed_process_and_business_wait_are_independent_channels(tmp_path, monkeypatch, order):
+    import threading
+
+    gate = m.Gate(tmp_path)
+    owner = gate.register('decision', local_actions=True)
+    job = gate.admit(owner, 'channel-order')
+    resource = gate.reserve_local_resource(owner, job)
+    monkeypatch.setattr(m.os, 'getsid', lambda _: os.getpid())
+    gate.bind_local_resource_identity(resource)
+    armed = threading.Event()
+    observed_closed = threading.Event()
+    monkeypatch.setattr(session, 'WAIT_EVIDENCE_SECONDS', 0.05, raising=False)
+
+    class Channel(FixtureChannel):
+        def send(self, message):
+            self.sent.append(message)
+            if message.startswith('ARM'):
+                self.event('FORK', audit(200, 2), audit(300))
+                self.frames.put(dict(type='started', resource=resource, pid=300))
+                self.event('EXIT', audit(300))
+                if order == 'wait-first':
+                    self.frames.put(dict(type='waited', resource=resource, pid=300, code=23))
+                self.event('EXIT', audit(200, 2))
+                if order != 'wait-first':
+                    self.frames.put('delayed-wait')
+                armed.set()
+
+        def read(self):
+            frame = super().read()
+            if frame == 'delayed-wait':
+                assert observed_closed.wait(2)
+                if order == 'exit-first':
+                    return dict(type='waited', resource=resource, pid=300, code=23)
+                if order == 'exit-eof':
+                    raise EOFError('isolated disconnect')
+                if order == 'exit-lost':
+                    return dict(type='lost')
+                try:
+                    return super().read()  # Healthy source, no WAIT; close must unblock it.
+                except queue.Empty:
+                    self.read_timed_out = True
+                    raise
+            return frame
+
+    channel = Channel()
+    channel.read_timed_out = False
+    reducer = FixtureReducer(gate, channel)
+    original_status = reducer.status
+
+    def status(resource):
+        value = original_status(resource)
+        if value['process_closed']:
+            observed_closed.set()
+        return value
+
+    monkeypatch.setattr(reducer, 'status', status)
+    original_seal = reducer.seal
+
+    def seal(resource):
+        assert original_status(resource)['business_waited'], 'must not seal before real WAIT'
+        return original_seal(resource)
+
+    monkeypatch.setattr(reducer, 'seal', seal)
+
+    class Helper:
+        def wait(self):
+            assert armed.wait(2)
+            return 23
+
+        def poll(self):
+            return 23
+
+    def popen(command):
+        channel.event('FORK', audit(os.getpid()), audit(200))
+        channel.event('EXEC', audit(200), audit(200, 2), 'helper')
+        channel.frames.put(dict(type='register', resource=resource, nonce='nonce', image='helper', peer=audit(200, 2).words))
+        return Helper()
+
+    monkeypatch.setattr(session, 'subprocess', SimpleNamespace(Popen=popen))
+    assert session._run_session(reducer, channel, resource, 'nonce', ['unused']) == 23
+    assert not channel.read_timed_out, 'session must bound missing WAIT, not rely on source EOF'
+    complete = order in ('wait-first', 'exit-first')
+    assert reducer.seal_calls == int(complete)
+    assert original_status(resource)['business_waited'] == complete
+    assert len([message for message in channel.sent if message.startswith('ARM')]) == 1
+    assert not gate.local_action_idle(job)  # Offline evidence never promotes production closure.
+    if not complete:
+        assert not original_status(resource)['source_ready']
+        assert not original_status(resource)['resources_closed']
+        with gate.tx() as db:
+            assert db.execute('SELECT waited_at FROM local_resources').fetchone()[0] is None

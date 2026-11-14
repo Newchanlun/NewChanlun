@@ -1629,10 +1629,8 @@ async function main(): Promise<void> {
     }
     for (;;) {
       try {
-        if (!maintenance?.poll()) {
-          if (graphAdmissionFrozen()) { console.log("旧入口冻结，本轮不再领新工作"); return; }
-          await runOnce(cfg, maintenance);
-        }
+        if (graphAdmissionFrozen()) { console.log("旧入口冻结，本轮不再领新工作"); return; }
+        if (!maintenance?.poll()) await runOnce(cfg, maintenance);
       } catch (e) {
         console.error(`[wayfinder_engine] 一轮异常：${e}`);
       }

@@ -943,10 +943,6 @@ def _serve(args: argparse.Namespace, store: ClaimStore, cutover_store: CutoverSt
                 print(f"round skipped, source unreadable (github): {type(error).__name__}: {error}",
                       file=sys.stderr, flush=True)
                 mark_source_unreadable(source_repo, f"github: {type(error).__name__}: {error}")
-            except (OSError, ValueError, sqlite3.Error, subprocess.SubprocessError) as error:
-                if args.once:
-                    raise
-                print(f"round skipped, runtime unavailable: {type(error).__name__}", file=sys.stderr, flush=True)
             if args.once:
                 return 0
             time.sleep(args.poll_seconds)

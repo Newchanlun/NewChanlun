@@ -288,3 +288,15 @@ Wayfinder 的 map 动作和 release 两个入口遇到 Closed 都结束本轮新
 上述 caller 隔离不补全缺失的 callback return。已有精确返回链与资源闭包可以走原恢复路径；两者缺失
 仍须可信终态证据，不能补签、按 PID 消失放行或宣称只能整机重启。外部签名 ES、真实 macOS 闭包验收、
 六历史资源域及旧无绑定证据仍分别保留原发布 BLOCK，自动快进加载 main 的风险未解除。
+
+### ES EXIT 与业务 WAIT 的跨通道收尾
+
+ES 最后 EXIT 只证明进程域闭合；helper socket 的精确绑定 WAIT 才提供业务返回证据。
+两者可以任意先后到达，显式 ES 会话仅在 `process_closed && business_waited` 时尝试封闭，
+外部 Docker/Boat 资源仍须原判据通过。真实 helper wait 返回码不被证据故障覆盖。
+真实 helper 已退出且 ES 进程域已闭合后，缺失 WAIT 的传输等待最多 5 秒；到期或断连撤销会话，
+保留未结清账本，不生成 wait、not_started 或完成证据，也不重派。此期限不是资源 TTL，
+不对仍活后代的自然收尾计时。离线 `PROCESS_CLOSED` 分层状态不等于 Gate drained。
+
+Executor 的维护 poll 故障仍跳过该轮；intake 业务异常恢复原传播出口，不再被 loop 的通用
+维护容错吞成只剩类型名的重试。Wayfinder 旧冻结检查先于维护 poll，helper 故障不妨碍旧冻结退出。
