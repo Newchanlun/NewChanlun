@@ -25,6 +25,7 @@ from .domain import (
     parse_run_id,
     parse_sha,
 )
+from .maintenance import Closed, Owner, evidence_write
 from .run import InsufficientSpace, PilotRun, TaskSpec, _ps_rows, require_free_space
 from .workunit import (
     RELEASE_LABEL,
@@ -112,6 +113,7 @@ class QueueIntake:
     claims: ClaimStore
     cutover: CutoverStore
     source_repo: Path
+    maintenance: Owner | None = None
 
     def register(self, ticket: int) -> WorkUnit:
         from .executor import AdmissionRefused, _task_json, load_unit, unit_path
@@ -194,6 +196,9 @@ class QueueIntake:
             load_unit,
         )
         from .run import Busy, Halted
+        if self.maintenance is not None:
+            self.maintenance.coverage(False)  # 失败读取不能沿用上一轮覆盖结论。
+            self.maintenance.gate.bind_scope(self.maintenance.id, self.state_root, self.source_repo)
         try:
             self.cutover.load()
         except CutoverError:
@@ -223,6 +228,7 @@ class QueueIntake:
                     invalid[ticket] = f'invalid unit {path}: {error}'
                 tickets.add(ticket)
                 runs.setdefault(ticket, set()).add(PilotRun.run_dir(self.state_root, parse_run_id(path.stem)))
+            permits: dict[int, str] = {}
             results: dict[int, dict[str, Any]] = {ticket: {'phase': 'queued'} for ticket in tickets}
             for ticket, invalid_reason in invalid.items():
                 results[ticket] = {'phase': 'halted', 'reason': invalid_reason}
@@ -244,6 +250,8 @@ class QueueIntake:
                         return self._status(results)
             occupied = {ticket: reason for ticket, folders in runs.items()
                         if (reason := self._worker_activity(folders)) is not None}
+            if self.maintenance is not None:
+                self._maintenance_coverage()
             for ticket, reason in occupied.items():
                 results[ticket] = {'phase': 'active', 'reason': reason}
 
@@ -266,6 +274,16 @@ class QueueIntake:
                     results[ticket].update(phase=phase, reason=f'{previous}; {activity}' if previous else activity)
                 else:
                     occupied.pop(ticket, None)
+                    if self.maintenance is not None and results[ticket].get('phase') != 'active':
+                        with evidence_write():
+                            with self.maintenance.gate.tx() as db:
+                                jobs = [r[0] for r in db.execute(
+                                    "SELECT id FROM jobs WHERE owner=? AND work=? AND state!='finished' "
+                                    "AND id NOT IN (SELECT job FROM resolutions)", (self.maintenance.id, f'ticket:{ticket}'))]
+                            for job in jobs:
+                                if not self.maintenance.gate.settle_bound(self.maintenance.id, job):
+                                    self.maintenance.finish(job, natural=False)
+                        permits.pop(ticket, None)
 
             for ticket in sorted(tickets, key=priority):
                 if ticket not in occupied and set(occupied) - {t for t, _, _ in planned}:
@@ -278,6 +296,9 @@ class QueueIntake:
                 try:
                     if ticket in invalid:
                         results[ticket] = {'phase': 'halted', 'reason': invalid[ticket]}
+                        continue
+                    if (self.maintenance is not None and self.maintenance.poll()
+                            and not runs.get(ticket) and not self.maintenance.gate.has_execution(ticket, self.state_root)):
                         continue
                     claim = self.claims.read(ticket)
                     if claim and claim.state == 'released' and ticket in occupied:
@@ -339,6 +360,15 @@ class QueueIntake:
                     finish(ticket)
                     continue
                 try:
+                    if self.maintenance is not None:
+                        try:
+                            permits[ticket] = self.maintenance.gate.admit_executor(
+                                self.maintenance.id, unit.run_id, ticket, self.state_root, self.source_repo)
+                        except Closed:
+                            continue
+                        except ValueError:
+                            results[ticket] = {'phase': 'active', 'run_id': unit.run_id, 'reason': 'maintenance owner unresolved'}
+                            continue
                     code = run(unit)
                     state = delivery_status(run_dir)
                     phase = state['phase']
@@ -361,39 +391,21 @@ class QueueIntake:
                         break
                 finally:
                     finish(ticket)
+            if self.maintenance is not None:
+                with evidence_write():
+                    self._maintenance_coverage()
             return self._status(results)
         finally:
             os.close(fd)
 
+    def _maintenance_coverage(self) -> None:
+        from .maintenance_recovery import executor_scope_idle
+        assert self.maintenance is not None
+        self.maintenance.coverage(executor_scope_idle(
+            dict(state_root=str(self.state_root), source_repo=str(self.source_repo))))
+
     def _worker_activity(self, folders: set[Path]) -> str | None:
-        for folder in sorted(folders):
-            try:
-                if not (folder / 'run.json').exists():
-                    if any((folder / name).exists() for name in ('workers', 'intents', 'boat')):
-                        return f'{folder.name}: effect_unknown: missing run.json with worker state'
-                    continue
-                run = PilotRun.open(folder.parent.parent, parse_run_id(folder.name), source_repo=self.source_repo)
-                rows = [] if run.execution is not None else _ps_rows()
-                keys = set(run._keys())
-                if run.execution is not None:
-                    keys.update(parse_key_name(run.spec.run_id, p.stem) for p in (folder / 'boat').glob('*.json')
-                                if '.' not in p.stem)
-                workers = {key: run._observe(key, rows, reconcile=False) for key in keys}
-                pending = []
-                for key, fact in workers.items():
-                    if isinstance(fact, NotStarted) and run.execution is None:
-                        continue
-                    if isinstance(fact, (NotStarted, Running, EffectUnknown)):
-                        if run.execution is not None and run.execution.is_drained(key):
-                            continue
-                        reason = ("effect_unknown: " + fact.reason if isinstance(fact, EffectUnknown)
-                                  else "preparing" if isinstance(fact, NotStarted) else "running")
-                        pending.append(f"{key.name}: {reason}")
-                if pending:
-                    return f'{folder.name}: worker slot retained: ' + '; '.join(pending)
-            except (ExecutionUnknown, OSError, ValueError, TypeError, KeyError, subprocess.CalledProcessError) as error:
-                return f'{folder.name}: effect_unknown: worker observation failed: {error}'
-        return None
+        return worker_activity(folders, self.source_repo)
 
     def _status(self, results: dict[int, dict[str, Any]]) -> dict[int, dict[str, Any]]:
         from .executor import _write_json
@@ -435,3 +447,34 @@ def mark_source_unreadable(source_repo: Path, detail: str) -> None:
     stamp = time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())
     notice = f'{UNREADABLE_NOTICE}{stamp} 读不到 {detail}；以下为上一轮成功读取时的状态。'
     _write_status_page(source_repo, [STATUS_TITLE, notice, *body])
+
+
+def worker_activity(folders: set[Path], source_repo: Path) -> str | None:
+    for folder in sorted(folders):
+        try:
+            if not (folder / 'run.json').exists():
+                if any((folder / name).exists() for name in ('workers', 'intents', 'boat')):
+                    return f'{folder.name}: effect_unknown: missing run.json with worker state'
+                continue
+            run = PilotRun.open(folder.parent.parent, parse_run_id(folder.name), source_repo=source_repo)
+            rows = [] if run.execution is not None else _ps_rows()
+            keys = set(run._keys())
+            if run.execution is not None:
+                keys.update(parse_key_name(run.spec.run_id, p.stem) for p in (folder / 'boat').glob('*.json')
+                            if '.' not in p.stem)
+            workers = {key: run._observe(key, rows, reconcile=False) for key in keys}
+            pending = []
+            for key, fact in workers.items():
+                if isinstance(fact, NotStarted) and run.execution is None:
+                    continue
+                if isinstance(fact, (NotStarted, Running, EffectUnknown)):
+                    if run.execution is not None and run.execution.is_drained(key):
+                        continue
+                    reason = ("effect_unknown: " + fact.reason if isinstance(fact, EffectUnknown)
+                              else "preparing" if isinstance(fact, NotStarted) else "running")
+                    pending.append(f"{key.name}: {reason}")
+            if pending:
+                return f'{folder.name}: worker slot retained: ' + '; '.join(pending)
+        except (ExecutionUnknown, OSError, ValueError, TypeError, KeyError, subprocess.CalledProcessError) as error:
+            return f'{folder.name}: effect_unknown: worker observation failed: {error}'
+    return None

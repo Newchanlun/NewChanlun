@@ -87,6 +87,7 @@ from .external_review import (
     _git,
     git_environment,
 )
+from .maintenance import Closed, Owner, evidence_write
 from .run import _ps_rows
 from .workunit import REPO
 
@@ -315,6 +316,7 @@ class Sweep:
         self.github, self.lane, self.spawn, self.rows, self.sync = github, lane, spawn, rows, sync
         self.review_app = review_app
         self.folder = state_root / "sweep"
+        self._launch_markers: dict[int, tuple[Path, str]] = {}
         self._sync_failed = False
         self._backoff: dict[str, Any] | None = None
         self.max_running, self.auto_merge, self.max_age, self.now = max_running, auto_merge, max_age, now
@@ -408,13 +410,23 @@ class Sweep:
         self.folder.mkdir(parents=True, exist_ok=True, mode=0o700)
         return self.spawn(number, attempt, head, self.folder / "logs" / f"p{number}-{head[:12]}-a{attempt}.log")
 
+    def _launch_marked(self, marker: Path, number: int, head: str, attempt: int) -> int:
+        self.folder.mkdir(parents=True, exist_ok=True, mode=0o700)
+        marker.write_text(str(time.time()))
+        try:
+            pid = self._launch(number, head, attempt)
+            self._launch_markers[pid] = (marker, marker.read_text())
+            return pid
+        except (Closed, NotStarted):
+            # 仅派发边界的未启动证明可释放；已启动异常保留标记。
+            marker.unlink()
+            raise
+
     def _resume_once(self, number: int, head: str, attempt: int, action: str) -> tuple[str, dict | None]:
         marker = self._resumes(number, head, attempt)
         if marker.exists():
             return ("needs-reconcile" if action == "publish" else "needs-operator"), None
-        self.folder.mkdir(parents=True, exist_ok=True, mode=0o700)
-        marker.write_text(str(time.time()))
-        return f"resume-{action}", {"pid": self._launch(number, head, attempt), "attempt": attempt}
+        return f"resume-{action}", {"pid": self._launch_marked(marker, number, head, attempt), "attempt": attempt}
 
     def decide(self, pr: dict[str, Any], busy: set[int], running: int, behind: bool) -> tuple[str, dict | None]:
         number, head, base = pr["number"], pr["head"]["sha"], pr["base"]["sha"]
@@ -461,11 +473,18 @@ class Sweep:
         marker = self.folder / f"p{number}-{head}-{base}-a{attempt}.launched"
         if marker.exists() and time.time() - marker.stat().st_mtime < LAUNCH_BACKOFF_SECONDS:
             return "launch-backoff", None
-        self.folder.mkdir(parents=True, exist_ok=True, mode=0o700)
-        marker.write_text(str(time.time()))
-        return "launch", {"pid": self._launch(number, head, attempt), "attempt": attempt}
+        return "launch", {"pid": self._launch_marked(marker, number, head, attempt), "attempt": attempt}
+
+    def reap_launches(self) -> None:
+        for pid in getattr(self.spawn, "reap", lambda: [])():
+            saved = self._launch_markers.pop(pid, None)
+            if saved is not None:
+                marker, stamp = saved
+                if marker.exists() and marker.read_text() == stamp:
+                    marker.unlink()  # 已 wait 且未 adopt，未消耗实际执行机会。
 
     def tick(self) -> list[dict[str, Any]]:
+        self.reap_launches()
         try:
             rows = self.rows()
         except Exception as error:  # 不知道谁在审就不能派审：整轮作废
@@ -763,12 +782,31 @@ class ServeRound:
     见 MIN_LOOP_SECONDS）。上一轮的时间记在状态目录的文件上，launchd 重启 serve 也不会加密轮次。每个动作一行日志，
     前缀 `review-sweep `；输入源读不到或整轮出错时记一行写明原因，不抛出，serve 循环照常继续。"""
 
-    def __init__(self, sweep: Sweep, *, interval: float = MIN_LOOP_SECONDS, clock: Callable[[], float] = time.time):
+    def __init__(self, sweep: Sweep, *, interval: float = MIN_LOOP_SECONDS, clock: Callable[[], float] = time.time,
+                 maintenance: Owner | None = None):
+        self.maintenance = maintenance
         self.sweep, self.interval, self.clock = sweep, interval, clock
         self.stamp = sweep.folder / "serve-round.last"
 
+    def close(self) -> None:
+        if self.maintenance is not None:
+            self.maintenance.stop()
+
     def __call__(self) -> list[dict[str, Any]] | None:
         """返回本轮动作；本轮不到时间或失败返回 None。"""
+        try:
+            if self.maintenance is not None:
+                self.maintenance.coverage(False)
+            self.sweep.reap_launches()
+            if self.maintenance is not None:
+                self.maintenance.gate.bind_scope(self.maintenance.id, self.sweep.lane.state_root,
+                                                     self.sweep.lane.source, kind='review')
+                self.maintenance.coverage(self.sweep.lane.maintenance_idle())
+                if self.maintenance.poll():
+                    return None
+        except Exception as error:
+            report([{"action": "tick-error", "reason": f"maintenance unavailable: {type(error).__name__}"}], "review-sweep ")
+            return None
         try:
             last = float(self.stamp.read_text())
         except (OSError, ValueError):
@@ -817,24 +855,71 @@ def fetcher(source: Path, url: str = f"https://github.com/{REPO}.git") -> Sync:
     return sync
 
 
-def serve_round(private_key: Path, *, auto_merge: bool = False, max_running: int = 1) -> ServeRound:
+def serve_round(private_key: Path, *, auto_merge: bool = False, max_running: int = 1,
+                maintenance_root: Path | None = None) -> ServeRound:
     """executor serve 用的钩子。max_running 默认 1：HOST 上同时在跑的审查不超过它，操作员手动起的 review-pr 也算
     （reviewing）。同一 PR 有活进程就不再派（decide 的 running）；各审查子进程照常各自过空间与额度准入。
     风险：两道准入都按单个 run 算，不是总量。空间准入只看本 run 的快照，不给同时在跑、还没铺开快照的 run 预留；
     额度准入只统计已结束 run 的回执。上限 N 时最多 N 个 run（每个 2 个模型）同时铺快照、同时耗额度，
     可能集体超占外盘或超出每日上限。调高 N 前先查外盘剩余空间（df -h /Volumes/AgentStorage）。"""
     lane = ExternalReview(None)
-    return ServeRound(Sweep(GhCli(), lane, spawner(private_key), max_running=max_running, auto_merge=auto_merge,
-                            sync=fetcher(lane.source)))
+    owner = Owner("review") if maintenance_root is None else Owner("review", maintenance_root)
+    try:
+        owner.coverage(False)
+        return ServeRound(Sweep(GhCli(), lane, spawner(private_key, owner), max_running=max_running,
+                                auto_merge=auto_merge, sync=fetcher(lane.source)), maintenance=owner)
+    except BaseException:
+        # No tick/dispatch has been handed to the caller. The gate verifies no work or
+        # scope was accepted; failure to persist withdrawal stays conservatively unknown.
+        with evidence_write():
+            owner.gate.abort_initialization(owner.id)
+        raise
 
 
-def spawner(private_key: Path) -> Spawn:
+class NotStarted(OSError):
+    """派发边界证明 Popen 未成功；只用于释放本轮启动标记。"""
+
+
+def spawner(private_key: Path, maintenance: Owner | None = None) -> Spawn:
+    owner = maintenance or Owner("review")
+    from .maintenance_spawn import Launch
+    pending: dict[int, Launch] = {}
+    def reap() -> list[int]:
+        cancelled = []
+        for pid, launch in list(pending.items()):
+            if launch.process.poll() is not None:
+                if launch.reap():
+                    cancelled.append(pid)
+                del pending[pid]
+        return cancelled
     def spawn(number: int, attempt: int, head: str, log: Path) -> int:
-        log.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-        with open(log, "ab", opener=lambda p, f: os.open(p, f, 0o600)) as out:
-            return subprocess.Popen(run_review_command(number, attempt, head, private_key), stdin=subprocess.DEVNULL,
-                                    stdout=out, stderr=out, start_new_session=True,
-                                    cwd=Path(__file__).resolve().parents[1]).pid
+        try:
+            reservation = owner.reserve(f"pr:{number}:{head}:{attempt}")
+        except Closed:
+            raise
+        except Exception as error:
+            raise NotStarted('reservation failed before spawn') from error
+        process = None
+        try:
+            log.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+            with open(log, "ab", opener=lambda p, f: os.open(p, f, 0o600)) as out:
+                process = Launch(owner.gate, owner.id, reservation, run_review_command(number, attempt, head, private_key) +
+                                        ["--maintenance-reservation", reservation, "--maintenance-root", str(owner.gate.root)], stdin=subprocess.DEVNULL,
+                                        stdout=out, stderr=out, start_new_session=True,
+                                        cwd=Path(__file__).resolve().parents[1])
+                pending[process.pid] = process
+                process.prepare()
+                process.release()
+                return process.pid
+        except Exception as error:
+            if process is not None:
+                process.close()  # EOF only affects unreleased bootstrap, never kills accepted work.
+                raise  # Popen 已返回；即使后续 bookkeeping 失败也不能撤销准入。
+            try:
+                owner.gate.cancel_unstarted(owner.id, reservation, 'spawn_failed')
+            finally:
+                raise NotStarted('spawn failed before exec') from error
+    spawn.reap = reap  # type: ignore[attr-defined]
     return spawn
 
 
@@ -845,13 +930,31 @@ def run_review(argv: list[str], github: GitHubPort | None = None) -> int:
     parser.add_argument("--attempt", required=True, type=int)
     parser.add_argument("--expect-head", required=True)
     parser.add_argument("--private-key", required=True, type=Path)
+    parser.add_argument("--maintenance-reservation")
+    parser.add_argument("--maintenance-root", type=Path)
     args = parser.parse_args(argv)
+    owner = Owner("review", args.maintenance_root, args.maintenance_reservation)
+    try:
+        job = args.maintenance_reservation or owner.admit(f"pr:{args.pr}:{args.expect_head}:{args.attempt}")
+    except Closed:
+        owner.stop()
+        return 75
+    try:
+        with owner.observing():
+            return _run_review(args, github, lambda: None, (owner, job))
+    finally:
+        with evidence_write():
+            owner.gate.finish_review(owner.id, job)
+        owner.stop()
+
+
+def _run_review(args, github, on_natural, maintenance=None):
     if (github or GhCli()).pr(args.pr)["head"] != args.expect_head:
         print(json.dumps({"pr": args.pr, "action": "head-moved-not-reviewed", "expected": args.expect_head}))
         return 3
     from . import external_review
     return external_review.main(["review-pr", "--pr", str(args.pr), "--attempt", str(args.attempt),
-                                 "--private-key", str(args.private_key)])
+                                 "--private-key", str(args.private_key)], admitted=True, on_natural=on_natural, maintenance=maintenance)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -859,6 +962,7 @@ def main(argv: list[str] | None = None) -> int:
     if argv[:1] == ["run-review"]:
         return run_review(argv[1:])
     parser = argparse.ArgumentParser(prog="pilot1742.review_sweep")
+    parser.add_argument("--maintenance-root", type=Path)
     parser.add_argument("--private-key", required=True, type=Path, help="只原样交给审查子进程")
     parser.add_argument("--max-running", type=int, default=2)
     parser.add_argument("--loop", type=float, default=0,
@@ -868,17 +972,24 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     if not math.isfinite(args.loop) or not (args.loop == 0 or args.loop >= MIN_LOOP_SECONDS):  # 挡住负数、nan、inf
         parser.error(f"--loop 须为 0 或至少 {MIN_LOOP_SECONDS:g} 秒")
-    sweep = Sweep(GhCli(), ExternalReview(None), spawner(args.private_key), max_running=args.max_running,
+    owner = Owner("review") if args.maintenance_root is None else Owner("review", args.maintenance_root)
+    sweep = Sweep(GhCli(), ExternalReview(None), spawner(args.private_key, owner), max_running=args.max_running,
                   auto_merge=args.auto_merge)
     while True:
         try:
-            report(sweep.tick())
+            owner.coverage(False)
+            sweep.reap_launches()
+            owner.gate.bind_scope(owner.id, sweep.lane.state_root, sweep.lane.source, kind='review')
+            owner.coverage(sweep.lane.maintenance_idle())
+            if not owner.poll():
+                report(sweep.tick())
         except SourceUnreadable as error:  # 与 ServeRound 一致：本轮已做的动作照常写日志
             report([*error.actions, {"action": "round-skipped", "unreadable": error.source, "reason": str(error)}])
         except Exception:  # 整轮失败（例如列 PR 失败）：记下，下轮重试，不退出
             print(json.dumps({"action": "tick-error", "reason": traceback.format_exc(limit=3)}, ensure_ascii=False),
                   flush=True)
         if args.loop <= 0:
+            owner.stop()
             return 0
         time.sleep(args.loop)
 

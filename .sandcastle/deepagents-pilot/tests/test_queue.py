@@ -201,7 +201,8 @@ def test_busy_run_is_skipped_and_same_run_is_recovered_next_round(queued):
     assert seen == [f't{TICKET}-1'] * 3
 
 
-def test_engine_emission_to_queue_child_sigkill_recovery_and_exact_delivery(queued, wayfinder_engine_path):
+@pytest.mark.parametrize("maintenance_enabled", [False, True])
+def test_engine_emission_to_queue_child_sigkill_recovery_and_exact_delivery(queued, wayfinder_engine_path, maintenance_enabled):
     import base64
     import multiprocessing
     import subprocess
@@ -213,6 +214,9 @@ def test_engine_emission_to_queue_child_sigkill_recovery_and_exact_delivery(queu
     from cryptography.hazmat.primitives import serialization
 
     v2, cutover, intake, signer = queued
+    if maintenance_enabled:
+        from pilot1742.maintenance import Owner
+        intake.maintenance = Owner('executor', v2.tmp / 'maintenance-gate')
     module = wayfinder_engine_path
     script = '''const m = await import(process.argv[1]);
       const label = m.releaseLabel(process.argv[2], process.argv[3]);
@@ -268,6 +272,12 @@ def test_engine_emission_to_queue_child_sigkill_recovery_and_exact_delivery(queu
             'claims': str(v2.claims_root), 'workers': str(v2.workers_log), 'drain': str(cutover.drain_root),
             'pem': str(v2.identity.private_key_path), 'authority': str(signer.root), 'trust': str(public_trust),
             'crash': 'after_push_before_receipt' if len(seen) == 1 else None}))
+        if intake.maintenance is not None:
+            gate = intake.maintenance.gate
+            job = gate.status([])['inflight'][0]['id']
+            data = json.loads(config.read_text())
+            data.update(maintenance_root=str(gate.root), maintenance_job=job)
+            config.write_text(json.dumps(data))
         proc = subprocess.Popen([sys.executable, str(Path(__file__).with_name('queue_child.py')),
                                  str(config), str(child.fileno())], pass_fds=(child.fileno(),))
         child.close()
@@ -280,11 +290,16 @@ def test_engine_emission_to_queue_child_sigkill_recovery_and_exact_delivery(queu
 
     first = intake.once(runner)
     assert first[TICKET]['phase'] == 'active'
+    if intake.maintenance is not None:
+        assert len(intake.maintenance.gate.status([])['inflight']) == 1
+        intake.maintenance.gate.request()
     assert v2.github.ref(unit.branch) is not None and not v2.github.pulls
     run_spec = json.loads((PilotRun.run_dir(v2.home, unit.run_id) / 'run.json').read_text())
     assert run_spec['execution'] == {'backend': 'test-launcher'}
     second = intake.once(runner)
     assert second[TICKET]['phase'] == 'awaiting_merge'
+    if intake.maintenance is not None:
+        assert intake.maintenance.gate.status([])['inflight'] == []
     head = second[TICKET]['head']
     assert head == v2.github.ref(unit.branch) == v2.gateway().get_pr(next(iter(v2.github.pulls)))['head']['sha']
     assert seen == [unit.run_id, unit.run_id] and v2.claim_record()['generation'] == 1
@@ -1452,3 +1467,142 @@ def test_release_keeps_mirror_until_drained_and_old_release_cannot_strip_new_gen
         release_claim(intake.claims, v2.gateway(), TICKET, unit.run_id, '旧释放重试')
     assert v2.writes() == before and 'deepagents' in v2.github.issues[TICKET]['labels'], '旧释放不碰新代次镜像'
     assert '正由' in engine_hold(v2)
+
+
+def test_maintenance_closes_before_registration_without_queue_writes(queued, tmp_path):
+    from pilot1742.maintenance import Owner
+    v2, cutover, intake, _ = queued
+    owner = Owner('executor', tmp_path / 'gate')
+    intake.maintenance = owner
+    owner.gate.request()
+    intake.once(lambda _: pytest.fail('closed intake started child'))
+    assert v2.writes() == []
+    assert not list((v2.home / 'units').glob('*.json'))
+    assert owner.gate.status([])['inflight'] == []
+
+
+def test_maintenance_close_inside_registration_blocks_unadmitted_child(queued, tmp_path, monkeypatch):
+    from pilot1742.maintenance import Owner
+    v2, cutover, intake, _ = queued
+    owner = Owner('executor', tmp_path / 'gate')
+    intake.maintenance = owner
+    publish_ruling(v2)
+    original = intake.register
+    def close_after_claim(ticket):
+        unit = original(ticket)
+        owner.gate.request()
+        return unit
+    monkeypatch.setattr(intake, 'register', close_after_claim)
+    calls = []
+    rows = intake.once(lambda unit: calls.append(unit.run_id) or 75)
+    assert len(calls) == 0, rows
+    assert len(owner.gate.status([])['inflight']) == 0
+    intake.once(lambda unit: calls.append(unit.run_id) or 75)
+    assert len(calls) == 0  # 计划登记不是执行准入，关闸后不能派新 run
+
+
+def test_maintenance_waiting_ticket_has_no_execution_permit(queued, tmp_path):
+    from pilot1742.maintenance import Owner
+    v2, _, intake, _ = queued
+    v2.github.issues[SPEC]['body'] = '# SPEC without required scope'
+    owner = Owner('executor', tmp_path / 'gate')
+    intake.maintenance = owner
+    rows = intake.once(lambda _: pytest.fail('unapproved ticket started'))
+    assert rows[TICKET]['phase'] == 'awaiting_human'
+    assert owner.gate.status([])['inflight'] == []
+
+
+def test_maintenance_keeps_only_dispatched_run_across_close(queued, tmp_path):
+    from pilot1742.maintenance import Owner
+    v2, _, intake, _ = queued
+    owner = Owner('executor', tmp_path / 'gate')
+    intake.maintenance = owner
+    publish_ruling(v2)
+    calls = []
+    def child(unit):
+        calls.append(unit.run_id)
+        owner.gate.request()
+        return 75
+    intake.once(child)
+    intake.once(child)
+    assert len(calls) == 2 and calls[0] == calls[1]
+    assert len(owner.gate.status([])['inflight']) == 1
+
+
+def test_maintenance_pre_run_failure_has_bound_not_entered_evidence(queued, tmp_path, monkeypatch):
+    from pilot1742 import executor as cli
+    from pilot1742.maintenance import Owner
+    v2, _, intake, _ = queued
+    unit = intake.register(TICKET)
+    owner = Owner('executor', tmp_path / 'gate')
+    job = owner.gate.admit_executor(owner.id, unit.run_id, unit.ticket, v2.home, v2.source)
+    monkeypatch.setattr(cli, '_main', lambda args, **kw: 2)  # 身份错误发生在 run 入口之前
+    assert cli.main(['--maintenance-job', job, '--maintenance-root', str(owner.gate.root),
+                     '--state-root', str(v2.home), '--run-id', unit.run_id]) == 2
+    assert owner.gate.settle_bound(owner.id, job)
+    with owner.gate.tx() as db:
+        assert db.execute('SELECT count(*) FROM preflight_returns').fetchone()[0] == 1
+
+
+def test_real_serve_child_busy_keeps_queue_active_and_same_run(queued, tmp_path):
+    import os
+    import subprocess
+    import sys
+    from pathlib import Path
+
+    from pilot1742 import executor as cli
+    from pilot1742.maintenance import Owner
+
+    v2, _, intake, _ = queued
+    owner = Owner('executor', tmp_path / 'gate')
+    intake.maintenance = owner
+    publish_ruling(v2)
+    calls = []
+    def child(unit):
+        with owner.gate.tx() as db:
+            job = db.execute('SELECT id FROM jobs WHERE owner=? AND work=?',
+                             (owner.id, f'ticket:{unit.ticket}')).fetchone()[0]
+            witness = db.execute('SELECT id FROM witnesses WHERE job=?', (job,)).fetchone()
+        if witness is None:
+            owner.gate.start_bound(job, unit.run_id, v2.home)
+        result = subprocess.run([sys.executable, '-m', 'pilot1742.executor', '--state-root', str(v2.home),
+                                 'run', '--run-id', unit.run_id, '--maintenance-job', job,
+                                 '--maintenance-root', str(owner.gate.root)], capture_output=True, text=True,
+                                env={**os.environ, 'PYTHONPATH': str(Path(cli.__file__).parents[1])})
+        assert result.returncode == 75, result.stderr
+        calls.append(unit.run_id)
+        return result.returncode
+    for _ in range(2):
+        assert intake.once(child)[TICKET]['phase'] == 'active'
+    assert len(calls) == 2 and calls[0] == calls[1]
+    with owner.gate.tx() as db:
+        assert db.execute('SELECT count(*) FROM witnesses').fetchone()[0] == 1
+        assert db.execute('SELECT count(*) FROM returns').fetchone()[0] == 0
+
+
+@pytest.mark.parametrize('failure', ['settle', 'final_coverage'])
+def test_queue_cleanup_failure_preserves_business_result(queued, tmp_path, monkeypatch, failure):
+    import sqlite3
+
+    from pilot1742.maintenance import Owner
+
+    v2, _, intake, _ = queued
+    owner = Owner('executor', tmp_path / 'gate')
+    intake.maintenance = owner
+    publish_ruling(v2)
+    calls = []
+    def unavailable(*args, **kwargs):
+        raise sqlite3.OperationalError('injected evidence failure')
+    def child(unit):
+        calls.append(unit.run_id)
+        if failure == 'settle':
+            monkeypatch.setattr(owner.gate, 'settle_bound', unavailable)
+        else:
+            monkeypatch.setattr(intake, '_maintenance_coverage', unavailable)
+        return 23
+    result = intake.once(child)
+    assert result[TICKET]['phase'] == 'halted'
+    assert len(calls) == 1
+    report = owner.gate.status([])
+    assert report['inflight']
+    assert report['state'] != 'drained'
