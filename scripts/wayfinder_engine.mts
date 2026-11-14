@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-import { MaintenanceOwner, maintenanceCommand } from "../.sandcastle/maintenance.mts";
+import { MaintenanceOwner, MaintenanceClosed, maintenanceCommand } from "../.sandcastle/maintenance.mts";
 /**
  * wayfinder_engine.mts —— 图清自动汇入主干管线自动化（#1078 裁定落地，#1084 实装）。
  *
@@ -1457,18 +1457,22 @@ function describeAction(a: Action): string {
 
 // ── 壳：轮询 + 每轮重算 ready 集 ───────────────────────────────────────────────
 
-async function runOnce(cfg: EngineConfig, maintenance?: MaintenanceOwner): Promise<void> {
-  if (graphAdmissionFrozen()) return;
+const roundIO = { frozen: graphAdmissionFrozen, maps: fetchOpenMaps, ready: fetchReadyTickets,
+  admit: withEngineAdmission, execute: executeAction, release: releaseTicket, status: writeStatus };
+
+export async function runOnce(cfg: EngineConfig, maintenance?: Pick<MaintenanceOwner, "work">,
+  io = roundIO): Promise<void> {
+  if (io.frozen()) return;
   const stamp = new Date().toISOString().slice(0, 19).replace("T", " ");
   console.log(`\n[wayfinder_engine] ${stamp} 一轮开始（${cfg.dryRun ? "dry-run" : "live"}）`);
   let maps: MapState[];
   let ready: ReadyTicket[];
   let facts: SpecTreeFacts;
   try {
-    maps = fetchOpenMaps();
+    maps = io.maps();
     // 队列交棒视图：全仓 ready-for-agent × 父图 spec 批准态。
     facts = buildSpecTreeFacts(maps, cfg.orchestrator);
-    ready = withSpecApproval(fetchReadyTickets(), facts.approved, buildOpenChildIndex(maps), facts.underSpec);
+    ready = withSpecApproval(io.ready(), facts.approved, buildOpenChildIndex(maps), facts.underSpec);
   } catch (e) {
     console.error(`[wayfinder_engine] 拉取 tracker 状态失败（网络/鉴权？已重试，本轮跳过）：${e}`);
     return;
@@ -1484,10 +1488,14 @@ async function runOnce(cfg: EngineConfig, maintenance?: MaintenanceOwner): Promi
         console.log(`    [dry-run] 将执行：${describeAction(action)}`);
       } else {
         try {
-          const execute = () => withEngineAdmission(() => executeAction(action, cfg));
+          const execute = () => io.admit(() => io.execute(action, cfg));
           if (maintenance) await maintenance.work(`map:${m.number}:${action.kind}`, execute);
           else await execute();
         } catch (e) {
+          if (e instanceof MaintenanceClosed) {
+            console.log("    维护关闭，停止本轮新领取");
+            return;
+          }
           console.error(`    ✗ 执行失败（${action.kind}）：${e}`);
         }
       }
@@ -1511,19 +1519,23 @@ async function runOnce(cfg: EngineConfig, maintenance?: MaintenanceOwner): Promi
       console.log(`    [dry-run] 将释放（挂 ${releaseLabel()}）：#${n}`);
     } else {
       try {
-        const release = () => withEngineAdmission(() => releaseTicket(n, { specs: facts.requiredSpecs.get(n) ?? [], orchestrator: cfg.orchestrator,
+        const release = () => io.admit(() => io.release(n, { specs: facts.requiredSpecs.get(n) ?? [], orchestrator: cfg.orchestrator,
           via: facts.planBound.has(n) ? "plan" : "tree" }));
         const why = maintenance ? await maintenance.work(`release:${n}`, release) : await release();
         if (why) console.log(`    · 写前复核不放行 #${n}：${why}`);
         else console.log(`    ✓ 已释放（挂 ${releaseLabel()}）：#${n}`);
       } catch (e) {
+        if (e instanceof MaintenanceClosed) {
+          console.log("    维护关闭，停止本轮新领取");
+          return;
+        }
         console.error(`    ✗ 释放失败（#${n}）：${e}`);
       }
     }
   }
 
   // 3) 状态页：五桶分明落盘，供宿主/roster 读（不把 sandcastle 空误写成全空）。
-  writeStatus(cfg, stamp, maps, ready, summary);
+  io.status(cfg, stamp, maps, ready, summary);
   console.log(`[wayfinder_engine] 一轮结束`);
 }
 

@@ -1643,12 +1643,20 @@ export async function archaeologyOnlyAdmission(n: number, d: Deps) {
 export async function processTicket(n: number, raw: Deps): Promise<Summary> {
   const release = acquireTicketLock(raw.outRoot, n);
   if (!release) return { ticket: n, mode: raw.mode, phase: "error", attempts: 0, durationsMs: {}, plannedWrites: [], error: "本地锁已存在，另一进程正在处理" };
+  let entered = false;
+  const execute = () => {
+    entered = true;
+    return processTicketLocked(n, raw);
+  };
   try {
-    return raw.maintenance
-      ? await raw.maintenance.work(`ticket:${n}`, () => processTicketLocked(n, raw))
-      : await processTicketLocked(n, raw);
-  }
-  finally { release(); }
+    return raw.maintenance ? await raw.maintenance.work(`ticket:${n}`, execute) : await execute();
+  } catch (error) {
+    // 仅准入前拒绝属于该票；已执行回调的异常保留原语义，不授予重派。
+    if (error instanceof MaintenanceClosed || entered) throw error;
+    return { ticket: n, mode: raw.mode, phase: "error", attempts: 0,
+      durationsMs: {}, plannedWrites: [],
+      error: `维护准入拒绝：${error instanceof Error ? error.message : String(error)}` };
+  } finally { release(); }
 }
 
 async function processTicketLocked(n: number, raw: Deps): Promise<Summary> {
@@ -2345,7 +2353,7 @@ function log(msg: string) {
   process.stdout.write(`[decision-claimer ${new Date().toISOString()}] ${msg}\n`);
 }
 
-async function round(a: Args, d: Deps) {
+export async function round(a: Args, d: Deps) {
   let tickets = a.tickets;
   if (tickets.length === 0) {
     const children = a.maps.flatMap((m) => JSON.parse(d.gh(["api", "--paginate", `repos/${GH_REPO}/issues/${m}/sub_issues`])) as RawChild[]);

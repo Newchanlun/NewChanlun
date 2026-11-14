@@ -276,3 +276,15 @@ TS action-exited丢失不能只凭local resource的wait/sealed补造callback ret
 图回调仍执行后续不透明工作期间。原活caller提交真实action-exited后，已有reconcile链可以消费；若caller已失联且该
 记录及action_returns都不存在，同boot仍明确`missing_bound_completion`。本批没有授予同key重派或人工补签权限，
 此类完全丢失callback return的恢复来源仍是具体缺口，不将local seal误解释为整个graph动作完成。
+
+### 调度循环的准入拒绝与关闸
+
+Decision 在尚未进入票回调时遇到非 Closed 准入拒绝，返回该票 `phase=error`、`attempts=0` 的
+Summary，保留同轮其它票的结果日志；此拒绝不持久化为票已完成，也不自动重试或绕过 Gate。
+回调已开始后的异常不重解释为准入失败。Closed 仍由工作池停止新领取，并等待已接受工作完成。
+Wayfinder 的 map 动作和 release 两个入口遇到 Closed 都结束本轮新领取，不记业务执行失败或继续领取
+后续动作；普通业务失败仍保留原错误记录及后续动作处理语义。
+
+上述 caller 隔离不补全缺失的 callback return。已有精确返回链与资源闭包可以走原恢复路径；两者缺失
+仍须可信终态证据，不能补签、按 PID 消失放行或宣称只能整机重启。外部签名 ES、真实 macOS 闭包验收、
+六历史资源域及旧无绑定证据仍分别保留原发布 BLOCK，自动快进加载 main 的风险未解除。
