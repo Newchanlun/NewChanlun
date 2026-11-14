@@ -38,7 +38,7 @@ python3 .sandcastle/deepagents-pilot/pilot1742/maintenance.py resume --generatio
 ## 准入与结束证据
 
 TS 与 Python 共用 SQLite 账本。`request` 与 `admit` 都使用短 `BEGIN IMMEDIATE` 事务：
-先提交领取，则完整工作可继续；先提交关闭，则新领取被拒绝。网络、模型、子进程等待均在事务之外。
+先提交领取，则完整工作可继续；先提交关闭，则新领取被拒绝。网络、模型及业务子进程的长等待在事务之外。`_owner` 的短身份核验仍可能在写事务内调用 ps，macOS 的 epoch 核验也可能调用 ioreg/sysctl；这里不承诺所有子进程调用均在事务外。
 因此不使用 legacy admission.lock 阻塞在途工作，也没有“检查 open 后再无记录 spawn”的间隙。
 
 领取粒度：共享模型 decision 单票/考古、live Wayfinder 单图动作/放行动作、executor 精确 run、review 单次 PR/head/attempt。
@@ -300,3 +300,18 @@ ES 最后 EXIT 只证明进程域闭合；helper socket 的精确绑定 WAIT 才
 
 Executor 的维护 poll 故障仍跳过该轮；intake 业务异常恢复原传播出口，不再被 loop 的通用
 维护容错吞成只剩类型名的重试。Wayfinder 旧冻结检查先于维护 poll，helper 故障不妨碍旧冻结退出。
+
+
+### 显式 ES 的业务返回与后台收尾
+
+显式 ES 入口复用本机 guardian 包装，在启动来源消费线程前 fork。绑定账本与可信来源的 guardian
+持有会话；真实 helper wait 后向外层返回原退出码，关闭 guardian 自身的调用方标准流，继续消费
+后代 EXIT 和绑定 WAIT。Wayfinder 的 execFileSync 超时信号由外层转给 guardian，再转给仍活 helper；
+helper 已退出后，不再让同步调用等待活后代。维护关闸不发送此信号，不截断已接受工作。
+
+外层返回不是资源封闭：后代仍活时保留 unknown、拒绝跨 owner 同 key 重派；guardian 自然收尾后
+仍须原可信来源与资源判据才能提交封闭。来源丢失或 guardian 异常退出不补签。此改动不杀逃逸后代，
+也不保证忽略信号的业务进程能被 SIGTERM 强制终止。
+
+TS `maintenanceResource` 是当前仅供测试的不透明回调计数钩子，不是生产资源登记入口。真实本机
+CLI 通过 `maintenanceCommand → reserve-resource → 监督器绑定/真实 wait/封域` 登记，不依赖该计数钩子。

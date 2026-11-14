@@ -180,7 +180,29 @@ def supervise(args, command: list[str], notify: int | None = None, signal_mask=N
 
 
 def linux_guardian(args, command: list[str]) -> int:
-    """外层保留原退出合同；独立 guardian 自然 wait 到最后一个后代结束。"""
+    return guarded_execution(args, command, supervise)
+
+
+def report_business_wait(notify: int, result: int) -> None:
+    """Return an actual wait result without closing the independent resource supervisor."""
+    # Release the caller's pipes before notification; descendants are never killed.
+    devnull = os.open(os.devnull, os.O_RDWR)
+    try:
+        for fd in (0, 1, 2):
+            os.dup2(devnull, fd)
+    finally:
+        if devnull > 2:
+            os.close(devnull)
+    try:
+        os.write(notify, f'{result}\n'.encode())
+    except OSError:
+        pass  # Caller disappeared; continue supervision, not dispatch.
+    finally:
+        os.close(notify)
+
+
+def guarded_execution(args, command: list[str], supervisor) -> int:
+    """外层保留原退出合同；独立 guardian 自然监督到资源闭合。仅在线程启动前 fork。"""
     mask = signal.pthread_sigmask(signal.SIG_BLOCK, {signal.SIGTERM, signal.SIGINT})
     reader, writer = os.pipe()
     guardian = None
@@ -196,7 +218,7 @@ def linux_guardian(args, command: list[str]) -> int:
     if guardian == 0:
         os.close(reader)
         try:
-            supervise(args, command, writer, mask)
+            supervisor(args, command, writer, mask)
         except Exception:
             print("local guardian failed before completion", file=sys.stderr, flush=True)
         finally:

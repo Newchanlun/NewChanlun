@@ -13,7 +13,7 @@ export function maintenanceCommand(file: string, args: string[]): { file: string
   return { file: "python3", args: [LOCAL, "--root", scope.owner.root ?? "/Volumes/AgentStorage/newchanlun-maintenance",
     "--resource", resource, ...(scope.owner.esConfig ? ["--es-config", scope.owner.esConfig] : []), "--", file, ...args] };
 }
-/** 模型启动前登记，只有进程明确结束且收尾可判定才释放；无 context 的旧调用不变。 */
+/** 不透明回调计数钩子（当前仅测试使用）；真实 CLI 资源由 maintenanceCommand 预留并监督。 */
 export function maintenanceResource(): (settled: boolean) => void {
   const scope = resources.getStore();
   if (!scope) return () => {};

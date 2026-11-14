@@ -80,7 +80,7 @@ class FixtureReducer(session.BoundSession):
         return False
 
 
-@pytest.mark.parametrize('failure', [None, 'ack', 'source', 'seal'])
+@pytest.mark.parametrize('failure', [None, 'ack', 'source', 'seal', 'notification'])
 def test_vertical_wait_and_loss_preserve_business_result_without_promoting_fixture(tmp_path, monkeypatch, failure):
     gate = m.Gate(tmp_path)
     owner = gate.register('decision', local_actions=True)
@@ -103,7 +103,13 @@ def test_vertical_wait_and_loss_preserve_business_result_without_promoting_fixtu
         def failed(_):
             raise sqlite3.OperationalError('fixture persistence failure')
         reducer.seal = failed
-    assert session._run_session(reducer, channel, resource, 'nonce', ['unused']) == 23
+    def notify(code):
+        assert code == 23
+        raise OSError('isolated caller notification failure')
+    assert session._run_session(reducer, channel, resource, 'nonce', ['unused'],
+                                on_business_wait=notify if failure == 'notification' else None) == 23
+    if failure == 'notification':
+        assert reducer.seal_calls == 1, 'caller notification failure must not abandon supervision'
     assert len([s for s in channel.sent if s.startswith('ARM')]) == 1
     assert not gate.local_action_idle(job)
     assert not reducer.status(resource)['production_accepted']
@@ -127,7 +133,7 @@ def test_missing_managed_configuration_refuses_before_helper_or_fallback(tmp_pat
     monkeypatch.setattr(m.os, 'getsid', lambda _: os.getpid())
     monkeypatch.setattr(session, 'subprocess', SimpleNamespace(Popen=lambda *a, **kw: pytest.fail('must not spawn')))
     with pytest.raises((OSError, ValueError)):
-        session.run(SimpleNamespace(root=tmp_path, resource=resource, es_config=tmp_path / 'absent'), ['unused'])
+        session._supervise(SimpleNamespace(root=tmp_path, resource=resource, es_config=tmp_path / 'absent'), ['unused'])
     with gate.tx() as db:
         assert db.execute('SELECT reason FROM local_resource_not_started').fetchone()[0] == 'baseline_unavailable'
         assert db.execute('SELECT waited_at FROM local_resources').fetchone()[0] is None

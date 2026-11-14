@@ -254,11 +254,19 @@ def settle_native_resource(gate: Gate, resource: str) -> bool:
 
 
 def run(args, command: list[str]) -> int:
-    """Explicit local-command entry. Never falls back to snapshot or unsupervised spawn."""
+    """Explicit ES entry: reuse the local guardian, never snapshot/unsupervised fallback."""
+    from .maintenance_local import guarded_execution
+    return guarded_execution(args, command, _supervise)
+
+
+def _supervise(args, command: list[str], notify: int | None = None, signal_mask=None) -> int:
+    """The process bound to Gate owns the source until closure, independently of caller wait."""
     resource, nonce = token(args.resource), uuid.uuid4().hex
     received: list[int] = []
     old = {signum: signal.signal(signum, lambda signum, frame: received.append(signum))
            for signum in (signal.SIGTERM, signal.SIGINT)}
+    if signal_mask is not None:
+        signal.pthread_sigmask(signal.SIG_SETMASK, signal_mask)
     channel = None
     try:
         os.setsid()
@@ -271,7 +279,17 @@ def run(args, command: list[str]) -> int:
             with evidence_write():
                 gate.local_resource_not_started(resource)
             raise
-        return _run_session(reducer, channel, resource, nonce, command, received)
+        from .maintenance_local import report_business_wait
+        notified = False
+        def report(code):
+            nonlocal notified
+            if notify is not None and not notified:
+                notified = True
+                report_business_wait(notify, code)
+        result = _run_session(reducer, channel, resource, nonce, command, received,
+                              report if notify is not None else None)
+        report(result)  # Pre-dispatch refusal also keeps its original exit contract.
+        return result
     finally:
         if channel is not None:
             with evidence_write():
@@ -280,7 +298,8 @@ def run(args, command: list[str]) -> int:
             signal.signal(signum, handler)
 
 
-def _run_session(reducer, channel, resource: str, nonce: str, command: list[str], received: list[int] | None = None) -> int:
+def _run_session(reducer, channel, resource: str, nonce: str, command: list[str], received: list[int] | None = None,
+                 on_business_wait=None) -> int:
     """Shared orchestration; offline tests use OfflineES, never a VerifiedChannel."""
     received = [] if received is None else received
     lock = threading.Condition(threading.RLock())
@@ -331,6 +350,11 @@ def _run_session(reducer, channel, resource: str, nonce: str, command: list[str]
             helper = subprocess.Popen([config['helper'], '--managed-session', config['socket'], config['collector_requirement'],
                                        config['helper_requirement'], resource, nonce, config['image'], '--', *command])
         code = helper.wait()
+        if on_business_wait is not None:
+            # Only the actual helper wait is returned. The source reader and
+            # bound guardian remain alive; no closure evidence is invented.
+            with evidence_write():
+                on_business_wait(code if code >= 0 else 128 - code)
         # Preserve real helper wait even if registration or evidence is incomplete.
         with evidence_write():
             with lock:
