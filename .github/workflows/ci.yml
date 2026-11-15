@@ -50,7 +50,7 @@ jobs:
   #   能伪造 artifact（#2027 第三轮独审）。只认本仓库分支、7 天内的 run，查询出错一律全跑。判定见 .github/scripts/ci-rust-reuse.py。
   # #1855 裁定 2（issuecomment-6732190569）：s_writer 决定四条 W2 冷锁（w2-cold-locks）是否随本 PR 跑。
   #   S 写者路径由 .github/scripts/s_writer_paths.py 判定：静态集合（rust/ 去掉 S 写者不引用的部分，加 s_session 的
-  #   catalog/profiles/contracts/tests/inputs、rust-job-setup、run-cargo-with-telemetry.sh 及其 EACCES 重试脚本与冷锁 workflow），
+  #   catalog/profiles/contracts/tests/inputs、rust-job-setup、run-cargo-with-telemetry.sh 及其 EACCES 重试脚本、s_writer_paths.py 及其单测、ci.yml 与冷锁 workflow），
   #   再加从写者源码的 #[path]、include*! 与字符串字面量自动求出的仓内文件（#1855 阻断 2，issuecomment-6741990654）。
   #   判定样例与负控在 test_s_writer_paths.py，rust-check 执行。手动触发全跑；push 不跑，main 由 w2-cold-locks.yml
   #   每晚跑；文件数达上限、取不到清单或脚本出错时跑。
@@ -401,6 +401,13 @@ jobs:
           RUSTFLAGS: "-D warnings"
         run: cargo check --all-targets --features s_session,s_capture_native_testonly
 
+      - name: cargo check — s_session,s_v2_seed_testonly 种子构建（#1419）
+        env:
+          RUSTFLAGS: "-D warnings"
+        run: |
+          cargo check --all-targets --features s_session,s_v2_seed_testonly
+          cargo check --all-targets --features s_session,s_incremental,s_v2_seed_testonly
+
       # #1640 §2.3 第 2 层：生产增量构建不含测试钩子（源码机检，不编译）。
       - name: 生产增量构建无测试钩子（#1640）
         working-directory: .
@@ -623,7 +630,7 @@ jobs:
       #   ② 发布构建未开 s_v2_seed_testonly：release 下该 feature 本就 compile_error；再对产物断言种子自报
       #      子命令为「未知子命令」，全部 v2 写子命令返回退役错误且不建库。
       - name: v2 写者机械锁 — 发布构建（#1419）
-        if: ${{ !cancelled() && matrix.group == 'content' }}
+        if: ${{ !cancelled() && matrix.group == 'owned-h1' }}
         env:
           RUSTFLAGS: -D unfulfilled_lint_expectations
         run: |
@@ -643,6 +650,20 @@ jobs:
             grep -q 'v2 结构写者已退役' "$lock_dir/err" || { echo "$sub:"; cat "$lock_dir/err"; exit 1; }
           done
           test ! -e "$lock_dir/v2.db"
+
+      - name: cargo test — v2 种子构建专属路由锁（s_v2_seed_testonly，#1419）
+        if: ${{ !cancelled() && matrix.group == 'owned-h1' }}
+        run: |
+          set -euo pipefail
+          log="$RUNNER_TEMP/v2-seed-lock.log"
+          for test in \
+            tests::v2_seed_build_reports_itself \
+            tests::v2_seed_build_routes_explicit_v2_init_and_rejects_incomplete_selector \
+            v3::tests::selector_dispatch_rejects_unknown_duplicate_and_malformed_forms \
+            v3::tests::v3_init_requires_complete_key_value_pairs_before_creating_anything; do
+            ../.github/scripts/run-cargo-with-telemetry.sh cargo test --locked --features s_session,s_v2_seed_testonly --bin s_structure_session --jobs "${CI_CARGO_JOBS:-1}" -- --exact "$test" --test-threads 1 --show-output --format pretty --color never | tee "$log"
+            grep -Fx "test $test ... ok" "$log"
+          done
 
       # #1394 C：内容编码在 s_session feature 下供多个 owner 共用；只测 S bin 不会执行库测试。
       - name: cargo test — 完整内容编码与共享图校验（#1394）

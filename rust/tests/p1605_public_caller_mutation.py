@@ -1,59 +1,94 @@
-"""#1605 公开入口变异负控（在 rust/ 下运行：python3 tests/p1605_public_caller_mutation.py）。
-
-1. 生效记录改为非默认值（version=2，annualization_days=126，cvar_tail=0.25），p1605_public_* 须绿。
-2. runner.rs/metrics.rs 公开入口改读旧常数记录（version=2，数值为原生效值），须编译成功且两条测试
-   都在数值断言处红（两侧都是 Signed(2)，红灯只能来自指标数值）。
-3. 还原全部临时修改并以原生效记录重跑，须绿。变异不提交。
-"""
 import json
+import os
+import shutil
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 
+RUST_DIR = Path(__file__).resolve().parents[1]
+REPO_ROOT = RUST_DIR.parent
 FILES = [
     Path("src/theta_v0/policy_records/research-stats.json"),
     Path("src/theta_v0/backtest/runner.rs"),
     Path("src/theta_v0/backtest/metrics.rs"),
 ]
 CMD = ["cargo", "test", "--lib", "p1605_public_", "--", "--test-threads=1"]
-originals = {p: p.read_text() for p in FILES}
 
 
-def run(label):
+def stage_workspace(tmp_root: Path) -> Path:
+    for entry in REPO_ROOT.iterdir():
+        if entry.name in ("rust", ".git"):
+            continue
+        os.symlink(entry, tmp_root / entry.name)
+    work_rust = tmp_root / "rust"
+    shutil.copytree(RUST_DIR, work_rust, ignore=shutil.ignore_patterns("target", ".git"))
+    return work_rust
+
+
+def run_public_tests(label: str, cwd: Path, env: dict[str, str]) -> subprocess.CompletedProcess[str]:
     print(label, flush=True)
-    r = subprocess.run(CMD, text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
-    print(r.stdout, flush=True)
-    return r
+    result = subprocess.run(CMD, cwd=cwd, env=env, text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+    print(result.stdout, flush=True)
+    return result
 
 
-try:
-    old = json.loads(originals[FILES[0]])
-    old["version"] = 2
-    active = json.loads(json.dumps(old))
+def assert_nondefault_policy_passes(work_rust: Path, env: dict[str, str], base_record: dict) -> None:
+    active = json.loads(json.dumps(base_record))
     active["fields"]["annualization_days"]["value"] = 126.0
     active["fields"]["cvar_tail"]["value"] = 0.25
-    FILES[0].write_text(json.dumps(active))
-    r = run("P1605 PUBLIC NONDEFAULT EXPECT GREEN")
-    if r.returncode != 0 or "2 passed; 0 failed" not in r.stdout:
+    (work_rust / FILES[0]).write_text(json.dumps(active), encoding="utf-8")
+    result = run_public_tests("P1605 PUBLIC NONDEFAULT EXPECT GREEN", work_rust, env)
+    if result.returncode != 0 or "2 passed; 0 failed" not in result.stdout:
         sys.exit("nondefault green failed")
 
-    const = '\nconst P1605_OLD_RECORD: &str = r##"' + json.dumps(old) + '"##;\n'
-    for p in FILES[1:]:
-        s = originals[p]
-        n = s.count("Some(ACTIVE_RESEARCH_STATS_JSON)")
-        if n == 0:
-            sys.exit(f"{p} 无公开入口加载点")
-        p.write_text(s.replace("Some(ACTIVE_RESEARCH_STATS_JSON)", "Some(P1605_OLD_RECORD)") + const)
-        print(f"MUTATED {p} load_sites={n}", flush=True)
-    r = run("P1605 PUBLIC OLD CONSTANT MUTANT EXPECT RED")
-    if r.returncode != 101 or "0 passed; 2 failed" not in r.stdout or "assertion `left == right` failed" not in r.stdout:
-        sys.exit("mutant did not fail at numeric assertions")
-finally:
-    for p, s in originals.items():
-        p.write_text(s)
-    print("RESTORED", flush=True)
 
-r = run("P1605 PUBLIC RESTORED EXPECT GREEN")
-if r.returncode != 0 or "2 passed; 0 failed" not in r.stdout:
-    sys.exit("restored green failed")
-print("P1605 MUTATION CHECK OK", flush=True)
+def assert_same_version_stale_values_fail_numeric_assertions(
+    work_rust: Path, env: dict[str, str], originals: dict[Path, str], stale_record_v2: dict
+) -> None:
+    const = '\nconst P1605_OLD_RECORD: &str = r##"' + json.dumps(stale_record_v2) + '"##;\n'
+    for rel_path in FILES[1:]:
+        source = originals[rel_path]
+        count = source.count("Some(ACTIVE_RESEARCH_STATS_JSON)")
+        if count == 0:
+            sys.exit(f"{rel_path} 无公开入口加载点")
+        (work_rust / rel_path).write_text(
+            source.replace("Some(ACTIVE_RESEARCH_STATS_JSON)", "Some(P1605_OLD_RECORD)") + const,
+            encoding="utf-8",
+        )
+        print(f"MUTATED {rel_path} load_sites={count}", flush=True)
+    result = run_public_tests("P1605 PUBLIC OLD CONSTANT MUTANT EXPECT RED", work_rust, env)
+    if (
+        result.returncode != 101
+        or "0 passed; 2 failed" not in result.stdout
+        or "assertion `left == right` failed" not in result.stdout
+    ):
+        sys.exit("mutant did not fail at numeric assertions")
+
+
+def assert_restored_workspace_passes(work_rust: Path, env: dict[str, str], originals: dict[Path, str]) -> None:
+    for rel_path, source in originals.items():
+        (work_rust / rel_path).write_text(source, encoding="utf-8")
+    print("RESTORED", flush=True)
+    result = run_public_tests("P1605 PUBLIC RESTORED EXPECT GREEN", work_rust, env)
+    if result.returncode != 0 or "2 passed; 0 failed" not in result.stdout:
+        sys.exit("restored green failed")
+
+
+def main() -> None:
+    originals = {rel_path: (RUST_DIR / rel_path).read_text(encoding="utf-8") for rel_path in FILES}
+    stale_record_v2 = json.loads(originals[FILES[0]])
+    stale_record_v2["version"] = 2
+
+    with tempfile.TemporaryDirectory(prefix="p1605-mutation-") as tmp:
+        work_rust = stage_workspace(Path(tmp))
+        env = {**os.environ, "CARGO_TARGET_DIR": os.environ.get("CARGO_TARGET_DIR", str(RUST_DIR / "target"))}
+        assert_nondefault_policy_passes(work_rust, env, stale_record_v2)
+        assert_same_version_stale_values_fail_numeric_assertions(work_rust, env, originals, stale_record_v2)
+        assert_restored_workspace_passes(work_rust, env, originals)
+
+    print("P1605 MUTATION CHECK OK", flush=True)
+
+
+if __name__ == "__main__":
+    main()

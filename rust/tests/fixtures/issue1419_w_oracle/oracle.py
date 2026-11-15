@@ -300,4 +300,3 @@ def main():
  print(json.dumps({k:v for k,v in result.items() if k not in ('errors','negative_controls','cases_detail')},ensure_ascii=False));print('errors:',len(allerrors),'negative controls:',len(trials));print(json.dumps(allerrors[:5],ensure_ascii=False,indent=2))
  return 0 if result['status']=='PASS' else 1
 if __name__=='__main__':sys.exit(main())
-

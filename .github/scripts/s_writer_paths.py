@@ -6,7 +6,7 @@
 
 S 写者路径由两部分组成：
 1. 静态集合：rust/ 下除去 S 写者不引用的部分，再加锁读取的 s_session 目录、Rust 作业 setup action、
-   cargo 遥测包装脚本（及它调用的 EACCES 重试脚本）和冷锁 workflow。不引用的部分：其它 bin（s_structure_session 只经 #[path] 引入
+   cargo 遥测包装脚本（及它调用的 EACCES 重试脚本）、本路径判定脚本及其单测，以及控制冷锁调度/ci-ok 汇总的 ci.yml 与冷锁 workflow。不引用的部分：其它 bin（s_structure_session 只经 #[path] 引入
    s_session_v2/、s_session_v3/）、六个库模块（从 bin 的 newchan_rust:: 与库内 crate::/super:: 引用求闭包，
    2026-11-09 实算）、rust/tests 下 fixtures 以外的文件。新增的库模块默认算在内。
 2. 派生集合：扫描静态集合内的 Rust 源码，取 `#[path = ".."]`、`include_str!/include_bytes!("..")` 和
@@ -31,7 +31,9 @@ RUST_TESTS = re.compile(r"^rust/tests/")
 RUST_TEST_FIXTURES = re.compile(r"^rust/tests/fixtures/")
 STATIC = re.compile(
     r"^(rust/|s_session/(catalog|profiles|contracts|tests|inputs)/|\.github/actions/rust-job-setup/|"
-    r"\.github/scripts/(run-cargo-with-telemetry|cargo-eacces-retry)\.sh$|\.github/workflows/w2-cold-locks\.yml$)"
+    r"\.github/scripts/(run-cargo-with-telemetry|cargo-eacces-retry)\.sh$|"
+    r"\.github/scripts/(s_writer_paths|test_s_writer_paths)\.py$|"
+    r"\.github/workflows/(ci|w2-cold-locks)\.yml$)"
 )
 LITERAL = re.compile(r'"((?:[^"\\\n]|\\.)*)"')
 

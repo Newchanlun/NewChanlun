@@ -28,6 +28,9 @@ class StaticSet(unittest.TestCase):
             ".github/actions/rust-job-setup/action.yml",
             ".github/scripts/run-cargo-with-telemetry.sh",
             ".github/scripts/cargo-eacces-retry.sh",
+            ".github/scripts/s_writer_paths.py",
+            ".github/scripts/test_s_writer_paths.py",
+            ".github/workflows/ci.yml",
             ".github/workflows/w2-cold-locks.yml",
         ]:
             self.assertTrue(w.static_hit(path), path)
@@ -41,7 +44,7 @@ class StaticSet(unittest.TestCase):
             "rust/src/segment_tangency_tests.rs",
             "rust/tests/nest_isolation_guard.rs",
             "docs/adr/0042-s-writer-incremental-production-path.md",
-            ".github/workflows/ci.yml",
+            ".github/workflows/devskim.yml",
         ]:
             self.assertFalse(w.static_hit(path), path)
 
@@ -72,6 +75,15 @@ class DerivedSet(unittest.TestCase):
         # 静态集合外、只经派生进入的文件：改它们同样要跑冷锁。
         extra = sorted(p for p in self.derived if not w.static_hit(p))
         self.assertEqual(w.s_writer_files(extra, ROOT), extra)
+
+    def test_gate_workflow_or_classifier_change_runs_the_locks(self):
+        for path in [
+            ".github/workflows/ci.yml",
+            ".github/workflows/w2-cold-locks.yml",
+            ".github/scripts/s_writer_paths.py",
+            ".github/scripts/test_s_writer_paths.py",
+        ]:
+            self.assertEqual(w.s_writer_files([path], ROOT), [path], path)
 
     def test_docs_only_change_skips_the_locks(self):
         self.assertEqual(w.s_writer_files(["docs/agents/issue-tracker.md", "README.md"], ROOT), [])

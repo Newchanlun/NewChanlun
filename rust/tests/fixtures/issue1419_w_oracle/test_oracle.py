@@ -43,4 +43,3 @@ class FoldTests(unittest.TestCase):
   self.assertEqual(o.Codec().value(None),digest)
 
 if __name__=='__main__':unittest.main()
-
