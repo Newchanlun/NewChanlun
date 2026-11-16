@@ -399,8 +399,8 @@ function w2Case() {
     raw("u2", "2", { withdrawn_generation: "4", withdrawal_reason: "superseded_by_revision", superseded_by: "g1" }),
   ];
   const groups = [
-    { object_id: "g0", members: ["0", "1"], first_known_generation: "4", withdrawn_generation: null },
-    { object_id: "g1", members: ["2"], first_known_generation: "4", withdrawn_generation: null },
+    { object_id: "g0", members: ["0", "1"], direction: "DOWN", first_known_generation: "4", withdrawn_generation: null },
+    { object_id: "g1", members: ["2"], direction: "UP", first_known_generation: "4", withdrawn_generation: null },
   ];
   const kinds = new Map([...pending.map((p) => [p.object_id, "CC-004.undetermined_raw"]), ...groups.map((g) => [g.object_id, "CC-005.inclusion_group"])]);
   const superseded = pending.filter((p) => p.superseded_by).map((p) => ({ ...p, kind: "CC-004.undetermined_raw" }));
@@ -453,6 +453,33 @@ test("W/2 逐原件替代：每个未定原件（含修订身份）替代到含�
   reject((c) => {
     c.pending[1].withdrawn_generation = "3";
   }, /W2同槽位对象生命周期重叠/);
+});
+
+test("W/2 逐原件替代只认定向组：direction=null 的在世组不是替代目标，也不算已有替代", async (t) => {
+  const removed = (direction) => {
+    const c = w2Case();
+    c.groups[1].direction = direction;
+    Object.assign(c.pending[3], { withdrawal_reason: "fact_removed", superseded_by: null });
+    c.superseded = c.superseded.filter((w) => w.object_id !== "u2");
+    c.replaces = c.replaces.filter((r) => r.object !== "u2");
+    return c;
+  };
+  await t.test("UP、DOWN 组各自成立为替代目标，并各自拒同坐标 fact_removed", () => {
+    for (const direction of ["UP", "DOWN"]) {
+      const c = w2Case();
+      for (const g of c.groups) g.direction = direction;
+      typed.w2Replacements(c);
+      assert.throws(() => typed.w2Replacements(removed(direction)), /W2未定原件存在替代目标却按fact_removed撤回/);
+    }
+  });
+  await t.test("direction=null 的在世组作替代目标即拒", () => {
+    const c = w2Case();
+    c.groups[1].direction = null;
+    assert.throws(() => typed.w2Replacements(c), /不满足坐标、种类或生命周期/);
+  });
+  await t.test("direction=null 的在世组不挡同坐标 fact_removed", () => {
+    typed.w2Replacements(removed(null));
+  });
 });
 
 test("W/2 完整 validateState：替代目标须在撤回代已出生且在世，公开 replaces 全集对应撤回事实", async (t) => {
@@ -637,6 +664,55 @@ test("W/2 完整 validateState：替代目标须在撤回代已出生且在世�
   await reject(nonrawOverlap, /W2同槽位对象生命周期重叠/, "R3-2 同槽位生命周期重叠被拒绝");
 });
 
+// 对象身份与见证身份是内容身份：手工改写真实 g5 底座后须重算，否则公开入口先按身份不符拒。
+function convert(r, keys = ["seq", "revision"]) {
+  return Object.fromEntries(Object.entries(r).map(([k, x]) =>
+    [k, keys.includes(k) && x !== null ? Q3.V.number(x) : x]));
+}
+async function reid(st) {
+  for (let k = 0; k < 5; k++) {
+    const mm = new Map();
+    for (const r of [...st.snapshot.objects, ...st.snapshot.withdrawn_objects]) {
+      let p;
+      if (r.kind !== "CC-006.local_shape") {
+        p = Object.fromEntries(["kind", "fact_key", "payload", "input_refs"].map(k => [k, r[k]]));
+      } else {
+        p = Object.fromEntries(["branch", "dir_ab", "dir_bc", "window_start",
+          "window_mid", "window_end", "comparisons"].map(k => [k, r[k]]));
+        const groups = r.input_refs.map(ir => st.snapshot.objects.find(g =>
+          g.kind === "CC-005.inclusion_group" && g.payload.group_index === ir.merged_index));
+        p.merged_highs = groups.map(g => g.payload.high);
+        p.merged_lows = groups.map(g => g.payload.low);
+        p.input_refs = r.input_refs.map(g => ({
+          merged_index: Q3.V.number(g.merged_index),
+          raw_refs: g.raw_refs.map(r => convert(r)),
+          dependency_refs: g.dependency_refs.map(r => convert(r))
+        }));
+      }
+      p.profile_id = st.snapshot.profile_id;
+      p.rule_revision = st.snapshot.rule_revision;
+      mm.set(r.object_id, await Q3.V.identity(0x20, p, "obj3-"));
+    }
+    const replace = v => typeof v === "string" ? mm.get(v) || v
+      : Array.isArray(v) ? v.map(replace)
+      : v && typeof v === "object"
+        ? Object.fromEntries(Object.entries(v).map(([k, x]) => [k, replace(x)])) : v;
+    st = replace(st);
+  }
+  for (const w of st.snapshot.witnesses) {
+    const group = st.snapshot.objects.find(g => g.kind === "CC-005.inclusion_group"
+      && g.payload.group_anchor === w.merged_source_index);
+    const raw_bars = w.raw_bars.map(r => ({
+      ...convert(r, ["revision", "seq", "supersedes_revision"]), price: r.close
+    }));
+    w.witness_id = "wit-" + (await Q3.V.sha({
+      mi: Q3.V.number(group.payload.group_index), object_id: w.object_id,
+      raw_bars, slot: Q3.V.number(w.slot)
+    })).slice(0, 16);
+  }
+  return st;
+}
+
 // #1419 31P bounded-layout/2：单元 source_ref 经真实公开入口 Q3.validateState 消费。底座是真实 Rust 导出 g5（W1 原件），
 // 下列改动均为手工读者夹具：三条 fact_removed 未定原件改为 W2 逐原件替代到含其坐标的组并补 replaces 边；
 // 另加一个分型及坐标 3、4 的具名单元批记录，覆盖活动与撤回序列。期望 source_ref 由 raw_history
@@ -650,53 +726,6 @@ test("bounded-layout/2 完整 validateState：单元 source_ref 精确绑定同�
   snapshot.rule_revision = b.fixed.rule_revision;
   const base = { snapshot, catalog, cut: Object.fromEntries(["session_id", "generation", "structure_cut", "catalog_revision", "index_frontier"].map((k) => [k, snapshot[k]])) };
   await Q3.validateState(base, "s-session/3");
-  function convert(r, keys = ["seq", "revision"]) {
-    return Object.fromEntries(Object.entries(r).map(([k, x]) =>
-      [k, keys.includes(k) && x !== null ? Q3.V.number(x) : x]));
-  }
-  async function reid(st) {
-    for (let k = 0; k < 5; k++) {
-      const mm = new Map();
-      for (const r of [...st.snapshot.objects, ...st.snapshot.withdrawn_objects]) {
-        let p;
-        if (r.kind !== "CC-006.local_shape") {
-          p = Object.fromEntries(["kind", "fact_key", "payload", "input_refs"].map(k => [k, r[k]]));
-        } else {
-          p = Object.fromEntries(["branch", "dir_ab", "dir_bc", "window_start",
-            "window_mid", "window_end", "comparisons"].map(k => [k, r[k]]));
-          const groups = r.input_refs.map(ir => st.snapshot.objects.find(g =>
-            g.kind === "CC-005.inclusion_group" && g.payload.group_index === ir.merged_index));
-          p.merged_highs = groups.map(g => g.payload.high);
-          p.merged_lows = groups.map(g => g.payload.low);
-          p.input_refs = r.input_refs.map(g => ({
-            merged_index: Q3.V.number(g.merged_index),
-            raw_refs: g.raw_refs.map(r => convert(r)),
-            dependency_refs: g.dependency_refs.map(r => convert(r))
-          }));
-        }
-        p.profile_id = st.snapshot.profile_id;
-        p.rule_revision = st.snapshot.rule_revision;
-        mm.set(r.object_id, await Q3.V.identity(0x20, p, "obj3-"));
-      }
-      const replace = v => typeof v === "string" ? mm.get(v) || v
-        : Array.isArray(v) ? v.map(replace)
-        : v && typeof v === "object"
-          ? Object.fromEntries(Object.entries(v).map(([k, x]) => [k, replace(x)])) : v;
-      st = replace(st);
-    }
-    for (const w of st.snapshot.witnesses) {
-      const group = st.snapshot.objects.find(g => g.kind === "CC-005.inclusion_group"
-        && g.payload.group_anchor === w.merged_source_index);
-      const raw_bars = w.raw_bars.map(r => ({
-        ...convert(r, ["revision", "seq", "supersedes_revision"]), price: r.close
-      }));
-      w.witness_id = "wit-" + (await Q3.V.sha({
-        mi: Q3.V.number(group.payload.group_index), object_id: w.object_id,
-        raw_bars, slot: Q3.V.number(w.slot)
-      })).slice(0, 16);
-    }
-    return st;
-  }
   const REF_KEYS = ["identity_key", "payload_hash", "receipt_id", "event_id", "input_revision", "revision", "seq", "source_coord"];
   const rawRef = (coord) => {
     const rows = snapshot.raw_history.filter((r) => r.source_coord === coord);
@@ -1032,4 +1061,52 @@ test("bounded-layout/2 完整 validateState：单元 source_ref 精确绑定同�
     Object.assign(firstBatch, { first_known_generation: "5", published_generation: "5", first_known_cut: "cut-5" });
     await assert.rejects(async () => Q3.validateState(await reid(latePrefix), "s-session/3"), /单元序列引用晚于自身出生的单元/);
   });
+});
+
+// 底座是真实 Rust 导出 g5（W1 原件），手工改为 W2+/1：坐标 0..2 的三条未定原件替代到含其坐标的首组。
+// g4 起的已定初始化来源含坐标 0..3，同代初始化来源会先于组判据拒 fact_removed。为单独观察组判据，
+// 另造坐标 4 的未定原件（g3 出生、g4 撤回），并把含坐标 4 的尾组出生代提前到 g4。
+test("W/2 完整 validateState：direction=null 的在世组不得作替代目标，也不挡 fact_removed", async (t) => {
+  const H = require("./q3_complete_fixture.cjs");
+  const b = await H.makeS16Base("5", "q3-real-s3-w-recover-revise.json");
+  b.graph = await H.C.GraphView.create([...b.nodes.values()]);
+  async function plain(ref) { let s = ""; for await (const c of b.graph.renderChunks(ref)) s += c; return JSON.parse(s); }
+  const snapshot = await plain(b.graph.header(b.publication.snapshot_root)), catalog = await plain(b.catalog);
+  snapshot.rule_revision = b.fixed.rule_revision;
+  const base = { snapshot, catalog, cut: Object.fromEntries(["session_id", "generation", "structure_cut", "catalog_revision", "index_frontier"].map((k) => [k, snapshot[k]])) };
+  function build({ head = "DOWN", tail = "DOWN", superseded = true }) {
+    const st = structuredClone(base);
+    st.snapshot.rule_revision = st.snapshot.catalog_evidence.rule_revision = st.catalog.catalog_evidence.rule_revision = typed.W2_ARCHIVED_RULE;
+    const groupOf = (coord) => st.snapshot.objects.find((r) => r.kind === "CC-005.inclusion_group" && r.payload.members.includes(coord));
+    const headGroup = groupOf("0"), tailGroup = groupOf("4");
+    const real = st.snapshot.withdrawn_objects.filter((r) => r.kind === "CC-004.undetermined_raw");
+    for (const u of real) {
+      assert(headGroup.payload.members.includes(u.payload.raw.source_coord) && u.withdrawn_generation === "4");
+      Object.assign(u, { withdrawal_reason: "superseded_by_revision", superseded_by: headGroup.object_id });
+      st.snapshot.relations.push({ subject: headGroup.object_id, relation_type: "replaces", object: u.object_id });
+    }
+    headGroup.payload.direction = head;
+    Object.assign(tailGroup, { first_known_generation: "4", published_generation: "4", first_known_cut: "cut-4" });
+    tailGroup.payload.direction = tail;
+    const ref = tailGroup.input_refs.find((r) => r.source_coord === "4"), row = st.snapshot.raw_history.find((r) => r.source_coord === "4");
+    const extra = structuredClone(real.find((u) => u.first_known_generation === "3"));
+    Object.assign(extra, { object_id: "obj3-" + "c".repeat(64), fact_key: JSON.stringify(["CC-004.undetermined_raw", "4"]), input_refs: [structuredClone(ref)], source_coords: ["4"],
+      withdrawal_reason: superseded ? "superseded_by_revision" : "fact_removed", superseded_by: superseded ? tailGroup.object_id : null });
+    extra.payload.raw = Object.fromEntries(["source_coord", "open", "high", "low", "close"].map((k) => [k, row[k]]));
+    const waiting = st.snapshot.withdrawn_objects.find((r) => r.kind === "CC-004.initialization" && r.first_known_generation === "3");
+    waiting.input_refs.push(structuredClone(ref));
+    waiting.source_coords.push("4");
+    st.snapshot.withdrawn_objects.push(extra);
+    if (superseded) st.snapshot.relations.push({ subject: tailGroup.object_id, relation_type: "replaces", object: extra.object_id });
+    return st;
+  }
+  const accept = (label, shape) => t.test(label, async () => { await Q3.validateState(await reid(build(shape)), "s-session/3"); });
+  const reject = (label, shape, pattern) => t.test(label, async () => { await assert.rejects(async () => Q3.validateState(await reid(build(shape)), "s-session/3"), pattern); });
+  await accept("D1 两组均为 DOWN，四条未定原件各替代到含其坐标的组", {});
+  await accept("D2 两组均为 UP 同样成立", { head: "UP", tail: "UP" });
+  await reject("D3 真实首组 direction=null 仍作三条真实未定原件的替代目标即拒", { head: null }, /不满足坐标、种类或生命周期/);
+  await reject("D4 尾组 direction=null 作坐标 4 未定原件的替代目标即拒", { tail: null }, /不满足坐标、种类或生命周期/);
+  await accept("D5 同一 direction=null 尾组在世，坐标 4 未定原件按 fact_removed 撤回成立", { tail: null, superseded: false });
+  for (const tail of ["DOWN", "UP"])
+    await reject("D6 尾组为 " + tail + " 时同一 fact_removed 撤回即拒", { tail, superseded: false }, /W2未定原件存在替代目标却按fact_removed撤回/);
 });
