@@ -1406,7 +1406,9 @@ jobs:
         run: npm run typecheck
       - name: node:test — Sandcastle + wayfinder
         # #1915：wayfinder_engine 的测试按通配纳入（含 split-publication、action-recheck 等交错测试），新增同类测试无需再改这里。
-        run: npx tsx --test .sandcastle/*.test.ts .sandcastle/*.test.mts scripts/wayfinder_engine*.test.mts
+        # #1875：默认并发是核数减一（托管 runner 为 3）。42 个文件串行合计约 617 s（本机），CI 墙钟约 154 s。
+        #   本机实测并发 3 → 8：298 → 152 s，通过/失败集合不变；托管 runner 上的收益以本 PR 的 CI 实测为准。
+        run: npx tsx --test --test-concurrency=8 .sandcastle/*.test.ts .sandcastle/*.test.mts scripts/wayfinder_engine*.test.mts
 
   deepagents-pilot:
     runs-on: ubuntu-latest
