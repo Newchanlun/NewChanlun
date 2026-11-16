@@ -3344,7 +3344,7 @@ if (typeof module !== 'object' || !module.exports) {
     validateCenterPayload, validatePairPayload, validatePairPublication, validatePairHistory, validateCenterFamilyCut});
 });
 
-/* exact source q3-typed.js SHA256 84cd30996986ffa69d5157f71ae1a22cb6c62c8f30b0dba2802992cfce4ceed1 */
+/* exact source q3-typed.js SHA256 73ef928e1bbec36a95ad275c962aaf9ac24255d0e74b039e64c6a167dbe11657 */
 /* #1394：typed 与形态来源的同一判据；只把访问迁为完整异步 Value 遍历。 */
 (function (root, factory) {
   const common = typeof module === "object" && module.exports;
@@ -3458,6 +3458,8 @@ if (typeof module !== 'object' || !module.exports) {
     const edges = new Set(replaces.map(r => JSON.stringify([r.subject, r.object])));
     need(edges.size === replaces.length, "W2重复公开replaces关系");
     const alive = (obj, at) => BigInt(obj.first_known_generation) <= at && (obj.withdrawn_generation === null || BigInt(obj.withdrawn_generation) > at);
+    // W/2 只让定向组替代未定原件，direction=null 的组不替代（Rust w2_group_contains、w2_audit_group_contains 同判据）。
+    const directedMember = (g, coord) => ["UP", "DOWN"].includes(g.direction) && g.members.includes(coord);
     const bySlot = new Map();
     for (const [id, obj] of objects) {
       const slot = slotOf(id, obj);
@@ -3487,7 +3489,7 @@ if (typeof module !== 'object' || !module.exports) {
       if (u.withdrawn_generation === null) { need(u.superseded_by === null, "活动未定原件不得声明superseded_by"); continue; }
       const at = BigInt(u.withdrawn_generation);
       const replaced = pending.some(r => r.object_id !== u.object_id && r.coord === u.coord && alive(r, at)) ||
-        groups.some(g => alive(g, at) && g.members.includes(u.coord)) ||
+        groups.some(g => alive(g, at) && directedMember(g, u.coord)) ||
         initializations.some(init => alive(init, at) && init.source_coords.includes(u.coord));
       if (u.withdrawal_reason === "fact_removed") {
         need(u.superseded_by === null && !replaced, "W2未定原件存在替代目标却按fact_removed撤回");
@@ -3496,7 +3498,7 @@ if (typeof module !== 'object' || !module.exports) {
       need(u.withdrawal_reason === "superseded_by_revision", "W2撤回原因不符");
       const revision = raws.get(u.superseded_by), group = byGroup.get(u.superseded_by);
       need((revision && revision.object_id !== u.object_id && revision.coord === u.coord && alive(revision, at)) ||
-        (group && alive(group, at) && group.members.includes(u.coord)), "W2逐原件替代目标不满足坐标、种类或生命周期");
+        (group && alive(group, at) && directedMember(group, u.coord)), "W2逐原件替代目标不满足坐标、种类或生命周期");
       need(edges.has(JSON.stringify([u.superseded_by, u.object_id])), "W2逐原件替代缺公开replaces关系");
     }
     for (const w of superseded) need(edges.has(JSON.stringify([w.superseded_by, w.object_id])), "W2替代撤回缺公开replaces关系");
@@ -3509,7 +3511,7 @@ if (typeof module !== 'object' || !module.exports) {
       if (newKind !== oldKind) {
         need(oldKind === "CC-004.undetermined_raw" && newKind === "CC-005.inclusion_group", "W2跨kind替代未获准");
         const raw = raws.get(r.object), group = byGroup.get(r.subject);
-        need(raw && group && group.members.includes(raw.coord), "W2逐原件替代目标不满足坐标、种类或生命周期");
+        need(raw && group && directedMember(group, raw.coord), "W2逐原件替代目标不满足坐标、种类或生命周期");
       } else {
         const oldSlot = slotOf(r.object, objects.get(r.object) || target), newSlot = slotOf(r.subject, replacement);
         need(oldSlot !== null && oldSlot === newSlot, "W2同kind替代槽位不符");
@@ -4346,7 +4348,7 @@ if (typeof module !== 'object' || !module.exports) {
     TB02_KINDS: Object.freeze(TB02_KINDS), BI_KINDS, SEGMENT_KINDS: Object.freeze(SEGMENT_KINDS)});
 });
 
-/* exact source q3-consumer.js SHA256 98efdb715961bb25eacc0f3ac95f9f7086fdaffe58e57b98a0a3b59d90693d1b */
+/* exact source q3-consumer.js SHA256 28cc19340d2a5487e1aef1205df49497399848e080f1e9ec1d5660bde3c03acc */
 /* #1394：Q3完整消费者；只供既有tb01c页面调用，没有产品路由或默认资源。 */
 (function (root, factory) {
   const common = typeof module === "object" && module.exports;
@@ -4873,9 +4875,9 @@ if (typeof module !== 'object' || !module.exports) {
           pending.push({object_id, coord: await s(await f(await f(record, "payload"), "raw"), "source_coord"),
             first_known_generation, withdrawn_generation, withdrawal_reason, superseded_by});
         if (kind === "CC-005.inclusion_group") {
-          const members = [];
-          for await (const c of (await f(await f(record, "payload"), "members")).items()) members.push(await S(c));
-          groups.push({object_id, members, first_known_generation, withdrawn_generation});
+          const payload = await f(record, "payload"), members = [];
+          for await (const c of (await f(payload, "members")).items()) members.push(await S(c));
+          groups.push({object_id, members, direction: await (await f(payload, "direction")).scalar(), first_known_generation, withdrawn_generation});
         }
       }
     for await (const r of (await f(snapshot, "relations")).items())

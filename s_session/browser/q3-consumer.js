@@ -524,9 +524,9 @@
           pending.push({object_id, coord: await s(await f(await f(record, "payload"), "raw"), "source_coord"),
             first_known_generation, withdrawn_generation, withdrawal_reason, superseded_by});
         if (kind === "CC-005.inclusion_group") {
-          const members = [];
-          for await (const c of (await f(await f(record, "payload"), "members")).items()) members.push(await S(c));
-          groups.push({object_id, members, first_known_generation, withdrawn_generation});
+          const payload = await f(record, "payload"), members = [];
+          for await (const c of (await f(payload, "members")).items()) members.push(await S(c));
+          groups.push({object_id, members, direction: await (await f(payload, "direction")).scalar(), first_known_generation, withdrawn_generation});
         }
       }
     for await (const r of (await f(snapshot, "relations")).items())

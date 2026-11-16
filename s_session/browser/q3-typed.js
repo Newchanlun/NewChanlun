@@ -111,6 +111,8 @@
     const edges = new Set(replaces.map(r => JSON.stringify([r.subject, r.object])));
     need(edges.size === replaces.length, "W2重复公开replaces关系");
     const alive = (obj, at) => BigInt(obj.first_known_generation) <= at && (obj.withdrawn_generation === null || BigInt(obj.withdrawn_generation) > at);
+    // W/2 只让定向组替代未定原件，direction=null 的组不替代（Rust w2_group_contains、w2_audit_group_contains 同判据）。
+    const directedMember = (g, coord) => ["UP", "DOWN"].includes(g.direction) && g.members.includes(coord);
     const bySlot = new Map();
     for (const [id, obj] of objects) {
       const slot = slotOf(id, obj);
@@ -140,7 +142,7 @@
       if (u.withdrawn_generation === null) { need(u.superseded_by === null, "活动未定原件不得声明superseded_by"); continue; }
       const at = BigInt(u.withdrawn_generation);
       const replaced = pending.some(r => r.object_id !== u.object_id && r.coord === u.coord && alive(r, at)) ||
-        groups.some(g => alive(g, at) && g.members.includes(u.coord)) ||
+        groups.some(g => alive(g, at) && directedMember(g, u.coord)) ||
         initializations.some(init => alive(init, at) && init.source_coords.includes(u.coord));
       if (u.withdrawal_reason === "fact_removed") {
         need(u.superseded_by === null && !replaced, "W2未定原件存在替代目标却按fact_removed撤回");
@@ -149,7 +151,7 @@
       need(u.withdrawal_reason === "superseded_by_revision", "W2撤回原因不符");
       const revision = raws.get(u.superseded_by), group = byGroup.get(u.superseded_by);
       need((revision && revision.object_id !== u.object_id && revision.coord === u.coord && alive(revision, at)) ||
-        (group && alive(group, at) && group.members.includes(u.coord)), "W2逐原件替代目标不满足坐标、种类或生命周期");
+        (group && alive(group, at) && directedMember(group, u.coord)), "W2逐原件替代目标不满足坐标、种类或生命周期");
       need(edges.has(JSON.stringify([u.superseded_by, u.object_id])), "W2逐原件替代缺公开replaces关系");
     }
     for (const w of superseded) need(edges.has(JSON.stringify([w.superseded_by, w.object_id])), "W2替代撤回缺公开replaces关系");
@@ -162,7 +164,7 @@
       if (newKind !== oldKind) {
         need(oldKind === "CC-004.undetermined_raw" && newKind === "CC-005.inclusion_group", "W2跨kind替代未获准");
         const raw = raws.get(r.object), group = byGroup.get(r.subject);
-        need(raw && group && group.members.includes(raw.coord), "W2逐原件替代目标不满足坐标、种类或生命周期");
+        need(raw && group && directedMember(group, raw.coord), "W2逐原件替代目标不满足坐标、种类或生命周期");
       } else {
         const oldSlot = slotOf(r.object, objects.get(r.object) || target), newSlot = slotOf(r.subject, replacement);
         need(oldSlot !== null && oldSlot === newSlot, "W2同kind替代槽位不符");
