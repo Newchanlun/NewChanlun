@@ -24,11 +24,16 @@ fi
 work="$(mktemp -d)"
 trap 'rm -rf "$work"' EXIT
 
+# #1875：一组 features 只调一次 cargo 编出 lib 与 bin 两个测试二进制（两份编译在同一次构建里并行），
+#   再各用 cargo 列名（产物已是最新，不重编）。列出的名单、求差集与两道门都和逐目标各编一次时相同。
 list_tests() {
-  local features="$1" out="$2"
-  shift 2
-  cargo test --locked --features "$features" "$@" --jobs "${CI_CARGO_JOBS:-1}" -- --list >"$out.raw"
-  sed -n 's/: test$//p' "$out.raw" | LC_ALL=C sort >"$out"
+  local features="$1" out="$2" target sel
+  cargo test --locked --features "$features" --lib --bin s_structure_session --no-run --jobs "${CI_CARGO_JOBS:-1}"
+  for target in lib bin; do
+    if [[ "$target" == lib ]]; then sel=(--lib); else sel=(--bin s_structure_session); fi
+    cargo test --locked --features "$features" "${sel[@]}" --jobs "${CI_CARGO_JOBS:-1}" -- --list >"$out.$target.raw"
+    sed -n 's/: test$//p' "$out.$target.raw" | LC_ALL=C sort >"$out.$target"
+  done
 }
 
 # #1875：CI_TEST_PART=i/N 时只执行新增集合中按名字排序后第 i、i+N、i+2N… 个（i 从 0 起）。N 个作业各取一份，
@@ -51,19 +56,17 @@ phase_done() {
   echo "::notice title=feature-delta phase::feature=$feature part=${CI_TEST_PART:-0/1} target=$1 phase=$2 seconds=$((SECONDS - $3))"
 }
 
+t0=$SECONDS
+list_tests "$base_features" "$work/base"
+phase_done both list-base "$t0"
+t0=$SECONDS
+list_tests "$base_features,$feature" "$work/feature"
+phase_done both list-feature "$t0"
+
 total=0
 for target in lib bin; do
-  if [[ "$target" == lib ]]; then
-    selector=(--lib)
-  else
-    selector=(--bin s_structure_session)
-  fi
-  t0=$SECONDS
-  list_tests "$base_features" "$work/$target.base" "${selector[@]}"
-  phase_done "$target" list-base "$t0"
-  t0=$SECONDS
-  list_tests "$base_features,$feature" "$work/$target.feature" "${selector[@]}"
-  phase_done "$target" list-feature "$t0"
+  mv "$work/base.$target" "$work/$target.base"
+  mv "$work/feature.$target" "$work/$target.feature"
   LC_ALL=C comm -13 "$work/$target.base" "$work/$target.feature" >"$work/$target.delta"
   removed="$(LC_ALL=C comm -23 "$work/$target.base" "$work/$target.feature" | wc -l | tr -d ' ')"
   count="$(wc -l <"$work/$target.delta" | tr -d ' ')"
