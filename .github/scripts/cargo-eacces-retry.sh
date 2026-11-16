@@ -55,17 +55,25 @@ if [[ -n "$cause" ]]; then
   # EACCES 在同一文件上是粘的：原地重跑时 cargo 认为构建脚本已是新的，只会再执行同一个被拒的文件（run 42774135845
   #   同机同路径连拒 4 次）。重跑前删掉被拒的 build-script-build 及同目录的 build_script_build-*（前者是后者的硬链接，
   #   cargo 只看后者判新旧，只删前者会把同一 inode 链回来），cargo 判输出缺失、重编出新文件。只多一次构建脚本编译，结论不变。
-  #   删除范围（#2066 独审加固）：只删 cargo 报告里紧跟着 Permission denied (os error 13) 的那几个路径（同一日志里因
-  #   ENOENT 等别的原因 never executed 的不删）；路径必须形如 <target 根>/…/build/<crate>-<16 位 hash>/build-script-build，
-  #   target 根取 CARGO_TARGET_DIR（缺省 ./target）的真实路径；crate 目录的真实路径必须与字面路径逐字相同（任何一级
-  #   是符号链接都不删）。任一条不满足就不删，照旧原地重跑。
+  #   删除范围（#2066 两轮独审加固）：只在归属无歧义时删，否则一律不删、照旧原地重跑。
+  #   - 整份输出里「never executed」与「could not execute process」各恰好出现一次（交错的多段报错、或路径文本里用反引号
+  #     或换行嵌着另一段报错，都会多出一次：真实报错行本身必含后者，伪造的整行也必含后者）；
+  #   - 那一行整行就是 `could not execute process \`<路径>\` (never executed)`，路径只含 [A-Za-z0-9_./-]；
+  #   - 其后的非空行依次恰为「Caused by:」与「Permission denied (os error 13)」；
+  #   - 路径形如 <target 根>/…/build/<crate>-<16 位 hash>/build-script-build，target 根取 CARGO_TARGET_DIR（缺省 ./target）
+  #     的真实路径；crate 目录的真实路径须与字面路径逐字相同（任何一级是符号链接都不删）。
   if [[ "$cause" == EACCES* ]]; then
-    bad=$(awk '
-      match($0, /could not execute process `[^`]*\/build-script-build` \(never executed\)/) {
-        p = substr($0, RSTART, RLENGTH); sub(/^could not execute process `/, "", p); sub(/` \(never executed\)$/, "", p); left = 4; next
-      }
-      left > 0 { if ($0 ~ /Permission denied \(os error 13\)/) { print p; left = 0 } else if ($0 ~ /\(os error [0-9]+\)/) { left = 0 } else { left-- } }
-    ' "$log" | sort -u)
+    bad=
+    if [[ "$(grep -o 'never executed' "$log" | wc -l)" -eq 1 && "$(grep -o 'could not execute process' "$log" | wc -l)" -eq 1 ]]; then
+      bad=$(awk '
+        state == 0 && /^[[:space:]]*could not execute process `[A-Za-z0-9_.\/-]+` \(never executed\)$/ {
+          p = $0; sub(/^[[:space:]]*could not execute process `/, "", p); sub(/` \(never executed\)$/, "", p); state = 1; next
+        }
+        state == 0 || /^[[:space:]]*$/ { next }
+        state == 1 { state = ($0 ~ /^[[:space:]]*Caused by:$/) ? 2 : -1; next }
+        state == 2 { if ($0 ~ /^[[:space:]]*Permission denied \(os error 13\)$/) print p; state = -1; next }
+      ' "$log")
+    fi
     target_root="$(realpath -e -- "${CARGO_TARGET_DIR:-target}" 2>/dev/null)" || target_root=
     removed=0
     while IFS= read -r f; do
