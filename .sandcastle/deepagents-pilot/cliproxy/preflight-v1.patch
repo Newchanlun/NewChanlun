@@ -1,0 +1,1337 @@
+--- a/internal/api/middleware/preflight_receipt.go
++++ b/internal/api/middleware/preflight_receipt.go
+@@ -0,0 +1,39 @@
++package middleware
++
++import (
++	"context"
++	"net/http"
++	"os"
++	"strings"
++	"time"
++
++	"github.com/gin-gonic/gin"
++	"github.com/router-for-me/CLIProxyAPI/v8/sdk/preflightreceipt"
++)
++
++func PreflightReceipt() gin.HandlerFunc {
++	root := os.Getenv("CLIPROXY_PREFLIGHT_RECEIPTS")
++	return func(c *gin.Context) {
++		session := c.GetHeader("Session-Id")
++		if root == "" || !strings.HasPrefix(session, "preflight-") {
++			c.Next()
++			return
++		}
++		if c.Request.Method != http.MethodPost || c.Request.URL.Path != "/v1/responses" || c.GetHeader("Upgrade") != "" {
++			c.AbortWithStatus(http.StatusBadRequest)
++			return
++		}
++		ctx, collector, err := preflightreceipt.Begin(c.Request.Context(), root, session)
++		if err != nil {
++			c.AbortWithStatus(http.StatusServiceUnavailable)
++			return
++		}
++		ctx, cancel := context.WithDeadline(ctx, time.Now().Add(preflightreceipt.Lifetime))
++		defer cancel()
++		c.Request = c.Request.WithContext(ctx)
++		finished := false
++		defer func() { collector.HandlerDone(finished && c.Writer.Status() == http.StatusOK) }()
++		c.Next()
++		finished = true
++	}
++}
+--- a/internal/api/preflight_receipt_test.go
++++ b/internal/api/preflight_receipt_test.go
+@@ -0,0 +1,300 @@
++package api
++
++import (
++	"bufio"
++	"context"
++	"crypto/tls"
++	"crypto/x509"
++	"encoding/json"
++	"io"
++	"net"
++	"net/http"
++	"net/http/httptest"
++	"os"
++	"path/filepath"
++	"strings"
++	"sync/atomic"
++	"testing"
++	"time"
++
++	"github.com/router-for-me/CLIProxyAPI/v8/internal/pluginhost"
++	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
++	runtimeexecutor "github.com/router-for-me/CLIProxyAPI/v8/internal/runtime/executor"
++	"github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
++	coreexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
++	"github.com/router-for-me/CLIProxyAPI/v8/sdk/preflightreceipt"
++)
++
++type preflightFakeTransport func(*http.Request) (*http.Response, error)
++
++func (f preflightFakeTransport) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
++
++// The complete HTTP handler, native Kimi executor, retry scheduler and producer
++// run unchanged; only the final network boundary is replaced with an offline fake.
++func TestPreflightReceiptNativeKimiHTTP(t *testing.T) {
++	root := filepath.Join(t.TempDir(), "receipts")
++	t.Setenv("CLIPROXY_PREFLIGHT_RECEIPTS", root)
++	server := newTestServerWithOptions(t, WithPluginHost(pluginhost.New()))
++	server.handlers.AuthManager.RegisterExecutor(runtimeexecutor.NewKimiExecutor(server.cfg))
++	server.handlers.AuthManager.SetRetryConfig(1, 0, 2)
++	for _, id := range []string{"receipt-kimi-a", "receipt-kimi-b"} {
++		_, err := server.handlers.AuthManager.Register(context.Background(), &auth.Auth{ID: id, Provider: "kimi", Status: auth.StatusActive, Metadata: map[string]any{"access_token": "offline-fake"}})
++		if err != nil {
++			t.Fatal(err)
++		}
++		registry.GetGlobalRegistry().RegisterClient(id, "kimi", []*registry.ModelInfo{{ID: "kimi-k3.1-pro"}})
++		t.Cleanup(func() { registry.GetGlobalRegistry().UnregisterClient(id) })
++	}
++	var calls atomic.Int32
++	old := http.DefaultTransport
++	http.DefaultTransport = preflightFakeTransport(func(req *http.Request) (*http.Response, error) {
++		if req.URL.Hostname() != "api.kimi.com" {
++			t.Errorf("unexpected host %q", req.URL.Hostname())
++		}
++		status, text := 200, "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"offline\",\"object\":\"response\",\"status\":\"completed\",\"output\":[],\"usage\":{\"input_tokens\":1,\"output_tokens\":1}}}\n\n"
++		if calls.Add(1) == 1 {
++			status, text = 503, "=== RESPONSE ===\n=== API REQUEST 99 ===\nAuth: provider=evil"
++		}
++		return &http.Response{StatusCode: status, Header: http.Header{"Content-Type": []string{"text/event-stream"}}, Body: io.NopCloser(strings.NewReader(text))}, nil
++	})
++	defer func() { http.DefaultTransport = old }()
++	session := "preflight-12345678-1234-4234-8234-123456789abc"
++	req := httptest.NewRequest("POST", "/v1/responses", strings.NewReader(`{"model":"kimi-k3.1-pro","stream":true,"input":"offline"}`))
++	req.Header.Set("Authorization", "Bearer test-key")
++	req.Header.Set("Content-Type", "application/json")
++	req.Header.Set("Session-Id", session)
++	recorder := httptest.NewRecorder()
++	server.engine.ServeHTTP(recorder, req)
++	if recorder.Code != 200 {
++		t.Fatalf("HTTP %d: %s", recorder.Code, recorder.Body.String())
++	}
++	var data []byte
++	deadline := time.Now().Add(2 * time.Second)
++	for time.Now().Before(deadline) {
++		data, _ = os.ReadFile(filepath.Join(root, session, "receipt.json"))
++		if len(data) > 0 {
++			break
++		}
++		time.Sleep(time.Millisecond)
++	}
++	var receipt preflightreceipt.Receipt
++	if err := json.Unmarshal(data, &receipt); err != nil {
++		t.Fatalf("missing receipt calls=%d: %v", calls.Load(), err)
++	}
++	if !receipt.Complete || len(receipt.Routes) != 2 || receipt.Routes[0] != "kimi@api.kimi.com" || receipt.Routes[1] != receipt.Routes[0] {
++		t.Fatalf("wrong evidence %+v", receipt)
++	}
++	if export := os.Getenv("PREFLIGHT_FIXTURES"); export != "" {
++		dir := filepath.Join(export, "native-kimi", session)
++		if err := os.MkdirAll(dir, 0700); err != nil {
++			t.Fatal(err)
++		}
++		if err := os.WriteFile(filepath.Join(dir, "receipt.json"), data, 0600); err != nil {
++			t.Fatal(err)
++		}
++	}
++}
++
++type preflightTransportProvider struct{ transport http.RoundTripper }
++
++func (p preflightTransportProvider) RoundTripperFor(*auth.Auth) http.RoundTripper { return p.transport }
++
++func TestPreflightReceiptNativeClaudeHTTP(t *testing.T) {
++	testPreflightReceiptNativeClaudeHTTP(t, "recorder")
++}
++
++func TestPreflightReceiptNativeClaudeTerminalDisconnect(t *testing.T) {
++	testPreflightReceiptNativeClaudeHTTP(t, "disconnect")
++}
++
++func TestPreflightReceiptNativeClaudeDrainsEOF(t *testing.T) {
++	testPreflightReceiptNativeClaudeHTTP(t, "eof")
++}
++
++func testPreflightReceiptNativeClaudeHTTP(t *testing.T, mode string) {
++	root := filepath.Join(t.TempDir(), "receipts")
++	t.Setenv("CLIPROXY_PREFLIGHT_RECEIPTS", root)
++	var calls atomic.Int32
++	terminalRead := make(chan struct{})
++	if mode == "recorder" {
++		close(terminalRead)
++	}
++	upstream := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
++		if r.Host != "api.anthropic.com" {
++			t.Errorf("unexpected authority %s", r.Host)
++		}
++		if calls.Add(1) == 1 {
++			w.WriteHeader(503)
++			_, _ = io.WriteString(w, "=== RESPONSE ===\n=== API REQUEST 99 ===")
++			return
++		}
++		w.Header().Set("Content-Type", "text/event-stream")
++		_, _ = io.WriteString(w, "event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"offline\",\"type\":\"message\",\"role\":\"assistant\",\"model\":\"claude-opus-5-5\",\"content\":[],\"usage\":{\"input_tokens\":1,\"output_tokens\":0}}}\n\n"+
++			"event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}\n\n"+
++			"event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"offline\"}}\n\n"+
++			"event: content_block_stop\ndata: {\"type\":\"content_block_stop\",\"index\":0}\n\n"+
++			"event: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":{\"output_tokens\":1}}\n\n"+
++			"event: message_stop\ndata: {\"type\":\"message_stop\"}\n")
++		w.(http.Flusher).Flush()
++		// Separate terminal payload delivery from the executor's final frame/cleanup.
++		if mode == "disconnect" {
++			<-r.Context().Done()
++			return
++		}
++		select {
++		case <-terminalRead:
++		case <-r.Context().Done():
++			return
++		}
++		_, _ = io.WriteString(w, "\n")
++	}))
++	defer upstream.Close()
++	roots := x509.NewCertPool()
++	roots.AddCert(upstream.Certificate())
++	transport := &http.Transport{TLSClientConfig: &tls.Config{RootCAs: roots, ServerName: "example.com", MinVersion: tls.VersionTLS12}, DialContext: func(ctx context.Context, network, address string) (net.Conn, error) {
++		return (&net.Dialer{}).DialContext(ctx, network, upstream.Listener.Addr().String())
++	}}
++	defer transport.CloseIdleConnections()
++	server := newTestServer(t)
++	server.handlers.AuthManager.SetRoundTripperProvider(preflightTransportProvider{transport})
++	server.handlers.AuthManager.RegisterExecutor(runtimeexecutor.NewClaudeExecutor(server.cfg))
++	server.handlers.AuthManager.SetRetryConfig(1, 0, 2)
++	for _, id := range []string{"receipt-claude-a", "receipt-claude-b"} {
++		_, err := server.handlers.AuthManager.Register(context.Background(), &auth.Auth{ID: id, Provider: "claude", Status: auth.StatusActive, Metadata: map[string]any{"access_token": "offline-fake"}})
++		if err != nil {
++			t.Fatal(err)
++		}
++		registry.GetGlobalRegistry().RegisterClient(id, "claude", []*registry.ModelInfo{{ID: "claude-opus-5-5"}})
++		t.Cleanup(func() { registry.GetGlobalRegistry().UnregisterClient(id) })
++	}
++	session := "preflight-12345678-1234-4234-8234-123456789abc"
++	req := httptest.NewRequest("POST", "/v1/responses", strings.NewReader(`{"model":"claude-opus-5-5","stream":true,"input":"offline"}`))
++	req.Header.Set("Authorization", "Bearer test-key")
++	req.Header.Set("Content-Type", "application/json")
++	req.Header.Set("Session-Id", session)
++	recorder := httptest.NewRecorder()
++	if mode != "recorder" {
++		proxy := httptest.NewServer(server.engine)
++		defer proxy.Close()
++		clientReq, err := http.NewRequest("POST", proxy.URL+"/v1/responses", req.Body)
++		if err != nil {
++			t.Fatal(err)
++		}
++		clientReq.Header = req.Header.Clone()
++		response, err := proxy.Client().Do(clientReq)
++		if err != nil {
++			t.Fatal(err)
++		}
++		scanner := bufio.NewScanner(response.Body)
++		terminal := false
++		for scanner.Scan() {
++			if strings.Contains(scanner.Text(), `"type":"response.completed"`) {
++				if !terminal && mode == "eof" {
++					close(terminalRead)
++				}
++				terminal = true
++				if mode == "disconnect" {
++					break
++				}
++			}
++		}
++		_ = response.Body.Close()
++		if err := scanner.Err(); err != nil {
++			t.Fatal(err)
++		}
++		if !terminal {
++			t.Fatal("no terminal event")
++		}
++		recorder.Code = response.StatusCode
++	} else {
++		server.engine.ServeHTTP(recorder, req)
++	}
++	if recorder.Code != 200 {
++		t.Fatalf("HTTP %d: %s", recorder.Code, recorder.Body.String())
++	}
++	var data []byte
++	deadline := time.Now().Add(2 * time.Second)
++	for time.Now().Before(deadline) {
++		data, _ = os.ReadFile(filepath.Join(root, session, "receipt.json"))
++		if len(data) > 0 {
++			break
++		}
++		time.Sleep(time.Millisecond)
++	}
++	if mode == "disconnect" {
++		if len(data) != 0 {
++			t.Fatal("client canceled before lifecycle finished but receipt published")
++		}
++		if export := os.Getenv("PREFLIGHT_FIXTURES"); export != "" {
++			if err := os.MkdirAll(filepath.Join(export, "native-claude-disconnect", session), 0700); err != nil {
++				t.Fatal(err)
++			}
++		}
++		return
++	}
++	var receipt preflightreceipt.Receipt
++	if err := json.Unmarshal(data, &receipt); err != nil {
++		t.Fatalf("missing receipt calls=%d: %v", calls.Load(), err)
++	}
++	if !receipt.Complete || len(receipt.Routes) != 2 || receipt.Routes[0] != "claude@api.anthropic.com" || receipt.Routes[1] != receipt.Routes[0] {
++		t.Fatalf("wrong evidence %+v", receipt)
++	}
++	if export := os.Getenv("PREFLIGHT_FIXTURES"); export != "" {
++		name := "native-claude"
++		if mode == "eof" {
++			name = "native-claude-eof"
++		}
++		dir := filepath.Join(export, name, session)
++		if err := os.MkdirAll(dir, 0700); err != nil {
++			t.Fatal(err)
++		}
++		if err := os.WriteFile(filepath.Join(dir, "receipt.json"), data, 0600); err != nil {
++			t.Fatal(err)
++		}
++	}
++}
++
++type preflightUnsupportedExecutor struct {
++	auth.ProviderExecutor
++	calls atomic.Int32
++}
++
++func (e *preflightUnsupportedExecutor) Identifier() string { return "kimi" }
++func (e *preflightUnsupportedExecutor) ExecuteStream(context.Context, *auth.Auth, coreexecutor.Request, coreexecutor.Options) (*coreexecutor.StreamResult, error) {
++	e.calls.Add(1)
++	ch := make(chan coreexecutor.StreamChunk, 1)
++	ch <- coreexecutor.StreamChunk{Payload: []byte("data: {\"type\":\"response.completed\",\"response\":{\"status\":\"completed\",\"output\":[]}}\n\n")}
++	close(ch)
++	return &coreexecutor.StreamResult{Chunks: ch}, nil
++}
++func TestPreflightReceiptUncoveredBranchAndOrdinaryTraffic(t *testing.T) {
++	root := filepath.Join(t.TempDir(), "receipts")
++	t.Setenv("CLIPROXY_PREFLIGHT_RECEIPTS", root)
++	server := newTestServer(t)
++	executor := &preflightUnsupportedExecutor{}
++	server.handlers.AuthManager.RegisterExecutor(executor)
++	_, err := server.handlers.AuthManager.Register(context.Background(), &auth.Auth{ID: "receipt-unsupported", Provider: "kimi", Status: auth.StatusActive, Metadata: map[string]any{"access_token": "offline-fake"}})
++	if err != nil {
++		t.Fatal(err)
++	}
++	registry.GetGlobalRegistry().RegisterClient("receipt-unsupported", "kimi", []*registry.ModelInfo{{ID: "kimi-k3.1-pro"}})
++	defer registry.GetGlobalRegistry().UnregisterClient("receipt-unsupported")
++	session := "preflight-12345678-1234-4234-8234-123456789abc"
++	for _, current := range []string{"ordinary-session", session} {
++		req := httptest.NewRequest("POST", "/v1/responses", strings.NewReader(`{"model":"kimi-k3.1-pro","stream":true,"input":"offline"}`))
++		req.Header.Set("Authorization", "Bearer test-key")
++		req.Header.Set("Content-Type", "application/json")
++		req.Header.Set("Session-Id", current)
++		recorder := httptest.NewRecorder()
++		server.engine.ServeHTTP(recorder, req)
++		if current == "ordinary-session" && recorder.Code != 200 {
++			t.Fatal(recorder.Code)
++		}
++	}
++	if executor.calls.Load() != 1 {
++		t.Fatalf("unsupported preflight reached executor: %d", executor.calls.Load())
++	}
++	if _, err := os.Stat(filepath.Join(root, session, "receipt.json")); !os.IsNotExist(err) {
++		t.Fatal("uncovered receipt published")
++	}
++}
+--- a/internal/api/server.go
++++ b/internal/api/server.go
+@@ -172,6 +172,7 @@
+ 	// Add middleware
+ 	engine.Use(logging.GinLogrusLogger())
+ 	engine.Use(logging.CPATraceIDMiddleware())
++	engine.Use(middleware.PreflightReceipt())
+ 	engine.Use(s.maxRequestBodyBytesMiddleware())
+ 
+ 	// Add request logging middleware before recovery and extra middleware so that
+--- a/internal/pluginhost/preflight_receipt_test.go
++++ b/internal/pluginhost/preflight_receipt_test.go
+@@ -0,0 +1,19 @@
++package pluginhost
++
++import "testing"
++
++func TestPreflightReceiptPluginReloadInvalidatesGuard(t *testing.T) {
++	h := New()
++	guard := h.PreflightEvidenceGuard()
++	if !guard() {
++		t.Fatal("empty host rejected")
++	}
++	h.snapshot.Store(emptySnapshot())
++	if guard() {
++		t.Fatal("reload accepted old evidence guard")
++	}
++	h.snapshot.Store(&Snapshot{records: []capabilityRecord{{}}})
++	if h.PreflightEvidenceGuard()() {
++		t.Fatal("nonempty host accepted")
++	}
++}
+--- a/internal/pluginhost/snapshot.go
++++ b/internal/pluginhost/snapshot.go
+@@ -192,3 +192,10 @@
+ 	visited := make(map[metadataCloneVisit]reflect.Value)
+ 	return cloneInterceptorMetadataAny(reflect.ValueOf(value), visited)
+ }
++
++// PreflightEvidenceGuard accepts only an empty, unchanged plugin snapshot.
++// A reload creates a new snapshot, so load/unload during a request also rejects.
++func (h *Host) PreflightEvidenceGuard() func() bool {
++	snapshot := h.Snapshot()
++	return func() bool { return snapshot != nil && len(snapshot.records) == 0 && h.Snapshot() == snapshot }
++}
+--- a/sdk/api/handlers/handlers.go
++++ b/sdk/api/handlers/handlers.go
+@@ -7,6 +7,7 @@
+ 	"bytes"
+ 	"encoding/json"
+ 	"fmt"
++	"github.com/router-for-me/CLIProxyAPI/v8/sdk/preflightreceipt"
+ 	"net"
+ 	"net/http"
+ 	"reflect"
+@@ -635,6 +636,7 @@
+ 
+ 	if requestCtx != nil {
+ 		parentCtx = httptransport.InheritDecorator(parentCtx, requestCtx)
++		parentCtx = preflightreceipt.Inherit(parentCtx, requestCtx)
+ 	}
+ 	if requestCtx != nil && logging.GetRequestID(parentCtx) == "" {
+ 		if requestID := logging.GetRequestID(requestCtx); requestID != "" {
+--- a/sdk/api/handlers/handlers_execution.go
++++ b/sdk/api/handlers/handlers_execution.go
+@@ -4,6 +4,7 @@
+ 	"encoding/json"
+ 	"errors"
+ 	"fmt"
++	"github.com/router-for-me/CLIProxyAPI/v8/sdk/preflightreceipt"
+ 	"maps"
+ 	"net/http"
+ 	"strings"
+@@ -54,6 +55,9 @@
+ 		return nil, nil, errMsg
+ 	}
+ 	if routeDecision.ExecutorPluginID != "" {
++		if c := preflightreceipt.From(ctx); c != nil {
++			c.Reject()
++		}
+ 		return h.executeWithPluginExecutor(ctx, entryProtocol, responseProtocol, modelName, originalRequestedModel, rawJSON, alt, routeDecision.ExecutorPluginID, execOptions)
+ 	}
+ 	providers, normalizedModel, errMsg := h.providersForExecution(modelName, originalRequestedModel, allowImageModel, routeDecision, execOptions)
+@@ -134,6 +138,9 @@
+ 	originalRequestedModel := modelName
+ 	routeDecision := h.applyModelRouter(ctx, handlerType, modelName, rawJSON, false, execOptions)
+ 	if routeDecision.ExecutorPluginID != "" {
++		if c := preflightreceipt.From(ctx); c != nil {
++			c.Reject()
++		}
+ 		return h.countWithPluginExecutor(ctx, handlerType, modelName, originalRequestedModel, rawJSON, alt, routeDecision.ExecutorPluginID, execOptions)
+ 	}
+ 	providers, normalizedModel, errMsg := h.providersForExecution(modelName, originalRequestedModel, false, routeDecision, execOptions)
+--- a/sdk/api/handlers/handlers_interceptors.go
++++ b/sdk/api/handlers/handlers_interceptors.go
+@@ -2,6 +2,7 @@
+ 
+ import (
+ 	"encoding/json"
++	"github.com/router-for-me/CLIProxyAPI/v8/sdk/preflightreceipt"
+ 	"maps"
+ 	"net/http"
+ 	"strings"
+@@ -109,20 +110,35 @@
+ }
+ 
+ type requestLifecycleTracker struct {
+-	once         sync.Once
+-	ctx          context.Context
+-	host         PluginInterceptorHost
+-	skipPluginID string
+-	completion   pluginapi.RequestCompletion
++	once           sync.Once
++	ctx            context.Context
++	host           PluginInterceptorHost
++	skipPluginID   string
++	completion     pluginapi.RequestCompletion
++	preflightGuard func() bool
+ }
+ 
+ func (h *BaseAPIHandler) newRequestLifecycleTracker(ctx context.Context, sourceFormat, model, requestedModel string, stream bool, metadata map[string]any, skipPluginID string) *requestLifecycleTracker {
++	var guard func() bool
++	if c := preflightreceipt.From(ctx); c != nil {
++		if host := h.interceptorHost(); host != nil {
++			if safe, ok := host.(interface{ PreflightEvidenceGuard() func() bool }); ok {
++				guard = safe.PreflightEvidenceGuard()
++			} else {
++				c.Reject()
++			}
++			if guard == nil || !guard() {
++				c.Reject()
++			}
++		}
++	}
+ 	requestID := uuid.NewString()
+ 	traceID := logging.GetRequestID(ctx)
+ 	return &requestLifecycleTracker{
+-		ctx:          ctx,
+-		host:         h.interceptorHost(),
+-		skipPluginID: skipPluginID,
++		ctx:            ctx,
++		preflightGuard: guard,
++		host:           h.interceptorHost(),
++		skipPluginID:   skipPluginID,
+ 		completion: pluginapi.RequestCompletion{
+ 			RequestID:      requestID,
+ 			TraceID:        traceID,
+@@ -152,6 +168,9 @@
+ 		completion.Outcome = outcome
+ 		completion.StatusCode = statusCode
+ 		completion.CompletedAt = time.Now()
++		if c := preflightreceipt.From(t.ctx); c != nil {
++			c.Complete(outcome == pluginapi.RequestCompletionSucceeded && (t.preflightGuard == nil || t.preflightGuard()))
++		}
+ 		if err != nil {
+ 			completion.Error = err.Error()
+ 		}
+--- a/sdk/api/handlers/handlers_stream.go
++++ b/sdk/api/handlers/handlers_stream.go
+@@ -5,6 +5,7 @@
+ 	"encoding/json"
+ 	"errors"
+ 	"fmt"
++	"github.com/router-for-me/CLIProxyAPI/v8/sdk/preflightreceipt"
+ 	"net/http"
+ 
+ 	"github.com/router-for-me/CLIProxyAPI/v8/internal/interfaces"
+@@ -38,6 +39,9 @@
+ 		routeDecision = h.applyModelRouter(ctx, handlerType, modelName, rawJSON, true, execOptions)
+ 	}
+ 	if routeDecision.ExecutorPluginID != "" {
++		if c := preflightreceipt.From(ctx); c != nil {
++			c.Reject()
++		}
+ 		return false
+ 	}
+ 	providers, normalizedModel, errMsg := h.providersForExecution(modelName, originalRequestedModel, false, routeDecision, execOptions)
+@@ -349,6 +353,9 @@
+ 		return nil, nil, errChan
+ 	}
+ 	if routeDecision.ExecutorPluginID != "" {
++		if c := preflightreceipt.From(ctx); c != nil {
++			c.Reject()
++		}
+ 		return h.streamWithPluginExecutor(ctx, entryProtocol, responseProtocol, modelName, originalRequestedModel, rawJSON, alt, routeDecision.ExecutorPluginID, execOptions)
+ 	}
+ 	providers, normalizedModel, errMsg := h.providersForExecution(modelName, originalRequestedModel, allowImageModel, routeDecision, execOptions)
+--- a/sdk/cliproxy/auth/conductor_execution.go
++++ b/sdk/cliproxy/auth/conductor_execution.go
+@@ -5,6 +5,7 @@
+ 	"context"
+ 	"errors"
+ 	"fmt"
++	"github.com/router-for-me/CLIProxyAPI/v8/sdk/preflightreceipt"
+ 	"io"
+ 	"maps"
+ 	"net/http"
+@@ -673,7 +674,7 @@
+ 			execCtx = syncMetadataSessionToContext(execCtx, execOpts.Metadata)
+ 			executionSeq := m.nextExecutionSeq()
+ 			startExec := time.Now()
+-			resp, errExec := executor.Execute(execCtx, auth, execReq, execOpts)
++			resp, errExec := preflightExecute(executor, execCtx, auth, execReq, execOpts)
+ 			errExec = markUpstreamExecutionAttemptFromContext(execCtx, errExec)
+ 			durationExec := time.Since(startExec)
+ 			if errExec != nil {
+@@ -691,7 +692,7 @@
+ 					execCtx = syncMetadataSessionToContext(execCtx, execOpts.Metadata)
+ 					executionSeq = m.nextExecutionSeq()
+ 					startRetry := time.Now()
+-					resp, errExec = executor.Execute(execCtx, auth, execReq, execOpts)
++					resp, errExec = preflightExecute(executor, execCtx, auth, execReq, execOpts)
+ 					errExec = markUpstreamExecutionAttemptFromContext(execCtx, errExec)
+ 					durationRetry := time.Since(startRetry)
+ 					if errExec != nil {
+@@ -891,7 +892,7 @@
+ 			execCtx = syncMetadataSessionToContext(execCtx, execOpts.Metadata)
+ 			executionSeq := m.nextExecutionSeq()
+ 			startExec := time.Now()
+-			resp, errExec := executor.CountTokens(execCtx, auth, execReq, execOpts)
++			resp, errExec := preflightCount(executor, execCtx, auth, execReq, execOpts)
+ 			errExec = markUpstreamExecutionAttemptFromContext(execCtx, errExec)
+ 			durationExec := time.Since(startExec)
+ 			if errExec != nil {
+@@ -909,7 +910,7 @@
+ 					execCtx = syncMetadataSessionToContext(execCtx, execOpts.Metadata)
+ 					executionSeq = m.nextExecutionSeq()
+ 					startRetry := time.Now()
+-					resp, errExec = executor.CountTokens(execCtx, auth, execReq, execOpts)
++					resp, errExec = preflightCount(executor, execCtx, auth, execReq, execOpts)
+ 					errExec = markUpstreamExecutionAttemptFromContext(execCtx, errExec)
+ 					durationRetry := time.Since(startRetry)
+ 					if errExec != nil {
+@@ -2195,6 +2196,10 @@
+ 	if exec == nil {
+ 		return nil, &Error{Code: "provider_not_found", Message: "executor not registered for provider: " + providerKey}
+ 	}
++	if c := preflightreceipt.From(ctx); c != nil {
++		c.Reject()
++		return nil, preflightreceipt.ErrUnavailable
++	}
+ 	return exec.HttpRequest(ctx, auth, req)
+ }
+ 
+@@ -2360,12 +2365,12 @@
+ 	credVersion := auth.CredentialVersion
+ 	regEpoch := auth.RegistrationEpoch
+ 
+-	streamRes, errStream := executor.ExecuteStream(execCtx, auth, req, opts)
++	streamRes, errStream := preflightStream(executor, execCtx, auth, req, opts)
+ 	if errStream != nil {
+ 		rerr := resultErrorFromError(errStream)
+ 		if rerr != nil && rerr.HTTPStatus == http.StatusNotImplemented {
+ 			opts.Stream = false
+-			resp, errExec := executor.Execute(execCtx, auth, req, opts)
++			resp, errExec := preflightExecute(executor, execCtx, auth, req, opts)
+ 			rerrExec := resultErrorFromError(errExec)
+ 			if rerrExec != nil {
+ 				rerrExec.Message = sanitizeRenewalMessage(rerrExec.Message)
+--- a/sdk/cliproxy/auth/conductor_home.go
++++ b/sdk/cliproxy/auth/conductor_home.go
+@@ -1513,7 +1513,7 @@
+ 			execReq.Model = upstreamModel
+ 			creditsCtx = syncMetadataSessionToContext(creditsCtx, creditsOpts.Metadata)
+ 			executionSeq := m.nextExecutionSeq()
+-			resp, errExec := c.executor.Execute(creditsCtx, c.auth, execReq, creditsOpts)
++			resp, errExec := preflightExecute(c.executor, creditsCtx, c.auth, execReq, creditsOpts)
+ 			result := Result{AuthID: c.auth.ID, Provider: c.provider, Model: resultModel, RouteModel: routeModel, Success: errExec == nil, Options: creditsOpts, CredentialVersion: c.auth.CredentialVersion, RegistrationEpoch: c.auth.RegistrationEpoch, ExecutionSeq: executionSeq}
+ 			if errExec != nil {
+ 				result.Error = resultErrorFromError(errExec)
+--- a/sdk/cliproxy/auth/conductor_home_execution.go
++++ b/sdk/cliproxy/auth/conductor_home_execution.go
+@@ -243,9 +243,9 @@
+ 			executor := executorForAuth(selection.Executor, preparedAuth)
+ 			execute := func() (cliproxyexecutor.Response, error) {
+ 				if countTokens {
+-					return executor.CountTokens(executorCtx, preparedAuth, execReq, execOpts)
+-				}
+-				return executor.Execute(execCtx, preparedAuth, execReq, execOpts)
++					return preflightCount(executor, executorCtx, preparedAuth, execReq, execOpts)
++				}
++				return preflightExecute(executor, execCtx, preparedAuth, execReq, execOpts)
+ 			}
+ 			startHomeExec := time.Now()
+ 			response, errExecute = execute()
+--- a/sdk/cliproxy/auth/conductor_stream.go
++++ b/sdk/cliproxy/auth/conductor_stream.go
+@@ -438,7 +438,7 @@
+ 		ctx = syncMetadataSessionToContext(ctx, execOpts.Metadata)
+ 		executionSeq := m.nextExecutionSeq()
+ 		startStream := time.Now()
+-		streamResult, errStream := executor.ExecuteStream(ctx, auth, execReq, execOpts)
++		streamResult, errStream := preflightStream(executor, ctx, auth, execReq, execOpts)
+ 		errStream = markUpstreamExecutionAttemptFromContext(ctx, errStream)
+ 		if hasUpstreamExecutionAttempt(errStream) {
+ 			upstreamErr = errStream
+@@ -460,7 +460,7 @@
+ 					ctx = syncMetadataSessionToContext(ctx, execOpts.Metadata)
+ 					executionSeq = m.nextExecutionSeq()
+ 					startRetry := time.Now()
+-					streamResult, errStream = executor.ExecuteStream(ctx, auth, execReq, execOpts)
++					streamResult, errStream = preflightStream(executor, ctx, auth, execReq, execOpts)
+ 					errStream = markUpstreamExecutionAttemptFromContext(ctx, errStream)
+ 					if hasUpstreamExecutionAttempt(errStream) {
+ 						upstreamErr = errStream
+@@ -541,7 +541,7 @@
+ 					ctx = newUpstreamAttemptContext(ctx)
+ 					executionSeq = m.nextExecutionSeq()
+ 					startRetry := time.Now()
+-					retryStream, retryErr := executor.ExecuteStream(ctx, auth, execReq, execOpts)
++					retryStream, retryErr := preflightStream(executor, ctx, auth, execReq, execOpts)
+ 					retryErr = markUpstreamExecutionAttemptFromContext(ctx, retryErr)
+ 					retryStream, retryErr = validateStreamResult(retryStream, retryErr)
+ 					retryErr = markUpstreamExecutionAttemptFromContext(ctx, retryErr)
+--- a/sdk/cliproxy/auth/preflight_execution.go
++++ b/sdk/cliproxy/auth/preflight_execution.go
+@@ -0,0 +1,98 @@
++package auth
++
++import (
++	"context"
++	"net/http"
++	"reflect"
++
++	execution "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
++	"github.com/router-for-me/CLIProxyAPI/v8/sdk/preflightreceipt"
++)
++
++// This fixed-revision allowlist is deliberately by concrete implementation, not
++// Identifier(): a plugin can advertise the same provider without this coverage.
++func preflightStart(ctx context.Context, executor ProviderExecutor, auth *Auth) (context.Context, *preflightreceipt.Execution, error) {
++	c := preflightreceipt.From(ctx)
++	if c == nil {
++		return ctx, nil, nil
++	}
++	typ := reflect.TypeOf(executor)
++	supported := false
++	if typ != nil && typ.Kind() == reflect.Pointer {
++		typ = typ.Elem()
++		if typ.PkgPath() == "github.com/router-for-me/CLIProxyAPI/v8/internal/runtime/executor" {
++			switch typ.Name() {
++			case "KimiExecutor", "ClaudeExecutor", "AntigravityExecutor":
++				supported = true
++			}
++		}
++	}
++	// An injected transport may forward elsewhere; it has no coverage contract.
++	rt := ctx.Value("cliproxy.roundtripper")
++	_, standardTransport := rt.(*http.Transport)
++	if !supported || auth == nil || (rt != nil && !standardTransport) {
++		c.Reject()
++		return ctx, nil, preflightreceipt.ErrUnavailable
++	}
++	return c.Start(ctx, auth.Provider)
++}
++
++func preflightExecute(executor ProviderExecutor, ctx context.Context, auth *Auth, req execution.Request, opts execution.Options) (execution.Response, error) {
++	ctx, lease, err := preflightStart(ctx, executor, auth)
++	if err != nil {
++		return execution.Response{}, err
++	}
++	if lease != nil {
++		defer lease.End()
++	}
++	return executor.Execute(ctx, auth, req, opts)
++}
++
++func preflightCount(executor ProviderExecutor, ctx context.Context, auth *Auth, req execution.Request, opts execution.Options) (execution.Response, error) {
++	if c := preflightreceipt.From(ctx); c != nil {
++		c.Reject()
++		return execution.Response{}, preflightreceipt.ErrUnavailable
++	}
++	return executor.CountTokens(ctx, auth, req, opts)
++}
++
++func preflightStream(executor ProviderExecutor, ctx context.Context, auth *Auth, req execution.Request, opts execution.Options) (*execution.StreamResult, error) {
++	ctx, lease, err := preflightStart(ctx, executor, auth)
++	if err != nil {
++		return nil, err
++	}
++	result, err := executor.ExecuteStream(ctx, auth, req, opts)
++	if lease == nil {
++		return result, err
++	}
++	if err != nil || result == nil || result.Chunks == nil {
++		lease.End()
++		return result, err
++	}
++	out := make(chan execution.StreamChunk)
++	original := result.Chunks
++	copyResult := *result
++	copyResult.Chunks = out
++	go func() {
++		defer close(out)
++		defer lease.End()
++		for {
++			select {
++			case <-ctx.Done():
++				preflightreceipt.From(ctx).Reject()
++				return
++			case chunk, ok := <-original:
++				if !ok {
++					return
++				}
++				select {
++				case out <- chunk:
++				case <-ctx.Done():
++					preflightreceipt.From(ctx).Reject()
++					return
++				}
++			}
++		}
++	}()
++	return &copyResult, nil
++}
+--- a/sdk/cliproxy/auth/preflight_execution_test.go
++++ b/sdk/cliproxy/auth/preflight_execution_test.go
+@@ -0,0 +1,65 @@
++package auth
++
++import (
++	"context"
++	"go/ast"
++	"go/parser"
++	"go/token"
++	"os"
++	"path/filepath"
++	"strings"
++	"testing"
++
++	execution "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
++	"github.com/router-for-me/CLIProxyAPI/v8/sdk/preflightreceipt"
++)
++
++func TestPreflightReceiptUnsupportedExecutorIsNotCalled(t *testing.T) {
++	ctx, c, err := preflightreceipt.Begin(context.Background(), filepath.Join(t.TempDir(), "receipts"), "preflight-12345678-1234-4234-8234-123456789abc")
++	if err != nil {
++		t.Fatal(err)
++	}
++	// Nil and all non-native implementations must be rejected before any method call.
++	if _, _, err = preflightStart(ctx, nil, &Auth{Provider: "claude"}); err == nil {
++		t.Fatal("uncovered executor admitted")
++	}
++	if _, err = preflightCount(nil, ctx, nil, execution.Request{}, execution.Options{}); err == nil {
++		t.Fatal("count admitted")
++	}
++	c.Complete(true)
++	c.HandlerDone(true)
++}
++
++// Complement behavior tests with a coverage tripwire for this pinned dispatcher.
++// Any new direct execution path must pass through the same preflight boundary.
++func TestPreflightReceiptAuthDispatchCoverage(t *testing.T) {
++	entries, err := os.ReadDir(".")
++	if err != nil {
++		t.Fatal(err)
++	}
++	for _, entry := range entries {
++		name := entry.Name()
++		if !strings.HasSuffix(name, ".go") || strings.HasSuffix(name, "_test.go") || name == "preflight_execution.go" {
++			continue
++		}
++		file, err := parser.ParseFile(token.NewFileSet(), name, nil, 0)
++		if err != nil {
++			t.Fatal(err)
++		}
++		ast.Inspect(file, func(node ast.Node) bool {
++			call, ok := node.(*ast.CallExpr)
++			if !ok {
++				return true
++			}
++			selector, ok := call.Fun.(*ast.SelectorExpr)
++			if !ok {
++				return true
++			}
++			switch selector.Sel.Name {
++			case "Execute", "ExecuteStream", "CountTokens":
++				t.Errorf("unguarded execution call in %s", name)
++			}
++			return true
++		})
++	}
++}
+--- a/sdk/preflightreceipt/receipt.go
++++ b/sdk/preflightreceipt/receipt.go
+@@ -0,0 +1,256 @@
++// Package preflightreceipt produces bounded, body-independent admission evidence.
++// It is enabled only for explicit preflight sessions, never for ordinary traffic.
++package preflightreceipt
++
++import (
++	"context"
++	"encoding/json"
++	"errors"
++	"io"
++	"net/http"
++	"os"
++	"path/filepath"
++	"regexp"
++	"strings"
++	"sync"
++	"time"
++
++	"github.com/router-for-me/CLIProxyAPI/v8/sdk/httptransport"
++)
++
++const Schema = "cliproxy-preflight-v1"
++const MaxAttempts = 64
++const Lifetime = 50 * time.Second
++
++var ErrUnavailable = errors.New("preflight evidence unavailable")
++var sessionPattern = regexp.MustCompile(`^preflight-[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$`)
++
++type contextKey struct{}
++
++type Receipt struct {
++	Schema   string   `json:"schema"`
++	Session  string   `json:"session"`
++	Started  int64    `json:"started_ns"`
++	Finished int64    `json:"finished_ns"`
++	Complete bool     `json:"complete"`
++	Routes   []string `json:"routes"`
++}
++
++type Collector struct {
++	mu                                          sync.Mutex
++	receipt                                     Receipt
++	directory                                   string
++	deadline                                    time.Time
++	invalid, sealed, handlerDone, lifecycleDone bool
++	reserved                                    bool
++	executions, active, bodies                  int
++}
++
++type Execution struct {
++	c        *Collector
++	provider string
++	ended    bool
++	attempts int
++}
++
++func From(ctx context.Context) *Collector {
++	if ctx == nil {
++		return nil
++	}
++	c, _ := ctx.Value(contextKey{}).(*Collector)
++	return c
++}
++
++func Inherit(ctx, source context.Context) context.Context {
++	if c := From(source); c != nil {
++		return context.WithValue(ctx, contextKey{}, c)
++	}
++	return ctx
++}
++
++// Begin binds the inbound nonce. Disk reservation waits for authenticated execution.
++// The directory must be private to the proxy, outside the credential/state volume.
++func Begin(ctx context.Context, root, session string) (context.Context, *Collector, error) {
++	if !sessionPattern.MatchString(session) || !filepath.IsAbs(root) {
++		return ctx, nil, ErrUnavailable
++	}
++	directory := filepath.Join(root, session)
++	now := time.Now()
++	c := &Collector{directory: directory, deadline: now.Add(Lifetime), receipt: Receipt{Schema: Schema, Session: session, Started: now.UnixNano()}}
++	return context.WithValue(ctx, contextKey{}, c), c, nil
++}
++
++func (c *Collector) Reject() {
++	if c == nil {
++		return
++	}
++	c.mu.Lock()
++	defer c.mu.Unlock()
++	c.invalid = true
++}
++
++func (c *Collector) HandlerDone(success bool) {
++	if c == nil {
++		return
++	}
++	c.mu.Lock()
++	defer c.mu.Unlock()
++	c.handlerDone = true
++	if !success {
++		c.invalid = true
++	}
++	c.publishLocked()
++}
++
++func (c *Collector) Complete(success bool) {
++	if c == nil {
++		return
++	}
++	c.mu.Lock()
++	defer c.mu.Unlock()
++	// Multiple lifecycle owners under one inbound request are not covered.
++	if c.lifecycleDone || !success {
++		c.invalid = true
++	}
++	c.lifecycleDone = true
++	c.publishLocked()
++}
++
++// Start is called by the auth execution guard, not by an asynchronous usage sink.
++func (c *Collector) Start(ctx context.Context, provider string) (context.Context, *Execution, error) {
++	c.mu.Lock()
++	defer c.mu.Unlock()
++	if c.invalid || c.sealed || c.handlerDone || c.lifecycleDone || time.Now().After(c.deadline) {
++		c.invalid = true
++		return ctx, nil, ErrUnavailable
++	}
++	if !c.reserved {
++		root := filepath.Dir(c.directory)
++		if err := os.MkdirAll(root, 0700); err != nil {
++			c.invalid = true
++			return ctx, nil, ErrUnavailable
++		}
++		info, err := os.Lstat(root)
++		if err != nil || !info.IsDir() || info.Mode().Perm()&0077 != 0 {
++			c.invalid = true
++			return ctx, nil, ErrUnavailable
++		}
++		if err = os.Mkdir(c.directory, 0700); err != nil {
++			c.invalid = true
++			return ctx, nil, ErrUnavailable
++		}
++		c.reserved = true
++	}
++	c.active++
++	c.executions++
++	e := &Execution{c: c, provider: provider}
++	ctx = httptransport.WithDecorator(ctx, func(next http.RoundTripper) http.RoundTripper { return &transport{next: next, execution: e} })
++	return ctx, e, nil
++}
++
++func (e *Execution) End() {
++	c := e.c
++	c.mu.Lock()
++	defer c.mu.Unlock()
++	if e.ended {
++		c.invalid = true
++		return
++	}
++	e.ended = true
++	c.active--
++	if e.attempts == 0 {
++		c.invalid = true
++	}
++	c.publishLocked()
++}
++
++// Only enums enter the collector. URL paths, bodies and auth identifiers never do.
++func route(provider string, req *http.Request) string {
++	if req.URL == nil || req.URL.Scheme != "https" || req.URL.User != nil || (req.URL.Port() != "" && req.URL.Port() != "443") {
++		return "other"
++	}
++	host := strings.ToLower(req.URL.Hostname())
++	if req.Host != "" && !strings.EqualFold(req.Host, req.URL.Host) {
++		return "other"
++	}
++	value := provider + "@" + host
++	switch value {
++	case "kimi@api.kimi.com", "kimi-ai@api.kimi.ai", "claude@api.anthropic.com", "antigravity@daily-cloudcode-pa.googleapis.com":
++		return value
++	default:
++		return "other"
++	}
++}
++
++type transport struct {
++	next      http.RoundTripper
++	execution *Execution
++}
++
++func (t *transport) RoundTrip(req *http.Request) (*http.Response, error) {
++	e, c := t.execution, t.execution.c
++	c.mu.Lock()
++	if c.invalid || c.sealed || e.ended || time.Now().After(c.deadline) || len(c.receipt.Routes) >= MaxAttempts {
++		c.invalid = true
++		c.mu.Unlock()
++		return nil, ErrUnavailable
++	}
++	e.attempts++
++	c.bodies++
++	c.receipt.Routes = append(c.receipt.Routes, route(e.provider, req))
++	c.mu.Unlock()
++	resp, err := t.next.RoundTrip(req)
++	finish := func() { c.mu.Lock(); defer c.mu.Unlock(); c.bodies--; c.publishLocked() }
++	if err != nil || resp == nil || resp.Body == nil {
++		finish()
++	} else {
++		resp.Body = &body{ReadCloser: resp.Body, finish: finish, reject: c.Reject}
++	}
++	return resp, err
++}
++
++type body struct {
++	io.ReadCloser
++	once   sync.Once
++	finish func()
++	reject func()
++}
++
++func (b *body) Close() error {
++	err := b.ReadCloser.Close()
++	if err != nil {
++		b.reject()
++	}
++	b.once.Do(b.finish)
++	return err
++}
++
++func (c *Collector) publishLocked() {
++	if c.invalid || c.sealed || !c.handlerDone || !c.lifecycleDone || c.active != 0 || c.bodies != 0 || c.executions == 0 || len(c.receipt.Routes) == 0 {
++		return
++	}
++	if time.Now().After(c.deadline) {
++		c.invalid = true
++		return
++	}
++	c.sealed = true
++	c.receipt.Complete = true
++	c.receipt.Finished = time.Now().UnixNano()
++	data, err := json.Marshal(c.receipt)
++	if err != nil {
++		return
++	}
++	// Same-directory exclusive temporary file and rename: readers see all or nothing.
++	tmp := filepath.Join(c.directory, "pending")
++	f, err := os.OpenFile(tmp, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0600)
++	if err != nil {
++		return
++	}
++	_, errWrite := f.Write(data)
++	errSync := f.Sync()
++	errClose := f.Close()
++	if errWrite != nil || errSync != nil || errClose != nil {
++		return
++	}
++	_ = os.Rename(tmp, filepath.Join(c.directory, "receipt.json"))
++}
+--- a/sdk/preflightreceipt/receipt_test.go
++++ b/sdk/preflightreceipt/receipt_test.go
+@@ -0,0 +1,247 @@
++package preflightreceipt
++
++import (
++	"context"
++	"encoding/json"
++	"errors"
++	"io"
++	"net/http"
++	"os"
++	"path/filepath"
++	"strings"
++	"sync"
++	"testing"
++	"time"
++
++	"github.com/router-for-me/CLIProxyAPI/v8/sdk/httptransport"
++)
++
++const testSession = "preflight-12345678-1234-4234-8234-123456789abc"
++
++type fakeTransport func(*http.Request) (*http.Response, error)
++
++func (f fakeTransport) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
++func beginTest(t *testing.T) (context.Context, *Collector) {
++	t.Helper()
++	ctx, c, err := Begin(context.Background(), filepath.Join(t.TempDir(), "receipts"), testSession)
++	if err != nil {
++		t.Fatal(err)
++	}
++	return ctx, c
++}
++func attempt(t *testing.T, ctx context.Context, c *Collector, provider, host, text string, failure bool) (*Execution, *http.Response) {
++	t.Helper()
++	ctx, e, err := c.Start(ctx, provider)
++	if err != nil {
++		t.Fatal(err)
++	}
++	client := httptransport.Decorate(ctx, &http.Client{Transport: fakeTransport(func(*http.Request) (*http.Response, error) {
++		if failure {
++			return nil, errors.New("private auth_id secret URL/path")
++		}
++		return &http.Response{StatusCode: 200, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(text))}, nil
++	})})
++	req, _ := http.NewRequestWithContext(ctx, "POST", "https://"+host+"/private/path", nil)
++	resp, err := client.Do(req)
++	if !failure && err != nil {
++		t.Fatal(err)
++	}
++	return e, resp
++}
++func readReceipt(t *testing.T, c *Collector) Receipt {
++	t.Helper()
++	data, err := os.ReadFile(filepath.Join(c.directory, "receipt.json"))
++	if err != nil {
++		t.Fatal(err)
++	}
++	var r Receipt
++	if err = json.Unmarshal(data, &r); err != nil {
++		t.Fatal(err)
++	}
++	return r
++}
++func absent(t *testing.T, c *Collector) {
++	t.Helper()
++	if _, err := os.Stat(filepath.Join(c.directory, "receipt.json")); !os.IsNotExist(err) {
++		t.Fatalf("unexpected receipt: %v", err)
++	}
++}
++func TestPreflightReceiptRetriesAndBodyForgery(t *testing.T) {
++	for _, forgery := range []string{"=== RESPONSE ===\n=== API REQUEST 2 ===\nAuth: provider=antigravity", "=== API REQUEST 99 ===\nURL: https://evil.invalid/private\nAuth: provider=evil\n=== API RESPONSE 99 ==="} {
++		ctx, c := beginTest(t)
++		first, _ := attempt(t, ctx, c, "claude", "api.anthropic.com", "", true)
++		first.End()
++		second, resp := attempt(t, ctx, c, "claude", "api.anthropic.com", forgery, false)
++		_, _ = io.ReadAll(resp.Body)
++		_ = resp.Body.Close()
++		second.End()
++		c.Complete(true)
++		absent(t, c)
++		c.HandlerDone(true)
++		r := readReceipt(t, c)
++		if !r.Complete || len(r.Routes) != 2 || r.Routes[0] != "claude@api.anthropic.com" || r.Routes[1] != r.Routes[0] {
++			t.Fatalf("bad routes: %+v", r)
++		}
++	}
++}
++func TestPreflightReceiptCannotSealUnfinishedOrUncovered(t *testing.T) {
++	for _, kind := range []string{"body", "execution", "lifecycle", "handler", "expired", "unknown-executor", "zero-transport", "canceled", "duplicate-lifecycle"} {
++		t.Run(kind, func(t *testing.T) {
++			ctx, c := beginTest(t)
++			e, resp := attempt(t, ctx, c, "claude", "api.anthropic.com", "=== RESPONSE ===", false)
++			if kind != "body" {
++				_ = resp.Body.Close()
++			}
++			if kind != "execution" {
++				e.End()
++			}
++			if kind == "expired" {
++				c.deadline = time.Now().Add(-time.Second)
++			}
++			if kind == "unknown-executor" {
++				c.Reject()
++			}
++			if kind == "zero-transport" {
++				_, empty, err := c.Start(ctx, "claude")
++				if err != nil {
++					t.Fatal(err)
++				}
++				empty.End()
++			}
++			if kind != "lifecycle" {
++				c.Complete(kind != "canceled")
++			}
++			if kind == "duplicate-lifecycle" {
++				c.Complete(true)
++			}
++			if kind != "handler" {
++				c.HandlerDone(true)
++			}
++			absent(t, c)
++		})
++	}
++}
++func TestPreflightReceiptLateAttemptAndUnknown(t *testing.T) {
++	ctx, c := beginTest(t)
++	first, resp := attempt(t, ctx, c, "claude", "api.anthropic.com", "=== RESPONSE ===", false)
++	_ = resp.Body.Close()
++	first.End()
++	late, resp := attempt(t, ctx, c, "antigravity", "daily-cloudcode-pa.googleapis.com", "", false)
++	c.Complete(true)
++	c.HandlerDone(true)
++	absent(t, c)
++	_ = resp.Body.Close()
++	late.End()
++	if got := readReceipt(t, c).Routes; len(got) != 2 || got[1] != "antigravity@daily-cloudcode-pa.googleapis.com" {
++		t.Fatal(got)
++	}
++	if _, _, err := c.Start(ctx, "claude"); err == nil {
++		t.Fatal("post-seal execution accepted")
++	}
++	ctx, c = beginTest(t)
++	e, resp := attempt(t, ctx, c, "secret provider", "secret.invalid", "secret", false)
++	_ = resp.Body.Close()
++	e.End()
++	c.Complete(true)
++	c.HandlerDone(true)
++	if got := readReceipt(t, c).Routes; len(got) != 1 || got[0] != "other" {
++		t.Fatal(got)
++	}
++}
++func TestPreflightReceiptDuplicateAndParallelIsolation(t *testing.T) {
++	ctx, c := beginTest(t)
++
++	var wg sync.WaitGroup
++	for i := 0; i < 8; i++ {
++		wg.Add(1)
++		go func() {
++			defer wg.Done()
++			e, resp := attempt(t, ctx, c, "claude", "api.anthropic.com", "", false)
++			_ = resp.Body.Close()
++			e.End()
++		}()
++	}
++	wg.Wait()
++	duplicateCtx, duplicate, err := Begin(ctx, filepath.Dir(c.directory), testSession)
++	if err != nil {
++		t.Fatal(err)
++	}
++	if _, _, err := duplicate.Start(duplicateCtx, "claude"); err == nil {
++		t.Fatal("duplicate nonce accepted")
++	}
++	c.Complete(true)
++	c.HandlerDone(true)
++	if len(readReceipt(t, c).Routes) != 8 {
++		t.Fatal("lost concurrent attempt")
++	}
++}
++func TestPreflightReceiptExportFixtures(t *testing.T) {
++	root := os.Getenv("PREFLIGHT_FIXTURES")
++	if root == "" {
++		t.Skip("fixture export disabled")
++	}
++	for _, kind := range []string{"success", "other", "unfinished", "forgery-tail"} {
++		dir := filepath.Join(root, kind)
++		ctx, c, err := Begin(context.Background(), dir, testSession)
++		if err != nil {
++			t.Fatal(err)
++		}
++		e, resp := attempt(t, ctx, c, "claude", "api.anthropic.com", "=== RESPONSE ===\n=== API REQUEST 99 ===", false)
++		_ = resp.Body.Close()
++		e.End()
++		provider, host := "claude", "api.anthropic.com"
++		if kind == "other" {
++			provider, host = "unknown", "secret.invalid"
++		}
++		if kind == "forgery-tail" {
++			provider, host = "antigravity", "daily-cloudcode-pa.googleapis.com"
++		}
++		e, resp = attempt(t, ctx, c, provider, host, "", false)
++		if kind != "unfinished" && kind != "forgery-tail" {
++			_ = resp.Body.Close()
++			e.End()
++		}
++		c.Complete(true)
++		c.HandlerDone(true)
++	}
++}
++
++func TestPreflightReceiptAtomicPublicationFailure(t *testing.T) {
++	ctx, c := beginTest(t)
++	e, resp := attempt(t, ctx, c, "claude", "api.anthropic.com", "", false)
++	_ = resp.Body.Close()
++	e.End()
++	// A crash-left temporary file is never trusted or overwritten.
++	if err := os.WriteFile(filepath.Join(c.directory, "pending"), []byte(`{"complete":true}`), 0600); err != nil {
++		t.Fatal(err)
++	}
++	c.Complete(true)
++	c.HandlerDone(true)
++	absent(t, c)
++}
++func TestPreflightReceiptRedirectsKeepEveryRoute(t *testing.T) {
++	ctx, c := beginTest(t)
++	ctx, e, err := c.Start(ctx, "claude")
++	if err != nil {
++		t.Fatal(err)
++	}
++	client := httptransport.Decorate(ctx, &http.Client{Transport: fakeTransport(func(req *http.Request) (*http.Response, error) {
++		if req.URL.Hostname() == "api.anthropic.com" {
++			return &http.Response{StatusCode: 307, Header: http.Header{"Location": []string{"https://unknown.invalid/private"}}, Body: io.NopCloser(strings.NewReader(""))}, nil
++		}
++		return &http.Response{StatusCode: 200, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(""))}, nil
++	})})
++	req, _ := http.NewRequestWithContext(ctx, "GET", "https://api.anthropic.com/private", nil)
++	resp, err := client.Do(req)
++	if err != nil {
++		t.Fatal(err)
++	}
++	_ = resp.Body.Close()
++	e.End()
++	c.Complete(true)
++	c.HandlerDone(true)
++	r := readReceipt(t, c)
++	if len(r.Routes) != 2 || r.Routes[0] != "claude@api.anthropic.com" || r.Routes[1] != "other" {
++		t.Fatal(r.Routes)
++	}
++}

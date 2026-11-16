@@ -5,7 +5,7 @@
 - `.sandcastle/`、`scripts/` 下的 TypeScript：`npm run typecheck`，再跑改动模块旁的测试，例如 `npx tsx --test .sandcastle/<模块>.test.mts`。
 - Deep Agents 执行器（`.sandcastle/deepagents-pilot/`）：在该目录跑 `python -m pytest -q tests`，可加 `-k` 只跑相关用例。
 - 其余 Python：`python -m pytest -q <相关测试>`。
-- Rust：macOS 本机不跑 cargo 或 rustc。先提交，再用 `NC_REPO="$(git rev-parse --show-toplevel)" NC_TARGET=<唯一名> ~/.local/bin/nc-remote <已提交分支> rust cargo check --locked`，或推分支交 CI。拿不到真实结果就写「Rust 未验证」。
+- Rust：macOS 本机不跑 cargo 或 rustc；Rust 验证走 CI、Boat 或远端环境（与 AGENTS.md「底线」同一口径）。远端环境的用法：先提交，再用 `NC_REPO="$(git rev-parse --show-toplevel)" NC_TARGET=<唯一名> ~/.local/bin/nc-remote <已提交分支> rust cargo check --locked`，或推分支交 CI。拿不到真实结果就写「Rust 未验证」。
 - 改了 `formal/`：`python3 scripts/check_fixture_drift.py`。
 - `git status` 与 `git diff --cached --stat`：确认只暂存了本次要提交的文件。
 

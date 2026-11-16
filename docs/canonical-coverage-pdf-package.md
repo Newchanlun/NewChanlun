@@ -128,7 +128,7 @@
 | III-3 | **CertifiedEngine 认证谓词 `∀h, Normalize_E(E(Θ,h))=Spec_Θ(h)`** | REFERENCE_SEMANTICS_SPEC §4, CLAUDE_CODE_HANDOFF | **否**（FULL 无「引擎=候选实现，须认证」的元层；FULL 自身即定义） | 部分（Lean `RustEngineContract` 有 contract，未证具体行为商） | L0 可证（谓词） |
 | III-4 | **仓库 spec 对象图**：`Move[0]:=Segment`、`Center[k]` 由连续 3 个 `Move[k-1]` 重叠构成、`Move[k]:=TrendTypeInstance[k]`、不跳级、笔不裁决、核固定 | strict_complete_classification_strategy.md §0/§2, REPO_FILE_MAP（`definitions.yaml`/`chan_spec.md`/`formal_axioms.md`） | 部分（FULL §4 抽象 `F_{ℓ,Θ}` 递归；仓库给「Move/Center/TrendTypeInstance 不跳级」具体对象图） | **是**（`ChanlunElements.lean` 的 Bar/Fractal/Stroke/Segment/Center/Move/Bsp） | L0 可证 |
 | III-5 | **maimai 重合律**：允许 2B 与 3B 重合，1B 与 2B/3B 不重合 | strict_complete_classification_strategy.md §0, test-results.txt（测试名 `二B三B同端点可重合`/`一B与二B同端点违反互斥律`） | 部分（FULL §5 `b_{ℓ,t}∈{0,1}^6` 信号位向量 + "三类买卖点不能强行互斥"，但「1B 不与 2B/3B 重合」的非对称律是 spec 细化） | **是**（`recursive_t/types.rs` 测试） | L0 可证 |
-| III-6 | **概念图拓扑引擎**：`β₁`、`fold/negate/sublate`、settlement（行为等价/拓扑不变量） | FULL_CODEX_TRANSCRIPT 行 340, ENGINE_STRICTNESS_AUDIT | **否**（FULL 无 β₁/fold/sublate；这是另一引擎 `topological-computation/engine.py`） | **是**（独立引擎，非行情缠论） | L0 可证；非缠论本体 |
+| III-6 | **概念图拓扑引擎**：`β₁`、`fold/negate/sublate`、settlement（行为等价/拓扑不变量） | FULL_CODEX_TRANSCRIPT 行 340, ENGINE_STRICTNESS_AUDIT | **否**（FULL 无 β₁/fold/sublate；这是另一引擎 `topological-computation/engine.py`，已删除：#1945 移出仓库） | **是**（独立引擎，非行情缠论） | L0 可证；非缠论本体 |
 
 ---
 

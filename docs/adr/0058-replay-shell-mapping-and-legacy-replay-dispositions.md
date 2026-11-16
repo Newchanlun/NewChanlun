@@ -1,5 +1,7 @@
 # ADR 0058：#1304 回放外壳映射与旧回放件终态
 
+> #1742 迁移说明：本文对三份历史纪律的引用已退役，原文及当时行号按 `.chanlun/review-results/ARCHIVE-INDEX.md`「三份历史纪律」恢复。现行产品名分见 ADR 0004「现行名分与现役线」；通用交付见 `.sandcastle/docs/graph-engineering.md`「交付与关票」及 `.sandcastle/CODEX-CHILD.md`。历史取证文字保留，不作为要求新报告入 Git 的现役入口。 本次保留 AT-14 的具名 schema、报告路径、绑定 #1304 与全部产品验收义务；更改该专用报告合同需要 #1304/#1418 的消费者迁移依据，本批不据通用归档规则改写它。
+
 > 正本：本文件是 #1550（FU-19）#1304 回放外壳与唯一 launcher `production_session` 之间的 seam、外壳输出合同映射、旧回放件终态表、#1528/#1607 处置与 AT-14 实体报告（`at14-report/1`）载体、路径和判定口径的正本。
 > 最后裁定：#1550（FU-19，2026-10-31，#1323 Notes N-1 预授权 T 类判定）
 > 受影响代码清单：见本文「受影响票与 blocking 边变化」节（`rust/src/bin/production_session.rs:25-26`、`rust/src/bin/x_execution_session.rs:22/:55`、`rust/src/bin/replay_compare.rs:94`、`rust/src/trading/replay_comparator.rs:151`、`rust/src/trading/replay.rs`、`rust/tests/replay_compare_test.rs`、`scripts/replay_compare.sh`、`.github/workflows/ci.yml:516-523`；实施归 #1769、#1381、#1411、#1413、#1418）
@@ -54,7 +56,7 @@
 - ADR 0052 `:288-291`：FU-14 判据 (a)–(d)，四条都是二值。
 - #1340 body `:434`：「现有对拍仅信号面硬断言、PASS 可含 inconclusive、同进程第二实例恢复、忽略测试或缺依赖跳过，都不能计作本 SPEC 通过」。`:436`：「新增一个从正式 launcher 启动的完整会话测试夹具……使用两个独立新进程双跑及真正杀进程/重启……不继承旧 expected/advisory 规则掩盖差异」。`:438`：「运行报告保存输入/schema/构建/政策/能力 hash、实际负载、故障与调度序列、完整输出、未执行项以及独评绑定面」。`:426` 是 AT-14 行。
 - #1418 body :11：「报告至少含输入/schema/构建/规则/模型/政策/能力hash、实际负载、故障与调度、三面及完整域差异、未跑项、证据与独评绑定，不能只输出信号计数」。:12：「验收报告器和生产改动触发的回归锁有真实代码/CI或项目既定载体及失败负对照」。:13：「报告明确只证明有界受测域」。
-- `docs/agents/delivery-discipline.md:16`（第 6 项）：「关票时本票报告……已入 git，以仓内相对路径引用（如 `chanlun/review-results/`）……引 `/tmp` 或绝对路径视同未入仓」。`:15`（第 5 项）：「有在制品未合入的不得关票，先处置在制品」。`docs/agents/generation-constitution.md:52`：「review-results / handoff = **工作草稿**……**活期绑定票**——关联票 open 期间留仓，票关后月度归档」。
+- `docs/agents/delivery-discipline.md:16`（第 6 项）：「关票时本票报告……已入 git，以仓内相对路径引用（如 `chanlun/review-results/`）……引 `/tmp` 或绝对路径视同未入仓」。`:15`（第 5 项）：「有在制品未合入的不得关票，先处置在制品」。`docs/agents/generation-constitution.md:52`：「review-results / handoff = **工作草稿**……**活期绑定票**——关联票 open 期间留仓，票关后月度归档」。 （已退役原件。）
 - `.github/workflows/ci.yml:516-523`：已有 `cargo test … --features production_session_testonly --test production_session_entry`（:517）和纯生产构建 `--features production_session`（:523）两段。
 - `rust/src/bin/theta_accept.rs:27`：「`--out DIR` 报告写盘（每品种一份 <SYMBOL>.md + summary.md；默认只打 stdout）」。这是影子工具的先例。
 
@@ -91,11 +93,11 @@
 票面五个词映射到 ADR 0038 六面、ADR 0038:56/:60/:74 和 #1340 C08.6，详见裁定二。
 
 ### Q4 AT-14 报告的载体与路径（B）
-默认值：**由 #1418 报告器在 `production_session`（`evidence_class=simulation`）完整会话夹具结束时产出。载体是具名版本化记录 `at14-report/1`（机器可读 JSON）加一份人读 `summary.md`。入仓路径是 `.chanlun/review-results/issue1304-at14-<YYYYMMDD>-<short-sha>/`。CI 载体是 ADR 0038:88-91 的四个具名 cargo test，进 `ci.yml` 的 `production_session` feature 段**（出处：#1340 :438；#1418 :11-13；ADR 0052:280/:350；ADR 0038:88-94；delivery-discipline.md:16；generation-constitution.md:52；ci.yml:516-523；theta_accept.rs:27 只借形式）。
+默认值：**由 #1418 报告器在 `production_session`（`evidence_class=simulation`）完整会话夹具结束时产出。载体是具名版本化记录 `at14-report/1`（机器可读 JSON）加一份人读 `summary.md`。入仓路径是 `.chanlun/review-results/issue1304-at14-<YYYYMMDD>-<short-sha>/`。CI 载体是 ADR 0038:88-91 的四个具名 cargo test，进 `ci.yml` 的 `production_session` feature 段**（出处：#1340 :438；#1418 :11-13；ADR 0052:280/:350；ADR 0038:88-94；delivery-discipline.md:16；generation-constitution.md:52；ci.yml:516-523；theta_accept.rs:27 只借形式）。 （已退役原件。）
 
 推理链重过 `[新缠论:选择]`：
 1. 字段清单已由 #1340 :438、#1418 :11 和 ADR 0052:280/:350 写死，缺的只是载体与路径。
-2. 仓内「实体报告」唯一的硬口径是 delivery-discipline.md:16（入 git、用仓内相对路径）；generation-constitution.md:52 又规定 `review-results/` 活期绑定票，所以目录必须绑一张 open 票。考古默认绑 #1366，本裁定改绑 **#1304**，理由：
+2. 仓内「实体报告」唯一的硬口径是 delivery-discipline.md:16（入 git、用仓内相对路径）；generation-constitution.md:52 又规定 `review-results/` 活期绑定票，所以目录必须绑一张 open 票。考古默认绑 #1366，本裁定改绑 **#1304**，理由： （已退役原件。）
    - 报告的消费者是 #1304 和 #1279，两张票都在 TB-11 才得到合法去向（#1340 :378）。
    - 绑 #1366 的话，报告可能在 TB-11 总验之前就被月度归档移出仓。
    - 仓内已有 `.chanlun/review-results/issue1304-phase0-specs-20261017.md` 和 `issue1304-replay-system-frontier-20261017.md`，同前缀有先例。
@@ -176,7 +178,7 @@
 
 ### 四、#1528 与 #1607 的处置
 
-1. **#1528**：旧正文目标「替换为 `run_theta_v0_pi` 生产链」与 ADR 0039:217、ADR 0027:46 冲突，**不实施**。改题关闭为「不实施：与 ADR 0039 冻结影子终态冲突」。它要的「逐 bar 分类/信号/订单/持仓/账目」对拍由父票 #1411 的六面 oracle（ADR 0038:49-54）覆盖，不另开票。在制分支 `codex/issue1528-replay-compare-20261018`（origin head `72b1dbcc73`，见 #1528 评论 6243030915 / 6278136284）按 delivery-discipline.md:15 先处置，再关票：不合入，在 #1528 留下 head SHA 后删除远端分支。#1411 要复用这批组件，就按该 SHA 自取。
+1. **#1528**：旧正文目标「替换为 `run_theta_v0_pi` 生产链」与 ADR 0039:217、ADR 0027:46 冲突，**不实施**。改题关闭为「不实施：与 ADR 0039 冻结影子终态冲突」。它要的「逐 bar 分类/信号/订单/持仓/账目」对拍由父票 #1411 的六面 oracle（ADR 0038:49-54）覆盖，不另开票。在制分支 `codex/issue1528-replay-compare-20261018`（origin head `72b1dbcc73`，见 #1528 评论 6243030915 / 6278136284）按 delivery-discipline.md:15 先处置，再关票：不合入，在 #1528 留下 head SHA 后删除远端分支。#1411 要复用这批组件，就按该 SHA 自取。 （已退役原件。）
 2. **#1607**：选票面的「退场」臂，**不补齐**。原验收合同（#1607 body :30-34）不变：退场 = 随冻结影子删除 ∧ 在 #1304 记录去向，完成后删掉 `replay_comparator.rs:151` 的待办注释和 DevSkim 抑制。
    - 文件不在本票删除：终态表第一行的退场条件（ADR 0048:288）还没成立。本票也不为满足关票去删影子源码。
    - 本票能交付的只是选臂与去向：在 #1304 发去向登记（臂 = 退场、删除走终态表第一行、ADR 0058 指针）。这一步只完成退场臂里「记录去向」那一半，**不算 #1607 完成**。
@@ -242,7 +244,7 @@
 | 票 | 状态 | 处置 | 边变化 |
 |---|---|---|---|
 | #1550 | OPEN→CLOSED | 本票；发 resolution 和 #1528/#1607 冲突登记评论；关票不等 #1607 关闭 | 现有 blocked-by 1533/1536/1537/1538（都已 closed）、blocking 1366/1369/1551 不改；关票即解锁 |
-| #1528 | OPEN→CLOSED | 改题「不实施：与 ADR 0039 冻结影子终态冲突」；需求由 #1411 六面 oracle 承接；在制分支按 delivery-discipline.md:15 先处置 | **删** #1381 → #1528 |
+| #1528 | OPEN→CLOSED | 改题「不实施：与 ADR 0039 冻结影子终态冲突」；需求由 #1411 六面 oracle 承接；在制分支按 delivery-discipline.md:15 先处置 | **删** #1381 → #1528 | （已退役原件。）
 | #1607 | OPEN 保持 | 选「退场、不补齐」；在 #1304 记录去向；过渡注释订正转 #1413；影子按终态表第一行实际删除、`:151` 待办与 DevSkim 抑制清除后才关闭 | 无（当前无边） |
 | #1769 | OPEN | 承接登记：`dry-run` 与 evidence_class 三值冲突，回放路径只接 `simulation` | **加** #1769 → #1381（#1769 无 blocker，不成环） |
 | #1381 | OPEN | 承接：外壳输入 = `production-session-manifest/1` + `history-input-profile/1`（`evidence_class=simulation`） | 新增被 #1769 阻塞；原 blocked-by 1364/1353/1481/1443 不动 |

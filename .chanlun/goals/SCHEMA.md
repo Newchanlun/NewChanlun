@@ -61,3 +61,7 @@ goal events ≠ genealogy。只有 goal 定义/验收/分解原则**语义变更
 
 ## 治理事件归属（650 实施附带裁决）
 DECISION/ADJUDICATION/CEREMONY/ESCALATE 等治理/叙事类型**不进 SCHEMA 的 8 种**——它们是编排者裁决/escalation 文件的人读记录，归 EVIDENCE（artifact 自由文本）+ escalation 文件。writer 拒绝它们当结构事件 append（防退化类型扩散）；reader 宽容跳过历史中已存在的此类裸 append。
+
+## 正式事件的写入步骤（2026-11-09 从 AGENTS.md「记忆」节迁入，#1742）
+
+正式 GOAL_SET/SUPERSEDE 由 Lead 直接 append 到 `.chanlun/goals/events.jsonl`（`scripts/goal_events.py` 只出草稿），随后运行 `python scripts/goal_reducer.py` 验证：它读取 events.jsonl，打印当前 goal 投影（JSON）。退出码 0 = 正常，1 = 有损坏行被跳过，2 = 文件缺失或没有可解析事件。

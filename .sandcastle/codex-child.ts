@@ -149,6 +149,15 @@ export const DEEPAGENTS_OUTPUT_SCHEMA = {
   required: [...OUTPUT_SCHEMA.required, "confidence", "caveats"],
 } as const;
 
+/** #1968：精确模型使用提示词 JSON，不传 --output-schema；结果仍由 CodexTranscript 严格消费。 */
+export const PROMPT_JSON_MODELS: ReadonlySet<string> = new Set(["kimi-k3.1-pro"]);
+
+export function workerOutputInstruction(protocol: OutputProtocol = "legacy"): string {
+  return "\n最终消息只输出一个 JSON 对象，不加 Markdown 代码围栏、不加其它文字。"
+    + "对象必须严格满足以下 JSON Schema（所有 required 键必须齐全，不得添加其他键）：\n"
+    + JSON.stringify(workerOutputSchema(protocol));
+}
+
 export function workerOutputSchema(protocol: OutputProtocol = "legacy") {
   return outputProtocol(protocol) === DEEPAGENTS_OUTPUT_PROTOCOL ? DEEPAGENTS_OUTPUT_SCHEMA : OUTPUT_SCHEMA;
 }

@@ -1036,7 +1036,7 @@ export const MAIN_CONTINUE_LINE = "本轮在本票 MAIN 会话中续接：上文
 export function draftPrompt(t: TicketContext, c: Classification, feedback?: string, arch?: string): string {
   return `你是 NewChanlun 仓 #1323 图的裁决起草者。当前目录是 origin/main 的只读检出；禁止修改任何文件，只读取证。
 ${MAIN_CONTINUE_LINE}
-先读 AGENTS.md（教义正本、#799 收敛通则、#804 总缝规则、引原文四步核验）、CONTEXT.md、.sandcastle/docs/graph-engineering.md，以及票面点名的票（gh issue view <号> --comments）。评论 id 用 gh api repos/${GH_REPO}/issues/comments/<id> 或 gh api repos/${GH_REPO}/issues/<号>/comments 取，只读。
+先读 AGENTS.md、docs/agents/doctrine-rules.md（教义正本、#799 收敛通则含三条限定词、#804 总缝规则含举证门与全仓上限 3 条、引原文四步核验）、CONTEXT.md、.sandcastle/docs/graph-engineering.md，以及票面点名的票（gh issue view <号> --comments）。评论 id 用 gh api repos/${GH_REPO}/issues/comments/<id> 或 gh api repos/${GH_REPO}/issues/<号>/comments 取，只读。
 本票分级：${c.klass} 类 —— ${c.reason}
 分级由分级器决定，你无权改判：按 ${c.klass} 类起草。若你认为分级有误，在「授权引用」段末另起一行写 \`改判建议：T 或 P — 理由\`，由编排逻辑处置；其余部分仍按 ${c.klass} 类写。
 
@@ -1084,7 +1084,7 @@ export const ADR_FORMAT_LINE = `新建 ADR 时落点一律写 \`正本落点：d
 
 export function reviewPrompt(t: TicketContext, c: Classification, draft: string, arch?: string, plan?: CanonicalPlan): string {
   return `你是 NewChanlun 仓 #1323 图裁决面的独立审查者。你看不到起草过程，只拿草稿与仓内源文件。当前目录是 origin/main 的只读检出；禁止修改任何文件。
-需要时用 Read/Grep/rg 回查每条引用，用 gh issue view 查票，用 gh api repos/${GH_REPO}/issues/comments/<id> 或 gh api repos/${GH_REPO}/issues/<号>/comments 回查评论 id（只读）。审查依据：AGENTS.md、.chanlun/definitions/、docs/adr/、CONTEXT.md、.sandcastle/docs/graph-engineering.md「4. 独审」。
+需要时用 Read/Grep/rg 回查每条引用，用 gh issue view 查票，用 gh api repos/${GH_REPO}/issues/comments/<id> 或 gh api repos/${GH_REPO}/issues/<号>/comments 回查评论 id（只读）。审查依据：AGENTS.md、docs/agents/doctrine-rules.md（#799/#804 完整条文、引原文四步）、.chanlun/definitions/、docs/adr/、CONTEXT.md、.sandcastle/docs/graph-engineering.md「4. 独审」。
 
 被审票：#${t.number} ${t.title}
 分级器结论：${c.klass} 类 —— ${c.reason}

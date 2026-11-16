@@ -375,7 +375,9 @@ def system_prompt(run: PilotRun) -> str:
         skills_root = PSTACK_TARGET + "/installed/skills/"
         poteto_mode = skills_root + "poteto-mode/SKILL.md"
     else:
-        models = PSTACK_MODELS.read_text() if PSTACK_MODELS.exists() else "(pstack-models.md 缺失)"
+        frozen_models = run.spec.model_rules_text
+        models = frozen_models if frozen_models is not None else (
+            PSTACK_MODELS.read_text() if PSTACK_MODELS.exists() else "(pstack-models.md 缺失)")
         skills_root, poteto_mode = SKILLS_ROOT, POTETO_MODE
     task = run.spec.task
     ending = V1_ENDING if run.spec.v == 1 else _v2_ending(run)
@@ -397,7 +399,7 @@ def system_prompt(run: PilotRun) -> str:
 - 独审结论只认 VERDICT: PASS/BLOCK。BLOCK 时把完整 findings、validation、response.caveats 写进新的 author brief 返修，再 commit_candidate、再 run_worker(review)。
 {ending}- 一条消息只调用一个业务工具，等它返回再决定下一步。
 
-模型角色表（~/.agents/pstack-models.md，本 run 已冻结：作者 {run.spec.author_model}，独审 {run.spec.reviewer_model}，主控 {run.spec.brain_model}）：
+模型角色表（本 run 已冻结：作者 {run.spec.author_model}，独审 {run.spec.reviewer_model}，主控 {run.spec.brain_model}）：
 {models}
 
 任务：{task.title}
@@ -419,6 +421,7 @@ def build_agent(run: PilotRun, checkpointer: Any, model: BaseChatModel | None = 
     register_harness_profile(f"openai:{run.spec.brain_model}", HarnessProfile(
         general_purpose_subagent=GeneralPurposeSubagentProfile(enabled=False)))
     project_root = project_skills_root(run)
+    rules_backend: BackendProtocol
     if run.execution is not None:
         context = run.execution.controller_context()
         project_docs = context / "repo"
@@ -427,12 +430,19 @@ def build_agent(run: PilotRun, checkpointer: Any, model: BaseChatModel | None = 
         skills_root = PSTACK_TARGET + "/installed/skills/"
         skills_dir = bundle / "pstack/installed/skills"
         rules_root, rules_dir = RULES_TARGET + "/", bundle / "rules"
+        rules_backend = FilesystemBackend(root_dir=str(rules_dir), virtual_mode=True)
         manuals = run.execution.controller_manuals() / "repo" / MANUALS_DIR
     else:
-        rules_dir = run.dir / "read-only-rules"
-        rules_dir.mkdir(exist_ok=True)
-        if PSTACK_MODELS.is_file():
-            (rules_dir / "pstack-models.md").write_bytes(PSTACK_MODELS.read_bytes())
+        from deepagents.backends import StoreBackend
+        from langgraph.store.memory import InMemoryStore
+
+        # Studio 构图只读：以冻结全文建立内存文件视图，不改 run 目录。
+        rules_backend = StoreBackend(namespace=lambda _: ("model-rules",), store=InMemoryStore())
+        models = run.spec.model_rules_text
+        if models is None and PSTACK_MODELS.is_file():
+            models = PSTACK_MODELS.read_text()
+        if models is not None:
+            rules_backend.write("/pstack-models.md", models)
         rules_root = str(PSTACK_MODELS.parent) + "/"
         project_docs = run.dir / "read-only-project"
         if project_docs.exists():
@@ -452,7 +462,7 @@ def build_agent(run: PilotRun, checkpointer: Any, model: BaseChatModel | None = 
         "/project/": FilesystemBackend(root_dir=str(project_docs), virtual_mode=True),
         skills_root: FilesystemBackend(root_dir=str(skills_dir), virtual_mode=True),
         project_root: FilesystemBackend(root_dir=str(project_skills), virtual_mode=True),
-        rules_root: FilesystemBackend(root_dir=str(rules_dir), virtual_mode=True),
+        rules_root: rules_backend,
     }
     if run.execution is not None:
         routes[PSTACK_TARGET + "/"] = FilesystemBackend(root_dir=str(bundle / "pstack"), virtual_mode=True)
