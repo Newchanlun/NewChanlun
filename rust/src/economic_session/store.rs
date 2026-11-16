@@ -148,6 +148,7 @@ impl Config {
         let withdrawal = super::domain_event::withdrawal_selected(&manifest)?;
         super::evidence::validate_config(&manifest)?;
         super::finance::validate_config(&manifest)?;
+        let exact_release = super::finance::exact_release_selected(&manifest);
         super::tb03c_allocation::validate_config(&manifest)?;
         super::tb03c_funding::validate_config(&manifest)?;
         let session = required(&manifest, "session_id")?.to_owned();
@@ -235,7 +236,8 @@ impl Config {
                 let known = BASE_OPS.contains(&op)
                     || (sr_expansion
                         && [super::sr_expansion::OP, super::sr_expansion::QUERY].contains(&op))
-                    || (withdrawal && op == super::domain_event::WITHDRAW_OP);
+                    || (withdrawal && op == super::domain_event::WITHDRAW_OP)
+                    || (exact_release && super::finance::EXACT_OPS.contains(&op));
                 if !known || !unique.insert(op) {
                     return Err("InvalidDomain：操作权限未知或重复".into());
                 }
