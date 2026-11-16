@@ -52,6 +52,44 @@ fi
 if [[ -n "$cause" ]]; then
   # 标记行格式是调用方的分界依据（run-1488-delta-ci.py RETRY_MARKER），改动须同步。
   echo "::warning title=Boat transient cargo error retry::cause=${cause} host=$(hostname)"
+  # EACCES 在同一文件上是粘的：原地重跑时 cargo 认为构建脚本已是新的，只会再执行同一个被拒的文件（run 42774135845
+  #   同机同路径连拒 4 次）。重跑前删掉被拒的 build-script-build 及同目录的 build_script_build-*（前者是后者的硬链接，
+  #   cargo 只看后者判新旧，只删前者会把同一 inode 链回来），cargo 判输出缺失、重编出新文件。只多一次构建脚本编译，结论不变。
+  #   删除范围（#2066 两轮独审加固）：只在归属无歧义时删，否则一律不删、照旧原地重跑。
+  #   - 输出里没有 NUL 字节（否则 grep 会按二进制截断计数，与 awk 看到的行不一致；#2066 复审 2），计数与解析都按 C 区域逐字节；
+  #   - 整份输出里「never executed」与「could not execute process」各恰好出现一次（交错的多段报错、或路径文本里用反引号
+  #     或换行嵌着另一段报错，都会多出一次：真实报错行本身必含后者，伪造的整行也必含后者）；
+  #   - 那一行整行就是 `could not execute process \`<路径>\` (never executed)`，路径只含 [A-Za-z0-9_./-]；
+  #   - 其后的非空行依次恰为「Caused by:」与「Permission denied (os error 13)」；
+  #   - 路径形如 <target 根>/…/build/<crate>-<16 位 hash>/build-script-build，target 根取 CARGO_TARGET_DIR（缺省 ./target）
+  #     的真实路径；crate 目录的真实路径须与字面路径逐字相同（任何一级是符号链接都不删）。
+  if [[ "$cause" == EACCES* ]]; then
+    bad=
+    if [[ "$(LC_ALL=C tr -cd '\000' <"$log" | wc -c)" -eq 0 \
+        && "$(LC_ALL=C grep -a -o 'never executed' "$log" | wc -l)" -eq 1 \
+        && "$(LC_ALL=C grep -a -o 'could not execute process' "$log" | wc -l)" -eq 1 ]]; then
+      bad=$(LC_ALL=C awk '
+        state == 0 && /^[[:space:]]*could not execute process `[A-Za-z0-9_.\/-]+` \(never executed\)$/ {
+          p = $0; sub(/^[[:space:]]*could not execute process `/, "", p); sub(/` \(never executed\)$/, "", p); state = 1; next
+        }
+        state == 0 || /^[[:space:]]*$/ { next }
+        state == 1 { state = ($0 ~ /^[[:space:]]*Caused by:$/) ? 2 : -1; next }
+        state == 2 { if ($0 ~ /^[[:space:]]*Permission denied \(os error 13\)$/) print p; state = -1; next }
+      ' "$log")
+    fi
+    target_root="$(realpath -e -- "${CARGO_TARGET_DIR:-target}" 2>/dev/null)" || target_root=
+    removed=0
+    while IFS= read -r f; do
+      [[ -n "$f" && -n "$target_root" ]] || continue
+      [[ "$f" == "$target_root"/* && "$f" =~ /build/[A-Za-z0-9_.-]+-[0-9a-f]{16}/build-script-build$ ]] || continue
+      d="${f%/build-script-build}"
+      [[ -d "$d" && "$(realpath -e -- "$d" 2>/dev/null)" == "$d" ]] || continue
+      for g in "$f" "$d"/build_script_build-*; do
+        if [[ -f "$g" && ! -L "$g" ]]; then rm -f -- "$g" && echo "removed rejected build script: $g" && removed=1; fi
+      done
+    done <<<"$bad"
+    (( removed )) || echo "no rejected build script removed; retrying in place"
+  fi
   run "$@"; status=$?
 fi
 exit "$status"

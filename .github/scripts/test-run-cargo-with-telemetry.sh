@@ -289,3 +289,6 @@ assert_status 0 "$direct_status" retry-direct "$direct_log"
 [[ "$(cat "$direct_calls")" == 2 ]] || { echo "FAIL retry-direct: expected 2 calls" >&2; exit 1; }
 
 printf 'PASS: 16 status-priority cells, guard boundaries, defaults, configuration validation, argv preservation, 9 transient-retry cases (EACCES, EXDEV rlib/rmeta), and 2 no-TMPDIR fail-closed cases\n'
+
+# #2066：删脚本重试的删除范围（target 根、符号链接、只删紧跟 os error 13 的脚本）。
+"$script_dir/test-cargo-eacces-retry.sh"
