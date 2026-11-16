@@ -224,9 +224,6 @@ jobs:
           pip install "nautilus_trader==1.229.0"
           CARGO_TARGET_DIR="$HOME/.cache/newchan-rust-target" pip install ./rust
 
-      - name: Build and install newchan_rust extension
-        run: pip install ./rust
-
       - name: Run tests with coverage
         # -rs 是 #324 的 090 要求：显式打印 skip 原因。
         # #1875：-n 4 与托管 runner 4 核一致。Belay 同机：串行 100.7 s，-n 4 两轮 72.8 / 79.1 s，
