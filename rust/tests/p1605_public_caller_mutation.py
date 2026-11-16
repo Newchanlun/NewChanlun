@@ -82,7 +82,9 @@ def main() -> None:
 
     with tempfile.TemporaryDirectory(prefix="p1605-mutation-") as tmp:
         work_rust = stage_workspace(Path(tmp))
-        env = {**os.environ, "CARGO_TARGET_DIR": os.environ.get("CARGO_TARGET_DIR", str(RUST_DIR / "target"))}
+        # 变异体只许写专属子目录：与真实 rust/target 共用会让失败后的变异产物被原始树当作新鲜缓存。
+        target_base = Path(os.environ.get("CARGO_TARGET_DIR", str(RUST_DIR / "target")))
+        env = {**os.environ, "CARGO_TARGET_DIR": str(target_base / "p1605-mutation")}
         assert_nondefault_policy_passes(work_rust, env, stale_record_v2)
         assert_same_version_stale_values_fail_numeric_assertions(work_rust, env, originals, stale_record_v2)
         assert_restored_workspace_passes(work_rust, env, originals)
