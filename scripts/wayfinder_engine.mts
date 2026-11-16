@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import { MaintenanceOwner, MaintenanceClosed, maintenanceCommand } from "../.sandcastle/maintenance.mts";
 /**
  * wayfinder_engine.mts —— 图清自动汇入主干管线自动化（#1078 裁定落地，#1084 实装）。
  *
@@ -44,7 +45,7 @@ import { execFileSync, execSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import { cliProxyEnv } from "../.sandcastle/cliproxy-env.mts";
 import { MAIN_MODEL, SUPPORTED_MAIN_MODELS } from "../.sandcastle/main-model.mts";
 
@@ -1005,6 +1006,8 @@ function writeStatus(
 // ── 动作执行器（IO 层；dry-run 下不调用） ──────────────────────────────────────
 
 export interface EngineConfig {
+  maintenanceRoot?: string;
+  maintenanceEsConfig?: string;
   orchestrator: string;
   dryRun: boolean;
   pollSeconds: number;
@@ -1113,15 +1116,15 @@ function runSpecDrafter(prompt: string, cfg: EngineConfig): string {
     WAYFINDER_SPEC_MODEL: cfg.specModel,
   });
   const { file, args } = specDrafterCommand(specModel);
-  const out = execFileSync(file, args, {
+  const command = maintenanceCommand(file, args);
+  return execFileSync(command.file, command.args, {
     encoding: "utf8",
     input: prompt,
     cwd: tmpdir(),
     env: specDrafterEnv(process.env, cliProxyEnv()),
     maxBuffer: 32 * 1024 * 1024,
     timeout: 15 * 60 * 1000,
-  });
-  return out.trim();
+  }).trim();
 }
 
 /** 拉一张图的全量上下文（供起草 spec / 组装图关 comment）。 */
@@ -1454,18 +1457,22 @@ function describeAction(a: Action): string {
 
 // ── 壳：轮询 + 每轮重算 ready 集 ───────────────────────────────────────────────
 
-async function runOnce(cfg: EngineConfig): Promise<void> {
-  if (graphAdmissionFrozen()) return;
+const roundIO = { frozen: graphAdmissionFrozen, maps: fetchOpenMaps, ready: fetchReadyTickets,
+  admit: withEngineAdmission, execute: executeAction, release: releaseTicket, status: writeStatus };
+
+export async function runOnce(cfg: EngineConfig, maintenance?: Pick<MaintenanceOwner, "work">,
+  io = roundIO): Promise<void> {
+  if (io.frozen()) return;
   const stamp = new Date().toISOString().slice(0, 19).replace("T", " ");
   console.log(`\n[wayfinder_engine] ${stamp} 一轮开始（${cfg.dryRun ? "dry-run" : "live"}）`);
   let maps: MapState[];
   let ready: ReadyTicket[];
   let facts: SpecTreeFacts;
   try {
-    maps = fetchOpenMaps();
+    maps = io.maps();
     // 队列交棒视图：全仓 ready-for-agent × 父图 spec 批准态。
     facts = buildSpecTreeFacts(maps, cfg.orchestrator);
-    ready = withSpecApproval(fetchReadyTickets(), facts.approved, buildOpenChildIndex(maps), facts.underSpec);
+    ready = withSpecApproval(io.ready(), facts.approved, buildOpenChildIndex(maps), facts.underSpec);
   } catch (e) {
     console.error(`[wayfinder_engine] 拉取 tracker 状态失败（网络/鉴权？已重试，本轮跳过）：${e}`);
     return;
@@ -1481,8 +1488,14 @@ async function runOnce(cfg: EngineConfig): Promise<void> {
         console.log(`    [dry-run] 将执行：${describeAction(action)}`);
       } else {
         try {
-          await withEngineAdmission(() => executeAction(action, cfg));
+          const execute = () => io.admit(() => io.execute(action, cfg));
+          if (maintenance) await maintenance.work(`map:${m.number}:${action.kind}`, execute);
+          else await execute();
         } catch (e) {
+          if (e instanceof MaintenanceClosed) {
+            console.log("    维护关闭，停止本轮新领取");
+            return;
+          }
           console.error(`    ✗ 执行失败（${action.kind}）：${e}`);
         }
       }
@@ -1506,22 +1519,29 @@ async function runOnce(cfg: EngineConfig): Promise<void> {
       console.log(`    [dry-run] 将释放（挂 ${releaseLabel()}）：#${n}`);
     } else {
       try {
-        const why = await withEngineAdmission(() => releaseTicket(n, { specs: facts.requiredSpecs.get(n) ?? [], orchestrator: cfg.orchestrator,
+        const release = () => io.admit(() => io.release(n, { specs: facts.requiredSpecs.get(n) ?? [], orchestrator: cfg.orchestrator,
           via: facts.planBound.has(n) ? "plan" : "tree" }));
+        const why = maintenance ? await maintenance.work(`release:${n}`, release) : await release();
         if (why) console.log(`    · 写前复核不放行 #${n}：${why}`);
         else console.log(`    ✓ 已释放（挂 ${releaseLabel()}）：#${n}`);
       } catch (e) {
+        if (e instanceof MaintenanceClosed) {
+          console.log("    维护关闭，停止本轮新领取");
+          return;
+        }
         console.error(`    ✗ 释放失败（#${n}）：${e}`);
       }
     }
   }
 
   // 3) 状态页：五桶分明落盘，供宿主/roster 读（不把 sandcastle 空误写成全空）。
-  writeStatus(cfg, stamp, maps, ready, summary);
+  io.status(cfg, stamp, maps, ready, summary);
   console.log(`[wayfinder_engine] 一轮结束`);
 }
 
 function parseArgs(argv: string[]): EngineConfig {
+  let maintenanceRoot: string | undefined;
+  let maintenanceEsConfig: string | undefined;
   let dryRun = true;
   let once = false;
   let explain = false;
@@ -1532,6 +1552,14 @@ function parseArgs(argv: string[]): EngineConfig {
     else if (a === "--dry-run") dryRun = true;
     else if (a === "--once") once = true;
     else if (a === "--explain") explain = true;
+    else if (a === "--maintenance-es-config") {
+      if (!argv[i + 1]) throw new Error("--maintenance-es-config 缺参数");
+      maintenanceEsConfig = resolve(argv[++i]!);
+    }
+    else if (a === "--maintenance-root") {
+      if (!argv[i + 1]) throw new Error("--maintenance-root 缺参数");
+      maintenanceRoot = resolve(argv[++i]!);
+    }
     else if (a === "--poll-seconds") {
       const n = Number(argv[i + 1]);
       if (Number.isFinite(n) && n > 0) {
@@ -1541,6 +1569,8 @@ function parseArgs(argv: string[]): EngineConfig {
     }
   }
   return {
+    maintenanceRoot,
+    maintenanceEsConfig,
     orchestrator: process.env.WAYFINDER_ORCHESTRATOR ?? ORCHESTRATOR_LOGIN,
     dryRun,
     pollSeconds,
@@ -1591,18 +1621,23 @@ async function main(): Promise<void> {
   console.log(
     `[wayfinder_engine] 启动：dry-run=${cfg.dryRun} poll=${cfg.pollSeconds}s orchestrator=${cfg.orchestrator} spec 起草子代理=${cfg.specProvider}/${cfg.specModel}`,
   );
-  if (cfg.once) {
-    await runOnce(cfg);
-    return;
-  }
-  for (;;) {
-    if (graphAdmissionFrozen()) { console.log("旧入口冻结，本轮不再领新工作"); return; }
-    try {
-      await runOnce(cfg);
-    } catch (e) {
-      console.error(`[wayfinder_engine] 一轮异常：${e}`);
+  const maintenance = cfg.dryRun ? undefined : new MaintenanceOwner("wayfinder", cfg.maintenanceRoot, cfg.maintenanceEsConfig);
+  try {
+    if (cfg.once) {
+      if (!maintenance?.poll()) await runOnce(cfg, maintenance);
+      return;
     }
-    await sleep(cfg.pollSeconds * 1000);
+    for (;;) {
+      try {
+        if (graphAdmissionFrozen()) { console.log("旧入口冻结，本轮不再领新工作"); return; }
+        if (!maintenance?.poll()) await runOnce(cfg, maintenance);
+      } catch (e) {
+        console.error(`[wayfinder_engine] 一轮异常：${e}`);
+      }
+      await sleep(cfg.pollSeconds * 1000);
+    }
+  } finally {
+    try { maintenance?.stop(); } catch { console.error("maintenance stop unavailable，保留未确认状态"); }
   }
 }
 

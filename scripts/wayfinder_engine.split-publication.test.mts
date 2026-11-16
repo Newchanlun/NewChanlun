@@ -1,3 +1,4 @@
+import { isolateMaintenance } from "./wayfinder-maintenance-fixture.mts";
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
@@ -16,6 +17,7 @@ for (const label of ['sandcastle', 'deepagents:queue']) {
         // 只隔离准入设施；生产拆票、裁定与发布代码原样运行。
         writeFileSync(join(root, '.sandcastle/deepagents-cutover.mts'), `export const HOLD_LABELS=['needs-info']; export const QUEUE_LABEL='deepagents:queue'; export const releaseLabel=()=>${JSON.stringify(label)}; export const graphAdmissionFrozen=()=>false; export const withGraphAdmission=async f=>f(); export const MIRROR_LABEL='deepagents'; export const ORCHESTRATOR_LOGIN='xy7365527-lang'; export const withTicketHold=async (n,f)=>f(null);`);
         for (const f of ['scripts/wayfinder_engine.mts', '.sandcastle/cliproxy-env.mts', '.sandcastle/main-model.mts', '.sandcastle/scheduler-config.mts', '.sandcastle/scheduler-config.json']) writeFileSync(join(root, f), readFileSync(f === 'scripts/wayfinder_engine.mts' && process.env.SPLIT_ENGINE_SOURCE ? process.env.SPLIT_ENGINE_SOURCE : new URL(f, repo)));
+        isolateMaintenance(root);
         const body = '<!-- wayfinder-split -->\n```json\n'+JSON.stringify({tickets:[{id:'S1',title:'first',depends_on:fault==='cycle'?['S2']:[]},{id:'S2',title:'second',depends_on:[fault==='unknown-dependency'?'missing':'S1']}]})+'\n```';
         const ruling = (verdict: 'PASS'|'BLOCK') => ({user:{login:'fixture'}, body:specRulingBody({specNumber:2,verdict,author:'draft',reviewer:'review',digest:specBodyDigest(body),evidence:'/fake/review'}),created_at:verdict==='PASS'?'2026-11-07T01:00:00Z':'2026-11-07T02:00:00Z'});
         writeFileSync(join(root, 'state.json'), JSON.stringify({body,pass:ruling('PASS'),block:ruling('BLOCK'),issues:fault==='legacy-race'?[{number:101,title:'[impl] S1 first',body:'原票正文',labels:['sandcastle']},{number:102,title:'[impl] S2 second',body:'',labels:[]}]:fault==='stale-body'?[{number:101,title:'[impl] S1 first',body:'<!-- wayfinder-ticket:2:S1 -->\nPart of [SPEC #9](https://github.com/fixture/repo/issues/9)（map [#1](https://github.com/fixture/repo/issues/1) 图内实施票）。\n\n## 目标（spec S1）\n\n旧版 SPEC 的过期目标\n\n追加验收：跑通 X 并附日志\n',labels:[]}]:fault.startsWith('title-only')?[{number:101,title:'[impl] S1 first',body:'原实施票的额外验收条件',labels:fault==='title-only-held'?['deepagents','deepagents:queue']:[]},{number:102,title:'[impl] S2 second',body:'',labels:[]}]:[],links:fault.startsWith('title-only')||fault==='legacy-race'?[101,102]:fault==='stale-body'?[101]:[],edges:fault==='title-only-held'?[[102,101]]:[],foreign:fault==='forged'?[{number:150,title:'[impl] S1 first',body:'<!-- wayfinder-ticket:2:S1 -->\n外部账号预建的票',labels:[],author:'outsider'},{number:151,title:'PR 里贴了标记',body:'<!-- wayfinder-ticket:2:S1 -->',labels:[],pr:true}]:[],fault:fault==='title-only-edge'?'edge':fault,race:fault==='legacy-race'&&label==='sandcastle',raced:false,used:false,blocked:false,violations:[]}));
@@ -43,7 +45,7 @@ else if(a[0]==='api') {
  else {console.error('unexpected '+cmd);process.exit(74);}
 } else {console.error('unexpected '+cmd);process.exit(74);}
 `, {mode:0o755});
-        const run = () => spawnSync(process.execPath, ['--experimental-strip-types','scripts/wayfinder_engine.mts','--live','--once'],{cwd:root,env:{...process.env,PATH:`${root}:${process.env.PATH}`,FIXTURE:root,GH_REPO:'fixture/repo',WAYFINDER_ORCHESTRATOR:'fixture',WAYFINDER_GH_MAX_ATTEMPTS:'1'},encoding:'utf8',timeout:30000});
+        const run = () => spawnSync(process.execPath, ['--experimental-strip-types','scripts/wayfinder_engine.mts','--live','--maintenance-root',join(root,'maintenance'),'--once'],{cwd:root,env:{...process.env,PATH:`${root}:${process.env.PATH}`,FIXTURE:root,GH_REPO:'fixture/repo',WAYFINDER_ORCHESTRATOR:'fixture',WAYFINDER_GH_MAX_ATTEMPTS:'1'},encoding:'utf8',timeout:30000});
         const read = () => JSON.parse(readFileSync(join(root,'state.json'),'utf8'));
         const initial = JSON.parse(readFileSync(join(root,'state.json'),'utf8'));
         const first=run(); assert.equal(first.status,0,first.stderr);

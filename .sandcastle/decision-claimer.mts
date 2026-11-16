@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import { MaintenanceOwner, MaintenanceClosed, maintenanceCommand } from "./maintenance.mts";
 /**
  * decision-claimer.mts —— graph engineering 裁决面（#1547）。
  *
@@ -88,6 +89,8 @@ export const ADR_PLACEHOLDER = "NNNN";
 
 export type Mode = "dry-run" | "live";
 export interface Args {
+  maintenanceRoot?: string;
+  maintenanceEsConfig?: string;
   mode: Mode;
   loop: boolean;
   tickets: number[];
@@ -113,6 +116,8 @@ export function parseArgs(argv: string[]): Args {
     else if (v === "--archaeology-only") a.archaeologyOnly = true;
     else if (v === "--ticket") a.tickets.push(...next().split(",").map(toTicket));
     else if (v === "--maps") a.maps = next().split(",").map(toTicket);
+    else if (v === "--maintenance-es-config") a.maintenanceEsConfig = resolve(next());
+    else if (v === "--maintenance-root") a.maintenanceRoot = resolve(next());
     else if (v === "--out") a.outRoot = next();
     else if (v === "--concurrency") a.concurrency = Math.min(MAX_CONCURRENT, Math.max(1, Number(next())));
     else throw new Error(`未知参数 ${v}`);
@@ -605,7 +610,8 @@ function claudeOnce(c: ModelCall, token: string, timeoutMs: number, sessionId?: 
   delete env.ANTHROPIC_API_KEY;
   const args = claudeArgs(c, sessionId);
   return new Promise((res) => {
-    const child = spawn("claude", args, { cwd: c.cwd, env, stdio: ["pipe", "pipe", "pipe"] });
+    const command = maintenanceCommand("claude", args);
+    const child = spawn(command.file, command.args, { cwd: c.cwd, env, stdio: ["pipe", "pipe", "pipe"] });
     let stdout = "";
     let stderr = "";
     let timedOut = false;
@@ -613,7 +619,7 @@ function claudeOnce(c: ModelCall, token: string, timeoutMs: number, sessionId?: 
     child.stdout.on("data", (d) => (stdout += d));
     child.stderr.on("data", (d) => (stderr += d));
     child.on("error", (e) => (stderr += `\nspawn error: ${e.message}`));
-    child.on("close", (code) => {
+    child.on("close", (code, signal) => {
       clearTimeout(timer);
       res({ code: code ?? 1, stdout, stderr: timedOut ? `${stderr}\nclaude 子进程超时（${Math.round(timeoutMs / 1000)}s timed out）` : stderr });
     });
@@ -1119,6 +1125,7 @@ export function reviewRetryPrompt(base: string): string {
 
 export interface Deps {
   mode: Mode;
+  maintenance?: MaintenanceOwner;
   drainRoot?: string;
   /** 切流记录根；缺省与 engine 共用生产根，测试显式给临时目录。 */
   stateRoot?: string;
@@ -1629,14 +1636,27 @@ async function archaeologyOnlyLocked(n: number, d: Deps): Promise<{ ticket: numb
 
 /** --archaeology-only 入口与 engine 共用切流准入；无有效切流时保持冻结。 */
 export async function archaeologyOnlyAdmission(n: number, d: Deps) {
-  return withGraphAdmission(() => archaeologyOnly(n, d), d);
+  const action = () => withGraphAdmission(() => archaeologyOnly(n, d), d);
+  return d.maintenance ? d.maintenance.work(`archaeology:${n}`, action) : action();
 }
 
 export async function processTicket(n: number, raw: Deps): Promise<Summary> {
   const release = acquireTicketLock(raw.outRoot, n);
   if (!release) return { ticket: n, mode: raw.mode, phase: "error", attempts: 0, durationsMs: {}, plannedWrites: [], error: "本地锁已存在，另一进程正在处理" };
-  try { return await processTicketLocked(n, raw); }
-  finally { release(); }
+  let entered = false;
+  const execute = () => {
+    entered = true;
+    return processTicketLocked(n, raw);
+  };
+  try {
+    return raw.maintenance ? await raw.maintenance.work(`ticket:${n}`, execute) : await execute();
+  } catch (error) {
+    // 仅准入前拒绝属于该票；已执行回调的异常保留原语义，不授予重派。
+    if (error instanceof MaintenanceClosed || entered) throw error;
+    return { ticket: n, mode: raw.mode, phase: "error", attempts: 0,
+      durationsMs: {}, plannedWrites: [],
+      error: `维护准入拒绝：${error instanceof Error ? error.message : String(error)}` };
+  } finally { release(); }
 }
 
 async function processTicketLocked(n: number, raw: Deps): Promise<Summary> {
@@ -2287,14 +2307,24 @@ export function pickUnresolved(gh: GhRunner, candidates: number[], limit: number
 export async function runPool<T, R>(items: T[], limit: number, fn: (x: T) => Promise<R>): Promise<R[]> {
   const out: R[] = new Array(items.length);
   let next = 0;
+  let closed = false;
+  const completed = new Set<number>();
   const worker = async () => {
-    while (next < items.length) {
+    while (!closed && next < items.length) {
       const i = next++;
-      out[i] = await fn(items[i]);
+      try {
+        out[i] = await fn(items[i]);
+        completed.add(i);
+      } catch (error) {
+        if (!(error instanceof MaintenanceClosed)) throw error;
+        closed = true; // 不领取下一票；已启动的同轮动作仍完整等待并保留结果。
+      }
     }
   };
-  await Promise.all(Array.from({ length: Math.min(limit, items.length) }, worker));
-  return out;
+  const settled = await Promise.allSettled(Array.from({ length: Math.min(limit, items.length) }, worker));
+  const failed = settled.find((result): result is PromiseRejectedResult => result.status === "rejected");
+  if (failed) throw failed.reason;
+  return out.filter((_, i) => completed.has(i));
 }
 
 /** 用 ssh 地址把远端 main 取到 refs/remotes/origin/main，返回取到的 SHA。 */
@@ -2323,7 +2353,7 @@ function log(msg: string) {
   process.stdout.write(`[decision-claimer ${new Date().toISOString()}] ${msg}\n`);
 }
 
-async function round(a: Args, d: Deps) {
+export async function round(a: Args, d: Deps) {
   let tickets = a.tickets;
   if (tickets.length === 0) {
     const children = a.maps.flatMap((m) => JSON.parse(d.gh(["api", "--paginate", `repos/${GH_REPO}/issues/${m}/sub_issues`])) as RawChild[]);
@@ -2342,6 +2372,13 @@ async function round(a: Args, d: Deps) {
   }
 }
 
+/** CLI 使用共享模型；业务 dry-run 与离线 Deps 测试不是同一执行合同。 */
+export function attachCliMaintenance(d: Deps, root?: string, esConfig?: string): MaintenanceOwner {
+  const owner = new MaintenanceOwner("decision", root, esConfig);
+  d.maintenance = owner;
+  return owner;
+}
+
 async function main() {
   const a = parseArgs(process.argv.slice(2));
   if (process.argv.includes("--maps")) console.error(`[配置 #1606] decision-claimer.decisionMaps=${JSON.stringify(a.maps)} source=cli:--maps`);
@@ -2354,34 +2391,42 @@ async function main() {
   const srcDir = join(a.outRoot, ".src");
   const d: Deps = {
     mode: a.mode, drainRoot: DRAIN_ROOT, gh, git, model: makeClaudeRunner(), outRoot: a.outRoot, srcDir, repoRoot: REPO_ROOT, now: Date.now,
-    me: a.mode === "live" ? gh(["api", "user", "--jq", ".login"]).trim() : undefined,
+    me: undefined,
   };
-  if (a.archaeologyOnly) {
-    const sha = ensureSrc(REPO_ROOT, srcDir, git);
-    log(`考古 only：取证检出对齐远端 main ${sha.slice(0, 10)}`);
-    for (const n of a.tickets) {
-      try {
-        const r = await archaeologyOnlyAdmission(n, d);
-        log(`#${n} 考古 A ${r.counts.A} / B ${r.counts.B} / C ${r.counts.C}；机械校验${r.problems.length ? `问题 ${r.problems.length} 条：${r.problems.join("；")}` : "通过"}；${r.dir}/${ARCHAEOLOGY_FILE}`);
-      } catch (e) {
-        log(`#${n} 考古失败：${e instanceof Error ? e.message : String(e)}`);
-        process.exitCode = 1;
-      }
-    }
-    return;
-  }
-  for (;;) {
-    if (graphAdmissionFrozen(d)) { log("旧入口冻结，已领工作收尾后退出"); return; }
-    try {
+  const maintenance = attachCliMaintenance(d, a.maintenanceRoot, a.maintenanceEsConfig);
+  try {
+    d.me = a.mode === "live" ? gh(["api", "user", "--jq", ".login"]).trim() : undefined;
+    if (a.archaeologyOnly) {
       const sha = ensureSrc(REPO_ROOT, srcDir, git);
-      log(`取证检出对齐远端 main ${sha.slice(0, 10)}`);
-      await round(a, d);
-    } catch (e) {
-      log(`本轮失败：${e instanceof Error ? e.message : String(e)}`);
-      if (!a.loop) process.exitCode = 1;
+      log(`考古 only：取证检出对齐远端 main ${sha.slice(0, 10)}`);
+      for (const n of a.tickets) {
+        try {
+          const r = await archaeologyOnlyAdmission(n, d);
+          log(`#${n} 考古 A ${r.counts.A} / B ${r.counts.B} / C ${r.counts.C}；机械校验${r.problems.length ? `问题 ${r.problems.length} 条：${r.problems.join("；")}` : "通过"}；${r.dir}/${ARCHAEOLOGY_FILE}`);
+        } catch (e) {
+          log(`#${n} 考古失败：${e instanceof Error ? e.message : String(e)}`);
+          process.exitCode = 1;
+        }
+      }
+      return;
     }
-    if (!a.loop) break;
-    await new Promise((r) => setTimeout(r, LOOP_INTERVAL_MS));
+    for (;;) {
+      if (graphAdmissionFrozen(d)) { log("旧入口冻结，已领工作收尾后退出"); return; }
+      try {
+        if (!maintenance?.poll()) {
+          const sha = ensureSrc(REPO_ROOT, srcDir, git);
+          log(`取证检出对齐远端 main ${sha.slice(0, 10)}`);
+          await round(a, d);
+        }
+      } catch (e) {
+        if (!(e instanceof MaintenanceClosed)) log(`本轮失败：${e instanceof Error ? e.message : String(e)}`);
+        if (!a.loop) process.exitCode = 1;
+      }
+      if (!a.loop) break;
+      await new Promise((r) => setTimeout(r, LOOP_INTERVAL_MS));
+    }
+  } finally {
+    try { maintenance?.stop(); } catch { log("maintenance stop unavailable，保留未确认状态"); }
   }
 }
 
