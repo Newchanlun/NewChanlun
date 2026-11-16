@@ -130,12 +130,66 @@ def outcome? : Move → Option MoveOutcome
   | Move.compose _ centers _ => some (classifyMove centers)
 
 /--
+  `UnitDir m d`：走势 `m` 作为中枢成员单元时可取方向 `d`。
+
+  线段自带方向，只可取它。`compose` 不带方向：上级单元的方向由引擎按上下文投影
+  （Rust `recursive_tower::project_to_units`：所属趋势块的方向，否则与前一单元比高点），
+  μF 结构层不携带该投影，故对 `compose` 两个方向都可取。
+-/
+def UnitDir : Move → Direction → Prop
+  | Move.segment d _ _, d' => d = d'
+  | Move.compose _ _ _, _ => True
+
+/--
+  `windowCenters` 派生中枢时取的单元方向：线段取自带方向；`compose` 记 `up`
+  （Rust `LeveledMove::fold_direction` 对无前驱单元同取 `Up`）。
+-/
+def Move.unitDir : Move → Direction
+  | Move.segment d _ _ => d
+  | Move.compose _ _ _ => Direction.up
+
+/-- `Move.unitDir` 取的方向满足 `UnitDir`。 -/
+theorem Move.unitDir_spec (m : Move) : UnitDir m m.unitDir := by
+  cases m <;> simp [UnitDir, Move.unitDir]
+
+/-- Zn 外缘下沿累积一步：成员方向 `d` 等于 seed 首成员方向 `d0` 才并入其下沿，否则原样。 -/
+def znLo (d0 : Direction) (acc : Int) (d : Direction) (m : Move) : Int :=
+  if d = d0 then min acc m.lo else acc
+
+/-- Zn 外缘上沿累积一步：成员方向 `d` 等于 seed 首成员方向 `d0` 才并入其上沿，否则原样。 -/
+def znHi (d0 : Direction) (acc : Int) (d : Direction) (m : Move) : Int :=
+  if d = d0 then max acc m.hi else acc
+
+/--
+  三成员窗口的外缘下沿 `DD = min(dₙ)`，n 遍历 Zn（#1419 D-A，`020-第20课.md:52`）。
+
+  Zn = 方向与 seed 首成员相等的成员（Rust `center::is_zn`、Lean `Origin.isZn` 同一判据）。
+  `d0 d1 d2` 是三成员的单元方向；首成员恒为 Zn，第 2、3 成员经 `znLo` 判。
+-/
+def znDD (d0 d1 d2 : Direction) (a b c : Move) : Int := znLo d0 (znLo d0 a.lo d1 b) d2 c
+
+/-- 三成员窗口的外缘上沿 `GG = max(gₙ)`，n 遍历 Zn（同 `znDD`）。 -/
+def znGG (d0 d1 d2 : Direction) (a b c : Move) : Int := znHi d0 (znHi d0 a.hi d1 b) d2 c
+
+/-- DD 不超过首成员下沿（首成员恒为 Zn）。 -/
+theorem znDD_le_first (d0 d1 d2 : Direction) (a b c : Move) : znDD d0 d1 d2 a b c ≤ a.lo := by
+  unfold znDD znLo; split <;> split <;> omega
+
+/-- 首成员上沿不超过 GG（首成员恒为 Zn）。 -/
+theorem first_le_znGG (d0 d1 d2 : Direction) (a b c : Move) : a.hi ≤ znGG d0 d1 d2 a b c := by
+  unfold znGG znHi; split <;> split <;> omega
+
+/--
   ★中枢在某起点 `i` 由子走势窗口生成（codex R3#2 + R4：核心 **和外缘** 都 sound）。
 
   一个中枢 `c` 在起点 `i` 由 `subs` 生成 ⟺ 连续三段 `subs[i..i+2]` 的区间重叠产生 `c`：
   - 核心：`c.zd = max(三段 lo)`、`c.zg = min(三段 hi)`（zhongshu.md / formal_axioms §3.2）；
-  - ★外缘（codex R4 必修）：`c.dd = min(三段 lo)`、`c.gg = max(三段 hi)`。
+  - ★外缘（codex R4 必修；#1419 D-A 只聚合 Zn）：存在三成员的单元方向 `d0 d1 d2`（各自满足
+    `UnitDir`），使 `c.dd = znDD …`、`c.gg = znGG …`。`dd` 与 `gg` 共用同一组方向。
     外缘 dd/gg **驱动 up/down/expansion 判定**——不约束外缘则可伪造外缘翻转分类。
+
+  三成员都是线段时方向由线段自带，外缘被唯一确定。成员是 `compose` 时方向由引擎投影给出，
+  本定义只要求外缘是某组方向下的 Zn 聚合（至多四种取值），不指定是哪一组。
 
   （三段窗口版；延伸中枢的 start/finish 区间版留待 Rust 引擎，Lean 给三段 sound contract。）
 -/
@@ -144,8 +198,10 @@ def CenterDerivedAt (subs : List Move) (c : Center) (i : Nat) : Prop :=
     ∧ (∀ (h0 : i < subs.length) (h1 : i + 1 < subs.length) (h2 : i + 2 < subs.length),
         c.zd = max (subs[i].lo) (max (subs[i+1].lo) (subs[i+2].lo))
         ∧ c.zg = min (subs[i].hi) (min (subs[i+1].hi) (subs[i+2].hi))
-        ∧ c.dd = min (subs[i].lo) (min (subs[i+1].lo) (subs[i+2].lo))
-        ∧ c.gg = max (subs[i].hi) (max (subs[i+1].hi) (subs[i+2].hi)))
+        ∧ ∃ d0 d1 d2 : Direction,
+            UnitDir subs[i] d0 ∧ UnitDir subs[i+1] d1 ∧ UnitDir subs[i+2] d2
+            ∧ c.dd = znDD d0 d1 d2 subs[i] subs[i+1] subs[i+2]
+            ∧ c.gg = znGG d0 d1 d2 subs[i] subs[i+1] subs[i+2])
 
 /-- 存在某起点窗口生成该中枢（核心+外缘 sound）。 -/
 def CenterDerivedFromWindow (subs : List Move) (c : Center) : Prop :=
@@ -282,32 +338,37 @@ instance (a b c : Move) : Decidable (WindowOverlap a b c) := by
   ★三段窗口真派生中枢（核心+外缘 sound，由公共重叠证据 `h` 派生）。
 
   - 核心 `[zd, zg] = [max(三lo), min(三hi)]`（前三段区间重叠核心，I5 不变量）。
-  - 外缘 `[dd, gg] = [min(三lo), max(三hi)]`（全部参与段定，含全波动）。
-  - 不变量 `zd < zg`（核心非退化，由 `WindowOverlap h`）、`dd ≤ zd`、`zg ≤ gg`（外缘含核心，omega）。
+  - 外缘 `[dd, gg] = [znDD, znGG]`，单元方向取 `Move.unitDir`（#1419 D-A：只聚合 Zn）。
+    三段都是线段时与 `Origin.CenterConstruction.computeDD`/`computeGG` 同一公式；`compose` 成员
+    一律记 `up`，三成员同向，外缘取全部三段——这是 `CenterDerivedAt` 在上级容许的取值之一。
+  - 不变量 `zd < zg`（核心非退化，由 `WindowOverlap h`）、`dd ≤ zd`、`zg ≤ gg`（首成员恒为 Zn，
+    外缘经首成员含核心）。
 
-  这是 `CenterDerivedAt` 的核心+外缘等式（RecursiveConstruction.lean:112）的**构造性 witness**——
-  派生中枢恰满足三段窗口起点 0 处的 sound 约束（见 `deriveWindowCenter3_derivedAt`）。
+  这是 `CenterDerivedAt` 核心+外缘等式的**构造性 witness**——派生中枢恰满足三段窗口起点 0 处的
+  sound 约束（见 `deriveWindowCenter3_derivedAt`）。
 -/
 def deriveWindowCenter3 (a b c : Move) (h : WindowOverlap a b c) : Center :=
-  { dd := min a.lo (min b.lo c.lo)
+  { dd := znDD a.unitDir b.unitDir c.unitDir a b c
     zd := max a.lo (max b.lo c.lo)
     zg := min a.hi (min b.hi c.hi)
-    gg := max a.hi (max b.hi c.hi)
+    gg := znGG a.unitDir b.unitDir c.unitDir a b c
     core_valid := h
-    outer_lo := by unfold WindowOverlap at h; omega
-    outer_hi := by unfold WindowOverlap at h; omega }
+    outer_lo := by
+      have := znDD_le_first a.unitDir b.unitDir c.unitDir a b c
+      omega
+    outer_hi := by
+      have := first_le_znGG a.unitDir b.unitDir c.unitDir a b c
+      omega }
 
 /--
   ★派生中枢满足 `CenterDerivedAt`（L0，反退化忠实性核心）：`deriveWindowCenter3 a b c h` 在
   三段窗口 `[a, b, c]` 的起点 0 处核心+外缘全 sound。这证明派生中枢**不是凭空**——它由三段
-  下级走势的真实 lo/hi 边界算出（核心=max lo/min hi，外缘=min lo/max hi）。
+  下级走势的真实 lo/hi 边界算出（核心=max lo/min hi，外缘=Zn 成员的 min lo/max hi）。
 -/
 theorem deriveWindowCenter3_derivedAt (a b c : Move) (h : WindowOverlap a b c) :
-    CenterDerivedAt [a, b, c] (deriveWindowCenter3 a b c h) 0 := by
-  unfold CenterDerivedAt deriveWindowCenter3
-  refine ⟨by simp, ?_⟩
-  intro _ _ _
-  refine ⟨?_, ?_, ?_, ?_⟩ <;> simp [Move.lo, Move.hi]
+    CenterDerivedAt [a, b, c] (deriveWindowCenter3 a b c h) 0 :=
+  ⟨by simp, fun _ _ _ => ⟨rfl, rfl, a.unitDir, b.unitDir, c.unitDir,
+    a.unitDir_spec, b.unitDir_spec, c.unitDir_spec, rfl, rfl⟩⟩
 
 /--
   ★窗口序列派生中枢（全函数）：取序列前三段，若公共重叠则派生单中枢，否则空。
@@ -334,14 +395,66 @@ def znCenter : Center := ⟨10, 20, 30, 35, by decide, by decide, by decide⟩
 /-- `znSegs` 的三段全取外缘中枢：外缘 [0,40]。 -/
 def allThreeCenter : Center := ⟨0, 20, 30, 40, by decide, by decide, by decide⟩
 
-/-- #1855 缺陷现状：`CenterDerivedAt` 拒绝 Zn 外缘中枢，只接受三段全取外缘。 -/
-example : ¬ CenterDerivedAt znSegs znCenter 0 := by
-  intro ⟨_, h⟩
-  have hdd := (h (by decide) (by decide) (by decide)).2.2.1
+/-- #1855：`CenterDerivedAt` 接受 Zn 外缘中枢（单元方向 上、下、上，Zn = 第 1、3 段）。 -/
+theorem znSegs_derives_znCenter : CenterDerivedAt znSegs znCenter 0 :=
+  ⟨by decide, fun _ _ _ => ⟨rfl, rfl, Direction.up, Direction.down, Direction.up,
+    rfl, rfl, rfl, rfl, rfl⟩⟩
+
+/-- #1855：`CenterDerivedAt` 在任何起点都拒绝三段全取外缘（线段方向自带，中间段不是 Zn）。 -/
+theorem znSegs_rejects_allThreeCenter (i : Nat) : ¬ CenterDerivedAt znSegs allThreeCenter i := by
+  intro ⟨hi, h⟩
+  have hi0 : i = 0 := by simp [znSegs] at hi; omega
+  subst hi0
+  obtain ⟨_, _, d0, d1, d2, h0, h1, h2, hdd, _⟩ := h (by decide) (by decide) (by decide)
+  cases (h0 : Direction.up = d0)
+  cases (h1 : Direction.down = d1)
+  cases (h2 : Direction.up = d2)
   revert hdd; decide
 
-example : CenterDerivedAt znSegs allThreeCenter 0 :=
-  ⟨by decide, fun _ _ _ => ⟨rfl, rfl, rfl, rfl⟩⟩
+/-- #1855：首窗派生函数给出的就是 Zn 外缘 [10,35]。 -/
+example : windowCenters znSegs = [znCenter] := rfl
+
+/-- #1855：带 Zn 外缘中枢的走势良构。 -/
+example : WellFormed (Move.compose znSegs [znCenter] 1) := by
+  unfold WellFormed
+  refine ⟨by decide, by decide, ?_, by decide,
+    ⟨by decide, [0], rfl, True.intro, znSegs_derives_znCenter, True.intro⟩, ?_⟩
+  · intro m hm
+    simp only [znSegs, List.mem_cons, List.not_mem_nil, or_false] at hm
+    rcases hm with rfl | rfl | rfl <;> rfl
+  · intro m hm
+    simp only [znSegs, List.mem_cons, List.not_mem_nil, or_false] at hm
+    rcases hm with rfl | rfl | rfl <;> simp only [WellFormed]
+
+/-- #1855：带三段全取外缘中枢的走势不良构。 -/
+example : ¬ WellFormed (Move.compose znSegs [allThreeCenter] 1) := by
+  unfold WellFormed
+  intro ⟨_, _, _, _, ⟨_, starts, _, _, hpw⟩, _⟩
+  cases starts with
+  | nil => exact hpw
+  | cons i _ => exact znSegs_rejects_allThreeCenter i hpw.1
+
+/-- 上级判别窗口：三个 `compose` 成员，走势区间同 `znSegs`（[10,30]、[0,40]、[20,35]），不带方向。 -/
+def znUpperSubs : List Move :=
+  [Move.compose [Move.segment Direction.up 10 30] [] 1,
+   Move.compose [Move.segment Direction.down 0 40] [] 1,
+   Move.compose [Move.segment Direction.up 20 35] [] 1]
+
+/-- 上级成员的方向由引擎投影给出：投影为 上、下、上 时外缘 [10,35]，三成员同向时外缘 [0,40]，
+    两者都是某组方向下的 Zn 聚合，`CenterDerivedAt` 都接受。 -/
+example : CenterDerivedAt znUpperSubs znCenter 0 :=
+  ⟨by decide, fun _ _ _ => ⟨rfl, rfl, Direction.up, Direction.down, Direction.up,
+    True.intro, True.intro, True.intro, rfl, rfl⟩⟩
+
+example : CenterDerivedAt znUpperSubs allThreeCenter 0 :=
+  ⟨by decide, fun _ _ _ => ⟨rfl, rfl, Direction.up, Direction.up, Direction.up,
+    True.intro, True.intro, True.intro, rfl, rfl⟩⟩
+
+/-- 上级外缘仍受约束：`dd = 0` 要求第 2 成员是 Zn，`gg = 35` 要求它不是，没有一组方向同时给出两者。 -/
+example : ¬ CenterDerivedAt znUpperSubs ⟨0, 20, 30, 35, by decide, by decide, by decide⟩ 0 := by
+  intro ⟨_, h⟩
+  obtain ⟨_, _, d0, d1, d2, _, _, _, hdd, hgg⟩ := h (by decide) (by decide) (by decide)
+  cases d0 <;> cases d1 <;> cases d2 <;> revert hdd hgg <;> decide
 
 /--
   ★canonical 选择唯一性（640 谱系第三列，L0 by-construction 零信息增量）：
