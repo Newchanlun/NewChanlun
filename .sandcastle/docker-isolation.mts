@@ -138,8 +138,9 @@ export const DOCKER_INNER_SANDBOX = "danger-full-access";
 
 /** AppArmor 观测策略；改动即改合同摘要。缺省 "enforce"：必须观测到 docker-default (enforce)。
  * 部署显式设 SANDCASTLE_APPARMOR_ABSENT=accept 时为 "absent-accepted"（#2070，用户 2026-11-16 裁定审查服务改用 OrbStack）：
- * 只在内核根本没有 AppArmor 时放行这一项——读 /proc/self/attr/current 返回 EINVAL（OrbStack 实测原文即 APPARMOR_ABSENT）。
- * 内核有 AppArmor 而容器未受限时读到的是 "unconfined"，仍判违规，所以在 Colima 等有 AppArmor 的宿主上不会被悄悄降级。
+ * 只额外放行「探针读 /proc/self/attr/current 得到 EINVAL」这一种观测（OrbStack 实测原文即 APPARMOR_ABSENT，内核未启用 AppArmor 时的表现）。
+ * 内核有 AppArmor 而容器未受限时读到的是 "unconfined"，仍判违规。观测来自审阅镜像里的 cat/sh，镜像可信是原合同已有的前提
+ *   （不可信镜像同样能伪造 docker-default (enforce)）；放宽是部署方的显式授权，代价是失去 AppArmor 的 MAC 纵深（#2071 独审）。
  * Seccomp、CapEff、CapBnd 与全部挂载探针不受此策略影响。 */
 export type AppArmorPolicy = "enforce" | "absent-accepted";
 export const APPARMOR_POLICY: AppArmorPolicy = process.env.SANDCASTLE_APPARMOR_ABSENT === "accept" ? "absent-accepted" : "enforce";
