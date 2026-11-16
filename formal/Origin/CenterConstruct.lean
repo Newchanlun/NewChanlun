@@ -336,7 +336,7 @@ theorem centersOfWithOuter_nontrivial :
       全部 **L0**——纯整数 max3/min3 + fuel-bounded 滑窗（终止机器检查）+ 弱接触延伸 +
       生命周期字段，不依赖经验数据。`lake env lean Origin/CenterConstruct.lean` 通过 =
       本节定义可由内核检查，**不是**任何「v1 中枢在真实行情上有效」的 L2 断言。
-      #1419 本轮未运行该命令，也不以旧参考或 donor 的验收认证此树。
+      `scripts/check_fixture_drift.py`（CI `fixture-drift` job）运行该命令并核对导出与 fixture 一致。
 -/
 
 /--
@@ -745,9 +745,9 @@ open Lean (Json) in
 
   `break_up` 的对拍范围（#1419 根裁定 r2 R4）：只比 `settled = true` 的中枢。未结算中枢的 `break_up`
   是 reference 占位编码（`true`），导出照实写出，但不参与对拍；`meta.break_up_scope = "settled_only"`
-  声明这一点。#1419 具名缺口 E_REFERENCE_FIXTURE_BINDING：545e 的 ref_v1.rs 仍为全成员外缘、
-  A 口径续扫，theta_v0_center_parity.json 也尚未有这四组新案例及 scope 元数据；不得声称当前
-  Rust 对拍已读取此字段。后续统一 source 须修复参考消费者并实际重导出，本轮不改 Rust/fixture。
+  声明这一点。Rust 参考实现 `rust/src/theta_v0/classifier/ref_v1.rs` 同为 Zn 外缘、`end + 2` 续扫；
+  `theta_v0_center_parity.json` 已含上列四组判别例与 scope 元数据，
+  `rust/tests/theta_v0_center_parity.rs` 读 `meta.break_up_scope` 并逐组对拍。
 -/
 def refV1FixtureJson : Json :=
   Json.mkObj [
