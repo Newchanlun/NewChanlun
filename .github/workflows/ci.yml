@@ -774,8 +774,18 @@ jobs:
             total=$((total + 1))
             log="../out-release-$(echo $t | tr ':/' '__').log"
             if ! grep -qx "$t: test" ../list-release.txt; then echo -e "$t\tNOT_LISTED_RELEASE" >> ../locks.tsv; fail=1; continue; fi
+            s0=$(grep "^cpu " /proc/stat 2>/dev/null); t0=$SECONDS
             timeout 2700 ../.github/scripts/cargo-eacces-retry.sh cargo test --release --locked --features s_session,s_incremental --bin s_structure_session -- --ignored --exact "$t" --test-threads 1 > "$log" 2>&1
             rc=$?
+            # #1875：S4 用时快机约 600 s、慢机约 900 s（11-10 后 10 轮），要分清是 CPU 型号还是同宿主争抢（#1889：整轮约 16 台 VM）。
+            #   每条锁打一行公开 annotation（免认证可读）：型号、核数、用时、本条执行期间的 steal（秒；占忙碌时间、占全部 vCPU 时间）与 iowait。
+            #   S4 只占 1–2 核，steal_busy_pct 才不被空闲 vCPU 稀释（独审采纳）；/proc/stat 读不到时打 steal=na。只打日志，不影响结论。
+            m=$( (lscpu 2>/dev/null | sed -n "s/^Model name:[[:space:]]*//p"; sed -n "s/^model name[[:space:]]*: //p" /proc/cpuinfo 2>/dev/null) | head -n 1)
+            awk -v a="$s0" -v b="$(grep "^cpu " /proc/stat 2>/dev/null)" -v t="$t" -v s=$((SECONDS - t0)) -v m="$m" -v n="$(nproc 2>/dev/null)" -v r="$rc" \
+              'BEGIN { if (split(a, x) < 9 || split(b, y) < 9) { printf "::notice title=release-lock machine::test=%s seconds=%s model=%s nproc=%s steal=na rc=%s\n", t, s, m, n, r; exit }
+                hz = 100; tot = 0; for (i = 2; i <= 9; i++) tot += y[i] - x[i]; busy = tot - (y[5] - x[5]) - (y[6] - x[6]); st = y[9] - x[9]; io = y[6] - x[6]
+                if (tot <= 0) tot = 1; if (busy <= 0) busy = 1
+                printf "::notice title=release-lock machine::test=%s seconds=%s model=%s nproc=%s steal_s=%.1f steal_busy_pct=%.1f steal_pct=%.1f iowait_pct=%.1f rc=%s\n", t, s, m, n, st / hz, 100 * st / busy, 100 * st / tot, 100 * io / tot, r }' || true
             cat "$log"
             if [ $rc -eq 0 ] && grep -q "test result: ok. 1 passed" "$log"; then echo -e "$t\tPASS_RELEASE" >> ../locks.tsv; else echo -e "$t\tFAIL_RELEASE($rc)" >> ../locks.tsv; fail=1; fi
           done < ../.github/1488-uo-release-locks.txt
