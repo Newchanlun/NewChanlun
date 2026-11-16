@@ -31,6 +31,7 @@ C_before 只从该重 book 同源读；统计单位 = 重，汇总只作报告�
 `net_position_value.{window, benchmark_ref, reading(固定=ADR 0022 下界), pass_rule(下界与基准的序关系)}`、`frequency.min_evidence_ref`（独立门）、`growth_enable.{conditions, rollback}`（K 回正为固定回退项）、`shift_threshold_ref`（只引用 #1355 容量）。
 ### 十、时序与有效域
 `触达.known_at < 版本.authorized_at < 首次启用.known_at`，三者持久互引；无版本不得启用；早于触达的版本拒收；改参数开新版本只对之后评价窗生效；有效域随签署时 profile，experiment 版本不自动迁移到 production；TB-11 关图须出示三条记录。
+> **★ 2026-11-16 适用范围指针（[#1551](https://github.com/Newchanlun/NewChanlun/issues/1551)，[ADR 0064](0064-at18-whole-graph-acceptance-and-closeout.md) 第二节第 4 条，依 #1909 代理独审裁定）**：「TB-11 关图须出示三条记录」读作对 `growth_enabled=true` 或声明闸门后参数生效的每个槽位必出三条记录；闸门未触达或阶段能力尚未启用的槽位出示未启用证据，并以 `required=false` 记入整图报告的 `unexecuted[]`，不按已激活处理。原文不删。
 
 ## 被否方案
 只收成本下降事件；按原件逐条或按自然日聚合；零时长加 ε；跨闸整条入闸门前或整条剔除；空头用开空均价作基价；汇总作门；现在给闸门后任何槽位默认值；人工判定触达。
