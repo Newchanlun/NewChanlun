@@ -6,8 +6,6 @@
 //! 读写两侧只经 [`Layout::of_rule`] 取布局，再由 [`Layout::epoch`] 给出公开主序的代际前缀，
 //! 两种布局不接在同一 if-else 上作准入兜底（#799/#804）。
 
-/// 布局组件名（含分隔符的前缀）；版本号紧随其后。
-
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Layout {
     /// layout/1：累计数组按内容键排序（ADR 0037 之前全部 v3 库；只读）。
@@ -116,7 +114,6 @@ pub(crate) fn with_forced_library_layout_for_test<T>(
     f()
 }
 
-/// 去掉布局组件后的规则串（教义组件部分）与布局；目录轴表等教义侧判据只看前者。
 fn registered(rule_revision: &str) -> Result<(&'static str, Layout), String> {
     let (doctrine, layout) = match rule_revision {
         #[cfg(test)]
@@ -159,6 +156,7 @@ fn registered(rule_revision: &str) -> Result<(&'static str, Layout), String> {
     Ok((doctrine, layout))
 }
 
+/// 去掉布局组件后的规则串（教义组件部分）与布局；目录轴表等教义侧判据只看前者。
 pub(crate) fn split(rule_revision: &str) -> Result<(String, Layout), String> {
     registered(rule_revision).map(|(doctrine, layout)| (doctrine.to_string(), layout))
 }
