@@ -156,14 +156,15 @@ test("S3 规则串：冻结 W1 显式映射 W1 基串，现役 V3 基串分离�
   assert.equal(typed.W1_BASE_STRUCTURE_RULE, BASE);
   assert.equal(typed.V3_STRUCTURE_RULE, V3_BASE);
   assert.equal(typed.W_STRUCTURE_RULE, W);
-  assert.equal(typed.baseRule(W), BASE);
+  assert.equal(typed.resolveRule(W).base, BASE);
+  // 裸 V3 结构串是 Rust registered() 已登记串（#1855 B1），读者按无 W 的中枢基规则读。
+  assert.deepEqual(typed.resolveRule(V3_BASE), { base: V3_BASE, w: null, layout: "layout/1" });
   assert.deepEqual(typed.RULE_CONTRACTS[BASE], ["s-new-bi/2", "s-segment/5", "established_direction_with_extreme_root_sets"]);
   assert.deepEqual(typed.RULE_CONTRACTS[V3_BASE], ["s-new-bi/2", "s-segment/5", "established_direction_with_extreme_root_sets"]);
   assert(typed.CENTER_RULES.has(BASE));
   assert(typed.CENTER_RULES.has(V3_BASE));
   const bad = [
     BASE, // 剥去 W 后缀：库里无此 cut 规则
-    V3_BASE, // 裸现役 V3 基串从未写库
     V3_BASE + "+raw-initialization-w/1", // 冻结 W1 混入 +segment-first-own/1 一律拒收
     W + "+raw-initialization-w/1", // 重复后缀
     BASE + "+raw-initialization-w/2", // W 版本变体
@@ -175,7 +176,7 @@ test("S3 规则串：冻结 W1 显式映射 W1 基串，现役 V3 基串分离�
     W.replace("+center-pair/1", ""),
     "s2-axis-quantifiers+new-bi/2+segment-second/2+segment-turn/1+second-seq-scan-budget/2+raw-initialization-w/1",
   ];
-  for (const rule of bad) assert.throws(() => typed.baseRule(rule), /未获准的完整规则组合/, rule);
+  for (const rule of bad) assert.throws(() => typed.resolveRule(rule), /未获准的完整规则组合/, rule);
 });
 
 test("22 轴目录：CF22/W 规则选 22 轴，scope 与子义务按 E/F 片，中枢轴绑定实际对象", async () => {
@@ -351,7 +352,6 @@ test("W/2 规则串与 Rust 写者字面量逐字符对齐：冻结 W1 与现役
   assert.deepEqual(typed.resolveRule(V3_BASE.replace(/\+center-seed.*$/, "") + "+bounded-layout/1").w, null);
   const bad = [
     BASE, // 裸冻结 W1 基串
-    V3_BASE, // 裸现役 V3 基串
     V3_BASE + "+raw-initialization-w/1", // 冻结 W1 混入 +segment-first-own/1
     V3_BASE + "+raw-initialization-w/1+bounded-layout/1", // 冻结 W1 混入 +segment-first-own/1 并挂布局
     BASE + "+raw-initialization-w/2+bounded-layout/2", // W2 漏掉 +segment-first-own/1（现役布局）

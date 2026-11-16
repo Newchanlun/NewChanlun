@@ -413,6 +413,7 @@
   async function tb02Identity(record, rule, profile, protocol) {
     // W 判据比对的是去布局组件后的教义串（#1491 布局组件与 W 后缀正交）；身份仍绑完整 rule。
     const baseRule = typed.protocolRule(rule, protocol), wPolicy = baseRule !== typed.splitRule(rule).doctrine, kind = await t(record, "kind");
+    need(Object.hasOwn(typed.RULE_CONTRACTS, baseRule), "cut规则修订未声明");
     const [biSchema, segmentSchema, contractDomain] = typed.RULE_CONTRACTS[baseRule];
     const domain = wPolicy ? typed.W_KNOWLEDGE_DOMAIN : contractDomain;
     const payload = await f(record, "payload");

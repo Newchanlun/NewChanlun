@@ -3344,7 +3344,7 @@ if (typeof module !== 'object' || !module.exports) {
     validateCenterPayload, validatePairPayload, validatePairPublication, validatePairHistory, validateCenterFamilyCut});
 });
 
-/* exact source q3-typed.js SHA256 73ef928e1bbec36a95ad275c962aaf9ac24255d0e74b039e64c6a167dbe11657 */
+/* exact source q3-typed.js SHA256 05e0c543fb4f4a40a043f4129a0706dfb5a02f3fecd83d2af9b663148b97d911 */
 /* #1394：typed 与形态来源的同一判据；只把访问迁为完整异步 Value 遍历。 */
 (function (root, factory) {
   const common = typeof module === "object" && module.exports;
@@ -3376,30 +3376,13 @@ if (typeof module !== 'object' || !module.exports) {
     [W1_BASE_STRUCTURE_RULE]: ["s-new-bi/2", "s-segment/5", KNOWLEDGE_DOMAINS[1]],
     [V3_STRUCTURE_RULE]: ["s-new-bi/2", "s-segment/5", KNOWLEDGE_DOMAINS[1]],
   };
-  // #1491 ADR 0037 §五/§六：rule_revision 的布局组件与教义组件正交。轴表/合同只看去掉布局组件后的
-  // 教义串；串内无 `bounded-layout` 组件即 layout/1（定义，不是兜底）；未知或重复布局组件一律拒收。
-  const LAYOUT_COMPONENT = "bounded-layout/", LAYOUTS = Object.freeze({LAYOUT1: "layout/1", BOUNDED1: "bounded-layout/1", BOUNDED2: "bounded-layout/2"});
-  // #1419 P2（issuecomment-6504760769）：W/2 只认完整串，整串相等才选中；串内出现任何非 W/1 的
-  // W 组件而整串不等即拒，不剥布局组件、不改序推断。W/1 与其余已登记历史串仍走下方原分派。
+  // #1491 ADR 0037 §五/§六：rule_revision 的布局组件与教义组件正交；轴表/合同只看教义串。
+  const LAYOUTS = Object.freeze({LAYOUT1: "layout/1", BOUNDED1: "bounded-layout/1", BOUNDED2: "bounded-layout/2"});
   // #1419 31P：唯一现役 W/2 串带 bounded-layout/2（单元加 source_ref）；失败候选的 W2+bounded-layout/1
-  // 完整串仍精确登记为 W2 语义＋Bounded1 布局，只供归档读。bounded-layout/2 不出现在任何其他组合里。
-  const W_COMPONENT = "raw-initialization-w/", W2_POLICY = "raw-initialization-w/2";
+  // 完整串仍精确登记为 W2 语义＋Bounded1 布局，只供归档读。
+  const W2_POLICY = "raw-initialization-w/2";
   const W2_DOCTRINE = V3_STRUCTURE_RULE + "+" + W2_POLICY, W2_PUBLICATION_RULE = W2_DOCTRINE + "+" + LAYOUTS.BOUNDED2;
   const W2_ARCHIVED_RULE = W2_DOCTRINE + "+" + LAYOUTS.BOUNDED1;
-  const W2_RULE_LAYOUTS = new Map([[W2_PUBLICATION_RULE, LAYOUTS.BOUNDED2], [W2_ARCHIVED_RULE, LAYOUTS.BOUNDED1]]);
-  function splitRule(rule) {
-    need(typeof rule === "string", "cut规则修订未声明");
-    if (W2_RULE_LAYOUTS.has(rule)) return {doctrine: W2_DOCTRINE, layout: W2_RULE_LAYOUTS.get(rule)};
-    need(!rule.split("+").some(c => c.startsWith(W_COMPONENT) && c !== INITIALIZATION_POLICY), "cut规则修订未声明：未获准的完整规则组合");
-    let layout = null; const rest = [];
-    for (const component of rule.split("+")) {
-      if (!component.startsWith(LAYOUT_COMPONENT)) { rest.push(component); continue; }
-      need(component === LAYOUTS.BOUNDED1, "cut规则修订未声明：未知布局组件 " + component);
-      need(layout === null, "cut规则修订未声明：多个布局组件");
-      layout = LAYOUTS.BOUNDED1;
-    }
-    return {doctrine: rest.join("+"), layout: layout || LAYOUTS.LAYOUT1};
-  }
   const ruleContract = rule => { const {doctrine} = splitRule(rule); return Object.hasOwn(RULE_CONTRACTS, doctrine) ? RULE_CONTRACTS[doctrine] : null; };
   const DEVELOPMENT_BATCH_KIND = "CC-007.development_batch";
   const SAME_PRICE_KEEP_EVIDENCE = "same_kind_equal_price_keep_earlier";
@@ -3414,36 +3397,45 @@ if (typeof module !== 'object' || !module.exports) {
   const INITIALIZATION_KINDS = ["CC-004.initialization", "CC-004.undetermined_raw"];
   const W_KNOWLEDGE_DOMAIN = "raw_adjacent_W_initialization";
   TB02_KINDS.push(...INITIALIZATION_KINDS);
-  // #1393×#1419：完整规则串精确白名单——无后缀者即自身基规则；带 W 后缀者逐条显式映射，不剥后缀推断。
-  // 本表管 s-session/1 写者历史 cut 与 W 单域历史（主控裁定 (a)：v2 写者对新会话只读）。
-  const RULE_BASES = new Map(Object.keys(RULE_CONTRACTS).map(rule => [rule, rule]));
-  RULE_BASES.set("s2-axis-quantifiers+new-bi/1+segment-second/1+" + INITIALIZATION_POLICY, "s2-axis-quantifiers+new-bi/1+segment-second/1");
-  // #1393×#1419×#1855：冻结只读 W1 历史串（s_structure_session.rs W1_STRUCTURE_RULE_REVISION）显式映射到 W1_BASE_STRUCTURE_RULE。
+  // #1393×#1419×#1855：冻结只读 W1 历史串（s_structure_session.rs W1_STRUCTURE_RULE_REVISION）。
   const W_STRUCTURE_RULE = W1_BASE_STRUCTURE_RULE + "+" + INITIALIZATION_POLICY;
-  RULE_BASES.set(W_STRUCTURE_RULE, W1_BASE_STRUCTURE_RULE);
-  // 两代 CF22 基规则串只作合同/轴表的键：库里没有以裸基串为 cut 规则的历史，剥去 W 后缀的串一律按未获准组合拒。
-  RULE_BASES.delete(W1_BASE_STRUCTURE_RULE);
-  RULE_BASES.delete(V3_STRUCTURE_RULE);
   // 中枢族对象只准出现在这些基规则的 cut（TB02E/F RULE_MIX）。
   const CENTER_RULES = new Set([W1_BASE_STRUCTURE_RULE, V3_STRUCTURE_RULE]);
   const {CENTER_KINDS, PAIR_KINDS} = Center;
   TB02_KINDS.push(...CENTER_KINDS, ...PAIR_KINDS);
-  // 拒绝文本保留 CF 既有原因词与 W 的「完整规则组合」，两侧负控都按原文匹配。
-  // 入参是去掉布局组件后的教义串（#1491 布局组件与教义组件正交；W 后缀属教义串）。
-  function baseRule(rule, reason = "cut规则修订未声明") { need(typeof rule === "string" && RULE_BASES.has(rule), reason + "：未获准的完整规则组合"); return RULE_BASES.get(rule); }
-  // #1419 主控裁定②：S3 结构规则只属 s-session/3 写者；s-session/1/2 cut 携此串一律按未获准组合拒（与 Python s-session/1 合同 BAD_RULES 同侧）。
-  // 规则表在下方声明，函数体只在调用时读取。
-  // 入参是 cut 的完整 rule_revision：先按 ADR 0037 剥唯一合法布局组件，再对教义串走精确白名单。
-  // 完整 rule_revision 的唯一选择器：基规则、W 组件（无 W 为 null）与布局，一次选定后各判据按此分派。
-  function resolveRule(rule, reason = "cut规则修订未声明") {
-    const {doctrine, layout} = splitRule(rule);
-    if (doctrine === W2_DOCTRINE) return {base: V3_STRUCTURE_RULE, w: W2_POLICY, layout};
-    const base = baseRule(doctrine, reason);
-    return {base, w: base === doctrine ? null : doctrine.slice(base.length + 1), layout};
+  // #1855 B1（baohan.md:182、ADR 0037:43）：完整 rule_revision 登记表，键是完整串。读者只按整串查表，
+  // 不剥组件、不改序推断；未知、混串、重复、错序串查不到即拒。值是基规则（RULE_CONTRACTS 与轴表的键）、
+  // W 组件（无为 null）、布局和准读该串的协议。s-session/3 准读集逐串等于 Rust s_session_v3/layout.rs
+  // registered()，测试从 Rust 源码对拍；s-session/1、/2 只读旧写者串（#1419 主控裁定②：S3 结构规则不属旧协议）。
+  const S3 = ["s-session/3"], ALL_PROTOCOLS = ["s-session/1", "s-session/2", ...S3];
+  const RULES = new Map();
+  function register(base, w, protocols, layouts = [LAYOUTS.LAYOUT1, LAYOUTS.BOUNDED1]) {
+    const doctrine = w === null ? base : base + "+" + w;
+    for (const layout of layouts)
+      RULES.set(layout === LAYOUTS.LAYOUT1 ? doctrine : doctrine + "+" + layout, Object.freeze({doctrine, base, w, layout, protocols}));
   }
+  // 旧写者基规则（RULE_CONTRACTS 中两条中枢基规则之外的键），三协议同读。
+  for (const base of Object.keys(RULE_CONTRACTS)) if (!CENTER_RULES.has(base)) register(base, null, ALL_PROTOCOLS);
+  // W 单域历史串只属 s-session/1、/2 写者；Rust registered() 无此串。
+  register("s2-axis-quantifiers+new-bi/1+segment-second/1", INITIALIZATION_POLICY, ["s-session/1", "s-session/2"]);
+  // Rust 登记了此旧串，但无笔合同与轴表（tb02b.rs contract_for_rule、tb02a_facts.rs for_rule_revision 均为 None）：
+  // 读者同样登记，再在合同与轴表处拒。
+  register("s2-axis-quantifiers+new-bi/1+segment-second/2", null, S3);
+  // 裸 V3 结构串虽未写过库，Rust 仍登记并有轴表与笔合同（CenterPair、CURRENT_CONTRACT），读者同读。
+  register(V3_STRUCTURE_RULE, null, S3);
+  register(W1_BASE_STRUCTURE_RULE, INITIALIZATION_POLICY, S3);
+  register(V3_STRUCTURE_RULE, W2_POLICY, S3, [LAYOUTS.BOUNDED1, LAYOUTS.BOUNDED2]);
+  // 拒绝文本保留 CF 既有原因词与 W 的「完整规则组合」，两侧负控都按原文匹配。
+  function registeredRule(rule, reason = "cut规则修订未声明") {
+    need(typeof rule === "string" && RULES.has(rule), reason + "：未获准的完整规则组合");
+    return RULES.get(rule);
+  }
+  function splitRule(rule) { const {doctrine, layout} = registeredRule(rule); return {doctrine, layout}; }
+  // 完整 rule_revision 的唯一选择器：基规则、W 组件（无 W 为 null）与布局，一次选定后各判据按此分派。
+  function resolveRule(rule, reason = "cut规则修订未声明") { const {base, w, layout} = registeredRule(rule, reason); return {base, w, layout}; }
   function protocolRule(rule, protocol, reason = "cut规则修订未声明") {
-    const base = resolveRule(rule, reason).base;
-    need(protocol === "s-session/3" || !CENTER_RULES.has(base), reason + "：未获准的完整规则组合");
+    const {base, protocols} = registeredRule(rule, reason);
+    need(protocols.includes(protocol), reason + "：未获准的完整规则组合");
     return base;
   }
   function w2Replacements({pending, groups, initializations = [], superseded, replaces, kinds, objects}) {
@@ -4344,11 +4336,11 @@ if (typeof module !== 'object' || !module.exports) {
     if (layout !== LAYOUTS.LAYOUT1) await bindDevelopmentPrefixes(records);
     return last;
   }
-  return Object.freeze({RULE_CONTRACTS, RULE_BASES, baseRule, protocolRule, resolveRule, splitRule, W2_POLICY, W2_DOCTRINE, W2_PUBLICATION_RULE, W2_ARCHIVED_RULE, w2Replacements, ruleContract, LAYOUTS, DEVELOPMENT_BATCH_KIND, bindDevelopmentBatches, W1_BASE_STRUCTURE_RULE, V3_STRUCTURE_RULE, W_STRUCTURE_RULE, CENTER_RULES, CENTER_KINDS, PAIR_KINDS, Center, INITIALIZATION_POLICY, INITIALIZATION_KINDS, W_KNOWLEDGE_DOMAIN, validateTyped, validateBiPayload, validateSegmentPayload, turnLinks: (d, f) => segmentTurnLinks(d, f), PARSE_INVALID_REASON, RESULT_SEMANTIC_BRANCH, validateTB02ShapeRefs, plain,
+  return Object.freeze({RULE_CONTRACTS, protocolRule, resolveRule, splitRule, W2_POLICY, W2_DOCTRINE, W2_PUBLICATION_RULE, W2_ARCHIVED_RULE, w2Replacements, ruleContract, LAYOUTS, DEVELOPMENT_BATCH_KIND, bindDevelopmentBatches, W1_BASE_STRUCTURE_RULE, V3_STRUCTURE_RULE, W_STRUCTURE_RULE, CENTER_RULES, CENTER_KINDS, PAIR_KINDS, Center, INITIALIZATION_POLICY, INITIALIZATION_KINDS, W_KNOWLEDGE_DOMAIN, validateTyped, validateBiPayload, validateSegmentPayload, turnLinks: (d, f) => segmentTurnLinks(d, f), PARSE_INVALID_REASON, RESULT_SEMANTIC_BRANCH, validateTB02ShapeRefs, plain,
     TB02_KINDS: Object.freeze(TB02_KINDS), BI_KINDS, SEGMENT_KINDS: Object.freeze(SEGMENT_KINDS)});
 });
 
-/* exact source q3-consumer.js SHA256 28cc19340d2a5487e1aef1205df49497399848e080f1e9ec1d5660bde3c03acc */
+/* exact source q3-consumer.js SHA256 237c1b016d99c1138d3b90977bd8c98c95bdaee6f70b1489d37f73bd2508a676 */
 /* #1394：Q3完整消费者；只供既有tb01c页面调用，没有产品路由或默认资源。 */
 (function (root, factory) {
   const common = typeof module === "object" && module.exports;
@@ -4764,6 +4756,7 @@ if (typeof module !== 'object' || !module.exports) {
   async function tb02Identity(record, rule, profile, protocol) {
     // W 判据比对的是去布局组件后的教义串（#1491 布局组件与 W 后缀正交）；身份仍绑完整 rule。
     const baseRule = typed.protocolRule(rule, protocol), wPolicy = baseRule !== typed.splitRule(rule).doctrine, kind = await t(record, "kind");
+    need(Object.hasOwn(typed.RULE_CONTRACTS, baseRule), "cut规则修订未声明");
     const [biSchema, segmentSchema, contractDomain] = typed.RULE_CONTRACTS[baseRule];
     const domain = wPolicy ? typed.W_KNOWLEDGE_DOMAIN : contractDomain;
     const payload = await f(record, "payload");
