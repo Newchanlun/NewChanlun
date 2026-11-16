@@ -578,34 +578,18 @@ test("W/2 完整 validateState：替代目标须在撤回代已出生且在世�
   const snapshot = await plain(b.graph.header(b.publication.snapshot_root)), catalog = await plain(b.catalog);
   snapshot.rule_revision = b.fixed.rule_revision;
   const state = { snapshot, catalog, cut: Object.fromEntries(["session_id", "generation", "structure_cut", "catalog_revision", "index_frontier"].map((k) => [k, snapshot[k]])) };
-  async function reid(st) {
-    const mm = new Map();
-    for (const r of [...st.snapshot.objects, ...st.snapshot.withdrawn_objects]) {
-      const p = Object.fromEntries(["kind", "fact_key", "payload", "input_refs"].map((k) => [k, r[k]]));
-      p.profile_id = st.snapshot.profile_id;
-      p.rule_revision = st.snapshot.rule_revision;
-      mm.set(r.object_id, await Q3.V.identity(0x20, p, "obj3-"));
-    }
-    function replace(v) {
-      if (typeof v === "string") return mm.get(v) || v;
-      if (Array.isArray(v)) return v.map(replace);
-      if (v && typeof v === "object") return Object.fromEntries(Object.entries(v).map(([k, x]) => [k, replace(x)]));
-      return v;
-    }
-    return replace(st);
-  }
   await Q3.validateState(state, "s-session/3");
   t.diagnostic("W1 历史完整入口正控通过");
   let w2 = structuredClone(state);
   w2.snapshot.rule_revision = typed.W2_PUBLICATION_RULE;
   w2.snapshot.catalog_evidence.rule_revision = w2.snapshot.rule_revision;
   w2.catalog.catalog_evidence.rule_revision = w2.snapshot.rule_revision;
-  for (let k = 0; k < 4; k++) w2 = await reid(w2);
+  w2 = await reid(w2);
   await Q3.validateState(w2, "s-session/3");
   t.diagnostic("手工 W2 正控及非 raw g1 到 g2 到 g3 历史链通过，目标后来撤回合法");
   let archived = structuredClone(state);
   archived.snapshot.rule_revision = archived.snapshot.catalog_evidence.rule_revision = archived.catalog.catalog_evidence.rule_revision = typed.W2_ARCHIVED_RULE;
-  for (let k = 0; k < 4; k++) archived = await reid(archived);
+  archived = await reid(archived);
   await Q3.validateState(archived, "s-session/3");
   t.diagnostic("失败候选 W2+bounded-layout/1 完整串仍按 W2 语义归档读通过");
 
@@ -625,7 +609,7 @@ test("W/2 完整 validateState：替代目标须在撤回代已出生且在世�
   cur.first_known_cut = cur.payload.pending_since_cut = "cut-3";
   futureRevision.snapshot.withdrawn_objects.push(old);
   futureRevision.snapshot.relations.push({ subject: cur.object_id, relation_type: "replaces", object: old.object_id });
-  for (let k = 0; k < 4; k++) futureRevision = await reid(futureRevision);
+  futureRevision = await reid(futureRevision);
   await reject(futureRevision, /不满足坐标、种类或生命周期/, "F1 未来目标在生命周期判据拒绝");
 
   // 手工单元历史为 old 在 g2 被 middle 替代，middle 在 g3 被 current 替代。
@@ -639,7 +623,7 @@ test("W/2 完整 validateState：替代目标须在撤回代已出生且在世�
   Object.assign(oldest, { object_id: "obj3-" + "e".repeat(64), withdrawn_generation: "2", withdrawal_reason: "superseded_by_revision", superseded_by: middle.object_id, lifecycle: "withdrawn" });
   laterWithdrawn.snapshot.withdrawn_objects.push(oldest, middle);
   laterWithdrawn.snapshot.relations.push({ subject: middle.object_id, relation_type: "replaces", object: oldest.object_id }, { subject: current.object_id, relation_type: "replaces", object: middle.object_id });
-  for (let k = 0; k < 4; k++) laterWithdrawn = await reid(laterWithdrawn);
+  laterWithdrawn = await reid(laterWithdrawn);
   await Q3.validateState(laterWithdrawn, "s-session/3");
   t.diagnostic("F1 g1→g2→g3 历史链通过，目标后来撤回合法");
 
@@ -666,7 +650,7 @@ test("W/2 完整 validateState：替代目标须在撤回代已出生且在世�
   initAt1.input_refs.push(structuredClone(activeCoord2.input_refs[0]));
   initAt1.source_coords.push("2");
   genuineFactRemovedState.snapshot.withdrawn_objects.push(removedCoord2);
-  for (let k = 0; k < 4; k++) genuineFactRemovedState = await reid(genuineFactRemovedState);
+  genuineFactRemovedState = await reid(genuineFactRemovedState);
   genuineFactRemovedState.snapshot.withdrawn_objects.sort((a, b) =>
     Number(a.withdrawn_generation) - Number(b.withdrawn_generation) || (a.object_id < b.object_id ? -1 : 1));
   await Q3.validateState(genuineFactRemovedState, "s-session/3");
@@ -781,7 +765,8 @@ async function reid(st) {
       p.rule_revision = st.snapshot.rule_revision;
       mm.set(r.object_id, await Q3.V.identity(0x20, p, "obj3-"));
     }
-    const replace = v => typeof v === "string" ? mm.get(v) || v
+    // 整串 ID 之外，request_id 等 JSON 文本内嵌的 obj3 ID 也须改写，否则改规则后请求仍指旧主体地址。
+    const replace = v => typeof v === "string" ? mm.get(v) || v.replace(/obj3-[0-9a-f]{64}/g, (id) => mm.get(id) || id)
       : Array.isArray(v) ? v.map(replace)
       : v && typeof v === "object"
         ? Object.fromEntries(Object.entries(v).map(([k, x]) => [k, replace(x)])) : v;
