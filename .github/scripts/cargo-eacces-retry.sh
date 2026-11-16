@@ -56,6 +56,7 @@ if [[ -n "$cause" ]]; then
   #   同机同路径连拒 4 次）。重跑前删掉被拒的 build-script-build 及同目录的 build_script_build-*（前者是后者的硬链接，
   #   cargo 只看后者判新旧，只删前者会把同一 inode 链回来），cargo 判输出缺失、重编出新文件。只多一次构建脚本编译，结论不变。
   #   删除范围（#2066 两轮独审加固）：只在归属无歧义时删，否则一律不删、照旧原地重跑。
+  #   - 输出里没有 NUL 字节（否则 grep 会按二进制截断计数，与 awk 看到的行不一致；#2066 复审 2），计数与解析都按 C 区域逐字节；
   #   - 整份输出里「never executed」与「could not execute process」各恰好出现一次（交错的多段报错、或路径文本里用反引号
   #     或换行嵌着另一段报错，都会多出一次：真实报错行本身必含后者，伪造的整行也必含后者）；
   #   - 那一行整行就是 `could not execute process \`<路径>\` (never executed)`，路径只含 [A-Za-z0-9_./-]；
@@ -64,8 +65,10 @@ if [[ -n "$cause" ]]; then
   #     的真实路径；crate 目录的真实路径须与字面路径逐字相同（任何一级是符号链接都不删）。
   if [[ "$cause" == EACCES* ]]; then
     bad=
-    if [[ "$(grep -o 'never executed' "$log" | wc -l)" -eq 1 && "$(grep -o 'could not execute process' "$log" | wc -l)" -eq 1 ]]; then
-      bad=$(awk '
+    if [[ "$(LC_ALL=C tr -cd '\000' <"$log" | wc -c)" -eq 0 \
+        && "$(LC_ALL=C grep -a -o 'never executed' "$log" | wc -l)" -eq 1 \
+        && "$(LC_ALL=C grep -a -o 'could not execute process' "$log" | wc -l)" -eq 1 ]]; then
+      bad=$(LC_ALL=C awk '
         state == 0 && /^[[:space:]]*could not execute process `[A-Za-z0-9_.\/-]+` \(never executed\)$/ {
           p = $0; sub(/^[[:space:]]*could not execute process `/, "", p); sub(/` \(never executed\)$/, "", p); state = 1; next
         }

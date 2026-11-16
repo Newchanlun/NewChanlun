@@ -80,8 +80,11 @@ cat >"$W/replay" <<'F'
 echo call >>"$W_CALLS"; cat "$1"; exit 101
 F
 chmod +x "$W/replay"
-for c in interleaved backtick newline; do
-  : >"$W/calls"; out=$(cd "$W" && W_CALLS="$W/calls" "$S" "$W/replay" "$W/$c.txt" 2>&1 </dev/null); rc=$?
+# 14 复审 2：128 KiB 文本后插 NUL，再接第二条指向 V 的完整记录（grep 二进制截断计数）
+{ head -c 131072 /dev/zero | tr '\0' 'x'; printf '\n\0\n'; printf '%s\n' "  could not execute process \`$v/build-script-build\` (never executed)" "Caused by:" "  Permission denied (os error 13)"; } >"$W/nul.txt"
+{ printf '%s\n' "  could not execute process \`$a\` (never executed)" "Caused by:" "  Permission denied (os error 13)"; cat "$W/nul.txt"; } >"$W/nul2.txt"
+for c in interleaved backtick newline nul nul2; do
+  : >"$W/calls"; out=$(cd "$W" && W_CALLS="$W/calls" "$S" "$W/replay" "$W/$c.txt" 2>&1 </dev/null | tr -d '\000'; exit "${PIPESTATUS[0]}"); rc=$?
   ok "adversarial $c: victim kept" '[[ -e "$v/build-script-build" && -e "$v/build_script_build-6666666666666666" && -e "$a" && $rc -eq 101 && "$out" != *"removed rejected build script:"* ]]'
 done
 # 9 非 EACCES 失败：不重试；10 成功：一次、无标记
