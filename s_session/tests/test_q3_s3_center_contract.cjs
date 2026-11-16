@@ -390,6 +390,58 @@ test("W/2 规则串与 Rust 写者字面量逐字符对齐：冻结 W1 与现役
   assert.equal(typed.INITIALIZATION_POLICY, "raw-initialization-w/1");
 });
 
+// #1855 B1（baohan.md:182「读侧按完整规则身份选择版本……未知、混串、重复、错序拒绝」，ADR 0037:43）：
+// s-session/3 读者准读的完整串必须逐串等于 Rust s_session_v3/layout.rs registered()（不含 #[cfg(test)] 串）。
+test("S3 完整规则登记：s-session/3 准读串逐串等于 Rust registered()，布局组件移位、重复与未登记串一律拒", () => {
+  const fs = require("node:fs"), path = require("node:path");
+  const rust = (file) => fs.readFileSync(path.join(__dirname, "../../rust/src/bin", file), "utf8");
+  const consts = new Map([...rust("s_structure_session.rs").matchAll(/^const (\w+): &str = "([^"]+)";$/gm)].map((m) => [m[1], m[2]]));
+  const registered = [];
+  let testOnly = false;
+  for (const line of rust("s_session_v3/layout.rs").match(/\nfn registered\([^]*?\n}\n/)[0].split("\n")) {
+    if (line.trim() === "#[cfg(test)]") { testOnly = true; continue; }
+    const m = line.match(/^\s*(?:"([^"]+)"|crate::(\w+)) =>/);
+    if (!m) continue;
+    if (!testOnly) registered.push(m[1] ?? consts.get(m[2]));
+    testOnly = false;
+  }
+  assert.equal(registered.length, 28);
+  assert(registered.every((r) => typeof r === "string"));
+  const S3 = new Set(registered);
+  // 历史协议（s-session/1、/2）只读旧写者串：非中枢基规则与 W 单域串，各带无布局与尾部 bounded-layout/1 两形。
+  const W_SINGLE = "s2-axis-quantifiers+new-bi/1+segment-second/1+raw-initialization-w/1";
+  const HISTORY = new Set([
+    "s2-axis-quantifiers", "s2-axis-quantifiers+new-bi/1", "s2-axis-quantifiers+new-bi/2",
+    "s2-axis-quantifiers+new-bi/1+segment-first/1", "s2-axis-quantifiers+new-bi/1+segment-second/1",
+    "s2-axis-quantifiers+new-bi/2+segment-second/1", "s2-axis-quantifiers+new-bi/2+segment-second/2",
+    "s2-axis-quantifiers+new-bi/2+segment-second/2+segment-turn/1",
+    "s2-axis-quantifiers+new-bi/2+segment-second/2+segment-turn/1+second-seq-scan-budget/2",
+    "s2-axis-quantifiers+new-bi/2+segment-second/2+segment-turn/1+second-seq-scan-budget/2+segment-first-own/1",
+    W_SINGLE,
+  ].flatMap((d) => [d, d + "+bounded-layout/1"]));
+  const candidates = new Set([...S3, ...HISTORY, "", "unknown-rule", BASE, BASE + "+bounded-layout/1"]);
+  for (const rule of [...S3, ...HISTORY]) {
+    const parts = rule.split("+");
+    for (let k = 1; k <= parts.length; k++)
+      for (const layout of ["bounded-layout/1", "bounded-layout/2"]) candidates.add([...parts.slice(0, k), layout, ...parts.slice(k)].join("+"));
+    candidates.add(rule + "+" + parts[parts.length - 1]);
+    candidates.add(parts.filter((c) => !c.startsWith("bounded-layout/")).reverse().join("+"));
+  }
+  const accepts = (rule, protocol) => { try { typed.protocolRule(rule, protocol); return true; } catch (e) { assert.match(e.message, /cut规则修订未声明/, rule); return false; } };
+  for (const rule of candidates) {
+    assert.equal(accepts(rule, "s-session/3"), S3.has(rule), "s-session/3 " + rule);
+    for (const protocol of ["s-session/1", "s-session/2"]) assert.equal(accepts(rule, protocol), HISTORY.has(rule), protocol + " " + rule);
+  }
+  // 审阅反例：W1 冻结串把 bounded-layout/1 挪到首组件后，Rust 报 VersionUnsupported，读者同样拒。
+  assert(!accepts("s2-axis-quantifiers+bounded-layout/1+new-bi/2+segment-second/2+segment-turn/1+second-seq-scan-budget/2+center-seed/1+center-pair/1+raw-initialization-w/1", "s-session/3"));
+  // W 单域串只属旧写者；Rust registered() 无此串，S3 拒。
+  assert(!S3.has(W_SINGLE) && !accepts(W_SINGLE, "s-session/3") && accepts(W_SINGLE, "s-session/2"));
+  // Rust 登记、读者原先误拒的两类：裸 V3 结构串（含 bounded-layout/1 形）与 new-bi/1+segment-second/2。
+  for (const rule of [V3_BASE, V3_BASE + "+bounded-layout/1", "s2-axis-quantifiers+new-bi/1+segment-second/2", "s2-axis-quantifiers+new-bi/1+segment-second/2+bounded-layout/1"])
+    assert(S3.has(rule) && accepts(rule, "s-session/3"), rule);
+  assert.deepEqual(typed.resolveRule(V3_BASE + "+bounded-layout/1"), { base: V3_BASE, w: null, layout: "bounded-layout/1" });
+});
+
 function w2Case() {
   const raw = (id, coord, extra = {}) => ({ object_id: id, coord, first_known_generation: "1", withdrawn_generation: null, withdrawal_reason: null, superseded_by: null, ...extra });
   const pending = [
@@ -479,6 +531,42 @@ test("W/2 逐原件替代只认定向组：direction=null 的在世组不是替�
   });
   await t.test("direction=null 的在世组不挡同坐标 fact_removed", () => {
     typed.w2Replacements(removed(null));
+  });
+});
+
+// #1855 B6：Rust 撤回时刻先认同槽位 raw 修订（object_diff Superseded），没有修订才枚举在世定向组，
+// 多于一个即拒（writer w2_replacing_group「未定原件落入多个定向组」，auditor「未定原件有多个替代候选」）。
+test("W/2 逐原件替代：撤回时刻含坐标的在世定向组须唯一，同槽位 raw 修订优先于定向组", async (t) => {
+  // u1r（坐标 1）在 g4 撤回；另加 g4 出生、含坐标 1 的第二个组。
+  const twoGroups = (direction) => {
+    const c = w2Case(), extra = { object_id: "g2", members: ["1"], direction, first_known_generation: "4", withdrawn_generation: null };
+    c.groups.push(extra);
+    c.kinds.set("g2", "CC-005.inclusion_group");
+    c.objects.set("g2", extra);
+    return c;
+  };
+  await t.test("第二个组为 UP 或 DOWN：坐标 1 在撤回时刻有两个定向候选即拒", () => {
+    for (const direction of ["UP", "DOWN"]) assert.throws(() => typed.w2Replacements(twoGroups(direction)), /W2未定原件有多个定向替代候选/, direction);
+  });
+  await t.test("第二个组 direction=null 不是候选：唯一定向组替代成立", () => {
+    typed.w2Replacements(twoGroups(null));
+  });
+  // u1r 在 g4 撤回时另有同坐标 raw 修订 u1s 在 g4 出生。
+  const revised = (direction, target) => {
+    const c = twoGroups(direction), u1s = { object_id: "u1s", coord: "1", first_known_generation: "4", withdrawn_generation: null, withdrawal_reason: null, superseded_by: null };
+    c.pending.push(u1s);
+    c.kinds.set("u1s", "CC-004.undetermined_raw");
+    c.objects.set("u1s", u1s);
+    c.pending.find((p) => p.object_id === "u1r").superseded_by = target;
+    c.superseded.find((w) => w.object_id === "u1r").superseded_by = target;
+    c.replaces.find((r) => r.object === "u1r").subject = target;
+    return c;
+  };
+  await t.test("同槽位修订在世：替代到修订成立，即使另有两个定向组含该坐标", () => {
+    for (const direction of [null, "UP"]) typed.w2Replacements(revised(direction, "u1s"));
+  });
+  await t.test("同槽位修订在世：改指定向组即拒", () => {
+    assert.throws(() => typed.w2Replacements(revised(null, "g0")), /W2逐原件替代目标须为撤回时刻同槽位修订或唯一定向组/);
   });
 });
 
@@ -1109,4 +1197,100 @@ test("W/2 完整 validateState：direction=null 的在世组不得作替代目�
   await accept("D5 同一 direction=null 尾组在世，坐标 4 未定原件按 fact_removed 撤回成立", { tail: null, superseded: false });
   for (const tail of ["DOWN", "UP"])
     await reject("D6 尾组为 " + tail + " 时同一 fact_removed 撤回即拒", { tail, superseded: false }, /W2未定原件存在替代目标却按fact_removed撤回/);
+});
+
+// #1855 B1/B5/B6 的完整入口负控。底座是真实 Rust 导出 g5（W1 原件）；W2 臂与 bounded-layout/2 测试同法，
+// 把坐标 0..2 的三条未定原件替代到首组并补 replaces 边。增删对象后同步目录证据（各轴对象引用、本代撤回清单、
+// 替代清单与三项计数），使拒因只能是被测判据。
+let g5Base = null;
+async function g5() {
+  g5Base ??= (async () => {
+    const H = require("./q3_complete_fixture.cjs");
+    const b = await H.makeS16Base("5", "q3-real-s3-w-recover-revise.json");
+    b.graph = await H.C.GraphView.create([...b.nodes.values()]);
+    async function plain(ref) { let s = ""; for await (const c of b.graph.renderChunks(ref)) s += c; return JSON.parse(s); }
+    const snapshot = await plain(b.graph.header(b.publication.snapshot_root)), catalog = await plain(b.catalog);
+    snapshot.rule_revision = b.fixed.rule_revision;
+    return { snapshot, catalog, cut: Object.fromEntries(["session_id", "generation", "structure_cut", "catalog_revision", "index_frontier"].map((k) => [k, snapshot[k]])) };
+  })();
+  return structuredClone(await g5Base);
+}
+const withRule = (st, rule) => { st.snapshot.rule_revision = st.snapshot.catalog_evidence.rule_revision = st.catalog.catalog_evidence.rule_revision = rule; return st; };
+function asW2(st) {
+  withRule(st, typed.W2_PUBLICATION_RULE);
+  const group = st.snapshot.objects.find((r) => r.kind === "CC-005.inclusion_group" && r.payload.members.includes("0"));
+  for (const u of st.snapshot.withdrawn_objects.filter((r) => r.kind === "CC-004.undetermined_raw")) {
+    Object.assign(u, { withdrawal_reason: "superseded_by_revision", superseded_by: group.object_id });
+    st.snapshot.relations.push({ subject: group.object_id, relation_type: "replaces", object: u.object_id });
+  }
+  return st;
+}
+function syncCatalog(st) {
+  const s = st.snapshot, e = s.catalog_evidence, ids = new Set([...s.objects, ...s.withdrawn_objects].map((r) => r.object_id));
+  for (const axis of Object.values(e.axes)) axis.evidence.object_ids = axis.evidence.object_ids.filter((id) => ids.has(id));
+  const v = e.axes["CC-056"].evidence;
+  v.withdrawals = s.withdrawn_objects.filter((r) => r.withdrawn_generation === s.generation)
+    .map((r) => ({ fact_key: r.fact_key, object_id: r.object_id, reason: r.withdrawal_reason, superseded_by: r.superseded_by }));
+  v.replaces = v.replaces.filter((r) => ids.has(r.new_object_id) && ids.has(r.old_object_id));
+  Object.assign(e, { classified_objects: String(s.objects.length), withdrawals: String(v.withdrawals.length), replaces: String(v.replaces.length) });
+  st.catalog.catalog_evidence = structuredClone(e);
+  for (const item of st.catalog.items) if (e.axes[item.id]) item.evidence = structuredClone(e.axes[item.id].evidence);
+  return st;
+}
+const accepted = async (st) => Q3.validateState(await reid(st), "s-session/3");
+const rejected = async (st, pattern) => assert.rejects(async () => Q3.validateState(await reid(st), "s-session/3"), pattern);
+
+test("B1 完整 validateState：已登记 W1/W2 完整串收，W1 冻结串的布局组件移位即拒", async (t) => {
+  const W1 = typed.W_STRUCTURE_RULE;
+  await accepted(await g5());
+  await accepted(withRule(await g5(), W1 + "+bounded-layout/1"));
+  await accepted(asW2(await g5()));
+  t.diagnostic("W1、W1+bounded-layout/1 与 W2 现役串正控通过");
+  for (const rule of [
+    W1.replace("s2-axis-quantifiers+", "s2-axis-quantifiers+bounded-layout/1+"), // 审阅反例
+    typed.W1_BASE_STRUCTURE_RULE + "+bounded-layout/1+raw-initialization-w/1",
+    W1.replace("+center-seed/1", "+bounded-layout/1+center-seed/1"),
+  ]) {
+    await rejected(withRule(await g5(), rule), /未获准的完整规则组合/);
+    t.diagnostic("拒 " + rule);
+  }
+});
+
+test("B5 完整 validateState：S3 结构规则非零代 cut 缺任一 CC-056 结构版本根即拒", async (t) => {
+  const without = (st, kinds) => {
+    const s = st.snapshot, gone = new Set([...s.objects, ...s.withdrawn_objects].filter((r) => kinds.includes(r.kind)).map((r) => r.object_id));
+    s.objects = s.objects.filter((r) => !gone.has(r.object_id));
+    s.withdrawn_objects = s.withdrawn_objects.filter((r) => !gone.has(r.object_id));
+    s.relations = s.relations.filter((r) => !gone.has(r.subject) && !gone.has(r.object));
+    return syncCatalog(st);
+  };
+  await accepted(syncCatalog(asW2(await g5())));
+  t.diagnostic("W2 底座经目录同步后正控通过");
+  for (const kinds of [["CC-056.segment_version"], ["CC-056.center_version"], ["CC-056.pair_version"], ["CC-056.center_version", "CC-056.pair_version"]]) {
+    await rejected(without(asW2(await g5()), kinds), /结构域版本根缺失或重复/);
+    t.diagnostic("W2 删 " + kinds.join("、") + " 即拒");
+  }
+  await rejected(without(await g5(), ["CC-056.segment_version"]), /结构域版本根缺失或重复/);
+  t.diagnostic("W1 删 CC-056.segment_version 即拒");
+});
+
+test("B6 完整 validateState：未定原件撤回代含其坐标的在世定向组须唯一", async (t) => {
+  // 原件 raw1 在 g4 撤回到首组（成员 0..2）；另加 g4 出生、g5 按 fact_removed 撤回、只含坐标 1 的第二个组。
+  const secondGroup = (st, direction) => {
+    const s = st.snapshot, row = s.raw_history.find((r) => r.source_coord === "1");
+    const g = structuredClone(s.objects.find((r) => r.kind === "CC-005.inclusion_group" && r.payload.members.includes("1")));
+    Object.assign(g, { object_id: "obj3-" + "b".repeat(64), fact_key: JSON.stringify([g.kind, "1"]), first_known_generation: "4", published_generation: "4", first_known_cut: "cut-4",
+      withdrawn_generation: "5", withdrawal_reason: "fact_removed", superseded_by: null, lifecycle: "withdrawn" });
+    Object.assign(g.payload, { group_anchor: "1", group_index: "2", members: ["1"], high_sources: ["1"], low_sources: ["1"], direction,
+      open: row.open, high: row.high, low: row.low, close: row.close });
+    s.withdrawn_objects.push(g);
+    return syncCatalog(st);
+  };
+  await accepted(asW2(await g5()));
+  await accepted(secondGroup(asW2(await g5()), null));
+  t.diagnostic("唯一定向组正控与第二组 direction=null 控制通过");
+  for (const direction of ["DOWN", "UP"]) {
+    await rejected(secondGroup(asW2(await g5()), direction), /W2未定原件有多个定向替代候选/);
+    t.diagnostic("第二组 " + direction + " 即拒");
+  }
 });
