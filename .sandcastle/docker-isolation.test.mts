@@ -269,3 +269,31 @@ test("凭据名按词边界匹配：GIT_AUTHOR_* 等普通键不再误命中，�
   assert.deepEqual(containerEnvLeaks([...live, "CLIPROXY_LOCAL_KEY=k"], live), []);
   assert.deepEqual(containerEnvLeaks(live.map((e) => (e === "GIT_AUTHOR_NAME=" ? "GIT_AUTHOR_NAME=x" : e)), live), [], "GIT_AUTHOR_NAME 被覆盖不算凭据泄漏");
 });
+
+import { APPARMOR_ABSENT, violations } from "./docker-isolation.mts";
+
+const isolated = {
+  apparmor: "docker-default (enforce)", seccomp: "2", capEff: "0000000000000000", capBnd: "00000000a80425fb",
+  roWrite: "touch: x: Read-only file system", rwWrite: "ok", roChildInRw: "touch: x: Read-only file system",
+  roFileAppend: "sh: Read-only file system", renameMountpoint: "mv: Device or resource busy",
+  hardlinkAcross: "ln: Invalid cross-device link", symlinkIntoRo: "touch: x: Read-only file system",
+};
+
+test("#2070 AppArmor：缺省 enforce 只认 docker-default (enforce)；内核无 AppArmor 也判违规", () => {
+  assert.deepEqual(violations(isolated, "enforce"), []);
+  assert.deepEqual(violations({ ...isolated, apparmor: APPARMOR_ABSENT }, "enforce"), [`AppArmor=${APPARMOR_ABSENT}`]);
+  assert.deepEqual(violations({ ...isolated, apparmor: "unconfined" }, "enforce"), ["AppArmor=unconfined"]);
+});
+
+test("#2070 AppArmor：absent-accepted 只放行内核无 AppArmor 的 EINVAL 原文，unconfined 等仍违规，其余各项不放宽", () => {
+  const absent = { ...isolated, apparmor: APPARMOR_ABSENT };
+  assert.deepEqual(violations(absent, "absent-accepted"), []);
+  assert.deepEqual(violations(isolated, "absent-accepted"), []);
+  for (const apparmor of ["unconfined", "", "docker-default (complain)", `${APPARMOR_ABSENT} extra`, "cat: /proc/self/attr/current: No such file or directory"]) {
+    assert.deepEqual(violations({ ...isolated, apparmor }, "absent-accepted"), [`AppArmor=${apparmor}`], apparmor);
+  }
+  assert.deepEqual(violations({ ...absent, seccomp: "0" }, "absent-accepted"), ["Seccomp=0"]);
+  assert.deepEqual(violations({ ...absent, capEff: "00000000a80425fb" }, "absent-accepted"), ["CapEff=00000000a80425fb"]);
+  assert.equal(violations({ ...absent, capBnd: "000001ffffffffff" }, "absent-accepted").length, 1);
+  assert.equal(violations({ ...absent, roWrite: "ok" }, "absent-accepted").length, 1);
+});

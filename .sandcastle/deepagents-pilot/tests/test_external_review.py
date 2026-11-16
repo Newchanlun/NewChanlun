@@ -2278,6 +2278,7 @@ def test_docker_context_at_admission_supervisor_and_recovery_boundaries(lane, mo
         monkeypatch.setenv(key, "fixture-must-not-pass")
     monkeypatch.setenv("SANDCASTLE_MAIN_MODEL", "fixture-not-the-review-model")
     monkeypatch.setenv("CLIPROXY_LOCAL_KEY", "fixture-worker-only")
+    monkeypatch.setenv("SANDCASTLE_APPARMOR_ABSENT", "accept")  # #2071：部署的 AppArmor 策略声明要到准入与监督子进程
     trace = tmp_path / "docker-calls.jsonl"
     binary = tmp_path / "bin"
     binary.mkdir()
@@ -2304,6 +2305,7 @@ from pathlib import Path
 assert os.environ.get("DOCKER_CONTEXT") == {context!r}
 assert not any(k in os.environ for k in ("DOCKER_HOST", "DOCKER_CONFIG", "DOCKER_TLS_VERIFY", "DOCKER_CERT_PATH", "SECRET_TOKEN", "SANDCASTLE_MAIN_MODEL"))
 admission = sys.argv[1:] == ["--admission-only"]
+assert os.environ.get("SANDCASTLE_APPARMOR_ABSENT") == "accept"
 assert os.environ.get("CLIPROXY_LOCAL_KEY") == (None if admission else "fixture-worker-only")
 if not admission:
     launch = json.loads((Path(sys.argv[-1]) / "launch.json").read_text())
