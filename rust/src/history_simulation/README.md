@@ -30,14 +30,22 @@ RD12 固定为 `per-leg-source-attribution/1`；未知政策拒绝。netted 返�
 - QueryOriginal：payload 为 external_fact_id 字符串，回 X 冻结的完整原件。
 
 E/S wire 是 `x-exact-authority/1`。op 分别 QueryReleasedExact 与
-RequestConditionalExecution。请求包含完整 ExactCommand、command_hash、会话、
+RequestConditionalExecution。业务请求包含完整 ExactCommand、command_hash、会话、
 authority_id/epoch 与可选 release_receipt_id；回复另含 state、receipt_id、commit_ns。
+业务请求放在 IC:9 共同信封里（schema_revision、session、source_namespace/epoch、message_id、
+producer_id/epoch、payload_hash、causal_refs），走 ADR 0056:39 同一个 `session_transport`，E 端就是
+经济会话的正式 serve 入口与 `authorized` 判据。profile 的 e/s 各自冻结 schema_revision、reply_namespace
+与 producer_id；回复整帧须等于由原请求经 `reply_envelope` 重建的结果，与 E↔B 财务输送同一判据（#1407 C2）。
 S 回复必须同时绑定原 E release_receipt_id；命令资格引用必须等于 S receipt_id。
 未知、Denied、不可达、不同内容/身份/epoch 均不取得调用权。
 
-ConditionEvidence 当前只支持 released-exact/1、execute-committed/1、
-simulation-local-transaction/1 三种能力。每项必须携带完整权威、依赖、失效源、
-检查阶段、证据及覆盖，失败语义为 Denied；其他能力返回 Unsupported。
+ConditionEvidence 清单由 profile 的 `conditions` 冻结，与 E 冻结原件 `exact_release.conditions` 是同一份
+获准清单（含 ADR 0052 裁定二的 `model_coverage`）。命令证书的清单须与它逐项相等，否则 Unsupported。
+每项须带齐九字段，能力与阶段须是 E/X 共用配对表（`economic_session::exact_command::CONDITION_PAIRS`）里的
+已知配对，阶段前缀只能是 E./S./X.，失败语义为 Denied；X 阶段只有 simulation-local-transaction/1（#1407 C2）。
+清单还须完备：配对表的四项能力（E 的 released-exact/1 与 model-coverage/1、S 的 execute-committed/1、
+X 的 simulation-local-transaction/1）各出现恰一次，缺项按 MissingDependency、重复按 Unsupported 拒绝；
+E 冻结原件与 X profile 走同一个 `check_required_capabilities`。
 真实 E/S producer 尚须在 #1407 / TB04-D/E 接此 wire，受控夹具不替代它们。
 
 ## 时间、恢复与消费边界
@@ -89,6 +97,18 @@ AdvanceBar 在取得任何 S 资格前完成同一模型的完整只读计算及
 不能用空 close 异批绕过。
 
 对每条 Accepted 命令，X 先连接 S，连接成功后才置 ExecutionRequested，再写请求帧。
+权威期限（timeout_ms）只从写帧开始计，不含这次 ExecutionRequested 的本地持久写；否则慢盘会在一个字节都没
+发出时超时，把命令误标成可能已发出（#1407 C2）。
+
+残余窗口（未消除，归 #1407 C2 后续，与真 S producer 一起处理）：上面只挪了 X 自己的期限。对端若走
+`session_transport`，它的读期限从接受连接起算（`io_connection_inner`），而 X 是连接之后才做这次持久写。
+持久写超过对端的读期限时，对端回输送层的 `{"ok":false,…}` 或直接关连接；X 此时已持久 ExecutionRequested，
+S 却一个字节都没处理。之后只能查 QueryExecuteCommitted，得到 NoRecord，按下段规则保持 pending，没有自动出路。
+本仓现有的受控 S 夹具不设读期限，测试覆盖不到这条路径。没有改成「先持久、再连接、连接失败退回 Accepted」，
+因为那要新增一条 ExecutionRequested → Accepted 的反向迁移：今天「S 不可达时命令保持 Accepted」不依赖任何写入，
+改后要靠第二次持久写成功才成立，写失败就把一条确定未发出的命令留在只能查询的状态；这条迁移没有规格，也没有
+真 S 可以对拍。
+
 两类失败以此为界：
 
 - 确定未发出：编码失败、帧界超限、连接失败。S 一个字节都没收到，命令保持 Accepted；
