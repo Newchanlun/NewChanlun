@@ -144,6 +144,12 @@
       const revision = raws.get(u.superseded_by), group = byGroup.get(u.superseded_by);
       need((revision && revision.object_id !== u.object_id && revision.coord === u.coord && alive(revision, at)) ||
         (group && alive(group, at) && directedMember(group, u.coord)), "W2逐原件替代目标不满足坐标、种类或生命周期");
+      // #1855 B6：撤回时刻在世的同槽位 raw 修订优先（Rust object_diff Superseded）；没有修订才看在世定向组，
+      // 多于一个即拒（Rust w2_replacing_group、审计「未定原件有多个替代候选」）。
+      const sameSlot = pending.find(r => r.object_id !== u.object_id && r.coord === u.coord && alive(r, at));
+      const directed = groups.filter(g => alive(g, at) && directedMember(g, u.coord));
+      need(sameSlot || directed.length === 1, "W2未定原件有多个定向替代候选");
+      need(u.superseded_by === (sameSlot || directed[0]).object_id, "W2逐原件替代目标须为撤回时刻同槽位修订或唯一定向组");
       need(edges.has(JSON.stringify([u.superseded_by, u.object_id])), "W2逐原件替代缺公开replaces关系");
     }
     for (const w of superseded) need(edges.has(JSON.stringify([w.superseded_by, w.object_id])), "W2替代撤回缺公开replaces关系");
