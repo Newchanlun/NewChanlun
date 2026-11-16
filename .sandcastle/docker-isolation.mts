@@ -136,10 +136,20 @@ export const DEFAULT_CAP_MASK = 0xa80425fbn;
 /** Docker 内层 Codex 沙箱模式；改动即改合同摘要。 */
 export const DOCKER_INNER_SANDBOX = "danger-full-access";
 
+/** AppArmor 观测策略；改动即改合同摘要。缺省 "enforce"：必须观测到 docker-default (enforce)。
+ * 部署显式设 SANDCASTLE_APPARMOR_ABSENT=accept 时为 "absent-accepted"（#2070，用户 2026-11-16 裁定审查服务改用 OrbStack）：
+ * 只在内核根本没有 AppArmor 时放行这一项——读 /proc/self/attr/current 返回 EINVAL（OrbStack 实测原文即 APPARMOR_ABSENT）。
+ * 内核有 AppArmor 而容器未受限时读到的是 "unconfined"，仍判违规，所以在 Colima 等有 AppArmor 的宿主上不会被悄悄降级。
+ * Seccomp、CapEff、CapBnd 与全部挂载探针不受此策略影响。 */
+export type AppArmorPolicy = "enforce" | "absent-accepted";
+export const APPARMOR_POLICY: AppArmorPolicy = process.env.SANDCASTLE_APPARMOR_ABSENT === "accept" ? "absent-accepted" : "enforce";
+export const APPARMOR_ABSENT = "cat: /proc/self/attr/current: Invalid argument";
+
 /** 观测值全部满足才 Ready；缺一项即返回原因列表（不缓存、不推断）。 */
-export function violations(o: IsolationObservation): string[] {
+export function violations(o: IsolationObservation, apparmorPolicy: AppArmorPolicy = APPARMOR_POLICY): string[] {
   const bad: string[] = [];
-  if (!/^docker-default \(enforce\)/.test(o.apparmor)) bad.push(`AppArmor=${o.apparmor}`);
+  const apparmorOk = /^docker-default \(enforce\)/.test(o.apparmor) || (apparmorPolicy === "absent-accepted" && o.apparmor === APPARMOR_ABSENT);
+  if (!apparmorOk) bad.push(`AppArmor=${o.apparmor}`);
   if (o.seccomp !== "2") bad.push(`Seccomp=${o.seccomp}`);
   if (!/^0+$/.test(o.capEff)) bad.push(`CapEff=${o.capEff}`);
   if (!/^[0-9a-f]+$/i.test(o.capBnd) || (BigInt("0x" + o.capBnd) & ~DEFAULT_CAP_MASK) !== 0n) bad.push(`CapBnd=${o.capBnd} 超出 Docker 默认集合`);
