@@ -111,7 +111,9 @@ executor cutover verify --workers-log "$WORKERS_LOG" --private-key "$PEM"
 executor cutover record --workers-log "$WORKERS_LOG" --private-key "$PEM"
 ```
 
-`verify` 只读核对冻结代次、快照进程退出且当下无旧写者、旧宿主挂载的 Docker 活容器、旧工作的当前生命周期终态、快照后无新增 claim、App 读取的全部 `agent-*` job 已完成，以及 claimer 和 harvest 的 launchd 服务已卸载。日志按票和 branch 归约：历史重复 claim 不当场永久报错，但仍保留 pending，直到同一生命周期出现 `sandbox/closed` 或 `claim/rolled_back`。独立 reviewer/merger 沿用各自已有的终态。另一 branch 的关闭不能消除本 branch 的未决工作；缺 branch 的历史记录也不猜测归属。
+`verify` 只读核对冻结代次、快照进程退出且当下无旧写者、旧宿主挂载的 Docker 活容器、旧工作的当前生命周期终态、快照后无新增 claim、App 读取的全部 `agent-*` job 已完成，以及 claimer 和 harvest 的 launchd 服务已卸载。
+
+五个 `agent-*.yml` 已在 #1992 从仓库删除。`/actions/workflows` 在文件删除后仍按历史 run 列出它们（实测已删的 `issue-1406-c6a.yml` 仍以 state=active 列出），`remote_barrier` 按 `cutover.LEGACY_WORKFLOWS` 里的固定名单核对这份列表，缺任何一个都报 `legacy workflow inventory incomplete` 拒绝放行。所以**不得删除这五个工作流的历史 run**（包括在 Actions 页面清理侧栏）；一旦列表里没了它们，verify/record/audit-release 会一直拒绝，只能改代码解开。日志按票和 branch 归约：历史重复 claim 不当场永久报错，但仍保留 pending，直到同一生命周期出现 `sandbox/closed` 或 `claim/rolled_back`。独立 reviewer/merger 沿用各自已有的终态。另一 branch 的关闭不能消除本 branch 的未决工作；缺 branch 的历史记录也不猜测归属。
 
 快照 PID + 启动标识由 verify/record 和审计释放共用的全量进程采样器核对，不受 cwd、命令或父子关系筛选影响。快照子进程换 cwd、父进程退出后被 PID 1 收养，仍须等其身份消失；zombie 也保留在身份清单中。相同 PID 但启动标识不同不算快照进程。完整进程表采样失败、空表或格式错误时拒绝。
 
