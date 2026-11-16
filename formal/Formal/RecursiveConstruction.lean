@@ -324,6 +324,25 @@ def windowCenters : List Move → List Center
   | a :: b :: c :: _ => if h : WindowOverlap a b c then [deriveWindowCenter3 a b c h] else []
   | _ => []
 
+/-- #1855 判别窗口：上[10,30]、下[0,40]、上[20,35]，核心 [20,30]。Zn = 与首段同向的第 1、3 段。 -/
+def znSegs : List Move :=
+  [Move.segment Direction.up 10 30, Move.segment Direction.down 0 40, Move.segment Direction.up 20 35]
+
+/-- `znSegs` 的 Zn 外缘中枢：外缘 [10,35]（中间段的 0 与 40 不进外缘）。 -/
+def znCenter : Center := ⟨10, 20, 30, 35, by decide, by decide, by decide⟩
+
+/-- `znSegs` 的三段全取外缘中枢：外缘 [0,40]。 -/
+def allThreeCenter : Center := ⟨0, 20, 30, 40, by decide, by decide, by decide⟩
+
+/-- #1855 缺陷现状：`CenterDerivedAt` 拒绝 Zn 外缘中枢，只接受三段全取外缘。 -/
+example : ¬ CenterDerivedAt znSegs znCenter 0 := by
+  intro ⟨_, h⟩
+  have hdd := (h (by decide) (by decide) (by decide)).2.2.1
+  revert hdd; decide
+
+example : CenterDerivedAt znSegs allThreeCenter 0 :=
+  ⟨by decide, fun _ _ _ => ⟨rfl, rfl, rfl, rfl⟩⟩
+
 /--
   ★canonical 选择唯一性（640 谱系第三列，L0 by-construction 零信息增量）：
 
