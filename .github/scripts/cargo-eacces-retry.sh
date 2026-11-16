@@ -54,16 +54,25 @@ if [[ -n "$cause" ]]; then
   echo "::warning title=Boat transient cargo error retry::cause=${cause} host=$(hostname)"
   # EACCES 在同一文件上是粘的：原地重跑时 cargo 认为构建脚本已是新的，只会再执行同一个被拒的文件（run 42774135845
   #   同机同路径连拒 4 次）。重跑前删掉被拒的 build-script-build 及同目录的 build_script_build-*（前者是后者的硬链接，
-  #   cargo 只看后者判新旧，只删前者会把同一 inode 链回来），cargo 判输出缺失、重编出新文件。只删
-  #   …/build/<crate>-<16 位 hash>/ 下这两类普通文件，路径不符时照旧原地重跑。只多一次构建脚本编译，结论不变。
+  #   cargo 只看后者判新旧，只删前者会把同一 inode 链回来），cargo 判输出缺失、重编出新文件。只多一次构建脚本编译，结论不变。
+  #   删除范围（#2066 独审加固）：只删 cargo 报告里紧跟着 Permission denied (os error 13) 的那几个路径（同一日志里因
+  #   ENOENT 等别的原因 never executed 的不删）；路径必须形如 <target 根>/…/build/<crate>-<16 位 hash>/build-script-build，
+  #   target 根取 CARGO_TARGET_DIR（缺省 ./target）的真实路径；crate 目录的真实路径必须与字面路径逐字相同（任何一级
+  #   是符号链接都不删）。任一条不满足就不删，照旧原地重跑。
   if [[ "$cause" == EACCES* ]]; then
-    bad=$(grep -Eo 'could not execute process `[^`]*/build-script-build`' "$log" | sed -E 's/^could not execute process `//; s/`$//' | sort -u)
+    bad=$(awk '
+      match($0, /could not execute process `[^`]*\/build-script-build` \(never executed\)/) {
+        p = substr($0, RSTART, RLENGTH); sub(/^could not execute process `/, "", p); sub(/` \(never executed\)$/, "", p); left = 4; next
+      }
+      left > 0 { if ($0 ~ /Permission denied \(os error 13\)/) { print p; left = 0 } else if ($0 ~ /\(os error [0-9]+\)/) { left = 0 } else { left-- } }
+    ' "$log" | sort -u)
+    target_root="$(realpath -e -- "${CARGO_TARGET_DIR:-target}" 2>/dev/null)" || target_root=
     removed=0
     while IFS= read -r f; do
-      # 只认 cargo 打出的绝对路径；含 /./ 或 /../ 段、或 crate 目录 / build 目录是符号链接时不删（独审加固）。
-      [[ "$f" =~ ^/.*/build/[A-Za-z0-9_.-]+-[0-9a-f]{16}/build-script-build$ && "$f" != */./* && "$f" != */../* ]] || continue
+      [[ -n "$f" && -n "$target_root" ]] || continue
+      [[ "$f" == "$target_root"/* && "$f" =~ /build/[A-Za-z0-9_.-]+-[0-9a-f]{16}/build-script-build$ ]] || continue
       d="${f%/build-script-build}"
-      [[ -d "$d" && ! -L "$d" && ! -L "${d%/*}" ]] || continue
+      [[ -d "$d" && "$(realpath -e -- "$d" 2>/dev/null)" == "$d" ]] || continue
       for g in "$f" "$d"/build_script_build-*; do
         if [[ -f "$g" && ! -L "$g" ]]; then rm -f -- "$g" && echo "removed rejected build script: $g" && removed=1; fi
       done
