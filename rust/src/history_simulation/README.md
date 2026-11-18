@@ -69,15 +69,16 @@ S commit_ns；写入与启动冷审计共用判据，早 1 个读数即拒（#16
 CaptureExternal 对照 X 库原字节后可 Recorded+Pending。完整经济分量/short 归因未接通，
 Resolve/Apply 明确拒绝；不得把 Pending 当作持仓或完整回放验收。
 
-#1375 补录一个已知的模拟批时，先用 X 的 QueryBatch 取该批原回执，再查询 E：
+#1375 补录一个已知的模拟批时，先用 X 的 QueryBatch 取该批原回执，对完整规范 JSON（键排序、紧凑 UTF-8、不含传输换行）取 SHA-256，再查询 E：
 
 ```sh
 e_economic_session inspect-simulation-capture-batch --manifest MANIFEST --db E_DB \
-  --batch-id BATCH_ID --state-content-hash STATE_CONTENT_HASH --x-id X_ID --x-epoch X_WRITER_EPOCH
+  --batch-id BATCH_ID --batch-receipt-sha256 RECEIPT_SHA256 --x-id X_ID --x-epoch X_WRITER_EPOCH
 ```
 
 这个本地只读命令使用 E 库绑定的 manifest，不从请求接受 X 库路径；在 X 的同一
-只读事务中使用 X 冷恢复的完整审计，逐件核对原字节。结果中的 `e_cut` 是接纳状态
+只读事务中使用 X 冷恢复的正式核验，逐件核对原字节、已接纳命令与 E/S 原收据。
+完整回执的摘要用于固定该批；回执中的 state_content_hash 仍是单独的状态读数。结果中的 `e_cut` 是接纳状态
 所依据的切面；每个 `Recorded` 项带原收据和当前 Pending（若存在）。获准来源
 把 `Missing` 项的原字节、指针和事件时刻走原 CaptureExternal 补录；有过发送的
 请求沿用原消息和 token，不因未确定回执换身份。重查同一批可核对补录结果。

@@ -159,7 +159,7 @@ pub(crate) fn verify_capture(manifest: &Value, envelope: &Value, raw: &str) -> R
 pub(crate) fn committed_capture_batch(
     manifest: &Value,
     batch_id: &str,
-    state_hash: &str,
+    receipt_digest: &str,
     x_id: &str,
     x_epoch: i64,
 ) -> Result<Value, String> {
@@ -187,28 +187,28 @@ pub(crate) fn committed_capture_batch(
     {
         return Err("IdentityConflict：指定 X 模型或当前 writer epoch 不符".into());
     }
-    let sim_meta = |key| -> Result<Value, String> {
-        let raw: String = tx
-            .query_row("SELECT v FROM x_sim_meta WHERE k=?1", [key], |r| r.get(0))
-            .map_err(failure)?;
-        strict_json(raw.as_bytes())
-    };
-    let profile = sim_meta("authority_profile")?;
-    let contract = sim_meta("contract")?;
-    for key in ["session_id", "session_generation"] {
-        if required(&profile, key)? != required(manifest, key)? {
-            return Err("IdentityConflict：X 与 E 的会话或化身不同".into());
-        }
+    let raw_profile: String = tx
+        .query_row(
+            "SELECT v FROM x_sim_meta WHERE k='authority_profile'",
+            [],
+            |r| r.get(0),
+        )
+        .map_err(failure)?;
+    let profile: super::runtime::Profile =
+        serde_json::from_value(strict_json(raw_profile.as_bytes())?).map_err(failure)?;
+    if profile.session_id != required(manifest, "session_id")?
+        || profile.session_generation != required(manifest, "session_generation")?
+    {
+        return Err("IdentityConflict：X 与 E 的会话或化身不同".into());
     }
-    for key in ["source_namespace", "source_epoch"] {
-        let expected = required(binding, key)?;
-        if required(&profile, key)? != expected || required(&contract, key)? != expected {
-            return Err("IdentityConflict：X 持久来源与 E 冻结来源不同".into());
-        }
+    if profile.source_namespace != required(binding, "source_namespace")?
+        || profile.source_epoch != required(binding, "source_epoch")?
+    {
+        return Err("IdentityConflict：X 持久来源与 E 冻结来源不同".into());
     }
-    if required(&profile, "x_id")? != x_id
-        || profile["model"] != contract["model"]
-        || digest(&contract["model"]) != required(binding, "model_content_hash")?
+    if profile.x_id != x_id
+        || digest(&serde_json::to_value(&profile.model).map_err(failure)?)
+            != required(binding, "model_content_hash")?
     {
         return Err("IdentityConflict：X 身份或模型与冻结范围不同".into());
     }
@@ -222,13 +222,14 @@ pub(crate) fn committed_capture_batch(
     let receipt = strict_json(raw.as_bytes())?;
     if canonical_json(&receipt) != raw
         || receipt["request_id"] != batch_id
-        || receipt["state_content_hash"] != state_hash
+        || sha256_hex(raw.as_bytes()) != receipt_digest
+    // DevSkim: ignore DS197836 内容寻址摘要
     {
-        return Err("IdentityConflict：指定 X 批的完整回执或状态摘要不同".into());
+        return Err("IdentityConflict：指定 X 批的完整回执摘要不同".into());
     }
-    // 与 X 自己恢复共用核验：从已知创世重演连续批，并逐件比对独立原字节、
-    // bust 记录及完整表计数。不能从回执字段缺失推断「本批没有该原件」。
-    super::store::audit_history(&tx)?;
+    // 复用正式 X 恢复入口的只读部分：批重演之外，还核接纳、原 Release 与
+    // S 执行证据。只核原件相符不能证明该批由正式命令产生。
+    super::runtime::validate_existing(&tx, &profile, x_epoch)?;
     tx.commit().map_err(failure)?;
     Ok(receipt)
 }

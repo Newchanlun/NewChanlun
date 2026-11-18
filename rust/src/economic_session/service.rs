@@ -1555,7 +1555,7 @@ pub(super) fn serve(config: &Config, epoch: i64, e_epoch: i64) -> Result<(), Str
 fn inspect_simulation_capture_batch(
     config: &Config,
     batch_id: &str,
-    state_hash: &str,
+    receipt_digest: &str,
     x_id: &str,
     x_epoch: i64,
 ) -> Result<Value, String> {
@@ -1579,7 +1579,7 @@ fn inspect_simulation_capture_batch(
     let receipt = crate::history_simulation::intake::committed_capture_batch(
         &config.manifest,
         batch_id,
-        state_hash,
+        receipt_digest,
         x_id,
         x_epoch,
     )?;
@@ -1620,7 +1620,8 @@ fn inspect_simulation_capture_batch(
     Ok(json!({
         "kind":"SimulationCaptureBatch","domain_id":config.domain,
         "e_cut":cut(config,seq,&root),"x_id":x_id,"x_writer_epoch":x_epoch.to_string(),
-        "batch_id":batch_id,"bar_index":receipt["bar_index"],"state_content_hash":state_hash,
+        "batch_id":batch_id,"bar_index":receipt["bar_index"],"batch_receipt_sha256":receipt_digest,
+        "state_content_hash":receipt["state_content_hash"],
         "source_namespace":source["source_namespace"],"source_epoch":source["source_epoch"],
         "producer_id":source["producer_id"],"producer_epoch":source["producer_epoch"],
         "entries":entries,"release_eligibility":"NotEvaluated"
@@ -1634,7 +1635,7 @@ pub fn cli(is_b: bool) -> Result<(), String> {
         if is_b {
             "usage: init|serve|recover --manifest FILE --db FILE --chong ID [--epoch N --e-epoch N]"
         } else {
-            "usage: init|serve|recover --manifest FILE --db FILE [--epoch N]; inspect-simulation-capture-batch --manifest FILE --db FILE --batch-id ID --state-content-hash HASH --x-id ID --x-epoch N"
+            "usage: init|serve|recover --manifest FILE --db FILE [--epoch N]; inspect-simulation-capture-batch --manifest FILE --db FILE --batch-id ID --batch-receipt-sha256 HASH --x-id ID --x-epoch N"
         },
     )?;
     let mut opts = BTreeMap::new();
@@ -1650,7 +1651,7 @@ pub fn cli(is_b: bool) -> Result<(), String> {
             "--manifest",
             "--db",
             "--batch-id",
-            "--state-content-hash",
+            "--batch-receipt-sha256",
             "--x-id",
             "--x-epoch",
         ]
@@ -1680,7 +1681,7 @@ pub fn cli(is_b: bool) -> Result<(), String> {
         let result = inspect_simulation_capture_batch(
             &config,
             get("--batch-id")?,
-            get("--state-content-hash")?,
+            get("--batch-receipt-sha256")?,
             get("--x-id")?,
             positive(get("--x-epoch")?, "--x-epoch")?,
         )?;

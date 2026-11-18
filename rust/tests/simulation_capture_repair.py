@@ -6,7 +6,7 @@ import subprocess
 import time
 
 
-def exercise(e_bin, directory, e_socket, x_db, source, receipt, canonical, digest):
+def exercise(e_bin, directory, e_socket, x_db, source, receipt, alternate, other, canonical, digest):
     def client(source_db, name):
         db = directory / f"{name}.sqlite"
         manifest = directory / f"{name}.json"
@@ -48,7 +48,7 @@ def exercise(e_bin, directory, e_socket, x_db, source, receipt, canonical, diges
         def inspect(anchor=receipt, epoch="1", error=None):
             return run(
                 "inspect-simulation-capture-batch", "--batch-id", anchor["request_id"],
-                "--state-content-hash", anchor["state_content_hash"], "--x-id", source["x_id"],
+                "--batch-receipt-sha256", digest(anchor), "--x-id", source["x_id"],
                 "--x-epoch", epoch, error=error,
             )
 
@@ -80,23 +80,45 @@ def exercise(e_bin, directory, e_socket, x_db, source, receipt, canonical, diges
                                           json_pointer=article["json_pointer"], token=f"token-{key}",
                                           source_event_time=article["source_event_time"]))
 
-    bad = directory / "missing-fee.sqlite"
-    with sqlite3.connect(x_db.as_uri() + "?mode=ro", uri=True) as src, sqlite3.connect(bad) as dst:
-        src.backup(dst)
-        fee = receipt["originals"][1]["event"]["source"]["external_fact_id"]
-        assert dst.execute("DELETE FROM x_sim_originals WHERE id=?", (fee,)).rowcount == 1
-    bad_db, _, _, bad_inspect = client(bad, "bad-e")
-    # X still has a valid batch row, but one independent original at the same cursor is gone.
-    bad_inspect(error="Query returned no rows")
-    with sqlite3.connect(bad_db.as_uri() + "?mode=ro", uri=True) as c:
-        assert c.execute("SELECT count(*) FROM facts").fetchone() == (0,)
+    def reject_corrupt_x(name, sql, args, error):
+        corrupt = directory / f"{name}.sqlite"
+        with sqlite3.connect(x_db.as_uri() + "?mode=ro", uri=True) as src, sqlite3.connect(corrupt) as dst:
+            src.backup(dst)
+            assert dst.execute(sql, args).rowcount == 1
+        e_db, _, _, inspect_corrupt = client(corrupt, f"{name}-e")
+        inspect_corrupt(error=error)
+        with sqlite3.connect(e_db.as_uri() + "?mode=ro", uri=True) as c:
+            assert c.execute("SELECT count(*) FROM facts").fetchone() == (0,)
+
+    # Keep batch and result fixed. Each copy lacks a different independent proof.
+    fee = receipt["originals"][1]["event"]["source"]["external_fact_id"]
+    reject_corrupt_x("missing-fee", "DELETE FROM x_sim_originals WHERE id=?", (fee,),
+                     "Query returned no rows")
+    reject_corrupt_x("missing-x-command", "DELETE FROM x_exact_commands WHERE id=?", ("a",),
+                     "缺已接纳命令权威原件")
+    reject_corrupt_x("missing-s-proof", "UPDATE x_exact_commands SET execute_evidence=NULL WHERE id=?",
+                     ("a",), "执行缺S原件")
+    reject_corrupt_x("wrong-release-link", "UPDATE x_exact_commands SET release_receipt=? WHERE id=?",
+                     ("wrong-receipt", "a"), "交付引用不符")
+
+    _, _, _, alternate_inspect = client(alternate, "alternate-frontier-e")
+    alternate_result = alternate_inspect(anchor=other)
+    assert alternate_result["state_content_hash"] == receipt["state_content_hash"]
+    assert alternate_result["batch_receipt_sha256"] == digest(other)
+    assert [e["raw_utf8"] for e in alternate_result["entries"]] == list(map(canonical, other["originals"]))
+    alternate_inspect(anchor=receipt, error="完整回执摘要不同")
+    save("query-batch-b1", receipt)
+    save("query-batch-b1-alternate", other)
+    save("alternate-frontier-inspected", alternate_result)
 
     _, argv, run, inspect = client(x_db, "good-e")
     inspect(epoch="2", error="writer epoch")
-    inspect(anchor={**receipt, "state_content_hash": "0" * 64}, error="状态摘要")
+    inspect(anchor={**receipt, "state_content_hash": "0" * 64}, error="完整回执摘要不同")
     inspect(anchor={**receipt, "request_id": "uncommitted"}, error="Query returned no rows")
     empty = inspect()
     assert empty["kind"] == "SimulationCaptureBatch" and empty["release_eligibility"] == "NotEvaluated"
+    assert empty["batch_receipt_sha256"] == digest(receipt)
+    assert empty["state_content_hash"] == receipt["state_content_hash"]
     assert [e["state"] for e in empty["entries"]] == ["Missing", "Missing"]
     assert [e["source_cursor"] for e in empty["entries"]] == ["1", "1"]
     fills = receipt["originals"]
@@ -177,4 +199,4 @@ def exercise(e_bin, directory, e_socket, x_db, source, receipt, canonical, diges
         save("recovered-view", view)
     finally:
         stop(again)
-    print("PASS #1375: fixed X batch; same-cursor fee omission refused; 1 missing → 2 Recorded/Pending; original receipts survive new E process")
+    print("PASS #1375: full batch identity and X cold audit; alternate frontier, missing command and missing fee refused; 1 missing → 2 Recorded/Pending; original receipts survive new E process")

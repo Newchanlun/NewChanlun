@@ -196,13 +196,31 @@ def run(name):
             submit = dict(kind='submit',order=order('a',quantity=3))
             assert request(xp,'AcceptExact',command(submit))['state']=='Accepted'
             assert request(xp,'AdvanceBar',batch(0,[submit]))['originals']==[]
-            b1=batch(1); b1['capacity']=dict(kind='scenario',reference='test-cap-1',buy=1,sell=0)
+            alternate = directory / 'alternate-frontier.sqlite'
+            with sqlite3.connect(db.as_uri()+'?mode=ro',uri=True) as src, sqlite3.connect(alternate) as dst:
+                src.backup(dst)
+            # Keep capacity=none so the frontier changes the original documents
+            # without becoming part of a newly formed capacity epoch in State.
+            b1=batch(1)
             r1=request(xp,'AdvanceBar',b1)
             assert len(r1['originals'])==2
-            assert len(request(xp,'AdvanceBar',batch(2))['originals'])==2
+            assert request(xp,'AdvanceBar',batch(2))['bar_index']==2
             assert request(xp,'QueryBatch','b1')==r1
+
+            # Close/reopen the same X authority on an independent snapshot cut
+            # at b0. Only the b1 input frontier differs; real X writes both receipts.
+            p.terminate(); p.wait(5); xp.unlink()
+            db=alternate; p=start()
+            other=request(xp,'AdvanceBar',{**b1,'known_frontier_cut':'different-frontier1'})
+            assert request(xp,'QueryBatch','b1')==other
+            assert r1['state_content_hash']==other['state_content_hash'] and r1!=other
+            p.terminate(); p.wait(5); xp.unlink()
+            db=main_db; p=start()
+            assert request(xp,'QueryBatch','b1')==r1
+
             before = (len(e.calls), len(s.calls))
-            exercise(Path(sys.argv[4]).resolve(),directory,sockets/'real-e',db,sim,r1,canonical,digest)
+            exercise(Path(sys.argv[4]).resolve(),directory,sockets/'real-e',db,sim,r1,
+                     alternate,other,canonical,digest)
             assert (len(e.calls), len(s.calls)) == before
             return
 
