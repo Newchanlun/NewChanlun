@@ -1,0 +1,4 @@
+{"identity": [16777232, 418464804], "os": "Darwin", "owner": 7873, "path": "/tmp/tmp9ue9qgfv/service.sock", "phase": "托管端创建实名监听器"}
+{"phase": "原路径仍在，不能另行 bind"}
+{"launchers": [7878, 7884], "phase": "两层新进程接回同一监听器；上一代空窗的原始请求也到了新进程", "received": "二代:queued-before-next-generation", "same_path_inode": true, "workers": [7879, 7889]}
+{"phase": "最后持有者也退出则路径仍在；不承诺托管者全失后的自动接管"}

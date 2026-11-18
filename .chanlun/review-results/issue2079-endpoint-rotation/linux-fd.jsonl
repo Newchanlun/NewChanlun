@@ -1,0 +1,4 @@
+{"identity": [117, 3], "os": "Linux", "owner": 1, "path": "/tmp/tmphrb6biwi/service.sock", "phase": "托管端创建实名监听器"}
+{"phase": "原路径仍在，不能另行 bind"}
+{"launchers": [6, 8], "phase": "两层新进程接回同一监听器；上一代空窗的原始请求也到了新进程", "received": "二代:queued-before-next-generation", "same_path_inode": true, "workers": [7, 9]}
+{"phase": "最后持有者也退出则路径仍在；不承诺托管者全失后的自动接管"}

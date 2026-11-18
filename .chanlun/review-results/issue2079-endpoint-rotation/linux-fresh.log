@@ -1,0 +1,9 @@
+{"stage": "published", "generation": "1", "publisher_uid": 0}
+{"stage": "worker", "generation": "1", "worker_uid": 65534, "pid": 11}
+{"stage": "client", "uid": 65534, "namespace_writes": "create/rename/unlink denied", "reply": "from-1"}
+{"stage": "old-message-queued"}
+{"stage": "old-connection-ended", "result": "ECONNRESET"}
+{"stage": "published", "generation": "2", "publisher_uid": 0}
+{"stage": "worker", "generation": "2", "worker_uid": 65534, "pid": 31}
+{"stage": "client", "uid": 65534, "namespace_writes": "create/rename/unlink denied", "reply": "from-2"}
+PASS: 原绝对路径两次重新发布，非发布者不能换名，旧积压未传到新一代。
