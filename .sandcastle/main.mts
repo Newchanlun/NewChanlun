@@ -1,7 +1,7 @@
 // Sequential Reviewer（Codex/Astra 版，#1617）—— #1001/#1002/#1003 裁定落地。
 // 每票：host 侧 frontier 取票 + claim → createSandbox（确定性分支，baseBranch=main）
 //   → Phase 1 实装工蜂 → Phase 2 独立评审工蜂（直接在分支上修正）
-//   → 不合 main（人工闸，#1003 裁 3）。
+//   → 不合 main（工蜂只交分支；合入由分支保护的 deepagents/review 与 ci-ok 把关，#1003 裁 3）。
 // 跑法：npx tsx .sandcastle/main.mts
 
 import { useScheduler } from "./scheduler-config.mts";
@@ -66,7 +66,7 @@ const GH_CLEAN_ENV = {
 // #1588 起评审提示改在宿主侧渲染，不再依赖内置 TARGET_BRANCH；diff 基准也不再取宿主本地 main，
 // 而是渲染前现 fetch 的 origin/main 提交（resolveReviewBase：宿主 main 落后时别线提交会混进摘要，
 // 领先/分叉即 FAIL-loud）。本校验仍保留，理由：
-//  - 宿主 cwd 是 main 的干净检出这一前提，claim-loop refreshHostMain（reset --hard origin/main）依赖它；
+//  - 宿主 cwd 是 main 的干净检出这一前提，claim-loop refreshHostMain（只快进到 origin/main，领先/分叉 fail-closed，#1979）依赖它；
 //  - 内置 TARGET_BRANCH 仍按宿主当前分支解析，任何仍走 promptFile 的模板若引用它，须与 main 同源；
 //  - .sandcastle/logs/workers.jsonl 等相对路径以宿主 cwd 为根，别线 worktree 下运行会写错地方。
 // 非 main 直接 FAIL-loud 退出（不取票、不起沙盒）。
@@ -331,7 +331,7 @@ if (REVIEW_ONLY) {
     if (e instanceof ReviewPromptTooLargeError) process.exit(e.exitCode);
     throw e;
   }
-  console.log(`REVIEW_ONLY 完成：${branch} 待验收合入（人工闸）。`);
+  console.log(`REVIEW_ONLY 完成：${branch} 待验收开 PR（不合 main）。`);
   await sandbox.close();
   process.exit(0);
 }
@@ -408,7 +408,7 @@ for (let iter = 1; iter <= MAX_TICKETS_PER_RUN; iter++) {
       process.exitCode = e.exitCode;
       break;
     }
-    console.log(`两段完成：${branch} 待验收合入（人工闸）。`);
+    console.log(`两段完成：${branch} 待验收开 PR（不合 main）。`);
   } catch (error) {
     logWorker({ ticket: issue, branch, phase: "managed-stage", status: "failed", reason: String(error).slice(0, 500) });
     throw error;

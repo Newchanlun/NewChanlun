@@ -1,0 +1,377 @@
+{
+ "schema": "spec-ruling-vectors/v1",
+ "note": "TS（scripts/wayfinder_engine.mts isSpecApproved）与 Python（pilot1742/approval.py spec_ruling）共用的SPEC 裁定消费向量；评论按列表顺序发出，{DIGEST} 由测试替换为 spec_body 的正文摘要。",
+ "spec_number": 1340,
+ "spec_body": "中文\n正文",
+ "orchestrator": "owner",
+ "vectors": [
+  {
+   "name": "合规 PASS 放行",
+   "expected": true,
+   "comments": [
+    {
+     "author": "owner",
+     "body": "**SPEC 独审裁定：PASS**\nSPEC：1340\n作者：author\n独审：reviewer\n正文 sha256：{DIGEST}\n证据：/review_file.json\n"
+    }
+   ]
+  },
+  {
+   "name": "首行不加粗的合规 PASS 放行",
+   "expected": true,
+   "comments": [
+    {
+     "author": "owner",
+     "body": "SPEC 独审裁定：PASS\nSPEC：1340\n作者：author\n独审：reviewer\n正文 sha256：{DIGEST}\n证据：/review_file.json\n"
+    }
+   ]
+  },
+  {
+   "name": "首行行尾空白不计",
+   "expected": true,
+   "comments": [
+    {
+     "author": "owner",
+     "body": "**SPEC 独审裁定：PASS**  \t\nSPEC：1340\n作者：author\n独审：reviewer\n正文 sha256：{DIGEST}\n证据：/review_file.json\n"
+    }
+   ]
+  },
+  {
+   "name": "CRLF 合规 PASS 放行",
+   "expected": true,
+   "comments": [
+    {
+     "author": "owner",
+     "body": "**SPEC 独审裁定：PASS**\r\nSPEC：1340\r\n作者：author\r\n独审：reviewer\r\n正文 sha256：{DIGEST}\r\n证据：/review_file.json\r\n"
+    }
+   ]
+  },
+  {
+   "name": "PASS 后无关自由文本不改变状态",
+   "expected": true,
+   "comments": [
+    {
+     "author": "owner",
+     "body": "**SPEC 独审裁定：PASS**\nSPEC：1340\n作者：author\n独审：reviewer\n正文 sha256：{DIGEST}\n证据：/review_file.json\n"
+    },
+    {
+     "author": "owner",
+     "body": "已阅，按计划推进。"
+    }
+   ]
+  },
+  {
+   "name": "PASS→BLOCK→新 PASS 重新放行",
+   "expected": true,
+   "comments": [
+    {
+     "author": "owner",
+     "body": "**SPEC 独审裁定：PASS**\nSPEC：1340\n作者：author\n独审：reviewer\n正文 sha256：{DIGEST}\n证据：/review_file.json\n"
+    },
+    {
+     "author": "owner",
+     "body": "**SPEC 独审裁定：BLOCK**\nSPEC：1340\n作者：author\n独审：reviewer\n正文 sha256：{DIGEST}\n证据：/review_file.json\n"
+    },
+    {
+     "author": "owner",
+     "body": "**SPEC 独审裁定：PASS**\nSPEC：1340\n作者：author\n独审：reviewer\n正文 sha256：{DIGEST}\n证据：/review_file.json\n"
+    }
+   ]
+  },
+  {
+   "name": "非编排账号的 BLOCK 不撤销",
+   "expected": true,
+   "comments": [
+    {
+     "author": "owner",
+     "body": "**SPEC 独审裁定：PASS**\nSPEC：1340\n作者：author\n独审：reviewer\n正文 sha256：{DIGEST}\n证据：/review_file.json\n"
+    },
+    {
+     "author": "other",
+     "body": "**SPEC 独审裁定：BLOCK**\nSPEC：1340\n作者：author\n独审：reviewer\n正文 sha256：{DIGEST}\n证据：/review_file.json\n"
+    }
+   ]
+  },
+  {
+   "name": "PASS不通过（结论后缀）不放行",
+   "expected": false,
+   "comments": [
+    {
+     "author": "owner",
+     "body": "SPEC 独审裁定：PASS不通过\nSPEC：1340\n作者：author\n独审：reviewer\n正文 sha256：{DIGEST}\n证据：/review_file.json\n"
+    }
+   ]
+  },
+  {
+   "name": "PASS (draft) 不放行",
+   "expected": false,
+   "comments": [
+    {
+     "author": "owner",
+     "body": "SPEC 独审裁定：PASS (draft)\nSPEC：1340\n作者：author\n独审：reviewer\n正文 sha256：{DIGEST}\n证据：/review_file.json\n"
+    }
+   ]
+  },
+  {
+   "name": "引用前缀 > **…PASS** 不放行",
+   "expected": false,
+   "comments": [
+    {
+     "author": "owner",
+     "body": "> **SPEC 独审裁定：PASS**\nSPEC：1340\n作者：author\n独审：reviewer\n正文 sha256：{DIGEST}\n证据：/review_file.json\n"
+    }
+   ]
+  },
+  {
+   "name": "标题前缀不放行",
+   "expected": false,
+   "comments": [
+    {
+     "author": "owner",
+     "body": "## SPEC 独审裁定：PASS\nSPEC：1340\n作者：author\n独审：reviewer\n正文 sha256：{DIGEST}\n证据：/review_file.json\n"
+    }
+   ]
+  },
+  {
+   "name": "半角冒号不放行",
+   "expected": false,
+   "comments": [
+    {
+     "author": "owner",
+     "body": "SPEC 独审裁定:PASS\nSPEC：1340\n作者：author\n独审：reviewer\n正文 sha256：{DIGEST}\n证据：/review_file.json\n"
+    }
+   ]
+  },
+  {
+   "name": "开头空行不放行",
+   "expected": false,
+   "comments": [
+    {
+     "author": "owner",
+     "body": "\n**SPEC 独审裁定：PASS**\nSPEC：1340\n作者：author\n独审：reviewer\n正文 sha256：{DIGEST}\n证据：/review_file.json\n"
+    }
+   ]
+  },
+  {
+   "name": "合规 PASS 正文含驳回词不放行",
+   "expected": false,
+   "comments": [
+    {
+     "author": "owner",
+     "body": "**SPEC 独审裁定：PASS**\nSPEC：1340\n作者：author\n独审：reviewer\n正文 sha256：{DIGEST}\n证据：/review_file.json\n备注：暂不合入。\n"
+    }
+   ]
+  },
+  {
+   "name": "PASS 不通过时也撤销旧 PASS",
+   "expected": false,
+   "comments": [
+    {
+     "author": "owner",
+     "body": "**SPEC 独审裁定：PASS**\nSPEC：1340\n作者：author\n独审：reviewer\n正文 sha256：{DIGEST}\n证据：/review_file.json\n"
+    },
+    {
+     "author": "owner",
+     "body": "SPEC 独审裁定：PASS不通过\nSPEC：1340\n作者：author\n独审：reviewer\n正文 sha256：{DIGEST}\n证据：/review_file.json\n"
+    }
+   ]
+  },
+  {
+   "name": "注释后的 BLOCK 撤销旧 PASS",
+   "expected": false,
+   "comments": [
+    {
+     "author": "owner",
+     "body": "**SPEC 独审裁定：PASS**\nSPEC：1340\n作者：author\n独审：reviewer\n正文 sha256：{DIGEST}\n证据：/review_file.json\n"
+    },
+    {
+     "author": "owner",
+     "body": "<!-- x -->\n**SPEC 独审裁定：BLOCK**\nSPEC：1340\n作者：author\n独审：reviewer\n正文 sha256：{DIGEST}\n证据：/review_file.json\n"
+    }
+   ]
+  },
+  {
+   "name": "代码块里的 BLOCK 撤销旧 PASS",
+   "expected": false,
+   "comments": [
+    {
+     "author": "owner",
+     "body": "**SPEC 独审裁定：PASS**\nSPEC：1340\n作者：author\n独审：reviewer\n正文 sha256：{DIGEST}\n证据：/review_file.json\n"
+    },
+    {
+     "author": "owner",
+     "body": "补充说明：\n```\n**SPEC 独审裁定：BLOCK**\nSPEC：1340\n作者：author\n独审：reviewer\n正文 sha256：{DIGEST}\n证据：/review_file.json\n```\n"
+    }
+   ]
+  },
+  {
+   "name": "非首行 BLOCK 撤销旧 PASS",
+   "expected": false,
+   "comments": [
+    {
+     "author": "owner",
+     "body": "**SPEC 独审裁定：PASS**\nSPEC：1340\n作者：author\n独审：reviewer\n正文 sha256：{DIGEST}\n证据：/review_file.json\n"
+    },
+    {
+     "author": "owner",
+     "body": "补充\n**SPEC 独审裁定：BLOCK**\nSPEC：1340\n作者：author\n独审：reviewer\n正文 sha256：{DIGEST}\n证据：/review_file.json\n"
+    }
+   ]
+  },
+  {
+   "name": "全角 ＳＰＥＣ 撤销旧 PASS",
+   "expected": false,
+   "comments": [
+    {
+     "author": "owner",
+     "body": "**SPEC 独审裁定：PASS**\nSPEC：1340\n作者：author\n独审：reviewer\n正文 sha256：{DIGEST}\n证据：/review_file.json\n"
+    },
+    {
+     "author": "owner",
+     "body": "**ＳＰＥＣ 独审裁定：BLOCK**\nSPEC：1340\n作者：author\n独审：reviewer\n正文 sha256：{DIGEST}\n证据：/review_file.json\n"
+    }
+   ]
+  },
+  {
+   "name": "「待重审」撤销旧 PASS",
+   "expected": false,
+   "comments": [
+    {
+     "author": "owner",
+     "body": "**SPEC 独审裁定：PASS**\nSPEC：1340\n作者：author\n独审：reviewer\n正文 sha256：{DIGEST}\n证据：/review_file.json\n"
+    },
+    {
+     "author": "owner",
+     "body": "SPEC 独审裁定：待重审"
+    }
+   ]
+  },
+  {
+   "name": "半角冒号 BLOCK 撤销旧 PASS",
+   "expected": false,
+   "comments": [
+    {
+     "author": "owner",
+     "body": "**SPEC 独审裁定：PASS**\nSPEC：1340\n作者：author\n独审：reviewer\n正文 sha256：{DIGEST}\n证据：/review_file.json\n"
+    },
+    {
+     "author": "owner",
+     "body": "SPEC 独审裁定:BLOCK"
+    }
+   ]
+  },
+  {
+   "name": "小写 spec 独审裁定 撤销旧 PASS",
+   "expected": false,
+   "comments": [
+    {
+     "author": "owner",
+     "body": "**SPEC 独审裁定：PASS**\nSPEC：1340\n作者：author\n独审：reviewer\n正文 sha256：{DIGEST}\n证据：/review_file.json\n"
+    },
+    {
+     "author": "owner",
+     "body": "spec独审裁定 有误，重做"
+    }
+   ]
+  },
+  {
+   "name": "BLOCK 之后引用旧 PASS 不重新放行",
+   "expected": false,
+   "comments": [
+    {
+     "author": "owner",
+     "body": "**SPEC 独审裁定：PASS**\nSPEC：1340\n作者：author\n独审：reviewer\n正文 sha256：{DIGEST}\n证据：/review_file.json\n"
+    },
+    {
+     "author": "owner",
+     "body": "**SPEC 独审裁定：BLOCK**\nSPEC：1340\n作者：author\n独审：reviewer\n正文 sha256：{DIGEST}\n证据：/review_file.json\n"
+    },
+    {
+     "author": "owner",
+     "body": "引用旧裁定供对照：\n> **SPEC 独审裁定：PASS**\n> SPEC：1340\n> 作者：author\n> 独审：reviewer\n> 正文 sha256：{DIGEST}\n> 证据：/review_file.json\n"
+    }
+   ]
+  },
+  {
+   "name": "BLOCK 之后以引用块开头的旧 PASS 不重新放行",
+   "expected": false,
+   "comments": [
+    {
+     "author": "owner",
+     "body": "**SPEC 独审裁定：PASS**\nSPEC：1340\n作者：author\n独审：reviewer\n正文 sha256：{DIGEST}\n证据：/review_file.json\n"
+    },
+    {
+     "author": "owner",
+     "body": "**SPEC 独审裁定：BLOCK**\nSPEC：1340\n作者：author\n独审：reviewer\n正文 sha256：{DIGEST}\n证据：/review_file.json\n"
+    },
+    {
+     "author": "owner",
+     "body": "> **SPEC 独审裁定：PASS**\n> SPEC：1340\n> 作者：author\n> 独审：reviewer\n> 正文 sha256：{DIGEST}\n> 证据：/review_file.json\n"
+    }
+   ]
+  },
+  {
+   "name": "驳回词撤销旧 PASS",
+   "expected": false,
+   "comments": [
+    {
+     "author": "owner",
+     "body": "**SPEC 独审裁定：PASS**\nSPEC：1340\n作者：author\n独审：reviewer\n正文 sha256：{DIGEST}\n证据：/review_file.json\n"
+    },
+    {
+     "author": "owner",
+     "body": "这版打回。"
+    }
+   ]
+  },
+  {
+   "name": "无关账号的合规 PASS 不放行",
+   "expected": false,
+   "comments": [
+    {
+     "author": "other",
+     "body": "**SPEC 独审裁定：PASS**\nSPEC：1340\n作者：author\n独审：reviewer\n正文 sha256：{DIGEST}\n证据：/review_file.json\n"
+    }
+   ]
+  },
+  {
+   "name": "作者与独审相同不放行",
+   "expected": false,
+   "comments": [
+    {
+     "author": "owner",
+     "body": "**SPEC 独审裁定：PASS**\nSPEC：1340\n作者：author\n独审：AUTHOR\n正文 sha256：{DIGEST}\n证据：/review_file.json\n"
+    }
+   ]
+  },
+  {
+   "name": "缺证据不放行",
+   "expected": false,
+   "comments": [
+    {
+     "author": "owner",
+     "body": "**SPEC 独审裁定：PASS**\nSPEC：1340\n作者：author\n独审：reviewer\n正文 sha256：{DIGEST}\n证据：\n"
+    }
+   ]
+  },
+  {
+   "name": "票号不符不放行",
+   "expected": false,
+   "comments": [
+    {
+     "author": "owner",
+     "body": "**SPEC 独审裁定：PASS**\nSPEC：1341\n作者：author\n独审：reviewer\n正文 sha256：{DIGEST}\n证据：/review_file.json\n"
+    }
+   ]
+  },
+  {
+   "name": "正文摘要不符不放行",
+   "expected": false,
+   "comments": [
+    {
+     "author": "owner",
+     "body": "**SPEC 独审裁定：PASS**\nSPEC：1340\n作者：author\n独审：reviewer\n正文 sha256：0000000000000000000000000000000000000000000000000000000000000000\n证据：/review_file.json\n"
+    }
+   ]
+  }
+ ]
+}

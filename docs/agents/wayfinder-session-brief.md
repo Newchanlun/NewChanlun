@@ -2,13 +2,14 @@
 
 > 由 `UserPromptSubmit` hook 自动注入（[#784](https://github.com/xy7365527-lang/NewChanlun/issues/784)）。你打的 `/wayfinder` 加载的是**通用 skill 正文**，下面是**本仓特有**的口径——通用正文里一个字都没有。
 
-## 先读这三份
+## 先读这四份
 
 1. `docs/agents/wayfinder-workflow.md` —— **本仓 wayfinder 唯一正本**（入流判据 / 五段管线 / 图的两行声明 / 四票型口径 / 一票一会话与并行纪律 / HITL 吞吐纪律 / 图正文写入协议 / 图的寿命与关图判据 / `/to-spec` 交棒边界 / 开票手续）
 2. `docs/agents/issue-tracker.md`「Wayfinding operations」段 —— tracker 物理操作（map/子票/blocking/frontier/claim/resolve 的 `gh` 命令）
 3. `AGENTS.md` —— 全 harness 唯一正本入口
+4. `docs/agents/doctrine-rules.md` —— 教义正本、#799 收敛通则、#804 总缝规则与引原文四步的完整条文（决策图的起草与独审必读）
 
-碰代码的图再追加 `docs/agents/delivery-discipline.md`。
+碰代码的图再追加 `.sandcastle/docs/graph-engineering.md`「交付与关票」；实体报告读 `.sandcastle/CODEX-CHILD.md`。
 
 ## 五条最容易忘的
 

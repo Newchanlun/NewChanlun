@@ -8,6 +8,8 @@ mod content_store;
 #[cfg_attr(not(test), allow(dead_code))]
 mod domain_event;
 mod evidence;
+mod exact_command;
+pub(crate) use exact_command::{check_condition_semantics, check_required_capabilities};
 mod finance;
 mod finance_transport;
 mod financial_reader_resources;
@@ -26,6 +28,14 @@ mod tb03c_per_leg;
 mod tb03c_transfer;
 mod voice;
 pub use service::cli;
+
+/// 单写者持久库的打开前件（本地文件系统、WAL、synchronous=FULL、fullfsync 及核验）。
+/// X 模拟库保存「S 只授权一次」的状态，与 E 共用同一实现，返回实际读到的存储证据。
+pub fn open_durable_db(
+    db: &std::path::Path,
+) -> Result<(rusqlite::Connection, serde_json::Value), String> {
+    store::open(db, false)
+}
 
 #[cfg(test)]
 mod domain_event_tests;
@@ -61,3 +71,35 @@ mod tb03c_kill_tests;
 mod tb03c_rf01_tests;
 #[cfg(test)]
 mod tb03c_v2_kill_tests;
+
+/// 容量 epoch 的累计差量复用 ADR0032 唯一配额算法；不复用 E 的投影清单名分。
+pub(crate) fn simulation_increment(
+    from: i64,
+    to: i64,
+    weights: &[i64],
+    ranks: &[usize],
+) -> Result<Vec<i64>, String> {
+    allocation::increments(from, to, weights, ranks)
+}
+
+/// 测试专用：写出桩脚本并设为可执行。内容先在本进程写到暂存文件，再由 `/bin/cp` 子进程复制成
+/// 真正被执行的文件：本进程从不持有该文件的写句柄，并行测试线程 fork 出的子进程就不会继承它，
+/// 执行时也就不会因 ETXTBSY（文本文件忙）失败。
+/// 不要改成 `std::fs::copy` 或直接 `std::fs::write`：两者都在本进程打开目标文件写入，竞态会原样回来。
+#[cfg(test)]
+pub(crate) fn write_test_executable(path: &std::path::Path, body: &str, mode: u32) {
+    use std::os::unix::fs::PermissionsExt;
+    let staged = path.with_file_name(format!(
+        "{}.staged",
+        path.file_name().unwrap().to_str().unwrap()
+    ));
+    std::fs::write(&staged, body).unwrap();
+    let copied = std::process::Command::new("/bin/cp")
+        .arg(&staged)
+        .arg(path)
+        .status()
+        .unwrap();
+    std::fs::remove_file(&staged).unwrap();
+    assert!(copied.success(), "复制桩脚本失败：{copied}");
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode)).unwrap();
+}

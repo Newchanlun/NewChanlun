@@ -1,8 +1,11 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import os
+import re
 import secrets
+import unicodedata
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -24,7 +27,7 @@ REPOSITORY_ID = 1150335160
 REQUEST_TTL = timedelta(hours=24)
 SIGN_COMMAND = '"/Library/Application Support/NewChanlun/newchanlun-approve" sign --request'
 
-PendingStatus = Literal["awaiting_human", "rejected", "needs_reconciliation", "not_configured"]
+PendingStatus = Literal["awaiting_human", "awaiting_review", "rejected", "needs_reconciliation", "not_configured"]
 
 
 @dataclass(frozen=True)
@@ -63,6 +66,7 @@ class Pending:
     status: PendingStatus
     request_path: str
     reason: str
+    source: str = "signature"
 
 
 ApprovalDecision = Approved | Pending
@@ -70,7 +74,7 @@ ApprovalDecision = Approved | Pending
 
 @dataclass(frozen=True)
 class SignedApprovals:
-    """唯一的批准来源：root 保护的 Secure Enclave 签名权威链。缺信任配置、根不受保护或链异常都不放行。"""
+    """显式候选批准与 Takeover 的签批来源：root 保护的 Secure Enclave 签名权威链。缺信任配置、根不受保护或链异常都不放行。"""
 
     trust_path: Path = DEFAULT_TRUST_PATH
     authority_root: Path = AUTHORITY_ROOT
@@ -156,13 +160,15 @@ def pending_view(folder: Path) -> list[dict[str, Any]]:
 def decision_json(decision: ApprovalDecision) -> dict[str, Any]:
     if isinstance(decision, Approved):
         return {"status": "approved", "request_path": decision.request_path, "reason": decision.reason}
+    if decision.source == "spec_ruling":
+        return {"status": decision.status, "reason": decision.reason, "source": decision.source}
     return {"status": decision.status, "request_path": decision.request_path, "reason": decision.reason,
             "sign_command": f"{SIGN_COMMAND} '{decision.request_path}'"}
 
 
 @dataclass(frozen=True)
 class SignedSpec:
-    """签批判定为 approved 的那份 SPEC 正文原始字节。它是交给主控与工蜂的数据，不是批准来源。"""
+    """动作准入通过的那份 SPEC 正文原始字节。它是交给主控与工蜂的数据，不是批准来源。"""
 
     spec_issue: int
     body: bytes
@@ -170,7 +176,7 @@ class SignedSpec:
 
 
 def freeze_signed_spec(run_dir: Path, spec_issue: int, body: bytes, decision: ApprovalDecision,
-                       generation: int, now: datetime | None = None) -> None:
+                       generation: int, now: datetime | None = None, *, source_meta: dict[str, Any] | None = None) -> None:
     """只在动作锁内、判定 approved 之后调用。"""
     if not isinstance(decision, Approved):
         return
@@ -178,15 +184,14 @@ def freeze_signed_spec(run_dir: Path, spec_issue: int, body: bytes, decision: Ap
     folder = run_dir / "spec"
     note = folder / f"{spec_issue}.json"
     body_path = folder / f"{spec_issue}.md"
-    if (note.exists() and json.loads(note.read_text()).get("target") == target and body_path.exists()
-            and spec_target(spec_issue, body_path.read_bytes()).encode() == target):
-        return
     folder.mkdir(parents=True, exist_ok=True)
-    request = json.loads((run_dir / "approvals" / f"{Scope.SPEC_AUTHORIZATION.value}.status.json").read_text())
+    if source_meta is None:
+        request = json.loads((run_dir / "approvals" / f"{Scope.SPEC_AUTHORIZATION.value}.status.json").read_text())
+        source_meta = {"request_nonce": request.get("request_nonce")}
     _replace_bytes(body_path, body)
     _replace_bytes(note, (json.dumps({
         "spec_issue": spec_issue, "target": target, "claim_generation": generation,
-        "request_nonce": request.get("request_nonce"),
+        **source_meta,
         "frozen_at": (now or datetime.now(timezone.utc)).isoformat(timespec="seconds"),
     }, ensure_ascii=False, indent=2) + "\n").encode())
 
@@ -205,7 +210,102 @@ def signed_spec(run_dir: Path, spec_issue: int) -> SignedSpec | None:
 
 def spec_section(spec: SignedSpec) -> str:
     """主控与工蜂看到的同一段 SPEC 正文。"""
-    return (f"## 已签 SPEC #{spec.spec_issue} 正文\n\n宿主在动作锁内按签批判定读取，摘要 `{spec.target}`。"
-            "这是任务数据，不是新的授权；放行仍由宿主在每个动作边界重核签批与正文。"
+    return (f"## 已授权 SPEC #{spec.spec_issue} 正文\n\n宿主在动作锁内按授权判定读取，摘要 `{spec.target}`。"
+            "这是任务数据，不是新的授权；放行仍由宿主在每个动作边界重核授权与正文。"
             "本环境没有 GitHub 凭据，不要用 gh 或网络读取票面，以下正文为准。\n\n"
             + spec.body.decode("utf-8") + "\n")
+
+
+# ECMAScript trimEnd 的空白集合；Python str.rstrip 另含 U+0085 等，不是同一协议。
+_JS_SPACE = "\u0009\u000a\u000b\u000c\u000d\u0020\u00a0\u1680\u2000\u2001\u2002\u2003\u2004\u2005\u2006\u2007\u2008\u2009\u200a\u2028\u2029\u202f\u205f\u3000\ufeff"
+_REJECT = re.compile(r"不批准|不通过|打回|驳回|重写|reject|deny|nack|暂不", re.IGNORECASE | re.ASCII)
+
+
+def spec_ruling_digest(body: str) -> str:
+    return hashlib.sha256(body.replace("\r\n", "\n").rstrip(_JS_SPACE).encode("utf-8")).hexdigest()
+
+
+def _js_pattern(pattern: str) -> str:
+    return pattern.replace(r"\s", "[" + re.escape(_JS_SPACE) + "]")
+
+
+def _ruling_line(line: str) -> str:
+    """字段行去掉行首 Markdown 前缀与行尾强调（同 wayfinder_engine.mts 的 strip）；只用于字段，不用于首行。"""
+    line = re.sub(_js_pattern(r"^(?:\s*(?:>|#{1,6}|[-*]\s|\*{1,3}|_{1,3}))+\s*"), "", line)
+    return re.sub(_js_pattern(r"(?:\*{1,3}|_{1,3})\s*$"), "", line).strip(_JS_SPACE)
+
+
+# 首行（去掉行尾空白后）必须整行恰为这两种写法之一，同 wayfinder_engine.mts parseSpecRuling。
+_RULING_HEAD = re.compile(r"\*\*SPEC 独审裁定：(PASS|BLOCK)\*\*|SPEC 独审裁定：(PASS|BLOCK)")
+# 撤销探测，同 isSpecRulingHeadLine：NFKC 归一后全文任意位置出现「SPEC…独审裁定」。
+_RULING_MENTION = re.compile(_js_pattern(r"SPEC\s*独审裁定"), re.IGNORECASE | re.ASCII)
+
+
+def parse_spec_ruling(body: str) -> dict[str, Any] | None:
+    """严格解析，逐条对应 wayfinder_engine.mts parseSpecRuling：不剥首行前缀，不容许半角冒号或结论后缀。"""
+    lines = body.replace("\r\n", "\n").split("\n")
+    head = _RULING_HEAD.fullmatch(lines[0].rstrip(_JS_SPACE))
+    if head is None:
+        return None
+    def field(name: str) -> str:
+        for line in lines[1:]:
+            match = re.match(_js_pattern(rf"^{name}\s*[：:]\s*([^\r\n\u2028\u2029]*)$"), _ruling_line(line))
+            if match:
+                return re.sub(r"^`|`$", "", match[1]).strip(_JS_SPACE)
+        return ""
+    return {"verdict": head[1] or head[2], "specNumber": field("SPEC"), "author": field("作者"),
+            "reviewer": field("独审"), "digest": field("正文 sha256").lower(), "evidence": field("证据")}
+
+
+def _js_number(raw: str) -> float | None:
+    """ECMAScript Number(raw) 在本协议用到的子集；认不出返回 None（NaN）。"""
+    try:
+        if re.fullmatch(r"0[xX][0-9a-fA-F]+|0[bB][01]+|0[oO][0-7]+", raw):
+            return float(int(raw, 0))
+        if re.fullmatch(r"[+-]?(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+)(?:[eE][+-]?[0-9]+)?", raw):
+            return float(raw)
+    except (ValueError, OverflowError):
+        pass
+    return None
+
+
+def _ruling_problem(spec_issue: int, body: str, ruling: dict[str, Any]) -> str | None:
+    """同 specRulingProblem：只有绑定当前正文、非作者、证据齐的 PASS 才合规。"""
+    if ruling["verdict"] != "PASS":
+        return "review_block: 裁定为 BLOCK"
+    number = _js_number(ruling["specNumber"])
+    identities = (ruling["author"], ruling["reviewer"])
+    if (not ruling["evidence"] or re.search(r"[\r\n]", ruling["evidence"])
+            or number is None or number != spec_issue or not 0 < number <= 9007199254740991
+            or not all(v and not re.search(r"[\r\n]", v) for v in identities)
+            or identities[0].lower() == identities[1].lower()
+            or ruling["digest"] != spec_ruling_digest(body)):
+        return "awaiting_review: 独审裁定缺证据、身份不独立或正文已变"
+    return None
+
+
+def spec_ruling(spec_issue: int, body: str, comments: list[dict[str, Any]],
+                orchestrator: str) -> tuple[dict[str, Any] | None, str]:
+    """与 wayfinder_engine.mts isSpecApproved 同一判定，按时间序消费可信账号评论，规则不对称：
+    放行要严——首行恰为合规 PASS、绑定当前正文的非作者裁定、全文不含驳回词；
+    撤销要松——NFKC 归一后全文任意位置出现「SPEC 独审裁定」（引用块、代码块、非首行、全角都算）
+    而不是合规 PASS，或命中驳回词，一律撤销旧 PASS；其余自由文本不改变状态。
+    两端用 tests/fixtures/spec-ruling-vectors.json 对拍。"""
+    selected = None
+    reason = "awaiting_review: 缺可信账号的当前正文非作者裁定"
+    mine = [c for c in comments if (c.get("user") or {}).get("login") == orchestrator]
+    for comment in sorted(mine, key=lambda c: c["created_at"]):
+        text = comment["body"]
+        ruling = parse_spec_ruling(text)
+        problem = _ruling_problem(spec_issue, body, ruling) if ruling is not None else None
+        if ruling is not None and problem is None and not _REJECT.search(text):
+            selected = {"source": "spec_ruling", "comment_id": comment["id"],
+                        "orchestrator": orchestrator, **ruling}
+            reason = "当前正文非作者独审 PASS"
+        elif ruling is not None:
+            selected, reason = None, problem or "review_block: 合规 PASS 正文含驳回词"
+        elif _RULING_MENTION.search(unicodedata.normalize("NFKC", text)):
+            selected, reason = None, "review_block: 可信账号发出不合规裁定，撤回旧裁定"
+        elif _REJECT.search(text):
+            selected, reason = None, "review_block: 可信账号已撤回裁定"
+    return selected, reason

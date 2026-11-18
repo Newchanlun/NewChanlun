@@ -8766,101 +8766,135 @@ mod tests {
         }
         let mut prior = s4_reachable(&native.conn);
         let mut rows = Vec::new();
-        for (index, step) in steps.iter().enumerate() {
-            let k = index + 1;
-            let e = s4_message(k, step);
-            let nodes_before = count(&native.conn, "s_content_nodes");
-            let probe = native.conn.sql_read_probe();
-            let (actual, events, work) = state::traced(true, || native.handle(e.clone()));
-            drop(probe);
-            let actual = actual.unwrap();
-            let generation = meta_i64(&native.conn, "generation").unwrap();
-            assert_eq!(generation, k as i64, "每步须恰好新发布一代：{actual}");
-            let delta = state::stage_rows(&events);
-            assert_eq!(
-                delta["paths"],
-                json!(["-", "delta"]),
-                "warm owner 第{k}代必须走 delta 增量车道：{delta}"
-            );
-            // #1640 路径断言：s_incremental 构建的增量臂稳态代不得进入完整分支（出生锁 D2）。
-            assert!(
-                full_births(&events).is_empty(),
-                "第{k}代增量臂调用了完整分支：{:?}",
-                full_births(&events)
-            );
-            for name in state::S4_STAGES {
-                assert_eq!(
-                    delta["stages"][name]["segments"], 1,
-                    "第{k}代阶段{name}缺标记：{delta}"
-                );
+        // #1875/#1890：冷臂（每代新 Runtime 冷全量重算，约占 S4 的 63%）在独立线程逐代推进，与本线程的增量臂和
+        //   只读 native 的两项对拍并行；每代在双边对拍前汇合，冷臂线程等到下一代消息才再写冷库。
+        //   冷链数据来源不变（第 k 代冷算只消费冷库第 k−1 代），对拍内容与次数不变。Driver 含 Rc 不能跨线程，
+        //   冷臂线程只交回回复、事件与回执；双边对拍由本线程另开普通连接读停在第 k 代的冷库。
+        std::thread::scope(|scope| {
+            // 通道建在 scope 闭包内：本线程断言失败展开时先丢掉发送端，冷臂线程的接收循环随即结束，scope 才能汇合，
+            //   测试立即报出断言而不是挂到超时；冷臂线程 panic 时它的发送端被丢，本线程 recv 立即失败。
+            let (to_cold, cold_inbox) = std::sync::mpsc::channel::<Value>();
+            let (cold_outbox, from_cold) = std::sync::mpsc::channel::<(Value, Vec<Value>, Value)>();
+            if cold {
+                let o = &o;
+                scope.spawn(move || {
+                    for e in cold_inbox {
+                        let (mut reader, expected, cold_events) = s4_cold_handle(o, &e);
+                        let receipt = reader.handle(receipt_request(&e)).unwrap();
+                        drop(reader);
+                        if cold_outbox.send((expected, cold_events, receipt)).is_err() {
+                            break;
+                        }
+                    }
+                });
+            } else {
+                drop((cold_inbox, cold_outbox));
             }
-            let reachable = s4_reachable(&native.conn);
-            let delta_r = reachable.difference(&prior).count();
-            let new_nodes = count(&native.conn, "s_content_nodes") - nodes_before;
-            let workspace = events.iter().any(|e| e["phase"] == "s4_manifest_workspace");
-            let mut row = json!({"generation":generation,"kind":step.kind,"bars_in_message":step.rows.len(),
+            for (index, step) in steps.iter().enumerate() {
+                let k = index + 1;
+                let e = s4_message(k, step);
+                if cold {
+                    to_cold.send(e.clone()).unwrap();
+                }
+                let nodes_before = count(&native.conn, "s_content_nodes");
+                let probe = native.conn.sql_read_probe();
+                let (actual, events, work) = state::traced(true, || native.handle(e.clone()));
+                drop(probe);
+                let actual = actual.unwrap();
+                let generation = meta_i64(&native.conn, "generation").unwrap();
+                assert_eq!(generation, k as i64, "每步须恰好新发布一代：{actual}");
+                let delta = state::stage_rows(&events);
+                assert_eq!(
+                    delta["paths"],
+                    json!(["-", "delta"]),
+                    "warm owner 第{k}代必须走 delta 增量车道：{delta}"
+                );
+                // #1640 路径断言：s_incremental 构建的增量臂稳态代不得进入完整分支（出生锁 D2）。
+                assert!(
+                    full_births(&events).is_empty(),
+                    "第{k}代增量臂调用了完整分支：{:?}",
+                    full_births(&events)
+                );
+                for name in state::S4_STAGES {
+                    assert_eq!(
+                        delta["stages"][name]["segments"], 1,
+                        "第{k}代阶段{name}缺标记：{delta}"
+                    );
+                }
+                let reachable = s4_reachable(&native.conn);
+                let delta_r = reachable.difference(&prior).count();
+                let new_nodes = count(&native.conn, "s_content_nodes") - nodes_before;
+                let workspace = events.iter().any(|e| e["phase"] == "s4_manifest_workspace");
+                let mut row = json!({"generation":generation,"kind":step.kind,"bars_in_message":step.rows.len(),
                 "manifest_workspace":workspace,
                 "raw_events":count(&native.conn, "raw_events"),"delta_r":delta_r,"reachable":reachable.len(),
                 "new_stored_nodes":new_nodes,"delta":delta,"work":work});
-            if cold {
-                let (mut reader, expected, cold_events) = s4_cold_handle(&o, &e);
-                // 回复、回执、全表（含全部节点）逐位相同；owner complete 与冷审计一致。
-                assert_eq!(actual, expected, "第{k}代回复分叉");
-                let full = state::stage_rows(&cold_events);
-                assert_eq!(full["paths"], json!(["-", "full"]), "冷臂须走完整路径");
-                // 冷臂每代新 Runtime：恰一次完整分支，入口为 startup。
-                assert_eq!(
-                    full_births(&cold_events),
-                    [json!("startup")],
-                    "第{k}代冷臂完整分支入口"
-                );
-                native.conn.assert_complete_matches_cold();
-                // 来源审计跨代增量状态不进入产物，单独与独立全量来源审计 Counts 六字段对拍。
-                let counts = super::super::audit_owner::construction_tests::b2_assert_counts_match_independent_full_source(
-                    &native.conn,
-                );
-                assert_eq!(
-                    native.handle(receipt_request(&e)).unwrap(),
-                    reader.handle(receipt_request(&e)).unwrap(),
-                    "第{k}代回执分叉"
-                );
-                // 非节点表逐表逐位；节点表按公共根可达闭包逐位（存储了但不可达的节点
-                // 不是产物，只记差集计数供诊断）。
-                let tables = prepared::tests::runtime_root_tables(&reader.conn, false);
-                for (left, right) in prepared::tests::runtime_root_tables(&native.conn, false)
-                    .iter()
-                    .zip(&tables)
-                {
-                    assert_eq!(left.0, right.0, "第{k}代表集分叉");
-                    assert!(
-                        left == right,
-                        "第{k}代({})表{}增量≠冷全量",
-                        step.kind,
-                        left.0
+                if cold {
+                    // 单线程时冷臂进入与退出都会清本线程的热车道，时点在增量臂之后、native 侧对拍之前；这里在同一时点清，
+                    //   保持增量臂与对拍所见的车道状态不变（冷臂线程里的两次清只作用于该线程）。
+                    s_fact_cache::warm_lane_reset();
+                    // complete 全量对拍 + 来源审计跨代增量状态（不进入产物）与独立全量来源审计 Counts 六字段对拍；
+                    // 两者在同一只读快照上共用一次冷 state::audit（#1890 / #2032）。只读 native，与冷臂线程并行。
+                    let counts =
+                        super::super::audit_owner::construction_tests::assert_complete_and_b2_counts(
+                            &native.conn,
+                        );
+                    let (expected, cold_events, cold_receipt) = from_cold.recv().unwrap();
+                    // 回复、回执、全表（含全部节点）逐位相同；owner complete 与冷审计一致。
+                    assert_eq!(actual, expected, "第{k}代回复分叉");
+                    let full = state::stage_rows(&cold_events);
+                    assert_eq!(full["paths"], json!(["-", "full"]), "冷臂须走完整路径");
+                    // 冷臂每代新 Runtime：恰一次完整分支，入口为 startup。
+                    assert_eq!(
+                        full_births(&cold_events),
+                        [json!("startup")],
+                        "第{k}代冷臂完整分支入口"
                     );
+                    assert_eq!(
+                        native.handle(receipt_request(&e)).unwrap(),
+                        cold_receipt,
+                        "第{k}代回执分叉"
+                    );
+                    let reader = Connection::open(&o.db).unwrap();
+                    // 非节点表逐表逐位；节点表按公共根可达闭包逐位（存储了但不可达的节点
+                    // 不是产物，只记差集计数供诊断）。
+                    let tables = prepared::tests::runtime_root_tables(&reader, false);
+                    for (left, right) in prepared::tests::runtime_root_tables(&native.conn, false)
+                        .iter()
+                        .zip(&tables)
+                    {
+                        assert_eq!(left.0, right.0, "第{k}代表集分叉");
+                        assert!(
+                            left == right,
+                            "第{k}代({})表{}增量≠冷全量",
+                            step.kind,
+                            left.0
+                        );
+                    }
+                    prepared::tests::runtime_root_compare_reachable_bytes(&native.conn, &reader);
+                    let stored = |c: &Connection| {
+                        c.prepare("SELECT digest FROM s_content_nodes")
+                            .unwrap()
+                            .query_map([], |r| r.get::<_, Vec<u8>>(0))
+                            .unwrap()
+                            .collect::<Result<std::collections::BTreeSet<_>, _>>()
+                            .unwrap()
+                    };
+                    let (delta_nodes, cold_nodes) = (stored(&native.conn), stored(&reader));
+                    let cold_reachable = s4_reachable(&reader);
+                    assert_eq!(reachable, cold_reachable, "第{k}代可达节点集分叉");
+                    row["stored_only_delta"] = json!(delta_nodes.difference(&cold_nodes).count());
+                    row["stored_only_cold"] = json!(cold_nodes.difference(&delta_nodes).count());
+                    row["source_counts"] = json!(format!("{counts:?}"));
+                    drop(reader);
+                    row["full"] = full;
                 }
-                prepared::tests::runtime_root_compare_reachable_bytes(&native.conn, &reader.conn);
-                let stored = |c: &Connection| {
-                    c.prepare("SELECT digest FROM s_content_nodes")
-                        .unwrap()
-                        .query_map([], |r| r.get::<_, Vec<u8>>(0))
-                        .unwrap()
-                        .collect::<Result<std::collections::BTreeSet<_>, _>>()
-                        .unwrap()
-                };
-                let (delta_nodes, cold_nodes) = (stored(&native.conn), stored(&reader.conn));
-                let cold_reachable = s4_reachable(&reader.conn);
-                assert_eq!(reachable, cold_reachable, "第{k}代可达节点集分叉");
-                row["stored_only_delta"] = json!(delta_nodes.difference(&cold_nodes).count());
-                row["stored_only_cold"] = json!(cold_nodes.difference(&delta_nodes).count());
-                row["source_counts"] = json!(format!("{counts:?}"));
-                drop(reader);
-                row["full"] = full;
+                prior = reachable;
+                eprintln!("S4_STAGE_ROW {row}");
+                rows.push(row);
             }
-            prior = reachable;
-            eprintln!("S4_STAGE_ROW {row}");
-            rows.push(row);
-        }
+            drop(to_cold);
+        });
         rows
     }
     #[cfg(feature = "s_incremental")]
@@ -8875,7 +8909,7 @@ mod tests {
     /// 与「新 Runtime + 清车道 + oracle」冷全量重算逐位相同；六阶段标记逐代齐全。
     ///
     /// release-only（fix-0089 负责人裁定）：debug 下 O(N²) 超 50 分钟，release 约 1000–1200 s；
-    /// 不缩代数、不削弱比较，由 issue-1488-uo-iter.yml 的 Native 组 release 步与
+    /// 不缩代数、不削弱比较，由 ci.yml 的 release-locks 组与
     /// `.github/1488-uo-release-locks.txt` 以 `--release --ignored --exact` 执行。
     #[cfg(feature = "s_incremental")]
     #[test]

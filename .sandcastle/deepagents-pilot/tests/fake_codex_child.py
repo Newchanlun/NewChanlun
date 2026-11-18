@@ -21,7 +21,8 @@ os.mkdir(out)
 with open(home / "fake-claims.log", "a") as fh:
     fh.write(f"{out.name}\n")
 state = {"status": "running", "process_pid": os.getpid()}
-(out / "state.json").write_text(json.dumps(state))
+(out / "state.json.tmp").write_text(json.dumps(state))
+(out / "state.json.tmp").replace(out / "state.json")
 time.sleep(step.get("sleep", 0))
 for rel, content in step.get("write", {}).items():
     target = Path(args.checkout) / rel
@@ -33,7 +34,7 @@ status = subprocess.run(["git", "-C", args.checkout, "status", "--porcelain=v1",
 report = ({"confidence": step.get("confidence", "medium"), "caveats": step.get("caveats", ["仅夹具验证"])}
           if args.output_protocol == "deepagents-self-report-v1" else {})
 summary = step.get("summaries", {}).get(args.expected_head, step.get("summary", "完成"))
-(out / "result.json").write_text(json.dumps({
+(out / "result.json.tmp").write_text(json.dumps({
     **({"output_protocol": args.output_protocol} if args.output_protocol else {}),
     "ticket": int(args.ticket), "run_id": str(uuid.uuid4()), "status": step.get("status", "completed"),
     "mode": args.mode, "model": args.model, "expected_head": args.expected_head,
@@ -41,4 +42,5 @@ summary = step.get("summaries", {}).get(args.expected_head, step.get("summary", 
     "external_session_log": "/dev/null", "failure_reason": None,
     "result": {"status": "completed", "summary": summary, "findings": step.get("findings", []), "validation": step.get("validation", []), **report},
 }))
+(out / "result.json.tmp").replace(out / "result.json")
 sys.exit(0)

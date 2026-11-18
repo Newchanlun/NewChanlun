@@ -37,6 +37,13 @@ export function swarmAgent(): AgentProvider {
   return codexWorker({ docker: true });
 }
 
+/** CLIProxy 对部分上游在 response.model 里回传上游型号名，而不是请求的型号名。
+ *  只认这里显式登记的对应（2026-11-07 实测：请求 kimi-k3.1-pro，回传 k3.1-pro），不做前缀或模糊匹配。 */
+const UPSTREAM_RESPONSE_MODEL_IDS: Readonly<Record<string, readonly string[]>> = { "kimi-k3.1-pro": ["k3.1-pro"] };
+export function responseModelIds(model: string): readonly string[] {
+  return [model, ...(UPSTREAM_RESPONSE_MODEL_IDS[model] ?? [])];
+}
+
 export const DOCKER_MODEL_PROBE = String.raw`
 (async () => {
   const baseUrl = process.env.CLIPROXY_BASE_URL;
@@ -56,7 +63,7 @@ export const DOCKER_MODEL_PROBE = String.raw`
   });
   const payload = await response.json();
   if (!response.ok) throw new Error("HTTP " + response.status + ": " + (payload?.error?.type || "model request failed"));
-  if (payload?.object !== "response" || payload?.status !== "completed" || payload?.model !== "${MAIN_MODEL}") {
+  if (payload?.object !== "response" || payload?.status !== "completed" || !${JSON.stringify(responseModelIds(MAIN_MODEL))}.includes(payload?.model)) {
     throw new Error("response is not a ${MAIN_MODEL} message");
   }
   console.log("MAIN_MODEL_HTTP_OK model=" + payload.model);

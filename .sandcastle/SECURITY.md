@@ -35,7 +35,7 @@ sandcastle 自动从 `.sandcastle/.env` 与 `process.env` 解析环境变量注�
 
 - **形态**：`gh` CLI 的 OAuth token，`repo` 全 scope（#1005 关票）。
 - **为什么是 repo 全 scope**：sandcastle 官方文档/envExample 只写细粒度 PAT「Issues RW + Metadata R」，但上游 issue #937 证实推分支、开 PR 还需 **Contents RW + Pull requests RW**；申领时按后者放全（#1005 权限修正）。本仓直接取 `gh` OAuth token，免人工申领 PAT，天然覆盖。
-- **能力 vs 纪律的落差（如实标注）**：token 技术上具备本仓全部读写能力（push、合 PR、关票均可为）；「工蜂不关票、不 push、不合 main」是 **prompt 层硬性规则与编排层人工闸**，不是权限位强制。信任模型是「凭据够宽让流程跑得动，约束靠流程兜住」。
+- **能力 vs 纪律的落差（如实标注）**：token 技术上具备本仓全部读写能力（push、合 PR、关票均可为）；「工蜂不关票、不 push、不合 main」是 **prompt 层硬性规则**，不是权限位强制。合入 main 的硬约束是 main 分支保护（必需检查 `deepagents/review` 与 `ci-ok`、strict 追平、管理员同受约束），它挡的是没过检查的合入，不区分是谁合入。信任模型是「凭据够宽让流程跑得动，约束靠流程兜住」。
 - **附带注入**：蜂群场景另注入 `GH_REPO=xy7365527-lang/NewChanlun`（clone 场景 origin 是本地路径，`gh` 靠它认仓，#1009）。
 
 ## 3. 沙盒网络面
@@ -51,7 +51,7 @@ sandcastle 自动从 `.sandcastle/.env` 与 `process.env` 解析环境变量注�
 2. key 从宿主 `auth.json` **静默迁移**：不打印值、不写任何已跟踪文件（#1006 裁定原文）；
 3. **Dockerfile 与镜像资产不含任何 key**——provider 凭据只在运行时经 env 注入（`image/prime-agent-settings.json` 只登记 MCP server，凭据字段为零）；
 4. 工蜂 prompt 硬性规则「密钥永不写入任何文件」；commit 前评审面含密钥扫描；
-5. 任何会话导出/备份/工具残留按 AGENTS.md 名分四态禁入仓。
+5. 任何会话导出/备份/工具残留按 `docs/adr/0004-generation-constitution.md`「名分五态」 名分判定禁入仓。
 
 ## 5. prebake 的 `--change` 清 Env 机制
 
