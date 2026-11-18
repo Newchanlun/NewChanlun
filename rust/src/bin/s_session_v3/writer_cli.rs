@@ -8,7 +8,9 @@
 use super::driver::Driver;
 use super::*;
 use newchan_rust::session_protocol::{positive, validate_envelope};
-use newchan_rust::session_transport::{serve_unix, TransportBounds};
+use newchan_rust::session_transport::{
+    serve_unix_with_shutdown, ShutdownMode, TransportBounds, SHUTDOWN_CONTROL_FLAG,
+};
 #[cfg(test)]
 use std::io::Read;
 #[cfg(test)]
@@ -57,7 +59,8 @@ const GATE_FIELDS_TEXT: &str =
 /// 旧启动器对 Unix socket 路径的 100 字节上限（`s_service_control.py`），本入口沿用。
 const SOCKET_PATH_BYTES: usize = 100;
 
-const SERVE_FLAGS: [&str; 9] = [
+const SERVE_FLAGS: [&str; 10] = [
+    SHUTDOWN_CONTROL_FLAG,
     "--structure-source",
     "--admission-job-limits",
     "--protocol-revision",
@@ -220,6 +223,7 @@ fn err(e: impl std::fmt::Display) -> String {
 }
 
 struct ServeOptions {
+    shutdown: ShutdownMode,
     db: PathBuf,
     profile: PathBuf,
     epoch: String,
@@ -414,6 +418,9 @@ impl ServeOptions {
         let values = parse_flags("serve", args, &SERVE_FLAGS)?;
         selector(&values, "serve")?;
         Ok(Self {
+            shutdown: ShutdownMode::from_option(
+                values.get(SHUTDOWN_CONTROL_FLAG).map(String::as_str),
+            )?,
             structure_source: values.get("--structure-source").map(PathBuf::from),
             db: existing_file(required(&values, "serve", "--db")?, "--db")?,
             profile: existing_file(required(&values, "serve", "--profile")?, "--profile")?,
@@ -714,10 +721,11 @@ fn serve_diagnostic_fixture(
     driver.check_structure_source(options.structure_source.as_deref())?;
     driver.finish_startup()?;
     let bounds = resources.transport_bounds();
-    serve_unix(
+    serve_unix_with_shutdown(
         &options.socket,
         bounds,
         |value| validate_envelope(value, PROTOCOL_REVISION),
+        options.shutdown,
         |envelope| {
             reply(
                 envelope,
@@ -845,10 +853,11 @@ fn serve_with_policy(
     driver.check_structure_source(options.structure_source.as_deref())?;
     driver.finish_startup()?;
     let bounds = resources.transport_bounds();
-    serve_unix(
+    serve_unix_with_shutdown(
         &options.socket,
         bounds,
         |value| validate_envelope(value, PROTOCOL_REVISION),
+        options.shutdown,
         |envelope| {
             reply(
                 envelope,

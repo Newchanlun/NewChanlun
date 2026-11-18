@@ -13,7 +13,9 @@
 //!   `_redact`）过滤后写 stderr。
 //!
 //! 用法：production_session --manifest FILE
-use newchan_rust::session_transport::{SUPERVISED_STOP_BYTE, SUPERVISED_STOP_ENV};
+use newchan_rust::session_transport::{
+    SHUTDOWN_CONTROL_FLAG, SHUTDOWN_STDIN_V1, SUPERVISED_STOP_BYTE,
+};
 use newchan_rust::structure_source::Declaration;
 use serde_json::{json, Value};
 use std::collections::BTreeSet;
@@ -405,7 +407,8 @@ fn spawn_domains(
     let mut spawn = |domain: String, mut c: Command, critical: bool| -> Result<(), String> {
         c.stdout(Stdio::null());
         if critical {
-            c.stdin(Stdio::piped()).env(SUPERVISED_STOP_ENV, "1");
+            c.stdin(Stdio::piped())
+                .args([SHUTDOWN_CONTROL_FLAG, SHUTDOWN_STDIN_V1]);
         }
         let child = c
             .spawn()

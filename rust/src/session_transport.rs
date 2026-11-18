@@ -620,39 +620,96 @@ pub fn serve_unix(
     socket: &Path,
     bounds: TransportBounds,
     validate: EnvelopeValidator,
+    handler: impl FnMut(&Value) -> Value,
+) -> Result<(), String> {
+    serve_unix_with_shutdown(socket, bounds, validate, ShutdownMode::Standalone, handler)
+}
+
+pub fn serve_unix_with_shutdown(
+    socket: &Path,
+    bounds: TransportBounds,
+    validate: EnvelopeValidator,
+    shutdown: ShutdownMode,
     mut handler: impl FnMut(&Value) -> Value,
 ) -> Result<(), String> {
-    serve_unix_inner(socket, bounds, validate, legacy_job, |job: &Job| {
-        handler(&job.envelope)
-    })
+    serve_unix_inner(
+        socket,
+        bounds,
+        validate,
+        shutdown,
+        legacy_job,
+        |job: &Job| handler(&job.envelope),
+    )
 }
-/// New economic domain only: deliver the I/O thread's original response
-/// deadline to the actor as trusted memory context. It is never wire data.
+
+/// 只给经济域传入由 I/O 线程记录的可信响应期限；不从信封取期限。
 pub fn serve_unix_with_deadline(
     socket: &Path,
     bounds: TransportBounds,
     validate: EnvelopeValidator,
+    handler: impl FnMut(&Value, Instant) -> Value,
+) -> Result<(), String> {
+    serve_unix_with_deadline_and_shutdown(
+        socket,
+        bounds,
+        validate,
+        ShutdownMode::Standalone,
+        handler,
+    )
+}
+
+pub fn serve_unix_with_deadline_and_shutdown(
+    socket: &Path,
+    bounds: TransportBounds,
+    validate: EnvelopeValidator,
+    shutdown: ShutdownMode,
     mut handler: impl FnMut(&Value, Instant) -> Value,
 ) -> Result<(), String> {
-    serve_unix_inner(socket, bounds, validate, timed_job, |job: &TimedJob| {
-        handler(&job.job.envelope, job.response_deadline)
-    })
+    serve_unix_inner(
+        socket,
+        bounds,
+        validate,
+        shutdown,
+        timed_job,
+        |job: &TimedJob| handler(&job.job.envelope, job.response_deadline),
+    )
 }
-/// 私有 launcher → 域进程关停管道约定，不是业务 socket 的命令。
-pub const SUPERVISED_STOP_ENV: &str = "NC_SESSION_SUPERVISED_STOP";
+
+/// Launcher 私有控制管道协定，不从环境或业务 socket 启用。
+pub const SHUTDOWN_CONTROL_FLAG: &str = "--shutdown-control";
+pub const SHUTDOWN_STDIN_V1: &str = "stdin/1";
 pub const SUPERVISED_STOP_BYTE: u8 = 1;
 const STOP_POLL: Duration = Duration::from_millis(25);
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum ShutdownMode {
+    Standalone,
+    SupervisedStdin,
+}
+
+impl ShutdownMode {
+    pub fn from_option(value: Option<&str>) -> Result<Self, String> {
+        match value {
+            None => Ok(Self::Standalone),
+            Some(SHUTDOWN_STDIN_V1) => Ok(Self::SupervisedStdin),
+            Some(_) => Err(format!(
+                "InvalidDomain：{SHUTDOWN_CONTROL_FLAG} 只接受 {SHUTDOWN_STDIN_V1}"
+            )),
+        }
+    }
+}
 
 fn serve_unix_inner<T: QueuedJob + 'static>(
     socket: &Path,
     bounds: TransportBounds,
     validate: EnvelopeValidator,
+    shutdown: ShutdownMode,
     make_job: fn(Value, mpsc::SyncSender<Value>, Instant) -> T,
     mut handler: impl FnMut(&T) -> Value,
 ) -> Result<(), String> {
     // 只有 launcher 传来的私有管道允许有序关停。EOF（包括 launcher 崩溃）
     // 不是关停请求；普通独立 serve 的启动与残留路径行为不变。
-    let supervised = std::env::var_os(SUPERVISED_STOP_ENV).as_deref() == Some("1".as_ref());
+    let supervised = shutdown == ShutdownMode::SupervisedStdin;
     let listener = UnixListener::bind(socket)
         .map_err(|e| format!("TransportUnavailable：socket绑定失败 {e}"))?;
     if supervised {

@@ -1039,6 +1039,32 @@ fn closing_writer_does_not_claim_or_touch_replaced_socket() {
 }
 
 #[test]
+fn standalone_s_ignores_obsolete_launcher_environment_and_pipe_byte() {
+    let space = Space::new();
+    let db = s_init_v3(&space, Some(&declaration("TestOnlyStructure", DECLARED_NS)));
+    let limits = anchor(&db);
+    let socket = space.path("s.sock");
+    let mut child = s_serve_command(&space, &db, &limits)
+        .stdin(Stdio::piped())
+        .env("NC_SESSION_SUPERVISED_STOP", "1")
+        .spawn()
+        .unwrap();
+    eventually("独立 S 入口", || UnixStream::connect(&socket).is_ok());
+    let mut input = child.stdin.take().unwrap();
+    input.write_all(&[1]).unwrap();
+    drop(input);
+    let deadline = Instant::now() + Duration::from_millis(300);
+    while Instant::now() < deadline {
+        assert!(child.try_wait().unwrap().is_none(), "环境不能启用受管关停");
+        std::thread::sleep(Duration::from_millis(25));
+    }
+    let result = s_ingest(&socket, DECLARED_NS, 1);
+    child.kill().unwrap();
+    child.wait().unwrap();
+    assert_eq!(result["payload"]["kind"], "Committed", "{result}");
+}
+
+#[test]
 fn killed_s_is_not_orderly_and_its_socket_remains_for_explicit_recovery() {
     let space = Space::new();
     let (manifest, _) = simulation(&space, "simulation", false);
