@@ -15,7 +15,7 @@ Infer the repo from `git remote -v` — `gh` does this automatically when run in
 
 ## `main` 与 CI
 
-Git 线名分与基线以 [`generation-constitution.md` §2](generation-constitution.md#2-现役线名单) 为唯一正本。本 tracker 的操作差分：新 PR 的 base 选 `main`；验收/关票引用 `main` 对应的 CI run；查旧 issue、PR 或 run 时，`main-rewritten` 只作为历史分支名检索。
+Git 线名分与基线以 [ADR 0004「现役线与工位」](../adr/0004-generation-constitution.md#现役线与工位) 为唯一正本。本 tracker 的操作差分：新 PR 的 base 选 `main`；验收/关票引用 `main` 对应的 CI run；查旧 issue、PR 或 run 时，`main-rewritten` 只作为历史分支名检索。
 
 ## Pull requests as a triage surface
 

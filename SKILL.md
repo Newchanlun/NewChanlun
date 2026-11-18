@@ -93,7 +93,6 @@ Gemini 是外部验证工具（MCP tool call），不在 Agent Teams 内部。�
 | `.chanlun/genealogy/` | 读+写 | 谱系记录。矛盾处理后必须写入 |
 | `docs/chanlun/text/blog/` | 只读 | 缠师原文（一级权威） |
 | `docs/chanlun/text/chan99/` | 只读 | 编纂版（二级权威） |
-| `.chanlun/sessions/` | 读+写 | 会话状态 |
 
 **权威等级：** 原文(blog/) > 编纂版(chan99/) > 当前定义(definitions/)。上级否定下级时，写source-tracing谱系，不自行修改定义。
 

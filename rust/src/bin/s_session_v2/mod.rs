@@ -13,7 +13,6 @@ use newchan_rust::session_transport::{self, serve_unix, TransportBounds};
 use newchan_rust::sqlite_checked::{CheckedRow, CheckedStatement};
 use std::ffi::CStr;
 use std::fmt;
-use std::fs::File;
 use std::time::Duration;
 #[cfg(test)]
 use std::time::Instant;
@@ -2740,7 +2739,7 @@ fn persisted_commit_ns(
     )
 }
 
-fn process_lock(db: &Path) -> Result<File, String> {
+fn process_lock(db: &Path) -> Result<session_transport::ProcessLock, String> {
     session_transport::process_lock(db, "S")
 }
 fn init_v2(
@@ -3373,7 +3372,7 @@ pub enum LegacyWriteGuard {
             dead_code,
             reason = "#1527：文件持有本身保持 init/reset 锁直到 guard 析构"
         )]
-        File,
+        session_transport::ProcessLock,
     ),
     Existing(crate::v3::admission::WriterScope),
 }

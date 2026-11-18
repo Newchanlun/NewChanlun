@@ -32,14 +32,15 @@ decision.load_trust = lambda path: parse_trust(Path(config['trust']).read_bytes(
 authority.trust_path_problem = lambda path: None
 home = Path(config['home'])
 unit, task = load_unit(home, config['run_id'])
-identity = AppIdentity(5486877, 175617978, 1150335160, REPO, 'newchanlun-deepagents-1742', Path(config['pem']))
+identity = AppIdentity(5486877, 179444545, 1150335160, REPO, 'newchanlun-deepagents-1742', Path(config['pem']))
 gateway = RepoGateway(GitHubAppClient(identity, transport=httpx.MockTransport(request), permissions=WRITE_PERMISSIONS))
 executor = TicketExecutor(unit, gateway, claims=ClaimStore(Path(config['claims'])),
                           workers_log=Path(config['workers']),
                           approvals=SignedApprovals(authority_root=Path(config['authority'])),
                           cutover=CutoverStore(home, Path(config['drain']), Path(config['workers'])),
                           crash=_sigkill_at(config['crash']), status_locks=home / 'status-locks')
-with patch('pilot1742.run.new_execution', return_value=HistoricalLocal('test-launcher')):
+with (patch('pilot1742.run.new_execution', return_value=HistoricalLocal('test-launcher')),
+      patch('pilot1742.run.DISPATCH_FREE_BYTES', 0)):
     run = open_v2_run(home, unit, task, executor, MODELS, launcher=FAKE, source_repo=Path(config['source']))
 try:
     if not run.facts().commits:

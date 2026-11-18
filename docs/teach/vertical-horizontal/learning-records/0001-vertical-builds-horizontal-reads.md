@@ -41,4 +41,4 @@
 - [MISSION.md](../MISSION.md)
 - [术语表 glossary.html](../reference/glossary.html)
 - [第 0001 课](../lessons/0001-vertical-builds-horizontal-reads.html)
-- [ADR 0010](../../adr/0010-chong-persistent-operating-unit.md)
+- [ADR 0010](../../../adr/0010-chong-persistent-operating-unit.md)

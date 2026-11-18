@@ -11,7 +11,7 @@ use newchan_rust::theta_v0::config::ParseConfig;
 use newchan_rust::theta_v0::parser::{
     feature_seq::SecondTerminal,
     second_fold::{SecondCandidateId, SecondFoldStore},
-    segment::{SegmentFacts, CONSTRUCTION_RULE},
+    segment::{SegmentCandidateFact, SegmentFacts, CONSTRUCTION_RULE},
     stroke::StrokeFacts,
 };
 
@@ -122,6 +122,27 @@ fn stroke_refs(
     (refs, sources)
 }
 
+/// #1978：CC-012 按 `[start_stroke, observed_through]` 投影 `stroke_refs`、按 `raw_elements` 投影 CC-055
+/// `member_of`。任一特征元素越出本段，两条事实就互相矛盾（`scan.from_stroke` 也会大于 `through_stroke`），
+/// 构造期拒写，不留给来源核报。v3 结构写者共用。
+pub(super) fn candidate_members_inside(c: &SegmentCandidateFact) -> Result<(), String> {
+    let elements = c
+        .first
+        .raw_elements
+        .iter()
+        .chain(c.second.iter().flat_map(|s| s.raw_elements.iter()));
+    match elements
+        .map(|e| e.stroke_idx)
+        .find(|&k| k < c.start_stroke || k > c.observed_through)
+    {
+        Some(k) => Err(format!(
+            "TB-02-C：候选特征元素笔 {k} 越出本段 [{}, {}]（#1978）",
+            c.start_stroke, c.observed_through
+        )),
+        None => Ok(()),
+    }
+}
+
 pub(super) fn build(
     facts: &SegmentFacts,
     strokes: &StrokeFacts,
@@ -213,6 +234,7 @@ pub(super) fn build(
     let mut active = std::collections::BTreeSet::new();
     let mut waiting = facts.waiting_reasons.clone();
     for c in &facts.candidates {
+        candidate_members_inside(c)?;
         let bi = &strokes.strokes[c.start_stroke];
         let entity = format!("segment:{generation}:{}", bi.identity_anchor);
         let sequence = format!("first:{entity}");
@@ -563,6 +585,81 @@ mod tests {
             String::from_utf8_lossy(&output.stderr)
         );
     }
+    /// #1978：构造期守卫。真实工厂候选全部通过；同一份事实只往 FIRST 里塞一个越出本段的元素，`build`
+    /// 即以「越出本段」拒写，而不是发布一条与 `stroke_refs` 矛盾的 `member_of`。
+    #[test]
+    fn tb02c_rejects_feature_member_outside_candidate_range() {
+        let ledger: Value = serde_json::from_str(include_str!(
+            "../../../../s_session/tests/fixtures/tb02d/raw-ledger.json"
+        ))
+        .unwrap();
+        let mut forged = 0;
+        for values in ledger["cases"].as_object().unwrap().values() {
+            let rows = values.as_array().unwrap();
+            let bars: Vec<Bar> = rows
+                .iter()
+                .enumerate()
+                .map(|(i, row)| Bar {
+                    source_index: i,
+                    timestamp: i as i64,
+                    open: row["open"].as_i64().unwrap(),
+                    high: row["high"].as_i64().unwrap(),
+                    low: row["low"].as_i64().unwrap(),
+                    close: row["close"].as_i64().unwrap(),
+                    volume: 1.0,
+                    untradable: false,
+                })
+                .collect();
+            let (_, facts, store) =
+                newchan_rust::theta_v0::parser::parse_layer_with_inclusion_facts_store(
+                    &bars,
+                    &ThetaConfig::default(),
+                    second_store(&ThetaConfig::default().parse),
+                );
+            let mut segment_facts = facts.segment_facts.clone().unwrap();
+            for c in &segment_facts.candidates {
+                candidate_members_inside(c).unwrap();
+            }
+            let Some(c) = segment_facts.candidates.first_mut() else {
+                continue;
+            };
+            let outside = c.observed_through + 1;
+            c.first.raw_elements.push(
+                newchan_rust::theta_v0::parser::feature_seq::FeatureElement {
+                    high: 1,
+                    low: 0,
+                    stroke_idx: outside,
+                    stroke_indices: vec![outside],
+                    window_members: vec![],
+                },
+            );
+            let raw: BTreeMap<i64, Value> = rows.iter().enumerate().map(|(i,row)| (i as i64,json!({
+                "identity_key":format!("raw-{i}"),"payload_hash":sha256_hex(canonical_json(row).as_bytes()),
+                "receipt_id":format!("receipt-{i}"),"event_id":format!("bar-{i}"),"input_revision":"1","revision":1,"seq":i,"source_coord":i.to_string(),"received_at":"2000-01-01T00:00:00Z"
+            }))).collect();
+            let n = rows.len() as i64;
+            let error = build(
+                &segment_facts,
+                facts.stroke_facts.as_ref().unwrap(),
+                &raw,
+                &[],
+                &[],
+                n,
+                &format!("cut-{n}"),
+                n - 1,
+                None,
+                &store,
+            )
+            .unwrap_err();
+            assert!(
+                error.contains(&format!("特征元素笔 {outside} 越出本段")),
+                "{error}"
+            );
+            forged += 1;
+        }
+        assert!(forged > 0, "夹具须有候选");
+    }
+
     /// #1420 独审 INFO：第二种候选不在游标簿是 S 不变式破坏；`build` 返回 IdentityConflict 错误，
     /// 不 panic（会话路径上 panic 会带走整个 S 进程）。同一输入配真游标簿照常成功。
     #[test]

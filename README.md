@@ -117,18 +117,6 @@ K4 六条边中，背驰方向的分歧率稳定在 22.2%（±2%）。这是结�
 
 338 号在 268a 号四项异质否定后做出修正：初始自有资金动态重置语义、止损未完成降成本边界条件补全等。
 
-### 纲目结构（gangmu.yaml）
-
-总方针展开为五纲十三目，覆盖从实盘闭环到知识谱系的全维度：
-
-| 纲 | 名称 | 核心内容 | 活跃目数 |
-|----|------|----------|----------|
-| 一 | 实盘闭环 | 缠论管线→操作方法论→K4 监控→实盘交易 | 1 active / 2 closed |
-| 二 | 四矩阵全域 | K4 配置→板块→个股的全域资本流转判断 | 2 active / 3 closed |
-| 三 | 区块拓扑 | 谱系的物质形式——三层架构 | 1 active / 1 closed |
-| 四 | 蜂群基础设施 | ceremony/RTAS/质询/共识/结晶 | 0 active / 2 closed |
-| 五 | 知识谱系 | 穿越基础设施 + 偶遇记录 + Morse 数学 | 1 active |
-
 ---
 
 ## 区块拓扑：谱系的物质形式
@@ -145,7 +133,7 @@ K4 六条边中，背驰方向的分歧率稳定在 22.2%（±2%）。这是结�
 
 ### 当前规模
 
-- **1194 个区块**：覆盖全部 342 条谱系 + 概念注册表 + 分析产出
+- **1194 个区块**：覆盖全部已结算谱系（含已移出仓库的条目）+ 概念注册表 + 分析产出
 - **6650 条关系**：区块间的有向依赖/否定/扩展关系
 - **概念注册表**：1148 个已定义概念
 - **内容充实**：313 个区块经过内容充实（概念提取 + 关系自动发现）
@@ -161,184 +149,35 @@ K4 六条边中，背驰方向的分歧率稳定在 22.2%（±2%）。这是结�
 
 ---
 
-## 递归拓扑异步自指蜂群
-
-### 为什么不是普通 agent team
-
-形式化缠论的过程中反复遇到**概念矛盾**——不是代码 bug，而是定义之间的冲突。这些矛盾是系统最有价值的产出。为了系统化地发现和处理矛盾，我们建立了一套方法论，最终演化为**递归拓扑异步自指蜂群**。
-
-它不是普通的 multi-agent 系统。四个不可分离的维度：
-
-| 维度 | 功能 | 工程对应 |
-|------|------|----------|
-| **递归** | 执行动力，向下展开 | Agent Team 真调用栈递归（TeamCreate → Task(team_name)），深度上限 ≈ 3-4 层 |
-| **拓扑** | DAG 路由，定义连接模式 | dispatch-dag.yaml（9 节点偏序集 + genome_layer + platform_layer） |
-| **异步自指** | 系统在 t 时刻审查 t-1 时刻的自己 | meta-observer 自环 |
-| **结晶** | 状态沉淀，向上收敛 | 谱系/定义/session/skill 的析出 |
-
-### 五约束有向依赖图（093 号谱系）
-
-蜂群架构从系统物理限制独立推导出五个约束及其有向依赖关系：
-
-| # | 约束 | 来源 | 失效后果 |
-|---|------|------|----------|
-| 1a | 物理持久化 | agent 临时、上下文有限 | 信息丢失 |
-| 1b | 符号可解释性 | 跨实例无共享记忆 | 信息噪声化 |
-| 2 | 规则先在性 | spawn 在执行前完成 | 不可预测行为 |
-| 3 | 执行不可自观性 | token 单向生成 | 无法即时自修正 |
-| 4 | 异质验证必要性 | 同质系统盲点不可自检 | 自我确认循环 |
-
-**拓扑结构**：
-
-```
-核心环路（操作性依赖）：
-  1a（持久化）→ 1b（可解释性）→ 2（先在性）→ 3（不可自观性）
-  ↑                                                    │
-  └────────────────────────────────────────────────────┘
-  约束3使约束1a/1b必要；约束2缓解约束3
-
-审计层（结构性校验）：
-  4（异质验证）→ [核心环路整体]
-  约束4只能通过约束1a/1b的外化产出观察核心环路
-```
-
-**异步自指**是约束3（执行不可自观性）的工程表现形式——当前 LLM 不能同步读写自身，因此审查必须异步（t 时刻审查 t-1 时刻的产出）。
-
-### 三个不可消除的 Gap（094 号谱系）
-
-| Gap | 五约束框架定位 | 涉及约束 | 性质 |
-|-----|--------------|----------|------|
-| **创世 Gap** | 约束2（规则先在性）对其加载者的 bootstrap 破缺 | 约束2 | 瞬时破缺（每次 ceremony 时） |
-| **视差 Gap** | 约束3 + 约束2 的联合推论——自我审查只能作用于下一轮 | 约束2 × 约束3 | 核心环路正常运作方式 |
-| **审计层断裂 Gap** | 约束4 必须经过约束1a/1b 中介才能观察核心环路 | 约束4 → 约束1a/1b | 层间界面属性 |
-
-这三个 Gap 是系统的结构条件，不是 bug。创世 Gap 是 bootstrap 的必然代价，视差 Gap 是核心环路的正常运作方式，审计层断裂 Gap 是异质验证的介质限制。
-
-### 真递归是默认模式（095 号谱系）
-
-蜂群严格使用 Agent Team（TeamCreate + Task with team_name）实现递归。子蜂群 = 完整蜂群（结构复制，不是简化版 agent pool）：
-
-- **拓扑**：子 team 有自己的 TaskList 作为 DAG 路由
-- **异步自指**：子 team 内部的 agent 用 t 时刻规则审查 t-1 时刻的产出
-- **结晶**：子 team 的产出在收缩相凝固为文件，向上回传给父蜂群
-- **ceremony**：子 team 的创建者作为子 Swarm₀，加载规则后递归进入工作
-
-| 模式 | 机制 | 何时使用 |
-|------|------|----------|
-| **真递归**（默认） | teammate 创建子 team → 子 team 内部自治 → 结果向上回传 | 默认——除非子任务不可分解 |
-| **扁平执行**（退化特例） | 任务裂变 → Lead 重新 spawn → 同一层执行 | 仅当任务不需要独立治理时 |
-
-递归深度上限 ≈ 3-4 层，受并发 agent 数、API 成本、视差 Gap 累积约束。
-
-### dispatch-dag v3.1：蜂群拓扑
-
-```
-genome_layer (区域0)                    ← 蜂群的基因组/公理层
-  CLAUDE.md / dispatch-dag.yaml / ceremony_scan.py / hooks/
-
-ceremony (source)
-  │
-  ├── genealogist (structural, mandatory)    ← 谱系写入、张力检查
-  ├── quality-guard (structural, mandatory)  ← 结果包检查、代码违规扫描
-  ├── meta-observer (structural, mandatory)  ← 二阶反馈回路（含自环）、元编排进化
-  ├── code-verifier (structural)             ← 代码变更后测试验证
-  ├── topology-mutator (structural)          ← 拓扑变更管理
-  ├── skill-crystallizer (terminal_sink)     ← 知识结晶
-  │
-  ├── source-auditor (conditional)           ← 三级权威链验证
-  ├── topology-manager (conditional)         ← 蜂群扩张/收缩信号
-  ├── topology-analyst (conditional)         ← 拓扑分析
-  ├── gemini-challenger (conditional)        ← 异质否定源 + 编排者代理
-  ├── claude-challenger (conditional)        ← 反向质询（对 Gemini 再质询）
-  └── codex-challenger (conditional)         ← Codex 异质质询
-
-platform_layer                              ← ECC 工程底座 agent（10个）
-  architect / planner / tdd-guide / code-reviewer / python-reviewer
-  security-reviewer / refactor-cleaner / doc-updater / meta-lead / build-error-resolver
-```
-
-genome_layer 是蜂群的先验结构——CLAUDE.md 不是蜂群之外的特权法则，而是蜂群 DAG 的基因组根节点（089 号谱系：严格扬弃 Aufhebung）。
-
-### 27 个 Hook：系统的免疫系统
-
-Hook 不依赖 agent 的自觉遵守，在运行时物理阻断违规：
-
-| Hook | 类型 | 功能 |
-|------|------|------|
-| agent-team-bootstrap | PreToolUse | Agent Team 启动引导 |
-| agent-team-enforce | PreToolUse | ceremony 阶段验证 + Agent Team 结构工位强制注入 |
-| definition-write-guard | PreToolUse | 定义文件修改拦截（必须通过仪式） |
-| genealogy-write-guard | PreToolUse | 谱系文件格式强制 |
-| spec-write-guard | PreToolUse | 规格文件修改拦截 |
-| hub-node-impact-guard | PreToolUse | Hub 节点影响评估 |
-| double-helix-verify | PreToolUse | 双螺旋验证 |
-| pre-write-edit-dispatcher | PreToolUse | 写入/编辑前分派 |
-| ceremony-step-guard | PreToolUse | ceremony 步骤守卫 |
-| lead-audit | PostToolUse | Lead 行为审计（拓扑异常对象化） |
-| meta-observer-guard | PostToolUse | 元观察者自环守卫 |
-| flow-continuity-guard | PostToolUse | 流程连续性 |
-| crystallization-guard | PostToolUse | 结晶条件检查 |
-| topology-guard | PostToolUse | 拓扑一致性 |
-| result-package-guard | PostToolUse | 结果包六要素检查 |
-| dag-validation-guard | PostToolUse | DAG 不变量验证（节点/文件一致性） |
-| downstream-action-guard | PostToolUse | 下游行动守卫 |
-| function-length-guard | PostToolUse | 函数长度守卫 |
-| genealogy-gemini-verify | PostToolUse | Gemini 谱系语义检查触发 |
-| source-auditor-prompt | PostToolUse | 溯源审计提示 |
-| post-write-edit-dispatcher | PostToolUse | 写入/编辑后分派 |
-| topology-mutator-prompt | PostToolUse | 拓扑变更提示 |
-| consensus-ceremony-trigger | PostToolUse | 共识仪式触发 |
-| ceremony-completion-guard | Stop | 6 项检查（dominator/任务队列/谱系/proof/确认请求） |
-| post-session-pattern-detect | Stop | 模式检测 |
-| session-start-ceremony | SessionStart | 冷启动/热启动双模式 |
-| precompact-save | PreCompact | 上下文压缩前状态保存 |
-
-### 四分法：推论自动结算
-
-系统产出分为四类，处理方式不同：
-
-| 类型 | 定义 | 处理 |
-|------|------|------|
-| **定理** | 已结算原则的逻辑必然推论 | 自动结算 |
-| **选择** | 多种合理方案，需价值判断 | 路由到 Gemini 编排者代理 |
-| **语法记录** | 已在运作但未显式化的规则 | 路由到 Gemini 编排者代理 |
-| **行动** | 不携带信息差的操作性事件 | 自动执行 |
-
-### 异质碰撞：三主体拓扑
-
-Claude / Gemini / Codex 三个异质主体的受控碰撞，防止系统在自身盲点中同质化坍塌：
-
-- `challenge` 模式：对新定义进行异质质询（Gemini 3.1-pro 为主要否定源）
-- `verify` 模式：数学验证
-- `derive` 模式：推论生成
-- `decide` 模式：选择/语法记录类决断（四分法路由）
-
-人类编排者从同步决策者变为异步审计者，保留 INTERRUPT 权。
-
-### 知识结晶：三维度同一运动
-
-上下文窗口中的知识有走势结构：扩张（频繁引用）→ 背驰（净新区分递减）→ 收缩结晶 → 需要时重载。
-
-三个结晶维度是同一运动的不同投影：
-- **session** = 时间维度结晶（过去状态快照）
-- **skill** = 知识维度结晶（已稳定能力快照）
-- **definition** = 概念维度结晶（已结算定义快照）
-
-### 热启动：蜂群永远在线
-
-| 级别 | 触发条件 | 恢复方式 |
-|------|----------|----------|
-| L0 正常 | 上下文充足 | 蜂群持续运行 |
-| L1 compact | 上下文压缩 | PreCompact 保存 + SessionStart 恢复 |
-| L2 新对话 | 上下文耗尽 | ceremony 从 session 文件热启动 |
-
----
-
 ## 谱系：概念发现的发动机
 
 谱系不是变更日志。谱系记录的是**否定史**——概念如何被矛盾推动而分化、重组、升级。
 
-当前 342 条已结算谱系，0 条生成态。关键谱系节点：
+早年蜂群机制退役（#1952）后，`.chanlun/genealogy/` 的保留口径是：
+
+- **保留**：被现役层按路径、文件名或编号（「NNN号」「谱系 NNN」等写法）引用的条目。
+  现役层 = 任意位置的代码（`.py` `.rs` `.lean` `.sh` `.ts` `.mts`，含测试、脚本，
+  也含 `analysis/` 与 `.chanlun/` 下的代码文件），
+  加上 `.chanlun/definitions/`、`docs/adr/`、`docs/agents/`、`formal/`、`.claude/`、
+  `.agents/`、`spec/`、`.github/` 与根目录 `AGENTS.md` / `CLAUDE.md` / `CONTEXT.md`。
+- **移出仓库**：只被推论层文档（`analysis/` 与 `docs/` 散件里的文档、`.chanlun/` 下的
+  历史快照、评审稿、提案）、本 README 或其他谱系条目引用的条目。只算一跳：保留条目里
+  再引用的编号不跟着保留。
+- 这条口径由 `tests/test_retired_references.py` 在 CI 里强制：上面列的现役层（代码和文档）
+  按编号引用的谱系，必须在 `.chanlun/genealogy/settled/` 或 `pending/` 下存在。引用里列出的
+  每个编号都查（「谱系：598 → 603 → 615」「谱系 256/264」「谱系引用：…」整行），`#NNN` 视为
+  工单号不查。同一测试还检查非历史文档里写的仓内路径（链接、反引号或裸写）都存在、不让读者
+  运行已退役的命令（历史文件列在测试里的 `HISTORICAL`，各附原因；主线上原有的断路径冻结在
+  `tests/retired_references_baseline.txt`，只减不增）。
+- 另外保留仍待裁决的生成态条目 689、693（未被引用，但裁决尚未完成）。
+- 当前在仓 245 条已结算、6 条生成态。
+
+不在仓的条目到退役前的基线提交 `f049256` 查：
+`git ls-tree --name-only f049256 .chanlun/genealogy/settled/` 列出全部文件名，
+`git show f049256:.chanlun/genealogy/settled/<文件名>` 读原文。
+
+下表是关键谱系节点的历史索引，不按是否在仓筛选：标 † 的编号已不在仓内；
+区间行标「部分在仓」的，只有被现役层引用的那些编号还在。
 
 ### 第一阶段（基础形式化 + 蜂群架构）
 
@@ -350,43 +189,43 @@ Claude / Gemini / Codex 三个异质主体的受控碰撞，防止系统在自�
 | 012 | 谱系是发现引擎，不是记录日志 |
 | 020 | 编排者 = 相位转换点 |
 | 041 | Gemini 编排者代理 |
-| 056 | 蜂群递归是默认模式 |
-| 058 | ceremony 是 Swarm₀ |
+| 056 † | 蜂群递归是默认模式 |
+| 058 † | ceremony 是 Swarm₀ |
 | 067 | 合法/非法替代概率/胜率 |
 | 068 | 缠论空间是偏序集 |
 | 069 | 递归拓扑异步自指蜂群 |
 | 073 | 蜂群能修改一切包括自身（原则0） |
-| 088 | 拓扑异常对象化（权限架构重设计） |
+| 088 † | 拓扑异常对象化（权限架构重设计） |
 | 089 | 严格扬弃——元编排 genome_layer 内化 |
 | 090 | 严格性是蜂群的语法规则 |
-| 093 | 五约束有向依赖图 |
-| 094 | 三个 Gap 重新定位 |
-| 095 | Agent Team 真递归蜂群 |
-| 130 | 审计递归缺口修复（RTAS 全 Gap 闭合） |
-| 133 | 异质双向收敛协议 |
+| 093 † | 五约束有向依赖图 |
+| 094 † | 三个 Gap 重新定位 |
+| 095 † | Agent Team 真递归蜂群 |
+| 130 † | 审计递归缺口修复（RTAS 全 Gap 闭合） |
+| 133 † | 异质双向收敛协议 |
 | 135 | CLAUDE.md 单体→skill 集合结晶 |
 | 137 | Lead 停顿结构根因（RLHF 基底约束 + 强制输出格式） |
-| 145 | 三行 Gemini 收敛（格式B排除理由推导链） |
+| 145 † | 三行 Gemini 收敛（格式B排除理由推导链） |
 
 ### 第二阶段（全球资本流转 + 操作方法论）
 
 | 谱系 | 内容 |
 |------|------|
-| 189-215 | 单标的代码管线完成（四层引擎 + 身份追踪 + 背驰 + 买卖点） |
-| 216-228 | 蜂群架构修复 v2（Lead 并行化、原子链、ceremony 步骤守卫） |
+| 189-215（部分在仓） | 单标的代码管线完成（四层引擎 + 身份追踪 + 背驰 + 买卖点） |
+| 216-228（部分在仓） | 蜂群架构修复 v2（Lead 并行化、原子链、ceremony 步骤守卫） |
 | 229-253 | K4 独立性 + 纤维丛 + 多 TF 双管道架构，22.2% 结构常数确认 |
 | 254 | 多经济体资本流转本体论（K4 共展开 + 三层递归） |
-| 264 | 定理 1 最终撤销（两版三轮全否 + "不测而测"消解） |
+| 264 † | 定理 1 最终撤销（两版三轮全否 + "不测而测"消解） |
 | 265/267 | 操作方法论 v1（帕萨卡利亚三层 + 降成本 + 多重赋格 + 选股区间套） |
 | 269-275 | 蜂群架构补充 v3（局部依赖原则、全局排序否定） |
-| 277-287 | OQ v2 实验线（定稿） |
-| 292-300 | 折叠拓扑本体论（折叠区块 = 区块拓扑组件） |
-| 301 | 区块拓扑 Phase 1 启动 |
-| 315-337 | 折叠内在性检验全程（全部否定→向心坍缩→最终结算：触发外在/条件内在） |
-| 329-335 | K4 体制分析（三个全图同步压缩体制 + 自发/自觉动力学签名） |
+| 277-287（部分在仓） | OQ v2 实验线（定稿） |
+| 292-300（部分在仓） | 折叠拓扑本体论（折叠区块 = 区块拓扑组件） |
+| 301 † | 区块拓扑 Phase 1 启动 |
+| 315-337（部分在仓） | 折叠内在性检验全程（全部否定→向心坍缩→最终结算：触发外在/条件内在） |
+| 329-335（部分在仓） | K4 体制分析（三个全图同步压缩体制 + 自发/自觉动力学签名） |
 | 338 | 操作方法论 v2（四项异质否定修正） |
 | 341 | 偶遇定义精化（时间性绑定→结构性标准，编排者三轮自否定） |
-| 342 | 元观察 v150（偶遇扫描 + 规则二十八连稳定） |
+| 342 † | 元观察 v150（偶遇扫描 + 规则二十八连稳定） |
 
 ### 三级权威链
 
@@ -398,22 +237,25 @@ Claude / Gemini / Codex 三个异质主体的受控碰撞，防止系统在自�
 
 ## 项目现状
 
-| 指标 | 数值 |
-|------|------|
-| 源文件 | 162 个 Python 模块 |
-| 测试文件 | 163 个 |
-| 核心定义 | 15 条（已结算） |
-| 已结算谱系 | 342 条 |
-| 规则规范 | 16 份（8 蜂群规则 + 8 ECC 通用规则）+ 10 份 spec |
-| Agent 定义 | 21 个 |
-| Hook | 27 个 |
-| Skill | 14 个 |
-| 脚本 | 84 个 |
-| dispatch-dag | v3.1（12 业务节点 + genome_layer + platform_layer） |
-| 谱系 DAG | 342 节点 |
-| 区块拓扑 | 1194 区块 / 6650 关系 / 1148 概念 |
-| Session | 242 个 |
-| 纲目 | 5 纲 13 目 |
+2026-11-08（#1952 退役后）按仓内跟踪文件实数：
+
+| 指标 | 数值 | 计数口径 |
+|------|------|----------|
+| 源文件 | 200 个 Python 模块 | `src/newchan/**/*.py` |
+| 测试文件 | 258 个 | `tests/` 下文件名为 `test_*.py` 的文件（git pathspec `tests/*test_*.py` 会多算 `tests/test_*/` 目录里的 5 个 `__init__.py`，得 263） |
+| 定义文件 | 19 份 | `.chanlun/definitions/*.md` |
+| 已结算谱系 | 在仓 245 条 + 6 条生成态（#1952 后只保留被现役层引用的条目，口径见「谱系」节） | `.chanlun/genealogy/{settled,pending}/` |
+| spec | 13 份 | `spec/**/*.md` |
+| Agent 定义 | 0 个（仓内不再跟踪 `.claude/agents/`） | `.claude/agents/*.md` |
+| Hook | 1 个 | `.claude/settings.json` 的 hooks 条目 |
+| Skill | 21 个 | `.claude/skills/*/SKILL.md`（git 跟踪的文件；经符号链接展开更多） |
+| 命令 | 3 个 | `.claude/commands/*.md` |
+| 脚本 | 198 个 | `scripts/**/*.{py,sh}`，不含测试 |
+| 区块拓扑 | 1194 区块 / 6650 关系 / 1148 概念 | `.chanlun/block-topology/meta.json`（未随退役重算） |
+
+早年蜂群机制退役（#1952）移除了 dispatch-dag.yaml、谱系 DAG（genealogy/dag.yaml）、
+.chanlun/sessions/ 与纲目（gangmu.yaml），上表不再列这四项；蜂群规则文件
+（原「8 蜂群规则 + 8 ECC 通用规则」）也已不在仓内。
 
 ### 定义基底
 
@@ -493,45 +335,28 @@ src/newchan/
 └── cli.py                 # 命令行入口
 
 .chanlun/                  # 概念层基础设施
-├── definitions/           #   15 个核心定义（推荐通过仪式修改）
-├── genealogy/             #   谱系记录
-│   ├── settled/           #     342 条已结算
-│   ├── pending/           #     生成态矛盾
-│   └── dag.yaml           #     谱系 DAG
-├── gangmu.yaml            #   纲目结构（五纲十三目）
-├── block-topology/        #   区块拓扑（1194 区块 / 6650 关系）
-│   ├── blocks/            #     内容寻址区块（SHA-256）
-│   ├── relations.jsonl    #     关系流
-│   ├── meta.json          #     拓扑元数据
-│   ├── concept_registry.json  # 概念注册表
-│   ├── morse_landscape.json   # Morse 地形图
-│   └── encounter_log.md  #     偶遇记录
-├── dispatch-dag.yaml      #   蜂群拓扑 v3.1
-├── pattern-buffer/        #   知识结晶候选（按主题分片）
-└── sessions/              #   242 个会话状态快照（热启动用）
+├── definitions/           #   19 份定义文件（推荐通过仪式修改）
+├── genealogy/             #   被现役层引用的谱系条目（settled/ + pending/；其余随 #1952 移出，见「谱系」节）
+└── block-topology/        #   区块拓扑（1194 区块 / 6650 关系）
+    ├── blocks/            #     内容寻址区块（SHA-256）
+    ├── relations.jsonl    #     关系流
+    ├── meta.json          #     拓扑元数据
+    ├── concept_registry.json  # 概念注册表
+    ├── morse_landscape.json   # Morse 地形图
+    └── encounter_log.md  #     偶遇记录
 
-.claude/                   # 递归拓扑异步自指蜂群基础设施
-├── agents/                #   21 个 agent 定义
-│   ├── genealogist.md     #     谱系工位（structural, mandatory）
-│   ├── quality-guard.md   #     质量守卫（structural, mandatory）
-│   ├── meta-observer.md   #     元观察者（structural, mandatory，含自环）
-│   ├── gemini-challenger.md #   异质否定源 + 编排者代理
-│   └── ...
-├── hooks/                 #   27 个 hook（系统免疫层）
-├── commands/              #   /ceremony, /inquire, /escalate, /ritual
-├── skills/                #   14 个结晶的知识能力（skill）
-└── settings.json          #   hook 注册 + 权限配置
+.claude/                   # Claude Code 项目配置与仓内 skill
 
 docs/
 ├── chanlun/text/          # 缠论原文（三级权威链）
 │   ├── blog/              #   缠师原始博文（一级权威）
 │   ├── chan99/            #   编纂版（二级权威）
 │   └── mindmaps/         #   思维导图（三级）
-├── spec/                  # 10 份规格规范
+├── spec/                  # 13 份规格规范
 └── architecture/          # 架构文档（总方针等）
 
-scripts/                   # 84 个脚本（ceremony_scan、区块拓扑、实验等）
-tests/                     # 163 个测试文件
+scripts/                   # 脚本（区块拓扑、实验等）
+tests/                     # 258 个测试文件（tests/**/test_*.py）
 ```
 
 ## 数据源

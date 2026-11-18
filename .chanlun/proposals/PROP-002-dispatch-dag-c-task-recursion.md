@@ -42,7 +42,9 @@ approval_condition: |
   - gemini-challenger 高阶元原则审查（069号矛盾5：结构修改由 gemini 高阶审查，避免 quality-guard t/t+1 保守死锁）
   - 编排者 INTERRUPT 覆盖权保留
   批准后由具写权限工位实施，status 改 implemented。
-status: pending_review
+status: withdrawn
+withdrawn_date: "2026-11-08"
+withdrawn_reason: "提案修改的目标文件 .chanlun/dispatch-dag.yaml 及所依赖的蜂群调度机制已随早年蜂群退役（#1952 / PR #1955）删除，提案无对象可改，撤回；原文保留为历史记录。"
 review_date: ""
 reviewer: ""
 review_verdict: ""

@@ -10,7 +10,7 @@ import sys
 import time
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager, nullcontext
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from pathlib import Path
 from typing import Any
 
@@ -18,11 +18,13 @@ from approval_signing.protocol import CommitTarget, Scope, spec_target
 
 from .approval import (
     ApprovalDesk,
+    Approved,
     Pending,
     SignedApprovals,
     decision_json,
     freeze_signed_spec,
     spec_body,
+    spec_ruling,
 )
 from .boat_execution import ExecutionUnknown
 from .claims import (
@@ -53,6 +55,7 @@ from .delivery import (
     marker,
 )
 from .domain import (
+    MERGE_GATE,
     EffectUnknown,
     NotStarted,
     RunFacts,
@@ -65,10 +68,18 @@ from .domain import (
     parse_sha,
 )
 from .external_review import STATUS_LOCKS, head_status, latest_status
-from .github_app import WRITE_PERMISSIONS, AppIdentity, GitHubAppClient, IdentityError
+from .github_app import (
+    WRITE_PERMISSIONS,
+    AppIdentity,
+    GitHubAppClient,
+    IdentityError,
+    LocalConfigError,
+)
 from .run import (
+    SOURCE_REPO,
     Busy,
     Halted,
+    InsufficientSpace,
     PilotRun,
     TaskSpec,
     ToolRefusal,
@@ -79,7 +90,9 @@ from .run import (
 )
 from .workunit import (
     MIRROR_LABEL,
+    ORCHESTRATOR_LOGIN,
     REPO,
+    REPO_NAMES,
     DedicatedPilot,
     Ineligible,
     Playbook,
@@ -105,10 +118,11 @@ class AdmissionRefused(ClaimRefused):
 
 
 class ApprovalRequired(Exception):
-    """动作需要的真人签批此刻不成立。不执行副作用，不转 halted；请求文件路径随异常给出。"""
+    """动作需要的授权此刻不成立。不执行副作用，不转 halted；请求文件路径随异常给出。"""
 
     def __init__(self, decision: Pending):
-        super().__init__(f"{decision.status}：{decision.reason}；请求 {decision.request_path}")
+        super().__init__(f"{decision.status}：{decision.reason}" +
+                         (f"；请求 {decision.request_path}" if decision.request_path else ""))
         self.decision = decision
 
 
@@ -209,13 +223,27 @@ class TicketExecutor:
         return ApprovalDesk(run_dir / "approvals", self.unit.ticket, self.unit.run_id, self.approvals)
 
     def spec_approval(self, run_dir: Path, generation: int) -> Pending | None:
-        """需要 SPEC 授权的准入：目标是 SPEC 票此刻正文的原始字节摘要，正文一变就换请求。"""
+        """Queued 读当前正文裁定，Takeover 保留签批；冻结与 scope 共用这次读取的原始正文。"""
         admission = self.unit.admission
         assert not isinstance(admission, DedicatedPilot)
         issue = admission.spec_auth.spec_issue
         body = spec_body(self.gateway.issue(issue))
-        decision = self.desk(run_dir).check(Scope.SPEC_AUTHORIZATION, generation, spec_target(issue, body))
-        freeze_signed_spec(run_dir, issue, body, decision, generation)
+        if isinstance(admission, Queued):
+            from .queue import approved_scope
+            source, reason = spec_ruling(issue, body.decode("utf-8"), self.gateway.comments(issue),
+                                        os.environ.get("WAYFINDER_ORCHESTRATOR", ORCHESTRATOR_LOGIN))
+            scope = approved_scope(body.decode("utf-8"))
+            if any(not any(prefix.startswith(allowed) for allowed in scope) for prefix in self.unit.allowed_prefixes):
+                raise AdmissionRefused("registered scope exceeds current SPEC deepagents-scope")
+            decision = Approved("", reason) if source else Pending("awaiting_review", "", reason, "spec_ruling")
+            _write_json(run_dir / "approvals" / "spec_authorization.status.json", {
+                "scope": "spec_authorization", "status": "approved" if source else "awaiting_review",
+                "source": "spec_ruling", "reason": reason, "target": spec_target(issue, body).encode(),
+                "claim_generation": generation, "checked_at": _now(), **(source or {})})
+            freeze_signed_spec(run_dir, issue, body, decision, generation, source_meta=source)
+        else:
+            decision = self.desk(run_dir).check(Scope.SPEC_AUTHORIZATION, generation, spec_target(issue, body))
+            freeze_signed_spec(run_dir, issue, body, decision, generation)
         return decision if isinstance(decision, Pending) else None
 
     def candidate_approval(self, run_dir: Path, generation: int, head: Sha) -> Pending | None:
@@ -243,50 +271,9 @@ class TicketExecutor:
         return self.cutover.frozen() if isinstance(self.unit.admission, Queued) else nullcontext()
 
     def _queue_check(self) -> None:
-        from .queue import approved_scope, prove_queue
+        from .queue import prove_queue
         assert isinstance(self.unit.admission, Queued)
         prove_queue(self.gateway, self.unit.ticket, self.cutover, self.unit.admission.proof)
-        scope = approved_scope(str(self.gateway.issue(self.unit.admission.spec_auth.spec_issue).get("body") or ""))
-        if any(not any(prefix.startswith(allowed) for allowed in scope) for prefix in self.unit.allowed_prefixes):
-            raise AdmissionRefused("registered scope exceeds current signed SPEC deepagents-scope")
-
-    def _previous_run_quiet(self, previous: TicketClaim) -> None:
-        run_dir = Path(previous.run_dir)
-        lock = run_dir / "owner.lock"
-        if lock.exists():
-            fd = os.open(lock, os.O_RDWR)
-            try:
-                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-            except BlockingIOError:
-                raise ClaimRefused(f"上一代次 run {previous.run_id} 的控制进程仍持锁") from None
-            finally:
-                os.close(fd)
-        needle = f"--output-dir {run_dir}/workers/"
-        if any(needle in cmd and not stat.startswith("Z") for _, _, stat, cmd in _ps_rows()):
-            raise ClaimRefused(f"上一代次 run {previous.run_id} 仍有工蜂在运行")
-        # Boat 工蜂不在本机 PID 表；仅观察冻结绑定，不恢复、收集或补提交旧工蜂。
-        try:
-            if not (run_dir / "run.json").exists():
-                if (run_dir / "boat").exists():
-                    raise ExecutionUnknown("缺少旧 run 清单")
-                return
-            run = PilotRun.open(run_dir.parent.parent, previous.run_id)
-            if run.execution is None:
-                if (run_dir / "boat").exists():
-                    raise ExecutionUnknown("旧执行后端与 Boat 绑定不符")
-                return
-            if (run.spec.run_id != previous.run_id or run.dir.resolve() != run_dir.resolve()
-                    or run.spec.ticket != previous.ticket or run.generation != previous.generation):
-                raise ExecutionUnknown("旧 run 的票号或持有代次不符")
-            keys = set(run._keys())
-            keys.update(parse_key_name(previous.run_id, p.stem) for p in (run_dir / "boat").glob("*.json")
-                        if "." not in p.stem)
-            for key in keys:
-                fact = run.execution.observe(key, reconcile=False)
-                if isinstance(fact, (NotStarted, Running, EffectUnknown)) and not run.execution.is_drained(key):
-                    raise ExecutionUnknown(f"{key.name}: {fact}")
-        except (ExecutionUnknown, OSError, ValueError, TypeError, KeyError) as error:
-            raise ClaimRefused(f"上一代次 run {previous.run_id} 的 Boat 工蜂尚未排空：{error}") from None
 
     def claim(self, run_dir: Path) -> TicketClaim:
         """SPEC 7.4：intent → 镜像 → post-check → active，全程在票级动作锁内；崩溃后同 run 从记录处续做。"""
@@ -304,7 +291,7 @@ class TicketExecutor:
                 if record is not None and record.state != "released":
                     raise ClaimRefused(f"票 #{unit.ticket} 已由 {record.run_id} 持有（{record.state}）")
                 if record is not None:
-                    self._previous_run_quiet(record)
+                    run_quiet(record)
                 self.admit(run_dir, record.generation + 1 if record else 1)
                 labels = self.gateway.label_names(self.gateway.issue(unit.ticket))
                 if record is None and MIRROR_LABEL in labels:
@@ -313,12 +300,18 @@ class TicketExecutor:
                                               record.generation + 1 if record else 1, "intent",
                                               unit.admission.kind, False, None, None, _now()))
             if isinstance(unit.admission, Queued):
-                self.admit(run_dir, claim.generation)
+                try:
+                    self.admit(run_dir, claim.generation)
+                except (ClaimRefused, ValueError) as error:
+                    txn.write(advance(claim, "halt", reason=str(error)))
+                    raise Halted(str(error)) from error
             journal = Journal(claim_effects(self.claims, unit.ticket, claim.run_id, claim.generation))
             if claim.state == "intent":
                 journal.converge("label", lambda: self._label_probe(), lambda: self.gateway.add_label(
                     unit.ticket, MIRROR_LABEL), idempotent=True,
                     what={"kind": "label", "issue": unit.ticket, "name": MIRROR_LABEL}, crash=self.crash)
+                if isinstance(unit.admission, Queued):
+                    self.admit(run_dir, claim.generation)
                 text = self._marker("claim", claim.run_id, claim.generation, unit.base)
                 body = (f"[deepagents run={claim.run_id} gen={claim.generation}]\n\n"
                         f"新执行器（{self.gateway.bot}）持有本票，基线 `{unit.base}`。这是持有标记，不是批准。\n\n{text}")
@@ -395,7 +388,12 @@ class TicketExecutor:
             if pr_hits:
                 return "pr_forbidden_label:" + ",".join(pr_hits)
         if not isinstance(self.unit.admission, DedicatedPilot):
-            pending = self.spec_approval(run_dir, generation)
+            try:
+                pending = self.spec_approval(run_dir, generation)
+            except (ClaimRefused, ValueError) as error:
+                if isinstance(self.unit.admission, Queued):
+                    return str(error)
+                raise
             if pending is not None:
                 if isinstance(self.unit.admission, Queued):
                     raise ApprovalRequired(pending)
@@ -411,7 +409,7 @@ class TicketExecutor:
             # 取消是撤回既有能力，不要求仍可派工；票级锁仍防止与换代交错。
             with self.claims.locked(self.unit.ticket) as txn:
                 claim = txn.record
-                if (claim is None or claim.repo != REPO or claim.ticket != self.unit.ticket
+                if (claim is None or claim.repo not in REPO_NAMES or claim.ticket != self.unit.ticket
                         or claim.run_id != self.unit.run_id or claim.run_dir != str(run_dir.resolve())
                         or claim.generation != generation):
                     raise Fenced("取消身份不符：须为原 run、状态目录与持有代次")
@@ -513,7 +511,7 @@ class TicketExecutor:
     def _pr_body(self, run: PilotRun, head: Sha, generation: int) -> str:
         spec = run.spec
         return (f"Refs #{self.unit.ticket}\n\n新执行器交付冻结 head `{head}`。作者 {spec.author_model}，"
-                f"异家族独审 {spec.reviewer_model} 对该 head 判 PASS。合入 main 由人决定。\n\n"
+                f"异家族独审 {spec.reviewer_model} 对该 head 判 PASS。{MERGE_GATE}\n\n"
                 + self._marker("pr", spec.run_id, generation, head))
 
     def _verify(self, head: Sha, number: int) -> str:
@@ -625,7 +623,7 @@ class TicketExecutor:
             if observed == "open":
                 text = self._marker("deliver", spec.run_id, generation, head)
                 body = (f"[deepagents run={spec.run_id} gen={generation}]\n\n交付冻结 head `{head}` 到 "
-                        f"`{branch}`，PR {pr.get('url')}，等待人合入。\n\n{text}")
+                        f"`{branch}`，PR {pr.get('url')}。{MERGE_GATE}\n\n{text}")
                 with self.action("deliver", run.dir, generation, pr_number=number, head=head) as boundary:
                     self._require_review_spec(run, head)
                     observed = self._checked(boundary, head, number)
@@ -661,17 +659,70 @@ class TicketExecutor:
             raise boundary.halt(f"pr:{refused}") from None
 
 
+def run_quiet(previous: TicketClaim) -> None:
+    """持有的执行者已排空：控制锁空闲、本机无工蜂、Boat 绑定全部排空。换代与释放摘镜像共用这一判定。"""
+    run_dir = Path(previous.run_dir)
+    lock = run_dir / "owner.lock"
+    if lock.exists():
+        fd = os.open(lock, os.O_RDWR)
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            raise ClaimRefused(f"持有的 run {previous.run_id} 的控制进程仍持锁") from None
+        finally:
+            os.close(fd)
+    needle = f"--output-dir {run_dir}/workers/"
+    if any(needle in cmd and not stat.startswith("Z") for _, _, stat, cmd in _ps_rows()):
+        raise ClaimRefused(f"持有的 run {previous.run_id} 仍有工蜂在运行")
+    # Boat 工蜂不在本机 PID 表；仅观察冻结绑定，不恢复、收集或补提交旧工蜂。
+    try:
+        if not (run_dir / "run.json").exists():
+            if (run_dir / "boat").exists():
+                raise ExecutionUnknown("缺少旧 run 清单")
+            return
+        run = PilotRun.open(run_dir.parent.parent, previous.run_id)
+        if run.execution is None:
+            if (run_dir / "boat").exists():
+                raise ExecutionUnknown("旧执行后端与 Boat 绑定不符")
+            return
+        if (run.spec.run_id != previous.run_id or run.dir.resolve() != run_dir.resolve()
+                or run.spec.ticket != previous.ticket or run.generation != previous.generation):
+            raise ExecutionUnknown("旧 run 的票号或持有代次不符")
+        keys = set(run._keys())
+        keys.update(parse_key_name(previous.run_id, p.stem) for p in (run_dir / "boat").glob("*.json")
+                    if "." not in p.stem)
+        for key in keys:
+            fact = run.execution.observe(key, reconcile=False)
+            if isinstance(fact, (NotStarted, Running, EffectUnknown)) and not run.execution.is_drained(key):
+                raise ExecutionUnknown(f"{key.name}: {fact}")
+    except (ExecutionUnknown, OSError, ValueError, TypeError, KeyError) as error:
+        raise ClaimRefused(f"持有的 run {previous.run_id} 的 Boat 工蜂尚未排空：{error}") from None
+
+
 def claim_effects(store: ClaimStore, ticket: int, run_id: str, generation: int) -> Path:
     return store.root / f"{ticket}.effects" / f"{run_id}-g{generation}"
 
 
-def release_claim(store: ClaimStore, ticket: int, run_id: str, reason: str) -> TicketClaim:
-    """主控释放。等在飞副作用做完才拿到锁；旧控制进程此后在下一次锁内复核时停下。"""
+def release_claim(store: ClaimStore, gateway: RepoGateway | None, ticket: int, run_id: str, reason: str) -> TicketClaim:
+    """主控释放。等在飞副作用做完才拿到锁，先记 released 让旧控制进程在下一次锁内复核时停下；
+    执行者排空后才在同一把锁内摘票面镜像，持有结束由此在 GitHub 上可见。返回记录 mirror_label 仍为真
+    表示镜像保留，排空后重跑同一命令即可。记录已换成新 run 时拒绝，旧释放碰不到新代次的镜像。
+    gateway 为 None 时只在本机记 released，不碰镜像。"""
     with store.locked(ticket) as txn:
         record = txn.record
         if record is None or record.run_id != run_id:
             raise ClaimRefused(f"票 #{ticket} 当前不由 {run_id} 持有")
-        return txn.write(advance(record, "release", reason=reason))
+        if gateway is None:
+            return txn.write(advance(record, "release", reason=reason))
+        try:
+            run_quiet(record)
+        except ClaimRefused:
+            return txn.write(advance(record, "release", reason=reason, mirror_label=True))
+        released = txn.write(advance(record, "release", reason=reason))
+        gateway.remove_label(ticket, MIRROR_LABEL)
+        if MIRROR_LABEL in gateway.label_names(gateway.issue(ticket)):
+            return txn.write(replace(released, mirror_label=True))
+        return txn.write(replace(released, mirror_label=False))
 
 
 def reconcile_effect(state_root: Path, store: ClaimStore, run_id: str, effect: str, note: str) -> dict[str, Any]:
@@ -739,8 +790,8 @@ def load_unit(state_root: Path, run_id: str) -> tuple[WorkUnit, TaskSpec]:
     return parse_work_unit(data["work_unit"]), task
 
 
-def open_v2_run(state_root: Path, unit: WorkUnit, task: TaskSpec, executor: TicketExecutor, models_text: str,
-                **kw: Any) -> PilotRun:
+def open_v2_run(state_root: Path, unit: WorkUnit, task: TaskSpec, executor: TicketExecutor, models_text: str | None = None,
+                *, model_rules: Path | None = None, **kw: Any) -> PilotRun:
     if (PilotRun.run_dir(state_root, unit.run_id) / "run.json").exists():
         run = PilotRun.open(state_root, unit.run_id, executor=executor, **kw)
         if run.spec.unit != unit:
@@ -755,6 +806,9 @@ def open_v2_run(state_root: Path, unit: WorkUnit, task: TaskSpec, executor: Tick
             run.release()
             raise
         return run
+    from .run import read_model_rules
+    if models_text is None:
+        models_text = read_model_rules(model_rules)
     return PilotRun.create_v2(state_root, unit, task, models_text, executor, **kw)
 
 
@@ -765,12 +819,107 @@ def _sigkill_at(point: str | None) -> Callable[[str], None]:
     return crash
 
 
+def review_sweep_key(executor_key: Path, review_key: Path | None) -> Path | None:
+    """serve --review-sweep 交给审查子进程的私钥。给了 --review-private-key 就用它。没给时：审查身份文件不存在，
+    审查本来就用执行器 App 签名（external_review 的缺省），沿用执行器私钥并记一行；身份文件存在（已换审查专用
+    App），执行器私钥签不出审查 App 的 JWT，每次派审都会退出码 2，于是失败关闭：记一行，返回 None。"""
+    from . import external_review
+    if review_key is not None:
+        return review_key
+    if external_review.IDENTITY_CONFIG.exists():
+        print("review-sweep " + json.dumps({
+            "action": "refused-no-review-key",
+            "reason": f"{external_review.IDENTITY_CONFIG} 指定了审查专用 App，serve 须给 --review-private-key"},
+            ensure_ascii=False), flush=True)
+        return None
+    print("review-sweep " + json.dumps({
+        "action": "review-key-fallback",
+        "reason": "未给 --review-private-key 且没有审查身份文件：审查沿用执行器 App"}, ensure_ascii=False), flush=True)
+    return executor_key
+
+
+def _ignore_orphan_sweep_flags(args: argparse.Namespace) -> None:
+    """关审查只删 --review-sweep 时，留在 plist 里的 sweep 子参数不能让 serve 起不来（launchd 会反复重启、派票停摆）：
+    记一行警告并忽略。有 --review-sweep 时只补默认值。"""
+    orphans = []
+    if not args.review_sweep:
+        if args.review_sweep_auto_merge:
+            orphans.append("--review-sweep-auto-merge")
+        if args.review_sweep_max_running is not None:
+            orphans.append("--review-sweep-max-running")
+        args.review_sweep_auto_merge, args.review_sweep_max_running = False, None
+    if args.review_sweep_max_running is None:
+        args.review_sweep_max_running = 1
+    if orphans:
+        print("review-sweep " + json.dumps({"action": "ignored-without-review-sweep", "flags": orphans,
+                                            "reason": "没有 --review-sweep，这些参数不生效"}, ensure_ascii=False),
+              flush=True)
+
+
 def _client(args: argparse.Namespace) -> GitHubAppClient:
-    """登记只要读权限；run 才申请写权限。两者都先核 App、安装与仓库身份。"""
-    identity = AppIdentity(5486877, 175617978, 1150335160, REPO, "newchanlun-deepagents-1742", args.private_key)
-    client = GitHubAppClient(identity, permissions=WRITE_PERMISSIONS if args.command == "run" else None)
-    client.verify()
+    """登记只要读权限；run 与 release（摘镜像）才申请写权限。两者都先核 App、安装与仓库身份。"""
+    identity = AppIdentity(5486877, 179444545, 1150335160, REPO, "newchanlun-deepagents-1742", args.private_key)
+    client = GitHubAppClient(identity, permissions=WRITE_PERMISSIONS if args.command in ("run", "release") else None)
+    try:
+        client.verify()
+    except BaseException:
+        client.close()
+        raise
     return client
+
+
+def _serve(args: argparse.Namespace, store: ClaimStore, cutover_store: CutoverStore, source_repo: Path,
+           review_key: Path | None = None) -> int:
+    """队列轮询。读不到 GitHub（含启动时的 App 身份核验）：
+    `--once` 让 IdentityError 照旧冒到 main → 退出码 2（runbook 拿它当检查步骤）；
+    `--loop` 写明哪个源读不到、标到状态页，等一个轮询间隔再从头核身份，进程不退出（launchd 不重启）。
+    本机配置错误（LocalConfigError，含私钥 PrivateKeyError）不是读不到源，两种模式都冒到 main → 退出码 2。"""
+    from .queue import QueueIntake, mark_source_unreadable
+
+    def child(unit: WorkUnit) -> int:
+        command = [sys.executable, "-m", "pilot1742.executor", "--state-root", str(args.state_root),
+                   "--drain-root", str(args.drain_root), "run", "--run-id", unit.run_id,
+                   "--workers-log", str(args.workers_log), "--private-key", str(args.private_key),
+                   "--recheck-approval"]
+        if args.model_rules is not None:
+            command.extend(["--model-rules", str(args.model_rules.resolve())])
+        return subprocess.run(command, check=False).returncode
+
+    sweep_round = None
+    if args.review_sweep and review_key is not None:
+        from .review_sweep import serve_round
+        sweep_round = serve_round(review_key, auto_merge=args.review_sweep_auto_merge,
+                                  max_running=args.review_sweep_max_running)
+    client: GitHubAppClient | None = None
+    try:
+        while True:
+            try:
+                cutover_store.load()
+            except CutoverError as error:
+                print(f"queue inactive: {error}")
+                return 0
+            if sweep_round is not None:  # 排在派票前、App 核身份前：派票子进程再久、App 再读不到，sweep 也已跑过
+                sweep_round()
+            try:
+                if client is None:
+                    client = _client(args)
+                    intake = QueueIntake(args.state_root, RepoGateway(client), store, cutover_store, source_repo)
+                print(json.dumps(intake.once(child), ensure_ascii=False, indent=2), flush=True)
+            except IdentityError as error:
+                if args.once or isinstance(error, LocalConfigError):
+                    raise
+                if client is not None:
+                    client.close()
+                    client = None
+                print(f"round skipped, source unreadable (github): {type(error).__name__}: {error}",
+                      file=sys.stderr, flush=True)
+                mark_source_unreadable(source_repo, f"github: {type(error).__name__}: {error}")
+            if args.once:
+                return 0
+            time.sleep(args.poll_seconds)
+    finally:
+        if client is not None:
+            client.close()
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -790,6 +939,7 @@ def main(argv: list[str] | None = None) -> int:
                      help="发布前要求对确切候选 head 的真人 Secure Enclave 签批")
     reg.add_argument("--private-key", type=Path, required=True)
     run_parser = sub.add_parser("run", help="持有并运行或恢复一个已登记的 v2 run")
+    run_parser.add_argument("--model-rules", type=Path, help="新 run 的 pstack 角色表；缺省沿用全局表")
     run_parser.add_argument("--run-id", required=True)
     run_parser.add_argument("--workers-log", type=Path, default=WORKERS_LOG)
     run_parser.add_argument("--private-key", type=Path, required=True)
@@ -803,9 +953,21 @@ def main(argv: list[str] | None = None) -> int:
     modes = serve.add_mutually_exclusive_group(required=True)
     modes.add_argument("--once", action="store_true")
     modes.add_argument("--loop", action="store_true")
+    serve.add_argument("--model-rules", type=Path, help="传给每个新 run 的项目 pstack 角色表")
     serve.add_argument("--poll-seconds", type=float, default=60)
     serve.add_argument("--workers-log", type=Path, default=WORKERS_LOG)
     serve.add_argument("--private-key", type=Path, required=True)
+    serve.add_argument("--review-sweep", action="store_true",
+                       help="每轮附带一次 review_sweep：给非 draft 的开放 PR 派正式审查（宿主 gh 凭据；"
+                            "HOST 上同时在跑的审查数见 --review-sweep-max-running）")
+    serve.add_argument("--review-private-key", type=Path,
+                       help="审查 App 私钥，只原样转给 sweep 派的 review-pr；不复用 --private-key（执行器 App）。"
+                            "审查身份文件（external_review.IDENTITY_CONFIG）存在时必须给")
+    serve.add_argument("--review-sweep-auto-merge", action="store_true",
+                       help="review_sweep 追平队首，并在精确 head 双门全绿时带 sha 合入；没有 --review-sweep 时记一行警告并忽略")
+    serve.add_argument("--review-sweep-max-running", type=int, default=None,
+                       help="HOST 上同时在跑的审查上限（默认 1；操作员手动起的 review-pr 也算）；"
+                            "没有 --review-sweep 时记一行警告并忽略")
     cutover = sub.add_parser("cutover", help="全局冻结排空证据；不执行生产切换")
     cutover.add_argument("operation", choices=("snapshot", "pending", "audit-release", "verify", "record"))
     cutover.add_argument("--snapshot", type=Path)
@@ -827,12 +989,10 @@ def main(argv: list[str] | None = None) -> int:
     release.add_argument("--ticket", type=int, required=True)
     release.add_argument("--run-id", required=True)
     release.add_argument("--reason", required=True)
+    release.add_argument("--private-key", type=Path, required=True)
     args = parser.parse_args(argv)
     store = ClaimStore()
     try:
-        if args.command == "release":
-            print(json.dumps(asdict(release_claim(store, args.ticket, args.run_id, args.reason)), ensure_ascii=False))
-            return 0
         if args.command == "reconcile":
             try:
                 result = reconcile_effect(args.state_root, store, args.run_id, args.effect, args.note)
@@ -848,16 +1008,28 @@ def main(argv: list[str] | None = None) -> int:
             print(json.dumps({"claim": asdict(record) if record else None, "status": report}, ensure_ascii=False,
                              indent=2))
             return 0
-        source_repo = Path(__file__).resolve().parents[3]
+        if args.command == "release":
+            # 本机先记 released，GitHub 或 App 凭据不可用也能让旧控制进程停下；摘镜像在下面联网后做。
+            release_claim(store, None, args.ticket, args.run_id, args.reason)
+        source_repo = SOURCE_REPO
         cutover_store = CutoverStore(args.state_root, args.drain_root, getattr(args, "workers_log", WORKERS_LOG))
         if args.command == "serve":
             if args.poll_seconds <= 0:
                 raise ValueError("poll-seconds 须为正数")
+            _ignore_orphan_sweep_flags(args)
+            if args.review_sweep_max_running < 1:
+                raise ValueError("--review-sweep-max-running 须为正整数")
+            review_key = None
+            if args.review_sweep:
+                review_key = review_sweep_key(args.private_key, args.review_private_key)
+                if review_key is None:
+                    return 2
             try:
                 cutover_store.load()
             except CutoverError as error:
                 print(f"queue inactive: {error}")
                 return 0
+            return _serve(args, store, cutover_store, source_repo, review_key)
         if args.command == "cutover":
             snapshot_path = args.snapshot or args.state_root / "cutover-snapshot.json"
             if args.operation == "pending":
@@ -881,6 +1053,14 @@ def main(argv: list[str] | None = None) -> int:
                 raise ValueError("cutover verify/record/audit-release 需要 --private-key 显式路径")
         with _client(args) as client:
             gateway = RepoGateway(client)
+            if args.command == "release":
+                released = release_claim(store, gateway, args.ticket, args.run_id, args.reason)
+                print(json.dumps(asdict(released), ensure_ascii=False))
+                if released.mirror_label:
+                    print("已记 released，旧控制进程在下一动作边界停下；执行者未排空或镜像未读回，"
+                          f"票面 {MIRROR_LABEL} 保留。排空后重跑同一 release 命令。", file=sys.stderr)
+                    return 75
+                return 0
             if args.command == "cutover":
                 data = json.loads(snapshot_path.read_text())
                 data["legacy_snapshot"] = tuple(LegacyProcess(**p) for p in data["legacy_snapshot"])
@@ -899,25 +1079,6 @@ def main(argv: list[str] | None = None) -> int:
                         cutover_store.record(cutover_record)
                 print(json.dumps(asdict(cutover_record), ensure_ascii=False, indent=2))
                 return 0
-            if args.command == "serve":
-                from .queue import QueueIntake
-                intake = QueueIntake(args.state_root, gateway, store, cutover_store, source_repo)
-                def child(unit: WorkUnit) -> int:
-                    command = [sys.executable, "-m", "pilot1742.executor", "--state-root", str(args.state_root),
-                               "--drain-root", str(args.drain_root), "run", "--run-id", unit.run_id,
-                               "--workers-log", str(args.workers_log), "--private-key", str(args.private_key),
-                               "--recheck-approval"]
-                    return subprocess.run(command, check=False).returncode
-                while True:
-                    try:
-                        cutover_store.load()
-                    except CutoverError as error:
-                        print(f"queue inactive: {error}")
-                        return 0
-                    print(json.dumps(intake.once(child), ensure_ascii=False, indent=2), flush=True)
-                    if args.once:
-                        return 0
-                    time.sleep(args.poll_seconds)
             if args.command == "register":
                 unit = register(args.state_root, gateway, ticket=args.ticket, run_id=args.run_id, base=args.base,
                                 task=parse_task(args.task.read_text()), playbook=args.playbook,
@@ -927,7 +1088,6 @@ def main(argv: list[str] | None = None) -> int:
                 print(json.dumps(unit.to_json(), ensure_ascii=False, indent=2))
                 return 0
             from .cli import EXIT_BUSY, cancel_worker, drive
-            from .run import PSTACK_MODELS
 
             unit, task = load_unit(args.state_root, args.run_id)
             if args.command == "cancel-worker":
@@ -939,7 +1099,7 @@ def main(argv: list[str] | None = None) -> int:
             executor = TicketExecutor(unit, gateway, claims=store, workers_log=args.workers_log,
                                       crash=_sigkill_at(args.crash_at), cutover=cutover_store)
             try:
-                pilot = open_v2_run(args.state_root, unit, task, executor, PSTACK_MODELS.read_text())
+                pilot = open_v2_run(args.state_root, unit, task, executor, model_rules=args.model_rules)
             except Busy as error:
                 print(str(error), file=sys.stderr)
                 return EXIT_BUSY
@@ -947,8 +1107,14 @@ def main(argv: list[str] | None = None) -> int:
                 pilot.clear_interrupt()
             return drive(pilot, recheck_approval=args.resume or args.recheck_approval, resume=args.resume)
     except ApprovalRequired as required:
-        print(json.dumps({"phase": "awaiting_human", "approval": decision_json(required.decision)}, ensure_ascii=False))
+        phase = "awaiting_review" if required.decision.status == "awaiting_review" else "awaiting_human"
+        print(json.dumps({"phase": phase, "approval": decision_json(required.decision)}, ensure_ascii=False))
         return 0
+    except InsufficientSpace as error:
+        # 图运行中派工建 checkout 时也会触发；检查点停在该工具调用之前，下一轮恢复同一 run 重做。
+        from .cli import EXIT_BUSY
+        print(str(error), file=sys.stderr)
+        return EXIT_BUSY
     except (*EXECUTOR_ERRORS, Halted, ToolRefusal, ValueError, OSError, subprocess.CalledProcessError) as error:
         print(f"{type(error).__name__}: {error}", file=sys.stderr)
         return 2

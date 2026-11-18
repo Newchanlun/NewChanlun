@@ -4,7 +4,7 @@
 //   Phase 2 Promise.allSettled 扇出（MAX_PARALLEL=4 信号量，#1007 裁 2），
 //     每 issue：createSandbox 确定性分支（baseBranch=main）→ 实装→独立评审 →
 //   Phase 3 候选交主控验收；accepted 清单由独立入口受管归并到 sandcastle/merge-<run-id>，
-//     **不合 main、不关 issue**（人工闸，#1003 裁 3 有意偏离）。
+//     **不合 main、不关 issue**（工蜂只交分支，#1003 裁 3 有意偏离；合入由分支保护的 deepagents/review 与 ci-ok 把关）。
 // 跑法：npx tsx .sandcastle/main-swarm.mts
 
 import { useScheduler } from "./scheduler-config.mts";

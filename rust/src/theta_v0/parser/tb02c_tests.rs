@@ -613,7 +613,7 @@ fn tb1493_splitmix(state: &mut u64) -> u64 {
 }
 
 /// 交替折线；`distinct` ⟹ 端点价两两互异（低位编号），否则小整数域高频并列。
-fn tb1493_polyline(seed: u64, n: usize, distinct: bool) -> Vec<i64> {
+pub(super) fn tb1493_polyline(seed: u64, n: usize, distinct: bool) -> Vec<i64> {
     let mut st = seed;
     let mut p = 10_000i64;
     let mut out = vec![p];

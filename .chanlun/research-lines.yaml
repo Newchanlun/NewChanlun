@@ -1,6 +1,10 @@
 # .chanlun/research-lines.yaml
 # 研究线索引文件——活跃研究线的持存结构
 #
+# ⚠️ 2026-11-08（#1952 / PR #1955）：唯一机器读取方 scripts/ceremony_scan.py 已随早年蜂群
+#   退役删除，本文件不再被任何程序读取或推进，仅作历史研究线索引。下文设计约束 1/2 随之失效；
+#   指向已删脚本的 next_action 已标 retired。
+#
 # 设计约束（编排者确认）：
 #   1. 状态转换：ceremony_scan.py 提议转换，编排者确认。ceremony 不越权。
 #   2. next_action 必须结构化：ceremony_scan.py 能机器读取，不是自由文本备忘录。
@@ -191,6 +195,8 @@ lines:
       - type: engineering
         target: "ceremony-scan-bidirectional"
         description: "修改 ceremony_scan.py，增加产出端是否有消费者扫描"
+        status: retired
+        retired_reason: "目标脚本 scripts/ceremony_scan.py 已随 #1952 删除（2026-11-08，PR #1955），此项无对象可改"
         blocked_by: "spec-gap-bidirectional"
         completion_check:
           type: genealogy_settled

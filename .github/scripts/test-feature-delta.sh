@@ -13,6 +13,14 @@ if (( $# != 1 )); then
 fi
 readonly feature="$1"
 readonly base_features="s_session"
+# #1875：CI_DELTA_SKIP_FILE（可选）每行「<lib|bin> <测试全名>」，列出同一 CI 内另有作业以相同 features 逐名精确执行的测试
+#   （同为 dev 档，但对方依赖优化级别与进程模型不同：每条单独进程、--exact），这里不再重复执行。
+#   「新增集合为空即失败」与「特性移除测试」两道门仍按完整集合判定；跳过条数写进日志。
+readonly skip_file="${CI_DELTA_SKIP_FILE:-}"
+if [[ -n "$skip_file" && ! -r "$skip_file" ]]; then
+  echo "::error title=Feature delta skip list unreadable::$skip_file" >&2
+  exit 1
+fi
 work="$(mktemp -d)"
 trap 'rm -rf "$work"' EXIT
 
@@ -21,6 +29,20 @@ list_tests() {
   shift 2
   cargo test --locked --features "$features" "$@" --jobs "${CI_CARGO_JOBS:-1}" -- --list >"$out.raw"
   sed -n 's/: test$//p' "$out.raw" | LC_ALL=C sort >"$out"
+}
+
+# #1875：CI_TEST_PART=i/N 时只执行新增集合中按名字排序后第 i、i+N、i+2N… 个（i 从 0 起）。N 个作业各取一份，
+#   并集恰为新增集合、互不重叠；每个作业的机器上仍是 RUST_TEST_THREADS 个线程，同机负载与不拆时相同。
+#   「新增集合为空即失败」仍按完整集合判定。不设或 0/1 时执行全部。
+run_delta() {
+  local target="$1"; shift
+  local sel part=() i n k
+  if [[ "$target" == lib ]]; then sel=(--lib); else sel=(--bin s_structure_session); fi
+  IFS=/ read -r i n <<<"${CI_TEST_PART:-0/1}"
+  for (( k = i; k < $#; k += n )); do part+=("${@:k+1:1}"); done
+  echo "feature_delta target=$target part=$i/$n run=${#part[@]} of $#"
+  (( ${#part[@]} == 0 )) && return 0
+  cargo test --locked --features "$base_features,$feature" "${sel[@]}" --jobs "${CI_CARGO_JOBS:-1}" -- --exact "${part[@]}"
 }
 
 total=0
@@ -42,10 +64,16 @@ for target in lib bin; do
   fi
   if (( count > 0 )); then
     names=()
+    skipped=0
     while IFS= read -r name; do
+      if [[ -n "$skip_file" ]] && grep -Fxq -- "$target $name" "$skip_file"; then
+        skipped=$((skipped + 1))
+        continue
+      fi
       names+=("$name")
     done <"$work/$target.delta"
-    cargo test --locked --features "$base_features,$feature" "${selector[@]}" --jobs "${CI_CARGO_JOBS:-1}" -- --exact "${names[@]}"
+    echo "feature_delta target=$target skipped_elsewhere=$skipped"
+    run_delta "$target" "${names[@]}"
   fi
   total=$(( total + count ))
 done

@@ -1,13 +1,20 @@
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { existsSync, lstatSync, readFileSync, realpathSync } from "node:fs";
-import { isAbsolute, resolve } from "node:path";
+import { isAbsolute, relative, resolve, sep } from "node:path";
 import { z } from "zod";
 import { gitEnvironment } from "./git-environment.ts";
 
 const digest = z.string().regex(/^[a-f0-9]{64}$/);
 const commit = z.string().regex(/^[a-f0-9]{40}$/);
-const artifact = z.object({ path: z.string().min(1), sha256: digest }).strict();
+const gitArtifact = z.object({ path: z.string().min(1), sha256: digest }).strict();
+const externalArtifact = gitArtifact.extend({
+  storage: z.literal("external"),
+  ticket: z.number().int().positive(),
+  base: commit,
+  head: commit,
+}).strict();
+const artifact = z.union([gitArtifact, externalArtifact]);
 const change = z.object({
   path: z.string().min(1),
   beforeSha256: digest.nullable(),
@@ -25,6 +32,7 @@ export const deliveryManifestSchema = z.object({
   productDiff: z.array(change),
   requiredReports: z.array(z.string().min(1)),
   reports: z.array(artifact),
+  externalReportsRoot: z.string().min(1).optional(),
   noReportsReason: z.string().min(1).optional(),
   reviews: z.array(z.object({ report: artifact, covers: z.array(change) }).strict()),
   requiredChecks: z.array(z.string().min(1)),
@@ -182,9 +190,41 @@ export function preflightDelivery(repo: string, input: unknown): DeliveryResult 
     const checkedArtifacts = new Set<string>();
     const verifyArtifact = (item: z.infer<typeof artifact>, mustBeReport = true) => {
       if (mustBeReport && !reportPaths.has(item.path)) fail("UNDECLARED_REPORT", "证据实体遗漏在 reports 清单之外。", item.path);
-      const key = `${item.path}\0${item.sha256}`;
+      const declaration = manifest.reports.find(report => report.path === item.path);
+      if (declaration && JSON.stringify(declaration) !== JSON.stringify(item)) {
+        fail("REPORT_DECLARATION_MISMATCH", "证据引用与 reports 中的存储类型、版本或摘要不一致。", item.path);
+      }
+      const key = JSON.stringify(item);
       if (checkedArtifacts.has(key)) return;
       checkedArtifacts.add(key);
+      if ("storage" in item) {
+        if (item.ticket !== manifest.ticket || item.base !== manifest.base || item.head !== manifest.head) {
+          fail("REPORT_VERSION_MISMATCH", "仓外证据必须绑定本清单的 ticket、base 与 head。", item.path);
+        }
+        const root = manifest.externalReportsRoot;
+        if (!root || !isAbsolute(root) || !isAbsolute(item.path) || item.path.includes("\\") || item.path.includes("\0") ||
+            item.path.split("/").some(part => part === "." || part === "..")) {
+          fail("INVALID_REPORT_PATH", "仓外证据须显式指定 externalReportsRoot 与绝对路径，禁止父目录跳转。", item.path);
+          return;
+        }
+        try {
+          const externalRoot = realpathSync(root);
+          const absolute = resolve(externalRoot, relative(resolve(root), resolve(item.path)));
+          const inside = (path: string, directory: string) => path === directory || path.startsWith(directory + sep);
+          if (inside(externalRoot, repositoryRoot) || !inside(absolute, externalRoot) || inside(absolute, repositoryRoot)) {
+            fail("INVALID_REPORT_PATH", "证据必须位于指定仓外目录，不能借外部协议读取仓内文件。", item.path);
+            return;
+          }
+          if (!lstatSync(absolute).isFile() || realpathSync(absolute) !== absolute) {
+            fail("REPORT_NOT_REGULAR_FILE", "仓外报告须为普通文件，路径不能经过符号链接。", item.path);
+            return;
+          }
+          if (sha256(readFileSync(absolute)) !== item.sha256) {
+            fail("REPORT_HASH_MISMATCH", "仓外报告 SHA-256 与冻结摘要不一致。", item.path);
+          }
+        } catch { fail("REPORT_MISSING", "仓外证据目录或实体缺失、不可读。", item.path); }
+        return;
+      }
       if (!safePath(item.path)) { fail("INVALID_REPORT_PATH", "实体报告必须使用仓内相对路径，禁止外部路径或父目录跳转。", item.path); return; }
       const entry = treeEntry(manifest.head, item.path);
       if (!entry) { fail("REPORT_NOT_IN_HEAD", "报告不存在于指定 head；请把实体入 Git 后重建 manifest。", item.path); return; }
@@ -259,7 +299,7 @@ export function preflightDelivery(repo: string, input: unknown): DeliveryResult 
         continue;
       }
       if (!check.evidence || !check.executedAt || !check.command || check.exitCode === undefined) {
-        fail("CHECK_EXECUTION_EVIDENCE_MISSING", `${check.id} 缺已执行的命令、时间、退出码或入仓证据。`);
+        fail("CHECK_EXECUTION_EVIDENCE_MISSING", `${check.id} 缺已执行的命令、时间、退出码或实体证据。`);
       }
       if (check.evidence) verifyArtifact(check.evidence);
       if (check.status === "failed" || check.exitCode !== 0) fail("CHECK_FAILED", `${check.id} 未通过（退出码 ${check.exitCode ?? "缺失"}）；修复后补实际执行结果。`);
@@ -276,7 +316,7 @@ export function preflightDelivery(repo: string, input: unknown): DeliveryResult 
     if (scan.status === "not_run") fail("SCAN_NOT_RUN", "扫描尚未执行，不能用披露代替执行。");
     else {
       if (!scan.evidence || !scan.executedAt || scan.exitCode === undefined || !scan.scannedHead) {
-        fail("SCAN_EXECUTION_EVIDENCE_MISSING", "扫描缺实际 commit、执行时间、退出码或入仓证据。");
+        fail("SCAN_EXECUTION_EVIDENCE_MISSING", "扫描缺实际 commit、执行时间、退出码或实体证据。");
       }
       if (scan.evidence) verifyArtifact(scan.evidence);
       if (scan.status === "passed" && scan.exitCode !== 0) fail("SCAN_STATUS_CONFLICT", "扫描声明通过但退出码非 0。");

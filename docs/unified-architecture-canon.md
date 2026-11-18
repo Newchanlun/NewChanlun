@@ -67,9 +67,9 @@
 | `trading_system/` | 研究消费区（离下单最近） | 活 | `rec_t_strategy.py` 生产策略在此 |
 
 **出界声明（R3：一行一条，不许无声缺席）**：
-- `topological-computation/` —— 独立研究系统（signifier_net）；承载语料第二副本（109 份，行号体系与正本不同）——**语料正本 = `docs/chanlun/text/blog/`，副本行号一律无效**（AGENTS.md 已钉）。
+- `topological-computation/` —— 已删除：#1945 整体移出仓库，原样归档于 `/Volumes/AgentStorage/repo-archive/f43fac8f46-batch2/`；git 历史里 #1945 合入前的 main（如 `2267aa75`）也能取回。它原是独立研究系统（signifier_net），承载语料第二副本（109 份，行号体系与正本不同），副本随之出仓——**语料正本 = `docs/chanlun/text/blog/`**（AGENTS.md 已钉）。
 - `frontend/` —— 图表前端（React/Vite），消费 `src/newchan/server.py`；bi.md U-13 已登记「未核、无人跟进」，本图销账。
-- `prototypes/`、`experiments/`、`external/`、`spec/theorems/` —— 原型/实验/外部/定理 spec 区。
+- `experiments/`、`external/`、`spec/theorems/` —— 实验/外部/定理 spec 区；`prototypes/` 已删除（#1945 移出仓库，归档同上）。
 - `chanlun/` —— 工作草稿区（与 Python 引擎 `newchan` 近名、与 `.chanlun/` 同名异物，引用时勿混）。
 - `.chanlun/` —— 谱系与草稿（#790 边界条已排除）。
 - `tradingview-mcp-plugin/` 等 —— TV 集成侧（K4 支柱）。
