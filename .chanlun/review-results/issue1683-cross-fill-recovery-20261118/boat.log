@@ -1,0 +1,146 @@
+creating a large sandbox...
+bx_psmq52st ready in 116.6s
+pushed 949 files (42.5 MB) to ~/work
+    Updating crates.io index
+ Downloading crates ...
+  Downloaded autocfg v1.5.1
+  Downloaded bitflags v2.13.0
+  Downloaded block-buffer v0.10.4
+  Downloaded allocator-api2 v0.2.21
+  Downloaded cc v1.2.65
+  Downloaded unindent v0.2.4
+  Downloaded cfg-if v1.0.4
+  Downloaded sha2-asm v0.6.4
+  Downloaded generic-array v0.14.7
+  Downloaded memoffset v0.9.1
+  Downloaded fallible-streaming-iterator v0.1.9
+  Downloaded cpufeatures v0.2.17
+  Downloaded foldhash v0.2.0
+  Downloaded quote v1.0.45
+  Downloaded pkg-config v0.3.34
+  Downloaded indoc v2.0.7
+  Downloaded serde v1.0.229
+  Downloaded target-lexicon v0.12.16
+  Downloaded errno v0.3.14
+  Downloaded find-msvc-tools v0.1.9
+  Downloaded version_check v0.9.5
+  Downloaded fallible-iterator v0.3.0
+  Downloaded once_cell v1.21.4
+  Downloaded tempfile v3.27.0
+  Downloaded digest v0.10.7
+  Downloaded pyo3-macros v0.23.5
+  Downloaded shlex v2.0.1
+  Downloaded crypto-common v0.1.7
+  Downloaded zmij v1.0.21
+  Downloaded rustversion v1.0.22
+  Downloaded heck v0.5.0
+  Downloaded sha2 v0.10.9
+  Downloaded proc-macro2 v1.0.106
+  Downloaded fastrand v2.5.0
+  Downloaded serde_core v1.0.229
+  Downloaded smallvec v1.15.2
+  Downloaded unicode-ident v1.0.24
+  Downloaded getrandom v0.4.3
+  Downloaded itoa v1.0.18
+  Downloaded pyo3-build-config v0.23.5
+  Downloaded pyo3-ffi v0.23.5
+  Downloaded hashlink v0.12.2
+  Downloaded pyo3-macros-backend v0.23.5
+  Downloaded serde_derive v1.0.229
+  Downloaded typenum v1.20.1
+  Downloaded memchr v2.8.2
+  Downloaded serde_json v1.0.151
+  Downloaded hashbrown v0.17.1
+  Downloaded rusqlite v0.40.2
+  Downloaded vcpkg v0.2.15
+  Downloaded syn v2.0.117
+  Downloaded syn v3.0.4
+  Downloaded rustix v1.1.5
+  Downloaded libc v0.2.189
+  Downloaded pyo3 v0.23.5
+  Downloaded linux-raw-sys v0.12.1
+  Downloaded libsqlite3-sys v0.38.2
+   Compiling target-lexicon v0.12.16
+   Compiling once_cell v1.21.4
+   Compiling proc-macro2 v1.0.106
+   Compiling quote v1.0.45
+   Compiling unicode-ident v1.0.24
+   Compiling version_check v0.9.5
+   Compiling libc v0.2.189
+   Compiling shlex v2.0.1
+   Compiling typenum v1.20.1
+   Compiling find-msvc-tools v0.1.9
+   Compiling cfg-if v1.0.4
+   Compiling vcpkg v0.2.15
+   Compiling generic-array v0.14.7
+   Compiling cc v1.2.65
+   Compiling pkg-config v0.3.34
+   Compiling serde_core v1.0.229
+   Compiling autocfg v1.5.1
+   Compiling heck v0.5.0
+   Compiling pyo3-build-config v0.23.5
+   Compiling memoffset v0.9.1
+   Compiling foldhash v0.2.0
+   Compiling allocator-api2 v0.2.21
+   Compiling bitflags v2.13.0
+   Compiling rustix v1.1.5
+   Compiling zmij v1.0.21
+   Compiling syn v2.0.117
+   Compiling getrandom v0.4.3
+   Compiling syn v3.0.4
+   Compiling hashbrown v0.17.1
+   Compiling crypto-common v0.1.7
+   Compiling libsqlite3-sys v0.38.2
+   Compiling block-buffer v0.10.4
+   Compiling serde_json v1.0.151
+   Compiling serde v1.0.229
+   Compiling linux-raw-sys v0.12.1
+   Compiling digest v0.10.7
+   Compiling hashlink v0.12.2
+   Compiling pyo3-ffi v0.23.5
+   Compiling pyo3-macros-backend v0.23.5
+   Compiling pyo3 v0.23.5
+   Compiling fastrand v2.5.0
+   Compiling fallible-iterator v0.3.0
+   Compiling fallible-streaming-iterator v0.1.9
+   Compiling indoc v2.0.7
+   Compiling memchr v2.8.2
+   Compiling unindent v0.2.4
+   Compiling cpufeatures v0.2.17
+   Compiling smallvec v1.15.2
+   Compiling itoa v1.0.18
+   Compiling sha2 v0.10.9
+   Compiling serde_derive v1.0.229
+   Compiling tempfile v3.27.0
+   Compiling pyo3-macros v0.23.5
+   Compiling rusqlite v0.40.2
+   Compiling newchan_rust v0.1.0 (/home/user/work/rust)
+
+running 1 test
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 1m 22s
+     Running unittests src/lib.rs (target/debug/deps/newchan_rust-f9d5508acb2acc81)
+FORWARD pid=7866 db=/tmp/nc1406-c4b-xproc-7866-0 original_fees=[[0,2,1],[0,0,1],[2,2,1]]
+test economic_session::tb03c_allocation_tests::c4b_process_acceptance_forward ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3671 filtered out; finished in 19.11s
+
+
+running 1 test
+RECOVER pid=7983 db=/tmp/nc1406-c4b-xproc-7866-0/e.db bytes=1474560 epoch=2
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.04s
+     Running unittests src/lib.rs (target/debug/deps/newchan_rust-f9d5508acb2acc81)
+RECOVER pid=7983 db=/tmp/nc1406-c4b-xproc-7866-0/b0.db bytes=6332416 epoch=2
+RECOVER pid=7983 db=/tmp/nc1406-c4b-xproc-7866-0/b1.db bytes=6426624 epoch=2
+RECOVER pid=7983 db=/tmp/nc1406-c4b-xproc-7866-0/b2.db bytes=6529024 epoch=2
+IMAGE owner=0 equal_bytes=139944
+IMAGE owner=1 equal_bytes=1675572
+IMAGE owner=2 equal_bytes=1690149
+IMAGE owner=3 equal_bytes=1704725
+RECEIPTS case=7 Capture+Resolve+3 Apply byte-identical
+RECEIPTS case=8 Capture+Resolve+3 Apply byte-identical
+RESENDS all four images unchanged; audits passed
+test economic_session::tb03c_allocation_tests::c4b_process_acceptance_recover ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3671 filtered out; finished in 10.36s
+
+exit 0 · 4m 07s · large · $0.0027 · bx_psmq52st deleted
