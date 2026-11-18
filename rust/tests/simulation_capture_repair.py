@@ -91,6 +91,8 @@ def exercise(e_bin, directory, e_socket, x_db, source, receipt, alternate, other
             assert c.execute("SELECT count(*) FROM facts").fetchone() == (0,)
 
     # Keep batch and result fixed. Each copy lacks a different independent proof.
+    reject_corrupt_x("old-profile", "UPDATE x_meta SET value=? WHERE key='profile_revision'",
+                     ("x-execution-profile/1",), "指定 X 模型")
     fee = receipt["originals"][1]["event"]["source"]["external_fact_id"]
     reject_corrupt_x("missing-fee", "DELETE FROM x_sim_originals WHERE id=?", (fee,),
                      "Query returned no rows")

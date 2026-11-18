@@ -49,9 +49,16 @@ pub(super) fn decorate_input(data: &mut Value) {
         q["exact"] = json!({"command_id":format!("cmd-{name}"),"logical_order_family":format!("family-{name}"),"chong_id":name,"revision":"1","first_quantity":q["quantity"],"allocation_id":format!("alloc-{name}"),"side":"buy","symbol":name,"projection_manifest":format!("TestOnly-projection/{name}"),"eligibility_ref":format!("S:cmd-{name}"),"concurrency":if name == "alpha" {"single"} else {"batched"}});
     }
 }
+/// `/5` 夹具的组件时钟。`LogicalBar` 是 #1407 C2 的 simulation 读法：全部前置消息落在 bar 1
+/// （单位 S 基础的 commit_ns 是 1，财务获知不得早于它），alpha 的 ReleaseExact 落在 bar 2（见 `x_e2e`）。
+#[derive(Clone, Copy)]
+pub(super) enum ExactClock {
+    TestOnly,
+    LogicalBar,
+}
 /// X 的来源身份（`x-exact-authority/1` 共同信封的 source/producer）；E 只授它 QueryReleasedExact。
 pub(super) const X_SOURCE: (&str, &str, &str, &str) = ("x-sim", "epoch1", "X", "1");
-pub(super) fn decorate_manifest(manifest: &mut Value) {
+pub(super) fn decorate_manifest(manifest: &mut Value, clock: ExactClock) {
     manifest["authorized_sources"][0]["operations"]
         .as_array_mut()
         .unwrap()
@@ -71,6 +78,23 @@ pub(super) fn decorate_manifest(manifest: &mut Value) {
     ] {
         clocks[message] = json!({"received_ns":t.to_string(),"first_known_ns":(t+1).to_string(),"commit_ns":(t+2).to_string()});
     }
+    if let ExactClock::LogicalBar = clock {
+        let mut bars = serde_json::Map::new();
+        for message in manifest["clock"]["plan"]["messages"]
+            .as_object()
+            .unwrap()
+            .keys()
+        {
+            let bar = if message == "ReleaseExact-alpha" {
+                "2"
+            } else {
+                "1"
+            };
+            bars.insert(message.clone(), json!(bar));
+        }
+        manifest["clock"] =
+            json!({"kind":"logical-bar/1","bars":{"init":"0","recover":["2","2"],"messages":bars}});
+    }
 }
 
 fn fixture(fault: Option<(&str, &str)>) -> Fixture {
@@ -84,7 +108,7 @@ fn fixture(fault: Option<(&str, &str)>) -> Fixture {
         None,
         None,
         None,
-        true,
+        Some(ExactClock::TestOnly),
     )
 }
 /// B Prepare → E Reserve → B Commit，全部经 `service::handle`。
@@ -134,17 +158,14 @@ fn grant_id(f: &Fixture, name: &str) -> String {
         .unwrap()
         .to_owned()
 }
-fn int(v: &Value) -> i64 {
-    v.as_str().unwrap().parse().unwrap()
-}
 /// 测试侧独立组装的期望 ExactCommand（#1942 `runtime.rs:108-122` 字段集）。
 fn expected_command(f: &Fixture, name: &str) -> Value {
     let q = plan_of(f, name);
     let s = &f.data["exact_release"];
     let x = &q["exact"];
-    let change = json!({"kind":"submit","order":{"command_id":x["command_id"],"family_id":x["logical_order_family"],"chong_id":x["chong_id"],"revision":1,"side":"buy","quantity":int(&q["quantity"]),"kind":{"kind":"limit","price":int(&q["limit_price"])},"eligibility_ref":x["eligibility_ref"],"projection_manifest":x["projection_manifest"]}});
+    let change = json!({"kind":"submit","order":{"command_id":x["command_id"],"family_id":x["logical_order_family"],"chong_id":x["chong_id"],"revision":"1","side":"buy","quantity":q["quantity"],"kind":{"kind":"limit","price":q["limit_price"]},"eligibility_ref":x["eligibility_ref"],"projection_manifest":x["projection_manifest"]}});
     let certificate = json!({"rd11_policy":s["rd11_policy"],"responsibility_refs":[grant_id(f,name)],"structure_dependencies":[format!("{}@{}",q["s_ref"]["object_id"].as_str().unwrap(),q["s_ref"]["object_hash"].as_str().unwrap())],"market_dependencies":s["market_dependencies"],"rule_revision":s["rule_revision"],"conditions":s["conditions"]});
-    json!({"command_id":x["command_id"],"logical_order_family":x["logical_order_family"],"session_id":f.configs[0].session,"session_generation":f.configs[0].generation,"x_id":"X","x_epoch":1,"symbol":x["symbol"],"projection_kind":"per_leg","change":change,"plan_hash":hash(&change),"certificate_hash":hash(&certificate),"certificate":certificate})
+    json!({"command_id":x["command_id"],"logical_order_family":x["logical_order_family"],"allocation_id":x["allocation_id"],"first_quantity":x["first_quantity"],"session_id":f.configs[0].session,"session_generation":f.configs[0].generation,"x_id":"X","x_epoch":"1","symbol":x["symbol"],"projection_kind":"per_leg","change":change,"plan_hash":hash(&change),"certificate_hash":hash(&certificate),"certificate":certificate})
 }
 fn release_payload(f: &Fixture, name: &str) -> Value {
     let c = expected_command(f, name);
@@ -223,7 +244,7 @@ fn l1_formal_entry_releases_exact_in_the_e_sequence() {
         authority_query(&f, &expected_command(&f, "alpha"), "1"),
     );
     assert_eq!(reply["state"], "ReleasedExact", "{reply}");
-    assert_eq!(reply["commit_ns"], 162);
+    assert_eq!(reply["commit_ns"], "162");
     f.audit();
 }
 
@@ -400,7 +421,7 @@ mod wire_1942 {
         pub state: String,
         pub receipt_id: String,
         pub release_receipt_id: Option<String>,
-        pub commit_ns: i64,
+        pub commit_ns: String,
     }
 }
 
@@ -425,7 +446,7 @@ fn l8_released_exact_reply_decodes_as_1942_authority_reply() {
     assert_eq!(decoded.authority_id, "E");
     assert_eq!(decoded.authority_epoch, "1");
     assert_eq!(decoded.release_receipt_id, None);
-    assert_eq!(decoded.commit_ns, 162);
+    assert_eq!(decoded.commit_ns, "162");
     assert_eq!(
         decoded.command_hash,
         sha256_hex(canonical_json(&reply["command"]).as_bytes())
@@ -629,7 +650,7 @@ fn l5_sigkill_before_and_after_commit_recovers_by_original_identity() {
                         "{reply}"
                     );
                     if durable {
-                        assert_eq!(reply["commit_ns"], 162);
+                        assert_eq!(reply["commit_ns"], "162");
                     }
                     reply["state"].clone()
                 } else {
@@ -763,6 +784,22 @@ fn old_contracts_do_not_know_exact_operations_or_commands() {
     assert!(latest(&old.dbs[0]).unwrap().3["finance"]
         .get("commands")
         .is_none());
+    let mut m = old.configs[0].manifest.clone();
+    m["clock"] = json!({"kind":"logical-bar/1","bars":{"init":"0","messages":{},"recover":[]}});
+    let (path, _) = save(&old.dir, "old-logical-bar.json", &m);
+    let err = Config::load(Path::new(&path), &old.configs[0].db, None)
+        .err()
+        .expect("逻辑 bar 不得改变旧财务合同的时钟选择");
+    assert_eq!(err, "SchemaUnsupported：Voice 证据仅显式 TestOnly voice-binding/1");
+    // 去掉提前拒绝的两个组件，单独穿到 Config 自身的时钟选择门。
+    m.as_object_mut().unwrap().remove("voice_binding");
+    m.as_object_mut().unwrap().remove("finance");
+    m["authorized_sources"][0]["operations"] = json!(["ReadView", "Watch"]);
+    let (path, _) = save(&old.dir, "bare-logical-bar.json", &m);
+    let err = Config::load(Path::new(&path), &old.configs[0].db, None)
+        .err()
+        .expect("无 /5 的基础合同也不接受模拟时钟");
+    assert!(err.contains("显式指定时钟adapter"), "{err}");
     for op in EXACT_OPS {
         let mut m = old.configs[0].manifest.clone();
         m["authorized_sources"][0]["operations"]

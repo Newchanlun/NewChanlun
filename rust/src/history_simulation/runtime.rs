@@ -1,3 +1,4 @@
+use super::exact_wire::{decimal, Plan, SignedChange};
 use super::{
     model::{Batch, Change, Model},
     store,
@@ -175,12 +176,17 @@ pub struct Certificate {
 pub struct ExactCommand {
     pub command_id: String,
     pub logical_order_family: String,
+    #[serde(with = "decimal")]
+    pub first_quantity: i64,
+    pub allocation_id: String,
     pub session_id: String,
     pub session_generation: String,
     pub x_id: String,
+    #[serde(with = "decimal")]
     pub x_epoch: i64,
     pub symbol: String,
     pub projection_kind: String,
+    #[serde(with = "SignedChange")]
     pub change: Change,
     pub plan_hash: String,
     pub certificate_hash: String,
@@ -212,7 +218,7 @@ impl ExactCommand {
             || family != &self.logical_order_family
             || command.is_empty()
             || family.is_empty()
-            || self.plan_hash != hash(&self.change)
+            || self.plan_hash != hash(&Plan(&self.change))
             || self.certificate_hash != hash(&self.certificate)
         {
             return Err("IdentityConflict：精确命令身份/计划/条件摘要不符".into());
@@ -232,6 +238,13 @@ impl ExactCommand {
             .any(|a| a.is_empty() || a.iter().any(String::is_empty))
         {
             return Err("MissingDependency：精确命令缺责任/结构/市场/规则依赖".into());
+        }
+        if self.first_quantity <= 0 || self.allocation_id.is_empty() {
+            return Err("MissingDependency：精确命令缺首次量 L 或分配身份".into());
+        }
+        if matches!(&self.change, Change::Submit { order } if order.quantity != self.first_quantity)
+        {
+            return Err("IdentityConflict：首次提交量与 L 不同".into());
         }
         if c.conditions != p.conditions {
             return Err("Unsupported：条件清单与获准 manifest 清单不逐项相等".into());
@@ -261,13 +274,17 @@ struct AuthorityReply {
     state: String,
     receipt_id: String,
     release_receipt_id: Option<String>,
+    #[serde(with = "decimal")]
     commit_ns: i64,
 }
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct AcceptClock {
+    #[serde(with = "decimal")]
     received_ns: i64,
+    #[serde(with = "decimal")]
     first_known_ns: i64,
+    #[serde(with = "decimal")]
     commit_ns: i64,
 }
 /// simulation 证据类的 `logical-bar/1` 接纳读数（ADR 0052:296、ADR 0056:52）：已提交前沿
@@ -440,7 +457,8 @@ fn validate_execution_record(
     };
     if eligibility != &reply.receipt_id
         || evidence["claimed_ns"]
-            .as_i64()
+            .as_str()
+            .and_then(|s| crate::session_protocol::nonnegative(s, "claimed_ns").ok())
             .is_none_or(|t| t < reply.commit_ns)
     {
         return Err("IdentityConflict：持久S执行证据与资格/调用占有时刻不符".into());
@@ -606,7 +624,7 @@ fn query_command(c: &Connection, p: &Profile, id: &str) -> Result<Value, String>
             let clock: Value = serde_json::from_str(&clock).map_err(error)?;
             let evidence: AuthorityReply = serde_json::from_str(&evidence).map_err(error)?;
             Ok(
-                json!({"kind":"ExactCommandState","command_id":id,"state":state,"x_accept":clock,"causal_refs":[{"authority_id":p.e.authority_id,"authority_epoch":p.e.authority_epoch,"receipt_id":release,"command_hash":evidence.command_hash,"release_commit_ns":evidence.commit_ns}]}),
+                json!({"kind":"ExactCommandState","command_id":id,"state":state,"x_accept":clock,"causal_refs":[{"authority_id":p.e.authority_id,"authority_epoch":p.e.authority_epoch,"receipt_id":release,"command_hash":evidence.command_hash,"release_commit_ns":evidence.commit_ns.to_string()}]}),
             )
         }
     }
@@ -739,7 +757,7 @@ fn execute(c: &mut Connection, p: &Profile, epoch: i64, mut batch: Batch) -> Res
         if claimed_ns < executed.commit_ns {
             return Err("InvalidDomain：X 调用占有早于 S 持久提交".into());
         }
-        let evidence = json!({"reply":executed,"claimed_ns":claimed_ns});
+        let evidence = json!({"reply":executed,"claimed_ns":claimed_ns.to_string()});
         c.execute("UPDATE x_exact_commands SET state='ExecutionReady',attempt_batch=?2,execute_evidence=COALESCE(execute_evidence,?3) WHERE id=?1 AND state IN ('ExecutionRequested','ExecutionReady')",params![command.command_id,encoded,canonical_json(&evidence)]).map_err(error)?;
         executed_records.push((command.command_id, evidence));
     }
@@ -798,6 +816,17 @@ pub fn validate_existing(c: &Connection, p: &Profile, epoch: i64) -> Result<(), 
         )
         .map_err(error)?;
     if exists {
+        let version: Option<String> = c
+            .query_row(
+                "SELECT v FROM x_sim_meta WHERE k='exact_profile_revision'",
+                [],
+                |r| r.get(0),
+            )
+            .optional()
+            .map_err(error)?;
+        if version.as_deref() != Some(super::EXACT_PROFILE_REVISION) {
+            return Err("VersionUnsupported：旧历史模拟库须从空库重放".into());
+        }
         validate_pending_epoch(c, epoch)?;
         store::audit_history(c)?;
         let frozen: Option<String> = c
@@ -856,8 +885,11 @@ pub fn initialize_in_transaction(
     store::initialize_in_transaction(c, &p.model, &p.source_namespace, &p.source_epoch)?;
     c.execute_batch("CREATE TABLE x_exact_commands(id TEXT PRIMARY KEY,command TEXT NOT NULL,release_receipt TEXT NOT NULL,state TEXT NOT NULL,attempt_batch TEXT,accept_clock TEXT NOT NULL,release_evidence TEXT NOT NULL,execute_evidence TEXT) STRICT;").map_err(error)?;
     c.execute(
-        "INSERT INTO x_sim_meta VALUES('authority_profile',?1)",
-        [canonical_json(&serde_json::to_value(p).map_err(error)?)],
+        "INSERT INTO x_sim_meta VALUES('authority_profile',?1),('exact_profile_revision',?2)",
+        params![
+            canonical_json(&serde_json::to_value(p).map_err(error)?),
+            super::EXACT_PROFILE_REVISION
+        ],
     )
     .map_err(error)?;
     Ok(())

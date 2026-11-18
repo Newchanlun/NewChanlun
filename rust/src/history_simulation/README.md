@@ -1,8 +1,7 @@
 # X 历史模拟执行接口
 
-`x_execution_session serve --db FILE --profile FILE --writer-epoch N` 在既有
-`x-execution-profile/1` 的 `mode: simulation` 下接受 `history_simulation` 对象。
-它只产生模拟成交原件，不连接场所。旧 profile 的行为保持不变。
+`x_execution_session serve --db FILE --profile FILE --writer-epoch N` 用 `x-execution-profile/2`、
+`mode: simulation` 与 `history_simulation` 对象运行历史撮合。已有 /1 历史模拟库（即使还没有命令）须从空库重放；不带历史撮合的模拟骨架以及 dry-run、experiment、production 仍使用 /1。
 
 ## 冻结输入
 
@@ -23,7 +22,7 @@ RD12 固定为 `per-leg-source-attribution/1`；未知政策拒绝。netted 返�
 
 - AcceptExact：payload 为完整 ExactCommand。查询冻结 E 的 ReleasedExact；
   核全命令、计划/条件摘要、会话与 epoch 后持久 Accepted，不问 S、不产生调用权。
-- AdvanceBar：payload 为 Batch。每个 close_change 必须逐字对应已接纳命令；
+- AdvanceBar：payload 为 Batch。每个 close_change 解码后必须等于已接纳命令的 change（批合同保留 JSON 数字）；
   真正动作前向 S 请求 ExecuteCommitted，绑定 E release 收据与命令 eligibility_ref；
   X 先持久 MayHaveCalled，再原子提交模型状态、不可变原件、批结果与 Observed。
 - QueryCommand：payload 为 command_id 字符串，回状态、x_accept 三相时钟与 E causal_refs。
@@ -46,9 +45,13 @@ ConditionEvidence 清单由 profile 的 `conditions` 冻结，与 E 冻结原件
 清单还须完备：配对表的四项能力（E 的 released-exact/1 与 model-coverage/1、S 的 execute-committed/1、
 X 的 simulation-local-transaction/1）各出现恰一次，缺项按 MissingDependency、重复按 Unsupported 拒绝；
 E 冻结原件与 X profile 走同一个 `check_required_capabilities`。
-真实 E/S producer 尚须在 #1407 / TB04-D/E 接此 wire，受控夹具不替代它们。
+正式 E 用 `tb03b-finance/5`，X 的 `e.socket` 指向该会话 E，其来源须获 `QueryReleasedExact` 权限。模拟条件执行的 S 由夹具按冻结的 eligibility_ref 发证，真实 S 签发归 #1416。
+
+订单投影的 revision、quantity 和 price（市价为 exec_index）先编码成规范十进制字符串，再计算 plan_hash。整个命令还冻结 first_quantity、allocation_id、目标 X 与 x_epoch，一并进入 command_hash。接纳钟、权威 commit_ns、release_commit_ns 与执行 claimed_ns 同样使用字符串；数字、前导零或越出 i64 的文本均不属于该合同。
 
 ## 时间、恢复与消费边界
+
+E 的 /5 组件按冻结的 `clock: {kind:"logical-bar/1",bars:{init:"0",messages:{"ReleaseExact-alpha":"2"},recover:["3"]}}` 选择调度读数。每条写消息须在 messages 声明，以数组区分恢复代际时按恢复索引取值；三相使用同一 bar，没有墙钟回退。
 
 X 不读系统时钟。simulation 证据类的时钟固定为 `logical-bar/1`（ADR 0056:52，定义见
 ADR 0052:296）：checkpoint 与前沿只认 bar_index。接纳三相 received/first_known/commit 都取
@@ -185,3 +188,22 @@ StorageUnavailable 拒启。启动时把实际读到的存储证据写到 stderr
   price_rules、capacity_source、unsupported_domains、clock/known_frontier_cut 等）。#1381 不关。
 - 启动重放两次：`x_execution_session` 的 persist 与 `runtime::serve` 各调用一次
   initialize_in_transaction，两次都经 validate_existing 从空状态重放全部历史批。
+
+## 在 Linux 复跑 #1407 C2
+
+从仓根进入 `rust/`。L1 生成 /5 项目输入；第二步只读其中的 JSON，不复用 L1 的库。输出根选短路径（Unix socket 有长度限制）。
+
+```sh
+r=$(mktemp -d /tmp/c2.XXXXXX)
+mkdir "$r/fixture"
+export CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-$PWD/target}"
+cargo build --locked --features production_session --bin e_economic_session --bin b_chong_session --bin x_execution_session
+TB03B_TEST_ROOT="$r/fixture" cargo test --locked --features production_session --lib \
+  economic_session::finance::tests::exact_release::l1_formal_entry_releases_exact_in_the_e_sequence -- --exact
+python3 tests/c2_formal_entry.py --fixture "$r"/fixture/unit-* --bin "$CARGO_TARGET_DIR/debug" \
+  --out "$r/proof" --twice --geckodriver "$(command -v geckodriver)"
+```
+
+Firefox 和 geckodriver 须能共用临时 profile；Snap 安装可追加 `--profile-root "$HOME/snap/firefox/common"`。省略 `--geckodriver` 只跑到真实 HTTP，不验浏览器。两轮均通过正式 launcher 启动 E 与两个 B，通过正式 X socket 提交同一份命令。看 `proof/b/summary.json` 的接纳、占有、模拟调用与 S 签发计数，`proof/b/browser/cut-{5,6}.json` 的同切面原件；`proof/{a,b}/business.json` 是包含空表在内的全表规范转储。
+
+Q 来源需获 `QueryCommand` 权限；启用已有 `EconomicReadOpen/Page/Close` 三项权限后，既有测试页通过分页读取超出单帧的完整快照和变化，命令原件仍由 E 的 `QueryCommand` 按所选 cut 返回。

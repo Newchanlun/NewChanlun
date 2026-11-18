@@ -180,7 +180,7 @@ pub(crate) fn committed_capture_batch(
         tx.query_row("SELECT value FROM x_meta WHERE key=?1", [key], |r| r.get(0))
             .map_err(failure)
     };
-    if x_meta("profile_revision")? != "x-execution-profile/1"
+    if x_meta("profile_revision")? != super::EXACT_PROFILE_REVISION
         || x_meta("profile_mode")? != "simulation"
         || x_meta("history_simulation")? != "true"
         || x_meta("writer_epoch")? != x_epoch.to_string()

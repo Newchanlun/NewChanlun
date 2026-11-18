@@ -15,7 +15,7 @@
 <button id="current">读取当前账簿</button><button id="watch">读取后续变化</button>
 <label>已保存切面 <select id="history"><option value="">请选择</option></select></label>
 <button id="revisit">回看所选切面</button>
-<label>当时可知时间（纳秒） <input id="known-at" type="text" inputmode="numeric" size="20"></label>
+<label><span id="time-label">当时可知时间（纳秒）</span> <input id="known-at" type="text" inputmode="numeric" size="20"></label>
 <button id="as-known">按时间回看</button>
 </div>
 <div id="status" class="status" role="status"></div><div id="cuts"></div>
@@ -38,7 +38,7 @@ function voiceDetails(voice) {
     ["执行级",voice.structure_view.execution_level],
     ["区间套梯级数",voice.structure_view.nest_depth],
     ["冻结开局数量",voice.opening_basis.quantity],
-    ["首次获知时间（纳秒）",voice.first_known_ns]
+    [client.discovery.clock_kind==="logical-bar/1"?"首次获知 bar":"首次获知时间（纳秒）",voice.first_known_ns]
   ];
   for(const [label,value] of fields){const row=el("tr");row.append(el("th",label),el("td",value));table.append(row);}
   section.append(table,el("p","业务生命周期：尚无记录；责任尾账：未知。","muted"),
@@ -51,6 +51,12 @@ function financialDetails(card, state, domain, finance) {
   if(domain==="E") {
     const total=finance.responsibilities.reduce((sum,r)=>sum+BigInt(r.amount),0n);
     section.append(el("h3","公共最大责任"),metric("保留总额",total.toString()));
+    for(const c of finance.commands||[]) {
+      const row=el("section");row.dataset.command=c.command_id;
+      row.append(el("h4",c.command_id+" · "+c.state));
+      if(c.state==="ReleasedExact")row.append(el("p","首次量 "+c.command.first_quantity+" · 分配 "+c.command.allocation_id+" · 放行读数 "+c.release_commit_ns));
+      originalButton(row,state,domain,"command",c.command_id);section.append(row);
+    }
     for(const slot of finance.slots) {
       section.append(el("p",slot.slot_id+" · "+slot.state+(slot.waiting_for?" · 等待 "+slot.waiting_for:"")));
       for(const grant of slot.grants)originalButton(section,state,domain,"grant",grant.grant_id);
@@ -72,14 +78,22 @@ function financialDetails(card, state, domain, finance) {
 function originalButton(parent,state,domain,kind,id) {
   if(state.completeness!=="CompleteVector")return;
   const button=el("button","查询原件 · "+id),result=el("pre");result.hidden=true;
+  const receiptLine=kind==="command"?el("p",undefined,"muted"):null;
+  if(receiptLine){receiptLine.hidden=true;parent.append(receiptLine);}
   button.dataset.originalKind=kind;button.dataset.originalDomain=domain;button.dataset.originalId=id;
-  button.onclick=async()=>{button.disabled=true;try{
+  button.onclick=async()=>{button.disabled=true;if(receiptLine)receiptLine.hidden=true;try{
     const reply=await client.original(state,domain,kind,id);
+    if(receiptLine){
+      const o=reply.original;
+      receiptLine.textContent="E 提交 "+o.cut.commit_seq+" · "+o.receipts.length+" 份原回执："+o.receipts.map(r=>r.kind).join("、");
+      receiptLine.hidden=false;
+    }
     result.textContent=JSON.stringify(reply,null,2);result.hidden=false;
   }catch(error){result.textContent=error.message;result.hidden=false;}finally{button.disabled=false;}};
   parent.append(button,result);
 }
 function render(state) {
+  if(client.discovery.clock_kind==="logical-bar/1")document.getElementById("time-label").textContent="当时可知 bar";
   document.getElementById("status").textContent=(state.mode==="AsKnown"?"历史切面":"当前已知")+" · "+(state.completeness==="CompleteVector"?"各域已核对":"部分域不可用，见具体原因");
   document.getElementById("status").className="status";
   const books=document.getElementById("books"), external=document.getElementById("external"), cuts=document.getElementById("cuts");

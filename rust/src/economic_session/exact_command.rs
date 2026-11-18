@@ -1,8 +1,7 @@
 //! #1407 C1：E 侧精确命令（INTERFACE-CONTRACTS「ExactCommand」「ConditionEvidence」；SPEC C07.1–2；
 //! ADR 0052 裁定二 `model_coverage`）。只属 `tb03b-finance/5`。
 //! wire 形状与 #1942 `history_simulation::runtime::{ExactCommand, Certificate, Condition, AuthorityReply}`
-//! 逐字段对齐：命令体内的量、价、revision、x_epoch 与回复的 commit_ns 是 JSON 整数，不是十进制字符串。
-//! 首次量 L 与分配身份不在 #1942 的命令体里，留在 E 的 Release 记录（主控 #1407 切片裁定第 3 条）。
+//! 逐字段对齐。首次量和分配身份在签封前固定；IC:13 精确整数以十进制字符串进入摘要。
 use super::book::hash;
 use super::voice::exact;
 use crate::session_protocol::{positive, required};
@@ -316,9 +315,6 @@ pub(super) fn validate_plan(q: &Value) -> Result<(), String> {
     }
     Ok(())
 }
-fn integer(v: &Value, k: &str) -> Result<i64, String> {
-    positive(required(v, k)?, k)
-}
 /// 由冻结原件与 E 持有的 grant 组装 ExactCommand；同输入逐字节同输出。
 pub(super) fn command(
     session_id: &str,
@@ -333,10 +329,10 @@ pub(super) fn command(
         "command_id":x["command_id"],
         "family_id":x["logical_order_family"],
         "chong_id":x["chong_id"],
-        "revision":integer(x, "revision")?,
+        "revision":x["revision"],
         "side":x["side"],
-        "quantity":integer(q, "quantity")?,
-        "kind":{"kind":"limit","price":integer(q, "limit_price")?},
+        "quantity":q["quantity"],
+        "kind":{"kind":"limit","price":q["limit_price"]},
         "eligibility_ref":x["eligibility_ref"],
         "projection_manifest":x["projection_manifest"],
     }});
@@ -352,10 +348,12 @@ pub(super) fn command(
     Ok(json!({
         "command_id":x["command_id"],
         "logical_order_family":x["logical_order_family"],
+        "first_quantity":x["first_quantity"],
+        "allocation_id":x["allocation_id"],
         "session_id":session_id,
         "session_generation":session_generation,
         "x_id":s["x_target"]["x_id"],
-        "x_epoch":integer(&s["x_target"], "x_epoch")?,
+        "x_epoch":s["x_target"]["x_epoch"],
         "symbol":x["symbol"],
         "projection_kind":s["projection_kind"],
         "plan_hash":hash(&change),
@@ -429,6 +427,6 @@ pub(super) fn authority_reply(
         "state":state,
         "receipt_id":receipt_id,
         "release_receipt_id":Value::Null,
-        "commit_ns":commit_ns,
+        "commit_ns":commit_ns.to_string(),
     })
 }

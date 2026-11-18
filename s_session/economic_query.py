@@ -67,6 +67,9 @@ def economic_revisions(manifest: Mapping[str, object]) -> tuple[str, str]:
     elif protocol == "economic-session/2" and finance.get("schema_revision") == "tb03b-finance/4":
         # #1716 I1-C：/2 内容域显式选择的新合同（/2 全部语义 + 签署 cap 原子激活）。
         finance_revision = "tb03b-finance/4"
+    elif protocol == "economic-session/1" and finance.get("schema_revision") == "tb03b-finance/5":
+        # #1407 C2：/1 域显式选择的 E 精确命令生产者（/1 全部语义 + commands 族与 QueryCommand 读）。
+        finance_revision = "tb03b-finance/5"
     elif finance.get("schema_revision") != finance_revision:
         raise EconomicQueryError("经济会话与财务版本混搭或未知")
     return protocol, finance_revision
@@ -397,6 +400,8 @@ class EconomicQuery:
                     if type(entry) is dict and {k: entry.get(k) for k in source_fields} == self.source]
         read_ops = {"ReadView", "Watch", "QueryFact", "QueryAllocation", "QueryVoice", "QueryDecision", "QueryGrant",
                     "EconomicReadOpen", "EconomicReadPage", "EconomicReadClose"}
+        if self.finance_revision == "tb03b-finance/5":
+            read_ops.add("QueryCommand")
         if (len(matching) != 1 or type(matching[0].get("operations")) is not list
                 or any(type(op) is not str for op in matching[0]["operations"])
                 or not {"ReadView", "Watch"} <= set(matching[0]["operations"]) <= read_ops):
@@ -441,6 +446,11 @@ class EconomicQuery:
         self.open_records = {}
         self.metadata_bytes = 0
         self.budget = threading.local()
+
+    @property
+    def command_read_pages(self):
+        return (self.finance_revision == "tb03b-finance/5"
+                and {"EconomicReadOpen", "EconomicReadPage", "EconomicReadClose"} <= self.authorized_read_ops)
 
     def _start(self, deadline=None):
         own_deadline = time.monotonic() + self.resources["operation_timeout_ms"] / 1000
@@ -800,6 +810,8 @@ class EconomicQuery:
         if "finance" in image:
             finance = image["finance"]
             fields = {"schema_revision", "rights", "decisions", "slots", "responsibilities"}
+            if self.finance_revision == "tb03b-finance/5":
+                fields.add("commands")  # #1407：/5 创世图像即带 commands 族。
             if (type(finance) is not dict or set(finance) not in (fields, fields | {"closed_applicants"})
                     or finance.get("schema_revision") != self.finance_revision
                     or any(type(finance[k]) is not list for k in set(finance) - {"schema_revision"})):
@@ -869,10 +881,10 @@ class EconomicQuery:
     def original(self, payload):
         """#1394：沿指定完整经济 cut 向量查原件，绝不用后来回执填旧 cut。"""
         self._start()
-        self.budget.paged = False
+        self.budget.paged = self.command_read_pages
         if (type(payload) is not dict
                 or set(payload) != {"op", "kind", "domain_id", "object_id", "cuts"}
-                or payload["op"] != "original" or payload["kind"] not in ("decision", "grant")):
+                or payload["op"] != "original" or payload["kind"] not in ("decision", "grant", "command")):
             raise EconomicQueryError("原件查询参数不完整或多余")
         domain, cuts = payload["domain_id"], payload["cuts"]
         if domain not in self.nodes or type(cuts) is not dict or set(cuts) != set(self.nodes):
@@ -880,10 +892,14 @@ class EconomicQuery:
         for name, cut in cuts.items():
             verify_cut(cut, name)
         kind = payload["kind"]
-        if (kind == "grant") != (domain == "E"):
+        if (kind == "decision") == (domain == "E"):
             raise EconomicQueryError("原件类型不属于该权威域")
+        if kind == "command" and self.finance_revision != "tb03b-finance/5":
+            raise EconomicQueryError("命令原件只属于 tb03b-finance/5")
         object_id = text(payload["object_id"], "原身份")
         view = self.view(domain, cuts[domain])
+        if kind == "command":
+            return self._command_original(view, cuts, object_id)
         response = self.owner(domain, {"op": "QueryDecision" if kind == "decision" else "QueryGrant",
                                       "decision_id" if kind == "decision" else "grant_id": object_id,
                                       "cut": cuts[domain], "as_known_ns": None})
@@ -903,6 +919,53 @@ class EconomicQuery:
         return {"kind": "EconomicOriginal", "session_id": self.session,
                 "session_generation": self.generation, "manifest_hash": self.manifest_hash,
                 "cuts": cuts, "domain_id": domain, "original": response}
+
+    def _command_original(self, view, cuts, command_id):
+        """#1407 C2：E 的 QueryCommand 须对应同 cut 已核图像的 commands 记录；无记录只认 NoRecord。"""
+        cut = cuts["E"]
+        response = self.owner("E", {"op": "QueryCommand", "command_id": command_id,
+                                    "cut": cut, "as_known_ns": None})
+        selected = next((c for c in view["image"]["finance"]["commands"]
+                         if c["command_id"] == command_id), None)
+        head = {"kind": "EconomicCommand", "domain_id": "E", "command_id": command_id, "cut": cut}
+        if selected is None:
+            if response != {**head, "state": "NoRecord"}:
+                raise EconomicQueryError("命令原件与指定 cut 的 NoRecord 不同")
+        else:
+            receipt_kinds = {"Dispatchable": ["DispatchableReceipt"],
+                             "ReleasedExact": ["DispatchableReceipt", "ReleasedExactReceipt"],
+                             "Unsupported": ["DispatchableReceipt", "ReleaseUnsupportedReceipt"]}
+            receipts = response.get("receipts")
+            if (set(response) != set(head) | {"state", "record", "receipts"}
+                    or any(response[k] != v for k, v in head.items())
+                    or response["record"] != selected or response["state"] != selected["state"]
+                    or type(receipts) is not list
+                    or [type(r) is dict and r.get("kind") for r in receipts] != receipt_kinds.get(selected["state"])
+                    or receipts[-1].get("record") != selected):
+                raise EconomicQueryError("命令原件与指定 cut 的已核图像不同")
+            events = [e for e in view["image"]["history"] if e.get("kind") in ("MakeDispatchable", "ReleaseExact")
+                      and e["record"]["command_id"] == command_id]
+            if len(events) != len(receipts):
+                raise EconomicQueryError("命令回执与当前历史不对应")
+            for receipt, event in zip(receipts, events):
+                at = verify_cut(receipt.get("cut"), "E")
+                if int(at["commit_seq"]) > int(cut["commit_seq"]):
+                    raise EconomicQueryError("旧 cut 不能查到未来回执")
+                op = event["kind"]
+                key = command_id if op == "ReleaseExact" else selected["decision_id"]
+                if receipt != {"kind": receipt["kind"], "cut": at, "record": event["record"], "domain_id": "E",
+                               "commit_ns": event["commit_ns"], "first_known_ns": event["first_known_ns"],
+                               "receipt_key": f"{self.finance_revision}:{op}:{digest(key)}"} or at["commit_seq"] != event["commit_seq"]:
+                    raise EconomicQueryError("命令回执与历史原件不同")
+                # 所选 cut 之前的回执也须引用 E 的真根；ReadView 按序号和根一起定位。
+                if at["commit_seq"] == cut["commit_seq"]:
+                    if at != cut:
+                        raise EconomicQueryError("原回执根不同")
+                else:
+                    self.view("E", at)
+        return {"kind": "EconomicOriginal", "session_id": self.session,
+                "session_generation": self.generation, "manifest_hash": self.manifest_hash,
+                "cuts": cuts, "domain_id": "E", "original": response}
 
     def watch(self, payload, *, deadline=None, paged=False):
         self._start(deadline)
