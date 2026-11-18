@@ -1,7 +1,6 @@
 //! **T 操作层引擎**（flat：单核心 + 区间套 sink/recover 短差执行层，含次级别空头腿）。
 //!
-//! GUARD-ROLE: t-engine-flat-branch-live-python-caller——名分：现役（详见 `stream.rs`
-//! 头部 GUARD-ROLE 块，#762 C7-E3 核定）。
+//! GUARD-ROLE: t-engine-flat-branch-live-python-caller——冻结的 flat 研究回放核，用途见 `stream.rs`（#1385 OE11）。
 //!
 //! ## 架构状态（2026-06-20 编排者裁决：递归重写为正式方向）
 //! 本文件是**当前 flat 实现**：`layers: Vec<Layer>`（绝对 ladder 数组）+ 中央 `route_bsp`。它对

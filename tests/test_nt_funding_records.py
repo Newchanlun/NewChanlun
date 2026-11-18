@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import importlib.util
+import json
 import sys
 import types
 from pathlib import Path
@@ -275,3 +276,29 @@ def test_theta_cli_keeps_both_profiles_and_uses_signed_balance(monkeypatch, tmp_
     assert calls[0].funding_profile == funding
     assert calls[0].venue_profile == (None if diagnostic else "P0")
     assert calls[0].preset == ("diagnostic-fixture" if diagnostic else None)
+
+
+def test_t_fugue_keeps_history_and_writes_each_new_run(monkeypatch, tmp_path):
+    _install(monkeypatch)
+    module = _load_target(monkeypatch, "t_fugue")
+    report = tmp_path / "t_fugue_CL_structural.json"
+    original = b'{"trades": [], "equity": []}\n'
+    report.write_bytes(original)
+
+    for run_id in ("a", "b"):
+        out = {"provenance": {"run_id": run_id}, "trades": []}
+        saved = module.save_report(report, out)
+        assert saved == tmp_path / "runs" / run_id / report.name
+        assert json.loads(saved.read_text()) == out
+    assert report.read_bytes() == original
+    assert json.loads((tmp_path / "runs/a" / report.name).read_text())["provenance"]["run_id"] == "a"
+
+
+def test_t_fugue_refreshes_current_report_at_its_usual_path(monkeypatch, tmp_path):
+    _install(monkeypatch)
+    module = _load_target(monkeypatch, "t_fugue")
+    report = tmp_path / "t_fugue_CL_structural.json"
+    for run_id in ("a", "b"):
+        out = {"provenance": {"run_id": run_id}}
+        assert module.save_report(report, out) == report
+        assert json.loads(report.read_text()) == out
