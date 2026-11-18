@@ -5,6 +5,7 @@
 
 import argparse
 import copy
+import gzip
 import hashlib
 import json
 import os
@@ -17,7 +18,7 @@ import threading
 import http.client
 import socket
 import time
-from contextlib import closing
+from contextlib import closing, ExitStack
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -39,7 +40,33 @@ def resources():
                 max_client_pending_batches=2, max_page_size=8, max_watch_batches=2)
 
 
-class QueryTests(unittest.TestCase):
+class HTTPFixture(unittest.TestCase):
+    def server(self, *, cleanup=None):
+        class Quiet(reader.Handler):
+            db_path = str(self.db)
+            browser_path = str(ROOT/"s_session/browser/index.html")
+            def log_message(self, *args):
+                pass
+        server = reader.QueryHTTPServer(("127.0.0.1", 0), Quiet, self.db, resources(), 7)  # DevSkim: ignore DS162092 有意使用本机回环（本地服务/测试），非调试残留
+        server.control_instance_id = "test-only-start-nonce"
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        def stop():
+            server.shutdown()
+            thread.join(timeout=5)
+            server.server_close()
+        (cleanup or self.addCleanup)(stop)
+        return server
+
+    @staticmethod
+    def envelope(payload, session="tb01c-query-unit"):
+        return dict(schema_revision="s-session/2", session_id=session, session_generation="1",
+                    source_namespace="query-tests", source_epoch="1", message_id="query-message",
+                    producer_id="query-tests", producer_epoch="1", causal_refs=[], payload=payload,
+                    payload_hash=hashlib.sha256(audit.canonical(payload)).hexdigest())
+
+
+class QueryTests(HTTPFixture):
     @classmethod
     def setUpClass(cls):
         cls.directory = tempfile.TemporaryDirectory(prefix="tb01c-query-")
@@ -352,29 +379,6 @@ class QueryTests(unittest.TestCase):
         with self.assertRaises(audit.QueryBudgetExceeded):
             bounded.readline()
 
-    def server(self):
-        class Quiet(reader.Handler):
-            db_path = str(self.db)
-            browser_path = str(ROOT/"s_session/browser/index.html")
-            def log_message(self, *args):
-                pass
-        server = reader.QueryHTTPServer(("127.0.0.1", 0), Quiet, self.db, resources(), 7)  # DevSkim: ignore DS162092 有意使用本机回环（本地服务/测试），非调试残留
-        server.control_instance_id = "test-only-start-nonce"
-        thread = threading.Thread(target=server.serve_forever, daemon=True)
-        thread.start()
-        def cleanup():
-            server.shutdown()
-            thread.join(timeout=5)
-            server.server_close()
-        self.addCleanup(cleanup)
-        return server
-
-    def envelope(self, payload):
-        return dict(schema_revision="s-session/2", session_id="tb01c-query-unit", session_generation="1",
-                    source_namespace="query-tests", source_epoch="1", message_id="query-message",
-                    producer_id="query-tests", producer_epoch="1", causal_refs=[], payload=payload,
-                    payload_hash=hashlib.sha256(audit.canonical(payload)).hexdigest())
-
     def test_real_http_legacy_health_and_corruption_without_s_socket(self):
         server = self.server()
         def get(path="/api/state"):
@@ -540,6 +544,123 @@ class QueryTests(unittest.TestCase):
         result = query.watch_page(later, stalled, limits, vars(reader), leases)
         self.assertEqual(result["gap"]["reason"], "client_backlog_overflow")
         self.assertEqual(result["gap"]["missing_range"], {"from_generation":"5", "to_generation":"7"})
+
+
+class HistoricalV2ArchiveTests(HTTPFixture):
+    # 6badaa6049 的正式 v2 writer 发布 TB01C 第一条 TestOnly tick 的原库（#1399）。
+    # 压缩仅供存放；每个测试都用独立副本，未给旧 Delta 添列或改写规则。
+    session = "tb01c-draft01"
+    rule = "s2-axis-quantifiers+new-bi/2+segment-second/2"
+    scope = {"economic": "not_started", "structure": "CompleteCut"}
+
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.db = Path(tmp.name) / "s.sqlite"
+        self.original = gzip.decompress((ROOT / "s_session/tests/fixtures/archive-v2/pre-policy-cut1.sqlite.gz").read_bytes())
+        self.db.write_bytes(self.original)
+        self.wal = self.db.with_suffix(".sqlite-wal")
+        self.wal.touch()
+
+    def cli(self, command, *args):
+        return subprocess.run([BINARY, command, "--db", self.db, *args], capture_output=True, timeout=15)
+
+    def checked_cli(self, *args):
+        result = self.cli(*args)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        return json.loads(result.stdout)
+
+    def http(self, server, path, request=None):
+        with closing(http.client.HTTPConnection(*server.server_address, timeout=5)) as conn:
+            if request is None:
+                conn.request("GET", path)
+            else:
+                env = self.envelope(request, self.session)
+                conn.request("POST", path, audit.canonical(env), {"Content-Type": "application/json"})
+            response = conn.getresponse()
+            return response.status, json.loads(response.read())
+
+    def test_same_cut_pages_and_delta(self):
+        snapshot = self.checked_cli("snapshot", "--as-of", "1")
+        delta, = self.checked_cli("watch", "--after-generation", "0")["deltas"]
+        raw, = snapshot["raw_history"]
+        self.assertEqual((raw["event_id"], raw["price"], raw["receipt_id"]),
+                         ("evt-0000", "1000000", "rcpt-ebcf56a0cabb3149"))
+        self.assertEqual(self.checked_cli("query", "--identity-key", raw["identity_key"])["latest"]["receipt_id"],
+                         raw["receipt_id"])
+        server = self.server()
+
+        def post(route, **payload):
+            status, reply = self.http(server, "/api/v2/" + route, dict(op=route, **payload))
+            self.assertEqual(status, 200, reply)
+            return reply["payload"]
+
+        page = post("snapshot", session_id=self.session, session_generation="1", scope=self.scope,
+                    history_mode="AsKnown", as_of_generation="1", page_size="1", order_version="s-record-order/1")
+        next_page = post("snapshot", snapshot_token=page["next_token"])
+        cut = page["fixed_cut"]
+        self.assertEqual((cut["history_mode"], cut["rule_revision"], cut["structure_cut"]), ("AsKnown", self.rule, "cut-1"))
+        self.assertEqual(next_page["fixed_cut"], cut)
+        self.assertEqual(next_page["cut_projection_digest"], page["cut_projection_digest"])
+        self.assertIsNone(next_page["next_token"])
+        for part, family in ((page, "observations"), (next_page, "raw_history")):
+            row, = part["rows"]
+            self.assertEqual((row["family"], [row["record"]]), (family, snapshot[family]))
+
+        cursor = dict(session_id=self.session, session_generation="1", catalog_revision=cut["catalog_revision"],
+                      scope=self.scope, after_generation="0", base_cut="cut-0", index_frontier="", last_seq="-1",
+                      order_version="s-record-order/1")
+        watch = post("watch", client_id="archive", max_batches="1", cursor=cursor)
+        q_delta, = watch["deltas"]
+        self.assertIsNone(watch["gap"])
+        self.assertEqual((q_delta["base_cut"], q_delta["next_cut"], watch["next_cursor"]["base_cut"]),
+                         ("cut-0", "cut-1", "cut-1"))
+        self.assertEqual(q_delta, dict(delta, catalog_evidence=cut["catalog_evidence"],
+                                      catalog_run_status=cut["catalog_run_status"]))
+        self.assertNotIn("policy_records", q_delta)
+        self.assertNotIn("policy_records", q_delta["delta"])
+        self.assertEqual(self.db.read_bytes(), self.original)
+        self.assertEqual(self.wal.read_bytes(), b"")
+
+    def test_current_12_column_session_needs_no_archive_registration(self):
+        self.db = self.db.with_name("current.sqlite")
+        fixtures = ROOT / "s_session/tests/fixtures/tb01c"
+        self.checked_cli("init", "--profile", fixtures / "profile.json", "--clock-plan", fixtures / "clock-plan.json",
+                         "--session", self.session, "--session-generation", "1", "--delivery-retain-generations", "4",
+                         "--catalog", ROOT / "s_session/catalog/signed-catalog.json")
+        with closing(reader.open_readonly(self.db)) as conn:
+            columns = [r[1] for r in conn.execute("PRAGMA table_info(structure_deltas)")]
+        self.assertEqual((len(columns), columns[-1]), (12, "policy_records"))
+        cut = self.checked_cli("snapshot", "--as-of", "0")
+        status, reply = self.http(self.server(), "/api/snapshot?as_of=0")
+        self.assertEqual(status, 200, reply)
+        for field in ("history_mode", "structure_cut", "index_frontier", "raw_history"):
+            self.assertEqual(reply[field], cut[field])
+
+    def test_unregistered_rule_or_damaged_schema_keeps_first_error(self):
+        changes = (
+            "UPDATE meta SET value=value || '+unregistered/1' WHERE key='rule_revision'",
+            "UPDATE s_protocol_meta SET protocol_revision='s-session/3'",
+            "ALTER TABLE structure_deltas ADD COLUMN policy_record TEXT",
+            "ALTER TABLE structure_deltas ADD COLUMN extra TEXT GENERATED ALWAYS AS (base_cut) VIRTUAL",
+            "CREATE TABLE zz_extra(value TEXT)",
+        )
+        for i, change in enumerate(changes):
+            with self.subTest(change=change):
+                self.db = self.db.with_name(f"damaged-{i}.sqlite")
+                self.db.write_bytes(self.original)
+                with closing(sqlite3.connect(self.db)) as conn, conn:
+                    conn.execute(change)
+                before = self.db.read_bytes()
+                result = self.cli("snapshot", "--as-of", "1")
+                self.assertEqual(result.returncode, 1)
+                self.assertEqual(json.loads(result.stderr)["error"], "StorageUnavailable：模式/约束不匹配 table/structure_deltas")
+                with ExitStack() as stack:
+                    server = self.server(cleanup=stack.callback)
+                    status, reply = self.http(server, "/api/snapshot?as_of=1")
+                self.assertEqual((status, reply["error"], reply["detail"]),
+                                 (503, "StorageUnavailable", "S 权威表/列/PK/UNIQUE/NOT NULL 与已知协议模式不符"))
+                self.assertEqual(self.db.read_bytes(), before)
 
 
 if __name__ == "__main__":

@@ -1007,33 +1007,51 @@ pub(super) fn expect_ddl_tables(
         Ok(())
     })
 }
+// #1602 之前 v2 正式写者发布过的完整规则串；S3 布局和后来新增的规则不在这组。
+fn registered_pre_policy_v2(conn: &Connection) -> Result<bool, String> {
+    let protocol: bool = conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM s_protocol_meta WHERE singleton=1 AND protocol_revision='s-session/2')",
+        [], |r| r.get(0),
+    ).map_err(err)?;
+    Ok(protocol && matches!(meta_get_opt(conn, "rule_revision")?.as_deref(),
+                Some("s2-axis-quantifiers"
+                    | "s2-axis-quantifiers+new-bi/1"
+                    | "s2-axis-quantifiers+new-bi/1+segment-first/1"
+                    | "s2-axis-quantifiers+new-bi/1+segment-second/1"
+                    | "s2-axis-quantifiers+new-bi/2+segment-second/1"
+                    | "s2-axis-quantifiers+new-bi/2+segment-second/2"
+                    | "s2-axis-quantifiers+new-bi/2+segment-second/2+segment-turn/1"
+                    | "s2-axis-quantifiers+new-bi/2+segment-second/2+segment-turn/1+second-seq-scan-budget/2")))
+}
+
 enum SchemaRead<'a> {
     Normal(&'a BTreeMap<String, String>),
+    V2Content(&'a BTreeMap<String, String>),
     Owned(&'a ControlSchema),
 }
 impl SchemaRead<'_> {
     fn owner(&self) -> Option<&OwnedBudget> {
         match self {
-            Self::Normal(_) => None,
+            Self::Normal(_) | Self::V2Content(_) => None,
             Self::Owned(s) => s.owner.as_ref(),
         }
     }
     fn len(&self) -> usize {
         match self {
-            Self::Normal(s) => s.len(),
+            Self::Normal(s) | Self::V2Content(s) => s.len(),
             Self::Owned(s) => s.tables.len(),
         }
     }
     fn get(&self, k: &str) -> Option<&str> {
         match self {
-            Self::Normal(s) => s.get(k).map(String::as_str),
+            Self::Normal(s) | Self::V2Content(s) => s.get(k).map(String::as_str),
             Self::Owned(s) => s.tables.get(k).map(TextValue::as_str),
         }
     }
     fn sorted_names_admitted(&self, work: Option<&WorkScope>) -> Result<CodecVec<&str>, String> {
         let mut names = control_json::new_work(self.owner());
         match self {
-            Self::Normal(s) => {
+            Self::Normal(s) | Self::V2Content(s) => {
                 for k in s.keys() {
                     control_push(&mut names, k.as_str(), work).map_err(err)?;
                 }
@@ -1077,22 +1095,44 @@ fn verify_schema_read_admitted(
     )
     .map_err(err)?;
     let mut seen = control_json::new_map::<TextValue, bool>(owner);
+    // 11 列只是归档候选。其余 DDL 或版本不对时，仍返回原扫描顺序的第一个不匹配。
+    let mut archive_difference = None;
     while let Some(mut r) = q.next().map_err(err)? {
         let kind = TextValue::from_sql_admitted(&mut r, 0, owner, work).map_err(err)?;
         let name = TextValue::from_sql_admitted(&mut r, 1, owner, work).map_err(err)?;
         let sql = TextValue::from_sql_admitted(&mut r, 2, owner, work).map_err(err)?;
         if kind != "table" {
-            return Err(err(format!("模式/约束不匹配 {kind}/{name}")));
+            return Err(
+                archive_difference.unwrap_or_else(|| err(format!("模式/约束不匹配 {kind}/{name}")))
+            );
         }
         let normalized = control_normalized_admitted(sql.as_str(), owner, work)?;
         if expected.get(name.as_str()) != Some(normalized.as_str()) {
-            return Err(err(format!("模式/约束不匹配 {kind}/{name}")));
+            let mismatch = || err(format!("模式/约束不匹配 {kind}/{name}"));
+            if matches!(expected, SchemaRead::V2Content(_))
+                && name == "structure_deltas"
+                && normalized.as_str()
+                    == normalize_schema(
+                        crate::PRE_POLICY_RECORDS_DELTAS
+                            .trim()
+                            .trim_end_matches(';'),
+                    )
+            {
+                archive_difference = Some(mismatch());
+            } else {
+                return Err(archive_difference.unwrap_or_else(mismatch));
+            }
         }
         control_insert(&mut seen, name, true, work).map_err(err)?;
     }
     q.finalize().map_err(err)?;
     if seen.len() != expected.len() {
-        return Err(err("缺必需表/约束"));
+        return Err(archive_difference.unwrap_or_else(|| err("缺必需表/约束")));
+    }
+    if let Some(mismatch) = archive_difference {
+        if !registered_pre_policy_v2(conn)? {
+            return Err(mismatch);
+        }
     }
     for table in &expected.sorted_names_admitted(work)? {
         let mut columns = CheckedStatement::prepare(
@@ -1162,11 +1202,7 @@ pub(super) fn valid_storage_cell(
     }
 }
 
-fn verify_schema(
-    conn: &Connection,
-    v2: bool,
-    before_write: Option<&std::cell::Cell<crate::DeltaShape>>,
-) -> Result<(), String> {
+fn verify_schema(conn: &Connection, v2: bool, schema: DeltaSchema<'_>) -> Result<(), String> {
     let mut expected = BTreeMap::new();
     expect_ddl_tables(
         "schema常量",
@@ -1217,7 +1253,7 @@ fn verify_schema(
         expect_ddl_tables("证据图 DDL", evidence_store::DDL, &mut expected)?;
     }
     // 写前准入：迁移前源换成迁移前的精确 structure_deltas 期望并记下形状，判别与迁移同一谓词。
-    if let Some(shape) = before_write {
+    if let DeltaSchema::BeforeWrite(shape) = schema {
         if crate::policy_records_missing(conn)? {
             expect_ddl_tables(
                 "#1602前Delta",
@@ -1227,7 +1263,11 @@ fn verify_schema(
             shape.set(crate::DeltaShape::PrePolicyRecords);
         }
     }
-    verify_expected_schema(conn, &expected)?;
+    if v2 && matches!(schema, DeltaSchema::ArchiveRead) {
+        verify_schema_read(conn, SchemaRead::V2Content(&expected))?;
+    } else {
+        verify_expected_schema(conn, &expected)?;
+    }
     // 表在而登记行缺/多/未声明值：与模式损坏同门，读取与写入前一律拒绝。
     delta_storage::read_mode(conn)?;
     evidence_store::read_format(conn)?;
@@ -1544,17 +1584,21 @@ pub(crate) fn audit_private_startup(
     conn: &Connection,
     before_write: Option<&std::cell::Cell<crate::DeltaShape>>,
 ) -> Result<(), String> {
-    crate::verified_root_raw_events_before_write(conn, before_write).map(|_| ())
+    crate::audit_root(
+        conn,
+        before_write.map_or(DeltaSchema::Current, DeltaSchema::BeforeWrite),
+    )
+    .map(drop)
 }
 
 /// 新鲜检查所有全局控制行，再准备逐代控制头期望；返回不代表批次控制审计通过。
 /// 不能按generation过滤未来/同代损坏或信任自报摘要。
 pub(super) fn prepare_control(
     conn: &Connection,
-    before_write: Option<&std::cell::Cell<crate::DeltaShape>>,
+    schema: DeltaSchema<'_>,
 ) -> Result<ExpectedControl, String> {
     let enabled = active(conn)?;
-    verify_schema(conn, enabled, before_write)?;
+    verify_schema(conn, enabled, schema)?;
     let epoch_facts = verify_epoch_history(conn, enabled)?;
     if !enabled {
         return Ok(ExpectedControl::Legacy);
@@ -4337,7 +4381,7 @@ mod tests {
         cache::counters_reset();
         let tx = conn.unchecked_transaction().unwrap();
         let mut reachable = capture_reachable_batches(&tx).unwrap();
-        let expected = prepare_control(&tx, None).unwrap();
+        let expected = prepare_control(&tx, DeltaSchema::Current).unwrap();
         assert_eq!(cache::counters_snapshot().batch_header_hits, 4);
         assert_eq!(cache::counters_snapshot().batch_full_reads, 0);
         assert_eq!(
@@ -4363,7 +4407,7 @@ mod tests {
                 }
             }
             std::mem::swap(&mut reachable.batches, &mut bad);
-            let expected = prepare_control(&tx, None).unwrap();
+            let expected = prepare_control(&tx, DeltaSchema::Current).unwrap();
             assert!(
                 verify_reachable_root_in_tx(&tx, &reachable, expected).is_err(),
                 "控制头不得暗补或数字归一化"
@@ -5295,7 +5339,7 @@ fn testonly_audit_cost_breakdown() {
         let b = t.elapsed();
         let captured = retained_sample();
         let capture_counters = serde_json::to_value(cache::counters_snapshot()).unwrap();
-        let expected = prepare_control(&tx, None).unwrap();
+        let expected = prepare_control(&tx, DeltaSchema::Current).unwrap();
         let c = t.elapsed();
         let control_counters = serde_json::to_value(cache::counters_snapshot()).unwrap();
         verify_reachable_root_in_tx(&tx, &batches, expected).unwrap();
