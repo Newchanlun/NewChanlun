@@ -376,11 +376,15 @@ fn run() -> Result<i32, String> {
         failed |= sup.critical && !clean_stop;
         log(
             "domain-stopped",
-            json!({"domain":sup.domain,"status":sup.status.as_ref().map(ToString::to_string),"orderly":sup.critical && clean_stop}),
+            json!({"domain":sup.domain,"status":sup.status.as_ref().map(ToString::to_string),"writer_closed":sup.critical && clean_stop}),
         );
     }
     spawned?;
-    log("stopped", json!({"failed": failed}));
+    // 成功仅指停止域进程；socket 名字空间未交接，不承诺原样重启。
+    log(
+        "stopped",
+        json!({"failed": failed, "socket_handoff": "not_performed"}),
+    );
     Ok(if failed { 1 } else { 0 })
 }
 

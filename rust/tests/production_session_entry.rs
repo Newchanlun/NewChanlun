@@ -889,33 +889,23 @@ fn production_session_new_s_init_and_serve_share_source_declaration() {
 }
 
 /// 经 S socket 提交第 `n` 条 ingest（`s-session/3` 封包、`s-ohlc/1` 原件；一帧 LF + 写端 EOF）。
-fn s_ingest_request(ns: &str, n: u32) -> Value {
+fn s_ingest(socket: &Path, ns: &str, n: u32) -> Value {
     let raw = json!({"schema_revision":"s-ohlc/1","session_id":SESSION,"source_namespace":ns,"source_epoch":"1",
         "instrument":"TEST.OHLC","profile":"ohlc_integer_tb02a_v1",
         "events":[{"event_id":format!("bar-{n}"),"revision":"1","seq":(n * 10).to_string(),"received_at":"2026-09-18T00:00:00Z",
             "raw_text":"3/12","open":"6","high":"12","low":"3","close":"7","timestamp":(n * 10).to_string(),"volume":"1"}]});
     let payload = json!({"op":"ingest","target_session_id":SESSION,"target_session_generation":"1","writer_epoch":"1",
         "clock_event_id":format!("input-{n}"),"raw_input":raw});
-    s_request(ns, &format!("message-{n}"), payload)
-}
-
-fn s_request(ns: &str, id: &str, payload: Value) -> Value {
-    json!({"schema_revision":"s-session/3","session_id":SESSION,"session_generation":"1",
-        "source_namespace":ns,"source_epoch":"1","message_id":id,"producer_id":"pse-test",
+    let envelope = json!({"schema_revision":"s-session/3","session_id":SESSION,"session_generation":"1",
+        "source_namespace":ns,"source_epoch":"1","message_id":format!("message-{n}"),"producer_id":"pse-test",
         "producer_epoch":"1","payload_hash":sha256_hex(newchan_rust::session_protocol::canonical_json(&payload).as_bytes()),
-        "causal_refs":[],"payload":payload})
-}
-
-fn s_exchange(socket: &Path, request: &Value) -> Value {
+        "causal_refs":[],"payload":payload});
     let mut stream = UnixStream::connect(socket).unwrap();
-    stream
-        .set_read_timeout(Some(Duration::from_secs(35)))
-        .unwrap();
     stream
         .write_all(
             format!(
                 "{}\n",
-                newchan_rust::session_protocol::canonical_json(request)
+                newchan_rust::session_protocol::canonical_json(&envelope)
             )
             .as_bytes(),
         )
@@ -924,10 +914,6 @@ fn s_exchange(socket: &Path, request: &Value) -> Value {
     let mut reply = String::new();
     stream.read_to_string(&mut reply).unwrap();
     serde_json::from_str(reply.trim_end()).unwrap()
-}
-
-fn s_ingest(socket: &Path, ns: &str, n: u32) -> Value {
-    s_exchange(socket, &s_ingest_request(ns, n))
 }
 
 fn wait_simulation_sockets(space: &Space) {
@@ -945,18 +931,27 @@ fn stopped_events(launcher: &mut Child) -> Vec<Value> {
 }
 
 #[test]
-fn orderly_stop_restarts_same_published_s_and_accepts_next_input() {
+fn orderly_stop_closes_same_s_db_without_claiming_socket_handoff() {
     let space = Space::new();
     let (manifest, s_db) = simulation(&space, "simulation", false);
-    let socket = space.path("s.sock");
     let mut launcher = spawn_launcher(&manifest);
     wait_simulation_sockets(&space);
     let id = std::fs::metadata(&s_db).unwrap().ino();
+    let paths = ["s.sock", "e.sock", "b.sock"].map(|name| space.path(name));
+    let socket_ids = paths
+        .each_ref()
+        .map(|path| std::fs::symlink_metadata(path).unwrap().ino());
 
-    let input = s_ingest_request(DECLARED_NS, 1);
-    let first = s_exchange(&socket, &input);
+    let first = s_ingest(&paths[0], DECLARED_NS, 1);
     assert_eq!(first["payload"]["kind"], "Committed", "{first}");
     assert_eq!(first["payload"]["publication"]["structure_cut"], "cut-1");
+    assert!(s_db.with_extension("db-shm").exists());
+    assert!(
+        std::fs::metadata(s_db.with_extension("db-wal"))
+            .unwrap()
+            .len()
+            > 0
+    );
 
     let status = stop(&mut launcher);
     let events = stopped_events(&mut launcher);
@@ -965,82 +960,59 @@ fn orderly_stop_restarts_same_published_s_and_accepts_next_input() {
         assert!(
             events.iter().any(|event| event["event"] == "domain-stopped"
                 && event["domain"] == domain
-                && event["orderly"] == true),
+                && event["writer_closed"] == true),
             "{events:?}"
         );
     }
-    assert!(["s.sock", "e.sock", "b.sock"]
-        .iter()
-        .all(|name| !space.path(name).exists()));
-    assert!(!s_db.with_extension("db-shm").exists());
-    assert_eq!(std::fs::metadata(&s_db).unwrap().ino(), id);
-
-    // 保留项目既有 E/B 恢复入口；不清任何 socket 或 SQLite 侧件。
-    let mut recovered: Value = serde_json::from_slice(&std::fs::read(&manifest).unwrap()).unwrap();
-    for (bin, db, chong, epoch) in [
-        (
-            env!("CARGO_BIN_EXE_e_economic_session"),
-            "e.db",
-            None,
-            "/economic/e/epoch",
-        ),
-        (
-            env!("CARGO_BIN_EXE_b_chong_session"),
-            "b.db",
-            Some("one"),
-            "/economic/b/0/epoch",
-        ),
-    ] {
-        let mut c = Command::new(bin);
-        c.arg("recover")
-            .arg("--manifest")
-            .arg(space.path("economic.json"))
-            .arg("--db")
-            .arg(space.path(db));
-        if let Some(name) = chong {
-            c.args(["--chong", name]);
-        }
-        let result = run(&mut c);
-        assert!(
-            result.status.success(),
-            "{}",
-            String::from_utf8_lossy(&result.stderr)
-        );
-        let receipt: Value = serde_json::from_slice(&result.stdout).unwrap();
-        assert_eq!(receipt["writer_epoch"], "2");
-        *recovered.pointer_mut(epoch).unwrap() = receipt["writer_epoch"].clone();
-    }
-    write_json(&manifest, &recovered);
-    let mut launcher = spawn_launcher(&manifest);
-    wait_simulation_sockets(&space);
-    let receipt = s_exchange(
-        &socket,
-        &s_request(
-            DECLARED_NS,
-            "receipt-query",
-            json!({"op":"receipt","original_source_namespace":input["source_namespace"],
-            "original_source_epoch":input["source_epoch"],"original_message_id":input["message_id"],
-            "original_payload_hash":input["payload_hash"]}),
-        ),
+    assert!(
+        events.iter().any(|event| event["event"] == "stopped"
+            && event["failed"] == false
+            && event["socket_handoff"] == "not_performed"),
+        "{events:?}"
     );
-    let second = s_ingest(&socket, DECLARED_NS, 2);
-    let status = stop(&mut launcher);
-    let events = stopped_events(&mut launcher);
-    assert!(status.success(), "{events:?}");
-    assert_eq!(receipt["payload"], first["payload"]);
-    assert_eq!(second["payload"]["kind"], "Committed", "{second}");
-    assert_eq!(second["payload"]["publication"]["structure_cut"], "cut-2");
+    assert_eq!(
+        paths
+            .each_ref()
+            .map(|path| std::fs::symlink_metadata(path).unwrap().ino()),
+        socket_ids
+    );
+    assert!(!s_db.with_extension("db-shm").exists());
+    assert!(!s_db.with_extension("db-wal").exists());
     assert_eq!(std::fs::metadata(&s_db).unwrap().ino(), id);
+    let query = run(Command::new(s_bin())
+        .args(["snapshot", "--as-of", "1", "--db"])
+        .arg(&s_db));
+    assert!(
+        query.status.success(),
+        "{}",
+        String::from_utf8_lossy(&query.stderr)
+    );
+    let snapshot: Value = serde_json::from_slice(&query.stdout).unwrap();
+    assert_eq!(snapshot["structure_cut"], "cut-1", "{snapshot}");
+
+    // 保留既有配置、临时媒体与 socket；不能把能关闭库算成整套实地重启。
+    let restarted = run_refusal(
+        Command::new(launcher_bin())
+            .arg("--manifest")
+            .arg(&manifest),
+    );
+    assert_eq!(restarted.status.code(), Some(1));
+    let err = String::from_utf8_lossy(&restarted.stderr);
+    assert!(err.contains("socket路径已占用"), "{err}");
+    assert_eq!(
+        paths
+            .each_ref()
+            .map(|path| std::fs::symlink_metadata(path).unwrap().ino()),
+        socket_ids
+    );
     println!(
-        "原库 inode={id}，cut-1 原收据={}，重启收据={}，后续 cut-2 收据={}",
-        first["payload"]["receipt_id"],
-        receipt["payload"]["receipt_id"],
-        second["payload"]["receipt_id"]
+        "原 S 主库 inode={id}，正式快照 {}；原 manifest 再启动按 socket 门拒绝",
+        snapshot["structure_cut"]
     );
 }
 
 #[test]
-fn orderly_stop_does_not_unlink_replaced_socket_or_report_success() {
+fn closing_writer_does_not_claim_or_touch_replaced_socket() {
     let space = Space::new();
     let (manifest, _) = simulation(&space, "simulation", false);
     let mut launcher = spawn_launcher(&manifest);
@@ -1057,11 +1029,17 @@ fn orderly_stop_does_not_unlink_replaced_socket_or_report_success() {
 
     let status = stop(&mut launcher);
     let events = stopped_events(&mut launcher);
-    assert_eq!(status.code(), Some(1), "{events:?}");
+    assert!(status.success(), "{events:?}");
     assert!(
         events.iter().any(|event| event["event"] == "domain-stopped"
             && event["domain"] == "S"
-            && event["orderly"] == false),
+            && event["writer_closed"] == true),
+        "{events:?}"
+    );
+    assert!(
+        events
+            .iter()
+            .any(|event| event["event"] == "stopped" && event["socket_handoff"] == "not_performed"),
         "{events:?}"
     );
     assert_eq!(std::fs::symlink_metadata(&original).unwrap().ino(), id);

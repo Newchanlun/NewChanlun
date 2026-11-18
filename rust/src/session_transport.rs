@@ -13,7 +13,6 @@ use std::fs::{File, OpenOptions};
 use std::io::Read;
 use std::io::Write;
 use std::os::fd::AsRawFd;
-use std::os::unix::fs::{FileTypeExt, MetadataExt};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
 use std::sync::{
@@ -644,14 +643,6 @@ pub const SUPERVISED_STOP_ENV: &str = "NC_SESSION_SUPERVISED_STOP";
 pub const SUPERVISED_STOP_BYTE: u8 = 1;
 const STOP_POLL: Duration = Duration::from_millis(25);
 
-fn socket_identity(socket: &Path) -> Result<(u64, u64), String> {
-    let metadata = std::fs::symlink_metadata(socket).map_err(err)?;
-    if !metadata.file_type().is_socket() {
-        return Err("TransportUnavailable：路径不是当前实例的 socket".into());
-    }
-    Ok((metadata.dev(), metadata.ino()))
-}
-
 fn serve_unix_inner<T: QueuedJob + 'static>(
     socket: &Path,
     bounds: TransportBounds,
@@ -664,12 +655,9 @@ fn serve_unix_inner<T: QueuedJob + 'static>(
     let supervised = std::env::var_os(SUPERVISED_STOP_ENV).as_deref() == Some("1".as_ref());
     let listener = UnixListener::bind(socket)
         .map_err(|e| format!("TransportUnavailable：socket绑定失败 {e}"))?;
-    let owned_socket = if supervised {
+    if supervised {
         listener.set_nonblocking(true).map_err(err)?;
-        Some(socket_identity(socket)?)
-    } else {
-        None
-    };
+    }
     let stopping = Arc::new(AtomicBool::new(false));
     if supervised {
         let stopping = stopping.clone();
@@ -687,7 +675,7 @@ fn serve_unix_inner<T: QueuedJob + 'static>(
     let count = Arc::new(AtomicUsize::new(0));
     let accept_bounds = bounds.clone();
     let stop_accepting = stopping.clone();
-    let acceptor = std::thread::spawn(move || -> std::io::Result<UnixListener> {
+    let acceptor = std::thread::spawn(move || -> std::io::Result<()> {
         while !stop_accepting.load(Ordering::Acquire) {
             let stream = match listener.accept() {
                 Ok((stream, _)) => stream,
@@ -730,7 +718,7 @@ fn serve_unix_inner<T: QueuedJob + 'static>(
             let c = count.clone();
             std::thread::spawn(move || io_connection_inner(stream, t, b, c, validate, make_job));
         }
-        Ok(listener)
+        Ok(())
     });
     while !stopping.load(Ordering::Acquire) {
         let next = if supervised {
@@ -753,16 +741,13 @@ fn serve_unix_inner<T: QueuedJob + 'static>(
     let outcome = acceptor
         .join()
         .map_err(|_| "TransportUnavailable：socket 接纳线程异常退出")?;
-    // 普通 serve 保持原先的返回口径。被监督服务必须完成实际交接才返回成功。
-    if let Some(identity) = owned_socket {
-        let _bound_listener = outcome.map_err(err)?;
+    // 只交还本进程 FD；任意 manifest 路径没有名字空间排他合同（#1823）。
+    // 不触碰文件系统中的 socket 条目。普通 serve 保持原返回口径。
+    if supervised {
+        outcome.map_err(err)?;
         if !stopping.load(Ordering::Acquire) {
             return Err("TransportUnavailable：socket 未收到有序关停请求".into());
         }
-        if socket_identity(socket)? != identity {
-            return Err("TransportUnavailable：关停时 socket 路径已不属于当前实例".into());
-        }
-        std::fs::remove_file(socket).map_err(err)?;
     }
     Ok(())
 }
