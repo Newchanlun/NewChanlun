@@ -15,6 +15,7 @@ import time
 import re
 import zlib
 from collections import defaultdict
+from functools import cache
 
 
 class QueryBudgetExceeded(RuntimeError):
@@ -33,6 +34,12 @@ _tb02_spec.loader.exec_module(tb02)
 
 # #1602：旧库迁移只能标记历史记录戳不可考；新发布由 Rust writer 显式写实际版本。
 LEGACY_POLICY_RECORDS_UNKNOWN = "legacy/unknown"
+
+_DELTA_CREATE = """CREATE TABLE structure_deltas (
+ generation INTEGER PRIMARY KEY, session_id TEXT NOT NULL, catalog_revision TEXT NOT NULL,
+ base_cut TEXT NOT NULL, next_cut TEXT NOT NULL, seq_range_json TEXT NOT NULL,
+ index_frontier TEXT NOT NULL, input_frontier INTEGER NOT NULL, catalog_run_status TEXT NOT NULL,
+ catalog_evidence_json TEXT NOT NULL, delta_json TEXT NOT NULL"""
 
 LEGACY_SCHEMA = """
 CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
@@ -64,11 +71,7 @@ CREATE TABLE observations (
  observation_id TEXT PRIMARY KEY, batch_id TEXT NOT NULL, kind TEXT NOT NULL,
  window_start INTEGER, window_mid INTEGER, window_end INTEGER, reason TEXT NOT NULL,
  detail_json TEXT NOT NULL, published_generation INTEGER NOT NULL);
-CREATE TABLE structure_deltas (
- generation INTEGER PRIMARY KEY, session_id TEXT NOT NULL, catalog_revision TEXT NOT NULL,
- base_cut TEXT NOT NULL, next_cut TEXT NOT NULL, seq_range_json TEXT NOT NULL,
- index_frontier TEXT NOT NULL, input_frontier INTEGER NOT NULL, catalog_run_status TEXT NOT NULL,
- catalog_evidence_json TEXT NOT NULL, delta_json TEXT NOT NULL,
+""" + _DELTA_CREATE + """,
  policy_records TEXT NOT NULL DEFAULT 'legacy/unknown');
 CREATE TABLE writer_epoch_history (
  ordinal INTEGER PRIMARY KEY, from_epoch TEXT NOT NULL, to_epoch TEXT NOT NULL,
@@ -398,38 +401,72 @@ EXPECTED_SQL = _expected_sql(
     LEGACY_SCHEMA + CONTROL_SCHEMA + tb02.SCHEMA + STORAGE_FORMAT_SCHEMA + EVIDENCE_GRAPH_SCHEMA)
 
 
+# #1399：只有这些 v2 规则在 #1602 加列前发布过。轴数相同不代表磁盘合同相同。
+_PRE_POLICY_V2_AXES = {
+    "s2-axis-quantifiers": tb02.LEGACY_AXES,
+    "s2-axis-quantifiers+new-bi/1": tb02.BI_AXES,
+    "s2-axis-quantifiers+new-bi/1+segment-first/1": tb02.FIRST_SEGMENT_AXES,
+    "s2-axis-quantifiers+new-bi/1+segment-second/1": tb02.AXES,
+    "s2-axis-quantifiers+new-bi/2+segment-second/1": tb02.AXES,
+    "s2-axis-quantifiers+new-bi/2+segment-second/2": tb02.AXES,
+    "s2-axis-quantifiers+new-bi/2+segment-second/2+segment-turn/1": tb02.AXES,
+    "s2-axis-quantifiers+new-bi/2+segment-second/2+segment-turn/1+second-seq-scan-budget/2": tb02.AXES,
+}
+_PUBLISHED_AXES = {
+    **_PRE_POLICY_V2_AXES,
+    "s2-axis-quantifiers+new-bi/2": tb02.BI_AXES,
+    "s2-axis-quantifiers+new-bi/2+segment-second/2+segment-turn/1+second-seq-scan-budget/2+segment-first-own/1": tb02.AXES,
+}
+
+
 def _published_axes(rule_revision):
     """按已存规则选择其当时的轴，不向旧 B cut 追补未来 C 轴。"""
-    known = {
-        "s2-axis-quantifiers": tb02.LEGACY_AXES,
-        "s2-axis-quantifiers+new-bi/1": tb02.BI_AXES,
-        "s2-axis-quantifiers+new-bi/2": tb02.BI_AXES,
-        "s2-axis-quantifiers+new-bi/1+segment-first/1": tb02.FIRST_SEGMENT_AXES,
-        "s2-axis-quantifiers+new-bi/1+segment-second/1": tb02.AXES,
-        "s2-axis-quantifiers+new-bi/2+segment-second/1": tb02.AXES,
-        "s2-axis-quantifiers+new-bi/2+segment-second/2": tb02.AXES,
-        # #1493：segment-turn/1 不新增轴；段端门 fail-closed 由 tb02.validate_segment_links 核阻断标记。
-        "s2-axis-quantifiers+new-bi/2+segment-second/2+segment-turn/1": tb02.AXES,
-        # #1604：预算 token 进规则（段合同 s-segment/5），不新增轴。
-        "s2-axis-quantifiers+new-bi/2+segment-second/2+segment-turn/1+second-seq-scan-budget/2": tb02.AXES,
-        # #1978：流首段规则 token 不新增轴，段合同仍 s-segment/5。
-        "s2-axis-quantifiers+new-bi/2+segment-second/2+segment-turn/1+second-seq-scan-budget/2+segment-first-own/1": tb02.AXES,
-    }
-    if rule_revision not in known:
+    if rule_revision not in _PUBLISHED_AXES:
         raise ValueError("cut规则修订未声明")
-    return known[rule_revision]
+    return _PUBLISHED_AXES[rule_revision]
 
 
-def _validate_schema(rows, tables):
-    if tables not in EXPECTED_SCHEMAS:
-        raise ValueError("S 权威表/列/PK/UNIQUE/NOT NULL 与已知协议模式不符")
+_PRE_POLICY_DDL = _DELTA_CREATE + ");"
+_PRE_POLICY_DELTA = _expected_schema(_PRE_POLICY_DDL)["structure_deltas"]
+_SCHEMA_MISMATCH = "S 权威表/列/PK/UNIQUE/NOT NULL 与已知协议模式不符"
+
+
+@cache
+def _archive_ddl_query():
+    return (Path(__file__).with_name("contracts") / "archive-v2-pre-policy.sql").read_text(encoding="utf-8")
+
+
+def _validate_schema(conn, rows, tables):
+    archive = tables.get("structure_deltas") == _PRE_POLICY_DELTA
+    candidate = tables
+    if archive:
+        if "s_protocol_meta" not in tables:
+            raise ValueError(_SCHEMA_MISMATCH)
+        # 只替换比对用的表签名；捕获仍按真实 11 列，摘要与投影不添字段。
+        candidate = dict(tables, structure_deltas=EXPECTED_LEGACY["structure_deltas"])
+    if candidate not in EXPECTED_SCHEMAS:
+        raise ValueError(_SCHEMA_MISMATCH)
     if any(kind not in ("table", "index") for kind, *_rest in rows):
-        raise ValueError("S 权威模式包含未声明视图/触发器")
+        raise ValueError(_SCHEMA_MISMATCH if archive else "S 权威模式包含未声明视图/触发器")
     if any(kind == "index" and sql is not None for kind, _name, _table, sql in rows):
-        raise ValueError("S 权威模式包含未声明索引")
-    for kind, name, _table, sql in rows:
-        if kind == "table" and re.sub(r"\s+", "", sql).rstrip(";") != EXPECTED_SQL[name]:
-            raise ValueError("S 权威表 SQL/约束定义与协议不符")
+        raise ValueError(_SCHEMA_MISMATCH if archive else "S 权威模式包含未声明索引")
+    if not archive:
+        for kind, name, _table, sql in rows:
+            if kind == "table" and re.sub(r"\s+", "", sql).rstrip(";") != EXPECTED_SQL[name]:
+                raise ValueError("S 权威表 SQL/约束定义与协议不符")
+        return
+
+    # 与 S 共用历史 writer 的 DDL；字面量、标识符及其内部空白均逐字核。
+    if not conn.execute(_archive_ddl_query()).fetchone()[0]:
+        raise ValueError(_SCHEMA_MISMATCH)
+    slots = ",".join("?" for _ in _PRE_POLICY_V2_AXES)
+    declared = conn.execute(f"""
+        SELECT EXISTS(SELECT 1 FROM meta WHERE key='rule_revision' AND value IN ({slots}))
+           AND EXISTS(SELECT 1 FROM meta WHERE key='protocol_revision' AND value='s-session/2')
+           AND EXISTS(SELECT 1 FROM s_protocol_meta WHERE singleton=1 AND protocol_revision='s-session/2')
+    """, tuple(_PRE_POLICY_V2_AXES)).fetchone()[0]
+    if not declared:
+        raise ValueError(_SCHEMA_MISMATCH)
 
 
 def storage_mode(tables):
@@ -703,7 +740,7 @@ max_bytes 计实际 Python 捕获对象大小的保守增量（含每行/每值�
         if count > MAX_SCHEMA_OBJECTS or schema_bytes > min(max_bytes, 128*1024):
             raise QueryBudgetExceeded("当前模式元数据超过捕获界限")
     schema_rows, schema = _schema(conn)
-    _validate_schema(schema_rows, schema)
+    _validate_schema(conn, schema_rows, schema)
     image = {"schema_rows": schema_rows, "schema": schema, "tables": {}}
     used = sys.getsizeof(image) + len(canonical(schema_rows)) + len(canonical(schema))
     for table, (columns, _indexes) in schema.items():

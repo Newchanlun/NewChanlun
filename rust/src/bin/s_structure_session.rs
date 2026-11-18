@@ -495,7 +495,7 @@ fn prepare_h1_wal_handoff<T>(
 }
 
 /// #1602 之前的 structure_deltas 建表语句（`SCHEMA` 逐字去掉 `policy_records` 列）。
-/// 写前准入只用它精确识别尚未迁移的源库；开库迁移后的严格审计仍只认 `SCHEMA`。
+/// 历史 v2 内容读口与写前形状核验共用此 DDL；只有后者能记录迁移资格。
 const PRE_POLICY_RECORDS_DELTAS: &str = r#"
 CREATE TABLE IF NOT EXISTS structure_deltas (
   generation INTEGER PRIMARY KEY,
@@ -1900,18 +1900,24 @@ fn verify_reachable_root(conn: &Connection) -> Result<(), String> {
 }
 
 fn verified_root_raw_events(conn: &Connection) -> Result<Vec<Value>, String> {
-    verified_root_raw_events_before_write(conn, None)
+    audit_root(conn, DeltaSchema::Current)
 }
 
-/// `before_write` 只由写前准入门面给出：源库若是 #1602 迁移前精确形状，schema 期望按迁移前 DDL
-/// 并记下形状；开库后的审计传 None，只认当前 schema。
-fn verified_root_raw_events_before_write(
-    conn: &Connection,
-    before_write: Option<&std::cell::Cell<DeltaShape>>,
-) -> Result<Vec<Value>, String> {
+#[derive(Clone, Copy)]
+enum DeltaSchema<'a> {
+    Current,
+    BeforeWrite(&'a std::cell::Cell<DeltaShape>),
+    ArchiveRead,
+}
+
+fn verify_content_root(conn: &Connection) -> Result<(), String> {
+    audit_root(conn, DeltaSchema::ArchiveRead).map(drop)
+}
+
+fn audit_root(conn: &Connection, schema: DeltaSchema<'_>) -> Result<Vec<Value>, String> {
     #[cfg(test)]
     let started = std::time::Instant::now();
-    let out = verified_root_raw_events_inner(conn, before_write);
+    let out = verified_root_raw_events_inner(conn, schema);
     #[cfg(test)]
     cache::counter(|c| c.audit_ns += started.elapsed().as_nanos() as u64);
     out
@@ -1919,7 +1925,7 @@ fn verified_root_raw_events_before_write(
 
 fn verified_root_raw_events_inner(
     conn: &Connection,
-    before_write: Option<&std::cell::Cell<DeltaShape>>,
+    schema: DeltaSchema<'_>,
 ) -> Result<Vec<Value>, String> {
     // #1394 第二段（2D）：整次根审计共享**一个**捕获作用域——根清单、Delta 原件与结构事实
     // 共用同一份节点读集，同一唯一节点原行只读一次（写入路径会显式作废该读集）。
@@ -1929,13 +1935,13 @@ fn verified_root_raw_events_inner(
         let tx = conn
             .unchecked_transaction()
             .map_err(|e| format!("开根审计读事务失败：{e}"))?;
-        let raw = verified_root_raw_events_inner(&tx, before_write)?;
+        let raw = verified_root_raw_events_inner(&tx, schema)?;
         tx.commit()
             .map_err(|e| format!("结束根审计读事务失败：{e}"))?;
         return Ok(raw);
     }
     let reachable = capture_reachable_batches(conn)?;
-    let control = v2::prepare_control(conn, before_write)?;
+    let control = v2::prepare_control(conn, schema)?;
     verify_reachable_root_in_tx(conn, &reachable, control)
         .map_err(|e| format!("StorageUnavailable：{e}"))
 }
@@ -5503,7 +5509,7 @@ fn cmd_catalog(db: &Path, as_of: Option<i64>) -> Result<(), String> {
     let tx = conn
         .unchecked_transaction()
         .map_err(|e| format!("开读事务失败：{e}"))?;
-    verify_reachable_root(&tx)?;
+    verify_content_root(&tx)?;
     let out = read_catalog_in_tx(&tx, as_of)?;
     drop(tx);
     println!("{}", project_wire_integers(&out));
@@ -5516,7 +5522,7 @@ fn cmd_snapshot(db: &Path, as_of: Option<i64>) -> Result<(), String> {
     let tx = conn
         .unchecked_transaction()
         .map_err(|e| format!("开读事务失败：{e}"))?;
-    verify_reachable_root(&tx)?;
+    verify_content_root(&tx)?;
     let out = read_snapshot_in_tx(&tx, as_of)?;
     drop(tx);
     println!("{}", project_wire_integers(&out));
@@ -5531,7 +5537,7 @@ fn cmd_query(db: &Path, identity_key: &str) -> Result<(), String> {
     let tx = conn
         .unchecked_transaction()
         .map_err(|e| format!("开读事务失败：{e}"))?;
-    verify_reachable_root(&tx)?;
+    verify_content_root(&tx)?;
     let published_frontier: i64 = meta_i64(&tx, "last_advance_frontier")?;
     let mut rows: Vec<Value> = {
         let mut stmt = tx
@@ -5628,7 +5634,7 @@ fn cmd_financial_basis(db: &Path) -> Result<(), String> {
     let conn = open_db(db)?;
     ensure_initialized(&conn)?;
     let tx = conn.unchecked_transaction().map_err(|e| e.to_string())?;
-    verify_reachable_root(&tx)?;
+    verify_content_root(&tx)?;
     let meta = db_meta(&tx)?;
     let (sid, generation, _) = v2::protocol_identity(&tx)?;
     let pending = financial_basis_pending(&tx)?;
@@ -5792,7 +5798,7 @@ fn cmd_watch(db: &Path, after_generation: i64) -> Result<(), String> {
     let tx = conn
         .unchecked_transaction()
         .map_err(|e| format!("开读事务失败：{e}"))?;
-    verify_reachable_root(&tx)?;
+    verify_content_root(&tx)?;
     if let Some(value) = v2::retained_watch(&tx, after_generation)? {
         drop(tx);
         println!("{}", project_wire_integers(&value));
