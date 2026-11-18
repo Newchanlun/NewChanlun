@@ -1550,11 +1550,93 @@ pub(super) fn serve(config: &Config, epoch: i64, e_epoch: i64) -> Result<(), Str
         }
     })
 }
+/// #1375：恢复准备读口。只出具指定 X 批的逐件接纳状态和原字节；
+/// 缺失项仍由获准来源走原 CaptureExternal。读取不得落 E 事实或清 Pending。
+fn inspect_simulation_capture_batch(
+    config: &Config,
+    batch_id: &str,
+    receipt_digest: &str,
+    x_id: &str,
+    x_epoch: i64,
+) -> Result<Value, String> {
+    let binding = &config.manifest["history_simulation_source"];
+    if !binding.is_object() {
+        return Err("SchemaUnsupported：本会话未冻结模拟 X 原件来源".into());
+    }
+    let source = json!({
+        "session_id":config.session,"session_generation":config.generation,
+        "source_namespace":required(binding,"source_namespace")?,
+        "source_epoch":required(binding,"source_epoch")?,
+        "producer_id":required(binding,"producer_id")?,
+        "producer_epoch":required(binding,"producer_epoch")?,
+        "payload":{"op":"CaptureExternal"}
+    });
+    config.authorized(&source)?;
+    let (mut c, _) = open(&config.db, true)?;
+    let tx = c.transaction().map_err(err)?;
+    audit(&tx, config)?;
+    let (seq, root, _, _) = latest(&tx)?;
+    let receipt = crate::history_simulation::intake::committed_capture_batch(
+        &config.manifest,
+        batch_id,
+        receipt_digest,
+        x_id,
+        x_epoch,
+    )?;
+    let originals = receipt["originals"]
+        .as_array()
+        .ok_or("StorageUnavailable：模拟批缺原件列表")?;
+    let mut entries = Vec::with_capacity(originals.len());
+    for doc in originals {
+        // X 的冷审已逐字比对原件表和规范化回执值。按 Capture 的同一规则派生
+        // fact_key，不另创身份，也不替调用者生成 token / message_id。
+        let raw = canonical_json(doc);
+        let (_, event) = decode(&raw, "/event", config.book_rules()?)?;
+        let key = fact_key(&event)?;
+        let recorded = row(&tx, "facts", &key)?;
+        let capture_receipt = match recorded {
+            Some(record) => {
+                if record["raw_utf8"] != raw
+                    || record["json_pointer"] != "/event"
+                    || record["source_producer"]["producer_id"] != source["producer_id"]
+                    || record["source_producer"]["producer_epoch"] != source["producer_epoch"]
+                {
+                    return Err("IdentityConflict：X 原件与 E 已接纳事实不一致".into());
+                }
+                Some(row(&tx, "receipts", &key)?.ok_or("StorageUnavailable：E 缺原接纳回执")?)
+            }
+            None => None,
+        };
+        entries.push(json!({
+            "fact_key":key,"external_fact_id":event["source"]["external_fact_id"],
+            "source_cursor":event["source"]["source_cursor"],
+            "source_event_time":event["source"]["source_event_time"],
+            "raw_utf8":raw,"json_pointer":"/event",
+            "state":if capture_receipt.is_some() {"Recorded"} else {"Missing"},
+            "receipt":capture_receipt,"pending":row(&tx,"pending",&key)?
+        }));
+    }
+    tx.commit().map_err(err)?;
+    Ok(json!({
+        "kind":"SimulationCaptureBatch","domain_id":config.domain,
+        "e_cut":cut(config,seq,&root),"x_id":x_id,"x_writer_epoch":x_epoch.to_string(),
+        "batch_id":batch_id,"bar_index":receipt["bar_index"],"batch_receipt_sha256":receipt_digest,
+        "state_content_hash":receipt["state_content_hash"],
+        "source_namespace":source["source_namespace"],"source_epoch":source["source_epoch"],
+        "producer_id":source["producer_id"],"producer_epoch":source["producer_epoch"],
+        "entries":entries,"release_eligibility":"NotEvaluated"
+    }))
+}
+
 /// 正式 owner 入口。init/recover/serve 共用同一域独占锁；不给客户端创建替代权威路径。
 pub fn cli(is_b: bool) -> Result<(), String> {
     let mut args = std::env::args().skip(1);
     let command = args.next().ok_or(
-        "usage: init|serve|recover --manifest FILE --db FILE [--chong ID] [--epoch N --e-epoch N]",
+        if is_b {
+            "usage: init|serve|recover --manifest FILE --db FILE --chong ID [--epoch N --e-epoch N]"
+        } else {
+            "usage: init|serve|recover --manifest FILE --db FILE [--epoch N]; inspect-simulation-capture-batch --manifest FILE --db FILE --batch-id ID --batch-receipt-sha256 HASH --x-id ID --x-epoch N"
+        },
     )?;
     let mut opts = BTreeMap::new();
     while let Some(k) = args.next() {
@@ -1563,8 +1645,22 @@ pub fn cli(is_b: bool) -> Result<(), String> {
         }
         opts.insert(k, args.next().ok_or("InvalidDomain：参数缺值")?);
     }
+    let inspect_batch = !is_b && command == "inspect-simulation-capture-batch";
+    let valid = if inspect_batch {
+        [
+            "--manifest",
+            "--db",
+            "--batch-id",
+            "--batch-receipt-sha256",
+            "--x-id",
+            "--x-epoch",
+        ]
+        .as_slice()
+    } else {
+        ["--manifest", "--db", "--chong", "--epoch", "--e-epoch"].as_slice()
+    };
     for k in opts.keys() {
-        if !["--manifest", "--db", "--chong", "--epoch", "--e-epoch"].contains(&k.as_str()) {
+        if !valid.contains(&k.as_str()) {
             return Err(format!("InvalidDomain：未知参数{k}"));
         }
     }
@@ -1580,6 +1676,17 @@ pub fn cli(is_b: bool) -> Result<(), String> {
     )?;
     if !is_b && opts.contains_key("--chong") {
         return Err("InvalidDomain：E不能指定重".into());
+    }
+    if inspect_batch {
+        let result = inspect_simulation_capture_batch(
+            &config,
+            get("--batch-id")?,
+            get("--batch-receipt-sha256")?,
+            get("--x-id")?,
+            positive(get("--x-epoch")?, "--x-epoch")?,
+        )?;
+        println!("{}", canonical_json(&result));
+        return Ok(());
     }
     let _lock = process_lock(&config.db, &config.domain)?;
     match command.as_str() {
