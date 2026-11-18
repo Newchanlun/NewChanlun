@@ -1,0 +1,20 @@
+running 1 test
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 55.76s
+     Running unittests src/lib.rs (target/debug/deps/newchan_rust-f9d5508acb2acc81)
+test economic_session::tb03c_allocation_tests::c4b_total_bust_across_three_fills_reverses_per_unit_from_range_stack_and_recovers ... FAILED
+
+failures:
+
+failures:
+    economic_session::tb03c_allocation_tests::c4b_total_bust_across_three_fills_reverses_per_unit_from_range_stack_and_recovers
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 3352 filtered out; finished in 5.62s
+
+
+thread 'economic_session::tb03c_allocation_tests::c4b_total_bust_across_three_fills_reverses_per_unit_from_range_stack_and_recovers' (20617) panicked at src/economic_session/tb03c_c4b_tests.rs:551:5:
+assertion `left == right` failed: {"domain_id":"E","error":"Unsupported：跨多个原 fill 的 bust 现金对应尚未支持","kind":"Error"}
+  left: String("Error")
+ right: "Resolved"
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+error: test failed, to rerun pass `--lib`
+exit 101 · 1m 38s · large · $0.0016 · bx_jds9ey3v deleted
