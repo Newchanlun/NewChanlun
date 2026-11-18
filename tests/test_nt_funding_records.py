@@ -275,3 +275,28 @@ def test_theta_cli_keeps_both_profiles_and_uses_signed_balance(monkeypatch, tmp_
     assert calls[0].funding_profile == funding
     assert calls[0].venue_profile == (None if diagnostic else "P0")
     assert calls[0].preset == ("diagnostic-fixture" if diagnostic else None)
+
+
+def test_t_fugue_preserves_an_untagged_report(monkeypatch, tmp_path):
+    """旧报告不是本次回放的输出，不能用新结果覆盖。"""
+    _install(monkeypatch)
+    module = _load_target(monkeypatch, "t_fugue")
+    report = tmp_path / "t_fugue_CL_structural.json"
+    original = b'{"trades": [], "equity": []}\n'
+    report.write_bytes(original)
+
+    builds = []
+
+    def build(*args):
+        builds.append(args)
+        return NS(dispose=lambda: None), NS(size_precision=0), object()
+
+    monkeypatch.setattr(module, "INSTRUMENTS", {"CL": NS(price_precision=2)})
+    monkeypatch.setattr(module, "build_engine", build)
+    monkeypatch.setattr(module, "load_bars", lambda *_: ([], [], [], [], [1.0]))
+
+    with pytest.raises(FileExistsError, match="--output-dir"):
+        module.run_symbol("CL", ("structural",), None, "ERROR", output_dir=tmp_path)
+
+    assert report.read_bytes() == original
+    assert len(builds) == 1  # 仅构造加载数据所需的 instrument；未启动回放。

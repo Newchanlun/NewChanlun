@@ -43,16 +43,23 @@ Structural（纯结构 5 条件）/ And（结构∧MACD 收紧）/ Or（结构�
     PYTHONPATH=src .venv/bin/python trading_system/backtest_t_fugue.py --symbols OKLO,CL  # 指定标的
     PYTHONPATH=src .venv/bin/python trading_system/backtest_t_fugue.py --modes structural # 指定模式
 输出：trading_system/data_cache/t_fugue_<SYM>_<MODE>.json + 汇总矩阵打印。
+旧报告没有出处时保留原件，用 --output-dir 写到另一个目录。新报告仅增加 provenance：
+core_id 标识 flat 核（不是 RecTStream），run_id 标识一次标的/模式回放，
+input_hash 是按 push_bar 调用顺序连接实际 OHLC 的大端 binary64（每条 32 字节）的 SHA-256；
+同一输入序列跨模式可比，模式仍从报告 mode 读取，资金记录见 provenance。
 """
 
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
+import struct
 import sys
 import time
 from pathlib import Path
+from uuid import uuid4
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO_ROOT))
@@ -162,6 +169,7 @@ class TFugueStreamStrategy(Strategy):
         super().__init__(config)
         self.stream: "nr.TFugueStream | None" = None
         self._bar_i = 0
+        self._input_digest = hashlib.sha256()
         self._new_trades: list = []
         self.result: dict | None = None
         self.stream_res: dict | None = None
@@ -180,6 +188,7 @@ class TFugueStreamStrategy(Strategy):
         low = bar.low.as_double()
         c = bar.close.as_double()
         new = self.stream.push_bar(o, h, low, c)
+        self._input_digest.update(struct.pack(">dddd", o, h, low, c))
         self._new_trades.extend(new)
         self._bar_i += 1
 
@@ -227,7 +236,10 @@ def build_engine(spec, mode: str, log_level: str):
     return engine, instrument, bar_type
 
 
-def run_symbol(sym: str, modes: tuple[str, ...], max_bars: int | None, log_level: str) -> list[dict]:
+def run_symbol(
+    sym: str, modes: tuple[str, ...], max_bars: int | None, log_level: str,
+    *, output_dir: Path = OUT_DIR,
+) -> list[dict]:
     """单标的全模式 NT 真流式回测。bars 加载一次，3 模式各跑一个 BacktestEngine。"""
     spec = INSTRUMENTS[sym]
     rows: list[dict] = []
@@ -244,6 +256,10 @@ def run_symbol(sym: str, modes: tuple[str, ...], max_bars: int | None, log_level
     print(f"  {len(bars):,} Bar  {time.time() - t0:.1f}s  BH={bh_pct:+.1f}% BH_MDD={bh_dd:.1f}%", flush=True)
 
     for mode in modes:
+        report = output_dir / f"t_fugue_{sym}_{mode}.json"
+        if report.exists() and "provenance" not in json.loads(report.read_text(encoding="utf-8")):
+            raise FileExistsError(f"保留无出处旧报告 {report}；请用 --output-dir 另存")
+        run_id = str(uuid4())
         engine, instrument, bar_type = build_engine(spec, mode, log_level)
         engine.add_data(bars)
         t0 = time.time()
@@ -271,6 +287,15 @@ def run_symbol(sym: str, modes: tuple[str, ...], max_bars: int | None, log_level
             flush=True,
         )
         out = {
+            "provenance": {
+                "core_id": "recursive_t::stream::TFugueStreamCore",
+                "run_id": run_id,
+                "input_hash": f"sha256:{strat._input_digest.hexdigest()}",
+                "input_encoding": "ohlc-f64be/1",
+                "input_count": strat._bar_i,
+                "funding_record": stream_res["funding_record"],
+                "q_total": stream_res["q_total"],
+            },
             "symbol": sym, "instrument_id": str(instrument.id), "mode": mode,
             "n_bars": len(closes), "bh_pct": round(bh_pct, 1), "bh_mdd_pct": round(bh_dd, 1),
             "max_bars": max_bars,
@@ -295,8 +320,8 @@ def run_symbol(sym: str, modes: tuple[str, ...], max_bars: int | None, log_level
             "trades": strat.trades, "equity": strat.equity,
             "closes_first": closes[0], "closes_last": closes[-1],
         }
-        OUT_DIR.mkdir(parents=True, exist_ok=True)
-        (OUT_DIR / f"t_fugue_{sym}_{mode}.json").write_text(json.dumps(out, ensure_ascii=False, indent=1))
+        output_dir.mkdir(parents=True, exist_ok=True)
+        report.write_text(json.dumps(out, ensure_ascii=False, indent=1), encoding="utf-8")
         rows.append({
             "sym": sym, "mode": mode, "bh": bh_pct, "strat": a["strat_pct"],
             "mdd": a["mdd_pct"], "trades": a["n_trades"], "p1": p1,
@@ -339,6 +364,7 @@ def main() -> int:
                         help="逗号分隔模式 structural/and/or（默认全 3）")
     parser.add_argument("--bars", type=int, default=0, help="最大 bar 数（0=全量）")
     parser.add_argument("--log-level", default="ERROR")
+    parser.add_argument("--output-dir", type=Path, default=OUT_DIR, help="独立保存研究报告的目录")
     args = parser.parse_args()
 
     symbols = [s.strip().upper() for s in args.symbols.split(",") if s.strip()]
@@ -356,7 +382,7 @@ def main() -> int:
     all_rows: list[dict] = []
     for sym in symbols:
         try:
-            all_rows.extend(run_symbol(sym, modes, max_bars, args.log_level))
+            all_rows.extend(run_symbol(sym, modes, max_bars, args.log_level, output_dir=args.output_dir))
         except FileNotFoundError as e:
             print(f"[{sym}] 数据缺失，跳过: {e}", file=sys.stderr)
         except Exception as e:  # noqa: BLE001 — runner 容错：单标的失败不中断全矩阵
