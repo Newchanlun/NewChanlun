@@ -979,16 +979,9 @@ fn orderly_stop_closes_same_s_db_without_claiming_socket_handoff() {
     assert!(!s_db.with_extension("db-shm").exists());
     assert!(!s_db.with_extension("db-wal").exists());
     assert_eq!(std::fs::metadata(&s_db).unwrap().ino(), id);
-    let query = run(Command::new(s_bin())
-        .args(["snapshot", "--as-of", "1", "--db"])
-        .arg(&s_db));
-    assert!(
-        query.status.success(),
-        "{}",
-        String::from_utf8_lossy(&query.stderr)
-    );
-    let snapshot: Value = serde_json::from_slice(&query.stdout).unwrap();
-    assert_eq!(snapshot["structure_cut"], "cut-1", "{snapshot}");
+    // 只读验证关库后原切仍可取；S3 公共快照是另一 Q3 服务入口。
+    let cut = meta(&s_db, "SELECT value FROM meta WHERE key='structure_cut'").unwrap();
+    assert_eq!(cut, "cut-1");
 
     // 保留既有配置、临时媒体与 socket；不能把能关闭库算成整套实地重启。
     let restarted = run_refusal(
@@ -1005,10 +998,7 @@ fn orderly_stop_closes_same_s_db_without_claiming_socket_handoff() {
             .map(|path| std::fs::symlink_metadata(path).unwrap().ino()),
         socket_ids
     );
-    println!(
-        "原 S 主库 inode={id}，正式快照 {}；原 manifest 再启动按 socket 门拒绝",
-        snapshot["structure_cut"]
-    );
+    println!("原 S 主库 inode={id}，只读核验 {cut}；原 manifest 再启动按 socket 门拒绝");
 }
 
 #[test]
