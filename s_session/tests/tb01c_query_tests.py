@@ -637,6 +637,20 @@ class HistoricalV2ArchiveTests(HTTPFixture):
         for field in ("history_mode", "structure_cut", "index_frontier", "raw_history"):
             self.assertEqual(reply[field], cut[field])
 
+    def assert_archive_refused_like_parent(self):
+        before = self.db.read_bytes()
+        with self.subTest(reader="S"):
+            result = self.cli("snapshot", "--as-of", "1")
+            self.assertEqual(result.returncode, 1)
+            self.assertEqual(json.loads(result.stderr)["error"], "StorageUnavailable：模式/约束不匹配 table/structure_deltas")
+        with self.subTest(reader="Q"), ExitStack() as stack:
+            server = self.server(cleanup=stack.callback)
+            status, reply = self.http(server, "/api/snapshot?as_of=1")
+            self.assertEqual(status, 503)
+            self.assertEqual((reply["error"], reply["detail"]),
+                             ("StorageUnavailable", "S 权威表/列/PK/UNIQUE/NOT NULL 与已知协议模式不符"))
+        self.assertEqual(self.db.read_bytes(), before)
+
     def test_unregistered_rule_or_damaged_schema_keeps_first_error(self):
         changes = (
             "UPDATE meta SET value=value || '+unregistered/1' WHERE key='rule_revision'",
@@ -651,16 +665,22 @@ class HistoricalV2ArchiveTests(HTTPFixture):
                 self.db.write_bytes(self.original)
                 with closing(sqlite3.connect(self.db)) as conn, conn:
                     conn.execute(change)
-                before = self.db.read_bytes()
-                result = self.cli("snapshot", "--as-of", "1")
-                self.assertEqual(result.returncode, 1)
-                self.assertEqual(json.loads(result.stderr)["error"], "StorageUnavailable：模式/约束不匹配 table/structure_deltas")
-                with ExitStack() as stack:
-                    server = self.server(cleanup=stack.callback)
-                    status, reply = self.http(server, "/api/snapshot?as_of=1")
-                self.assertEqual((status, reply["error"], reply["detail"]),
-                                 (503, "StorageUnavailable", "S 权威表/列/PK/UNIQUE/NOT NULL 与已知协议模式不符"))
-                self.assertEqual(self.db.read_bytes(), before)
+                self.assert_archive_refused_like_parent()
+
+    def test_sqlite_lookalike_is_an_ordinary_table(self):
+        with closing(sqlite3.connect(self.db)) as conn, conn:
+            conn.execute("CREATE TABLE sqliteXextra(value TEXT)")
+        self.assert_archive_refused_like_parent()
+
+    def test_changed_clock_phase_literal_is_not_the_registered_check(self):
+        with closing(sqlite3.connect(self.db)) as conn, conn:
+            ddl, = conn.execute("SELECT sql FROM sqlite_schema WHERE name='s_clock_events'").fetchone()
+            self.assertEqual(ddl.count("'recover'"), 1)
+            conn.execute("ALTER TABLE s_clock_events RENAME TO old_clock_events")
+            conn.execute(ddl.replace("'recover'", "'recover '"))
+            conn.execute("INSERT INTO s_clock_events SELECT * FROM old_clock_events")
+            conn.execute("DROP TABLE old_clock_events")
+        self.assert_archive_refused_like_parent()
 
 
 if __name__ == "__main__":

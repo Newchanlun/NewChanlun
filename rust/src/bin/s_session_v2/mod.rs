@@ -1130,7 +1130,14 @@ fn verify_schema_read_admitted(
         return Err(archive_difference.unwrap_or_else(|| err("缺必需表/约束")));
     }
     if let Some(mismatch) = archive_difference {
-        if !registered_pre_policy_v2(conn)? {
+        let exact_ddl: bool = conn
+            .query_row(
+                include_str!("../../../../s_session/contracts/archive-v2-pre-policy.sql"),
+                [],
+                |row| row.get(0),
+            )
+            .map_err(err)?;
+        if !exact_ddl || !registered_pre_policy_v2(conn)? {
             return Err(mismatch);
         }
     }

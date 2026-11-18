@@ -15,6 +15,7 @@ import time
 import re
 import zlib
 from collections import defaultdict
+from functools import cache
 
 
 class QueryBudgetExceeded(RuntimeError):
@@ -427,8 +428,12 @@ def _published_axes(rule_revision):
 
 _PRE_POLICY_DDL = _DELTA_CREATE + ");"
 _PRE_POLICY_DELTA = _expected_schema(_PRE_POLICY_DDL)["structure_deltas"]
-_PRE_POLICY_DELTA_SQL = _expected_sql(_PRE_POLICY_DDL)["structure_deltas"]
 _SCHEMA_MISMATCH = "S 权威表/列/PK/UNIQUE/NOT NULL 与已知协议模式不符"
+
+
+@cache
+def _archive_ddl_query():
+    return (Path(__file__).with_name("contracts") / "archive-v2-pre-policy.sql").read_text(encoding="utf-8")
 
 
 def _validate_schema(conn, rows, tables):
@@ -445,21 +450,23 @@ def _validate_schema(conn, rows, tables):
         raise ValueError(_SCHEMA_MISMATCH if archive else "S 权威模式包含未声明视图/触发器")
     if any(kind == "index" and sql is not None for kind, _name, _table, sql in rows):
         raise ValueError(_SCHEMA_MISMATCH if archive else "S 权威模式包含未声明索引")
-    for kind, name, _table, sql in rows:
-        if kind == "table":
-            expected = _PRE_POLICY_DELTA_SQL if archive and name == "structure_deltas" else EXPECTED_SQL[name]
-            if re.sub(r"\s+", "", sql).rstrip(";") != expected:
-                raise ValueError(_SCHEMA_MISMATCH if archive else "S 权威表 SQL/约束定义与协议不符")
-    if archive:
-        # 仅在完整历史形状上查版本；不提前取出无界文本，也不要求 12 列调用者先有 meta 行。
-        slots = ",".join("?" for _ in _PRE_POLICY_V2_AXES)
-        declared = conn.execute(f"""
-            SELECT EXISTS(SELECT 1 FROM meta WHERE key='rule_revision' AND value IN ({slots}))
-               AND EXISTS(SELECT 1 FROM meta WHERE key='protocol_revision' AND value='s-session/2')
-               AND EXISTS(SELECT 1 FROM s_protocol_meta WHERE singleton=1 AND protocol_revision='s-session/2')
-        """, tuple(_PRE_POLICY_V2_AXES)).fetchone()[0]
-        if not declared:
-            raise ValueError(_SCHEMA_MISMATCH)
+    if not archive:
+        for kind, name, _table, sql in rows:
+            if kind == "table" and re.sub(r"\s+", "", sql).rstrip(";") != EXPECTED_SQL[name]:
+                raise ValueError("S 权威表 SQL/约束定义与协议不符")
+        return
+
+    # 与 S 共用历史 writer 的 DDL；字面量、标识符及其内部空白均逐字核。
+    if not conn.execute(_archive_ddl_query()).fetchone()[0]:
+        raise ValueError(_SCHEMA_MISMATCH)
+    slots = ",".join("?" for _ in _PRE_POLICY_V2_AXES)
+    declared = conn.execute(f"""
+        SELECT EXISTS(SELECT 1 FROM meta WHERE key='rule_revision' AND value IN ({slots}))
+           AND EXISTS(SELECT 1 FROM meta WHERE key='protocol_revision' AND value='s-session/2')
+           AND EXISTS(SELECT 1 FROM s_protocol_meta WHERE singleton=1 AND protocol_revision='s-session/2')
+    """, tuple(_PRE_POLICY_V2_AXES)).fetchone()[0]
+    if not declared:
+        raise ValueError(_SCHEMA_MISMATCH)
 
 
 def storage_mode(tables):
