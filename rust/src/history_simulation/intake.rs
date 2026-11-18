@@ -153,3 +153,82 @@ pub(crate) fn verify_capture(manifest: &Value, envelope: &Value, raw: &str) -> R
     }
     Ok(())
 }
+
+/// #1375：从 E 已冻结的 X 只读库核验一批已提交原件。调用者须指定批身份，
+/// 不能用最新读数主张故障结束；此结果也不证明任何事实已经济核清。
+pub(crate) fn committed_capture_batch(
+    manifest: &Value,
+    batch_id: &str,
+    state_hash: &str,
+    x_id: &str,
+    x_epoch: i64,
+) -> Result<Value, String> {
+    let binding = &manifest["history_simulation_source"];
+    if !binding.is_object() {
+        return Err("SchemaUnsupported：本会话未冻结模拟 X 原件来源".into());
+    }
+    let db = Path::new(required(binding, "x_db")?);
+    if !db.is_absolute() {
+        return Err("InvalidDomain：X 原件库须为冻结绝对路径".into());
+    }
+    let mut c =
+        Connection::open_with_flags(db, OpenFlags::SQLITE_OPEN_READ_ONLY).map_err(failure)?;
+    c.busy_timeout(std::time::Duration::from_secs(2))
+        .map_err(failure)?;
+    let tx = c.transaction().map_err(failure)?;
+    let x_meta = |key| -> Result<String, String> {
+        tx.query_row("SELECT value FROM x_meta WHERE key=?1", [key], |r| r.get(0))
+            .map_err(failure)
+    };
+    if x_meta("profile_revision")? != "x-execution-profile/1"
+        || x_meta("profile_mode")? != "simulation"
+        || x_meta("history_simulation")? != "true"
+        || x_meta("writer_epoch")? != x_epoch.to_string()
+    {
+        return Err("IdentityConflict：指定 X 模型或当前 writer epoch 不符".into());
+    }
+    let sim_meta = |key| -> Result<Value, String> {
+        let raw: String = tx
+            .query_row("SELECT v FROM x_sim_meta WHERE k=?1", [key], |r| r.get(0))
+            .map_err(failure)?;
+        strict_json(raw.as_bytes())
+    };
+    let profile = sim_meta("authority_profile")?;
+    let contract = sim_meta("contract")?;
+    for key in ["session_id", "session_generation"] {
+        if required(&profile, key)? != required(manifest, key)? {
+            return Err("IdentityConflict：X 与 E 的会话或化身不同".into());
+        }
+    }
+    for key in ["source_namespace", "source_epoch"] {
+        let expected = required(binding, key)?;
+        if required(&profile, key)? != expected || required(&contract, key)? != expected {
+            return Err("IdentityConflict：X 持久来源与 E 冻结来源不同".into());
+        }
+    }
+    if required(&profile, "x_id")? != x_id
+        || profile["model"] != contract["model"]
+        || digest(&contract["model"]) != required(binding, "model_content_hash")?
+    {
+        return Err("IdentityConflict：X 身份或模型与冻结范围不同".into());
+    }
+    let raw: String = tx
+        .query_row(
+            "SELECT result FROM x_sim_batches WHERE id=?1",
+            [batch_id],
+            |r| r.get(0),
+        )
+        .map_err(failure)?;
+    let receipt = strict_json(raw.as_bytes())?;
+    if canonical_json(&receipt) != raw
+        || receipt["request_id"] != batch_id
+        || receipt["state_content_hash"] != state_hash
+    {
+        return Err("IdentityConflict：指定 X 批的完整回执或状态摘要不同".into());
+    }
+    // 与 X 自己恢复共用核验：从已知创世重演连续批，并逐件比对独立原字节、
+    // bust 记录及完整表计数。不能从回执字段缺失推断「本批没有该原件」。
+    super::store::audit_history(&tx)?;
+    tx.commit().map_err(failure)?;
+    Ok(receipt)
+}
