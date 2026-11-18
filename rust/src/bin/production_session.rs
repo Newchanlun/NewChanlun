@@ -13,9 +13,11 @@
 //!   `_redact`）过滤后写 stderr。
 //!
 //! 用法：production_session --manifest FILE
+use newchan_rust::session_transport::{SUPERVISED_STOP_BYTE, SUPERVISED_STOP_ENV};
 use newchan_rust::structure_source::Declaration;
 use serde_json::{json, Value};
 use std::collections::BTreeSet;
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitStatus, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -339,15 +341,24 @@ fn run() -> Result<i32, String> {
         std::thread::sleep(Duration::from_millis(100));
     }
 
-    // ── 回收：先 SIGTERM，宽限期后 SIGKILL；全部 wait ──
-    for sup in children.iter().filter(|c| c.status.is_none()) {
-        // SAFETY：向本进程自己拉起、尚未回收的子进程 PID 发信号。
-        unsafe {
-            libc::kill(sup.child.id() as libc::pid_t, libc::SIGTERM);
+    // ── 回收：S/E/B 先结束域服务和关库；失约则 SIGKILL 并报告失败。
+    // X 尚非结构/账簿 owner，维持原回收口径（早已退出亦不影响 S/E/B）。
+    for sup in children.iter_mut().filter(|c| c.status.is_none()) {
+        if let Some(mut stop) = sup.child.stdin.take() {
+            if let Err(e) = stop.write_all(&[SUPERVISED_STOP_BYTE]) {
+                failed = true;
+                log(
+                    "stop-request-failed",
+                    json!({"domain":sup.domain, "error":e.to_string()}),
+                );
+            }
+        } else {
+            // SAFETY：只通知自己拉起、尚未回收的子进程。
+            unsafe { libc::kill(sup.child.id() as libc::pid_t, libc::SIGTERM) };
         }
     }
     let deadline = Instant::now() + STOP_GRACE;
-    for sup in children.iter_mut() {
+    for sup in children.iter_mut().filter(|c| c.status.is_none()) {
         while sup.status.is_none() {
             match sup.child.try_wait() {
                 Ok(Some(status)) => sup.status = Some(status),
@@ -361,6 +372,12 @@ fn run() -> Result<i32, String> {
                 }
             }
         }
+        let clean_stop = sup.status.as_ref().is_some_and(ExitStatus::success);
+        failed |= sup.critical && !clean_stop;
+        log(
+            "domain-stopped",
+            json!({"domain":sup.domain,"status":sup.status.as_ref().map(ToString::to_string),"orderly":sup.critical && clean_stop}),
+        );
     }
     spawned?;
     log("stopped", json!({"failed": failed}));
@@ -383,6 +400,9 @@ fn spawn_domains(
     let chongs = raw["economic"]["b"].as_array().cloned().unwrap_or_default();
     let mut spawn = |domain: String, mut c: Command, critical: bool| -> Result<(), String> {
         c.stdout(Stdio::null());
+        if critical {
+            c.stdin(Stdio::piped()).env(SUPERVISED_STOP_ENV, "1");
+        }
         let child = c
             .spawn()
             .map_err(|e| format!("MissingDependency：{domain} 启动失败：{e}"))?;

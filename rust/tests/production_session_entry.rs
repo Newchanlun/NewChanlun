@@ -439,7 +439,7 @@ fn stop(launcher: &mut Child) -> std::process::ExitStatus {
 }
 
 /// 域进程出现在 launcher 名下不等于已持锁/建库/开 socket；就绪类断言一律限时轮询。
-fn eventually(what: &str, ready: impl Fn() -> bool) {
+fn eventually(what: &str, mut ready: impl FnMut() -> bool) {
     let deadline = Instant::now() + Duration::from_secs(30);
     while !ready() {
         assert!(Instant::now() < deadline, "{what} 未就绪");
@@ -889,23 +889,33 @@ fn production_session_new_s_init_and_serve_share_source_declaration() {
 }
 
 /// 经 S socket 提交第 `n` 条 ingest（`s-session/3` 封包、`s-ohlc/1` 原件；一帧 LF + 写端 EOF）。
-fn s_ingest(socket: &Path, ns: &str, n: u32) -> Value {
+fn s_ingest_request(ns: &str, n: u32) -> Value {
     let raw = json!({"schema_revision":"s-ohlc/1","session_id":SESSION,"source_namespace":ns,"source_epoch":"1",
         "instrument":"TEST.OHLC","profile":"ohlc_integer_tb02a_v1",
         "events":[{"event_id":format!("bar-{n}"),"revision":"1","seq":(n * 10).to_string(),"received_at":"2026-09-18T00:00:00Z",
             "raw_text":"3/12","open":"6","high":"12","low":"3","close":"7","timestamp":(n * 10).to_string(),"volume":"1"}]});
     let payload = json!({"op":"ingest","target_session_id":SESSION,"target_session_generation":"1","writer_epoch":"1",
         "clock_event_id":format!("input-{n}"),"raw_input":raw});
-    let envelope = json!({"schema_revision":"s-session/3","session_id":SESSION,"session_generation":"1",
-        "source_namespace":ns,"source_epoch":"1","message_id":format!("message-{n}"),"producer_id":"pse-test",
+    s_request(ns, &format!("message-{n}"), payload)
+}
+
+fn s_request(ns: &str, id: &str, payload: Value) -> Value {
+    json!({"schema_revision":"s-session/3","session_id":SESSION,"session_generation":"1",
+        "source_namespace":ns,"source_epoch":"1","message_id":id,"producer_id":"pse-test",
         "producer_epoch":"1","payload_hash":sha256_hex(newchan_rust::session_protocol::canonical_json(&payload).as_bytes()),
-        "causal_refs":[],"payload":payload});
+        "causal_refs":[],"payload":payload})
+}
+
+fn s_exchange(socket: &Path, request: &Value) -> Value {
     let mut stream = UnixStream::connect(socket).unwrap();
+    stream
+        .set_read_timeout(Some(Duration::from_secs(35)))
+        .unwrap();
     stream
         .write_all(
             format!(
                 "{}\n",
-                newchan_rust::session_protocol::canonical_json(&envelope)
+                newchan_rust::session_protocol::canonical_json(request)
             )
             .as_bytes(),
         )
@@ -914,6 +924,192 @@ fn s_ingest(socket: &Path, ns: &str, n: u32) -> Value {
     let mut reply = String::new();
     stream.read_to_string(&mut reply).unwrap();
     serde_json::from_str(reply.trim_end()).unwrap()
+}
+
+fn s_ingest(socket: &Path, ns: &str, n: u32) -> Value {
+    s_exchange(socket, &s_ingest_request(ns, n))
+}
+
+fn wait_simulation_sockets(space: &Space) {
+    for name in ["s.sock", "e.sock", "b.sock"] {
+        eventually(name, || UnixStream::connect(space.path(name)).is_ok());
+    }
+}
+
+fn stopped_events(launcher: &mut Child) -> Vec<Value> {
+    launcher_stderr(launcher)
+        .lines()
+        .filter_map(|line| line.strip_prefix("production_session "))
+        .filter_map(|line| serde_json::from_str(line).ok())
+        .collect()
+}
+
+#[test]
+fn orderly_stop_restarts_same_published_s_and_accepts_next_input() {
+    let space = Space::new();
+    let (manifest, s_db) = simulation(&space, "simulation", false);
+    let socket = space.path("s.sock");
+    let mut launcher = spawn_launcher(&manifest);
+    wait_simulation_sockets(&space);
+    let id = std::fs::metadata(&s_db).unwrap().ino();
+
+    let input = s_ingest_request(DECLARED_NS, 1);
+    let first = s_exchange(&socket, &input);
+    assert_eq!(first["payload"]["kind"], "Committed", "{first}");
+    assert_eq!(first["payload"]["publication"]["structure_cut"], "cut-1");
+
+    let status = stop(&mut launcher);
+    let events = stopped_events(&mut launcher);
+    assert!(status.success(), "{events:?}");
+    for domain in ["S", "E", "B:one"] {
+        assert!(
+            events.iter().any(|event| event["event"] == "domain-stopped"
+                && event["domain"] == domain
+                && event["orderly"] == true),
+            "{events:?}"
+        );
+    }
+    assert!(["s.sock", "e.sock", "b.sock"]
+        .iter()
+        .all(|name| !space.path(name).exists()));
+    assert!(!s_db.with_extension("db-shm").exists());
+    assert_eq!(std::fs::metadata(&s_db).unwrap().ino(), id);
+
+    // 保留项目既有 E/B 恢复入口；不清任何 socket 或 SQLite 侧件。
+    let mut recovered: Value = serde_json::from_slice(&std::fs::read(&manifest).unwrap()).unwrap();
+    for (bin, db, chong, epoch) in [
+        (
+            env!("CARGO_BIN_EXE_e_economic_session"),
+            "e.db",
+            None,
+            "/economic/e/epoch",
+        ),
+        (
+            env!("CARGO_BIN_EXE_b_chong_session"),
+            "b.db",
+            Some("one"),
+            "/economic/b/0/epoch",
+        ),
+    ] {
+        let mut c = Command::new(bin);
+        c.arg("recover")
+            .arg("--manifest")
+            .arg(space.path("economic.json"))
+            .arg("--db")
+            .arg(space.path(db));
+        if let Some(name) = chong {
+            c.args(["--chong", name]);
+        }
+        let result = run(&mut c);
+        assert!(
+            result.status.success(),
+            "{}",
+            String::from_utf8_lossy(&result.stderr)
+        );
+        let receipt: Value = serde_json::from_slice(&result.stdout).unwrap();
+        assert_eq!(receipt["writer_epoch"], "2");
+        *recovered.pointer_mut(epoch).unwrap() = receipt["writer_epoch"].clone();
+    }
+    write_json(&manifest, &recovered);
+    let mut launcher = spawn_launcher(&manifest);
+    wait_simulation_sockets(&space);
+    let receipt = s_exchange(
+        &socket,
+        &s_request(
+            DECLARED_NS,
+            "receipt-query",
+            json!({"op":"receipt","original_source_namespace":input["source_namespace"],
+            "original_source_epoch":input["source_epoch"],"original_message_id":input["message_id"],
+            "original_payload_hash":input["payload_hash"]}),
+        ),
+    );
+    let second = s_ingest(&socket, DECLARED_NS, 2);
+    let status = stop(&mut launcher);
+    let events = stopped_events(&mut launcher);
+    assert!(status.success(), "{events:?}");
+    assert_eq!(receipt["payload"], first["payload"]);
+    assert_eq!(second["payload"]["kind"], "Committed", "{second}");
+    assert_eq!(second["payload"]["publication"]["structure_cut"], "cut-2");
+    assert_eq!(std::fs::metadata(&s_db).unwrap().ino(), id);
+    println!(
+        "原库 inode={id}，cut-1 原收据={}，重启收据={}，后续 cut-2 收据={}",
+        first["payload"]["receipt_id"],
+        receipt["payload"]["receipt_id"],
+        second["payload"]["receipt_id"]
+    );
+}
+
+#[test]
+fn orderly_stop_does_not_unlink_replaced_socket_or_report_success() {
+    let space = Space::new();
+    let (manifest, _) = simulation(&space, "simulation", false);
+    let mut launcher = spawn_launcher(&manifest);
+    wait_simulation_sockets(&space);
+    let original = space.path("s.sock");
+    assert_eq!(
+        s_ingest(&original, DECLARED_NS, 1)["payload"]["kind"],
+        "Committed"
+    );
+    let moved = space.path("original.sock");
+    std::fs::rename(&original, &moved).unwrap();
+    let replacement = std::os::unix::net::UnixListener::bind(&original).unwrap();
+    let id = std::fs::symlink_metadata(&original).unwrap().ino();
+
+    let status = stop(&mut launcher);
+    let events = stopped_events(&mut launcher);
+    assert_eq!(status.code(), Some(1), "{events:?}");
+    assert!(
+        events.iter().any(|event| event["event"] == "domain-stopped"
+            && event["domain"] == "S"
+            && event["orderly"] == false),
+        "{events:?}"
+    );
+    assert_eq!(std::fs::symlink_metadata(&original).unwrap().ino(), id);
+    UnixStream::connect(&original).unwrap();
+    replacement.accept().unwrap();
+    assert!(moved.exists());
+}
+
+#[test]
+fn killed_s_is_not_orderly_and_its_socket_remains_for_explicit_recovery() {
+    let space = Space::new();
+    let (manifest, _) = simulation(&space, "simulation", false);
+    let mut launcher = spawn_launcher(&manifest);
+    wait_simulation_sockets(&space);
+    let socket = space.path("s.sock");
+    assert_eq!(
+        s_ingest(&socket, DECLARED_NS, 1)["payload"]["kind"],
+        "Committed"
+    );
+    let id = std::fs::symlink_metadata(&socket).unwrap().ino();
+    let (_, pid) = domain_children(launcher.id())
+        .into_iter()
+        .find(|(name, _)| name == "s_structure_session")
+        .unwrap();
+    // 只命中本例已接纳 input-1 的直接 S 子进程。
+    assert_eq!(unsafe { libc::kill(pid as libc::pid_t, libc::SIGKILL) }, 0);
+    eventually("因 S 被杀而退出", || {
+        launcher.try_wait().unwrap().is_some()
+    });
+    assert_eq!(launcher.wait().unwrap().code(), Some(1));
+    let events = stopped_events(&mut launcher);
+    assert!(
+        events.iter().any(|event| event["event"] == "exit"
+            && event["domain"] == "S"
+            && event["critical"] == true),
+        "{events:?}"
+    );
+    assert_eq!(std::fs::symlink_metadata(&socket).unwrap().ino(), id);
+
+    let result = run_refusal(
+        Command::new(launcher_bin())
+            .arg("--manifest")
+            .arg(&manifest),
+    );
+    assert_eq!(result.status.code(), Some(1));
+    let err = String::from_utf8_lossy(&result.stderr);
+    assert!(err.contains("socket路径已占用"), "{err}");
+    assert_eq!(std::fs::symlink_metadata(&socket).unwrap().ino(), id);
 }
 
 #[test]
