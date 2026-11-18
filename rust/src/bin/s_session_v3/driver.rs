@@ -82,7 +82,8 @@ pub(super) struct VenueProfileTag {
 }
 
 pub(super) struct Driver {
-    conn: super::audit_owner::AuditConnection,
+    // #1419 M7B：owner 内联状态不再扩大 Driver 的开库/返回槽；资源计费布局保持原样。
+    conn: Box<super::audit_owner::AuditConnection>,
     /// 启动前冻结的互斥私有模式；Owned 与 Runtime 同账，不保留 capture/审计结果。
     mode: s_allocation::Mode,
     runtime: prepared::Runtime,
@@ -571,38 +572,15 @@ impl Driver {
         let mut runtime = prepared::Runtime::with_config(mode.clone(), theta_config.clone());
         #[cfg(not(all(feature = "s_incremental", unix)))]
         let runtime = prepared::Runtime::with_config(mode.clone(), theta_config.clone());
-        #[cfg(feature = "s_incremental")]
-        let conn = if startup_context
-            .as_deref()
-            .is_some_and(|c| c.source_cache_enabled())
-        {
-            #[cfg(unix)]
-            {
-                let mut rebuilt = None;
-                super::audit_owner::AuditConnection::open_rebuilt_history_into(
-                    db,
-                    startup_context
-                        .as_deref()
-                        .unwrap()
-                        .complete_workspace_limit(),
-                    Some(scope.first_read_deadline()?),
-                    startup_context.as_deref_mut().unwrap(),
-                    &mut runtime,
-                    scope.max_store_bytes(),
-                    &scope,
-                    &mut rebuilt,
-                )?;
-                rebuilt.expect("冷交接成功后必有owner")
-            }
-            #[cfg(not(unix))]
-            {
-                return Err("H1准入需要Unix文件身份与只读FD/VFS".into());
-            }
-        } else {
-            super::audit_owner::AuditConnection::open(db)?
-        };
-        #[cfg(not(feature = "s_incremental"))]
-        let conn = super::audit_owner::AuditConnection::open(db)?;
+        let conn = Self::open_connection(
+            db,
+            #[cfg(feature = "s_incremental")]
+            startup_context.as_deref_mut(),
+            #[cfg(all(feature = "s_incremental", unix))]
+            &mut runtime,
+            #[cfg(all(feature = "s_incremental", unix))]
+            &scope,
+        )?;
         #[cfg(feature = "s_incremental")]
         let sqlite_pager_probe = matches!(mode, s_allocation::Mode::CapturedNative)
             && super::audit_owner::pager_enabled();
@@ -646,6 +624,43 @@ impl Driver {
         }
         driver.resume_pending(startup_context)?;
         Ok(driver)
+    }
+
+    // #1419 M7B：按值 owner 的构造/返回槽局限于本帧，调用方只承接 Box。
+    #[inline(never)]
+    fn open_connection(
+        db: &Path,
+        #[cfg(feature = "s_incremental")] startup_context: Option<
+            &mut request_audit::RequestAuditContext,
+        >,
+        #[cfg(all(feature = "s_incremental", unix))] runtime: &mut prepared::Runtime,
+        #[cfg(all(feature = "s_incremental", unix))] scope: &super::admission::WriterScope,
+    ) -> Result<Box<super::audit_owner::AuditConnection>, String> {
+        #[cfg(feature = "s_incremental")]
+        if startup_context
+            .as_deref()
+            .is_some_and(|c| c.source_cache_enabled())
+        {
+            #[cfg(unix)]
+            {
+                let limit = startup_context
+                    .as_deref()
+                    .unwrap()
+                    .complete_workspace_limit();
+                return open_rebuilt_connection(
+                    scope,
+                    startup_context.unwrap(),
+                    runtime,
+                    limit,
+                    "冷交接成功后必有owner",
+                );
+            }
+            #[cfg(not(unix))]
+            {
+                return Err("H1准入需要Unix文件身份与只读FD/VFS".into());
+            }
+        }
+        super::audit_owner::AuditConnection::open(db).map(Box::new)
     }
 
     pub(super) fn handle(&mut self, envelope: Value) -> Result<Value, String> {
@@ -832,6 +847,30 @@ impl Driver {
     }
 }
 
+// #1419 M7B：只拆 owner 的固定构造槽；context/runtime 的生涯仍由原调用方覆盖。
+#[cfg(all(feature = "s_incremental", unix))]
+#[inline(never)]
+fn open_rebuilt_connection(
+    scope: &super::admission::WriterScope,
+    context: &mut request_audit::RequestAuditContext,
+    runtime: &mut prepared::Runtime,
+    limit: usize,
+    owner_expected: &'static str,
+) -> Result<Box<super::audit_owner::AuditConnection>, String> {
+    let mut rebuilt = None;
+    super::audit_owner::AuditConnection::open_rebuilt_history_into(
+        scope.db_path(),
+        limit,
+        Some(scope.first_read_deadline()?),
+        context,
+        runtime,
+        scope.max_store_bytes(),
+        scope,
+        &mut rebuilt,
+    )?;
+    Ok(Box::new(rebuilt.expect(owner_expected)))
+}
+
 /// #1481：监督器新生涯先冷重建完整台账，完成 H1 资格消费后才允许 Recover 写入。
 #[cfg(feature = "s_incremental")]
 pub(super) fn recover_scoped_with_retention(
@@ -882,18 +921,13 @@ fn recover_rebuilt_history(
         newchan_rust::theta_v0::config::ThetaConfig::for_s_structure_writer()
             .map_err(|e| e.to_string())?,
     );
-    let mut rebuilt = None;
-    super::audit_owner::AuditConnection::open_rebuilt_history_into(
-        scope.db_path(),
-        retention,
-        Some(scope.first_read_deadline()?),
+    let conn = open_rebuilt_connection(
+        scope,
         &mut context,
         &mut runtime,
-        scope.max_store_bytes(),
-        scope,
-        &mut rebuilt,
+        retention,
+        "冷恢复交接成功后必有owner",
     )?;
-    let conn = rebuilt.expect("冷恢复交接成功后必有owner");
     #[cfg(test)]
     {
         let marker = 0_u8;
@@ -964,6 +998,18 @@ mod tests {
     use crate::tests::located_ohlc_input;
     use std::sync::atomic::{AtomicU64, Ordering};
     static NEXT: AtomicU64 = AtomicU64::new(0);
+
+    /// 9d6d81319ca 起 debug 档里持有 capture 与审计事务状态的帧普遍大了 5–11 KB，几条长链路 Driver 测试的栈需求
+    /// 越过默认测试线程的 2 MiB（release 档不越）。这些测试的主体与断言不变，只换一个 8 MiB 栈的线程跑，panic 原样抛回。
+    #[cfg(feature = "s_incremental")]
+    fn on_big_stack(body: fn()) {
+        std::thread::Builder::new()
+            .stack_size(8 << 20)
+            .spawn(body)
+            .unwrap()
+            .join()
+            .unwrap_or_else(|panic| std::panic::resume_unwind(panic));
+    }
     struct Fixture {
         path: PathBuf,
         db: PathBuf,
@@ -1400,6 +1446,330 @@ mod tests {
         .err()
         .unwrap();
         assert_eq!(e.split("；原准入账=").next(), Some(expected.as_str()));
+    }
+
+    // 普通连接读后即关：最后关闭者清掉空 -wal/-shm，不留下准入 E6 拒收的侧件组合；只读查询不改主库字节。
+    fn read_only(db: &Path) -> Connection {
+        Connection::open(db).unwrap()
+    }
+
+    fn all_rows_in(conn: &Connection) -> Vec<(String, Vec<Vec<rusqlite::types::Value>>)> {
+        let tables = {
+            let mut stmt = conn
+                .prepare("SELECT name FROM sqlite_master WHERE type='table' ORDER BY name")
+                .unwrap();
+            let rows = stmt.query_map([], |r| r.get::<_, String>(0)).unwrap();
+            rows.collect::<Result<Vec<_>, _>>().unwrap()
+        };
+        tables
+            .into_iter()
+            .map(|table| {
+                let quoted = table.replace('"', "\"\"");
+                let mut stmt = conn
+                    .prepare(&format!("SELECT * FROM \"{quoted}\""))
+                    .unwrap();
+                let columns = stmt.column_count();
+                let mut rows = stmt
+                    .query_map([], |r| {
+                        (0..columns)
+                            .map(|n| r.get::<_, rusqlite::types::Value>(n))
+                            .collect::<rusqlite::Result<Vec<_>>>()
+                    })
+                    .unwrap()
+                    .collect::<Result<Vec<_>, _>>()
+                    .unwrap();
+                rows.sort_by_cached_key(|row| format!("{row:?}"));
+                (table, rows)
+            })
+            .collect()
+    }
+
+    fn all_rows(db: &Path) -> Vec<(String, Vec<Vec<rusqlite::types::Value>>)> {
+        all_rows_in(&read_only(db))
+    }
+
+    fn s3_profile() -> PathBuf {
+        Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .unwrap()
+            .join("s_session/profiles/ohlc_integer_tb02a_v1.json")
+    }
+
+    /// #1419 P4 G4：原 `tb1405_composed_s2_recover_rejects_old_rules_before_any_persistent_change`
+    /// （`7f4f1eeb4b:rust/src/bin/s_structure_session.rs:7829–7914`）的 9 规则 × 3 pending 逐格迁到
+    /// 正式 S3 写者（Driver 开门）与 S3 恢复入口。三态为真实无 raw / 正式接纳未发布 / 真实 Begin 未发布。
+    /// S3 写者只认 W 串（`require_current_writer_rule`），原 v2 当前串 RULE_REVISION 在此也是历史串；
+    /// 错误名按该函数的 S3 合同为 VersionUnsupported，原 v2 VersionMismatch 锁同文保留于 s_structure_session.rs。
+    /// 当前 W 串三态为正控：恢复成功换代并清 Begin。
+    #[test]
+    fn s3_writer_and_recover_reject_every_old_rule_in_every_pending_state_unchanged() {
+        use super::super::prepared::tests::Fixture as Real;
+        for rule in [
+            "s2-axis-quantifiers",
+            "s2-axis-quantifiers+new-bi/1",
+            "s2-axis-quantifiers+new-bi/2",
+            "s2-axis-quantifiers+new-bi/1+segment-first/1",
+            "s2-axis-quantifiers+new-bi/1+segment-second/1",
+            "s2-axis-quantifiers+new-bi/2+segment-second/1",
+            "s2-axis-quantifiers+new-bi/1+segment-second/2",
+            "unknown-rule",
+            crate::RULE_REVISION,
+            crate::W_STRUCTURE_RULE_REVISION,
+        ] {
+            for pending in 0..3 {
+                let mut f = Real::with_clock_plan(4, 4, &[("recover-1", 13)]);
+                let row = ("p0", 0, 5, 10, 0, 5);
+                match pending {
+                    1 => {
+                        f.accept_rows(1, &[row], 1);
+                    }
+                    2 => {
+                        f.accept_begin(1, row, 1);
+                    }
+                    _ => {}
+                }
+                let clock = v2::stored_clock(&f.conn).unwrap();
+                let current = rule == crate::W_STRUCTURE_RULE_REVISION;
+                assert_eq!(
+                    meta_get_opt(&f.conn, "rule_revision").unwrap().as_deref(),
+                    Some(crate::W_STRUCTURE_RULE_REVISION)
+                );
+                if !current {
+                    meta_set(&f.conn, "rule_revision", rule).unwrap();
+                }
+                let db = f.db_path();
+                drop(std::mem::replace(
+                    &mut f.conn,
+                    Connection::open_in_memory().unwrap(),
+                ));
+                let _prepared_fixture = crate::v3::admission_anchor::test_prepare(&db);
+                let raw_count = count(&read_only(&db), "raw_events");
+                assert_eq!(raw_count, i64::from(pending > 0), "{rule}/{pending}");
+                let rows_before = all_rows(&db);
+                let bytes_before = std::fs::read(&db).unwrap();
+                if current {
+                    let receipt = recover(
+                        &db,
+                        "2",
+                        &clock,
+                        "recover-1",
+                        crate::v3::admission_anchor::test_prepare(&db).into(),
+                    )
+                    .unwrap();
+                    let c = read_only(&db);
+                    assert_eq!(
+                        meta_get_opt(&c, "writer_epoch").unwrap().as_deref(),
+                        Some("2"),
+                        "{pending}: {receipt}"
+                    );
+                    assert_eq!(
+                        meta_get_opt(&c, "advance_state").unwrap().as_deref(),
+                        Some("idle"),
+                        "{pending}"
+                    );
+                    continue;
+                }
+                let open_error = Driver::open(
+                    &db,
+                    &s3_profile(),
+                    "1",
+                    clock.clone(),
+                    crate::v3::admission_anchor::test_prepare(&db).into(),
+                )
+                .err()
+                .unwrap();
+                assert!(
+                    open_error.contains("VersionUnsupported"),
+                    "{rule}/{pending}: {open_error}"
+                );
+                let recover_error = recover(
+                    &db,
+                    "2",
+                    &clock,
+                    "recover-1",
+                    crate::v3::admission_anchor::test_prepare(&db).into(),
+                )
+                .err()
+                .unwrap();
+                assert!(
+                    recover_error.contains("VersionUnsupported"),
+                    "{rule}/{pending}: {recover_error}"
+                );
+                assert_eq!(
+                    std::fs::read(&db).unwrap(),
+                    bytes_before,
+                    "{rule}/{pending}"
+                );
+                assert_eq!(all_rows(&db), rows_before, "{rule}/{pending}");
+            }
+        }
+    }
+
+    /// #1419 P4 G5：原 `tb1405_composed_s2_recover_rejects_old_rule_before_journal_mode_change`
+    /// （`7f4f1eeb4b:rust/src/bin/s_structure_session.rs:7916–7939`）迁正式 S3：DELETE 日志模式的旧规则库，
+    /// 写者开门与恢复均在版本门拒绝，日志模式仍 delete、meta 与全表不变、主库字节不变、不生成 -wal。
+    #[test]
+    fn s3_writer_and_recover_reject_old_rule_before_journal_mode_change() {
+        use super::super::prepared::tests::Fixture as Real;
+        let mut f = Real::with_clock_plan(4, 4, &[("recover-1", 13)]);
+        let clock = v2::stored_clock(&f.conn).unwrap();
+        let db = f.db_path();
+        drop(std::mem::replace(
+            &mut f.conn,
+            Connection::open_in_memory().unwrap(),
+        ));
+        let conn = Connection::open(&db).unwrap();
+        meta_set(&conn, "rule_revision", "s2-axis-quantifiers+new-bi/1").unwrap();
+        let mode: String = conn
+            .query_row("PRAGMA journal_mode=DELETE", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(mode, "delete");
+        let before = db_meta(&conn).unwrap();
+        drop(conn);
+        let _prepared_fixture = crate::v3::admission_anchor::test_prepare(&db);
+        let rows_before = all_rows(&db);
+        let bytes_before = std::fs::read(&db).unwrap();
+        let wal = PathBuf::from(format!("{}-wal", db.display()));
+        assert!(!wal.exists());
+
+        let open_error = Driver::open(
+            &db,
+            &s3_profile(),
+            "1",
+            clock.clone(),
+            crate::v3::admission_anchor::test_prepare(&db).into(),
+        )
+        .err()
+        .unwrap();
+        assert!(open_error.contains("VersionUnsupported"), "{open_error}");
+        let recover_error = recover(
+            &db,
+            "2",
+            &clock,
+            "recover-1",
+            crate::v3::admission_anchor::test_prepare(&db).into(),
+        )
+        .err()
+        .unwrap();
+        assert!(
+            recover_error.contains("VersionUnsupported"),
+            "{recover_error}"
+        );
+
+        assert_eq!(std::fs::read(&db).unwrap(), bytes_before);
+        assert!(!wal.exists(), "拒绝路径不得切换 WAL");
+        let conn = Connection::open(&db).unwrap();
+        let mode: String = conn
+            .query_row("PRAGMA journal_mode", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(mode, "delete");
+        assert_eq!(db_meta(&conn).unwrap(), before);
+        drop(conn);
+        assert_eq!(all_rows(&db), rows_before);
+    }
+
+    /// #1419 P4 G7 后半：原 `tb02u_pending_append_keeps_first_known_and_policy_gate`
+    /// （`028796ba08:rust/src/bin/s_session_v2/tb02u_tests.rs:140–171`）在非空历史上改旧规则后拒写。
+    /// S3 来源审计逐代核 manifest 与冻结域 rule_revision（history.rs「manifest.rule_revision 与冻结域
+    /// 不符」），只改 meta 会造出不合法库；故用冻结的真实已发布历史会话原件（4 代、4 根 raw、旧串），
+    /// 不由 W parser 新造旧串库（29BE）。正式写者开门与恢复均拒，主库与 -wal 字节、全表不变。
+    #[test]
+    fn s3_writer_and_recover_reject_frozen_nonempty_historical_session_unchanged() {
+        let history = super::super::generation::tests::issue1419_history();
+        let db = history.path().join("historical-published-layout1.sqlite");
+        let wal = PathBuf::from(format!("{}-wal", db.display()));
+        let (clock, rule) = {
+            let ro = Connection::open_with_flags(&db, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
+                .unwrap();
+            assert_eq!(count(&ro, "raw_events"), 4);
+            assert_eq!(
+                meta_get_opt(&ro, "generation").unwrap().as_deref(),
+                Some("4")
+            );
+            assert_eq!(
+                meta_get_opt(&ro, "writer_epoch").unwrap().as_deref(),
+                Some("1")
+            );
+            (
+                v2::stored_clock(&ro).unwrap(),
+                meta_get_opt(&ro, "rule_revision").unwrap().unwrap(),
+            )
+        };
+        assert_ne!(rule, crate::W_STRUCTURE_RULE_REVISION);
+        // 冻结原件带 -wal/-shm：写者准入在 E6 即拒，主库与侧件字节不变。
+        let frozen = (std::fs::read(&db).unwrap(), std::fs::read(&wal).unwrap());
+        let e6 = Driver::open(
+            &db,
+            &s3_profile(),
+            "1",
+            clock.clone(),
+            crate::v3::admission_anchor::test_prepare(&db).into(),
+        )
+        .err()
+        .unwrap();
+        assert!(e6.contains("UnsupportedWalShmJournalCombination"), "{e6}");
+        let raw_recover = recover(
+            &db,
+            "2",
+            &clock,
+            "recover-1",
+            crate::v3::admission_anchor::test_prepare(&db).into(),
+        )
+        .err()
+        .unwrap();
+        assert!(
+            raw_recover.contains("UnsupportedWalShmJournalCombination"),
+            "{raw_recover}"
+        );
+
+        assert_eq!(
+            (std::fs::read(&db).unwrap(), std::fs::read(&wal).unwrap()),
+            frozen
+        );
+        // 临时解包副本上合并 WAL（仓内原件不动），逻辑全表不变，再核版本门本身。
+        let rows_frozen = {
+            let ro = Connection::open_with_flags(&db, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
+                .unwrap();
+            all_rows_in(&ro)
+        };
+        {
+            let c = Connection::open(&db).unwrap();
+            c.query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |_| Ok(()))
+                .unwrap();
+            drop(c);
+        }
+        let _prepared_fixture = crate::v3::admission_anchor::test_prepare(&db);
+        let rows_before = all_rows(&db);
+        assert_eq!(rows_before, rows_frozen);
+        let bytes_before = (std::fs::read(&db).unwrap(), std::fs::read(&wal).ok());
+        let open_error = Driver::open(
+            &db,
+            &s3_profile(),
+            "1",
+            clock.clone(),
+            crate::v3::admission_anchor::test_prepare(&db).into(),
+        )
+        .err()
+        .unwrap();
+        assert!(open_error.contains("VersionUnsupported"), "{open_error}");
+        let recover_error = recover(
+            &db,
+            "2",
+            &clock,
+            "recover-1",
+            crate::v3::admission_anchor::test_prepare(&db).into(),
+        )
+        .err()
+        .unwrap();
+        assert!(
+            recover_error.contains("VersionUnsupported"),
+            "{recover_error}"
+        );
+        assert_eq!(
+            (std::fs::read(&db).unwrap(), std::fs::read(&wal).ok()),
+            bytes_before
+        );
+        assert_eq!(all_rows(&db), rows_before);
     }
 
     #[cfg(feature = "s_allocation_json_testonly")]
@@ -3045,6 +3415,165 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "s_incremental")]
+    #[test]
+    fn s_system_clock_owner_reopen_attempt_boundary() {
+        use v2::system_clock_test as fake;
+        fn open_native(f: &Fixture, epoch: &str) -> Result<Driver, String> {
+            Driver::open_for_serve_with_mode(
+                &f.db,
+                &f.profile,
+                epoch,
+                f.clock.clone(),
+                536_870_912,
+                s_allocation::Mode::CapturedNative,
+                crate::v3::admission_anchor::test_prepare(&f.db).into(),
+            )
+        }
+        fake::install(Some(&[100, 200, 300, 400, 500, 600]));
+        let f = Fixture::system();
+        let g = Fixture::system();
+        let mut first = open_native(&f, "1").unwrap();
+        assert_eq!(
+            first.handle(Fixture::ingest(1)).unwrap()["kind"],
+            "Committed"
+        );
+        let first_parent = first.conn.complete_budget_for_test();
+        first.runtime.set_after_prepare_for_request_test(Some(|_| {
+            Err("TestOnly：clock-attempt-boundary-after-prepare".into())
+        }));
+        let input = Fixture::ingest(2);
+        let failure = first.handle(input.clone()).unwrap_err();
+        assert!(
+            failure.contains("clock-attempt-boundary-after-prepare"),
+            "{failure}"
+        );
+        assert_eq!(
+            fake::samples(),
+            6,
+            "真实 Prepare 已取本 attempt 首次 Commit 读数"
+        );
+        drop(first);
+
+        let failure = match open_native(&f, "1") {
+            Err(error) => error,
+            Ok(_) => panic!("未完成 Begin 不能在原 epoch 重开 writer"),
+        };
+        assert!(
+            failure.contains("未完成Begin须先由监督器recover"),
+            "{failure}"
+        );
+        assert_eq!(fake::samples(), 6, "正式重开拒绝不消费新时钟");
+        eprintln!("clock-boundary: owner-reopen=StaleWriter; samples=6");
+
+        fake::push(&[700, 800, 900]);
+        recover(
+            &f.db,
+            "2",
+            &f.clock,
+            "recover-boundary",
+            crate::v3::admission_anchor::test_prepare(&f.db).into(),
+        )
+        .unwrap();
+        let recovered = open_native(&f, "2").unwrap();
+        assert_eq!(
+            recovered.state_summary("recovered").unwrap()["generation"],
+            "2"
+        );
+        assert_eq!(fake::samples(), 9, "recover、新 Begin、新 Commit 各取一次");
+        assert_eq!(
+            cold_audit_commit_ns(&f.db),
+            vec!["300".to_string(), "900".to_string()]
+        );
+        assert!(system_clock_rows(&f.db)
+            .iter()
+            .any(|r| r == "input-2|begin|1|800"));
+        assert!(system_clock_rows(&f.db)
+            .iter()
+            .any(|r| r == "input-2|commit|1|900"));
+
+        fake::push(&[1000, 1100, 1200]);
+        let mut independent = open_native(&g, "1").unwrap();
+        assert_eq!(
+            independent.handle(Fixture::ingest(1)).unwrap()["kind"],
+            "Committed"
+        );
+        let other_parent = independent.conn.complete_budget_for_test();
+        assert!(!other_parent.same_parent(&first_parent));
+        assert_eq!(cold_audit_commit_ns(&g.db), vec!["1200".to_string()]);
+        assert_eq!(fake::samples(), 12);
+        eprintln!("clock-boundary: recover-attempt=1; recovered-commit=900; independent-db-commit=1200; distinct-parents=true; samples=12");
+    }
+
+    #[cfg(feature = "s_incremental")]
+    #[test]
+    fn s_system_clock_same_owner_cross_publish_retains_first_reading() {
+        use v2::system_clock_test as fake;
+        fn fixed_charge(driver: &Driver) -> usize {
+            let keeper = driver.conn.source_keeper_for_test();
+            let partition = driver.conn.old_pool_partition(keeper.as_ref()).unwrap();
+            let items: Vec<_> = partition
+                .items()
+                .iter()
+                .filter(|item| item.item == "owner.first_commit_reading")
+                .collect();
+            assert_eq!(items.len(), 1, "固定槽每入口只列一次");
+            assert_eq!(items[0].origin, request_audit::OldPoolPartition::ELSEWHERE);
+            assert_eq!(
+                items[0].contract,
+                std::mem::size_of::<v2::CommitReadingSlot>()
+            );
+            items[0].contract
+        }
+        for (label, mode) in [
+            ("Ordinary", s_allocation::Mode::Ordinary),
+            ("CapturedNative", s_allocation::Mode::CapturedNative),
+        ] {
+            fake::install(Some(&[100, 200, 300]));
+            let f = Fixture::system();
+            let mut driver = Driver::open_for_serve_with_mode(
+                &f.db,
+                &f.profile,
+                "1",
+                f.clock.clone(),
+                536_870_912,
+                mode.clone(),
+                crate::v3::admission_anchor::test_prepare(&f.db).into(),
+            )
+            .unwrap();
+            let fixed = fixed_charge(&driver);
+            driver.runtime.set_after_prepare_for_request_test(Some(|_| {
+                Err("TestOnly：cross-publish-after-prepare".into())
+            }));
+            let input = Fixture::ingest(1);
+            let error = driver.handle(input.clone()).unwrap_err();
+            assert!(error.contains("cross-publish-after-prepare"), "{error}");
+            assert_eq!(fake::samples(), 3);
+            driver.conn.discard_after_error();
+            assert_eq!(
+                fixed_charge(&driver),
+                fixed,
+                "丢弃候选不能释放仍活的首次读数槽"
+            );
+            let conn = open_db(&f.db).unwrap();
+            let token = meta_get_opt(&conn, "begin_token").unwrap().unwrap();
+            drop(conn);
+            driver.runtime.set_after_prepare_for_request_test(None);
+            let retry = driver.conn.publish(
+                &mut driver.runtime,
+                &token,
+                &input,
+                &mut request_audit::RequestAuditContext::default(),
+            );
+            let (receipt, ended) = retry.expect("同 owner 跨 publish 的合法重试必须成功");
+            assert_eq!(receipt.generation, 1);
+            assert_eq!(fake::samples(), 3, "跨调用同 Begin 成功必须复用原读数");
+            driver.conn.continue_with(ended).unwrap();
+            assert_eq!(cold_audit_commit_ns(&f.db), vec!["300".to_string()]);
+            eprintln!("cross-publish: mode={label}; result=Committed; samples=3; commit=300; owner_fixed_bytes={fixed}");
+        }
+    }
+
     // 仅调用正常 Driver，覆盖“新消息携带既有 raw”而控制账继续变化的情况。
     #[cfg(feature = "s_incremental")]
     #[test]
@@ -3276,6 +3805,12 @@ mod tests {
     #[cfg(feature = "s_incremental")]
     #[test]
     fn audit_owner_complete_accept_tail_begin_recover_retry_and_revision_qualification() {
+        on_big_stack(
+            audit_owner_complete_accept_tail_begin_recover_retry_and_revision_qualification_body,
+        );
+    }
+    #[cfg(feature = "s_incremental")]
+    fn audit_owner_complete_accept_tail_begin_recover_retry_and_revision_qualification_body() {
         fn context(d: &mut Driver) -> request_audit::RequestAuditContext {
             let mut context = request_audit::RequestAuditContext::default();
             if matches!(d.mode, s_allocation::Mode::CapturedNative) {
@@ -3811,6 +4346,10 @@ mod tests {
     #[cfg(feature = "s_incremental")]
     #[test]
     fn recover_lock_fee_permit_moves_on_same_parent_ledger() {
+        on_big_stack(recover_lock_fee_permit_moves_on_same_parent_ledger_body);
+    }
+    #[cfg(feature = "s_incremental")]
+    fn recover_lock_fee_permit_moves_on_same_parent_ledger_body() {
         let f = Fixture::new();
         let (mut native, _, _) = recover_lock_driver(&f);
         let mut context = recover_lock_context(&mut native);
@@ -3893,6 +4432,10 @@ mod tests {
     #[cfg(feature = "s_incremental")]
     #[test]
     fn recover_lock_old_raw_token_and_begin_token_rejected_after_promotion() {
+        on_big_stack(recover_lock_old_raw_token_and_begin_token_rejected_after_promotion_body);
+    }
+    #[cfg(feature = "s_incremental")]
+    fn recover_lock_old_raw_token_and_begin_token_rejected_after_promotion_body() {
         let f = Fixture::new();
         let (mut native, _, _) = recover_lock_driver(&f);
         let mut context = recover_lock_context(&mut native);
@@ -4116,6 +4659,10 @@ mod tests {
     #[cfg(feature = "s_incremental")]
     #[test]
     fn recover_lock_rejects_qualification_recorded_on_other_parent_or_domain() {
+        on_big_stack(recover_lock_rejects_qualification_recorded_on_other_parent_or_domain_body);
+    }
+    #[cfg(feature = "s_incremental")]
+    fn recover_lock_rejects_qualification_recorded_on_other_parent_or_domain_body() {
         let expected =
             "StaleWriter：construction资格失效：Recover迁移资格所记父账或冻结域与事务父账不符";
         // 他账：资格与候选分属不同 Ledger。
@@ -4374,6 +4921,10 @@ mod tests {
     #[cfg(feature = "s_incremental")]
     #[test]
     fn recover_lock_holds_gate_rejects_fee_permit_on_foreign_ledger() {
+        on_big_stack(recover_lock_holds_gate_rejects_fee_permit_on_foreign_ledger_body);
+    }
+    #[cfg(feature = "s_incremental")]
+    fn recover_lock_holds_gate_rejects_fee_permit_on_foreign_ledger_body() {
         let f = Fixture::new();
         let (mut native, _, _) = recover_lock_driver(&f);
         let mut context = recover_lock_context(&mut native);
@@ -4636,7 +5187,7 @@ mod tests {
     }
 
     /// #1488 0079（P24-adj，0078 探针 H 形态）：同一 writer 内冷根自然失败（1M）后无票重跑提交，
-    /// 之后 allowance 变大（改 16M）使候选重新出生；后续 ingest 必须走 Carry 提交且与 ordinary 一致。
+    /// 之后 allowance 变大（改 16M；#1419 W 起为 31M）使候选重新出生；后续 ingest 必须走 Carry 提交且与 ordinary 一致。
     /// 负控：去掉 `renew_after_cold_root_rerun` 的续租 → ingest-2 报“Carry租约已撤销”。
     #[cfg(feature = "s_incremental")]
     #[test]
@@ -4677,7 +5228,9 @@ mod tests {
                 first,
                 ordinary.handle(Fixture::ingest(1)).unwrap(),
             );
-            d.audit_cache_source_bytes = Some(16 << 20);
+            // #1419 W：候选重新出生所需 allowance 实测下限 30MiB（29.5MiB 下 ingest-2 放弃候选、20MiB 下
+            // ingest-3 StaleWriter），同 #1488 先例取下限+1MiB＝31MiB；1M 冷根自然失败不变。
+            d.audit_cache_source_bytes = Some(31 << 20);
             let steps = [
                 ("ready-a", envelope("p24adj-ready-a", json!({"op":"ready"}))),
                 ("ingest-2", Fixture::ingest(2)),
@@ -4716,7 +5269,7 @@ mod tests {
             )
         };
         let cold = run(1 << 20);
-        let control = run(16 << 20);
+        let control = run(31 << 20);
         eprintln!(
             "{}",
             json!({"scenario":"p24adj-cold-root-then-larger-cap",
@@ -4736,7 +5289,7 @@ mod tests {
         );
         assert!(
             cold.3.is_empty() && control.0.is_empty(),
-            "16M 下冷根不应失败"
+            "31M 下冷根不应失败"
         );
         assert!(
             cold.5.is_empty(),
@@ -4754,7 +5307,7 @@ mod tests {
             ("ingest-2", true, true, false, false),
             "候选重新出生后 ingest-2 须命中完整候选、经 Carry 提交资格且租约有效"
         );
-        assert_eq!(cold.4[1], control.4[1], "ingest-3 须与全程 16M 对照组同路");
+        assert_eq!(cold.4[1], control.4[1], "ingest-3 须与全程 31M 对照组同路");
         assert!(cold.4.iter().all(|c| !c.4), "租约不得撤销：{:?}", cold.4);
     }
 
@@ -4787,7 +5340,7 @@ mod tests {
         let mut d = open(&f);
         let a1 = d.handle(Fixture::ingest(1)).map(|_| ());
         let a_notes = probe::take();
-        d.audit_cache_source_bytes = Some(16 << 20);
+        d.audit_cache_source_bytes = Some(31 << 20); // #1419 W：同 p24adj 主锁实测下限 30MiB+1
         let a2 = d.handle(ready("p24adj-neg-ready-a")).map(|_| ());
         let a3 = d.handle(Fixture::ingest(2)).map(|_| ());
         let carried = d.conn.recover_probe_for_test();
@@ -4806,7 +5359,7 @@ mod tests {
         let b2 = e.handle(Fixture::ingest(1)).map(|_| ());
         let b_notes = probe::take();
         let not_renewed = e.conn.recover_probe_for_test();
-        e.audit_cache_source_bytes = Some(16 << 20);
+        e.audit_cache_source_bytes = Some(31 << 20); // #1419 W：同上
         let b3 = e.handle(ready("p24adj-neg-ready-c")).map(|_| ());
         let b4 = e.handle(Fixture::ingest(2));
         crate::cache::configure(0);
@@ -4886,7 +5439,10 @@ mod tests {
         let held = native.conn.complete_retained_bytes();
         assert!(held > 0);
         assert_eq!(before["charge"]["slot_result_capacity"], 0);
-        let workspace = 16 * 1024 * 1024;
+        // #1419 W（主控 2026-10-28 裁定：只调 TestOnly 夹具额度，生产帽不动）：W 结构体量下候选
+        // 父工作域实测下限（nc-remote 971cb5cbbf 扫描，512KiB 步长）：legacy+held+X 写期保留
+        // 候选需 X≥25MiB（24.5MiB 放弃并冷路径）；同 #1488 先例取下限+1MiB。
+        let workspace = 26 * 1024 * 1024;
         let old_gate_lower_bound = held.checked_mul(32).unwrap().checked_add(65536).unwrap();
         assert!(
             workspace < old_gate_lower_bound,
@@ -4961,7 +5517,10 @@ mod tests {
         let held = native.conn.complete_retained_bytes();
         assert!(held > 0);
         let legacy = crate::cache::retained_bytes();
-        let total = legacy + held + 8 * 1024 * 1024;
+        // #1419 W（主控 2026-10-28 裁定：只调 TestOnly 夹具额度，生产帽不动）：W 结构体量下候选
+        // 父工作域实测下限（nc-remote 971cb5cbbf 扫描，512KiB 步长）：legacy+held+X 写期保留
+        // 候选需 X≥25MiB（24.5MiB 放弃并冷路径）；同 #1488 先例取下限+1MiB。
+        let total = legacy + held + 26 * 1024 * 1024;
         // 仅收紧本测试 Driver 的同一 S7 额度，不修改任何默认额度。
         native.audit_cache_source_bytes = Some(total);
         let memory = Window::start();
@@ -5934,13 +6493,15 @@ mod tests {
             .map(|n| ordinary.handle(Fixture::ingest(n)).unwrap())
             .collect::<Vec<_>>();
         let cap = measured_source_cap(&mut ordinary);
+        // #1855（主控 6738968739 Q2）：/1 形状下 owner 首次 Commit 读数槽与来源池同占 S7，预算要先付它。
+        let budget = cap + std::mem::size_of::<v2::CommitReadingSlot>();
         let fixture = Fixture::new();
         let mut driver = Driver::open_for_serve_with_mode(
             &fixture.db,
             &fixture.profile,
             "1",
             fixture.clock.clone(),
-            cap,
+            budget,
             s_allocation::Mode::CapturedNative,
             crate::v3::admission_anchor::test_prepare(&fixture.db).into(),
         )
@@ -6017,7 +6578,7 @@ mod tests {
             &fixture.profile,
             "1",
             fixture.clock.clone(),
-            cap,
+            budget,
             s_allocation::Mode::CapturedNative,
             crate::v3::admission_anchor::test_prepare(&fixture.db).into(),
         )
@@ -6101,9 +6662,10 @@ mod tests {
             let keeper = keeper_owner.as_ref().unwrap();
             assert_eq!(keeper.retained_source_bytes(), 0);
             assert!(warm.conn.complete_retained_bytes() > 0);
+            // #1855（主控 6741990654 阻断 1）：封池上限先扣请求后常驻的 owner 首次 Commit 读数槽。
             assert_eq!(
                 keeper.report()["cap"].as_u64().unwrap() as usize,
-                total.checked_sub(legacy).unwrap()
+                total.checked_sub(legacy).unwrap() - std::mem::size_of::<v2::CommitReadingSlot>()
             );
             assert!(
                 crate::cache::retained_bytes()
@@ -6145,7 +6707,10 @@ mod tests {
         let reply = seed.handle(Fixture::ingest(1)).unwrap();
         let cap = measured_source_cap(&mut seed);
         drop(seed);
-        for budget in [cap, cap - 1, 1] {
+        // #1855（主控 6738968739 Q2、6741990654 阻断 1）：/1 形状下 owner 首次 Commit 读数槽（O，ELSEWHERE）
+        // 与来源池同占 S7，封池上限先扣掉它。装得下读数槽时，其余预算只改变保留量、不改变回复；装不下时拒绝。
+        let slot = std::mem::size_of::<v2::CommitReadingSlot>();
+        for budget in [cap + slot, cap + slot - 1, slot, slot - 1] {
             let mut driver = Driver::open_for_serve_with_mode(
                 &fixture.db,
                 &fixture.profile,
@@ -6156,25 +6721,33 @@ mod tests {
                 crate::v3::admission_anchor::test_prepare(&fixture.db).into(),
             )
             .unwrap();
+            if budget < slot {
+                let error = driver.handle(Fixture::ingest(1)).unwrap_err();
+                assert!(error.contains("S3WriterResourcesInvalid"), "{error}");
+                assert_eq!(meta_i64(&driver.conn, "generation").unwrap(), 1);
+                continue;
+            }
+            let retained = |driver: &Driver| {
+                driver
+                    .conn
+                    .source_keeper_for_test()
+                    .as_ref()
+                    .map_or((0, 0), |k| (k.retained_source_bytes(), k.hits))
+            };
             assert_eq!(
                 driver.handle(Fixture::ingest(1)).unwrap(),
                 reply,
                 "缓存不足不改变已提交回复"
             );
-            let retained = driver
-                .conn
-                .source_keeper_for_test()
-                .as_ref()
-                .map_or(0, |k| k.retained_source_bytes());
-            assert_eq!(retained, if budget == cap { cap } else { 0 });
-            if budget == 1 {
-                assert!(
-                    driver.conn.source_keeper_for_test().is_none(),
-                    "原S7=1不创建keeper"
-                );
-            }
+            let (first, hits) = retained(&driver);
+            assert_eq!(first, if budget == cap + slot { cap } else { 0 });
             assert_eq!(driver.handle(Fixture::ingest(1)).unwrap(), reply);
             assert_eq!(meta_i64(&driver.conn, "generation").unwrap(), 1);
+            if budget == cap + slot {
+                let (second, second_hits) = retained(&driver);
+                assert_eq!(second, cap, "第二次请求后池仍在");
+                assert!(second_hits > hits, "第二次请求命中上一请求封下的池");
+            }
         }
         let mut ordinary = fixture.open("1").unwrap();
         ordinary.audit_cache_source_bytes = Some(cap);
@@ -6183,6 +6756,57 @@ mod tests {
             ordinary.conn.source_keeper_for_test().is_none(),
             "普通路径没有keeper"
         );
+    }
+
+    /// #1855（主控 6741990654 阻断 1）：请求之间 owner 实际常驻的旧池不超过总账——每次请求结束后，
+    /// 下一请求入口要计的 legacy + carried 都不超过 total。/1（keeper_cap=S7）与 /2（keeper_cap=第八门）
+    /// 都覆盖，预算取来源需求加读数槽附近三档；封池上限少扣读数槽时 cap+slot−1 与 cap 两档超出 1–40 B。
+    #[cfg(feature = "s_incremental")]
+    #[test]
+    fn source_keeper_retention_fits_total_between_requests() {
+        let fixture = Fixture::new();
+        let mut seed = fixture.open("1").unwrap();
+        let reply = seed.handle(Fixture::ingest(1)).unwrap();
+        let cap = measured_source_cap(&mut seed);
+        drop(seed);
+        let slot = std::mem::size_of::<v2::CommitReadingSlot>();
+        for shape in ["/1", "/2"] {
+            for budget in [cap + slot, cap + slot - 1, cap] {
+                let seventh = if shape == "/1" { budget } else { 1 << 30 };
+                let mut driver = Driver::open_for_serve_with_mode(
+                    &fixture.db,
+                    &fixture.profile,
+                    "1",
+                    fixture.clock.clone(),
+                    seventh,
+                    s_allocation::Mode::CapturedNative,
+                    crate::v3::admission_anchor::test_prepare(&fixture.db).into(),
+                )
+                .unwrap();
+                if shape == "/2" {
+                    driver.incremental_retention_bytes = Some(budget);
+                }
+                for request in 1..=2 {
+                    assert_eq!(driver.handle(Fixture::ingest(1)).unwrap(), reply);
+                    let legacy = crate::cache::retained_bytes();
+                    let total = if shape == "/1" {
+                        budget
+                    } else {
+                        legacy + budget
+                    };
+                    let keeper = driver.conn.source_keeper_for_test();
+                    let carried = driver
+                        .conn
+                        .old_pool_partition(keeper.as_ref())
+                        .unwrap()
+                        .carried();
+                    assert!(
+                        legacy + carried <= total,
+                        "{shape} budget={budget} request={request}: legacy {legacy} + carried {carried} > total {total}"
+                    );
+                }
+            }
+        }
     }
 
     #[cfg(feature = "s_incremental")]
@@ -7834,8 +8458,37 @@ mod tests {
 
     #[cfg(feature = "s_incremental")]
     #[test]
+    #[inline(never)]
     fn audit_owner_incremental_normal_writes_full_oracle_and_suffix() {
+        // debug 档实测栈需求（Belay，RUST_MIN_STACK 二分）：1ed64ea9 在 1.75–2 MiB 之间，9d6d81319ca 起在 2–2.25 MiB 之间。
+        on_big_stack(audit_owner_incremental_normal_writes_full_oracle_and_suffix_body);
+    }
+
+    #[cfg(feature = "s_incremental")]
+    #[inline(never)]
+    fn audit_owner_incremental_normal_writes_full_oracle_and_suffix_body() {
         use super::super::audit_owner::allocation_probe::Window;
+        // #1419 M6：沿 #1481 S1R 将大 Driver 返回槽隔离在不可内联的开库帧内；
+        // 主体与 traced 请求只持 Box，仍走原来的正式入口和 Ordinary 对照臂。
+        #[cfg(test)]
+        #[inline(never)]
+        fn open_native(f: &Fixture, epoch: &str) -> Box<Driver> {
+            Driver::open_for_serve_with_mode(
+                &f.db,
+                &f.profile,
+                epoch,
+                f.clock.clone(),
+                536_870_912,
+                s_allocation::Mode::CapturedNative,
+                crate::v3::admission_anchor::test_prepare(&f.db).into(),
+            )
+            .map(Box::new)
+            .unwrap()
+        }
+        #[inline(never)]
+        fn open_ordinary(f: &Fixture) -> Box<Driver> {
+            f.open("1").map(Box::new).unwrap()
+        }
         fn context(d: &mut Driver) -> request_audit::RequestAuditContext {
             let total = d.audit_cache_source_bytes.unwrap_or(536_870_912);
             let keeper = d
@@ -7929,8 +8582,8 @@ mod tests {
         }
         let f = Fixture::with_clock(plan.clone());
         let o = Fixture::with_clock(plan);
-        let mut native = complete_driver(&f);
-        let mut ordinary = o.open("1").unwrap();
+        let mut native = open_native(&f, "1");
+        let mut ordinary = open_ordinary(&o);
         let ready = envelope("establish-q", json!({"op":"ready"}));
         assert_eq!(
             native.handle(ready.clone()).unwrap(),
@@ -8118,16 +8771,7 @@ mod tests {
         let memory = Window::start();
         drop(native);
         let memory = memory.finish();
-        let mut reopened = Driver::open_for_serve_with_mode(
-            &f.db,
-            &f.profile,
-            "2",
-            f.clock.clone(),
-            536_870_912,
-            s_allocation::Mode::CapturedNative,
-            crate::v3::admission_anchor::test_prepare(&f.db).into(),
-        )
-        .unwrap();
+        let mut reopened = open_native(&f, "2");
         assert_eq!(reopened.conn.complete_retained_bytes(), 0);
         assert_eq!(
             reopened.handle(receipt_request(&revision)).unwrap(),
@@ -8319,6 +8963,79 @@ mod tests {
     fn publication_source_append_allocation_failure_degrades() {
         use super::super::audit_owner::SOURCE_APPEND_ALLOCATION_FAILURE;
         publication_candidate_shortfall_case(&SOURCE_APPEND_ALLOCATION_FAILURE, None);
+    }
+    /// #1419 M8D P2：真实 `effects::audit_native_source` 来源追加的有限 j.cap 门。首次遇到
+    /// owner 原件索引扩容边界时把本次 cap 换成该次完整申请 G（通过）或 G−1（父 reserve 后
+    /// 局部 Allocation，经原桥降级放弃候选）；其余追加与各代照原 j.cap。两臂回复与运行根均逐项
+    /// 等于 ordinary oracle；收据核原 j.cap 不小于 G（真实路径本就放行该次扩容）。
+    #[cfg(feature = "s_incremental")]
+    fn m8d_jcap_case(offset: usize) -> (usize, usize) {
+        use super::super::audit_owner::{SOURCE_APPEND_CAP_AT_GROWTH, SOURCE_APPEND_CAP_RECEIPT};
+        use super::super::prepared::tests::runtime_root_tables;
+        let abandoned = |events: &[Value]| {
+            events
+                .iter()
+                .filter(|e| e["phase"] == "publication_candidate_abandoned")
+                .count()
+        };
+        let warm_fixture = Fixture::new();
+        let ordinary_fixture = Fixture::new();
+        let mut warm = Driver::open_for_serve_with_mode(
+            &warm_fixture.db,
+            &warm_fixture.profile,
+            "1",
+            warm_fixture.clock.clone(),
+            536_870_912,
+            s_allocation::Mode::CapturedNative,
+            crate::v3::admission_anchor::test_prepare(&warm_fixture.db).into(),
+        )
+        .unwrap();
+        let mut ordinary = ordinary_fixture.open("1").unwrap();
+        assert_eq!(
+            warm.handle(Fixture::ingest(1)).unwrap(),
+            ordinary.handle(Fixture::ingest(1)).unwrap()
+        );
+        SOURCE_APPEND_CAP_RECEIPT.with(|r| r.set(None));
+        let mut receipt = None;
+        for n in [2, 3, 3] {
+            let armed = receipt.is_none();
+            if armed {
+                assert!(
+                    warm.conn.complete_retained_bytes() > 0,
+                    "布置代入口须带候选"
+                );
+                SOURCE_APPEND_CAP_AT_GROWTH.with(|f| f.set(Some(offset)));
+            }
+            let (reply, events, _) = state::traced(false, || warm.handle(Fixture::ingest(n)));
+            let hit = armed && SOURCE_APPEND_CAP_AT_GROWTH.with(|f| f.get()).is_none();
+            SOURCE_APPEND_CAP_AT_GROWTH.with(|f| f.set(None));
+            assert_eq!(reply.unwrap(), ordinary.handle(Fixture::ingest(n)).unwrap());
+            assert_eq!(
+                runtime_root_tables(&warm.conn, true),
+                runtime_root_tables(&ordinary.conn, true)
+            );
+            let expect_abandon = hit && offset > 0;
+            assert_eq!(abandoned(&events), usize::from(expect_abandon), "第{n}代");
+            if hit {
+                receipt = SOURCE_APPEND_CAP_RECEIPT.with(|r| r.take());
+                assert!(receipt.is_some());
+            }
+        }
+        let (growth, real) = receipt.expect("来源追加必须实际到达索引扩容边界");
+        assert!(real >= growth, "原 j.cap={real} 小于 G={growth}");
+        assert!(
+            warm.conn.complete_retained_bytes() > 0,
+            "后续代重建并保留候选"
+        );
+        (growth, real)
+    }
+    #[cfg(feature = "s_incremental")]
+    #[test]
+    fn h1_m8d_jcap_effects_append_read_diff() {
+        let exact = m8d_jcap_case(0);
+        let one_less = m8d_jcap_case(1);
+        assert_eq!(exact, one_less, "同输入同边界");
+        println!("M8D_P2_RECEIPT growth={} real_j_cap={}", exact.0, exact.1);
     }
     /// #1488 0072 锁（独审 0070 R1）：故障起点改到 prepared 发布读取租约处，真实候选父工作域
     /// Allocation 经 prepared 的 `err` 以 `S3PrepareInvalid：` 包装上抛（S86 message-34 的真实形态）。
@@ -8539,7 +9256,19 @@ mod tests {
         s_fact_cache::warm_lane_reset();
         s_fact_cache::set_oracle(true);
         super::admission_private::s4_read_trace::enable();
-        let opened = o.open("1");
+        // oracle 臂每代冷读全史；测试准入默认 wire 上限 1 GiB 不是产品预算，多代 W 库下会被它截停
+        // （#1855：规则串加长 20 B 后超出 1,668 B），故只给 oracle 臂放到 2 GiB。
+        let opened = Driver::open(
+            &o.db,
+            &o.profile,
+            "1",
+            o.clock.clone(),
+            crate::v3::admission_anchor::test_prepare_caps(
+                &o.db,
+                &[("max_total_wire_bytes", 2 * 1024 * 1024 * 1024)],
+            )
+            .into(),
+        );
         let coverage = super::admission_private::s4_read_trace::finish();
         let mut cold = opened.unwrap();
         assert_eq!(
@@ -8556,7 +9285,7 @@ mod tests {
     }
     #[cfg(feature = "s_incremental")]
     #[test]
-    fn ordinary_proof_multicut_complete_outputs_match_frozen_oracle() {
+    fn ordinary_proof_w_multicut_complete_outputs_match_full_read_oracle() {
         let steps = vec![
             S4Step {
                 kind: "append",
@@ -8623,7 +9352,7 @@ mod tests {
             );
             assert_eq!(
                 super::super::layout::Layout::of_library(&actual.conn).unwrap(),
-                super::super::layout::Layout::Sorted
+                super::super::layout::Layout::Bounded2
             );
             let coverage = super::admission_private::s4_read_trace::finish();
             assert_eq!(coverage, [index as u64, index as u64 * 3], "{}", step.kind);
@@ -8646,7 +9375,11 @@ mod tests {
         let coverage = super::admission_private::s4_read_trace::finish();
         assert_eq!(coverage, [steps.len() as u64, steps.len() as u64 * 3]);
         let stats = super::super::source_audit::ordinary_proof_stats();
-        assert!(stats.hits > 0 && stats.executions > 0);
+        assert_eq!(
+            (stats.hits, stats.executions),
+            (0, 0),
+            "W 规则不启用旧业务配方"
+        );
         eprintln!(
             "ORDINARY_PROOF_MULTICUT cuts={} hits={} executions={} coverage={coverage:?}",
             steps.len(),

@@ -17,9 +17,10 @@ S_LIBDIR="$("$S_PYTHON" -c 'import sysconfig; print(sysconfig.get_config_var("LI
 export LD_LIBRARY_PATH="$S_LIBDIR${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
 export DYLD_LIBRARY_PATH="$S_LIBDIR${DYLD_LIBRARY_PATH:+:$DYLD_LIBRARY_PATH}"
 export CARGO_TARGET_DIR="$S_RUN_ROOT/build"
-cargo build --manifest-path "$S_REPO/rust/Cargo.toml" --release \
-  --features s_session --bin s_structure_session
-export S_BINARY="$CARGO_TARGET_DIR/release/s_structure_session"
+# #1419：s-launcher/2 写 v2 库，v2 写者只在 s_v2_seed_testonly 的 debug 构建存在（发布构建一律拒写）。
+cargo build --manifest-path "$S_REPO/rust/Cargo.toml" \
+  --features s_session,s_v2_seed_testonly --bin s_structure_session
+export S_BINARY="$CARGO_TARGET_DIR/debug/s_structure_session"
 "$S_PYTHON" -c 'import hashlib,os,pathlib; p=pathlib.Path(os.environ["S_BINARY"]); print(p,hashlib.sha256(p.read_bytes()).hexdigest())'
 ```
 
@@ -60,7 +61,7 @@ for name, port in [('manual', 18787), ('a', 18788), ('b', 18789)]:
 PY
 ```
 
-S3 写者有两种启动配置版本（#1640，ADR 0042 D4）：`s-launcher/3` 冻结 `s-structure-resources/1`，`s_resources` 必须恰好是原七字段，配 `s_session` 二进制；`s-launcher/4` 冻结 `s-structure-resources/2`，`s_resources` 必须恰好是七字段加 `incremental_retention_bytes`，只配 `s_session,s_incremental` 二进制。换二进制时须同时换启动配置，版本错配会在启动时被拒绝。tb01c fixture 是冻结输入，仍为七字段；切片 1 验收按 `incremental_retention_bytes = "268435456"` 另行给出。
+S3 写者有两种启动配置版本（#1640，ADR 0042 D4）：`s-launcher/3` 冻结 `s-structure-resources/1`，`s_resources` 必须恰好是原七字段，配 `s_session` 二进制；`s-launcher/4` 冻结 `s-structure-resources/2`，`s_resources` 必须恰好是七字段加 `incremental_retention_bytes`，只配 `s_session,s_incremental` 二进制。换二进制时须同时换启动配置，版本错配会在启动时被拒绝。tb01c fixture 是冻结输入，仍为七字段；切片 1 验收按 `incremental_retention_bytes = "268435456"` 另行给出。生产 `s-launcher/4` 的第八门取签署值 `"1342177280"`（1.25 GiB，[#1855 签署记录](https://github.com/Newchanlun/NewChanlun/pull/1855#issuecomment-6718096622)）。
 
 所有路径字段按配置文件所在目录解析；示例写成绝对路径以便核对。`state-dir` 与该数据库绑定，不能换一个控制目录采用未知进程。配置中的 `producer_id/producer_epoch` 是控制请求生产者身份；S 的 `writer_epoch` 和 Q 的 `query_epoch` 分别管理，不能互相代替。
 

@@ -27,7 +27,7 @@ open Formal.TrendTrichotomy (TrendKind Direction)
   中枢的区间端点（zhongshu.md / formal_axioms §3.2）。
 
   - `[zd, zg]` 核心区间：前两段定，`zg > zd` 为成立条件（中枢核固定，I5 不变量）。
-  - `[dd, gg]` 外缘区间：全部参与段定（含全部波动）。约束 `dd ≤ zd ∧ zg ≤ gg`。
+  - `[dd, gg]` 外缘区间：Zn（与 seed 首成员同向的成员）定（#1419 D-A）。约束 `dd ≤ zd ∧ zg ≤ gg`。
 -/
 structure Center where
   dd : Int   -- DD 外缘下沿
