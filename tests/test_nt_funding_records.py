@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import importlib.util
+import json
 import sys
 import types
 from pathlib import Path
@@ -277,26 +278,27 @@ def test_theta_cli_keeps_both_profiles_and_uses_signed_balance(monkeypatch, tmp_
     assert calls[0].preset == ("diagnostic-fixture" if diagnostic else None)
 
 
-def test_t_fugue_preserves_an_untagged_report(monkeypatch, tmp_path):
-    """旧报告不是本次回放的输出，不能用新结果覆盖。"""
+def test_t_fugue_keeps_history_and_writes_each_new_run(monkeypatch, tmp_path):
     _install(monkeypatch)
     module = _load_target(monkeypatch, "t_fugue")
     report = tmp_path / "t_fugue_CL_structural.json"
     original = b'{"trades": [], "equity": []}\n'
     report.write_bytes(original)
 
-    builds = []
-
-    def build(*args):
-        builds.append(args)
-        return NS(dispose=lambda: None), NS(size_precision=0), object()
-
-    monkeypatch.setattr(module, "INSTRUMENTS", {"CL": NS(price_precision=2)})
-    monkeypatch.setattr(module, "build_engine", build)
-    monkeypatch.setattr(module, "load_bars", lambda *_: ([], [], [], [], [1.0]))
-
-    with pytest.raises(FileExistsError, match="--output-dir"):
-        module.run_symbol("CL", ("structural",), None, "ERROR", output_dir=tmp_path)
-
+    for run_id in ("a", "b"):
+        out = {"provenance": {"run_id": run_id}, "trades": []}
+        saved = module.save_report(report, out)
+        assert saved == tmp_path / "runs" / run_id / report.name
+        assert json.loads(saved.read_text()) == out
     assert report.read_bytes() == original
-    assert len(builds) == 1  # 仅构造加载数据所需的 instrument；未启动回放。
+    assert json.loads((tmp_path / "runs/a" / report.name).read_text())["provenance"]["run_id"] == "a"
+
+
+def test_t_fugue_refreshes_current_report_at_its_usual_path(monkeypatch, tmp_path):
+    _install(monkeypatch)
+    module = _load_target(monkeypatch, "t_fugue")
+    report = tmp_path / "t_fugue_CL_structural.json"
+    for run_id in ("a", "b"):
+        out = {"provenance": {"run_id": run_id}}
+        assert module.save_report(report, out) == report
+        assert json.loads(report.read_text()) == out

@@ -43,7 +43,8 @@ Structural（纯结构 5 条件）/ And（结构∧MACD 收紧）/ Or（结构�
     PYTHONPATH=src .venv/bin/python trading_system/backtest_t_fugue.py --symbols OKLO,CL  # 指定标的
     PYTHONPATH=src .venv/bin/python trading_system/backtest_t_fugue.py --modes structural # 指定模式
 输出：trading_system/data_cache/t_fugue_<SYM>_<MODE>.json + 汇总矩阵打印。
-旧报告没有出处时保留原件，用 --output-dir 写到另一个目录。新报告仅增加 provenance：
+同名历史报告留在原位；新报告另存到 runs/<run_id>/ 下，实际路径随结果打印。
+可用 --output-dir 更换输出目录。新报告仅增加 provenance：
 core_id 标识 flat 核（不是 RecTStream），run_id 标识一次标的/模式回放，
 input_hash 是按 push_bar 调用顺序连接实际 OHLC 的大端 binary64（每条 32 字节）的 SHA-256；
 同一输入序列跨模式可比，模式仍从报告 mode 读取，资金记录见 provenance。
@@ -236,6 +237,20 @@ def build_engine(spec, mode: str, log_level: str):
     return engine, instrument, bar_type
 
 
+def save_report(report: Path, out: dict) -> Path:
+    """历史原件留在旧读者使用的位置；本次回放总能得到自己的报告。"""
+    if report.exists():
+        try:
+            previous = json.loads(report.read_bytes())
+        except (UnicodeDecodeError, json.JSONDecodeError):
+            previous = None
+        if not isinstance(previous, dict) or "provenance" not in previous:
+            report = report.parent / "runs" / out["provenance"]["run_id"] / report.name
+    report.parent.mkdir(parents=True, exist_ok=True)
+    report.write_text(json.dumps(out, ensure_ascii=False, indent=1), encoding="utf-8")
+    return report
+
+
 def run_symbol(
     sym: str, modes: tuple[str, ...], max_bars: int | None, log_level: str,
     *, output_dir: Path = OUT_DIR,
@@ -257,8 +272,6 @@ def run_symbol(
 
     for mode in modes:
         report = output_dir / f"t_fugue_{sym}_{mode}.json"
-        if report.exists() and "provenance" not in json.loads(report.read_text(encoding="utf-8")):
-            raise FileExistsError(f"保留无出处旧报告 {report}；请用 --output-dir 另存")
         run_id = str(uuid4())
         engine, instrument, bar_type = build_engine(spec, mode, log_level)
         engine.add_data(bars)
@@ -320,8 +333,8 @@ def run_symbol(
             "trades": strat.trades, "equity": strat.equity,
             "closes_first": closes[0], "closes_last": closes[-1],
         }
-        output_dir.mkdir(parents=True, exist_ok=True)
-        report.write_text(json.dumps(out, ensure_ascii=False, indent=1), encoding="utf-8")
+        saved = save_report(report, out)
+        print(f"  [{sym}/{mode}] 报告：{saved}", flush=True)
         rows.append({
             "sym": sym, "mode": mode, "bh": bh_pct, "strat": a["strat_pct"],
             "mdd": a["mdd_pct"], "trades": a["n_trades"], "p1": p1,
