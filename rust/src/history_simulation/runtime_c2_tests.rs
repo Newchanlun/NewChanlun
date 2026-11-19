@@ -34,12 +34,12 @@ fn profile(dir: &Path, conditions: Value) -> Value {
         "conditions":conditions,"timeout_ms":2000,"max_frame_bytes":65536})
 }
 fn command(conditions: Value) -> Value {
-    let change = json!({"kind":"submit","order":{"command_id":"a","family_id":"f-a","chong_id":"a","revision":1,"side":"buy",
-        "quantity":5,"kind":{"kind":"limit","price":100},"eligibility_ref":"S:a","projection_manifest":"p-a"}});
+    let change = json!({"kind":"submit","order":{"command_id":"a","family_id":"f-a","chong_id":"a","revision":"1","side":"buy",
+        "quantity":"5","kind":{"kind":"limit","price":"100"},"eligibility_ref":"S:a","projection_manifest":"p-a"}});
     let certificate = json!({"rd11_policy":"controlled-fixture-rd11","responsibility_refs":["r"],"structure_dependencies":["s"],
         "market_dependencies":["m"],"rule_revision":"rule","conditions":conditions});
-    json!({"command_id":"a","logical_order_family":"f-a","session_id":"session",
-        "session_generation":"1","x_id":"X","x_epoch":1,"symbol":"TEST","projection_kind":"per_leg","plan_hash":hash(&change),
+    json!({"command_id":"a","logical_order_family":"f-a","first_quantity":"5","allocation_id":"alloc-a","session_id":"session",
+        "session_generation":"1","x_id":"X","x_epoch":"1","symbol":"TEST","projection_kind":"per_leg","plan_hash":hash(&change),
         "certificate_hash":hash(&certificate),"change":change,"certificate":certificate})
 }
 fn parse<T: serde::de::DeserializeOwned>(v: Value) -> T {
@@ -225,7 +225,7 @@ fn authority_request_is_a_common_envelope_and_reply_must_bind_it() {
             let q = e["payload"].clone();
             let payload = json!({"protocol":AUTHORITY_WIRE,"session_id":q["session_id"],"session_generation":q["session_generation"],
                 "authority_id":"E","authority_epoch":"1","command_id":"a","command_hash":hash(&reply_for),"command":reply_for,
-                "state":"ReleasedExact","receipt_id":"E:a","release_receipt_id":null,"commit_ns":0});
+                "state":"ReleasedExact","receipt_id":"E:a","release_receipt_id":null,"commit_ns":"0"});
             if !bind_original {
                 e["message_id"] = json!("someone-else");
             }
@@ -254,4 +254,55 @@ fn authority_request_is_a_common_envelope_and_reply_must_bind_it() {
             ),
         }
     }
+}
+
+#[test]
+fn command_accepts_only_ic13_integers_and_binds_first_quantity_and_allocation() {
+    let p: Profile = parse(profile(&dir("exact-wire"), approved()));
+    let original = command(approved());
+    for path in [
+        "/first_quantity",
+        "/x_epoch",
+        "/change/order/quantity",
+        "/change/order/revision",
+        "/change/order/kind/price",
+    ] {
+        for bad in [
+            json!(5),
+            json!("05"),
+            json!("+5"),
+            json!("9223372036854775808"),
+        ] {
+            let mut wire = original.clone();
+            *wire.pointer_mut(path).unwrap() = bad;
+            assert!(
+                serde_json::from_value::<ExactCommand>(wire).is_err(),
+                "{path}"
+            );
+        }
+    }
+    for field in ["first_quantity", "allocation_id"] {
+        let mut wire = original.clone();
+        wire.as_object_mut().unwrap().remove(field);
+        assert!(
+            serde_json::from_value::<ExactCommand>(wire).is_err(),
+            "{field}"
+        );
+    }
+    let mut unknown = original.clone();
+    unknown["change"]["order"]["extra"] = json!("1");
+    assert!(serde_json::from_value::<ExactCommand>(unknown).is_err());
+    let mut c: ExactCommand = parse(original.clone());
+    assert_eq!(serde_json::to_value(&c).unwrap(), original);
+    c.first_quantity += 1;
+    assert!(c
+        .validate(&p, 1)
+        .unwrap_err()
+        .starts_with("IdentityConflict"));
+    c.first_quantity -= 1;
+    c.allocation_id.clear();
+    assert!(c
+        .validate(&p, 1)
+        .unwrap_err()
+        .starts_with("MissingDependency"));
 }
