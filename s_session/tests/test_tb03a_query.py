@@ -76,6 +76,26 @@ class EconomicQueryTests(unittest.TestCase):
         self.assertEqual(self.snapshot(snapshot_token=old["snapshot_token"]), old)
         self.assertEqual(len(self.calls), 6)
 
+    def test_cached_snapshot_and_projection_tokens_cannot_exchange_documents(self):
+        snapshot = self.snapshot()
+        # 这里只测同一个 Q 的缓存；owner 图像读取不在本例的证据范围。
+        self.q.finance_revision = "tb03b-finance/6"
+        self.q.book_revision = "tb03c-book/1"
+        self.q.authorized_read_ops |= {"EconomicReadOpen", "EconomicReadPage", "EconomicReadClose"}
+        self.q.projection_view = lambda d, cut, as_known_ns: {"status": "Available", "cut": self.states[d]["cut"]}
+        def projection(token=None):
+            return self.q.projection({"op": "projection", "projection_revision": "economic-read-projection/1",
+                                      "cuts": None, "as_known_ns": None, "projection_token": token})
+
+        projected = projection()
+        self.assertEqual(self.snapshot(snapshot_token=snapshot["snapshot_token"]), snapshot)
+        self.assertEqual(projection(projected["projection_token"]), projected)
+        for read, token in ((lambda t: self.snapshot(snapshot_token=t), projected["projection_token"]),
+                            (projection, snapshot["snapshot_token"])):
+            with self.subTest(token=token), self.assertRaisesRegex(EconomicQueryError, "类型"):
+                read(token)
+        self.assertEqual(projection("no-such-token")["reason"], "SnapshotExpired")
+
     def test_missing_historical_cut_does_not_fall_back_to_latest(self):
         old = self.snapshot()
         cuts = {d: v["cut"] for d, v in old["domains"].items()}

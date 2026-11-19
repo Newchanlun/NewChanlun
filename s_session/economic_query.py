@@ -1026,6 +1026,25 @@ class EconomicQuery:
                 self._cache_put_locked(token, encoded)
         return result
 
+    def _fixed_document(self, token, kind, token_field, *, single_frame=False):
+        """共享缓存容量，固定 token 只读回签发它的那类文档。"""
+        with self.lock:
+            self._expire_transfers_locked()
+            encoded = self.cache.get(token)
+            if encoded is not None:
+                self.cache.move_to_end(token)
+        if encoded is None:
+            self._remaining_ms()
+            return {"kind": "Gap", "reason": "SnapshotExpired", "requested_token": token,
+                    "session_id": self.session, "session_generation": self.generation}
+        if single_frame and len(encoded) > self.resources["max_reply_bytes"]:
+            raise EconomicQueryError("QueryBudgetExceeded：旧版单帧经济切面超过容量")
+        document = decode_frame(encoded)
+        if document.get("kind") != kind or document.get(token_field) != token:
+            raise EconomicQueryError("固定 token 与请求的经济文档类型不符")
+        self._remaining_ms()
+        return document
+
     def snapshot(self, payload, *, deadline=None, paged=False, cache=True):
         self._start(deadline)
         self.budget.paged = paged
@@ -1037,20 +1056,7 @@ class EconomicQuery:
         if token is not None:
             if type(token) is not str or cuts is not None or as_known is not None:
                 raise EconomicQueryError("固定 token 不能混入新 cut 或获知时刻")
-            with self.lock:
-                self._expire_transfers_locked()
-                encoded = self.cache.get(token)
-                if encoded is not None:
-                    self.cache.move_to_end(token)
-            if encoded is None:
-                self._remaining_ms()
-                return {"kind": "Gap", "reason": "SnapshotExpired", "requested_token": token,
-                        "session_id": self.session, "session_generation": self.generation}
-            result = decode_frame(encoded)
-            if not paged and len(encoded) > self.resources["max_reply_bytes"]:
-                raise EconomicQueryError("QueryBudgetExceeded：旧版单帧经济切面超过容量")
-            self._remaining_ms()
-            return result
+            return self._fixed_document(token, "EconomicSnapshot", "snapshot_token", single_frame=not paged)
         if cuts is not None and (type(cuts) is not dict or set(cuts) != set(self.nodes)):
             raise EconomicQueryError("回看须给完整域向量")
         if cuts is not None and as_known is not None:
@@ -1254,17 +1260,7 @@ class EconomicQuery:
         if token is not None:
             if type(token) is not str or cuts is not None or as_known is not None:
                 raise EconomicQueryError("固定 projection token 不能混入新 cut 或获知时刻")
-            with self.lock:
-                self._expire_transfers_locked()
-                encoded = self.cache.get(token)
-                if encoded is not None:
-                    self.cache.move_to_end(token)
-            if encoded is None:
-                self._remaining_ms()
-                return {"kind": "Gap", "reason": "SnapshotExpired", "requested_token": token,
-                        "session_id": self.session, "session_generation": self.generation}
-            self._remaining_ms()
-            return decode_frame(encoded)
+            return self._fixed_document(token, "EconomicProjection", "projection_token")
         if cuts is not None and (type(cuts) is not dict or set(cuts) != set(self.nodes)):
             raise EconomicQueryError("投影回看须给完整域向量")
         if cuts is not None and as_known is not None:
