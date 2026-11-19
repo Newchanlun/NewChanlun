@@ -6,26 +6,36 @@
 `GroupAction::ChiralSeam`、E spawn 走 `σ⁻¹∘τ`）外，信号层/会计层/成本门与 unn
 **完全一致**（spiral 复用 unn 的 `CenterBook`/`DepthRef` 成本门机件）。故：
 
-  - bit-exact 通过 ⟹ 群作用抽象足以表达全部已验证操作（除 A 强平非群，gap G2）
-    = "操作=群作用" 的 L2 验证。
-  - bit-exact 失败 ⟹ 逐处归因：差异落在群作用层 = 命题被否证；落在已知 gap = 标注。
+  - 三项 bit-exact 全部通过（逐 bar 吐单、finish trade 表、final_nav）且有交易样本
+    ⟹ 观测到群作用抽象复现已触发操作（除 A 强平非群 gap G2）；空交易样本仅声明
+    无交易路径上的观测等价，不宣称验证全部操作。
+  - 任一项分歧 ⟹ MISMATCH（退出码 2），明确第一处分歧并逐处归因：差异落在群作用层
+    = 命题被否证；落在已知 gap = 标注。
+
+角色边界（ADR 0039 §四·4 / ADR 0048 一·C）：本脚本为冻结影子研究对账，不读凭据、
+不开域库、不回退默认资金（须经 `NC_FUNDING_PROFILE` 指定签署记录）；相等仅作研究
+读数，不构成生产准入、交易许可、资金放行或 TStage 触闸依据。
 
 ═══════════════ 方法（apples-to-apples）═══════════════
 
 单个 `StreamingSignalReader` 逐 bar 产出 sig（缠论增量信号），**同一 sig** 喂给
 `UnnStream` 与 `SpiralStream`（`push_signal` 因两者 `push_bar` 签名相同而通用）。
-逐 bar 比对吐单 + finish 后比对完整 trade 表 + final_nav。
+逐 bar 比对吐单 + finish 后比对完整 trade 表 + final_nav；三项全部参与最终判决。
 
 用法（仓库根目录）：
-    PYTHONPATH=src .venv/bin/python trading_system/compare_spiral_unn.py --symbol OKLO --bars 30000
+    NC_FUNDING_PROFILE=P0 PYTHONPATH=src .venv/bin/python trading_system/compare_spiral_unn.py --symbol OKLO --bars 30000
 """
 
 from __future__ import annotations
 
 import argparse
+import hashlib
 import os
+import struct
 import sys
+from collections.abc import Sequence
 from pathlib import Path
+from uuid import uuid4
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO_ROOT))
@@ -48,22 +58,83 @@ from organic_signals import StreamingSignalReader, push_signal  # noqa: E402
 from trading_system.backtest_unn import load_bars  # noqa: E402
 from trading_system.config.instruments import INSTRUMENTS, make_instrument  # noqa: E402
 
+ROLE = "frozen_shadow_research_comparison"
+ADMISSION_EFFECT = "none"
+UNN_CORE_ID = "trading::unified_necessity::UnnStreamCore"
+SPIRAL_CORE_ID = "spiral::engine::SpiralEngineCore"
+SIGNAL_UPSTREAM_ID = "analysis.organic_signals.StreamingSignalReader"
+LOADER_ID = "trading_system.backtest_unn.load_bars"
+INPUT_ENCODING = "ohlc-f64be/1"
+REQUIRE_SETTLED = True
 
-def compare(sym: str, max_bars: int | None) -> int:
+
+def hash_ohlc_series(
+    opens: Sequence[float],
+    highs: Sequence[float],
+    lows: Sequence[float],
+    closes: Sequence[float],
+) -> str:
+    """计算两臂共享实际 OHLC 序列的 SHA-256（大端 binary64，每根 32 字节）。"""
+    n = len(closes)
+    if not (len(opens) == len(highs) == len(lows) == n):
+        raise ValueError(
+            f"OHLC 序列长度不一致: opens={len(opens)}, highs={len(highs)}, "
+            f"lows={len(lows)}, closes={n}"
+        )
+    digest = hashlib.sha256()
+    for o, h, low, c in zip(opens, highs, lows, closes):
+        digest.update(struct.pack(">dddd", float(o), float(h), float(low), float(c)))
+    return f"sha256:{digest.hexdigest()}"
+
+
+def _resolve_input_source(sym: str) -> str:
+    backtest_mod = sys.modules.get("trading_system.backtest_unn")
+    if backtest_mod is not None and load_bars is not getattr(backtest_mod, "load_bars", None):
+        return "<custom load_bars>"
+    symbol_files = getattr(backtest_mod, "SYMBOL_FILES", None)
+    if isinstance(symbol_files, dict) and sym in symbol_files:
+        path = Path(symbol_files[sym])
+        try:
+            return str(path.resolve().relative_to(REPO_ROOT.resolve()))
+        except ValueError:
+            return str(path)
+    return "<unmapped-by-SYMBOL_FILES>"
+
+
+def _format_bt_max_bars() -> str:
+    raw = os.environ.get("BT_MAX_BARS")
+    if raw is None or raw == "":
+        return "未设"
+    try:
+        val = int(raw)
+    except ValueError:
+        return raw
+    return f"{val} (清洗前截断)" if val > 0 else f"{val} (未生效)"
+
+
+def compare(sym: str, max_bars: int | None, *, run_id: str | None = None) -> int:
     spec = INSTRUMENTS[sym]
     instrument = make_instrument(spec)
     bar_type = BarType.from_str(f"{instrument.id}-1-MINUTE-LAST-EXTERNAL")
-    print(f"加载 {sym}（max_bars={max_bars or '全量'}）...")
+    actual_run_id = run_id or str(uuid4())
+    funding_profile = FUNDING_PROFILE
+
+    # 两臂先验签署资金记录（无默认资金；缺失即在加载数据前由 Rust 核报 AwaitingPolicy）。
+    unn = nr.UnnStream(floor_ladder=FLOOR, funding_profile=funding_profile)
+    spiral = nr.SpiralStream(floor_ladder=FLOOR, funding_profile=funding_profile)
+
+    max_bars_label = "全量" if max_bars is None else str(max_bars)
+    print(f"加载 {sym}（max_bars={max_bars_label}）...")
     t0 = time.time()
     _bars, opens, highs, lows, closes = load_bars(
         sym, bar_type, spec.price_precision, max_bars, instrument.size_precision)
+    input_hash = hash_ohlc_series(opens, highs, lows, closes)
+    input_source = _resolve_input_source(sym)
     n = len(closes)
     print(f"  {n:,} bar  {time.time() - t0:.1f}s")
 
     dir_flips: list = []
-    reader = StreamingSignalReader(dir_flips=dir_flips, require_settled=True)
-    unn = nr.UnnStream(floor_ladder=FLOOR, funding_profile=FUNDING_PROFILE)
-    spiral = nr.SpiralStream(floor_ladder=FLOOR, funding_profile=FUNDING_PROFILE)
+    reader = StreamingSignalReader(dir_flips=dir_flips, require_settled=REQUIRE_SETTLED)
 
     first_div = None       # 第一处逐 bar 吐单分歧 (bar, unn_trades, spiral_trades)
     n_bar_div = 0          # 逐 bar 吐单分歧次数
@@ -74,7 +145,8 @@ def compare(sym: str, max_bars: int | None) -> int:
     t0 = time.time()
     for i in range(n):
         n_before = len(dir_flips)
-        sig = reader.process_bar(i, opens[i], highs[i], lows[i], closes[i])
+        sig = reader.process_bar(
+            i, float(opens[i]), float(highs[i]), float(lows[i]), float(closes[i]))
         flip_rows = [(lad, d) for (_b, lad, d) in dir_flips[n_before:]]
         tu = push_signal(unn, sig, flip_rows)
         ts = push_signal(spiral, sig, flip_rows)
@@ -91,7 +163,8 @@ def compare(sym: str, max_bars: int | None) -> int:
     tu_all = ru["trades"]
     ts_all = rs["trades"]
 
-    # ── trade 表逐行比对（bit-exact = 完全相等）──
+    # ── 三项 bit-exact 核对：逐 bar 吐单、finish trade 表、final_nav ──
+    bar_match = n_bar_div == 0
     trade_match = tu_all == ts_all
     n_first_trade_div = None
     if not trade_match:
@@ -106,16 +179,69 @@ def compare(sym: str, max_bars: int | None) -> int:
     nav_u = ru["final_nav"]
     nav_s = rs["final_nav"]
     nav_match = nav_u == nav_s
+    verdict = bar_match and trade_match and nav_match
+
+    failed_axes: list[str] = []
+    if not bar_match:
+        failed_axes.append("逐 bar 吐单")
+    if not trade_match:
+        failed_axes.append("finish trade 表")
+    if not nav_match:
+        failed_axes.append("final_nav")
+
+    first_divergence_summary: str | None = None
+    if first_div is not None:
+        first_divergence_summary = f"逐 bar 吐单 @ bar {first_div[0]}"
+    elif n_first_trade_div is not None:
+        first_divergence_summary = f"finish trade 表 @ index {n_first_trade_div}"
+    elif not nav_match:
+        first_divergence_summary = (
+            f"final_nav (unn={nav_u!r}, spiral={nav_s!r}, Δ={nav_s - nav_u:.17g})"
+        )
+
+    zero_trade_sample = (
+        len(tu_all) == 0
+        and len(ts_all) == 0
+        and n_unn_pushed == 0
+        and n_spiral_pushed == 0
+    )
+
+    unn_records = ru.get("records", "<未返回>")
+    spiral_funding_record = rs.get("funding_record", "<未返回>")
+    unn_q_total = ru.get("q_total", "<未返回>")
+    spiral_q_total = rs.get("q_total", "<未返回>")
 
     print("\n========== spiral × unn bit-exact 对账 ==========")
+    print(f"run_id          : {actual_run_id}")
+    print(f"role            : {ROLE} (admission_effect={ADMISSION_EFFECT}；ADR 0039 §四·4 / ADR 0048 一·C)")
+    print(f"arm_unn core_id : {UNN_CORE_ID} (via newchan_rust.UnnStream)")
+    print(f"arm_spiral core_id: {SPIRAL_CORE_ID} (via newchan_rust.SpiralStream)")
+    print(f"shared_signal   : {SIGNAL_UPSTREAM_ID} (require_settled={REQUIRE_SETTLED})")
+    print(f"input_source    : {input_source} (loader={LOADER_ID}, bar_type={bar_type})")
+    print(f"input_hash      : {input_hash} (encoding={INPUT_ENCODING}, bars={n})")
+    print(
+        f"所选条件        : symbol={sym}({instrument.id}), max_bars={max_bars_label}, "
+        f"bt_max_bars={_format_bt_max_bars()}, floor_ladder={FLOOR}, "
+        f"require_settled={REQUIRE_SETTLED}, funding_profile={funding_profile}"
+    )
+    print(
+        f"资金记录        : unn=({unn_records}, q_total={unn_q_total}) | "
+        f"spiral=({spiral_funding_record}, q_total={spiral_q_total})"
+    )
     print(f"标的            : {sym}（{instrument.id}）")
     print(f"bars            : {n:,}")
     print(f"unn   trades    : {len(tu_all)}  (逐 bar 吐 {n_unn_pushed})")
     print(f"spiral trades   : {len(ts_all)}  (逐 bar 吐 {n_spiral_pushed})")
-    print(f"逐 bar 吐单分歧 : {n_bar_div} bar")
+    print(f"逐 bar 吐单分歧 : {n_bar_div} bar  {'✅ PASS' if bar_match else '❌ MISMATCH'}")
     print(f"trade 表 bit-exact : {'✅ PASS' if trade_match else '❌ MISMATCH'}")
-    print(f"final_nav       : unn={nav_u:.6f}  spiral={nav_s:.6f}  {'✅' if nav_match else '❌ Δ=%.6f' % (nav_s - nav_u)}")
+    print(
+        f"final_nav       : unn={nav_u:.6f}  spiral={nav_s:.6f}  "
+        f"{'✅ PASS' if nav_match else '❌ MISMATCH (Δ=%.6f)' % (nav_s - nav_u)}"
+    )
 
+    if first_divergence_summary is not None:
+        print(f"分歧项          : {', '.join(failed_axes)}")
+        print(f"第一处分歧      : {first_divergence_summary}")
     if first_div is not None:
         bar, tud, tsd = first_div
         print(f"\n第一处逐 bar 分歧 @ bar {bar}:")
@@ -125,19 +251,49 @@ def compare(sym: str, max_bars: int | None) -> int:
         print(f"\n第一处 trade 表分歧 @ index {n_first_trade_div}:")
         if n_first_trade_div < len(tu_all):
             print(f"  unn   : {tu_all[n_first_trade_div]}")
+        else:
+            print(f"  unn   : <缺失 (len={len(tu_all)})>")
         if n_first_trade_div < len(ts_all):
             print(f"  spiral: {ts_all[n_first_trade_div]}")
+        else:
+            print(f"  spiral: <缺失 (len={len(ts_all)})>")
+    if not nav_match:
+        print("\nfinal_nav 分歧:")
+        print(f"  unn   : {nav_u!r}")
+        print(f"  spiral: {nav_s!r}")
+        print(f"  delta : {nav_s - nav_u:.17g}")
 
-    verdict = trade_match and nav_match
-    print(f"\n判决: {'✅ BIT-EXACT —— 操作=群作用 L2 验证通过（除 A 强平非群 gap G2）' if verdict else '❌ 分歧 —— 须逐处归因（群作用层=否证 / 已知 gap=标注）'}")
+    if verdict and zero_trade_sample:
+        print(
+            "观测等价范围    : 空交易样本（两臂均为 0 笔交易、逐 bar 吐单均为 0）；"
+            "仅观测到无交易路径上的三项等价，未覆盖交易操作，不得据此宣称验证全部操作"
+        )
+        print(
+            "\n判决: ✅ BIT-EXACT（空交易样本）—— 仅观测到无交易路径三项等价，"
+            "未验证交易操作（仅研究读数，不构成生产准入）"
+        )
+    elif verdict:
+        print(
+            f"观测等价范围    : 已观测 {len(tu_all)} 笔完成交易（逐 bar 吐 {n_unn_pushed}），"
+            "逐 bar 吐单 / finish trade 表 / final_nav 三项全等（仅研究对账，不构成生产准入）"
+        )
+        print(
+            "\n判决: ✅ BIT-EXACT —— 三项（逐 bar / trade 表 / final_nav）全通过"
+            "（操作=群作用 L2 对账，除 A 强平非群 gap G2；仅研究读数，不构成生产准入）"
+        )
+    else:
+        print(
+            f"\n判决: ❌ MISMATCH —— 分歧项: {', '.join(failed_axes)}；"
+            "须逐处归因（群作用层=否证 / 已知 gap=标注；仅研究读数，不构成生产准入）"
+        )
     return 0 if verdict else 2
 
 
-def main() -> int:
+def main(argv: Sequence[str] | None = None) -> int:
     p = argparse.ArgumentParser(description="spiral × unn bit-exact 对账")
     p.add_argument("--symbol", default="OKLO")
     p.add_argument("--bars", type=int, default=30000, help="最大 bar 数（0=全量）")
-    args = p.parse_args()
+    args = p.parse_args(argv)
     if args.symbol not in INSTRUMENTS:
         print(f"标的 {args.symbol} 未注册（可用: {list(INSTRUMENTS)}）", file=sys.stderr)
         return 1
