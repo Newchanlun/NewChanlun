@@ -10,6 +10,7 @@
 
 from __future__ import annotations
 
+import ast
 import hashlib
 import importlib.util
 import json
@@ -32,7 +33,13 @@ def _extract_provenance_json(md_text: str) -> dict:
     return json.loads(match.group(1))
 
 
-def _load_comparison_module(monkeypatch, tmp_path: Path):
+def _load_comparison_module(
+    monkeypatch,
+    tmp_path: Path,
+    *,
+    nf_fires_fn=None,
+    t_bsps_fn=None,
+):
     """在隔离 stub 下加载真实 analysis/t_vs_v3_comparison.py 源码。"""
     records = {
         "P0": ("#1557/funding-authorization/v1@P0/v1", 100_000),
@@ -40,14 +47,17 @@ def _load_comparison_module(monkeypatch, tmp_path: Path):
     }
     state = {
         "t_inputs": [],
+        "t_orch_kwargs": [],
         "v3_inputs": [],
         "v3_init_calls": [],
         "organic_calls": 0,
+        "organic_kwargs": [],
     }
 
     class FakeOrchestrator:
         def __init__(self, **kwargs):
-            self.kwargs = kwargs
+            self.kwargs = dict(kwargs)
+            state["t_orch_kwargs"].append(dict(kwargs))
             self.bars = []
 
         def process_bar(self, o, h, l, c):
@@ -63,6 +73,8 @@ def _load_comparison_module(monkeypatch, tmp_path: Path):
 
     def fake_run_recursive_t(seg_in):
         assert len(seg_in) >= 1
+        if t_bsps_fn is not None:
+            return t_bsps_fn(seg_in)
         high = seg_in[0][3]
         low = seg_in[0][4]
         return [
@@ -86,10 +98,17 @@ def _load_comparison_module(monkeypatch, tmp_path: Path):
             self.pushed = []
 
         def finish(self):
-            high = max(self.pushed) if self.pushed else 0.0
-            low = min(self.pushed) if self.pushed else 0.0
+            if nf_fires_fn is not None:
+                fires = nf_fires_fn(self.pushed)
+            else:
+                high = max(self.pushed) if self.pushed else 0.0
+                low = min(self.pushed) if self.pushed else 0.0
+                fires = [
+                    (0, 3, False, low),
+                    (max(len(self.pushed) - 1, 0), 3, True, high),
+                ]
             return {
-                "nf_fires": [(0, 3, False, low), (max(len(self.pushed) - 1, 0), 3, True, high)],
+                "nf_fires": fires,
                 "funding_record": self.funding_record,
                 "q_total": self.q_total,
             }
@@ -102,6 +121,7 @@ def _load_comparison_module(monkeypatch, tmp_path: Path):
 
     def fake_compute_organic_signals(opens, highs, lows, closes, *, dir_flips=None, require_settled=True):
         state["organic_calls"] += 1
+        state["organic_kwargs"].append({"require_settled": require_settled})
         state["v3_inputs"].append(list(zip(opens, highs, lows, closes)))
         return list(closes)
 
@@ -109,6 +129,7 @@ def _load_comparison_module(monkeypatch, tmp_path: Path):
         stream.pushed.append(s)
 
     fake_org = types.ModuleType("organic_signals")
+    fake_org.MAX_LEVELS = 8
     fake_org.compute_organic_signals = fake_compute_organic_signals
     fake_org.push_signal = fake_push_signal
     monkeypatch.setitem(sys.modules, "organic_signals", fake_org)
@@ -346,15 +367,288 @@ def test_explicit_empty_cli_funding_profile_does_not_fallback_to_env(monkeypatch
     assert not (tmp_path / "runs").exists()
 
 
-def test_bt_max_bars_env_recorded_in_selected_conditions(monkeypatch, tmp_path):
+def test_two_stage_input_limits_distinguish_pre_and_post_clean(monkeypatch, tmp_path):
     mod, _state, _hist = _load_comparison_module(monkeypatch, tmp_path)
     monkeypatch.setenv("NC_FUNDING_PROFILE", "P0")
+
+    # 1) 仅设 BT_MAX_BARS（清洗前），未设位置参数 max_bars（清洗后）：绝不可打印“全量（env BT_MAX_BARS=…）”
     monkeypatch.setenv("BT_MAX_BARS", "42")
+    assert mod.main(["OKLO"]) == 0
+    # 2) 同时设 BT_MAX_BARS（清洗前）与位置参数 max_bars（清洗后）
+    assert mod.main(["OKLO", "5"]) == 0
+    # 3) 均未设
+    monkeypatch.delenv("BT_MAX_BARS", raising=False)
+    assert mod.main(["OKLO"]) == 0
+
+    reports = sorted((tmp_path / "runs").glob("*/T_vs_v3_comparison.md"))
+    assert len(reports) == 3
+
+    by_limits = {}
+    for rep in reports:
+        md = rep.read_text(encoding="utf-8")
+        prov = _extract_provenance_json(md)
+        lim = prov["selected_conditions"]["input_limits"]
+        key = (lim["pre_clean_raw_max_bars_env"], lim["post_clean_max_bars_arg"])
+        by_limits[key] = (md, prov)
+
+    md_pre, _ = by_limits[(42, None)]
+    assert "全量（env BT_MAX_BARS" not in md_pre
+    assert "清洗前原始上限 env BT_MAX_BARS=42；清洗后无截断（未设位置参数 max_bars）" in md_pre
+
+    md_both, _ = by_limits[(42, 5)]
+    assert "清洗前原始上限 env BT_MAX_BARS=42；清洗后截断前 5 bar（位置参数 max_bars=5）" in md_both
+
+    md_none, _ = by_limits[(None, None)]
+    assert "清洗前无原始上限（env BT_MAX_BARS 未设）；清洗后无截断（未设位置参数 max_bars）" in md_none
+
+
+def test_real_source_arm_max_levels_are_t6_and_v3_8():
+    """直接从仓库真实源码 AST 验证：T 臂 MAX_LEVELS=6，v3 经 organic_signals 使用 fugue_version_i.MAX_LEVELS=8。"""
+    def _extract_int_const(path: Path, name: str) -> int:
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        for node in tree.body:
+            if isinstance(node, ast.Assign):
+                for target in node.targets:
+                    if isinstance(target, ast.Name) and target.id == name:
+                        assert isinstance(node.value, ast.Constant) and isinstance(node.value.value, int)
+                        return node.value.value
+        raise AssertionError(f"{path} 缺少整型常量 {name}")
+
+    assert _extract_int_const(ROOT / "analysis" / "t_vs_v3_comparison.py", "MAX_LEVELS") == 6
+    assert _extract_int_const(ROOT / "analysis" / "fugue_version_i.py", "MAX_LEVELS") == 8
+
+    org_src = (ROOT / "analysis" / "organic_signals.py").read_text(encoding="utf-8")
+    org_tree = ast.parse(org_src)
+    imported_max_levels = any(
+        isinstance(node, ast.ImportFrom)
+        and node.module == "fugue_version_i"
+        and any(alias.name == "MAX_LEVELS" for alias in node.names)
+        for node in ast.walk(org_tree)
+    )
+    assert imported_max_levels, "organic_signals.py 应从 fugue_version_i 导入 MAX_LEVELS"
+    assert "RecursiveOrchestrator(max_levels=MAX_LEVELS" in org_src
+    assert "enable_macd_divergence=True" in org_src
+    assert "require_settled_subseg=require_settled" in org_src
+
+
+def test_per_arm_actual_configs_and_scope_shared_between_json_and_prose(monkeypatch, tmp_path):
+    mod, state, _hist = _load_comparison_module(monkeypatch, tmp_path)
+    monkeypatch.setenv("NC_FUNDING_PROFILE", "P0")
 
     assert mod.main(["OKLO", "5"]) == 0
     reports = list((tmp_path / "runs").glob("*/T_vs_v3_comparison.md"))
     assert len(reports) == 1
     md = reports[0].read_text(encoding="utf-8")
-    assert "BT_MAX_BARS=42" in md
     prov = _extract_provenance_json(md)
-    assert prov["selected_conditions"]["bt_max_bars_env"] == "42"
+
+    # 运行参数保持原样（未为迎合报告而改成统一值）
+    assert state["t_orch_kwargs"] == [
+        {"max_levels": 6, "enable_macd_divergence": True, "require_settled_subseg": True}
+    ]
+    assert state["organic_kwargs"] == [{"require_settled": True}]
+    assert state["v3_init_calls"] == [{"floor_ladder": 2, "funding_profile": "P0"}]
+
+    # JSON 分臂记录 T=6、v3=8，无失真全局 max_levels
+    t_arm = prov["cores"]["t_arm"]
+    v3_arm = prov["cores"]["v3_arm"]
+    assert t_arm["operator_uses_macd"] is False
+    assert t_arm["upstream_orchestrator"] == {
+        "max_levels": 6,
+        "enable_macd_divergence": True,
+        "require_settled_subseg": True,
+    }
+    assert v3_arm["upstream_signal_require_settled"] is True
+    assert v3_arm["upstream_orchestrator"] == {
+        "max_levels": 8,
+        "enable_macd_divergence": True,
+        "require_settled_subseg": True,
+    }
+    assert "max_levels" not in prov["selected_conditions"]
+    assert "enable_macd_divergence_orchestrator" not in prov["selected_conditions"]
+
+    # 正文与 JSON 一致，且明确“纯结构、零 MACD”仅限定 T 算子本体
+    assert "# T 算子（算子本体纯结构、零 MACD）vs v3 nf 信号 L2 对照" in md
+    assert "“纯结构、零 MACD”仅限定于 T 算子本体" in md
+    assert "`operator_uses_macd=False`" in md
+    assert "`max_levels=6`" in md
+    assert "`max_levels=8`" in md
+
+
+def test_empty_reference_zero_fire_report_is_neutral_and_distinct_from_failure(
+    monkeypatch, tmp_path
+):
+    mod, _state, _hist = _load_comparison_module(
+        monkeypatch, tmp_path, nf_fires_fn=lambda _pushed: []
+    )
+    monkeypatch.setenv("NC_FUNDING_PROFILE", "P0")
+
+    rc = mod.main(["OKLO", "5"])
+    assert rc == 0, "零 fire 是执行成功的空参照样本，不应改成非零退出"
+
+    reports = list((tmp_path / "runs").glob("*/T_vs_v3_comparison.md"))
+    assert len(reports) == 1
+    md = reports[0].read_text(encoding="utf-8")
+    prov = _extract_provenance_json(md)
+
+    assert prov["run_status"] == "complete"
+    obs = prov["observations"]["OKLO"]
+    assert obs["execution_status"] == "succeeded"
+    assert obs["reference_status"] == "empty_v3_reference"
+    assert obs["n_nf_fires"] == 0
+    assert obs["n_nf_dedup"] == 0
+    assert obs["n_t_compared"] == 2
+    assert obs["n_t_only"] == 2
+    assert obs["n_nf_only"] == 0
+    assert obs["t_overlap_rate"] == 0.0
+    assert obs["v3_overlap_rate"] is None
+
+    # 中性表头与显式分母/不适用说明：无误判/漏判表头，无裸 None
+    assert "T_only(仅T侧) | nf_only(仅v3侧) | T侧重合率 | v3侧重合率" in md
+    assert "T_only(误判?)" not in md
+    assert "nf_only(漏判?)" not in md
+    assert "| None |" not in md
+    assert "0/1 (0.0%) | 不适用（无 v3 样本）" in md
+    assert "execution_status=succeeded" in md
+    assert "reference_status=empty_v3_reference" in md
+    assert "无参照样本 / 空参照" in md
+    assert obs["interpretation"] in md
+    assert "## 失败标的" not in md
+
+
+def test_non_empty_reference_report_preserves_matching_dedup_and_both_denominators(
+    monkeypatch, tmp_path
+):
+    # T 产出：ladder 3 sell 2 个点（1 个命中、1 个仅T侧），ladder 3 buy 1 个命中点，外加 1 个 type2
+    def custom_t(seg_in):
+        high = seg_in[0][3]
+        low = seg_in[0][4]
+        return [
+            ("type1_sell", 1, high, 0),
+            ("type3_sell", 2, high + 5.0, 0),
+            ("type1_buy", 0, low, 0),
+            ("type2_buy", 1, low, 0),
+        ]
+
+    # v3 产出：ladder 3 sell 重复 fire 2 次（去重后 1 点命中 high=13.5），ladder 3 buy 1 点命中 low=9.5，
+    # 外加 ladder 4 buy 1 点（仅 v3 侧，T 侧分母 0 -> 不适用（无 T 样本））
+    def custom_nf(_pushed):
+        return [
+            (0, 3, False, 9.5),
+            (1, 3, True, 13.5),
+            (2, 3, True, 13.5),
+            (3, 4, False, 8.5),
+        ]
+
+    mod, _state, _hist = _load_comparison_module(
+        monkeypatch, tmp_path, nf_fires_fn=custom_nf, t_bsps_fn=custom_t
+    )
+    monkeypatch.setenv("NC_FUNDING_PROFILE", "P0")
+
+    assert mod.main(["OKLO", "5"]) == 0
+    reports = list((tmp_path / "runs").glob("*/T_vs_v3_comparison.md"))
+    assert len(reports) == 1
+    md = reports[0].read_text(encoding="utf-8")
+    prov = _extract_provenance_json(md)
+
+    obs = prov["observations"]["OKLO"]
+    assert obs["execution_status"] == "succeeded"
+    assert obs["reference_status"] == "non_empty_v3_reference"
+    assert obs["n_nf_fires"] == 4
+    assert obs["n_nf_dedup"] == 3
+    assert obs["n_t_compared"] == 3
+    assert obs["n_t_type2"] == 1
+    assert obs["n_matched"] == 2
+    assert obs["n_t_only"] == 1
+    assert obs["n_nf_only"] == 1
+    assert obs["t_overlap_rate"] == round(2 / 3, 3)
+    assert obs["v3_overlap_rate"] == round(2 / 3, 3)
+
+    assert "T_only(仅T侧) | nf_only(仅v3侧) | T侧重合率 | v3侧重合率" in md
+    assert "| None |" not in md
+    # ladder 3 sell: n_T=2, n_nf=1 (去重), n_nf_raw=2, matched=1, t_only=1, nf_only=0
+    assert "| 3 | move/L1 | sell | 2 | 1 | 2 | 1 | 1 | 0 | 1/2 (50.0%) | 1/1 (100.0%) |" in md
+    # ladder 3 buy: 1/1 & 1/1
+    assert "| 3 | move/L1 | buy | 1 | 1 | 1 | 1 | 0 | 0 | 1/1 (100.0%) | 1/1 (100.0%) |" in md
+    # ladder 4 buy: n_T=0 -> T侧不适用，v3侧 0/1 (0.0%)
+    assert "| 4 | recL2 | buy | 0 | 1 | 1 | 0 | 0 | 1 | 不适用（无 T 样本） | 0/1 (0.0%) |" in md
+    assert obs["interpretation"] in md
+
+
+def test_real_run05_zero_fire_anchor_renders_neutral_report(monkeypatch, tmp_path):
+    """以 run-05 A 真实 OKLO 零 fire 观测为验收锚点，验证新版报告格式与出处一致性。"""
+    mod, _state, _hist = _load_comparison_module(monkeypatch, tmp_path)
+    run05_result = {
+        "symbol": "OKLO",
+        "n_bars": 343_282,
+        "n_segs": 2_844,
+        "n_t_bsps": 529,
+        "n_nf_fires": 0,
+        "n_type2": 20,
+        "source_file": "analysis/data_cache/oklo_1m_databento.json",
+        "input_hash": "sha256:7adfa0884eadd9e4d5ad4a78af6cb18cb803beef7c9d7e1b95d23ec5803438e5",
+        "input_encoding": "ohlc-f64be/1",
+        "input_count": 343_282,
+        "t_mode": "structure",
+        "t_operator_uses_macd": False,
+        "t_upstream_orchestrator": {
+            "max_levels": 6,
+            "enable_macd_divergence": True,
+            "require_settled_subseg": True,
+        },
+        "v3_funding_profile": "P0",
+        "v3_funding_record": "#1557/funding-authorization/v1@P0/v1",
+        "v3_q_total": 100_000,
+        "v3_floor_ladder": 2,
+        "v3_upstream_signal_require_settled": True,
+        "v3_upstream_orchestrator": {
+            "max_levels": 8,
+            "enable_macd_divergence": True,
+            "require_settled_subseg": True,
+        },
+        "rows": [
+            {"ladder": 3, "level": 0, "name": "move/L1", "side": "sell", "n_T": 218, "n_nf": 0, "n_nf_raw": 0, "matched": 0, "t_only": 218, "nf_only": 0, "t_match_rate": 0.0, "nf_match_rate": None},
+            {"ladder": 3, "level": 0, "name": "move/L1", "side": "buy", "n_T": 213, "n_nf": 0, "n_nf_raw": 0, "matched": 0, "t_only": 213, "nf_only": 0, "t_match_rate": 0.0, "nf_match_rate": None},
+            {"ladder": 4, "level": 1, "name": "recL2", "side": "sell", "n_T": 37, "n_nf": 0, "n_nf_raw": 0, "matched": 0, "t_only": 37, "nf_only": 0, "t_match_rate": 0.0, "nf_match_rate": None},
+            {"ladder": 4, "level": 1, "name": "recL2", "side": "buy", "n_T": 30, "n_nf": 0, "n_nf_raw": 0, "matched": 0, "t_only": 30, "nf_only": 0, "t_match_rate": 0.0, "nf_match_rate": None},
+            {"ladder": 5, "level": 2, "name": "recL3", "side": "sell", "n_T": 4, "n_nf": 0, "n_nf_raw": 0, "matched": 0, "t_only": 4, "nf_only": 0, "t_match_rate": 0.0, "nf_match_rate": None},
+            {"ladder": 5, "level": 2, "name": "recL3", "side": "buy", "n_T": 5, "n_nf": 0, "n_nf_raw": 0, "matched": 0, "t_only": 5, "nf_only": 0, "t_match_rate": 0.0, "nf_match_rate": None},
+            {"ladder": 6, "level": 3, "name": "recL4", "side": "sell", "n_T": 1, "n_nf": 0, "n_nf_raw": 0, "matched": 0, "t_only": 1, "nf_only": 0, "t_match_rate": 0.0, "nf_match_rate": None},
+            {"ladder": 6, "level": 3, "name": "recL4", "side": "buy", "n_T": 1, "n_nf": 0, "n_nf_raw": 0, "matched": 0, "t_only": 1, "nf_only": 0, "t_match_rate": 0.0, "nf_match_rate": None},
+        ],
+        "regime": [
+            {"bar_lo": 0, "bar_hi": 68_656, "ret_pct": 1.2, "regime": "range", "n_nf": 0},
+            {"bar_lo": 68_656, "bar_hi": 137_312, "ret_pct": 111.8, "regime": "bull", "n_nf": 0},
+            {"bar_lo": 137_312, "bar_hi": 205_968, "ret_pct": 226.4, "regime": "bull", "n_nf": 0},
+            {"bar_lo": 205_968, "bar_hi": 274_624, "ret_pct": -45.2, "regime": "bear", "n_nf": 0},
+            {"bar_lo": 274_624, "bar_hi": 343_282, "ret_pct": -20.0, "regime": "bear", "n_nf": 0},
+        ],
+    }
+
+    report_path = mod.write_report(
+        [run05_result],
+        None,
+        run_id="anchor-run05-oklo",
+        output_dir=tmp_path,
+        requested_symbols=["OKLO"],
+        failed=[],
+        funding_profile="P0",
+    )
+    md = report_path.read_text(encoding="utf-8")
+    prov = _extract_provenance_json(md)
+
+    assert prov["cores"]["t_arm"]["upstream_orchestrator"]["max_levels"] == 6
+    assert prov["cores"]["v3_arm"]["upstream_orchestrator"]["max_levels"] == 8
+    obs = prov["observations"]["OKLO"]
+    assert obs["n_t_compared"] == 509
+    assert obs["n_t_only"] == 509
+    assert obs["n_nf_fires"] == 0
+    assert obs["t_overlap_rate"] == 0.0
+    assert obs["v3_overlap_rate"] is None
+    assert obs["reference_status"] == "empty_v3_reference"
+
+    assert "| 3 | move/L1 | sell | 218 | 0 | 0 | 0 | 218 | 0 | 0/218 (0.0%) | 不适用（无 v3 样本） |" in md
+    assert "0/509 = 0.0%" in md
+    assert "| None |" not in md
+    assert "T_only(误判?)" not in md
+    assert "nf_only(漏判?)" not in md
+
