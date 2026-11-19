@@ -15,11 +15,12 @@
 use rusqlite::{Connection, OpenFlags};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
-use std::io::{Read, Write};
+use std::io::{BufRead, BufReader, Read, Write};
 use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Output, Stdio};
+use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
 
 const SESSION: &str = "s-session-testonly-001";
@@ -414,6 +415,102 @@ fn launcher_stderr(child: &mut Child) -> String {
         let _ = e.read_to_string(&mut s);
     }
     s
+}
+
+fn launcher_events(lines: &[String]) -> Vec<Value> {
+    lines
+        .iter()
+        .filter_map(|line| line.strip_prefix("production_session "))
+        .filter_map(|raw| serde_json::from_str::<Value>(raw).ok())
+        .collect()
+}
+
+/// 边运行边读取 launcher stderr，以结构化事件而非进程列表快照作为有界同步点。
+struct LauncherStderr {
+    state: Arc<(Mutex<(Vec<String>, bool)>, Condvar)>,
+    reader: Option<std::thread::JoinHandle<()>>,
+}
+
+impl LauncherStderr {
+    fn attach(launcher: &mut Child) -> Self {
+        let stderr = launcher.stderr.take().expect("launcher stderr piped");
+        let state = Arc::new((Mutex::new((Vec::new(), false)), Condvar::new()));
+        let shared = Arc::clone(&state);
+        let reader = std::thread::spawn(move || {
+            let mut reader = BufReader::new(stderr);
+            let mut line = String::new();
+            loop {
+                line.clear();
+                match reader.read_line(&mut line) {
+                    Ok(0) | Err(_) => break,
+                    Ok(_) => {
+                        let trimmed = line.trim_end_matches(['\r', '\n']).to_string();
+                        let (lock, cv) = &*shared;
+                        lock.lock().unwrap().0.push(trimmed);
+                        cv.notify_all();
+                    }
+                }
+            }
+            let (lock, cv) = &*shared;
+            lock.lock().unwrap().1 = true;
+            cv.notify_all();
+        });
+        Self {
+            state,
+            reader: Some(reader),
+        }
+    }
+
+    fn wait_for<T>(
+        &self,
+        what: &str,
+        launcher: &mut Child,
+        timeout: Duration,
+        mut check: impl FnMut(&[String]) -> Option<T>,
+    ) -> T {
+        let deadline = Instant::now() + timeout;
+        let (lock, cv) = &*self.state;
+        let mut guard = lock.lock().unwrap();
+        loop {
+            if let Some(found) = check(&guard.0) {
+                return found;
+            }
+            if let Some(status) = launcher.try_wait().unwrap() {
+                let drain_until = (Instant::now() + Duration::from_millis(200)).min(deadline);
+                while !guard.1 {
+                    let slice = drain_until.saturating_duration_since(Instant::now());
+                    if slice.is_zero() {
+                        break;
+                    }
+                    guard = cv.wait_timeout(guard, slice).unwrap().0;
+                }
+                let log = guard.0.join("\n");
+                panic!("{what}：launcher 提前退出 {status}\n{log}");
+            }
+            if guard.1 {
+                let log = guard.0.join("\n");
+                panic!("{what}：launcher stderr 已关闭但未观测到目标事件\n{log}");
+            }
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                let log = guard.0.join("\n");
+                drop(guard);
+                let _ = stop(launcher);
+                panic!("{what} 超时\n{log}");
+            }
+            guard = cv
+                .wait_timeout(guard, remaining.min(Duration::from_millis(50)))
+                .unwrap()
+                .0;
+        }
+    }
+
+    fn finish(mut self) -> Vec<String> {
+        if let Some(handle) = self.reader.take() {
+            let _ = handle.join();
+        }
+        self.state.0.lock().unwrap().0.clone()
+    }
 }
 
 /// 等四类域进程都在 launcher 名下存活；launcher 先退出则带其 stderr 失败。
@@ -1167,7 +1264,7 @@ fn launcher_refuses_incompatible_history_simulation_assemblies_before_writing() 
 /// 2. launcher 不在 `load_manifest` 预读 `economic.manifest`，未给正常非历史配置新增前置依赖。
 #[test]
 fn non_history_preserves_parent_startup_and_x_degradation() {
-    // 1) 非历史配置 + 坏 X revision：S/E/B 正常启动，X 作为非关键进程自行拒绝，launcher 不提前整组退出。
+    // 1) 非历史配置 + 坏 X revision：S/E/B 正常启动，X 作为非关键进程自行拒绝，launcher 观察到同一 X 退出后仍继续监督 S/E/B。
     let space = Space::new();
     let source = declaration("TestOnlyStructure", DECLARED_NS);
     let s_db = s_init_v3(&space, Some(&source));
@@ -1184,32 +1281,139 @@ fn non_history_preserves_parent_startup_and_x_degradation() {
     );
     let manifest = launcher_manifest(&space, "simulation", &source, &s_db, &limits, &bad_xp);
     let mut launcher = spawn_launcher(&manifest);
-    eventually("S socket", || space.path("s.sock").exists());
-    eventually("E socket", || space.path("e.sock").exists());
-    eventually("B socket", || space.path("b.sock").exists());
-    eventually("X 非关键退出后仅 S/E/B 存活", || {
-        let names: Vec<String> = domain_children(launcher.id())
-            .into_iter()
-            .map(|(n, _)| n)
-            .collect();
-        names.iter().any(|n| n == "s_structure_session")
-            && names.iter().any(|n| n == "e_economic_session")
-            && names.iter().any(|n| n == "b_chong_session")
-            && !names.iter().any(|n| n == "x_execution_session")
-    });
+    let stderr_log = LauncherStderr::attach(&mut launcher);
+
+    // 停止前的有界同步点：必须等 launcher 监督循环真已观察并记录同一 X 的退出事件，
+    // 而不以 `/proc` 瞬时看不到 X（可能是尚未被 100ms 监督周期 try_wait 回收的僵尸）作为停止信号。
+    let (s_pid, e_pid, b_pid, x_pid, x_exit) = stderr_log.wait_for(
+        "launcher 观测到同一 X 的退出事件",
+        &mut launcher,
+        Duration::from_secs(30),
+        |lines| {
+            let events = launcher_events(lines);
+            let spawn_pid = |domain: &str| -> Option<(usize, u32)> {
+                events.iter().enumerate().find_map(|(idx, ev)| {
+                    (ev["event"] == "spawn" && ev["domain"] == domain)
+                        .then(|| ev["pid"].as_u64().and_then(|p| u32::try_from(p).ok()))
+                        .flatten()
+                        .map(|pid| (idx, pid))
+                })
+            };
+            let (_, s_pid) = spawn_pid("S")?;
+            let (_, e_pid) = spawn_pid("E")?;
+            let (_, b_pid) = spawn_pid("B:one")?;
+            let (x_spawn_idx, x_pid) = spawn_pid("X")?;
+            let x_exit = events
+                .iter()
+                .enumerate()
+                .find(|(idx, ev)| {
+                    *idx > x_spawn_idx && ev["event"] == "exit" && ev["domain"] == "X"
+                })
+                .map(|(_, ev)| ev.clone())?;
+            Some((s_pid, e_pid, b_pid, x_pid, x_exit))
+        },
+    );
+
+    // 坏 X 及其非关键属性：已非 0 退出并被 launcher 回收，未建 x.db，且 critical=false。
+    assert_eq!(
+        x_exit["critical"],
+        json!(false),
+        "launcher 应将坏 X 退出标记为非关键：{x_exit}"
+    );
+    let x_status = x_exit["status"].as_str().unwrap_or_default();
+    assert!(
+        x_status.starts_with("exit status: ") && x_status != "exit status: 0",
+        "坏 X 应自行非 0 退出：{x_exit}"
+    );
+    assert!(
+        !Path::new(&format!("/proc/{x_pid}")).exists(),
+        "launcher 记录 X 退出后应已回收原 X pid={x_pid}"
+    );
+    assert!(
+        !space.path("x.db").exists(),
+        "坏 X 应先因 VersionUnsupported 拒启，不得创建 x.db"
+    );
     assert!(
         launcher.try_wait().unwrap().is_none(),
         "坏非历史 X 不应导致整组 launcher 提前退出"
     );
-    assert_eq!(stop(&mut launcher).code(), Some(0));
-    let stderr = launcher_stderr(&mut launcher);
+
+    // 其他域继续：原 S/E/B 进程存活、持锁、开 socket，且 X 退出后 S 仍正常接纳声明源写入并推进 generation。
+    eventually("S socket", || space.path("s.sock").exists());
+    eventually("E socket", || space.path("e.sock").exists());
+    eventually("B socket", || space.path("b.sock").exists());
+    let expected_kids = vec![
+        ("b_chong_session".to_string(), b_pid),
+        ("e_economic_session".to_string(), e_pid),
+        ("s_structure_session".to_string(), s_pid),
+    ];
+    assert_eq!(
+        domain_children(launcher.id()),
+        expected_kids,
+        "X 非关键退出后应仅保留原 S/E/B 子进程"
+    );
+    for db in [s_db.clone(), space.path("e.db"), space.path("b.db")] {
+        assert_lock_held(&db);
+    }
+    assert!(meta(&s_db, "SELECT value FROM meta WHERE key='writer_epoch'").is_some());
+    for db in ["e.db", "b.db"] {
+        eventually(&format!("{db} 的 writer_epoch"), || {
+            meta(&space.path(db), "SELECT v FROM meta WHERE k='writer_epoch'").is_some()
+        });
+    }
+    let before_rows = raw_rows(&s_db);
+    let before_gen = meta(&s_db, "SELECT value FROM meta WHERE key='generation'").unwrap();
+    let accepted = s_ingest(&space.path("s.sock"), DECLARED_NS, 1);
     assert!(
-        stderr.contains("VersionUnsupported"),
-        "X 应报 VersionUnsupported：{stderr}"
+        !accepted.to_string().contains("InvalidDomain")
+            && !accepted.to_string().contains("\"error\""),
+        "X 退出后 S 应继续接纳声明源写入：{accepted}"
+    );
+    eventually("X 退出后 S 提交推进 generation", || {
+        meta(&s_db, "SELECT value FROM meta WHERE key='generation'")
+            .is_some_and(|g| g != before_gen)
+    });
+    assert_eq!(raw_rows(&s_db), before_rows + 1, "{accepted}");
+    assert_eq!(
+        domain_children(launcher.id()),
+        expected_kids,
+        "S 写入后原 S/E/B 子进程应继续存活"
     );
     assert!(
-        stderr.contains("\"domain\":\"X\"") && stderr.contains("\"critical\":false"),
-        "launcher 应记录非关键 X 退出：{stderr}"
+        launcher.try_wait().unwrap().is_none(),
+        "其他域继续运行期间 launcher 不得提前退出"
+    );
+
+    let status = stop(&mut launcher);
+    let lines = stderr_log.finish();
+    let stderr = lines.join("\n");
+    assert_eq!(status.code(), Some(0), "正常停止应返回 0：{stderr}");
+    for pid in [s_pid, e_pid, b_pid, x_pid] {
+        assert!(
+            !Path::new(&format!("/proc/{pid}")).exists(),
+            "停止后子进程 {pid} 未回收"
+        );
+    }
+    assert!(
+        stderr.contains("VersionUnsupported") && stderr.contains("x-execution-profile/99"),
+        "X 应报 VersionUnsupported：{stderr}"
+    );
+    let events = launcher_events(&lines);
+    let x_spawns: Vec<&Value> = events
+        .iter()
+        .filter(|e| e["event"] == "spawn" && e["domain"] == "X")
+        .collect();
+    assert_eq!(x_spawns.len(), 1, "同一 X 应只拉起一次：{stderr}");
+    assert_eq!(x_spawns[0]["pid"].as_u64(), Some(u64::from(x_pid)));
+    let exits: Vec<&Value> = events.iter().filter(|e| e["event"] == "exit").collect();
+    assert_eq!(exits.len(), 1, "除坏 X 外不应有其他域提前退出：{stderr}");
+    assert_eq!(exits[0]["domain"], "X", "{stderr}");
+    assert_eq!(exits[0]["critical"], json!(false), "{stderr}");
+    assert!(
+        events
+            .iter()
+            .any(|e| e["event"] == "stopped" && e["failed"] == json!(false)),
+        "非关键 X 退出不应将整组停止标为 failed：{stderr}"
     );
 
     // 2) 非历史配置 + 缺失 economic.manifest：load_manifest 不预读 E 配置，先建 state_dir 再由 E init 报错。
@@ -1225,9 +1429,14 @@ fn non_history_preserves_parent_startup_and_x_degradation() {
             .arg("--manifest")
             .arg(&manifest2),
     );
-    assert!(!out.status.success());
+    let stderr2 = String::from_utf8_lossy(&out.stderr);
+    assert!(!out.status.success(), "{stderr2}");
     assert!(
         space2.path("launcher-state").is_dir(),
-        "非历史配置不应在 load_manifest 预读 economic.manifest"
+        "非历史配置不应在 load_manifest 预读 economic.manifest：{stderr2}"
+    );
+    assert!(
+        stderr2.contains("E init 失败") && !stderr2.contains("VersionUnsupported"),
+        "缺 economic.manifest 应推进至 E init 报错而非版本预检拒绝：{stderr2}"
     );
 }
