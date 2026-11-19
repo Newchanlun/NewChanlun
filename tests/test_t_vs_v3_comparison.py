@@ -14,6 +14,7 @@ import ast
 import hashlib
 import importlib.util
 import json
+import os
 import re
 import struct
 import sys
@@ -151,6 +152,22 @@ def _load_comparison_module(
         ),
         encoding="utf-8",
     )
+    data_tail_bad = tmp_path / "tail_bad.json"
+    data_tail_bad.write_text(
+        json.dumps(
+            {
+                "bars": [
+                    {"ts": "2025-01-01T00:00:00Z", "open": 10.0, "high": 11.0, "low": 9.5, "close": 10.5},
+                    {"ts": "2025-01-01T00:01:00Z", "open": -1.0, "high": 11.0, "low": 9.5, "close": 10.5},
+                    {"ts": "2025-01-01T00:02:00Z", "open": 10.5, "high": 12.0, "low": 10.0, "close": 11.5},
+                    {"ts": "2025-01-01T00:03:00Z", "open": 11.5, "high": 12.5, "low": 11.0, "close": 12.0},
+                    {"ts": "2025-01-01T00:04:00Z", "open": 12.0, "high": 13.0, "low": 11.5, "close": 12.5},
+                    {"ts": "2025-01-01T00:05:00Z", "open": -2.0, "high": 14.0, "low": 12.5, "close": 13.5},
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
     data_empty = tmp_path / "empty.json"
     data_empty.write_text(
         json.dumps({"opens": [-1.0, 0.0], "highs": [1.0, 1.0], "lows": [1.0, 1.0], "closes": [1.0, 1.0]}),
@@ -168,6 +185,9 @@ def _load_comparison_module(
             c_in = [b["close"] for b in bars]
         else:
             o_in, h_in, l_in, c_in = raw["opens"], raw["highs"], raw["lows"], raw["closes"]
+        _max = int(os.environ.get("BT_MAX_BARS", "0"))
+        if _max > 0:
+            o_in, h_in, l_in, c_in = o_in[:_max], h_in[:_max], l_in[:_max], c_in[:_max]
         opens, highs, lows, closes = [], [], [], []
         for o, h, l, c in zip(o_in, h_in, l_in, c_in):
             if o <= 0 or h <= 0 or l <= 0 or c <= 0:
@@ -181,6 +201,7 @@ def _load_comparison_module(
     fake_v2 = types.ModuleType("fugue_v2_full_backtest")
     fake_v2.SYMBOL_FILES = {
         "OKLO": data_oklo,
+        "TAIL_BAD": data_tail_bad,
         "EMPTY": data_empty,
         "ES": data_missing,
     }
@@ -376,30 +397,127 @@ def test_two_stage_input_limits_distinguish_pre_and_post_clean(monkeypatch, tmp_
     assert mod.main(["OKLO"]) == 0
     # 2) 同时设 BT_MAX_BARS（清洗前）与位置参数 max_bars（清洗后）
     assert mod.main(["OKLO", "5"]) == 0
-    # 3) 均未设
-    monkeypatch.delenv("BT_MAX_BARS", raising=False)
-    assert mod.main(["OKLO"]) == 0
+    # 3) BT_MAX_BARS=0 / -3 与 max_bars=0 / "" 均不生效，应显示“未生效”而非“未设”
+    monkeypatch.setenv("BT_MAX_BARS", "0")
+    assert mod.main(["OKLO", "0"]) == 0
+    monkeypatch.setenv("BT_MAX_BARS", "-3")
+    assert mod.main(["OKLO", ""]) == 0
 
     reports = sorted((tmp_path / "runs").glob("*/T_vs_v3_comparison.md"))
-    assert len(reports) == 3
+    assert len(reports) == 4
 
-    by_limits = {}
+    by_limits: dict[tuple, list[tuple[str, dict]]] = {}
     for rep in reports:
         md = rep.read_text(encoding="utf-8")
         prov = _extract_provenance_json(md)
         lim = prov["selected_conditions"]["input_limits"]
-        key = (lim["pre_clean_raw_max_bars_env"], lim["post_clean_max_bars_arg"])
-        by_limits[key] = (md, prov)
+        key = (
+            lim["pre_clean_raw_max_bars_env"],
+            lim["post_clean_max_bars_arg"],
+            lim["post_clean_slice_mode"],
+        )
+        by_limits.setdefault(key, []).append((md, prov))
 
-    md_pre, _ = by_limits[(42, None)]
+    md_pre, _ = by_limits[(42, None, "none")][0]
     assert "全量（env BT_MAX_BARS" not in md_pre
-    assert "清洗前原始上限 env BT_MAX_BARS=42；清洗后无截断（未设位置参数 max_bars）" in md_pre
+    assert "清洗前原始上限 env BT_MAX_BARS=42；清洗后无截断（位置参数 max_bars 未生效）" in md_pre
 
-    md_both, _ = by_limits[(42, 5)]
+    md_both, _ = by_limits[(42, 5, "head")][0]
     assert "清洗前原始上限 env BT_MAX_BARS=42；清洗后截断前 5 bar（位置参数 max_bars=5）" in md_both
 
-    md_none, _ = by_limits[(None, None)]
-    assert "清洗前无原始上限（env BT_MAX_BARS 未设）；清洗后无截断（未设位置参数 max_bars）" in md_none
+    inactive_reports = by_limits[(None, None, "none")]
+    assert len(inactive_reports) == 2
+    for md_none, prov_none in inactive_reports:
+        assert "清洗前无原始上限（env BT_MAX_BARS 未生效）；清洗后无截断（位置参数 max_bars 未生效）" in md_none
+        assert prov_none["inputs"]["OKLO"]["input_count"] == 6
+
+
+def test_negative_max_bars_drops_tail_after_cleaning_and_distinguishes_cleaning_order(
+    monkeypatch, tmp_path, capsys
+):
+    """恢复基线 x[:max_bars] 负数语义，并区分清洗顺序：
+    TAIL_BAD 原始 6 根为 [B0, BAD1, B2, B3, B4, BAD5]。
+    - 先清洗后 x[:-1]：先删 BAD1/BAD5 得 4 根 [B0,B2,B3,B4]，再去末根 B4 得 3 根 [B0,B2,B3]；
+      （若误在清洗前切片 [:-1]，只会删掉 BAD5 而保留 4 根，数量与 hash 均可区分。）
+    - 清洗前 BT_MAX_BARS=4 与清洗后 max_bars=-1 叠加：先取前 4 根原始 [B0,BAD1,B2,B3]，
+      清洗得 3 根 [B0,B2,B3]，再去尾 1 根得 2 根 [B0,B2]。
+    """
+    mod, state, hist_md = _load_comparison_module(monkeypatch, tmp_path)
+    hist_before = hist_md.read_bytes()
+    monkeypatch.setenv("NC_FUNDING_PROFILE", "P0")
+
+    b0 = (10.0, 11.0, 9.5, 10.5)
+    b2 = (10.5, 12.0, 10.0, 11.5)
+    b3 = (11.5, 12.5, 11.0, 12.0)
+
+    # 1) 真实 CLI：TAIL_BAD -1（无 BT_MAX_BARS）
+    assert mod.main(["TAIL_BAD", "-1"]) == 0
+    assert state["t_inputs"][-1] == [b0, b2, b3]
+    assert state["v3_inputs"][-1] == [b0, b2, b3]
+
+    # 2) 真实 CLI：BT_MAX_BARS=4（清洗前）+ TAIL_BAD -1（清洗后去尾）
+    monkeypatch.setenv("BT_MAX_BARS", "4")
+    assert mod.main(["TAIL_BAD", "-1"]) == 0
+    assert state["t_inputs"][-1] == [b0, b2]
+    assert state["v3_inputs"][-1] == [b0, b2]
+
+    reports = sorted((tmp_path / "runs").glob("*/T_vs_v3_comparison.md"))
+    assert len(reports) == 2
+
+    by_pre = {}
+    for rep in reports:
+        md = rep.read_text(encoding="utf-8")
+        prov = _extract_provenance_json(md)
+        by_pre[prov["selected_conditions"]["input_limits"]["pre_clean_raw_max_bars_env"]] = (md, prov)
+
+    md_neg, prov_neg = by_pre[None]
+    expected_hash_3 = hashlib.sha256(b"".join(struct.pack(">dddd", *bar) for bar in (b0, b2, b3))).hexdigest()
+    assert prov_neg["inputs"]["TAIL_BAD"]["input_count"] == 3
+    assert prov_neg["inputs"]["TAIL_BAD"]["input_hash"] == f"sha256:{expected_hash_3}"
+    assert prov_neg["selected_conditions"]["input_limits"] == {
+        "pre_clean_raw_max_bars_env": None,
+        "post_clean_max_bars_arg": -1,
+        "post_clean_slice_mode": "drop_tail",
+    }
+    assert prov_neg["cores"]["t_arm"]["upstream_orchestrator"]["max_levels"] == 6
+    assert prov_neg["cores"]["v3_arm"]["upstream_orchestrator"]["max_levels"] == 8
+    assert "清洗前无原始上限（env BT_MAX_BARS 未生效）；清洗后去尾 1 bar（切片 x[:-1]，位置参数 max_bars=-1）" in md_neg
+    assert "前 -1 bar" not in md_neg
+    assert "T侧重合率 | v3侧重合率" in md_neg
+
+    md_combo, prov_combo = by_pre[4]
+    expected_hash_2 = hashlib.sha256(b"".join(struct.pack(">dddd", *bar) for bar in (b0, b2))).hexdigest()
+    assert prov_combo["inputs"]["TAIL_BAD"]["input_count"] == 2
+    assert prov_combo["inputs"]["TAIL_BAD"]["input_hash"] == f"sha256:{expected_hash_2}"
+    assert prov_combo["selected_conditions"]["input_limits"] == {
+        "pre_clean_raw_max_bars_env": 4,
+        "post_clean_max_bars_arg": -1,
+        "post_clean_slice_mode": "drop_tail",
+    }
+    assert "清洗前原始上限 env BT_MAX_BARS=4；清洗后去尾 1 bar（切片 x[:-1]，位置参数 max_bars=-1）" in md_combo
+    assert "前 -1 bar" not in md_combo
+
+    # 3) --diag 与负数位置参数混排，退出 0 且不新增报告
+    monkeypatch.delenv("BT_MAX_BARS", raising=False)
+    assert mod.main(["--diag", "TAIL_BAD", "-1"]) == 0
+    assert state["t_inputs"][-1] == [b0, b2, b3]
+    assert mod.main(["TAIL_BAD", "-1", "--diag"]) == 0
+    assert state["v3_inputs"][-1] == [b0, b2, b3]
+    assert len(list((tmp_path / "runs").glob("*/T_vs_v3_comparison.md"))) == 2
+
+    # 4) 去尾后变空（-4 / -99）沿用空输入失败合同：退出 1、不写新报告、历史原件不变
+    assert mod.main(["TAIL_BAD", "-4"]) == 1
+    assert mod.main(["TAIL_BAD", "-99"]) == 1
+    assert len(list((tmp_path / "runs").glob("*/T_vs_v3_comparison.md"))) == 2
+    assert hist_md.read_bytes() == hist_before
+
+    # 5) --help 明确说明去尾与 BT_MAX_BARS 顺序
+    with pytest.raises(SystemExit) as exc_info:
+        mod.parse_args(["--help"])
+    assert exc_info.value.code == 0
+    help_out = capsys.readouterr().out
+    assert "去尾" in help_out
+    assert "BT_MAX_BARS" in help_out
 
 
 def test_real_source_arm_max_levels_are_t6_and_v3_8():

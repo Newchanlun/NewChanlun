@@ -29,7 +29,7 @@ v3 nf 信号集的对称差集对照，L2 真实数据、可否证）。
 
 用法:
   NC_FUNDING_PROFILE=P0 .venv/bin/python analysis/t_vs_v3_comparison.py [symbols] [max_bars] [--diag] [--funding-profile PROFILE] [--output-dir DIR]
-  symbols: 逗号分隔（默认 8 标的）; max_bars: 清洗后截断上限（0 或留空表示清洗后不截断；清洗前原始上限见 env BT_MAX_BARS）
+  symbols: 逗号分隔（默认 8 标的）; max_bars: 清洗后切片上限（正数取前 N 根，负数去尾 |N| 根如 -1 去末根，0 或留空不截断；清洗前原始上限见 env BT_MAX_BARS，<=0 不生效）
   --diag: 只跑诊断不写报告
   --funding-profile: 显式签署资金 profile（覆盖 NC_FUNDING_PROFILE；仅传给需它的 v3 核，无默认）
   --output-dir: 新报告根目录（默认 analysis/，每次运行写入 <output-dir>/runs/<run_id>/T_vs_v3_comparison.md，不覆写历史原件）
@@ -130,9 +130,7 @@ def _display_source_path(path: Path) -> str:
 def load_symbol_ohlc(
     path: Path, max_bars: int | None
 ) -> tuple[tuple[float, ...], tuple[float, ...], tuple[float, ...], tuple[float, ...]]:
-    """加载、清洗（清洗前受 env BT_MAX_BARS 限制）并按位置参数 max_bars 清洗后截断 OHLC。"""
-    if max_bars is not None and max_bars < 0:
-        raise ValueError(f"max_bars 须为非负整数，得 {max_bars}")
+    """加载、清洗（清洗前受 env BT_MAX_BARS>0 限制）并按位置参数 max_bars 对清洗后四路做 x[:max_bars]（正数取前 N 根，负数去尾 |N| 根，0/None 不截断）。"""
     opens, highs, lows, closes, _years = load_ohlc(path)
     if max_bars:
         opens, highs, lows, closes = (x[:max_bars] for x in (opens, highs, lows, closes))
@@ -444,20 +442,21 @@ def resolve_report_path(output_dir: Path, run_id: str) -> Path:
     return target
 
 
-def _format_input_limits(input_limits: dict[str, int | None]) -> str:
+def _format_input_limits(input_limits: dict[str, int | str | None]) -> str:
     """将两阶段输入上限（清洗前 BT_MAX_BARS 与清洗后 max_bars）格式化为中性说明。"""
     pre = input_limits.get("pre_clean_raw_max_bars_env")
     post = input_limits.get("post_clean_max_bars_arg")
     pre_part = (
         f"清洗前原始上限 env BT_MAX_BARS={pre:,}"
-        if pre is not None
-        else "清洗前无原始上限（env BT_MAX_BARS 未设）"
+        if isinstance(pre, int) and pre > 0
+        else "清洗前无原始上限（env BT_MAX_BARS 未生效）"
     )
-    post_part = (
-        f"清洗后截断前 {post:,} bar（位置参数 max_bars={post}）"
-        if post is not None
-        else "清洗后无截断（未设位置参数 max_bars）"
-    )
+    if isinstance(post, int) and post > 0:
+        post_part = f"清洗后截断前 {post:,} bar（位置参数 max_bars={post}）"
+    elif isinstance(post, int) and post < 0:
+        post_part = f"清洗后去尾 {-post:,} bar（切片 x[:{post}]，位置参数 max_bars={post}）"
+    else:
+        post_part = "清洗后无截断（位置参数 max_bars 未生效）"
     return f"{pre_part}；{post_part}"
 
 
@@ -607,6 +606,11 @@ def build_provenance(
             "input_limits": {
                 "pre_clean_raw_max_bars_env": _read_pre_clean_raw_max_bars(),
                 "post_clean_max_bars_arg": max_bars if max_bars else None,
+                "post_clean_slice_mode": (
+                    "none"
+                    if not max_bars
+                    else ("head" if max_bars > 0 else "drop_tail")
+                ),
             },
             "comparison": {
                 "ladder_move": LADDER_MOVE,
@@ -789,9 +793,7 @@ def _parse_max_bars(raw: str) -> int | None:
         val = int(raw)
     except ValueError as exc:
         raise argparse.ArgumentTypeError(f"max_bars 须为整数，得 {raw!r}") from exc
-    if val < 0:
-        raise argparse.ArgumentTypeError(f"max_bars 须为非负整数，得 {val}")
-    return val if val > 0 else None
+    return val if val != 0 else None
 
 
 def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
@@ -809,7 +811,7 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         nargs="?",
         default=None,
         type=_parse_max_bars,
-        help="清洗后截断 bar 上限（0 或留空表示清洗后不截断；清洗前原始上限见 env BT_MAX_BARS）",
+        help="清洗后切片 bar 上限（正数取前 N 根，负数去尾 |N| 根如 -1 去末根，0 或留空不截断；清洗前原始上限见 env BT_MAX_BARS，<=0 不生效）",
     )
     parser.add_argument(
         "--diag",
