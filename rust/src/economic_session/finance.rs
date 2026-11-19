@@ -227,6 +227,38 @@ fn exact_release_contract(config: &Config) -> Result<(), String> {
         Err("SchemaUnsupported：精确命令只属于 tb03b-finance/5 与 /6".into())
     }
 }
+/// #1407 C3 R2：独立 E 对新 `MakeDispatchable` / `ReleaseExact` 按自身可核验的目标合同守门。
+/// 仅在 `write_with_ingress` 优先查回原消息/原收据未命中后调用，因此不阻断已提交收据重取、
+/// 历史审计重演、查询或其余 `/5` 财务操作，也不要求 X 在线。
+fn exact_delivery_target_contract(config: &Config, d: &Value) -> Result<(), String> {
+    let c = contract(&config.manifest)?;
+    if c.model_binding {
+        return Ok(());
+    }
+    let is_history_sim_session = config.manifest["clock"]["kind"] == super::store::LOGICAL_BAR
+        || config
+            .manifest
+            .get("history_simulation_source")
+            .is_some_and(|v| !v.is_null());
+    let targets_history_sim = d["exact_release"]["model_coverage"]["model_ref"]["model_id"]
+        .as_str()
+        .is_some_and(|id| id.starts_with("history-sim/"))
+        || d["exact_release"]["conditions"]
+            .as_array()
+            .is_some_and(|list| {
+                list.iter()
+                    .any(|item| item["validator_capability"] == "simulation-local-transaction/1")
+            });
+    if is_history_sim_session && targets_history_sim {
+        return Err(
+            "VersionUnsupported：tb03b-finance/5 在历史模拟目标合同下不绑定实装模型内容摘要，\
+             不再签发新的 MakeDispatchable/ReleaseExact 交付（原已提交收据仍按原身份优先重取，\
+             查询与其余财务操作不受影响；请在新会话显式使用 tb03b-finance/6 + x-execution-profile/3）"
+                .into(),
+        );
+    }
+    Ok(())
+}
 pub(super) fn enabled(config: &Config) -> bool {
     config.manifest.get("finance").is_some_and(|v| !v.is_null())
 }
@@ -2023,6 +2055,7 @@ pub(super) fn write_with_ingress(
             )?);
         }
         "MakeDispatchable" => {
+            exact_delivery_target_contract(config, &d)?;
             let q = plan(&d, p)?;
             w["commit_proof"] = proof(
                 config,
@@ -2030,7 +2063,10 @@ pub(super) fn write_with_ingress(
                 &receipt_key_for(config, "CommitDecision", required(q, "decision_id")?)?,
             )?;
         }
-        "ImportResponsibility" | "AbortDecision" | "CloseApplicants" | "ReleaseExact" => (),
+        "ReleaseExact" => {
+            exact_delivery_target_contract(config, &d)?;
+        }
+        "ImportResponsibility" | "AbortDecision" | "CloseApplicants" => (),
         _ => return Err("SchemaUnsupported：财务操作未知".into()),
     }
     persist(c, config, epoch, e, w)

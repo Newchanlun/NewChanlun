@@ -1072,3 +1072,92 @@ fn production_launcher_does_not_forward_theta_diagnostic_switch() {
     assert_s_environ_lacks_theta_diagnostic(&kids);
     assert_eq!(stop(&mut launcher).code(), Some(0));
 }
+
+/// #1407 C3 R2：正式 launcher 在创建 state_dir 或任何域库前，拒绝明确不兼容的 E/X 历史模拟装配
+/// （FIN/5 + X/3、FIN/5 + X/2、FIN/6 + X/2、缺 finance + X/3），不落任何域文件。
+#[test]
+fn launcher_refuses_incompatible_history_simulation_assemblies_before_writing() {
+    for (case, fin_rev, x_rev) in [
+        ("fin5_x3", Some("tb03b-finance/5"), "x-execution-profile/3"),
+        ("fin5_x2", Some("tb03b-finance/5"), "x-execution-profile/2"),
+        ("fin6_x2", Some("tb03b-finance/6"), "x-execution-profile/2"),
+        ("none_x3", None, "x-execution-profile/3"),
+    ] {
+        let space = Space::new();
+        let source = declaration("TestOnlyStructure", DECLARED_NS);
+        let s_db = space.s_db();
+        let limits = space.path("limits.json");
+        let econ_path = space.path("economic.json");
+        let mut econ = json!({
+            "schema_revision": "economic-manifest/1",
+            "session_id": "pse",
+            "session_generation": "1",
+            "book_revision": "tb03c-book/1",
+            "e": {"db": space.path("e.db"), "socket": space.path("e.sock")},
+            "chongs": [{"chong_id": "one", "symbol": "TEST", "operation_level": "1", "fixed_q": "10", "db": space.path("b.db"), "socket": space.path("b.sock")}],
+            "authorized_sources": [{"source_namespace": "pse-test", "source_epoch": "1", "producer_id": "reader", "producer_epoch": "1", "operations": ["ReadView", "Watch"]}],
+            "resources": {"max_frame_bytes": "1048576", "read_timeout_ms": "1000", "write_timeout_ms": "1000", "response_timeout_ms": "30000", "queue_capacity": "2", "max_connections": "2"},
+            "clock": {"kind": "TestOnly", "plan": {"init_ns": "1", "recover_ns": ["90000"], "messages": {}}}
+        });
+        if let Some(rev) = fin_rev {
+            econ["finance"] = json!({"schema_revision": rev});
+        }
+        write_json(&econ_path, &econ);
+        let xp = write_json(
+            &space.path("x-profile.json"),
+            &json!({
+                "profile_revision": x_rev,
+                "mode": "simulation",
+                "endpoint": null,
+                "tb09_fingerprint": null,
+                "credential_scope": {"env": CREDENTIAL_KEY, "file": space.path("credential.txt")},
+                "history_simulation": {"x_id": "X"}
+            }),
+        );
+        let manifest = write_json(
+            &space.path("production.json"),
+            &json!({
+                "manifest_revision": "production-session-manifest/1",
+                "profile": "simulation",
+                "state_dir": space.path("launcher-state"),
+                "execution_capabilities": {"namespaces": [HL_NS]},
+                "structure_source": source,
+                "s": {
+                    "db": s_db, "session": SESSION,
+                    "catalog": fixture("catalog/signed-catalog.json"),
+                    "profile": fixture(TB02A_PROFILE),
+                    "clock_plan": space.path("clock.json"),
+                    "session_generation": "1", "delivery_retain_generations": "4",
+                    "admission_job_limits": limits, "writer_epoch": "1",
+                    "socket": space.path("s.sock"), "resource_config": s_resources(&space)
+                },
+                "economic": {
+                    "manifest": econ_path,
+                    "e": {"db": space.path("e.db"), "epoch": "1"},
+                    "b": [{"chong": "one", "db": space.path("b.db"), "epoch": "1"}]
+                },
+                "x": {"db": space.path("x.db"), "profile": xp, "writer_epoch": "1"}
+            }),
+        );
+        let out = run_refusal(
+            Command::new(launcher_bin())
+                .arg("--manifest")
+                .arg(&manifest),
+        );
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(!out.status.success(), "{case}: {stderr}");
+        assert!(stderr.contains("VersionUnsupported"), "{case}: {stderr}");
+        assert!(
+            !space.path("launcher-state").exists(),
+            "{case}: 不兼容装配不得创建 state_dir"
+        );
+        for db in [
+            s_db,
+            space.path("e.db"),
+            space.path("b.db"),
+            space.path("x.db"),
+        ] {
+            assert!(!db.exists(), "{case}: 不兼容装配不得创建 {}", db.display());
+        }
+    }
+}

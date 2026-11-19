@@ -1649,7 +1649,8 @@ fn old_finance_contracts_refuse_cap_activation() {
             (REV_V2, true, false),
             (REV_V3, false, true),
             (REV_V4, true, true),
-            (REV_V5, false, false)
+            (REV_V5, false, false),
+            (REV_V6, false, false),
         ]
     );
     m["finance"] = Value::Null;

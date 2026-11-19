@@ -182,6 +182,11 @@ fn load_manifest(path: &Path) -> Result<Manifest, String> {
             xp["mode"]
         ));
     }
+    let econ = read_json(
+        Path::new(text(&raw, "economic.manifest")?),
+        "经济域 manifest",
+    )?;
+    check_x_economic_assembly(&profile, &xp, &econ)?;
     let credential_env = text(&xp, "credential_scope.env")?.to_string();
     // 凭据文件缺失不在此判错：是否必需由 X 按 profile 裁决（MissingDependency）。
     let credential = xp["credential_scope"]["file"]
@@ -198,6 +203,43 @@ fn load_manifest(path: &Path) -> Result<Manifest, String> {
         x_profile,
         credential,
     })
+}
+
+/// #1407 C3 R2：在创建任何状态目录、初始化或拉起任何域库前，拒绝明确不兼容的 E/X 历史模拟装配。
+/// 非历史模拟 X profile（`/1` 骨架、dry-run、experiment、production）与无关经济配置保持原义不受影响。
+fn check_x_economic_assembly(profile: &str, xp: &Value, econ: &Value) -> Result<(), String> {
+    let has_history_sim = xp.get("history_simulation").is_some_and(|v| !v.is_null());
+    let x_rev = xp["profile_revision"].as_str().unwrap_or_default();
+    if has_history_sim {
+        if profile != "simulation" {
+            return Err("InvalidDomain：history_simulation 仅允许 simulation profile".into());
+        }
+        let expected_x = newchan_rust::history_simulation::EXACT_PROFILE_REVISION;
+        if x_rev != expected_x {
+            return Err(format!(
+                "VersionUnsupported：历史模拟 X 执行 profile 版本 `{x_rev}` 已退场或不兼容，\
+                 正式装配必须使用 {expected_x} 搭配 tb03b-finance/6 新开会话（旧 /1、/2 历史模拟库仅保留只读取证）"
+            ));
+        }
+        let finance_rev = econ
+            .get("finance")
+            .filter(|v| !v.is_null())
+            .and_then(|f| f.get("schema_revision"))
+            .and_then(Value::as_str);
+        if finance_rev != Some("tb03b-finance/6") {
+            return Err(format!(
+                "VersionUnsupported：历史模拟装配拒绝将 E 财务子合同 `{}` 与 {expected_x} 混配\
+                 （tb03b-finance/5 命令不含实装模型内容摘要，无法通过 /3 核验；\
+                 请在新会话显式升级为 tb03b-finance/6 + {expected_x}，原 /5 收据、责任与查询保持原义）",
+                finance_rev.unwrap_or("<none>")
+            ));
+        }
+    } else if x_rev != "x-execution-profile/1" {
+        return Err(format!(
+            "VersionUnsupported：非历史模拟 X 执行 profile 版本 `{x_rev}` 必须是 x-execution-profile/1"
+        ));
+    }
+    Ok(())
 }
 
 fn sibling(name: &str) -> Result<PathBuf, String> {

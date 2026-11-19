@@ -421,8 +421,12 @@ fn swapped_fee_rate_model_and_forged_model_ref_are_rejected_without_s_calls() {
     assert_eq!(query_command(&mut f, "alpha")["state"], "ReleasedExact");
 }
 
-/// #1407 C3 版本边界：旧 `/5` E 放行的无 `model_ref` 命令不得借用新 `/3` X 的模型产生外效，
-/// 无论原样递交还是伪造附带 `model_ref` 均被拒绝。
+/// #1407 C3 R2 升级配对与独立 E 守门：
+/// 1. `tb03b-finance/5` + `logical-bar/1` 历史模拟会话仍允许普通财务操作（Prepare/Reserve/Commit），
+///    但独立 E 拒绝新签 `MakeDispatchable` 与 `ReleaseExact`（`VersionUnsupported`，不要求 X 在线）；
+/// 2. 既有已提交 `Dispatchable`（如父头 `#2081` 遗留库）：原 ID 重试优先重取原回执，新 `ReleaseExact` 被拒且保持 `Dispatchable`、责任不变；
+/// 3. 既有已提交 `ReleasedExact`：原 ID / 新消息同内容重试均优先重取原回执，篡改仍 `IdentityConflict`，
+///    `QueryCommand` / `QueryReleasedExact` 原义不变；该旧 `/5` 命令原样或伪造 `model_ref` 递交 `/3` X 均被拒绝且零调用。
 #[test]
 fn legacy_v5_command_cannot_borrow_v3_x_model() {
     let mut f = Fixture::build_with(
@@ -438,18 +442,107 @@ fn legacy_v5_command_cannot_borrow_v3_x_model() {
         Some(ExactClock::LogicalBar),
     );
     committed(&mut f);
-    dispatch(&mut f, "alpha");
+
+    // 1) 未进入 Dispatchable 时：独立 E 拒绝新 MakeDispatchable，E/B 全表零变更。
+    let e_before_new_dispatch = economic_tables(&f);
+    let refused_md = f.handle(0, "MakeDispatchable-alpha", dispatch_payload(&f, "alpha"));
+    assert_eq!(refused_md["kind"], "Error", "{refused_md}");
+    assert!(
+        refused_md["error"]
+            .as_str()
+            .unwrap()
+            .starts_with("VersionUnsupported："),
+        "{refused_md}"
+    );
+    assert_eq!(economic_tables(&f), e_before_new_dispatch);
+
+    // 2) 模拟父头 #2081 历史库中已提交的 Dispatchable（绕过新写门直接调用 persist 落历史原件）。
+    let raw_input = std::fs::read_to_string(f.dir.join("input.json")).unwrap();
+    let commit_key = format!("{}:CommitDecision:{}", REV_V5, hash(&json!("alpha")));
+    let b_config = &f.configs[1];
+    let commit_proof = proof(&f.configs[0], &b_config.domain, &commit_key).unwrap();
+    let md_env = envelope("MakeDispatchable-alpha", dispatch_payload(&f, "alpha"));
+    let historical_md = persist(
+        &mut f.dbs[0],
+        &f.configs[0],
+        1,
+        &md_env,
+        json!({"input_raw": raw_input, "commit_proof": commit_proof}),
+    )
+    .unwrap();
+    assert_eq!(
+        historical_md["kind"], "DispatchableReceipt",
+        "{historical_md}"
+    );
+
+    // 已有 Dispatchable：原 ID 重试优先查回原收据；QueryCommand 仍为 Dispatchable；新 ReleaseExact 被拒且不改状态。
+    let e_dispatchable = economic_tables(&f);
+    let replay_md = f.handle(0, "MakeDispatchable-alpha", dispatch_payload(&f, "alpha"));
+    assert_eq!(replay_md, historical_md);
+    assert_eq!(query_command(&mut f, "alpha")["state"], "Dispatchable");
+    let refused_rel = f.handle(0, "ReleaseExact-alpha", release_payload(&f, "alpha"));
+    assert_eq!(refused_rel["kind"], "Error", "{refused_rel}");
+    assert!(
+        refused_rel["error"]
+            .as_str()
+            .unwrap()
+            .starts_with("VersionUnsupported："),
+        "{refused_rel}"
+    );
+    assert_eq!(query_command(&mut f, "alpha")["state"], "Dispatchable");
+    assert_eq!(economic_tables(&f), e_dispatchable);
+
+    // 3) 模拟父头 #2081 历史库中已提交的 ReleasedExact：原 ID 重试优先查回，篡改仍 IdentityConflict。
+    let rel_env = envelope("ReleaseExact-alpha", release_payload(&f, "alpha"));
+    let historical_rel = persist(
+        &mut f.dbs[0],
+        &f.configs[0],
+        1,
+        &rel_env,
+        json!({"input_raw": raw_input}),
+    )
+    .unwrap();
+    assert_eq!(
+        historical_rel["record"]["state"], "ReleasedExact",
+        "{historical_rel}"
+    );
+    let legacy_command = historical_rel["record"]["command"].clone();
+    assert!(legacy_command.get("model_ref").is_none());
+
     let e_config = Config::load(&f.dir.join("manifest.json"), &f.configs[0].db, None).unwrap();
     std::thread::spawn(move || service::serve(&e_config, 1, 1).unwrap());
     wait_for(&f.dir.join("e.sock"));
-    let released = exchange(
+    let replayed = exchange(&f.dir.join("e.sock"), &rel_env)["payload"].clone();
+    assert_eq!(replayed, historical_rel);
+    let mut tampered = release_payload(&f, "alpha");
+    tampered["x_epoch"] = json!("9");
+    let conflict = exchange(
         &f.dir.join("e.sock"),
-        &envelope("ReleaseExact-alpha", release_payload(&f, "alpha")),
+        &envelope("ReleaseExact-alpha", tampered),
     )["payload"]
         .clone();
-    assert_eq!(released["record"]["state"], "ReleasedExact", "{released}");
-    let legacy_command = released["record"]["command"].clone();
-    assert!(legacy_command.get("model_ref").is_none());
+    assert_eq!(conflict["kind"], "Error", "{conflict}");
+    assert!(
+        conflict["error"]
+            .as_str()
+            .unwrap()
+            .starts_with("IdentityConflict："),
+        "{conflict}"
+    );
+    // 同库另一条未释放决策 beta 的新 MakeDispatchable 仍被拒。
+    let refused_beta = exchange(
+        &f.dir.join("e.sock"),
+        &envelope("MakeDispatchable-beta", dispatch_payload(&f, "beta")),
+    )["payload"]
+        .clone();
+    assert_eq!(refused_beta["kind"], "Error", "{refused_beta}");
+    assert!(
+        refused_beta["error"]
+            .as_str()
+            .unwrap()
+            .starts_with("VersionUnsupported："),
+        "{refused_beta}"
+    );
 
     let s_calls = Arc::new(AtomicUsize::new(0));
     controlled_s(f.dir.join("s.sock"), 2, s_calls.clone());

@@ -331,6 +331,29 @@ def run_arm(name: str, fixture: Path, bins: Path, out: Path, *, maker_numerator:
         env=env,
     )
 
+    if not upgrade_v6:
+        rc = outer.wait(timeout=15)
+        out_log.close()
+        err_log.close()
+        stderr = (run / "outer.stderr").read_text()
+        assert rc != 0, (rc, stderr)
+        assert "VersionUnsupported" in stderr, stderr
+        assert not (run / "launcher-state").exists()
+        for p in [nodes["E"]["db"], nodes["B:alpha"]["db"], nodes["B:beta"]["db"], str(run / "x.db")]:
+            assert not Path(p).exists(), p
+        outcome = dict(
+            arm=name,
+            finance_revision=manifest["finance"]["schema_revision"],
+            x_profile_revision="x-execution-profile/3",
+            launcher_exit_code=rc,
+            launcher_refusal=stderr.strip(),
+            state_dir_created=False,
+            domain_dbs_created=False,
+            new_release_receipts=0,
+        )
+        write("summary.json", outcome)
+        return outcome
+
     s_requests = []
     s_listener = socket.socket(socket.AF_UNIX)
     s_listener.bind(str(run / "s.sock"))
@@ -678,42 +701,7 @@ def run_arm(name: str, fixture: Path, bins: Path, out: Path, *, maker_numerator:
                 retained_liability=retained,
             )
         else:
-            # Legacy tb03b-finance/5 E + active x-execution-profile/3 X
-            assert "model_ref" not in exact
-            advance(1)
-            refused_legacy = xwire("accept-legacy-v5", "AcceptExact", exact, "Error")
-            assert "model_ref" in refused_legacy["error"], refused_legacy
-            forged_v5 = copy.deepcopy(exact)
-            forged_v5["model_ref"] = dict(
-                model_id=x_model["model_id"],
-                revision=x_model["revision"],
-                content_hash=digest(x_model),
-            )
-            refused_forged_v5 = xwire("accept-legacy-v5-forged", "AcceptExact", forged_v5, "Error")
-            assert (
-                refused_forged_v5["error"]
-                == "MissingDependency：权威拒绝：IdentityConflict：同 command_id 的命令内容与 E 已交付对象不同"
-            ), refused_forged_v5
-            assert xwire("query-legacy-v5", "QueryCommand", cid, "ExactCommandState")["state"] == "NoRecord"
-            advance(2)
-            bar3 = advance(3)
-            assert bar3["originals"] == []
-            counts_final = observe()
-            assert counts_final == dict(accepted=0, owned=0, calls=0, s=0)
-            outcome = dict(
-                arm=name,
-                finance_revision=manifest["finance"]["schema_revision"],
-                x_profile_revision="x-execution-profile/3",
-                command_hash=record["command_hash"],
-                release_receipt=release["receipt_key"],
-                e_model=record["model_ref"],
-                x_model=bar3["model_content_hash"],
-                legacy_v5_error=refused_legacy["error"],
-                forged_v5_error=refused_forged_v5["error"],
-                originals=bar3["originals"],
-                counts=dict(final=counts_final),
-                retained_liability=retained,
-            )
+            raise AssertionError((upgrade_v6, maker_numerator))
 
         assert all(same(baseline[d], business_dump(dbs[d])) for d in nodes)
         write("business.json", {d: business_dump(p) for d, p in dbs.items()})
@@ -755,7 +743,9 @@ def main():
     assert control["release_receipt"] == altered["release_receipt"]
     assert control["e_model"] == altered["e_model"]
     assert control["x_model"] != altered["x_model"]
-    assert control["retained_liability"] == altered["retained_liability"] == legacy_v5["retained_liability"] == 90
+    assert control["retained_liability"] == altered["retained_liability"] == 90
+    assert legacy_v5["launcher_exit_code"] != 0 and legacy_v5["new_release_receipts"] == 0
+    assert not legacy_v5["state_dir_created"] and not legacy_v5["domain_dbs_created"]
 
     comparison = dict(
         only_model_change="fee_profile.maker.numerator:1->10",

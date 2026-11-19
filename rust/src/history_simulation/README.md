@@ -208,3 +208,57 @@ python3 tests/c2_formal_entry.py --fixture "$r"/fixture/unit-* --bin "$CARGO_TAR
 Firefox 和 geckodriver 须能共用临时 profile；Snap 安装可追加 `--profile-root "$HOME/snap/firefox/common"`。省略 `--geckodriver` 只跑到真实 HTTP，不验浏览器。两轮均通过正式 launcher 启动 E 与两个 B，通过正式 X socket 提交同一份命令。看 `proof/b/summary.json` 的接纳、占有、模拟调用与 S 签发计数，`proof/b/browser/cut-{5,6}.json` 的同切面原件；`proof/{a,b}/business.json` 是包含空表在内的全表规范转储。
 
 Q 来源需获 `QueryCommand` 权限；启用已有 `EconomicReadOpen/Page/Close` 三项权限后，既有测试页通过分页读取超出单帧的完整快照和变化，命令原件仍由 E 的 `QueryCommand` 按所选 cut 返回。
+
+## C3 升级、退场合同候选与迁移说明（待独立评审与主控裁定）
+
+> **审签状态：候选条文（尚未接受）。** 前次 C2 裁定（`#1407#issuecomment-6749476649`）仅退掉 `#1942` 数值编码的 `/1` 历史模拟写入口，不授权自动退掉 `/2` 写入口；本节条文须经独立非作者评审与主控显式裁定后方视为生效合同。
+
+### 1. 无法原地保全 `FIN/5 + X/2` 续写的证据依据
+
+核查父头 `#2081`（`eabdfb02013135db78d21cb2d8a47dec0a71a555`）真实 `/2` 样本（`signed-c2-t3/a/manifest.json`、`input.json`）与 `tb03b-finance/5` 实现后，旧档缺少能证明 E 授权过实装 `Model` 内容的权威绑定：
+
+1. **E manifest 无实装模型绑定**：`signed-c2-t3/a/manifest.json` 仅有 `finance.schema_revision = "tb03b-finance/5"` 与 `clock.kind = "logical-bar/1"`，不含 `history_simulation_source`。
+2. **冻结 `model_ref.content_hash` 为旧口径名称摘要**：`signed-c2-t3/a/input.json` 的 `exact_release.model_coverage.model_ref.content_hash` 为 `e28cb65bf917085d648735d192848c2d1a9d460f0b61c3c57144055770f925cb`（即 `sha256("\"history-sim/bar-batch-known-frontier/1@oracle-1\"")`），只覆盖模型名与版本串，不覆盖费率、滑点、tick/量/金额量子、标的或撮合参数。
+3. **FIN/5 `ExactCommand` 不含 `model_ref`**：14 字段命令体与 `command_hash` 均未承诺实装 `Model` 内容。
+4. **X 自持配置不等于 E 授权**：旧进程曾运行过或 X 本地持有 `x-profile.json`，都不能证明 E 授权过该模型（C3 反例 `06a767ab` 已证在 `FIN/5 + X/2` 下仅将 X 的 maker 费率分子 `1 → 10` 即可静默产生错费成交）。
+5. **不伪造兼容**：不得给 `/3` 增加可选 `model_ref`、不得回填或重签旧 `/5` 命令、不得靠事后拆换旧二进制或仅改版本字符串假装兼容。
+
+因此，本候选采用最小升级与退场合同：仅受影响的历史模拟旧写组合退出新执行，保留全部历史查询、已提交收据、归档只读取证与其余 `/5` 用法，新执行统一走显式 `tb03b-finance/6 + x-execution-profile/3` 新会话。
+
+### 2. 退场范围、生效点与两道守门
+
+- **拟定生效点**：本 C3 模型绑定二进制组（`tb03b-finance/6` + `x-execution-profile/3`）经独立评审与主控裁定合入/发布之时。
+- **不再提供的新写组合（仅限以下三处）**：
+  1. **历史模拟 X `/2`（及既有已退 `/1`）写入口**：`x_execution_session serve` 对含 `history_simulation` 的配置只接受 `x-execution-profile/3`，并在改动业务表和 `writer_epoch` 前拒绝续写或恢复既有 `/1`、`/2` 历史模拟库（`VersionUnsupported`）。
+  2. **正式装配入口（`production_session`）**：在创建 `state_dir`、初始化或拉起任何 S/E/B/X 域库前，`load_manifest` 检查 E/X 合同配对；凡 `x.profile` 含 `history_simulation` 但 `profile_revision != "x-execution-profile/3"` 或 `economic.manifest.finance.schema_revision != "tb03b-finance/6"`（含 `FIN/5 + X/3`、`FIN/5 + X/2`、`FIN/6 + X/2`、无 `finance + X/3`），一律以 `VersionUnsupported` 拒绝，不落任何域文件。
+  3. **独立正式 E（`e_economic_session` / `finance.rs`）新交付写入口**：当 E 的财务子合同为无模型绑定的 `tb03b-finance/5`（`!model_binding`），且本会话可由自身冻结配置核验为历史模拟目标合同（`clock.kind == "logical-bar/1"` 或配置了 `history_simulation_source`，且冻结输入针对 `history-sim/*` 或 `simulation-local-transaction/1`）时：
+     - **已提交收据优先重取**：`write_with_ingress` 先核审计并按原消息 ID（`previous_message`）与原收据键（`receipts`）查回已提交收据；命中则原样返回原收据（同键改内容仍报 `IdentityConflict`）。
+     - **新交付当场拒绝**：未命中既有收据的新 `MakeDispatchable` 与新 `ReleaseExact` 直接以 `VersionUnsupported` 拒绝，不落行、不产生注定无法被 `/3` X 接纳的新收据，且**不要求 X 在线**。
+
+### 3. 保持不变的能力（不改只读、不伤无关配置）
+
+- **非历史模拟 X profile（`/1` 骨架、`dry-run`、`experiment`、`production`）**：完全不变。
+- **`tb03b-finance/5` 其余经济写操作**：`ImportResponsibility`、`PrepareDecision`、`Reserve`、`CommitDecision`、`AbortDecision`、`CloseApplicants`、`CaptureExternal`、`ResolveEvidence`、`ApplyAllocation`、`BindVoice` 继续可用，不把整个 FIN/5 库改只读。
+- **C1 离线 `TestOnly` 时钟 `/5` 用法**：不带 `logical-bar/1` 且不带 `history_simulation_source` 的离线 TestOnly 夹具与 `exact_command_oracle.json` 保持原义（其产物仍不能被 `/3` X 接纳）。
+- **全部查询、只读视图与旧收据**：`QueryCommand`、`QueryReleasedExact`、`QueryDecision`、`QueryGrant`、`QueryFact`、`QueryAllocation`、`ReadView`、`Watch`、`EconomicRead*` 与原已提交收据重取保持原义。
+- **历史归档只读取证**：`e_economic_session inspect-simulation-capture-batch` 对 `/1` 与 `/2` 已提交终态批继续只读核验、不改写 X 库。
+
+### 4. 既有会话逐态处置与可执行迁移步骤
+
+| 既有 FIN/5 + /2 状态 | 本包行为与处置要求 | 责任与外效边界 |
+|---|---|---|
+| 仅 `Committed`（未 `Dispatchable`） | 独立 E 拒绝新 `MakeDispatchable`（`VersionUnsupported`）；不进入 `Dispatchable` | E 责任不变，零新收据 |
+| 已有 `Dispatchable` | 原 ID 重试返回原 `DispatchableReceipt`；`QueryCommand` 仍为 `Dispatchable`；新 `ReleaseExact` 被拒（`VersionUnsupported`） | 保持 `Dispatchable`，E 责任不变，零新 `ReleasedExact` |
+| 已有 `ReleasedExact` | 原 ID / 同内容重试返回原 `ReleasedExactReceipt`（篡改报 `IdentityConflict`）；`QueryCommand`、`QueryReleasedExact` 仍返原 14 字段命令；送 `/3` X（原样或伪造 `model_ref`）均被拒 | E 责任不变，零 X/S 调用与成交 |
+| 可能在途（`/2` X 库停在 `Accepted` / `ExecutionRequested` / `ExecutionReady` / `MayHaveCalled`） | `/3` X 拒绝打开或恢复 `/2` 库（`VersionUnsupported`，零字节写入）；原库封存备审，不得自动重放成新外效 | 不减免、不释放 E 责任 |
+| 已提交终态批（`/2` X 库 `Observed`） | 继续用 `e_economic_session inspect-simulation-capture-batch` 只读核验原批并按需 `CaptureExternal` 补录缺失原件 | X 库零改写，原批与原件逐字节保留 |
+
+**新历史模拟会话迁移步骤（显式 `FIN/6 + X/3`）：**
+
+1. 固定本次拟执行的 typed `Model` JSON，计算规范内容摘要：`content_hash = sha256(canonical_json(model))`（64 位小写十六进制）。
+2. 新建独立的会话目录与全新空 S/E/B/X 库及新的 `session_id` / `session_generation`（不得原地覆写或复用旧 FIN/5 E 库或 `/2` X 库）。
+3. 准备新的冻结财务输入 `input.json`：`schema_revision` 设为 `"tb03b-finance/6"`，`exact_release.model_coverage.model_ref` 写入 `{"model_id": model.model_id, "revision": model.revision, "content_hash": content_hash}`。
+4. 准备新的 `economic.manifest`：`finance.schema_revision` 设为 `"tb03b-finance/6"`，更新 `finance.input_path` 与 `finance.input_sha256`，保持 `clock.kind = "logical-bar/1"`。
+5. 准备新的 `x-profile.json`：`profile_revision` 设为 `"x-execution-profile/3"`、`mode` 设为 `"simulation"`，其中 `history_simulation.model` 与第 1 步取摘要的 `Model` 逐字段一致。
+6. 通过正式入口 `production_session --manifest <new-production.json>` 启动新会话。
+7. **账务与责任边界**：若需从原市场/策略输入重放历史模拟，新 `FIN/6 + X/3` 运行严格属于**独立新会话**，不得将其视为延续旧 FIN/5 账本，也不得以重放结果清零或抵消旧 FIN/5 会话的既有责任。
