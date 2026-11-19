@@ -24,10 +24,22 @@ fi
 work="$(mktemp -d)"
 trap 'rm -rf "$work"' EXIT
 
-list_tests() {
-  local features="$1" out="$2"
+delta_cargo() {
+  local target="$1" features="$2"
   shift 2
-  cargo test --locked --features "$features" "$@" --jobs "${CI_CARGO_JOBS:-1}" -- --list >"$out.raw"
+  # #1875：只给 Native 特性 bin 的列名和执行用同一份局部 profile。
+  if [[ "${CI_NATIVE_FEATURE_BIN_OPT1:-}" == 1 && "$target" == bin &&
+        "$features" == "$base_features,s_capture_native_testonly" ]]; then
+    cargo --config profile.dev.package.newchan_rust.opt-level=1 test --locked --features "$features" "$@"
+  else
+    cargo test --locked --features "$features" "$@"
+  fi
+}
+
+list_tests() {
+  local target="$1" features="$2" out="$3"
+  shift 3
+  delta_cargo "$target" "$features" "$@" --jobs "${CI_CARGO_JOBS:-1}" -- --list >"$out.raw"
   sed -n 's/: test$//p' "$out.raw" | LC_ALL=C sort >"$out"
 }
 
@@ -42,7 +54,7 @@ run_delta() {
   for (( k = i; k < $#; k += n )); do part+=("${@:k+1:1}"); done
   echo "feature_delta target=$target part=$i/$n run=${#part[@]} of $#"
   (( ${#part[@]} == 0 )) && return 0
-  cargo test --locked --features "$base_features,$feature" "${sel[@]}" --jobs "${CI_CARGO_JOBS:-1}" -- --exact "${part[@]}"
+  delta_cargo "$target" "$base_features,$feature" "${sel[@]}" --jobs "${CI_CARGO_JOBS:-1}" -- --exact "${part[@]}"
 }
 
 total=0
@@ -52,8 +64,8 @@ for target in lib bin; do
   else
     selector=(--bin s_structure_session)
   fi
-  list_tests "$base_features" "$work/$target.base" "${selector[@]}"
-  list_tests "$base_features,$feature" "$work/$target.feature" "${selector[@]}"
+  list_tests "$target" "$base_features" "$work/$target.base" "${selector[@]}"
+  list_tests "$target" "$base_features,$feature" "$work/$target.feature" "${selector[@]}"
   LC_ALL=C comm -13 "$work/$target.base" "$work/$target.feature" >"$work/$target.delta"
   removed="$(LC_ALL=C comm -23 "$work/$target.base" "$work/$target.feature" | wc -l | tr -d ' ')"
   count="$(wc -l <"$work/$target.delta" | tr -d ' ')"

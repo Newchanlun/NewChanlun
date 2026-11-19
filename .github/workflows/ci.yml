@@ -623,6 +623,8 @@ jobs:
             | python3 -c 'import json, sys; print("\n".join(lock["target"] + " " + lock["name"] for lock in json.load(sys.stdin)["locks"]))' \
             > "$RUNNER_TEMP/native-1488-locks.txt"
           echo "skip list: $(wc -l < "$RUNNER_TEMP/native-1488-locks.txt") Native locks run by #1488"
+          # #1875：只优化未分片 Native 特性 bin；两片各自冷编的成本不计入这项实测收益。
+          CI_NATIVE_FEATURE_BIN_OPT1="${{ matrix.group == 'native' && '1' || '' }}" \
           CI_DELTA_SKIP_FILE="$RUNNER_TEMP/native-1488-locks.txt" \
             ../.github/scripts/run-cargo-with-telemetry.sh ../.github/scripts/test-feature-delta.sh s_capture_native_testonly
 
