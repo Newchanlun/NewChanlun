@@ -151,7 +151,7 @@ ADR 0027 定了「结构判定域 / 重操作程序」两个互斥的唯一 owne
 **候选 B（拒绝）：把 `theta_backtest` + `run_theta_v0_pi` 扶正为 launcher。**
 这是上一稿的方案。`theta_backtest.rs:17` 自述「π_Θ 七链 + 内部 fill 模拟」；`pi_theta_fill_loop*` 同时拥有交易、成交和账本状态，正是 ADR 0027:64 点名的入口。ADR 0027:10 明禁直接扶正；C10.1 只允许「单独 π batch、ThetaPiStream」标注组件证据。`Cargo.toml:54` 把 `backtest_bin` 自称为「CLI 生产入口」，这只是旧注释，不构成 owner 裁定。
 
-**候选 C（拒绝）：把 Python `trading_system/live/runner.py`（NT TradingNode）扶正为 launcher，Rust 经 FFI 挂入。**
+**候选 C（拒绝）：把 Python `trading_system/live/runner.py`（NT TradingNode）扶正为 launcher，Rust 经 FFI 挂入。**（注：该诊断壳已删除（#1385 OE13 / ADR 0048），删前原脚本见 [runner.py:61-69@b9d898dccf](https://github.com/Newchanlun/NewChanlun/blob/b9d898dccf46c2a716115eaa1215bc39c458a959/trading_system/live/runner.py#L61-L69)；当前正式入口见 `production_session`。）
 `live/runner.py:61/:69` 是打印诊断后 `return 1` 的骨架。C09.1 规定核心判断和经营 reducer 用 Rust，Python/NT 外壳只做适配；C11.2 要求旧 Python 外壳「迁为同核 adapter」。扶正它等于让 adapter 层持有装配权和凭据，违反 C09.7。
 
 **候选 D（拒绝）：允许多个 launcher（回测、paper、live 各一个）加协调锁。**
@@ -237,7 +237,7 @@ ADR 0039 的编号按 main 顺序分配：落地时取 `docs/adr/` 现有最大�
 | 入口 | 类 | 终态 | 失去写权的机制 | OE |
 |---|---|---|---|---|
 | `trading_system/backtest/runner.py`（README:12/:15，含 `--enable-orders --db`） | 命令+preset | 冻结影子：NT 回测研究壳 | 不读凭据；`--db` 是其私有 SQLite，不是任何 R2 域库（`s_structure_session.rs:29`） | OE13 |
-| `trading_system/live/runner.py`（README:18；:61/:69 骨架） | 命令+preset | **删除** | 删除前不得实装为任何 launcher；删除由 FU-12 逐依赖验收后执行（X6） | OE13 |
+| `trading_system/live/runner.py`（README:18；:61/:69 骨架） | 命令+preset | **删除** | 删除前不得实装为任何 launcher；删除由 FU-12 逐依赖验收后执行（X6）（现已删除，#1385 OE13 / ADR 0048；删前原脚本见 [runner.py:61-69@b9d898dccf](https://github.com/Newchanlun/NewChanlun/blob/b9d898dccf46c2a716115eaa1215bc39c458a959/trading_system/live/runner.py#L61-L69)，当前正式入口见 `production_session`） | OE13 |
 | `live/databento_live_runner.py`（:3 数据-only，无 exec client） | 命令 | 冻结影子：行情冒烟 | 无 exec client，不读场所写凭据 | OE13 |
 | `strategy/chanlun_strategy.py`（:20-21）+ `execution/lmt_executor.py:70` + `execution/maker_optimizer.py:89` | feature（NT 策略） | 冻结影子：策略本体的经济判断退出生产；LMT-only 和 maker 撤单逻辑能否逐函数收编进 X adapter，归 FU-12 | 生产部署宿主无场所凭据（裁定四·2）；不得挂到任何生产 node | OE07 |
 | `strategy/theta_rec_strategy.py:123` | feature（NT 策略） | 冻结影子 | 同上 | OE08 |
@@ -275,7 +275,7 @@ ADR 0039 的编号按 main 顺序分配：落地时取 `docs/adr/` 现有最大�
 1. **身份**
    - bin `production_session`，源文件 `rust/src/bin/production_session.rs`；
    - Cargo feature `production_session`，含 `s_session` 与 X adapter 所需依赖，**不含** `backtest_bin` 和 `nautilus`；
-   - 全仓只有这一个 launcher。`theta_backtest`、`trading_system/live/runner.py`、`newchan` CLI、任何 `*_launcher.py` 都不是 launcher。
+   - 全仓只有这一个 launcher。`theta_backtest`、`trading_system/live/runner.py`、`newchan` CLI、任何 `*_launcher.py` 都不是 launcher。（注：`trading_system/live/runner.py` 已删除（#1385 OE13 / ADR 0048），删前原脚本见 [runner.py@b9d898dccf](https://github.com/Newchanlun/NewChanlun/blob/b9d898dccf46c2a716115eaa1215bc39c458a959/trading_system/live/runner.py)；当前正式入口见上方 `production_session`。）
 2. **输入**
    - 一份 manifest：已批准规则和政策版本、能力 manifest、原始输入来源、各域 DB 路径、时钟、adapter 选择（C10.1）；
    - 一份 profile：ADR 0028 裁定一字段。
@@ -336,9 +336,10 @@ ADR 0039 的编号按 main 顺序分配：落地时取 `docs/adr/` 现有最大�
 **A. 本裁定落地（关本票条件；命令在仓库根目录执行）**
 
 1. 文件存在：`find docs/adr -name '*-production-entry-inventory-and-unique-launcher.md' | wc -l | tr -d ' '` 输出 `1`。
-2. 可执行命令，输出为空：
+2. 可执行命令，输出为空（原单行命令见 [ADR 0039:341@b9d898dccf](https://github.com/Newchanlun/NewChanlun/blob/b9d898dccf46c2a716115eaa1215bc39c458a959/docs/adr/0039-production-entry-inventory-and-unique-launcher.md#L341)；下述按现存路径与已删路径分行，保持相同逐键核验语义）：
    ```
-   f=$(find docs/adr -name '*-production-entry-inventory-and-unique-launcher.md'); for k in production_session x_execution_session s_structure_session e_economic_session b_chong_session theta_backtest pi_theta_fill_loop ThetaPiStream PyThetaStream theta_pi_strategy run_organic run_positional run_recursive PyFugueV3Stream PySpiralStream PyRecStream PyRecursiveOrchestrator 'trading_system/backtest/runner.py' 'trading_system/live/runner.py' databento_live_runner.py chanlun_strategy.py lmt_executor.py maker_optimizer.py theta_rec_strategy.py broker_config.py risk_controls.py hl_verify_sdk.py hl_verify_nautilus.py buy_28316_warrant.py realtime_server.py gateway.py dev.ps1 OUT_OF_SCOPE_PRESERVE; do rg -q -F -- "$k" "$f" || echo "MISSING $k"; done
+   f=$(find docs/adr -name '*-production-entry-inventory-and-unique-launcher.md'); for k in production_session x_execution_session s_structure_session e_economic_session b_chong_session theta_backtest pi_theta_fill_loop ThetaPiStream PyThetaStream theta_pi_strategy run_organic run_positional run_recursive PyFugueV3Stream PySpiralStream PyRecStream PyRecursiveOrchestrator 'trading_system/backtest/runner.py' databento_live_runner.py chanlun_strategy.py lmt_executor.py maker_optimizer.py theta_rec_strategy.py broker_config.py risk_controls.py hl_verify_sdk.py hl_verify_nautilus.py buy_28316_warrant.py realtime_server.py gateway.py dev.ps1 OUT_OF_SCOPE_PRESERVE; do rg -q -F -- "$k" "$f" || echo "MISSING $k"; done
+   rg -q -F -- 'trading_system/live/runner.py' "$f" || echo "MISSING trading_system/live/runner.py" # 历史路径已删除（#1385 OE13 / ADR 0048），删前原脚本见 b9d898dccf46c2a716115eaa1215bc39c458a959
    ```
 3. 可执行命令：`rg -c '^> 正本：本文件是' "$(find docs/adr -name '*-production-entry-inventory-and-unique-launcher.md')"` 输出 `1`。
 4. 可执行命令（写权闭包锁定当前提交），输出为空：

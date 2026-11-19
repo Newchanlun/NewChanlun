@@ -30,7 +30,8 @@
 ## 权威依据
 
 **入口与 seam（A）**
-- `docs/adr/0039-production-entry-inventory-and-unique-launcher.md:276`：「全仓只有这一个 launcher。`theta_backtest`、`trading_system/live/runner.py`、`newchan` CLI、任何 `*_launcher.py` 都不是 launcher。」
+- `docs/adr/0039-production-entry-inventory-and-unique-launcher.md:276`：
+  「全仓只有这一个 launcher。`theta_backtest`、`trading_system/live/runner.py`、`newchan` CLI、任何 `*_launcher.py` 都不是 launcher。」（注：引文内 `trading_system/live/runner.py` 已删除（#1385 OE13 / ADR 0048），删前原脚本见 [runner.py@b9d898dccf](https://github.com/Newchanlun/NewChanlun/blob/b9d898dccf46c2a716115eaa1215bc39c458a959/trading_system/live/runner.py)；当前正式入口见 `production_session`。）
 - 同 ADR `:280`：「`evidence_class` 只决定 adapter 装配：`simulation` 装受控撮合，`experiment` 和 `production` 装场所 adapter。三种运行环境只在 adapter 处分叉（ADR 0027:46）。」
 - 同 ADR `:296`：「AT-01/02/03/16 以 `production_session` 拉起的独立进程为最高缝（C12.1）。直接调用 `s_structure_session` 等域 bin 只算组件证据。」
 - 同 ADR `:217`：`theta_backtest` 行，终态「冻结影子：π 批量对照臂，只出组件证据（C10.1）」，失去写权的机制是「`backtest_bin` 不进 `production_session` feature」。`:220`：「42 个无 required-features 的 bin、`lav_seal_samples`」也是冻结影子，「不在生产二进制集合内」。

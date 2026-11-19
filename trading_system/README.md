@@ -1,11 +1,12 @@
 # trading_system —— NautilusTrader × 缠论引擎骨架
 
-> 状态：阶段1骨架（信号贯通 L2 验证；下单链路冒烟；持久化+崩溃恢复 L1 验证；流式交易层/实盘为 TODO 骨架）
-> 设计文档：`analysis/nautilus_integration_design.md`
-> 架构：**IBKR（期货/美股/期权）+ Hyperliquid（加密永续）+ Databento（历史+期货实时）**
-> NautilusTrader：pin **1.228.0**（PyPI，已装入 `.venv`；克隆的 v1.229.0 源码仅作 API 参考）
+> 当前用途（按 [ADR 0039](../docs/adr/0039-production-entry-inventory-and-unique-launcher.md) / [ADR 0048](../docs/adr/0048-legacy-engine-module-level-dispositions.md)，#1532 / #1385）：本目录现为历史 NautilusTrader 原型与冻结影子资产（回测冒烟、Databento 数据管线与实验验证脚本），**不再承担实盘入口职责**；旧实盘骨架已删除，唯一生产 launcher 入口见 [`rust/src/bin/production_session.rs`](../rust/src/bin/production_session.rs) 与 [production_session 运行手册（simulation / dry-run）](../docs/runbook_production_session.md)。
+> 当年原型基线（2026-06-12）：阶段1骨架（信号贯通 L2 验证；回测下单链路冒烟；持久化+崩溃恢复 L1 验证）；原设计文档：[`analysis/nautilus_integration_design.md`](../analysis/nautilus_integration_design.md)；当时原型架构：IBKR + Hyperliquid + Databento；NautilusTrader pin **1.228.0**（PyPI，克隆的 v1.229.0 源码仅作 API 参考）。
 
 ## 运行
+
+- **唯一生产 launcher（simulation / dry-run）**：旧实盘空壳已按 [ADR 0048](../docs/adr/0048-legacy-engine-module-level-dispositions.md)（#1532 / #1385）删除。请直接参阅 [production_session 运行手册（simulation / dry-run）](../docs/runbook_production_session.md) 与入口源码 [`rust/src/bin/production_session.rs`](../rust/src/bin/production_session.rs)（当前仅覆盖 simulation / dry-run 可运行骨架，不含场所写代码，非已运行 paper/live）。
+- **本目录保留的原回测 / 守卫测试命令**（历史原型 / 冻结影子用途）：
 
 ```bash
 # 阶段1：信号贯通（只读，不下单）—— 默认 BZ 1min 2024 数据前 3 万根
@@ -13,9 +14,6 @@
 
 # 阶段3形态冒烟：LMT-only + maker 60s 撤单 + L_max 杠杆钳制 + 保守撮合 + SQLite 持久化
 .venv/bin/python trading_system/backtest/runner.py --enable-orders --db /tmp/chanlun_bt.db
-
-# 实盘入口（阶段4骨架，打印配置诊断）
-.venv/bin/python trading_system/live/runner.py
 
 # 守卫测试（17 项）
 .venv/bin/python -m pytest tests/test_trading_system_skeleton.py -q
@@ -64,8 +62,7 @@ trading_system/
 ├── strategy/bar_counter.py    # 数据管线冒烟空策略（回测/实盘共用，只计数不下单）
 ├── backtest/runner.py         # BacktestEngine 入口（--db 开持久化）
 ├── backtest/catalog_smoke.py  # BacktestNode × DBN catalog 消费端验证
-├── live/runner.py             # TradingNode 骨架（阶段4）
-└── live/databento_live_runner.py  # Databento Live 数据流冒烟（数据-only node，定时停机）
+└── live/databento_live_runner.py  # Databento Live 实时数据流冒烟（数据-only node，不下单，定时停机；旧实盘骨架已删）
 ```
 
 ## Hyperliquid 调研结论（adapter 源码逐字核对）
@@ -97,8 +94,11 @@ fail-fast，禁止带错误结构交易），不是结构反序列化（那是�
 由 Nautilus reconciliation 从 venue 拉取（判决二：venue 是真账本）；SQLite 管
 Nautilus 不管的部分（引擎重放源、voice 影子账本、信号/杠杆审计日志）。
 
-恢复序列（live/runner.py 文档化）：reconciliation → BarCache 重放 → request_bars
-补缺口 → voice_state↔Portfolio 对账 → 全部通过才恢复意图产生。
+旧实盘空壳（已按 [ADR 0048](../docs/adr/0048-legacy-engine-module-level-dispositions.md) / #1385 删除）曾拟议的「reconciliation → BarCache 重放 →
+request_bars 补缺口 → voice_state↔Portfolio 对账」恢复序列仅为未实装的历史设计构想；
+现行唯一生产 launcher 入口与运行边界请见 [`rust/src/bin/production_session.rs`](../rust/src/bin/production_session.rs)、
+[production_session 运行手册（simulation / dry-run）](../docs/runbook_production_session.md)（当前仅覆盖 simulation / dry-run 骨架及 S 写入完整性
+fail-stop 合同，不含场所写代码或已运行的 paper/live 实盘）及 [ADR 0039](../docs/adr/0039-production-entry-inventory-and-unique-launcher.md)。
 
 ## 三个钉死的判决（设计 §0，代码中已体现）
 
@@ -107,13 +107,14 @@ Nautilus 不管的部分（引擎重放源、voice 影子账本、信号/杠杆�
    接入点 TODO 在 chanlun_strategy.py；voice_state 持久化出口在 trade_journal.py）。
 3. **时间映射全住桥接层**：`feed`/`feed_ohlc` 同一守卫路径——重放与实时无第二套时间逻辑。
 
-## 下一步（按设计文档阶段门）
+## 历史原型规划（2026-06-12，已归档，非现行路线）
 
-- **阶段2（最大工程项）**：Rust `PositionalStream` 流式意图模式，批↔流 bit-exact 预注册守卫。
-- **阶段0 残项**：DBN 重下载 → ParquetDataCatalog。
-- **阶段4**：TradingNode + IBKR paper + **Hyperliquid testnet**（水龙头领测试金，无 KYC）
-  + 预热协议 + 两级对账；HL INTERNAL 1s ↔ EXTERNAL 1m 对账（R5）。
-- **待 L2 收口**：Databento Live 费率、HL WS 实测延迟/重连、IBKR 快照口径影响。
+> 以下为当年 NautilusTrader 原型阶段的阶段门记录，仅作历史背景保留；现行入口终态与迁移顺序以 [ADR 0039](../docs/adr/0039-production-entry-inventory-and-unique-launcher.md) 与 [ADR 0048](../docs/adr/0048-legacy-engine-module-level-dispositions.md) 为准。
+
+- **原阶段2**：Rust `PositionalStream` 流式意图模式，批↔流 bit-exact 预注册守卫。
+- **原阶段0 残项**：DBN 重下载 → ParquetDataCatalog。
+- **原阶段4（已作废，不再执行）**：当年曾拟议在本目录组装 `TradingNode` + IBKR paper + Hyperliquid testnet 实盘入口；该实盘骨架已按 [ADR 0048](../docs/adr/0048-legacy-engine-module-level-dispositions.md)（#1532 / #1385）删除，生产编排统一归 Rust [`production_session`](../rust/src/bin/production_session.rs)（参见 [运行手册（simulation / dry-run）](../docs/runbook_production_session.md)），勿按原设计重建。
+- **原待 L2 收口项**：Databento Live 费率、HL WS 实测延迟/重连、IBKR 快照口径影响。
 
 ## 已知边界
 

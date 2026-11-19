@@ -10,7 +10,7 @@
 
 ⟹ **暂无实盘需求** ⟹ 场所选定的前提（隔离能力、敞口上限、API 凭证）**当前全部不成立**——回测不需要其中任何一项。
 
-**与代码现状一致**（非事后合理化，实测在先）：三条下单链**没有一条 live 跑过**；`trading_system/live/runner.py` 自述「阶段 4+ 骨架，当前不可运行」；`enable_orders` 真实读取点是 `backtest/runner.py:84` 的 argparse（**硬默认 False，非 env var**），本 HEAD 无 `deploy/` 目录、CI 不调用（[#945](https://github.com/xy7365527-lang/NewChanlun/issues/945) / [#949](https://github.com/xy7365527-lang/NewChanlun/issues/949)）。
+**与代码现状一致**（非事后合理化，实测在先）：三条下单链**没有一条 live 跑过**；`trading_system/live/runner.py` 自述「阶段 4+ 骨架，当前不可运行」；`enable_orders` 真实读取点是 `backtest/runner.py:84` 的 argparse（**硬默认 False，非 env var**），本 HEAD 无 `deploy/` 目录、CI 不调用（[#945](https://github.com/xy7365527-lang/NewChanlun/issues/945) / [#949](https://github.com/xy7365527-lang/NewChanlun/issues/949)）。（注：`trading_system/live/runner.py` 已删除（#1385 OE13 / ADR 0048），删前原脚本见 [runner.py:1@b9d898dccf](https://github.com/Newchanlun/NewChanlun/blob/b9d898dccf46c2a716115eaa1215bc39c458a959/trading_system/live/runner.py#L1)；当前正式入口见 `production_session`。）
 
 ## 裁定二：倾向 Hyperliquid，但**证据等级已降级，须随倾向一起引**
 

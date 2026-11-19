@@ -49,7 +49,8 @@ TStage latch 只投影 campaign 内已经发生的阶段事件史。`phase_event
 | Rust | `rust/src/economic_session/book.rs:80、87、97、387、405`；`rust/src/economic_session/tb03c_book.rs:366–373` | 目标重、事实键、解码、账本应用与当前资格计算。逐重金额及阶段史、换向连续性归 #1406、#1361、#1364；事件外壳归 #1534。 |
 | Rust 新文件 | `rust/src/bin/production_session.rs`、`rust/src/bin/x_execution_session.rs` | 该基线尚无这两个文件，也无 production_session Cargo 项，不能编造行号。ADR 0039:266–288 已指定由 #1523 交付，#1536、#1538、#1550 消费正式 launcher。 |
 | Lean | `formal/Origin/TotalWealth.lean:66、140、194、212` | TStage、advanceTo、阶段单调性及 earning_no_regress。现有定理不能当作全部多空资格关系证明。#1406 按三阶段正本 §2 声明模型覆盖面及 Rust 对拍义务，#1361 验收。 |
-| Python | `trading_system/live/runner.py:31`；`trading_system/strategy/theta_rec_strategy.py:73、123` | 现有 Python 运行与发送路径只用于旧入口终态核查，不能成为第二个正式 launcher 或决策主干。终态实施归 TB-10 #1368，三模式同核与外壳接入归 #1538、#1550。 |
+| Python | `trading_system/strategy/theta_rec_strategy.py:73、123` | 现有 Python 运行与发送路径只用于旧入口终态核查，不能成为第二个正式 launcher 或决策主干。终态实施归 TB-10 #1368，三模式同核与外壳接入归 #1538、#1550。 |
+| Python（历史） | `trading_system/live/runner.py:31`（已删除，#1385 OE13 / ADR 0048；删前原脚本见 [runner.py:31@b9d898dccf](https://github.com/Newchanlun/NewChanlun/blob/b9d898dccf46c2a716115eaa1215bc39c458a959/trading_system/live/runner.py#L31)） | 定位基线 `99df2ed762201236b89f0e81c0276cb3aa847f0a` 原列旧入口终态核查对象，已按 ADR 0048 执行删除；当前正式 launcher 见 `production_session`。 |
 
 定位方法为先查询代码图中的 Chong、TStage、production_session，再在图缺项时检索 `rust/src/` 的上述符号、`formal/Origin/TotalWealth.lean` 的阶段定义及 `trading_system/` 的 `on_bar`、`submit_order`、`main`。`git ls-tree` 核新文件不存在，`git grep` 核 Cargo 尚无 launcher 项。没有新增 Lean 或 Python 判据；它们列为覆盖面与旧入口核查对象。
 
