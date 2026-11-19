@@ -43,11 +43,24 @@ def executor(v2, cutover, unit):
     return result
 
 
+def publish_ruling(v2, verdict="PASS", **overrides):
+    from pilot1742.approval import spec_ruling_digest
+    fields = {"verdict": verdict, "specNumber": SPEC, "author": "author-session", "reviewer": "review-session",
+              "digest": spec_ruling_digest(v2.github.issues[SPEC]['body']), "evidence": "/fixture/review.json"}
+    fields.update(overrides)
+    comments = v2.github.issues[SPEC]['comments']
+    comments.append({"id": len(comments) + 100, "created_at": f"2026-11-07T00:00:{len(comments):02d}Z",
+                     "user": {"login": "xy7365527-lang", "type": "User"},
+                     "body": (f"**SPEC 独审裁定：{fields['verdict']}**\nSPEC：{fields['specNumber']}\n"
+                              f"作者：{fields['author']}\n独审：{fields['reviewer']}\n"
+                              f"正文 sha256：{fields['digest']}\n证据：{fields['evidence']}\n")})
+
+
 def authorize(v2, cutover, unit, signer):
     run_dir = PilotRun.run_dir(v2.home, unit.run_id)
     with pytest.raises(ApprovalRequired):
         executor(v2, cutover, unit).claim(run_dir)
-    signer.publish(run_dir / 'approvals' / 'spec_authorization.request', Decision.APPROVE)
+    publish_ruling(v2)
     assert v2.writes() == []
 
 
@@ -75,10 +88,6 @@ def test_released_drained_run_advances_to_next_generation(queued, registered_bef
         assert unit.run_id == f't{TICKET}-2'
         ex = executor(v2, cutover, unit)
         run_dir = PilotRun.run_dir(v2.home, unit.run_id)
-        if len(seen) == 1:
-            with pytest.raises(ApprovalRequired):
-                ex.claim(run_dir)
-            signer.publish(run_dir / 'approvals' / 'spec_authorization.request', Decision.APPROVE)
         claim = ex.claim(run_dir)
         assert claim.generation == 2 and claim.state == 'active'
         return 75
@@ -109,7 +118,8 @@ def test_queue_roundtrip_does_not_change_dedicated_rules(queued):
     assert forbidden_for(dedicated.admission, {'ready-for-agent'}) == ('ready-for-agent',)
 
 
-@pytest.mark.parametrize('bad', ['sandcastle', 'agent:explore', 'needs-approval', 'assignee', 'parent', 'tail',
+@pytest.mark.parametrize('bad', ['sandcastle', 'agent:explore', 'needs-approval', 'ready-for-human', 'needs-info',
+                                 'needs-triage', 'wontfix', 'assignee', 'parent', 'tail',
                                  'scope', 'ticket_scope_only'])
 def test_queue_refuses_missing_contract_without_writes(queued, bad):
     v2, cutover, intake, signer = queued
@@ -131,7 +141,7 @@ def test_queue_refuses_missing_contract_without_writes(queued, bad):
     assert v2.writes() == []
 
 
-def test_signed_queue_delivers_exact_head_and_replays_without_duplicate_effects(queued):
+def test_unsigned_queue_delivers_exact_head_and_replays_without_duplicate_effects(queued, monkeypatch):
     from conftest import FAKE, MODELS
 
     from pilot1742.executor import load_unit, open_v2_run
@@ -139,6 +149,7 @@ def test_signed_queue_delivers_exact_head_and_replays_without_duplicate_effects(
     unit = intake.register(TICKET)
     assert intake.register(TICKET) == unit
     authorize(v2, cutover, unit, signer)
+    monkeypatch.setattr('pilot1742.approval.SignedApprovals.evaluate', lambda *a, **kw: pytest.fail('signer called'))
     task = load_unit(v2.home, unit.run_id)[1]
     run = open_v2_run(v2.home, unit, task, executor(v2, cutover, unit), MODELS, launcher=FAKE, source_repo=v2.source)
     head = v2.to_pass(run)
@@ -152,7 +163,7 @@ def test_signed_queue_delivers_exact_head_and_replays_without_duplicate_effects(
     assert results[TICKET]['head'] == v2.github.ref(unit.branch) == head
 
 
-def test_spec_changes_wait_for_new_signature_and_old_label_halts(queued):
+def test_spec_changes_wait_for_new_ruling_and_old_label_halts(queued):
     v2, cutover, intake, signer = queued
     unit = intake.register(TICKET)
     authorize(v2, cutover, unit, signer)
@@ -165,7 +176,7 @@ def test_spec_changes_wait_for_new_signature_and_old_label_halts(queued):
         with ex.action('dispatch', run_dir, claim.generation):
             pytest.fail('new SPEC body accepted')
     assert v2.writes() == before and v2.claim_record()['state'] == 'active'
-    signer.publish(run_dir / 'approvals' / 'spec_authorization.request', Decision.APPROVE)
+    publish_ruling(v2)
     v2.github.issues[TICKET]['labels'].append('sandcastle')
     with pytest.raises(Halted, match='forbidden'):
         with ex.action('dispatch', run_dir, claim.generation):
@@ -190,7 +201,7 @@ def test_busy_run_is_skipped_and_same_run_is_recovered_next_round(queued):
     assert seen == [f't{TICKET}-1'] * 3
 
 
-def test_engine_emission_to_queue_child_sigkill_recovery_and_exact_delivery(queued):
+def test_engine_emission_to_queue_child_sigkill_recovery_and_exact_delivery(queued, wayfinder_engine_path):
     import base64
     import multiprocessing
     import subprocess
@@ -202,11 +213,22 @@ def test_engine_emission_to_queue_child_sigkill_recovery_and_exact_delivery(queu
     from cryptography.hazmat.primitives import serialization
 
     v2, cutover, intake, signer = queued
-    module = Path(__file__).resolve().parents[3] / 'scripts' / 'wayfinder_engine.mts'
+    module = wayfinder_engine_path
     script = '''const m = await import(process.argv[1]);
       const label = m.releaseLabel(process.argv[2], process.argv[3]);
-      m.releaseTicket(4242, {read: () => JSON.stringify({state:'OPEN',labels:[],assignees:[]}),
-        write: cmd => { console.log(cmd); return ''; }}, label);'''
+      // map 直挂票只放行 map SPEC 拆票计划里、带当前发布凭据的票（#1915 a2）。
+      const plan = '# SPEC\\n<!-- wayfinder-split -->\\n```json\\n{"tickets":[{"id":"S1","title":"fixture"}]}\\n```';
+      const spec = {number: 1340, title: 'SPEC: fixture', body: plan, state: 'OPEN'};
+      const pass = {user: {login: 'fixture'}, created_at: '2026-11-07T01:00:00Z', body: m.specRulingBody({specNumber: 1340,
+        verdict: 'PASS', author: 'draft', reviewer: 'review', digest: m.specBodyDigest(spec.body), evidence: '/fake/review'})};
+      const ticketBody = '<!-- wayfinder-ticket:1340:S1 -->\\nPart of [SPEC #1340]\\n<!-- wayfinder-published:1340:'
+        + m.specBodyDigest(spec.body) + ':S1 -->\\n';
+      const read = args => args.startsWith('issue view 1340 ') ? JSON.stringify(spec)
+        : args.includes('/issues/1340/comments') ? JSON.stringify([pass])
+        : JSON.stringify({title: '[impl] S1 fixture', body: ticketBody, state: 'OPEN', labels: [], assignees: []});
+      const why = m.releaseTicket(4242, {specs: [1340], orchestrator: 'fixture', via: 'plan'},
+        {read, write: cmd => { console.log(cmd); return ''; }}, label);
+      if (why !== null) throw new Error(why);'''
     emitted = subprocess.run(['node', '--experimental-strip-types', '--input-type=module', '-e', script,
                               module.as_uri(), str(v2.home), str(cutover.drain_root)],
                              check=True, capture_output=True, text=True).stdout.strip()
@@ -282,6 +304,133 @@ def test_serve_modes_do_not_open_app_without_cutover(tmp_path, monkeypatch, caps
     assert not (tmp_path / 'absent').exists()
 
 
+def _serve_argv(v2, tmp_path, mode):
+    return ['--state-root', str(v2.home), '--drain-root', str(tmp_path / 'drain'), 'serve', mode,
+            '--poll-seconds', '1', '--workers-log', str(v2.workers_log),
+            '--private-key', str(tmp_path / 'absent.pem')]
+
+
+class _StopLoop(Exception):
+    pass
+
+
+def test_serve_once_keeps_exit_2_when_github_unreadable(queued, tmp_path, monkeypatch, capsys):
+    """#1988：`serve --once` 是 cutover-runbook 的检查步骤，读不到 GitHub 必须非零退出，不能报成功。"""
+    from pilot1742 import executor as cli
+    from pilot1742.github_app import RequestNotSent
+    v2 = queued[0]
+
+    def unreadable(_args):
+        raise RequestNotSent('连接未建立')
+    monkeypatch.setattr(cli, 'SOURCE_REPO', v2.source)
+    monkeypatch.setattr(cli, '_client', unreadable)
+    assert cli.main(_serve_argv(v2, tmp_path, '--once')) == 2
+    assert 'RequestNotSent' in capsys.readouterr().err
+
+    gateway = v2.gateway()
+    monkeypatch.setattr(cli, '_client', lambda _args: gateway.client)
+
+    def round_unreadable(self, _run):
+        raise RequestNotSent('连接中断')
+    monkeypatch.setattr(QueueIntake, 'once', round_unreadable)
+    assert cli.main(_serve_argv(v2, tmp_path, '--once')) == 2
+
+
+def test_serve_loop_retries_unreadable_github_in_process_and_marks_status(queued, tmp_path, monkeypatch, capsys):
+    """#1988：`--loop` 下启动核身份与单轮读取失败都在进程内重试，不退出（launchd KeepAlive 不再每 10s 重启）。"""
+    from pilot1742 import executor as cli
+    from pilot1742.github_app import OutcomeUnknown, RequestNotSent
+    from pilot1742.queue import UNREADABLE_NOTICE
+    v2 = queued[0]
+    gateway = v2.gateway()
+    page = v2.source / '.sandcastle' / 'logs' / 'deepagents-status.md'
+    opened, rounds, sleeps = [], [], []
+
+    def client(_args):
+        opened.append(1)
+        if len(opened) == 1:
+            raise RequestNotSent('启动时读不到 App')
+        return gateway.client
+
+    def once(self, _run):
+        rounds.append(1)
+        if len(rounds) == 1:
+            raise OutcomeUnknown('GitHub 返回 HTTP 502')
+        return self._status({})
+
+    def sleep(_seconds):
+        sleeps.append(1)
+        if len(sleeps) == 1:
+            assert UNREADABLE_NOTICE in page.read_text() and 'RequestNotSent' in page.read_text()
+        if len(sleeps) == 2:
+            assert 'OutcomeUnknown' in page.read_text()
+        if len(sleeps) == 3:
+            raise _StopLoop
+    monkeypatch.setattr(cli, 'SOURCE_REPO', v2.source)
+    monkeypatch.setattr(cli, '_client', client)
+    monkeypatch.setattr(QueueIntake, 'once', once)
+    monkeypatch.setattr(cli.time, 'sleep', sleep)
+    with pytest.raises(_StopLoop):
+        cli.main(_serve_argv(v2, tmp_path, '--loop'))
+    assert (len(opened), len(rounds), len(sleeps)) == (3, 2, 3), 'failed round must drop the client and re-verify'
+    assert UNREADABLE_NOTICE not in page.read_text()
+    err = capsys.readouterr().err
+    assert err.count('round skipped, source unreadable (github)') == 2
+
+
+def test_serve_loop_exits_2_on_local_private_key_error(queued, tmp_path, monkeypatch, capsys):
+    """本机私钥读不到是配置错误，不是 GitHub 读不到：`--loop` 也不吞，退出码 2，状态页不标「读不到源」。"""
+    from pilot1742 import executor as cli
+    v2 = queued[0]
+    monkeypatch.setattr(cli, 'SOURCE_REPO', v2.source)
+    monkeypatch.setattr(cli.time, 'sleep', lambda _s: pytest.fail('private key error retried in-process'))
+    assert cli.main(_serve_argv(v2, tmp_path, '--loop')) == 2
+    assert 'PrivateKeyError' in capsys.readouterr().err
+    assert not (v2.source / '.sandcastle' / 'logs' / 'deepagents-status.md').exists()
+
+
+def test_serve_loop_exits_2_on_relative_private_key_path(queued, tmp_path, monkeypatch, capsys):
+    """#1988：相对私钥路径是本机配置错误，`--loop` 不当成 GitHub 读不到去重试，退出码 2。"""
+    from pilot1742 import executor as cli
+    v2 = queued[0]
+    monkeypatch.setattr(cli, 'SOURCE_REPO', v2.source)
+    monkeypatch.setattr(cli.time, 'sleep', lambda _s: pytest.fail('relative key path retried in-process'))
+    argv = _serve_argv(v2, tmp_path, '--loop')
+    argv[argv.index('--private-key') + 1] = 'relative.pem'
+    assert cli.main(argv) == 2
+    assert 'PrivateKeyError' in capsys.readouterr().err
+    assert not (v2.source / '.sandcastle' / 'logs' / 'deepagents-status.md').exists()
+
+
+def test_local_config_errors_are_not_github_read_failures(tmp_path):
+    """身份常量、token 权限范围都是本机配置：归 LocalConfigError，serve --loop 不会当成读不到源去重试。"""
+    from pilot1742.github_app import AppIdentity, GitHubAppClient, LocalConfigError
+
+    key = tmp_path / 'key.pem'
+    for bad in ((0, 1, 1, 'o/r', 'slug', key), (1, 1, 1, 'bad', 'slug', key), (1, 1, 1, 'o/r', 'Bad', key)):
+        with pytest.raises(LocalConfigError):
+            AppIdentity(*bad)
+    with pytest.raises(LocalConfigError):
+        GitHubAppClient(AppIdentity(1, 1, 1, 'o/r', 'slug', key), permissions={'administration': 'write'})
+
+
+def test_client_closes_when_identity_verification_fails(tmp_path, monkeypatch):
+    """`--loop` 每轮都可能重建客户端：核身份失败要关掉连接池，不靠 GC 回收。"""
+    import argparse
+
+    from pilot1742 import executor as cli
+    from pilot1742.github_app import GitHubAppClient, RequestNotSent
+    closed = []
+
+    def verify(_self):
+        raise RequestNotSent('连接未建立')
+    monkeypatch.setattr(GitHubAppClient, 'verify', verify)
+    monkeypatch.setattr(GitHubAppClient, 'close', lambda _self: closed.append(1))
+    with pytest.raises(RequestNotSent):
+        cli._client(argparse.Namespace(private_key=tmp_path / 'key.pem', command='serve'))
+    assert closed == [1]
+
+
 def test_spec_recheck_interrupts_graph_and_resume_payload_does_not_authorize(queued):
     import sqlite3
 
@@ -309,7 +458,7 @@ def test_spec_recheck_interrupts_graph_and_resume_payload_does_not_authorize(que
         assert agent.get_state(config).next and v2.claims() == []
         agent.invoke(Command(resume={'approved': True}), config, durability='sync')
         assert agent.get_state(config).next and v2.claims() == []
-        signer.publish(run.dir / 'approvals' / 'spec_authorization.request', Decision.APPROVE)
+        publish_ruling(v2)
         agent.invoke(Command(resume={}), config, durability='sync')
         assert not agent.get_state(config).next and v2.claims() == [f'author-{v2.base}']
     finally:
@@ -448,14 +597,20 @@ def test_delivered_queue_observes_merge_even_after_ticket_closes(delivered, tick
 
 @pytest.mark.parametrize('fault', ['status_500', 'drop_before'])
 def test_delivery_read_failure_is_retryable_not_stale(delivered, fault):
+    """#1988：对账读不到 GitHub 不在票内吞成 awaiting_human，整轮失败交给 serve 处理；本机状态一概不动。"""
+    from pilot1742.github_app import IdentityError
+
     v2, intake, unit, head, run_dir = delivered
     (number,) = v2.github.pulls
+    intake.once(lambda _: pytest.fail('delivered run dispatched again'))
+    queue_status = v2.home / 'queue-status.json'
     state_path = run_dir / 'delivery' / 'state.json'
     before_state, before_writes = state_path.read_bytes(), v2.writes()
+    before_queue = queue_status.read_bytes()
     v2.github.fault('GET', rf'.*/pulls/{number}', fault)
-    rows = intake.once(lambda _: pytest.fail('delivered run dispatched again'))
-    assert rows[TICKET]['phase'] == 'awaiting_human'
-    assert rows[TICKET]['run_id'] == unit.run_id and rows[TICKET]['reason']
+    with pytest.raises(IdentityError):
+        intake.once(lambda _: pytest.fail('delivered run dispatched again'))
+    assert queue_status.read_bytes() == before_queue
     assert state_path.read_bytes() == before_state
     assert not (run_dir / 'delivery' / 'stale.json').exists()
     assert v2.claim_record()['state'] == 'active'
@@ -464,6 +619,91 @@ def test_delivery_read_failure_is_retryable_not_stale(delivered, fault):
     assert rows[TICKET]['head'] == head and rows[TICKET]['run_id'] == unit.run_id
     assert v2.writes() == before_writes
 
+
+
+def test_serve_surfaces_delivery_read_failure(delivered, tmp_path, monkeypatch, capsys):
+    """#1988：真实对账路径读不到 GitHub 时，`--once` 退出 2；`--loop` 标状态页、不动 queue-status.json，下一轮恢复。"""
+    from pilot1742 import executor as cli
+    from pilot1742.queue import UNREADABLE_NOTICE
+
+    v2, intake, unit, head, run_dir = delivered
+    (number,) = v2.github.pulls
+    intake.once(lambda _: pytest.fail('delivered run dispatched again'))
+    queue_status = v2.home / 'queue-status.json'
+    page = v2.source / '.sandcastle' / 'logs' / 'deepagents-status.md'
+    before = queue_status.read_bytes()
+    monkeypatch.setattr(cli, 'SOURCE_REPO', v2.source)
+    monkeypatch.setattr(cli, 'ClaimStore', lambda: intake.claims)
+    monkeypatch.setattr(cli, '_client', lambda _args: v2.gateway().client)
+
+    v2.github.fault('GET', rf'.*/pulls/{number}', 'status_500')
+    assert cli.main(_serve_argv(v2, tmp_path, '--once')) == 2
+    assert queue_status.read_bytes() == before
+
+    v2.github.fault('GET', rf'.*/pulls/{number}', 'status_500')
+    sleeps = []
+
+    def sleep(_seconds):
+        sleeps.append(1)
+        if len(sleeps) == 1:
+            assert UNREADABLE_NOTICE in page.read_text()
+            assert queue_status.read_bytes() == before
+        else:
+            raise _StopLoop
+    monkeypatch.setattr(cli.time, 'sleep', sleep)
+    with pytest.raises(_StopLoop):
+        cli.main(_serve_argv(v2, tmp_path, '--loop'))
+    assert UNREADABLE_NOTICE not in page.read_text()
+    assert json.loads(queue_status.read_text())[str(TICKET)]['phase'] == 'awaiting_merge'
+    assert 'round skipped, source unreadable (github)' in capsys.readouterr().err
+
+
+def test_read_failure_after_higher_priority_ticket_aborts_before_any_dispatch(queued):
+    """#1988：本轮读 GitHub 失败时不能已经起了子进程。优先级更高的票本可派工，
+    排在后面的票登记读失败：整轮抛出，子进程一次都没起；读恢复后照常派工。"""
+    import copy
+
+    from pilot1742.github_app import IdentityError
+
+    v2, _, intake, _ = queued
+    later = TICKET + 1
+    v2.github.issues[later] = {**copy.deepcopy(v2.github.issues[TICKET]), 'number': later}
+    dispatched = []
+
+    def child(unit):
+        dispatched.append(unit.ticket)
+        return 0
+    v2.github.fault('GET', rf'.*/issues/{later}', 'status_500')
+    with pytest.raises(IdentityError):
+        intake.once(child)
+    assert dispatched == [], 'child started before the round finished reading GitHub'
+    assert not (v2.home / 'queue-status.json').exists()
+    rows = intake.once(child)
+    assert dispatched == [TICKET, later]
+    assert rows[TICKET]['phase'] == rows[later]['phase'] == 'halted'
+
+
+def test_dispatch_phase_rechecks_slot_after_read_phase(queued, monkeypatch):
+    """读阶段乐观登记了后面的票；派工阶段前一张票仍占槽时，后面的票本轮不派（单票在飞上限不变）。"""
+    import copy
+
+    v2, _, intake, _ = queued
+    later = TICKET + 1
+    v2.github.issues[later] = {**copy.deepcopy(v2.github.issues[TICKET]), 'number': later}
+    dispatched = []
+
+    def activity(folders):
+        if TICKET in dispatched and any(f.name.startswith(f't{TICKET}-') for f in folders):
+            return 'worker slot retained: implementer: running'
+        return None
+    monkeypatch.setattr(intake, '_worker_activity', activity)
+
+    def child(unit):
+        dispatched.append(unit.ticket)
+        return 0
+    rows = intake.once(child)
+    assert dispatched == [TICKET]
+    assert rows[TICKET]['phase'] == 'active' and rows[later]['phase'] == 'queued'
 
 
 def test_registration_never_publishes_partial_json(queued, monkeypatch):
@@ -625,7 +865,7 @@ def test_background_approval_recheck_preserves_operator_interrupt(queued, monkey
     finally:
         pilot.release()
         connection.close()
-    signer.publish(pilot.dir / 'approvals' / 'spec_authorization.request', Decision.APPROVE)
+    publish_ruling(v2)
     models_path = v2.tmp / 'pstack-models.md'
     models_path.write_text(MODELS)
     monkeypatch.setattr(run_module, 'PSTACK_MODELS', models_path)
@@ -637,8 +877,8 @@ def test_background_approval_recheck_preserves_operator_interrupt(queued, monkey
     original_open = cli.open_v2_run
     opened = []
 
-    def open_run(*args):
-        result = original_open(*args, launcher=FAKE, source_repo=v2.source)
+    def open_run(*args, **kwargs):
+        result = original_open(*args, launcher=FAKE, source_repo=v2.source, **kwargs)
         opened.append(result)
         return result
 
@@ -691,3 +931,524 @@ def test_background_approval_recheck_preserves_operator_interrupt(queued, monkey
     assert invoke(common + ['run', '--run-id', unit.run_id, '--resume'] + resources) == 0
     assert v2.claims() == [f'author-{v2.base}']
     assert v2.claim_record()['run_id'] == unit.run_id
+
+
+def _low_disk(monkeypatch, free):
+    from types import SimpleNamespace
+
+    from pilot1742 import run
+    monkeypatch.setattr(run, 'DISPATCH_FREE_BYTES', 100)
+    monkeypatch.setattr(run.shutil, 'disk_usage', lambda _path: SimpleNamespace(free=free))
+
+
+def test_low_disk_leaves_ticket_queued_without_claim_then_dispatches_when_space_returns(queued, monkeypatch):
+    v2, cutover, intake, signer = queued
+    _low_disk(monkeypatch, 99)
+    rows = intake.once(lambda _: pytest.fail('dispatched below the disk threshold'))
+    assert rows[TICKET]['phase'] == 'queued' and '派工门槛' in rows[TICKET]['reason']
+    assert json.loads((v2.home / 'queue-status.json').read_text())[str(TICKET)]['phase'] == 'queued'
+    assert not (v2.claims_root / f'{TICKET}.json').exists() and v2.writes() == []
+    _low_disk(monkeypatch, 100)
+    seen = []
+    intake.once(lambda unit: seen.append(unit.run_id) or 75)
+    assert seen == [f't{TICKET}-1']
+
+
+def test_low_disk_still_reconciles_delivered_run(delivered, monkeypatch):
+    v2, intake, unit, head, run_dir = delivered
+    (number,) = v2.github.pulls
+    v2.github.merge_pull(number)
+    _low_disk(monkeypatch, 0)
+    rows = intake.once(lambda _: pytest.fail('merged run dispatched again'))
+    assert rows[TICKET]['delivery_phase'] == 'merged' and rows[TICKET]['phase'] == 'awaiting_merge'
+
+
+@pytest.mark.parametrize('bad', ['untrusted', 'same_author', 'evidence', 'digest', 'block', 'number', 'free_text'])
+@pytest.mark.parametrize('effect', ['claim', 'dispatch', 'commit', 'push', 'pr', 'status', 'deliver'])
+def test_ruling_refuses_every_boundary_without_signature_fallback(queued, bad, effect):
+    v2, cutover, intake, signer = queued
+    unit = intake.register(TICKET)
+    ex = executor(v2, cutover, unit)
+    run_dir = PilotRun.run_dir(v2.home, unit.run_id)
+    if effect != 'claim':
+        publish_ruling(v2)
+        claim = ex.claim(run_dir)
+    publish_ruling(v2)
+    comment = v2.github.issues[SPEC]['comments'][-1]
+    if bad == 'untrusted':
+        v2.github.issues[SPEC]['comments'] = [comment]
+        comment['user']['login'] = 'untrusted'
+    elif bad == 'same_author':
+        comment['body'] = comment['body'].replace('review-session', 'AUTHOR-SESSION')
+    elif bad == 'evidence':
+        comment['body'] = comment['body'].replace('/fixture/review.json', '')
+    elif bad == 'digest':
+        v2.github.issues[SPEC]['body'] += 'changed'
+    elif bad == 'block':
+        comment['body'] = comment['body'].replace('PASS', 'BLOCK')
+    elif bad == 'number':
+        comment['body'] = comment['body'].replace(f'SPEC：{SPEC}', 'SPEC：999')
+    else:
+        v2.github.issues[SPEC]['comments'] = [dict(comment, body='批准 通过 approved')]
+    before = v2.writes()
+    with pytest.raises(ApprovalRequired):
+        if effect == 'claim':
+            ex.claim(run_dir)
+        else:
+            with ex.action(effect, run_dir, claim.generation):
+                pytest.fail('invalid ruling crossed boundary')
+    assert before == v2.writes()
+    assert not (run_dir / 'approvals/spec_authorization.request').exists()
+    status = json.loads((run_dir / 'approvals/spec_authorization.status.json').read_text())
+    assert 'request_nonce' not in status and 'sign_command' not in status
+
+
+
+@pytest.mark.parametrize('override, login, trusted', [
+    (None, 'xy7365527-lang', True), (None, 'Newchanlun', False), (None, 'untrusted', False),
+    ('fixture-orchestrator', 'fixture-orchestrator', True), ('fixture-orchestrator', 'xy7365527-lang', False)])
+def test_orchestrator_login_does_not_follow_the_repository_owner(queued, monkeypatch, override, login, trusted):
+    from dataclasses import replace
+    v2, cutover, intake, signer = queued
+    if override is None:
+        monkeypatch.delenv('WAYFINDER_ORCHESTRATOR', raising=False)
+    else:
+        monkeypatch.setenv('WAYFINDER_ORCHESTRATOR', override)
+    unit = intake.register(TICKET)
+    moved = replace(v2.identity, repository='Newchanlun/NewChanlun')
+    v2.identity = v2.github.identity = moved
+    v2.github.repo = moved.repository
+    ex = executor(v2, cutover, unit)
+    assert ex.gateway.owner == 'Newchanlun'
+    publish_ruling(v2)
+    v2.github.issues[SPEC]['comments'][-1]['user']['login'] = login
+    run_dir = PilotRun.run_dir(v2.home, unit.run_id)
+    if trusted:
+        ex.claim(run_dir)
+        assert (run_dir / f'spec/{SPEC}.md').exists()
+    else:
+        with pytest.raises(ApprovalRequired, match='awaiting_review'):
+            ex.claim(run_dir)
+        assert v2.writes() == []
+
+
+
+@pytest.mark.parametrize('ruling', [None, 'BLOCK'])
+def test_missing_ruling_is_reported_as_awaiting_review_not_a_human_stop(queued, ruling):
+    v2, cutover, intake, signer = queued
+    if ruling:
+        publish_ruling(v2, ruling)
+
+    def child(unit):
+        try:
+            executor(v2, cutover, unit).claim(PilotRun.run_dir(v2.home, unit.run_id))
+        except ApprovalRequired:
+            return 0
+        return 75
+
+    rows = intake.once(child)
+    run_dir = PilotRun.run_dir(v2.home, f't{TICKET}-1')
+    status = json.loads((run_dir / 'approvals/spec_authorization.status.json').read_text())
+    assert rows[TICKET]['phase'] == 'awaiting_review' and status['status'] == 'awaiting_review'
+    assert status['reason'].startswith('review_block' if ruling else 'awaiting_review')
+    page = (v2.source / '.sandcastle/logs/deepagents-status.md').read_text()
+    assert page.index('## awaiting_review') < page.index(f'- #{TICKET} ') < page.index('## awaiting_human')
+    publish_ruling(v2)
+    assert intake.once(child)[TICKET]['phase'] == 'active'
+
+
+def test_low_disk_continues_reconciling_later_merged_ticket(delivered, monkeypatch):
+    from types import SimpleNamespace
+
+    from pilot1742 import run as module
+    from pilot1742.executor import delivery_status
+    v2, intake, unit, head, run_dir = delivered
+    lower = TICKET - 1
+    v2.github.add_issue(lower, body=f'Part of [SPEC #{SPEC}]', parent=SPEC,
+                        labels=('ready-for-agent', 'deepagents:queue'))
+    lower_unit = intake.register(lower)
+    executor(v2, intake.cutover, lower_unit).claim(PilotRun.run_dir(v2.home, lower_unit.run_id))
+    (pr,) = v2.github.pulls
+    v2.github.merge_pull(pr)
+    monkeypatch.setattr(module, 'DISPATCH_FREE_BYTES', 100)
+    monkeypatch.setattr(module.shutil, 'disk_usage', lambda _: SimpleNamespace(free=99))
+    for _ in range(2):
+        rows = intake.once(lambda _: pytest.fail('low disk dispatched work'))
+        assert rows[lower]['phase'] == 'queued'
+        assert rows[TICKET]['delivery_phase'] == 'merged'
+        assert delivery_status(run_dir)['phase'] == 'merged'
+
+
+def test_current_ruling_overwrites_historical_pending_and_preserves_raw_spec(queued):
+    from approval_signing.protocol import spec_target
+
+    from pilot1742.approval import signed_spec, spec_ruling_digest
+    v2, cutover, intake, signer = queued
+    v2.github.issues[SPEC]['body'] = '# 中文\r\ndeepagents-scope: demo/\r\n \t'
+    unit = intake.register(TICKET)
+    run_dir = PilotRun.run_dir(v2.home, unit.run_id)
+    folder = run_dir / 'approvals'
+    folder.mkdir(parents=True)
+    (folder / 'spec_authorization.status.json').write_text('{"status":"awaiting_human","request_nonce":"old"}')
+    publish_ruling(v2)
+    ex = executor(v2, cutover, unit)
+    ex.claim(run_dir)
+    body = v2.github.issues[SPEC]['body'].encode()
+    frozen = signed_spec(run_dir, SPEC)
+    assert frozen.body == body and frozen.target == spec_target(SPEC, body).encode()
+    note = json.loads((run_dir / f'spec/{SPEC}.json').read_text())
+    assert note['digest'] == spec_ruling_digest(body.decode()) and 'request_nonce' not in note
+    rows = intake.once(lambda _: 75)
+    assert rows[TICKET]['phase'] == 'active'
+
+
+@pytest.mark.parametrize('candidate_required', [False, True])
+def test_push_then_revocation_resumes_same_delivery_without_duplicate_upload(queued, candidate_required):
+    from dataclasses import replace
+
+    from conftest import FAKE, MODELS
+
+    from pilot1742.executor import load_unit, open_v2_run
+    v2, cutover, intake, signer = queued
+    unit = replace(intake.register(TICKET), candidate_approval=candidate_required)
+    publish_ruling(v2)
+    ex = executor(v2, cutover, unit)
+    task = load_unit(v2.home, unit.run_id)[1]
+    run = open_v2_run(v2.home, unit, task, ex, MODELS, launcher=FAKE, source_repo=v2.source)
+    try:
+        head = v2.to_pass(run)
+        if candidate_required:
+            assert run.publish_candidate()['decision'] == 'awaiting_approval'
+            assert v2.github.ref(unit.branch) is None
+            signer.publish(run.dir / 'approvals/candidate_head.request', Decision.APPROVE)
+        revoked = False
+        def revoke(point):
+            nonlocal revoked
+            if point == 'after_push_before_receipt' and not revoked:
+                revoked = True
+                publish_ruling(v2, 'BLOCK')
+        ex.crash = revoke
+        assert run.publish_candidate()['decision'] == 'awaiting_approval'
+        assert revoked and v2.github.ref(unit.branch) == head and not v2.github.pulls
+        before = v2.writes()
+        assert run.publish_candidate()['decision'] == 'awaiting_approval'
+        assert before == v2.writes()
+        publish_ruling(v2)
+        assert run.publish_candidate()['phase'] == 'awaiting_merge'
+        assert v2.github.count('POST', r'.*/git/refs') == 1
+        assert v2.github.count('POST', r'.*/pulls') == 1
+    finally:
+        run.release()
+
+
+@pytest.mark.parametrize('label', ['needs-approval', 'ready-for-human', 'needs-info', 'needs-triage', 'wontfix'])
+def test_typescript_release_and_python_intake_share_hold_policy(queued, label, wayfinder_engine_path):
+    import subprocess
+    v2, cutover, intake, signer = queued
+    module = wayfinder_engine_path
+    script = """const m = await import(process.argv[1]);
+      let wrote = false;
+      // 只比较两侧的 hold 策略：票是 map SPEC 计划内、带当前发布凭据的直挂票（#1915 a2 的放行前提）。
+      const body = 'fixture SPEC\\n<!-- wayfinder-split -->\\n```json\\n{"tickets":[{"id":"S1","title":"queue fixture"}]}\\n```', specNumber = 7;
+      const ruling = m.specRulingBody({specNumber, verdict:'PASS', author:'fixture-author',
+        reviewer:'fixture-reviewer', digest:m.specBodyDigest(body), evidence:'/fixture/review.json'});
+      const ticketBody = '<!-- wayfinder-ticket:7:S1 -->\\n<!-- wayfinder-published:7:' + m.specBodyDigest(body) + ':S1 -->\\n';
+      const read = cmd => JSON.stringify(cmd.includes('/comments')
+        ? [{user:{login:'fixture'}, body:ruling, created_at:'2026-11-07T00:00:00Z'}]
+        : cmd.startsWith('issue view 7 ')
+          ? {number:7, title:'SPEC: fixture', body, state:'OPEN'}
+          : {title:'[impl] S1 queue fixture', body:ticketBody, state:'OPEN', labels:[{name:process.argv[2]}], assignees:[]});
+      m.releaseTicket(4242, {specs:[specNumber], orchestrator:'fixture', via:'plan'}, {read,
+        write: () => {wrote = true; return ''; }}, 'deepagents:queue');
+      console.log(JSON.stringify(wrote));"""
+    result = subprocess.run(['node', '--experimental-strip-types', '--input-type=module', '-e', script,
+                             module.as_uri(), label], text=True, capture_output=True, check=True)
+    assert json.loads(result.stdout) is False  # needs-approval 仍是 hold 标签，与 graph-run「逐张核后再摘」一致
+    v2.github.issues[TICKET]['labels'].append(label)
+    with pytest.raises(AdmissionRefused):
+        intake.register(TICKET)
+    assert not v2.writes()
+
+
+@pytest.mark.parametrize('body', ['# SPEC\ndeepagents-scope: other/\n', '# SPEC\n'])
+def test_claim_halted_when_authorized_scope_changes(queued, body):
+    v2, cutover, intake, _ = queued
+    unit = intake.register(TICKET)
+    publish_ruling(v2)
+    ex = executor(v2, cutover, unit)
+    run_dir = PilotRun.run_dir(v2.home, unit.run_id)
+    claim = ex.claim(run_dir)
+    v2.github.issues[SPEC]['body'] = body
+    publish_ruling(v2)
+    before = v2.writes()
+    with pytest.raises(Halted):
+        with ex.action('dispatch', run_dir, claim.generation):
+            pytest.fail('scope change must fence dispatch')
+    assert v2.claim_record()['state'] == 'halted'
+    assert v2.writes() == before
+
+
+@pytest.mark.parametrize('body', ['# SPEC\ndeepagents-scope: other/\n', '# SPEC\n'])
+def test_restart_persists_scope_fence(queued, body):
+    from conftest import FAKE, MODELS
+
+    from pilot1742.executor import load_unit, open_v2_run
+    v2, cutover, intake, _ = queued
+    unit = intake.register(TICKET)
+    publish_ruling(v2)
+    task = load_unit(v2.home, unit.run_id)[1]
+    run = open_v2_run(v2.home, unit, task, executor(v2, cutover, unit), MODELS,
+                      launcher=FAKE, source_repo=v2.source)
+    run.release()
+    v2.github.issues[SPEC]['body'] = body
+    publish_ruling(v2)
+    before = v2.writes()
+    with pytest.raises((AdmissionRefused, QueueWaiting, Halted)):
+        open_v2_run(v2.home, unit, task, executor(v2, cutover, unit), MODELS,
+                    launcher=FAKE, source_repo=v2.source)
+    assert v2.claim_record()['state'] == 'halted'
+    assert v2.writes() == before
+
+
+def test_restart_pending_ruling_keeps_claim_and_resumes(queued):
+    from conftest import FAKE, MODELS
+
+    from pilot1742.executor import load_unit, open_v2_run
+    v2, cutover, intake, _ = queued
+    unit = intake.register(TICKET)
+    publish_ruling(v2)
+    task = load_unit(v2.home, unit.run_id)[1]
+    def reopen():
+        return open_v2_run(v2.home, unit, task, executor(v2, cutover, unit), MODELS,
+                           launcher=FAKE, source_repo=v2.source)
+    reopen().release()
+    publish_ruling(v2, 'BLOCK')
+    before = v2.writes()
+    with pytest.raises(ApprovalRequired):
+        reopen()
+    assert v2.claim_record()['state'] == 'active'
+    publish_ruling(v2)
+    reopen().release()
+    assert v2.writes() == before
+
+
+def test_low_disk_restart_collects_submitted_boat_without_new_dispatch(queued, monkeypatch):
+    from dataclasses import replace
+    from pathlib import Path
+
+    from conftest import FAKE, MODELS
+    from test_boat import FakeBoat, config, payload
+
+    from pilot1742.boat_execution import BoatBinding, BoatConfig, BoatExecution, BoatRun
+    from pilot1742.domain import Terminal, WorkerKey
+    from pilot1742.executor import load_unit, open_v2_run
+    from pilot1742.run import InsufficientSpace
+    v2, cutover, intake, _ = queued
+    unit = intake.register(TICKET)
+    publish_ruling(v2)
+    task = load_unit(v2.home, unit.run_id)[1]
+    run = open_v2_run(v2.home, unit, task, executor(v2, cutover, unit), MODELS,
+                      launcher=FAKE, source_repo=v2.source)
+    run.spec = replace(run.spec, execution=BoatRun(BoatConfig.parse(config()), v2.base))
+    (run.dir / 'run.json').write_text(json.dumps(run.spec.to_json()))
+    run.execution = BoatExecution(run)
+    key = WorkerKey(unit.run_id, 'author', v2.base)
+    (run.dir / 'intents').mkdir(exist_ok=True)
+    (run.dir / 'intents' / f'{key.name}.json').write_text('{}')
+    binding = BoatBinding(run.execution._identity(key), 'vm-author', 'p1', '/home/user/fixture/p1',
+                          'submitted', sandbox_id='bx_fixture')
+    run.execution._store(key, binding)
+    package = run.dir / 'boat/packages/p1'
+    package.mkdir(parents=True)
+    (package / 'request.json').write_text(json.dumps({'spec': run.signed_spec().target}))
+    receipt = payload(run, run.execution, key, [dict(path='demo/recovered', mode='100644', content='b2s=')])
+    run.release()
+    stops = []
+    def scp(source, target):
+        Path(target).write_text(json.dumps(receipt))
+        return []
+    cli = FakeBoat(info=lambda: {'state': 'stopped' if stops else 'running'}, scp=scp,
+                   stop=lambda *a: stops.append(a) or [{'operation': {'id': 'stop_1'}}],
+                   exec=lambda command: {} if command.startswith('rm -f') else
+                   {'identity': binding.identity, 'package_id': 'p1', 'state': 'receipt'})
+    _low_disk(monkeypatch, 0)
+    seen = []
+    def child(current):
+        seen.append(current.run_id)
+        recovered = open_v2_run(v2.home, current, task, executor(v2, cutover, current), MODELS,
+                                launcher=FAKE, source_repo=v2.source)
+        try:
+            recovered.execution.cli = cli
+            assert isinstance(recovered.execution.observe(key), Terminal)
+            assert (Path(recovered.spec.author_checkout) / 'demo/recovered').read_text() == 'ok'
+            assert recovered.execution.load(key).stop_confirmed
+            with pytest.raises(InsufficientSpace):
+                recovered.execution.submit(WorkerKey(unit.run_id, 'review', v2.base))
+        finally:
+            recovered.release()
+        return 75
+    intake.once(child)
+    assert seen == [unit.run_id], 'low disk must not block recovery of submitted workers'
+    before = list(cli.calls)
+    intake.once(child)
+    assert len(stops) == 1 and cli.calls == before, 'terminal adoption must not repeat remote work'
+
+
+@pytest.mark.parametrize('remote_running', [False, True])
+def test_low_disk_unclaimed_boat_adopts_only_existing_command(env, monkeypatch, remote_running):
+    from test_boat import history_engine
+
+    from pilot1742.domain import Running
+    from pilot1742.run import InsufficientSpace
+    run, engine, key, binding, launches = history_engine(env, 'submitting', [])
+    if remote_running:
+        engine.cli.handlers['history'] = [{'commands': [{
+            'status': 'running', 'commandId': 'original', 'processId': 5,
+            'command': engine._command(binding, 'submit')}]}]
+    _low_disk(monkeypatch, 0)
+    try:
+        if remote_running:
+            assert isinstance(engine.observe(key), Running)
+            assert engine.load(key).command_id == 'original'
+            engine.submit(key)
+        else:
+            with pytest.raises(InsufficientSpace):
+                engine.observe(key)
+        assert launches == []
+    finally:
+        run.release()
+
+
+def test_low_disk_existing_checkout_cannot_start_fresh_worker(env, monkeypatch):
+    from pilot1742.run import InsufficientSpace
+    run = env.create()
+    _low_disk(monkeypatch, 0)
+    try:
+        with pytest.raises(InsufficientSpace):
+            run.run_worker('author', 'implement')
+        assert env.claims() == [] and not (run.dir / 'intents').exists()
+    finally:
+        run.release()
+
+
+def engine_hold(v2):
+    """引擎迁移旧票时的持有判定：真实 withTicketHold 读本机持有记录，migrationHold 读当前票面。"""
+    import subprocess
+    from pathlib import Path
+    root = Path(__file__).resolve().parents[3]
+    issue = v2.github.issues[TICKET]
+    view = {'state': issue['state'].upper(), 'labels': [{'name': n} for n in issue['labels']],
+            'assignees': issue.get('assignees') or []}
+    script = '''const e = await import(process.argv[1]); const c = await import(process.argv[2]);
+      const why = await c.withTicketHold(Number(process.argv[3]),
+        claim => e.migrationHold(JSON.parse(process.argv[4]), claim), process.argv[5]);
+      console.log(JSON.stringify(why));'''
+    out = subprocess.run(['node', '--experimental-strip-types', '--input-type=module', '-e', script,
+                          (root / 'scripts' / 'wayfinder_engine.mts').as_uri(),
+                          (root / '.sandcastle' / 'deepagents-cutover.mts').as_uri(),
+                          str(TICKET), json.dumps(view), str(v2.claims_root)],
+                         check=True, capture_output=True, text=True).stdout
+    return json.loads(out.strip().splitlines()[-1])
+
+
+def test_release_after_merge_ends_hold_on_github_and_is_not_redispatched(queued):
+    from conftest import FAKE, MODELS
+
+    from pilot1742.executor import load_unit, open_v2_run, release_claim
+    v2, cutover, intake, signer = queued
+    unit = intake.register(TICKET)
+    authorize(v2, cutover, unit, signer)
+    run = open_v2_run(v2.home, unit, load_unit(v2.home, unit.run_id)[1], executor(v2, cutover, unit), MODELS,
+                      launcher=FAKE, source_repo=v2.source)
+    v2.to_pass(run)
+    pr = run.publish_candidate()['pr']['number']
+    run.release()
+    assert 'deepagents' in v2.github.issues[TICKET]['labels']
+    assert '正由' in engine_hold(v2), 'awaiting_merge 期间引擎仍视为持有'
+    v2.github.merge_pull(pr)
+    assert intake.once(lambda _unit: pytest.fail('merged run restarted'))[TICKET]['delivery_phase'] == 'merged'
+    assert '正由' in engine_hold(v2), '合入不等于释放'
+
+    released = release_claim(intake.claims, v2.gateway(), TICKET, unit.run_id, '已合入')
+    assert released.state == 'released' and not released.mirror_label
+    assert 'deepagents' not in v2.github.issues[TICKET]['labels'], '释放摘镜像，持有结束在 GitHub 上可见'
+    assert 'deepagents:queue' in v2.github.issues[TICKET]['labels'], '释放只摘镜像'
+    assert engine_hold(v2) is None, '真实释放之后引擎可迁移'
+    again = release_claim(intake.claims, v2.gateway(), TICKET, unit.run_id, '重试')
+    assert again.state == 'released' and not again.mirror_label, '释放可重试'
+
+    rows = intake.once(lambda _unit: pytest.fail('merged delivery re-dispatched after release'))
+    assert rows[TICKET]['phase'] == 'awaiting_human' and '已合入' in rows[TICKET]['reason']
+    assert len(list((v2.home / 'units').glob('*.json'))) == 1
+
+
+def test_release_after_unobserved_merge_is_not_redispatched(queued):
+    from conftest import FAKE, MODELS
+
+    from pilot1742.executor import load_unit, open_v2_run, release_claim
+    v2, cutover, intake, signer = queued
+    unit = intake.register(TICKET)
+    authorize(v2, cutover, unit, signer)
+    run = open_v2_run(v2.home, unit, load_unit(v2.home, unit.run_id)[1], executor(v2, cutover, unit), MODELS,
+                      launcher=FAKE, source_repo=v2.source)
+    v2.to_pass(run)
+    v2.github.merge_pull(run.publish_candidate()['pr']['number'])
+    run.release()
+    release_claim(intake.claims, v2.gateway(), TICKET, unit.run_id, '释放早于队列观察到合入')
+    rows = intake.once(lambda _unit: pytest.fail('merged delivery re-dispatched after release'))
+    assert rows[TICKET]['phase'] == 'awaiting_human' and '已合入' in rows[TICKET]['reason']
+
+
+def test_registered_rerun_is_not_executed_after_earlier_delivery_merges(queued):
+    from conftest import FAKE, MODELS
+
+    from pilot1742.executor import load_unit, open_v2_run, release_claim
+    v2, cutover, intake, signer = queued
+    unit = intake.register(TICKET)
+    authorize(v2, cutover, unit, signer)
+    run = open_v2_run(v2.home, unit, load_unit(v2.home, unit.run_id)[1], executor(v2, cutover, unit), MODELS,
+                      launcher=FAKE, source_repo=v2.source)
+    v2.to_pass(run)
+    pr = run.publish_candidate()['pr']['number']
+    run.release()
+    release_claim(intake.claims, v2.gateway(), TICKET, unit.run_id, '主控退回')
+    assert intake.register(TICKET).run_id == f't{TICKET}-2'
+    v2.github.merge_pull(pr)
+    rows = intake.once(lambda _unit: pytest.fail('registered rerun executed after earlier delivery merged'))
+    assert rows[TICKET]['phase'] == 'awaiting_human' and '已合入' in rows[TICKET]['reason']
+
+
+def test_release_keeps_mirror_until_drained_and_old_release_cannot_strip_new_generation(queued):
+    import fcntl
+    import os
+
+    from pilot1742.claims import ClaimRefused
+    from pilot1742.executor import release_claim
+    v2, cutover, intake, signer = queued
+    unit = intake.register(TICKET)
+    authorize(v2, cutover, unit, signer)
+    run_dir = PilotRun.run_dir(v2.home, unit.run_id)
+    assert executor(v2, cutover, unit).claim(run_dir).state == 'active'
+    controller = os.open(run_dir / 'owner.lock', os.O_RDWR | os.O_CREAT, 0o600)
+    fcntl.flock(controller, fcntl.LOCK_EX)
+    try:
+        pending = release_claim(intake.claims, v2.gateway(), TICKET, unit.run_id, '主控退回')
+        assert pending.state == 'released' and pending.mirror_label, '控制进程未排空：记 released 但镜像保留'
+        assert 'deepagents' in v2.github.issues[TICKET]['labels']
+        assert '镜像' in engine_hold(v2), '释放未完成时引擎继续等待'
+    finally:
+        os.close(controller)
+    done = release_claim(intake.claims, v2.gateway(), TICKET, unit.run_id, '主控退回')
+    assert not done.mirror_label and 'deepagents' not in v2.github.issues[TICKET]['labels'], '排空后重试完成释放'
+    assert engine_hold(v2) is None
+
+    second = intake.register(TICKET)
+    assert second.run_id == f't{TICKET}-2'
+    second_dir = PilotRun.run_dir(v2.home, second.run_id)
+    assert executor(v2, cutover, second).claim(second_dir).generation == 2, '当前 SPEC 已有 PASS 裁定，第二代领取不再等人'
+    assert 'deepagents' in v2.github.issues[TICKET]['labels']
+    before = v2.writes()
+    with pytest.raises(ClaimRefused):
+        release_claim(intake.claims, v2.gateway(), TICKET, unit.run_id, '旧释放重试')
+    assert v2.writes() == before and 'deepagents' in v2.github.issues[TICKET]['labels'], '旧释放不碰新代次镜像'
+    assert '正由' in engine_hold(v2)

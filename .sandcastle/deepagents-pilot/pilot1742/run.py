@@ -107,6 +107,24 @@ class Busy(Exception):
     """同一 run 已有控制进程持锁。"""
 
 
+# 实测一个 run 的写入峰值约 11.7 GiB：t1758-1 两份 checkout 共 7.0 GiB，t1863-1 的 Boat 回收 4.7 GiB。
+DISPATCH_FREE_BYTES = 16 << 30
+
+
+class InsufficientSpace(Exception):
+    """写入卷剩余空间低于新增资源门槛；保留已有工作，空间恢复后同一入口重试。"""
+
+
+def require_free_space(path: Path) -> None:
+    existing = path.absolute()
+    while not existing.exists():
+        existing = existing.parent
+    free = shutil.disk_usage(existing).free
+    if free < DISPATCH_FREE_BYTES:
+        raise InsufficientSpace(f"{existing} 所在卷可用 {free} bytes，低于派工门槛 {DISPATCH_FREE_BYTES} bytes；"
+                                "本次新增资源已阻止，已有工作可继续恢复")
+
+
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
@@ -157,11 +175,16 @@ class RolePlan:
     judge: ModelSlug
 
 
+def read_model_rules(source: Path | None = None) -> str:
+    """显式项目来源不回退；未指定时保留全局默认。"""
+    return (source if source is not None else PSTACK_MODELS).read_text(encoding="utf-8")
+
+
 def plan_roles(text: str) -> RolePlan:
     """从 pstack-models.md 派生：feature 行作者、judgment 行独审、hardest 行主控、architect runners 行前两个做设计候选、
     arena cross-judge pool 里第一个与主控不同家族的模型做交叉裁判。"""
     rows = {key.strip(): [m.strip() for m in value.split(",") if m.strip()]
-            for key, value in (line.split(":", 1) for line in text.splitlines()
+            for key, value in (line.split(":", 1) for line in (line.split("#", 1)[0] for line in text.splitlines())
                                if ":" in line and not line.lstrip().startswith("#"))}
     missing = [name for name in ("feature, refactoring", "judgment and prose", "hardest tasks", "architect runners",
                                  "arena cross-judge pool") if not rows.get(name)]
@@ -198,9 +221,12 @@ class RunSpec:
     v: int = 1
     work_unit: dict | None = None
     execution: RunExecution = HistoricalLocal()
+    model_rules_text: str | None = None
 
     def to_json(self) -> dict:
         data = asdict(self)
+        if self.model_rules_text is None:
+            data.pop("model_rules_text")
         if self.v == 1:
             data.pop("v")
             data.pop("work_unit")
@@ -236,7 +262,8 @@ class RunSpec:
                        parse_model(data["author_model"]), parse_model(data["reviewer_model"]),
                        parse_model(data["brain_model"]), data["author_checkout"], data["review_checkout"],
                        data["created_at"], (parse_model(design[0]), parse_model(design[1])) if design else None,
-                       parse_model(judge) if judge else None, version, unit, parse_execution(data.get("execution")))
+                       parse_model(judge) if judge else None, version, unit, parse_execution(data.get("execution")),
+                       data.get("model_rules_text"))
 
     def model_for(self, role: Role) -> ModelSlug:
         if role == "author":
@@ -352,7 +379,7 @@ def parse_approval_ledger(text: str) -> tuple[list[ApprovalRecord], list[str]]:
     """主控登记的人类批准账本。合成、代理来源或缺出处的行不计入，只进诊断。"""
     records: list[ApprovalRecord] = []
     problems: list[str] = []
-    comment_url = re.compile(rf"https://github\.com/xy7365527-lang/NewChanlun/issues/{TICKET}#issuecomment-\d+")
+    comment_url = re.compile(rf"https://github\.com/(?:xy7365527-lang|Newchanlun)/NewChanlun/issues/{TICKET}#issuecomment-\d+")
     for n, line in enumerate(text.splitlines(), 1):
         if not line.strip():
             continue
@@ -452,7 +479,7 @@ class PilotRun:
         checkouts = home / "checkouts" / run_id
         spec = RunSpec(run_id, TICKET, "pilot_acceptance", base, task, plan.author, plan.reviewer, plan.brain,
                        str(checkouts / "author"), str(checkouts / "review"), _now(), plan.design, plan.judge,
-                       execution=cls._frozen_execution(root, kw))
+                       execution=cls._frozen_execution(root, kw), model_rules_text=models_text)
         run = cls(home, spec, **kw)
         run.acquire()
         if not (root / "run.json").exists():
@@ -472,10 +499,11 @@ class PilotRun:
         checkouts = home / "checkouts" / unit.run_id
         spec = RunSpec(unit.run_id, unit.ticket, None, unit.base, task, plan.author, plan.reviewer, plan.brain,
                        str(checkouts / "author"), str(checkouts / "review"), _now(), plan.design, plan.judge,
-                       2, unit.to_json(), cls._frozen_execution(cls.run_dir(home, unit.run_id), kw))
+                       2, unit.to_json(), cls._frozen_execution(cls.run_dir(home, unit.run_id), kw), models_text)
         run = cls(home, spec, executor=executor, **kw)
         run.acquire()
         try:
+            require_free_space(home)
             run.bind_claim()
             if not (run.dir / "run.json").exists():
                 _write_once(run.dir / "run.json", spec.to_json())
@@ -591,6 +619,7 @@ class PilotRun:
     def _ensure_checkout(self, role: Role, head: Sha) -> None:
         path, branch = self.spec.checkout_for(role), self.spec.branch_for(role)
         if not path.exists():
+            require_free_space(path.parent)
             path.parent.mkdir(parents=True, exist_ok=True)
             exists = subprocess.run(["git", "-C", str(self.source_repo), "rev-parse", "--verify", "-q",
                                      f"refs/heads/{branch}"], capture_output=True).returncode == 0
@@ -719,6 +748,7 @@ class PilotRun:
         return DEEPAGENTS_OUTPUT_PROTOCOL if declaration in source.splitlines() else "legacy"
 
     def _prepare_dispatch(self, key: WorkerKey, brief: str, facts: RunFacts) -> None:
+        require_free_space(self.dir)
         model = self.spec.model_for(key.role)
         checkout = self.spec.checkout_for(key.role)
         if key.role != "author":
@@ -748,6 +778,7 @@ class PilotRun:
                 self.execution.submit(key)
             self.trail("boat_dispatched", key=key.name)
             return
+        require_free_space(self.dir)
         intent = json.loads((self.dir / "intents" / f"{key.name}.json").read_text())
         out = self._key_dir(key)
         out.parent.mkdir(parents=True, exist_ok=True)

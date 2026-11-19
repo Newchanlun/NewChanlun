@@ -149,6 +149,15 @@ export const DEEPAGENTS_OUTPUT_SCHEMA = {
   required: [...OUTPUT_SCHEMA.required, "confidence", "caveats"],
 } as const;
 
+/** #1968：精确模型使用提示词 JSON，不传 --output-schema；结果仍由 CodexTranscript 严格消费。 */
+export const PROMPT_JSON_MODELS: ReadonlySet<string> = new Set(["kimi-k3.1-pro"]);
+
+export function workerOutputInstruction(protocol: OutputProtocol = "legacy"): string {
+  return "\n最终消息只输出一个 JSON 对象，不加 Markdown 代码围栏、不加其它文字。"
+    + "对象必须严格满足以下 JSON Schema（所有 required 键必须齐全，不得添加其他键）：\n"
+    + JSON.stringify(workerOutputSchema(protocol));
+}
+
 export function workerOutputSchema(protocol: OutputProtocol = "legacy") {
   return outputProtocol(protocol) === DEEPAGENTS_OUTPUT_PROTOCOL ? DEEPAGENTS_OUTPUT_SCHEMA : OUTPUT_SCHEMA;
 }
@@ -321,6 +330,13 @@ export async function boundedCodex(mode: ChildMode, schemaPath: string, env = wo
   };
 }
 
+/** 模型偶尔把最终 JSON 整段包进一个 ```json 围栏（#1912 run 75aad755）。只剥这一种整段包裹；
+ *  围栏外有任何其他文字仍原样返回，交给 JSON.parse 按无效 JSON 拒绝。Python 侧 unwrap_json_fence 同一规则。 */
+export function unwrapJsonFence(text: string): string {
+  const fenced = /^```(?:json)?[ \t]*\r?\n([\s\S]*?)\r?\n```$/.exec(text.trim());
+  return fenced ? fenced[1]! : text;
+}
+
 export class CodexTranscript {
   sessionId: string | null = null;
   finalText: string | null = null;
@@ -344,7 +360,7 @@ export class CodexTranscript {
       return;
     }
     const reconnect = event.type === "error" && typeof event.message === "string"
-      ? /^Reconnecting\.\.\. ([1-9]\d*)\/([1-9]\d*) \(stream disconnected before completion(?:: [^\r\n]+)?\)$/.exec(event.message) : null;
+      ? /^Reconnecting\.\.\. ([1-9]\d*)\/([1-9]\d*) \([^\r\n]+\)$/.exec(event.message) : null;
     if (reconnect && BigInt(reconnect[1]) <= BigInt(reconnect[2])) {
       this.reconnectPending = true;
       this.turnCompleted = false;
@@ -374,7 +390,7 @@ export class CodexTranscript {
     if (this.reconnectPending) throw new Error("Codex 重连后未完成");
     if (!this.sessionId || !this.turnCompleted || !this.finalText?.trim()) throw new Error("缺少 session_id、turn.completed 或最终结果");
     let value: unknown;
-    try { value = JSON.parse(this.finalText); } catch { throw new Error("Codex 最终结果不是有效 JSON"); }
+    try { value = JSON.parse(unwrapJsonFence(this.finalText)); } catch { throw new Error("Codex 最终结果不是有效 JSON"); }
     const result = value as Partial<DeepAgentsWorkerOutput> | null;
     const selfReport = this.protocol === DEEPAGENTS_OUTPUT_PROTOCOL;
     if (!result || typeof result !== "object" || Array.isArray(result)

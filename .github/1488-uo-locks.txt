@@ -1,3 +1,4 @@
+# 现状（#1932）：原读取本清单的 issue-1488-uo-iter.yml 已删除，不再逐名校验存在性。各锁仍在 ci.yml 中运行：不带 s_incremental 门的随 s_session 全量分片；带 #[cfg(feature = "s_incremental")] 的不进该分片，由 s_capture_native_testonly 特性差分步（该特性隐含 s_incremental）或其跳过清单指向的 #1488 Native 作业运行。
 # 原六 driver（判据逐字不变）
 v3::driver::tests::audit_owner_complete_accept_tail_begin_recover_retry_and_revision_qualification
 v3::driver::tests::audit_owner_complete_normal_second_connection_and_new_life_are_cold

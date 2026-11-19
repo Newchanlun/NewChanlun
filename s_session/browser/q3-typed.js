@@ -20,7 +20,7 @@
     "s2-axis-quantifiers+new-bi/2+segment-second/1": ["s-new-bi/2", "s-segment/2", KNOWLEDGE_DOMAINS[1]],
     "s2-axis-quantifiers+new-bi/2+segment-second/2": ["s-new-bi/2", "s-segment/3", KNOWLEDGE_DOMAINS[1]],
     // #1493（xianduan.md §7.1 第 7 条）：§7.1 写的 s-segment/3 已被 #1420 占用，本代段合同用 s-segment/4。
-    "s2-axis-quantifiers+new-bi/2+segment-second/2+segment-turn/1": ["s-new-bi/2", "s-segment/4", KNOWLEDGE_DOMAINS[1]], "s2-axis-quantifiers+new-bi/2+segment-second/2+segment-turn/1+second-seq-scan-budget/2": ["s-new-bi/2", "s-segment/5", KNOWLEDGE_DOMAINS[1]], // #1604：预算 token 必填值 v1→v2 ⟹ 规则加 token、段合同升 /5（形状同 /4）
+    "s2-axis-quantifiers+new-bi/2+segment-second/2+segment-turn/1": ["s-new-bi/2", "s-segment/4", KNOWLEDGE_DOMAINS[1]], "s2-axis-quantifiers+new-bi/2+segment-second/2+segment-turn/1+second-seq-scan-budget/2": ["s-new-bi/2", "s-segment/5", KNOWLEDGE_DOMAINS[1]], "s2-axis-quantifiers+new-bi/2+segment-second/2+segment-turn/1+second-seq-scan-budget/2+segment-first-own/1": ["s-new-bi/2", "s-segment/5", KNOWLEDGE_DOMAINS[1]], // #1604：预算 token 必填值 v1→v2 ⟹ 规则加 token、段合同升 /5（形状同 /4）；#1978：流首段规则 token，段合同仍 /5
   };
   // #1491 ADR 0037 §五/§六：rule_revision 的布局组件与教义组件正交。轴表/合同只看去掉布局组件后的
   // 教义串；串内无 `bounded-layout` 组件即 layout/1（定义，不是兜底）；未知或重复布局组件一律拒收。

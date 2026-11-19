@@ -9,6 +9,9 @@
 3. 解析 dag.yaml edges → relations.jsonl（created_by = genesis block id）
 4. 生成 meta.json（id_mapping + genesis_block_id）
 
+dag.yaml 已随早年蜂群机制退役（#1952）移出仓库；文件不存在时第 3 步写 0 条边，
+区块与 meta.json 照常生成。
+
 编排者决断：
 - migration 区块 refs 一律为空（关系全走边表）
 - created_by 字段类型始终为 SHA256（genesis 区块 id）
@@ -245,6 +248,21 @@ def migrate_settled_files(
     return id_mapping, blocks
 
 
+def _load_dag_edges(dag_path: Path) -> dict:
+    """Return the ``edges`` mapping of dag.yaml, or {} when it is absent.
+
+    The genealogy DAG (.chanlun/genealogy/dag.yaml) was retired with the early
+    swarm mechanism (#1952). Without it there are no edges to migrate, but
+    blocks and meta.json must still be written, so a missing file means
+    "zero edges" rather than an error that leaves orphan blocks behind.
+    """
+    if not dag_path.exists():
+        return {}
+    with open(dag_path, "r", encoding="utf-8") as f:
+        dag = yaml.safe_load(f) or {}
+    return dag.get("edges", {}) or {}
+
+
 def migrate_edges(
     dag_path: Path,
     id_mapping: dict[str, str],
@@ -255,10 +273,7 @@ def migrate_edges(
 
     Returns count of relations written.
     """
-    with open(dag_path, "r", encoding="utf-8") as f:
-        dag = yaml.safe_load(f)
-
-    edges = dag.get("edges", {})
+    edges = _load_dag_edges(dag_path)
     count = 0
 
     # depends_on: directed {from, to}
@@ -333,11 +348,21 @@ def migrate_edges(
     return count
 
 
+class RebuildRefused(RuntimeError):
+    """Full rebuild would overwrite an existing meta.json; pass force=True."""
+
+
 def run_migration(
     project_root: Path | None = None,
     base: Path | None = None,
+    force: bool = False,
 ) -> dict:
-    """Execute full migration.
+    """Execute full migration (destructive: rewrites meta.json).
+
+    Refuses when meta.json already exists unless force=True. Since #1952 most
+    settled genealogy files and dag.yaml are out of the repo, so a rebuild
+    from what is on disk would drop most of id_mapping plus
+    content_enrichment / last_mapped_genealogy. Use --incremental instead.
 
     Returns meta dict with migration results.
     """
@@ -348,6 +373,12 @@ def run_migration(
 
     settled_dir = project_root / ".chanlun" / "genealogy" / "settled"
     dag_path = project_root / ".chanlun" / "genealogy" / "dag.yaml"
+
+    if not force and read_meta(base) is not None:
+        raise RebuildRefused(
+            f"{base / 'meta.json'} already exists; a full rebuild would replace "
+            "its id_mapping and drop content_enrichment. Use --incremental, or "
+            "pass --force to rebuild anyway.")
 
     print(f"[migration] Project root: {project_root}")
     print(f"[migration] Target: {base}")
@@ -563,9 +594,7 @@ def _migrate_edges_deduped(
     except FileNotFoundError:
         pass
 
-    with open(dag_path, "r", encoding="utf-8") as f:
-        dag = yaml.safe_load(f)
-    edges = dag.get("edges", {})
+    edges = _load_dag_edges(dag_path)
     count = 0
 
     def emit(from_id: str, to_id: str, relation: str, **extra) -> None:
@@ -637,6 +666,9 @@ if __name__ == "__main__":
         "--dry-run", action="store_true",
         help="With --incremental: print the migration plan (target ids, "
              "549 edge-skip status) without writing anything")
+    parser.add_argument(
+        "--force", action="store_true",
+        help="Allow the destructive full rebuild even when meta.json exists")
     args = parser.parse_args()
 
     if args.incremental:
@@ -648,7 +680,10 @@ if __name__ == "__main__":
             else:
                 print(f"  {k}: {v}")
     else:
-        meta = run_migration()
+        try:
+            meta = run_migration(force=args.force)
+        except RebuildRefused as exc:
+            raise SystemExit(f"[migration] refused: {exc}")
         print(f"\nMigration complete.")
         print(f"  Blocks: {meta['block_count']}")
         print(f"  Relations: {meta['relation_count']}")

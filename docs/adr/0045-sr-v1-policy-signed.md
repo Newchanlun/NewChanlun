@@ -80,3 +80,13 @@ SR-1 动作取冻结为 `[新缠论:选择]`；SR-1 可观察字段、SR-2 映�
 ## #1599 批复与受影响清单
 
 [用户批复](https://github.com/xy7365527-lang/NewChanlun/issues/1599#issuecomment-6403278294)；[受影响清单](../../.chanlun/review-results/issue1599-policy-20261026/affected-code.md)含固定基线、Rust/Python/Lean 接缝及下游未承接项。本次为政策文书，不声称实现或关票；新增自由度为 `[新缠论:选择]`，既裁不变量不变。
+
+## 修订（#1540，SR-3 与发送门的边界，2026-11-07）
+
+（append-only：签署值与以上各节原文不改。依据 #1540 主控裁定 [裁定评论 6702983888](https://github.com/Newchanlun/NewChanlun/issues/1540#issuecomment-6702983888)；Q5 的实现机制按 [修订裁定 6717784668](https://github.com/Newchanlun/NewChanlun/issues/1540#issuecomment-6717784668)（2026-11-08：0045:24 读法照旧，P1 机器层核验改为独立的发送前置件），正本 [ADR 0062](0062-fu18-venue-account-permission-binding.md)。）
+
+1. **SR-3 v1 签署原样保留，不升版重签。** 判据、范围、动作与 `P1_experiment_never_fires` 都不变。:24 的读法照旧：ADR 0028:46 的五项失效触发只在 `production` profile 下构成 SR-3 条件。
+2. **发送门不是 SR-3 的失效触发。** ADR 0062 裁定五让 X 在 `experiment` 上也核 ADR 0028:46 的四项组成，这是一个独立的发送前置件：触发条件是每次 X 启动后、首个写传输前，不判定、不登记失效触发是否发生；产物是 X 库绑定行与启动记录（含 `send_state`）（拒发带 `send_refusal_class` / `send_refusal_detail`）。发送门拒发不写 SR 条件记录、冻结态或退出授权记录，也不改变 SR-3 五项触发的定义。
+3. **哪个签署管哪件事。** SR-3 是否触发、冻结与退出授权，由本 ADR 的 SR 清单 v1 管；本 epoch 能否发送，由 ADR 0062 裁定五管。
+4. **例子。** P1 profile 从 v1 升到 v2 后以 `writer_epoch` 8 重启，指纹仍按 v1：SR-3 不触发，记录 0 条；发送门第 6 步拒发，`IdentityConflict` / `Tb09Fingerprint`，写请求 0 个。逐步推演见 ADR 0062 裁定五。
+5. **回退。** 用户如要四项核验只在 production 做，说一句即回退成 Q5 = B。代价是 TB-09 无法在 P1 上满足 AT-09「被真实部署阻止」。回退不影响本清单任何签署值。

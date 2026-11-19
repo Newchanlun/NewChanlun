@@ -1,12 +1,15 @@
 import json
 import os
+import runpy
 import signal
+import sys
 import time
+from pathlib import Path
 
 import pytest
-from conftest import DESIGN_TASK, MODELS, git
+from conftest import DESIGN_TASK, FAKE, MODELS, git
 
-from pilot1742.domain import Approved, Awaiting, Refused, WorkerKey
+from pilot1742.domain import Approved, Awaiting, Refused, Terminal, WorkerKey
 from pilot1742.run import (
     Busy,
     Halted,
@@ -138,6 +141,57 @@ def test_crash_after_spawn_before_launch_record_adopts_the_detached_worker(env):
     assert not list((env.home / "runs" / "r1" / "launch").glob("*.json"))
     assert env.reopen().run_worker("author", "恢复").status == "completed"
     assert env.claims() == [f"author-{env.base}"]
+
+
+@pytest.mark.parametrize("name", ["state.json", "result.json"])
+def test_fake_receipt_is_invisible_until_fully_written(env, monkeypatch, name):
+    run = env.create()
+    key = WorkerKey(run.spec.run_id, "author", env.base)
+    out = run.dir / "workers" / key.name
+    out.parent.mkdir(parents=True, exist_ok=True)
+    original_open = Path.open
+    observed = []
+
+    def inspect_open(path, mode="r", *args, **kwargs):
+        stream = original_open(path, mode, *args, **kwargs)
+        if mode == "w" and path.parent == out and path.name in (name, name + ".tmp"):
+            try:
+                # 在创建空文件后、写入 JSON 前观察，不依赖 sleep 或调度概率。
+                assert not (out / name).exists()
+                fact = run._observe(key, [])
+                assert "工蜂回执无法解析" not in getattr(fact, "reason", "")
+                observed.append(path)
+            except BaseException:
+                stream.close()
+                raise
+        return stream
+
+    monkeypatch.setattr(Path, "open", inspect_open)
+    monkeypatch.setattr(sys, "argv", [FAKE[1], "--output-dir", str(out),
+                                    "--checkout", str(env.source), "--ticket", "1742",
+                                    "--expected-head", env.base, "--mode", "execute",
+                                    "--model", run.spec.author_model])
+    with pytest.raises(SystemExit) as exited:
+        runpy.run_path(FAKE[1], run_name="__main__")
+    assert exited.value.code == 0
+    assert len(observed) == 1
+    assert not list(out.glob("*.tmp"))
+    assert json.loads((out / "state.json").read_text())["status"] == "running"
+    fact = run._observe(key, [])
+    assert isinstance(fact, Terminal)
+    assert fact.receipt.status == "completed"
+    assert env.claims() == [key.name]
+
+
+@pytest.mark.parametrize("name", ["state.json", "result.json"])
+def test_published_empty_receipt_still_halts(env, name):
+    run = env.create()
+    out = run.dir / "workers" / f"author-{env.base}"
+    out.mkdir(parents=True)
+    (out / name).write_text("")
+    with pytest.raises(Halted, match="工蜂回执无法解析"):
+        run.run_worker("author", "恢复")
+    assert env.claims() == []
 
 
 def test_claimed_dir_without_result_or_supervisor_halts_without_new_dispatch(env):
@@ -324,3 +378,31 @@ def test_parse_result_preserves_supported_model(tmp_path, model):
     parsed = parse_result(key, data, tmp_path)
     assert parsed.model == model
     assert parsed.key == key and parsed.status == "completed"
+
+
+def test_low_disk_mid_graph_dispatch_stops_before_intent_and_resumes_from_checkpoint(env, monkeypatch):
+    import sqlite3
+    from types import SimpleNamespace
+
+    from langchain_core.messages import AIMessage
+    from langgraph.checkpoint.sqlite import SqliteSaver
+    from test_agent import call, scripted
+
+    from pilot1742 import run as module
+    from pilot1742.agent import build_agent
+
+    run = env.create(task=DESIGN_TASK)
+    env.control(DESIGNS)
+    monkeypatch.setattr(module, "DISPATCH_FREE_BYTES", 100)
+    free = SimpleNamespace(free=99)
+    monkeypatch.setattr(module.shutil, "disk_usage", lambda _path: free)
+    model = scripted(call("run_worker", role="design", brief="设计"), AIMessage("设计完成"))
+    agent = build_agent(run, SqliteSaver(sqlite3.connect(run.dir / "graph.sqlite", check_same_thread=False)), model)
+    config = {"configurable": {"thread_id": "r1"}}
+    with pytest.raises(module.InsufficientSpace, match="派工门槛"):
+        agent.invoke({"messages": [("user", "开始")]}, config, durability="sync")
+    assert agent.get_state(config).next == ("tools",)
+    assert not (run.dir / "intents").exists() and env.claims() == []
+    free.free = 100
+    agent.invoke(None, config, durability="sync")
+    assert sorted(env.claims()) == [f"design-a-{env.base}", f"design-b-{env.base}"]

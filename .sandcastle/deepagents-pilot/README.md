@@ -20,7 +20,7 @@
 
 ## 用新执行器交付专用票
 
-v2 新执行器（登记、持有、运行、精确发布与释放）用法见 [用新执行器交付一张首证专用票](EXECUTOR.md)。它只接首证专用票，交付到 `awaiting_merge` 为止，不改变下文 v1 run 与批准账本。
+v2 新执行器（登记、持有、运行、精确发布与释放）用法见 [用新执行器交付一张首证专用票](EXECUTOR.md)。它接首证专用票和切流后的 Queued 队列，交付到 `awaiting_merge` 为止，不改变下文 v1 run 与批准账本。Queued 的 SPEC 授权改消费可信编排账号的当前正文非作者裁定，不调用人工 signer；具体边界与恢复见 EXECUTOR.md。
 
 ## 为已有业务 PR 提供独审状态
 
@@ -37,7 +37,9 @@ npm ci   # codex-child.mts 需要仓库根的 node_modules
 
 模型经本机 CLIProxyLocal（`http://127.0.0.1:8318/v1`）。密钥沿用 codex-child 的受管机制：进程环境有 `CLIPROXY_LOCAL_KEY` 就用，否则 `launchctl getenv` 取一次，只留在内存。启动时关闭 LangSmith 外发。
 
-run 创建时从 `~/.agents/pstack-models.md` 冻结六个角色的模型：
+run 创建时默认从 `~/.agents/pstack-models.md` 冻结六个角色的模型。`run --model-rules /绝对路径/project-models.md` 可显式指定项目表；`executor serve` 同名参数传给每个 run 子进程。新 run 同时冻结角色表全文，Boat 技能包和主控提示消费这份快照，源文件之后修改不影响该 run。未指定参数时保留原全局默认；显式文件不可读或角色非法时失败，不回退。支持 `#` 行尾注释。
+
+角色映射：
 
 | 角色 | 取自 |
 |---|---|
@@ -47,7 +49,7 @@ run 创建时从 `~/.agents/pstack-models.md` 冻结六个角色的模型：
 | 设计候选 `design-a`、`design-b` | `architect runners` 前两个 |
 | 交叉裁判 `judge` | `arena cross-judge pool` 中第一个与主控不同家族的 |
 
-模型白名单接受 `gpt-6-astra`、`gpt-6.1-sol` 与 `claude-opus-5-5`。Astra 与 Sol 同属 `gpt` 家族，Opus 属 `claude` 家族。已创建的 run 继续使用冻结模型。
+模型白名单接受 `gpt-6-astra`、`gpt-6.1-sol`、`claude-opus-5-5` 与 `kimi-k3.1-pro`。Astra 与 Sol 同属 `gpt` 家族，Opus 属 `claude` 家族，Kimi 属 `moonshot` 家族。已创建的 run 继续使用冻结模型。
 
 作者与独审同家族、两个设计候选同家族，或裁判池里没有与主控不同家族的模型时，run 拒绝创建。
 

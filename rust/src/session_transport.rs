@@ -39,8 +39,22 @@ pub struct TransportBounds {
     pub connections: usize,
 }
 
-/// 规范化数据库路径后持 OS 锁；返回 File 的生存期即持锁期。
-pub fn process_lock(db: &Path, domain_name: &str) -> Result<File, String> {
+/// 单写者进程锁：从获取成功起独占 `<db>.writer.lock`，到本 guard 析构为止。
+/// #1895/#2008：flock 挂在打开文件描述上，同进程其他线程 spawn 的子进程在 exec 前复制着这个描述；
+///   只靠 close 时锁会延续到那个子进程 exec。析构时先显式解锁，释放时刻与 drop 一致。
+#[derive(Debug)]
+#[must_use = "锁在 guard 析构时释放；`let _ = process_lock(..)` 会立刻放锁"]
+pub struct ProcessLock {
+    file: File,
+}
+impl Drop for ProcessLock {
+    fn drop(&mut self) {
+        let _ = self.file.unlock();
+    }
+}
+
+/// 规范化数据库路径后持 OS 锁；返回的 guard 的生存期即持锁期。
+pub fn process_lock(db: &Path, domain_name: &str) -> Result<ProcessLock, String> {
     let canonical = if db.exists() {
         db.canonicalize().map_err(err)?
     } else {
@@ -63,7 +77,7 @@ pub fn process_lock(db: &Path, domain_name: &str) -> Result<File, String> {
         .map_err(err)?;
     f.try_lock()
         .map_err(|e| format!("StaleWriter：{domain_name}独占进程锁不可得：{e}"))?;
-    Ok(f)
+    Ok(ProcessLock { file: f })
 }
 /// 单写队列项；回包通道不拥有或撤销权威业务事务。
 pub struct Job {
@@ -838,5 +852,62 @@ mod tests {
         assert!(Instant::now() >= job.response_deadline);
         assert!(job.job.result.try_send(json!({"ok":true})).is_err());
         thread.join().unwrap();
+    }
+
+    // #1895/#2008：另一线程持续 spawn 子进程时，process_lock 释放后立即重新获取必须成功。
+    //   只统计真正启动成功的子进程，避免 `true` 不可执行时退化成无并发（走 PATH：Linux 是 /bin/true，macOS 只有 /usr/bin/true）；总时长设上限，防挂死。
+    #[test]
+    fn process_lock_reacquire_after_drop_survives_concurrent_spawn() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::sync::Arc;
+        let dir = std::env::temp_dir().join(format!(
+            "process-lock-release-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let db = dir.join("state.sqlite");
+        let stop = Arc::new(AtomicBool::new(false));
+        let spawned = Arc::new(std::sync::atomic::AtomicU32::new(0));
+        let spawner = {
+            let stop = stop.clone();
+            let spawned = spawned.clone();
+            std::thread::spawn(move || {
+                while !stop.load(Ordering::Relaxed) {
+                    if std::process::Command::new("true").status().is_ok() {
+                        spawned.fetch_add(1, Ordering::Relaxed);
+                    }
+                }
+            })
+        };
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+        let mut failures = 0u32;
+        let mut rounds = 0u32;
+        // 至少 2000 轮且期间真正 spawn 过 200 个子进程才停：只数轮次时快路径可能根本撞不上 fork 窗口。
+        while (rounds < 2000 || spawned.load(Ordering::Relaxed) < 200)
+            && std::time::Instant::now() < deadline
+        {
+            match super::process_lock(&db, "T") {
+                Ok(lock) => drop(lock),
+                Err(_) => failures += 1,
+            }
+            rounds += 1;
+        }
+        stop.store(true, Ordering::Relaxed);
+        spawner.join().unwrap();
+        let spawned = spawned.load(Ordering::Relaxed);
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(
+            rounds >= 2000 && spawned >= 200,
+            "time limit hit: {rounds} rounds, {spawned} spawns"
+        );
+        assert!(spawned > 0, "no child process was actually spawned");
+        assert_eq!(
+            failures, 0,
+            "reacquire failed {failures}/{rounds} times with {spawned} concurrent spawns"
+        );
     }
 }

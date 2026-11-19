@@ -5,7 +5,7 @@ from dataclasses import replace
 from pathlib import Path
 
 import pytest
-from conftest import git
+from conftest import MODELS, git
 from test_boat import adapter
 
 from pilot1742.domain import DEEPAGENTS_OUTPUT_PROTOCOL, parse_sha
@@ -15,9 +15,10 @@ RUNTIME = ("boat-worker.mts", "codex-child.ts", "docker-isolation.mts", "accepta
            "git-environment.ts", "main-model.mts")
 
 
+@pytest.mark.parametrize("model", ["gpt-6.1-sol", "kimi-k3.1-pro"])
 @pytest.mark.parametrize("protocol", [None, DEEPAGENTS_OUTPUT_PROTOCOL])
 @pytest.mark.parametrize(("scheduler", "missing_record"), [(False, False), (True, False), (True, True)])
-def test_frozen_runtime_package_keeps_its_import_closure(env, tmp_path, scheduler, missing_record, protocol):
+def test_frozen_runtime_package_keeps_its_import_closure(env, tmp_path, scheduler, missing_record, protocol, model):
     paths = ["package.json", "package-lock.json", ".sandcastle/deepagents-pilot/pilot1742/boat_remote.py"]
     paths.extend(".sandcastle/" + name for name in RUNTIME)
     if scheduler:
@@ -48,7 +49,7 @@ def test_frozen_runtime_package_keeps_its_import_closure(env, tmp_path, schedule
     (pstack / "upstream/LICENSE").write_text("fixture")
     rules = tmp_path / "models.md"
     rules.write_text("fixture")
-    run, engine, key, binding = adapter(env)
+    run, engine, key, binding = adapter(env, models=MODELS.replace("gpt-6.1-sol", model))
     engine.config = replace(engine.config, pstack_source=str(pstack), model_rules=str(rules))
     prompt = run.dir / "prompt.md"
     prompt.write_text("fixture")
@@ -65,6 +66,7 @@ def test_frozen_runtime_package_keeps_its_import_closure(env, tmp_path, schedule
             return
         package = engine._build(key, binding)
         request = json.loads((package / "request.json").read_text())
+        assert request["model"] == model
         assert request.get("output_protocol") == protocol
         assert request["prompt"] == "fixture"
         runtime = package / "runtime/.sandcastle"

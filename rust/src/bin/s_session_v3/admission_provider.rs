@@ -532,6 +532,7 @@ mod control_lock_tests {
         let controller = if held {
             Some(controller)
         } else {
+            controller.unlock().unwrap(); // #1895：同下，先解锁再 drop
             drop(controller);
             None
         };
@@ -560,6 +561,10 @@ mod control_lock_tests {
             .unwrap();
         if held {
             assert!(probe.try_lock().is_err(), "监督器仍拥有锁");
+            // #1895：先显式解锁再 drop。只靠 close 时，并发测试线程 spawn 的子进程在 exec 前仍持有这个描述，
+            //   下面的 probe.try_lock() 会偶发失败。
+            let controller = controller.unwrap();
+            controller.unlock().unwrap();
             drop(controller);
         }
         probe.try_lock().unwrap(); // provider 的只读 FD 没有争抢/延长控制锁。

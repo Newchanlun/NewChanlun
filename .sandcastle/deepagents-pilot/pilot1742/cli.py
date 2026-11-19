@@ -17,12 +17,13 @@ from .domain import WorkerKey, parse_role, parse_run_id, parse_sha
 from .run import (
     CRASH_POINTS,
     DEFAULT_HOME,
-    PSTACK_MODELS,
     SOURCE_REPO,
     Busy,
+    InsufficientSpace,
     PilotRun,
     _fact_json,
     parse_task,
+    read_model_rules,
 )
 
 EXIT_BUSY = 75
@@ -56,11 +57,16 @@ def _run(args: argparse.Namespace) -> int:
             base = parse_sha(args.base or subprocess.run(["git", "-C", str(SOURCE_REPO), "rev-parse", "HEAD"],
                                                          check=True, capture_output=True, text=True).stdout.strip())
             run = PilotRun.create(home, run_id, parse_task(Path(args.task).read_text()), base,
-                                  PSTACK_MODELS.read_text(), **kw)
-    except Busy as error:
+                                  read_model_rules(args.model_rules), **kw)
+    except (Busy, InsufficientSpace) as error:
         print(str(error), file=sys.stderr)
         return EXIT_BUSY
-    return drive(run, recheck_approval=args.recheck_approval)
+    try:
+        return drive(run, recheck_approval=args.recheck_approval)
+    except InsufficientSpace as error:
+        # 同 executor.py：图运行中派工建 checkout 时低盘，检查点停在该工具调用之前，下一轮恢复同一 run 重做。
+        print(str(error), file=sys.stderr)
+        return EXIT_BUSY
 
 
 SETTLED_PHASES = frozenset({"gate", "halted", "awaiting_merge", "merged", "stale", "conflict"})
@@ -161,6 +167,7 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="pilot1742")
     sub = parser.add_subparsers(dest="command", required=True)
     run_parser = sub.add_parser("run", help="首跑或恢复一个 run")
+    run_parser.add_argument("--model-rules", type=Path, help="新 run 的 pstack 角色表；缺省沿用全局表")
     run_parser.add_argument("--run-id", required=True)
     run_parser.add_argument("--task", help="新 run 的任务文件（--- 头含 title 与 allowed_prefixes）")
     run_parser.add_argument("--base", help="新 run 的基线提交，缺省为源工作区 HEAD")
