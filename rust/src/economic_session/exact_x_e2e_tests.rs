@@ -933,3 +933,417 @@ fn gap_bound_simulation_x_rejects_uncooperative_writer_without_creating_lock_fil
     );
     drop(new_x_lock);
 }
+
+#[cfg(target_os = "linux")]
+struct LinuxDirWatcher {
+    fd: std::os::fd::RawFd,
+}
+
+#[cfg(target_os = "linux")]
+impl LinuxDirWatcher {
+    fn new(dir: &Path) -> Self {
+        use std::ffi::CString;
+        use std::os::unix::ffi::OsStrExt;
+        let fd = unsafe { libc::inotify_init1(libc::IN_NONBLOCK | libc::IN_CLOEXEC) };
+        assert!(fd >= 0, "inotify_init1 failed");
+        let c_dir = CString::new(dir.as_os_str().as_bytes()).unwrap();
+        let mask = libc::IN_CREATE
+            | libc::IN_MODIFY
+            | libc::IN_DELETE
+            | libc::IN_MOVED_FROM
+            | libc::IN_MOVED_TO
+            | libc::IN_ATTRIB;
+        let wd = unsafe { libc::inotify_add_watch(fd, c_dir.as_ptr(), mask) };
+        assert!(wd >= 0, "inotify_add_watch failed");
+        Self { fd }
+    }
+
+    fn drain(&self) -> Vec<(String, u32)> {
+        let mut events = Vec::new();
+        let mut buf = [0u8; 65536];
+        loop {
+            let n =
+                unsafe { libc::read(self.fd, buf.as_mut_ptr() as *mut libc::c_void, buf.len()) };
+            if n <= 0 {
+                break;
+            }
+            let n = n as usize;
+            let mut off = 0;
+            let hdr_len = std::mem::size_of::<libc::inotify_event>();
+            while off + hdr_len <= n {
+                let ev = unsafe {
+                    std::ptr::read_unaligned(buf.as_ptr().add(off) as *const libc::inotify_event)
+                };
+                off += hdr_len;
+                let name_len = ev.len as usize;
+                let raw_name = &buf[off..off + name_len];
+                let end = raw_name
+                    .iter()
+                    .position(|&b| b == 0)
+                    .unwrap_or(raw_name.len());
+                let name = String::from_utf8_lossy(&raw_name[..end]).into_owned();
+                off += name_len;
+                events.push((name, ev.mask));
+            }
+        }
+        events
+    }
+}
+
+#[cfg(target_os = "linux")]
+impl Drop for LinuxDirWatcher {
+    fn drop(&mut self) {
+        unsafe {
+            libc::close(self.fd);
+        }
+    }
+}
+
+fn dir_file_digests(dir: &Path) -> std::collections::BTreeMap<String, String> {
+    let mut out = std::collections::BTreeMap::new();
+    for entry in std::fs::read_dir(dir).unwrap() {
+        let entry = entry.unwrap();
+        let name = entry.file_name().to_string_lossy().into_owned();
+        let bytes = std::fs::read(entry.path()).unwrap();
+        out.insert(name, crate::session_protocol::sha256_hex(&bytes));
+    }
+    out
+}
+
+fn append_suffix(base: &Path, suffix: &str) -> std::path::PathBuf {
+    let mut s = base.as_os_str().to_os_string();
+    s.push(suffix);
+    std::path::PathBuf::from(s)
+}
+
+#[test]
+fn gap_bound_simulation_x_reads_uncheckpointed_wal_without_mutating_shm_or_sidecars() {
+    let dir = tempfile::tempdir().unwrap();
+    // 含 URI 特殊字符（#、?、%、&、=、空格、中文）的普通可写目录与库文件名，并经符号链接绑定。
+    let special_dir = dir.path().join("dir #1?q=2&k=%20%25中文");
+    std::fs::create_dir_all(&special_dir).unwrap();
+    let x_real = special_dir.join("x#db?mode=rw&readonly_shm=0.sqlite");
+    let x_link = dir.path().join("x-link.sqlite");
+    std::os::unix::fs::symlink(&x_real, &x_link).unwrap();
+
+    let (mut f, profile) = build_bound_sim_fixture(&x_link, true);
+
+    committed(&mut f);
+    dispatch(&mut f, "alpha");
+    dispatch(&mut f, "beta");
+    let rel_alpha = f.handle(0, "ReleaseExact-alpha", release_payload(&f, "alpha"));
+    assert_eq!(rel_alpha["record"]["state"], "ReleasedExact", "{rel_alpha}");
+    let command_alpha = rel_alpha["record"]["command"].clone();
+
+    // 1) 在独立供体 X 实例上经真实 E/S/X 挂出旧单并构造两份未 checkpoint WAL 的停机磁盘快照：
+    //    - x_real：主库停在 b0-1，b0（含已挂出旧单、0 条成交原件）仅在未 checkpoint 的 WAL 中；
+    //    - x_uncap：主库停在 b0（0 条原件），b0+1（旧单撮合产出 2 条未补录 fill+fee）仅在未 checkpoint 的 WAL 中。
+    let e_serve_cfg = f.configs[0].clone();
+    let e_sock = f.dir.join("e.sock");
+    let e_stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let e_stop_flag = e_stop.clone();
+    let e_uncertain = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let e_server = std::thread::spawn(move || {
+        let (mut c, runtime) = store::open(&e_serve_cfg.db, false).unwrap();
+        let bounds = crate::session_transport::TransportBounds {
+            frame: 16 * 1024 * 1024,
+            read: std::time::Duration::from_millis(1000),
+            write: std::time::Duration::from_millis(1000),
+            response: std::time::Duration::from_millis(3000),
+            queue: 4,
+            connections: 4,
+        };
+        crate::session_transport::serve_unix_with_deadline_until(
+            &e_serve_cfg.socket,
+            bounds,
+            |v| Ok(v),
+            Box::new(move || e_stop_flag.load(Ordering::SeqCst)),
+            e_uncertain,
+            |e, _| service::handle(&mut c, &e_serve_cfg, 1, 1, &runtime, e),
+        )
+        .unwrap();
+    });
+    wait_for(&e_sock);
+
+    let s_calls = Arc::new(AtomicUsize::new(0));
+    controlled_s(f.dir.join("s.sock"), RELEASE_NS, s_calls.clone());
+
+    let donor_dir = tempfile::tempdir().unwrap();
+    let donor_db = donor_dir.path().join("donor.sqlite");
+    let donor_db_for_serve = donor_db.clone();
+    let donor_profile = profile.clone();
+    std::thread::spawn(move || {
+        let _x_writer_lock =
+            crate::history_simulation::runtime::acquire_simulation_writer_lock(&donor_db_for_serve)
+                .unwrap();
+        let (mut c, _) = crate::economic_session::open_durable_db(&donor_db_for_serve).unwrap();
+        c.execute_batch("PRAGMA wal_autocheckpoint = 0;").unwrap();
+        {
+            let xtx = c.transaction().unwrap();
+            xtx.execute_batch(
+                "CREATE TABLE IF NOT EXISTS x_meta(key TEXT PRIMARY KEY, value TEXT NOT NULL) STRICT;",
+            )
+            .unwrap();
+            for (k, v) in [
+                ("profile_revision", "x-execution-profile/1"),
+                ("profile_mode", "simulation"),
+                ("history_simulation", "true"),
+                ("writer_epoch", "1"),
+            ] {
+                xtx.execute("INSERT INTO x_meta VALUES(?1,?2)", rusqlite::params![k, v])
+                    .unwrap();
+            }
+            crate::history_simulation::runtime::initialize_in_transaction(&xtx, &donor_profile, 1)
+                .unwrap();
+            xtx.commit().unwrap();
+        }
+        let _ = crate::history_simulation::runtime::serve(&mut c, &donor_profile, 1);
+    });
+    let xs = f.dir.join("x.sock");
+    wait_for(&xs);
+
+    for index in 0..RELEASE_NS {
+        assert_eq!(
+            x(&xs, "AdvanceBar", bar(index, json!([])))["kind"],
+            "SimulationBatch"
+        );
+    }
+    // 将 0..=b0-1 刷入供体主库并截断 WAL。
+    {
+        let ck = rusqlite::Connection::open(&donor_db).unwrap();
+        let _: (i64, i64, i64) = ck
+            .query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |r| {
+                Ok((r.get(0)?, r.get(1)?, r.get(2)?))
+            })
+            .unwrap();
+    }
+    assert_eq!(
+        x(&xs, "AcceptExact", command_alpha.clone())["state"],
+        "Accepted"
+    );
+    let resting_batch = x(
+        &xs,
+        "AdvanceBar",
+        bar(RELEASE_NS, json!([command_alpha["change"]])),
+    );
+    assert_eq!(resting_batch["kind"], "SimulationBatch", "{resting_batch}");
+    assert_eq!(resting_batch["originals"].as_array().unwrap().len(), 0);
+
+    // 复制快照 1（x_real）：b0 仅在未 checkpoint 的 WAL 中。
+    std::fs::copy(&donor_db, &x_real).unwrap();
+    std::fs::copy(
+        append_suffix(&donor_db, "-wal"),
+        append_suffix(&x_real, "-wal"),
+    )
+    .unwrap();
+    std::fs::copy(
+        append_suffix(&donor_db, "-shm"),
+        append_suffix(&x_real, "-shm"),
+    )
+    .unwrap();
+    std::fs::write(append_suffix(&x_real, ".writer.lock"), b"").unwrap();
+
+    // 将 b0 刷入供体主库，再推进 b0+1（旧挂单撮合产出 2 条未补录 fill+fee 仅落于未 checkpoint WAL）。
+    {
+        let ck = rusqlite::Connection::open(&donor_db).unwrap();
+        let _: (i64, i64, i64) = ck
+            .query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |r| {
+                Ok((r.get(0)?, r.get(1)?, r.get(2)?))
+            })
+            .unwrap();
+    }
+    let fill_batch = x(&xs, "AdvanceBar", bar(RELEASE_NS + 1, json!([])));
+    assert_eq!(fill_batch["kind"], "SimulationBatch", "{fill_batch}");
+    assert_eq!(fill_batch["originals"].as_array().unwrap().len(), 2);
+
+    let x_uncap = special_dir.join("x#uncap?mode=rw.sqlite");
+    std::fs::copy(&donor_db, &x_uncap).unwrap();
+    std::fs::copy(
+        append_suffix(&donor_db, "-wal"),
+        append_suffix(&x_uncap, "-wal"),
+    )
+    .unwrap();
+    std::fs::copy(
+        append_suffix(&donor_db, "-shm"),
+        append_suffix(&x_uncap, "-shm"),
+    )
+    .unwrap();
+    std::fs::write(append_suffix(&x_uncap, ".writer.lock"), b"").unwrap();
+
+    // 确认仅读主库（无 WAL）看不到 b0（x_real）与 b0+1 原件（x_uncap）。
+    let check_main_only = |src: &Path, tag: &str| -> (i64, i64) {
+        let copy = donor_dir.path().join(tag);
+        std::fs::copy(src, &copy).unwrap();
+        let mc = rusqlite::Connection::open_with_flags(
+            &copy,
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+        )
+        .unwrap();
+        let raw_state: String = mc
+            .query_row("SELECT v FROM x_sim_meta WHERE k='state'", [], |r| r.get(0))
+            .unwrap();
+        let st: Value = serde_json::from_str(&raw_state).unwrap();
+        let orig_cnt: i64 = mc
+            .query_row("SELECT count(*) FROM x_sim_originals", [], |r| r.get(0))
+            .unwrap();
+        (st["last_bar"].as_i64().unwrap(), orig_cnt)
+    };
+    assert_eq!(
+        check_main_only(&x_real, "main-clean.sqlite"),
+        (RELEASE_NS - 1, 0)
+    );
+    assert_eq!(
+        check_main_only(&x_uncap, "main-uncap.sqlite"),
+        (RELEASE_NS, 0)
+    );
+
+    // 2) E 经 recover 进入真实 source_gap == true。
+    e_stop.store(true, Ordering::SeqCst);
+    e_server.join().unwrap();
+    let rec2 = recover(&f.configs[0]).unwrap();
+    assert_eq!(rec2["writer_epoch"], "2", "{rec2}");
+    let (mut ec2, runtime2) = store::open(&f.configs[0].db, false).unwrap();
+    let mut cfg2 = f.configs[0].clone();
+    cfg2.intake = capture_continuity::start(&mut ec2, &cfg2, 2).unwrap();
+    let (cut_before, _, _, _) = latest(&ec2).unwrap();
+
+    let mut beta_payload = release_payload(&f, "beta");
+    beta_payload["writer_epoch"] = json!("2");
+    let mut beta_env = envelope("ReleaseExact-beta", beta_payload);
+    beta_env["schema_revision"] = json!(cfg2.revision().unwrap());
+    beta_env["session_id"] = json!(cfg2.session);
+    beta_env["session_generation"] = json!(cfg2.generation);
+
+    // 2a) 负向未 checkpoint WAL：x_uncap 主库只有 b0 且 0 原件，但未 checkpoint WAL 有 2 条未补录原件；
+    //     缺口态 E 必须真实读出 WAL 并拒绝放行，绝不能漏看 WAL 后误放。
+    let mut cfg2_uncap = cfg2.clone();
+    cfg2_uncap.manifest["history_simulation_source"]["x_db"] = json!(x_uncap);
+    let before_uncap = dir_file_digests(&special_dir);
+    #[cfg(target_os = "linux")]
+    let w_uncap = LinuxDirWatcher::new(&special_dir);
+    let refused_uncap =
+        service::handle(&mut ec2, &cfg2_uncap, 2, 1, &runtime2, &beta_env)["payload"].clone();
+    assert_eq!(refused_uncap["kind"], "Error", "{refused_uncap}");
+    assert!(
+        refused_uncap["error"]
+            .as_str()
+            .unwrap()
+            .contains("模拟 X 原件未补录"),
+        "{refused_uncap}"
+    );
+    #[cfg(target_os = "linux")]
+    assert!(w_uncap.drain().is_empty(), "负向 WAL 拒绝时不得写侧件");
+    assert_eq!(before_uncap, dir_file_digests(&special_dir));
+    assert_eq!(latest(&ec2).unwrap().0, cut_before);
+
+    // 2b) 侧件不可安全读取时（缺 -shm / 缺 -wal&-shm / -shm 无读权限），缺口态拒新风险且不新建侧件，
+    //     E 既有只读查询与原已提交收据重送仍可用。
+    let saved_shm = std::fs::read(append_suffix(&x_real, "-shm")).unwrap();
+    let saved_wal = std::fs::read(append_suffix(&x_real, "-wal")).unwrap();
+
+    std::fs::remove_file(append_suffix(&x_real, "-shm")).unwrap();
+    let digests_no_shm = dir_file_digests(&special_dir);
+    #[cfg(target_os = "linux")]
+    let w_no_shm = LinuxDirWatcher::new(&special_dir);
+    let err_no_shm =
+        service::handle(&mut ec2, &cfg2, 2, 1, &runtime2, &beta_env)["payload"].clone();
+    assert_eq!(err_no_shm["kind"], "Error", "{err_no_shm}");
+    #[cfg(target_os = "linux")]
+    assert!(w_no_shm.drain().is_empty(), "缺 -shm 拒绝时不得写/建侧件");
+    assert_eq!(digests_no_shm, dir_file_digests(&special_dir));
+    assert_eq!(latest(&ec2).unwrap().0, cut_before);
+
+    std::fs::remove_file(append_suffix(&x_real, "-wal")).unwrap();
+    let digests_no_both = dir_file_digests(&special_dir);
+    #[cfg(target_os = "linux")]
+    let w_no_both = LinuxDirWatcher::new(&special_dir);
+    let err_no_both =
+        service::handle(&mut ec2, &cfg2, 2, 1, &runtime2, &beta_env)["payload"].clone();
+    assert_eq!(err_no_both["kind"], "Error", "{err_no_both}");
+    #[cfg(target_os = "linux")]
+    assert!(
+        w_no_both.drain().is_empty(),
+        "缺 -wal/-shm 拒绝时不得由 sqlite3WalOpen 建空 -wal"
+    );
+    assert_eq!(digests_no_both, dir_file_digests(&special_dir));
+    assert_eq!(latest(&ec2).unwrap().0, cut_before);
+
+    // 还原 -wal 与 -shm，再测 -shm 无读权限（非 root）。
+    std::fs::write(append_suffix(&x_real, "-wal"), &saved_wal).unwrap();
+    let shm_path = append_suffix(&x_real, "-shm");
+    std::fs::write(&shm_path, &saved_shm).unwrap();
+    if unsafe { libc::geteuid() } != 0 {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&shm_path, std::fs::Permissions::from_mode(0o000)).unwrap();
+        #[cfg(target_os = "linux")]
+        let w_perm = LinuxDirWatcher::new(&special_dir);
+        let err_perm =
+            service::handle(&mut ec2, &cfg2, 2, 1, &runtime2, &beta_env)["payload"].clone();
+        assert_eq!(err_perm["kind"], "Error", "{err_perm}");
+        #[cfg(target_os = "linux")]
+        assert!(w_perm.drain().is_empty(), "-shm 不可读拒绝时不得写侧件");
+        assert_eq!(latest(&ec2).unwrap().0, cut_before);
+        std::fs::set_permissions(&shm_path, std::fs::Permissions::from_mode(0o600)).unwrap();
+    }
+
+    // 拒绝后 E 既有读口（ReadView / QueryReleasedExact）仍可用。
+    let mut read_env = envelope(
+        "ReadView-after-sidecar-refusal",
+        json!({"op": "ReadView", "cut": null, "as_known_ns": null}),
+    );
+    read_env["schema_revision"] = json!(cfg2.revision().unwrap());
+    read_env["session_id"] = json!(cfg2.session);
+    read_env["session_generation"] = json!(cfg2.generation);
+    let view = service::handle(&mut ec2, &cfg2, 2, 1, &runtime2, &read_env)["payload"].clone();
+    assert_eq!(view["kind"], "EconomicView", "{view}");
+
+    let mut q_env = envelope(
+        "QueryCommand-alpha-after-refusal",
+        json!({
+            "op": "QueryCommand",
+            "command_id": command_alpha["command_id"],
+            "cut": null,
+            "as_known_ns": null
+        }),
+    );
+    q_env["schema_revision"] = json!(cfg2.revision().unwrap());
+    q_env["session_id"] = json!(cfg2.session);
+    q_env["session_generation"] = json!(cfg2.generation);
+    let q_reply = service::handle(&mut ec2, &cfg2, 2, 1, &runtime2, &q_env)["payload"].clone();
+    assert_eq!(q_reply["state"], "ReleasedExact", "{q_reply}");
+
+    // 2c) URI 特殊字符 + 符号链接路径的锁汇合：经符号链接持旧 writer.lock 时 E 必拒。
+    let held_old = crate::session_transport::process_lock(&x_link, "X").unwrap();
+    let refused_old =
+        service::handle(&mut ec2, &cfg2, 2, 1, &runtime2, &beta_env)["payload"].clone();
+    assert_eq!(refused_old["kind"], "Error", "{refused_old}");
+    assert!(
+        refused_old["error"]
+            .as_str()
+            .unwrap()
+            .contains("旧版或非协作 X"),
+        "{refused_old}"
+    );
+    drop(held_old);
+
+    // 3) 正向未 checkpoint WAL + 可写目录零修改：读出未 checkpoint 的 b0 并返回真 ReleasedExact，
+    //    且不创建/修改/删除主库、WAL/SHM 与既有锁文件（无 frontier.lock 创建）。
+    let before_clean = dir_file_digests(&special_dir);
+    #[cfg(target_os = "linux")]
+    let w_clean = LinuxDirWatcher::new(&special_dir);
+    let rel_beta = service::handle(&mut ec2, &cfg2, 2, 1, &runtime2, &beta_env)["payload"].clone();
+    assert_eq!(rel_beta["record"]["state"], "ReleasedExact", "{rel_beta}");
+    #[cfg(target_os = "linux")]
+    {
+        let evs = w_clean.drain();
+        assert!(
+            evs.is_empty(),
+            "缺口态只读核清不得在可写 X 目录产生 CREATE/MODIFY/DELETE/ATTRIB 事件，实际：{evs:?}"
+        );
+    }
+    assert_eq!(
+        before_clean,
+        dir_file_digests(&special_dir),
+        "主库、WAL、SHM 与 writer.lock 必须逐字节不变且不得新建 frontier.lock"
+    );
+}

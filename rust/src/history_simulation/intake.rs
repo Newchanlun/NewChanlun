@@ -6,7 +6,7 @@ use super::{
 use crate::session_protocol::{canonical_json, nonnegative, required, sha256_hex, strict_json};
 use rusqlite::{Connection, OpenFlags};
 use serde_json::{json, Value};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 pub(crate) const EVENT: &str = "history-sim-unresolved/1";
 fn digest(v: &Value) -> String {
@@ -235,6 +235,114 @@ pub(crate) fn committed_capture_batch(
     Ok(receipt)
 }
 
+fn append_path_suffix(base: &Path, suffix: &str) -> PathBuf {
+    let mut s = base.as_os_str().to_os_string();
+    s.push(suffix);
+    PathBuf::from(s)
+}
+
+fn sqlite_readonly_uri(canonical: &Path) -> Result<String, String> {
+    let bytes = canonical.as_os_str().as_encoded_bytes();
+    if bytes.is_empty() || bytes[0] != b'/' || bytes.contains(&0) {
+        return Err("InvalidDomain：X 原件库须为合法绝对路径".into());
+    }
+    let mut uri = String::with_capacity(bytes.len() + 32);
+    uri.push_str("file://");
+    for &b in bytes {
+        if b.is_ascii_alphanumeric() || matches!(b, b'/' | b'-' | b'.' | b'_' | b'~') {
+            uri.push(b as char);
+        } else {
+            use std::fmt::Write as _;
+            let _ = write!(&mut uri, "%{b:02X}");
+        }
+    }
+    uri.push_str("?mode=ro&readonly_shm=1");
+    Ok(uri)
+}
+
+fn ensure_readable_regular_sidecar(path: &Path, label: &str) -> Result<(), String> {
+    let meta = std::fs::symlink_metadata(path).map_err(|e| {
+        format!(
+            "StorageUnavailable：模拟 X 缺可只读核验的 {label} 侧件 {}：{e}",
+            path.display()
+        )
+    })?;
+    if !meta.file_type().is_file() {
+        return Err(format!(
+            "StorageUnavailable：模拟 X {label} 侧件不是普通文件 {}",
+            path.display()
+        ));
+    }
+    std::fs::OpenOptions::new()
+        .read(true)
+        .open(path)
+        .map_err(|e| {
+            format!(
+                "StorageUnavailable：模拟 X {label} 侧件不可只读打开 {}：{e}",
+                path.display()
+            )
+        })?;
+    Ok(())
+}
+
+/// 缺口态只读打开模拟 X 业务库：
+/// 1) 规范化路径并按 SQLite URI 语法逐字节百分号编码，附 `mode=ro&readonly_shm=1`，
+///    阻止 SQLite 对 `-shm` 发起 `O_RDWR|O_CREAT` 或 `ftruncate`/回写；
+/// 2) 打开前只读检查主库头与 WAL/SHM 侧件存在性及可读性，避免 WAL 模式主库在缺 `-wal`
+///    时触发 `sqlite3WalOpen` 创建空 `-wal` 或在空主库头下删除既有 `-wal`；
+/// 3) 打开后核对 `Connection::path()` 与规范化绝对路径完全一致，确保与锁文件指向同一实体库。
+fn open_readonly_source_db(db: &Path) -> Result<Connection, String> {
+    let canonical = db.canonicalize().map_err(failure)?;
+    let mut main_file = std::fs::OpenOptions::new()
+        .read(true)
+        .open(&canonical)
+        .map_err(failure)?;
+    let mut header = [0u8; 100];
+    use std::io::Read as _;
+    main_file.read_exact(&mut header).map_err(|e| {
+        format!("StorageUnavailable：模拟 X 主库头不完整，拒绝只读打开以防改写侧件：{e}")
+    })?;
+    if &header[..16] != b"SQLite format 3\0" {
+        return Err("IdentityConflict：模拟 X 主库不是合法 SQLite 数据库".into());
+    }
+    let wal_path = append_path_suffix(&canonical, "-wal");
+    let shm_path = append_path_suffix(&canonical, "-shm");
+    let is_wal_header = header[18] == 2 || header[19] == 2;
+    let wal_exists = match std::fs::symlink_metadata(&wal_path) {
+        Ok(_) => true,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => false,
+        Err(e) => {
+            return Err(format!(
+                "StorageUnavailable：无法核验模拟 X WAL 侧件 {}：{e}",
+                wal_path.display()
+            ));
+        }
+    };
+    if is_wal_header || wal_exists {
+        ensure_readable_regular_sidecar(&wal_path, "WAL")?;
+        ensure_readable_regular_sidecar(&shm_path, "SHM")?;
+    }
+    let uri = sqlite_readonly_uri(&canonical)?;
+    let c = Connection::open_with_flags(
+        &uri,
+        OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_URI,
+    )
+    .map_err(failure)?;
+    if let Some(expected) = canonical.to_str() {
+        if c.path() != Some(expected) {
+            return Err(format!(
+                "IdentityConflict：模拟 X 只读 URI 解析路径不一致（期望 {expected}，实际 {:?}）",
+                c.path()
+            ));
+        }
+    }
+    c.busy_timeout(std::time::Duration::from_secs(2))
+        .map_err(failure)?;
+    c.execute_batch("PRAGMA query_only = ON;")
+        .map_err(failure)?;
+    Ok(c)
+}
+
 fn inspect_committed_history(
     manifest: &Value,
     expected_x_id: Option<&str>,
@@ -250,10 +358,7 @@ fn inspect_committed_history(
     if !db.is_absolute() {
         return Err("InvalidDomain：X 原件库须为冻结绝对路径".into());
     }
-    let mut c =
-        Connection::open_with_flags(db, OpenFlags::SQLITE_OPEN_READ_ONLY).map_err(failure)?;
-    c.busy_timeout(std::time::Duration::from_secs(2))
-        .map_err(failure)?;
+    let mut c = open_readonly_source_db(db)?;
     let tx = c.transaction().map_err(failure)?;
     let x_meta = |key| -> Result<String, String> {
         tx.query_row("SELECT value FROM x_meta WHERE key=?1", [key], |r| r.get(0))
