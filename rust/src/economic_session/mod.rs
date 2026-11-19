@@ -25,6 +25,7 @@ mod tb03c_corrections;
 mod tb03c_e;
 mod tb03c_funding;
 mod tb03c_per_leg;
+mod tb03c_sim_resolve;
 mod tb03c_transfer;
 mod voice;
 pub use service::cli;
@@ -69,6 +70,8 @@ mod tb03c_chain_tests;
 mod tb03c_kill_tests;
 #[cfg(test)]
 mod tb03c_rf01_tests;
+#[cfg(test)]
+mod tb03c_sim_resolve_tests;
 #[cfg(test)]
 mod tb03c_v2_kill_tests;
 

@@ -174,10 +174,11 @@ pub(super) fn resolve_image(
             .iter()
             .find(|f| f["fact_key"] == k.as_str())
             .ok_or("MissingDependency：Resolve 缺持久原事实")?;
-        if fact["event"]["event"] == crate::history_simulation::intake::EVENT {
-            return Err(
-                "MissingDependency：模拟外部事实缺命令归属/成本/利润分量证明，Pending 保留".into(),
-            );
+        if super::tb03c_sim_resolve::is_history_sim(&fact["event"]) {
+            super::tb03c_sim_resolve::check_pending(
+                config, previous, covered, fact, frontier, cursor,
+            )?;
+            continue;
         }
         // #1406 H2：风险 Pending 可被 Reserve 按完整责任覆盖清除；净额待办独立由
         // 已 Recorded 且未分配定义，不能因清风险永久丢失。非净额仍须原 Pending。
@@ -258,12 +259,21 @@ pub(super) fn resolve_image(
             .iter()
             .find(|f| f["fact_key"] == k.as_str())
             .ok_or("StorageUnavailable：Pending 缺原件")?;
-        super::tb03c_allocation::resolve(
-            config,
-            &mut next,
-            fact,
-            required(payload, "evidence_id")?,
-        )?;
+        if super::tb03c_sim_resolve::is_history_sim(&fact["event"]) {
+            super::tb03c_sim_resolve::resolve(
+                config,
+                &mut next,
+                fact,
+                required(payload, "evidence_id")?,
+            )?;
+        } else {
+            super::tb03c_allocation::resolve(
+                config,
+                &mut next,
+                fact,
+                required(payload, "evidence_id")?,
+            )?;
+        }
     }
     next["pending"] = json!(pending
         .iter()

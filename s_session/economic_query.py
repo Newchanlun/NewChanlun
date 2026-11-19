@@ -170,8 +170,6 @@ def _original_event(record):
     raw_hash = record.get("raw_sha256")
     _hash(raw_hash, "raw_sha256")
     pointer = text(record.get("json_pointer"), "json_pointer")
-    if not pointer.startswith("/events/"):
-        raise EconomicQueryError("事实指针须定位 events 原件")
     try:
         raw_bytes = raw.encode("utf-8")
         if hashlib.sha256(raw_bytes).hexdigest() != raw_hash:
@@ -186,7 +184,35 @@ def _original_event(record):
             elif type(value) is list:
                 pending.extend(value)
             elif type(value) is int and not -(2**63) <= value < 2**64:
-                raise EconomicQueryError("原件 JSON 整数越出生产域")
+                raise EconomicQueryError("原件 JSON 整数超出生产域")
+        if document.get("format") == "history-sim-economic-originals/1":
+            if pointer != "/event":
+                raise EconomicQueryError("模拟原件须定位 /event")
+            model = document.get("model")
+            raw_event = document.get("event")
+            event = record.get("event")
+            if type(model) is not dict or type(raw_event) is not dict or type(event) is not dict:
+                raise EconomicQueryError("模拟原件形状缺失")
+            if event.get("event") != "history-sim-unresolved/1":
+                raise EconomicQueryError("模拟事实事件类型不符")
+            if canonical(event.get("simulation_original")) != canonical(raw_event):
+                raise EconomicQueryError("模拟事实事件与原件 /event 不同")
+            units = {
+                "quantity": {"unit": text(model.get("quantity_unit"), "quantity_unit"), "quantum": "1"},
+                "money": {"unit": text(model.get("currency"), "currency"),
+                          "currency": text(model.get("currency"), "currency"), "quantum": "1"},
+                "numeric_encoding": "exact_decimal_integer_text",
+            }
+            text(event.get("allocation_id"), "allocation_id")
+            if record.get("fact_key") != _source_key(event.get("source")):
+                raise EconomicQueryError("事实身份与原来源三元组不同")
+            content_hash = digest({"raw_sha256": raw_hash, "json_pointer": pointer,
+                                   "event": event, "units": units})
+            if record.get("fact_hash") != content_hash:
+                raise EconomicQueryError("事实内容摘要与原件/指针/事件/单位不同")
+            return event
+        if not pointer.startswith("/events/"):
+            raise EconomicQueryError("事实指针须定位 events 原件")
         if (document.get("format") != "neutral TestOnly economic raw originals; not production transport wire"
                 or type(document.get("units")) is not dict):
             raise EconomicQueryError("原件 profile/单位缺失")
@@ -248,10 +274,104 @@ def _correction_predecessor(row, event, rows, verified_event):
             raise EconomicQueryError("更正政策引用与具名原分配不同")
 
 
+def _verify_history_sim_allocation_row(row, image, rows, verified, verified_event):
+    kind = row["source_kind"]
+    if kind == "history_sim_fill":
+        expected_fields = {
+            "fact_key", "fact_hash", "projection_kind", "source_kind",
+            "command_id", "grant_id", "responsibility_ref", "plan_hash",
+            "command_plan_hash", "command_hash", "symbol",
+            "fill_allocation_policy_id", "policy_revision", "evidence_id", "allocations",
+        }
+    elif kind == "history_sim_fee":
+        expected_fields = {
+            "fact_key", "fact_hash", "projection_kind", "source_kind",
+            "command_id", "grant_id", "responsibility_ref",
+            "original_fact_key", "original_allocation_id", "symbol",
+            "fill_allocation_policy_id", "policy_revision", "evidence_id", "allocations",
+        }
+    else:
+        raise EconomicQueryError("未知模拟分配来源类型")
+    _exact(row, expected_fields, "模拟分配记录")
+    _hash(row["fact_key"], "fact_key")
+    _hash(row["fact_hash"], "fact_hash")
+    if row["projection_kind"] != "per_leg":
+        raise EconomicQueryError("模拟分配投影类型不符")
+    for field in ("command_id", "grant_id", "responsibility_ref", "symbol",
+                  "fill_allocation_policy_id", "policy_revision", "evidence_id"):
+        text(row[field], field)
+    if row["grant_id"] != row["responsibility_ref"]:
+        raise EconomicQueryError("模拟分配 grant_id 与 responsibility_ref 不符")
+    finance = image.get("finance")
+    if type(finance) is not dict or finance.get("schema_revision") != "tb03b-finance/6":
+        raise EconomicQueryError("模拟分配仅属于绑定模型摘要的 tb03b-finance/6 域")
+    cmd_matches = [c for c in finance.get("commands", []) if type(c) is dict and c.get("command_id") == row["command_id"]]
+    if (len(cmd_matches) != 1 or cmd_matches[0].get("state") != "ReleasedExact"
+            or cmd_matches[0].get("grant_id") != row["grant_id"]
+            or type(cmd_matches[0].get("command", {}).get("model_ref")) is not dict):
+        raise EconomicQueryError("模拟分配缺少同域 tb03b-finance/6 ReleasedExact 命令与 model_ref")
+    _hash(cmd_matches[0]["command"]["model_ref"].get("content_hash"), "command.model_ref.content_hash")
+    event = verified_event(row["fact_key"])
+    if verified[row["fact_key"]][1] != row["fact_hash"]:
+        raise EconomicQueryError("分配事实内容身份不同")
+    if event.get("event") != "history-sim-unresolved/1":
+        raise EconomicQueryError("模拟分配原件类型不符")
+    evidence = [h for h in image["history"] if type(h) is dict and h.get("kind") == "ResolveEvidence"
+                and h.get("evidence_id") == row["evidence_id"]]
+    if (len(evidence) != 1 or type(evidence[0].get("covered")) is not list
+            or row["fact_key"] not in evidence[0]["covered"]):
+        raise EconomicQueryError("分配缺具名 Resolve 原史")
+    allocations = row["allocations"]
+    if type(allocations) is not list or len(allocations) != 1:
+        raise EconomicQueryError("单一明确原责任域须恰有一条逐重分配")
+    alloc = allocations[0]
+    common_alloc = {
+        "allocation_id", "source_kind", "chong_id", "command_id", "grant_id",
+        "responsibility_ref", "family_id", "revision", "symbol", "units",
+        "income_changes", "fill_allocation_policy_id", "policy_revision",
+    }
+    if kind == "history_sim_fill":
+        _exact(alloc, common_alloc | {
+            "acquisition_cash", "commission", "fee_deferred_to_cause_fact", "reported_fill_fee",
+        }, "模拟成交逐重分配")
+        expected_id = "sim-command:" + digest([
+            row["fact_key"], row["grant_id"], row["command_id"], alloc["chong_id"],
+        ])
+        if alloc["allocation_id"] != expected_id:
+            raise EconomicQueryError("模拟成交逐重分配身份摘要不符")
+        if int(integer(alloc["units"], "units")) <= 0:
+            raise EconomicQueryError("模拟成交数量须为正")
+        integer(alloc["acquisition_cash"], "acquisition_cash")
+        if alloc["commission"] != "0" or alloc["fee_deferred_to_cause_fact"] is not True:
+            raise EconomicQueryError("模拟成交费用延期标记不符")
+        integer(alloc["reported_fill_fee"], "reported_fill_fee")
+    else:
+        _exact(alloc, common_alloc | {
+            "fee_only", "fee_type", "cause", "original_fact_key", "original_allocation_id",
+        }, "模拟费用逐重分配")
+        _hash(row["original_fact_key"], "original_fact_key")
+        if (alloc["original_fact_key"] != row["original_fact_key"]
+                or alloc["original_allocation_id"] != row["original_allocation_id"]
+                or alloc["cause"] != "fill" or alloc["units"] != "0"):
+            raise EconomicQueryError("模拟费用前件或数量不符")
+        integer(alloc["fee_only"], "fee_only")
+        text(alloc["fee_type"], "fee_type")
+        expected_id = "sim-command-fee:" + digest([
+            row["fact_key"], row["original_fact_key"], row["grant_id"],
+            row["command_id"], alloc["chong_id"],
+        ])
+        if alloc["allocation_id"] != expected_id:
+            raise EconomicQueryError("模拟费用逐重分配身份摘要不符")
+        pred = [r for r in rows if type(r) is dict and r.get("fact_key") == row["original_fact_key"]
+                and r.get("source_kind") == "history_sim_fill"]
+        if len(pred) != 1 or pred[0]["allocations"][0]["allocation_id"] != row["original_allocation_id"]:
+            raise EconomicQueryError("模拟费用缺唯一前件 fill 分配")
+    if alloc["income_changes"] != {"Pi": "0", "A": "0", "W": "0"}:
+        raise EconomicQueryError("模拟买单分配收益账变动非零")
+
+
 def verify_fill_allocations(image, policy, sources):
     """只核原图像的字段、类型与具名来源；返回时不改写、补齐或重算。"""
-    if policy is None:
-        raise EconomicQueryError("分配图像缺冻结政策")
     rows = image["fill_allocations"]
     if type(rows) is not list:
         raise EconomicQueryError("fill_allocations 须为数组")
@@ -270,6 +390,14 @@ def verify_fill_allocations(image, policy, sources):
     for row in rows:
         if type(row) is not dict:
             raise EconomicQueryError("分配记录须为对象")
+        if row.get("source_kind") in ("history_sim_fill", "history_sim_fee"):
+            if row.get("fact_key") in seen:
+                raise EconomicQueryError("分配事实重复")
+            _verify_history_sim_allocation_row(row, image, rows, verified, verified_event)
+            seen.add(row["fact_key"])
+            continue
+        if policy is None:
+            raise EconomicQueryError("分配图像缺冻结政策")
         common = {"fact_key", "fact_hash", "manifest_hash", "symbol", "fill_allocation_policy_id",
                   "policy_revision", "evidence_id", "allocations"}
         per_leg = row.get("projection_kind") == "per_leg"
