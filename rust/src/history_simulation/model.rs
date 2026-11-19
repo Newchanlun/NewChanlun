@@ -133,6 +133,14 @@ pub struct FeeProfile {
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
+pub struct ModelRef {
+    pub model_id: String,
+    pub revision: String,
+    pub content_hash: String,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
 pub struct Model {
     pub model_id: String,
     pub revision: String,
@@ -147,6 +155,21 @@ pub struct Model {
     pub seed: String,
 }
 impl Model {
+    pub fn content_hash(&self) -> String {
+        let value = serde_json::to_value(self).expect("typed finite integer model");
+        crate::session_protocol::sha256_hex(
+            crate::session_protocol::canonical_json(&value).as_bytes(),
+        )
+    }
+
+    pub fn model_ref(&self) -> ModelRef {
+        ModelRef {
+            model_id: self.model_id.clone(),
+            revision: self.revision.clone(),
+            content_hash: self.content_hash(),
+        }
+    }
+
     pub fn validate(&self) -> Result<(), String> {
         if self.model_id != MODEL_ID || self.seed != "none" {
             return Err("Unsupported：未知模型或非确定性 seed".into());
