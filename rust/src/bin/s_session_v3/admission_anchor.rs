@@ -1627,11 +1627,11 @@ fn entry_exists(directory: &File, name: &str) -> io::Result<bool> {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(feature = "s_lock_subset_testonly")))]
 #[path = "../../../../s_session/tests/issue1527_recovery/anchor_tests.rs"]
 mod tests;
 
-#[cfg(test)]
+#[cfg(all(test, not(feature = "s_lock_subset_testonly")))]
 #[path = "../../../../s_session/tests/issue1527_recovery/b2b3_terminal_tests.rs"]
 mod b2b3_terminal_tests;
 #[cfg(test)]

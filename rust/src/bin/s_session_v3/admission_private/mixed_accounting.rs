@@ -207,7 +207,7 @@ pub(super) fn fixed_metadata_bytes() -> usize {
     std::mem::size_of::<MixedAccounting<'static, 'static>>()
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(feature = "s_lock_subset_testonly")))]
 mod tests {
     use super::*;
     use sc::capture_allocation::scratch::{CodecWork, ScratchCharge, ScratchParent};

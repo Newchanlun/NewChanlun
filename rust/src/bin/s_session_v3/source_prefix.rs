@@ -23,7 +23,7 @@ pub(super) enum SourceCoords {
     Shared(NativeRc<[i64]>),
 }
 
-#[cfg(all(test, feature = "s_incremental"))]
+#[cfg(all(test, feature = "s_incremental", not(feature = "s_lock_subset_testonly")))]
 mod tests {
     use super::*;
     fn event(identity: &str, coord: &str, revision: i64, seq: i64) -> Value {

@@ -811,7 +811,7 @@ fn read_session<T>(
         .ok_or_else(|| "PrivateSqliteMissingResult".into())
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(feature = "s_lock_subset_testonly")))]
 mod tests {
     use super::*;
     use std::sync::atomic::{AtomicU64, Ordering};

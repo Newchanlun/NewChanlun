@@ -2535,7 +2535,7 @@ fn codec_error(error: sc::CodecError) -> String {
     format!("GenError：{error}")
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(feature = "s_lock_subset_testonly")))]
 mod tests {
     #[test]
     fn borrowed_json_write_keeps_old_integer_oracle_and_rejects_before_put() {

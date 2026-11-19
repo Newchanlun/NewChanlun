@@ -2590,7 +2590,7 @@ pub(super) fn stage_in_material(
     Ok(())
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(feature = "s_lock_subset_testonly")))]
 mod tests {
     #[cfg(feature = "s_incremental")]
     #[test]

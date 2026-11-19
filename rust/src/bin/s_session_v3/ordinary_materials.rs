@@ -278,6 +278,6 @@ impl Drop for OrdinaryAuditMaterials {
         LAST_REPORT.with(|r| r.set(Some(self.stats)));
     }
 }
-#[cfg(test)]
+#[cfg(all(test, not(feature = "s_lock_subset_testonly")))]
 #[path = "ordinary_materials_tests.rs"]
 mod tests;

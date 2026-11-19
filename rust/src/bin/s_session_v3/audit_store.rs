@@ -1239,7 +1239,7 @@ impl serde::Serialize for RefValue {
         st.end()
     }
 }
-#[cfg(test)]
+#[cfg(all(test, not(feature = "s_lock_subset_testonly")))]
 mod ref_value_tests {
     use super::*;
 

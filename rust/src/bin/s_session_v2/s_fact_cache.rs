@@ -795,7 +795,7 @@ fn min_source(previous: Option<i64>, coord: i64) -> Option<i64> {
     Some(previous.map_or(coord, |old| old.min(coord)))
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(feature = "s_lock_subset_testonly")))]
 mod delta_tests {
     use super::*;
     use crate::v3::audit_owner::{RawAdvanceFixture, RawWinner, RawWinnerEdit};

@@ -268,7 +268,7 @@ fn log(line: Value) {
     let _ = writeln!(std::io::stderr().lock(), "{line}");
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(feature = "s_lock_subset_testonly")))]
 mod tests {
     use super::*;
 

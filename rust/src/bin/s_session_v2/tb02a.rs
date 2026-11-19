@@ -836,7 +836,7 @@ fn verify_raw_ohlc_cardinality(conn: &Connection) -> Result<(), String> {
     Ok(())
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(feature = "s_lock_subset_testonly")))]
 mod input_view_tests {
     use super::*;
     fn input(ohlc: bool) -> Value {

@@ -2872,7 +2872,7 @@ mod tests {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(feature = "s_lock_subset_testonly")))]
 mod scoped_prototype_probe {
     use super::*;
     #[test]
@@ -3088,7 +3088,7 @@ mod shared_sqlite_probe {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(feature = "s_lock_subset_testonly")))]
 mod audit_capture_gate_tests {
     use super::*;
     use sha2::{Digest, Sha256};
@@ -3997,7 +3997,7 @@ pub(super) fn overlay_ab_signature(s: &AuditedState) -> serde_json::Value {
     serde_json::json!({"schema_revision":"ordinary-audit-complete-return/1","sha256":digest(crate::canonical_json(&components).as_bytes()),"components":components})
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(feature = "s_lock_subset_testonly")))]
 mod transaction_material_qualification {
     use super::*;
     struct Meter;

@@ -2407,7 +2407,7 @@ fn native_journal_only_reserves_the_container_that_grows() {
     assert!(j.bytes <= j.cap);
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(feature = "s_lock_subset_testonly")))]
 mod construction_coverage_tests {
     use super::*;
     use newchan_rust::s_content::{self as sc, NodeSink};
@@ -3207,7 +3207,7 @@ mod construction_coverage_tests {
     }
 }
 
-#[cfg(all(test, feature = "s_incremental"))]
+#[cfg(all(test, feature = "s_incremental", not(feature = "s_lock_subset_testonly")))]
 mod e_owner_move_tests {
     use super::*;
     #[test]
@@ -3400,7 +3400,7 @@ mod e_owner_move_tests {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(feature = "s_lock_subset_testonly")))]
 // #1488 U2：原 adopt_row（原 1750）改为只核本父出生身份；正/负锁。
 mod u2_row_owned_tests {
     use super::*;

@@ -141,7 +141,7 @@ pub(crate) fn split(rule_revision: &str) -> Result<(String, Layout), String> {
     Ok((rest.join("+"), layout.unwrap_or(Layout::Sorted)))
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(feature = "s_lock_subset_testonly")))]
 mod tests {
     use super::*;
 

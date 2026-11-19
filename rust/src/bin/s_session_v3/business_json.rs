@@ -3233,7 +3233,7 @@ mod owner_retention {
     }
 }
 
-#[cfg(all(test, feature = "s_incremental"))]
+#[cfg(all(test, feature = "s_incremental", not(feature = "s_lock_subset_testonly")))]
 mod native_consumer_tests {
     use super::*;
 
@@ -3379,7 +3379,7 @@ mod native_consumer_tests {
     }
 }
 
-#[cfg(all(test, feature = "s_incremental"))]
+#[cfg(all(test, feature = "s_incremental", not(feature = "s_lock_subset_testonly")))]
 mod plain_raii_tests {
     use super::*;
 
@@ -3486,7 +3486,7 @@ mod plain_raii_tests {
     }
 }
 
-#[cfg(all(test, feature = "s_incremental"))]
+#[cfg(all(test, feature = "s_incremental", not(feature = "s_lock_subset_testonly")))]
 mod scoped_json_array_tests {
     use super::super::audit_retention::Retained;
     use super::*;
@@ -3650,7 +3650,7 @@ mod scoped_json_array_tests {
 }
 
 // #1488：跨代RawEvents保留同父许可；以下是测试源码，运行由远端统一执行。
-#[cfg(all(test, feature = "s_incremental"))]
+#[cfg(all(test, feature = "s_incremental", not(feature = "s_lock_subset_testonly")))]
 mod raw_events_native_append_tests {
     use super::super::audit_owner::native::Budget;
     use super::*;
@@ -3753,7 +3753,7 @@ mod raw_events_native_append_tests {
     }
 }
 
-#[cfg(all(test, feature = "s_incremental"))]
+#[cfg(all(test, feature = "s_incremental", not(feature = "s_lock_subset_testonly")))]
 mod raw_events_layout_tests {
     use super::super::audit_owner::native::Budget;
     use super::*;

@@ -373,7 +373,7 @@ pub(super) fn build(
     (b.objects, relations)
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(feature = "s_lock_subset_testonly")))]
 mod version_contract_tests {
     use super::*;
 

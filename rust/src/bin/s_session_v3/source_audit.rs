@@ -31,7 +31,7 @@ mod frozen_oracle;
 #[cfg(feature = "s_incremental")]
 #[path = "source_contributions.rs"]
 mod source_contributions;
-#[cfg(test)]
+#[cfg(all(test, not(feature = "s_lock_subset_testonly")))]
 #[path = "source_delta.rs"]
 mod source_delta;
 #[cfg(all(test, feature = "s_incremental"))]
@@ -5081,7 +5081,7 @@ mod tests {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(feature = "s_lock_subset_testonly")))]
 mod closed_array_role_probe {
     use super::super::{
         audit_store::StoreView,

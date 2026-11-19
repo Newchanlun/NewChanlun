@@ -303,7 +303,7 @@ pub(super) fn check_projection_anchor_view(
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(feature = "s_lock_subset_testonly")))]
 mod tests {
     use super::*;
     use newchan_rust::s_content::{

@@ -1535,7 +1535,7 @@ fn resolve_observations(
     Ok(())
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(feature = "s_lock_subset_testonly")))]
 mod tests {
     use super::super::{canonical_json, json, meta_set, sha256_hex, tb02a, SCHEMA};
     use super::*;

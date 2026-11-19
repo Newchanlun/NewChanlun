@@ -1097,7 +1097,7 @@ impl HistoricalDependencyBinding {
     }
 }
 
-#[cfg(all(test, feature = "s_incremental"))]
+#[cfg(all(test, feature = "s_incremental", not(feature = "s_lock_subset_testonly")))]
 mod tests {
     use super::super::{prepared::tests::Fixture, s_allocation, state};
     use super::*;
@@ -2922,7 +2922,7 @@ impl ExactRows {
     }
 }
 
-#[cfg(all(test, feature = "s_incremental"))]
+#[cfg(all(test, feature = "s_incremental", not(feature = "s_lock_subset_testonly")))]
 mod r_owner_move_tests {
     use super::super::audit_owner::native::Budget;
     use super::super::audit_retention::Retained;
@@ -3124,7 +3124,7 @@ mod r_owner_move_tests {
     }
 }
 
-#[cfg(all(test, feature = "s_incremental"))]
+#[cfg(all(test, feature = "s_incremental", not(feature = "s_lock_subset_testonly")))]
 // NOT_RUN：本轮只静态检查。
 mod handoff_domain_tests {
     use super::super::audit_owner::native::Budget;

@@ -37,7 +37,7 @@ use rusqlite::OpenFlags;
 use std::collections::BTreeSet;
 
 mod atomic_init;
-#[cfg(test)]
+#[cfg(all(test, not(feature = "s_lock_subset_testonly")))]
 mod atomic_init_tests;
 // #1527 提案：admission 由根协调恢复/资源 provider，当前基线无此模块。
 // M-01：WriterScope::admit 独占 StartedAdmission，provider 仅收
@@ -1755,7 +1755,7 @@ pub(super) fn trace_request_clock(bytes: usize, elapsed: std::time::Duration) {
 
 mod ordinary_materials;
 
-#[cfg(test)]
+#[cfg(all(test, not(feature = "s_lock_subset_testonly")))]
 mod overlay_ab_fixture {
     use super::*;
     #[test]
@@ -1791,7 +1791,7 @@ mod overlay_ab_fixture {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(feature = "s_lock_subset_testonly")))]
 mod transaction_view_multiple_bad_fixture {
     use super::*;
     #[test]
@@ -1827,7 +1827,7 @@ mod transaction_view_multiple_bad_fixture {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(feature = "s_lock_subset_testonly")))]
 mod layout_writer_rule_injection {
     use super::*;
 

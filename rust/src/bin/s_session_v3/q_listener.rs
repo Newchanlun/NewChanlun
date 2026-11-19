@@ -255,7 +255,7 @@ fn last_os_error(context: &str) -> String {
     format!("{context}: {}", std::io::Error::last_os_error())
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(feature = "s_lock_subset_testonly")))]
 mod tests {
     use super::*;
     use serde_json::json;

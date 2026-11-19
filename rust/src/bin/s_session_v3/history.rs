@@ -7947,7 +7947,7 @@ pub(super) mod tests {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(feature = "s_lock_subset_testonly")))]
 mod audit_capture_prototype_tests {
     use super::*;
     #[test]
@@ -8135,7 +8135,7 @@ mod audit_capture_prototype_tests {
 }
 
 /// #1394 c3e26e27 的开放 hook 红例在原提交/证据包保留；新接口必须严格拒绝。
-#[cfg(test)]
+#[cfg(all(test, not(feature = "s_lock_subset_testonly")))]
 mod audit_capture_closed_owner_tests {
     use super::*;
     #[test]
@@ -8783,7 +8783,7 @@ pub(super) fn append_owner_cut(
     ))
 }
 
-#[cfg(all(test, feature = "s_incremental"))]
+#[cfg(all(test, feature = "s_incremental", not(feature = "s_lock_subset_testonly")))]
 mod native_reader_owner_tests {
     use super::*;
 
@@ -8819,7 +8819,7 @@ mod native_reader_owner_tests {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(feature = "s_lock_subset_testonly")))]
 mod manifest_template_coverage_tests {
     use super::*;
     use std::{cell::Cell, rc::Rc};

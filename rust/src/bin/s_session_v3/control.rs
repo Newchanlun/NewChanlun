@@ -332,7 +332,7 @@ impl<'a> S3Control<'a> {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(feature = "s_lock_subset_testonly")))]
 mod tests {
     use super::*;
     use std::sync::atomic::{AtomicU64, Ordering};

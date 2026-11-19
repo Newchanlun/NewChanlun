@@ -2093,7 +2093,7 @@ fn match_value(
     match_digest(store, root, key, expected)
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(feature = "s_lock_subset_testonly")))]
 mod tests {
     use super::*;
     use newchan_rust::s_content::{MemoryNodes, NumberToken, Value as V};
