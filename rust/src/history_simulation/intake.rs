@@ -6,7 +6,7 @@ use super::{
 use crate::session_protocol::{canonical_json, nonnegative, required, sha256_hex, strict_json};
 use rusqlite::{Connection, OpenFlags};
 use serde_json::{json, Value};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 pub(crate) const EVENT: &str = "history-sim-unresolved/1";
 fn digest(v: &Value) -> String {
@@ -235,21 +235,456 @@ pub(crate) fn committed_capture_batch(
     Ok(receipt)
 }
 
-fn append_path_suffix(base: &Path, suffix: &str) -> PathBuf {
-    let mut s = base.as_os_str().to_os_string();
-    s.push(suffix);
-    PathBuf::from(s)
+/// 仅用于缺口态只读打开模拟 X 库的非默认 SQLite wrapper VFS（`makeDflt = 0`）：
+/// - 在 SQLite 实际文件操作层强制所有打开为 `SQLITE_OPEN_READONLY`（去掉 `READWRITE`/`CREATE`/
+///   `EXCLUSIVE`/`DELETEONCLOSE`），且仅放行主库与 WAL 文件，从根上消除预检到 `sqlite3WalOpen`
+///   之间的关库 TOCTOU 创建空 `-wal` 窗口；
+/// - 阻断 `xDelete`/`xWrite`/`xTruncate`/`xSync`、高于 `SHARED` 的库锁、`xShmMap` 扩展、
+///   `xShmLock` 独占锁与 `xShmUnmap` 删除，并将 `xShmMap` 映射结果标记为 `SQLITE_READONLY`、
+///   `SQLITE_FCNTL_PERSIST_WAL` 查询返回 `1`，确保对 X 目录零创建、零写入、零删除；
+/// - 绝不改动全局默认 SQLite VFS 或健康财务路径、`#2078` 单批核验与旧查询。
+mod readonly_vfs {
+    use rusqlite::ffi;
+    use std::ffi::{c_char, c_int, c_void};
+    use std::sync::OnceLock;
+
+    const VFS_NAME: &str = "history_sim_ro";
+    const VFS_NAME_CSTR: &[u8] = b"history_sim_ro\0";
+    static REGISTERED: OnceLock<Result<&'static str, String>> = OnceLock::new();
+
+    #[repr(C)]
+    struct RoFile {
+        base: ffi::sqlite3_file,
+        real: *mut ffi::sqlite3_file,
+    }
+
+    pub(super) fn name() -> Result<&'static str, String> {
+        REGISTERED
+            .get_or_init(|| {
+                let init_rc = unsafe { ffi::sqlite3_initialize() };
+                if init_rc != ffi::SQLITE_OK {
+                    return Err(format!(
+                        "StorageUnavailable：初始化 SQLite 失败（rc={init_rc}）"
+                    ));
+                }
+                let parent = unsafe { ffi::sqlite3_vfs_find(std::ptr::null()) };
+                if parent.is_null() {
+                    return Err("StorageUnavailable：未找到默认 SQLite VFS".into());
+                }
+                let parent_vfs = unsafe { *parent };
+                let mut vfs = Box::new(parent_vfs);
+                vfs.iVersion = parent_vfs.iVersion.min(2);
+                vfs.szOsFile = parent_vfs
+                    .szOsFile
+                    .checked_add(std::mem::size_of::<RoFile>() as c_int)
+                    .ok_or_else(|| "StorageUnavailable：只读 VFS 文件句柄尺寸溢出".to_string())?;
+                vfs.zName = VFS_NAME_CSTR.as_ptr().cast::<c_char>();
+                vfs.pNext = std::ptr::null_mut();
+                vfs.pAppData = parent.cast::<c_void>();
+                vfs.xOpen = Some(ro_open);
+                vfs.xDelete = Some(ro_delete);
+                vfs.xAccess = Some(ro_access);
+                vfs.xFullPathname = Some(ro_full_pathname);
+                vfs.xDlOpen = None;
+                vfs.xDlError = None;
+                vfs.xDlSym = None;
+                vfs.xDlClose = None;
+                vfs.xRandomness = Some(ro_randomness);
+                vfs.xSleep = Some(ro_sleep);
+                vfs.xCurrentTime = Some(ro_current_time);
+                vfs.xGetLastError = Some(ro_get_last_error);
+                vfs.xCurrentTimeInt64 = parent_vfs.xCurrentTimeInt64.map(|_| {
+                    ro_current_time64
+                        as unsafe extern "C" fn(
+                            *mut ffi::sqlite3_vfs,
+                            *mut ffi::sqlite3_int64,
+                        ) -> c_int
+                });
+                vfs.xSetSystemCall = None;
+                vfs.xGetSystemCall = None;
+                vfs.xNextSystemCall = None;
+                let raw = Box::into_raw(vfs);
+                let rc = unsafe { ffi::sqlite3_vfs_register(raw, 0) };
+                if rc != ffi::SQLITE_OK {
+                    unsafe {
+                        drop(Box::from_raw(raw));
+                    }
+                    return Err(format!(
+                        "StorageUnavailable：注册只读 SQLite VFS 失败（rc={rc}）"
+                    ));
+                }
+                Ok(VFS_NAME)
+            })
+            .clone()
+    }
+
+    #[inline]
+    unsafe fn parent_vfs(vfs: *mut ffi::sqlite3_vfs) -> *mut ffi::sqlite3_vfs {
+        (*vfs).pAppData.cast::<ffi::sqlite3_vfs>()
+    }
+
+    #[inline]
+    unsafe fn ro_parts<'a>(
+        file: *mut ffi::sqlite3_file,
+    ) -> (*mut ffi::sqlite3_file, &'a ffi::sqlite3_io_methods) {
+        let ro = &*file.cast::<RoFile>();
+        (ro.real, &*(*ro.real).pMethods)
+    }
+
+    unsafe extern "C" fn ro_open(
+        vfs: *mut ffi::sqlite3_vfs,
+        name: *const c_char,
+        file: *mut ffi::sqlite3_file,
+        flags: c_int,
+        out: *mut c_int,
+    ) -> c_int {
+        (*file).pMethods = std::ptr::null();
+        if name.is_null() {
+            return ffi::SQLITE_READONLY;
+        }
+        if flags & (ffi::SQLITE_OPEN_MAIN_DB | ffi::SQLITE_OPEN_WAL) == 0 {
+            return ffi::SQLITE_READONLY;
+        }
+        let parent = parent_vfs(vfs);
+        let Some(open) = (*parent).xOpen else {
+            return ffi::SQLITE_CANTOPEN;
+        };
+        let real = file
+            .cast::<u8>()
+            .add(std::mem::size_of::<RoFile>())
+            .cast::<ffi::sqlite3_file>();
+        file.cast::<RoFile>().write(RoFile {
+            base: ffi::sqlite3_file {
+                pMethods: std::ptr::null(),
+            },
+            real,
+        });
+        let ro_flags = (flags
+            & !(ffi::SQLITE_OPEN_READWRITE
+                | ffi::SQLITE_OPEN_CREATE
+                | ffi::SQLITE_OPEN_EXCLUSIVE
+                | ffi::SQLITE_OPEN_DELETEONCLOSE))
+            | ffi::SQLITE_OPEN_READONLY;
+        let mut child_out: c_int = 0;
+        let rc = open(parent, name, real, ro_flags, &mut child_out);
+        if !(*real).pMethods.is_null() {
+            (*file).pMethods = &RO_IO_METHODS;
+        }
+        if !out.is_null() {
+            *out = (child_out
+                & !(ffi::SQLITE_OPEN_READWRITE
+                    | ffi::SQLITE_OPEN_CREATE
+                    | ffi::SQLITE_OPEN_EXCLUSIVE
+                    | ffi::SQLITE_OPEN_DELETEONCLOSE))
+                | ffi::SQLITE_OPEN_READONLY;
+        }
+        rc
+    }
+
+    unsafe extern "C" fn ro_delete(
+        _vfs: *mut ffi::sqlite3_vfs,
+        _name: *const c_char,
+        _sync_dir: c_int,
+    ) -> c_int {
+        ffi::SQLITE_READONLY
+    }
+
+    unsafe extern "C" fn ro_access(
+        vfs: *mut ffi::sqlite3_vfs,
+        name: *const c_char,
+        flags: c_int,
+        out: *mut c_int,
+    ) -> c_int {
+        if flags == ffi::SQLITE_ACCESS_READWRITE {
+            if !out.is_null() {
+                *out = 0;
+            }
+            return ffi::SQLITE_OK;
+        }
+        let parent = parent_vfs(vfs);
+        (*parent).xAccess.map_or(ffi::SQLITE_IOERR_ACCESS, |call| {
+            call(parent, name, flags, out)
+        })
+    }
+
+    unsafe extern "C" fn ro_full_pathname(
+        vfs: *mut ffi::sqlite3_vfs,
+        name: *const c_char,
+        n_out: c_int,
+        out: *mut c_char,
+    ) -> c_int {
+        let parent = parent_vfs(vfs);
+        (*parent)
+            .xFullPathname
+            .map_or(ffi::SQLITE_CANTOPEN, |call| call(parent, name, n_out, out))
+    }
+
+    unsafe extern "C" fn ro_randomness(
+        vfs: *mut ffi::sqlite3_vfs,
+        n_byte: c_int,
+        out: *mut c_char,
+    ) -> c_int {
+        let parent = parent_vfs(vfs);
+        (*parent)
+            .xRandomness
+            .map_or(0, |call| call(parent, n_byte, out))
+    }
+
+    unsafe extern "C" fn ro_sleep(vfs: *mut ffi::sqlite3_vfs, micros: c_int) -> c_int {
+        let parent = parent_vfs(vfs);
+        (*parent).xSleep.map_or(0, |call| call(parent, micros))
+    }
+
+    unsafe extern "C" fn ro_current_time(vfs: *mut ffi::sqlite3_vfs, out: *mut f64) -> c_int {
+        let parent = parent_vfs(vfs);
+        (*parent)
+            .xCurrentTime
+            .map_or(ffi::SQLITE_ERROR, |call| call(parent, out))
+    }
+
+    unsafe extern "C" fn ro_get_last_error(
+        vfs: *mut ffi::sqlite3_vfs,
+        n_buf: c_int,
+        out: *mut c_char,
+    ) -> c_int {
+        let parent = parent_vfs(vfs);
+        (*parent)
+            .xGetLastError
+            .map_or(0, |call| call(parent, n_buf, out))
+    }
+
+    unsafe extern "C" fn ro_current_time64(
+        vfs: *mut ffi::sqlite3_vfs,
+        out: *mut ffi::sqlite3_int64,
+    ) -> c_int {
+        let parent = parent_vfs(vfs);
+        (*parent)
+            .xCurrentTimeInt64
+            .map_or(ffi::SQLITE_ERROR, |call| call(parent, out))
+    }
+
+    unsafe extern "C" fn ro_close(file: *mut ffi::sqlite3_file) -> c_int {
+        let (real, methods) = ro_parts(file);
+        let rc = methods.xClose.map_or(ffi::SQLITE_OK, |call| call(real));
+        (*file).pMethods = std::ptr::null();
+        rc
+    }
+
+    unsafe extern "C" fn ro_read(
+        file: *mut ffi::sqlite3_file,
+        buf: *mut c_void,
+        amt: c_int,
+        offset: ffi::sqlite3_int64,
+    ) -> c_int {
+        let (real, methods) = ro_parts(file);
+        methods
+            .xRead
+            .map_or(ffi::SQLITE_IOERR_READ, |call| call(real, buf, amt, offset))
+    }
+
+    unsafe extern "C" fn ro_write(
+        _file: *mut ffi::sqlite3_file,
+        _buf: *const c_void,
+        _amt: c_int,
+        _offset: ffi::sqlite3_int64,
+    ) -> c_int {
+        ffi::SQLITE_READONLY
+    }
+
+    unsafe extern "C" fn ro_truncate(
+        _file: *mut ffi::sqlite3_file,
+        _size: ffi::sqlite3_int64,
+    ) -> c_int {
+        ffi::SQLITE_READONLY
+    }
+
+    unsafe extern "C" fn ro_sync(_file: *mut ffi::sqlite3_file, _flags: c_int) -> c_int {
+        ffi::SQLITE_READONLY
+    }
+
+    unsafe extern "C" fn ro_file_size(
+        file: *mut ffi::sqlite3_file,
+        out: *mut ffi::sqlite3_int64,
+    ) -> c_int {
+        let (real, methods) = ro_parts(file);
+        methods
+            .xFileSize
+            .map_or(ffi::SQLITE_IOERR_FSTAT, |call| call(real, out))
+    }
+
+    unsafe extern "C" fn ro_lock(file: *mut ffi::sqlite3_file, level: c_int) -> c_int {
+        if level > ffi::SQLITE_LOCK_SHARED {
+            return ffi::SQLITE_READONLY;
+        }
+        let (real, methods) = ro_parts(file);
+        methods
+            .xLock
+            .map_or(ffi::SQLITE_IOERR_LOCK, |call| call(real, level))
+    }
+
+    unsafe extern "C" fn ro_unlock(file: *mut ffi::sqlite3_file, level: c_int) -> c_int {
+        let (real, methods) = ro_parts(file);
+        methods
+            .xUnlock
+            .map_or(ffi::SQLITE_IOERR_UNLOCK, |call| call(real, level))
+    }
+
+    unsafe extern "C" fn ro_check_reserved_lock(
+        file: *mut ffi::sqlite3_file,
+        out: *mut c_int,
+    ) -> c_int {
+        let (real, methods) = ro_parts(file);
+        methods
+            .xCheckReservedLock
+            .map_or(ffi::SQLITE_IOERR_CHECKRESERVEDLOCK, |call| call(real, out))
+    }
+
+    unsafe extern "C" fn ro_file_control(
+        file: *mut ffi::sqlite3_file,
+        op: c_int,
+        arg: *mut c_void,
+    ) -> c_int {
+        match op {
+            ffi::SQLITE_FCNTL_SIZE_HINT
+            | ffi::SQLITE_FCNTL_BEGIN_ATOMIC_WRITE
+            | ffi::SQLITE_FCNTL_COMMIT_ATOMIC_WRITE
+            | ffi::SQLITE_FCNTL_ROLLBACK_ATOMIC_WRITE => return ffi::SQLITE_NOTFOUND,
+            ffi::SQLITE_FCNTL_PERSIST_WAL => {
+                if !arg.is_null() {
+                    let slot = arg.cast::<c_int>();
+                    if *slot < 0 {
+                        *slot = 1;
+                        return ffi::SQLITE_OK;
+                    }
+                }
+                return ffi::SQLITE_NOTFOUND;
+            }
+            ffi::SQLITE_FCNTL_MMAP_SIZE => {
+                if !arg.is_null() {
+                    *arg.cast::<i64>() = 0;
+                }
+            }
+            _ => {}
+        }
+        let (real, methods) = ro_parts(file);
+        methods
+            .xFileControl
+            .map_or(ffi::SQLITE_NOTFOUND, |call| call(real, op, arg))
+    }
+
+    unsafe extern "C" fn ro_sector_size(file: *mut ffi::sqlite3_file) -> c_int {
+        let (real, methods) = ro_parts(file);
+        methods.xSectorSize.map_or(4096, |call| call(real))
+    }
+
+    unsafe extern "C" fn ro_device_characteristics(file: *mut ffi::sqlite3_file) -> c_int {
+        let (real, methods) = ro_parts(file);
+        methods.xDeviceCharacteristics.map_or(0, |call| call(real))
+    }
+
+    unsafe extern "C" fn ro_shm_map(
+        file: *mut ffi::sqlite3_file,
+        page: c_int,
+        size: c_int,
+        _extend: c_int,
+        out: *mut *mut c_void,
+    ) -> c_int {
+        let (real, methods) = ro_parts(file);
+        let Some(call) = methods.xShmMap else {
+            return ffi::SQLITE_IOERR_SHMMAP;
+        };
+        let rc = call(real, page, size, 0, out);
+        if rc == ffi::SQLITE_OK {
+            if !(*out).is_null() || page == 0 {
+                ffi::SQLITE_READONLY
+            } else {
+                ffi::SQLITE_IOERR_SHMSIZE
+            }
+        } else {
+            rc
+        }
+    }
+
+    unsafe extern "C" fn ro_shm_lock(
+        file: *mut ffi::sqlite3_file,
+        offset: c_int,
+        n: c_int,
+        flags: c_int,
+    ) -> c_int {
+        if flags & ffi::SQLITE_SHM_EXCLUSIVE != 0 && flags & ffi::SQLITE_SHM_UNLOCK == 0 {
+            return ffi::SQLITE_READONLY;
+        }
+        let (real, methods) = ro_parts(file);
+        methods.xShmLock.map_or(ffi::SQLITE_IOERR_SHMLOCK, |call| {
+            call(real, offset, n, flags)
+        })
+    }
+
+    unsafe extern "C" fn ro_shm_barrier(file: *mut ffi::sqlite3_file) {
+        let (real, methods) = ro_parts(file);
+        if let Some(call) = methods.xShmBarrier {
+            call(real);
+        }
+    }
+
+    unsafe extern "C" fn ro_shm_unmap(file: *mut ffi::sqlite3_file, _delete_flag: c_int) -> c_int {
+        let (real, methods) = ro_parts(file);
+        methods
+            .xShmUnmap
+            .map_or(ffi::SQLITE_OK, |call| call(real, 0))
+    }
+
+    unsafe extern "C" fn ro_fetch(
+        _file: *mut ffi::sqlite3_file,
+        _offset: ffi::sqlite3_int64,
+        _amt: c_int,
+        out: *mut *mut c_void,
+    ) -> c_int {
+        *out = std::ptr::null_mut();
+        ffi::SQLITE_OK
+    }
+
+    unsafe extern "C" fn ro_unfetch(
+        _file: *mut ffi::sqlite3_file,
+        _offset: ffi::sqlite3_int64,
+        _page: *mut c_void,
+    ) -> c_int {
+        ffi::SQLITE_OK
+    }
+
+    static RO_IO_METHODS: ffi::sqlite3_io_methods = ffi::sqlite3_io_methods {
+        iVersion: 3,
+        xClose: Some(ro_close),
+        xRead: Some(ro_read),
+        xWrite: Some(ro_write),
+        xTruncate: Some(ro_truncate),
+        xSync: Some(ro_sync),
+        xFileSize: Some(ro_file_size),
+        xLock: Some(ro_lock),
+        xUnlock: Some(ro_unlock),
+        xCheckReservedLock: Some(ro_check_reserved_lock),
+        xFileControl: Some(ro_file_control),
+        xSectorSize: Some(ro_sector_size),
+        xDeviceCharacteristics: Some(ro_device_characteristics),
+        xShmMap: Some(ro_shm_map),
+        xShmLock: Some(ro_shm_lock),
+        xShmBarrier: Some(ro_shm_barrier),
+        xShmUnmap: Some(ro_shm_unmap),
+        xFetch: Some(ro_fetch),
+        xUnfetch: Some(ro_unfetch),
+    };
 }
 
 fn sqlite_readonly_uri(canonical: &Path) -> Result<String, String> {
-    let bytes = canonical.as_os_str().as_encoded_bytes();
-    if bytes.is_empty() || bytes[0] != b'/' || bytes.contains(&0) {
-        return Err("InvalidDomain：X 原件库须为合法绝对路径".into());
+    use std::os::unix::ffi::OsStrExt as _;
+    let bytes = canonical.as_os_str().as_bytes();
+    if bytes.is_empty() || bytes[0] != b'/' {
+        return Err("InvalidDomain：X 原件库须为冻结绝对路径".into());
     }
-    let mut uri = String::with_capacity(bytes.len() + 32);
+    let mut uri = String::with_capacity("file://".len() + bytes.len() + 32);
     uri.push_str("file://");
     for &b in bytes {
-        if b.is_ascii_alphanumeric() || matches!(b, b'/' | b'-' | b'.' | b'_' | b'~') {
+        if b.is_ascii_alphanumeric() || matches!(b, b'/' | b'-' | b'_' | b'.' | b'~') {
             uri.push(b as char);
         } else {
             use std::fmt::Write as _;
@@ -260,72 +695,21 @@ fn sqlite_readonly_uri(canonical: &Path) -> Result<String, String> {
     Ok(uri)
 }
 
-fn ensure_readable_regular_sidecar(path: &Path, label: &str) -> Result<(), String> {
-    let meta = std::fs::symlink_metadata(path).map_err(|e| {
-        format!(
-            "StorageUnavailable：模拟 X 缺可只读核验的 {label} 侧件 {}：{e}",
-            path.display()
-        )
-    })?;
-    if !meta.file_type().is_file() {
-        return Err(format!(
-            "StorageUnavailable：模拟 X {label} 侧件不是普通文件 {}",
-            path.display()
-        ));
-    }
-    std::fs::OpenOptions::new()
-        .read(true)
-        .open(path)
-        .map_err(|e| {
-            format!(
-                "StorageUnavailable：模拟 X {label} 侧件不可只读打开 {}：{e}",
-                path.display()
-            )
-        })?;
-    Ok(())
-}
-
 /// 缺口态只读打开模拟 X 业务库：
 /// 1) 规范化路径并按 SQLite URI 语法逐字节百分号编码，附 `mode=ro&readonly_shm=1`，
 ///    阻止 SQLite 对 `-shm` 发起 `O_RDWR|O_CREAT` 或 `ftruncate`/回写；
-/// 2) 打开前只读检查主库头与 WAL/SHM 侧件存在性及可读性，避免 WAL 模式主库在缺 `-wal`
-///    时触发 `sqlite3WalOpen` 创建空 `-wal` 或在空主库头下删除既有 `-wal`；
-/// 3) 打开后核对 `Connection::path()` 与规范化绝对路径完全一致，确保与锁文件指向同一实体库。
-fn open_readonly_source_db(db: &Path) -> Result<Connection, String> {
+/// 2) 通过非默认 `history_sim_ro` VFS 在 SQLite 实际文件操作层强制 `SQLITE_OPEN_READONLY`
+///    并阻断任何创建、写入、截断、删除与高于 `SHARED` 的库锁，彻底消除预检到真实打开之间的
+///    关库交错建空 `-wal` 竞态；
+/// 3) 打开后核对 `Connection::path()` 与规范化绝对路径完全一致，并开启 `query_only` 与内存临时库。
+pub(crate) fn open_readonly_source_db(db: &Path) -> Result<Connection, String> {
     let canonical = db.canonicalize().map_err(failure)?;
-    let mut main_file = std::fs::OpenOptions::new()
-        .read(true)
-        .open(&canonical)
-        .map_err(failure)?;
-    let mut header = [0u8; 100];
-    use std::io::Read as _;
-    main_file.read_exact(&mut header).map_err(|e| {
-        format!("StorageUnavailable：模拟 X 主库头不完整，拒绝只读打开以防改写侧件：{e}")
-    })?;
-    if &header[..16] != b"SQLite format 3\0" {
-        return Err("IdentityConflict：模拟 X 主库不是合法 SQLite 数据库".into());
-    }
-    let wal_path = append_path_suffix(&canonical, "-wal");
-    let shm_path = append_path_suffix(&canonical, "-shm");
-    let is_wal_header = header[18] == 2 || header[19] == 2;
-    let wal_exists = match std::fs::symlink_metadata(&wal_path) {
-        Ok(_) => true,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => false,
-        Err(e) => {
-            return Err(format!(
-                "StorageUnavailable：无法核验模拟 X WAL 侧件 {}：{e}",
-                wal_path.display()
-            ));
-        }
-    };
-    if is_wal_header || wal_exists {
-        ensure_readable_regular_sidecar(&wal_path, "WAL")?;
-        ensure_readable_regular_sidecar(&shm_path, "SHM")?;
-    }
     let uri = sqlite_readonly_uri(&canonical)?;
-    let c = Connection::open_with_flags(
+    let vfs = readonly_vfs::name()?;
+    let c = Connection::open_with_flags_and_vfs(
         &uri,
         OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_URI,
+        vfs,
     )
     .map_err(failure)?;
     if let Some(expected) = canonical.to_str() {
@@ -338,7 +722,7 @@ fn open_readonly_source_db(db: &Path) -> Result<Connection, String> {
     }
     c.busy_timeout(std::time::Duration::from_secs(2))
         .map_err(failure)?;
-    c.execute_batch("PRAGMA query_only = ON;")
+    c.execute_batch("PRAGMA query_only = ON; PRAGMA temp_store = MEMORY;")
         .map_err(failure)?;
     Ok(c)
 }

@@ -942,17 +942,23 @@ struct LinuxDirWatcher {
 #[cfg(target_os = "linux")]
 impl LinuxDirWatcher {
     fn new(dir: &Path) -> Self {
+        Self::with_mask(
+            dir,
+            libc::IN_CREATE
+                | libc::IN_MODIFY
+                | libc::IN_DELETE
+                | libc::IN_MOVED_FROM
+                | libc::IN_MOVED_TO
+                | libc::IN_ATTRIB,
+        )
+    }
+
+    fn with_mask(dir: &Path, mask: u32) -> Self {
         use std::ffi::CString;
         use std::os::unix::ffi::OsStrExt;
         let fd = unsafe { libc::inotify_init1(libc::IN_NONBLOCK | libc::IN_CLOEXEC) };
         assert!(fd >= 0, "inotify_init1 failed");
         let c_dir = CString::new(dir.as_os_str().as_bytes()).unwrap();
-        let mask = libc::IN_CREATE
-            | libc::IN_MODIFY
-            | libc::IN_DELETE
-            | libc::IN_MOVED_FROM
-            | libc::IN_MOVED_TO
-            | libc::IN_ATTRIB;
         let wd = unsafe { libc::inotify_add_watch(fd, c_dir.as_ptr(), mask) };
         assert!(wd >= 0, "inotify_add_watch failed");
         Self { fd }
@@ -1346,4 +1352,179 @@ fn gap_bound_simulation_x_reads_uncheckpointed_wal_without_mutating_shm_or_sidec
         dir_file_digests(&special_dir),
         "主库、WAL、SHM 与 writer.lock 必须逐字节不变且不得新建 frontier.lock"
     );
+}
+
+#[test]
+fn readonly_source_vfs_survives_writer_close_interleaving_without_creating_wal() {
+    use crate::history_simulation::intake::open_readonly_source_db;
+
+    let dir = tempfile::tempdir().unwrap();
+    let db_dir = dir.path().join("x-close-race");
+    std::fs::create_dir_all(&db_dir).unwrap();
+    let x_db = db_dir.join("x.db");
+    let x_wal = append_suffix(&x_db, "-wal");
+    let x_shm = append_suffix(&x_db, "-shm");
+
+    // 1) 写者打开 WAL 库并写入未 checkpoint 提交；E 在 SQLite 取得 SHARED 锁之前打开只读句柄；
+    //    随后写者走正常末连接析构清理并删除 -wal/-shm；仅剩 E 活动时发起只读事务，
+    //    必须拒绝且绝不创建空 x.db-wal，亦无任何目录变更或 IN_CLOSE_WRITE。
+    let writer = rusqlite::Connection::open(&x_db).unwrap();
+    writer
+        .execute_batch(
+            "PRAGMA journal_mode = WAL;
+             PRAGMA wal_autocheckpoint = 0;
+             CREATE TABLE t(v INTEGER);
+             INSERT INTO t VALUES (10);",
+        )
+        .unwrap();
+    assert!(x_wal.exists() && x_shm.exists(), "写者应已生成 WAL/SHM");
+
+    let mut reader = open_readonly_source_db(&x_db).unwrap();
+    drop(writer);
+    assert!(
+        !x_wal.exists() && !x_shm.exists(),
+        "写者正常末连接关闭应已删除 WAL/SHM"
+    );
+
+    let before_close_race = dir_file_digests(&db_dir);
+    #[cfg(target_os = "linux")]
+    let w_race = LinuxDirWatcher::with_mask(
+        &db_dir,
+        libc::IN_CREATE
+            | libc::IN_MODIFY
+            | libc::IN_DELETE
+            | libc::IN_MOVED_FROM
+            | libc::IN_MOVED_TO
+            | libc::IN_ATTRIB
+            | libc::IN_CLOSE_WRITE,
+    );
+    {
+        let tx = reader.transaction().unwrap();
+        let err = tx
+            .query_row("SELECT v FROM t", [], |r| r.get::<_, i64>(0))
+            .unwrap_err();
+        assert!(
+            matches!(err, rusqlite::Error::SqliteFailure(_, _)),
+            "预期 SQLite 只读打开 WAL 失败，实际：{err:?}"
+        );
+    }
+    drop(reader);
+    assert!(
+        !x_wal.exists() && !x_shm.exists(),
+        "E 拒绝后绝不得遗留空 WAL/SHM"
+    );
+    #[cfg(target_os = "linux")]
+    {
+        let evs = w_race.drain();
+        assert!(
+            evs.is_empty(),
+            "写者关库清理后仅 E 活动不得产生任何创建/修改/删除/CLOSE_WRITE 事件，实际：{evs:?}"
+        );
+    }
+    assert_eq!(before_close_race, dir_file_digests(&db_dir));
+
+    // 2) E 已通过只读事务持有 SHARED 锁后写者关闭：写者末连接析构无法获取 EXCLUSIVE 锁，
+    //    不得删除 WAL/SHM，且 E 后续读与关闭均零副作用（不回写、不清理侧件）。
+    let writer2 = rusqlite::Connection::open(&x_db).unwrap();
+    writer2
+        .execute_batch(
+            "PRAGMA wal_autocheckpoint = 0;
+             INSERT INTO t VALUES (20);",
+        )
+        .unwrap();
+    assert!(x_wal.exists() && x_shm.exists());
+
+    let mut reader2 = open_readonly_source_db(&x_db).unwrap();
+    let tx2 = reader2.transaction().unwrap();
+    let cnt: i64 = tx2
+        .query_row("SELECT count(*) FROM t", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(cnt, 2);
+    drop(writer2);
+    assert!(
+        x_wal.exists() && x_shm.exists(),
+        "E 持 SHARED 锁时写者关闭不得删除 WAL/SHM"
+    );
+
+    let before_after_shared = dir_file_digests(&db_dir);
+    // 同进程内 SQLite POSIX 锁会延迟到最后一个句柄关闭时才 close(writer2) 遗留的 O_RDWR fd
+    // （触发无写入的 IN_CLOSE_WRITE），此处按物理副作用契约监测创建/修改/删除/改名/属性变更。
+    #[cfg(target_os = "linux")]
+    let w_shared = LinuxDirWatcher::new(&db_dir);
+    let total: i64 = tx2
+        .query_row("SELECT sum(v) FROM t", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(total, 30);
+    drop(tx2);
+    drop(reader2);
+    assert!(
+        x_wal.exists() && x_shm.exists(),
+        "E 自身关闭绝不得 checkpoint 或删除 WAL/SHM"
+    );
+    #[cfg(target_os = "linux")]
+    {
+        let evs = w_shared.drain();
+        assert!(
+            evs.is_empty(),
+            "E 持 SHARED 锁读毕并关闭不得产生目录写事件，实际：{evs:?}"
+        );
+    }
+    assert_eq!(before_after_shared, dir_file_digests(&db_dir));
+
+    // 3) 0 字节主库配遗留 -wal：ro_delete 阻断 pagerOpenWalIfPresent 删除 -wal。
+    let zero_dir = dir.path().join("zero-main");
+    std::fs::create_dir_all(&zero_dir).unwrap();
+    let zero_db = zero_dir.join("zero.db");
+    let zero_wal = append_suffix(&zero_db, "-wal");
+    std::fs::write(&zero_db, b"").unwrap();
+    std::fs::write(&zero_wal, b"stray-wal-payload").unwrap();
+    let before_zero = dir_file_digests(&zero_dir);
+    #[cfg(target_os = "linux")]
+    let w_zero = LinuxDirWatcher::with_mask(
+        &zero_dir,
+        libc::IN_CREATE
+            | libc::IN_MODIFY
+            | libc::IN_DELETE
+            | libc::IN_MOVED_FROM
+            | libc::IN_MOVED_TO
+            | libc::IN_ATTRIB
+            | libc::IN_CLOSE_WRITE,
+    );
+    let mut zero_reader = open_readonly_source_db(&zero_db).unwrap();
+    {
+        let tx = zero_reader.transaction().unwrap();
+        assert!(tx
+            .query_row("SELECT count(*) FROM sqlite_master", [], |r| r
+                .get::<_, i64>(0))
+            .is_err());
+    }
+    drop(zero_reader);
+    assert!(zero_wal.exists(), "0 字节主库下不得删除遗留 -wal");
+    #[cfg(target_os = "linux")]
+    {
+        let evs = w_zero.drain();
+        assert!(evs.is_empty(), "0 字节主库拒绝时不得产生事件：{evs:?}");
+    }
+    assert_eq!(before_zero, dir_file_digests(&zero_dir));
+
+    // 4) 物理只读来源（chmod 555 目录 + chmod 444 文件，非 root）保留完整读取能力。
+    if unsafe { libc::geteuid() } != 0 {
+        use std::os::unix::fs::PermissionsExt;
+        for f in [&x_db, &x_wal, &x_shm] {
+            std::fs::set_permissions(f, std::fs::Permissions::from_mode(0o444)).unwrap();
+        }
+        std::fs::set_permissions(&db_dir, std::fs::Permissions::from_mode(0o555)).unwrap();
+        let mut ro_reader = open_readonly_source_db(&x_db).unwrap();
+        let tx = ro_reader.transaction().unwrap();
+        let sum_ro: i64 = tx
+            .query_row("SELECT sum(v) FROM t", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(sum_ro, 30);
+        drop(tx);
+        drop(ro_reader);
+        std::fs::set_permissions(&db_dir, std::fs::Permissions::from_mode(0o755)).unwrap();
+        for f in [&x_db, &x_wal, &x_shm] {
+            std::fs::set_permissions(f, std::fs::Permissions::from_mode(0o644)).unwrap();
+        }
+    }
 }
