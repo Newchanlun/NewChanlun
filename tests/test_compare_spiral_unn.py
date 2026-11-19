@@ -437,7 +437,99 @@ def test_cli_subprocess_unknown_symbol_exits_1():
         timeout=60,
     )
     assert proc.returncode == 1
+    assert proc.stdout == ""
     assert "标的 NO_SUCH_SYM 未注册" in proc.stderr
+    assert "未作两臂比较" in proc.stderr
+
+
+def test_cli_subprocess_help_shows_funding_contracts_status_and_exit_semantics():
+    env = dict(os.environ)
+    env["PYTHONPATH"] = f"{ROOT}:{ROOT / 'src'}"
+    proc = subprocess.run(
+        [sys.executable, str(CLI_PATH), "--help"],
+        cwd=ROOT,
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+    assert proc.returncode == 0, proc.stderr
+    out = proc.stdout
+    assert "funding-record.json" in out
+    assert "chong-derivation-input.json" in out
+    assert "PENDING_LO = 3" in out
+    assert "P0 / P1-hl-testnet / P0-acceptance-5m" in out
+    assert "l_start=L0" in out
+    assert "op_ladder=2" in out
+    assert "非永久版本表" in out
+    assert "不硬编码拒绝" in out
+    assert "exit 1" in out and "未作两臂比较" in out
+    assert "exit 2" in out and "MISMATCH" in out
+    assert "exit 0" in out and "0 笔交易" in out
+    assert "NC_FUNDING_PROFILE=<profile>" in out
+    assert "NC_FUNDING_PROFILE=P0 " not in out
+
+
+def test_unn_op_ladder_rejection_reports_no_comparison_and_no_hardcoding(monkeypatch, capsys):
+    """构造拒绝时：stderr 明示未作两臂比较、保留原异常且不加载 OHLC；且不硬编码拒绝任何 profile。"""
+    err_msg = "unified_necessity 要求 op_ladder（操作绑定级别）∈ [3=2+1, 11)（segment 非势源）；op_ladder=2"
+    monkeypatch.setenv("NC_FUNDING_PROFILE", "P0")
+
+    def reject_unn(floor_ladder, funding_profile):
+        raise ValueError(err_msg)
+
+    load_calls = _install_stub_deps(
+        monkeypatch,
+        unn_factory=reject_unn,
+        spiral_factory=lambda floor_ladder, funding_profile: _ScriptedStream(),
+    )
+    mod = _load_cli_module(monkeypatch, "csu_op_ladder_reject")
+
+    with pytest.raises(ValueError, match=r"op_ladder=2"):
+        mod.main(["--symbol", "OKLO", "--bars", "3"])
+
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert load_calls == []
+    assert "构造未成（未作两臂比较）" in captured.err
+    assert "arm_init_rejected" in captured.err
+    assert "rejected_arm    : arm_unn" in captured.err
+    assert f"原异常原因      : ValueError: {err_msg}" in captured.err
+    assert "区别于已完成比较的分歧 exit 2 与已完成但零交易的 exit 0" in captured.err
+    assert "不硬编码拒绝" in captured.err
+
+    # 验证不硬编码拒绝 P0：当运行时两臂构造器接纳同一 profile 时，脚本直接执行两臂比较。
+    mod.nr = NS(
+        UnnStream=lambda floor_ladder, funding_profile: _ScriptedStream(),
+        SpiralStream=lambda floor_ladder, funding_profile: _ScriptedStream(),
+    )
+    rc = mod.main(["--symbol", "OKLO", "--bars", "3"])
+    captured2 = capsys.readouterr()
+    assert rc == 0
+    assert captured2.err == ""
+    assert "空交易样本" in captured2.out
+
+
+def test_spiral_arm_rejection_reports_arm_spiral_and_preserves_exception(monkeypatch, capsys):
+    monkeypatch.setenv("NC_FUNDING_PROFILE", "P0")
+    load_calls = _install_stub_deps(
+        monkeypatch,
+        unn_factory=lambda floor_ladder, funding_profile: _ScriptedStream(),
+        spiral_factory=lambda floor_ladder, funding_profile: (_ for _ in ()).throw(
+            ValueError("AwaitingPolicy{funding_record, profile=P0}")
+        ),
+    )
+    mod = _load_cli_module(monkeypatch, "csu_spiral_reject")
+
+    with pytest.raises(ValueError, match=r"AwaitingPolicy\{funding_record, profile=P0\}"):
+        mod.compare("OKLO", 3)
+
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert load_calls == []
+    assert "rejected_arm    : arm_spiral" in captured.err
+    assert "构造未成（未作两臂比较）" in captured.err
+    assert "原异常原因      : ValueError: AwaitingPolicy{funding_record, profile=P0}" in captured.err
 
 
 def test_cli_subprocess_real_nt_load_bars_on_fixture_json(tmp_path):
@@ -530,6 +622,10 @@ raise SystemExit(mod.main(["--symbol", "OKLO", "--bars", "0"]))
     assert h_match == h_div
 
 
-def test_line_1_docstring_preserved_for_adr_0039():
-    first_line = CLI_PATH.read_text(encoding="utf-8").splitlines()[0]
+def test_line_1_docstring_preserved_for_adr_0039_and_honest_usage():
+    src = CLI_PATH.read_text(encoding="utf-8")
+    first_line = src.splitlines()[0]
     assert first_line.startswith('"""螺旋引擎 v2（spiral）× 统一必然性引擎（unn）逐 bar bit-exact 对账')
+    assert "NC_FUNDING_PROFILE=P0 PYTHONPATH=" not in src
+    assert "NC_FUNDING_PROFILE=<profile>" in src
+    assert "非永久版本表" in src

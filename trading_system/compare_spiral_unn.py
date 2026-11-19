@@ -2,19 +2,37 @@
 
 ═══════════════ 验证命题（架构 §2.4 判据2）═══════════════
 
-"操作 = 群作用" 的 L2 否证测试：spiral 引擎除**群作用路由层**（C 翻转走
-`GroupAction::ChiralSeam`、E spawn 走 `σ⁻¹∘τ`）外，信号层/会计层/成本门与 unn
-**完全一致**（spiral 复用 unn 的 `CenterBook`/`DepthRef` 成本门机件）。故：
+"操作 = 群作用" 的 L2 否证测试：两臂共享同一 `StreamingSignalReader` 增量信号，
+核心差异在群作用路由层（spiral 的 C 翻转走 `GroupAction::ChiralSeam`、E spawn 走
+`σ⁻¹∘τ`，复用成本门机件）。两臂在 ADR 0040 资金/级别输入上的实际契约如下：
 
-  - 三项 bit-exact 全部通过（逐 bar 吐单、finish trade 表、final_nav）且有交易样本
-    ⟹ 观测到群作用抽象复现已触发操作（除 A 强平非群 gap G2）；空交易样本仅声明
-    无交易路径上的观测等价，不宣称验证全部操作。
-  - 任一项分歧 ⟹ MISMATCH（退出码 2），明确第一处分歧并逐处归因：差异落在群作用层
-    = 命题被否证；落在已知 gap = 标注。
+  - arm_unn（`trading::unified_necessity::UnnStreamCore` / `newchan_rust.UnnStream`）：
+    同时读取 `funding-record.json`（`Q_total`）与 `chong-derivation-input.json`
+    （`l_start` → `op_ladder = 2 + ℓ`），且引擎约束 `op_ladder ∈ [3, 11)`（segment 非势源）。
+  - arm_spiral（`spiral::engine::SpiralEngineCore` / `newchan_rust.SpiralStream`）：
+    仅读取 `funding-record.json`（`Q_total`），不消费 `chong-derivation-input.json`
+    （其 `PENDING_LO = 3` 为引擎内结构常量）。
 
 角色边界（ADR 0039 §四·4 / ADR 0048 一·C）：本脚本为冻结影子研究对账，不读凭据、
-不开域库、不回退默认资金（须经 `NC_FUNDING_PROFILE` 指定签署记录）；相等仅作研究
-读数，不构成生产准入、交易许可、资金放行或 TStage 触闸依据。
+不开域库、不回退默认资金（须经 `NC_FUNDING_PROFILE` 指定签署记录）、不抬升操作级别；
+相等仅作研究读数，不构成生产准入、交易许可、资金放行或 TStage 触闸依据。
+
+═══════════════ 退出语义与四类结果区分 ═══════════════
+
+  - exit 1（构造未成 / 未作两臂比较）：标的未注册、未设置 `NC_FUNDING_PROFILE`，或任一臂
+    被运行时底层引擎拒绝（如 `AwaitingPolicy`、`op_ladder` 不满足）。尚未加载 OHLC，
+    未执行两臂对账，不产生任何对账判决。
+  - exit 2（已完成两臂比较，存在分歧）：三项（逐 bar 吐单 / finish trade 表 / final_nav）
+    中至少一项不等，输出 `❌ MISMATCH`、全部 `分歧项` 与 `第一处分歧`。
+  - exit 0（已完成两臂比较，空交易样本）：三项全等但两臂均为 0 笔交易、逐 bar 吐单均为 0；
+    仅声明无交易路径上的观测等价，未覆盖交易操作，不得据此宣称验证全部操作。
+  - exit 0（已完成两臂比较，有交易样本）：三项全等且有完成交易；仅研究读数，不构成生产准入。
+
+当前仓库基线现状说明（非永久版本表；实际可否构造由运行时引擎与生效签署记录决定）：
+  截至当前基线，库内三份生效 ADR 0040 签署记录（`P0` / `P1-hl-testnet` /
+  `P0-acceptance-5m`）在 `chong-derivation-input.json` 中均签署 `l_start=L0`
+  （`op_ladder=2`），运行时在加载 OHLC 前即会被 `UnnStream` 构造器拒绝（仅 `SpiralStream`
+  可完成单臂构造）。本入口不硬编码拒绝任何 profile，也不预设或覆盖级别/资金。
 
 ═══════════════ 方法（apples-to-apples）═══════════════
 
@@ -22,8 +40,11 @@
 `UnnStream` 与 `SpiralStream`（`push_signal` 因两者 `push_bar` 签名相同而通用）。
 逐 bar 比对吐单 + finish 后比对完整 trade 表 + final_nav；三项全部参与最终判决。
 
-用法（仓库根目录）：
-    NC_FUNDING_PROFILE=P0 PYTHONPATH=src .venv/bin/python trading_system/compare_spiral_unn.py --symbol OKLO --bars 30000
+调用格式（仓库根目录；需提供被两臂运行时共同接纳的 ADR 0040 签署 profile）：
+    NC_FUNDING_PROFILE=<profile> PYTHONPATH=src .venv/bin/python trading_system/compare_spiral_unn.py --symbol OKLO --bars 30000
+    （注意：截至当前基线，若传入 `P0` / `P1-hl-testnet` / `P0-acceptance-5m`，因
+    `chong-derivation-input.json` 签 `l_start=L0 → op_ladder=2`，运行时会在加载数据前
+    被 `UnnStream` 拒绝并退出 1，不会执行两臂比较。）
 """
 
 from __future__ import annotations
@@ -46,8 +67,8 @@ import time  # noqa: E402
 
 import newchan_rust as nr  # noqa: E402
 
-# #1601：期初资金/操作级别读 ADR 0040 签署记录的 profile（如 P0）；未设 ⟹ 引擎报
-# AwaitingPolicy{funding_record}，不回退任何默认资金。
+# #1601：期初资金/操作级别读 ADR 0040 签署记录的 profile；未设 ⟹ 运行时引擎报
+# AwaitingPolicy{funding_record}，不回退任何默认资金，本脚本也不硬编码拒绝列表。
 FUNDING_PROFILE = os.environ.get("NC_FUNDING_PROFILE")
 
 from nautilus_trader.model.data import BarType  # noqa: E402
@@ -112,18 +133,90 @@ def _format_bt_max_bars() -> str:
     return f"{val} (清洗前截断)" if val > 0 else f"{val} (未生效)"
 
 
+def _print_arm_init_rejection(
+    *,
+    rejected_arm: str,
+    core_id: str,
+    ctor: str,
+    sym: str,
+    instrument_id: str,
+    max_bars_label: str,
+    run_id: str,
+    funding_profile: str | None,
+    exc: Exception,
+) -> None:
+    print("========== spiral × unn 构造未成（未作两臂比较） ==========", file=sys.stderr)
+    print(f"run_id          : {run_id}", file=sys.stderr)
+    print(
+        f"role            : {ROLE} (admission_effect={ADMISSION_EFFECT}；ADR 0039 §四·4 / ADR 0048 一·C)",
+        file=sys.stderr,
+    )
+    print(
+        "status          : arm_init_rejected（构造未成，未加载 OHLC，未作两臂比较；"
+        "CLI 退出 1，区别于已完成比较的分歧 exit 2 与已完成但零交易的 exit 0）",
+        file=sys.stderr,
+    )
+    print(f"rejected_arm    : {rejected_arm} ({core_id} via {ctor})", file=sys.stderr)
+    print(
+        "两臂 funding 契约: arm_unn 读 ADR 0040 funding-record + chong-derivation-input(l_start→op_ladder)；"
+        "arm_spiral 仅读 funding-record（PENDING_LO=3）",
+        file=sys.stderr,
+    )
+    print(
+        f"所选条件        : symbol={sym}({instrument_id}), max_bars={max_bars_label}, "
+        f"bt_max_bars={_format_bt_max_bars()}, floor_ladder={FLOOR}, "
+        f"require_settled={REQUIRE_SETTLED}, funding_profile={funding_profile}",
+        file=sys.stderr,
+    )
+    print(f"原异常原因      : {type(exc).__name__}: {exc}", file=sys.stderr)
+    print(
+        "说明            : 实际可否构造由运行时引擎与生效 ADR 0040 签署记录决定"
+        "（本入口不硬编码拒绝、不设默认资金、不抬升级别，也不构成模型分歧判决）。",
+        file=sys.stderr,
+    )
+
+
 def compare(sym: str, max_bars: int | None, *, run_id: str | None = None) -> int:
     spec = INSTRUMENTS[sym]
     instrument = make_instrument(spec)
     bar_type = BarType.from_str(f"{instrument.id}-1-MINUTE-LAST-EXTERNAL")
     actual_run_id = run_id or str(uuid4())
     funding_profile = FUNDING_PROFILE
-
-    # 两臂先验签署资金记录（无默认资金；缺失即在加载数据前由 Rust 核报 AwaitingPolicy）。
-    unn = nr.UnnStream(floor_ladder=FLOOR, funding_profile=funding_profile)
-    spiral = nr.SpiralStream(floor_ladder=FLOOR, funding_profile=funding_profile)
-
     max_bars_label = "全量" if max_bars is None else str(max_bars)
+
+    # 两臂在加载数据前交由运行时 Rust 引擎校验 ADR 0040 签署记录（不硬编码拒绝、无默认资金、不抬升级别）。
+    try:
+        unn = nr.UnnStream(floor_ladder=FLOOR, funding_profile=funding_profile)
+    except Exception as exc:
+        _print_arm_init_rejection(
+            rejected_arm="arm_unn",
+            core_id=UNN_CORE_ID,
+            ctor="newchan_rust.UnnStream",
+            sym=sym,
+            instrument_id=str(instrument.id),
+            max_bars_label=max_bars_label,
+            run_id=actual_run_id,
+            funding_profile=funding_profile,
+            exc=exc,
+        )
+        raise
+
+    try:
+        spiral = nr.SpiralStream(floor_ladder=FLOOR, funding_profile=funding_profile)
+    except Exception as exc:
+        _print_arm_init_rejection(
+            rejected_arm="arm_spiral",
+            core_id=SPIRAL_CORE_ID,
+            ctor="newchan_rust.SpiralStream",
+            sym=sym,
+            instrument_id=str(instrument.id),
+            max_bars_label=max_bars_label,
+            run_id=actual_run_id,
+            funding_profile=funding_profile,
+            exc=exc,
+        )
+        raise
+
     print(f"加载 {sym}（max_bars={max_bars_label}）...")
     t0 = time.time()
     _bars, opens, highs, lows, closes = load_bars(
@@ -289,13 +382,50 @@ def compare(sym: str, max_bars: int | None, *, run_id: str | None = None) -> int
     return 0 if verdict else 2
 
 
+CLI_HELP_EPILOG = """\
+两臂 funding / domain 契约（运行时校验，不硬编码拒绝、无默认资金、不抬升级别）：
+  - arm_unn（trading::unified_necessity::UnnStreamCore / newchan_rust.UnnStream）：
+    读取 ADR 0040 funding-record.json（Q_total）与 chong-derivation-input.json（l_start → op_ladder = 2 + ℓ），
+    且引擎约束 op_ladder ∈ [3, 11)（segment 非势源）。
+  - arm_spiral（spiral::engine::SpiralEngineCore / newchan_rust.SpiralStream）：
+    仅读取 ADR 0040 funding-record.json（Q_total），不消费 chong-derivation-input.json（PENDING_LO = 3）。
+  - 须经环境变量 NC_FUNDING_PROFILE=<profile> 指定签署记录；实际可否构造由运行时引擎与生效签署记录决定。
+
+当前仓库基线实测现状（非永久版本表）：
+  截至当前基线，库内现行三份 ADR 0040 签署记录（P0 / P1-hl-testnet / P0-acceptance-5m）在
+  chong-derivation-input.json 中均签署 l_start=L0（op_ladder=2），在加载 OHLC 数据前会被
+  UnnStream 构造器拒绝（仅 SpiralStream 可完成单臂构造）。因此当前直接以这三者调用会构造未成并退出 1，
+  不会执行两臂比较；本入口不把现状固化为版本表，后续若生效签署记录更新则按运行时实际结果执行。
+
+退出码与四类结果区分：
+  exit 1  构造未成 / 未作两臂比较（标的未注册、未设 NC_FUNDING_PROFILE、或任一臂被底层引擎拒绝；无对账判决）
+  exit 2  已完成两臂比较，但三项（逐 bar 吐单 / finish trade 表 / final_nav）至少一项分歧（❌ MISMATCH）
+  exit 0  已完成两臂比较且三项全等，两臂均 0 笔交易：仅声明无交易路径等价，未覆盖交易操作
+  exit 0  已完成两臂比较且三项全等，有完成交易：仅研究对账读数（admission_effect=none，不构成生产准入）
+
+调用格式：
+  NC_FUNDING_PROFILE=<profile> PYTHONPATH=src .venv/bin/python trading_system/compare_spiral_unn.py --symbol OKLO --bars 30000
+"""
+
+
 def main(argv: Sequence[str] | None = None) -> int:
-    p = argparse.ArgumentParser(description="spiral × unn bit-exact 对账")
-    p.add_argument("--symbol", default="OKLO")
-    p.add_argument("--bars", type=int, default=30000, help="最大 bar 数（0=全量）")
+    p = argparse.ArgumentParser(
+        description=(
+            "spiral × unn 逐 bar bit-exact 研究对账"
+            "（ADR 0039 §四·4 / ADR 0048 一·C；仅研究读数，不构成生产准入）"
+        ),
+        epilog=CLI_HELP_EPILOG,
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    p.add_argument("--symbol", default="OKLO", help="已注册标的代码（默认: OKLO）")
+    p.add_argument("--bars", type=int, default=30000, help="最大 bar 数（0=全量，默认: 30000）")
     args = p.parse_args(argv)
     if args.symbol not in INSTRUMENTS:
-        print(f"标的 {args.symbol} 未注册（可用: {list(INSTRUMENTS)}）", file=sys.stderr)
+        print(
+            f"标的 {args.symbol} 未注册（可用: {list(INSTRUMENTS)}）；"
+            "构造未成，未作两臂比较（退出 1，区别于已完成比较的分歧 exit 2 与零交易等价 exit 0）",
+            file=sys.stderr,
+        )
         return 1
     return compare(args.symbol, args.bars or None)
 
