@@ -83,7 +83,7 @@
 **另两条对本 ADR 有影响的发现**：
 
 1. **两条互不相交的 NT 适配层并存** —— Python 侧 `ChanlunStrategy`（自称 "production"）只消费线段中枢层；Rust-native `theta_v0::nautilus::ThetaStrategy` 是**完全独立的第三套引擎**，两条 BSP 链**都不消费**。⟹ **本 ADR 说「实盘喂 C」时，未说清喂的是哪一套** —— 重裁须补。
-2. **「实盘臂」从未真正跑起来过** —— `trading_system/live/runner.py` 自述「阶段 4+ 骨架，当前不可运行」。**本 ADR 裁的是「该喂什么」不是「已经在喂什么」，故裁定不受影响**，但下游实施的起点估计要改。
+2. **「实盘臂」从未真正跑起来过** —— `trading_system/live/runner.py` 自述「阶段 4+ 骨架，当前不可运行」（该诊断壳已删除，#1385 OE13 / ADR 0048；删前原脚本见 [runner.py:1@b9d898dccf](https://github.com/Newchanlun/NewChanlun/blob/b9d898dccf46c2a716115eaa1215bc39c458a959/trading_system/live/runner.py#L1)，当前正式入口见 `production_session`）。**本 ADR 裁的是「该喂什么」不是「已经在喂什么」，故裁定不受影响**，但下游实施的起点估计要改。
 
 ### ⚠️ 重裁前必须先答的一问 —— **已由 [#945](https://github.com/xy7365527-lang/NewChanlun/issues/945) 答出，见上节**
 

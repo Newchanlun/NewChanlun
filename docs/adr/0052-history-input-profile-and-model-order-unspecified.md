@@ -48,7 +48,8 @@
    - :109「保持：#1536（FU-14）blocks #1537（依赖既存）」。
 4. **唯一 launcher 与最高测试缝**（`docs/adr/0039-production-entry-inventory-and-unique-launcher.md`）：
    - :209 `theta_backtest`→`run_theta_v0_pi`「冻结影子：π 批量对照臂，只出组件证据（C10.1）」；:212 另有 42 个无 required-features 的 bin，也是冻结影子；
-   - :266-268「bin `production_session`，源文件 `rust/src/bin/production_session.rs`…全仓只有这一个 launcher。`theta_backtest`、`trading_system/live/runner.py`、`newchan` CLI、任何 `*_launcher.py` 都不是 launcher」；
+   - :266「bin `production_session`，源文件 `rust/src/bin/production_session.rs`」；
+   - :268「全仓只有这一个 launcher。`theta_backtest`、`trading_system/live/runner.py`、`newchan` CLI、任何 `*_launcher.py` 都不是 launcher」（注：引文内 `trading_system/live/runner.py` 已删除（#1385 OE13 / ADR 0048），删前原脚本见 [runner.py@b9d898dccf](https://github.com/Newchanlun/NewChanlun/blob/b9d898dccf46c2a716115eaa1215bc39c458a959/trading_system/live/runner.py)；当前正式入口见上方 `production_session`）；
    - :270「一份 manifest：已批准规则和政策版本、能力 manifest、原始输入来源、各域 DB 路径、时钟、adapter 选择（C10.1）」；:272「`evidence_class` 只决定 adapter 装配：`simulation` 装受控撮合」；
    - :284 #1523 交付 `production_session` 与 `x_execution_session` 骨架；
    - :288「AT-01/02/03/16 以 `production_session` 拉起的独立进程为最高缝（C12.1）。直接调用 `s_structure_session` 等域 bin 只算组件证据」。
