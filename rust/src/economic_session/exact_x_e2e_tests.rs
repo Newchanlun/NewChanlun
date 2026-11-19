@@ -570,6 +570,9 @@ fn gap_bound_simulation_x_orders_resting_order_advance_bar_with_this_e_commit() 
     let x_db_for_serve = x_db.clone();
     let serving_profile = profile.clone();
     std::thread::spawn(move || {
+        let _x_writer_lock =
+            crate::history_simulation::runtime::acquire_simulation_writer_lock(&x_db_for_serve)
+                .unwrap();
         let (mut c, _) = crate::economic_session::open_durable_db(&x_db_for_serve).unwrap();
         {
             let xtx = c.transaction().unwrap();
@@ -657,11 +660,13 @@ fn gap_bound_simulation_x_orders_resting_order_advance_bar_with_this_e_commit() 
         (ec2, out["payload"].clone())
     });
 
-    entered_rx
-        .recv_timeout(std::time::Duration::from_secs(5))
-        .expect("E 应进入 before_commit 暂停点");
+    if let Err(err) = entered_rx.recv_timeout(std::time::Duration::from_secs(20)) {
+        let (_, early_reply) = e_thread.join().unwrap();
+        panic!("E 应进入 before_commit 暂停点 ({err:?})，实际提前返回：{early_reply}");
+    }
 
     // E 正持 FrontierGuard 处于核对后、COMMIT 前窗口，此时并发推进旧挂单的 b0+1。
+    let before_wb = crate::history_simulation::store::frontier_exclusive_would_block_count();
     let xs_for_adv = xs.clone();
     let (adv_tx, adv_rx) = std::sync::mpsc::channel::<Value>();
     let x_thread = std::thread::spawn(move || {
@@ -669,8 +674,15 @@ fn gap_bound_simulation_x_orders_resting_order_advance_bar_with_this_e_commit() 
         let _ = adv_tx.send(reply);
     });
 
-    // 观察窗口：150ms 内 X 的 AdvanceBar(b0+1) 必须被前沿顺序锁阻挡，不能在 E COMMIT 前落盘。
-    std::thread::sleep(std::time::Duration::from_millis(150));
+    // 因果见证：必须真实观测到 X 在 lock_frontier_exclusive 处撞上内核 WouldBlock，而非只睡固定时长。
+    let wb_deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+    while crate::history_simulation::store::frontier_exclusive_would_block_count() <= before_wb {
+        assert!(
+            std::time::Instant::now() < wb_deadline,
+            "X 的 AdvanceBar(b0+1) 未在限定时间内到达 frontier.lock 争用点"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
     if let Ok(early) = adv_rx.try_recv() {
         panic!("X 的 AdvanceBar(b0+1) 不得在 E 当次 COMMIT 完成前返回，实际提前返回：{early}");
     }
@@ -781,4 +793,143 @@ fn gap_bound_simulation_x_orders_resting_order_advance_bar_with_this_e_commit() 
             || pending_err.contains("economic_components"),
         "模拟 X 非空 fill/fee 补录后仍归 #1381 Pending，不得放行：{pending_err}"
     );
+}
+
+#[test]
+fn gap_bound_simulation_x_rejects_uncooperative_writer_without_creating_lock_files() {
+    let dir = tempfile::tempdir().unwrap();
+    let x_db = dir.path().join("x-legacy.sqlite");
+    let (mut f, profile) = build_bound_sim_fixture(&x_db, true);
+
+    committed(&mut f);
+    dispatch(&mut f, "alpha");
+    dispatch(&mut f, "beta");
+    let rel_alpha = f.handle(0, "ReleaseExact-alpha", release_payload(&f, "alpha"));
+    assert_eq!(rel_alpha["record"]["state"], "ReleasedExact", "{rel_alpha}");
+
+    // 模拟旧 X 直接初始化 x_db：仅建库（不创建 frontier.lock），且初始没有 writer.lock。
+    {
+        let (mut xc, _) = crate::economic_session::open_durable_db(&x_db).unwrap();
+        let xtx = xc.transaction().unwrap();
+        xtx.execute_batch(
+            "CREATE TABLE IF NOT EXISTS x_meta(key TEXT PRIMARY KEY, value TEXT NOT NULL) STRICT;",
+        )
+        .unwrap();
+        for (k, v) in [
+            ("profile_revision", "x-execution-profile/1"),
+            ("profile_mode", "simulation"),
+            ("history_simulation", "true"),
+            ("writer_epoch", "1"),
+        ] {
+            xtx.execute("INSERT INTO x_meta VALUES(?1,?2)", rusqlite::params![k, v])
+                .unwrap();
+        }
+        crate::history_simulation::runtime::initialize_in_transaction(&xtx, &profile, 1).unwrap();
+        xtx.commit().unwrap();
+    }
+    let canonical = x_db.canonicalize().unwrap();
+    let writer_lock_path = std::path::PathBuf::from(format!("{}.writer.lock", canonical.display()));
+    let frontier_lock_path =
+        std::path::PathBuf::from(format!("{}.frontier.lock", canonical.display()));
+    // 清理 initialize_in_transaction 在旧测路径创建的 frontier.lock，还原旧 X 磁盘形态。
+    let _ = std::fs::remove_file(&frontier_lock_path);
+    assert!(!writer_lock_path.exists());
+    assert!(!frontier_lock_path.exists());
+
+    // E recover 到 epoch 2 进入真实 source_gap == true。
+    let rec2 = recover(&f.configs[0]).unwrap();
+    assert_eq!(rec2["writer_epoch"], "2", "{rec2}");
+    let (mut ec2, runtime2) = store::open(&f.configs[0].db, false).unwrap();
+    let mut cfg2 = f.configs[0].clone();
+    cfg2.intake = capture_continuity::start(&mut ec2, &cfg2, 2).unwrap();
+
+    let mut beta_payload = release_payload(&f, "beta");
+    beta_payload["writer_epoch"] = json!("2");
+    let mut beta_env = envelope("ReleaseExact-beta", beta_payload);
+    beta_env["schema_revision"] = json!(cfg2.revision().unwrap());
+    beta_env["session_id"] = json!(cfg2.session);
+    beta_env["session_generation"] = json!(cfg2.generation);
+
+    // 1) 缺少 writer.lock 时：E 必须拒绝且不得新建任何锁文件。
+    let (cut_before, _, _, _) = latest(&ec2).unwrap();
+    let err_missing =
+        service::handle(&mut ec2, &cfg2, 2, 1, &runtime2, &beta_env)["payload"].clone();
+    assert_eq!(err_missing["kind"], "Error", "{err_missing}");
+    assert!(
+        err_missing["error"]
+            .as_str()
+            .unwrap()
+            .contains("单写者准入锁"),
+        "{err_missing}"
+    );
+    assert!(!writer_lock_path.exists(), "E 不得新建 writer.lock");
+    assert!(!frontier_lock_path.exists(), "E 不得新建 frontier.lock");
+    assert_eq!(latest(&ec2).unwrap().0, cut_before);
+
+    // 2) 旧 X 正在运行（独占 writer.lock，无 frontier.lock）：E 必须拒绝且不得新建 frontier.lock。
+    let old_x_lock = crate::session_transport::process_lock(&x_db, "X").unwrap();
+    assert!(
+        crate::history_simulation::runtime::acquire_simulation_writer_lock(&x_db)
+            .unwrap_err()
+            .contains("StaleWriter"),
+        "旧 X 独占期间新 X 不得并存"
+    );
+    let err_old_running =
+        service::handle(&mut ec2, &cfg2, 2, 1, &runtime2, &beta_env)["payload"].clone();
+    assert_eq!(err_old_running["kind"], "Error", "{err_old_running}");
+    assert!(
+        err_old_running["error"]
+            .as_str()
+            .unwrap()
+            .contains("旧版或非协作 X"),
+        "{err_old_running}"
+    );
+    assert!(
+        !frontier_lock_path.exists(),
+        "E 不得为旧 X 新建 frontier.lock"
+    );
+    assert_eq!(latest(&ec2).unwrap().0, cut_before);
+
+    // 3) 即使磁盘上残留 frontier.lock，旧 X / R4 X 独占 writer.lock 仍必须被 E 拒绝。
+    std::fs::write(&frontier_lock_path, b"").unwrap();
+    let err_r4_running =
+        service::handle(&mut ec2, &cfg2, 2, 1, &runtime2, &beta_env)["payload"].clone();
+    assert_eq!(err_r4_running["kind"], "Error", "{err_r4_running}");
+    assert!(
+        err_r4_running["error"]
+            .as_str()
+            .unwrap()
+            .contains("writer.lock 被独占持有"),
+        "{err_r4_running}"
+    );
+    assert_eq!(latest(&ec2).unwrap().0, cut_before);
+
+    // 4) 拒绝后 E 的已有只读/查询口仍可用。
+    let mut read_env = envelope(
+        "ReadView-after-refusal",
+        json!({"op": "ReadView", "cut": null, "as_known_ns": null}),
+    );
+    read_env["schema_revision"] = json!(cfg2.revision().unwrap());
+    read_env["session_id"] = json!(cfg2.session);
+    read_env["session_generation"] = json!(cfg2.generation);
+    let view = service::handle(&mut ec2, &cfg2, 2, 1, &runtime2, &read_env)["payload"].clone();
+    assert_eq!(view["kind"], "EconomicView", "{view}");
+
+    // 5) 释放旧 X 锁后，单写者互斥：新 X 之间互斥、新 X 与旧 X 互斥。
+    drop(old_x_lock);
+    let new_x_lock =
+        crate::history_simulation::runtime::acquire_simulation_writer_lock(&x_db).unwrap();
+    assert!(
+        crate::history_simulation::runtime::acquire_simulation_writer_lock(&x_db)
+            .unwrap_err()
+            .contains("StaleWriter"),
+        "两个新模拟 X 不得并存"
+    );
+    assert!(
+        crate::session_transport::process_lock(&x_db, "X")
+            .unwrap_err()
+            .contains("StaleWriter"),
+        "新模拟 X 运行期间旧 X / 非模拟 X 不得启动"
+    );
+    drop(new_x_lock);
 }

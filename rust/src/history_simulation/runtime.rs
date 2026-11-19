@@ -13,6 +13,10 @@ use std::os::unix::net::UnixStream;
 use std::path::Path;
 use std::time::{Duration, Instant};
 
+pub use super::store::{
+    acquire_simulation_writer_lock, lock_frontier_exclusive, FrontierGuard, SimulationWriterLock,
+};
+
 pub const WIRE: &str = "x-exact-simulation/1";
 pub const AUTHORITY_WIRE: &str = "x-exact-authority/1";
 fn hash<T: Serialize>(v: &T) -> String {
@@ -746,15 +750,18 @@ fn execute(c: &mut Connection, p: &Profile, epoch: i64, mut batch: Batch) -> Res
         c.execute("UPDATE x_exact_commands SET state='ExecutionReady',attempt_batch=?2,execute_evidence=COALESCE(execute_evidence,?3) WHERE id=?1 AND state IN ('ExecutionRequested','ExecutionReady')",params![command.command_id,encoded,canonical_json(&evidence)]).map_err(error)?;
         executed_records.push((command.command_id, evidence));
     }
-    let tx = c.transaction().map_err(error)?;
-    tx.execute("INSERT INTO x_sim_meta(k,v) VALUES('pending_batch',?1) ON CONFLICT(k) DO UPDATE SET v=excluded.v",[&encoded]).map_err(error)?;
-    for (id, evidence) in &executed_records {
-        let changed=tx.execute("UPDATE x_exact_commands SET state='MayHaveCalled',attempt_batch=?2,execute_evidence=COALESCE(execute_evidence,?3) WHERE id=?1 AND (state='ExecutionReady' OR (state='MayHaveCalled' AND attempt_batch=?2))",params![id,encoded,canonical_json(evidence)]).map_err(error)?;
-        if changed != 1 {
-            return Err("IdentityConflict：X 同命令调用占有冲突".into());
+    {
+        let _frontier_lock = store::lock_frontier_exclusive(c)?;
+        let tx = c.transaction().map_err(error)?;
+        tx.execute("INSERT INTO x_sim_meta(k,v) VALUES('pending_batch',?1) ON CONFLICT(k) DO UPDATE SET v=excluded.v",[&encoded]).map_err(error)?;
+        for (id, evidence) in &executed_records {
+            let changed=tx.execute("UPDATE x_exact_commands SET state='MayHaveCalled',attempt_batch=?2,execute_evidence=COALESCE(execute_evidence,?3) WHERE id=?1 AND (state='ExecutionReady' OR (state='MayHaveCalled' AND attempt_batch=?2))",params![id,encoded,canonical_json(evidence)]).map_err(error)?;
+            if changed != 1 {
+                return Err("IdentityConflict：X 同命令调用占有冲突".into());
+            }
         }
+        tx.commit().map_err(error)?;
     }
-    tx.commit().map_err(error)?;
     #[cfg(test)]
     if std::env::var("ISSUE1381_TEST_CRASH_AFTER_CLAIM")
         .ok()
@@ -867,17 +874,20 @@ pub fn initialize_in_transaction(
 }
 
 pub fn serve(c: &mut Connection, p: &Profile, epoch: i64) -> Result<(), String> {
-    let tx = c.transaction().map_err(error)?;
-    initialize_in_transaction(&tx, p, epoch)?;
-    #[cfg(test)]
-    if std::env::var("ISSUE1381_TEST_INIT_INTERRUPT")
-        .ok()
-        .as_deref()
-        == Some("before")
     {
-        std::process::exit(44);
+        let _frontier_lock = store::lock_frontier_exclusive(c)?;
+        let tx = c.transaction().map_err(error)?;
+        initialize_in_transaction(&tx, p, epoch)?;
+        #[cfg(test)]
+        if std::env::var("ISSUE1381_TEST_INIT_INTERRUPT")
+            .ok()
+            .as_deref()
+            == Some("before")
+        {
+            std::process::exit(44);
+        }
+        tx.commit().map_err(error)?;
     }
-    tx.commit().map_err(error)?;
     store::ensure_frontier_lock(c)?;
     #[cfg(test)]
     if std::env::var("ISSUE1381_TEST_INIT_INTERRUPT")

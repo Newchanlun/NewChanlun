@@ -1339,6 +1339,7 @@ fn history_simulation_source_live_frontier_blocks_empty_advance_inflight_and_mul
 
     let f = fixture(None);
     let x_db = f.dir.join("x-live.db");
+    let _x_writer_lock = sim_rt::acquire_simulation_writer_lock(&x_db).unwrap();
     let mut xc = Connection::open(&x_db).unwrap();
     let sim_model = model();
     let auth = |id: &str| sim_rt::Authority {
