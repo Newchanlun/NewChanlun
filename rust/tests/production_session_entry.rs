@@ -15,11 +15,12 @@
 use rusqlite::{Connection, OpenFlags};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
-use std::io::{BufRead, BufReader, Read, Write};
+use std::io::{BufRead, BufReader, ErrorKind, Read, Write};
 use std::os::unix::fs::{MetadataExt, PermissionsExt};
-use std::os::unix::net::UnixStream;
+use std::os::unix::net::{UnixListener, UnixStream};
+use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command, Output, Stdio};
+use std::process::{Child, Command, ExitStatus, Output, Stdio};
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
 
@@ -98,48 +99,116 @@ fn run(cmd: &mut Command) -> Output {
     cmd.stdin(Stdio::null()).output().unwrap()
 }
 
-/// 期望「拒绝启动」的命令：限时等待退出。门失效时 S/launcher 会进入服务循环不退出，
-/// 此处超时即杀掉 launcher 及其域子进程并判红，不吃满 job 超时。
-#[cfg_attr(feature = "production_session_testonly", allow(dead_code))]
-fn run_refusal(cmd: &mut Command) -> Output {
+struct BoundedByteReader {
+    state: Arc<(Mutex<(Vec<u8>, bool)>, Condvar)>,
+    reader: Option<std::thread::JoinHandle<()>>,
+}
+
+impl BoundedByteReader {
+    fn attach<R: Read + Send + 'static>(mut pipe: R) -> Self {
+        let state = Arc::new((Mutex::new((Vec::new(), false)), Condvar::new()));
+        let shared = Arc::clone(&state);
+        let reader = std::thread::spawn(move || {
+            let mut buf = Vec::new();
+            let _ = pipe.read_to_end(&mut buf);
+            let (lock, cv) = &*shared;
+            let mut guard = lock.lock().unwrap_or_else(|e| e.into_inner());
+            guard.0 = buf;
+            guard.1 = true;
+            cv.notify_all();
+        });
+        Self {
+            state,
+            reader: Some(reader),
+        }
+    }
+
+    fn finish_bounded(&mut self, timeout: Duration) -> (Vec<u8>, bool) {
+        let deadline = Instant::now() + timeout;
+        let (lock, cv) = &*self.state;
+        let mut guard = lock.lock().unwrap_or_else(|e| e.into_inner());
+        while !guard.1 {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                break;
+            }
+            guard = cv
+                .wait_timeout(guard, remaining)
+                .unwrap_or_else(|e| e.into_inner())
+                .0;
+        }
+        let eof = guard.1;
+        let bytes = std::mem::take(&mut guard.0);
+        drop(guard);
+        if eof {
+            if let Some(handle) = self.reader.take() {
+                let _ = handle.join();
+            }
+        }
+        (bytes, eof)
+    }
+}
+
+/// 隔离进程组内执行一次性命令（init 探针 / 拒启门）：对进程退出、后代兜底清理及 stdout/stderr 读者收尾均设上限。
+fn run_command_bounded(cmd: &mut Command, timeout: Duration, what: &str) -> Output {
     let mut child = cmd
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
+        .process_group(0)
         .spawn()
         .unwrap();
-    let mut stdout = child.stdout.take().unwrap();
-    let mut stderr = child.stderr.take().unwrap();
-    let out_reader = std::thread::spawn(move || {
-        let mut buf = Vec::new();
-        let _ = stdout.read_to_end(&mut buf);
-        buf
-    });
-    let err_reader = std::thread::spawn(move || {
-        let mut buf = Vec::new();
-        let _ = stderr.read_to_end(&mut buf);
-        buf
-    });
-    let deadline = Instant::now() + Duration::from_secs(60);
-    let status = loop {
+    let pgid = child.id();
+    let mut out_reader = BoundedByteReader::attach(child.stdout.take().unwrap());
+    let mut err_reader = BoundedByteReader::attach(child.stderr.take().unwrap());
+    let started = Instant::now();
+    let deadline = started + timeout;
+    let mut exit_status: Option<ExitStatus> = None;
+    loop {
         if let Some(status) = child.try_wait().unwrap() {
-            break status;
+            exit_status = Some(status);
+            break;
         }
         if Instant::now() >= deadline {
-            for (_, pid) in domain_children(child.id()) {
-                unsafe { libc::kill(pid as libc::pid_t, libc::SIGKILL) };
-            }
-            let _ = child.kill();
-            let _ = child.wait();
-            panic!("拒启门失效：进程 60s 内未退出（应以拒绝退出），已杀掉");
+            let (_, _, remaining) =
+                terminate_owned_group(&mut child, pgid, &mut exit_status, Duration::from_secs(2));
+            let (_, _) = out_reader.finish_bounded(Duration::from_secs(5));
+            let (stderr, err_eof) = err_reader.finish_bounded(Duration::from_secs(5));
+            panic!(
+                "{what}：进程超过上限 {timeout:?}（耗时 {:?}）未退出，已按本测试进程组 {pgid} 清理\
+                 （残留 PID={remaining:?}，stderr_eof={err_eof}）：{}",
+                started.elapsed(),
+                String::from_utf8_lossy(&stderr)
+            );
         }
         std::thread::sleep(Duration::from_millis(50));
-    };
-    Output {
-        status,
-        stdout: out_reader.join().unwrap(),
-        stderr: err_reader.join().unwrap(),
     }
+    let (_, _, remaining) =
+        terminate_owned_group(&mut child, pgid, &mut exit_status, Duration::from_secs(2));
+    let (stdout, out_eof) = out_reader.finish_bounded(Duration::from_secs(5));
+    let (stderr, err_eof) = err_reader.finish_bounded(Duration::from_secs(5));
+    assert!(
+        remaining.is_empty(),
+        "{what}：进程退出后本测试进程组 {pgid} 仍有残留 PID={remaining:?}：{}",
+        String::from_utf8_lossy(&stderr)
+    );
+    assert!(
+        out_eof && err_eof,
+        "{what}：stdout/stderr 读者收尾超时（out_eof={out_eof}, err_eof={err_eof}）：{}",
+        String::from_utf8_lossy(&stderr)
+    );
+    Output {
+        status: exit_status.expect("child exited"),
+        stdout,
+        stderr,
+    }
+}
+
+/// 期望「拒绝启动」的命令：限时等待退出。门失效时 S/launcher 会进入服务循环不退出，
+/// 此处超时即按隔离进程组先停后杀并判红，不吃满 job 超时。
+#[cfg_attr(feature = "production_session_testonly", allow(dead_code))]
+fn run_refusal(cmd: &mut Command) -> Output {
+    run_command_bounded(cmd, Duration::from_secs(60), "拒启门失效（应以拒绝退出）")
 }
 
 /// v3 init（可带结构源声明）。
@@ -159,7 +228,7 @@ fn s_init_v3(space: &Space, declared: Option<&Value>) -> PathBuf {
         c.arg("--structure-source")
             .arg(write_json(&space.path("source.json"), d));
     }
-    let out = run(&mut c);
+    let out = run_command_bounded(&mut c, Duration::from_secs(30), "S v3 init");
     assert!(
         out.status.success(),
         "S v3 init: {}",
@@ -359,15 +428,126 @@ fn spawn_launcher(manifest: &Path) -> Child {
         .unwrap()
 }
 
-fn ppid(pid: u32) -> Option<u32> {
+fn proc_stat_ids(pid: u32) -> Option<(u32, u32)> {
     let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
-    stat.rsplit_once(')')?
-        .1
-        .split_whitespace()
-        .nth(1)?
-        .parse()
-        .ok()
+    let mut fields = stat.rsplit_once(')')?.1.split_whitespace();
+    let ppid = fields.nth(1)?.parse().ok()?;
+    let pgrp = fields.next()?.parse().ok()?;
+    Some((ppid, pgrp))
 }
+
+fn ppid(pid: u32) -> Option<u32> {
+    proc_stat_ids(pid).map(|(ppid, _)| ppid)
+}
+
+/// 仅返回归属本测试隔离进程组（`pgrp == owner_pgid`）的 PID（排除当前测试进程）。
+fn owned_group_pids(owner_pgid: u32) -> Vec<u32> {
+    let self_pid = std::process::id();
+    let mut out = Vec::new();
+    let Ok(entries) = std::fs::read_dir("/proc") else {
+        return out;
+    };
+    for entry in entries.flatten() {
+        let Ok(pid) = entry.file_name().to_string_lossy().parse::<u32>() else {
+            continue;
+        };
+        if pid == self_pid {
+            continue;
+        }
+        if proc_stat_ids(pid).is_some_and(|(_, pgrp)| pgrp == owner_pgid) {
+            out.push(pid);
+        }
+    }
+    out.sort_unstable();
+    out
+}
+
+/// 优先向目标根进程发 SIGTERM 走正常停机；仅当逾期或根进程退出后仍有本测试进程组残留时，
+/// 才对 `owned_group_pids(pgid)` 兜底升级，不波及任何其他进程或并发工位。
+fn terminate_owned_group(
+    child: &mut Child,
+    pgid: u32,
+    exit_status: &mut Option<ExitStatus>,
+    grace: Duration,
+) -> (bool, bool, Vec<u32>) {
+    if exit_status.is_none() {
+        if let Ok(Some(st)) = child.try_wait() {
+            *exit_status = Some(st);
+        }
+    }
+    let mut escalated = false;
+    if exit_status.is_none() {
+        // SAFETY: `pgid == child.id()` 且 `child` 尚未回收，只向本测试创建的根进程发 SIGTERM。
+        unsafe { libc::kill(pgid as libc::pid_t, libc::SIGTERM) };
+        let grace_deadline = Instant::now() + grace;
+        while exit_status.is_none() && Instant::now() < grace_deadline {
+            match child.try_wait() {
+                Ok(Some(st)) => {
+                    *exit_status = Some(st);
+                    break;
+                }
+                Ok(None) => std::thread::sleep(Duration::from_millis(25)),
+                Err(_) => break,
+            }
+        }
+    }
+    if exit_status.is_none() {
+        escalated = true;
+        for pid in owned_group_pids(pgid) {
+            // SAFETY: 仅向 `pgrp == pgid` 且由本测试隔离进程组拥有的 PID 发 SIGKILL。
+            unsafe { libc::kill(pid as libc::pid_t, libc::SIGKILL) };
+        }
+        let _ = child.kill();
+        let kill_deadline = Instant::now() + Duration::from_secs(5);
+        while exit_status.is_none() && Instant::now() < kill_deadline {
+            match child.try_wait() {
+                Ok(Some(st)) => {
+                    *exit_status = Some(st);
+                    break;
+                }
+                Ok(None) => std::thread::sleep(Duration::from_millis(25)),
+                Err(_) => break,
+            }
+        }
+    }
+
+    let mut stragglers_cleaned = false;
+    let settle_deadline = Instant::now() + Duration::from_millis(200);
+    while !owned_group_pids(pgid).is_empty() && Instant::now() < settle_deadline {
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    let mut remaining = owned_group_pids(pgid);
+    if !remaining.is_empty() {
+        stragglers_cleaned = true;
+        for &pid in &remaining {
+            unsafe { libc::kill(pid as libc::pid_t, libc::SIGTERM) };
+        }
+        let term_deadline = Instant::now() + Duration::from_secs(2);
+        while Instant::now() < term_deadline {
+            remaining = owned_group_pids(pgid);
+            if remaining.is_empty() {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(25));
+        }
+        if !remaining.is_empty() {
+            let kill_deadline = Instant::now() + Duration::from_secs(5);
+            while Instant::now() < kill_deadline {
+                remaining = owned_group_pids(pgid);
+                if remaining.is_empty() {
+                    break;
+                }
+                for &pid in &remaining {
+                    unsafe { libc::kill(pid as libc::pid_t, libc::SIGKILL) };
+                }
+                std::thread::sleep(Duration::from_millis(25));
+            }
+            remaining = owned_group_pids(pgid);
+        }
+    }
+    (escalated, stragglers_cleaned, remaining)
+}
+
 fn exe_name(pid: u32) -> String {
     std::fs::read(format!("/proc/{pid}/cmdline"))
         .ok()
@@ -425,7 +605,8 @@ fn launcher_events(lines: &[String]) -> Vec<Value> {
         .collect()
 }
 
-/// 边运行边读取 launcher stderr，以结构化事件而非进程列表快照作为有界同步点。
+/// 边运行边读取 launcher stderr，以结构化事件而非进程列表快照作为有界同步点，
+/// 且收尾对 EOF 等待设上限，避免残留写端卡死测试。
 struct LauncherStderr {
     state: Arc<(Mutex<(Vec<String>, bool)>, Condvar)>,
     reader: Option<std::thread::JoinHandle<()>>,
@@ -446,13 +627,16 @@ impl LauncherStderr {
                     Ok(_) => {
                         let trimmed = line.trim_end_matches(['\r', '\n']).to_string();
                         let (lock, cv) = &*shared;
-                        lock.lock().unwrap().0.push(trimmed);
+                        lock.lock()
+                            .unwrap_or_else(|e| e.into_inner())
+                            .0
+                            .push(trimmed);
                         cv.notify_all();
                     }
                 }
             }
             let (lock, cv) = &*shared;
-            lock.lock().unwrap().1 = true;
+            lock.lock().unwrap_or_else(|e| e.into_inner()).1 = true;
             cv.notify_all();
         });
         Self {
@@ -461,28 +645,46 @@ impl LauncherStderr {
         }
     }
 
+    fn snapshot_log(&self) -> String {
+        self.state
+            .0
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .0
+            .join("\n")
+    }
+
     fn wait_for<T>(
         &self,
         what: &str,
         launcher: &mut Child,
+        exit_status: &mut Option<ExitStatus>,
         timeout: Duration,
         mut check: impl FnMut(&[String]) -> Option<T>,
     ) -> T {
         let deadline = Instant::now() + timeout;
         let (lock, cv) = &*self.state;
-        let mut guard = lock.lock().unwrap();
+        let mut guard = lock.lock().unwrap_or_else(|e| e.into_inner());
         loop {
             if let Some(found) = check(&guard.0) {
                 return found;
             }
-            if let Some(status) = launcher.try_wait().unwrap() {
+            if exit_status.is_none() {
+                if let Some(status) = launcher.try_wait().unwrap() {
+                    *exit_status = Some(status);
+                }
+            }
+            if let Some(status) = *exit_status {
                 let drain_until = (Instant::now() + Duration::from_millis(200)).min(deadline);
                 while !guard.1 {
                     let slice = drain_until.saturating_duration_since(Instant::now());
                     if slice.is_zero() {
                         break;
                     }
-                    guard = cv.wait_timeout(guard, slice).unwrap().0;
+                    guard = cv
+                        .wait_timeout(guard, slice)
+                        .unwrap_or_else(|e| e.into_inner())
+                        .0;
                 }
                 let log = guard.0.join("\n");
                 panic!("{what}：launcher 提前退出 {status}\n{log}");
@@ -494,22 +696,179 @@ impl LauncherStderr {
             let remaining = deadline.saturating_duration_since(Instant::now());
             if remaining.is_zero() {
                 let log = guard.0.join("\n");
-                drop(guard);
-                let _ = stop(launcher);
-                panic!("{what} 超时\n{log}");
+                panic!("{what} 超时（上限 {timeout:?}）\n{log}");
             }
             guard = cv
                 .wait_timeout(guard, remaining.min(Duration::from_millis(50)))
-                .unwrap()
+                .unwrap_or_else(|e| e.into_inner())
                 .0;
         }
     }
 
-    fn finish(mut self) -> Vec<String> {
-        if let Some(handle) = self.reader.take() {
-            let _ = handle.join();
+    fn finish_bounded(&mut self, timeout: Duration) -> (Vec<String>, bool) {
+        let deadline = Instant::now() + timeout;
+        let (lock, cv) = &*self.state;
+        let mut guard = lock.lock().unwrap_or_else(|e| e.into_inner());
+        while !guard.1 {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                break;
+            }
+            guard = cv
+                .wait_timeout(guard, remaining)
+                .unwrap_or_else(|e| e.into_inner())
+                .0;
         }
-        self.state.0.lock().unwrap().0.clone()
+        let eof = guard.1;
+        let lines = guard.0.clone();
+        drop(guard);
+        if eof {
+            if let Some(handle) = self.reader.take() {
+                let _ = handle.join();
+            }
+        }
+        (lines, eof)
+    }
+}
+
+/// 隔离进程组托管的 launcher 守卫：在正常停止、断言 panic、stderr 提前 EOF 与等待超时路径上
+/// 统一优先正常 SIGTERM 停机、逾期仅对本测试进程组兜底清理、并对日志读者收尾设上限。
+/// 声明在 `Space` 之后时，Rust 逆序 Drop 保证进程先退出再删除临时目录。
+struct ManagedLauncher {
+    child: Child,
+    pgid: u32,
+    stderr: LauncherStderr,
+    exit_status: Option<ExitStatus>,
+    stop_grace: Duration,
+    drain_timeout: Duration,
+    cleaned: bool,
+}
+
+impl ManagedLauncher {
+    fn spawn(manifest: &Path) -> Self {
+        assert!(
+            std::env::var_os(CREDENTIAL_KEY).is_none(),
+            "测试进程环境不得含哨兵键"
+        );
+        let mut child = Command::new(launcher_bin())
+            .arg("--manifest")
+            .arg(manifest)
+            .env_remove(CREDENTIAL_KEY)
+            .env_remove(THETA_DIAGNOSTIC.0)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped())
+            .process_group(0)
+            .spawn()
+            .unwrap();
+        let pgid = child.id();
+        let stderr = LauncherStderr::attach(&mut child);
+        Self {
+            child,
+            pgid,
+            stderr,
+            exit_status: None,
+            stop_grace: Duration::from_secs(15),
+            drain_timeout: Duration::from_secs(5),
+            cleaned: false,
+        }
+    }
+
+    fn id(&self) -> u32 {
+        self.pgid
+    }
+
+    fn try_wait(&mut self) -> Option<ExitStatus> {
+        if self.exit_status.is_none() {
+            if let Some(st) = self.child.try_wait().unwrap() {
+                self.exit_status = Some(st);
+            }
+        }
+        self.exit_status
+    }
+
+    fn wait_for_stderr<T>(
+        &mut self,
+        what: &str,
+        timeout: Duration,
+        check: impl FnMut(&[String]) -> Option<T>,
+    ) -> T {
+        self.stderr
+            .wait_for(what, &mut self.child, &mut self.exit_status, timeout, check)
+    }
+
+    fn wait_until(&mut self, what: &str, timeout: Duration, mut ready: impl FnMut() -> bool) {
+        let deadline = Instant::now() + timeout;
+        while !ready() {
+            if let Some(status) = self.try_wait() {
+                panic!(
+                    "{what}：launcher 提前退出 {status}\n{}",
+                    self.stderr.snapshot_log()
+                );
+            }
+            assert!(
+                Instant::now() < deadline,
+                "{what} 未在 {timeout:?} 内就绪\n{}",
+                self.stderr.snapshot_log()
+            );
+            std::thread::sleep(Duration::from_millis(50));
+        }
+    }
+
+    fn shutdown_bounded(
+        &mut self,
+        require_graceful: bool,
+    ) -> Result<(ExitStatus, Vec<String>), String> {
+        let (escalated, stragglers_cleaned, remaining) = terminate_owned_group(
+            &mut self.child,
+            self.pgid,
+            &mut self.exit_status,
+            self.stop_grace,
+        );
+        let (lines, eof) = self.stderr.finish_bounded(self.drain_timeout);
+        self.cleaned = true;
+        let log = lines.join("\n");
+        if escalated {
+            return Err(format!(
+                "launcher 正常停止超过上限 {:?}，已仅对本测试进程组 {} 升级 SIGKILL 清理\
+                 （残留 PID={remaining:?}，stderr_eof={eof}）：\n{log}",
+                self.stop_grace, self.pgid
+            ));
+        }
+        if !remaining.is_empty() {
+            return Err(format!(
+                "launcher 退出后本测试进程组 {} 仍有残留 PID={remaining:?}：\n{log}",
+                self.pgid
+            ));
+        }
+        if require_graceful && stragglers_cleaned {
+            return Err(format!(
+                "launcher 正常退出后未自行回收本测试进程组 {} 的全部子进程（已兜底清理）：\n{log}",
+                self.pgid
+            ));
+        }
+        if !eof {
+            return Err(format!(
+                "launcher stderr 读者收尾超过上限 {:?}：\n{log}",
+                self.drain_timeout
+            ));
+        }
+        let status = self
+            .exit_status
+            .ok_or_else(|| format!("launcher 未返回退出状态：\n{log}"))?;
+        Ok((status, lines))
+    }
+
+    fn stop_gracefully(mut self) -> Result<(ExitStatus, Vec<String>), String> {
+        self.shutdown_bounded(true)
+    }
+}
+
+impl Drop for ManagedLauncher {
+    fn drop(&mut self) {
+        if !self.cleaned {
+            let _ = self.shutdown_bounded(false);
+        }
     }
 }
 
@@ -985,8 +1344,7 @@ fn production_session_new_s_init_and_serve_share_source_declaration() {
     );
 }
 
-/// 经 S socket 提交第 `n` 条 ingest（`s-session/3` 封包、`s-ohlc/1` 原件；一帧 LF + 写端 EOF）。
-fn s_ingest(socket: &Path, ns: &str, n: u32) -> Value {
+fn s_ingest_frame(ns: &str, n: u32) -> String {
     let raw = json!({"schema_revision":"s-ohlc/1","session_id":SESSION,"source_namespace":ns,"source_epoch":"1",
         "instrument":"TEST.OHLC","profile":"ohlc_integer_tb02a_v1",
         "events":[{"event_id":format!("bar-{n}"),"revision":"1","seq":(n * 10).to_string(),"received_at":"2026-09-18T00:00:00Z",
@@ -997,20 +1355,144 @@ fn s_ingest(socket: &Path, ns: &str, n: u32) -> Value {
         "source_namespace":ns,"source_epoch":"1","message_id":format!("message-{n}"),"producer_id":"pse-test",
         "producer_epoch":"1","payload_hash":sha256_hex(newchan_rust::session_protocol::canonical_json(&payload).as_bytes()),
         "causal_refs":[],"payload":payload});
-    let mut stream = UnixStream::connect(socket).unwrap();
+    format!(
+        "{}\n",
+        newchan_rust::session_protocol::canonical_json(&envelope)
+    )
+}
+
+/// 经 Unix socket 执行一次完整 JSON 请求-应答（含连接、写帧、写端 EOF、读至对端 EOF 与解析），
+/// 全程共享同一总截止时间 `timeout`，而非单一读/写调用超时。
+fn exchange_unix_json_bounded(
+    socket: &Path,
+    frame: &str,
+    timeout: Duration,
+) -> Result<Value, String> {
+    let started = Instant::now();
+    let deadline = started + timeout;
+    let mut stream = loop {
+        match UnixStream::connect(socket) {
+            Ok(s) => break s,
+            Err(e) if matches!(e.kind(), ErrorKind::WouldBlock | ErrorKind::Interrupted) => {
+                if Instant::now() >= deadline {
+                    return Err(format!(
+                        "S socket 事务超时（上限 {timeout:?}，耗时 {:?}，连接 {} 未完成）：{e}",
+                        started.elapsed(),
+                        socket.display()
+                    ));
+                }
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            Err(e) => {
+                return Err(format!("连接 S socket {} 失败：{e}", socket.display()));
+            }
+        }
+    };
+
+    let bytes = frame.as_bytes();
+    let mut written = 0;
+    while written < bytes.len() {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            return Err(format!(
+                "S socket 事务超时（上限 {timeout:?}，耗时 {:?}，写请求未完成：已写 {written}/{} 字节）",
+                started.elapsed(),
+                bytes.len()
+            ));
+        }
+        stream
+            .set_write_timeout(Some(remaining.max(Duration::from_millis(1))))
+            .map_err(|e| format!("设置 S socket 写超时失败：{e}"))?;
+        match stream.write(&bytes[written..]) {
+            Ok(0) => {
+                return Err(format!(
+                    "S socket 写请求中断（返回 0 字节，已写 {written}/{} 字节）",
+                    bytes.len()
+                ));
+            }
+            Ok(n) => written += n,
+            Err(e) if e.kind() == ErrorKind::Interrupted => continue,
+            Err(e) if matches!(e.kind(), ErrorKind::WouldBlock | ErrorKind::TimedOut) => {
+                if Instant::now() >= deadline {
+                    return Err(format!(
+                        "S socket 事务超时（上限 {timeout:?}，耗时 {:?}，写请求未完成：已写 {written}/{} 字节）",
+                        started.elapsed(),
+                        bytes.len()
+                    ));
+                }
+            }
+            Err(e) => {
+                return Err(format!(
+                    "S socket 写请求失败（已写 {written}/{} 字节）：{e}",
+                    bytes.len()
+                ));
+            }
+        }
+    }
     stream
-        .write_all(
-            format!(
-                "{}\n",
-                newchan_rust::session_protocol::canonical_json(&envelope)
-            )
-            .as_bytes(),
+        .shutdown(std::net::Shutdown::Write)
+        .map_err(|e| format!("S socket 关闭写端失败：{e}"))?;
+
+    let mut reply = Vec::new();
+    let mut chunk = [0u8; 4096];
+    loop {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            let preview = String::from_utf8_lossy(&reply);
+            return Err(format!(
+                "S socket 事务超时（上限 {timeout:?}，耗时 {:?}，等待回复/EOF；已收 {} 字节：{preview:?}）",
+                started.elapsed(),
+                reply.len()
+            ));
+        }
+        stream
+            .set_read_timeout(Some(remaining.max(Duration::from_millis(1))))
+            .map_err(|e| format!("设置 S socket 读超时失败：{e}"))?;
+        match stream.read(&mut chunk) {
+            Ok(0) => break,
+            Ok(n) => reply.extend_from_slice(&chunk[..n]),
+            Err(e) if e.kind() == ErrorKind::Interrupted => continue,
+            Err(e) if matches!(e.kind(), ErrorKind::WouldBlock | ErrorKind::TimedOut) => {
+                if Instant::now() >= deadline {
+                    let preview = String::from_utf8_lossy(&reply);
+                    return Err(format!(
+                        "S socket 事务超时（上限 {timeout:?}，耗时 {:?}，等待回复/EOF；已收 {} 字节：{preview:?}）",
+                        started.elapsed(),
+                        reply.len()
+                    ));
+                }
+            }
+            Err(e) => {
+                return Err(format!(
+                    "S socket 读取回复失败（已收 {} 字节）：{e}",
+                    reply.len()
+                ));
+            }
+        }
+    }
+
+    let text = String::from_utf8_lossy(&reply);
+    serde_json::from_str(text.trim_end()).map_err(|e| {
+        format!(
+            "S socket 收到不完整或非法 JSON 应答（{} 字节，耗时 {:?}）：{text:?}（{e}）",
+            reply.len(),
+            started.elapsed()
         )
-        .unwrap();
-    stream.shutdown(std::net::Shutdown::Write).unwrap();
-    let mut reply = String::new();
-    stream.read_to_string(&mut reply).unwrap();
-    serde_json::from_str(reply.trim_end()).unwrap()
+    })
+}
+
+fn try_s_ingest_bounded(
+    socket: &Path,
+    ns: &str,
+    n: u32,
+    timeout: Duration,
+) -> Result<Value, String> {
+    exchange_unix_json_bounded(socket, &s_ingest_frame(ns, n), timeout)
+}
+
+/// 经 S socket 提交第 `n` 条 ingest（`s-session/3` 封包、`s-ohlc/1` 原件；一帧 LF + 写端 EOF，整体有界）。
+fn s_ingest(socket: &Path, ns: &str, n: u32) -> Value {
+    try_s_ingest_bounded(socket, ns, n, Duration::from_secs(30)).unwrap_or_else(|e| panic!("{e}"))
 }
 
 #[test]
@@ -1259,15 +1741,19 @@ fn launcher_refuses_incompatible_history_simulation_assemblies_before_writing() 
     }
 }
 
-/// #1407 C3 R3：非历史模拟 `/1` 装配恢复父版行为：
-/// 1. 坏非历史 X `profile_revision` 仍由非关键 X 自行拒绝退出，S/E/B 照常启动存活；
-/// 2. launcher 不在 `load_manifest` 预读 `economic.manifest`，未给正常非历史配置新增前置依赖。
-#[test]
-fn non_history_preserves_parent_startup_and_x_degradation() {
-    // 1) 非历史配置 + 坏 X revision：S/E/B 正常启动，X 作为非关键进程自行拒绝，launcher 观察到同一 X 退出后仍继续监督 S/E/B。
-    let space = Space::new();
+struct NonHistoryBadXObservation {
+    s_pid: u32,
+    e_pid: u32,
+    b_pid: u32,
+    x_pid: u32,
+    x_exit: Value,
+}
+
+fn start_non_history_bad_x_until_x_exit(
+    space: &Space,
+) -> (PathBuf, ManagedLauncher, NonHistoryBadXObservation) {
     let source = declaration("TestOnlyStructure", DECLARED_NS);
-    let s_db = s_init_v3(&space, Some(&source));
+    let s_db = s_init_v3(space, Some(&source));
     let limits = anchor(&s_db);
     let bad_xp = write_json(
         &space.path("x-bad-non-history.json"),
@@ -1279,15 +1765,13 @@ fn non_history_preserves_parent_startup_and_x_degradation() {
             "credential_scope": {"env": CREDENTIAL_KEY, "file": space.path("credential.txt")}
         }),
     );
-    let manifest = launcher_manifest(&space, "simulation", &source, &s_db, &limits, &bad_xp);
-    let mut launcher = spawn_launcher(&manifest);
-    let stderr_log = LauncherStderr::attach(&mut launcher);
+    let manifest = launcher_manifest(space, "simulation", &source, &s_db, &limits, &bad_xp);
+    let mut launcher = ManagedLauncher::spawn(&manifest);
 
     // 停止前的有界同步点：必须等 launcher 监督循环真已观察并记录同一 X 的退出事件，
     // 而不以 `/proc` 瞬时看不到 X（可能是尚未被 100ms 监督周期 try_wait 回收的僵尸）作为停止信号。
-    let (s_pid, e_pid, b_pid, x_pid, x_exit) = stderr_log.wait_for(
+    let obs = launcher.wait_for_stderr(
         "launcher 观测到同一 X 的退出事件",
-        &mut launcher,
         Duration::from_secs(30),
         |lines| {
             let events = launcher_events(lines);
@@ -1310,9 +1794,44 @@ fn non_history_preserves_parent_startup_and_x_degradation() {
                     *idx > x_spawn_idx && ev["event"] == "exit" && ev["domain"] == "X"
                 })
                 .map(|(_, ev)| ev.clone())?;
-            Some((s_pid, e_pid, b_pid, x_pid, x_exit))
+            Some(NonHistoryBadXObservation {
+                s_pid,
+                e_pid,
+                b_pid,
+                x_pid,
+                x_exit,
+            })
         },
     );
+    (s_db, launcher, obs)
+}
+
+fn panic_payload_text(payload: Box<dyn std::any::Any + Send>) -> String {
+    if let Some(s) = payload.downcast_ref::<String>() {
+        s.clone()
+    } else if let Some(s) = payload.downcast_ref::<&str>() {
+        (*s).to_string()
+    } else {
+        "<non-string panic payload>".to_string()
+    }
+}
+
+/// #1407 C3 R3：非历史模拟 `/1` 装配恢复父版行为：
+/// 1. 坏非历史 X `profile_revision` 仍由非关键 X 自行拒绝退出，S/E/B 照常启动存活；
+/// 2. launcher 不在 `load_manifest` 预读 `economic.manifest`，未给正常非历史配置新增前置依赖。
+#[test]
+fn non_history_preserves_parent_startup_and_x_degradation() {
+    // 1) 非历史配置 + 坏 X revision：S/E/B 正常启动，X 作为非关键进程自行拒绝，launcher 观察到同一 X 退出后仍继续监督 S/E/B。
+    // `launcher` 声明在 `space` 之后，任何返回/panic/超时均先清理进程组与 stderr 读者，再删临时目录。
+    let space = Space::new();
+    let (s_db, mut launcher, obs) = start_non_history_bad_x_until_x_exit(&space);
+    let NonHistoryBadXObservation {
+        s_pid,
+        e_pid,
+        b_pid,
+        x_pid,
+        x_exit,
+    } = obs;
 
     // 坏 X 及其非关键属性：已非 0 退出并被 launcher 回收，未建 x.db，且 critical=false。
     assert_eq!(
@@ -1334,14 +1853,20 @@ fn non_history_preserves_parent_startup_and_x_degradation() {
         "坏 X 应先因 VersionUnsupported 拒启，不得创建 x.db"
     );
     assert!(
-        launcher.try_wait().unwrap().is_none(),
+        launcher.try_wait().is_none(),
         "坏非历史 X 不应导致整组 launcher 提前退出"
     );
 
     // 其他域继续：原 S/E/B 进程存活、持锁、开 socket，且 X 退出后 S 仍正常接纳声明源写入并推进 generation。
-    eventually("S socket", || space.path("s.sock").exists());
-    eventually("E socket", || space.path("e.sock").exists());
-    eventually("B socket", || space.path("b.sock").exists());
+    launcher.wait_until("S socket", Duration::from_secs(30), || {
+        space.path("s.sock").exists()
+    });
+    launcher.wait_until("E socket", Duration::from_secs(30), || {
+        space.path("e.sock").exists()
+    });
+    launcher.wait_until("B socket", Duration::from_secs(30), || {
+        space.path("b.sock").exists()
+    });
     let expected_kids = vec![
         ("b_chong_session".to_string(), b_pid),
         ("e_economic_session".to_string(), e_pid),
@@ -1357,22 +1882,34 @@ fn non_history_preserves_parent_startup_and_x_degradation() {
     }
     assert!(meta(&s_db, "SELECT value FROM meta WHERE key='writer_epoch'").is_some());
     for db in ["e.db", "b.db"] {
-        eventually(&format!("{db} 的 writer_epoch"), || {
-            meta(&space.path(db), "SELECT v FROM meta WHERE k='writer_epoch'").is_some()
-        });
+        launcher.wait_until(
+            &format!("{db} 的 writer_epoch"),
+            Duration::from_secs(30),
+            || meta(&space.path(db), "SELECT v FROM meta WHERE k='writer_epoch'").is_some(),
+        );
     }
     let before_rows = raw_rows(&s_db);
     let before_gen = meta(&s_db, "SELECT value FROM meta WHERE key='generation'").unwrap();
-    let accepted = s_ingest(&space.path("s.sock"), DECLARED_NS, 1);
+    let accepted = try_s_ingest_bounded(
+        &space.path("s.sock"),
+        DECLARED_NS,
+        1,
+        Duration::from_secs(30),
+    )
+    .unwrap_or_else(|e| panic!("X 退出后有界 S socket 写入失败：{e}"));
     assert!(
         !accepted.to_string().contains("InvalidDomain")
             && !accepted.to_string().contains("\"error\""),
         "X 退出后 S 应继续接纳声明源写入：{accepted}"
     );
-    eventually("X 退出后 S 提交推进 generation", || {
-        meta(&s_db, "SELECT value FROM meta WHERE key='generation'")
-            .is_some_and(|g| g != before_gen)
-    });
+    launcher.wait_until(
+        "X 退出后 S 提交推进 generation",
+        Duration::from_secs(30),
+        || {
+            meta(&s_db, "SELECT value FROM meta WHERE key='generation'")
+                .is_some_and(|g| g != before_gen)
+        },
+    );
     assert_eq!(raw_rows(&s_db), before_rows + 1, "{accepted}");
     assert_eq!(
         domain_children(launcher.id()),
@@ -1380,20 +1917,26 @@ fn non_history_preserves_parent_startup_and_x_degradation() {
         "S 写入后原 S/E/B 子进程应继续存活"
     );
     assert!(
-        launcher.try_wait().unwrap().is_none(),
+        launcher.try_wait().is_none(),
         "其他域继续运行期间 launcher 不得提前退出"
     );
 
-    let status = stop(&mut launcher);
-    let lines = stderr_log.finish();
+    let launcher_pid = launcher.id();
+    let (status, lines) = launcher
+        .stop_gracefully()
+        .unwrap_or_else(|e| panic!("有界正常停止失败：{e}"));
     let stderr = lines.join("\n");
     assert_eq!(status.code(), Some(0), "正常停止应返回 0：{stderr}");
-    for pid in [s_pid, e_pid, b_pid, x_pid] {
+    for pid in [launcher_pid, s_pid, e_pid, b_pid, x_pid] {
         assert!(
             !Path::new(&format!("/proc/{pid}")).exists(),
-            "停止后子进程 {pid} 未回收"
+            "停止后进程 {pid} 未回收"
         );
     }
+    assert!(
+        owned_group_pids(launcher_pid).is_empty(),
+        "停止后本测试进程组 {launcher_pid} 不得有残留"
+    );
     assert!(
         stderr.contains("VersionUnsupported") && stderr.contains("x-execution-profile/99"),
         "X 应报 VersionUnsupported：{stderr}"
@@ -1416,7 +1959,7 @@ fn non_history_preserves_parent_startup_and_x_degradation() {
         "非关键 X 退出不应将整组停止标为 failed：{stderr}"
     );
 
-    // 2) 非历史配置 + 缺失 economic.manifest：load_manifest 不预读 E 配置，先建 state_dir 再由 E init 报错。
+    // 2) 非历史配置 + 缺失 economic.manifest：load_manifest 不预读 E 配置，先建 state_dir 再由 E init 报错（有界探针）。
     let space2 = Space::new();
     let source2 = declaration("TestOnlyStructure", DECLARED_NS);
     let s_db2 = s_init_v3(&space2, Some(&source2));
@@ -1424,10 +1967,12 @@ fn non_history_preserves_parent_startup_and_x_degradation() {
     let xp2 = x_profile(&space2, "simulation", None, Some("tb09-sentinel"), false);
     let manifest2 = launcher_manifest(&space2, "simulation", &source2, &s_db2, &limits2, &xp2);
     std::fs::remove_file(space2.path("economic.json")).unwrap();
-    let out = run_refusal(
+    let out = run_command_bounded(
         Command::new(launcher_bin())
             .arg("--manifest")
             .arg(&manifest2),
+        Duration::from_secs(30),
+        "缺 economic.manifest 启动探针",
     );
     let stderr2 = String::from_utf8_lossy(&out.stderr);
     assert!(!out.status.success(), "{stderr2}");
@@ -1438,5 +1983,235 @@ fn non_history_preserves_parent_startup_and_x_degradation() {
     assert!(
         stderr2.contains("E init 失败") && !stderr2.contains("VersionUnsupported"),
         "缺 economic.manifest 应推进至 E init 报错而非版本预检拒绝：{stderr2}"
+    );
+}
+
+/// 反例 1：连接后对端不给回复、慢速滴漏不给 EOF 或写回一帧后不关闭连接时，
+/// 整体 socket 事务必须在总上限内以可辨认根因失败，并触发托管 launcher 与全部后代进程收尾。
+#[test]
+fn non_history_stalled_s_socket_times_out_and_cleans_up_launcher() {
+    let space = Space::new();
+    let socket_cap = Duration::from_millis(450);
+
+    // 1a) 连接后读取请求但既不写回复也不给 EOF。
+    let silent_sock = space.path("stalled-silent.sock");
+    let listener = UnixListener::bind(&silent_sock).unwrap();
+    let (tx_a, rx_a) = std::sync::mpsc::channel::<()>();
+    let srv_a = std::thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        let mut req = Vec::new();
+        let _ = stream.read_to_end(&mut req);
+        let _ = rx_a.recv_timeout(Duration::from_secs(5));
+    });
+    let t0 = Instant::now();
+    let err_a = try_s_ingest_bounded(&silent_sock, DECLARED_NS, 1, socket_cap).unwrap_err();
+    let elapsed_a = t0.elapsed();
+    let _ = tx_a.send(());
+    srv_a.join().unwrap();
+    assert!(
+        elapsed_a >= Duration::from_millis(350) && elapsed_a < Duration::from_secs(3),
+        "静默卡死耗时超出预期窗口：{elapsed_a:?}，err={err_a}"
+    );
+    assert!(
+        err_a.contains("S socket 事务超时")
+            && err_a.contains("等待回复/EOF")
+            && err_a.contains("已收 0 字节"),
+        "静默卡死报错未指明根因：{err_a}"
+    );
+
+    // 1b) 慢速滴漏（每 90ms 写 1 字节且不给 EOF），证明上限约束的是整个事务而非单次 read。
+    let trickle_sock = space.path("stalled-trickle.sock");
+    let listener = UnixListener::bind(&trickle_sock).unwrap();
+    let (tx_b, rx_b) = std::sync::mpsc::channel::<()>();
+    let srv_b = std::thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        let mut req = Vec::new();
+        let _ = stream.read_to_end(&mut req);
+        while rx_b.try_recv().is_err() {
+            if stream.write_all(b" ").is_err() {
+                break;
+            }
+            if rx_b.recv_timeout(Duration::from_millis(90)).is_ok() {
+                break;
+            }
+        }
+    });
+    let t1 = Instant::now();
+    let err_b = try_s_ingest_bounded(&trickle_sock, DECLARED_NS, 1, socket_cap).unwrap_err();
+    let elapsed_b = t1.elapsed();
+    let _ = tx_b.send(());
+    srv_b.join().unwrap();
+    assert!(
+        elapsed_b >= Duration::from_millis(350) && elapsed_b < Duration::from_secs(3),
+        "慢速滴漏事务总耗时超出预期窗口：{elapsed_b:?}，err={err_b}"
+    );
+    assert!(
+        err_b.contains("S socket 事务超时")
+            && err_b.contains("等待回复/EOF")
+            && !err_b.contains("已收 0 字节"),
+        "慢速滴漏报错未指明根因：{err_b}"
+    );
+
+    // 1c) 真实 launcher + S/E/B 存活且 X 已非关键退出后，模拟写回一帧但不关闭 EOF 触发事务超时 panic，
+    // 验证 Drop 在临时目录撤走前收口 launcher 及全部后代。
+    let no_eof_sock = space.path("stalled-no-eof.sock");
+    let listener = UnixListener::bind(&no_eof_sock).unwrap();
+    let (tx_c, rx_c) = std::sync::mpsc::channel::<()>();
+    let srv_c = std::thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        let mut req = Vec::new();
+        let _ = stream.read_to_end(&mut req);
+        let _ = stream.write_all(b"{\"ok\":true}\n");
+        let _ = rx_c.recv_timeout(Duration::from_secs(5));
+    });
+    let recorded: Arc<Mutex<Option<(u32, u32, u32, u32, u32, PathBuf, Instant)>>> =
+        Arc::new(Mutex::new(None));
+    let recorded_inner = Arc::clone(&recorded);
+    let panic_res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let (s_db, mut launcher, obs) = start_non_history_bad_x_until_x_exit(&space);
+        launcher.wait_until("S socket", Duration::from_secs(30), || {
+            space.path("s.sock").exists()
+        });
+        launcher.wait_until("E socket", Duration::from_secs(30), || {
+            space.path("e.sock").exists()
+        });
+        launcher.wait_until("B socket", Duration::from_secs(30), || {
+            space.path("b.sock").exists()
+        });
+        let phase_start = Instant::now();
+        *recorded_inner.lock().unwrap() = Some((
+            launcher.id(),
+            obs.s_pid,
+            obs.e_pid,
+            obs.b_pid,
+            obs.x_pid,
+            s_db,
+            phase_start,
+        ));
+        try_s_ingest_bounded(&no_eof_sock, DECLARED_NS, 1, socket_cap)
+            .unwrap_or_else(|e| panic!("反例1受控失败：{e}"));
+    }));
+    let _ = tx_c.send(());
+    srv_c.join().unwrap();
+    let panic_msg = panic_payload_text(panic_res.expect_err("不给 EOF 必须超时失败"));
+    let (launcher_pid, s_pid, e_pid, b_pid, x_pid, s_db, phase_start) =
+        recorded.lock().unwrap().take().expect("已记录运行 PID");
+    let total_elapsed = phase_start.elapsed();
+    assert!(
+        panic_msg.contains("S socket 事务超时")
+            && panic_msg.contains("等待回复/EOF")
+            && panic_msg.contains("已收 12 字节"),
+        "不给 EOF 报错未指明根因：{panic_msg}"
+    );
+    assert!(
+        total_elapsed < Duration::from_secs(10),
+        "事务超时与 launcher 清理总耗时过长：{total_elapsed:?}"
+    );
+    for pid in [launcher_pid, s_pid, e_pid, b_pid, x_pid] {
+        assert!(
+            !Path::new(&format!("/proc/{pid}")).exists(),
+            "反例1清理后进程 {pid} 仍存活"
+        );
+    }
+    assert!(
+        owned_group_pids(launcher_pid).is_empty(),
+        "反例1清理后进程组 {launcher_pid} 仍有残留"
+    );
+    for db in [s_db, space.path("e.db"), space.path("b.db")] {
+        let lock_path = format!("{}.writer.lock", db.display());
+        let file = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&lock_path)
+            .unwrap();
+        assert!(file.try_lock().is_ok(), "反例1清理后 {lock_path} 仍被占用");
+    }
+    eprintln!(
+        "NEG1_EVIDENCE socket_cap_ms={} silent_ms={} trickle_ms={} no_eof_plus_cleanup_ms={} \
+         pids=[launcher:{launcher_pid},S:{s_pid},E:{e_pid},B:{b_pid},X:{x_pid}] \
+         remaining_group={:?} err={panic_msg}",
+        socket_cap.as_millis(),
+        elapsed_a.as_millis(),
+        elapsed_b.as_millis(),
+        total_elapsed.as_millis(),
+        owned_group_pids(launcher_pid),
+    );
+}
+
+/// 反例 2：拿到 X 非关键退出回执后刻意触发断言失败（模拟 generation 未推进等提前失败），
+/// 验证 ManagedLauncher::drop 在临时目录撤走前优先正常停机并回收本测试 launcher 及全部后代。
+#[test]
+fn non_history_panic_after_x_exit_cleans_up_launcher_and_descendants() {
+    let space = Space::new();
+    let recorded: Arc<Mutex<Option<(u32, u32, u32, u32, u32, PathBuf, Instant)>>> =
+        Arc::new(Mutex::new(None));
+    let recorded_inner = Arc::clone(&recorded);
+    let panic_res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let (s_db, mut launcher, obs) = start_non_history_bad_x_until_x_exit(&space);
+        assert_eq!(obs.x_exit["critical"], json!(false));
+        launcher.wait_until("S socket", Duration::from_secs(30), || {
+            space.path("s.sock").exists()
+        });
+        launcher.wait_until("E socket", Duration::from_secs(30), || {
+            space.path("e.sock").exists()
+        });
+        launcher.wait_until("B socket", Duration::from_secs(30), || {
+            space.path("b.sock").exists()
+        });
+        let expected_kids = vec![
+            ("b_chong_session".to_string(), obs.b_pid),
+            ("e_economic_session".to_string(), obs.e_pid),
+            ("s_structure_session".to_string(), obs.s_pid),
+        ];
+        assert_eq!(domain_children(launcher.id()), expected_kids);
+        let panic_at = Instant::now();
+        *recorded_inner.lock().unwrap() = Some((
+            launcher.id(),
+            obs.s_pid,
+            obs.e_pid,
+            obs.b_pid,
+            obs.x_pid,
+            s_db,
+            panic_at,
+        ));
+        panic!("反例2受控失败：X 非关键退出回执后模拟 generation 未推进断言失败");
+    }));
+    let panic_msg = panic_payload_text(panic_res.expect_err("刻意失败必须触发 panic"));
+    let (launcher_pid, s_pid, e_pid, b_pid, x_pid, s_db, panic_at) =
+        recorded.lock().unwrap().take().expect("已记录运行 PID");
+    let cleanup_elapsed = panic_at.elapsed();
+    assert!(
+        panic_msg.contains("反例2受控失败") && panic_msg.contains("generation 未推进"),
+        "反例2报错未保留根因：{panic_msg}"
+    );
+    assert!(
+        cleanup_elapsed < Duration::from_secs(15),
+        "反例2清理超过正常停止上限 15s：{cleanup_elapsed:?}"
+    );
+    for pid in [launcher_pid, s_pid, e_pid, b_pid, x_pid] {
+        assert!(
+            !Path::new(&format!("/proc/{pid}")).exists(),
+            "反例2清理后进程 {pid} 仍存活"
+        );
+    }
+    assert!(
+        owned_group_pids(launcher_pid).is_empty(),
+        "反例2清理后进程组 {launcher_pid} 仍有残留"
+    );
+    for db in [s_db, space.path("e.db"), space.path("b.db")] {
+        let lock_path = format!("{}.writer.lock", db.display());
+        let file = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&lock_path)
+            .unwrap();
+        assert!(file.try_lock().is_ok(), "反例2清理后 {lock_path} 仍被占用");
+    }
+    eprintln!(
+        "NEG2_EVIDENCE stop_grace_ms=15000 drain_cap_ms=5000 cleanup_ms={} \
+         pids=[launcher:{launcher_pid},S:{s_pid},E:{e_pid},B:{b_pid},X:{x_pid}] \
+         remaining_group={:?} err={panic_msg}",
+        cleanup_elapsed.as_millis(),
+        owned_group_pids(launcher_pid),
     );
 }
