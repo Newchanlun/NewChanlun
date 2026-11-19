@@ -1528,3 +1528,135 @@ fn readonly_source_vfs_survives_writer_close_interleaving_without_creating_wal()
         }
     }
 }
+
+#[test]
+fn readonly_source_vfs_preserves_zero_byte_readonly_sidecar_modes_without_fchmod() {
+    use crate::history_simulation::intake::open_readonly_source_db;
+    use std::os::unix::fs::{MetadataExt, PermissionsExt};
+
+    let dir = tempfile::tempdir().unwrap();
+    let db_dir = dir.path().join("x-mode-preserve");
+    std::fs::create_dir_all(&db_dir).unwrap();
+    let x_db = db_dir.join("x.db");
+    let x_wal = append_suffix(&x_db, "-wal");
+    let x_shm = append_suffix(&x_db, "-shm");
+
+    // 1) 主库 0644 + checkpoint(TRUNCATE) 后的 0 字节 WAL 设为 0444（复现 R7 probe.py 元数据反例）：
+    //    只读打开与查询必须成功，且绝不调用 fchmod 改写 WAL mode/ctime（零 IN_ATTRIB）。
+    let writer = rusqlite::Connection::open(&x_db).unwrap();
+    writer
+        .execute_batch(
+            "PRAGMA journal_mode = WAL;
+             CREATE TABLE t(v INTEGER);
+             INSERT INTO t VALUES (42);",
+        )
+        .unwrap();
+    let ck: (i64, i64, i64) = writer
+        .query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |r| {
+            Ok((r.get(0)?, r.get(1)?, r.get(2)?))
+        })
+        .unwrap();
+    assert_eq!(ck, (0, 0, 0));
+    assert_eq!(std::fs::metadata(&x_wal).unwrap().len(), 0);
+    std::fs::set_permissions(&x_db, std::fs::Permissions::from_mode(0o644)).unwrap();
+    std::fs::set_permissions(&x_wal, std::fs::Permissions::from_mode(0o444)).unwrap();
+    let wal_meta_before = std::fs::metadata(&x_wal).unwrap();
+    assert_eq!(wal_meta_before.mode() & 0o777, 0o444);
+
+    #[cfg(target_os = "linux")]
+    let w_wal_mode = LinuxDirWatcher::with_mask(
+        &db_dir,
+        libc::IN_CREATE
+            | libc::IN_MODIFY
+            | libc::IN_DELETE
+            | libc::IN_MOVED_FROM
+            | libc::IN_MOVED_TO
+            | libc::IN_ATTRIB
+            | libc::IN_CLOSE_WRITE,
+    );
+    {
+        let mut reader = open_readonly_source_db(&x_db).unwrap();
+        let tx = reader.transaction().unwrap();
+        let val: i64 = tx.query_row("SELECT v FROM t", [], |r| r.get(0)).unwrap();
+        assert_eq!(val, 42);
+    }
+    let wal_meta_after = std::fs::metadata(&x_wal).unwrap();
+    assert_eq!(
+        wal_meta_after.mode() & 0o777,
+        0o444,
+        "0 字节 0444 WAL 不得被 fchmod 改为 0644"
+    );
+    assert_eq!(
+        (wal_meta_before.ctime(), wal_meta_before.ctime_nsec()),
+        (wal_meta_after.ctime(), wal_meta_after.ctime_nsec()),
+        "0 字节 0444 WAL ctime 不得变化"
+    );
+    #[cfg(target_os = "linux")]
+    {
+        let evs = w_wal_mode.drain();
+        assert!(
+            evs.is_empty(),
+            "读取 0 字节 0444 WAL 不得触发 IN_ATTRIB 或任何目录写事件：{evs:?}"
+        );
+    }
+    drop(writer);
+
+    // 2) 停机快照中主库 0644 + 0 字节 0444 SHM + 0 字节 0444 WAL：
+    //    同样不得触发 unixOpenSharedMemory/robust_open 的 fchmod 改写 SHM mode/ctime。
+    std::fs::write(&x_wal, b"").unwrap();
+    std::fs::write(&x_shm, b"").unwrap();
+    std::fs::set_permissions(&x_db, std::fs::Permissions::from_mode(0o644)).unwrap();
+    std::fs::set_permissions(&x_wal, std::fs::Permissions::from_mode(0o444)).unwrap();
+    std::fs::set_permissions(&x_shm, std::fs::Permissions::from_mode(0o444)).unwrap();
+    let shm_meta_before = std::fs::metadata(&x_shm).unwrap();
+    let wal2_meta_before = std::fs::metadata(&x_wal).unwrap();
+    assert_eq!(shm_meta_before.len(), 0);
+    assert_eq!(shm_meta_before.mode() & 0o777, 0o444);
+
+    #[cfg(target_os = "linux")]
+    let w_shm_mode = LinuxDirWatcher::with_mask(
+        &db_dir,
+        libc::IN_CREATE
+            | libc::IN_MODIFY
+            | libc::IN_DELETE
+            | libc::IN_MOVED_FROM
+            | libc::IN_MOVED_TO
+            | libc::IN_ATTRIB
+            | libc::IN_CLOSE_WRITE,
+    );
+    {
+        let mut reader = open_readonly_source_db(&x_db).unwrap();
+        let tx = reader.transaction().unwrap();
+        let val: i64 = tx.query_row("SELECT v FROM t", [], |r| r.get(0)).unwrap();
+        assert_eq!(val, 42);
+    }
+    let shm_meta_after = std::fs::metadata(&x_shm).unwrap();
+    let wal2_meta_after = std::fs::metadata(&x_wal).unwrap();
+    assert_eq!(
+        shm_meta_after.mode() & 0o777,
+        0o444,
+        "0 字节 0444 SHM 不得被 fchmod 改为 0644"
+    );
+    assert_eq!(
+        (shm_meta_before.ctime(), shm_meta_before.ctime_nsec()),
+        (shm_meta_after.ctime(), shm_meta_after.ctime_nsec()),
+        "0 字节 0444 SHM ctime 不得变化"
+    );
+    assert_eq!(wal2_meta_after.mode() & 0o777, 0o444);
+    assert_eq!(
+        (wal2_meta_before.ctime(), wal2_meta_before.ctime_nsec()),
+        (wal2_meta_after.ctime(), wal2_meta_after.ctime_nsec())
+    );
+    #[cfg(target_os = "linux")]
+    {
+        let evs = w_shm_mode.drain();
+        assert!(
+            evs.is_empty(),
+            "读取 0 字节 0444 SHM/WAL 不得触发 IN_ATTRIB 或任何目录写事件：{evs:?}"
+        );
+    }
+
+    // 恢复权限以便 tempdir 清理。
+    std::fs::set_permissions(&x_wal, std::fs::Permissions::from_mode(0o644)).unwrap();
+    std::fs::set_permissions(&x_shm, std::fs::Permissions::from_mode(0o644)).unwrap();
+}
