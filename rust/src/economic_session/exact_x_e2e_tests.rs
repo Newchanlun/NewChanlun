@@ -203,16 +203,21 @@ fn controlled_s(socket: PathBuf, bar: i64, calls: Arc<AtomicUsize>) {
         }
     });
 }
-fn x_profile(f: &Fixture) -> Value {
-    let mut model = serde_json::to_value(crate::history_simulation::tests::model()).unwrap();
-    model["symbol"] = json!("alpha");
+fn x_profile_with(
+    f: &Fixture,
+    model: crate::history_simulation::model::Model,
+    socket_name: &str,
+) -> Value {
     let (namespace, epoch, producer, _) = X_SOURCE;
     let e = &f.configs[0];
     json!({"model":model,"session_id":e.session,"session_generation":e.generation,"x_id":producer,
-        "source_namespace":namespace,"source_epoch":epoch,"socket":f.dir.join("x.sock"),
+        "source_namespace":namespace,"source_epoch":epoch,"socket":f.dir.join(socket_name),
         "e":{"socket":f.dir.join("e.sock"),"authority_id":"E","authority_epoch":"1","schema_revision":e.revision().unwrap(),"reply_namespace":"economic-session/replies","producer_id":e.producer},
         "s":{"socket":f.dir.join("s.sock"),"authority_id":"S","authority_epoch":"1","schema_revision":S_SCHEMA,"reply_namespace":S_REPLIES,"producer_id":S_PRODUCER},
         "conditions":f.data["exact_release"]["conditions"],"timeout_ms":5000,"max_frame_bytes":1048576})
+}
+fn x_profile(f: &Fixture) -> Value {
+    x_profile_with(f, alpha_sim_model(), "x.sock")
 }
 fn bar(index: i64, changes: Value) -> Value {
     json!({"request_id":format!("b{index}"),"known_frontier_cut":format!("frontier{index}"),
@@ -231,7 +236,7 @@ fn logical_bar_fixture() -> Fixture {
         None,
         None,
         None,
-        Some(ExactClock::LogicalBar),
+        Some(ExactClock::LogicalBarV6),
     )
 }
 #[test]
@@ -253,6 +258,7 @@ fn e_formal_release_is_accepted_by_x_over_the_common_envelope() {
         "E 放行读数是 bar 2"
     );
     let command = released["record"]["command"].clone();
+    assert_eq!(command["model_ref"], json!(alpha_sim_model().model_ref()));
 
     let s_calls = Arc::new(AtomicUsize::new(0));
     controlled_s(f.dir.join("s.sock"), 2, s_calls.clone());
@@ -318,9 +324,183 @@ fn e_formal_release_is_accepted_by_x_over_the_common_envelope() {
     let filled = x(&xs, "AdvanceBar", bar(3, json!([])));
     let fill = &filled["originals"][0]["event"]["fill"];
     assert_eq!(
-        (&fill["family_id"], &fill["quantity"]),
-        (&json!("family-alpha"), &json!(2)),
+        (
+            &fill["family_id"],
+            &fill["quantity"],
+            &fill["amount"],
+            &fill["fee"]
+        ),
+        (&json!("family-alpha"), &json!(2), &json!(28), &json!(1)),
         "{filled}"
     );
     assert_eq!(query_command(&mut f, "alpha")["state"], "ReleasedExact");
+}
+
+/// #1407 C3 反例闭环：同一 `/6` E 放行的 `cmd-alpha`，X 装载同 `model_id`/`revision` 但 maker 费率 1%→10%
+/// 的模型时必须在 `AcceptExact` 拒绝，不得调用 S、不得落 X 业务行、不得改写 E 责任；
+/// 伪造 `command.model_ref` 匹配篡改模型亦在 E 的 `QueryReleasedExact` 遭 `IdentityConflict` 拒绝。
+#[test]
+fn swapped_fee_rate_model_and_forged_model_ref_are_rejected_without_s_calls() {
+    let mut f = logical_bar_fixture();
+    committed(&mut f);
+    dispatch(&mut f, "alpha");
+    let e_config = Config::load(&f.dir.join("manifest.json"), &f.configs[0].db, None).unwrap();
+    std::thread::spawn(move || service::serve(&e_config, 1, 1).unwrap());
+    wait_for(&f.dir.join("e.sock"));
+    let released = exchange(
+        &f.dir.join("e.sock"),
+        &envelope("ReleaseExact-alpha", release_payload(&f, "alpha")),
+    )["payload"]
+        .clone();
+    assert_eq!(released["record"]["state"], "ReleasedExact", "{released}");
+    let command = released["record"]["command"].clone();
+
+    let s_calls = Arc::new(AtomicUsize::new(0));
+    controlled_s(f.dir.join("s.sock"), 2, s_calls.clone());
+
+    let mut altered_model = alpha_sim_model();
+    altered_model.fee_profile.maker.numerator = 10;
+    assert_eq!(altered_model.model_id, alpha_sim_model().model_id);
+    assert_eq!(altered_model.revision, alpha_sim_model().revision);
+    assert_ne!(
+        altered_model.content_hash(),
+        alpha_sim_model().content_hash()
+    );
+
+    let profile: XProfile =
+        serde_json::from_value(x_profile_with(&f, altered_model.clone(), "x-alt.sock")).unwrap();
+    let x_db = f.dir.join("x-alt.sqlite");
+    let serving = profile.clone();
+    let db = x_db.clone();
+    std::thread::spawn(move || {
+        let (mut c, _) = crate::economic_session::open_durable_db(&db).unwrap();
+        crate::history_simulation::runtime::serve(&mut c, &serving, 1).unwrap()
+    });
+    let xs = f.dir.join("x-alt.sock");
+    wait_for(&xs);
+    assert_eq!(
+        x(&xs, "AdvanceBar", bar(0, json!([])))["kind"],
+        "SimulationBatch"
+    );
+    assert_eq!(
+        x(&xs, "AdvanceBar", bar(1, json!([])))["kind"],
+        "SimulationBatch"
+    );
+
+    let e_before = economic_tables(&f);
+    let x_before = tables(&x_db);
+
+    // 臂 1：原封不动递交 E 放行的 cmd-alpha → X 直接核对实际装载模型内容并拒绝。
+    let rejected = x(&xs, "AcceptExact", command.clone());
+    assert_eq!(rejected["kind"], "Error", "{rejected}");
+    assert_eq!(
+        rejected["error"],
+        "IdentityConflict：精确命令获准模型身份与 X 实际装载模型内容不符"
+    );
+
+    // 臂 2：攻击者改写 command.model_ref 以匹配篡改后的 X 模型 → E QueryReleasedExact 拒绝。
+    let mut forged = command.clone();
+    forged["model_ref"] = json!(altered_model.model_ref());
+    let forged_reply = x(&xs, "AcceptExact", forged);
+    assert_eq!(forged_reply["kind"], "Error", "{forged_reply}");
+    assert!(
+        forged_reply["error"]
+            .as_str()
+            .unwrap()
+            .contains("IdentityConflict：同 command_id 的命令内容与 E 已交付对象不同"),
+        "{forged_reply}"
+    );
+
+    assert_eq!(
+        x(&xs, "QueryCommand", json!("cmd-alpha"))["state"],
+        "NoRecord"
+    );
+    assert_eq!(s_calls.load(Ordering::SeqCst), 0, "未获准模型不得调用 S");
+    assert_eq!(tables(&x_db), x_before, "拒绝后 X 业务表零变更");
+    assert_eq!(economic_tables(&f), e_before, "E/B 全表零变更");
+    assert_eq!(query_command(&mut f, "alpha")["state"], "ReleasedExact");
+}
+
+/// #1407 C3 版本边界：旧 `/5` E 放行的无 `model_ref` 命令不得借用新 `/3` X 的模型产生外效，
+/// 无论原样递交还是伪造附带 `model_ref` 均被拒绝。
+#[test]
+fn legacy_v5_command_cannot_borrow_v3_x_model() {
+    let mut f = Fixture::build_with(
+        "100",
+        None,
+        &[("slot", &["alpha", "beta"])],
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        Some(ExactClock::LogicalBar),
+    );
+    committed(&mut f);
+    dispatch(&mut f, "alpha");
+    let e_config = Config::load(&f.dir.join("manifest.json"), &f.configs[0].db, None).unwrap();
+    std::thread::spawn(move || service::serve(&e_config, 1, 1).unwrap());
+    wait_for(&f.dir.join("e.sock"));
+    let released = exchange(
+        &f.dir.join("e.sock"),
+        &envelope("ReleaseExact-alpha", release_payload(&f, "alpha")),
+    )["payload"]
+        .clone();
+    assert_eq!(released["record"]["state"], "ReleasedExact", "{released}");
+    let legacy_command = released["record"]["command"].clone();
+    assert!(legacy_command.get("model_ref").is_none());
+
+    let s_calls = Arc::new(AtomicUsize::new(0));
+    controlled_s(f.dir.join("s.sock"), 2, s_calls.clone());
+    let profile: XProfile = serde_json::from_value(x_profile(&f)).unwrap();
+    let x_db = f.dir.join("x-v5.sqlite");
+    let serving = profile.clone();
+    let db = x_db.clone();
+    std::thread::spawn(move || {
+        let (mut c, _) = crate::economic_session::open_durable_db(&db).unwrap();
+        crate::history_simulation::runtime::serve(&mut c, &serving, 1).unwrap()
+    });
+    let xs = f.dir.join("x.sock");
+    wait_for(&xs);
+    assert_eq!(
+        x(&xs, "AdvanceBar", bar(0, json!([])))["kind"],
+        "SimulationBatch"
+    );
+    assert_eq!(
+        x(&xs, "AdvanceBar", bar(1, json!([])))["kind"],
+        "SimulationBatch"
+    );
+
+    let e_before = economic_tables(&f);
+    let x_before = tables(&x_db);
+
+    // 原样递交 `/5` 命令 → X 在反序列化阶段拒绝（缺少 model_ref）。
+    let raw_reject = x(&xs, "AcceptExact", legacy_command.clone());
+    assert_eq!(raw_reject["kind"], "Error", "{raw_reject}");
+    assert!(
+        raw_reject["error"].as_str().unwrap().contains("model_ref"),
+        "{raw_reject}"
+    );
+
+    // 给 `/5` 命令强塞 X 模型的 `model_ref` → `/5` E 的 QueryReleasedExact 拒绝。
+    let mut forged = legacy_command.clone();
+    forged["model_ref"] = json!(alpha_sim_model().model_ref());
+    let forged_reject = x(&xs, "AcceptExact", forged);
+    assert_eq!(forged_reject["kind"], "Error", "{forged_reject}");
+    assert!(
+        forged_reject["error"]
+            .as_str()
+            .unwrap()
+            .contains("IdentityConflict"),
+        "{forged_reject}"
+    );
+
+    assert_eq!(
+        x(&xs, "QueryCommand", json!("cmd-alpha"))["state"],
+        "NoRecord"
+    );
+    assert_eq!(s_calls.load(Ordering::SeqCst), 0);
+    assert_eq!(tables(&x_db), x_before);
+    assert_eq!(economic_tables(&f), e_before);
 }

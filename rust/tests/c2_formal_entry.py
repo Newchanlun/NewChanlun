@@ -65,7 +65,7 @@ def copied(name):
     return p
 
 manifest = load(fixture / "manifest.json")
-assert manifest["finance"]["schema_revision"] == "tb03b-finance/5"
+assert manifest["finance"]["schema_revision"] in ("tb03b-finance/5", "tb03b-finance/6")
 assert manifest["clock"]["kind"] == "TestOnly"
 assert manifest["clock"]["plan"]["messages"]["ReleaseExact-alpha"]["commit_ns"] == "162"
 assert "test_only_fault" not in manifest and manifest.get("protocol_revision") in (None, "economic-session/1")
@@ -106,10 +106,22 @@ for authority in manifest["voice_binding"]["authorities"]:
         sigma="Long", n="0", opening_basis={k if k != "fact_hash" else "expected_fact_hash": origin[k]
         for k in ("fact_key", "fact_hash", "allocation_id")})
 
-data_path = copied("input.json")
-assert manifest["finance"]["input_sha256"] == file_digest(data_path)
-data = load(data_path)
-assert data["schema_revision"] == "tb03b-finance/5" and data["kind"] == "TestOnly"
+model_config = {**model(), "symbol": "alpha"}
+assert manifest["finance"]["input_sha256"] == file_digest(fixture / "input.json")
+data = load(fixture / "input.json")
+assert data["schema_revision"] in ("tb03b-finance/5", "tb03b-finance/6") and data["kind"] == "TestOnly"
+if data["schema_revision"] == "tb03b-finance/5":
+    data["schema_revision"] = "tb03b-finance/6"
+    data["exact_release"]["model_coverage"]["model_ref"] = dict(
+        model_id=model_config["model_id"],
+        revision=model_config["revision"],
+        content_hash=digest(model_config),
+    )
+    data_path = write("input.json", data)
+    manifest["finance"]["schema_revision"] = "tb03b-finance/6"
+    manifest["finance"]["input_sha256"] = file_digest(data_path)
+else:
+    data_path = copied("input.json")
 plans = {q["decision_id"]: q for q in data["plans"]}
 assert list(plans) == ["alpha", "beta"] and data["policy"]["cap"] == "100"
 assert data["slots"][0]["applicants"] == ["alpha", "beta"]
@@ -280,7 +292,7 @@ try:
     exact = record["command"]
     expected_command = dict(command_id=cid, logical_order_family=x["logical_order_family"], session_id=sid,
         session_generation=gen, x_id="X", x_epoch="1", first_quantity=x["first_quantity"], allocation_id=x["allocation_id"], symbol=x["symbol"], projection_kind=freeze["projection_kind"],
-        change=change, plan_hash=digest(change), certificate=certificate, certificate_hash=digest(certificate))
+        model_ref=freeze["model_coverage"]["model_ref"], change=change, plan_hash=digest(change), certificate=certificate, certificate_hash=digest(certificate))
     assert same(exact, expected_command)
     assert record["state"] == "ReleasedExact" and record["release_commit_ns"] == "2"
     assert (record["allocation_id"], record["first_quantity"]) == ("alloc-alpha", "2")
@@ -305,8 +317,7 @@ try:
     assert auth["commit_ns"] == "2" and same(auth["command"], exact)
     assert auth["command_hash"] == record["command_hash"] == digest(exact)
 
-    model_config = {**model(), "symbol":"alpha"}
-    pp = write("x-profile.json", dict(profile_revision="x-execution-profile/2", mode="simulation",
+    pp = write("x-profile.json", dict(profile_revision="x-execution-profile/3", mode="simulation",
         credential_scope=dict(env="UNUSED_SIMULATION_CREDENTIAL"), history_simulation=dict(model=model_config,
             session_id=sid, session_generation=gen, x_id="X", source_namespace=src_x["source_namespace"],
             source_epoch=src_x["source_epoch"], socket=x_socket, timeout_ms=5000, max_frame_bytes=1048576,
@@ -372,7 +383,9 @@ try:
     assert counts["executed"] == dict(accepted=1,owned=1,calls=1,s=1)
     filled = advance(3)
     assert [o["event"]["kind"] for o in filled["originals"]]==["fill","fee"]
-    assert filled["originals"][0]["event"]["fill"]["quantity"]==2
+    fill = filled["originals"][0]["event"]["fill"]
+    assert (fill["quantity"], fill["price"], fill["amount"], fill["fee"]) == (2, 14, 28, 1), fill
+    assert filled["originals"][1]["event"]["amount"] == 1
     assert all(same(baseline[d],business_dump(dbs[d])) for d in nodes)
     write("business.json", {d: business_dump(p) for d,p in dbs.items()})
 

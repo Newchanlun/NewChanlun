@@ -104,6 +104,25 @@ class CommandOriginalTests(unittest.TestCase):
         with self.assertRaisesRegex(EconomicQueryError, "财务图像字段"):
             self.q.original(self.request())
 
+    def test_v6_is_selected_only_under_economic_session_1(self):
+        manifest = {"protocol_revision": "economic-session/1", "finance": {"schema_revision": "tb03b-finance/6"}}
+        self.assertEqual(economic_revisions(manifest), ("economic-session/1", "tb03b-finance/6"))
+        manifest["protocol_revision"] = "economic-session/2"
+        with self.assertRaisesRegex(EconomicQueryError, "混搭"):
+            economic_revisions(manifest)
+
+    def test_v6_command_original_binds_e_image_record_at_fixed_cut(self):
+        self.manifest["finance"] = {"schema_revision": "tb03b-finance/6"}
+        self.q = self.load(self.manifest)
+        self.q.owner = self.owner
+        for view in self.states.values():
+            view["image"]["finance"]["schema_revision"] = "tb03b-finance/6"
+            view["image_hash"] = digest(view["image"])
+        self.receipts[0]["receipt_key"] = "tb03b-finance/6:MakeDispatchable:" + digest("d1")
+        result = self.q.original(self.request())
+        self.assertEqual(result["original"]["record"], self.record)
+        self.assertEqual(result["domain_id"], "E")
+
     def test_command_original_needs_v5(self):
         self.manifest["finance"]["schema_revision"] = "tb03b-finance/1"
         self.manifest["authorized_sources"][0]["operations"].remove("QueryCommand")

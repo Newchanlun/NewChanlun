@@ -24,7 +24,7 @@ const MODES: [&str; 4] = ["simulation", "dry-run", "experiment", "production"];
 const SCHEMA: &str =
     "CREATE TABLE IF NOT EXISTS x_meta(key TEXT PRIMARY KEY, value TEXT NOT NULL);";
 
-/// 历史模拟采用 /2，其他执行 profile 保留 /1。凭据只经 `credential_scope.env` 指名的环境变量
+/// 历史模拟采用 /3（`EXACT_PROFILE_REVISION`），其他执行 profile 保留 /1。凭据只经 `credential_scope.env` 指名的环境变量
 /// 进入本进程；值永不落库、不打印。
 struct Profile {
     revision: String,

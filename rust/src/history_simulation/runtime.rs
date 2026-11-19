@@ -1,7 +1,8 @@
 mod archive_v1;
+mod archive_v2;
 use super::exact_wire::{decimal, Plan, SignedChange};
 use super::{
-    model::{Batch, Change, Model},
+    model::{Batch, Change, Model, ModelRef},
     store,
 };
 use crate::session_protocol::{canonical_json, reply_envelope, sha256_hex};
@@ -187,6 +188,7 @@ pub struct ExactCommand {
     pub x_epoch: i64,
     pub symbol: String,
     pub projection_kind: String,
+    pub model_ref: ModelRef,
     #[serde(with = "SignedChange")]
     pub change: Change,
     pub plan_hash: String,
@@ -204,6 +206,9 @@ impl ExactCommand {
             || self.certificate.rd11_policy != p.model.rd11_policy
         {
             return Err("IdentityConflict：精确命令会话/执行域/模型不符".into());
+        }
+        if self.model_ref != p.model.model_ref() {
+            return Err("IdentityConflict：精确命令获准模型身份与 X 实际装载模型内容不符".into());
         }
         let (command, family) = match &self.change {
             Change::Submit { order } | Change::Replace { order } => {
@@ -849,6 +854,15 @@ pub(super) fn audit_archived_v1(
     epoch: i64,
 ) -> Result<(), String> {
     audit_existing::<archive_v1::ArchivedCommand>(tx, p, epoch)
+}
+
+/// 仅 E 固定批只读事务可选 C2 封存 `/2` 格式；不供 X 初始化或续写使用。
+pub(super) fn audit_archived_v2(
+    tx: &rusqlite::Transaction<'_>,
+    p: &Profile,
+    epoch: i64,
+) -> Result<(), String> {
+    audit_existing::<archive_v2::ArchivedCommand>(tx, p, epoch)
 }
 
 fn audit_existing<C: CommandRecord>(c: &Connection, p: &Profile, epoch: i64) -> Result<(), String> {

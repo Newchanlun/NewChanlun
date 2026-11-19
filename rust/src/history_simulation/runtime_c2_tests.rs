@@ -39,7 +39,8 @@ fn command(conditions: Value) -> Value {
     let certificate = json!({"rd11_policy":"controlled-fixture-rd11","responsibility_refs":["r"],"structure_dependencies":["s"],
         "market_dependencies":["m"],"rule_revision":"rule","conditions":conditions});
     json!({"command_id":"a","logical_order_family":"f-a","first_quantity":"5","allocation_id":"alloc-a","session_id":"session",
-        "session_generation":"1","x_id":"X","x_epoch":"1","symbol":"TEST","projection_kind":"per_leg","plan_hash":hash(&change),
+        "session_generation":"1","x_id":"X","x_epoch":"1","symbol":"TEST","projection_kind":"per_leg",
+        "model_ref":super::super::tests::model().model_ref(),"plan_hash":hash(&change),
         "certificate_hash":hash(&certificate),"change":change,"certificate":certificate})
 }
 fn parse<T: serde::de::DeserializeOwned>(v: Value) -> T {
@@ -89,6 +90,42 @@ fn conditions_equal_the_approved_list_including_model_coverage() {
         .validate()
         .unwrap_err();
     assert!(e.starts_with("Unsupported：获准条件缺"), "{e}");
+}
+
+#[test]
+fn model_ref_must_match_loaded_model_content_not_just_name() {
+    let d = dir("model-ref");
+    let p: Profile = parse(profile(&d, approved()));
+    let c: ExactCommand = parse(command(approved()));
+    c.validate(&p, 1).unwrap();
+
+    // Same model_id and revision, only maker fee numerator 1 -> 10: must be rejected by X.
+    let mut altered = p.clone();
+    altered.model.fee_profile.maker.numerator = 10;
+    assert_eq!(altered.model.model_id, p.model.model_id);
+    assert_eq!(altered.model.revision, p.model.revision);
+    assert_ne!(altered.model.content_hash(), p.model.content_hash());
+    let e = c.validate(&altered, 1).unwrap_err();
+    assert_eq!(
+        e,
+        "IdentityConflict：精确命令获准模型身份与 X 实际装载模型内容不符"
+    );
+
+    // Mismatched revision or model_id also rejected.
+    let mut bad_rev = c.clone();
+    bad_rev.model_ref.revision = "oracle-2".into();
+    assert!(bad_rev
+        .validate(&p, 1)
+        .unwrap_err()
+        .starts_with("IdentityConflict：精确命令获准模型身份"));
+
+    // Legacy command without model_ref cannot deserialize into active ExactCommand.
+    let mut legacy = command(approved());
+    legacy.as_object_mut().unwrap().remove("model_ref");
+    let err = serde_json::from_value::<ExactCommand>(legacy)
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("model_ref"), "{err}");
 }
 
 /// 语义闸与 E 冻结原件共用 `check_condition_semantics`；同一组反例在 E 侧见
@@ -305,4 +342,68 @@ fn command_accepts_only_ic13_integers_and_binds_first_quantity_and_allocation() 
         .validate(&p, 1)
         .unwrap_err()
         .starts_with("MissingDependency"));
+}
+
+/// #1407 C3：封存的 `/2` 库（无 `model_ref` 的 14 字段 C2 命令）仍可只读审计（`audit_archived_v2`），
+/// 不可被 `/3` 续写；损坏 E 回执或混入未知字段时拒绝审计。
+#[test]
+fn frozen_v2_archive_is_audited_readonly_and_refused_for_reopen() {
+    let d = dir("archive-v2");
+    let p: Profile = parse(profile(&d, approved()));
+    let mut conn = rusqlite::Connection::open_in_memory().unwrap();
+    {
+        let tx = conn.transaction().unwrap();
+        initialize_in_transaction(&tx, &p, 1).unwrap();
+        // 切回封存 /2 标记并写入一条合法的 14 字段 /2 命令（无 model_ref）。
+        tx.execute(
+            "UPDATE x_sim_meta SET v='x-execution-profile/2' WHERE k='exact_profile_revision'",
+            [],
+        )
+        .unwrap();
+        let mut cmd_v2 = command(approved());
+        cmd_v2.as_object_mut().unwrap().remove("model_ref");
+        let cmd_hash = sha256_hex(canonical_json(&cmd_v2).as_bytes());
+        let release = json!({
+            "protocol": AUTHORITY_WIRE,
+            "session_id": p.session_id,
+            "session_generation": p.session_generation,
+            "authority_id": p.e.authority_id,
+            "authority_epoch": p.e.authority_epoch,
+            "command_id": "a",
+            "command_hash": cmd_hash,
+            "command": cmd_v2,
+            "state": "ReleasedExact",
+            "receipt_id": "E:a",
+            "release_receipt_id": null,
+            "commit_ns": "0",
+        });
+        let clock = json!({"received_ns": "0", "first_known_ns": "0", "commit_ns": "0"});
+        tx.execute(
+            "INSERT INTO x_exact_commands(id,command,release_receipt,release_evidence,accept_clock,state) VALUES('a',?,'E:a',?,?,'Accepted')",
+            rusqlite::params![canonical_json(&cmd_v2), canonical_json(&release), canonical_json(&clock)],
+        )
+        .unwrap();
+        tx.commit().unwrap();
+    }
+    // /3 现役运行路径拒绝重开封存 /2 库。
+    let tx = conn.transaction().unwrap();
+    let reopen_err = initialize_in_transaction(&tx, &p, 1).unwrap_err();
+    assert!(
+        reopen_err.starts_with("VersionUnsupported"),
+        "expected VersionUnsupported, got {reopen_err}"
+    );
+    // 只读归档审计 /2 通过。
+    audit_archived_v2(&tx, &p, 1).unwrap();
+    // 损坏 E 回执哈希必须被 /2 审计拒绝。
+    tx.execute(
+        "UPDATE x_exact_commands SET release_evidence = json_set(release_evidence, '$.command_hash', 'wrong') WHERE id='a'",
+        [],
+    )
+    .unwrap();
+    let corrupt_err = audit_archived_v2(&tx, &p, 1).unwrap_err();
+    assert!(
+        corrupt_err.contains("权威回执未绑定原命令"),
+        "unexpected error: {corrupt_err}"
+    );
+    tx.rollback().unwrap();
 }

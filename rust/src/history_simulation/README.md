@@ -1,7 +1,7 @@
 # X 历史模拟执行接口
 
-`x_execution_session serve --db FILE --profile FILE --writer-epoch N` 用 `x-execution-profile/2`、
-`mode: simulation` 与 `history_simulation` 对象运行历史撮合。X 不续写或恢复已有 /1 历史模拟库（即使还没有命令）；要继续撮合须另起空库重放。不带历史撮合的模拟骨架以及 dry-run、experiment、production 仍使用 /1。
+`x_execution_session serve --db FILE --profile FILE --writer-epoch N` 用 `x-execution-profile/3`、
+`mode: simulation` 与 `history_simulation` 对象运行历史撮合。X 不续写或恢复已有 `/1`、`/2` 历史模拟库（即使还没有命令）；要继续撮合须另起空库重放。不带历史撮合的模拟骨架以及 dry-run、experiment、production 仍使用 `/1`。
 
 ## 冻结输入
 
@@ -20,7 +20,7 @@ RD12 固定为 `per-leg-source-attribution/1`；未知政策拒绝。netted 返�
 请求：`{"protocol":"x-exact-simulation/1","op":OP,"payload":VALUE}`。
 每帧以 LF 结束并关闭写半边（EOF），读取回复后关闭连接；字段形状见 `runtime.rs` 与 `model.rs` 的具名类型。
 
-- AcceptExact：payload 为完整 ExactCommand。查询冻结 E 的 ReleasedExact；
+- AcceptExact：payload 为完整 ExactCommand。先按 X 实际装载的 `model` 规范内容摘要核对 `command.model_ref`（`model_id`、`revision`、`content_hash = sha256(canonical_json(model))`），不符即以 `IdentityConflict` 拒绝且不问 E/S；再查询冻结 E 的 ReleasedExact，
   核全命令、计划/条件摘要、会话与 epoch 后持久 Accepted，不问 S、不产生调用权。
 - AdvanceBar：payload 为 Batch。每个 close_change 解码后必须等于已接纳命令的 change（批合同保留 JSON 数字）；
   真正动作前向 S 请求 ExecuteCommitted，绑定 E release 收据与命令 eligibility_ref；
@@ -45,9 +45,9 @@ ConditionEvidence 清单由 profile 的 `conditions` 冻结，与 E 冻结原件
 清单还须完备：配对表的四项能力（E 的 released-exact/1 与 model-coverage/1、S 的 execute-committed/1、
 X 的 simulation-local-transaction/1）各出现恰一次，缺项按 MissingDependency、重复按 Unsupported 拒绝；
 E 冻结原件与 X profile 走同一个 `check_required_capabilities`。
-正式 E 用 `tb03b-finance/5`，X 的 `e.socket` 指向该会话 E，其来源须获 `QueryReleasedExact` 权限。模拟条件执行的 S 由夹具按冻结的 eligibility_ref 发证，真实 S 签发归 #1416。
+正式 E 的 C3 模型绑定合同用 `tb03b-finance/6`（保留 `tb03b-finance/5` 既有原件、旧收据与测试含义不变）；`/6` 将冻结的 `exact_release.model_coverage.model_ref`（含 64 位十六进制 SHA-256 `content_hash`）直接编入 `ExactCommand.model_ref` 并进入 `command_hash`，X 的 `/3` 只接纳带有效 `model_ref` 且与实际装载 `Model` 内容摘要完全一致的命令，因此旧 `/5` 命令不得借用 `/3` X 产生外效。X 的 `e.socket` 指向该会话 E，其来源须获 `QueryReleasedExact` 权限。模拟条件执行的 S 由夹具按冻结的 eligibility_ref 发证，真实 S 签发归 #1416。
 
-订单投影的 revision、quantity 和 price（市价为 exec_index）先编码成规范十进制字符串，再计算 plan_hash。整个命令还冻结 first_quantity、allocation_id、目标 X 与 x_epoch，一并进入 command_hash。接纳钟、权威 commit_ns、release_commit_ns 与执行 claimed_ns 同样使用字符串；数字、前导零或越出 i64 的文本均不属于该合同。
+订单投影的 revision、quantity 和 price（市价为 exec_index）先编码成规范十进制字符串，再计算 plan_hash。整个命令还冻结 first_quantity、allocation_id、目标 X 与 x_epoch、以及 `model_ref`（`/6`+`/3`），一并进入 command_hash。接纳钟、权威 commit_ns、release_commit_ns 与执行 claimed_ns 同样使用字符串；数字、前导零或越出 i64 的文本均不属于该合同。
 
 ## 时间、恢复与消费边界
 
@@ -80,7 +80,7 @@ e_economic_session inspect-simulation-capture-batch --manifest MANIFEST --db E_D
 ```
 
 这个本地只读命令使用 E 库绑定的 manifest，不从请求接受 X 库路径；在 X 的同一
-只读事务中按持久版本选择核验：/1 用原数字命令和整数时钟，/2 用含首次量、分配身份的 IC:13 命令和时钟。
+只读事务中按持久版本选择核验：`/1` 用原数字命令和整数时钟，`/2` 用含首次量、分配身份的 IC:13 命令和时钟（归档只读），`/3` 在 `/2` 基础上强制核对 `model_ref` 与 X 实际装载模型内容摘要。
 外层版本与内层标记不符、命令或 E/S 原收据不符、批重演或原件对不上，都拒绝；不换版本重试。
 完整回执的摘要用于固定该批；回执中的 state_content_hash 仍是单独的状态读数。结果中的 `e_cut` 是接纳状态
 所依据的切面；每个 `Recorded` 项带原收据和当前 Pending（若存在）。获准来源

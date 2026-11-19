@@ -67,9 +67,9 @@ def economic_revisions(manifest: Mapping[str, object]) -> tuple[str, str]:
     elif protocol == "economic-session/2" and finance.get("schema_revision") == "tb03b-finance/4":
         # #1716 I1-C：/2 内容域显式选择的新合同（/2 全部语义 + 签署 cap 原子激活）。
         finance_revision = "tb03b-finance/4"
-    elif protocol == "economic-session/1" and finance.get("schema_revision") == "tb03b-finance/5":
-        # #1407 C2：/1 域显式选择的 E 精确命令生产者（/1 全部语义 + commands 族与 QueryCommand 读）。
-        finance_revision = "tb03b-finance/5"
+    elif protocol == "economic-session/1" and finance.get("schema_revision") in ("tb03b-finance/5", "tb03b-finance/6"):
+        # #1407 C2/C3：/1 域显式选择的 E 精确命令生产者（/5 保留旧命令与收据；/6 命令体固化 model_ref）。
+        finance_revision = finance["schema_revision"]
     elif finance.get("schema_revision") != finance_revision:
         raise EconomicQueryError("经济会话与财务版本混搭或未知")
     return protocol, finance_revision
@@ -400,7 +400,7 @@ class EconomicQuery:
                     if type(entry) is dict and {k: entry.get(k) for k in source_fields} == self.source]
         read_ops = {"ReadView", "Watch", "QueryFact", "QueryAllocation", "QueryVoice", "QueryDecision", "QueryGrant",
                     "EconomicReadOpen", "EconomicReadPage", "EconomicReadClose"}
-        if self.finance_revision == "tb03b-finance/5":
+        if self.finance_revision in ("tb03b-finance/5", "tb03b-finance/6"):
             read_ops.add("QueryCommand")
         if (len(matching) != 1 or type(matching[0].get("operations")) is not list
                 or any(type(op) is not str for op in matching[0]["operations"])
@@ -449,7 +449,7 @@ class EconomicQuery:
 
     @property
     def command_read_pages(self):
-        return (self.finance_revision == "tb03b-finance/5"
+        return (self.finance_revision in ("tb03b-finance/5", "tb03b-finance/6")
                 and {"EconomicReadOpen", "EconomicReadPage", "EconomicReadClose"} <= self.authorized_read_ops)
 
     def _start(self, deadline=None):
@@ -810,8 +810,8 @@ class EconomicQuery:
         if "finance" in image:
             finance = image["finance"]
             fields = {"schema_revision", "rights", "decisions", "slots", "responsibilities"}
-            if self.finance_revision == "tb03b-finance/5":
-                fields.add("commands")  # #1407：/5 创世图像即带 commands 族。
+            if self.finance_revision in ("tb03b-finance/5", "tb03b-finance/6"):
+                fields.add("commands")  # #1407：/5、/6 创世图像即带 commands 族。
             if (type(finance) is not dict or set(finance) not in (fields, fields | {"closed_applicants"})
                     or finance.get("schema_revision") != self.finance_revision
                     or any(type(finance[k]) is not list for k in set(finance) - {"schema_revision"})):
@@ -894,8 +894,8 @@ class EconomicQuery:
         kind = payload["kind"]
         if (kind == "decision") == (domain == "E"):
             raise EconomicQueryError("原件类型不属于该权威域")
-        if kind == "command" and self.finance_revision != "tb03b-finance/5":
-            raise EconomicQueryError("命令原件只属于 tb03b-finance/5")
+        if kind == "command" and self.finance_revision not in ("tb03b-finance/5", "tb03b-finance/6"):
+            raise EconomicQueryError("命令原件只属于 tb03b-finance/5 与 /6")
         object_id = text(payload["object_id"], "原身份")
         view = self.view(domain, cuts[domain])
         if kind == "command":

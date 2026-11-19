@@ -231,6 +231,7 @@ pub(crate) fn committed_capture_batch(
     // S 执行证据。只核原件相符不能证明该批由正式命令产生。
     match revision.as_str() {
         super::EXACT_PROFILE_REVISION => super::runtime::validate_existing(&tx, &profile, x_epoch)?,
+        "x-execution-profile/2" => super::runtime::audit_archived_v2(&tx, &profile, x_epoch)?,
         "x-execution-profile/1" => super::runtime::audit_archived_v1(&tx, &profile, x_epoch)?,
         _ => return Err("VersionUnsupported：未知历史模拟库版本".into()),
     }

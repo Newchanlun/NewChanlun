@@ -3,7 +3,7 @@
 //! wire 形状与 #1942 `history_simulation::runtime::{ExactCommand, Certificate, Condition, AuthorityReply}`
 //! 逐字段对齐。首次量和分配身份在签封前固定；IC:13 精确整数以十进制字符串进入摘要。
 use super::book::hash;
-use super::voice::exact;
+use super::voice::{digest, exact};
 use crate::session_protocol::{positive, required};
 use serde_json::{json, Value};
 use std::collections::BTreeSet;
@@ -153,7 +153,7 @@ fn model_domain(v: &Value) -> Result<(), String> {
     }
     Ok(())
 }
-/// `/5` 冻结原件顶层 `exact_release`：唯一目标 X/epoch、投影、规则与市场依赖、获准条件清单、模型覆盖域。
+/// `/5`、`/6` 冻结原件顶层 `exact_release`：唯一目标 X/epoch、投影、规则与市场依赖、获准条件清单、模型覆盖域。
 pub(super) fn validate_section(d: &Value) -> Result<(), String> {
     let s = &d["exact_release"];
     exact(
@@ -250,6 +250,13 @@ pub(super) fn validate_section(d: &Value) -> Result<(), String> {
     }
     Ok(())
 }
+/// `/6` 模型绑定合同：冻结 `model_ref.content_hash` 须为规范 64 位小写十六进制 SHA-256 摘要。
+pub(super) fn validate_model_binding(d: &Value) -> Result<(), String> {
+    digest(required(
+        &d["exact_release"]["model_coverage"]["model_ref"],
+        "content_hash",
+    )?)
+}
 /// `/5` 计划的 `exact`：逻辑族、首次量 L 与物理 revision、分配身份、方向与场所投影引用。
 /// C1 只产首次提交：revision 1 且 L 等于计划量；现金买入模型只有 buy。
 pub(super) fn validate_plan(q: &Value) -> Result<(), String> {
@@ -316,12 +323,14 @@ pub(super) fn validate_plan(q: &Value) -> Result<(), String> {
     Ok(())
 }
 /// 由冻结原件与 E 持有的 grant 组装 ExactCommand；同输入逐字节同输出。
+/// `/6`（`bind_model_ref = true`）将冻结的 `model_coverage.model_ref` 固化进命令体并进入 `command_hash`。
 pub(super) fn command(
     session_id: &str,
     session_generation: &str,
     d: &Value,
     q: &Value,
     grant_id: &str,
+    bind_model_ref: bool,
 ) -> Result<Value, String> {
     let s = &d["exact_release"];
     let x = &q["exact"];
@@ -345,7 +354,7 @@ pub(super) fn command(
         "rule_revision":s["rule_revision"],
         "conditions":s["conditions"],
     });
-    Ok(json!({
+    let mut cmd = json!({
         "command_id":x["command_id"],
         "logical_order_family":x["logical_order_family"],
         "first_quantity":x["first_quantity"],
@@ -360,7 +369,11 @@ pub(super) fn command(
         "certificate_hash":hash(&certificate),
         "change":change,
         "certificate":certificate,
-    }))
+    });
+    if bind_model_ref {
+        cmd["model_ref"] = model_ref(d);
+    }
+    Ok(cmd)
 }
 /// SPEC C07.2：请求证书逐项对照获准清单。缺条件、多条件或任一条件缺九字段之一 → Unsupported；
 /// 形状完整但内容与 E 自行组装的证书不同 → IdentityConflict。

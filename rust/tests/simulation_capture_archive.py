@@ -31,7 +31,7 @@ def archived_capture(x_bin, e_bin, directory, canonical, digest, *, originals=No
     with sqlite3.connect(x_db.as_uri() + "?mode=ro", uri=True) as src, sqlite3.connect(write_copy) as dst:
         src.backup(dst)
         before = list(dst.iterdump())
-    for version in ("x-execution-profile/1", "x-execution-profile/2"):
+    for version in ("x-execution-profile/1", "x-execution-profile/2", "x-execution-profile/3"):
         profile = directory / "writer.json"
         profile.write_text(canonical(dict(profile_revision=version, mode="simulation", history_simulation=source,
                                           credential_scope=dict(env="UNUSED_SIMULATION_CREDENTIAL"))))

@@ -26,6 +26,10 @@ const REV_V4: &str = "tb03b-finance/4";
 /// #1407 C1：`economic-session/1` 域上显式选择的 E 侧精确命令生产者 = `/1` 全部语义 + MakeDispatchable、
 /// ReleaseExact、QueryCommand 与 `x-exact-authority/1` 的 QueryReleasedExact 应答。只跑 TestOnly 已定域 slot。
 const REV_V5: &str = "tb03b-finance/5";
+/// #1407 C3：`economic-session/1` 域上显式选择的模型绑定精确命令生产者 = `/5` 全部语义 +
+/// `ExactCommand.model_ref`（取自冻结 `exact_release.model_coverage.model_ref` 并进入 `command_hash`）。
+/// `/5` 旧收据含义与摘要保持不变；新 X `/3` 拒绝缺 `model_ref` 的旧命令。
+const REV_V6: &str = "tb03b-finance/6";
 /// §5.7 `s_ref/2` 的 exact 四字段版本值。
 const S_REF_V2: &str = "s-object-ref/2";
 /// 财务子合同：一个版本串只有一种含义。
@@ -41,15 +45,18 @@ struct Contract {
     cap_activation: bool,
     /// 接受 E 侧精确命令（#1407）：冻结原件带 `exact_release`、计划带 `exact`，图像带 `commands`。
     exact_release: bool,
+    /// 精确命令体内固化获准模拟模型身份 `model_ref` 并进入 `command_hash`（#1407 C3，仅 `/6`）。
+    model_binding: bool,
 }
 /// 财务子合同的唯一登记点（§5.8：未知值与跨域混写当场拒绝，旧 manifest 缺省仍按域基础合同读）。
-const CONTRACTS: [Contract; 5] = [
+const CONTRACTS: [Contract; 6] = [
     Contract {
         revision: REV,
         domain: SCHEMA_V1,
         content: false,
         cap_activation: false,
         exact_release: false,
+        model_binding: false,
     },
     Contract {
         revision: REV_V2,
@@ -57,6 +64,7 @@ const CONTRACTS: [Contract; 5] = [
         content: true,
         cap_activation: false,
         exact_release: false,
+        model_binding: false,
     },
     Contract {
         revision: REV_V3,
@@ -64,6 +72,7 @@ const CONTRACTS: [Contract; 5] = [
         content: false,
         cap_activation: true,
         exact_release: false,
+        model_binding: false,
     },
     Contract {
         revision: REV_V4,
@@ -71,6 +80,7 @@ const CONTRACTS: [Contract; 5] = [
         content: true,
         cap_activation: true,
         exact_release: false,
+        model_binding: false,
     },
     Contract {
         revision: REV_V5,
@@ -78,6 +88,15 @@ const CONTRACTS: [Contract; 5] = [
         content: false,
         cap_activation: false,
         exact_release: true,
+        model_binding: false,
+    },
+    Contract {
+        revision: REV_V6,
+        domain: SCHEMA_V1,
+        content: false,
+        cap_activation: false,
+        exact_release: true,
+        model_binding: true,
     },
 ];
 fn contract(m: &Value) -> Result<Contract, String> {
@@ -100,7 +119,7 @@ fn contract(m: &Value) -> Result<Contract, String> {
     }
 }
 fn unsupported_contract() -> String {
-    "SchemaUnsupported：财务子合同只有 tb03b-finance/1、/2、/3、/4 与 /5".into()
+    "SchemaUnsupported：财务子合同只有 tb03b-finance/1、/2、/3、/4、/5 与 /6".into()
 }
 fn revision(m: &Value) -> Result<&'static str, String> {
     Ok(contract(m)?.revision)
@@ -205,7 +224,7 @@ fn exact_release_contract(config: &Config) -> Result<(), String> {
     if contract(&config.manifest)?.exact_release {
         Ok(())
     } else {
-        Err("SchemaUnsupported：精确命令只属于 tb03b-finance/5".into())
+        Err("SchemaUnsupported：精确命令只属于 tb03b-finance/5 与 /6".into())
     }
 }
 pub(super) fn enabled(config: &Config) -> bool {
@@ -608,6 +627,23 @@ fn input(config: &Config, raw: &str) -> Result<Value, String> {
     }
     if release {
         super::exact_command::validate_section(&d)?;
+        if contract(&config.manifest)?.model_binding {
+            super::exact_command::validate_model_binding(&d)?;
+            if let Some(binding) = config
+                .manifest
+                .get("history_simulation_source")
+                .filter(|v| v.is_object())
+            {
+                if binding["model_content_hash"]
+                    != d["exact_release"]["model_coverage"]["model_ref"]["content_hash"]
+                {
+                    return Err(
+                        "IdentityConflict：冻结模拟模型摘要与 exact_release.model_coverage.model_ref 不符"
+                            .into(),
+                    );
+                }
+            }
+        }
     }
     Ok(d)
 }
@@ -1660,8 +1696,14 @@ fn release_exact(
         return Err("IdentityConflict：目标 X/epoch 与冻结目标不同".into());
     }
     let grant_id = required(old, "grant_id")?;
-    let command =
-        super::exact_command::command(&config.session, &config.generation, d, q, grant_id)?;
+    let command = super::exact_command::command(
+        &config.session,
+        &config.generation,
+        d,
+        q,
+        grant_id,
+        contract(&config.manifest)?.model_binding,
+    )?;
     if p["plan_hash"] != command["plan_hash"] {
         return Err("IdentityConflict：plan_hash 不是冻结计划的精确投影".into());
     }

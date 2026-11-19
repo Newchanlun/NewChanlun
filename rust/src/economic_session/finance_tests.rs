@@ -242,7 +242,7 @@ impl Fixture {
         exact: Option<exact_release::ExactClock>,
     ) -> Self {
         let rev = match (carriers.is_some(), v3.is_some()) {
-            _ if exact.is_some() => "tb03b-finance/5",
+            _ if exact.is_some() => exact.unwrap().revision(),
             (false, false) => REV,
             (false, true) => REV_V3,
             (true, false) => REV_V2,
@@ -377,8 +377,8 @@ impl Fixture {
         if v3.is_some() {
             data["policy"]["profile_id"] = json!(TEST_PROFILE);
         }
-        if exact.is_some() {
-            exact_release::decorate_input(&mut data);
+        if let Some(clock) = exact {
+            exact_release::decorate_input(&mut data, clock);
         }
         let (ip, ih) = save(&dir, "input.json", &data);
         let source = json!({"source_namespace":"test","source_epoch":"one","producer_id":"unit","producer_epoch":"1"});

@@ -119,7 +119,9 @@ def command(change):
         key='price' if kind['kind']=='limit' else 'exec_index'
         kind[key]=str(kind[key])
     cert=dict(rd11_policy='controlled-fixture-rd11',responsibility_refs=['controlled-responsibility'],structure_dependencies=['controlled-structure'],market_dependencies=['controlled-market'],rule_revision='controlled-rule',conditions=copy.deepcopy(CONDITIONS))
-    return dict(command_id=cid,logical_order_family=family,session_id='session',session_generation=GENERATION,x_id='X',x_epoch='1',first_quantity=str(first),allocation_id='alloc-'+family,symbol='TEST',projection_kind='per_leg',change=change,plan_hash=digest(change),certificate_hash=digest(cert),certificate=cert)
+    m=SIM['model']
+    model_ref=dict(model_id=m['model_id'],revision=m['revision'],content_hash=digest(m))
+    return dict(command_id=cid,logical_order_family=family,session_id='session',session_generation=GENERATION,x_id='X',x_epoch='1',first_quantity=str(first),allocation_id='alloc-'+family,symbol='TEST',projection_kind='per_leg',model_ref=model_ref,change=change,plan_hash=digest(change),certificate_hash=digest(cert),certificate=cert)
 def batch(i,changes=[]):
     return dict(request_id='b'+str(i),known_frontier_cut='frontier'+str(i),bar=dict(index=i,open=100,low=90,high=110,close=105),capacity=dict(kind='none'),close_changes=changes,scenario_busts=[])
 def run(name):
@@ -131,7 +133,7 @@ def run(name):
     # S's long schema_revision keeps every S request larger than the matching E reply (oversized-frame case below).
     sim=dict(model=model(),session_id='session',session_generation=GENERATION,x_id='X',source_namespace='x-sim',source_epoch='epoch1',socket=str(xp),e=dict(socket=str(e.path),authority_id='E',authority_epoch='e1',schema_revision='e-authority-fixture/1',reply_namespace='e/replies',producer_id='E:session'),s=dict(socket=str(s.path),authority_id='S',authority_epoch='s1',schema_revision='s-authority-fixture/1#'+'s'*512,reply_namespace='s/replies',producer_id='S:session'),conditions=CONDITIONS,timeout_ms=500,max_frame_bytes=262144)
     SIM.clear(); SIM.update(sim); FIRST_QUANTITY.clear()
-    profile=dict(profile_revision='x-execution-profile/2',mode='simulation',credential_scope=dict(env='UNUSED_SIMULATION_CREDENTIAL'),history_simulation=sim)
+    profile=dict(profile_revision='x-execution-profile/3',mode='simulation',credential_scope=dict(env='UNUSED_SIMULATION_CREDENTIAL'),history_simulation=sim)
     pp=directory/'profile.json'; pp.write_text(canonical(profile)); db=directory/'x.sqlite'
     log=open(directory/'x.log','ab')
     fixture=len(sys.argv)>3 and sys.argv[3]=='runtime-fixture'
@@ -198,19 +200,22 @@ def run(name):
         with sqlite3.connect(db) as c:
             assert c.execute("select value from x_meta where key='writer_epoch'").fetchone()==('1',)
             assert json.loads(c.execute("select v from x_sim_meta where k='authority_profile'").fetchone()[0])==sim
-        # Even an initialized /1 database with no commands is not a /2 database.
-        with sqlite3.connect(db) as c:
-            assert c.execute('select count(*) from x_exact_commands').fetchone()==(0,)
-            c.execute("update x_meta set value='x-execution-profile/1' where key='profile_revision'")
-            c.execute("delete from x_sim_meta where k='exact_profile_revision'")
-            old='\n'.join(c.iterdump())
-        for rev in ('x-execution-profile/1','x-execution-profile/2'):
-            pp.write_text(canonical({**profile,'profile_revision':rev}))
-            refused=subprocess.run(argv(),env=env(),capture_output=True,timeout=5)
-            assert refused.returncode and b'VersionUnsupported' in refused.stderr
-            with sqlite3.connect(db) as c: assert old=='\n'.join(c.iterdump())
+        # Even an initialized /1 or /2 database with no commands is not a /3 database.
+        for old_rev, inner_rev in (('x-execution-profile/1', None), ('x-execution-profile/2', 'x-execution-profile/2')):
+            with sqlite3.connect(db) as c:
+                assert c.execute('select count(*) from x_exact_commands').fetchone()==(0,)
+                c.execute("update x_meta set value=? where key='profile_revision'", (old_rev,))
+                c.execute("delete from x_sim_meta where k='exact_profile_revision'")
+                if inner_rev is not None:
+                    c.execute("insert into x_sim_meta(k,v) values('exact_profile_revision',?)", (inner_rev,))
+                old='\n'.join(c.iterdump())
+            for rev in ('x-execution-profile/1','x-execution-profile/2','x-execution-profile/3'):
+                pp.write_text(canonical({**profile,'profile_revision':rev}))
+                refused=subprocess.run(argv(),env=env(),capture_output=True,timeout=5)
+                assert refused.returncode and b'VersionUnsupported' in refused.stderr, (old_rev, rev, refused.stderr)
+                with sqlite3.connect(db) as c: assert old=='\n'.join(c.iterdump())
         # Use a fresh file; the old database is never migrated.
-        db=directory/'fresh-v2.sqlite'; main_db=db
+        db=directory/'fresh-v3.sqlite'; main_db=db
     p=start()
     try:
         if REPAIR:
@@ -266,6 +271,16 @@ def run(name):
         moved.rename(e.path)
         unknown=copy.deepcopy(ca); unknown['certificate']['conditions'][0]['validator_capability']='unknown'; unknown['certificate_hash']=digest(unknown['certificate'])
         assert request(xp,'AcceptExact',unknown)['kind']=='Error'
+        # #1407 C3: same model_id/revision but different model content (maker fee 1 -> 10) and missing model_ref must fail before E/S.
+        swapped_model=copy.deepcopy(SIM['model']); swapped_model['fee_profile']['maker']['numerator']=10
+        swapped=copy.deepcopy(ca); swapped['model_ref']['content_hash']=digest(swapped_model)
+        before_e=len(e.calls)
+        refused_model=request(xp,'AcceptExact',swapped)
+        assert refused_model['kind']=='Error' and 'IdentityConflict' in refused_model['error'], refused_model
+        legacy_v5=copy.deepcopy(ca); legacy_v5.pop('model_ref')
+        assert request(xp,'AcceptExact',legacy_v5)['kind']=='Error'
+        assert len(e.calls)==before_e and len(s.calls)==before
+        assert request(xp,'QueryCommand','a')['state']=='NoRecord'
         assert request(xp,'AcceptExact',ca)['state']=='Accepted'
         assert len(s.calls)==before, 'Accept must never ask S/call adapter'
         conflicting=copy.deepcopy(ca); conflicting['x_epoch']='2'

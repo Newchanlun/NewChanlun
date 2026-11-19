@@ -92,18 +92,20 @@ def exercise(e_bin, directory, e_socket, x_db, source, receipt, alternate, other
             assert c.execute("SELECT count(*) FROM facts").fetchone() == (0,)
 
     # Keep batch and result fixed. Each copy lacks a different independent proof.
-    wrong_revision = "x-execution-profile/2" if archived_v1 else "x-execution-profile/1"
+    wrong_revision = "x-execution-profile/3" if archived_v1 else "x-execution-profile/1"
     reject_corrupt_x("mixed-profile", "UPDATE x_meta SET value=? WHERE key='profile_revision'",
                      (wrong_revision,), "VersionUnsupported")
     if archived_v1:
-        # 两层均声称 /2 但仍是 /1 原件：必须在 /2 解码失败，不得改用 /1 重试。
-        corrupt = directory / "v2-with-v1-wire.sqlite"
-        with sqlite3.connect(x_db.as_uri() + "?mode=ro", uri=True) as src, sqlite3.connect(corrupt) as dst:
-            src.backup(dst)
-            dst.execute("UPDATE x_meta SET value=? WHERE key='profile_revision'", (wrong_revision,))
-            dst.execute("INSERT INTO x_sim_meta VALUES('exact_profile_revision',?)", (wrong_revision,))
-        _, _, _, inspect_wrong_wire = client(corrupt, "v2-with-v1-wire-e")
-        inspect_wrong_wire(error="InvalidDomain")
+        # 两层均声称 /2 或 /3 但仍是 /1 原件：必须在对应版本解码失败，不得改用 /1 重试。
+        for claimed in ("x-execution-profile/2", "x-execution-profile/3"):
+            tag = claimed.rsplit("/", 1)[1]
+            corrupt = directory / f"v{tag}-with-v1-wire.sqlite"
+            with sqlite3.connect(x_db.as_uri() + "?mode=ro", uri=True) as src, sqlite3.connect(corrupt) as dst:
+                src.backup(dst)
+                dst.execute("UPDATE x_meta SET value=? WHERE key='profile_revision'", (claimed,))
+                dst.execute("INSERT INTO x_sim_meta VALUES('exact_profile_revision',?)", (claimed,))
+            _, _, _, inspect_wrong_wire = client(corrupt, f"v{tag}-with-v1-wire-e")
+            inspect_wrong_wire(error="InvalidDomain")
         reject_corrupt_x("wrong-e-proof", "UPDATE x_exact_commands SET release_evidence="
                          "json_set(release_evidence,'$.command_hash','wrong') WHERE id=?", ("a",),
                          "权威回执未绑定原命令")

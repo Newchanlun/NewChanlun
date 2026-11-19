@@ -37,24 +37,51 @@ const CONDITION_FIELDS: [&str; 9] = [
 
 /// 冻结原件 `/5` 增量：唯一目标 X、获准条件清单（含 ADR 0052 的 `model_coverage`）与模型覆盖域。
 /// alpha 的并发形态在域内；beta 落在 `unsupported_domains`（L7）。
-pub(super) fn decorate_input(data: &mut Value) {
+pub(super) fn alpha_sim_model() -> crate::history_simulation::model::Model {
+    let mut model = crate::history_simulation::tests::model();
+    model.symbol = "alpha".into();
+    model
+}
+pub(super) fn decorate_input(data: &mut Value, clock: ExactClock) {
     let conditions: Vec<Value> = CONDITIONS
         .iter()
         .map(|(id, capability, stage)| json!({"condition_id":id,"authority_revision":capability,"dependency_set":["controlled-dependency"],"invalidation_sources":["controlled-invalidation"],"required_check_stages":[stage],"evidence_refs":["controlled-evidence"],"coverage_proof":"controlled-coverage","validator_capability":capability,"failure_result":"Denied"}))
         .collect();
     let domain = |concurrency: &str| json!({"order_kind":"limit","concurrency":concurrency,"allocation_model":"#1349/atomic-slot-wait/v1"});
-    data["exact_release"] = json!({"x_target":{"x_id":"X","x_epoch":"1"},"projection_kind":"per_leg","rd11_policy":"controlled-fixture-rd11","rule_revision":"TestOnly-rule/1407-c1","market_dependencies":["TestOnly-market/1407-c1"],"conditions":conditions,"model_coverage":{"model_ref":{"model_id":"history-sim/bar-batch-known-frontier/1","revision":"oracle-1","content_hash":hash(&json!("history-sim/bar-batch-known-frontier/1@oracle-1"))},"domain_id":"TestOnly-domain/1407-c1","input_domain":[domain("single")],"unsupported_domains":[domain("batched")]}});
+    let model_ref = if clock.is_v6() {
+        json!(alpha_sim_model().model_ref())
+    } else {
+        json!({"model_id":"history-sim/bar-batch-known-frontier/1","revision":"oracle-1","content_hash":hash(&json!("history-sim/bar-batch-known-frontier/1@oracle-1"))})
+    };
+    data["exact_release"] = json!({"x_target":{"x_id":"X","x_epoch":"1"},"projection_kind":"per_leg","rd11_policy":"controlled-fixture-rd11","rule_revision":"TestOnly-rule/1407-c1","market_dependencies":["TestOnly-market/1407-c1"],"conditions":conditions,"model_coverage":{"model_ref":model_ref,"domain_id":"TestOnly-domain/1407-c1","input_domain":[domain("single")],"unsupported_domains":[domain("batched")]}});
     for q in data["plans"].as_array_mut().unwrap() {
         let name = q["decision_id"].as_str().unwrap().to_owned();
         q["exact"] = json!({"command_id":format!("cmd-{name}"),"logical_order_family":format!("family-{name}"),"chong_id":name,"revision":"1","first_quantity":q["quantity"],"allocation_id":format!("alloc-{name}"),"side":"buy","symbol":name,"projection_manifest":format!("TestOnly-projection/{name}"),"eligibility_ref":format!("S:cmd-{name}"),"concurrency":if name == "alpha" {"single"} else {"batched"}});
     }
 }
-/// `/5` 夹具的组件时钟。`LogicalBar` 是 #1407 C2 的 simulation 读法：全部前置消息落在 bar 1
+/// `/5`、`/6` 夹具的组件时钟。`LogicalBar*` 是 #1407 C2/C3 的 simulation 读法：全部前置消息落在 bar 1
 /// （单位 S 基础的 commit_ns 是 1，财务获知不得早于它），alpha 的 ReleaseExact 落在 bar 2（见 `x_e2e`）。
 #[derive(Clone, Copy)]
 pub(super) enum ExactClock {
     TestOnly,
     LogicalBar,
+    TestOnlyV6,
+    LogicalBarV6,
+}
+impl ExactClock {
+    pub(super) fn revision(self) -> &'static str {
+        if self.is_v6() {
+            REV_V6
+        } else {
+            REV_V5
+        }
+    }
+    pub(super) fn is_v6(self) -> bool {
+        matches!(self, Self::TestOnlyV6 | Self::LogicalBarV6)
+    }
+    fn is_logical_bar(self) -> bool {
+        matches!(self, Self::LogicalBar | Self::LogicalBarV6)
+    }
 }
 /// X 的来源身份（`x-exact-authority/1` 共同信封的 source/producer）；E 只授它 QueryReleasedExact。
 pub(super) const X_SOURCE: (&str, &str, &str, &str) = ("x-sim", "epoch1", "X", "1");
@@ -78,7 +105,7 @@ pub(super) fn decorate_manifest(manifest: &mut Value, clock: ExactClock) {
     ] {
         clocks[message] = json!({"received_ns":t.to_string(),"first_known_ns":(t+1).to_string(),"commit_ns":(t+2).to_string()});
     }
-    if let ExactClock::LogicalBar = clock {
+    if clock.is_logical_bar() {
         let mut bars = serde_json::Map::new();
         for message in manifest["clock"]["plan"]["messages"]
             .as_object()
@@ -165,7 +192,11 @@ fn expected_command(f: &Fixture, name: &str) -> Value {
     let x = &q["exact"];
     let change = json!({"kind":"submit","order":{"command_id":x["command_id"],"family_id":x["logical_order_family"],"chong_id":x["chong_id"],"revision":"1","side":"buy","quantity":q["quantity"],"kind":{"kind":"limit","price":q["limit_price"]},"eligibility_ref":x["eligibility_ref"],"projection_manifest":x["projection_manifest"]}});
     let certificate = json!({"rd11_policy":s["rd11_policy"],"responsibility_refs":[grant_id(f,name)],"structure_dependencies":[format!("{}@{}",q["s_ref"]["object_id"].as_str().unwrap(),q["s_ref"]["object_hash"].as_str().unwrap())],"market_dependencies":s["market_dependencies"],"rule_revision":s["rule_revision"],"conditions":s["conditions"]});
-    json!({"command_id":x["command_id"],"logical_order_family":x["logical_order_family"],"allocation_id":x["allocation_id"],"first_quantity":x["first_quantity"],"session_id":f.configs[0].session,"session_generation":f.configs[0].generation,"x_id":"X","x_epoch":"1","symbol":x["symbol"],"projection_kind":"per_leg","change":change,"plan_hash":hash(&change),"certificate_hash":hash(&certificate),"certificate":certificate})
+    let mut cmd = json!({"command_id":x["command_id"],"logical_order_family":x["logical_order_family"],"allocation_id":x["allocation_id"],"first_quantity":x["first_quantity"],"session_id":f.configs[0].session,"session_generation":f.configs[0].generation,"x_id":"X","x_epoch":"1","symbol":x["symbol"],"projection_kind":"per_leg","change":change,"plan_hash":hash(&change),"certificate_hash":hash(&certificate),"certificate":certificate});
+    if f.data["schema_revision"] == REV_V6 {
+        cmd["model_ref"] = s["model_coverage"]["model_ref"].clone();
+    }
+    cmd
 }
 fn release_payload(f: &Fixture, name: &str) -> Value {
     let c = expected_command(f, name);
@@ -427,7 +458,19 @@ mod wire_1942 {
 
 #[test]
 fn l8_released_exact_reply_decodes_as_1942_authority_reply() {
-    let mut f = fixture(None);
+    // 现役 `/6` E 回复必须能被现役 `/3` X 的 `ExactCommand`（含 `model_ref`）严格解码。
+    let mut f = Fixture::build_with(
+        "100",
+        None,
+        &[("slot", &["alpha", "beta"])],
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        Some(ExactClock::TestOnlyV6),
+    );
     committed(&mut f);
     dispatch(&mut f, "alpha");
     let released = f.handle(0, "ReleaseExact-alpha", release_payload(&f, "alpha"));
@@ -441,6 +484,20 @@ fn l8_released_exact_reply_decodes_as_1942_authority_reply() {
         reply,
         "十二字段逐项相等"
     );
+    // 既有 `/5` E 回复保持 14 字段（无 `model_ref`），不得通过现役 `/3` X 严格解码。
+    let mut f5 = fixture(None);
+    committed(&mut f5);
+    dispatch(&mut f5, "alpha");
+    let r5 = f5.handle(0, "ReleaseExact-alpha", release_payload(&f5, "alpha"));
+    assert_eq!(r5["record"]["state"], "ReleasedExact", "{r5}");
+    let c5 = expected_command(&f5, "alpha");
+    let reply5 = f5.handle(0, "query-released", authority_query(&f5, &c5, "1"));
+    assert_eq!(reply5["state"], "ReleasedExact");
+    assert_eq!(reply5["command"], c5);
+    let err5 = serde_json::from_value::<wire_1942::AuthorityReply>(reply5)
+        .unwrap_err()
+        .to_string();
+    assert!(err5.contains("model_ref"), "{err5}");
     assert_eq!(decoded.protocol, "x-exact-authority/1");
     assert_eq!(decoded.state, "ReleasedExact");
     assert_eq!(decoded.authority_id, "E");
@@ -1223,6 +1280,72 @@ fn frozen_conditions_refuse_a_missing_or_repeated_required_capability() {
     dispatch(&mut f, "alpha");
     let r = f.handle(0, "ReleaseExact-alpha", release_payload(&f, "alpha"));
     assert_eq!(r["record"]["state"], "ReleasedExact", "{r}");
+}
+
+/// #1407 C3：`/6` 将 `model_coverage.model_ref` 固化进 `ExactCommand` 与 `command_hash`，校验 64 位摘要；
+/// E 仍是唯一覆盖域判断者（beta 仍落 `Unsupported{ModelOrderUnspecified}`），且 `/5` 旧收据键与摘要不变。
+#[test]
+fn v6_binds_model_ref_in_command_and_preserves_v5_receipts() {
+    let mut f5 = fixture(None);
+    committed(&mut f5);
+    dispatch(&mut f5, "alpha");
+    let r5 = f5.handle(0, "ReleaseExact-alpha", release_payload(&f5, "alpha"));
+    assert_eq!(r5["record"]["state"], "ReleasedExact", "{r5}");
+    assert!(r5["record"]["command"].get("model_ref").is_none(), "{r5}");
+    assert!(r5["receipt_key"]
+        .as_str()
+        .unwrap()
+        .starts_with("tb03b-finance/5:ReleaseExact:"));
+
+    let mut f6 = Fixture::build_with(
+        "100",
+        None,
+        &[("slot", &["alpha", "beta"])],
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        Some(ExactClock::TestOnlyV6),
+    );
+    committed(&mut f6);
+    dispatch(&mut f6, "alpha");
+    dispatch(&mut f6, "beta");
+    let r6 = f6.handle(0, "ReleaseExact-alpha", release_payload(&f6, "alpha"));
+    assert_eq!(r6["record"]["state"], "ReleasedExact", "{r6}");
+    let expected_ref = json!(alpha_sim_model().model_ref());
+    assert_eq!(r6["record"]["command"]["model_ref"], expected_ref, "{r6}");
+    assert_eq!(r6["record"]["model_ref"], expected_ref, "{r6}");
+    assert_eq!(
+        r6["record"]["command_hash"],
+        hash(&r6["record"]["command"]),
+        "{r6}"
+    );
+    assert_ne!(r6["record"]["command_hash"], r5["record"]["command_hash"]);
+    assert!(r6["receipt_key"]
+        .as_str()
+        .unwrap()
+        .starts_with("tb03b-finance/6:ReleaseExact:"));
+
+    // E 仍是唯一覆盖域判断者：beta 落 unsupported_domains，仍持久 Unsupported。
+    let unsupported = f6.handle(0, "ReleaseExact-beta", release_payload(&f6, "beta"));
+    assert_eq!(
+        unsupported["kind"], "ReleaseUnsupportedReceipt",
+        "{unsupported}"
+    );
+    assert_eq!(unsupported["record"]["state"], "Unsupported");
+    assert_eq!(
+        unsupported["record"]["unsupported"]["reason"],
+        "ModelOrderUnspecified"
+    );
+    assert_eq!(unsupported["record"]["command"]["model_ref"], expected_ref);
+
+    // `/6` 拒绝非 64 位小写十六进制的 model_ref.content_hash。
+    let mut bad = f6.data.clone();
+    bad["exact_release"]["model_coverage"]["model_ref"]["content_hash"] = json!("not-a-sha256");
+    let err = crate::economic_session::exact_command::validate_model_binding(&bad).unwrap_err();
+    assert!(err.starts_with("InvalidDomain："), "{err}");
 }
 
 #[path = "exact_x_e2e_tests.rs"]

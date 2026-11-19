@@ -104,10 +104,11 @@
   // #1716：/3 = economic-session/1 窄测试臂，/4 = economic-session/2 内容域；两者都接受签署 cap 激活。
   const contentDomain = version => version === "tb03b-finance/2" || version === "tb03b-finance/4";
   const capActivation = version => version === "tb03b-finance/3" || version === "tb03b-finance/4";
-  // #1407 C2：/5 = economic-session/1 上的 E 精确命令生产者；图像多 commands 族，历史多两种 E 事件。
-  const exactRelease = version => version === "tb03b-finance/5";
+  // #1407 C2/C3：/5 与 /6 = economic-session/1 上的 E 精确命令生产者；/6 在命令体固化 model_ref。
+  const exactRelease = version => version === "tb03b-finance/5" || version === "tb03b-finance/6";
+  const modelBinding = version => version === "tb03b-finance/6";
   function revision(discovery) {
-    need(discovery.finance_revision === undefined || ["tb03b-finance/1", "tb03b-finance/2", "tb03b-finance/3", "tb03b-finance/4", "tb03b-finance/5"].includes(discovery.finance_revision), "未知财务查询版本");
+    need(discovery.finance_revision === undefined || ["tb03b-finance/1", "tb03b-finance/2", "tb03b-finance/3", "tb03b-finance/4", "tb03b-finance/5", "tb03b-finance/6"].includes(discovery.finance_revision), "未知财务查询版本");
     return contentDomain(discovery.finance_revision) ? "economic-session/2" : "economic-session/1";
   }
   function evidence(value, discovery, horizon) {
@@ -198,7 +199,7 @@
     need(new TextEncoder().encode(event.witness.input_raw).byteLength<=16*1024*1024,"财务原输入超出原 Rust 字节上限");
     const data=parse(event.witness.input_raw);
     keys(data,["schema_revision","kind","source_id","source_epoch","policy","baseline","rights","plans","slots",...(exactRelease(data.schema_revision)?["exact_release"]:[])],"财务原输入");
-    need((event.request.schema_revision==="economic-session/2"?["tb03b-finance/2","tb03b-finance/4"]:["tb03b-finance/1","tb03b-finance/3","tb03b-finance/5"]).includes(data.schema_revision) && data.kind==="TestOnly","财务原输入版本/范围不同");
+    need((event.request.schema_revision==="economic-session/2"?["tb03b-finance/2","tb03b-finance/4"]:["tb03b-finance/1","tb03b-finance/3","tb03b-finance/5","tb03b-finance/6"]).includes(data.schema_revision) && data.kind==="TestOnly","财务原输入版本/范围不同");
     text(data.source_id,"输入来源");text(data.source_epoch,"输入来源代际");
     for(const k of ["rights","plans","slots"])need(Array.isArray(data[k]),"财务原输入族缺失");
     const p=data.policy,b=data.baseline;
@@ -308,14 +309,16 @@
     const certificate={rd11_policy:s.rd11_policy,responsibility_refs:[base.grant_id],
       structure_dependencies:[q.s_ref.object_id+"@"+q.s_ref.object_hash],market_dependencies:s.market_dependencies,
       rule_revision:s.rule_revision,conditions:s.conditions};
+    const coverage=s.model_coverage,model_ref=coverage.model_ref;
+    if(modelBinding(data.schema_revision)) digest(model_ref.content_hash,"模型内容摘要");
     const command={command_id:x.command_id,logical_order_family:x.logical_order_family,first_quantity:x.first_quantity,
       allocation_id:x.allocation_id,session_id:discovery.session_id,session_generation:discovery.session_generation,
-      x_id:target.x_id,x_epoch:target.x_epoch,symbol:x.symbol,projection_kind:s.projection_kind,change,
+      x_id:target.x_id,x_epoch:target.x_epoch,symbol:x.symbol,projection_kind:s.projection_kind,
+      ...(modelBinding(data.schema_revision)?{model_ref}:{}),change,
       plan_hash:await sha256(change),certificate,certificate_hash:await sha256(certificate)};
     need(req.command_id===x.command_id && base.decision_id===q.decision_id && base.plan_hash===await sha256(q)
       && req.x_id===target.x_id && req.x_epoch===target.x_epoch && req.plan_hash===command.plan_hash
       && same(req.certificate,certificate),"放行请求不属于冻结计划、条件或 X");
-    const coverage=s.model_coverage,model_ref=coverage.model_ref;
     const scope={order_kind:"limit",concurrency:x.concurrency,allocation_model:data.policy.allocation_policy_id};
     const covered=coverage.input_domain.some(d=>same(d,scope)) && !coverage.unsupported_domains.some(d=>same(d,scope));
     const result=covered ? {state:"ReleasedExact",first_quantity:x.first_quantity,allocation_id:x.allocation_id,
