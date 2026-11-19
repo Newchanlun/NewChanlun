@@ -1,0 +1,441 @@
+{
+  "first_nine": [
+    {
+      "window": [
+        "segment:1:301",
+        "segment:1:347",
+        "segment:1:429"
+      ],
+      "core": [
+        8834,
+        11512
+      ],
+      "strict_core": true,
+      "local_seed": {
+        "selected": [
+          "segment:1:301",
+          "segment:1:429"
+        ],
+        "DD": {
+          "value": 7580,
+          "contributors": [
+            "segment:1:301"
+          ]
+        },
+        "GG": {
+          "value": 11988,
+          "contributors": [
+            "segment:1:429"
+          ]
+        },
+        "D": {
+          "value": 8834,
+          "contributors": [
+            "segment:1:429"
+          ]
+        },
+        "G": {
+          "value": 11512,
+          "contributors": [
+            "segment:1:301"
+          ]
+        }
+      },
+      "parent_seed": {
+        "selected": [
+          "segment:1:301",
+          "segment:1:429"
+        ],
+        "DD": {
+          "value": 7580,
+          "contributors": [
+            "segment:1:301"
+          ]
+        },
+        "GG": {
+          "value": 11988,
+          "contributors": [
+            "segment:1:429"
+          ]
+        },
+        "D": {
+          "value": 8834,
+          "contributors": [
+            "segment:1:429"
+          ]
+        },
+        "G": {
+          "value": 11512,
+          "contributors": [
+            "segment:1:301"
+          ]
+        }
+      },
+      "all_units": {
+        "selected": [
+          "segment:1:301",
+          "segment:1:347",
+          "segment:1:429"
+        ],
+        "DD": {
+          "value": 7580,
+          "contributors": [
+            "segment:1:301"
+          ]
+        },
+        "GG": {
+          "value": 11988,
+          "contributors": [
+            "segment:1:429"
+          ]
+        },
+        "D": {
+          "value": 8834,
+          "contributors": [
+            "segment:1:347",
+            "segment:1:429"
+          ]
+        },
+        "G": {
+          "value": 11512,
+          "contributors": [
+            "segment:1:301",
+            "segment:1:347"
+          ]
+        }
+      }
+    },
+    {
+      "window": [
+        "segment:1:558",
+        "segment:1:653",
+        "segment:1:678"
+      ],
+      "core": [
+        8205,
+        9155
+      ],
+      "strict_core": true,
+      "local_seed": {
+        "selected": [
+          "segment:1:558",
+          "segment:1:678"
+        ],
+        "DD": {
+          "value": 7478,
+          "contributors": [
+            "segment:1:558"
+          ]
+        },
+        "GG": {
+          "value": 11988,
+          "contributors": [
+            "segment:1:558"
+          ]
+        },
+        "D": {
+          "value": 8205,
+          "contributors": [
+            "segment:1:678"
+          ]
+        },
+        "G": {
+          "value": 9155,
+          "contributors": [
+            "segment:1:678"
+          ]
+        }
+      },
+      "parent_seed": {
+        "selected": [
+          "segment:1:653"
+        ],
+        "DD": {
+          "value": 7478,
+          "contributors": [
+            "segment:1:653"
+          ]
+        },
+        "GG": {
+          "value": 9155,
+          "contributors": [
+            "segment:1:653"
+          ]
+        },
+        "D": {
+          "value": 7478,
+          "contributors": [
+            "segment:1:653"
+          ]
+        },
+        "G": {
+          "value": 9155,
+          "contributors": [
+            "segment:1:653"
+          ]
+        }
+      },
+      "all_units": {
+        "selected": [
+          "segment:1:558",
+          "segment:1:653",
+          "segment:1:678"
+        ],
+        "DD": {
+          "value": 7478,
+          "contributors": [
+            "segment:1:558",
+            "segment:1:653"
+          ]
+        },
+        "GG": {
+          "value": 11988,
+          "contributors": [
+            "segment:1:558"
+          ]
+        },
+        "D": {
+          "value": 8205,
+          "contributors": [
+            "segment:1:678"
+          ]
+        },
+        "G": {
+          "value": 9155,
+          "contributors": [
+            "segment:1:653",
+            "segment:1:678"
+          ]
+        }
+      }
+    },
+    {
+      "window": [
+        "segment:1:709",
+        "segment:1:775",
+        "segment:1:856"
+      ],
+      "core": [
+        10655,
+        12908
+      ],
+      "strict_core": true,
+      "local_seed": {
+        "selected": [
+          "segment:1:709",
+          "segment:1:856"
+        ],
+        "DD": {
+          "value": 8205,
+          "contributors": [
+            "segment:1:709"
+          ]
+        },
+        "GG": {
+          "value": 13253,
+          "contributors": [
+            "segment:1:856"
+          ]
+        },
+        "D": {
+          "value": 10655,
+          "contributors": [
+            "segment:1:856"
+          ]
+        },
+        "G": {
+          "value": 12908,
+          "contributors": [
+            "segment:1:709"
+          ]
+        }
+      },
+      "parent_seed": {
+        "selected": [
+          "segment:1:709",
+          "segment:1:856"
+        ],
+        "DD": {
+          "value": 8205,
+          "contributors": [
+            "segment:1:709"
+          ]
+        },
+        "GG": {
+          "value": 13253,
+          "contributors": [
+            "segment:1:856"
+          ]
+        },
+        "D": {
+          "value": 10655,
+          "contributors": [
+            "segment:1:856"
+          ]
+        },
+        "G": {
+          "value": 12908,
+          "contributors": [
+            "segment:1:709"
+          ]
+        }
+      },
+      "all_units": {
+        "selected": [
+          "segment:1:709",
+          "segment:1:775",
+          "segment:1:856"
+        ],
+        "DD": {
+          "value": 8205,
+          "contributors": [
+            "segment:1:709"
+          ]
+        },
+        "GG": {
+          "value": 13253,
+          "contributors": [
+            "segment:1:856"
+          ]
+        },
+        "D": {
+          "value": 10655,
+          "contributors": [
+            "segment:1:775",
+            "segment:1:856"
+          ]
+        },
+        "G": {
+          "value": 12908,
+          "contributors": [
+            "segment:1:709",
+            "segment:1:775"
+          ]
+        }
+      }
+    }
+  ],
+  "unconsumed_by_first_nine": [
+    "segment:1:937",
+    "segment:1:989"
+  ],
+  "last_window_if_two_remaining_members_assigned_as_extension": {
+    "window": [
+      "segment:1:709",
+      "segment:1:775",
+      "segment:1:856",
+      "segment:1:937",
+      "segment:1:989"
+    ],
+    "core": [
+      10655,
+      12908
+    ],
+    "strict_core": true,
+    "local_seed": {
+      "selected": [
+        "segment:1:709",
+        "segment:1:856",
+        "segment:1:989"
+      ],
+      "DD": {
+        "value": 8205,
+        "contributors": [
+          "segment:1:709"
+        ]
+      },
+      "GG": {
+        "value": 20221,
+        "contributors": [
+          "segment:1:989"
+        ]
+      },
+      "D": {
+        "value": 11444,
+        "contributors": [
+          "segment:1:989"
+        ]
+      },
+      "G": {
+        "value": 12908,
+        "contributors": [
+          "segment:1:709"
+        ]
+      }
+    },
+    "parent_seed": {
+      "selected": [
+        "segment:1:709",
+        "segment:1:856",
+        "segment:1:989"
+      ],
+      "DD": {
+        "value": 8205,
+        "contributors": [
+          "segment:1:709"
+        ]
+      },
+      "GG": {
+        "value": 20221,
+        "contributors": [
+          "segment:1:989"
+        ]
+      },
+      "D": {
+        "value": 11444,
+        "contributors": [
+          "segment:1:989"
+        ]
+      },
+      "G": {
+        "value": 12908,
+        "contributors": [
+          "segment:1:709"
+        ]
+      }
+    },
+    "all_units": {
+      "selected": [
+        "segment:1:709",
+        "segment:1:775",
+        "segment:1:856",
+        "segment:1:937",
+        "segment:1:989"
+      ],
+      "DD": {
+        "value": 8205,
+        "contributors": [
+          "segment:1:709"
+        ]
+      },
+      "GG": {
+        "value": 20221,
+        "contributors": [
+          "segment:1:989"
+        ]
+      },
+      "D": {
+        "value": 11444,
+        "contributors": [
+          "segment:1:937",
+          "segment:1:989"
+        ]
+      },
+      "G": {
+        "value": 12908,
+        "contributors": [
+          "segment:1:709",
+          "segment:1:775"
+        ]
+      }
+    }
+  },
+  "connector": [
+    "segment:1:1212"
+  ],
+  "following_seed": [
+    "segment:1:1262",
+    "segment:1:1328",
+    "segment:1:1353"
+  ]
+}

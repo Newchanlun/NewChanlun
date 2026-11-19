@@ -1,0 +1,548 @@
+{
+  "candidate": "68f7eb9dfef6b130b270071ffcc8b4d8191c74ed",
+  "snapshot_kind": "9011 final C/D and E/F constructor output",
+  "parent": "center:1:301",
+  "center_record": {
+    "line": 914,
+    "id": "obj3-f52d8b14752f8912d2003439c84c3acc96055e8cb6161bf246b919660a8b91e8"
+  },
+  "parents_with_9_or_more": [
+    "center:1:301"
+  ],
+  "parent_direction": "UP",
+  "parent_seed": [
+    "segment:1:301",
+    "segment:1:347",
+    "segment:1:429"
+  ],
+  "parent_members": [
+    "segment:1:301",
+    "segment:1:347",
+    "segment:1:429",
+    "segment:1:558",
+    "segment:1:653",
+    "segment:1:678",
+    "segment:1:709",
+    "segment:1:775",
+    "segment:1:856",
+    "segment:1:937",
+    "segment:1:989"
+  ],
+  "resume_anchor": {
+    "after_unit_id": "segment:1:989",
+    "offset": "2"
+  },
+  "roles_record": {
+    "line": 915,
+    "id": "obj3-2dcf0cec728624ce8b3b2b6135244d02859029bf247aeb201642eb72d856b96f"
+  },
+  "source_core": [
+    8834,
+    11512
+  ],
+  "source_outer": {
+    "DD": {
+      "contributors": [],
+      "frozen": false,
+      "null_reason": "UPGRADE_PENDING_TB02H",
+      "same_price_witness": [],
+      "value": null
+    },
+    "GG": {
+      "contributors": [],
+      "frozen": false,
+      "null_reason": "UPGRADE_PENDING_TB02H",
+      "same_price_witness": [],
+      "value": null
+    }
+  },
+  "pair": "pair:1:301:1:1262",
+  "pair_record": {
+    "line": 1192,
+    "id": "obj3-78762fe8a2f00b480df6baa69e3966572af0d7ba08a3f9ddbd22f8363f88838a"
+  },
+  "source_pair_status": "PENDING_UPGRADE_TB02H",
+  "source_pair_leaf": null,
+  "source_realization": {
+    "trend": "NOT_ASSERTED_DEFERRED_1426",
+    "upper_center": "NOT_CONSTRUCTED_DEFERRED_1429"
+  },
+  "connector": [
+    "segment:1:1212"
+  ],
+  "following_seed": [
+    "segment:1:1262",
+    "segment:1:1328",
+    "segment:1:1353"
+  ],
+  "units": [
+    {
+      "unit": "segment:1:301",
+      "segment_record": {
+        "line": 99,
+        "id": "obj3-fbb45a48ae028099ea635894d2059970be86fed9b63553aa46d88077f1f1245d"
+      },
+      "assignment_record": {
+        "line": 963,
+        "id": "obj3-4899a42ae146e75b75302f1def705529dc3c28c2d71b9e959dba906f6f6226e3"
+      },
+      "status": "NOT_YET_ASSIGNED",
+      "reason": "UPGRADE_PENDING_TB02H",
+      "assigned_center": null,
+      "left": null,
+      "right": null,
+      "geometric_end": [
+        347,
+        11512
+      ],
+      "first_three_points": [
+        [
+          301,
+          7580
+        ],
+        [
+          308,
+          9110
+        ],
+        [
+          315,
+          8385
+        ]
+      ],
+      "source_direction": "UP",
+      "source_range": [
+        7580,
+        11512
+      ]
+    },
+    {
+      "unit": "segment:1:347",
+      "segment_record": {
+        "line": 112,
+        "id": "obj3-3897c12afbc3bd0a36efebaff018db8d04db00fafc5ed2f32fc966b623f52abf"
+      },
+      "assignment_record": {
+        "line": 964,
+        "id": "obj3-c98e8186ca50783180189bc3c872bfd8b32e6deb1cc6b8c2d5201990f6769aa5"
+      },
+      "status": "NOT_YET_ASSIGNED",
+      "reason": "UPGRADE_PENDING_TB02H",
+      "assigned_center": null,
+      "left": null,
+      "right": null,
+      "geometric_end": [
+        429,
+        8834
+      ],
+      "first_three_points": [
+        [
+          347,
+          11512
+        ],
+        [
+          353,
+          10710
+        ],
+        [
+          359,
+          11216
+        ]
+      ],
+      "source_direction": "DOWN",
+      "source_range": [
+        8834,
+        11512
+      ]
+    },
+    {
+      "unit": "segment:1:429",
+      "segment_record": {
+        "line": 123,
+        "id": "obj3-009719bb85e2cef4e44889015f679469b81b272f98ebed0a04840b9e80ccdaa4"
+      },
+      "assignment_record": {
+        "line": 965,
+        "id": "obj3-6730b05028c3162376f5ad57fb27352b128150f67132caea0dd15b7e28c4d64e"
+      },
+      "status": "NOT_YET_ASSIGNED",
+      "reason": "UPGRADE_PENDING_TB02H",
+      "assigned_center": null,
+      "left": null,
+      "right": null,
+      "geometric_end": [
+        558,
+        11988
+      ],
+      "first_three_points": [
+        [
+          429,
+          8834
+        ],
+        [
+          452,
+          11069
+        ],
+        [
+          458,
+          10264
+        ]
+      ],
+      "source_direction": "UP",
+      "source_range": [
+        8834,
+        11988
+      ]
+    },
+    {
+      "unit": "segment:1:558",
+      "segment_record": {
+        "line": 133,
+        "id": "obj3-25b114022c8ecb1b9428cdc9fb856e68ed12ad4c60573d857bc3cc474ee963ca"
+      },
+      "assignment_record": {
+        "line": 966,
+        "id": "obj3-5d3bff8bfd0102e7b28465724a2c20a88d9d67442fd21da4aabb41cae6bda11a"
+      },
+      "status": "NOT_YET_ASSIGNED",
+      "reason": "UPGRADE_PENDING_TB02H",
+      "assigned_center": null,
+      "left": null,
+      "right": null,
+      "geometric_end": [
+        653,
+        7478
+      ],
+      "first_three_points": [
+        [
+          558,
+          11988
+        ],
+        [
+          601,
+          9211
+        ],
+        [
+          609,
+          9756
+        ]
+      ],
+      "source_direction": "DOWN",
+      "source_range": [
+        7478,
+        11988
+      ]
+    },
+    {
+      "unit": "segment:1:653",
+      "segment_record": {
+        "line": 141,
+        "id": "obj3-50147fa141a8e49ab3f8eeb01dd03b162ecba3dea4a68f39abc021354f0b9057"
+      },
+      "assignment_record": {
+        "line": 967,
+        "id": "obj3-cb972e6c02bfa0df5c21b6b78cb4095bbb3e4e72bf1c1b831778c941b5b95727"
+      },
+      "status": "NOT_YET_ASSIGNED",
+      "reason": "UPGRADE_PENDING_TB02H",
+      "assigned_center": null,
+      "left": null,
+      "right": null,
+      "geometric_end": [
+        678,
+        9155
+      ],
+      "first_three_points": [
+        [
+          653,
+          7478
+        ],
+        [
+          659,
+          8620
+        ],
+        [
+          665,
+          8012
+        ]
+      ],
+      "source_direction": "UP",
+      "source_range": [
+        7478,
+        9155
+      ]
+    },
+    {
+      "unit": "segment:1:678",
+      "segment_record": {
+        "line": 148,
+        "id": "obj3-32cf905cb7d3fe0f6525a4d4d5692869871adc983885345c0ccb05791ce03693"
+      },
+      "assignment_record": {
+        "line": 968,
+        "id": "obj3-852c169884f7459f8705035ead5047ceff7cf9cc0df6bc2a5e4f6a121fceca6b"
+      },
+      "status": "NOT_YET_ASSIGNED",
+      "reason": "UPGRADE_PENDING_TB02H",
+      "assigned_center": null,
+      "left": null,
+      "right": null,
+      "geometric_end": [
+        709,
+        8205
+      ],
+      "first_three_points": [
+        [
+          678,
+          9155
+        ],
+        [
+          685,
+          8440
+        ],
+        [
+          692,
+          8920
+        ]
+      ],
+      "source_direction": "DOWN",
+      "source_range": [
+        8205,
+        9155
+      ]
+    },
+    {
+      "unit": "segment:1:709",
+      "segment_record": {
+        "line": 155,
+        "id": "obj3-f2ba98fc4360a3efdba8fe345714d2fad956e75918e06c83804d93b7a0cd05d6"
+      },
+      "assignment_record": {
+        "line": 969,
+        "id": "obj3-902c9c159fac75ae387b03601a78564fcf422a8637ca01b7c3a9581bc49cb28c"
+      },
+      "status": "NOT_YET_ASSIGNED",
+      "reason": "UPGRADE_PENDING_TB02H",
+      "assigned_center": null,
+      "left": null,
+      "right": null,
+      "geometric_end": [
+        775,
+        12908
+      ],
+      "first_three_points": [
+        [
+          709,
+          8205
+        ],
+        [
+          739,
+          10901
+        ],
+        [
+          746,
+          10240
+        ]
+      ],
+      "source_direction": "UP",
+      "source_range": [
+        8205,
+        12908
+      ]
+    },
+    {
+      "unit": "segment:1:775",
+      "segment_record": {
+        "line": 162,
+        "id": "obj3-aac232fa44dc7546322c61df2e9d998774ac69cc5a41f62708e709e85219d295"
+      },
+      "assignment_record": {
+        "line": 970,
+        "id": "obj3-2b57d49ac7a704c0ea9c104891f141e29e49ecdc9121513f0b9c3fa38d29e9ce"
+      },
+      "status": "NOT_YET_ASSIGNED",
+      "reason": "UPGRADE_PENDING_TB02H",
+      "assigned_center": null,
+      "left": null,
+      "right": null,
+      "geometric_end": [
+        856,
+        10655
+      ],
+      "first_three_points": [
+        [
+          775,
+          12908
+        ],
+        [
+          800,
+          11398
+        ],
+        [
+          806,
+          11922
+        ]
+      ],
+      "source_direction": "DOWN",
+      "source_range": [
+        10655,
+        12908
+      ]
+    },
+    {
+      "unit": "segment:1:856",
+      "segment_record": {
+        "line": 170,
+        "id": "obj3-91937ecc0a4278424c53520907eeb7400bea14b7c997c8466cee66675bc73997"
+      },
+      "assignment_record": {
+        "line": 971,
+        "id": "obj3-0d7be8e533bc0e4bbbf956f486883c0292134a843f15ffb92f5b31d2fa8630e0"
+      },
+      "status": "NOT_YET_ASSIGNED",
+      "reason": "UPGRADE_PENDING_TB02H",
+      "assigned_center": null,
+      "left": null,
+      "right": null,
+      "geometric_end": [
+        937,
+        13253
+      ],
+      "first_three_points": [
+        [
+          856,
+          10655
+        ],
+        [
+          864,
+          12066
+        ],
+        [
+          872,
+          11377
+        ]
+      ],
+      "source_direction": "UP",
+      "source_range": [
+        10655,
+        13253
+      ]
+    },
+    {
+      "unit": "segment:1:937",
+      "segment_record": {
+        "line": 179,
+        "id": "obj3-7e4923ebcda158ee2866e7a49a8069fb64b309312048acdd6139c56cff91f31a"
+      },
+      "assignment_record": {
+        "line": 972,
+        "id": "obj3-cfbc2ac7f2dc0410f2bc77492ae4d6bd652e4bac10cf3005a95606c039dd2ef1"
+      },
+      "status": "NOT_YET_ASSIGNED",
+      "reason": "UPGRADE_PENDING_TB02H",
+      "assigned_center": null,
+      "left": null,
+      "right": null,
+      "geometric_end": [
+        989,
+        11444
+      ],
+      "first_three_points": [
+        [
+          937,
+          13253
+        ],
+        [
+          945,
+          12381
+        ],
+        [
+          953,
+          12908
+        ]
+      ],
+      "source_direction": "DOWN",
+      "source_range": [
+        11444,
+        13253
+      ]
+    },
+    {
+      "unit": "segment:1:989",
+      "segment_record": {
+        "line": 186,
+        "id": "obj3-b24f6e3bf2d587c6c6500d9177ffa53b81aed22425ed90dac5fb52d9dcabdbce"
+      },
+      "assignment_record": {
+        "line": 973,
+        "id": "obj3-6dd40b76dcfcc7d7dc5218e3f07e16f02ac2b9ac9d8ae9054a9a632fed745746"
+      },
+      "status": "NOT_YET_ASSIGNED",
+      "reason": "UPGRADE_PENDING_TB02H",
+      "assigned_center": null,
+      "left": null,
+      "right": null,
+      "geometric_end": [
+        1212,
+        20221
+      ],
+      "first_three_points": [
+        [
+          989,
+          11444
+        ],
+        [
+          996,
+          12735
+        ],
+        [
+          1003,
+          12082
+        ]
+      ],
+      "source_direction": "UP",
+      "source_range": [
+        11444,
+        20221
+      ]
+    },
+    {
+      "unit": "segment:1:1212",
+      "segment_record": {
+        "line": 199,
+        "id": "obj3-f98e90d49857d7208b38f0b5e71c3e775a09f7ee21b07e678781bfb0fbff74ce"
+      },
+      "assignment_record": {
+        "line": 974,
+        "id": "obj3-4f3a878f94e3faf00f0754b9c0b979c08102752d99fe4cb2d74c76161f679500"
+      },
+      "status": "CONNECTOR",
+      "reason": null,
+      "assigned_center": null,
+      "left": "center:1:301",
+      "right": "center:1:1262",
+      "geometric_end": [
+        1262,
+        18093
+      ],
+      "first_three_points": [
+        [
+          1212,
+          20221
+        ],
+        [
+          1219,
+          19521
+        ],
+        [
+          1226,
+          19997
+        ]
+      ],
+      "source_direction": "DOWN",
+      "source_range": [
+        18093,
+        20221
+      ]
+    }
+  ]
+}
