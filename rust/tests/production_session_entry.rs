@@ -1379,7 +1379,7 @@ mod non_history_bound {
         }
     }
 
-    /// 非阻塞 AF_UNIX connect：把监听队列满（Linux 返回 EAGAIN）与 EINPROGRESS 同纳入 `deadline`。
+    /// 路径在 bind 后、listen 前就可见；只在尚未写请求的 connect 阶段等待监听就绪或队列腾位。
     pub(super) fn connect_unix_bounded(
         socket: &Path,
         deadline: Instant,
@@ -1395,28 +1395,33 @@ mod non_history_bound {
         }
         let len = (std::mem::offset_of!(libc::sockaddr_un, sun_path) + bytes.len() + 1)
             as libc::socklen_t;
-        let fd = unsafe {
-            libc::socket(
-                libc::AF_UNIX,
-                libc::SOCK_STREAM | libc::SOCK_NONBLOCK | libc::SOCK_CLOEXEC,
-                0,
-            )
-        };
-        if fd < 0 {
-            return Err(format!(
-                "创建 Unix socket 失败：{}",
-                std::io::Error::last_os_error()
-            ));
-        }
-        let stream = unsafe { UnixStream::from_raw_fd(fd) };
         let left = || {
             deadline
                 .checked_duration_since(Instant::now())
                 .filter(|d| !d.is_zero())
-                .ok_or_else(|| format!("Unix connect 等待监听队列超时：{}", socket.display()))
+                .ok_or_else(|| {
+                    format!(
+                        "Unix connect 等待监听就绪或队列腾位超时：{}",
+                        socket.display()
+                    )
+                })
         };
-        loop {
-            let rem = left()?;
+        let stream = 'connect: loop {
+            left()?;
+            let fd = unsafe {
+                libc::socket(
+                    libc::AF_UNIX,
+                    libc::SOCK_STREAM | libc::SOCK_NONBLOCK | libc::SOCK_CLOEXEC,
+                    0,
+                )
+            };
+            if fd < 0 {
+                return Err(format!(
+                    "创建 Unix socket 失败：{}",
+                    std::io::Error::last_os_error()
+                ));
+            }
+            let stream = unsafe { UnixStream::from_raw_fd(fd) };
             let rc = unsafe {
                 libc::connect(
                     stream.as_raw_fd(),
@@ -1425,60 +1430,56 @@ mod non_history_bound {
                 )
             };
             if rc == 0 {
-                break;
+                break stream;
             }
             let err = std::io::Error::last_os_error();
             match err.raw_os_error() {
                 Some(libc::EINTR) => continue,
-                Some(e) if e == libc::EAGAIN || e == libc::EWOULDBLOCK => {
-                    std::thread::sleep(Duration::from_millis(5).min(rem));
-                }
-                Some(libc::EINPROGRESS) => {
-                    loop {
-                        let ms = left()?
-                            .as_nanos()
-                            .div_ceil(1_000_000)
-                            .max(1)
-                            .min(i32::MAX as u128) as i32;
-                        let mut pfd = libc::pollfd {
-                            fd: stream.as_raw_fd(),
-                            events: libc::POLLOUT,
-                            revents: 0,
-                        };
-                        let n = unsafe { libc::poll(&mut pfd, 1, ms) };
-                        if n < 0 && std::io::Error::last_os_error().kind() == ErrorKind::Interrupted
-                        {
-                            continue;
-                        }
-                        if n <= 0 {
-                            return Err(format!(
-                                "Unix connect poll 超时/失败：{}",
-                                socket.display()
-                            ));
-                        }
-                        let (mut code, mut olen) = (
-                            0 as libc::c_int,
-                            std::mem::size_of::<libc::c_int>() as libc::socklen_t,
-                        );
-                        let r = unsafe {
-                            libc::getsockopt(
-                                stream.as_raw_fd(),
-                                libc::SOL_SOCKET,
-                                libc::SO_ERROR,
-                                (&mut code as *mut libc::c_int).cast(),
-                                &mut olen,
-                            )
-                        };
-                        if r != 0 || code != 0 {
-                            return Err(format!("Unix connect socket error {code}"));
-                        }
+                Some(e)
+                    if e == libc::EAGAIN || e == libc::EWOULDBLOCK || e == libc::ECONNREFUSED => {}
+                Some(libc::EINPROGRESS) => loop {
+                    let ms = left()?
+                        .as_nanos()
+                        .div_ceil(1_000_000)
+                        .max(1)
+                        .min(i32::MAX as u128) as i32;
+                    let mut pfd = libc::pollfd {
+                        fd: stream.as_raw_fd(),
+                        events: libc::POLLOUT,
+                        revents: 0,
+                    };
+                    let n = unsafe { libc::poll(&mut pfd, 1, ms) };
+                    if n < 0 && std::io::Error::last_os_error().kind() == ErrorKind::Interrupted {
+                        continue;
+                    }
+                    if n <= 0 {
+                        return Err(format!("Unix connect poll 超时/失败：{}", socket.display()));
+                    }
+                    let (mut code, mut olen) = (
+                        0 as libc::c_int,
+                        std::mem::size_of::<libc::c_int>() as libc::socklen_t,
+                    );
+                    let r = unsafe {
+                        libc::getsockopt(
+                            stream.as_raw_fd(),
+                            libc::SOL_SOCKET,
+                            libc::SO_ERROR,
+                            (&mut code as *mut libc::c_int).cast(),
+                            &mut olen,
+                        )
+                    };
+                    if r == 0 && code == libc::ECONNREFUSED {
                         break;
                     }
-                    break;
-                }
+                    if r != 0 || code != 0 {
+                        return Err(format!("Unix connect socket error {code}"));
+                    }
+                    break 'connect stream;
+                },
                 _ => return Err(format!("连接 S socket {} 失败：{err}", socket.display())),
             }
-        }
+            std::thread::sleep(Duration::from_millis(5).min(left()?));
+        };
         stream
             .set_nonblocking(false)
             .map_err(|e| format!("恢复阻塞模式失败：{e}"))?;
