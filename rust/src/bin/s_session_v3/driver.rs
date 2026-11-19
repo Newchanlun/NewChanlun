@@ -8840,7 +8840,10 @@ mod tests {
                             &native.conn,
                         );
                     assert!(native.conn.is_autocommit());
-                    native.conn.release_memory().expect("SQLite idle pager reclaim");
+                    native
+                        .conn
+                        .release_memory()
+                        .expect("SQLite idle pager reclaim");
                     let (expected, cold_events, cold_receipt) = from_cold.recv().unwrap();
                     // 回复、回执、全表（含全部节点）逐位相同；owner complete 与冷审计一致。
                     assert_eq!(actual, expected, "第{k}代回复分叉");
