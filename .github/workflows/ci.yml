@@ -332,7 +332,7 @@ jobs:
           free -b
           df -B1 -T .
           du -sx -B1 target 2>/dev/null || true
-          cargo check --all-targets
+          cargo check --all-targets --features research_probes
           free -b
           df -B1 -T .
           du -sx -B1 target 2>/dev/null || true
@@ -437,7 +437,7 @@ jobs:
       # #1563：--no-fail-fast——lib 目标的既有红（m3_partition_synthetic_holds，归 #1487/#1493）
       # 不再让其后的 bin / tests 目标被跳过；本步仍按任一失败判红，不掩盖。
       - name: cargo test — default targets
-        run: ../.github/scripts/run-cargo-with-telemetry.sh cargo test --all-targets --no-fail-fast --jobs "${CI_CARGO_JOBS:-1}"
+        run: ../.github/scripts/run-cargo-with-telemetry.sh cargo test --all-targets --features research_probes --no-fail-fast --jobs "${CI_CARGO_JOBS:-1}"
 
   # #1370：s_session 的 required-features 不在 default/backtest_bin 中启用。
   # 运行正式 S bin 的回归测试，不能只编译或以默认目标的通过代替。
