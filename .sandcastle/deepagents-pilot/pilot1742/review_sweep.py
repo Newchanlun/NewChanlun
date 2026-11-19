@@ -82,6 +82,8 @@ from typing import Any, Protocol
 from .external_review import (
     DEFAULT_IDENTITY,
     IDENTITY_CONFIG,
+    POLICY,
+    REVIEW_CONTRACT,
     STATE_ROOT,
     ExternalReview,
     _git,
@@ -416,6 +418,11 @@ class Sweep:
         marker.write_text(str(time.time()))
         return f"resume-{action}", {"pid": self._launch(number, head, attempt), "attempt": attempt}
 
+    @staticmethod
+    def _resumable(row: dict) -> bool:
+        target = row["target"]
+        return target.get("policy_version") == POLICY and target.get("review_contract") == REVIEW_CONTRACT
+
     def decide(self, pr: dict[str, Any], busy: set[int], running: int, behind: bool) -> tuple[str, dict | None]:
         number, head, base = pr["number"], pr["head"]["sha"], pr["base"]["sha"]
         if number in busy:
@@ -428,7 +435,7 @@ class Sweep:
             return "queued", None
         if final:  # 有结论没发布：受管对账与发布（同一 attempt，key 要求 base 未变）
             row = max(final, key=lambda r: r["target"]["registered_at_ns"])
-            if row["target"].get("base_sha") != base:
+            if row["target"].get("base_sha") != base or not self._resumable(row):
                 return "needs-reconcile", None
             return self._resume_once(number, head, row["target"]["attempt"], "publish")
         if behind:  # 先追平再审：不审一个合入前必然被替换的 head
@@ -454,7 +461,10 @@ class Sweep:
         current = [r for r in runs if r["target"].get("base_sha") == base]
         live = [r for r in current if not r["outcome"]]
         if live:  # 中断：同一 attempt 续跑一次
-            return self._resume_once(number, head, max(r["target"]["attempt"] for r in live), "review")
+            row = max(live, key=lambda r: r["target"]["attempt"])
+            if not self._resumable(row):
+                return "needs-operator", None
+            return self._resume_once(number, head, row["target"]["attempt"], "review")
         attempt = max((r["target"]["attempt"] for r in current), default=0) + 1
         # 子进程在登记前就退出（读 PR 失败、App 身份未就绪、controller 不干净）时同一 attempt 会原样再派；
         # 退避一段时间，免得每轮都派一个必死的子进程。

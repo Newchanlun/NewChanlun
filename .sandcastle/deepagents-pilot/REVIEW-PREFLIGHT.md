@@ -36,11 +36,11 @@ python3 -I .sandcastle/deepagents-pilot/review_preflight.py \
 
 宿主部署的补丁代理可显式使用 `--proxy-receipt-dir <私有收据目录>`；它也在受总 deadline 约束的子进程中读取，防止文件读取阻塞拖住宿主。原 `--proxy-log-dir`、`--proxy-log-container` 和 `--proxy-container-log-dir` 仍表示**旧文本日志**，不能将收据路径填进去冒充迁移。这些旧入口不读取文本并返回无证明，不静默切换格式。
 
-容器外始终只有 `{session, complete_stable, routes}`。`complete_stable=true` 表示生产者收据已封口并原子发布，不再表示两次文件大小相同。routes 是全部有序 HTTP 尝试的白名单枚举或 `other`，保留重复项；每项都必须满足该模型的原 allowlist。宿主继续拒绝多余字段、重复 JSON 字段、不匹配 session、自由文本和异常退出。不存在从失败收据降级回文本的路径。报告的既有 `log_found` 字段表示取得可用路由证据，不证明文本文件存在。
+容器外始终只有 `{session, complete_stable, routes}`。`complete_stable=true` 表示生产者收据已封口并原子发布，不再表示两次文件大小相同。routes 是全部有序 HTTP 尝试的白名单枚举或 `other`，保留重复项；两路 GPT 的每次尝试都必须是 `codex@chatgpt.com`。宿主继续拒绝多余字段、重复 JSON 字段、不匹配 session、自由文本和异常退出。不存在从失败收据降级回文本的路径。报告的既有 `log_found` 字段表示取得可用路由证据，不证明文本文件存在。
 
 ### 成功终态之后仍须读到 EOF
 
-预检收到 `response.completed` / `response.incomplete` 后继续读完流，不能立刻关闭连接。CLIProxy v8.0.63 的 Claude 路径仍需完成上游帧与 lifecycle 收尾；提前断开会取消执行，留下 nonce 目录但没有收据。消费者使用标准库 `HTTPResponse.read()`（不传 `amt`）验证 Content-Length / chunked 完整性，不把逐行迭代结束当作完整响应。整个 HTTP 往返在独立子进程组内执行，连接、响应头、成功体和错误体共用父进程传入的绝对工作期限。父进程通过 `run_bounded` 到期终止并 wait 回收进程组，不依赖 socket 空闲超时或成功体阶段的计时器。密钥仅通过 stdin 管道传入，stdout 仅返回固定字段的脱敏结果，stderr 不进入报告。只有 HTTP 响应体完整读完、未超总 deadline、无后续错误或冲突终态，往返检查才成功；路由检查仍独立要求完整收据和全部 attempt 通过 allowlist。终态之后一直不结束的流仍按原总 deadline 拦截。
+预检要求 HTTP 200、唯一的 `response.completed`、内层 `response.status=completed` 和完整 HTTP 消息。缺响应对象、`response.incomplete`、任何非 null 错误或重复终态都拦截。收到终态后继续读完流，避免客户端提前断开而只留下 nonce 目录、不产生收据。消费者使用标准库 `HTTPResponse.read()`（不传 `amt`）验证 Content-Length / chunked 完整性，不把逐行迭代结束当作完整响应。整个 HTTP 往返在独立子进程组内执行，连接、响应头、成功体和错误体共用父进程传入的绝对工作期限。父进程通过 `run_bounded` 到期终止并 wait 回收进程组，不依赖 socket 空闲超时或成功体阶段的计时器。密钥仅通过 stdin 管道传入，stdout 仅返回固定字段的脱敏结果，stderr 不进入报告。只有 HTTP 响应体完整读完、未超总 deadline、无后续错误或冲突终态，往返检查才成功；路由检查仍独立要求完整收据和全部 attempt 通过 allowlist。终态之后一直不结束的流仍按原总 deadline 拦截。
 
 #2055 的离线回归使用原生 Claude executor、首次 503 后重试和受控迟到的终态帧尾：客户端读终态行就断开时无收据；读完 EOF 时产生两条 Claude 路线。生产者封口条件未放宽，真实路线仍须以新正式预检的收据为证。
 
@@ -61,6 +61,8 @@ python -m ruff check --select F,E9,B,I .
 Go `-race` 测试包含实际 `/v1/responses` handler、原生 Kimi/Claude executor 和失败后重试；只将出站网络替换为本地 fake，分别导出双 attempt 成功收据。Python 直接消费这些 Go 产物，验证成功路径及 `other`、未收尾、正文伪造尾部的拒绝路径。未提供 `CLIPROXY_OFFLINE_RECEIPTS` 时跨语言测试会 skip，不能把这种运行报告为端到端通过。
 
 ### 生产者支持范围与完成合同
+
+下列固定构建用于复跑 #2055 的历史 Kimi/Claude 生产者回归。正式 GPT 预检需要含原生 Codex 收据支持的代理候选；不要部署本节的历史构建来验 GPT。
 
 - 仅显式开启收据目录、且请求头为严格 `preflight-<UUIDv4>` 的 `POST /v1/responses` 启用。普通 session 的路由、传输和返回行为保持原样。收据功能未开启时不产生证据。
 - 本次固定源码仅允许具体的原生 `KimiExecutor`、`ClaudeExecutor`、`AntigravityExecutor`，不靠可冒名的 `Identifier()` 判覆盖。Antigravity 的真实尝试可被记录，但 Opus 的原 allowlist 仍拒绝它。Codex、插件 executor、count-tokens、裸 `HttpRequest`、非标准自定义 RoundTripper、WebSocket/其他入口不在本补丁支持范围，不能得到成功证明。
@@ -91,8 +93,8 @@ Go `-race` 测试包含实际 `/v1/responses` handler、原生 Kimi/Claude execu
 |---|---|---|
 | `checkout_root_free_space` | PR1866 A1/A2、PR1868 A3（f9）：快照需 2.60GB，HOME 只剩 1.40–1.65GB | 逐字节复刻 `prepare_review` 的快照字节公式，要求 checkout_root 所在卷剩余 ≥ 2 份（两位 reviewer） |
 | `checkout_root_container_mount` | PR1868 A1：checkout 在未共享进 colima 的路径，容器里看到的是 VM 本地空目录 | 在 checkout_root 写一次性 nonce，用审阅镜像 `--network none --read-only` 只读 bind 挂载 checkout_root 读回；读不到或不一致即拦。探针目录与容器随即删除，删不掉报 `probe_cleanup`；`docker run` 超时或 docker 自身出错（退出 125）时，daemon 可能在 `rm -f` 之后才建出容器，也报 `probe_cleanup`（回收未确认） |
-| `route:<model>` | PR1883 A1：claude-opus-5-5 新会话被选到 Antigravity | 旧文本始终拦截；可信收据的每次尝试要求 Sol=`codex@chatgpt.com`，Kimi=`kimi@api.kimi.com` 或 `kimi-ai@api.kimi.ai`（CLIProxy 在国内、国际两个上游间切换），Opus=`claude@api.anthropic.com`；只探测 `external_review.MODELS` 当前的两位。没有完整收据也拦 |
-| `roundtrip:<model>` | 同上，上游 400 `tool_choice ... not supported` | 每家一次最小 `/v1/responses` 往返，带 tools、`tool_choice=auto`、JSON 输出格式、新会话，必须读到 `response.completed`/`incomplete` |
+| `route:<model>` | 旧会话被派到非预期上游 | 两位 GPT 都要求每次尝试有可信收据且是 `codex@chatgpt.com`；旧文本和缺收据都拦截 |
+| `roundtrip:<model>` | 上游 400、响应不完整或线程未退出 | 每位一次最小 `/v1/responses` 往返；HTTP 200、唯一完成终态、内层完成无错误、HTTP 消息完整读完 |
 | `credential:codex-host` | #1323：宿主缺 `CLIPROXY_LOCAL_KEY`，回合在调模型前报 `Missing environment variable` | 去掉该环境变量后，按 `$CODEX_HOME/config.toml` 的 `model_providers.cliproxy-local` 取 key（`auth.command` / `env_key`）。provider 配置是否合法以宿主自己的 codex 为准：先离线跑一次 `codex features list`（约 50ms，不发请求），Codex 拒绝加载就拦（如 `auth` 与 `env_key` 并存），报告只取 Codex 报错里的字段名。两家往返都用这把 key，所以通过即证明没有该变量时 provider 也能完成往返 |
 
 模型探测每家只发一次、提示极短（effort=low），这是预检唯一的模型花费。
@@ -105,7 +107,7 @@ Go `-race` 测试包含实际 `/v1/responses` handler、原生 Kimi/Claude execu
 
 ## 局限
 
-- 预检是某一时刻的快照。CLIProxy 是 fill-first + 会话亲和，正式 attempt 的新会话仍可能在几秒后被选到别的凭据；路由的根治在共享 proxy 配置（当前已用 `oauth-excluded-models.antigravity` 排除两个 Claude 模型），预检只负责发现回归。
+- 预检是某一时刻的快照。CLIProxy 是 fill-first + 会话亲和，正式 attempt 的新会话仍可能在几秒后被选到别的凭据；预检只核本次路线；它不能替代实际发审后的模型与会话证据。
 - JSON 围栏类失败需要真实模型完整输出才能复现，预检不覆盖。
 - 以下检查没有对应的真实失败，已移出本版、留作后续单独 PR：正式 worker 的 key 来源（进程环境 / launchctl）、实际服务模型（Claude fallback 到 4.8）、CLIProxy `request-log` 开关、目标 commit 缺失时的 `needs_source_sync`、空间不足时 VM 持有已删除文件的诊断、宿主 `base_url` 与预检代理是否同一端点。
 

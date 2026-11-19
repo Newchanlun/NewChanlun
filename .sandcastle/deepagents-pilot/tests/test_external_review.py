@@ -2230,8 +2230,8 @@ def test_prompt_asks_for_standalone_diff_that_patch_read_accepts():
 
 # ---------------- Codex 额度耗尽时的临时组合（Kimi + Opus） ----------------
 
-LEGACY_MODELS = ("gpt-6.1-sol", "claude-opus-5-5")
-LEGACY_POLICY = "external-pr-v1"
+LEGACY_MODELS = ("kimi-k3.1-pro", "claude-opus-5-5")
+LEGACY_POLICY = "external-pr-v1-kimi"
 
 
 def _contract(policy, models):
@@ -2244,10 +2244,10 @@ def _use_contract(monkeypatch, models, policy):
     monkeypatch.setattr(module, "REVIEW_CONTRACT", _contract(policy, models))
 
 
-def test_fallback_pair_is_two_families_under_its_own_contract():
-    assert MODELS == ("kimi-k3.1-pro", "claude-opus-5-5")
-    assert len({model.split("-")[0] for model in MODELS}) == len(MODELS) == 2
-    assert module.POLICY == "external-pr-v1-kimi" != LEGACY_POLICY
+def test_distinct_gpt_pair_has_its_own_contract():
+    assert MODELS == ("gpt-6.2-sol", "gpt-6.2-astra")
+    assert len(set(MODELS)) == len(MODELS) == 2
+    assert module.POLICY == "external-pr-v2-gpt62" != LEGACY_POLICY
     assert module.REVIEW_CONTRACT == _contract(module.POLICY, MODELS) != _contract(LEGACY_POLICY, LEGACY_MODELS)
 
 
@@ -2257,10 +2257,14 @@ def test_pass_under_legacy_contract_is_not_reused_after_switch(lane, env, monkey
     first = lane.review_pr(1810)
     assert first["verdict"] == "PASS" and [r["model"] for r in first["reviews"]] == list(LEGACY_MODELS)
     _use_contract(monkeypatch, *current)
-    _advance_main(lane, env)
-    result = lane.review_pr(1810)
-    assert "reused_from" not in result and [r["model"] for r in result["reviews"]] == list(MODELS)
-    assert result["target"]["policy_version"] == "external-pr-v1-kimi"
+    with pytest.raises(IdentityError, match="旧合同占用"):
+        lane.review_pr(1810, 1)
+    assert lane.status(1810)[0]["outcome"] == first
+    second = lane.review_pr(1810, 2)
+    assert [(r["model"], r["verdict"]) for r in second["reviews"]] == [(m, "PASS") for m in MODELS]
+    assert len({r["session_id"] for r in second["reviews"]}) == 2
+    assert "reused_from" not in second
+    assert second["target"]["policy_version"] == "external-pr-v2-gpt62"
     assert sorted((lane.state_root / "runs" / "launches").read_text().splitlines()[2:]) == sorted(MODELS)
 
 

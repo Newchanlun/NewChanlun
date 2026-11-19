@@ -120,25 +120,23 @@ test("路由门：模型不得带 mf/、yd/ 等中转前缀，provider 只能是
   assert.ok(providerOverrides().every((item) => !item.includes(fixtureKey)));
 });
 
-test("deepagents/review 审查员与控制器 MODELS 相同、两家族不同，且无论主模型是否被覆盖都能派发", () => {
+test("deepagents/review 审查员与控制器 MODELS 相同、是不同的 GPT 模型，且无论主模型是否被覆盖都能派发", () => {
   const source = readFileSync(join(__dirname, "deepagents-pilot/pilot1742/external_review.py"), "utf8");
   const declared = /^MODELS = \(([^)]*)\)$/m.exec(source)?.[1].split(",").map((item) => item.trim().replace(/^"|"$/g, ""));
   assert.deepEqual(declared, [...EXTERNAL_REVIEW_MODELS]);
-  assert.deepEqual(EXTERNAL_REVIEW_MODELS, ["kimi-k3.1-pro", "claude-opus-5-5"]);
+  assert.deepEqual(EXTERNAL_REVIEW_MODELS, ["gpt-6.2-sol", "gpt-6.2-astra"]);
   assert.ok(ALLOWED_MODELS.includes(MODEL) && ALLOWED_MODELS.length === new Set(ALLOWED_MODELS).size);
   const code = `
     import assert from "node:assert/strict";
     import {assertRoute, MODEL} from "./.sandcastle/codex-child.ts";
     import {codexWorker} from "./.sandcastle/codex-route.mts";
-    import {modelFamily} from "./.sandcastle/docker-acceptance.mts";
-    assert.deepEqual(["kimi-k3.1-pro", "claude-opus-5-5"].map(modelFamily), ["moonshot", "anthropic"]);
-    for (const model of ["kimi-k3.1-pro", "claude-opus-5-5", MODEL]) {
+    for (const model of ["gpt-6.2-sol", "gpt-6.2-astra", MODEL]) {
       assert.doesNotThrow(() => assertRoute(model));
       const built = codexWorker({docker: true, model}).buildPrintCommand({prompt: "x", dangerouslySkipPermissions: true});
       assert.ok(built.command.includes(" -m '" + model + "'") && built.command.includes('model_provider="cliproxy-local"'));
     }
     for (const model of ["mf/kimi-k3.1-pro", "yd/kimi-k3.1-pro", "moonshot/kimi-k3.1-pro"]) assert.throws(() => assertRoute(model), /中转前缀/);
-    for (const provider of ["openai", "kimi", "moonshot"]) assert.throws(() => assertRoute("kimi-k3.1-pro", provider), /cliproxy-local/);
+    for (const provider of ["openai", "kimi", "moonshot"]) assert.throws(() => assertRoute("gpt-6.2-sol", provider), /cliproxy-local/);
     assert.throws(() => assertRoute("kimi-k3.1-pro-highspeed"), /模型只能是/);
     console.log(MODEL);
   `;

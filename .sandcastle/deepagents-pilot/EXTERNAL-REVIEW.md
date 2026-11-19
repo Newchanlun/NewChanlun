@@ -18,7 +18,7 @@ export PYTHONPATH=.sandcastle/approval-signing:.sandcastle/deepagents-pilot
 
 审阅冻结 base、head 和 merge-base，范围为 `merge_base..head` 的完整修改，不只审最后一次提交。对象必须已在当前 controller 的本地对象库；缺失时返回 `needs_source_sync`，由原 owner 按其既有同步授权补齐。入口和 reviewer 都不 fetch。
 
-两位 reviewer 固定请求 `external_review.MODELS` 中的两个模型（常规为 `gpt-6.1-sol`、`claude-opus-5-5`；当前是下节的临时组合 `kimi-k3.1-pro`、`claude-opus-5-5`），各自独立 checkout、进程和新 session，不要求作者自报模型。模型字段记录 launcher 所选路由；实际上游模型身份仍须由独立路由证据确认。
+两位 reviewer 固定请求 GPT‑6.2 Sol（`gpt-6.2-sol`）和 Astra（`gpt-6.2-astra`）。两者同属 GPT，但各自使用独立 checkout、进程和新 session，必须对同一冻结 base、head、merge-base 各交一份真实有效的 PASS，才能由现有 GitHub App 发布 success。模型字段记录 launcher 的请求；[预检](REVIEW-PREFLIGHT.md)用代理的可信收据核实实际路由。
 
 ## 指定 Docker context
 
@@ -28,25 +28,11 @@ export PYTHONPATH=.sandcastle/approval-signing:.sandcastle/deepagents-pilot
 
 同一部署的派发、恢复与回收须使用同一 context；旧 run 没有持久化 context 绑定，不能换 daemon 后接管。部署新代码后，部署 owner 必须按新 controller head 重新绑定 Docker 准入，不能沿用旧 controller head 的验收。隔离 fake 测试不代替这一步。
 
-## Codex 额度耗尽时的临时组合
+## 换用 GPT 双臂后的旧记录
 
-触发条件：CLIProxy 的 Codex/OpenAI 上游没有可用额度，`gpt-6.1-sol` 请求全部失败（2026-11-07 实测 401，唯一账号额度为 0，reset_at=2026-11-11T01:00Z），此时任何新审都无法得到两份 PASS。
+新 attempt 使用合同 `external-pr-v2-gpt62`；模型与提示词一并进入 `REVIEW_CONTRACT`。旧合同的 PASS 不能沿用，旧合同的 STALE 不迁移；旧 run 的回执、已发布结论和 BLOCK 证据保留。原 base/head 上的新 attempt 使用下一个未占用的编号。自动 sweep 不把旧合同中断的 run 当成 GPT 派发：待发布终态交对账，未完结的 run 交操作员。
 
-临时组合是 `MODELS = ("kimi-k3.1-pro", "claude-opus-5-5")`、`POLICY = "external-pr-v1-kimi"`。两位仍属不同家族（moonshot 与 anthropic），仍要两份 PASS 才发 success。`kimi-k3.1-pro` 经同一个 CLIProxyLocal 走 OAuth 直连，CLIProxy 在国内 `kimi@api.kimi.com` 与国际 `kimi-ai@api.kimi.ai` 两个上游间切换，预检两者都认。
-
-POLICY 与模型都进了 `REVIEW_CONTRACT`，换组合后旧组合的 PASS 不能沿用，旧组合的 STALE 也不能 `migrate-stale`，都须在新组合下重审。旧 run 里已退役 reviewer 留下的派发与 BLOCK 证据仍计入完结与否决判断：控制器按 run 目录里实有的 worker 读，不只读当前 `MODELS`。
-
-kimi 不带 `--output-schema`（#1968）。带 schema 时它把开场白（「我先读 diff」）当成终答，零工具调用就结束回合；PR #1966 上实测带 schema 3/3 零调用，不带 schema、提示词要求只输出 JSON 时 3/3 执行 9–17 条只读命令并给出可解析的结论。名单统一在 `../codex-child.ts` 的 `PROMPT_JSON_MODELS`（`external-review-worker.mts` 保留再导出），表内模型的提示词末尾追加 `PROMPT_JSON_INSTRUCTION`，回执的 `output_contract` 记 `prompt` 或 `schema`。opus 照旧带 schema。最终消息若整段恰好是一个 ```json（或无语言标注）围栏，先剥掉围栏再解析，TS（`unwrapJsonFence`）与 Python（`unwrap_json_fence`）同一规则；围栏外有其他文字、有多个围栏或 text 不是字符串，仍记 FAILED（fail closed）。
-
-部署：Sandcastle 主模型另行切换，设 `SANDCASTLE_MAIN_MODEL=kimi-k3.1-pro`。审查员派发不依赖主模型取值，`.sandcastle/codex-child.ts` 的 `EXTERNAL_REVIEW_MODELS` 总在 `ALLOWED_MODELS` 里。部署后照常先跑 `review_preflight.py`，它探测的就是当前两位。
-
-到期条件：Codex 上游恢复（`gpt-6.1-sol` 预检的 `route` 与 `roundtrip` 都通过）后换回常规组合。改这三处，保持一致（测试核对）：
-
-- `pilot1742/external_review.py`：`MODELS = ("gpt-6.1-sol", "claude-opus-5-5")`、`POLICY = "external-pr-v1"`；
-- `review_preflight.py`：`MODELS` 同上；
-- `../codex-child.ts`：`EXTERNAL_REVIEW_MODELS = ["gpt-6.1-sol", "claude-opus-5-5"]`。
-
-同时改回测试里写死的临时组合（`tests/test_external_review.py` 的 `test_fallback_pair_*`、`tests/test_review_preflight.py` 的 `KIMI`/`OFFICIAL`、`../codex-child.test.ts` 的审查员用例）。换回同样会改变合同：本组合下的 PASS 不沿用，本组合的 STALE 不迁移。
+审查模型不依赖 `SANDCASTLE_MAIN_MODEL`。两位 GPT 走原有结构化输出 schema；Kimi 的历史 `prompt` 模式仍可用于读旧回执。Claude 或 Kimi 不再作为新正式审查的替补；任一 GPT 路由未过预检就不启动新 attempt。
 
 ## 启用前完成部署验收
 

@@ -184,6 +184,32 @@ def test_unpublished_outcome_is_resumed_once_then_needs_reconcile(lane):
     assert acts(sweep.tick()) == ["needs-reconcile"]
 
 
+@pytest.mark.parametrize(("published", "verdict", "expected"), [
+    (False, None, "needs-operator"),
+    (False, "FAILED", "needs-reconcile"),
+    (True, "FAILED", "done"),
+])
+def test_old_contract_is_never_dispatched_as_a_gpt_resume(lane, monkeypatch, published, verdict, expected):
+    from pilot1742 import external_review
+
+    sweep, host, _ = make(lane, run=False)
+    with monkeypatch.context() as legacy:
+        _external_review._use_contract(legacy, _external_review.LEGACY_MODELS, _external_review.LEGACY_POLICY)
+        target = lane.target(1810, 1)
+    folder = lane.state_root / "runs" / target.key
+    if verdict:
+        outcome = {"verdict": verdict}
+        if published:
+            outcome["publication"] = {"status": "error"}
+        (folder / "outcome.json").write_text(json.dumps(outcome))
+    before = list(lane.status(1810))
+    for _ in range(2):
+        assert acts(sweep.tick()) == [expected]
+    assert not host.spawned
+    assert lane.status(1810) == before
+    assert external_review.POLICY == "external-pr-v2-gpt62"
+
+
 def test_explicit_reattempt_by_operator_is_left_alone(lane):
     sweep, host, _ = make(lane)
     sweep.tick()
