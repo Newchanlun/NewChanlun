@@ -13,6 +13,7 @@ pub(crate) use exact_command::{check_condition_semantics, check_required_capabil
 mod finance;
 mod finance_transport;
 mod financial_reader_resources;
+mod fx_valuation;
 mod phase_trace;
 mod quantity_calibration;
 mod service;
@@ -39,6 +40,8 @@ pub fn open_durable_db(
 
 #[cfg(test)]
 mod domain_event_tests;
+#[cfg(test)]
+mod fx_valuation_tests;
 #[cfg(test)]
 mod quantity_calibration_tests;
 #[cfg(test)]
