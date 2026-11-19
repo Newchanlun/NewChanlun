@@ -149,6 +149,16 @@ tar -xpf /Volumes/AgentStorage/restart-20261107/slim/remaining-archive/history14
 旧报告、roster 与推论中的原路径保持历史原文，按本批来源提交恢复。ADR 0039/0048 的历史引文保留，当前产品名分指向 ADR 0004；ADR 0058 的 AT-14 专用报告 schema、路径及消费者合同不在本批改动范围。移除的是历史纪律原件，不是整个 docs/agents 或产品报告树。
 
 
+
+## #1742：#1954 历史报告
+
+本批迁出 13 件历史过程稿，原路径和文件模式不变。仍被 goal 事件、已结算谱系、产品或在用检查引用的证据留仓。不改原草稿未结事项。
+
+- 来源提交：`b9d898dccf46c2a716115eaa1215bc39c458a959`。
+- 归档：`/Volumes/AgentStorage/restart-20261107/slim/1954-reconcile.AjX4Gc/originals.tar`。同目录 `manifest.tsv` 列出精确原路径、字节数和模式。
+- 恢复：用 `tar -xpf <归档包> -C <空目录>`，或按清单中的原路径用 `git show b9d898dccf46c2a716115eaa1215bc39c458a959:<原路径>` 读取单件。
+
+
 ## 历史层归档（#1920）
 
 本批已删除 **114 件**：`.auto-memory-snapshot/` 48 件、`.rtas/review-results/` 12 件、`chanlun/harness/` 54 件（其中 vendored harness-engineering 51 件）。以下清单是本 PR 相对 main 的精确删除集合；现役 watcher roster 保留。
