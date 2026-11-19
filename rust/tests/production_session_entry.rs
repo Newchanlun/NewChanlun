@@ -1161,3 +1161,73 @@ fn launcher_refuses_incompatible_history_simulation_assemblies_before_writing() 
         }
     }
 }
+
+/// #1407 C3 R3：非历史模拟 `/1` 装配恢复父版行为：
+/// 1. 坏非历史 X `profile_revision` 仍由非关键 X 自行拒绝退出，S/E/B 照常启动存活；
+/// 2. launcher 不在 `load_manifest` 预读 `economic.manifest`，未给正常非历史配置新增前置依赖。
+#[test]
+fn non_history_preserves_parent_startup_and_x_degradation() {
+    // 1) 非历史配置 + 坏 X revision：S/E/B 正常启动，X 作为非关键进程自行拒绝，launcher 不提前整组退出。
+    let space = Space::new();
+    let source = declaration("TestOnlyStructure", DECLARED_NS);
+    let s_db = s_init_v3(&space, Some(&source));
+    let limits = anchor(&s_db);
+    let bad_xp = write_json(
+        &space.path("x-bad-non-history.json"),
+        &json!({
+            "profile_revision": "x-execution-profile/99",
+            "mode": "simulation",
+            "endpoint": null,
+            "tb09_fingerprint": null,
+            "credential_scope": {"env": CREDENTIAL_KEY, "file": space.path("credential.txt")}
+        }),
+    );
+    let manifest = launcher_manifest(&space, "simulation", &source, &s_db, &limits, &bad_xp);
+    let mut launcher = spawn_launcher(&manifest);
+    eventually("S socket", || space.path("s.sock").exists());
+    eventually("E socket", || space.path("e.sock").exists());
+    eventually("B socket", || space.path("b.sock").exists());
+    eventually("X 非关键退出后仅 S/E/B 存活", || {
+        let names: Vec<String> = domain_children(launcher.id())
+            .into_iter()
+            .map(|(n, _)| n)
+            .collect();
+        names.iter().any(|n| n == "s_structure_session")
+            && names.iter().any(|n| n == "e_economic_session")
+            && names.iter().any(|n| n == "b_chong_session")
+            && !names.iter().any(|n| n == "x_execution_session")
+    });
+    assert!(
+        launcher.try_wait().unwrap().is_none(),
+        "坏非历史 X 不应导致整组 launcher 提前退出"
+    );
+    assert_eq!(stop(&mut launcher).code(), Some(0));
+    let stderr = launcher_stderr(&mut launcher);
+    assert!(
+        stderr.contains("VersionUnsupported"),
+        "X 应报 VersionUnsupported：{stderr}"
+    );
+    assert!(
+        stderr.contains("\"domain\":\"X\"") && stderr.contains("\"critical\":false"),
+        "launcher 应记录非关键 X 退出：{stderr}"
+    );
+
+    // 2) 非历史配置 + 缺失 economic.manifest：load_manifest 不预读 E 配置，先建 state_dir 再由 E init 报错。
+    let space2 = Space::new();
+    let source2 = declaration("TestOnlyStructure", DECLARED_NS);
+    let s_db2 = s_init_v3(&space2, Some(&source2));
+    let limits2 = anchor(&s_db2);
+    let xp2 = x_profile(&space2, "simulation", None, Some("tb09-sentinel"), false);
+    let manifest2 = launcher_manifest(&space2, "simulation", &source2, &s_db2, &limits2, &xp2);
+    std::fs::remove_file(space2.path("economic.json")).unwrap();
+    let out = run_refusal(
+        Command::new(launcher_bin())
+            .arg("--manifest")
+            .arg(&manifest2),
+    );
+    assert!(!out.status.success());
+    assert!(
+        space2.path("launcher-state").is_dir(),
+        "非历史配置不应在 load_manifest 预读 economic.manifest"
+    );
+}

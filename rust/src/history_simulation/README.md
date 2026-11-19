@@ -211,47 +211,80 @@ Q 来源需获 `QueryCommand` 权限；启用已有 `EconomicReadOpen/Page/Close
 
 ## C3 升级、退场合同候选与迁移说明（待独立评审与主控裁定）
 
-> **审签状态：候选条文（尚未接受）。** 前次 C2 裁定（`#1407#issuecomment-6749476649`）仅退掉 `#1942` 数值编码的 `/1` 历史模拟写入口，不授权自动退掉 `/2` 写入口；本节条文须经独立非作者评审与主控显式裁定后方视为生效合同。
+> **审签状态：R3 候选条文（尚未批准 /2 退场）。** 前次 C2 裁定（`#1407#issuecomment-6749476649`）仅退掉 `#1942` 数值编码的 `/1` 历史模拟写入入口，未授权自动退掉 `/2` 写入入口；本节条文须经独立非作者评审与主控显式裁定后方视为生效合同。
 
 ### 1. 无法原地保全 `FIN/5 + X/2` 续写的证据依据
 
-核查父头 `#2081`（`eabdfb02013135db78d21cb2d8a47dec0a71a555`）真实 `/2` 样本（`signed-c2-t3/a/manifest.json`、`input.json`）与 `tb03b-finance/5` 实现后，旧档缺少能证明 E 授权过实装 `Model` 内容的权威绑定：
+核查父头 `#2081`（`eabdfb02013135db78d21cb2d8a47dec0a71a555`）真实 `/2` 样本（`signed-c2-t3/a/manifest.json`、`input.json`）与 `tb03b-finance/5` 实现后，旧 `/5` 协议自身无法证明 E 授权过具体实装 `Model` 内容：
 
-1. **E manifest 无实装模型绑定**：`signed-c2-t3/a/manifest.json` 仅有 `finance.schema_revision = "tb03b-finance/5"` 与 `clock.kind = "logical-bar/1"`，不含 `history_simulation_source`。
-2. **冻结 `model_ref.content_hash` 为旧口径名称摘要**：`signed-c2-t3/a/input.json` 的 `exact_release.model_coverage.model_ref.content_hash` 为 `e28cb65bf917085d648735d192848c2d1a9d460f0b61c3c57144055770f925cb`（即 `sha256("\"history-sim/bar-batch-known-frontier/1@oracle-1\"")`），只覆盖模型名与版本串，不覆盖费率、滑点、tick/量/金额量子、标的或撮合参数。
-3. **FIN/5 `ExactCommand` 不含 `model_ref`**：14 字段命令体与 `command_hash` 均未承诺实装 `Model` 内容。
-4. **X 自持配置不等于 E 授权**：旧进程曾运行过或 X 本地持有 `x-profile.json`，都不能证明 E 授权过该模型（C3 反例 `06a767ab` 已证在 `FIN/5 + X/2` 下仅将 X 的 maker 费率分子 `1 → 10` 即可静默产生错费成交）。
-5. **不伪造兼容**：不得给 `/3` 增加可选 `model_ref`、不得回填或重签旧 `/5` 命令、不得靠事后拆换旧二进制或仅改版本字符串假装兼容。
+1. **原样本 `model_ref.content_hash` 仅为名/版摘要**：`signed-c2-t3/a/input.json` 的 `exact_release.model_coverage.model_ref.content_hash` 为 `e28cb65bf917085d648735d192848c2d1a9d460f0b61c3c57144055770f925cb`（即 `sha256("\"history-sim/bar-batch-known-frontier/1@oracle-1\"")`），只覆盖模型名与版本串，不覆盖费率、滑点、tick/量/金额量子、标的或撮合参数。
+2. **FIN/5 wire 自身不绑定模型实装**：14 字段 `ExactCommand` 与 `command_hash` 均不含实装 `Model` 摘要；`signed-c2-t3/a/manifest.json` 亦无实装模型绑定字段。注：这证明的是 `/5` wire 自身不绑定实装模型，而非断言所有旧档外部均无任何历史证据。
+3. **X 自持配置不等于 E 授权**：旧进程曾运行过或 X 本地持有 `x-profile.json`，都不能证明 E 授权过该实装模型（C3 反例 `06a767ab` 已证在 `FIN/5 + X/2` 下仅将 X 的 maker 费率分子 `1 → 10` 即可静默产生错费成交）。
+4. **不伪造兼容、不放宽 `/3`**：不得给 `/3` 增加可选 `model_ref`、不得回填或重签旧 `/5` 命令、不得靠事后拆换旧二进制或仅改版本字符串假装兼容。
 
-因此，本候选采用最小升级与退场合同：仅受影响的历史模拟旧写组合退出新执行，保留全部历史查询、已提交收据、归档只读取证与其余 `/5` 用法，新执行统一走显式 `tb03b-finance/6 + x-execution-profile/3` 新会话。
+因此，本候选提出最小升级与退场合同：退掉可向真实历史 X 交付未绑定模型授权的旧写入口，保留全部既有收据、其他 `/5` 经济写入、非历史用途、真正隔离的 C1 离线验算以及完整只读查询取证；新执行统一走显式 `tb03b-finance/6 + x-execution-profile/3` 新会话。
 
-### 2. 退场范围、生效点与两道守门
+### 2. 退场范围、现有能力分界与三处守门
 
 - **拟定生效点**：本 C3 模型绑定二进制组（`tb03b-finance/6` + `x-execution-profile/3`）经独立评审与主控裁定合入/发布之时。
-- **不再提供的新写组合（仅限以下三处）**：
-  1. **历史模拟 X `/2`（及既有已退 `/1`）写入口**：`x_execution_session serve` 对含 `history_simulation` 的配置只接受 `x-execution-profile/3`，并在改动业务表和 `writer_epoch` 前拒绝续写或恢复既有 `/1`、`/2` 历史模拟库（`VersionUnsupported`）。
-  2. **正式装配入口（`production_session`）**：在创建 `state_dir`、初始化或拉起任何 S/E/B/X 域库前，`load_manifest` 检查 E/X 合同配对；凡 `x.profile` 含 `history_simulation` 但 `profile_revision != "x-execution-profile/3"` 或 `economic.manifest.finance.schema_revision != "tb03b-finance/6"`（含 `FIN/5 + X/3`、`FIN/5 + X/2`、`FIN/6 + X/2`、无 `finance + X/3`），一律以 `VersionUnsupported` 拒绝，不落任何域文件。
-  3. **独立正式 E（`e_economic_session` / `finance.rs`）新交付写入口**：当 E 的财务子合同为无模型绑定的 `tb03b-finance/5`（`!model_binding`），且本会话可由自身冻结配置核验为历史模拟目标合同（`clock.kind == "logical-bar/1"` 或配置了 `history_simulation_source`，且冻结输入针对 `history-sim/*` 或 `simulation-local-transaction/1`）时：
-     - **已提交收据优先重取**：`write_with_ingress` 先核审计并按原消息 ID（`previous_message`）与原收据键（`receipts`）查回已提交收据；命中则原样返回原收据（同键改内容仍报 `IdentityConflict`）。
-     - **新交付当场拒绝**：未命中既有收据的新 `MakeDispatchable` 与新 `ReleaseExact` 直接以 `VersionUnsupported` 拒绝，不落行、不产生注定无法被 `/3` X 接纳的新收据，且**不要求 X 在线**。
+- **独立正式 E（`e_economic_session` / `finance.rs`）的现有能力分界**：
+  - 守门守的是 **E 能否向真实历史 X 实际交付新的可兑现授权**，而不是 `clock.kind` 名称、`history_simulation_source` 归档来源或 X 当时是否在线。
+  - 判据（仅复用现有冻结入口与授权能力，不新增任何开关或新入口）：当 E 为无模型绑定的 `tb03b-finance/5`（`!model_binding`），冻结 `exact_release` 面向历史模拟目标（`model_ref.model_id` 以 `history-sim/` 开头或 `conditions` 含 `simulation-local-transaction/1`），且 E 在 `init` 时钉死的 `manifest.authorized_sources` 将 `QueryReleasedExact` 授予了冻结的 `x_target.x_id` 时：
+    - **已提交收据优先重取**：`write_with_ingress` 先核审计并按原消息 ID（`previous_message`）与原收据键（`receipts`）查回已提交收据；命中则原样返回原收据（同键改内容仍报 `IdentityConflict`）。
+    - **新交付当场拒绝**：未命中既有收据的新 `MakeDispatchable` 与新 `ReleaseExact` 直接以 `VersionUnsupported` 拒绝，不落行、不产生新收据，且不要求 X 在线。
+  - **显式退场项与保留项（两臂对比）**：
+    - **必须退出正式交付的两类既有 `/5` 用法**：（a）`#2081` 形态（`logical-bar/1`、无归档源、`X` 获准 `QueryReleasedExact`）；（b）`b9d898` 祖先形态（`TestOnly` 时钟、无归档源、`X` 获准 `QueryReleasedExact`，曾由正式 E/B 放行并被真实旧 `/1` X 在 cut `162` 接纳）。两者具备向真实历史 X 出具未绑定模型授权的完全相同能力，故均须退出正式交付。
+    - **保留的真正隔离 C1 离线验算**：沿用原始 C1（`1f0a42bc20^`）形态的 `TestOnly` 离线配置，其 `manifest.authorized_sources` **未将 `QueryReleasedExact` 授予 `x_target.x_id`**。该配置可继续离线产成 `Dispatchable` / `ReleasedExact` 与 `exact_command_oracle.json` 验算，但**不可能向真实历史 X 出具可兑现授权**：因 `ExactCommand::validate` 钉死 `command.x_id == profile.x_id`、`authority_frame` 以 `producer_id = profile.x_id` 向 E 发起 `QueryReleasedExact`、E 的 `Config::authorized` 拒绝未授权来源（`来源未获准`）且 `manifest_hash` 在 `init` 时钉死不可后改；同时 `/3` X 亦直接拒绝缺 `model_ref` 的 `/5` 命令。
+- **正式装配入口（`production_session`）**：
+  - **仅当 `x.profile` 含非空 `history_simulation` 时**，`load_manifest` 才预读 `economic.manifest` 并校验 E/X 合同配对：要求 `profile_revision == "x-execution-profile/3"` 且 `economic.manifest.finance.schema_revision == "tb03b-finance/6"`；任何不匹配组合（`FIN/5 + X/3`、`FIN/5 + X/2`、`FIN/6 + X/2`、无 `finance + X/3`）均在创建 `state_dir` 或域库前以 `VersionUnsupported` 拒绝。
+  - **非历史装配完全恢复旧行为**：`x.profile` 不含 `history_simulation` 时，launcher 不预读 `economic.manifest`，不因坏非历史 X `profile_revision` 拉停整组 S/E/B，保持既有非关键 X 降级与启动条件不变。
+- **历史模拟 X `/2`（及既有已退 `/1`）写入入口**：
+  - `x_execution_session serve` 对含 `history_simulation` 的配置只接受 `x-execution-profile/3`。
+  - 在获取 `<db>.writer.lock` 与调用 `open_durable_db`（读写打开）**之前**，先以 `SQLITE_OPEN_READ_ONLY`（不启用 `immutable=1`，故可见活 `-wal` 帧）预检既有库；凡已存在 `/1`、`/2` 历史模拟库即当场以 `VersionUnsupported` 退出，不落锁文件、不改写业务表、不推进 `writer_epoch`、**不静默 checkpoint `-wal`**。
 
-### 3. 保持不变的能力（不改只读、不伤无关配置）
+### 3. 操作者可用的只读查询入口、跨域补录前提与撤掉 `/2` socket 的损失
 
-- **非历史模拟 X profile（`/1` 骨架、`dry-run`、`experiment`、`production`）**：完全不变。
-- **`tb03b-finance/5` 其余经济写操作**：`ImportResponsibility`、`PrepareDecision`、`Reserve`、`CommitDecision`、`AbortDecision`、`CloseApplicants`、`CaptureExternal`、`ResolveEvidence`、`ApplyAllocation`、`BindVoice` 继续可用，不把整个 FIN/5 库改只读。
-- **C1 离线 `TestOnly` 时钟 `/5` 用法**：不带 `logical-bar/1` 且不带 `history_simulation_source` 的离线 TestOnly 夹具与 `exact_command_oracle.json` 保持原义（其产物仍不能被 `/3` X 接纳）。
-- **全部查询、只读视图与旧收据**：`QueryCommand`、`QueryReleasedExact`、`QueryDecision`、`QueryGrant`、`QueryFact`、`QueryAllocation`、`ReadView`、`Watch`、`EconomicRead*` 与原已提交收据重取保持原义。
-- **历史归档只读取证**：`e_economic_session inspect-simulation-capture-batch` 对 `/1` 与 `/2` 已提交终态批继续只读核验、不改写 X 库。
+撤掉 `/1`/`/2` X 的在线 Unix socket 服务（`x-exact-simulation/1`）后，操作者不再需要借助 E `ReleasedExact`、直接 SQL 或新起归档 reader E 才能查旧 X 状态；改由 `x_execution_session` 提供经过完整只读审计（`SQLITE_OPEN_READ_ONLY`，覆盖 `/1`、`/2`、`/3`）的离线 CLI 入口（原 `query --db FILE` 仅元数据入口保持原样）：
 
-### 4. 既有会话逐态处置与可执行迁移步骤
-
-| 既有 FIN/5 + /2 状态 | 本包行为与处置要求 | 责任与外效边界 |
+| 入口 | 可直接查询的对象（不依赖 E/S 在线，也不要求 E 预配归档源） | 覆盖状态与边界 |
 |---|---|---|
-| 仅 `Committed`（未 `Dispatchable`） | 独立 E 拒绝新 `MakeDispatchable`（`VersionUnsupported`）；不进入 `Dispatchable` | E 责任不变，零新收据 |
-| 已有 `Dispatchable` | 原 ID 重试返回原 `DispatchableReceipt`；`QueryCommand` 仍为 `Dispatchable`；新 `ReleaseExact` 被拒（`VersionUnsupported`） | 保持 `Dispatchable`，E 责任不变，零新 `ReleasedExact` |
-| 已有 `ReleasedExact` | 原 ID / 同内容重试返回原 `ReleasedExactReceipt`（篡改报 `IdentityConflict`）；`QueryCommand`、`QueryReleasedExact` 仍返原 14 字段命令；送 `/3` X（原样或伪造 `model_ref`）均被拒 | E 责任不变，零 X/S 调用与成交 |
-| 可能在途（`/2` X 库停在 `Accepted` / `ExecutionRequested` / `ExecutionReady` / `MayHaveCalled`） | `/3` X 拒绝打开或恢复 `/2` 库（`VersionUnsupported`，零字节写入）；原库封存备审，不得自动重放成新外效 | 不减免、不释放 E 责任 |
-| 已提交终态批（`/2` X 库 `Observed`） | 继续用 `e_economic_session inspect-simulation-capture-batch` 只读核验原批并按需 `CaptureExternal` 补录缺失原件 | X 库零改写，原批与原件逐字节保留 |
+| `x_execution_session query-history --db FILE` | 库 schema 版本、profile/模型摘要、已提交前沿 `last_bar_index`、全部命令摘要、已提交批列表（含 `batch_receipt_sha256`）与原件 ID 列表 | 覆盖 `/1`、`/2`、`/3` 全部合法库；损坏或篡改库在审计期拒绝 |
+| `x_execution_session query-command --db FILE --command-id ID` | 完整 `ExactCommandState`：`state`、`x_accept` 三相时钟、`causal_refs`、`attempt_batch_id`、`pending_batch_id`、`pending_epoch`、`has_execute_evidence`、`execute_evidence`、`last_committed_batch_id`、`last_bar_index` | 逐项覆盖 `Accepted`、`ExecutionReady`、`ExecutionRequested`（含 pending batch/epoch）、`MayHaveCalled`、`Observed` |
+| `x_execution_session query-batch --db FILE --batch-id ID` | 完整已提交 `SimulationBatch` JSON（含 `orders`、`fills`、`fees`、`scenario_busts`、`originals`、`batch_receipt_sha256`） | 仅返回已提交终态批（如 `b3` 含原 `fill`+`fee`）；未提交 pending 批（如 `ExecutionRequested` 挂起的 `b2`）以 `MissingDependency` 明确拒绝 |
+| `x_execution_session query-original --db FILE --original-id ID` | 完整冻结原件 JSON（如原 `fill` 与原 `fee` 文档） | 与原 `/2` socket `QueryOriginal` 逐字节一致 |
+
+**区分两类对象的职责与调用前提**：
+1. **X 可直接只读查询的对象**：上述四条 `x_execution_session query-*` 命令直接按 X 库路径审计并返回旧 X 的全态命令、已提交批与冻结原件，无需原 E 会话预配 `history_simulation_source`。
+2. **E 跨域核验与补录对象（`e_economic_session inspect-simulation-capture-batch` / `CaptureExternal`）**：仅当**原 E 会话在 `init` 时已预先冻结 `history_simulation_source`**（`manifest_hash` 钉死后不可事后补写）才可直接按原 E 归档通道核验/补录缺失原件；若原 E 会话未预配 `history_simulation_source`（例如 `#2081` 形态），不能靠另起“新归档 reader E”替代原 E 会话的 cut 与责任，只能先用上述 X 只读 CLI 取出原批与原件，再按既有人工/外部事实审计流程处理，且不减免原 E 责任。
+
+**撤掉 `/2` socket 的实际损失（明示）**：
+- 不再为 `/1`/`/2` X 库提供在线 Unix socket（`x-exact-simulation/1`）的 `QueryCommand` / `QueryOriginal` / `AcceptExact` / `AdvanceBar` 服务；在线客户端查询须改调 `x_execution_session query-*` 离线只读 CLI。
+- 停留在未终结态（`Accepted`、`ExecutionReady`、`ExecutionRequested + pending`、`MayHaveCalled`）的旧 `/2` 命令无法经 `/3` X 推进至 `Observed`，其未决外效风险与原 E 责任原样保留，不得自动重放或免责。
+
+### 4. 原档不静默 checkpoint 与封存条件（待裁合同）
+
+- **首次拒绝与只读查询不改原档与活 WAL**：`x_execution_session serve` 的预检与全部 `query-*` 命令均使用 `SQLITE_OPEN_READ_ONLY`（不传 `immutable=1`，不使用自造 VFS），因此能够看到未 checkpoint 的活 `-wal` 帧，同时保证在首次被拒打开与重复只读查询后，原 `<db>` 与 `<db>-wal` 的字节内容（SHA-256）完全不变，也不会生成 `<db>.writer.lock`。
+- **必须明示的 SQLite WAL 封存边界（不宣称为“目录零变化”）**：
+  - 当归档库处于 WAL 模式且存在未 checkpoint 的 `<db>-wal` 但缺少 `<db>-shm` 时，SQLite 在不使用 `immutable=1` 的前提下以 `SQLITE_OPEN_READ_ONLY` 打开，**会在可写目录中建立 `<db>-shm` 共享内存索引文件**（不会修改 `<db>` 或 `<db>-wal` 字节，也不会 checkpoint）；若所在目录本身为只读权限（如 `chmod 0555` / 只读介质）且缺少 `-shm`，则 SQLite 只读打开会因无法建立 `-shm` 而拒绝（`SQLITE_READONLY`），这正是保持活 WAL 可见性、不使用 `immutable=1` 漏看活 WAL 的代价。
+  - **待裁封存规程**：（1）在可写取证目录直接运行 `query-*` 或误触 `serve` 时，原 `.db` 与 `.db-wal` 字节 100% 保全可恢复，仅可能伴生瞬态 `.db-shm`；（2）若要求只读介质或目录级零 sidecar 不可变封存，操作者须在封存时成对拷贝 `.db` + `.db-wal` 到只读归档并**对副本执行 `query-*`**，或在旧二进制停机封存前先做一次显式 clean checkpoint 再转入只读介质。
+
+### 5. 保持不变的能力
+
+- **非历史模拟 X profile（`/1` 骨架、`dry-run`、`experiment`、`production`）及 launcher 既有启动/降级路径**：完全不变。
+- **`tb03b-finance/5` 其余经济写操作**：`ImportResponsibility`、`PrepareDecision`、`Reserve`、`CommitDecision`、`AbortDecision`、`CloseApplicants`、`CaptureExternal`、`ResolveEvidence`、`ApplyAllocation`、`BindVoice` 继续可用，不把整个 FIN/5 库改只读。
+- **真正隔离的 C1 离线 `TestOnly` 验算**：未向 `x_target.x_id` 授予 `QueryReleasedExact` 的配置保持原义（其产物无法被真实历史 X 兑现）。
+- **全部查询、只读视图与旧收据**：`QueryCommand`、`QueryReleasedExact`、`QueryDecision`、`QueryGrant`、`QueryFact`、`QueryAllocation`、`ReadView`、`Watch`、`EconomicRead*` 与原已提交收据重取保持原义。
+
+### 6. 既有会话逐态处置与可执行迁移步骤
+
+| 既有 FIN/5 + /2 状态 | 本包行为与处置要求 | 可用只读入口与责任/外效边界 |
+|---|---|---|
+| 仅 `Committed`（未 `Dispatchable`） | 独立 E（含 X `QueryReleasedExact` 授权）拒绝新 `MakeDispatchable`（`VersionUnsupported`）；不进入 `Dispatchable` | E `QueryCommand`/`ReadView`；E 责任不变，零新收据 |
+| 已有 `Dispatchable` | 原 ID 重试返回原 `DispatchableReceipt`；`QueryCommand` 仍为 `Dispatchable`；新 `ReleaseExact` 被拒（`VersionUnsupported`） | E `QueryCommand`/`ReadView`；保持 `Dispatchable`，E 责任不变，零新 `ReleasedExact` |
+| 已有 `ReleasedExact` | 原 ID / 同内容重试返回原 `ReleasedExactReceipt`（篡改报 `IdentityConflict`）；`QueryCommand`、`QueryReleasedExact` 仍返原 14 字段命令；送 `/3` X（原样或伪造 `model_ref`）均被拒 | E `QueryCommand`/`QueryReleasedExact`；E 责任不变，零 X/S 调用与成交 |
+| `/2` X 库 `Accepted`（已接纳、未起批） | `/3` X `serve` 预检以 `VersionUnsupported` 拒绝，原 `.db`/`.db-wal` 零字节改动、无锁文件 | `x_execution_session query-history` / `query-command` 查 `Accepted`、`x_accept`、`causal_refs`；原库封存备审，不减免原 E 责任 |
+| `/2` X 库 `ExecutionReady` / `ExecutionRequested` + pending 批 / `MayHaveCalled` | `/3` X `serve` 预检以 `VersionUnsupported` 拒绝，不静默 checkpoint 活 WAL，不得自动重放成新外效 | `x_execution_session query-command` 查 `state`、`attempt_batch_id`、`pending_batch_id`、`pending_epoch`、`execute_evidence`；`query-batch` 对未提交 pending 批报 `MissingDependency`；保留未决外效与原 E 责任 |
+| `/2` X 库已提交终态批（`Observed`，如 `b3` 含原 `fill`+`fee`） | `/3` X `serve` 拒绝续写；原批与原件零改写保留 | `x_execution_session query-command` / `query-batch` / `query-original` 逐字节读出 `Observed`、原批与 `fill`+`fee` 原件；若原 E 会话在 `init` 时已预冻结 `history_simulation_source`，可继续用 `e_economic_session inspect-simulation-capture-batch` 核验并按需 `CaptureExternal` 补录 |
 
 **新历史模拟会话迁移步骤（显式 `FIN/6 + X/3`）：**
 

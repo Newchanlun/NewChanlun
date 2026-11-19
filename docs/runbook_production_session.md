@@ -78,8 +78,8 @@ S `serve` 需要 admission 锚（`<db>.control-owner.json` + `state/s-admission/
 - experiment/production 缺凭据：X 在构造任何传输之前以 `MissingDependency` 非 0 退出。
 - production 缺 `tb09_fingerprint`：X 持久化 `send_state=refused`、`send_refusal_reason=MissingTb09Fingerprint`。
 - 写调用（`submit`/`cancel`）恒返回 `UnsupportedCapability`；本步不含任何场所写代码。
-- 查询：`x_execution_session query --db x.db`（只读）。
-- 历史模拟装配（含 `history_simulation` 字段）使用 `x-execution-profile/3` 搭配 `tb03b-finance/6`；launcher 在建库前拒绝 `FIN/5 + X/3`、`/2` 历史模拟 profile 等不兼容装配（详见 [`rust/src/history_simulation/README.md`](../rust/src/history_simulation/README.md) 中待裁定的 C3 升级与退场合同候选）。
+- 查询：`x_execution_session query --db x.db`（非历史骨架元数据只读）；历史模拟库（含 `/1`、`/2`、`/3`）使用 `query-history`、`query-command --command-id ID`、`query-batch --batch-id ID`、`query-original --original-id ID` 只读审计查询。
+- 历史模拟装配（仅当 `x.profile` 含非空 `history_simulation` 字段时生效；非历史装配不预读 `economic.manifest`，保持既有启动与降级条件）：使用 `x-execution-profile/3` 搭配 `tb03b-finance/6`；launcher 在建库前拒绝 `FIN/5 + X/3`、`/2` 历史模拟 profile 等不兼容装配（详见 [`rust/src/history_simulation/README.md`](../rust/src/history_simulation/README.md) 中待裁定的 C3 升级与退场合同候选）。
 
 ## simulation / dry-run 启动
 

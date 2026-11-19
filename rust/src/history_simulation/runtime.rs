@@ -5,11 +5,11 @@ use super::{
     model::{Batch, Change, Model, ModelRef},
     store,
 };
-use crate::session_protocol::{canonical_json, reply_envelope, sha256_hex};
+use crate::session_protocol::{canonical_json, reply_envelope, sha256_hex, strict_json};
 use crate::session_transport::{
     read_frame, serve_unix, write_frame_observed, NoObserver, TransportBounds,
 };
-use rusqlite::{params, Connection, OptionalExtension};
+use rusqlite::{params, Connection, OpenFlags, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::os::unix::net::UnixStream;
@@ -1030,6 +1030,317 @@ pub fn serve(c: &mut Connection, p: &Profile, epoch: i64) -> Result<(), String> 
             }
         },
     )
+}
+
+fn storage_ro(e: impl std::fmt::Display) -> String {
+    format!("StorageUnavailable：{e}")
+}
+
+fn open_readonly_db(db: &Path) -> Result<Connection, String> {
+    let conn =
+        Connection::open_with_flags(db, OpenFlags::SQLITE_OPEN_READ_ONLY).map_err(storage_ro)?;
+    conn.busy_timeout(Duration::from_secs(2))
+        .map_err(storage_ro)?;
+    Ok(conn)
+}
+
+fn audit_readonly_tx(tx: &rusqlite::Transaction<'_>) -> Result<(String, i64, Profile), String> {
+    let has_meta: bool = tx
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='x_meta')",
+            [],
+            |r| r.get(0),
+        )
+        .map_err(storage_ro)?;
+    if !has_meta {
+        return Err("InvalidDomain：X 库尚未初始化 x_meta".into());
+    }
+    let meta = |key: &str| -> Result<String, String> {
+        tx.query_row("SELECT value FROM x_meta WHERE key=?1", [key], |r| r.get(0))
+            .map_err(storage_ro)
+    };
+    if meta("history_simulation")? != "true" || meta("profile_mode")? != "simulation" {
+        return Err("InvalidDomain：该 X 库不是历史模拟执行库".into());
+    }
+    let revision = meta("profile_revision")?;
+    let epoch: i64 = meta("writer_epoch")?.parse().map_err(error)?;
+    let raw_profile: String = tx
+        .query_row(
+            "SELECT v FROM x_sim_meta WHERE k='authority_profile'",
+            [],
+            |r| r.get(0),
+        )
+        .map_err(storage_ro)?;
+    let profile: Profile =
+        serde_json::from_value(strict_json(raw_profile.as_bytes())?).map_err(error)?;
+    match revision.as_str() {
+        super::EXACT_PROFILE_REVISION => validate_existing(tx, &profile, epoch)?,
+        "x-execution-profile/2" => audit_archived_v2(tx, &profile, epoch)?,
+        "x-execution-profile/1" => audit_archived_v1(tx, &profile, epoch)?,
+        other => return Err(format!("VersionUnsupported：未知历史模拟库版本 `{other}`")),
+    }
+    Ok((revision, epoch, profile))
+}
+
+fn pending_and_frontier(
+    tx: &Connection,
+) -> Result<(Option<String>, Option<String>, Option<String>, Option<i64>), String> {
+    let pending_batch_id = match store::pending_batch(tx)? {
+        Some(raw) => {
+            let b: Batch = serde_json::from_str(&raw).map_err(error)?;
+            Some(b.request_id)
+        }
+        None => None,
+    };
+    let pending_epoch: Option<String> = tx
+        .query_row(
+            "SELECT v FROM x_sim_meta WHERE k='pending_epoch'",
+            [],
+            |r| r.get(0),
+        )
+        .optional()
+        .map_err(storage_ro)?;
+    let raw_state: String = tx
+        .query_row("SELECT v FROM x_sim_meta WHERE k='state'", [], |r| r.get(0))
+        .map_err(storage_ro)?;
+    let state: super::model::State = serde_json::from_str(&raw_state).map_err(error)?;
+    Ok((
+        pending_batch_id,
+        pending_epoch,
+        state.last_request_id,
+        state.last_bar,
+    ))
+}
+
+/// #1407 C3 R3：对 `/1`、`/2`、`/3` 历史模拟 X 库的只读冷审摘要查询（不获取 writer lock、不触发 WAL checkpoint）。
+pub fn inspect_history(db: &Path) -> Result<Value, String> {
+    let mut conn = open_readonly_db(db)?;
+    let tx = conn.transaction().map_err(storage_ro)?;
+    let (revision, epoch, profile) = audit_readonly_tx(&tx)?;
+    let (pending_batch_id, pending_epoch, last_committed_batch_id, last_bar_index) =
+        pending_and_frontier(&tx)?;
+
+    let mut batches = Vec::new();
+    {
+        let mut stmt = tx
+            .prepare("SELECT id, result FROM x_sim_batches ORDER BY rowid")
+            .map_err(storage_ro)?;
+        let rows = stmt
+            .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))
+            .map_err(storage_ro)?;
+        for row in rows {
+            let (id, raw) = row.map_err(storage_ro)?;
+            let parsed = strict_json(raw.as_bytes())?;
+            let orig_count = parsed["originals"].as_array().map_or(0, Vec::len);
+            batches.push(json!({
+                "batch_id": id,
+                "bar_index": parsed["bar_index"],
+                "batch_receipt_sha256": sha256_hex(raw.as_bytes()),
+                "state_content_hash": parsed["state_content_hash"],
+                "original_count": orig_count,
+            }));
+        }
+    }
+
+    let mut commands = Vec::new();
+    {
+        let mut stmt = tx
+            .prepare("SELECT id, state, attempt_batch, release_receipt, execute_evidence IS NOT NULL FROM x_exact_commands ORDER BY id")
+            .map_err(storage_ro)?;
+        let rows = stmt
+            .query_map([], |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, String>(1)?,
+                    r.get::<_, Option<String>>(2)?,
+                    r.get::<_, String>(3)?,
+                    r.get::<_, bool>(4)?,
+                ))
+            })
+            .map_err(storage_ro)?;
+        for row in rows {
+            let (id, state, attempt, receipt, has_exec) = row.map_err(storage_ro)?;
+            let attempt_batch_id = match attempt {
+                Some(raw) => {
+                    let b: Batch = serde_json::from_str(&raw).map_err(error)?;
+                    Some(b.request_id)
+                }
+                None => None,
+            };
+            commands.push(json!({
+                "command_id": id,
+                "state": state,
+                "attempt_batch_id": attempt_batch_id,
+                "release_receipt": receipt,
+                "has_execute_evidence": has_exec,
+            }));
+        }
+    }
+
+    let mut originals = Vec::new();
+    {
+        let mut stmt = tx
+            .prepare("SELECT id FROM x_sim_originals ORDER BY rowid")
+            .map_err(storage_ro)?;
+        let rows = stmt
+            .query_map([], |r| r.get::<_, String>(0))
+            .map_err(storage_ro)?;
+        for row in rows {
+            originals.push(row.map_err(storage_ro)?);
+        }
+    }
+
+    tx.commit().map_err(storage_ro)?;
+    Ok(json!({
+        "kind": "HistorySimulationArchiveSummary",
+        "read_only": true,
+        "profile_revision": revision,
+        "writer_epoch": epoch.to_string(),
+        "session_id": profile.session_id,
+        "session_generation": profile.session_generation,
+        "x_id": profile.x_id,
+        "source_namespace": profile.source_namespace,
+        "source_epoch": profile.source_epoch,
+        "model_content_hash": hash(&profile.model),
+        "last_committed_batch_id": last_committed_batch_id,
+        "last_bar_index": last_bar_index,
+        "pending_batch_id": pending_batch_id,
+        "pending_epoch": pending_epoch,
+        "committed_batches": batches,
+        "commands": commands,
+        "originals": originals,
+    }))
+}
+
+/// #1407 C3 R3：对 `/1`、`/2`、`/3` 历史模拟 X 库的只读命令状态查询。
+/// 保留 `QueryCommand` 原字段（`state`、`x_accept`、`causal_refs`），并显式回传 `attempt_batch_id`、
+/// `pending_batch_id`、`execute_evidence` 与已提交前沿，逐态覆盖 `Accepted`、`ExecutionReady`、
+/// `ExecutionRequested`、`MayHaveCalled`、`Observed` 与 `NoRecord`。
+pub fn inspect_command(db: &Path, id: &str) -> Result<Value, String> {
+    let mut conn = open_readonly_db(db)?;
+    let tx = conn.transaction().map_err(storage_ro)?;
+    let (revision, epoch, profile) = audit_readonly_tx(&tx)?;
+    let (pending_batch_id, pending_epoch, last_committed_batch_id, last_bar_index) =
+        pending_and_frontier(&tx)?;
+    let row: Option<(String, String, Option<String>, String, String, Option<String>)> = tx
+        .query_row(
+            "SELECT release_receipt, state, attempt_batch, accept_clock, release_evidence, execute_evidence FROM x_exact_commands WHERE id=?1",
+            [id],
+            |r| {
+                Ok((
+                    r.get(0)?,
+                    r.get(1)?,
+                    r.get(2)?,
+                    r.get(3)?,
+                    r.get(4)?,
+                    r.get(5)?,
+                ))
+            },
+        )
+        .optional()
+        .map_err(storage_ro)?;
+    let out = match row {
+        None => json!({
+            "kind": "ExactCommandState",
+            "command_id": id,
+            "state": "NoRecord",
+            "profile_revision": revision,
+            "writer_epoch": epoch.to_string(),
+            "pending_batch_id": pending_batch_id,
+            "pending_epoch": pending_epoch,
+            "last_committed_batch_id": last_committed_batch_id,
+            "last_bar_index": last_bar_index,
+            "read_only": true,
+        }),
+        Some((release_receipt, state, attempt, clock_raw, rel_raw, exec_raw)) => {
+            let clock: Value = strict_json(clock_raw.as_bytes())?;
+            let rel: Value = strict_json(rel_raw.as_bytes())?;
+            let attempt_batch_id = match attempt {
+                Some(raw) => {
+                    let b: Batch = serde_json::from_str(&raw).map_err(error)?;
+                    Some(b.request_id)
+                }
+                None => None,
+            };
+            let execute_evidence = match exec_raw {
+                Some(raw) => strict_json(raw.as_bytes())?,
+                None => Value::Null,
+            };
+            json!({
+                "kind": "ExactCommandState",
+                "command_id": id,
+                "state": state,
+                "x_accept": clock,
+                "causal_refs": [{
+                    "authority_id": profile.e.authority_id,
+                    "authority_epoch": profile.e.authority_epoch,
+                    "receipt_id": release_receipt,
+                    "command_hash": rel["command_hash"],
+                    "release_commit_ns": rel["commit_ns"],
+                }],
+                "attempt_batch_id": attempt_batch_id,
+                "pending_batch_id": pending_batch_id,
+                "pending_epoch": pending_epoch,
+                "has_execute_evidence": !execute_evidence.is_null(),
+                "execute_evidence": execute_evidence,
+                "profile_revision": revision,
+                "writer_epoch": epoch.to_string(),
+                "last_committed_batch_id": last_committed_batch_id,
+                "last_bar_index": last_bar_index,
+                "read_only": true,
+            })
+        }
+    };
+    tx.commit().map_err(storage_ro)?;
+    Ok(out)
+}
+
+/// #1407 C3 R3：对 `/1`、`/2`、`/3` 历史模拟 X 库的只读已提交批查询（与原 X socket `QueryBatch` 同形）。
+pub fn inspect_batch(db: &Path, id: &str) -> Result<Value, String> {
+    let mut conn = open_readonly_db(db)?;
+    let tx = conn.transaction().map_err(storage_ro)?;
+    let _ = audit_readonly_tx(&tx)?;
+    let raw: Option<String> = tx
+        .query_row("SELECT result FROM x_sim_batches WHERE id=?1", [id], |r| {
+            r.get(0)
+        })
+        .optional()
+        .map_err(storage_ro)?;
+    let out = match raw {
+        Some(raw) => strict_json(raw.as_bytes())?,
+        None => {
+            if let Some(pending_raw) = store::pending_batch(&tx)? {
+                let b: Batch = serde_json::from_str(&pending_raw).map_err(error)?;
+                if b.request_id == id {
+                    return Err(format!(
+                        "MissingDependency：批次 `{id}` 尚未提交（当前为未终态 pending_batch，不能按已提交终态批消费）"
+                    ));
+                }
+            }
+            return Err(format!("MissingDependency：未找到已提交批次 `{id}`"));
+        }
+    };
+    tx.commit().map_err(storage_ro)?;
+    Ok(out)
+}
+
+/// #1407 C3 R3：对 `/1`、`/2`、`/3` 历史模拟 X 库的只读原件查询（与原 X socket `QueryOriginal` 同形）。
+pub fn inspect_original(db: &Path, id: &str) -> Result<Value, String> {
+    let mut conn = open_readonly_db(db)?;
+    let tx = conn.transaction().map_err(storage_ro)?;
+    let _ = audit_readonly_tx(&tx)?;
+    let raw: Option<String> = tx
+        .query_row("SELECT raw FROM x_sim_originals WHERE id=?1", [id], |r| {
+            r.get(0)
+        })
+        .optional()
+        .map_err(storage_ro)?;
+    let out = match raw {
+        Some(raw) => strict_json(raw.as_bytes())?,
+        None => return Err(format!("MissingDependency：未找到已提交原件 `{id}`")),
+    };
+    tx.commit().map_err(storage_ro)?;
+    Ok(out)
 }
 
 #[cfg(test)]

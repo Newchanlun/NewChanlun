@@ -227,19 +227,18 @@ fn exact_release_contract(config: &Config) -> Result<(), String> {
         Err("SchemaUnsupported：精确命令只属于 tb03b-finance/5 与 /6".into())
     }
 }
-/// #1407 C3 R2：独立 E 对新 `MakeDispatchable` / `ReleaseExact` 按自身可核验的目标合同守门。
+/// #1407 C3 R3：独立 E 对新 `MakeDispatchable` / `ReleaseExact` 按自身可核验的目标合同与获准能力守门。
 /// 仅在 `write_with_ingress` 优先查回原消息/原收据未命中后调用，因此不阻断已提交收据重取、
-/// 历史审计重演、查询或其余 `/5` 财务操作，也不要求 X 在线。
+/// 历史审计重演、查询或其余 `/5` 财务操作，也不要求 X 在线、不依赖 `clock.kind` 或归档来源配置。
+/// 当 `tb03b-finance/5`（`!model_binding`）的冻结输入指向历史模拟目标，且本会话 `authorized_sources`
+/// 已授予目标 `x_target.x_id` 以 `QueryReleasedExact` 权限（即 E 实际可向真实历史 X 出具可兑现权威应答）时，
+/// 拒绝新交付；未向目标 `x_target.x_id` 授予 `QueryReleasedExact` 的离线 C1 隔离验算保持原义（真实 X
+/// 经 `Config::authorized` 必然被拒且 `manifest_hash` 已在 init 冻结，永无法兑现）。
 fn exact_delivery_target_contract(config: &Config, d: &Value) -> Result<(), String> {
     let c = contract(&config.manifest)?;
     if c.model_binding {
         return Ok(());
     }
-    let is_history_sim_session = config.manifest["clock"]["kind"] == super::store::LOGICAL_BAR
-        || config
-            .manifest
-            .get("history_simulation_source")
-            .is_some_and(|v| !v.is_null());
     let targets_history_sim = d["exact_release"]["model_coverage"]["model_ref"]["model_id"]
         .as_str()
         .is_some_and(|id| id.starts_with("history-sim/"))
@@ -249,11 +248,27 @@ fn exact_delivery_target_contract(config: &Config, d: &Value) -> Result<(), Stri
                 list.iter()
                     .any(|item| item["validator_capability"] == "simulation-local-transaction/1")
             });
-    if is_history_sim_session && targets_history_sim {
+    let authorizes_target_x_query =
+        d["exact_release"]["x_target"]["x_id"]
+            .as_str()
+            .is_some_and(|target_x_id| {
+                config.manifest["authorized_sources"]
+                    .as_array()
+                    .is_some_and(|sources| {
+                        sources.iter().any(|s| {
+                            s["producer_id"].as_str() == Some(target_x_id)
+                                && s["operations"].as_array().is_some_and(|ops| {
+                                    ops.iter().any(|op| op == "QueryReleasedExact")
+                                })
+                        })
+                    })
+            });
+    if targets_history_sim && authorizes_target_x_query {
         return Err(
-            "VersionUnsupported：tb03b-finance/5 在历史模拟目标合同下不绑定实装模型内容摘要，\
-             不再签发新的 MakeDispatchable/ReleaseExact 交付（原已提交收据仍按原身份优先重取，\
-             查询与其余财务操作不受影响；请在新会话显式使用 tb03b-finance/6 + x-execution-profile/3）"
+            "VersionUnsupported：tb03b-finance/5 冻结历史模拟目标且已向目标 X 授予 QueryReleasedExact，\
+             因 /5 命令不绑定实装模型内容摘要，不再签发新的 MakeDispatchable/ReleaseExact 交付\
+             （原已提交收据仍按原身份优先重取，查询、其余财务写入与未授权目标 X 的离线 C1 验算不受影响；\
+             请在新会话显式使用 tb03b-finance/6 + x-execution-profile/3）"
                 .into(),
         );
     }

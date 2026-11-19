@@ -597,3 +597,126 @@ fn legacy_v5_command_cannot_borrow_v3_x_model() {
     assert_eq!(tables(&x_db), x_before);
     assert_eq!(economic_tables(&f), e_before);
 }
+
+/// #1407 C3 R3 决定性双臂：同一冻结历史目标（`x_target=X/1` + `history-sim/*` + `TestOnly` 时钟 + 无归档来源）下：
+/// - 臂 1（`b9d898dc` 形态：向目标 `X` 授予 `QueryReleasedExact`）：正式 E 拒绝新 `MakeDispatchable`/`ReleaseExact`
+///   （`VersionUnsupported`），不依赖时钟名、归档来源或 X 在线，同时保留原已提交收据重取与其余 `/5` 写入；
+/// - 臂 2（真正隔离的 C1 离线形态：未向目标 `X` 授予 `QueryReleasedExact`）：离线 `MakeDispatchable`/`ReleaseExact`
+///   与原 `unit` 查询继续通过；真实 X 身份经正式 E socket 请求 `QueryReleasedExact` 必然被 `Config::authorized` 拒绝，
+///   且 `manifest_hash` 已在 init 冻结，永不可向真实 X 兑现。
+#[test]
+fn testonly_fin5_distinguishes_x_authorized_pairing_from_isolated_c1() {
+    // 臂 1：TestOnly + 无归档来源 + X 获准 QueryReleasedExact（b9d898dc 正式配对形态）→ 拒新交付。
+    let mut paired = Fixture::build_with(
+        "100",
+        None,
+        &[("slot", &["alpha", "beta"])],
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        Some(ExactClock::TestOnlyWithX),
+    );
+    assert_eq!(paired.configs[0].manifest["clock"]["kind"], "TestOnly");
+    assert!(paired.configs[0]
+        .manifest
+        .get("history_simulation_source")
+        .is_none());
+    committed(&mut paired);
+    let paired_before = economic_tables(&paired);
+
+    let paired_cfg = Config::load(
+        &paired.dir.join("manifest.json"),
+        &paired.configs[0].db,
+        None,
+    )
+    .unwrap();
+    std::thread::spawn(move || service::serve(&paired_cfg, 1, 1).unwrap());
+    wait_for(&paired.dir.join("e.sock"));
+
+    let refused_md = exchange(
+        &paired.dir.join("e.sock"),
+        &envelope("MakeDispatchable-alpha", dispatch_payload(&paired, "alpha")),
+    )["payload"]
+        .clone();
+    assert_eq!(refused_md["kind"], "Error", "{refused_md}");
+    assert!(
+        refused_md["error"]
+            .as_str()
+            .unwrap()
+            .starts_with("VersionUnsupported："),
+        "{refused_md}"
+    );
+    assert_eq!(economic_tables(&paired), paired_before);
+
+    // 臂 2：相同冻结目标 + TestOnly + 无归档来源，但不向目标 X 授予 QueryReleasedExact（真正隔离的 C1 离线）。
+    let mut isolated = Fixture::build_with(
+        "100",
+        None,
+        &[("slot", &["alpha", "beta"])],
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        Some(ExactClock::TestOnly),
+    );
+    assert_eq!(isolated.configs[0].manifest["clock"]["kind"], "TestOnly");
+    assert!(isolated.configs[0]
+        .manifest
+        .get("history_simulation_source")
+        .is_none());
+    committed(&mut isolated);
+
+    let iso_cfg = Config::load(
+        &isolated.dir.join("manifest.json"),
+        &isolated.configs[0].db,
+        None,
+    )
+    .unwrap();
+    std::thread::spawn(move || service::serve(&iso_cfg, 1, 1).unwrap());
+    wait_for(&isolated.dir.join("e.sock"));
+
+    let md = exchange(
+        &isolated.dir.join("e.sock"),
+        &envelope(
+            "MakeDispatchable-alpha",
+            dispatch_payload(&isolated, "alpha"),
+        ),
+    )["payload"]
+        .clone();
+    assert_eq!(md["kind"], "DispatchableReceipt", "{md}");
+    let rel = exchange(
+        &isolated.dir.join("e.sock"),
+        &envelope("ReleaseExact-alpha", release_payload(&isolated, "alpha")),
+    )["payload"]
+        .clone();
+    assert_eq!(rel["kind"], "ReleasedExactReceipt", "{rel}");
+    assert_eq!(rel["record"]["release_commit_ns"], "162");
+
+    // 真实 X 身份（producer_id="X"）向该隔离 E 发起 QueryReleasedExact 必被 Config::authorized 拒绝，永无法兑现。
+    let (ns, ep, prod, pep) = X_SOURCE;
+    let q_payload = authority_query(&isolated, &rel["record"]["command"], "1");
+    let x_env = json!({
+        "schema_revision": "economic-session/1",
+        "session_id": isolated.configs[0].session,
+        "session_generation": isolated.configs[0].generation,
+        "source_namespace": ns,
+        "source_epoch": ep,
+        "message_id": "x-try-redeem-isolated-c1",
+        "producer_id": prod,
+        "producer_epoch": pep,
+        "payload_hash": hash(&q_payload),
+        "causal_refs": [],
+        "payload": q_payload,
+    });
+    let x_reply = exchange(&isolated.dir.join("e.sock"), &x_env)["payload"].clone();
+    assert_eq!(x_reply["kind"], "Error", "{x_reply}");
+    assert!(
+        x_reply["error"].as_str().unwrap().contains("来源未获准"),
+        "{x_reply}"
+    );
+}

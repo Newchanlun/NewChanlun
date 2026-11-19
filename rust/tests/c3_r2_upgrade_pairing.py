@@ -605,18 +605,23 @@ def main():
     finally:
         stop_procs(procs_b_p)
 
-    # Snapshot real parent in-flight /2 X DB & E DB before candidate tests
+    # Snapshot real parent in-flight /2 X DB & E DB BEFORE first candidate open
+    x_db_b_sha_before = file_digest(x_db_b)
+    x_wal_b = Path(str(x_db_b) + "-wal")
+    x_wal_b_sha_before = file_digest(x_wal_b) if x_wal_b.exists() else None
     dump_x_b_before = business_dump(x_db_b)
     e_db_b = Path(sess_b["nodes"]["E"]["db"])
     dump_e_b_before = business_dump(e_db_b)
 
-    # 1) Candidate X refuses in-flight /2 DB with both /2 profile and rewritten /3 profile (0 logical rows modified!)
+    # 1) Candidate X refuses in-flight /2 DB with both /2 profile and rewritten /3 profile (0 bytes modified on FIRST open!)
     refuse_v2_prof = subprocess.run(
         [str(cbin / "x_execution_session"), "serve", "--db", str(x_db_b), "--profile", str(xp_v2_path), "--writer-epoch", "2"],
         capture_output=True,
         text=True,
     )
     assert refuse_v2_prof.returncode != 0 and "VersionUnsupported" in refuse_v2_prof.stderr, refuse_v2_prof.stderr
+    assert file_digest(x_db_b) == x_db_b_sha_before
+    assert (file_digest(x_wal_b) if x_wal_b.exists() else None) == x_wal_b_sha_before
     assert same(business_dump(x_db_b), dump_x_b_before)
 
     xp_v3_same = copy.deepcopy(xp_v2)
@@ -629,8 +634,9 @@ def main():
         text=True,
     )
     assert refuse_v3_resume.returncode != 0 and "VersionUnsupported" in refuse_v3_resume.stderr, refuse_v3_resume.stderr
+    assert file_digest(x_db_b) == x_db_b_sha_before
+    assert (file_digest(x_wal_b) if x_wal_b.exists() else None) == x_wal_b_sha_before
     assert same(business_dump(x_db_b), dump_x_b_before)
-    x_db_b_sha_before = file_digest(x_db_b)
     refuse_v3_repeat = subprocess.run(
         [str(cbin / "x_execution_session"), "serve", "--db", str(x_db_b), "--profile", str(xp_v3_same_path), "--writer-epoch", "2"],
         capture_output=True,
@@ -638,6 +644,7 @@ def main():
     )
     assert refuse_v3_repeat.returncode != 0 and "VersionUnsupported" in refuse_v3_repeat.stderr, refuse_v3_repeat.stderr
     assert file_digest(x_db_b) == x_db_b_sha_before
+    assert (file_digest(x_wal_b) if x_wal_b.exists() else None) == x_wal_b_sha_before
 
     # 2) Candidate standalone formal E on ReleasedExact FIN/5 DB:
     #    - original ReleaseExact replay returns byte-identical receipt FIRST

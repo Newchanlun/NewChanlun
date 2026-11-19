@@ -63,7 +63,10 @@ pub(super) fn decorate_input(data: &mut Value, clock: ExactClock) {
 /// （单位 S 基础的 commit_ns 是 1，财务获知不得早于它），alpha 的 ReleaseExact 落在 bar 2（见 `x_e2e`）。
 #[derive(Clone, Copy)]
 pub(super) enum ExactClock {
+    /// 真正隔离的 C1 离线夹具（与 `1f0a42bc20^` 原 C1 一致：不向 `x_target` 授予 `QueryReleasedExact`）。
     TestOnly,
+    /// `b9d898dc` 祖先形态：`tb03b-finance/5` + `TestOnly` + 无归档来源 + 向目标 `X` 授予 `QueryReleasedExact`。
+    TestOnlyWithX,
     LogicalBar,
     TestOnlyV6,
     LogicalBarV6,
@@ -82,6 +85,9 @@ impl ExactClock {
     fn is_logical_bar(self) -> bool {
         matches!(self, Self::LogicalBar | Self::LogicalBarV6)
     }
+    fn authorizes_x(self) -> bool {
+        !matches!(self, Self::TestOnly)
+    }
 }
 /// X 的来源身份（`x-exact-authority/1` 共同信封的 source/producer）；E 只授它 QueryReleasedExact。
 pub(super) const X_SOURCE: (&str, &str, &str, &str) = ("x-sim", "epoch1", "X", "1");
@@ -90,8 +96,10 @@ pub(super) fn decorate_manifest(manifest: &mut Value, clock: ExactClock) {
         .as_array_mut()
         .unwrap()
         .extend(EXACT_OPS.iter().map(|op| json!(op)));
-    let (namespace, epoch, producer, producer_epoch) = X_SOURCE;
-    manifest["authorized_sources"].as_array_mut().unwrap().push(json!({"source_namespace":namespace,"source_epoch":epoch,"producer_id":producer,"producer_epoch":producer_epoch,"operations":["QueryReleasedExact"]}));
+    if clock.authorizes_x() {
+        let (namespace, epoch, producer, producer_epoch) = X_SOURCE;
+        manifest["authorized_sources"].as_array_mut().unwrap().push(json!({"source_namespace":namespace,"source_epoch":epoch,"producer_id":producer,"producer_epoch":producer_epoch,"operations":["QueryReleasedExact"]}));
+    }
     let clocks = &mut manifest["clock"]["plan"]["messages"];
     for (message, t) in [
         ("MakeDispatchable-alpha", 140),
