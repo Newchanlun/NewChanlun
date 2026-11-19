@@ -324,6 +324,31 @@ def test_zero_trade_match_preserves_exit_0_and_reports_honest_scope(monkeypatch,
     assert "操作=群作用 L2" not in out
 
 
+@pytest.mark.parametrize(
+    ("trades", "nav", "code", "first_difference"),
+    [
+        ([], 100_000.0, 0, None),
+        ([TRADE_A], 100_000.0, 2, "finish trade 表 @ index 0"),
+        ([], 99_999.0, 2, "final_nav ("),
+    ],
+)
+def test_empty_bar_slice_compares_only_finish(monkeypatch, capsys, trades, nav, code, first_difference):
+    unn = _ScriptedStream()
+    spiral = _ScriptedStream(finish_trades=trades, final_nav=nav)
+    _install_stub_deps(monkeypatch, unn_factory=lambda **_: unn, spiral_factory=lambda **_: spiral)
+    cli = _load_cli_module(monkeypatch)
+
+    assert cli.main(["--symbol", "OKLO", "--bars", "-3"]) == code
+    out = capsys.readouterr().out
+    assert "bars=0)" in out and unn.bar_idx == spiral.bar_idx == 0
+    assert "逐 bar 吐单分歧 : 不适用" in out
+    assert "无交易路径" not in out and "逐 bar 完成" not in out
+    if first_difference is None:
+        assert "判决: 收尾值相等" in out
+    else:
+        assert "判决: ❌ MISMATCH" in out and f"第一处分歧      : {first_difference}" in out
+
+
 def test_provenance_arms_run_id_and_shared_input_hash(monkeypatch, capsys):
     monkeypatch.setenv("NC_FUNDING_PROFILE", "P0")
     monkeypatch.delenv("BT_MAX_BARS", raising=False)
@@ -466,6 +491,7 @@ def test_cli_subprocess_help_shows_funding_contracts_status_and_exit_semantics()
     assert "exit 1" in out and "未作两臂比较" in out
     assert "exit 2" in out and "MISMATCH" in out
     assert "exit 0" in out and "0 笔交易" in out
+    assert "零根行情：逐 bar 无样本" in out
     assert "NC_FUNDING_PROFILE=<profile>" in out
     assert "NC_FUNDING_PROFILE=P0 " not in out
 

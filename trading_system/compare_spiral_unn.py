@@ -17,14 +17,15 @@
 不开域库、不回退默认资金（须经 `NC_FUNDING_PROFILE` 指定签署记录）、不抬升操作级别；
 相等仅作研究读数，不构成生产准入、交易许可、资金放行或 TStage 触闸依据。
 
-═══════════════ 退出语义与四类结果区分 ═══════════════
+═══════════════ 退出码与观测范围 ═══════════════
 
   - exit 1（构造未成 / 未作两臂比较）：标的未注册、未设置 `NC_FUNDING_PROFILE`，或任一臂
     被运行时底层引擎拒绝（如 `AwaitingPolicy`、`op_ladder` 不满足）。尚未加载 OHLC，
     未执行两臂对账，不产生任何对账判决。
   - exit 2（已完成两臂比较，存在分歧）：三项（逐 bar 吐单 / finish trade 表 / final_nav）
     中至少一项不等，输出 `❌ MISMATCH`、全部 `分歧项` 与 `第一处分歧`。
-  - exit 0（已完成两臂比较，空交易样本）：三项全等但两臂均为 0 笔交易、逐 bar 吐单均为 0；
+  - exit 0（零根行情）：两臂未步进，只比较 finish trade 表与 final_nav；两者均相等才返回 0。
+  - exit 0（有行情，空交易样本）：三项全等但两臂均为 0 笔交易、逐 bar 吐单均为 0；
     仅声明无交易路径上的观测等价，未覆盖交易操作，不得据此宣称验证全部操作。
   - exit 0（已完成两臂比较，有交易样本）：三项全等且有完成交易；仅研究读数，不构成生产准入。
 
@@ -38,7 +39,7 @@
 
 单个 `StreamingSignalReader` 逐 bar 产出 sig（缠论增量信号），**同一 sig** 喂给
 `UnnStream` 与 `SpiralStream`（`push_signal` 因两者 `push_bar` 签名相同而通用）。
-逐 bar 比对吐单 + finish 后比对完整 trade 表 + final_nav；三项全部参与最终判决。
+有行情时逐 bar 比对吐单；无论有无行情，finish 后均比对完整 trade 表与 final_nav。
 
 调用格式（仓库根目录；需提供被两臂运行时共同接纳的 ADR 0040 签署 profile）：
     NC_FUNDING_PROFILE=<profile> PYTHONPATH=src .venv/bin/python trading_system/compare_spiral_unn.py --symbol OKLO --bars 30000
@@ -234,7 +235,8 @@ def compare(sym: str, max_bars: int | None, *, run_id: str | None = None) -> int
     n_unn_pushed = 0
     n_spiral_pushed = 0
 
-    print("逐 bar 流式对账（同一 sig → UnnStream + SpiralStream）...")
+    if n:
+        print("逐 bar 流式对账（同一 sig → UnnStream + SpiralStream）...")
     t0 = time.time()
     for i in range(n):
         n_before = len(dir_flips)
@@ -249,7 +251,8 @@ def compare(sym: str, max_bars: int | None, *, run_id: str | None = None) -> int
             n_bar_div += 1
             if first_div is None:
                 first_div = (i, tu, ts)
-    print(f"  逐 bar 完成 {time.time() - t0:.1f}s")
+    if n:
+        print(f"  逐 bar 完成 {time.time() - t0:.1f}s")
 
     ru = unn.finish()
     rs = spiral.finish()
@@ -325,7 +328,10 @@ def compare(sym: str, max_bars: int | None, *, run_id: str | None = None) -> int
     print(f"bars            : {n:,}")
     print(f"unn   trades    : {len(tu_all)}  (逐 bar 吐 {n_unn_pushed})")
     print(f"spiral trades   : {len(ts_all)}  (逐 bar 吐 {n_spiral_pushed})")
-    print(f"逐 bar 吐单分歧 : {n_bar_div} bar  {'✅ PASS' if bar_match else '❌ MISMATCH'}")
+    if n:
+        print(f"逐 bar 吐单分歧 : {n_bar_div} bar  {'✅ PASS' if bar_match else '❌ MISMATCH'}")
+    else:
+        print("逐 bar 吐单分歧 : 不适用（零根行情，两臂均未步进）；只比较 finish trade 表与 final_nav")
     print(f"trade 表 bit-exact : {'✅ PASS' if trade_match else '❌ MISMATCH'}")
     print(
         f"final_nav       : unn={nav_u:.6f}  spiral={nav_s:.6f}  "
@@ -356,7 +362,9 @@ def compare(sym: str, max_bars: int | None, *, run_id: str | None = None) -> int
         print(f"  spiral: {nav_s!r}")
         print(f"  delta : {nav_s - nav_u:.17g}")
 
-    if verdict and zero_trade_sample:
+    if verdict and n == 0:
+        print("\n判决: 收尾值相等（零根行情，逐 bar 无样本；仅研究读数，不构成生产准入）")
+    elif verdict and zero_trade_sample:
         print(
             "观测等价范围    : 空交易样本（两臂均为 0 笔交易、逐 bar 吐单均为 0）；"
             "仅观测到无交易路径上的三项等价，未覆盖交易操作，不得据此宣称验证全部操作"
@@ -397,10 +405,11 @@ CLI_HELP_EPILOG = """\
   UnnStream 构造器拒绝（仅 SpiralStream 可完成单臂构造）。因此当前直接以这三者调用会构造未成并退出 1，
   不会执行两臂比较；本入口不把现状固化为版本表，后续若生效签署记录更新则按运行时实际结果执行。
 
-退出码与四类结果区分：
+退出码与观测范围：
   exit 1  构造未成 / 未作两臂比较（标的未注册、未设 NC_FUNDING_PROFILE、或任一臂被底层引擎拒绝；无对账判决）
   exit 2  已完成两臂比较，但三项（逐 bar 吐单 / finish trade 表 / final_nav）至少一项分歧（❌ MISMATCH）
-  exit 0  已完成两臂比较且三项全等，两臂均 0 笔交易：仅声明无交易路径等价，未覆盖交易操作
+  exit 0  零根行情：逐 bar 无样本，只比较 finish trade 表与 final_nav；任一不等仍返回 2
+  exit 0  有行情且三项全等，两臂均 0 笔交易：仅声明无交易路径等价，未覆盖交易操作
   exit 0  已完成两臂比较且三项全等，有完成交易：仅研究对账读数（admission_effect=none，不构成生产准入）
 
 调用格式：
