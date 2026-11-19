@@ -67,6 +67,7 @@ pub(super) fn decorate_manifest(manifest: &mut Value) {
         ("close-late", 175),
         ("capture-late", 180),
         ("ReleaseExact-alpha-late", 190),
+        ("ReleaseExact-alpha-post-recover", 1200),
         ("ReleaseExact-alpha-expired", 100001),
     ] {
         clocks[message] = json!({"received_ns":t.to_string(),"first_known_ns":(t+1).to_string(),"commit_ns":(t+2).to_string()});
@@ -1183,6 +1184,177 @@ fn frozen_conditions_refuse_a_missing_or_repeated_required_capability() {
     dispatch(&mut f, "alpha");
     let r = f.handle(0, "ReleaseExact-alpha", release_payload(&f, "alpha"));
     assert_eq!(r["record"]["state"], "ReleasedExact", "{r}");
+}
+
+#[test]
+fn legacy_upgrade_requires_source_reconcile_while_clean_handoff_preserves_restart() {
+    use crate::economic_session::{capture_continuity, store};
+
+    let send_e = |f: &mut Fixture, ep: i64, msg: &str, p: Value| {
+        let mut e = envelope(msg, p);
+        e["schema_revision"] = json!(f.configs[0].revision().unwrap());
+        e["session_id"] = json!(f.configs[0].session);
+        e["session_generation"] = json!(f.configs[0].generation);
+        service::handle(&mut f.dbs[0], &f.configs[0], ep, ep, &json!({}), &e)["payload"].clone()
+    };
+
+    // Case 1: 健康无 tape 会话经优雅停机签发 clean_handoff -> recover(1000) -> epoch 2 直接放行 alpha。
+    let mut f_clean = fixture(None);
+    committed(&mut f_clean);
+    dispatch(&mut f_clean, "alpha");
+    let e_cfg = f_clean.configs[0].clone();
+    {
+        let intake1 = capture_continuity::start(&mut f_clean.dbs[0], &e_cfg, 1).unwrap();
+        let mut cfg1 = e_cfg.clone();
+        cfg1.intake = intake1;
+        capture_continuity::finish_clean(&mut f_clean.dbs[0], &cfg1, 1, false).unwrap();
+    }
+    let rec2 = recover(&e_cfg).unwrap();
+    assert_eq!(rec2["writer_epoch"], "2");
+    f_clean.configs[0].intake = capture_continuity::start(&mut f_clean.dbs[0], &e_cfg, 2).unwrap();
+    let mut rel_alpha = release_payload(&f_clean, "alpha");
+    rel_alpha["writer_epoch"] = json!("2");
+    let r_alpha = send_e(
+        &mut f_clean,
+        2,
+        "ReleaseExact-alpha-post-recover",
+        rel_alpha,
+    );
+    assert_eq!(r_alpha["kind"], "ReleasedExactReceipt", "{r_alpha}");
+
+    // Case 2: 旧库无租约升级（删除 lease，不改原 manifest）-> recover(1000) -> epoch 2：
+    // 直接放行被保守拦下；局部片段/缺件/过期界被拒；经原绑定来源完整连续核清后放行成功。
+    let mut f_legacy = fixture(None);
+    committed(&mut f_legacy);
+    dispatch(&mut f_legacy, "alpha");
+    let l_cfg = f_legacy.configs[0].clone();
+    f_legacy.dbs[0]
+        .execute("DELETE FROM meta WHERE k='external_intake_lease/1'", [])
+        .unwrap();
+    let rec_l = recover(&l_cfg).unwrap();
+    assert_eq!(rec_l["writer_epoch"], "2");
+    f_legacy.configs[0].intake =
+        capture_continuity::start(&mut f_legacy.dbs[0], &l_cfg, 2).unwrap();
+
+    let mut rel_l = release_payload(&f_legacy, "alpha");
+    rel_l["writer_epoch"] = json!("2");
+    let blocked = send_e(
+        &mut f_legacy,
+        2,
+        "ReleaseExact-alpha-post-recover",
+        rel_l.clone(),
+    );
+    assert_eq!(blocked["kind"], "Error", "{blocked}");
+    assert!(
+        blocked["error"].as_str().unwrap().contains("未核来源缺口"),
+        "{blocked}"
+    );
+
+    let mut events = Vec::new();
+    let mut max_cursor = 0i64;
+    for rec in store::rows(&f_legacy.dbs[0], "facts").unwrap() {
+        let cur = rec["event"]["source"]["source_cursor"].as_str().unwrap();
+        max_cursor = max_cursor.max(cur.parse::<i64>().unwrap());
+        events.push(json!({
+            "fact_key": rec["fact_key"],
+            "fact_hash": rec["fact_hash"],
+            "raw_sha256": rec["raw_sha256"],
+            "json_pointer": rec["json_pointer"],
+            "token": rec["token"],
+            "source_cursor": cur,
+        }));
+    }
+    assert!(events.len() >= 2, "{events:?}");
+    let end_cursor = max_cursor.to_string();
+
+    // 早于 recover_ns(1000) 的陈旧结束界被拒。
+    let stale_ns = send_e(
+        &mut f_legacy,
+        2,
+        "reconcile-stale-ns",
+        json!({
+            "op": "ReconcileCaptureContinuity",
+            "writer_epoch": "2",
+            "range_start": "genesis",
+            "range_end_cursor": end_cursor,
+            "through_ns": "999",
+            "events": events,
+        }),
+    );
+    assert_eq!(stale_ns["kind"], "Error", "{stale_ns}");
+    assert!(
+        stale_ns["error"].as_str().unwrap().contains("早于"),
+        "{stale_ns}"
+    );
+
+    // 仅交单条局部片段被拒。
+    let partial = send_e(
+        &mut f_legacy,
+        2,
+        "reconcile-partial",
+        json!({
+            "op": "ReconcileCaptureContinuity",
+            "writer_epoch": "2",
+            "range_start": "genesis",
+            "range_end_cursor": end_cursor,
+            "through_ns": "1000",
+            "events": [events[0].clone()],
+        }),
+    );
+    assert_eq!(partial["kind"], "Error", "{partial}");
+    assert!(
+        partial["error"].as_str().unwrap().contains("未覆盖全部"),
+        "{partial}"
+    );
+
+    // 额外包含未补录事实被拒。
+    let mut with_missing = events.clone();
+    with_missing.push(json!({
+        "fact_key": "f".repeat(64),
+        "fact_hash": "e".repeat(64),
+        "raw_sha256": "d".repeat(64),
+        "json_pointer": "/events/0",
+        "token": "missed-fact",
+        "source_cursor": end_cursor,
+    }));
+    let missing = send_e(
+        &mut f_legacy,
+        2,
+        "reconcile-missing",
+        json!({
+            "op": "ReconcileCaptureContinuity",
+            "writer_epoch": "2",
+            "range_start": "genesis",
+            "range_end_cursor": end_cursor,
+            "through_ns": "1000",
+            "events": with_missing,
+        }),
+    );
+    assert_eq!(missing["kind"], "Error", "{missing}");
+    assert!(
+        missing["error"].as_str().unwrap().contains("未补录"),
+        "{missing}"
+    );
+
+    // 完整连续范围核清（不改原 manifest、不耗 TestOnly 时钟计划）-> alpha 放行成功。
+    let ok = send_e(
+        &mut f_legacy,
+        2,
+        "reconcile-ok",
+        json!({
+            "op": "ReconcileCaptureContinuity",
+            "writer_epoch": "2",
+            "range_start": "genesis",
+            "range_end_cursor": end_cursor,
+            "through_ns": "1000",
+            "events": events,
+        }),
+    );
+    assert_eq!(ok["kind"], "CaptureContinuityReconciled", "{ok}");
+    assert_eq!(ok["source_gap_cleared"], true);
+
+    let r_l = send_e(&mut f_legacy, 2, "ReleaseExact-alpha-post-recover", rel_l);
+    assert_eq!(r_l["kind"], "ReleasedExactReceipt", "{r_l}");
 }
 
 #[path = "exact_x_e2e_tests.rs"]

@@ -233,3 +233,141 @@ pub(crate) fn committed_capture_batch(
     tx.commit().map_err(failure)?;
     Ok(receipt)
 }
+
+/// #1375：从 E 已冻结的模拟 X 只读库核验**全部**已提交批的原件并确认无未提交在途批。
+/// 单一 QueryBatch 不能替代整段连续性证明：这里必须核对 `state.last_request_id` 对应的
+/// 完整结束界、全量冷重放 `validate_existing` 与所有批的逐件原件。
+pub(crate) fn committed_capture_history(
+    manifest: &Value,
+    x_id: &str,
+    x_epoch: i64,
+    end_batch_id: Option<&str>,
+    end_receipt_digest: Option<&str>,
+) -> Result<Value, String> {
+    let binding = &manifest["history_simulation_source"];
+    if !binding.is_object() {
+        return Err("SchemaUnsupported：本会话未冻结模拟 X 原件来源".into());
+    }
+    let db = Path::new(required(binding, "x_db")?);
+    if !db.is_absolute() {
+        return Err("InvalidDomain：X 原件库须为冻结绝对路径".into());
+    }
+    let mut c =
+        Connection::open_with_flags(db, OpenFlags::SQLITE_OPEN_READ_ONLY).map_err(failure)?;
+    c.busy_timeout(std::time::Duration::from_secs(2))
+        .map_err(failure)?;
+    let tx = c.transaction().map_err(failure)?;
+    let x_meta = |key| -> Result<String, String> {
+        tx.query_row("SELECT value FROM x_meta WHERE key=?1", [key], |r| r.get(0))
+            .map_err(failure)
+    };
+    if x_meta("profile_revision")? != "x-execution-profile/1"
+        || x_meta("profile_mode")? != "simulation"
+        || x_meta("history_simulation")? != "true"
+        || x_meta("writer_epoch")? != x_epoch.to_string()
+    {
+        return Err("IdentityConflict：指定 X 模型或当前 writer epoch 不符".into());
+    }
+    let raw_profile: String = tx
+        .query_row(
+            "SELECT v FROM x_sim_meta WHERE k='authority_profile'",
+            [],
+            |r| r.get(0),
+        )
+        .map_err(failure)?;
+    let profile: super::runtime::Profile =
+        serde_json::from_value(strict_json(raw_profile.as_bytes())?).map_err(failure)?;
+    if profile.session_id != required(manifest, "session_id")?
+        || profile.session_generation != required(manifest, "session_generation")?
+    {
+        return Err("IdentityConflict：X 与 E 的会话或化身不同".into());
+    }
+    if profile.source_namespace != required(binding, "source_namespace")?
+        || profile.source_epoch != required(binding, "source_epoch")?
+    {
+        return Err("IdentityConflict：X 持久来源与 E 冻结来源不同".into());
+    }
+    if profile.x_id != x_id
+        || digest(&serde_json::to_value(&profile.model).map_err(failure)?)
+            != required(binding, "model_content_hash")?
+    {
+        return Err("IdentityConflict：X 身份或模型与冻结范围不同".into());
+    }
+    super::runtime::validate_existing(&tx, &profile, x_epoch)?;
+    if super::store::pending_batch(&tx)?.is_some() {
+        return Err("MissingDependency：模拟 X 尚有未提交在途批，无法证明完整结束界".into());
+    }
+    let raw_state: String = tx
+        .query_row("SELECT v FROM x_sim_meta WHERE k='state'", [], |r| r.get(0))
+        .map_err(failure)?;
+    let state: super::model::State =
+        serde_json::from_value(strict_json(raw_state.as_bytes())?).map_err(failure)?;
+    let state_hash = digest(&serde_json::to_value(&state).map_err(failure)?);
+    let mut batches: Vec<(i64, Value)> = Vec::new();
+    {
+        let mut stmt = tx
+            .prepare("SELECT id, result FROM x_sim_batches")
+            .map_err(failure)?;
+        let rows = stmt
+            .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))
+            .map_err(failure)?;
+        for row in rows {
+            let (id, raw) = row.map_err(failure)?;
+            let receipt = strict_json(raw.as_bytes())?;
+            if canonical_json(&receipt) != raw || receipt["request_id"] != id {
+                return Err("IdentityConflict：模拟 X 批回执不规范".into());
+            }
+            let bar = receipt["bar_index"]
+                .as_i64()
+                .ok_or("IdentityConflict：模拟 X 批缺 bar_index")?;
+            batches.push((bar, receipt));
+        }
+    }
+    match (end_batch_id, end_receipt_digest) {
+        (Some(id), Some(expected_digest)) => {
+            if state.last_request_id.as_deref() != Some(id) {
+                return Err(
+                    "MissingDependency：指定结束批不是模拟 X 当前完整前沿，单一 QueryBatch 不能证明整段无漏报"
+                        .into(),
+                );
+            }
+            let raw: String = tx
+                .query_row("SELECT result FROM x_sim_batches WHERE id=?1", [id], |r| {
+                    r.get(0)
+                })
+                .map_err(failure)?;
+            if sha256_hex(raw.as_bytes()) != expected_digest {
+                // DevSkim: ignore DS197836 内容寻址摘要
+                return Err("IdentityConflict：指定 X 结束批的完整回执摘要不同".into());
+            }
+        }
+        (None, None) => {
+            if state.last_request_id.is_some() || !batches.is_empty() {
+                return Err("MissingDependency：模拟 X 已有已提交批，须指定完整结束批".into());
+            }
+        }
+        _ => {
+            return Err("InvalidDomain：模拟 X 结束批号与回执摘要须成对提供".into());
+        }
+    }
+    batches.sort_by_key(|(bar, _)| *bar);
+    let mut originals = Vec::new();
+    for (_, receipt) in &batches {
+        let docs = receipt["originals"]
+            .as_array()
+            .ok_or("StorageUnavailable：模拟批缺原件列表")?;
+        for doc in docs {
+            originals.push(doc.clone());
+        }
+    }
+    tx.commit().map_err(failure)?;
+    Ok(json!({
+        "x_id": x_id,
+        "x_writer_epoch": x_epoch.to_string(),
+        "last_bar": state.last_bar,
+        "last_request_id": state.last_request_id,
+        "state_content_hash": state_hash,
+        "batch_count": batches.len().to_string(),
+        "originals": originals
+    }))
+}

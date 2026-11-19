@@ -377,6 +377,7 @@ impl Config {
             return Err("InvalidDomain：来源未获准：未绑定来源/producer epoch".into());
         }
         let op = required(&e["payload"], "op")?;
+        let reconcile = op == super::capture_continuity::RECONCILE_OP;
         if !self.manifest["authorized_sources"]
             .as_array()
             .unwrap()
@@ -390,7 +391,11 @@ impl Config {
                 ]
                 .iter()
                 .all(|k| a[k] == e[k])
-                    && a["operations"].as_array().unwrap().iter().any(|v| v == op)
+                    && a["operations"]
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .any(|v| v == op || (reconcile && v == "CaptureExternal"))
             })
         {
             return Err("InvalidDomain：来源未获准执行该操作".into());

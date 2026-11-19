@@ -2216,7 +2216,7 @@ fn persist_with_job(
         &mut super::store::ReadBudget::new(job.as_deref_mut(), deadline),
     )?;
     if matches!(record["state"].as_str(), Some("Reserved" | "ReleasedExact")) {
-        config.intake.check_new_risk(config, &image, &ns)?;
+        config.intake.check_new_risk(config, &image, &record, &ns)?;
     }
     super::phase_trace::mark("reduce", &config.domain);
     // C06.5：已核覆盖 token 的清除须与 E 本事务持久状态一致，不能只改返回 JSON。
