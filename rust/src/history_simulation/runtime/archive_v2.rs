@@ -27,9 +27,12 @@ pub(super) struct ArchivedCommand {
 }
 
 impl CommandRecord for ArchivedCommand {
+    type Profile = Profile;
     type Tick = DecimalTick;
     const INNER_REVISION: Option<&'static str> = Some("x-execution-profile/2");
     const CLAIMED_MATCHES_BATCH_BAR: bool = true;
+    const CLAIMED_NS_AUDIT_POLICY: &'static str = "verified_equal_to_attempt_bar";
+    const ARCHIVE_LAYOUT: &'static str = "v2";
 
     fn id(&self) -> &str {
         &self.command_id

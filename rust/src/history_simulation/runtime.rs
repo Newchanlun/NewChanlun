@@ -259,17 +259,62 @@ impl ExactCommand {
     }
 }
 
-/// 冷审绑定原命令及其时钟编码。活动的接纳、调用与恢复接口只接 ExactCommand。
+pub(super) trait AuditProfile {
+    fn validate_profile(&self) -> Result<(), String>;
+    fn model(&self) -> &Model;
+    fn session_id(&self) -> &str;
+    fn session_generation(&self) -> &str;
+    fn x_id(&self) -> &str;
+    fn source_namespace(&self) -> &str;
+    fn source_epoch(&self) -> &str;
+    fn e_identity(&self) -> (&str, &str);
+    fn s_identity(&self) -> (&str, &str);
+}
+
+impl AuditProfile for Profile {
+    fn validate_profile(&self) -> Result<(), String> {
+        self.validate()
+    }
+    fn model(&self) -> &Model {
+        &self.model
+    }
+    fn session_id(&self) -> &str {
+        &self.session_id
+    }
+    fn session_generation(&self) -> &str {
+        &self.session_generation
+    }
+    fn x_id(&self) -> &str {
+        &self.x_id
+    }
+    fn source_namespace(&self) -> &str {
+        &self.source_namespace
+    }
+    fn source_epoch(&self) -> &str {
+        &self.source_epoch
+    }
+    fn e_identity(&self) -> (&str, &str) {
+        (&self.e.authority_id, &self.e.authority_epoch)
+    }
+    fn s_identity(&self) -> (&str, &str) {
+        (&self.s.authority_id, &self.s.authority_epoch)
+    }
+}
+
+/// 冷审绑定原命令、对应冻结 profile 布局及其时钟编码。活动的接纳、调用与恢复接口只接 ExactCommand。
 trait CommandRecord: Serialize + serde::de::DeserializeOwned + PartialEq {
+    type Profile: AuditProfile + Serialize;
     type Tick: serde::de::DeserializeOwned + Copy + Into<i64>;
     const INNER_REVISION: Option<&'static str>;
-    /// `/2` 与 `/3` 写者在持久化 `execute_evidence.claimed_ns` 时恒写 `batch.bar.index`；
-    /// `/1` 早期写者曾写墙钟 `now_ns()`，后期改写 `batch.bar.index`，同属 `x-execution-profile/1`，
-    /// 无法对归档 `/1` 溯及强制等于 `attempt_batch.bar.index`。
+    /// 后期 `/1`（`1f0a42bc20`–`b66b61a0b0`）、`/2` 与 `/3` 写者在持久化 `execute_evidence.claimed_ns`
+    /// 时恒写 `batch.bar.index`；早期 `/1`（`18446a3d35`、`5f3361ca8b` 写墙钟 `now_ns()`，
+    /// `d1c46577b1` 改写 `batch.bar.index`，同用 11 键/3 键早期布局）不能溯及强制等于 `bar.index`。
     const CLAIMED_MATCHES_BATCH_BAR: bool;
+    const CLAIMED_NS_AUDIT_POLICY: &'static str;
+    const ARCHIVE_LAYOUT: &'static str;
     fn id(&self) -> &str;
     fn change(&self) -> &Change;
-    fn validate_record(&self, p: &Profile) -> Result<(), String>;
+    fn validate_record(&self, p: &Self::Profile) -> Result<(), String>;
 }
 
 #[derive(Debug, Copy, Clone, Serialize, Deserialize)]
@@ -281,9 +326,12 @@ impl From<DecimalTick> for i64 {
     }
 }
 impl CommandRecord for ExactCommand {
+    type Profile = Profile;
     type Tick = DecimalTick;
     const INNER_REVISION: Option<&'static str> = Some(super::EXACT_PROFILE_REVISION);
     const CLAIMED_MATCHES_BATCH_BAR: bool = true;
+    const CLAIMED_NS_AUDIT_POLICY: &'static str = "verified_equal_to_attempt_bar";
+    const ARCHIVE_LAYOUT: &'static str = "v3";
     fn id(&self) -> &str {
         &self.command_id
     }
@@ -360,7 +408,7 @@ fn validate_accept_clock<T: Into<i64> + Copy>(
     }
     Ok(())
 }
-fn audit_accepts<C: CommandRecord>(c: &Connection, p: &Profile) -> Result<(), String> {
+fn audit_accepts<C: CommandRecord>(c: &Connection, p: &C::Profile) -> Result<(), String> {
     let mut q = c
         .prepare("SELECT accept_clock,release_evidence,command FROM x_exact_commands")
         .map_err(error)?;
@@ -381,12 +429,19 @@ fn audit_accepts<C: CommandRecord>(c: &Connection, p: &Profile) -> Result<(), St
             return Err("IdentityConflict：恢复交付与命令不符".into());
         }
         let command: C = serde_json::from_str(&command).map_err(error)?;
-        validate_authority_reply(p, &p.e, "QueryReleasedExact", &command, None, &release)?;
+        validate_authority_reply(
+            p,
+            p.e_identity(),
+            "QueryReleasedExact",
+            &command,
+            None,
+            &release,
+        )?;
         validate_accept_clock(&clock, release.commit_ns.into())?;
     }
     Ok(())
 }
-fn audit_execution<C: CommandRecord>(c: &Connection, p: &Profile) -> Result<(), String> {
+fn audit_execution<C: CommandRecord>(c: &Connection, p: &C::Profile) -> Result<(), String> {
     let pending = store::pending_batch(c)?;
     let mut required = std::collections::BTreeMap::new();
     let mut q = c
@@ -493,7 +548,7 @@ fn audit_execution<C: CommandRecord>(c: &Connection, p: &Profile) -> Result<(), 
 }
 
 fn validate_execution_record<C: CommandRecord>(
-    p: &Profile,
+    p: &C::Profile,
     command: &C,
     release: &str,
     evidence: &Value,
@@ -504,7 +559,7 @@ fn validate_execution_record<C: CommandRecord>(
     let reply = parsed.reply;
     validate_authority_reply(
         p,
-        &p.s,
+        p.s_identity(),
         "RequestConditionalExecution",
         command,
         Some(release),
@@ -604,7 +659,14 @@ fn authority_exchange(
         ));
     }
     let r: AuthorityReply = serde_json::from_value(payload.clone()).map_err(error)?;
-    validate_authority_reply(p, a, op, command, release, &r)?;
+    validate_authority_reply(
+        p,
+        (&a.authority_id, &a.authority_epoch),
+        op,
+        command,
+        release,
+        &r,
+    )?;
     Ok(r)
 }
 fn authority(
@@ -621,18 +683,18 @@ fn authority(
 }
 
 fn validate_authority_reply<C: CommandRecord>(
-    p: &Profile,
-    a: &Authority,
+    p: &C::Profile,
+    auth: (&str, &str),
     op: &str,
     command: &C,
     release: Option<&str>,
     r: &Receipt<C, C::Tick>,
 ) -> Result<(), String> {
     if r.protocol != AUTHORITY_WIRE
-        || r.session_id != p.session_id
-        || r.session_generation != p.session_generation
-        || r.authority_id != a.authority_id
-        || r.authority_epoch != a.authority_epoch
+        || r.session_id != p.session_id()
+        || r.session_generation != p.session_generation()
+        || r.authority_id != auth.0
+        || r.authority_epoch != auth.1
         || r.command_id != command.id()
         || r.command_hash != hash(command)
         || r.command != *command
@@ -872,16 +934,8 @@ pub fn validate_existing(c: &Connection, p: &Profile, epoch: i64) -> Result<(), 
     audit_existing::<ExactCommand>(c, p, epoch)
 }
 
-/// 仅 E 固定批只读事务可选封存格式；不供 X 初始化或续写使用。
-pub(super) fn audit_archived_v1(
-    tx: &rusqlite::Transaction<'_>,
-    p: &Profile,
-    epoch: i64,
-) -> Result<(), String> {
-    audit_existing::<archive_v1::ArchivedCommand>(tx, p, epoch)
-}
-
-/// 仅 E 固定批只读事务可选 C2 封存 `/2` 格式；不供 X 初始化或续写使用。
+/// 仅只读冷审与 E 固定批事务可选 C2 封存 `/2` 格式；不供 X 初始化或续写使用。
+#[cfg_attr(not(test), allow(dead_code))]
 pub(super) fn audit_archived_v2(
     tx: &rusqlite::Transaction<'_>,
     p: &Profile,
@@ -890,8 +944,156 @@ pub(super) fn audit_archived_v2(
     audit_existing::<archive_v2::ArchivedCommand>(tx, p, epoch)
 }
 
-fn audit_existing<C: CommandRecord>(c: &Connection, p: &Profile, epoch: i64) -> Result<(), String> {
-    p.validate()?;
+pub(super) struct AuditedArchiveIdentity {
+    pub(super) profile_revision: String,
+    pub(super) archive_layout: &'static str,
+    pub(super) claimed_ns_audit_policy: &'static str,
+    pub(super) writer_epoch: i64,
+    pub(super) session_id: String,
+    pub(super) session_generation: String,
+    pub(super) x_id: String,
+    pub(super) source_namespace: String,
+    pub(super) source_epoch: String,
+    pub(super) model_content_hash: String,
+    pub(super) e_authority_id: String,
+    pub(super) e_authority_epoch: String,
+}
+
+enum ArchiveProfileInner {
+    EarlyV1(archive_v1::EarlyProfile),
+    LateV1(Profile),
+    V2(Profile),
+    V3(Profile),
+}
+
+/// 按外层 `profile_revision` + 内层 `exact_profile_revision` + 冻结键集判别出的归档 profile。
+/// 仅用于只读冷审（`inspect_*`）与 E 固定批核档（`intake::committed_capture_batch`），绝不供 X 续写。
+pub(super) struct ArchiveProfile(ArchiveProfileInner);
+
+impl ArchiveProfile {
+    fn as_audit_profile(&self) -> &dyn AuditProfile {
+        match &self.0 {
+            ArchiveProfileInner::EarlyV1(p) => p,
+            ArchiveProfileInner::LateV1(p)
+            | ArchiveProfileInner::V2(p)
+            | ArchiveProfileInner::V3(p) => p,
+        }
+    }
+
+    pub(super) fn identity(&self, revision: String, writer_epoch: i64) -> AuditedArchiveIdentity {
+        let p = self.as_audit_profile();
+        let (archive_layout, claimed_ns_audit_policy) = match &self.0 {
+            ArchiveProfileInner::EarlyV1(_) => (
+                archive_v1::EarlyArchivedCommand::ARCHIVE_LAYOUT,
+                archive_v1::EarlyArchivedCommand::CLAIMED_NS_AUDIT_POLICY,
+            ),
+            ArchiveProfileInner::LateV1(_) => (
+                archive_v1::LateArchivedCommand::ARCHIVE_LAYOUT,
+                archive_v1::LateArchivedCommand::CLAIMED_NS_AUDIT_POLICY,
+            ),
+            ArchiveProfileInner::V2(_) => (
+                archive_v2::ArchivedCommand::ARCHIVE_LAYOUT,
+                archive_v2::ArchivedCommand::CLAIMED_NS_AUDIT_POLICY,
+            ),
+            ArchiveProfileInner::V3(_) => (
+                ExactCommand::ARCHIVE_LAYOUT,
+                ExactCommand::CLAIMED_NS_AUDIT_POLICY,
+            ),
+        };
+        let (e_authority_id, e_authority_epoch) = p.e_identity();
+        AuditedArchiveIdentity {
+            profile_revision: revision,
+            archive_layout,
+            claimed_ns_audit_policy,
+            writer_epoch,
+            session_id: p.session_id().to_owned(),
+            session_generation: p.session_generation().to_owned(),
+            x_id: p.x_id().to_owned(),
+            source_namespace: p.source_namespace().to_owned(),
+            source_epoch: p.source_epoch().to_owned(),
+            model_content_hash: hash(p.model()),
+            e_authority_id: e_authority_id.to_owned(),
+            e_authority_epoch: e_authority_epoch.to_owned(),
+        }
+    }
+
+    pub(super) fn audit(&self, tx: &rusqlite::Transaction<'_>, epoch: i64) -> Result<(), String> {
+        match &self.0 {
+            ArchiveProfileInner::EarlyV1(p) => {
+                audit_existing::<archive_v1::EarlyArchivedCommand>(tx, p, epoch)
+            }
+            ArchiveProfileInner::LateV1(p) => {
+                audit_existing::<archive_v1::LateArchivedCommand>(tx, p, epoch)
+            }
+            ArchiveProfileInner::V2(p) => {
+                audit_existing::<archive_v2::ArchivedCommand>(tx, p, epoch)
+            }
+            ArchiveProfileInner::V3(p) => audit_existing::<ExactCommand>(tx, p, epoch),
+        }
+    }
+}
+
+/// 在任何 `authority_profile` 解码之前，先核对外层 `x_meta.profile_revision`
+/// 与内层 `x_sim_meta.exact_profile_revision` 一致性，阻断跨代混装。
+pub(super) fn check_inner_revision(tx: &Connection, revision: &str) -> Result<(), String> {
+    let expected = match revision {
+        super::EXACT_PROFILE_REVISION => Some(super::EXACT_PROFILE_REVISION),
+        "x-execution-profile/2" => Some("x-execution-profile/2"),
+        "x-execution-profile/1" => None,
+        other => {
+            return Err(format!("VersionUnsupported：未知历史模拟库版本 `{other}`"));
+        }
+    };
+    let actual: Option<String> = tx
+        .query_row(
+            "SELECT v FROM x_sim_meta WHERE k='exact_profile_revision'",
+            [],
+            |r| r.get(0),
+        )
+        .optional()
+        .map_err(storage_ro)?;
+    if actual.as_deref() != expected {
+        return Err("VersionUnsupported：历史模拟库内层版本与所选格式不符".into());
+    }
+    Ok(())
+}
+
+/// 按版本与冻结键集严格判别归档 profile：
+/// `/2` 与 `/3` 恒直接解码完整 12 键/6 键 `Profile`；
+/// `/1` 先按严格键集区分早期（11 键 + 3 键）与后期（12 键 + 6 键），不回退降格。
+pub(super) fn parse_archive_profile(
+    revision: &str,
+    raw_profile: &str,
+) -> Result<ArchiveProfile, String> {
+    let val = strict_json(raw_profile.as_bytes())?;
+    let inner = match revision {
+        super::EXACT_PROFILE_REVISION => {
+            ArchiveProfileInner::V3(serde_json::from_value(val).map_err(error)?)
+        }
+        "x-execution-profile/2" => {
+            ArchiveProfileInner::V2(serde_json::from_value(val).map_err(error)?)
+        }
+        "x-execution-profile/1" => match archive_v1::classify_v1_profile(&val)? {
+            archive_v1::V1ProfileLayout::Early => {
+                ArchiveProfileInner::EarlyV1(serde_json::from_value(val).map_err(error)?)
+            }
+            archive_v1::V1ProfileLayout::Late => {
+                ArchiveProfileInner::LateV1(serde_json::from_value(val).map_err(error)?)
+            }
+        },
+        other => {
+            return Err(format!("VersionUnsupported：未知历史模拟库版本 `{other}`"));
+        }
+    };
+    Ok(ArchiveProfile(inner))
+}
+
+fn audit_existing<C: CommandRecord>(
+    c: &Connection,
+    p: &C::Profile,
+    epoch: i64,
+) -> Result<(), String> {
+    p.validate_profile()?;
     let exists: bool = c
         .query_row(
             "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='x_sim_meta')",
@@ -919,9 +1121,11 @@ fn audit_existing<C: CommandRecord>(c: &Connection, p: &Profile, epoch: i64) -> 
             })
             .optional()
             .map_err(error)?;
-        let expected = canonical_json(
-            &json!({"model":p.model,"source_namespace":p.source_namespace,"source_epoch":p.source_epoch}),
-        );
+        let expected = canonical_json(&json!({
+            "model": p.model(),
+            "source_namespace": p.source_namespace(),
+            "source_epoch": p.source_epoch(),
+        }));
         if frozen.as_ref().is_some_and(|s| s != &expected) {
             return Err("IdentityConflict：X 模型或事实来源已冻结".into());
         }
@@ -1069,7 +1273,7 @@ fn open_readonly_db(db: &Path) -> Result<Connection, String> {
     Ok(conn)
 }
 
-fn audit_readonly_tx(tx: &rusqlite::Transaction<'_>) -> Result<(String, i64, Profile), String> {
+fn audit_readonly_tx(tx: &rusqlite::Transaction<'_>) -> Result<AuditedArchiveIdentity, String> {
     let has_meta: bool = tx
         .query_row(
             "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='x_meta')",
@@ -1089,6 +1293,7 @@ fn audit_readonly_tx(tx: &rusqlite::Transaction<'_>) -> Result<(String, i64, Pro
     }
     let revision = meta("profile_revision")?;
     let epoch: i64 = meta("writer_epoch")?.parse().map_err(error)?;
+    check_inner_revision(tx, &revision)?;
     let raw_profile: String = tx
         .query_row(
             "SELECT v FROM x_sim_meta WHERE k='authority_profile'",
@@ -1096,15 +1301,9 @@ fn audit_readonly_tx(tx: &rusqlite::Transaction<'_>) -> Result<(String, i64, Pro
             |r| r.get(0),
         )
         .map_err(storage_ro)?;
-    let profile: Profile =
-        serde_json::from_value(strict_json(raw_profile.as_bytes())?).map_err(error)?;
-    match revision.as_str() {
-        super::EXACT_PROFILE_REVISION => validate_existing(tx, &profile, epoch)?,
-        "x-execution-profile/2" => audit_archived_v2(tx, &profile, epoch)?,
-        "x-execution-profile/1" => audit_archived_v1(tx, &profile, epoch)?,
-        other => return Err(format!("VersionUnsupported：未知历史模拟库版本 `{other}`")),
-    }
-    Ok((revision, epoch, profile))
+    let parsed = parse_archive_profile(&revision, &raw_profile)?;
+    parsed.audit(tx, epoch)?;
+    Ok(parsed.identity(revision, epoch))
 }
 
 fn pending_and_frontier(
@@ -1137,19 +1336,11 @@ fn pending_and_frontier(
     ))
 }
 
-fn claimed_ns_audit_policy(revision: &str) -> &'static str {
-    if revision == super::EXACT_PROFILE_REVISION || revision == "x-execution-profile/2" {
-        "verified_equal_to_attempt_bar"
-    } else {
-        "raw_claim_only_non_retroactive_v1"
-    }
-}
-
-/// #1407 C3 R3/R4：对 `/1`、`/2`、`/3` 历史模拟 X 库的只读冷审摘要查询（不获取 writer lock、不触发 WAL checkpoint）。
+/// #1407 C3 R3–R5：对 `/1`（早期/后期）、`/2`、`/3` 历史模拟 X 库的只读冷审摘要查询（不获取 writer lock、不触发 WAL checkpoint）。
 pub fn inspect_history(db: &Path) -> Result<Value, String> {
     let mut conn = open_readonly_db(db)?;
     let tx = conn.transaction().map_err(storage_ro)?;
-    let (revision, epoch, profile) = audit_readonly_tx(&tx)?;
+    let identity = audit_readonly_tx(&tx)?;
     let (pending_batch_id, pending_epoch, last_committed_batch_id, last_bar_index) =
         pending_and_frontier(&tx)?;
 
@@ -1227,15 +1418,16 @@ pub fn inspect_history(db: &Path) -> Result<Value, String> {
     Ok(json!({
         "kind": "HistorySimulationArchiveSummary",
         "read_only": true,
-        "profile_revision": revision,
-        "execute_evidence_claimed_ns_audit_policy": claimed_ns_audit_policy(&revision),
-        "writer_epoch": epoch.to_string(),
-        "session_id": profile.session_id,
-        "session_generation": profile.session_generation,
-        "x_id": profile.x_id,
-        "source_namespace": profile.source_namespace,
-        "source_epoch": profile.source_epoch,
-        "model_content_hash": hash(&profile.model),
+        "profile_revision": identity.profile_revision,
+        "archive_layout": identity.archive_layout,
+        "execute_evidence_claimed_ns_audit_policy": identity.claimed_ns_audit_policy,
+        "writer_epoch": identity.writer_epoch.to_string(),
+        "session_id": identity.session_id,
+        "session_generation": identity.session_generation,
+        "x_id": identity.x_id,
+        "source_namespace": identity.source_namespace,
+        "source_epoch": identity.source_epoch,
+        "model_content_hash": identity.model_content_hash,
         "last_committed_batch_id": last_committed_batch_id,
         "last_bar_index": last_bar_index,
         "pending_batch_id": pending_batch_id,
@@ -1246,14 +1438,15 @@ pub fn inspect_history(db: &Path) -> Result<Value, String> {
     }))
 }
 
-/// #1407 C3 R3/R4：对 `/1`、`/2`、`/3` 历史模拟 X 库的只读命令状态查询。
-/// 保留 `QueryCommand` 原字段（`state`、`x_accept`、`causal_refs`），并显式回传 `attempt_batch_id`、
-/// `attempt_batch_bar_index`、`pending_batch_id`、`execute_evidence`、`execute_evidence_claimed_ns_audit`
-/// 与已提交前沿，逐态覆盖 `Accepted`、`ExecutionReady`、`ExecutionRequested`、`MayHaveCalled`、`Observed` 与 `NoRecord`。
+/// #1407 C3 R3–R5：对 `/1`（早期/后期）、`/2`、`/3` 历史模拟 X 库的只读命令状态查询。
+/// 保留 `QueryCommand` 原字段（`state`、`x_accept`、`causal_refs`），并显式回传 `archive_layout`、
+/// `attempt_batch_id`、`attempt_batch_bar_index`、`pending_batch_id`、`execute_evidence`、
+/// `execute_evidence_claimed_ns_audit` 与已提交前沿，逐态覆盖 `Accepted`、`ExecutionReady`、
+/// `ExecutionRequested`、`MayHaveCalled`、`Observed` 与 `NoRecord`。
 pub fn inspect_command(db: &Path, id: &str) -> Result<Value, String> {
     let mut conn = open_readonly_db(db)?;
     let tx = conn.transaction().map_err(storage_ro)?;
-    let (revision, epoch, profile) = audit_readonly_tx(&tx)?;
+    let identity = audit_readonly_tx(&tx)?;
     let (pending_batch_id, pending_epoch, last_committed_batch_id, last_bar_index) =
         pending_and_frontier(&tx)?;
     let row: Option<(String, String, Option<String>, String, String, Option<String>)> = tx
@@ -1278,8 +1471,9 @@ pub fn inspect_command(db: &Path, id: &str) -> Result<Value, String> {
             "kind": "ExactCommandState",
             "command_id": id,
             "state": "NoRecord",
-            "profile_revision": revision,
-            "writer_epoch": epoch.to_string(),
+            "profile_revision": identity.profile_revision,
+            "archive_layout": identity.archive_layout,
+            "writer_epoch": identity.writer_epoch.to_string(),
             "pending_batch_id": pending_batch_id,
             "pending_epoch": pending_epoch,
             "last_committed_batch_id": last_committed_batch_id,
@@ -1303,7 +1497,7 @@ pub fn inspect_command(db: &Path, id: &str) -> Result<Value, String> {
             let claimed_ns_audit = if execute_evidence.is_null() {
                 Value::Null
             } else {
-                json!(claimed_ns_audit_policy(&revision))
+                json!(identity.claimed_ns_audit_policy)
             };
             json!({
                 "kind": "ExactCommandState",
@@ -1311,8 +1505,8 @@ pub fn inspect_command(db: &Path, id: &str) -> Result<Value, String> {
                 "state": state,
                 "x_accept": clock,
                 "causal_refs": [{
-                    "authority_id": profile.e.authority_id,
-                    "authority_epoch": profile.e.authority_epoch,
+                    "authority_id": identity.e_authority_id,
+                    "authority_epoch": identity.e_authority_epoch,
                     "receipt_id": release_receipt,
                     "command_hash": rel["command_hash"],
                     "release_commit_ns": rel["commit_ns"],
@@ -1324,8 +1518,9 @@ pub fn inspect_command(db: &Path, id: &str) -> Result<Value, String> {
                 "has_execute_evidence": !execute_evidence.is_null(),
                 "execute_evidence": execute_evidence,
                 "execute_evidence_claimed_ns_audit": claimed_ns_audit,
-                "profile_revision": revision,
-                "writer_epoch": epoch.to_string(),
+                "profile_revision": identity.profile_revision,
+                "archive_layout": identity.archive_layout,
+                "writer_epoch": identity.writer_epoch.to_string(),
                 "last_committed_batch_id": last_committed_batch_id,
                 "last_bar_index": last_bar_index,
                 "read_only": true,

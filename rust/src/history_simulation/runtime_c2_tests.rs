@@ -408,13 +408,15 @@ fn frozen_v2_archive_is_audited_readonly_and_refused_for_reopen() {
     tx.rollback().unwrap();
 }
 
-/// #1407 C3 R4 B2：`/2` 派生 `MayHaveCalled` 工作副本中 `execute_evidence.claimed_ns` 必须等于
-/// `attempt_batch.bar.index`（合法对照 `claimed_ns="2"` 通过，篡改反例 `"999"` 以 `IdentityConflict` 拒绝）；
-/// `/1` 因历史写者曾写墙钟 `now_ns()` 与后期改写 `bar.index` 并存，不溯及强制相等，但在 `inspect_command`
-/// 输出中显式以 `raw_claim_only_non_retroactive_v1` 区分原始声称与已核字段。
+/// #1407 C3 R4/R5：按真正冻结的写者代际核档：
+/// - `/2`（12 键/6 键 + 十进制文本时钟）强制 `claimed_ns == attempt_batch.bar.index`；
+/// - 早期 `/1`（`18446a3d35`–`d1c46577b1`：11 键无 `conditions` + 3 键 `e`/`s` + 3 项冻结条件，允许当年墙钟 `claimed_ns`）
+///   标明 `archive_layout="v1_early"` 与 `raw_claim_only_non_retroactive_v1`，绝不把旧墙钟标成已验证等于 bar；
+/// - 后期 `/1`（`1f0a42bc20`–`b66b61a0b0`：12 键 + 6 键）恒写 `bar.index`，标明 `archive_layout="v1_late"`
+///   并强制 `claimed_ns == attempt_batch.bar.index`（墙钟或篡改均拒）。
 #[test]
-fn archived_v2_claimed_ns_must_equal_attempt_bar_while_v1_marks_raw_claim() {
-    let d = dir("r4-claimed-ns");
+fn archived_v2_claimed_ns_must_equal_attempt_bar_and_v1_splits_early_vs_late() {
+    let d = dir("r5-claimed-ns-and-v1-split");
     let p: Profile = parse(profile(&d, approved()));
 
     let mut cmd_v2 = command(approved());
@@ -484,6 +486,7 @@ fn archived_v2_claimed_ns_must_equal_attempt_bar_while_v1_marks_raw_claim() {
     normalized_batch.normalize();
     let batch_raw = canonical_json(&serde_json::to_value(&normalized_batch).unwrap());
 
+    // 1) /2 MayHaveCalled 合法对照 vs 篡改反例
     let db_v2 = d.join("v2-mhc.sqlite");
     let _ = std::fs::remove_file(&db_v2);
     {
@@ -527,16 +530,21 @@ fn archived_v2_claimed_ns_must_equal_attempt_bar_while_v1_marks_raw_claim() {
         tx.commit().unwrap();
     }
 
-    // 合法对照：claimed_ns == attempt_batch.bar.index (0) → 通过并标记 verified_equal_to_attempt_bar。
+    let ok_hist = inspect_history(&db_v2).unwrap();
+    assert_eq!(ok_hist["archive_layout"], "v2");
+    assert_eq!(
+        ok_hist["execute_evidence_claimed_ns_audit_policy"],
+        "verified_equal_to_attempt_bar"
+    );
     let ok_cmd = inspect_command(&db_v2, "a").unwrap();
     assert_eq!(ok_cmd["state"], "MayHaveCalled");
+    assert_eq!(ok_cmd["archive_layout"], "v2");
     assert_eq!(ok_cmd["attempt_batch_bar_index"], 0);
     assert_eq!(
         ok_cmd["execute_evidence_claimed_ns_audit"],
         "verified_equal_to_attempt_bar"
     );
 
-    // 篡改反例：仅改 claimed_ns "0" -> "999"（仍 >= S.commit_ns="0"）→ /2 审计必须拒绝。
     {
         let conn = rusqlite::Connection::open(&db_v2).unwrap();
         let exec_bad = json!({"reply": s_reply_v2, "claimed_ns": "999"});
@@ -554,8 +562,86 @@ fn archived_v2_claimed_ns_must_equal_attempt_bar_while_v1_marks_raw_claim() {
         "unexpected error: {bad_err}"
     );
 
-    // /1 归档库对照：早期 /1 墙钟 claimed_ns (1_700_000_000_000_000_000) 不溯及拒绝，但标明 raw_claim_only_non_retroactive_v1。
-    let cmd_v1 = json!({
+    // 2) 真实冻结早期 /1（11 键无 conditions + 3 键 E/S + 3 项冻结条件 + 墙钟 claimed_ns）
+    let early_conditions = json!([
+        {
+            "condition_id": "cond-release",
+            "authority_revision": "released-exact/1",
+            "validator_capability": "released-exact/1",
+            "required_check_stages": ["E.ReleaseExact"],
+            "dependency_set": ["e:1"],
+            "evidence_refs": ["ev:e"],
+            "invalidation_sources": ["inv:e"],
+            "coverage_proof": "cov:e",
+            "failure_result": "Denied"
+        },
+        {
+            "condition_id": "cond-exec",
+            "authority_revision": "execute-committed/1",
+            "validator_capability": "execute-committed/1",
+            "required_check_stages": ["S.RequestConditionalExecution"],
+            "dependency_set": ["s:1"],
+            "evidence_refs": ["ev:s"],
+            "invalidation_sources": ["inv:s"],
+            "coverage_proof": "cov:s",
+            "failure_result": "Denied"
+        },
+        {
+            "condition_id": "cond-x",
+            "authority_revision": "simulation-local-transaction/1",
+            "validator_capability": "simulation-local-transaction/1",
+            "required_check_stages": ["X.OwnAttemptAndCall"],
+            "dependency_set": ["x:1"],
+            "evidence_refs": ["ev:x"],
+            "invalidation_sources": ["inv:x"],
+            "coverage_proof": "cov:x",
+            "failure_result": "Denied"
+        }
+    ]);
+    let early_profile = json!({
+        "model": serde_json::to_value(&p.model).unwrap(),
+        "session_id": p.session_id,
+        "session_generation": p.session_generation,
+        "x_id": p.x_id,
+        "source_namespace": p.source_namespace,
+        "source_epoch": p.source_epoch,
+        "socket": p.socket,
+        "e": {
+            "socket": p.e.socket,
+            "authority_id": p.e.authority_id,
+            "authority_epoch": p.e.authority_epoch,
+        },
+        "s": {
+            "socket": p.s.socket,
+            "authority_id": p.s.authority_id,
+            "authority_epoch": p.s.authority_epoch,
+        },
+        "timeout_ms": p.timeout_ms,
+        "max_frame_bytes": p.max_frame_bytes,
+    });
+    let change_v1 = json!({
+        "kind": "submit",
+        "order": {
+            "command_id": "a",
+            "family_id": "f-a",
+            "chong_id": "a",
+            "revision": 1,
+            "side": "buy",
+            "quantity": 5,
+            "kind": {"kind": "limit", "price": 100},
+            "eligibility_ref": "S:a",
+            "projection_manifest": "p-a"
+        }
+    });
+    let cert_early = json!({
+        "rd11_policy": "controlled-fixture-rd11",
+        "responsibility_refs": ["r"],
+        "structure_dependencies": ["s"],
+        "market_dependencies": ["m"],
+        "rule_revision": "rule",
+        "conditions": early_conditions
+    });
+    let cmd_early = json!({
         "command_id": "a",
         "logical_order_family": "f-a",
         "session_id": p.session_id,
@@ -564,84 +650,251 @@ fn archived_v2_claimed_ns_must_equal_attempt_bar_while_v1_marks_raw_claim() {
         "x_epoch": 1,
         "symbol": "TEST",
         "projection_kind": "per_leg",
-        "change": {
-            "kind": "submit",
-            "order": {
-                "command_id": "a",
-                "family_id": "f-a",
-                "chong_id": "a",
-                "revision": 1,
-                "side": "buy",
-                "quantity": 5,
-                "kind": {"kind": "limit", "price": 100},
-                "eligibility_ref": "S:a",
-                "projection_manifest": "p-a"
-            }
-        },
-        "certificate": {
-            "rd11_policy": "controlled-fixture-rd11",
-            "responsibility_refs": ["r"],
-            "structure_dependencies": ["s"],
-            "market_dependencies": ["m"],
-            "rule_revision": "rule",
-            "conditions": approved()
-        },
-        "plan_hash": hash(&json!({
-            "kind": "submit",
-            "order": {
-                "command_id": "a",
-                "family_id": "f-a",
-                "chong_id": "a",
-                "revision": 1,
-                "side": "buy",
-                "quantity": 5,
-                "kind": {"kind": "limit", "price": 100},
-                "eligibility_ref": "S:a",
-                "projection_manifest": "p-a"
-            }
-        })),
-        "certificate_hash": hash(&json!({
-            "rd11_policy": "controlled-fixture-rd11",
-            "responsibility_refs": ["r"],
-            "structure_dependencies": ["s"],
-            "market_dependencies": ["m"],
-            "rule_revision": "rule",
-            "conditions": approved()
-        }))
+        "change": change_v1,
+        "certificate": cert_early,
+        "plan_hash": hash(&change_v1),
+        "certificate_hash": hash(&cert_early),
     });
-    let cmd_v1_hash = sha256_hex(canonical_json(&cmd_v1).as_bytes());
-    let release_v1 = json!({
+    let cmd_early_hash = sha256_hex(canonical_json(&cmd_early).as_bytes());
+    let release_early = json!({
         "protocol": AUTHORITY_WIRE,
         "session_id": p.session_id,
         "session_generation": p.session_generation,
         "authority_id": p.e.authority_id,
         "authority_epoch": p.e.authority_epoch,
         "command_id": "a",
-        "command_hash": cmd_v1_hash,
-        "command": cmd_v1,
+        "command_hash": cmd_early_hash,
+        "command": cmd_early,
         "state": "ReleasedExact",
         "receipt_id": "E:a",
         "release_receipt_id": null,
         "commit_ns": 100,
     });
-    let s_reply_v1 = json!({
+    let s_reply_early = json!({
         "protocol": AUTHORITY_WIRE,
         "session_id": p.session_id,
         "session_generation": p.session_generation,
         "authority_id": p.s.authority_id,
         "authority_epoch": p.s.authority_epoch,
         "command_id": "a",
-        "command_hash": cmd_v1_hash,
-        "command": cmd_v1,
+        "command_hash": cmd_early_hash,
+        "command": cmd_early,
         "state": "ExecuteCommitted",
         "receipt_id": "S:a",
         "release_receipt_id": "E:a",
-        "commit_ns": 105,
+        "commit_ns": 100,
     });
-    let db_v1 = d.join("v1-wallclock.sqlite");
-    let _ = std::fs::remove_file(&db_v1);
+    let db_v1_early = d.join("v1-early-wallclock.sqlite");
+    let _ = std::fs::remove_file(&db_v1_early);
     {
-        let mut conn = rusqlite::Connection::open(&db_v1).unwrap();
+        let mut conn = rusqlite::Connection::open(&db_v1_early).unwrap();
+        let tx = conn.transaction().unwrap();
+        tx.execute_batch("CREATE TABLE x_meta(key TEXT PRIMARY KEY, value TEXT NOT NULL);")
+            .unwrap();
+        for (k, v) in [
+            ("profile_revision", "x-execution-profile/1"),
+            ("profile_mode", "simulation"),
+            ("history_simulation", "true"),
+            ("writer_epoch", "1"),
+        ] {
+            tx.execute("INSERT INTO x_meta VALUES(?1,?2)", rusqlite::params![k, v])
+                .unwrap();
+        }
+        initialize_in_transaction(&tx, &p, 1).unwrap();
+        tx.execute(
+            "DELETE FROM x_sim_meta WHERE k='exact_profile_revision'",
+            [],
+        )
+        .unwrap();
+        tx.execute(
+            "UPDATE x_sim_meta SET v=?1 WHERE k='authority_profile'",
+            [canonical_json(&early_profile)],
+        )
+        .unwrap();
+        tx.execute(
+            "INSERT INTO x_sim_meta VALUES('pending_batch',?1),('pending_epoch','1')",
+            [&batch_raw],
+        )
+        .unwrap();
+        let clock = json!({
+            "received_ns": 1795111790971528899i64,
+            "first_known_ns": 1795111790972359201i64,
+            "commit_ns": 1795111790972359285i64
+        });
+        let exec_wall = json!({"reply": s_reply_early, "claimed_ns": 1795111790994769493i64});
+        tx.execute(
+            "INSERT INTO x_exact_commands(id,command,release_receipt,state,attempt_batch,accept_clock,release_evidence,execute_evidence) VALUES('a',?,'E:a','MayHaveCalled',?,?,?,?)",
+            rusqlite::params![
+                canonical_json(&cmd_early),
+                batch_raw,
+                canonical_json(&clock),
+                canonical_json(&release_early),
+                canonical_json(&exec_wall)
+            ],
+        )
+        .unwrap();
+        tx.commit().unwrap();
+    }
+    let early_hist = inspect_history(&db_v1_early).unwrap();
+    assert_eq!(early_hist["profile_revision"], "x-execution-profile/1");
+    assert_eq!(early_hist["archive_layout"], "v1_early");
+    assert_eq!(
+        early_hist["execute_evidence_claimed_ns_audit_policy"],
+        "raw_claim_only_non_retroactive_v1"
+    );
+    let early_cmd = inspect_command(&db_v1_early, "a").unwrap();
+    assert_eq!(early_cmd["state"], "MayHaveCalled");
+    assert_eq!(early_cmd["archive_layout"], "v1_early");
+    assert_eq!(
+        early_cmd["execute_evidence"]["claimed_ns"],
+        1795111790994769493i64
+    );
+    assert_eq!(
+        early_cmd["execute_evidence_claimed_ns_audit"],
+        "raw_claim_only_non_retroactive_v1"
+    );
+    // 早期 /1 坏档：claimed_ns < S.commit_ns(100) 必须拒绝。
+    {
+        let conn = rusqlite::Connection::open(&db_v1_early).unwrap();
+        let exec_lt = json!({"reply": s_reply_early, "claimed_ns": 99});
+        conn.execute(
+            "UPDATE x_exact_commands SET execute_evidence=?1 WHERE id='a'",
+            [canonical_json(&exec_lt)],
+        )
+        .unwrap();
+    }
+    let early_lt_err = inspect_command(&db_v1_early, "a").unwrap_err();
+    assert!(
+        early_lt_err.starts_with("IdentityConflict"),
+        "unexpected error: {early_lt_err}"
+    );
+    // 早期 /1 坏档：即使重算哈希，塞入非当年冻结 3 项条件清单（如 4 项条件）也必须拒绝。
+    {
+        let cert_4 = json!({
+            "rd11_policy": "controlled-fixture-rd11",
+            "responsibility_refs": ["r"],
+            "structure_dependencies": ["s"],
+            "market_dependencies": ["m"],
+            "rule_revision": "rule",
+            "conditions": approved()
+        });
+        let cmd_4 = json!({
+            "command_id": "a",
+            "logical_order_family": "f-a",
+            "session_id": p.session_id,
+            "session_generation": p.session_generation,
+            "x_id": p.x_id,
+            "x_epoch": 1,
+            "symbol": "TEST",
+            "projection_kind": "per_leg",
+            "change": change_v1,
+            "certificate": cert_4,
+            "plan_hash": hash(&change_v1),
+            "certificate_hash": hash(&cert_4),
+        });
+        let cmd_4_hash = sha256_hex(canonical_json(&cmd_4).as_bytes());
+        let rel_4 = json!({
+            "protocol": AUTHORITY_WIRE,
+            "session_id": p.session_id,
+            "session_generation": p.session_generation,
+            "authority_id": p.e.authority_id,
+            "authority_epoch": p.e.authority_epoch,
+            "command_id": "a",
+            "command_hash": cmd_4_hash,
+            "command": cmd_4,
+            "state": "ReleasedExact",
+            "receipt_id": "E:a",
+            "release_receipt_id": null,
+            "commit_ns": 100,
+        });
+        let s_4 = json!({
+            "protocol": AUTHORITY_WIRE,
+            "session_id": p.session_id,
+            "session_generation": p.session_generation,
+            "authority_id": p.s.authority_id,
+            "authority_epoch": p.s.authority_epoch,
+            "command_id": "a",
+            "command_hash": cmd_4_hash,
+            "command": cmd_4,
+            "state": "ExecuteCommitted",
+            "receipt_id": "S:a",
+            "release_receipt_id": "E:a",
+            "commit_ns": 100,
+        });
+        let exec_4 = json!({"reply": s_4, "claimed_ns": 1795111790994769493i64});
+        let conn = rusqlite::Connection::open(&db_v1_early).unwrap();
+        conn.execute(
+            "UPDATE x_exact_commands SET command=?1, release_evidence=?2, execute_evidence=?3 WHERE id='a'",
+            rusqlite::params![
+                canonical_json(&cmd_4),
+                canonical_json(&rel_4),
+                canonical_json(&exec_4),
+            ],
+        )
+        .unwrap();
+    }
+    let early_4cond_err = inspect_command(&db_v1_early, "a").unwrap_err();
+    assert!(
+        early_4cond_err.starts_with("Unsupported"),
+        "unexpected error: {early_4cond_err}"
+    );
+
+    // 3) 真实冻结后期 /1（12 键含 conditions + 6 键 E/S）：claimed_ns == bar.index 通过，墙钟/篡改必拒。
+    let cert_late = json!({
+        "rd11_policy": "controlled-fixture-rd11",
+        "responsibility_refs": ["r"],
+        "structure_dependencies": ["s"],
+        "market_dependencies": ["m"],
+        "rule_revision": "rule",
+        "conditions": approved()
+    });
+    let cmd_late = json!({
+        "command_id": "a",
+        "logical_order_family": "f-a",
+        "session_id": p.session_id,
+        "session_generation": p.session_generation,
+        "x_id": p.x_id,
+        "x_epoch": 1,
+        "symbol": "TEST",
+        "projection_kind": "per_leg",
+        "change": change_v1,
+        "certificate": cert_late,
+        "plan_hash": hash(&change_v1),
+        "certificate_hash": hash(&cert_late),
+    });
+    let cmd_late_hash = sha256_hex(canonical_json(&cmd_late).as_bytes());
+    let release_late = json!({
+        "protocol": AUTHORITY_WIRE,
+        "session_id": p.session_id,
+        "session_generation": p.session_generation,
+        "authority_id": p.e.authority_id,
+        "authority_epoch": p.e.authority_epoch,
+        "command_id": "a",
+        "command_hash": cmd_late_hash,
+        "command": cmd_late,
+        "state": "ReleasedExact",
+        "receipt_id": "E:a",
+        "release_receipt_id": null,
+        "commit_ns": 0,
+    });
+    let s_reply_late = json!({
+        "protocol": AUTHORITY_WIRE,
+        "session_id": p.session_id,
+        "session_generation": p.session_generation,
+        "authority_id": p.s.authority_id,
+        "authority_epoch": p.s.authority_epoch,
+        "command_id": "a",
+        "command_hash": cmd_late_hash,
+        "command": cmd_late,
+        "state": "ExecuteCommitted",
+        "receipt_id": "S:a",
+        "release_receipt_id": "E:a",
+        "commit_ns": 0,
+    });
+    let db_v1_late = d.join("v1-late.sqlite");
+    let _ = std::fs::remove_file(&db_v1_late);
+    {
+        let mut conn = rusqlite::Connection::open(&db_v1_late).unwrap();
         let tx = conn.transaction().unwrap();
         tx.execute_batch("CREATE TABLE x_meta(key TEXT PRIMARY KEY, value TEXT NOT NULL);")
             .unwrap();
@@ -665,30 +918,229 @@ fn archived_v2_claimed_ns_must_equal_attempt_bar_while_v1_marks_raw_claim() {
             [&batch_raw],
         )
         .unwrap();
-        let clock = json!({"received_ns": 100, "first_known_ns": 101, "commit_ns": 102});
-        let exec_wall = json!({"reply": s_reply_v1, "claimed_ns": 1700000000000000000i64});
+        let clock = json!({"received_ns": 0, "first_known_ns": 0, "commit_ns": 0});
+        let exec_ok = json!({"reply": s_reply_late, "claimed_ns": 0});
         tx.execute(
             "INSERT INTO x_exact_commands(id,command,release_receipt,state,attempt_batch,accept_clock,release_evidence,execute_evidence) VALUES('a',?,'E:a','MayHaveCalled',?,?,?,?)",
             rusqlite::params![
-                canonical_json(&cmd_v1),
+                canonical_json(&cmd_late),
                 batch_raw,
                 canonical_json(&clock),
-                canonical_json(&release_v1),
-                canonical_json(&exec_wall)
+                canonical_json(&release_late),
+                canonical_json(&exec_ok)
             ],
         )
         .unwrap();
         tx.commit().unwrap();
     }
-    let v1_hist = inspect_history(&db_v1).unwrap();
+    let late_hist = inspect_history(&db_v1_late).unwrap();
+    assert_eq!(late_hist["archive_layout"], "v1_late");
     assert_eq!(
-        v1_hist["execute_evidence_claimed_ns_audit_policy"],
-        "raw_claim_only_non_retroactive_v1"
+        late_hist["execute_evidence_claimed_ns_audit_policy"],
+        "verified_equal_to_attempt_bar"
     );
-    let v1_cmd = inspect_command(&db_v1, "a").unwrap();
-    assert_eq!(v1_cmd["state"], "MayHaveCalled");
+    let late_cmd = inspect_command(&db_v1_late, "a").unwrap();
+    assert_eq!(late_cmd["archive_layout"], "v1_late");
     assert_eq!(
-        v1_cmd["execute_evidence_claimed_ns_audit"],
-        "raw_claim_only_non_retroactive_v1"
+        late_cmd["execute_evidence_claimed_ns_audit"],
+        "verified_equal_to_attempt_bar"
     );
+    // 后期 /1 不允许墙钟或篡改 claimed_ns（不能借早期 /1 通道放行）。
+    {
+        let conn = rusqlite::Connection::open(&db_v1_late).unwrap();
+        let exec_wall = json!({"reply": s_reply_late, "claimed_ns": 1700000000000000000i64});
+        conn.execute(
+            "UPDATE x_exact_commands SET execute_evidence=?1 WHERE id='a'",
+            [canonical_json(&exec_wall)],
+        )
+        .unwrap();
+    }
+    let late_bad = inspect_command(&db_v1_late, "a").unwrap_err();
+    assert!(
+        late_bad.starts_with(
+            "IdentityConflict：持久S执行证据调用占有时刻(1700000000000000000)与占有批bar.index(0)不符"
+        ),
+        "unexpected error: {late_bad}"
+    );
+}
+
+/// #1407 C3 R5 反降格回归：严禁将损坏的后期 `/1`、混合/非对称键集、或 `/2`/`/3` 降格成早期 `/1`。
+#[test]
+fn archived_profile_classification_refuses_downgrade_and_hybrid_layouts() {
+    let d = dir("r5-anti-downgrade");
+    let p: Profile = parse(profile(&d, approved()));
+    let late_val = serde_json::to_value(&p).unwrap();
+
+    let early_val = json!({
+        "model": serde_json::to_value(&p.model).unwrap(),
+        "session_id": p.session_id,
+        "session_generation": p.session_generation,
+        "x_id": p.x_id,
+        "source_namespace": p.source_namespace,
+        "source_epoch": p.source_epoch,
+        "socket": p.socket,
+        "e": {
+            "socket": p.e.socket,
+            "authority_id": p.e.authority_id,
+            "authority_epoch": p.e.authority_epoch,
+        },
+        "s": {
+            "socket": p.s.socket,
+            "authority_id": p.s.authority_id,
+            "authority_epoch": p.s.authority_epoch,
+        },
+        "timeout_ms": p.timeout_ms,
+        "max_frame_bytes": p.max_frame_bytes,
+    });
+
+    let write_db = |name: &str, rev: &str, inner_rev: Option<&str>, prof: &Value| {
+        let path = d.join(format!("{name}.sqlite"));
+        let _ = std::fs::remove_file(&path);
+        let mut conn = rusqlite::Connection::open(&path).unwrap();
+        let tx = conn.transaction().unwrap();
+        tx.execute_batch("CREATE TABLE x_meta(key TEXT PRIMARY KEY, value TEXT NOT NULL);")
+            .unwrap();
+        for (k, v) in [
+            ("profile_revision", rev),
+            ("profile_mode", "simulation"),
+            ("history_simulation", "true"),
+            ("writer_epoch", "1"),
+        ] {
+            tx.execute("INSERT INTO x_meta VALUES(?1,?2)", rusqlite::params![k, v])
+                .unwrap();
+        }
+        initialize_in_transaction(&tx, &p, 1).unwrap();
+        match inner_rev {
+            Some(v) => {
+                tx.execute(
+                    "UPDATE x_sim_meta SET v=?1 WHERE k='exact_profile_revision'",
+                    [v],
+                )
+                .unwrap();
+            }
+            None => {
+                tx.execute(
+                    "DELETE FROM x_sim_meta WHERE k='exact_profile_revision'",
+                    [],
+                )
+                .unwrap();
+            }
+        }
+        tx.execute(
+            "UPDATE x_sim_meta SET v=?1 WHERE k='authority_profile'",
+            [canonical_json(prof)],
+        )
+        .unwrap();
+        tx.commit().unwrap();
+        path
+    };
+
+    // 1) 损坏后期 /1：有 conditions（12 键），但 e 缺失 schema_revision（5 键）→ 拒（绝不降格）
+    let mut late_missing_schema = late_val.clone();
+    late_missing_schema["e"]
+        .as_object_mut()
+        .unwrap()
+        .remove("schema_revision");
+    let err = inspect_history(&write_db(
+        "late-missing-schema",
+        "x-execution-profile/1",
+        None,
+        &late_missing_schema,
+    ))
+    .unwrap_err();
+    assert!(err.starts_with("InvalidDomain"), "unexpected: {err}");
+
+    // 2) 混合布局：有 conditions（12 键）但 e/s 为早期 3 键 → 拒
+    let mut mixed_12_with_3 = early_val.clone();
+    mixed_12_with_3
+        .as_object_mut()
+        .unwrap()
+        .insert("conditions".into(), late_val["conditions"].clone());
+    let err = inspect_history(&write_db(
+        "mixed-12-with-3",
+        "x-execution-profile/1",
+        None,
+        &mixed_12_with_3,
+    ))
+    .unwrap_err();
+    assert!(err.starts_with("InvalidDomain"), "unexpected: {err}");
+
+    // 3) 混合布局：无 conditions（11 键）但 e/s 为后期 6 键 → 拒
+    let mut mixed_11_with_6 = late_val.clone();
+    mixed_11_with_6
+        .as_object_mut()
+        .unwrap()
+        .remove("conditions");
+    let err = inspect_history(&write_db(
+        "mixed-11-with-6",
+        "x-execution-profile/1",
+        None,
+        &mixed_11_with_6,
+    ))
+    .unwrap_err();
+    assert!(err.starts_with("InvalidDomain"), "unexpected: {err}");
+
+    // 4) 非对称：无 conditions（11 键），e 为 6 键、s 为 3 键 → 拒
+    let mut asym = early_val.clone();
+    asym["e"] = late_val["e"].clone();
+    let err = inspect_history(&write_db(
+        "asym-e6-s3",
+        "x-execution-profile/1",
+        None,
+        &asym,
+    ))
+    .unwrap_err();
+    assert!(err.starts_with("InvalidDomain"), "unexpected: {err}");
+
+    // 5) 早期 /1 多出未知键 → 拒
+    let mut early_extra = early_val.clone();
+    early_extra
+        .as_object_mut()
+        .unwrap()
+        .insert("extra".into(), json!(1));
+    let err = inspect_history(&write_db(
+        "early-extra-key",
+        "x-execution-profile/1",
+        None,
+        &early_extra,
+    ))
+    .unwrap_err();
+    assert!(err.starts_with("InvalidDomain"), "unexpected: {err}");
+
+    // 6) 后期 /1 schema_revision 为空字符串 → 拒（绝不降格）
+    let mut late_empty_schema = late_val.clone();
+    late_empty_schema["e"]["schema_revision"] = json!("");
+    let err = inspect_history(&write_db(
+        "late-empty-schema",
+        "x-execution-profile/1",
+        None,
+        &late_empty_schema,
+    ))
+    .unwrap_err();
+    assert!(err.starts_with("InvalidDomain"), "unexpected: {err}");
+
+    // 7) /2 与 /3 塞入早期 11+3 profile → 严格按 Profile 拒绝，绝不降格
+    for rev in ["x-execution-profile/2", "x-execution-profile/3"] {
+        let err = inspect_history(&write_db(
+            &format!("downgrade-{}", rev.rsplit('/').next().unwrap()),
+            rev,
+            Some(rev),
+            &early_val,
+        ))
+        .unwrap_err();
+        assert!(
+            err.starts_with("InvalidDomain") && err.contains("missing field"),
+            "unexpected for {rev}: {err}"
+        );
+    }
+
+    // 8) 早期 /1 混装内层 exact_profile_revision → VersionUnsupported
+    let err = inspect_history(&write_db(
+        "early-with-inner-rev",
+        "x-execution-profile/1",
+        Some("x-execution-profile/3"),
+        &early_val,
+    ))
+    .unwrap_err();
+    assert!(err.starts_with("VersionUnsupported"), "unexpected: {err}");
 }

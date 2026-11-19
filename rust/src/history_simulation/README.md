@@ -79,9 +79,8 @@ e_economic_session inspect-simulation-capture-batch --manifest MANIFEST --db E_D
   --batch-id BATCH_ID --batch-receipt-sha256 RECEIPT_SHA256 --x-id X_ID --x-epoch X_WRITER_EPOCH
 ```
 
-这个本地只读命令使用 E 库绑定的 manifest，不从请求接受 X 库路径；在 X 的同一
-只读事务中按持久版本选择核验：`/1` 用原数字命令和整数时钟，`/2` 用含首次量、分配身份的 IC:13 命令和时钟（归档只读），`/3` 在 `/2` 基础上强制核对 `model_ref` 与 X 实际装载模型内容摘要。
-外层版本与内层标记不符、命令或 E/S 原收据不符、批重演或原件对不上，都拒绝；不换版本重试。
+这个本地只读命令使用 E 库绑定的 manifest，不从请求接受 X 库路径（也不得修改原 manifest；若经原 E 读取已封存旧档，原 manifest 绑定的 `history_simulation_source.x_db` 绝对路径须实际指向独立可写工作副本，不直接打开封存原件）；在 X 的同一只读事务中按外层 `profile_revision`、内层 `exact_profile_revision` 与冻结键集严格判别核验：早期 `/1`（11 键无 `conditions` + 3 键 `e`/`s` + 3 项冻结条件 + 整数时钟，不伪造共同信封或新授权）、后期 `/1`（12 键含 `conditions` + 6 键 `e`/`s` + 整数时钟，强制 `claimed_ns == bar.index`）、`/2`（含首次量、分配身份的 IC:13 命令与十进制文本时钟，归档只读）、`/3`（在 `/2` 基础上强制核对 `model_ref` 与 X 实际装载模型内容摘要）。
+外层版本与内层标记不符、键集混合/缺失、命令或 E/S 原收据不符、批重演或原件对不上，都拒绝；不宽松回退降格，不换版本重试。
 完整回执的摘要用于固定该批；回执中的 state_content_hash 仍是单独的状态读数。结果中的 `e_cut` 是接纳状态
 所依据的切面；每个 `Recorded` 项带原收据和当前 Pending（若存在）。获准来源
 把 `Missing` 项的原字节、指针和事件时刻走原 CaptureExternal 补录；有过发送的
@@ -211,7 +210,7 @@ Q 来源需获 `QueryCommand` 权限；启用已有 `EconomicReadOpen/Page/Close
 
 ## C3 升级、退场合同候选与迁移说明（待独立评审与主控裁定）
 
-> **审签状态：R4 候选条文（尚未批准 /2 退场，真正执行升级与停进程不在此次授权）。** 前次 C2 裁定（`#1407#issuecomment-6749476649`）仅退掉 `#1942` 数值编码的 `/1` 历史模拟写入入口，未授权自动退掉 `/2` 写入入口；本节条文须经独立非作者评审与主控显式签署后，再于下文拟定生效点切换生效。
+> **审签状态：R5 候选条文（保留对真实早期/后期 `/1` 档案的只读核档读回；新历史执行走 `FIN/6 + X/3` 与旧写者退场的操作时点沿用 R4 拟案，尚未批准 `/2` 退场，真正执行升级与停进程不在此次授权）。** 前次 C2 裁定（`#1407#issuecomment-6749476649`）仅退掉 `#1942` 数值编码的 `/1` 历史模拟写入入口，未授权自动退掉 `/2` 写入入口；本节条文须经独立非作者评审与主控显式签署后，再于下文拟定生效点切换生效。
 
 ### 1. 无法原地保全 `FIN/5 + X/2` 续写的证据依据
 
@@ -222,7 +221,7 @@ Q 来源需获 `QueryCommand` 权限；启用已有 `EconomicReadOpen/Page/Close
 3. **X 自持配置不等于 E 授权**：旧进程曾运行过或 X 本地持有 `x-profile.json`，都不能证明 E 授权过该实装模型（C3 反例 `06a767ab` 已证在 `FIN/5 + X/2` 下仅将 X 的 maker 费率分子 `1 → 10` 即可静默产生错费成交）。
 4. **不伪造兼容、不放宽 `/3`**：不得给 `/3` 增加可选 `model_ref`、不得回填或重签旧 `/5` 命令、不得靠事后拆换旧二进制或仅改版本字符串假装兼容。
 
-因此，本候选提出最小升级与退场合同：退掉可向目标真实历史 X 交付未绑定模型授权的旧写入入口，保留全部既有收据、其他 `/5` 经济写入、非历史用途、真正不可兑现的离线 C1 验算以及完整只读查询取证；新执行统一走显式 `tb03b-finance/6 + x-execution-profile/3` 新会话。
+因此，本候选提出最小升级与退场合同：退掉可向目标真实历史 X 交付未绑定模型授权的旧写入入口，保留全部既有收据、其他 `/5` 经济写入、非历史用途、真正不可兑现的离线 C1 验算以及完整只读查询取证（涵盖真实早期 `/1`、后期 `/1`、`/2` 与 `/3`）；新执行统一走显式 `tb03b-finance/6 + x-execution-profile/3` 新会话。
 
 ### 2. 拟定生效点、退场范围、现有能力分界与三处守门
 
@@ -244,43 +243,51 @@ Q 来源需获 `QueryCommand` 权限；启用已有 `EconomicReadOpen/Page/Close
   - **非历史装配完全恢复旧行为**：`x.profile` 不含 `history_simulation` 时，launcher 不预读 `economic.manifest`，不因坏非历史 X `profile_revision` 拉停整组 S/E/B，保持既有非关键 X 降级与启动条件不变。
 - **历史模拟 X `/2`（及既有已退 `/1`）写入入口**：
   - `x_execution_session serve` 对含 `history_simulation` 的配置只接受 `x-execution-profile/3`。
-  - 在获取 `<db>.writer.lock` 与调用 `open_durable_db`（读写打开）**之前**，先以 `SQLITE_OPEN_READ_ONLY`（不启用 `immutable=1`，故可见活 `-wal` 帧）预检既有库；凡已存在 `/1`、`/2` 历史模拟库即当场以 `VersionUnsupported` 退出，不落锁文件、不改写业务表、不推进 `writer_epoch`、**不静默 checkpoint `-wal`**。
+  - 在获取 `<db>.writer.lock` 与调用 `open_durable_db`（读写打开）**之前**，先以 `SQLITE_OPEN_READ_ONLY`（不启用 `immutable=1`，故可见活 `-wal` 帧）预检既有库；凡已存在 `/1`（早期与后期）、`/2` 历史模拟库即当场以 `VersionUnsupported` 退出，不落锁文件、不改写业务表、不推进 `writer_epoch`、**不静默 checkpoint `-wal`**。
 
 ### 3. 操作者可用的只读查询入口、本地审计边界与撤掉 `/2` socket 的损失
 
-撤掉 `/1`/`/2` X 的在线 Unix socket 服务（`x-exact-simulation/1`）后，操作者由 `x_execution_session` 的离线只读 CLI 入口（基于 `SQLITE_OPEN_READ_ONLY`，覆盖 `/1`、`/2`、`/3`，不改变既有 `SimulationBatch` 存储格式；原 `query --db FILE` 仅元数据入口保持原样）完成档案取证：
+撤掉 `/1`/`/2` X 的在线 Unix socket 服务（`x-exact-simulation/1`）后，操作者由 `x_execution_session` 的离线只读 CLI 入口（基于 `SQLITE_OPEN_READ_ONLY`，覆盖早期 `/1`、后期 `/1`、`/2`、`/3`，不改变既有 `SimulationBatch` 存储格式；原 `query --db FILE` 仅元数据入口保持原样）完成档案取证：
 
 | 入口 | 按实际读口返回的字段（不依赖 E/S 在线，也不要求 E 预配归档源） | 覆盖状态与实际边界 |
 |---|---|---|
-| `x_execution_session query-history --db FILE` | `profile_revision`、`execute_evidence_claimed_ns_audit_policy`、`writer_epoch`、`session_id`/`session_generation`/`x_id`、`source_namespace`/`source_epoch`、`model_content_hash`、前沿 `last_committed_batch_id`/`last_bar_index`、`pending_batch_id`/`pending_epoch`、`committed_batches[*]`（每批含 `batch_id`、`bar_index`、`batch_receipt_sha256`、`state_content_hash`、`original_count`）、`commands[*]` 摘要与 `originals` ID 列表 | 覆盖 `/1`、`/2`、`/3` 通过本地一致性审计的库；`batch_receipt_sha256` 由此处的 `committed_batches[*]` 给出 |
-| `x_execution_session query-command --db FILE --command-id ID` | `ExactCommandState`：`state`、`x_accept` 三相时钟、`causal_refs`、`attempt_batch_id`、`attempt_batch_bar_index`、`pending_batch_id`、`pending_epoch`、`has_execute_evidence`、`execute_evidence`、`execute_evidence_claimed_ns_audit`、`last_committed_batch_id`、`last_bar_index` | 逐态覆盖 `Accepted`、`ExecutionReady`、`ExecutionRequested`（含 pending batch/epoch）、`MayHaveCalled`、`Observed` 与 `NoRecord` |
+| `x_execution_session query-history --db FILE` | `profile_revision`、`archive_layout`（`v1_early` / `v1_late` / `v2` / `v3`）、`execute_evidence_claimed_ns_audit_policy`、`writer_epoch`、`session_id`/`session_generation`/`x_id`、`source_namespace`/`source_epoch`、`model_content_hash`、前沿 `last_committed_batch_id`/`last_bar_index`、`pending_batch_id`/`pending_epoch`、`committed_batches[*]`（每批含 `batch_id`、`bar_index`、`batch_receipt_sha256`、`state_content_hash`、`original_count`）、`commands[*]` 摘要与 `originals` ID 列表 | 覆盖早期 `/1`、后期 `/1`、`/2`、`/3` 通过对应代际本地一致性审计的库；`batch_receipt_sha256` 由此处的 `committed_batches[*]` 给出 |
+| `x_execution_session query-command --db FILE --command-id ID` | `ExactCommandState`：`state`、`x_accept` 三相时钟、`causal_refs`、`attempt_batch_id`、`attempt_batch_bar_index`、`pending_batch_id`、`pending_epoch`、`has_execute_evidence`、`execute_evidence`、`execute_evidence_claimed_ns_audit`、`archive_layout`、`last_committed_batch_id`、`last_bar_index` | 逐态覆盖 `Accepted`、`ExecutionReady`、`ExecutionRequested`（含 pending batch/epoch）、`MayHaveCalled`、`Observed` 与 `NoRecord`；原样保留 `/1` JSON 整数与 `/2`/`/3` 十进制文本 |
 | `x_execution_session query-batch --db FILE --batch-id ID` | 原样已提交 `SimulationBatch` JSON：`kind`、`request_id`、`bar_index`、`model_content_hash`、`state_content_hash`、`intra_batch_order`、`capacity_transitions`、`capacity_evidence`、`l0_fill_count`、`unfilled_market`、`originals`（不变更原批格式，不含 `orders`/`fills`/`fees`/`scenario_busts`/`batch_receipt_sha256` 顶层键） | 仅返回已提交终态批（如 `b3` 含原 `fill`+`fee` 原件）；未提交 pending 批（如 `ExecutionRequested` 挂起的 `b2`）以 `MissingDependency` 明确拒绝 |
-| `x_execution_session query-original --db FILE --original-id ID` | 完整冻结原件 JSON（如原 `fill` 与原 `fee` 文档） | 与原 `/2` socket `QueryOriginal` 逐字节一致 |
+| `x_execution_session query-original --db FILE --original-id ID` | 完整冻结原件 JSON（如原 `fill` 与原 `fee` 文档） | 与原 socket `QueryOriginal` 逐字节一致，原样保留原字段与原整数 |
 
-**本地一致性审计范围、版本不变量区分与责任边界（必须明示）**：
-1. **审计范围与不可过度承诺**：上述只读查询先在只读事务内执行本地一致性审计（外层 `x_meta` 与内层 `exact_profile_revision` 匹配、`pending_epoch == writer_epoch`、冻结 `contract`/`authority_profile` 校验、从空历史确定性重演所有已提交批及 `originals`/`busts`、命令与 E/S 回执引用闭合及时钟单调性）。该审计**只能检测违反上述本地不变量的损坏或不一致，不能承诺发现一切离线篡改**（例如同步改写未签名本地字段但仍满足全部本地不变量的副本）。
-2. **`execute_evidence.claimed_ns` 按各版写者真实不变量区分**：
-   - **`/2` 与 `/3`**：所有 `/2`（自 `8d23381b0c` 至 `#2081`）与 `/3` 写者在持久化 `execute_evidence.claimed_ns` 时恒写入 `batch.bar.index`（规范十进制字符串）。因此本地审计强制核验 `claimed_ns == attempt_batch.bar.index` 且 `>= reply.commit_ns`（不符则以 `IdentityConflict` 拒绝），并在 `query-command` 中标为 `execute_evidence_claimed_ns_audit: "verified_equal_to_attempt_bar"`（如在 `/2` 派生 `MayHaveCalled` 工作副本中，`b2` `bar.index=2` 对应合法对照 `claimed_ns="2"` 通过，而篡改反例 `claimed_ns="999"` 被当场拒绝）。
-   - **`/1`**：早期 `/1` 写者（`18446a3d35`、`5f3361ca8b`）持久化墙钟 `now_ns()`，后期 `/1` 写者（`d1c46577b1`）改写 `batch.bar.index`，两者共用 `x-execution-profile/1` 与整数编码。审计不能溯及强制 `/1` 满足 `claimed_ns == attempt_batch.bar.index`，仅核验 `>= reply.commit_ns`，并在 `query-command` 中以 `execute_evidence_claimed_ns_audit: "raw_claim_only_non_retroactive_v1"`（及 `query-history.execute_evidence_claimed_ns_audit_policy`）明确区分“原始声称”与“按占有批核证字段”。
+**本地一致性审计范围、冻结写者代际判别与责任边界（必须明示）**：
+1. **严格按冻结写者格式判别，绝不宽松回退降格或伪造字段**：
+   - 任何 `authority_profile` 解码前先核对外层 `x_meta.profile_revision` 与内层 `x_sim_meta.exact_profile_revision` 一致性（`/1` 必须缺省，`/2` 必须为 `x-execution-profile/2`，`/3` 必须为 `x-execution-profile/3`），不符即以 `VersionUnsupported` 拒绝。
+   - `/2` 与 `/3` 恒直接解码完整 12 键/6 键 `Profile`，绝不回退或降格到早期 `/1`。
+   - `/1` 在反序列化之前按冻结键集同时判别顶层及 `e`/`s` 端点：
+     - **早期 `/1`（`archive_layout: "v1_early"`，历史正式写者 `18446a3d35`–`d1c46577b1`）**：顶层精确 11 键（无 `conditions`）且 `e`/`s` 各精确 3 键（仅 `socket`、`authority_id`、`authority_epoch`，无 `schema_revision`/`reply_namespace`/`producer_id`）；不补写、不伪造共同信封或新授权，按当年冻结的 3 项条件清单（`released-exact/1`、`execute-committed/1`、`simulation-local-transaction/1`）、整数时钟、批重演与原 E/S 收据闭包核档。
+     - **后期 `/1`（`archive_layout: "v1_late"`，历史正式写者 `1f0a42bc20`–`b66b61a0b0`，含 `#2078` 归档布局）**：顶层精确 12 键（含 `conditions`）且 `e`/`s` 各精确 6 键（含 `schema_revision`、`reply_namespace`、`producer_id`）；严格校验完整 `Profile`、命令 `conditions == profile.conditions` 与全部 E/S 原收据。
+     - **反降格拒绝**：任何缺失键（如后期 `/1` 缺 `e.schema_revision`）、多余未知键、混合键集（12 键配 3 键 `e`/`s` 或 11 键配 6 键 `e`/`s`）、非对称 `e`/`s` 键集或空必填字段均直接以 `InvalidDomain` 拒绝，绝不做“按 `Profile` 解码失败后降格为早期 `/1`”的宽松兜底。
+2. **审计范围与不可过度承诺**：上述只读查询先在只读事务内执行对应代际的本地一致性审计（外层/内层版本匹配、`pending_epoch == writer_epoch`、冻结 `contract`/`authority_profile` 规范字节校验、从空历史确定性重演所有已提交批及 `originals`/`busts`、命令与 E/S 回执引用闭包及时钟单调性）。该审计**只能检测违反该代本地不变量的损坏或不一致，不能承诺发现一切离线篡改**（例如同步改写未签名本地字段但仍满足该代全部本地不变量的副本）。
+3. **`execute_evidence.claimed_ns` 按各代写者真实可证明不变量区分**：
+   - **后期 `/1`（`v1_late`）、`/2`（`v2`）与 `/3`（`v3`）**：全部后期 `/1`（自 `1f0a42bc20`，晚于 `d1c46577b1` 删除 `now_ns()`）、`/2`（自 `8d23381b0c` 至 `#2081`）与 `/3` 写者在持久化 `execute_evidence.claimed_ns` 时恒写入 `batch.bar.index`（后期 `/1` 为整数，`/2`/`/3` 为规范十进制字符串）。因此本地审计强制核验 `claimed_ns == attempt_batch.bar.index` 且 `>= reply.commit_ns`（不符则以 `IdentityConflict` 拒绝），并在输出中标为 `verified_equal_to_attempt_bar`。
+   - **早期 `/1`（`v1_early`）**：早期 `/1` 写者中 `18446a3d35`/`5f3361ca8b` 写墙钟 `now_ns()`、`d1c46577b1` 写 `batch.bar.index`，且共享完全相同的 11 键/3 键布局。审计无法溯及强制早期 `/1` 满足 `claimed_ns == attempt_batch.bar.index`，仅核验当年可证明的 `claimed_ns >= reply.commit_ns`，并在 `query-history.execute_evidence_claimed_ns_audit_policy` 与 `query-command.execute_evidence_claimed_ns_audit` 中明确标为 `"raw_claim_only_non_retroactive_v1"`——**绝不把早期墙钟说成已验证等于 `bar.index`**。
    - **不构成授权或免责**：无论 `verified_equal_to_attempt_bar` 还是 `raw_claim_only_non_retroactive_v1`，X 本地查询输出均**不得作为自动重放授权、自动补录授权或原 E 责任免责依据**。测试中基于真实 `/2` 库构造的 `MayHaveCalled` 派生工作副本仅用于验证本地审计分支，不得描述为真实进程崩溃现场。
-3. **E 跨域核验与补录（`e_economic_session inspect-simulation-capture-batch` / `CaptureExternal`）的真实前提**（`service.rs:1555`、`intake.rs:157`）：
+4. **E 跨域核验与补录（`e_economic_session inspect-simulation-capture-batch` / `CaptureExternal`）的真实前提**（`service.rs:1555`、`intake.rs:157`）：
    - 须针对**原 E 会话自身的 `manifest` 与 `E_DB`** 执行（不得另起“新归档 reader E”冒充原 E 的 cut 与责任）；
-   - 原 E `manifest` 须在 `init` 时已预冻结 `history_simulation_source`（含 `x_db` 绝对路径、`source_namespace`、`source_epoch`、`producer_id`、`producer_epoch`、`model_content_hash`，`manifest_hash` 钉死后不可事后补写）；
+   - 原 E `manifest` 须在 `init` 时已预冻结 `history_simulation_source`（含 `x_db` 绝对路径、`source_namespace`、`source_epoch`、`producer_id`、`producer_epoch`、`model_content_hash`，`manifest_hash` 钉死后不可事后补写或修改）；
+   - **原 E 固定批读取的工作副本路径要求**：`inspect-simulation-capture-batch` 不从命令行接受 X 库路径，且严禁修改原 `manifest`；因此经原 E 读取已封存旧档时，原 `manifest` 绑定的 `history_simulation_source.x_db` 绝对路径本身必须实际指向独立可写工作副本（将封存副本成套恢复到该原绑定路径，封存原件保持不打开、零改动）；若只需在任意独立取证目录查库而不触动原绑定路径，直接对工作副本运行 `x_execution_session query-*`。
    - `history_simulation_source` 对应来源须在原 E `authorized_sources` 中获准 `CaptureExternal`；
    - 调用方须显式提供已提交批的 `--batch-id`、完整规范回执摘要 `--batch-receipt-sha256`（取自原 `QueryBatch` 回执或 `x_execution_session query-history.committed_batches[*].batch_receipt_sha256`）、`--x-id` 与 `--x-epoch`（须与 X 库 `x_meta.writer_epoch` 及 `authority_profile` 一致）。
    - 若原 E 会话未预配 `history_simulation_source`（例如 `#2081` 形态），只能先用 `x_execution_session query-*` 取出原批与原件，再按既有人工/外部事实审计流程处理，且不减免原 E 责任。
 
 **撤掉 `/2` socket 的实际损失（明示）**：
 - 不再为 `/1`/`/2` X 库提供在线 Unix socket（`x-exact-simulation/1`）的 `QueryCommand`、`QueryBatch`、`QueryOriginal`、`AcceptExact`、`AdvanceBar` 服务；在线客户端查询须改调 `x_execution_session query-*` 离线只读 CLI。
-- 停留在未终结态（`Accepted`、`ExecutionReady`、`ExecutionRequested + pending`、`MayHaveCalled`）的旧 `/2` 命令无法经 `/3` X 推进至 `Observed`，其未决外效风险与原 E 责任原样保留，不得自动重放或免责。
+- 停留在未终结态（`Accepted`、`ExecutionReady`、`ExecutionRequested + pending`、`MayHaveCalled`）的旧 `/1`/`/2` 命令无法经 `/3` X 推进至 `Observed`，其未决外效风险与原 E 责任原样保留，不得自动重放或免责。
 
 ### 4. 单一可操作封存与取证规程（不引入 `#1375` VFS）
 
-为保证既有 `/1`/`/2` 档案（尤其是存在未 checkpoint 活 `-wal` 的现场）在封存后既不丢失仅在 WAL 中的状态，又不改写封存原件，统一采用以下**唯一操作路径**（同步见 [`docs/runbook_production_session.md`](../../../docs/runbook_production_session.md)）：
+为保证既有 `/1`（早期/后期）、`/2` 档案（尤其是存在未 checkpoint 活 `-wal` 的现场）在封存后既不丢失仅在 WAL 中的状态，又不改写封存原件，统一采用以下**唯一操作路径**（同步见 [`docs/runbook_production_session.md`](../../../docs/runbook_production_session.md)）：
 
 1. **获取单一一致切面**：先停止/隔离旧历史写者及全部其他可能写入或触发 checkpoint 的连接（确认无活写进程与外部 SQLite 工具连接），或使用可保证单一一致切面的存储/文件系统快照取得整套档案。
-2. **成套封存原件（绝不直接打开）**：将同一一致切面的 `<x>.db` 及所有存在的 `<x>.db-wal`（连同对应原 E 会话的 `manifest`、`E_DB`、收据等原 E 责任证据）成套封存至只读归档介质/目录，并登记文件清单与 SHA-256。**严禁直接对封存原件运行 SQLite、`x_execution_session serve` 或 `query-*`。**
-3. **恢复到独立可写取证目录再查询**：需要核查前沿、pending 批、命令状态或原批/原件时，从封存归档完整复制一套副本（`.db` + 存在的 `-wal`）到**独立的可写取证工作目录**，再对工作副本运行 `x_execution_session query-history` / `query-command` / `query-batch` / `query-original`。工作副本查询期间可正常产生 `-wal`/`-shm`（`query-*` 本身不触发写回或静默 checkpoint，可见仅在 WAL 中的状态），封存原件始终保持零改动。
+2. **成套封存原件（绝不直接打开）**：将同一一致切面的 `<x>.db` 及所有存在的 `<x>.db-wal`（连同对应原 E 会话的 `manifest`、`E_DB`、收据等原 E 责任证据）成套封存至只读归档介质/目录，并登记文件清单与 SHA-256。**严禁直接对封存原件运行 SQLite、`x_execution_session serve`、`query-*` 或 `e_economic_session inspect-simulation-capture-batch`。**
+3. **恢复到独立可写取证目录再查询**：需要核查前沿、pending 批、命令状态或原批/原件时，从封存归档完整复制一套副本（`.db` + 存在的 `-wal`）到**独立的可写取证工作目录**，再对工作副本运行 `x_execution_session query-history` / `query-command` / `query-batch` / `query-original`；若需用原 E 的 `e_economic_session inspect-simulation-capture-batch` 读取固定批，须在不修改原 `manifest` 的前提下，令原 `manifest` 绑定的 `history_simulation_source.x_db` 绝对路径实际指向该独立可写工作副本（不直接打开封存原件）。工作副本查询期间可正常产生 `-wal`/`-shm`（`query-*` 本身不触发写回或静默 checkpoint，可见仅在 WAL 中的状态），封存原件始终保持零改动。
 
 **明确不作为通用方案的做法**：
 - **仅做 `wal_checkpoint(TRUNCATE)`**：checkpoint 后主库头字节 `[18:20]` 仍为 WAL 模式 `[2, 2]`，放到只读目录/介质上以 `SQLITE_OPEN_READ_ONLY` 打开仍会因 `attempt to write a readonly database` 失败。
