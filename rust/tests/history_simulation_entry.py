@@ -509,7 +509,10 @@ def run(name):
         log.close(); e.sock.close(); s.sock.close()
         for file in sockets.iterdir(): file.unlink()
         sockets.rmdir()
-if REPAIR:
+if len(sys.argv) == 5 and sys.argv[3] == "archive-repair":
+    from simulation_capture_archive import archived_capture
+    archived_capture(BIN, Path(sys.argv[4]).resolve(), ROOT, canonical, digest)
+elif REPAIR:
     run('capture-repair')
 else:
     check_listening_predicate()

@@ -180,8 +180,8 @@ pub(crate) fn committed_capture_batch(
         tx.query_row("SELECT value FROM x_meta WHERE key=?1", [key], |r| r.get(0))
             .map_err(failure)
     };
-    if x_meta("profile_revision")? != super::EXACT_PROFILE_REVISION
-        || x_meta("profile_mode")? != "simulation"
+    let revision = x_meta("profile_revision")?;
+    if x_meta("profile_mode")? != "simulation"
         || x_meta("history_simulation")? != "true"
         || x_meta("writer_epoch")? != x_epoch.to_string()
     {
@@ -229,7 +229,11 @@ pub(crate) fn committed_capture_batch(
     }
     // 复用正式 X 恢复入口的只读部分：批重演之外，还核接纳、原 Release 与
     // S 执行证据。只核原件相符不能证明该批由正式命令产生。
-    super::runtime::validate_existing(&tx, &profile, x_epoch)?;
+    match revision.as_str() {
+        super::EXACT_PROFILE_REVISION => super::runtime::validate_existing(&tx, &profile, x_epoch)?,
+        "x-execution-profile/1" => super::runtime::audit_archived_v1(&tx, &profile, x_epoch)?,
+        _ => return Err("VersionUnsupported：未知历史模拟库版本".into()),
+    }
     tx.commit().map_err(failure)?;
     Ok(receipt)
 }

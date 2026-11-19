@@ -6,7 +6,8 @@ import subprocess
 import time
 
 
-def exercise(e_bin, directory, e_socket, x_db, source, receipt, alternate, other, canonical, digest):
+def exercise(e_bin, directory, e_socket, x_db, source, receipt, alternate, other, canonical, digest,
+             *, archived_v1=False):
     def client(source_db, name):
         db = directory / f"{name}.sqlite"
         manifest = directory / f"{name}.json"
@@ -91,8 +92,24 @@ def exercise(e_bin, directory, e_socket, x_db, source, receipt, alternate, other
             assert c.execute("SELECT count(*) FROM facts").fetchone() == (0,)
 
     # Keep batch and result fixed. Each copy lacks a different independent proof.
-    reject_corrupt_x("old-profile", "UPDATE x_meta SET value=? WHERE key='profile_revision'",
-                     ("x-execution-profile/1",), "指定 X 模型")
+    wrong_revision = "x-execution-profile/2" if archived_v1 else "x-execution-profile/1"
+    reject_corrupt_x("mixed-profile", "UPDATE x_meta SET value=? WHERE key='profile_revision'",
+                     (wrong_revision,), "VersionUnsupported")
+    if archived_v1:
+        # 两层均声称 /2 但仍是 /1 原件：必须在 /2 解码失败，不得改用 /1 重试。
+        corrupt = directory / "v2-with-v1-wire.sqlite"
+        with sqlite3.connect(x_db.as_uri() + "?mode=ro", uri=True) as src, sqlite3.connect(corrupt) as dst:
+            src.backup(dst)
+            dst.execute("UPDATE x_meta SET value=? WHERE key='profile_revision'", (wrong_revision,))
+            dst.execute("INSERT INTO x_sim_meta VALUES('exact_profile_revision',?)", (wrong_revision,))
+        _, _, _, inspect_wrong_wire = client(corrupt, "v2-with-v1-wire-e")
+        inspect_wrong_wire(error="InvalidDomain")
+        reject_corrupt_x("wrong-e-proof", "UPDATE x_exact_commands SET release_evidence="
+                         "json_set(release_evidence,'$.command_hash','wrong') WHERE id=?", ("a",),
+                         "权威回执未绑定原命令")
+        reject_corrupt_x("wrong-s-release", "UPDATE x_exact_commands SET execute_evidence="
+                         "json_set(execute_evidence,'$.reply.release_receipt_id','wrong') WHERE id=?",
+                         ("a",), "S 收据未绑定本次精确交付")
     fee = receipt["originals"][1]["event"]["source"]["external_fact_id"]
     reject_corrupt_x("missing-fee", "DELETE FROM x_sim_originals WHERE id=?", (fee,),
                      "Query returned no rows")
@@ -103,17 +120,20 @@ def exercise(e_bin, directory, e_socket, x_db, source, receipt, alternate, other
     reject_corrupt_x("wrong-release-link", "UPDATE x_exact_commands SET release_receipt=? WHERE id=?",
                      ("wrong-receipt", "a"), "交付引用不符")
 
-    _, _, _, alternate_inspect = client(alternate, "alternate-frontier-e")
-    alternate_result = alternate_inspect(anchor=other)
-    assert alternate_result["state_content_hash"] == receipt["state_content_hash"]
-    assert alternate_result["batch_receipt_sha256"] == digest(other)
-    assert [e["raw_utf8"] for e in alternate_result["entries"]] == list(map(canonical, other["originals"]))
-    alternate_inspect(anchor=receipt, error="完整回执摘要不同")
+    if alternate is not None:
+        _, _, _, alternate_inspect = client(alternate, "alternate-frontier-e")
+        alternate_result = alternate_inspect(anchor=other)
+        assert alternate_result["state_content_hash"] == receipt["state_content_hash"]
+        assert alternate_result["batch_receipt_sha256"] == digest(other)
+        assert [e["raw_utf8"] for e in alternate_result["entries"]] == list(map(canonical, other["originals"]))
+        alternate_inspect(anchor=receipt, error="完整回执摘要不同")
+        save("alternate-frontier-inspected", alternate_result)
     save("query-batch-b1", receipt)
     save("query-batch-b1-alternate", other)
-    save("alternate-frontier-inspected", alternate_result)
 
     _, argv, run, inspect = client(x_db, "good-e")
+    assert other["state_content_hash"] == receipt["state_content_hash"] and other != receipt
+    inspect(anchor=other, error="完整回执摘要不同")
     inspect(epoch="2", error="writer epoch")
     inspect(anchor={**receipt, "state_content_hash": "0" * 64}, error="完整回执摘要不同")
     inspect(anchor={**receipt, "request_id": "uncommitted"}, error="Query returned no rows")

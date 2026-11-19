@@ -790,7 +790,10 @@ fn old_contracts_do_not_know_exact_operations_or_commands() {
     let err = Config::load(Path::new(&path), &old.configs[0].db, None)
         .err()
         .expect("逻辑 bar 不得改变旧财务合同的时钟选择");
-    assert_eq!(err, "SchemaUnsupported：Voice 证据仅显式 TestOnly voice-binding/1");
+    assert_eq!(
+        err,
+        "SchemaUnsupported：Voice 证据仅显式 TestOnly voice-binding/1"
+    );
     // 去掉提前拒绝的两个组件，单独穿到 Config 自身的时钟选择门。
     m.as_object_mut().unwrap().remove("voice_binding");
     m.as_object_mut().unwrap().remove("finance");

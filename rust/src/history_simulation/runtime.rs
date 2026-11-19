@@ -1,3 +1,4 @@
+mod archive_v1;
 use super::exact_wire::{decimal, Plan, SignedChange};
 use super::{
     model::{Batch, Change, Model},
@@ -253,6 +254,37 @@ impl ExactCommand {
     }
 }
 
+/// 冷审绑定原命令及其时钟编码。活动的接纳、调用与恢复接口只接 ExactCommand。
+trait CommandRecord: Serialize + serde::de::DeserializeOwned + PartialEq {
+    type Tick: serde::de::DeserializeOwned + Copy + Into<i64>;
+    const INNER_REVISION: Option<&'static str>;
+    fn id(&self) -> &str;
+    fn change(&self) -> &Change;
+    fn validate_record(&self, p: &Profile) -> Result<(), String>;
+}
+
+#[derive(Debug, Copy, Clone, Serialize, Deserialize)]
+#[serde(transparent)]
+struct DecimalTick(#[serde(with = "decimal")] i64);
+impl From<DecimalTick> for i64 {
+    fn from(t: DecimalTick) -> i64 {
+        t.0
+    }
+}
+impl CommandRecord for ExactCommand {
+    type Tick = DecimalTick;
+    const INNER_REVISION: Option<&'static str> = Some(super::EXACT_PROFILE_REVISION);
+    fn id(&self) -> &str {
+        &self.command_id
+    }
+    fn change(&self) -> &Change {
+        &self.change
+    }
+    fn validate_record(&self, p: &Profile) -> Result<(), String> {
+        self.validate(p, self.x_epoch)
+    }
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Request {
@@ -262,7 +294,7 @@ struct Request {
 }
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-struct AuthorityReply {
+struct Receipt<C, T> {
     protocol: String,
     session_id: String,
     session_generation: String,
@@ -270,22 +302,20 @@ struct AuthorityReply {
     authority_epoch: String,
     command_id: String,
     command_hash: String,
-    command: ExactCommand,
+    command: C,
     state: String,
     receipt_id: String,
     release_receipt_id: Option<String>,
-    #[serde(with = "decimal")]
-    commit_ns: i64,
+    commit_ns: T,
 }
+type AuthorityReply = Receipt<ExactCommand, DecimalTick>;
+
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-struct AcceptClock {
-    #[serde(with = "decimal")]
-    received_ns: i64,
-    #[serde(with = "decimal")]
-    first_known_ns: i64,
-    #[serde(with = "decimal")]
-    commit_ns: i64,
+struct AcceptClock<T> {
+    received_ns: T,
+    first_known_ns: T,
+    commit_ns: T,
 }
 /// simulation 证据类的 `logical-bar/1` 接纳读数（ADR 0052:296、ADR 0056:52）：已提交前沿
 /// last_bar+1，空历史为 0。X 不读系统时钟；*_ns 字段在本域存 bar_index 读数。
@@ -299,18 +329,21 @@ fn logical_now(c: &Connection) -> Result<i64, String> {
         .map_or(Some(0), |bar| bar.checked_add(1))
         .ok_or_else(|| "InvalidDomain：逻辑 bar 时钟溢出".into())
 }
-fn validate_accept_clock(clock: &AcceptClock, release_commit_ns: i64) -> Result<(), String> {
+fn validate_accept_clock<T: Into<i64> + Copy>(
+    clock: &AcceptClock<T>,
+    release_commit_ns: i64,
+) -> Result<(), String> {
     if release_commit_ns < 0
-        || clock.received_ns < 0
-        || clock.received_ns > clock.first_known_ns
-        || clock.first_known_ns > clock.commit_ns
-        || clock.first_known_ns < release_commit_ns
+        || clock.received_ns.into() < 0
+        || clock.received_ns.into() > clock.first_known_ns.into()
+        || clock.first_known_ns.into() > clock.commit_ns.into()
+        || clock.first_known_ns.into() < release_commit_ns
     {
         return Err("InvalidDomain：X 接纳时钟早于 E 持久交付或本地相位倒退".into());
     }
     Ok(())
 }
-fn audit_accepts(c: &Connection, p: &Profile) -> Result<(), String> {
+fn audit_accepts<C: CommandRecord>(c: &Connection, p: &Profile) -> Result<(), String> {
     let mut q = c
         .prepare("SELECT accept_clock,release_evidence,command FROM x_exact_commands")
         .map_err(error)?;
@@ -325,18 +358,18 @@ fn audit_accepts(c: &Connection, p: &Profile) -> Result<(), String> {
         .map_err(error)?;
     for row in rows {
         let (clock, release, command) = row.map_err(error)?;
-        let clock: AcceptClock = serde_json::from_str(&clock).map_err(error)?;
-        let release: AuthorityReply = serde_json::from_str(&release).map_err(error)?;
+        let clock: AcceptClock<C::Tick> = serde_json::from_str(&clock).map_err(error)?;
+        let release: Receipt<C, C::Tick> = serde_json::from_str(&release).map_err(error)?;
         if canonical_json(&serde_json::to_value(&release.command).map_err(error)?) != command {
             return Err("IdentityConflict：恢复交付与命令不符".into());
         }
-        let command: ExactCommand = serde_json::from_str(&command).map_err(error)?;
+        let command: C = serde_json::from_str(&command).map_err(error)?;
         validate_authority_reply(p, &p.e, "QueryReleasedExact", &command, None, &release)?;
-        validate_accept_clock(&clock, release.commit_ns)?;
+        validate_accept_clock(&clock, release.commit_ns.into())?;
     }
     Ok(())
 }
-fn audit_execution(c: &Connection, p: &Profile) -> Result<(), String> {
+fn audit_execution<C: CommandRecord>(c: &Connection, p: &Profile) -> Result<(), String> {
     let pending = store::pending_batch(c)?;
     let mut required = std::collections::BTreeMap::new();
     let mut q = c
@@ -386,14 +419,14 @@ fn audit_execution(c: &Connection, p: &Profile) -> Result<(), String> {
         .map_err(error)?;
     for row in rows {
         let (id, raw, release, state, attempt, evidence, released) = row.map_err(error)?;
-        let command: ExactCommand = serde_json::from_str(&raw).map_err(error)?;
-        command.validate(p, command.x_epoch)?;
-        let released: AuthorityReply = serde_json::from_str(&released).map_err(error)?;
-        if id != command.command_id || released.receipt_id != release {
+        let command: C = serde_json::from_str(&raw).map_err(error)?;
+        command.validate_record(p)?;
+        let released: Receipt<C, C::Tick> = serde_json::from_str(&released).map_err(error)?;
+        if id != command.id() || released.receipt_id != release {
             return Err("IdentityConflict：接纳身份或交付引用不符".into());
         }
         if let Some((batch, change, is_pending)) = required.remove(&id) {
-            if command.change != change {
+            if command.change() != &change {
                 return Err("IdentityConflict：批命令与已接纳内容不符".into());
             }
             if is_pending && state == "Accepted" {
@@ -434,13 +467,14 @@ fn audit_execution(c: &Connection, p: &Profile) -> Result<(), String> {
     Ok(())
 }
 
-fn validate_execution_record(
+fn validate_execution_record<C: CommandRecord>(
     p: &Profile,
-    command: &ExactCommand,
+    command: &C,
     release: &str,
     evidence: &Value,
-) -> Result<AuthorityReply, String> {
-    let reply: AuthorityReply = serde_json::from_value(evidence["reply"].clone()).map_err(error)?;
+) -> Result<Receipt<C, C::Tick>, String> {
+    let reply: Receipt<C, C::Tick> =
+        serde_json::from_value(evidence["reply"].clone()).map_err(error)?;
     validate_authority_reply(
         p,
         &p.s,
@@ -449,17 +483,15 @@ fn validate_execution_record(
         Some(release),
         &reply,
     )?;
-    let eligibility = match &command.change {
+    let eligibility = match command.change() {
         Change::Submit { order } | Change::Replace { order } => &order.eligibility_ref,
         Change::Cancel {
             eligibility_ref, ..
         } => eligibility_ref,
     };
     if eligibility != &reply.receipt_id
-        || evidence["claimed_ns"]
-            .as_str()
-            .and_then(|s| crate::session_protocol::nonnegative(s, "claimed_ns").ok())
-            .is_none_or(|t| t < reply.commit_ns)
+        || serde_json::from_value::<C::Tick>(evidence["claimed_ns"].clone())
+            .map_or(true, |t| t.into() < reply.commit_ns.into())
     {
         return Err("IdentityConflict：持久S执行证据与资格/调用占有时刻不符".into());
     }
@@ -558,20 +590,20 @@ fn authority(
     authority_exchange(p, a, op, command, release, connection, &frame)
 }
 
-fn validate_authority_reply(
+fn validate_authority_reply<C: CommandRecord>(
     p: &Profile,
     a: &Authority,
     op: &str,
-    command: &ExactCommand,
+    command: &C,
     release: Option<&str>,
-    r: &AuthorityReply,
+    r: &Receipt<C, C::Tick>,
 ) -> Result<(), String> {
     if r.protocol != AUTHORITY_WIRE
         || r.session_id != p.session_id
         || r.session_generation != p.session_generation
         || r.authority_id != a.authority_id
         || r.authority_epoch != a.authority_epoch
-        || r.command_id != command.command_id
+        || r.command_id != command.id()
         || r.command_hash != hash(command)
         || r.command != *command
         || r.receipt_id.is_empty()
@@ -583,7 +615,7 @@ fn validate_authority_reply(
     } else {
         "ExecuteCommitted"
     };
-    if r.commit_ns < 0 {
+    if r.commit_ns.into() < 0 {
         return Err("InvalidDomain：权威提交时刻不得为负".into());
     }
     if r.state != expected {
@@ -624,7 +656,7 @@ fn query_command(c: &Connection, p: &Profile, id: &str) -> Result<Value, String>
             let clock: Value = serde_json::from_str(&clock).map_err(error)?;
             let evidence: AuthorityReply = serde_json::from_str(&evidence).map_err(error)?;
             Ok(
-                json!({"kind":"ExactCommandState","command_id":id,"state":state,"x_accept":clock,"causal_refs":[{"authority_id":p.e.authority_id,"authority_epoch":p.e.authority_epoch,"receipt_id":release,"command_hash":evidence.command_hash,"release_commit_ns":evidence.commit_ns.to_string()}]}),
+                json!({"kind":"ExactCommandState","command_id":id,"state":state,"x_accept":clock,"causal_refs":[{"authority_id":p.e.authority_id,"authority_epoch":p.e.authority_epoch,"receipt_id":release,"command_hash":evidence.command_hash,"release_commit_ns":evidence.commit_ns}]}),
             )
         }
     }
@@ -649,11 +681,11 @@ fn accept(
     command.validate(p, epoch)?;
     let released = authority(p, &p.e, epoch, "QueryReleasedExact", &command, None)?;
     let clock = AcceptClock {
-        received_ns,
-        first_known_ns: received_ns,
-        commit_ns: received_ns,
+        received_ns: DecimalTick(received_ns),
+        first_known_ns: DecimalTick(received_ns),
+        commit_ns: DecimalTick(received_ns),
     };
-    validate_accept_clock(&clock, released.commit_ns)?;
+    validate_accept_clock(&clock, released.commit_ns.0)?;
     c.execute("INSERT INTO x_exact_commands(id,command,release_receipt,state,attempt_batch,accept_clock,release_evidence) VALUES(?1,?2,?3,'Accepted',NULL,?4,?5)",params![command.command_id,raw,released.receipt_id,canonical_json(&serde_json::to_value(&clock).map_err(error)?),canonical_json(&serde_json::to_value(&released).map_err(error)?)]).map_err(error)?;
     query_command(c, p, &command.command_id)
 }
@@ -754,7 +786,7 @@ fn execute(c: &mut Connection, p: &Profile, epoch: i64, mut batch: Batch) -> Res
             return Err("IdentityConflict：命令资格引用未绑定 S 实际提交收据".into());
         }
         let claimed_ns = batch.bar.index;
-        if claimed_ns < executed.commit_ns {
+        if claimed_ns < executed.commit_ns.0 {
             return Err("InvalidDomain：X 调用占有早于 S 持久提交".into());
         }
         let evidence = json!({"reply":executed,"claimed_ns":claimed_ns.to_string()});
@@ -807,6 +839,19 @@ fn validate_pending_epoch(c: &Connection, epoch: i64) -> Result<(), String> {
 
 /// 在 bin 写入 writer_epoch 之前检查已有冻结合同与接纳记录。
 pub fn validate_existing(c: &Connection, p: &Profile, epoch: i64) -> Result<(), String> {
+    audit_existing::<ExactCommand>(c, p, epoch)
+}
+
+/// 仅 E 固定批只读事务可选封存格式；不供 X 初始化或续写使用。
+pub(super) fn audit_archived_v1(
+    tx: &rusqlite::Transaction<'_>,
+    p: &Profile,
+    epoch: i64,
+) -> Result<(), String> {
+    audit_existing::<archive_v1::ArchivedCommand>(tx, p, epoch)
+}
+
+fn audit_existing<C: CommandRecord>(c: &Connection, p: &Profile, epoch: i64) -> Result<(), String> {
     p.validate()?;
     let exists: bool = c
         .query_row(
@@ -824,8 +869,8 @@ pub fn validate_existing(c: &Connection, p: &Profile, epoch: i64) -> Result<(), 
             )
             .optional()
             .map_err(error)?;
-        if version.as_deref() != Some(super::EXACT_PROFILE_REVISION) {
-            return Err("VersionUnsupported：旧历史模拟库须从空库重放".into());
+        if version.as_deref() != C::INNER_REVISION {
+            return Err("VersionUnsupported：历史模拟库内层版本与所选格式不符".into());
         }
         validate_pending_epoch(c, epoch)?;
         store::audit_history(c)?;
@@ -856,8 +901,8 @@ pub fn validate_existing(c: &Connection, p: &Profile, epoch: i64) -> Result<(), 
     }
     let commands:bool=c.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='x_exact_commands')",[],|r|r.get(0)).map_err(error)?;
     if commands {
-        audit_accepts(c, p)?;
-        audit_execution(c, p)?;
+        audit_accepts::<C>(c, p)?;
+        audit_execution::<C>(c, p)?;
     } else if exists {
         return Err("IdentityConflict：模拟历史缺命令权威表".into());
     }

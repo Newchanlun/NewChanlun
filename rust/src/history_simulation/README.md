@@ -1,7 +1,7 @@
 # X 历史模拟执行接口
 
 `x_execution_session serve --db FILE --profile FILE --writer-epoch N` 用 `x-execution-profile/2`、
-`mode: simulation` 与 `history_simulation` 对象运行历史撮合。已有 /1 历史模拟库（即使还没有命令）须从空库重放；不带历史撮合的模拟骨架以及 dry-run、experiment、production 仍使用 /1。
+`mode: simulation` 与 `history_simulation` 对象运行历史撮合。X 不续写或恢复已有 /1 历史模拟库（即使还没有命令）；要继续撮合须另起空库重放。不带历史撮合的模拟骨架以及 dry-run、experiment、production 仍使用 /1。
 
 ## 冻结输入
 
@@ -72,7 +72,7 @@ S commit_ns；写入与启动冷审计共用判据，早 1 个读数即拒（#16
 CaptureExternal 对照 X 库原字节后可 Recorded+Pending。完整经济分量/short 归因未接通，
 Resolve/Apply 明确拒绝；不得把 Pending 当作持仓或完整回放验收。
 
-#1375 补录一个已知的模拟批时，先用 X 的 QueryBatch 取该批原回执，对完整规范 JSON（键排序、紧凑 UTF-8、不含传输换行）取 SHA-256，再查询 E：
+#1375 补录一个已知的模拟批时，使用当时 X 的 QueryBatch 原回执（/1 归档直接使用已保存回执，不需启动 X），对完整规范 JSON（键排序、紧凑 UTF-8、不含传输换行）取 SHA-256，再查询 E：
 
 ```sh
 e_economic_session inspect-simulation-capture-batch --manifest MANIFEST --db E_DB \
@@ -80,7 +80,8 @@ e_economic_session inspect-simulation-capture-batch --manifest MANIFEST --db E_D
 ```
 
 这个本地只读命令使用 E 库绑定的 manifest，不从请求接受 X 库路径；在 X 的同一
-只读事务中使用 X 冷恢复的正式核验，逐件核对原字节、已接纳命令与 E/S 原收据。
+只读事务中按持久版本选择核验：/1 用原数字命令和整数时钟，/2 用含首次量、分配身份的 IC:13 命令和时钟。
+外层版本与内层标记不符、命令或 E/S 原收据不符、批重演或原件对不上，都拒绝；不换版本重试。
 完整回执的摘要用于固定该批；回执中的 state_content_hash 仍是单独的状态读数。结果中的 `e_cut` 是接纳状态
 所依据的切面；每个 `Recorded` 项带原收据和当前 Pending（若存在）。获准来源
 把 `Missing` 项的原字节、指针和事件时刻走原 CaptureExternal 补录；有过发送的
