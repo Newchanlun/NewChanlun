@@ -1692,7 +1692,19 @@ pub(crate) fn verify_record(r: &Value, rules: super::book::Rules) -> Result<(), 
     Ok(())
 }
 pub(crate) fn recover(config: &Config) -> Result<Value, String> {
-    let (mut c, runtime) = open(&config.db, false)?;
+    let (mut c, runtime) = recovery_writer(config)?;
+    let tx = c.transaction().map_err(err)?;
+    audit(&tx, config)?;
+    let old = recovery_epoch(&tx)?;
+    let (next, ns, cut) = advance_recovery(&tx, config, old)?;
+    tx.commit().map_err(err)?;
+    Ok(
+        json!({"kind":"Recovered","domain_id":config.domain,"writer_epoch":next.to_string(),"cut":cut,"recover_ns":ns,"runtime":runtime}),
+    )
+}
+
+pub(super) fn recovery_writer(config: &Config) -> Result<(Connection, Value), String> {
+    let (c, runtime) = open(&config.db, false)?;
     if config.revision()? == SCHEMA_V2 {
         let resources = super::financial_reader_resources::FinancialReaderResources::from_json(
             &config.manifest["finance"]["structure"]["reader_resources"],
@@ -1700,30 +1712,35 @@ pub(crate) fn recover(config: &Config) -> Result<Value, String> {
         super::content_store::configure(&c, &config.db, resources.job_limits)
             .map_err(|e| format!("Incomplete：恢复载体配置失败：{e}"))?;
     }
-    let tx = c.transaction().map_err(err)?;
-    audit(&tx, config)?;
+    Ok((c, runtime))
+}
+
+pub(super) fn recovery_epoch(c: &Connection) -> Result<i64, String> {
+    positive(&meta(c, "writer_epoch")?, "writer_epoch")
+}
+
+pub(super) fn advance_recovery(
+    tx: &Transaction<'_>,
+    config: &Config,
+    old: i64,
+) -> Result<(i64, String, Value), String> {
     if config.revision()? == SCHEMA_V2 {
-        super::content_store::discard_in_transaction(&tx)
+        super::content_store::discard_in_transaction(tx)
             .map_err(|e| format!("Incomplete：恢复清理未发布节点失败：{e}"))?;
     }
-    let old = positive(&meta(&tx, "writer_epoch")?, "writer_epoch")?;
     let ns = config.clock(None, "recover_ns", (old - 1) as usize)?;
-    let (_, _, last_ns, _) = latest(&tx)?;
+    let (seq, h, last_ns, _) = latest(tx)?;
     if nonnegative(&ns, "recover_ns")? < nonnegative(&last_ns, "last_commit_ns")? {
         return Err("InvalidDomain：恢复时刻早于已提交事实".into());
     }
     let next = old.checked_add(1).ok_or("InvalidDomain：epoch溢出")?;
-    set_meta(&tx, "writer_epoch", &next.to_string())?;
+    set_meta(tx, "writer_epoch", &next.to_string())?;
     tx.execute(
         "INSERT INTO epochs VALUES(?,'recover',?)",
         params![next, ns],
     )
     .map_err(err)?;
-    let (seq, h, _, _) = latest(&tx)?;
-    tx.commit().map_err(err)?;
-    Ok(
-        json!({"kind":"Recovered","domain_id":config.domain,"writer_epoch":next.to_string(),"cut":cut(config,seq,&h),"recover_ns":ns,"runtime":runtime}),
-    )
+    Ok((next, ns, cut(config, seq, &h)))
 }
 pub(crate) fn immediate(c: &mut Connection) -> Result<Transaction<'_>, String> {
     c.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)

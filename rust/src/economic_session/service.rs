@@ -1573,6 +1573,12 @@ pub fn cli(is_b: bool) -> Result<(), String> {
     let command = args.next().ok_or(
         "usage: init|serve|recover --manifest FILE --db FILE [--chong ID] [--epoch N --e-epoch N]",
     )?;
+    let named_recovery = match command.as_str() {
+        "recover-named" => Some(super::recovery::Action::Recover),
+        "query-recovery" => Some(super::recovery::Action::Query),
+        "current-recovery" => Some(super::recovery::Action::VerifyCurrent),
+        _ => None,
+    };
     let mut opts = BTreeMap::new();
     while let Some(k) = args.next() {
         if !k.starts_with("--") || opts.contains_key(&k) {
@@ -1581,9 +1587,13 @@ pub fn cli(is_b: bool) -> Result<(), String> {
         opts.insert(k, args.next().ok_or("InvalidDomain：参数缺值")?);
     }
     for k in opts.keys() {
-        let ordinary =
-            ["--manifest", "--db", "--chong", "--epoch", "--e-epoch"].contains(&k.as_str());
-        if !ordinary && !(command == "serve" && k == SHUTDOWN_CONTROL_FLAG) {
+        let allowed = if named_recovery.is_some() {
+            ["--manifest", "--db", "--chong", "--recovery-request"].contains(&k.as_str())
+        } else {
+            ["--manifest", "--db", "--chong", "--epoch", "--e-epoch"].contains(&k.as_str())
+                || (command == "serve" && k == SHUTDOWN_CONTROL_FLAG)
+        };
+        if !allowed {
             return Err(format!("InvalidDomain：未知参数{k}"));
         }
     }
@@ -1602,6 +1612,14 @@ pub fn cli(is_b: bool) -> Result<(), String> {
         return Err("InvalidDomain：E不能指定重".into());
     }
     let _lock = process_lock(&config.db, &config.domain)?;
+    if let Some(action) = named_recovery {
+        let request = Path::new(get("--recovery-request")?);
+        println!(
+            "{}",
+            canonical_json(&super::recovery::run(&config, request, action)?)
+        );
+        return Ok(());
+    }
     match command.as_str() {
         "init" => println!("{}", canonical_json(&init(&config)?)),
         "recover" => println!("{}", canonical_json(&recover(&config)?)),
