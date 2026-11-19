@@ -594,6 +594,31 @@ impl Ac2Session {
             ("cap-r1-backfill", 410),
             ("cap-fork", 420),
             ("cap-frac", 430),
+            ("cap-r1-first", 5),
+            ("cap-r1-early", 15),
+            ("res-early-before-import", 16),
+            ("imp-fx-second", 18),
+            ("imp-fx-1", 21),
+            ("imp-fx-after-r1", 22),
+            ("res-early-before-baseline", 22),
+            ("imp-fx-2", 24),
+            ("act-before-fx-import", 25),
+            ("imp-base-third", 28),
+            ("res-partial-blocked", 36),
+            ("res-r1-after-import", 42),
+            ("reserve-before-fx-import", 180),
+            ("imp-fx-late", 182),
+            ("reserve-no-quote", 185),
+            ("cap-r1-late", 188),
+            ("reserve-pending-r1", 190),
+            ("res-r1-late", 195),
+            ("reserve-after-r1-110", 205),
+            ("release-alpha-empty-fx", 235),
+            ("cap-other-a1", 345),
+            ("retire-r1-ep2-bad-other", 10005),
+            ("retire-r1-ep2-mixed-other", 10008),
+            ("retire-r1-ep2-ok", 10012),
+            ("reserve-blocked-by-other-ep2", 10020),
         ] {
             clock_messages.insert(
                 msg.to_owned(),
@@ -846,7 +871,41 @@ impl Ac2Session {
         )
     }
 
+    fn e_fin_epoch(&mut self, epoch: i64, msg: &str, payload: Value) -> Value {
+        let req = env(
+            &self.session_id,
+            FIN_NS,
+            FIN_EPOCH,
+            "fin-coord",
+            msg,
+            payload,
+        );
+        send(&mut self.e_db, &self.e_config, epoch, &req)
+    }
+
+    fn e_market_epoch(&mut self, epoch: i64, msg: &str, payload: Value) -> Value {
+        let req = env(
+            &self.session_id,
+            MARKET_NS,
+            MARKET_EPOCH,
+            "market-feed-fx",
+            msg,
+            payload,
+        );
+        send(&mut self.e_db, &self.e_config, epoch, &req)
+    }
+
     fn resolve_fx(&mut self, msg: &str, evidence_id: &str, recs: &[&Value]) -> Value {
+        self.resolve_fx_epoch(1, msg, evidence_id, recs)
+    }
+
+    fn resolve_fx_epoch(
+        &mut self,
+        epoch: i64,
+        msg: &str,
+        evidence_id: &str,
+        recs: &[&Value],
+    ) -> Value {
         let covered: Vec<Value> = recs
             .iter()
             .map(|r| {
@@ -857,7 +916,8 @@ impl Ac2Session {
                 })
             })
             .collect();
-        self.e_market(
+        self.e_market_epoch(
+            epoch,
             msg,
             json!({
                 "op": "ResolveEvidence",
@@ -1432,9 +1492,57 @@ fn arm_b_finance_truth_91_95_and_cap_policy_activation_move_fx_projection() {
         "91"
     );
     assert_eq!(
-        q_after_imp["fx_valuation"]["summary"]["evaluated_total"],
-        "91"
+        q_after_imp["fx_valuation"]["initial_foreign_responsibilities_complete"],
+        json!(false)
     );
+    assert_eq!(
+        q_after_imp["fx_valuation"]["boundary"]["missing_foreign_responsibility_ids"],
+        json!(["ob-fx-unclosed-20"])
+    );
+    assert!(q_after_imp["fx_valuation"]["summary"]["foreign_evaluated_subtotal"].is_null());
+    assert!(q_after_imp["fx_valuation"]["summary"]["evaluated_total"].is_null());
+    assert_eq!(
+        q_after_imp["fx_valuation"]["summary"]["gate_status"],
+        "BlockedUnverifiable"
+    );
+    // 期初外币义务未导入前，也不得基于缺漏敞口激活新 cap。
+    let (pre_cap_path, pre_cap_sha) = s.space.save_json(
+        "cap-pre-120.json",
+        &json!({
+            "schema_revision": "funding-cap-policy-record/1",
+            "kind": "TestOnly",
+            "profile_id": "unit",
+            "policy_id": "TestOnly-ac2-cap-95",
+            "version": "2",
+            "supersedes": "1",
+            "cap": "120",
+            "currency": "TEST-CASH",
+            "money_unit": "TEST-CASH",
+            "valid_through_ns": "9000000000000000000",
+            "authorizer": "testonly-owner",
+            "authorized_at_ns": "1",
+            "signature_ref": "sig-pre-120"
+        }),
+    );
+    let act_before_fx = s.e_fin(
+        "act-before-fx-import",
+        json!({
+            "op": "ActivateCapPolicy",
+            "activation_id": "act-before-fx",
+            "policy_id": "TestOnly-ac2-cap-95",
+            "from_version": "1",
+            "to_version": "2",
+            "cap": "120",
+            "valid_through_ns": "9000000000000000000",
+            "policy_record": {"path": pre_cap_path, "sha256": pre_cap_sha},
+            "writer_epoch": "1"
+        }),
+    );
+    assert_eq!(act_before_fx["kind"], "Error", "{act_before_fx}");
+    assert!(act_before_fx["error"]
+        .as_str()
+        .unwrap()
+        .contains("ob-fx-unclosed-20"));
 
     // 再导入 20 TEST-FX 外币义务并接纳 r1 (1/1) -> 91 + 20 = 111 > 95 -> BlockedExceedsCap。
     assert_eq!(
@@ -1701,5 +1809,499 @@ fn negative_catchup_old_r1_out_of_order_fork_non_integer_and_config_guards() {
         .unwrap_err()
         .contains("不得与现金 cap 币种相同"));
         let _ = latest(&s.e_db).unwrap();
+    }
+}
+
+#[test]
+fn b1_unimported_initial_foreign_obligation_blocks_admission_while_empty_boundary_allows() {
+    // 1. 复现非作者 B1 反例：声明了 ob-fx-unclosed-20，现金基线 20 / cap 100；
+    //    未导入期初外币义务前不得按 0 敞口放行 Reserve；补入义务与 r1 后按 20+20+70=110 > 100 拒发 grant。
+    {
+        let mut s = Ac2Session::build(
+            "r3-b1-missing-import",
+            "100",
+            "20",
+            "baseline-cash-20",
+            vec![],
+            false,
+            FX_OBLIGATIONS_RAW,
+        );
+        assert_eq!(
+            s.e_fin(
+                "imp-base",
+                json!({"op": "ImportResponsibility", "responsibility_id": "baseline-cash-20", "writer_epoch": "1"}),
+            )["kind"],
+            "ResponsibilityImportedReceipt"
+        );
+        let q_missing = s.query_fx(1, "q-missing", Value::Null, Value::Null);
+        assert_eq!(
+            q_missing["fx_valuation"]["initial_foreign_responsibilities_complete"],
+            json!(false)
+        );
+        assert_eq!(
+            q_missing["fx_valuation"]["boundary"]["missing_foreign_responsibility_ids"],
+            json!(["ob-fx-unclosed-20"])
+        );
+        assert!(q_missing["fx_valuation"]["summary"]["foreign_evaluated_subtotal"].is_null());
+        assert!(q_missing["fx_valuation"]["summary"]["evaluated_total"].is_null());
+        assert_eq!(
+            q_missing["fx_valuation"]["summary"]["gate_status"],
+            "BlockedUnverifiable"
+        );
+        assert_eq!(
+            q_missing["fx_valuation"]["summary"]["admissible"],
+            json!(false)
+        );
+
+        s.prepare_all_chongs();
+        let slot_main = s.slot("slot-main");
+        let res_before = s.e_fin(
+            "reserve-before-fx-import",
+            json!({
+                "op": "Reserve",
+                "slot_id": "slot-main",
+                "request_set_hash": hash(&slot_main["applicants"]),
+                "writer_epoch": "1"
+            }),
+        );
+        assert_eq!(res_before["kind"], "Error", "{res_before}");
+        assert!(res_before["error"]
+            .as_str()
+            .unwrap()
+            .contains("ob-fx-unclosed-20"));
+
+        // 导入期初外币义务：无报价仍阻断。
+        assert_eq!(
+            s.e_fin(
+                "imp-fx-late",
+                json!({"op": "ImportFxResponsibility", "responsibility_id": "ob-fx-unclosed-20", "writer_epoch": "1"}),
+            )["kind"],
+            "FxResponsibilityImportedReceipt"
+        );
+        let res_noq = s.e_fin(
+            "reserve-no-quote",
+            json!({
+                "op": "Reserve",
+                "slot_id": "slot-main",
+                "request_set_hash": hash(&slot_main["applicants"]),
+                "writer_epoch": "1"
+            }),
+        );
+        assert_eq!(res_noq["kind"], "Error", "{res_noq}");
+
+        // 接纳 r1 但未核清仍阻断；核清 r1 后总敞口 40 <= 100，Reserve(+70) 算出 110 > 100 进入 AwaitingAllocationPolicy。
+        let r1 = s.capture_fx("cap-r1-late", FX_R1_RAW, "tok-r1");
+        assert_eq!(r1["kind"], "Recorded", "{r1}");
+        let res_pend = s.e_fin(
+            "reserve-pending-r1",
+            json!({
+                "op": "Reserve",
+                "slot_id": "slot-main",
+                "request_set_hash": hash(&slot_main["applicants"]),
+                "writer_epoch": "1"
+            }),
+        );
+        assert_eq!(res_pend["kind"], "Error", "{res_pend}");
+
+        assert_eq!(
+            s.resolve_fx("res-r1-late", "ev-r1", &[&r1])["kind"],
+            "Resolved"
+        );
+        let res_over = s.e_fin(
+            "reserve-after-r1-110",
+            json!({
+                "op": "Reserve",
+                "slot_id": "slot-main",
+                "request_set_hash": hash(&slot_main["applicants"]),
+                "writer_epoch": "1"
+            }),
+        );
+        assert_eq!(res_over["kind"], "ReserveReceipt", "{res_over}");
+        assert_eq!(res_over["record"]["state"], "AwaitingAllocationPolicy");
+        assert_eq!(res_over["record"]["required_total"], "110");
+        assert_eq!(res_over["record"]["retained_total"], "40");
+        assert_eq!(res_over["record"]["grants"], json!([]));
+    }
+
+    // 2. 部分导入（声明 2 条，仅导入 1 条）：仍不可核清报价或放行 Reserve。
+    {
+        let mut two_obs: Value = serde_json::from_str(FX_OBLIGATIONS_RAW).unwrap();
+        let mut second = two_obs["obligations"][0].clone();
+        second["responsibility_id"] = json!("ob-fx-second-10");
+        second["quantity"] = json!("10");
+        second["unit"] = json!("OTHER-FX");
+        second["valuation_instrument"] = json!("OTHER-FX/TEST-CASH");
+        second["source_ref"] = json!("testonly-ac2-fx-second-10");
+        two_obs["obligations"].as_array_mut().unwrap().push(second);
+        let two_obs_raw = canonical_json(&two_obs);
+
+        let mut s = Ac2Session::build(
+            "r3-b1-partial-import",
+            "100",
+            "0",
+            "baseline-cash-0",
+            vec![],
+            false,
+            &two_obs_raw,
+        );
+        assert_eq!(
+            s.e_fin(
+                "imp-base",
+                json!({"op": "ImportResponsibility", "responsibility_id": "baseline-cash-0", "writer_epoch": "1"}),
+            )["kind"],
+            "ResponsibilityImportedReceipt"
+        );
+        assert_eq!(
+            s.e_fin(
+                "imp-fx-1",
+                json!({"op": "ImportFxResponsibility", "responsibility_id": "ob-fx-unclosed-20", "writer_epoch": "1"}),
+            )["kind"],
+            "FxResponsibilityImportedReceipt"
+        );
+        let r1 = s.capture_fx("cap-r1", FX_R1_RAW, "tok-r1");
+        assert_eq!(r1["kind"], "Recorded", "{r1}");
+        let q_partial = s.query_fx(1, "q-partial", Value::Null, Value::Null);
+        assert_eq!(
+            q_partial["fx_valuation"]["initial_foreign_responsibilities_complete"],
+            json!(false)
+        );
+        assert_eq!(
+            q_partial["fx_valuation"]["boundary"]["missing_foreign_responsibility_ids"],
+            json!(["ob-fx-second-10"])
+        );
+        assert!(q_partial["fx_valuation"]["summary"]["evaluated_total"].is_null());
+        let bad_res = s.resolve_fx("res-partial-blocked", "ev-partial", &[&r1]);
+        assert_eq!(bad_res["kind"], "Error", "{bad_res}");
+        assert!(bad_res["error"]
+            .as_str()
+            .unwrap()
+            .contains("ob-fx-second-10"));
+    }
+
+    // 3. 共同界显式声明为空（obligations: []）：持久确认为零外币义务，同一公开路径可放行 Reserve -> Commit -> Release。
+    {
+        let empty_obs_raw = canonical_json(&json!({
+            "schema_revision": "testonly-fx-obligation-input/1",
+            "kind": "TestOnly",
+            "source_id": "testonly-ac2-fx-empty-boundary",
+            "source_epoch": "1",
+            "obligations": []
+        }));
+        let mut s = Ac2Session::build(
+            "r3-b1-empty-boundary",
+            "100",
+            "20",
+            "baseline-cash-20",
+            vec![],
+            false,
+            &empty_obs_raw,
+        );
+        assert_eq!(
+            s.e_fin(
+                "imp-base",
+                json!({"op": "ImportResponsibility", "responsibility_id": "baseline-cash-20", "writer_epoch": "1"}),
+            )["kind"],
+            "ResponsibilityImportedReceipt"
+        );
+        let q_empty = s.query_fx(1, "q-empty", Value::Null, Value::Null);
+        assert_eq!(
+            q_empty["fx_valuation"]["initial_foreign_responsibilities_complete"],
+            json!(true)
+        );
+        assert_eq!(
+            q_empty["fx_valuation"]["boundary"]["declared_foreign_responsibility_ids"],
+            json!([])
+        );
+        assert_eq!(
+            q_empty["fx_valuation"]["summary"]["foreign_evaluated_subtotal"],
+            "0"
+        );
+        assert_eq!(q_empty["fx_valuation"]["summary"]["evaluated_total"], "20");
+        assert_eq!(
+            q_empty["fx_valuation"]["summary"]["gate_status"],
+            "AdmissibleWithinCap"
+        );
+
+        s.prepare_all_chongs();
+        let slot_main = s.slot("slot-main");
+        let res = s.e_fin(
+            "reserve-main",
+            json!({
+                "op": "Reserve",
+                "slot_id": "slot-main",
+                "request_set_hash": hash(&slot_main["applicants"]),
+                "writer_epoch": "1"
+            }),
+        );
+        assert_eq!(res["kind"], "ReserveReceipt", "{res}");
+        assert_eq!(res["record"]["state"], "Reserved");
+        assert_eq!(res["record"]["required_total"], "90");
+
+        let alpha_grant = res["record"]["grants"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|g| g["decision_id"] == "alpha")
+            .unwrap()
+            .clone();
+        let alpha_plan = s.plan("alpha");
+        assert_eq!(
+            s.b_send(
+                "alpha",
+                "commit-alpha",
+                json!({
+                    "op": "CommitDecision",
+                    "decision_id": "alpha",
+                    "plan_hash": hash(&alpha_plan),
+                    "grant_id": alpha_grant["grant_id"],
+                    "writer_epoch": "1"
+                }),
+            )["kind"],
+            "LocalCommitReceipt"
+        );
+        assert_eq!(
+            s.e_fin(
+                "dispatch-alpha",
+                json!({
+                    "op": "MakeDispatchable",
+                    "decision_id": "alpha",
+                    "plan_hash": hash(&alpha_plan),
+                    "writer_epoch": "1"
+                }),
+            )["kind"],
+            "DispatchableReceipt"
+        );
+        let rel = s.e_fin(
+            "release-alpha-empty-fx",
+            s.release_exact_payload("alpha", alpha_grant["grant_id"].as_str().unwrap()),
+        );
+        assert_eq!(rel["kind"], "ReleasedExactReceipt", "{rel}");
+        assert_eq!(recover(&s.e_config).unwrap()["writer_epoch"], "2");
+    }
+}
+
+#[test]
+fn a1_quote_before_import_resolves_and_retires_after_attribution_across_epoch2_leaving_history_and_unrelated_account_star_intact(
+) {
+    // 1. 复现非作者 A1 反例 + epoch 2 恢复 + 无关 account:* 并存对照：
+    //    baseline -> cap r1 (account:*) -> 未导入前 Resolve 拒 -> ImportFx -> cap r2/r3 -> Resolve [r3,r2] ->
+    //    接纳无关 OTHER-FX (account:*) -> recover 到 epoch 2 -> 历史 cut 保持 account:* ->
+    //    在 epoch 2 拒清 OTHER-FX、拒混清 [r1, OTHER-FX]、成功精确退役 r1，且 OTHER-FX 仍留存封闸。
+    {
+        let mut s = Ac2Session::build(
+            "r3-a1-retire-ep2",
+            "100",
+            "0",
+            "baseline-cash-0",
+            vec![],
+            false,
+            FX_OBLIGATIONS_RAW,
+        );
+        assert_eq!(
+            s.e_fin(
+                "imp-base",
+                json!({"op": "ImportResponsibility", "responsibility_id": "baseline-cash-0", "writer_epoch": "1"}),
+            )["kind"],
+            "ResponsibilityImportedReceipt"
+        );
+        let r1 = s.capture_fx("cap-r1-early", FX_R1_RAW, "tok-r1");
+        assert_eq!(r1["kind"], "Recorded", "{r1}");
+        let rv_early = s.e_read(
+            1,
+            "rv-early",
+            json!({"op": "ReadView", "cut": null, "as_known_ns": null}),
+        );
+        let p_early = rv_early["image"]["pending"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|p| p["fact_key"] == r1["fact_key"])
+            .unwrap()
+            .clone();
+        assert_eq!(p_early["scope"], "account:*");
+
+        // 导入义务前尝试 Resolve r1：必须拒绝。
+        let bad_before = s.resolve_fx("res-early-before-import", "ev-early-before", &[&r1]);
+        assert_eq!(bad_before["kind"], "Error", "{bad_before}");
+        assert!(bad_before["error"].as_str().unwrap().contains("账户范围"));
+
+        // 导入期初外币义务：r1 在当前切面已获归属证明，但仍待核清。
+        assert_eq!(
+            s.e_fin(
+                "imp-fx-after-r1",
+                json!({"op": "ImportFxResponsibility", "responsibility_id": "ob-fx-unclosed-20", "writer_epoch": "1"}),
+            )["kind"],
+            "FxResponsibilityImportedReceipt"
+        );
+        let q_attr = s.query_fx(1, "q-attr", Value::Null, Value::Null);
+        assert_eq!(
+            q_attr["fx_valuation"]["revisions"][0]["matched_responsibility_ids"],
+            json!(["ob-fx-unclosed-20"])
+        );
+        assert_eq!(
+            q_attr["fx_valuation"]["revisions"][0]["attribution_status"],
+            "Attributed"
+        );
+        assert_eq!(
+            q_attr["fx_valuation"]["revisions"][0]["effective_scope"],
+            "E:fx:TEST-FX/TEST-CASH"
+        );
+        assert_eq!(
+            q_attr["fx_valuation"]["summary"]["gate_status"],
+            "BlockedPendingEvidence"
+        );
+
+        let r2 = s.capture_fx("cap-r2", FX_R2_RAW, "tok-r2");
+        let r3 = s.capture_fx("cap-r3", FX_R3_RAW, "tok-r3");
+        assert_eq!(r2["kind"], "Recorded", "{r2}");
+        assert_eq!(r3["kind"], "Recorded", "{r3}");
+        assert_eq!(
+            s.resolve_fx("res-r2-r3-batch", "ev-r3-r2", &[&r3, &r2])["kind"],
+            "Resolved"
+        );
+
+        // 并存一条真未知的 OTHER-FX account:* token。
+        let mut other_q: Value = serde_json::from_str(FX_R1_RAW).unwrap();
+        other_q["instrument"] = json!("OTHER-FX/TEST-CASH");
+        other_q["base_unit"] = json!("OTHER-FX");
+        other_q["event_id"] = json!("fx-quote-other-a1");
+        let other_rec = s.capture_fx("cap-other-a1", &canonical_json(&other_q), "tok-other-a1");
+        assert_eq!(other_rec["kind"], "Recorded", "{other_rec}");
+
+        // 正式恢复到 epoch 2。
+        let rec = recover(&s.e_config).unwrap();
+        assert_eq!(rec["writer_epoch"], "2");
+
+        // 历史早到 cut 原貌未改（仍为 account:*）。
+        let rv_old = s.e_read(
+            2,
+            "rv-old",
+            json!({"op": "ReadView", "cut": rv_early["cut"], "as_known_ns": null}),
+        );
+        assert_eq!(rv_old["image"], rv_early["image"]);
+
+        // 在 epoch 2：真未知 OTHER-FX 拒清，混批 [r1, OTHER-FX] 拒清。
+        let bad_other =
+            s.resolve_fx_epoch(2, "retire-r1-ep2-bad-other", "ev-other-ep2", &[&other_rec]);
+        assert_eq!(bad_other["kind"], "Error", "{bad_other}");
+        assert!(bad_other["error"].as_str().unwrap().contains("账户范围"));
+
+        let bad_mixed = s.resolve_fx_epoch(
+            2,
+            "retire-r1-ep2-mixed-other",
+            "ev-mixed-ep2",
+            &[&r1, &other_rec],
+        );
+        assert_eq!(bad_mixed["kind"], "Error", "{bad_mixed}");
+        assert!(bad_mixed["error"].as_str().unwrap().contains("账户范围"));
+
+        // 在 epoch 2：仅退役已获归属证明的 r1 原 token -> 成功！
+        let retired_r1 = s.resolve_fx_epoch(2, "retire-r1-ep2-ok", "ev-retire-r1-ep2", &[&r1]);
+        assert_eq!(retired_r1["kind"], "Resolved", "{retired_r1}");
+        assert_eq!(retired_r1["covered"], json!([r1["fact_key"]]));
+
+        let q_after = s.query_fx(2, "q-after-ep2", Value::Null, Value::Null);
+        let r1_row = q_after["fx_valuation"]["revisions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|r| r["fact_key"] == r1["fact_key"])
+            .unwrap();
+        assert_eq!(r1_row["coverage_status"], "RetiredBySupersession");
+        assert_eq!(r1_row["retired_by_fact_key"], r3["fact_key"]);
+        assert_eq!(r1_row["retired_by_revision"], "3");
+        assert_eq!(r1_row["initial_pending_scope"], "account:*");
+        assert_eq!(r1_row["resolved_scope"], "E:fx:TEST-FX/TEST-CASH");
+        assert_eq!(
+            r1_row["attributed_responsibility_ids"],
+            json!(["ob-fx-unclosed-20"])
+        );
+        // 无关 OTHER-FX 原 account:* token 仍在 pending 且继续封闸。
+        assert_eq!(
+            q_after["fx_valuation"]["summary"]["active_pending_fact_keys"],
+            json!([other_rec["fact_key"]])
+        );
+        assert_eq!(
+            q_after["fx_valuation"]["summary"]["gate_status"],
+            "BlockedUnverifiable"
+        );
+        // 在 epoch 2 尝试 Reserve：仍被未归属 OTHER-FX 阻断。
+        let slot_main = s.slot("slot-main");
+        let bad_res_ep2 = s.e_fin_epoch(
+            2,
+            "reserve-blocked-by-other-ep2",
+            json!({
+                "op": "Reserve",
+                "slot_id": "slot-main",
+                "request_set_hash": hash(&slot_main["applicants"]),
+                "writer_epoch": "2"
+            }),
+        );
+        assert_eq!(bad_res_ep2["kind"], "Error", "{bad_res_ep2}");
+        // 再次恢复到 epoch 3，确认全历史重放审计完全通过。
+        assert_eq!(recover(&s.e_config).unwrap()["writer_epoch"], "3");
+    }
+
+    // 2. 早到 r1 先于基线与外币义务到达，待两者都导入后直接核清为 Covered 并放行全链路。
+    {
+        let mut s = Ac2Session::build(
+            "r3-a1-direct-cover",
+            "100",
+            "0",
+            "baseline-cash-0",
+            vec![],
+            false,
+            FX_OBLIGATIONS_RAW,
+        );
+        let r1 = s.capture_fx("cap-r1-first", FX_R1_RAW, "tok-r1");
+        assert_eq!(r1["kind"], "Recorded", "{r1}");
+        let rv_c1 = s.e_read(
+            1,
+            "rv-c1",
+            json!({"op": "ReadView", "cut": null, "as_known_ns": null}),
+        );
+        assert_eq!(rv_c1["image"]["pending"][0]["scope"], "account:*");
+
+        // 先导入外币义务、基线未导入 -> 归属已明但缺基线，仍不能核清。
+        assert_eq!(
+            s.e_fin(
+                "imp-fx-second",
+                json!({"op": "ImportFxResponsibility", "responsibility_id": "ob-fx-unclosed-20", "writer_epoch": "1"}),
+            )["kind"],
+            "FxResponsibilityImportedReceipt"
+        );
+        let bad_no_base = s.resolve_fx("res-early-before-baseline", "ev-no-base", &[&r1]);
+        assert_eq!(bad_no_base["kind"], "Error", "{bad_no_base}");
+
+        // 再导入基线 -> 直接核清 r1 原 token 为 Covered，历史 cut 1 不变。
+        assert_eq!(
+            s.e_fin(
+                "imp-base-third",
+                json!({"op": "ImportResponsibility", "responsibility_id": "baseline-cash-0", "writer_epoch": "1"}),
+            )["kind"],
+            "ResponsibilityImportedReceipt"
+        );
+        let ok = s.resolve_fx("res-r1-after-import", "ev-r1-direct", &[&r1]);
+        assert_eq!(ok["kind"], "Resolved", "{ok}");
+        let q_ok = s.query_fx(1, "q-direct-ok", Value::Null, Value::Null);
+        assert_eq!(
+            q_ok["fx_valuation"]["summary"]["gate_status"],
+            "AdmissibleWithinCap"
+        );
+        assert_eq!(
+            q_ok["fx_valuation"]["revisions"][0]["initial_pending_scope"],
+            "account:*"
+        );
+        assert_eq!(
+            q_ok["fx_valuation"]["revisions"][0]["resolved_scope"],
+            "E:fx:TEST-FX/TEST-CASH"
+        );
+        let rv_c1_again = s.e_read(
+            1,
+            "rv-c1-again",
+            json!({"op": "ReadView", "cut": rv_c1["cut"], "as_known_ns": null}),
+        );
+        assert_eq!(rv_c1_again["image"], rv_c1["image"]);
+        assert_eq!(recover(&s.e_config).unwrap()["writer_epoch"], "2");
     }
 }

@@ -107,10 +107,18 @@ pub(super) fn pinned_obligation_raw(config: &Config) -> Result<String, String> {
     String::from_utf8(bytes).map_err(|e| e.to_string())
 }
 
-pub(super) fn parse_obligation_input(
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct DeclaredBoundary {
+    obligation_input_sha256: String,
+    source_id: String,
+    source_epoch: String,
+    declared_foreign_responsibility_ids: Vec<String>,
+}
+
+fn parse_obligation_doc(
     config: &Config,
     raw: &str,
-    finance_policy: &Value,
+    cap_currency: Option<&str>,
 ) -> Result<Value, String> {
     if !enabled(config) {
         return Err("SchemaUnsupported：未启用 fx-valuation/1 子合同".into());
@@ -138,7 +146,6 @@ pub(super) fn parse_obligation_input(
     }
     required(&doc, "source_id")?;
     required(&doc, "source_epoch")?;
-    let cap_currency = required(finance_policy, "currency")?;
     let arr = doc["obligations"]
         .as_array()
         .ok_or("SchemaUnsupported：obligations 须数组")?;
@@ -170,18 +177,32 @@ pub(super) fn parse_obligation_input(
         required(ob, "source_ref")?;
         positive(required(ob, "quantity")?, "foreign obligation quantity")?;
         let unit = required(ob, "unit")?;
-        if unit == cap_currency {
-            return Err(
-                "InvalidDomain：外币义务单位不得与现金 cap 币种相同（不得给旧现金义务改标签）"
-                    .into(),
-            );
+        if let Some(cc) = cap_currency {
+            if unit == cc {
+                return Err(
+                    "InvalidDomain：外币义务单位不得与现金 cap 币种相同（不得给旧现金义务改标签）"
+                        .into(),
+                );
+            }
         }
         let instrument = required(ob, "valuation_instrument")?;
-        let expected_inst = format!("{unit}/{cap_currency}");
-        if instrument != expected_inst {
+        let Some((base, quote)) = instrument.split_once('/') else {
             return Err(format!(
-                "InvalidDomain：外币义务估值工具 {instrument} 须与 {expected_inst} 一致"
+                "InvalidDomain：外币义务估值工具 {instrument} 须为 BASE/QUOTE 形式"
             ));
+        };
+        if base != unit || quote.is_empty() || quote.contains('/') || base == quote {
+            return Err(format!(
+                "InvalidDomain：外币义务估值工具 {instrument} 与单位 {unit} 不一致"
+            ));
+        }
+        if let Some(cc) = cap_currency {
+            let expected_inst = format!("{unit}/{cc}");
+            if instrument != expected_inst {
+                return Err(format!(
+                    "InvalidDomain：外币义务估值工具 {instrument} 须与 {expected_inst} 一致"
+                ));
+            }
         }
         exact(&ob["quote_source"], &["source_namespace", "source_epoch"])?;
         let qns = required(&ob["quote_source"], "source_namespace")?;
@@ -204,6 +225,65 @@ pub(super) fn parse_obligation_input(
         }
     }
     Ok(doc)
+}
+
+pub(super) fn parse_obligation_input(
+    config: &Config,
+    raw: &str,
+    finance_policy: &Value,
+) -> Result<Value, String> {
+    let cap_currency = required(finance_policy, "currency")?;
+    parse_obligation_doc(config, raw, Some(cap_currency))
+}
+
+fn parse_declared_boundary(config: &Config) -> Result<DeclaredBoundary, String> {
+    let raw = pinned_obligation_raw(config)?;
+    let doc = parse_obligation_doc(config, &raw, None)?;
+    let expected_sha = required(&config.manifest[CONTRACT_FIELD], "obligation_input_sha256")?;
+    let declared_ids = doc["obligations"]
+        .as_array()
+        .ok_or("SchemaUnsupported：obligations 须数组")?
+        .iter()
+        .map(|ob| required(ob, "responsibility_id").map(ToOwned::to_owned))
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(DeclaredBoundary {
+        obligation_input_sha256: expected_sha.to_owned(),
+        source_id: required(&doc, "source_id")?.to_owned(),
+        source_epoch: required(&doc, "source_epoch")?.to_owned(),
+        declared_foreign_responsibility_ids: declared_ids,
+    })
+}
+
+fn extract_boundary(image: &Value, config: Option<&Config>) -> Result<DeclaredBoundary, String> {
+    let b = image
+        .get(CONTRACT_FIELD)
+        .and_then(|fx| fx.get("boundary"))
+        .filter(|v| v.is_object())
+        .ok_or("StorageUnavailable：持久图像缺失 fx_valuation.boundary 共同界声明")?;
+    let sha = required(b, "obligation_input_sha256")?.to_owned();
+    if let Some(cfg) = config {
+        let expected_sha = required(&cfg.manifest[CONTRACT_FIELD], "obligation_input_sha256")?;
+        if sha != expected_sha {
+            return Err("IdentityConflict：持久共同界声明与冻结外币义务摘要不符".into());
+        }
+    }
+    let declared_ids = b["declared_foreign_responsibility_ids"]
+        .as_array()
+        .ok_or("StorageUnavailable：boundary.declared_foreign_responsibility_ids 形状")?
+        .iter()
+        .map(|v| {
+            v.as_str()
+                .filter(|s| !s.is_empty())
+                .map(ToOwned::to_owned)
+                .ok_or_else(|| "StorageUnavailable：boundary 声明责任 ID 非字符串".to_owned())
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(DeclaredBoundary {
+        obligation_input_sha256: sha,
+        source_id: required(b, "source_id")?.to_owned(),
+        source_epoch: required(b, "source_epoch")?.to_owned(),
+        declared_foreign_responsibility_ids: declared_ids,
+    })
 }
 
 pub(super) fn import_obligation(
@@ -412,19 +492,27 @@ pub(super) fn check_capture(config: &Config, event: &Value) -> Result<(), String
     Ok(())
 }
 
-/// 创世空投影：不预载任何 manifest 假数量/假 cap，等待真实 FIN 导入。
+/// 创世空投影：不预载任何 manifest 假数量/假 cap，只持久绑定冻结外币义务清单的身份边界，等待真实 FIN 导入。
 pub(super) fn empty(config: &Config) -> Result<Option<Value>, String> {
     if config.domain != "E" || !enabled(config) {
         return Ok(None);
     }
+    let boundary = parse_declared_boundary(config)?;
     let dummy_image = json!({
         "finance": {
             "responsibilities": [],
             "foreign_responsibilities": []
         }
     });
-    let state = build_state_from_image(config, &dummy_image, &[], &[], &BTreeMap::new())?;
-    Ok(Some(state))
+    let derived = derive_state(
+        Some(config),
+        &dummy_image,
+        &boundary,
+        &[],
+        &[],
+        &BTreeMap::new(),
+    )?;
+    Ok(Some(derived.json))
 }
 
 #[derive(Clone)]
@@ -541,6 +629,29 @@ fn quote_matches_foreign(quote: &ParsedQuote, ob: &ForeignObligationRow) -> bool
         && quote.instrument == ob.valuation_instrument
 }
 
+fn matched_foreign_obligations(
+    image: &Value,
+    fact: &Value,
+) -> Result<Vec<ForeignObligationRow>, String> {
+    let Some(quote) = parse_quote_record(fact)? else {
+        return Ok(Vec::new());
+    };
+    let foreign_obs = parse_foreign_responsibilities(image)?;
+    Ok(foreign_obs
+        .into_iter()
+        .filter(|ob| quote_matches_foreign(&quote, ob))
+        .collect())
+}
+
+/// 同一切面上检验 `account:*` 的 FX 报价 Pending 是否已在 E 持久外币责任中获得归属证明。
+/// 非 FX 事实一律返回 `false`，绝不放松无关 `account:*` Pending。
+pub(super) fn has_persisted_attribution(previous: &Value, fact: &Value) -> Result<bool, String> {
+    if !is_fx_quote_event(&fact["event"]) {
+        return Ok(false);
+    }
+    Ok(!matched_foreign_obligations(previous, fact)?.is_empty())
+}
+
 fn extract_coverages(image: &Value) -> BTreeMap<String, Value> {
     let mut map = BTreeMap::new();
     let Some(revs) = image
@@ -561,7 +672,10 @@ fn extract_coverages(image: &Value) -> BTreeMap<String, Value> {
                         "evidence_id": r["evidence_id"],
                         "evidence_hash": r["evidence_hash"],
                         "retired_by_fact_key": r.get("retired_by_fact_key").cloned().unwrap_or(Value::Null),
-                        "retired_by_revision": r.get("retired_by_revision").cloned().unwrap_or(Value::Null)
+                        "retired_by_revision": r.get("retired_by_revision").cloned().unwrap_or(Value::Null),
+                        "initial_pending_scope": r.get("initial_pending_scope").cloned().unwrap_or(Value::Null),
+                        "resolved_scope": r.get("resolved_scope").cloned().unwrap_or(Value::Null),
+                        "attributed_responsibility_ids": r.get("attributed_responsibility_ids").cloned().unwrap_or(Value::Null)
                     }),
                 );
             }
@@ -571,13 +685,15 @@ fn extract_coverages(image: &Value) -> BTreeMap<String, Value> {
 }
 
 struct LiveCapPolicy {
+    policy_id: String,
+    policy_version: String,
     amount: i64,
     currency: String,
     json: Value,
 }
 
 fn extract_live_cap_policy(
-    config: &Config,
+    config: Option<&Config>,
     image: &Value,
 ) -> Result<Option<LiveCapPolicy>, String> {
     let Some(fin) = image.get("finance") else {
@@ -592,21 +708,31 @@ fn extract_live_cap_policy(
     let base_policy = &baseline["policy"];
     let currency = required(base_policy, "currency")?.to_owned();
     let finance_input_sha256 = config
-        .manifest
-        .get("finance")
+        .and_then(|cfg| cfg.manifest.get("finance"))
         .and_then(|f| f.get("input_sha256"))
         .and_then(Value::as_str)
+        .or_else(|| {
+            image
+                .get(CONTRACT_FIELD)
+                .and_then(|fx| fx.get("cap_policy"))
+                .and_then(|cp| cp.get("finance_input_sha256"))
+                .and_then(Value::as_str)
+        })
         .unwrap_or("")
         .to_owned();
     if let Some(cap_pol) = fin.get("cap_policy").filter(|v| !v.is_null()) {
         let amount = nonnegative(required(cap_pol, "cap")?, "active cap_policy cap")?;
+        let policy_id = required(cap_pol, "policy_id")?.to_owned();
+        let policy_version = required(cap_pol, "policy_version")?.to_owned();
         Ok(Some(LiveCapPolicy {
+            policy_id: policy_id.clone(),
+            policy_version: policy_version.clone(),
             amount,
             currency: currency.clone(),
             json: json!({
                 "source": "finance.cap_policy",
-                "policy_id": cap_pol["policy_id"],
-                "policy_version": cap_pol["policy_version"],
+                "policy_id": policy_id,
+                "policy_version": policy_version,
                 "cap": cap_pol["cap"],
                 "currency": currency,
                 "money_unit": base_policy["money_unit"],
@@ -620,13 +746,17 @@ fn extract_live_cap_policy(
         }))
     } else {
         let amount = nonnegative(required(base_policy, "cap")?, "finance policy cap")?;
+        let policy_id = required(base_policy, "policy_id")?.to_owned();
+        let policy_version = "1".to_owned();
         Ok(Some(LiveCapPolicy {
+            policy_id: policy_id.clone(),
+            policy_version: policy_version.clone(),
             amount,
             currency: currency.clone(),
             json: json!({
                 "source": "finance.policy",
-                "policy_id": base_policy["policy_id"],
-                "policy_version": "1",
+                "policy_id": policy_id,
+                "policy_version": policy_version,
                 "cap": base_policy["cap"],
                 "currency": currency,
                 "money_unit": base_policy["money_unit"],
@@ -641,14 +771,27 @@ fn extract_live_cap_policy(
     }
 }
 
-/// 纯函数：从 E 实际持久 `image["finance"]`、`recorded`、`pending` 与已核覆盖构建 `image["fx_valuation"]`。
-fn build_state_from_image(
-    config: &Config,
+struct DerivedFxState {
+    baseline_imported: bool,
+    live_cap: Option<LiveCapPolicy>,
+    missing_foreign_ids: Vec<String>,
+    initial_foreign_responsibilities_complete: bool,
+    foreign_subtotal_i64: Option<i64>,
+    evaluated_total_i64: Option<i64>,
+    within_cap: Option<bool>,
+    gate_status: &'static str,
+    json: Value,
+}
+
+/// 纯函数：从 E 实际持久 `image["finance"]`、`boundary`、`recorded`、`pending` 与已核覆盖推导完整 FX 估值态。
+fn derive_state(
+    config: Option<&Config>,
     image: &Value,
+    boundary: &DeclaredBoundary,
     recorded: &[Value],
     pending: &[Value],
     coverages: &BTreeMap<String, Value>,
-) -> Result<Value, String> {
+) -> Result<DerivedFxState, String> {
     let live_cap = extract_live_cap_policy(config, image)?;
     let baseline_imported = live_cap.is_some();
     let cap_currency = live_cap
@@ -661,6 +804,7 @@ fn build_state_from_image(
     let mut cash_subtotal: i128 = 0;
     let mut grant_ids = Vec::new();
     let mut all_responsibility_ids = Vec::new();
+    let mut common_cap_owners = BTreeSet::new();
     if let Some(resps) = image
         .get("finance")
         .and_then(|f| f.get("responsibilities"))
@@ -674,6 +818,7 @@ fn build_state_from_image(
                 .checked_add(i128::from(amount))
                 .ok_or("InvalidDomain：现金责任汇总溢出")?;
             all_responsibility_ids.push(rid.clone());
+            common_cap_owners.insert(owner.clone());
             if let Some(grant) = r.get("grant").filter(|g| g.is_object()) {
                 let gid = required(grant, "grant_id")?.to_owned();
                 grant_ids.push(gid.clone());
@@ -706,11 +851,23 @@ fn build_state_from_image(
         }
     }
 
-    // 2. 读取正式导入的 TestOnly 外币义务。
+    // 2. 读取正式导入的 TestOnly 外币义务，并与共同界声明核对期初完整性。
     let foreign_obs = parse_foreign_responsibilities(image)?;
+    let mut imported_foreign_ids = Vec::new();
+    let mut imported_foreign_set = BTreeSet::new();
     for ob in &foreign_obs {
         all_responsibility_ids.push(ob.responsibility_id.clone());
+        imported_foreign_ids.push(ob.responsibility_id.clone());
+        imported_foreign_set.insert(ob.responsibility_id.as_str());
+        common_cap_owners.insert(ob.owner.clone());
     }
+    let missing_foreign_ids: Vec<String> = boundary
+        .declared_foreign_responsibility_ids
+        .iter()
+        .filter(|id| !imported_foreign_set.contains(id.as_str()))
+        .cloned()
+        .collect();
+    let initial_foreign_responsibilities_complete = missing_foreign_ids.is_empty();
 
     // 3. 解析所有已接纳的 FX 报价原件，并按 (namespace, epoch, instrument, event_id) 组链。
     let mut quotes = Vec::new();
@@ -745,6 +902,13 @@ fn build_state_from_image(
     let mut chain_incomplete = false;
     let mut blocking_reasons = Vec::new();
     let mut active_fact_keys = Vec::new();
+
+    if !initial_foreign_responsibilities_complete {
+        blocking_reasons.push(format!(
+            "ForeignResponsibilitiesNotImported: missing initial foreign obligation(s) {}",
+            missing_foreign_ids.join(",")
+        ));
+    }
 
     for ((ns, ep, inst, eid), mut list) in chains_map {
         list.sort_by_key(|q| q.revision_num);
@@ -800,7 +964,7 @@ fn build_state_from_image(
         }));
     }
 
-    // 4. 构建每版修订行，保留全部原件元数据、替代链与核清/退役状态。
+    // 4. 构建每版修订行，保留全部原件元数据、替代链与归属/核清/退役状态。
     let mut revision_rows = Vec::new();
     let mut active_pending_fact_keys = Vec::new();
     let mut has_unmatched_quote = false;
@@ -809,19 +973,33 @@ fn build_state_from_image(
     let mut has_superseded_pending = false;
 
     for q in &quotes {
-        let matched_ids: Vec<String> = foreign_obs
+        let matched_obs: Vec<&ForeignObligationRow> = foreign_obs
             .iter()
             .filter(|ob| quote_matches_foreign(q, ob))
+            .collect();
+        let matched_ids: Vec<String> = matched_obs
+            .iter()
             .map(|ob| ob.responsibility_id.clone())
             .collect();
+        let is_attributed = !matched_ids.is_empty();
+        let effective_scope = if is_attributed {
+            format!("E:fx:{}", q.instrument)
+        } else {
+            "account:*".to_owned()
+        };
+        let attribution_status = if is_attributed {
+            "Attributed"
+        } else {
+            "Unattributed"
+        };
         let pending_entry = pending_by_key.get(&q.fact_key).copied();
         let is_pending = pending_entry.is_some();
         if is_pending {
             active_pending_fact_keys.push(q.fact_key.clone());
         }
-        let account_scoped_pending =
-            pending_entry.is_some_and(|p| p["scope"].as_str() == Some("account:*"));
-        if matched_ids.is_empty() || account_scoped_pending {
+        // 只在当前切面仍无持久外币责任归属时判为未归属；先于责任到达、后来归属获证的报价保留其初始
+        // `account:*` 捕获史，同时按当前切面的权威归属允许正式 ResolveEvidence 核清或退役。
+        if !is_attributed {
             has_unmatched_quote = true;
             blocking_reasons.push(format!(
                 "UnmatchedQuoteScope: {}/{} rev {} cannot be attributed to imported foreign obligations",
@@ -855,6 +1033,11 @@ fn build_state_from_image(
                 q.instrument, q.revision
             ));
         }
+        let initial_pending_scope = pending_entry
+            .and_then(|p| p.get("scope"))
+            .cloned()
+            .or_else(|| cov.and_then(|c| c.get("initial_pending_scope")).cloned())
+            .unwrap_or(Value::Null);
         revision_rows.push(json!({
             "fact_key": q.fact_key,
             "fact_hash": q.fact_hash,
@@ -882,6 +1065,11 @@ fn build_state_from_image(
             "evidence_hash": cov.and_then(|c| c.get("evidence_hash")).cloned().unwrap_or(Value::Null),
             "retired_by_fact_key": cov.and_then(|c| c.get("retired_by_fact_key")).cloned().unwrap_or(Value::Null),
             "retired_by_revision": cov.and_then(|c| c.get("retired_by_revision")).cloned().unwrap_or(Value::Null),
+            "initial_pending_scope": initial_pending_scope,
+            "effective_scope": effective_scope,
+            "attribution_status": attribution_status,
+            "resolved_scope": cov.and_then(|c| c.get("resolved_scope")).cloned().unwrap_or(Value::Null),
+            "attributed_responsibility_ids": cov.and_then(|c| c.get("attributed_responsibility_ids")).cloned().unwrap_or(Value::Null),
             "matched_responsibility_ids": matched_ids
         }));
     }
@@ -982,7 +1170,7 @@ fn build_state_from_image(
         }
     }
 
-    // 6. 合成总敞口与封闸裁决（严格基于 E 实际财务基线/保留/外币义务与生效 cap）。
+    // 6. 合成总敞口与封闸裁决（严格基于 E 实际财务基线/保留/完整外币义务与生效 cap）。
     if !baseline_imported {
         blocking_reasons.push(
             "FinanceBaselineNotImported: awaiting ImportResponsibility before FX cap evaluation"
@@ -990,20 +1178,22 @@ fn build_state_from_image(
         );
     }
 
-    let foreign_subtotal_i64: Option<i64> = if all_foreign_valued {
-        i64::try_from(foreign_subtotal).ok()
-    } else {
-        None
-    };
+    let foreign_subtotal_i64: Option<i64> =
+        if initial_foreign_responsibilities_complete && all_foreign_valued {
+            i64::try_from(foreign_subtotal).ok()
+        } else {
+            None
+        };
     let cash_subtotal_i64 = i64::try_from(cash_subtotal).ok();
-    let evaluated_total_i64: Option<i64> = if baseline_imported {
-        match (cash_subtotal_i64, foreign_subtotal_i64) {
-            (Some(c), Some(f)) => c.checked_add(f),
-            _ => None,
-        }
-    } else {
-        None
-    };
+    let evaluated_total_i64: Option<i64> =
+        if baseline_imported && initial_foreign_responsibilities_complete {
+            match (cash_subtotal_i64, foreign_subtotal_i64) {
+                (Some(c), Some(f)) => c.checked_add(f),
+                _ => None,
+            }
+        } else {
+            None
+        };
 
     let (within_cap, headroom_or_excess) = match (&live_cap, evaluated_total_i64) {
         (Some(cap), Some(total)) => {
@@ -1020,7 +1210,9 @@ fn build_state_from_image(
         _ => (None, None),
     };
 
-    let evidence_coverage_status = if !has_uncovered_active
+    let evidence_coverage_status = if baseline_imported
+        && initial_foreign_responsibilities_complete
+        && !has_uncovered_active
         && active_pending_fact_keys.is_empty()
         && !has_no_quote
         && !has_unmatched_quote
@@ -1034,26 +1226,43 @@ fn build_state_from_image(
         "Uncovered"
     };
 
-    let gate_status =
-        if !baseline_imported || has_unmatched_quote || chain_incomplete || has_unverifiable_ob {
-            "BlockedUnverifiable"
-        } else if has_no_quote {
-            "BlockedNoQuote"
-        } else if within_cap == Some(false) {
-            "BlockedExceedsCap"
-        } else if within_cap.is_none() {
-            "BlockedUnverifiable"
-        } else if !active_pending_fact_keys.is_empty() || has_uncovered_active {
-            "BlockedPendingEvidence"
-        } else {
-            "AdmissibleWithinCap"
-        };
+    let gate_status = if !baseline_imported
+        || !initial_foreign_responsibilities_complete
+        || has_unmatched_quote
+        || chain_incomplete
+        || has_unverifiable_ob
+    {
+        "BlockedUnverifiable"
+    } else if has_no_quote {
+        "BlockedNoQuote"
+    } else if within_cap == Some(false) {
+        "BlockedExceedsCap"
+    } else if within_cap.is_none() {
+        "BlockedUnverifiable"
+    } else if !active_pending_fact_keys.is_empty() || has_uncovered_active {
+        "BlockedPendingEvidence"
+    } else {
+        "AdmissibleWithinCap"
+    };
     let admissible = gate_status == "AdmissibleWithinCap";
 
-    Ok(json!({
+    let boundary_json = json!({
+        "domain_id": "E",
+        "obligation_input_sha256": boundary.obligation_input_sha256,
+        "source_id": boundary.source_id,
+        "source_epoch": boundary.source_epoch,
+        "declared_foreign_responsibility_ids": boundary.declared_foreign_responsibility_ids,
+        "imported_foreign_responsibility_ids": imported_foreign_ids,
+        "missing_foreign_responsibility_ids": missing_foreign_ids,
+        "initial_foreign_responsibilities_complete": initial_foreign_responsibilities_complete
+    });
+
+    let json = json!({
         "schema_revision": SCHEMA,
         "kind": "TestOnly",
         "baseline_imported": baseline_imported,
+        "initial_foreign_responsibilities_complete": initial_foreign_responsibilities_complete,
+        "boundary": boundary_json,
         "cap_policy": live_cap.as_ref().map(|c| c.json.clone()).unwrap_or(Value::Null),
         "cash_responsibilities": cash_rows,
         "foreign_responsibilities": foreign_rows,
@@ -1061,11 +1270,18 @@ fn build_state_from_image(
         "supersession_chains": chain_summaries,
         "applicable_scope": {
             "domain_id": "E",
+            "common_cap_policy_id": live_cap.as_ref().map(|c| c.policy_id.clone()),
+            "common_cap_policy_version": live_cap.as_ref().map(|c| c.policy_version.clone()),
             "cap_currency": cap_currency,
+            "declared_foreign_responsibility_ids": boundary.declared_foreign_responsibility_ids,
+            "imported_foreign_responsibility_ids": imported_foreign_ids,
+            "missing_foreign_responsibility_ids": missing_foreign_ids,
+            "initial_foreign_responsibilities_complete": initial_foreign_responsibilities_complete,
             "instruments": instruments.into_iter().collect::<Vec<_>>(),
             "all_responsibility_ids": all_responsibility_ids,
             "affected_responsibility_ids": affected_ids,
             "affected_owners": affected_owners.into_iter().collect::<Vec<_>>(),
+            "common_cap_owners": common_cap_owners.into_iter().collect::<Vec<_>>(),
             "grant_ids": grant_ids
         },
         "summary": {
@@ -1083,7 +1299,40 @@ fn build_state_from_image(
             "active_pending_fact_keys": active_pending_fact_keys,
             "blocking_reasons": blocking_reasons
         }
-    }))
+    });
+
+    Ok(DerivedFxState {
+        baseline_imported,
+        live_cap,
+        missing_foreign_ids,
+        initial_foreign_responsibilities_complete,
+        foreign_subtotal_i64,
+        evaluated_total_i64,
+        within_cap,
+        gate_status,
+        json,
+    })
+}
+
+fn derive_state_from_image(
+    config: Option<&Config>,
+    image: &Value,
+    recorded: &[Value],
+    pending: &[Value],
+    coverages: &BTreeMap<String, Value>,
+) -> Result<DerivedFxState, String> {
+    let boundary = extract_boundary(image, config)?;
+    derive_state(config, image, &boundary, recorded, pending, coverages)
+}
+
+fn build_state_from_image(
+    config: &Config,
+    image: &Value,
+    recorded: &[Value],
+    pending: &[Value],
+    coverages: &BTreeMap<String, Value>,
+) -> Result<Value, String> {
+    Ok(derive_state_from_image(Some(config), image, recorded, pending, coverages)?.json)
 }
 
 fn foreign_row_json(
@@ -1332,7 +1581,10 @@ pub(super) fn refresh_from_finance(config: &Config, image: &mut Value) -> Result
 }
 
 /// ResolveEvidence 校验 FX 报价核清与被替代旧版 token 的精确退役：
-/// - 活动头修订：要求基线已导入、非 `account:*`、替代链完整、且基于真实财务责任的当前总敞口 `<= cap`。
+/// - 同一切面上按 E 已持久的 `finance.foreign_responsibilities` 核定本条报价的真实归属；
+///   若仍无归属证明（含真未知的 `account:*`），严格拒绝；若先前以 `account:*` 捕获、现归属已获证，
+///   仅重新核定这一已证明项的有效影响范围并保留历史 cut 原貌。
+/// - 活动头修订：要求基线已导入、共同界期初外币责任已完整导入、替代链完整、且基于真实财务责任的当前总敞口 `<= cap`。
 /// - 同替代链中被替代的旧版修订：
 ///   - 若该链活动头尚未 `Covered` 且不在本批 `ResolveEvidence` 中有效覆盖，拒绝（旧证据不能核清新修订）。
 ///   - 若该链活动头已 `Covered` 或在本批同核清、替代链完整、当前总敞口 `<= cap` 且前沿覆盖活动头，
@@ -1348,15 +1600,30 @@ pub(super) fn validate_resolve_fx_quote(
     if !enabled(config) {
         return Err("SchemaUnsupported：未启用 fx-valuation/1 子合同".into());
     }
-    if pending["scope"] == "account:*" {
-        return Err(
-            "MissingDependency：未匹配义务范围的 FX 报价不能由 ResolveEvidence 核清".into(),
-        );
+    let matched_obs = matched_foreign_obligations(previous, fact)?;
+    if matched_obs.is_empty() {
+        return Err("MissingDependency：账户范围 Pending 尚缺归属与影响范围证明".into());
     }
+    let attributed_ids: Vec<String> = matched_obs
+        .iter()
+        .map(|ob| ob.responsibility_id.clone())
+        .collect();
+    let instrument = required(&fact["event"]["quote"], "instrument")?;
+    let resolved_scope = format!("E:fx:{instrument}");
+    let initial_pending_scope = pending["scope"].clone();
+
+    let recorded = previous["recorded"]
+        .as_array()
+        .ok_or("StorageUnavailable：recorded 形状")?;
+    let all_pending = previous["pending"]
+        .as_array()
+        .ok_or("StorageUnavailable：pending 形状")?;
+    let coverages = extract_coverages(previous);
+    let derived =
+        derive_state_from_image(Some(config), previous, recorded, all_pending, &coverages)?;
+
     let fk = required(fact, "fact_key")?;
-    let fx = previous
-        .get(CONTRACT_FIELD)
-        .ok_or("StorageUnavailable：持久图像缺失 fx_valuation 对象")?;
+    let fx = &derived.json;
     let revs = fx["revisions"]
         .as_array()
         .ok_or("StorageUnavailable：fx_valuation.revisions 形状")?;
@@ -1405,7 +1672,7 @@ pub(super) fn validate_resolve_fx_quote(
         {
             return Err("MissingDependency：退役证据前沿未到达同链活动修订".into());
         }
-        check_fx_resolvable_now(fx, rev)?;
+        check_fx_resolvable_now(&derived, rev)?;
         if chain["complete"] != json!(true) {
             return Err("AwaitingDependency：FX 报价替代链缺失前序修订，无法退役旧 token".into());
         }
@@ -1416,14 +1683,17 @@ pub(super) fn validate_resolve_fx_quote(
             "frontier": payload["frontier"],
             "dependency_version": payload["dependency_version"],
             "retired_by_fact_key": active_fk,
-            "retired_by_revision": active_rev_num
+            "retired_by_revision": active_rev_num,
+            "initial_pending_scope": initial_pending_scope,
+            "resolved_scope": resolved_scope,
+            "attributed_responsibility_ids": attributed_ids
         }));
     }
 
     if chain["complete"] != json!(true) {
         return Err("AwaitingDependency：FX 报价替代链缺失前序修订，无法核清".into());
     }
-    check_fx_resolvable_now(fx, rev)?;
+    check_fx_resolvable_now(&derived, rev)?;
     Ok(json!({
         "status": "Covered",
         "evidence_id": payload["evidence_id"],
@@ -1431,31 +1701,49 @@ pub(super) fn validate_resolve_fx_quote(
         "frontier": payload["frontier"],
         "dependency_version": payload["dependency_version"],
         "retired_by_fact_key": Value::Null,
-        "retired_by_revision": Value::Null
+        "retired_by_revision": Value::Null,
+        "initial_pending_scope": initial_pending_scope,
+        "resolved_scope": resolved_scope,
+        "attributed_responsibility_ids": attributed_ids
     }))
 }
 
-fn check_fx_resolvable_now(fx: &Value, rev: &Value) -> Result<(), String> {
-    if fx["baseline_imported"] != json!(true) {
+fn check_fx_resolvable_now(derived: &DerivedFxState, rev: &Value) -> Result<(), String> {
+    if !derived.baseline_imported {
         return Err("MissingDependency：既有财务责任尚未规范导入 E，不能核清 FX 报价".into());
     }
-    let summary = &fx["summary"];
-    if summary["within_cap"].is_null() {
-        return Err("MissingDependency：FX 外币义务尚不可精确核验，不能放行".into());
-    }
-    if summary["within_cap"] != json!(true) {
+    if !derived.initial_foreign_responsibilities_complete {
         return Err(format!(
-            "AwaitingPolicy：{CAP_GATE_SLOT}；FX 报价修订 {} 评估总敞口 {} {} 超过上限 {} {}，已补录原件不能替代超限放行",
-            rev["revision"].as_str().unwrap_or(""),
-            summary["evaluated_total"].as_str().unwrap_or("?"),
-            summary["currency"].as_str().unwrap_or("?"),
-            summary["cap"].as_str().unwrap_or("?"),
-            summary["currency"].as_str().unwrap_or("?")
+            "MissingDependency：适用共同界的期初外币责任尚未完整导入 E（缺少 {}），不能核清 FX 报价",
+            derived.missing_foreign_ids.join(",")
         ));
     }
-    Ok(())
+    match derived.within_cap {
+        None => Err("MissingDependency：FX 外币义务尚不可精确核验，不能放行".into()),
+        Some(false) => {
+            let cap = derived
+                .live_cap
+                .as_ref()
+                .map(|c| (c.amount.to_string(), c.currency.as_str()))
+                .unwrap_or_else(|| ("?".into(), "?"));
+            let total = derived
+                .evaluated_total_i64
+                .map(|v| v.to_string())
+                .unwrap_or_else(|| "?".into());
+            Err(format!(
+                "AwaitingPolicy：{CAP_GATE_SLOT}；FX 报价修订 {} 评估总敞口 {} {} 超过上限 {} {}，已补录原件不能替代超限放行",
+                rev["revision"].as_str().unwrap_or(""),
+                total,
+                cap.1,
+                cap.0,
+                cap.1
+            ))
+        }
+        Some(true) => Ok(()),
+    }
 }
 
+/// ResolveEvidence 同事务刷新 `image["fx_valuation"]`。
 pub(super) fn refresh_after_resolve(
     config: &Config,
     next: &mut Value,
@@ -1506,26 +1794,112 @@ pub(super) fn forbid_reserve_bypass(pending: &Value) -> Result<(), String> {
     Ok(())
 }
 
+pub(super) enum GateSubject<'a> {
+    ReserveSlot {
+        slot_id: &'a str,
+        policy_id: &'a str,
+        cap_currency: &'a str,
+    },
+    CommitGrant {
+        grant_id: &'a str,
+        owner: &'a str,
+        policy_id: &'a str,
+        cap_currency: &'a str,
+    },
+    ReleaseCommand {
+        command_id: &'a str,
+        grant_id: &'a str,
+        owner: &'a str,
+        policy_id: &'a str,
+        cap_currency: &'a str,
+    },
+}
+
 /// 财务授权闸口检查（`Reserve`、`CommitDecision`、`ReleaseExact` 共用）；未启用 fx-valuation/1 时透传。
-pub(super) fn check_gate(image: &Value) -> Result<(), String> {
-    let Some(fx) = image.get(CONTRACT_FIELD).filter(|v| !v.is_null()) else {
-        return Ok(());
-    };
-    let summary = &fx["summary"];
-    if summary["admissible"] == json!(true) {
+/// 不信赖旧布尔缓存，直接从同一切面的共同界、生效 policy、成员责任与实际修订重算推导是否放行。
+pub(super) fn check_gate(image: &Value, subject: GateSubject<'_>) -> Result<(), String> {
+    if image.get(CONTRACT_FIELD).is_none_or(Value::is_null) {
         return Ok(());
     }
-    let status = summary["gate_status"]
-        .as_str()
-        .unwrap_or("BlockedUnverifiable");
-    match status {
-        "BlockedExceedsCap" => Err(format!(
-            "AwaitingPolicy：{CAP_GATE_SLOT}；FX 评估总敞口 {} {} 超过上限 {} {}，拒绝放行",
-            summary["evaluated_total"].as_str().unwrap_or("?"),
-            summary["currency"].as_str().unwrap_or("?"),
-            summary["cap"].as_str().unwrap_or("?"),
-            summary["currency"].as_str().unwrap_or("?")
-        )),
+    let recorded = image["recorded"]
+        .as_array()
+        .ok_or("StorageUnavailable：recorded 形状")?;
+    let pending = image["pending"]
+        .as_array()
+        .ok_or("StorageUnavailable：pending 形状")?;
+    let coverages = extract_coverages(image);
+    let derived = derive_state_from_image(None, image, recorded, pending, &coverages)?;
+
+    let (subject_policy_id, subject_currency) = match subject {
+        GateSubject::ReserveSlot {
+            slot_id,
+            policy_id,
+            cap_currency,
+        } => {
+            if slot_id.is_empty() {
+                return Err("InvalidDomain：Reserve 缺少 slot_id".into());
+            }
+            (policy_id, cap_currency)
+        }
+        GateSubject::CommitGrant {
+            grant_id,
+            owner,
+            policy_id,
+            cap_currency,
+        } => {
+            verify_grant_member(image, grant_id, owner)?;
+            (policy_id, cap_currency)
+        }
+        GateSubject::ReleaseCommand {
+            command_id,
+            grant_id,
+            owner,
+            policy_id,
+            cap_currency,
+        } => {
+            if command_id.is_empty() {
+                return Err("InvalidDomain：ReleaseExact 缺少 command_id".into());
+            }
+            verify_grant_member(image, grant_id, owner)?;
+            (policy_id, cap_currency)
+        }
+    };
+
+    if !derived.baseline_imported {
+        return Err("MissingDependency：既有财务责任尚未规范导入 E，拒绝放行".into());
+    }
+    if let Some(cap) = &derived.live_cap {
+        if cap.policy_id != subject_policy_id || cap.currency != subject_currency {
+            return Err(format!(
+                "IdentityConflict：目标动作所属资金政策（{subject_policy_id}/{subject_currency}）与 E 生效共同界（{}/{}）不符",
+                cap.policy_id, cap.currency
+            ));
+        }
+    }
+    if !derived.initial_foreign_responsibilities_complete {
+        return Err(format!(
+            "MissingDependency：适用共同界的期初外币责任尚未完整导入 E（缺少 {}），拒绝放行",
+            derived.missing_foreign_ids.join(",")
+        ));
+    }
+
+    match derived.gate_status {
+        "AdmissibleWithinCap" => Ok(()),
+        "BlockedExceedsCap" => {
+            let cap = derived
+                .live_cap
+                .as_ref()
+                .map(|c| (c.amount.to_string(), c.currency.as_str()))
+                .unwrap_or_else(|| ("?".into(), "?"));
+            let total = derived
+                .evaluated_total_i64
+                .map(|v| v.to_string())
+                .unwrap_or_else(|| "?".into());
+            Err(format!(
+                "AwaitingPolicy：{CAP_GATE_SLOT}；FX 评估总敞口 {} {} 超过上限 {} {}，拒绝放行",
+                total, cap.1, cap.0, cap.1
+            ))
+        }
         "BlockedPendingEvidence" => Err(
             "MissingDependency：FX 报价修订或其被替代遗留 token 尚未完成证据核清/退役，拒绝放行"
                 .into(),
@@ -1533,23 +1907,51 @@ pub(super) fn check_gate(image: &Value) -> Result<(), String> {
         "BlockedNoQuote" => {
             Err("MissingDependency：已导入 FX 外币义务尚缺市场报价，拒绝放行".into())
         }
-        _ => Err(format!(
-            "MissingDependency：FX 估值处于不可核状态（{status}），拒绝放行"
+        other => Err(format!(
+            "MissingDependency：FX 估值处于不可核状态（{other}），拒绝放行"
         )),
     }
 }
 
+fn verify_grant_member(image: &Value, grant_id: &str, owner: &str) -> Result<(), String> {
+    let resps = image
+        .get("finance")
+        .and_then(|f| f.get("responsibilities"))
+        .and_then(Value::as_array)
+        .ok_or("StorageUnavailable：缺少 responsibilities 集合")?;
+    let member = resps
+        .iter()
+        .find(|r| r["responsibility_id"] == grant_id)
+        .ok_or("MissingDependency：E 未先保留该 grant 的完整责任")?;
+    if member["owner"] != owner {
+        return Err("IdentityConflict：grant 归属与当前共同界成员不符".into());
+    }
+    Ok(())
+}
+
 /// 供 `finance::Reserve` 与 `ActivateCapPolicy` 计入外币义务的当前已估值金额；未启用 fx-valuation/1 时为 0。
+/// 直接由同一切面的共同界与持久外币责任重算，未完整导入声明的期初外币义务时明确拒绝。
 pub(super) fn evaluated_foreign_total(image: &Value) -> Result<i64, String> {
-    let Some(fx) = image.get(CONTRACT_FIELD).filter(|v| !v.is_null()) else {
+    if image.get(CONTRACT_FIELD).is_none_or(Value::is_null) {
         return Ok(0);
-    };
-    let Some(raw) = fx["summary"]["foreign_evaluated_subtotal"].as_str() else {
-        return Err(
-            "MissingDependency：FX 外币义务尚不可精确估值，不能按缺漏外币敞口核验额度".into(),
-        );
-    };
-    nonnegative(raw, "foreign_evaluated_subtotal")
+    }
+    let recorded = image["recorded"]
+        .as_array()
+        .ok_or("StorageUnavailable：recorded 形状")?;
+    let pending = image["pending"]
+        .as_array()
+        .ok_or("StorageUnavailable：pending 形状")?;
+    let coverages = extract_coverages(image);
+    let derived = derive_state_from_image(None, image, recorded, pending, &coverages)?;
+    if !derived.initial_foreign_responsibilities_complete {
+        return Err(format!(
+            "MissingDependency：适用共同界的期初外币责任尚未完整导入 E（缺少 {}），不能按缺漏外币敞口核验额度",
+            derived.missing_foreign_ids.join(",")
+        ));
+    }
+    derived.foreign_subtotal_i64.ok_or_else(|| {
+        "MissingDependency：FX 外币义务尚不可精确估值，不能按缺漏外币敞口核验额度".into()
+    })
 }
 
 /// 正式只读查询 `QueryFxValuation`：返回同一 `cut` 的持久 `fx_valuation`、FX 原件回执、证据回执与责任回执。

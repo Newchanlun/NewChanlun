@@ -644,7 +644,9 @@ pub(super) fn covered_pending(
     }
     // #1406 OQ-3：新书账域的显式等待不能由 Reserve 的风险覆盖旁路清掉。
     // 旧域 Pending.reason 为字符串，保持原有判据。
-    if pending["scope"] == "account:*" {
+    if pending["scope"] == "account:*"
+        && !super::fx_valuation::has_persisted_attribution(previous, fact)?
+    {
         return Err("MissingDependency：账户范围 Pending 尚缺归属与影响范围证明".into());
     }
     if pending["reason"].is_object() {
@@ -1363,7 +1365,14 @@ fn reduce_with_budget(
                 covered_pending(previous, coverage, pending)?;
                 resolved.insert(required(pending, "fact_key")?.to_owned());
             }
-            super::fx_valuation::check_gate(previous)?;
+            super::fx_valuation::check_gate(
+                previous,
+                super::fx_valuation::GateSubject::ReserveSlot {
+                    slot_id: required(slot, "slot_id")?,
+                    policy_id: required(&d["policy"], "policy_id")?,
+                    cap_currency: required(&d["policy"], "currency")?,
+                },
+            )?;
             if !resolved.is_empty() {
                 let kept: Vec<Value> = list(previous, "pending")?
                     .iter()
@@ -1437,7 +1446,15 @@ fn reduce_with_budget(
                 super::fx_valuation::forbid_reserve_bypass(pending)?;
                 covered_pending(&gp["current_image"], coverage, pending)?;
             }
-            super::fx_valuation::check_gate(&gp["current_image"])?;
+            super::fx_valuation::check_gate(
+                &gp["current_image"],
+                super::fx_valuation::GateSubject::CommitGrant {
+                    grant_id: required(p, "grant_id")?,
+                    owner: &config.domain,
+                    policy_id: required(&d["policy"], "policy_id")?,
+                    cap_currency: required(&d["policy"], "currency")?,
+                },
+            )?;
             let closed = finance(config, &gp["current_image"])?
                 .get("closed_applicants")
                 .and_then(Value::as_array)
@@ -1717,7 +1734,16 @@ fn release_exact(
             super::fx_valuation::forbid_reserve_bypass(pending)?;
             covered_pending(previous, coverage, pending)?;
         }
-        super::fx_valuation::check_gate(previous)?;
+        super::fx_valuation::check_gate(
+            previous,
+            super::fx_valuation::GateSubject::ReleaseCommand {
+                command_id: required(p, "command_id")?,
+                grant_id,
+                owner: required(q, "owner")?,
+                policy_id: required(&d["policy"], "policy_id")?,
+                cap_currency: required(&d["policy"], "currency")?,
+            },
+        )?;
         let closed = f
             .get("closed_applicants")
             .and_then(Value::as_array)
