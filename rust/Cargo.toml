@@ -93,6 +93,8 @@ production_session = ["s_session"]
 #   ThetaConfig（不参与准入）开门，launcher 才转交该变量；生产构建（只开 production_session）遇该变量即拒绝启动。
 #   P0 场所/成本记录未签期间（#1774）生产 S serve 照旧以 AwaitingPolicy 退出，不给备用值。
 production_session_testonly = ["production_session"]
+# Historical research / audit probe binaries (checked in rust-check & tested in rust-test-default; excluded from unrelated integration tests).
+research_probes = []
 
 # ── theta_backtest：π 组件证据 CLI（历史名「CLI 生产入口」；冻结影子，非生产 launcher；ADR 0048，#1532） ──
 # required-features：默认 cargo build 不编译它（cdylib 构建不受影响）。
@@ -306,3 +308,214 @@ name = "production_session_entry"
 path = "tests/production_session_entry.rs"
 # 生产构建（production_session）跑拒绝类子集；production_session_testonly 跑全部（文件内 cfg 分流）。
 required-features = ["production_session"]
+
+# Historical research / audit probe binaries gated behind `research_probes` so unrelated integration tests do not compile them.
+[[bin]]
+name = "cp_capability_smoke"
+path = "src/bin/cp_capability_smoke.rs"
+required-features = ["research_probes"]
+
+[[bin]]
+name = "issue550_event_battery"
+path = "src/bin/issue550_event_battery.rs"
+required-features = ["research_probes"]
+
+[[bin]]
+name = "p102_b_long_zero_probe"
+path = "src/bin/p102_b_long_zero_probe.rs"
+required-features = ["research_probes"]
+
+[[bin]]
+name = "p104_trend_div_funnel"
+path = "src/bin/p104_trend_div_funnel.rs"
+required-features = ["research_probes"]
+
+[[bin]]
+name = "p106_cert_forward_pnl"
+path = "src/bin/p106_cert_forward_pnl.rs"
+required-features = ["research_probes"]
+
+[[bin]]
+name = "p107_level_funnel_audit"
+path = "src/bin/p107_level_funnel_audit.rs"
+required-features = ["research_probes"]
+
+[[bin]]
+name = "p108_dparent_caliber_counterfactual"
+path = "src/bin/p108_dparent_caliber_counterfactual.rs"
+required-features = ["research_probes"]
+
+[[bin]]
+name = "p109_chain157_gate_attrition"
+path = "src/bin/p109_chain157_gate_attrition.rs"
+required-features = ["research_probes"]
+
+[[bin]]
+name = "p111_parent_divergence_validity"
+path = "src/bin/p111_parent_divergence_validity.rs"
+required-features = ["research_probes"]
+
+[[bin]]
+name = "p112_trend_predicate_caseaudit"
+path = "src/bin/p112_trend_predicate_caseaudit.rs"
+required-features = ["research_probes"]
+
+[[bin]]
+name = "p113_pan_caseaudit"
+path = "src/bin/p113_pan_caseaudit.rs"
+required-features = ["research_probes"]
+
+[[bin]]
+name = "p116_turnpoint_anchor_existence"
+path = "src/bin/p116_turnpoint_anchor_existence.rs"
+required-features = ["research_probes"]
+
+[[bin]]
+name = "p117_h4_attribution"
+path = "src/bin/p117_h4_attribution.rs"
+required-features = ["research_probes"]
+
+[[bin]]
+name = "p117_s1a_level_recheck"
+path = "src/bin/p117_s1a_level_recheck.rs"
+required-features = ["research_probes"]
+
+[[bin]]
+name = "p119_l5_decompose"
+path = "src/bin/p119_l5_decompose.rs"
+required-features = ["research_probes"]
+
+[[bin]]
+name = "p122_replay_profile"
+path = "src/bin/p122_replay_profile.rs"
+required-features = ["research_probes"]
+
+[[bin]]
+name = "p123_fast_replay"
+path = "src/bin/p123_fast_replay.rs"
+required-features = ["research_probes"]
+
+[[bin]]
+name = "p124_merge"
+path = "src/bin/p124_merge.rs"
+required-features = ["research_probes"]
+
+[[bin]]
+name = "p124_shard_replay"
+path = "src/bin/p124_shard_replay.rs"
+required-features = ["research_probes"]
+
+[[bin]]
+name = "p125_endorsement_audit"
+path = "src/bin/p125_endorsement_audit.rs"
+required-features = ["research_probes"]
+
+[[bin]]
+name = "p126_d3_descending_clock"
+path = "src/bin/p126_d3_descending_clock.rs"
+required-features = ["research_probes"]
+
+[[bin]]
+name = "p127_skip_impact"
+path = "src/bin/p127_skip_impact.rs"
+required-features = ["research_probes"]
+
+[[bin]]
+name = "p129_44ke_strict_skip"
+path = "src/bin/p129_44ke_strict_skip.rs"
+required-features = ["research_probes"]
+
+[[bin]]
+name = "p409_pan_live_probe"
+path = "src/bin/p409_pan_live_probe.rs"
+required-features = ["research_probes"]
+
+[[bin]]
+name = "p76_case2_replay"
+path = "src/bin/p76_case2_replay.rs"
+required-features = ["research_probes"]
+
+[[bin]]
+name = "p83_yield_remeasure"
+path = "src/bin/p83_yield_remeasure.rs"
+required-features = ["research_probes"]
+
+[[bin]]
+name = "p84_failclosed_audit"
+path = "src/bin/p84_failclosed_audit.rs"
+required-features = ["research_probes"]
+
+[[bin]]
+name = "p86_anchor_hypothesis"
+path = "src/bin/p86_anchor_hypothesis.rs"
+required-features = ["research_probes"]
+
+[[bin]]
+name = "p89_dual_core_audit"
+path = "src/bin/p89_dual_core_audit.rs"
+required-features = ["research_probes"]
+
+[[bin]]
+name = "p92_nest_replay_postruling"
+path = "src/bin/p92_nest_replay_postruling.rs"
+required-features = ["research_probes"]
+
+[[bin]]
+name = "p93_invalidseed_probe"
+path = "src/bin/p93_invalidseed_probe.rs"
+required-features = ["research_probes"]
+
+[[bin]]
+name = "p940_struct_input_abc"
+path = "src/bin/p940_struct_input_abc.rs"
+required-features = ["research_probes"]
+
+[[bin]]
+name = "p944_bsp_layer_mismatch"
+path = "src/bin/p944_bsp_layer_mismatch.rs"
+required-features = ["research_probes"]
+
+[[bin]]
+name = "p946_seg_structure_alignment"
+path = "src/bin/p946_seg_structure_alignment.rs"
+required-features = ["research_probes"]
+
+[[bin]]
+name = "p95_carriedonly_ab"
+path = "src/bin/p95_carriedonly_ab.rs"
+required-features = ["research_probes"]
+
+[[bin]]
+name = "p985_s8_consume_baseline"
+path = "src/bin/p985_s8_consume_baseline.rs"
+required-features = ["research_probes"]
+
+[[bin]]
+name = "p_issue668_bsp_bridge_battery"
+path = "src/bin/p_issue668_bsp_bridge_battery.rs"
+required-features = ["research_probes"]
+
+[[bin]]
+name = "p_issue668_bsp_key_truth"
+path = "src/bin/p_issue668_bsp_key_truth.rs"
+required-features = ["research_probes"]
+
+[[bin]]
+name = "s2_lean_mirror_extract"
+path = "src/bin/s2_lean_mirror_extract.rs"
+required-features = ["research_probes"]
+
+[[bin]]
+name = "strict_nest_check"
+path = "src/bin/strict_nest_check.rs"
+required-features = ["research_probes"]
+
+[[bin]]
+name = "tangency_probe"
+path = "src/bin/tangency_probe.rs"
+required-features = ["research_probes"]
+
+[[test]]
+name = "issue533_p123_byte_guardrail"
+path = "tests/issue533_p123_byte_guardrail.rs"
+required-features = ["research_probes"]
