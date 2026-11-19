@@ -757,7 +757,24 @@ fn capture(
     e: &Value,
     ingress_response_deadline: Option<std::time::Instant>,
 ) -> Result<Value, String> {
-    let mut record = record_from_payload(config, e)?;
+    let result = (|| {
+        let record = record_from_payload(config, e)?;
+        capture_record(c, config, epoch, e, ingress_response_deadline, record)
+    })();
+    if let Err(reason) = &result {
+        config.intake.failed(reason);
+    }
+    result
+}
+
+fn capture_record(
+    c: &mut Connection,
+    config: &Config,
+    epoch: i64,
+    e: &Value,
+    ingress_response_deadline: Option<std::time::Instant>,
+    mut record: Value,
+) -> Result<Value, String> {
     let key = required(&record, "fact_key")?.to_owned();
     let tx = immediate(c)?;
     check_epoch(&tx, epoch)?;
@@ -815,6 +832,7 @@ fn capture(
     record["first_known_ns"] = json!(first);
     record["commit_ns"] = json!(ns);
     record["recorded_seq"] = json!(seq.to_string());
+    super::capture_continuity::verify_member(config, &record)?;
     let pending = super::tb03c_e::pending_entry(config, &image, &record, seq)?;
     image["recorded"]
         .as_array_mut()
@@ -1516,6 +1534,9 @@ pub(super) fn serve(config: &Config, epoch: i64, e_epoch: i64) -> Result<(), Str
     let (mut c, runtime) = open(&config.db, false)?;
     check_epoch(&c, epoch)?;
     audit(&c, config)?;
+    let mut owner = config.clone();
+    owner.intake = super::capture_continuity::start(&mut c, config, epoch)?;
+    let config = &owner;
     let r = &config.manifest["resources"];
     let n = |k: &str| -> Result<usize, String> {
         usize::try_from(positive(required(r, k)?, k)?).map_err(err)

@@ -332,7 +332,7 @@ fn pinned_raw(config: &Config) -> Result<String, String> {
         "财务原件",
     )
 }
-fn original_raw(path: &str, what: &str) -> Result<String, String> {
+pub(super) fn original_raw(path: &str, what: &str) -> Result<String, String> {
     let mut bytes = Vec::new();
     let f =
         std::fs::File::open(path).map_err(|e| format!("MissingDependency：{what}不可读：{e}"))?;
@@ -2215,6 +2215,9 @@ fn persist_with_job(
         &ns,
         &mut super::store::ReadBudget::new(job.as_deref_mut(), deadline),
     )?;
+    if matches!(record["state"].as_str(), Some("Reserved" | "ReleasedExact")) {
+        config.intake.check_new_risk(config, &image, &ns)?;
+    }
     super::phase_trace::mark("reduce", &config.domain);
     // C06.5：已核覆盖 token 的清除须与 E 本事务持久状态一致，不能只改返回 JSON。
     super::store::sync_pending(&tx, &next)?;

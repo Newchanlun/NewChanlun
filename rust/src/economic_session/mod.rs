@@ -2,6 +2,7 @@
 //! 无交易决策、资金分配策略或外效；未知本金与阶段不构造默认值。
 mod allocation;
 mod book;
+mod capture_continuity;
 mod content_store;
 // #1768：B/E 域事件外壳与 snapshot/delta 读口为 crate 内只读接口；wire op 接线待主控裁定，
 // 生产构建暂无调用方，故只在非测试构建豁免 dead_code。
