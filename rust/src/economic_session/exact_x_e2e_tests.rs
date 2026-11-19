@@ -1242,12 +1242,14 @@ fn gap_bound_simulation_x_reads_uncheckpointed_wal_without_mutating_shm_or_sidec
     assert_eq!(before_uncap, dir_file_digests(&special_dir));
     assert_eq!(latest(&ec2).unwrap().0, cut_before);
 
-    // 2b) 侧件不可安全读取时（缺 -shm / 缺 -wal&-shm / -shm 无读权限），缺口态拒新风险且不新建侧件，
-    //     E 既有只读查询与原已提交收据重送仍可用。
-    let saved_shm = std::fs::read(append_suffix(&x_real, "-shm")).unwrap();
-    let saved_wal = std::fs::read(append_suffix(&x_real, "-wal")).unwrap();
+    // 2b) 侧件不可安全读取时（有 -wal 缺 -shm / 有孤立 -shm 缺 -wal / -shm 或 -wal 无读权限），
+    //     缺口态拒新风险且不新建侧件，绝不回落陈旧主库；E 既有只读查询与原已提交收据重送仍可用。
+    let wal_path = append_suffix(&x_real, "-wal");
+    let shm_path = append_suffix(&x_real, "-shm");
+    let saved_shm = std::fs::read(&shm_path).unwrap();
+    let saved_wal = std::fs::read(&wal_path).unwrap();
 
-    std::fs::remove_file(append_suffix(&x_real, "-shm")).unwrap();
+    std::fs::remove_file(&shm_path).unwrap();
     let digests_no_shm = dir_file_digests(&special_dir);
     #[cfg(target_os = "linux")]
     let w_no_shm = LinuxDirWatcher::new(&special_dir);
@@ -1255,29 +1257,32 @@ fn gap_bound_simulation_x_reads_uncheckpointed_wal_without_mutating_shm_or_sidec
         service::handle(&mut ec2, &cfg2, 2, 1, &runtime2, &beta_env)["payload"].clone();
     assert_eq!(err_no_shm["kind"], "Error", "{err_no_shm}");
     #[cfg(target_os = "linux")]
-    assert!(w_no_shm.drain().is_empty(), "缺 -shm 拒绝时不得写/建侧件");
+    assert!(
+        w_no_shm.drain().is_empty(),
+        "有 -wal 缺 -shm 拒绝时不得写/建侧件"
+    );
     assert_eq!(digests_no_shm, dir_file_digests(&special_dir));
     assert_eq!(latest(&ec2).unwrap().0, cut_before);
 
-    std::fs::remove_file(append_suffix(&x_real, "-wal")).unwrap();
-    let digests_no_both = dir_file_digests(&special_dir);
+    // 还原 -shm、删 -wal（孤立 -shm）：必须拒绝且绝不得由 sqlite3WalOpen 建空 -wal。
+    std::fs::write(&shm_path, &saved_shm).unwrap();
+    std::fs::remove_file(&wal_path).unwrap();
+    let digests_stray_shm = dir_file_digests(&special_dir);
     #[cfg(target_os = "linux")]
-    let w_no_both = LinuxDirWatcher::new(&special_dir);
-    let err_no_both =
+    let w_stray_shm = LinuxDirWatcher::new(&special_dir);
+    let err_stray_shm =
         service::handle(&mut ec2, &cfg2, 2, 1, &runtime2, &beta_env)["payload"].clone();
-    assert_eq!(err_no_both["kind"], "Error", "{err_no_both}");
+    assert_eq!(err_stray_shm["kind"], "Error", "{err_stray_shm}");
     #[cfg(target_os = "linux")]
     assert!(
-        w_no_both.drain().is_empty(),
-        "缺 -wal/-shm 拒绝时不得由 sqlite3WalOpen 建空 -wal"
+        w_stray_shm.drain().is_empty(),
+        "孤立 -shm 拒绝时不得由 sqlite3WalOpen 建空 -wal"
     );
-    assert_eq!(digests_no_both, dir_file_digests(&special_dir));
+    assert_eq!(digests_stray_shm, dir_file_digests(&special_dir));
     assert_eq!(latest(&ec2).unwrap().0, cut_before);
 
-    // 还原 -wal 与 -shm，再测 -shm 无读权限（非 root）。
-    std::fs::write(append_suffix(&x_real, "-wal"), &saved_wal).unwrap();
-    let shm_path = append_suffix(&x_real, "-shm");
-    std::fs::write(&shm_path, &saved_shm).unwrap();
+    // 还原 -wal，再测 -shm 与 -wal 无读权限（非 root）。
+    std::fs::write(&wal_path, &saved_wal).unwrap();
     if unsafe { libc::geteuid() } != 0 {
         use std::os::unix::fs::PermissionsExt;
         std::fs::set_permissions(&shm_path, std::fs::Permissions::from_mode(0o000)).unwrap();
@@ -1290,6 +1295,17 @@ fn gap_bound_simulation_x_reads_uncheckpointed_wal_without_mutating_shm_or_sidec
         assert!(w_perm.drain().is_empty(), "-shm 不可读拒绝时不得写侧件");
         assert_eq!(latest(&ec2).unwrap().0, cut_before);
         std::fs::set_permissions(&shm_path, std::fs::Permissions::from_mode(0o600)).unwrap();
+
+        std::fs::set_permissions(&wal_path, std::fs::Permissions::from_mode(0o000)).unwrap();
+        #[cfg(target_os = "linux")]
+        let w_wal_perm = LinuxDirWatcher::new(&special_dir);
+        let err_wal_perm =
+            service::handle(&mut ec2, &cfg2, 2, 1, &runtime2, &beta_env)["payload"].clone();
+        assert_eq!(err_wal_perm["kind"], "Error", "{err_wal_perm}");
+        #[cfg(target_os = "linux")]
+        assert!(w_wal_perm.drain().is_empty(), "-wal 不可读拒绝时不得写侧件");
+        assert_eq!(latest(&ec2).unwrap().0, cut_before);
+        std::fs::set_permissions(&wal_path, std::fs::Permissions::from_mode(0o600)).unwrap();
     }
 
     // 拒绝后 E 既有读口（ReadView / QueryReleasedExact）仍可用。
@@ -1366,8 +1382,9 @@ fn readonly_source_vfs_survives_writer_close_interleaving_without_creating_wal()
     let x_shm = append_suffix(&x_db, "-shm");
 
     // 1) 写者打开 WAL 库并写入未 checkpoint 提交；E 在 SQLite 取得 SHARED 锁之前打开只读句柄；
-    //    随后写者走正常末连接析构清理并删除 -wal/-shm；仅剩 E 活动时发起只读事务，
-    //    必须拒绝且绝不创建空 x.db-wal，亦无任何目录变更或 IN_CLOSE_WRITE。
+    //    随后写者走正常末连接析构 checkpoint 并删除 -wal/-shm（主库头仍为 WAL [2,2]）；
+    //    仅剩 E 活动时发起只读事务，必须直接读出已落主库事实，且绝不创建空 x.db-wal/-shm，
+    //    亦无任何目录变更或 IN_CLOSE_WRITE。
     let writer = rusqlite::Connection::open(&x_db).unwrap();
     writer
         .execute_batch(
@@ -1400,18 +1417,13 @@ fn readonly_source_vfs_survives_writer_close_interleaving_without_creating_wal()
     );
     {
         let tx = reader.transaction().unwrap();
-        let err = tx
-            .query_row("SELECT v FROM t", [], |r| r.get::<_, i64>(0))
-            .unwrap_err();
-        assert!(
-            matches!(err, rusqlite::Error::SqliteFailure(_, _)),
-            "预期 SQLite 只读打开 WAL 失败，实际：{err:?}"
-        );
+        let v: i64 = tx.query_row("SELECT v FROM t", [], |r| r.get(0)).unwrap();
+        assert_eq!(v, 10, "正常闭库双缺 WAL/SHM 须可读出已 checkpoint 事实");
     }
     drop(reader);
     assert!(
         !x_wal.exists() && !x_shm.exists(),
-        "E 拒绝后绝不得遗留空 WAL/SHM"
+        "E 读毕正常闭库后绝不得新建空 WAL/SHM"
     );
     #[cfg(target_os = "linux")]
     {
@@ -1659,4 +1671,223 @@ fn readonly_source_vfs_preserves_zero_byte_readonly_sidecar_modes_without_fchmod
     // 恢复权限以便 tempdir 清理。
     std::fs::set_permissions(&x_wal, std::fs::Permissions::from_mode(0o644)).unwrap();
     std::fs::set_permissions(&x_shm, std::fs::Permissions::from_mode(0o644)).unwrap();
+}
+
+#[test]
+fn readonly_source_vfs_clean_close_wal_safety_and_same_process_shm_lock_ownership() {
+    use crate::history_simulation::intake::open_readonly_source_db;
+    use std::ffi::CString;
+    use std::os::unix::ffi::OsStrExt;
+    use std::os::unix::fs::PermissionsExt;
+
+    // 外部子进程 F_GETLK 探测指定文件 byte 128 (UNIX_SHM_DMS) 的锁类型：
+    // 只有跨进程探测才能看到父进程在 -shm 上持有的 POSIX F_RDLCK。
+    fn probe_external_dms_lock(shm: &Path) -> libc::c_short {
+        let cpath = CString::new(shm.as_os_str().as_bytes()).unwrap();
+        let mut pipefd = [-1i32; 2];
+        assert_eq!(unsafe { libc::pipe(pipefd.as_mut_ptr()) }, 0);
+        let pid = unsafe { libc::fork() };
+        assert!(pid >= 0, "fork failed");
+        if pid == 0 {
+            unsafe {
+                libc::close(pipefd[0]);
+                let fd = libc::open(cpath.as_ptr(), libc::O_RDONLY | libc::O_CLOEXEC);
+                let mut res: i32 = -1;
+                if fd >= 0 {
+                    let mut fl: libc::flock = std::mem::zeroed();
+                    fl.l_type = libc::F_WRLCK as libc::c_short;
+                    fl.l_whence = libc::SEEK_SET as libc::c_short;
+                    fl.l_start = 128;
+                    fl.l_len = 1;
+                    if libc::fcntl(fd, libc::F_GETLK, &mut fl) == 0 {
+                        res = fl.l_type as i32;
+                    }
+                    libc::close(fd);
+                }
+                let bytes = res.to_ne_bytes();
+                let _ = libc::write(pipefd[1], bytes.as_ptr().cast(), bytes.len());
+                libc::close(pipefd[1]);
+                libc::_exit(0);
+            }
+        }
+        unsafe {
+            libc::close(pipefd[1]);
+            let mut buf = [0u8; 4];
+            let n = libc::read(pipefd[0], buf.as_mut_ptr().cast(), buf.len());
+            libc::close(pipefd[0]);
+            let mut status = 0i32;
+            libc::waitpid(pid, &mut status, 0);
+            assert_eq!(n, 4, "failed to read child F_GETLK probe");
+            i32::from_ne_bytes(buf) as libc::c_short
+        }
+    }
+
+    let dir = tempfile::tempdir().unwrap();
+    let db_dir = dir.path().join("x-r9");
+    std::fs::create_dir_all(&db_dir).unwrap();
+    let x_db = db_dir.join("x.db");
+    let x_wal = append_suffix(&x_db, "-wal");
+    let x_shm = append_suffix(&x_db, "-shm");
+
+    // 1) 同进程 POSIX SHM 锁归属：默认 unix VFS 写者持有 -shm DMS 锁，
+    //    同进程 open_readonly_source_db 读取并关闭后，写者外部可见的 DMS F_RDLCK 必须保持不变。
+    let writer = rusqlite::Connection::open(&x_db).unwrap();
+    writer
+        .execute_batch(
+            "PRAGMA journal_mode = WAL;
+             PRAGMA wal_autocheckpoint = 0;
+             CREATE TABLE t(v INTEGER);
+             INSERT INTO t VALUES (1);",
+        )
+        .unwrap();
+    assert!(x_wal.exists() && x_shm.exists());
+    assert_eq!(
+        probe_external_dms_lock(&x_shm),
+        libc::F_RDLCK as libc::c_short,
+        "写者建库后外部 F_GETLK 应见 DMS=F_RDLCK"
+    );
+
+    {
+        let mut reader = open_readonly_source_db(&x_db).unwrap();
+        let tx = reader.transaction().unwrap();
+        let v: i64 = tx
+            .query_row("SELECT sum(v) FROM t", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(v, 1);
+    }
+    assert_eq!(
+        probe_external_dms_lock(&x_shm),
+        libc::F_RDLCK as libc::c_short,
+        "关闭同进程只读连接后绝不得误释写者的 -shm POSIX DMS 锁"
+    );
+
+    // 写者追加未 checkpoint 行，同进程只读连接必须读出最新 WAL 行且关闭后仍不丢写者 DMS 锁。
+    writer.execute("INSERT INTO t VALUES (2)", []).unwrap();
+    {
+        let mut reader = open_readonly_source_db(&x_db).unwrap();
+        let tx = reader.transaction().unwrap();
+        let v: i64 = tx
+            .query_row("SELECT sum(v) FROM t", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(v, 3);
+    }
+    assert_eq!(
+        probe_external_dms_lock(&x_shm),
+        libc::F_RDLCK as libc::c_short,
+        "二次关闭同进程只读连接后写者 DMS 锁仍须完好"
+    );
+
+    // 2) 停机遗留未 checkpoint WAL 快照：必须读出 WAL 中的最新行（+40 => 43），绝不回落陈旧主库。
+    writer.execute("INSERT INTO t VALUES (40)", []).unwrap();
+    let stopped_dir = dir.path().join("x-stopped-wal");
+    std::fs::create_dir_all(&stopped_dir).unwrap();
+    let s_db = stopped_dir.join("x.db");
+    let s_wal = append_suffix(&s_db, "-wal");
+    let s_shm = append_suffix(&s_db, "-shm");
+    std::fs::copy(&x_db, &s_db).unwrap();
+    std::fs::copy(&x_wal, &s_wal).unwrap();
+    std::fs::copy(&x_shm, &s_shm).unwrap();
+    let before_stopped = dir_file_digests(&stopped_dir);
+    #[cfg(target_os = "linux")]
+    let w_stopped = LinuxDirWatcher::with_mask(
+        &stopped_dir,
+        libc::IN_CREATE
+            | libc::IN_MODIFY
+            | libc::IN_DELETE
+            | libc::IN_MOVED_FROM
+            | libc::IN_MOVED_TO
+            | libc::IN_ATTRIB
+            | libc::IN_CLOSE_WRITE,
+    );
+    {
+        let mut reader = open_readonly_source_db(&s_db).unwrap();
+        let tx = reader.transaction().unwrap();
+        let v: i64 = tx
+            .query_row("SELECT sum(v) FROM t", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(v, 43, "停机遗留 WAL 须完整读出未 checkpoint 最新行");
+    }
+    #[cfg(target_os = "linux")]
+    assert!(w_stopped.drain().is_empty(), "停机 WAL 只读不得产生写事件");
+    assert_eq!(before_stopped, dir_file_digests(&stopped_dir));
+
+    // 3) 有 WAL 但缺 SHM：必须显式拒绝，绝不可跳过 WAL 读陈旧主库，且不得建 SHM。
+    std::fs::remove_file(&s_shm).unwrap();
+    let before_no_shm = dir_file_digests(&stopped_dir);
+    {
+        let mut reader = open_readonly_source_db(&s_db).unwrap();
+        let tx = reader.transaction().unwrap();
+        assert!(
+            tx.query_row("SELECT sum(v) FROM t", [], |r| r.get::<_, i64>(0))
+                .is_err(),
+            "存在 -wal 但缺 -shm 时必须拒绝而非跳过 WAL"
+        );
+    }
+    assert!(!s_shm.exists(), "拒绝时绝不得创建 -shm");
+    assert_eq!(before_no_shm, dir_file_digests(&stopped_dir));
+
+    // 4) 不可读 WAL（0000，非 root）与符号链接 WAL：必须显式拒绝，绝不可回落双缺主库路径。
+    if unsafe { libc::geteuid() } != 0 {
+        std::fs::set_permissions(&s_wal, std::fs::Permissions::from_mode(0o000)).unwrap();
+        let mut reader = open_readonly_source_db(&s_db).unwrap();
+        let tx = reader.transaction().unwrap();
+        assert!(
+            tx.query_row("SELECT sum(v) FROM t", [], |r| r.get::<_, i64>(0))
+                .is_err(),
+            "不可读 -wal 必须显式拒绝，不得视作正常闭库"
+        );
+        drop(tx);
+        drop(reader);
+        std::fs::set_permissions(&s_wal, std::fs::Permissions::from_mode(0o644)).unwrap();
+    }
+    let symlink_target = stopped_dir.join("real.wal");
+    std::fs::rename(&s_wal, &symlink_target).unwrap();
+    std::os::unix::fs::symlink(&symlink_target, &s_wal).unwrap();
+    {
+        let mut reader = open_readonly_source_db(&s_db).unwrap();
+        let tx = reader.transaction().unwrap();
+        assert!(
+            tx.query_row("SELECT sum(v) FROM t", [], |r| r.get::<_, i64>(0))
+                .is_err(),
+            "符号链接 -wal 必须显式拒绝"
+        );
+    }
+    std::fs::remove_file(&s_wal).unwrap();
+
+    // 5) 写者正常关闭（checkpoint 并删 -wal/-shm）后：
+    //    5a) 只读目录（chmod 555 + chmod 444）下双缺 WAL/SHM 必须成功读出 43 且零建文件；
+    //    5b) 若残留孤立 -shm（缺 -wal），必须显式拒绝。
+    drop(writer);
+    assert!(!x_wal.exists() && !x_shm.exists());
+    let hdr = &std::fs::read(&x_db).unwrap()[18..20];
+    assert_eq!(hdr, &[2, 2], "正常闭库后主库头应保持 WAL [2,2]");
+    if unsafe { libc::geteuid() } != 0 {
+        std::fs::set_permissions(&x_db, std::fs::Permissions::from_mode(0o444)).unwrap();
+        std::fs::set_permissions(&db_dir, std::fs::Permissions::from_mode(0o555)).unwrap();
+        let mut reader = open_readonly_source_db(&x_db).unwrap();
+        let tx = reader.transaction().unwrap();
+        let v: i64 = tx
+            .query_row("SELECT sum(v) FROM t", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(v, 43, "物理只读目录下正常闭库 WAL DB 须成功读出 43");
+        drop(tx);
+        drop(reader);
+        assert!(!x_wal.exists() && !x_shm.exists());
+        std::fs::set_permissions(&db_dir, std::fs::Permissions::from_mode(0o755)).unwrap();
+        std::fs::set_permissions(&x_db, std::fs::Permissions::from_mode(0o644)).unwrap();
+    }
+
+    // 孤立 -shm（无 -wal）必须拒绝。
+    std::fs::write(&x_shm, b"").unwrap();
+    {
+        let mut reader = open_readonly_source_db(&x_db).unwrap();
+        let tx = reader.transaction().unwrap();
+        assert!(
+            tx.query_row("SELECT sum(v) FROM t", [], |r| r.get::<_, i64>(0))
+                .is_err(),
+            "孤立 -shm（无 -wal）必须显式拒绝"
+        );
+    }
+    assert!(!x_wal.exists(), "孤立 -shm 拒绝时不得创建 -wal");
+    std::fs::remove_file(&x_shm).unwrap();
 }
