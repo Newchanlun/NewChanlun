@@ -263,6 +263,10 @@ impl ExactCommand {
 trait CommandRecord: Serialize + serde::de::DeserializeOwned + PartialEq {
     type Tick: serde::de::DeserializeOwned + Copy + Into<i64>;
     const INNER_REVISION: Option<&'static str>;
+    /// `/2` 与 `/3` 写者在持久化 `execute_evidence.claimed_ns` 时恒写 `batch.bar.index`；
+    /// `/1` 早期写者曾写墙钟 `now_ns()`，后期改写 `batch.bar.index`，同属 `x-execution-profile/1`，
+    /// 无法对归档 `/1` 溯及强制等于 `attempt_batch.bar.index`。
+    const CLAIMED_MATCHES_BATCH_BAR: bool;
     fn id(&self) -> &str;
     fn change(&self) -> &Change;
     fn validate_record(&self, p: &Profile) -> Result<(), String>;
@@ -279,6 +283,7 @@ impl From<DecimalTick> for i64 {
 impl CommandRecord for ExactCommand {
     type Tick = DecimalTick;
     const INNER_REVISION: Option<&'static str> = Some(super::EXACT_PROFILE_REVISION);
+    const CLAIMED_MATCHES_BATCH_BAR: bool = true;
     fn id(&self) -> &str {
         &self.command_id
     }
@@ -314,6 +319,13 @@ struct Receipt<C, T> {
     commit_ns: T,
 }
 type AuthorityReply = Receipt<ExactCommand, DecimalTick>;
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ExecuteEvidence<C, T> {
+    reply: Receipt<C, T>,
+    claimed_ns: T,
+}
 
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -384,9 +396,13 @@ fn audit_execution<C: CommandRecord>(c: &Connection, p: &Profile) -> Result<(), 
     for row in rows {
         let raw = row.map_err(error)?;
         let b: Batch = serde_json::from_str(&raw).map_err(error)?;
+        let bar_index = b.bar.index;
         for change in b.close_changes {
             let id = command_id(&change).to_owned();
-            if required.insert(id, (raw.clone(), change, false)).is_some() {
+            if required
+                .insert(id, (raw.clone(), change, bar_index, false))
+                .is_some()
+            {
                 return Err("IdentityConflict：命令跨批重复".into());
             }
         }
@@ -401,9 +417,13 @@ fn audit_execution<C: CommandRecord>(c: &Connection, p: &Profile) -> Result<(), 
             return Err("IdentityConflict：pending内容非法或已提交".into());
         }
         store::validate_batch(c, &b)?;
+        let bar_index = b.bar.index;
         for change in b.close_changes {
             let id = command_id(&change).to_owned();
-            if required.insert(id, (raw.clone(), change, true)).is_some() {
+            if required
+                .insert(id, (raw.clone(), change, bar_index, true))
+                .is_some()
+            {
                 return Err("IdentityConflict：pending重复已执行命令".into());
             }
         }
@@ -430,7 +450,7 @@ fn audit_execution<C: CommandRecord>(c: &Connection, p: &Profile) -> Result<(), 
         if id != command.id() || released.receipt_id != release {
             return Err("IdentityConflict：接纳身份或交付引用不符".into());
         }
-        if let Some((batch, change, is_pending)) = required.remove(&id) {
+        if let Some((batch, change, expected_bar_index, is_pending)) = required.remove(&id) {
             if command.change() != &change {
                 return Err("IdentityConflict：批命令与已接纳内容不符".into());
             }
@@ -460,7 +480,7 @@ fn audit_execution<C: CommandRecord>(c: &Connection, p: &Profile) -> Result<(), 
                     evidence.as_deref().ok_or("IdentityConflict：执行缺S原件")?,
                 )
                 .map_err(error)?;
-                validate_execution_record(p, &command, &release, &evidence)?;
+                validate_execution_record(p, &command, &release, &evidence, expected_bar_index)?;
             }
         } else if state != "Accepted" || attempt.is_some() || evidence.is_some() {
             return Err("IdentityConflict：游离执行命令".into());
@@ -477,9 +497,11 @@ fn validate_execution_record<C: CommandRecord>(
     command: &C,
     release: &str,
     evidence: &Value,
+    expected_bar_index: i64,
 ) -> Result<Receipt<C, C::Tick>, String> {
-    let reply: Receipt<C, C::Tick> =
-        serde_json::from_value(evidence["reply"].clone()).map_err(error)?;
+    let parsed: ExecuteEvidence<C, C::Tick> =
+        serde_json::from_value(evidence.clone()).map_err(error)?;
+    let reply = parsed.reply;
     validate_authority_reply(
         p,
         &p.s,
@@ -494,11 +516,14 @@ fn validate_execution_record<C: CommandRecord>(
             eligibility_ref, ..
         } => eligibility_ref,
     };
-    if eligibility != &reply.receipt_id
-        || serde_json::from_value::<C::Tick>(evidence["claimed_ns"].clone())
-            .map_or(true, |t| t.into() < reply.commit_ns.into())
-    {
+    let claimed = parsed.claimed_ns.into();
+    if eligibility != &reply.receipt_id || claimed < reply.commit_ns.into() {
         return Err("IdentityConflict：持久S执行证据与资格/调用占有时刻不符".into());
+    }
+    if C::CLAIMED_MATCHES_BATCH_BAR && claimed != expected_bar_index {
+        return Err(format!(
+            "IdentityConflict：持久S执行证据调用占有时刻({claimed})与占有批bar.index({expected_bar_index})不符"
+        ));
     }
     Ok(reply)
 }
@@ -778,7 +803,7 @@ fn execute(c: &mut Connection, p: &Profile, epoch: i64, mut batch: Batch) -> Res
                     )
                     .map_err(error)?;
                 let evidence: Value = serde_json::from_str(&raw).map_err(error)?;
-                validate_execution_record(p, &command, &release, &evidence)?
+                validate_execution_record(p, &command, &release, &evidence, batch.bar.index)?
             }
         };
         let eligibility = match &command.change {
@@ -1112,7 +1137,15 @@ fn pending_and_frontier(
     ))
 }
 
-/// #1407 C3 R3：对 `/1`、`/2`、`/3` 历史模拟 X 库的只读冷审摘要查询（不获取 writer lock、不触发 WAL checkpoint）。
+fn claimed_ns_audit_policy(revision: &str) -> &'static str {
+    if revision == super::EXACT_PROFILE_REVISION || revision == "x-execution-profile/2" {
+        "verified_equal_to_attempt_bar"
+    } else {
+        "raw_claim_only_non_retroactive_v1"
+    }
+}
+
+/// #1407 C3 R3/R4：对 `/1`、`/2`、`/3` 历史模拟 X 库的只读冷审摘要查询（不获取 writer lock、不触发 WAL checkpoint）。
 pub fn inspect_history(db: &Path) -> Result<Value, String> {
     let mut conn = open_readonly_db(db)?;
     let tx = conn.transaction().map_err(storage_ro)?;
@@ -1195,6 +1228,7 @@ pub fn inspect_history(db: &Path) -> Result<Value, String> {
         "kind": "HistorySimulationArchiveSummary",
         "read_only": true,
         "profile_revision": revision,
+        "execute_evidence_claimed_ns_audit_policy": claimed_ns_audit_policy(&revision),
         "writer_epoch": epoch.to_string(),
         "session_id": profile.session_id,
         "session_generation": profile.session_generation,
@@ -1212,10 +1246,10 @@ pub fn inspect_history(db: &Path) -> Result<Value, String> {
     }))
 }
 
-/// #1407 C3 R3：对 `/1`、`/2`、`/3` 历史模拟 X 库的只读命令状态查询。
+/// #1407 C3 R3/R4：对 `/1`、`/2`、`/3` 历史模拟 X 库的只读命令状态查询。
 /// 保留 `QueryCommand` 原字段（`state`、`x_accept`、`causal_refs`），并显式回传 `attempt_batch_id`、
-/// `pending_batch_id`、`execute_evidence` 与已提交前沿，逐态覆盖 `Accepted`、`ExecutionReady`、
-/// `ExecutionRequested`、`MayHaveCalled`、`Observed` 与 `NoRecord`。
+/// `attempt_batch_bar_index`、`pending_batch_id`、`execute_evidence`、`execute_evidence_claimed_ns_audit`
+/// 与已提交前沿，逐态覆盖 `Accepted`、`ExecutionReady`、`ExecutionRequested`、`MayHaveCalled`、`Observed` 与 `NoRecord`。
 pub fn inspect_command(db: &Path, id: &str) -> Result<Value, String> {
     let mut conn = open_readonly_db(db)?;
     let tx = conn.transaction().map_err(storage_ro)?;
@@ -1255,16 +1289,21 @@ pub fn inspect_command(db: &Path, id: &str) -> Result<Value, String> {
         Some((release_receipt, state, attempt, clock_raw, rel_raw, exec_raw)) => {
             let clock: Value = strict_json(clock_raw.as_bytes())?;
             let rel: Value = strict_json(rel_raw.as_bytes())?;
-            let attempt_batch_id = match attempt {
+            let (attempt_batch_id, attempt_batch_bar_index) = match attempt {
                 Some(raw) => {
                     let b: Batch = serde_json::from_str(&raw).map_err(error)?;
-                    Some(b.request_id)
+                    (Some(b.request_id), Some(b.bar.index))
                 }
-                None => None,
+                None => (None, None),
             };
             let execute_evidence = match exec_raw {
                 Some(raw) => strict_json(raw.as_bytes())?,
                 None => Value::Null,
+            };
+            let claimed_ns_audit = if execute_evidence.is_null() {
+                Value::Null
+            } else {
+                json!(claimed_ns_audit_policy(&revision))
             };
             json!({
                 "kind": "ExactCommandState",
@@ -1279,10 +1318,12 @@ pub fn inspect_command(db: &Path, id: &str) -> Result<Value, String> {
                     "release_commit_ns": rel["commit_ns"],
                 }],
                 "attempt_batch_id": attempt_batch_id,
+                "attempt_batch_bar_index": attempt_batch_bar_index,
                 "pending_batch_id": pending_batch_id,
                 "pending_epoch": pending_epoch,
                 "has_execute_evidence": !execute_evidence.is_null(),
                 "execute_evidence": execute_evidence,
+                "execute_evidence_claimed_ns_audit": claimed_ns_audit,
                 "profile_revision": revision,
                 "writer_epoch": epoch.to_string(),
                 "last_committed_batch_id": last_committed_batch_id,

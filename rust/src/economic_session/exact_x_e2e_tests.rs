@@ -720,3 +720,107 @@ fn testonly_fin5_distinguishes_x_authorized_pairing_from_isolated_c1() {
         "{x_reply}"
     );
 }
+
+/// #1407 C3 R4 B1 守门精确化：
+/// 1. 冻结 `x_target=X/1`，但 `authorized_sources` 仅向 `X/2`（且故意设 `source_epoch="1"`）授
+///    `QueryReleasedExact`，另向 `X/1` 仅授 `ReadView`（不可跨项拼权限）：
+///    - 离线 `MakeDispatchable` / `ReleaseExact` 放行；
+///    - 真实 `X/1` 查 `QueryReleasedExact` 被 E `Config::authorized` 拒绝（`来源未获准`）；
+///    - `X/2` 即使伪造 `model_ref` 试图以 `writer_epoch=2` 接纳该 `x_epoch=1` 命令亦被拒绝。
+/// 2. 冻结 `x_target=X/1`，同一条授权项匹配 `producer_id="X"` + `producer_epoch="1"` +
+///    `QueryReleasedExact`，但 `source_namespace="custom-sim-ns"`、`source_epoch="99"`：
+///    - 不把可配置来源 `source_namespace`/`source_epoch` 误当作 writer epoch，E 仍以
+///      `VersionUnsupported` 拒绝新交付。
+#[test]
+fn fin5_gate_requires_same_entry_target_x_id_and_writer_epoch() {
+    // 1) 错代 X/2 授权 + X/1 仅 ReadView（拆项）：离线可签，真实 X/1 查不出。
+    let mut wrong_epoch = Fixture::build_with(
+        "100",
+        None,
+        &[("slot", &["alpha", "beta"])],
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        Some(ExactClock::TestOnlyWrongEpochAndSplitX),
+    );
+    committed(&mut wrong_epoch);
+    let we_cfg = Config::load(
+        &wrong_epoch.dir.join("manifest.json"),
+        &wrong_epoch.configs[0].db,
+        None,
+    )
+    .unwrap();
+    std::thread::spawn(move || service::serve(&we_cfg, 1, 1).unwrap());
+    wait_for(&wrong_epoch.dir.join("e.sock"));
+
+    let md = exchange(
+        &wrong_epoch.dir.join("e.sock"),
+        &envelope(
+            "MakeDispatchable-alpha",
+            dispatch_payload(&wrong_epoch, "alpha"),
+        ),
+    )["payload"]
+        .clone();
+    assert_eq!(md["kind"], "DispatchableReceipt", "{md}");
+    let rel = exchange(
+        &wrong_epoch.dir.join("e.sock"),
+        &envelope("ReleaseExact-alpha", release_payload(&wrong_epoch, "alpha")),
+    )["payload"]
+        .clone();
+    assert_eq!(rel["kind"], "ReleasedExactReceipt", "{rel}");
+
+    // 真实 X/1 发起 QueryReleasedExact 必被 Config::authorized 拒（来源未获准）。
+    let q_payload = authority_query(&wrong_epoch, &rel["record"]["command"], "1");
+    let x1_env = json!({
+        "schema_revision": "economic-session/1",
+        "session_id": wrong_epoch.configs[0].session,
+        "session_generation": wrong_epoch.configs[0].generation,
+        "source_namespace": "x-sim",
+        "source_epoch": "epoch1",
+        "message_id": "x1-query-unapproved",
+        "producer_id": "X",
+        "producer_epoch": "1",
+        "payload_hash": hash(&q_payload),
+        "causal_refs": [],
+        "payload": q_payload,
+    });
+    let x1_reply = exchange(&wrong_epoch.dir.join("e.sock"), &x1_env)["payload"].clone();
+    assert_eq!(x1_reply["kind"], "Error", "{x1_reply}");
+    assert!(
+        x1_reply["error"].as_str().unwrap().contains("来源未获准"),
+        "{x1_reply}"
+    );
+
+    // 2) 非 "1" 的 source_epoch="99" 但同一条授权项匹配 (X, producer_epoch="1", QueryReleasedExact)：必须拒绝。
+    let mut custom_src = Fixture::build_with(
+        "100",
+        None,
+        &[("slot", &["alpha", "beta"])],
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        Some(ExactClock::TestOnlyCustomSourceEpochX),
+    );
+    committed(&mut custom_src);
+    let before = economic_tables(&custom_src);
+    let refused = custom_src.handle(
+        0,
+        "MakeDispatchable-alpha",
+        dispatch_payload(&custom_src, "alpha"),
+    );
+    assert_eq!(refused["kind"], "Error", "{refused}");
+    assert!(
+        refused["error"]
+            .as_str()
+            .unwrap()
+            .starts_with("VersionUnsupported："),
+        "{refused}"
+    );
+    assert_eq!(economic_tables(&custom_src), before);
+}

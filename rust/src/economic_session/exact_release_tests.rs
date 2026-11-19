@@ -65,8 +65,14 @@ pub(super) fn decorate_input(data: &mut Value, clock: ExactClock) {
 pub(super) enum ExactClock {
     /// 真正隔离的 C1 离线夹具（与 `1f0a42bc20^` 原 C1 一致：不向 `x_target` 授予 `QueryReleasedExact`）。
     TestOnly,
-    /// `b9d898dc` 祖先形态：`tb03b-finance/5` + `TestOnly` + 无归档来源 + 向目标 `X` 授予 `QueryReleasedExact`。
+    /// `b9d898dc` 祖先形态：`tb03b-finance/5` + `TestOnly` + 无归档来源 + 向目标 `X/1` 授予 `QueryReleasedExact`。
     TestOnlyWithX,
+    /// #1407 C3 R4 错代+拆项对照：冻结 `x_target=X/1`，仅授 `X/2`（含 `source_epoch="1"`）以
+    /// `QueryReleasedExact`，另授 `X/1` 仅 `ReadView`（不跨项拼权限）。
+    TestOnlyWrongEpochAndSplitX,
+    /// #1407 C3 R4 可配置来源 epoch 反例：冻结 `x_target=X/1`，同项内 `producer_id="X"`、
+    /// `producer_epoch="1"`、`QueryReleasedExact`，但 `source_namespace="custom-sim-ns"`、`source_epoch="99"`。
+    TestOnlyCustomSourceEpochX,
     LogicalBar,
     TestOnlyV6,
     LogicalBarV6,
@@ -85,9 +91,6 @@ impl ExactClock {
     fn is_logical_bar(self) -> bool {
         matches!(self, Self::LogicalBar | Self::LogicalBarV6)
     }
-    fn authorizes_x(self) -> bool {
-        !matches!(self, Self::TestOnly)
-    }
 }
 /// X 的来源身份（`x-exact-authority/1` 共同信封的 source/producer）；E 只授它 QueryReleasedExact。
 pub(super) const X_SOURCE: (&str, &str, &str, &str) = ("x-sim", "epoch1", "X", "1");
@@ -96,9 +99,41 @@ pub(super) fn decorate_manifest(manifest: &mut Value, clock: ExactClock) {
         .as_array_mut()
         .unwrap()
         .extend(EXACT_OPS.iter().map(|op| json!(op)));
-    if clock.authorizes_x() {
-        let (namespace, epoch, producer, producer_epoch) = X_SOURCE;
-        manifest["authorized_sources"].as_array_mut().unwrap().push(json!({"source_namespace":namespace,"source_epoch":epoch,"producer_id":producer,"producer_epoch":producer_epoch,"operations":["QueryReleasedExact"]}));
+    let sources = manifest["authorized_sources"].as_array_mut().unwrap();
+    match clock {
+        ExactClock::TestOnly => {}
+        ExactClock::TestOnlyWrongEpochAndSplitX => {
+            sources.push(json!({
+                "source_namespace": "x-sim",
+                "source_epoch": "epoch1",
+                "producer_id": "X",
+                "producer_epoch": "1",
+                "operations": ["ReadView"]
+            }));
+            sources.push(json!({
+                "source_namespace": "x-sim",
+                "source_epoch": "1",
+                "producer_id": "X",
+                "producer_epoch": "2",
+                "operations": ["QueryReleasedExact"]
+            }));
+        }
+        ExactClock::TestOnlyCustomSourceEpochX => {
+            sources.push(json!({
+                "source_namespace": "custom-sim-ns",
+                "source_epoch": "99",
+                "producer_id": "X",
+                "producer_epoch": "1",
+                "operations": ["QueryReleasedExact"]
+            }));
+        }
+        ExactClock::TestOnlyWithX
+        | ExactClock::LogicalBar
+        | ExactClock::TestOnlyV6
+        | ExactClock::LogicalBarV6 => {
+            let (namespace, epoch, producer, producer_epoch) = X_SOURCE;
+            sources.push(json!({"source_namespace":namespace,"source_epoch":epoch,"producer_id":producer,"producer_epoch":producer_epoch,"operations":["QueryReleasedExact"]}));
+        }
     }
     let clocks = &mut manifest["clock"]["plan"]["messages"];
     for (message, t) in [

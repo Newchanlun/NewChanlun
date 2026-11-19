@@ -29,6 +29,7 @@ pub(super) struct ArchivedCommand {
 impl CommandRecord for ArchivedCommand {
     type Tick = DecimalTick;
     const INNER_REVISION: Option<&'static str> = Some("x-execution-profile/2");
+    const CLAIMED_MATCHES_BATCH_BAR: bool = true;
 
     fn id(&self) -> &str {
         &self.command_id

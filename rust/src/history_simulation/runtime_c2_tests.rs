@@ -407,3 +407,288 @@ fn frozen_v2_archive_is_audited_readonly_and_refused_for_reopen() {
     );
     tx.rollback().unwrap();
 }
+
+/// #1407 C3 R4 B2：`/2` 派生 `MayHaveCalled` 工作副本中 `execute_evidence.claimed_ns` 必须等于
+/// `attempt_batch.bar.index`（合法对照 `claimed_ns="2"` 通过，篡改反例 `"999"` 以 `IdentityConflict` 拒绝）；
+/// `/1` 因历史写者曾写墙钟 `now_ns()` 与后期改写 `bar.index` 并存，不溯及强制相等，但在 `inspect_command`
+/// 输出中显式以 `raw_claim_only_non_retroactive_v1` 区分原始声称与已核字段。
+#[test]
+fn archived_v2_claimed_ns_must_equal_attempt_bar_while_v1_marks_raw_claim() {
+    let d = dir("r4-claimed-ns");
+    let p: Profile = parse(profile(&d, approved()));
+
+    let mut cmd_v2 = command(approved());
+    cmd_v2.as_object_mut().unwrap().remove("model_ref");
+    let cmd_v2_hash = sha256_hex(canonical_json(&cmd_v2).as_bytes());
+    let release_v2 = json!({
+        "protocol": AUTHORITY_WIRE,
+        "session_id": p.session_id,
+        "session_generation": p.session_generation,
+        "authority_id": p.e.authority_id,
+        "authority_epoch": p.e.authority_epoch,
+        "command_id": "a",
+        "command_hash": cmd_v2_hash,
+        "command": cmd_v2,
+        "state": "ReleasedExact",
+        "receipt_id": "E:a",
+        "release_receipt_id": null,
+        "commit_ns": "0",
+    });
+    let s_reply_v2 = json!({
+        "protocol": AUTHORITY_WIRE,
+        "session_id": p.session_id,
+        "session_generation": p.session_generation,
+        "authority_id": p.s.authority_id,
+        "authority_epoch": p.s.authority_epoch,
+        "command_id": "a",
+        "command_hash": cmd_v2_hash,
+        "command": cmd_v2,
+        "state": "ExecuteCommitted",
+        "receipt_id": "S:a",
+        "release_receipt_id": "E:a",
+        "commit_ns": "0",
+    });
+    let pending_batch = Batch {
+        request_id: "b0".into(),
+        known_frontier_cut: "cut-0".into(),
+        bar: crate::history_simulation::model::Bar {
+            index: 0,
+            open: 100,
+            high: 105,
+            low: 95,
+            close: 100,
+        },
+        capacity: crate::history_simulation::model::Capacity::Input {
+            reference: "cap-0".into(),
+            buy: 100,
+            sell: 100,
+        },
+        close_changes: vec![serde_json::from_value(json!({
+            "kind": "submit",
+            "order": {
+                "command_id": "a",
+                "family_id": "f-a",
+                "chong_id": "a",
+                "revision": 1,
+                "side": "buy",
+                "quantity": 5,
+                "kind": {"kind": "limit", "price": 100},
+                "eligibility_ref": "S:a",
+                "projection_manifest": "p-a"
+            }
+        }))
+        .unwrap()],
+        scenario_busts: vec![],
+    };
+    let mut normalized_batch = pending_batch.clone();
+    normalized_batch.normalize();
+    let batch_raw = canonical_json(&serde_json::to_value(&normalized_batch).unwrap());
+
+    let db_v2 = d.join("v2-mhc.sqlite");
+    let _ = std::fs::remove_file(&db_v2);
+    {
+        let mut conn = rusqlite::Connection::open(&db_v2).unwrap();
+        let tx = conn.transaction().unwrap();
+        tx.execute_batch("CREATE TABLE x_meta(key TEXT PRIMARY KEY, value TEXT NOT NULL);")
+            .unwrap();
+        for (k, v) in [
+            ("profile_revision", "x-execution-profile/2"),
+            ("profile_mode", "simulation"),
+            ("history_simulation", "true"),
+            ("writer_epoch", "1"),
+        ] {
+            tx.execute("INSERT INTO x_meta VALUES(?1,?2)", rusqlite::params![k, v])
+                .unwrap();
+        }
+        initialize_in_transaction(&tx, &p, 1).unwrap();
+        tx.execute(
+            "UPDATE x_sim_meta SET v='x-execution-profile/2' WHERE k='exact_profile_revision'",
+            [],
+        )
+        .unwrap();
+        tx.execute(
+            "INSERT INTO x_sim_meta VALUES('pending_batch',?1),('pending_epoch','1')",
+            [&batch_raw],
+        )
+        .unwrap();
+        let clock = json!({"received_ns": "0", "first_known_ns": "0", "commit_ns": "0"});
+        let exec_ok = json!({"reply": s_reply_v2, "claimed_ns": "0"});
+        tx.execute(
+            "INSERT INTO x_exact_commands(id,command,release_receipt,state,attempt_batch,accept_clock,release_evidence,execute_evidence) VALUES('a',?,'E:a','MayHaveCalled',?,?,?,?)",
+            rusqlite::params![
+                canonical_json(&cmd_v2),
+                batch_raw,
+                canonical_json(&clock),
+                canonical_json(&release_v2),
+                canonical_json(&exec_ok)
+            ],
+        )
+        .unwrap();
+        tx.commit().unwrap();
+    }
+
+    // 合法对照：claimed_ns == attempt_batch.bar.index (0) → 通过并标记 verified_equal_to_attempt_bar。
+    let ok_cmd = inspect_command(&db_v2, "a").unwrap();
+    assert_eq!(ok_cmd["state"], "MayHaveCalled");
+    assert_eq!(ok_cmd["attempt_batch_bar_index"], 0);
+    assert_eq!(
+        ok_cmd["execute_evidence_claimed_ns_audit"],
+        "verified_equal_to_attempt_bar"
+    );
+
+    // 篡改反例：仅改 claimed_ns "0" -> "999"（仍 >= S.commit_ns="0"）→ /2 审计必须拒绝。
+    {
+        let conn = rusqlite::Connection::open(&db_v2).unwrap();
+        let exec_bad = json!({"reply": s_reply_v2, "claimed_ns": "999"});
+        conn.execute(
+            "UPDATE x_exact_commands SET execute_evidence=?1 WHERE id='a'",
+            [canonical_json(&exec_bad)],
+        )
+        .unwrap();
+    }
+    let bad_err = inspect_command(&db_v2, "a").unwrap_err();
+    assert!(
+        bad_err.starts_with(
+            "IdentityConflict：持久S执行证据调用占有时刻(999)与占有批bar.index(0)不符"
+        ),
+        "unexpected error: {bad_err}"
+    );
+
+    // /1 归档库对照：早期 /1 墙钟 claimed_ns (1_700_000_000_000_000_000) 不溯及拒绝，但标明 raw_claim_only_non_retroactive_v1。
+    let cmd_v1 = json!({
+        "command_id": "a",
+        "logical_order_family": "f-a",
+        "session_id": p.session_id,
+        "session_generation": p.session_generation,
+        "x_id": p.x_id,
+        "x_epoch": 1,
+        "symbol": "TEST",
+        "projection_kind": "per_leg",
+        "change": {
+            "kind": "submit",
+            "order": {
+                "command_id": "a",
+                "family_id": "f-a",
+                "chong_id": "a",
+                "revision": 1,
+                "side": "buy",
+                "quantity": 5,
+                "kind": {"kind": "limit", "price": 100},
+                "eligibility_ref": "S:a",
+                "projection_manifest": "p-a"
+            }
+        },
+        "certificate": {
+            "rd11_policy": "controlled-fixture-rd11",
+            "responsibility_refs": ["r"],
+            "structure_dependencies": ["s"],
+            "market_dependencies": ["m"],
+            "rule_revision": "rule",
+            "conditions": approved()
+        },
+        "plan_hash": hash(&json!({
+            "kind": "submit",
+            "order": {
+                "command_id": "a",
+                "family_id": "f-a",
+                "chong_id": "a",
+                "revision": 1,
+                "side": "buy",
+                "quantity": 5,
+                "kind": {"kind": "limit", "price": 100},
+                "eligibility_ref": "S:a",
+                "projection_manifest": "p-a"
+            }
+        })),
+        "certificate_hash": hash(&json!({
+            "rd11_policy": "controlled-fixture-rd11",
+            "responsibility_refs": ["r"],
+            "structure_dependencies": ["s"],
+            "market_dependencies": ["m"],
+            "rule_revision": "rule",
+            "conditions": approved()
+        }))
+    });
+    let cmd_v1_hash = sha256_hex(canonical_json(&cmd_v1).as_bytes());
+    let release_v1 = json!({
+        "protocol": AUTHORITY_WIRE,
+        "session_id": p.session_id,
+        "session_generation": p.session_generation,
+        "authority_id": p.e.authority_id,
+        "authority_epoch": p.e.authority_epoch,
+        "command_id": "a",
+        "command_hash": cmd_v1_hash,
+        "command": cmd_v1,
+        "state": "ReleasedExact",
+        "receipt_id": "E:a",
+        "release_receipt_id": null,
+        "commit_ns": 100,
+    });
+    let s_reply_v1 = json!({
+        "protocol": AUTHORITY_WIRE,
+        "session_id": p.session_id,
+        "session_generation": p.session_generation,
+        "authority_id": p.s.authority_id,
+        "authority_epoch": p.s.authority_epoch,
+        "command_id": "a",
+        "command_hash": cmd_v1_hash,
+        "command": cmd_v1,
+        "state": "ExecuteCommitted",
+        "receipt_id": "S:a",
+        "release_receipt_id": "E:a",
+        "commit_ns": 105,
+    });
+    let db_v1 = d.join("v1-wallclock.sqlite");
+    let _ = std::fs::remove_file(&db_v1);
+    {
+        let mut conn = rusqlite::Connection::open(&db_v1).unwrap();
+        let tx = conn.transaction().unwrap();
+        tx.execute_batch("CREATE TABLE x_meta(key TEXT PRIMARY KEY, value TEXT NOT NULL);")
+            .unwrap();
+        for (k, v) in [
+            ("profile_revision", "x-execution-profile/1"),
+            ("profile_mode", "simulation"),
+            ("history_simulation", "true"),
+            ("writer_epoch", "1"),
+        ] {
+            tx.execute("INSERT INTO x_meta VALUES(?1,?2)", rusqlite::params![k, v])
+                .unwrap();
+        }
+        initialize_in_transaction(&tx, &p, 1).unwrap();
+        tx.execute(
+            "DELETE FROM x_sim_meta WHERE k='exact_profile_revision'",
+            [],
+        )
+        .unwrap();
+        tx.execute(
+            "INSERT INTO x_sim_meta VALUES('pending_batch',?1),('pending_epoch','1')",
+            [&batch_raw],
+        )
+        .unwrap();
+        let clock = json!({"received_ns": 100, "first_known_ns": 101, "commit_ns": 102});
+        let exec_wall = json!({"reply": s_reply_v1, "claimed_ns": 1700000000000000000i64});
+        tx.execute(
+            "INSERT INTO x_exact_commands(id,command,release_receipt,state,attempt_batch,accept_clock,release_evidence,execute_evidence) VALUES('a',?,'E:a','MayHaveCalled',?,?,?,?)",
+            rusqlite::params![
+                canonical_json(&cmd_v1),
+                batch_raw,
+                canonical_json(&clock),
+                canonical_json(&release_v1),
+                canonical_json(&exec_wall)
+            ],
+        )
+        .unwrap();
+        tx.commit().unwrap();
+    }
+    let v1_hist = inspect_history(&db_v1).unwrap();
+    assert_eq!(
+        v1_hist["execute_evidence_claimed_ns_audit_policy"],
+        "raw_claim_only_non_retroactive_v1"
+    );
+    let v1_cmd = inspect_command(&db_v1, "a").unwrap();
+    assert_eq!(v1_cmd["state"], "MayHaveCalled");
+    assert_eq!(
+        v1_cmd["execute_evidence_claimed_ns_audit"],
+        "raw_claim_only_non_retroactive_v1"
+    );
+}

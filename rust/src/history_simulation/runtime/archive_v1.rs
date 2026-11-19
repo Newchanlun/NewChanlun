@@ -21,6 +21,7 @@ pub(super) struct ArchivedCommand {
 impl CommandRecord for ArchivedCommand {
     type Tick = i64;
     const INNER_REVISION: Option<&'static str> = None;
+    const CLAIMED_MATCHES_BATCH_BAR: bool = false;
 
     fn id(&self) -> &str {
         &self.command_id
