@@ -1,3 +1,4 @@
+pub(crate) use super::store::FrontierGuard;
 use super::{
     model::{Fill, Model},
     store::RAW_FORMAT,
@@ -408,20 +409,32 @@ fn inspect_committed_history(
     }))
 }
 
-/// #1375：在 E 放行事务内实时冷审已冻结模拟 X 库的全量已提交批与原件前沿，不落核清布尔位。
+/// #1375 R4：先持模拟 X 前沿共享顺序锁，再在 E 放行事务内实时冷审已冻结模拟 X 库的
+/// 全量已提交批与原件前沿；调用者须持续持有返回的 `FrontierGuard` 至 E `tx.commit()` 完成，
+/// 使 X 无法在核对完毕与本次 E 提交落盘之间推进新批。
 pub(crate) fn committed_capture_frontier(
     manifest: &Value,
     expected_x_id: Option<&str>,
     expected_x_epoch: Option<i64>,
     require_committed_frontier: bool,
-) -> Result<Value, String> {
-    inspect_committed_history(
+) -> Result<(Value, FrontierGuard), String> {
+    let binding = &manifest["history_simulation_source"];
+    if !binding.is_object() {
+        return Err("SchemaUnsupported：本会话未冻结模拟 X 原件来源".into());
+    }
+    let db = Path::new(required(binding, "x_db")?);
+    if !db.is_absolute() {
+        return Err("InvalidDomain：X 原件库须为冻结绝对路径".into());
+    }
+    let guard = super::store::lock_frontier_shared(db)?;
+    let history = inspect_committed_history(
         manifest,
         expected_x_id,
         expected_x_epoch,
         None,
         require_committed_frontier,
-    )
+    )?;
+    Ok((history, guard))
 }
 
 /// #1375：按显式结束批与完整回执摘要核验模拟 X 全部已提交批（供冷审与回归测试使用）。

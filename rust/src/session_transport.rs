@@ -764,7 +764,7 @@ fn serve_listener_inner<T: QueuedJob + 'static>(
                     mark_uncertain(&accept_uncertain);
                     break Err(format!("TransportUnavailable：listener poll失败 {err}"));
                 }
-                if ready == 0 || stop_fn() {
+                if ready == 0 {
                     continue;
                 }
                 if (pfd.revents & (libc::POLLERR | libc::POLLHUP | libc::POLLNVAL)) != 0 {
@@ -773,6 +773,9 @@ fn serve_listener_inner<T: QueuedJob + 'static>(
                         "TransportUnavailable：listener poll异常状态 {:#x}",
                         pfd.revents
                     ));
+                }
+                if stop_fn() {
+                    break Ok(());
                 }
                 match listener.accept() {
                     Ok((stream, _)) => {
@@ -1182,5 +1185,52 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         result.unwrap();
         assert!(!uncertain.load(Ordering::SeqCst));
+    }
+
+    #[test]
+    fn same_tick_poll_hard_error_beats_stop_signal() {
+        let dir = std::env::temp_dir().join(format!(
+            "transport-same-tick-err-stop-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let sock = dir.join("e.sock");
+        let listener = UnixListener::bind(&sock).unwrap();
+        let raw_fd = listener.as_raw_fd();
+        // 先 shutdown listener，使首次 poll 立刻返回 POLLHUP/POLLERR；
+        // 同时让 stop_fn 在首轮顶部返回 false、紧随 poll 返回后的同拍检查返回 true，
+        // 证明已观察到的硬错误优先于同拍停止信号，不被吞成清洁退出。
+        // SAFETY: raw_fd 仍归 listener 所有，shutdown 触发异常 revents 而不关闭描述符。
+        unsafe { libc::shutdown(raw_fd, libc::SHUT_RDWR) };
+        let checks = Arc::new(AtomicUsize::new(0));
+        let checks_in_loop = checks.clone();
+        let uncertain = Arc::new(AtomicBool::new(false));
+        let bounds = TransportBounds {
+            frame: 4096,
+            read: Duration::from_millis(100),
+            write: Duration::from_millis(100),
+            response: Duration::from_millis(100),
+            queue: 2,
+            connections: 2,
+        };
+        let result = serve_listener_inner(
+            listener,
+            bounds,
+            value_only,
+            timed_job,
+            Some(Box::new(move || {
+                checks_in_loop.fetch_add(1, Ordering::SeqCst) >= 1
+            })),
+            Some(uncertain.clone()),
+            |_: &TimedJob| json!({"ok":true}),
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+        let err = result.unwrap_err();
+        assert!(err.contains("listener poll异常状态"), "{err}");
+        assert!(uncertain.load(Ordering::SeqCst));
     }
 }

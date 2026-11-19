@@ -694,10 +694,13 @@ fn execute(c: &mut Connection, p: &Profile, epoch: i64, mut batch: Batch) -> Res
         };
         commands.push((command, release, call));
     }
-    let pending_tx = c.transaction().map_err(error)?;
-    pending_tx.execute("INSERT INTO x_sim_meta(k,v) VALUES('pending_batch',?1) ON CONFLICT(k) DO UPDATE SET v=excluded.v",[&encoded]).map_err(error)?;
-    pending_tx.execute("INSERT INTO x_sim_meta(k,v) VALUES('pending_epoch',?1) ON CONFLICT(k) DO UPDATE SET v=excluded.v",[epoch.to_string()]).map_err(error)?;
-    pending_tx.commit().map_err(error)?;
+    {
+        let _frontier_lock = store::lock_frontier_exclusive(c)?;
+        let pending_tx = c.transaction().map_err(error)?;
+        pending_tx.execute("INSERT INTO x_sim_meta(k,v) VALUES('pending_batch',?1) ON CONFLICT(k) DO UPDATE SET v=excluded.v",[&encoded]).map_err(error)?;
+        pending_tx.execute("INSERT INTO x_sim_meta(k,v) VALUES('pending_epoch',?1) ON CONFLICT(k) DO UPDATE SET v=excluded.v",[epoch.to_string()]).map_err(error)?;
+        pending_tx.commit().map_err(error)?;
+    }
     let mut executed_records = Vec::new();
     for (command, release, call) in commands {
         // AcceptExact 不产生调用权；在真正模型动作前才取得本命令 S 终态。
@@ -875,6 +878,7 @@ pub fn serve(c: &mut Connection, p: &Profile, epoch: i64) -> Result<(), String> 
         std::process::exit(44);
     }
     tx.commit().map_err(error)?;
+    store::ensure_frontier_lock(c)?;
     #[cfg(test)]
     if std::env::var("ISSUE1381_TEST_INIT_INTERRUPT")
         .ok()

@@ -109,13 +109,19 @@ pub(super) fn validate_config(manifest: &Value) -> Result<(), String> {
     }
     if !Path::new(path).is_absolute()
         || manifest["clock"]["kind"] != "TestOnly"
-        || manifest.get("history_simulation_source").is_some()
         || !super::finance::exact_release_selected(manifest)
         || !authorized_manifest(manifest, "CaptureExternal")
         || !(authorized_manifest(manifest, "Reserve")
             || authorized_manifest(manifest, "ReleaseExact"))
     {
         return Err("InvalidDomain：封闭原件源仅属于具名 TestOnly 精确交付域".into());
+    }
+    if let Some(sim) = manifest.get("history_simulation_source") {
+        // 允许 TestOnly 精确域同时绑定独立模拟 X 来源与非模拟来源的 TestOnly 原件带，
+        // 但模拟 X 绑定本身必须完整有效，且原件带绝不能替代模拟 X 主体。
+        principal_key(sim)?;
+        required(sim, "x_db")?;
+        required(sim, "model_content_hash")?;
     }
     Ok(())
 }
@@ -163,18 +169,27 @@ pub(super) fn start(db: &mut Connection, c: &Config, epoch: i64) -> Result<Intak
             let seal = strict_json(raw.as_bytes())
                 .map_err(|_| "StorageUnavailable：外部接纳交接记录损坏".to_owned())?;
             let (seq, root, _, _) = latest(&tx)?;
-            if seal["kind"].as_str() != Some("clean_handoff") {
-                return Err("StorageUnavailable：外部接纳交接记录损坏".into());
+            match seal["kind"].as_str() {
+                Some("clean_handoff") => {
+                    super::voice::exact(&seal, &["kind", "epoch", "commit_seq", "root_hash"])?;
+                    let prev_epoch = positive(required(&seal, "epoch")?, "handoff.epoch")?;
+                    let seal_seq =
+                        nonnegative(required(&seal, "commit_seq")?, "handoff.commit_seq")?;
+                    let seal_root = required(&seal, "root_hash")?;
+                    if prev_epoch > epoch || seal_seq != seq || seal_root != root {
+                        return Err("StorageUnavailable：外部接纳交接记录与当前切面不符".into());
+                    }
+                    set_meta(&tx, LEASE, "serving")?;
+                    (false, false)
+                }
+                // R2 中间态遗留的 `source_verified_handoff` 绝不可作为干净交接采信，
+                // 但按未知缺口迁入 `serving`，保留 socket 只读与原收据查询入口。
+                Some("source_verified_handoff") => {
+                    set_meta(&tx, LEASE, "serving")?;
+                    (true, true)
+                }
+                _ => return Err("StorageUnavailable：外部接纳交接记录损坏".into()),
             }
-            super::voice::exact(&seal, &["kind", "epoch", "commit_seq", "root_hash"])?;
-            let prev_epoch = positive(required(&seal, "epoch")?, "handoff.epoch")?;
-            let seal_seq = nonnegative(required(&seal, "commit_seq")?, "handoff.commit_seq")?;
-            let seal_root = required(&seal, "root_hash")?;
-            if prev_epoch > epoch || seal_seq != seq || seal_root != root {
-                return Err("StorageUnavailable：外部接纳交接记录与当前切面不符".into());
-            }
-            set_meta(&tx, LEASE, "serving")?;
-            (false, false)
         }
         // 旧库存量没有初次交接，不能把不在场误作连续；写入 serving 以便后续异常停机仍可察觉。
         Some("serving") | None => {
@@ -308,7 +323,7 @@ fn verify_simulation_live(
     image: &Value,
     record: &Value,
     require_committed_frontier: bool,
-) -> Result<String, String> {
+) -> Result<(String, crate::history_simulation::intake::FrontierGuard), String> {
     let binding = &c.manifest["history_simulation_source"];
     let sim_principal = principal_key(binding)?;
     let (expected_x_id, expected_x_epoch) = if record["state"] == "ReleasedExact" {
@@ -322,7 +337,7 @@ fn verify_simulation_live(
     } else {
         (None, None)
     };
-    let history = crate::history_simulation::intake::committed_capture_frontier(
+    let (history, guard) = crate::history_simulation::intake::committed_capture_frontier(
         &c.manifest,
         expected_x_id,
         expected_x_epoch,
@@ -359,7 +374,7 @@ fn verify_simulation_live(
     if seen.len() != recorded_from_sim.len() {
         return Err("IdentityConflict：E 存在模拟 X 完整历史之外的游离原件".into());
     }
-    Ok(sim_principal)
+    Ok((sim_principal, guard))
 }
 
 impl Intake {
@@ -386,7 +401,7 @@ impl Intake {
         image: &Value,
         record: &Value,
         at: &str,
-    ) -> Result<(), String> {
+    ) -> Result<Option<crate::history_simulation::intake::FrontierGuard>, String> {
         let (source_gap, had_gap) = match &self.0 {
             Some(lock) => {
                 let s = lock
@@ -422,9 +437,14 @@ impl Intake {
             covered_principals.insert(principal_key(&tape.source)?);
         }
 
-        if has_sim {
-            let sim_principal = verify_simulation_live(c, image, record, source_gap)?;
+        // #2078 / #1375 R4：健康已绑模拟 X（`source_gap == false`）保持原有财务检查与
+        // Reserve/Release 条件，不因 X 未就绪或无关在途批新增拒绝；仅在存在真实来源缺口时
+        // 持模拟 X 前沿顺序锁实时冷审并排序本次 E 提交。
+        let mut sim_guard = None;
+        if has_sim && source_gap {
+            let (sim_principal, guard) = verify_simulation_live(c, image, record, true)?;
             covered_principals.insert(sim_principal);
+            sim_guard = Some(guard);
         }
 
         if source_gap {
@@ -437,10 +457,10 @@ impl Intake {
             }
         }
 
-        if has_tape || has_sim || had_gap {
+        if has_tape || had_gap {
             check_scoped_pending(c, image, &owners, had_gap)?;
         }
-        Ok(())
+        Ok(sim_guard)
     }
 }
 struct Original {
@@ -501,6 +521,15 @@ impl Tape {
         }
         let source = &tape["source"];
         super::voice::exact(source, &WHO)?;
+        let sim_principal = if let Some(sim) = c.manifest.get("history_simulation_source") {
+            let sp = principal_key(sim)?;
+            if principal_key(source)? == sp {
+                return Err("IdentityConflict：TestOnly 原件带不得替代模拟 X 来源".into());
+            }
+            Some(sp)
+        } else {
+            None
+        };
         let mut captures = c.manifest["authorized_sources"]
             .as_array()
             .ok_or("InvalidDomain：缺来源")?
@@ -509,6 +538,11 @@ impl Tape {
                 p["operations"]
                     .as_array()
                     .is_some_and(|ops| ops.iter().any(|o| o == "CaptureExternal"))
+            })
+            .filter(|p| {
+                sim_principal
+                    .as_ref()
+                    .is_none_or(|sp| principal_key(p).ok().as_deref() != Some(sp.as_str()))
             })
             .peekable();
         if captures.peek().is_none() || !captures.all(|p| WHO.iter().all(|k| p[k] == source[k])) {
@@ -578,6 +612,11 @@ impl Tape {
 
 pub(super) fn verify_member(c: &Config, r: &Value) -> Result<(), String> {
     if c.manifest.get(TAPE).is_some() {
+        if let Some(sim) = c.manifest.get("history_simulation_source") {
+            if record_principal_key(r)? == principal_key(sim)? {
+                return Ok(());
+            }
+        }
         let tape = Tape::load(c)?;
         let item = tape
             .items
@@ -845,17 +884,15 @@ mod tests {
         let after_transport_uncertain = start(&mut db, &cfg, 4).unwrap();
         assert!(is_gap(&after_transport_uncertain));
 
-        // R2 遗留或伪造的 source_verified_handoff 布尔免检章必须被启动校验拒绝。
+        // 未知/伪造的交接章类型必须被启动校验拒绝。
         set_meta(
             &db,
             LEASE,
             &canonical_json(&json!({
-                "kind": "source_verified_handoff",
+                "kind": "forged_handoff",
                 "epoch": "4",
                 "commit_seq": "1",
                 "root_hash": "root-1",
-                "source_kind": "history_simulation_source",
-                "proof_sha256": "a".repeat(64),
             })),
         )
         .unwrap();
@@ -1099,5 +1136,34 @@ mod tests {
         let mut sim = cfg.manifest.clone();
         sim["history_simulation_source"] = json!({});
         assert!(validate_config(&sim).is_err());
+    }
+
+    #[test]
+    fn r2_source_verified_handoff_downgrades_to_untrusted_gap_keeping_start_open() {
+        let mut db = setup_meta_db();
+        let cfg = make_config(None);
+        let r2_seal = canonical_json(&json!({
+            "kind": "source_verified_handoff",
+            "epoch": "1",
+            "commit_seq": "1",
+            "root_hash": "root-1",
+            "source_kind": "history_simulation_source"
+        }));
+        set_meta(&db, LEASE, &r2_seal).unwrap();
+        let intake = start(&mut db, &cfg, 1).unwrap();
+        assert!(
+            is_gap(&intake),
+            "R2 source_verified_handoff 不得采信为干净交接，须进入未知缺口态"
+        );
+        let lease: String = db
+            .query_row("SELECT v FROM meta WHERE k=?", [LEASE], |r| r.get(0))
+            .unwrap();
+        assert_eq!(lease, "serving");
+        // 仍阻断新风险放行（而 start 已成功，保留 socket 只读与原收据查询）。
+        let empty = json!({"recorded": [], "pending": [], "finance": {"responsibilities": []}});
+        let err = intake
+            .check_new_risk(&cfg, &empty, &release_record("B:alpha"), "1202")
+            .unwrap_err();
+        assert!(err.contains("缺少独立持久原件与可证结束界"), "{err}");
     }
 }

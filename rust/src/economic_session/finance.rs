@@ -2215,9 +2215,12 @@ fn persist_with_job(
         &ns,
         &mut super::store::ReadBudget::new(job.as_deref_mut(), deadline),
     )?;
-    if matches!(record["state"].as_str(), Some("Reserved" | "ReleasedExact")) {
-        config.intake.check_new_risk(config, &image, &record, &ns)?;
-    }
+    let _sim_frontier_guard =
+        if matches!(record["state"].as_str(), Some("Reserved" | "ReleasedExact")) {
+            config.intake.check_new_risk(config, &image, &record, &ns)?
+        } else {
+            None
+        };
     super::phase_trace::mark("reduce", &config.domain);
     // C06.5：已核覆盖 token 的清除须与 E 本事务持久状态一致，不能只改返回 JSON。
     super::store::sync_pending(&tx, &next)?;
@@ -2245,9 +2248,12 @@ fn persist_with_job(
     put(&tx, "receipts", &k, &r)?;
     super::service::bind_message(&tx, e, &k)?;
     config.pause(required(e, "message_id")?, "before_commit")?;
+    #[cfg(test)]
+    test_before_commit_hook(&config.db, required(e, "message_id")?);
     super::phase_trace::mark("append_and_receipt", &config.domain);
     check_operation_deadline(job.as_deref_mut(), deadline)?;
     tx.commit().map_err(err)?;
+    drop(_sim_frontier_guard);
     super::phase_trace::mark("commit", &config.domain);
     if let Some((grant, before, ceiling)) = final_budget {
         super::content_store::reconcile_final(
@@ -2538,6 +2544,61 @@ fn internal(config: &Config, payload: Value) -> Result<Value, String> {
         m.insert(k.into(), v);
     }
     validate_envelope(e, config.revision()?)
+}
+
+#[cfg(test)]
+type BeforeCommitHook = std::sync::Arc<dyn Fn() + Send + Sync>;
+
+#[cfg(test)]
+type BeforeCommitHookKey = (std::path::PathBuf, String);
+
+#[cfg(test)]
+fn before_commit_hooks(
+) -> &'static std::sync::Mutex<std::collections::BTreeMap<BeforeCommitHookKey, BeforeCommitHook>> {
+    static HOOKS: std::sync::OnceLock<
+        std::sync::Mutex<std::collections::BTreeMap<BeforeCommitHookKey, BeforeCommitHook>>,
+    > = std::sync::OnceLock::new();
+    HOOKS.get_or_init(|| std::sync::Mutex::new(std::collections::BTreeMap::new()))
+}
+
+#[cfg(test)]
+pub(crate) struct BeforeCommitHookGuard {
+    key: BeforeCommitHookKey,
+}
+
+#[cfg(test)]
+impl Drop for BeforeCommitHookGuard {
+    fn drop(&mut self) {
+        if let Ok(mut map) = before_commit_hooks().lock() {
+            map.remove(&self.key);
+        }
+    }
+}
+
+#[cfg(test)]
+pub(crate) fn install_test_before_commit_hook(
+    db: std::path::PathBuf,
+    message_id: impl Into<String>,
+    hook: impl Fn() + Send + Sync + 'static,
+) -> BeforeCommitHookGuard {
+    let key = (db, message_id.into());
+    before_commit_hooks()
+        .lock()
+        .unwrap()
+        .insert(key.clone(), std::sync::Arc::new(hook));
+    BeforeCommitHookGuard { key }
+}
+
+#[cfg(test)]
+fn test_before_commit_hook(db: &std::path::Path, message_id: &str) {
+    let hook = before_commit_hooks()
+        .lock()
+        .unwrap()
+        .get(&(db.to_path_buf(), message_id.to_owned()))
+        .cloned();
+    if let Some(f) = hook {
+        f();
+    }
 }
 
 #[cfg(test)]

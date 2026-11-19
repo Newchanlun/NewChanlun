@@ -2,6 +2,9 @@ use super::model::{advance, Batch, Model, State};
 use crate::session_protocol::{canonical_json, sha256_hex};
 use rusqlite::{params, Connection, OptionalExtension};
 use serde_json::{json, Value};
+use std::fs::{File, OpenOptions};
+use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant};
 
 pub const RAW_FORMAT: &str = "history-sim-economic-originals/1";
 const SCHEMA: &str = "CREATE TABLE IF NOT EXISTS x_sim_meta(k TEXT PRIMARY KEY,v TEXT NOT NULL) STRICT;
@@ -16,6 +19,122 @@ fn value<T: serde::Serialize>(v: &T) -> Value {
 }
 fn digest(v: &Value) -> String {
     sha256_hex(canonical_json(v).as_bytes())
+}
+
+/// #1375 R4：模拟 X 前沿与 E 缺口放行提交之间的跨进程/跨连接顺序护栏（`<x_db>.frontier.lock`）。
+/// - X 仅在写入 `pending_batch` 与提交 `x_sim_batches`/`x_sim_originals` 的本地盘事务期间持独占锁，
+///   调用 S 期间不持此锁，保持严格无环锁序（`e.db` -> `frontier.lock` -> `x.db`）。
+/// - E 仅在 `source_gap == true` 校验模拟 X 时持共享锁，并在 `tx.commit()` 完成后才释放，
+///   阻止 X 在 E 核对完毕与 E 提交落盘之间推进新批。
+/// - 析构时显式 `unlock()`，避免子进程继承 fd 延迟放锁（同 `#1895/#2008`）。
+#[derive(Debug)]
+#[must_use = "前沿顺序锁须持续持有至提交完成；`let _ = ...` 会立刻放锁"]
+pub(crate) struct FrontierGuard {
+    file: File,
+}
+impl Drop for FrontierGuard {
+    fn drop(&mut self) {
+        let _ = self.file.unlock();
+    }
+}
+
+fn frontier_lock_path(db: &Path) -> Result<PathBuf, String> {
+    let canonical = if db.exists() {
+        db.canonicalize().map_err(storage)?
+    } else {
+        let parent = db
+            .parent()
+            .filter(|p| !p.as_os_str().is_empty())
+            .unwrap_or_else(|| Path::new("."));
+        parent.canonicalize().map_err(storage)?.join(
+            db.file_name()
+                .ok_or("InvalidDomain：X 数据库路径缺文件名")?,
+        )
+    };
+    Ok(PathBuf::from(format!(
+        "{}.frontier.lock",
+        canonical.display()
+    )))
+}
+
+pub(crate) fn ensure_frontier_lock(c: &Connection) -> Result<(), String> {
+    let Some(path) = c.path().filter(|p| !p.is_empty()) else {
+        return Ok(());
+    };
+    let lock_path = frontier_lock_path(Path::new(path))?;
+    OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .read(true)
+        .write(true)
+        .open(lock_path)
+        .map_err(storage)?;
+    Ok(())
+}
+
+pub(crate) fn lock_frontier_exclusive(c: &Connection) -> Result<Option<FrontierGuard>, String> {
+    let Some(path) = c.path().filter(|p| !p.is_empty()) else {
+        return Ok(None);
+    };
+    let lock_path = frontier_lock_path(Path::new(path))?;
+    let file = OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .read(true)
+        .write(true)
+        .open(lock_path)
+        .map_err(storage)?;
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        match file.try_lock() {
+            Ok(()) => return Ok(Some(FrontierGuard { file })),
+            Err(std::fs::TryLockError::WouldBlock) => {
+                if Instant::now() >= deadline {
+                    return Err("StorageUnavailable：等待模拟 X 前沿独占顺序锁超时".into());
+                }
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            Err(std::fs::TryLockError::Error(e)) => return Err(storage(e)),
+        }
+    }
+}
+
+pub(crate) fn lock_frontier_shared(db: &Path) -> Result<FrontierGuard, String> {
+    let lock_path = frontier_lock_path(db)?;
+    let file = match OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .read(true)
+        .write(true)
+        .open(&lock_path)
+    {
+        Ok(file) => file,
+        Err(e)
+            if matches!(
+                e.kind(),
+                std::io::ErrorKind::PermissionDenied | std::io::ErrorKind::ReadOnlyFilesystem
+            ) =>
+        {
+            OpenOptions::new()
+                .read(true)
+                .open(&lock_path)
+                .map_err(storage)?
+        }
+        Err(e) => return Err(storage(e)),
+    };
+    let deadline = Instant::now() + Duration::from_secs(2);
+    loop {
+        match file.try_lock_shared() {
+            Ok(()) => return Ok(FrontierGuard { file }),
+            Err(std::fs::TryLockError::WouldBlock) => {
+                if Instant::now() >= deadline {
+                    return Err("StorageUnavailable：等待模拟 X 前沿共享顺序锁超时".into());
+                }
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            Err(std::fs::TryLockError::Error(e)) => return Err(storage(e)),
+        }
+    }
 }
 
 /// 调用者持有 X 进程锁。模型、来源与状态在本库冻结，不接受换来源续跑。
@@ -40,6 +159,7 @@ pub(crate) fn initialize_in_transaction(
     if source_namespace.is_empty() || source_epoch.is_empty() {
         return Err("InvalidDomain：X 来源身份为空".into());
     }
+    ensure_frontier_lock(c)?;
     c.execute_batch(SCHEMA).map_err(storage)?;
     let frozen = canonical_json(
         &json!({"model":model,"source_namespace":source_namespace,"source_epoch":source_epoch}),
@@ -336,6 +456,7 @@ pub(crate) fn commit_batch_with_commands(
     let mut normalized = batch.clone();
     normalized.normalize();
     let batch = &normalized;
+    let _frontier_lock = lock_frontier_exclusive(c)?;
     let tx = c.transaction().map_err(storage)?;
     let request = canonical_json(&value(batch));
     let prior: Option<(String, String)> = tx
