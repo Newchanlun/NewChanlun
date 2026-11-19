@@ -19,26 +19,22 @@ import subprocess
 import sys
 import threading
 import time
+import tomllib
 import urllib.error
 import urllib.request
 import uuid
 from pathlib import Path
 
-import tomllib
-
 # 与 pilot1742.external_review.SPACE_RESERVE 相同；预检不导入控制器，避免改变其加载面。
 SPACE_RESERVE = 256 * 1024 * 1024
 # 与 pilot1742.external_review.MODELS 相同（测试核对）。
-MODELS = ("kimi-k3.1-pro", "claude-opus-5-5")
+MODELS = ("gpt-6.2-sol", "gpt-6.2-astra")
 CLIPROXY_LOG_DIR = Path.home() / "Library/Application Support/CLIProxyLocal/auth/logs"
-# 每个模型可接受的上游路线。Sol 走 Codex OAuth（chatgpt.com）；Kimi 走国内 kimi（api.kimi.com）或国际 kimi-ai
-# （api.kimi.ai），CLIProxy 在两者间按同型号候选池切换（CLIProxyLocal ROUTING-KIMI-1696.md）；Opus 走 Claude OAuth。
-ROUTES = {"gpt-6.1-sol": {("codex", "chatgpt.com")},
-          "kimi-k3.1-pro": {("kimi", "api.kimi.com"), ("kimi-ai", "api.kimi.ai")},
-          "claude-opus-5-5": {("claude", "api.anthropic.com")}}
-# 报告里只回显这些已知路由，其余记作 "other"：日志字段来自上游，不能原样进报告
-KNOWN_ROUTES = {*(route for routes in ROUTES.values() for route in routes),
-                ("antigravity", "daily-cloudcode-pa.googleapis.com")}
+# 两位 GPT 只接受 Codex OAuth；旧路线保留在报告词表中用于诊断，不得放行。
+CODEX_ROUTE = ("codex", "chatgpt.com")
+ROUTES = {model: {CODEX_ROUTE} for model in MODELS}
+KNOWN_ROUTES = {CODEX_ROUTE, ("kimi", "api.kimi.com"), ("kimi-ai", "api.kimi.ai"),
+                ("claude", "api.anthropic.com"), ("antigravity", "daily-cloudcode-pa.googleapis.com")}
 PROVIDER = "cliproxy-local"
 SCRUBBED_ENV = "CLIPROXY_LOCAL_KEY"
 SHA_RE = re.compile(r"[0-9a-f]{40}")
@@ -354,8 +350,7 @@ def round_trip(url: str, key: str, model: str, session: str, deadline: Deadline)
 
 
 def _round_trip_http(url: str, key: str, model: str, session: str, deadline: Deadline) -> dict:
-    """一次最小往返，只探连通：responses + tools + tool_choice=auto + json_schema 输出格式。
-    不代表 kimi 的生产请求形状（正式独审对 kimi 不带 --output-schema），也不验证回合内真实工具调用。"""
+    """最小连通探针采用 JSON schema，不验证真实审阅或工具调用。"""
     body = {"model": model, "stream": True, "store": False, "reasoning": {"effort": "low"},
             "instructions": "Preflight connectivity check. Do not call tools.",
             "input": [{"role": "user", "content": [{"type": "input_text", "text": 'Return {"ok": true}.'}]}],
@@ -391,14 +386,14 @@ def _round_trip_http(url: str, key: str, model: str, session: str, deadline: Dea
                         # 只报已知枚举：上游任意值（可能以各种编码夹带 key）一律归一成 "other"，不进报告
                         status = inner.get("status") if inner.get("status") in RESPONSE_STATUSES else (
                             None if inner.get("status") is None else "other")
-                        detail = inner.get("error") or event.get("error") or event.get("message")
+                        detail = next((value for value in (inner.get("error"), event.get("error"),
+                                                            event.get("message")) if value is not None), None)
                         # 终态数据不等于代理 lifecycle 已收尾；读到 EOF 才关闭连接。
             if deadline.work_left() <= 0:
                 detail = "总时限内流未收尾"
-            # 事件名成功还不够：响应体自报 failed/cancelled 或带 error 也算失败。
-            ok = (terminal in ("response.completed", "response.incomplete") and not detail
-                  and status not in ("failed", "cancelled"))
-            text = detail if isinstance(detail, str) else json.dumps(detail, ensure_ascii=False) if detail else ""
+            # 只接受唯一 completed 终态、内层 completed、无错误及完整 HTTP 消息。
+            ok = response.status == 200 and terminal == "response.completed" and status == "completed" and detail is None
+            text = detail if isinstance(detail, str) else json.dumps(detail, ensure_ascii=False) if detail is not None else ""
             return {"http_status": response.status, "terminal": terminal, "status": status, "ok": ok,
                     "error": None if ok else _error_info(text)}
     except urllib.error.HTTPError as error:

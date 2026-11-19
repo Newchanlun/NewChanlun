@@ -211,8 +211,8 @@ test("准入锁：持有者活着时后来者等到超时，超时不释放别�
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
 
-test("显式两家族模型保留旧默认并拒绝路由外模型", () => {
-  for (const model of ["gpt-6.1-sol", "claude-opus-5-5"] as const) {
+test("两位 GPT 独立建会话；历史显式模型仍可用", () => {
+  for (const model of ["gpt-6.2-sol", "gpt-6.2-astra", "gpt-6.1-sol", "claude-opus-5-5"] as const) {
     const a = codexWorker({ docker: true, model });
     const b = codexWorker({ docker: true, model });
     const options = { prompt: "只审不修", dangerouslySkipPermissions: false };
@@ -233,6 +233,7 @@ const modes = ["PASS", "BLOCK", "failed", "missing-log", "missing-completed", "w
   "reconnect-429-recovers"] as const;
 const RECONNECT_429 = "Reconnecting... 1/5 (exceeded retry limit, last status: 429 Too Many Requests)";
 for (const [mode, model] of [...modes.map((m) => [m, "gpt-6.1-sol"] as const),
+  ["PASS", "gpt-6.2-sol"], ["PASS", "gpt-6.2-astra"],
   ["PASS", "kimi-k3.1-pro"], ["BLOCK", "kimi-k3.1-pro"], ["PASS", "claude-opus-5-5"]] as const) {
   test(`宿主监督 ${model} ${mode} 不把缺证据转为通过`, async () => {
     const f = fixture(model); const session = randomUUID();

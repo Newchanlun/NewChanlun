@@ -45,10 +45,9 @@ from .patch_read import FrozenPatch, reads_candidate_patch
 from .run import DEFAULT_HOME, SOURCE_REPO, _ps_rows, supervisor_alive
 from .vm_trim import DOCKER_ENV, trim_vm_disk
 
-# Codex 上游额度耗尽期间的临时组合（EXTERNAL-REVIEW.md「Codex 额度耗尽时的临时组合」）；
-# 常规组合为 ("gpt-6.1-sol", "claude-opus-5-5") 与 POLICY "external-pr-v1"。两位须属不同家族。
-MODELS = ("kimi-k3.1-pro", "claude-opus-5-5")
-POLICY = "external-pr-v1-kimi"
+# 正式 GPT 双审（EXTERNAL-REVIEW.md）；不同模型各走独立 checkout、进程与 session。
+MODELS = ("gpt-6.2-sol", "gpt-6.2-astra")
+POLICY = "external-pr-v2-gpt62"
 CONTEXT = "deepagents/review"
 TOKEN_PERMISSIONS = {"metadata": "read", "contents": "read", "pull_requests": "read", "statuses": "write"}
 REPOSITORY_ID = 1150335160
@@ -537,8 +536,14 @@ class ExternalReview:
                 previous = ReviewTarget(**_read(folder / "target.json"))
                 if previous.controller_code_head != target.controller_code_head:
                     raise IdentityError("controller 已变更，请用新 attempt 保留旧证据")
+                if previous.review_contract != target.review_contract:
+                    raise IdentityError("审查合同已变更，请用新 attempt 保留旧证据")
                 return previous
             with self._pr_lock(target.pr_number):
+                used = (self.state_root / "runs").glob(
+                    f"r{target.repository_id}-p{target.pr_number}-{target.base_sha}-{target.head_sha}-*-a{attempt}/target.json")
+                if any(used):
+                    raise IdentityError("同一 base/head 的 attempt 已由旧合同占用，请用新 attempt 保留旧证据")
                 _save(folder / "target.json", asdict(target))
         return target
 
