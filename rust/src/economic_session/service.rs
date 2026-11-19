@@ -1611,15 +1611,17 @@ pub fn cli(is_b: bool) -> Result<(), String> {
     if !is_b && opts.contains_key("--chong") {
         return Err("InvalidDomain：E不能指定重".into());
     }
-    let _lock = process_lock(&config.db, &config.domain)?;
     if let Some(action) = named_recovery {
-        let request = Path::new(get("--recovery-request")?);
+        let request =
+            super::recovery::Request::load(Path::new(get("--recovery-request")?), &config)?;
+        let _lock = process_lock(&config.db, &config.domain)?;
         println!(
             "{}",
-            canonical_json(&super::recovery::run(&config, request, action)?)
+            canonical_json(&super::recovery::run(&config, &request, action)?)
         );
         return Ok(());
     }
+    let _lock = process_lock(&config.db, &config.domain)?;
     match command.as_str() {
         "init" => println!("{}", canonical_json(&init(&config)?)),
         "recover" => println!("{}", canonical_json(&recover(&config)?)),

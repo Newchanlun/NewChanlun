@@ -18,14 +18,14 @@ pub(super) enum Action {
     VerifyCurrent,
 }
 
-struct Request {
+pub(super) struct Request {
     document: Value,
     key: String,
     from: i64,
 }
 
 impl Request {
-    fn load(path: &Path, config: &Config) -> Result<Self, String> {
+    pub(super) fn load(path: &Path, config: &Config) -> Result<Self, String> {
         let mut raw = Vec::new();
         std::fs::File::open(path)
             .map_err(err)?
@@ -109,8 +109,7 @@ impl Request {
 }
 
 /// 调用方持有与 init/serve/recover 相同的域锁；核对和换代在同一事务。
-pub(super) fn run(config: &Config, path: &Path, action: Action) -> Result<Value, String> {
-    let request = Request::load(path, config)?;
+pub(super) fn run(config: &Config, request: &Request, action: Action) -> Result<Value, String> {
     if !config.db.is_file() {
         return Err("StorageUnavailable：具名恢复要求已存在的域库".into());
     }
@@ -188,30 +187,28 @@ mod tests {
             "cut":init["cut"]
         });
         let write_request = |value: &Value| std::fs::write(&path, canonical_json(value)).unwrap();
+        let run_request = |action| run(&config, &Request::load(&path, &config)?, action);
         write_request(&request);
-        assert!(run(&config, &path, Action::Query)
+        assert!(run_request(Action::Query)
             .unwrap_err()
             .contains("MissingDependency"));
         // 不消费初次返回值，后续各调用重新打开库。
-        run(&config, &path, Action::Recover).unwrap();
-        let original = run(&config, &path, Action::Query).unwrap();
+        run_request(Action::Recover).unwrap();
+        let original = run_request(Action::Query).unwrap();
         assert_eq!(original["writer_epoch"], "2");
-        assert_eq!(run(&config, &path, Action::Recover).unwrap(), original);
-        assert_eq!(
-            run(&config, &path, Action::VerifyCurrent).unwrap(),
-            original
-        );
+        assert_eq!(run_request(Action::Recover).unwrap(), original);
+        assert_eq!(run_request(Action::VerifyCurrent).unwrap(), original);
 
         request["from_epoch"] = json!("2");
         write_request(&request);
-        assert!(run(&config, &path, Action::Recover)
+        assert!(run_request(Action::Recover)
             .unwrap_err()
             .contains("IdentityConflict"));
         request["from_epoch"] = json!("1");
         write_request(&request);
         assert_eq!(recover(&config).unwrap()["writer_epoch"], "3");
-        assert_eq!(run(&config, &path, Action::Query).unwrap(), original);
-        assert!(run(&config, &path, Action::VerifyCurrent)
+        assert_eq!(run_request(Action::Query).unwrap(), original);
+        assert!(run_request(Action::VerifyCurrent)
             .unwrap_err()
             .contains("StaleWriter"));
     }
