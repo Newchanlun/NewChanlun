@@ -12,10 +12,15 @@
 //! - 日志经 `redact`（移植 `381fda3f` `trading_system/execution/hl_paper_launcher.py:46-53`
 //!   `_redact`）过滤后写 stderr。
 //!
-//! 用法：production_session --manifest FILE
+//! 用法：production_session --manifest FILE [--economic-recovery-plan FILE]
+use newchan_rust::session_protocol::{positive, strict_json};
+use newchan_rust::session_transport::{
+    SHUTDOWN_CONTROL_FLAG, SHUTDOWN_STDIN_V1, SUPERVISED_STOP_BYTE,
+};
 use newchan_rust::structure_source::Declaration;
 use serde_json::{json, Value};
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitStatus, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -241,6 +246,101 @@ fn run_once(mut command: Command, what: &str) -> Result<(), String> {
     }
 }
 
+/// 恢复入口只消费已持久化的具名回执；绝不替任何域换代或处理 socket 残留。
+fn economic_recovery_epochs(
+    path: &Path,
+    manifest: &Value,
+    e_bin: &Path,
+    b_bin: &Path,
+) -> Result<BTreeMap<String, String>, String> {
+    const MAX_PLAN_BYTES: u64 = 65_536;
+    let mut bytes = Vec::new();
+    std::fs::File::open(path)
+        .and_then(|file| file.take(MAX_PLAN_BYTES + 1).read_to_end(&mut bytes))
+        .map_err(|e| format!("InvalidDomain：读经济恢复计划失败：{e}"))?;
+    if bytes.len() as u64 > MAX_PLAN_BYTES {
+        return Err("InvalidDomain：经济恢复计划超过上限".into());
+    }
+    let plan = strict_json(&bytes)?;
+    if plan.as_object().map(|object| object.len()) != Some(2)
+        || plan["schema_revision"] != "launcher-economic-recovery/1"
+    {
+        return Err("InvalidDomain：经济恢复计划版本或字段未知".into());
+    }
+    let requests = plan["requests"]
+        .as_object()
+        .ok_or("InvalidDomain：恢复请求必须按域具名")?;
+    let econ = text(manifest, "economic.manifest")?;
+    let chongs = manifest["economic"]["b"]
+        .as_array()
+        .map(Vec::as_slice)
+        .unwrap_or(&[]);
+    let mut members = vec![(
+        "E".to_owned(),
+        e_bin,
+        text(manifest, "economic.e.db")?,
+        None,
+    )];
+    for b in chongs {
+        let chong = text(b, "chong")?;
+        members.push((format!("B:{chong}"), b_bin, text(b, "db")?, Some(chong)));
+    }
+    let domain_set: BTreeSet<_> = members
+        .iter()
+        .map(|(name, _, _, _)| name.as_str())
+        .collect();
+    if domain_set.len() != members.len()
+        || domain_set != requests.keys().map(String::as_str).collect()
+    {
+        return Err("InvalidDomain：经济恢复计划必须与 launcher 的 E/B 域一一对应".into());
+    }
+    let paths = members
+        .iter()
+        .map(|(name, _, _, _)| {
+            requests[name]
+                .as_str()
+                .filter(|path| !path.is_empty())
+                .ok_or_else(|| format!("InvalidDomain：缺 {name} 的具名恢复请求文件"))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let mut epochs = BTreeMap::new();
+    for ((name, bin, db, chong), request) in members.into_iter().zip(paths) {
+        let mut cmd = clean(Command::new(bin), &[]);
+        cmd.args([
+            "current-recovery",
+            "--manifest",
+            econ,
+            "--db",
+            db,
+            "--recovery-request",
+            request,
+        ]);
+        if let Some(chong) = chong {
+            cmd.args(["--chong", chong]);
+        }
+        let output = cmd
+            .output()
+            .map_err(|e| format!("MissingDependency：{name} 恢复核验启动失败：{e}"))?;
+        if !output.status.success() {
+            return Err(format!(
+                "{name} 恢复核验拒绝（{}）：{}",
+                output.status,
+                String::from_utf8_lossy(&output.stderr).trim()
+            ));
+        }
+        let receipt = strict_json(&output.stdout)?;
+        if receipt["kind"] != "NamedRecoveryReceipt" || receipt["request"]["domain_id"] != name {
+            return Err(format!(
+                "IdentityConflict：{name} 回执并非该域已核的具名恢复"
+            ));
+        }
+        let epoch = text(&receipt, "writer_epoch")?;
+        positive(epoch, "writer_epoch")?;
+        epochs.insert(name, epoch.to_owned());
+    }
+    Ok(epochs)
+}
+
 struct Supervised {
     domain: String,
     child: Child,
@@ -250,9 +350,12 @@ struct Supervised {
 
 fn run() -> Result<i32, String> {
     let args: Vec<String> = std::env::args().skip(1).collect();
-    let manifest_path = match args.as_slice() {
-        [flag, path] if flag == "--manifest" => PathBuf::from(path),
-        _ => return Err("InvalidDomain：usage: production_session --manifest FILE".into()),
+    let (manifest_path, recovery_plan) = match args.as_slice() {
+        [flag, path] if flag == "--manifest" => (PathBuf::from(path), None),
+        [flag, path, recovery_flag, recovery] if flag == "--manifest" && recovery_flag == "--economic-recovery-plan" => {
+            (PathBuf::from(path), Some(Path::new(recovery)))
+        }
+        _ => return Err("InvalidDomain：usage: production_session --manifest FILE [--economic-recovery-plan FILE]".into()),
     };
     let m = load_manifest(&manifest_path)?;
     let raw = &m.raw;
@@ -263,6 +366,10 @@ fn run() -> Result<i32, String> {
         sibling("b_chong_session")?,
         sibling("x_execution_session")?,
     );
+    // 在 init/启动前收齐当前回执。未显式选入时不改变旧启动参数。
+    let recovery_epochs = recovery_plan
+        .map(|path| economic_recovery_epochs(path, raw, &e_bin, &b_bin))
+        .transpose()?;
     log(
         "start",
         json!({"profile": m.profile, "structure_source": serde_json::from_str::<Value>(&m.source.canonical()).unwrap_or_default()}),
@@ -321,7 +428,15 @@ fn run() -> Result<i32, String> {
 
     // ── 拉起：每域独立进程；中途失败也先回收已拉起的子进程再报错，不留孤儿 ──
     let mut children: Vec<Supervised> = Vec::new();
-    let spawned = spawn_domains(&m, &s_bin, &e_bin, &b_bin, &x_bin, &mut children);
+    let spawned = spawn_domains(
+        &m,
+        &s_bin,
+        &e_bin,
+        &b_bin,
+        &x_bin,
+        recovery_epochs.as_ref(),
+        &mut children,
+    );
     let mut failed = spawned.is_err();
 
     // ── 监督 ──
@@ -339,15 +454,24 @@ fn run() -> Result<i32, String> {
         std::thread::sleep(Duration::from_millis(100));
     }
 
-    // ── 回收：先 SIGTERM，宽限期后 SIGKILL；全部 wait ──
-    for sup in children.iter().filter(|c| c.status.is_none()) {
-        // SAFETY：向本进程自己拉起、尚未回收的子进程 PID 发信号。
-        unsafe {
-            libc::kill(sup.child.id() as libc::pid_t, libc::SIGTERM);
+    // ── 回收：S/E/B 先结束域服务和关库；失约则 SIGKILL 并报告失败。
+    // X 尚非结构/账簿 owner，维持原回收口径（早已退出亦不影响 S/E/B）。
+    for sup in children.iter_mut().filter(|c| c.status.is_none()) {
+        if let Some(mut stop) = sup.child.stdin.take() {
+            if let Err(e) = stop.write_all(&[SUPERVISED_STOP_BYTE]) {
+                failed = true;
+                log(
+                    "stop-request-failed",
+                    json!({"domain":sup.domain, "error":e.to_string()}),
+                );
+            }
+        } else {
+            // SAFETY：只通知自己拉起、尚未回收的子进程。
+            unsafe { libc::kill(sup.child.id() as libc::pid_t, libc::SIGTERM) };
         }
     }
     let deadline = Instant::now() + STOP_GRACE;
-    for sup in children.iter_mut() {
+    for sup in children.iter_mut().filter(|c| c.status.is_none()) {
         while sup.status.is_none() {
             match sup.child.try_wait() {
                 Ok(Some(status)) => sup.status = Some(status),
@@ -361,9 +485,19 @@ fn run() -> Result<i32, String> {
                 }
             }
         }
+        let clean_stop = sup.status.as_ref().is_some_and(ExitStatus::success);
+        failed |= sup.critical && !clean_stop;
+        log(
+            "domain-stopped",
+            json!({"domain":sup.domain,"status":sup.status.as_ref().map(ToString::to_string),"writer_closed":sup.critical && clean_stop}),
+        );
     }
     spawned?;
-    log("stopped", json!({"failed": failed}));
+    // 成功仅指停止域进程；socket 名字空间未交接，不承诺原样重启。
+    log(
+        "stopped",
+        json!({"failed": failed, "socket_handoff": "not_performed"}),
+    );
     Ok(if failed { 1 } else { 0 })
 }
 
@@ -374,6 +508,7 @@ fn spawn_domains(
     e_bin: &Path,
     b_bin: &Path,
     x_bin: &Path,
+    recovery_epochs: Option<&BTreeMap<String, String>>,
     children: &mut Vec<Supervised>,
 ) -> Result<(), String> {
     let raw = &m.raw;
@@ -383,6 +518,10 @@ fn spawn_domains(
     let chongs = raw["economic"]["b"].as_array().cloned().unwrap_or_default();
     let mut spawn = |domain: String, mut c: Command, critical: bool| -> Result<(), String> {
         c.stdout(Stdio::null());
+        if critical {
+            c.stdin(Stdio::piped())
+                .args([SHUTDOWN_CONTROL_FLAG, SHUTDOWN_STDIN_V1]);
+        }
         let child = c
             .spawn()
             .map_err(|e| format!("MissingDependency：{domain} 启动失败：{e}"))?;
@@ -411,7 +550,13 @@ fn spawn_domains(
         .arg("--structure-source")
         .arg(m.state_dir.join("structure-source.json"));
     spawn("S".into(), s, true)?;
-    let e_epoch = text(raw, "economic.e.epoch")?;
+    let e_epoch = match recovery_epochs {
+        Some(epochs) => epochs
+            .get("E")
+            .ok_or("MissingDependency：缺已核 E 恢复代")?
+            .as_str(),
+        None => text(raw, "economic.e.epoch")?,
+    };
     let mut e = clean(Command::new(e_bin), &[]);
     e.args([
         "serve",
@@ -425,17 +570,18 @@ fn spawn_domains(
     spawn("E".into(), e, true)?;
     for b in &chongs {
         let chong = text(b, "chong")?;
+        let domain = format!("B:{chong}");
+        let b_epoch = match recovery_epochs {
+            Some(epochs) => epochs
+                .get(&domain)
+                .ok_or("MissingDependency：缺已核 B 恢复代")?
+                .as_str(),
+            None => text(b, "epoch")?,
+        };
         let mut c = clean(Command::new(b_bin), &[]);
         c.args(["serve", "--manifest", econ, "--db", text(b, "db")?])
-            .args([
-                "--chong",
-                chong,
-                "--epoch",
-                text(b, "epoch")?,
-                "--e-epoch",
-                e_epoch,
-            ]);
-        spawn(format!("B:{chong}"), c, true)?;
+            .args(["--chong", chong, "--epoch", b_epoch, "--e-epoch", e_epoch]);
+        spawn(domain, c, true)?;
     }
     let mut x = clean(Command::new(x_bin), &[]);
     x.args(["serve", "--db", text(raw, "x.db")?])
