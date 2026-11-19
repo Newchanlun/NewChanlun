@@ -33,6 +33,9 @@ impl CommandRecord for ArchivedCommand {
     const CLAIMED_MATCHES_BATCH_BAR: bool = true;
     const CLAIMED_NS_AUDIT_POLICY: &'static str = "verified_equal_to_attempt_bar";
     const ARCHIVE_LAYOUT: &'static str = "v2";
+    const CONDITION_AUDIT_POLICY: &'static str =
+        "verified_current_condition_semantics_and_completeness";
+    const CONDITION_AUDIT_UNPROVEN: &'static [&'static str] = &[];
 
     fn id(&self) -> &str {
         &self.command_id

@@ -1,6 +1,11 @@
-//! 封存的 `/1` 命令与档案布局（覆盖早期 `18446a3d35`–`d1c46577b1` 与后期 C2 `#2078` 两种冻结写者格式）。
-//! 摘要按当年的整数、字段及 `Change` 原样计算；按冻结键集严格判别，不回退降格，不伪造共同信封或新授权。
-use super::{hash, AuditProfile, Certificate, Change, CommandRecord, Model, Profile};
+//! 封存的 `/1` 命令与档案布局（覆盖早期 `18446a3d35`–`d1c46577b1` 与后期 `1f0a42bc20`–`734847be00` 两种冻结存储布局）。
+//! 摘要按当年的整数、字段及 `Change` 原样计算；按冻结键集严格判别，不回退降格，不伪造共同信封或新授权；
+//! 后期 `/1` 三个条件准入世代（`1f0a42bc20` / `2ed00abd6c` / `b66b61a0b0+`）共享同一 12+6+6 存储布局且无写者修订落盘，
+//! 因此按该布局共同可证语义核验并在读出元数据中显式标明未证项，不溯及重放后加准入闸。
+use super::{
+    hash, validate_conditions_common_12_6, AuditProfile, Certificate, Change, CommandRecord, Model,
+    Profile,
+};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::path::Path;
@@ -244,6 +249,12 @@ impl CommandRecord for EarlyArchivedCommand {
     const CLAIMED_MATCHES_BATCH_BAR: bool = false;
     const CLAIMED_NS_AUDIT_POLICY: &'static str = "raw_claim_only_non_retroactive_v1";
     const ARCHIVE_LAYOUT: &'static str = "v1_early";
+    const CONDITION_AUDIT_POLICY: &'static str = "v1_early_frozen_three_conditions";
+    const CONDITION_AUDIT_UNPROVEN: &'static [&'static str] = &[
+        "model_coverage_condition_1f0a42bc20",
+        "condition_semantics_pairing_table_2ed00abd6c",
+        "required_four_capabilities_completeness_b66b61a0b0",
+    ];
 
     fn id(&self) -> &str {
         &self.0.command_id
@@ -293,21 +304,66 @@ impl CommandRecord for EarlyArchivedCommand {
     }
 }
 
-/// 后期 `/1`（`1f0a42bc20`–`b66b61a0b0`，含 `#2078` 封存布局）归档命令：
-/// 按完整 12 键/6 键 `Profile` 严格校验 `c.conditions == p.conditions`；
+/// 后期 `/1`（`1f0a42bc20`–`734847be00`，含 `#2078` 封存布局）的只读档案 profile 包装：
+/// 保留严格 12 键/6 键形态、端点与模型基础不变量，并按 12+6+6 布局共同可证条件语义
+/// （`validate_conditions_common_12_6`）核验；因 `1f0a42bc20`、`2ed00abd6c`、`b66b61a0b0+`
+/// 共享完全相同的落盘键集且无写者修订记录，不溯及重放 `2ed00abd6c` 配对表与 `b66b61a0b0` 四项完备闸，
+/// 而是由 `LateArchivedCommand::CONDITION_AUDIT_UNPROVEN` 显式标明未证项。
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(transparent)]
+pub(super) struct LateV1Profile(pub(super) Profile);
+
+impl AuditProfile for LateV1Profile {
+    fn validate_profile(&self) -> Result<(), String> {
+        self.0.validate_base()?;
+        validate_conditions_common_12_6(&self.0.conditions)
+    }
+    fn model(&self) -> &Model {
+        &self.0.model
+    }
+    fn session_id(&self) -> &str {
+        &self.0.session_id
+    }
+    fn session_generation(&self) -> &str {
+        &self.0.session_generation
+    }
+    fn x_id(&self) -> &str {
+        &self.0.x_id
+    }
+    fn source_namespace(&self) -> &str {
+        &self.0.source_namespace
+    }
+    fn source_epoch(&self) -> &str {
+        &self.0.source_epoch
+    }
+    fn e_identity(&self) -> (&str, &str) {
+        (&self.0.e.authority_id, &self.0.e.authority_epoch)
+    }
+    fn s_identity(&self) -> (&str, &str) {
+        (&self.0.s.authority_id, &self.0.s.authority_epoch)
+    }
+}
+
+/// 后期 `/1`（`1f0a42bc20`–`734847be00`，含 `#2078` 封存布局）归档命令：
+/// 按严格 12 键/6 键 `LateV1Profile` 校验 `c.conditions == p.0.conditions` 与 12+6+6 共同可证条件语义；
 /// 该代全部写者均在 `d1c46577b1` 移除 `now_ns()` 之后恒写 `claimed_ns = batch.bar.index`，
-/// 因此可按占有批 `bar.index` 强制核证。
+/// 因此仍按占有批 `bar.index` 强制核证，不削弱逻辑 bar、版号、布局与回执原件闭包。
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(transparent)]
 pub(super) struct LateArchivedCommand(ArchivedCommandFields);
 
 impl CommandRecord for LateArchivedCommand {
-    type Profile = Profile;
+    type Profile = LateV1Profile;
     type Tick = i64;
     const INNER_REVISION: Option<&'static str> = None;
     const CLAIMED_MATCHES_BATCH_BAR: bool = true;
     const CLAIMED_NS_AUDIT_POLICY: &'static str = "verified_equal_to_attempt_bar";
     const ARCHIVE_LAYOUT: &'static str = "v1_late";
+    const CONDITION_AUDIT_POLICY: &'static str = "v1_late_common_12_6_invariants_only";
+    const CONDITION_AUDIT_UNPROVEN: &'static [&'static str] = &[
+        "condition_semantics_pairing_table_2ed00abd6c",
+        "required_four_capabilities_completeness_b66b61a0b0",
+    ];
 
     fn id(&self) -> &str {
         &self.0.command_id
@@ -315,9 +371,9 @@ impl CommandRecord for LateArchivedCommand {
     fn change(&self) -> &Change {
         &self.0.change
     }
-    fn validate_record(&self, p: &Profile) -> Result<(), String> {
+    fn validate_record(&self, p: &LateV1Profile) -> Result<(), String> {
         self.0.validate_common(p)?;
-        if self.0.certificate.conditions != p.conditions {
+        if self.0.certificate.conditions != p.0.conditions {
             return Err("Unsupported：条件清单与获准 manifest 清单不逐项相等".into());
         }
         Ok(())

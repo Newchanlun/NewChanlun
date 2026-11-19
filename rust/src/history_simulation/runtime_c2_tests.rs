@@ -536,6 +536,11 @@ fn archived_v2_claimed_ns_must_equal_attempt_bar_and_v1_splits_early_vs_late() {
         ok_hist["execute_evidence_claimed_ns_audit_policy"],
         "verified_equal_to_attempt_bar"
     );
+    assert_eq!(
+        ok_hist["condition_audit_policy"],
+        "verified_current_condition_semantics_and_completeness"
+    );
+    assert_eq!(ok_hist["condition_audit_unproven"], json!([]));
     let ok_cmd = inspect_command(&db_v2, "a").unwrap();
     assert_eq!(ok_cmd["state"], "MayHaveCalled");
     assert_eq!(ok_cmd["archive_layout"], "v2");
@@ -544,6 +549,11 @@ fn archived_v2_claimed_ns_must_equal_attempt_bar_and_v1_splits_early_vs_late() {
         ok_cmd["execute_evidence_claimed_ns_audit"],
         "verified_equal_to_attempt_bar"
     );
+    assert_eq!(
+        ok_cmd["condition_audit_policy"],
+        "verified_current_condition_semantics_and_completeness"
+    );
+    assert_eq!(ok_cmd["condition_audit_unproven"], json!([]));
 
     {
         let conn = rusqlite::Connection::open(&db_v2).unwrap();
@@ -742,6 +752,18 @@ fn archived_v2_claimed_ns_must_equal_attempt_bar_and_v1_splits_early_vs_late() {
         early_hist["execute_evidence_claimed_ns_audit_policy"],
         "raw_claim_only_non_retroactive_v1"
     );
+    assert_eq!(
+        early_hist["condition_audit_policy"],
+        "v1_early_frozen_three_conditions"
+    );
+    assert_eq!(
+        early_hist["condition_audit_unproven"],
+        json!([
+            "model_coverage_condition_1f0a42bc20",
+            "condition_semantics_pairing_table_2ed00abd6c",
+            "required_four_capabilities_completeness_b66b61a0b0"
+        ])
+    );
     let early_cmd = inspect_command(&db_v1_early, "a").unwrap();
     assert_eq!(early_cmd["state"], "MayHaveCalled");
     assert_eq!(early_cmd["archive_layout"], "v1_early");
@@ -752,6 +774,14 @@ fn archived_v2_claimed_ns_must_equal_attempt_bar_and_v1_splits_early_vs_late() {
     assert_eq!(
         early_cmd["execute_evidence_claimed_ns_audit"],
         "raw_claim_only_non_retroactive_v1"
+    );
+    assert_eq!(
+        early_cmd["condition_audit_policy"],
+        "v1_early_frozen_three_conditions"
+    );
+    assert_eq!(
+        early_cmd["condition_audit_unproven"],
+        early_hist["condition_audit_unproven"]
     );
     // 早期 /1 坏档：claimed_ns < S.commit_ns(100) 必须拒绝。
     {
@@ -939,11 +969,30 @@ fn archived_v2_claimed_ns_must_equal_attempt_bar_and_v1_splits_early_vs_late() {
         late_hist["execute_evidence_claimed_ns_audit_policy"],
         "verified_equal_to_attempt_bar"
     );
+    assert_eq!(
+        late_hist["condition_audit_policy"],
+        "v1_late_common_12_6_invariants_only"
+    );
+    assert_eq!(
+        late_hist["condition_audit_unproven"],
+        json!([
+            "condition_semantics_pairing_table_2ed00abd6c",
+            "required_four_capabilities_completeness_b66b61a0b0"
+        ])
+    );
     let late_cmd = inspect_command(&db_v1_late, "a").unwrap();
     assert_eq!(late_cmd["archive_layout"], "v1_late");
     assert_eq!(
         late_cmd["execute_evidence_claimed_ns_audit"],
         "verified_equal_to_attempt_bar"
+    );
+    assert_eq!(
+        late_cmd["condition_audit_policy"],
+        "v1_late_common_12_6_invariants_only"
+    );
+    assert_eq!(
+        late_cmd["condition_audit_unproven"],
+        late_hist["condition_audit_unproven"]
     );
     // 后期 /1 不允许墙钟或篡改 claimed_ns（不能借早期 /1 通道放行）。
     {
@@ -1143,4 +1192,358 @@ fn archived_profile_classification_refuses_downgrade_and_hybrid_layouts() {
     ))
     .unwrap_err();
     assert!(err.starts_with("VersionUnsupported"), "unexpected: {err}");
+}
+
+/// #1407 C3 R6 回归：区分 12+6+6 存储布局与条件准入世代。
+/// - 后期 `/1` 历史正式库 `1f0a42bc20`（旧 E 配对 `released-exact-probe/1`）与 `2ed00abd6c`（仅 `model_coverage`、尚未要求四项齐全）
+///   按 12+6+6 共同可证语义可读，且显式标明 `condition_audit_policy` 与 `condition_audit_unproven`；
+/// - 后期 `/1` 的逻辑 bar、X 能力、E.ReleaseExact `model_coverage`、九字段非空、`condition_id` 唯一、命令/档案逐项相等均不削弱；
+/// - `/2` 与 `/3` 维持完整语义配对表与四项完备闸，同样反例在 `/2`、`/3` 上必拒。
+#[test]
+fn late_v1_archive_audits_common_12_6_invariants_without_retroactive_gates() {
+    let d = dir("r6-late-v1-generations");
+    let p: Profile = parse(profile(&d, approved()));
+    let base_profile = serde_json::to_value(&p).unwrap();
+    let change_v1 = json!({
+        "kind": "submit",
+        "order": {
+            "command_id": "a",
+            "family_id": "f-a",
+            "chong_id": "a",
+            "revision": 1,
+            "side": "buy",
+            "quantity": 5,
+            "kind": {"kind": "limit", "price": 100},
+            "eligibility_ref": "S:a",
+            "projection_manifest": "p-a"
+        }
+    });
+    let mut attempt_batch = Batch {
+        request_id: "b0".into(),
+        known_frontier_cut: "cut-0".into(),
+        bar: crate::history_simulation::model::Bar {
+            index: 0,
+            open: 100,
+            high: 105,
+            low: 95,
+            close: 100,
+        },
+        capacity: crate::history_simulation::model::Capacity::Input {
+            reference: "cap-0".into(),
+            buy: 100,
+            sell: 100,
+        },
+        close_changes: vec![serde_json::from_value(change_v1.clone()).unwrap()],
+        scenario_busts: vec![],
+    };
+    attempt_batch.normalize();
+    let batch_raw = canonical_json(&serde_json::to_value(&attempt_batch).unwrap());
+
+    let cond = |id: &str, auth: &str, stage: &str, cap: &str, fail: &str| {
+        json!({
+            "condition_id": id,
+            "authority_revision": auth,
+            "dependency_set": ["dep"],
+            "invalidation_sources": ["inv"],
+            "required_check_stages": [stage],
+            "evidence_refs": ["ref"],
+            "coverage_proof": "proof",
+            "validator_capability": cap,
+            "failure_result": fail,
+        })
+    };
+
+    // 1f0a42bc20 世代：允许自定义旧 E 能力配对（released-exact-probe/1），但带 model_coverage 且 X 能力有效。
+    let conds_1f0a = json!([
+        cond(
+            "model_coverage",
+            "released-exact-probe/1",
+            "E.ReleaseExact",
+            "released-exact-probe/1",
+            "Denied"
+        ),
+        cond(
+            "s_exec",
+            "execute-committed/1",
+            "S.RequestConditionalExecution",
+            "execute-committed/1",
+            "Denied"
+        ),
+        cond(
+            "x_local",
+            "simulation-local-transaction/1",
+            "X.OwnAttemptAndCall",
+            "simulation-local-transaction/1",
+            "Denied"
+        ),
+    ]);
+
+    // 2ed00abd6c 世代：每项满足配对表，但尚未要求四项必备能力齐全（仅 model_coverage）。
+    let conds_2ed0 = json!([cond(
+        "model_coverage",
+        "model-coverage/1",
+        "E.ReleaseExact",
+        "model-coverage/1",
+        "Denied"
+    )]);
+
+    let write_late_v1 = |name: &str, profile_conds: &Value, cmd_conds: &Value, claimed_ns: i64| {
+        let path = d.join(format!("{name}.sqlite"));
+        let _ = std::fs::remove_file(&path);
+        let mut prof = base_profile.clone();
+        prof["conditions"] = profile_conds.clone();
+        let cert = json!({
+            "rd11_policy": "controlled-fixture-rd11",
+            "responsibility_refs": ["r"],
+            "structure_dependencies": ["s"],
+            "market_dependencies": ["m"],
+            "rule_revision": "rule",
+            "conditions": cmd_conds,
+        });
+        let cmd = json!({
+            "command_id": "a",
+            "logical_order_family": "f-a",
+            "session_id": p.session_id,
+            "session_generation": p.session_generation,
+            "x_id": p.x_id,
+            "x_epoch": 1,
+            "symbol": "TEST",
+            "projection_kind": "per_leg",
+            "change": change_v1,
+            "certificate": cert,
+            "plan_hash": hash(&change_v1),
+            "certificate_hash": hash(&cert),
+        });
+        let cmd_hash = sha256_hex(canonical_json(&cmd).as_bytes());
+        let rel = json!({
+            "protocol": AUTHORITY_WIRE,
+            "session_id": p.session_id,
+            "session_generation": p.session_generation,
+            "authority_id": p.e.authority_id,
+            "authority_epoch": p.e.authority_epoch,
+            "command_id": "a",
+            "command_hash": cmd_hash,
+            "command": cmd,
+            "state": "ReleasedExact",
+            "receipt_id": "E:a",
+            "release_receipt_id": null,
+            "commit_ns": 0,
+        });
+        let s_reply = json!({
+            "protocol": AUTHORITY_WIRE,
+            "session_id": p.session_id,
+            "session_generation": p.session_generation,
+            "authority_id": p.s.authority_id,
+            "authority_epoch": p.s.authority_epoch,
+            "command_id": "a",
+            "command_hash": cmd_hash,
+            "command": cmd,
+            "state": "ExecuteCommitted",
+            "receipt_id": "S:a",
+            "release_receipt_id": "E:a",
+            "commit_ns": 0,
+        });
+        let mut conn = rusqlite::Connection::open(&path).unwrap();
+        let tx = conn.transaction().unwrap();
+        tx.execute_batch("CREATE TABLE x_meta(key TEXT PRIMARY KEY, value TEXT NOT NULL);")
+            .unwrap();
+        for (k, v) in [
+            ("profile_revision", "x-execution-profile/1"),
+            ("profile_mode", "simulation"),
+            ("history_simulation", "true"),
+            ("writer_epoch", "1"),
+        ] {
+            tx.execute("INSERT INTO x_meta VALUES(?1,?2)", rusqlite::params![k, v])
+                .unwrap();
+        }
+        initialize_in_transaction(&tx, &p, 1).unwrap();
+        tx.execute(
+            "DELETE FROM x_sim_meta WHERE k='exact_profile_revision'",
+            [],
+        )
+        .unwrap();
+        tx.execute(
+            "UPDATE x_sim_meta SET v=?1 WHERE k='authority_profile'",
+            [canonical_json(&prof)],
+        )
+        .unwrap();
+        tx.execute(
+            "INSERT INTO x_sim_meta VALUES('pending_batch',?1),('pending_epoch','1')",
+            [&batch_raw],
+        )
+        .unwrap();
+        let clock = json!({"received_ns": 0, "first_known_ns": 0, "commit_ns": 0});
+        let exec = json!({"reply": s_reply, "claimed_ns": claimed_ns});
+        tx.execute(
+            "INSERT INTO x_exact_commands(id,command,release_receipt,state,attempt_batch,accept_clock,release_evidence,execute_evidence) VALUES('a',?,'E:a','MayHaveCalled',?,?,?,?)",
+            rusqlite::params![
+                canonical_json(&cmd),
+                batch_raw,
+                canonical_json(&clock),
+                canonical_json(&rel),
+                canonical_json(&exec),
+            ],
+        )
+        .unwrap();
+        tx.commit().unwrap();
+        path
+    };
+
+    let expected_unproven = json!([
+        "condition_semantics_pairing_table_2ed00abd6c",
+        "required_four_capabilities_completeness_b66b61a0b0"
+    ]);
+
+    // 1) 1f0a42bc20 旧配对库可读，且显式标明未证项与逻辑 bar 已核证。
+    let db_1f0a = write_late_v1("late-1f0a-legacy-pair", &conds_1f0a, &conds_1f0a, 0);
+    let h_1f0a = inspect_history(&db_1f0a).unwrap();
+    assert_eq!(h_1f0a["archive_layout"], "v1_late");
+    assert_eq!(
+        h_1f0a["execute_evidence_claimed_ns_audit_policy"],
+        "verified_equal_to_attempt_bar"
+    );
+    assert_eq!(
+        h_1f0a["condition_audit_policy"],
+        "v1_late_common_12_6_invariants_only"
+    );
+    assert_eq!(h_1f0a["condition_audit_unproven"], expected_unproven);
+    let c_1f0a = inspect_command(&db_1f0a, "a").unwrap();
+    assert_eq!(c_1f0a["state"], "MayHaveCalled");
+    assert_eq!(
+        c_1f0a["condition_audit_policy"],
+        "v1_late_common_12_6_invariants_only"
+    );
+    assert_eq!(c_1f0a["condition_audit_unproven"], expected_unproven);
+    // 1f0a42bc20 库篡改逻辑 bar 仍必拒（不削弱晚 /1 逻辑 bar）。
+    let db_1f0a_bad_bar = write_late_v1("late-1f0a-bad-bar", &conds_1f0a, &conds_1f0a, 7);
+    let err = inspect_command(&db_1f0a_bad_bar, "a").unwrap_err();
+    assert!(err.starts_with("IdentityConflict"), "unexpected: {err}");
+
+    // 2) 2ed00abd6c 缺四项完备（仅 model_coverage）库可读，且显式标明未证项。
+    let db_2ed0 = write_late_v1("late-2ed0-incomplete", &conds_2ed0, &conds_2ed0, 0);
+    let h_2ed0 = inspect_history(&db_2ed0).unwrap();
+    assert_eq!(h_2ed0["archive_layout"], "v1_late");
+    assert_eq!(
+        h_2ed0["condition_audit_policy"],
+        "v1_late_common_12_6_invariants_only"
+    );
+    assert_eq!(h_2ed0["condition_audit_unproven"], expected_unproven);
+    let c_2ed0 = inspect_command(&db_2ed0, "a").unwrap();
+    assert_eq!(c_2ed0["state"], "MayHaveCalled");
+    assert_eq!(c_2ed0["condition_audit_unproven"], expected_unproven);
+
+    // 3) 后期 /1 共同不变量负控仍必拒：
+    // 3a) X.* 阶段未支持能力 → Unsupported
+    let bad_x_cap = json!([
+        cond(
+            "model_coverage",
+            "model-coverage/1",
+            "E.ReleaseExact",
+            "model-coverage/1",
+            "Denied"
+        ),
+        cond(
+            "x_bad",
+            "venue-call/1",
+            "X.OwnAttemptAndCall",
+            "venue-call/1",
+            "Denied"
+        ),
+    ]);
+    let err =
+        inspect_history(&write_late_v1("late-bad-x-cap", &bad_x_cap, &bad_x_cap, 0)).unwrap_err();
+    assert!(err.starts_with("Unsupported"), "unexpected: {err}");
+
+    // 3b) 缺 E.ReleaseExact 阶段的 model_coverage → MissingDependency
+    let no_cov = json!([cond(
+        "x_local",
+        "simulation-local-transaction/1",
+        "X.OwnAttemptAndCall",
+        "simulation-local-transaction/1",
+        "Denied"
+    )]);
+    let err = inspect_history(&write_late_v1("late-no-coverage", &no_cov, &no_cov, 0)).unwrap_err();
+    assert!(err.starts_with("MissingDependency"), "unexpected: {err}");
+
+    // 3c) 重复 condition_id → Unsupported
+    let dup_id = json!([
+        cond(
+            "model_coverage",
+            "model-coverage/1",
+            "E.ReleaseExact",
+            "model-coverage/1",
+            "Denied"
+        ),
+        cond(
+            "model_coverage",
+            "released-exact/1",
+            "E.ReleaseExact",
+            "released-exact/1",
+            "Denied"
+        ),
+    ]);
+    let err = inspect_history(&write_late_v1("late-dup-id", &dup_id, &dup_id, 0)).unwrap_err();
+    assert!(err.starts_with("Unsupported"), "unexpected: {err}");
+
+    // 3d) 命令条件清单与档案 profile 不逐项相等 → Unsupported
+    let err = inspect_command(
+        &write_late_v1("late-cond-mismatch", &conds_1f0a, &conds_2ed0, 0),
+        "a",
+    )
+    .unwrap_err();
+    assert!(err.starts_with("Unsupported"), "unexpected: {err}");
+
+    // 4) /2 与 /3 严禁削弱：塞入 1f0a42bc20 旧配对或 2ed00abd6c 缺四项清单必拒，合法 /3 报告空未证列表。
+    for rev in ["x-execution-profile/2", "x-execution-profile/3"] {
+        let tag = rev.rsplit('/').next().unwrap();
+        let write_strict = |suffix: &str, conds: &Value| {
+            let path = d.join(format!("strict-v{tag}-{suffix}.sqlite"));
+            let _ = std::fs::remove_file(&path);
+            let mut prof = serde_json::to_value(&p).unwrap();
+            prof["conditions"] = conds.clone();
+            let mut conn = rusqlite::Connection::open(&path).unwrap();
+            let tx = conn.transaction().unwrap();
+            tx.execute_batch("CREATE TABLE x_meta(key TEXT PRIMARY KEY, value TEXT NOT NULL);")
+                .unwrap();
+            for (k, v) in [
+                ("profile_revision", rev),
+                ("profile_mode", "simulation"),
+                ("history_simulation", "true"),
+                ("writer_epoch", "1"),
+            ] {
+                tx.execute("INSERT INTO x_meta VALUES(?1,?2)", rusqlite::params![k, v])
+                    .unwrap();
+            }
+            initialize_in_transaction(&tx, &p, 1).unwrap();
+            tx.execute(
+                "UPDATE x_sim_meta SET v=?1 WHERE k='exact_profile_revision'",
+                [rev],
+            )
+            .unwrap();
+            tx.execute(
+                "UPDATE x_sim_meta SET v=?1 WHERE k='authority_profile'",
+                [canonical_json(&prof)],
+            )
+            .unwrap();
+            tx.commit().unwrap();
+            path
+        };
+
+        let err_legacy = inspect_history(&write_strict("legacy-pair", &conds_1f0a)).unwrap_err();
+        assert!(
+            err_legacy.starts_with("Unsupported"),
+            "rev={rev} unexpected: {err_legacy}"
+        );
+        let err_incomplete = inspect_history(&write_strict("incomplete", &conds_2ed0)).unwrap_err();
+        assert!(
+            err_incomplete.starts_with("MissingDependency"),
+            "rev={rev} unexpected: {err_incomplete}"
+        );
+        let ok = inspect_history(&write_strict("ok", &approved())).unwrap();
+        assert_eq!(
+            ok["condition_audit_policy"],
+            "verified_current_condition_semantics_and_completeness"
+        );
+        assert_eq!(ok["condition_audit_unproven"], json!([]));
+    }
 }

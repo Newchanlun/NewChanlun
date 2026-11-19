@@ -58,7 +58,7 @@ pub struct Profile {
     pub max_frame_bytes: usize,
 }
 impl Profile {
-    pub fn validate(&self) -> Result<(), String> {
+    pub(super) fn validate_base(&self) -> Result<(), String> {
         self.model.validate()?;
         for s in [
             &self.session_id,
@@ -94,12 +94,19 @@ impl Profile {
         {
             return Err("InvalidDomain：模拟端点须独立且资源界为正".into());
         }
+        Ok(())
+    }
+
+    pub fn validate(&self) -> Result<(), String> {
+        self.validate_base()?;
         validate_conditions(&self.conditions)
     }
 }
 
-/// 获准清单逐项带齐 IC「ConditionEvidence」九字段；含 ADR 0052 裁定二 E-Release 阶段的 `model_coverage`。
-fn validate_conditions(list: &[Condition]) -> Result<(), String> {
+/// X 自身持有核验能力的条件；自 `1f0a42bc20` 起所有 12+6+6 写者均拒绝未支持的 X 阶段能力。
+const X_CAPABILITIES: [&str; 1] = ["simulation-local-transaction/1"];
+
+fn validate_conditions_shape(list: &[Condition]) -> Result<(), String> {
     let mut ids = std::collections::BTreeSet::new();
     let filled = |a: &[String]| !a.is_empty() && a.iter().all(|x| !x.is_empty());
     for c in list {
@@ -126,6 +133,44 @@ fn validate_conditions(list: &[Condition]) -> Result<(), String> {
                 "Unsupported：获准条件缺 ConditionEvidence 字段或 condition_id 重复".into(),
             );
         }
+    }
+    Ok(())
+}
+
+fn require_model_coverage(list: &[Condition]) -> Result<(), String> {
+    if !list.iter().any(|c| {
+        c.condition_id == "model_coverage"
+            && c.required_check_stages
+                .iter()
+                .any(|s| s == "E.ReleaseExact")
+    }) {
+        return Err("MissingDependency：获准条件清单缺 E-Release 阶段的 model_coverage".into());
+    }
+    Ok(())
+}
+
+/// 全部 12+6+6 布局（后期 `/1` 自 `1f0a42bc20` 起）共同可证的条件清单不变量：
+/// 1. 逐项带齐 IC「ConditionEvidence」九字段且非空，`condition_id` 不重复；
+/// 2. 任何 `X.*` 阶段条件的核验能力须属于 `X_CAPABILITIES`；
+/// 3. 清单包含 ADR 0052 裁定二 `E.ReleaseExact` 阶段的 `model_coverage`。
+/// 不包含后来在 `2ed00abd6c` 新增的语义配对表与 `b66b61a0b0` 新增的四项必备能力完备闸。
+pub(super) fn validate_conditions_common_12_6(list: &[Condition]) -> Result<(), String> {
+    validate_conditions_shape(list)?;
+    for c in list {
+        if c.required_check_stages.iter().any(|s| s.starts_with("X."))
+            && !X_CAPABILITIES.contains(&c.validator_capability.as_str())
+        {
+            return Err("Unsupported：X 阶段条件的核验能力 X 未支持".into());
+        }
+    }
+    require_model_coverage(list)
+}
+
+/// 现行（`/2` 自 `8d23381b0c` 及 `/3`）完整准入条件清单校验：
+/// 除九字段非空与 `model_coverage` 外，强制逐项配对表（`2ed00abd6c+`）与四项必备能力完备闸（`b66b61a0b0+`）。
+fn validate_conditions(list: &[Condition]) -> Result<(), String> {
+    validate_conditions_shape(list)?;
+    for c in list {
         // 与 E 冻结原件同一张配对表：X.* 阶段只有 X 支持的能力，失败结果必须 Denied。
         let stages: Vec<&str> = c.required_check_stages.iter().map(String::as_str).collect();
         crate::economic_session::check_condition_semantics(
@@ -136,14 +181,7 @@ fn validate_conditions(list: &[Condition]) -> Result<(), String> {
             &c.failure_result,
         )?;
     }
-    if !list.iter().any(|c| {
-        c.condition_id == "model_coverage"
-            && c.required_check_stages
-                .iter()
-                .any(|s| s == "E.ReleaseExact")
-    }) {
-        return Err("MissingDependency：获准条件清单缺 E-Release 阶段的 model_coverage".into());
-    }
+    require_model_coverage(list)?;
     // 与 E 同一个完备闸：E/S/X 各阶段的必备能力都在、各一次。
     crate::economic_session::check_required_capabilities(
         list.iter().map(|c| c.validator_capability.as_str()),
@@ -312,6 +350,9 @@ trait CommandRecord: Serialize + serde::de::DeserializeOwned + PartialEq {
     const CLAIMED_MATCHES_BATCH_BAR: bool;
     const CLAIMED_NS_AUDIT_POLICY: &'static str;
     const ARCHIVE_LAYOUT: &'static str;
+    /// 标明只读核档所核证的条件清单世代边界，以及因旧档缺少可信写者修订记录而未核证的后加准入闸。
+    const CONDITION_AUDIT_POLICY: &'static str;
+    const CONDITION_AUDIT_UNPROVEN: &'static [&'static str];
     fn id(&self) -> &str;
     fn change(&self) -> &Change;
     fn validate_record(&self, p: &Self::Profile) -> Result<(), String>;
@@ -332,6 +373,9 @@ impl CommandRecord for ExactCommand {
     const CLAIMED_MATCHES_BATCH_BAR: bool = true;
     const CLAIMED_NS_AUDIT_POLICY: &'static str = "verified_equal_to_attempt_bar";
     const ARCHIVE_LAYOUT: &'static str = "v3";
+    const CONDITION_AUDIT_POLICY: &'static str =
+        "verified_current_condition_semantics_and_completeness";
+    const CONDITION_AUDIT_UNPROVEN: &'static [&'static str] = &[];
     fn id(&self) -> &str {
         &self.command_id
     }
@@ -948,6 +992,8 @@ pub(super) struct AuditedArchiveIdentity {
     pub(super) profile_revision: String,
     pub(super) archive_layout: &'static str,
     pub(super) claimed_ns_audit_policy: &'static str,
+    pub(super) condition_audit_policy: &'static str,
+    pub(super) condition_audit_unproven: &'static [&'static str],
     pub(super) writer_epoch: i64,
     pub(super) session_id: String,
     pub(super) session_generation: String,
@@ -961,7 +1007,7 @@ pub(super) struct AuditedArchiveIdentity {
 
 enum ArchiveProfileInner {
     EarlyV1(archive_v1::EarlyProfile),
-    LateV1(Profile),
+    LateV1(archive_v1::LateV1Profile),
     V2(Profile),
     V3(Profile),
 }
@@ -974,30 +1020,42 @@ impl ArchiveProfile {
     fn as_audit_profile(&self) -> &dyn AuditProfile {
         match &self.0 {
             ArchiveProfileInner::EarlyV1(p) => p,
-            ArchiveProfileInner::LateV1(p)
-            | ArchiveProfileInner::V2(p)
-            | ArchiveProfileInner::V3(p) => p,
+            ArchiveProfileInner::LateV1(p) => p,
+            ArchiveProfileInner::V2(p) | ArchiveProfileInner::V3(p) => p,
         }
     }
 
     pub(super) fn identity(&self, revision: String, writer_epoch: i64) -> AuditedArchiveIdentity {
         let p = self.as_audit_profile();
-        let (archive_layout, claimed_ns_audit_policy) = match &self.0 {
+        let (
+            archive_layout,
+            claimed_ns_audit_policy,
+            condition_audit_policy,
+            condition_audit_unproven,
+        ) = match &self.0 {
             ArchiveProfileInner::EarlyV1(_) => (
                 archive_v1::EarlyArchivedCommand::ARCHIVE_LAYOUT,
                 archive_v1::EarlyArchivedCommand::CLAIMED_NS_AUDIT_POLICY,
+                archive_v1::EarlyArchivedCommand::CONDITION_AUDIT_POLICY,
+                archive_v1::EarlyArchivedCommand::CONDITION_AUDIT_UNPROVEN,
             ),
             ArchiveProfileInner::LateV1(_) => (
                 archive_v1::LateArchivedCommand::ARCHIVE_LAYOUT,
                 archive_v1::LateArchivedCommand::CLAIMED_NS_AUDIT_POLICY,
+                archive_v1::LateArchivedCommand::CONDITION_AUDIT_POLICY,
+                archive_v1::LateArchivedCommand::CONDITION_AUDIT_UNPROVEN,
             ),
             ArchiveProfileInner::V2(_) => (
                 archive_v2::ArchivedCommand::ARCHIVE_LAYOUT,
                 archive_v2::ArchivedCommand::CLAIMED_NS_AUDIT_POLICY,
+                archive_v2::ArchivedCommand::CONDITION_AUDIT_POLICY,
+                archive_v2::ArchivedCommand::CONDITION_AUDIT_UNPROVEN,
             ),
             ArchiveProfileInner::V3(_) => (
                 ExactCommand::ARCHIVE_LAYOUT,
                 ExactCommand::CLAIMED_NS_AUDIT_POLICY,
+                ExactCommand::CONDITION_AUDIT_POLICY,
+                ExactCommand::CONDITION_AUDIT_UNPROVEN,
             ),
         };
         let (e_authority_id, e_authority_epoch) = p.e_identity();
@@ -1005,6 +1063,8 @@ impl ArchiveProfile {
             profile_revision: revision,
             archive_layout,
             claimed_ns_audit_policy,
+            condition_audit_policy,
+            condition_audit_unproven,
             writer_epoch,
             session_id: p.session_id().to_owned(),
             session_generation: p.session_generation().to_owned(),
@@ -1421,6 +1481,8 @@ pub fn inspect_history(db: &Path) -> Result<Value, String> {
         "profile_revision": identity.profile_revision,
         "archive_layout": identity.archive_layout,
         "execute_evidence_claimed_ns_audit_policy": identity.claimed_ns_audit_policy,
+        "condition_audit_policy": identity.condition_audit_policy,
+        "condition_audit_unproven": identity.condition_audit_unproven,
         "writer_epoch": identity.writer_epoch.to_string(),
         "session_id": identity.session_id,
         "session_generation": identity.session_generation,
@@ -1438,11 +1500,11 @@ pub fn inspect_history(db: &Path) -> Result<Value, String> {
     }))
 }
 
-/// #1407 C3 R3–R5：对 `/1`（早期/后期）、`/2`、`/3` 历史模拟 X 库的只读命令状态查询。
+/// #1407 C3 R3–R6：对 `/1`（早期/后期）、`/2`、`/3` 历史模拟 X 库的只读命令状态查询。
 /// 保留 `QueryCommand` 原字段（`state`、`x_accept`、`causal_refs`），并显式回传 `archive_layout`、
-/// `attempt_batch_id`、`attempt_batch_bar_index`、`pending_batch_id`、`execute_evidence`、
-/// `execute_evidence_claimed_ns_audit` 与已提交前沿，逐态覆盖 `Accepted`、`ExecutionReady`、
-/// `ExecutionRequested`、`MayHaveCalled`、`Observed` 与 `NoRecord`。
+/// `condition_audit_policy`、`condition_audit_unproven`、`attempt_batch_id`、`attempt_batch_bar_index`、
+/// `pending_batch_id`、`execute_evidence`、`execute_evidence_claimed_ns_audit` 与已提交前沿，逐态覆盖
+/// `Accepted`、`ExecutionReady`、`ExecutionRequested`、`MayHaveCalled`、`Observed` 与 `NoRecord`。
 pub fn inspect_command(db: &Path, id: &str) -> Result<Value, String> {
     let mut conn = open_readonly_db(db)?;
     let tx = conn.transaction().map_err(storage_ro)?;
@@ -1473,6 +1535,8 @@ pub fn inspect_command(db: &Path, id: &str) -> Result<Value, String> {
             "state": "NoRecord",
             "profile_revision": identity.profile_revision,
             "archive_layout": identity.archive_layout,
+            "condition_audit_policy": identity.condition_audit_policy,
+            "condition_audit_unproven": identity.condition_audit_unproven,
             "writer_epoch": identity.writer_epoch.to_string(),
             "pending_batch_id": pending_batch_id,
             "pending_epoch": pending_epoch,
@@ -1518,6 +1582,8 @@ pub fn inspect_command(db: &Path, id: &str) -> Result<Value, String> {
                 "has_execute_evidence": !execute_evidence.is_null(),
                 "execute_evidence": execute_evidence,
                 "execute_evidence_claimed_ns_audit": claimed_ns_audit,
+                "condition_audit_policy": identity.condition_audit_policy,
+                "condition_audit_unproven": identity.condition_audit_unproven,
                 "profile_revision": identity.profile_revision,
                 "archive_layout": identity.archive_layout,
                 "writer_epoch": identity.writer_epoch.to_string(),
