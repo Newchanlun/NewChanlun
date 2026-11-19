@@ -3207,7 +3207,11 @@ mod construction_coverage_tests {
     }
 }
 
-#[cfg(all(test, feature = "s_incremental", not(feature = "s_lock_subset_testonly")))]
+#[cfg(all(
+    test,
+    feature = "s_incremental",
+    not(feature = "s_lock_subset_testonly")
+))]
 mod e_owner_move_tests {
     use super::*;
     #[test]

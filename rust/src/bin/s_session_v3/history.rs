@@ -8783,7 +8783,11 @@ pub(super) fn append_owner_cut(
     ))
 }
 
-#[cfg(all(test, feature = "s_incremental", not(feature = "s_lock_subset_testonly")))]
+#[cfg(all(
+    test,
+    feature = "s_incremental",
+    not(feature = "s_lock_subset_testonly")
+))]
 mod native_reader_owner_tests {
     use super::*;
 

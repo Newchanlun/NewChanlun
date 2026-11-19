@@ -2169,7 +2169,12 @@ mod tests {
 }
 
 /// 正常副本的离线来源体积测量；不接入业务、Keeper接纳或旧codec根播种。
-#[cfg(all(test, feature = "s_incremental", unix, not(feature = "s_lock_subset_testonly")))]
+#[cfg(all(
+    test,
+    feature = "s_incremental",
+    unix,
+    not(feature = "s_lock_subset_testonly")
+))]
 mod counts_footprint_tests {
     use super::super::{request_audit::RequestAuditContext, state};
     use super::*;

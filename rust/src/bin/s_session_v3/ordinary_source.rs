@@ -800,7 +800,11 @@ impl OrdinaryProofs {
     }
 }
 
-#[cfg(all(test, feature = "s_incremental", not(feature = "s_lock_subset_testonly")))]
+#[cfg(all(
+    test,
+    feature = "s_incremental",
+    not(feature = "s_lock_subset_testonly")
+))]
 mod tests {
     use super::super::tests::{fixture, original_sources, replace_field, STATE};
     use super::*;
