@@ -1480,9 +1480,6 @@ fn handle_with_deadline(
             "ResolveEvidence" if config.domain == "E" => {
                 resolve_evidence(c, config, epoch, e, ingress_response_deadline)
             }
-            crate::economic_session::capture_continuity::RECONCILE_OP if config.domain == "E" => {
-                crate::economic_session::capture_continuity::reconcile_wire(c, config, epoch, e)
-            }
             super::sr_expansion::OP if config.domain == "E" => {
                 super::sr_expansion::write(c, config, epoch, e, ingress_response_deadline)
             }
@@ -1603,6 +1600,7 @@ pub(super) fn serve(config: &Config, epoch: i64, e_epoch: i64) -> Result<(), Str
         &mut c,
         config,
         epoch,
+        STOP_SERVE.load(Ordering::SeqCst),
         uncertain.load(Ordering::SeqCst),
     )
 }
@@ -1691,7 +1689,7 @@ pub fn cli(is_b: bool) -> Result<(), String> {
         if is_b {
             "usage: init|serve|recover --manifest FILE --db FILE --chong ID [--epoch N --e-epoch N]"
         } else {
-            "usage: init|serve|recover --manifest FILE --db FILE [--epoch N]; inspect-simulation-capture-batch --manifest FILE --db FILE --batch-id ID --batch-receipt-sha256 HASH --x-id ID --x-epoch N; reconcile-simulation-capture --manifest FILE --db FILE --x-id ID --x-epoch N [--end-batch-id ID --end-batch-receipt-sha256 HASH]"
+            "usage: init|serve|recover --manifest FILE --db FILE [--epoch N]; inspect-simulation-capture-batch --manifest FILE --db FILE --batch-id ID --batch-receipt-sha256 HASH --x-id ID --x-epoch N"
         },
     )?;
     let mut opts = BTreeMap::new();
@@ -1702,7 +1700,6 @@ pub fn cli(is_b: bool) -> Result<(), String> {
         opts.insert(k, args.next().ok_or("InvalidDomain：参数缺值")?);
     }
     let inspect_batch = !is_b && command == "inspect-simulation-capture-batch";
-    let reconcile_sim = !is_b && command == "reconcile-simulation-capture";
     let valid = if inspect_batch {
         [
             "--manifest",
@@ -1711,16 +1708,6 @@ pub fn cli(is_b: bool) -> Result<(), String> {
             "--batch-receipt-sha256",
             "--x-id",
             "--x-epoch",
-        ]
-        .as_slice()
-    } else if reconcile_sim {
-        [
-            "--manifest",
-            "--db",
-            "--x-id",
-            "--x-epoch",
-            "--end-batch-id",
-            "--end-batch-receipt-sha256",
         ]
         .as_slice()
     } else {
@@ -1759,16 +1746,6 @@ pub fn cli(is_b: bool) -> Result<(), String> {
     match command.as_str() {
         "init" => println!("{}", canonical_json(&init(&config)?)),
         "recover" => println!("{}", canonical_json(&recover(&config)?)),
-        "reconcile-simulation-capture" if !is_b => {
-            let result = crate::economic_session::capture_continuity::reconcile_simulation_cli(
-                &config,
-                get("--x-id")?,
-                positive(get("--x-epoch")?, "--x-epoch")?,
-                opts.get("--end-batch-id").map(String::as_str),
-                opts.get("--end-batch-receipt-sha256").map(String::as_str),
-            )?;
-            println!("{}", canonical_json(&result));
-        }
         "serve" => {
             let epoch = positive(get("--epoch")?, "epoch")?;
             let e_epoch = if is_b {

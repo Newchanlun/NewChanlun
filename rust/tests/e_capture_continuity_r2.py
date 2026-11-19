@@ -1,7 +1,11 @@
-"""#1375 AC3 R2 长期回归锁（Linux Docker 隔离实测）：
-覆盖健康无 tape 重启、旧库无改 manifest 升级（干净/真实故障对照）、写失败后 SIGTERM 禁发交接、
-放行时刻结束界（2000 未来事实不挡 1202，179 过去缺口仍挡）、责任界分级（已知且充分覆盖无关重
-Pending 不停摆全账；未覆盖/未知范围 account:* 仍保守全域拦截）。
+"""#1375 AC3 R3 长期回归锁（Linux Docker 隔离实测）：
+覆盖：
+- 健康无 tape 重启（clean_handoff 保留）
+- 独审独立账本 4 臂（upgrade 2/2 clean、3/2 omitted、3/3 un-recaptured 与同代 3/2 omitted）：
+  禁止自报 events 清障（ReconcileCaptureContinuity 拒收），无独立持久来源锁在 Dispatchable(cut-5)
+- 写失败后 SIGTERM 禁发交接
+- 放行时刻结束界与从核到用重核（1202 放行 alpha 后推进到 2102 仍实时拦下 2000，补录并核清后放行 beta）
+- 责任界分级（已知且充分覆盖无关重 Pending 不停摆全账；未覆盖/未知范围 account:* 仍保守全域拦截）。
 """
 import hashlib
 import json
@@ -88,7 +92,7 @@ def make_reconcile_item(raw_utf8, token, json_pointer=P):
     )
 
 
-def build_sealed_fixture(m, extras):
+def build_sealed_fixture(m, extras, allow_beta_exact=False):
     """extras: list of (name, chong_id, emitted_ns, covered, cursor, ext_id, is_fee)"""
     data = read(ROOT / "input.json")
     documents, coverage = [], []
@@ -159,6 +163,14 @@ def build_sealed_fixture(m, extras):
         if covered:
             coverage.append(entry)
     data["baseline"]["covered_facts"] = coverage
+    if allow_beta_exact:
+        mc = data["exact_release"]["model_coverage"]
+        mc["input_domain"].append(
+            dict(allocation_model="#1349/atomic-slot-wait/v1", concurrency="batched", order_kind="limit")
+        )
+        mc["unsupported_domains"] = [
+            dict(allocation_model="#1349/atomic-slot-wait/v1", concurrency="batched", order_kind="market")
+        ]
     m["finance"]["input_sha256"] = save(ROOT / "input.json", data)
     tape = dict(
         format="test-only-economic-source/1",
@@ -215,6 +227,15 @@ def run(mode, expect="pass"):
                 ("fee", "alpha", 2000, True, "2", "R-fee", True),
             ],
         )
+    elif mode == "advance-after-check":
+        docs = build_sealed_fixture(
+            manifest,
+            [
+                ("fill", "alpha", 179, True, "2", "R-buy", False),
+                ("fill-beta", "beta", 2000, True, "3", "R-beta-late", False),
+            ],
+            allow_beta_exact=True,
+        )
     elif mode == "scoped-pending-covered":
         docs = build_sealed_fixture(
             manifest,
@@ -239,6 +260,12 @@ def run(mode, expect="pass"):
         ("fee", 1020),
         ("resolve-fill", 1030),
         ("resolve-fee", 1040),
+        ("MakeDispatchable-beta", 2050),
+        ("beta-release-1", 2100),
+        ("fill-beta", 2120),
+        ("beta-release-2", 2150),
+        ("resolve-fill-beta", 2170),
+        ("beta-release-3", 2200),
     ]:
         clock[name] = dict(received_ns=str(ns), first_known_ns=str(ns + 1), commit_ns=str(ns + 2))
     clock["fill"] = {k: [str(180 + j), val] for j, (k, val) in enumerate(clock["fill"].items())}
@@ -251,7 +278,7 @@ def run(mode, expect="pass"):
     nodes = {"E": manifest["e"], **{r["chong_id"]: r for r in manifest["chongs"]}}
     processes, epochs = {}, dict.fromkeys(nodes, "1")
     frames = {}
-    bindir = "/parent" if mode in {"upgrade-clean", "upgrade-faulted", "upgrade-faulted-parent"} else "/binset"
+    bindir = "/parent" if mode in {"upgrade-clean", "upgrade-faulted", "upgrade-faulted-parent", "ledger-clean", "ledger-omitted", "ledger-complete"} else "/binset"
 
     def cli(node, *args):
         return [
@@ -395,6 +422,61 @@ def run(mode, expect="pass"):
                 assert q["receipts"] == [disp]
             save(OUT / "result.json", dict(mode=mode, expect=expect, stop_rc=stop_rc, result=rel["kind"], error=rel.get("error"), state=q["state"], query_cut=q["cut"]))
 
+        elif mode in {"ledger-clean", "ledger-omitted", "ledger-complete", "ledger-r2-omitted"}:
+            # 复用独审独立账本逻辑：2/2 clean、3/2 omitted（升级及同代）与 3/3 un-recaptured
+            # 在 R3 下全部拒收自报 ReconcileCaptureContinuity，并将 alpha 锁在 Dispatchable(cut-5)。
+            late_p = read(SEED / "capture-late.request.wire")["payload"]
+            late = make_reconcile_item(late_p["raw_utf8"], late_p["token"], late_p["json_pointer"])
+            complete = recorded_items + ([] if mode == "ledger-clean" else [late])
+            save(OUT / "independent-ledger.json", complete)
+            if mode != "ledger-clean":
+                pad = fill_disk()
+                wire("fault-late", "capture-late", error="full")
+                pad.unlink()
+            switch = mode != "ledger-r2-omitted"
+            stop_rc, recovered = restart_e(switch_to_binset=switch)
+            assert digest(mp.read_bytes()) == manifest_sha, "manifest must remain untouched"
+            assert recovered["cut"] == disp["cut"] and recovered["writer_epoch"] == "2"
+            assert wire("old-dispatch", "MakeDispatchable-alpha", kind="DispatchableReceipt") == disp
+            q0 = wire("before-query", "after-recapture-command", kind="EconomicCommand")
+            assert q0["state"] == "Dispatchable" and q0["receipts"] == [disp]
+            before_err = cold_release("before-reconcile", error="缺少独立持久原件与可证结束界")
+            report = complete if mode == "ledger-complete" else recorded_items
+            payload = dict(
+                op="ReconcileCaptureContinuity",
+                writer_epoch="2",
+                range_start="genesis",
+                range_end_cursor=str(max(int(r["source_cursor"]) for r in complete)),
+                through_ns="1000",
+                events=report,
+            )
+            reconcile_err = wire(
+                "reconcile",
+                "capture-alpha",
+                payload,
+                "reconcile-clean",
+                error="未获准",
+            )
+            after_err = cold_release("after-reconcile", msg="cold-release-2", error="缺少独立持久原件与可证结束界")
+            q = wire("after-query", "after-recapture-command", kind="EconomicCommand")
+            assert q["state"] == "Dispatchable" and q["receipts"] == [disp] and q["cut"] == disp["cut"]
+            save(
+                OUT / "result.json",
+                dict(
+                    mode=mode,
+                    stop_rc=stop_rc,
+                    manifest_unchanged=True,
+                    start_cut=q0["cut"],
+                    end_cut=q["cut"],
+                    ledger_count=len(complete),
+                    reported_count=len(report),
+                    before_error=before_err["error"],
+                    reconcile_error=reconcile_err["error"],
+                    after_error=after_err["error"],
+                    state=q["state"],
+                ),
+            )
+
         elif mode == "fault-sigterm":
             pad = fill_disk()
             wire("fault-late", "capture-late", error="full")
@@ -409,39 +491,23 @@ def run(mode, expect="pass"):
             epochs["E"] = rec["writer_epoch"]
             start("E")
             assert wire("old-dispatch", "MakeDispatchable-alpha", kind="DispatchableReceipt") == disp
-            cold_release("blocked-after-fault-sigterm", error="外部接纳存在未核来源缺口")
-
-            late_p = read(SEED / "capture-late.request.wire")["payload"]
-            late_item = make_reconcile_item(late_p["raw_utf8"], late_p["token"], late_p["json_pointer"])
-            # 陈旧 through_ns、局部单批、缺漏真实未补录原件均须拒收。
-            wire("rec-stale-ns", "capture-alpha", dict(op="ReconcileCaptureContinuity", writer_epoch="2", range_start="genesis", range_end_cursor="1", through_ns="999", events=recorded_items), "rec-stale-ns", error="早于")
-            wire("rec-partial", "capture-alpha", dict(op="ReconcileCaptureContinuity", writer_epoch="2", range_start="genesis", range_end_cursor="1", through_ns="1000", events=[recorded_items[0]]), "rec-partial", error="未覆盖全部")
-            wire("rec-missing-late", "capture-alpha", dict(op="ReconcileCaptureContinuity", writer_epoch="2", range_start="genesis", range_end_cursor="1", through_ns="1000", events=recorded_items + [late_item]), "rec-missing-late", error="未补录")
-
-            # 正式补录真实丢失的 capture-late -> 来源核清通过 -> 但因 late-opening 不在责任覆盖集，仍由责任界拦截。
+            blocked_direct = cold_release("blocked-after-fault-sigterm", error="缺少独立持久原件与可证结束界")
+            reconcile_err = wire(
+                "rec-self-attest",
+                "capture-alpha",
+                dict(op="ReconcileCaptureContinuity", writer_epoch="2", range_start="genesis", range_end_cursor="1", through_ns="1000", events=recorded_items),
+                "rec-self-attest",
+                error="未获准",
+            )
+            # 即使正式补录 capture-late，无独立持久来源仍不得放行新风险。
             wire("recapture-late", "capture-late", kind="Recorded")
             assert (OUT / "fault-late.request.wire").read_bytes() == (OUT / "recapture-late.request.wire").read_bytes()
-            reconciled = wire("rec-ok", "capture-alpha", dict(op="ReconcileCaptureContinuity", writer_epoch="2", range_start="genesis", range_end_cursor="1", through_ns="1012", events=recorded_items + [late_item]), "rec-ok", kind="CaptureContinuityReconciled")
-            assert reconciled["source_gap_cleared"] is True
-            rel_err = cold_release("blocked-by-uncovered-late", error="责任界")
-            save(OUT / "result.json", dict(mode=mode, stop_rc=old.returncode, reconciled=reconciled, final=rel_err))
-
-        elif mode == "upgrade-clean":
-            stop_rc, rec = restart_e(sigkill=False, switch_to_binset=True)
-            assert digest(mp.read_bytes()) == manifest_sha, "manifest must remain untouched"
-            assert rec["writer_epoch"] == "2" and rec["cut"] == disp["cut"]
-            assert wire("old-dispatch", "MakeDispatchable-alpha", kind="DispatchableReceipt") == disp
-            # 旧库无租约不能凭空判安全：直接放行必须被拒。
-            direct_err = cold_release("direct-after-upgrade", error="外部接纳存在未核来源缺口")
-            # 不改原 manifest，由原绑定来源交付完整连续范围核清。
-            reconciled = wire("reconcile-clean", "capture-alpha", dict(op="ReconcileCaptureContinuity", writer_epoch="2", range_start="genesis", range_end_cursor="1", through_ns="1000", events=recorded_items), "reconcile-clean", kind="CaptureContinuityReconciled")
-            assert reconciled["source_gap_cleared"] is True
-            rel = cold_release("released-after-reconcile", msg="cold-release-2", kind="ReleasedExactReceipt")
+            rel_err = cold_release("blocked-after-recapture", msg="cold-release-2", error="责任界")
             q = wire("after-query", "after-recapture-command", kind="EconomicCommand")
-            assert q["receipts"] == [disp, rel]
-            save(OUT / "result.json", dict(mode=mode, stop_rc=stop_rc, manifest_unchanged=True, direct_error=direct_err["error"], reconciled=reconciled, released=rel["kind"], query_cut=q["cut"]))
+            assert q["state"] == "Dispatchable" and q["receipts"] == [disp]
+            save(OUT / "result.json", dict(mode=mode, stop_rc=old.returncode, blocked_direct=blocked_direct["error"], reconcile_error=reconcile_err["error"], final=rel_err["error"], state=q["state"], cut=q["cut"]))
 
-        elif mode in {"upgrade-faulted", "upgrade-faulted-parent"}:
+        elif mode == "upgrade-faulted-parent":
             pad = fill_disk()
             wire("fault-late", "capture-late", error="full")
             old = processes["E"]
@@ -449,27 +515,14 @@ def run(mode, expect="pass"):
             old.wait(timeout=10)
             pad.unlink()
             Path(nodes["E"]["socket"]).unlink(missing_ok=True)
-            if mode == "upgrade-faulted":
-                bindir = "/binset"
             r = subprocess.run(cli("E", "recover"), capture_output=True, check=True)
             rec = json.loads(r.stdout)
             epochs["E"] = rec["writer_epoch"]
             start("E")
             assert digest(mp.read_bytes()) == manifest_sha
-            if mode == "upgrade-faulted-parent":
-                # 对照：父头 734847be 在磁盘满丢 capture-late 后重启竟直接放行！
-                rel = cold_release("parent-blind-release", kind="ReleasedExactReceipt")
-                save(OUT / "result.json", dict(mode=mode, parent_blind_release=rel["kind"], cut=rel["cut"]))
-            else:
-                direct_err = cold_release("direct-blocked", error="外部接纳存在未核来源缺口")
-                late_p = read(SEED / "capture-late.request.wire")["payload"]
-                late_item = make_reconcile_item(late_p["raw_utf8"], late_p["token"], late_p["json_pointer"])
-                miss_err = wire("rec-missing", "capture-alpha", dict(op="ReconcileCaptureContinuity", writer_epoch="2", range_start="genesis", range_end_cursor="1", through_ns="1000", events=recorded_items + [late_item]), "rec-missing", error="未补录")
-                wire("recapture-late", "capture-late", kind="Recorded")
-                reconciled = wire("rec-ok", "capture-alpha", dict(op="ReconcileCaptureContinuity", writer_epoch="2", range_start="genesis", range_end_cursor="1", through_ns="1012", events=recorded_items + [late_item]), "rec-ok", kind="CaptureContinuityReconciled")
-                assert reconciled["source_gap_cleared"] is True
-                final_err = cold_release("blocked-uncovered", msg="cold-release-2", error="责任界")
-                save(OUT / "result.json", dict(mode=mode, manifest_unchanged=True, direct_error=direct_err["error"], miss_error=miss_err["error"], reconciled=reconciled, final_error=final_err["error"]))
+            # 对照：父头 734847be 在磁盘满丢 capture-late 后重启竟直接放行！
+            rel = cold_release("parent-blind-release", kind="ReleasedExactReceipt")
+            save(OUT / "result.json", dict(mode=mode, parent_blind_release=rel["kind"], cut=rel["cut"]))
 
         elif mode in {"future-live", "future-restart", "future-kill"}:
             stop_rc = None
@@ -505,6 +558,92 @@ def run(mode, expect="pass"):
             # 注意：docs[3] (fee, emitted_ns=2000) 故意未补录！
             rel = cold_release("released-despite-future-2000", msg="cold-release-2", kind="ReleasedExactReceipt")
             save(OUT / "result.json", dict(mode=mode, stop_rc=stop_rc, blocked_past=blocked_past["error"], blocked_pending=blocked_pending["error"], released=rel["kind"], cut=rel["cut"]))
+
+        elif mode == "advance-after-check":
+            # 有区分力覆盖：1202 核过放行 alpha 后，前沿推进到 2102（跨过 2000 的 beta 成交）立即拦截，
+            # 证明没有核清布尔位；补录后因 Pending 仍拦，Resolve 后才真实放出第二张 ReleasedExactReceipt。
+            stop_rc, rec = restart_e(sigkill=True)
+            assert rec["writer_epoch"] == "2"
+            blocked_past = cold_release("blocked-past-179", error="未补录")
+            fact1 = wire("restage-fill-alpha", "capture-late", capture_body(docs[2]), "fill", kind="Recorded")
+            blocked_pending1 = cold_release("blocked-pending-179", error="Pending")
+            wire(
+                "resolve-fill-alpha",
+                "capture-late",
+                dict(
+                    op="ResolveEvidence",
+                    evidence_id="fill",
+                    covered=[{k: fact1[k] for k in ("fact_key", "fact_hash", "token")}],
+                    frontier=dict(source_namespace="test", source_epoch="one", cursor="2"),
+                    dependency_version="retained-existing20",
+                ),
+                "resolve-fill",
+                kind="Resolved",
+            )
+            rel_alpha = cold_release("release-alpha-at-1202", msg="cold-release-2", kind="ReleasedExactReceipt")
+            # 现在推进到 beta，commit_ns=2102 跨过 emitted_ns=2000 的 docs[3]
+            beta_plan_hash = frames["CommitDecision-beta"]["record"]["local_commit_receipt"]["plan_hash"]
+            beta_grant_id = frames["CommitDecision-beta"]["record"]["local_commit_receipt"]["grant_id"]
+            disp_beta = wire(
+                "MakeDispatchable-beta",
+                "MakeDispatchable-alpha",
+                dict(op="MakeDispatchable", decision_id="beta", plan_hash=beta_plan_hash, writer_epoch=epochs["E"]),
+                "MakeDispatchable-beta",
+                kind="DispatchableReceipt",
+            )
+            beta_plan = frames["CommitDecision-beta"]["record"]["prepared"]["plan"]
+            bx = beta_plan["exact"]
+            beta_change = dict(
+                kind="submit",
+                order=dict(
+                    command_id=bx["command_id"],
+                    family_id=bx["logical_order_family"],
+                    chong_id=bx["chong_id"],
+                    revision=int(bx["revision"]),
+                    side=bx["side"],
+                    quantity=int(beta_plan["quantity"]),
+                    kind=dict(kind="limit", price=int(beta_plan["limit_price"])),
+                    eligibility_ref=bx["eligibility_ref"],
+                    projection_manifest=bx["projection_manifest"],
+                ),
+            )
+            rel_beta_payload = read(SEED / "ReleaseExact-alpha-late.request.wire")["payload"]
+            rel_beta_payload["decision_id"] = "beta"
+            rel_beta_payload["command_id"] = "cmd-beta"
+            rel_beta_payload["plan_hash"] = digest(canonical(beta_change))
+            rel_beta_payload["writer_epoch"] = epochs["E"]
+            rel_beta_payload["certificate"]["responsibility_refs"] = [beta_grant_id]
+            blocked_advance = wire("beta-blocked-at-2102", "ReleaseExact-alpha-late", rel_beta_payload, "beta-release-1", error="未补录")
+            fact2 = wire("restage-fill-beta", "capture-late", capture_body(docs[3]), "fill-beta", kind="Recorded")
+            blocked_pending2 = wire("beta-blocked-pending-2152", "ReleaseExact-alpha-late", rel_beta_payload, "beta-release-2", error="Pending")
+            wire(
+                "resolve-fill-beta",
+                "capture-late",
+                dict(
+                    op="ResolveEvidence",
+                    evidence_id="fill-beta",
+                    covered=[{k: fact2[k] for k in ("fact_key", "fact_hash", "token")}],
+                    frontier=dict(source_namespace="test", source_epoch="one", cursor="3"),
+                    dependency_version="retained-existing20",
+                ),
+                "resolve-fill-beta",
+                kind="Resolved",
+            )
+            rel_beta = wire("release-beta-at-2202", "ReleaseExact-alpha-late", rel_beta_payload, "beta-release-3", kind="ReleasedExactReceipt")
+            save(
+                OUT / "result.json",
+                dict(
+                    mode=mode,
+                    stop_rc=stop_rc,
+                    blocked_past=blocked_past["error"],
+                    blocked_pending1=blocked_pending1["error"],
+                    alpha_release_cut=rel_alpha["cut"],
+                    blocked_advance=blocked_advance["error"],
+                    blocked_pending2=blocked_pending2["error"],
+                    beta_release_cut=rel_beta["cut"],
+                    beta_receipt_id=rel_beta["receipt_key"],
+                ),
+            )
 
         elif mode in {"scoped-pending-covered", "scoped-pending-uncovered", "scoped-pending-unknown"}:
             pad = fill_disk()

@@ -1,19 +1,24 @@
-//! #1375：E 外部接纳连续性守卫、正常停机干净交接与绑定来源正式核清。
+//! #1375：E 外部接纳连续性守卫、正常停机交接与独立来源实时核验（SPEC C06.4–6）。
 //!
-//! - 预武装租约：E 启动 serve 前即写入 `serving`，即使进程死在磁盘写满之前，下一任仍见缺口。
-//! - 正常交接：仅当本代全程无不确定接纳故障、输送无丢帧/丢应答且无缺口未核 Pending 时，
-//!   优雅停机（SIGTERM/SIGINT）才把当前 `(epoch, commit_seq, root_hash)` 落盘为一次性 `clean_handoff`。
-//! - 绑定来源核清：
-//!   1. `test_only_capture_tape`：按本次放行提交时刻 `commit_ns` 对账（不把未来事件挡在当前放行前），
+//! - 不复活核清布尔位：不接受无独立原件支撑的主体自报 `events` 列表来解除封闸，也不落盘
+//!   跳过复核的 `source_verified_handoff`。每次 `Reserve`/`ReleaseExact` 放行都在 E 写事务内
+//!   由来源连续性、责任范围、缺口状态与当前放行前沿共同推出。
+//! - 预武装租约：E 启动 serve 前即写入 `serving`，进程死在故障之前下一任仍见缺口。
+//! - 正常交接：仅当本代收到显式停机信号（SIGTERM/SIGINT）、transport 无异常退出/丢帧/丢应答、
+//!   本代无来源缺口且无缺口未核 Pending 时，才把当前 `(epoch, commit_seq, root_hash)` 落盘为
+//!   一次性 `clean_handoff`。进程正常退出只证明本次服务期间已受理连接排空，不伪造来源历史。
+//! - 独立持久原件来源：
+//!   1. `test_only_capture_tape`：按本次放行提交时刻 `commit_ns` 实时核对全部已发原件（不拦未来项），
 //!      同游标逐件核原字节/指针/token/来源身份。
-//!   2. `history_simulation_source`：直接冷审冻结 `x_db` 全部已提交批与原件（`validate_existing` +
-//!      无 `pending_batch` + 锚定 `state.last_request_id`），单一 `QueryBatch` 不得替代整段。
-//!   3. 其他既绑定 `authorized_sources`（无 tape / 无模拟库）：不改原 manifest，由原 `CaptureExternal`
-//!      主体在当前 epoch 按 `genesis` 起连续范围、不早于恢复时刻的结束界与逐件原件摘要核对 E 已录事实。
+//!   2. `history_simulation_source`：每次放行实时只读冷审冻结 `x_db` 全量已提交批与原件（`#1381`
+//!      `validate_existing` + 无 `pending_batch` + 无在途 `x_exact_commands` + `x_sim_batches`/`x_sim_originals`
+//!      前缀一致；缺口态拒绝空快照），防止核完后 X 继续推进而漏计新增原件。
+//!   3. 多来源共同覆盖：缺口态下逐一核对 manifest 中所有 `CaptureExternal` 主体；任一主体缺少独立
+//!      持久原件来源或存在漏件，整次新风险继续保持关闭，不简单凑主体。
 //! - 责任范围：未知范围（`account:*`）或未覆盖 Pending 保守全域拦截；已知范围且已由 E 持久责任
-//!   充分覆盖的无关 Pending 不额外全局停摆；受影响责任范围的缺口 Pending 须经正式 `ResolveEvidence` 核清。
+//!   充分覆盖的无关 Pending 不额外全局停摆；受影响责任范围的缺口 Pending 须经正式核清。
 use super::book::{decode, fact_key};
-use super::store::{audit, check_epoch, cut, err, immediate, latest, rows, set_meta, Config};
+use super::store::{check_epoch, err, immediate, latest, set_meta, Config};
 use crate::session_protocol::{
     canonical_json, nonnegative, positive, required, sha256_hex, strict_json,
 };
@@ -26,7 +31,6 @@ use std::sync::{Arc, Mutex};
 const LEASE: &str = "external_intake_lease/1";
 const TAPE: &str = "test_only_capture_tape";
 const FORMAT: &str = "test-only-economic-source/1";
-pub(super) const RECONCILE_OP: &str = "ReconcileCaptureContinuity";
 const WHO: [&str; 4] = [
     "source_namespace",
     "source_epoch",
@@ -131,14 +135,14 @@ pub(super) fn initialize(db: &Connection, c: &Config) -> Result<(), String> {
 struct IntakeState {
     source_gap: bool,
     had_gap: bool,
-    reconciled_sources: BTreeSet<String>,
 }
 
 #[derive(Clone, Default)]
 pub(crate) struct Intake(Option<Arc<Mutex<IntakeState>>>);
 
-/// 只有消费 init 一次性交接、经核的优雅停机交接或离线模拟源全量核清交接的 actor 才无来源缺口。
-/// recover 只换 epoch，不补发交接；旧库（无租约）与异常停机（serving）均保守进入缺口态。
+/// 只有消费 init 一次性交接或经核优雅停机 `clean_handoff` 的 actor 才无来源缺口。
+/// recover 只换 epoch，不补发交接；旧库（无租约）与异常停机（serving）均保守进入缺口态，
+/// 且不在内存或租约表里通过核清布尔位抹去缺口，而是每次新风险由独立持久来源实时核验。
 pub(super) fn start(db: &mut Connection, c: &Config, epoch: i64) -> Result<Intake, String> {
     if !relevant(c) {
         return Ok(Intake::default());
@@ -159,45 +163,18 @@ pub(super) fn start(db: &mut Connection, c: &Config, epoch: i64) -> Result<Intak
             let seal = strict_json(raw.as_bytes())
                 .map_err(|_| "StorageUnavailable：外部接纳交接记录损坏".to_owned())?;
             let (seq, root, _, _) = latest(&tx)?;
-            let verify_cut = |s: &Value| -> Result<(), String> {
-                let prev_epoch = positive(required(s, "epoch")?, "handoff.epoch")?;
-                let seal_seq = nonnegative(required(s, "commit_seq")?, "handoff.commit_seq")?;
-                let seal_root = required(s, "root_hash")?;
-                if prev_epoch > epoch || seal_seq != seq || seal_root != root {
-                    return Err("StorageUnavailable：外部接纳交接记录与当前切面不符".into());
-                }
-                Ok(())
-            };
-            match seal["kind"].as_str() {
-                Some("clean_handoff") => {
-                    super::voice::exact(&seal, &["kind", "epoch", "commit_seq", "root_hash"])?;
-                    verify_cut(&seal)?;
-                    set_meta(&tx, LEASE, "serving")?;
-                    (false, false)
-                }
-                Some("source_verified_handoff") => {
-                    super::voice::exact(
-                        &seal,
-                        &[
-                            "kind",
-                            "epoch",
-                            "commit_seq",
-                            "root_hash",
-                            "source_kind",
-                            "proof_sha256",
-                        ],
-                    )?;
-                    verify_cut(&seal)?;
-                    if seal["source_kind"] != "history_simulation_source"
-                        || !is_hex64(required(&seal, "proof_sha256")?)
-                    {
-                        return Err("StorageUnavailable：外部接纳来源核清交接记录损坏".into());
-                    }
-                    set_meta(&tx, LEASE, "serving")?;
-                    (false, true)
-                }
-                _ => return Err("StorageUnavailable：外部接纳交接记录损坏".into()),
+            if seal["kind"].as_str() != Some("clean_handoff") {
+                return Err("StorageUnavailable：外部接纳交接记录损坏".into());
             }
+            super::voice::exact(&seal, &["kind", "epoch", "commit_seq", "root_hash"])?;
+            let prev_epoch = positive(required(&seal, "epoch")?, "handoff.epoch")?;
+            let seal_seq = nonnegative(required(&seal, "commit_seq")?, "handoff.commit_seq")?;
+            let seal_root = required(&seal, "root_hash")?;
+            if prev_epoch > epoch || seal_seq != seq || seal_root != root {
+                return Err("StorageUnavailable：外部接纳交接记录与当前切面不符".into());
+            }
+            set_meta(&tx, LEASE, "serving")?;
+            (false, false)
         }
         // 旧库存量没有初次交接，不能把不在场误作连续；写入 serving 以便后续异常停机仍可察觉。
         Some("serving") | None => {
@@ -210,19 +187,19 @@ pub(super) fn start(db: &mut Connection, c: &Config, epoch: i64) -> Result<Intak
     Ok(Intake(Some(Arc::new(Mutex::new(IntakeState {
         source_gap,
         had_gap,
-        reconciled_sources: BTreeSet::new(),
     })))))
 }
 
-/// 优雅停机（SIGTERM/SIGINT）在排空所有已受理连接后落盘一次性干净交接边界。
-/// 若本代发生过任何接纳不确定故障、输送丢帧/丢应答、或仍存在未核清的缺口 Pending，则不签发交接。
+/// 仅当收到显式停机信号（SIGTERM/SIGINT）、transport 正常返回且无不确定故障、
+/// 本代全程无来源缺口且无缺口未核 Pending 时，才落盘一次性 `clean_handoff`。
 pub(super) fn finish_clean(
     db: &mut Connection,
     c: &Config,
     epoch: i64,
+    explicit_stop: bool,
     transport_uncertain: bool,
 ) -> Result<(), String> {
-    if !relevant(c) {
+    if !relevant(c) || !explicit_stop {
         return Ok(());
     }
     let Some(lock) = &c.intake.0 else {
@@ -324,30 +301,40 @@ fn check_scoped_pending(
     Ok(())
 }
 
-fn verify_simulation_facts(
-    tx: &Connection,
+/// 在 E 放行写事务内实时冷审冻结 `history_simulation_source`，把 `x_db` 全量已提交原件
+/// 与当前 `image["recorded"]` 逐字对照。不写核清布尔位，X 随后推进新批会在下次放行立刻被拦。
+fn verify_simulation_live(
     c: &Config,
-    x_id: &str,
-    x_epoch: i64,
-    end_batch_id: Option<&str>,
-    end_receipt_digest: Option<&str>,
-) -> Result<(Value, usize, String), String> {
+    image: &Value,
+    record: &Value,
+    require_committed_frontier: bool,
+) -> Result<String, String> {
     let binding = &c.manifest["history_simulation_source"];
-    if !binding.is_object() {
-        return Err("SchemaUnsupported：本会话未冻结模拟 X 原件来源".into());
-    }
-    let history = crate::history_simulation::intake::committed_capture_history(
-        &c.manifest,
-        x_id,
-        x_epoch,
-        end_batch_id,
-        end_receipt_digest,
-    )?;
     let sim_principal = principal_key(binding)?;
+    let (expected_x_id, expected_x_epoch) = if record["state"] == "ReleasedExact" {
+        let cmd = &record["command"];
+        let x_id = required(cmd, "x_id")?;
+        let x_epoch = cmd["x_epoch"]
+            .as_i64()
+            .filter(|e| *e > 0)
+            .ok_or("IdentityConflict：ReleaseExact 命令缺正整数 x_epoch")?;
+        (Some(x_id), Some(x_epoch))
+    } else {
+        (None, None)
+    };
+    let history = crate::history_simulation::intake::committed_capture_frontier(
+        &c.manifest,
+        expected_x_id,
+        expected_x_epoch,
+        require_committed_frontier,
+    )?;
+    let facts = image["recorded"]
+        .as_array()
+        .ok_or("StorageUnavailable：缺 Recorded")?;
     let mut recorded_from_sim = BTreeMap::new();
-    for rec in rows(tx, "facts")? {
-        if record_principal_key(&rec)? == sim_principal {
-            recorded_from_sim.insert(required(&rec, "fact_key")?.to_owned(), rec);
+    for rec in facts {
+        if record_principal_key(rec)? == sim_principal {
+            recorded_from_sim.insert(required(rec, "fact_key")?.to_owned(), rec);
         }
     }
     let originals = history["originals"]
@@ -372,259 +359,13 @@ fn verify_simulation_facts(
     if seen.len() != recorded_from_sim.len() {
         return Err("IdentityConflict：E 存在模拟 X 完整历史之外的游离原件".into());
     }
-    let proof_sha256 = sha256_hex(
-        canonical_json(&json!({
-            "x_id": history["x_id"],
-            "x_writer_epoch": history["x_writer_epoch"],
-            "last_bar": history["last_bar"],
-            "last_request_id": history["last_request_id"],
-            "state_content_hash": history["state_content_hash"],
-            "batch_count": history["batch_count"],
-            "fact_keys": seen.into_iter().collect::<Vec<_>>(),
-        }))
-        .as_bytes(),
-    );
-    let count = originals.len();
-    Ok((history, count, proof_sha256))
-}
-
-/// 正式线上来源对账入口：不修改原 manifest，由原已绑定 `CaptureExternal` 主体在当前 epoch
-/// 交付完整连续范围的逐件原件证据（对模拟 X 则直接冷审冻结 `x_db` 全量批历史）。
-pub(super) fn reconcile_wire(
-    db: &mut Connection,
-    c: &Config,
-    epoch: i64,
-    e: &Value,
-) -> Result<Value, String> {
-    if !relevant(c) {
-        return Err("SchemaUnsupported：当前域无需外部接纳连续性对账".into());
-    }
-    if c.manifest.get(TAPE).is_some() {
-        return Err(
-            "InvalidDomain：已绑定 TestOnly 封闭源，以冻结原件源按提交时刻核验，不接受外部声明替代"
-                .into(),
-        );
-    }
-    let p = &e["payload"];
-    let req_epoch = positive(required(p, "writer_epoch")?, "writer_epoch")?;
-    if req_epoch != epoch {
-        return Err("StaleWriter：来源对账 epoch 与当前写者代际不符".into());
-    }
-    let tx = db.transaction().map_err(err)?;
-    check_epoch(&tx, epoch)?;
-    audit(&tx, c)?;
-    let (seq, root, last_ns, _) = latest(&tx)?;
-    let sender_key = principal_key(e)?;
-    let sim_matches = c.manifest["history_simulation_source"].is_object()
-        && principal_key(&c.manifest["history_simulation_source"])? == sender_key;
-
-    let verified_count = if sim_matches {
-        super::voice::exact(
-            p,
-            &[
-                "op",
-                "writer_epoch",
-                "x_id",
-                "x_epoch",
-                "end_batch_id",
-                "end_batch_receipt_sha256",
-            ],
-        )?;
-        let x_id = required(p, "x_id")?;
-        let x_epoch = positive(required(p, "x_epoch")?, "x_epoch")?;
-        let end_batch_id = match &p["end_batch_id"] {
-            Value::Null => None,
-            Value::String(s) if !s.is_empty() => Some(s.as_str()),
-            _ => return Err("InvalidDomain：end_batch_id 须为非空字符串或 null".into()),
-        };
-        let end_receipt_digest = match &p["end_batch_receipt_sha256"] {
-            Value::Null => None,
-            Value::String(s) if is_hex64(s) => Some(s.as_str()),
-            _ => {
-                return Err(
-                    "InvalidDomain：end_batch_receipt_sha256 须为 64 位十六进制或 null".into(),
-                )
-            }
-        };
-        let (_, count, _) =
-            verify_simulation_facts(&tx, c, x_id, x_epoch, end_batch_id, end_receipt_digest)?;
-        count
-    } else {
-        super::voice::exact(
-            p,
-            &[
-                "op",
-                "writer_epoch",
-                "range_start",
-                "range_end_cursor",
-                "through_ns",
-                "events",
-            ],
-        )?;
-        if required(p, "range_start")? != "genesis" {
-            return Err("InvalidDomain：来源对账须从 genesis 连续覆盖，不得仅提交局部片段".into());
-        }
-        let end_cursor = nonnegative(required(p, "range_end_cursor")?, "range_end_cursor")?;
-        let through_ns = nonnegative(required(p, "through_ns")?, "through_ns")?;
-        let recovered_ns: String = tx
-            .query_row(
-                "SELECT at_ns FROM epochs ORDER BY epoch DESC LIMIT 1",
-                [],
-                |r| r.get(0),
-            )
-            .map_err(err)?;
-        let floor =
-            nonnegative(&last_ns, "last commit")?.max(nonnegative(&recovered_ns, "epoch at_ns")?);
-        if through_ns < floor {
-            return Err("InvalidDomain：来源对账结束界早于当前恢复/提交时刻".into());
-        }
-        let events = p["events"]
-            .as_array()
-            .ok_or("InvalidDomain：来源对账缺 events 数组")?;
-        let mut recorded_from_sender = BTreeMap::new();
-        for rec in rows(&tx, "facts")? {
-            if record_principal_key(&rec)? == sender_key {
-                recorded_from_sender.insert(required(&rec, "fact_key")?.to_owned(), rec);
-            }
-        }
-        let mut seen_keys = BTreeSet::new();
-        let mut seen_tokens = BTreeSet::new();
-        for ev in events {
-            super::voice::exact(
-                ev,
-                &[
-                    "fact_key",
-                    "fact_hash",
-                    "raw_sha256",
-                    "json_pointer",
-                    "token",
-                    "source_cursor",
-                ],
-            )?;
-            let fk = required(ev, "fact_key")?;
-            let tok = required(ev, "token")?;
-            let ev_cursor = nonnegative(required(ev, "source_cursor")?, "source_cursor")?;
-            if ev_cursor > end_cursor {
-                return Err("InvalidDomain：事件游标超过声明结束游标".into());
-            }
-            if !seen_keys.insert(fk.to_owned()) || !seen_tokens.insert(tok.to_owned()) {
-                return Err("IdentityConflict：来源对账存在重复 fact_key 或 token".into());
-            }
-            let rec = recorded_from_sender
-                .get(fk)
-                .ok_or_else(|| format!("MissingDependency：来源范围原件未补录 {fk}"))?;
-            if rec["fact_hash"] != ev["fact_hash"]
-                || rec["raw_sha256"] != ev["raw_sha256"]
-                || rec["json_pointer"] != ev["json_pointer"]
-                || rec["token"] != ev["token"]
-                || rec["event"]["source"]["source_cursor"] != ev["source_cursor"]
-            {
-                return Err("IdentityConflict：来源范围原件与 E 已接纳事实不一致".into());
-            }
-        }
-        if seen_keys.len() != recorded_from_sender.len() {
-            return Err(
-                "MissingDependency：来源对账未覆盖全部已接纳原件，单一批片段不得替代完整连续范围"
-                    .into(),
-            );
-        }
-        events.len()
-    };
-    tx.commit().map_err(err)?;
-
-    let required_principals = capture_principals(&c.manifest)?;
-    let (cleared, reconciled_len) = {
-        let lock = c
-            .intake
-            .0
-            .as_ref()
-            .ok_or("StorageUnavailable：接纳状态未初始化")?;
-        let mut state = lock
-            .lock()
-            .map_err(|_| "StorageUnavailable：接纳状态锁损坏")?;
-        state.reconciled_sources.insert(sender_key);
-        if required_principals.is_subset(&state.reconciled_sources) {
-            state.source_gap = false;
-        }
-        (!state.source_gap, state.reconciled_sources.len())
-    };
-    Ok(json!({
-        "kind": "CaptureContinuityReconciled",
-        "domain_id": c.domain,
-        "writer_epoch": epoch.to_string(),
-        "source_gap_cleared": cleared,
-        "reconciled_sources": reconciled_len.to_string(),
-        "required_sources": required_principals.len().to_string(),
-        "verified_events": verified_count.to_string(),
-        "cut": cut(c, seq, &root)
-    }))
-}
-
-/// 正式离线 owner CLI：核验冻结 `history_simulation_source` 全部已提交批并签发一次性
-/// `source_verified_handoff` 交接边界（不修改原 manifest）。
-pub(super) fn reconcile_simulation_cli(
-    c: &Config,
-    x_id: &str,
-    x_epoch: i64,
-    end_batch_id: Option<&str>,
-    end_receipt_digest: Option<&str>,
-) -> Result<Value, String> {
-    if !relevant(c) {
-        return Err("SchemaUnsupported：当前域无需外部接纳连续性核清".into());
-    }
-    let binding = &c.manifest["history_simulation_source"];
-    if !binding.is_object() {
-        return Err("SchemaUnsupported：本会话未冻结模拟 X 原件来源".into());
-    }
-    let sim_principal = principal_key(binding)?;
-    let required_principals = capture_principals(&c.manifest)?;
-    if required_principals.len() != 1 || !required_principals.contains(&sim_principal) {
-        return Err(
-            "InvalidDomain：存在模拟 X 以外的其他 CaptureExternal 来源，无法仅由模拟库核清全局连续性"
-                .into(),
-        );
-    }
-    let (mut db, _) = super::store::open(&c.db, false)?;
-    let tx = immediate(&mut db)?;
-    audit(&tx, c)?;
-    let writer_epoch: String = tx
-        .query_row("SELECT v FROM meta WHERE k='writer_epoch'", [], |r| {
-            r.get(0)
-        })
-        .map_err(err)?;
-    let (seq, root, _, _) = latest(&tx)?;
-    let (history, count, proof_sha256) =
-        verify_simulation_facts(&tx, c, x_id, x_epoch, end_batch_id, end_receipt_digest)?;
-    let seal = canonical_json(&json!({
-        "kind": "source_verified_handoff",
-        "epoch": writer_epoch,
-        "commit_seq": seq.to_string(),
-        "root_hash": root,
-        "source_kind": "history_simulation_source",
-        "proof_sha256": proof_sha256,
-    }));
-    set_meta(&tx, LEASE, &seal)?;
-    tx.commit().map_err(err)?;
-    Ok(json!({
-        "kind": "SimulationCaptureReconciled",
-        "domain_id": c.domain,
-        "writer_epoch": writer_epoch,
-        "e_cut": cut(c, seq, &root),
-        "x_id": history["x_id"],
-        "x_writer_epoch": history["x_writer_epoch"],
-        "last_bar": history["last_bar"],
-        "last_request_id": history["last_request_id"],
-        "state_content_hash": history["state_content_hash"],
-        "batch_count": history["batch_count"],
-        "verified_events": count.to_string(),
-        "proof_sha256": proof_sha256
-    }))
+    Ok(sim_principal)
 }
 
 impl Intake {
     pub(super) fn failed(&self, reason: &str) {
         // 已授权且原件可解码。明确的身份/输入拒绝不算日志故障；存储、超时、来源不可核等
-        // 不确定结果则先关闸并清空已对账来源，含 COMMIT 返回未知。已提交事实仍由原收据认回。
+        // 不确定结果则进入缺口态，含 COMMIT 返回未知。已提交事实仍由原收据认回。
         if !reason.starts_with("IdentityConflict")
             && !reason.starts_with("InvalidDomain")
             && !reason.starts_with("SchemaUnsupported")
@@ -634,7 +375,6 @@ impl Intake {
                 if let Ok(mut s) = lock.lock() {
                     s.source_gap = true;
                     s.had_gap = true;
-                    s.reconciled_sources.clear();
                 }
             }
         }
@@ -657,39 +397,52 @@ impl Intake {
             None => (false, false),
         };
         let owners = target_owners(record)?;
-        if c.manifest.get(TAPE).is_none() {
-            if source_gap {
-                return Err(
-                    "MissingDependency：E 外部接纳存在未核来源缺口，须由绑定来源证明完整结束界"
-                        .into(),
-                );
+        let principals = capture_principals(&c.manifest)?;
+        let has_tape = c.manifest.get(TAPE).is_some();
+        let has_sim = c.manifest["history_simulation_source"].is_object();
+        let mut covered_principals = BTreeSet::new();
+
+        if has_tape {
+            let tape = Tape::load(c)?;
+            let now = nonnegative(at, "commit_ns")?;
+            let facts = image["recorded"]
+                .as_array()
+                .ok_or("StorageUnavailable：缺 Recorded")?;
+            for (key, item) in &tape.items {
+                // 始终按本次放行提交时刻作为来源真实结束界：未来尚未发出的事实不得挡在当前放行前。
+                if item.emitted_ns > now {
+                    continue;
+                }
+                let r = facts
+                    .iter()
+                    .find(|r| r["fact_key"] == key.as_str())
+                    .ok_or_else(|| format!("MissingDependency：TestOnly 来源未补录 {key}"))?;
+                item.verify(r, &tape.source)?;
             }
-            if had_gap {
-                check_scoped_pending(c, image, &owners, true)?;
-            }
-            return Ok(());
+            covered_principals.insert(principal_key(&tape.source)?);
         }
-        let tape = Tape::load(c)?;
-        let now = nonnegative(at, "commit_ns")?;
-        let facts = image["recorded"]
-            .as_array()
-            .ok_or("StorageUnavailable：缺 Recorded")?;
-        for (key, item) in &tape.items {
-            // 始终按本次放行提交时刻作为来源真实结束界：未来尚未发出的事实不得挡在当前放行前。
-            if item.emitted_ns > now {
-                continue;
-            }
-            let r = facts
-                .iter()
-                .find(|r| r["fact_key"] == key.as_str())
-                .ok_or_else(|| format!("MissingDependency：TestOnly 来源未补录 {key}"))?;
-            item.verify(r, &tape.source)?;
+
+        if has_sim {
+            let sim_principal = verify_simulation_live(c, image, record, source_gap)?;
+            covered_principals.insert(sim_principal);
         }
-        check_scoped_pending(c, image, &owners, had_gap)?;
+
+        if source_gap {
+            for principal in &principals {
+                if !covered_principals.contains(principal) {
+                    return Err(format!(
+                        "MissingDependency：E 外部接纳存在未核来源缺口，获准来源 {principal} 缺少独立持久原件与可证结束界，不能仅凭自述放行新风险"
+                    ));
+                }
+            }
+        }
+
+        if has_tape || has_sim || had_gap {
+            check_scoped_pending(c, image, &owners, had_gap)?;
+        }
         Ok(())
     }
 }
-
 struct Original {
     raw: Arc<str>,
     pointer: String,
@@ -974,7 +727,6 @@ mod tests {
         Intake(Some(Arc::new(Mutex::new(IntakeState {
             source_gap,
             had_gap,
-            reconciled_sources: BTreeSet::new(),
         }))))
     }
 
@@ -1057,9 +809,17 @@ mod tests {
         let first = start(&mut db, &cfg, 1).unwrap();
         assert!(!is_gap(&first));
 
-        // 优雅停机（无故障、输送无不确定）落盘一次性 clean_handoff；换代后可无缝续接。
+        // 非显式停机（explicit_stop=false，如 transport 异常退出）绝不得签发 clean_handoff。
+        cfg.intake = first.clone();
+        finish_clean(&mut db, &cfg, 1, false, false).unwrap();
+        let lease_after_abnormal: String = db
+            .query_row("SELECT v FROM meta WHERE k=?", [LEASE], |r| r.get(0))
+            .unwrap();
+        assert_eq!(lease_after_abnormal, "serving");
+
+        // 优雅停机（显式停机、无故障、输送无不确定）落盘一次性 clean_handoff；换代后可无缝续接。
         cfg.intake = first;
-        finish_clean(&mut db, &cfg, 1, false).unwrap();
+        finish_clean(&mut db, &cfg, 1, true, false).unwrap();
         set_meta(&db, "writer_epoch", "2").unwrap();
         let clean_next = start(&mut db, &cfg, 2).unwrap();
         assert!(!is_gap(&clean_next));
@@ -1073,17 +833,38 @@ mod tests {
         faulted.failed("StorageUnavailable：database or disk is full");
         assert!(is_gap(&faulted));
         cfg.intake = faulted;
-        finish_clean(&mut db, &cfg, 2, false).unwrap();
+        finish_clean(&mut db, &cfg, 2, true, false).unwrap();
         set_meta(&db, "writer_epoch", "3").unwrap();
         let after_fault_term = start(&mut db, &cfg, 3).unwrap();
         assert!(is_gap(&after_fault_term));
 
         // 输送丢帧/丢应答（transport_uncertain=true）同样不得签发 clean_handoff。
         cfg.intake = make_intake(false, false);
-        finish_clean(&mut db, &cfg, 3, true).unwrap();
+        finish_clean(&mut db, &cfg, 3, true, true).unwrap();
         set_meta(&db, "writer_epoch", "4").unwrap();
         let after_transport_uncertain = start(&mut db, &cfg, 4).unwrap();
         assert!(is_gap(&after_transport_uncertain));
+
+        // R2 遗留或伪造的 source_verified_handoff 布尔免检章必须被启动校验拒绝。
+        set_meta(
+            &db,
+            LEASE,
+            &canonical_json(&json!({
+                "kind": "source_verified_handoff",
+                "epoch": "4",
+                "commit_seq": "1",
+                "root_hash": "root-1",
+                "source_kind": "history_simulation_source",
+                "proof_sha256": "a".repeat(64),
+            })),
+        )
+        .unwrap();
+        let forged_seal_err = start(&mut db, &cfg, 4).err().unwrap();
+        assert!(
+            forged_seal_err.contains("交接记录损坏"),
+            "{forged_seal_err}"
+        );
+        set_meta(&db, LEASE, "serving").unwrap();
 
         // 篡改 clean_handoff 指向错误切面根，拒绝启动。
         set_meta(

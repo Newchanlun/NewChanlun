@@ -693,11 +693,24 @@ fn serve_unix_inner<T: QueuedJob + 'static>(
     make_job: fn(Value, mpsc::SyncSender<Value>, Instant) -> T,
     stop: Option<Box<dyn Fn() -> bool + Send>>,
     uncertain: Option<Arc<AtomicBool>>,
-    mut handler: impl FnMut(&T) -> Value,
+    handler: impl FnMut(&T) -> Value,
 ) -> Result<(), String> {
     // 不擅自unlink既有socket：SIGKILL残留由监督器核路径/PID后清理。
     let listener = UnixListener::bind(socket)
         .map_err(|e| format!("TransportUnavailable：socket绑定失败 {e}"))?;
+    serve_listener_inner(
+        listener, bounds, validate, make_job, stop, uncertain, handler,
+    )
+}
+fn serve_listener_inner<T: QueuedJob + 'static>(
+    listener: UnixListener,
+    bounds: TransportBounds,
+    validate: EnvelopeValidator,
+    make_job: fn(Value, mpsc::SyncSender<Value>, Instant) -> T,
+    stop: Option<Box<dyn Fn() -> bool + Send>>,
+    uncertain: Option<Arc<AtomicBool>>,
+    mut handler: impl FnMut(&T) -> Value,
+) -> Result<(), String> {
     if stop.is_some() {
         listener
             .set_nonblocking(true)
@@ -708,7 +721,7 @@ fn serve_unix_inner<T: QueuedJob + 'static>(
     let accept_bounds = bounds.clone();
     let accept_count = count.clone();
     let accept_uncertain = uncertain.clone();
-    let accept_handle = std::thread::spawn(move || {
+    let accept_handle = std::thread::spawn(move || -> Result<(), String> {
         let spawn_conn = |stream: UnixStream| {
             if accept_count
                 .try_update(Ordering::SeqCst, Ordering::SeqCst, |n| {
@@ -730,7 +743,7 @@ fn serve_unix_inner<T: QueuedJob + 'static>(
             let u = accept_uncertain.clone();
             std::thread::spawn(move || io_connection_inner(stream, t, b, c, validate, make_job, u));
         };
-        if let Some(stop_fn) = stop {
+        let exit = if let Some(stop_fn) = stop {
             let mut pfd = libc::pollfd {
                 fd: listener.as_raw_fd(),
                 events: libc::POLLIN,
@@ -738,19 +751,28 @@ fn serve_unix_inner<T: QueuedJob + 'static>(
             };
             loop {
                 if stop_fn() {
-                    break;
+                    break Ok(());
                 }
                 pfd.revents = 0;
                 // SAFETY: pfd 指向当前存活的 UnixListener 有效文件描述符。
                 let ready = unsafe { libc::poll(&mut pfd, 1, 25) };
                 if ready < 0 {
-                    if std::io::Error::last_os_error().kind() == std::io::ErrorKind::Interrupted {
+                    let err = std::io::Error::last_os_error();
+                    if err.kind() == std::io::ErrorKind::Interrupted {
                         continue;
                     }
-                    break;
+                    mark_uncertain(&accept_uncertain);
+                    break Err(format!("TransportUnavailable：listener poll失败 {err}"));
                 }
                 if ready == 0 || stop_fn() {
                     continue;
+                }
+                if (pfd.revents & (libc::POLLERR | libc::POLLHUP | libc::POLLNVAL)) != 0 {
+                    mark_uncertain(&accept_uncertain);
+                    break Err(format!(
+                        "TransportUnavailable：listener poll异常状态 {:#x}",
+                        pfd.revents
+                    ));
                 }
                 match listener.accept() {
                     Ok((stream, _)) => {
@@ -768,24 +790,47 @@ fn serve_unix_inner<T: QueuedJob + 'static>(
                     {
                         continue;
                     }
-                    Err(_) => break,
+                    Err(e) => {
+                        mark_uncertain(&accept_uncertain);
+                        break Err(format!("TransportUnavailable：accept失败 {e}"));
+                    }
                 }
             }
         } else {
+            let mut result = Ok(());
             for incoming in listener.incoming() {
-                let Ok(stream) = incoming else { break };
-                spawn_conn(stream);
+                match incoming {
+                    Ok(stream) => spawn_conn(stream),
+                    Err(e) => {
+                        mark_uncertain(&accept_uncertain);
+                        result = Err(format!("TransportUnavailable：accept失败 {e}"));
+                        break;
+                    }
+                }
             }
-        }
+            result
+        };
         drop(listener);
         drop(tx);
+        exit
     });
     for job in rx {
         let out = handler(&job);
-        let _ = job.result().try_send(out);
+        if job.result().try_send(out).is_err() {
+            mark_uncertain(&uncertain);
+        }
     }
-    let _ = accept_handle.join();
-    Ok(())
+    match accept_handle.join() {
+        Ok(Ok(())) => Ok(()),
+        Ok(Err(error)) => {
+            mark_uncertain(&uncertain);
+            Err(error)
+        }
+        Err(_) => {
+            mark_uncertain(&uncertain);
+            Err("TransportUnavailable：accept线程异常中止".into())
+        }
+    }
 }
 
 #[cfg(test)]
@@ -1017,5 +1062,125 @@ mod tests {
             failures, 0,
             "reacquire failed {failures}/{rounds} times with {spawned} concurrent spawns"
         );
+    }
+
+    #[test]
+    fn abnormal_listener_shutdown_marks_uncertain_and_returns_error() {
+        let dir = std::env::temp_dir().join(format!(
+            "transport-abnormal-exit-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let sock = dir.join("e.sock");
+        let listener = UnixListener::bind(&sock).unwrap();
+        let raw_fd = listener.as_raw_fd();
+        let uncertain = Arc::new(AtomicBool::new(false));
+        let bounds = TransportBounds {
+            frame: 4096,
+            read: Duration::from_millis(100),
+            write: Duration::from_millis(100),
+            response: Duration::from_millis(100),
+            queue: 2,
+            connections: 2,
+        };
+        let killer = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(40));
+            // SAFETY: raw_fd 仍被 serve_listener_inner 中的 listener 持有，shutdown 触发异常 poll/accept 而不释放描述符。
+            unsafe { libc::shutdown(raw_fd, libc::SHUT_RDWR) };
+        });
+        let result = serve_listener_inner(
+            listener,
+            bounds,
+            value_only,
+            timed_job,
+            Some(Box::new(|| false)),
+            Some(uncertain.clone()),
+            |_: &TimedJob| json!({"ok":true}),
+        );
+        killer.join().unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
+        let err = result.unwrap_err();
+        assert!(err.starts_with("TransportUnavailable："), "{err}");
+        assert!(uncertain.load(Ordering::SeqCst));
+    }
+
+    #[test]
+    fn accept_thread_panic_marks_uncertain_and_returns_error() {
+        let dir = std::env::temp_dir().join(format!(
+            "transport-accept-panic-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let sock = dir.join("e.sock");
+        let uncertain = Arc::new(AtomicBool::new(false));
+        let bounds = TransportBounds {
+            frame: 4096,
+            read: Duration::from_millis(100),
+            write: Duration::from_millis(100),
+            response: Duration::from_millis(100),
+            queue: 2,
+            connections: 2,
+        };
+        let result = serve_unix_with_deadline_until(
+            &sock,
+            bounds,
+            value_only,
+            Box::new(|| panic!("injected accept thread panic")),
+            uncertain.clone(),
+            |_, _| json!({"ok":true}),
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+        let err = result.unwrap_err();
+        assert!(err.contains("accept线程异常中止"), "{err}");
+        assert!(uncertain.load(Ordering::SeqCst));
+    }
+
+    #[test]
+    fn explicit_stop_returns_ok_and_preserves_clean_uncertain_flag() {
+        let dir = std::env::temp_dir().join(format!(
+            "transport-clean-stop-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let sock = dir.join("e.sock");
+        let stop = Arc::new(AtomicBool::new(false));
+        let stop_check = stop.clone();
+        let uncertain = Arc::new(AtomicBool::new(false));
+        let bounds = TransportBounds {
+            frame: 4096,
+            read: Duration::from_millis(100),
+            write: Duration::from_millis(100),
+            response: Duration::from_millis(100),
+            queue: 2,
+            connections: 2,
+        };
+        let stopper = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(40));
+            stop.store(true, Ordering::SeqCst);
+        });
+        let result = serve_unix_with_deadline_until(
+            &sock,
+            bounds,
+            value_only,
+            Box::new(move || stop_check.load(Ordering::SeqCst)),
+            uncertain.clone(),
+            |_, _| json!({"ok":true}),
+        );
+        stopper.join().unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
+        result.unwrap();
+        assert!(!uncertain.load(Ordering::SeqCst));
     }
 }

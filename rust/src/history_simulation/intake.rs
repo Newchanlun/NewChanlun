@@ -234,15 +234,12 @@ pub(crate) fn committed_capture_batch(
     Ok(receipt)
 }
 
-/// #1375：从 E 已冻结的模拟 X 只读库核验**全部**已提交批的原件并确认无未提交在途批。
-/// 单一 QueryBatch 不能替代整段连续性证明：这里必须核对 `state.last_request_id` 对应的
-/// 完整结束界、全量冷重放 `validate_existing` 与所有批的逐件原件。
-pub(crate) fn committed_capture_history(
+fn inspect_committed_history(
     manifest: &Value,
-    x_id: &str,
-    x_epoch: i64,
-    end_batch_id: Option<&str>,
-    end_receipt_digest: Option<&str>,
+    expected_x_id: Option<&str>,
+    expected_x_epoch: Option<i64>,
+    end_pin: Option<(Option<&str>, Option<&str>)>,
+    require_committed_frontier: bool,
 ) -> Result<Value, String> {
     let binding = &manifest["history_simulation_source"];
     if !binding.is_object() {
@@ -261,10 +258,16 @@ pub(crate) fn committed_capture_history(
         tx.query_row("SELECT value FROM x_meta WHERE key=?1", [key], |r| r.get(0))
             .map_err(failure)
     };
+    let actual_epoch_raw = x_meta("writer_epoch")?;
+    let actual_epoch = actual_epoch_raw
+        .parse::<i64>()
+        .ok()
+        .filter(|e| *e > 0)
+        .ok_or("IdentityConflict：模拟 X writer_epoch 非正整数")?;
     if x_meta("profile_revision")? != "x-execution-profile/1"
         || x_meta("profile_mode")? != "simulation"
         || x_meta("history_simulation")? != "true"
-        || x_meta("writer_epoch")? != x_epoch.to_string()
+        || expected_x_epoch.is_some_and(|e| e != actual_epoch)
     {
         return Err("IdentityConflict：指定 X 模型或当前 writer epoch 不符".into());
     }
@@ -287,15 +290,26 @@ pub(crate) fn committed_capture_history(
     {
         return Err("IdentityConflict：X 持久来源与 E 冻结来源不同".into());
     }
-    if profile.x_id != x_id
+    if expected_x_id.is_some_and(|id| profile.x_id != id)
         || digest(&serde_json::to_value(&profile.model).map_err(failure)?)
             != required(binding, "model_content_hash")?
     {
         return Err("IdentityConflict：X 身份或模型与冻结范围不同".into());
     }
-    super::runtime::validate_existing(&tx, &profile, x_epoch)?;
+    // #1381 全量冷审：逐批重演 x_sim_batches，核对 x_sim_originals 原字节与总数、bust 累计及末状态。
+    super::runtime::validate_existing(&tx, &profile, actual_epoch)?;
     if super::store::pending_batch(&tx)?.is_some() {
         return Err("MissingDependency：模拟 X 尚有未提交在途批，无法证明完整结束界".into());
+    }
+    let in_flight: i64 = tx
+        .query_row(
+            "SELECT count(*) FROM x_exact_commands WHERE state IN ('ExecutionRequested','ExecutionReady','MayHaveCalled')",
+            [],
+            |r| r.get(0),
+        )
+        .map_err(failure)?;
+    if in_flight != 0 {
+        return Err("MissingDependency：模拟 X 存在在途执行命令，尚未落批结束界".into());
     }
     let raw_state: String = tx
         .query_row("SELECT v FROM x_sim_meta WHERE k='state'", [], |r| r.get(0))
@@ -303,7 +317,7 @@ pub(crate) fn committed_capture_history(
     let state: super::model::State =
         serde_json::from_value(strict_json(raw_state.as_bytes())?).map_err(failure)?;
     let state_hash = digest(&serde_json::to_value(&state).map_err(failure)?);
-    let mut batches: Vec<(i64, Value)> = Vec::new();
+    let mut batches: Vec<(i64, String, Value)> = Vec::new();
     {
         let mut stmt = tx
             .prepare("SELECT id, result FROM x_sim_batches")
@@ -320,39 +334,61 @@ pub(crate) fn committed_capture_history(
             let bar = receipt["bar_index"]
                 .as_i64()
                 .ok_or("IdentityConflict：模拟 X 批缺 bar_index")?;
-            batches.push((bar, receipt));
+            batches.push((bar, id, receipt));
         }
     }
-    match (end_batch_id, end_receipt_digest) {
-        (Some(id), Some(expected_digest)) => {
-            if state.last_request_id.as_deref() != Some(id) {
+    batches.sort_by_key(|(bar, _, _)| *bar);
+    match batches.last() {
+        Some((last_bar, last_id, _)) => {
+            if state.last_bar != Some(*last_bar)
+                || state.last_request_id.as_deref() != Some(last_id.as_str())
+            {
+                return Err("IdentityConflict：模拟 X 末状态与批前沿不一致".into());
+            }
+        }
+        None => {
+            if state.last_bar.is_some() || state.last_request_id.is_some() {
+                return Err("IdentityConflict：模拟 X 空批表与末状态不一致".into());
+            }
+            if require_committed_frontier {
                 return Err(
-                    "MissingDependency：指定结束批不是模拟 X 当前完整前沿，单一 QueryBatch 不能证明整段无漏报"
+                    "MissingDependency：模拟 X 空快照无已提交批前沿，不能证明外部调度已覆盖本次缺口"
                         .into(),
                 );
             }
-            let raw: String = tx
-                .query_row("SELECT result FROM x_sim_batches WHERE id=?1", [id], |r| {
-                    r.get(0)
-                })
-                .map_err(failure)?;
-            if sha256_hex(raw.as_bytes()) != expected_digest {
-                // DevSkim: ignore DS197836 内容寻址摘要
-                return Err("IdentityConflict：指定 X 结束批的完整回执摘要不同".into());
-            }
-        }
-        (None, None) => {
-            if state.last_request_id.is_some() || !batches.is_empty() {
-                return Err("MissingDependency：模拟 X 已有已提交批，须指定完整结束批".into());
-            }
-        }
-        _ => {
-            return Err("InvalidDomain：模拟 X 结束批号与回执摘要须成对提供".into());
         }
     }
-    batches.sort_by_key(|(bar, _)| *bar);
+    if let Some((end_batch_id, end_receipt_digest)) = end_pin {
+        match (end_batch_id, end_receipt_digest) {
+            (Some(id), Some(expected_digest)) => {
+                if state.last_request_id.as_deref() != Some(id) {
+                    return Err(
+                        "MissingDependency：指定结束批不是模拟 X 当前完整前沿，单一 QueryBatch 不能证明整段无漏报"
+                            .into(),
+                    );
+                }
+                let raw: String = tx
+                    .query_row("SELECT result FROM x_sim_batches WHERE id=?1", [id], |r| {
+                        r.get(0)
+                    })
+                    .map_err(failure)?;
+                if sha256_hex(raw.as_bytes()) != expected_digest {
+                    // DevSkim: ignore DS197836 内容寻址摘要
+                    return Err("IdentityConflict：指定 X 结束批的完整回执摘要不同".into());
+                }
+            }
+            (None, None) => {
+                if state.last_request_id.is_some() || !batches.is_empty() {
+                    return Err("MissingDependency：模拟 X 已有已提交批，须指定完整结束批".into());
+                }
+            }
+            _ => {
+                return Err("InvalidDomain：模拟 X 结束批号与回执摘要须成对提供".into());
+            }
+        }
+    }
     let mut originals = Vec::new();
-    for (_, receipt) in &batches {
+    for (_, _, receipt) in &batches {
         let docs = receipt["originals"]
             .as_array()
             .ok_or("StorageUnavailable：模拟批缺原件列表")?;
@@ -362,12 +398,46 @@ pub(crate) fn committed_capture_history(
     }
     tx.commit().map_err(failure)?;
     Ok(json!({
-        "x_id": x_id,
-        "x_writer_epoch": x_epoch.to_string(),
+        "x_id": profile.x_id,
+        "x_writer_epoch": actual_epoch.to_string(),
         "last_bar": state.last_bar,
         "last_request_id": state.last_request_id,
         "state_content_hash": state_hash,
         "batch_count": batches.len().to_string(),
         "originals": originals
     }))
+}
+
+/// #1375：在 E 放行事务内实时冷审已冻结模拟 X 库的全量已提交批与原件前沿，不落核清布尔位。
+pub(crate) fn committed_capture_frontier(
+    manifest: &Value,
+    expected_x_id: Option<&str>,
+    expected_x_epoch: Option<i64>,
+    require_committed_frontier: bool,
+) -> Result<Value, String> {
+    inspect_committed_history(
+        manifest,
+        expected_x_id,
+        expected_x_epoch,
+        None,
+        require_committed_frontier,
+    )
+}
+
+/// #1375：按显式结束批与完整回执摘要核验模拟 X 全部已提交批（供冷审与回归测试使用）。
+#[cfg(test)]
+pub(crate) fn committed_capture_history(
+    manifest: &Value,
+    x_id: &str,
+    x_epoch: i64,
+    end_batch_id: Option<&str>,
+    end_receipt_digest: Option<&str>,
+) -> Result<Value, String> {
+    inspect_committed_history(
+        manifest,
+        Some(x_id),
+        Some(x_epoch),
+        Some((end_batch_id, end_receipt_digest)),
+        false,
+    )
 }
