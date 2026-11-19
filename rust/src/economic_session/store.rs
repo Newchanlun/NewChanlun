@@ -155,6 +155,8 @@ impl Config {
         let sr_expansion = super::sr_expansion::validate_config(&manifest)?;
         // #1778：持久撤回同为并列子合同 `domain-event-withdrawal/1`；未选择它的 manifest 不认识其写口。
         let withdrawal = super::domain_event::withdrawal_selected(&manifest)?;
+        // #1375 AC2：市场 FX 报价与影响封闸为并列子合同 `fx-valuation/1`；未选择它的域完全不变。
+        let fx_valuation = super::fx_valuation::validate_config(&manifest)?;
         super::evidence::validate_config(&manifest)?;
         super::finance::validate_config(&manifest)?;
         let exact_release = super::finance::exact_release_selected(&manifest);
@@ -246,6 +248,9 @@ impl Config {
                     || (sr_expansion
                         && [super::sr_expansion::OP, super::sr_expansion::QUERY].contains(&op))
                     || (withdrawal && op == super::domain_event::WITHDRAW_OP)
+                    || (fx_valuation
+                        && [super::fx_valuation::QUERY, super::fx_valuation::IMPORT_OP]
+                            .contains(&op))
                     || (exact_release && super::finance::EXACT_OPS.contains(&op));
                 if !known || !unique.insert(op) {
                     return Err("InvalidDomain：操作权限未知或重复".into());
@@ -870,6 +875,9 @@ pub(crate) fn init(config: &Config) -> Result<Value, String> {
     if let Some(revision) = super::domain_event::withdrawal_bound_revision(config)? {
         set_meta(&tx, super::domain_event::WITHDRAWAL_META_KEY, revision)?;
     }
+    if let Some(revision) = super::fx_valuation::bound_revision(config)? {
+        set_meta(&tx, super::fx_valuation::META_KEY, revision)?;
+    }
     let ns = config.clock(None, "init_ns", 0)?;
     tx.execute("INSERT INTO epochs VALUES(1,'init',?)", [&ns])
         .map_err(err)?;
@@ -1092,6 +1100,17 @@ pub(super) fn audit_with_budget(
             "IdentityConflict：撤回子合同版本未由 init 显式绑定；不得在 recover 暗迁移".into(),
         );
     }
+    let fx_revision: Option<String> = budget.optional(
+        c,
+        "SELECT v FROM meta WHERE k=?",
+        [super::fx_valuation::META_KEY],
+        |r| r.get(0),
+    )?;
+    if fx_revision.as_deref() != super::fx_valuation::bound_revision(config)? {
+        return Err(
+            "IdentityConflict：FX 估值子合同版本未由 init 显式绑定；不得在 recover 暗迁移".into(),
+        );
+    }
     // 上面已核 meta 与选择相等：此后「已选择」即「本域已在 init 绑定」，四处撤回分支共用此前置。
     let withdrawal = super::domain_event::withdrawal_bound(config)?;
     // 内容格式登记与 Voice 版本同一条纪律：只认 init 显式绑定，recover 不暗迁移。
@@ -1254,6 +1273,7 @@ pub(super) fn audit_with_budget(
                 x["recorded"].as_array_mut().unwrap().push(record.clone());
                 let p = super::tb03c_e::pending_entry(config, &previous_image, record, seq)?;
                 x["pending"].as_array_mut().unwrap().push(p);
+                super::fx_valuation::apply_capture(config, &mut x, record)?;
                 x["history"].as_array_mut().unwrap().push(json!({"kind":"CaptureExternal","fact_key":record["fact_key"],"commit_seq":seq.to_string(),"commit_ns":ns}));
                 x
             } else {
@@ -1711,7 +1731,10 @@ pub(crate) fn verify_e_copy(record: &Value, config: &Config) -> Result<(), Strin
 
 pub(crate) fn verify_record(r: &Value, rules: super::book::Rules) -> Result<(), String> {
     let raw = required(r, "raw_utf8")?;
-    let (doc, event) = decode(raw, required(r, "json_pointer")?, rules)?;
+    let pointer = r["json_pointer"]
+        .as_str()
+        .ok_or("SchemaUnsupported：缺字符串 json_pointer")?;
+    let (doc, event) = decode(raw, pointer, rules)?;
     if r["raw_sha256"] != sha256_hex(raw.as_bytes())
         || r["event"] != event
         || r["fact_key"] != fact_key(&event)?
