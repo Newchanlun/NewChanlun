@@ -1,0 +1,26 @@
+{
+  "byte_equal": {
+    "input.json": true,
+    "ReleaseExact-alpha.reply.wire": false,
+    "retry.request.wire": true,
+    "retry.reply.wire": true,
+    "S-eligibility.reply.json": true
+  },
+  "only_model_change": "fee_profile.maker.numerator:1->10",
+  "model_fill_fee": [
+    [
+      "7f7817be1f748290c3761d66cea766845ed379db1962f202f76dc2a7f1afc81f",
+      2,
+      14,
+      28,
+      1
+    ],
+    [
+      "70b0008e9f15797bd902ff5925c87bc0b00e6b28ea62d300a4739b88a6ce4c65",
+      2,
+      14,
+      28,
+      3
+    ]
+  ]
+}

@@ -1,0 +1,11 @@
+production_session {"event":"start","profile":"simulation","structure_source":{"category":"TestOnlyStructure","namespaces":["testonly.ohlc"]}}
+production_session {"domain":"E","event":"init"}
+production_session {"domain":"B","event":"init"}
+production_session {"domain":"B","event":"init"}
+production_session {"domain":"S","event":"spawn","pid":22296}
+production_session {"domain":"E","event":"spawn","pid":22297}
+production_session {"domain":"B:alpha","event":"spawn","pid":22298}
+production_session {"domain":"B:beta","event":"spawn","pid":22299}
+production_session {"domain":"X","event":"spawn","pid":22300}
+x_execution_session storage {"control_instance_id":null,"filesystem":"tmpfs","fullfsync":"1","journal_mode":"wal","pid":"22300","read_only":false,"sqlite_version":"3.53.2","sqlite_version_number":"3053002","synchronous":"2"}
+production_session {"event":"stopped","failed":false}
