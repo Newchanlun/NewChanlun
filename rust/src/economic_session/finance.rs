@@ -306,6 +306,12 @@ pub(super) fn empty(config: &Config) -> Result<Value, String> {
         if contract(&config.manifest)?.exact_release {
             image["finance"]["commands"] = json!([]);
         }
+        if config.domain == "E" && super::fx_valuation::enabled(config) {
+            image["finance"]["foreign_responsibilities"] = json!([]);
+        }
+    }
+    if let Some(fx) = super::fx_valuation::empty(config)? {
+        image[super::fx_valuation::CONTRACT_FIELD] = fx;
     }
     Ok(image)
 }
@@ -714,6 +720,7 @@ pub(super) fn is_event(v: &Value) -> bool {
         v["kind"].as_str(),
         Some(
             "ImportResponsibility"
+                | "ImportFxResponsibility"
                 | "PrepareDecision"
                 | "Reserve"
                 | "CommitDecision"
@@ -728,7 +735,10 @@ pub(super) fn is_event(v: &Value) -> bool {
 fn operation_id<'a>(p: &'a Value) -> Result<&'a str, String> {
     required(
         p,
-        if p["op"] == "ImportResponsibility" {
+        if matches!(
+            p["op"].as_str(),
+            Some("ImportResponsibility" | "ImportFxResponsibility")
+        ) {
             "responsibility_id"
         } else if matches!(p["op"].as_str(), Some("Reserve" | "CloseApplicants")) {
             "slot_id"
@@ -750,7 +760,9 @@ fn key(p: &Value) -> Result<String, String> {
 }
 fn validate_request(p: &Value) -> Result<(), String> {
     match required(p, "op")? {
-        "ImportResponsibility" => exact(p, &["op", "responsibility_id", "writer_epoch"]),
+        "ImportResponsibility" | "ImportFxResponsibility" => {
+            exact(p, &["op", "responsibility_id", "writer_epoch"])
+        }
         "PrepareDecision" => exact(p, &["op", "decision_id", "plan_hash", "writer_epoch"]),
         "Reserve" => exact(p, &["op", "slot_id", "request_set_hash", "writer_epoch"]),
         "CommitDecision" => exact(
@@ -1194,8 +1206,19 @@ fn reduce_with_budget(
             }
             let r = json!({"responsibility_id":d["baseline"]["responsibility_id"],"owner":"E:baseline","amount":d["baseline"]["amount"],"source":d["baseline"],"policy":d["policy"]});
             push(&mut next["finance"], "responsibilities", r.clone());
+            super::fx_valuation::refresh_from_finance(config, &mut next)?;
             json!({"responsibility_id":p["responsibility_id"],"state":"ResponsibilityImported","original":r})
         }
+        "ImportFxResponsibility" => super::fx_valuation::import_obligation(
+            config,
+            previous,
+            &mut next,
+            &d["policy"],
+            required(w, "fx_obligation_input_raw")?,
+            required(p, "responsibility_id")?,
+            seq,
+            ns,
+        )?,
         "PrepareDecision" => {
             let plan = plan(&d, p)?;
             if plan["owner"] != config.domain || hash(plan) != p["plan_hash"] {
@@ -1336,9 +1359,11 @@ fn reduce_with_budget(
             let coverage = list(&d["baseline"], "covered_facts")?;
             let mut resolved = BTreeSet::new();
             for pending in list(previous, "pending")? {
+                super::fx_valuation::forbid_reserve_bypass(pending)?;
                 covered_pending(previous, coverage, pending)?;
                 resolved.insert(required(pending, "fact_key")?.to_owned());
             }
+            super::fx_valuation::check_gate(previous)?;
             if !resolved.is_empty() {
                 let kept: Vec<Value> = list(previous, "pending")?
                     .iter()
@@ -1354,6 +1379,10 @@ fn reduce_with_budget(
             let existing = responsibilities
                 .iter()
                 .try_fold(0i64, |a, r| add(a, number(r, "amount")?))?;
+            let existing = add(
+                existing,
+                super::fx_valuation::evaluated_foreign_total(previous)?,
+            )?;
             let total = add(existing, additional)?;
             let all_fit = total <= number(&live_cap, "cap")?;
             let mut r = json!({"slot_id":slot["slot_id"],"slot":slot,"state":if all_fit{"Reserved"}else{"AwaitingAllocationPolicy"},"policy_id":d["policy"]["policy_id"],"waiting_for":if all_fit{Value::Null}else{d["policy"]["allocation_policy_id"].clone()},"required_total":total.to_string(),"retained_total":if all_fit{total}else{existing}.to_string(),"grants":if all_fit{grants.clone()}else{vec![]},"closed_applicants":closed,"reserve_seq":seq.to_string(),"reserve_ns":ns});
@@ -1371,6 +1400,7 @@ fn reduce_with_budget(
                 }
             }
             push(f, "slots", r.clone());
+            super::fx_valuation::refresh_from_finance(config, &mut next)?;
             r
         }
         "CommitDecision" => {
@@ -1404,8 +1434,10 @@ fn reduce_with_budget(
             // 未覆盖风险 token 使共同约束不可核，暂停受影响新增；已独立保存的界仍覆盖的责任保留。
             let coverage = list(&d["baseline"], "covered_facts")?;
             for pending in list(&gp["current_image"], "pending")? {
+                super::fx_valuation::forbid_reserve_bypass(pending)?;
                 covered_pending(&gp["current_image"], coverage, pending)?;
             }
+            super::fx_valuation::check_gate(&gp["current_image"])?;
             let closed = finance(config, &gp["current_image"])?
                 .get("closed_applicants")
                 .and_then(Value::as_array)
@@ -1508,9 +1540,13 @@ fn reduce_with_budget(
                         .into(),
                 );
             }
-            let liability = responsibilities
+            let cash_liability = responsibilities
                 .iter()
                 .try_fold(0i64, |a, r| add(a, number(r, "amount")?))?;
+            let liability = add(
+                cash_liability,
+                super::fx_valuation::evaluated_foreign_total(previous)?,
+            )?;
             if liability > cap {
                 return Err(format!(
                     "InvalidDomain：新 cap {cap} 低于原子点当前责任 {liability}；保留原生效版本"
@@ -1518,6 +1554,7 @@ fn reduce_with_budget(
             }
             let new = json!({"schema_revision":CAP_POLICY_REV,"profile_id":signed["profile_id"],"policy_id":p["policy_id"],"policy_version":p["to_version"],"cap":p["cap"],"valid_through_ns":p["valid_through_ns"],"activation_id":p["activation_id"],"replaces_version":p["from_version"],"policy_record_sha256":p["policy_record"]["sha256"],"authorizer":signed["authorizer"],"authorized_at_ns":signed["authorized_at_ns"],"signature_ref":signed["signature_ref"],"liability_at_activation":liability.to_string(),"activated_seq":seq.to_string(),"activated_ns":ns});
             next["finance"]["cap_policy"] = new.clone();
+            super::fx_valuation::refresh_from_finance(config, &mut next)?;
             json!({"activation_id":p["activation_id"],"state":"CapPolicyActivated","from":live_cap,"to":new,"liability_at_activation":liability.to_string()})
         }
         "CloseApplicants" => {
@@ -1677,8 +1714,10 @@ fn release_exact(
     } else {
         let coverage = list(&d["baseline"], "covered_facts")?;
         for pending in list(previous, "pending")? {
+            super::fx_valuation::forbid_reserve_bypass(pending)?;
             covered_pending(previous, coverage, pending)?;
         }
+        super::fx_valuation::check_gate(previous)?;
         let closed = f
             .get("closed_applicants")
             .and_then(Value::as_array)
@@ -1720,6 +1759,7 @@ fn latest_proof_seq(p: &Value) -> Result<i64, String> {
 pub(super) fn receipt(config: &Config, event: &Value, cut: Value) -> Result<Value, String> {
     let kind = match required(event, "kind")? {
         "ImportResponsibility" => "ResponsibilityImportedReceipt",
+        "ImportFxResponsibility" => "FxResponsibilityImportedReceipt",
         "PrepareDecision" => "PreparedReceipt",
         "Reserve" => "ReserveReceipt",
         "CommitDecision" => "LocalCommitReceipt",
@@ -1873,6 +1913,9 @@ pub(super) fn write_with_ingress(
     if matches!(p["op"].as_str(), Some("MakeDispatchable" | "ReleaseExact")) {
         exact_release_contract(config)?;
     }
+    if p["op"] == super::fx_valuation::IMPORT_OP && !super::fx_valuation::enabled(config) {
+        return Err("SchemaUnsupported：ImportFxResponsibility 只属于 fx-valuation/1".into());
+    }
     let k = key_for(config, p)?;
     let mut shared_job = if contract(&config.manifest)?.content {
         Some(new_content_job(c, config)?)
@@ -1988,6 +2031,10 @@ pub(super) fn write_with_ingress(
                 &receipt_key_for(config, "CommitDecision", required(q, "decision_id")?)?,
             )?;
         }
+        "ImportFxResponsibility" => {
+            w["fx_obligation_input_raw"] =
+                json!(super::fx_valuation::pinned_obligation_raw(config)?);
+        }
         "ImportResponsibility" | "AbortDecision" | "CloseApplicants" | "ReleaseExact" => (),
         _ => return Err("SchemaUnsupported：财务操作未知".into()),
     }
@@ -2083,6 +2130,10 @@ fn write_v2_inner(
                 "新 cap 签署原件"
             )?);
             check_operation_deadline(Some(&mut *job), Some(deadline))?;
+        }
+        "ImportFxResponsibility" => {
+            witness["fx_obligation_input_raw"] =
+                json!(super::fx_valuation::pinned_obligation_raw(config)?);
         }
         "ImportResponsibility" | "AbortDecision" | "CloseApplicants" => (),
         _ => return Err("SchemaUnsupported：财务操作未知".into()),

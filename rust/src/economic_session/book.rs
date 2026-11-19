@@ -109,6 +109,12 @@ pub(crate) fn decode(raw: &str, pointer: &str, rules: Rules) -> Result<(Value, V
         }
         return crate::history_simulation::intake::decode(&doc, pointer);
     }
+    if doc["schema_revision"] == super::fx_valuation::QUOTE_SCHEMA {
+        if !rules.is_tb03c() {
+            return Err("SchemaUnsupported：市场 FX 报价原件须 tb03c 经济域".into());
+        }
+        return super::fx_valuation::decode(&doc, pointer);
+    }
     if doc["format"] != "neutral TestOnly economic raw originals; not production transport wire" {
         return Err("SchemaUnsupported：仅已声明 TestOnly 经济原件 profile".into());
     }

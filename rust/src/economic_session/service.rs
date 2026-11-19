@@ -707,7 +707,9 @@ fn record_from_payload(config: &Config, e: &Value) -> Result<Value, String> {
         ],
     )?;
     let raw = required(p, "raw_utf8")?;
-    let pointer = required(p, "json_pointer")?;
+    let pointer = p["json_pointer"]
+        .as_str()
+        .ok_or("SchemaUnsupported：缺字符串 json_pointer")?;
     let (doc, event) = decode(raw, pointer, config.book_rules()?)?;
     if event["source"]["source_namespace"] != e["source_namespace"]
         || event["source"]["source_epoch"] != e["source_epoch"]
@@ -715,12 +717,18 @@ fn record_from_payload(config: &Config, e: &Value) -> Result<Value, String> {
         return Err("InvalidDomain：来源未获准：原件来源不等于获准连接来源".into());
     }
     let netted = super::tb03c_allocation::is_projected(&event);
+    let fx_quote = super::fx_valuation::is_fx_quote_event(&event);
+    super::fx_valuation::check_capture(config, &event)?;
     super::tb03c_allocation::check_capture(config, &event)?;
     if config.book_rules()?.is_tb03c() {
         super::tb03c_transfer::check_capture(config, &event)?;
     }
     let domain = super::tb03c_allocation::target_domain(&event)?;
-    let id = if netted { "" } else { target(&event)? };
+    let id = if netted || fx_quote {
+        ""
+    } else {
+        target(&event)?
+    };
     // #1406 / C06.4：tb03c-book/1 域里目标重不在 manifest 的原件照记（Pending 封账户范围），旧域照旧拒收。
     let unrouted = json!({});
     let route = match config.route(id) {
@@ -824,6 +832,7 @@ fn capture(
         .as_array_mut()
         .unwrap()
         .push(pending.clone());
+    super::fx_valuation::apply_capture(config, &mut image, &record)?;
     image["history"].as_array_mut().unwrap().push(json!({"kind":"CaptureExternal","fact_key":key,"commit_seq":seq.to_string(),"commit_ns":ns}));
     put(&tx, "facts", &key, &record)?;
     put(&tx, "pending", &key, &pending)?;
@@ -1365,6 +1374,7 @@ fn read(
             super::finance::query_command(&tx, config, epoch, p)?
         }
         super::sr_expansion::QUERY => super::sr_expansion::query(&tx, config, p)?,
+        super::fx_valuation::QUERY => super::fx_valuation::query(&tx, config, epoch, p)?,
         "QueryFact" => {
             exact(p, &["op", "fact_key"])?;
             let k = required(p, "fact_key")?;
@@ -1443,6 +1453,7 @@ fn handle_with_deadline(
                 super::finance::write_with_ingress(c, config, epoch, e, ingress_response_deadline)
             }
             "ImportResponsibility"
+            | "ImportFxResponsibility"
             | "Reserve"
             | "CloseApplicants"
             | "ActivateCapPolicy"
@@ -1489,7 +1500,8 @@ fn handle_with_deadline(
             | "QueryGrant"
             | "QueryCommand"
             | "QueryReleasedExact"
-            | super::sr_expansion::QUERY => read(c, config, epoch, runtime, &e["payload"]),
+            | super::sr_expansion::QUERY
+            | super::fx_valuation::QUERY => read(c, config, epoch, runtime, &e["payload"]),
             _ => Err("SchemaUnsupported：操作不属于本域".into()),
         }
     })();
