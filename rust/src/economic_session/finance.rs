@@ -790,7 +790,7 @@ fn push(v: &mut Value, k: &str, x: Value) {
 fn receipt_key(op: &str, id: &str) -> String {
     format!("{REV}:{op}:{}", hash(&json!(id)))
 }
-fn receipt_key_for(config: &Config, op: &str, id: &str) -> Result<String, String> {
+pub(super) fn receipt_key_for(config: &Config, op: &str, id: &str) -> Result<String, String> {
     Ok(format!(
         "{}:{op}:{}",
         revision(&config.manifest)?,
@@ -829,7 +829,7 @@ fn operation_id<'a>(p: &'a Value) -> Result<&'a str, String> {
         },
     )
 }
-fn key_for(config: &Config, p: &Value) -> Result<String, String> {
+pub(super) fn key_for(config: &Config, p: &Value) -> Result<String, String> {
     receipt_key_for(config, required(p, "op")?, operation_id(p)?)
 }
 #[cfg(test)]

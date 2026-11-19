@@ -1353,14 +1353,15 @@ try:
             "b_alpha_cut5_image_bytes": len(canonical(mid_view["image"])),
             "b_alpha_cut6_image_bytes": len(canonical(views_before["B:alpha"]["image"])),
             "http_read_cache_limit_bytes": 4 * 1048576,
+            "public_query_scope": "legacy_full_snapshot_and_legacy_client",
             "public_query_final_cut_status": "BLOCKED_BY_4MIB_AND_BROWSER_TB03C_CONTRACT",
         },
     )
     print(
-        "CORE-PASS (PUBLIC-FINAL-CUT-BLOCKED): #1425 FIN/6+X/3 单一明确原责任域 E/B/X 实账与冷恢复通过 "
+        "CORE-PASS (LEGACY-FULL-SNAPSHOT-LIMIT): #1425 FIN/6+X/3 单一明确原责任域 E/B/X 实账与冷恢复通过 "
         f"(fill={fill_aid[:24]}..., fee={fee_aid[:28]}..., B:alpha qty=4->6 K=80000->80029, "
         "B:beta 不动, E 责任维持 90, 冷恢复 epoch=2 三域逐值一致; "
-        "终态 cut 6 公开端/浏览器实测首拒已记录至 public-query-gap-evidence.json，不以 resolved_cuts 报完成)"
+        "旧全图接口与旧客户端在 cut 6 的首拒见 public-query-gap-evidence.json；固定切面投影另验)"
     )
 finally:
     for d in reversed(started_domains):

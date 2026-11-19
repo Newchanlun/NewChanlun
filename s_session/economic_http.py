@@ -60,6 +60,12 @@ def get(handler):
                                if query.manifest.get("clock", {}).get("kind") == "logical-bar/1" else {}),
                             **({"read_pages": {"schema_revision":"economic-read-pages/1", "owner_epochs":query.epochs}}
                                if query.command_read_pages else {}),
+                            **({"read_projection": {
+                                "schema_revision": "economic-read-projection/1",
+                                "transport_revision": "economic-read-pages/1",
+                                "owner_epochs": query.epochs,
+                                "original_kinds": ["fact", "allocation", "decision", "grant", "command", "model"],
+                            }} if query.read_projection_available else {}),
                             **({"book_revision": query.book_revision} if query.book_revision is not None else {}),
                             **({"finance_revision": query.finance_revision} if query.manifest.get("finance") else {})})
     return True

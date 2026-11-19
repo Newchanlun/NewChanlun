@@ -15,6 +15,7 @@ mod finance_transport;
 mod financial_reader_resources;
 mod phase_trace;
 mod quantity_calibration;
+mod read_projection;
 mod service;
 mod sr_expansion;
 mod store;

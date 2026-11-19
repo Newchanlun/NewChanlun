@@ -745,12 +745,7 @@ pub(super) struct StoredImage {
     pub bytes: usize,
 }
 
-pub(super) fn stored_image(
-    c: &Connection,
-    seq: i64,
-    maximum: usize,
-) -> Result<StoredImage, String> {
-    // CAST 为 BLOB 很关键：SQLite TEXT 的 length/substr 是字符数，并非 UTF-8 字节数。
+pub(super) fn stored_image_meta(c: &Connection, seq: i64) -> Result<StoredImage, String> {
     let row: Option<(String, String, String, i64)> = c
         .query_row(
             "SELECT root,prev_root,commit_ns,length(CAST(image AS BLOB)) FROM commits WHERE seq=?",
@@ -762,8 +757,8 @@ pub(super) fn stored_image(
     let (root, previous_root, commit_ns, bytes) =
         row.ok_or("MissingDependency：指定历史cut不存在")?;
     let bytes = usize::try_from(bytes).map_err(err)?;
-    if bytes == 0 || bytes > maximum {
-        return Err("Incomplete：完整持久图像超出读取逻辑字节帽".into());
+    if bytes == 0 {
+        return Err("StorageUnavailable：持久图像为空".into());
     }
     Ok(StoredImage {
         seq,
@@ -772,6 +767,19 @@ pub(super) fn stored_image(
         commit_ns,
         bytes,
     })
+}
+
+pub(super) fn stored_image(
+    c: &Connection,
+    seq: i64,
+    maximum: usize,
+) -> Result<StoredImage, String> {
+    // CAST 为 BLOB 很关键：SQLite TEXT 的 length/substr 是字符数，并非 UTF-8 字节数。
+    let image = stored_image_meta(c, seq)?;
+    if image.bytes > maximum {
+        return Err("Incomplete：完整持久图像超出读取逻辑字节帽".into());
+    }
+    Ok(image)
 }
 
 pub(super) fn stored_image_bytes(

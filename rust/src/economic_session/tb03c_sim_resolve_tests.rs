@@ -119,8 +119,28 @@ impl Env {
         let mut routes = vec![];
 
         for (name, family, fixed, qty, cash, new_qty, price, fee, concurrency) in [
-            ("alpha", alpha_family, "12", "4", "40", "2", "14", "2", "single"),
-            ("beta", "family-beta", "20", "15", "50", "3", "12", "4", "batched"),
+            (
+                "alpha",
+                alpha_family,
+                "12",
+                "4",
+                "40",
+                "2",
+                "14",
+                "2",
+                "single",
+            ),
+            (
+                "beta",
+                "family-beta",
+                "20",
+                "15",
+                "50",
+                "3",
+                "12",
+                "4",
+                "batched",
+            ),
         ] {
             let mut doc = book::tests::document();
             let ev = &mut doc["events"][0];
@@ -149,11 +169,10 @@ impl Env {
                 "units": doc["units"]
             }));
             // F1：baseline 只覆盖开账，不预列任何未来成交或费用！
-            covered.push(json!({"fact_key": fk, "fact_hash": fh, "token": format!("token-{name}")}));
+            covered
+                .push(json!({"fact_key": fk, "fact_hash": fh, "token": format!("token-{name}")}));
 
-            let reference = |id: &str| {
-                json!({"authority_id":name,"object_id":id,"revision":"0","content_hash":book::hash(&json!(id))})
-            };
+            let reference = |id: &str| json!({"authority_id":name,"object_id":id,"revision":"0","content_hash":book::hash(&json!(id))});
             let bind = json!({
                 "op":"BindVoice",
                 "binding_id":format!("voice-{name}"),
@@ -250,17 +269,19 @@ impl Env {
 
         let conditions: Vec<Value> = CONDITIONS
             .iter()
-            .map(|(id, cap, stage)| json!({
-                "condition_id":id,
-                "authority_revision":cap,
-                "dependency_set":["controlled-dependency"],
-                "invalidation_sources":["controlled-invalidation"],
-                "required_check_stages":[stage],
-                "evidence_refs":["controlled-evidence"],
-                "coverage_proof":"controlled-coverage",
-                "validator_capability":cap,
-                "failure_result":"Denied"
-            }))
+            .map(|(id, cap, stage)| {
+                json!({
+                    "condition_id":id,
+                    "authority_revision":cap,
+                    "dependency_set":["controlled-dependency"],
+                    "invalidation_sources":["controlled-invalidation"],
+                    "required_check_stages":[stage],
+                    "evidence_refs":["controlled-evidence"],
+                    "coverage_proof":"controlled-coverage",
+                    "validator_capability":cap,
+                    "failure_result":"Denied"
+                })
+            })
             .collect();
         let domain = |c: &str| json!({"order_kind":"limit","concurrency":c,"allocation_model":"#1349/atomic-slot-wait/v1"});
         let applicants = json!(["alpha", "beta"]);
@@ -361,7 +382,13 @@ impl Env {
 
         let mut bars = serde_json::Map::new();
         for i in 0..256 {
-            let bar = if i < 14 { "1" } else if i == 14 { "2" } else { "3" };
+            let bar = if i < 14 {
+                "1"
+            } else if i == 14 {
+                "2"
+            } else {
+                "3"
+            };
             bars.insert(format!("m-{i}"), json!(bar));
         }
         for name in [
@@ -475,7 +502,13 @@ impl Env {
         }
     }
 
-    fn send_as(&mut self, owner: usize, source: (&str, &str, &str, &str), msg: &str, payload: Value) -> Value {
+    fn send_as(
+        &mut self,
+        owner: usize,
+        source: (&str, &str, &str, &str),
+        msg: &str,
+        payload: Value,
+    ) -> Value {
         let e = json!({
             "schema_revision": "economic-session/1",
             "session_id": SESSION,
@@ -593,10 +626,7 @@ impl Env {
         assert_eq!(res["record"]["state"], "Reserved", "{res}");
         let grants = res["record"]["grants"].as_array().unwrap().clone();
         let grant_of = |d: &str| {
-            grants
-                .iter()
-                .find(|g| g["decision_id"] == d)
-                .unwrap()["grant_id"]
+            grants.iter().find(|g| g["decision_id"] == d).unwrap()["grant_id"]
                 .as_str()
                 .unwrap()
                 .to_owned()
@@ -864,14 +894,20 @@ fn tb04f_single_owner_fresh_db_fill_and_fee_resolve_apply_recover_and_negatives(
         json!({"op":"ApplyAllocation","fact_key":fill_rec["fact_key"],"allocation_id":"alloc-alpha","expected_fact_hash":fill_rec["fact_hash"]}),
     );
     assert_eq!(bad_id["kind"], "Error", "{bad_id}");
-    assert!(bad_id["error"].as_str().unwrap().starts_with("IdentityConflict"));
+    assert!(bad_id["error"]
+        .as_str()
+        .unwrap()
+        .starts_with("IdentityConflict"));
     let bad_hash = env.biz_named(
         ALPHA,
         "apply-bad-hash",
         json!({"op":"ApplyAllocation","fact_key":fill_rec["fact_key"],"allocation_id":fill_alloc_id,"expected_fact_hash":"0".repeat(64)}),
     );
     assert_eq!(bad_hash["kind"], "Error", "{bad_hash}");
-    assert!(bad_hash["error"].as_str().unwrap().starts_with("IdentityConflict"));
+    assert!(bad_hash["error"]
+        .as_str()
+        .unwrap()
+        .starts_with("IdentityConflict"));
 
     // 3. B:alpha 唯一应用 fill，再唯一应用 fee
     let fill_app = env.biz_named(
@@ -903,9 +939,15 @@ fn tb04f_single_owner_fresh_db_fill_and_fee_resolve_apply_recover_and_negatives(
     assert_eq!(book_after["cost_totals"]["commission"], "0");
     assert_eq!(book_after["cost_totals"]["fee_only"], "1");
     assert_eq!(book_after["cost_basis"]["K"], "80029");
-    assert_eq!(book_after["cost_remaining"], json!({"status":"Known","value":"80029"}));
+    assert_eq!(
+        book_after["cost_remaining"],
+        json!({"status":"Known","value":"80029"})
+    );
     assert_eq!(book_after["principal"]["status"], "NotEvaluable");
-    assert_eq!(book_after["phase"]["growth_enabled"]["status"], "NotEvaluable");
+    assert_eq!(
+        book_after["phase"]["growth_enabled"]["status"],
+        "NotEvaluable"
+    );
 
     // B:beta 全程不动；E 总责任维持 90（ADR 0060 §3，不从 28+1 提前减责）
     assert_eq!(store::latest(&env.dbs[BETA]).unwrap(), beta_before);
@@ -964,7 +1006,10 @@ fn tb04f_single_owner_batch_resolve_and_wrong_command_over_qty_family_mismatch_n
     let rej = env.resolve("resolve-bad", "ev-over", &[&rec], "3");
     assert_eq!(rej["kind"], "Error", "{rej}");
     assert!(
-        rej["error"].as_str().unwrap().contains("超出原 grant 授权数量"),
+        rej["error"]
+            .as_str()
+            .unwrap()
+            .contains("超出原 grant 授权数量"),
         "{rej}"
     );
     assert_eq!(store::latest(&env.dbs[E]).unwrap(), e_before);
@@ -996,9 +1041,18 @@ fn tb04f_single_owner_batch_resolve_and_wrong_command_over_qty_family_mismatch_n
     let fee_rec = env_fam.x_capture("capture-fee", &fee_doc, "tok-fee");
     let batch = env_fam.resolve("resolve-batch", "ev-batch", &[&fill_rec, &fee_rec], "3");
     assert_eq!(batch["kind"], "Resolved", "{batch}");
-    let rows = env_fam.image(E)["fill_allocations"].as_array().unwrap().clone();
-    let fill_aid = rows[0]["allocations"][0]["allocation_id"].as_str().unwrap().to_owned();
-    let fee_aid = rows[1]["allocations"][0]["allocation_id"].as_str().unwrap().to_owned();
+    let rows = env_fam.image(E)["fill_allocations"]
+        .as_array()
+        .unwrap()
+        .clone();
+    let fill_aid = rows[0]["allocations"][0]["allocation_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let fee_aid = rows[1]["allocations"][0]["allocation_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
     let unmatched = env_fam.biz_named(
         ALPHA,
         "apply-fill",
@@ -1070,4 +1124,3 @@ fn tb04f_single_owner_refuses_fin5_without_version_relaxation() {
         "expected VersionUnsupported from resolve, got: {err_resolve}"
     );
 }
-

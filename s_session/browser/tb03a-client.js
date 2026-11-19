@@ -644,9 +644,152 @@
     need(value.snapshot_token === "economic-snapshot-" + await sha256(body), "固定向量 token 与完整图像不同");
     return value;
   }
+  const PROJECTION_REV = "economic-read-projection/1";
+  const PROJECTION_ORIG_KINDS = ["fact", "allocation", "decision", "grant", "command", "model"];
+  async function utf8Sha256(text) {
+    return bytesHash(new TextEncoder().encode(text));
+  }
+  function checkReadError(reply, rev) {
+    if (object(reply) && reply.kind === "EconomicReadError") {
+      keys(reply, ["schema_revision", "kind", "code", "detail", "transfer_id"], "分页错误");
+      need(reply.schema_revision === rev && typeof reply.code === "string" && reply.code.length > 0
+        && typeof reply.detail === "string" && reply.detail.length > 0, "分页错误格式非法");
+      throw new Error(reply.detail.startsWith(reply.code) ? reply.detail : reply.code + "：" + reply.detail);
+    }
+  }
+  async function verifyProjectedBook(book, domain, discovery) {
+    if (domain === "E") { need(book === null, "E 不能伪装重账"); return; }
+    if (book === null) return;
+    need(object(book) && domain === "B:" + book.chong_id, "重归属与权威域不同");
+    need(book.book_revision === discovery.book_revision, "投影书账版本与冻结域不同");
+    integer(book.fixed_q, true); integer(book.operation_level);
+    integer(book.actual_quantity, false, true); integer(book.opening_quantity, false, true);
+    keys(book.income_book, ["Pi", "A", "W", "R"], "利润账");
+    for (const amount of Object.values(book.income_book)) integer(amount, false, true);
+    if (book.book_revision === "tb03c-book/1") {
+      need(object(book.cost_totals), "tb03c 成本汇总缺失");
+      integer(book.cost_totals.acquisition_cash, false, true);
+      integer(book.cost_totals.commission, false, true);
+      integer(book.cost_totals.fee_only, false, true);
+      need(object(book.cost_basis), "tb03c 成本基数缺失");
+      integer(book.cost_basis.K, false, true);
+      need(object(book.cost_remaining) && object(book.principal) && object(book.phase), "tb03c 余量/本金/阶段缺失");
+      if (book.cost_remaining.status === "Known") integer(book.cost_remaining.value, false, true);
+    }
+  }
+  async function verifyProjection(value, discovery) {
+    need(object(discovery.read_projection), "会话未声明只读投影能力");
+    keys(value, ["kind", "projection_revision", "session_id", "session_generation", "manifest_hash",
+      "mode", "as_known_ns", "domains", "projection_completeness", "projection_token"], "经济投影");
+    need(value.kind === "EconomicProjection" && value.projection_revision === PROJECTION_REV
+      && value.session_id === discovery.session_id && value.session_generation === discovery.session_generation
+      && value.manifest_hash === discovery.manifest_hash, "经济投影身份或版本不符");
+    need(value.mode === "Current" || value.mode === "AsKnown", "未知投影历史模式");
+    if (value.as_known_ns !== null) integer(value.as_known_ns);
+    keys(value.domains, discovery.domains, "投影域集合");
+    let complete = true;
+    for (const domain of discovery.domains) {
+      const view = value.domains[domain];
+      if (view.status === "Unavailable") {
+        keys(view, ["status", "error"], "不可用投影域");
+        need(typeof view.error === "string" && view.error.length > 0, "投影域不可用原因缺失");
+        complete = false;
+        continue;
+      }
+      keys(view, ["status", "projection_revision", "cut", "commit_ns", "writer_epoch", "audit_verified",
+        "authoritative_image_hash", "authoritative_image_bytes", "projection_hash", "projection_bytes",
+        "omitted_peer_images", "projection"], "可用投影域");
+      need(view.status === "Available" && view.projection_revision === PROJECTION_REV
+        && view.audit_verified === true
+        && view.writer_epoch === discovery.read_projection.owner_epochs[domain], "投影域状态、审计确认或 epoch 不符");
+      cut(view.cut, domain);
+      integer(view.commit_ns);
+      if (value.as_known_ns !== null) need(BigInt(view.commit_ns) <= BigInt(value.as_known_ns), "投影晚于获知截止时刻");
+      digest(view.authoritative_image_hash, "权威原像摘要");
+      integer(view.authoritative_image_bytes, true);
+      digest(view.projection_hash, "投影摘要");
+      const projBytes = new TextEncoder().encode(canonical(view.projection));
+      need(await bytesHash(projBytes) === view.projection_hash
+        && String(projBytes.byteLength) === view.projection_bytes, "投影正文摘要或字节长度不符");
+      need(Array.isArray(view.omitted_peer_images), "省略证明锚点列表缺失");
+      for (const om of view.omitted_peer_images) {
+        keys(om, ["path", "omitted_kind", "sha256", "byte_len"], "省略证明锚点");
+        need(typeof om.path === "string" && om.path.length > 0 && om.omitted_kind === "EmbeddedPeerImage", "省略锚点类型非法");
+        digest(om.sha256, "省略锚点摘要"); integer(om.byte_len, true);
+      }
+      const proj = view.projection;
+      need(object(proj), "投影正文非对象");
+      for (const k of ["recorded", "pending", "applied", "unmatched", "history"]) need(Array.isArray(proj[k]), "投影记录族非数组");
+      for (const rec of proj.recorded) {
+        need(object(rec) && typeof rec.raw_utf8 === "string", "投影事实缺少原件字节");
+        digest(rec.raw_sha256, "raw_sha256");
+        need(await utf8Sha256(rec.raw_utf8) === rec.raw_sha256, "投影事实 raw_utf8 与 raw_sha256 不符");
+      }
+      if (proj.finance !== undefined) {
+        need(object(proj.finance) && proj.finance.schema_revision === discovery.finance_revision, "投影财务版本不符");
+      }
+      await verifyProjectedBook(proj.book, domain, discovery);
+    }
+    need(value.projection_completeness === (complete ? "CompleteProjectionVector" : "PartialProjectionVector"), "投影完整性声明与域状态不符");
+    const body = {...value}; delete body.projection_token;
+    need(value.projection_token === "economic-projection-" + await sha256(body), "投影固定向量 token 与正文不符");
+    return value;
+  }
+  async function verifyProjectionOriginal(reply, state, discovery, domain, kind, id) {
+    need(state && state.kind === "EconomicProjection" && state.projection_completeness === "CompleteProjectionVector", "同切面取证需要完整投影向量");
+    keys(reply, ["kind", "projection_revision", "session_id", "session_generation", "manifest_hash",
+      "cuts", "domain_id", "original_kind", "object_id", "authoritative_image_hash",
+      "authoritative_image_bytes", "commit_ns", "writer_epoch", "original"], "同切面投影原件");
+    const cuts = Object.fromEntries(Object.entries(state.domains).map(([d, v]) => [d, v.cut]));
+    const view = state.domains[domain];
+    need(reply.kind === "EconomicProjectionOriginal" && reply.projection_revision === PROJECTION_REV
+      && reply.session_id === state.session_id && reply.session_generation === state.session_generation
+      && reply.manifest_hash === state.manifest_hash && reply.domain_id === domain
+      && reply.original_kind === kind && reply.object_id === id && same(reply.cuts, cuts)
+      && reply.authoritative_image_hash === view.authoritative_image_hash
+      && reply.authoritative_image_bytes === view.authoritative_image_bytes
+      && reply.commit_ns === view.commit_ns && reply.writer_epoch === view.writer_epoch, "同切面原件与固定投影切面不符");
+    const o = reply.original;
+    need(object(o), "同切面原件载荷非对象");
+    const maxSeq = BigInt(cuts[domain].commit_seq);
+    const checkFact = async (f) => {
+      need(object(f) && typeof f.raw_utf8 === "string", "事实原件缺 raw_utf8");
+      digest(f.raw_sha256, "raw_sha256");
+      need(await utf8Sha256(f.raw_utf8) === f.raw_sha256, "事实原件精确字节与 raw_sha256 不符");
+      need(object(f.raw_exact_text) && f.raw_exact_text.representation === "ExactDecimalIntegerTextProjection"
+        && f.raw_exact_text.raw_sha256 === f.raw_sha256, "事实精确文本视图绑定不符");
+      for (const r of (f.receipts || [])) {
+        cut(r.cut, r.domain_id);
+        if (r.domain_id === domain) need(BigInt(r.cut.commit_seq) <= maxSeq, "事实回执晚于固定切面");
+      }
+    };
+    if (kind === "fact") await checkFact(o);
+    else if (kind === "allocation") {
+      await checkFact(o.fact);
+      const rec = domain === "E" ? o.resolve_receipt : o.receipt;
+      cut(rec.cut, domain);
+      need(BigInt(rec.cut.commit_seq) <= maxSeq, "分配回执晚于固定切面");
+    } else if (kind === "model") {
+      need(object(o.model_ref), "模型原件缺 model_ref");
+      digest(o.model_ref.content_hash, "model_ref.content_hash");
+      if (o.model_raw_utf8 !== null) {
+        need(typeof o.model_raw_utf8 === "string"
+          && await utf8Sha256(o.model_raw_utf8) === o.model_ref.content_hash, "模型原件字节与 model_ref.content_hash 不符");
+        need(object(o.model_exact_text) && o.model_exact_text.representation === "ExactDecimalIntegerTextProjection"
+          && o.model_exact_text.content_hash === o.model_ref.content_hash, "模型精确文本视图绑定不符");
+      }
+    } else if (["decision", "grant", "command"].includes(kind)) {
+      const recs = kind === "grant" ? [o.receipt] : (o.receipts || []);
+      for (const r of recs) {
+        cut(r.cut, domain);
+        need(BigInt(r.cut.commit_seq) <= maxSeq, "财务回执晚于固定切面");
+      }
+    }
+    return reply;
+  }
   class Client {
     constructor({fetcher = globalThis.fetch.bind(globalThis), onCommit = () => {}} = {}) {
-      this.fetcher = fetcher; this.onCommit = onCommit; this.discovery = null; this.state = null; this.epoch = 0;
+      this.fetcher = fetcher; this.onCommit = onCommit; this.discovery = null; this.state = null; this.epoch = 0; this.readLog = [];
     }
     async fetchBounded(path, options, timeout, limit) {
       const control = new AbortController(), timer = setTimeout(() => control.abort(), timeout); // DevSkim: ignore DS172411 回调为函数字面量而非字符串
@@ -681,11 +824,20 @@
         keys(d.read_pages.owner_epochs,d.domains,"分页 owner 代际");
         Object.values(d.read_pages.owner_epochs).forEach(n=>integer(n,true));
       }
+      if(d.read_projection!==undefined){
+        keys(d.read_projection,["schema_revision","transport_revision","owner_epochs","original_kinds"],"经济投影能力");
+        need(d.finance_revision==="tb03b-finance/6" && d.read_projection.schema_revision===PROJECTION_REV
+          && d.read_projection.transport_revision==="economic-read-pages/1","未知经济投影合同");
+        keys(d.read_projection.owner_epochs,d.domains,"投影 owner 代际");
+        Object.values(d.read_projection.owner_epochs).forEach(n=>integer(n,true));
+        need(Array.isArray(d.read_projection.original_kinds)
+          && d.read_projection.original_kinds.every(k=>PROJECTION_ORIG_KINDS.includes(k)),"投影原件类型非法");
+      }
       this.discovery = d; return d;
     }
     async query(payload, deadline = null) {
       const d = await this.discover();
-      if(d.read_pages && ["snapshot","watch"].includes(payload.op)){
+      if(d.read_pages && ["snapshot","watch","projection","projection_original"].includes(payload.op)){
         const end = performance.now()+Math.min(30000,Number(d.operation_timeout_ms));
         return this.pagedQuery(payload,Math.min(deadline??end,end));
       }
@@ -693,15 +845,20 @@
     }
     async pagedQuery(query, deadline) {
       const d=this.discovery, rev=d.read_pages.schema_revision;
+      const expectedKindMap={snapshot:"EconomicSnapshot",watch:"EconomicWatch",projection:"EconomicProjection",projection_original:"EconomicProjectionOriginal"};
+      const expectedKind=expectedKindMap[query.op];
+      need(typeof expectedKind==="string","未知分页查询类型");
       const remaining=()=>{const ms=Math.floor(deadline-performance.now());need(ms>0,"完整分页查询超时");return String(ms);};
       const call=(op,body)=>this.rpc({op,schema_revision:rev,...body},"read",deadline);
       const opened=await call("EconomicReadOpen",{query,requested_remaining_ms:remaining()});
+      checkReadError(opened, rev);
       keys(opened,["schema_revision","kind","descriptor","descriptor_sha256"],"分页 Open");
       const h=opened.descriptor, binding={transfer_id:h.transfer_id,descriptor_sha256:opened.descriptor_sha256};
       need(opened.schema_revision===rev && opened.kind==="EconomicReadOpened" && /^[0-9a-f]{32}$/.test(h.transfer_id)
         && opened.descriptor_sha256===await sha256(h),"分页描述符摘要或传输身份不同");
       const close=async()=>{
         const closed=await call("EconomicReadClose",binding);
+        checkReadError(closed, rev);
         need(same(closed,{schema_revision:rev,kind:"EconomicReadClosed",...binding}),"分页关闭未确认");
       };
       let doc;
@@ -711,12 +868,13 @@
         need(h.schema_revision===rev && h.session_id===d.session_id && h.session_generation===d.session_generation
           && h.manifest_hash===d.manifest_hash && h.producer_id==="Q:"+d.session_id && h.producer_epoch===d.producer_epoch
           && same(h.owner_epochs,d.read_pages.owner_epochs) && h.query_sha256===await sha256(query)
-          && h.document_kind===(query.op==="watch"?"EconomicWatch":"EconomicSnapshot"),"分页描述符不属于本次查询");
+          && h.document_kind===expectedKind,"分页描述符不属于本次查询");
         const size=Number(integer(h.document_bytes,true)),chunk=262144;
         need(size<=4194304 && h.chunk_bytes===String(chunk) && h.page_count===String(Math.ceil(size/chunk)),"分页容量或页数错误");
         const bytes=new Uint8Array(size);
         for(let i=0;i<size;i+=chunk){
           const page=await call("EconomicReadPage",{...binding,offset:String(i),requested_remaining_ms:remaining()});
+          checkReadError(page, rev);
           const n=Math.min(chunk,size-i),done=i+n===size;
           keys(page,["schema_revision","kind","transfer_id","descriptor_sha256","offset","raw_byte_count","chunk_sha256","data_base64","next_offset","done"],"分页数据");
           need(page.schema_revision===rev && page.kind==="EconomicReadPage" && page.transfer_id===binding.transfer_id
@@ -731,10 +889,16 @@
         const raw=new TextDecoder("utf-8",{fatal:true}).decode(bytes); doc=parse(raw);
         need(canonical(doc)===raw && doc.kind===h.document_kind && doc.manifest_hash===h.manifest_hash
           && doc.session_id===h.session_id && doc.session_generation===h.session_generation,"分页正文身份或编码不同");
-        keys(doc.domains,d.domains,"分页文档域");
-        const fixed=Object.fromEntries(Object.entries(doc.domains).map(([id,v])=>[id,v.status==="Available"?
-          (query.op==="snapshot"?v.cut:v.next_cut):null]));
-        need(same(fixed,h.fixed_cuts),"分页文档切面与描述符不同");
+        if(query.op==="projection_original"){
+          keys(doc.cuts,d.domains,"同切面原件固定切面");
+          need(same(doc.cuts,h.fixed_cuts),"同切面原件切面与描述符不同");
+        } else {
+          keys(doc.domains,d.domains,"分页文档域");
+          const fixed=Object.fromEntries(Object.entries(doc.domains).map(([id,v])=>[id,v.status==="Available"?
+            (["snapshot","projection"].includes(query.op)?v.cut:v.next_cut):null]));
+          need(same(fixed,h.fixed_cuts),"分页文档切面与描述符不同");
+        }
+        this.readLog.push({op:query.op,document_kind:h.document_kind,document_bytes:size,page_count:Number(h.page_count),document_sha256:h.document_sha256,fixed_cuts:h.fixed_cuts});
       } catch (error) {
         try { await close(); } catch { /* 保留首个错误；Q 会按原期限回收传输。 */ }
         throw error;
@@ -782,7 +946,47 @@
       if (epoch === this.epoch) { this.state = result; this.onCommit(result); }
       return result;
     }
+    async loadProjection({cuts = null, asKnown = null, token = null} = {}) {
+      const d = await this.discover();
+      need(object(d.read_projection), "会话未声明 economic-read-projection/1");
+      const epoch = ++this.epoch;
+      const result = await this.query({
+        op: "projection",
+        projection_revision: PROJECTION_REV,
+        cuts,
+        as_known_ns: asKnown,
+        projection_token: token,
+      });
+      need(result.kind !== "Gap", "固定投影切面已过期，请重新读取当前投影向量");
+      await verifyProjection(result, this.discovery);
+      if (token !== null) need(result.projection_token === token, "返回了另一个投影固定 token");
+      else {
+        need(result.mode === (cuts !== null || asKnown !== null ? "AsKnown" : "Current") &&
+          result.as_known_ns === asKnown, "投影历史模式或获知时刻与原请求不同");
+      }
+      if (cuts !== null) for (const [domain, expected] of Object.entries(cuts)) {
+        const view = result.domains[domain];
+        if (view.status === "Available") need(same(view.cut, expected), "投影回看返回其他切面");
+      }
+      if (epoch === this.epoch) { this.state = result; this.onCommit(result); }
+      return result;
+    }
+    async projectionOriginal(state, domain, kind, id) {
+      const cuts = Object.fromEntries(Object.entries(state.domains).map(([d, v]) => [d, v.cut]));
+      const result = await this.query({
+        op: "projection_original",
+        projection_revision: PROJECTION_REV,
+        domain_id: domain,
+        kind,
+        object_id: id,
+        cuts,
+      });
+      return verifyProjectionOriginal(result, state, this.discovery, domain, kind, id);
+    }
     async original(state, domain, kind, id) {
+      if (state && state.kind === "EconomicProjection") {
+        return this.projectionOriginal(state, domain, kind, id);
+      }
       const cuts=Object.fromEntries(Object.entries(state.domains).map(([d,v])=>[d,v.cut]));
       const result=await this.query({op:"original",kind,domain_id:domain,object_id:id,cuts});
       return verifyOriginal(result,state,this.discovery,domain,kind,id);
@@ -835,5 +1039,5 @@
       return snapshot;
     }
   }
-  return Object.freeze({Client, verifySnapshot, verifyOriginal, canonical, parse, sha256});
+  return Object.freeze({Client, verifySnapshot, verifyOriginal, verifyProjection, verifyProjectionOriginal, canonical, parse, sha256});
 });

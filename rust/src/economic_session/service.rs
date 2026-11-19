@@ -15,8 +15,8 @@ use std::time::Duration;
 
 // #1406 C6a：分页是单独、显式授权的只读协议，不接管旧单帧读失败。
 const READ_PAGES: &str = "economic-read-pages/1";
-const READ_CHUNK: usize = 262_144;
-const READ_CACHE: usize = 4 * 1_048_576;
+pub(super) const READ_CHUNK: usize = 262_144;
+pub(super) const READ_CACHE: usize = 4 * 1_048_576;
 const READ_FRAME: usize = 1_048_576;
 const READ_TRANSFERS: usize = 4;
 const READ_CHANGES: usize = 32;
@@ -29,6 +29,7 @@ struct ReadTransfer {
     descriptor_hash: String,
     document: Option<Vec<u8>>,
     cuts: Vec<StoredImage>,
+    allow_oversize_source_cut: bool,
     deadline: std::time::Instant,
 }
 impl ReadTransfer {
@@ -236,18 +237,48 @@ fn fixed_read_document(
     runtime: &Value,
     query: &Value,
     deadline: std::time::Instant,
-) -> Result<(Vec<u8>, Vec<StoredImage>, StoredImage, &'static str), String> {
+) -> Result<(Vec<u8>, Vec<StoredImage>, StoredImage, &'static str, bool), String> {
     let tx = c.transaction().map_err(err)?;
     check_operation_deadline(None, Some(deadline))?;
     check_epoch(&tx, epoch)?;
     let operation = required(query, "op")?;
     let mut cuts = Vec::new();
     let mut changes = Vec::new();
+    let mut allow_oversize_source = false;
     let next = match operation {
         "ReadView" => {
             exact(query, &["op", "cut", "as_known_ns"])?;
             let selected = selected_image_meta(&tx, config, query)?;
             cuts.push(selected.clone());
+            selected
+        }
+        super::read_projection::OP_READ_PROJECTION => {
+            exact(query, &["op", "projection_revision", "cut", "as_known_ns"])?;
+            if required(query, "projection_revision")?
+                != super::read_projection::PROJECTION_REVISION
+            {
+                return Err("SchemaUnsupported：未知只读经济投影版本".into());
+            }
+            let selected =
+                super::read_projection::select_projection_meta(&tx, config, query, false)?;
+            cuts.push(selected.clone());
+            allow_oversize_source = true;
+            selected
+        }
+        super::read_projection::OP_READ_ORIGINAL_AT_CUT => {
+            exact(
+                query,
+                &["op", "projection_revision", "cut", "kind", "object_id"],
+            )?;
+            if required(query, "projection_revision")?
+                != super::read_projection::PROJECTION_REVISION
+            {
+                return Err("SchemaUnsupported：未知只读经济投影版本".into());
+            }
+            let selected =
+                super::read_projection::select_projection_meta(&tx, config, query, true)?;
+            cuts.push(selected.clone());
+            allow_oversize_source = true;
             selected
         }
         "Watch" => {
@@ -296,7 +327,12 @@ fn fixed_read_document(
             }
             next
         }
-        _ => return Err("SchemaUnsupported：分页只接受ReadView/Watch".into()),
+        _ => {
+            return Err(
+                "SchemaUnsupported：分页只接受ReadView/Watch/ReadProjection/ReadOriginalAtCut"
+                    .into(),
+            )
+        }
     };
     // 每次 open 沿原审计核一次；所有 SQL 的检查共享本读截止。续页不重跑历史。
     let mut job = if config.revision()? == SCHEMA_V2 {
@@ -309,6 +345,31 @@ fn fixed_read_document(
         let raw = fixed_image_bytes(&tx, &next, deadline)?;
         let fields = json!({"kind":"EconomicView","domain_id":config.domain,"cut":cut(config,next.seq,&next.root),"image_hash":sha256_hex(&raw),"image":null,"commit_ns":next.commit_ns,"writer_epoch":epoch.to_string(),"runtime":runtime});
         (read_object(&fields, "image", &raw)?, "EconomicView")
+    } else if operation == super::read_projection::OP_READ_PROJECTION {
+        let doc = super::read_projection::build_projection_document(
+            &tx,
+            config,
+            epoch,
+            runtime,
+            &next,
+            job.as_mut(),
+            deadline,
+        )?;
+        (doc, super::read_projection::KIND_PROJECTION_VIEW)
+    } else if operation == super::read_projection::OP_READ_ORIGINAL_AT_CUT {
+        let kind = required(query, "kind")?;
+        let object_id = required(query, "object_id")?;
+        let doc = super::read_projection::build_original_at_cut_document(
+            &tx,
+            config,
+            epoch,
+            &next,
+            kind,
+            object_id,
+            job.as_mut(),
+            deadline,
+        )?;
+        (doc, super::read_projection::KIND_ORIGINAL_AT_CUT)
     } else {
         let mut array = Vec::new();
         append_read_bytes(&mut array, b"[")?;
@@ -327,7 +388,7 @@ fn fixed_read_document(
     };
     check_operation_deadline(None, Some(deadline))?;
     tx.commit().map_err(err)?;
-    Ok((document, cuts, next, kind))
+    Ok((document, cuts, next, kind, allow_oversize_source))
 }
 
 fn checked_transfer_roots(
@@ -350,7 +411,12 @@ fn checked_transfer_roots(
         }
     }
     for image in &entry.cuts {
-        if stored_image(&tx, image.seq, READ_CACHE)? != *image {
+        let current = if entry.allow_oversize_source_cut {
+            stored_image_meta(&tx, image.seq)?
+        } else {
+            stored_image(&tx, image.seq, READ_CACHE)?
+        };
+        if current != *image {
             return Err("StorageUnavailable：分页固定cut身份改变".into());
         }
         check_operation_deadline(None, Some(entry.deadline))?;
@@ -420,9 +486,19 @@ fn paged_read(
             let request_hash = hash(e);
             let query = &p["query"];
             // 分页权限不隐含扩大原逻辑查询权限。
-            let mut logical_request = e.clone();
-            logical_request["payload"] = query.clone();
-            config.authorized(&logical_request)?;
+            if matches!(
+                query.get("op").and_then(Value::as_str),
+                Some(
+                    super::read_projection::OP_READ_PROJECTION
+                        | super::read_projection::OP_READ_ORIGINAL_AT_CUT
+                )
+            ) {
+                super::read_projection::check_authorization(config, e, query)?;
+            } else {
+                let mut logical_request = e.clone();
+                logical_request["payload"] = query.clone();
+                config.authorized(&logical_request)?;
+            }
             if let Some(entry) = state
                 .entries
                 .values_mut()
@@ -457,6 +533,7 @@ fn paged_read(
                 descriptor_hash: "0".repeat(64),
                 document: None,
                 cuts: Vec::new(),
+                allow_oversize_source_cut: false,
                 deadline,
             };
             if state
@@ -468,7 +545,7 @@ fn paged_read(
             }
             // 先签去重身份：任何审计/编码失败都不能用相同 open 消息重开时间窗。
             state.entries.insert(id.clone(), entry);
-            let (document, cuts, next, kind) =
+            let (document, cuts, next, kind, allow_oversize_source_cut) =
                 fixed_read_document(c, config, epoch, runtime, query, deadline)?;
             let mut fixed_cuts = serde_json::Map::new();
             fixed_cuts.insert(config.domain.clone(), cut(config, next.seq, &next.root));
@@ -490,6 +567,7 @@ fn paged_read(
             entry.descriptor_hash = descriptor_hash;
             entry.document = Some(document);
             entry.cuts = cuts;
+            entry.allow_oversize_source_cut = allow_oversize_source_cut;
             if state.retained_bytes() > READ_CACHE {
                 state.entries.get_mut(&id).unwrap().release_document();
                 return Err("QueryBudgetExceeded：逻辑原文与分页共享元数据超过4MiB".into());

@@ -50,7 +50,8 @@ pub(super) fn check_pending(
     frontier: &Value,
     cursor: i64,
 ) -> Result<(), String> {
-    if previous.get("finance").is_none() || !super::finance::exact_release_selected(&config.manifest)
+    if previous.get("finance").is_none()
+        || !super::finance::exact_release_selected(&config.manifest)
     {
         return Err(
             "MissingDependency：模拟外部事实缺命令归属/成本/利润分量证明，Pending 保留".into(),
