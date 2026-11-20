@@ -1881,6 +1881,40 @@ fn coverage_fixture_wire() -> String {
     )
 }
 
+/// #1486：L0 的首末笔索引定位成员；导给 Lean 的价是方向极值，不是首末笔端价。
+fn assert_l0_segment_endpoint_prices(segment: &Segment, strokes: &[Stroke]) {
+    let start = strokes.partition_point(|s| s.start_index < segment.start_index);
+    let end = strokes.partition_point(|s| s.end_index <= segment.end_index);
+    let members = &strokes[start..end];
+    assert_eq!(
+        members.first().map(|s| s.start_index),
+        Some(segment.start_index),
+        "#1486：L0 段缺起笔"
+    );
+    assert_eq!(
+        members.last().map(|s| s.end_index),
+        Some(segment.end_index),
+        "#1486：L0 段缺末笔"
+    );
+    let (lo, hi) = members
+        .iter()
+        .flat_map(|s| [s.start_price, s.end_price])
+        .fold(
+            (members[0].start_price, members[0].start_price),
+            |(lo, hi), p| (lo.min(p), hi.max(p)),
+        );
+    let expected = match segment.direction {
+        Direction::Up => (lo, hi),
+        Direction::Down => (hi, lo),
+    };
+    assert_eq!(
+        (segment.start_price, segment.end_price),
+        expected,
+        "#1486：L0 段 {:?} 端价不是成员笔方向极值",
+        (segment.start_index, segment.end_index)
+    );
+}
+
 fn frontier_check(value: &FrontierCapture, path: &str, series_name: &str) -> String {
     format!(
         "checkMergedScan \"{path}\" {series_name} {} {} {} {} {} {} {}",
@@ -2867,6 +2901,11 @@ fn append_scan_checks(
             .raw_series
             .as_ref()
             .unwrap_or_else(|| panic!("bar {checkpoint} frontier 缺 batch shared raw series"));
+        for frontier in batch.frontiers.iter().filter(|frontier| frontier.level == 0) {
+            for segment in &frontier.segments {
+                assert_l0_segment_endpoint_prices(segment, &series.strokes);
+            }
+        }
         if let Some(existing) = shared_series_defs.insert(series_name.clone(), series.clone()) {
             assert_eq!(existing, *series, "bar {checkpoint} raw series 定义不一致");
         }
@@ -4432,6 +4471,43 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn l0_export_checks_directional_member_extremes() {
+        let prices = [20, 3, 9, 2, 7, 0];
+        let strokes: Vec<_> = prices
+            .windows(2)
+            .enumerate()
+            .map(|(i, p)| Stroke {
+                direction: if p[0] < p[1] {
+                    Direction::Up
+                } else {
+                    Direction::Down
+                },
+                start_index: i,
+                end_index: i + 1,
+                start_price: p[0],
+                end_price: p[1],
+            })
+            .collect();
+        let normalized = Segment {
+            direction: Direction::Up,
+            start_index: 1,
+            end_index: 4,
+            start_price: 2,
+            end_price: 9,
+        };
+        assert_l0_segment_endpoint_prices(&normalized, &strokes);
+        let geometric = Segment {
+            start_price: 3,
+            end_price: 7,
+            ..normalized
+        };
+        assert!(std::panic::catch_unwind(|| {
+            assert_l0_segment_endpoint_prices(&geometric, &strokes);
+        })
+        .is_err());
+    }
 
     fn raw_stroke_fixture(end_index: usize) -> Stroke {
         Stroke {
