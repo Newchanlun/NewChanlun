@@ -1,8 +1,8 @@
 # #2079 考古：原会话端点同址换代
 
-取证基线：`5a1ac9de73766f0a943c156f97cb467b7d690218`，分支 `decision/2079`，初始 main 原件 `b9d898dccf46c2a716115eaa1215bc39c458a959`。分类 **P**：ADR 0039 已裁启动、监督和换代；ADR 0059 明留残留名字处置。给未来受管部署定义持续发布和退役权，是新的 OS 权限归属取舍。按 #1909 起草、非作者独审后由代理裁定。硬门清单为空（`userGate: []`）；本票不授予实际 unlink、部署、隔离、资金、账户、场所、密钥或凭据权限。
+第一轮取证基线：`5a1ac9de73766f0a943c156f97cb467b7d690218`，分支 `decision/2079`，两轮落地 main `b9d898dccf46c2a716115eaa1215bc39c458a959`。分类 **P**：ADR 0039 已裁启动、监督和换代；ADR 0059 明留残留名字处置。给未来受管部署定义持续发布和退役权，是新的 OS 权限归属取舍。按 #1909 起草、非作者独审后由代理裁定。硬门清单为空（`userGate: []`）；本票不授予实际 unlink、部署、隔离、资金、账户、场所、密钥或凭据权限。
 
-tracker 使用含 title/body/comments 的查询并包含已关闭票。仓内 `rg -n` 覆盖 `analysis/ docs/ .chanlun/`，逐点原输出见相邻 Qn 文件。PR 不计为 issue 搜索命中：用 PR 工具读 #2077、#2082、#2065、#2088，再读精确 Git 原件。零/少量命中只描述对应检索式；旧候选、评论、代码及探针不能代替已有正本。Q6 待决的是生产状态与中断恢复，不把本轮草稿中的提议写成旧先例。
+tracker 使用含 title/body/comments 的查询并包含已关闭票。仓内 `rg -n` 覆盖 `analysis/ docs/ .chanlun/`，逐点原输出见相邻 Qn 文件。PR 不计为 issue 搜索命中：用 PR 工具读 #2077、#2082、#2065、#2088，再读精确 Git 原件。零/少量命中只描述对应检索式；旧候选、评论、代码及探针不能代替已有正本。Q6 待决的是生产状态与中断恢复，不把首稿提议写成旧先例。Q12–Q15 的仓内查询在首稿 666a1a42 上、重写前执行；0065 命中是被审首稿。
 
 
 ## Q1 [A] 正式 owner、适用范围与旧入口
@@ -92,7 +92,7 @@ tracker 使用含 title/body/comments 的查询并包含已关闭票。仓内 `r
 - 命中 329be34f 的 rust/src/economic_session/recovery.rs:111-154、rust/src/bin/production_session.rs:265-341：按同一 ID 取回已提交原回执；current-recovery 拒旧回执。launcher 只核回执，不接管名字。
 - 出处：[#2082](https://github.com/Newchanlun/NewChanlun/pull/2082) 及精确头；/Volumes/AgentStorage/issue1411-epoch-handoff-20261119/REVIEW-NAMED-RECOVERY-INDEPENDENT.md。
 - 结论：端点代不能替代库的 epoch。不能把 #2082 全 E/B 计划硬套到活着的其他域；其当前回执核验用本域锁，E 仍在持锁时不能代验。
-- 默认采纳：照原配置标识会话，换代取本域正式当前恢复凭证，serve 自己复核；B 按合同分别使用本域与 E 来源代。S/X 由各自 owner 接线，不拿 E/B 回执代用。
+- 默认采纳：照原配置标识会话，持久代等于 manifest 代时沿用；不等时取本域正式当前恢复凭证，serve 自己复核；B 按合同分别使用本域与 E 来源代。S/X 由各自 owner 接线，不拿 E/B 回执代用。
 
 ## Q9 [A] 局部服务、真实就绪和 X 外效边界
 
@@ -124,11 +124,56 @@ tracker 使用含 title/body/comments 的查询并包含已关闭票。仓内 `r
 - 结论：正式入口留第一次提交原件，再由新进程以原配置和库、实际路径及有效写者代恢复；查询同 cut、继续提交才排除假 Ready 或空库。
 - 默认采纳：四组二值验收以原回执逐字节、input-2 Committed 且持久化为正控，保留局部健康、崩溃及 SAFE 负控；不减 #1411 原有六面双跑义务。
 
+## Q12 [C] 单域退出是否由本合同重拉，如何判局部隔离
+
+- `gh issue list --search '"单域" "重启" in:title,body,comments' --state all --limit 100 --json number,state,title,url`：2 个搜索结果，见 [Q12.tracker.txt](Q12.tracker.txt)。
+- `rg -n '单域.{0,20}(重启|重拉|接续)|局部故障|一域损坏|current-recovery' analysis/ docs/ .chanlun/`：4 行，见 [Q12.repo.txt](Q12.repo.txt)。
+- 命中 #1425、#1419：tracker 两条是责任应用和结构种子；不定义局部端点重拉。
+- 命中 SPEC #1340 C09.3（efc1ddc4 的 SPEC.md:326）；#1411：已定局部故障隔离和全状态恢复，未规定单域端点重拉的执行者和凭证。
+- 命中 基线 rust/src/bin/production_session.rs:11,327-367；#2082 @329be34f 的 launcher:265-341 与 service.rs:1614-1624：现行 critical exit 回收会话；具名回执核验占域锁，显式计划要求完整 E/B 集合。
+- 结论：健康 E 持锁时不能用 current-recovery 核其回执；E 若已换代，既有 B 仍按其启动 e_epoch 核来源。不能靠换 socket 替换来源代，也不能牺牲健康域去读取局部凭证。C09.3 的隔离并不要求端点 ADR 裁定完整的单域恢复接口。
+- 推荐裁定：受管 launcher 仅隔离退出域、保持健康域，不自行重拉一域。单域重拉、单域 E/B 回执与来源代接口及其验收交 #1411，独立于本 ADR 的局部故障测试；未选入维持原监督语义。
+- 缺口去向 `decision`；检索词：单域 重启、局部故障、current-recovery。
+
+## Q13 [C] launcher 崩溃后的全会话回收证明和接续分支
+
+- `gh issue list --search '"launcher 崩溃" in:title,body,comments' --state all --limit 100 --json number,state,title,url`：0 个搜索结果，见 [Q13.tracker.txt](Q13.tracker.txt)。
+- `rg -n 'launcher.{0,16}(崩溃|被杀|强杀)|孤儿.{0,15}(回收|FD|端点)|进程退出.*发送子进程' analysis/ docs/ .chanlun/`：3 行，见 [Q13.repo.txt](Q13.repo.txt)。
+- 命中 Q13 tracker 与仓内：精确查询无命中；仓内首稿未定出具方，其他命中为未运行范围说明。
+- 命中 ADR 0039 裁定三·6；SPEC #1340 C09.8：已有旧 X 与发送子进程隔离原则，未定义 launcher 崩溃后的全会话和 FD 回收证明。
+- 命中 #2077 @b7b79657:rust/src/session_transport.rs:710-713：关停管道 EOF（含 launcher 崩溃）不是有序关停指令。
+- 结论：被强杀的 launcher 无法证明自己及派生作业已被回收。PID、EOF 与 connect 不覆盖仍活着的孤儿和监听副本。独立部署监督器须监管真实作业范围，并封堵旧作业复起。
+- 推荐裁定：选入必须有独立部署监督器；证实旧 launcher、发布作业、各域及 FD/发送子进程已回收方可启动新 launcher 并按崩溃接续。遇任一存活、暂停或证据缺失，拒绝且保留现场，不为清名杀进程。
+- 缺口去向 `decision`；检索词：launcher 崩溃、孤儿 回收 FD、发送子进程。
+
+## Q14 [C] 端点需恢复的出口、登记代作废和宿主重启取证
+
+- `gh issue list --search '"端点需恢复" in:title,body,comments' --state all --limit 100 --json number,state,title,url`：0 个搜索结果，见 [Q14.tracker.txt](Q14.tracker.txt)。
+- `rg -n '端点需恢复|登记.{0,15}(作废|废止|重登)|boot[_ -]id|退役意图' analysis/ docs/ .chanlun/`：4 行，见 [Q14.repo.txt](Q14.repo.txt)。
+- 命中 Q14 tracker 与仓内：精确短语无结果；仓内命中首稿和无关作废登记，没有可直接套用的受管端点废止协议。
+- 命中 #1823 评论 6994092216；ADR 0059:117：未知对象不能清退，布局裁定不授予重启清理权。
+- 命中 首稿 ADR 0065:30-34；843c18d2 的 R4：旧稿没分已发布但名消失、bind 后未记完成、发布状态丢失。
+- 结论：排他防止他人改名，但不补出 bind 成功时的目录项身份和初次归属。退役意图已经绑到完整登记的具体对象，故可在连续排他下核同一对象。可信同机换 boot 证明旧内核进程和 FD 已退出，不证明当前锚与现场对象的权利。
+- 推荐裁定：监督器以独立部署记录封堵旧代并核回收。发布助手在原址确认空、当前锚与排他重验后，原子作废旧登记代并开新登记代。发布状态丢失依独立部署记录定位旧代；该关联也丢失就不恢复。已有对象只由另获授权的运维处置。
+- 缺口去向 `decision`；检索词：端点需恢复、登记 作废/废止/重登、boot id、退役意图。
+
+## Q15 [B] 如何证明收到的 FD 当前已监听
+
+- `gh issue list --search '"SO_ACCEPTCONN" in:title,body,comments' --state all --limit 100 --json number,state,title,url`：0 个搜索结果，见 [Q15.tracker.txt](Q15.tracker.txt)。
+- `rg -n 'SO_ACCEPTCONN|ENOPROTOOPT|同一判断.*松紧' analysis/ docs/ .chanlun/`：24 行，见 [Q15.repo.txt](Q15.repo.txt)。
+- 命中 Q15 tracker：SO_ACCEPTCONN 无 ticket 命中。
+- 命中 ADR 0041:11-15；5a1ac9de 的 fresh_listener.py:39-41、probe.py:15-27：禁止松紧两档；Linux 夹具向内核查，Darwin 对照未查。
+- 命中 843c18d2 的 R5：首稿未定义的信任证明会形成降级分支。
+- 结论：受信通道证明来源，不证明 FD 已在监听。没有另一种已验证等强机制，也没有 Darwin 的同址新建证据。
+- 默认采纳：受管只支持内核 SO_ACCEPTCONN 可核的部署环境；平台不支持不得选入，查询报错或返回 0 均拒绝，不走其他证明。
+
 ## 引用原件和范围
 
 - ADR 0039 的「唯一」是 ADR 已裁的规范，沿用其裁定三；不重报仓内实现全覆盖。本文要核的端点集合按原配置字段枚举：launcher 的 S、经济 manifest 的 E、逐个配置重匹配的 B、所选 X profile 的实际本地监听项。基线 X 的两个分支见 `rust/src/bin/x_execution_session.rs:73-95,201-234` 与 `rust/src/history_simulation/runtime.rs:42-51,866-897`，不把未监听的场所地址当作本地端点。发布名对各已登记会话物理目录项判重，不数全仓 bind 点。
 - #1818 resolution 评论和主线 ADR 0059 可直接回查；现票仍 OPEN 不等于布局未裁。ADR 0059 第 6 条不是受管 S 的布局豁免。#1823 六份收据仅在该 CI 的两步生产会话构建与 OBS-IN-A、OBS-IN-BASENAME、OBS-OUT 中逐项计数；不把不具域归属的 EADDRINUSE 当作 S 首错。
 - `linux-fresh.log:1-3,6-9` 读两代发布、worker 与客户端结果；`:4-5` 读旧队列和 ECONNRESET。原址以及前代最后一个监听副本的关闭顺序以 `fresh_listener.py:4-5,17-28,42-51`、`run_fresh.py:18-29` 互证。两代使用私有容器；测试本身未运行产品。
 - `darwin-fd.jsonl:1-4`、`linux-fd.jsonl:1-4` 逐行读托管地址、占用、不同 PID + 同 inode + 旧载荷、最终留名。两次占用 errno 由 `probe.py:50-54,74-80` 的断言核对，JSONL 未输出 errno；真实往返、旧进程退出、inode 检查在 `probe.py:60-73`。EVIDENCE.md 的 Darwin 初试 ENOPROTOOPT 只有摘要，无对应原始日志，最终代码 `probe.py:15-27` 只在 Linux 查 SO_ACCEPTCONN；ADR 不将初试 errno 作为已核原始观测。没有 Darwin 异 UID 同址换代的实测。
-- ADR 编号：按要求查本 worktree `ls docs/adr | tail`，用实时 main 的 `git ls-tree -r --name-only` 复核；对开放 PR 查询 `docs/adr` 与 `0065`，把命中项和 #2088 的活动 Git head 逐个检查 `git diff --name-status <main>...<head> -- docs/adr` 与 head 树的 `/0065[-.]`。主线已有 0061，#2065 新增 0064，#2088 改 0039；所查 PR 未见 0065。原件见 [编号核查](adr-number-check.txt)。
-- 原生依赖：查 GitHub REST 的 `/issues/{2079,1411,1818,1823}/dependencies/{blocked_by,blocking}`，原输出在同目录。本票无现成原生边；#1411 完整恢复验收依赖本裁定，不能把功能依赖写成已有 GitHub 边。#1818→#1781 保持；#1823 读取这些结论，不改其 ticket 名分。#2077/#2082 是 #1411 的候选 PR，并非 #2079 的决策阻塞票。为不阻塞不消费端点合同的准备工作，本稿不要求新增整票排程边。
+- ADR 编号：按要求查本 worktree `ls docs/adr | tail`，用实时 main 的 `git ls-tree -r --name-only` 复核；对开放 PR 查询 `docs/adr` 与 `0065`，把命中项和 #2088 的活动 Git head 逐个检查 `git diff --name-status <main>...<head> -- docs/adr` 与 head 树的 `/0065[-.]`。取证时主线最大为 0063，主线已经使用 0061；#2065 新增 0064，#2088 改 0039；所查 PR 未见 0065。原件见 [编号核查](adr-number-check.txt)。
+- 原生依赖：查 GitHub REST 的 `/issues/{2079,1411,1818,1823}/dependencies/{blocked_by,blocking}`，原输出见 [2079](2079-dependencies.txt)、[1411](1411-dependencies.txt)、[1818](1818-dependencies.txt)、[1823](1823-dependencies.txt)。本票为 #1411 的原生子票（[原件](2079-parent.txt)），没有现成的 blocking 边；#1411 完整恢复验收依赖本裁定，不能把功能依赖写成已有 GitHub 边。#1818→#1781 保持；#1823 读取这些结论，不改其 ticket 名分。#2077/#2082 是 #1411 的候选 PR，并非 #2079 的决策阻塞票。为不阻塞不消费端点合同的准备工作，本稿不要求新增整票排程边。
+
+- 第二轮按 [独审原件](https://github.com/Newchanlun/NewChanlun/blob/843c18d2cfe02aa4507810bf91decc7b8e64fa6c/.chanlun/review-results/issue2079-review-666a1a42/REVIEW.md) 的 R3/R4/R5 BLOCK 重做。正本基线为 `b9d898dccf46c2a716115eaa1215bc39c458a959`；探针仍固定在 `5a1ac9de73766f0a943c156f97cb467b7d690218`。

@@ -1,0 +1,1 @@
+$ gh issue list --search \"socket_handoff\"\ in:title,body,comments --state all --limit 100 --json number,state,title,url

@@ -1,0 +1,1 @@
+$ gh issue list --search \"端点需恢复\"\ in:title,body,comments --state all --limit 100 --json number,state,title,url

@@ -1,0 +1,3 @@
+$ gh issue list --search \"单域\"\ \"重启\"\ in:title,body,comments --state all --limit 100 --json number,state,title,url
+1425	OPEN	[impl] TB-04-F 单一明确归属的回报应用与责任减保留（SPEC #1340）	https://github.com/Newchanlun/NewChanlun/issues/1425
+1419	OPEN	[impl] TB-02-E 中枢 seed、核心、外缘与成员（SPEC #1340）	https://github.com/Newchanlun/NewChanlun/issues/1419

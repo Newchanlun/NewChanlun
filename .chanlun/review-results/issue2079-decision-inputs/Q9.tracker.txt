@@ -1,0 +1,3 @@
+$ gh issue list --search \"MayHaveCalled\"\ \"就绪\"\ in:title,body,comments --state all --limit 100 --json number,state,title,url
+1340	OPEN	📋 SPEC：完整生产程序、结构全分类与逐重经营（#1323，R2）	https://github.com/Newchanlun/NewChanlun/issues/1340
+1407	OPEN	[impl] TB-04-C 不可改精确交付与阶段条件清单（SPEC #1340）	https://github.com/Newchanlun/NewChanlun/issues/1407

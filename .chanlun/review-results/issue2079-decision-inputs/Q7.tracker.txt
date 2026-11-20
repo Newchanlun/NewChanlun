@@ -1,0 +1,2 @@
+$ gh issue list --search \"监听\ FD\"\ in:title,body,comments --state all --limit 100 --json number,state,title,url
+2079	OPEN	[grilling] 正常关停或崩溃后，谁有权重新提供原会话端点（#1411 / #1823）	https://github.com/Newchanlun/NewChanlun/issues/2079

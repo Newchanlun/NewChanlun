@@ -1,0 +1,10 @@
+$ rg -n input-2\|SAFE-ADMISSION\|OBS-IN\|SAFE-LIVE\|完整会话双进程 analysis/ docs/ .chanlun/
+.chanlun/review-results/issue2079-endpoint-rotation/DRAFT.md:44:1. **有序重启**：L1 由正式入口首次提交 input-1，留存原请求、完整回执、库身份和各域身份。正常关库，确认子进程收回。不同的 L2 以同一份 manifest 原字节、相同路径、原库和相同会话启动；出示各域有效恢复收据及真实就绪。经正式读口固定 cut-1，完整原收据逐字节相同；再给原会话 input-2，原始应答为 Committed，查询其持久提交。原身份重送不重复经济效果。不得用 SQLite meta 的 cut 数字、空库或不同 manifest 代替。
+.chanlun/review-results/issue2079-endpoint-rotation/DRAFT.md:46:3. **SAFE-LIVE / UNKNOWN / RACE**：活实例、暂停、PID 复用、替换、错域、错 uid、未注册对象、symlink/替换祖先和不受保护的同 UID 部署，均不得触碰对象。在核验到退役间设置确定同步点；未授权改名必须被 OS 拒绝，不能靠操作恰好没有撞上；第二个受信发布作业不能同时进入。定向错传/多传 FD 必须拒绝、兄弟域不能得到 FD；旧代排队不能在新 handler 触发。异常后的业务重试依原身份办理。
+.chanlun/review-results/issue2079-endpoint-rotation/DRAFT.md:47:4. **SAFE-ADMISSION / 原入口对照**：受管非法位置在 spawn、域写入、改名字前拒绝；保存 R4、锁、旧 epoch、坏锚的原拒绝与现场。对未选入 profile 跑原 CLI、有占用拒绝及布局对照；对无 listener 的 X 不新增 socket 要求。
+.chanlun/review-results/issue1340-publication-20260909/view/inputs/TB07-11-EXECUTION-SLICES.md:32:## TB-07-C 完整会话双进程与崩溃恢复保持全状态一致
+.chanlun/review-results/issue1340-publication-20260909/payload/inputs/TB07-11-EXECUTION-SLICES.json:1841:      "title": "完整会话双进程与崩溃恢复保持全状态一致",
+.chanlun/review-results/issue1340-publication-20260909/payload/inputs/FULL-LEAF-PUBLISHED-VERIFY.json:3288:      "expected_title": "[impl] TB-07-C 完整会话双进程与崩溃恢复保持全状态一致（SPEC #1340）",
+.chanlun/review-results/issue1340-publication-20260909/payload/inputs/TB07-11-EXECUTION-SLICES.md:30:## TB-07-C 完整会话双进程与崩溃恢复保持全状态一致
+.chanlun/review-results/issue1340-publication-20260909/payload/evidence/EXECUTION-SLICES-PUBLISHED.json:820:    "title": "[impl] TB-07-C 完整会话双进程与崩溃恢复保持全状态一致（SPEC #1340）",
+.chanlun/review-results/graph-engine-fix-20261020/dryrun-compare.json:986:      "title": "[impl] TB-07-C 完整会话双进程与崩溃恢复保持全状态一致（SPEC #1340）",

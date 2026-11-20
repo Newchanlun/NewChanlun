@@ -1,0 +1,4 @@
+$ rg -n launcher.\{0,16\}\(崩溃\|被杀\|强杀\)\|孤儿.\{0,15\}\(回收\|FD\|端点\)\|进程退出.\*发送子进程 analysis/ docs/ .chanlun/
+docs/adr/0065-production-session-endpoint-rotation.md:32:3. **退出证据。** 正常关停须有该域的正常结果和可信监督记录，证明旧作业、持 FD 的派生进程及受控持有者副本都已回收。崩溃或强杀是异常接续；可信监督记录仍须证明同一前代作业已终止及受控 FD 无副本，launcher 崩溃也不例外。用部署监管的不可混淆作业身份、进程回收和 FD 保管约束取证；PID 消失或复用、超时、不能 connect、出现在目录里都不构成单独证据。旧域、持有者或竞争发布者仍在运行或暂停时，拒绝二次发布，不为清名杀进程。
+.chanlun/review-results/issue1339-r2-spec-20260909/view/spec/review/SCOPE-SPEC-REVIEW.md:66:未运行项目程序、launcher、项目测试、Lean、UI、崩溃注入、paper、live或协议模型。未改输入/仓库、未写GitHub、未派票、未合入main、未改变服务或交易配置；只写本工位的两份评审文件。
+.chanlun/review-results/issue1339-r2-spec-20260909/payload/spec/review/SCOPE-SPEC-REVIEW.md:64:未运行项目程序、launcher、项目测试、Lean、UI、崩溃注入、paper、live或协议模型。未改输入/仓库、未写GitHub、未派票、未合入main、未改变服务或交易配置；只写本工位的两份评审文件。

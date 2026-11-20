@@ -1,0 +1,2 @@
+$ gh issue list --search \"授权来源与生效边界\"\ in:title,body,comments --state all --limit 100 --json number,state,title,url
+1551	OPEN	[grilling] FU-20 #1279 关票门与整图报告（#1323，新增）	https://github.com/Newchanlun/NewChanlun/issues/1551

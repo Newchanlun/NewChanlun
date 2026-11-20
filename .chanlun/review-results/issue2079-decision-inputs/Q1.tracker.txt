@@ -1,0 +1,12 @@
+$ gh issue list --search \"唯一\ launcher\"\ in:title,body,comments --state all --limit 100 --json number,state,title,url
+2079	OPEN	[grilling] 正常关停或崩溃后，谁有权重新提供原会话端点（#1411 / #1823）	https://github.com/Newchanlun/NewChanlun/issues/2079
+1823	OPEN	[task] production_session 中 S 崩溃后残留 s.socket 的重启行为：只读复现、归属与测试规格（#1818 规则 5 承接）	https://github.com/Newchanlun/NewChanlun/issues/1823
+1719	OPEN	[impl] 政策增量 I4：center_break 到活假设第二层清账桥	https://github.com/Newchanlun/NewChanlun/issues/1719
+1530	CLOSED	[grilling] FU-08 生产入口与唯一 owner（#1323，新增）	https://github.com/Newchanlun/NewChanlun/issues/1530
+1533	CLOSED	[grilling] FU-10 逐 bar Classification→旁路/下钻→Chong（#1323，新增）	https://github.com/Newchanlun/NewChanlun/issues/1533
+1381	OPEN	[impl] TB-07-A 完整历史输入推动全部权威域并生成可追溯回放（SPEC #1340）	https://github.com/Newchanlun/NewChanlun/issues/1381
+1550	CLOSED	[grilling] FU-19 #1304 接入映射（#1323，新增）	https://github.com/Newchanlun/NewChanlun/issues/1550
+1538	CLOSED	[grilling] FU-16 paper/live 与回放同核边界（#1323，新增）	https://github.com/Newchanlun/NewChanlun/issues/1538
+1536	CLOSED	[grilling] FU-14 完整历史数据与模型 profile（#1323，新增）	https://github.com/Newchanlun/NewChanlun/issues/1536
+1323	OPEN	🗺️ 完整生产程序接线总单：#787 严格多重赋格落地 → 旧实现收敛 → 历史回放与 paper 同核	https://github.com/Newchanlun/NewChanlun/issues/1323
+1612	CLOSED	[grilling] S 写者增量路径是否升格为生产路径，及 #1488 范围拆分（承接 #1488 S4）	https://github.com/Newchanlun/NewChanlun/issues/1612

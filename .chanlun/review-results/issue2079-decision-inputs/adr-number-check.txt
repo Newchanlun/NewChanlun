@@ -1,0 +1,34 @@
+docs/adr/0052-history-input-profile-and-model-order-unspecified.md
+docs/adr/0053-domain-event-withdrawal-subcontract.md
+docs/adr/0054-development-batch-entries-window-order.md
+docs/adr/0055-itemized-old-pool-settlement.md
+docs/adr/0056-three-mode-shared-core-adapter-boundary.md
+docs/adr/0057-p0-venue-profile-v2-signature.md
+docs/adr/0058-replay-shell-mapping-and-legacy-replay-dispositions.md
+docs/adr/0059-production-session-layout-contract.md
+docs/adr/0060-fill-position-single-authority-and-crosswalk.md
+docs/adr/0061-s-writer-audit-ledger-delta-reading.md
+docs/adr/0062-fu18-venue-account-permission-binding.md
+docs/adr/0063-position-bearing-migration-rollback.md
+
+--- #1668 5c9dcfc5a9767b159c92b6c3195cd357ef500e5a ---
+
+--- #1855 9e57032bcd08399b0a90189402be07200d95a857 ---
+M	docs/adr/0037-s-content-bounded-layout.md
+M	docs/adr/0042-s-writer-incremental-production-path.md
+
+--- #1951 f133ff39bd56b736e9e100d9598aef4a09dd6b67 ---
+
+--- #1954 1d48120acb1f8b6057187ee23f2e028f0c2325a2 ---
+
+--- #2065 6ba72e84c55aa6d65b11cc46b7288142f4fce62b ---
+M	docs/adr/0036-operating-statistics-sampling-and-post-gate-parameter-protocol.md
+A	docs/adr/0064-at18-whole-graph-acceptance-and-closeout.md
+
+--- #2088 7be81f6c4dc974f939db496d335ffe3b82d1aed7 ---
+M	docs/adr/0020-backtest-cash-live-perp-filtered.md
+M	docs/adr/0021-venue-selection-deferred.md
+M	docs/adr/0039-production-entry-inventory-and-unique-launcher.md
+M	docs/adr/0048-legacy-engine-module-level-dispositions.md
+M	docs/adr/0052-history-input-profile-and-model-order-unspecified.md
+M	docs/adr/0058-replay-shell-mapping-and-legacy-replay-dispositions.md

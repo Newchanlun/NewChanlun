@@ -1,0 +1,13 @@
+$ rg -n 每域每代\|每代换监听器\|queued-before-next-generation\|SCM_RIGHTS analysis/ docs/ .chanlun/
+.chanlun/review-results/issue2079-endpoint-rotation/fresh_listener.py:26:            assert handoff.sendmsg([b'F'],[(socket.SOL_SOCKET,socket.SCM_RIGHTS,fds)])==1
+.chanlun/review-results/issue2079-endpoint-rotation/fresh_listener.py:36:            if (level,kind)==(socket.SOL_SOCKET,socket.SCM_RIGHTS):
+.chanlun/review-results/issue2079-endpoint-rotation/probe.py:66:                queued.sendall(b'queued-before-next-generation')
+.chanlun/review-results/issue2079-endpoint-rotation/probe.py:69:                assert recv=='二代:queued-before-next-generation'.encode()
+.chanlun/review-results/issue2079-endpoint-rotation/linux-fd.jsonl:3:{"launchers": [6, 8], "phase": "两层新进程接回同一监听器；上一代空窗的原始请求也到了新进程", "received": "二代:queued-before-next-generation", "same_path_inode": true, "workers": [7, 9]}
+.chanlun/review-results/issue2079-endpoint-rotation/darwin-fd.jsonl:3:{"launchers": [7878, 7884], "phase": "两层新进程接回同一监听器；上一代空窗的原始请求也到了新进程", "received": "二代:queued-before-next-generation", "same_path_inode": true, "workers": [7879, 7889]}
+.chanlun/review-results/issue2079-endpoint-rotation/EVIDENCE.md:16:测试协调器按顺序等两代退出，受保护父目录在测试中不变，不是“现行产品部署已具备排他”的证据。测试专用 SCM_RIGHTS 通道按夹具调度传 FD；实际实现须受信启动通道及定向角色校验。没有运行业务 writer、协议校验或账目恢复；未实跑 Darwin 的异 UID 新 listener 方案。
+.chanlun/review-results/issue2079-endpoint-rotation/EVIDENCE.md:31:独立持有者保存 FD，两个先后启动的 launcher 及其各自的域 worker 通过传入 FD accept。两边实际发送/接受/回包均成功，公开目录项及 inode 均未换；原 launcher 和 worker 已退出，与二代进程 PID 不同。二代收到的正是启动前已排队的 `queued-before-next-generation`。最后持有者关闭后，另行 bind 原名仍被 EADDRINUSE 拒绝。Darwin 上 SO_ACCEPTCONN 的初试返回 ENOPROTOOPT；最终两端以 AF_UNIX、SO_TYPE、getsockname 和真实 accept/往返确认，Linux 另查 SO_ACCEPTCONN。
+.chanlun/review-results/issue2079-endpoint-rotation/DRAFT.md:3:**建议选「同一公开路径，每域每代新建监听器」。** 对明确选入且部署条件成立的会话，由 ADR 0039 的唯一 launcher 经受信部署入口发布端点；S、E、各 Bᵢ 及实际提供端点的 X 只接收属于自己的监听 FD。关闭上代最后一个监听 FD，不把上代内核队列交给下一代。客户端继续使用 manifest 中的原绝对路径、原消息和原业务身份。该选择增加的是端点名字的发布责任，不是新的业务进程、数据库写权或外部调用权。
+.chanlun/review-results/issue2079-endpoint-rotation/DRAFT.md:10:- **每代换监听器**：隔离 Linux 中，两个不同的域进程通过 FD 先后在同一绝对路径答复；域身份能 connect，却不能创建、改名或删除该目录项。上代未受理但已写入的连接收到 ECONNRESET，下一代只收到新连接。[实跑原件](linux-fresh.log)。
+.chanlun/review-results/goal1323-resume-20261017/c6a-external-anchor-review.md:36:只有 runtime 显式 pass_fds，父进程关 child 副本，driver 接管设 non-inheritable；其 E/B/Q/git 仍 close_fds=True 且无该 pass_fds。收到意外 SCM_RIGHTS 会先关收到的 FD 再拒绝。五次应答与 EOF 不齐，正常 exit 0 仍不获 PASS。
+.chanlun/review-results/goal1323-resume-20261017/c6a-external-anchor-implementation.md:24:固定顺序为 work、we5-case、we5-q、we7-case、we7-q。每次 tick 至多一收一发，packet 最大1024字节，只保存五请求/五应答，不做文件 I/O、hash、派生进程或无界 drain。run_id 防串线，不冒称密钥或密码学鉴权。重复键/乱序/重放/超包/附带 FD/提前 EOF/第六请求/响应断连等拒绝；收到 SCM_RIGHTS 时先关闭已接收 FD 再拒绝。

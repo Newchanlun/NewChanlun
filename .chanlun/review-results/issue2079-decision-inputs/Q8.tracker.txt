@@ -1,0 +1,2 @@
+$ gh issue list --search \"具名恢复\"\ in:title,body,comments --state all --limit 100 --json number,state,title,url
+1411	OPEN	[impl] TB-07-C 完整会话双进程与崩溃恢复保持全状态一致（SPEC #1340）	https://github.com/Newchanlun/NewChanlun/issues/1411

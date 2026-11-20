@@ -1,0 +1,345 @@
+<!-- goal1323-current-20261119 -->
+### 2026-11-20　六项 Destination 的验收前沿
+
+图直挂 100 票（74 已关、26 开放），其中 [实施总单 SPEC #1340](https://github.com/Newchanlun/NewChanlun/issues/1340) 下的 11 张 TB 验收汇总，仅 [TB-01 正式结构与只读观察](https://github.com/Newchanlun/NewChanlun/issues/1359) 已关；六项 Destination 均未整体验收。#1304 仍开；完整验收前不关 #1279。前端归 #1460，K4 不并入。
+
+| 目标 | 已取得的证据 | 下一道实际验收 |
+|---|---|---|
+| ① 唯一生产主干；② 逐 bar 到 Chong | [#1855 同头收据](https://github.com/Newchanlun/NewChanlun/pull/1855#issuecomment-6990044850)：非作者独审、Hosted TB-02-D（40 项）、Q3 保鲜、W2 四锁及 ci-ok 已过。[9011 根冻结输入](https://github.com/Newchanlun/NewChanlun/issues/1552#issuecomment-6990003817)产生 16 个 L0 中枢；[15 个相邻对中，14 个向上扩展、1 个未定](https://github.com/Newchanlun/NewChanlun/issues/1426#issuecomment-7022141473)，没有给出完成上涨的正例。另有[111 根 OHLC 双向新生正控](https://github.com/Newchanlun/NewChanlun/issues/1424#issuecomment-7023030025)，解析与关系已验；[本条历史正式 S 只发布到 cut-71](https://github.com/Newchanlun/NewChanlun/issues/1424#issuecomment-7025367845)，第 72 根来源索引扩容超过局部帽 3,720,449 B。111/123 在公开端均未发布。已认领 [#1642 来源索引扩容](https://github.com/Newchanlun/NewChanlun/issues/1642#issuecomment-7025338799)；以相同预算、输入及正式写者检验能否发布。 | [正式双审预检已回退](https://github.com/Newchanlun/NewChanlun/issues/2075#issuecomment-7001109340)，该窗口授权已用完；#1855 未合入。#1426/#1429 消费具名结构对象，#1437 发布同域完整标签，再由 #1552 绑定真实 terminal、host 和 γ。 |
+| ③ 旧臂终态 | [OE11 接收侧对照](https://github.com/Newchanlun/NewChanlun/issues/1385#issuecomment-6988784670)：旧研究报告不改变 E/B 入账。[#2080 候选及实证](https://github.com/Newchanlun/NewChanlun/issues/1385#issuecomment-6995106029)：flat 新报告绑定核、运行与实际 OHLC，旧命令仍可用，24 份原件不变。 | #2080 尚未合入。[T/v3 研究入口 #2087](https://github.com/Newchanlun/NewChanlun/pull/2087) 的候选独审已过；受审头 `47f30a3` 的 [ci-ok](https://github.com/Newchanlun/NewChanlun/actions/runs/44623632047/job/135935237792) 与 [DevSkim](https://github.com/Newchanlun/NewChanlun/actions/runs/44623631870/job/135911552693) 均已通过，仍待正式 App 独审。#2088 的 [Python 检查发现 15 处旧路径引用](https://github.com/Newchanlun/NewChanlun/issues/1385#issuecomment-7023790578)；[引用修订 `7be81f6`](https://github.com/Newchanlun/NewChanlun/pull/2088/commits/7be81f6c4dc974f939db496d335ffe3b82d1aed7)已通过非作者增量独审和 [DevSkim](https://github.com/Newchanlun/NewChanlun/actions/runs/44629628224/job/135932494098)；修订头的 [Python 引用检查](https://github.com/Newchanlun/NewChanlun/actions/runs/44629628249/job/135936551961) 和 [ci-ok](https://github.com/Newchanlun/NewChanlun/actions/runs/44629628249/job/135948078419) 已通过，待正式 App。[OE12 草稿 #2091](https://github.com/Newchanlun/NewChanlun/pull/2091) 的受审头 `27bbf29` 已修正逐 bar 漏判：同一笔交易错开一根即报分歧，零根行情只比较收尾值。候选独审、[ci-ok](https://github.com/Newchanlun/NewChanlun/actions/runs/44631190450/job/135955209996) 和 [DevSkim](https://github.com/Newchanlun/NewChanlun/actions/runs/44631190350/job/135937932738) 已过，待正式 App；[现行三份签署](https://github.com/Newchanlun/NewChanlun/issues/1385#issuecomment-7023892735)的 L0 不满足 Unn 模型下界，真实双臂尚未完成同场对账。数据采集与回测入口保留；实际旧身份、在途责任和默认切换交 H/I。 |
+| ④ 完整历史、查账和双跑；⑥ 接通 #1304 | [BTC 全史解析](https://github.com/Newchanlun/NewChanlun/issues/1634#issuecomment-6987169722)、[#2076 的 v2 归档读取](https://github.com/Newchanlun/NewChanlun/pull/2076)、[#2077 的有序关库](https://github.com/Newchanlun/NewChanlun/issues/1411#issuecomment-6994680466)各有具名证据。[#2082](https://github.com/Newchanlun/NewChanlun/issues/1411#issuecomment-7002229803) 在恢复应答丢失后可取回 E/B 原回执；[正式 S 的历史切面](https://github.com/Newchanlun/NewChanlun/issues/1399#issuecomment-7016301521)在市场更正后仍能读回旧版。[cut-71 的真实客户端](https://github.com/Newchanlun/NewChanlun/issues/1789#issuecomment-7037777879)已取齐 132 页、4,069 行，但正文未读完。连续 30 个正文请求 HTTP 共 34.719 秒，其中 Q 进程用 CPU 34.670 秒；[读取工位](https://github.com/Newchanlun/NewChanlun/issues/1419#issuecomment-7037778742)据此定位服务端开销。 | [#2081 的双跑](https://github.com/Newchanlun/NewChanlun/issues/1411#issuecomment-7016815625)用组件驱动和受控 S，不能作为 #1304 的正式双跑。#1411 仍须经 production_session 在相同 manifest、原库和[原端点](https://github.com/Newchanlun/NewChanlun/issues/2079#issuecomment-6994679622)上续作并与未中断会话对读，再由 [#1418 出具全域差异报告](https://github.com/Newchanlun/NewChanlun/issues/1418#issuecomment-7037557907)；#2084 已过的入口 CI 没有 ADR 0038 四项具名运行收据。 |
+| ⑤ paper/live 同核、成交持仓来源唯一 | [模型绑定 #2084（草稿）](https://github.com/Newchanlun/NewChanlun/pull/2084)和[期初外币责任 #2086（草稿）](https://github.com/Newchanlun/NewChanlun/pull/2086)已分别通过候选独审；旧成交/费用可读回，缺责任不再放行。[E 停止应答 94.067 秒时](https://github.com/Newchanlun/NewChanlun/issues/1376#issuecomment-7016146266)，正式 S 仍发布同一报价的修订。 | [#2084 修复头 `dea8163`](https://github.com/Newchanlun/NewChanlun/pull/2084/commits/dea81631486b8aa870b5215a76df4436bcf773f2)已独审并推送；S 延迟监听只收一次请求。原先失败的 [Rust 生产会话测试](https://github.com/Newchanlun/NewChanlun/actions/runs/44634325084/job/135950730902)和 [DevSkim](https://github.com/Newchanlun/NewChanlun/actions/runs/44634325044/job/135948819715)均已在新头通过。 仍按 #2078→#2081→#2084 合入，并须正式 App 裁决。[#2086 的 ci-ok](https://github.com/Newchanlun/NewChanlun/actions/runs/44621606545/job/135920268539) 与 [DevSkim](https://github.com/Newchanlun/NewChanlun/actions/runs/44621606159/job/135904455934) 已在 `7d46b3a` 通过；仍待正式 App 独审，并须先合[父 #2078](https://github.com/Newchanlun/NewChanlun/pull/2078)。 [#1425 已在 FIN/6 + X/3 单一原重入账](https://github.com/Newchanlun/NewChanlun/issues/1425#issuecomment-7023559379)：数量 4→6、费用 1、K=80029、E 保留责任 90。[两个 Linux 空库双跑](https://github.com/Newchanlun/NewChanlun/issues/1425#issuecomment-7025140178)的 E/B/X 业务全表逐字节相同，Chrome 在 E 与两个 B 重启前后读回同一成交与费用回执（X 参与双跑，未重启）；同页从 cut 6 回看 cut 5，费用 1→0、K 80029→80028。[非作者独审阻止提交 Draft](https://github.com/Newchanlun/NewChanlun/issues/1425#issuecomment-7025322007)：裸撮合记录可误入账，E:6 / B:alpha:6 可读到 E:8 回执。原工位 `9b24be5` 已隔离两类读取 token，X/3 因果、逐域前沿、读权、作业预算和旧 Watch 仍待修。更正与减责仍待验。 [CE-S07 集成头 ff699a6](https://github.com/Newchanlun/NewChanlun/issues/1407#issuecomment-7037712657)在 E cut 11 / 16 分别按修订 1 / 3 放行。旧 FIN/5+FX 夹具首笔导入、候选按旧合同写成的非空库恢复已通过。[非作者独审打回两项](https://github.com/Newchanlun/NewChanlun/issues/1407#issuecomment-7037911487)：旧 FIN/6+FX 静态配置被追加强制标记；超限时模型域外命令未写终态。原工位返修，未送 Draft。[实际 S3 拒绝条件执行请求](https://github.com/Newchanlun/NewChanlun/issues/1416#issuecomment-7037713416)，X 停在 ExecutionRequested，资格回执由 #1416 承接；[#1375 AC3 R10](https://github.com/Newchanlun/NewChanlun/issues/1375#issuecomment-7037906441)：在正式模拟 E/X 中，root 读取非空 SHM 后属主和 ctime 不变，未接纳的 WAL 事实仍封闸；独审发现首次读取才注册 SQLite 全局方法，会与健康连接竞争。原工位返修注册时序。paper/live 账户核清另验。 |
+
+以下日期段落保留历史候选与决定；当前缺件以相应执行票为准。
+
+<!-- /goal1323-current-20261119 -->
+
+<!-- goal1323-current-20261106 -->
+### 2026-11-06 主控接续与验收前沿
+
+09:11 UTC 原生子票完整分页核对：本图直挂100张，72关、28开；72张已关子票均在 Decisions-so-far 中有索引。关票比例不代表功能完成率。六项 Destination 的整体验收尚未完成。
+
+当前业务主线是 #1419 / PR #1855 的同父资源台账与生产接线。远端候选为 8ad8454c1f57b0319ff5e225175aebbcfbc9c1f6，已普通合并 main 9ae28877 并解决 CI 冲突。源码增量审查不能代替该 head 的运行验收；冷认证、跨请求换绑、一次 install 与 Native 路径 Legacy 删除仍待后续交付。
+
+PR #1898 的 af8c7852 已通过 CI 42184675113。新增 s_serve_explicit_source_lock_conflict_precedes_mismatch 在两种 Linux 构建均通过，测试文件分别32/34 passed。#1742唯一正式 owner 已消费这份证据，并已接收 PR #1899 最终71行文书准备件；1897/1898/1899 的正式审查仍有 T3 Downloads 系统许可依赖，不以材料接收或 CI 成功代替正式验收。
+
+#1769 选择保留完整比较标准的 A 原时钟输入路线。合同仍在返修，读观察、分页 wire 身份及旧录制件兼容尚未签批，未改正式 oracle。#1719 U1 正本候选在 PR #1899，组件实现、真实事实源及持久恢复另有未交义务。
+
+FU-19 #1550已关；FU-13 #1535 协议已随 ADR 0063／PR #2064 合入 main 并关票，现场盘点、非空迁移及恢复验收仍归 #1368/#1402；FU-20 #1551 继续核其下游实施证据，#1540 义务保留。正式起草仍归唯一 decision-claimer，由 #1742 迁移 owner 承担恢复与自然消费；不另起竞争写者。#1890仍归现有CI优化owner。
+
+各项动作按当前具名授权和真实权限执行，非作者独审、精确运行、资金、隔离、恢复、全历史与双跑验收不放宽。#1304由 #1333承接；#1279完整验收前保持开放。前端归 #1460，K4排除。
+
+以下日期段落均为历史快照，当前候选、批准与验收以各票及精确证据为准。
+<!-- /goal1323-current-20261106 -->
+
+<!-- goal1323-current-20261029 -->
+### 2026-10-29 控制面对账
+
+六项 Destination 尚未完成整体验收。当前原生直挂子票 100 张，69 关、31 开；SPEC #1340 的 11 张 TB 汇总票仅 #1359 已关，其余 10 张仍开放。关票比例不是功能完成率。
+
+业务正在并行推进 #1768 的 FIN/2 选定撤回和原测试兼容修复、#1640/PR #1757 的原 S4 冷审计修复、#1789 固定 bytes 片长的上界原型。#1789 已核实真实 Reader 先完整读取并认证父键，原型仍需证明全 offset 上界与双端帽关系。原 28 代、1 GiB、2700 秒 S4 要求不变。
+
+模型入口旧阻塞已变化：当前已有 Opus 与 Astra 工位并行执行，A7/S4 在 Claude 连续 429 后由 Astra 接续，S4 已获得 Opus 源码增量独审，完整 exact 仍待实际运行。#1768 原候选因跨表示域 memo 摘要错误被独审打回并在返修；#1789 正式扫描仍未完成，不以诊断超时当通过。[当前并行及证据](https://github.com/xy7365527-lang/NewChanlun/issues/1323#issuecomment-6502279467)。
+
+#1778 正本 ADR 0053 和报告已合 main，具名工位及两个本地分支已按用户批准保全后处置，七条关票门已核并关闭。[关票声明](https://github.com/xy7365527-lang/NewChanlun/issues/1778#issuecomment-6493556775)。#1768 的原生 blockers 已全部关闭，其 M-1/L-2 与全部运行验收保持，不据此前置关闭宣告交付。
+
+#1718 组件 PR #1731 已合入 main 4c10229e，精确 main CI 与 DevSkim 通过；接口已交 #1381、#1411、#1523。正式入口实际消费仍欠，不能据组件合入关闭 #1718 或解除完整交付依赖。[交付及欠项](https://github.com/xy7365527-lang/NewChanlun/issues/1718#issuecomment-6491722979)。
+
+FU-19=#1550、FU-20=#1551 已有原生票和依赖。最近 frontier 核查未找到误阻塞的合格实施票，不删除真实 blocker 来增加并发。唯一 wayfinder_engine 保持自动放行职责。
+
+#1800 轮换交接消息已获批发送并收到报告。安装pstack聊天尚有在飞任务，暂不可重开App；Windows桌面消费者真实回合仍待验。旧客户端密钥暂保留，不改上游账户。[交接状态](https://github.com/xy7365527-lang/NewChanlun/issues/1800#issuecomment-6493214266)。
+
+六项 Destination、资金、隔离、恢复及全历史双跑要求保持。#1279 完整验收前不关闭；前端归 #1460，K4 排除。下方日期快照保留发生史，当前候选、批准和验收以各票及精确证据为准。
+<!-- /goal1323-current-20261029 -->
+
+<!-- goal1323-current-20261026 -->
+### 2026-10-26 历史执行快照
+
+六项 Destination 尚未完成整体验收。原生直挂子票100张，60关、40开；TB汇总1/11关闭，TB01仅覆盖已声明受测域。关票比例不是功能完成率。
+
+已交付的局部结构、S/Q和E/B运行证据继续复用。完整历史、全状态双跑、正式paper/live同核仍缺整体验收。FU-19=#1550、FU-20=#1551已有原生票与依赖，不重建。#1531/#1532已裁并落main；#1533正本与归档PR1727均已合main，三工位处置完成并按门关闭；八条下游实施依赖保持。
+
+当前 #1419、#1572、#1640、#1491 由各自原实施角色在独立工位续接；#1640/PR1757 与 #1491/PR1760 完整合同独审为 ISSUES，原隔离返修已启动，组件交付不代替整票验收。#1523 汇总等待回环修订正在按独审返修，尚未改依赖边；保留已签结构源与执行源分离。已有负责人不重复派工，自动放行仍由唯一 wayfinder_engine 负责。具体候选、批准与消费状态以各票、PR及持久账本为准。
+
+六项Destination、资金、隔离、恢复、全历史双跑与三道人闸保持。#1279完整验收前不关闭；前端归#1460，K4排除。下方2026-10-18内容是历史快照，不能据此判断当前工位、候选和状态。
+<!-- /goal1323-current-20261026 -->
+
+
+<!-- goal1323-current-20261018 -->
+### 2026-10-18 历史执行快照
+
+六 Destination 均未完成完整验收；资金、隔离、恢复、完整历史双跑、资源与验收义务保持。#1279 仍 open，前端归 #1460，K4 排除。主控按整票负责人＋Sandcastle实施和独审并行；已完成工作不重做。
+
+本轮重新核原生直挂与关票索引；原claim及blocking保持。回放四子票仍有实际open blocker，只读准备不改变可实施资格。
+
+- [S写者增量构造](https://github.com/xy7365527-lang/NewChanlun/issues/1488#issuecomment-6246215552)：唯一真实run39095659808/attempt1编译成功、1PASS/5FAIL；0012 NONPASS，31文件WIP/7新锁未验。完整v3设计质询原件显示父账选择必须前移到分配前：冷路径BootstrapGrant→ColdBuildGuard；暖观察单元由唯一真实父预付且不可分配。拒绝转发旧根/绑定补签/unassigned尾部追认。保留128B/1024可选成功/R13/原六oracle；legacy E/O交集、局部_inline提前退款、四类费用穷尽为必闭反例。根准隔离候选合同/接口和本票实施，尚未给消费者改写/API稳定/运行/编译授权；原六driver和新增模型仍NOT_RUN。
+- [财务责任先增与提交](https://github.com/xy7365527-lang/NewChanlun/issues/1394#issuecomment-6246761895)：组合源4b3a84eb冻结；产品独审BLOCK四处（外来输出原件、可替换输出路径、准入前目录占用、独立工具预算漏计），负责人自主返修；监督旧HIGH闭合，新采样MEDIUM返修。根准同Supervisor registry/tick/stop的READ_GUARD隔离控制接线及fake负控；#1488已交5cb精确入口事实SHA9282ef47：Native/Job账仅进程内原语，现役reader/Q owner导出及全过程endpoint/deadline UNKNOWN必须拒。无真实产品运行授权。完整terminal/BSP/γ/K、两ARTIFACTS、真实A/B与恢复仍欠。
+- [中枢seed/核心/成员](https://github.com/xy7365527-lang/NewChanlun/issues/1419)：raw-v6冻结ff0524b0、22 fake定向测试/173观察、独审5542b760在飞；不声称watch delta闭包/应用Snapshot已验证。formal-v5冻结86f9cd7b，补原始前缀映射及第二种具体投影，独审3e85377a在飞；90声明/53证明体不等于全D通过。Rust精化/机器整数/撤销/恢复与1493/E/F仍欠。known_at/AsKnown/生命周期、市场对拍和全历史义务保持。
+- [未建方向与全包含前缀](https://github.com/xy7365527-lang/NewChanlun/issues/1393#issuecomment-6246587585)：唯一锁解析run39102752711成功属发生史；根裁SUPERSEDE_BROAD_LOCK。run16保旧解析准备d06b1274；run17因账号额度耗尽失败，未执行Cargo。三入口及四toy partial已原样冻结、未提交/回滚，状态INCOMPLETE_UNREVIEWED_NOT_AUTHORIZED：[收据](/Volumes/AgentStorage/issue1393-sandcastle-20261018-management/RUN17-PARTIAL-FREEZE.json)，完整diff副本SHA53b0560d。不得当通过、不得复用其F/重跑；待额度恢复后再绑定独审。Rust/Lean/fixture/产品NOT_RUN。
+- [正式producer/R4/CLI恢复](https://github.com/xy7365527-lang/NewChanlun/issues/1527)：Rust H1/M02限定独审通过，M03窄修中；Python H1R3 a8afdc0c独审PASS_SCOPED/0C0H0M。B1v3独审BLOCK/2H1M；根已裁v4保分片域、补opaque流式checked构造、固定错误布局/无堆失败路径及G4首错边界，已落票6246750950，跨票预算写集等1488接口冻结。普通1392 R2 source bd593212固定合同59.178986GiB，但仍NOT_READY：真实._*字节小样、APFS/全卷硬空间上界/约束和真实运行缺失。A/B执行器与≥11GiB metadata候选仍在推；I-2至I-5及真实运行未验。
+- [受控事实唯一应用](https://github.com/xy7365527-lang/NewChanlun/issues/1406)：C6a正常41步run39089806835已根验；C5 71/71、C7a复用，完整C6/C7、FIN/2及正式财务仍欠。
+- [Lean第一种情况](https://github.com/xy7365527-lang/NewChanlun/issues/1495)：批准39b纯文档经PR1529合main3315并关闭，已有158jobs/三fixture复用；不重复执行或代销1493。
+- [线段第一种情况#1493](https://github.com/xy7365527-lang/NewChanlun/issues/1493#issuecomment-6246533234)：查明旧供方仅失败WIP，已认领并复用clean545e准备工位；#1405/#1420原生blocker仍OPEN，状态PREPARATION_ONLY，未起产品工蜂，不冒称实现遗漏已补齐。
+
+[CF/W组合身份](https://github.com/xy7365527-lang/NewChanlun/issues/1419#issuecomment-6245944375)与[W域互指](https://github.com/xy7365527-lang/NewChanlun/issues/1393#issuecomment-6245949648)保持CF22轴及W exact字段；各自冻结后逐段适配、组合独审及运行，不整树覆盖。
+
+[完整回放实证缺口](https://github.com/xy7365527-lang/NewChanlun/issues/1304#issuecomment-6245981746)已有[TB-07真实承接](https://github.com/xy7365527-lang/NewChanlun/issues/1366#issuecomment-6245990224)：main的MinimalEngine、计数ReplayBook、长度/timestamp比较不能证明完整经营、全状态确定性、恢复与AsKnown；旧Phase0缩减草案仅历史。
+[全来源收据](https://github.com/xy7365527-lang/NewChanlun/issues/1323#issuecomment-6245810273)保869端点/3510关系和main151端点；G0/Cargo.lock/donor额外Lean/C1及组合运行继续欠。
+
+存储：已退役两审计副本净释放约2.66GiB不重复记收益。最近statvfs约106.561GiB；普通归档26.066GiB＋五旧6.734GiB即使兑现仍差约8.639GiB，加A/B保留暂存后约10.655GiB，metadata新增候选目标至少约11GiB。raw稀疏恢复未过，完全排除可兑收益；首轮候选净条件上限0.595GiB、当前合格0B。Windows继续已验USB4 SSH；本次Tailscale SSH握手超时，未核G盘。普通R2已有固定合同但NOT_READY，真实._小样和硬空间保证仍缺；A/B精确执行器待审，五旧HOLD；不删源、不把远端空闲当本机148GiB达门。
+
+五位原生负责人仍工作；外部Sandcastle实际astra/xhigh分别留痕。主仓仍在codex/1523-1525-launcher-riskgate-v1且四项既有WIP保留，本机重型执行禁令保持。S86/MIN12、234、全部历史双跑、同核、旧实现终态、资金与恢复义务未闭。根证据：.chanlun/review-results/goal1323-resume-20261017/。以下旧记录保留发生史。
+<!-- /goal1323-current-20261018 -->
+
+## Destination
+
+本图到达时，必须同时为真：
+
+1. **#787 严格多重赋格架构成为唯一生产程序**：一条纵向主干塔／一份 Classification，挂 N 个操作级别旁路；每重各自做唯一同级别分解与向下定位，各自拥有 TStage、Voice 生命史、专属筹码和毛账；旁路与下钻不回流主干；重内单向、重间不仲裁；物理订单仅在最后按场所能力投影。
+2. **生产 owner 唯一**：逐 bar 消费 `Classification → 操作级别旁路/向下定位 → Chong` 的模块已裁定、实现并机械锁定；同一判断不存在第二套生产实现或失败兜底。
+3. **旧实现全部有终态**：每条旧引擎／简化臂逐一落为收编、冻结影子臂或删除；冻结臂不得参与生产准入和交易决策；#1096 不再图外悬空。
+4. **完整历史回放可执行**：历史数据驱动的确是上述完整程序，输出逐重状态、毛账、订单投影、成交与唯一真账；同输入双跑确定。
+5. **paper/live 与回放关系已裁定并验收**：共享到哪一层、替换哪些 adapter、谁持有唯一成交/持仓真账均有明确接口与行为锁；#1319 只能按本图裁定验收或废弃。
+6. **#1304 与 #1279 有合法去向**：#1304 作为回放功能工作线接入本图；本图完成并通过 SPEC 实施验收前，#1279 不得关图或宣布试运行放行。
+
+## Notes
+
+<!-- notes-N-1 -->
+- **N-1 决策预授权**（2026-10-19 原记录，2026-11-07 按用户授权更新）：T/P 类决策均按代理起草、非作者独审、代理裁定推进，不再设置 P 类影子待人工批准门。非作者独审必须绑定本次待裁定的当前正文；正文变更不得沿用旧版本结论，也不按时间豁免。判定时 resolution 首行引本条并附所审版本与独审原件。真实权限、资金与账户操作边界、行为正确性、合入前非作者独审及完整验收义务不变；缺证据如实留待补齐，不以自由文本批准替代独审绑定。流程正本 `.sandcastle/docs/graph-engineering.md`，追踪 #1547、#1909。
+
+<!-- ticket-mode-20261018 -->
+- **2026-10-18 用户更新编排方式**：逐票核认、依赖驱动、多票并行、整票Sandcastle交付。一票一个执行负责人承担票内实施/验证/返修/封包；主控保留全图、跨票接口、准入、验收和簿记。已有claim续接、blocked只作不消费前置的准备，不重复已完成工作。[完整执行约定](https://github.com/xy7365527-lang/NewChanlun/issues/1323#issuecomment-6245322989)。六Destination及既有全部验收/批准门不变。
+<!-- /ticket-mode-20261018 -->
+
+- **2026-09-18 产品前端分图（用户明确决定）**：完整产品前端单独由 [#1460](https://github.com/xy7365527-lang/NewChanlun/issues/1460) 承接；它不是本图子图，也不是本图或当前 goal 的关图前置。本图保留上述六 Destination、后台全部结构/经营数据及对外协议的实现和验收；可以使用现有测试客户端验证接口、历史和恢复。新产品页面、导航、交互、视觉及整体产品浏览器验收归 #1460。本图自身后台义务成立后收尾，不延续到前端。本决定是现行范围补充，原签署 SPEC 字节保留为历史。
+
+- **本图带实装**（决策+执行混合：真裁在 grilling/research/task-乙 票内完成；决策锁定后经 SPEC 拆 tracer-bullet 实施票，逐票独立评审与人工合入）。
+- **本图到达即关**。
+- **2026-10-17 恢复核查**：GitHub已有凭据在沙盒外正常，未重做登录。旧 `/private/tmp/goal1323-native-20261012` 已不存在；已从 Git 对象恢复 #1419 `018c6542e5` 与 #1488 `c2c9c5640a` 的隔离持久工位，丢失的未提交面/设计原件不能当已恢复。#1419真实BTC夹具已从`ecc9b196d3`原字节找回，合流兼容候选仍因第二种游标因果、对象/关系身份及构造合同未闭合而未通过独审，继续重做；[本轮登记](https://github.com/xy7365527-lang/NewChanlun/issues/1419#issuecomment-6224860070)。基线121949的run38854239929含16项编译错误，不能说仅旧lib红。#1488准确六driver清单已恢复，c2c9c自己的run38785485944仍failure；旧两项通过不代六项。C6a远端b6e690ecae按分支及完整SHA均无Actions run，且分支无专用C6a workflow，通用CI不能代验。全图原生对账仍50直挂(27关/23开)、11TB下77叶(8关/69开)，27个已关直挂索引齐全；#1304承接存在，#1279继续被本图阻塞。外盘约120GiB仍未满足全长双跑148GiB门；本机重型、资金、隔离、恢复和main合入门保持。六Destination均未完成。
+
+- **2026-10-16 恢复实况**：远端 main 为 `fdc5c6a7`；#1394 候选为 `b46ba296`。**C6a #1406 driver v4** commit `b6e690ecae` 已 push 至 `validate/1406-c6a-final`（tree `601a3f4b`），CI v3 独审进行中。**B2 #1488 driver v4** [run 38785485944](https://github.com/xy7365527-lang/NewChanlun/actions/runs/38785485944) 红灯（6测试 5失败），根因为 **StageOwner 资源租约违例**（"Carry租约已撤销"等4类错误），证明 H1 接口设计不完整导致下游 driver 失败；StageOwner 接口已冻结（MANIFEST `c0b0ace1`，根裁定 `ROOT-H1-H2-RULING.md` SHA `8ac2379e`），R/S 实施进行中。**#1419 v3 核心合流**已封存（35路径，MANIFEST `39dd24b5`，`ROOT-SEAL.json` 06:25Z），rustfmt pass、0文本冲突；E/F construction 进行中。六 Destination 均未取得完整通过证据。
+- **独立研究发生史**：#1334/#1335/#1336封存成果保留；#1336原有条件推荐不改签署字节。旧#1327–#1333设计排程继续暂停，现有义务已逐票登记真实SPEC/TB承接；未做旧结果对照，查阅或比较隔离旧成果仍须用户明确授权。
+- 本图是 #59/#529/#743/#787 的**续图**，不是重开：四张旧图的历史 destination 均正确完成；当前范围是后裁 #787 严格架构的完整生产接线、旧实现总收敛、历史回放与 paper 同核。
+- 架构继承链：#787/#960/#961 → `docs/unified-architecture-canon.md`；#827 → ADR 0011；#839 → ADR 0013；#834 → ADR 0014；#842 → ADR 0010；实施发生史 #847。
+- #847 是结构层非持久 SPEC；15/15 关闭不等于 π、organic、paper 已完整贯通。
+- #1319/#1320 在本图裁定前均保持 `needs-triage`：禁止恢复、合入或关票完成；分支只作候选史料。
+
+- **#1338 图文发生史**：三套候选Archify及对比总图已交付并独立复核；仍OPEN的归档/main门须按该票实体单独核。本次SPEC包不宣称已收编全部四图；旧图原推荐不替代当前R2。
+
+- **#1339 需求与架构链**：完整多重赋格和后台完整结构/经营事实为范围；需求、分类量词、观察合同及候选重评已完成当前批准链，现由#1340承接实施。Codex App承接工作，不迁移Prime运行态。
+
+### 红线
+
+**资金、隔离与恢复边界保留**：S 独立正式产出，不等待 E 或经营回执；坏重不得无条件拖停健康重，经济全故障不得拖停健康结构域。专属筹码与逐重毛账保留，净省不得复用；最大责任先留后发、真实终态且私账已应用后才减。E-Release 与 S-Execute 的已采纳精确交付窗口照 SPEC 留存，不扩大到普通准备；X 一次调用权、恢复封闸、旧命令不补发、非空持仓/尾账恢复仍须逐项验收。Q、cap、容量、θ、费率、滑点及经营参数不暗填，真实场所权限与最终调用批准门不因恢复执行而改变。
+
+1. 同一判断不得有宽严两档，失败不得触发换判据重判（#799）。
+2. 同一个判定每级必须复用同一判定，级别差异只以输入参数出现（#804）。
+3. 不得把 Chong 粗化为资金桶：重是 `⟨标的, 操作级别, 专属筹码⟩` 的持久操作单位；Voice 是一次建仓生命史；TStage 每重一份。
+4. 不得用“事后联立”仲裁重间方向；多级别联立是结构判断联立，不是跨重订单仲裁。
+5. 净额物理执行不得抹掉逐重毛账；场所能力不足只能形成明确投影与退场条件。
+6. 实施票不得替人裁架构；未决项必须留 Fog 或开决策票。
+
+## Decisions-so-far
+
+- #1540（FU-18）受控场所、账户与权限已定为 ADR 0062（#1949）；真实只读核验归 #1400，能力记录归 #1770。[关票声明](https://github.com/Newchanlun/NewChanlun/issues/1540#issuecomment-6736610451)
+
+- #1535（FU-13）带仓迁移、回退与责任退休协议已落 ADR 0063（PR #2064，main `ed780bcd`）；#1368/#1402 的非空迁移与恢复、#1551 整体验收继续开放。[关票声明](https://github.com/Newchanlun/NewChanlun/issues/1535#issuecomment-6860922006)
+
+- #1539 FU-17 已裁并落 ADR0060，成交/分配由 E 唯一记录、逐重账由 B 唯一应用，场所持仓仅对账；恢复与 crosswalk 义务按正本接续。PR1844及合后CI通过，具名工位已保全处置。[关票证据](https://github.com/xy7365527-lang/NewChanlun/issues/1539#issuecomment-6589184035)。
+
+- #1550（FU-19）回放外壳映射、旧回放件终态与 AT-14 报告合同落 ADR0058，正本及证据已入 main、按门关闭；#1528 不实施关闭，#1607 退场义务保留。[关票](https://github.com/xy7365527-lang/NewChanlun/issues/1550#issuecomment-6564521755)
+
+
+- [P0 数据来源研究 #1775](https://github.com/xy7365527-lang/NewChanlun/issues/1775#issuecomment-6455103063)区分 Binance 现货回放与 S86 合成整数 tick；已由 #1774/#1640/#1536 消费，未签定政策值。
+- [窗口序前提订正 #1790](https://github.com/xy7365527-lang/NewChanlun/issues/1790#issuecomment-6470317995)保留窗口序规范，撤销两序中段出生分叉前提；验收改为新出生分型构成窗口序后缀，后裁覆盖 #1783 原前提。
+
+- [S写者段A与既定增量构造 #1488](https://github.com/xy7365527-lang/NewChanlun/issues/1488#issuecomment-6440370171) 已按门关闭，实现8bbe4499与最终归档da03a10e已入main；布局段B归1491、增量生产化与量测归1640–1645，1552另等1437正式terminal。
+- #1533：逐 bar 追溯合同正本与证据已落 main，文书关票完成；八条下游行为验收保留。[修订 resolution](https://github.com/xy7365527-lang/NewChanlun/issues/1533#issuecomment-6428629112)
+- #1534（FU-11）逐 bar 域事件外壳 `domain-event/1`、身份与生命周期合同落 ADR 0051 与 CONTEXT（P 类，用户 2026-10-27 批复，main `7b842b69`）；B/E 实施归 #1768。
+- #1778（TB-07-E 前置）持久撤回子合同 domain-event-withdrawal/1 已落 ADR 0053，正本与归档合 main、具名工位保全后处置并按门关闭；#1768运行验收保持。[关票声明](https://github.com/xy7365527-lang/NewChanlun/issues/1778#issuecomment-6493556775)
+- #1783（#1491 前置）`CC-007.development_batch` entries 按分型窗口序（`window[0]` 严格升序），只取代 ADR 0037 §二「按分型出生序」一子句；`bounded-layout/1` 不升版本（T 类 N-1；正本 ADR 0054 / PR #1784，注释与分叉锁归 #1491/PR #1780）。[resolution](https://github.com/xy7365527-lang/NewChanlun/issues/1783#issuecomment-6463281163)
+- #1786（#1572 前置）#1572 逐项结算：每请求遍历许可求和、共享块归 audited、删聚合行与组净额分支；U 消耗 A 而已签数值不变（附升 P 触发）；生产切换在 #1640 合入后（新边 #1572 blocked by #1640）；v3 legacy E 侧空映射；generator/auxiliary 归 working set 并随候选同窗丢弃；逐项读数交 #1641 签署（T 类 N-1；正本 ADR 0055 / PR #1788，实施归 #1572）。[resolution](https://github.com/xy7365527-lang/NewChanlun/issues/1786#issuecomment-6465237016)
+- #1536（FU-14）完整历史数据与模型 profile 正本 ADR 0052 已入 main（`58039c60`，T 类 N-1）；#1538 解除阻塞。[关票](https://github.com/xy7365527-lang/NewChanlun/issues/1536#issuecomment-6465849505)
+- #1538（FU-16）三模式同核与 adapter 边界正本 ADR 0056（P 类，用户 2026-10-28 四条全批）已入 main（PR #1796 `af15e1a9`），承接收据与 review1796 独审归档 PR #1799 `c5da72d0` 已入 main；九票 FU-16 承接登记各 1，blocking 八边按 ADR :147-148 保留，具名两工位及本地分支按批准保全后处置，七条关票门已核并关闭；实施归 #1769/#1381/#1770/#1425/#1525/#1382/#1400/#1524，#1329 保持暂停。[关票声明](https://github.com/xy7365527-lang/NewChanlun/issues/1538#issuecomment-6543333293)
+- #1737（#1588 后继债）ingress deadline 测试同步修复 PR #1738 `d310c46d` 与归档 PR #1739 `00fdf0dd` 已入 main，主线 CI/macOS/DevSkim success，#1406 已收承接评论；具名两工位及本地分支按批准保全后处置，关票门已核并关闭；economic-session/2 完整验收仍归 #1716。[关票声明](https://github.com/xy7365527-lang/NewChanlun/issues/1737#issuecomment-6543303978)
+- #1523 汇总回环与来源边界（P 类，用户 2026-10-28 批复 28G）：新建组件叶 #1769（C-L）、#1770（C-API）；#1383/#1524/#1525 改等组件叶，#1524 改挂 #1382；HL 撤查默认 `cloid`、保留 `venue_oid_if_bound_else_cloid`；ADR 0039 修订 PR #1771。[resolution](https://github.com/xy7365527-lang/NewChanlun/issues/1523#issuecomment-6452353777)
+- #1654 已落 main 2804ae501c 并按门关闭；Stroke 保留为禁入生产的对照臂，后续退场条件不变。[resolution](https://github.com/xy7365527-lang/NewChanlun/issues/1654#issuecomment-6407493990)
+
+- #1516 撤销 make_token 两字段替换的P0前提，正式七字段配方保留；完整双跑归 #1411、旧入口终态归 #1413。[resolution](https://github.com/xy7365527-lang/NewChanlun/issues/1516#issuecomment-6407291604)
+
+- #1598 量档、成本与历史模拟政策已落 main，数量定标交 #1715，A-02 归 #1677。 [resolution](https://github.com/xy7365527-lang/NewChanlun/issues/1598#issuecomment-6407142443)
+- #1599 风控与场所候选政策已落 main，D/E 准备承接齐备，实现归 #1717–#1719 及 adapter 票。 [resolution](https://github.com/xy7365527-lang/NewChanlun/issues/1599#issuecomment-6407143570)
+- #1610 cap 原子激活及金额到冻结数量方法已落 main，新增协议交 #1715/#1716，旧 /2 不变。 [resolution](https://github.com/xy7365527-lang/NewChanlun/issues/1610#issuecomment-6407144670)
+
+- #1605 验收统计版本化与 #1669 分方向资格蕴含锁已验收关闭；[1605 resolution](https://github.com/xy7365527-lang/NewChanlun/issues/1605#issuecomment-6407018202)、[1669 resolution](https://github.com/xy7365527-lang/NewChanlun/issues/1669#issuecomment-6407019110)。
+
+- **[#1604 线段尾窗与相切边界](https://github.com/xy7365527-lang/NewChanlun/issues/1604#issuecomment-6371879256)**：票已关闭；PR #1663 与 #1625 已合 main，承接具名记录字段。
+- **[#1620 Python 读者 tb03c-book/2](https://github.com/xy7365527-lang/NewChanlun/issues/1620#issuecomment-6369027523)**：票已关闭，PR #1690 已合 main（e67def13a1）；索引指向非作者独审，不采用后发评论中将 Python 读者误写为 Rust 的描述。
+- **[#1622 BindVoice 故障缝](https://github.com/xy7365527-lang/NewChanlun/issues/1622#issuecomment-6390401630)**：tracker 为 CLOSED，代码 PR #1688 已合 main（13ed4d45c8）；该评论要求的收尾文档 [PR #1703](https://github.com/xy7365527-lang/NewChanlun/pull/1703) 仍 OPEN，工位处置与最终关票门由主控核对，不据关闭状态销项整图。
+- **[#1677 evidence_gate 记录化](https://github.com/xy7365527-lang/NewChanlun/issues/1677#issuecomment-6326054728)**：ADR 0022 修订节将验收门六字段落为 `#1677/evidence-gate/v1`；单边、逐窗与互不重叠保持固定规则，C-19 由 #1605 另立记录。
+
+- **#1531**：FU-09 严格判据唯一与级别同构锁落 ADR 0047，PR #1679 已合入（344d4da15d）。[结论与范围](https://github.com/xy7365527-lang/NewChanlun/issues/1531#issuecomment-6381351416)
+- **#1532**：FU-12 旧引擎/简化臂逐入口终态落 ADR 0048，PR #1679 已合入（344d4da15d）。[结论与范围](https://github.com/xy7365527-lang/NewChanlun/issues/1532#issuecomment-6381351923)
+- **#1619**：WE-1/WE-2 映射正本落 sanjieduan §6，PR #1679 已合入（344d4da15d）。[结论与范围](https://github.com/xy7365527-lang/NewChanlun/issues/1619#issuecomment-6381352410)
+
+
+- **#1557**：资金签署与重推导落 ADR 0040；实施由 #1601/#1598/#1599、换向口径由 #1590 承接。[结论与范围](https://github.com/xy7365527-lang/NewChanlun/issues/1557#issuecomment-6287625744)
+- **#1558**：量档与容量签署随 ADR 0040 落地；不代替下游实施验收。[结论与范围](https://github.com/xy7365527-lang/NewChanlun/issues/1558#issuecomment-6287626989)
+- **#1565**：W 初始化对象发布约束落 baohan.md v1.7；代码由 #1419/#1393 承接。[结论与范围](https://github.com/xy7365527-lang/NewChanlun/issues/1565#issuecomment-6278183391)
+- **#1576**：旧规则库未完成 Begin 的 serve→recover 死路修复已合入；迁移余项归 TB-10。[结论与范围](https://github.com/xy7365527-lang/NewChanlun/issues/1576#issuecomment-6310501161)
+- **#1568**：s-session/3 init 原子发布与失败重试已合入；v1/v2/reset 归 #1570，评审余项归 #1666。[结论与范围](https://github.com/xy7365527-lang/NewChanlun/issues/1568#issuecomment-6317280745)
+- **#1581**：段端失效标记贯通 parser→classifier 拒读；非 classifier 直读归 #1585。[结论与范围](https://github.com/xy7365527-lang/NewChanlun/issues/1581#issuecomment-6309751245)
+- **#1586**：自由度审计与 ADR 0041 已合入；40 条实施项映射到 #1598–#1606、#1368、#1532。[结论与范围](https://github.com/xy7365527-lang/NewChanlun/issues/1586#issuecomment-6292945322)
+- **#1588**：八份工程债交付已合入并逐提交验证；派生债与收尾去向见关票声明。[结论与范围](https://github.com/xy7365527-lang/NewChanlun/issues/1588#issuecomment-6310348710)
+- **#1600**：线段/区间套四项自由度落版本化字段正本；代码与冲突分别归 #1626/#1627。[结论与范围](https://github.com/xy7365527-lang/NewChanlun/issues/1600#issuecomment-6307650479)
+- **#1603**：塔上界与 MACD 参数记录及资源截断标记已合入；消费者接线缺口保留。[结论与范围](https://github.com/xy7365527-lang/NewChanlun/issues/1603#issuecomment-6308897078)
+- **#1612**：S 写者增量生产路径裁定落 ADR 0042；实施由 #1640–#1645 承接。[结论与范围](https://github.com/xy7365527-lang/NewChanlun/issues/1612#issuecomment-6308930379)
+- **#1629**：端点持久树并集剪枝已合入；全史性能与分层对拍范围见报告。[结论与范围](https://github.com/xy7365527-lang/NewChanlun/issues/1629#issuecomment-6310334575)
+- **#1630**：replay-drop 超线性来源已定位，现 main 已线性；探针和报告合入，未改生产代码。[结论与范围](https://github.com/xy7365527-lang/NewChanlun/issues/1630#issuecomment-6323502443)
+- **#1639**：layout/1 错位探针由 #1488 probe-0064 完成，本票补登记关闭。[结论与范围](https://github.com/xy7365527-lang/NewChanlun/issues/1639#issuecomment-6307954790)
+- [Lean第一种情况限定交付及纯文档收尾](https://github.com/xy7365527-lang/NewChanlun/issues/1495#issuecomment-6245096249)：#1495已于2026-10-18关闭；源码9e1b22、证据859886及收尾39b1b02均已入main，最新merge3315ed1d；158 jobs/三fixture及独评复用，七关票子句核验完成。CI继承红项有明确责任登记，不代销Rust1493、旧消费者迁移或整图。
+
+- 2026-10-18：恢复完整六项交付目标，#1523/#1527/#1528 接回原 TB 依赖，组件证据不代销全图；[恢复记录](https://github.com/xy7365527-lang/NewChanlun/issues/1323#issuecomment-6242783141)。
+
+- **继承 #787**：目标架构是一条纵向主干塔／一份 Classification，N 个操作级别旁路各自产唯一同级别分解序列，并各自向下定位。
+- **继承 #839/#834/#842**：重持久、Voice 一次性、TStage 每重一份；重内单向、重间不仲裁；专属筹码和毛账逐重保留，物理层最后投影。
+- **#1321 已确认的声明上限**：M1 只认包含严格多重赋格与执行面的完整生产程序；ThetaPiStream 或 π batch 单独读数不得冒充完整程序结论。
+- **旧图判重**：#59/#529/#743/#787 均为“历史 destination 已完成但新范围不同”，不重开；证据见 `.chanlun/review-results/issue1321-map-coverage-matrix.md`。
+- **撤回候选**：A′“唯一结构源→多个资金桶→事后联立→统一执行”被编排者打回，不是裁定。
+- **Archify 工具前置 #1324 已完成**：编排者选择先扩展 Archify；无箭头 association、Fog seam、edge bridge、嵌套 containment、depth ruler、read-only connection 已安装并通过 Standards/Spec/A/B 四路评审及安装后回归；#1321 blocker 已解除。
+- **#1321 Owner 已完成**：B 分域单-owner 已落 ADR 0027、CONTEXT 和统一架构正本（origin/main `644075a6`）；结构域拥有唯一 Classification，下游唯一重操作 owner 拥有 Chong/TStage/Voice/专属筹码/逐重毛账与生产交易意图；旧入口收编或退役；前端只读 Projection。
+- **#1322 全链 scan 已完成**：固定快照 `644075a6` 的终稿 2,445 行；221 边、24 严格锁、197 无锁；四审 PASS。结论是仓内尚无 ADR 0027 端到端入口，报告 SHA `9ead1c42...`。
+- **#1326 旧研究结果保留**：已产出有界静态审计、候选和解盲对照，不能替代用户要求的新一轮独立重做；归档/关票流程暂停，旧产物不得输入新作者。
+- **#1325 候选 bundle 已选择并关票**：完整 B 按 C1–C5 全选推进；C6 仅作临时非生产隔离区并强制退役。Evidence PASS、Visual PASS、完整 B 覆盖审计 PASS（0H/0M/0L）；top recommendation 只决定起点，不代表单选。设计 DAG 为 #1327→#1328→{#1329,#1330,#1332}，#1329+#1330→#1331，#1331+#1332→#1333。
+
+- **#1334 独立 Archify 已完成**：9视图分清语义义务、当前代码与未决，准确字节通过原生/独立语义/实际视觉验收并封存；不等于程序或完整研究通过。[交付与验收](https://github.com/xy7365527-lang/NewChanlun/issues/1334#issuecomment-5554436733)。
+
+- **#1335 独立全链扫描已完成**：有界静态171合同/94锁，原独审0H/0M/1L；根核309候选、316载荷、317归档成员及2204输入字节。未读与not-run保留，不等于程序通过。[交付与验收](https://github.com/xy7365527-lang/NewChanlun/issues/1335#issuecomment-5559726009)。
+
+- **#1336 独立完整方案已交付**：三主组织B-r1/A2-r3/C3-r1及C2完整变体，整包108文件独审0H/0M/2L、根机械核120载荷/121归档成员；推荐B不等采纳，运行全not-run、旧对照未做。[方案与完整选择依据](https://github.com/xy7365527-lang/NewChanlun/issues/1336#issuecomment-5566225609)。
+
+- **#1339 当前批准链**：需求冻结、完整345条目/496验收点/97故事、62 CC逐域分类量词、R2/RF-01/RF-02及精确交付窗口已采纳；[采纳与归档登记](https://github.com/xy7365527-lang/NewChanlun/issues/1339#issuecomment-5596164716)。S独立正式生产结构，Bᵢ保各重经营，E保共同责任，X保唯一实际调用；前端只读同源事实。所有运行义务仍须实际实现和验收。
+- **SPEC #1340 已批准并发布**：规范清单SHA256 `38e3176b6dfff456b8e3704410401c3bedddf0671751464bb9ea5b829e460260`，正文原件SHA256 `42fc34cd0bb6736469db5b6e652f861bee41b6ccc5808677125fae831b75bd11`。[原件及批准记录](https://github.com/xy7365527-lang/NewChanlun/blob/efc1ddc4d6c015f4f8c6d44f904d704a88308b46/.chanlun/review-results/issue1339-r2-spec-20260909/README.md)绑定commit `efc1ddc4d6c015f4f8c6d44f904d704a88308b46`；阅读链接转换不改签署payload。归档PR #1341已于本次批准后合入main；签署payload字节未改。
+- **TB-01-A #1370 已落地**：只完成其声明受测域的正式结构观察链；resolution=`2212eba3`，独评和主线CI已核、工位已清。[逐提交交付记录](https://github.com/xy7365527-lang/NewChanlun/issues/1370#issuecomment-5604744871)。其余结构、修订恢复和跨域义务继续由后续TB承接。
+- **旧票已具名承接**：#1327–#1333及#1096/#1304/#1319/#1320/#1279已逐票追加真实TB去向和未销义务；旧状态/标签/原生边暂存，暂停声明继续有效。#1282旧实验落档和#942逐问取消/未决/转挂处分保持。
+
+- **TB-01-B #1371 已落地**：声明结构域内修订、撤回、历史与真实恢复通过，实际 main `e46cf3bc`，工位已清；[交付、CI 红灯与证据边界](https://github.com/xy7365527-lang/NewChanlun/issues/1371#issuecomment-5648582221)。
+
+- **[固定结构 cut 分页与断线续接](https://github.com/xy7365527-lang/NewChanlun/issues/1372#issuecomment-5653539776) 已交付**：声明域八项 AC 与主线检查、尾部独评及工位处置完成，最终主线 `65298686cf`；不代销完整结构或经营义务。
+- **[正式结构和只读观察 TB-01 验收汇总](https://github.com/xy7365527-lang/NewChanlun/issues/1359#issuecomment-5653549133) 已关闭**：A/B/C 的本域联合验收成立，保留 47 项直接贡献与 190 项共享基础设施引用的区别，解除原 DAG 上 TB-02/TB-03 的本前置。
+
+- **[TB-02-A #1373 已交付](https://github.com/xy7365527-lang/NewChanlun/issues/1373#issuecomment-5659880295)**：具名已定方向、无同价身份竞争的完整 OHLC、包含/局部分型、来源与修订历史已验收；PR #1453 resolution `2706d87f7306d03afac2148297eb7a7be579cbf8`，主线检查与工位收尾完成。#1342/#1343 一般域仍开放。
+
+- **[TB-03-A #1374 已交付](https://github.com/xy7365527-lang/NewChanlun/issues/1374#issuecomment-5659882019)**：非空持久重、固定 Q 与受控单根 Voice 已验收，产品及完整报告补件均在 main；resolution `c65f021959b0caec1f385459de3d6049f99f7244`，工位已清。完整经营与未决资金政策继续由后续片承接。
+- **[TB-02-B #1392 已交付](https://github.com/xy7365527-lang/NewChanlun/pull/1458)**：无同价极值竞争域的新笔成立、延伸、确认与同源观察已验收；PR #1458 merge commit `8619a20f2800095e6bb9ec20ba2607a744740f91`，merged 不共用与 raw 极值间距分别取证，增量追加使用 checkpoint 和稳定前缀；合入时 CI 仍有三项与同价身份（#1343/#1405）相关的失败，原数据和断言保留。本域独立成功；涉及同价身份的原 ST005/相应 A 成功继续由 TB-02-V #1405 按 RD-02 补齐，三项关联失败保留。
+- **[TB-02-C #1404 已交付](https://github.com/xy7365527-lang/NewChanlun/issues/1404#issuecomment-6117508188)**：具名已裁域的线段 seed、FIRST 特征序列和第一种终结，经正式 S/Q 观察、独立 oracle、双跑及恢复验收；PR #1473 resolution `f95a7f3ebc0ce84ec2d2f8a8d71b5030b19f89b9`，独评、实体报告及主线批准例外已核，专属工位已清；第二种终结、一般 continuation 与同价身份义务仍由后续片保留。
+- **[级别递归归一化现状核验](https://github.com/xy7365527-lang/NewChanlun/issues/1463#issuecomment-5723053083) 已完成**：固定主线 `6f99b36c` 已有递归内核和小转大必要条件候选；完整自然递归、发生见证和正式全分类发布仍由既有 TB 承接。产品能力归既有后台总图与独立前端图，不新开实现图；仅勘察完成。
+- **[TB-02-D #1414 已交付](https://github.com/xy7365527-lang/NewChanlun/issues/1414#issuecomment-6146963944)**：已裁有限域的第二特征序列、strict 封闭与带缺口终结，笔/段破坏分立发布，经正式 S/Q/浏览器验收；合入前修 Codex P2（SECOND 扫描起点与身份锚）并在新字节上四臂重验；PR #1477 merge `46517424`，主线 CI 仅 3 既有红，工位已清。078:52 失效条件与一般窗口归 #1344/#1420。
+- **[#1342 初始包含方向 已裁](https://github.com/xy7365527-lang/NewChanlun/issues/1342#issuecomment-6149622771)**：方向未定时等首个 raw 非包含严格对（W）；此前逐 raw 保留未定前缀，方向出现后新组 `replaces` 未定记录。正本 baohan.md，实施归 #1393。
+- **[#1344 第二种候选终点 已裁](https://github.com/xy7365527-lang/NewChanlun/issues/1344#issuecomment-6149624668)**：分型或严格越界先到者定（078:52），失效不复活；同笔先分型后越界；续扫用 K1 游标；族I 50 窗归 TB-10。正本 xianduan.md §5.1，实施归 #1420。
+- **[#1345 选父价格投影 已裁](https://github.com/xy7365527-lang/NewChanlun/issues/1345#issuecomment-6149626626)**：取同源原始窗口 R=[min low, max high]，price-subset 与 index-subset 并列，缺证不填真假，selected 父不改选。正本 qujiantao.md §3.4.4，实施归 #1438。
+- **[#1347 Type2/3 NA 合成 已裁](https://github.com/xy7365527-lang/NewChanlun/issues/1347#issuecomment-6149628539)**：Type2/3 入口出条件证书（基例确认∧下级完成），不求 N^δ；对外报 L_geo 与 D_crit；cand_delta 填真臂随 #1442 退场。正本 qujiantao.md §8.2.4。
+- **[#1348 本金与回收 已裁](https://github.com/xy7365527-lang/NewChanlun/issues/1348#issuecomment-6149630088)**：本金按授权来源分批冻结，利润资本化不计本金；阶段准入谓词、零分母与公司行动口径定案。ADR 0031、正本 sanjieduan.md；实施归 #1406/TB-06。
+- **[#1349 共同资金争用 已裁](https://github.com/xy7365527-lang/NewChanlun/issues/1349#issuecomment-6149631601)**：超 cap 整 slot 原子等待（`#1349/atomic-slot-wait/v1`），注入与释放触发重算，只取空闲，cap 只认人工具名数额、本轮不填数。ADR 0029；实施归 #1394/#1408。
+- **[#1350 外效分配归属 已裁](https://github.com/xy7365527-lang/NewChanlun/issues/1350#issuecomment-6149633188)**：按投影时冻结的 projection_kind 分路：netted 走冻结比例累计分配，per_leg 只认逐腿归属；含残量与更正逆规则。ADR 0032；实施归 #1406/TB-04/TB-06。
+- **[#1351 首个能力验证 profile 已裁](https://github.com/xy7365527-lang/NewChanlun/issues/1351#issuecomment-6149634845)**：P1 绑 Hyperliquid testnet，API wallet 可下单不可划转，净额验证，TB-09 机器+人工双层重核；不选生产场所、不授权真实下单。ADR 0028；实施归 TB-08/09。
+- **[#1352 退出授权与退休 已裁](https://github.com/xy7365527-lang/NewChanlun/issues/1352#issuecomment-6149637096)**：结构、具名风险条件、手动三类来源各自成类，范围随类，动作一张表；外部可核终态即退休、迟到可重开，崩溃后续原授权。ADR 0030；实施归 #1380/#1408/#1412。
+- **[#1353 完整历史模拟模型 已裁](https://github.com/xy7365527-lang/NewChanlun/issues/1353#issuecomment-6149639079)**：采用已知前沿分段的 bar 批模型（`history-sim/bar-batch-known-frontier/1`），批内各重独立判定、先后未知，域外请求报 Unspecified。ADR 0033；实施归 TB-07。
+- **[#1478 中枢外缘 GG/DD 已裁](https://github.com/xy7365527-lang/NewChanlun/issues/1478#issuecomment-6149640661)**：GG/DD 只取 Zn 落码，延伸测试末成员按 Lean 全单元口径；并入 #1419 R8 批次同拍改塔与 Lean，禁中间态。正本 zhongshu.md §3/§4.1。
+- **[#1481 S 写者审计核心降阶](https://github.com/xy7365527-lang/NewChanlun/issues/1481) 已承接**：根裁 U-A/U-B/U-1 为 Δ 单代判据、写者生涯夹持与线性冷启动，旧审计只作对照臂；§5.9.2 全 9011 双跑由 #1394 拆来，挂 #1361/#1381/#1411。阶段 0 已有测量报告，实施与全规模验收未完成。
+- **[#1343 同价端点与极值身份已裁](https://github.com/xy7365527-lang/NewChanlun/issues/1343#issuecomment-6153028395)**：真实 BTC 1m 尾 5 万根 0 笔 0 段的根因是 TB-02-B 把同价当永久未定并全流冻结。裁定同型同价取先者（`077:54/:58`），多根组以极值根集合为身份、raw 间隔按极值区计（`[新缠论:选择]`，带退场条件），同价域无未定态；正本 bi.md v2.2 §7.1（main `b09bd8ed`）。落码由 #1405 承接（诊断的 blocked 级联并入），读数口径尾 5 万根 4,016 笔。
+- **资金/经营 policy 组已裁（[#1354](https://github.com/xy7365527-lang/NewChanlun/issues/1354#issuecomment-6153713798)、[#1355](https://github.com/xy7365527-lang/NewChanlun/issues/1355#issuecomment-6153710637)、[#1356](https://github.com/xy7365527-lang/NewChanlun/issues/1356#issuecomment-6153715166)、[#1357](https://github.com/xy7365527-lang/NewChanlun/issues/1357#issuecomment-6153712139)；#1358 只落容器）**：ADR 0034 量档记录、固定 Q 只经 `q_rebase` 改写、增长权益 G 分账与七态换档转移；ADR 0035 成本停止 policy（θ 用户签署、θ<1 拒、缺项是状态、L0 余量逐级复测）；ADR 0036 经营统计样本 (重, 稳定点) 与闸门后参数槽位（全 Unset）。main `1f5cdf76`。**五票零数值**：Q、量档、容量、θ、费率、滑点、换档份额、门槛全由用户签署，签署前系统只输出 AwaitingPolicy/NotEvaluable/InsufficientEvidence——这是 Destination ⑤ 真实 paper/live 开跑前须由用户签署的参数清单。义务已回填 #1394/#1398/#1402/#1406/#1410/#1421/#1441/#1444/#1445/#1446 与 TB-10 #1368。
+- **[#1346 适用域桥已查证](https://github.com/xy7365527-lang/NewChanlun/issues/1346#issuecomment-6154425014)**：#1245 Comparable、#778 Sel_Θ 与区间套 p4 两层式 C(J,t) 是同一对象域，可直接复用，无新选择（BRIDGED_WITH_GAPS）；`qujiantao.md` §6.5 同步、§9 第 46/49 条转指 TB-02-Q #1439（main `65d52234`）。实施缺口 I-1～I-8 回填 #1439、#1366 下叶、TB-04 主动定位准入叶与 Lean 跟进；G-026 随这些票销项。
+- **[#1489 S 内容布局已裁](https://github.com/xy7365527-lang/NewChanlun/issues/1489#issuecomment-6159518677)**：每代新增可达节点 ∝ g 的病灶在布局，不在 §5.2 编码。裁 `bounded-layout/1`：快照累计数组按出生序只在尾部变化；CC-007 的 2,615,078 个比较单元仍由 S 同核产生、只发一次，承载在每代一条 `CC-007.development_batch`，分型对象只出生一次；验收为比例门＋逐代上界门（r6 实测代入超界，外推 9011 为 18 倍）；9011 双跑落外置卷、每库 64 GiB 帽。ADR 0037（main `6525fa0f`），APPROVED-SOURCE 零字面改动。段 A #1488、段 B #1491。
+- **[#1490 线段第一种情况已裁](https://github.com/xy7365527-lang/NewChanlun/issues/1490#issuecomment-6159626152)**：#1487 查明全量回放在 raw 787,209 后停产是线段吸收态（第一种情况以「当下有无分型」决定包含，071:42 两句都做反；段端门失败只 skip）。裁第一种候选三态（CONFIRMED／KILLED_BY_NEW_EXTREME／OPEN_AT_PREFIX_END）、a/b 不包含、c ⊂ b 为转折点窗、071:30/:32 先破判据为唯一确认判据、流首段起点定义、段端门 fail-closed，规则 `segment-turn/1`。正本 xianduan.md v2.3 §7.1（main `dedf11f0`）；落码归 #1493，#1419 L3 尾窗「24 段」属同一机制、已发更正。
+
+- **[PR #1498 文档修订已合入](https://github.com/xy7365527-lang/NewChanlun/pull/1498)**：ADR 0032 累计分配改为 Balinski–Young 配额法，政策 `/2`，1348/1350 受影响清单随之订正；merge `a54d1ced`。OQ-2a 的多空方向单向蕴含及 Lean 覆盖声明已另经 PR #1500 合入 main（`64fbe7ad5ce9afa883f80b4f0599fefb156a4e3d`）；两份文档修订均不能代销 #1406 实施与恢复验收。
+
+- [FU-15 双跑确定性、恢复、seek、AsKnown](https://github.com/xy7365527-lang/NewChanlun/issues/1537) — ADR 0038 定双跑全状态等价、独立进程杀停恢复、seek 不偷未来与 AsKnown 分证协议（N-1 预授权，独审全 PASS，PR #1562）。
+- [FU-08 生产入口清单与唯一 launcher](https://github.com/xy7365527-lang/NewChanlun/issues/1530) — ADR 0039 列全仓生产入口五类清单与逐入口终态，定 `production_session` 为唯一正式 launcher（凭据只进新立的 X `x_execution_session`），第二写权按持久域锁、凭据、构建三层锁定（用户 2026-10-20 批复，独审 PASS，PR #1579）。
+- **[#1590 重回 0 换向的账已裁](https://github.com/xy7365527-lang/NewChanlun/issues/1590#issuecomment-6313235585)**：一重回 0 换向是 Voice 换代，本金批次 P、成本 K、R、费用、phase_events、G 全属重、跨方向连续不重置不分账；谓词按在世声部方向取侧（空头侧 `Σ M_b ≔ Σ P_b`），latch 不回退；声部开局资金 policy `voice-open-funding/v1`。ADR 0043（main `d07fc204`，PR #1652）。
+- **[#1627 a₀ 构件值域收敛已裁](https://github.com/xy7365527-lang/NewChanlun/issues/1627#issuecomment-6314397373)**：a₀ 值域只在 `zhongshu.md` §2.1.1 写一份，qujiantao/beichi/level_recursion 改指针；不改判据（塔 L0 ＝ 线段）。受影响代码清单 zhongshu §9.6（注释与实验开关名分，C1 归 #1626）。main `63ecebf8`，PR #1655。
+- **[#1559 成本停止 policy 签署](https://github.com/xy7365527-lang/NewChanlun/issues/1559#issuecomment-6315081122)**：首份签署实例 v1（P0 / P1-hl-testnet，θ = 2/1，费率已签、滑点 Missing），成本门仍 NotEvaluable。ADR 0044（main `1879c6a6`，PR #1658）。
+- **[#1560 SR v1 签署](https://github.com/xy7365527-lang/NewChanlun/issues/1560#issuecomment-6315082704)**：SR 清单 v1 绑 P1-hl-testnet：SR-1 只冻结新承担、SR-2 比值 1 无缓冲、SR-3 P1 恒不触发、SR-4 不登记。ADR 0045（main `1879c6a6`，PR #1658）。
+- **[#1561 P2 处置](https://github.com/xy7365527-lang/NewChanlun/issues/1561#issuecomment-6315084208)**：本图不做 P2 真钱首发，TB-09/TB-10 以 P1 验收，首发授权记录六字段只登记不执行。ADR 0028「P2 处置」节（main `1879c6a6`，PR #1658）。
+- **[#1567 s-admission 锚签发与无锚库接管](https://github.com/xy7365527-lang/NewChanlun/issues/1567#issuecomment-6315085658)**：锚为 S 资源准入合同（不授交易权），签发把关 uid + 合同 sha256；实施归 #1657。ADR 0046（main `1879c6a6`，PR #1658）。
+- **[#1602 执行成本/风控/tick 版本化记录](https://github.com/xy7365527-lang/NewChanlun/issues/1602#issuecomment-6433223413)**：实现与归档入 main（PR #1735 `75568405`，CI 40437265113），三处 LOW 归 #1751；该票系历史自动关闭，旧工位处置与关票声明仍欠。
+- **[#1621 known_at 可审计时间与跨域先后不变式](https://github.com/xy7365527-lang/NewChanlun/issues/1621#issuecomment-6457099143)**：PR #1688 `13ed4d45` 与文书 PR #1703 `3a6866ad` 入 main，按关票门关闭。
+
+- [#1644 P6 来源审计持久台账与清单全闭包核验已裁](https://github.com/xy7365527-lang/NewChanlun/issues/1644#issuecomment-6315087025)：S 写前核验改为增量台账，拒绝判据与原批准源不减；PR1646 已落地。
+- [#1653 段账本拒读终止态 ParseInvalid 已交付](https://github.com/xy7365527-lang/NewChanlun/issues/1653#issuecomment-6324854611)：PR1662 落地，新增三条断言有旧红新绿证据。
+- [#1678 health-monitor 未加载服务自愈已交付](https://github.com/xy7365527-lang/NewChanlun/issues/1678#issuecomment-6457111804)：bootstrap 自愈与真实恢复证据已归档，后续 CI 修复及工位处置完成。
+
+## Not yet specified
+
+R2和本次完整SPEC/C09已批准，不再作为缺少选择。以下仅为仍需具体证据/决定的局部成功门；已裁同步、缺证明和新选择各守其名分，不能把整个G/FU集合挂成全局开工门。
+
+1. RD-01 #1342、RD-02 #1343、RD-03 #1344 均已裁，见 Decisions-so-far；本条毕业，同价落码归 #1405。
+2. RD-04 #1345、RD-05 #1346（查证）、RD-06 #1347、RD-07 #1354 均已结，本条毕业。
+3. 量档、增长与换档（RD-09 #1355、RD-10 #1357）与 RD-08 #1348、RD-11 #1349、RD-12 #1350 均已裁（ADR 0034/0031/0029/0032）；本条只剩用户签署的数值，不是未裁问题。
+4. 计样（RD-14 #1356）已裁（ADR 0036）；按首次触达激活的后闸 [RD-15 #1358](https://github.com/xy7365527-lang/NewChanlun/issues/1358) 容器已落、票保持 open 待真实触达后由用户签 v1。已取消实验不复活。RD-13 #1351、RD-16 #1352 已裁（ADR 0028/0030）。
+5. RD-17 #1353 已裁（ADR 0033），本条毕业；完整模型的实现与 H1–H8 oracle 归 TB-07 叶片。
+6. #1303图/链表示终局仍OPEN缓办；保留其B7c对拍锁及#1283引擎链定位前件，是否进入后续frontier仍须依该票定位核实，不因本次SPEC发布自动采纳、消失或添加为全局blocker。
+7. 旧关联票额外义务继续对账：#1320七标的十年1min及冻结7/7重型测量未被有界TB-07测试吞掉；#1304报告器/回归锁已有TB-07-D实际接单；#1319实场所范围及#1279自身就绪条件保留。#1338单独归档门未由本次SPEC包自动完成。
+
+## Frontier
+
+**当前执行总单：[完整 SPEC #1340](https://github.com/xy7365527-lang/NewChanlun/issues/1340)**。2026-10-15 经 GitHub 原生 `sub_issues --paginate` 查询：本图直挂 **50 张（27 closed / 23 open）**；SPEC 下 11 个 TB 汇总，只有 TB-01 #1359 关闭。11 个 TB 原生子叶合计仍为 **77 张（8 closed / 69 open）**，与图直挂附加票分开计数；#1493 虽标 TB-02-X，目前原生父仍是 #1323，不混入这 77 张。#1498 为 merged PR，不是子票。
+
+已关八片 #1370/#1371/#1372/#1373/#1374/#1392/#1404/#1414 的既有验收索引保留，不重复派发已关工作。对账本图 27 张已关直挂子票，现有 Decisions-so-far 均可定位；#1489/#1490 已裁，不重开，缺的是下游实施与实际验收。RD-15 #1358 保持 open，首次真实触闸后才由用户签参数。
+
+1. **根处理 #1394 财务准备与整合**：P10 H1/H2、P16双身份v2尾差均已独审通过限定范围；19/19协议靶向证据复用，旧baseline/SEAL未改，r7 producer与b46 consumer分别具名。两ARTIFACTS=null，P11/真实A/B/资源/监督握手/新封口及正式执行仍缺，execution_authorized=false；财务、隔离、恢复门全部保留。
+2. **原生实施工位 [#1406 资金接纳与累计分配](https://github.com/xy7365527-lang/NewChanlun/issues/1406)**：C4b 37549bd4 的[CI38690336921](https://github.com/xy7365527-lang/NewChanlun/actions/runs/38690336921)已终态failure；macOS financial26/0/3、资金115/0/7及七新锁通过，Linux s_session489/2/11。C4a a463轮已终态failure，原DNS失败的macOS单job重试成功（资金108/0/7、financial26/0/3）；Linux也有capture期限与q_watch游标两红，另保留三既有lib失败。两候选缺已完成TestOnly时限/租约修复eb578149；sequence基线已吸收且相应两锁实跑通过，后续整合复用，不另改生产时间帽。C7a真实E/B双边界kill、重启和六轨双跑驱动v3 dde3b6b5已通过完整及尾差独审，16契约通过，主超时/清理失败双证据缺陷销项；已追加CI和精确TestOnly尾差后冻结f231e487；[CI38709551066](https://github.com/xy7365527-lang/NewChanlun/actions/runs/38709551066)的C7a job成功，独审核942项/356原件SHA，真实六轨/四SIGKILL/20恢复/120步oracle及三组十表原字节双跑通过，根已限定验收[WE-5 C7a](https://github.com/xy7365527-lang/NewChanlun/issues/1406#issuecomment-6188601588)。整轮已终态failure，仅rust-check的default/backtest红，失败名字、panic位置及断言与旧fields基线三败一致；没有新增编译错误，不称全绿。C5 v3 b93eee571f/tree4ceed89710已冻结，返修源图像可读深度与peer import目标复读计费/最早期限两项；独立资金安全审APPROVE_STATIC，0新增C/H/M。根复核29源码、13作者工件、9审查工件；27旧测试正文及11fixture不变，13独立账目模型通过。SQL实际返回只累wire，records沿原逻辑访问；提交后先保已写清单，再物理核账并传播错误，停止Job清理保留。36个源码测试入口=35默认+1需16MiB固定HFS载体的ignored。CI v3两项HIGH已在v4通过独审关闭，实际截止及统一清理/归档期限保持原上限。v4 run38737828204的HFS因blank-image create错误使用-format UDRW而实际执行0次，原失败证据保留；v5只换-type UDIF，精确3f93b1c464/tree d7fb039edb经run38740790534取得本轮HFS与C7a限定证据，；v5整轮已终态failure，Linux与macOS各32通过/3失败，HFS1通过，71实例合计65过/6败，原日志和135件封包已核，不能称C5通过。default2974/3/161、backtest2980/3/161，三旧失败完整指纹与ABC相同但未证明根因。三败已定位为测试期望漏计真实SQL复读；v6只改测试oracle及两个目标读取边界锁，保留生产计费/期限、36入口与其余31锁正文，Always-Allow authorizer只观察prepare轨迹而不冒充返回计数。源码862f2adbd5/tree6acbd22ecc及两CI身份常量尾差各获独审0C/H/M/L；最终HEAD4d9b072e5b671fc1a84f7d75b3976471b93d2afb/tree e2668b87c3f01c67ed7c8cb4bacc88c62f14e71c已单次推送并派发[run38744887626](https://github.com/xy7365527-lang/NewChanlun/actions/runs/38744887626)。v6自己原件的13:50Z独审：HFS真实1/0/0，16回执/67清单、创建→挂载→运行→卸载→原镜像归档链通过；同轮C7a的356原件、120oracle、20恢复、4真实SIGKILL及三组双跑通过，仅TestOnly WE-5。同轮macOS默认35入口已逐名独核35/0，资金库150/0/8、financial26/0/3；五条修正锁全部通过。v6终态已核：Linux35/35、macOS35/35、HFS1/1共71/71实际通过，137件最终封包根核，MANIFEST80da1799b2ff918c5e14915903154da4516c8b2a9c17b4a4f59bb34b0076f3bc；[限定结果](https://github.com/xy7365527-lang/NewChanlun/issues/1406#issuecomment-6196476911)。default2974/3/161、backtest2980/3/161，三旧失败完整指纹与ABC相同，不证明根因；整轮failure保留。独立金额oracle v2已获限定Approve，原7反例关闭，38测试与18手算点/11fixture原字节保持；此模型通过不替代Rust、持久化或恢复验收。C6、完整C7、FIN/2、真实S/γ、per_leg成功等仍缺。 C6a核心v2和driver v3三来源身份修复已独审；driver v4补Q启动connect-refused专属尝试及成功后Q-STARTUP，48作者合同、11受影响方法/53独立探针通过，根核41作者/30审件，源码已提交b6e690ecae5723fbbcb773f15400c71d1010da87/tree601a3f4bd54c22358eddfbf6ad51cd268fa9de5b。CI v2原2H1M闭合，但新H3 Capture原件/事实与Recorded cut未绑定after owner，两反例错误接纳；CI v3正补H3及startup，PENDING/False，未push/真实运行。[证据与剩余门](https://github.com/xy7365527-lang/NewChanlun/issues/1406#issuecomment-6199094453)。原绝对截止不变，真实Q/owner与完整C6/C7未验，#1394前置保留。
+3. **原生实施工位 [#1424 中枢五叶关系](https://github.com/xy7365527-lang/NewChanlun/issues/1424)**：v4 `c74a0efa28` + X1 `338173bb2e` 的24文件组合与CI七行尾差独审PASS，提交 `c07e9830fbd380734c75869b02c9f43e087066ac` 已推。[CI](https://github.com/xy7365527-lang/NewChanlun/actions/runs/38681398701)终态failure，s-observer/test/fixture-drift通过，X1 Python8+F8、Node E2+F6、29/29变异和center_pair_1424零漂移实际通过。默认Rust2991/3/162，三失败完整指纹与旧基线相同；候选7个Rust路径有改动，不称全树同base对照。s_session/backtest跳过的覆盖缺口保留。H3发布代与M1操作计数4n非性能验收；尚未混#1497，真实非空S→Q、双跑、恢复、原性能帽及#1488前置仍缺。
+4. **原生实施工位 [#1497 Q 冷校验降阶](https://github.com/xy7365527-lang/NewChanlun/issues/1497)**：已审v2提交 `fcf02461446c6517d1410b98bb62a49fbe2f4011` 已推；[CI](https://github.com/xy7365527-lang/NewChanlun/actions/runs/38680193580)终态failure，s-observer/test/fixture-drift及新增8方法通过，默认Rust2981/3/162，三失败完整指纹与旧main相同。候选与父07479的Rust树及job块相同，但精确父无旧CI，旧main至候选29个Rust路径不同，不称同base全对拍。s_session/backtest因父缺已有if:always而跳过，整合须保留主线门。43代5s且余量≥2s、背景/停池/100代拟合/内存/真实库/browser和a-b仍欠；正确性候选不等性能验收。
+5. **#1405/#1419/#1420 预整合并行**：69文件组合的预算尾差d5b9d018已独审通过（Python39/Node26）；恢复HIGH仍开放：首次SQLite读取可先恢复旧库，NO_CKPT_ON_CLOSE只约束本连接close，不能独立修复零写门。持writer.lock时正式逻辑规则写者已核清，882格源码模型和native小clone探针已过，但不等真实bundled/全量验收。根已选clone-only私有SQLite门、短期maintenance shared/exclusive、普通hot-journal支持及super-journal外路径前置拒绝；显式复用JobLimits传预算、无默认数值，保留64/148。恢复实现进行中；Python准入R4已获限定独审0C/0H/0M：特殊文件、有界读取、同字节换身份、外置owner锚及发布中断续原对象均保留；新增9独立检查关闭持续父目录fsync失败被重试跳过的问题，作者52项定向测试通过。仅Python范围通过。Rust v2已独审限定PASS：模块移至子目录、固定dirfd枚举和清理，原2H在静态/独立模型范围关闭，8模型和10次DIR关闭检查通过。留存0700空容器继续入store/staging账；只保证固定目录删除范围，不保证同名成员替换后零删除。未运行Rust；原冻结与PythonR4不变。v4已在独立wt-1405-1420-recovery-v4完成Rust消费R4持久owner→binding→limits、一次性PreparedAdmission/Arc身份lease、真实首读t0及实际payload回灌、最终path→FD；修复双超限时Deadline首错，并格式化六已改文件。17旧+4新边界锁共21个Rust锁仍NOT_RUN。独审PASS_STATIC_SCOPE_LIMITED，0新增C/H/M；M1仅静态关闭，独立还原语义补丁/格式化与原Job先累计实际字节保持，原R4/Cargo/清理算法不变。根复核作者9源码/20工件及5审查工件。整体仍BLOCK_NOT_MERGEABLE，生产allocation_upper全面拒绝尚未交付合法恢复；禁止push/merge。固定只读FD+私有SQLite WAL heap设计与资源合同查证已封；S7不是全heap帽，512MiB仅原150..151缓存窗口，4GiB仍参考值，不新增虚构预算门。完整S store baseline provider在限定资料内未找到，控制对象/metadata归属仍欠。已两路查重新建并认领[D1非空WAL原型#1504](https://github.com/xy7365527-lang/NewChanlun/issues/1504)，原生挂本图。独立proto/1504源码73ef47a4f46938b48e07094fb6583d57da2a9d42已通过unsafe/C ABI独审；CI的归档保原件、最终哈希截止和信号回收三项HIGH经v2修复并独审。注册工作流迁移尾差v3亦获独审，最终b9f38106a5c0cc6f320798cf146e3bc7a6677c1b/tree63c4beb1382fbaa0eb0f3cb4ea1003f9b75fdecc在[CI38750495969](https://github.com/xy7365527-lang/NewChanlun/actions/runs/38750495969)的六个D1真实案例已独审核通过，根复核43件证据SHA：四查询48/48/32/32行与独立默认VFS一致，pathname换位、19callback/7SQL/3读故障负控通过；14前后快照、13生命周期、原件保留/归档/正常回收及59.191秒监督链成立。二进制hash来自已审runner真实必经断言，未上传二进制，不冒称本地重算；真实SIGTERM/SIGINT仍NOT_RUN；仅Python取消补验两新文件已冻结，作者28项无信号静态/替身通过；独审新增3个替身复现2HIGH/1MEDIUM：WATCHDOG写失败绕过回收、退出后历史PGID盲发信号、外层1180秒未覆盖验证/清单。9件审查包根核，v1拒绝推送；v2外层返修已独审0C/H/M，47作者回放+7独立替身通过，两文件仅本地提交未push。后续独立发现原D1监督器reap在wait/poll收割leader后仍向历史PGID发信号，根已暂停取消补验push；同票v3最小修原runner并同步探针字节锁，已收割只读核残留、未收割持有身份才发信号、残留失败，原1170秒不扩。源码独审65作者+6独立替身通过，根精确提交f420550d16707191a6fe3df640dd4600785f3979/tree152de0432ad009c1fa1e626bf61110bf659ae511，单次push专用分支的[run38765051882](https://github.com/xy7365527-lang/NewChanlun/actions/runs/38765051882)已真实限定通过：正常exit0、取消预期exit1、TERM及回收中INT真实发生，75原件/70外层清单/两例各16内层清单/raw与tar及8终结阶段独核，86件包根核，MANIFEST5b1b03517c0e7a5fccebcab1578cc94b12cadcbb631c15bdf0b6ced52b81bba8。原ci.yml不变；旧六SQLite案例仍只属旧runner，未移植。D2首次run38767596239失败原件保留。新精确HEAD b9d3ecde1838e0db3eb67bfd01d364d624ec8619的[run38773444490](https://github.com/xy7365527-lang/NewChanlun/actions/runs/38773444490)实际success，12正/11负/10super/2tail、L01活statement BUSY链、3writer+1reader真实SIGKILL与执行后binary复核均过。独审0C/H/M/L，根核455件，MANIFEST e149074624a64a3c2feb7b5640db113c88860171bea55522d38a9f44d983197c；[限定验收](https://github.com/xy7365527-lang/NewChanlun/issues/1505#issuecomment-6198363279)。八文件Git报告29df8cbb69b196625ae8589be1d46e79bfd9c18d进入[draft PR1506](https://github.com/xy7365527-lang/NewChanlun/pull/1506)，文档独审通过，尚未合main/关票。D2真实监督器SIGTERM/SIGINT与OS EINTR仍NOT_RUN。D1/D2只答组件可达性，不替正式producer/CLI/R4、完整S baseline、同步I/O硬期限、源RW final-open连续性、49GB历史及整图；生产v4继续BLOCK_NOT_MERGEABLE且禁止push/merge。新库准备仍仅设计，既存无锚接管未实施，不以缺env/缺锚降级。APFS共享extent/metadata计费和49GB规模恢复资格仍缺；统一资源未证拒绝只能记未完成候选，不能冒称正常恢复交付，冻结组合未push。历史/1原件[CI38696709522](https://github.com/xy7365527-lang/NewChanlun/actions/runs/38696709522)精确028401b2已真实通过，旧锁及两export逐名1/0/0；独审核265项artifact SHA、13,438源帧、S3库7,886帧/4代/12时钟及SQLite原字节完整性。当前组合读者消费原件、S2历史、新/2黄金和mutants继续欠，不重标原件。v3仅A/B13轴，段/K1贯通未完成；main未含1394候选依赖，本阶段仍b46隔离候选，#1419真实S写者/非空中枢验收继续开放。
+6. **#1488 → #1491 → #1481 规模线**：sequence与旧fields限定证据保留，不重复验收。ABC首轮38709788198因四处测试编译接线错误失败，旧原件保留。新候选fd5b5fce45/tree0b27577922的[CI38713369836](https://github.com/xy7365527-lang/NewChanlun/actions/runs/38713369836)已由独审核49独立ABC锁，Plain31/Owned36/Native44共111次及同HEAD fields37次全部真实通过；macOS financial26/0/3、资金/协议75/0/7通过，忽略项不算通过。196件证据SHA经根复核，源码、二进制和退出码绑定，未累计旧轮结果。旧ABC整轮已终态failure，独审核完整日志：default2982/3/161、backtest2988/3/161，均exit101；三失败名/panic位置/断言与旧fields基线一致，只证明指纹一致，不证明根因相同。两档check、fmt及其余Rust步骤成功，不称全绿。A2 v2 fa4ba6a00e已独审51项静态PASS，关闭跨代来源污染H和身份检查顺序M；仅加runner的CI提交db9887d6/tree67b257779b经[38722158322](https://github.com/xy7365527-lang/NewChanlun/actions/runs/38722158322)实际执行62独立ABC锁、43+49+56=148次，加fields37共185次全部通过；macOS101通过/10忽略。根核255项证据，公共12项仍为Plain原件/fixture、Owned1为拒绝负控，不冒称完整Owned/Native Runtime。旧A2整轮已终态failure：default2981/4/161、backtest2987/4/161，旧三败外新增BSP绑定扫描门失败；点名content_producer.rs:2999。已核其为原始Bar的精确查找，后续B2树仅加1精确白名单及3行理由，scanner/stray/stale与生产代码不变；独审0C/H/M、系统grep修前唯一stray/修后双零，Rust修复尚NOT_RUN。旧失败原件保留，不称仅旧三败。全窗口、包装、排序等实际全扫仍列欠项，不称整个generate已具增量比例资格。C2 v2 24ed2ad4ae/tree305693bfa6已独审PASS_SCOPED_STATIC，关闭实际事务材料来源H1及重复业务阶段M1，0新增C/H/M；176静态断言与5,461条独立规则序列通过，18个新C2 Rust锁已在后述精确组合CI逐名通过。cap随retained对象存活，既有codec retain沿原父账结束，原完整source audit及首错保持。根已在新wt-1488-a2-c2-ci组合已审A2+C2；四个A2和八个C2源码路径互不重叠且与各自冻结源逐字相同。追加18Native锁的CI接线独审通过（36正控/216负控，执行器和workflow保持），最终35db1eb74b/tree8996a0b7已单次推送并触发[CI38731231166](https://github.com/xy7365527-lang/NewChanlun/actions/runs/38731231166)。本轮已独审核80独立锁/166次ABC+fields37=203实际全部逐名通过：Plain43+10、Owned49+20、Native74+7，18个新C2全过；macOS金融26/0/3及协议75/0/7通过，忽略不计通过。根复核268件证据SHA、三个artifact API digest、精确源/本轮cargo executable和六binary前后SHA。C2组合run38731231166已终态failure：default2981/4/161、backtest2987/4/161，三旧败外仍有BSP绑定扫描门content_producer.rs:2999；s_session534/0/11，其余已核编码/内容/Native/库与allocation通过，无编译错误。203专项通过不等整轮通过，BSP修复只在后续B2树且Rust尚NOT_RUN。B2在base35db1eb74b的共享隔离树已完成S来源核、M/I真实事务接线与codec成功子树桥；Accept/Begin Carry、Publish Advance、写前IssuedRawAdvance、真实MaterialAccess、旧新scratch同WorkScope和COMMIT后提升保持。codec-v2以私有确定性AVL替代O(N)哈希扩容，14新锁；S六文件以BTree贡献索引及独立节点AVL避免arena搬移，94旧显式错误出口/61实参及首错顺序核清，5新锁；M/I五新锁含真实三库非空四代轨迹，MI-M1的提前失败假绿已由精确到达/错误尾差独审关闭。三组件及M尾差均获静态限定通过，S↔M/codec接口合流静态核通过。fault尾差4锁/12坏件的SFT-M1已由cfg(test)冻结oracle wrapper和两调用替换修复，独立返审0C/H/M/L；旧两oracle与基线逐字一致。CI精确目录独审通过，原203实例保留、新增31，总234（Plain54/Owned70/Native110），执行器及workflow不变。根逐个匹配16源码和1CI路径后，首轮5063e850490c27e02c61fbc16a86b7b5a54f9966/tree da55436a477647422b6a8c442a8c5f83c1f5ba25的[CI38749701945](https://github.com/xy7365527-lang/NewChanlun/actions/runs/38749701945)实际Plain54/54、Owned70/70、Native lib23/23通过；Native bin80/fields7因五条类型/借用诊断未执行，合计147/234，不能称B2通过。三个BSP扫描门已在此SHA实际通过；同轮macOS financial26/0/3、economic/session75/0/7通过，整轮default已红、终态指纹待核。两文件最小修复经独审0C/H/M/L，根核11件后正常hooks提交fe96256fd535d8a604027dd55abf2a9f1281259d/tree67af52bfe80123f2d4becd2de8bb95eb7e32fcae；已快进原验证分支，单次[新CI38753679348](https://github.com/xy7365527-lang/NewChanlun/actions/runs/38753679348)已派发。仅prepared/source_contributions共20+/5-，234验收清单/执行器/workflow不变；新SHA自己的Plain54/54、Owned70/70、Native108/110及macOS专项已独核，234实例全部执行、232通过，322件专项封包根核。两真败保留：第4代全表差为普通RawCoords split丢弃但持久化的两个旧右段；独立重算全部7843/7845节点摘要、189根/6956可达节点一致，两额外节点无父引用亦无23表直接引用。第二败已到第三COMMIT注入，回滚/清资格断言越过，但测试错误要求复用按生产规则已退役owner。根核6件诊断包后批准新树最小两文件修复：仅取保留前缀，不造旧右段；测试按commit退役、其他两支可begin但不可重签旧token分开断言并核三支全部完成。保留234清单/全表含原件对拍/生产退役规则；不宣称整体消废、Owned闭合或物理首错序列不变。作者7件/独审5件已根核，独审0C/H/M/L，16,770纯模型例通过；两文件24+/8-正常hooks提交46066625166eeb1fa475ce76b1947c5c5f3f1b88/tree1d2f5481b70294f8d110710dcbfee3bf4d30c25b并快进验证分支，单次[CI38762285862](https://github.com/xy7365527-lang/NewChanlun/actions/runs/38762285862)已启动。新SHA本轮234/234已逐名独核(Plain54/Owned70/Native110)，三ZIP/251原件及282件检查点根核，MANIFEST41924664c89de5424b1fd1c440545783e3b00bb801968d0566e809fa4e0895be。5场景×4代全表含原件20点、三条真实注入回滚及commit退役拒重用通过，[限定验收](https://github.com/xy7365527-lang/NewChanlun/issues/1488#issuecomment-6196586384)。同轮macOS26/0/3与75/0/7；v3终态已核failure：default2982/3/161、backtest2988/3/161三旧指纹相同不证根因，s_session534/0/11，Native lib40/0、bin206/6/7，无编译错误；两原B2失败消失而六driver仍败。终态8件MANIFEST b4b88bba3a7887f457689faf391d9baa348e4dc25585adb438f2781ce0c8dd04根核，不称全绿。旧v1终态补核default2982/3/161、backtest2988/3/161三旧指纹且Native bin编译错误保留；旧v2终态已核：default2982/3/161、backtest2988/3/161、s_session534/0/11、Native lib40/0及bin204/8/7（2项B2加6driver）；不拼SHA。原失败证据保留，不拼旧轮通过。完整Owned、Native父账、Runtime默认mint、B2及主库/WAL身份夹持仍欠。#1491布局、#1481全9011、S86/MIN12/正式入口继续欠。原比例门、逐代上界、每库64GiB及外盘至少148GiB保留；AgentStorage读取超时/约114GiB条件未解除。 三文件v4已独审并提交9160fc9deec9bb8870c6e757583424b272cf3d69/tree660775bac826170882434c84c00e8aa4e5379aa8，原16/8MiB与全部成功锁不变，未push/运行。六测试专用CI两新文件已封，67纯替身合同通过，根核14件、独审中；不重复234，不代替全长义务。StageOwner B设计9审件根核并采纳C1/C2/C3：三点选择性真实SQL落库、资源/材料分开一次签发、同父scope贯通，必须run尾检Ok后才COMMIT、许可随载荷连续持有；新隔离树正冻结接口，未实现。16MiB工作域/额度失效与8MiB材料签发guard分别保留，不能合称内存不足。[限定进度](https://github.com/xy7365527-lang/NewChanlun/issues/1488#issuecomment-6199095051)。完整父账/Runtime、Owned及恢复规模门继续欠，不暗填生产heap帽。
+7. **#1393/#1493结构缺口与 [#1495 Lean跟进](https://github.com/xy7365527-lang/NewChanlun/issues/1495)**：#1393待组合；#1493未认领，前置#1405/#1420。#1426已认领，独立工作例准备包13件及独审5件根核通过（0C/H/M/L）：E10只证S读法旧P完成+新P开放，E03/E04只证盘整完成充分条件几何，E05/E06仅formed U/D；v2数值候选13件及独审4件根核，114显式笔/中心/时序、14固定Git对象与9引文一致，0C/H/M/L；completed U/D仍各0，同一合法读法中b/c及d/r完成/首次性联合见证未齐。v3独审发现1M：d[110,200]与B核心[145,155]相交，应进入B延伸，不能同时保B.last=u7且称d首离开。60笔/b独立/A首次三类known_at373保留，completed U/D仍0；v5已以双枢U的d和单枢P的r消除该问题，独审0C/H/M/L；根核13作者/6审件，限定接纳1个有条件U完成推论工作例（60笔137前缀12负控），低级完成收据仍为归纳输入，733仅是“当时或紧随其后完成”推论取得时刻，非生产CompletedAt。v6-D已独审0C/H/M/L并根核12作者/7审件，signed Lb=-175/2、Lc=-135、首SELL709、证据725，13负控通过；条件U/D各1，真实raw/正式owner U/D仍0，production CompletedAt仍null。[限定证据](https://github.com/xy7365527-lang/NewChanlun/issues/1426#issuecomment-6199095675)。新81件真实来源接线方案已根核：当前v3仍A/B13轴，E/F公共事实和source种类/目录合同未合流，泛化中枢核仍在。以9160fc9新隔离候选三方审接d5b C/D及c07 E/F，保B2与StageOwner10文件，先真实raw→至少2中心1pair→同源S/Q，再一般完成桥；不可复制S2整批JSON或将deferred冒标implemented。核心合流已开工，实际非空验证未运行。不新增循环依赖。#1419/#1424正式前置保留，不将准备标为ready或交付。[PR1501](https://github.com/xy7365527-lang/NewChanlun/pull/1501)已合main，merge fdc5c6a7fd2fcb6b8d436d419984c1c826b669f6整树与已验PR merge相同。mainCI38685059094终态failure：default2955/3/161、backtest2961/3/161三失败逐名/断言与旧指纹同，s_session81/0/1；mainDevSkim38685059028 failure，34664基线外key与已审PR双向差集0。原34655存量/#1474及上传超限责任保留，不称全绿。#1495仍OPEN，旧外盘WIP未核/未处置，不代销#1493或全图。
+8. **[#1496 中枢 R5 两段式结算](https://github.com/xy7365527-lang/NewChanlun/issues/1496)**：承接已裁“离开后看回抽，回则延伸、不回则破坏”，与 #1424 五叶关系、#1429 九段升级分开；当前只有 DESIGN 草稿，无代码验收。塔/S/Q/JS/Lean 同拍及全量≡增量、真实判别例仍待完成，票内前置 #1419 保留。#1426已有上述限定手算准备，正式实施未交付；#1429仍仅引文核对素材。
+
+历史 Sandcastle **10/10 已退出失败**：8 个末尾为 CLIProxy 本地入口 403“额度不足”，#1426 为 429 重试耗尽，#1493 自报实现失败。入口标签不能证明 OAuth/MF/YD 上游；后续执行按用户指定 OAuth CLIProxy 约束与根当前原生继承模型安排，不恢复历史耗尽路线。外盘终止时残留已经登记，但当前读取出现 EINTR，尚未核当前字节；不得覆盖或丢弃这些工作树。
+
+**2026-10-15 本轮对账与存储核验**：27/27 已关直挂子票均有 Decisions 索引，未重复已交付工作；#1304 的 #1418/TB-07 与 #1096 的 #1385/TB-10 承接真实存在，开放前置未完成。外盘 APFS 已挂载且系统报告可写，剩余约114GiB；宿主1KiB/8秒只读探针仍未返回内容，不能按元数据宣布可用。本机 cargo、正式性能与浏览器禁令保留，原全9011外盘≥148GiB门未满足；其余内盘实现、独审与远端CI并行。
+
+上述安排是执行优先级与恢复位置，不新增 blocking 边，也不把“原生已启动”当完成。叶片各自原生依赖、已裁语义、同树验证、独审与 main 合入门继续有效。
+
+| 已批准 TB | 真实验收汇总票 | 原生子叶（已关 / 开放） |
+|---|---|---:|
+| TB-01 | #1359（closed） | 3 / 0 |
+| TB-02 | #1360 | 6 / 19 |
+| TB-03 | #1361 | 2 / 4 |
+| TB-04 | #1362 | 0 / 12 |
+| TB-05 | #1363 | 0 / 5 |
+| TB-06 | #1364 | 0 / 10 |
+| TB-07 | #1366 | 0 / 4 |
+| TB-08 | #1367 | 0 / 3 |
+| TB-09 | #1365 | 0 / 2 |
+| TB-10 | #1368 | 0 / 9 |
+| TB-11 | #1369 | 0 / 2 |
+
+排程保持原 11 TB DAG，尤其 TB-04→TB-09→TB-08→TB-10→TB-11。跨 TB 共同销项集合不机械变成排程边。全部必需成功路径、实际权限、资金保留、故障隔离、恢复、最终独评与 main/CI 证据未齐前，SPEC 和六 Destination 均保持未完成。
+
+**旧 #1327–#1333 是暂停的历史设计排程**，不恢复原两方案选型与旧 B 组织；原生关系暂保留。#1096/#1304 义务不提前删除，#1319/#1320/#1279 继续受本图约束。**#1279 不关图、不宣布试运行放行；#1460 保持独立产品前端图，不作本图子图或关图前置；K4 研究排除在本次 #1323 恢复范围之外。**
+
+## Out of scope
+
+- 不重裁缠论概念定义或 #787 已定的严格多重赋格结构。
+- 不把历史冻结臂的 alpha 读数重新解释成完整程序读数。
+- 不在 map 阶段直接实装；图清后经 SPEC 人工批准再拆实施票。
+- 不在本图完成数据采购、磁盘采购或与完整生产程序无关的基础设施迁移。
+- K4 独立研究工作不并入本图；本图六 Destination 的结构/经营义务不因此删减。
+
+## Newly linked decision ticket
+
+- #1774 P0 venue profile v2 decision. Native sub-issue capacity is full (100); child carries `Part of #1323` and blocks #1640.
+
+- #1775 P0 venue/data source research. Native sub-issue capacity is full; child carries `Part of #1323` and blocks #1774.
+
+
+
+
+
+## 过程产物退仓
+
+- [ ] #1907 退仓24份旧meta-observer观察快照；外盘保全，保留现役消费者与历史来源。原生子票已满100，采用正文关联；不替代六Destination验收。
+
