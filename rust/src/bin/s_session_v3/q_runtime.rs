@@ -26,7 +26,7 @@ use std::{
 
 /// 可信Q调用层没有消费者累计账。Q的各phase、单包、Delta、worker/cache/lease门
 /// 仍由冻结resources及各实际调用点执行；不能把None称作无限Job。
-struct ServerAccess<'a> {
+pub(super) struct ServerAccess<'a> {
     _resources: &'a QResources,
     allocation: Option<&'a newchan_rust::s_content::capture_allocation::OwnedBudget>,
 }
@@ -287,7 +287,7 @@ fn execute(
     request: Request,
 ) -> Result<q_watch::Reply, String> {
     let allocation = reader.allocation_profile().cloned();
-    reader.with_capture(
+    reader.with_server_capture(
         resources,
         &mut ServerAccess::with_allocation(resources, allocation.as_ref().map(|p| &p.budget)),
         |capture, access| execute_captured(capture, resources, leases, epoch, request, access),
@@ -571,7 +571,7 @@ fn serve_http<S: q_http_input::TimedRead + q_watch::TimedWrite>(
         }
     };
     let mut identity = None;
-    let result = reader.with_capture(
+    let result = reader.with_server_capture(
         resources,
         &mut ServerAccess {
             _resources: resources,
@@ -1137,6 +1137,105 @@ mod tests {
     }
     fn call(rt: &Runtime, path: &str, body: &[u8]) -> q_watch::Reply {
         rt.dispatch(path, body).unwrap().recv().unwrap()
+    }
+    #[test]
+    fn content_memo_belongs_to_one_checked_image_and_worker_share() {
+        let mut f = Fixture::new();
+        publish(&mut f, 1);
+        let r = resources();
+        let p = projection(&f, &r);
+        let anchor = p.anchor();
+        let make = |anchor: &Value, r: &QResources| {
+            let bytes = envelope(
+                &anchor["fixed_cut"],
+                json!({"op":"content","anchor":anchor,"path":[{"field":"rows"}],"unit":"items","offset":"0","limit":"1"}),
+            );
+            q_content::Request::parse(&bytes, r).unwrap()
+        };
+        let read = |reader: &mut AuditReader,
+                    r: &QResources,
+                    req: &q_content::Request,
+                    epoch: &str,
+                    cached: bool| {
+            let mut server = ServerAccess::new(r);
+            let action =
+                |c: &mut ConfiguredCapture<'_>, a: &mut dyn Access| c.content(req, epoch, a);
+            if cached {
+                reader.with_server_capture(r, &mut server, action)
+            } else {
+                reader.with_capture(r, &mut server, action)
+            }
+            .and_then(|r| r.try_into_plain().map_err(|e| e.to_string()))
+        };
+        let req = make(&anchor, &r);
+        let mut reader = AuditReader::new(f.db_path(), &r);
+        let original = read(&mut reader, &r, &req, "1", false).unwrap();
+        let image_bytes = reader.stats().cached_bytes;
+        assert!(image_bytes > 0);
+        assert_eq!(read(&mut reader, &r, &req, "1", true).unwrap(), original);
+        let combined = reader.stats().cached_bytes;
+        assert!(combined > image_bytes);
+        assert_eq!(read(&mut reader, &r, &req, "1", true).unwrap(), original);
+        struct StopAtRecord;
+        impl Access for StopAtRecord {
+            fn owner_job(&mut self) -> Option<&mut Job> {
+                None
+            }
+            fn charge_records(
+                &mut self,
+                _: u64,
+            ) -> Result<(), newchan_rust::s_content::CodecError> {
+                Err(newchan_rust::s_content::CodecError::new(
+                    "record_stop",
+                    "fixture record limit",
+                ))
+            }
+        }
+        let stopped = reader
+            .with_capture(&r, &mut StopAtRecord, |c, a| c.content(&req, "1", a))
+            .err()
+            .unwrap();
+        assert!(stopped.contains("record_stop"), "{stopped}");
+        let changed_epoch = read(&mut reader, &r, &req, "2", true).unwrap();
+        assert_ne!(changed_epoch, original);
+        assert_eq!(
+            changed_epoch,
+            read(&mut reader, &r, &req, "2", false).unwrap()
+        );
+        for (key, val) in [
+            ("index_frontier", "other"),
+            ("rule_revision", "other"),
+            ("cut_generation", "2"),
+            ("history_mode", "RecomputedWithRevision"),
+        ] {
+            let mut bad = anchor.clone();
+            bad["fixed_cut"][key] = json!(val);
+            let bad = make(&bad, &r);
+            let warm = read(&mut reader, &r, &bad, "1", true).unwrap_err();
+            assert_eq!(
+                warm,
+                read(&mut reader, &r, &bad, "1", false).unwrap_err(),
+                "{key}"
+            );
+        }
+
+        let mut config = q_resources::tests::functional_input();
+        config["limits"]["max_query_workers"] = json!("2");
+        // 两工位合计足够，单工位的份额恰差一字节：不可借另一工位，也不可拒绝旧读法。
+        config["limits"]["max_cache_bytes"] = json!(((combined - 1) * 2).to_string());
+        let tight = QResources::parse(&serde_json::to_vec(&config).unwrap()).unwrap();
+        let mut small = AuditReader::new(f.db_path(), &tight);
+        let req = make(&anchor, &tight);
+        assert_eq!(read(&mut small, &tight, &req, "1", true).unwrap(), original);
+        assert_eq!(small.stats().cached_bytes, image_bytes);
+        let req = make(&anchor, &r);
+        publish(&mut f, 2);
+        let after = read(&mut reader, &r, &req, "1", true).unwrap();
+        assert_ne!(after, original, "应答必须带上新捕获的实际摘要");
+        assert_eq!(after, read(&mut reader, &r, &req, "1", false).unwrap());
+        assert_eq!(reader.stats().captures, 2);
+        reader.close();
+        assert_eq!(reader.stats().cached_bytes, 0);
     }
     #[test]
     fn historical_layout1_published_session_asknown_q() {

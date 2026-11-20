@@ -25,7 +25,7 @@ const FAMILIES: [&str; 6] = [
     "observations",
     "raw_history",
 ];
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum HistoryMode {
     AsKnown,
     RecomputedWithRevision,

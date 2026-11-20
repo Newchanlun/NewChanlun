@@ -3211,8 +3211,9 @@ impl NodeSource for ReadOwner<'_> {
     }
 }
 
+pub(super) type QueryNodes = super::audit_store::NativeTree<NodeDigest, (u8, sc::CodecVec<u8>)>;
 enum OverlayOwner {
-    Dynamic(super::audit_store::NativeTree<NodeDigest, (u8, sc::CodecVec<u8>)>),
+    Dynamic(QueryNodes),
     #[cfg(test)]
     Bounded(sc::capture_allocation::overlay::OverlaySlab),
 }
@@ -3365,6 +3366,16 @@ impl sc::ClosedReadObserver for AuditObserver<'_> {
     }
 }
 impl<'a> HashReader<'a> {
+    #[cfg(unix)]
+    pub(super) fn take_query_nodes(&mut self) -> Option<QueryNodes> {
+        match &mut self.overlay {
+            OverlayOwner::Dynamic(nodes) if self.owned.is_none() && self.work.is_none() => {
+                Some(std::mem::take(nodes))
+            }
+            _ => None,
+        }
+    }
+
     /// cold入口已有父work时直接承接；不得以Owned字段代替Native域。
     pub(crate) fn with_native_scope(
         mut self,
