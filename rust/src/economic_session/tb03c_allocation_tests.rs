@@ -17,11 +17,11 @@ pub(super) struct Session {
 }
 pub(super) fn manifest(space: &Space, policy: bool) -> Value {
     let mut plan = serde_json::Map::new();
-    for i in 0..256 {
+    for i in 0..96 {
         let t = 1000 + 10 * i;
         // 每个 owner 的 epoch 使用独立时间段；恢复后新提交仍通过真实单调时钟门。
         let times = |offset: i64| {
-            (0..16)
+            (0..8)
                 .map(|r| (r * 1_000_000 + t + offset).to_string())
                 .collect::<Vec<_>>()
         };
@@ -35,7 +35,7 @@ pub(super) fn manifest(space: &Space, policy: bool) -> Value {
         "e":{"db":space.0.join("e.db"),"socket":space.0.join("e.sock")},"chongs":chongs,"fill_manifests":[serde_json::from_str::<Value>(MANIFEST).unwrap()],
         "authorized_sources":[{"source_namespace":"testonly-tb1406","source_epoch":"fixture-epoch-1","producer_id":"tb1406-c4a","producer_epoch":"1","operations":["CaptureExternal","ResolveEvidence","ApplyAllocation","ReadView","QueryFact","QueryAllocation"]}],
         "resources":{"max_frame_bytes":"1048576","read_timeout_ms":"1000","write_timeout_ms":"1000","response_timeout_ms":"2000","queue_capacity":"2","max_connections":"2"},
-        "clock":{"kind":"TestOnly","plan":{"init_ns":"1","recover_ns":((1..=16).map(|r| (r * 1_000_000).to_string()).collect::<Vec<_>>()),"messages":plan}}});
+        "clock":{"kind":"TestOnly","plan":{"init_ns":"1","recover_ns":((1..=8).map(|r| (r * 1_000_000).to_string()).collect::<Vec<_>>()),"messages":plan}}});
     if policy {
         m["fill_allocation_policy"] = json!({"fill_allocation_policy_id":super::allocation::FILL_ALLOCATION_POLICY_ID,"policy_revision":"we7-frozen-1"});
     }

@@ -148,12 +148,13 @@ fn voice_authority() -> &'static Value {
 }
 
 /// 与 C4a WE7 同一时钟形状：每条消息每个 epoch 一列，恢复后按第二列提交。
+/// 计划共 22 步、最多 2 个 epoch；保留 32×4 余量（与 tb03c_v2_kill_tests 同口径），避免每进程重复解析 160 KB 未使用时钟项。
 fn manifest(dir: &Path, fault: Option<(&str, &str)>) -> Value {
     let mut plan = serde_json::Map::new();
-    for i in 0..256 {
+    for i in 0..32 {
         let t = 1000 + 10 * i;
         let times = |offset: i64| {
-            (0..16)
+            (0..4)
                 .map(|r| (r * 1_000_000 + t + offset).to_string())
                 .collect::<Vec<_>>()
         };
@@ -169,7 +170,7 @@ fn manifest(dir: &Path, fault: Option<(&str, &str)>) -> Value {
         "e":{"db":dir.join("e.db"),"socket":dir.join("e.sock")},"chongs":chongs,"fill_manifests":[serde_json::from_str::<Value>(MANIFEST).unwrap()],
         "authorized_sources":[{"source_namespace":"testonly-tb1406","source_epoch":"fixture-epoch-1","producer_id":"tb1406-s3","producer_epoch":"1","operations":["CaptureExternal","ResolveEvidence","ApplyAllocation","BindVoice","ReadView","QueryFact","QueryAllocation","QueryVoice"]}],
         "resources":{"max_frame_bytes":"1048576","read_timeout_ms":"1000","write_timeout_ms":"1000","response_timeout_ms":"2000","queue_capacity":"2","max_connections":"2"},
-        "clock":{"kind":"TestOnly","plan":{"init_ns":"1","recover_ns":((1..=16).map(|r| (r * 1_000_000).to_string()).collect::<Vec<_>>()),"messages":plan}},
+        "clock":{"kind":"TestOnly","plan":{"init_ns":"1","recover_ns":((1..=4).map(|r| (r * 1_000_000).to_string()).collect::<Vec<_>>()),"messages":plan}},
         "fill_allocation_policy":{"fill_allocation_policy_id":super::allocation::FILL_ALLOCATION_POLICY_ID,"policy_revision":"we7-frozen-1"},
         "voice_binding":voice_binding});
     if let Some((message, phase)) = fault {
@@ -405,7 +406,8 @@ fn is_root_key(k: &str) -> bool {
 /// `audit_all` 重放核；全部 `*_ns` 时刻替换为 `v mod COLUMN` 逐值比较，商按 [`Clock`] 逐值核对，
 /// 不符记入 `bad`。字符串形式的 JSON 先解析再规范化。
 fn normalize(v: &Value, clock: &Clock, path: &str, bad: &mut Vec<String>) -> Value {
-    Normalizer::new(clock).value(v, path, bad)
+    let mut buf = path.to_owned();
+    Normalizer::new(clock).value(v, &mut buf, bad)
 }
 /// 规范化器：同一次比较里内容相同的 JSON 字符串（库内图像逐提交重复嵌入同一原件/记录）只解析、规范化一次。
 /// 记忆的是「字符串 → (规范化值, 相对路径的商不合记录)」；命中时按当前路径前缀还原不合记录，
@@ -421,44 +423,55 @@ impl<'c> Normalizer<'c> {
             strings: Default::default(),
         }
     }
-    fn value(&mut self, v: &Value, path: &str, bad: &mut Vec<String>) -> Value {
+    fn value(&mut self, v: &Value, path: &mut String, bad: &mut Vec<String>) -> Value {
+        use std::fmt::Write;
         match v {
-            Value::Object(o) => Value::Object(
-                o.iter()
-                    .filter(|(k, _)| !is_root_key(k))
-                    .map(|(k, x)| {
-                        let here = format!("{path}/{k}");
-                        let n = match x {
-                            Value::String(t) if k.ends_with("_ns") => t.parse::<i64>().ok(),
-                            _ => None,
-                        };
-                        let out = match n {
-                            Some(n) => {
-                                let (q, r) = (n / COLUMN, n % COLUMN);
-                                match self.clock.expected_quotient(r) {
-                                    Ok(e) if e + self.clock.base_quotient == q => (),
-                                    Ok(e) => bad.push(format!("{here}={n}：商 {q} ≠ 期望 {e}")),
-                                    Err(e) => bad.push(format!("{here}={n}：{e}")),
-                                }
-                                json!(r.to_string())
+            Value::Object(o) => {
+                let mut map = serde_json::Map::new();
+                for (k, x) in o {
+                    if is_root_key(k) {
+                        continue;
+                    }
+                    let base_len = path.len();
+                    path.push('/');
+                    path.push_str(k);
+                    let n = match x {
+                        Value::String(t) if k.ends_with("_ns") => t.parse::<i64>().ok(),
+                        _ => None,
+                    };
+                    let out = match n {
+                        Some(n) => {
+                            let (q, r) = (n / COLUMN, n % COLUMN);
+                            match self.clock.expected_quotient(r) {
+                                Ok(e) if e + self.clock.base_quotient == q => (),
+                                Ok(e) => bad.push(format!("{path}={n}：商 {q} ≠ 期望 {e}")),
+                                Err(e) => bad.push(format!("{path}={n}：{e}")),
                             }
-                            None => self.value(x, &here, bad),
-                        };
-                        (k.clone(), out)
-                    })
-                    .collect(),
-            ),
-            Value::Array(a) => Value::Array(
-                a.iter()
-                    .enumerate()
-                    .map(|(i, x)| self.value(x, &format!("{path}/{i}"), bad))
-                    .collect(),
-            ),
+                            json!(r.to_string())
+                        }
+                        None => self.value(x, path, bad),
+                    };
+                    path.truncate(base_len);
+                    map.insert(k.clone(), out);
+                }
+                Value::Object(map)
+            }
+            Value::Array(a) => {
+                let mut arr = Vec::with_capacity(a.len());
+                for (i, x) in a.iter().enumerate() {
+                    let base_len = path.len();
+                    let _ = write!(path, "/{i}");
+                    arr.push(self.value(x, path, bad));
+                    path.truncate(base_len);
+                }
+                Value::Array(arr)
+            }
             Value::String(t) if t.starts_with('{') || t.starts_with('[') => {
                 if !self.strings.contains_key(t) {
                     let mut rel = vec![];
+                    let mut sub_path = String::new();
                     let out = match strict_json(t.as_bytes()) {
-                        Ok(p) => self.value(&p, "", &mut rel),
+                        Ok(p) => self.value(&p, &mut sub_path, &mut rel),
                         Err(_) => v.clone(),
                     };
                     self.strings.insert(t.clone(), (out, rel));
@@ -512,11 +525,10 @@ fn first_diff(a: &Value, b: &Value, path: &str) -> Option<String> {
         )),
     }
 }
-/// 崩溃轨值 `actual`（时钟 `clock`）与参照值 `expected`（参照时钟）规范化后逐值相同、且全部时刻商合规。
-/// 返回 Err(差异描述)，供正向断言与负控共用（负控断言其为 Err，不用 should_panic）。
-pub(super) fn compare(actual: &Value, clock: &Clock, expected: &Value) -> Result<(), String> {
+fn compare_with(norm: &mut Normalizer<'_>, actual: &Value, expected: &Value) -> Result<(), String> {
     let mut bad = vec![];
-    let a = normalize(actual, clock, "", &mut bad);
+    let mut path = String::new();
+    let a = norm.value(actual, &mut path, &mut bad);
     if !bad.is_empty() {
         return Err(format!(
             "时刻商不合：{}",
@@ -527,6 +539,11 @@ pub(super) fn compare(actual: &Value, clock: &Clock, expected: &Value) -> Result
         Some(d) => Err(format!("规范化后不同：{d}")),
         None => Ok(()),
     }
+}
+/// 崩溃轨值 `actual`（时钟 `clock`）与参照值 `expected`（参照时钟）规范化后逐值相同、且全部时刻商合规。
+/// 返回 Err(差异描述)，供正向断言与负控共用（负控断言其为 Err，不用 should_panic）。
+pub(super) fn compare(actual: &Value, clock: &Clock, expected: &Value) -> Result<(), String> {
+    compare_with(&mut Normalizer::new(clock), actual, expected)
 }
 pub(super) fn parsed(cell: &Value) -> Value {
     strict_json(cell.as_str().unwrap().as_bytes()).unwrap()
@@ -1109,13 +1126,15 @@ fn kill_and_recover(plan: &Plan, target: usize, phase: &str, work: &Path) -> Kil
 /// 必须保持 #1621 的 `B.first_known_ns >= E.commit_ns`，不能沿用恢复前的小时钟。
 fn resume(k: &Killed, work: &Path, steps: Vec<Value>) -> Vec<Value> {
     if k.owner == 0 {
-        for owner in 1..k.configs.len() {
-            let label = format!("recover-b{owner}");
-            finish(
-                spawn(work, &label, json!({"action":"recover","owner":owner})),
-                work,
-                &label,
-            );
+        let children: Vec<(String, Child)> = (1..k.configs.len())
+            .map(|owner| {
+                let label = format!("recover-b{owner}");
+                let child = spawn(work, &label, json!({"action":"recover","owner":owner}));
+                (label, child)
+            })
+            .collect();
+        for (label, child) in children {
+            finish(child, work, &label);
             let recovered = progress(work, &label)[0]["recovered"].clone();
             assert_eq!(recovered["kind"], "Recovered");
             assert_eq!(recovered["writer_epoch"], "2");
@@ -1145,17 +1164,18 @@ fn resume(k: &Killed, work: &Path, steps: Vec<Value>) -> Vec<Value> {
 fn final_diff(k: &Killed, clock: &Clock) -> Result<(Vec<Value>, Vec<Value>), String> {
     let reference = reference();
     let finals = dumps(&k.configs);
+    let mut norm = Normalizer::new(clock);
     for d in 0..4 {
-        compare(
+        compare_with(
+            &mut norm,
             &without(&finals[d], &["meta", "epochs"]),
-            clock,
             &reference.norm_tables[d],
         )
         .map_err(|e| format!("终态域 {d}：{e}"))?;
     }
     let queries = public(&k.configs);
     for d in 0..4 {
-        compare(&queries[d], clock, &reference.norm_public[d])
+        compare_with(&mut norm, &queries[d], &reference.norm_public[d])
             .map_err(|e| format!("公开查询域 {d}：{e}"))?;
     }
     Ok((finals, queries))
