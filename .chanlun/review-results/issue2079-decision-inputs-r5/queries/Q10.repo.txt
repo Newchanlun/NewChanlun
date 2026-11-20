@@ -1,0 +1,2 @@
+b9d898dccf46c2a716115eaa1215bc39c458a959:docs/adr/0026-scan-unify-defense-lean-mirror.md:42:- `rust/src/bin/strict_nest_check.rs` P1 硬门（P1Checker :423，checkpoint 全比对 :419-660 一带）——3b 退役对象；
+b9d898dccf46c2a716115eaa1215bc39c458a959:docs/adr/0039-production-entry-inventory-and-unique-launcher.md:286:   - 生产部署中，域 bin 只能由 launcher 拉起。手工用生产库路径启动域 bin 的情形，是 TB-09 部署隔离（#1383/#1401）的验收对象，本 ADR 不把「约定」算作锁。

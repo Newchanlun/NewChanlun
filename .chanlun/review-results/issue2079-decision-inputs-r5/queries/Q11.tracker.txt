@@ -1,0 +1,1 @@
+[{"number":2127,"state":"OPEN","title":"[grilling] 运行目录与 socket 的绝对路径进入 E/B 提交根：算账本事实还是非语义运行身份（#1425 复跑发现，#1411 双跑前置）","url":"https://github.com/Newchanlun/NewChanlun/issues/2127"}]

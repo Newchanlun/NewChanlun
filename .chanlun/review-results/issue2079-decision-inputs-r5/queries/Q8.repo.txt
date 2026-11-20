@@ -1,0 +1,4 @@
+b9d898dccf46c2a716115eaa1215bc39c458a959:.chanlun/review-results/issue1406-c6a-pagination-20261018/semantics.py:443:            # - 追加的 authorized_sources（完整版，包含 EconomicRead* operations）
+b9d898dccf46c2a716115eaa1215bc39c458a959:.chanlun/review-results/issue1406-c6a-pagination-20261018/semantics.py:458:            expected_manifest['authorized_sources'].append({**driver.QUERY_SOURCE, 'operations': ['ReadView', 'Watch',
+b9d898dccf46c2a716115eaa1215bc39c458a959:.chanlun/review-results/issue1406-c6a-pagination-20261018/test_semantics.py:302:        # 2. 追加 authorized_sources（Query source）
+b9d898dccf46c2a716115eaa1215bc39c458a959:.chanlun/review-results/issue1406-c6a-pagination-20261018/test_semantics.py:307:        # 父类已经修改了 manifest（添加了 db/socket 字段和 authorized_sources）
