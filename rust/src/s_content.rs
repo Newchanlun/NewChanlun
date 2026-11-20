@@ -338,11 +338,25 @@ pub fn frame(t: u8, body: &[u8]) -> NodeDigest {
                 .wrapping_add((DOMAIN_SEPARATOR.len() + 9 + body.len()) as u64),
         )
     });
+    const HEADER_LEN: usize = DOMAIN_SEPARATOR.len() + 9;
     let mut h = Sha256::new();
-    h.update(DOMAIN_SEPARATOR);
-    h.update([t]);
-    h.update((body.len() as u64).to_be_bytes());
-    h.update(body);
+    if body.len() <= 128 - HEADER_LEN {
+        let mut buf = [0u8; 128];
+        buf[..DOMAIN_SEPARATOR.len()].copy_from_slice(DOMAIN_SEPARATOR);
+        buf[DOMAIN_SEPARATOR.len()] = t;
+        buf[DOMAIN_SEPARATOR.len() + 1..HEADER_LEN]
+            .copy_from_slice(&(body.len() as u64).to_be_bytes());
+        buf[HEADER_LEN..HEADER_LEN + body.len()].copy_from_slice(body);
+        h.update(&buf[..HEADER_LEN + body.len()]);
+    } else {
+        let mut hdr = [0u8; HEADER_LEN];
+        hdr[..DOMAIN_SEPARATOR.len()].copy_from_slice(DOMAIN_SEPARATOR);
+        hdr[DOMAIN_SEPARATOR.len()] = t;
+        hdr[DOMAIN_SEPARATOR.len() + 1..HEADER_LEN]
+            .copy_from_slice(&(body.len() as u64).to_be_bytes());
+        h.update(hdr);
+        h.update(body);
+    }
     h.finalize().into()
 }
 
