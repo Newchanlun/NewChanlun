@@ -2,7 +2,7 @@
 
 > 正本：本文件是 `production_session` 在正常关停或崩溃后重新提供原会话本地 Unix socket 的正本。
 > 最后裁定：[#2079](https://github.com/Newchanlun/NewChanlun/issues/2079)（2026-11-20，P 类，依 #1909 代理独审裁定，非 `UserSigned`）。
-> 受影响代码清单：`rust/src/bin/production_session.rs:11,90-96,327-367,371-448`（监督、回收、各域 spawn）；`rust/src/bin/s_session_v3/writer_cli.rs:382-395,845-856`（S 地址与监听）；`rust/src/economic_session/service.rs:1515-1539,1584-1595`（E/B 监听与写者锁）；`rust/src/session_transport.rs:641-655`（实际 bind）；`rust/src/bin/x_execution_session.rs:201-234`、`rust/src/history_simulation/runtime.rs:866-897`（X 选择与本地监听）；`rust/tests/production_session_entry.rs:1-9`（正式入口验证）。行号按落地基线 `b9d898dccf46`；实施归 #1411。
+> 受影响代码清单：`rust/src/bin/production_session.rs:11,90-96,327-367,371-448`（监督、回收、各域 spawn）；`rust/src/bin/s_session_v3/writer_cli.rs:382-395,845-856`（S 地址与监听）；`rust/src/economic_session/service.rs:1515-1539,1584-1595`（E/B 监听与写者锁）；`rust/src/session_transport.rs:641-655`（实际 bind；:648 对照 PID/路径清理的旧注释由本裁定取代，实施时带 #2079 改写）；`rust/src/bin/x_execution_session.rs:201-234`、`rust/src/history_simulation/runtime.rs:866-897`（X 选择与本地监听）；`rust/tests/production_session_entry.rs:1-9`（正式入口验证）。行号按落地基线 `b9d898dccf46`；实施归 #1411。
 
 正文经绑定当前版本的非作者独审并按裁定流程落地后生效。
 
@@ -10,7 +10,9 @@
 
 **每个受管域每代新建一个监听器，公开绝对路径不变。** [ADR 0039 裁定三](0039-production-entry-inventory-and-unique-launcher.md#三唯一正式-launcher-的-seam) 的 `production_session` 仍是正式 launcher。部署监督器独立于 launcher，持有会话作业的启动排他权，负责出具退出与 FD 回收证明；它不因持有启动排他权而取得终止旧进程的权限。它以专用非特权 OS 身份启动受信发布助手。发布助手核对指令，执行名字操作，通过受信通道把本代 FD 交给 launcher；launcher 只交给指定域进程。发布助手不是第二个会话入口，不装配业务进程。域进程有本域监听权，无目录写权；发布助手和 launcher 都不新增域写权或发送权。
 
-既有部署入口在具名、版本化的会话部署记录 `production-session-deployment/1` 中选择 `endpoint_mode`，不写回原会话 manifest。默认 `direct`，既有未选入调用不需要该记录；显式选入 `managed-rotation` 后，该启动不能因记录缺失而视作未选入。改选须创建新的获准部署版本，不在运行中切换。受管模式限同一宿主，并要求独立监督、受保护的名字和内核监听核验。
+默认 `direct`。改选 `managed-rotation` 必须发布新的获准部署版本，不改原会话 manifest，不在运行中切换。受管部署在启动入口配置里，把会话键 `session_key` 与原会话配置和监督器入口绑定。该绑定独立于运行期登记簿。监督器只能用这条获准入口启动受管 launcher，经私有启动交付标明会话键与模式，再匹配 `production-session-deployment/1` 记录中的 `endpoint_mode`。交付、入口绑定或登记缺失、互相矛盾时拒绝受管启动，不改走 `direct`。
+
+原直绑入口对从未选入的调用照旧，无需新记录。若当前获准入口配置或登记簿仍把同一会话键标为受管，拒绝直绑，即使登记已损坏或受管名字已经消失。受管部署不允许用另一个会话键、直拉域进程或绕开受控入口取得同一配置的启动权。受管模式仅限同一宿主，并要求独立监督、受保护的名字及内核监听核验。
 
 部署保留原客户端连接权限和原会话协议、请求身份、资源限制。换代空窗内，残留路径没有监听时客户端可遇 `ECONNREFUSED`，退役后尚未 bind 时可遇 `ENOENT`；旧连接也会断开。这些是传输暂不可用，不能据此认定业务未提交。新代不继承旧监听 FD、待受理连接或已受理连接；客户端按原协议查询同一身份，或在原协议允许时重投同一请求。X 的已有调用与责任不因断线消失，不自动补发。
 
@@ -18,7 +20,7 @@
 
 ## 各域接续与 launcher 监督
 
-正常关停保留名字。下次发布前，由部署监督器先证明前代会话作业的进程已退出且 FD 已回收，再按每个域自己的退出证据选列。同一次接续可以混用两列：有本域正常结果才走正常列，已崩溃或缺本域结果走异常列；缺作业退出证明则两列都不能进。正常列不因端点换代推进写者代。
+正常关停保留名字。下次发布前，由部署监督器先证明紧邻前代会话作业的进程已退出且 FD 已回收。缺这份整作业证明时，两列都不能进。证明成立后，由新 launcher 按下文的持久域退出结果逐域选列，同一次接续可以混用两列。正常列不因端点换代推进写者代。
 
 | 域与公开地址（按原配置枚举本次发布集合） | 本域正常关停 | 本域异常退出或无正常结果 |
 | --- | --- | --- |
@@ -29,13 +31,17 @@
 
 发布助手按宿主目录项比较规则对上表各名字和登记簿内各会话的有效登记判重。同一目录项不得有两个有效登记代；废止记录仅供追溯。取证基线 `b9d898dccf46` 上，[历史模拟 X](https://github.com/Newchanlun/NewChanlun/blob/b9d898dccf46c2a716115eaa1215bc39c458a959/rust/src/history_simulation/runtime.rs#L866-L897) 监听 `history_simulation.socket`；[其余 X 骨架分支](https://github.com/Newchanlun/NewChanlun/blob/b9d898dccf46c2a716115eaa1215bc39c458a959/rust/src/bin/x_execution_session.rs#L201-L234) 不监听 profile 的 `endpoint`。X 没有本地监听时不登记地址、不传 FD，仍核 profile 的启动条件、持锁和持久身份。对外连接地址不在登记集合内。
 
-[#2077](https://github.com/Newchanlun/NewChanlun/pull/2077) 的有序关库仅覆盖 S/E/各 B。对收到有序关停请求后退出的域，以本次域实例正常结束且 launcher 记录 `event=domain-stopped`、匹配 `domain`、`writer_closed=true` 为正常结果；提前退出或被强杀的域不能用全局停止事件代填。
+**采集域退出结果。** [#2077 的有序关库](https://github.com/Newchanlun/NewChanlun/blob/b7b79657d85c4d9ef830d0422c29f944c7a4cc87/rust/src/bin/production_session.rs#L346-L382) 仅覆盖 S/E/各 B。受管 launcher 扩展这条 `event=domain-stopped`，在原有 `domain`、`status`、`writer_closed` 外加本次 `run_id` 和该域的 `pid`，与就绪事件同口径。仅对本次域实例的有序停止请求已成功下达、并收到该实例的正常退出结果时，才发 `writer_closed=true`。X 只在所选 profile 有自己的有序关停合同且给出正常结果时发同类事件。提前退出、未确认的停止、强杀和全局 `stopped` 都不能代填。
+
+**持久化与选列。** 部署监督器在当期作业内从仅由 launcher 写入的私有 stderr 通道采集该事件，域子进程不继承该通道。它只接受与其已登记的本次进程实例匹配的正常结果，原子提交到 `production-session-deployment/1` 中的 `domain_exit_results`，与部署记录一起落在受保护持久卷。每条记录含 `session_key`、`job_id`、`boot_id`、`run_id`、`domain`、`pid`、`process_start_id`、`registration_generation`、`status` 和 `writer_closed`。进程启动标识及登记代取监督器保存的当期实例登记；按 profile 无本地监听的 X 登记代显式为 null，不代表未知。提交持久化后，监督器才确认该域的正常退出结果可用于接续。
+
+新 launcher 只读监督器通过私有启动交付提供的紧邻前代部署记录与该字段。逐域仅当该条记录绑定前代会话键、作业、boot、运行、域实例和登记代，且状态为正常退出、`writer_closed=true`，才选正常列；缺失、未提交、冲突或不匹配时走异常列，不读原始 stderr、历史运行或其他域的结果。若独立部署记录或整作业回收证明本身不可核，仍拒绝本次接续。新 launcher 实际派发恢复分支时，输出 `event=managed-recovery-selection`，含本次 `run_id`、`previous_run_id`、`domain` 和 `branch`（`normal` 或 `abnormal`）；它是分支观测，不是退出原件。
 
 **launcher 存活时单域退出。** 受管 launcher 标记该域不可用，清除全会话 Ready，不退役该域名字、不自动重拉，也不停健康域。健康域继续处理不依赖故障域的合法请求，其他请求仍受原协议约束。本 ADR 不改变、也不裁定 `direct` 的监督语义；直绑下落实 C09.3 由 [TB-05（#1363）](https://github.com/Newchanlun/NewChanlun/issues/1363) 的各片负责，不以受管端点为前置。
 
-受管模式从隔离态回到全会话 Ready，本 ADR 只定义一条路径：显式有序停止会话，等健康域完成自身关停并证明旧作业退出，再以原配置重启，各域按自身退出证据选上表的列。隔离当下不触发整会话停止。launcher 存活时如何只让失效域原址再服务，包括换代触发者、回收证明方和 E/B 当前回执及 E 来源代，由后续决策票承接。
+受管模式从隔离态回到全会话 Ready，须显式有序停掉健康域，证明旧作业退出，再以原配置逐域选列重启。隔离当下不触发整会话停止。launcher 存活时如何让失效域原址再服务，包括换代触发者、回收证明方、E/B 当前回执与 E 来源代，由 [#2120](https://github.com/Newchanlun/NewChanlun/issues/2120) 承接。整会话重启影响健康域，不构成 C09.3「重启只影响该域」的证据。在 #2120 裁定及相应实施验收前，受管模式不得用于默认部署或总验部署。
 
-**launcher 崩溃。** 取证基线的 launcher 直接 spawn 各域，无父进程死亡联动。launcher 被强杀时，已在服务且仍存活的 S/E/B 成为孤儿，保留原监听并继续按原协议处理可完成的请求；[#2077 的控制管道](https://github.com/Newchanlun/NewChanlun/blob/b7b79657d85c4d9ef830d0422c29f944c7a4cc87/rust/src/session_transport.rs#L710-L728) EOF 也不触发有序关停。本 ADR 不新增切断旧服务或主动终止孤儿的行为。孤儿仍存活时，只有本 ADR 之外另行获准的运维动作可以终止它。
+**launcher 崩溃。** 取证基线的 launcher 直接 spawn 各域，无父进程死亡联动。launcher 被强杀时，已在服务且仍存活的 S/E/B 成为孤儿，保留原监听并继续按原协议处理可完成的请求；[#2077 的控制管道](https://github.com/Newchanlun/NewChanlun/blob/b7b79657d85c4d9ef830d0422c29f944c7a4cc87/rust/src/session_transport.rs#L710-L728) EOF 也不触发有序关停。仍存活的 X 同样不由本 ADR 终止，其发送照原 profile 发送门；接续前还须证明旧 X 和发送子进程退出。只可由「不授予的权限」节规定的独立运维授权终止孤儿，否则保持拒绝新代。
 
 部署监督器握有启动排他并封堵前代复起；它只观察旧进程是否已退出并出证，不发终止、暂停或隔离指令。退出证明绑定当期独立部署记录的会话、宿主、boot ID 和作业。以该作业从启动时登记的 launcher、发布助手和各域为起点，核对 OS 强制约束的作业中所有后代（含 X 的发送子进程）已退出、回收完毕；以私有交付链及其作业边界证明副本和含 FD 的待收消息已释放、没有越界转移。任一成员仍存活、暂停或无法证明，拒绝新 launcher 启动、域恢复与名字变更，保留现场。EOF、PID 消失、端点探测失败都不出证。前代全部进程自然退出或经另获授权的运维动作退出，且监督器取得完整退出与 FD 回收证据后，才可按异常列接续无正常结果的域；已持久记录的本域正常结果仍只归该域。处置名字还须通过下一节。
 
@@ -43,51 +49,61 @@
 
 ## 名字处置权与重新登记
 
-1. **首次登记。** 部署监督器保有独立持久部署记录，绑定部署版本、宿主及 boot ID、不可变会话配置、域/重 ID、原绝对路径、锚、发布身份、登记代和会话作业。发布助手另存按域发布日志，记录发布/退役意图、端点代、成功 bind 的目录项身份和完成状态；日志不是部署记录。两份记录和互斥状态都在受保护持久存储，避开 S 测量域、业务库和会随运行目录丢失的临时文件系统。初次登记须确认原址为空，不将直绑遗留或不明对象补登记为受管资产。重登提交同时更新部署记录的有效登记代，不能以发布日志、旧快照或现场对象补一份部署记录。
+1. **首次登记。** 部署监督器保有独立持久部署记录，绑定部署版本、会话键、宿主及 boot ID、不可变会话配置、域/重 ID、原绝对路径、锚、发布身份、登记代和会话作业。启动时固化作业 `job_id` 与会话内不重复的 `run_id`，域启动时在该作业内登记其 `domain`、`pid`、`process_start_id` 与登记代，退出结果与之绑定。确定紧邻前代后才推进当前作业记录；选列读取前代，不扫描历史。发布助手另存按域发布日志，记录发布/退役意图、端点代、成功 bind 的目录项身份和完成状态；日志不是部署记录。两份记录和互斥状态都在受保护持久存储，避开 S 测量域、业务库和会随运行目录丢失的临时文件系统。初次登记须确认原址为空，不将直绑遗留或不明对象补登记为受管资产。重登提交同时更新部署记录的有效登记代，不能以发布日志、旧快照或现场对象补一份部署记录。
 2. **排他。** 从核验到名字变更及状态提交，发布助手须持有该目录项的排他资格。部署持续禁止域、客户端、旧入口及同发布身份的其他作业绕开互斥。锚及可影响解析或替换对象的祖先、挂载和写权限须受保护。专用发布身份与无锚写权的域身份分开；其他作业可用同 UID 绕行时，`0700`、协作锁及 PID/inode 比对都不构成排他。锚、挂载或发布身份不连续时，旧登记不授权名字操作。对保留目录项的宿主重启，须核同一受控持久卷和锚的身份，以及停机、挂载和重启全过程中写权限的保护证据；一次 lstat 或重启后的权限快照不能证明连续。
 3. **先记意图，再改名字。** 只有前代回收、排他、保护连续性和完整登记同时成立，且原位置确为登记的同代 socket，才允许发布助手 unlink 该目录项。先持久记录绑定旧对象的退役意图，退役后记完成；确认空址后另持久记录新端点代的发布意图，再原址 bind。只有已记 `已发布` 及具体目录项身份才交 FD。设备号、inode、类型和属主用于查错，不是处置权来源；目录项 inode 也不是监听 FD 的 inode。
 4. **中断按证据续接。** 有退役意图时，只有旧对象和退出证据仍匹配、排他连续才续做；若原址已空且上述退役意图和排他连续仍可证，补记退役完成。仅有发布意图、现场为空且可证本次作业及 FD 回收时，结束该次尝试，以新端点代重试。bind 后已有对象、却未写完 `已发布` 时，报「端点需恢复」并保留原对象：发布意图没有成功 bind 的身份凭据，排他不能补这条绑定；退役意图则已引用完整登记的旧对象。完整登记对应的对象消失、发布日志丢失、对象被替换或保护失效也报「端点需恢复」，不猜测、不自动移动或删除。
 5. **「端点需恢复」的出口。** 部署监督器按会话键从独立部署记录的受保护登记簿读取当前有效登记代。重登入口不接收调用者指定的记录文件。当前记录缺失、不可核或只能找到历史代时拒绝，不以备份或发布日志代替。监督器按记录定位并封堵旧登记代的再启动和发布资格；取得对应前代退出与 FD 回收证明后，授权本次重登并持久记录这项许可。发布助手在排他范围内重验原址、当前锚和写权。若锚须重备，由另获授权的部署动作先完成；若现场仍有任何对象，发布助手不得认领或移除，只能等待另获授权的运维动作使原址为空。确认原址为空后，发布助手依许可在同一次登记提交中记旧代废止及其凭据、开启新登记代，提交后才首次发布。重复同一许可只续做该次重登。bind 后未记完成、已发布地址丢失、发布日志丢失均走这一规则；日志丢失不豁免独立部署记录与回收证明。
-6. **FD 定向交付和内核核验。** 发布助手与 launcher、launcher 与域的交付均使用定向继承白名单或已认证的私有通道；部署、域、登记代、端点代与同次 FD 一起绑定在该私有启动交付，不由公开请求提供。接收者核来源、域、代、`AF_UNIX`、`SOCK_STREAM`，并核 `getsockname` 的绝对地址字节等于预检通过的该域原配置地址。**接收者必须直接向内核查 `SO_ACCEPTCONN` 且结果为真。** 不支持该核验的平台不属于受管模式支持范围，选入即拒绝；对具体 FD 查询报错或返回 0 均拒绝，不改走其他证明。错传、多传或拒绝时关闭相应副本，正常交付后上游释放多余副本；兄弟域、客户端以及后续 exec 不得获取 FD。域按原协议服务，不再按名字 bind 或 unlink。
+6. **FD 定向交付和内核核验。** 发布助手与 launcher、launcher 与域的交付均使用定向继承白名单或已认证的私有通道；部署、域、登记代、端点代与同次 FD 一起绑定在该私有启动交付，不由公开请求提供。监督器给 launcher 的模式、会话键、当前 `run_id`、紧邻前代记录及退出结果也经受信的私有启动通道，独立于某个域是否有 FD，不下发给域。FD 接收者核来源、域、代、`AF_UNIX`、`SOCK_STREAM`，并核 `getsockname` 的绝对地址字节等于预检通过的该域原配置地址。**接收者必须直接向内核查 `SO_ACCEPTCONN` 且结果为真。** 不支持该核验的平台不属于受管模式支持范围，选入即拒绝；对具体 FD 查询报错或返回 0 均拒绝，不改走其他证明。错传、多传或拒绝时关闭相应副本，正常交付后上游释放多余副本；兄弟域、客户端以及后续 exec 不得获取 FD。域按原协议服务，不再按名字 bind 或 unlink。
 
-7. **退出受管模式。** 只在事先批准的部署版本变更中执行。前代作业退出并封堵复起后，原发布助手逐项读取会话的有效登记，按第 2–4 条退役可证明归属的名字，持久废止相应登记代，不创建新监听器。若名字已按第 5 条的证据条件确认为空，可在原排他下废止旧代而不再登记。部署监督器核对上表配置和会话登记簿中没有剩余有效登记、原址为空，才交给获准的直绑部署。任一名字或证据不符就停止切换，不以 direct 接管受管失败，不改变既有直绑的占用拒绝。
+7. **退出受管模式。** 只在事先批准的部署版本变更中执行。前代作业退出并封堵复起后，原发布助手逐项读取会话的有效登记，按第 2–4 条退役可证明归属的名字，持久废止相应登记代，不创建新监听器。若名字已按第 5 条的证据条件确认为空，可在原排他下废止旧代而不再登记。部署监督器核对上表配置和会话登记簿中没有剩余有效登记、原址为空，获准的新部署版本才移除入口的受管绑定并交给直绑。任一名字或证据不符就保留受管绑定、停止切换，不以 direct 接管受管失败。
 
 ## 先做布局核验，再接业务恢复
 
-[ADR 0059 裁定第 1–4、6–10 条](0059-production-session-layout-contract.md#裁定) 继续管路径解析、布局、前置拒绝和禁用放行开关。受管 S 不借用直绑 S「打开 driver 后才 bind」的第 6 条例外。正式入口先只读核地址、登记、角色和布局，再改名字、传 FD、建域文件或拉起写域。对受管公开地址，预检原配置中的值必须是绝对路径，拒绝 `.`、`..` 与从根到最终条目任一级符号链接（含悬空链接、链接祖先）；不能先 canon 再用新路径冒充原值。缺失的最终条目可以登记为空址，祖先必须存在且符合锚与保护要求。路径不合格时以 `InvalidDomain` 点名字段和地址，在任何副作用前拒绝。
+[ADR 0059 裁定第 1–10 条](0059-production-session-layout-contract.md#裁定) 对 `direct` 照旧。第 5 条仍只豁免 launcher 自身的 `state_dir`，第 6 条只豁免在 driver 打开后才 bind 的直绑 `s.socket`。受管入口先只读核地址、登记、角色和布局，再改名字、传 FD、建域文件或拉起写域。对受管公开地址，预检原配置中的值必须是绝对路径，拒绝 `.`、`..` 与从根到最终条目任一级符号链接（含悬空链接、链接祖先）；不能先 canon 再用新路径冒充原值。缺失的最终条目可以登记为空址，祖先必须存在且符合锚与保护要求。路径不合格时以 `InvalidDomain` 点名字段和地址，在任何副作用前拒绝。
 
-受管 S、E、各 B、适用 X、登记、发布及互斥写足迹避开测量域 M：`P` 本身、`P` 内 S 族条目及其子树、`A` 及其子树。按 ADR 0059 核目录项所在和实际目标目录，不扩大到 `P` 其他子树；命中即 `InvalidDomain`。既有 `state_dir` 例外不用于受管发布状态。接 FD 只换传输装配；原有资源、媒体、持久身份、锁和 R4 照核。
+受管模式沿用第 3–4 条的 M 判定，并将受管 `s.socket`、适用 X 的本地监听名、登记（含退出结果）、发布日志及互斥写足迹纳入该项预检。它们避开 `P` 本身、`P` 内 S 族条目及其子树、`A` 及其子树。核目录项所在和实际目标目录，不扩大到 `P` 其他子树；命中即 `InvalidDomain`。不把这些新增状态放进豁免的 launcher `state_dir`。接 FD 只换传输装配；原有资源、媒体、持久身份、锁和 R4 照核。
 
-**端点代不等于会话代或持久写者代。** 整会话从原 manifest 字节及其引用的域配置确定静态会话、库和身份。若本域持久写者代仍等于 manifest 代，沿用该代，不要求额外恢复回执。若需要推进或已不等于 manifest 代，只从该域对原配置、库、域、前代与当前代核过的正式恢复凭证取值。若恢复已提交却丢回包，用同一恢复身份取回原件并核其仍授权当前代。不能改原 manifest 的 epoch、读整数手加一、借历史回执或端点代赋予写权；`serve` 持本域锁后仍须核当前持久代。
+**端点代不等于会话代或持久写者代。** 原 manifest 字节及其引用配置确定静态会话、各库和身份。正常列沿用本域有效写者代，若等于 manifest 代则无需额外恢复回执。异常列用各域原有恢复合同，不把相等的 manifest 代当作可跳过恢复的条件：
 
-[#2082 @ `329be34f`](https://github.com/Newchanlun/NewChanlun/blob/329be34f5a9ca9c2bcc38ae75783304cc654904c/rust/src/bin/production_session.rs#L265-L341) 的 `--economic-recovery-plan` 是整套 E/B 显式当前回执的候选先例，不是单域接续接口。#1411 按整会话重启装配各域有效代，包括 S/X 和原代与换后代的混合；B 的本域写者代与 E 来源代分别校验。未推进写者代的域不因同会话另一个域换代而升代；B 连接新运行的 E 时核同一会话的当前 E 来源身份，不重写历史来源。故障隔离与原责任保留仍按 [SPEC #1340 C09.3、C09.7–9](https://github.com/Newchanlun/NewChanlun/blob/efc1ddc4d6c015f4f8c6d44f904d704a88308b46/.chanlun/review-results/issue1339-r2-spec-20260909/view/spec/SPEC.md#L326-L332) 和 [ADR 0038 的 #1539 修订](0038-dual-run-determinism-recovery-seek-asknown.md#修订1539恢复语义按证据类分述2026-11-02) 执行。
+- S 异常接续走正式 S `recover`，依其严格升代和 R4 介质门；恢复已经提交则取回该次原件，不再升代。R4 拒绝就停，不重建库或清侧件。
+- E 异常接续走 E 正式恢复，推进本域写者代，并按原合同恢复 Recorded/Pending 和责任；各 B 异常接续走各自正式恢复，推进自己的写者代并重放原归属；已提交的同次具名恢复走原件取回。
+- X 若重启后要取得新发送资格，不论选列，先证旧 X 及发送子进程退出，再按 ADR 0039 三.6 及 X 合同推进写者代、取得排他发送身份并核在途责任。无该发送资格的 profile 仍按本域原持久恢复门，不能把端点换代变成发送换代。
 
-**从正式入口读就绪。** S 须实际答复原协议的具名读请求；E 和各 B 须核本域锁与持久身份、实际答复原协议；X 按获准 profile 核实际服务，或在无监听时核 profile、持锁及持久发送身份与状态。路径存在、connect 或 spawn 都不能置 Ready，也不能为 X 开启发送。受管 launcher 沿用 `production_session ` 前缀的 stderr JSON 行，在初始、各域就绪/拒绝/退出以及总状态变化时输出 `event=managed-readiness` 快照。字段为 `run_id`（每次 launcher 启动分配的非敏感序号）、`session_ready`（布尔值）、`domains`（以 `S`、`E`、`B:<chong>`、`X` 为键，各值含 `pid`、`state`、`first_error`）。`state` 为 `starting`、`ready` 或 `unavailable`；`first_error` 为 null 或首错类别，不载任意错误正文。未 fork 的域 `pid` 为 null。只有配置所要求的域均 `ready` 才置 `session_ready=true`；验收同时核原响应或 X 的既有持锁与身份证据。快照供观察，不增公开 Ready RPC，不用总状态给健康域设闸。
+升代或持久写者代不等于 manifest 代时，只用本域核过且仍授权当前代的正式恢复凭证。凭证绑定原配置、库、域、原恢复身份、前代与当前代。#1411 由 S/X 各自的写者实现补齐同一身份的持久恢复原件取回和当前代核验接口，launcher 只装配，不写其库。不能改原 manifest 的 epoch、从整数手加一或借历史回执赋权；`serve` 持本域锁后仍核持久代。
+
+[#2082 @ `329be34f`](https://github.com/Newchanlun/NewChanlun/blob/329be34f5a9ca9c2bcc38ae75783304cc654904c/rust/src/bin/production_session.rs#L265-L341) 的 `--economic-recovery-plan` 原合同要求 E 和所有 B 一一对应，不能直接用于混合重启。#1411 的受管整会话装配沿用它的具名当前回执核验，但回执子集只覆盖需要消费已升代回执的 E/B，含本次和此前已升代的域；launcher 仍为配置中每个域核定有效代。未换代的域不凑回执、不升代。B 的本域写者代与 E 来源代分别校验；连接新运行的 E 时核同会话的当前 E 来源身份，不重写历史来源。故障隔离与原责任保留仍按 [SPEC #1340 C09.3、C09.7–9](https://github.com/Newchanlun/NewChanlun/blob/efc1ddc4d6c015f4f8c6d44f904d704a88308b46/.chanlun/review-results/issue1339-r2-spec-20260909/view/spec/SPEC.md#L326-L332) 和 [ADR 0038 的 #1539 修订](0038-dual-run-determinism-recovery-seek-asknown.md#修订1539恢复语义按证据类分述2026-11-02) 执行。
+
+**从正式入口读就绪。** S 须实际答复原协议的具名读请求；E 和各 B 须核本域锁与持久身份、实际答复原协议；X 按获准 profile 核实际服务，或在无监听时核 profile、持锁及持久发送身份与状态。路径存在、connect 或 spawn 都不能置 Ready，也不能为 X 开启发送。受管 launcher 沿用 `production_session ` 前缀的 stderr JSON 行，在初始、各域就绪/拒绝/退出以及总状态变化时输出 `event=managed-readiness` 快照。字段为 `run_id`（监督器在启动登记中分配的非敏感序号）、`session_ready`（布尔值）、`domains`（以 `S`、`E`、`B:<chong>`、`X` 为键，各值含 `pid`、`state`、`first_error`）。`state` 为 `starting`、`ready` 或 `unavailable`；`first_error` 为 null 或首错类别，不载任意错误正文。未 fork 的域 `pid` 为 null。只有配置所要求的域均 `ready` 才置 `session_ready=true`；验收同时核原响应或 X 的既有持锁与身份证据。快照供观察，不增公开 Ready RPC，不用总状态给健康域设闸。
 
 ## 候选取舍与实证
 
 - **同址新建监听器。** [Linux 探针第 1–3、6–9 行](https://github.com/Newchanlun/NewChanlun/blob/5a1ac9de73766f0a943c156f97cb467b7d690218/.chanlun/review-results/issue2079-endpoint-rotation/linux-fresh.log#L1-L9) 记录不同 worker 在原址答复 `from-1`、`from-2`。同 worker UID 的客户端不能在锚目录内新建条目，也不能改名或删除该 socket。第 4–5 行记录待受理且已写入的旧连接随第一代最后一个监听 FD 关闭收到 `ECONNRESET`；第二代只受理夹具的新连接。该方案需要证明排他和 FD 回收，有短暂断连，不能自动接管陌生对象。
-- **跨代保留监听 FD。** [Darwin 第 1–4 行](https://github.com/Newchanlun/NewChanlun/blob/5a1ac9de73766f0a943c156f97cb467b7d690218/.chanlun/review-results/issue2079-endpoint-rotation/darwin-fd.jsonl#L1-L4) 与 [Linux 第 1–4 行](https://github.com/Newchanlun/NewChanlun/blob/5a1ac9de73766f0a943c156f97cb467b7d690218/.chanlun/review-results/issue2079-endpoint-rotation/linux-fd.jsonl#L1-L4) 记录地址与 inode 未换、二代处理空窗排队的旧请求、最后持有者关闭后路径仍在。末次另 bind 的 `EADDRINUSE` 是[探针断言](https://github.com/Newchanlun/NewChanlun/blob/5a1ac9de73766f0a943c156f97cb467b7d690218/.chanlun/review-results/issue2079-endpoint-rotation/probe.py#L74-L80)，不是日志 errno 字段。该候选不满足旧队列隔离，不是本合同的可切换项。
+- **跨代保留监听 FD。** [Darwin 第 1–4 行](https://github.com/Newchanlun/NewChanlun/blob/5a1ac9de73766f0a943c156f97cb467b7d690218/.chanlun/review-results/issue2079-endpoint-rotation/darwin-fd.jsonl#L1-L4) 与 [Linux 第 1–4 行](https://github.com/Newchanlun/NewChanlun/blob/5a1ac9de73766f0a943c156f97cb467b7d690218/.chanlun/review-results/issue2079-endpoint-rotation/linux-fd.jsonl#L1-L4) 记录地址与 inode 未换、二代处理空窗排队的旧请求、最后持有者关闭后路径仍在。末次另 bind 的 `EADDRINUSE` 是[探针断言](https://github.com/Newchanlun/NewChanlun/blob/5a1ac9de73766f0a943c156f97cb467b7d690218/.chanlun/review-results/issue2079-endpoint-rotation/probe.py#L74-L80)，不是日志 errno 字段。本裁定采纳 [#2079 2026-11-18 候选](https://github.com/Newchanlun/NewChanlun/issues/2079#issuecomment-6994679622) 的「不把上一代内核队列交给下一代」要求；保留 FD 不满足该要求，不是本合同的可切换项。
 - **直绑或改址。** 直绑用于未选入部署。轮换私有路径、使用抽象名或单独重建运行目录不能证明原路径被原客户端复用；只比 PID、inode 再按名删除没有排他保障，已由 #2077 首版的非作者审查否决，见 [贴在 #1823 的记录](https://github.com/Newchanlun/NewChanlun/issues/1823#issuecomment-6994092216)。
 
-同址新建只在 OrbStack 的隔离 Linux 容器夹具实跑，发布者为容器 UID 0、无 capabilities，未记录内核版本。Darwin 完全未跑同址新建，只跑了保留 FD 对照。探针未运行产品 writer、正式协议、业务恢复或真实部署。受管实现声称支持的环境须逐个跑下列验收；Darwin 对照不能授予支持名分。
+同址新建只在 OrbStack 的隔离 Linux 容器夹具实跑，发布者为容器 UID 0、无 capabilities，未记录内核版本。Darwin 只跑了保留 FD 对照；[探针记载](https://github.com/Newchanlun/NewChanlun/blob/5a1ac9de73766f0a943c156f97cb467b7d690218/.chanlun/review-results/issue2079-endpoint-rotation/EVIDENCE.md#L31)初试 `SO_ACCEPTCONN` 返回 `ENOPROTOOPT`。该读数据实保留，不外推到所有内核；本版 macOS 不得选入受管。探针未运行产品 writer、正式协议、业务恢复或真实部署。
 
 ## #1411 的实施验收
 
-在精确实现头上用正式入口验收，夹具不产生真实外效。Linux 入口测试落 `rust/tests/production_session_entry.rs`。要求两种 OS 身份的用例用单次隔离 Linux 双身份作业，分配发布身份与域身份，不能以同一 runner UID 代替。崩溃夹具的进程控制者只管理本例创建的 OS 作业，另行具备处置权限；监督器只观察并出证。重启正控在一次性 Linux VM 的同一个 guest 中真实重启，测试控制器在 VM 外留存同一 guest 身份；独立部署记录放持久卷。重启前后由 guest 的监督器读取 `/proc/sys/kernel/random/boot_id`，记录实际值、宿主绑定、挂载与锚证据。普通容器重启、不同 CI runner 或注入 boot ID 不算正控。各受支持环境均须用其真实执行条件取得等范围证据。保留原配置、构建、平台/内核、各代作业和进程、状态行、退出证据及原响应。
+受管模式本版支持范围仅同一 Linux 宿主上的受控本地文件系统及受保护持久卷。部署版本须列出已通过下列验收的发行版、内核版本、架构、文件系统及作业隔离配置组合，按列举项选入；未列环境不得选入。隔离容器可做双身份夹具，不能代替真实宿主重启。本节只定义实施验收，不开启真实部署。
+
+在精确实现头上用正式入口验收，不产生真实外效。Linux 入口测试落 `rust/tests/production_session_entry.rs`；双身份子例分配不同的发布身份和域身份。崩溃夹具的进程控制者只处置本例创建的隔离作业，监督器只观察并出证。#1411 增设宿主测试入口 `scripts/verify_managed_endpoint_reboot.py --scenario <retained-name|vanished-name>`，由 VM 外控制器调用；对应表中的 `managed_endpoint_host_reboot_retained_name` 与 `managed_endpoint_recovery_exit` 的重启子例。guest 内分别运行 `managed_endpoint_host_reboot_{retained_name,vanished_name}_{prepare,resume}` 两阶段具名测试，阶段之间由 VM 外控制器真实重启同一个一次性 Linux guest。控制器保留 guest 与持久卷身份，guest 监督器分别从内核 `/proc/sys/kernel/random/boot_id` 取样；准备结束后不依赖仍运行的 guest 测试进程。容器重启、不同 CI runner 或注入 boot ID 不算正控。保留原配置、构建、平台/内核、挂载与锚、各代作业和进程、状态行、退出证据及原响应。
 
 | 验收 | 二值判据 |
 | --- | --- |
-| `managed_endpoint_orderly_restart` | L1 从登记空址启动，input-1 得到 `Committed`，保存原回执及库身份。有序停止后，L2 以相同 manifest 原字节、库、绝对路径和会话接续，按各域证据选列，核 L2 的 `session_ready=true`。从正式读口查回 cut-1，完整回执与首次响应逐字节相同；input-2 得到 `Committed` 并经正式读口查到持久提交；原身份重投无重复业务效果。另跑混合退出：使一个域退出并隔离，保留健康域 PID，再显式有序停止，核该域无正常结果、其余 S/E/B 各有正常结果；L2 按两列恢复，无需换代的域保持持久代，最终同址 Ready 并通过同样的读回与续写。 |
+| `managed_endpoint_orderly_restart` | L1 从登记空址启动，input-1 得到 `Committed`，保存原回执及库身份。有序停止后，L2 以相同 manifest 原字节、库、绝对路径和会话接续；验 L2 的 `managed-recovery-selection` 对同一前代 `run_id` 有持久正常结果的 S/E/各 B 为 `normal`，无正常结果的 X 为 `abnormal`；核 `session_ready=true`。正式读口查回 cut-1，完整回执与首次响应逐字节相同；input-2 得到 `Committed`、可读回且重投无重复业务效果。混合退出：强杀并隔离 E，保持健康域 PID，再显式有序停机。试验只给前代 E 放入更早一轮的正常结果作负控；即使 PID 可复用也不匹配前代 `run_id`。L2 须报告 E 为 `abnormal`，实际使用其当前恢复回执；S 和各正常退出的 B 为 `normal` 且本域代不升，B 核 E 当前来源代；最后同址 Ready 并通过同样的读回与续写。 |
 | `managed_endpoint_crash_isolation` | 让 S、E、配置中的一个 B、适用 X 分别真实退出。每次读取同一 `run_id` 下故障域 `state=unavailable`、`first_error` 非空、`session_ready=false`，健康域保持原 PID；无故障域 spawn 或名字变更。E 或 X 停止时复用 #1376 的正式输入，读回 S 新 `Committed` 切面；B 停止时复用 #1417 的双重夹具，读回健康重的新 `Committed`；S 停止时把受控事实以 `CaptureExternal` 交健康 E，核新 `Recorded` 并以原 ID 读回，不借该事实伪造 S 条件或 Release。此项只验隔离，不验单域重拉。 |
 | `managed_endpoint_launcher_crash` | 已 Ready 时只强杀 L1，不杀域。用仍存活的 S 在原端点完成原协议具名读请求，E 和各 B 完成各自原端点的 `ReadView`，再验证第二次启动拒绝且未改端点/登记、未做域恢复和 spawn。由另行获准的隔离夹具控制者处置旧作业，待全部进程退出、监督器取得退出及 FD 回收证据后，用原 manifest 走异常接续并在原址读回、续写及见证 L2 Ready。进程已退但移除回收证明的对照仍拒绝。不发虚假正常关库结果；各域按原介质准入，未知 SQLite 侧件不删，R4 拒绝不计成功。覆盖已持久接纳而丢回包，用原身份取原恢复回执，不重复升代，保留 `MayHaveCalled`；simulation 与受控场所按 ADR 0038 分别验证。旧直绑的 #1823 OBS 对照保留实际首错。 |
 | `managed_endpoint_ownership_and_interruption` | 以 [#1823 SAFE 规格摘要](https://github.com/Newchanlun/NewChanlun/issues/1823#issuecomment-6550850441) 的活实例、PID 复用、错 UID、不明对象、链接和路径竞争为底，显式验证暂停、错域、祖先变更或保护失效；均不得改变原对象。双身份在确定的核验/改名同步点验证域不能新建、改名或删除，第二发布作业不能进入。错域、额外或非监听 FD、内核核验失败均拒绝；确认旧积压不进新 handler。中断退役可凭有效意图续接；bind 后未记完成且现场有对象只报「端点需恢复」。 |
-| `managed_endpoint_recovery_exit` | 分别触发 bind 后未记完成、同一 VM 真实重启使临时目录内已发布地址消失、发布日志丢失。重启子例可先有序关库，保留原介质。留存独立部署记录和前代回收证明；已有对象默认保留，只由另行获准的夹具动作处置。依规重验空址及保护，核旧登记废止、新登记从空址发布，原端点正式读回原会话持久 cut。同一许可重试不再开一代。分别移除独立部署记录、以过期副本冒充当前部署记录、移除前代回收证明、保留未知对象，各例验证拒绝重登且不改现场；旧登记代不能再发布。 |
-| `managed_endpoint_host_reboot_retained_name` | 正式入口在该 VM 的受保护持久卷发布，保存登记、锚和旧 boot ID，重启同一 VM。此用例验证内核退出证据；可先有序关库保留原介质，不使用进程逐个 wait 的证明代替 boot 证据。验收保留原登记 socket，取得新 boot ID，核对同一宿主、持久锚/对象身份及离线至再次挂载间的写保护证据；按各域的退出证据选列，在同一登记代退役原名、换端点代并从原址读回持久 cut。boot ID 成立但对象替换或保护断裂时拒绝退役；boot ID 相同、缺失或换宿主时不能用重启证明放行。 |
-| `managed_endpoint_layout_and_legacy` | 受管地址或登记/锁命中 M、原配置使用相对地址或任一链接祖先时，验证预检 `InvalidDomain`、无文件变更或 spawn；保留 R4、坏锚、旧 epoch、独占锁的原首错。不能从内核核验监听的平台拒绝选入。未选入按原方式启动或拒占用，X 无本地监听时无新增地址前提。另在获准版本切换夹具验证原发布助手先退名/废止登记、后启动 direct；证据不足时不得尝试 direct。 |
+| `managed_endpoint_recovery_exit` | 分别触发 bind 后未记完成、通过 `vanished-name` 重启使临时目录内已发布地址消失、发布日志丢失。重启子例先有序关库并提交域结果，保留原介质和持久卷。留存独立部署记录和前代回收证明；已有对象默认保留，只由另行获准的夹具动作处置。依规重验空址及保护，核旧登记废止、新登记从空址发布，launcher 仍按被废止的前代实例登记核退出结果，不把新登记代当作旧域代；从原端点正式读回原会话持久 cut。同一许可重试不再开一代。分别移除独立部署记录、以过期副本冒充当前部署记录、移除前代回收证明、保留未知对象，各例验证拒绝重登且不改现场；旧登记代不能再发布。 |
+| `managed_endpoint_host_reboot_retained_name` | 通过 `retained-name`，在该 VM 的受保护持久卷发布并有序关库，保存登记、`domain_exit_results`、锚和旧 boot ID，重启同一 VM。新监督器从该卷读回前代 `production-session-deployment/1`，不提供旧 stderr 给 launcher；核同宿主、新 boot ID、持久锚/对象身份和离线写保护。L2 对持久化正常结果的 S/E/各 B 报 `normal`；另跑一例用夹具只丢掉前代某域的结果，其他证据仍有效，该域须报 `abnormal` 并走正式恢复。保留名字的正控须在同一登记代退役原名、换端点代并从原址读回持久 cut。boot ID 成立但对象替换或保护断裂时拒绝退役；boot ID 相同、缺失或换宿主时不能用重启证明放行。 |
+| `managed_endpoint_layout_and_legacy` | 受管地址或登记/锁命中 M、原配置使用相对地址或任一链接祖先时，验证预检 `InvalidDomain`、无文件变更或 spawn；保留 R4、坏锚、旧 epoch、独占锁的原首错。不能从内核核验监听的平台拒绝选入。未选入按原方式启动或拒占用，X 无本地监听时无新增地址前提。受管入口缺独立登记时拒绝；直绑入口遇仍绑定为受管的同一会话键也拒绝，即使其地址为空。另在获准版本切换夹具验证原发布助手先退名/废止登记、后启动 direct；证据不足时不得尝试 direct。 |
 
-[#1411](https://github.com/Newchanlun/NewChanlun/issues/1411) 负责本合同的整会话接续和实施验收，以及原票逐域真实中断、正式恢复及全状态双跑。受管隔离正控复用 TB-05 的业务夹具，既不是 TB-05 的实施前置，也不替代其验收。launcher 存活时单域原址再服务由后续决策票承接，不作为 #1411 已获裁的实施输入。端点、正常关库或 E/B 子合同单独通过都不能销项。[#1823](https://github.com/Newchanlun/NewChanlun/issues/1823) 提供调查和测试规格，不承担实施或授权。
+[#1411](https://github.com/Newchanlun/NewChanlun/issues/1411) 负责本合同实施，包括补齐 #2077 受管事件字段、监督器持久结果、launcher 装配、整会话接续和验收。原票逐域真实中断及全状态双跑中，要求原址续跑的用例走 `managed-rotation`，`direct` 在原址恢复测试中只保留 #1823 OBS 的拒绝对照；不限制 TB-05 用直绑验隔离。受管隔离正控复用 TB-05 的业务夹具，不替代其验收。launcher 存活时单域原址再服务归 [#2120](https://github.com/Newchanlun/NewChanlun/issues/2120)，不作为 #1411 的实施输入。端点、正常关库或 E/B 子合同单独通过都不能销项。[#1823](https://github.com/Newchanlun/NewChanlun/issues/1823) 提供调查和测试规格，不承担实施或授权。
 
 ## 不授予的权限
 
-本 ADR 只规定将来获准部署中受管目录项的发布、退役与重登条件。它不授予任何现存进程或账户实际 unlink、宿主目录/挂载/身份变更、隔离、安装、迁移或生产启用权限；隔离 CI 夹具的一次性测试身份和目录不赋予宿主权限。ADR 0039 三.2 的 manifest/profile 及 launcher 职责不变；私有 FD 和代际启动交付只在选入受管部署时增量生效。发布助手不持有场所凭据，launcher 原有 X 凭据装配不变。实际资金、下单、场所/账户、风险参数、密钥、凭据与发送权限仍按 [ADR 0041「授权来源与生效边界」](0041-degrees-of-freedom-configurable-not-excluded.md#授权来源与生效边界1909--pr-19152026-11-07) 执行。本票不修改 ADR 0039/0059、缠论和交易判据、R4、既有恢复帽或 #1323 的 Destination。
+ADR 0039 三.2 的输入与三.3 的 launcher 装配职责不变；私有启动交付只在受管模式生效。受管退出证明由独立部署监督器出具，沿用 C09.8 对旧 X 退出的分工，不转移域写权。发布助手不持有场所凭据，launcher 原有只向 X 交付凭据的边界不变。
+
+本 ADR 不授予终止进程、unlink、宿主目录/挂载/身份变更、隔离、安装、迁移或生产启用权限。真正部署时，目标部署负责人须在 TB-09 的 [#1383](https://github.com/Newchanlun/NewChanlun/issues/1383) 与 [#1401](https://github.com/Newchanlun/NewChanlun/issues/1401) 的部署验收和对应 runbook 中承接孤儿处置、残留名字处置及重备锚的动作级授权，单列作用域、执行身份及批准来源；这两票的存在不构成授权。授权路径未建立或证据不成立时保持失败关闭，监督器和发布助手不代办。#1411 隔离夹具仅控制本例进程和私有目录，不授权宿主。实际资金、下单、场所/账户、风险参数、密钥、凭据与发送权限仍按 [ADR 0041「授权来源与生效边界」](0041-degrees-of-freedom-configurable-not-excluded.md#授权来源与生效边界1909--pr-19152026-11-07) 执行。本票不修改 ADR 0039/0059、缠论和交易判据、R4、既有恢复帽或 #1323 的 Destination。
