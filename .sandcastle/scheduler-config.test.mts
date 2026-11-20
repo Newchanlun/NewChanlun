@@ -5,6 +5,8 @@ import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { spawnSync } from "node:child_process";
+import { API } from "typescript/unstable/sync";
+import * as ts from "typescript/unstable/ast";
 import { configPath, readSchedulerConfig, schedulerEnvName, type SchedulerKey } from "./scheduler-config.mts";
 
 const expected = {
@@ -128,6 +130,76 @@ test("各入口绑定集中记录；启动日志含值和来源但不含无关se
   assert.match(result.stderr, /claimPollSeconds=71 source=env:CLAIM_LOOP_POLL_SECONDS/);
   assert.doesNotMatch(result.stdout + result.stderr, /do-not-log-secret/);
 });
+test("#1606 C-29/C-30 入口不新增绕开配置记录的调度常量", () => {
+  const entries = [
+    "main.mts", "main-swarm.mts", "main-model.mts", "codex-child.ts", "codex-child.mts",
+    "decision-claimer.mts", "claim-loop.mts", "health-monitor.mts",
+  ];
+  // 逐字面量豁免；位置不绑定行号，每项只抵扣一次命中。
+  const exceptions = new Map([
+    ['codex-child.ts:EXTERNAL_REVIEW_MODELS="kimi-k3.1-pro"', "#1742 外审准入名单，与 external_review.py 的 MODELS 由测试对拍"],
+    ['codex-child.ts:EXTERNAL_REVIEW_MODELS="claude-opus-5-5"', "#1742 外审准入名单，与 external_review.py 的 MODELS 由测试对拍"],
+    ['codex-child.ts:PROMPT_JSON_MODELS="kimi-k3.1-pro"', "#1968 指定模型走提示词 JSON 的协议兼容表，不选调度模型"],
+    ["decision-claimer.mts:MIN_MODEL_ATTEMPTS=5", "#1547 首次加至少四次重试的政策下限，可调总次数来自 decisionMaxAttempts"],
+  ]);
+  // 匹配完整模型 ID，不把路由前缀、入口标签、路径或环境变量名当作模型。
+  const modelId = /^(?:(?:gpt|gemini|claude)-|claude-(?:opus|sonnet|haiku)-|kimi-k?|deepseek-v?|o(?=[134]))\d+(?:\.\d+)*(?:-[a-z0-9]+)*$/i;
+  const isNumericConstant = (expression: ts.Expression): boolean => {
+    const value = ts.skipOuterExpressions(expression);
+    if (ts.isNumericLiteral(value)) return true;
+    if (ts.isPrefixUnaryExpression(value)) {
+      return (value.operator === ts.SyntaxKind.PlusToken || value.operator === ts.SyntaxKind.MinusToken)
+        && isNumericConstant(value.operand);
+    }
+    return ts.isBinaryExpression(value) && /^(?:[+*/%-]|\*\*)$/.test(ts.tokenToString(value.operatorToken.kind) ?? "")
+      && isNumericConstant(value.left) && isNumericConstant(value.right);
+  };
+
+  const failures: string[] = [];
+  const projectPath = fileURLToPath(new URL("../tsconfig.sandcastle.json", import.meta.url));
+  const api = new API({ cwd: dirname(projectPath) });
+  try {
+    const snapshot = api.updateSnapshot({ openProjects: [projectPath] });
+    try {
+      const project = snapshot.getProject(projectPath);
+      assert.ok(project, projectPath);
+      for (const file of entries) {
+        const source = project.program.getSourceFile(fileURLToPath(new URL(file, import.meta.url)));
+        assert.ok(source, `.sandcastle/${file} 未纳入扫描`);
+        const report = (node: ts.Node, name: string, literal: string) => {
+          const hit = name ? `${name}=${literal}` : literal;
+          if (exceptions.delete(`${file}:${hit}`)) return;
+          const { line } = source.getLineAndCharacterOfPosition(ts.getTokenPosOfNode(node, source));
+          failures.push(`.sandcastle/${file}:${line + 1}: ${hit}`);
+        };
+        const scan = (node: ts.Node, binding = "") => {
+          if (ts.isVariableDeclaration(node) && ts.isIdentifier(node.name)) {
+            binding = node.name.text;
+            if ((node.parent.flags & ts.NodeFlags.Const) && /^[A-Z][A-Z_0-9]*$/.test(binding) && node.initializer) {
+              const value = ts.skipOuterExpressions(node.initializer);
+              if (isNumericConstant(value) || (ts.isArrayLiteralExpression(value) && value.elements.length > 0
+                  && value.elements.every(isNumericConstant))) {
+                report(value, binding, source.text.slice(ts.getTokenPosOfNode(value, source), value.end));
+              }
+            }
+          }
+          if ((ts.isStringLiteral(node) || ts.isNoSubstitutionTemplateLiteral(node)) && modelId.test(node.text)) {
+            report(node, binding, JSON.stringify(node.text));
+          }
+          node.forEachChild(child => scan(child, binding));
+        };
+        scan(source);
+      }
+    } finally {
+      snapshot.dispose();
+    }
+  } finally {
+    api.close();
+  }
+  for (const key of exceptions.keys()) failures.push(`删除已失效的豁免：${key}`);
+  assert.equal(failures.join("\n"), "", "#1606 请读取版本化配置，或按票号说明为何是固定协议");
+});
+
 test("真实 claim-loop dry-run 与集成基线 main@3a01bed557 同值等价，不写票不启动工蜂", () => fixture(path => {
   const dir = dirname(path); const bin = join(dir, "bin"); mkdirSync(bin);
   const calls = join(dir, "calls");
