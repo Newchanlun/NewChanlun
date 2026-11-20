@@ -66,7 +66,9 @@ LAST_EXCHANGE={}
 def request(path,op,payload):
     with socket.socket(socket.AF_UNIX) as s:
         s.settimeout(5); s.connect(str(path)); s.sendall((canonical({'protocol':'x-exact-simulation/1','op':op,'payload':payload})+'\n').encode())
-        s.shutdown(socket.SHUT_WR)
+        try: s.shutdown(socket.SHUT_WR)
+        except OSError as e:
+            if e.errno!=errno.ENOTCONN: raise
         raw=s.makefile('rb').readline()
         r=json.loads(raw)
     LAST_EXCHANGE.clear(); LAST_EXCHANGE.update(op=op,reply=r)
@@ -82,7 +84,9 @@ class Authority:
             try: c,_=self.sock.accept()
             except OSError: return
             with c:
-                envelope=json.loads(c.makefile('rb').readline()); q=envelope['payload']; self.calls.append(q)
+                with c.makefile('rb') as f:
+                    envelope=json.loads(f.readline()); assert f.read(1)==b''
+                q=envelope['payload']; self.calls.append(q)
                 r={k:q[k] for k in ['protocol','session_id','session_generation','authority_id','authority_epoch','command_id','command_hash','command']}
                 r.update(state='ReleasedExact' if self.role=='E' else 'ExecuteCommitted',receipt_id=self.role+':'+q['command_id'],release_receipt_id=q['release_receipt_id'],commit_ns=CLOCK['bar'])
                 if q['command_id'] in self.compact:

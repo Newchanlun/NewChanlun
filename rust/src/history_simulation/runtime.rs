@@ -491,6 +491,16 @@ fn authority_frame(
 fn authority_connect(a: &Authority) -> Result<UnixStream, String> {
     UnixStream::connect(&a.socket).map_err(io)
 }
+fn shutdown_request_write(stream: &UnixStream) -> Result<(), String> {
+    match stream.shutdown(std::net::Shutdown::Write) {
+        Ok(()) => Ok(()),
+        // BSD/macOS 在对端读完换行、写回回复并先行关闭连接时，本端 shutdown(SHUT_WR)
+        // 会返回 ENOTCONN（ErrorKind::NotConnected）；此时请求帧已由 write_frame_observed
+        // 完整写出，继续由 read_frame 读取并验签对端回复（若对端未回则由 read_frame 失败关闭）。
+        Err(err) if err.kind() == std::io::ErrorKind::NotConnected => Ok(()),
+        Err(err) => Err(io(err)),
+    }
+}
 fn authority_exchange(
     p: &Profile,
     a: &Authority,
@@ -505,7 +515,7 @@ fn authority_exchange(
     // 只能查询 S 的 NoRecord，永远卡住（#1407 C2，CI run 42772775704）。
     let deadline = Instant::now() + Duration::from_millis(p.timeout_ms);
     write_frame_observed(&mut stream, &frame.bytes, deadline, &mut NoObserver)?;
-    stream.shutdown(std::net::Shutdown::Write).map_err(io)?;
+    shutdown_request_write(&stream)?;
     let reply = read_frame(&mut stream, p.max_frame_bytes, deadline, json_frame)?;
     let expected = reply_envelope(
         &frame.envelope,
