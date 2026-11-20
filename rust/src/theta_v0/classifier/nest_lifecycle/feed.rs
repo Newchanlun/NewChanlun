@@ -255,6 +255,7 @@ pub fn feed_replay_bar(
 /// #1719 伴随绑定喂入。旧 channel_switch 函数及其两相执行顺序保持不变。
 /// bindings 必须来自本 bar 的 active provider；迁移由原 book 执行。
 /// 返回每份绑定的接纳/政策冻结/拒绝结果，调用方不能把新政策误报为已接纳。
+/// v2 绑定在首次出生登记同一步消费出生前已留档 Broken 事实产生的修订并入返回增量；v1 行为不变。
 pub fn feed_replay_bar_with_bridges(
     book: &mut NestLifecycleBook,
     feed: &ReplayBarFeed<'_>,
@@ -265,7 +266,7 @@ pub fn feed_replay_bar_with_bridges(
     ReplayFeedStats,
     Vec<BridgeRegistration>,
 ) {
-    let (delta, stats) = feed_replay_bar(book, feed, material);
+    let (mut delta, stats) = feed_replay_bar(book, feed, material);
     let registrations = bindings
         .iter()
         .map(|binding| {
@@ -276,7 +277,10 @@ pub fn feed_replay_bar_with_bridges(
                         if LifecycleKey::from(window) == binding.binding_key)
                 });
             if supplied {
-                book.register_center_bridge(binding.clone())
+                let (registration, break_revisions) =
+                    book.register_center_bridge_with_revisions(binding.clone());
+                delta.extend(break_revisions);
+                registration
             } else {
                 BridgeRegistration::Rejected
             }

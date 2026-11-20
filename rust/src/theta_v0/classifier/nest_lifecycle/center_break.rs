@@ -5,6 +5,74 @@ use super::super::center_lifecycle::{CenterId, CenterLifecycleEvent};
 use super::entry::LifecycleRevision;
 use super::key::LifecycleKey;
 
+/// ADR 0003 §1 登记的完成政策版本字符串（精确匹配）。
+pub const CENTER_BREAK_COMPLETION_POLICY_V1: &str = "#1719/center-break-completion/v1";
+pub const CENTER_BREAK_COMPLETION_POLICY_V2: &str = "#1719/center-break-completion/v2";
+
+/// ADR 0003 §1 具名完成政策版本；字符串只在边界解析一次，内部按本枚举分派。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum CompletionPolicyVersion {
+    /// PR #1833 现行语义（冻结，仅服务历史 v1 回放/恢复与既有夹具）。
+    V1,
+    /// v1 加 U1 出生当步规则（新独立 center_break 运行只绑定本版）。
+    V2,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UnknownCompletionPolicyVersion {
+    pub raw: String,
+}
+
+impl CompletionPolicyVersion {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::V1 => CENTER_BREAK_COMPLETION_POLICY_V1,
+            Self::V2 => CENTER_BREAK_COMPLETION_POLICY_V2,
+        }
+    }
+
+    /// 生产版本解析器：只接受 ADR 0003 §1 已登记的具名版本；未知或未签字符串一律拒绝，
+    /// 不得默认为 v1。
+    pub fn parse(raw: &str) -> Result<Self, UnknownCompletionPolicyVersion> {
+        match raw {
+            CENTER_BREAK_COMPLETION_POLICY_V1 => Ok(Self::V1),
+            CENTER_BREAK_COMPLETION_POLICY_V2 => Ok(Self::V2),
+            _ => Err(UnknownCompletionPolicyVersion {
+                raw: raw.to_string(),
+            }),
+        }
+    }
+
+    /// 登记边界解析：生产构建与 `parse` 严格一致；仅单元测试兼容既有 `synthetic-*` 夹具
+    /// （按 v1 语义执行），未知字符串仍一律拒绝，不落到 v1。
+    pub(super) fn parse_at_bridge_boundary(
+        raw: &str,
+    ) -> Result<Self, UnknownCompletionPolicyVersion> {
+        #[cfg(test)]
+        {
+            Self::parse(raw).or_else(|err| {
+                if is_legacy_synthetic_fixture_version(raw) {
+                    Ok(Self::V1)
+                } else {
+                    Err(err)
+                }
+            })
+        }
+        #[cfg(not(test))]
+        {
+            Self::parse(raw)
+        }
+    }
+}
+
+#[cfg(test)]
+fn is_legacy_synthetic_fixture_version(raw: &str) -> bool {
+    raw.trim() == raw
+        && raw
+            .strip_prefix("synthetic-")
+            .is_some_and(|suffix| !suffix.is_empty())
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CompletionAnchor {
     ChannelSwitch,
@@ -16,6 +84,27 @@ pub enum CompletionAnchor {
 pub struct CompletionPolicy {
     pub version: String,
     pub anchor: CompletionAnchor,
+}
+
+impl CompletionPolicy {
+    pub fn new(version: CompletionPolicyVersion, anchor: CompletionAnchor) -> Self {
+        Self {
+            version: version.as_str().to_string(),
+            anchor,
+        }
+    }
+
+    pub fn v1(anchor: CompletionAnchor) -> Self {
+        Self::new(CompletionPolicyVersion::V1, anchor)
+    }
+
+    pub fn v2(anchor: CompletionAnchor) -> Self {
+        Self::new(CompletionPolicyVersion::V2, anchor)
+    }
+
+    pub fn parse_version(&self) -> Result<CompletionPolicyVersion, UnknownCompletionPolicyVersion> {
+        CompletionPolicyVersion::parse(&self.version)
+    }
 }
 
 /// 只接受真实事件机输出中的 Broken。三类点确认源坐标保存在原件中；
@@ -115,20 +204,44 @@ impl HypothesisBridge {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+/// 首次留档的合法 Broken 原件及留档先后证据；同身份重送不改写原件或首次留档时点。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ArchivedCenterBreakFact {
+    pub fact: CenterBreakFact,
+    pub archived_at: usize,
+    pub archived_seq: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BreakApplicationMode {
+    /// 常规清账（v1 与 v2 共有）：`application_at == fact.known_at()`。
+    KnownAt,
+    /// v2 出生当步清账：对象首次出生登记的同一步消费出生前已留档事实，
+    /// `application_at == target_registered_at`，保留原 `fact_known_at`。
+    BirthStep,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub(super) struct BreakApplicationKey {
     pub fact: BreakIdentity,
     pub original_key: LifecycleKey,
-    pub policy_version: String,
+    pub policy_version: CompletionPolicyVersion,
 }
 
-/// 独立于原生命周期修订的清账凭证。保留原件、三钟、原对象及原政策，
+/// 独立于原生命周期修订的清账凭证。分开保留原件、四钟（physical_bar / fact_known_at /
+/// target_registered_at / application_at）、留档因果证据、原对象及原政策，
 /// 不伪造 StructureCompleted、交易否证或成交。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CenterBreakAudit {
     pub fact: CenterBreakFact,
     pub bridge: HypothesisBridge,
     pub settled_key: LifecycleKey,
+    pub policy_version: CompletionPolicyVersion,
+    pub application_at: usize,
+    pub fact_archived_at: usize,
+    pub fact_archived_seq: u64,
+    pub target_registered_seq: u64,
+    pub mode: BreakApplicationMode,
     pub consumed_at: usize,
     pub physical_before_registration: bool,
 }
