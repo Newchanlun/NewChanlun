@@ -860,9 +860,9 @@ impl Drop for ExplicitEvidence<'_> {
         let path = [case.as_ref(), run, parent.as_ref()]
             .into_iter()
             .flatten()
-            .find(|path| path.exists());
+            .find_map(|path| super::explicit_evidence_path::directory_text(path));
         if let Some(path) = path {
-            let _ = writeln!(std::io::stderr().lock(), "证据目录：{}", path.display());
+            let _ = writeln!(std::io::stderr().lock(), "证据目录：{path}");
         }
     }
 }
