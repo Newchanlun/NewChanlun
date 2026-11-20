@@ -7,7 +7,7 @@ use super::tb03c_book_tests::Space;
 use super::tb03c_funding_tests::{chong_id, funding_record, policy_record, raw, Batch};
 use super::tb03c_kill_tests::{
     audit_all, bound_receipt, business, compare, dump, dumps, explicit_root, finish,
-    normalize_reference, parsed, progress, save, without, CaseDir, Clock,
+    normalize_reference, parsed, progress, save, with_case, without, CaseDir, Clock,
 };
 use super::{book, service, store};
 use crate::session_protocol::{canonical_json, strict_json};
@@ -319,8 +319,9 @@ fn run(work: &Path, label: &str, epochs: &[i64], steps: &[Value]) -> Vec<Value> 
     assert_eq!(lines.len(), steps.len());
     lines
 }
+static ROOT: OnceLock<PathBuf> = OnceLock::new();
+
 fn root() -> &'static PathBuf {
-    static ROOT: OnceLock<PathBuf> = OnceLock::new();
     ROOT.get_or_init(|| {
         // 同一外部根下重跑或 PID 复用时也必须从空现场开始；保留旧证据，不删除共享目录。
         let run_ns = SystemTime::now()
@@ -491,67 +492,72 @@ struct Reference {
     norm_public: Vec<Value>,
 }
 fn build_reference(plan: &Plan) -> Reference {
-    let t0 = Instant::now();
-    let ref_dir = CaseDir::new(
+    let relative = Path::new(tag(plan.id)).join("reference");
+    with_case(
         &format!("nc1674-v2-kill-{}-reference-", tag(plan.id)),
-        || root().join(tag(plan.id)).join("reference"),
-    );
-    let base = ref_dir.path();
-    let work = base.join("work");
-    let mut finals: Vec<(Vec<Value>, Vec<Value>, String)> = vec![];
-    for rep in 0..2 {
-        std::fs::create_dir_all(&work).unwrap();
-        let configs = setup(&work, plan.id, None);
-        let epochs = vec![1; plan.domains()];
-        let lines = run(&work, "run", &epochs, &plan.steps);
-        for (i, line) in lines.iter().enumerate() {
-            assert_eq!(line["reply"], plan.replies[i], "参照新进程第 {i} 步");
-        }
-        let tables = dumps(&configs);
-        for (d, t) in tables.iter().enumerate() {
-            assert_eq!(business(t), plan.snapshots.last().unwrap()[d]);
-        }
-        audit_all(&configs);
-        golden(plan.id, &tables);
-        let queries = public(&configs);
-        let digest = book::hash(&json!(tables));
-        println!(
-            "V2-REPLAY {}",
-            canonical_json(
-                &json!({"profile":plan.id,"rep":rep,"final_tables_sha256":digest,"raw_dir":base.join(format!("rep-{rep}"))})
-            )
-        );
-        std::fs::rename(&work, base.join(format!("rep-{rep}"))).unwrap();
-        finals.push((tables, queries, digest));
-    }
-    assert_eq!(
-        canonical_json(&json!(finals[0].0)),
-        canonical_json(&json!(finals[1].0)),
-        "{} 无故障同输入两次新进程完整终态逐字节相同",
-        plan.id
-    );
-    assert_eq!(finals[0].2, finals[1].2, "{} 两次终态哈希相同", plan.id);
-    let (tables, public, _) = finals.swap_remove(0);
-    let clock = Clock::of_at(plan.owners(), None, VALID_DAY_NS);
-    let norm_tables = tables
-        .iter()
-        .map(|t| normalize_reference(&without(t, &["meta", "epochs"]), &clock))
-        .collect();
-    let norm_public = public
-        .iter()
-        .map(|q| normalize_reference(q, &clock))
-        .collect();
-    ref_dir.cleanup();
-    println!(
-        "V2-TIME {}",
-        canonical_json(&json!({"profile":plan.id,"reference_ms":t0.elapsed().as_millis()}))
-    );
-    Reference {
-        tables,
-        public,
-        norm_tables,
-        norm_public,
-    }
+        &ROOT,
+        &relative,
+        |base| {
+            let t0 = Instant::now();
+            let base = base
+                .map(Path::to_path_buf)
+                .unwrap_or_else(|| root().join(&relative));
+            let work = base.join("work");
+            let mut finals: Vec<(Vec<Value>, Vec<Value>, String)> = vec![];
+            for rep in 0..2 {
+                std::fs::create_dir_all(&work).unwrap();
+                let configs = setup(&work, plan.id, None);
+                let epochs = vec![1; plan.domains()];
+                let lines = run(&work, "run", &epochs, &plan.steps);
+                for (i, line) in lines.iter().enumerate() {
+                    assert_eq!(line["reply"], plan.replies[i], "参照新进程第 {i} 步");
+                }
+                let tables = dumps(&configs);
+                for (d, t) in tables.iter().enumerate() {
+                    assert_eq!(business(t), plan.snapshots.last().unwrap()[d]);
+                }
+                audit_all(&configs);
+                golden(plan.id, &tables);
+                let queries = public(&configs);
+                let digest = book::hash(&json!(tables));
+                println!(
+                    "V2-REPLAY {}",
+                    canonical_json(
+                        &json!({"profile":plan.id,"rep":rep,"final_tables_sha256":digest,"raw_dir":base.join(format!("rep-{rep}"))})
+                    )
+                );
+                std::fs::rename(&work, base.join(format!("rep-{rep}"))).unwrap();
+                finals.push((tables, queries, digest));
+            }
+            assert_eq!(
+                canonical_json(&json!(finals[0].0)),
+                canonical_json(&json!(finals[1].0)),
+                "{} 无故障同输入两次新进程完整终态逐字节相同",
+                plan.id
+            );
+            assert_eq!(finals[0].2, finals[1].2, "{} 两次终态哈希相同", plan.id);
+            let (tables, public, _) = finals.swap_remove(0);
+            let clock = Clock::of_at(plan.owners(), None, VALID_DAY_NS);
+            let norm_tables = tables
+                .iter()
+                .map(|t| normalize_reference(&without(t, &["meta", "epochs"]), &clock))
+                .collect();
+            let norm_public = public
+                .iter()
+                .map(|q| normalize_reference(q, &clock))
+                .collect();
+            println!(
+                "V2-TIME {}",
+                canonical_json(&json!({"profile":plan.id,"reference_ms":t0.elapsed().as_millis()}))
+            );
+            Reference {
+                tables,
+                public,
+                norm_tables,
+                norm_public,
+            }
+        },
+    )
 }
 fn reference(id: &str) -> &'static Reference {
     static REFERENCES: [OnceLock<Reference>; 3] =
@@ -583,8 +589,7 @@ fn kill_and_recover(plan: &Plan, target: usize, phase: &str, work: &Path) -> Kil
     assert_ne!(
         plan.snapshots[target][owner],
         plan.snapshots[target + 1][owner],
-        "目标步 {target} 未改变被杀域，边界判据退化（证据目录：{}）",
-        work.parent().unwrap_or(work).display()
+        "目标步 {target} 未改变被杀域，边界判据退化"
     );
     let message = plan.steps[target]["envelope"]["message_id"]
         .as_str()
@@ -833,47 +838,46 @@ fn run_once(plan: &Plan, target: usize, phase: &str, work: &Path) -> Value {
 /// 一个（profile, 目标步, 阶段）组合：两次全新目录、全新 P/A/R/C 进程，终态全表与续跑回复逐字节相同。
 fn matrix(id: &str, target: usize, op: &str, owner: usize, phase: &str) {
     let label = format!("step{target:02}");
-    let case_dir = CaseDir::new(
+    let relative = Path::new(tag(id)).join(&label).join(phase);
+    with_case(
         &format!("nc1674-v2-kill-{}-{label}-{phase}-", tag(id)),
-        || root().join(tag(id)).join(&label).join(phase),
+        &ROOT,
+        &relative,
+        |base| {
+            let plan = plan(id);
+            assert_eq!(plan.steps[target]["envelope"]["payload"]["op"], op);
+            assert_eq!(plan.steps[target]["owner"], owner);
+            let base = base
+                .map(Path::to_path_buf)
+                .unwrap_or_else(|| root().join(&relative));
+            let work = base.join("work");
+            let mut finals = vec![];
+            for rep in 0..2 {
+                let evidence = run_once(plan, target, phase, &work);
+                let archived = base.join(format!("rep-{rep}"));
+                std::fs::rename(&work, &archived).unwrap();
+                save(&archived.join("evidence.json"), &evidence);
+                println!(
+                    "V2-KILL {}",
+                    canonical_json(
+                        &json!({"profile":id,"label":label,"op":op,"phase":phase,"rep":rep,"message_id":evidence["message_id"],"domain_id":evidence["domain_id"],"pid":evidence["pid"],"signal":evidence["signal"],"kill_seq":evidence["kill_seq"],"stale_kind":evidence["stale_resend"]["reply"]["kind"],"resend_kind":evidence["resend"]["reply"]["kind"],"resend_seq":evidence["resend"]["seq"],"final_tables_sha256":evidence["final_tables_sha256"],"raw_dir":archived})
+                    )
+                );
+                finals.push((
+                    canonical_json(&evidence["final_tables"]),
+                    evidence["continuation_replies"].clone(),
+                ));
+            }
+            assert_eq!(
+                finals[0].0, finals[1].0,
+                "{id} {label}/{phase} 两次新进程完整终态逐字节相同"
+            );
+            assert_eq!(
+                finals[0].1, finals[1].1,
+                "{id} {label}/{phase} 两次新进程续跑回复相同"
+            );
+        },
     );
-    let base = case_dir.path();
-    let plan = plan(id);
-    assert_eq!(
-        plan.steps[target]["envelope"]["payload"]["op"], op,
-        "{id} {label}/{phase} 目标步 op 不符"
-    );
-    assert_eq!(
-        plan.steps[target]["owner"], owner,
-        "{id} {label}/{phase} 目标步 owner 不符"
-    );
-    let work = base.join("work");
-    let mut finals = vec![];
-    for rep in 0..2 {
-        let evidence = run_once(plan, target, phase, &work);
-        let archived = base.join(format!("rep-{rep}"));
-        std::fs::rename(&work, &archived).unwrap();
-        save(&archived.join("evidence.json"), &evidence);
-        println!(
-            "V2-KILL {}",
-            canonical_json(
-                &json!({"profile":id,"label":label,"op":op,"phase":phase,"rep":rep,"message_id":evidence["message_id"],"domain_id":evidence["domain_id"],"pid":evidence["pid"],"signal":evidence["signal"],"kill_seq":evidence["kill_seq"],"stale_kind":evidence["stale_resend"]["reply"]["kind"],"resend_kind":evidence["resend"]["reply"]["kind"],"resend_seq":evidence["resend"]["seq"],"final_tables_sha256":evidence["final_tables_sha256"],"raw_dir":archived})
-            )
-        );
-        finals.push((
-            canonical_json(&evidence["final_tables"]),
-            evidence["continuation_replies"].clone(),
-        ));
-    }
-    assert_eq!(
-        finals[0].0, finals[1].0,
-        "{id} {label}/{phase} 两次新进程完整终态逐字节相同"
-    );
-    assert_eq!(
-        finals[0].1, finals[1].1,
-        "{id} {label}/{phase} 两次新进程续跑回复相同"
-    );
-    case_dir.cleanup();
 }
 
 /// 无故障：同输入两次新进程完整重放，终态逐字节与哈希相同，meta 为 `/2`、E/B audit 通过、对黄金值。
