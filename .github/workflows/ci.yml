@@ -1137,6 +1137,7 @@ jobs:
       #   debug-assertions 与 overflow-checks 显式保持开启，与 rust-job-setup R4 同口径。
       CARGO_PROFILE_DEV_DEBUG_ASSERTIONS: "true"
       CARGO_PROFILE_DEV_OVERFLOW_CHECKS: "true"
+      CARGO_PROFILE_DEV_DEBUG: "0"
       CI_1488_BIN_OPT_LEVEL1: "1"
     defaults:
       run:
