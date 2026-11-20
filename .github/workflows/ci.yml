@@ -288,6 +288,9 @@ jobs:
     timeout-minutes: 30
     env:
       CARGO_INCREMENTAL: "0"
+      # #1875：rust-check 只执行 cargo check + fmt + 脚本检查，从不运行编译产物；跳过第三方依赖 opt-level=2，
+      #   避免给 libsqlite3-sys (C) 与 proc-macro 做无用的优化编译，不改变任何警告或检查覆盖。
+      CI_SKIP_DEP_OPT2: "1"
     defaults:
       run:
         working-directory: rust
