@@ -1988,9 +1988,11 @@ fn readonly_source_vfs_clean_close_wal_safety_and_same_process_shm_lock_ownershi
     std::fs::remove_file(&x_shm).unwrap();
 }
 
-/// 独立新进程入口：验证进程启动期（早于 main/任何 SQLite 连接）已完成只读元数据守卫安装，
-/// 且 `sqlite3_config` 前置配置保持可用；随后多健康写者线程并发创建/写入 WAL 与首次只读打开
-/// 同时撞击，不修改全局 `aSyscall` 表，健康侧件权限与只读源元数据均完好。
+/// 独立新进程入口：在任何 SQLite 连接或 `open_readonly_source_db` 之前，断言启动期构造器已置位
+/// 守卫安装标志（该入口断言区分启动期安装与首次打开懒安装）且 `sqlite3_config(SQLITE_CONFIG_GETMALLOC)`
+/// 返回 `SQLITE_OK`；随后多健康写者线程并发创建/写入 WAL 与首次只读打开同屏障执行，断言健康侧件
+/// 权限保持 `0664`、只读源 `-shm` 元数据不变（并发阶段的普通模式断言在懒安装实现下同样通过，不单独
+/// 证明无全局 `aSyscall` 并发写竞争）。
 #[test]
 #[ignore = "仅供 #1375 独立新进程启动期守卫与并发首次打开验证调用"]
 fn readonly_source_vfs_fresh_process_startup_and_concurrent_first_open_child() {
@@ -2003,7 +2005,7 @@ fn readonly_source_vfs_fresh_process_startup_and_concurrent_first_open_child() {
 
     // 1) 在本进程任何 SQLite 连接或 open_readonly_source_db 之前：
     //    - 启动期守卫已就位；
-    //    - SQLite 已恢复未初始化态，sqlite3_config(SQLITE_CONFIG_GETMALLOC) 仍返回 SQLITE_OK。
+    //    - sqlite3_shutdown() 已将 isInit 归零，sqlite3_config(SQLITE_CONFIG_GETMALLOC) 仍返回 SQLITE_OK。
     assert!(
         readonly_vfs_startup_guards_installed(),
         "进程启动期构造器必须在 main() 之前完成守卫安装"
@@ -2143,6 +2145,151 @@ fn readonly_source_vfs_startup_guards_precede_main_and_concurrent_first_open() {
     );
     assert!(
         String::from_utf8_lossy(&out.stdout).contains("STARTUP_AND_CONCURRENT_FIRST_OPEN_OK"),
+        "missing ok marker: {}",
+        String::from_utf8_lossy(&out.stdout)
+    );
+}
+
+/// 独立新进程负向入口：在启动期构造器正常完成安装后，通过默认 VFS 的 `xSetSystemCall(NULL, NULL)`
+/// 将 `aSyscall` 表复位回默认系统调用，再断言首次 `open_readonly_source_db` 失败关闭并返回
+/// `StorageUnavailable`，且来源库的 `-shm` 元数据（属主、权限、ctime）与目录内容均不变。
+#[test]
+#[ignore = "仅供 #1375 独立新进程守卫缺失失败关闭负向验证调用"]
+fn readonly_source_vfs_fail_closed_when_syscall_table_reset_child() {
+    use crate::history_simulation::intake::{
+        open_readonly_source_db, readonly_vfs_startup_guards_installed,
+    };
+    use rusqlite::ffi;
+    use std::os::unix::fs::MetadataExt;
+
+    assert!(
+        readonly_vfs_startup_guards_installed(),
+        "前置条件：进程启动期构造器必须已置位守卫安装标志"
+    );
+
+    // 准备独立 inode 的非空 SHM + WAL 来源库快照（仅用默认 VFS，不触发 history_sim_ro 注册）。
+    let dir = tempfile::tempdir().unwrap();
+    let src_dir = dir.path().join("src");
+    std::fs::create_dir_all(&src_dir).unwrap();
+    let src_db = src_dir.join("x.db");
+    let src_wal = append_suffix(&src_db, "-wal");
+    let src_shm = append_suffix(&src_db, "-shm");
+    let src_writer = rusqlite::Connection::open(&src_db).unwrap();
+    src_writer
+        .execute_batch(
+            "PRAGMA journal_mode = WAL;
+             PRAGMA wal_autocheckpoint = 0;
+             CREATE TABLE t(v INTEGER);
+             INSERT INTO t VALUES (42);",
+        )
+        .unwrap();
+    let snap_dir = dir.path().join("snap");
+    std::fs::create_dir_all(&snap_dir).unwrap();
+    let snap_db = snap_dir.join("x.db");
+    let snap_wal = append_suffix(&snap_db, "-wal");
+    let snap_shm = append_suffix(&snap_db, "-shm");
+    std::fs::copy(&src_db, &snap_db).unwrap();
+    std::fs::copy(&src_wal, &snap_wal).unwrap();
+    std::fs::copy(&src_shm, &snap_shm).unwrap();
+    drop(src_writer);
+
+    let snap_shm_before = std::fs::metadata(&snap_shm).unwrap();
+    assert!(
+        snap_shm_before.len() >= 32768,
+        "预期非空 SHM 至少 32768 字节，实际 {}",
+        snap_shm_before.len()
+    );
+    let before_digests = dir_file_digests(&snap_dir);
+    #[cfg(target_os = "linux")]
+    let watcher = LinuxDirWatcher::with_mask(
+        &snap_dir,
+        libc::IN_CREATE
+            | libc::IN_MODIFY
+            | libc::IN_DELETE
+            | libc::IN_MOVED_FROM
+            | libc::IN_MOVED_TO
+            | libc::IN_ATTRIB
+            | libc::IN_CLOSE_WRITE,
+    );
+
+    // 复位默认 unix VFS 的全部系统调用表项回编译期默认值（恢复裸 fchown/fchmod）；
+    // 此时 STARTUP_GUARD_STATE 仍为 GUARD_INSTALLED，全靠 verify_metadata_write_guards_installed
+    // 回读核验表项地址来拦截。
+    unsafe {
+        assert_eq!(ffi::sqlite3_initialize(), ffi::SQLITE_OK);
+        let parent = ffi::sqlite3_vfs_find(std::ptr::null());
+        assert!(!parent.is_null(), "默认 SQLite VFS 不应为空");
+        assert!(
+            (*parent).iVersion >= 3,
+            "默认 SQLite VFS 应支持 iVersion >= 3"
+        );
+        let set = (*parent)
+            .xSetSystemCall
+            .expect("默认 SQLite VFS 缺少 xSetSystemCall");
+        assert_eq!(
+            set(parent, std::ptr::null(), None),
+            ffi::SQLITE_OK,
+            "xSetSystemCall(NULL, NULL) 复位默认表应返回 SQLITE_OK"
+        );
+    }
+
+    let err = open_readonly_source_db(&snap_db)
+        .expect_err("默认 VFS 系统调用表被复位后，open_readonly_source_db 必须失败关闭");
+    assert!(
+        err.starts_with("StorageUnavailable"),
+        "守卫缺失必须返回 StorageUnavailable，实际：{err}"
+    );
+
+    let snap_shm_after = std::fs::metadata(&snap_shm).unwrap();
+    assert_eq!(
+        (
+            snap_shm_before.uid(),
+            snap_shm_before.gid(),
+            snap_shm_before.mode() & 0o777,
+            snap_shm_before.ctime(),
+            snap_shm_before.ctime_nsec(),
+        ),
+        (
+            snap_shm_after.uid(),
+            snap_shm_after.gid(),
+            snap_shm_after.mode() & 0o777,
+            snap_shm_after.ctime(),
+            snap_shm_after.ctime_nsec(),
+        ),
+        "失败关闭期间来源库 -shm 属主/权限/ctime 必须保持不变"
+    );
+    assert_eq!(
+        before_digests,
+        dir_file_digests(&snap_dir),
+        "失败关闭期间来源库目录文件摘要必须保持不变"
+    );
+    #[cfg(target_os = "linux")]
+    assert!(
+        watcher.drain().is_empty(),
+        "失败关闭期间不得产生任何目录写或 IN_ATTRIB 事件"
+    );
+    println!("FAIL_CLOSED_ON_SYSCALL_RESET_OK");
+}
+
+#[test]
+fn readonly_source_vfs_fail_closed_when_syscall_table_reset() {
+    let out = std::process::Command::new(std::env::current_exe().unwrap())
+        .args([
+            "--exact",
+            "economic_session::finance::tests::exact_release::x_e2e::readonly_source_vfs_fail_closed_when_syscall_table_reset_child",
+            "--ignored",
+            "--nocapture",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "fresh-process fail-closed check failed: stdout={} stderr={}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        String::from_utf8_lossy(&out.stdout).contains("FAIL_CLOSED_ON_SYSCALL_RESET_OK"),
         "missing ok marker: {}",
         String::from_utf8_lossy(&out.stdout)
     );
