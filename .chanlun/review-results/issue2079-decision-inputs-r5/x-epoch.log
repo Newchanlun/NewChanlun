@@ -1,0 +1,8 @@
+init 1
+E=1, same X 8 {'error': 'MissingDependency：权威拒绝：InvalidDomain：来源未获准执行该操作', 'kind': 'Error'}
+e.sock exit -9 
+formal recovery Recovered 2
+E=2, same X 8 {'error': 'IdentityConflict：权威回复信封的身份/epoch/因果/规范字节不符', 'kind': 'Error'}
+X state {'command_id': 'probe', 'kind': 'ExactCommandState', 'state': 'NoRecord'}
+e.sock exit -9 
+x.sock exit -9 x_execution_session storage {"control_instance_id":null,"filesystem":"overlayfs","fullfsync":"1","journal_mode":"wal","pid":"8","read_only":false,"sqlite_version":"3.53.2","sqlite_version_number":"3053002","synchronous":"2"}

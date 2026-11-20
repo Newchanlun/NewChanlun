@@ -25,11 +25,15 @@
         {
           "source": "ADR 0039:273–287；SPEC C09.1–2；#1530（已关）",
           "excerpt": "0039 第三节明确各域各自 DB、锁与代，仅 launcher 装配；#1530 是现成裁定，#1823/#2079 探讨名字不改这条。"
+        },
+        {
+          "source": "https://github.com/Newchanlun/NewChanlun/issues/1895#issuecomment-6727386306",
+          "excerpt": "#2007 与 #2010/#2008 修复已入 main；guard 析构显式解锁。"
         }
       ],
-      "citation": "ADR 0039:273–287；SPEC C09.1–2；#1530（已关）",
-      "reasoning": "0039 第三节明确各域各自 DB、锁与代，仅 launcher 装配；#1530 是现成裁定，#1823/#2079 探讨名字不改这条。",
-      "recommended": "沿用逐域独占进程锁，不把传输层或 launcher 变成域写者。",
+      "citation": "ADR 0039:273–287；SPEC C09.1–2；#1530（已关）；#1895 关票说明 6727386306；session_transport.rs:42–81",
+      "reasoning": "0039 第三节明确各域各自 DB、锁与代，仅 launcher 装配；#1530 是现成裁定，#1823/#2079 探讨名字不改这条。 #1895 的修复在 guard 析构时显式解锁；重新取得同一文件的锁不证明前代 PID 消失。",
+      "recommended": "沿用逐域独占进程锁，不把传输层或 launcher 变成域写者。 guard 最后释放，覆盖监听关闭、标记事务与关库。",
       "searchedKeywords": [],
       "gap": "",
       "conflict": "",
@@ -60,8 +64,8 @@
         }
       ],
       "citation": "ADR 0059:95–121；#1818 resolution 6550813315；#1781",
-      "reasoning": "P 本身、A 树及 S 族路径/子树才属 M；并发域库与锁和 E/B socket 须过 `Q1–Q5` 排除；S 自己 socket 在 driver open 后 bind 的例外不把改名也放进去。0059:107 的代码行号是历史行锚；本轮以 main :57–81 核实际锁。",
-      "recommended": "原 M 与 R4 沿用；只在 M 外做 S 的新认领。",
+      "reasoning": "P 本身、A 树及 S 族路径/子树才属 M；并发域库与锁和 E/B socket 须过 `Q1–Q5` 排除；S 自己 socket 在 driver open 后 bind 的例外不把改名也放进去。0059:107 的代码行号是历史行锚；本轮以 main :57–81 核实际锁。 现行 0059:109 只列 E/B socket，不列 simulation X；X 无 S 准入输入。",
+      "recommended": "原 M 与 R4 沿用；只在 M 外做 S 的新认领。 simulation X 的本地 socket 路径不布在 M 内，核查与整改归 #2130，不加跨域运行时闸。",
       "searchedKeywords": [],
       "gap": "",
       "conflict": "",
@@ -83,17 +87,39 @@
           "query": "\"残留 socket\"",
           "command": "gh issue list --repo Newchanlun/NewChanlun --search '\"残留 socket\" in:title,body,comments' --state all --limit 100 --json number,state,title,url",
           "hits": 5
+        },
+        {
+          "channel": "repo",
+          "query": "ECONNREFUSED|prepare_socket|unlink|control-owner|清理",
+          "command": "git grep -I -n -E 'ECONNREFUSED|prepare_socket|unlink|control-owner|清理' b9d898dccf -- s_session/s_service_control.py s_session/economic_service_control.py docs/adr .chanlun/review-results",
+          "hits": 244
+        },
+        {
+          "channel": "tracker",
+          "query": "ECONNREFUSED OR prepare_socket OR control-owner OR 残留 socket",
+          "command": "gh issue list --repo Newchanlun/NewChanlun --search '\"ECONNREFUSED\" OR \"prepare_socket\" OR \"control-owner\" OR \"残留 socket\" in:title,body,comments' --state all --limit 100 --json number,state,title,url",
+          "hits": 8
+        },
+        {
+          "channel": "tracker",
+          "query": "1372（从 PY-XR-02 原件回查关票）",
+          "command": "gh issue view 1372 --repo Newchanlun/NewChanlun --json url,number,title,state,body,comments",
+          "hits": 1
         }
       ],
       "hits": [
         {
           "source": "[#1823 OBS](https://github.com/Newchanlun/NewChanlun/issues/1823#issuecomment-6687775294)，[SAFE-RACE 回勘](https://github.com/Newchanlun/NewChanlun/issues/1823#issuecomment-6994092216)，cc674e88:sources/1823-safe-original.md",
           "excerpt": "#1823 已观察三布局两构建全拒，S 首错是参数期占用，不是 bind 或 admission；先前建议 PID 后按名清理遭有效反例。SAFE 不是获审实现合同，但可作为二值验收底本。"
+        },
+        {
+          "source": "main s_session/s_service_control.py:498–528、:712–729、s_session/economic_service_control.py:83–95；#1372 PY-XR-02（.chanlun/review-results/issue1372-tb01c-20260913/reports/python-cross-review-fix-01/REVIEW.md:8）",
+          "excerpt": "S 与 E/B 独立控制器调用 prepare_socket；:527 在按名重核后 unlink。"
         }
       ],
-      "citation": "[#1823 OBS](https://github.com/Newchanlun/NewChanlun/issues/1823#issuecomment-6687775294)，[SAFE-RACE 回勘](https://github.com/Newchanlun/NewChanlun/issues/1823#issuecomment-6994092216)，cc674e88:sources/1823-safe-original.md",
-      "reasoning": "#1823 已观察三布局两构建全拒，S 首错是参数期占用，不是 bind 或 admission；先前建议 PID 后按名清理遭有效反例。SAFE 不是获审实现合同，但可作为二值验收底本。",
-      "recommended": "保留 LIVE/UNKNOWN/RACE/ADMISSION；SAFE-STALE 以同锁、钉住对象和退役而非 PID/boot 与 unlink 验收。",
+      "citation": "[#1823 OBS](https://github.com/Newchanlun/NewChanlun/issues/1823#issuecomment-6687775294)，[SAFE-RACE 回勘](https://github.com/Newchanlun/NewChanlun/issues/1823#issuecomment-6994092216)，cc674e88:sources/1823-safe-original.md；main s_session/s_service_control.py:498–528、:712–729、s_session/economic_service_control.py:83–95；#1372 PY-XR-02（.chanlun/review-results/issue1372-tb01c-20260913/reports/python-cross-review-fix-01/REVIEW.md:8）",
+      "reasoning": "#1823 已观察三布局两构建全拒，S 首错是参数期占用，不是 bind 或 admission；先前建议 PID 后按名清理遭有效反例。SAFE 不是获审实现合同，但可作为二值验收底本。 #1372 控制器先例经限定复核：允许自有失活路径，拒绝未知登记、换 inode 与活监听。复核没有穷尽最后一次核验之后到 unlink 之间的替换窗口。",
+      "recommended": "保留 LIVE/UNKNOWN/RACE/ADMISSION；SAFE-STALE 以同锁、钉住对象和退役而非 PID/boot 与 unlink 验收。 保留旧工具的拒绝先例，不把其删名方式移植进正式合同。",
       "searchedKeywords": [],
       "gap": "",
       "conflict": "原 SAFE 草案写了 PID/boot 与 unlink；产品不得接这条动作权限。",
@@ -101,7 +127,7 @@
     },
     {
       "id": "Q4",
-      "klass": "C",
+      "klass": "B",
       "question": "名字 owner、钉住对象、发布／退役与中断窗口",
       "queries": [
         {
@@ -115,26 +141,43 @@
           "query": "\"退役名\" OR \"端点归属\"",
           "command": "gh issue list --repo Newchanlun/NewChanlun --search '\"退役名\" OR \"端点归属\" in:title,body,comments' --state all --limit 100 --json number,state,title,url",
           "hits": 8
+        },
+        {
+          "channel": "repo",
+          "query": "ECONNREFUSED|prepare_socket|unlink|control-owner|清理",
+          "command": "git grep -I -n -E 'ECONNREFUSED|prepare_socket|unlink|control-owner|清理' b9d898dccf -- s_session/s_service_control.py s_session/economic_service_control.py docs/adr .chanlun/review-results",
+          "hits": 244
+        },
+        {
+          "channel": "tracker",
+          "query": "ECONNREFUSED OR prepare_socket OR control-owner OR 残留 socket",
+          "command": "gh issue list --repo Newchanlun/NewChanlun --search '\"ECONNREFUSED\" OR \"prepare_socket\" OR \"control-owner\" OR \"残留 socket\" in:title,body,comments' --state all --limit 100 --json number,state,title,url",
+          "hits": 8
+        },
+        {
+          "channel": "tracker",
+          "query": "1372（从 PY-XR-02 原件回查关票）",
+          "command": "gh issue view 1372 --repo Newchanlun/NewChanlun --json url,number,title,state,body,comments",
+          "hits": 1
         }
       ],
       "hits": [
         {
-          "source": "ADR 0059:117 留空；#2079 返修评论 7046963728；probe-ext4.log；probe/supplement.py",
-          "excerpt": "没有在案 owner/退役规则。#2079 历史提案与 #2128/#2129/#2130 命中只参照本题，其他检索命中不涉会话端点。ext4 试验显示原地连接残留拒、锁归还、钉住身份保留，且未钉 inode 可复用；替换文件名的普通 rename 会移除被换入的 socket，必须避开。"
+          "source": "main s_session/s_service_control.py:498–528、:712–729、s_session/economic_service_control.py:83–95；#1372 PY-XR-02（.chanlun/review-results/issue1372-tb01c-20260913/reports/python-cross-review-fix-01/REVIEW.md:8）",
+          "excerpt": "已停止的 owner 记录、dev/ino/uid、仅接 ECONNREFUSED、删前同身份复核，最后路径 unlink。"
+        },
+        {
+          "source": "#1823 comment 6994092216；probe-ext4.log",
+          "excerpt": "最后一次按名核验不排除随后被换入对象；NOREPLACE 后比较钉住 dev/ino，不销毁换入对象。"
         }
       ],
-      "citation": "ADR 0059:117 留空；#2079 返修评论 7046963728；probe-ext4.log；probe/supplement.py",
-      "reasoning": "没有在案 owner/退役规则。#2079 历史提案与 #2128/#2129/#2130 命中只参照本题，其他检索命中不涉会话端点。ext4 试验显示原地连接残留拒、锁归还、钉住身份保留，且未钉 inode 可复用；替换文件名的普通 rename 会移除被换入的 socket，必须避开。",
-      "recommended": "用单个 owner、空址与可核残留的确定性表；钉住普通 owner FD 更新，不按名覆盖；退役 NOREPLACE 后核对象，不符原样放回或保留到 #2130。半写或不明拒绝。",
-      "searchedKeywords": [
-        "endpoint-owner/1",
-        "端点名.*写者锁",
-        "退役名",
-        "RENAME_NOREPLACE"
-      ],
-      "gap": "decision",
-      "conflict": "简报 owner 临时文件覆盖不满足零毁损；补探针验证 pinned FD 写不会触碰换入 socket。",
-      "section": "规则 1–8、11、16；情形表与 race/bind 负控"
+      "citation": "main s_session/s_service_control.py:498–528、:712–729、s_session/economic_service_control.py:83–95；#1372 PY-XR-02（.chanlun/review-results/issue1372-tb01c-20260913/reports/python-cross-review-fix-01/REVIEW.md:8）；#1823 comment 6994092216；ADR 0059:117；probe-ext4.log",
+      "reasoning": "旧控制器有以停止记录和已登记身份处置残留的在案做法，不是正式唯一 launcher 的规范。PY-XR-02 闭合限所测四臂；#1823 的并发边界另外否决核后按名删。ext4 读数支持钉住、仅接 ECONNREFUSED、移动后用 dev/ino 复核；owner 更新按 FD 以避免覆盖被换入的 socket。",
+      "recommended": "采用独立工具边界。借用拒绝存活/未知对象的判据，不把停机记录或核后按名 unlink 作为正式域所有权。正式域只在持锁、钉住失活对象后按 NOREPLACE 改名并复核。两个 Python 控制器不得用于本合同管辖的端点目录；独立 E/B stop 再 start 仍经正式恢复与有效代。",
+      "searchedKeywords": [],
+      "gap": "",
+      "conflict": "旧 Python 工具可 unlink；本票选独立工具边界，不改 Python 或将它作为正式入口。",
+      "section": "权威依据；规则 1–8、11、16；授权引用与受影响代码"
     },
     {
       "id": "Q5",
@@ -168,7 +211,7 @@
       ],
       "citation": "SPEC C09.9/11、IC:62；#2077 service.rs:1521–1568、transport:797–809；#2082 store.rs:70、:786–835、:967–1084、:1694–1743",
       "reasoning": "#1823/#2079/#1411 命中均未裁库内关库证据。主库 schema 只固定表和 DDL，audit 逐键核身份与代、逐步重放，不枚举 meta 键全集；#2082 recovery.rs:148–153 已加具名 meta 键作为先例。同域停机返回不是 launcher 事件出证。",
-      "recommended": "init、升代事务、规定关停后三处写本代标记；持锁、当前代和全史重验后核标记，bind、认领持久化后首个 accept 前消费。无标记须正式恢复；不自动回退。",
+      "recommended": "init、升代事务、规定关停后三处写本代标记；持锁、当前代和全史重验后核标记，bind、认领持久化后首个 accept 前消费。无标记须正式恢复；不自动回退。 消费属于所有 bind 路径的共同接纳前门，非 Linux 和不适用认领的直绑也必须消费；先前旧二进制开服或恢复备份时，授权运维先正式恢复。",
       "searchedKeywords": [
         "clean_close/1",
         "正常关库",
@@ -271,8 +314,8 @@
           "excerpt": "E 的回复通过现任 producer_epoch 进入信封；X 用冻结的 e/s 代重建期望信封；受控真 E/E recover/真 X 证实 E 1→2 后 X 从正常处理同代权威错误变为 IdentityConflict，X 状态 NoRecord。没有解消费已升代的 E 或 S。"
         }
       ],
-      "citation": "main history_simulation/runtime.rs:506–517、:815–826；store.rs:214–243、:359–373；#2129；x-epoch.log",
-      "reasoning": "E 的回复通过现任 producer_epoch 进入信封；X 用冻结的 e/s 代重建期望信封；受控真 E/E recover/真 X 证实 E 1→2 后 X 从正常处理同代权威错误变为 IdentityConflict，X 状态 NoRecord。没有解消费已升代的 E 或 S。",
+      "citation": "main history_simulation/runtime.rs:506–517、:815–826；store.rs:214–243、:359–373；#2129；x-epoch.log；x-epoch-boat.log",
+      "reasoning": "E 的回复通过现任 producer_epoch 进入信封；X 用冻结的 e/s 代重建期望信封；受控真 E/E recover/真 X 证实 E 1→2 后 X 从正常处理同代权威错误变为 IdentityConflict，X 状态 NoRecord。没有解消费已升代的 E 或 S。 原始 OrbStack 输出与 Boat ext4 重跑一致；后者记录 uname 和 findmnt，且未继承环境。",
       "recommended": "保留本地 X 启动门；权威代跟随、E 的 authorized_sources 与在途责任交 #2129。",
       "searchedKeywords": [],
       "gap": "",
@@ -439,7 +482,7 @@
       ],
       "citation": "CI ci.yml:811、:830–841；#1411、#2077、#2082；edges.txt、adr-number-check.txt",
       "reasoning": "既有两种构建的真 launcher 测试同文件。#2077 :934 起的夹具仅 S/E/B socket，X 骨架无本地监听；本稿四域正控要加有本地监听的 simulation X。#2082 仍为草稿头，当前原生子票与 blocking 回读在证据里。",
-      "recommended": "沿九个具名测试和精确头序；结构成功不等于整链通过；0065 只在决策 branch 新建。",
+      "recommended": "沿九个具名测试和精确头序；结构成功不等于整链通过；0065 只在决策 branch 新建。 保留九个具名测试，在原用例内补旧直绑、关停提交失败、两种 vacant 与半写强杀。",
       "searchedKeywords": [],
       "gap": "",
       "conflict": "",

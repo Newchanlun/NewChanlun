@@ -1,0 +1,50 @@
+=== 原简报两份探针 ===
+creating a default sandbox...
+bx_zfz3q5x5 ready in 4.4s
+pushed 3 files (7.6 KB) to ~/probe
+workdir=/var/tmp/p2079-r5-zp8oy2jn
+/      /dev/vda1 ext4
+filesystem=ext4 uid=1000 python=3.12.3
+=== original_probe.py ===
+uname=6.8.0-117-generic
+machine=x86_64
+live_connect=connected
+live_lock=EAGAIN
+dead_lock=acquired
+dead_path_exists=True
+dead_connect=ECONNREFUSED
+bind_on_residue=EADDRINUSE
+openat2_nosymlinks_plain=fd
+openat2_nosymlinks_on_symlink=ELOOP
+pin_identity_equals_bound=True
+dead_connect_via_pin=ECONNREFUSED
+move_aside=0
+moved_dev_ino_equal_pin=True
+moved_ctime_changed=False
+k_absent_after_move=True
+bind_via_dirfd_creates_k=True
+new_listener_connect_by_path=connected
+retired_still_present=True
+ino_reused_without_pin=True
+ino_reused_with_pin=False
+race_pre_verify_dead=ECONNREFUSED
+race_move_aside=0
+race_post_verify_same_object=False
+race_put_back=0
+race_competitor_object_kept=True
+race_competitor_still_answers=connected
+noreplace_on_existing=EEXIST
+stopped_connect_results=EAGAIN,connected
+=== probe2.py ===
+live_connect_via_pin=connected
+exit 0 · 13s · default · $0.0001 · bx_zfz3q5x5 deleted
+
+=== owner 更新与 ctime 补探针 ===
+creating a default sandbox...
+bx_v93w46gn ready in 3.4s
+pushed 4 files (9.5 KB) to ~/probe
+filesystem /dev/vda1 ext4 kernel 6.8.0-117-generic
+replace_metadata_removes_injected_socket_name True pinned_socket_nlink 0
+pinned_regular_write_keeps_replacement_socket True
+delayed_rename_ctime_changed True
+exit 0 · 11s · default · $0.0001 · bx_v93w46gn deleted

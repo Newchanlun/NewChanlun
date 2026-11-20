@@ -1,11 +1,11 @@
-# #2079 第五稿送审原件
+# #2079 第五稿重做送审原件
 
 日期：2026-11-20 America/Los_Angeles（UTC-08）
 源 main：b9d898dccf46c2a716115eaa1215bc39c458a959
-决策分支：decision/2079-r5 @ 4812b992057ff5c6bf39da50e8b40bd1816382d3
+决策分支：decision/2079-r5 @ d18e70fad7aae91156ac28860acab1132a076bea（追加在 4812b992057ff5c6bf39da50e8b40bd1816382d3 之后）
 唯一差异：A docs/adr/0065-production-session-endpoint-ownership.md（0065 空闲；PR #2065 使用 0064）
-证据分支：evidence/2079-decision-inputs-r5，从决策 head 新建
-独审状态：待审；起草模型 GPT-6.2 Sol，未分派独审
+证据分支：evidence/2079-decision-inputs-r5，保留首轮输入历史并并入最新决策 head
+独审状态：待重审；被审 4812b992057ff5c6bf39da50e8b40bd1816382d3 @ a2ba91e232e6d69c162ddb22d2d20d81d61c3580，R5/R8 BLOCK；重做逐项记录 REDO-1.md
 正本与草稿 canonical_edit、canonical-plan.after、git show 决策 blob 逐字匹配。
 基线差异的 git diff --check 退出 0。
 
@@ -27,10 +27,15 @@ origin/evidence/2079-review-c061b667 @ 029077ad4851d0db7c8c85bf13e1701bdcfe041f 
 origin/evidence/2079-review-1a2be7e6 @ 5d9676d306a669f7e62c58ee66aa26322f2f9f7c .chanlun/review-results/issue2079-review-1a2be7e6/REVIEW.md
 origin/evidence/2079-review-173fff70 @ 849a7940c7880367b7586b8339e9e3aee65d6467 .chanlun/review-results/issue2079-review-173fff70/REVIEW.md
 
-核心原件：classify.json、archaeology.md/.json、draft.md、canonical-plan.json、DEVIATIONS.md。
+核心原件：classify.json、archaeology.md/.json、draft.md、canonical-plan.json、DEVIATIONS.md、REDO-1.md。
 现场取证：sources/ 为相关票的只读快照；queries/ 为逐点两路查询的原始输出；edges.txt 与 1417-blocked-by.txt 为 native API 读数；adr-number-check.txt 为 main 和全部开放 PR 的树检查。
 Boat 用法（Linux x86_64、/var/tmp 下的 ext4；无环境继承）：boat limits 后从 probe/ 的父目录执行：
   boat run --no-env --timeout 120 --push probe -- python3 probe.py
   boat run --no-env --timeout 120 --push probe -- python3 supplement.py
 完整 stdout/stderr 在 probe-ext4.log；original_probe.py 和 probe2.py 未改自简报，probe.py 只是挂载核验与运行封装。
 X 读数：x-epoch.log、x_epoch_probe.py、x_helpers.py；真实 E/X 各来自 #1375 run-3 使用的 b9d898dc Linux release 构建，证据本地 /Volumes/AgentStorage/issue1375-capture-resolve-20261118/RESULT.md、target/release/，镜像 python:3.11-bookworm、linux/amd64、无网与无 capabilities。未测真实场所、无订单或凭据。
+
+重做日志索引（原始输出随 Git 树提交）：
+- probe-ext4.log：Linux 6.8.0-117-generic x86_64，findmnt /dev/vda1 ext4；杀后锁可得、钉住死端点 ECONNREFUSED、RENAME_NOREPLACE 同 dev/ino、owner 普通覆盖将 socket nlink 降为 0。
+- x-epoch.log：原 OrbStack 对照，E=1 正常处理权威拒绝，E=2 同一 X 拒信封为 IdentityConflict、NoRecord。
+- x-epoch-boat.log：复用原 E/X 二进制在 Boat Linux 6.8.0-117-generic x86_64、findmnt /dev/vda1 ext4 验证同一结果。Rust 日志的 ext2/ext3 是 stat 类型名，挂载事实以 findmnt 为准。运行封装 probe/x-epoch-boat.py；将该文件改名 run.py，同目录放本分支 x_epoch_probe.py、x_helpers.py 及原 E/X 二进制，以 boat run --no-env --timeout 120 --push <目录> -- python3 run.py 运行。
