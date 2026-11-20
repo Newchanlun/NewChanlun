@@ -1,0 +1,11 @@
+# ticket: 2114
+# round: 2
+# revision_head: 98aeb22a783c00428ffa44d76eff89004e89b243
+# source_commit: b9d898dccf46c2a716115eaa1215bc39c458a959
+# prior_review_commit: 06e6e28e337fdbf0acc2ade98ba927489518940c
+d380cc6469dd82c7d5b989273465d8cd202e028ce8ef0980eebcc06b9c2b1c8f  archaeology.json
+adf9f687bd9be2f4e6ab0d70aad8b27b42b55bf5765423e4c6d8b784e26a9ef4  archaeology.md
+b3d51a6850308d4fd17835e2925f2c111bbe43da08a9a91f544a55a5bcb13e8a  canonical-plan.json
+2d0ac2d14e4b70ae2fd9af02893cb6954fd1a69e39693e3faf99382d0d8237b2  CHANGES-r2.md
+8eb6443d2bdcc309818c92448af221a2887564fcef055b1a55df7355be567d9b  classify.json
+2f655cbfcb1caa936b927756d3eb475975a7a00e6a85fe3598ccba3626a9e2a9  draft.md
