@@ -1,8 +1,8 @@
 # ADR 0044：成本停止 policy 签署记录 v1（P0 / P1-hl-testnet）
 
-> 正本：本文件是 `#1354/cost-stop-policy/v1` 在 `P0` 与 `P1-hl-testnet` 两个 profile 上的签署值（θ 与四项成本输入的状态、来源与有效域）的正本。
-> 最后裁定：#1559（2026-10-21，用户批复）
-> 受影响代码清单：见「下游与受影响票」节（本 ADR 只登记数值，读取实现归 #1441 TB-02-S）
+> 正本：本文件登记 `#1354/cost-stop-policy/v1` 在 P0 与 P1-hl-testnet 的签署值；§三规定成本停止求值的零总成本边界。
+> 最后裁定：#2111（2026-11-20，P 类方法修订）；P0／P1-hl-testnet 的签署值沿用 #1559（2026-10-21，用户批复）。
+> 受影响代码清单：见「下游与受影响票」节（#2111 候选行号及基线；实现归 #1441）。
 
 **日期**：2026-10-21
 **裁定人**：用户（2026-10-21 批复 [#1559 评论 6310844461](https://github.com/xy7365527-lang/NewChanlun/issues/1559#issuecomment-6310844461)，原话「不重要你自己定吧」，委托主控按推荐默认值逐项确认）；代理起草，非作者独审
@@ -39,6 +39,23 @@
 4. TB-08 升级任一输入来源即出新版本（`supersedes` 指向旧版），不改 θ 与波幅证据（ADR 0035:24）。
 5. 波幅证据（`amplitude`）由探针按 ADR 0035:12 产出，不由签署填写；本记录不含波幅数值。
 6. TB-02-S [#1441](https://github.com/xy7365527-lang/NewChanlun/issues/1441) 读取当前生效版本，输出 Enabled / Disabled / InsufficientEvidence / NotEvaluable 之一；机读文件路径与格式归 #1441 实施，本 ADR 是唯一数值来源。
+
+### 三、已知总成本为零的求值（[#2111](https://github.com/Newchanlun/NewChanlun/issues/2111)，2026-11-20）
+
+记 `C = 2·fee + slippage + latency_error [+ holding]`，与 [ADR 0035](0035-cost-stop-policy-instance-and-base-extension-evidence.md) 裁定一同尺度、同往返口径。先按请求时刻的有效记录、有效域、级别及来源解析成本；只合计适用项。适用项 Missing 或无合格输入仍按 §二与 ADR 0035 裁定二处理为不可评估，不用 0 占位；未到生效级别的 holding 不适用。获授权的已知零值与匹配已登记 Known 来源的运行实测零值，在各自来源门通过后同为 0；来源及有效域各自保留。零费率可进入合法记录，不代表其余成本为零；运行读数不得覆盖已签值或将 Missing、代理下界改成 Known。
+
+成本来源可用后，先查 ROUNDTRIP 波幅证据是否符合所引证据门（[ADR 0022](0022-acceptance-criterion-parameters.md) 裁定六／七和版本记录）。不满足时为 `InsufficientEvidence(Amplitude)`，即使所有适用成本项均已知且 `C = 0`。合格下界与下界数值过线是两件事：
+
+| 成本证据 | 合格波幅下界的读法 | 输出 |
+|---|---|---|
+| 所有适用成本项为 Known，`C > 0` | 逐窗比较 `A_ℓ/C ≥ θ` | 全过为 `Enabled`；任一窗不过为 `Disabled(Measured)` |
+| 所有适用成本项为 Known，`C = 0` | 比值无定义，不做 θ 数值比较 | `NotEvaluable(ZeroTotalCost)`；合格下界为 0 或为正均如此 |
+| 含 ProxyLowerBound，合成下界 `C_min > 0` | `A_ℓ/C_min` 只给比值上界 | 任一窗口上界严格小于 θ 为 `Disabled(UpperBoundOnly)`；否则 `InsufficientEvidence(UpperBoundOnly)` |
+| 含 ProxyLowerBound，合成下界 `C_min = 0` | 未证明实际总成本为 0，也不能据该下界作上界的 θ 比较 | `InsufficientEvidence(UpperBoundOnly)` |
+
+`Disabled` 表示证据已证明门槛不满足，不表示比值无定义。此门没有独立的绝对波幅最低值；正成本比较上的不过线仍为 `Disabled`，零总成本时不得用交叉相乘的等价式越出正分母定义域，也不填极限值、最小分母或备用判据。三种非 Enabled 结果均不放行本门；调用方保留四态及原因，不把「缺证据／不可评估」记成测得不过线，不改现有塔底和进阶复测协议。
+
+零分母处置和证据先决关系是对既有比值及证据契约的边界补全，不设可调字段（[ADR 0041](0041-degrees-of-freedom-configurable-not-excluded.md) 裁定一、二、四；#799、#804）。同一规则用于各级和各有效 profile；继续按已授权版本读取 θ 与成本来源，变动成本值或来源仍须按原合同另出版本。P0、P1-hl-testnet 两份 v1 签署值、来源与有效域不变；两版滑点仍为 Missing，按原合同输出 `NotEvaluable`。本条只定求值方法，不签任何实际取值。
 
 ## 签署记录
 
@@ -99,6 +116,9 @@ valid_through: 2027-10-21
 
 - [#1360](https://github.com/xy7365527-lang/NewChanlun/issues/1360) TB-02、[#1366](https://github.com/xy7365527-lang/NewChanlun/issues/1366) TB-07、[#1367](https://github.com/xy7365527-lang/NewChanlun/issues/1367) TB-08：#1559 关票后 blocking 边解除；#1366 回放按「请求时刻生效版本」引本 ADR；#1367 升级 P1 滑点/延迟/funding 来源即出新版本。
 - [#1441](https://github.com/xy7365527-lang/NewChanlun/issues/1441) TB-02-S：读本 ADR 的版本输出四态之一（不加边，票面验收允许「未定参数准确缺项」输出）。
+- [#2111](https://github.com/Newchanlun/NewChanlun/issues/2111) 补全 §三；实现与测试仍归 #1441。以下行号据 `impl/1441-cost-stop-policy` 取证头 `b7e23c31bc353378b71b090499c6eeea91676c92`：
+  - `rust/src/theta_v0/cost_stop.rs:69-86,136-161,171-195,209-278,282-301`：签署费率和实测来源、四态、波幅证据与分母检查（旧零早返 :249-251）、来源匹配；测试 seam `:322-452,499-516`。
+  - `rust/src/theta_v0/policy_records.rs:76-87,625-647`、`rust/src/theta_v0/policy_records/cost-stop.json:4-56`：继续读既有 v1，不改签值；零值用非生产夹具覆盖。
 - [#1602](https://github.com/xy7365527-lang/NewChanlun/issues/1602)：成本参数版本化记录以本 ADR 为数值来源。
 
 ## 溯源标签
