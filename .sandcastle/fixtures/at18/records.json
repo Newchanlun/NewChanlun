@@ -1,0 +1,13 @@
+{
+  "runtime": {"example": "合成：场所程序实际输出"},
+  "migration": {"example": "合成：非空持仓、未结单、费用尾、中断恢复和回退"},
+  "other": {"example": "合成：测试用实体，不构成验收证据"},
+  "authorization": {"example": "合成：场所档案签署"},
+  "permissionSources": {"source_url": "https://example.test/permission", "retrieved_at": "2026-11-20"},
+  "capability": {"version": 1},
+  "profile": {"profile_id": "P1-fixture"},
+  "startup": {"example": "合成：发送门第 4 至 7 步核验"},
+  "gate": {"id": "gate", "profile_id": "P1-fixture", "evidence_class": "experiment", "known_at": "2026-11-20T00:00:00.000001Z"},
+  "version": {"id": "params", "profile_id": "P1-fixture", "evidence_class": "experiment", "authorized_at": "2026-11-20T00:00:00.000002Z", "gate_reached_event_id": "gate"},
+  "activation": {"id": "first", "profile_id": "P1-fixture", "evidence_class": "experiment", "known_at": "2026-11-20T00:00:00.000003Z", "gate_reached_event_id": "gate", "parameter_version_id": "params"}
+}
