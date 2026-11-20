@@ -1,0 +1,8 @@
+f12f47fac3 fix(wayfinder): 执行动作前重验 SPEC 并厘清授权边界 (#1915)
+df7beb0c8d Sandcastle #1626: [impl] #1600 承接：trend_scope 与 tower_base 代码侧改读版本化字段，Lean 同步（Q-4、Q-6～Q-8、X-38、Q-2） (#1693)
+40f11b540f [#1598 #1599 #1610] 已批准政策正本与量纲订正 (#1713)
+82a9e5436a docs: 落 #1323 资金/经营 policy 组 grilling 裁定（ADR 0034–0036）
+21a568a560 impl(classifier): #1054——classify 入口族 7→2 收口为 classify/classify_incremental + ClassifyOutput 统一输出模块，消费点改字段访问
+55fdd4a717 style: cargo fmt 五个探针 bin——CI fmt 门归绿
+5ee83b1e8f probe(#915): 逐级容量/频率/波幅阶梯跨标的实测
+a257400242 docs(#907): 成本门探针报告入仓（324 行；两窗跑完，含 BTC 全史 100%）

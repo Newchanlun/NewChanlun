@@ -1,0 +1,13 @@
+1367	open	TB-08 验收汇总：场所共核与能力验收（SPEC #1340）
+1368	open	TB-10 验收汇总：带仓迁移、旧入口终态及默认启用（SPEC #1340）
+1369	open	TB-11 验收汇总：整图实装和独立总验（SPEC #1340）
+1385	open	[impl] TB-10-B 旧策略和多重装配入口完成R2迁移准备（SPEC #1340）
+1386	open	[impl] TB-10-C Organic与positional核心旧经济臂隔离准备（SPEC #1340）
+1387	open	[impl] TB-10-D positional延续与fusion变体旧写权隔离准备（SPEC #1340）
+1388	open	[impl] TB-10-E 混合经济臂及旧π组织完成逐族迁移准备（SPEC #1340）
+1389	open	[impl] TB-10-F 严格构造费用统计与形式锁收编（SPEC #1340）
+1390	open	[impl] TB-10-G 探针研究及封存支持的退出准备（SPEC #1340）
+1391	open	[impl] TB-11-A 完整程序验收与旧关联票义务逐项对账（SPEC #1340）
+1402	open	[impl] TB-10-H 非空持仓与尾责迁移及回退不丢权利（SPEC #1340）
+1523	open	[impl] TB-04/08/09 纵片 A：nautilus 0.62 HL 适配器与正式 paper launcher
+1524	open	[impl] TB-04/07 纵片 B：HL trade tick/1m feed 与断线恢复

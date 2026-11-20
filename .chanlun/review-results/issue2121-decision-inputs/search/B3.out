@@ -1,0 +1,5 @@
+origin/decision/2111:docs/adr/0044-cost-stop-policy-signed-instance-v1.md:26:| 滑点 | 两版 `Missing` | 仓内无逐笔滑点落盘（`.chanlun/review-results/issue907-cost-gate-level-20260805.md:282`）；`rust/src/theta_v0/venue_fee.rs:36` 明文 `slippage_bps` 未标定（字段 `rust/src/theta_v0/config.rs:309`，默认 `:366` 为 2.0），不作输入（ADR 0035:27 否「代理下界充 Known」「缺项代 0」） |
+origin/decision/2111:docs/adr/0044-cost-stop-policy-signed-instance-v1.md:47:成本来源可用后，先查 ROUNDTRIP 波幅证据是否符合所引证据门（[ADR 0022](0022-acceptance-criterion-parameters.md) 裁定六／七和版本记录）。不满足时为 `InsufficientEvidence(Amplitude)`，即使所有适用成本项均已知且 `C = 0`。合格下界与下界数值过线是两件事：
+origin/decision/2111:docs/adr/0044-cost-stop-policy-signed-instance-v1.md:49:| 成本证据 | 合格波幅下界的读法 | 输出 |
+origin/decision/2111:docs/adr/0044-cost-stop-policy-signed-instance-v1.md:53:| 含 ProxyLowerBound，合成下界 `C_min > 0` | `A_ℓ/C_min` 只给比值上界 | 任一窗口上界严格小于 θ 为 `Disabled(UpperBoundOnly)`；否则 `InsufficientEvidence(UpperBoundOnly)` |
+origin/decision/2111:docs/adr/0044-cost-stop-policy-signed-instance-v1.md:74:latency_error: ProxyLowerBound  probe_run_ref: .chanlun/review-results/issue907-cost-gate-level-20260805.md:161-169（DELAYERR，只能判失败）

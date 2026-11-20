@@ -1,0 +1,139 @@
+id	command	status	accepted
+T01	gh issue list -R Newchanlun/NewChanlun --state all --search '波幅 下界 bootstrap 统计量' --limit 1000 --json number,title,state,url	0	True
+T02	gh issue list -R Newchanlun/NewChanlun --state all --search 'amplitude block bootstrap method_id' --limit 1000 --json number,title,state,url	0	True
+T03	gh issue list -R Newchanlun/NewChanlun --state all --search 'ROUNDTRIP 波幅 95% 下界 方法' --limit 1000 --json number,title,state,url	0	True
+T04	gh issue list -R Newchanlun/NewChanlun --state all --search '"A_ℓ" 下界 方法 in:title,body' --limit 1000 --json number,title,state,url	0	True
+T05	gh issue list -R Newchanlun/NewChanlun --state all --search '"ROUNDTRIP"' --limit 1000 --json number,title,state,url	0	True
+T06	gh issue list -R Newchanlun/NewChanlun --state all --search '"block bootstrap"' --limit 1000 --json number,title,state,url	0	True
+T07	gh issue list -R Newchanlun/NewChanlun --state all --search '"bootstrap" in:comments' --limit 1000 --json number,title,state,url	0	True
+T08	gh issue list -R Newchanlun/NewChanlun --state all --search '"成本停止"' --limit 1000 --json number,title,state,url	0	True
+T09	gh issue list -R Newchanlun/NewChanlun --state all --search '"波幅" "下界"' --limit 1000 --json number,title,state,url	0	True
+T10	gh issue list -R Newchanlun/NewChanlun --state all --search '"波幅" "置信下限"' --limit 1000 --json number,title,state,url	0	True
+T11	gh issue list -R Newchanlun/NewChanlun --state all --search '"振幅" "下界"' --limit 1000 --json number,title,state,url	0	True
+T12	gh issue list -R Newchanlun/NewChanlun --state all --search '"amplitude" "lower bound"' --limit 1000 --json number,title,state,url	0	True
+T13	gh issue list -R Newchanlun/NewChanlun --state all --search '"下钻" "分位"' --limit 1000 --json number,title,state,url	0	True
+T14	gh issue list -R Newchanlun/NewChanlun --state all --search '"波幅" "重采样"' --limit 1000 --json number,title,state,url	0	True
+T15	gh issue list -R Newchanlun/NewChanlun --state all --search '"振幅" "自助"' --limit 1000 --json number,title,state,url	0	True
+T16	gh issue list -R Newchanlun/NewChanlun --state all --search '"波幅" "月簇"' --limit 1000 --json number,title,state,url	0	True
+T17	gh issue list -R Newchanlun/NewChanlun --state all --search '"波幅" "月块"' --limit 1000 --json number,title,state,url	0	True
+T18	gh issue list -R Newchanlun/NewChanlun --state all --search '"成本门" "均值"' --limit 1000 --json number,title,state,url	0	True
+T19	gh issue list -R Newchanlun/NewChanlun --state all --search '"波幅" "中位数"' --limit 1000 --json number,title,state,url	0	True
+T20	gh issue list -R Newchanlun/NewChanlun --state all --search '"置信下界" "逐窗"' --limit 1000 --json number,title,state,url	0	True
+T21	gh issue list -R Newchanlun/NewChanlun --state all --search '"method_id" "成本停止"' --limit 1000 --json number,title,state,url	0	True
+T22	gh issue list -R Newchanlun/NewChanlun --state all --search '"PCG-XSH-RR"' --limit 1000 --json number,title,state,url	0	True
+T23	gh issue list -R Newchanlun/NewChanlun --state all --search '"descent-share/block-bootstrap/1"' --limit 1000 --json number,title,state,url	0	True
+T24	gh issue list -R Newchanlun/NewChanlun --state all --search '"evidence-gate/v1"' --limit 1000 --json number,title,state,url	0	True
+T25	gh issue list -R Newchanlun/NewChanlun --state all --search '"成本下降速率"' --limit 1000 --json number,title,state,url	0	True
+T26	gh issue list -R Newchanlun/NewChanlun --state all --search '"成本停止" "签署"' --limit 1000 --json number,title,state,url	0	True
+T27	gh issue list -R Newchanlun/NewChanlun --state all --search '"买卖点间波幅"' --limit 1000 --json number,title,state,url	0	True
+T28	gh issue list -R Newchanlun/NewChanlun --state all --search '"zero total cost"' --limit 1000 --json number,title,state,url	0	True
+T29	gh issue list -R Newchanlun/NewChanlun --state all --search '"零总成本"' --limit 1000 --json number,title,state,url	0	True
+T30	gh issue list -R Newchanlun/NewChanlun --state all --search '"波幅" "上尾"' --limit 1000 --json number,title,state,url	0	True
+I390	gh issue view 390 -R Newchanlun/NewChanlun --json number,title,state,url,body,comments	0	True
+I395	gh issue view 395 -R Newchanlun/NewChanlun --json number,title,state,url,body,comments	0	True
+I399	gh issue view 399 -R Newchanlun/NewChanlun --json number,title,state,url,body,comments	0	True
+I424	gh issue view 424 -R Newchanlun/NewChanlun --json number,title,state,url,body,comments	0	True
+I443	gh issue view 443 -R Newchanlun/NewChanlun --json number,title,state,url,body,comments	0	True
+I579	gh issue view 579 -R Newchanlun/NewChanlun --json number,title,state,url,body,comments	0	True
+I731	gh issue view 731 -R Newchanlun/NewChanlun --json number,title,state,url,body,comments	0	True
+I787	gh issue view 787 -R Newchanlun/NewChanlun --json number,title,state,url,body,comments	0	True
+I799	gh issue view 799 -R Newchanlun/NewChanlun --json number,title,state,url,body,comments	0	True
+I804	gh issue view 804 -R Newchanlun/NewChanlun --json number,title,state,url,body,comments	0	True
+I806	gh issue view 806 -R Newchanlun/NewChanlun --json number,title,state,url,body,comments	0	True
+I817	gh issue view 817 -R Newchanlun/NewChanlun --json number,title,state,url,body,comments	0	True
+I833	gh issue view 833 -R Newchanlun/NewChanlun --json number,title,state,url,body,comments	0	True
+I844	gh issue view 844 -R Newchanlun/NewChanlun --json number,title,state,url,body,comments	0	True
+I847	gh issue view 847 -R Newchanlun/NewChanlun --json number,title,state,url,body,comments	0	True
+I853	gh issue view 853 -R Newchanlun/NewChanlun --json number,title,state,url,body,comments	0	True
+I854	gh issue view 854 -R Newchanlun/NewChanlun --json number,title,state,url,body,comments	0	True
+I859	gh issue view 859 -R Newchanlun/NewChanlun --json number,title,state,url,body,comments	0	True
+I907	gh issue view 907 -R Newchanlun/NewChanlun --json number,title,state,url,body,comments	0	True
+I911	gh issue view 911 -R Newchanlun/NewChanlun --json number,title,state,url,body,comments	0	True
+I914	gh issue view 914 -R Newchanlun/NewChanlun --json number,title,state,url,body,comments	0	True
+I915	gh issue view 915 -R Newchanlun/NewChanlun --json number,title,state,url,body,comments	0	True
+I917	gh issue view 917 -R Newchanlun/NewChanlun --json number,title,state,url,body,comments	0	True
+I925	gh issue view 925 -R Newchanlun/NewChanlun --json number,title,state,url,body,comments	0	True
+I962	gh issue view 962 -R Newchanlun/NewChanlun --json number,title,state,url,body,comments	0	True
+I1004	gh issue view 1004 -R Newchanlun/NewChanlun --json number,title,state,url,body,comments	0	True
+I1077	gh issue view 1077 -R Newchanlun/NewChanlun --json number,title,state,url,body,comments	0	True
+I1116	gh issue view 1116 -R Newchanlun/NewChanlun --json number,title,state,url,body,comments	0	True
+I1173	gh issue view 1173 -R Newchanlun/NewChanlun --json number,title,state,url,body,comments	0	True
+I1309	gh issue view 1309 -R Newchanlun/NewChanlun --json number,title,state,url,body,comments	0	True
+I1317	gh issue view 1317 -R Newchanlun/NewChanlun --json number,title,state,url,body,comments	0	True
+I1323	gh issue view 1323 -R Newchanlun/NewChanlun --json number,title,state,url,body,comments	0	True
+I1340	gh issue view 1340 -R Newchanlun/NewChanlun --json number,title,state,url,body,comments	0	True
+I1354	gh issue view 1354 -R Newchanlun/NewChanlun --json number,title,state,url,body,comments	0	True
+I1355	gh issue view 1355 -R Newchanlun/NewChanlun --json number,title,state,url,body,comments	0	True
+I1356	gh issue view 1356 -R Newchanlun/NewChanlun --json number,title,state,url,body,comments	0	True
+I1357	gh issue view 1357 -R Newchanlun/NewChanlun --json number,title,state,url,body,comments	0	True
+I1358	gh issue view 1358 -R Newchanlun/NewChanlun --json number,title,state,url,body,comments	0	True
+I1360	gh issue view 1360 -R Newchanlun/NewChanlun --json number,title,state,url,body,comments	0	True
+I1366	gh issue view 1366 -R Newchanlun/NewChanlun --json number,title,state,url,body,comments	0	True
+I1367	gh issue view 1367 -R Newchanlun/NewChanlun --json number,title,state,url,body,comments	0	True
+I1394	gh issue view 1394 -R Newchanlun/NewChanlun --json number,title,state,url,body,comments	0	True
+I1398	gh issue view 1398 -R Newchanlun/NewChanlun --json number,title,state,url,body,comments	0	True
+I1415	gh issue view 1415 -R Newchanlun/NewChanlun --json number,title,state,url,body,comments	0	True
+I1441	gh issue view 1441 -R Newchanlun/NewChanlun --json number,title,state,url,body,comments	0	True
+I1443	gh issue view 1443 -R Newchanlun/NewChanlun --json number,title,state,url,body,comments	0	True
+I1444	gh issue view 1444 -R Newchanlun/NewChanlun --json number,title,state,url,body,comments	0	True
+I1465	gh issue view 1465 -R Newchanlun/NewChanlun --json number,title,state,url,body,comments	0	True
+I1467	gh issue view 1467 -R Newchanlun/NewChanlun --json number,title,state,url,body,comments	0	True
+I1535	gh issue view 1535 -R Newchanlun/NewChanlun --json number,title,state,url,body,comments	0	True
+I1547	gh issue view 1547 -R Newchanlun/NewChanlun --json number,title,state,url,body,comments	0	True
+I1557	gh issue view 1557 -R Newchanlun/NewChanlun --json number,title,state,url,body,comments	0	True
+I1558	gh issue view 1558 -R Newchanlun/NewChanlun --json number,title,state,url,body,comments	0	True
+I1559	gh issue view 1559 -R Newchanlun/NewChanlun --json number,title,state,url,body,comments	0	True
+I1586	gh issue view 1586 -R Newchanlun/NewChanlun --json number,title,state,url,body,comments	0	True
+I1598	gh issue view 1598 -R Newchanlun/NewChanlun --json number,title,state,url,body,comments	0	True
+I1605	gh issue view 1605 -R Newchanlun/NewChanlun --json number,title,state,url,body,comments	0	True
+I1641	gh issue view 1641 -R Newchanlun/NewChanlun --json number,title,state,url,body,comments	0	True
+I1677	gh issue view 1677 -R Newchanlun/NewChanlun --json number,title,state,url,body,comments	0	True
+I1678	gh issue view 1678 -R Newchanlun/NewChanlun --json number,title,state,url,body,comments	0	True
+I1774	gh issue view 1774 -R Newchanlun/NewChanlun --json number,title,state,url,body,comments	0	True
+I1775	gh issue view 1775 -R Newchanlun/NewChanlun --json number,title,state,url,body,comments	0	True
+I1968	gh issue view 1968 -R Newchanlun/NewChanlun --json number,title,state,url,body,comments	0	True
+I1993	gh issue view 1993 -R Newchanlun/NewChanlun --json number,title,state,url,body,comments	0	True
+I2111	gh issue view 2111 -R Newchanlun/NewChanlun --json number,title,state,url,body,comments	0	True
+I2121	gh issue view 2121 -R Newchanlun/NewChanlun --json number,title,state,url,body,comments	0	True
+R1	rg --no-heading --color never --hidden -n -i -e '(ROUNDTRIP|A_[ℓl]|method_id|成本停止|成本门|波幅|振幅|amplitude).{0,100}(下界|下限|lower[-_ ]bound|LCB|分位|quantile|percentile|bootstrap|重[采抽]样|自助|区块|分[块桶]|block|月[块簇]|聚簇|均值|中位|mean|median|置信|confidence)|(下界|下限|lower[-_ ]bound|LCB|分位|quantile|percentile|bootstrap|重[采抽]样|自助|区块|分[块桶]|block|月[块簇]|聚簇|均值|中位|mean|median|置信|confidence).{0,100}(ROUNDTRIP|A_[ℓl]|method_id|成本停止|成本门|波幅|振幅|amplitude)' -- docs/adr .chanlun/definitions analysis docs rust formal .chanlun/review-results CONTEXT.md	0	True
+R2	rg --no-heading --color never --hidden -n -i -e 'PCG[-_ ]?XSH|Pcg32|拒绝取模|nearest[-_ ]rank|descent-share/block-bootstrap|evidence-gate/v1' -- docs/adr .chanlun/definitions analysis docs rust formal .chanlun/review-results CONTEXT.md	0	True
+R3	rg --no-heading --color never --hidden -n -i -e 'p907_cost_gate_level|issue907-cost-gate-level|5194145006|5289198250|MethodNotRuled|amplitude-run/' -- docs/adr .chanlun/definitions analysis docs rust formal .chanlun/review-results CONTEXT.md	0	True
+B1	git grep -nI -iE -e '((ROUNDTRIP|A_[ℓl]|method_id|成本停止|成本门|波幅|振幅|amplitude).{0,100}(下界|下限|lower[-_ ]bound|LCB|分位|quantile|percentile|bootstrap|重[采抽]样|自助|区块|分[块桶]|block|月[块簇]|聚簇|均值|中位|mean|median|置信|confidence)|(下界|下限|lower[-_ ]bound|LCB|分位|quantile|percentile|bootstrap|重[采抽]样|自助|区块|分[块桶]|block|月[块簇]|聚簇|均值|中位|mean|median|置信|confidence).{0,100}(ROUNDTRIP|A_[ℓl]|method_id|成本停止|成本门|波幅|振幅|amplitude))|(PCG[-_ ]?XSH|Pcg32|拒绝取模|nearest[-_ ]rank|descent-share/block-bootstrap|evidence-gate/v1)|(p907_cost_gate_level|issue907-cost-gate-level|5194145006|5289198250|MethodNotRuled|amplitude-run/)' origin/evidence/1441-design-r3 -- .chanlun/review-results/issue1441-design-r3	0	True
+B2	git grep -nI -iE -e '((ROUNDTRIP|A_[ℓl]|method_id|成本停止|成本门|波幅|振幅|amplitude).{0,100}(下界|下限|lower[-_ ]bound|LCB|分位|quantile|percentile|bootstrap|重[采抽]样|自助|区块|分[块桶]|block|月[块簇]|聚簇|均值|中位|mean|median|置信|confidence)|(下界|下限|lower[-_ ]bound|LCB|分位|quantile|percentile|bootstrap|重[采抽]样|自助|区块|分[块桶]|block|月[块簇]|聚簇|均值|中位|mean|median|置信|confidence).{0,100}(ROUNDTRIP|A_[ℓl]|method_id|成本停止|成本门|波幅|振幅|amplitude))|(PCG[-_ ]?XSH|Pcg32|拒绝取模|nearest[-_ ]rank|descent-share/block-bootstrap|evidence-gate/v1)|(p907_cost_gate_level|issue907-cost-gate-level|5194145006|5289198250|MethodNotRuled|amplitude-run/)' origin/impl/1441-cost-stop-policy -- rust/src/theta_v0/cost_stop rust/src/theta_v0/evidence_gate rust/src/theta_v0/cost_stop.rs rust/tests/cost_stop_public_surface.rs	0	True
+B3	git grep -nI -iE -e '((ROUNDTRIP|A_[ℓl]|method_id|成本停止|成本门|波幅|振幅|amplitude).{0,100}(下界|下限|lower[-_ ]bound|LCB|分位|quantile|percentile|bootstrap|重[采抽]样|自助|区块|分[块桶]|block|月[块簇]|聚簇|均值|中位|mean|median|置信|confidence)|(下界|下限|lower[-_ ]bound|LCB|分位|quantile|percentile|bootstrap|重[采抽]样|自助|区块|分[块桶]|block|月[块簇]|聚簇|均值|中位|mean|median|置信|confidence).{0,100}(ROUNDTRIP|A_[ℓl]|method_id|成本停止|成本门|波幅|振幅|amplitude))|(PCG[-_ ]?XSH|Pcg32|拒绝取模|nearest[-_ ]rank|descent-share/block-bootstrap|evidence-gate/v1)|(p907_cost_gate_level|issue907-cost-gate-level|5194145006|5289198250|MethodNotRuled|amplitude-run/)' origin/decision/2111 -- docs/adr/0044-cost-stop-policy-signed-instance-v1.md	0	True
+T31	gh issue list -R Newchanlun/NewChanlun --state all --search '"cost-stop" "bootstrap" in:title,body,comments' --limit 1000 --json number,title,state,url	0	True
+T32	gh issue list -R Newchanlun/NewChanlun --state all --search '"波幅" "置信区间" in:title,body,comments' --limit 1000 --json number,title,state,url	0	True
+T33	gh issue list -R Newchanlun/NewChanlun --state all --search '"置信下限" "成本" in:title,body,comments' --limit 1000 --json number,title,state,url	0	True
+T34	gh issue list -R Newchanlun/NewChanlun --state all --search '"平均买卖点间波幅" in:title,body,comments' --limit 1000 --json number,title,state,url	0	True
+T35	gh issue list -R Newchanlun/NewChanlun --state all --search '"percentile" "ROUNDTRIP" in:title,body,comments' --limit 1000 --json number,title,state,url	0	True
+T36	gh issue list -R Newchanlun/NewChanlun --state all --search '"月簇" "下界" in:title,body,comments' --limit 1000 --json number,title,state,url	0	True
+T37	gh issue list -R Newchanlun/NewChanlun --state all --search '"ROUNDTRIP" "median" in:title,body,comments' --limit 1000 --json number,title,state,url	0	True
+T38	gh issue list -R Newchanlun/NewChanlun --state all --search '"抽样" "波幅" in:title,body,comments' --limit 1000 --json number,title,state,url	0	True
+T39	gh issue list -R Newchanlun/NewChanlun --state all --search '"cost stop" "amplitude" in:title,body,comments' --limit 1000 --json number,title,state,url	0	True
+T40	gh issue list -R Newchanlun/NewChanlun --state all --search '"振幅" "分位数" in:title,body,comments' --limit 1000 --json number,title,state,url	0	True
+T41	gh issue list -R Newchanlun/NewChanlun --state all --search '"波幅" "置信" in:title,body,comments' --limit 1000 --json number,title,state,url	0	True
+I852	gh issue view 852 -R Newchanlun/NewChanlun --json number,title,state,url,body,comments	0	True
+I872	gh issue view 872 -R Newchanlun/NewChanlun --json number,title,state,url,body,comments	0	True
+I1359	gh issue view 1359 -R Newchanlun/NewChanlun --json number,title,state,url,body,comments	0	True
+I1382	gh issue view 1382 -R Newchanlun/NewChanlun --json number,title,state,url,body,comments	0	True
+I1400	gh issue view 1400 -R Newchanlun/NewChanlun --json number,title,state,url,body,comments	0	True
+I1412	gh issue view 1412 -R Newchanlun/NewChanlun --json number,title,state,url,body,comments	0	True
+I1440	gh issue view 1440 -R Newchanlun/NewChanlun --json number,title,state,url,body,comments	0	True
+I1536	gh issue view 1536 -R Newchanlun/NewChanlun --json number,title,state,url,body,comments	0	True
+I1602	gh issue view 1602 -R Newchanlun/NewChanlun --json number,title,state,url,body,comments	0	True
+I1909	gh issue view 1909 -R Newchanlun/NewChanlun --json number,title,state,url,body,comments	0	True
+R4	rg --no-heading --color never --hidden -n -i -e '下界读法|lower_bound_95|A_[ℓl]\b|波幅.{0,20}(区间|估计|点估计|p10)|置信下界.{0,12}逐窗|cost[-_ ]stop.{0,60}(bootstrap|method)|#1677.{0,25}A-10' -- docs/adr .chanlun/definitions analysis docs rust formal .chanlun/review-results CONTEXT.md	0	True
+R5	rg --no-heading --color never -n -i -e '成本门|波幅|振幅|amplitude|ROUNDTRIP|bootstrap|重采样|聚簇' -- formal/Origin	0	True
+R6	git log '--format=%h %s' -- rust/src/bin/p907_cost_gate_level.rs .chanlun/review-results/issue907-cost-gate-level-20260805.md docs/adr/0035-cost-stop-policy-instance-and-base-extension-evidence.md	0	True
+E2121-blocking	gh api --paginate 'repos/Newchanlun/NewChanlun/issues/2121/dependencies/blocking?per_page=100' --jq '.[]|[.number,.state,.title]|@tsv'	0	True
+E2121-blocked_by	gh api --paginate 'repos/Newchanlun/NewChanlun/issues/2121/dependencies/blocked_by?per_page=100' --jq '.[]|[.number,.state,.title]|@tsv'	0	True
+E1441-blocking	gh api --paginate 'repos/Newchanlun/NewChanlun/issues/1441/dependencies/blocking?per_page=100' --jq '.[]|[.number,.state,.title]|@tsv'	0	True
+E1441-blocked_by	gh api --paginate 'repos/Newchanlun/NewChanlun/issues/1441/dependencies/blocked_by?per_page=100' --jq '.[]|[.number,.state,.title]|@tsv'	0	True
+E2111-blocking	gh api --paginate 'repos/Newchanlun/NewChanlun/issues/2111/dependencies/blocking?per_page=100' --jq '.[]|[.number,.state,.title]|@tsv'	0	True
+E2111-blocked_by	gh api --paginate 'repos/Newchanlun/NewChanlun/issues/2111/dependencies/blocked_by?per_page=100' --jq '.[]|[.number,.state,.title]|@tsv'	0	True
+E1360-blocking	gh api --paginate 'repos/Newchanlun/NewChanlun/issues/1360/dependencies/blocking?per_page=100' --jq '.[]|[.number,.state,.title]|@tsv'	0	True
+E1360-blocked_by	gh api --paginate 'repos/Newchanlun/NewChanlun/issues/1360/dependencies/blocked_by?per_page=100' --jq '.[]|[.number,.state,.title]|@tsv'	0	True
+E1366-blocking	gh api --paginate 'repos/Newchanlun/NewChanlun/issues/1366/dependencies/blocking?per_page=100' --jq '.[]|[.number,.state,.title]|@tsv'	0	True
+E1366-blocked_by	gh api --paginate 'repos/Newchanlun/NewChanlun/issues/1366/dependencies/blocked_by?per_page=100' --jq '.[]|[.number,.state,.title]|@tsv'	0	True
+E1367-blocking	gh api --paginate 'repos/Newchanlun/NewChanlun/issues/1367/dependencies/blocking?per_page=100' --jq '.[]|[.number,.state,.title]|@tsv'	0	True
+E1367-blocked_by	gh api --paginate 'repos/Newchanlun/NewChanlun/issues/1367/dependencies/blocked_by?per_page=100' --jq '.[]|[.number,.state,.title]|@tsv'	0	True

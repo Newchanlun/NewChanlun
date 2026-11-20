@@ -1,0 +1,552 @@
+ticket	ref	matching_paragraphs	exact_locator	disposition
+390	body	11,12,13,26	https://github.com/Newchanlun/NewChanlun/issues/390	验收口径唯一性与统计标注祖先；不定义本门波幅
+390	comment	-	https://github.com/Newchanlun/NewChanlun/issues/390#issuecomment-5093572697	验收口径唯一性与统计标注祖先；不定义本门波幅
+390	comment	-	https://github.com/Newchanlun/NewChanlun/issues/390#issuecomment-5094451561	验收口径唯一性与统计标注祖先；不定义本门波幅
+395	body	-	https://github.com/Newchanlun/NewChanlun/issues/395	第二套验收口径的旧结论处置；不定义波幅估计
+395	comment	-	https://github.com/Newchanlun/NewChanlun/issues/395#issuecomment-5090722955	第二套验收口径的旧结论处置；不定义波幅估计
+395	comment	4,7	https://github.com/Newchanlun/NewChanlun/issues/395#issuecomment-5092844379	第二套验收口径的旧结论处置；不定义波幅估计
+395	comment	-	https://github.com/Newchanlun/NewChanlun/issues/395#issuecomment-5092879791	第二套验收口径的旧结论处置；不定义波幅估计
+399	body	17	https://github.com/Newchanlun/NewChanlun/issues/399	MAX_BARS 截窗 helper 复用；不是本门资格或 bootstrap
+399	comment	3	https://github.com/Newchanlun/NewChanlun/issues/399#issuecomment-5092880157	MAX_BARS 截窗 helper 复用；不是本门资格或 bootstrap
+399	comment	-	https://github.com/Newchanlun/NewChanlun/issues/399#issuecomment-5306026912	MAX_BARS 截窗 helper 复用；不是本门资格或 bootstrap
+424	body	8	https://github.com/Newchanlun/NewChanlun/issues/424	walkforward/oddeven 旧实验归档纠偏；无往返波幅 CI
+424	comment	-	https://github.com/Newchanlun/NewChanlun/issues/424#issuecomment-5093115884	walkforward/oddeven 旧实验归档纠偏；无往返波幅 CI
+443	body	51	https://github.com/Newchanlun/NewChanlun/issues/443	统计 provenance 与引用规范的历史先例；不是估计量
+443	comment	-	https://github.com/Newchanlun/NewChanlun/issues/443#issuecomment-5094169665	统计 provenance 与引用规范的历史先例；不是估计量
+443	comment	-	https://github.com/Newchanlun/NewChanlun/issues/443#issuecomment-5094172358	统计 provenance 与引用规范的历史先例；不是估计量
+443	comment	-	https://github.com/Newchanlun/NewChanlun/issues/443#issuecomment-5094194537	统计 provenance 与引用规范的历史先例；不是估计量
+443	comment	-	https://github.com/Newchanlun/NewChanlun/issues/443#issuecomment-5094448614	统计 provenance 与引用规范的历史先例；不是估计量
+579	body	-	https://github.com/Newchanlun/NewChanlun/issues/579	C 候选集变化与重算条件；不是重采样
+579	comment	3,5	https://github.com/Newchanlun/NewChanlun/issues/579#issuecomment-5109150326	C 候选集变化与重算条件；不是重采样
+731	body	-	https://github.com/Newchanlun/NewChanlun/issues/731	旧图的 L38 重算边界；不是波幅下界
+731	comment	6	https://github.com/Newchanlun/NewChanlun/issues/731#issuecomment-5302435197	旧图的 L38 重算边界；不是波幅下界
+787	body	130,141	https://github.com/Newchanlun/NewChanlun/issues/787	历史主图、#817/#907/#853 的分工；没有新增算法
+787	comment	-	https://github.com/Newchanlun/NewChanlun/issues/787#issuecomment-5136292903	历史主图、#817/#907/#853 的分工；没有新增算法
+787	comment	-	https://github.com/Newchanlun/NewChanlun/issues/787#issuecomment-5290129831	历史主图、#817/#907/#853 的分工；没有新增算法
+787	comment	-	https://github.com/Newchanlun/NewChanlun/issues/787#issuecomment-5328379747	历史主图、#817/#907/#853 的分工；没有新增算法
+799	body	-	https://github.com/Newchanlun/NewChanlun/issues/799	已裁收敛通则；禁备用档，不选估计量
+799	comment	-	https://github.com/Newchanlun/NewChanlun/issues/799#issuecomment-5136924234	已裁收敛通则；禁备用档，不选估计量
+799	comment	-	https://github.com/Newchanlun/NewChanlun/issues/799#issuecomment-5136937530	已裁收敛通则；禁备用档，不选估计量
+799	comment	-	https://github.com/Newchanlun/NewChanlun/issues/799#issuecomment-5137180859	已裁收敛通则；禁备用档，不选估计量
+799	comment	-	https://github.com/Newchanlun/NewChanlun/issues/799#issuecomment-5137200076	已裁收敛通则；禁备用档，不选估计量
+799	comment	-	https://github.com/Newchanlun/NewChanlun/issues/799#issuecomment-5137777812	已裁收敛通则；禁备用档，不选估计量
+799	comment	-	https://github.com/Newchanlun/NewChanlun/issues/799#issuecomment-5137931081	已裁收敛通则；禁备用档，不选估计量
+799	comment	-	https://github.com/Newchanlun/NewChanlun/issues/799#issuecomment-5137946539	已裁收敛通则；禁备用档，不选估计量
+799	comment	-	https://github.com/Newchanlun/NewChanlun/issues/799#issuecomment-5137991303	已裁收敛通则；禁备用档，不选估计量
+799	comment	-	https://github.com/Newchanlun/NewChanlun/issues/799#issuecomment-5138004315	已裁收敛通则；禁备用档，不选估计量
+799	comment	-	https://github.com/Newchanlun/NewChanlun/issues/799#issuecomment-5138056638	已裁收敛通则；禁备用档，不选估计量
+804	body	-	https://github.com/Newchanlun/NewChanlun/issues/804	已裁各级同判据；锁同输入同输出
+804	comment	-	https://github.com/Newchanlun/NewChanlun/issues/804#issuecomment-5138067184	已裁各级同判据；锁同输入同输出
+804	comment	-	https://github.com/Newchanlun/NewChanlun/issues/804#issuecomment-5138190089	已裁各级同判据；锁同输入同输出
+804	comment	-	https://github.com/Newchanlun/NewChanlun/issues/804#issuecomment-5138196151	已裁各级同判据；锁同输入同输出
+806	body	-	https://github.com/Newchanlun/NewChanlun/issues/806	递归方法论的适用范围；没有成本读数
+806	comment	16	https://github.com/Newchanlun/NewChanlun/issues/806#issuecomment-5137333804	递归方法论的适用范围；没有成本读数
+817	body	26	https://github.com/Newchanlun/NewChanlun/issues/817	教义正本来源，成本界、塔底与复测；统计细节转 #907
+817	comment	-	https://github.com/Newchanlun/NewChanlun/issues/817#issuecomment-5183267304	教义正本来源，成本界、塔底与复测；统计细节转 #907
+817	comment	-	https://github.com/Newchanlun/NewChanlun/issues/817#issuecomment-5184307743	教义正本来源，成本界、塔底与复测；统计细节转 #907
+817	comment	-	https://github.com/Newchanlun/NewChanlun/issues/817#issuecomment-5184427506	教义正本来源，成本界、塔底与复测；统计细节转 #907
+817	comment	9,10,24	https://github.com/Newchanlun/NewChanlun/issues/817#issuecomment-5186280546	教义正本来源，成本界、塔底与复测；统计细节转 #907
+817	comment	-	https://github.com/Newchanlun/NewChanlun/issues/817#issuecomment-5186396833	教义正本来源，成本界、塔底与复测；统计细节转 #907
+817	comment	-	https://github.com/Newchanlun/NewChanlun/issues/817#issuecomment-5186565830	教义正本来源，成本界、塔底与复测；统计细节转 #907
+817	comment	-	https://github.com/Newchanlun/NewChanlun/issues/817#issuecomment-5186584049	教义正本来源，成本界、塔底与复测；统计细节转 #907
+817	comment	-	https://github.com/Newchanlun/NewChanlun/issues/817#issuecomment-5186602852	教义正本来源，成本界、塔底与复测；统计细节转 #907
+817	comment	-	https://github.com/Newchanlun/NewChanlun/issues/817#issuecomment-5186615398	教义正本来源，成本界、塔底与复测；统计细节转 #907
+817	comment	-	https://github.com/Newchanlun/NewChanlun/issues/817#issuecomment-5186791446	教义正本来源，成本界、塔底与复测；统计细节转 #907
+817	comment	-	https://github.com/Newchanlun/NewChanlun/issues/817#issuecomment-5187857124	教义正本来源，成本界、塔底与复测；统计细节转 #907
+817	comment	-	https://github.com/Newchanlun/NewChanlun/issues/817#issuecomment-5193680699	教义正本来源，成本界、塔底与复测；统计细节转 #907
+817	comment	-	https://github.com/Newchanlun/NewChanlun/issues/817#issuecomment-5193950348	教义正本来源，成本界、塔底与复测；统计细节转 #907
+817	comment	-	https://github.com/Newchanlun/NewChanlun/issues/817#issuecomment-5194297826	教义正本来源，成本界、塔底与复测；统计细节转 #907
+833	body	-	https://github.com/Newchanlun/NewChanlun/issues/833	成本／筹码与 Sharpe 的目标差别；不定义 A_ℓ
+833	comment	-	https://github.com/Newchanlun/NewChanlun/issues/833#issuecomment-5160791296	成本／筹码与 Sharpe 的目标差别；不定义 A_ℓ
+844	body	-	https://github.com/Newchanlun/NewChanlun/issues/844	旧赋格资产索引；振幅是策略凑手边界或引用线索
+844	comment	-	https://github.com/Newchanlun/NewChanlun/issues/844#issuecomment-5153942265	旧赋格资产索引；振幅是策略凑手边界或引用线索
+847	body	74	https://github.com/Newchanlun/NewChanlun/issues/847	旧统一架构结构与统计实施 SPEC；没有本波幅方法
+847	comment	-	https://github.com/Newchanlun/NewChanlun/issues/847#issuecomment-5173336943	旧统一架构结构与统计实施 SPEC；没有本波幅方法
+847	comment	-	https://github.com/Newchanlun/NewChanlun/issues/847#issuecomment-5173372177	旧统一架构结构与统计实施 SPEC；没有本波幅方法
+847	comment	-	https://github.com/Newchanlun/NewChanlun/issues/847#issuecomment-5173431775	旧统一架构结构与统计实施 SPEC；没有本波幅方法
+847	comment	-	https://github.com/Newchanlun/NewChanlun/issues/847#issuecomment-5173793832	旧统一架构结构与统计实施 SPEC；没有本波幅方法
+847	comment	-	https://github.com/Newchanlun/NewChanlun/issues/847#issuecomment-5173808087	旧统一架构结构与统计实施 SPEC；没有本波幅方法
+847	comment	1	https://github.com/Newchanlun/NewChanlun/issues/847#issuecomment-5289199740	旧统一架构结构与统计实施 SPEC；没有本波幅方法
+847	comment	-	https://github.com/Newchanlun/NewChanlun/issues/847#issuecomment-5289597792	旧统一架构结构与统计实施 SPEC；没有本波幅方法
+847	comment	-	https://github.com/Newchanlun/NewChanlun/issues/847#issuecomment-5326941331	旧统一架构结构与统计实施 SPEC；没有本波幅方法
+852	body	-	https://github.com/Newchanlun/NewChanlun/issues/852	到底／下钻失败分类和聚簇先例；不同事件/分母
+852	comment	-	https://github.com/Newchanlun/NewChanlun/issues/852#issuecomment-5160490254	到底／下钻失败分类和聚簇先例；不同事件/分母
+853	body	15	https://github.com/Newchanlun/NewChanlun/issues/853	ADR 0022 速率的时间块和证据门；可继承窗口纪律，不继承估计量
+853	comment	-	https://github.com/Newchanlun/NewChanlun/issues/853#issuecomment-5221780534	ADR 0022 速率的时间块和证据门；可继承窗口纪律，不继承估计量
+853	comment	6	https://github.com/Newchanlun/NewChanlun/issues/853#issuecomment-5224634834	ADR 0022 速率的时间块和证据门；可继承窗口纪律，不继承估计量
+853	comment	3	https://github.com/Newchanlun/NewChanlun/issues/853#issuecomment-5289198250	ADR 0022 速率的时间块和证据门；可继承窗口纪律，不继承估计量
+854	body	-	https://github.com/Newchanlun/NewChanlun/issues/854	力度与背驰主图；不是成本准入
+854	comment	-	https://github.com/Newchanlun/NewChanlun/issues/854#issuecomment-5161947025	力度与背驰主图；不是成本准入
+854	comment	-	https://github.com/Newchanlun/NewChanlun/issues/854#issuecomment-5161947089	力度与背驰主图；不是成本准入
+854	comment	-	https://github.com/Newchanlun/NewChanlun/issues/854#issuecomment-5173843543	力度与背驰主图；不是成本准入
+854	comment	-	https://github.com/Newchanlun/NewChanlun/issues/854#issuecomment-5173843653	力度与背驰主图；不是成本准入
+859	body	-	https://github.com/Newchanlun/NewChanlun/issues/859	中枢停留级别与中枢个数比重；与往返波幅无关
+859	comment	-	https://github.com/Newchanlun/NewChanlun/issues/859#issuecomment-5169672279	中枢停留级别与中枢个数比重；与往返波幅无关
+859	comment	-	https://github.com/Newchanlun/NewChanlun/issues/859#issuecomment-5170379474	中枢停留级别与中枢个数比重；与往返波幅无关
+872	body	-	https://github.com/Newchanlun/NewChanlun/issues/872	力度映射与 Lean Rat；不是波幅显著性
+872	comment	-	https://github.com/Newchanlun/NewChanlun/issues/872#issuecomment-5170435746	力度映射与 Lean Rat；不是波幅显著性
+872	comment	-	https://github.com/Newchanlun/NewChanlun/issues/872#issuecomment-5171643222	力度映射与 Lean Rat；不是波幅显著性
+872	comment	-	https://github.com/Newchanlun/NewChanlun/issues/872#issuecomment-5299941265	力度映射与 Lean Rat；不是波幅显著性
+872	comment	-	https://github.com/Newchanlun/NewChanlun/issues/872#issuecomment-5299943402	力度映射与 Lean Rat；不是波幅显著性
+872	comment	-	https://github.com/Newchanlun/NewChanlun/issues/872#issuecomment-5301269330	力度映射与 Lean Rat；不是波幅显著性
+907	body	3,7,12,18,20	https://github.com/Newchanlun/NewChanlun/issues/907	已裁 ROUNDTRIP；点估计、归桶和补区间建议，未跑 bootstrap
+907	comment	12	https://github.com/Newchanlun/NewChanlun/issues/907#issuecomment-5188662599	已裁 ROUNDTRIP；点估计、归桶和补区间建议，未跑 bootstrap
+907	comment	5,6,7,9,10,13,19,26	https://github.com/Newchanlun/NewChanlun/issues/907#issuecomment-5194145006	已裁 ROUNDTRIP；点估计、归桶和补区间建议，未跑 bootstrap
+911	body	-	https://github.com/Newchanlun/NewChanlun/issues/911	N-6 下钻链长度的窗口判例；不是 A_ℓ 的采样统计
+911	comment	-	https://github.com/Newchanlun/NewChanlun/issues/911#issuecomment-5194288842	N-6 下钻链长度的窗口判例；不是 A_ℓ 的采样统计
+914	body	-	https://github.com/Newchanlun/NewChanlun/issues/914	触发量档和配额；不把容量的 A_ℓ 当成本波幅置信界
+914	comment	4,11	https://github.com/Newchanlun/NewChanlun/issues/914#issuecomment-5209309682	触发量档和配额；不把容量的 A_ℓ 当成本波幅置信界
+915	body	15,21,22,27	https://github.com/Newchanlun/NewChanlun/issues/915	跨标的容量/频率及 ROUNDTRIP 中位点估计先例；无 CI
+915	comment	36	https://github.com/Newchanlun/NewChanlun/issues/915#issuecomment-5199952807	跨标的容量/频率及 ROUNDTRIP 中位点估计先例；无 CI
+915	comment	11,16,21	https://github.com/Newchanlun/NewChanlun/issues/915#issuecomment-5209250256	跨标的容量/频率及 ROUNDTRIP 中位点估计先例；无 CI
+917	body	13	https://github.com/Newchanlun/NewChanlun/issues/917	冲击方程、容量代理与数据可得性；不是置信界
+917	comment	10,11,13,17,20,31,34	https://github.com/Newchanlun/NewChanlun/issues/917#issuecomment-5199839236	冲击方程、容量代理与数据可得性；不是置信界
+925	body	12,24	https://github.com/Newchanlun/NewChanlun/issues/925	λ 的容量与持有时间比；引用点读数，不定义 A_ℓ 的下界
+925	comment	10	https://github.com/Newchanlun/NewChanlun/issues/925#issuecomment-5222542549	λ 的容量与持有时间比；引用点读数，不定义 A_ℓ 的下界
+962	body	-	https://github.com/Newchanlun/NewChanlun/issues/962	冲击 OCR 材料；不是月块统计
+962	comment	-	https://github.com/Newchanlun/NewChanlun/issues/962#issuecomment-5292052810	冲击 OCR 材料；不是月块统计
+1004	body	2	https://github.com/Newchanlun/NewChanlun/issues/1004	镜像 venv 的 bootstrap 指自举环境
+1004	comment	3,4	https://github.com/Newchanlun/NewChanlun/issues/1004#issuecomment-5306874611	镜像 venv 的 bootstrap 指自举环境
+1077	body	-	https://github.com/Newchanlun/NewChanlun/issues/1077	候选架构搭建与扫描验收；不是统计下界
+1077	comment	-	https://github.com/Newchanlun/NewChanlun/issues/1077#issuecomment-5397564032	候选架构搭建与扫描验收；不是统计下界
+1116	body	-	https://github.com/Newchanlun/NewChanlun/issues/1116	S_net 缓存格式；无波幅下界
+1116	comment	-	https://github.com/Newchanlun/NewChanlun/issues/1116#issuecomment-5349489483	S_net 缓存格式；无波幅下界
+1116	comment	-	https://github.com/Newchanlun/NewChanlun/issues/1116#issuecomment-5349543830	S_net 缓存格式；无波幅下界
+1116	comment	-	https://github.com/Newchanlun/NewChanlun/issues/1116#issuecomment-5349546791	S_net 缓存格式；无波幅下界
+1116	comment	-	https://github.com/Newchanlun/NewChanlun/issues/1116#issuecomment-5350054983	S_net 缓存格式；无波幅下界
+1116	comment	7	https://github.com/Newchanlun/NewChanlun/issues/1116#issuecomment-5350126489	S_net 缓存格式；无波幅下界
+1116	comment	-	https://github.com/Newchanlun/NewChanlun/issues/1116#issuecomment-5350134010	S_net 缓存格式；无波幅下界
+1116	comment	-	https://github.com/Newchanlun/NewChanlun/issues/1116#issuecomment-5350267276	S_net 缓存格式；无波幅下界
+1116	comment	-	https://github.com/Newchanlun/NewChanlun/issues/1116#issuecomment-5350323017	S_net 缓存格式；无波幅下界
+1116	comment	-	https://github.com/Newchanlun/NewChanlun/issues/1116#issuecomment-5350326689	S_net 缓存格式；无波幅下界
+1116	comment	-	https://github.com/Newchanlun/NewChanlun/issues/1116#issuecomment-5350597006	S_net 缓存格式；无波幅下界
+1116	comment	-	https://github.com/Newchanlun/NewChanlun/issues/1116#issuecomment-5350612061	S_net 缓存格式；无波幅下界
+1173	body	-	https://github.com/Newchanlun/NewChanlun/issues/1173	Sandcastle 冒烟与引导；无统计方法
+1173	comment	-	https://github.com/Newchanlun/NewChanlun/issues/1173#issuecomment-5382031478	Sandcastle 冒烟与引导；无统计方法
+1173	comment	-	https://github.com/Newchanlun/NewChanlun/issues/1173#issuecomment-5382036327	Sandcastle 冒烟与引导；无统计方法
+1173	comment	-	https://github.com/Newchanlun/NewChanlun/issues/1173#issuecomment-5382058124	Sandcastle 冒烟与引导；无统计方法
+1173	comment	-	https://github.com/Newchanlun/NewChanlun/issues/1173#issuecomment-5382290400	Sandcastle 冒烟与引导；无统计方法
+1173	comment	3,5	https://github.com/Newchanlun/NewChanlun/issues/1173#issuecomment-5382602624	Sandcastle 冒烟与引导；无统计方法
+1173	comment	-	https://github.com/Newchanlun/NewChanlun/issues/1173#issuecomment-5382629981	Sandcastle 冒烟与引导；无统计方法
+1173	comment	-	https://github.com/Newchanlun/NewChanlun/issues/1173#issuecomment-5382720331	Sandcastle 冒烟与引导；无统计方法
+1173	comment	-	https://github.com/Newchanlun/NewChanlun/issues/1173#issuecomment-5382723948	Sandcastle 冒烟与引导；无统计方法
+1173	comment	-	https://github.com/Newchanlun/NewChanlun/issues/1173#issuecomment-5382768220	Sandcastle 冒烟与引导；无统计方法
+1173	comment	-	https://github.com/Newchanlun/NewChanlun/issues/1173#issuecomment-5382800571	Sandcastle 冒烟与引导；无统计方法
+1173	comment	-	https://github.com/Newchanlun/NewChanlun/issues/1173#issuecomment-5382839389	Sandcastle 冒烟与引导；无统计方法
+1173	comment	3	https://github.com/Newchanlun/NewChanlun/issues/1173#issuecomment-5383069095	Sandcastle 冒烟与引导；无统计方法
+1173	comment	-	https://github.com/Newchanlun/NewChanlun/issues/1173#issuecomment-5383207358	Sandcastle 冒烟与引导；无统计方法
+1173	comment	-	https://github.com/Newchanlun/NewChanlun/issues/1173#issuecomment-5385172053	Sandcastle 冒烟与引导；无统计方法
+1173	comment	-	https://github.com/Newchanlun/NewChanlun/issues/1173#issuecomment-5385341381	Sandcastle 冒烟与引导；无统计方法
+1173	comment	4	https://github.com/Newchanlun/NewChanlun/issues/1173#issuecomment-5386465887	Sandcastle 冒烟与引导；无统计方法
+1173	comment	-	https://github.com/Newchanlun/NewChanlun/issues/1173#issuecomment-5388107542	Sandcastle 冒烟与引导；无统计方法
+1173	comment	-	https://github.com/Newchanlun/NewChanlun/issues/1173#issuecomment-5388769331	Sandcastle 冒烟与引导；无统计方法
+1309	body	-	https://github.com/Newchanlun/NewChanlun/issues/1309	多空对称实验的预注册交易绩效；不是本门证据
+1309	comment	3	https://github.com/Newchanlun/NewChanlun/issues/1309#issuecomment-5465288905	多空对称实验的预注册交易绩效；不是本门证据
+1309	comment	-	https://github.com/Newchanlun/NewChanlun/issues/1309#issuecomment-5465293147	多空对称实验的预注册交易绩效；不是本门证据
+1309	comment	-	https://github.com/Newchanlun/NewChanlun/issues/1309#issuecomment-5465374305	多空对称实验的预注册交易绩效；不是本门证据
+1309	comment	-	https://github.com/Newchanlun/NewChanlun/issues/1309#issuecomment-5465517122	多空对称实验的预注册交易绩效；不是本门证据
+1309	comment	-	https://github.com/Newchanlun/NewChanlun/issues/1309#issuecomment-5466854430	多空对称实验的预注册交易绩效；不是本门证据
+1317	body	-	https://github.com/Newchanlun/NewChanlun/issues/1317	历史回放预注册绩效与旧机制；未决本门估计量
+1317	comment	10	https://github.com/Newchanlun/NewChanlun/issues/1317#issuecomment-5475779628	历史回放预注册绩效与旧机制；未决本门估计量
+1317	comment	-	https://github.com/Newchanlun/NewChanlun/issues/1317#issuecomment-5478190155	历史回放预注册绩效与旧机制；未决本门估计量
+1323	body	31,60,72,74,75	https://github.com/Newchanlun/NewChanlun/issues/1323	主图目的与资金签署边界；不推出方法
+1323	comment	-	https://github.com/Newchanlun/NewChanlun/issues/1323#issuecomment-5501786480	主图目的与资金签署边界；不推出方法
+1323	comment	-	https://github.com/Newchanlun/NewChanlun/issues/1323#issuecomment-5502243868	主图目的与资金签署边界；不推出方法
+1323	comment	-	https://github.com/Newchanlun/NewChanlun/issues/1323#issuecomment-5503812952	主图目的与资金签署边界；不推出方法
+1323	comment	-	https://github.com/Newchanlun/NewChanlun/issues/1323#issuecomment-5509410924	主图目的与资金签署边界；不推出方法
+1323	comment	-	https://github.com/Newchanlun/NewChanlun/issues/1323#issuecomment-5509601124	主图目的与资金签署边界；不推出方法
+1323	comment	-	https://github.com/Newchanlun/NewChanlun/issues/1323#issuecomment-6097139810	主图目的与资金签署边界；不推出方法
+1323	comment	-	https://github.com/Newchanlun/NewChanlun/issues/1323#issuecomment-6097204211	主图目的与资金签署边界；不推出方法
+1323	comment	-	https://github.com/Newchanlun/NewChanlun/issues/1323#issuecomment-6242783141	主图目的与资金签署边界；不推出方法
+1323	comment	-	https://github.com/Newchanlun/NewChanlun/issues/1323#issuecomment-6243351822	主图目的与资金签署边界；不推出方法
+1323	comment	-	https://github.com/Newchanlun/NewChanlun/issues/1323#issuecomment-6245322989	主图目的与资金签署边界；不推出方法
+1323	comment	-	https://github.com/Newchanlun/NewChanlun/issues/1323#issuecomment-6245534516	主图目的与资金签署边界；不推出方法
+1323	comment	-	https://github.com/Newchanlun/NewChanlun/issues/1323#issuecomment-6245810273	主图目的与资金签署边界；不推出方法
+1323	comment	-	https://github.com/Newchanlun/NewChanlun/issues/1323#issuecomment-6261281111	主图目的与资金签署边界；不推出方法
+1323	comment	-	https://github.com/Newchanlun/NewChanlun/issues/1323#issuecomment-6262399178	主图目的与资金签署边界；不推出方法
+1323	comment	-	https://github.com/Newchanlun/NewChanlun/issues/1323#issuecomment-6262888639	主图目的与资金签署边界；不推出方法
+1323	comment	4	https://github.com/Newchanlun/NewChanlun/issues/1323#issuecomment-6263227971	主图目的与资金签署边界；不推出方法
+1323	comment	-	https://github.com/Newchanlun/NewChanlun/issues/1323#issuecomment-6278168950	主图目的与资金签署边界；不推出方法
+1323	comment	-	https://github.com/Newchanlun/NewChanlun/issues/1323#issuecomment-6308001064	主图目的与资金签署边界；不推出方法
+1323	comment	-	https://github.com/Newchanlun/NewChanlun/issues/1323#issuecomment-6310866929	主图目的与资金签署边界；不推出方法
+1323	comment	-	https://github.com/Newchanlun/NewChanlun/issues/1323#issuecomment-6314408873	主图目的与资金签署边界；不推出方法
+1323	comment	2	https://github.com/Newchanlun/NewChanlun/issues/1323#issuecomment-6315092704	主图目的与资金签署边界；不推出方法
+1323	comment	-	https://github.com/Newchanlun/NewChanlun/issues/1323#issuecomment-6364039269	主图目的与资金签署边界；不推出方法
+1323	comment	-	https://github.com/Newchanlun/NewChanlun/issues/1323#issuecomment-6364972970	主图目的与资金签署边界；不推出方法
+1323	comment	-	https://github.com/Newchanlun/NewChanlun/issues/1323#issuecomment-6365671466	主图目的与资金签署边界；不推出方法
+1323	comment	-	https://github.com/Newchanlun/NewChanlun/issues/1323#issuecomment-6366565974	主图目的与资金签署边界；不推出方法
+1323	comment	-	https://github.com/Newchanlun/NewChanlun/issues/1323#issuecomment-6366895698	主图目的与资金签署边界；不推出方法
+1323	comment	-	https://github.com/Newchanlun/NewChanlun/issues/1323#issuecomment-6367856736	主图目的与资金签署边界；不推出方法
+1323	comment	-	https://github.com/Newchanlun/NewChanlun/issues/1323#issuecomment-6367935142	主图目的与资金签署边界；不推出方法
+1323	comment	-	https://github.com/Newchanlun/NewChanlun/issues/1323#issuecomment-6367991827	主图目的与资金签署边界；不推出方法
+1323	comment	-	https://github.com/Newchanlun/NewChanlun/issues/1323#issuecomment-6368201827	主图目的与资金签署边界；不推出方法
+1323	comment	-	https://github.com/Newchanlun/NewChanlun/issues/1323#issuecomment-6381454059	主图目的与资金签署边界；不推出方法
+1323	comment	-	https://github.com/Newchanlun/NewChanlun/issues/1323#issuecomment-6391096420	主图目的与资金签署边界；不推出方法
+1323	comment	-	https://github.com/Newchanlun/NewChanlun/issues/1323#issuecomment-6396406667	主图目的与资金签署边界；不推出方法
+1323	comment	-	https://github.com/Newchanlun/NewChanlun/issues/1323#issuecomment-6398195678	主图目的与资金签署边界；不推出方法
+1323	comment	-	https://github.com/Newchanlun/NewChanlun/issues/1323#issuecomment-6399588932	主图目的与资金签署边界；不推出方法
+1323	comment	-	https://github.com/Newchanlun/NewChanlun/issues/1323#issuecomment-6403196095	主图目的与资金签署边界；不推出方法
+1323	comment	-	https://github.com/Newchanlun/NewChanlun/issues/1323#issuecomment-6502279467	主图目的与资金签署边界；不推出方法
+1323	comment	-	https://github.com/Newchanlun/NewChanlun/issues/1323#issuecomment-6701586841	主图目的与资金签署边界；不推出方法
+1323	comment	-	https://github.com/Newchanlun/NewChanlun/issues/1323#issuecomment-7001625986	主图目的与资金签署边界；不推出方法
+1323	comment	7	https://github.com/Newchanlun/NewChanlun/issues/1323#issuecomment-7041689736	主图目的与资金签署边界；不推出方法
+1340	body	54,86,119,123,146,152,176	https://github.com/Newchanlun/NewChanlun/issues/1340	SPEC R2 的 TB-02-S 验收；消费已裁 policy，不定 A_ℓ 算法
+1340	comment	-	https://github.com/Newchanlun/NewChanlun/issues/1340#issuecomment-5596948167	SPEC R2 的 TB-02-S 验收；消费已裁 policy，不定 A_ℓ 算法
+1340	comment	-	https://github.com/Newchanlun/NewChanlun/issues/1340#issuecomment-6226369555	SPEC R2 的 TB-02-S 验收；消费已裁 policy，不定 A_ℓ 算法
+1340	comment	-	https://github.com/Newchanlun/NewChanlun/issues/1340#issuecomment-6248212744	SPEC R2 的 TB-02-S 验收；消费已裁 policy，不定 A_ℓ 算法
+1340	comment	-	https://github.com/Newchanlun/NewChanlun/issues/1340#issuecomment-6283989787	SPEC R2 的 TB-02-S 验收；消费已裁 policy，不定 A_ℓ 算法
+1340	comment	-	https://github.com/Newchanlun/NewChanlun/issues/1340#issuecomment-6308972964	SPEC R2 的 TB-02-S 验收；消费已裁 policy，不定 A_ℓ 算法
+1340	comment	1	https://github.com/Newchanlun/NewChanlun/issues/1340#issuecomment-6403536453	SPEC R2 的 TB-02-S 验收；消费已裁 policy，不定 A_ℓ 算法
+1340	comment	-	https://github.com/Newchanlun/NewChanlun/issues/1340#issuecomment-6403879801	SPEC R2 的 TB-02-S 验收；消费已裁 policy，不定 A_ℓ 算法
+1340	comment	-	https://github.com/Newchanlun/NewChanlun/issues/1340#issuecomment-6403926843	SPEC R2 的 TB-02-S 验收；消费已裁 policy，不定 A_ℓ 算法
+1340	comment	-	https://github.com/Newchanlun/NewChanlun/issues/1340#issuecomment-7041649508	SPEC R2 的 TB-02-S 验收；消费已裁 policy，不定 A_ℓ 算法
+1354	body	6,8,18	https://github.com/Newchanlun/NewChanlun/issues/1354	ADR 0035 初裁；配对、下界、门、四态分开，无估计量与重采样细节
+1354	comment	2,3	https://github.com/Newchanlun/NewChanlun/issues/1354#issuecomment-6153713798	ADR 0035 初裁；配对、下界、门、四态分开，无估计量与重采样细节
+1355	body	-	https://github.com/Newchanlun/NewChanlun/issues/1355	容量和量档；波幅处是容量代理，不是成本门统计
+1355	comment	2	https://github.com/Newchanlun/NewChanlun/issues/1355#issuecomment-6153710637	容量和量档；波幅处是容量代理，不是成本门统计
+1356	body	6,13	https://github.com/Newchanlun/NewChanlun/issues/1356	经营操作样本的事件合格口径；不同事件，不改其定义
+1356	comment	2	https://github.com/Newchanlun/NewChanlun/issues/1356#issuecomment-6153715166	经营操作样本的事件合格口径；不同事件，不改其定义
+1357	body	-	https://github.com/Newchanlun/NewChanlun/issues/1357	固定 Q 的换档、会计衔接；不是波幅方程
+1357	comment	2	https://github.com/Newchanlun/NewChanlun/issues/1357#issuecomment-6153712139	固定 Q 的换档、会计衔接；不是波幅方程
+1358	body	-	https://github.com/Newchanlun/NewChanlun/issues/1358	首次触闸后的净头寸评价；另一判据
+1358	comment	2	https://github.com/Newchanlun/NewChanlun/issues/1358#issuecomment-6153716650	首次触闸后的净头寸评价；另一判据
+1358	comment	-	https://github.com/Newchanlun/NewChanlun/issues/1358#issuecomment-6482760900	首次触闸后的净头寸评价；另一判据
+1359	body	-	https://github.com/Newchanlun/NewChanlun/issues/1359	已关闭 TB-01 结构/观察前置；不定估计量
+1359	comment	-	https://github.com/Newchanlun/NewChanlun/issues/1359#issuecomment-5596948782	已关闭 TB-01 结构/观察前置；不定估计量
+1359	comment	-	https://github.com/Newchanlun/NewChanlun/issues/1359#issuecomment-5653549133	已关闭 TB-01 结构/观察前置；不定估计量
+1360	body	-	https://github.com/Newchanlun/NewChanlun/issues/1360	本票及 #1441 父汇总；不改边
+1360	comment	-	https://github.com/Newchanlun/NewChanlun/issues/1360#issuecomment-5596949206	本票及 #1441 父汇总；不改边
+1360	comment	-	https://github.com/Newchanlun/NewChanlun/issues/1360#issuecomment-6027575268	本票及 #1441 父汇总；不改边
+1360	comment	-	https://github.com/Newchanlun/NewChanlun/issues/1360#issuecomment-6117546729	本票及 #1441 父汇总；不改边
+1360	comment	-	https://github.com/Newchanlun/NewChanlun/issues/1360#issuecomment-6404225320	本票及 #1441 父汇总；不改边
+1366	body	-	https://github.com/Newchanlun/NewChanlun/issues/1366	完整历史与恢复，旧证据沿版本回放；不改验收
+1366	comment	-	https://github.com/Newchanlun/NewChanlun/issues/1366#issuecomment-5596952172	完整历史与恢复，旧证据沿版本回放；不改验收
+1366	comment	-	https://github.com/Newchanlun/NewChanlun/issues/1366#issuecomment-6245990224	完整历史与恢复，旧证据沿版本回放；不改验收
+1367	body	-	https://github.com/Newchanlun/NewChanlun/issues/1367	场所与 TB-08 成本来源，非波幅方法 owner
+1367	comment	-	https://github.com/Newchanlun/NewChanlun/issues/1367#issuecomment-5596952705	场所与 TB-08 成本来源，非波幅方法 owner
+1382	body	-	https://github.com/Newchanlun/NewChanlun/issues/1382	TB-08 成本证据支线；提供来源不选波幅方法
+1382	comment	-	https://github.com/Newchanlun/NewChanlun/issues/1382#issuecomment-6403917562	TB-08 成本证据支线；提供来源不选波幅方法
+1382	comment	-	https://github.com/Newchanlun/NewChanlun/issues/1382#issuecomment-6405903436	TB-08 成本证据支线；提供来源不选波幅方法
+1382	comment	-	https://github.com/Newchanlun/NewChanlun/issues/1382#issuecomment-6472268892	TB-08 成本证据支线；提供来源不选波幅方法
+1382	comment	-	https://github.com/Newchanlun/NewChanlun/issues/1382#issuecomment-6483602060	TB-08 成本证据支线；提供来源不选波幅方法
+1382	comment	-	https://github.com/Newchanlun/NewChanlun/issues/1382#issuecomment-6690356791	TB-08 成本证据支线；提供来源不选波幅方法
+1394	body	-	https://github.com/Newchanlun/NewChanlun/issues/1394	财务与持久边界，#1441 借编译负例体例；不是算法
+1394	comment	-	https://github.com/Newchanlun/NewChanlun/issues/1394#issuecomment-6090179596	财务与持久边界，#1441 借编译负例体例；不是算法
+1394	comment	-	https://github.com/Newchanlun/NewChanlun/issues/1394#issuecomment-6097391201	财务与持久边界，#1441 借编译负例体例；不是算法
+1394	comment	-	https://github.com/Newchanlun/NewChanlun/issues/1394#issuecomment-6103204215	财务与持久边界，#1441 借编译负例体例；不是算法
+1394	comment	-	https://github.com/Newchanlun/NewChanlun/issues/1394#issuecomment-6103219595	财务与持久边界，#1441 借编译负例体例；不是算法
+1394	comment	-	https://github.com/Newchanlun/NewChanlun/issues/1394#issuecomment-6103247514	财务与持久边界，#1441 借编译负例体例；不是算法
+1394	comment	4	https://github.com/Newchanlun/NewChanlun/issues/1394#issuecomment-6103556714	财务与持久边界，#1441 借编译负例体例；不是算法
+1394	comment	-	https://github.com/Newchanlun/NewChanlun/issues/1394#issuecomment-6113981376	财务与持久边界，#1441 借编译负例体例；不是算法
+1394	comment	-	https://github.com/Newchanlun/NewChanlun/issues/1394#issuecomment-6116542024	财务与持久边界，#1441 借编译负例体例；不是算法
+1394	comment	-	https://github.com/Newchanlun/NewChanlun/issues/1394#issuecomment-6153728414	财务与持久边界，#1441 借编译负例体例；不是算法
+1394	comment	-	https://github.com/Newchanlun/NewChanlun/issues/1394#issuecomment-6234296035	财务与持久边界，#1441 借编译负例体例；不是算法
+1394	comment	-	https://github.com/Newchanlun/NewChanlun/issues/1394#issuecomment-6244940174	财务与持久边界，#1441 借编译负例体例；不是算法
+1394	comment	-	https://github.com/Newchanlun/NewChanlun/issues/1394#issuecomment-6245139663	财务与持久边界，#1441 借编译负例体例；不是算法
+1394	comment	-	https://github.com/Newchanlun/NewChanlun/issues/1394#issuecomment-6245227321	财务与持久边界，#1441 借编译负例体例；不是算法
+1394	comment	-	https://github.com/Newchanlun/NewChanlun/issues/1394#issuecomment-6245343437	财务与持久边界，#1441 借编译负例体例；不是算法
+1394	comment	-	https://github.com/Newchanlun/NewChanlun/issues/1394#issuecomment-6246198440	财务与持久边界，#1441 借编译负例体例；不是算法
+1394	comment	-	https://github.com/Newchanlun/NewChanlun/issues/1394#issuecomment-6246761895	财务与持久边界，#1441 借编译负例体例；不是算法
+1394	comment	-	https://github.com/Newchanlun/NewChanlun/issues/1394#issuecomment-6247164429	财务与持久边界，#1441 借编译负例体例；不是算法
+1394	comment	-	https://github.com/Newchanlun/NewChanlun/issues/1394#issuecomment-6262469214	财务与持久边界，#1441 借编译负例体例；不是算法
+1394	comment	-	https://github.com/Newchanlun/NewChanlun/issues/1394#issuecomment-6262511139	财务与持久边界，#1441 借编译负例体例；不是算法
+1394	comment	-	https://github.com/Newchanlun/NewChanlun/issues/1394#issuecomment-6262520827	财务与持久边界，#1441 借编译负例体例；不是算法
+1394	comment	-	https://github.com/Newchanlun/NewChanlun/issues/1394#issuecomment-6262677937	财务与持久边界，#1441 借编译负例体例；不是算法
+1394	comment	-	https://github.com/Newchanlun/NewChanlun/issues/1394#issuecomment-6262742173	财务与持久边界，#1441 借编译负例体例；不是算法
+1394	comment	-	https://github.com/Newchanlun/NewChanlun/issues/1394#issuecomment-6262745122	财务与持久边界，#1441 借编译负例体例；不是算法
+1394	comment	-	https://github.com/Newchanlun/NewChanlun/issues/1394#issuecomment-6262851762	财务与持久边界，#1441 借编译负例体例；不是算法
+1394	comment	-	https://github.com/Newchanlun/NewChanlun/issues/1394#issuecomment-6263036435	财务与持久边界，#1441 借编译负例体例；不是算法
+1394	comment	-	https://github.com/Newchanlun/NewChanlun/issues/1394#issuecomment-6278559427	财务与持久边界，#1441 借编译负例体例；不是算法
+1394	comment	-	https://github.com/Newchanlun/NewChanlun/issues/1394#issuecomment-6283430332	财务与持久边界，#1441 借编译负例体例；不是算法
+1394	comment	-	https://github.com/Newchanlun/NewChanlun/issues/1394#issuecomment-6284766661	财务与持久边界，#1441 借编译负例体例；不是算法
+1394	comment	-	https://github.com/Newchanlun/NewChanlun/issues/1394#issuecomment-6317099095	财务与持久边界，#1441 借编译负例体例；不是算法
+1398	body	6	https://github.com/Newchanlun/NewChanlun/issues/1398	TB-06-I 成本下降速率证据门；不是往返振幅统计
+1398	comment	-	https://github.com/Newchanlun/NewChanlun/issues/1398#issuecomment-6153729131	TB-06-I 成本下降速率证据门；不是往返振幅统计
+1398	comment	1	https://github.com/Newchanlun/NewChanlun/issues/1398#issuecomment-6326057540	TB-06-I 成本下降速率证据门；不是往返振幅统计
+1398	comment	-	https://github.com/Newchanlun/NewChanlun/issues/1398#issuecomment-6472281147	TB-06-I 成本下降速率证据门；不是往返振幅统计
+1400	body	-	https://github.com/Newchanlun/NewChanlun/issues/1400	TB-08 场所成本来源支线；不选波幅方法
+1400	comment	-	https://github.com/Newchanlun/NewChanlun/issues/1400#issuecomment-6405905587	TB-08 场所成本来源支线；不选波幅方法
+1400	comment	-	https://github.com/Newchanlun/NewChanlun/issues/1400#issuecomment-6452358366	TB-08 场所成本来源支线；不选波幅方法
+1400	comment	-	https://github.com/Newchanlun/NewChanlun/issues/1400#issuecomment-6472283079	TB-08 场所成本来源支线；不选波幅方法
+1400	comment	-	https://github.com/Newchanlun/NewChanlun/issues/1400#issuecomment-6483603004	TB-08 场所成本来源支线；不选波幅方法
+1412	body	-	https://github.com/Newchanlun/NewChanlun/issues/1412	TB-08 场所成本来源支线；不选波幅方法
+1412	comment	-	https://github.com/Newchanlun/NewChanlun/issues/1412#issuecomment-6311318272	TB-08 场所成本来源支线；不选波幅方法
+1412	comment	-	https://github.com/Newchanlun/NewChanlun/issues/1412#issuecomment-6472291834	TB-08 场所成本来源支线；不选波幅方法
+1415	body	6,29	https://github.com/Newchanlun/NewChanlun/issues/1415	受控事实来源与重内量验证；不定义本统计
+1415	comment	-	https://github.com/Newchanlun/NewChanlun/issues/1415#issuecomment-6310430906	受控事实来源与重内量验证；不定义本统计
+1415	comment	-	https://github.com/Newchanlun/NewChanlun/issues/1415#issuecomment-6324054892	受控事实来源与重内量验证；不定义本统计
+1440	body	-	https://github.com/Newchanlun/NewChanlun/issues/1440	前置 Type1 结构链；本方法不造链
+1441	body	6,8,13	https://github.com/Newchanlun/NewChanlun/issues/1441	直接消费者；#1677 等同、两轮拒收与 PR 专用方法未裁
+1441	comment	3	https://github.com/Newchanlun/NewChanlun/issues/1441#issuecomment-6153733292	直接消费者；#1677 等同、两轮拒收与 PR 专用方法未裁
+1441	comment	1	https://github.com/Newchanlun/NewChanlun/issues/1441#issuecomment-6311316938	直接消费者；#1677 等同、两轮拒收与 PR 专用方法未裁
+1441	comment	1	https://github.com/Newchanlun/NewChanlun/issues/1441#issuecomment-6326059290	直接消费者；#1677 等同、两轮拒收与 PR 专用方法未裁
+1441	comment	3	https://github.com/Newchanlun/NewChanlun/issues/1441#issuecomment-6403916404	直接消费者；#1677 等同、两轮拒收与 PR 专用方法未裁
+1441	comment	3,4	https://github.com/Newchanlun/NewChanlun/issues/1441#issuecomment-7042363636	直接消费者；#1677 等同、两轮拒收与 PR 专用方法未裁
+1443	body	8	https://github.com/Newchanlun/NewChanlun/issues/1443	下游 TB-02-T 汇验；不改既有前置边
+1444	body	8	https://github.com/Newchanlun/NewChanlun/issues/1444	下游 TB-06-C 的容量和频率独立门；原边不动
+1444	comment	-	https://github.com/Newchanlun/NewChanlun/issues/1444#issuecomment-6153733935	下游 TB-06-C 的容量和频率独立门；原边不动
+1444	comment	-	https://github.com/Newchanlun/NewChanlun/issues/1444#issuecomment-6403915081	下游 TB-06-C 的容量和频率独立门；原边不动
+1444	comment	-	https://github.com/Newchanlun/NewChanlun/issues/1444#issuecomment-6411678859	下游 TB-06-C 的容量和频率独立门；原边不动
+1444	comment	-	https://github.com/Newchanlun/NewChanlun/issues/1444#issuecomment-6428399547	下游 TB-06-C 的容量和频率独立门；原边不动
+1444	comment	-	https://github.com/Newchanlun/NewChanlun/issues/1444#issuecomment-6472303099	下游 TB-06-C 的容量和频率独立门；原边不动
+1465	body	34	https://github.com/Newchanlun/NewChanlun/issues/1465	订单事件递归基底图；不是波幅证据估计
+1467	body	-	https://github.com/Newchanlun/NewChanlun/issues/1467	订单基底构造和实证；不是 A_ℓ 的重采样
+1467	comment	-	https://github.com/Newchanlun/NewChanlun/issues/1467#issuecomment-5963112836	订单基底构造和实证；不是 A_ℓ 的重采样
+1467	comment	-	https://github.com/Newchanlun/NewChanlun/issues/1467#issuecomment-5963393056	订单基底构造和实证；不是 A_ℓ 的重采样
+1467	comment	-	https://github.com/Newchanlun/NewChanlun/issues/1467#issuecomment-5963523357	订单基底构造和实证；不是 A_ℓ 的重采样
+1467	comment	-	https://github.com/Newchanlun/NewChanlun/issues/1467#issuecomment-5963978022	订单基底构造和实证；不是 A_ℓ 的重采样
+1467	comment	-	https://github.com/Newchanlun/NewChanlun/issues/1467#issuecomment-5964250085	订单基底构造和实证；不是 A_ℓ 的重采样
+1467	comment	-	https://github.com/Newchanlun/NewChanlun/issues/1467#issuecomment-5965101881	订单基底构造和实证；不是 A_ℓ 的重采样
+1467	comment	-	https://github.com/Newchanlun/NewChanlun/issues/1467#issuecomment-5965360278	订单基底构造和实证；不是 A_ℓ 的重采样
+1467	comment	-	https://github.com/Newchanlun/NewChanlun/issues/1467#issuecomment-5965532602	订单基底构造和实证；不是 A_ℓ 的重采样
+1467	comment	-	https://github.com/Newchanlun/NewChanlun/issues/1467#issuecomment-5965812257	订单基底构造和实证；不是 A_ℓ 的重采样
+1467	comment	-	https://github.com/Newchanlun/NewChanlun/issues/1467#issuecomment-5966056304	订单基底构造和实证；不是 A_ℓ 的重采样
+1467	comment	-	https://github.com/Newchanlun/NewChanlun/issues/1467#issuecomment-5966463971	订单基底构造和实证；不是 A_ℓ 的重采样
+1467	comment	-	https://github.com/Newchanlun/NewChanlun/issues/1467#issuecomment-5966557375	订单基底构造和实证；不是 A_ℓ 的重采样
+1467	comment	-	https://github.com/Newchanlun/NewChanlun/issues/1467#issuecomment-5966726281	订单基底构造和实证；不是 A_ℓ 的重采样
+1467	comment	-	https://github.com/Newchanlun/NewChanlun/issues/1467#issuecomment-5966887885	订单基底构造和实证；不是 A_ℓ 的重采样
+1467	comment	-	https://github.com/Newchanlun/NewChanlun/issues/1467#issuecomment-5967050740	订单基底构造和实证；不是 A_ℓ 的重采样
+1467	comment	-	https://github.com/Newchanlun/NewChanlun/issues/1467#issuecomment-5967218731	订单基底构造和实证；不是 A_ℓ 的重采样
+1467	comment	-	https://github.com/Newchanlun/NewChanlun/issues/1467#issuecomment-5967545971	订单基底构造和实证；不是 A_ℓ 的重采样
+1467	comment	-	https://github.com/Newchanlun/NewChanlun/issues/1467#issuecomment-5968067143	订单基底构造和实证；不是 A_ℓ 的重采样
+1467	comment	-	https://github.com/Newchanlun/NewChanlun/issues/1467#issuecomment-5968796690	订单基底构造和实证；不是 A_ℓ 的重采样
+1467	comment	-	https://github.com/Newchanlun/NewChanlun/issues/1467#issuecomment-5969132803	订单基底构造和实证；不是 A_ℓ 的重采样
+1467	comment	-	https://github.com/Newchanlun/NewChanlun/issues/1467#issuecomment-5969280959	订单基底构造和实证；不是 A_ℓ 的重采样
+1467	comment	-	https://github.com/Newchanlun/NewChanlun/issues/1467#issuecomment-5969459468	订单基底构造和实证；不是 A_ℓ 的重采样
+1467	comment	-	https://github.com/Newchanlun/NewChanlun/issues/1467#issuecomment-5969637070	订单基底构造和实证；不是 A_ℓ 的重采样
+1467	comment	-	https://github.com/Newchanlun/NewChanlun/issues/1467#issuecomment-5969837430	订单基底构造和实证；不是 A_ℓ 的重采样
+1467	comment	-	https://github.com/Newchanlun/NewChanlun/issues/1467#issuecomment-5970120495	订单基底构造和实证；不是 A_ℓ 的重采样
+1467	comment	-	https://github.com/Newchanlun/NewChanlun/issues/1467#issuecomment-5970817167	订单基底构造和实证；不是 A_ℓ 的重采样
+1467	comment	-	https://github.com/Newchanlun/NewChanlun/issues/1467#issuecomment-5971581768	订单基底构造和实证；不是 A_ℓ 的重采样
+1467	comment	-	https://github.com/Newchanlun/NewChanlun/issues/1467#issuecomment-5971877425	订单基底构造和实证；不是 A_ℓ 的重采样
+1467	comment	-	https://github.com/Newchanlun/NewChanlun/issues/1467#issuecomment-5972524424	订单基底构造和实证；不是 A_ℓ 的重采样
+1467	comment	-	https://github.com/Newchanlun/NewChanlun/issues/1467#issuecomment-5972698456	订单基底构造和实证；不是 A_ℓ 的重采样
+1467	comment	-	https://github.com/Newchanlun/NewChanlun/issues/1467#issuecomment-5972866702	订单基底构造和实证；不是 A_ℓ 的重采样
+1467	comment	-	https://github.com/Newchanlun/NewChanlun/issues/1467#issuecomment-5973047503	订单基底构造和实证；不是 A_ℓ 的重采样
+1467	comment	-	https://github.com/Newchanlun/NewChanlun/issues/1467#issuecomment-5973224544	订单基底构造和实证；不是 A_ℓ 的重采样
+1467	comment	-	https://github.com/Newchanlun/NewChanlun/issues/1467#issuecomment-5973409283	订单基底构造和实证；不是 A_ℓ 的重采样
+1467	comment	-	https://github.com/Newchanlun/NewChanlun/issues/1467#issuecomment-5973895875	订单基底构造和实证；不是 A_ℓ 的重采样
+1467	comment	-	https://github.com/Newchanlun/NewChanlun/issues/1467#issuecomment-5974540351	订单基底构造和实证；不是 A_ℓ 的重采样
+1467	comment	-	https://github.com/Newchanlun/NewChanlun/issues/1467#issuecomment-5974973389	订单基底构造和实证；不是 A_ℓ 的重采样
+1467	comment	-	https://github.com/Newchanlun/NewChanlun/issues/1467#issuecomment-5975154185	订单基底构造和实证；不是 A_ℓ 的重采样
+1467	comment	-	https://github.com/Newchanlun/NewChanlun/issues/1467#issuecomment-5975430829	订单基底构造和实证；不是 A_ℓ 的重采样
+1467	comment	-	https://github.com/Newchanlun/NewChanlun/issues/1467#issuecomment-5975694451	订单基底构造和实证；不是 A_ℓ 的重采样
+1467	comment	-	https://github.com/Newchanlun/NewChanlun/issues/1467#issuecomment-5976100686	订单基底构造和实证；不是 A_ℓ 的重采样
+1467	comment	-	https://github.com/Newchanlun/NewChanlun/issues/1467#issuecomment-5976667488	订单基底构造和实证；不是 A_ℓ 的重采样
+1467	comment	-	https://github.com/Newchanlun/NewChanlun/issues/1467#issuecomment-5976920211	订单基底构造和实证；不是 A_ℓ 的重采样
+1467	comment	-	https://github.com/Newchanlun/NewChanlun/issues/1467#issuecomment-5978090192	订单基底构造和实证；不是 A_ℓ 的重采样
+1467	comment	-	https://github.com/Newchanlun/NewChanlun/issues/1467#issuecomment-5978574585	订单基底构造和实证；不是 A_ℓ 的重采样
+1467	comment	-	https://github.com/Newchanlun/NewChanlun/issues/1467#issuecomment-5979046990	订单基底构造和实证；不是 A_ℓ 的重采样
+1467	comment	-	https://github.com/Newchanlun/NewChanlun/issues/1467#issuecomment-5979354284	订单基底构造和实证；不是 A_ℓ 的重采样
+1467	comment	-	https://github.com/Newchanlun/NewChanlun/issues/1467#issuecomment-5979668660	订单基底构造和实证；不是 A_ℓ 的重采样
+1467	comment	-	https://github.com/Newchanlun/NewChanlun/issues/1467#issuecomment-5980959768	订单基底构造和实证；不是 A_ℓ 的重采样
+1467	comment	-	https://github.com/Newchanlun/NewChanlun/issues/1467#issuecomment-5981467740	订单基底构造和实证；不是 A_ℓ 的重采样
+1467	comment	-	https://github.com/Newchanlun/NewChanlun/issues/1467#issuecomment-5981946599	订单基底构造和实证；不是 A_ℓ 的重采样
+1467	comment	-	https://github.com/Newchanlun/NewChanlun/issues/1467#issuecomment-5982354377	订单基底构造和实证；不是 A_ℓ 的重采样
+1467	comment	-	https://github.com/Newchanlun/NewChanlun/issues/1467#issuecomment-5982891248	订单基底构造和实证；不是 A_ℓ 的重采样
+1467	comment	-	https://github.com/Newchanlun/NewChanlun/issues/1467#issuecomment-5983271754	订单基底构造和实证；不是 A_ℓ 的重采样
+1467	comment	-	https://github.com/Newchanlun/NewChanlun/issues/1467#issuecomment-5983752007	订单基底构造和实证；不是 A_ℓ 的重采样
+1467	comment	-	https://github.com/Newchanlun/NewChanlun/issues/1467#issuecomment-5984256455	订单基底构造和实证；不是 A_ℓ 的重采样
+1467	comment	-	https://github.com/Newchanlun/NewChanlun/issues/1467#issuecomment-5984965288	订单基底构造和实证；不是 A_ℓ 的重采样
+1467	comment	-	https://github.com/Newchanlun/NewChanlun/issues/1467#issuecomment-5985147287	订单基底构造和实证；不是 A_ℓ 的重采样
+1467	comment	-	https://github.com/Newchanlun/NewChanlun/issues/1467#issuecomment-5985408770	订单基底构造和实证；不是 A_ℓ 的重采样
+1467	comment	-	https://github.com/Newchanlun/NewChanlun/issues/1467#issuecomment-5985824750	订单基底构造和实证；不是 A_ℓ 的重采样
+1467	comment	-	https://github.com/Newchanlun/NewChanlun/issues/1467#issuecomment-5986469867	订单基底构造和实证；不是 A_ℓ 的重采样
+1467	comment	-	https://github.com/Newchanlun/NewChanlun/issues/1467#issuecomment-5986768583	订单基底构造和实证；不是 A_ℓ 的重采样
+1467	comment	-	https://github.com/Newchanlun/NewChanlun/issues/1467#issuecomment-5987207928	订单基底构造和实证；不是 A_ℓ 的重采样
+1467	comment	-	https://github.com/Newchanlun/NewChanlun/issues/1467#issuecomment-5987899392	订单基底构造和实证；不是 A_ℓ 的重采样
+1467	comment	-	https://github.com/Newchanlun/NewChanlun/issues/1467#issuecomment-5996962382	订单基底构造和实证；不是 A_ℓ 的重采样
+1467	comment	-	https://github.com/Newchanlun/NewChanlun/issues/1467#issuecomment-5997108740	订单基底构造和实证；不是 A_ℓ 的重采样
+1467	comment	-	https://github.com/Newchanlun/NewChanlun/issues/1467#issuecomment-5998236772	订单基底构造和实证；不是 A_ℓ 的重采样
+1467	comment	-	https://github.com/Newchanlun/NewChanlun/issues/1467#issuecomment-5999413664	订单基底构造和实证；不是 A_ℓ 的重采样
+1467	comment	-	https://github.com/Newchanlun/NewChanlun/issues/1467#issuecomment-6000735348	订单基底构造和实证；不是 A_ℓ 的重采样
+1467	comment	3	https://github.com/Newchanlun/NewChanlun/issues/1467#issuecomment-6001729938	订单基底构造和实证；不是 A_ℓ 的重采样
+1467	comment	-	https://github.com/Newchanlun/NewChanlun/issues/1467#issuecomment-6003589182	订单基底构造和实证；不是 A_ℓ 的重采样
+1467	comment	-	https://github.com/Newchanlun/NewChanlun/issues/1467#issuecomment-6005680882	订单基底构造和实证；不是 A_ℓ 的重采样
+1535	body	-	https://github.com/Newchanlun/NewChanlun/issues/1535	带仓迁移、回退、责任退休；版本通用纪律，不定方法
+1535	comment	-	https://github.com/Newchanlun/NewChanlun/issues/1535#issuecomment-6404501311	带仓迁移、回退、责任退休；版本通用纪律，不定方法
+1535	comment	-	https://github.com/Newchanlun/NewChanlun/issues/1535#issuecomment-6589360339	带仓迁移、回退、责任退休；版本通用纪律，不定方法
+1535	comment	-	https://github.com/Newchanlun/NewChanlun/issues/1535#issuecomment-6693433603	带仓迁移、回退、责任退休；版本通用纪律，不定方法
+1535	comment	-	https://github.com/Newchanlun/NewChanlun/issues/1535#issuecomment-6693434442	带仓迁移、回退、责任退休；版本通用纪律，不定方法
+1535	comment	56,90	https://github.com/Newchanlun/NewChanlun/issues/1535#issuecomment-6693886531	带仓迁移、回退、责任退休；版本通用纪律，不定方法
+1535	comment	-	https://github.com/Newchanlun/NewChanlun/issues/1535#issuecomment-6696556962	带仓迁移、回退、责任退休；版本通用纪律，不定方法
+1535	comment	-	https://github.com/Newchanlun/NewChanlun/issues/1535#issuecomment-6741136580	带仓迁移、回退、责任退休；版本通用纪律，不定方法
+1535	comment	-	https://github.com/Newchanlun/NewChanlun/issues/1535#issuecomment-6749584863	带仓迁移、回退、责任退休；版本通用纪律，不定方法
+1535	comment	-	https://github.com/Newchanlun/NewChanlun/issues/1535#issuecomment-6749586134	带仓迁移、回退、责任退休；版本通用纪律，不定方法
+1535	comment	-	https://github.com/Newchanlun/NewChanlun/issues/1535#issuecomment-6819047963	带仓迁移、回退、责任退休；版本通用纪律，不定方法
+1535	comment	-	https://github.com/Newchanlun/NewChanlun/issues/1535#issuecomment-6846558673	带仓迁移、回退、责任退休；版本通用纪律，不定方法
+1535	comment	-	https://github.com/Newchanlun/NewChanlun/issues/1535#issuecomment-6846966656	带仓迁移、回退、责任退休；版本通用纪律，不定方法
+1535	comment	-	https://github.com/Newchanlun/NewChanlun/issues/1535#issuecomment-6848115356	带仓迁移、回退、责任退休；版本通用纪律，不定方法
+1535	comment	-	https://github.com/Newchanlun/NewChanlun/issues/1535#issuecomment-6848448473	带仓迁移、回退、责任退休；版本通用纪律，不定方法
+1535	comment	-	https://github.com/Newchanlun/NewChanlun/issues/1535#issuecomment-6850260037	带仓迁移、回退、责任退休；版本通用纪律，不定方法
+1535	comment	-	https://github.com/Newchanlun/NewChanlun/issues/1535#issuecomment-6851766650	带仓迁移、回退、责任退休；版本通用纪律，不定方法
+1535	comment	-	https://github.com/Newchanlun/NewChanlun/issues/1535#issuecomment-6852296934	带仓迁移、回退、责任退休；版本通用纪律，不定方法
+1535	comment	-	https://github.com/Newchanlun/NewChanlun/issues/1535#issuecomment-6852298160	带仓迁移、回退、责任退休；版本通用纪律，不定方法
+1535	comment	-	https://github.com/Newchanlun/NewChanlun/issues/1535#issuecomment-6852468725	带仓迁移、回退、责任退休；版本通用纪律，不定方法
+1535	comment	-	https://github.com/Newchanlun/NewChanlun/issues/1535#issuecomment-6854073693	带仓迁移、回退、责任退休；版本通用纪律，不定方法
+1535	comment	-	https://github.com/Newchanlun/NewChanlun/issues/1535#issuecomment-6860922006	带仓迁移、回退、责任退休；版本通用纪律，不定方法
+1536	body	-	https://github.com/Newchanlun/NewChanlun/issues/1536	具名历史输入源；设计待用的身份原件体例，不替代波幅验收
+1536	comment	-	https://github.com/Newchanlun/NewChanlun/issues/1536#issuecomment-6391077284	具名历史输入源；设计待用的身份原件体例，不替代波幅验收
+1536	comment	-	https://github.com/Newchanlun/NewChanlun/issues/1536#issuecomment-6404223988	具名历史输入源；设计待用的身份原件体例，不替代波幅验收
+1536	comment	-	https://github.com/Newchanlun/NewChanlun/issues/1536#issuecomment-6452285266	具名历史输入源；设计待用的身份原件体例，不替代波幅验收
+1536	comment	10,13,79	https://github.com/Newchanlun/NewChanlun/issues/1536#issuecomment-6453581301	具名历史输入源；设计待用的身份原件体例，不替代波幅验收
+1536	comment	-	https://github.com/Newchanlun/NewChanlun/issues/1536#issuecomment-6455099817	具名历史输入源；设计待用的身份原件体例，不替代波幅验收
+1536	comment	-	https://github.com/Newchanlun/NewChanlun/issues/1536#issuecomment-6465849505	具名历史输入源；设计待用的身份原件体例，不替代波幅验收
+1547	body	-	https://github.com/Newchanlun/NewChanlun/issues/1547	系统编排的 bootstrap 或裁决面；无本域统计
+1547	comment	3	https://github.com/Newchanlun/NewChanlun/issues/1547#issuecomment-6324440910	系统编排的 bootstrap 或裁决面；无本域统计
+1547	comment	-	https://github.com/Newchanlun/NewChanlun/issues/1547#issuecomment-6324619926	系统编排的 bootstrap 或裁决面；无本域统计
+1547	comment	1	https://github.com/Newchanlun/NewChanlun/issues/1547#issuecomment-6383119259	系统编排的 bootstrap 或裁决面；无本域统计
+1547	comment	2	https://github.com/Newchanlun/NewChanlun/issues/1547#issuecomment-6461149616	系统编排的 bootstrap 或裁决面；无本域统计
+1557	body	-	https://github.com/Newchanlun/NewChanlun/issues/1557	其他签署槽（cap/Q/本金），不借其批复
+1557	comment	-	https://github.com/Newchanlun/NewChanlun/issues/1557#issuecomment-6263395091	其他签署槽（cap/Q/本金），不借其批复
+1557	comment	-	https://github.com/Newchanlun/NewChanlun/issues/1557#issuecomment-6263509523	其他签署槽（cap/Q/本金），不借其批复
+1557	comment	-	https://github.com/Newchanlun/NewChanlun/issues/1557#issuecomment-6277222960	其他签署槽（cap/Q/本金），不借其批复
+1557	comment	-	https://github.com/Newchanlun/NewChanlun/issues/1557#issuecomment-6277802844	其他签署槽（cap/Q/本金），不借其批复
+1557	comment	3,12,29,31,35,44,54	https://github.com/Newchanlun/NewChanlun/issues/1557#issuecomment-6278230349	其他签署槽（cap/Q/本金），不借其批复
+1557	comment	-	https://github.com/Newchanlun/NewChanlun/issues/1557#issuecomment-6280851977	其他签署槽（cap/Q/本金），不借其批复
+1557	comment	-	https://github.com/Newchanlun/NewChanlun/issues/1557#issuecomment-6282040441	其他签署槽（cap/Q/本金），不借其批复
+1557	comment	-	https://github.com/Newchanlun/NewChanlun/issues/1557#issuecomment-6282676362	其他签署槽（cap/Q/本金），不借其批复
+1557	comment	-	https://github.com/Newchanlun/NewChanlun/issues/1557#issuecomment-6282686046	其他签署槽（cap/Q/本金），不借其批复
+1557	comment	-	https://github.com/Newchanlun/NewChanlun/issues/1557#issuecomment-6283050080	其他签署槽（cap/Q/本金），不借其批复
+1557	comment	-	https://github.com/Newchanlun/NewChanlun/issues/1557#issuecomment-6284629893	其他签署槽（cap/Q/本金），不借其批复
+1557	comment	-	https://github.com/Newchanlun/NewChanlun/issues/1557#issuecomment-6284716884	其他签署槽（cap/Q/本金），不借其批复
+1557	comment	-	https://github.com/Newchanlun/NewChanlun/issues/1557#issuecomment-6284944397	其他签署槽（cap/Q/本金），不借其批复
+1557	comment	-	https://github.com/Newchanlun/NewChanlun/issues/1557#issuecomment-6284956555	其他签署槽（cap/Q/本金），不借其批复
+1557	comment	19,49,66	https://github.com/Newchanlun/NewChanlun/issues/1557#issuecomment-6285191679	其他签署槽（cap/Q/本金），不借其批复
+1557	comment	-	https://github.com/Newchanlun/NewChanlun/issues/1557#issuecomment-6287625744	其他签署槽（cap/Q/本金），不借其批复
+1558	body	-	https://github.com/Newchanlun/NewChanlun/issues/1558	量档与容量签署，不是 θ 或 A_ℓ
+1558	comment	-	https://github.com/Newchanlun/NewChanlun/issues/1558#issuecomment-6263395734	量档与容量签署，不是 θ 或 A_ℓ
+1558	comment	9,29	https://github.com/Newchanlun/NewChanlun/issues/1558#issuecomment-6263470828	量档与容量签署，不是 θ 或 A_ℓ
+1558	comment	-	https://github.com/Newchanlun/NewChanlun/issues/1558#issuecomment-6277224462	量档与容量签署，不是 θ 或 A_ℓ
+1558	comment	-	https://github.com/Newchanlun/NewChanlun/issues/1558#issuecomment-6277804241	量档与容量签署，不是 θ 或 A_ℓ
+1558	comment	14,57,61	https://github.com/Newchanlun/NewChanlun/issues/1558#issuecomment-6278245503	量档与容量签署，不是 θ 或 A_ℓ
+1558	comment	-	https://github.com/Newchanlun/NewChanlun/issues/1558#issuecomment-6280852417	量档与容量签署，不是 θ 或 A_ℓ
+1558	comment	-	https://github.com/Newchanlun/NewChanlun/issues/1558#issuecomment-6282676793	量档与容量签署，不是 θ 或 A_ℓ
+1558	comment	-	https://github.com/Newchanlun/NewChanlun/issues/1558#issuecomment-6282686450	量档与容量签署，不是 θ 或 A_ℓ
+1558	comment	-	https://github.com/Newchanlun/NewChanlun/issues/1558#issuecomment-6284945807	量档与容量签署，不是 θ 或 A_ℓ
+1558	comment	-	https://github.com/Newchanlun/NewChanlun/issues/1558#issuecomment-6286295347	量档与容量签署，不是 θ 或 A_ℓ
+1558	comment	18,70	https://github.com/Newchanlun/NewChanlun/issues/1558#issuecomment-6286717371	量档与容量签署，不是 θ 或 A_ℓ
+1558	comment	-	https://github.com/Newchanlun/NewChanlun/issues/1558#issuecomment-6287626989	量档与容量签署，不是 θ 或 A_ℓ
+1559	body	2	https://github.com/Newchanlun/NewChanlun/issues/1559	明确签署 θ 和成本来源，方法未签；两份滑点 Missing
+1559	comment	-	https://github.com/Newchanlun/NewChanlun/issues/1559#issuecomment-6263819662	明确签署 θ 和成本来源，方法未签；两份滑点 Missing
+1559	comment	3,10,27,30,33,39	https://github.com/Newchanlun/NewChanlun/issues/1559#issuecomment-6263938817	明确签署 θ 和成本来源，方法未签；两份滑点 Missing
+1559	comment	3	https://github.com/Newchanlun/NewChanlun/issues/1559#issuecomment-6282694847	明确签署 θ 和成本来源，方法未签；两份滑点 Missing
+1559	comment	-	https://github.com/Newchanlun/NewChanlun/issues/1559#issuecomment-6310844461	明确签署 θ 和成本来源，方法未签；两份滑点 Missing
+1559	comment	-	https://github.com/Newchanlun/NewChanlun/issues/1559#issuecomment-6311314201	明确签署 θ 和成本来源，方法未签；两份滑点 Missing
+1559	comment	2	https://github.com/Newchanlun/NewChanlun/issues/1559#issuecomment-6315081122	明确签署 θ 和成本来源，方法未签；两份滑点 Missing
+1586	body	-	https://github.com/Newchanlun/NewChanlun/issues/1586	自由度通则；须具名、可选、单选，不能兜底
+1586	comment	3	https://github.com/Newchanlun/NewChanlun/issues/1586#issuecomment-6285779430	自由度通则；须具名、可选、单选，不能兜底
+1586	comment	4	https://github.com/Newchanlun/NewChanlun/issues/1586#issuecomment-6285968293	自由度通则；须具名、可选、单选，不能兜底
+1586	comment	-	https://github.com/Newchanlun/NewChanlun/issues/1586#issuecomment-6287113751	自由度通则；须具名、可选、单选，不能兜底
+1586	comment	-	https://github.com/Newchanlun/NewChanlun/issues/1586#issuecomment-6292945322	自由度通则；须具名、可选、单选，不能兜底
+1598	body	8,10	https://github.com/Newchanlun/NewChanlun/issues/1598	A-10 确认配对与第二层方法；未钉第一层 B/seed/估计量
+1598	comment	4	https://github.com/Newchanlun/NewChanlun/issues/1598#issuecomment-6324441812	A-10 确认配对与第二层方法；未钉第一层 B/seed/估计量
+1598	comment	2	https://github.com/Newchanlun/NewChanlun/issues/1598#issuecomment-6324618369	A-10 确认配对与第二层方法；未钉第一层 B/seed/估计量
+1598	comment	-	https://github.com/Newchanlun/NewChanlun/issues/1598#issuecomment-6325636052	A-10 确认配对与第二层方法；未钉第一层 B/seed/估计量
+1598	comment	1	https://github.com/Newchanlun/NewChanlun/issues/1598#issuecomment-6326060031	A-10 确认配对与第二层方法；未钉第一层 B/seed/估计量
+1598	comment	3,7,15,18,20,22,27,31,32,43,64	https://github.com/Newchanlun/NewChanlun/issues/1598#issuecomment-6326308008	A-10 确认配对与第二层方法；未钉第一层 B/seed/估计量
+1598	comment	-	https://github.com/Newchanlun/NewChanlun/issues/1598#issuecomment-6381372201	A-10 确认配对与第二层方法；未钉第一层 B/seed/估计量
+1598	comment	-	https://github.com/Newchanlun/NewChanlun/issues/1598#issuecomment-6390916198	A-10 确认配对与第二层方法；未钉第一层 B/seed/估计量
+1598	comment	-	https://github.com/Newchanlun/NewChanlun/issues/1598#issuecomment-6390990959	A-10 确认配对与第二层方法；未钉第一层 B/seed/估计量
+1598	comment	2,3,6,17,27,41,42,50,55,61,63	https://github.com/Newchanlun/NewChanlun/issues/1598#issuecomment-6391381050	A-10 确认配对与第二层方法；未钉第一层 B/seed/估计量
+1598	comment	-	https://github.com/Newchanlun/NewChanlun/issues/1598#issuecomment-6391406103	A-10 确认配对与第二层方法；未钉第一层 B/seed/估计量
+1598	comment	-	https://github.com/Newchanlun/NewChanlun/issues/1598#issuecomment-6391483345	A-10 确认配对与第二层方法；未钉第一层 B/seed/估计量
+1598	comment	2,6,11,21,27,43,44,50,51,62,64,67,73,75	https://github.com/Newchanlun/NewChanlun/issues/1598#issuecomment-6391573635	A-10 确认配对与第二层方法；未钉第一层 B/seed/估计量
+1598	comment	-	https://github.com/Newchanlun/NewChanlun/issues/1598#issuecomment-6391630188	A-10 确认配对与第二层方法；未钉第一层 B/seed/估计量
+1598	comment	-	https://github.com/Newchanlun/NewChanlun/issues/1598#issuecomment-6391719316	A-10 确认配对与第二层方法；未钉第一层 B/seed/估计量
+1598	comment	2,6,13,28,29,49,50,52,65,76,82,84	https://github.com/Newchanlun/NewChanlun/issues/1598#issuecomment-6391844175	A-10 确认配对与第二层方法；未钉第一层 B/seed/估计量
+1598	comment	3	https://github.com/Newchanlun/NewChanlun/issues/1598#issuecomment-6395646381	A-10 确认配对与第二层方法；未钉第一层 B/seed/估计量
+1598	comment	-	https://github.com/Newchanlun/NewChanlun/issues/1598#issuecomment-6398505839	A-10 确认配对与第二层方法；未钉第一层 B/seed/估计量
+1598	comment	-	https://github.com/Newchanlun/NewChanlun/issues/1598#issuecomment-6398552322	A-10 确认配对与第二层方法；未钉第一层 B/seed/估计量
+1598	comment	-	https://github.com/Newchanlun/NewChanlun/issues/1598#issuecomment-6403277308	A-10 确认配对与第二层方法；未钉第一层 B/seed/估计量
+1598	comment	-	https://github.com/Newchanlun/NewChanlun/issues/1598#issuecomment-6403352079	A-10 确认配对与第二层方法；未钉第一层 B/seed/估计量
+1598	comment	-	https://github.com/Newchanlun/NewChanlun/issues/1598#issuecomment-6403928414	A-10 确认配对与第二层方法；未钉第一层 B/seed/估计量
+1598	comment	3	https://github.com/Newchanlun/NewChanlun/issues/1598#issuecomment-6407142443	A-10 确认配对与第二层方法；未钉第一层 B/seed/估计量
+1602	body	-	https://github.com/Newchanlun/NewChanlun/issues/1602	历史场所成本参数版本记录；数值来源不等算法
+1602	comment	-	https://github.com/Newchanlun/NewChanlun/issues/1602#issuecomment-6323188250	历史场所成本参数版本记录；数值来源不等算法
+1602	comment	-	https://github.com/Newchanlun/NewChanlun/issues/1602#issuecomment-6325635316	历史场所成本参数版本记录；数值来源不等算法
+1602	comment	-	https://github.com/Newchanlun/NewChanlun/issues/1602#issuecomment-6388913596	历史场所成本参数版本记录；数值来源不等算法
+1602	comment	-	https://github.com/Newchanlun/NewChanlun/issues/1602#issuecomment-6389637146	历史场所成本参数版本记录；数值来源不等算法
+1602	comment	-	https://github.com/Newchanlun/NewChanlun/issues/1602#issuecomment-6389765340	历史场所成本参数版本记录；数值来源不等算法
+1602	comment	-	https://github.com/Newchanlun/NewChanlun/issues/1602#issuecomment-6392800819	历史场所成本参数版本记录；数值来源不等算法
+1602	comment	-	https://github.com/Newchanlun/NewChanlun/issues/1602#issuecomment-6404501214	历史场所成本参数版本记录；数值来源不等算法
+1602	comment	-	https://github.com/Newchanlun/NewChanlun/issues/1602#issuecomment-6406951740	历史场所成本参数版本记录；数值来源不等算法
+1602	comment	-	https://github.com/Newchanlun/NewChanlun/issues/1602#issuecomment-6407150649	历史场所成本参数版本记录；数值来源不等算法
+1602	comment	-	https://github.com/Newchanlun/NewChanlun/issues/1602#issuecomment-6407254140	历史场所成本参数版本记录；数值来源不等算法
+1602	comment	-	https://github.com/Newchanlun/NewChanlun/issues/1602#issuecomment-6409863841	历史场所成本参数版本记录；数值来源不等算法
+1602	comment	-	https://github.com/Newchanlun/NewChanlun/issues/1602#issuecomment-6411524842	历史场所成本参数版本记录；数值来源不等算法
+1602	comment	-	https://github.com/Newchanlun/NewChanlun/issues/1602#issuecomment-6432120874	历史场所成本参数版本记录；数值来源不等算法
+1602	comment	-	https://github.com/Newchanlun/NewChanlun/issues/1602#issuecomment-6432267373	历史场所成本参数版本记录；数值来源不等算法
+1602	comment	-	https://github.com/Newchanlun/NewChanlun/issues/1602#issuecomment-6433223413	历史场所成本参数版本记录；数值来源不等算法
+1605	body	5,7,13	https://github.com/Newchanlun/NewChanlun/issues/1605	研发回测 C-19/PnL 参数；不能被 #1677 或本波幅做统计替身
+1605	comment	1	https://github.com/Newchanlun/NewChanlun/issues/1605#issuecomment-6324428750	研发回测 C-19/PnL 参数；不能被 #1677 或本波幅做统计替身
+1605	comment	1	https://github.com/Newchanlun/NewChanlun/issues/1605#issuecomment-6324619150	研发回测 C-19/PnL 参数；不能被 #1677 或本波幅做统计替身
+1605	comment	1,2,3	https://github.com/Newchanlun/NewChanlun/issues/1605#issuecomment-6326056784	研发回测 C-19/PnL 参数；不能被 #1677 或本波幅做统计替身
+1605	comment	1	https://github.com/Newchanlun/NewChanlun/issues/1605#issuecomment-6391151717	研发回测 C-19/PnL 参数；不能被 #1677 或本波幅做统计替身
+1605	comment	4	https://github.com/Newchanlun/NewChanlun/issues/1605#issuecomment-6391218623	研发回测 C-19/PnL 参数；不能被 #1677 或本波幅做统计替身
+1605	comment	2,4,6,10,12	https://github.com/Newchanlun/NewChanlun/issues/1605#issuecomment-6391227952	研发回测 C-19/PnL 参数；不能被 #1677 或本波幅做统计替身
+1605	comment	-	https://github.com/Newchanlun/NewChanlun/issues/1605#issuecomment-6391350526	研发回测 C-19/PnL 参数；不能被 #1677 或本波幅做统计替身
+1605	comment	5,11	https://github.com/Newchanlun/NewChanlun/issues/1605#issuecomment-6392484425	研发回测 C-19/PnL 参数；不能被 #1677 或本波幅做统计替身
+1605	comment	1	https://github.com/Newchanlun/NewChanlun/issues/1605#issuecomment-6397255356	研发回测 C-19/PnL 参数；不能被 #1677 或本波幅做统计替身
+1605	comment	-	https://github.com/Newchanlun/NewChanlun/issues/1605#issuecomment-6397338958	研发回测 C-19/PnL 参数；不能被 #1677 或本波幅做统计替身
+1605	comment	-	https://github.com/Newchanlun/NewChanlun/issues/1605#issuecomment-6398190639	研发回测 C-19/PnL 参数；不能被 #1677 或本波幅做统计替身
+1605	comment	-	https://github.com/Newchanlun/NewChanlun/issues/1605#issuecomment-6403269084	研发回测 C-19/PnL 参数；不能被 #1677 或本波幅做统计替身
+1605	comment	-	https://github.com/Newchanlun/NewChanlun/issues/1605#issuecomment-6404179200	研发回测 C-19/PnL 参数；不能被 #1677 或本波幅做统计替身
+1605	comment	-	https://github.com/Newchanlun/NewChanlun/issues/1605#issuecomment-6404209771	研发回测 C-19/PnL 参数；不能被 #1677 或本波幅做统计替身
+1605	comment	-	https://github.com/Newchanlun/NewChanlun/issues/1605#issuecomment-6407018202	研发回测 C-19/PnL 参数；不能被 #1677 或本波幅做统计替身
+1641	body	-	https://github.com/Newchanlun/NewChanlun/issues/1641	结构写者的恢复与候选保留，非统计
+1641	comment	-	https://github.com/Newchanlun/NewChanlun/issues/1641#issuecomment-6308987525	结构写者的恢复与候选保留，非统计
+1641	comment	-	https://github.com/Newchanlun/NewChanlun/issues/1641#issuecomment-6309122187	结构写者的恢复与候选保留，非统计
+1641	comment	-	https://github.com/Newchanlun/NewChanlun/issues/1641#issuecomment-6315835481	结构写者的恢复与候选保留，非统计
+1641	comment	-	https://github.com/Newchanlun/NewChanlun/issues/1641#issuecomment-6465248755	结构写者的恢复与候选保留，非统计
+1641	comment	1	https://github.com/Newchanlun/NewChanlun/issues/1641#issuecomment-6487205970	结构写者的恢复与候选保留，非统计
+1641	comment	-	https://github.com/Newchanlun/NewChanlun/issues/1641#issuecomment-6718096946	结构写者的恢复与候选保留，非统计
+1677	body	3,5,6	https://github.com/Newchanlun/NewChanlun/issues/1677	证据门版本化、confidence/block_unit 等同与预登记；不裁波幅估计量
+1677	comment	1	https://github.com/Newchanlun/NewChanlun/issues/1677#issuecomment-6324607726	证据门版本化、confidence/block_unit 等同与预登记；不裁波幅估计量
+1677	comment	3,4,7,11,14,16,19,21,22,24,26,27,29,30,34,35,37,43,44,46,48,50,53,55,59,61	https://github.com/Newchanlun/NewChanlun/issues/1677#issuecomment-6325562676	证据门版本化、confidence/block_unit 等同与预登记；不裁波幅估计量
+1677	comment	2,5,8,10,13,15,16,18,20,21,23,24,28,29,31,37,38,40,42,44,47,49,53,55	https://github.com/Newchanlun/NewChanlun/issues/1677#issuecomment-6326054728	证据门版本化、confidence/block_unit 等同与预登记；不裁波幅估计量
+1677	comment	1,2,3	https://github.com/Newchanlun/NewChanlun/issues/1677#issuecomment-6391042753	证据门版本化、confidence/block_unit 等同与预登记；不裁波幅估计量
+1677	comment	-	https://github.com/Newchanlun/NewChanlun/issues/1677#issuecomment-6391043066	证据门版本化、confidence/block_unit 等同与预登记；不裁波幅估计量
+1678	body	5,7	https://github.com/Newchanlun/NewChanlun/issues/1678	launchctl bootstrap 与自愈，无统计
+1678	comment	2,3	https://github.com/Newchanlun/NewChanlun/issues/1678#issuecomment-6325643647	launchctl bootstrap 与自愈，无统计
+1678	comment	-	https://github.com/Newchanlun/NewChanlun/issues/1678#issuecomment-6325975716	launchctl bootstrap 与自愈，无统计
+1678	comment	1	https://github.com/Newchanlun/NewChanlun/issues/1678#issuecomment-6383118929	launchctl bootstrap 与自愈，无统计
+1678	comment	-	https://github.com/Newchanlun/NewChanlun/issues/1678#issuecomment-6387490414	launchctl bootstrap 与自愈，无统计
+1678	comment	-	https://github.com/Newchanlun/NewChanlun/issues/1678#issuecomment-6403292124	launchctl bootstrap 与自愈，无统计
+1678	comment	-	https://github.com/Newchanlun/NewChanlun/issues/1678#issuecomment-6403927849	launchctl bootstrap 与自愈，无统计
+1678	comment	-	https://github.com/Newchanlun/NewChanlun/issues/1678#issuecomment-6418805412	launchctl bootstrap 与自愈，无统计
+1678	comment	-	https://github.com/Newchanlun/NewChanlun/issues/1678#issuecomment-6418878078	launchctl bootstrap 与自愈，无统计
+1678	comment	-	https://github.com/Newchanlun/NewChanlun/issues/1678#issuecomment-6434497325	launchctl bootstrap 与自愈，无统计
+1678	comment	-	https://github.com/Newchanlun/NewChanlun/issues/1678#issuecomment-6435570528	launchctl bootstrap 与自愈，无统计
+1678	comment	2	https://github.com/Newchanlun/NewChanlun/issues/1678#issuecomment-6457111804	launchctl bootstrap 与自愈，无统计
+1774	body	-	https://github.com/Newchanlun/NewChanlun/issues/1774	P0 v2 回放／生产假设签署；ADR 0057 明分撮合和成本停止
+1774	comment	1	https://github.com/Newchanlun/NewChanlun/issues/1774#issuecomment-6454867893	P0 v2 回放／生产假设签署；ADR 0057 明分撮合和成本停止
+1774	comment	-	https://github.com/Newchanlun/NewChanlun/issues/1774#issuecomment-6455096600	P0 v2 回放／生产假设签署；ADR 0057 明分撮合和成本停止
+1774	comment	-	https://github.com/Newchanlun/NewChanlun/issues/1774#issuecomment-6472081788	P0 v2 回放／生产假设签署；ADR 0057 明分撮合和成本停止
+1774	comment	-	https://github.com/Newchanlun/NewChanlun/issues/1774#issuecomment-6485539899	P0 v2 回放／生产假设签署；ADR 0057 明分撮合和成本停止
+1774	comment	-	https://github.com/Newchanlun/NewChanlun/issues/1774#issuecomment-6542854318	P0 v2 回放／生产假设签署；ADR 0057 明分撮合和成本停止
+1774	comment	-	https://github.com/Newchanlun/NewChanlun/issues/1774#issuecomment-6548771125	P0 v2 回放／生产假设签署；ADR 0057 明分撮合和成本停止
+1774	comment	-	https://github.com/Newchanlun/NewChanlun/issues/1774#issuecomment-6697343990	P0 v2 回放／生产假设签署；ADR 0057 明分撮合和成本停止
+1774	comment	-	https://github.com/Newchanlun/NewChanlun/issues/1774#issuecomment-6697422464	P0 v2 回放／生产假设签署；ADR 0057 明分撮合和成本停止
+1774	comment	-	https://github.com/Newchanlun/NewChanlun/issues/1774#issuecomment-6697804941	P0 v2 回放／生产假设签署；ADR 0057 明分撮合和成本停止
+1774	comment	-	https://github.com/Newchanlun/NewChanlun/issues/1774#issuecomment-6701928041	P0 v2 回放／生产假设签署；ADR 0057 明分撮合和成本停止
+1774	comment	-	https://github.com/Newchanlun/NewChanlun/issues/1774#issuecomment-6702153508	P0 v2 回放／生产假设签署；ADR 0057 明分撮合和成本停止
+1774	comment	-	https://github.com/Newchanlun/NewChanlun/issues/1774#issuecomment-6702746707	P0 v2 回放／生产假设签署；ADR 0057 明分撮合和成本停止
+1774	comment	-	https://github.com/Newchanlun/NewChanlun/issues/1774#issuecomment-6723284739	P0 v2 回放／生产假设签署；ADR 0057 明分撮合和成本停止
+1774	comment	-	https://github.com/Newchanlun/NewChanlun/issues/1774#issuecomment-6723858747	P0 v2 回放／生产假设签署；ADR 0057 明分撮合和成本停止
+1774	comment	-	https://github.com/Newchanlun/NewChanlun/issues/1774#issuecomment-6728876475	P0 v2 回放／生产假设签署；ADR 0057 明分撮合和成本停止
+1774	comment	-	https://github.com/Newchanlun/NewChanlun/issues/1774#issuecomment-6728881226	P0 v2 回放／生产假设签署；ADR 0057 明分撮合和成本停止
+1775	body	-	https://github.com/Newchanlun/NewChanlun/issues/1775	P0 venue/data 来源研究；非 A_ℓ
+1775	comment	-	https://github.com/Newchanlun/NewChanlun/issues/1775#issuecomment-6454980815	P0 venue/data 来源研究；非 A_ℓ
+1775	comment	3	https://github.com/Newchanlun/NewChanlun/issues/1775#issuecomment-6455103063	P0 venue/data 来源研究；非 A_ℓ
+1775	comment	-	https://github.com/Newchanlun/NewChanlun/issues/1775#issuecomment-6455103710	P0 venue/data 来源研究；非 A_ℓ
+1909	body	-	https://github.com/Newchanlun/NewChanlun/issues/1909	普通 P 代理独审授权边界；不代用户签交易
+1968	body	5	https://github.com/Newchanlun/NewChanlun/issues/1968	CI 审查工具调用 bug；词碰撞，不是统计
+1993	body	2	https://github.com/Newchanlun/NewChanlun/issues/1993	接口名 roundtrip 的并发 CI；不是交易往返
+1993	comment	-	https://github.com/Newchanlun/NewChanlun/issues/1993#issuecomment-6984775203	接口名 roundtrip 的并发 CI；不是交易往返
+1993	comment	-	https://github.com/Newchanlun/NewChanlun/issues/1993#issuecomment-6985076428	接口名 roundtrip 的并发 CI；不是交易往返
+2111	body	1,3,5,7,9	https://github.com/Newchanlun/NewChanlun/issues/2111	零成本已获审；候选接受四态顺序，未合入
+2111	comment	-	https://github.com/Newchanlun/NewChanlun/issues/2111#issuecomment-7042010826	零成本已获审；候选接受四态顺序，未合入
+2111	comment	4,6	https://github.com/Newchanlun/NewChanlun/issues/2111#issuecomment-7042575932	零成本已获审；候选接受四态顺序，未合入
+2111	comment	2,3,7,8	https://github.com/Newchanlun/NewChanlun/issues/2111#issuecomment-7043014665	零成本已获审；候选接受四态顺序，未合入
+2121	body	1,3,4,6,7,9,12,15	https://github.com/Newchanlun/NewChanlun/issues/2121	本票、5 项问题和 θ 边界，不是既有裁定

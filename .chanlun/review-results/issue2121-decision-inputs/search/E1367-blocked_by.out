@@ -1,0 +1,11 @@
+1362	open	TB-04 验收汇总：责任到实际调用及回报闭环（SPEC #1340）
+1363	open	TB-05 验收汇总：故障隔离及持续服务（SPEC #1340）
+1366	open	TB-07 验收汇总：完整历史及恢复（SPEC #1340）
+1365	open	TB-09 验收汇总：目标部署旧写入口隔离及X排他（SPEC #1340）
+1536	closed	[grilling] FU-14 完整历史数据与模型 profile（#1323，新增）
+1538	closed	[grilling] FU-16 paper/live 与回放同核边界（#1323，新增）
+1539	closed	[grilling] FU-17 成交/持仓唯一真账与 crosswalk（#1323，新增）
+1540	closed	[grilling] FU-18 受控场所、账户、权限（#1323，新增）
+1557	closed	[grilling] FU-01/03 余项：共同 cap、固定 Q 与本金批次的数值签署（#1323，P 类）
+1559	closed	[grilling] FU-01/05 余项：成本停止 θ 与四项成本输入的签署（#1323，P 类）
+1560	closed	[grilling] FU-07 余项：系统风险条件 SR v1 阈值与退出动作表签署（#1323，P 类）

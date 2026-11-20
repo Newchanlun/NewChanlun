@@ -1,0 +1,5 @@
+1440	open	[impl] TB-02-R 已裁Type1完整链与原始N/A事实（SPEC #1340）
+1359	closed	TB-01 验收汇总：正式结构和只读观察（SPEC #1340）
+1354	closed	[grilling] 成本停止 policy 实例与基底进阶证据（#1323，G-029）
+2111	open	[grilling] 成本停止：全部成本实测为零时的四态归属与检查顺序（ADR 0044，#1441 独审发现）
+2121	open	[grilling] 成本停止波幅下界 A_ℓ 的计算方法：统计量、重采样参数与 method_id（ADR 0035，#1441 设计发现）

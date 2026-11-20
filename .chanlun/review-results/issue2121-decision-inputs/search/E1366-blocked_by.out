@@ -1,0 +1,13 @@
+1360	open	TB-02 验收汇总：全部结构分类及构造子义务（SPEC #1340）
+1363	open	TB-05 验收汇总：故障隔离及持续服务（SPEC #1340）
+1364	open	TB-06 验收汇总：完整阶段、换档与尾账（SPEC #1340）
+1534	closed	[grilling] FU-11 逐 bar 事件、身份、生命周期合同（#1323，新增）
+1536	closed	[grilling] FU-14 完整历史数据与模型 profile（#1323，新增）
+1537	closed	[grilling] FU-15 双跑确定性、恢复、seek、AsKnown（#1323，新增）
+1538	closed	[grilling] FU-16 paper/live 与回放同核边界（#1323，新增）
+1539	closed	[grilling] FU-17 成交/持仓唯一真账与 crosswalk（#1323，新增）
+1550	closed	[grilling] FU-19 #1304 接入映射（#1323，新增）
+1557	closed	[grilling] FU-01/03 余项：共同 cap、固定 Q 与本金批次的数值签署（#1323，P 类）
+1558	closed	[grilling] FU-02 余项：量档与逐级容量 C(ℓ) 的数值签署（#1323，P 类）
+1559	closed	[grilling] FU-01/05 余项：成本停止 θ 与四项成本输入的签署（#1323，P 类）
+1572	open	[impl] 统一所有权：聚合残差 U 逐项拆到 v4:38 清单与 E 侧 L0 逐项映射（承接 #1488）

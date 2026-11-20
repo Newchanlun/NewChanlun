@@ -1,0 +1,10 @@
+default first u32: [257813417, 407017181, 896943092, 4175973425, 2864827017, 1163259907, 618144122, 1041812380]
+default first m=2 pairs: [(1, 1), (0, 1), (1, 1), (0, 0)]
+toy first t: [18, 4, 18, 3]
+toy counts(t): {3: 2506, 4: 4927, 18: 2567}
+toy rank,t,A(ppb): (500, 3, 1)
+12-block first indices: [5, 5, 8, 5, 9, 7, 2, 4, 9, 6, 0, 9]
+12-block counts(t): {4: 181, 5: 585, 6: 3165, 12: 2273, 18: 3073, 19: 532, 20: 191}
+12-block rank,t,A(ppb): (500, 5, 2)
+three windows: [3, 2, 5]
+PASS: exact arithmetic and replay fixtures

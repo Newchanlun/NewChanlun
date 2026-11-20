@@ -1,0 +1,209 @@
+CONTEXT.md:49:具名版本化记录（`#1354/cost-stop-policy/v1`）：费率/滑点/延迟/持有成本四项输入各带 Known|ProxyLowerBound|Missing 状态，ROUNDTRIP 波幅逐级带单边 95% 下界，真实交易阈值 θ 保留用户授权硬门，普通研发选择按 ADR 0041 的代理裁定合同记来源；通过 = 下界比值 ≥ θ 且证据门满足。缺项是状态（NotEvaluable），不是 0；代理下界只能判失败。第一层 = L0 余量 + 延伸后复测；第二层 = 到底份额下界 > 判不出背驰份额上界。首份签署记录见 [ADR 0044](docs/adr/0044-cost-stop-policy-signed-instance-v1.md)（[#1559](https://github.com/xy7365527-lang/NewChanlun/issues/1559)，P0 / P1-hl-testnet 两版 v1，θ = 2/1，滑点 Missing ⟹ 成本门仍 NotEvaluable）。
+CONTEXT.md:50:_Avoid_: 用中位数读成本门；把 #907 的 2.59× 当当前通过证据；缺费率时代 0 下钻。
+.chanlun/review-results/issue853-acceptance-params-facts-20260808.md:312:> **关键后果（交给裁定方）**：按中位数看，成本门在 BTC 1m 塔的**任何已测级别都不咬**（连塔底 L0 都有 2.6 倍余量）。**但按下尾看，L0…L3 的 p10 全部 < 1**（0.31/0.38/0.43/0.78）——即「成本门咬不咬」取决于裁定方用**中位数**还是**下尾/失败比例**立判据。这两种选法给出的停止级别不同。**这是本读数最重要的一条，不是脚注。**
+.chanlun/review-results/issue853-acceptance-params-facts-20260808.md:367:**跨窗稳定性**（`:273`）：「**L0…L3 的波幅读数与单调性跨两窗稳定；L4 不稳且严重聚簇 ⟹ 表 A/B 的 L4 行（148.86 / 188.04）不可采信，请裁定方勿据以定阈值。**」机制：一趟 L4 往返中位持有 700,524 bar ≈ **486 天**，1.2M bar（≈2.3 年）窗装不下几趟。
+.chanlun/review-results/issue853-acceptance-params-facts-20260808.md:369:**分布形状**（`:147`）：「**分布强右偏，均值全部约为中位数的 2–3 倍。**……用均值会把每一级的典型波幅高估 2 倍以上。」（L0 均值/中位 = 2.12，`:141`）
+.chanlun/review-results/issue853-acceptance-params-facts-20260808.md:379:以及 §6 敏感性（`:320-322`）：ROUNDTRIP 假定持到同级第一个反向信号，**持有期资金成本/funding 没进分母** ⟹ 高级别列是**上界**；若生产改盘口成交或加真实滑点，**L0/L1 首先翻**；`:322`「真实误差若比这个下界大一个量级（例如 30 bp 而非 6 bp），分母翻倍以上，**L0 中位比值会从 2.59 掉到 ~1.4**，L0 的 p25 早已 < 1」。
+.chanlun/definitions/qujiantao.md:534:1. **第一层 —— 当前 L0 余量 + 延伸后立即复测**（#907 后裁 2026-08-05；#1354 定记录与协议，ADR 0035）：延伸之前算不出上限（L0 之下无可测对象）。第一层给出当前塔底级别的余量 `L0Margin`（ROUNDTRIP 波幅单边 95% 下界 ÷ 往返成本对用户签署的 θ），每延伸一级立即按同一探针复测新级，跌破即停、塔底回退——停止判据是逐级现场闸，不是事前上限。参数与数值不入正本（§4.2 硬条款）。
+.chanlun/definitions/qujiantao.md:1012:**同族缺陷已连带收紧（不是只修这一条）**：**N-2 两层进阶判据的第一层「成本门定上限」**（§4.5.3）原文**同样只写了「比值失效」没写置信要求** ⟹ **已回写 [探针 #907](https://github.com/xy7365527-lang/NewChanlun/issues/907) 票面**，要求那条曲线**带不确定性带 + 逐窗报 + 明写 n 与聚簇**，**不得再用点估计判**。
+.chanlun/definitions/qujiantao.md:1526:     - **★ 元教训（§7.7.4，跨图通用）**：凡「某比例超阈值就触发不可逆动作」的条款，**必须同时写清点估计还是下界／几个独立窗／每窗还是合计／覆盖多少总体**。四项缺任一项，条款就在**擦线处**失效 —— 而擦线恰恰是它最常被引用的地方。**同族缺陷已连带收紧**：N-2 第一层「成本门定上限」（§4.5.3）原亦只写点估计，**已回写 [#907](https://github.com/xy7365527-lang/NewChanlun/issues/907) 票面**要求曲线带不确定性 + 逐窗报 + 明写 n 与聚簇。
+docs/adr/0022-acceptance-criterion-parameters.md:179:    - 待接读点：[#1398](https://github.com/xy7365527-lang/NewChanlun/issues/1398)（正文 :12「原样实现单边95%下界、日历月block bootstrap……」）、[#1410](https://github.com/xy7365527-lang/NewChanlun/issues/1410)（ADR 0036:30）、[#1441](https://github.com/xy7365527-lang/NewChanlun/issues/1441)（ADR 0035 A_ℓ 下界）
+rust/src/trading/level_operating_unit.rs:1037:                // 中枢振幅 θ_q（因果滚动中位数，零前瞻）≥ k 倍往返摩擦。
+rust/src/trading/level_operating_unit.rs:1402:    /// 决策不得是被检对象自身振幅的函数），下界为成本门
+analysis/strict_form_audit.md:31:| 3b | REV：θ 自适应深度门 | **外加**（有 35课根基） | 35课:30"那些太小的级别，不足以让交易成本、交易误差等相对买卖点间波幅足够小，这样的操作……没有意义" | 35课讲的是**操作级别的一次性选择**，不是逐腿过滤门。成本下界（θ_eff≥2×friction）忠实于 35课；分位数门是工程化外推。L3 判决在册为正（OKLO+520/BRN+71.5pp）——外加但未失败的少数例外，因其本质是成本判据非择时判据 |
+.chanlun/review-results/issue1598-policy-20261026/affected-code.md:33:| `rust/src/bin/p915_capacity_frequency.rs:10-11` | 探针明确 `capacity` 与 `w(d)=(A_{ℓ−d}/A_ℓ)^(1/δ)`，不是生产 `impact_form` 字段。 | #1444 用作 Measured 来源；补窗口、n、最大月簇和不确定性带。 |
+rust/src/trading/positional_fusion.rs:31://!    如数接回。35课成本门（θ_q(k−1) 因果滚动中位数 ≥ k×friction）守卫
+.chanlun/review-results/issue915-capacity-frequency-20260805.md:41:- **L3 以上**：ES 那一格算出 `w = 35.7`（意思是「往下走一级容量变大 36 倍」）——它的 L4 中位波幅 **50.6 bp 比 L3 的 302.3 bp 还小**（阶梯反了），样本只覆盖 8 个日历月、最大单月占 24.5%。**废数。**
+.chanlun/review-results/issue915-capacity-frequency-20260805.md:104:| ROUNDTRIP 中位 (bp) L0…L4 | 79.4 / 137.9 / 260.1 / 506.1 / 77.0 | **79.4 / 137.9 / 260.1 / 506.1 / 77.0** | **逐位相同** |
+.chanlun/review-results/issue915-capacity-frequency-20260805.md:134:### 曲线一 —— `A_ℓ` ROUNDTRIP 中位波幅（bp），全史
+.chanlun/review-results/issue915-capacity-frequency-20260805.md:149:样本量与聚簇（ROUNDTRIP 样本 n ／最大单月占比）：
+.chanlun/review-results/issue915-capacity-frequency-20260805.md:258:（† ＝ 参与该比值的某一级 ROUNDTRIP 样本 n < 100；‡ ＝ 最大单月簇 > 25%。**BTC 的半窗未算：本件不重跑 BTC 全史。**）
+.chanlun/review-results/issue915-capacity-frequency-20260805.md:367:| **哪一级哪个分层** | **级别 ＝ L0→L1 这一档，且仅此一档**（L1→L2 已按每窗否掉，L2 以上测不出）。**分层 ＝ ROUNDTRIP 配对、中位数统计量、δ=0.5、1 分钟粒度、`ThetaConfig::default()`、全部买卖点不分 bit 类型**。换任一项都要重测：δ 变则全表换指数；换分位数则值变（#917 §3.5b 实测 p25↔p75 让 BTC 的 w 从 0.438 摆到 0.198）。 |
+rust/src/trading/axiom_voice.rs:17://! | 5 成本门 | 摩擦随载体涌现→参数/端口分离，k_cost≡1 钉死 | Q(k)=defined(θ_mean)∧θ_mean≥C_rt（C=端口） | 递归终止+级别去特化+震荡参与资格 |
+rust/src/trading/axiom_voice.rs:331:        // 成本门 Q(k)（公理5）：defined(θ_mean) ∧ θ_mean ≥ C_rt，k_cost≡1。
+rust/src/trading/nested_fugue.rs:914:        //    终止 = floor（阶梯下限：笔层不开一类点，77-78课）∨ 35课成本门 ──
+docs/adr/0035-cost-stop-policy-instance-and-base-extension-evidence.md:8:#907 后裁：ROUNDTRIP 配对；第一层由「延伸前算出上限」收窄为「当前 L0 余量 + 延伸后立即复测」；中位数与下尾读法给出相反结论的张力移交 #853，ADR 0022 裁定三已答「用置信下界」。RESIDUAL G-029：历史 BTC/1m、两重叠前缀窗、无置信区间、误差只有代理下界、未计持有成本，不能作当前证据。SPEC C04.4/C04.5、A-ST-037-01/02、A-FG-011-01。
+docs/adr/0035-cost-stop-policy-instance-and-base-extension-evidence.md:14:政策 id 族 `#1354/cost-stop-policy/v1`。记录 ⟨policy_id, version, profile_id, symbol, granularity, tower_base_ref, inputs{fee(Known, 费率簿引用含 source_url/retrieved_at/tier/role), slippage(Known|ProxyLowerBound|Missing), latency_error(同), holding(funding/borrow 引用 | Missing)}, amplitude{pairing=ROUNDTRIP, per_level[{level, median, lower_bound_95, n, max_month_cluster, windows[]}], probe_run_ref}, threshold{form=ratio_lb_ge_theta, theta 整数对(用户签署), authorizer, authorized_at}, evidence_gate(继承 ADR 0022 裁定六/七), valid_through, supersedes⟩。比值 `r(ℓ) = A_ℓ / (2·fee + slippage + latency_error [+ holding])`，A_ℓ 取 ROUNDTRIP 波幅单边 95% 下界（按月 block bootstrap）。通过 ⟺ `lb(r) ≥ θ` ∧ 证据门；`InsufficientEvidence` 与 `Fail` 分开。交易成本政策的 θ 仍由用户授权签署；普通研发方法和离线参数按 ADR 0041「授权来源与生效边界」由代理独审裁定，不冒充用户签名、不自动启用交易。系统拒绝 θ < 1（约束，非默认值）。全部定点整数。
+docs/adr/0035-cost-stop-policy-instance-and-base-extension-evidence.md:34:具体算法：按所引 block_unit 将该窗事件分块，保留块内全部事件及依赖；从该窗 m 个非空块有放回抽 m 块，每次取合并事件的分子总数/分母总数，不平均各块比例。method_id=`descent-share/block-bootstrap/1`、resamples=10000、seed=0；PRNG固定PCG-XSH-RR 64/32（stream=1），块索引用拒绝取模避免偏差。以上算法标识/次数/随机种子和实现版本均在读数前记录；它们属于Q6已批准方法，不加入或改写evidence_gate六字段。每次重采样按抽样块计重复，得B个精确有理占比；升序排列，取第 ceil((1−confidence)×B) 项（1-based）为下界，不作插值。固定种子仅保证可复现，不替代区间有效性；在#1441实现时以独立定义oracle和同seed双跑检验方法。
+rust/src/trading/depth_ref.rs:114:    /// 该层 θ 因果均值（035:30"平均的买卖点间波幅"字面泛函——公理5 工位
+.chanlun/review-results/issue1598-policy-20261026/draft.md:116:推荐具体算法：按所引 block_unit 将该窗事件分块，保留块内全部事件及依赖；从该窗 m 个非空块有放回抽 m 块，每次取合并事件的分子总数/分母总数，不平均各块比例。建议 method_id=`descent-share/block-bootstrap/1`、resamples=10000、seed=0；PRNG建议固定PCG-XSH-RR 64/32（stream=1），块索引用拒绝取模避免偏差。以上算法标识/次数/随机种子和实现版本均在读数前记录；它们只属于Q6方法推荐，不加入或改写evidence_gate六字段。每次重采样按抽样块计重复，得B个精确有理占比；升序排列，取第 ceil((1−confidence)×B) 项（1-based）为下界，不作插值。固定种子仅保证可复现，不替代区间有效性；在#1441实现时以独立定义oracle和同seed双跑检验方法。
+rust/src/trading/positional.rs:680:    /// 几何接回，049:64）、44课铰链升级、成本门 k_cost≡1（θ 因果均值）、
+docs/adr/0017-chong-quantity-numerator-shortdiff-amplitude.md:146:- `A_ℓ` ＝ [#907](https://github.com/xy7365527-lang/NewChanlun/issues/907) 的 **ROUNDTRIP 中位波幅**（进 → 同级最近反向信号，一趟往返）；
+docs/adr/0017-chong-quantity-numerator-shortdiff-amplitude.md:239:- **L3 以上**：出现 `w = 35.7` 废数（ES 的 L4 中位波幅 **50.6 bp 比 L3 的 302.3 bp 还小**，阶梯反了）。
+.chanlun/review-results/issue907-cost-gate-level-20260805.md:16:| 口径 | 波幅随级别 | 比值跌破 1 的级别（中位数，VIP0 taker） |
+.chanlun/review-results/issue907-cost-gate-level-20260805.md:18:| **ROUNDTRIP**（入场信号 → 同级最近反向信号，**一趟往返**） | **单调递增**（L0 68.5 → L4 3572.7 bp） | **L0…L4 中位数全部 > 1**（最低 L0 = 2.59）⟹ 在已测级别里**没有**跌破 |
+.chanlun/review-results/issue907-cost-gate-level-20260805.md:23:**关键后果（交给裁定方）**：按中位数看，成本门在 BTC 1m 塔的**任何已测级别都不咬**（连塔底 L0 都有 2.6 倍余量）。**但按下尾看，L0…L3 的 p10 全部 < 1**（0.31/0.38/0.43/0.78）——即「成本门咬不咬」取决于裁定方用**中位数**还是**下尾/失败比例**立判据。这两种选法给出的停止级别不同。**这是本读数最重要的一条，不是脚注。**
+.chanlun/review-results/issue907-cost-gate-level-20260805.md:147:> **分布强右偏，均值全部约为中位数的 2–3 倍。**票面「不只均值」的要求成立且必要——用均值会把每一级的典型波幅高估 2 倍以上。下面比值表**以中位数为主**，并列 p10/p25 下尾。
+.chanlun/review-results/issue907-cost-gate-level-20260805.md:209:**「跌破成本」的样本占比（由上表分位数**夹逼**，非精确计数）**，VIP0，ROUNDTRIP：
+.chanlun/review-results/issue907-cost-gate-level-20260805.md:239:**对照**：`GAPBARS_ROUNDTRIP` 中位间隔 = 553 / 1661 / 5952 / 28390 / **700524** bar，**单调暴涨**，符合「级别越高、一趟往返持有越久」。⟹ ROUNDTRIP 没有被簇污染。
+.chanlun/review-results/issue907-cost-gate-level-20260805.md:263:**跨窗对照（ROUNDTRIP 中位数 bp）**
+.chanlun/review-results/issue907-cost-gate-level-20260805.md:273:**结论**：**L0…L3 的波幅读数与单调性跨两窗稳定；L4 不稳且严重聚簇 ⟹ 表 A/B 的 L4 行（148.86 / 188.04）不可采信，请裁定方勿据以定阈值。** L4 不稳的机制清楚：一趟 L4 往返中位持有 700,524 bar ≈ **486 天**，1.2M bar（≈2.3 年）的窗**装不下几趟**，前缀窗必然截断。
+.chanlun/review-results/issue907-cost-gate-level-20260805.md:320:2. **ROUNDTRIP 的隐含持有假设**。它假定「进了就一直持到同级第一个反向信号」，L4 中位持有 486 天。**这趟持有期内的资金成本/funding 没进分母**（§6.7）⟹ **表 A/B 的高级别列是上界**。补上持有成本后高级别比值会降，可能降很多。
+.chanlun/review-results/issue907-cost-gate-level-20260805.md:322:4. **交易误差只取了 1 根 K 的下界**。真实误差若比这个下界大一个量级（例如 30 bp 而非 6 bp），分母翻倍以上，**L0 中位比值会从 2.59 掉到 ~1.4**，L0 的 p25 早已 < 1。⟹ **「成本门在 L0 不咬」这个结论对误差项的真实大小很敏感，而真实值查不到。**
+rust/src/trading/runner.rs:497:            "sub_cost_gate 要求 sub_cost_k 为正有限数（成本门下限 = k×friction）；\
+.chanlun/review-results/issue925-lambda-implementations-20260807.md:23:> 同名异物排除（已逐条打开）：`rust/src/theta_v0/backtest/capture_oos.rs:49-51` 的 `LAMBDA_LO/HI/Q` 是**成交价滑点分位参数**（0.05%~1.0%），与尺度比无关；`rust/src/bin/p112_*.rs:370` / `p113_*.rs:184,207` 的 `lambda_c` / `lambda_a` 是**走势 C/A 段起点索引**，与尺度比无关。
+rust/src/trading/level_operating_unit_tests.rs:299:    // 成本门参照：12 个 1% 振幅中枢（θ_q=1% ≥ 2×10bps 下界）
+rust/src/trading/level_operating_unit_tests.rs:381:    // 成本门全程未拒（参照充足且振幅过下界）
+.chanlun/review-results/issue1677-evidence-gate-review-20261022.md:22:- **R6 PASS**：受影响票清单覆盖 AUDIT A-02 行点名的 #1559（已关）、#1398/#1410、ADR 0036（#1356 已关）及拆票链 #1598/#1605/#1340，另含 #1441（ADR 0035 A_ℓ 下界消费者）。边变化明确：保留 #1677 → #1605（实核 1605 blocked_by = 1586 closed, 1677 open，一致）；新增 #1605 → #1398 并给出理由（#1398:12「原样实现」须经读取器读版本，ADR 0041:25），实核 1398 现 blocked_by 1377/1378/1361/1362/1356，与 #1605/#1677 无环；#1410 经 #1398 传递不加边（实核 1410 已被 1398 阻塞）；#1441 不加边并给出理由（实核被 1440 阻塞，ADR 0035 现文与 v1 逐位相同）；#1598 不加边只发评论；已关票不改。AUDIT C-19 行点名的 #1358/#1468 属 C-19 记录范围，由 #1605 承接，不在本票边清单内合理。
+rust/src/trading/config.rs:73:///   方案A（锚自身振幅的分位数）= 自指退化（单个数无分位数）；
+rust/src/trading/config.rs:81:    /// θ_t(k) = 该层最近 window 个中枢相对振幅的 q 分位（nearest-rank，
+rust/src/trading/config.rs:343:    /// osc 开腿前提 = 锚层典型中枢相对振幅 θ_q（DepthRef 因果滚动中位数，
+rust/src/trading/config.rs:378:    /// 成本门下界倍数 k（θ 相对化落地任务，2026-06-11）：AdaptiveQuantile
+rust/src/trading/config.rs:381:    /// 下界是相对化语义的严格组成部分而非可选项（35课成本门的 REV 主腿形态）。
+rust/src/trading/config.rs:385:    /// 与 sub_friction_rt 同值不同消费点——本值供 REV 主腿成本门下界）。
+rust/src/trading/config.rs:496:    /// 用该层中枢振幅的因果滚动中位数 θ_q（DepthRef，零前瞻）度量：
+rust/src/trading/config.rs:504:    /// 成本门倍数 k（θ 下限 = k × sub_friction_rt；35课"不够小"的量化档）。
+rust/src/trading/config.rs:575:    /// 滚动中位数，零前瞻）≥ theta_cost_k × friction_rt——振幅不足的级别
+rust/src/trading/config.rs:582:/// 成本门 θ_q 的分位数（中位数 = 该层"典型"中枢振幅；35课判据是级别的
+rust/src/trading/config.rs:830:        // 路径的默认门——AdaptiveQuantile q=0.25 + 成本门下界
+rust/src/trading/config.rs:903:        // θ 自适应/成本门下界继承 V2oa25（循环开腿的成本门用同一
+rust/src/trading/config.rs:1408:            // 成本门下界常数（Adaptive 分支无条件生效）：2 × 10bps = 0.2%
+rust/src/trading/config.rs:1426:        // 其余继承 V2oa25：θ 自适应 + 成本门下界 + 震荡型触发集
+rust/src/trading/config.rs:1678:        // = 0.2% 相对振幅下限——ledger_cost_gate 同对常数）
+analysis/p1_dual_gate_backtest.py:9:            该层中枢振幅因果滚动中位数不够覆盖 2 倍往返成本 ⇒ 级别自动关闭）
+rust/src/trading/types.rs:480:    /// 振幅 θ_q（DepthRef 因果滚动中位数）< theta_cost_k × friction_rt
+rust/src/trading/types.rs:541:    /// θ 成本门下界触发：分位数 < k×friction_rt，θ_eff 被抬到下界的取值次数
+rust/src/trading/types.rs:542:    /// （仅 AdaptiveQuantile 计数——下界激活 = 该层参照振幅不足覆盖 k 倍往返成本）。
+rust/src/trading/level_sub_lou.rs:339:                // 中枢振幅 θ_q（DepthRef 因果滚动中位数，零前瞻）不够覆盖
+analysis/k4_config_transition_matrix_1min.py:360:        L.append(f"| {gamma_label(k)} | {len(v)} | {mean_d:.2f} 天 | {max(v)} 天 | {sum(v)} 天 |")
+analysis/unified_config_regime_research.md:332:**g6 成本门**（[35:30]+[38:32]+[53:34]「如果中枢级别足够」）：θ_q(j) ≥ 摩擦下限。H4 已实装，摩擦调整面 5/5 全正，唯一自身口径无白名单的轴。
+analysis/unified_config_regime_research.md:349:- **级别塔**：j ∈ [j_min, j_max]。**下界 j_min 由成本门截断**：[35:30]「那些太小的级别，不足以让交易成本、交易误差等相对买卖点间波幅足够小……没有意义」+ [53:26]「人需要反应的时间、有交易成本等等」。**上界 j_max 由资金容纳量与卖点稀疏度决定**：[53:34]「与该级别能容纳的资金量有关」；[26:34] 级别↔量。
+.chanlun/review-results/dof-audit-20261020/AUDIT.md:49:| A-02 | `docs/adr/0022-acceptance-criterion-parameters.md:28-33`（单边 95%、日历月块）、`:45`（n≥30、月块≥12）、`:51-58`（≥3 窗、各窗过线、≥50% 覆盖） | 写死在 ADR 正文 | T | 溯源表自标裁定三 `[新缠论:选择]`（「原文留白且无统计法可援」）、裁定六 `[新缠论:选择]`；这些是统计参数，原文无数。ADR 0035 裁定一的 `evidence_gate` 只写「继承 ADR 0022 裁定六/七」，没有把数值落成记录字段。代价：验收参数可调会带来看数后改参的风险，故必须在读数前签版本（预登记），版本号随每份读数输出 | 95% / 日历月 / n≥30 / 月块≥12 / ≥3 窗 / ≥50%（现行） | #1559（成本门记录）、#1398/#1410（运营统计）、ADR 0036：在 `evidence_gate` 记录化为 `{confidence, block_unit, min_events, min_blocks, min_windows, min_coverage}`，读数前签署，读数带版本 | 中 |
+.chanlun/review-results/dof-audit-20261020/AUDIT.md:135:| #1354 | [grilling] 成本停止 policy 实例与基底进阶证据 | 部分 | 同 candidates #6。θ<1 拒收是有效域下界，依据 `035:30`，O 或 E。签署前不给值一项并入 B-10 |
+.chanlun/review-results/dof-audit-20261020/AUDIT.md:182:| C-21 | 成本门旧族重复常数：`SUB_COST_K 2.0`（spiral/params.rs:51、fugue_v3/mod.rs:132、trading/positional_fusion.rs:89）、`SUB_FRICTION_RT 0.001`（spiral :54、fugue_v3 :135、positional_fusion :90；`axiom_voice.rs:71` 用 `2*SUB_FRICTION_RT`）、`SUB_COST_Q 0.5`（spiral :57、fugue_v3 :138、trading/config.rs:584）、`SUB_COST_MIN_OBS 10`（spiral :60、fugue_v3 :141、config.rs:587）、`DEPTH_REF_WINDOW 50`（spiral :63、trading/depth_ref.rs:25）、`SUB_LIQ_FACTOR 2.0`（spiral :69、fugue_v3 :145） | 写死，多处重复 | T | 注释标为「35课成本门参数」L2。成本门语义是 `[旧缠论]`，但阈值、分位、样本门槛属参数。现役正本已有 ADR 0035 的签署 θ，这几组旧常数是平行副本 | 现行值（只作旧线回放用） | #1559、TB-10（#1368）、#1386。改法：v2 留用的部分改读 ADR 0035 policy 记录；旧线随终态删除 | 中 |
+.chanlun/review-results/dof-audit-20261020/candidates.md:16:| 6 | ADR 0035 `:27` 被否「中位数读法」「第二层用占比阈值」 | 被否 | 成本门语义 `[旧缠论]`，其余 `[新缠论:选择]` | 「中位数读法」对比单边 95% 下界是统计口径的合法备选（代价：偏乐观），改可调待判；「θ 固定为 1」被否的是写死，现行 θ 已是签署字段，合通则；「缺项代 0」「代理下界充 Known」维持排除（伪造数据） | 单边 95% 下界（现行） | #1559 |
+.chanlun/review-results/issue917-market-impact-proxy-20260805.md:330:| **A_ℓ** | #907 ROUNDTRIP 中位：68.5 / 116.3 / 201.9 / 506.6 / 3572.7 bp | **#907 实测**（BTC 全史 100%） | L4 跨窗不稳 46×，**不可用**；分布右偏（均值/中位 2.1–2.9） | ✅（#907 已产） |
+.chanlun/review-results/issue917-market-impact-proxy-20260805.md:408:| 级别 | 中位波幅 A_ℓ (bp) | n |
+.chanlun/review-results/issue917-market-impact-proxy-20260805.md:433:| δ | w(1)（中位波幅） | 1/w |
+.chanlun/review-results/issue917-market-impact-proxy-20260805.md:440:**(b) 用波幅分布的哪个分位数**（#907 明写分布强右偏，均值/中位 = 2.1–2.9）：
+.chanlun/review-results/issue917-market-impact-proxy-20260805.md:476:4. **中位数不是保守值。** #907 自陈 L0–L3 的 p10 比值全 < 1（0.31/0.38/0.43/0.78）⟹ 用中位波幅算出的容量是**中位情形**的容量，不是下界。**要下界，得用 p10/p25 重算，w(1) 会变（§3.5b）。**
+.chanlun/review-results/issue1339-r2-spec-20260909/view/sources/newchanlun-1339-requirements-20260908/author/COVERAGE.md:49:| ST-037 | [区间套成本停止、塔底及阶段进阶证据](parts/STRUCTURE.md) | 当前基底与经济下界；费用/误差/波幅输入及未定项；停止原因/最后可用锚；逐窗不确定性与n/聚簇；阶段条件达成证据 | OB-002、OB-003、OB-005、OB-011、OB-013＋通用合同 | 区间套步骤及停止原因、证书详情；从使用该结构的重追到相应判据。 同源只读展示对象、轴值、关系、判据证据、版本和获知时间；按结构锚回到组成对象，不自行重判。 | AC-01、AC-02、AC-04、AC-09、AC-11、AC-15 | EV-013、EV-014（静态导航；未运行） |
+.chanlun/review-results/issue1339-r2-spec-20260909/view/sources/newchanlun-1339-requirements-20260908/author/COVERAGE.md:67:| FG-011 | [可操作下限包含成本、误差与交易制度](parts/FUGUE.md) | 价差/费率/延迟/波幅、制度配置、测量有效域、准入通过/不足/不适用原因。 | OB-002、OB-007、OB-011、OB-012、OB-013、OB-014＋通用合同 | 逐重详情：目标、结构依据、Voice、阶段、筹码及完整经营史；可沿事件进入账目和执行记录。 | AC-01、AC-04、AC-06、AC-09、AC-15 | EV-010、EV-013（静态导航；未运行） |
+.chanlun/review-results/issue844-multi-fugue-asset-census-20260801.md:87:| `analysis/organic_fugue_v2_design.md` | 1481 | 有机赋格 v2：v1 矛盾诊断与逐点修正（C1-C7 + D1-D2 + K1-K13） | `:57`「**L\* 分辨率下界**（命题 3.4 + E6 实测爆仓）：段振幅 < 信号粒度+摩擦的层级……floor=segment 的依据」；`:43` 主升段休止符；`:220`「也是休止符（中途不参与短差）的根据」 | `:3`「设计稿（不含实现）」 |
+.chanlun/review-results/issue844-multi-fugue-asset-census-20260801.md:225:| D8 | #842 **R-3**「选级别是可算的最优化：硬约束 ＝ 交易成本 + 交易误差 ≪ 该级别买卖点间平均波幅，选满足约束的最低级」（`035:30`） | `recursive_regularization_theory.md:90` 命题 3.4「声部 L 可操作，当且仅当其域的期望震荡振幅超过信号分辨粒度与执行摩擦之和：**amp(D_L) > ρ**……存在最低可操作级别 **L\***」+ `:92-96` OKLO L2 校准（ρ ≈ 1% 量级；同中枢配对中位间隔仅 32 bars；bar 级 churn 17,424 次净毁 −11,973；floor≥segment 才进入正收益域） | ✅ **同一判据，且存量带 L2 校准与已实装的 floor 参数**。R-3 是形式，存量是形式 + 一次实测标定 |
+.chanlun/review-results/issue844-multi-fugue-asset-census-20260801.md:236:| **R3** `049:60` 级别门控仓内缺失 | **部分回答，但是另一套机制** | `recursive_regularization_theory.md:90` 命题 3.4 L\*（**振幅/分辨率比**门）+ `:98`「不是小级别信号更不准，而是**小级别域的振幅低于操作点的分辨率**——三元组在 L\* 以下结构性退化」；`organic_fugue_v2_design.md:57`「L\* 分辨率下界……floor=segment 的依据」；`concurrent_fugue_deep_think.md:259-260`「**期货上低级别声部先验关闭**」；已实装为 floor 参数（`multi_level_fugue_cross_asset.md:33-34` floor=segment 9/9 全胜升 L3） | **不够格顶替 R3**。`049:60` 的门是「小级别走不完三阶段（成本归不了 0）」，存量的门是「小级别振幅低于摩擦，短差期望翻负」——**两个不同判据、不同后果**（前者禁阶段推进，后者禁开腿）。代码侧独立复核确认：`ledger.rs` 全文件 `grep -n "level"` **零命中**，`advance_to`(:112)/`stage_progression`(`closed_loop/transition.rs:362`) 签名均无 level 参数 ⟹ **`049:60` 那个门在仓内仍是「未查到」**（检索式已列在附录），不写「不受影响」 |
+.chanlun/review-results/issue1339-r2-spec-20260909/view/sources/newchanlun-1339-requirements-20260908/author/parts/FUGUE.md:195:边界：成本/误差相对波幅的量化阈值和现场交易权限仍待定；成本门与塔底按先到者终止，不能人为提前停。进一步下延已批准方向但须满足成本不确定性/逐窗/样本/聚簇及已到现底条件；不能默认手续费为0、T+0或无限精度。
+.chanlun/review-results/issue1340-publication-20260909/payload/inputs/RESIDUAL-TICKET-PLAN.json:2662:        "docs/adr/0017-chong-quantity-numerator-shortdiff-amplitude.md:144:- `A_ℓ` ＝ [#907](https://github.com/xy7365527-lang/NewChanlun/issues/907) 的 **ROUNDTRIP 中位波幅**（进 → 同级最近反向信号，一趟往返）；",
+.chanlun/review-results/issue1340-publication-20260909/payload/inputs/RESIDUAL-TICKET-PLAN.json:5033:      "publication_body_template": "Part of #1323\n\n已批准基准：{{APPROVED_SPEC_PERMALINK}}；S2-R1 清单 SHA256 `38e3176b6dfff456b8e3704410401c3bedddf0671751464bb9ea5b829e460260`。\n本票承接 G-029；#1339 为需求来源。既有 closed 裁定只作来源，本票不据此声称成功路径完成。\n\n待完成：\n- 成本项目、单位、阈值、采样窗、policy 版本/有效域和数据缺项状态。\n- 按 #907 后裁的第一层材料以及第二层到底证据；不足则相关进阶不启用并保留完整未完成义务。\n\n直接继承：\n- ROUNDTRIP 与当前 L0 余量+延伸后立即复测直接继承；第二层到底证据不取消；阶段二不因 SPEC 批准自动开启。\n\n可独立备料：\n- 先同步 #907：ROUNDTRIP 配对，阶段二第一层使用当前 L0 余量、延伸后立即复测。\n- 目标 profile 确认后查官方费率/资金与持有成本、滑点/延迟来源；分别测真实不确定性和代理下界。\n- 由 TB-02/07 的具名 task 探针提供各层成本余量、置信区间、第二层实际到底失败分类；不得把旧两个重叠 BTC/1m 窗当当前证据。\n\n仅阻以下成功子义务，不阻无关开工：\n- TB-02：ST-037 依赖具体成本门的操作级别/下钻停止成功（AT-01,AT-02）。\n- TB-06：依赖成本余量的容量/层级进阶成功（AT-06）。\n- TB-07：现行成本 policy 和输入来源按当时可知重放（AT-14）。\n- TB-08：指定真实 profile 的成本有效域验证（AT-15）。\n\n仍可继续：\n- #907 已裁文字同步，cost policy/输入来源接口，缺参和证据不足状态；未依赖进阶的结构能力。\n\n后续讨论节拍：一次一问；不自动代答。此票发布不等于已向用户提问。\n首个备好材料后再问的问题：在具名运行 profile 的真实成本与误差证据齐备后，采用哪一份成本停止阈值和政策有效域？\n激活条件：AFTER_PUBLICATION\n\n来源：\n- .chanlun/definitions/qujiantao.md:408-507\n- https://github.com/xy7365527-lang/NewChanlun/issues/907#issuecomment-5194145006\n- https://github.com/xy7365527-lang/NewChanlun/issues/917\n\n关票条件：具体规则/实例或适用域证据已完成并落规范所需正本/ADR与受影响清单；对应实施/证明工作点名回填到 TB。只写 AwaitingPolicy/Unsupported 的正确失败，不替代本票依赖的必需成功路径。\n本票不授权真实下单、转账、充值、账户变更或合入 main；不填写未经确认的资金/费率/退出默认。\n",
+docs/covering_space_asymmetry.md:195:> 振幅/历史分位）。**MAM 的事前可估性是 L2，不是 L0**——强趋势/逼空时 MAM_actual 可远超
+docs/covering_space_asymmetry.md:437:  解有效域/四重换维"已结算分离记录。**两个强候选语法记录**：(a)「成本门双边性：摩擦下界
+analysis/spiral_solution_to_underperformance.md:54:3. 禁 spawn_seg 须把允许 spawn 的父级别下界从 move(L1) 抬高，或在 move(L1) 父处加门。前者改 T₈/T₂₈ 结构定义（否定 move(L1) 是势源，违缠师第 67/71 课线段=次级别走势本体）；后者就是成本门 θ 振幅门（标的依赖）。**故无「从推论推出的零参数 segment-spawn 禁令」。**
+analysis/spiral_solution_to_underperformance.md:58:**非零参数（zero_parameter=false）。** 成本门 r_min 由 `depth_ref.theta()` 决定，θ(k)=最近 window 个中枢相对振幅 (ZG−ZD)/c 的 q 分位（`depth_ref.rs:61,88-110`），是价格振幅。价格是螺旋嵌入坐标（螺旋⊥价格，C2），不在 D∞ 三坐标 {φ,r,ε} 中。
+analysis/spiral_solution_to_underperformance.md:249:- **方向 A（r 下界）/方向 C（ε 翻转 r 门槛）都瞄准此问题，都被拒/否定**：A 证明零参数 r_min 在成本门层不可能（C2），C 证明非对称 r 门槛违 T₂₅/T₅₇/C3。
+.chanlun/review-results/issue1339-r2-spec-20260909/payload/sources/newchanlun-1339-requirements-20260908/author/COVERAGE.md:47:| ST-037 | [区间套成本停止、塔底及阶段进阶证据](/tmp/newchanlun-1339-requirements-20260908/author/parts/STRUCTURE.md) | 当前基底与经济下界；费用/误差/波幅输入及未定项；停止原因/最后可用锚；逐窗不确定性与n/聚簇；阶段条件达成证据 | OB-002、OB-003、OB-005、OB-011、OB-013＋通用合同 | 区间套步骤及停止原因、证书详情；从使用该结构的重追到相应判据。 同源只读展示对象、轴值、关系、判据证据、版本和获知时间；按结构锚回到组成对象，不自行重判。 | AC-01、AC-02、AC-04、AC-09、AC-11、AC-15 | EV-013、EV-014（静态导航；未运行） |
+.chanlun/review-results/issue1339-r2-spec-20260909/payload/sources/newchanlun-1339-requirements-20260908/author/COVERAGE.md:65:| FG-011 | [可操作下限包含成本、误差与交易制度](/tmp/newchanlun-1339-requirements-20260908/author/parts/FUGUE.md) | 价差/费率/延迟/波幅、制度配置、测量有效域、准入通过/不足/不适用原因。 | OB-002、OB-007、OB-011、OB-012、OB-013、OB-014＋通用合同 | 逐重详情：目标、结构依据、Voice、阶段、筹码及完整经营史；可沿事件进入账目和执行记录。 | AC-01、AC-04、AC-06、AC-09、AC-15 | EV-010、EV-013（静态导航；未运行） |
+.chanlun/review-results/issue1339-r2-spec-20260909/payload/sources/newchanlun-1339-requirements-20260908/author/COVERAGE.json:10385:      "applicable_domain": "成本/误差相对波幅的量化阈值和现场交易权限仍待定；成本门与塔底按先到者终止，不能人为提前停。进一步下延已批准方向但须满足成本不确定性/逐窗/样本/聚簇及已到现底条件；不能默认手续费为0、T+0或无限精度。",
+.chanlun/review-results/issue1339-r2-spec-20260909/payload/sources/newchanlun-1339-requirements-20260908/author/parts/FUGUE.md:193:边界：成本/误差相对波幅的量化阈值和现场交易权限仍待定；成本门与塔底按先到者终止，不能人为提前停。进一步下延已批准方向但须满足成本不确定性/逐窗/样本/聚簇及已到现底条件；不能默认手续费为0、T+0或无限精度。
+.chanlun/review-results/issue1339-r2-spec-20260909/payload/sources/newchanlun-1339-requirements-20260908/author/parts/FUGUE.json:478:      "boundary": "成本/误差相对波幅的量化阈值和现场交易权限仍待定；成本门与塔底按先到者终止，不能人为提前停。进一步下延已批准方向但须满足成本不确定性/逐窗/样本/聚簇及已到现底条件；不能默认手续费为0、T+0或无限精度。",
+.chanlun/review-results/issue1339-r2-spec-20260909/payload/sources/newchanlun-1339-architecture-20260908/author/INDEPENDENT-DESIGN.json:4184:      "retained_boundary_or_unknown": "成本/误差相对波幅的量化阈值和现场交易权限仍待定；成本门与塔底按先到者终止，不能人为提前停。进一步下延已批准方向但须满足成本不确定性/逐窗/样本/聚簇及已到现底条件；不能默认手续费为0、T+0或无限精度。",
+.chanlun/review-results/issue1340-publication-20260909/payload/inputs/TB01-PARENT-CONTRIBUTION.json:6235:      "source_requirement_locator_text": "成本门与塔底构成两个限制，先到者停止；不能硬编码日历级别或强制所有层有一类。阶段二向笔/成交延伸的方向已定但有条件。#907后裁有效：阶段二第一层给当前L0余量，延伸后立即复测，并使用ROUNDTRIP配对；继续保留第二层实际到底/失败分类证据，以及具体成本policy和足够不确定性证据。历史BTC/1m和两重叠前缀窗未算置信区间、误差仅代理下界且未计holding costs，不能当当前进阶已经通过。",
+.chanlun/review-results/issue1339-r2-spec-20260909/view/spec/inputs/SPEC-COVERAGE-INPUT.md:514:| ST-037 | 成本门与塔底谁先到谁停止已经确定，不给费用/波幅参数默认值。#907后裁有效：阶段二第一层给当前L0余量，延伸后立即复测，并使用ROUNDTRIP配对；继续保留第二层实际到底/失败分类证据，以及具体成本policy和足够不确定性证据。历史BTC/1m和两重叠前缀窗未算置信区间、误差仅代理下界且未计holding costs，不能当当前进阶已经通过。 |
+.chanlun/review-results/issue1339-r2-spec-20260909/view/spec/inputs/SPEC-COVERAGE-INPUT.md:515:| FG-011 | 当前成本/误差/波幅阈值和场所权限实例仍待，不默认0费用、T+0或无限精度；成本门与塔底先到停。#907后裁有效：阶段二第一层给当前L0余量，延伸后立即复测，并使用ROUNDTRIP配对；继续保留第二层实际到底/失败分类证据，以及具体成本policy和足够不确定性证据。历史BTC/1m和两重叠前缀窗未算置信区间、误差仅代理下界且未计holding costs，不能当当前进阶已经通过。 |
+analysis/cl1s_theta_relative_rev.md:28:| n_rev_theta_cost_floor | 18,992 | **成本下界生效次数 ≈ 全候选**——秒级上 P25 分位低于摩擦下界，实际守门的是成本门 |
+analysis/cl1s_theta_relative_rev.md:39:2. **守门权移交成本门**：秒级上 θ_P25 几乎恒低于成本下界（floor 生效 18,992
+.chanlun/review-results/issue1339-r2-spec-20260909/payload/spec/inputs/SPEC-COVERAGE-INPUT.md:512:| ST-037 | 成本门与塔底谁先到谁停止已经确定，不给费用/波幅参数默认值。#907后裁有效：阶段二第一层给当前L0余量，延伸后立即复测，并使用ROUNDTRIP配对；继续保留第二层实际到底/失败分类证据，以及具体成本policy和足够不确定性证据。历史BTC/1m和两重叠前缀窗未算置信区间、误差仅代理下界且未计holding costs，不能当当前进阶已经通过。 |
+.chanlun/review-results/issue1339-r2-spec-20260909/payload/spec/inputs/SPEC-COVERAGE-INPUT.md:513:| FG-011 | 当前成本/误差/波幅阈值和场所权限实例仍待，不默认0费用、T+0或无限精度；成本门与塔底先到停。#907后裁有效：阶段二第一层给当前L0余量，延伸后立即复测，并使用ROUNDTRIP配对；继续保留第二层实际到底/失败分类证据，以及具体成本policy和足够不确定性证据。历史BTC/1m和两重叠前缀窗未算置信区间、误差仅代理下界且未计holding costs，不能当当前进阶已经通过。 |
+.chanlun/review-results/issue1339-r2-spec-20260909/payload/spec/inputs/SPEC-COVERAGE-INPUT.json:3254:      "criterion_or_requirement": "成本门与塔底构成两个限制，先到者停止；不能硬编码日历级别或强制所有层有一类。阶段二向笔/成交延伸的方向已定但有条件。#907后裁有效：阶段二第一层给当前L0余量，延伸后立即复测，并使用ROUNDTRIP配对；继续保留第二层实际到底/失败分类证据，以及具体成本policy和足够不确定性证据。历史BTC/1m和两重叠前缀窗未算置信区间、误差仅代理下界且未计holding costs，不能当当前进阶已经通过。",
+.chanlun/review-results/issue1339-r2-spec-20260909/payload/spec/inputs/SPEC-COVERAGE-INPUT.json:3314:      "retained_boundary": "成本门与塔底谁先到谁停止已经确定，不给费用/波幅参数默认值。#907后裁有效：阶段二第一层给当前L0余量，延伸后立即复测，并使用ROUNDTRIP配对；继续保留第二层实际到底/失败分类证据，以及具体成本policy和足够不确定性证据。历史BTC/1m和两重叠前缀窗未算置信区间、误差仅代理下界且未计holding costs，不能当当前进阶已经通过。",
+.chanlun/review-results/issue1339-r2-spec-20260909/payload/spec/inputs/SPEC-COVERAGE-INPUT.json:4759:      "retained_boundary": "当前成本/误差/波幅阈值和场所权限实例仍待，不默认0费用、T+0或无限精度；成本门与塔底先到停。#907后裁有效：阶段二第一层给当前L0余量，延伸后立即复测，并使用ROUNDTRIP配对；继续保留第二层实际到底/失败分类证据，以及具体成本policy和足够不确定性证据。历史BTC/1m和两重叠前缀窗未算置信区间、误差仅代理下界且未计holding costs，不能当当前进阶已经通过。",
+.chanlun/review-results/issue1339-r2-spec-20260909/payload/spec/inputs/SPEC-COVERAGE-INPUT.json:4763:        "retained_boundary": "成本/误差相对波幅的量化阈值和现场交易权限仍待定；成本门与塔底按先到者终止，不能人为提前停。进一步下延已批准方向但须满足成本不确定性/逐窗/样本/聚簇及已到现底条件；不能默认手续费为0、T+0或无限精度。",
+.chanlun/review-results/issue1339-r2-spec-20260909/payload/spec/inputs/SPEC-COVERAGE-INPUT.json:4764:        "applicable_domain": "成本/误差相对波幅的量化阈值和现场交易权限仍待定；成本门与塔底按先到者终止，不能人为提前停。进一步下延已批准方向但须满足成本不确定性/逐窗/样本/聚簇及已到现底条件；不能默认手续费为0、T+0或无限精度。"
+.chanlun/review-results/issue1339-r2-spec-20260909/payload/spec/inputs/SPEC-COVERAGE-INPUT.json:15801:      "legal_combinations_and_exclusions": "停止=cost_stop OR at_base；两触发可同真且完整保留。当前实际基底及允许变化要有版本。#907后裁有效：阶段二第一层给当前L0余量，延伸后立即复测，并使用ROUNDTRIP配对；继续保留第二层实际到底/失败分类证据，以及具体成本policy和足够不确定性证据。历史BTC/1m和两重叠前缀窗未算置信区间、误差仅代理下界且未计holding costs，不能当当前进阶已经通过。",
+rust/src/bin/p915_capacity_frequency.rs:17://! 1. **`A_ℓ` 波幅阶梯** —— 逐级 ROUNDTRIP 中位波幅（**口径照抄 #907，不重裁**：进 → 同级
+analysis/_p0p1/p0c_ladder_cost.md:54:| QQQ | **ladder3（走势级）** | 比值 2.14 临界；ladder2 比值 0.91 中位振幅连成本都覆盖不了 |
+analysis/_p0p1/p0c_ladder_cost.md:96:  P50/成本 < 2（成本占中位可兑现波幅的一半以上）。
+analysis/_p0p1/p1_dual_gate.md:46:ladder2 尝试因果滚动中位数 ≥ 0.2% 过门。即：**F1 depth=1 通道上成本门的
+analysis/_p0p1/p1_dual_gate.md:122:   需要新的振幅参照（如 D3 翻转间 close 摆幅的滚动分位），那是新工位。
+analysis/organic_fugue_v2_design.md:57:3. **L\* 分辨率下界**（命题 3.4 + E6 实测爆仓）：段振幅 < 信号粒度+摩擦的层级，三元组退化——结构上存在但操作上不可吃（floor=segment 的依据）；
+rust/src/bin/p907_cost_gate_level.rs:11://! 1. 逐级「相邻买卖点间波幅」分布（p10/p25/p50/p75/p90 + 均值 + 样本数），单位 **bp**（相对幅度）。
+docs/spiral_engine_v2_architecture.md:622:| 成本门 SUB_COST_Q | 0.5 | ❌ | L2 | θ 分位 nearest-rank |
+rust/src/theta_v0/backtest/l3_delta_r_alpha.rs:1376:    eprintln!("\n===== ★LCB(μ) vs 裸 μ 选择器 L2 对比（acc-lcb-l2-vs-naive, θ={theta}, z_α_LCB={z_alpha_lcb}）=====");
+rust/src/theta_v0/backtest/l3_delta_r_alpha.rs:1377:    eprintln!("★唯一变量 = config.risk.chi_z_alpha（0=裸 μ baseline vs {z_alpha_lcb}=95% LCB）；同 μ 表/同 split/同 θ");
+rust/src/theta_v0/backtest/l3_delta_r_alpha.rs:1452:        lcb_cfg.risk.chi_z_alpha = z_alpha_lcb;
+rust/src/theta_v0/backtest/l3_delta_r_alpha.rs:1496:            match est_diag.mu_lcb(z, z_alpha_lcb) {
+rust/src/theta_v0/backtest/l3_delta_r_alpha.rs:1677:    eprintln!("\n===== ★三路对比 裸μ vs LCB vs shrinkage L2（acc-three-way-l2, θ={theta}, z_α={z_alpha_lcb}, τ²={tau_sq}）=====");
+rust/src/theta_v0/backtest/l3_delta_r_alpha.rs:1740:        lcb_cfg.risk.chi_z_alpha = z_alpha_lcb;
+rust/src/theta_v0/backtest/capture_oos.rs:540:                Some(quantile(&gaps, LAMBDA_Q).clamp(LAMBDA_LO, LAMBDA_HI))
+docs/adr/0022-acceptance-criterion-parameters.md:179:    - 待接读点：[#1398](https://github.com/xy7365527-lang/NewChanlun/issues/1398)（正文 :12「原样实现单边95%下界、日历月block bootstrap……」）、[#1410](https://github.com/xy7365527-lang/NewChanlun/issues/1410)（ADR 0036:30）、[#1441](https://github.com/xy7365527-lang/NewChanlun/issues/1441)（ADR 0035 A_ℓ 下界）
+analysis/fugue_version_i.py:51:  波幅不可忽略）。指令#3 要求纳入 bar 级。严格解法：下限改为透明参数（消除"主观排除"），
+analysis/fugue_version_i.py:683:# P4 振幅过滤阈值 θ：卖价距中枢上沿 ZG 的相对深度下限（中枢中心定理保证的最小
+analysis/fugue_version_i.py:706:    theta_amp: float = THETA_AMP     # P4+ 振幅阈值（(c−ZG)/c 下限）
+analysis/cycle38_close_ablation.md:161:- **第35课成本门**：四臂共享（θ_q ≥ 2×friction_rt，因果滚动中位数）——
+docs/adr/0017-chong-quantity-numerator-shortdiff-amplitude.md:146:- `A_ℓ` ＝ [#907](https://github.com/xy7365527-lang/NewChanlun/issues/907) 的 **ROUNDTRIP 中位波幅**（进 → 同级最近反向信号，一趟往返）；
+docs/adr/0017-chong-quantity-numerator-shortdiff-amplitude.md:239:- **L3 以上**：出现 `w = 35.7` 废数（ES 的 L4 中位波幅 **50.6 bp 比 L3 的 302.3 bp 还小**，阶梯反了）。
+analysis/interval_nesting_reverse_backtest.md:7:> P4 振幅阈值 θ=0.01（卖价距 ZG 相对深度下限；根因诊断：<1% 回调是次级别买点无法现实捕捉的噪音粒度）。P5 盘整背驰用『次级别卖点×价格≥ZG』作必要条件代理（完整盘背判定需次级别力度比较，引擎零改动约束下不可得，诚实声明）。
+analysis/interval_nesting_reverse_backtest.md:121:**4. 下游推论**：(a) 短差层的正确存在形式是**级别隔离的结构域腿**（每级别只在自己的锚中枢 [ZD,ZG]×lifetime 内操作：次级别卖点×ZG 高抛 / 锚 ZD 触线低吸 / type3 死亡逃逸），不是『卖点开/买点平』的事件配对——Version I 生产路径若启用降成本，应采 P5 的域腿 + type3 逃逸（域腿独立净现金三标的全正：OKLO +32339 / QQQ +8070 / BRN +15808），弃 kind 盲配对与买回侧次级别合取。(b) BSP 事件流（bsp_events，每 ladder 独立流 + 中枢锚点）现已是磁带标准字段，下游策略可消费 kind/center 结构信息，不再被 4 布尔卡脖子。(c) θ 需波动率归一（如 ATR 或中枢振幅分位）才能跨标的部署 P4 门。(d) 『candidate 左侧信号 > confirmed 右侧确认』（P3>P2）与 525号『candidate+PH settle 进场』方向一致，且与买回侧判决同构（等右侧确认 = 粒度损失），支持 candidate 流/边界触达的系统性利用。
+docs/adr/0035-cost-stop-policy-instance-and-base-extension-evidence.md:8:#907 后裁：ROUNDTRIP 配对；第一层由「延伸前算出上限」收窄为「当前 L0 余量 + 延伸后立即复测」；中位数与下尾读法给出相反结论的张力移交 #853，ADR 0022 裁定三已答「用置信下界」。RESIDUAL G-029：历史 BTC/1m、两重叠前缀窗、无置信区间、误差只有代理下界、未计持有成本，不能作当前证据。SPEC C04.4/C04.5、A-ST-037-01/02、A-FG-011-01。
+docs/adr/0035-cost-stop-policy-instance-and-base-extension-evidence.md:14:政策 id 族 `#1354/cost-stop-policy/v1`。记录 ⟨policy_id, version, profile_id, symbol, granularity, tower_base_ref, inputs{fee(Known, 费率簿引用含 source_url/retrieved_at/tier/role), slippage(Known|ProxyLowerBound|Missing), latency_error(同), holding(funding/borrow 引用 | Missing)}, amplitude{pairing=ROUNDTRIP, per_level[{level, median, lower_bound_95, n, max_month_cluster, windows[]}], probe_run_ref}, threshold{form=ratio_lb_ge_theta, theta 整数对(用户签署), authorizer, authorized_at}, evidence_gate(继承 ADR 0022 裁定六/七), valid_through, supersedes⟩。比值 `r(ℓ) = A_ℓ / (2·fee + slippage + latency_error [+ holding])`，A_ℓ 取 ROUNDTRIP 波幅单边 95% 下界（按月 block bootstrap）。通过 ⟺ `lb(r) ≥ θ` ∧ 证据门；`InsufficientEvidence` 与 `Fail` 分开。交易成本政策的 θ 仍由用户授权签署；普通研发方法和离线参数按 ADR 0041「授权来源与生效边界」由代理独审裁定，不冒充用户签名、不自动启用交易。系统拒绝 θ < 1（约束，非默认值）。全部定点整数。
+docs/adr/0035-cost-stop-policy-instance-and-base-extension-evidence.md:34:具体算法：按所引 block_unit 将该窗事件分块，保留块内全部事件及依赖；从该窗 m 个非空块有放回抽 m 块，每次取合并事件的分子总数/分母总数，不平均各块比例。method_id=`descent-share/block-bootstrap/1`、resamples=10000、seed=0；PRNG固定PCG-XSH-RR 64/32（stream=1），块索引用拒绝取模避免偏差。以上算法标识/次数/随机种子和实现版本均在读数前记录；它们属于Q6已批准方法，不加入或改写evidence_gate六字段。每次重采样按抽样块计重复，得B个精确有理占比；升序排列，取第 ceil((1−confidence)×B) 项（1-based）为下界，不作插值。固定种子仅保证可复现，不替代区间有效性；在#1441实现时以独立定义oracle和同seed双跑检验方法。
+analysis/recursive_fugue_ultimate_design.md:26:   存在论下限（FIRST_BSP_LADDER，无中枢=域不可定义）、经济下限（振幅<往返
+analysis/h4_rolling_amplitude_results.md:16:- **门槛** = theta_cost_k(2.0) × friction_rt(10bps) = **0.2% 相对振幅下限**
+analysis/h4_rolling_amplitude_results.md:66:（35课口径下 BRN segment 级中枢振幅 P50≈0.10% 不覆盖 0.2% 成本下限，
+analysis/h4_rolling_amplitude_results.md:114:   038-第38课.md:32）；35课行30（成本相对波幅下限，035-第35课.md:30）；
+analysis/h4_rolling_amplitude_results.md:133:   θ自适应深度门（因果滚动分位先例）、P0+P1双门判决（成本门=亏损有界化
+analysis/recursive_empty_domain_research.md:133:| 成本下限 | 太小级别"交易成本、交易误差相对买卖点间波幅"不够小，"长期看没有意义" | 35课 |
+analysis/recursive_fugue_depth1_backtest.py:89:    # θ 相对化落地任务（2026-06-11）：自适应回退/成本门下界/41课门可观测面
+analysis/notional_exposure_leverage_research.md:65:### 1.4 波幅下限——名义操作的另一面
+analysis/notional_exposure_leverage_research.md:71:**读法**：θ_q（级别振幅）已经以**下限门**的形式实装在册（fusion_u ②门：`θ_q(j) ≥ SUB_COST_K × SUB_FRICTION_RT`，[positional_fusion.rs:85](rust/src/trading/positional_fusion.rs:85)，2.0×0.001）。杠杆上限是**同一个量的对偶面**：35课门说"级别太小，摩擦相对波幅太大，操作无意义"（下限）；26:26 说"杠杆太大，期限相对波幅太短，操作被截断"（上限）。两面合起来，θ_q(j) 同时锚定操作的成本下限与杠杆上限。
+analysis/notional_exposure_leverage_research.md:242:2. **定义依据**：26:26（有限期资金→降级别，轴心）、26:34（量是唯一控制变量 + 权证恒仓案例）、49:52/64（满仓义务与前提-否定结构）、53:34+49:76+26:36（容纳量）、35:30（波幅-成本下限，θ_q 对偶面）、44:48（级别错配禁令）、31课（敞口上界入场前固定）、25:168（机动资金）。全部引文逐字核验于 `docs/chanlun/text/blog/`。
+analysis/pins_backtest_results.md:51:  + `rev_l41_gate=true` + 成本门下界，继承 V2of（配对 REV）。满仓入场 = 有机赋格 master 默认。
+analysis/post_cseg_fix_backtest.md:92:3. **边界条件**：①θ=1% 门的有效域排除 QQQ 类低振幅 1min 标的——若 θ 改为分位数
+analysis/leverage_triad_formalization.md:31:| θ_q(j,t) | 级别 j 中枢相对振幅的因果滚动分位（[depth_ref.rs:90](rust/src/trading/depth_ref.rs:90)） | 在册估计器 | 零（因果、排除自身） |
+analysis/master_exit_mode_results.md:87:   成本门下界 + rev_l41_gate）、零摩擦、close 成交、1min 数据。换 floor
+analysis/unified_recursive_voice_fsm_design.md:39:Σ|各段涨跌幅| = M·TV（望远镜恒等式，L0 在册），是**被完美预知达成的不可达上确界**（53:26 原文自承"按分笔的买卖点……在实际中是不可能的"）；细层因果捕获率仅 0.5-3.7%（BTC seg 甚至 −1.7%——细层连方向跟随都亏，slow_bull §7.2 L2），recL2 层 10.3-29.7%。47/53 分割（跨资产不变，在册）：约 53% 反向振幅在笔级 = a0 存在论下限以下，对**两个极性同等不可达**——双向不把笔级振幅升格为可达（持仓方向自然暴露段内笔级波动是 β 非 α）。
+analysis/unified_recursive_voice_fsm_design.md:178:3. 递归终止三范畴不变（a0 存在论下限 / 35课成本门 / 结构参照不可定义）。
+analysis/residual_chanlun_flow_velocity.py:249:    # 月度流量：L1/L2 amplitude 均值
+analysis/residual_chanlun_flow_velocity.py:276:                "amp_mean": float(np.mean([e["amplitude"] for e in evs])),
+analysis/residual_chanlun_flow_velocity.py:277:                "l1_amp_mean": float(np.mean([e["amplitude"] for e in l1])) if l1 else 0.0,
+analysis/residual_chanlun_flow_velocity.py:352:        row("全级别均振幅", "amp_mean", "amp_mean")
+analysis/residual_chanlun_flow_velocity.py:353:        row("L1 均振幅", "l1_amp_mean", "l1_amp_mean")
+analysis/ledger_voice_experiment.md:127:| 成本门（VLc，35课） | θ_q(k) < 2×friction_rt ⇒ 拒开（DepthRef 因果滚动中位数，warm-up 保守拒绝） | 35课；设计 §5.4"比值不足者配额为 0" | 经济生命周期 |
+analysis/fugue_level_routed_backtest_1min.md:28:| v7 过滤版 | median 以上 up-move | 价格振幅 | L1 PH nr1 | 段间比较被过滤 |
+analysis/hold26_counterseg_fusion_results.md:161:   事后授予）、035:32（成本门）、77/78课（笔=a0 ⇒ C 轴下界 k≥3）、17课
+analysis/theta_adaptive_results.md:60:| A：锚自身振幅的分位数 | θ = 当前锚中枢振幅的 P25/P50 | — | **自指退化**：单个数没有分位数。若把"自身"读为"该标的全部中枢"，则坍缩为方案 C |
+analysis/theta_adaptive_results.md:61:| B：滚动 N 个中枢的统计量 | θ_t(k) = 该层最近 window 个**已观测**中枢振幅的 q 分位 | **零前瞻**：参照集只含形成时刻 ≤ 当前 bar 的中枢 | **最严格，采纳** |
+analysis/theta_adaptive_results.md:62:| C：标的级固定分位数 | θ = 回测期全样本分布的 q 分位（每标的一个常数） | **回测期内前瞻**：bar t 的门槛是 t 之后中枢振幅的函数 | 否定。须独立样本外期才合法，本任务全样本回测下不可用 |
+analysis/theta_adaptive_results.md:66:- θ_t(k) = ladder k 最近 **window=50** 个中枢相对振幅的 **q 分位**（nearest-rank），
+analysis/unn_strict_interval_nesting_l2.md:50:中枢中位振幅 vs 摩擦门 0.2%（=SUB_COST_K 2.0 × SUB_FRICTION_RT 0.001）：
+analysis/interval_nesting_reverse_backtest.py:219:    L.append(f"> P4 振幅阈值 θ={theta}（卖价距 ZG 相对深度下限；根因诊断：<1% 回调是"
+analysis/interval_nesting_reverse_backtest.py:386:             "4 布尔卡脖子。(c) θ 需波动率归一（如 ATR 或中枢振幅分位）才能跨标的部署 "
+analysis/_trend_counter_seg_stats.py:104:    # 全标的笔振幅 P25（θ 门对照基准；全局静态分位，非因果滚动——下界对照用）
+analysis/recursive_nested_fugue_unified.md:153:  (冻结-RNF=零操作下界 / 上移-RNF=忠实降成本)，与 URS(E\*清仓)/v4(振幅棘轮)/CT(事件选层)
+analysis/cycle38_voice_results.md:49:- **成本门（35课）**：每条循环腿过 `θ_q(k) ≥ theta_cost_k × friction_rt`（DepthRef 因果滚动中位数，零前瞻；参照不可定义保守拒绝）。BRN 上活跃：1,348 次拒（约 39% 的开腿尝试被成本门关掉）。
+analysis/cycle38_voice_results.md:101:3. **边界条件**：①否证有效域 = 本近似形态（无位置约束的 k−1 买点买回）；若买回端改为原文位置分支（不破第一段低点 ∨ 跌破后盘整背驰）或本级别结束证据（同锚 Buy1/ZD 触线），结论可能翻转——循环结构本身（重复开闭）未被单独否证，与买回判据纠缠；②floor=2 单口径；③宿主趋势态在 ladder3 的判别力依赖 pending move 的中枢计数语义，若 move 分组规则变化数字全变；④成本门用 SUB_COST_Q=0.5 中位数口径（与 F1 子腿门同构，非 θ 自适应 q25 口径）。
+analysis/unified_voice_from_concept_chain.md:41:| 14 | 成本门=递归终止 | 三处承载：(a) osc ②振幅门 H4（θ_q(k) ≥ k_cost×friction，35课）拦截幅度不足的短差；(b) floor_ladder = BSP 承载结构下限（该层以下买卖点词汇不存在）；(c) a0 存在论下限（47/53 分割：笔级以下 53% 振幅对两极性同等不可达，L0 在册） | :136-141；unified_osc ②门 | 链内 |
+analysis/cycle38_voice_backtest.py:11:  { V2oa25 = 在册默认门基线（单次 REV：θ 自适应 q25 + 成本门下界 + 41课门）
+analysis/nrf_v4_strict_accounting.md:125:  035课成本门；077-78课 a0 下界；090号（声明-能力一致）；
+analysis/es_1s_recl2_located_confirm_diagnosis.md:96:即：从 segment(2) 到 recL3(5)，**每一级的中位中枢振幅 θ 都低于 0.2% 往返成本门**。所以对任意候选层 k，
+analysis/es_1s_recl2_located_confirm_diagnosis.md:207:- `unn_strict_interval_nesting_l2`：recL2 θ≈0.211–0.453% 与 0.2% 成本门临界（本报告确认动态中位 <0.2%）。
+analysis/recursive_regularization_theory.md:90:**命题 3.4（可操作下界 L*，L0 形式 + L2 校准）**：声部 L 可操作，当且仅当其域的期望震荡振幅超过信号分辨粒度与执行摩擦之和：amp(D_L) > ρ。由于 amp(D_L) 随 L 递减而 ρ 固定，存在最低可操作级别 L*。L* 以下三元组仍有定义（走势存在）但 O_L 在 D_L 内不可分辨——三元组**退化**，期望翻负。
+analysis/recursive_regularization_theory.md:213:| 3 | 振幅/分辨率 | 域近期震荡振幅 > k·(信号粒度+摩擦)？经验下界：该标的成功短差的 depth_below 分布 p25 以上（OKLO 1min ≈ 1%） | 命题 3.4；L2 数据 |
+analysis/recursive_regularization_theory.md:243:1. **同中枢配对劣于跨中枢（1min）**：same_center 均值 −0.076 vs cross_center −0.006，与 49课"域内差价最安全"表面冲突。消解：该层（中位间隔 32 bars）已在 L* 之下，回归保证的振幅低于摩擦——49课的语境是 30分钟操作级别、"每次的差价就是10%以上"的振幅。安全性主张（存在性+守恒性，§4.3）在 L* 之下仍真，期望主张在 L* 之下为假。**这不是理论矛盾，是有效域边界的实测**。
+analysis/profit_gap_comprehensive_research.md:18:| 1. QQQ 低振幅 REV | 原 1min 级别上浮，REV 操作落在涌现高级别，中枢振幅自然更大 | 35课成本门选层（θ自适应已在做的事的严格下界） | 需拉 QQQ 1s 数据（databento ohlcv-1s $0） |
+analysis/profit_gap_comprehensive_research.md:109:amp_ok(k) = 该层操作对象振幅/c ≥ max(θ_quantile(k), m × friction_rt)
+analysis/profit_gap_comprehensive_research.md:183:├── 成本门：max(θ_q, m×friction_rt) 统一下界（m 由 S0 标定）
+analysis/profit_gap_comprehensive_research.md:209:4. **下游推论**：(i) a0 下推后全部既有 1min 回测结论的级别标号整体平移（原 L_k ≈ 新 L_{k+Δ}），跨 a0 比较必须按"距塔底层数"对齐而非级别名；(ii) "多周期"术语在本系统停用，改用"多级别"；(iii) SubMode::Fractal 的谱系地位修正：不是近似实现（v1 误判），是定义内退化态——其有效域（震荡 regime）是退化锚能力边界的涌现；(iv) θ自适应 V2oa25 的角色从"门"重定位为"塔上选层机制"，成本门是其严格下界而非替代；(v) 引擎容量结论（4.2s/5.96M、O(N) day-batch）使秒级全标的普查在工程上无障碍。
+analysis/nrf_v3_root_flip_recursive_nest.md:164:- 027:25 否定线 / 035课成本门 / 077-078课 a0 下界：机制词汇来源不变。
+analysis/pins_backtest.py:9:  V2oa25    = 满仓入场 + θ自适应(q=0.25/w=50) + 成本门(2×10bps下界)
+analysis/theta_relative_full_revalidation.md:16:| 成本门下界 | `effective_theta` Adaptive 分支：θ_eff = max(θ_q, k×friction_rt)，k=2，friction_rt=10bps → 下界 0.2%（35课成本门的 REV 主腿形态） | `n_rev_theta_cost_floor` |
+analysis/theta_relative_full_revalidation.md:94:几乎恒低于 0.2% 下界，**θ_eff 实际 = 成本门下界**。纯分位数只在 OKLO
+analysis/theta_relative_full_revalidation.md:138:- 成本门下界在细分辨率域 binding → 未来若引入更细级别（tick），θ 相对化
+analysis/theta_relative_full_revalidation.md:157:  ——V2oa25 语义变更（+41课门）、新增 V2oa25F1、effective_theta 加成本门下界、
+analysis/theta_adaptive_backtest.py:10:  方案A（锚自身振幅的分位数）：自指退化——单个数无分位数；
+analysis/theta_adaptive_backtest.py:14:        相对振幅 (ZG−ZD)/c 的 q 分位（nearest-rank，排除当前锚自身），
+analysis/fugue_version_i_slice.py:41:  波幅不可忽略）。指令#3 要求纳入 bar 级。严格解法：下限改为透明参数（消除"主观排除"），
+analysis/unn_theta_allocation_necessity_diagnosis.md:107:**这是 N4 成本门 + 势源下界的正确终止**，非 bug。孙 voice 只在子空头@3/@4（move 层以上）涌现，符合
+analysis/unn_theta_allocation_necessity_diagnosis.md:127:θ(k) = 该层买卖点振幅的 q=0.5 分位数（`depth_ref.theta`，035:30"平均波幅"），**纯经验量（L2）**。
+analysis/options_short_fixed_point_research.md:81:    中枢振幅下界）；L3 = **程式失效域候选**（首波回收 28% ⇒ 首波豁免失效 ⇒ D_min 膨胀
+analysis/options_short_fixed_point_research.md:630:| Greeks 快照 | 准入门用（delta 保真度核验 §4.2 + IV percentile 成本门），**非逐 bar**——事件驱动（开仓/roll/升级），维护定理同构 | 小 |
+analysis/options_short_fixed_point_research.md:1017:> 保守下界（中枢 = 重叠区间，恒小于同期 move 实际幅度；move 振幅分位数列为脚本补充项，
+analysis/options_short_fixed_point_research.md:1038:  方向腿（L3 离开段 ≥ L3 中枢振幅 2.45% 下界）= 2.45%×64,000×Δ̄0.65 ≈ 1,019
+analysis/options_short_fixed_point_research.md:1050:(ii) 内部短差腿成本门下界口径不过（K_f=2.0）。原"边际/须修正"措辞**撤回**——
+analysis/options_short_fixed_point_research.md:1070:  方向腿（L2 中枢振幅 1.03% 下界）= 659×0.65 ≈ 428
+analysis/options_short_fixed_point_research.md:1075:  move 振幅口径（真实振幅 ≥ 1.2× 中枢振幅即翻案——下界保守度远大于此）⇒ 悬置
+analysis/options_short_fixed_point_research.md:1080:最强候选，且下界口径已近半）；theta 占兑现 20%；但内部短差腿成本门在 K_f=2.0 +
+analysis/options_short_fixed_point_research.md:1081:中枢振幅下界口径下差 16% 未过——短差腿是否可开**悬置至 move 振幅复核**
+analysis/options_short_fixed_point_research.md:1090:| 级别 | D_min 典型 | 网格 | 首波回收/权利金 | theta/兑现 | 成本门（K_f=2.0，下界口径） | 判决（质询修正后） |
+analysis/options_short_fixed_point_research.md:1145:| 10 | move 振幅分位数缺位 | §11 全部用中枢振幅作保守下界（中枢=重叠区间恒小于 move 幅度） | 脚本补充项（`_btc_zhongshu_duration_stats.py` 扩展）；L3 判决悬置至复核 |
+analysis/options_short_fixed_point_research.md:1213:   (viii) §11 全部为振幅下界口径（中枢振幅代理）+ ATM √T 近似（put skew 使读数偏乐观
+analysis/fugue_level_routed_backtest_1min.py:1009:    L.append("| v7 过滤版 | median 以上 up-move | 价格振幅 | L1 PH nr1 | 段间比较被过滤 |")

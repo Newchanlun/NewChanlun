@@ -1,0 +1,490 @@
+query_id	match_no	file_or_commit	line	disposition
+B1	1	origin/evidence/1441-design-r3:.chanlun/review-results/issue1441-design-r3/BASIS.md	3	设计候选：确定证据入口与未裁范围，不把自选均值当既裁
+B1	2	origin/evidence/1441-design-r3:.chanlun/review-results/issue1441-design-r3/DESIGN.md	49	设计候选：确定证据入口与未裁范围，不把自选均值当既裁
+B1	3	origin/evidence/1441-design-r3:.chanlun/review-results/issue1441-design-r3/DESIGN.md	53	设计候选：确定证据入口与未裁范围，不把自选均值当既裁
+B1	4	origin/evidence/1441-design-r3:.chanlun/review-results/issue1441-design-r3/DESIGN.md	60	设计候选：确定证据入口与未裁范围，不把自选均值当既裁
+B1	5	origin/evidence/1441-design-r3:.chanlun/review-results/issue1441-design-r3/DESIGN.md	70	设计候选：确定证据入口与未裁范围，不把自选均值当既裁
+B1	6	origin/evidence/1441-design-r3:.chanlun/review-results/issue1441-design-r3/DESIGN.md	98	设计候选：确定证据入口与未裁范围，不把自选均值当既裁
+B1	7	origin/evidence/1441-design-r3:.chanlun/review-results/issue1441-design-r3/UNRESOLVED.md	3	设计候选：确定证据入口与未裁范围，不把自选均值当既裁
+B1	8	origin/evidence/1441-design-r3:.chanlun/review-results/issue1441-design-r3/UNRESOLVED.md	6	设计候选：确定证据入口与未裁范围，不把自选均值当既裁
+B1	9	origin/evidence/1441-design-r3:.chanlun/review-results/issue1441-design-r3/UNRESOLVED.md	8	设计候选：确定证据入口与未裁范围，不把自选均值当既裁
+B1	10	origin/evidence/1441-design-r3:.chanlun/review-results/issue1441-design-r3/UNRESOLVED.md	10	设计候选：确定证据入口与未裁范围，不把自选均值当既裁
+B2	1	origin/impl/1441-cost-stop-policy:rust/src/theta_v0/cost_stop.rs	5	候选触点或测试：核方法失败关闭、窗资格和逐窗消费；非依据
+B2	2	origin/impl/1441-cost-stop-policy:rust/src/theta_v0/cost_stop.rs	240	候选触点或测试：核方法失败关闭、窗资格和逐窗消费；非依据
+B2	3	origin/impl/1441-cost-stop-policy:rust/src/theta_v0/cost_stop/amplitude.rs	22	候选触点或测试：核方法失败关闭、窗资格和逐窗消费；非依据
+B2	4	origin/impl/1441-cost-stop-policy:rust/src/theta_v0/cost_stop/amplitude.rs	60	候选触点或测试：核方法失败关闭、窗资格和逐窗消费；非依据
+B2	5	origin/impl/1441-cost-stop-policy:rust/src/theta_v0/cost_stop/amplitude.rs	223	候选触点或测试：核方法失败关闭、窗资格和逐窗消费；非依据
+B2	6	origin/impl/1441-cost-stop-policy:rust/src/theta_v0/cost_stop/amplitude.rs	268	候选触点或测试：核方法失败关闭、窗资格和逐窗消费；非依据
+B2	7	origin/impl/1441-cost-stop-policy:rust/src/theta_v0/cost_stop/amplitude.rs	342	候选触点或测试：核方法失败关闭、窗资格和逐窗消费；非依据
+B2	8	origin/impl/1441-cost-stop-policy:rust/src/theta_v0/cost_stop/registry.rs	59	候选触点或测试：核方法失败关闭、窗资格和逐窗消费；非依据
+B2	9	origin/impl/1441-cost-stop-policy:rust/src/theta_v0/cost_stop/tests.rs	15	候选触点或测试：核方法失败关闭、窗资格和逐窗消费；非依据
+B2	10	origin/impl/1441-cost-stop-policy:rust/src/theta_v0/cost_stop/tests.rs	124	候选触点或测试：核方法失败关闭、窗资格和逐窗消费；非依据
+B2	11	origin/impl/1441-cost-stop-policy:rust/src/theta_v0/cost_stop/tests.rs	340	候选触点或测试：核方法失败关闭、窗资格和逐窗消费；非依据
+B2	12	origin/impl/1441-cost-stop-policy:rust/src/theta_v0/cost_stop/tests.rs	572	候选触点或测试：核方法失败关闭、窗资格和逐窗消费；非依据
+B2	13	origin/impl/1441-cost-stop-policy:rust/src/theta_v0/cost_stop/tests.rs	617	候选触点或测试：核方法失败关闭、窗资格和逐窗消费；非依据
+B2	14	origin/impl/1441-cost-stop-policy:rust/src/theta_v0/cost_stop/tests.rs	844	候选触点或测试：核方法失败关闭、窗资格和逐窗消费；非依据
+B2	15	origin/impl/1441-cost-stop-policy:rust/src/theta_v0/cost_stop/tests.rs	1044	候选触点或测试：核方法失败关闭、窗资格和逐窗消费；非依据
+B2	16	origin/impl/1441-cost-stop-policy:rust/src/theta_v0/cost_stop/tests.rs	1059	候选触点或测试：核方法失败关闭、窗资格和逐窗消费；非依据
+B3	1	origin/decision/2111:docs/adr/0044-cost-stop-policy-signed-instance-v1.md	26	已获审 #2111：沿用零成本次序与原签域
+B3	2	origin/decision/2111:docs/adr/0044-cost-stop-policy-signed-instance-v1.md	47	已获审 #2111：沿用零成本次序与原签域
+B3	3	origin/decision/2111:docs/adr/0044-cost-stop-policy-signed-instance-v1.md	49	已获审 #2111：沿用零成本次序与原签域
+B3	4	origin/decision/2111:docs/adr/0044-cost-stop-policy-signed-instance-v1.md	53	已获审 #2111：沿用零成本次序与原签域
+B3	5	origin/decision/2111:docs/adr/0044-cost-stop-policy-signed-instance-v1.md	74	已获审 #2111：沿用零成本次序与原签域
+R1	1	CONTEXT.md	49	词汇区分成本停止和另一成本下降速率统计
+R1	2	CONTEXT.md	50	词汇区分成本停止和另一成本下降速率统计
+R1	3	.chanlun/review-results/issue853-acceptance-params-facts-20260808.md	312	另一量的事实底稿：费后速率、正态覆盖与聚簇经验，不选波幅的统计量
+R1	4	.chanlun/review-results/issue853-acceptance-params-facts-20260808.md	367	另一量的事实底稿：费后速率、正态覆盖与聚簇经验，不选波幅的统计量
+R1	5	.chanlun/review-results/issue853-acceptance-params-facts-20260808.md	369	另一量的事实底稿：费后速率、正态覆盖与聚簇经验，不选波幅的统计量
+R1	6	.chanlun/review-results/issue853-acceptance-params-facts-20260808.md	379	另一量的事实底稿：费后速率、正态覆盖与聚簇经验，不选波幅的统计量
+R1	7	.chanlun/definitions/qujiantao.md	534	教义前件：成本界/塔底、参数不入正本以及非点估计的复测
+R1	8	.chanlun/definitions/qujiantao.md	1012	教义前件：成本界/塔底、参数不入正本以及非点估计的复测
+R1	9	.chanlun/definitions/qujiantao.md	1526	教义前件：成本界/塔底、参数不入正本以及非点估计的复测
+R1	10	docs/adr/0022-acceptance-criterion-parameters.md	179	正本：继承块、置信度和窗口证据；主统计量属成本下降速率
+R1	11	rust/src/trading/level_operating_unit.rs	1037	相邻旧策略路径：中枢振幅/开腿/选层摩擦门，不以登记的 ROUNDTRIP 事件为输入
+R1	12	rust/src/trading/level_operating_unit.rs	1402	相邻旧策略路径：中枢振幅/开腿/选层摩擦门，不以登记的 ROUNDTRIP 事件为输入
+R1	13	analysis/strict_form_audit.md	31	旧策略因果中枢振幅、短差/震荡/选层的摩擦研究，非逐窗完整往返置信界
+R1	14	.chanlun/review-results/issue1598-policy-20261026/affected-code.md	33	自由度/证据门链：验证 A-10 第一层指针与第二层方法批准的区别
+R1	15	rust/src/trading/positional_fusion.rs	31	相邻旧策略路径：中枢振幅/开腿/选层摩擦门，不以登记的 ROUNDTRIP 事件为输入
+R1	16	.chanlun/review-results/issue915-capacity-frequency-20260805.md	41	旁证：同配对的跨标的容量/频率/中位点估计，仍无区间
+R1	17	.chanlun/review-results/issue915-capacity-frequency-20260805.md	104	旁证：同配对的跨标的容量/频率/中位点估计，仍无区间
+R1	18	.chanlun/review-results/issue915-capacity-frequency-20260805.md	134	旁证：同配对的跨标的容量/频率/中位点估计，仍无区间
+R1	19	.chanlun/review-results/issue915-capacity-frequency-20260805.md	149	旁证：同配对的跨标的容量/频率/中位点估计，仍无区间
+R1	20	.chanlun/review-results/issue915-capacity-frequency-20260805.md	258	旁证：同配对的跨标的容量/频率/中位点估计，仍无区间
+R1	21	.chanlun/review-results/issue915-capacity-frequency-20260805.md	367	旁证：同配对的跨标的容量/频率/中位点估计，仍无区间
+R1	22	rust/src/trading/axiom_voice.rs	17	相邻旧策略路径：中枢振幅/开腿/选层摩擦门，不以登记的 ROUNDTRIP 事件为输入
+R1	23	rust/src/trading/axiom_voice.rs	331	相邻旧策略路径：中枢振幅/开腿/选层摩擦门，不以登记的 ROUNDTRIP 事件为输入
+R1	24	rust/src/trading/nested_fugue.rs	914	相邻旧策略路径：中枢振幅/开腿/选层摩擦门，不以登记的 ROUNDTRIP 事件为输入
+R1	25	docs/adr/0035-cost-stop-policy-instance-and-base-extension-evidence.md	8	正本：区分第一层波幅与第二层占比；仅后者有完整抽样实现
+R1	26	docs/adr/0035-cost-stop-policy-instance-and-base-extension-evidence.md	14	正本：区分第一层波幅与第二层占比；仅后者有完整抽样实现
+R1	27	docs/adr/0035-cost-stop-policy-instance-and-base-extension-evidence.md	34	正本：区分第一层波幅与第二层占比；仅后者有完整抽样实现
+R1	28	rust/src/trading/depth_ref.rs	114	相邻旧策略路径：中枢振幅/开腿/选层摩擦门，不以登记的 ROUNDTRIP 事件为输入
+R1	29	.chanlun/review-results/issue1598-policy-20261026/draft.md	116	自由度/证据门链：验证 A-10 第一层指针与第二层方法批准的区别
+R1	30	rust/src/trading/positional.rs	680	相邻旧策略路径：中枢振幅/开腿/选层摩擦门，不以登记的 ROUNDTRIP 事件为输入
+R1	31	docs/adr/0017-chong-quantity-numerator-shortdiff-amplitude.md	146	旁证：容量式/δ 的中位点估计，不能充 A_ℓ 置信界
+R1	32	docs/adr/0017-chong-quantity-numerator-shortdiff-amplitude.md	239	旁证：容量式/δ 的中位点估计，不能充 A_ℓ 置信界
+R1	33	.chanlun/review-results/issue907-cost-gate-level-20260805.md	16	直接探针先例：描述分位、月簇／旧读数和不确定性缺口；不采旧摘要
+R1	34	.chanlun/review-results/issue907-cost-gate-level-20260805.md	18	直接探针先例：描述分位、月簇／旧读数和不确定性缺口；不采旧摘要
+R1	35	.chanlun/review-results/issue907-cost-gate-level-20260805.md	23	直接探针先例：描述分位、月簇／旧读数和不确定性缺口；不采旧摘要
+R1	36	.chanlun/review-results/issue907-cost-gate-level-20260805.md	147	直接探针先例：描述分位、月簇／旧读数和不确定性缺口；不采旧摘要
+R1	37	.chanlun/review-results/issue907-cost-gate-level-20260805.md	209	直接探针先例：描述分位、月簇／旧读数和不确定性缺口；不采旧摘要
+R1	38	.chanlun/review-results/issue907-cost-gate-level-20260805.md	239	直接探针先例：描述分位、月簇／旧读数和不确定性缺口；不采旧摘要
+R1	39	.chanlun/review-results/issue907-cost-gate-level-20260805.md	263	直接探针先例：描述分位、月簇／旧读数和不确定性缺口；不采旧摘要
+R1	40	.chanlun/review-results/issue907-cost-gate-level-20260805.md	273	直接探针先例：描述分位、月簇／旧读数和不确定性缺口；不采旧摘要
+R1	41	.chanlun/review-results/issue907-cost-gate-level-20260805.md	320	直接探针先例：描述分位、月簇／旧读数和不确定性缺口；不采旧摘要
+R1	42	.chanlun/review-results/issue907-cost-gate-level-20260805.md	322	直接探针先例：描述分位、月簇／旧读数和不确定性缺口；不采旧摘要
+R1	43	rust/src/trading/runner.rs	497	相邻旧策略路径：中枢振幅/开腿/选层摩擦门，不以登记的 ROUNDTRIP 事件为输入
+R1	44	.chanlun/review-results/issue925-lambda-implementations-20260807.md	23	排除作本门证据：市场冲击或容量/λ 估计，不是成本比值的逐窗置信下界
+R1	45	rust/src/trading/level_operating_unit_tests.rs	299	相邻旧策略路径：中枢振幅/开腿/选层摩擦门，不以登记的 ROUNDTRIP 事件为输入
+R1	46	rust/src/trading/level_operating_unit_tests.rs	381	相邻旧策略路径：中枢振幅/开腿/选层摩擦门，不以登记的 ROUNDTRIP 事件为输入
+R1	47	.chanlun/review-results/issue1677-evidence-gate-review-20261022.md	22	自由度/证据门链：验证 A-10 第一层指针与第二层方法批准的区别
+R1	48	rust/src/trading/config.rs	73	相邻旧策略路径：中枢振幅/开腿/选层摩擦门，不以登记的 ROUNDTRIP 事件为输入
+R1	49	rust/src/trading/config.rs	81	相邻旧策略路径：中枢振幅/开腿/选层摩擦门，不以登记的 ROUNDTRIP 事件为输入
+R1	50	rust/src/trading/config.rs	343	相邻旧策略路径：中枢振幅/开腿/选层摩擦门，不以登记的 ROUNDTRIP 事件为输入
+R1	51	rust/src/trading/config.rs	378	相邻旧策略路径：中枢振幅/开腿/选层摩擦门，不以登记的 ROUNDTRIP 事件为输入
+R1	52	rust/src/trading/config.rs	381	相邻旧策略路径：中枢振幅/开腿/选层摩擦门，不以登记的 ROUNDTRIP 事件为输入
+R1	53	rust/src/trading/config.rs	385	相邻旧策略路径：中枢振幅/开腿/选层摩擦门，不以登记的 ROUNDTRIP 事件为输入
+R1	54	rust/src/trading/config.rs	496	相邻旧策略路径：中枢振幅/开腿/选层摩擦门，不以登记的 ROUNDTRIP 事件为输入
+R1	55	rust/src/trading/config.rs	504	相邻旧策略路径：中枢振幅/开腿/选层摩擦门，不以登记的 ROUNDTRIP 事件为输入
+R1	56	rust/src/trading/config.rs	575	相邻旧策略路径：中枢振幅/开腿/选层摩擦门，不以登记的 ROUNDTRIP 事件为输入
+R1	57	rust/src/trading/config.rs	582	相邻旧策略路径：中枢振幅/开腿/选层摩擦门，不以登记的 ROUNDTRIP 事件为输入
+R1	58	rust/src/trading/config.rs	830	相邻旧策略路径：中枢振幅/开腿/选层摩擦门，不以登记的 ROUNDTRIP 事件为输入
+R1	59	rust/src/trading/config.rs	903	相邻旧策略路径：中枢振幅/开腿/选层摩擦门，不以登记的 ROUNDTRIP 事件为输入
+R1	60	rust/src/trading/config.rs	1408	相邻旧策略路径：中枢振幅/开腿/选层摩擦门，不以登记的 ROUNDTRIP 事件为输入
+R1	61	rust/src/trading/config.rs	1426	相邻旧策略路径：中枢振幅/开腿/选层摩擦门，不以登记的 ROUNDTRIP 事件为输入
+R1	62	rust/src/trading/config.rs	1678	相邻旧策略路径：中枢振幅/开腿/选层摩擦门，不以登记的 ROUNDTRIP 事件为输入
+R1	63	analysis/p1_dual_gate_backtest.py	9	旧策略因果中枢振幅、短差/震荡/选层的摩擦研究，非逐窗完整往返置信界
+R1	64	rust/src/trading/types.rs	480	相邻旧策略路径：中枢振幅/开腿/选层摩擦门，不以登记的 ROUNDTRIP 事件为输入
+R1	65	rust/src/trading/types.rs	541	相邻旧策略路径：中枢振幅/开腿/选层摩擦门，不以登记的 ROUNDTRIP 事件为输入
+R1	66	rust/src/trading/types.rs	542	相邻旧策略路径：中枢振幅/开腿/选层摩擦门，不以登记的 ROUNDTRIP 事件为输入
+R1	67	rust/src/trading/level_sub_lou.rs	339	相邻旧策略路径：中枢振幅/开腿/选层摩擦门，不以登记的 ROUNDTRIP 事件为输入
+R1	68	analysis/k4_config_transition_matrix_1min.py	360	策略实验中固定/滚动振幅或时长统计，不是登记的经济证据
+R1	69	analysis/unified_config_regime_research.md	332	旧策略因果中枢振幅、短差/震荡/选层的摩擦研究，非逐窗完整往返置信界
+R1	70	analysis/unified_config_regime_research.md	349	旧策略因果中枢振幅、短差/震荡/选层的摩擦研究，非逐窗完整往返置信界
+R1	71	.chanlun/review-results/dof-audit-20261020/AUDIT.md	49	自由度/证据门链：验证 A-10 第一层指针与第二层方法批准的区别
+R1	72	.chanlun/review-results/dof-audit-20261020/AUDIT.md	135	自由度/证据门链：验证 A-10 第一层指针与第二层方法批准的区别
+R1	73	.chanlun/review-results/dof-audit-20261020/AUDIT.md	182	自由度/证据门链：验证 A-10 第一层指针与第二层方法批准的区别
+R1	74	.chanlun/review-results/dof-audit-20261020/candidates.md	16	自由度/证据门链：验证 A-10 第一层指针与第二层方法批准的区别
+R1	75	.chanlun/review-results/issue917-market-impact-proxy-20260805.md	330	排除作本门证据：市场冲击或容量/λ 估计，不是成本比值的逐窗置信下界
+R1	76	.chanlun/review-results/issue917-market-impact-proxy-20260805.md	408	排除作本门证据：市场冲击或容量/λ 估计，不是成本比值的逐窗置信下界
+R1	77	.chanlun/review-results/issue917-market-impact-proxy-20260805.md	433	排除作本门证据：市场冲击或容量/λ 估计，不是成本比值的逐窗置信下界
+R1	78	.chanlun/review-results/issue917-market-impact-proxy-20260805.md	440	排除作本门证据：市场冲击或容量/λ 估计，不是成本比值的逐窗置信下界
+R1	79	.chanlun/review-results/issue917-market-impact-proxy-20260805.md	476	排除作本门证据：市场冲击或容量/λ 估计，不是成本比值的逐窗置信下界
+R1	80	.chanlun/review-results/issue1339-r2-spec-20260909/view/sources/newchanlun-1339-requirements-20260908/author/COVERAGE.md	49	SPEC/Coverage/残余票明定消费者和既裁边界；不指定 A_ℓ 统计量
+R1	81	.chanlun/review-results/issue1339-r2-spec-20260909/view/sources/newchanlun-1339-requirements-20260908/author/COVERAGE.md	67	SPEC/Coverage/残余票明定消费者和既裁边界；不指定 A_ℓ 统计量
+R1	82	.chanlun/review-results/issue844-multi-fugue-asset-census-20260801.md	87	多重赋格资产普查，较早的门与指标只作线索
+R1	83	.chanlun/review-results/issue844-multi-fugue-asset-census-20260801.md	225	多重赋格资产普查，较早的门与指标只作线索
+R1	84	.chanlun/review-results/issue844-multi-fugue-asset-census-20260801.md	236	多重赋格资产普查，较早的门与指标只作线索
+R1	85	.chanlun/review-results/issue1339-r2-spec-20260909/view/sources/newchanlun-1339-requirements-20260908/author/parts/FUGUE.md	195	SPEC/Coverage/残余票明定消费者和既裁边界；不指定 A_ℓ 统计量
+R1	86	.chanlun/review-results/issue1340-publication-20260909/payload/inputs/RESIDUAL-TICKET-PLAN.json	2662	SPEC/Coverage/残余票明定消费者和既裁边界；不指定 A_ℓ 统计量
+R1	87	.chanlun/review-results/issue1340-publication-20260909/payload/inputs/RESIDUAL-TICKET-PLAN.json	5033	SPEC/Coverage/残余票明定消费者和既裁边界；不指定 A_ℓ 统计量
+R1	88	docs/covering_space_asymmetry.md	195	覆盖空间不对称的结构振幅下限，不是成本统计
+R1	89	docs/covering_space_asymmetry.md	437	覆盖空间不对称的结构振幅下限，不是成本统计
+R1	90	analysis/spiral_solution_to_underperformance.md	54	螺旋或赋格的结构、策略参数与旧震荡门，不是波幅证据
+R1	91	analysis/spiral_solution_to_underperformance.md	58	螺旋或赋格的结构、策略参数与旧震荡门，不是波幅证据
+R1	92	analysis/spiral_solution_to_underperformance.md	249	螺旋或赋格的结构、策略参数与旧震荡门，不是波幅证据
+R1	93	.chanlun/review-results/issue1339-r2-spec-20260909/payload/sources/newchanlun-1339-requirements-20260908/author/COVERAGE.md	47	SPEC/Coverage/残余票明定消费者和既裁边界；不指定 A_ℓ 统计量
+R1	94	.chanlun/review-results/issue1339-r2-spec-20260909/payload/sources/newchanlun-1339-requirements-20260908/author/COVERAGE.md	65	SPEC/Coverage/残余票明定消费者和既裁边界；不指定 A_ℓ 统计量
+R1	95	.chanlun/review-results/issue1339-r2-spec-20260909/payload/sources/newchanlun-1339-requirements-20260908/author/COVERAGE.json	10385	SPEC/Coverage/残余票明定消费者和既裁边界；不指定 A_ℓ 统计量
+R1	96	.chanlun/review-results/issue1339-r2-spec-20260909/payload/sources/newchanlun-1339-requirements-20260908/author/parts/FUGUE.md	193	SPEC/Coverage/残余票明定消费者和既裁边界；不指定 A_ℓ 统计量
+R1	97	.chanlun/review-results/issue1339-r2-spec-20260909/payload/sources/newchanlun-1339-requirements-20260908/author/parts/FUGUE.json	478	SPEC/Coverage/残余票明定消费者和既裁边界；不指定 A_ℓ 统计量
+R1	98	.chanlun/review-results/issue1339-r2-spec-20260909/payload/sources/newchanlun-1339-architecture-20260908/author/INDEPENDENT-DESIGN.json	4184	SPEC/Coverage/残余票明定消费者和既裁边界；不指定 A_ℓ 统计量
+R1	99	.chanlun/review-results/issue1340-publication-20260909/payload/inputs/TB01-PARENT-CONTRIBUTION.json	6235	SPEC/Coverage/残余票明定消费者和既裁边界；不指定 A_ℓ 统计量
+R1	100	.chanlun/review-results/issue1339-r2-spec-20260909/view/spec/inputs/SPEC-COVERAGE-INPUT.md	514	SPEC/Coverage/残余票明定消费者和既裁边界；不指定 A_ℓ 统计量
+R1	101	.chanlun/review-results/issue1339-r2-spec-20260909/view/spec/inputs/SPEC-COVERAGE-INPUT.md	515	SPEC/Coverage/残余票明定消费者和既裁边界；不指定 A_ℓ 统计量
+R1	102	analysis/cl1s_theta_relative_rev.md	28	旧策略因果中枢振幅、短差/震荡/选层的摩擦研究，非逐窗完整往返置信界
+R1	103	analysis/cl1s_theta_relative_rev.md	39	旧策略因果中枢振幅、短差/震荡/选层的摩擦研究，非逐窗完整往返置信界
+R1	104	.chanlun/review-results/issue1339-r2-spec-20260909/payload/spec/inputs/SPEC-COVERAGE-INPUT.md	512	SPEC/Coverage/残余票明定消费者和既裁边界；不指定 A_ℓ 统计量
+R1	105	.chanlun/review-results/issue1339-r2-spec-20260909/payload/spec/inputs/SPEC-COVERAGE-INPUT.md	513	SPEC/Coverage/残余票明定消费者和既裁边界；不指定 A_ℓ 统计量
+R1	106	.chanlun/review-results/issue1339-r2-spec-20260909/payload/spec/inputs/SPEC-COVERAGE-INPUT.json	3254	SPEC/Coverage/残余票明定消费者和既裁边界；不指定 A_ℓ 统计量
+R1	107	.chanlun/review-results/issue1339-r2-spec-20260909/payload/spec/inputs/SPEC-COVERAGE-INPUT.json	3314	SPEC/Coverage/残余票明定消费者和既裁边界；不指定 A_ℓ 统计量
+R1	108	.chanlun/review-results/issue1339-r2-spec-20260909/payload/spec/inputs/SPEC-COVERAGE-INPUT.json	4759	SPEC/Coverage/残余票明定消费者和既裁边界；不指定 A_ℓ 统计量
+R1	109	.chanlun/review-results/issue1339-r2-spec-20260909/payload/spec/inputs/SPEC-COVERAGE-INPUT.json	4763	SPEC/Coverage/残余票明定消费者和既裁边界；不指定 A_ℓ 统计量
+R1	110	.chanlun/review-results/issue1339-r2-spec-20260909/payload/spec/inputs/SPEC-COVERAGE-INPUT.json	4764	SPEC/Coverage/残余票明定消费者和既裁边界；不指定 A_ℓ 统计量
+R1	111	.chanlun/review-results/issue1339-r2-spec-20260909/payload/spec/inputs/SPEC-COVERAGE-INPUT.json	15801	SPEC/Coverage/残余票明定消费者和既裁边界；不指定 A_ℓ 统计量
+R1	112	rust/src/bin/p915_capacity_frequency.rs	17	旁证：同配对的跨标的容量/频率/中位点估计，仍无区间
+R1	113	analysis/_p0p1/p0c_ladder_cost.md	54	旧策略因果中枢振幅、短差/震荡/选层的摩擦研究，非逐窗完整往返置信界
+R1	114	analysis/_p0p1/p0c_ladder_cost.md	96	旧策略因果中枢振幅、短差/震荡/选层的摩擦研究，非逐窗完整往返置信界
+R1	115	analysis/_p0p1/p1_dual_gate.md	46	旧策略因果中枢振幅、短差/震荡/选层的摩擦研究，非逐窗完整往返置信界
+R1	116	analysis/_p0p1/p1_dual_gate.md	122	旧策略因果中枢振幅、短差/震荡/选层的摩擦研究，非逐窗完整往返置信界
+R1	117	analysis/organic_fugue_v2_design.md	57	递归终止或分辨率研究，给结构下限或振幅代理，不是月簇置信界
+R1	118	rust/src/bin/p907_cost_gate_level.rs	11	直接探针先例：描述分位、月簇／旧读数和不确定性缺口；不采旧摘要
+R1	119	docs/spiral_engine_v2_architecture.md	622	螺旋或赋格的结构、策略参数与旧震荡门，不是波幅证据
+R1	120	rust/src/theta_v0/backtest/l3_delta_r_alpha.rs	1376	回测收益 μ 的 LCB 与 C-19 选择对比，不是往返波幅
+R1	121	rust/src/theta_v0/backtest/l3_delta_r_alpha.rs	1377	回测收益 μ 的 LCB 与 C-19 选择对比，不是往返波幅
+R1	122	rust/src/theta_v0/backtest/l3_delta_r_alpha.rs	1452	回测收益 μ 的 LCB 与 C-19 选择对比，不是往返波幅
+R1	123	rust/src/theta_v0/backtest/l3_delta_r_alpha.rs	1496	回测收益 μ 的 LCB 与 C-19 选择对比，不是往返波幅
+R1	124	rust/src/theta_v0/backtest/l3_delta_r_alpha.rs	1677	回测收益 μ 的 LCB 与 C-19 选择对比，不是往返波幅
+R1	125	rust/src/theta_v0/backtest/l3_delta_r_alpha.rs	1740	回测收益 μ 的 LCB 与 C-19 选择对比，不是往返波幅
+R1	126	rust/src/theta_v0/backtest/capture_oos.rs	540	样本外捕获/收益认证的分位或抽样，不是成本停止
+R1	127	docs/adr/0022-acceptance-criterion-parameters.md	179	正本：继承块、置信度和窗口证据；主统计量属成本下降速率
+R1	128	analysis/fugue_version_i.py	51	反向回测/P4 价格相对中枢深度阈值，不是置信界
+R1	129	analysis/fugue_version_i.py	683	反向回测/P4 价格相对中枢深度阈值，不是置信界
+R1	130	analysis/fugue_version_i.py	706	反向回测/P4 价格相对中枢深度阈值，不是置信界
+R1	131	analysis/cycle38_close_ablation.md	161	旧策略因果中枢振幅、短差/震荡/选层的摩擦研究，非逐窗完整往返置信界
+R1	132	docs/adr/0017-chong-quantity-numerator-shortdiff-amplitude.md	146	旁证：容量式/δ 的中位点估计，不能充 A_ℓ 置信界
+R1	133	docs/adr/0017-chong-quantity-numerator-shortdiff-amplitude.md	239	旁证：容量式/δ 的中位点估计，不能充 A_ℓ 置信界
+R1	134	analysis/interval_nesting_reverse_backtest.md	7	反向回测/P4 价格相对中枢深度阈值，不是置信界
+R1	135	analysis/interval_nesting_reverse_backtest.md	121	反向回测/P4 价格相对中枢深度阈值，不是置信界
+R1	136	docs/adr/0035-cost-stop-policy-instance-and-base-extension-evidence.md	8	正本：区分第一层波幅与第二层占比；仅后者有完整抽样实现
+R1	137	docs/adr/0035-cost-stop-policy-instance-and-base-extension-evidence.md	14	正本：区分第一层波幅与第二层占比；仅后者有完整抽样实现
+R1	138	docs/adr/0035-cost-stop-policy-instance-and-base-extension-evidence.md	34	正本：区分第一层波幅与第二层占比；仅后者有完整抽样实现
+R1	139	analysis/recursive_fugue_ultimate_design.md	26	递归终止或分辨率研究，给结构下限或振幅代理，不是月簇置信界
+R1	140	analysis/h4_rolling_amplitude_results.md	16	旧策略因果中枢振幅、短差/震荡/选层的摩擦研究，非逐窗完整往返置信界
+R1	141	analysis/h4_rolling_amplitude_results.md	66	旧策略因果中枢振幅、短差/震荡/选层的摩擦研究，非逐窗完整往返置信界
+R1	142	analysis/h4_rolling_amplitude_results.md	114	旧策略因果中枢振幅、短差/震荡/选层的摩擦研究，非逐窗完整往返置信界
+R1	143	analysis/h4_rolling_amplitude_results.md	133	旧策略因果中枢振幅、短差/震荡/选层的摩擦研究，非逐窗完整往返置信界
+R1	144	analysis/recursive_empty_domain_research.md	133	递归终止或分辨率研究，给结构下限或振幅代理，不是月簇置信界
+R1	145	analysis/recursive_fugue_depth1_backtest.py	89	旧策略因果中枢振幅、短差/震荡/选层的摩擦研究，非逐窗完整往返置信界
+R1	146	analysis/notional_exposure_leverage_research.md	65	旧策略因果中枢振幅、短差/震荡/选层的摩擦研究，非逐窗完整往返置信界
+R1	147	analysis/notional_exposure_leverage_research.md	71	旧策略因果中枢振幅、短差/震荡/选层的摩擦研究，非逐窗完整往返置信界
+R1	148	analysis/notional_exposure_leverage_research.md	242	旧策略因果中枢振幅、短差/震荡/选层的摩擦研究，非逐窗完整往返置信界
+R1	149	analysis/pins_backtest_results.md	51	旧策略因果中枢振幅、短差/震荡/选层的摩擦研究，非逐窗完整往返置信界
+R1	150	analysis/post_cseg_fix_backtest.md	92	策略实验中固定/滚动振幅或时长统计，不是登记的经济证据
+R1	151	analysis/leverage_triad_formalization.md	31	旧策略因果中枢振幅、短差/震荡/选层的摩擦研究，非逐窗完整往返置信界
+R1	152	analysis/master_exit_mode_results.md	87	旧策略因果中枢振幅、短差/震荡/选层的摩擦研究，非逐窗完整往返置信界
+R1	153	analysis/unified_recursive_voice_fsm_design.md	39	递归终止或分辨率研究，给结构下限或振幅代理，不是月簇置信界
+R1	154	analysis/unified_recursive_voice_fsm_design.md	178	递归终止或分辨率研究，给结构下限或振幅代理，不是月簇置信界
+R1	155	analysis/residual_chanlun_flow_velocity.py	249	L1/L2 流量／事件的振幅均值描述，不含成本窗口准入
+R1	156	analysis/residual_chanlun_flow_velocity.py	276	L1/L2 流量／事件的振幅均值描述，不含成本窗口准入
+R1	157	analysis/residual_chanlun_flow_velocity.py	277	L1/L2 流量／事件的振幅均值描述，不含成本窗口准入
+R1	158	analysis/residual_chanlun_flow_velocity.py	352	L1/L2 流量／事件的振幅均值描述，不含成本窗口准入
+R1	159	analysis/residual_chanlun_flow_velocity.py	353	L1/L2 流量／事件的振幅均值描述，不含成本窗口准入
+R1	160	analysis/ledger_voice_experiment.md	127	旧策略因果中枢振幅、短差/震荡/选层的摩擦研究，非逐窗完整往返置信界
+R1	161	analysis/fugue_level_routed_backtest_1min.md	28	策略实验中固定/滚动振幅或时长统计，不是登记的经济证据
+R1	162	analysis/hold26_counterseg_fusion_results.md	161	旧策略因果中枢振幅、短差/震荡/选层的摩擦研究，非逐窗完整往返置信界
+R1	163	analysis/theta_adaptive_results.md	60	旧策略因果中枢振幅、短差/震荡/选层的摩擦研究，非逐窗完整往返置信界
+R1	164	analysis/theta_adaptive_results.md	61	旧策略因果中枢振幅、短差/震荡/选层的摩擦研究，非逐窗完整往返置信界
+R1	165	analysis/theta_adaptive_results.md	62	旧策略因果中枢振幅、短差/震荡/选层的摩擦研究，非逐窗完整往返置信界
+R1	166	analysis/theta_adaptive_results.md	66	旧策略因果中枢振幅、短差/震荡/选层的摩擦研究，非逐窗完整往返置信界
+R1	167	analysis/unn_strict_interval_nesting_l2.md	50	旧策略因果中枢振幅、短差/震荡/选层的摩擦研究，非逐窗完整往返置信界
+R1	168	analysis/interval_nesting_reverse_backtest.py	219	反向回测/P4 价格相对中枢深度阈值，不是置信界
+R1	169	analysis/interval_nesting_reverse_backtest.py	386	反向回测/P4 价格相对中枢深度阈值，不是置信界
+R1	170	analysis/_trend_counter_seg_stats.py	104	策略实验中固定/滚动振幅或时长统计，不是登记的经济证据
+R1	171	analysis/recursive_nested_fugue_unified.md	153	旧策略因果中枢振幅、短差/震荡/选层的摩擦研究，非逐窗完整往返置信界
+R1	172	analysis/cycle38_voice_results.md	49	旧策略因果中枢振幅、短差/震荡/选层的摩擦研究，非逐窗完整往返置信界
+R1	173	analysis/cycle38_voice_results.md	101	旧策略因果中枢振幅、短差/震荡/选层的摩擦研究，非逐窗完整往返置信界
+R1	174	analysis/unified_voice_from_concept_chain.md	41	旧策略因果中枢振幅、短差/震荡/选层的摩擦研究，非逐窗完整往返置信界
+R1	175	analysis/cycle38_voice_backtest.py	11	旧策略因果中枢振幅、短差/震荡/选层的摩擦研究，非逐窗完整往返置信界
+R1	176	analysis/nrf_v4_strict_accounting.md	125	旧策略因果中枢振幅、短差/震荡/选层的摩擦研究，非逐窗完整往返置信界
+R1	177	analysis/es_1s_recl2_located_confirm_diagnosis.md	96	旧策略因果中枢振幅、短差/震荡/选层的摩擦研究，非逐窗完整往返置信界
+R1	178	analysis/es_1s_recl2_located_confirm_diagnosis.md	207	旧策略因果中枢振幅、短差/震荡/选层的摩擦研究，非逐窗完整往返置信界
+R1	179	analysis/recursive_regularization_theory.md	90	递归终止或分辨率研究，给结构下限或振幅代理，不是月簇置信界
+R1	180	analysis/recursive_regularization_theory.md	213	递归终止或分辨率研究，给结构下限或振幅代理，不是月簇置信界
+R1	181	analysis/recursive_regularization_theory.md	243	递归终止或分辨率研究，给结构下限或振幅代理，不是月簇置信界
+R1	182	analysis/profit_gap_comprehensive_research.md	18	旧策略因果中枢振幅、短差/震荡/选层的摩擦研究，非逐窗完整往返置信界
+R1	183	analysis/profit_gap_comprehensive_research.md	109	旧策略因果中枢振幅、短差/震荡/选层的摩擦研究，非逐窗完整往返置信界
+R1	184	analysis/profit_gap_comprehensive_research.md	183	旧策略因果中枢振幅、短差/震荡/选层的摩擦研究，非逐窗完整往返置信界
+R1	185	analysis/profit_gap_comprehensive_research.md	209	旧策略因果中枢振幅、短差/震荡/选层的摩擦研究，非逐窗完整往返置信界
+R1	186	analysis/nrf_v3_root_flip_recursive_nest.md	164	旧策略因果中枢振幅、短差/震荡/选层的摩擦研究，非逐窗完整往返置信界
+R1	187	analysis/pins_backtest.py	9	旧策略因果中枢振幅、短差/震荡/选层的摩擦研究，非逐窗完整往返置信界
+R1	188	analysis/theta_relative_full_revalidation.md	16	旧策略因果中枢振幅、短差/震荡/选层的摩擦研究，非逐窗完整往返置信界
+R1	189	analysis/theta_relative_full_revalidation.md	94	旧策略因果中枢振幅、短差/震荡/选层的摩擦研究，非逐窗完整往返置信界
+R1	190	analysis/theta_relative_full_revalidation.md	138	旧策略因果中枢振幅、短差/震荡/选层的摩擦研究，非逐窗完整往返置信界
+R1	191	analysis/theta_relative_full_revalidation.md	157	旧策略因果中枢振幅、短差/震荡/选层的摩擦研究，非逐窗完整往返置信界
+R1	192	analysis/theta_adaptive_backtest.py	10	旧策略因果中枢振幅、短差/震荡/选层的摩擦研究，非逐窗完整往返置信界
+R1	193	analysis/theta_adaptive_backtest.py	14	旧策略因果中枢振幅、短差/震荡/选层的摩擦研究，非逐窗完整往返置信界
+R1	194	analysis/fugue_version_i_slice.py	41	反向回测/P4 价格相对中枢深度阈值，不是置信界
+R1	195	analysis/unn_theta_allocation_necessity_diagnosis.md	107	旧策略因果中枢振幅、短差/震荡/选层的摩擦研究，非逐窗完整往返置信界
+R1	196	analysis/unn_theta_allocation_necessity_diagnosis.md	127	旧策略因果中枢振幅、短差/震荡/选层的摩擦研究，非逐窗完整往返置信界
+R1	197	analysis/options_short_fixed_point_research.md	81	期权短差风险/兑现的中枢或 move 波幅代理；非同级完整往返 CI
+R1	198	analysis/options_short_fixed_point_research.md	630	期权短差风险/兑现的中枢或 move 波幅代理；非同级完整往返 CI
+R1	199	analysis/options_short_fixed_point_research.md	1017	期权短差风险/兑现的中枢或 move 波幅代理；非同级完整往返 CI
+R1	200	analysis/options_short_fixed_point_research.md	1038	期权短差风险/兑现的中枢或 move 波幅代理；非同级完整往返 CI
+R1	201	analysis/options_short_fixed_point_research.md	1050	期权短差风险/兑现的中枢或 move 波幅代理；非同级完整往返 CI
+R1	202	analysis/options_short_fixed_point_research.md	1070	期权短差风险/兑现的中枢或 move 波幅代理；非同级完整往返 CI
+R1	203	analysis/options_short_fixed_point_research.md	1075	期权短差风险/兑现的中枢或 move 波幅代理；非同级完整往返 CI
+R1	204	analysis/options_short_fixed_point_research.md	1080	期权短差风险/兑现的中枢或 move 波幅代理；非同级完整往返 CI
+R1	205	analysis/options_short_fixed_point_research.md	1081	期权短差风险/兑现的中枢或 move 波幅代理；非同级完整往返 CI
+R1	206	analysis/options_short_fixed_point_research.md	1090	期权短差风险/兑现的中枢或 move 波幅代理；非同级完整往返 CI
+R1	207	analysis/options_short_fixed_point_research.md	1145	期权短差风险/兑现的中枢或 move 波幅代理；非同级完整往返 CI
+R1	208	analysis/options_short_fixed_point_research.md	1213	期权短差风险/兑现的中枢或 move 波幅代理；非同级完整往返 CI
+R1	209	analysis/fugue_level_routed_backtest_1min.py	1009	策略实验中固定/滚动振幅或时长统计，不是登记的经济证据
+R2	1	docs/adr/0022-acceptance-criterion-parameters.md	35	正本：继承块、置信度和窗口证据；主统计量属成本下降速率
+R2	2	docs/adr/0022-acceptance-criterion-parameters.md	53	正本：继承块、置信度和窗口证据；主统计量属成本下降速率
+R2	3	docs/adr/0022-acceptance-criterion-parameters.md	64	正本：继承块、置信度和窗口证据；主统计量属成本下降速率
+R2	4	docs/adr/0022-acceptance-criterion-parameters.md	136	正本：继承块、置信度和窗口证据；主统计量属成本下降速率
+R2	5	docs/adr/0022-acceptance-criterion-parameters.md	171	正本：继承块、置信度和窗口证据；主统计量属成本下降速率
+R2	6	docs/adr/0035-cost-stop-policy-instance-and-base-extension-evidence.md	28	正本：区分第一层波幅与第二层占比；仅后者有完整抽样实现
+R2	7	docs/adr/0035-cost-stop-policy-instance-and-base-extension-evidence.md	30	正本：区分第一层波幅与第二层占比；仅后者有完整抽样实现
+R2	8	docs/adr/0035-cost-stop-policy-instance-and-base-extension-evidence.md	34	正本：区分第一层波幅与第二层占比；仅后者有完整抽样实现
+R2	9	.chanlun/review-results/issue657-lag-decomposition-20260818.md	7	滞后分解的相关研究，不替代成本停止的样本合同
+R2	10	rust/src/trading/depth_ref.rs	10	相邻旧策略路径：中枢振幅/开腿/选层摩擦门，不以登记的 ROUNDTRIP 事件为输入
+R2	11	rust/src/trading/depth_ref.rs	90	相邻旧策略路径：中枢振幅/开腿/选层摩擦门，不以登记的 ROUNDTRIP 事件为输入
+R2	12	rust/src/trading/depth_ref.rs	108	相邻旧策略路径：中枢振幅/开腿/选层摩擦门，不以登记的 ROUNDTRIP 事件为输入
+R2	13	rust/src/trading/depth_ref.rs	155	相邻旧策略路径：中枢振幅/开腿/选层摩擦门，不以登记的 ROUNDTRIP 事件为输入
+R2	14	rust/src/trading/config.rs	81	相邻旧策略路径：中枢振幅/开腿/选层摩擦门，不以登记的 ROUNDTRIP 事件为输入
+R2	15	analysis/theta_adaptive_backtest.py	14	旧策略因果中枢振幅、短差/震荡/选层的摩擦研究，非逐窗完整往返置信界
+R2	16	analysis/theta_adaptive_backtest.py	90	旧策略因果中枢振幅、短差/震荡/选层的摩擦研究，非逐窗完整往返置信界
+R2	17	analysis/theta_adaptive_results.md	66	旧策略因果中枢振幅、短差/震荡/选层的摩擦研究，非逐窗完整往返置信界
+R2	18	analysis/theta_adaptive_results.md	82	旧策略因果中枢振幅、短差/震荡/选层的摩擦研究，非逐窗完整往返置信界
+R2	19	.chanlun/review-results/issue1598-policy-20261026/review/ROUND2-REVIEW.md	17	自由度/证据门链：验证 A-10 第一层指针与第二层方法批准的区别
+R2	20	.chanlun/review-results/issue1598-policy-20261026/draft.md	110	自由度/证据门链：验证 A-10 第一层指针与第二层方法批准的区别
+R2	21	.chanlun/review-results/issue1598-policy-20261026/draft.md	112	自由度/证据门链：验证 A-10 第一层指针与第二层方法批准的区别
+R2	22	.chanlun/review-results/issue1598-policy-20261026/draft.md	116	自由度/证据门链：验证 A-10 第一层指针与第二层方法批准的区别
+R2	23	.chanlun/review-results/issue1598-policy-20261026/draft.md	151	自由度/证据门链：验证 A-10 第一层指针与第二层方法批准的区别
+R2	24	.chanlun/review-results/issue-1605-c19-policy-records-rework-20261025.md	19	门参数记录或 C-19 回测消费；不定义本门估计量
+R2	25	rust/src/spiral/params.rs	56	螺旋或赋格的结构、策略参数与旧震荡门，不是波幅证据
+R2	26	rust/src/bin/p106_cert_forward_pnl.rs	334	样本外捕获/收益认证的分位或抽样，不是成本停止
+R2	27	rust/src/fugue_v3/mod.rs	137	螺旋或赋格的结构、策略参数与旧震荡门，不是波幅证据
+R2	28	rust/src/theta_v0/backtest/evidence_gate.rs	195	门参数记录或 C-19 回测消费；不定义本门估计量
+R2	29	docs/adr/0022-acceptance-criterion-parameters.md	35	正本：继承块、置信度和窗口证据；主统计量属成本下降速率
+R2	30	docs/adr/0022-acceptance-criterion-parameters.md	53	正本：继承块、置信度和窗口证据；主统计量属成本下降速率
+R2	31	docs/adr/0022-acceptance-criterion-parameters.md	64	正本：继承块、置信度和窗口证据；主统计量属成本下降速率
+R2	32	docs/adr/0022-acceptance-criterion-parameters.md	136	正本：继承块、置信度和窗口证据；主统计量属成本下降速率
+R2	33	docs/adr/0022-acceptance-criterion-parameters.md	171	正本：继承块、置信度和窗口证据；主统计量属成本下降速率
+R2	34	docs/spiral_engine_v2_architecture.md	622	螺旋或赋格的结构、策略参数与旧震荡门，不是波幅证据
+R2	35	docs/adr/0035-cost-stop-policy-instance-and-base-extension-evidence.md	28	正本：区分第一层波幅与第二层占比；仅后者有完整抽样实现
+R2	36	docs/adr/0035-cost-stop-policy-instance-and-base-extension-evidence.md	30	正本：区分第一层波幅与第二层占比；仅后者有完整抽样实现
+R2	37	docs/adr/0035-cost-stop-policy-instance-and-base-extension-evidence.md	34	正本：区分第一层波幅与第二层占比；仅后者有完整抽样实现
+R3	1	docs/adr/0057-p0-venue-profile-v2-signature.md	59	旁证：回放撮合假设与成本停止四项来源分离
+R3	2	docs/adr/0057-p0-venue-profile-v2-signature.md	70	旁证：回放撮合假设与成本停止四项来源分离
+R3	3	.chanlun/review-results/issue853-acceptance-params-facts-20260808.md	17	另一量的事实底稿：费后速率、正态覆盖与聚簇经验，不选波幅的统计量
+R3	4	.chanlun/review-results/issue853-acceptance-params-facts-20260808.md	21	另一量的事实底稿：费后速率、正态覆盖与聚簇经验，不选波幅的统计量
+R3	5	.chanlun/review-results/issue853-acceptance-params-facts-20260808.md	192	另一量的事实底稿：费后速率、正态覆盖与聚簇经验，不选波幅的统计量
+R3	6	.chanlun/review-results/issue853-acceptance-params-facts-20260808.md	306	另一量的事实底稿：费后速率、正态覆盖与聚簇经验，不选波幅的统计量
+R3	7	.chanlun/review-results/issue853-acceptance-params-facts-20260808.md	329	另一量的事实底稿：费后速率、正态覆盖与聚簇经验，不选波幅的统计量
+R3	8	.chanlun/review-results/issue853-acceptance-params-facts-20260808.md	440	另一量的事实底稿：费后速率、正态覆盖与聚簇经验，不选波幅的统计量
+R3	9	.chanlun/review-results/issue853-acceptance-params-facts-20260808.md	442	另一量的事实底稿：费后速率、正态覆盖与聚簇经验，不选波幅的统计量
+R3	10	docs/adr/0022-acceptance-criterion-parameters.md	115	正本：继承块、置信度和窗口证据；主统计量属成本下降速率
+R3	11	docs/adr/0022-acceptance-criterion-parameters.md	145	正本：继承块、置信度和窗口证据；主统计量属成本下降速率
+R3	12	docs/adr/0022-acceptance-criterion-parameters.md	151	正本：继承块、置信度和窗口证据；主统计量属成本下降速率
+R3	13	docs/adr/0022-acceptance-criterion-parameters.md	180	正本：继承块、置信度和窗口证据；主统计量属成本下降速率
+R3	14	docs/adr/0035-cost-stop-policy-instance-and-base-extension-evidence.md	16	正本：区分第一层波幅与第二层占比；仅后者有完整抽样实现
+R3	15	.chanlun/review-results/issue915-capacity-frequency-20260805.md	5	旁证：同配对的跨标的容量/频率/中位点估计，仍无区间
+R3	16	.chanlun/review-results/issue915-capacity-frequency-20260805.md	307	旁证：同配对的跨标的容量/频率/中位点估计，仍无区间
+R3	17	docs/adr/0044-cost-stop-policy-signed-instance-v1.md	26	正本：已有签署值、出处、域与 Missing；未锁估计量
+R3	18	docs/adr/0044-cost-stop-policy-signed-instance-v1.md	57	正本：已有签署值、出处、域与 Missing；未锁估计量
+R3	19	docs/adr/0057-p0-venue-profile-v2-signature.md	59	旁证：回放撮合假设与成本停止四项来源分离
+R3	20	docs/adr/0057-p0-venue-profile-v2-signature.md	70	旁证：回放撮合假设与成本停止四项来源分离
+R3	21	.chanlun/review-results/issue1598-policy-20261026/affected-code.md	72	自由度/证据门链：验证 A-10 第一层指针与第二层方法批准的区别
+R3	22	.chanlun/review-results/issue1598-policy-20261026/review/INDEPENDENT-REVIEW.md	8	自由度/证据门链：验证 A-10 第一层指针与第二层方法批准的区别
+R3	23	.chanlun/review-results/issue907-cost-gate-level-20260805.md	4	直接探针先例：描述分位、月簇／旧读数和不确定性缺口；不采旧摘要
+R3	24	.chanlun/review-results/issue907-cost-gate-level-20260805.md	305	直接探针先例：描述分位、月簇／旧读数和不确定性缺口；不采旧摘要
+R3	25	.chanlun/review-results/issue907-cost-gate-level-20260805.md	306	直接探针先例：描述分位、月簇／旧读数和不确定性缺口；不采旧摘要
+R3	26	.chanlun/review-results/issue907-cost-gate-level-20260805.md	307	直接探针先例：描述分位、月簇／旧读数和不确定性缺口；不采旧摘要
+R3	27	docs/adr/0022-acceptance-criterion-parameters.md	115	正本：继承块、置信度和窗口证据；主统计量属成本下降速率
+R3	28	docs/adr/0022-acceptance-criterion-parameters.md	145	正本：继承块、置信度和窗口证据；主统计量属成本下降速率
+R3	29	docs/adr/0022-acceptance-criterion-parameters.md	151	正本：继承块、置信度和窗口证据；主统计量属成本下降速率
+R3	30	docs/adr/0022-acceptance-criterion-parameters.md	180	正本：继承块、置信度和窗口证据；主统计量属成本下降速率
+R3	31	.chanlun/review-results/issue1598-policy-20261026/review/ROUND2-REVIEW.md	10	自由度/证据门链：验证 A-10 第一层指针与第二层方法批准的区别
+R3	32	.chanlun/review-results/issue1598-policy-20261026/draft.md	28	自由度/证据门链：验证 A-10 第一层指针与第二层方法批准的区别
+R3	33	.chanlun/review-results/issue1598-policy-20261026/draft.md	106	自由度/证据门链：验证 A-10 第一层指针与第二层方法批准的区别
+R3	34	.chanlun/review-results/issue1598-policy-20261026/draft.md	215	自由度/证据门链：验证 A-10 第一层指针与第二层方法批准的区别
+R3	35	docs/adr/0035-cost-stop-policy-instance-and-base-extension-evidence.md	16	正本：区分第一层波幅与第二层占比；仅后者有完整抽样实现
+R3	36	.chanlun/review-results/issue1677-evidence-gate-review-20261022.md	17	自由度/证据门链：验证 A-10 第一层指针与第二层方法批准的区别
+R3	37	.chanlun/review-results/issue1677-evidence-gate-review-20261022.md	20	自由度/证据门链：验证 A-10 第一层指针与第二层方法批准的区别
+R3	38	.chanlun/review-results/issue1340-publication-20260909/view/inputs/RESIDUAL-TICKET-PLAN.md	221	SPEC/Coverage/残余票明定消费者和既裁边界；不指定 A_ℓ 统计量
+R3	39	docs/adr/0044-cost-stop-policy-signed-instance-v1.md	26	正本：已有签署值、出处、域与 Missing；未锁估计量
+R3	40	docs/adr/0044-cost-stop-policy-signed-instance-v1.md	57	正本：已有签署值、出处、域与 Missing；未锁估计量
+R3	41	.chanlun/review-results/issue1323-grilling-20261013/1354-AFFECTED-CODE.md	9	既有代码指针与探针补采要求，不是方法裁定
+R3	42	.chanlun/review-results/issue917-market-impact-proxy-20260805.md	582	排除作本门证据：市场冲击或容量/λ 估计，不是成本比值的逐窗置信下界
+R3	43	.chanlun/review-results/issue1370-tb01-a/acceptance/payload/inputs/python-r6-evidence/json_corruption_probe.json	49	大 JSON 内命中探针 bin 名/构建清单，结构汇验不是波幅报告
+R3	44	.chanlun/review-results/issue1774-decision-20261028/draft.md	59	回放撮合/成本来源分离的历史提案；非波幅下界
+R3	45	.chanlun/review-results/issue1774-decision-20261028/draft.md	70	回放撮合/成本来源分离的历史提案；非波幅下界
+R3	46	.chanlun/review-results/issue1340-publication-20260909/payload/inputs/RESIDUAL-TICKET-PLAN.json	4982	SPEC/Coverage/残余票明定消费者和既裁边界；不指定 A_ℓ 统计量
+R3	47	.chanlun/review-results/issue1340-publication-20260909/payload/inputs/RESIDUAL-TICKET-PLAN.json	5033	SPEC/Coverage/残余票明定消费者和既裁边界；不指定 A_ℓ 统计量
+R3	48	.chanlun/review-results/issue1370-tb01-a/acceptance/payload/inputs/python-r6-evidence/contract_probe.json	49	大 JSON 内命中探针 bin 名/构建清单，结构汇验不是波幅报告
+R3	49	.chanlun/review-results/issue1340-publication-20260909/payload/inputs/RESIDUAL-TICKET-PLAN.md	219	SPEC/Coverage/残余票明定消费者和既裁边界；不指定 A_ℓ 统计量
+R3	50	.chanlun/review-results/issue1370-tb01-a/acceptance/payload/inputs/python-r6-evidence/native-build-binding.json	46	大 JSON 内命中探针 bin 名/构建清单，结构汇验不是波幅报告
+R3	51	.chanlun/review-results/issue1370-tb01-a/acceptance/payload/inputs/python-r6-evidence/wire_probe.json	49	大 JSON 内命中探针 bin 名/构建清单，结构汇验不是波幅报告
+R3	52	.chanlun/review-results/issue1339-r2-spec-20260909/view/spec/inputs/SPEC-COVERAGE-INPUT.md	255	SPEC/Coverage/残余票明定消费者和既裁边界；不指定 A_ℓ 统计量
+R3	53	.chanlun/review-results/issue1339-r2-spec-20260909/view/spec/inputs/RESIDUAL-DECISIONS.md	7	SPEC/Coverage/残余票明定消费者和既裁边界；不指定 A_ℓ 统计量
+R3	54	.chanlun/review-results/issue1339-r2-spec-20260909/view/spec/inputs/RESIDUAL-DECISIONS.md	114	SPEC/Coverage/残余票明定消费者和既裁边界；不指定 A_ℓ 统计量
+R3	55	.chanlun/review-results/issue1370-tb01-a/acceptance/payload/evidence/native-r5/native-build-binding.json	46	大 JSON 内命中探针 bin 名/构建清单，结构汇验不是波幅报告
+R3	56	rust/src/theta_v0/policy_records/evidence-gate.json	14	门参数记录或 C-19 回测消费；不定义本门估计量
+R3	57	.chanlun/review-results/issue1339-r2-spec-20260909/payload/spec/inputs/RESIDUAL-DECISIONS.json	112	SPEC/Coverage/残余票明定消费者和既裁边界；不指定 A_ℓ 统计量
+R3	58	.chanlun/review-results/issue1339-r2-spec-20260909/payload/spec/inputs/RESIDUAL-DECISIONS.json	296	SPEC/Coverage/残余票明定消费者和既裁边界；不指定 A_ℓ 统计量
+R3	59	.chanlun/review-results/issue1372-tb01c-20260913/reports/runtime/trajectory-r5-a/FACTS.json	466	大 JSON 内命中探针 bin 名/构建清单，结构汇验不是波幅报告
+R3	60	.chanlun/review-results/issue1372-tb01c-20260913/reports/runtime/trajectory-r5-a/FACTS.json	467	大 JSON 内命中探针 bin 名/构建清单，结构汇验不是波幅报告
+R3	61	.chanlun/review-results/issue1339-r2-spec-20260909/payload/spec/inputs/SPEC-COVERAGE-INPUT.md	253	SPEC/Coverage/残余票明定消费者和既裁边界；不指定 A_ℓ 统计量
+R3	62	.chanlun/review-results/issue1372-tb01c-20260913/reports/rust-p4-independent/queue-fix-recheck/RESULT.json	468	大 JSON 内命中探针 bin 名/构建清单，结构汇验不是波幅报告
+R3	63	.chanlun/review-results/issue1372-tb01c-20260913/reports/rust-p4-independent/queue-fix-recheck/RESULT.json	470	大 JSON 内命中探针 bin 名/构建清单，结构汇验不是波幅报告
+R3	64	.chanlun/review-results/issue1339-r2-spec-20260909/payload/spec/inputs/RESIDUAL-DECISIONS.md	5	SPEC/Coverage/残余票明定消费者和既裁边界；不指定 A_ℓ 统计量
+R3	65	.chanlun/review-results/issue1339-r2-spec-20260909/payload/spec/inputs/RESIDUAL-DECISIONS.md	112	SPEC/Coverage/残余票明定消费者和既裁边界；不指定 A_ℓ 统计量
+R3	66	.chanlun/review-results/issue1372-tb01c-20260913/reports/runtime/trajectory-r5-a/EVIDENCE-INDEX.json	2834	大 JSON 内命中探针 bin 名/构建清单，结构汇验不是波幅报告
+R3	67	.chanlun/review-results/issue1339-r2-spec-20260909/payload/spec/inputs/SPEC-COVERAGE-INPUT.json	3309	SPEC/Coverage/残余票明定消费者和既裁边界；不指定 A_ℓ 统计量
+R3	68	.chanlun/review-results/issue1339-r2-spec-20260909/payload/spec/inputs/SPEC-COVERAGE-INPUT.json	3325	SPEC/Coverage/残余票明定消费者和既裁边界；不指定 A_ℓ 统计量
+R3	69	.chanlun/review-results/issue1339-r2-spec-20260909/payload/spec/inputs/SPEC-COVERAGE-INPUT.json	4770	SPEC/Coverage/残余票明定消费者和既裁边界；不指定 A_ℓ 统计量
+R3	70	.chanlun/review-results/issue1339-r2-spec-20260909/payload/spec/inputs/SPEC-COVERAGE-INPUT.json	15923	SPEC/Coverage/残余票明定消费者和既裁边界；不指定 A_ℓ 统计量
+R3	71	.chanlun/review-results/issue1339-r2-spec-20260909/payload/spec/inputs/SPEC-COVERAGE-INPUT.json	21023	SPEC/Coverage/残余票明定消费者和既裁边界；不指定 A_ℓ 统计量
+R3	72	.chanlun/review-results/issue1339-r2-spec-20260909/payload/spec/inputs/SPEC-COVERAGE-INPUT.json	27931	SPEC/Coverage/残余票明定消费者和既裁边界；不指定 A_ℓ 统计量
+R3	73	rust/Cargo.toml	238	探针二进制构建入口，不含估计量
+R3	74	rust/Cargo.toml	239	探针二进制构建入口，不含估计量
+R3	75	.chanlun/review-results/issue1372-tb01c-20260913/reports/runtime/trajectory-r5-b/FACTS.json	466	大 JSON 内命中探针 bin 名/构建清单，结构汇验不是波幅报告
+R3	76	.chanlun/review-results/issue1372-tb01c-20260913/reports/runtime/trajectory-r5-b/FACTS.json	467	大 JSON 内命中探针 bin 名/构建清单，结构汇验不是波幅报告
+R3	77	.chanlun/review-results/issue1372-tb01c-20260913/reports/delivery-preparation/commit-check-inventory/RUST-BUILD-BINDINGS.json	430	大 JSON 内命中探针 bin 名/构建清单，结构汇验不是波幅报告
+R3	78	.chanlun/review-results/issue1372-tb01c-20260913/reports/delivery-preparation/commit-check-inventory/RUST-BUILD-BINDINGS.json	2594	大 JSON 内命中探针 bin 名/构建清单，结构汇验不是波幅报告
+R3	79	.chanlun/review-results/issue1372-tb01c-20260913/reports/delivery-preparation/commit-check-inventory/RUST-BUILD-BINDINGS.json	5245	大 JSON 内命中探针 bin 名/构建清单，结构汇验不是波幅报告
+R3	80	.chanlun/review-results/issue1372-tb01c-20260913/reports/delivery-preparation/commit-check-inventory/RUST-BUILD-BINDINGS.json	7409	大 JSON 内命中探针 bin 名/构建清单，结构汇验不是波幅报告
+R3	81	.chanlun/review-results/issue1372-tb01c-20260913/reports/delivery-preparation/commit-check-inventory/RUST-BUILD-BINDINGS.json	10113	大 JSON 内命中探针 bin 名/构建清单，结构汇验不是波幅报告
+R3	82	.chanlun/review-results/issue1372-tb01c-20260913/reports/delivery-preparation/commit-check-inventory/RUST-BUILD-BINDINGS.json	12282	大 JSON 内命中探针 bin 名/构建清单，结构汇验不是波幅报告
+R3	83	.chanlun/review-results/issue1372-tb01c-20260913/reports/delivery-preparation/commit-check-inventory/RUST-BUILD-BINDINGS.json	14862	大 JSON 内命中探针 bin 名/构建清单，结构汇验不是波幅报告
+R3	84	.chanlun/review-results/issue1372-tb01c-20260913/reports/delivery-preparation/commit-check-inventory/RUST-BUILD-BINDINGS.json	17031	大 JSON 内命中探针 bin 名/构建清单，结构汇验不是波幅报告
+R3	85	.chanlun/review-results/issue1372-tb01c-20260913/reports/runtime/trajectory-r5-b/EVIDENCE-INDEX.json	2674	大 JSON 内命中探针 bin 名/构建清单，结构汇验不是波幅报告
+R3	86	.chanlun/review-results/issue1372-tb01c-20260913/reports/browser-continuation-performance/final-run-results/THREE-ARM-SOURCE-COMPARISON.json	314	大 JSON 内命中探针 bin 名/构建清单，结构汇验不是波幅报告
+R3	87	rust/src/bin/p915_capacity_frequency.rs	33	旁证：同配对的跨标的容量/频率/中位点估计，仍无区间
+R3	88	rust/src/bin/p915_capacity_frequency.rs	118	旁证：同配对的跨标的容量/频率/中位点估计，仍无区间
+R3	89	rust/src/bin/p915_capacity_frequency.rs	286	旁证：同配对的跨标的容量/频率/中位点估计，仍无区间
+R3	90	rust/src/bin/p915_capacity_frequency.rs	296	旁证：同配对的跨标的容量/频率/中位点估计，仍无区间
+R3	91	rust/src/bin/p915_capacity_frequency.rs	301	旁证：同配对的跨标的容量/频率/中位点估计，仍无区间
+R3	92	rust/src/bin/p915_capacity_frequency.rs	427	旁证：同配对的跨标的容量/频率/中位点估计，仍无区间
+R3	93	rust/src/bin/p915_capacity_frequency.rs	543	旁证：同配对的跨标的容量/频率/中位点估计，仍无区间
+R3	94	rust/src/bin/p907_cost_gate_level.rs	1	直接探针先例：描述分位、月簇／旧读数和不确定性缺口；不采旧摘要
+R3	95	rust/src/bin/p907_cost_gate_level.rs	68	直接探针先例：描述分位、月簇／旧读数和不确定性缺口；不采旧摘要
+R4	1	docs/adr/0022-acceptance-criterion-parameters.md	171	正本：继承块、置信度和窗口证据；主统计量属成本下降速率
+R4	2	docs/adr/0022-acceptance-criterion-parameters.md	179	正本：继承块、置信度和窗口证据；主统计量属成本下降速率
+R4	3	.chanlun/review-results/issue915-capacity-frequency-20260805.md	4	旁证：同配对的跨标的容量/频率/中位点估计，仍无区间
+R4	4	.chanlun/review-results/issue915-capacity-frequency-20260805.md	96	旁证：同配对的跨标的容量/频率/中位点估计，仍无区间
+R4	5	.chanlun/review-results/issue915-capacity-frequency-20260805.md	107	旁证：同配对的跨标的容量/频率/中位点估计，仍无区间
+R4	6	.chanlun/review-results/issue915-capacity-frequency-20260805.md	124	旁证：同配对的跨标的容量/频率/中位点估计，仍无区间
+R4	7	.chanlun/review-results/issue915-capacity-frequency-20260805.md	134	旁证：同配对的跨标的容量/频率/中位点估计，仍无区间
+R4	8	.chanlun/review-results/issue915-capacity-frequency-20260805.md	220	旁证：同配对的跨标的容量/频率/中位点估计，仍无区间
+R4	9	.chanlun/review-results/issue915-capacity-frequency-20260805.md	266	旁证：同配对的跨标的容量/频率/中位点估计，仍无区间
+R4	10	.chanlun/review-results/issue915-capacity-frequency-20260805.md	377	旁证：同配对的跨标的容量/频率/中位点估计，仍无区间
+R4	11	.chanlun/review-results/issue915-capacity-frequency-20260805.md	394	旁证：同配对的跨标的容量/频率/中位点估计，仍无区间
+R4	12	.chanlun/review-results/issue915-capacity-frequency-20260805.md	426	旁证：同配对的跨标的容量/频率/中位点估计，仍无区间
+R4	13	.chanlun/review-results/issue915-capacity-frequency-20260805.md	459	旁证：同配对的跨标的容量/频率/中位点估计，仍无区间
+R4	14	docs/adr/0035-cost-stop-policy-instance-and-base-extension-evidence.md	14	正本：区分第一层波幅与第二层占比；仅后者有完整抽样实现
+R4	15	docs/adr/0017-chong-quantity-numerator-shortdiff-amplitude.md	37	旁证：容量式/δ 的中位点估计，不能充 A_ℓ 置信界
+R4	16	docs/adr/0017-chong-quantity-numerator-shortdiff-amplitude.md	138	旁证：容量式/δ 的中位点估计，不能充 A_ℓ 置信界
+R4	17	docs/adr/0017-chong-quantity-numerator-shortdiff-amplitude.md	143	旁证：容量式/δ 的中位点估计，不能充 A_ℓ 置信界
+R4	18	docs/adr/0017-chong-quantity-numerator-shortdiff-amplitude.md	146	旁证：容量式/δ 的中位点估计，不能充 A_ℓ 置信界
+R4	19	docs/adr/0017-chong-quantity-numerator-shortdiff-amplitude.md	155	旁证：容量式/δ 的中位点估计，不能充 A_ℓ 置信界
+R4	20	docs/adr/0017-chong-quantity-numerator-shortdiff-amplitude.md	259	旁证：容量式/δ 的中位点估计，不能充 A_ℓ 置信界
+R4	21	docs/adr/0017-chong-quantity-numerator-shortdiff-amplitude.md	341	旁证：容量式/δ 的中位点估计，不能充 A_ℓ 置信界
+R4	22	.chanlun/review-results/issue813-segment-G1-G5-20260805.md	469	线段/特征序列的 k-line 下标 A_L 或分型下界；同词异物
+R4	23	.chanlun/review-results/issue813-segment-G1-G5-20260805.md	551	线段/特征序列的 k-line 下标 A_L 或分型下界；同词异物
+R4	24	.chanlun/review-results/issue813-segment-G1-G5-20260805.md	553	线段/特征序列的 k-line 下标 A_L 或分型下界；同词异物
+R4	25	.chanlun/review-results/issue1677-evidence-gate-review-20261022.md	22	自由度/证据门链：验证 A-10 第一层指针与第二层方法批准的区别
+R4	26	.chanlun/review-results/issue1598-policy-20261026/affected-code.md	33	自由度/证据门链：验证 A-10 第一层指针与第二层方法批准的区别
+R4	27	.chanlun/review-results/issue1598-policy-20261026/review/INDEPENDENT-REVIEW.md	10	自由度/证据门链：验证 A-10 第一层指针与第二层方法批准的区别
+R4	28	.chanlun/review-results/issue1340-publication-20260909/payload/inputs/RESIDUAL-TICKET-PLAN.json	2662	SPEC/Coverage/残余票明定消费者和既裁边界；不指定 A_ℓ 统计量
+R4	29	.chanlun/review-results/issue917-market-impact-proxy-20260805.md	38	排除作本门证据：市场冲击或容量/λ 估计，不是成本比值的逐窗置信下界
+R4	30	.chanlun/review-results/issue917-market-impact-proxy-20260805.md	319	排除作本门证据：市场冲击或容量/λ 估计，不是成本比值的逐窗置信下界
+R4	31	.chanlun/review-results/issue917-market-impact-proxy-20260805.md	330	排除作本门证据：市场冲击或容量/λ 估计，不是成本比值的逐窗置信下界
+R4	32	.chanlun/review-results/issue917-market-impact-proxy-20260805.md	361	排除作本门证据：市场冲击或容量/λ 估计，不是成本比值的逐窗置信下界
+R4	33	.chanlun/review-results/issue917-market-impact-proxy-20260805.md	363	排除作本门证据：市场冲击或容量/λ 估计，不是成本比值的逐窗置信下界
+R4	34	.chanlun/review-results/issue917-market-impact-proxy-20260805.md	379	排除作本门证据：市场冲击或容量/λ 估计，不是成本比值的逐窗置信下界
+R4	35	.chanlun/review-results/issue917-market-impact-proxy-20260805.md	383	排除作本门证据：市场冲击或容量/λ 估计，不是成本比值的逐窗置信下界
+R4	36	.chanlun/review-results/issue917-market-impact-proxy-20260805.md	386	排除作本门证据：市场冲击或容量/λ 估计，不是成本比值的逐窗置信下界
+R4	37	.chanlun/review-results/issue917-market-impact-proxy-20260805.md	387	排除作本门证据：市场冲击或容量/λ 估计，不是成本比值的逐窗置信下界
+R4	38	.chanlun/review-results/issue917-market-impact-proxy-20260805.md	388	排除作本门证据：市场冲击或容量/λ 估计，不是成本比值的逐窗置信下界
+R4	39	.chanlun/review-results/issue917-market-impact-proxy-20260805.md	394	排除作本门证据：市场冲击或容量/λ 估计，不是成本比值的逐窗置信下界
+R4	40	.chanlun/review-results/issue917-market-impact-proxy-20260805.md	408	排除作本门证据：市场冲击或容量/λ 估计，不是成本比值的逐窗置信下界
+R4	41	.chanlun/review-results/issue917-market-impact-proxy-20260805.md	469	排除作本门证据：市场冲击或容量/λ 估计，不是成本比值的逐窗置信下界
+R4	42	.chanlun/review-results/issue917-market-impact-proxy-20260805.md	473	排除作本门证据：市场冲击或容量/λ 估计，不是成本比值的逐窗置信下界
+R4	43	.chanlun/review-results/issue917-market-impact-proxy-20260805.md	475	排除作本门证据：市场冲击或容量/λ 估计，不是成本比值的逐窗置信下界
+R4	44	rust/src/segment.rs	369	线段/特征序列的 k-line 下标 A_L 或分型下界；同词异物
+R4	45	rust/src/segment.rs	374	线段/特征序列的 k-line 下标 A_L 或分型下界；同词异物
+R4	46	rust/src/segment.rs	392	线段/特征序列的 k-line 下标 A_L 或分型下界；同词异物
+R4	47	rust/src/segment.rs	404	线段/特征序列的 k-line 下标 A_L 或分型下界；同词异物
+R4	48	rust/src/segment.rs	405	线段/特征序列的 k-line 下标 A_L 或分型下界；同词异物
+R4	49	rust/src/segment.rs	569	线段/特征序列的 k-line 下标 A_L 或分型下界；同词异物
+R4	50	rust/src/segment.rs	574	线段/特征序列的 k-line 下标 A_L 或分型下界；同词异物
+R4	51	rust/src/segment.rs	585	线段/特征序列的 k-line 下标 A_L 或分型下界；同词异物
+R4	52	rust/src/bin/p915_capacity_frequency.rs	10	旁证：同配对的跨标的容量/频率/中位点估计，仍无区间
+R4	53	rust/src/bin/p915_capacity_frequency.rs	11	旁证：同配对的跨标的容量/频率/中位点估计，仍无区间
+R4	54	rust/src/bin/p915_capacity_frequency.rs	17	旁证：同配对的跨标的容量/频率/中位点估计，仍无区间
+R4	55	.chanlun/review-results/dof-audit-20261020/AUDIT.md	48	自由度/证据门链：验证 A-10 第一层指针与第二层方法批准的区别
+R4	56	.chanlun/review-results/dof-audit-20261020/AUDIT.md	56	自由度/证据门链：验证 A-10 第一层指针与第二层方法批准的区别
+R4	57	rust/src/bin/p907_cost_gate_level.rs	11	直接探针先例：描述分位、月簇／旧读数和不确定性缺口；不采旧摘要
+R4	58	rust/Cargo.toml	242	探针二进制构建入口，不含估计量
+R4	59	rust/src/segment_tangency_tests.rs	116	线段/特征序列的 k-line 下标 A_L 或分型下界；同词异物
+R4	60	rust/src/segment_tangency_tests.rs	120	线段/特征序列的 k-line 下标 A_L 或分型下界；同词异物
+R4	61	rust/src/segment_tangency_tests.rs	134	线段/特征序列的 k-line 下标 A_L 或分型下界；同词异物
+R4	62	rust/src/segment_tangency_tests.rs	135	线段/特征序列的 k-line 下标 A_L 或分型下界；同词异物
+R4	63	rust/src/segment_tangency_tests.rs	138	线段/特征序列的 k-line 下标 A_L 或分型下界；同词异物
+R4	64	rust/src/segment_tangency_tests.rs	139	线段/特征序列的 k-line 下标 A_L 或分型下界；同词异物
+R4	65	rust/src/segment_tangency_tests.rs	146	线段/特征序列的 k-line 下标 A_L 或分型下界；同词异物
+R4	66	rust/src/segment_tangency_tests.rs	160	线段/特征序列的 k-line 下标 A_L 或分型下界；同词异物
+R4	67	docs/adr/0022-acceptance-criterion-parameters.md	171	正本：继承块、置信度和窗口证据；主统计量属成本下降速率
+R4	68	docs/adr/0022-acceptance-criterion-parameters.md	179	正本：继承块、置信度和窗口证据；主统计量属成本下降速率
+R4	69	docs/adr/0035-cost-stop-policy-instance-and-base-extension-evidence.md	14	正本：区分第一层波幅与第二层占比；仅后者有完整抽样实现
+R4	70	docs/adr/0017-chong-quantity-numerator-shortdiff-amplitude.md	37	旁证：容量式/δ 的中位点估计，不能充 A_ℓ 置信界
+R4	71	docs/adr/0017-chong-quantity-numerator-shortdiff-amplitude.md	138	旁证：容量式/δ 的中位点估计，不能充 A_ℓ 置信界
+R4	72	docs/adr/0017-chong-quantity-numerator-shortdiff-amplitude.md	143	旁证：容量式/δ 的中位点估计，不能充 A_ℓ 置信界
+R4	73	docs/adr/0017-chong-quantity-numerator-shortdiff-amplitude.md	146	旁证：容量式/δ 的中位点估计，不能充 A_ℓ 置信界
+R4	74	docs/adr/0017-chong-quantity-numerator-shortdiff-amplitude.md	155	旁证：容量式/δ 的中位点估计，不能充 A_ℓ 置信界
+R4	75	docs/adr/0017-chong-quantity-numerator-shortdiff-amplitude.md	259	旁证：容量式/δ 的中位点估计，不能充 A_ℓ 置信界
+R4	76	docs/adr/0017-chong-quantity-numerator-shortdiff-amplitude.md	341	旁证：容量式/δ 的中位点估计，不能充 A_ℓ 置信界
+R4	77	rust/src/theta_v0/parser/feature_seq.rs	64	线段/特征序列的 k-line 下标 A_L 或分型下界；同词异物
+R4	78	rust/src/theta_v0/parser/feature_seq.rs	253	线段/特征序列的 k-line 下标 A_L 或分型下界；同词异物
+R4	79	rust/src/theta_v0/parser/feature_seq.rs	257	线段/特征序列的 k-line 下标 A_L 或分型下界；同词异物
+R4	80	rust/src/theta_v0/parser/feature_seq.rs	268	线段/特征序列的 k-line 下标 A_L 或分型下界；同词异物
+R4	81	rust/src/theta_v0/parser/feature_seq.rs	293	线段/特征序列的 k-line 下标 A_L 或分型下界；同词异物
+R4	82	rust/src/theta_v0/parser/feature_seq.rs	297	线段/特征序列的 k-line 下标 A_L 或分型下界；同词异物
+R4	83	rust/src/theta_v0/parser/feature_seq.rs	301	线段/特征序列的 k-line 下标 A_L 或分型下界；同词异物
+R4	84	rust/src/theta_v0/parser/feature_seq.rs	320	线段/特征序列的 k-line 下标 A_L 或分型下界；同词异物
+R4	85	rust/src/theta_v0/parser/feature_seq.rs	325	线段/特征序列的 k-line 下标 A_L 或分型下界；同词异物
+R4	86	rust/src/theta_v0/parser/feature_seq.rs	1042	线段/特征序列的 k-line 下标 A_L 或分型下界；同词异物
+R4	87	rust/src/theta_v0/parser/feature_seq.rs	1047	线段/特征序列的 k-line 下标 A_L 或分型下界；同词异物
+R4	88	rust/src/theta_v0/parser/feature_seq.rs	1213	线段/特征序列的 k-line 下标 A_L 或分型下界；同词异物
+R4	89	rust/src/theta_v0/parser/feature_seq.rs	1216	线段/特征序列的 k-line 下标 A_L 或分型下界；同词异物
+R4	90	rust/src/theta_v0/parser/feature_seq.rs	1231	线段/特征序列的 k-line 下标 A_L 或分型下界；同词异物
+R4	91	rust/src/theta_v0/parser/feature_seq.rs	1258	线段/特征序列的 k-line 下标 A_L 或分型下界；同词异物
+R4	92	rust/src/theta_v0/parser/feature_seq.rs	1296	线段/特征序列的 k-line 下标 A_L 或分型下界；同词异物
+R4	93	rust/src/theta_v0/parser/feature_seq.rs	1300	线段/特征序列的 k-line 下标 A_L 或分型下界；同词异物
+R4	94	rust/src/theta_v0/parser/gap_overlap_fixture.rs	104	线段/特征序列的 k-line 下标 A_L 或分型下界；同词异物
+R5	1	formal/Origin/ScanAssemblyBridge.lean	694	Lean ScanAssembly 镜像的价格力度特征，不是成本停止数值
+R5	2	formal/Origin/ScanAssemblyBridge.lean	701	Lean ScanAssembly 镜像的价格力度特征，不是成本停止数值
+R5	3	formal/Origin/ScanAssemblyMirror.lean	838	Lean ScanAssembly 镜像的价格力度特征，不是成本停止数值
+R5	4	formal/Origin/UnifiedScanMirrorRunner.lean	204	Lean ScanAssembly 镜像的价格力度特征，不是成本停止数值
+R5	5	formal/Origin/UnifiedScanMirrorRunner.lean	426	Lean ScanAssembly 镜像的价格力度特征，不是成本停止数值
+R5	6	formal/Origin/UnifiedScanMirrorBridge.lean	539	Lean ScanAssembly 镜像的价格力度特征，不是成本停止数值
+R5	7	formal/Origin/UnifiedScanMirrorBridge.lean	571	Lean ScanAssembly 镜像的价格力度特征，不是成本停止数值
+R5	8	formal/Origin/UnifiedScanMirrorBridge.lean	577	Lean ScanAssembly 镜像的价格力度特征，不是成本停止数值
+R5	9	formal/Origin/UnifiedScanMirrorBridge.lean	579	Lean ScanAssembly 镜像的价格力度特征，不是成本停止数值
+R5	10	formal/Origin/UnifiedScanMirrorBridge.lean	585	Lean ScanAssembly 镜像的价格力度特征，不是成本停止数值
+R5	11	formal/Origin/UnifiedScanMirrorBridge.lean	612	Lean ScanAssembly 镜像的价格力度特征，不是成本停止数值
+R5	12	formal/Origin/UnifiedScanMirrorBridge.lean	614	Lean ScanAssembly 镜像的价格力度特征，不是成本停止数值
+R5	13	formal/Origin/UnifiedScanMirrorBridge.lean	1668	Lean ScanAssembly 镜像的价格力度特征，不是成本停止数值
+R5	14	formal/Origin/UnifiedScanMirrorBridge.lean	2336	Lean ScanAssembly 镜像的价格力度特征，不是成本停止数值
+R5	15	formal/Origin/UnifiedScanMirrorBridge.lean	2343	Lean ScanAssembly 镜像的价格力度特征，不是成本停止数值
+R6	1	f12f47fac3	-	历史版本定位：见该命中提交标题与考古章节
+R6	2	df7beb0c8d	-	历史版本定位：见该命中提交标题与考古章节
+R6	3	40f11b540f	-	历史版本定位：见该命中提交标题与考古章节
+R6	4	82a9e5436a	-	历史版本定位：见该命中提交标题与考古章节
+R6	5	21a568a560	-	历史版本定位：见该命中提交标题与考古章节
+R6	6	55fdd4a717	-	历史版本定位：见该命中提交标题与考古章节
+R6	7	5ee83b1e8f	-	历史版本定位：见该命中提交标题与考古章节
+R6	8	a257400242	-	历史版本定位：见该命中提交标题与考古章节

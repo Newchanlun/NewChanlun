@@ -1,0 +1,393 @@
+{
+  "ticket": 2121,
+  "model": "gpt-6.2-sol",
+  "sourceCommit": "b9d898dccf46c2a716115eaa1215bc39c458a959",
+  "implementationHead": "c2806071dec8d0669f478cec4df093781f691232",
+  "parsed": true,
+  "problems": [],
+  "points": [
+    {
+      "id": "Q1",
+      "question": "波幅估计量",
+      "klass": "B",
+      "hits": [
+        {
+          "source": "#907 报告 :139–147、:294；#915 报告 :363、:407",
+          "excerpt": "事件中位数 bootstrap 下界"
+        }
+      ],
+      "citation": "#907 报告 :139–147、:294；#915 报告 :363、:407",
+      "reasoning": "见 archaeology.md Q1、candidates.md",
+      "recommended": "事件中位数 bootstrap 下界",
+      "searchedKeywords": [],
+      "gap": "",
+      "queries": [
+        {
+          "channel": "tracker",
+          "query": "T01",
+          "command": "gh issue list -R Newchanlun/NewChanlun --state all --search '波幅 下界 bootstrap 统计量' --limit 1000 --json number,title,state,url",
+          "hits": 7
+        },
+        {
+          "channel": "tracker",
+          "query": "T05",
+          "command": "gh issue list -R Newchanlun/NewChanlun --state all --search '\"ROUNDTRIP\"' --limit 1000 --json number,title,state,url",
+          "hits": 20
+        },
+        {
+          "channel": "tracker",
+          "query": "T19",
+          "command": "gh issue list -R Newchanlun/NewChanlun --state all --search '\"波幅\" \"中位数\"' --limit 1000 --json number,title,state,url",
+          "hits": 10
+        },
+        {
+          "channel": "tracker",
+          "query": "T32",
+          "command": "gh issue list -R Newchanlun/NewChanlun --state all --search '\"波幅\" \"置信区间\" in:title,body,comments' --limit 1000 --json number,title,state,url",
+          "hits": 4
+        },
+        {
+          "channel": "repo",
+          "query": "R1",
+          "command": "rg --no-heading --color never --hidden -n -i -e '(ROUNDTRIP|A_[ℓl]|method_id|成本停止|成本门|波幅|振幅|amplitude).{0,100}(下界|下限|lower[-_ ]bound|LCB|分位|quantile|percentile|bootstrap|重[采抽]样|自助|区块|分[块桶]|block|月[块簇]|聚簇|均值|中位|mean|median|置信|confidence)|(下界|下限|lower[-_ ]bound|LCB|分位|quantile|percentile|bootstrap|重[采抽]样|自助|区块|分[块桶]|block|月[块簇]|聚簇|均值|中位|mean|median|置信|confidence).{0,100}(ROUNDTRIP|A_[ℓl]|method_id|成本停止|成本门|波幅|振幅|amplitude)' -- docs/adr .chanlun/definitions analysis docs rust formal .chanlun/review-results CONTEXT.md",
+          "hits": 209
+        },
+        {
+          "channel": "repo",
+          "query": "R3",
+          "command": "rg --no-heading --color never --hidden -n -i -e 'p907_cost_gate_level|issue907-cost-gate-level|5194145006|5289198250|MethodNotRuled|amplitude-run/' -- docs/adr .chanlun/definitions analysis docs rust formal .chanlun/review-results CONTEXT.md",
+          "hits": 95
+        },
+        {
+          "channel": "repo",
+          "query": "R4",
+          "command": "rg --no-heading --color never --hidden -n -i -e '下界读法|lower_bound_95|A_[ℓl]\\b|波幅.{0,20}(区间|估计|点估计|p10)|置信下界.{0,12}逐窗|cost[-_ ]stop.{0,60}(bootstrap|method)|#1677.{0,25}A-10' -- docs/adr .chanlun/definitions analysis docs rust formal .chanlun/review-results CONTEXT.md",
+          "hits": 94
+        },
+        {
+          "channel": "repo",
+          "query": "B1",
+          "command": "git grep -nI -iE -e '((ROUNDTRIP|A_[ℓl]|method_id|成本停止|成本门|波幅|振幅|amplitude).{0,100}(下界|下限|lower[-_ ]bound|LCB|分位|quantile|percentile|bootstrap|重[采抽]样|自助|区块|分[块桶]|block|月[块簇]|聚簇|均值|中位|mean|median|置信|confidence)|(下界|下限|lower[-_ ]bound|LCB|分位|quantile|percentile|bootstrap|重[采抽]样|自助|区块|分[块桶]|block|月[块簇]|聚簇|均值|中位|mean|median|置信|confidence).{0,100}(ROUNDTRIP|A_[ℓl]|method_id|成本停止|成本门|波幅|振幅|amplitude))|(PCG[-_ ]?XSH|Pcg32|拒绝取模|nearest[-_ ]rank|descent-share/block-bootstrap|evidence-gate/v1)|(p907_cost_gate_level|issue907-cost-gate-level|5194145006|5289198250|MethodNotRuled|amplitude-run/)' origin/evidence/1441-design-r3 -- .chanlun/review-results/issue1441-design-r3",
+          "hits": 10
+        }
+      ]
+    },
+    {
+      "id": "Q2",
+      "question": "次数、种子、PRNG、索引及分桶",
+      "klass": "B",
+      "hits": [
+        {
+          "source": "ADR 0035:34；#907 :128–146；#1441 候选",
+          "excerpt": "按进场 UTC 月块；B=10000、seed=0、PCG stream=1；精确定义初始化和低端拒绝"
+        }
+      ],
+      "citation": "ADR 0035:34；#907 :128–146；#1441 候选",
+      "reasoning": "见 archaeology.md Q2、candidates.md",
+      "recommended": "按进场 UTC 月块；B=10000、seed=0、PCG stream=1；精确定义初始化和低端拒绝",
+      "searchedKeywords": [],
+      "gap": "",
+      "queries": [
+        {
+          "channel": "tracker",
+          "query": "T02",
+          "command": "gh issue list -R Newchanlun/NewChanlun --state all --search 'amplitude block bootstrap method_id' --limit 1000 --json number,title,state,url",
+          "hits": 1
+        },
+        {
+          "channel": "tracker",
+          "query": "T14",
+          "command": "gh issue list -R Newchanlun/NewChanlun --state all --search '\"波幅\" \"重采样\"' --limit 1000 --json number,title,state,url",
+          "hits": 2
+        },
+        {
+          "channel": "tracker",
+          "query": "T16",
+          "command": "gh issue list -R Newchanlun/NewChanlun --state all --search '\"波幅\" \"月簇\"' --limit 1000 --json number,title,state,url",
+          "hits": 7
+        },
+        {
+          "channel": "tracker",
+          "query": "T22",
+          "command": "gh issue list -R Newchanlun/NewChanlun --state all --search '\"PCG-XSH-RR\"' --limit 1000 --json number,title,state,url",
+          "hits": 1
+        },
+        {
+          "channel": "tracker",
+          "query": "T38",
+          "command": "gh issue list -R Newchanlun/NewChanlun --state all --search '\"抽样\" \"波幅\" in:title,body,comments' --limit 1000 --json number,title,state,url",
+          "hits": 5
+        },
+        {
+          "channel": "repo",
+          "query": "R1",
+          "command": "rg --no-heading --color never --hidden -n -i -e '(ROUNDTRIP|A_[ℓl]|method_id|成本停止|成本门|波幅|振幅|amplitude).{0,100}(下界|下限|lower[-_ ]bound|LCB|分位|quantile|percentile|bootstrap|重[采抽]样|自助|区块|分[块桶]|block|月[块簇]|聚簇|均值|中位|mean|median|置信|confidence)|(下界|下限|lower[-_ ]bound|LCB|分位|quantile|percentile|bootstrap|重[采抽]样|自助|区块|分[块桶]|block|月[块簇]|聚簇|均值|中位|mean|median|置信|confidence).{0,100}(ROUNDTRIP|A_[ℓl]|method_id|成本停止|成本门|波幅|振幅|amplitude)' -- docs/adr .chanlun/definitions analysis docs rust formal .chanlun/review-results CONTEXT.md",
+          "hits": 209
+        },
+        {
+          "channel": "repo",
+          "query": "R2",
+          "command": "rg --no-heading --color never --hidden -n -i -e 'PCG[-_ ]?XSH|Pcg32|拒绝取模|nearest[-_ ]rank|descent-share/block-bootstrap|evidence-gate/v1' -- docs/adr .chanlun/definitions analysis docs rust formal .chanlun/review-results CONTEXT.md",
+          "hits": 37
+        },
+        {
+          "channel": "repo",
+          "query": "B2",
+          "command": "git grep -nI -iE -e '((ROUNDTRIP|A_[ℓl]|method_id|成本停止|成本门|波幅|振幅|amplitude).{0,100}(下界|下限|lower[-_ ]bound|LCB|分位|quantile|percentile|bootstrap|重[采抽]样|自助|区块|分[块桶]|block|月[块簇]|聚簇|均值|中位|mean|median|置信|confidence)|(下界|下限|lower[-_ ]bound|LCB|分位|quantile|percentile|bootstrap|重[采抽]样|自助|区块|分[块桶]|block|月[块簇]|聚簇|均值|中位|mean|median|置信|confidence).{0,100}(ROUNDTRIP|A_[ℓl]|method_id|成本停止|成本门|波幅|振幅|amplitude))|(PCG[-_ ]?XSH|Pcg32|拒绝取模|nearest[-_ ]rank|descent-share/block-bootstrap|evidence-gate/v1)|(p907_cost_gate_level|issue907-cost-gate-level|5194145006|5289198250|MethodNotRuled|amplitude-run/)' origin/impl/1441-cost-stop-policy -- rust/src/theta_v0/cost_stop rust/src/theta_v0/evidence_gate rust/src/theta_v0/cost_stop.rs rust/tests/cost_stop_public_surface.rs",
+          "hits": 16
+        }
+      ]
+    },
+    {
+      "id": "Q3",
+      "question": "分位、插值、整数取整",
+      "klass": "B",
+      "hits": [
+        {
+          "source": "ADR 0022:30、:114；ADR 0035:14、:34；#907 :93–109",
+          "excerpt": "精确经验逆 CDF、半 ppb 后向下取整"
+        }
+      ],
+      "citation": "ADR 0022:30、:114；ADR 0035:14、:34；#907 :93–109",
+      "reasoning": "见 archaeology.md Q3、candidates.md",
+      "recommended": "精确经验逆 CDF、半 ppb 后向下取整",
+      "searchedKeywords": [],
+      "gap": "",
+      "queries": [
+        {
+          "channel": "tracker",
+          "query": "T03",
+          "command": "gh issue list -R Newchanlun/NewChanlun --state all --search 'ROUNDTRIP 波幅 95% 下界 方法' --limit 1000 --json number,title,state,url",
+          "hits": 8
+        },
+        {
+          "channel": "tracker",
+          "query": "T10",
+          "command": "gh issue list -R Newchanlun/NewChanlun --state all --search '\"波幅\" \"置信下限\"' --limit 1000 --json number,title,state,url",
+          "hits": 0
+        },
+        {
+          "channel": "tracker",
+          "query": "T35",
+          "command": "gh issue list -R Newchanlun/NewChanlun --state all --search '\"percentile\" \"ROUNDTRIP\" in:title,body,comments' --limit 1000 --json number,title,state,url",
+          "hits": 1
+        },
+        {
+          "channel": "tracker",
+          "query": "T40",
+          "command": "gh issue list -R Newchanlun/NewChanlun --state all --search '\"振幅\" \"分位数\" in:title,body,comments' --limit 1000 --json number,title,state,url",
+          "hits": 3
+        },
+        {
+          "channel": "repo",
+          "query": "R1",
+          "command": "rg --no-heading --color never --hidden -n -i -e '(ROUNDTRIP|A_[ℓl]|method_id|成本停止|成本门|波幅|振幅|amplitude).{0,100}(下界|下限|lower[-_ ]bound|LCB|分位|quantile|percentile|bootstrap|重[采抽]样|自助|区块|分[块桶]|block|月[块簇]|聚簇|均值|中位|mean|median|置信|confidence)|(下界|下限|lower[-_ ]bound|LCB|分位|quantile|percentile|bootstrap|重[采抽]样|自助|区块|分[块桶]|block|月[块簇]|聚簇|均值|中位|mean|median|置信|confidence).{0,100}(ROUNDTRIP|A_[ℓl]|method_id|成本停止|成本门|波幅|振幅|amplitude)' -- docs/adr .chanlun/definitions analysis docs rust formal .chanlun/review-results CONTEXT.md",
+          "hits": 209
+        },
+        {
+          "channel": "repo",
+          "query": "R4",
+          "command": "rg --no-heading --color never --hidden -n -i -e '下界读法|lower_bound_95|A_[ℓl]\\b|波幅.{0,20}(区间|估计|点估计|p10)|置信下界.{0,12}逐窗|cost[-_ ]stop.{0,60}(bootstrap|method)|#1677.{0,25}A-10' -- docs/adr .chanlun/definitions analysis docs rust formal .chanlun/review-results CONTEXT.md",
+          "hits": 94
+        },
+        {
+          "channel": "repo",
+          "query": "B2",
+          "command": "git grep -nI -iE -e '((ROUNDTRIP|A_[ℓl]|method_id|成本停止|成本门|波幅|振幅|amplitude).{0,100}(下界|下限|lower[-_ ]bound|LCB|分位|quantile|percentile|bootstrap|重[采抽]样|自助|区块|分[块桶]|block|月[块簇]|聚簇|均值|中位|mean|median|置信|confidence)|(下界|下限|lower[-_ ]bound|LCB|分位|quantile|percentile|bootstrap|重[采抽]样|自助|区块|分[块桶]|block|月[块簇]|聚簇|均值|中位|mean|median|置信|confidence).{0,100}(ROUNDTRIP|A_[ℓl]|method_id|成本停止|成本门|波幅|振幅|amplitude))|(PCG[-_ ]?XSH|Pcg32|拒绝取模|nearest[-_ ]rank|descent-share/block-bootstrap|evidence-gate/v1)|(p907_cost_gate_level|issue907-cost-gate-level|5194145006|5289198250|MethodNotRuled|amplitude-run/)' origin/impl/1441-cost-stop-policy -- rust/src/theta_v0/cost_stop rust/src/theta_v0/evidence_gate rust/src/theta_v0/cost_stop.rs rust/tests/cost_stop_public_surface.rs",
+          "hits": 16
+        }
+      ]
+    },
+    {
+      "id": "Q4",
+      "question": "方法 id、记录和换代",
+      "klass": "C",
+      "hits": [
+        {
+          "source": "ADR 0022:153–167、ADR 0041:17–30；#1441 候选无生产方法",
+          "excerpt": "另起具名 id 及冻结绑定；旧摘要不迁移"
+        }
+      ],
+      "citation": "ADR 0022:153–167、ADR 0041:17–30；#1441 候选无生产方法",
+      "reasoning": "见 archaeology.md Q4、candidates.md",
+      "recommended": "另起具名 id 及冻结绑定；旧摘要不迁移",
+      "searchedKeywords": [
+        "method_id",
+        "ROUNDTRIP",
+        "版本",
+        "supersedes"
+      ],
+      "gap": "decision",
+      "queries": [
+        {
+          "channel": "tracker",
+          "query": "T02",
+          "command": "gh issue list -R Newchanlun/NewChanlun --state all --search 'amplitude block bootstrap method_id' --limit 1000 --json number,title,state,url",
+          "hits": 1
+        },
+        {
+          "channel": "tracker",
+          "query": "T21",
+          "command": "gh issue list -R Newchanlun/NewChanlun --state all --search '\"method_id\" \"成本停止\"' --limit 1000 --json number,title,state,url",
+          "hits": 1
+        },
+        {
+          "channel": "tracker",
+          "query": "T31",
+          "command": "gh issue list -R Newchanlun/NewChanlun --state all --search '\"cost-stop\" \"bootstrap\" in:title,body,comments' --limit 1000 --json number,title,state,url",
+          "hits": 4
+        },
+        {
+          "channel": "tracker",
+          "query": "T39",
+          "command": "gh issue list -R Newchanlun/NewChanlun --state all --search '\"cost stop\" \"amplitude\" in:title,body,comments' --limit 1000 --json number,title,state,url",
+          "hits": 7
+        },
+        {
+          "channel": "repo",
+          "query": "R2",
+          "command": "rg --no-heading --color never --hidden -n -i -e 'PCG[-_ ]?XSH|Pcg32|拒绝取模|nearest[-_ ]rank|descent-share/block-bootstrap|evidence-gate/v1' -- docs/adr .chanlun/definitions analysis docs rust formal .chanlun/review-results CONTEXT.md",
+          "hits": 37
+        },
+        {
+          "channel": "repo",
+          "query": "R3",
+          "command": "rg --no-heading --color never --hidden -n -i -e 'p907_cost_gate_level|issue907-cost-gate-level|5194145006|5289198250|MethodNotRuled|amplitude-run/' -- docs/adr .chanlun/definitions analysis docs rust formal .chanlun/review-results CONTEXT.md",
+          "hits": 95
+        },
+        {
+          "channel": "repo",
+          "query": "B1",
+          "command": "git grep -nI -iE -e '((ROUNDTRIP|A_[ℓl]|method_id|成本停止|成本门|波幅|振幅|amplitude).{0,100}(下界|下限|lower[-_ ]bound|LCB|分位|quantile|percentile|bootstrap|重[采抽]样|自助|区块|分[块桶]|block|月[块簇]|聚簇|均值|中位|mean|median|置信|confidence)|(下界|下限|lower[-_ ]bound|LCB|分位|quantile|percentile|bootstrap|重[采抽]样|自助|区块|分[块桶]|block|月[块簇]|聚簇|均值|中位|mean|median|置信|confidence).{0,100}(ROUNDTRIP|A_[ℓl]|method_id|成本停止|成本门|波幅|振幅|amplitude))|(PCG[-_ ]?XSH|Pcg32|拒绝取模|nearest[-_ ]rank|descent-share/block-bootstrap|evidence-gate/v1)|(p907_cost_gate_level|issue907-cost-gate-level|5194145006|5289198250|MethodNotRuled|amplitude-run/)' origin/evidence/1441-design-r3 -- .chanlun/review-results/issue1441-design-r3",
+          "hits": 10
+        },
+        {
+          "channel": "repo",
+          "query": "B2",
+          "command": "git grep -nI -iE -e '((ROUNDTRIP|A_[ℓl]|method_id|成本停止|成本门|波幅|振幅|amplitude).{0,100}(下界|下限|lower[-_ ]bound|LCB|分位|quantile|percentile|bootstrap|重[采抽]样|自助|区块|分[块桶]|block|月[块簇]|聚簇|均值|中位|mean|median|置信|confidence)|(下界|下限|lower[-_ ]bound|LCB|分位|quantile|percentile|bootstrap|重[采抽]样|自助|区块|分[块桶]|block|月[块簇]|聚簇|均值|中位|mean|median|置信|confidence).{0,100}(ROUNDTRIP|A_[ℓl]|method_id|成本停止|成本门|波幅|振幅|amplitude))|(PCG[-_ ]?XSH|Pcg32|拒绝取模|nearest[-_ ]rank|descent-share/block-bootstrap|evidence-gate/v1)|(p907_cost_gate_level|issue907-cost-gate-level|5194145006|5289198250|MethodNotRuled|amplitude-run/)' origin/impl/1441-cost-stop-policy -- rust/src/theta_v0/cost_stop rust/src/theta_v0/evidence_gate rust/src/theta_v0/cost_stop.rs rust/tests/cost_stop_public_surface.rs",
+          "hits": 16
+        }
+      ]
+    },
+    {
+      "id": "Q5",
+      "question": "每窗还是合并",
+      "klass": "A",
+      "hits": [
+        {
+          "source": "ADR 0022:55–64、:124；ADR 0035:14；#1441 评论 6326059290",
+          "excerpt": "各窗先合格，全数分别过线，不合并"
+        }
+      ],
+      "citation": "ADR 0022:55–64、:124；ADR 0035:14；#1441 评论 6326059290",
+      "reasoning": "见 archaeology.md Q5、candidates.md",
+      "recommended": "各窗先合格，全数分别过线，不合并",
+      "searchedKeywords": [],
+      "gap": "",
+      "queries": [
+        {
+          "channel": "tracker",
+          "query": "T16",
+          "command": "gh issue list -R Newchanlun/NewChanlun --state all --search '\"波幅\" \"月簇\"' --limit 1000 --json number,title,state,url",
+          "hits": 7
+        },
+        {
+          "channel": "tracker",
+          "query": "T20",
+          "command": "gh issue list -R Newchanlun/NewChanlun --state all --search '\"置信下界\" \"逐窗\"' --limit 1000 --json number,title,state,url",
+          "hits": 8
+        },
+        {
+          "channel": "tracker",
+          "query": "T24",
+          "command": "gh issue list -R Newchanlun/NewChanlun --state all --search '\"evidence-gate/v1\"' --limit 1000 --json number,title,state,url",
+          "hits": 5
+        },
+        {
+          "channel": "tracker",
+          "query": "T36",
+          "command": "gh issue list -R Newchanlun/NewChanlun --state all --search '\"月簇\" \"下界\" in:title,body,comments' --limit 1000 --json number,title,state,url",
+          "hits": 8
+        },
+        {
+          "channel": "repo",
+          "query": "R1",
+          "command": "rg --no-heading --color never --hidden -n -i -e '(ROUNDTRIP|A_[ℓl]|method_id|成本停止|成本门|波幅|振幅|amplitude).{0,100}(下界|下限|lower[-_ ]bound|LCB|分位|quantile|percentile|bootstrap|重[采抽]样|自助|区块|分[块桶]|block|月[块簇]|聚簇|均值|中位|mean|median|置信|confidence)|(下界|下限|lower[-_ ]bound|LCB|分位|quantile|percentile|bootstrap|重[采抽]样|自助|区块|分[块桶]|block|月[块簇]|聚簇|均值|中位|mean|median|置信|confidence).{0,100}(ROUNDTRIP|A_[ℓl]|method_id|成本停止|成本门|波幅|振幅|amplitude)' -- docs/adr .chanlun/definitions analysis docs rust formal .chanlun/review-results CONTEXT.md",
+          "hits": 209
+        },
+        {
+          "channel": "repo",
+          "query": "R3",
+          "command": "rg --no-heading --color never --hidden -n -i -e 'p907_cost_gate_level|issue907-cost-gate-level|5194145006|5289198250|MethodNotRuled|amplitude-run/' -- docs/adr .chanlun/definitions analysis docs rust formal .chanlun/review-results CONTEXT.md",
+          "hits": 95
+        },
+        {
+          "channel": "repo",
+          "query": "B2",
+          "command": "git grep -nI -iE -e '((ROUNDTRIP|A_[ℓl]|method_id|成本停止|成本门|波幅|振幅|amplitude).{0,100}(下界|下限|lower[-_ ]bound|LCB|分位|quantile|percentile|bootstrap|重[采抽]样|自助|区块|分[块桶]|block|月[块簇]|聚簇|均值|中位|mean|median|置信|confidence)|(下界|下限|lower[-_ ]bound|LCB|分位|quantile|percentile|bootstrap|重[采抽]样|自助|区块|分[块桶]|block|月[块簇]|聚簇|均值|中位|mean|median|置信|confidence).{0,100}(ROUNDTRIP|A_[ℓl]|method_id|成本停止|成本门|波幅|振幅|amplitude))|(PCG[-_ ]?XSH|Pcg32|拒绝取模|nearest[-_ ]rank|descent-share/block-bootstrap|evidence-gate/v1)|(p907_cost_gate_level|issue907-cost-gate-level|5194145006|5289198250|MethodNotRuled|amplitude-run/)' origin/impl/1441-cost-stop-policy -- rust/src/theta_v0/cost_stop rust/src/theta_v0/evidence_gate rust/src/theta_v0/cost_stop.rs rust/tests/cost_stop_public_surface.rs",
+          "hits": 16
+        }
+      ]
+    },
+    {
+      "id": "Q6",
+      "question": "已签 θ 与 #2111",
+      "klass": "A",
+      "hits": [
+        {
+          "source": "ADR 0044:23、:32–41；#2111 获审 8187e126",
+          "excerpt": "旧记录与零定义域不动；另立真实外效版本才适用对应授权"
+        }
+      ],
+      "citation": "ADR 0044:23、:32–41；#2111 获审 8187e126",
+      "reasoning": "见 archaeology.md Q6、candidates.md",
+      "recommended": "旧记录与零定义域不动；另立真实外效版本才适用对应授权",
+      "searchedKeywords": [],
+      "gap": "",
+      "queries": [
+        {
+          "channel": "tracker",
+          "query": "T08",
+          "command": "gh issue list -R Newchanlun/NewChanlun --state all --search '\"成本停止\"' --limit 1000 --json number,title,state,url",
+          "hits": 17
+        },
+        {
+          "channel": "tracker",
+          "query": "T25",
+          "command": "gh issue list -R Newchanlun/NewChanlun --state all --search '\"成本下降速率\"' --limit 1000 --json number,title,state,url",
+          "hits": 7
+        },
+        {
+          "channel": "tracker",
+          "query": "T26",
+          "command": "gh issue list -R Newchanlun/NewChanlun --state all --search '\"成本停止\" \"签署\"' --limit 1000 --json number,title,state,url",
+          "hits": 13
+        },
+        {
+          "channel": "tracker",
+          "query": "T29",
+          "command": "gh issue list -R Newchanlun/NewChanlun --state all --search '\"零总成本\"' --limit 1000 --json number,title,state,url",
+          "hits": 2
+        },
+        {
+          "channel": "repo",
+          "query": "R1",
+          "command": "rg --no-heading --color never --hidden -n -i -e '(ROUNDTRIP|A_[ℓl]|method_id|成本停止|成本门|波幅|振幅|amplitude).{0,100}(下界|下限|lower[-_ ]bound|LCB|分位|quantile|percentile|bootstrap|重[采抽]样|自助|区块|分[块桶]|block|月[块簇]|聚簇|均值|中位|mean|median|置信|confidence)|(下界|下限|lower[-_ ]bound|LCB|分位|quantile|percentile|bootstrap|重[采抽]样|自助|区块|分[块桶]|block|月[块簇]|聚簇|均值|中位|mean|median|置信|confidence).{0,100}(ROUNDTRIP|A_[ℓl]|method_id|成本停止|成本门|波幅|振幅|amplitude)' -- docs/adr .chanlun/definitions analysis docs rust formal .chanlun/review-results CONTEXT.md",
+          "hits": 209
+        },
+        {
+          "channel": "repo",
+          "query": "R3",
+          "command": "rg --no-heading --color never --hidden -n -i -e 'p907_cost_gate_level|issue907-cost-gate-level|5194145006|5289198250|MethodNotRuled|amplitude-run/' -- docs/adr .chanlun/definitions analysis docs rust formal .chanlun/review-results CONTEXT.md",
+          "hits": 95
+        },
+        {
+          "channel": "repo",
+          "query": "B3",
+          "command": "git grep -nI -iE -e '((ROUNDTRIP|A_[ℓl]|method_id|成本停止|成本门|波幅|振幅|amplitude).{0,100}(下界|下限|lower[-_ ]bound|LCB|分位|quantile|percentile|bootstrap|重[采抽]样|自助|区块|分[块桶]|block|月[块簇]|聚簇|均值|中位|mean|median|置信|confidence)|(下界|下限|lower[-_ ]bound|LCB|分位|quantile|percentile|bootstrap|重[采抽]样|自助|区块|分[块桶]|block|月[块簇]|聚簇|均值|中位|mean|median|置信|confidence).{0,100}(ROUNDTRIP|A_[ℓl]|method_id|成本停止|成本门|波幅|振幅|amplitude))|(PCG[-_ ]?XSH|Pcg32|拒绝取模|nearest[-_ ]rank|descent-share/block-bootstrap|evidence-gate/v1)|(p907_cost_gate_level|issue907-cost-gate-level|5194145006|5289198250|MethodNotRuled|amplitude-run/)' origin/decision/2111 -- docs/adr/0044-cost-stop-policy-signed-instance-v1.md",
+          "hits": 5
+        }
+      ]
+    }
+  ]
+}

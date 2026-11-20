@@ -1,0 +1,15 @@
+formal/Origin/ScanAssemblyBridge.lean:694:  priceAmplitude : Int
+formal/Origin/ScanAssemblyBridge.lean:701:    priceAmplitude := features.priceAmplitude, priceSpeedBits := features.priceSpeedBits }
+formal/Origin/ScanAssemblyMirror.lean:838:  priceAmplitude : Int
+formal/Origin/UnifiedScanMirrorRunner.lean:204:  failedPath s!"{path}.price_amplitude" (rust.priceAmplitude == lean.priceAmplitude) ++
+formal/Origin/UnifiedScanMirrorRunner.lean:426:  [s!"{path}.macd_area_bits", s!"{path}.dif_peak_bits", s!"{path}.price_amplitude",
+formal/Origin/UnifiedScanMirrorBridge.lean:539:  priceAmplitude : Int
+formal/Origin/UnifiedScanMirrorBridge.lean:571:def rawPriceAmplitude (closes : List Int) : Int :=
+formal/Origin/UnifiedScanMirrorBridge.lean:577:  let amplitude := Int64.ofInt (rawPriceAmplitude closes) |>.toFloat
+formal/Origin/UnifiedScanMirrorBridge.lean:579:  amplitude / span
+formal/Origin/UnifiedScanMirrorBridge.lean:585:    priceAmplitude := rawPriceAmplitude raw.closes
+formal/Origin/UnifiedScanMirrorBridge.lean:612:  let weaker := cArea < aArea || cDif < aDif || c.priceAmplitude < a.priceAmplitude ||
+formal/Origin/UnifiedScanMirrorBridge.lean:614:  let stronger := aArea < cArea || aDif < cDif || a.priceAmplitude < c.priceAmplitude ||
+formal/Origin/UnifiedScanMirrorBridge.lean:1668:        priceAmplitude := 6
+formal/Origin/UnifiedScanMirrorBridge.lean:2336:  priceAmplitude : Int
+formal/Origin/UnifiedScanMirrorBridge.lean:2343:    priceAmplitude := feature.priceAmplitude, priceSpeedBits := feature.priceSpeedBits }

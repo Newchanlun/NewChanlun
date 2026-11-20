@@ -1,0 +1,77 @@
+ticket	state	query_ids	title	url	disposition
+390	CLOSED	T06	🗺️ 验收判据口径唯一性：什么算验收，越线的怎么办	https://github.com/Newchanlun/NewChanlun/issues/390	验收口径唯一性与统计标注祖先；不定义本门波幅
+395	CLOSED	T06,T07	[grilling] 已用第二套口径算出的结论怎么处置	https://github.com/Newchanlun/NewChanlun/issues/395	第二套验收口径的旧结论处置；不定义波幅估计
+399	CLOSED	T06,T07	econ_positive.rs 截窗骨架收敛：4 处 MAX_BARS 复制抽共享 helper + 截断边界补单测	https://github.com/Newchanlun/NewChanlun/issues/399	MAX_BARS 截窗 helper 复用；不是本门资格或 bootstrap
+424	CLOSED	T06	归档订正：walkforward 补口径声明 + oddeven 撤回机制C判定 + 两处援引改措辞（#395 裁定执行项）	https://github.com/Newchanlun/NewChanlun/issues/424	walkforward/oddeven 旧实验归档纠偏；无往返波幅 CI
+443	CLOSED	T06	📋 SPEC：统计口径标注规范（map #390 /to-spec 交棒件）	https://github.com/Newchanlun/NewChanlun/issues/443	统计 provenance 与引用规范的历史先例；不是估计量
+579	CLOSED	T07	[wayfinder] 重算触发口径：no_recompute_in_span 5 只（是否并 C 候选集变化，#527 遗留②）	https://github.com/Newchanlun/NewChanlun/issues/579	C 候选集变化与重算条件；不是重采样
+731	CLOSED	T07	[task] L38 #527 遗留三问（map #695）	https://github.com/Newchanlun/NewChanlun/issues/731	旧图的 L38 重算边界；不是波幅下界
+787	CLOSED	T01,T03,T04,T05,T06,T09,T11,T13,T17,T18,T19,T20,T25,T38,T41	🗺️ 缠论量化交易系统统一架构正本：疆域测绘 → 三层推导链 → 线的归位	https://github.com/Newchanlun/NewChanlun/issues/787	历史主图、#817/#907/#853 的分工；没有新增算法
+799	CLOSED	直接取证	[grilling] 递归式统一怎么落地：判定模块每级复用的形态、验收判据与例外（map #787）	https://github.com/Newchanlun/NewChanlun/issues/799	已裁收敛通则；禁备用档，不选估计量
+804	CLOSED	直接取证	[grilling] 总缝规则：级别差异只准进数据不准进分支——措辞、举证门、适用域与机械锁（map #787）	https://github.com/Newchanlun/NewChanlun/issues/804	已裁各级同判据；锁同输入同输出
+806	CLOSED	T05	[research] 外部方法论的适用性重估：#801 的靶子只有一个递归方向（map #787，喂 #799）	https://github.com/Newchanlun/NewChanlun/issues/806	递归方法论的适用范围；没有成本读数
+817	CLOSED	T09,T20,T27,T34,T38,T41	[grilling] 区间套的教义正本：6 组分歧，最烂一块，排最后（map #787 第二批 6/6）	https://github.com/Newchanlun/NewChanlun/issues/817	教义正本来源，成本界、塔底与复测；统计细节转 #907
+833	CLOSED	T25	[grilling] 目标函数不同源：原文求(成本↓,筹码↑)、本仓求净值 Sharpe，验收标准用哪把尺子（map #787）	https://github.com/Newchanlun/NewChanlun/issues/833	成本／筹码与 Sharpe 的目标差别；不定义 A_ℓ
+844	CLOSED	T11	[task] 多重赋格资产盘点：已有的票/spec/理论文档/代码族 vs #839 六条 R 的对账（map #787，喂 #839）	https://github.com/Newchanlun/NewChanlun/issues/844	旧赋格资产索引；振幅是策略凑手边界或引用线索
+847	CLOSED	T06,T07,T09,T17,T20,T25,T27,T34,T38,T41	📋 SPEC：统一架构结构层实施总单（map #787 交棒）——重的实例化 + 操作级别挂载 + 区间套下钻接线	https://github.com/Newchanlun/NewChanlun/issues/847	旧统一架构结构与统计实施 SPEC；没有本波幅方法
+852	CLOSED	直接取证	[task] 探针：背驰段有没有逐级收缩到底 + 一路钻下去有没有到一类点——27课定理与17课趋势转折定律的实测（map #787）	https://github.com/Newchanlun/NewChanlun/issues/852	到底／下钻失败分类和聚簇先例；不同事件/分母
+853	CLOSED	T03,T05,T06,T07,T09,T16,T17,T19,T25,T27,T36,T41	[grilling] 新验收判据的参数：成本下降速率的通过阈值、最小样本量、置信下界与频率合成（map #787，ADR 0015 裁定六毕业）	https://github.com/Newchanlun/NewChanlun/issues/853	ADR 0022 速率的时间块和证据门；可继承窗口纪律，不继承估计量
+854	CLOSED	T13,T40	🗺️ 力度与背驰的精确定义：测度论重建与「背驰必转折」的可证性	https://github.com/Newchanlun/NewChanlun/issues/854	力度与背驰主图；不是成本准入
+859	CLOSED	T13,T40	[grilling] 那组比重由什么决定：中枢停留级别 + 中枢个数（map #854，主干 D-2）	https://github.com/Newchanlun/NewChanlun/issues/859	中枢停留级别与中枢个数比重；与往返波幅无关
+872	CLOSED	T40	[task] 把已定的力度定义接到生产塔上：段→笔映射在生产链上不存在 + 五套实现收编 + 盘整背驰度量层（map #854 下游）	https://github.com/Newchanlun/NewChanlun/issues/872	力度映射与 Lean Rat；不是波幅显著性
+907	CLOSED	T05,T06,T07,T09,T13,T16,T18,T19,T20,T27,T32,T34,T36,T41	[task] 探针：成本门咬在哪一级——逐级算「平均买卖点间波幅 ÷（交易成本+误差）」（map #787，喂 #817 N-2 阶段二上限）	https://github.com/Newchanlun/NewChanlun/issues/907	已裁 ROUNDTRIP；点估计、归桶和补区间建议，未跑 bootstrap
+911	CLOSED	T20	[task] 探针：按补齐后的四条判据重测 rung 长度分布——N-6 退场条款到底触发没触发（map #787）	https://github.com/Newchanlun/NewChanlun/issues/911	N-6 下钻链长度的窗口判例；不是 A_ℓ 的采样统计
+914	CLOSED	T19,T32,T38,T41	[grilling] 量层·分子：一份筹码内部，各结构级别信号触发时动多少量（map #787，从 #835 拆出，承接 #348）	https://github.com/Newchanlun/NewChanlun/issues/914	触发量档和配额；不把容量的 A_ℓ 当成本波幅置信界
+915	CLOSED	T03,T04,T05,T09,T19,T27,T32,T34,T38,T41	[task] 探针：逐级测「能容纳的资金量」与「信号频率」——ADR 0016 裁定三/四的落地前置（map #787，从 #835 毕业）	https://github.com/Newchanlun/NewChanlun/issues/915	跨标的容量/频率及 ROUNDTRIP 中位点估计先例；无 CI
+917	CLOSED	T05,T09,T19,T41	[research] 市场冲击的可测代理：平方根律的文献正本 + 只用 OHLCV 能标定到什么程度（map #787，喂 #914 Q4 与 #915）	https://github.com/Newchanlun/NewChanlun/issues/917	冲击方程、容量代理与数据可得性；不是置信界
+925	CLOSED	T05	[grilling] 542 的 λ 该不该回填实测值：自陈「未独立测、初始取 2」，而 #907 测出时间比 5.96、#915 测出容量比 3.10（map #787，ADR 0017 连带处置 b）	https://github.com/Newchanlun/NewChanlun/issues/925	λ 的容量与持有时间比；引用点读数，不定义 A_ℓ 的下界
+962	CLOSED	T25	[task] 46 页截图 PDF 的 OCR 入仓 + 冲击面核查（fpscreenshot (3).pdf）——map #787 关图残雾毕业	https://github.com/Newchanlun/NewChanlun/issues/962	冲击 OCR 材料；不是月块统计
+1004	CLOSED	T07	[task] 镜像预烤 IPython kernel venv，消掉每容器 1-2 分钟自举	https://github.com/Newchanlun/NewChanlun/issues/1004	镜像 venv 的 bootstrap 指自举环境
+1077	CLOSED	T20	📋 SPEC：五候选架构深化实施总单（map #1055 交棒）——3a/3b 扫描唯一 + E2E-O 装配 + Massive/K4 抓取	https://github.com/Newchanlun/NewChanlun/issues/1077	候选架构搭建与扫描验收；不是统计下界
+1116	CLOSED	T05	[task] 安全：S_net cache 移除未校验 pickle 反序列化	https://github.com/Newchanlun/NewChanlun/issues/1116	S_net 缓存格式；无波幅下界
+1173	CLOSED	T07	[smoke] Sandcastle 官方链路真实烟测：agent:implement → Draft PR → agent:review	https://github.com/Newchanlun/NewChanlun/issues/1173	Sandcastle 冒烟与引导；无统计方法
+1309	CLOSED	T07	[impl] #1282 预注册实验：多空双开对称扩展 + 7 标的按冻结判据回测入档（预注册已冻结，跑前不改一字）	https://github.com/Newchanlun/NewChanlun/issues/1309	多空对称实验的预注册交易绩效；不是本门证据
+1317	CLOSED	T07	[impl] M1 最终实验：生产引擎 7 期货回放 + 预注册 7/7 判据（theta_replay，替代简化代理，#1279 C 组收口）	https://github.com/Newchanlun/NewChanlun/issues/1317	历史回放预注册绩效与旧机制；未决本门估计量
+1323	OPEN	T08,T24,T26	🗺️ 完整生产程序接线总单：#787 严格多重赋格落地 → 旧实现收敛 → 历史回放与 paper 同核	https://github.com/Newchanlun/NewChanlun/issues/1323	主图目的与资金签署边界；不推出方法
+1340	OPEN	T01,T03,T05,T07,T08,T09,T13,T14,T17,T24,T26	📋 SPEC：完整生产程序、结构全分类与逐重经营（#1323，R2）	https://github.com/Newchanlun/NewChanlun/issues/1340	SPEC R2 的 TB-02-S 验收；消费已裁 policy，不定 A_ℓ 算法
+1354	CLOSED	T05,T08,T09,T16,T19,T20,T26,T32,T36,T41	[grilling] 成本停止 policy 实例与基底进阶证据（#1323，G-029）	https://github.com/Newchanlun/NewChanlun/issues/1354	ADR 0035 初裁；配对、下界、门、四态分开，无估计量与重采样细节
+1355	CLOSED	T09,T16,T19,T36	[grilling] 完整量档与容量经验参数 policy（#1323，FU-02）	https://github.com/Newchanlun/NewChanlun/issues/1355	容量和量档；波幅处是容量代理，不是成本门统计
+1356	CLOSED	T06,T09,T17	[grilling] 经营统计完整事件样本与边界规则（#1323，FU-05）	https://github.com/Newchanlun/NewChanlun/issues/1356	经营操作样本的事件合格口径；不同事件，不改其定义
+1357	CLOSED	T09	[grilling] 固定 Q 下增长换档的权利与会计衔接（#1323，FU-02）	https://github.com/Newchanlun/NewChanlun/issues/1357	固定 Q 的换档、会计衔接；不是波幅方程
+1358	OPEN	T09	[grilling] 首次触闸后的经营评价参数（#1323，FU-05）	https://github.com/Newchanlun/NewChanlun/issues/1358	首次触闸后的净头寸评价；另一判据
+1359	CLOSED	直接取证	TB-01 验收汇总：正式结构和只读观察（SPEC #1340）	https://github.com/Newchanlun/NewChanlun/issues/1359	已关闭 TB-01 结构/观察前置；不定估计量
+1360	OPEN	直接取证	TB-02 验收汇总：全部结构分类及构造子义务（SPEC #1340）	https://github.com/Newchanlun/NewChanlun/issues/1360	本票及 #1441 父汇总；不改边
+1366	OPEN	直接取证	TB-07 验收汇总：完整历史及恢复（SPEC #1340）	https://github.com/Newchanlun/NewChanlun/issues/1366	完整历史与恢复，旧证据沿版本回放；不改验收
+1367	OPEN	直接取证	TB-08 验收汇总：场所共核与能力验收（SPEC #1340）	https://github.com/Newchanlun/NewChanlun/issues/1367	场所与 TB-08 成本来源，非波幅方法 owner
+1382	OPEN	直接取证	[impl] TB-08-A 历史与paper模式由同一入口使用受控adapter（SPEC #1340）	https://github.com/Newchanlun/NewChanlun/issues/1382	TB-08 成本证据支线；提供来源不选波幅方法
+1394	CLOSED	T05	[impl] TB-03-B 财务准备、责任先增与本地提交史（SPEC #1340）	https://github.com/Newchanlun/NewChanlun/issues/1394	财务与持久边界，#1441 借编译负例体例；不是算法
+1398	OPEN	T06	[impl] TB-06-I 完整经济事件样本与闸门前统计（SPEC #1340）	https://github.com/Newchanlun/NewChanlun/issues/1398	TB-06-I 成本下降速率证据门；不是往返振幅统计
+1400	OPEN	直接取证	[impl] TB-08-B 具名场所只读能力与事实完整性接入会话（SPEC #1340）	https://github.com/Newchanlun/NewChanlun/issues/1400	TB-08 场所成本来源支线；不选波幅方法
+1412	OPEN	直接取证	[impl] TB-08-C 获准场所调用及回报完成严格逐重闭环（SPEC #1340）	https://github.com/Newchanlun/NewChanlun/issues/1412	TB-08 场所成本来源支线；不选波幅方法
+1415	OPEN	T08	[impl] TB-03-D 受控事实的依据绑定与重内量约束（SPEC #1340）	https://github.com/Newchanlun/NewChanlun/issues/1415	受控事实来源与重内量验证；不定义本统计
+1440	OPEN	直接取证	[impl] TB-02-R 已裁Type1完整链与原始N/A事实（SPEC #1340）	https://github.com/Newchanlun/NewChanlun/issues/1440	前置 Type1 结构链；本方法不造链
+1441	OPEN	T01,T05,T06,T07,T08,T09,T17,T24,T26,T29,T31	[impl] TB-02-S 成本停止与基底进阶的具名证据（SPEC #1340）	https://github.com/Newchanlun/NewChanlun/issues/1441	直接消费者；#1677 等同、两轮拒收与 PR 专用方法未裁
+1443	OPEN	T08	[impl] TB-02-T 全分类组合、全对象变化与同源闭包汇验（SPEC #1340）	https://github.com/Newchanlun/NewChanlun/issues/1443	下游 TB-02-T 汇验；不改既有前置边
+1444	OPEN	T08,T26	[impl] TB-06-C 容量规模与频率开重的独立门（SPEC #1340）	https://github.com/Newchanlun/NewChanlun/issues/1444	下游 TB-06-C 的容量和频率独立门；原边不动
+1465	OPEN	T08	🗺️ 订单事件作为缠论递归基底：合法构造与增量价值	https://github.com/Newchanlun/NewChanlun/issues/1465	订单事件递归基底图；不是波幅证据估计
+1467	OPEN	T01,T07,T11	[research] 订单基底候选构造与合法性证据	https://github.com/Newchanlun/NewChanlun/issues/1467	订单基底构造和实证；不是 A_ℓ 的重采样
+1535	CLOSED	T05	[grilling] FU-13 带仓迁移、回退、责任退休（#1323，新增）	https://github.com/Newchanlun/NewChanlun/issues/1535	带仓迁移、回退、责任退休；版本通用纪律，不定方法
+1536	CLOSED	直接取证	[grilling] FU-14 完整历史数据与模型 profile（#1323，新增）	https://github.com/Newchanlun/NewChanlun/issues/1536	具名历史输入源；设计待用的身份原件体例，不替代波幅验收
+1547	CLOSED	T07	[task] graph engineering 流程接通：代理裁决面 + Sandcastle 统一路由执行面（#1323）	https://github.com/Newchanlun/NewChanlun/issues/1547	系统编排的 bootstrap 或裁决面；无本域统计
+1557	CLOSED	T05,T08,T26,T36,T39	[grilling] FU-01/03 余项：共同 cap、固定 Q 与本金批次的数值签署（#1323，P 类）	https://github.com/Newchanlun/NewChanlun/issues/1557	其他签署槽（cap/Q/本金），不借其批复
+1558	CLOSED	T08,T09,T16,T26,T27,T36,T39	[grilling] FU-02 余项：量档与逐级容量 C(ℓ) 的数值签署（#1323，P 类）	https://github.com/Newchanlun/NewChanlun/issues/1558	量档与容量签署，不是 θ 或 A_ℓ
+1559	CLOSED	T03,T05,T08,T09,T17,T19,T26,T27,T39	[grilling] FU-01/05 余项：成本停止 θ 与四项成本输入的签署（#1323，P 类）	https://github.com/Newchanlun/NewChanlun/issues/1559	明确签署 θ 和成本来源，方法未签；两份滑点 Missing
+1586	CLOSED	直接取证	[research] 自由度审计：既有裁定与实现中把合法候选排除或写死的情形（用户 2026-10-20 通则）	https://github.com/Newchanlun/NewChanlun/issues/1586	自由度通则；须具名、可选、单选，不能兜底
+1598	CLOSED	T01,T03,T04,T05,T06,T07,T08,T09,T16,T26,T27,T31,T34,T36,T39,T41	[grilling] 量档、成本与历史模拟正本的选择项改写为可选值字段（#1586 A-01/A-09/A-10/B-05；A-02 拆至 #1677）	https://github.com/Newchanlun/NewChanlun/issues/1598	A-10 确认配对与第二层方法；未钉第一层 B/seed/估计量
+1602	CLOSED	直接取证	[impl] 执行成本、风控与声部参数、场所 tick 与坏 tick 闸落版本化记录（#1586 C-06/C-08/C-17/C-18）	https://github.com/Newchanlun/NewChanlun/issues/1602	历史场所成本参数版本记录；数值来源不等算法
+1605	CLOSED	T07,T24	[impl] 回测与验收统计常数并入验收口径版本化记录（#1586 C-19）	https://github.com/Newchanlun/NewChanlun/issues/1605	研发回测 C-19/PnL 参数；不能被 #1677 或本波幅做统计替身
+1641	OPEN	T07	[impl] S 写者增量路径：持久态重建出生与恢复、资源合同修订与候选保留有界（#1612 切片 2）	https://github.com/Newchanlun/NewChanlun/issues/1641	结构写者的恢复与候选保留，非统计
+1677	CLOSED	T01,T03,T05,T06,T07,T08,T09,T16,T17,T24,T25,T26,T31,T35,T36,T39,T41	[grilling] 验收判据参数记录化：evidence_gate 字段集、默认值与版本规则（拆自 #1598 A-02）	https://github.com/Newchanlun/NewChanlun/issues/1677	证据门版本化、confidence/block_unit 等同与预登记；不裁波幅估计量
+1678	CLOSED	T07	[impl] health-monitor 自愈：服务未加载时改走 launchctl bootstrap（拆自 #1547 判据 4）	https://github.com/Newchanlun/NewChanlun/issues/1678	launchctl bootstrap 与自愈，无统计
+1774	CLOSED	T08,T26	[grilling] P0 venue profile v2: sign replay and production cost inputs (#1323)	https://github.com/Newchanlun/NewChanlun/issues/1774	P0 v2 回放／生产假设签署；ADR 0057 明分撮合和成本停止
+1775	CLOSED	T08,T26	[research] P0 venue/data profile sources for #1774	https://github.com/Newchanlun/NewChanlun/issues/1775	P0 venue/data 来源研究；非 A_ℓ
+1909	OPEN	直接取证	[task] 删除Wayfinder用户审批门，统一代理独审裁定与放行	https://github.com/Newchanlun/NewChanlun/issues/1909	普通 P 代理独审授权边界；不代用户签交易
+1968	OPEN	T05	[bug] kimi 审查员在正式 review 中零工具调用即给结论（#1940 的 BLOCK 为编造）	https://github.com/Newchanlun/NewChanlun/issues/1968	CI 审查工具调用 bug；词碰撞，不是统计
+1993	CLOSED	T05	[bug] CI 偶发失败：admission_prepare_roundtrip_and_explicit_revoke_then_reissue 报 MaintenanceBusy（锁争用）	https://github.com/Newchanlun/NewChanlun/issues/1993	接口名 roundtrip 的并发 CI；不是交易往返
+2111	OPEN	T04,T08,T09,T12,T26,T29,T39	[grilling] 成本停止：全部成本实测为零时的四态归属与检查顺序（ADR 0044，#1441 独审发现）	https://github.com/Newchanlun/NewChanlun/issues/2111	零成本已获审；候选接受四态顺序，未合入
+2121	OPEN	T01,T02,T03,T04,T05,T06,T08,T09,T13,T14,T18,T19,T20,T21,T22,T23,T25,T31,T39,T41	[grilling] 成本停止波幅下界 A_ℓ 的计算方法：统计量、重采样参数与 method_id（ADR 0035，#1441 设计发现）	https://github.com/Newchanlun/NewChanlun/issues/2121	本票、5 项问题和 θ 边界，不是既有裁定

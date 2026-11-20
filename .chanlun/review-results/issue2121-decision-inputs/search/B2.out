@@ -1,0 +1,16 @@
+origin/impl/1441-cost-stop-policy:rust/src/theta_v0/cost_stop.rs:5://! 事件进出皆须在窗内，允许同 bar，依进场 UTC 月分块；修改这些规则须出 amplitude-run/2。
+origin/impl/1441-cost-stop-policy:rust/src/theta_v0/cost_stop.rs:240:        amplitude.lower_bounds().all(|bound| {
+origin/impl/1441-cost-stop-policy:rust/src/theta_v0/cost_stop/amplitude.rs:22:    MethodNotRuled,
+origin/impl/1441-cost-stop-policy:rust/src/theta_v0/cost_stop/amplitude.rs:60:    /// 口径见 #907 `p907_cost_gate_level.rs:128–146,166–170`；合格窗至少有一个样本。
+origin/impl/1441-cost-stop-policy:rust/src/theta_v0/cost_stop/amplitude.rs:223:    if string(&root, "schema")? != "cost-stop/amplitude-run/1" {
+origin/impl/1441-cost-stop-policy:rust/src/theta_v0/cost_stop/amplitude.rs:268:    // #2121 尚未裁定 A_ℓ 的生产统计量、重采样及分位计算。
+origin/impl/1441-cost-stop-policy:rust/src/theta_v0/cost_stop/amplitude.rs:342:    let lower_bound = method(&run.method_id).ok_or(AmplitudeGap::MethodNotRuled)?;
+origin/impl/1441-cost-stop-policy:rust/src/theta_v0/cost_stop/registry.rs:59:        key: "#1677/evidence-gate/v1",
+origin/impl/1441-cost-stop-policy:rust/src/theta_v0/cost_stop/tests.rs:15:const GATE: &str = "#1677/evidence-gate/v1";
+origin/impl/1441-cost-stop-policy:rust/src/theta_v0/cost_stop/tests.rs:124:            "schema":"cost-stop/amplitude-run/1", "domain":domain, "dataset":dataset,
+origin/impl/1441-cost-stop-policy:rust/src/theta_v0/cost_stop/tests.rs:340:                ".chanlun/review-results/issue907-cost-gate-level-20260805.md:161-169"
+origin/impl/1441-cost-stop-policy:rust/src/theta_v0/cost_stop/tests.rs:572:            AmplitudeGap::Window(WindowGap::TooFewBlocks { got: 1, need: 12 }),
+origin/impl/1441-cost-stop-policy:rust/src/theta_v0/cost_stop/tests.rs:617:        AmplitudeGap::Window(WindowGap::TooFewBlocks { got: 11, need: 12 }),
+origin/impl/1441-cost-stop-policy:rust/src/theta_v0/cost_stop/tests.rs:844:    gap(case.eval(0), AmplitudeGap::MethodNotRuled);
+origin/impl/1441-cost-stop-policy:rust/src/theta_v0/cost_stop/tests.rs:1044:fn insufficient_amplitude_precedes_zero_proxy_lower_bound() {
+origin/impl/1441-cost-stop-policy:rust/src/theta_v0/cost_stop/tests.rs:1059:fn positive_proxy_lower_bound_fails_at_qualified_zero_amplitude() {

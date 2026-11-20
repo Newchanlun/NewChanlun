@@ -1,0 +1,12 @@
+{
+  "ticket": 2121,
+  "role": "triage",
+  "model": "gpt-6.2-sol",
+  "klass": "P",
+  "reason": "新选择哪一个往返波幅估计目标与其离散重采样规则，可能改变固定 θ 下的准入结果；仓内没有同量完整裁定，不是四态接口的机械补写。",
+  "parsed": true,
+  "userGate": [],
+  "sourceCommit": "b9d898dccf46c2a716115eaa1215bc39c458a959",
+  "asOf": "2026-11-20",
+  "round": 1
+}

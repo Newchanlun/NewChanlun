@@ -1,0 +1,94 @@
+docs/adr/0022-acceptance-criterion-parameters.md:171:- 等同声明：[ADR 0044](0044-cost-stop-policy-signed-instance-v1.md) 两份 v1 记录里的 `evidence_gate: ADR 0022 裁定六/七` 按值等同 `#1677/evidence-gate/v1`（含 confidence、block_unit），不出 cost-stop v2，ADR 0044 正文不动。ADR 0035:12 读法中「单边 95% 下界（按月 block bootstrap）」改读「所引 evidence_gate 版本的 confidence 与 block_unit」，该改写归 [#1598](https://github.com/xy7365527-lang/NewChanlun/issues/1598) A-10。ADR 0035/0034/0036 字段名里带「月」（`max_month_cluster`、「最大月簇」、`Formal{…, months, …}`）的问题，留给各自下次改签。
+docs/adr/0022-acceptance-criterion-parameters.md:179:    - 待接读点：[#1398](https://github.com/xy7365527-lang/NewChanlun/issues/1398)（正文 :12「原样实现单边95%下界、日历月block bootstrap……」）、[#1410](https://github.com/xy7365527-lang/NewChanlun/issues/1410)（ADR 0036:30）、[#1441](https://github.com/xy7365527-lang/NewChanlun/issues/1441)（ADR 0035 A_ℓ 下界）
+.chanlun/review-results/issue915-capacity-frequency-20260805.md:4:- **上游**：[#907](https://github.com/xy7365527-lang/NewChanlun/issues/907)（波幅阶梯 `A_ℓ`，BTC，配对口径已裁 ＝ ROUNDTRIP）＋ [#917](https://github.com/xy7365527-lang/NewChanlun/issues/917)（容量代理公式、文献系数）。**两者的口径本件全盘照用，不重裁。**
+.chanlun/review-results/issue915-capacity-frequency-20260805.md:96:### 1.1 与 #907 的 `A_ℓ` 对表：**逐位相同**
+.chanlun/review-results/issue915-capacity-frequency-20260805.md:107:**⟹ 本件对其余 7 个标的的 `A_ℓ` 与 #907 的 BTC `A_ℓ` 可并表比较。** 这是本件唯一一次在 BTC 上跑塔——**BTC 的 FULL 窗 `A_ℓ` 与频率一律引用 #907，未重跑**（票面要求）。
+.chanlun/review-results/issue915-capacity-frequency-20260805.md:124:用 #907 的 `A_ℓ` + 本件的 σ/V + `x=10%, Y=0.9, δ=0.5` 单腿口径：
+.chanlun/review-results/issue915-capacity-frequency-20260805.md:134:### 曲线一 —— `A_ℓ` ROUNDTRIP 中位波幅（bp），全史
+.chanlun/review-results/issue915-capacity-frequency-20260805.md:220:#### 4a. `w(d) = (A_{ℓ−d}/A_ℓ)^(1/δ)`，δ=0.5 ⟹ 指数 2 —— **★ 本票核心**
+.chanlun/review-results/issue915-capacity-frequency-20260805.md:266:#### 4b. 绝对容量 `= V_日 · [x·A_ℓ/(Y·σ_日)]^(1/δ)`
+.chanlun/review-results/issue915-capacity-frequency-20260805.md:377:| **BTC 全史塔扫描** | **未重跑，`A_ℓ` 与频率引用 #907** | 票面明令「BTC 的数已有，直接引用不重跑」。本件只跑了 `1,200,000` bar 前缀做对表（§1.1）。**⟹ BTC 没有半窗读数，它不进 §3.7 的 14 窗计数。** |
+.chanlun/review-results/issue915-capacity-frequency-20260805.md:394:1. **`.v.0` 展期缝未处理**：连续合约在换月点有价格跳空，那不是市场波动。**本件没有识别或剔除展期缝。** 它污染 σ_日（RMS 尤甚）与高级别 `A_ℓ`（持有期跨月的往返）。**未量化。**
+.chanlun/review-results/issue915-capacity-frequency-20260805.md:426:# 相二（塔扫描 → A_ℓ + 频率），单标的分钟级到小时级（随 bar 数超线性）
+.chanlun/review-results/issue915-capacity-frequency-20260805.md:459:3. **`A_ℓ` 本身是 ROUNDTRIP 口径的产物**。#907 已证：换成 AMP_EXEC，波幅随级别的方向就反。**本件全盘继承 #907 的那条裁定；它若被推翻，本件全表作废。**
+docs/adr/0035-cost-stop-policy-instance-and-base-extension-evidence.md:14:政策 id 族 `#1354/cost-stop-policy/v1`。记录 ⟨policy_id, version, profile_id, symbol, granularity, tower_base_ref, inputs{fee(Known, 费率簿引用含 source_url/retrieved_at/tier/role), slippage(Known|ProxyLowerBound|Missing), latency_error(同), holding(funding/borrow 引用 | Missing)}, amplitude{pairing=ROUNDTRIP, per_level[{level, median, lower_bound_95, n, max_month_cluster, windows[]}], probe_run_ref}, threshold{form=ratio_lb_ge_theta, theta 整数对(用户签署), authorizer, authorized_at}, evidence_gate(继承 ADR 0022 裁定六/七), valid_through, supersedes⟩。比值 `r(ℓ) = A_ℓ / (2·fee + slippage + latency_error [+ holding])`，A_ℓ 取 ROUNDTRIP 波幅单边 95% 下界（按月 block bootstrap）。通过 ⟺ `lb(r) ≥ θ` ∧ 证据门；`InsufficientEvidence` 与 `Fail` 分开。交易成本政策的 θ 仍由用户授权签署；普通研发方法和离线参数按 ADR 0041「授权来源与生效边界」由代理独审裁定，不冒充用户签名、不自动启用交易。系统拒绝 θ < 1（约束，非默认值）。全部定点整数。
+docs/adr/0017-chong-quantity-numerator-shortdiff-amplitude.md:37:| 六 | `w(d) = (A_{ℓ−d}/A_ℓ)^{1/δ}`，五个量全部约掉 | `[新缠论:选择]` |
+docs/adr/0017-chong-quantity-numerator-shortdiff-amplitude.md:138:### 六、`w(d) = ( A_{ℓ−d} / A_ℓ ) ^ (1/δ)`
+docs/adr/0017-chong-quantity-numerator-shortdiff-amplitude.md:143:w(d) = 容量(ℓ−d) / 容量(ℓ) = ( A_{ℓ−d} / A_ℓ ) ^ (1/δ)
+docs/adr/0017-chong-quantity-numerator-shortdiff-amplitude.md:146:- `A_ℓ` ＝ [#907](https://github.com/xy7365527-lang/NewChanlun/issues/907) 的 **ROUNDTRIP 中位波幅**（进 → 同级最近反向信号，一趟往返）；
+docs/adr/0017-chong-quantity-numerator-shortdiff-amplitude.md:155:**名分为什么是 `[新缠论:选择]` 而不是推论**：#917 报告 §3.7 自陈——「把**该级别往返波幅**当冲击预算」这一步**无任何文献背书**，文献从不按级别分层。它可否证：预算若改挂在别的量上（例如该级的 σ、或该级的期望收益），上式**形式不变**，只是 `A_ℓ` 换成那个量。
+docs/adr/0017-chong-quantity-numerator-shortdiff-amplitude.md:259:**[#787](https://github.com/xy7365527-lang/NewChanlun/issues/787) 的立图前提（同一套判定在每一级复用同一个模块）不受影响**——`w(d) = (A_{ℓ−d}/A_ℓ)^{1/δ}` **就是那一个模块**，每级都用它，只是喂进去的波幅不同。**且 #915 给了它一条新的正面旁证**：底档跨 8 个标的、跨 20.6 倍波动率与 4,900 倍成交额，`w` 落在 1.34× 带内——**这正是公式预言的形状**。
+docs/adr/0017-chong-quantity-numerator-shortdiff-amplitude.md:341:| T-1 | `rust/src/theta_v0/strategy/voice.rs:206` `depth_weight()` | 按 `depth` 索引 `config.voice.depth_weights`，越界返 `0.0` | **键保留**（相对坐标，裁定三对）；返回值改由 `w(d)=(A_{ℓ−d}/A_ℓ)^{1/δ}` 实测填；`w(0)` 须为 `1.0`（裁定二） | 否 |
+.chanlun/review-results/issue813-segment-G1-G5-20260805.md:469:| **确认判据** | `segmentEndUpB`（`:142-143`）：`if hasGapB e1 e2 then fractalInSeqB false revSeq else true` ⟹ 向上段只找 **底**分型（`wantTop=false`），向下段只找**顶**分型（`:147`）⟹ **只找对偶分型** | `has_any_fractal`（`feature_seq.rs:164–181`）：`:173` 顶分型 `b_h > a_h && b_h > c_h` **或** `:176` 底分型 `b_l < a_l && b_l < c_l` ⟹ **任意分型**；提前终止版 `:266–269` 同 |
+.chanlun/review-results/issue813-segment-G1-G5-20260805.md:551:| Rust theta_v0（判据体） | `feature_seq.rs:452–461` | `// 67课严格延续：缺口被 c 封闭 → 第一种情况（Python :414-422）。` / `if has_gap && self.extend_mode == ExtendMode::Strict {` / `Direction::Up => c_l <= a_h,` / `Direction::Down => c_h >= a_l,` / `if gap_closed_by_c { has_gap = false; }` |
+.chanlun/review-results/issue813-segment-G1-G5-20260805.md:553:| Python 正本 | `src/newchan/a_segment_v1.py:431–436` | `if has_gap and self._extend_mode == "strict":` / `gap_closed_by_c = c_l <= a_h`（`:433`）/ `gap_closed_by_c = c_h >= a_l`（`:435`）/ `if gap_closed_by_c:`（`:436`） |
+.chanlun/review-results/issue1677-evidence-gate-review-20261022.md:22:- **R6 PASS**：受影响票清单覆盖 AUDIT A-02 行点名的 #1559（已关）、#1398/#1410、ADR 0036（#1356 已关）及拆票链 #1598/#1605/#1340，另含 #1441（ADR 0035 A_ℓ 下界消费者）。边变化明确：保留 #1677 → #1605（实核 1605 blocked_by = 1586 closed, 1677 open，一致）；新增 #1605 → #1398 并给出理由（#1398:12「原样实现」须经读取器读版本，ADR 0041:25），实核 1398 现 blocked_by 1377/1378/1361/1362/1356，与 #1605/#1677 无环；#1410 经 #1398 传递不加边（实核 1410 已被 1398 阻塞）；#1441 不加边并给出理由（实核被 1440 阻塞，ADR 0035 现文与 v1 逐位相同）；#1598 不加边只发评论；已关票不改。AUDIT C-19 行点名的 #1358/#1468 属 C-19 记录范围，由 #1605 承接，不在本票边清单内合理。
+.chanlun/review-results/issue1598-policy-20261026/affected-code.md:33:| `rust/src/bin/p915_capacity_frequency.rs:10-11` | 探针明确 `capacity` 与 `w(d)=(A_{ℓ−d}/A_ℓ)^(1/δ)`，不是生产 `impact_form` 字段。 | #1444 用作 Measured 来源；补窗口、n、最大月簇和不确定性带。 |
+.chanlun/review-results/issue1598-policy-20261026/review/INDEPENDENT-REVIEW.md:10:4. **Q6阈值合同尚不唯一**（draft:110）。“已到底占比≥θ₂”没有明确点估计/置信下界及逐窗/合计、分层。`∧证据门`不能决定比较哪一个数。按wayfinder:241–249引用具名evidence_gate的窗口、覆盖和方法，明确比较统计量；无既裁来源则在现Q6写完整推荐供确认，不代签θ₂。
+.chanlun/review-results/issue1340-publication-20260909/payload/inputs/RESIDUAL-TICKET-PLAN.json:2662:        "docs/adr/0017-chong-quantity-numerator-shortdiff-amplitude.md:144:- `A_ℓ` ＝ [#907](https://github.com/xy7365527-lang/NewChanlun/issues/907) 的 **ROUNDTRIP 中位波幅**（进 → 同级最近反向信号，一趟往返）；",
+.chanlun/review-results/issue917-market-impact-proxy-20260805.md:38:`w(1) = 容量(ℓ-1)/容量(ℓ) = (A_{ℓ-1}/A_ℓ)^{1/δ}` —— **Y、σ、V、x 全部约掉**。用 #907 的真实波幅，δ=0.5：
+.chanlun/review-results/issue917-market-impact-proxy-20260805.md:319:容量(S, ℓ)  =  V_日(S) · [ x · A_ℓ(S) / ( Y · σ_日(S) ) ] ^ (1/δ)
+.chanlun/review-results/issue917-market-impact-proxy-20260805.md:330:| **A_ℓ** | #907 ROUNDTRIP 中位：68.5 / 116.3 / 201.9 / 506.6 / 3572.7 bp | **#907 实测**（BTC 全史 100%） | L4 跨窗不稳 46×，**不可用**；分布右偏（均值/中位 2.1–2.9） | ✅（#907 已产） |
+.chanlun/review-results/issue917-market-impact-proxy-20260805.md:361:**⟹ §3 的推导给出 `w(d) = (A_{ℓ-d}/A_ℓ)^{1/δ}` ——它只依赖 δ 和波幅阶梯。**
+.chanlun/review-results/issue917-market-impact-proxy-20260805.md:363:- **跨标的可比性因此被归约为：不同标的的波幅阶梯 `A_ℓ(S)` 是否形状相同。** 这**不是市场冲击问题，是 #907 那类的测量问题**（#907 只测了 BTC，其余 7 品种探针已支持 `P907_SYMBOL` 但未跑）。
+.chanlun/review-results/issue917-market-impact-proxy-20260805.md:379:**假设 A3**（**无文献背书 —— 这是本仓自造的映射**）：级别 ℓ 的「冲击预算」＝ `x · A_ℓ`，其中 A_ℓ ＝ #907 的 ROUNDTRIP 波幅。
+.chanlun/review-results/issue917-market-impact-proxy-20260805.md:383:令 `Δ(Q*) = x·A_ℓ`：
+.chanlun/review-results/issue917-market-impact-proxy-20260805.md:386:Y·σ_日·(Q*/V_日)^δ = x·A_ℓ
+.chanlun/review-results/issue917-market-impact-proxy-20260805.md:387:(Q*/V_日)^δ = x·A_ℓ / (Y·σ_日)
+.chanlun/review-results/issue917-market-impact-proxy-20260805.md:388:Q*(ℓ) = V_日 · [ x·A_ℓ / (Y·σ_日) ]^(1/δ)            ……(★)
+.chanlun/review-results/issue917-market-impact-proxy-20260805.md:394:w(d) = 容量(ℓ−d) / 容量(ℓ) = ( A_{ℓ−d} / A_ℓ ) ^ (1/δ)      ……(★★)
+.chanlun/review-results/issue917-market-impact-proxy-20260805.md:408:| 级别 | 中位波幅 A_ℓ (bp) | n |
+.chanlun/review-results/issue917-market-impact-proxy-20260805.md:469:**⟹ 一条硬发现：级别阶梯横跨了平方根律的有效边界。** 下端（L0 及 #817 阶段二想去的更低级）掉进**线性区** ⟹ 那里 1/δ 应取 **1** 而不是 2 ⟹ **w(1) = A_{ℓ-1}/A_ℓ ≈ 0.59，而不是 0.35 —— 往下走时容量衰减得比平方根律预测的慢。** 上端 L4 直接出界。
+.chanlun/review-results/issue917-market-impact-proxy-20260805.md:473:1. **A3（把「级别的往返波幅」当冲击预算）没有任何文献背书。** 文献从不按「级别」分层。**这是本仓自造的映射，名分应为 `[新缠论:选择]`。** 它可否证：若裁定方认为预算应挂在别的量上（例如该级别的 σ、或该级别的期望收益），(★★) 的形式不变，但 A_ℓ 要换成那个量。
+.chanlun/review-results/issue917-market-impact-proxy-20260805.md:475:3. **σ 与波幅的关系我完全没有用**（我直接拿 A_ℓ 当预算，绕开了「A_ℓ 是几倍 σ」这个转换）。**这是有意的**——那一步才是最容易推不过去的地方，绕开它反而更稳。
+rust/src/segment.rs:369:        let (a_h, a_l) = elements[j - 1];
+rust/src/segment.rs:374:        if b_l < a_l && b_l < c_l {
+rust/src/segment.rs:392:    a_l: f64,
+rust/src/segment.rs:404:        let is_fractal = b_l < a_l && b_l < c_l;
+rust/src/segment.rs:405:        let has_gap = if is_fractal { a_l > b_h } else { false };
+rust/src/segment.rs:569:            let (a_h, a_l) = (self.std[i - 1].0, self.std[i - 1].1);
+rust/src/segment.rs:574:                is_fractal_and_gap(a_h, a_l, b_h, b_l, c_h, c_l, seg_direction);
+rust/src/segment.rs:585:                    c_h >= a_l
+rust/src/bin/p915_capacity_frequency.rs:10://! 容量(S, ℓ) = V_日(S) · [ x · A_ℓ(S) / ( Y · σ_日(S) ) ] ^ (1/δ)
+rust/src/bin/p915_capacity_frequency.rs:11://! w(d)       = ( A_{ℓ−d} / A_ℓ ) ^ (1/δ)        ← Y、σ、V、x 全部约掉
+rust/src/bin/p915_capacity_frequency.rs:17://! 1. **`A_ℓ` 波幅阶梯** —— 逐级 ROUNDTRIP 中位波幅（**口径照抄 #907，不重裁**：进 → 同级
+.chanlun/review-results/dof-audit-20261020/AUDIT.md:48:| A-01 | `docs/adr/0017-chong-quantity-numerator-shortdiff-amplitude.md:138-160`（裁定六 `w(d)=(A_{ℓ−d}/A_ℓ)^{1/δ}`，`:145` `δ = 0.5`）；`:315` 溯源表 | 写死：幂律形式与 δ=0.5 | T | 裁定六自标 `[新缠论:选择]`（`:37`、`:315`）；`:145` 自陈文献带 0.4–0.7；`:157` 起登记 Zarinelli 等 2015 对数形式拟合更优（E_RMS 6.70 vs 2.80）。形式与指数都是参数，另一取值无原文或实测否证。ADR 0034 裁定一的 `Measured` 来源已含 `δ` 字段，但冲击函数形式（幂律/对数）没有字段 | 幂律、δ=0.5（`0017:145`） | #1444（TB-06-C 量档记录）、#1355 后续：在 `#1355/quantity-tier-policy` 记录的 `source: Measured` 下补 `impact_form ∈ {power(δ), log}`，δ 进可选值集合并写敏感性代价；`log` 标「待标定」：对数形式不齐次、`Y` 约不掉（ADR 0017 `:161`），而 `Y` 在聚合 Bar 通道上标不了（`:149`，#917）；改签走 ADR 0034 裁定三新版本 | 高 |
+.chanlun/review-results/dof-audit-20261020/AUDIT.md:56:| A-10 | `docs/adr/0035-cost-stop-policy-instance-and-base-extension-evidence.md:27`「AMP_EXEC 配对」「第二层用占比阈值」 | 被否 | T | 波幅配对口径与第二层判据形式都是 `[新缠论:选择]`（`0035:8` 只写「#907 后裁：ROUNDTRIP 配对」，没有给出 AMP_EXEC 的错误证据）；记录已有 `amplitude.pairing` 字段（`0035:12`），被否只是把值域收成单值。约束：配对口径须与 ADR 0017 的 `A_ℓ` 同一取值（#804 同一判定） | ROUNDTRIP；序关系判据（现行） | #1559：`pairing` 值域恢复 `{ROUNDTRIP, AMP_EXEC}` 并写代价；第二层 `rule ∈ {order_relation, share_threshold(θ₂)}` | 低 |
+rust/src/bin/p907_cost_gate_level.rs:11://! 1. 逐级「相邻买卖点间波幅」分布（p10/p25/p50/p75/p90 + 均值 + 样本数），单位 **bp**（相对幅度）。
+rust/Cargo.toml:242:# 票 #915 容量/频率探针（乙类可复用）：逐级波幅阶梯 A_ℓ + 信号频率 + 日波动率/日成交额。
+rust/src/segment_tangency_tests.rs:116:    let (a_h, a_l) = (10.0, 5.0);
+rust/src/segment_tangency_tests.rs:120:    let (is_fractal, has_gap) = is_fractal_and_gap(a_h, a_l, b_h, b_l, c_h, c_l, Direction::Up);
+rust/src/segment_tangency_tests.rs:134:    // 向下段底分型，a 与 b 真相切（a_l == b_h == 10）。同上，锁向下臂严格 `>`。
+rust/src/segment_tangency_tests.rs:135:    let (a_h, a_l) = (20.0, 10.0);
+rust/src/segment_tangency_tests.rs:138:    assert_eq!(a_l, b_h, "前件：本用例须是真相切（a_l == b_h）");
+rust/src/segment_tangency_tests.rs:139:    let (is_fractal, has_gap) = is_fractal_and_gap(a_h, a_l, b_h, b_l, c_h, c_l, Direction::Down);
+rust/src/segment_tangency_tests.rs:146:        "向下段 a-b 真相切（a_l == b_h == 10）须判无缺口——#246 新口径严格 `>`；若红，\
+rust/src/segment_tangency_tests.rs:160:    assert!(g_dn, "向下段严格跳空（a_l=12 > b_h=10）须判有缺口");
+docs/adr/0022-acceptance-criterion-parameters.md:171:- 等同声明：[ADR 0044](0044-cost-stop-policy-signed-instance-v1.md) 两份 v1 记录里的 `evidence_gate: ADR 0022 裁定六/七` 按值等同 `#1677/evidence-gate/v1`（含 confidence、block_unit），不出 cost-stop v2，ADR 0044 正文不动。ADR 0035:12 读法中「单边 95% 下界（按月 block bootstrap）」改读「所引 evidence_gate 版本的 confidence 与 block_unit」，该改写归 [#1598](https://github.com/xy7365527-lang/NewChanlun/issues/1598) A-10。ADR 0035/0034/0036 字段名里带「月」（`max_month_cluster`、「最大月簇」、`Formal{…, months, …}`）的问题，留给各自下次改签。
+docs/adr/0022-acceptance-criterion-parameters.md:179:    - 待接读点：[#1398](https://github.com/xy7365527-lang/NewChanlun/issues/1398)（正文 :12「原样实现单边95%下界、日历月block bootstrap……」）、[#1410](https://github.com/xy7365527-lang/NewChanlun/issues/1410)（ADR 0036:30）、[#1441](https://github.com/xy7365527-lang/NewChanlun/issues/1441)（ADR 0035 A_ℓ 下界）
+docs/adr/0035-cost-stop-policy-instance-and-base-extension-evidence.md:14:政策 id 族 `#1354/cost-stop-policy/v1`。记录 ⟨policy_id, version, profile_id, symbol, granularity, tower_base_ref, inputs{fee(Known, 费率簿引用含 source_url/retrieved_at/tier/role), slippage(Known|ProxyLowerBound|Missing), latency_error(同), holding(funding/borrow 引用 | Missing)}, amplitude{pairing=ROUNDTRIP, per_level[{level, median, lower_bound_95, n, max_month_cluster, windows[]}], probe_run_ref}, threshold{form=ratio_lb_ge_theta, theta 整数对(用户签署), authorizer, authorized_at}, evidence_gate(继承 ADR 0022 裁定六/七), valid_through, supersedes⟩。比值 `r(ℓ) = A_ℓ / (2·fee + slippage + latency_error [+ holding])`，A_ℓ 取 ROUNDTRIP 波幅单边 95% 下界（按月 block bootstrap）。通过 ⟺ `lb(r) ≥ θ` ∧ 证据门；`InsufficientEvidence` 与 `Fail` 分开。交易成本政策的 θ 仍由用户授权签署；普通研发方法和离线参数按 ADR 0041「授权来源与生效边界」由代理独审裁定，不冒充用户签名、不自动启用交易。系统拒绝 θ < 1（约束，非默认值）。全部定点整数。
+docs/adr/0017-chong-quantity-numerator-shortdiff-amplitude.md:37:| 六 | `w(d) = (A_{ℓ−d}/A_ℓ)^{1/δ}`，五个量全部约掉 | `[新缠论:选择]` |
+docs/adr/0017-chong-quantity-numerator-shortdiff-amplitude.md:138:### 六、`w(d) = ( A_{ℓ−d} / A_ℓ ) ^ (1/δ)`
+docs/adr/0017-chong-quantity-numerator-shortdiff-amplitude.md:143:w(d) = 容量(ℓ−d) / 容量(ℓ) = ( A_{ℓ−d} / A_ℓ ) ^ (1/δ)
+docs/adr/0017-chong-quantity-numerator-shortdiff-amplitude.md:146:- `A_ℓ` ＝ [#907](https://github.com/xy7365527-lang/NewChanlun/issues/907) 的 **ROUNDTRIP 中位波幅**（进 → 同级最近反向信号，一趟往返）；
+docs/adr/0017-chong-quantity-numerator-shortdiff-amplitude.md:155:**名分为什么是 `[新缠论:选择]` 而不是推论**：#917 报告 §3.7 自陈——「把**该级别往返波幅**当冲击预算」这一步**无任何文献背书**，文献从不按级别分层。它可否证：预算若改挂在别的量上（例如该级的 σ、或该级的期望收益），上式**形式不变**，只是 `A_ℓ` 换成那个量。
+docs/adr/0017-chong-quantity-numerator-shortdiff-amplitude.md:259:**[#787](https://github.com/xy7365527-lang/NewChanlun/issues/787) 的立图前提（同一套判定在每一级复用同一个模块）不受影响**——`w(d) = (A_{ℓ−d}/A_ℓ)^{1/δ}` **就是那一个模块**，每级都用它，只是喂进去的波幅不同。**且 #915 给了它一条新的正面旁证**：底档跨 8 个标的、跨 20.6 倍波动率与 4,900 倍成交额，`w` 落在 1.34× 带内——**这正是公式预言的形状**。
+docs/adr/0017-chong-quantity-numerator-shortdiff-amplitude.md:341:| T-1 | `rust/src/theta_v0/strategy/voice.rs:206` `depth_weight()` | 按 `depth` 索引 `config.voice.depth_weights`，越界返 `0.0` | **键保留**（相对坐标，裁定三对）；返回值改由 `w(d)=(A_{ℓ−d}/A_ℓ)^{1/δ}` 实测填；`w(0)` 须为 `1.0`（裁定二） | 否 |
+rust/src/theta_v0/parser/feature_seq.rs:64:    /// 向下段底分型且 `a_l == b_h`（相切）：同上。
+rust/src/theta_v0/parser/feature_seq.rs:253:/// 向下段底分型：`b_l < a_l && b_l < c_l`（只看 low）；缺口 `a_l > b_h`（a 完全在 b 上方，边界相切不算缺口）。
+rust/src/theta_v0/parser/feature_seq.rs:257:/// 边界相切（`b_l == a_h` / `a_l == b_h`）算「有重合区间」⟹ 无缺口，全域生效。裁定书：
+rust/src/theta_v0/parser/feature_seq.rs:268:    a_l: Tick,
+rust/src/theta_v0/parser/feature_seq.rs:293:            let is_fractal = b_l < a_l && b_l < c_l;
+rust/src/theta_v0/parser/feature_seq.rs:297:                    if a_l == b_h {
+rust/src/theta_v0/parser/feature_seq.rs:301:                !t.meets(a_l, b_h)
+rust/src/theta_v0/parser/feature_seq.rs:320:        let (a_h, a_l) = elements[j - 1];
+rust/src/theta_v0/parser/feature_seq.rs:325:        if b_l < a_l && b_l < c_l {
+rust/src/theta_v0/parser/feature_seq.rs:1042:            let (a_h, a_l) = (window[0].high, window[0].low);
+rust/src/theta_v0/parser/feature_seq.rs:1047:                is_fractal_and_gap(a_h, a_l, b_h, b_l, c_h, c_l, self.seg_dir, self.tangency);
+rust/src/theta_v0/parser/feature_seq.rs:1213:        // 向下段：b_l 最低 → 底分型；a_l > b_h → 缺口（#246 严格）。
+rust/src/theta_v0/parser/feature_seq.rs:1216:        assert!(g); // a_l=12 > b_h=8（严格）
+rust/src/theta_v0/parser/feature_seq.rs:1231:    /// `b_l < a_l && b_l < c_l`），使 `has_gap` 分支真正被求值（前件不成立时该谓词恒返回 false，
+rust/src/theta_v0/parser/feature_seq.rs:1258:            // 向下段底分型：b 在下，缺口谓词 = `a_l > b_h`。
+rust/src/theta_v0/parser/feature_seq.rs:1296:        // 向下段底分型，a 与 b 仅公共端点（a_l == b_h == 10，相切）。
+rust/src/theta_v0/parser/feature_seq.rs:1300:        assert!(!g); // a_l=10 相切 b_h=10 → 有重合 → 无缺口
+rust/src/theta_v0/parser/gap_overlap_fixture.rs:104:    /// 两个生产谓词是**方向化**的（`is_fractal_and_gap` 向上段看 `b_l > a_h`、向下段看 `a_l > b_h`），
