@@ -33,6 +33,9 @@ fixtures = session / "tests/fixtures/tb01c"
 catalog = session / "catalog/signed-catalog.json"
 profile, clock = (fixtures / name for name in ("profile.json", "clock-plan.json"))
 environment = {"PATH": os.defpath, "LC_ALL": "C.UTF-8"}
+# main b9d898dccf 的 strace 扫描（3–8）：3/4 止于 Python 启动，5 首次在 R4 内
+# 触发 EMFILE（固定库父目录）；8 到达 owner 后得到 ENOENT，不构成耗尽。
+R4_NOFILE = 5
 
 
 def write_json(path, value):
@@ -128,15 +131,28 @@ with tempfile.TemporaryDirectory(prefix="i1-1527-", dir="/tmp") as directory:
             *init(work / "full.sqlite"),
         ], "error", "init commit 失败：disk I/O error", "以文件大小上限模拟 init 写入失败。",
               {"RLIMIT_FSIZE_bytes": 65536, "SIGXFSZ": "ignored"}),
-        check("F2b-nofile", [
-            "/bin/bash", "-c", 'ulimit -n 8 && exec "$@"', "nofile", *start,
-        ], "code", "IO", "限制子进程为 8 个文件描述符，R4 首读失败。", {"RLIMIT_NOFILE": 8}),
     ]
+    # F1 已留下正常控制锁；资源不足的重试只可复用这些锁，不得新增文件或改库。
+    before = {p.relative_to(work) for p in work.rglob("*")}
+    db_before = db.read_bytes()
+    results.append(check("F2b-nofile", [
+        "/bin/bash", "-c", 'ulimit -n "$1" && shift && exec "$@"',
+        "nofile", str(R4_NOFILE), *start,
+    ], "code", "IO", "在 R4 固定库路径时触发 EMFILE。", {"RLIMIT_NOFILE": R4_NOFILE}))
+    after = {p.relative_to(work) for p in work.rglob("*")}
+    fd_effects = {
+        "added": sorted(map(str, after - before)), "removed": sorted(map(str, before - after)),
+        "db_unchanged": db.is_file() and db.read_bytes() == db_before,
+    }
+    write_json(out / "F2b-nofile/side-effects.json", fd_effects)
+    fd_clean = not fd_effects["added"] and not fd_effects["removed"] and fd_effects["db_unchanged"]
+    if not fd_clean:
+        print("F2b-nofile：失败后夹具文件集合或库字节改变", file=sys.stderr)
     write_json(out / "post-state.json", {
         "init_residual_bytes": {p.name: p.stat().st_size for p in sorted(work.glob("full.sqlite*"))},
         "owner_exists": db.with_name(db.name + ".control-owner.json").exists(),
         "state_entries": sorted(p.name for p in state.iterdir()),
     })
     print(f"收据：{out}")
-    sys.exit(0 if all(results) else 1)
+    sys.exit(0 if all(results) and fd_clean else 1)
 PY
