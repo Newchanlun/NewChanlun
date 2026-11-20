@@ -1,6 +1,6 @@
 /* #1394 generated browser dependencies begin */
 if (typeof module !== 'object' || !module.exports) {
-/* exact source s-content-v3.js SHA256 fb21d3467a189ac1d09cd585b07ca927083bee550fdd2c50419eac82b20ba926 */
+/* exact source s-content-v3.js SHA256 802e7b912e1924f57446ece3a772c4cc53c363b8d8f659e0687547dcd30dc248 */
 /* s-content/1: portable, dependency-free content codec and proof reader.
  * Transport references are explicit edges. This module proves content only;
  * publication/cut authority, business semantics and resource budgets belong to callers.
@@ -20,7 +20,6 @@ if (typeof module !== 'object' || !module.exports) {
   const encoder = new TextEncoder();
   const DOMAIN = encoder.encode("NewChanlun/SContent/1\0");
   const ROOT = /^sc1-[0-9a-f]{64}$/;
-  const HEX = /^(?:[0-9a-f]{2})*$/;
   const NUMBER = /^-?(?:0|[1-9][0-9]*)(?:\.[0-9]+)?(?:[eE][+-]?[0-9]+)?$/;
   const kinds = [
     "null",
@@ -55,8 +54,12 @@ if (typeof module !== 'object' || !module.exports) {
     if (n > MAX || (positive && n === 0n)) fail("i64 extent");
     return n;
   }
-  function utf8(value) {
+  function wellFormed(value) {
     if (typeof value !== "string") fail("string");
+    if (typeof value.isWellFormed === "function") {
+      if (!value.isWellFormed()) fail("isolated surrogate");
+      return;
+    }
     for (let i = 0; i < value.length; i++) {
       const c = value.charCodeAt(i);
       if (c >= 0xd800 && c <= 0xdbff) {
@@ -64,18 +67,34 @@ if (typeof module !== 'object' || !module.exports) {
         if (!(d >= 0xdc00 && d <= 0xdfff)) fail("isolated surrogate");
       } else if (c >= 0xdc00 && c <= 0xdfff) fail("isolated surrogate");
     }
+  }
+  function utf8(value) {
+    wellFormed(value);
     return encoder.encode(value);
   }
+  const HEX_LUT = Array.from({ length: 256 }, (_, i) =>
+    i.toString(16).padStart(2, "0"),
+  );
+  const UNHEX_LUT = new Int8Array(128).fill(-1);
+  for (let i = 0; i < 10; i++) UNHEX_LUT[48 + i] = i;
+  for (let i = 0; i < 6; i++) UNHEX_LUT[97 + i] = 10 + i;
   function hex(bytes) {
     let s = "";
-    for (const b of bytes) s += b.toString(16).padStart(2, "0");
+    for (let i = 0; i < bytes.length; i++) s += HEX_LUT[bytes[i]];
     return s;
   }
   function unhex(s) {
-    if (typeof s !== "string" || !HEX.test(s)) fail("hex");
-    const b = new Uint8Array(s.length / 2);
-    for (let i = 0; i < b.length; i++)
-      b[i] = parseInt(s.slice(i * 2, i * 2 + 2), 16);
+    if (typeof s !== "string" || (s.length & 1) !== 0) fail("hex");
+    const n = s.length >>> 1;
+    const b = new Uint8Array(n);
+    for (let i = 0, j = 0; i < n; i++, j += 2) {
+      const c1 = s.charCodeAt(j),
+        c2 = s.charCodeAt(j + 1);
+      const hi = c1 < 128 ? UNHEX_LUT[c1] : -1,
+        lo = c2 < 128 ? UNHEX_LUT[c2] : -1;
+      if ((hi | lo) < 0) fail("hex");
+      b[i] = (hi << 4) | lo;
+    }
     return b;
   }
   function concat(...parts) {
@@ -140,7 +159,25 @@ if (typeof module !== 'object' || !module.exports) {
     return a.length - b.length;
   }
   function compareText(a, b) {
-    return byteCompare(utf8(a), utf8(b));
+    wellFormed(a);
+    wellFormed(b);
+    let i = 0,
+      j = 0;
+    while (i < a.length && j < b.length) {
+      const ca = a.charCodeAt(i),
+        cb = b.charCodeAt(j);
+      if (ca === cb) {
+        i += ca >= 0xd800 && ca <= 0xdbff ? 2 : 1;
+        j += cb >= 0xd800 && cb <= 0xdbff ? 2 : 1;
+        continue;
+      }
+      const pa = ca >= 0xd800 && ca <= 0xdbff ? a.codePointAt(i) : ca;
+      const pb = cb >= 0xd800 && cb <= 0xdbff ? b.codePointAt(j) : cb;
+      if (pa !== pb) return pa < pb ? -1 : 1;
+      i += pa > 0xffff ? 2 : 1;
+      j += pb > 0xffff ? 2 : 1;
+    }
+    return i < a.length ? 1 : j < b.length ? -1 : 0;
   }
   function quoteBody(s) {
     return s.replace(
@@ -194,7 +231,7 @@ if (typeof module !== 'object' || !module.exports) {
       if (v === null) set({ t: "null" });
       else if (typeof v === "boolean") set({ t: "bool", value: v });
       else if (typeof v === "string") {
-        utf8(v);
+        wellFormed(v);
         set({ t: "string", value: v });
       } else if (typeof v === "number")
         fail("plain Number loses token; use typed number");
@@ -235,7 +272,7 @@ if (typeof module !== 'object' || !module.exports) {
   }
   // JSON tokenizer preserves every number token and rejects duplicate source keys.
   function parseJSON(text) {
-    utf8(text);
+    wellFormed(text);
     let at = 0;
     const frames = [];
     let result,
@@ -249,7 +286,7 @@ if (typeof module !== 'object' || !module.exports) {
         const c = text[at++];
         if (c === '"') {
           const s = JSON.parse(text.slice(start, at));
-          utf8(s);
+          wellFormed(s);
           return s;
         }
         if (c === "\\") at++;
@@ -514,7 +551,7 @@ if (typeof module !== 'object' || !module.exports) {
             break;
           case "string":
             exact(a, ["t", "value"]);
-            utf8(a.value);
+            wellFormed(a.value);
             break;
           case "number":
             exact(a, ["t", "token"]);
@@ -533,7 +570,7 @@ if (typeof module !== 'object' || !module.exports) {
               const seen = new Set();
               for (const f of a.fields) {
                 if (!Array.isArray(f) || f.length !== 2) fail("field");
-                utf8(f[0]);
+                wellFormed(f[0]);
                 if (seen.has(f[0])) fail("duplicate key");
                 seen.add(f[0]);
               }
@@ -917,7 +954,7 @@ if (typeof module !== 'object' || !module.exports) {
       return this.entries(ref, index, index + 1n).next().value.value_ref;
     }
     field(ref, key, { partial = false } = {}) {
-      utf8(key);
+      wellFormed(key);
       ref = this.checkedRef(ref);
       if (ref.kind !== "object") fail("field path role");
       let found = null;
@@ -1327,7 +1364,7 @@ if (typeof module !== 'object' || !module.exports) {
       if (v === null) parts.push("null");
       else if (typeof v === "boolean") parts.push(v ? "true" : "false");
       else if (typeof v === "string") {
-        utf8(v);
+        wellFormed(v);
         parts.push('"' + quoteBody(v) + '"');
       } else if (typeof v === "number") {
         if (!Number.isSafeInteger(v) || Object.is(v, -0))
@@ -1371,7 +1408,7 @@ if (typeof module !== 'object' || !module.exports) {
     for (const s of path) {
       if (s && Object.hasOwn(s, "field")) {
         exact(s, ["field"]);
-        utf8(s.field);
+        wellFormed(s.field);
       } else if (s && Object.hasOwn(s, "index")) {
         exact(s, ["index"]);
         decimal(s.index);
@@ -1418,11 +1455,11 @@ if (typeof module !== 'object' || !module.exports) {
         "index_frontier",
         "delta_ref",
       ]);
-      utf8(a.session_id);
+      wellFormed(a.session_id);
       decimal(a.session_generation, true);
       decimal(a.generation, true);
-      utf8(a.base_cut);
-      utf8(a.next_cut);
+      wellFormed(a.base_cut);
+      wellFormed(a.next_cut);
       if (
         typeof a.index_frontier !== "string" ||
         !/^batch3-[0-9a-f]{64}$/.test(a.index_frontier)
@@ -1897,7 +1934,7 @@ if (typeof module !== 'object' || !module.exports) {
   return Object.freeze({LIMIT_FIELDS, parseLimits, validateConfig, Job});
 });
 
-/* exact source q3-values.js SHA256 2d881fd06f538218ac73291fde4ba6ea0bb5679ba8480c6c6f047e2e3f84fe4e */
+/* exact source q3-values.js SHA256 341e5bb4483575359918a87e689cd17c45dddd8bac239cd8895b492878d5520f */
 /* #1394：现有 Q3 消费者的私有值访问器。普通值与图值共用字段/位置遍历。 */
 (function (root, factory) {
   const common = typeof module === "object" && module.exports;
@@ -1922,9 +1959,13 @@ if (typeof module !== 'object' || !module.exports) {
   function isNumber(v) {
     return !!v?.[NUMBER];
   }
-  // 文本合法性（含孤立代理项）的唯一判据；utf8() 在其后编码，field() 快路径只判不编码。
+  // 文本合法性（含孤立代理项）的唯一判据；utf8() 在其后编码，只校验不需字节的快路径直接调用本函数。
   function wellFormed(s) {
     need(typeof s === "string", "要求 UTF-8 文本");
+    if (typeof s.isWellFormed === "function") {
+      need(s.isWellFormed(), "孤立 Unicode 代理项");
+      return;
+    }
     for (let i = 0; i < s.length; i++) {
       let c = s.charCodeAt(i);
       if (c >= 0xd800 && c <= 0xdbff) {
@@ -1937,15 +1978,30 @@ if (typeof module !== 'object' || !module.exports) {
     wellFormed(s);
     return encoder.encode(s);
   }
+  // UTF-8 字节序等价于 Unicode 码点序；先验孤立代理项再逐码点比较，零 TextEncoder 分配。
   function cmp(a, b) {
-    const x = utf8(a),
-      y = utf8(b);
-    for (let i = 0; i < Math.min(x.length, y.length); i++)
-      if (x[i] !== y[i]) return x[i] < y[i] ? -1 : 1;
-    return Math.sign(x.length - y.length);
+    wellFormed(a);
+    wellFormed(b);
+    let i = 0,
+      j = 0;
+    while (i < a.length && j < b.length) {
+      const ca = a.charCodeAt(i),
+        cb = b.charCodeAt(j);
+      if (ca === cb) {
+        i += ca >= 0xd800 && ca <= 0xdbff ? 2 : 1;
+        j += cb >= 0xd800 && cb <= 0xdbff ? 2 : 1;
+        continue;
+      }
+      const pa = ca >= 0xd800 && ca <= 0xdbff ? a.codePointAt(i) : ca;
+      const pb = cb >= 0xd800 && cb <= 0xdbff ? b.codePointAt(j) : cb;
+      if (pa !== pb) return pa < pb ? -1 : 1;
+      i += pa > 0xffff ? 2 : 1;
+      j += pb > 0xffff ? 2 : 1;
+    }
+    return i < a.length ? 1 : j < b.length ? -1 : 0;
   }
   function quote(s) {
-    utf8(s);
+    wellFormed(s);
     return JSON.stringify(s);
   }
   class Value {
@@ -2014,7 +2070,7 @@ if (typeof module !== 'object' || !module.exports) {
       }
       let previous = null;
       for (const key of Object.keys(this.plain).sort(cmp)) {
-        utf8(key);
+        wellFormed(key);
         need(
           previous === null || cmp(previous, key) < 0,
           "对象键重复/顺序错误",
@@ -2036,7 +2092,7 @@ if (typeof module !== 'object' || !module.exports) {
       }
     }
     async field(key) {
-      utf8(key);
+      wellFormed(key);
       if (!this.reader) {
         // #1394 整合（根裁定 A）：普通值按自有属性直接取字段。旧路径每取一个字段都经 entries() 把全部键
         // 按 UTF-8 重排、每次比较都编码（剖析：TextEncoder.encode 53%、cmp 12%）。JS 对象键不会重复，
@@ -2070,6 +2126,17 @@ if (typeof module !== 'object' || !module.exports) {
   async function keys(v, expected, name) {
     v = of(v);
     need(v.kind === "object", name + " 完整对象不符");
+    if (!v.reader) {
+      await v.check();
+      const actual = Object.keys(v.plain);
+      for (let idx = 0; idx < actual.length; idx++) wellFormed(actual[idx]);
+      need(
+        actual.length === expected.length &&
+          expected.every((k) => Object.hasOwn(v.plain, k)),
+        name + " 完整字段不符",
+      );
+      return v;
+    }
     const actual = [];
     for await (const e of v.entries()) actual.push(e.key);
     need(
@@ -2081,7 +2148,7 @@ if (typeof module !== 'object' || !module.exports) {
   }
   async function S(v) {
     const s = await of(v).scalar();
-    utf8(s);
+    wellFormed(s);
     return s;
   }
   async function T(v) {
@@ -2133,6 +2200,30 @@ if (typeof module !== 'object' || !module.exports) {
     }
     if (a.kind === "json_text") {
       return equal(await a.reader.inner(a), await b.reader.inner(b));
+    }
+    if (!a.reader && !b.reader) {
+      if (a.kind === "array") {
+        const ax = a.plain,
+          bx = b.plain;
+        if (ax.length !== bx.length) return false;
+        for (let idx = 0; idx < ax.length; idx++) {
+          need(Object.hasOwn(ax, idx), "稀疏数组");
+          need(Object.hasOwn(bx, idx), "稀疏数组");
+          if (!(await equal(ax[idx], bx[idx]))) return false;
+        }
+        return true;
+      }
+      const ak = Object.keys(a.plain),
+        bk = Object.keys(b.plain);
+      if (ak.length !== bk.length) return false;
+      for (let idx = 0; idx < ak.length; idx++) wellFormed(ak[idx]);
+      for (let idx = 0; idx < bk.length; idx++) wellFormed(bk[idx]);
+      for (let idx = 0; idx < ak.length; idx++) {
+        const k = ak[idx];
+        if (!Object.hasOwn(b.plain, k) || !(await equal(a.plain[k], b.plain[k])))
+          return false;
+      }
+      return true;
     }
     if ((await a.length()) !== (await b.length())) return false;
     const ai = a.kind === "object" ? a.entries() : a.items(),

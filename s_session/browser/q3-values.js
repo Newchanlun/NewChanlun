@@ -22,9 +22,13 @@
   function isNumber(v) {
     return !!v?.[NUMBER];
   }
-  // 文本合法性（含孤立代理项）的唯一判据；utf8() 在其后编码，field() 快路径只判不编码。
+  // 文本合法性（含孤立代理项）的唯一判据；utf8() 在其后编码，只校验不需字节的快路径直接调用本函数。
   function wellFormed(s) {
     need(typeof s === "string", "要求 UTF-8 文本");
+    if (typeof s.isWellFormed === "function") {
+      need(s.isWellFormed(), "孤立 Unicode 代理项");
+      return;
+    }
     for (let i = 0; i < s.length; i++) {
       let c = s.charCodeAt(i);
       if (c >= 0xd800 && c <= 0xdbff) {
@@ -37,15 +41,30 @@
     wellFormed(s);
     return encoder.encode(s);
   }
+  // UTF-8 字节序等价于 Unicode 码点序；先验孤立代理项再逐码点比较，零 TextEncoder 分配。
   function cmp(a, b) {
-    const x = utf8(a),
-      y = utf8(b);
-    for (let i = 0; i < Math.min(x.length, y.length); i++)
-      if (x[i] !== y[i]) return x[i] < y[i] ? -1 : 1;
-    return Math.sign(x.length - y.length);
+    wellFormed(a);
+    wellFormed(b);
+    let i = 0,
+      j = 0;
+    while (i < a.length && j < b.length) {
+      const ca = a.charCodeAt(i),
+        cb = b.charCodeAt(j);
+      if (ca === cb) {
+        i += ca >= 0xd800 && ca <= 0xdbff ? 2 : 1;
+        j += cb >= 0xd800 && cb <= 0xdbff ? 2 : 1;
+        continue;
+      }
+      const pa = ca >= 0xd800 && ca <= 0xdbff ? a.codePointAt(i) : ca;
+      const pb = cb >= 0xd800 && cb <= 0xdbff ? b.codePointAt(j) : cb;
+      if (pa !== pb) return pa < pb ? -1 : 1;
+      i += pa > 0xffff ? 2 : 1;
+      j += pb > 0xffff ? 2 : 1;
+    }
+    return i < a.length ? 1 : j < b.length ? -1 : 0;
   }
   function quote(s) {
-    utf8(s);
+    wellFormed(s);
     return JSON.stringify(s);
   }
   class Value {
@@ -114,7 +133,7 @@
       }
       let previous = null;
       for (const key of Object.keys(this.plain).sort(cmp)) {
-        utf8(key);
+        wellFormed(key);
         need(
           previous === null || cmp(previous, key) < 0,
           "对象键重复/顺序错误",
@@ -136,7 +155,7 @@
       }
     }
     async field(key) {
-      utf8(key);
+      wellFormed(key);
       if (!this.reader) {
         // #1394 整合（根裁定 A）：普通值按自有属性直接取字段。旧路径每取一个字段都经 entries() 把全部键
         // 按 UTF-8 重排、每次比较都编码（剖析：TextEncoder.encode 53%、cmp 12%）。JS 对象键不会重复，
@@ -170,6 +189,17 @@
   async function keys(v, expected, name) {
     v = of(v);
     need(v.kind === "object", name + " 完整对象不符");
+    if (!v.reader) {
+      await v.check();
+      const actual = Object.keys(v.plain);
+      for (let idx = 0; idx < actual.length; idx++) wellFormed(actual[idx]);
+      need(
+        actual.length === expected.length &&
+          expected.every((k) => Object.hasOwn(v.plain, k)),
+        name + " 完整字段不符",
+      );
+      return v;
+    }
     const actual = [];
     for await (const e of v.entries()) actual.push(e.key);
     need(
@@ -181,7 +211,7 @@
   }
   async function S(v) {
     const s = await of(v).scalar();
-    utf8(s);
+    wellFormed(s);
     return s;
   }
   async function T(v) {
@@ -233,6 +263,30 @@
     }
     if (a.kind === "json_text") {
       return equal(await a.reader.inner(a), await b.reader.inner(b));
+    }
+    if (!a.reader && !b.reader) {
+      if (a.kind === "array") {
+        const ax = a.plain,
+          bx = b.plain;
+        if (ax.length !== bx.length) return false;
+        for (let idx = 0; idx < ax.length; idx++) {
+          need(Object.hasOwn(ax, idx), "稀疏数组");
+          need(Object.hasOwn(bx, idx), "稀疏数组");
+          if (!(await equal(ax[idx], bx[idx]))) return false;
+        }
+        return true;
+      }
+      const ak = Object.keys(a.plain),
+        bk = Object.keys(b.plain);
+      if (ak.length !== bk.length) return false;
+      for (let idx = 0; idx < ak.length; idx++) wellFormed(ak[idx]);
+      for (let idx = 0; idx < bk.length; idx++) wellFormed(bk[idx]);
+      for (let idx = 0; idx < ak.length; idx++) {
+        const k = ak[idx];
+        if (!Object.hasOwn(b.plain, k) || !(await equal(a.plain[k], b.plain[k])))
+          return false;
+      }
+      return true;
     }
     if ((await a.length()) !== (await b.length())) return false;
     const ai = a.kind === "object" ? a.entries() : a.items(),
