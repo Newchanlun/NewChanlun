@@ -6384,60 +6384,74 @@ mod tests {
             &std::fs::read(fixture("tests/fixtures/tb02c/raw-ledger.json")).unwrap(),
         )
         .unwrap();
-        for case in ["first_up", "first_down"] {
-            let files = TestFiles::new();
-            init_test_db(&files);
-            let rows = ledger["cases"][case].as_array().unwrap();
-            for count in 1..=rows.len() {
-                let prices: Vec<_> = rows[..count]
-                    .iter()
-                    .map(|r| (r["low"].as_i64().unwrap(), r["high"].as_i64().unwrap()))
-                    .collect();
-                let mut input = ohlc_input(&prices, false);
-                for (i, row) in rows[..count].iter().enumerate() {
-                    for key in ["open", "close"] {
-                        input["events"][i][key] = json!(row[key].as_i64().unwrap().to_string());
-                    }
-                }
-                accept_ohlc(&files, &input);
-                advance_business(&files.db(), DEFAULT_WRITER_EPOCH).unwrap();
-            }
-            let current = snapshot_of(&files, None);
-            let old = snapshot_of(&files, Some(16));
-            let data = |snapshot: &Value| {
-                snapshot["objects"]
-                    .as_array()
-                    .unwrap()
-                    .iter()
-                    .find(|o| {
-                        o["kind"] == "CC-013.segment"
-                            && o["payload"]["data"]["entity_id"] == "segment:1:1"
+        let ledger = &ledger;
+        std::thread::scope(|scope| {
+            let handles: Vec<_> = ["first_up", "first_down"]
+                .into_iter()
+                .map(|case| {
+                    scope.spawn(move || {
+                        let files = TestFiles::new();
+                        init_test_db(&files);
+                        let rows = ledger["cases"][case].as_array().unwrap();
+                        for count in 1..=rows.len() {
+                            let prices: Vec<_> = rows[..count]
+                                .iter()
+                                .map(|r| (r["low"].as_i64().unwrap(), r["high"].as_i64().unwrap()))
+                                .collect();
+                            let mut input = ohlc_input(&prices, false);
+                            for (i, row) in rows[..count].iter().enumerate() {
+                                for key in ["open", "close"] {
+                                    input["events"][i][key] =
+                                        json!(row[key].as_i64().unwrap().to_string());
+                                }
+                            }
+                            accept_ohlc(&files, &input);
+                            advance_business(&files.db(), DEFAULT_WRITER_EPOCH).unwrap();
+                        }
+                        let current = snapshot_of(&files, None);
+                        let old = snapshot_of(&files, Some(16));
+                        let data = |snapshot: &Value| {
+                            snapshot["objects"]
+                                .as_array()
+                                .unwrap()
+                                .iter()
+                                .find(|o| {
+                                    o["kind"] == "CC-013.segment"
+                                        && o["payload"]["data"]["entity_id"] == "segment:1:1"
+                                })
+                                .unwrap()["payload"]["data"]
+                                .clone()
+                        };
+                        assert_eq!(data(&old)["result"], "NO_FIRST");
+                        assert_eq!(data(&current)["result"], "CASE_ONE");
+                        assert_eq!(data(&current)["geometric_end"]["group_anchor"], "13");
+                        recover_business(&files.db(), "2").unwrap();
+                        assert_eq!(snapshot_of(&files, Some(16)), old);
+                        assert_eq!(snapshot_of(&files, None), current);
+                        let out = std::process::Command::new("python3")
+                            .arg(fixture("tests/tb02c_verify.py"))
+                            .arg("--database")
+                            .arg(files.db())
+                            .arg("--case")
+                            .arg(case)
+                            .arg("--node")
+                            .arg("node")
+                            .output()
+                            .unwrap();
+                        assert!(
+                            out.status.success(),
+                            "{case}: {}",
+                            String::from_utf8_lossy(&out.stderr)
+                        );
                     })
-                    .unwrap()["payload"]["data"]
-                    .clone()
-            };
-            assert_eq!(data(&old)["result"], "NO_FIRST");
-            assert_eq!(data(&current)["result"], "CASE_ONE");
-            assert_eq!(data(&current)["geometric_end"]["group_anchor"], "13");
-            recover_business(&files.db(), "2").unwrap();
-            assert_eq!(snapshot_of(&files, Some(16)), old);
-            assert_eq!(snapshot_of(&files, None), current);
-            let out = std::process::Command::new("python3")
-                .arg(fixture("tests/tb02c_verify.py"))
-                .arg("--database")
-                .arg(files.db())
-                .arg("--case")
-                .arg(case)
-                .arg("--node")
-                .arg("node")
-                .output()
-                .unwrap();
-            assert!(
-                out.status.success(),
-                "{case}: {}",
-                String::from_utf8_lossy(&out.stderr)
-            );
-        }
+                })
+                .collect();
+            for handle in handles {
+                if let Err(payload) = handle.join() {
+                    std::panic::resume_unwind(payload);
+                }
+            }
+        });
     }
 
     /// #1420：按 tb02d `generate-input.py` 的端点→整数 OHLC 规则（UP；DOWN 为 10000 镜像），
