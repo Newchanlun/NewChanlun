@@ -27,7 +27,13 @@ trap 'rm -rf "$work"' EXIT
 list_tests() {
   local features="$1" out="$2"
   shift 2
-  cargo test --locked --features "$features" "$@" --jobs "${CI_CARGO_JOBS:-1}" -- --list >"$out.raw"
+  local opt_env=()
+  # 仅对带特性的 S bin 局部开 opt-level=1（debug_assertions/overflow_checks 保持 dev 默认 true，
+  # 其余仅 --list 或零耗时 lib 步保持 -O0，第三方依赖复用 opt-level=2 缓存）。
+  if [[ "$features" != "$base_features" && " $* " == *" --bin "* ]]; then
+    opt_env=(CARGO_PROFILE_DEV_OPT_LEVEL=1)
+  fi
+  env "${opt_env[@]}" cargo test --locked --features "$features" "$@" --jobs "${CI_CARGO_JOBS:-1}" -- --list >"$out.raw"
   sed -n 's/: test$//p' "$out.raw" | LC_ALL=C sort >"$out"
 }
 
@@ -42,7 +48,11 @@ run_delta() {
   for (( k = i; k < $#; k += n )); do part+=("${@:k+1:1}"); done
   echo "feature_delta target=$target part=$i/$n run=${#part[@]} of $#"
   (( ${#part[@]} == 0 )) && return 0
-  cargo test --locked --features "$base_features,$feature" "${sel[@]}" --jobs "${CI_CARGO_JOBS:-1}" -- --exact "${part[@]}"
+  local opt_env=()
+  if [[ "$target" == bin ]]; then
+    opt_env=(CARGO_PROFILE_DEV_OPT_LEVEL=1)
+  fi
+  env "${opt_env[@]}" cargo test --locked --features "$base_features,$feature" "${sel[@]}" --jobs "${CI_CARGO_JOBS:-1}" -- --exact "${part[@]}"
 }
 
 total=0
