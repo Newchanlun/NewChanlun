@@ -4,6 +4,8 @@ use newchan_rust::s_content::{self as sc, capture_allocation::native_owned::Nati
 
 #[derive(Clone, Copy)]
 pub(crate) enum ProjectionKind {
+    AcceptReceipt,
+    ControlReceipt,
     ObjectWire,
     WitnessWire,
     ObservationWire,
@@ -16,6 +18,22 @@ pub(crate) enum ProjectionKind {
 }
 #[derive(Clone, Copy)]
 pub(crate) enum Field {
+    Ok,
+    OriginalMessageId,
+    AcceptedSeq,
+    Publication,
+    PolicyRecords,
+    Generation,
+    StructureCut,
+    IndexFrontier,
+    CatalogRevision,
+    InputFrontier,
+
+    Status,
+    ExistingReceiptId,
+    ExistingPayloadHash,
+    NewPayloadHash,
+    MaxRevision,
     OldObjectId,
     NewObjectId,
     SchemaRevision,
@@ -84,8 +102,24 @@ pub(crate) enum Field {
     Lifecycle,
 }
 impl Field {
-    fn name(self) -> &'static str {
+    pub(crate) fn name(self) -> &'static str {
         match self {
+            Self::Ok => "ok",
+            Self::OriginalMessageId => "original_message_id",
+            Self::AcceptedSeq => "accepted_seq",
+            Self::Publication => "publication",
+            Self::PolicyRecords => "policy_records",
+            Self::Generation => "generation",
+            Self::StructureCut => "structure_cut",
+            Self::IndexFrontier => "index_frontier",
+            Self::CatalogRevision => "catalog_revision",
+            Self::InputFrontier => "input_frontier",
+
+            Self::Status => "status",
+            Self::ExistingReceiptId => "existing_receipt_id",
+            Self::ExistingPayloadHash => "existing_payload_hash",
+            Self::NewPayloadHash => "new_payload_hash",
+            Self::MaxRevision => "max_revision",
             Self::OldObjectId => "old_object_id",
             Self::NewObjectId => "new_object_id",
             Self::SchemaRevision => "schema_revision",
