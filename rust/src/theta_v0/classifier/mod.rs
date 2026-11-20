@@ -83,6 +83,7 @@ pub mod rebase_txn;
 pub mod recursive_tower;
 pub mod ref_v1;
 pub mod rmove_compose;
+pub mod trend_formation;
 /// p118 关④ 小转大显式分类分支：旁挂联合分类 `NestTurnClass`（四类 partition，纯只读派生）。
 pub mod turn_class;
 pub use turn_class::{
