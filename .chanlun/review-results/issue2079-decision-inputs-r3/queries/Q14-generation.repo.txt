@@ -1,0 +1,2 @@
+$ git grep -I -n -E '受管.{0,12}(退役|重登)|boot[_ -]id|可信恢复原件|managed-rotation' b9d898dccf46c2a716115eaa1215bc39c458a959 -- analysis/ docs/ .chanlun/
+退出码：1

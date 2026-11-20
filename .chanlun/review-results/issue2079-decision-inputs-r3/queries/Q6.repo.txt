@@ -1,0 +1,13 @@
+$ git grep -I -n -E '发布意图|退役意图|发布完成|受信发布者|端点代' b9d898dccf46c2a716115eaa1215bc39c458a959 -- analysis/ docs/ .chanlun/
+退出码：0
+b9d898dccf46c2a716115eaa1215bc39c458a959:analysis/recursive_position_experiment.md:207:- 这是"走势方向代理陷阱"（既往谱系）的镜像：那里用 swing 端点代理
+b9d898dccf46c2a716115eaa1215bc39c458a959:analysis/version_evolution_report.md:160:| 1 | 用 **swing 笔/线段端点代理走势方向** | 缠论走势方向由**中枢数量与同向性**定义，非端点高低；swing 代理是越级标签错配 | 原文第9/17/18课 + `project_trend_direction_proxy` |
+b9d898dccf46c2a716115eaa1215bc39c458a959:analysis/version_evolution_report.md:223:→ **裁决**：缠论"走势方向"（上涨/下跌）由**走势中枢依次同向的方向**定义，**不由笔/线段端点定义**。回测全程用 swing 端点代理走势方向是**层级错配**——原文一级权威确认 `project_trend_direction_proxy` 的判断。
+b9d898dccf46c2a716115eaa1215bc39c458a959:docs/RESEARCH_BACKTEST_INVENTORY.md:40:19. **swing 代理方向陷阱** ⚠️ — 用 swing 笔端点代理走势方向是标签错配（走势方向应由中枢定义）。`[project_trend_direction_proxy]`
+b9d898dccf46c2a716115eaa1215bc39c458a959:docs/ROADMAP.md:146:- 走势方向用中枢定义（缠论正典），不用 swing 笔端点代理
+b9d898dccf46c2a716115eaa1215bc39c458a959:docs/architecture/audit_fix_log.md:19:| B4 走势方向笔端点代理 | MEDIUM | 核查：σ 实为中枢定义，非端点代理 | ✅ 已核查（不构成证伪）|
+b9d898dccf46c2a716115eaa1215bc39c458a959:docs/architecture/audit_fix_log.md:130:- **结论**：`Move.direction` 是**中枢定义**（缠论正典），不是笔端点代理。与设计声明
+b9d898dccf46c2a716115eaa1215bc39c458a959:docs/architecture/audit_fix_log.md:138:（最近 move 若为小级别盘整则 σ=0），非端点代理；属可调粒度，记入待办，不影响本次修复正确性。
+b9d898dccf46c2a716115eaa1215bc39c458a959:docs/architecture/opus48_audit_report.md:27:| B4 | 走势方向用 `move.direction` / 笔端点代理，违反"中枢定义走势方向"声明 | 设计+代码 | **MEDIUM** | 自相矛盾 |
+b9d898dccf46c2a716115eaa1215bc39c458a959:docs/architecture/opus48_audit_report.md:120:`ROADMAP.md:118` + `memory: project_trend_direction_proxy`：**"走势方向用中枢定义（缠论正典），不用 swing 笔端点代理"**。
+b9d898dccf46c2a716115eaa1215bc39c458a959:docs/emergent_level_direction.md:143:> 回测用 swing 笔端点代理走势方向，但缠论正典走势方向由中枢定义。`trend_last_move_dir` 是

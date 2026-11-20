@@ -1,0 +1,4 @@
+$ git grep -I -n -E '端点需恢复|登记.{0,15}(作废|废止|重登)|boot[_ -]id|退役意图' b9d898dccf46c2a716115eaa1215bc39c458a959 -- analysis/ docs/ .chanlun/
+退出码：0
+b9d898dccf46c2a716115eaa1215bc39c458a959:.chanlun/agent-roster-2026-08-18.md:195:- L44 走势分解教义线开图 = #1094（wayfinder:map，承接 #174 L08 并入件）；L05 改裁搁置留触发（#695/#250 登记，原裁定作废）。
+b9d898dccf46c2a716115eaa1215bc39c458a959:.chanlun/review-results/dof-audit-20261020/AUDIT.md:168:| C-07 | `rust/src/theta_v0/config.rs:161` `depth_weights: vec![0.60, 0.30, 0.10]`（`VoiceConfig::default()`，`:158-167`） | 写死 | E | ADR 0034:39 已把「常数表 `depth_weights`（资金帽语义已废）」列为被否方案；ADR 0041 第三条又点名它和代码常数同向；ADR 0034:48 把 depth_weights 登记到 TB-10。语义作废的东西不是自由度，应维持排除，等 TB-10 删除 | — | TB-10（#1368）、#1558。改法：随旧入口终态删除，不要转成可调字段 | 高 |

@@ -1,0 +1,98 @@
+[
+  {
+    "host": "github.com",
+    "repository": "newchanlun/newchanlun",
+    "number": 2077,
+    "url": "https://github.com/newchanlun/newchanlun/pull/2077",
+    "summary": {
+      "title": "正常停止 S/E/B 写者并保留 socket 路径（#1411）",
+      "body": "Refs #1411。修复正式 launcher 停止时把 S 直接以信号终止、仍返回正常的问题。[修前实测](https://github.com/Newchanlun/NewChanlun/issues/1411#issuecomment-6991449080)：S 已发布 cut-1，停机后仍留有 354,352 B WAL 和 32,768 B SHM。\n\n现在 S/E/B 在私有停机管道收到请求后结束服务并正常关闭数据库；强杀或关键域未能正常退出不记为正常关库。普通独立启动方式不变，X 保留原监督行为。停机的成功表示进程已停止，日志另报 `socket_handoff=not_performed`。本 PR 不按路径删除任何 socket 或 SQLite 侧件。\n\n**停机行为受测头 `c5a7251f7a04ae3f4a49ac3ed5dbe713af9d471d`**：GPT‑6.2 Sol 非作者复审 PASS。此前 [#1640 机检](https://github.com/Newchanlun/NewChanlun/actions/runs/44416367441/job/135197696399) 拒绝了生产代码中的全局环境开关。返修后仅 launcher 显式向受管 S3/E/B 的 `serve` 传入 `--shutdown-control stdin/1`；独立启动即使继承旧变量并收到管道字节，仍可接纳输入。原机检零违规，Belay Linux 生产 28/28、TestOnly 26/26。非空 S 关库后 WAL/SHM 由 SQLite 自行清理，主库 inode 不变；SQLite 只读确认原库仍为 cut-1。另一监听器接管路径时不受影响；实际 SIGKILL 不获“正常关库”结果。\n\n**CI 登记修正 `b7b79657d85c4d9ef830d0422c29f944c7a4cc87`：**[上一头的 DevSkim 作业](https://github.com/Newchanlun/NewChanlun/actions/runs/44419899827/job/135209809105) 在 `service.rs:311` 报 DS197836。Git 溯源确认是原第 310 行的同一表达式：取摘要的是镜像字节，时间是并列字段。此提交仅移动基线键及其原说明；原 SARIF 经同一门脚本回放通过。[新头 Hosted 全扫](https://github.com/Newchanlun/NewChanlun/actions/runs/44421504985/job/135215388522)已通过，无超出基线的发现。[同头生产会话测试](https://github.com/Newchanlun/NewChanlun/actions/runs/44421504980/job/135215669141)实际验证了正常关库、SIGKILL 不作正常关库、被替换的 socket 不受影响。\n\n原 manifest 的再次启动仍被已有 socket 门拒绝。此候选不证明重新开服后 Q3 可读或 input-2 可提交；端点交接方案归 [#2079](https://github.com/Newchanlun/NewChanlun/issues/2079)，原调查见 [#1823](https://github.com/Newchanlun/NewChanlun/issues/1823)，完整故障恢复和双跑仍归 #1411。\n\n运行入口：`rust/tests/production_session_entry.rs`（`production_session`、`production_session_testonly`）。本机独审报告与运行原件 `/Volumes/AgentStorage/issue1411-orderly-repair-20261118/{RESULT-R3.md,non-author/REVIEW-EXPLICIT-STOP.md}`。草稿先接常规 CI，不发起含 Claude 的正式审查。\n\n",
+      "state": "open",
+      "isDraft": true,
+      "author": "xy7365527-lang",
+      "headBranch": "t3/issue1411-orderly-stop",
+      "baseBranch": "main",
+      "headSha": "b7b79657d85c4d9ef830d0422c29f944c7a4cc87",
+      "mergeability": "mergeable",
+      "behindBy": 0,
+      "autoMergeEnabled": false,
+      "additions": 420,
+      "deletions": 45,
+      "changedFiles": 6,
+      "labels": [],
+      "reviewers": []
+    }
+  },
+  {
+    "host": "github.com",
+    "repository": "newchanlun/newchanlun",
+    "number": 2082,
+    "url": "https://github.com/newchanlun/newchanlun/pull/2082",
+    "summary": {
+      "title": "修复 #1411：E/B 恢复丢回包后可取回原代际，launcher 按回执启动",
+      "body": "Refs #1411（TB-07-C）。本 PR 叠在 #2077 的 `b7b79657d8` 上；目标为 main 以运行正式 PR CI，#2077 先合。此次独审的增量为 [两提交、五文件](https://github.com/Newchanlun/NewChanlun/compare/b7b79657d85c4d9ef830d0422c29f944c7a4cc87...329be34f5a9ca9c2bcc38ae75783304cc654904c)。\n\n**修复的故障**：E/B 已经从代 1 恢复到 2 时，如果调用方没收到应答，旧恢复命令重试会再升到 3。新增具名恢复把请求、代际和回执一起持久提交；同一请求可由新进程逐字节取回原回执。旧回执仍可查询，但不能授权当前写者。生产 launcher 显式指定恢复计划时，逐域核验当前回执后才启动；未给计划的 launcher、独立 serve 和原 recover 保持原合同。\n\n**非作者 GPT‑6.2 Sol 独审：PASS，绑定 `329be34f5a9ca9c2bcc38ae75783304cc654904c`。** Belay Linux 实跑丢回包后重试不重复换代。E/B 服务实际持锁时，三条具名命令均拒绝且不改库。正式 launcher 以 E=3、B=2、B 所认 E 来源代=3 启动并读回同一非空 cut；旧代回执和缺域计划在启动子进程前被拒。最终具名单测 1 通过、0 失败。\n\n本项不接管 S 的原 socket。原 manifest 在同一组路径上恢复、从正式读口取回 cut-1 原收据并提交 input-2，仍归 #2079 与 #1411 整链验收。\n",
+      "state": "open",
+      "isDraft": true,
+      "author": "xy7365527-lang",
+      "headBranch": "t3/issue1411-named-recovery",
+      "baseBranch": "main",
+      "headSha": "329be34f5a9ca9c2bcc38ae75783304cc654904c",
+      "mergeability": "mergeable",
+      "behindBy": 0,
+      "autoMergeEnabled": false,
+      "additions": 820,
+      "deletions": 73,
+      "changedFiles": 9,
+      "labels": [],
+      "reviewers": []
+    }
+  },
+  {
+    "host": "github.com",
+    "repository": "newchanlun/newchanlun",
+    "number": 2065,
+    "url": "https://github.com/newchanlun/newchanlun/pull/2065",
+    "summary": {
+      "title": "docs(#1551): 落地 AT-18 整图验收报告与关票门裁定",
+      "body": "## Why\n\n用户目标是在不篡改契约与历史谱系的前提下打通 `#1323` 与 `SPEC #1340` 全图六项 Destination，推进整图完工验收。本 PR 将 `#1551` 经异家族 R1 至 R8 独审通过的正本裁定纳入 `main`，新增 `docs/adr/0064-at18-whole-graph-acceptance-and-closeout.md`（109 行，命令 `wc -l docs/adr/0064-at18-whole-graph-acceptance-and-closeout.md`），为 `#1391` 整图报告生成器、`#1403` 独立总验器、`#1369`（TB-11）关票门与 `#1279` 放行门提供封闭结构契约。\n\n## What changed\n\n- **AT-18 逐项证据与五项下游接口.** 规定六项 Destination 的逐项核验字段、`evidence_class`（`simulation`、`experiment`、`production`）严格分槽、Destination ⑤ 三层权限证据与 `CapabilityTuple` 对等校验、`ADR 0063:120` 四项带仓迁移与回退不变量复核、`ADR 0036:25-33` 闸门后参数触达与启用三记录核验，以及 `IMPLEMENTATION-CROSSWALK.json` 全部 97 故事、345 family 条目与 496 细项逐条对账义务。family 条目的 `entry_mode` 只由 crosswalk 的 `exclusion_boundary` 字段推出，`true` 的 2 项（`OE41`、`OE45`）只核排除边界，其余 343 项为必需条目，`OE42` 是必需条目。\n- **TB-01..11 三阶段无环关票门与七张旧关联票去向.** 将 `TB-01..TB-10` 独立关票门、`tb_summaries[TB-11]` 报告生成时代码落地前置门（`#1391` 与 `#1403` 实现代码入 `origin/main` 且绑定 `at18-input-bundle/1`，不要求 `#1391` 预先关票）与 `#1391` 封包关票、`#1403` 独立总验关票、整图关票序拆分为无环三阶段，并明确 `#942`、`#1096`、`#1282`、`#1304`、`#1319`、`#1320` 与 `#1279` 七张旧票去向及报告阶段与关图阶段分层核验条件。\n- **三份封闭 schema、仓外 manifest 绑定与无自指摘要.** 定义 `ManifestRef`（5 键）、`ArtifactRef`（8 键，仓外证据对齐 `.sandcastle/delivery-bundle.ts` 的 `ticket`、`base`、`head` 并命中 `ManifestRef`）、`PostGateSlot`（8 键）、`SpecCoverageLedger`（4 键）等全部子记录封闭类型，固定 10 键 `at18-input-bundle/1`、18 键 `at18-report/1` 与 12 键 `at18-verification/1` 结构、`origin/main` 提交祖先规则及 JCS 无自指 `content_hash` 计算口径。\n\n## Provenance and verification\n\n- **裁定票与基底.** `#1551`（P 类，依 `#1909` 代理独审裁定），基底为 `origin/main`，分支已合入 `b9d898dccf46c2a716115eaa1215bc39c458a959`；被审对象是本 PR 的 head，以 GitHub 显示为准，异家族草稿独审记录见 `https://github.com/Newchanlun/NewChanlun/issues/1551#issuecomment-6861637686`。\n- **边界与验证.** 本 PR 仅含协议与关票簿记正本，不执行运行变更，不签署资金、账户、场域激活、量档容量、成本与风险阈值、闸门后参数值或凭据权限，也不提前关闭 `#1279`、`#1369` 或任何实施票。在 `6ba72e84` 上本地运行：键数校验 `check-adr0064-keys.mjs` 全部吻合（23 个内联对象类型，0 处不符），`pytest -q tests/test_retired_references.py` 6 passed，`git diff --check` 无输出，ADR 0036 相对 `main` 仅末尾追加 4 行。\n- **修订与独审历史（按 head）.** `3d2b836e`：正式审查 BLOCK（OE42 与 crosswalk 不符）。`548b92e6`：祖先规则兼容 squash 合入、`TRIGGERED_VERSION_AUTHORIZED`、`obligation` 常量与连接规则、TB-11 子义务销项、ADR 0036 适用范围读法。`24c99e3e`／`030df041`：`entry_mode` 只由 crosswalk 的 `exclusion_boundary` 推出（2 项边界、343 项必需），并合入 main。`030df041` 上非作者独审（GPT）BLOCK，1 major、2 minor（[评论](https://github.com/Newchanlun/NewChanlun/pull/2065#issuecomment-6917329106)）。`53e6cdf9`：为权限槽、闸门后槽、迁移槽、TB-01..TB-10 实体报告与总验回执补了失败记录形状，`ISSUE_1320_HEAVY_MEASUREMENT` 定 `evidence_class=\"simulation\"`，规则 (b) 写明只证明合入不证明票归属，ADR 0036 指针移到文末以保住历史行锚。当时正文称「每条判 FAIL 的规则都有合规的失败记录形状」，这句不成立：非作者独审（GPT）第二轮 BLOCK，2 major（[评论](https://github.com/Newchanlun/NewChanlun/pull/2065#issuecomment-6918567641)），即回执 `head` 须等于被验报告与输入包的 `head`（:100），以及 TB-11 `input_bundle` 无条件非 `null`（:89）。`fd413c47`：前两轮逐句修补 FAIL 句子，同一缺陷三次复现，本轮改为消除成因。成因是 ADR 把形状规则（键集、类型、枚举）和判定规则（非 `null`、非空、跨文档相等、祖先、计数）写在同一句里，判定规则写成形状规则时，失败记录就没有合法形状。第五节在封闭字段规则旁新增「形状规则与判定规则分层」一条：只有形状违规使文档不可读；其余约束都是 PASS 条件，不满足时照写记录（观测值或 `null`/`[]`）、写 `FailedCheck` 并判 FAIL；各文档身份字段只取自本票 delivery manifest；并规定受验对象缺失或形状不合法时回执引用字段的填法。`SpecCoverageLedger.crosswalk_sha256`、`destinations[].main_sha` 与回执 `report_manifest`、`report_ref`、`input_bundle_ref` 放宽为可 `null`，其余实例改写为 PASS 条件，:98 与 :100 的当且仅当清单逐项列入被移出形状层的条件，业务 PASS 条件未放宽；新增的严格解析与 JCS 前提会拒收非规范输入，因此可判 PASS 的集合只可能收紧，不会扩大。键数无变化。`fd413c47` 上非作者独审（GPT）第三轮 BLOCK，2 major（[评论](https://github.com/Newchanlun/NewChanlun/pull/2065#issuecomment-6919750033)）。它复现了 31／19／0，确认放宽为可 `null` 的字段没有打开新的 PASS 路径，坏报告也不能借拒收或沉默满足关票门；两项 major 是：#1403 自身 manifest 缺失或不合法时，回执身份字段唯一来源消失，ADR 没有定义输出（R3-F1）；报告可解析为 JSON 对象却不能按 RFC 8785 规范化（`1e400`、孤立代理码点）时，`report_content_hash` 既算不出，也不在列出的两种 `null` 情形内（R3-F2）。`6ba72e84`：两项出自同一缺口，即两层规则没有定义「写不出形状合法文档」与「派生值算不出」两种情形。第五节在分层规则后新增两条。「引导前提与无文档结果」：#1391 与 #1403 写文档前先读本票 manifest（身份只取自它，不取自受验对象、调用参数或 Git 状态），取得固定数组各项中不可空的非结论字段，确保自身内容可规范化，并经临时文件改名写出；任一步失败即不写该文档，沿用 `.sandcastle/delivery-bundle.ts:116-132` 的 `BLOCKED` 载体给出具名 `code`，退出码 `1`；`BLOCKED` 载体不是文档，不能代替报告或回执。「派生值」：由另一份产物算出的字段，只在读取、严格解析、JCS 与 schema 各自需要的步骤都对现有字节成功时取计算值，否则取类型的缺失值并写指明失败步骤的 `FailedCheck`；`report_content_hash` 不经 schema，schema 不合法但可规范化的报告保留重算值。:59 与 :103 改为引用这两条。每个缺失值都伴随一项 `FailedCheck`，PASS 要求 `failed_checks=[]`，因此此前不能 PASS 的报告或回执现在也不能。键数无变化。\n\n\n\n## Two-layer enumeration\n\n- **脚本.** `/Volumes/AgentStorage/blackhole-claude/scratch/adr0064-two-layers.mjs`（仓外，不入本 PR）。它从 ADR 正文抽出全部封闭对象的字段与类型、全部规范性子句及其绑定字段，并判断违反该子句的记录在现行文字下是否仍合法。运行 `node adr0064-two-layers.mjs <ADR>`，实例为 0 时退出码为 0。\n- **结果.** 实例数在 `030df041` 为 31（含第一轮的权限槽类型，以及第二轮的闸门后槽、实体报告与 `report_content_hash`），在 `53e6cdf9` 为 19（含第三轮的 :86、:89、:100），在 `fd413c47` 与 `6ba72e84` 均为 0。往编辑后文件逐一植入三处已知缺陷（回执 `report_ref` 改回不可空、TB-11 无条件非 `null`、回执 `head` 无条件等于被验对象 `head`），脚本对每处都报出实例。\n- **局限.** 分类按关键词规则做，不是语义证明。第二轮的迁移槽缺陷出在字段名 `non_empty_evidence_refs` 上，正文没有对应句子，脚本不读字段名，因此在 `030df041` 上报不出这一处。脚本只检查已写出的记录是否合法，看不到「根本写不出文档」与「派生值算不出」两类情形，所以 R3-F1、R3-F2 在 `fd413c47` 上同样报 0；`6ba72e84` 的 0 也不证明这两类已闭合。这两类的依据是逐一列出每个工具写不出形状合法文档的情形及其结果，以及逐个派生字段核对其类型能否表示缺失值，见下节。\n\n## No-document and derived-value enumeration（`6ba72e84`，按正文推导，未运行 #1391/#1403 实现）\n\n- **写不出形状合法文档的情形.** #1391 与 #1403 各自：本票 manifest 缺失或不可读（`MANIFEST_UNREADABLE`）、不过 `deliveryManifestSchema`（`INVALID_MANIFEST`）、自身内容不能规范化（`CONTENT_NOT_CANONICAL`，照录的坏字符串先改写进 `FailedCheck.detail`）、输出写入失败（`OUTPUT_WRITE_FAILED`）；仅 #1391 报告：固定数组某项的 `ticket_state`、`disposition` 等不可空字段取不到（`FIXED_ITEM_UNAVAILABLE`）。以上此前均无定义，现在都是「不写文档、`BLOCKED`、退出码 `1`」。输入包的三个必填引用算不出时不生成输入包，这一结果此前已有定义，不属引导失败。\n- **派生字段.** 文件字节摘要（`ArtifactRef.sha256`、`ManifestRef.manifest_sha256`、`VenuePermissionFact.sha256`、`CapabilityTuple` 两个 `sha256`、`crosswalk_sha256`、TB-11 `input_bundle`），`report_content_hash`，`report_manifest`、`report_ref`、`input_bundle_ref`、`external_manifests[]`，`spec_coverage` 三个数组，`capability_record_version`，`VenuePermissionFact` 的 `source_url` 与 `retrieved_at`，`PostGateSlot` 三个时间戳。每个字段的声明类型或所在位置都能表示缺失（可空、数组，或整条引用省略后所在字段可空或为数组）；唯一不可空的位置是输入包三个引用，按既有规则不生成输入包。没有需要改键数的字段。\n- **关票门.** 无报告、无回执、`FAIL` 回执、任一工具引导失败，四种情形下 :105 要求的 PASS 报告与 PASS 回执至少缺一，正文要求写「无有效总验报告」，#1369、#1340、#1323 不可关闭。\n- **模型核对.** 用仓外小脚本按「派生值」四步跑第三轮独审的三份报告样例：`1e400` 与孤立代理码点两份停在 `JCS_CANONICALIZE`，`report_content_hash=null`；缺 `CiRunRef` 四键的形状不合法报告算出 `52396946…`，与独审回执样例的重算值相同。\n\n🤖 Generated with [Claude Code](https://claude.com/claude-code)\n\n## Independent verification @ `6ba72e84`\n\n非作者独审（GPT）在 `6ba72e84` 上判 PASS：0 blocking、0 major、2 minor（[评论](https://github.com/Newchanlun/NewChanlun/pull/2065#issuecomment-6920570456)）。R3-F1、R3-F2 已关闭；未发现放宽 PASS 或错误关图的路径。两项 minor 不改本 PR，由 #2074 跟进。正式门 `deepagents/review` 在本 head 上尚无结论（审查服务准入失败，属基础设施问题），合入以该门的双审结论为准。\n",
+      "state": "open",
+      "isDraft": false,
+      "author": "xy7365527-lang",
+      "headBranch": "decision/1551",
+      "baseBranch": "main",
+      "headSha": "6ba72e84c55aa6d65b11cc46b7288142f4fce62b",
+      "mergeability": "mergeable",
+      "behindBy": 0,
+      "autoMergeEnabled": false,
+      "additions": 113,
+      "deletions": 0,
+      "changedFiles": 2,
+      "labels": [],
+      "reviewers": []
+    }
+  },
+  {
+    "host": "github.com",
+    "repository": "newchanlun/newchanlun",
+    "number": 2088,
+    "url": "https://github.com/newchanlun/newchanlun/pull/2088",
+    "summary": {
+      "title": "chore(trading_system): 删除旧实盘空壳 live/runner.py 并更新 production_session 指路（ADR 0048 T1，#1385 OE13）",
+      "body": "Refs #1385（仅 OE13 / ADR 0048 T1，不自动关票）\n\n删除旧 Python 实盘诊断脚本，按 [ADR 0048 一·D](https://github.com/Newchanlun/NewChanlun/blob/b9d898dccf46c2a716115eaa1215bc39c458a959/docs/adr/0048-legacy-engine-module-level-dispositions.md#L304-L313) 执行。[删前 `main()`](https://github.com/Newchanlun/NewChanlun/blob/b9d898dccf46c2a716115eaa1215bc39c458a959/trading_system/live/runner.py#L31-L69) 只打印诊断并返回 1，未实例化 TradingNode；调用清查未发现该入口的消费者或需接管的订单、持仓和外部责任。[当前入口](https://github.com/Newchanlun/NewChanlun/blob/7be81f6c4dc974f939db496d335ffe3b82d1aed7/rust/src/bin/production_session.rs)与[运行手册](https://github.com/Newchanlun/NewChanlun/blob/7be81f6c4dc974f939db496d335ffe3b82d1aed7/docs/runbook_production_session.md)覆盖 simulation / dry-run。Databento 采数、回测和独立实验探针保留；本 PR 不启用 paper/live，不改变资金或执行权限。\n\n### 两个提交，各有对应证据\n\n- **`e91250d4c5` — 删除空壳并更新入口指引。** 删除前在 `b9d898dccf` 执行 B-Q3，无代码调用；删除后 B1 文件不存在，B2 在 `trading_system` 内不再有旧路径指引。该阶段经非作者 Sol 独审。开发工位因缺 NautilusTrader 跳过 skeleton 测试；该测试不引用被删入口。\n- **`7be81f6c4dc974f939db496d335ffe3b82d1aed7` — 修复 15 处文档引用。** [原 CI 失败](https://github.com/Newchanlun/NewChanlun/actions/runs/44624843756/job/135915797864)指向重的溯源表和六份 ADR。历史证据链接到删前版本，现行入口指回 Rust launcher。A9 仍核 T0 时文件存在，B1 仍核 T1 后文件不存在。未改引用检查、基线、扫描或审批规则。本地 `tests/test_retired_references.py` 六项通过；非作者增量独审核过两个时点、逐键命令及其他活路径的检查范围。\n\n[处理记录](https://github.com/Newchanlun/NewChanlun/issues/1385#issuecomment-7023790578)。本地审查原件：`/Volumes/AgentStorage/issue1385-oe13-review-20261119/REVIEW.md`、`/Volumes/AgentStorage/issue1385-oe13-references-review-20261119/REVIEW.md`。正式检查与 App 裁决以本 PR 当前头为准。\n\nOE13 其余装配与 T2–T5 仍按原票推进；本 PR 不切换运行版本。",
+      "state": "open",
+      "isDraft": true,
+      "author": "xy7365527-lang",
+      "headBranch": "t3/remove-live-runner-shell",
+      "baseBranch": "main",
+      "headSha": "7be81f6c4dc974f939db496d335ffe3b82d1aed7",
+      "mergeability": "mergeable",
+      "behindBy": 0,
+      "autoMergeEnabled": false,
+      "additions": 43,
+      "deletions": 108,
+      "changedFiles": 10,
+      "labels": [],
+      "reviewers": []
+    }
+  }
+]

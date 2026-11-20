@@ -1,0 +1,173 @@
+author:	xy7365527-lang
+association:	member
+edited:	false
+status:	none
+--
+登记（#1490／#1489 裁定）：最终规则集的全历史双跑验收清单需包含线段新规则 `segment-turn/1`（#1493，修 #1487 的全量停产）与 S 内容布局 `bounded-layout/1`（#1491）。按 #1489 裁定，#1481 的 9011 双跑以开跑时 main 的规则集为基线，开跑后合入的结构票不追加 9011 重跑；最终规则集的全历史双跑在本票（TB-07-C）与 #1381 承接，属 Destination ④。
+
+--
+author:	xy7365527-lang
+association:	member
+edited:	false
+status:	none
+--
+已批准政策增量接口交接（2026-10-26）。
+
+SPEC 提案 https://github.com/xy7365527-lang/NewChanlun/issues/1340#issuecomment-6403536453 ，用户批准 https://github.com/xy7365527-lang/NewChanlun/issues/1340#issuecomment-6403879801 。
+
+新增同 seed 五元组必须比较实际输出而非仅配置；随机模拟计数列 L1，bar_volume_derived 列 L0 假设。覆盖适用的新定标/SR版本恢复，不把新增缺签状态扩大为旧域阻塞。
+
+本评论只登记新增域合同与消费者，不表示已接单或已实现。既有票旧域及现有候选继续原合同；新增域须绑定自己的实现 head、非作者 PASS、CI 和真实输入到输出消费证据。若写区与在飞 owner 相交，由主控协调，不扩大旧候选或添加整票 blocker。
+
+--
+author:	xy7365527-lang
+association:	member
+edited:	false
+status:	none
+--
+## #1516 前提核验：保留完整身份与恢复比较
+
+固定 main `99df2ed762201236b89f0e81c0276cb3aa847f0a`，正式v2/S3 Begin共用七字段确定性配方：session_id、session_generation、writer_epoch、attempt_ordinal、base_cut、generation、input_frontier。出版核验重算同配方，CAS验证本attempt持久所有权，不要求另一独立进程复用原token。墙钟/PID make_token仅在旧无协议入口使用，不能据它将#1516列为本票P0前置。
+
+本票完整双进程/真实中断恢复验收仍须覆盖身份引用关系、attempt、epoch、语义时刻和前沿；只允许原已批合同中的预声明非语义身份一一重命名，不把所有token或时间列整体忽略。当前 replay_comparator 仅数量/timestamp比较、MinimalEngine入口，不是本票完成证据。
+
+以上技术调查已获非作者独审PASS，不改本票SPEC或原生依赖，不把“无需两字段token替换”当作回放验收完成。旧分支终态已具名登记到#1413的遗漏入口复核职责。
+
+--
+author:	xy7365527-lang
+association:	member
+edited:	false
+status:	none
+--
+#1718 已交付诊断组件候选 PR #1731 @ a4595824e50fbf850dd144c65d9d0d73f8fae1ad，尚未合main。组件独审与13项远端行为/回归验证通过，验收及接口见 https://github.com/xy7365527-lang/NewChanlun/issues/1718#issuecomment-6409069753 。
+
+本票在既有前置满足后，由正式全状态运行与恢复验收入口真实拒收 diagnostic-fill-report/1 的 mode=diagnostic 结果及诊断配置，保留正常正式输入成功对照与持久无副作用证据。不能用冻结theta_backtest影子门或诊断CLI自拒收代替。诊断Cross(k>=1)仍是合法研究自由度，不因此改生产政策。
+
+这是候选接口与验收义务交接，不是已消费或本票已放行的声明；不新增整票blocking边，不越过本票已有spec/资金/隔离/调用批准门。实际消费后把精确head及入口日志回链#1718。
+--
+author:	xy7365527-lang
+association:	member
+edited:	false
+status:	none
+--
+图维护（#1323 frontier 审计，报告 /Volumes/AgentStorage/frontier-audit-20261028/review.md）：blocked-by 由 #1360,#1363,#1364,#1381,#1399,#1481 改为 #1381,#1399,#1423,#1481,#1570（移除 #1360,#1363,#1364；新增 #1423,#1570），依据：汇总票不作为叶片 blocker，改挂实际消费叶片。逐边依据见 edges.corrected.tsv。
+--
+author:	xy7365527-lang
+association:	member
+edited:	false
+status:	none
+--
+#1718 组件合入交接更新。PR #1731 已合 main `4c10229eacaa21a8744e57d409b579359ca7cd97`，不再等待组件 main 批准。该提交的 CI [40780304989](https://github.com/xy7365527-lang/NewChanlun/actions/runs/40780304989) 与 DevSkim 均通过。
+
+本票既有前置满足后，由全状态双进程与崩溃恢复验收入口消费已合接口，实际拒收 `diagnostic-fill-request/1` 的诊断配置和 `diagnostic-fill-report/1` 的诊断结果，保留正常正式输入成功对照、恢复一致性与持久无副作用证据。接口、fixture 和精确证据见 [#1718 交棒记录](https://github.com/xy7365527-lang/NewChanlun/issues/1718#issuecomment-6491722979)。
+
+本次只更新可用组件的身份，不宣称本票已放行或已消费，不新增 blocking 边。完成实际消费时把精确 head、入口日志和结果回链 #1718；冻结影子门与诊断 CLI 自测不能代替本票入口。
+
+--
+author:	xy7365527-lang
+association:	member
+edited:	false
+status:	none
+--
+**FU-19 承接登记**（#1550 → #1411）
+
+正本已合：`docs/adr/0058-replay-shell-mapping-and-legacy-replay-dispositions.md` 随 PR #1821 squash 合入 main `3a01bed557aa5168d7af5243e9faec5854ab10e0`（#1550，T 类 N-1）。
+
+本票职责：
+- ADR 0038:88-91 四个具名测试 `dual_run_determinism_h1`、`recovery_after_kill_h2`、`seek_no_future_leak_h3`、`asknown_evidence_segregation_h4`，从 `production_session`（`evidence_class=simulation`）拉起两个独立新进程，真杀进程、真重启（ADR 0058 裁定一第 1 条 (b)、#1340 :436）。main `71df2ae749` 上 `rust/`、`.github/` 对四个名字 0 命中；#1816 新增的 H1 资格组件不等于这些测试已存在或已运行。
+- 六面导出（ADR 0058 裁定二）：ADR 0038:49-54 六面全部字段，各面按（域, `event_id`）排序（ADR 0056:70），批内顺序不比；序列化格式由本票与 #1418 实施时定。
+- 并入 #1528 的需求（ADR 0058 裁定四第 1 条）：逐 bar 分类/信号/订单/持仓/账目对拍由本票六面 oracle 覆盖，不另开票。要复用 #1528 组件，按 SHA `72b1dbcc7344dc0532cf2cef76cd90a429f31e6d` 自取，不合旧分支。
+- 判定（裁定五第 5 条）：H1–H4 diff 全空且 ADR 0052:288-291 (a)–(d) 成立才 PASS；inconclusive、同进程第二实例恢复、忽略或跳过的测试不计 PASS。
+
+依赖不变：blocked-by #1381/#1399/#1481/#1423/#1570，blocking #1418。本评论只登记承接，不改 AC、不改边、不关票。
+
+--
+author:	xy7365527-lang
+association:	member
+edited:	false
+status:	none
+--
+FU-19 消费更新：#1528 已依 ADR0058 不实施关闭，原 #1381 → #1528 边已撤。六面逐 bar 对拍仍由本票承接，裁定范围不变。处置与恢复记录：https://github.com/xy7365527-lang/NewChanlun/issues/1528#issuecomment-6564478697 。旧组件 tip 72b1dbcc7344dc0532cf2cef76cd90a429f31e6d 不再有原远端分支；需要复用时从主仓 refs/archive/issue1528/72b1dbcc 或 /Volumes/AgentStorage/fu19-cleanup-scope42g/issue1528-72b1dbcc.bundle 取回，包含三个未合入提交与六份独有证据。不要把旧组件作为已合入生产实现。
+--
+author:	xy7365527-lang
+association:	member
+edited:	false
+status:	none
+--
+### TB-07-C：正常停机已回收全部进程，但 S 原库不能再次准入
+
+固定 `b9d898dccf46c2a716115eaa1215bc39c458a959`，Linux x86_64 release、`production_session` 非增量构建、simulation。与 [#1375 的 E/B 恢复读](https://github.com/Newchanlun/NewChanlun/issues/1375#issuecomment-6989555597) 用同一配置，另起隔离样本定位 S：
+
+| 时点 | S 的侧件 | 持有者 |
+|---|---|---|
+| 首次启动前 | 无 WAL、SHM 或 journal | 无 |
+| 会话就绪 | WAL 0 B、SHM 32,768 B、无 journal | S |
+| launcher 收 SIGTERM 并退出 0 后 | 同一个 SHM inode、WAL 仍为 0 B、无 journal | 四个子进程全退；隔离 PID 空间找不到持有主库或侧件的 FD |
+
+再次从既有库启动，S 在 E6 返回 `UnsupportedWalShmJournalCombination / R4 准入拒绝：ReadFailed`，launcher 退出 1。[准入判据](https://github.com/Newchanlun/NewChanlun/blob/b9d898dccf46c2a716115eaa1215bc39c458a959/rust/src/bin/s_session_v3/admission_provider.rs#L231) 中，仅 SHM 存在即满足拒绝条件；已排除“必须还有活读者”。两次启动间仅清了本夹具的 socket、换代 E/B、写 manifest，未打开 S 介质。第二次 Popen 紧前未另存一份 stat，具体 SQLite 关停路径尚未定位。
+
+**S writer／launcher 生命周期的修复验收**：用正式 simulation 入口发布非空 cut，停机后保留原库，经同一合同完成再准入；公开读回原 cut 后继续接纳下一条。未知占用或不明来源 SHM 继续拒绝，不由 launcher 自动删除侧件。该 profile 尚无证据表明通用 S recover 能通过此介质准入。正常停机只是一条前置；真正中断 S/E/B/X 的双跑仍按本票原 AC。
+
+复跑驱动、精确配置、三份 stat/FD 快照和完整首拒：`/Volumes/AgentStorage/issue1411-r4-restart-20261118/RESULT.md`。
+
+--
+author:	xy7365527-lang
+association:	member
+edited:	true
+status:	none
+--
+**已查到非空 S 无法重启的停机路径：launcher 把写者以 SIGTERM 终止，并把回收进程报告为正常停机。** 在固定 main `b9d898dccf46` 的正式 Linux simulation 入口，一根 OHLC 获得 `Committed / cut-1`（`rcpt-fe23c8da81cb29d5`）。仅向 launcher 发 SIGTERM，内核记录 S 子进程的 wait status 为信号 15；launcher 却返回 `stopped.failed=false` 并退出 0。[launcher 的终止与回收](https://github.com/Newchanlun/NewChanlun/blob/b9d898dccf46c2a716115eaa1215bc39c458a959/rust/src/bin/production_session.rs#L342-L367)和[S 的监听循环](https://github.com/Newchanlun/NewChanlun/blob/b9d898dccf46c2a716115eaa1215bc39c458a959/rust/src/session_transport.rs#L641-L681)之间没有让结构 writer 正常结束并确认关库的步骤。
+
+停后和再次启动紧前，原库同 inode、WAL 354,352 B、SHM 32,768 B，都无 FD 持有者。为单独核实数据库能否再准入，夹具先清了已退出的 S/E/B 的本次 Unix socket，并按既定合同为 E/B 换代；没有打开或改动 S 主库及侧件。在这个条件下，第二次正式启动到达 R4/E6 后被拒，未接纳 input-2。未清理的 socket 是另一道门：[#1823 的 SIGKILL 原样重启 CI](https://github.com/Newchanlun/NewChanlun/issues/1823#issuecomment-6687775294) 三种布局下，S 都先报 `TransportUnavailable：socket路径已占用`，尚未进入 R4。三文件封存副本仍读得到 cut-1；这证明已提交状态还在，不是正式恢复成功。
+
+**修复位置是 S writer 与 launcher 的停机交接，不是 R4 的侧件拒绝条件。** 用同一输入验收：正常停机后无需夹具代删 socket 或 SQLite 侧件，即可按正式恢复步骤从同库重新准入，经正式读口读回 cut-1，再让 input-2 获得 Committed。异常终止不得冒充交接成功。已遗留的介质须保留并按另外的恢复合同处理，不能由 launcher 删除侧件。此项不替代 TB-07-C 的真实中断和全状态双跑。
+
+原始收据、wait status、紧前快照与复跑驱动：`/Volumes/AgentStorage/issue1411-r4-restart-20261118/nonempty-stop/RESULT.md`。
+
+--
+author:	xy7365527-lang
+association:	member
+edited:	true
+status:	none
+--
+[#2077](https://github.com/Newchanlun/NewChanlun/pull/2077)  的 `b7b79657d8` 已通过 [ci-ok](https://github.com/Newchanlun/NewChanlun/actions/runs/44421504980/job/135225411469) 和 [DevSkim 全扫](https://github.com/Newchanlun/NewChanlun/actions/runs/44421504985/job/135215388522)。[生产会话用例](https://github.com/Newchanlun/NewChanlun/actions/runs/44421504980/job/135215669141)已实际验证正常关库、强杀不报正常、不会动替换后的 socket；草稿尚缺原 App 正式审查。这里停止写者，不交接 socket。[#2079 的可行性证据](https://github.com/Newchanlun/NewChanlun/tree/5a1ac9de73766f0a943c156f97cb467b7d690218/.chanlun/review-results/issue2079-endpoint-rotation)表明，可在受保护部署中保留原路径而换掉旧监听队列。请把端点代和业务 writer epoch 分开验：即使能重新 bind，原 manifest 也不能用过期的 E/B epoch 启动写者。后者须消费正式恢复收据，不改 manifest 整数来冒充同配置重启。整条验收仍以新进程从同库通过正式读口读回 cut-1 的完整原收据、再提交 input-2 为准。
+
+--
+author:	xy7365527-lang
+association:	member
+edited:	false
+status:	none
+--
+本项由 GPT 实装，另开 GPT‑6.2 Sol 非作者独审。#2077 最终头 `b7b79657d85c4d9ef830d0422c29f944c7a4cc87` 已取得独立绑定结论：与受审产品头 `c5a7251f7a` 相比，只有 DS197836 的位置键及对应说明键从 310 移至 311；用同一原 SARIF 回放，旧基线退出 1，新基线退出 0。原有序关库审查适用。这个结果不改变原路径重启的判据：新进程同一 manifest、同一原库经正式入口查回 cut-1 原收据，再使 input-2 得到 Committed。#2079 的端点交接裁定与实际部署权限分别处理，不把 #1855 的 App 双审例外用于本项。
+--
+author:	xy7365527-lang
+association:	member
+edited:	false
+status:	none
+--
+已把「原 socket 冲突」和「恢复应答丢失」分开实测。固定 #2077 头 `b7b79657d85`，E/B 的同一非空库各从 writer epoch 1 开始，两份 manifest 的字节不改。收到正式 Recovered 时可按 2 启动 E、B（B 的 E 代也须为 2），读回 E cut 5、B cut 1 的完整原账图；用 launcher 原参数 1 会被 StaleWriter 拒绝。另一臂真实执行 recover 并丢弃回复，库内已经是 2；同一条 recover 命令重试却又升到 3。原 Recorded/Applied 业务收据可以重送查回，恢复操作自身没有同样的身份。
+
+因此本项先修可独立交付的 E/B 行为：以域内持久恢复身份取回原结果，令新进程不重复换代，launcher 消费经核对的有效代际。仍由 #2079 另裁原端点如何交接，不擅删路径。基线、Linux 真进程请求和丢回执对照在 `/Volumes/AgentStorage/issue1411-epoch-handoff-20261119/RESULT.md`。
+--
+author:	xy7365527-lang
+association:	member
+edited:	false
+status:	none
+--
+[#2082](https://github.com/Newchanlun/NewChanlun/pull/2082) 的 `329be34f5a` 已通过 E/B 具名恢复子合同的 GPT‑6.2 Sol 非作者独审。在 Belay，从非空库执行恢复并丢弃应答后，新进程重送同一请求逐字节取回原回执，不再升代；历史回执可查，但不能授权当前写者。正式 launcher 以 E=3、B=2、B 所认 E 来源代=3 启动并读回原 cut，旧代或缺域计划在 spawn 前被拒。
+
+同头 GitHub [ci-ok](https://github.com/Newchanlun/NewChanlun/actions/runs/44473412861/job/135397071505) 和 [DevSkim](https://github.com/Newchanlun/NewChanlun/actions/runs/44473412866/job/135388088312) 均已通过。#2082 叠在尚未合入的 #2077 上，仍缺分支保护指定 App 的 `deepagents/review`。#1411 保持开放：#2079 的原 socket 交接后，还要在原 manifest、原库和原路径上经正式读口查回 cut-1 原收据，并让 input-2 得到 Committed。
+
+--
+author:	xy7365527-lang
+association:	member
+edited:	false
+status:	none
+--
+**双跑选入口：已有一份可作回归对照的 E/B/X 基线，但它不是 #1304 的正式整会话双跑。** 核了 #2081 的冻结驱动和 `/Volumes/AgentStorage/issue1407-c2/signed-c2-t3/final/{a,b}/`：两次分别从空库启动，输入、E manifest、X profile 与经济启动配置逐字节相同；两个 3,865,882 字节的规范业务转储也逐字节相同。两次同一 `cmd-alpha` 都经历“过早接纳拒绝 → Accepted 且未占有 → 一次占有、一次本地模拟调用”，X 最终为 Observed，b3 的 fill/fee 原帧相同，E 保留 90 TEST-CASH。
+
+关键差别在驱动：[c2_formal_entry.py](https://github.com/Newchanlun/NewChanlun/blob/eabdfb02013135db78d21cb2d8a47dec0a71a555/rust/tests/c2_formal_entry.py) 的 `--twice` 比较 E、两个 B 和 X；它用 economic-launcher 配置与 X 子进程，不从 `production_session` 启动四域，S 资格来自夹具。转储里 E 只有两条开账事实，没有这两件 X 原件的经济应用。因此这对样本可定位“新代码在哪一域改变了原结果”，不能凭全表相等填 AT-14、崩溃恢复或原件回到 B 的通过项。
+
+接 #1304 时应复用能启动真正外层 `production_session` 的入口（C3 的 `c3_model_binding_contrast.py` 已演示），在同一受测头、同一正式输入的未中断臂和恢复臂比较；三种不同模型对照也不能当成一对相同输入。#2079 原 socket、#1425 的非空经济分量和真实 S 资格仍各按原成功条件承接。
+
+--

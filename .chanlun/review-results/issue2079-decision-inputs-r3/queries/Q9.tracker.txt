@@ -1,0 +1,3 @@
+$ gh issue list --search '"MayHaveCalled" "就绪" in:title,body,comments' --state all --limit 100 --json number,state,title,url
+退出码：0
+[{"number":1340,"state":"OPEN","title":"📋 SPEC：完整生产程序、结构全分类与逐重经营（#1323，R2）","url":"https://github.com/Newchanlun/NewChanlun/issues/1340"},{"number":1407,"state":"OPEN","title":"[impl] TB-04-C 不可改精确交付与阶段条件清单（SPEC #1340）","url":"https://github.com/Newchanlun/NewChanlun/issues/1407"}]

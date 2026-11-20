@@ -1,0 +1,3 @@
+$ gh issue list --search '"input-2" "cut-1" in:title,body,comments' --state all --limit 100 --json number,state,title,url
+退出码：0
+[{"number":2079,"state":"OPEN","title":"[grilling] 正常关停或崩溃后，谁有权重新提供原会话端点（#1411 / #1823）","url":"https://github.com/Newchanlun/NewChanlun/issues/2079"},{"number":1411,"state":"OPEN","title":"[impl] TB-07-C 完整会话双进程与崩溃恢复保持全状态一致（SPEC #1340）","url":"https://github.com/Newchanlun/NewChanlun/issues/1411"}]

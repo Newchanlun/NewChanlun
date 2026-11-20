@@ -1,0 +1,8 @@
+gh api repos/Newchanlun/NewChanlun/issues/1411/dependencies/blocked_by --paginate
+1381	[impl] TB-07-A 完整历史输入推动全部权威域并生成可追溯回放（SPEC #1340）	open
+1399	[impl] TB-07-B 历史seek与修订重算各自保留真实获知时间（SPEC #1340）	open
+1481	[impl] S 写者审计核心降阶：Δ 单代判据、写者生涯前缀夹持与线性冷启动（承接 §5.9.2 全 9011 双跑）	open
+1423	[impl] TB-05-E 既有持仓、订单与事实责任的非空恢复（SPEC #1340）	open
+1570	[task] S v1/v2 init 与 reset 仍在目标路径直接建库，失败留半成品（#1568 后续）	open
+gh api repos/Newchanlun/NewChanlun/issues/1411/dependencies/blocking --paginate
+1418	[impl] TB-07-D 回放验收报告器与生产改动回归锁上线（SPEC #1340）	open

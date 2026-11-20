@@ -1,0 +1,4 @@
+gh api repos/Newchanlun/NewChanlun/issues/1396/dependencies/blocked_by --paginate
+1376	[impl] TB-05-A 经济全故障时结构正式持续（SPEC #1340）	open
+gh api repos/Newchanlun/NewChanlun/issues/1396/dependencies/blocking --paginate
+1409	[impl] TB-05-C 双边界崩溃、旧写者与不补发（SPEC #1340）	open

@@ -1,0 +1,16 @@
+gh api repos/Newchanlun/NewChanlun/issues/1363/dependencies/blocked_by --paginate
+1362	TB-04 验收汇总：责任到实际调用及回报闭环（SPEC #1340）	open
+1534	[grilling] FU-11 逐 bar 事件、身份、生命周期合同（#1323，新增）	closed
+1557	[grilling] FU-01/03 余项：共同 cap、固定 Q 与本金批次的数值签署（#1323，P 类）	closed
+1560	[grilling] FU-07 余项：系统风险条件 SR v1 阈值与退出动作表签署（#1323，P 类）	closed
+1568	[task] S init 在磁盘满时留下 4096 字节残留库，重试需人工清理	closed
+1570	[task] S v1/v2 init 与 reset 仍在目标路径直接建库，失败留半成品（#1568 后续）	open
+1768	[impl] TB-07-E B/E 域事件外壳 domain-event/1 映射与 delta/Gap 读口（ADR 0051，#1534）	open
+gh api repos/Newchanlun/NewChanlun/issues/1363/dependencies/blocking --paginate
+1366	TB-07 验收汇总：完整历史及恢复（SPEC #1340）	open
+1367	TB-08 验收汇总：场所共核与能力验收（SPEC #1340）	open
+1368	TB-10 验收汇总：带仓迁移、旧入口终态及默认启用（SPEC #1340）	open
+1369	TB-11 验收汇总：整图实装和独立总验（SPEC #1340）	open
+1382	[impl] TB-08-A 历史与paper模式由同一入口使用受控adapter（SPEC #1340）	open
+1391	[impl] TB-11-A 完整程序验收与旧关联票义务逐项对账（SPEC #1340）	open
+1523	[impl] TB-04/08/09 纵片 A：nautilus 0.62 HL 适配器与正式 paper launcher	open

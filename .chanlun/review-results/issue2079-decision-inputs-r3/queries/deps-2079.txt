@@ -1,0 +1,2 @@
+gh api repos/Newchanlun/NewChanlun/issues/2079/dependencies/blocked_by --paginate
+gh api repos/Newchanlun/NewChanlun/issues/2079/dependencies/blocking --paginate

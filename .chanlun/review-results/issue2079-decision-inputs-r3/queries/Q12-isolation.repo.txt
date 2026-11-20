@@ -1,0 +1,6 @@
+$ git grep -I -n -E '单域.{0,14}故障隔离|TB-05 验收汇总|#1376、#1417|一域损坏、阻塞或重启' b9d898dccf46c2a716115eaa1215bc39c458a959 -- analysis/ docs/ .chanlun/
+退出码：0
+b9d898dccf46c2a716115eaa1215bc39c458a959:.chanlun/review-results/graph-engine-fix-20261020/dryrun-compare.json:426:      "title": "TB-05 验收汇总：故障隔离及持续服务（SPEC #1340）",
+b9d898dccf46c2a716115eaa1215bc39c458a959:.chanlun/review-results/issue1339-r2-spec-20260909/payload/spec/SPEC.md:324:3. 一域损坏、阻塞或重启的试验只影响该域数据库及进程；S/E/B 之间不共享应用级锁、读写事务或故障恢复闸。共享宿主、物理磁盘或系统整体故障仍可能同时影响各域，首版不承诺跨机器高可用或磁盘灾难隔离；不能把这种整体故障用作 RF-01/RF-02 应测局部故障的替代。
+b9d898dccf46c2a716115eaa1215bc39c458a959:.chanlun/review-results/issue1339-r2-spec-20260909/view/spec/SPEC.md:326:3. 一域损坏、阻塞或重启的试验只影响该域数据库及进程；S/E/B 之间不共享应用级锁、读写事务或故障恢复闸。共享宿主、物理磁盘或系统整体故障仍可能同时影响各域，首版不承诺跨机器高可用或磁盘灾难隔离；不能把这种整体故障用作 RF-01/RF-02 应测局部故障的替代。
+b9d898dccf46c2a716115eaa1215bc39c458a959:.chanlun/review-results/issue1340-publication-20260909/payload/evidence/TB-PUBLISHED.json:46:    "title": "TB-05 验收汇总：故障隔离及持续服务（SPEC #1340）",

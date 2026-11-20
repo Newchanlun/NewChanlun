@@ -1,0 +1,8 @@
+$ git grep -I -n -E 'input-2|SAFE-ADMISSION|OBS-IN|SAFE-LIVE|完整会话双进程' b9d898dccf46c2a716115eaa1215bc39c458a959 -- analysis/ docs/ .chanlun/
+退出码：0
+b9d898dccf46c2a716115eaa1215bc39c458a959:.chanlun/review-results/graph-engine-fix-20261020/dryrun-compare.json:986:      "title": "[impl] TB-07-C 完整会话双进程与崩溃恢复保持全状态一致（SPEC #1340）",
+b9d898dccf46c2a716115eaa1215bc39c458a959:.chanlun/review-results/issue1340-publication-20260909/payload/evidence/EXECUTION-SLICES-PUBLISHED.json:820:    "title": "[impl] TB-07-C 完整会话双进程与崩溃恢复保持全状态一致（SPEC #1340）",
+b9d898dccf46c2a716115eaa1215bc39c458a959:.chanlun/review-results/issue1340-publication-20260909/payload/inputs/FULL-LEAF-PUBLISHED-VERIFY.json:3288:      "expected_title": "[impl] TB-07-C 完整会话双进程与崩溃恢复保持全状态一致（SPEC #1340）",
+b9d898dccf46c2a716115eaa1215bc39c458a959:.chanlun/review-results/issue1340-publication-20260909/payload/inputs/TB07-11-EXECUTION-SLICES.json:1841:      "title": "完整会话双进程与崩溃恢复保持全状态一致",
+b9d898dccf46c2a716115eaa1215bc39c458a959:.chanlun/review-results/issue1340-publication-20260909/payload/inputs/TB07-11-EXECUTION-SLICES.md:30:## TB-07-C 完整会话双进程与崩溃恢复保持全状态一致
+b9d898dccf46c2a716115eaa1215bc39c458a959:.chanlun/review-results/issue1340-publication-20260909/view/inputs/TB07-11-EXECUTION-SLICES.md:32:## TB-07-C 完整会话双进程与崩溃恢复保持全状态一致

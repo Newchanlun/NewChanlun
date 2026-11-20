@@ -1,0 +1,7 @@
+gh api repos/Newchanlun/NewChanlun/issues/1423/dependencies/blocked_by --paginate
+1417	[impl] TB-05-D 坏重保界而健康重实际新增（SPEC #1340）	open
+1427	[impl] TB-04-G 订单首次量与取消改单的剩余额度（SPEC #1340）	open
+1428	[impl] TB-04-J 多重及配对分配政策的正式事实实例（SPEC #1340）	open
+gh api repos/Newchanlun/NewChanlun/issues/1423/dependencies/blocking --paginate
+1402	[impl] TB-10-H 非空持仓与尾责迁移及回退不丢权利（SPEC #1340）	open
+1411	[impl] TB-07-C 完整会话双进程与崩溃恢复保持全状态一致（SPEC #1340）	open

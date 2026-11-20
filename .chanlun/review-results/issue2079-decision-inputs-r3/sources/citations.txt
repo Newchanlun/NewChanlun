@@ -1,0 +1,1159 @@
+
+== b9d898dccf46c2a716115eaa1215bc39c458a959:docs/adr/0039-production-entry-inventory-and-unique-launcher.md [273,292p] ==
+   273	### 三、唯一正式 launcher 的 seam
+   274	
+   275	1. **身份**
+   276	   - bin `production_session`，源文件 `rust/src/bin/production_session.rs`；
+   277	   - Cargo feature `production_session`，含 `s_session` 与 X adapter 所需依赖，**不含** `backtest_bin` 和 `nautilus`；
+   278	   - 全仓只有这一个 launcher。`theta_backtest`、`trading_system/live/runner.py`、`newchan` CLI、任何 `*_launcher.py` 都不是 launcher。
+   279	2. **输入**
+   280	   - 一份 manifest：已批准规则和政策版本、能力 manifest、原始输入来源、各域 DB 路径、时钟、adapter 选择（C10.1）；
+   281	   - 一份 profile：ADR 0028 裁定一字段。
+   282	   - `evidence_class` 只决定 adapter 装配：`simulation` 装受控撮合，`experiment` 和 `production` 装场所 adapter。三种运行环境只在 adapter 处分叉（ADR 0027:46）。
+   283	3. **装配**
+   284	   - 以独立 OS 进程启动 S、E、X、各 Bᵢ（C09.1）；每个域有自己的 `--db`、`.writer.lock`、`writer_epoch`。
+   285	   - launcher 只负责启动、顺序、监督、换代和指纹计算。它不持任何域的写者身份，不产生交易意图。
+   286	   - 生产部署中，域 bin 只能由 launcher 拉起。手工用生产库路径启动域 bin 的情形，是 TB-09 部署隔离（#1383/#1401）的验收对象，本 ADR 不把「约定」算作锁。
+   287	4. **凭据**：launcher 从 profile 的 `credential_scope` 指向的来源读取凭据，**只**写进 X 子进程的启动环境。S、E、Bᵢ、查询壳和宿主 shell 环境都不含凭据（ADR 0028:36、C09.7）。
+   288	5. **启动门**
+   289	   - `production` profile 下，launcher 在启动时和失效触发后计算 TB-09 指纹，交给 X。
+   290	   - X 把指纹连同 profile 版本持久化到自己的域库；指纹缺失或不符就拒绝发送，不回退旧 writer（ADR 0028:46、ADR 0030:44）。
+   291	   - 启动时检测 checkpoint 并恢复（ADR 0038:60）。
+   292	6. **换代**：先确认旧 X 和它的发送子进程已退出，再提升 `writer_epoch`、取得排他进程锁（C09.8）。旧 epoch 的写入被 `store.rs:466-467` 拒绝。
+
+== b9d898dccf46c2a716115eaa1215bc39c458a959:docs/adr/0059-production-session-layout-contract.md [95,123p] ==
+    95	1. **canon 定义**：解析符号链接后的绝对路径，路径最终条目是符号链接时也解析。路径尚不存在时，取最近存在祖先的 canon，再按原样接上剩余路径段。路径最终条目是悬空符号链接时，先取链接目标（相对目标按链接所在目录解析，多级链接逐级取），再对目标按本条求 canon。
+    96	2. **S 测量边界**：
+    97	   - `P = parent(canon(s.db))`，`b = basename(canon(s.db))`；
+    98	   - `A = canon(parent(parent(s.admission_job_limits)))`；
+    99	   - S 族条目：P 中名字等于 `b`，或以 `b.`、`b-` 开头的条目。
+   100	
+   101	   A 的推导不核验后缀，后缀合法性由 S 的 E1 核验（Q12 推荐答案）。
+   102	3. **并发写域的库与判定目录**：库为 `economic.e.db`、每个 `economic.b[i].db`、`x.db`。对每个这样的库 `d` 取下列判定目录：
+   103	   - `Q₁ = canon(parent(d))`，即 d 的目录项所在目录；
+   104	   - `Q₂ = parent(canon(d))`，即 d 解析后实际库文件所在目录，也是 SQLite 侧件所在目录。d 不是符号链接时 `Q₁ == Q₂`；
+   105	   - 锁目标目录 `Q₃ = parent(canon(L))`，对下列每个锁路径 L 各取一个：`L₂ = canon(d)` 接 `.writer.lock`，恒取；d 不存在时（跟随链接判存在，悬空链接算不存在）另取 `L₁ = Q₁/basename(d)` 接 `.writer.lock`。L 不是符号链接时 `Q₃` 等于 `Q₁` 或 `Q₂`；L 是符号链接（含悬空）时，`Q₃` 是其最终目标所在目录。
+   106	
+   107	   `L₂`、`L₁` 与 `process_lock` 的存在、不存在两个分支一一对应（`rust/src/session_transport.rs:43-63`）；d 不存在时两个分支都会被用到，见 Q2。
+   108	
+   109	   **并发写域的 socket 与判定目录**：读 `economic.manifest` 指向的经济 manifest，取 E 的 `e.socket`，以及对每个 `economic.b[i]` 取 `chong_id` 等于其 `chong` 的 `chongs[j].socket`。对每个这样的 socket 路径 `k` 取两个 socket 目录：`Q₄ = canon(parent(k))`，即 k 的目录项所在目录；`Q₅ = parent(canon(k))`，即按第 1 条解析最终链接（含悬空）后 bind 可能创建 socket 的目录。k 不是符号链接时 `Q₄ == Q₅`。两者都判，理由见 Q2 第四类。经济 manifest 读不出、缺这些字段或找不到对应 `chong_id` 时，同样在拉起前以 `InvalidDomain` 退出；E/B 的 `Config::load` 对同一文件本会确定性拒绝（`store.rs:158`、`:176`、`:286-287`），launcher 只是提前。
+   110	4. **拒绝条件**：任一 `d` 的 `Q₁`、`Q₂` 或任一 `Q₃`，或任一 socket 的 `Q₄`、`Q₅`（下记 `Q`）满足下列任一条，即 `InvalidDomain`：
+   111	   - `Q == P`；
+   112	   - `Q == A`，或 `Q` 位于 `A` 之下；
+   113	   - `Q` 等于某个 S 族条目的路径，或位于其下。
+   114	
+   115	   `d` 本身取了 P 内的 S 族名字，已被 `Q == P` 覆盖。S 侧原本也会以 `UnknownDatabaseSidecar` 确定性拒绝（`admission_provider.rs:229-243`），launcher 只是把判定提前。
+   116	5. **不比较 launcher manifest `state_dir`**。理由是它只在 S init 之前写一次（`production_session.rs:320-323`），不与 S 打开窗口并发。
+   117	6. **不比较 `s.socket`**。残留 socket 在 S 参数期就以 `TransportUnavailable` 确定性拒绝（`writer_cli.rs:357-359`），S 自己在 driver open 之后才 bind（`writer_cli.rs:725`、`:802`）。本条只管 `s.socket`；E/B 的 socket 按第 3、4 条判定。重启时谁来清理，归 #1823 调查，不在本裁定范围内。
+   118	7. **不扩大范围**：P 的祖先目录、兄弟目录，以及 P 内既非族条目、也不在 A 内的子目录，都不在 M 内，一律放行。
+   119	8. **错误信息**：stderr 必须含 `InvalidDomain`，并点名冲突的两条 manifest 字段及两侧 canon 路径。被冲突的字段按情形取：与 P 或族条目冲突时是 `s.db`，与 A 冲突时是 `s.admission_job_limits`。并发写域的字段名为 `economic.e.db`、`economic.b[<i>].db` 或 `x.db`，该侧路径给出命中的判定目录（`Q₁`、`Q₂` 或 `Q₃`）。socket 冲突时，并发写域一侧点名经济 manifest 的具体字段 `e.socket` 或 `chongs[<j>].socket`，该侧路径给出命中的 `Q₄` 或 `Q₅`。
+   120	9. owner 落点：`load_manifest`（`rust/src/bin/production_session.rs:125`）。检查（含第 3 条读经济 manifest）位于其返回 `Ok` 之前，只读不写，因而早于 `check_existing_s`（`:300-302`）、任何 init、写 launcher `state_dir` 以及任何拉起。命中时不建任何域文件。
+   121	10. **不设可调字段，不设放行开关**。依据是 ADR 0041:13 的判别句和 #799。launcher 判定和 S admission 核验判的是两件事：前者是静态布局，后者是打开窗口内的 stamp。两者不在同一个 if-else 上，也不互相兜底。
+   122	11. **L-2 记录**：immutable 预检最多误拒、不会误放；改由 S 自核需要改 S v3 writer CLI，另行开票。本裁定不改实现。
+   123	12. **runbook**：`docs/runbook_production_session.md` 写明 M 的三部分和第 4 条拒绝规则；:40、:59 改写为「admission state 目录 A（owner 原件 `state_dir`）」；:53 标注「launcher 自身 `state_dir`」；给出 `/abs/s/s.db`、`/abs/s-state/`、`/abs/e/`、`/abs/b/`、`/abs/x/` 的分目录示例。
+
+== b9d898dccf46c2a716115eaa1215bc39c458a959:docs/adr/0041-degrees-of-freedom-configurable-not-excluded.md [9,27p;39,48p] ==
+     9	**一、适用范围。** 本通则只管**自由度**：正本标为 `[新缠论:选择]`、或属参数类且缠师原文无定论的量——构造选择、参数、档位、起点、阈值、场所 profile 等。缠师原文语义（`[旧缠论]`）与已裁教义推论（`[新缠论:推论]`）不是自由度，不变为可调：那是事实，不是偏好。一条量归哪类，以它所在正本的溯源标签为准；标签缺失时先补标签，再谈可调。
+    10	
+    11	**二、与 [#799](https://github.com/xy7365527-lang/NewChanlun/issues/799) 收敛通则的关系。** 可调 ＝ 事前在版本化记录里单选一个值，运行中全程只走这一个值。#799 禁两件事：同一个判断存在宽严两档实现，以及让宽松那档接管严格那档的失败（「严格版判不出 ⟹ 换宽松版再判 ⟹ 放行」）。本通则只覆盖不同的合法取值（参数值、构造选择、档位、起点、profile），同一判断的松紧两个版本不是自由度，事前单选也不得落为可调字段。在这个范围内两者不冲突。
+    12	
+    13	> **判别句**：先问候选是不是同一判断的两套松紧判据（两档实现；同一判据取不同参数值不算）——是 ⟹ #799 管辖，不是自由度，不得做成可调字段（哪怕事前单选）。不是 ⟹ 再看选值：发生在运行之前、写在版本化记录里、一次运行只读到一个值 ⟹ 合法的可调字段；运行中按前一个值的判定结果改走另一个值（同一 if-else 上的失败兜底）⟹ #799 违规，与是否「可配置」无关。
+    14	
+    15	推论：可调字段不得有「主值失败时的备用值」；要换值只能改签新版本、从头重推导。
+    16	
+    17	**三、落法。** 每个自由度落为：
+    18	
+    19	1. **版本化记录字段**——放进该量所属的具名版本化记录（签署记录、policy 记录或场所 profile），不另建配置面；
+    20	2. **默认值**——每个字段必须有默认值，附推导依据（原文锚、ADR 或在案读数）；
+    21	   **签署门字段的默认值 ＝ `AwaitingPolicy`**（用户 2026-10-20 批复 B-10，见 [#1586](https://github.com/xy7365527-lang/NewChanlun/issues/1586)）。凡已裁定「签署前不给值、不得代填」的字段——资金 cap（[ADR 0029](0029-common-cap-contention-policy.md) 裁定四）、量档与逐级容量（[ADR 0034](0034-quantity-tier-policy-growth-equity-shift.md) 的 `AwaitingPolicy{tier:d}`／`AwaitingPolicy{capacity}`）、成本门 θ 与成本输入（[ADR 0035](0035-cost-stop-policy-instance-and-base-extension-evidence.md)）、闸门后参数槽位（[ADR 0036](0036-operating-statistics-sampling-and-post-gate-parameter-protocol.md) 裁定九），以及其他已裁定由用户签署的风险阈值——运行时默认值就是 `AwaitingPolicy{<字段>}`：未签署则该字段所阻的动作不跑，不回退任何备用值。数值默认值只以「推荐值＋出处」写进版本记录，按「授权来源与生效边界」节取得适用授权后生效；真实资金与账户权限仍须用户确认。这样满足本条「每个字段有默认值」，也不违上述代填禁令；`AwaitingPolicy` 是等待签署的状态，不是第二个取值，因此不构成第二条所禁的备用值。
+    22	3. **出处**——字段说明写明可选值集合、各值的来源与代价；
+    23	4. **改签即新版本**——改值 ＝ 新版本，改后按新值重推导，不在旧版本内热改。
+    24	
+    25	实现不得把自由度写成代码常数（与 [ADR 0034](0034-quantity-tier-policy-growth-equity-shift.md) 被否方案「常数表 `depth_weights`」同向）。
+    26	
+    27	**四、合法候选保留，真错仍排除。** 裁决一个自由度时，被比较下去的候选分两种处置：
+    39	## 授权来源与生效边界（#1909 / PR #1915，2026-11-07）
+    40	
+    41	用户本次明确要求「保留 DeepAgents 并去普通人工审批」，同时要求不误放真实交易、凭据权限。普通 P 类取舍、SPEC 实施授权、离线研究方法与不产生真实账户外效的参数选择，均以起草 + 非作者独审 PASS 由代理裁定；不再逐项等用户签署。PASS 必须绑定实际获审版本，不能复用正文变化后的旧 PASS。
+    42	
+    43	授权分两层，不能把文书裁定当成外部操作许可：
+    44	
+    45	- **代理裁定**：来源记为「代理独审裁定」，记录票号、作者、独审身份、获审版本、原件位置与生效域。它不是 `UserSigned`，不得填入只接受 `UserSigned` 的交易政策来源字段。普通开发/SPEC 走 #1909 合同，不以运行时资金记录能否消费为前置。
+    46	- **独立资金与权限硬门**：真实资金投入/取出/改额、账户/场所激活、真实交易的量档与容量、成本/风险阈值，以及凭据和权限授予，仍须对应用户授权。代理可裁定方法、形成推荐值和实现方案；独审 PASS 不代签具体外部操作。只接受 `UserSigned` 的现有政策消费方保持原合同；缺授权仍 `AwaitingPolicy`，缺证据仍不启用。已授权值在原版本与有效域内使用不重复索要签署，扩大域或改值才重新取得对应授权。
+    47	
+    48	ADR 0029 的 cap、0034 的资金/容量来源、0035 的交易成本阈值与 0036 的真实账户阶段启用，适用上述独立硬门；普通研发选择适用代理裁定。历史用户批复、已签实例与其 `UserSigned` 来源不回写。新增代理裁定不能冒充这些历史签名，也不自动迁移到 production。
+
+== b9d898dccf46c2a716115eaa1215bc39c458a959:docs/adr/0038-dual-run-determinism-recovery-seek-asknown.md [130,139p] ==
+   130	## 修订（#1539，恢复语义按证据类分述，2026-11-02）
+   131	
+   132	（append-only：裁定一至四与验收清单原文不改，本节为现行修订。依据 #1539 P 类裁定稿，用户 2026-11-02 批复（[批复评论](https://github.com/xy7365527-lang/NewChanlun/issues/1539#issuecomment-6564138279)）；草稿、考古与审查原件：首两轮在 `/Volumes/AgentStorage/decisions/1539/`，其后依次为 `/Volumes/AgentStorage/fu17-repair40r/`、`/Volumes/AgentStorage/fu17-review40y/`、`/Volumes/AgentStorage/fu17-repair41f/`、`/Volumes/AgentStorage/fu17-review41k/`、`/Volumes/AgentStorage/fu17-publish41p/`（获批版本）；本仓存档 `.chanlun/review-results/issue1539-decision-20261102/`。）
+   133	
+   134	**原因**：裁定二「恢复」条（:60）含两句。前句「检测上次 checkpoint、加载六面快照并重放至当前 bar」对三种证据类都成立，ADR 0051 裁定三（:274）即据此定恢复幂等。后句「杀停等同未完成 bar 的全部外效未发生，S/B/E 回退到上一 checkpoint」的前提只在 simulation 成立。experiment/production 下 checkpoint 之后可能已有真实回报和可能已发出的调用，按后句回退与 #1340 C07.6、C09.8、C09.9、AT-13 及 ADR 0030 裁定五相反。ADR 0039 把本条写进正式 launcher 启动序列（:27、:147、:289），故在本文件修订。
+   135	
+   136	1. **通用（三种证据类）。** 恢复＝从最后一个 checkpoint 加载六面快照，再按持久日志重放。幂等判据为 ADR 0051:275-276 的 (a)(b)，任一不成立报 `StorageUnavailable` 并停写。任何证据类下恢复都不删除 append-only 真相行（ADR 0051:310）。
+   137	2. **simulation。** :60 后句照旧：未完成 bar 的外效视为未发生，S/B/E 工作态回到 checkpoint 快照，由受控撮合按同一五元组重跑该 bar。重跑产出与已持久行同 `fact_key` 同内容，按 (a) 返回原 application、不新增行；不一致即报 `StorageUnavailable`。
+   138	3. **experiment / production。** 不适用 :60 后句。重放持久日志直至最后提交：checkpoint 之后已 Recorded 的 E 事实与 Pending、已 Applied 的 Bᵢ 应用、X 已持久的 OwnAttempt/MayHaveCalled 与观测记录全部保留，不回到旧状态（#1340 C09.9）。恢复后先只读对账在途订单，外部未知按最大责任保留、不伪造终态（ADR 0030:48）；MayHaveCalled 保留最大责任、不自动重发（C07.6）；X 重启或换代先确认旧发送者已退出（C09.8）。
+   139	4. **验收。** H1/H2（:80、:81、:89）判据与射程不变：照 ADR 0056:63 裁定七 (a)，三种证据类的同模式会话都在固定完整输入（输入及修订、政策/模型、时钟、种子、数值语义、故障与调度轨迹，#1340 C10.4；experiment/production 的场所侧用受控场所夹具）下验 H2，各证据类以本节第 2、3 条各自的恢复方法满足它。#1340 AT-13「回退保留所有已经发生的外效」与 C07.6 不重发是附加约束，不替代六面 H2。恢复幂等另按 ADR 0051 裁定三 (a)(b)。本修订不增删验收项。
+
+== b9d898dccf46c2a716115eaa1215bc39c458a959:rust/src/bin/production_session.rs [1,13p;90,96p;327,367p;371,448p] ==
+     1	//! #1769（ADR 0039 迁移步骤 1）：唯一生产 launcher 可运行骨架。
+     2	//!
+     3	//! 职责只有编排：校验 manifest（含结构源声明）→ 必要时 init 各域库 → 以独立进程拉起
+     4	//! S、E、每个 Bᵢ、X → 监督 → 收到 SIGTERM/SIGINT 时回收全部子进程。各域进程自持库、
+     5	//! `<db>.writer.lock` 与 `writer_epoch`；launcher 不打开任何域库，不放宽其锁/epoch/隔离。
+     6	//!
+     7	//! - 结构源违规（类别不在封闭集合、namespace 与执行能力 manifest 相交）在拉起 S 之前以
+     8	//!   `InvalidDomain` 退出，S 库文件不创建；既有 S 库由 S 持锁自核声明，失败按 critical exit 回收会话。
+     9	//! - 凭据按 X 执行 profile 的 `credential_scope` 读文件，只注入 X 子进程环境；S/E/B 子进程
+    10	//!   以清空的环境启动，launcher 自身环境不写入凭据。
+    11	//! - X 退出只记录，不停 S/E/B；S/E/B 任一退出视为会话失败，回收其余进程后非 0 退出。
+    12	//! - 日志经 `redact`（移植 `381fda3f` `trading_system/execution/hl_paper_launcher.py:46-53`
+    13	//!   `_redact`）过滤后写 stderr。
+    90	fn log(event: &str, fields: Value) {
+    91	    let mut line = json!({"event": event});
+    92	    if let (Value::Object(target), Value::Object(extra)) = (&mut line, fields) {
+    93	        target.extend(extra);
+    94	    }
+    95	    eprintln!("production_session {}", redact(&line));
+    96	}
+   327	    // ── 监督 ──
+   328	    while !STOP.load(Ordering::SeqCst) && !failed {
+   329	        for sup in children.iter_mut().filter(|c| c.status.is_none()) {
+   330	            if let Ok(Some(status)) = sup.child.try_wait() {
+   331	                sup.status = Some(status);
+   332	                log(
+   333	                    "exit",
+   334	                    json!({"domain": sup.domain, "status": status.to_string(), "critical": sup.critical}),
+   335	                );
+   336	                failed |= sup.critical;
+   337	            }
+   338	        }
+   339	        std::thread::sleep(Duration::from_millis(100));
+   340	    }
+   341	
+   342	    // ── 回收：先 SIGTERM，宽限期后 SIGKILL；全部 wait ──
+   343	    for sup in children.iter().filter(|c| c.status.is_none()) {
+   344	        // SAFETY：向本进程自己拉起、尚未回收的子进程 PID 发信号。
+   345	        unsafe {
+   346	            libc::kill(sup.child.id() as libc::pid_t, libc::SIGTERM);
+   347	        }
+   348	    }
+   349	    let deadline = Instant::now() + STOP_GRACE;
+   350	    for sup in children.iter_mut() {
+   351	        while sup.status.is_none() {
+   352	            match sup.child.try_wait() {
+   353	                Ok(Some(status)) => sup.status = Some(status),
+   354	                Ok(None) if Instant::now() < deadline => {
+   355	                    std::thread::sleep(Duration::from_millis(50))
+   356	                }
+   357	                _ => {
+   358	                    let _ = sup.child.kill();
+   359	                    sup.status = sup.child.wait().ok();
+   360	                    break;
+   361	                }
+   362	            }
+   363	        }
+   364	    }
+   365	    spawned?;
+   366	    log("stopped", json!({"failed": failed}));
+   367	    Ok(if failed { 1 } else { 0 })
+   371	fn spawn_domains(
+   372	    m: &Manifest,
+   373	    s_bin: &Path,
+   374	    e_bin: &Path,
+   375	    b_bin: &Path,
+   376	    x_bin: &Path,
+   377	    children: &mut Vec<Supervised>,
+   378	) -> Result<(), String> {
+   379	    let raw = &m.raw;
+   380	    let s_db = text(raw, "s.db")?;
+   381	    let econ = text(raw, "economic.manifest")?;
+   382	    let e_db = text(raw, "economic.e.db")?;
+   383	    let chongs = raw["economic"]["b"].as_array().cloned().unwrap_or_default();
+   384	    let mut spawn = |domain: String, mut c: Command, critical: bool| -> Result<(), String> {
+   385	        c.stdout(Stdio::null());
+   386	        let child = c
+   387	            .spawn()
+   388	            .map_err(|e| format!("MissingDependency：{domain} 启动失败：{e}"))?;
+   389	        log("spawn", json!({"domain": domain, "pid": child.id()}));
+   390	        children.push(Supervised {
+   391	            domain,
+   392	            child,
+   393	            status: None,
+   394	            critical,
+   395	        });
+   396	        Ok(())
+   397	    };
+   398	    let mut s = clean(Command::new(s_bin), &S_PASS);
+   399	    s.args(["serve", "--protocol-revision", "s-session/3"])
+   400	        .args([
+   401	            "--admission-job-limits",
+   402	            text(raw, "s.admission_job_limits")?,
+   403	        ])
+   404	        .arg("--db")
+   405	        .arg(s_db)
+   406	        .args(["--profile", text(raw, "s.profile")?])
+   407	        .args(["--writer-epoch", text(raw, "s.writer_epoch")?])
+   408	        .args(["--clock-plan", text(raw, "s.clock_plan")?])
+   409	        .args(["--socket", text(raw, "s.socket")?])
+   410	        .args(["--resource-config", text(raw, "s.resource_config")?])
+   411	        .arg("--structure-source")
+   412	        .arg(m.state_dir.join("structure-source.json"));
+   413	    spawn("S".into(), s, true)?;
+   414	    let e_epoch = text(raw, "economic.e.epoch")?;
+   415	    let mut e = clean(Command::new(e_bin), &[]);
+   416	    e.args([
+   417	        "serve",
+   418	        "--manifest",
+   419	        econ,
+   420	        "--db",
+   421	        e_db,
+   422	        "--epoch",
+   423	        e_epoch,
+   424	    ]);
+   425	    spawn("E".into(), e, true)?;
+   426	    for b in &chongs {
+   427	        let chong = text(b, "chong")?;
+   428	        let mut c = clean(Command::new(b_bin), &[]);
+   429	        c.args(["serve", "--manifest", econ, "--db", text(b, "db")?])
+   430	            .args([
+   431	                "--chong",
+   432	                chong,
+   433	                "--epoch",
+   434	                text(b, "epoch")?,
+   435	                "--e-epoch",
+   436	                e_epoch,
+   437	            ]);
+   438	        spawn(format!("B:{chong}"), c, true)?;
+   439	    }
+   440	    let mut x = clean(Command::new(x_bin), &[]);
+   441	    x.args(["serve", "--db", text(raw, "x.db")?])
+   442	        .arg("--profile")
+   443	        .arg(&m.x_profile)
+   444	        .args(["--writer-epoch", text(raw, "x.writer_epoch")?]);
+   445	    if let Some((key, value)) = &m.credential {
+   446	        x.env(key, value);
+   447	    }
+   448	    spawn("X".into(), x, false)
+
+== b9d898dccf46c2a716115eaa1215bc39c458a959:rust/src/bin/s_session_v3/writer_cli.rs [372,395p;845,856p] ==
+   372	fn socket_path(raw: &str) -> Result<PathBuf, String> {
+   373	    if raw.is_empty() {
+   374	        return Err("S3WriterArgsUnsupported：--socket 不得为空".into());
+   375	    }
+   376	    if raw.len() > SOCKET_PATH_BYTES {
+   377	        return Err(format!(
+   378	            "S3WriterArgsUnsupported：--socket 路径超过旧启动器 {SOCKET_PATH_BYTES} 字节上限"
+   379	        ));
+   380	    }
+   381	    let path = PathBuf::from(raw);
+   382	    let parent = path
+   383	        .parent()
+   384	        .filter(|p| !p.as_os_str().is_empty())
+   385	        .unwrap_or(Path::new("."));
+   386	    if !parent.is_dir() {
+   387	        return Err("TransportUnavailable：socket父目录须已存在".into());
+   388	    }
+   389	    match path.symlink_metadata() {
+   390	        Ok(_) => return Err("TransportUnavailable：socket路径已占用".into()),
+   391	        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+   392	        Err(e) => return Err(format!("TransportUnavailable：socket路径不可核验：{e}")),
+   393	    }
+   394	    Ok(path)
+   395	}
+   845	    driver.check_structure_source(options.structure_source.as_deref())?;
+   846	    driver.finish_startup()?;
+   847	    let bounds = resources.transport_bounds();
+   848	    serve_unix(
+   849	        &options.socket,
+   850	        bounds,
+   851	        |value| validate_envelope(value, PROTOCOL_REVISION),
+   852	        |envelope| {
+   853	            reply(
+   854	                envelope,
+   855	                driver.handle(envelope.clone()),
+   856	                &identity,
+
+== b9d898dccf46c2a716115eaa1215bc39c458a959:rust/src/economic_session/service.rs [753,793p;827,848p;1434,1465p;1483,1493p;1515,1539p;1584,1595p] ==
+   753	fn capture(
+   754	    c: &mut Connection,
+   755	    config: &Config,
+   756	    epoch: i64,
+   757	    e: &Value,
+   758	    ingress_response_deadline: Option<std::time::Instant>,
+   759	) -> Result<Value, String> {
+   760	    let mut record = record_from_payload(config, e)?;
+   761	    let key = required(&record, "fact_key")?.to_owned();
+   762	    let tx = immediate(c)?;
+   763	    check_epoch(&tx, epoch)?;
+   764	    audit(&tx, config)?;
+   765	    if let Some(r) = previous_message(&tx, e)? {
+   766	        return Ok(r);
+   767	    }
+   768	    if let Some(old) = row(&tx, "facts", &key)? {
+   769	        for k in [
+   770	            "fact_hash",
+   771	            "token",
+   772	            "target_domain",
+   773	            "source_event_time",
+   774	            "source_producer",
+   775	        ] {
+   776	            if old[k] != record[k] {
+   777	                return Err(format!("IdentityConflict：原事实{k}改变"));
+   778	            }
+   779	        }
+   780	        let receipt =
+   781	            row(&tx, "receipts", &key)?.ok_or("StorageUnavailable：域损坏：原事实缺回执")?;
+   782	        bind_message(&tx, e, &key)?;
+   783	        tx.commit().map_err(err)?;
+   784	        return Ok(receipt);
+   785	    }
+   786	    check_operation_deadline(None, ingress_response_deadline)?;
+   787	    crate::history_simulation::intake::verify_capture(
+   788	        &config.manifest,
+   789	        e,
+   790	        required(&record, "raw_utf8")?,
+   791	    )?;
+   792	    let token = required(&record, "token")?;
+   793	    let token_table = if config.book_rules()?.is_tb03c() {
+   827	    image["history"].as_array_mut().unwrap().push(json!({"kind":"CaptureExternal","fact_key":key,"commit_seq":seq.to_string(),"commit_ns":ns}));
+   828	    put(&tx, "facts", &key, &record)?;
+   829	    put(&tx, "pending", &key, &pending)?;
+   830	    let cut = append(&tx, config, seq, &prev, &ns, &image)?;
+   831	    let receipt = json!({"kind":"Recorded","domain_id":config.domain,"fact_key":key,"fact_hash":record["fact_hash"],"allocation_id":record["event"]["allocation_id"],"target_domain":record["target_domain"],"token":record["token"],"first_known_ns":first,"commit_ns":ns,"cut":cut});
+   832	    put(&tx, "receipts", &key, &receipt)?;
+   833	    bind_message(&tx, e, &key)?;
+   834	    config.pause(required(e, "message_id")?, "before_commit")?;
+   835	    check_operation_deadline(None, ingress_response_deadline)?;
+   836	    tx.commit().map_err(err)?;
+   837	    config.pause(required(e, "message_id")?, "after_commit")?;
+   838	    Ok(receipt)
+   839	}
+   840	
+   841	fn resolve_evidence(
+   842	    c: &mut Connection,
+   843	    config: &Config,
+   844	    epoch: i64,
+   845	    e: &Value,
+   846	    ingress_response_deadline: Option<std::time::Instant>,
+   847	) -> Result<Value, String> {
+   848	    use super::tb03c_e;
+  1434	                // Once admitted, the multi-owner responsibility workflow may
+  1435	                // continue after the reply times out. An already expired
+  1436	                // queued request must not start new cross-domain work.
+  1437	                check_operation_deadline(None, ingress_response_deadline)?;
+  1438	                super::finance::advance(c, config, epoch, e)
+  1439	            }
+  1440	            "PrepareDecision" | "CommitDecision" | "AbortDecision"
+  1441	                if config.domain.starts_with("B:") =>
+  1442	            {
+  1443	                super::finance::write_with_ingress(c, config, epoch, e, ingress_response_deadline)
+  1444	            }
+  1445	            "ImportResponsibility"
+  1446	            | "Reserve"
+  1447	            | "CloseApplicants"
+  1448	            | "ActivateCapPolicy"
+  1449	            | "MakeDispatchable"
+  1450	            | "ReleaseExact"
+  1451	                if config.domain == "E" =>
+  1452	            {
+  1453	                super::finance::write_with_ingress(c, config, epoch, e, ingress_response_deadline)
+  1454	            }
+  1455	            "CaptureExternal" if config.domain == "E" => {
+  1456	                capture(c, config, epoch, e, ingress_response_deadline)
+  1457	            }
+  1458	            "ResolveEvidence" if config.domain == "E" => {
+  1459	                resolve_evidence(c, config, epoch, e, ingress_response_deadline)
+  1460	            }
+  1461	            super::sr_expansion::OP if config.domain == "E" => {
+  1462	                super::sr_expansion::write(c, config, epoch, e, ingress_response_deadline)
+  1463	            }
+  1464	            "ApplyAllocation" if config.domain.starts_with("B:") => apply_allocation_with_ingress(
+  1465	                c,
+  1483	            "ReadView"
+  1484	            | "Watch"
+  1485	            | "QueryFact"
+  1486	            | "QueryAllocation"
+  1487	            | "QueryVoice"
+  1488	            | "QueryDecision"
+  1489	            | "QueryGrant"
+  1490	            | "QueryCommand"
+  1491	            | "QueryReleasedExact"
+  1492	            | super::sr_expansion::QUERY => read(c, config, epoch, runtime, &e["payload"]),
+  1493	            _ => Err("SchemaUnsupported：操作不属于本域".into()),
+  1515	pub(super) fn serve(config: &Config, epoch: i64, e_epoch: i64) -> Result<(), String> {
+  1516	    let (mut c, runtime) = open(&config.db, false)?;
+  1517	    check_epoch(&c, epoch)?;
+  1518	    audit(&c, config)?;
+  1519	    let r = &config.manifest["resources"];
+  1520	    let n = |k: &str| -> Result<usize, String> {
+  1521	        usize::try_from(positive(required(r, k)?, k)?).map_err(err)
+  1522	    };
+  1523	    let bounds = TransportBounds {
+  1524	        frame: n("max_frame_bytes")?,
+  1525	        read: Duration::from_millis(n("read_timeout_ms")? as u64),
+  1526	        write: Duration::from_millis(n("write_timeout_ms")? as u64),
+  1527	        response: Duration::from_millis(n("response_timeout_ms")? as u64),
+  1528	        queue: n("queue_capacity")?,
+  1529	        connections: n("max_connections")?,
+  1530	    };
+  1531	    // 信封校验按本域登记的版本派发；未知版本在 Config::load 就已拒绝。
+  1532	    let validator: EnvelopeValidator = if config.revision()? == SCHEMA_V2 {
+  1533	        validate_v2
+  1534	    } else {
+  1535	        validate_v1
+  1536	    };
+  1537	    let mut reads = ReadTransfers::default();
+  1538	    let revision = config.revision()?;
+  1539	    serve_unix_with_deadline(&config.socket, bounds, validator, |e, deadline| {
+  1584	    let _lock = process_lock(&config.db, &config.domain)?;
+  1585	    match command.as_str() {
+  1586	        "init" => println!("{}", canonical_json(&init(&config)?)),
+  1587	        "recover" => println!("{}", canonical_json(&recover(&config)?)),
+  1588	        "serve" => {
+  1589	            let epoch = positive(get("--epoch")?, "epoch")?;
+  1590	            let e_epoch = if is_b {
+  1591	                positive(get("--e-epoch")?, "e_epoch")?
+  1592	            } else {
+  1593	                epoch
+  1594	            };
+  1595	            serve(&config, epoch, e_epoch)?;
+
+== b9d898dccf46c2a716115eaa1215bc39c458a959:rust/src/economic_session/store.rs [292,307p;794,812p;990,1004p] ==
+   292	            ("E".to_owned(), es)
+   293	        };
+   294	        let expected = absolute(required(route, "db")?)?;
+   295	        if canonical_target(db)? != canonical_target(&expected)? {
+   296	            return Err("IdentityConflict：命令数据库不是manifest域路径".into());
+   297	        }
+   298	        let socket = absolute(required(route, "socket")?)?;
+   299	        Ok(Self {
+   300	            manifest_hash: hash(&manifest),
+   301	            manifest,
+   302	            db: expected,
+   303	            producer: format!("{domain}:{session}"),
+   304	            domain,
+   305	            session,
+   306	            generation,
+   307	            socket,
+   794	    if revision == SCHEMA_V2 {
+   795	        tx.execute_batch(CONTENT_SQL).map_err(err)?;
+   796	    }
+   797	    for (k, v) in [
+   798	        ("schema_revision", revision),
+   799	        ("domain_id", config.domain.as_str()),
+   800	        ("session_id", config.session.as_str()),
+   801	        ("session_generation", config.generation.as_str()),
+   802	        ("manifest_hash", config.manifest_hash.as_str()),
+   803	        ("writer_epoch", "1"),
+   804	    ] {
+   805	        set_meta(&tx, k, v)?;
+   806	    }
+   807	    if revision == SCHEMA_V2 {
+   808	        // §5.2 内容格式登记只由 init 显式绑定；recover 不暗迁移。
+   809	        tx.execute(
+   810	            "INSERT INTO content_meta VALUES(1,?)",
+   811	            params![crate::s_content::CONTENT_FORMAT],
+   812	        )
+   990	    if extra != 0 {
+   991	        return Err("StorageUnavailable：域损坏：非预期触发器/视图".into());
+   992	    }
+   993	    for (k, v) in [
+   994	        ("schema_revision", revision),
+   995	        ("domain_id", config.domain.as_str()),
+   996	        ("session_id", config.session.as_str()),
+   997	        ("session_generation", config.generation.as_str()),
+   998	        ("manifest_hash", config.manifest_hash.as_str()),
+   999	    ] {
+  1000	        let actual: String = budget.one(c, "SELECT v FROM meta WHERE k=?", [k], |r| r.get(0))?;
+  1001	        if actual != v {
+  1002	            return Err(format!("IdentityConflict：持久{k}未绑定当前配置"));
+  1003	        }
+  1004	    }
+
+== b9d898dccf46c2a716115eaa1215bc39c458a959:rust/src/session_transport.rs [641,655p] ==
+   641	fn serve_unix_inner<T: QueuedJob + 'static>(
+   642	    socket: &Path,
+   643	    bounds: TransportBounds,
+   644	    validate: EnvelopeValidator,
+   645	    make_job: fn(Value, mpsc::SyncSender<Value>, Instant) -> T,
+   646	    mut handler: impl FnMut(&T) -> Value,
+   647	) -> Result<(), String> {
+   648	    // 不擅自unlink既有socket：SIGKILL残留由监督器核路径/PID后清理。
+   649	    let listener = UnixListener::bind(socket)
+   650	        .map_err(|e| format!("TransportUnavailable：socket绑定失败 {e}"))?;
+   651	    let (tx, rx) = mpsc::sync_channel::<T>(bounds.queue);
+   652	    let count = Arc::new(AtomicUsize::new(0));
+   653	    let accept_bounds = bounds.clone();
+   654	    std::thread::spawn(move || {
+   655	        for incoming in listener.incoming() {
+
+== b9d898dccf46c2a716115eaa1215bc39c458a959:rust/src/bin/x_execution_session.rs [73,95p;201,234p] ==
+    73	        let history_simulation = match v.get("history_simulation") {
+    74	            None | Some(Value::Null) => None,
+    75	            Some(value) => {
+    76	                if mode != "simulation" {
+    77	                    return Err(
+    78	                        "InvalidDomain：history_simulation 仅允许 simulation profile".into(),
+    79	                    );
+    80	                }
+    81	                let profile: newchan_rust::history_simulation::runtime::Profile =
+    82	                    serde_json::from_value(value.clone())
+    83	                        .map_err(|e| format!("InvalidDomain：模拟 profile：{e}"))?;
+    84	                profile.validate()?;
+    85	                Some(profile)
+    86	            }
+    87	        };
+    88	        Ok(Self {
+    89	            history_simulation,
+    90	            revision,
+    91	            mode,
+    92	            endpoint: opt("endpoint")?,
+    93	            credential_env,
+    94	            tb09_fingerprint: opt("tb09_fingerprint")?,
+    95	        })
+   201	    match command.as_str() {
+   202	        "serve" => {
+   203	            let profile = Profile::load(Path::new(get("--profile")?))?;
+   204	            let epoch = positive(get("--writer-epoch")?, "writer_epoch")?;
+   205	            let _lock = process_lock(db, "X")?;
+   206	            let (mut conn, storage) = newchan_rust::economic_session::open_durable_db(db)?;
+   207	            eprintln!("x_execution_session storage {storage}");
+   208	            let state = persist(&mut conn, &profile, epoch)?;
+   209	            if let Some(simulation) = &profile.history_simulation {
+   210	                return newchan_rust::history_simulation::runtime::serve(
+   211	                    &mut conn, simulation, epoch,
+   212	                );
+   213	            }
+   214	            drop(conn);
+   215	            // 凭据门在任何传输构造之前：缺即 MissingDependency 非 0 退出，端点从未被连接。
+   216	            if profile.needs_credential()
+   217	                && std::env::var_os(&profile.credential_env).is_none_or(|v| v.is_empty())
+   218	            {
+   219	                return Err(format!(
+   220	                    "MissingDependency：{} profile 缺凭据（credential_scope.env={}）；发送面未启动",
+   221	                    profile.mode, profile.credential_env
+   222	                ));
+   223	            }
+   224	            // 骨架：场所传输待后续叶落地（ADR 0039 迁移步骤 2+）；此处不连接 endpoint。
+   225	            let _ = &profile.endpoint;
+   226	            eprintln!(
+   227	                "x_execution_session serving（发送面 {}）",
+   228	                state["send_state"].as_str().unwrap_or_default()
+   229	            );
+   230	            println!("{state}");
+   231	            loop {
+   232	                std::thread::sleep(Duration::from_millis(200));
+   233	            }
+   234	        }
+
+== b9d898dccf46c2a716115eaa1215bc39c458a959:rust/src/history_simulation/runtime.rs [42,51p;866,897p] ==
+    42	pub struct Profile {
+    43	    pub model: Model,
+    44	    pub session_id: String,
+    45	    pub session_generation: String,
+    46	    pub x_id: String,
+    47	    pub source_namespace: String,
+    48	    pub source_epoch: String,
+    49	    pub socket: String,
+    50	    pub e: Authority,
+    51	    pub s: Authority,
+   866	pub fn serve(c: &mut Connection, p: &Profile, epoch: i64) -> Result<(), String> {
+   867	    let tx = c.transaction().map_err(error)?;
+   868	    initialize_in_transaction(&tx, p, epoch)?;
+   869	    #[cfg(test)]
+   870	    if std::env::var("ISSUE1381_TEST_INIT_INTERRUPT")
+   871	        .ok()
+   872	        .as_deref()
+   873	        == Some("before")
+   874	    {
+   875	        std::process::exit(44);
+   876	    }
+   877	    tx.commit().map_err(error)?;
+   878	    #[cfg(test)]
+   879	    if std::env::var("ISSUE1381_TEST_INIT_INTERRUPT")
+   880	        .ok()
+   881	        .as_deref()
+   882	        == Some("after")
+   883	    {
+   884	        std::process::exit(45);
+   885	    }
+   886	    let timeout = Duration::from_millis(p.timeout_ms);
+   887	    serve_unix(
+   888	        Path::new(&p.socket),
+   889	        TransportBounds {
+   890	            frame: p.max_frame_bytes,
+   891	            read: timeout,
+   892	            write: timeout,
+   893	            response: timeout.saturating_mul(4),
+   894	            queue: 16,
+   895	            connections: 16,
+   896	        },
+   897	        validate_frame,
+
+== b9d898dccf46c2a716115eaa1215bc39c458a959:rust/tests/production_session_entry.rs [1,9p;892,913p] ==
+     1	//! #1769（ADR 0039 迁移步骤 1，C-L 验收第 3 项）：唯一生产 launcher 与 X 骨架的入口测试。
+     2	//!
+     3	//! 只在 Linux（nc-remote、CI ubuntu）运行：读 `/proc/<pid>/{environ,stat}`。凭据只用非敏感
+     4	//! 哨兵；不连接任何真实场所（端点指向测试内本地监听器）。S 的 admission 锚用与
+     5	//! `s_session/tests/issue1527_recovery/test_support.rs` 同口径的 TestOnly 造锚（生产签发归 #1657）。
+     6	//!
+     7	//! 两种构建都跑本文件，原八项在两种构建下都只走 S 正式配置路径（已签 synthetic profile，#1774）；
+     8	//! 纯 `production_session`（生产构建）另真实执行生产 launcher 与生产 S 遇 TestOnly 开关即拒的接线。
+     9	#![cfg(target_os = "linux")]
+   892	fn s_ingest(socket: &Path, ns: &str, n: u32) -> Value {
+   893	    let raw = json!({"schema_revision":"s-ohlc/1","session_id":SESSION,"source_namespace":ns,"source_epoch":"1",
+   894	        "instrument":"TEST.OHLC","profile":"ohlc_integer_tb02a_v1",
+   895	        "events":[{"event_id":format!("bar-{n}"),"revision":"1","seq":(n * 10).to_string(),"received_at":"2026-09-18T00:00:00Z",
+   896	            "raw_text":"3/12","open":"6","high":"12","low":"3","close":"7","timestamp":(n * 10).to_string(),"volume":"1"}]});
+   897	    let payload = json!({"op":"ingest","target_session_id":SESSION,"target_session_generation":"1","writer_epoch":"1",
+   898	        "clock_event_id":format!("input-{n}"),"raw_input":raw});
+   899	    let envelope = json!({"schema_revision":"s-session/3","session_id":SESSION,"session_generation":"1",
+   900	        "source_namespace":ns,"source_epoch":"1","message_id":format!("message-{n}"),"producer_id":"pse-test",
+   901	        "producer_epoch":"1","payload_hash":sha256_hex(newchan_rust::session_protocol::canonical_json(&payload).as_bytes()),
+   902	        "causal_refs":[],"payload":payload});
+   903	    let mut stream = UnixStream::connect(socket).unwrap();
+   904	    stream
+   905	        .write_all(
+   906	            format!(
+   907	                "{}\n",
+   908	                newchan_rust::session_protocol::canonical_json(&envelope)
+   909	            )
+   910	            .as_bytes(),
+   911	        )
+   912	        .unwrap();
+   913	    stream.shutdown(std::net::Shutdown::Write).unwrap();
+
+== b9d898dccf46c2a716115eaa1215bc39c458a959:.github/workflows/ci.yml [810,841p] ==
+   810	  # #1769（ADR 0039 迁移步骤 1，C-L 验收第 4 项）：唯一生产 launcher 与 X 骨架入口测试。
+   811	  rust-test-production-session:
+   812	    needs: changes
+   813	    if: needs.changes.outputs.rust == 'true'
+   814	    runs-on: ${{ (vars.CI_BOAT_RUNNERS != 'off' && github.actor == 'xy7365527-lang' && github.triggering_actor == 'xy7365527-lang' && (github.event_name != 'pull_request' || github.event.pull_request.user.login == 'xy7365527-lang')) && 'boat-large/from=hc-ci-slim' || 'ubuntu-latest' }}
+   815	    timeout-minutes: 45
+   816	    env:
+   817	      CARGO_INCREMENTAL: "0"
+   818	    defaults:
+   819	      run:
+   820	        working-directory: rust
+   821	
+   822	    steps:
+   823	      - *rust-checkout
+   824	
+   825	      - uses: ./.github/actions/rust-job-setup
+   826	        id: setup
+   827	
+   828	      # production_session_testonly：入口测试显式走 S 的 TestOnly 诊断 theta 臂（P0 未签期间正式配置必拒，
+   829	      #   由 unsigned_p0_refuses_s_serve_* 两条测试锁住）；生产构建不含该臂，遇开关即拒绝启动。
+   830	      - name: cargo test — production_session_entry
+   831	        if: ${{ !cancelled() && steps.setup.outcome == 'success' }}
+   832	        run: ../.github/scripts/run-cargo-with-telemetry.sh cargo test --release --locked --features production_session_testonly --test production_session_entry --jobs "${CI_CARGO_JOBS:-1}" -- --test-threads 1
+   833	
+   834	      # 纯生产构建（只开 production_session，#1769 返修 M-3/M-4）：编译生产 launcher、X 骨架与 S bin 的生产 cfg
+   835	      #   （含 S_PASS 不转交 TestOnly 开关的分支），并真实执行拒绝类子集：P0 未签拒启两条、生产 S 遇
+   836	      #   S_THETA_DIAGNOSTIC_TESTONLY=1 即拒启、生产 launcher 不转交该开关。需 S 开门的测试在此构建由 cfg 排除。
+   837	      #   #1381：history_simulation_entry 用 python3 受控 E/S authority 驱动真实 x_execution_session 进程
+   838	      #   （入口、重启、S 唯一授权、epoch2 拒绝、首次初始化原子），文件 cfg 为 production_session，同在纯生产构建执行。
+   839	      - name: cargo test — production_session_entry / history_simulation_entry（纯生产构建）
+   840	        if: ${{ !cancelled() && steps.setup.outcome == 'success' }}
+   841	        run: ../.github/scripts/run-cargo-with-telemetry.sh cargo test --release --locked --features production_session --test production_session_entry --test history_simulation_entry --jobs "${CI_CARGO_JOBS:-1}" -- --test-threads 1
+
+== b7b79657:rust/src/bin/production_session.rs [346,389p] ==
+   346	    // ── 回收：S/E/B 先结束域服务和关库；失约则 SIGKILL 并报告失败。
+   347	    // X 尚非结构/账簿 owner，维持原回收口径（早已退出亦不影响 S/E/B）。
+   348	    for sup in children.iter_mut().filter(|c| c.status.is_none()) {
+   349	        if let Some(mut stop) = sup.child.stdin.take() {
+   350	            if let Err(e) = stop.write_all(&[SUPERVISED_STOP_BYTE]) {
+   351	                failed = true;
+   352	                log(
+   353	                    "stop-request-failed",
+   354	                    json!({"domain":sup.domain, "error":e.to_string()}),
+   355	                );
+   356	            }
+   357	        } else {
+   358	            // SAFETY：只通知自己拉起、尚未回收的子进程。
+   359	            unsafe { libc::kill(sup.child.id() as libc::pid_t, libc::SIGTERM) };
+   360	        }
+   361	    }
+   362	    let deadline = Instant::now() + STOP_GRACE;
+   363	    for sup in children.iter_mut().filter(|c| c.status.is_none()) {
+   364	        while sup.status.is_none() {
+   365	            match sup.child.try_wait() {
+   366	                Ok(Some(status)) => sup.status = Some(status),
+   367	                Ok(None) if Instant::now() < deadline => {
+   368	                    std::thread::sleep(Duration::from_millis(50))
+   369	                }
+   370	                _ => {
+   371	                    let _ = sup.child.kill();
+   372	                    sup.status = sup.child.wait().ok();
+   373	                    break;
+   374	                }
+   375	            }
+   376	        }
+   377	        let clean_stop = sup.status.as_ref().is_some_and(ExitStatus::success);
+   378	        failed |= sup.critical && !clean_stop;
+   379	        log(
+   380	            "domain-stopped",
+   381	            json!({"domain":sup.domain,"status":sup.status.as_ref().map(ToString::to_string),"writer_closed":sup.critical && clean_stop}),
+   382	        );
+   383	    }
+   384	    spawned?;
+   385	    // 成功仅指停止域进程；socket 名字空间未交接，不承诺原样重启。
+   386	    log(
+   387	        "stopped",
+   388	        json!({"failed": failed, "socket_handoff": "not_performed"}),
+   389	    );
+
+== b7b79657:rust/src/session_transport.rs [710,728p] ==
+   710	    // 只有 launcher 传来的私有管道允许有序关停。EOF（包括 launcher 崩溃）
+   711	    // 不是关停请求；普通独立 serve 的启动与残留路径行为不变。
+   712	    let supervised = shutdown == ShutdownMode::SupervisedStdin;
+   713	    let listener = UnixListener::bind(socket)
+   714	        .map_err(|e| format!("TransportUnavailable：socket绑定失败 {e}"))?;
+   715	    if supervised {
+   716	        listener.set_nonblocking(true).map_err(err)?;
+   717	    }
+   718	    let stopping = Arc::new(AtomicBool::new(false));
+   719	    if supervised {
+   720	        let stopping = stopping.clone();
+   721	        std::thread::spawn(move || {
+   722	            let mut byte = [0];
+   723	            if std::io::Read::read_exact(&mut std::io::stdin().lock(), &mut byte).is_ok()
+   724	                && byte == [SUPERVISED_STOP_BYTE]
+   725	            {
+   726	                stopping.store(true, Ordering::Release);
+   727	            }
+   728	        });
+
+== b7b79657:rust/tests/production_session_entry.rs [934,1001p] ==
+   934	fn orderly_stop_closes_same_s_db_without_claiming_socket_handoff() {
+   935	    let space = Space::new();
+   936	    let (manifest, s_db) = simulation(&space, "simulation", false);
+   937	    let mut launcher = spawn_launcher(&manifest);
+   938	    wait_simulation_sockets(&space);
+   939	    let id = std::fs::metadata(&s_db).unwrap().ino();
+   940	    let paths = ["s.sock", "e.sock", "b.sock"].map(|name| space.path(name));
+   941	    let socket_ids = paths
+   942	        .each_ref()
+   943	        .map(|path| std::fs::symlink_metadata(path).unwrap().ino());
+   944	
+   945	    let first = s_ingest(&paths[0], DECLARED_NS, 1);
+   946	    assert_eq!(first["payload"]["kind"], "Committed", "{first}");
+   947	    assert_eq!(first["payload"]["publication"]["structure_cut"], "cut-1");
+   948	    assert!(s_db.with_extension("db-shm").exists());
+   949	    assert!(
+   950	        std::fs::metadata(s_db.with_extension("db-wal"))
+   951	            .unwrap()
+   952	            .len()
+   953	            > 0
+   954	    );
+   955	
+   956	    let status = stop(&mut launcher);
+   957	    let events = stopped_events(&mut launcher);
+   958	    assert!(status.success(), "{events:?}");
+   959	    for domain in ["S", "E", "B:one"] {
+   960	        assert!(
+   961	            events.iter().any(|event| event["event"] == "domain-stopped"
+   962	                && event["domain"] == domain
+   963	                && event["writer_closed"] == true),
+   964	            "{events:?}"
+   965	        );
+   966	    }
+   967	    assert!(
+   968	        events.iter().any(|event| event["event"] == "stopped"
+   969	            && event["failed"] == false
+   970	            && event["socket_handoff"] == "not_performed"),
+   971	        "{events:?}"
+   972	    );
+   973	    assert_eq!(
+   974	        paths
+   975	            .each_ref()
+   976	            .map(|path| std::fs::symlink_metadata(path).unwrap().ino()),
+   977	        socket_ids
+   978	    );
+   979	    assert!(!s_db.with_extension("db-shm").exists());
+   980	    assert!(!s_db.with_extension("db-wal").exists());
+   981	    assert_eq!(std::fs::metadata(&s_db).unwrap().ino(), id);
+   982	    // 只读验证关库后原切仍可取；S3 公共快照是另一 Q3 服务入口。
+   983	    let cut = meta(&s_db, "SELECT value FROM meta WHERE key='structure_cut'").unwrap();
+   984	    assert_eq!(cut, "cut-1");
+   985	
+   986	    // 保留既有配置、临时媒体与 socket；不能把能关闭库算成整套实地重启。
+   987	    let restarted = run_refusal(
+   988	        Command::new(launcher_bin())
+   989	            .arg("--manifest")
+   990	            .arg(&manifest),
+   991	    );
+   992	    assert_eq!(restarted.status.code(), Some(1));
+   993	    let err = String::from_utf8_lossy(&restarted.stderr);
+   994	    assert!(err.contains("socket路径已占用"), "{err}");
+   995	    assert_eq!(
+   996	        paths
+   997	            .each_ref()
+   998	            .map(|path| std::fs::symlink_metadata(path).unwrap().ino()),
+   999	        socket_ids
+  1000	    );
+  1001	    println!("原 S 主库 inode={id}，只读核验 {cut}；原 manifest 再启动按 socket 门拒绝");
+
+== 329be34f:rust/src/bin/production_session.rs [265,341p;351,372p;572,590p] ==
+   265	    if plan.as_object().map(|object| object.len()) != Some(2)
+   266	        || plan["schema_revision"] != "launcher-economic-recovery/1"
+   267	    {
+   268	        return Err("InvalidDomain：经济恢复计划版本或字段未知".into());
+   269	    }
+   270	    let requests = plan["requests"]
+   271	        .as_object()
+   272	        .ok_or("InvalidDomain：恢复请求必须按域具名")?;
+   273	    let econ = text(manifest, "economic.manifest")?;
+   274	    let chongs = manifest["economic"]["b"]
+   275	        .as_array()
+   276	        .map(Vec::as_slice)
+   277	        .unwrap_or(&[]);
+   278	    let mut members = vec![(
+   279	        "E".to_owned(),
+   280	        e_bin,
+   281	        text(manifest, "economic.e.db")?,
+   282	        None,
+   283	    )];
+   284	    for b in chongs {
+   285	        let chong = text(b, "chong")?;
+   286	        members.push((format!("B:{chong}"), b_bin, text(b, "db")?, Some(chong)));
+   287	    }
+   288	    let domain_set: BTreeSet<_> = members
+   289	        .iter()
+   290	        .map(|(name, _, _, _)| name.as_str())
+   291	        .collect();
+   292	    if domain_set.len() != members.len()
+   293	        || domain_set != requests.keys().map(String::as_str).collect()
+   294	    {
+   295	        return Err("InvalidDomain：经济恢复计划必须与 launcher 的 E/B 域一一对应".into());
+   296	    }
+   297	    let paths = members
+   298	        .iter()
+   299	        .map(|(name, _, _, _)| {
+   300	            requests[name]
+   301	                .as_str()
+   302	                .filter(|path| !path.is_empty())
+   303	                .ok_or_else(|| format!("InvalidDomain：缺 {name} 的具名恢复请求文件"))
+   304	        })
+   305	        .collect::<Result<Vec<_>, _>>()?;
+   306	    let mut epochs = BTreeMap::new();
+   307	    for ((name, bin, db, chong), request) in members.into_iter().zip(paths) {
+   308	        let mut cmd = clean(Command::new(bin), &[]);
+   309	        cmd.args([
+   310	            "current-recovery",
+   311	            "--manifest",
+   312	            econ,
+   313	            "--db",
+   314	            db,
+   315	            "--recovery-request",
+   316	            request,
+   317	        ]);
+   318	        if let Some(chong) = chong {
+   319	            cmd.args(["--chong", chong]);
+   320	        }
+   321	        let output = cmd
+   322	            .output()
+   323	            .map_err(|e| format!("MissingDependency：{name} 恢复核验启动失败：{e}"))?;
+   324	        if !output.status.success() {
+   325	            return Err(format!(
+   326	                "{name} 恢复核验拒绝（{}）：{}",
+   327	                output.status,
+   328	                String::from_utf8_lossy(&output.stderr).trim()
+   329	            ));
+   330	        }
+   331	        let receipt = strict_json(&output.stdout)?;
+   332	        if receipt["kind"] != "NamedRecoveryReceipt" || receipt["request"]["domain_id"] != name {
+   333	            return Err(format!(
+   334	                "IdentityConflict：{name} 回执并非该域已核的具名恢复"
+   335	            ));
+   336	        }
+   337	        let epoch = text(&receipt, "writer_epoch")?;
+   338	        positive(epoch, "writer_epoch")?;
+   339	        epochs.insert(name, epoch.to_owned());
+   340	    }
+   341	    Ok(epochs)
+   351	fn run() -> Result<i32, String> {
+   352	    let args: Vec<String> = std::env::args().skip(1).collect();
+   353	    let (manifest_path, recovery_plan) = match args.as_slice() {
+   354	        [flag, path] if flag == "--manifest" => (PathBuf::from(path), None),
+   355	        [flag, path, recovery_flag, recovery] if flag == "--manifest" && recovery_flag == "--economic-recovery-plan" => {
+   356	            (PathBuf::from(path), Some(Path::new(recovery)))
+   357	        }
+   358	        _ => return Err("InvalidDomain：usage: production_session --manifest FILE [--economic-recovery-plan FILE]".into()),
+   359	    };
+   360	    let m = load_manifest(&manifest_path)?;
+   361	    let raw = &m.raw;
+   362	    let s_db = PathBuf::from(text(raw, "s.db")?);
+   363	    let (s_bin, e_bin, b_bin, x_bin) = (
+   364	        sibling("s_structure_session")?,
+   365	        sibling("e_economic_session")?,
+   366	        sibling("b_chong_session")?,
+   367	        sibling("x_execution_session")?,
+   368	    );
+   369	    // 在 init/启动前收齐当前回执。未显式选入时不改变旧启动参数。
+   370	    let recovery_epochs = recovery_plan
+   371	        .map(|path| economic_recovery_epochs(path, raw, &e_bin, &b_bin))
+   372	        .transpose()?;
+   572	        let chong = text(b, "chong")?;
+   573	        let domain = format!("B:{chong}");
+   574	        let b_epoch = match recovery_epochs {
+   575	            Some(epochs) => epochs
+   576	                .get(&domain)
+   577	                .ok_or("MissingDependency：缺已核 B 恢复代")?
+   578	                .as_str(),
+   579	            None => text(b, "epoch")?,
+   580	        };
+   581	        let mut c = clean(Command::new(b_bin), &[]);
+   582	        c.args(["serve", "--manifest", econ, "--db", text(b, "db")?])
+   583	            .args(["--chong", chong, "--epoch", b_epoch, "--e-epoch", e_epoch]);
+   584	        spawn(domain, c, true)?;
+   585	    }
+   586	    let mut x = clean(Command::new(x_bin), &[]);
+   587	    x.args(["serve", "--db", text(raw, "x.db")?])
+   588	        .arg("--profile")
+   589	        .arg(&m.x_profile)
+   590	        .args(["--writer-epoch", text(raw, "x.writer_epoch")?]);
+
+== 329be34f:rust/src/economic_session/recovery.rs [111,154p] ==
+   111	/// 调用方持有与 init/serve/recover 相同的域锁；核对和换代在同一事务。
+   112	pub(super) fn run(config: &Config, request: &Request, action: Action) -> Result<Value, String> {
+   113	    if !config.db.is_file() {
+   114	        return Err("StorageUnavailable：具名恢复要求已存在的域库".into());
+   115	    }
+   116	    let mut c = if action == Action::Recover {
+   117	        recovery_writer(config)?.0
+   118	    } else {
+   119	        open(&config.db, true)?.0
+   120	    };
+   121	    let tx = if action == Action::Recover {
+   122	        immediate(&mut c)?
+   123	    } else {
+   124	        c.transaction().map_err(err)?
+   125	    };
+   126	    audit(&tx, config)?;
+   127	    let epoch = recovery_epoch(&tx)?;
+   128	    if let Some((next, original)) = request.find(&tx, config)? {
+   129	        return if action == Action::VerifyCurrent && next != epoch {
+   130	            Err("StaleWriter：原恢复收据不能授权当前写者".into())
+   131	        } else {
+   132	            Ok(original)
+   133	        };
+   134	    }
+   135	    if action != Action::Recover {
+   136	        return Err("MissingDependency：具名恢复收据不存在".into());
+   137	    }
+   138	    if epoch != request.from {
+   139	        return Err("StaleWriter：具名恢复前代与当前持久代不符".into());
+   140	    }
+   141	    let (seq, h, _, _) = latest(&tx)?;
+   142	    if request.document["cut"] != cut(config, seq, &h) {
+   143	        return Err("IdentityConflict：恢复请求必须绑定当前持久 cut".into());
+   144	    }
+   145	    let (next, ns, _) = advance_recovery(&tx, config, epoch)?;
+   146	    let original = request.receipt(next, &ns);
+   147	    // 借用已存在的 meta 名字空间，不改变旧库 DDL，不把恢复收据混作业务消息。
+   148	    tx.execute(
+   149	        "INSERT INTO meta(k,v)VALUES(?,?)",
+   150	        params![request.key, canonical_json(&original)],
+   151	    )
+   152	    .map_err(err)?;
+   153	    tx.commit().map_err(err)?;
+   154	    Ok(original)
+
+== 329be34f:rust/src/economic_session/service.rs [1614,1633p] ==
+  1614	    if let Some(action) = named_recovery {
+  1615	        let request =
+  1616	            super::recovery::Request::load(Path::new(get("--recovery-request")?), &config)?;
+  1617	        let _lock = process_lock(&config.db, &config.domain)?;
+  1618	        println!(
+  1619	            "{}",
+  1620	            canonical_json(&super::recovery::run(&config, &request, action)?)
+  1621	        );
+  1622	        return Ok(());
+  1623	    }
+  1624	    let _lock = process_lock(&config.db, &config.domain)?;
+  1625	    match command.as_str() {
+  1626	        "init" => println!("{}", canonical_json(&init(&config)?)),
+  1627	        "recover" => println!("{}", canonical_json(&recover(&config)?)),
+  1628	        "serve" => {
+  1629	            let epoch = positive(get("--epoch")?, "epoch")?;
+  1630	            let e_epoch = if is_b {
+  1631	                positive(get("--e-epoch")?, "e_epoch")?
+  1632	            } else {
+  1633	                epoch
+
+== efc1ddc4:.chanlun/review-results/issue1339-r2-spec-20260909/view/spec/SPEC.md [324,334p;338,343p;413,420p] ==
+   324	1. 首个实现采用同一宿主上的独立进程：S、E、X 和各 Bᵢ 分别拥有独立持久域；前端查询外壳为只读进程。核心判断和经营 reducer 采用 Rust，现有 Python/NT 外壳仅承担模式输入、协议与展示适配。进程间走带版本和身份的本地消息协议，消息到达不等于持久提交。无需把每个结构级别拆成进程。
+   325	2. 每个域一份独立 SQLite 数据库和 WAL，由该域单写者进行有限事务；不使用 ATTACH 跨域原子提交，不以共享连接或统一事务管理器串起 S/E/B。所有权威提交采用 WAL + synchronous=FULL，macOS 开启 fullfsync；锁/持久化/文件系统前件启动时验证，不满足则拒绝相应写入。SQLite 运行版本必须包含官方 WAL-reset 修复（3.51.3 及后续，或有明确修复证据的回移版本），并锁定实际依赖版本。官方说明 WAL 不用于网络文件系统且跨库不提供集合原子性；这些约束决定本提案的同机边界。[SQLite WAL](https://sqlite.org/wal.html)、[同步设置](https://sqlite.org/pragma.html#pragma_synchronous)。
+   326	3. 一域损坏、阻塞或重启的试验只影响该域数据库及进程；S/E/B 之间不共享应用级锁、读写事务或故障恢复闸。共享宿主、物理磁盘或系统整体故障仍可能同时影响各域，首版不承诺跨机器高可用或磁盘灾难隔离；不能把这种整体故障用作 RF-01/RF-02 应测局部故障的替代。
+   327	4. S 的长期历史使用内容寻址的不可变批次对象和版本索引；先持久写完整对象，再由同一 S 事务发布可达引用，崩溃留下的不可达对象可以回收。发布读数从短事务取得固定 cut 的不可变引用，分页不持有写事务或跨请求读事务。持久 delta 按独立保留策略存储，落后消费者收到 Gap 并从指定 cut 重建。
+   328	5. S 条件请求按本地持久接纳序 FIFO 排队；每次结构 Commit 后、下一 Begin 前，如队列非空恰核验一项，然后让下一结构输入推进。无结构输入时仍逐项有限服务；新请求不能插到既有请求前。核验只读有限本地证书与 S 数据，不做 E/RPC/场所调用；条件不成立一次最终拒绝，不等待未来行情。该配额 1 是核验调度方案，不决定财务分配和物理订单先后。
+   329	6. 每个已交付命令在 S 队列中最多一份持久就绪身份，重复交付不增加排队项或调用权。普通 busy 不拒绝，已有项在有限本地服务下推进；S 本地存储失败则准确保留交付未知和责任，恢复按原 ID 查询，不另造 Release。部署容量依据获准在途集合、证书规模和实测负载配置，核验队列和长期历史分配独立的存储预算，不能让经济订阅断线积压结构关键存储。本提案不新增发送前的跨域容量预留/租约协议，也不承诺无限过载时活性；受测有效域内的 busy、重复包和容量处理不得造成健康持续合规请求永久得不到核验。
+   330	7. S/E/B 的写事务核数据库持久 writer_epoch；事务写入与 epoch 更替同序。X 是唯一持有场所写凭据并执行网络请求的进程；其他域和旧脚本在获准部署中无该凭据。X 的适配器在 X 内部受控调用，不能委托另一个仍有直发权的异步后台；SDK 对写请求的隐式重试、后台提交及恢复重投必须逐层核实并纳入一次调用合同，未能禁用或证明其幂等能力时该 adapter 不得发送。
+   331	8. 首版 X 不自动跨主机接管。重启/换代先由部署监督器确认旧进程及发送子进程已退出，并取得持久发送身份和排他进程锁，再核原 MayHaveCalled/在途记录；无法证实旧发送者隔离时不开新发送。锁或 epoch 本身不取消已发网络请求，其责任继续保留。旧凭据副本、旧启动脚本或另一 OS 身份可绕过 X 的部署验收失败，须先撤销旧发送权或更换限定凭据，相关实际外部动作另按权限执行。
+   332	9. E 重启先恢复 Recorded/Pending、证据及源前沿、责任集合、Released 和对应 S/X 状态，不能从旧 Open 恢复。B 恢复重放原归属应用，不从场所净仓重建成本。S 恢复未完成修订时保持相应条件门关闭，自己的恢复不等待 E。
+   333	10. 不可复活命令身份、内容摘要、判定和一次调用占有记录为长期审计事实；可迁往只读分段归档但查询必须覆盖全部有效代际，归档不可读不得把历史 ID 当新 ID。回收普通流游标不回收命令去重依据。
+   334	11. 版本升级先离线验证 schema/原始事实/责任 crosswalk，发布新 writer_epoch 后旧写者不得再写。回退保留新外效和尾责；旧程序不能理解新责任格式时，只允当前受控收尾路径接管，不删除日志后恢复旧交易。
+   338	1. 提供唯一完整会话入口，载入已批准规则/政策、能力 manifest、原始输入、存储/时钟和执行 adapter，推进完整 S→操作→B→E→X→事实→B→观察。单独 π batch、ThetaPiStream 或旧 Python 递归结果仅可标注对应组件证据。
+   339	2. 历史、paper、live 共用上述核心 reducer、身份、责任、执行生命周期和观察协议；只替换真实变化的 feed、clock、matcher/venue、传输与受控持久化 adapter。模拟 fill 不能与同会话真实 fill 同时充当权威。
+   340	3. 历史使用明确的模拟能力 profile。既有 bar 限价穿越、开盘取优、GTC、限价费用口径及其适用范围继续保留；新多重并发、混合订单和分配模型无裁定时显式 ModelOrderUnspecified，不能照旧单净单实现自行外推。TestOnly 顺序可用于协议试验，但不能证明完整经营验收。
+   341	4. 双跑固定原始输入及修订、政策/模型版本、时钟、随机种子、数值语义、故障与调度轨迹，比较完整结构关系、逐重状态/毛账、责任、命令/回报/分配和 AsKnown。允许不同运行 ID 等非语义字段经过预先声明的一一重命名；禁止只比较最终净仓。
+   342	5. 每个 paper/live adapter 提供能力证据：身份与代际、取消/改单、累计完整性、幂等/查询范围、费用/更正、会话权限、挂单限制、时间语义及唯一外部事实来源。缺项准确 Unsupported；历史通过不表示场所已通过。
+   343	6. 首个真实场所、账户/产品、费率/保证金/借贷规则及允许的查询/取消/退出动作仍须明确决定。adapter 合同可先以受控模拟和已留存无敏感回报验证；需要真实外效的验收须独立授权，不因名称为 paper、post-only 或 ALO 推定不会成交。
+   413	| AT-07 | 每个 Capture/Resolve/保留/释放崩溃点、token 交错、外部缺口及局部账故障均保守留责；健康新提交实际发生 | C06；RF-01 |
+   414	| AT-08 | RA-01–14、19 CE 与完整适用条件逐项运行；两个已交付窗口按原语义记账；普通准备不能提前发送 | C07；I-01/03/04 |
+   415	| AT-09 | 并发重复同 ID 仅一个新调用赢家；MayHaveCalled 后崩溃无自动补发；旧 epoch 和绕过发送均被真实部署阻止 | C07/09；I-05 |
+   416	| AT-10 | 100/40/20 改价、未知发送、cancel/ack/fill 乱序、重复、fee/bust 和后续更正维持全部累计量与潜量 | C07；P7/FE-07 |
+   417	| AT-11 | 经济日志、RPC、查询、ack、订阅及 X 分别故障，健康 S 连续正式新产出、撤回、续接和 AsKnown | C08/09；RF-02/I-02 |
+   418	| AT-12 | 持续结构输入下既有就绪持续合规请求在有限稳定点实际核验；无行情时也服务；交易队列不饿死结构 | C09；I-06 |
+   419	| AT-13 | 持仓、未结单、尾账和转移中断恢复不丢权利、不复制资金；回退保留所有已经发生的外效 | C05/09/11；FE-08 |
+   420	| AT-14 | 相同完整输入/版本/时钟/调度双跑全状态等价；AsKnown 不回填、重算另列；seek 不偷用未来数据 | C10；Destination 4 |
+
+== 5a1ac9de:.chanlun/review-results/issue2079-endpoint-rotation/linux-fresh.log [1,9p] ==
+     1	{"stage": "published", "generation": "1", "publisher_uid": 0}
+     2	{"stage": "worker", "generation": "1", "worker_uid": 65534, "pid": 11}
+     3	{"stage": "client", "uid": 65534, "namespace_writes": "create/rename/unlink denied", "reply": "from-1"}
+     4	{"stage": "old-message-queued"}
+     5	{"stage": "old-connection-ended", "result": "ECONNRESET"}
+     6	{"stage": "published", "generation": "2", "publisher_uid": 0}
+     7	{"stage": "worker", "generation": "2", "worker_uid": 65534, "pid": 31}
+     8	{"stage": "client", "uid": 65534, "namespace_writes": "create/rename/unlink denied", "reply": "from-2"}
+     9	PASS: 原绝对路径两次重新发布，非发布者不能换名，旧积压未传到新一代。
+
+== 5a1ac9de:.chanlun/review-results/issue2079-endpoint-rotation/fresh_listener.py [4,5p;12,28p;39,61p] ==
+     4	ROOT=Path('/tmp/ipc-proof')
+     5	ADDR=str(ROOT/'domain.sock')
+    12	    record=root/'registered.json'
+    13	    if g=='2':
+    14	        old=json.loads(record.read_text()); st=os.lstat(ADDR)
+    15	        assert old==[st.st_dev,st.st_ino,st.st_uid] and st.st_uid==os.geteuid()
+    16	        os.unlink(ADDR)
+    17	    with socket.socket(socket.AF_UNIX) as listener, socket.socket(socket.AF_UNIX) as ch:
+    18	        listener.bind(ADDR); os.chmod(ADDR,0o660); listener.listen(8)
+    19	        st=os.lstat(ADDR); record.write_text(json.dumps([st.st_dev,st.st_ino,st.st_uid]))
+    20	        ctl=str(root/('control.'+g))
+    21	        ch.bind(ctl); os.chmod(ctl,0o660); ch.listen(1)
+    22	        log(stage='published',generation=g,publisher_uid=os.geteuid())
+    23	        handoff,_=ch.accept()
+    24	        with handoff:
+    25	            fds=array.array('i',[listener.fileno()])
+    26	            assert handoff.sendmsg([b'F'],[(socket.SOL_SOCKET,socket.SCM_RIGHTS,fds)])==1
+    27	            assert handoff.recv(1)==b'A'
+    28	    # 此处不删应用端点，也不留任何 listener FD。
+    39	        listener=socket.socket(fileno=ints[0])
+    40	        assert listener.getsockname()==ADDR and listener.getsockopt(socket.SOL_SOCKET,socket.SO_ACCEPTCONN)
+    41	        ch.sendall(b'A')
+    42	    with listener:
+    43	        log(stage='worker',generation=g,worker_uid=os.geteuid(),pid=os.getpid())
+    44	        assert sys.stdin.readline().strip()=='accept-one'
+    45	        c,_=listener.accept()
+    46	        with c:
+    47	            body=c.recv(64)
+    48	            assert body==b'new'
+    49	            c.sendall(('from-'+g).encode())
+    50	        if g=='1':
+    51	            assert sys.stdin.readline().strip()=='exit'
+    52	def client():
+    53	    for name,act in [('create',lambda:(ROOT/'unsanctioned').touch()),
+    54	                     ('rename',lambda:os.rename(ADDR,ROOT/'replacement')),
+    55	                     ('unlink',lambda:os.unlink(ADDR))]:
+    56	        try: act()
+    57	        except OSError as e: assert e.errno in (errno.EACCES,errno.EPERM)
+    58	        else: raise AssertionError(name+' should be denied')
+    59	    with socket.socket(socket.AF_UNIX) as c:
+    60	        c.settimeout(5);c.connect(ADDR);c.sendall(b'new')
+    61	        log(stage='client',uid=os.geteuid(),namespace_writes='create/rename/unlink denied',reply=c.recv(64).decode())
+
+== 5a1ac9de:.chanlun/review-results/issue2079-endpoint-rotation/run_fresh.py [3,11p;18,29p] ==
+     3	D=Path(__file__).resolve().parent
+     4	DOCKER=['docker','--context','orbstack']
+     5	def display(t): print(t,flush=True)
+     6	def run(*args,**kw): return sp.run([*DOCKER,*args],text=True,check=True,**kw)
+     7	cid=run('run','--rm','-d','--pull','never','--network','none','--read-only','--cap-drop','ALL','--security-opt','no-new-privileges','--tmpfs','/tmp:mode=1777','-v',f'{D}:/p:ro','python:3.11-bookworm','sleep','90',capture_output=True).stdout.strip()
+     8	def child(role,g=None,uid='65534:0'):
+     9	    argv=['exec','-i','--user',uid,cid,'python','-B','/p/fresh_listener.py',role]
+    10	    if g: argv += [g]
+    11	    return sp.Popen([*DOCKER,*argv],text=True,stdin=sp.PIPE,stdout=sp.PIPE)
+    18	try:
+    19	    for g in ['1','2']:
+    20	        a=child('acquire',g,'0:0');one(a,'published')
+    21	        w=child('worker',g);one(w,'worker');expect(a)
+    22	        send(w,'accept-one')
+    23	        c=child('client');one(c,'client');expect(c)
+    24	        if g=='1':
+    25	            q=child('queued');one(q,'old-message-queued')
+    26	            send(w,'exit');expect(w)
+    27	            one(q,'old-connection-ended');expect(q)
+    28	        else:expect(w)
+    29	    display('PASS: 原绝对路径两次重新发布，非发布者不能换名，旧积压未传到新一代。')
+
+== 5a1ac9de:.chanlun/review-results/issue2079-endpoint-rotation/darwin-fd.jsonl [1,4p] ==
+     1	{"identity": [16777232, 418464804], "os": "Darwin", "owner": 7873, "path": "/tmp/tmp9ue9qgfv/service.sock", "phase": "托管端创建实名监听器"}
+     2	{"phase": "原路径仍在，不能另行 bind"}
+     3	{"launchers": [7878, 7884], "phase": "两层新进程接回同一监听器；上一代空窗的原始请求也到了新进程", "received": "二代:queued-before-next-generation", "same_path_inode": true, "workers": [7879, 7889]}
+     4	{"phase": "最后持有者也退出则路径仍在；不承诺托管者全失后的自动接管"}
+
+== 5a1ac9de:.chanlun/review-results/issue2079-endpoint-rotation/linux-fd.jsonl [1,4p] ==
+     1	{"identity": [117, 3], "os": "Linux", "owner": 1, "path": "/tmp/tmphrb6biwi/service.sock", "phase": "托管端创建实名监听器"}
+     2	{"phase": "原路径仍在，不能另行 bind"}
+     3	{"launchers": [6, 8], "phase": "两层新进程接回同一监听器；上一代空窗的原始请求也到了新进程", "received": "二代:queued-before-next-generation", "same_path_inode": true, "workers": [7, 9]}
+     4	{"phase": "最后持有者也退出则路径仍在；不承诺托管者全失后的自动接管"}
+
+== 5a1ac9de:.chanlun/review-results/issue2079-endpoint-rotation/probe.py [15,27p;50,54p;60,80p] ==
+    15	def worker():
+    16	    with socket.socket(fileno=int(sys.argv[2])) as sock:
+    17	        assert sock.family == socket.AF_UNIX
+    18	        assert sock.getsockopt(socket.SOL_SOCKET, socket.SO_TYPE) == socket.SOCK_STREAM
+    19	        if platform.system() == 'Linux':
+    20	            assert sock.getsockopt(socket.SOL_SOCKET, socket.SO_ACCEPTCONN)
+    21	        assert sock.getsockname() == sys.argv[3]
+    22	        line(pid=os.getpid())
+    23	        conn, _ = sock.accept()
+    24	        with conn:
+    25	            conn.settimeout(5)
+    26	            data = conn.recv(64)
+    27	            conn.sendall(sys.argv[4].encode() + b":" + data)
+    50	            with socket.socket(socket.AF_UNIX) as second:
+    51	                try: second.bind(path)
+    52	                except OSError as e: assert e.errno == errno.EADDRINUSE
+    53	                else: raise AssertionError('duplicate bind')
+    54	            line(phase='原路径仍在，不能另行 bind')
+    60	            p1,w1 = spawn('一代')
+    61	            with connect(path) as c:
+    62	                c.sendall(b'one'); assert c.recv(64)=='一代:one'.encode()
+    63	            assert p1.wait(timeout=5)==0
+    64	            # 两层应用进程都已退出。独立的托管方仍持监听 FD；同一路径仍可建连排队。
+    65	            with connect(path) as queued:
+    66	                queued.sendall(b'queued-before-next-generation')
+    67	                p2,w2 = spawn('二代')
+    68	                recv=queued.recv(80)
+    69	                assert recv=='二代:queued-before-next-generation'.encode()
+    70	            assert p2.wait(timeout=5)==0 and w1!=w2 and p1.pid!=p2.pid
+    71	            assert ident==(os.lstat(path).st_dev,os.lstat(path).st_ino)
+    72	            line(phase='两层新进程接回同一监听器；上一代空窗的原始请求也到了新进程',
+    73	                 launchers=[p1.pid,p2.pid],workers=[w1,w2],same_path_inode=True,received=recv.decode())
+    74	        # 无存活监听句柄，名字仍在；生产候选不得拿这个事实擅自清理。
+    75	        assert os.path.exists(path)
+    76	        with socket.socket(socket.AF_UNIX) as s:
+    77	            try: s.bind(path)
+    78	            except OSError as e: assert e.errno==errno.EADDRINUSE
+    79	            else: raise AssertionError('name unexpectedly freed')
+    80	        line(phase='最后持有者也退出则路径仍在；不承诺托管者全失后的自动接管')
+
+== b9d898dccf46c2a716115eaa1215bc39c458a959:rust/src/bin/s_session_v3/admission_provider.rs [225,239p] ==
+   225	        if members
+   226	            .iter()
+   227	            .any(|p| p.starts_with(sidecar(&db, ".admission-private")))
+   228	        {
+   229	            return Err(consumed.failure("PrivateResidueOwnershipUnproven"));
+   230	        }
+   231	        if shm || (journal && wal_index.is_some()) {
+   232	            return Err(consumed.failure("UnsupportedWalShmJournalCombination"));
+   233	        }
+   234	        let medium = if journal {
+   235	            Medium::RollbackJournal
+   236	        } else if wal_index.is_some() {
+   237	            Medium::Wal
+   238	        } else {
+   239	            Medium::MainOnly

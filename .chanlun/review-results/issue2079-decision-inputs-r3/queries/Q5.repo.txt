@@ -1,0 +1,4 @@
+$ git grep -I -n -E '每域每代|每代换监听器|queued-before-next-generation|SCM_RIGHTS' b9d898dccf46c2a716115eaa1215bc39c458a959 -- analysis/ docs/ .chanlun/
+退出码：0
+b9d898dccf46c2a716115eaa1215bc39c458a959:.chanlun/review-results/goal1323-resume-20261017/c6a-external-anchor-implementation.md:24:固定顺序为 work、we5-case、we5-q、we7-case、we7-q。每次 tick 至多一收一发，packet 最大1024字节，只保存五请求/五应答，不做文件 I/O、hash、派生进程或无界 drain。run_id 防串线，不冒称密钥或密码学鉴权。重复键/乱序/重放/超包/附带 FD/提前 EOF/第六请求/响应断连等拒绝；收到 SCM_RIGHTS 时先关闭已接收 FD 再拒绝。
+b9d898dccf46c2a716115eaa1215bc39c458a959:.chanlun/review-results/goal1323-resume-20261017/c6a-external-anchor-review.md:36:只有 runtime 显式 pass_fds，父进程关 child 副本，driver 接管设 non-inheritable；其 E/B/Q/git 仍 close_fds=True 且无该 pass_fds。收到意外 SCM_RIGHTS 会先关收到的 FD 再拒绝。五次应答与 EOF 不齐，正常 exit 0 仍不获 PASS。

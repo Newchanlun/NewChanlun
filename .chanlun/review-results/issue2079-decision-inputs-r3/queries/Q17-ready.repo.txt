@@ -1,0 +1,2 @@
+$ git grep -I -n -E 'session_ready|逐域.*就绪|全会话.*Ready|per.domain.*ready' b9d898dccf46c2a716115eaa1215bc39c458a959 -- analysis/ docs/ .chanlun/
+退出码：1

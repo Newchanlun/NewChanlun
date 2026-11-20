@@ -1,0 +1,4 @@
+$ git grep -I -n -E 'launcher.{0,16}(崩溃|被杀|强杀)|孤儿.{0,15}(回收|FD|端点)|进程退出.*发送子进程' b9d898dccf46c2a716115eaa1215bc39c458a959 -- analysis/ docs/ .chanlun/
+退出码：0
+b9d898dccf46c2a716115eaa1215bc39c458a959:.chanlun/review-results/issue1339-r2-spec-20260909/payload/spec/review/SCOPE-SPEC-REVIEW.md:64:未运行项目程序、launcher、项目测试、Lean、UI、崩溃注入、paper、live或协议模型。未改输入/仓库、未写GitHub、未派票、未合入main、未改变服务或交易配置；只写本工位的两份评审文件。
+b9d898dccf46c2a716115eaa1215bc39c458a959:.chanlun/review-results/issue1339-r2-spec-20260909/view/spec/review/SCOPE-SPEC-REVIEW.md:66:未运行项目程序、launcher、项目测试、Lean、UI、崩溃注入、paper、live或协议模型。未改输入/仓库、未写GitHub、未派票、未合入main、未改变服务或交易配置；只写本工位的两份评审文件。

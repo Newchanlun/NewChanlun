@@ -1,0 +1,6 @@
+1376	[impl] TB-05-A 经济全故障时结构正式持续（SPEC #1340）	open
+1396	[impl] TB-05-B 分区与恢复期间的真实获知前沿（SPEC #1340）	open
+1409	[impl] TB-05-C 双边界崩溃、旧写者与不补发（SPEC #1340）	open
+1417	[impl] TB-05-D 坏重保界而健康重实际新增（SPEC #1340）	open
+1423	[impl] TB-05-E 既有持仓、订单与事实责任的非空恢复（SPEC #1340）	open
+1993	[bug] CI 偶发失败：admission_prepare_roundtrip_and_explicit_revoke_then_reissue 报 MaintenanceBusy（锁争用）	closed

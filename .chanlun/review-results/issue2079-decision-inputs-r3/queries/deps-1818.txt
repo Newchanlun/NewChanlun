@@ -1,0 +1,3 @@
+gh api repos/Newchanlun/NewChanlun/issues/1818/dependencies/blocked_by --paginate
+gh api repos/Newchanlun/NewChanlun/issues/1818/dependencies/blocking --paginate
+1781	[impl] production_session：S 库独占目录约束收口到 launcher 与 runbook（#1769 后续）	open

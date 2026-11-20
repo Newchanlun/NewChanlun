@@ -1,0 +1,4 @@
+gh api repos/Newchanlun/NewChanlun/issues/1376/dependencies/blocked_by --paginate
+1422	[impl] TB-04-E X 一次占有与实际受控调用（SPEC #1340）	open
+gh api repos/Newchanlun/NewChanlun/issues/1376/dependencies/blocking --paginate
+1396	[impl] TB-05-B 分区与恢复期间的真实获知前沿（SPEC #1340）	open

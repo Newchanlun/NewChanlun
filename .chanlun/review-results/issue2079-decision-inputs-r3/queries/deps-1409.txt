@@ -1,0 +1,4 @@
+gh api repos/Newchanlun/NewChanlun/issues/1409/dependencies/blocked_by --paginate
+1396	[impl] TB-05-B 分区与恢复期间的真实获知前沿（SPEC #1340）	open
+gh api repos/Newchanlun/NewChanlun/issues/1409/dependencies/blocking --paginate
+1417	[impl] TB-05-D 坏重保界而健康重实际新增（SPEC #1340）	open

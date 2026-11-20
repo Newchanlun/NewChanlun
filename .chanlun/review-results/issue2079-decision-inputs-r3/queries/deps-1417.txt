@@ -1,0 +1,5 @@
+gh api repos/Newchanlun/NewChanlun/issues/1417/dependencies/blocked_by --paginate
+1409	[impl] TB-05-C 双边界崩溃、旧写者与不补发（SPEC #1340）	open
+1425	[impl] TB-04-F 单一明确归属的回报应用与责任减保留（SPEC #1340）	open
+gh api repos/Newchanlun/NewChanlun/issues/1417/dependencies/blocking --paginate
+1423	[impl] TB-05-E 既有持仓、订单与事实责任的非空恢复（SPEC #1340）	open
