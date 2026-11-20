@@ -3,11 +3,10 @@
 //! 子进程由 `current_exe` 以具名 ignored 测试重入，经 `service::handle` 执行；生产语义零改动。
 //! manifest 冻结 C8 资金合同（funding-record、每重 ⟨Q, policy-record⟩、margin_leverage）；三个签署 profile 各一份计划，
 //! 终态与不中断基线、与 FUNDING-ORACLE.json 逐值对拍。范围是本地事务进程故障缝，不是正式 socket/S/浏览器。
-use super::tb03c_book_tests::Space;
 use super::tb03c_funding_tests::{chong_id, funding_record, policy_record, raw, Batch};
 use super::tb03c_kill_tests::{
-    audit_all, bound_receipt, business, compare, dump, dumps, finish, normalize_reference, parsed,
-    progress, save, without, Clock,
+    audit_all, bound_receipt, business, compare, dump, dumps, finish, kill_root_parent,
+    normalize_reference, parsed, progress, save, without, Clock, KillRoot,
 };
 use super::{book, service, store};
 use crate::session_protocol::{canonical_json, strict_json};
@@ -319,20 +318,21 @@ fn run(work: &Path, label: &str, epochs: &[i64], steps: &[Value]) -> Vec<Value> 
     assert_eq!(lines.len(), steps.len());
     lines
 }
-fn root() -> &'static PathBuf {
-    static ROOT: OnceLock<PathBuf> = OnceLock::new();
+fn root() -> &'static KillRoot {
+    static ROOT: OnceLock<KillRoot> = OnceLock::new();
     ROOT.get_or_init(|| {
         // 同一外部根下重跑或 PID 复用时也必须从空现场开始；保留旧证据，不删除共享目录。
         let run_ns = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap()
             .as_nanos();
-        let p = std::env::var_os("TB03C_KILL_ROOT")
-            .map(PathBuf::from)
-            .unwrap_or_else(std::env::temp_dir)
-            .join(format!("nc1674-v2-kill-{}-{run_ns}", std::process::id()));
-        std::fs::create_dir_all(&p).unwrap();
-        p
+        let (parent, preserve_on_pass) = kill_root_parent();
+        let dir = parent.join(format!("nc1674-v2-kill-{}-{run_ns}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        KillRoot {
+            dir,
+            preserve_on_pass,
+        }
     })
 }
 
@@ -400,8 +400,9 @@ impl Builder {
 }
 fn build(id: &'static str) -> Plan {
     let t0 = Instant::now();
-    let space = Space::new("v2-kill-plan");
-    let configs = setup(&space.0, id, None);
+    let scratch = root().scratch_dir(format!("plan-work-{}", tag(id)));
+    std::fs::create_dir_all(scratch.path()).unwrap();
+    let configs = setup(scratch.path(), id, None);
     let dbs = configs
         .iter()
         .map(|c| store::open(&c.db, false).unwrap().0)
@@ -483,7 +484,12 @@ struct Reference {
 }
 fn build_reference(plan: &Plan) -> Reference {
     let t0 = Instant::now();
-    let base = root().join(tag(plan.id)).join("reference");
+    let ref_dir = if root().preserve_on_pass {
+        root().case_dir(Path::new(tag(plan.id)).join("reference"))
+    } else {
+        root().case_dir(format!("{}-reference", tag(plan.id)))
+    };
+    let base = ref_dir.path();
     let work = base.join("work");
     let mut finals: Vec<(Vec<Value>, Vec<Value>, String)> = vec![];
     for rep in 0..2 {
@@ -514,10 +520,17 @@ fn build_reference(plan: &Plan) -> Reference {
     assert_eq!(
         canonical_json(&json!(finals[0].0)),
         canonical_json(&json!(finals[1].0)),
-        "{} 无故障同输入两次新进程完整终态逐字节相同",
-        plan.id
+        "{} 无故障同输入两次新进程完整终态逐字节相同（证据目录：{}）",
+        plan.id,
+        base.display()
     );
-    assert_eq!(finals[0].2, finals[1].2, "{} 两次终态哈希相同", plan.id);
+    assert_eq!(
+        finals[0].2,
+        finals[1].2,
+        "{} 两次终态哈希相同（证据目录：{}）",
+        plan.id,
+        base.display()
+    );
     let (tables, public, _) = finals.swap_remove(0);
     let clock = Clock::of_at(plan.owners(), None, VALID_DAY_NS);
     let norm_tables = tables
@@ -821,7 +834,12 @@ fn matrix(id: &str, target: usize, op: &str, owner: usize, phase: &str) {
     assert_eq!(plan.steps[target]["envelope"]["payload"]["op"], op);
     assert_eq!(plan.steps[target]["owner"], owner);
     let label = format!("step{target:02}");
-    let base = root().join(tag(id)).join(&label).join(phase);
+    let case_dir = if root().preserve_on_pass {
+        root().case_dir(Path::new(tag(id)).join(&label).join(phase))
+    } else {
+        root().case_dir(format!("{}-{label}-{phase}", tag(id)))
+    };
+    let base = case_dir.path();
     let work = base.join("work");
     let mut finals = vec![];
     for rep in 0..2 {
@@ -841,12 +859,16 @@ fn matrix(id: &str, target: usize, op: &str, owner: usize, phase: &str) {
         ));
     }
     assert_eq!(
-        finals[0].0, finals[1].0,
-        "{id} {label}/{phase} 两次新进程完整终态逐字节相同"
+        finals[0].0,
+        finals[1].0,
+        "{id} {label}/{phase} 两次新进程完整终态逐字节相同（证据目录：{}）",
+        base.display()
     );
     assert_eq!(
-        finals[0].1, finals[1].1,
-        "{id} {label}/{phase} 两次新进程续跑回复相同"
+        finals[0].1,
+        finals[1].1,
+        "{id} {label}/{phase} 两次新进程续跑回复相同（证据目录：{}）",
+        base.display()
     );
 }
 
