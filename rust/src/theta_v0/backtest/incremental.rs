@@ -731,33 +731,56 @@ mod tests {
 
     fn run_oracle(bars: &[Bar], label: &str) -> classifier::oracle_probe::Probe {
         let config = ThetaConfig::default();
-        classifier::oracle_probe::reset();
-        let mut incr = IncrementalClassifier::new(bars, &config);
-        let mut max_depth = 0usize;
-        for i in 0..bars.len() {
-            let __ca6 = incr.classify_at(i);
-            let incr_cls = __ca6.classification;
-            let incr_tower = __ca6.tower;
-            max_depth = max_depth.max(incr_tower.len());
-            // 强制全量路径（无证书，每 bar 从头重算）——ground truth。
-            let l0 = parser::parse_layer(&bars[..=i], &config);
-            let __co7 = classifier::classify(&l0, &config, &[]);
-            let full_cls = __co7.classification;
-            let full_tower = __co7.tower;
-            assert_eq!(
-                incr_cls, full_cls,
-                "[{label}] bar {i}: 证书增量 classification != 强制全量（bit-exact 破裂）"
-            );
-            assert_eq!(
-                incr_tower.len(),
-                full_tower.len(),
-                "[{label}] bar {i}: 证书增量 tower 层数 != 全量"
-            );
-            for (lvl, (il, fl)) in incr_tower.iter().zip(full_tower.iter()).enumerate() {
-                assert_eq!(il, fl, "[{label}] bar {i} lvl {lvl}: 证书增量 tower LeveledMove != 全量（身份/值破裂）");
+        let workers = if bars.len() >= 512 { 4usize } else { 1usize };
+        let run_worker = |worker: usize| -> (usize, classifier::oracle_probe::Probe) {
+            classifier::oracle_probe::reset();
+            let mut incr = IncrementalClassifier::new(bars, &config);
+            let mut max_depth = 0usize;
+            for i in 0..bars.len() {
+                let __ca6 = incr.classify_at(i);
+                let incr_cls = __ca6.classification;
+                let incr_tower = __ca6.tower;
+                max_depth = max_depth.max(incr_tower.len());
+                if i % workers != worker {
+                    continue;
+                }
+                // 强制全量路径（无证书，每 bar 从头重算）——ground truth。
+                let l0 = parser::parse_layer(&bars[..=i], &config);
+                let __co7 = classifier::classify(&l0, &config, &[]);
+                let full_cls = __co7.classification;
+                let full_tower = __co7.tower;
+                assert_eq!(
+                    incr_cls, full_cls,
+                    "[{label}] bar {i}: 证书增量 classification != 强制全量（bit-exact 破裂）"
+                );
+                assert_eq!(
+                    incr_tower.len(),
+                    full_tower.len(),
+                    "[{label}] bar {i}: 证书增量 tower 层数 != 全量"
+                );
+                for (lvl, (il, fl)) in incr_tower.iter().zip(full_tower.iter()).enumerate() {
+                    assert_eq!(
+                        il, fl,
+                        "[{label}] bar {i} lvl {lvl}: 证书增量 tower LeveledMove != 全量（身份/值破裂）"
+                    );
+                }
             }
-        }
-        let p = classifier::oracle_probe::snapshot();
+            (max_depth, classifier::oracle_probe::snapshot())
+        };
+        let (max_depth, p) = if workers == 1 {
+            run_worker(0)
+        } else {
+            std::thread::scope(|s| {
+                let handles: Vec<_> = (1..workers)
+                    .map(|t| s.spawn(move || run_worker(t)))
+                    .collect();
+                let res = run_worker(0);
+                for h in handles {
+                    h.join().unwrap();
+                }
+                res
+            })
+        };
         eprintln!(
             "[oracle:{label}] n={} max_depth={} T==1={} T>1={} minparts_break={} empty_break={} \
              reentry_minparts={} reentry_empty={}",

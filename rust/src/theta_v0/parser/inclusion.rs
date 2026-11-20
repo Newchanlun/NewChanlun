@@ -2475,68 +2475,87 @@ mod tests {
     // ────────────────────────────────────────────────────────────────────────
 
     fn assert_per_prefix_bit_exact(bars: &[Bar], label: &str) {
-        let mut state = IncrFactsState::empty();
-        for i in 0..bars.len() {
-            state.append(bars[i]);
-            if state.degraded() {
-                // 退化域（坐标非严格递增）也必须逐位相等——展开回落全量入口。
+        let workers = if bars.len() >= 128 { 4usize } else { 1usize };
+        let run_worker = |worker: usize| {
+            let mut state = IncrFactsState::empty();
+            for i in 0..bars.len() {
+                state.append(bars[i]);
+                if i % workers != worker {
+                    continue;
+                }
+                if state.degraded() {
+                    // 退化域（坐标非严格递增）也必须逐位相等——展开回落全量入口。
+                    assert_eq!(
+                        state.materialize_facts(),
+                        process_inclusion_with_facts(&bars[..=i]),
+                        "{label} 前缀 {i} 退化展开不匹配"
+                    );
+                    continue;
+                }
+                // #1597：参照 = 扁平构造（#1597 前的唯一实现）；公开入口（共享导出）须与之
+                // 全字段相等，且 `Debug`（紧凑与 `{:#?}`）逐字相同。
+                let want = process_inclusion_with_facts_flat(&bars[..=i]);
+                let got = state.materialize_facts();
+                let public = process_inclusion_with_facts(&bars[..=i]);
+                assert_eq!(public, want, "{label} 前缀 {i} 公开入口与扁平参照不匹配");
                 assert_eq!(
-                    state.materialize_facts(),
-                    process_inclusion_with_facts(&bars[..=i]),
-                    "{label} 前缀 {i} 退化展开不匹配"
+                    format!("{public:?}"),
+                    format!("{want:?}"),
+                    "{label} 前缀 {i} Debug 不逐字相同"
                 );
-                continue;
+                assert_eq!(
+                    format!("{public:#?}"),
+                    format!("{want:#?}"),
+                    "{label} 前缀 {i} 美化 Debug 不逐字相同"
+                );
+                assert_eq!(got, want, "{label} 前缀 {i} 全字段不匹配");
+                assert_eq!(got.merged, want.merged, "{label} 前缀 {i} merged");
+                for (k, want_group) in want.groups.iter().enumerate() {
+                    assert_eq!(
+                        state.group_fact(k).as_ref(),
+                        Some(want_group),
+                        "{label} 前缀 {i} 组 {k} 单组展开不匹配"
+                    );
+                    assert_eq!(
+                        state.group_direction_coords(k),
+                        want_group
+                            .direction_evidence
+                            .as_ref()
+                            .map(|e| e.source_coords.clone())
+                            .unwrap_or_default(),
+                        "{label} 前缀 {i} 组 {k} 方向证据来源不匹配"
+                    );
+                    assert_eq!(
+                        state.group_confirmation_coords(k),
+                        want_group
+                            .confirmation_evidence
+                            .as_ref()
+                            .map(|e| e.source_coords.clone())
+                            .unwrap_or_default(),
+                        "{label} 前缀 {i} 组 {k} 封口证据来源不匹配"
+                    );
+                }
+                for (k, want_step) in want.steps.iter().enumerate() {
+                    assert_eq!(
+                        state.step_fact(k).as_ref(),
+                        Some(want_step),
+                        "{label} 前缀 {i} 步 {k} 单步展开不匹配"
+                    );
+                }
             }
-            // #1597：参照 = 扁平构造（#1597 前的唯一实现）；公开入口（共享导出）须与之
-            // 全字段相等，且 `Debug`（紧凑与 `{:#?}`）逐字相同。
-            let want = process_inclusion_with_facts_flat(&bars[..=i]);
-            let got = state.materialize_facts();
-            let public = process_inclusion_with_facts(&bars[..=i]);
-            assert_eq!(public, want, "{label} 前缀 {i} 公开入口与扁平参照不匹配");
-            assert_eq!(
-                format!("{public:?}"),
-                format!("{want:?}"),
-                "{label} 前缀 {i} Debug 不逐字相同"
-            );
-            assert_eq!(
-                format!("{public:#?}"),
-                format!("{want:#?}"),
-                "{label} 前缀 {i} 美化 Debug 不逐字相同"
-            );
-            assert_eq!(got, want, "{label} 前缀 {i} 全字段不匹配");
-            assert_eq!(got.merged, want.merged, "{label} 前缀 {i} merged");
-            for (k, want_group) in want.groups.iter().enumerate() {
-                assert_eq!(
-                    state.group_fact(k).as_ref(),
-                    Some(want_group),
-                    "{label} 前缀 {i} 组 {k} 单组展开不匹配"
-                );
-                assert_eq!(
-                    state.group_direction_coords(k),
-                    want_group
-                        .direction_evidence
-                        .as_ref()
-                        .map(|e| e.source_coords.clone())
-                        .unwrap_or_default(),
-                    "{label} 前缀 {i} 组 {k} 方向证据来源不匹配"
-                );
-                assert_eq!(
-                    state.group_confirmation_coords(k),
-                    want_group
-                        .confirmation_evidence
-                        .as_ref()
-                        .map(|e| e.source_coords.clone())
-                        .unwrap_or_default(),
-                    "{label} 前缀 {i} 组 {k} 封口证据来源不匹配"
-                );
-            }
-            for (k, want_step) in want.steps.iter().enumerate() {
-                assert_eq!(
-                    state.step_fact(k).as_ref(),
-                    Some(want_step),
-                    "{label} 前缀 {i} 步 {k} 单步展开不匹配"
-                );
-            }
+        };
+        if workers == 1 {
+            run_worker(0);
+        } else {
+            std::thread::scope(|s| {
+                let handles: Vec<_> = (1..workers)
+                    .map(|t| s.spawn(move || run_worker(t)))
+                    .collect();
+                run_worker(0);
+                for h in handles {
+                    h.join().unwrap();
+                }
+            });
         }
     }
 
