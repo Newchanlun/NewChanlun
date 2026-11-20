@@ -1,0 +1,164 @@
+--- body-2f422bd8f812.md
++++ body-r4.md
+@@ -61,11 +61,11 @@
+ 
+ 5. **US-ST-005** 作为结构观察者，我需要完整处理「笔序列、去重、延伸与确认边界」并能查看稳定对象修订、异性序列、前缀与尾部、缺映射原因共同发布，以便核对实际状态、依据及其变化。（C03, C02, C08, C12）
+ 
+-6. **US-ST-006** 作为结构观察者，我需要完整处理「线段基本良构与正本范式」并能查看全成员笔链、奇数约束、前三闭重叠max(low)<=min(high)与成段终结证据；#246/#249已裁相切，以便核对实际状态、依据及其变化。（C03, C02, C08, C12）
++6. **US-ST-006** 作为结构观察者，我需要完整处理「线段基本良构与正本范式」并能查看全成员笔链、奇数约束、按有效 `tangency` 判前三笔重合（默认 closed），并展示成段终结证据，以便核对实际状态、依据及其变化。（C03, C02, C08, C12）
+ 
+ 7. **US-ST-007** 作为结构观察者，我需要完整处理「特征序列构造、包含作用域与两类终结」并能查看两特征序列及各自包含作用域、gap和终结获知前沿完整输出，以便核对实际状态、依据及其变化。（C03, C02, C08, C12）
+ 
+-8. **US-ST-008** 作为结构观察者，我需要完整处理「缺口封闭、笔破坏与段破坏的独立事实」并能查看缺口严格分离与闭重叠相补，笔破坏与段终结分别输出。第二序列分型与原方向严格越界先到者定；开放前缀或资源截断不作否定，以便核对实际状态、依据及其变化。（C03, C02, C08, C12）
++8. **US-ST-008** 作为结构观察者，我需要完整处理「缺口封闭、笔破坏与段破坏的独立事实」并能查看同一有效 `tangency` 下缺口与重合互补，笔破坏与段终结分别输出。第二序列分型与原方向严格越界先到者定；开放前缀或资源截断不作否定，以便核对实际状态、依据及其变化。（C03, C02, C08, C12）
+ 
+ 9. **US-ST-009** 作为结构观察者，我需要完整处理「构造唯一与多读法分解分层」并能查看单主干和N读法分开；条件seed/恒三格/不延伸/连续盘整与余段可查，以便核对实际状态、依据及其变化。（C04, C08, C12）
+ 
+@@ -95,7 +95,7 @@
+ 
+ 22. **US-ST-022** 作为结构观察者，我需要完整处理「描述形态与PH类比结构名分分离」并能查看描述性形态引用已构造对象，不能替代缠论中枢或准入；K4排除，以便核对实际状态、依据及其变化。（C03, C08, C12）
+ 
+-23. **US-ST-023** 作为结构观察者，我需要完整处理「背驰先结构配对后力度及范围边界」并能查看完整结构候选集与正式比较对分别存，Comparable 与固定 Sel 按 G-026 的已裁对象域承接，以便核对实际状态、依据及其变化。（C03, C08, C12）
++23. **US-ST-023** 作为结构观察者，我需要完整处理「背驰先结构配对后力度及范围边界」并能查看完整结构候选集与正式比较对分别存，Comparable 按 G-026 的已裁对象域承接，Sel 读取有效 `selector_keys` 并保留版本，以便核对实际状态、依据及其变化。（C03, C08, C12）
+ 
+ 24. **US-ST-024** 作为结构观察者，我需要完整处理「力度精确定义、速度坐标与符号值」并能查看接口空/无效/有效单笔/有效多笔分开；仅D_L内输出有符号L及真实首末四端点，单笔有效L=0，以便核对实际状态、依据及其变化。（C03, C08, C12）
+ 
+@@ -137,7 +137,7 @@
+ 
+ 43. **US-ST-047** 作为结构观察者，我需要完整处理「转折后的高级结果、回拉与中心生死关系」并能查看29课三结果与53课中心后两结果按各自语境/终点输出；反向趋势level>=q，弱回拉可只触DD/GG，非必回核心，以便核对实际状态、依据及其变化。（C03, C08, C12）
+ 
+-44. **US-ST-048** 作为结构观察者，我需要完整处理「线段扫描上限、相切与结果完整性」并能查看扫描水位/资源截断与缓存形状分离；#246闭重叠相切已裁，51项见证不能被50项截断报全否，以便核对实际状态、依据及其变化。（C03, C02, C08, C12）
++44. **US-ST-048** 作为结构观察者，我需要完整处理「线段扫描上限、相切与结果完整性」并能查看扫描水位/资源截断与缓存形状分离；相切按有效 `tangency` 处理（closed 为 #246 默认口径），51项见证不能被50项截断报全否，以便核对实际状态、依据及其变化。（C03, C02, C08, C12）
+ 
+ 45. **US-FG-001** 作为多重经营使用者，我需要完整处理「N个持久重与专属筹码身份」并能查看N个不透明持久重各有S/操作级别/固定Q与完整史，Voice终结不删重，以便核对实际状态、依据及其变化。（C05, C08, C12）
+ 
+@@ -193,7 +193,7 @@
+ 
+ 71. **US-FG-027** 作为多重经营使用者，我需要完整处理「订单身份、冻结量、当前挂价与旧框清算区分」并能查看同逻辑key/冻结L/旧框/当前价分开，全部物理改单族共享L，P7只有具证原子amend或取消后可靠终态累计量再替换，以便核对实际状态、依据及其变化。（C07, C08, C12）
+ 
+-72. **US-FG-028** 作为多重经营使用者，我需要完整处理「回测成交假设与真实外部成交不能混证」并能查看严格穿越/开盘取优/GTC/双滑点纪律；同批域内订单按已知前沿撮合，批内先后为 Unknown；域外模型请求具名拒绝，以便核对实际状态、依据及其变化。（C07, C08, C12）
++72. **US-FG-028** 作为多重经营使用者，我需要完整处理「回测成交假设与真实外部成交不能混证」并能查看有效历史模型、容量来源和适用价规。选中已准入的默认 bar 批模型时，同批域内按已知前沿撮合，保留开盘取优、GTC、双滑点纪律，批内先后为 Unknown；所选模型缺标定与订单超出模型域分别报告，以便核对实际状态、依据及其变化。（C07, C08, C12）
+ 
+ 73. **US-FG-029** 作为多重经营使用者，我需要完整处理「部分成交、重复和乱序事实的完整接纳」并能查看P4同域Recorded+Pending先于解释，Resolved与逐重Applied分开；更正因果/去重；P7的100/40/20轨迹替换最多40，以便核对实际状态、依据及其变化。（C07, C08, C12）
+ 
+@@ -251,13 +251,13 @@
+ 
+ 1. 完成范围是 #1323 六项 Destination，#1339 只是本总单的需求与架构来源。结构教义以已裁正本及其原文/Lean 权威边界为准；R2 不重裁数学语义。R2 与旧 R1 的关系严格按 CR-01–20，只继承其中明确保留的条款，不把旧共轮、单个 MayHaveSent 或共同故障停结构接回。
+ 2. 全分类承接 44 ST、62 CC 和 10 LC；经营承接 35 FG、11 FE；观察承接 20 OB；工程状态承接 16 ES 并应用 R2 替代；故障及协议承接 RF-01、RF-02、14 RA 和独评 6 I。计数仅表示目录覆盖规模，不能作状态总数或已运行证明。
+-3. 每次发布绑定规则、目录、程序、schema、数值配置、输入来源和政策版本。任何未支持的适用域都列出精确对象、字段、条件与原因；不默默降级到另一引擎或判据。范围内未实现、未证或未决的必需项未清，整体验收不得通过。
++3. 每次发布绑定规则、目录、程序、schema、数值配置、输入来源和政策版本。已裁可调字段按具名版本在事前选定，一次运行只读一个有效取值；缺项按本字段原合同报告，不把文档默认值当成运行兜底。原文语义、已裁推论和形式化非退化条件不作可调字段。任何未支持的适用域都列出精确对象、字段、条件与原因；不默默降级到另一引擎或判据。范围内未实现、未证或未决的必需项未清，整体验收不得通过。
+ 4. 本 SPEC 的技术提案列在 C09；批准本稿仅批准写明的方案和依赖边界。不得据此推断真实账户、投入金额、资金分配、退出权限、main 合入或未指定的场所已经获批。
+ 
+ ### C02 标准输入与唯一结构核
+ 
+-1. 标准输入包含 source namespace/epoch、instrument、原始事件身份和修订、原始坐标、received_at、逻辑输入顺序、替代关系及来源证据。结构源遵守已裁美股 tick 边界；时间聚合、重采样或执行市场价格不得偷偷改变结构级别语义。
+-2. 一条纵向主塔只产生一份 Classification。每一级使用相同判定，级别差异只通过真实输入表达。唯一生产 owner 实际执行完整构造；各重、查询层、Python 外壳和前端不得重判。
++1. 标准输入包含 source namespace/epoch、instrument、原始事件身份和修订、原始坐标、received_at、逻辑输入顺序、替代关系及来源证据。结构源遵守已裁美股 tick 边界。历史读有效 `input_source`（默认 `massive-stock-tick/1`；已获准的 Databento 校验源按原射程标注），前置缺失报 `Unsupported{reason: InputSourceUnavailable}`，不运行中切源；时间聚合、重采样或执行市场价格不得偷偷改变结构级别语义。
++2. 一条纵向主塔只产生一份 Classification。每一级使用相同判定，级别差异只通过真实输入表达。塔底按有效 `tower_base` 构造（默认 `segment`，值域见[zhongshu.md:160–174](https://github.com/Newchanlun/NewChanlun/blob/b9d898dccf46c2a716115eaa1215bc39c458a959/.chanlun/definitions/zhongshu.md#L160-L174)），资源达到有效预算是覆盖截断，不是自然终止。唯一生产 owner 实际执行完整构造；各重、查询层、Python 外壳和前端不得重判。
+ 3. S 接纳自己的输入，在解释可能改变现有判定的输入前持久 BeginStructureRevision，关闭相关范围条件执行门；计算之后原子 CommitStructureRevision，公布对象、分类、关系、见证和变化。计算时的 first_known 不能改成后来的经济收件时间。
+ 4. 良构性、计算状态、知识状态、有效性与市场分类分轴。空输入、数据缺口、进行中、N/A、已撤回、未支持各有准确结果。合法原始结构到良构域的投影必须验证，不能靠先过滤反例获得分区完备。
+ 5. 结构自身提交成功即可发布和查询；没有 E/Bᵢ/X 时仍能继续新的正式结果、撤回和替代。S 自身存储损坏另按结构故障处理，不声称此时仍可正式推进。
+@@ -268,16 +268,16 @@
+ 2. 对真正分类的静态分区证明、各类真实输入投影、程序与定义等价、合法联合构造及转换不变量分别验收。角色/集合验全部必需成员、身份/引用和联合约束；公式验输入域、计算定义及边界，描述观察验来源与适用限度，不强造互斥档。证明按规则/程序版本复用；每次输入仍实际计算全部适用对象和条目，不以静态表或“已算”收据替代。
+ 3. 覆盖包含/分型/笔/线段、中枢核心和外缘、延伸/扩展/新生、高级构造、完成三类型、六态及位置三态、力度/背驰、小转大、全部买卖点、区间套、分解与级别递归。每个结果有对象身份、适用域、状态、证据、规则版本和可知时点。
+ 4. 小转大必要条件与实际已发生转折分开；扩展关系与高级对象已构造分开；六位逐点 BSP 与每级 LevelView 分开。64 个编码中至多 27 个约束允许签名不等于已证 27 个可构造，验收必须有实际构造或不可达证明。
+-5. 已裁边界直接同步和验证：三笔 seed 相切属于闭重叠，正式中枢保持非退化条件；力度在良构非空样本上使用已定首末式；三类回试遵守 Origin 严格端点。不得重开宽档兼容失败或把这些已定事项重新推给用户。
++5. 已裁边界直接同步和验证：三笔 seed 重合与特征序列缺口全级共读同一有效 `tangency`（[xianduan.md:257–268](https://github.com/Newchanlun/NewChanlun/blob/b9d898dccf46c2a716115eaa1215bc39c458a959/.chanlun/definitions/xianduan.md#L257-L268)），版本内缺口与重合互补，不因判定失败换值。默认 `closed`；合法 `open` 版本相切不重合。验收同一输入：[5,10] 与 [10,20] 在 closed 下无缺口，在 open 下有缺口；三笔公共区间只有端点时，closed 算重合、open 不算。正式中枢保持严格非退化条件；力度在良构非空样本上使用已定首末式；三类回试遵守 Origin 严格端点。不得重开宽档兼容失败或把这些已定事项重新推给用户。
+ 6. G 目录逐项承接。G-003/G-021 是描述性观察边界，不新增穷尽强弱档。G-001/002/007/025/026/028/029 按 C12 的现行裁定与适用域读取；投影、构造、证明和同步按对应实施票验收，不能统一标成 Fog 后跳过。
+ 
+ ### C04 操作读法、主动定位与固定选择
+ 
+ 1. 每重按自身操作级别从唯一主塔取得唯一同级别分解，未分配尾部及其原因可查。旁路和向下定位只读主塔，不把重的操作结果反向写成结构事实。
+-2. 候选全集、Comparable/Extreme 等实际适用条件、已固定 Sel、选中对象的完整链及失败原因一并保存。全候选任一通过只是观察信息，不可在选中失败后改选以放行同一判断。
++2. 候选全集、Comparable/Extreme 等实际适用条件、本次运行全级共用的有效 `selector_keys` 及其选中身份、选中对象的完整链及失败原因一并保存。全候选任一通过只是观察信息，不可在选中失败后改选以放行同一判断。
+ 3. 自然结构级别、操作级别、Voice 代际、区间套深度和来源坐标保持不同字段。真实父子关系、独立选父和几何包含不得互相冒充。
+ 4. 成本停止与无更低结构两个触发可同时真；停止不是结构否定，下钻失败不是小转大。Type1 的 `N^δ` 不变。Type2/3 入口的 `N^δ` 返回带原因的 N/A，不填 true 或 false；另用具名条件证书判「基例确认 ∧ 自身下级完成义务」。几何链和逐 rung N/A 只随证书供观察，不参与合取。
+-5. 初始化、同价、固定 Sel 与成本停止按 C12 的具名规则、当前有效版本和对应证据验收。G-029 按[ADR 0035:10–41](https://github.com/Newchanlun/NewChanlun/blob/b9d898dccf46c2a716115eaa1215bc39c458a959/docs/adr/0035-cost-stop-policy-instance-and-base-extension-evidence.md#L10-L41)用 ROUNDTRIP 配对；阶段二第一层保留 L0 余量，延伸后立即同源复测，不退回旧「延伸前算出最低级上限」。缺适用版本、真实成本或两层证据时，分别按原规则报告；不得用假定成本或 #907 探针替代，也不得据此自动开启阶段二。
++5. 初始化、同价、固定 Sel 与成本停止按 C12 的具名规则、当前有效版本和对应证据验收。第二层按有效 `second_layer.rule` 及其前件，默认 `order_relation`；选 `share_threshold` 而该阈值或证据未生效时不评为通过，不改跑默认门。G-029 按[ADR 0035:10–41](https://github.com/Newchanlun/NewChanlun/blob/b9d898dccf46c2a716115eaa1215bc39c458a959/docs/adr/0035-cost-stop-policy-instance-and-base-extension-evidence.md#L10-L41)用 ROUNDTRIP 配对；阶段二第一层保留 L0 余量，延伸后立即同源复测，不退回旧「延伸前算出最低级上限」。缺适用版本、真实成本或两层证据时，分别按原规则报告；不得用假定成本或 #907 探针替代，也不得据此自动开启阶段二。
+ 
+ ### C05 持久重、Voice、阶段与权利
+ 
+@@ -330,7 +330,7 @@
+ 1. 首个实现采用同一宿主上的独立进程：S、E、X 和各 Bᵢ 分别拥有独立持久域；前端查询外壳为只读进程。核心判断和经营 reducer 采用 Rust，现有 Python/NT 外壳仅承担模式输入、协议与展示适配。进程间走带版本和身份的本地消息协议，消息到达不等于持久提交。无需把每个结构级别拆成进程。
+ 2. 每个域一份独立 SQLite 数据库和 WAL，由该域单写者进行有限事务；不使用 ATTACH 跨域原子提交，不以共享连接或统一事务管理器串起 S/E/B。所有权威提交采用 WAL + synchronous=FULL，macOS 开启 fullfsync；锁/持久化/文件系统前件启动时验证，不满足则拒绝相应写入。SQLite 运行版本必须包含官方 WAL-reset 修复（3.51.3 及后续，或有明确修复证据的回移版本），并锁定实际依赖版本。官方说明 WAL 不用于网络文件系统且跨库不提供集合原子性；这些约束决定本提案的同机边界。[SQLite WAL](https://sqlite.org/wal.html)、[同步设置](https://sqlite.org/pragma.html#pragma_synchronous)。
+ 3. 一域损坏、阻塞或重启的试验只影响该域数据库及进程；S/E/B 之间不共享应用级锁、读写事务或故障恢复闸。共享宿主、物理磁盘或系统整体故障仍可能同时影响各域，首版不承诺跨机器高可用或磁盘灾难隔离；不能把这种整体故障用作 RF-01/RF-02 应测局部故障的替代。
+-4. S 的长期历史使用内容寻址的不可变批次对象和版本索引；先持久写完整对象，再由同一 S 事务发布可达引用，崩溃留下的不可达对象可以回收。发布读数从短事务取得固定 cut 的不可变引用，分页不持有写事务或跨请求读事务。持久 delta 按独立保留策略存储，落后消费者收到 Gap 并从指定 cut 重建。
++4. S 的长期历史使用内容寻址的不可变批次对象和版本索引；先持久写完整对象，再由同一 S 事务发布可达引用，崩溃留下的不可达对象可以回收。发布读数从短事务取得固定 cut 的不可变引用，分页不持有写事务或跨请求读事务。持久 delta 按有效 `delta_retention` 策略（默认 `retain_all`）存储，落后消费者收到 Gap 并从指定 cut 重建。
+ 5. S 条件请求按本地持久接纳序 FIFO 排队；每次结构 Commit 后、下一 Begin 前，如队列非空恰核验一项，然后让下一结构输入推进。无结构输入时仍逐项有限服务；新请求不能插到既有请求前。核验只读有限本地证书与 S 数据，不做 E/RPC/场所调用；条件不成立一次最终拒绝，不等待未来行情。该配额 1 是核验调度方案，不决定财务分配和物理订单先后。
+ 6. 每个已交付命令在 S 队列中最多一份持久就绪身份，重复交付不增加排队项或调用权。普通 busy 不拒绝，已有项在有限本地服务下推进；S 本地存储失败则准确保留交付未知和责任，恢复按原 ID 查询，不另造 Release。部署容量依据获准在途集合、证书规模和实测负载配置，核验队列和长期历史分配独立的存储预算，不能让经济订阅断线积压结构关键存储。本提案不新增发送前的跨域容量预留/租约协议，也不承诺无限过载时活性；受测有效域内的 busy、重复包和容量处理不得造成健康持续合规请求永久得不到核验。
+ 7. S/E/B 的写事务核数据库持久 writer_epoch；事务写入与 epoch 更替同序。X 是唯一持有场所写凭据并执行网络请求的进程；其他域和旧脚本在获准部署中无该凭据。X 的适配器在 X 内部受控调用，不能委托另一个仍有直发权的异步后台；SDK 对写请求的隐式重试、后台提交及恢复重投必须逐层核实并纳入一次调用合同，未能禁用或证明其幂等能力时该 adapter 不得发送。
+@@ -343,7 +343,9 @@
+ 
+ 1. 提供唯一完整会话入口，载入已批准规则/政策、能力 manifest、原始输入、存储/时钟和执行 adapter，推进完整 S→操作→B→E→X→事实→B→观察。单独 π batch、ThetaPiStream 或旧 Python 递归结果仅可标注对应组件证据。
+ 2. 历史、paper、live 共用上述核心 reducer、身份、责任、执行生命周期和观察协议；只替换真实变化的 feed、clock、matcher/venue、传输与受控持久化 adapter。模拟 fill 不能与同会话真实 fill 同时充当权威。
+-3. 历史按[ADR 0033:10–44](https://github.com/Newchanlun/NewChanlun/blob/b9d898dccf46c2a716115eaa1215bc39c458a959/docs/adr/0033-history-simulation-bar-batch-model.md#L10-L44)的 `history-sim/bar-batch-known-frontier/1`（确定性，`seed: none`）与[ADR 0052:258–291](https://github.com/Newchanlun/NewChanlun/blob/b9d898dccf46c2a716115eaa1215bc39c458a959/docs/adr/0052-history-input-profile-and-model-order-unspecified.md#L258-L291)的 `history-input-profile/1`；继承严格穿越、开盘取优、GTC 与费用纪律。第 t 根 bar 只消费 t−1 收盘时已知且获准的集合；同批各重限价独立对 OHLC 判定，`intra_batch_order: Unknown`。市价仅在具名 `exec_index` 收盘槽成交，限价逻辑先于该槽；t 收盘才知道的新挂/撤/改从 t+1 起生效。部分成交依具证容量合同（含[ADR 0033:77–116](https://github.com/Newchanlun/NewChanlun/blob/b9d898dccf46c2a716115eaa1215bc39c458a959/docs/adr/0033-history-simulation-bar-batch-model.md#L77-L116)的容量 epoch），容量合同为 `none` 时，已准入规模内严格穿越即全量成交，单列 L0 假设，不作容量证据；历史默认 `per_leg`，与场所对拍采用该场所冻结的同一 `projection_kind`。域外订单/并发/分配请求在 E-Release 前由 `model_coverage` 持久记为 `Unsupported{reason: ModelOrderUnspecified, model_ref, domain_id, command_id}`，不释放、不执行、不生模拟外效、不回落旧臂。TestOnly 排序只验协议。
++3. 历史先从有效 `history-input-profile/1` 读取本次冻结的 `model_id/revision`、`seed`、`capacity_source`、`projection_kind`、`fee_profile` 和适用域（[ADR 0033:10–48](https://github.com/Newchanlun/NewChanlun/blob/b9d898dccf46c2a716115eaa1215bc39c458a959/docs/adr/0033-history-simulation-bar-batch-model.md#L10-L48)；[ADR 0052:258–291](https://github.com/Newchanlun/NewChanlun/blob/b9d898dccf46c2a716115eaa1215bc39c458a959/docs/adr/0052-history-input-profile-and-model-order-unspecified.md#L258-L291)）。所选 `stochastic-microevent/<rev>` 缺逐笔/盘口标定，或选 `bar_volume_derived` 而缺公式标定时，容量记 Unknown，依赖动作报 AwaitingPolicy，不撮合、不退回默认模型。订单超出已选模型适用域时，则在 E-Release 前由 `model_coverage` 持久记为 `Unsupported{reason: ModelOrderUnspecified, model_ref, domain_id, command_id}`，不释放、不执行、不生模拟外效、不回落旧臂。
++
++   默认 `history-sim/bar-batch-known-frontier/1` 为确定性模型，`seed: none`，容量来源默认 `scenario_contract`。选中获准 v1 时，第 t 根 bar 只消费 t−1 收盘时已知且获准的集合；同批各重限价独立对 OHLC 判定、开盘取优，`intra_batch_order: Unknown`。限价按有效 `fill_rule`（默认至少 1 tick 的严格穿越，更大缓冲须有标定，touch 仅诊断）与既裁 GTC、费用和双滑点纪律。市价仅在具名 `exec_index` 收盘槽成交，限价逻辑先于该槽；t 收盘才知道的新挂/撤/改从 t+1 起生效。部分成交依具证容量合同（含[ADR 0033:77–116](https://github.com/Newchanlun/NewChanlun/blob/b9d898dccf46c2a716115eaa1215bc39c458a959/docs/adr/0033-history-simulation-bar-batch-model.md#L77-L116)的容量 epoch）；容量合同取 `none` 时，已准入规模内满足穿越条件才全量成交，单列为 L0 假设，不作容量证据。历史投影默认 `per_leg`，与场所对拍使用该场所冻结的同一 `projection_kind`。TestOnly 排序只验协议。
+ 4. 双跑固定原始输入及修订、政策/模型版本、时钟、随机种子、数值语义、故障与调度轨迹，比较完整结构关系、逐重状态/毛账、责任、命令/回报/分配和 AsKnown。允许不同运行 ID 等非语义字段经过预先声明的一一重命名；禁止只比较最终净仓。
+ 5. 每个 paper/live adapter 提供能力证据：身份与代际、取消/改单、累计完整性、幂等/查询范围、费用/更正、会话权限、挂单限制、时间语义及唯一外部事实来源。缺项准确 Unsupported；历史通过不表示场所已通过。
+ 6. 首个场所能力验收为[ADR 0028:13–48](https://github.com/Newchanlun/NewChanlun/blob/b9d898dccf46c2a716115eaa1215bc39c458a959/docs/adr/0028-first-capability-verification-profile.md#L13-L48)的 `P1-hl-testnet`：Hyperliquid testnet 主 DEX 加密永续、Netting、`experiment`，绑定账户、endpoint 与专用 API wallet（`trade_no_transfer`），范围为已授权的查询、下单、撤单和 reduce-only 平仓，不含划转、提现或创建子账户。费率、保证金和适用的借贷规则须绑定受测 profile 与证据。按[ADR 0028:91–99](https://github.com/Newchanlun/NewChanlun/blob/b9d898dccf46c2a716115eaa1215bc39c458a959/docs/adr/0028-first-capability-verification-profile.md#L91-L99)和[ADR 0062:155–197](https://github.com/Newchanlun/NewChanlun/blob/b9d898dccf46c2a716115eaa1215bc39c458a959/docs/adr/0062-fu18-venue-account-permission-binding.md#L155-L197)先核有效的用户授权、身份、凭据作用域、会话权限和 TB-09 指纹，再构造写传输；不因 paper、post-only 或 ALO 推定不会成交。可用余额前置读不到时，本次只取 P0 确定性回放与受控模拟证据，不做主网存款；P0 不代 P1 场所成功路径。P2 按 C12 保持未启用。
+@@ -371,7 +373,7 @@
+ | TB-04 | E 责任、精确交付、S 核验、X 唯一调用至受控场所回报和 B 应用完整闭环 | TB-03；完整条件及能力 profile；相关资金/分配政策 |
+ | TB-05 | 单重故障健康重实际新增；E 故障 S 正式持续；双边界崩溃与持续服务 | TB-04；独立持久化/隔离完成 |
+ | TB-06 | 全阶段、两类换档、部分成交/改单、退出尾账及统计输入完整可见 | TB-03/04；对应 FU 决定和模型 |
+-| TB-07 | 按 C10 的具名模型跑域内同批成交与域外拒绝，再验完整历史双跑、断点恢复、seek/断线续接及 AsKnown/重算分证 | TB-02/05/06；[ADR 0033:10–44](https://github.com/Newchanlun/NewChanlun/blob/b9d898dccf46c2a716115eaa1215bc39c458a959/docs/adr/0033-history-simulation-bar-batch-model.md#L10-L44)、[ADR 0052:258–291](https://github.com/Newchanlun/NewChanlun/blob/b9d898dccf46c2a716115eaa1215bc39c458a959/docs/adr/0052-history-input-profile-and-model-order-unspecified.md#L258-L291) |
++| TB-07 | 按 C10 冻结模型、种子与容量来源；分别验默认模型的域内同批成交、域外拒绝及所选模型/容量缺标定的处置，再验完整历史双跑、断点恢复、seek/断线续接及 AsKnown/重算分证 | TB-02/05/06；[ADR 0033:10–44](https://github.com/Newchanlun/NewChanlun/blob/b9d898dccf46c2a716115eaa1215bc39c458a959/docs/adr/0033-history-simulation-bar-batch-model.md#L10-L44)、[ADR 0052:258–291](https://github.com/Newchanlun/NewChanlun/blob/b9d898dccf46c2a716115eaa1215bc39c458a959/docs/adr/0052-history-input-profile-and-model-order-unspecified.md#L258-L291) |
+ | TB-08 | paper/live adapter 共核；按 P1-hl-testnet 核实际身份、能力与回报证据，标 experiment | TB-04/05/07/09；P1 有效 profile、证据和逐动作权限 |
+ | TB-09 | 在 P1 受测部署证明旧写入口禁入、X 排他及发送前重核；隔离身份与在途责任可查 | TB-04；P1 部署身份、凭据作用域与授权证据 |
+ | TB-10 | 所有旧入口取得终态；在 P1 验带仓迁移、回退保责与默认启动只到新核；生产专属门见下 | TB-02/05/07/08/09；对应迁移和启用批准 |
+@@ -383,14 +385,14 @@
+ 4. 残留决定表区分已裁同步、缺证明、可提出的工程实例、真正语义/资金选择和实际权限。可先实施不依赖它们的切片；若某门覆盖 TB-02/06/07/08 的必需行为，该行为未闭合就不算完成。AwaitingPolicy/Unsupported 的正确失败输出仅验收失败处理，不替代成功路径。
+ 5. 整图必须同时满足：唯一严格完整程序；逐 bar owner 与唯一判据行为锁；全部旧实现终态；完整确定性历史回放；paper/live 共核接口及相应能力验收；下游票合法去向及 #1279 放行门。任何一项缺证据不得关闭 SPEC、总图或 goal。
+ 
+-下表的已裁规则与 C03–C06、C10、AT-06/14/15/17 的对应条款优先于 2026-09-09 归档附件在这些事项上的旧描述。覆盖附件的 FG-018 开重起点、FG-025 样本以及对应 G/FU 的旧「待裁」条目按此处读取；覆盖 ID、其余验收义务与历史字节不改。[签署时残留核查](https://github.com/xy7365527-lang/NewChanlun/blob/efc1ddc4d6c015f4f8c6d44f904d704a88308b46/.chanlun/review-results/issue1339-r2-spec-20260909/view/spec/inputs/RESIDUAL-DECISIONS.md)仅供追溯。当期验收凭实施、证明和适用域的有效证据，不凭决策票已关。
++下表的已裁规则与 C03–C06、C10、AT-06/14/15/17 的对应条款优先于 2026-09-09 归档附件在这些事项上的旧描述。覆盖附件的 FG-018 开重起点、FG-025 样本、ST-006/008/048 的相切、G-026 的键序、FG-028 的模拟模型与对应 G/FU 的旧「待裁」条目按此处读取；覆盖 ID、其余验收义务与历史字节不改。[签署时残留核查](https://github.com/xy7365527-lang/NewChanlun/blob/efc1ddc4d6c015f4f8c6d44f904d704a88308b46/.chanlun/review-results/issue1339-r2-spec-20260909/view/spec/inputs/RESIDUAL-DECISIONS.md)仅供追溯。当期验收凭实施、证明和适用域的有效证据，不凭决策票已关。
+ 
+ | 依赖 | 已裁规则与适用域 | 实施、证明或仍缺的生效前件 |
+ |---|---|---|
+ | G-001/002 | 初始化 W（[#1342 resolution](https://github.com/Newchanlun/NewChanlun/issues/1342#issuecomment-6149622771)）：首个相邻 raw 严格非包含对出现前按 raw 留未定，不产合并组；若始终不出现则保持未定。出现时以其方向从序号 0 左折叠并发布，替代关系可查，旧 cut 不回填。同型同价端点取先，后者身份仍留；实际极值根取集合，raw 间隔取前端末根到后端首根之间（[#1343 resolution](https://github.com/Newchanlun/NewChanlun/issues/1343#issuecomment-6153028395)）。 | [#1393](https://github.com/Newchanlun/NewChanlun/issues/1393) 的 W 发布（含 `pending_since_cut`）、替代、增量和恢复对拍；[#1405](https://github.com/Newchanlun/NewChanlun/issues/1405) 承接同价行为锁，按其实际版本取证；保留对应 Lean 定义与证明义务。 |
+-| G-007 | [#1344 resolution](https://github.com/Newchanlun/NewChanlun/issues/1344#issuecomment-6149624668)：先成分型则确认，原方向先严格越过候选极值则失效且不复活；已知前缀内均未发生则开放。同笔先处理包含并检查分型，再查越界；同段不越过开放候选。扫描覆盖与语义态分开，资源耗尽不是否定。 | [#1420](https://github.com/Newchanlun/NewChanlun/issues/1420) 承接每候选折叠游标、checkpoint、失效及超 50 项的判定/恢复对拍，按实际版本取证；族 I 的 50 窗归 TB-10 旧入口处置，不参与准入。 |
++| G-007 | [#1344 resolution](https://github.com/Newchanlun/NewChanlun/issues/1344#issuecomment-6149624668)：先成分型则确认，原方向先严格越过候选极值则失效且不复活；已知前缀内均未发生则开放。同笔先处理包含并检查分型，再查越界；同段不越过开放候选。扫描按有效 `second-seq-scan-budget` 承载，扫描覆盖与语义态分开，资源耗尽不是否定。 | [#1420](https://github.com/Newchanlun/NewChanlun/issues/1420) 承接每候选折叠游标、checkpoint、失效及超 50 项的判定/恢复对拍，按实际版本取证；族 I 的 50 窗归 TB-10 旧入口处置，不参与准入。 |
+ | G-025 | [#1345 resolution](https://github.com/Newchanlun/NewChanlun/issues/1345#issuecomment-6149626626)：独立选父取同源、同有效版本及尺度、完整非空的 raw 闭窗 `[min low, max high]`；price-subset 是索引包含的派生证据，不是第二准入门，不证明血缘。缺前提报缺证，不改选。 | [#1438](https://github.com/Newchanlun/NewChanlun/issues/1438)：实际选中父和双坐标证书、缺证及真实对象对照；TB-04 消费实际证据。 |
+-| G-026 | [#1346 resolution](https://github.com/Newchanlun/NewChanlun/issues/1346#issuecomment-6154425014)：已裁 Comparable 与 Sel 可直接复用。闭合候选先按 Dir/Comparable/Extreme 及子区间条件过滤。按 end 最新、start 最新、idx 最小选定，再核所选后门；全候选真值只供观察。 | 按该 resolution 的 I-1～I-8：[#1439](https://github.com/Newchanlun/NewChanlun/issues/1439) 承接全集、所选及观察事实，TB-04 承接后门 predicate_id，TB-07 承接 selector_version，Lean 跟进键序等价。 |
++| G-026 | [#1346 resolution](https://github.com/Newchanlun/NewChanlun/issues/1346#issuecomment-6154425014)：已裁 Comparable 与 Sel 可直接复用。闭合候选先按 Dir/Comparable/Extreme 及子区间条件过滤。按[qujiantao.md:1543–1551](https://github.com/Newchanlun/NewChanlun/blob/b9d898dccf46c2a716115eaa1215bc39c458a959/.chanlun/definitions/qujiantao.md#L1543-L1551)用本次有效 `selector_keys` 选定，全级读同一键表。默认 end 降序、start 降序、idx 升序；缺有效记录按合同报告，不取代码常数。再核所选后门；全候选真值只供观察，失败不重选。两个已过滤候选同起止、idx 为 1 和 9，末键升序的默认版本选 1；有效末键降序版本选 9。#1439 验 selected_id，TB-07 按各自原版本回放，不改写旧结果。 | 按该 resolution 的 I-1～I-8：[#1439](https://github.com/Newchanlun/NewChanlun/issues/1439) 承接全集、所选及观察事实，TB-04 承接后门 predicate_id，TB-07 承接 selector_version，Lean 跟进键序等价。 |
+ | G-028 | [#1347 resolution](https://github.com/Newchanlun/NewChanlun/issues/1347#issuecomment-6149628539)：按 C04 分 Type1 与 Type2/3；Type2/3 条件证书另名，几何链长 `L_geo` 与判据深度 `D_crit` 分报，Type2/3 的 `D_crit=0`。链 B 的 provider Cand 真值不是 N/A 填真。 | [#1442](https://github.com/Newchanlun/NewChanlun/issues/1442)：入口点型随查链，条件证书正反例、链 A/B 的 Type1 同输入同输出锁及旧填真臂退场；TB-04 按实际证书准入。 |
+ | G-029 | [ADR 0035:10–41](https://github.com/Newchanlun/NewChanlun/blob/b9d898dccf46c2a716115eaa1215bc39c458a959/docs/adr/0035-cost-stop-policy-instance-and-base-extension-evidence.md#L10-L41)规定 ROUNDTRIP、L0 余量及延伸后复测、第二层逐层逐窗证据；[ADR 0044:19–41](https://github.com/Newchanlun/NewChanlun/blob/b9d898dccf46c2a716115eaa1215bc39c458a959/docs/adr/0044-cost-stop-policy-signed-instance-v1.md#L19-L41)登记 P0/P1 已签实例，不跨域借用。 | [#1441](https://github.com/Newchanlun/NewChanlun/issues/1441)、TB-07/08 核有效版本与输入。Missing 不代 0，代理下界不判通过；#907 材料不是第一层通过证据。两层实证未齐不开阶段二，不据此挡既有 L0。 |
+ | FU-01/02 | 本金、阶段、换向单账按[ADR 0031:10–34](https://github.com/Newchanlun/NewChanlun/blob/b9d898dccf46c2a716115eaa1215bc39c458a959/docs/adr/0031-principal-batches-phase-predicate-corporate-actions.md#L10-L34)、[ADR 0043:9–35](https://github.com/Newchanlun/NewChanlun/blob/b9d898dccf46c2a716115eaa1215bc39c458a959/docs/adr/0043-chong-reversal-account-continuity.md#L9-L35)；固定 Q、量档、容量、G 与两类换档按[ADR 0034:13–42](https://github.com/Newchanlun/NewChanlun/blob/b9d898dccf46c2a716115eaa1215bc39c458a959/docs/adr/0034-quantity-tier-policy-growth-equity-shift.md#L13-L42)和[ADR 0049:23–34](https://github.com/Newchanlun/NewChanlun/blob/b9d898dccf46c2a716115eaa1215bc39c458a959/docs/adr/0049-funding-quantity-and-policy-reference-dimensions.md#L23-L34)。金额与金额、数量与数量同维比较，量档随有效版本冻结，旧金额算例不作数量。 | [#1406](https://github.com/Newchanlun/NewChanlun/issues/1406)、[#1444](https://github.com/Newchanlun/NewChanlun/issues/1444)、[#1445](https://github.com/Newchanlun/NewChanlun/issues/1445)、[#1446](https://github.com/Newchanlun/NewChanlun/issues/1446) 承接。缺有效开局资金、档量、容量或所选定标的签署与证据（如 frozen_quote 的报价原件与 max_quote_age），只挡依赖动作；行情换档份额、真实重基及资金相关新版本按原授权门，不重签已生效原值。 |
+@@ -398,7 +400,7 @@
+ | FU-04 | 已定首个场所验证 profile，按[ADR 0028:13–48](https://github.com/Newchanlun/NewChanlun/blob/b9d898dccf46c2a716115eaa1215bc39c458a959/docs/adr/0028-first-capability-verification-profile.md#L13-L48)、[ADR 0028:91–99](https://github.com/Newchanlun/NewChanlun/blob/b9d898dccf46c2a716115eaa1215bc39c458a959/docs/adr/0028-first-capability-verification-profile.md#L91-L99)与[ADR 0062:155–197](https://github.com/Newchanlun/NewChanlun/blob/b9d898dccf46c2a716115eaa1215bc39c458a959/docs/adr/0062-fu18-venue-account-permission-binding.md#L155-L197)验 P1；P2 按[ADR 0028:66–73](https://github.com/Newchanlun/NewChanlun/blob/b9d898dccf46c2a716115eaa1215bc39c458a959/docs/adr/0028-first-capability-verification-profile.md#L66-L73)不启用。 | TB-08/09/10 在各自射程验证；P1 核实际账户、能力原件、有效版本、授权及发送前证据；生产专属证据与用户首发签署只在未来 P2 激活时消费。 |
+ | FU-05 | [ADR 0036:10–22](https://github.com/Newchanlun/NewChanlun/blob/b9d898dccf46c2a716115eaa1215bc39c458a959/docs/adr/0036-operating-statistics-sampling-and-post-gate-parameter-protocol.md#L10-L22)定闸前计样、跨闸分段和费后速率输出；AT-17 读有效 `evidence_gate`。[ADR 0036:24–33](https://github.com/Newchanlun/NewChanlun/blob/b9d898dccf46c2a716115eaa1215bc39c458a959/docs/adr/0036-operating-statistics-sampling-and-post-gate-parameter-protocol.md#L24-L33)另定后闸：真实 experiment/production 原件已 Applied、无覆盖 Pending 且 B/E 对账一致，首次使 `growth_eligible` 为真才记同源 `GateReachedEvent`。 | [#1398](https://github.com/Newchanlun/NewChanlun/issues/1398) 验统计；[#1358](https://github.com/Newchanlun/NewChanlun/issues/1358)、[#1410](https://github.com/Newchanlun/NewChanlun/issues/1410) 另验真实首触、触达后落盘的有效参数版本与首次启用，三记录按「触达 known_at < 参数 authorized_at < 首次启用 known_at」持久互引；启用仍须真实资格成立及启用记录。真实账户启用及资金/风险参数须用户授权。历史/TestOnly 仅演练，缺参不启用、不阻闸前统计。 |
+ | FU-06 | R2 组织已采纳；具体技术承载由 C09 提出随本稿审阅 | TB-01/03/04/05 的技术实施 |
+-| FU-07 | [ADR 0030:13–48](https://github.com/Newchanlun/NewChanlun/blob/b9d898dccf46c2a716115eaa1215bc39c458a959/docs/adr/0030-exit-authorization-and-liability-retirement.md#L13-L48)定结构/具名风险/手动退出及动作范围。场所订单终态、原 Voice 仓位为零、真实费用结清且 E 无 Pending，才可退休责任；迟到事实按原 Voice 重开。P1 风险清单按[ADR 0045:27–55](https://github.com/Newchanlun/NewChanlun/blob/b9d898dccf46c2a716115eaa1215bc39c458a959/docs/adr/0045-sr-v1-policy-signed.md#L27-L55)，拒发期间同一退出授权待续（[ADR 0030:70–76](https://github.com/Newchanlun/NewChanlun/blob/b9d898dccf46c2a716115eaa1215bc39c458a959/docs/adr/0030-exit-authorization-and-liability-retirement.md#L70-L76)）。 | [#1380](https://github.com/Newchanlun/NewChanlun/issues/1380)、[#1397](https://github.com/Newchanlun/NewChanlun/issues/1397) 承接；仍验具体外部终态/费用/持仓证据与适用风险、退出授权。新真实权限或超出原授权范围须按原门签署。 |
++| FU-07 | [ADR 0030:13–48](https://github.com/Newchanlun/NewChanlun/blob/b9d898dccf46c2a716115eaa1215bc39c458a959/docs/adr/0030-exit-authorization-and-liability-retirement.md#L13-L48)定结构/具名风险/手动退出及动作范围。场所订单终态、原 Voice 仓位为零、真实费用结清且 E 无 Pending，才可退休责任；有效 `observation_period` 如有正值，只在四条件成立后延迟释放，默认关闭。迟到事实按原 Voice 重开。P1 风险清单按[ADR 0045:27–55](https://github.com/Newchanlun/NewChanlun/blob/b9d898dccf46c2a716115eaa1215bc39c458a959/docs/adr/0045-sr-v1-policy-signed.md#L27-L55)，拒发期间同一退出授权待续（[ADR 0030:70–76](https://github.com/Newchanlun/NewChanlun/blob/b9d898dccf46c2a716115eaa1215bc39c458a959/docs/adr/0030-exit-authorization-and-liability-retirement.md#L70-L76)）。 | [#1380](https://github.com/Newchanlun/NewChanlun/issues/1380)、[#1397](https://github.com/Newchanlun/NewChanlun/issues/1397) 承接；仍验具体外部终态/费用/持仓证据与适用风险、退出授权。新真实权限或超出原授权范围须按原门签署。 |
+ 
+ 按现有实施票承接已裁规则及证明义务。缺有效记录、真实证据或用户签署时，只封该门覆盖的动作；不得由实施者补造政策、代签真实资金/账户/凭据或把旧有效版本跨域使用。真正未裁且进入实施范围的事项须先有具名裁定与真实 blocking 边，不得先放行实施票让实施者顺手代裁。
+ 
+@@ -423,7 +425,7 @@
+ | AT-11 | 经济日志、RPC、查询、ack、订阅及 X 分别故障，健康 S 连续正式新产出、撤回、续接和 AsKnown | C08/09；RF-02/I-02 |
+ | AT-12 | 持续结构输入下既有就绪持续合规请求在有限稳定点实际核验；无行情时也服务；交易队列不饿死结构 | C09；I-06 |
+ | AT-13 | 持仓、未结单、尾账和转移中断恢复不丢权利、不复制资金；回退保留所有已经发生的外效 | C05/09/11；FE-08 |
+-| AT-14 | 域内正例（`per_leg`）：两个重的 GTC 买限价 100 与 101（测试 tick），在 t−1 收盘已获准且各自资金独立，规模在已准入的全量撮合域内；t 的 O/H/L/C 为 102/103/99/102，两单各自严格穿越并撮合，归原重、批内先后 Unknown。域外反例：请求同 bar 按未观测逐笔先后决定互斥腿成交，profile 不支持该并发形态；E-Release 前出 ModelOrderUnspecified，该请求零旧臂调用、零成交/费用原件。相同完整输入、版本、时钟和调度双跑核全状态等价；AsKnown 不回填、重算另列；seek 不偷用未来数据。 | C10；Destination 4 |
++| AT-14 | 域内正例（确定性 bar 批 v1，`seed: none`，`scenario_contract/none`，`per_leg`，`fill_rule` 为默认穿越）：两个重的 GTC 买限价 100 与 101（测试 tick），在 t−1 收盘已获准且各自资金独立，规模在已准入的全量撮合域内；t 的 O/H/L/C 为 102/103/99/102，两单各自严格穿越并撮合，归原重、批内先后 Unknown。域外反例：请求同 bar 按未观测逐笔先后决定互斥腿成交，profile 不支持该并发形态；E-Release 前出 ModelOrderUnspecified，该请求零旧臂调用、零成交/费用原件。缺标定反例：保持正例两单与 OHLC 不变，事前分别选缺逐笔/盘口标定的 `stochastic-microevent/<rev>`、缺容量公式标定的 `bar_volume_derived`。两者容量均为 Unknown，依赖动作 AwaitingPolicy，该请求不产生 fill，不退回确定性 v1 或全量假设；不记为 ModelOrderUnspecified。相同完整输入、版本、时钟和调度双跑核全状态等价；AsKnown 不回填、重算另列；seek 不偷用未来数据。 | C10；Destination 4 |
+ | AT-15 | P1 按有效 profile 逐项核 adapter 的成功、不支持与故障，验证身份、授权、TB-09 指纹、实际发回的场所原件及唯一真账；缺能力不放行，P0 模拟与 P1 场所真账单源分证。TB-09/10 的 P1 隔离与带仓回退证据不作 P2 生产证据，P2 首发另守 C12 硬门。 | C10；Destination 5 |
+ | AT-16 | 每条入口/preset/feature/服务/直发路径有实际终态；默认启动、影子和带仓迁移不能绕过 owner/X | C11；Destination 2/3 |
+ | AT-17 | 按[ADR 0036:10–22](https://github.com/Newchanlun/NewChanlun/blob/b9d898dccf46c2a716115eaa1215bc39c458a959/docs/adr/0036-operating-statistics-sampling-and-post-gate-parameter-protocol.md#L10-L22)保留正负原件，按（重，S 稳定点）合并已 Applied、改变 K 的分量；迟到费用归到达的稳定点，不回填。逐重逐月核完整事件账 = 样本分量 + 具名排除（post_gate 域外、未应用、重算、合并后零基、整重终结）；零时长保留降幅、不入速率，跨闸按 ADR 0036 分段。不汇总多重作门，买卖频率另报。反例：同一重的 29 个合格稳定点各有成交，最后一点同点应用一笔费用，30 份入样原件只成 29 个样本，按 v1 报样本不足，不出通过读数。 | C05/06；FG-025/FE-11 |
+@@ -473,7 +475,16 @@
+ 依据 2026-11-20 独审原件（所审正文 digest `886112d118739fc10964759ec9fce220bcc7295d534e51125ee2c6f818f4bf50`，本次输入 `review-20261120.json`）。下列后裁只覆盖对应条款，签署归档保持原样。
+ 
+ - FG-018：从有效 `l_start` 起算；[ADR 0040:38–59](https://github.com/Newchanlun/NewChanlun/blob/b9d898dccf46c2a716115eaa1215bc39c458a959/docs/adr/0040-funding-signature-and-chong-derivation.md#L38-L59)、[ADR 0041:9–23](https://github.com/Newchanlun/NewChanlun/blob/b9d898dccf46c2a716115eaa1215bc39c458a959/docs/adr/0041-degrees-of-freedom-configurable-not-excluded.md#L9-L23)。
+-- 结构 G 表：初始化、同价、第二序列、选父与证书直接承接 [#1342 resolution](https://github.com/Newchanlun/NewChanlun/issues/1342#issuecomment-6149622771)、[#1343 resolution](https://github.com/Newchanlun/NewChanlun/issues/1343#issuecomment-6153028395)、[#1344 resolution](https://github.com/Newchanlun/NewChanlun/issues/1344#issuecomment-6149624668)、[#1345 resolution](https://github.com/Newchanlun/NewChanlun/issues/1345#issuecomment-6149626626)、[#1346 resolution](https://github.com/Newchanlun/NewChanlun/issues/1346#issuecomment-6154425014)、[#1347 resolution](https://github.com/Newchanlun/NewChanlun/issues/1347#issuecomment-6149628539)，成本实例见 [ADR 0044:19–41](https://github.com/Newchanlun/NewChanlun/blob/b9d898dccf46c2a716115eaa1215bc39c458a959/docs/adr/0044-cost-stop-policy-signed-instance-v1.md#L19-L41)。
++- 结构 G 表：初始化、同价、第二序列、选父与证书直接承接 [#1342 resolution](https://github.com/Newchanlun/NewChanlun/issues/1342#issuecomment-6149622771)、[#1343 resolution](https://github.com/Newchanlun/NewChanlun/issues/1343#issuecomment-6153028395)、[#1344 resolution](https://github.com/Newchanlun/NewChanlun/issues/1344#issuecomment-6149624668)、[#1345 resolution](https://github.com/Newchanlun/NewChanlun/issues/1345#issuecomment-6149626626)、[#1346 resolution](https://github.com/Newchanlun/NewChanlun/issues/1346#issuecomment-6154425014)、[#1347 resolution](https://github.com/Newchanlun/NewChanlun/issues/1347#issuecomment-6149628539)；选择键以 R4 指向的 #1600 后裁为准，成本实例见 [ADR 0044:19–41](https://github.com/Newchanlun/NewChanlun/blob/b9d898dccf46c2a716115eaa1215bc39c458a959/docs/adr/0044-cost-stop-policy-signed-instance-v1.md#L19-L41)。
+ - AT-17：按重及 S 稳定点计样，绑定有效验收记录；[ADR 0036:10–22](https://github.com/Newchanlun/NewChanlun/blob/b9d898dccf46c2a716115eaa1215bc39c458a959/docs/adr/0036-operating-statistics-sampling-and-post-gate-parameter-protocol.md#L10-L22)、[ADR 0022:97–167](https://github.com/Newchanlun/NewChanlun/blob/b9d898dccf46c2a716115eaa1215bc39c458a959/docs/adr/0022-acceptance-criterion-parameters.md#L97-L167)，后闸按[ADR 0036:24–33](https://github.com/Newchanlun/NewChanlun/blob/b9d898dccf46c2a716115eaa1215bc39c458a959/docs/adr/0036-operating-statistics-sampling-and-post-gate-parameter-protocol.md#L24-L33)另验。
+ - 经营政策：本金与单账 [ADR 0031:10–34](https://github.com/Newchanlun/NewChanlun/blob/b9d898dccf46c2a716115eaa1215bc39c458a959/docs/adr/0031-principal-batches-phase-predicate-corporate-actions.md#L10-L34)、[ADR 0043:9–35](https://github.com/Newchanlun/NewChanlun/blob/b9d898dccf46c2a716115eaa1215bc39c458a959/docs/adr/0043-chong-reversal-account-continuity.md#L9-L35)，增长与数量 [ADR 0034:13–42](https://github.com/Newchanlun/NewChanlun/blob/b9d898dccf46c2a716115eaa1215bc39c458a959/docs/adr/0034-quantity-tier-policy-growth-equity-shift.md#L13-L42)、[ADR 0049:23–34](https://github.com/Newchanlun/NewChanlun/blob/b9d898dccf46c2a716115eaa1215bc39c458a959/docs/adr/0049-funding-quantity-and-policy-reference-dimensions.md#L23-L34)，争用/分配/退休 [ADR 0029:13–37](https://github.com/Newchanlun/NewChanlun/blob/b9d898dccf46c2a716115eaa1215bc39c458a959/docs/adr/0029-common-cap-contention-policy.md#L13-L37)、[ADR 0032:10–49](https://github.com/Newchanlun/NewChanlun/blob/b9d898dccf46c2a716115eaa1215bc39c458a959/docs/adr/0032-fill-allocation-policy.md#L10-L49)、[ADR 0030:13–48](https://github.com/Newchanlun/NewChanlun/blob/b9d898dccf46c2a716115eaa1215bc39c458a959/docs/adr/0030-exit-authorization-and-liability-retirement.md#L13-L48)。
+-- 历史与场所：依 [ADR 0033:10–44](https://github.com/Newchanlun/NewChanlun/blob/b9d898dccf46c2a716115eaa1215bc39c458a959/docs/adr/0033-history-simulation-bar-batch-model.md#L10-L44)、[ADR 0052:273–291](https://github.com/Newchanlun/NewChanlun/blob/b9d898dccf46c2a716115eaa1215bc39c458a959/docs/adr/0052-history-input-profile-and-model-order-unspecified.md#L273-L291) 区分域内撮合及域外拒绝；依 [ADR 0028:66–73](https://github.com/Newchanlun/NewChanlun/blob/b9d898dccf46c2a716115eaa1215bc39c458a959/docs/adr/0028-first-capability-verification-profile.md#L66-L73)、[ADR 0062:155–197](https://github.com/Newchanlun/NewChanlun/blob/b9d898dccf46c2a716115eaa1215bc39c458a959/docs/adr/0062-fu18-venue-account-permission-binding.md#L155-L197) 分开 P1 验收与 P2 首发。
++- 历史与场所：依 [ADR 0033:10–44](https://github.com/Newchanlun/NewChanlun/blob/b9d898dccf46c2a716115eaa1215bc39c458a959/docs/adr/0033-history-simulation-bar-batch-model.md#L10-L44)、[ADR 0052:273–291](https://github.com/Newchanlun/NewChanlun/blob/b9d898dccf46c2a716115eaa1215bc39c458a959/docs/adr/0052-history-input-profile-and-model-order-unspecified.md#L273-L291) 分别处理已选模型的域内撮合、域外拒绝和所选模型/容量来源缺标定（详见 R4）；依 [ADR 0028:66–73](https://github.com/Newchanlun/NewChanlun/blob/b9d898dccf46c2a716115eaa1215bc39c458a959/docs/adr/0028-first-capability-verification-profile.md#L66-L73)、[ADR 0062:155–197](https://github.com/Newchanlun/NewChanlun/blob/b9d898dccf46c2a716115eaa1215bc39c458a959/docs/adr/0062-fu18-venue-account-permission-binding.md#L155-L197) 分开 P1 验收与 P2 首发。
++
++## 2026-11-20 R4 修订记录
++
++依据 `review-20261120-r3.json` 的所审正文 digest `2f422bd8f8120dcb0170fe20dd73f0582579b4b526c2c3e2179c09e102ef3e34`。已裁的可调值只作为默认值或具名实例，运行按有效版本。
++
++- G-026：先过滤再读有效 `selector_keys`，默认三键与合法变序分证（[qujiantao.md:1543–1551](https://github.com/Newchanlun/NewChanlun/blob/b9d898dccf46c2a716115eaa1215bc39c458a959/.chanlun/definitions/qujiantao.md#L1543-L1551)）。
++- 线段：三笔重合与特征序列缺口共用有效 `tangency`，默认 closed，正式中枢严格非退化条件不变（[xianduan.md:257–268](https://github.com/Newchanlun/NewChanlun/blob/b9d898dccf46c2a716115eaa1215bc39c458a959/.chanlun/definitions/xianduan.md#L257-L268)）。
++- C10/AT-14：先读模型、种子与容量来源，分别验默认模型和待标定选择；P1/P2 边界保持（[ADR 0033:10–48](https://github.com/Newchanlun/NewChanlun/blob/b9d898dccf46c2a716115eaa1215bc39c458a959/docs/adr/0033-history-simulation-bar-batch-model.md#L10-L48)；[ADR 0052:258–291](https://github.com/Newchanlun/NewChanlun/blob/b9d898dccf46c2a716115eaa1215bc39c458a959/docs/adr/0052-history-input-profile-and-model-order-unspecified.md#L258-L291)）。
++- 同类普查：核塔底/资源预算、成本第二层、退出观察期、历史结构源与 delta 保留的版本读法（[zhongshu.md:160–174](https://github.com/Newchanlun/NewChanlun/blob/b9d898dccf46c2a716115eaa1215bc39c458a959/.chanlun/definitions/zhongshu.md#L160-L174)；[ADR 0035:24–41](https://github.com/Newchanlun/NewChanlun/blob/b9d898dccf46c2a716115eaa1215bc39c458a959/docs/adr/0035-cost-stop-policy-instance-and-base-extension-evidence.md#L24-L41)；[ADR 0030:38–44](https://github.com/Newchanlun/NewChanlun/blob/b9d898dccf46c2a716115eaa1215bc39c458a959/docs/adr/0030-exit-authorization-and-liability-retirement.md#L38-L44)；[ADR 0052:304–317](https://github.com/Newchanlun/NewChanlun/blob/b9d898dccf46c2a716115eaa1215bc39c458a959/docs/adr/0052-history-input-profile-and-model-order-unspecified.md#L304-L317)；[ADR 0051:282–298](https://github.com/Newchanlun/NewChanlun/blob/b9d898dccf46c2a716115eaa1215bc39c458a959/docs/adr/0051-per-bar-domain-event-identity-lifecycle-contract.md#L282-L298)）。
