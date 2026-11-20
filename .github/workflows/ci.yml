@@ -825,6 +825,18 @@ jobs:
       - uses: ./.github/actions/rust-job-setup
         id: setup
 
+      - name: 安装并检查 B13 的 Linux exec 追踪能力
+        if: ${{ steps.setup.outcome == 'success' }}
+        run: |
+          if ! command -v strace >/dev/null; then
+            sudo -n apt-get update
+            sudo -n apt-get install -y --no-install-recommends strace
+          fi
+          probe=$(mktemp)
+          trap 'rm -f "$probe"' EXIT
+          env -i "$(command -v strace)" -f -v -e trace=execve -o "$probe" -- /bin/true
+          grep -Eq 'execve.*= 0$' "$probe"
+
       # production_session_testonly：入口测试显式走 S 的 TestOnly 诊断 theta 臂（P0 未签期间正式配置必拒，
       #   由 unsigned_p0_refuses_s_serve_* 两条测试锁住）；生产构建不含该臂，遇开关即拒绝启动。
       - name: cargo test — production_session_entry

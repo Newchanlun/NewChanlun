@@ -519,92 +519,20 @@ fn simulation_profile_spawns_isolated_domain_processes() {
 fn credential_key_only_in_x_child() {
     let space = Space(tempfile::Builder::new().prefix("pse").tempdir().unwrap());
     let (manifest, db) = simulation(&space, "simulation", true);
-    // 保留锚的规范路径绑定，让 launcher 自己重建 S 库，覆盖全部 init。
+    // 保留锚绑定，让 launcher 自己重建 S 库，覆盖所有 init。
     std::fs::remove_file(db).unwrap();
-    let bin = space.path("bin");
-    let receipts = bin.join("starts");
-    std::fs::create_dir_all(&receipts).unwrap();
-    // current_exe 解析符号链接；launcher 必须在垫片旁真正有一个副本。
-    let local_launcher = bin.join("production_session");
-    std::fs::copy(launcher_bin(), &local_launcher).unwrap();
-    let record = r#"#!/bin/bash
-set -eu
-while IFS= read -r -d '' entry; do
-    printf '%s\0' "${entry%%=*}"
-done < "/proc/$$/environ" > "${0%/*}/starts/${0##*/}.$1.$$"
-exec -a "$0" "$0.real" "$@"
-"#;
-    for (name, real) in [
-        ("s_structure_session", s_bin()),
-        ("e_economic_session", env!("CARGO_BIN_EXE_e_economic_session")),
-        ("b_chong_session", env!("CARGO_BIN_EXE_b_chong_session")),
-        ("x_execution_session", x_bin()),
-    ] {
-        let shim = bin.join(name);
-        std::fs::write(&shim, record).unwrap();
-        std::fs::set_permissions(&shim, std::fs::Permissions::from_mode(0o700)).unwrap();
-        std::os::unix::fs::symlink(real, shim.with_extension("real")).unwrap();
-    }
-    let has_credential_key = |keys: &[u8]| {
-        let keys: std::collections::BTreeSet<_> = keys.split(|&b| b == 0).collect();
-        keys.contains(CREDENTIAL_KEY.as_bytes())
-    };
-    let mut launcher = Command::new(local_launcher)
-        .arg("--manifest")
+    // 本文件仅在 Linux 运行：用 ptrace 抓取整棵树的 exec，包括短命进程。
+    let out = run(Command::new("python3")
+        .arg("-c")
+        .arg(include_str!("fixtures/production_session_exec_trace.py"))
+        .arg(launcher_bin())
+        .arg(x_bin())
         .arg(manifest)
-        .env_remove(CREDENTIAL_KEY)
-        .env_remove(THETA_DIAGNOSTIC.0)
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::piped())
-        .spawn()
-        .unwrap();
-    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        wait_domains(&mut launcher);
-        let env = environ(launcher.id());
-        assert!(
-            !env.split('\0')
-                .filter_map(|entry| entry.split_once('='))
-                .any(|(key, _)| key == CREDENTIAL_KEY),
-            "launcher 环境含哨兵键"
-        );
-    }));
-    let status = launcher
-        .try_wait()
-        .unwrap()
-        .unwrap_or_else(|| stop(&mut launcher));
-    if let Err(panic) = result {
-        std::panic::resume_unwind(panic);
-    }
-    assert_eq!(status.code(), Some(0), "{}", launcher_stderr(&mut launcher));
-
-    let mut observed = Vec::new();
-    for entry in std::fs::read_dir(receipts).unwrap() {
-        let entry = entry.unwrap();
-        let name = entry.file_name().into_string().unwrap();
-        let (role, _) = name.rsplit_once('.').unwrap();
-        observed.push((
-            role.to_owned(),
-            has_credential_key(&std::fs::read(entry.path()).unwrap()),
-        ));
-    }
-    observed.sort_unstable();
-    let observed: Vec<_> = observed
-        .iter()
-        .map(|(role, has)| (role.as_str(), *has))
-        .collect();
-    assert_eq!(
-        observed,
-        [
-            ("b_chong_session.init", false),
-            ("b_chong_session.serve", false),
-            ("e_economic_session.init", false),
-            ("e_economic_session.serve", false),
-            ("s_structure_session.init", false),
-            ("s_structure_session.serve", false),
-            ("x_execution_session.serve", true),
-        ],
-        "各子进程的启动凭据键归属"
+        .arg(CREDENTIAL_KEY));
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
     );
 }
 
