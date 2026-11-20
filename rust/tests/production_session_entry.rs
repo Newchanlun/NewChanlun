@@ -516,7 +516,7 @@ fn simulation_profile_spawns_isolated_domain_processes() {
 }
 
 #[test]
-fn credential_sentinel_only_in_x_process_environment() {
+fn credential_key_only_in_x_child() {
     let space = Space::new();
     // 凭据文件须存在，launcher 才按 credential_scope 读取并只注入 X。
     let (manifest, _) = simulation(&space, "simulation", true);
@@ -535,6 +535,37 @@ fn credential_sentinel_only_in_x_process_environment() {
         );
     }
     assert_eq!(stop(&mut launcher).code(), Some(0));
+}
+
+#[test]
+fn second_domain_writer_rejected_by_writer_lock() {
+    let space = Space(tempfile::Builder::new().prefix("pse").tempdir().unwrap());
+    let (manifest, _) = simulation(&space, "simulation", false);
+    let mut launcher = spawn_launcher(&manifest);
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        wait_domains(&mut launcher);
+        eventually("E socket", || space.path("e.sock").exists());
+        let out = run_refusal(
+            Command::new(env!("CARGO_BIN_EXE_e_economic_session"))
+                .args(["serve", "--manifest"])
+                .arg(space.path("economic.json"))
+                .arg("--db")
+                .arg(space.path("e.db"))
+                .args(["--epoch", "1"]),
+        );
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert_eq!(out.status.code(), Some(1), "{stderr}");
+        assert!(stderr.contains("独占进程锁不可得"), "{stderr}");
+    }));
+    // 就绪或拒绝断言失败也先让 launcher 回收域进程，再传播失败。
+    let status = launcher
+        .try_wait()
+        .unwrap()
+        .unwrap_or_else(|| stop(&mut launcher));
+    if let Err(panic) = result {
+        std::panic::resume_unwind(panic);
+    }
+    assert_eq!(status.code(), Some(0), "{}", launcher_stderr(&mut launcher));
 }
 
 #[test]
