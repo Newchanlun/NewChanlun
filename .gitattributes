@@ -2,3 +2,4 @@
 *.sh text eol=lf
 .chanlun/block-topology/relations.jsonl filter=lfs diff=lfs merge=lfs -text
 docs/chanlun/text/tiandao/*.pdf filter=lfs diff=lfs merge=lfs -text
+s_session/tests/fixtures/q3-real-s3-w-recover-revise.json filter=lfs diff=lfs merge=lfs -text

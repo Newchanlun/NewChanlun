@@ -60,6 +60,8 @@ pub mod center;
 /// #291（SPEC #274 T1）：中枢生命周期事件机（born/broken/reset，ADR 0001 修正案一·补充二
 /// 「中枢=事件」）。只产事件不产动作；wf8 经 opsem 只读旁路外化，默认零行为变化。
 pub mod center_lifecycle;
+/// #1419 TB-02-E：共用中枢扫描的事实侧车（seed 评估、成立窗口、六变量、单元归属）。
+pub mod center_scan;
 pub mod decompose;
 pub mod descend;
 pub mod divergence;
@@ -81,6 +83,7 @@ pub mod rebase_txn;
 pub mod recursive_tower;
 pub mod ref_v1;
 pub mod rmove_compose;
+pub mod trend_formation;
 /// p118 关④ 小转大显式分类分支：旁挂联合分类 `NestTurnClass`（四类 partition，纯只读派生）。
 pub mod turn_class;
 pub use turn_class::{
