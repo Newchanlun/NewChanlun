@@ -860,12 +860,14 @@ jobs:
             "$tel" cargo test "${args[@]}"
             exit 0
           fi
-          "$tel" cargo test "${args[@]}" --no-run
-          cargo test "${args[@]}" -- --list theta_v0::nautilus:: > "$RUNNER_TEMP/backtest-list"
+          # #1875：窄通道只执行 nautilus 具名锁；依赖编译用 Opt0，完整回退仍用原档。
+          scoped=(--config 'profile.dev.package."*".opt-level=0' test "${args[@]}")
+          "$tel" cargo "${scoped[@]}" --no-run
+          cargo "${scoped[@]}" -- --list theta_v0::nautilus:: > "$RUNNER_TEMP/backtest-list"
           n=$(grep -c ': test$' "$RUNNER_TEMP/backtest-list" || true)
           echo "backtest_bin nautilus tests: $n"
           [ "$n" -gt 0 ] || { echo "::error title=Empty backtest_bin scope::no theta_v0::nautilus tests listed" >&2; exit 1; }
-          "$tel" cargo test "${args[@]}" -- theta_v0::nautilus::
+          "$tel" cargo "${scoped[@]}" -- theta_v0::nautilus::
 
   # #1488：独立运行两种构建的序列与真实 memo 锁，不等待 rust-check 的完整回归。
   # 依赖预取单列为联网步骤；后续 --offline 只约束测试阶段，不代表全程离线。
