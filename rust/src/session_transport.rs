@@ -16,7 +16,7 @@ use std::os::fd::AsRawFd;
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
 use std::sync::{
-    atomic::{AtomicUsize, Ordering},
+    atomic::{AtomicBool, AtomicUsize, Ordering},
     mpsc, Arc,
 };
 use std::time::{Duration, Instant};
@@ -549,7 +549,7 @@ pub fn io_connection(
     count: Arc<AtomicUsize>,
     validate: EnvelopeValidator,
 ) {
-    io_connection_inner(stream, tx, bounds, count, validate, legacy_job)
+    io_connection_inner(stream, tx, bounds, count, validate, legacy_job, None)
 }
 #[cfg(test)]
 fn io_connection_with_deadline(
@@ -559,7 +559,12 @@ fn io_connection_with_deadline(
     count: Arc<AtomicUsize>,
     validate: EnvelopeValidator,
 ) {
-    io_connection_inner(stream, tx, bounds, count, validate, timed_job)
+    io_connection_inner(stream, tx, bounds, count, validate, timed_job, None)
+}
+fn mark_uncertain(flag: &Option<Arc<AtomicBool>>) {
+    if let Some(flag) = flag {
+        flag.store(true, Ordering::SeqCst);
+    }
 }
 fn io_connection_inner<T: Send + 'static>(
     mut stream: UnixStream,
@@ -568,6 +573,7 @@ fn io_connection_inner<T: Send + 'static>(
     count: Arc<AtomicUsize>,
     validate: EnvelopeValidator,
     make_job: fn(Value, mpsc::SyncSender<Value>, Instant) -> T,
+    uncertain: Option<Arc<AtomicBool>>,
 ) {
     struct Release(Arc<AtomicUsize>);
     impl Drop for Release {
@@ -577,25 +583,32 @@ fn io_connection_inner<T: Send + 'static>(
     }
     let _release = Release(count);
     let deadline = Instant::now() + bounds.read;
-    let output = match read_frame(&mut stream, bounds.frame, deadline, validate) {
-        Err(error) => json!({"ok":false,"error":error}),
+    let (accepted_frame, output) = match read_frame(&mut stream, bounds.frame, deadline, validate) {
+        Err(error) => (false, json!({"ok":false,"error":error})),
         Ok(e) => {
             let response_deadline = Instant::now() + bounds.response;
             let (reply_tx, reply_rx) = mpsc::sync_channel(1);
             let job = make_job(e, reply_tx, response_deadline);
             if !enqueue_before_deadline_inner(&tx, job, response_deadline) {
+                mark_uncertain(&uncertain);
                 return;
             }
             // 已入actor后，回包超期只结束此连接；不能撤销/重复权威工作。
             match reply_rx.recv_timeout(response_deadline.saturating_duration_since(Instant::now()))
             {
-                Ok(v) => v,
-                Err(_) => return,
+                Ok(v) => (true, v),
+                Err(_) => {
+                    mark_uncertain(&uncertain);
+                    return;
+                }
             }
         }
     };
     let body = format!("{}\n", canonical_json(&output));
     if body.len() > bounds.frame {
+        if accepted_frame {
+            mark_uncertain(&uncertain);
+        }
         return;
     }
     let deadline = Instant::now() + bounds.write;
@@ -612,6 +625,9 @@ fn io_connection_inner<T: Send + 'static>(
             Ok(n) => sent += n,
         }
     }
+    if accepted_frame && sent < body.len() {
+        mark_uncertain(&uncertain);
+    }
     let _ = stream.shutdown(std::net::Shutdown::Both);
 }
 /// 启动有界输送并在当前线程串行调用域 handler；慢/失联客户不阻塞下一权威工作。
@@ -622,9 +638,15 @@ pub fn serve_unix(
     validate: EnvelopeValidator,
     mut handler: impl FnMut(&Value) -> Value,
 ) -> Result<(), String> {
-    serve_unix_inner(socket, bounds, validate, legacy_job, |job: &Job| {
-        handler(&job.envelope)
-    })
+    serve_unix_inner(
+        socket,
+        bounds,
+        validate,
+        legacy_job,
+        None,
+        None,
+        |job: &Job| handler(&job.envelope),
+    )
 }
 /// New economic domain only: deliver the I/O thread's original response
 /// deadline to the actor as trusted memory context. It is never wire data.
@@ -634,27 +656,74 @@ pub fn serve_unix_with_deadline(
     validate: EnvelopeValidator,
     mut handler: impl FnMut(&Value, Instant) -> Value,
 ) -> Result<(), String> {
-    serve_unix_inner(socket, bounds, validate, timed_job, |job: &TimedJob| {
-        handler(&job.job.envelope, job.response_deadline)
-    })
+    serve_unix_inner(
+        socket,
+        bounds,
+        validate,
+        timed_job,
+        None,
+        None,
+        |job: &TimedJob| handler(&job.job.envelope, job.response_deadline),
+    )
+}
+/// 可控停机版本：`stop` 为真后停止接受新连接，排空已受理请求与应答再返回。
+/// 任一已接帧在排队、等待应答或回写失败时置 `uncertain`，阻止调用方误签干净交接。
+pub fn serve_unix_with_deadline_until(
+    socket: &Path,
+    bounds: TransportBounds,
+    validate: EnvelopeValidator,
+    stop: Box<dyn Fn() -> bool + Send>,
+    uncertain: Arc<AtomicBool>,
+    mut handler: impl FnMut(&Value, Instant) -> Value,
+) -> Result<(), String> {
+    serve_unix_inner(
+        socket,
+        bounds,
+        validate,
+        timed_job,
+        Some(stop),
+        Some(uncertain),
+        |job: &TimedJob| handler(&job.job.envelope, job.response_deadline),
+    )
 }
 fn serve_unix_inner<T: QueuedJob + 'static>(
     socket: &Path,
     bounds: TransportBounds,
     validate: EnvelopeValidator,
     make_job: fn(Value, mpsc::SyncSender<Value>, Instant) -> T,
-    mut handler: impl FnMut(&T) -> Value,
+    stop: Option<Box<dyn Fn() -> bool + Send>>,
+    uncertain: Option<Arc<AtomicBool>>,
+    handler: impl FnMut(&T) -> Value,
 ) -> Result<(), String> {
     // 不擅自unlink既有socket：SIGKILL残留由监督器核路径/PID后清理。
     let listener = UnixListener::bind(socket)
         .map_err(|e| format!("TransportUnavailable：socket绑定失败 {e}"))?;
+    serve_listener_inner(
+        listener, bounds, validate, make_job, stop, uncertain, handler,
+    )
+}
+fn serve_listener_inner<T: QueuedJob + 'static>(
+    listener: UnixListener,
+    bounds: TransportBounds,
+    validate: EnvelopeValidator,
+    make_job: fn(Value, mpsc::SyncSender<Value>, Instant) -> T,
+    stop: Option<Box<dyn Fn() -> bool + Send>>,
+    uncertain: Option<Arc<AtomicBool>>,
+    mut handler: impl FnMut(&T) -> Value,
+) -> Result<(), String> {
+    if stop.is_some() {
+        listener
+            .set_nonblocking(true)
+            .map_err(|e| format!("TransportUnavailable：socket非阻塞设置失败 {e}"))?;
+    }
     let (tx, rx) = mpsc::sync_channel::<T>(bounds.queue);
     let count = Arc::new(AtomicUsize::new(0));
     let accept_bounds = bounds.clone();
-    std::thread::spawn(move || {
-        for incoming in listener.incoming() {
-            let Ok(stream) = incoming else { break };
-            if count
+    let accept_count = count.clone();
+    let accept_uncertain = uncertain.clone();
+    let accept_handle = std::thread::spawn(move || -> Result<(), String> {
+        let spawn_conn = |stream: UnixStream| {
+            if accept_count
                 .try_update(Ordering::SeqCst, Ordering::SeqCst, |n| {
                     if n < accept_bounds.connections {
                         Some(n + 1)
@@ -664,20 +733,107 @@ fn serve_unix_inner<T: QueuedJob + 'static>(
                 })
                 .is_err()
             {
+                mark_uncertain(&accept_uncertain);
                 drop(stream);
-                continue;
+                return;
             }
             let t = tx.clone();
             let b = accept_bounds.clone();
-            let c = count.clone();
-            std::thread::spawn(move || io_connection_inner(stream, t, b, c, validate, make_job));
-        }
+            let c = accept_count.clone();
+            let u = accept_uncertain.clone();
+            std::thread::spawn(move || io_connection_inner(stream, t, b, c, validate, make_job, u));
+        };
+        let exit = if let Some(stop_fn) = stop {
+            let mut pfd = libc::pollfd {
+                fd: listener.as_raw_fd(),
+                events: libc::POLLIN,
+                revents: 0,
+            };
+            loop {
+                if stop_fn() {
+                    break Ok(());
+                }
+                pfd.revents = 0;
+                // SAFETY: pfd 指向当前存活的 UnixListener 有效文件描述符。
+                let ready = unsafe { libc::poll(&mut pfd, 1, 25) };
+                if ready < 0 {
+                    let err = std::io::Error::last_os_error();
+                    if err.kind() == std::io::ErrorKind::Interrupted {
+                        continue;
+                    }
+                    mark_uncertain(&accept_uncertain);
+                    break Err(format!("TransportUnavailable：listener poll失败 {err}"));
+                }
+                if ready == 0 {
+                    continue;
+                }
+                if (pfd.revents & (libc::POLLERR | libc::POLLHUP | libc::POLLNVAL)) != 0 {
+                    mark_uncertain(&accept_uncertain);
+                    break Err(format!(
+                        "TransportUnavailable：listener poll异常状态 {:#x}",
+                        pfd.revents
+                    ));
+                }
+                if stop_fn() {
+                    break Ok(());
+                }
+                match listener.accept() {
+                    Ok((stream, _)) => {
+                        if stream.set_nonblocking(false).is_err() {
+                            mark_uncertain(&accept_uncertain);
+                            continue;
+                        }
+                        spawn_conn(stream);
+                    }
+                    Err(e)
+                        if matches!(
+                            e.kind(),
+                            std::io::ErrorKind::WouldBlock | std::io::ErrorKind::Interrupted
+                        ) =>
+                    {
+                        continue;
+                    }
+                    Err(e) => {
+                        mark_uncertain(&accept_uncertain);
+                        break Err(format!("TransportUnavailable：accept失败 {e}"));
+                    }
+                }
+            }
+        } else {
+            let mut result = Ok(());
+            for incoming in listener.incoming() {
+                match incoming {
+                    Ok(stream) => spawn_conn(stream),
+                    Err(e) => {
+                        mark_uncertain(&accept_uncertain);
+                        result = Err(format!("TransportUnavailable：accept失败 {e}"));
+                        break;
+                    }
+                }
+            }
+            result
+        };
+        drop(listener);
+        drop(tx);
+        exit
     });
     for job in rx {
         let out = handler(&job);
-        let _ = job.result().try_send(out);
+        if job.result().try_send(out).is_err() {
+            mark_uncertain(&uncertain);
+        }
     }
-    Ok(())
+    match accept_handle.join() {
+        Ok(Ok(())) => Ok(()),
+        Ok(Err(error)) => {
+            mark_uncertain(&uncertain);
+            Err(error)
+        }
+        Err(_) => {
+            mark_uncertain(&uncertain);
+            Err("TransportUnavailable：accept线程异常中止".into())
+        }
+    }
 }
 
 #[cfg(test)]
@@ -909,5 +1065,150 @@ mod tests {
             failures, 0,
             "reacquire failed {failures}/{rounds} times with {spawned} concurrent spawns"
         );
+    }
+
+    fn short_socket_dir() -> tempfile::TempDir {
+        tempfile::Builder::new()
+            .prefix("st-")
+            .tempdir_in("/tmp")
+            .unwrap()
+    }
+
+    fn trigger_listener_poll_hup(raw_fd: std::os::fd::RawFd) {
+        let (broken, peer) = UnixStream::pair().unwrap();
+        drop(peer);
+        // SAFETY: raw_fd 仍归 listener 持有；dup2 原子替换底层描述符而不释放 raw_fd 号，
+        // 避免并发线程复用描述符，并使 Linux 与 macOS 的 poll 均稳定返回 POLLHUP。
+        assert_ne!(unsafe { libc::dup2(broken.as_raw_fd(), raw_fd) }, -1);
+        drop(broken);
+    }
+
+    #[test]
+    fn abnormal_listener_shutdown_marks_uncertain_and_returns_error() {
+        let dir = short_socket_dir();
+        let sock = dir.path().join("e.sock");
+        let listener = UnixListener::bind(&sock).unwrap();
+        let raw_fd = listener.as_raw_fd();
+        let uncertain = Arc::new(AtomicBool::new(false));
+        let bounds = TransportBounds {
+            frame: 4096,
+            read: Duration::from_millis(100),
+            write: Duration::from_millis(100),
+            response: Duration::from_millis(100),
+            queue: 2,
+            connections: 2,
+        };
+        let killer = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(40));
+            trigger_listener_poll_hup(raw_fd);
+        });
+        let result = serve_listener_inner(
+            listener,
+            bounds,
+            value_only,
+            timed_job,
+            Some(Box::new(|| false)),
+            Some(uncertain.clone()),
+            |_: &TimedJob| json!({"ok":true}),
+        );
+        killer.join().unwrap();
+        let err = result.unwrap_err();
+        assert!(err.starts_with("TransportUnavailable："), "{err}");
+        assert!(uncertain.load(Ordering::SeqCst));
+    }
+
+    #[test]
+    fn accept_thread_panic_marks_uncertain_and_returns_error() {
+        let dir = short_socket_dir();
+        let sock = dir.path().join("e.sock");
+        let uncertain = Arc::new(AtomicBool::new(false));
+        let bounds = TransportBounds {
+            frame: 4096,
+            read: Duration::from_millis(100),
+            write: Duration::from_millis(100),
+            response: Duration::from_millis(100),
+            queue: 2,
+            connections: 2,
+        };
+        let result = serve_unix_with_deadline_until(
+            &sock,
+            bounds,
+            value_only,
+            Box::new(|| panic!("injected accept thread panic")),
+            uncertain.clone(),
+            |_, _| json!({"ok":true}),
+        );
+        let err = result.unwrap_err();
+        assert!(err.contains("accept线程异常中止"), "{err}");
+        assert!(uncertain.load(Ordering::SeqCst));
+    }
+
+    #[test]
+    fn explicit_stop_returns_ok_and_preserves_clean_uncertain_flag() {
+        let dir = short_socket_dir();
+        let sock = dir.path().join("e.sock");
+        let stop = Arc::new(AtomicBool::new(false));
+        let stop_check = stop.clone();
+        let uncertain = Arc::new(AtomicBool::new(false));
+        let bounds = TransportBounds {
+            frame: 4096,
+            read: Duration::from_millis(100),
+            write: Duration::from_millis(100),
+            response: Duration::from_millis(100),
+            queue: 2,
+            connections: 2,
+        };
+        let stopper = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(40));
+            stop.store(true, Ordering::SeqCst);
+        });
+        let result = serve_unix_with_deadline_until(
+            &sock,
+            bounds,
+            value_only,
+            Box::new(move || stop_check.load(Ordering::SeqCst)),
+            uncertain.clone(),
+            |_, _| json!({"ok":true}),
+        );
+        stopper.join().unwrap();
+        result.unwrap();
+        assert!(!uncertain.load(Ordering::SeqCst));
+    }
+
+    #[test]
+    fn same_tick_poll_hard_error_beats_stop_signal() {
+        let dir = short_socket_dir();
+        let sock = dir.path().join("e.sock");
+        let listener = UnixListener::bind(&sock).unwrap();
+        let raw_fd = listener.as_raw_fd();
+        // 先令 listener 描述符在首次 poll 即返回 POLLHUP；
+        // 同时让 stop_fn 在首轮顶部返回 false、紧随 poll 返回后的同拍检查返回 true，
+        // 证明已观察到的硬错误优先于同拍停止信号，不被吞成清洁退出。
+        trigger_listener_poll_hup(raw_fd);
+        let checks = Arc::new(AtomicUsize::new(0));
+        let checks_in_loop = checks.clone();
+        let uncertain = Arc::new(AtomicBool::new(false));
+        let bounds = TransportBounds {
+            frame: 4096,
+            read: Duration::from_millis(100),
+            write: Duration::from_millis(100),
+            response: Duration::from_millis(100),
+            queue: 2,
+            connections: 2,
+        };
+        let result = serve_listener_inner(
+            listener,
+            bounds,
+            value_only,
+            timed_job,
+            Some(Box::new(move || {
+                checks_in_loop.fetch_add(1, Ordering::SeqCst) >= 1
+            })),
+            Some(uncertain.clone()),
+            |_: &TimedJob| json!({"ok":true}),
+        );
+        let err = result.unwrap_err();
+        assert!(err.contains("listener poll异常状态"), "{err}");
+        assert!(uncertain.load(Ordering::SeqCst));
     }
 }

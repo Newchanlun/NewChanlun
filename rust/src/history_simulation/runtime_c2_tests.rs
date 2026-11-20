@@ -255,3 +255,87 @@ fn authority_request_is_a_common_envelope_and_reply_must_bind_it() {
         }
     }
 }
+
+#[test]
+fn authority_shutdown_write_tolerates_early_peer_close_and_rejects_empty_close() {
+    let dir = tempfile::Builder::new()
+        .prefix("i1407-")
+        .tempdir_in("/tmp")
+        .unwrap();
+    let p: Profile = parse(profile(dir.path(), approved()));
+    let c: ExactCommand = parse(command(approved()));
+    let frame = authority_frame(&p, &p.e, 1, "QueryReleasedExact", &c, None).unwrap();
+    let payload = json!({
+        "protocol": AUTHORITY_WIRE,
+        "session_id": p.session_id,
+        "session_generation": p.session_generation,
+        "authority_id": "E",
+        "authority_epoch": "1",
+        "command_id": "a",
+        "command_hash": hash(&c),
+        "command": c,
+        "state": "ReleasedExact",
+        "receipt_id": "E:a",
+        "release_receipt_id": null,
+        "commit_ns": 0
+    });
+    let signed = reply_envelope(
+        &frame.envelope,
+        payload,
+        "e-schema/1",
+        "session",
+        "1",
+        "e/replies",
+        "e:session",
+        "1",
+    );
+
+    // 对端先写完回复并关闭连接后，客户端半关闭在 BSD/macOS 上返回 ENOTCONN，
+    // 但本端仍须读到缓冲区里的已签回复，而非误报 AuthorityUnavailable。
+    let (mut client, mut server) = UnixStream::pair().unwrap();
+    server
+        .write_all(format!("{}\n", canonical_json(&signed)).as_bytes())
+        .unwrap();
+    drop(server);
+    #[cfg(target_os = "macos")]
+    assert_eq!(
+        client
+            .shutdown(std::net::Shutdown::Write)
+            .unwrap_err()
+            .kind(),
+        std::io::ErrorKind::NotConnected
+    );
+    shutdown_request_write(&client).unwrap();
+    let deadline = Instant::now() + Duration::from_secs(2);
+    let got = read_frame(&mut client, p.max_frame_bytes, deadline, json_frame).unwrap();
+    assert_eq!(got, signed);
+
+    // 对端不等待客户端 EOF、读完换行即写回回复并关闭：端到端 authority() 须稳定成功。
+    let socket = dir.path().join("e");
+    let listener = UnixListener::bind(&socket).unwrap();
+    let reply_bytes = format!("{}\n", canonical_json(&signed)).into_bytes();
+    let fast_server = std::thread::spawn(move || {
+        for _ in 0..8 {
+            let (mut s, _) = listener.accept().unwrap();
+            let mut line = String::new();
+            BufReader::new(&s).read_line(&mut line).unwrap();
+            s.write_all(&reply_bytes).unwrap();
+            drop(s);
+        }
+        // 最后一轮不写任何字节即关闭：必须失败关闭。
+        let (s, _) = listener.accept().unwrap();
+        let mut line = String::new();
+        BufReader::new(&s).read_line(&mut line).unwrap();
+        drop(s);
+    });
+    for _ in 0..8 {
+        let reply = authority(&p, &p.e, 1, "QueryReleasedExact", &c, None).unwrap();
+        assert_eq!(reply.receipt_id, "E:a");
+    }
+    let empty_err = authority(&p, &p.e, 1, "QueryReleasedExact", &c, None).unwrap_err();
+    assert!(
+        empty_err.starts_with("SchemaUnsupported：只接收一个LF终止帧与请求EOF"),
+        "{empty_err}"
+    );
+    fast_server.join().unwrap();
+}

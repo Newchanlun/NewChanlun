@@ -510,6 +510,7 @@ mod tests {
                 server.shutdown(std::net::Shutdown::Write).unwrap();
             });
             let config = Config {
+                intake: Default::default(),
                 manifest: json!({}),
                 manifest_hash: String::new(),
                 db: Default::default(),
@@ -888,6 +889,7 @@ mod revision_tests {
             manifest["protocol_revision"] = revision;
         }
         let config = Config {
+            intake: Default::default(),
             manifest,
             manifest_hash: String::new(),
             db: Default::default(),

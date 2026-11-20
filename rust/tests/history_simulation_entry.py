@@ -8,6 +8,8 @@ import copy, errno, hashlib, json, os, socket, sqlite3, subprocess, sys, tempfil
 from pathlib import Path
 BIN=Path(sys.argv[1]).resolve()
 ROOT=Path(sys.argv[2]).resolve(); ROOT.mkdir(parents=True,exist_ok=True)
+REPAIR = len(sys.argv) == 5 and sys.argv[3] == "capture-repair"
+GENERATION = "1" if REPAIR else "g1"
 def canonical(x): return json.dumps(x,sort_keys=True,separators=(',',':'),ensure_ascii=False)
 def digest(x): return hashlib.sha256(canonical(x).encode()).hexdigest()
 # logical-bar/1: the open bar index X has reached (last committed bar + 1), the only clock E/S may report.
@@ -60,11 +62,16 @@ def check_listening_predicate():
             t2.join(5); assert not t2.is_alive()
         assert ready.exists() and not listening(ready), 'a closed stale socket file is not ready'
     assert not Path(root).exists()
+LAST_EXCHANGE={}
 def request(path,op,payload):
     with socket.socket(socket.AF_UNIX) as s:
         s.settimeout(5); s.connect(str(path)); s.sendall((canonical({'protocol':'x-exact-simulation/1','op':op,'payload':payload})+'\n').encode())
-        s.shutdown(socket.SHUT_WR)
-        r=json.loads(s.makefile('rb').readline())
+        try: s.shutdown(socket.SHUT_WR)
+        except OSError as e:
+            if e.errno!=errno.ENOTCONN: raise
+        raw=s.makefile('rb').readline()
+        r=json.loads(raw)
+    LAST_EXCHANGE.clear(); LAST_EXCHANGE.update(op=op,reply=r)
     if r.get('kind')=='SimulationBatch': CLOCK['bar']=max(CLOCK['bar'],r['bar_index']+1)
     return r
 class Authority:
@@ -77,7 +84,9 @@ class Authority:
             try: c,_=self.sock.accept()
             except OSError: return
             with c:
-                envelope=json.loads(c.makefile('rb').readline()); q=envelope['payload']; self.calls.append(q)
+                with c.makefile('rb') as f:
+                    envelope=json.loads(f.readline()); assert f.read(1)==b''
+                q=envelope['payload']; self.calls.append(q)
                 r={k:q[k] for k in ['protocol','session_id','session_generation','authority_id','authority_epoch','command_id','command_hash','command']}
                 r.update(state='ReleasedExact' if self.role=='E' else 'ExecuteCommitted',receipt_id=self.role+':'+q['command_id'],release_receipt_id=q['release_receipt_id'],commit_ns=CLOCK['bar'])
                 if q['command_id'] in self.compact:
@@ -108,7 +117,7 @@ CONDITIONS=[dict(condition_id=cid,authority_revision=cap,dependency_set=['contro
 def command(change):
     o=change.get('order',change); cid=o['command_id']; family=o['family_id']
     cert=dict(rd11_policy='controlled-fixture-rd11',responsibility_refs=['controlled-responsibility'],structure_dependencies=['controlled-structure'],market_dependencies=['controlled-market'],rule_revision='controlled-rule',conditions=copy.deepcopy(CONDITIONS))
-    return dict(command_id=cid,logical_order_family=family,session_id='session',session_generation='g1',x_id='X',x_epoch=1,symbol='TEST',projection_kind='per_leg',change=change,plan_hash=digest(change),certificate_hash=digest(cert),certificate=cert)
+    return dict(command_id=cid,logical_order_family=family,session_id='session',session_generation=GENERATION,x_id='X',x_epoch=1,symbol='TEST',projection_kind='per_leg',change=change,plan_hash=digest(change),certificate_hash=digest(cert),certificate=cert)
 def batch(i,changes=[]):
     return dict(request_id='b'+str(i),known_frontier_cut='frontier'+str(i),bar=dict(index=i,open=100,low=90,high=110,close=105),capacity=dict(kind='none'),close_changes=changes,scenario_busts=[])
 def run(name):
@@ -118,7 +127,7 @@ def run(name):
     CLOCK['bar']=0; sockets=Path(tempfile.gettempdir())/('i1381-'+str(os.getpid())); sockets.mkdir()
     e=Authority(sockets/'e','E'); s=Authority(sockets/'s','S'); xp=sockets/'x'
     # S's long schema_revision keeps every S request larger than the matching E reply (oversized-frame case below).
-    sim=dict(model=model(),session_id='session',session_generation='g1',x_id='X',source_namespace='x-sim',source_epoch='epoch1',socket=str(xp),e=dict(socket=str(e.path),authority_id='E',authority_epoch='e1',schema_revision='e-authority-fixture/1',reply_namespace='e/replies',producer_id='E:session'),s=dict(socket=str(s.path),authority_id='S',authority_epoch='s1',schema_revision='s-authority-fixture/1#'+'s'*512,reply_namespace='s/replies',producer_id='S:session'),conditions=CONDITIONS,timeout_ms=500,max_frame_bytes=262144)
+    sim=dict(model=model(),session_id='session',session_generation=GENERATION,x_id='X',source_namespace='x-sim',source_epoch='epoch1',socket=str(xp),e=dict(socket=str(e.path),authority_id='E',authority_epoch='e1',schema_revision='e-authority-fixture/1',reply_namespace='e/replies',producer_id='E:session'),s=dict(socket=str(s.path),authority_id='S',authority_epoch='s1',schema_revision='s-authority-fixture/1#'+'s'*512,reply_namespace='s/replies',producer_id='S:session'),conditions=CONDITIONS,timeout_ms=500,max_frame_bytes=262144)
     SIM.clear(); SIM.update(sim)
     profile=dict(profile_revision='x-execution-profile/1',mode='simulation',credential_scope=dict(env='UNUSED_SIMULATION_CREDENTIAL'),history_simulation=sim)
     pp=directory/'profile.json'; pp.write_text(canonical(profile)); db=directory/'x.sqlite'
@@ -189,6 +198,39 @@ def run(name):
             assert json.loads(c.execute("select v from x_sim_meta where k='authority_profile'").fetchone()[0])==sim
     p=start()
     try:
+        if REPAIR:
+            from simulation_capture_repair import exercise
+            submit = dict(kind='submit',order=order('a',quantity=3))
+            assert request(xp,'AcceptExact',command(submit))['state']=='Accepted'
+            assert request(xp,'AdvanceBar',batch(0,[submit]))['originals']==[]
+            alternate = directory / 'alternate-frontier.sqlite'
+            with sqlite3.connect(db.as_uri()+'?mode=ro',uri=True) as src, sqlite3.connect(alternate) as dst:
+                src.backup(dst)
+            # Keep capacity=none so the frontier changes the original documents
+            # without becoming part of a newly formed capacity epoch in State.
+            b1=batch(1)
+            r1=request(xp,'AdvanceBar',b1)
+            assert len(r1['originals'])==2
+            assert request(xp,'AdvanceBar',batch(2))['bar_index']==2
+            assert request(xp,'QueryBatch','b1')==r1
+
+            # Close/reopen the same X authority on an independent snapshot cut
+            # at b0. Only the b1 input frontier differs; real X writes both receipts.
+            p.terminate(); p.wait(5); xp.unlink()
+            db=alternate; p=start()
+            other=request(xp,'AdvanceBar',{**b1,'known_frontier_cut':'different-frontier1'})
+            assert request(xp,'QueryBatch','b1')==other
+            assert r1['state_content_hash']==other['state_content_hash'] and r1!=other
+            p.terminate(); p.wait(5); xp.unlink()
+            db=main_db; p=start()
+            assert request(xp,'QueryBatch','b1')==r1
+
+            before = (len(e.calls), len(s.calls))
+            exercise(Path(sys.argv[4]).resolve(),directory,sockets/'real-e',db,sim,r1,
+                     alternate,other,canonical,digest)
+            assert (len(e.calls), len(s.calls)) == before
+            return
+
         a=dict(kind='submit',order=order('a')); ca=command(a)
         # The production open path holds the S-authorize-once state: WAL and synchronous=FULL, as E's store.
         with sqlite3.connect(db) as c: assert c.execute('PRAGMA journal_mode').fetchone()==('wal',)
@@ -217,7 +259,8 @@ def run(name):
         # Invalid input cannot consume S eligibility or poison Accepted with MayHaveCalled.
         invalid_ohlc=batch(0,[a]); invalid_ohlc['bar']['low']=111
         sibling=copy.deepcopy(a); sibling['order'].update(command_id='a-conflict',eligibility_ref='S:a-conflict')
-        assert request(xp,'AcceptExact',command(sibling))['state']=='Accepted'
+        sibling_reply=request(xp,'AcceptExact',command(sibling))
+        assert sibling_reply.get('state')=='Accepted',(name,sibling_reply)
         invalid_close=batch(0,[a,sibling])
         invalid_bust=batch(0,[a]); invalid_bust['scenario_busts']=[dict(exec_id='missing',quantity=1,scenario_ref='missing')]
         before=len(s.calls)
@@ -446,11 +489,24 @@ def run(name):
         assert blocked.returncode!=0 and b'InvalidDomain' in blocked.stderr
         print(name+': PASS '+('test runtime with post-claim exit43' if fixture else 'production X binary')+', invalid input stays Accepted, unsent S failures stay Accepted, sent-but-unknown stays query-only, S reply loss/query-only recovery, unique S authorization, pending epoch2 rejected without writes, full fee/bust replay, frozen binding, atomic first initialization recovery')
         return tables
+    except Exception:
+        log.flush()
+        x_log=(directory/'x.log').read_text(errors='replace')
+        sys.stderr.write(
+            f"\n[diag:{name}] last_exchange={LAST_EXCHANGE!r}\n"
+            f"[diag:{name}] p_poll={p.poll()!r} e_alive={e.thread.is_alive()} s_alive={s.thread.is_alive()} "
+            f"e_calls={len(e.calls)} s_calls={len(s.calls)} sockets={str(sockets)!r}\n"
+            f"[diag:{name}] x.log:\n{x_log}\n"
+        )
+        raise
     finally:
         if p.poll() is None: p.terminate(); p.wait(5)
         log.close(); e.sock.close(); s.sock.close()
         for file in sockets.iterdir(): file.unlink()
         sockets.rmdir()
-check_listening_predicate()
-a=run('run-a'); b=run('run-b'); assert a==b, 'fresh process X tables differ'
-print('PASS two fresh processes: byte-identical X tables')
+if REPAIR:
+    run('capture-repair')
+else:
+    check_listening_predicate()
+    a=run('run-a'); b=run('run-b'); assert a==b, 'fresh process X tables differ'
+    print('PASS two fresh processes: byte-identical X tables')
