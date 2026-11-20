@@ -34,6 +34,22 @@ const cleanPath = (path: string) => !path.includes("\\") && !path.includes("\0")
 const externalPath = text.refine(path => isAbsolute(path) && cleanPath(path));
 const repoPath = text.refine(path => !isAbsolute(path) && cleanPath(path));
 
+// Zod 4 在 strictObject 中也会忽略此键；AT-18 的封闭格式不能丢字段后再校验。
+const rejectProtoKey = z.unknown().superRefine((value, ctx) => {
+  const pending = [value];
+  const seen = new Set<object>();
+  for (const item of pending) {
+    if (item === null || typeof item !== "object" || seen.has(item)) continue;
+    if (Object.hasOwn(item, "__proto__")) {
+      ctx.addIssue({ code: "custom", message: "未声明的 __proto__ 键。" });
+      return;
+    }
+    seen.add(item);
+    for (const field of Object.values(item)) pending.push(field);
+  }
+});
+const deliveredManifest = rejectProtoKey.pipe(deliveryManifestSchema);
+
 export const manifestRefSchema = z.strictObject({
   ticket: integer, base: sha, head: sha, manifest_path: externalPath, manifest_sha256: digest,
 });
@@ -174,7 +190,7 @@ const coverageObservation = z.strictObject({
   kind: z.enum(["story", "family", "detail"]), id: text, slices: z.array(z.strictObject({ tb_id: tbId, proof })),
   deferred_gates: z.array(z.strictObject({ gate: z.enum(coverageGates), boundary: proof })).optional(),
 });
-export const observationsSchema = z.strictObject({
+export const observationsSchema = rejectProtoKey.pipe(z.strictObject({
   production_enabled: z.boolean(), bounded_domain_statement: text,
   destinations: z.array(z.strictObject({
     id: integer, ...collected, tickets: z.array(ticketScope).optional(), commits: z.array(sha).optional(),
@@ -197,7 +213,7 @@ export const observationsSchema = z.strictObject({
   post_gate: classSlot(postObservation.optional()).optional(),
   unexecuted: z.array(unexecuted).optional(),
   permission_blocked: z.array(permissionBlocked).optional(),
-});
+}));
 export type At18Observations = z.infer<typeof observationsSchema>;
 
 export interface At18Source {
@@ -309,8 +325,8 @@ function hashMatches(value: { content_hash: string }, ctx: z.RefinementCtx) {
   ctx.addIssue({ code: "custom", path: ["content_hash"], message: "content_hash 与规范化内容不符。" });
 }
 
-export const at18InputBundleSchema = bundleShape.superRefine(hashMatches);
-export const at18ReportSchema = reportShape.superRefine((report, ctx) => {
+export const at18InputBundleSchema = rejectProtoKey.pipe(bundleShape.superRefine(hashMatches));
+export const at18ReportSchema = rejectProtoKey.pipe(reportShape.superRefine((report, ctx) => {
   const wrong = (field: string) => ctx.addIssue({ code: "custom", path: [field], message: "固定项顺序或槽位编码不符。" });
   if (report.destinations.some((d, i) => d.id !== destinationIds[i] || (d.id === 5) !== (d.permission_evidence !== null))) wrong("destinations");
   if (report.tb_summaries.some((tb, i) => tb.tb_id !== tbIds[i] || tb.ticket !== tbTickets[tbIds[i]] ||
@@ -325,7 +341,7 @@ export const at18ReportSchema = reportShape.superRefine((report, ctx) => {
     [...report.destinations, ...report.tb_summaries].some(r => (r.evidence_by_class.production !== null) !== enabled) ||
     report.tb_summaries.slice(-1).some(tb => Object.values(tb.evidence_by_class).some(refs => refs?.length))) wrong("post_gate_records");
   hashMatches(report, ctx);
-});
+}));
 
 function schemaValue<T>(value: unknown, schema: z.ZodType<T>): T {
   const parsed = schema.safeParse(value);
@@ -351,7 +367,7 @@ export function deriveJson<T>(bytes: Buffer, schema: z.ZodType<T>, canonicalize 
 export function readOwnManifest(source: At18Source, path: string): DeliveryManifest {
   if (!externalPath.safeParse(path).success) throw new At18BootstrapError("INVALID_MANIFEST", "自身 manifest 须使用仓外绝对路径。");
   try {
-    const manifest = deriveJson(deriveBytes(() => source.readExternal(path)), deliveryManifestSchema);
+    const manifest = deriveJson(deriveBytes(() => source.readExternal(path)), deliveredManifest);
     if (manifest.ticket !== 1391) throw new At18DerivationError("SCHEMA", "自身 manifest.ticket 须为 1391。");
     return manifest;
   } catch (error) {
@@ -403,7 +419,7 @@ export function generateAt18({ manifest, observations: obs, source, originMain, 
   for (const manifest_path of obs.external_manifests ?? []) {
     const loaded = derive(`external_manifests:${manifest_path}`, () => {
       const bytes = external(manifest_path);
-      return { manifest: deriveJson(bytes, deliveryManifestSchema), manifest_sha256: byteSha256(bytes) };
+      return { manifest: deriveJson(bytes, deliveredManifest), manifest_sha256: byteSha256(bytes) };
     });
     if (!loaded) continue;
     const { ticket, base, head } = loaded.manifest;

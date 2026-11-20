@@ -316,6 +316,9 @@ test("AT-18 交付 schema 拒绝未知键、错版本、错摘要和不合法 PA
   }
   const extraNested = { ...out.inputBundle!, spec_ref: { ...out.inputBundle!.spec_ref, extra: true } };
   assert.equal(at18InputBundleSchema.safeParse(withHash(extraNested)).success, false);
+  const hidden = structuredClone(out.inputBundle!);
+  Object.defineProperty(hidden.spec_ref, "__proto__", { value: true, enumerable: true });
+  assert.equal(at18InputBundleSchema.safeParse(hidden).success, false);
   const failedCheck = { scope: "a", check_id: "A", detail: "a", evidence_ref: null };
   assert.equal(at18ReportSchema.safeParse(withHash({ ...out.report, failed_checks: [failedCheck] })).success, false);
   assert.equal(at18ReportSchema.safeParse(withHash({ ...out.report, overall_result: "FAIL" })).success, false);
