@@ -352,6 +352,7 @@ import hashlib,json,struct;h=hashlib.sha256();v=[None,-2**63,2**63-1,'中\0é\n"
 index实体与容量许可随index释放
 ingest-3 须与全程 16M 对照组同路
 init 不应写内容节点
+injected accept thread panic
 injected write failure
 intern命中不重复签共享块费，临时复制已释放
 issue1527 31Q TestOnly：故意使登记锁中毒
