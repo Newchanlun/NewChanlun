@@ -1312,9 +1312,14 @@ def run_target(rust: Path, target_dir: Path, output: Path, target: str, mode: st
     report["targets"][target] = result
     try:
         args = ["--lib"] if target == "lib" else ["--bin", "s_structure_session"]
+        config_args = []
+        if target == "bin" and os.environ.get("CI_1488_BIN_OPT_LEVEL1") == "1":
+            # #1875：只对 bin 目标开本仓 opt-level=1（保留 debug-assertions 与 overflow-checks），
+            #   避免重编 --lib 全部 3700+ 单测；与 Step 1 的 --bin 构建共用同一产物哈希。
+            config_args = ["--config", "profile.dev.package.newchan_rust.opt-level=1"]
         build_log = output / f"{target}-build.log"
         # #1875：经 cargo-eacces-retry.sh 执行，Boat 上 build-script EACCES / rlib rename EXDEV 偶发时只重试一次（其余失败原样返回）。
-        command = [str(rust.parent / ".github/scripts/cargo-eacces-retry.sh"), "cargo", "test", "--offline", "--locked", "-j", "6", "--features",
+        command = [str(rust.parent / ".github/scripts/cargo-eacces-retry.sh"), "cargo", *config_args, "test", "--offline", "--locked", "-j", "6", "--features",
                    FEATURES[mode], "--no-run", "--message-format=json", *args]
         if run_logged(command, rust, build_log, result["commands"]) != 0:
             raise ValueError("cargo编译失败；不得寻找或执行旧二进制")
