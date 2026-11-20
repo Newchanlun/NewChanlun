@@ -4,8 +4,8 @@
   "asOf": "2026-11-20",
   "round": 3,
   "sourceCommit": "b9d898dccf46c2a716115eaa1215bc39c458a959",
-  "implementationHead": "271f3fbef99d3bbdffb4581f2610eb3679c6468b",
-  "priorReviewCommit": "4c4b472039132fec54758f54bd24a0c3443cd92a",
+  "implementationHead": "16b9820f0266e43c768a35a4d4994696ea8eb820",
+  "priorReviewCommit": "7b4bd1e537a649cdb06e646f1285c58dde1ce246",
   "parsed": true,
   "problems": [],
   "points": [
@@ -15,13 +15,6 @@
       "question": "A 已结算、B 开放且当前严格外缘分离时，原文如何称说，本仓能否发布正式趋势？",
       "queries": [
         {
-          "channel": "repo",
-          "query": "第二个(同级别)?(走势)?中枢|构成趋势|开放期|未结算.{0,20}(趋势|形成)",
-          "command": "rg -n --max-columns 450 --max-columns-preview '第二个(同级别)?(走势)?中枢|构成趋势|开放期|未结算.{0,20}(趋势|形成)' analysis/ docs/ .chanlun/",
-          "hits": 122,
-          "result": "122 行"
-        },
-        {
           "channel": "tracker",
           "query": "\"第二个中枢\" OR \"构成趋势\" OR \"开放期\" in:title,body,comments",
           "command": "gh issue list -R Newchanlun/NewChanlun --state all --limit 30 --search '\"第二个中枢\" OR \"构成趋势\" OR \"开放期\" in:title,body,comments' --json number,title,state,url",
@@ -30,92 +23,60 @@
         },
         {
           "channel": "repo",
-          "query": "第二个同级别中枢|形成两个依次同向|中枢的新生|第二个中枢",
-          "command": "rg -n --max-columns 450 --max-columns-preview '第二个同级别中枢|形成两个依次同向|中枢的新生|第二个中枢' analysis/ docs/ .chanlun/",
-          "hits": 94,
-          "result": "94 行"
-        },
-        {
-          "channel": "tracker",
-          "query": "\"第二个同级别中枢\" OR \"形成两个依次同向\" OR \"中枢的新生\" in:title,body,comments",
-          "command": "gh issue list -R Newchanlun/NewChanlun --state all --limit 30 --search '\"第二个同级别中枢\" OR \"形成两个依次同向\" OR \"中枢的新生\" in:title,body,comments' --json number,title,state,url",
-          "hits": 1,
-          "result": "#2114 OPEN"
+          "query": "博文普查 F／N／O／C／A／X 的候选与归类（固定原件）",
+          "command": "git show 306933f403addfca57c0a417aa92ddfd5e29bc1c:.chanlun/review-results/issue2114-corpus-sweep/CORPUS.md",
+          "hits": 384,
+          "result": "F 12 / N 42 / O 92 / C 62 / A 44 / X 132；另列 29 条剔除，实际采用的条目与已知边界见 Q1。"
         },
         {
           "channel": "repo",
-          "query": "中枢完成前|一个中枢的完成|第二个中枢的前三段",
-          "command": "rg -n --max-columns 450 --max-columns-preview '中枢完成前|一个中枢的完成|第二个中枢的前三段' analysis/ docs/ .chanlun/",
+          "query": "「确认／确立」换词复核（第三稿独审的命令，仅作对账，不以它代替普查）",
+          "command": "rg -n '确认.{0,14}(下跌|上涨|趋势|升势|跌势)|(下跌|上涨|趋势|升势|跌势).{0,10}(的确认|得到确认|被确认|确立|确认了)' docs/chanlun/text/blog/",
           "hits": 11,
-          "result": "11 行"
-        },
-        {
-          "channel": "tracker",
-          "query": "\"中枢的完成\" OR \"中枢完成前\" OR \"第二个中枢的前三段\" in:title,body,comments",
-          "command": "gh issue list -R Newchanlun/NewChanlun --state all --limit 30 --search '\"中枢的完成\" OR \"中枢完成前\" OR \"第二个中枢的前三段\" in:title,body,comments' --json number,title,state,url",
-          "hits": 1,
-          "result": "#2114 OPEN"
-        },
-        {
-          "channel": "repo",
-          "query": "形成了|才算(下跌|上涨)|第二个(同级别)?(走势)?中枢|第二[个個]?中[枢樞]|是否延续|演化成",
-          "command": "rg -n --max-columns 450 --max-columns-preview '形成了|才算(下跌|上涨)|第二个(同级别)?(走势)?中枢|第二[个個]?中[枢樞]|是否延续|演化成' docs/chanlun/text/blog/",
-          "hits": 151,
-          "result": "151 行"
-        },
-        {
-          "channel": "repo",
-          "query": "(趋势|升势|跌势|上涨|下跌).{0,18}(成立|形成|走出来|尚未|不算)|(成立|形成|才算|就是|构成).{0,20}(趋势|升势|跌势|上涨|下跌)|两[个個](同级别)?(走势)?中枢",
-          "command": "rg -n --max-columns 450 --max-columns-preview '(趋势|升势|跌势|上涨|下跌).{0,18}(成立|形成|走出来|尚未|不算)|(成立|形成|才算|就是|构成).{0,20}(趋势|升势|跌势|上涨|下跌)|两[个個](同级别)?(走势)?中枢' docs/chanlun/text/blog/",
-          "hits": 431,
-          "result": "431 行"
+          "result": "019:1160、019:524、021:42、047:30、051:102、068:154、086:104、091:130、100:100、100:34、102:428"
         }
       ],
       "hits": [
         {
-          "source": "docs/chanlun/text/blog/036-第36课.md:26,30",
-          "excerpt": "实案 2892 > 2888；有效突破前仍可扩展，第二枢尚未走完可当下组合。"
+          "source": "docs/chanlun/text/blog/020-第20课.md:34；035-第35课.md:122；036-第36课.md:26；060-第60课.md:44；068-第68课.md:154；073-第73课.md:100；074-第74课.md:56；088-第88课.md:92；099-第99课.md:196；102-第102课.md:238；106-第106课.md:186；107-第107课.md:32",
+          "excerpt": "F：普查 12 条全纳入并区分直接称谓、条件式、操作定义和无几何的旁证；核心例为后枢在震荡仍称上涨类型确立。"
         },
         {
-          "source": "docs/chanlun/text/blog/102-第102课.md:238",
-          "excerpt": "1 分钟下跌已形成；B 尚可反向三买或走 c 再标准背驰。"
+          "source": "docs/chanlun/text/blog/019-第19课.md:524；025-第25课.md:306,308；037-第37课.md:20；058-第58课.md:34；059-第59课.md:42；091-第91课.md:130；100-第100课.md:24,34",
+          "excerpt": "N：按新方向数两枢；前枢无三卖不百分百确定；第二枢种子未完成或最终分离未见，都不能冒充已见条件。c 条件限于趋势背驰。"
         },
         {
-          "source": "docs/chanlun/text/blog/035-第35课.md:122",
-          "excerpt": "当下 30 分钟上涨；是否延续、是否演化为更大中枢仍待。"
+          "source": "docs/chanlun/text/blog/020-第20课.md:24,32；036-第36课.md:26,30；060-第60课.md:44,50,114；068-第68课.md:154 → 070-第70课.md:80 → 071-第71课.md:102,122；073-第73课.md:100／074-第74课.md:56 → :100；080-第80课.md:465；092-第92课.md:58,62",
+          "excerpt": "O：触及前枢或九段升级改读更大中枢；区分同级组合作为当下读法、后续更级与原结构主张失效。"
         },
         {
-          "source": "docs/chanlun/text/blog/025-第25课.md:304–308",
-          "excerpt": "新下跌自身第二枢才算下跌；不能借旧上涨 A。"
-        },
-        {
-          "source": "docs/chanlun/text/blog/020-第20课.md:32",
-          "excerpt": "完成前波动仍可触及前枢形成更大级别枢。"
-        },
-        {
-          "source": "docs/chanlun/text/blog/041-第41课.md:317–319",
-          "excerpt": "读者问是否仅看前三段；缠师答完成与三类点关联，延伸即未完成。"
+          "source": "docs/chanlun/text/blog/018-第18课.md:64；037-第37课.md:18；041-第41课.md:319；051-第51课.md:314；068-第68课.md:150",
+          "excerpt": "C：等完成首回抽给中枢结算；标准背驰仍等 B 的同向三类点；并未规定作者只能在此后称趋势。"
         },
         {
           "source": "https://github.com/Newchanlun/NewChanlun/issues/1426#issuecomment-7041670512",
-          "excerpt": "同一前 111 根，普通续流可在第 202 根扩展。"
+          "excerpt": "同前 111 根合法分叉至 202，对的 ID/核心/连接保留，外缘叶从新生改扩展。"
         }
       ],
-      "citation": "018:42,44；025:304–308；035:122；036:26,30；078:166；099:196,200；102:238；105:468；020:32；041:319；#1426 c7041670512",
-      "reasoning": "原文有当下趋势叫法与可变几何；并无二者等于逐 bar 正式类型信号的合同。只比较发布候选：111→202 保持身份却翻叶，故不可将普通发展制造为正式首证撤回。#799/ADR 0041 裁定二不容同一判断两档；当下读法仍有效。",
-      "recommended": "采候选 3：开放切面发布观察，双 R5 且严格分离的真实相邻首对才给正式类型。下列记录列足正反语料。",
+      "citation": "archaeology.md Q1（F／N／O／C／A／X 四步核）；100:24,34；068:150,154；091:130；020:32；036:26,30；060:44,50,114；#1426 c7041670512",
+      "reasoning": "缠师明用形成、确认、确立描述当下走势，100:34 成前枢三卖的一支与 111 开放 B 的宽档同点；020:32 和现实续流可推翻当下读法，C08 失效轴不承接普通发展。取双 R5 且合法 Zn 分离作为类型首证，原文语义和发布事件分层。",
+      "recommended": "候选 3。只观察：开放期严格分离（当下读法；TrendFormed 未发）；同一构造及输入版本的双 R5 首证才发布 TrendFormed。",
       "searchedKeywords": [
-        "第二个(同级别)?(走势)?中枢|构成趋势|开放期|未结算.{0,20}(趋势|形成)",
         "\"第二个中枢\" OR \"构成趋势\" OR \"开放期\" in:title,body,comments",
-        "第二个同级别中枢|形成两个依次同向|中枢的新生|第二个中枢",
-        "\"第二个同级别中枢\" OR \"形成两个依次同向\" OR \"中枢的新生\" in:title,body,comments",
-        "中枢完成前|一个中枢的完成|第二个中枢的前三段",
-        "\"中枢的完成\" OR \"中枢完成前\" OR \"第二个中枢的前三段\" in:title,body,comments",
-        "形成了|才算(下跌|上涨)|第二个(同级别)?(走势)?中枢|第二[个個]?中[枢樞]|是否延续|演化成",
-        "(趋势|升势|跌势|上涨|下跌).{0,18}(成立|形成|走出来|尚未|不算)|(成立|形成|才算|就是|构成).{0,20}(趋势|升势|跌势|上涨|下跌)|两[个個](同级别)?(走势)?中枢"
+        "博文普查 F／N／O／C／A／X 的候选与归类（固定原件）",
+        "「确认／确立」换词复核（第三稿独审的命令，仅作对账，不以它代替普查）"
       ],
-      "gap": "",
-      "conflict": "第 1 轮未处理同状态称「形成」的原句；第 2 轮把技术边界标成 [旧缠论]，与这些原句相悖。"
+      "gap": "17-56课含中枢而不含趋势词的约437行未读；0-16课未查；57-108课回复区不含中枢或走势类型的行未查。",
+      "conflict": "开放当下读法与 C08 正式发布证据的稳固性不同；对外不得以否定趋势读法替代未发事件。",
+      "corpusCounts": {
+        "F": 12,
+        "N": 42,
+        "O": 92,
+        "C": 62,
+        "A": 44,
+        "X": 132,
+        "rejected": 29
+      }
     },
     {
       "id": "Q2",
@@ -267,7 +228,7 @@
       ],
       "hits": [
         {
-          "source": "rust/src/theta_v0/classifier/trend_formation.rs@271f3fbe:45–57,136–173",
+          "source": "rust/src/theta_v0/classifier/trend_formation.rs@16b9820f:58–69,145–185",
           "excerpt": "PairState 已有观察、扩展交接、升级待定；本票划定实例发布侧适用域。"
         },
         {
@@ -279,9 +240,9 @@
           "excerpt": "仅待升级不宣告中枢不存在。"
         }
       ],
-      "citation": "#2114；#1426／271f3fbe；#1340 CC-020/023/024/025；#1429 c6152239745",
+      "citation": "#2114；#1426／16b9820f；#1340 CC-020/023/024/025；#1429 c6152239745",
       "reasoning": "先有单枢实例；B 合法新生时五叶可知，形成门未证；实例生命周期、关系几何与知识状态分别输出，避免实例回退、五叶变六叶和下游把关系当正式趋势。",
-      "recommended": "ProvisionalSeparation 含观察方向、不准入，五叶独立，同实例 FORMED_OPEN 不回退；扩展或待升级只按适用域交接。",
+      "recommended": "对外开放期严格分离（当下读法；TrendFormed 未发）；观察不准入，CC-025 保持 FORMED_OPEN；正式交接限待证首对，核心未严格分离给 CoreNotStrictlySeparated，非首对只暴露 CC-020。",
       "searchedKeywords": [
         "ProvisionalSeparation|开放期严格分离|FORMED_OPEN|暂态|观察.{0,8}准入",
         "\"ProvisionalSeparation\" OR \"开放期严格分离\" OR \"待升级\" in:title,body,comments"
@@ -323,13 +284,13 @@
           "excerpt": "待升级中枢对保有 ID、连接；叶与方向为空。"
         },
         {
-          "source": "rust/src/bin/s_session_v3/content_structure.rs@271f3fbe:2790–2816",
+          "source": "rust/src/bin/s_session_v3/content_structure.rs@16b9820f:2790–2816",
           "excerpt": "既有关系变更为 pending_upgrade、leaf_revised 等；不是 PairState。"
         }
       ],
       "citation": "#1340 C02.3–.5、C08.2/.5/.6、AT-04；ADR 0051 §三、ADR 0038 §三；#1429 c6990012358；#1621",
       "reasoning": "结构几何证齐所在的输入前沿与 S 实际提交、接收分列；旧 AsKnown 固定。普通发展保留同一有效关系，可变的是叶或证据；失效才追加撤回，替代在当前提交。#1429 未决和已证明失效是两种状态。",
-      "recommended": "同身份原主张有效则修订；失效才撤；待升级保留旧对叶暂空；更早重算锚只在 RecomputedWithRevision。",
+      "recommended": "同身份有效修订，失效才撤；待升级保留原身份。#1429 有实际合规归属事实时原子版本替代，缺归属不撤；更早重算只写 RecomputedWithRevision。",
       "searchedKeywords": [
         "known_at|AsKnown|RecomputedWithRevision|修订.{0,8}撤回",
         "\"known_at\" \"撤回\" OR \"C08\" \"撤回\" in:title,body,comments"
@@ -425,5 +386,7 @@
       "gap": "",
       "conflict": ""
     }
-  ]
+  ],
+  "attempt": "redo-1",
+  "corpusCommit": "306933f403addfca57c0a417aa92ddfd5e29bc1c"
 }
