@@ -13,6 +13,7 @@
 - [ADR 0039 三.1–4](0039-production-entry-inventory-and-unique-launcher.md#三唯一正式-launcher-的-seam)（:273–287）规定正式 launcher、逐域写者锁和权限边界。#1818 的[已裁规则](https://github.com/Newchanlun/NewChanlun/issues/1818#issuecomment-6550813315)与 [ADR 0059 第 1–10 条](0059-production-session-layout-contract.md#裁定)（:95–121）定义 S 测量域 M，保留 S 自己在 driver open 后直绑的例外，并把残留处置留给 #1823。此处只给 **M 外**的 S 增加退役，不改 M 判据。
 - [SPEC #1340 C09.3–11](https://github.com/Newchanlun/NewChanlun/blob/efc1ddc4d6c015f4f8c6d44f904d704a88308b46/.chanlun/review-results/issue1339-r2-spec-20260909/view/spec/SPEC.md#L326-L334) 与 [INTERFACE-CONTRACTS:62](https://github.com/Newchanlun/NewChanlun/blob/efc1ddc4d6c015f4f8c6d44f904d704a88308b46/.chanlun/review-results/issue1339-r2-spec-20260909/view/spec/INTERFACE-CONTRACTS.md#L57-L62) 保留域独立、先恢复本地权威再供读取、真实发送隔离、长期责任、升级和回退约束。
 - [#1823 的观测](https://github.com/Newchanlun/NewChanlun/issues/1823#issuecomment-6687775294)、[SAFE 原件](https://github.com/Newchanlun/NewChanlun/blob/cc674e88768c6386ad58c6480b815dd9fb860221/.chanlun/review-results/issue2079-decision-inputs-r3/sources/1823-safe-original.md) 与[并发条件](https://github.com/Newchanlun/NewChanlun/issues/1823#issuecomment-6994092216)：最后一次预核后路径仍可换主，不能核完 inode 再按名删除。SAFE-STALE 的“清理”在此指改名退役，新测试用域锁和钉住的对象取代 PID/boot/start-time 链。SAFE-LIVE、UNKNOWN、RACE、ADMISSION 的负控照保留。
+- [#1372 PY-XR-02 的限定复核](https://github.com/Newchanlun/NewChanlun/blob/b9d898dccf46c2a716115eaa1215bc39c458a959/.chanlun/review-results/issue1372-tb01c-20260913/reports/python-cross-review-fix-01/REVIEW.md#L8)验证了旧控制器的已停止记录、登记身份、拒绝连接及删前复核。保留未知与存活对象必须被拒的判据，不沿用按名删除：复核与删除之间没有排他保证。
 - [ADR 0041 授权边界](0041-degrees-of-freedom-configurable-not-excluded.md#授权来源与生效边界1909--pr-19152026-11-07)（:39–48）与 [#799 收敛通则](../agents/doctrine-rules.md#收敛通则同一判断不得有宽严两档799-裁定2026-07-30)（:43–54）：端点资格、域库准入各自成立，不能用一个门的证据替代另一个门，也不在拒绝后换宽路。
 
 ## 三、候选
@@ -25,10 +26,12 @@
 
 ### 端点
 
-1. **唯一写者。** 对 S、E、各 B 以及带本地监听的 simulation X，端点名 `k` 只由持有本域实际 `<db>.writer.lock` 的进程 bind 或退役。锁从 bind 前持到监听 FD 关闭。正式 S driver 的 WriterScope、E/B CLI 的 guard、X 的 guard 已经先于现行 bind 获得；#1411 将认领与开始接纳拆开，沿用同一把锁，不给 transport 新建一把锁。`b9d898dc` 的通用 acceptor 将监听器交给线程却不显式 join；不能把这当作关闭顺序的证明。沿用 #2077 的 join，再统一保证所有返回路径先关闭监听再释放 guard。launcher、客户端和其他域不创建、不移动、不删除 `k`。
-2. **只认两项内核证据。** 持锁证明前代不再占有本域写者资格；有残留时，还必须对钉住的那个对象作 `AF_UNIX/SOCK_STREAM` 非阻塞 connect，且只接受 `ECONNREFUSED`。获得锁不证明前代 PID 已从系统消失，也不证明真实场所发送者已隔离。锁冲突沿用 S 的 `StaleWriter：S独占进程锁不可得`（保留 admission 包装）与 E/B/X 的 `StaleWriter：{domain_name}独占进程锁不可得：{e}`。不得等待或终止旧进程，不读 PID、boot ID、时间、日志或 launcher 事件来放行。
-3. **适用前提在认领前判定。** 仅 Linux，且 `openat2(RESOLVE_NO_SYMLINKS)`、同目录 `renameat2(RENAME_NOREPLACE)`、`O_PATH`、`/proc/self/fd` 可用。`k` 为绝对路径，逐段无 `.`、`..`，以无链接的 `openat2` 将其父目录打开为可 fsync 的目录 FD `d`。`fstat(d)` 的属主是 euid，组和其他位均不可写。只对 S，再核 `canon(parent(k))` 不命中 ADR 0059 第 4 条的三款；M 用规范库路径及 `--admission-job-limits` 推导，未核明算不适用。不满足这些适用条件时，保留旧合同：有对象按占用拒绝，空址直接 bind，不建 owner、不动残留。非 Linux 不做新认领；第 9 条的库门仍对所有平台生效。系统不提供所需接口时才沿旧合同；开始认领后文件系统不支持 `NOREPLACE`、核验或写入失败，一律拒绝，不回到直绑。适用时，检查和动作都相对 `d`；bind 的地址是 `/proc/self/fd/<d>/<basename>`，对外的 `k` 字节不变。
-4. **一个 owner 文件。** `<basename>.owner` 位于 `d`、权限 `0600`；规范 JSON 恰有四键：`schema="endpoint-owner/1"`、`socket=k`、`writer_lock` 为持有 guard 打开的锁的绝对路径、`bound` 为 `null` 或含 `dev`、`ino`、`ctime_ns` 的对象（十进制字符串，无损比较）。普通文件、euid、单链接、模式 `0600`、规范解析且前三项逐字节相符才算“我”。读时钉住条目并核类型，不能跟随目录内链接。持锁者首建用 `O_CREAT|O_EXCL|O_NOFOLLOW`，写完 fsync 文件和目录。更新只写同一个已钉住、复核为普通文件的 FD（从 `/proc/self/fd` 重新打开，核 dev/ino 后才写和截断），并 fsync；不得按目录名覆盖、删除 owner 或用临时文件覆盖目标。写前、写后核 owner 名仍对应该 inode；异常退出使 JSON 半写或不可读即按“非我”拒绝，交 #2130；没有备用 owner。这样即使有人把 owner 名换入 socket，更新也不会删除、截断或覆盖它。
+1. **唯一写者。** 对 S、E、各 B 以及带本地监听的 simulation X，端点名 `k` 只由持有本域实际 `<db>.writer.lock` 的进程 bind 或退役。guard 在 bind 前取得，覆盖整个服务期以及监听 FD 关闭、E/B 关库标记事务提交（如有）和域库关闭，最后才释放。正式 S driver 的 WriterScope、E/B CLI 的 guard、X 的 guard 已经先于现行 bind 获得；#1411 将认领与开始接纳拆开，不给 transport 新建一把锁。`b9d898dc` 的通用 acceptor 将监听器交给线程却不显式 join；沿用 #2077 的 join，并在所有返回路径保证上述关闭顺序。`production_session`、客户端和其他域不创建、不移动、不删除 `k`。
+2. **只认两项内核证据。** 取得同一锁文件对象的内核锁，证明前代已不持有这把写者锁；锁文件不得在持有期间被替换。获得锁不证明前代 PID 已消失（[#1895](https://github.com/Newchanlun/NewChanlun/issues/1895#issuecomment-6727386306)），也不证明真实场所发送者已隔离。退役残留还必须对钉住的对象作 `AF_UNIX/SOCK_STREAM` 非阻塞 connect，且只接受 `ECONNREFUSED`。锁冲突沿用 S 的 `StaleWriter：S独占进程锁不可得`（保留 admission 包装）与 E/B/X 的 `StaleWriter：{domain_name}独占进程锁不可得：{e}`。不得等待或终止旧进程，不读 PID、boot ID、时间、日志或 launcher 事件来放行。
+3. **适用前提在认领前判定。** 仅 Linux，且 `openat2(RESOLVE_NO_SYMLINKS)`、同目录 `renameat2(RENAME_NOREPLACE)`、`O_PATH`、`/proc/self/fd` 可用。`k` 为绝对路径，逐段无 `.`、`..`，以无链接的 `openat2` 将其父目录打开为可 fsync 的目录 FD `d`。`fstat(d)` 的属主是 euid，组和其他位均不可写；`fstatfs(d)` 的类型限 ext 家族、XFS、Btrfs 或 tmpfs。前三种是本合同的本地持久文件系统；overlayfs 不证明底层位于本机。S 还核 `canon(parent(k))` 不命中 ADR 0059 第 4 条的三款；M 用规范库路径及 `--admission-job-limits` 推导，未核明算不适用。带监听的 simulation X 也须布置在 M 外。现行 0059 未把 X socket 纳入 launcher 的 M 预检，X 也没有 S 的准入输入；M 内的 X 不算本合同可同址续服的布局，目录核对与整改归 #2130，不为此增加跨域准入或 launcher 第三项改动。
+   - 开始认领前判定不适用时走旧端点合同：`k` 有对象就按占用拒绝；`k` 空但有任意 `<basename>.owner` 条目，报 `TransportUnavailable：旧端点合同不接管已有 owner`；只在两个名字均不存在时直绑。不建 owner、不动残留；无法核验不视为不存在。这样保留从未认领的空址在组可写目录和非 Linux 上的 bind，不让已认领的名字因环境变化被直绑绕开。**两条路径均须过 E/B 标记门，并在 bind 成功后、首个 accept 前消费标记。**
+   - 开始认领后，文件系统不支持 `NOREPLACE` 或任何核验、写入失败均拒绝，不回到直绑。新认领的检查和动作都相对 `d`；bind 的地址是 `/proc/self/fd/<d>/<basename>`，对外的 `k` 字节不变。
+4. **一个 owner 文件。** `<basename>.owner` 位于 `d`、权限 `0600`；规范 JSON 恰有四键：`schema="endpoint-owner/1"`、`socket=k`、`writer_lock`、`bound`。`writer_lock` 是持锁代码实际打开的绝对路径：已有库取规范化的库路径，尚无库取规范化父目录拼库文件名，再接 `.writer.lock`；S 使用原准入 lease 绑定的规范化库路径。不另解析锁文件末级链接，不把路径当成锁 inode 的身份证明。`bound` 为 `null` 或含 `dev`、`ino`、`ctime_ns` 的对象（十进制字符串，无损比较）。普通文件、euid、单链接、模式 `0600`、规范解析且前三项逐字节相符才算“我”。读时钉住条目并核类型，不跟随目录内链接。持锁者首建用 `O_CREAT|O_EXCL|O_NOFOLLOW`，写完 fsync 文件和目录。更新只写同一个已钉住、复核为普通文件的 FD（从 `/proc/self/fd` 重新打开，核 dev/ino 后才写和截断），并 fsync；写前、写后核 owner 名仍对应该 inode。不得按目录名覆盖、删除 owner 或用临时文件覆盖目标，即使有人把 owner 名换入 socket 也不能销毁它。**原地更新不是原子的。** 进程中途被杀可留下不可解析的 owner，此时按“非我”拒绝并保留，交 #2130；不使用备用 owner。这里以可能需要人工恢复换取不按名覆盖 socket。
 5. **认领表。** 持锁且本域启动门均过后，域用下表决定是否 bind。`ENOENT` 才算无；其他错误是不可核验。成功 bind 后核新目录项为本 euid 的单链接 socket，按原路径无链接重新打开父目录并比较 `dev,ino`。不符则关监听、失败，不删已创建的对象。使用新打开的 `O_PATH` FD 钉住新路径，保持到认领结束；核其目录项同一性后 fsync 目录，再持久记录 `bound`，且全数完成（E/B 还须第 9 条消费标记）才接纳。`action` 取下表。
 
    | owner | k | 动作／action |
@@ -41,8 +44,8 @@
    | 无 | 有 | 拒绝；原对象保留 |
    | 非我或不可解析 | 任意 | 拒绝；原对象保留 |
 
-   对既有对象拒绝，S 保留 `TransportUnavailable：socket路径已占用`；E/B/X 保留 `TransportUnavailable：socket绑定失败 {e}`，占用用 `EADDRINUSE`（已见 Linux 原文 `TransportUnavailable：socket绑定失败 Address already in use (os error 98)`）。空址但 owner 非我：`TransportUnavailable：socket名字已由其他写者锁认领`。S 不可 stat 时保留 `TransportUnavailable：socket路径不可核验：{e}`；S 原有空参数、长度和 `TransportUnavailable：socket父目录须已存在` 错误不变。入表后的系统调用、持久化或目录身份失败返回 `TransportUnavailable：socket认领失败：<步骤>：<原因>`；bind 原来的错误原样返回。不重试，不放行。
-6. **退役只移不删。** 域用 `openat(d, basename, O_PATH|O_NOFOLLOW)` 钉住 `p`。其 `fstat` 须为 socket、euid、单链接；按身份还须与 `bound` 的三元组相等。按连续性只用于 `bound=null` 的本锁谱系；遵约进程只能在先持久化 null 后 bind。因此这里不比对旧三元组，其余门相同。对 `/proc/self/fd/<p>` 非阻塞 connect，成功、`EAGAIN`、超时或其他错误均拒绝；只有 `ECONNREFUSED` 才从原名以 `RENAME_NOREPLACE` 改到 `<basename>.retired.<ino>`。目标被占用或改名失败即拒绝。保持 `p` 打开；改名后对退役名不跟随链接，核 `dev,ino` 与 `p` 相同。`ctime_ns` 只在移走前比，不能假定改名时必变或不变。不符（含无法核验）即尝试以 `RENAME_NOREPLACE` 放回原名并拒绝，原名若又被占用或放回失败，则保留退役现场并报告两个名字与错误，交 #2130。整个过程不覆盖任何已有条目；产品从不 unlink 任何 socket。已确认退役的对象不参与后续身份判断。
+   入表时 `k` 存在，表内拒绝或退役预核中的类型、UID、链接数、身份或试连不符，都按占用报错，不再探查能否直绑。S 保留 `TransportUnavailable：socket路径已占用`；E/B/X 保留 `TransportUnavailable：socket绑定失败 {e}`，占用用 `EADDRINUSE`（Linux 已见原文 `TransportUnavailable：socket绑定失败 Address already in use (os error 98)`）。空址但 owner 非我：`TransportUnavailable：socket名字已由其他写者锁认领`（旧端点合同用第 3 条的专用错误）。S 不可 stat 时保留 `TransportUnavailable：socket路径不可核验：{e}`；S 原有空参数、长度和 `TransportUnavailable：socket父目录须已存在` 错误不变。不能确定路径状态，或改名、持久化、目录重验失败时，返回 `TransportUnavailable：socket认领失败：<步骤>：<原因>`；bind 返回原来的错误。不重试，不放行。退役预核按占用拒绝时不另报一次试连错误。
+6. **退役只移不删。** 域用 `openat(d, basename, O_PATH|O_NOFOLLOW)` 钉住 `p`。其 `fstat` 须为 socket、euid、单链接；按身份还须与 `bound` 的三元组相等。按连续性只用于 `bound=null` 的本锁谱系；遵约进程只能在先持久化 null 后 bind。因此这里不比对旧三元组，其余门相同。对 `/proc/self/fd/<p>` 非阻塞 connect，成功、`EAGAIN`、超时或其他错误均拒绝；只有 `ECONNREFUSED` 才从原名以 `RENAME_NOREPLACE` 改到 `<basename>.retired.<ino>`。目标被占用或改名失败即拒绝。保持 `p` 打开；改名后对退役名不跟随链接，核 `dev,ino` 与 `p` 相同。`ctime_ns` 只在移走前比，不能假定改名时必变或不变。不符（含无法核验）即尝试以 `RENAME_NOREPLACE` 放回原名并拒绝，原名若又被占用或放回失败，则保留退役现场并报告两个名字与错误，交 #2130。整个过程不覆盖任何已有条目；正式域 Rust bin 和 `production_session` 不 unlink 任何 socket。已确认退役的对象不参与后续身份判断。
 7. **S 预筛只读。** `ServeOptions::parse` 原 socket 检查处，以本域配置的锁路径和 M 调同一认领判定的只读部分。可以开目录和钉住对象、试连，不创建文件、不改名、不绑定、不把预筛通过当成资格。预筛拒绝沿用第 5 条的 S 首错；预筛过后仍走原 admission，最后在持锁状态重判。E/B/X 无预筛。
 8. **停机不改名字。** #2077 有序停止先收监听再关库；有序停止不修改 `k` 或 owner。旧监听关闭后，下次使用新监听器，不继承上一代排队连接。
 
@@ -50,15 +53,16 @@
 
 9. **E/B 各自记正常关库。** 本域 SQLite `meta` 新增键 `clean_close/1`，值恰为 `{"writer_epoch":"N"}`，N 为持久正整数代的十进制字符串。不改表、schema 或业务提交根。
    - 只有三处写标记：init 在写代 1 的同一事务；正式 `recover` 和 `recover-named` 经 `advance_recovery` 在升代的同一事务写新代（重取已存在的同请求回执不重写标记）；`SupervisedStdin` 收到规定字节、服务循环 `Ok` 返回（监听已关且不再执行 handler）后，由本域在关库之前用同一连接提交本代标记。末项提交失败非 0 退出，不报告正常关库。以事务已提交为界；即使在提交后、进程退出前被杀，也已无业务 handler 或监听。`writer_closed` 只是 launcher 观察量，EOF、SIGTERM 或 `Standalone` 不写正常标记。
-   - 任一 `serve` 持锁、`check_epoch` 和全域 `audit` 通过后，先验标记。缺失、不可核或 N 不等于持久代，返回 `StaleWriter：缺本代正常关库标记，须先正式恢复`，不 bind、不改权威库内容、不动 `k`。已过标记门才认领；认领成功后、首个 accept 前，用一个事务删除标记并提交。删除须恰命中已核的这条标记，失败关闭监听、非 0 退出，不 accept。此前不写本域业务或启动 meta；SQLite 本身的侧件及锁不算业务写入。旧库没有标记，一律先过正式恢复；独立 serve 也同此；它消费标记后退出时不补标记，下一次 serve 须先正式恢复。
+   - 任一 `serve` 持锁、`check_epoch` 和全域 `audit` 通过后，先验标记。缺失、不可核或 N 不等于持久代，返回 `StaleWriter：缺本代正常关库标记，须先正式恢复`，不 bind、不改权威库内容、不动 `k`。过标记门后才进入端点路径。**无论经认领表还是经旧合同直绑，bind 成功后、首个 accept 前，都必须在一个事务中删除标记并提交。** 走认领表时，先持久化 `bound` 再消费标记。删除须恰命中已核的这条标记，失败即关闭监听、非 0 退出，不 accept。此前不写本域业务或启动 meta；SQLite 本身的侧件及锁不算业务写入。旧库没有标记，一律先过正式恢复；独立 serve 消费标记后退出不补写，下一次 serve 须先正式恢复。
+   - 库曾由不识该标记的二进制开服，或本次库来自备份时，旧标记可能仍匹配代。已获授权的域运维须在前滚或恢复备份后先执行正式恢复，不能把看起来有效的标记当成本次关库证明；程序无法仅凭库内两值发现这种外部替换。按 #2130 处理，操作权限或恢复条件不满足时不启动。
    - **为什么干净停机不升代：** C09.9 要 E 从持久 Recorded/Pending、证据、前沿、责任与 Released 的原状恢复，不准拿旧 Open 当起点；B 必须重新核原归属应用。当前代匹配和全域审计重验持久原件、逐步重放、引用和物化状态，再通过关库标记确认同代上一轮已停止处理，合 IC:62 的“先恢复本域未决状态、引用完整性和 writer 代际”。这里恢复的是已提交状态及其引用，未决责任仍按原身份保留，不把开服本身当作一次换代。无标记时，审计通过也不足以从旧 Open 续跑，必须显式正式恢复；C09.11 的升级及回退合同仍适用。#2082 的回执核当前代不核“上次 serve 已干净关库”，故不能替这个门。
 10. **S、X 保留启动门。** S 仍核 R4 介质、未完成 Begin、epoch 和既有准入，不接受带 SHM 的介质；保留 `UnsupportedWalShmJournalCombination` 与需要 recover 时的 `StaleWriter：未完成Begin须先由监督器recover` 原诊断（该字样不授予新角色）。S 真实恢复后的介质再准入及有效代交接归 #2128。X 不加标记；本地 simulation 仍先锁、核 epoch 不降、冻结 profile、审计，再 bind。不提供本地监听的 profile 沿原合同。C09.8 的旧 X 与仍可发送的子进程退出证明、发送门及已发请求责任，归 #1401 的真实场所路径，不由本地端点认领替代。
 11. **拒绝后不换路。** 任一域任一门拒绝，本次域启动非 0，不另找路径、旧证明或宽判据。下一次从该域的持久状态重新判定。既有 launcher 对关键域与非关键 X 的处理保持原样；关键域失败仍按现行监督回收本次拉起的子进程。端点门已完成的动作（例如已复核的退役）不因后续 bind、目录重验或持久化失败回滚；只有第 6 条移错对象才尝试原样放回。标记未消费的失败不会把库判为崩溃。端点和库输入都不可核的拒绝态交 #2130。
 12. **launcher 只装配，再加两处约束。** 第一，在写 `state_dir` 或任何 init、核恢复计划、spawn 以前，读 E 和全部 B 库路径的存在性。全无才走原 E/B init；全有不 init。部分存在即 `InvalidDomain：E/B 域库部分缺失：<缺失 manifest 字段>`，点名 `economic.e.db` 或 `economic.b[i].db`，不 init、不 spawn。不把不可读路径或悬空链接当成缺失。S 仍按原合同单独判断（首启可已有库和签锚），X 仍自建。第二，#2082 的 `--economic-recovery-plan` 键集从 E/B 全集改为其子集（含空集），仍拒重复域、未知域及坏计划，按原 `current-recovery` 在 spawn 前核验每条且仅每条提交的回执。没条目的域用 manifest 代；不能从回执拒绝回退到 manifest。B 的 `--e-epoch` 一律取 E 有效代（有条目取已核回执，无则取 manifest）。E/B 持锁在 serve 再验自己的当前持久代（旧代报 `StaleWriter：持久epoch不等于获准写者`）；B 真读 E 权威时再验 E 的库持久代，非启动时跨域验库。子集扩展的是计划可省略未换代的域，不放宽域内任何校验。launcher 不恢复、不升代、不读 owner、不碰端点。
 13. **作用域只到本域。** 域用自己的锁、owner、库及介质决定再服务，不读其他域的退出记录或会话级证明。launcher 存活时只重拉一域、当健康域仍持锁时怎样取回执及更新来源代，归 #2120。#1363 下现有 TB-05 试验和监督语义不变、不在此裁。
 14. **launcher 已退而域仍活。** #2077 的控制管道 EOF 不停机。孤儿照常服务、继续持锁；同址同域新启动被 S 预筛或域持锁门拒绝。已退出的域按第 5、9、10 条重判；宿主重启也是逐域重判，不把重启当关库。产品不终止孤儿；测试夹具只结束它自己拉起的进程，并等退出。实际运维出口是 #2130。
-15. **授权与边界。** 本裁定不授予终止进程、unlink、改属主或权限、账户、凭据或部署启用。拒绝态清场、目录整改、结束孤儿与退役对象清理归 #2130，须另外取得运维权限，runbook 建立前保持拒绝。对同 UID 不守合同的进程（含不识标记仍写同库的旧二进制），本裁定不承诺名字持续不变或继续服务；ADR 0039:286 将部署隔离留给 TB-09。本合同保证产品不销毁 socket，移错对象时原样放回，若原名不能安全恢复即在退役名保留；“原样”是同一对象，不承诺 ctime 或空窗内可连。E/B 库全失不可与首启区分，X 库丢失仍按既有处理；C09.3 不承诺磁盘灾难。是否将路径计入提交根归 #2127，这里只要求同一布局的 `k` 字节不变。
-16. **观察而不授权。** 新认领成功且 E/B 标记消费成功后，域向 stderr 输出一行 `endpoint-claim`，字段为 `domain`、`action=fresh|vacant|retired|adopted`、`retired`（退役 basename，无退役为 `null`）。该行可断言，不参与准入。
+15. **授权与边界。** 本裁定不授予终止进程、unlink、改属主或权限、账户、凭据或部署启用。拒绝态清场、目录整改、结束孤儿与退役对象清理归 #2130，须另外取得运维权限，runbook 建立前保持拒绝。对同 UID 不守合同的进程（含不识标记仍写同库的旧二进制），本裁定不承诺名字持续不变或继续服务；ADR 0039:286 将部署隔离留给 TB-09。本合同保证正式域 Rust bin 和 `production_session` 不销毁 socket，移错对象时原样放回，若原名不能安全恢复即在退役名保留；“原样”是同一对象，不承诺 ctime 或空窗内可连。E/B 库全失不可与首启区分，X 库丢失仍按既有处理；C09.3 不承诺磁盘灾难。是否将路径计入提交根归 #2127，这里只要求同一布局的 `k` 字节不变。
+16. **观察而不授权。** 域在 bind 成功且接纳前各项义务完成后，若走了认领表，向 stderr 输出一行：ASCII 前缀 `endpoint-claim ` 后接带换行的 UTF-8 单行规范 JSON。对象恰有 `action`（`fresh`、`vacant`、`retired` 或 `adopted`）、`domain`（`S`、`E`、`B:<id>` 或 `X`）、`retired`（退役 basename，无退役为 `null`）。旧合同直绑不输出该行；E/B 的消费事务必须完成，与是否输出无关。该行只供观察。
 
 ### 情形表
 
@@ -75,7 +79,7 @@
 | 各域在提交前、提交后、回报或应用边界被杀 | 端点及是否须恢复仍按上列逐域判；保留责任、不重复调用、不漏应用及同轨迹等价由原恢复合同与 #1411 验 | 各域原库、原身份回执、外效和业务差异报告 |
 | launcher 被杀，S/E/各 B/X 仍活 | 孤儿继续服务。L2 中 S 对活对象试连拒绝（或锁拒），E/B/X 锁拒 | 同 inode、owner 未改，旧域仍应答 |
 | 孤儿随后全部退出 | 无干净标记的 E/B 须正式恢复；S 看 R4，X 看原门；运维终止的授权与步骤归 #2130 | 新进程只见本域锁、库和介质；夹具只等自己创建的子进程 |
-| 宿主重启 | 合格持久卷上的残留逐域退役；tmpfs 上 k、owner 同失走 `fresh`。原本正在服务的 E/B 标记已消费，须恢复；若持久标记有效仍按正常列 | 不读 boot ID；本票不要求 #1411 做整机重启 |
+| 宿主重启 | 第 3 条允许的本地持久目录若保留 k、owner 且身份相符，逐域退役；若挂载重建使 dev 改变则拒。tmpfs 上 k、owner 同失走 `fresh`。运行中的 E/B 标记已经消费，须恢复；持久标记有效且库未被外部替换则按正常列 | 不读 boot ID；本票不要求 #1411 做整机重启 |
 | L1 活时 L2，含 SIGSTOP、积压满 | 拒绝并保留 L1；connect 成功或 `EAGAIN` 都不是死亡证据 | 原路径同 inode，L1 恢复执行后再取同身份应答 |
 | 无 owner 残留、他人/坏 owner、身份或 UID 不符、普通文件、目录、链接、父路径链接、父目录不合权限 | 有对象即拒；合法检查不改原对象 | 前后 lstat，owner 和持久代对照 |
 | 预核后换入活监听、普通文件或换父目录 | 不销毁、不覆盖；移错对象时复核后放回，回放受占则保留并拒绝。父目录换掉时不能在新目录接纳 | 对照原对象 dev/ino，活监听仍可应答；后置目录身份复核 |
@@ -86,22 +90,22 @@
 | 升级首次面对旧库和旧残留 | 旧 E/B 库无标记须按 C09.11 连同正式恢复处理，旧残留无 owner 则拒，别把恢复回执当端点资格 | 旧库 meta、原残留；清场归 #2130 |
 | 恢复应答丢失后重试 | #2082 重取原件不再升代；若期间 serve 已消费标记再崩溃，原请求重取的回执不能重新放行 | 字节相同的旧回执与缺标记门 |
 | launcher 活时单域原址重拉 | 由 #2120 裁触发、证据与来源代，不在本票实现 | #2120 仍依赖 #2079 |
-| S 的 socket 在 M 内；非 Linux | 旧端点合同，OBS-IN 两布局首错不变；E/B 标记门仍生效 | 不创建 owner、不移动，原路径保留 |
+| S 的 socket 在 M 内；非 Linux 或其他不适用认领的目录 | 旧端点合同，OBS-IN 两布局占用首错不变；无 k 但有 owner 时拒绝；E/B 标记门与 bind 后、accept 前消费在所有路径生效 | 不创建 owner、不移动；E/B 直绑就绪时标记已无 |
 
 ## 五、验收清单
 
-以下测试落在 `rust/tests/production_session_entry.rs`，用 Linux 正式入口的真进程和权限 `0700` 的独立端点目录。实施 PR 的 `rust-test-production-session` 日志须逐行出现相应 `test <名> ... ok`（`.github/workflows/ci.yml:811、:830–841`），不以早先 #2077/#2082 的 PASS 代替。检测切面用原正式读口，不用打开可能改变 S admission 成员的观测连接冒充真实就绪。同步点只编入测试专用夹具。
+以下测试落在 `rust/tests/production_session_entry.rs`，用 Linux 正式入口的真进程；除明确的对照臂外，独立端点目录权限为 `0700`。实施 PR 的 `rust-test-production-session` 日志须逐行出现相应 `test <名> ... ok`（`.github/workflows/ci.yml:811、:830–841`），不以早先 #2077/#2082 的 PASS 代替。检测切面用原正式读口，不用打开可能改变 S admission 成员的观测连接冒充真实就绪。同步点只编入测试专用夹具。
 
 - `endpoint_orderly_restart`：L1/L2 PID 不同，逐字节复用 manifest，并重开同一组库文件，不替换原库。启用带本地监听的 simulation X，S、E、各 B 和 X 同代；每个原 ino 转到对应退役名并在原址出现新 ino。正式读口逐字节返回 cut-1 原收据，input-2 `Committed`，首次接纳前已消费 E/B 标记。
 - `endpoint_crash_needs_recovery`：分别对 E、某 B 真杀。不恢复先报缺标记；该域 k、owner、代、最新 cut 不变。正式恢复后子集仅列该域，目标按回执代认领原址，其余在 manifest 代。E 臂核 B 的实际 `--e-epoch` 和权威读取；分别以漏掉已换代域、旧回执、未知/重复域作负控；测试不把 X 的权威代跟随算作通过，归 #2129。
 - `endpoint_live_untouched`：存活、SIGSTOP、积压满三臂，L2 无第二写者/监听，原 inode 和 owner 不变；L1 恢复仍能应答；两种非死亡 connect 结果都不能放行。
-- `endpoint_unknown_untouched`：无/他人/坏 owner、错身份、错 UID（在已有夹具权限能合法构造时）、普通文件、目录、叶链接、父链接、不合格权限和 M 内两布局，都拒且保留原件；还核坏锚、旧 epoch 不因端点可退役而放行。ADR 0059 的 layout 拒绝仍断言没有 spawn、init 或建锚。
+- `endpoint_unknown_untouched`：无/他人/坏 owner、错身份、普通文件、目录、叶链接、父链接、不合格权限和 M 内两布局，都拒且保留原件。错 UID 臂用与正式路径同一个身份判定函数，输入除 UID 外全匹配的 stat 字段，断言拒绝，不要求 CI 提权。旧合同目录另加 k 空但有 owner 的负控。还核坏锚、旧 epoch 不因端点可退役而放行；ADR 0059 的 layout 拒绝仍断言没有 spawn、init 或建锚。
 - `endpoint_race_replacement`：在预核与移动之间以明确同步点换入活 socket、普通文件或父目录。比对保留的原对象及 live 应答；放回时原名被占用不得覆盖；更新 owner 时换入 socket 也不得覆盖，拒绝后它仍应答。
-- `endpoint_bind_window`：在 bind 后写 bound 前强杀，owner(null) 与 E/B 标记仍在。下一进程报告 `adopted`，旧 ino 在退役名；另测半写 owner 只拒不认领。
+- `endpoint_bind_window`：在 bind 后写 bound 前强杀，owner(null) 与 E/B 标记仍在。下一进程报告 `adopted`，旧 ino 在退役名。另分三臂：owner 为 null 或旧 bound、且 k 不存在时，两臂均报告 `vacant`，不造退役对象、写妥新身份；在 owner 已写部分字节、尚未完成有效 JSON 时用同步点强杀，重启报占用且保留原 k、半写 owner 和未消费标记，不 accept。
 - `endpoint_launcher_crash`：只杀 L1 不杀子进程，S/E/B/X 保持原 inode、锁和应答，L2 拒绝。夹具随后只结束自建子进程并等待；E/B 缺标记拒绝，S 带 SHM 首错为 R4，k 和 owner 原样。
 - `economic_store_partial_refused`：E 缺、任一 B 缺分别拒绝，点名准确字段，无 init、spawn 或 state_dir 写入；S 预建不影响 E/B 全无的首启；全有不 init。
-- `clean_close_negative`：缺失、损坏、错代标记拒绝；独立 serve 真杀后须正式恢复；准入拒绝前后未消费标记。恢复丢应答重取同字节，消费标记后崩溃再取原回执不能再次服役。
-- #2077 `b7b79657` 的测试 `orderly_stop_closes_same_s_db_without_claiming_socket_handoff`（:994）改为验证再启成功；`killed_s_is_not_orderly_and_its_socket_remains_for_explicit_recovery`（:1105）在适用目录首错改为 R4，S 原 inode 不变。原 OBS-IN/OUT 的占用对照可用未认领残留，不能用以取消新成功路径。
+- `clean_close_negative`：夹具手删、损坏、写错代标记均拒绝；准入拒绝前后不消费标记；恢复丢应答重取同字节，消费标记后崩溃再取原回执不能再次服役。旧合同两臂分别让 E、B 在 `0770` 目录真进程直绑服务，确认无 owner、标记已消费；真杀并等待退出后，夹具只移走它自己创建的残留，再启须报 `StaleWriter：缺本代正常关库标记，须先正式恢复`，不得 bind。受监督关停臂在关库标记事务提交处用测试专用故障注入令提交失败；断言进程非 0、监听已关、库内无标记且无正常关库结果。
+- #2077 `b7b79657` 的测试 `orderly_stop_closes_same_s_db_without_claiming_socket_handoff`（函数 :934）改为验证再启成功；`killed_s_is_not_orderly_and_its_socket_remains_for_explicit_recovery`（函数 :1068）在适用目录首错改为 R4，S 原 inode 不变。原 OBS-IN/OUT 的占用对照可用未认领残留，不能用以取消新成功路径。
 
 ## 六、受影响票与 blocking 边
 
@@ -110,7 +114,7 @@
 | #1323 / #1340 | 不改 Destination、SPEC 或关图门。 |
 | #2079 / #1411 | #2079 是 #1411 原生子票，关闭解除子票门，不等于 #1411 已放行；不另接 #2079 → #1411 的 blocking 边。#1411 实施认领与服务拆分、关库标记、launcher 两处约束及全链验证。 |
 | #2077 / #2082 | 实施前依次先合 #2077 `b7b79657d85c4d9ef830d0422c29f944c7a4cc87`、#2082 `329be34f5a9ca9c2bcc38ae75783304cc654904c` 对应合同；头变须重核行号与接缝。它们是 #1411 的 PR，不新增票边。 |
-| #1823 / #1818 | 接 #1823 的 SAFE 与 OBS，不改 #1818/ADR 0059 布局责任或边。 |
+| #1823 / #1818 | #2079 承接 #1823 的残留归属裁定，#1411 实施并提供 SAFE 读数。#1823 不随本裁定关闭；它继续留作 OBS 现状与 SAFE 复验的证据入口，具名验收证据齐备后由票主销项。不改 #1818 的布局范围或边。 |
 | #2128 / #2129 / #2127 | 均挂 #1366，三条各自已有 blocking → #1411，保留。分别承接 S 介质与有效代、X 权威代与 E 来源、路径与提交根。 |
 | #2120 / #1363 | #2120 挂 #1363；保留 #2079 → #2120。#2120 原址在线单域重拉与 TB-05 的局部隔离不是同一验收。#1363 的子票门也影响其下游 #1366、#1367、#1368、#1369、#1382、#1391、#1523。 |
 | #1376 / #1396 / #1409 / #1417 / #1423 | 保留现有 TB-05 局部隔离链，不增加端点或恢复权限，#1423 → #1411 不变。 |
@@ -122,6 +126,10 @@
 
 本条依 [#1909](https://github.com/Newchanlun/NewChanlun/issues/1909) 代理独审裁定；须绑定实际获审版本才生效。P 类新增本域端点归属和持久关库门，非 UserSigned。实际外部操作不在此授权。
 
+**与旧条文的关系。** ADR 0039:285 的“换代”在本合同内是编排与消费各域已核回执，不给 launcher 写库或升代权。ADR 0039:291 和 ADR 0038:60 的 checkpoint 恢复描述不再作为本合同 E/B 原库启动顺序或自动升代依据，实装按第 9、12 条；不把真实外效视为未发生。ADR 0038 的离线确定性回放与 seek、ADR 0039:290 的 X 指纹禁止发送门和真实 X 换代合同不变。需要在生产中正式恢复 E/B 时，由另行获授权的域运维在原域已停的前提下，用对应域 bin 的 `recover` 或 `recover-named`；域 bin 自己取同一写者锁，审计与换代在本域完成。launcher 不代为执行。S 的强杀恢复归 #2128，场所 X 的恢复按 C09.8 及 #1401。
+
+ADR 0059 第 6 条的“不比较 `s.socket`”作为 launcher 静态布局检查范围仍保留。该条“残留一律在 S 参数期拒绝”及“清理归 #1823 调查”的理由由第 3、5–7 条取代：M 内继续按旧合同，有资格的 M 外残留只允许持锁域退役；正常 bind 仍晚于 driver open。第 3、4 条的 E/B 布局预检不变。
+
 受影响代码（默认以 `b9d898dccf46c2a716115eaa1215bc39c458a959` 计）：
 
 - `rust/src/session_transport.rs:50–81、:617–680`：锁、监听生命周期与认领/接纳拆分。`:618、:648` 关于监督器、PID 的旧注释由本裁定取代。#2077 同文件 `:702–728、:735–755、:797–809` 对应停止字节、监听器与 join。
@@ -129,4 +137,5 @@
 - `rust/src/economic_session/service.rs:1515–1595`：E/B 锁、audit 与 bind。#2077 同文件 `:1521–1568`（标记门、消费及服务返回后标记）；#2082 `rust/src/economic_session/store.rs:659–663、:786–835、:967–1084、:1694–1743`（init、逐键审计与恢复），`recovery.rs:112–154`（当前回执与同事务），`service.rs:905–926、:1619–1635`（E 来源代与 serve 自身代）。
 - `rust/src/bin/production_session.rs:276–448`；#2082 同文件 `:249–342、:351–425、:553–584`：库存在性、自身恢复计划与有效代装配。
 - `rust/src/bin/x_execution_session.rs:118–162、:202–234`、`rust/src/history_simulation/runtime.rs:506–517、:815–831、:866–897`：X 持锁、冻权威配置、启动审计与本地 bind。
-- `rust/tests/production_session_entry.rs`：本 ADR 验收及 #2077 `:994、:1105` 的断言迁移。
+- `rust/tests/production_session_entry.rs`：本 ADR 验收及 #2077 的两个现有测试函数（`:934、:1068`）。
+- `s_session/s_service_control.py:505–528、:727` 与 `s_session/economic_service_control.py:83–95、:126–132`：按 ADR 0039:278、:286，两者不是正式入口，不能用于本合同管辖的生产会话端点目录，不改其独立用途或把删名逻辑移植过来。调用新版 E/B bin 时仍受第 9 条：独立 serve 不写正常关库标记，stop 后再 start 须先正式 `recover` 并使用有效代。
