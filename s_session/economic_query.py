@@ -170,116 +170,433 @@ PROJECTION_ORIGINAL_KINDS = ("fact", "allocation", "decision", "grant", "command
 CUT_FIELDS = frozenset({"domain_id", "commit_seq", "root_hash"})
 MAX_VERIFIED_CUTS = 64
 
+FILL_ALLOCATION_ROW_ALLOWED = frozenset({
+    "fact_key", "fact_hash", "projection_kind", "source_kind", "manifest_hash", "symbol",
+    "fill_allocation_policy_id", "policy_revision", "from", "to", "report_kind", "component",
+    "original_fact_key", "original_allocation_id", "command_id", "grant_id", "responsibility_ref",
+    "plan_hash", "command_plan_hash", "command_hash", "evidence_id", "allocations", "x_execution_witness",
+})
+ALLOCATION_ITEM_ALLOWED = frozenset({
+    "allocation_id", "source_kind", "chong_id", "command_id", "grant_id", "responsibility_ref",
+    "family_id", "revision", "symbol", "manifest_hash", "units", "acquisition_cash", "commission",
+    "fee_deferred_to_cause_fact", "reported_fill_fee", "fee_only", "fee_type", "cause",
+    "original_fact_key", "original_allocation_id", "income_changes", "fill_allocation_policy_id",
+    "policy_revision", "component", "reversal", "unmatched_reason", "status", "target_domain",
+})
+X_EXECUTION_WITNESS_ALLOWED = frozenset({
+    "witness_revision", "x_profile_revision", "x_id", "x_epoch", "session_id", "session_generation",
+    "source_namespace", "source_epoch", "model_content_hash", "command_id", "command_hash",
+    "e_release_receipt_key", "e_release_cut", "e_release_commit_ns", "x_release_evidence",
+    "x_accept_clock", "x_command_state", "x_execute_evidence", "attempt_batch_id",
+    "attempt_batch_bar_index", "attempt_batch_request_sha256", "attempt_batch_receipt_sha256",
+    "originals_batch_id", "originals_batch_bar_index", "originals_batch_receipt_sha256",
+    "fact_raw_sha256",
+})
+X_ACCEPT_CLOCK_ALLOWED = frozenset({"received_ns", "first_known_ns", "commit_ns"})
+X_AUTHORITY_EVIDENCE_BASE_ALLOWED = frozenset({
+    "protocol", "session_id", "session_generation", "authority_id", "command_id", "command_hash",
+    "state", "receipt_id", "release_receipt_id", "commit_ns",
+})
+X_EXECUTE_EVIDENCE_ALLOWED = frozenset({"claimed_ns", "reply"})
+COMMAND_REF_ALLOWED = frozenset({"command_id", "command_hash"})
+PROJECTED_RECORD_BASE_ALLOWED = frozenset({
+    "fact_key", "fact_hash", "raw_sha256", "raw_utf8", "json_pointer", "event", "token",
+    "target_domain", "source_event_time", "source_received_time", "source_producer",
+    "origin_message", "origin_request_hash", "received_ns", "first_known_ns", "commit_ns",
+    "recorded_seq", "cut", "e_domain_id", "e_session_id", "e_session_generation",
+    "e_commit_proof", "e_commit_proof_omitted", "e_receipt", "e_resolution_proof",
+    "source_debit_proof", "b_observation", "b_origin_message", "b_origin_request_hash",
+})
 
-def _verify_embedded_cuts_and_receipts(
-    root,
+
+def _assert_whitelist_keys(obj, allowed, label):
+    if type(obj) is not dict:
+        raise EconomicQueryError(f"{label} 必须为对象")
+    for k in sorted(obj):
+        if k not in allowed:
+            raise EconomicQueryError(f"{label} 存在未声明字段（不在读权白名单内）：{k}")
+
+
+def _verify_protocol_response_cuts(
+    body,
     vector_cuts,
     known_domains,
     *,
     verify_historical=None,
     own_domain_limit=None,
 ):
-    """不变量 A 单一递归检查：应答体内每一份回执和每一个内嵌 cut 均不得晚于其所属域的固定切面。"""
-    stack = [(root, None)]
-    while stack:
-        node, parent_key = stack.pop()
-        if type(node) is dict:
-            is_cut_shape = set(node) == CUT_FIELDS
-            is_cut_key = parent_key is not None and (parent_key == "cut" or parent_key.endswith("_cut"))
-            if is_cut_shape or is_cut_key:
-                if not is_cut_shape:
-                    raise EconomicQueryError("内嵌 cut 字段不完整或多余")
-                rdomain = node.get("domain_id")
-                if type(rdomain) is not str or (known_domains is not None and rdomain not in known_domains):
-                    raise EconomicQueryError(f"回执所属域 {rdomain} 不在固定向量中")
-                verified_rcut = verify_cut(node, rdomain)
-                rseq = int(verified_rcut["commit_seq"])
-                if own_domain_limit is not None and rdomain == own_domain_limit[0]:
-                    own_cut = own_domain_limit[1]
-                    own_seq = int(own_cut["commit_seq"])
-                    if rseq > own_seq:
-                        raise EconomicQueryError(
-                            f"MissingDependency：回执({rdomain}:{rseq})晚于固定切面({rdomain}:{own_seq})，拒绝未来回执（向量未就绪）"
-                        )
-                    if rseq == own_seq and verified_rcut != own_cut:
-                        raise EconomicQueryError(f"IdentityConflict：同序号回执({rdomain}:{rseq})根与固定切面根不符")
-                bound = vector_cuts.get(rdomain)
-                if bound is not None:
-                    cseq = int(bound["commit_seq"])
-                    if rseq > cseq:
-                        raise EconomicQueryError(
-                            f"MissingDependency：回执({rdomain}:{rseq})晚于固定切面({rdomain}:{cseq})，拒绝未来回执（向量未就绪）"
-                        )
-                    if rseq == cseq:
-                        if verified_rcut != bound:
-                            raise EconomicQueryError(f"IdentityConflict：同序号回执({rdomain}:{rseq})根与固定切面根不符")
-                    elif verify_historical is not None:
-                        verify_historical(rdomain, verified_rcut)
-            if parent_key in ("receipt", "e_receipt", "resolve_receipt", "receipts[]"):
-                rcut = node.get("cut")
-                if type(rcut) is not dict or set(rcut) != CUT_FIELDS:
-                    raise EconomicQueryError("回执缺失合法 cut")
-            if ("domain_id" in node and type(node.get("cut")) is dict
-                    and set(node["cut"]) == CUT_FIELDS and node["domain_id"] != node["cut"]["domain_id"]):
-                raise EconomicQueryError(f"回执域 {node['domain_id']} 与 cut 域 {node['cut']['domain_id']} 不符")
-            for k in sorted(node, reverse=True):
-                stack.append((node[k], k))
-        elif type(node) is list:
-            elem_key = "receipts[]" if parent_key == "receipts" else None
-            for item in reversed(node):
-                stack.append((item, elem_key))
+    """不变量 A + 回执域归属（按协议结构位置校验，绝不把来源数据内同名字段当成协议回执）。"""
+
+    def check_cut(node, expected_domain=None):
+        if type(node) is not dict or set(node) != CUT_FIELDS:
+            raise EconomicQueryError("内嵌 cut 字段不完整或多余")
+        rdomain = node.get("domain_id")
+        if expected_domain is not None and rdomain != expected_domain:
+            raise EconomicQueryError(f"回执域与期望域不符：期望 {expected_domain}，实际 {rdomain}")
+        if type(rdomain) is not str or (known_domains is not None and rdomain not in known_domains):
+            raise EconomicQueryError(f"回执所属域 {rdomain} 不在固定向量中")
+        verified_rcut = verify_cut(node, rdomain)
+        rseq = int(verified_rcut["commit_seq"])
+        if own_domain_limit is not None and rdomain == own_domain_limit[0]:
+            own_cut = own_domain_limit[1]
+            own_seq = int(own_cut["commit_seq"])
+            if rseq > own_seq:
+                raise EconomicQueryError(
+                    f"MissingDependency：回执({rdomain}:{rseq})晚于固定切面({rdomain}:{own_seq})，拒绝未来回执（向量未就绪）"
+                )
+            if rseq == own_seq and verified_rcut != own_cut:
+                raise EconomicQueryError(f"IdentityConflict：同序号回执({rdomain}:{rseq})根与固定切面根不符")
+        bound = vector_cuts.get(rdomain)
+        if bound is not None:
+            cseq = int(bound["commit_seq"])
+            if rseq > cseq:
+                raise EconomicQueryError(
+                    f"MissingDependency：回执({rdomain}:{rseq})晚于固定切面({rdomain}:{cseq})，拒绝未来回执（向量未就绪）"
+                )
+            if rseq == cseq:
+                if verified_rcut != bound:
+                    raise EconomicQueryError(f"IdentityConflict：同序号回执({rdomain}:{rseq})根与固定切面根不符")
+            elif verify_historical is not None:
+                verify_historical(rdomain, verified_rcut)
+
+    def check_finance_record(rec, owner_domain):
+        if type(rec) is not dict:
+            return
+        if rec.get("prepared_cut") is not None:
+            exp = rec.get("owner") if type(rec.get("owner")) is str else owner_domain
+            check_cut(rec["prepared_cut"], exp)
+        if rec.get("commit_cut") is not None:
+            exp = rec.get("owner") if type(rec.get("owner")) is str else None
+            check_cut(rec["commit_cut"], exp)
+        grant = rec.get("grant")
+        if type(grant) is dict:
+            if grant.get("e_cut") is not None:
+                check_cut(grant["e_cut"], "E")
+            orig_g = grant.get("original")
+            if type(orig_g) is dict and orig_g.get("prepared_cut") is not None:
+                exp = orig_g.get("owner") if type(orig_g.get("owner")) is str else owner_domain
+                check_cut(orig_g["prepared_cut"], exp)
+        lcr = rec.get("local_commit_receipt")
+        if type(lcr) is dict and lcr.get("e_cut") is not None:
+            check_cut(lcr["e_cut"], "E")
+        grants = rec.get("grants")
+        if type(grants) is list:
+            for g in grants:
+                if type(g) is dict and g.get("prepared_cut") is not None:
+                    exp = g.get("owner") if type(g.get("owner")) is str else None
+                    check_cut(g["prepared_cut"], exp)
+
+    def check_receipt(rec, expected_domain=None):
+        if type(rec) is not dict:
+            raise EconomicQueryError("回执非对象")
+        rcut = rec.get("cut")
+        if type(rcut) is not dict or set(rcut) != CUT_FIELDS:
+            raise EconomicQueryError("回执缺失合法 cut")
+        rdomain = rec.get("domain_id")
+        if rdomain is not None:
+            if type(rdomain) is not str:
+                raise EconomicQueryError("回执 domain_id 非文本")
+            if rdomain != rcut["domain_id"]:
+                raise EconomicQueryError(f"回执域 {rdomain} 与 cut 域 {rcut['domain_id']} 不符")
+            if expected_domain is not None and rdomain != expected_domain:
+                raise EconomicQueryError(f"回执域与期望域不符：期望 {expected_domain}，实际 {rdomain}")
+        check_cut(rcut, expected_domain)
+        if type(rec.get("record")) is dict:
+            check_finance_record(rec["record"], rdomain or rcut["domain_id"])
+
+    def check_fill_row(row):
+        if type(row) is not dict:
+            return
+        w = row.get("x_execution_witness")
+        if type(w) is dict and w.get("e_release_cut") is not None:
+            check_cut(w["e_release_cut"], "E")
+
+    def check_peer_proof(p):
+        if type(p) is not dict:
+            return
+        pdom = p.get("domain_id") if type(p.get("domain_id")) is str else None
+        if p.get("current_cut") is not None:
+            check_cut(p["current_cut"], pdom)
+        if p.get("receipt") is not None:
+            check_receipt(p["receipt"], pdom)
+        if type(p.get("image")) is dict:
+            check_image(p["image"], pdom)
+        if type(p.get("current_image")) is dict:
+            check_image(p["current_image"], pdom)
+
+    def check_record(rec):
+        if type(rec) is not dict:
+            return
+        # 仅检查协议证据路径，绝不解释来源数据（event / raw_utf8 / raw_exact_text）中的同名键。
+        if rec.get("cut") is not None:
+            check_cut(rec["cut"], "E")
+        if rec.get("e_receipt") is not None:
+            check_receipt(rec["e_receipt"], "E")
+        erp = rec.get("e_resolution_proof")
+        if type(erp) is dict:
+            if erp.get("receipt") is not None:
+                check_receipt(erp["receipt"], "E")
+            if type(erp.get("image")) is dict:
+                check_image(erp["image"], "E")
+            if type(erp.get("previous_image")) is dict:
+                check_image(erp["previous_image"], "E")
+        ecp = rec.get("e_commit_proof")
+        if type(ecp) is dict and type(ecp.get("image")) is dict:
+            check_image(ecp["image"], "E")
+        sdp = rec.get("source_debit_proof")
+        if type(sdp) is dict:
+            sd = sdp.get("domain_id") if type(sdp.get("domain_id")) is str else None
+            if sdp.get("receipt") is not None:
+                check_receipt(sdp["receipt"], sd)
+            if type(sdp.get("image")) is dict:
+                check_image(sdp["image"], sd)
+            if type(sdp.get("previous_image")) is dict:
+                check_image(sdp["previous_image"], sd)
+
+    def check_image(img, owner_domain):
+        if type(img) is not dict:
+            return
+        book = img.get("book")
+        if type(book) is dict:
+            ofr = book.get("opening_fact_ref")
+            if type(ofr) is dict and ofr.get("e_cut") is not None:
+                check_cut(ofr["e_cut"], "E")
+            for list_key in ("known_cost_components", "cost_events"):
+                items = book.get(list_key)
+                if type(items) is list:
+                    for item in items:
+                        if type(item) is dict:
+                            deriv = item.get("derivation")
+                            if type(deriv) is dict and deriv.get("resolve_cut") is not None:
+                                check_cut(deriv["resolve_cut"], "E")
+            voice = book.get("voice")
+            if type(voice) is dict and type(voice.get("identity")) is dict:
+                ob = voice["identity"].get("opening_basis")
+                if type(ob) is dict and ob.get("e_cut") is not None:
+                    check_cut(ob["e_cut"], "E")
+        for list_key in ("recorded", "pending"):
+            recs = img.get(list_key)
+            if type(recs) is list:
+                for rec in recs:
+                    check_record(rec)
+        rows = img.get("fill_allocations")
+        if type(rows) is list:
+            for row in rows:
+                check_fill_row(row)
+        fin = img.get("finance")
+        if type(fin) is dict:
+            if type(fin.get("decisions")) is list:
+                for d in fin["decisions"]:
+                    check_finance_record(d, owner_domain)
+            if type(fin.get("slots")) is list:
+                for s in fin["slots"]:
+                    if type(s) is dict and type(s.get("grants")) is list:
+                        for g in s["grants"]:
+                            check_finance_record(g, owner_domain)
+            if type(fin.get("commands")) is list:
+                for c in fin["commands"]:
+                    check_finance_record(c, owner_domain)
+        hist = img.get("history")
+        if type(hist) is list:
+            for h in hist:
+                if type(h) is not dict:
+                    continue
+                ws = h.get("x_execution_witnesses")
+                if type(ws) is dict:
+                    for w in ws.values():
+                        if type(w) is dict and w.get("e_release_cut") is not None:
+                            check_cut(w["e_release_cut"], "E")
+                if type(h.get("record")) is dict:
+                    check_finance_record(h["record"], owner_domain)
+                hw = h.get("witness")
+                if type(hw) is dict:
+                    if type(hw.get("prepared_proofs")) is list:
+                        for p in hw["prepared_proofs"]:
+                            check_peer_proof(p)
+                    if type(hw.get("grant_proof")) is dict:
+                        check_peer_proof(hw["grant_proof"])
+                    if type(hw.get("commit_proof")) is dict:
+                        check_peer_proof(hw["commit_proof"])
+
+    def check_original(orig, domain_id, original_kind):
+        if type(orig) is not dict:
+            raise EconomicQueryError("原件载荷非对象")
+        okind = original_kind or {
+            "EconomicFactAtCut": "fact",
+            "EconomicAllocationAtCut": "allocation",
+            "EconomicModelAtCut": "model",
+            "EconomicDecision": "decision",
+            "EconomicGrant": "grant",
+            "EconomicCommand": "command",
+        }.get(orig.get("kind"))
+        if okind == "fact":
+            if orig.get("domain_id") is not None and orig.get("domain_id") != domain_id:
+                raise EconomicQueryError(f"回执域与期望域不符：期望 {domain_id}，实际 {orig.get('domain_id')}")
+            receipts = orig.get("receipts")
+            if type(receipts) is not list:
+                raise EconomicQueryError("同切面事实缺回执列表")
+            for r in receipts:
+                exp = "E" if domain_id == "E" else ("E" if type(r) is dict and r.get("kind") == "Recorded" else domain_id)
+                check_receipt(r, exp)
+            if orig.get("projected_record") is not None:
+                check_record(orig["projected_record"])
+            if orig.get("fill_allocation_row") is not None:
+                check_fill_row(orig["fill_allocation_row"])
+        elif okind == "allocation":
+            if orig.get("domain_id") is not None and orig.get("domain_id") != domain_id:
+                raise EconomicQueryError(f"回执域与期望域不符：期望 {domain_id}，实际 {orig.get('domain_id')}")
+            if domain_id == "E":
+                check_receipt(orig.get("resolve_receipt"), "E")
+                if orig.get("fill_allocation_row") is not None:
+                    check_fill_row(orig["fill_allocation_row"])
+            else:
+                check_receipt(orig.get("receipt"), domain_id)
+            if orig.get("fact") is not None:
+                check_original(orig["fact"], domain_id, "fact")
+        elif okind == "model":
+            if orig.get("domain_id") is not None and orig.get("domain_id") != domain_id:
+                raise EconomicQueryError(f"回执域与期望域不符：期望 {domain_id}，实际 {orig.get('domain_id')}")
+        elif okind == "decision":
+            if orig.get("domain_id") is not None and orig.get("domain_id") != domain_id:
+                raise EconomicQueryError(f"回执域与期望域不符：期望 {domain_id}，实际 {orig.get('domain_id')}")
+            receipts = orig.get("receipts")
+            if type(receipts) is not list:
+                raise EconomicQueryError("决定原件缺回执列表")
+            for r in receipts:
+                check_receipt(r, domain_id)
+            if type(orig.get("decision")) is dict:
+                check_finance_record(orig["decision"], domain_id)
+        elif okind == "grant":
+            if domain_id != "E" or (orig.get("domain_id") is not None and orig.get("domain_id") != "E"):
+                raise EconomicQueryError(f"回执域与期望域不符：期望 E，实际 {orig.get('domain_id')}")
+            check_receipt(orig.get("receipt"), "E")
+            if type(orig.get("grant")) is dict:
+                check_finance_record(orig["grant"], "E")
+        elif okind == "command":
+            if domain_id != "E" or (orig.get("domain_id") is not None and orig.get("domain_id") != "E"):
+                raise EconomicQueryError(f"回执域与期望域不符：期望 E，实际 {orig.get('domain_id')}")
+            if orig.get("cut") is not None:
+                check_cut(orig["cut"], "E")
+            if type(orig.get("receipts")) is list:
+                for r in orig["receipts"]:
+                    check_receipt(r, "E")
+            if type(orig.get("record")) is dict:
+                check_finance_record(orig["record"], "E")
+        else:
+            raise EconomicQueryError(f"未知原件类型：{orig.get('kind')}")
+
+    kind = body.get("kind")
+    if kind in ("EconomicSnapshot", "EconomicProjection"):
+        for domain, view in sorted(body.get("domains", {}).items()):
+            if type(view) is dict and view.get("status") == "Available":
+                check_cut(view.get("cut"), domain)
+                check_image(view.get("image" if kind == "EconomicSnapshot" else "projection"), domain)
+    elif kind == "EconomicWatch":
+        for domain, view in sorted(body.get("domains", {}).items()):
+            if type(view) is dict and view.get("status") == "Available":
+                check_cut(view.get("base_cut"), domain)
+                check_cut(view.get("next_cut"), domain)
+                for change in view.get("changes", []):
+                    check_cut(change.get("cut"), domain)
+                    check_image(change.get("image"), domain)
+    elif kind in ("EconomicProjectionOriginal", "EconomicOriginal"):
+        for domain, c in sorted(body.get("cuts", {}).items()):
+            check_cut(c, domain)
+        check_original(body.get("original"), body.get("domain_id"), body.get("original_kind"))
+    elif kind == "_WatchChangeImage":
+        check_image(body.get("image"), body.get("domain_id"))
+
+
+def _verify_fill_allocation_row_whitelist(row, has_cmd):
+    _assert_whitelist_keys(row, FILL_ALLOCATION_ROW_ALLOWED, "fill_allocation_row")
+    allocs = row.get("allocations")
+    if type(allocs) is list:
+        for item in allocs:
+            _assert_whitelist_keys(item, ALLOCATION_ITEM_ALLOWED, "fill_allocation_row.allocations[]")
+    witness = row.get("x_execution_witness")
+    if witness is not None:
+        _assert_whitelist_keys(witness, X_EXECUTION_WITNESS_ALLOWED, "x_execution_witness")
+        if witness.get("e_release_cut") is not None:
+            _assert_whitelist_keys(witness["e_release_cut"], CUT_FIELDS, "x_execution_witness.e_release_cut")
+        if witness.get("x_accept_clock") is not None:
+            _assert_whitelist_keys(witness["x_accept_clock"], X_ACCEPT_CLOCK_ALLOWED, "x_execution_witness.x_accept_clock")
+        auth_allowed = (
+            X_AUTHORITY_EVIDENCE_BASE_ALLOWED | {"command"}
+            if has_cmd
+            else X_AUTHORITY_EVIDENCE_BASE_ALLOWED | {"command_ref"}
+        )
+        rel = witness.get("x_release_evidence")
+        if rel is not None:
+            if not has_cmd and rel.get("command") is not None:
+                raise EconomicQueryError("未获准 QueryCommand 却在内嵌执行见证中返回完整命令")
+            _assert_whitelist_keys(rel, auth_allowed, "x_release_evidence")
+            if rel.get("command_ref") is not None:
+                _assert_whitelist_keys(rel["command_ref"], COMMAND_REF_ALLOWED, "x_release_evidence.command_ref")
+        ex = witness.get("x_execute_evidence")
+        if ex is not None:
+            _assert_whitelist_keys(ex, X_EXECUTE_EVIDENCE_ALLOWED, "x_execute_evidence")
+            rep = ex.get("reply")
+            if rep is not None:
+                if not has_cmd and rep.get("command") is not None:
+                    raise EconomicQueryError("未获准 QueryCommand 却在内嵌执行见证中返回完整命令")
+                _assert_whitelist_keys(rep, auth_allowed, "x_execute_evidence.reply")
+                if rep.get("command_ref") is not None:
+                    _assert_whitelist_keys(rep["command_ref"], COMMAND_REF_ALLOWED, "x_execute_evidence.reply.command_ref")
 
 
 def _verify_original_permission_bounds(original, ops):
-    """不变量 B（Q 出口后置校验）：确认返回的同切面原件不含当前 Q 未获准取证类别的载荷。"""
-    if not isinstance(ops, (set, frozenset)):
+    """不变量 B（Q 出口后置校验）：按结构位置与正向白名单核验同切面原件不含未获准类别载荷或未声明字段。"""
+    if type(original) is not dict:
         return
-    has_fact = "QueryFact" in ops
-    has_cmd = "QueryCommand" in ops
-    has_alloc = "QueryAllocation" in ops
-    has_dec = "QueryDecision" in ops
-    has_grant = "QueryGrant" in ops
-    stack = [(original, None)]
-    while stack:
-        node, parent_key = stack.pop()
-        if parent_key in ("raw_exact_text", "model_exact_text", "simulation_original_text_view"):
-            if node is not None and not has_fact:
-                raise EconomicQueryError("未获准 QueryFact 却返回事实或模型精确文本视图")
-            continue
-        if type(node) is dict:
-            kind = node.get("kind")
-            if not has_fact:
-                if (kind == "EconomicFactAtCut"
-                        or node.get("raw_utf8") is not None
-                        or node.get("model_raw_utf8") is not None
-                        or node.get("projected_record") is not None
-                        or node.get("fact") is not None):
-                    raise EconomicQueryError("未获准 QueryFact 却返回事实或模型原字节")
-            if not has_cmd:
-                if kind == "EconomicCommand":
-                    raise EconomicQueryError("未获准 QueryCommand 却返回命令原件")
-                if (parent_key in ("x_release_evidence", "x_execute_evidence", "reply", "x_execution_witness")
-                        and node.get("command") is not None):
-                    raise EconomicQueryError("未获准 QueryCommand 却在内嵌执行见证中返回完整命令")
-            if not has_alloc:
-                if (kind == "EconomicAllocationAtCut"
-                        or node.get("fill_allocation_row") is not None
-                        or node.get("resolved_allocation") is not None):
-                    raise EconomicQueryError("未获准 QueryAllocation 却返回分配原件")
-            if not has_dec and kind == "EconomicDecision":
-                raise EconomicQueryError("未获准 QueryDecision 却返回决定原件")
-            if not has_grant and kind == "EconomicGrant":
-                raise EconomicQueryError("未获准 QueryGrant 却返回授信原件")
-            for k in sorted(node, reverse=True):
-                stack.append((node[k], k))
-        elif type(node) is list:
-            for item in reversed(node):
-                stack.append((item, None))
+    restricted = isinstance(ops, (set, frozenset))
+    has_fact = (not restricted) or ("QueryFact" in ops)
+    has_cmd = (not restricted) or ("QueryCommand" in ops)
+    has_alloc = (not restricted) or ("QueryAllocation" in ops)
+    has_dec = (not restricted) or ("QueryDecision" in ops)
+    has_grant = (not restricted) or ("QueryGrant" in ops)
+
+    def check_orig(obj):
+        if type(obj) is not dict:
+            return
+        kind = obj.get("kind")
+        if not has_fact:
+            if (kind == "EconomicFactAtCut"
+                    or obj.get("raw_utf8") is not None
+                    or obj.get("raw_exact_text") is not None
+                    or obj.get("model_raw_utf8") is not None
+                    or obj.get("model_exact_text") is not None
+                    or obj.get("projected_record") is not None
+                    or obj.get("fact") is not None):
+                raise EconomicQueryError("未获准 QueryFact 却返回事实或模型原字节")
+        if not has_cmd and kind == "EconomicCommand":
+            raise EconomicQueryError("未获准 QueryCommand 却返回命令原件")
+        if not has_alloc:
+            if kind == "EconomicAllocationAtCut" or obj.get("fill_allocation_row") is not None:
+                raise EconomicQueryError("未获准 QueryAllocation 却返回分配原件")
+        if not has_dec and kind == "EconomicDecision":
+            raise EconomicQueryError("未获准 QueryDecision 却返回决定原件")
+        if not has_grant and kind == "EconomicGrant":
+            raise EconomicQueryError("未获准 QueryGrant 却返回授信原件")
+
+        if obj.get("fill_allocation_row") is not None:
+            _verify_fill_allocation_row_whitelist(obj["fill_allocation_row"], has_cmd)
+        if obj.get("projected_record") is not None:
+            prec = obj["projected_record"]
+            if not has_alloc and prec.get("resolved_allocation") is not None:
+                raise EconomicQueryError("未获准 QueryAllocation 却返回分配原件")
+            allowed_prec = PROJECTED_RECORD_BASE_ALLOWED | (
+                {"resolved_allocation"} if has_alloc else {"resolved_allocation_ref"}
+            )
+            _assert_whitelist_keys(prec, allowed_prec, "projected_record")
+        if obj.get("fact") is not None:
+            check_orig(obj["fact"])
+
+    check_orig(original)
 
 
 def _finalize_public_response(query, body, *, requested_cuts=None, verify_historical_roots=False):
     """Python Q 聚合层的唯一出口：所有离开 Q 的读侧应答（主投影、原件、快照、Watch 及一切内嵌对象）
-    在缓存与发布之前均须经过此出口统一核验不变量 A 与不变量 B；不满足则整个应答拒绝。"""
+    在缓存与发布之前均须经过此出口统一核验不变量 A（含回执域归属）与不变量 B（含递归白名单）；不满足则整个应答拒绝。"""
     if type(body) is not dict:
         raise EconomicQueryError("应答体必须为对象")
     kind = body.get("kind")
@@ -330,7 +647,10 @@ def _finalize_public_response(query, body, *, requested_cuts=None, verify_histor
         local_verified.add(key)
         EconomicQuery._remember_verified_cut(query, key)
 
-    _verify_embedded_cuts_and_receipts(
+    if kind == "EconomicProjectionOriginal":
+        _verify_original_permission_bounds(body.get("original"), getattr(query, "authorized_read_ops", None))
+
+    _verify_protocol_response_cuts(
         body,
         vector_cuts,
         known_domains,
@@ -341,15 +661,12 @@ def _finalize_public_response(query, body, *, requested_cuts=None, verify_histor
         for domain, view in body.get("domains", {}).items():
             if type(view) is dict and view.get("status") == "Available":
                 for change in view.get("changes", []):
-                    _verify_embedded_cuts_and_receipts(
-                        change.get("image"),
+                    _verify_protocol_response_cuts(
+                        {"kind": "_WatchChangeImage", "domain_id": domain, "image": change.get("image")},
                         vector_cuts,
                         known_domains,
                         own_domain_limit=(domain, change["cut"]),
                     )
-
-    if kind == "EconomicProjectionOriginal":
-        _verify_original_permission_bounds(body.get("original"), getattr(query, "authorized_read_ops", None))
 
     return body
 
@@ -851,7 +1168,7 @@ class EconomicQuery:
         self._verified_cuts_cache = OrderedDict()
 
     def dispatch_public_read(self, op, payload, *, deadline=None, paged=False, cache=True):
-        """按 PUBLIC_READ_DISPATCH 统一分派公开读侧入口。"""
+        """按 PUBLIC_READ_DISPATCH 统一分派公开读侧入口，并在分派器出口强制再过单一出口核验。"""
         entry = self.PUBLIC_READ_DISPATCH.get(op)
         if entry is None:
             raise EconomicQueryError(f"SchemaUnsupported：未知公开读操作 {op}")
@@ -860,14 +1177,17 @@ class EconomicQuery:
             raise EconomicQueryError(f"SchemaUnsupported：分页不支持操作 {op}")
         fn = getattr(self, method_name)
         if op == "snapshot":
-            return fn(payload, deadline=deadline, paged=paged, cache=cache)
-        if op == "watch":
-            return fn(payload, deadline=deadline, paged=paged)
-        if op == "projection":
-            return fn(payload, deadline=deadline, cache=cache)
-        if op == "projection_original":
-            return fn(payload, deadline=deadline)
-        return fn(payload)
+            result = fn(payload, deadline=deadline, paged=paged, cache=cache)
+        elif op == "watch":
+            result = fn(payload, deadline=deadline, paged=paged)
+        elif op == "projection":
+            result = fn(payload, deadline=deadline, cache=cache)
+        elif op == "projection_original":
+            result = fn(payload, deadline=deadline)
+        else:
+            result = fn(payload)
+        req_cuts = payload.get("cuts") if type(payload) is dict and type(payload.get("cuts")) is dict else None
+        return _finalize_public_response(self, result, requested_cuts=req_cuts, verify_historical_roots=False)
 
     @staticmethod
     def _has_verified_cut(query, key):

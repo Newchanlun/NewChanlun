@@ -245,3 +245,337 @@ test("R4 #5: projection state rejects legacy watch() clearly, strict parser stil
   assert.equal(got.read_projection, undefined);
   await assert.rejects(legacyClient.loadProjection(), /未声明 economic-read-projection\/1/);
 });
+
+test("R6 #1: dual-domain Watch advances 0/0->1/1, E-then-B, B-then-E, and still rejects truly out-of-bounds future receipt", async () => {
+  const discovery = {
+    schema_revision: "economic-discovery/1",
+    session_id: "sess-r6-watch",
+    session_generation: "1",
+    producer_epoch: "1",
+    manifest_hash: "c".repeat(64),
+    domains: ["E", "B:alpha"],
+    max_reply_bytes: "1048576",
+    operation_timeout_ms: "10000",
+    scope: "TestOnlyRecordedEconomics",
+    configured: true,
+  };
+  const emptyImg = () => ({ book: null, recorded: [], pending: [], applied: [], unmatched: [], history: [] });
+  const rawOpen = TB03A.canonical({ events: [{ event: "open", units: "4" }], receipt: { label: "Delivery note" } });
+  const rawSha = sha256Text(rawOpen);
+  const cutsBySeq = {
+    E: { 0: makeCut("E", 0), 1: makeCut("E", 1), 2: makeCut("E", 2) },
+    "B:alpha": { 0: makeCut("B:alpha", 0), 1: makeCut("B:alpha", 1), 2: makeCut("B:alpha", 2) },
+  };
+  const makeImages = (mode) => {
+    const imgs = {
+      E: { 0: emptyImg(), 1: emptyImg(), 2: emptyImg() },
+      "B:alpha": { 0: emptyImg(), 1: emptyImg(), 2: emptyImg() },
+    };
+    const e1Rec = {
+      fact_key: "1".repeat(64),
+      fact_hash: "2".repeat(64),
+      raw_sha256: rawSha,
+      raw_utf8: rawOpen,
+      cut: cutsBySeq.E[1],
+      e_receipt: { kind: "Recorded", domain_id: "E", cut: cutsBySeq.E[1] },
+    };
+    if (mode === "paired_0_to_1" || mode === "e_then_b") {
+      imgs.E[1].recorded.push({ ...e1Rec });
+      imgs["B:alpha"][1].recorded.push({ ...e1Rec });
+    } else if (mode === "b_then_e") {
+      // B:1 PrepareDecision (no E dep); E:1 Reserve references B:alpha:1 prepared_cut.
+      imgs["B:alpha"][1].history.push({ kind: "PrepareDecision", record: { decision_id: "d1", prepared_cut: cutsBySeq["B:alpha"][1] } });
+      imgs.E[1].history.push({ kind: "Reserve", record: { grants: [{ grant_id: "g1", owner: "B:alpha", prepared_cut: cutsBySeq["B:alpha"][1] }] } });
+    } else if (mode === "out_of_bounds") {
+      // Negative control: B:1 embeds E:2 even though E only advanced to E:1!
+      imgs.E[1].recorded.push({ ...e1Rec });
+      imgs["B:alpha"][1].recorded.push({
+        ...e1Rec,
+        cut: cutsBySeq.E[2],
+        e_receipt: { kind: "Recorded", domain_id: "E", cut: cutsBySeq.E[2] },
+      });
+    }
+    return imgs;
+  };
+
+  function makeStrictWatchClient(mode, frontiers) {
+    const imgs = makeImages(mode);
+    let currentFrontier = { ...frontiers[0] };
+    const snapFor = (reqCuts) => {
+      // Enforce Q's exact Invariant A on every snapshot request (refusing E:0 / B:1 when B:1 embeds E:1!).
+      const eSeq = BigInt(reqCuts.E.commit_seq);
+      const bSeq = BigInt(reqCuts["B:alpha"].commit_seq);
+      const bImg = imgs["B:alpha"][Number(bSeq)];
+      for (const rec of bImg.recorded) {
+        if (rec.e_receipt && BigInt(rec.e_receipt.cut.commit_seq) > eSeq) {
+          throw new Error(`MissingDependency：回执(E:${rec.e_receipt.cut.commit_seq})晚于固定切面(E:${eSeq})，拒绝未来回执（向量未就绪）`);
+        }
+      }
+      const eImg = imgs.E[Number(eSeq)];
+      for (const h of eImg.history) {
+        for (const g of h.record?.grants || []) {
+          if (g.prepared_cut && BigInt(g.prepared_cut.commit_seq) > bSeq) {
+            throw new Error(`MissingDependency：回执(B:alpha:${g.prepared_cut.commit_seq})晚于固定切面(B:alpha:${bSeq})，拒绝未来回执（向量未就绪）`);
+          }
+        }
+      }
+      const domains = {};
+      for (const d of discovery.domains) {
+        const seq = Number(reqCuts[d].commit_seq);
+        const img = imgs[d][seq];
+        domains[d] = { status: "Available", cut: cutsBySeq[d][seq], commit_ns: String(seq), image: img, image_hash: sha256Canon(img) };
+      }
+      const body = {
+        kind: "EconomicSnapshot",
+        session_id: discovery.session_id,
+        session_generation: discovery.session_generation,
+        manifest_hash: discovery.manifest_hash,
+        mode: "AsKnown",
+        as_known_ns: null,
+        domains,
+        completeness: "CompleteVector",
+      };
+      return { ...body, snapshot_token: "economic-snapshot-" + sha256Canon(body) };
+    };
+    const watchFor = (afterCuts) => {
+      const domains = {};
+      for (const d of discovery.domains) {
+        const from = Number(afterCuts[d].commit_seq);
+        const to = currentFrontier[d];
+        const ch = [];
+        for (let s = from + 1; s <= to; s++) {
+          const img = imgs[d][s];
+          ch.push({ cut: cutsBySeq[d][s], image: img, image_hash: sha256Canon(img), commit_ns: String(s) });
+        }
+        domains[d] = { status: "Available", base_cut: cutsBySeq[d][from], next_cut: cutsBySeq[d][to], changes: ch };
+      }
+      return {
+        kind: "EconomicWatch",
+        session_id: discovery.session_id,
+        session_generation: discovery.session_generation,
+        manifest_hash: discovery.manifest_hash,
+        domains,
+      };
+    };
+    const c = new TB03A.Client();
+    c.discovery = discovery;
+    c.query = async (payload) => {
+      if (payload.op === "snapshot") {
+        const target = payload.cuts || { E: cutsBySeq.E[currentFrontier.E], "B:alpha": cutsBySeq["B:alpha"][currentFrontier["B:alpha"]] };
+        const res = snapFor(target);
+        if (!payload.cuts) {
+          res.mode = "Current";
+          delete res.snapshot_token;
+          res.snapshot_token = "economic-snapshot-" + sha256Canon(res);
+        }
+        return res;
+      }
+      if (payload.op === "watch") return watchFor(payload.cuts);
+      throw new Error("unexpected op: " + payload.op);
+    };
+    return { client: c, setFrontier: (f) => { currentFrontier = { ...f }; } };
+  }
+
+  // Positive 1: paired simultaneous 0/0 -> 1/1
+  {
+    const { client, setFrontier } = makeStrictWatchClient("paired_0_to_1", [{ E: 0, "B:alpha": 0 }]);
+    const s0 = await client.load({ cuts: { E: cutsBySeq.E[0], "B:alpha": cutsBySeq["B:alpha"][0] } });
+    assert.equal(s0.domains.E.cut.commit_seq, "0");
+    assert.equal(s0.domains["B:alpha"].cut.commit_seq, "0");
+    setFrontier({ E: 1, "B:alpha": 1 });
+    const s1 = await client.watch();
+    assert.equal(s1.domains.E.cut.commit_seq, "1");
+    assert.equal(s1.domains["B:alpha"].cut.commit_seq, "1");
+  }
+  // Positive 2: E leads (0/0 -> 1/0), then B follows (1/0 -> 1/1)
+  {
+    const { client, setFrontier } = makeStrictWatchClient("e_then_b", [{ E: 0, "B:alpha": 0 }]);
+    await client.load({ cuts: { E: cutsBySeq.E[0], "B:alpha": cutsBySeq["B:alpha"][0] } });
+    setFrontier({ E: 1, "B:alpha": 0 });
+    const mid = await client.watch();
+    assert.equal(mid.domains.E.cut.commit_seq, "1");
+    assert.equal(mid.domains["B:alpha"].cut.commit_seq, "0");
+    setFrontier({ E: 1, "B:alpha": 1 });
+    const end = await client.watch();
+    assert.equal(end.domains.E.cut.commit_seq, "1");
+    assert.equal(end.domains["B:alpha"].cut.commit_seq, "1");
+  }
+  // Positive 3: B leads (0/0 -> 0/1 Prepare), then E follows (0/1 -> 1/1 Reserve) AND paired 0/0 -> 1/1
+  {
+    const { client, setFrontier } = makeStrictWatchClient("b_then_e", [{ E: 0, "B:alpha": 0 }]);
+    await client.load({ cuts: { E: cutsBySeq.E[0], "B:alpha": cutsBySeq["B:alpha"][0] } });
+    setFrontier({ E: 0, "B:alpha": 1 });
+    const mid = await client.watch();
+    assert.equal(mid.domains.E.cut.commit_seq, "0");
+    assert.equal(mid.domains["B:alpha"].cut.commit_seq, "1");
+    setFrontier({ E: 1, "B:alpha": 1 });
+    const end = await client.watch();
+    assert.equal(end.domains.E.cut.commit_seq, "1");
+    assert.equal(end.domains["B:alpha"].cut.commit_seq, "1");
+  }
+  // Negative: B:1 embeds E:2 when E only reached E:1 -> MUST fail with MissingDependency and retain 0/0!
+  {
+    const { client, setFrontier } = makeStrictWatchClient("out_of_bounds", [{ E: 0, "B:alpha": 0 }]);
+    await client.load({ cuts: { E: cutsBySeq.E[0], "B:alpha": cutsBySeq["B:alpha"][0] } });
+    setFrontier({ E: 1, "B:alpha": 1 });
+    await assert.rejects(client.watch(), /MissingDependency.*E:2/);
+    assert.equal(client.state.domains.E.cut.commit_seq, "0");
+    assert.equal(client.state.domains["B:alpha"].cut.commit_seq, "0");
+  }
+});
+
+test("R6 #2/#3/#4: JS decoder allows source keys named receipt/cut/witness, enforces receipt domain ownership, and rejects 5-layer unknown witness fields", async () => {
+  const discovery = makeDiscovery(true);
+  const e10 = makeCut("E", 10);
+  const b6 = makeCut("B:alpha", 6);
+  const beta4 = makeCut("B:beta", 4);
+  const cuts = { E: e10, "B:alpha": b6, "B:beta": beta4 };
+  const sourceDoc = {
+    events: [{ event: "open_chong", units: "4" }],
+    receipt: { label: "Delivery note" },
+    cut: { note: "user-cut-field" },
+    e_cut: { note: "user-ecut" },
+    witness: { author: "desk" },
+  };
+  const rawUtf8 = TB03A.canonical(sourceDoc);
+  const rawSha = sha256Text(rawUtf8);
+  const state = makeProjectionState(discovery, cuts);
+  state.domains.E.projection.recorded.push({
+    fact_key: "f".repeat(64),
+    fact_hash: "e".repeat(64),
+    raw_sha256: rawSha,
+    raw_utf8: rawUtf8,
+    event: { event: "open_chong", receipt: { label: "event note" }, cut: { bar: "1" } },
+  });
+  const projEnc = TB03A.canonical(state.domains.E.projection);
+  state.domains.E.projection_hash = sha256Text(projEnc);
+  state.domains.E.projection_bytes = String(Buffer.byteLength(projEnc, "utf8"));
+  const stateBody = { ...state };
+  delete stateBody.projection_token;
+  state.projection_token = "economic-projection-" + sha256Canon(stateBody);
+
+  // #2 Positive: source document containing receipt/cut/e_cut/witness passes verifyProjection AND verifyProjectionOriginal!
+  await TB03A.verifyProjection(state, discovery);
+  const factReply = {
+    kind: "EconomicProjectionOriginal",
+    projection_revision: "economic-read-projection/1",
+    session_id: discovery.session_id,
+    session_generation: discovery.session_generation,
+    manifest_hash: discovery.manifest_hash,
+    cuts,
+    domain_id: "E",
+    original_kind: "fact",
+    object_id: "f".repeat(64),
+    authoritative_image_hash: state.domains.E.authoritative_image_hash,
+    authoritative_image_bytes: state.domains.E.authoritative_image_bytes,
+    commit_ns: state.domains.E.commit_ns,
+    writer_epoch: state.domains.E.writer_epoch,
+    original: {
+      kind: "EconomicFactAtCut",
+      domain_id: "E",
+      fact_key: "f".repeat(64),
+      fact_hash: "e".repeat(64),
+      raw_sha256: rawSha,
+      json_pointer: "/events/0",
+      raw_utf8: rawUtf8,
+      raw_exact_text: { representation: "ExactDecimalIntegerTextProjection", raw_sha256: rawSha, value: sourceDoc },
+      projected_record: state.domains.E.projection.recorded[0],
+      fill_allocation_row: null,
+      receipts: [{ kind: "Recorded", domain_id: "E", cut: e10 }],
+    },
+  };
+  await TB03A.verifyProjectionOriginal(factReply, state, discovery, "E", "fact", "f".repeat(64));
+
+  // #3 Negative: B:alpha allocation attaching a valid E receipt MUST be rejected!
+  const bAllocBase = {
+    kind: "EconomicProjectionOriginal",
+    projection_revision: "economic-read-projection/1",
+    session_id: discovery.session_id,
+    session_generation: discovery.session_generation,
+    manifest_hash: discovery.manifest_hash,
+    cuts,
+    domain_id: "B:alpha",
+    original_kind: "allocation",
+    object_id: "sim-command-fee:1",
+    authoritative_image_hash: state.domains["B:alpha"].authoritative_image_hash,
+    authoritative_image_bytes: state.domains["B:alpha"].authoritative_image_bytes,
+    commit_ns: state.domains["B:alpha"].commit_ns,
+    writer_epoch: state.domains["B:alpha"].writer_epoch,
+    original: {
+      kind: "EconomicAllocationAtCut",
+      domain_id: "B:alpha",
+      allocation_id: "sim-command-fee:1",
+      applied_entry: { allocation_id: "sim-command-fee:1" },
+      application: { allocation_id: "sim-command-fee:1" },
+      receipt: { kind: "Applied", domain_id: "E", cut: e10 },
+      fact_ref: { fact_key: "f".repeat(64), fact_hash: "e".repeat(64) },
+      fact: null,
+    },
+  };
+  await assert.rejects(
+    TB03A.verifyProjectionOriginal(bAllocBase, state, discovery, "B:alpha", "allocation", "sim-command-fee:1"),
+    /回执域与期望域不符/
+  );
+  // #3 Positive: fixing receipt domain to B:alpha succeeds!
+  const bAllocOk = structuredClone(bAllocBase);
+  bAllocOk.original.receipt = { kind: "Applied", domain_id: "B:alpha", cut: b6 };
+  await TB03A.verifyProjectionOriginal(bAllocOk, state, discovery, "B:alpha", "allocation", "sim-command-fee:1");
+
+  // #4 Negative: unknown key injected into any of the 5 witness/allocation layers MUST be rejected!
+  const makeEAlloc = (mutate) => {
+    const rep = {
+      kind: "EconomicProjectionOriginal",
+      projection_revision: "economic-read-projection/1",
+      session_id: discovery.session_id,
+      session_generation: discovery.session_generation,
+      manifest_hash: discovery.manifest_hash,
+      cuts,
+      domain_id: "E",
+      original_kind: "allocation",
+      object_id: "sim-command-fee:1",
+      authoritative_image_hash: state.domains.E.authoritative_image_hash,
+      authoritative_image_bytes: state.domains.E.authoritative_image_bytes,
+      commit_ns: state.domains.E.commit_ns,
+      writer_epoch: state.domains.E.writer_epoch,
+      original: {
+        kind: "EconomicAllocationAtCut",
+        domain_id: "E",
+        allocation_id: "sim-command-fee:1",
+        fill_allocation_row: {
+          fact_key: "f".repeat(64),
+          fact_hash: "e".repeat(64),
+          evidence_id: "ev-1",
+          allocations: [{ allocation_id: "sim-command-fee:1", chong_id: "alpha" }],
+          x_execution_witness: {
+            witness_revision: "x-sim-execution-witness/1",
+            e_release_cut: e10,
+            x_release_evidence: { protocol: "x-exact-authority/1", command_ref: { command_id: "cmd-alpha", command_hash: "a".repeat(64) } },
+            x_execute_evidence: { claimed_ns: "2", reply: { protocol: "x-exact-authority/1", command_ref: { command_id: "cmd-alpha", command_hash: "a".repeat(64) } } },
+          },
+        },
+        resolve_receipt: { kind: "Resolved", domain_id: "E", cut: e10 },
+        fact_ref: { fact_key: "f".repeat(64), fact_hash: "e".repeat(64) },
+        fact: null,
+      },
+    };
+    mutate(rep.original.fill_allocation_row);
+    return rep;
+  };
+  // #4 Positive: clean whitelisted payload succeeds
+  await TB03A.verifyProjectionOriginal(makeEAlloc(() => {}), state, discovery, "E", "allocation", "sim-command-fee:1");
+  // #4 Five-layer mutations must ALL reject
+  const mutations = [
+    ["row", (r) => { r.review_new_label = "blue"; }],
+    ["witness", (r) => { r.x_execution_witness.review_new_label = "blue"; }],
+    ["release", (r) => { r.x_execution_witness.x_release_evidence.review_new_label = "blue"; }],
+    ["execute", (r) => { r.x_execution_witness.x_execute_evidence.review_new_label = "blue"; }],
+    ["reply", (r) => { r.x_execution_witness.x_execute_evidence.reply.review_new_label = "blue"; }],
+  ];
+  for (const [layer, fn] of mutations) {
+    await assert.rejects(
+      TB03A.verifyProjectionOriginal(makeEAlloc(fn), state, discovery, "E", "allocation", "sim-command-fee:1"),
+      /白名单|未声明字段|未知字段/,
+      `layer ${layer} must be rejected`
+    );
+  }
+});

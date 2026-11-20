@@ -599,6 +599,7 @@
       need(g && same(o.grant,g) && o.receipt.record.grants.some(x=>same(x,g)),"grant 原件与快照不同");
       await receiptMatches(o.receipt,view.image,view,discovery);
     }
+    verifyProtocolCutsAndReceipts(reply, cuts, discovery.domains);
     return reply;
   }
   async function verifySnapshot(value, discovery) {
@@ -643,13 +644,85 @@
     const vectorCuts = Object.fromEntries(
       discovery.domains.map(d => [d, value.domains[d].status === "Available" ? value.domains[d].cut : null])
     );
-    verifyEmbeddedCutsAgainstVector(value, vectorCuts, discovery.domains, false);
+    verifyProtocolCutsAndReceipts(value, vectorCuts, discovery.domains, false);
     const body = {...value}; delete body.snapshot_token;
     need(value.snapshot_token === "economic-snapshot-" + await sha256(body), "固定向量 token 与完整图像不同");
     return value;
   }
   const PROJECTION_REV = "economic-read-projection/1";
   const PROJECTION_ORIG_KINDS = ["fact", "allocation", "decision", "grant", "command", "model"];
+  const FILL_ALLOCATION_ROW_ALLOWED = new Set([
+    "fact_key", "fact_hash", "projection_kind", "source_kind", "manifest_hash", "symbol",
+    "fill_allocation_policy_id", "policy_revision", "from", "to", "report_kind", "component",
+    "original_fact_key", "original_allocation_id", "command_id", "grant_id", "responsibility_ref",
+    "plan_hash", "command_plan_hash", "command_hash", "evidence_id", "allocations", "x_execution_witness",
+  ]);
+  const ALLOCATION_ITEM_ALLOWED = new Set([
+    "allocation_id", "source_kind", "chong_id", "command_id", "grant_id", "responsibility_ref",
+    "family_id", "revision", "symbol", "manifest_hash", "units", "acquisition_cash", "commission",
+    "fee_deferred_to_cause_fact", "reported_fill_fee", "fee_only", "fee_type", "cause",
+    "original_fact_key", "original_allocation_id", "income_changes", "fill_allocation_policy_id",
+    "policy_revision", "component", "reversal", "unmatched_reason", "status", "target_domain",
+  ]);
+  const X_EXECUTION_WITNESS_ALLOWED = new Set([
+    "witness_revision", "x_profile_revision", "x_id", "x_epoch", "session_id", "session_generation",
+    "source_namespace", "source_epoch", "model_content_hash", "command_id", "command_hash",
+    "e_release_receipt_key", "e_release_cut", "e_release_commit_ns", "x_release_evidence",
+    "x_accept_clock", "x_command_state", "x_execute_evidence", "attempt_batch_id",
+    "attempt_batch_bar_index", "attempt_batch_request_sha256", "attempt_batch_receipt_sha256",
+    "originals_batch_id", "originals_batch_bar_index", "originals_batch_receipt_sha256",
+    "fact_raw_sha256",
+  ]);
+  const X_ACCEPT_CLOCK_ALLOWED = new Set(["received_ns", "first_known_ns", "commit_ns"]);
+  const X_AUTHORITY_EVIDENCE_ALLOWED = new Set([
+    "protocol", "session_id", "session_generation", "authority_id", "command_id", "command_hash",
+    "state", "receipt_id", "release_receipt_id", "commit_ns", "command", "command_ref",
+  ]);
+  const X_EXECUTE_EVIDENCE_ALLOWED = new Set(["claimed_ns", "reply"]);
+  const COMMAND_REF_ALLOWED = new Set(["command_id", "command_hash"]);
+  const PROJECTED_RECORD_ALLOWED = new Set([
+    "fact_key", "fact_hash", "raw_sha256", "raw_utf8", "json_pointer", "event", "token",
+    "target_domain", "source_event_time", "source_received_time", "source_producer",
+    "origin_message", "origin_request_hash", "received_ns", "first_known_ns", "commit_ns",
+    "recorded_seq", "cut", "e_domain_id", "e_session_id", "e_session_generation",
+    "e_commit_proof", "e_commit_proof_omitted", "e_receipt", "e_resolution_proof",
+    "source_debit_proof", "b_observation", "b_origin_message", "b_origin_request_hash",
+    "resolved_allocation", "resolved_allocation_ref",
+  ]);
+  function assertWhitelistKeys(obj, allowed, label) {
+    need(object(obj), label + " 必须为对象");
+    for (const k of Object.keys(obj)) {
+      need(allowed.has(k), label + " 存在未声明字段（不在读权白名单内）：" + k);
+    }
+  }
+  function verifyFillAllocationRowWhitelist(row) {
+    assertWhitelistKeys(row, FILL_ALLOCATION_ROW_ALLOWED, "fill_allocation_row");
+    if (Array.isArray(row.allocations)) {
+      for (const item of row.allocations) assertWhitelistKeys(item, ALLOCATION_ITEM_ALLOWED, "fill_allocation_row.allocations[]");
+    }
+    if (row.x_execution_witness !== undefined && row.x_execution_witness !== null) {
+      const w = row.x_execution_witness;
+      assertWhitelistKeys(w, X_EXECUTION_WITNESS_ALLOWED, "x_execution_witness");
+      if (w.x_accept_clock !== undefined && w.x_accept_clock !== null) {
+        assertWhitelistKeys(w.x_accept_clock, X_ACCEPT_CLOCK_ALLOWED, "x_accept_clock");
+      }
+      if (w.x_release_evidence !== undefined && w.x_release_evidence !== null) {
+        assertWhitelistKeys(w.x_release_evidence, X_AUTHORITY_EVIDENCE_ALLOWED, "x_release_evidence");
+        if (w.x_release_evidence.command_ref !== undefined && w.x_release_evidence.command_ref !== null) {
+          assertWhitelistKeys(w.x_release_evidence.command_ref, COMMAND_REF_ALLOWED, "x_release_evidence.command_ref");
+        }
+      }
+      if (w.x_execute_evidence !== undefined && w.x_execute_evidence !== null) {
+        assertWhitelistKeys(w.x_execute_evidence, X_EXECUTE_EVIDENCE_ALLOWED, "x_execute_evidence");
+        if (w.x_execute_evidence.reply !== undefined && w.x_execute_evidence.reply !== null) {
+          assertWhitelistKeys(w.x_execute_evidence.reply, X_AUTHORITY_EVIDENCE_ALLOWED, "x_execute_evidence.reply");
+          if (w.x_execute_evidence.reply.command_ref !== undefined && w.x_execute_evidence.reply.command_ref !== null) {
+            assertWhitelistKeys(w.x_execute_evidence.reply.command_ref, COMMAND_REF_ALLOWED, "x_execute_evidence.reply.command_ref");
+          }
+        }
+      }
+    }
+  }
   function isCutShape(v) {
     if (!object(v)) return false;
     const ks = Object.keys(v);
@@ -657,38 +730,226 @@
       && Object.prototype.hasOwnProperty.call(v, "commit_seq")
       && Object.prototype.hasOwnProperty.call(v, "root_hash");
   }
-  function verifyEmbeddedCutsAgainstVector(root, cuts, knownDomains, requireKnownDomain = true) {
-    const stack = [[root, null]];
-    while (stack.length > 0) {
-      const [node, parentKey] = stack.pop();
-      if (Array.isArray(node)) {
-        const elemKey = parentKey === "receipts" ? "receipts[]" : null;
-        for (let i = node.length - 1; i >= 0; i--) stack.push([node[i], elemKey]);
-        continue;
+  function visitProtocolCutsInImage(img, ownerDomain, onCut, onReceipt) {
+    if (!object(img)) return;
+    if (object(img.book)) {
+      if (object(img.book.opening_fact_ref) && img.book.opening_fact_ref.e_cut != null) {
+        onCut(img.book.opening_fact_ref.e_cut, "E");
       }
-      if (!object(node)) continue;
-      const cutShape = isCutShape(node);
-      const cutKey = parentKey !== null && (parentKey === "cut" || parentKey.endsWith("_cut"));
-      if (cutShape || cutKey) {
-        need(cutShape, "内嵌 cut 字段不完整或多余");
-        const rdomain = node.domain_id;
-        need(typeof rdomain === "string" && (!requireKnownDomain || knownDomains.includes(rdomain)), "回执所属域不在固定切面向量中");
-        cut(node, rdomain);
-        if (Object.prototype.hasOwnProperty.call(cuts, rdomain) && cuts[rdomain] !== null) {
-          const rseq = BigInt(node.commit_seq), cseq = BigInt(cuts[rdomain].commit_seq);
-          need(rseq <= cseq, "MissingDependency：回执(" + rdomain + ":" + node.commit_seq + ")晚于固定切面(" + rdomain + ":" + cuts[rdomain].commit_seq + ")，向量未就绪");
-          if (rseq === cseq) need(same(node, cuts[rdomain]), "同序号回执根与固定切面根不符");
+      for (const listKey of ["known_cost_components", "cost_events"]) {
+        if (Array.isArray(img.book[listKey])) {
+          for (const item of img.book[listKey]) {
+            if (object(item) && object(item.derivation) && item.derivation.resolve_cut != null) {
+              onCut(item.derivation.resolve_cut, "E");
+            }
+          }
         }
       }
-      if (["receipt", "e_receipt", "resolve_receipt", "receipts[]"].includes(parentKey)) {
-        need(isCutShape(node.cut), "回执缺失合法 cut");
+      if (object(img.book.voice) && object(img.book.voice.identity) && object(img.book.voice.identity.opening_basis)
+          && img.book.voice.identity.opening_basis.e_cut != null) {
+        onCut(img.book.voice.identity.opening_basis.e_cut, "E");
       }
-      if (typeof node.domain_id === "string" && isCutShape(node.cut)) {
-        need(node.domain_id === node.cut.domain_id, "回执域与 cut 域不符");
-      }
-      const ks = Object.keys(node).sort();
-      for (let i = ks.length - 1; i >= 0; i--) stack.push([node[ks[i]], ks[i]]);
     }
+    for (const listKey of ["recorded", "pending"]) {
+      if (Array.isArray(img[listKey])) {
+        for (const rec of img[listKey]) visitProtocolCutsInRecord(rec, onCut, onReceipt);
+      }
+    }
+    if (Array.isArray(img.fill_allocations)) {
+      for (const row of img.fill_allocations) visitProtocolCutsInFillRow(row, onCut);
+    }
+    if (object(img.finance)) visitProtocolCutsInFinance(img.finance, ownerDomain, onCut);
+    if (Array.isArray(img.history)) {
+      for (const h of img.history) {
+        if (!object(h)) continue;
+        if (object(h.x_execution_witnesses)) {
+          for (const w of Object.values(h.x_execution_witnesses)) {
+            if (object(w) && w.e_release_cut != null) onCut(w.e_release_cut, "E");
+          }
+        }
+        if (object(h.record)) visitProtocolCutsInFinanceRecord(h.record, ownerDomain, onCut);
+        if (object(h.witness)) {
+          if (Array.isArray(h.witness.prepared_proofs)) {
+            for (const p of h.witness.prepared_proofs) visitProtocolCutsInPeerProof(p, onCut, onReceipt);
+          }
+          if (object(h.witness.grant_proof)) visitProtocolCutsInPeerProof(h.witness.grant_proof, onCut, onReceipt);
+          if (object(h.witness.commit_proof)) visitProtocolCutsInPeerProof(h.witness.commit_proof, onCut, onReceipt);
+        }
+      }
+    }
+  }
+  function visitProtocolCutsInRecord(rec, onCut, onReceipt) {
+    if (!object(rec)) return;
+    // 只检查协议定义的证据路径，绝不解析来源数据字段（event / raw_utf8 / raw_exact_text）。
+    if (rec.cut != null) onCut(rec.cut, "E");
+    if (rec.e_receipt != null) onReceipt(rec.e_receipt, "E");
+    if (object(rec.e_resolution_proof)) {
+      if (rec.e_resolution_proof.receipt != null) onReceipt(rec.e_resolution_proof.receipt, "E");
+      if (object(rec.e_resolution_proof.image)) visitProtocolCutsInImage(rec.e_resolution_proof.image, "E", onCut, onReceipt);
+      if (object(rec.e_resolution_proof.previous_image)) visitProtocolCutsInImage(rec.e_resolution_proof.previous_image, "E", onCut, onReceipt);
+    }
+    if (object(rec.e_commit_proof) && object(rec.e_commit_proof.image)) {
+      visitProtocolCutsInImage(rec.e_commit_proof.image, "E", onCut, onReceipt);
+    }
+    if (object(rec.source_debit_proof)) {
+      const sd = typeof rec.source_debit_proof.domain_id === "string" ? rec.source_debit_proof.domain_id : null;
+      if (rec.source_debit_proof.receipt != null) onReceipt(rec.source_debit_proof.receipt, sd);
+      if (object(rec.source_debit_proof.image)) visitProtocolCutsInImage(rec.source_debit_proof.image, sd, onCut, onReceipt);
+      if (object(rec.source_debit_proof.previous_image)) visitProtocolCutsInImage(rec.source_debit_proof.previous_image, sd, onCut, onReceipt);
+    }
+  }
+  function visitProtocolCutsInFillRow(row, onCut) {
+    if (object(row) && object(row.x_execution_witness) && row.x_execution_witness.e_release_cut != null) {
+      onCut(row.x_execution_witness.e_release_cut, "E");
+    }
+  }
+  function visitProtocolCutsInFinanceRecord(rec, ownerDomain, onCut) {
+    if (!object(rec)) return;
+    if (rec.prepared_cut != null) {
+      const exp = typeof rec.owner === "string" ? rec.owner : ownerDomain;
+      onCut(rec.prepared_cut, exp);
+    }
+    if (rec.commit_cut != null) {
+      const exp = typeof rec.owner === "string" ? rec.owner : null;
+      onCut(rec.commit_cut, exp);
+    }
+    if (object(rec.grant)) {
+      if (rec.grant.e_cut != null) onCut(rec.grant.e_cut, "E");
+      if (object(rec.grant.original) && rec.grant.original.prepared_cut != null) {
+        const exp = typeof rec.grant.original.owner === "string" ? rec.grant.original.owner : ownerDomain;
+        onCut(rec.grant.original.prepared_cut, exp);
+      }
+    }
+    if (object(rec.local_commit_receipt) && rec.local_commit_receipt.e_cut != null) {
+      onCut(rec.local_commit_receipt.e_cut, "E");
+    }
+    if (Array.isArray(rec.grants)) {
+      for (const g of rec.grants) {
+        if (object(g) && g.prepared_cut != null) {
+          onCut(g.prepared_cut, typeof g.owner === "string" ? g.owner : null);
+        }
+      }
+    }
+  }
+  function visitProtocolCutsInFinance(fin, ownerDomain, onCut) {
+    if (!object(fin)) return;
+    if (Array.isArray(fin.decisions)) {
+      for (const d of fin.decisions) visitProtocolCutsInFinanceRecord(d, ownerDomain, onCut);
+    }
+    if (Array.isArray(fin.slots)) {
+      for (const s of fin.slots) {
+        if (object(s) && Array.isArray(s.grants)) {
+          for (const g of s.grants) visitProtocolCutsInFinanceRecord(g, ownerDomain, onCut);
+        }
+      }
+    }
+    if (Array.isArray(fin.commands)) {
+      for (const c of fin.commands) visitProtocolCutsInFinanceRecord(c, ownerDomain, onCut);
+    }
+  }
+  function visitProtocolCutsInPeerProof(p, onCut, onReceipt) {
+    if (!object(p)) return;
+    const pdom = typeof p.domain_id === "string" ? p.domain_id : null;
+    if (p.current_cut != null) onCut(p.current_cut, pdom);
+    if (p.receipt != null) onReceipt(p.receipt, pdom);
+    if (object(p.image)) visitProtocolCutsInImage(p.image, pdom, onCut, onReceipt);
+    if (object(p.current_image)) visitProtocolCutsInImage(p.current_image, pdom, onCut, onReceipt);
+  }
+  function visitProtocolCutsInOriginal(orig, domain, kind, onCut, onReceipt) {
+    need(object(orig), "原件载荷非对象");
+    if (kind === "fact" || orig.kind === "EconomicFactAtCut") {
+      need(orig.domain_id === domain, "回执域与期望域不符");
+      need(Array.isArray(orig.receipts), "事实回执缺失");
+      for (const r of orig.receipts) {
+        const exp = domain === "E" ? "E" : (object(r) && r.kind === "Recorded" ? "E" : domain);
+        onReceipt(r, exp);
+      }
+      if (orig.projected_record != null) visitProtocolCutsInRecord(orig.projected_record, onCut, onReceipt);
+      if (orig.fill_allocation_row != null) visitProtocolCutsInFillRow(orig.fill_allocation_row, onCut);
+    } else if (kind === "allocation" || orig.kind === "EconomicAllocationAtCut") {
+      need(orig.domain_id === domain, "回执域与期望域不符");
+      if (domain === "E") {
+        onReceipt(orig.resolve_receipt, "E");
+        if (orig.fill_allocation_row != null) visitProtocolCutsInFillRow(orig.fill_allocation_row, onCut);
+      } else {
+        onReceipt(orig.receipt, domain);
+      }
+      if (orig.fact !== null && orig.fact !== undefined) {
+        visitProtocolCutsInOriginal(orig.fact, domain, "fact", onCut, onReceipt);
+      }
+    } else if (kind === "model" || orig.kind === "EconomicModelAtCut") {
+      need(orig.domain_id === domain, "回执域与期望域不符");
+    } else if (kind === "decision" || orig.kind === "EconomicDecision") {
+      need(orig.domain_id === domain, "回执域与期望域不符");
+      need(Array.isArray(orig.receipts), "决定回执缺失");
+      for (const r of orig.receipts) onReceipt(r, domain);
+      if (object(orig.decision)) visitProtocolCutsInFinanceRecord(orig.decision, domain, onCut);
+    } else if (kind === "grant" || orig.kind === "EconomicGrant") {
+      need(domain === "E" && orig.domain_id === "E", "回执域与期望域不符");
+      onReceipt(orig.receipt, "E");
+      if (object(orig.grant)) visitProtocolCutsInFinanceRecord(orig.grant, "E", onCut);
+    } else if (kind === "command" || orig.kind === "EconomicCommand") {
+      need(domain === "E" && orig.domain_id === "E", "回执域与期望域不符");
+      if (orig.cut != null) onCut(orig.cut, "E");
+      if (Array.isArray(orig.receipts)) {
+        for (const r of orig.receipts) onReceipt(r, "E");
+      }
+      if (object(orig.record)) visitProtocolCutsInFinanceRecord(orig.record, "E", onCut);
+    }
+  }
+  function verifyProtocolCutsAndReceipts(root, cuts, knownDomains, requireKnownDomain = true) {
+    const checkOneCut = (node, expectedDomain = null) => {
+      need(isCutShape(node), "内嵌 cut 字段不完整或多余");
+      const rdomain = node.domain_id;
+      if (expectedDomain !== null) need(rdomain === expectedDomain, "回执域与期望域不符");
+      need(typeof rdomain === "string" && (!requireKnownDomain || knownDomains.includes(rdomain)), "回执所属域不在固定切面向量中");
+      cut(node, rdomain);
+      if (Object.prototype.hasOwnProperty.call(cuts, rdomain) && cuts[rdomain] !== null) {
+        const rseq = BigInt(node.commit_seq), cseq = BigInt(cuts[rdomain].commit_seq);
+        need(rseq <= cseq, "MissingDependency：回执(" + rdomain + ":" + node.commit_seq + ")晚于固定切面(" + rdomain + ":" + cuts[rdomain].commit_seq + ")，向量未就绪");
+        if (rseq === cseq) need(same(node, cuts[rdomain]), "同序号回执根与固定切面根不符");
+      }
+    };
+    const checkOneReceipt = (rec, expectedDomain = null) => {
+      need(object(rec), "回执非对象");
+      need(isCutShape(rec.cut), "回执缺失合法 cut");
+      need(typeof rec.domain_id === "string", "回执缺失 domain_id");
+      need(rec.domain_id === rec.cut.domain_id, "回执域与 cut 域不符");
+      if (expectedDomain !== null) need(rec.domain_id === expectedDomain, "回执域与期望域不符");
+      checkOneCut(rec.cut, expectedDomain);
+      if (object(rec.record)) visitProtocolCutsInFinanceRecord(rec.record, rec.domain_id, checkOneCut);
+    };
+    if (root.kind === "EconomicSnapshot" || root.kind === "EconomicProjection") {
+      for (const [domain, view] of Object.entries(root.domains || {})) {
+        if (!object(view) || view.status !== "Available") continue;
+        checkOneCut(view.cut, domain);
+        const body = root.kind === "EconomicSnapshot" ? view.image : view.projection;
+        visitProtocolCutsInImage(body, domain, checkOneCut, checkOneReceipt);
+      }
+    } else if (root.kind === "EconomicProjectionOriginal" || root.kind === "EconomicOriginal") {
+      for (const [domain, c] of Object.entries(root.cuts || {})) checkOneCut(c, domain);
+      const kind = root.original_kind || (object(root.original) ? ({
+        EconomicDecision: "decision", EconomicGrant: "grant", EconomicCommand: "command",
+      }[root.original.kind] || null) : null);
+      visitProtocolCutsInOriginal(root.original, root.domain_id, kind, checkOneCut, checkOneReceipt);
+    }
+  }
+  function collectPeerCutDependencies(img, ownerDomain, knownDomains) {
+    const deps = new Map();
+    const recordCut = (node) => {
+      if (!isCutShape(node) || typeof node.domain_id !== "string") return;
+      if (!knownDomains.includes(node.domain_id)) return;
+      const seq = BigInt(node.commit_seq);
+      const prev = deps.get(node.domain_id);
+      if (prev === undefined || seq > prev) deps.set(node.domain_id, seq);
+    };
+    const recordReceipt = (rec) => {
+      if (!object(rec)) return;
+      recordCut(rec.cut);
+      if (object(rec.record)) visitProtocolCutsInFinanceRecord(rec.record, rec.domain_id || ownerDomain, recordCut);
+    };
+    visitProtocolCutsInImage(img, ownerDomain, recordCut, recordReceipt);
+    return deps;
   }
   async function utf8Sha256(text) {
     return bytesHash(new TextEncoder().encode(text));
@@ -778,7 +1039,7 @@
     const vectorCuts = Object.fromEntries(
       discovery.domains.map(d => [d, value.domains[d].status === "Available" ? value.domains[d].cut : null])
     );
-    verifyEmbeddedCutsAgainstVector(value, vectorCuts, discovery.domains);
+    verifyProtocolCutsAndReceipts(value, vectorCuts, discovery.domains);
     const body = {...value}; delete body.projection_token;
     need(value.projection_token === "economic-projection-" + await sha256(body), "投影固定向量 token 与正文不符");
     return value;
@@ -799,7 +1060,7 @@
       && reply.commit_ns === view.commit_ns && reply.writer_epoch === view.writer_epoch, "同切面原件与固定投影切面不符");
     const o = reply.original;
     need(object(o), "同切面原件载荷非对象");
-    verifyEmbeddedCutsAgainstVector(reply, cuts, discovery.domains);
+    verifyProtocolCutsAndReceipts(reply, cuts, discovery.domains);
     const checkFact = async (f) => {
       need(object(f) && typeof f.raw_utf8 === "string", "事实原件缺 raw_utf8");
       digest(f.raw_sha256, "raw_sha256");
@@ -807,11 +1068,20 @@
       need(object(f.raw_exact_text) && f.raw_exact_text.representation === "ExactDecimalIntegerTextProjection"
         && f.raw_exact_text.raw_sha256 === f.raw_sha256, "事实精确文本视图绑定不符");
       need(Array.isArray(f.receipts), "事实回执缺失");
+      if (f.projected_record !== undefined && f.projected_record !== null) {
+        assertWhitelistKeys(f.projected_record, PROJECTED_RECORD_ALLOWED, "projected_record");
+      }
+      if (f.fill_allocation_row !== undefined && f.fill_allocation_row !== null) {
+        verifyFillAllocationRowWhitelist(f.fill_allocation_row);
+      }
     };
     if (kind === "fact") await checkFact(o);
     else if (kind === "allocation") {
       const rec = domain === "E" ? o.resolve_receipt : o.receipt;
       need(object(rec), "分配回执缺失");
+      if (domain === "E" && o.fill_allocation_row !== undefined && o.fill_allocation_row !== null) {
+        verifyFillAllocationRowWhitelist(o.fill_allocation_row);
+      }
       if (o.fact !== null && o.fact !== undefined) {
         await checkFact(o.fact);
       } else {
@@ -1055,9 +1325,11 @@
         changes.session_generation === before.session_generation && changes.manifest_hash === before.manifest_hash, "变化身份不符");
       keys(changes.domains, this.discovery.domains, "变化域集合");
       const next = {};
+      const bySeq = {};
       for (const [domain, result] of Object.entries(changes.domains)) {
         need(result.status === "Available", result.error || "变化域不可用，保留原切面");
         need(same(result.base_cut, cuts[domain]) && Array.isArray(result.changes), "变化起点不符");
+        const seqMap = new Map([[cuts[domain].commit_seq, {cut: cuts[domain], image: before.domains[domain].image}]]);
         let previous = cuts[domain], previousNs = BigInt(before.domains[domain].commit_ns);
         for (const batch of result.changes) {
           keys(batch, ["cut", "image", "image_hash", "commit_ns"], "完整经济变化");
@@ -1066,16 +1338,42 @@
           need(BigInt(batch.commit_ns) >= previousNs && await sha256(batch.image) === batch.image_hash,
             "变化时间倒退或图像摘要不同");
           need(BigInt(batch.cut.commit_seq) === BigInt(previous.commit_seq) + 1n, "变化序号不连续");
+          seqMap.set(batch.cut.commit_seq, batch);
+          previous = batch.cut; previousNs = BigInt(batch.commit_ns);
+        }
+        need(same(previous, result.next_cut), "变化末尾与前沿不同");
+        next[domain] = result.next_cut;
+        bySeq[domain] = seqMap;
+      }
+      // 逐批复核时按该批实际因果依赖闭包选取一致同伴切面（不拿旧起点 E:0 配已依赖 E:1 的 B:1，亦不超过已核 next 前沿）。
+      for (const [domain, result] of Object.entries(changes.domains)) {
+        for (const batch of result.changes) {
           const one = {...cuts, [domain]: batch.cut};
+          const queue = [[domain, batch.image]];
+          while (queue.length > 0) {
+            const [curDom, curImg] = queue.shift();
+            const deps = collectPeerCutDependencies(curImg, curDom, this.discovery.domains);
+            for (const [peer, needSeq] of deps.entries()) {
+              if (peer === domain) continue;
+              const curPeerSeq = BigInt(one[peer].commit_seq);
+              const maxPeerSeq = BigInt(next[peer].commit_seq);
+              const targetSeq = needSeq <= maxPeerSeq ? needSeq : maxPeerSeq;
+              if (targetSeq > curPeerSeq) {
+                const peerBatch = bySeq[peer].get(targetSeq.toString());
+                if (peerBatch) {
+                  one[peer] = peerBatch.cut;
+                  queue.push([peer, peerBatch.image]);
+                }
+              }
+            }
+          }
           const fixed = await this.query({op: "snapshot", cuts: one, as_known_ns: null, snapshot_token: null}, deadline);
           await verifySnapshot(fixed, this.discovery);
           need(fixed.mode === "AsKnown" && fixed.as_known_ns === null, "逐批复核未返回指定历史模式");
           const view = fixed.domains[domain];
           need(view.status === "Available" && same(view.cut, batch.cut) && same(view.image, batch.image) &&
             view.image_hash === batch.image_hash && view.commit_ns === batch.commit_ns, "中间变化与同切面图像/时间不同");
-          previous = batch.cut; previousNs = BigInt(batch.commit_ns);
         }
-        need(same(previous, result.next_cut), "变化末尾与前沿不同"); next[domain] = result.next_cut;
       }
       const snapshot = await this.query({op: "snapshot", cuts: next, as_known_ns: null, snapshot_token: null}, deadline);
       await verifySnapshot(snapshot, this.discovery);

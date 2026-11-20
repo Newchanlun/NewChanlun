@@ -703,7 +703,7 @@ class R5ReadEntryEnumerationAndBudgetTests(unittest.TestCase):
             img = {"book": None, "recorded": [], "pending": [], "applied": [], "unmatched": [], "history": [], "finance": fin}
             if domain == "B:alpha" and seq == "6":
                 img["recorded"] = [b6_recorded_item]
-                img["finance"]["decisions"] = [{"decision_id": "alpha", "state": "Committed", "e_future_proof": {"cut": real_cuts[("E", "8")]}}]
+                img["finance"]["decisions"] = [{"decision_id": "alpha", "state": "Committed", "grant": {"e_cut": real_cuts[("E", "8")]}}]
             elif domain == "E" and seq in ("6", "8", "10"):
                 img["finance"]["commands"] = [cmd_record]
                 img["history"] = [
@@ -736,7 +736,7 @@ class R5ReadEntryEnumerationAndBudgetTests(unittest.TestCase):
             if op == "QueryDecision":
                 return {
                     "kind": "EconomicDecision", "domain_id": domain,
-                    "decision": {"decision_id": "alpha", "state": "Committed", "e_future_proof": {"cut": real_cuts[("E", "8")]}},
+                    "decision": {"decision_id": "alpha", "state": "Committed", "grant": {"e_cut": real_cuts[("E", "8")]}},
                     "receipts": [{"kind": "LocalCommitReceipt", "domain_id": domain, "cut": real_cuts[(domain, "6")]}],
                 }
             if op == "ReadProjection":
@@ -872,33 +872,55 @@ class R5ReadEntryEnumerationAndBudgetTests(unittest.TestCase):
                 with self.assertRaisesRegex(ValueError, r"MissingDependency.*E:8.*晚于固定切面.*E:6"):
                     self._call_http_entry(q, path, request_builders[op](), paged=paged)
 
-        # Positive controls: E:10 / B:alpha:6 / B:beta:4 succeeds for projection & projection_original; E:4->E:5 watch succeeds!
-        ok_proj = self._call_http_entry(q, "/api/economic/read", {
-            "op": "projection", "projection_revision": ECONOMIC_PROJECTION_REVISION,
-            "cuts": cuts_e10, "as_known_ns": None, "projection_token": None,
-        }, paged=True)
-        self.assertEqual(ok_proj["projection_completeness"], "CompleteProjectionVector")
-        ok_orig = self._call_http_entry(q, "/api/economic/read", {
-            "op": "projection_original", "projection_revision": ECONOMIC_PROJECTION_REVISION,
-            "domain_id": "B:alpha", "kind": "allocation", "object_id": aid, "cuts": cuts_e10,
-        }, paged=True)
-        self.assertEqual(ok_orig["kind"], "EconomicProjectionOriginal")
-        ok_watch = self._call_http_entry(q, "/api/economic/watch", {
-            "op": "watch",
-            "cuts": {"E": real_cuts[("E", "4")], "B:alpha": real_cuts[("B:alpha", "4")], "B:beta": real_cuts[("B:beta", "4")]},
-        }, paged=False)
-        self.assertEqual(ok_watch["domains"]["E"]["next_cut"]["commit_seq"], "5")
+        # Positive controls for EVERY enumerated HTTP entry (all 7 route+op pairs):
+        # E:10 / B:alpha:6 / B:beta:4 succeeds for snapshot, original, projection, projection_original (single & paged);
+        # E:4->E:5 watch succeeds for single-frame & paged!
+        positive_builders = {
+            "snapshot": lambda: {"op": "snapshot", "cuts": cuts_e10, "as_known_ns": None, "snapshot_token": None},
+            "watch": lambda: {"op": "watch", "cuts": {"E": real_cuts[("E", "4")], "B:alpha": real_cuts[("B:alpha", "4")], "B:beta": real_cuts[("B:beta", "4")]}},
+            "original": lambda: {"op": "original", "kind": "decision", "domain_id": "B:alpha", "object_id": "alpha", "cuts": cuts_e10},
+            "projection": lambda: {"op": "projection", "projection_revision": ECONOMIC_PROJECTION_REVISION, "cuts": cuts_e10, "as_known_ns": None, "projection_token": None},
+            "projection_original": lambda: {"op": "projection_original", "projection_revision": ECONOMIC_PROJECTION_REVISION, "domain_id": "B:alpha", "kind": "allocation", "object_id": aid, "cuts": cuts_e10},
+        }
+        for path, op in entries:
+            paged = path == "/api/economic/read"
+            with self.subTest(positive_path=path, op=op, paged=paged):
+                ok = self._call_http_entry(q, path, positive_builders[op](), paged=paged)
+                if op == "projection":
+                    self.assertEqual(ok["projection_completeness"], "CompleteProjectionVector")
+                elif op == "snapshot":
+                    self.assertEqual(ok["completeness"], "CompleteVector")
+                elif op == "watch":
+                    self.assertEqual(ok["domains"]["E"]["next_cut"]["commit_seq"], "5")
+                elif op == "original":
+                    self.assertEqual(ok["kind"], "EconomicOriginal")
+                elif op == "projection_original":
+                    self.assertEqual(ok["kind"], "EconomicProjectionOriginal")
+
+        # Dispatcher enforcement proof: even if an existing handler is replaced with one that skips _finalize_public_response,
+        # dispatch_public_read STILL calls _finalize_public_response and blocks future receipts!
+        from unittest.mock import patch
+        sample_snap = q.snapshot({"op": "snapshot", "cuts": cuts_e10, "as_known_ns": None, "snapshot_token": None})
+        with patch.object(q, "snapshot", return_value=sample_snap), \
+             patch.object(economic_query, "_finalize_public_response", wraps=economic_query._finalize_public_response) as spy:
+            q.dispatch_public_read("snapshot", {"op": "snapshot", "cuts": cuts_e10, "as_known_ns": None, "snapshot_token": None})
+            self.assertGreaterEqual(spy.call_count, 1)
 
         # Mutation sensitivity proof: if a newly added read entry bypasses _finalize_public_response,
-        # the exact same enumeration test fails immediately!
+        # the enumeration check catches it as uncovered AND fails the MissingDependency assertion when bypassing dispatch!
         import economic_http
         orig_dispatch = dict(economic_query.EconomicQuery.PUBLIC_READ_DISPATCH)
         orig_routes = dict(economic_http.ECONOMIC_POST_ROUTES)
         try:
-            q.leaky_new_entry = lambda payload: {
+            leaky_doc = {
                 "kind": "EconomicProjection", "cuts": cuts_e6,
-                "leaked_receipt": {"kind": "Recorded", "domain_id": "E", "cut": real_cuts[("E", "8")]},
+                "domains": {
+                    "E": {"status": "Available", "cut": cuts_e6["E"], "projection": {}},
+                    "B:alpha": {"status": "Available", "cut": cuts_e6["B:alpha"], "projection": {"recorded": [{"e_receipt": {"kind": "Recorded", "domain_id": "E", "cut": real_cuts[("E", "8")]}}]}},
+                    "B:beta": {"status": "Available", "cut": cuts_e6["B:beta"], "projection": {}},
+                },
             }
+            q.leaky_new_entry = lambda payload: leaky_doc
             economic_query.EconomicQuery.PUBLIC_READ_DISPATCH["leaky_new_entry"] = ("leaky_new_entry", False, True)
             economic_http.ECONOMIC_POST_ROUTES["/api/economic/leaky_new_entry"] = "leaky_new_entry"
             mutated_entries = self._enumerated_http_entries()
@@ -906,10 +928,14 @@ class R5ReadEntryEnumerationAndBudgetTests(unittest.TestCase):
             # 1) Fails because new entry isn't covered in request_builders
             uncovered = [e for e in mutated_entries if e[1] not in request_builders]
             self.assertEqual(uncovered, [("/api/economic/leaky_new_entry", "leaky_new_entry")])
-            # 2) Even if a request builder is added, an unguarded entry fails the invariant A rejection assertion!
-            with self.assertRaises(AssertionError):
-                with self.assertRaisesRegex(ValueError, r"MissingDependency"):
-                    self._call_http_entry(q, "/api/economic/leaky_new_entry", {"op": "leaky_new_entry"}, paged=False)
+            # 2) Routed through dispatch_public_read, the dispatcher exit itself rejects the leak!
+            with self.assertRaisesRegex(ValueError, r"MissingDependency.*E:8.*晚于固定切面.*E:6"):
+                self._call_http_entry(q, "/api/economic/leaky_new_entry", {"op": "leaky_new_entry"}, paged=False)
+            # 3) If a handler bypasses dispatch_public_read / _finalize_public_response, the assertion fails immediately!
+            with patch.object(q, "dispatch_public_read", side_effect=lambda op, p, **kw: leaky_doc):
+                with self.assertRaises(AssertionError):
+                    with self.assertRaisesRegex(ValueError, r"MissingDependency"):
+                        self._call_http_entry(q, "/api/economic/leaky_new_entry", {"op": "leaky_new_entry"}, paged=False)
         finally:
             economic_query.EconomicQuery.PUBLIC_READ_DISPATCH.clear()
             economic_query.EconomicQuery.PUBLIC_READ_DISPATCH.update(orig_dispatch)
@@ -1011,6 +1037,150 @@ class R5ReadEntryEnumerationAndBudgetTests(unittest.TestCase):
         self.assertEqual(q2.metadata_bytes, sum(q2._verified_cuts_cache.values()))
         self.assertNotIn(("E", "0", f"{0:064x}"), q2._verified_cuts_cache)
         self.assertIn(("E", str(economic_query.MAX_VERIFIED_CUTS + 4), f"{economic_query.MAX_VERIFIED_CUTS + 4:064x}"), q2._verified_cuts_cache)
+
+    def test_r6_source_data_with_protocol_named_keys_allowed_while_protocol_future_cut_rejected(self):
+        q = self._make_query()
+        real_cuts, fk, aid, base_owner = self._build_fixture_store(q)
+        cuts_e10 = {"E": real_cuts[("E", "10")], "B:alpha": real_cuts[("B:alpha", "6")], "B:beta": real_cuts[("B:beta", "4")]}
+        cuts_e6 = {"E": real_cuts[("E", "6")], "B:alpha": real_cuts[("B:alpha", "6")], "B:beta": real_cuts[("B:beta", "4")]}
+        source_doc = {
+            "events": [{"event": "open_chong", "units": "4"}],
+            "receipt": {"label": "Delivery note"},
+            "cut": {"note": "non-protocol-cut"},
+            "e_cut": {"note": "non-protocol-ecut"},
+            "witness": {"author": "desk"},
+        }
+        raw_src = canonical(source_doc).decode("utf-8")
+        raw_sha = hashlib.sha256(raw_src.encode("utf-8")).hexdigest()
+
+        def source_note_owner(domain, payload):
+            res = base_owner(domain, payload)
+            if payload["op"] == "ReadOriginalAtCut" and payload["kind"] == "fact":
+                res["original"]["raw_utf8"] = raw_src
+                res["original"]["raw_sha256"] = raw_sha
+                res["original"]["raw_exact_text"] = {
+                    "representation": "ExactDecimalIntegerTextProjection",
+                    "raw_sha256": raw_sha,
+                    "value": source_doc,
+                }
+                res["original"]["projected_record"]["event"] = {
+                    "event": "open_chong",
+                    "receipt": {"label": "event note"},
+                    "cut": {"arbitrary": "value"},
+                    "witness": {"x": "y"},
+                }
+            elif payload["op"] == "ReadProjection" and domain == "E":
+                rec = {
+                    "fact_key": fk, "fact_hash": "e" * 64, "raw_sha256": raw_sha,
+                    "json_pointer": "/events/0", "raw_utf8": raw_src,
+                    "event": {"event": "open_chong", "receipt": {"label": "Delivery note"}, "cut": {"bad": "1"}},
+                }
+                res["projection"]["recorded"] = [rec]
+                enc = canonical(res["projection"])
+                res["projection_hash"] = hashlib.sha256(enc).hexdigest()
+                res["projection_bytes"] = str(len(enc))
+            return res
+
+        q.owner = source_note_owner
+        # Positive: source data with receipt/cut/e_cut/witness succeeds on projection AND projection_original!
+        ok_proj = self._call_http_entry(q, "/api/economic/read", {
+            "op": "projection", "projection_revision": ECONOMIC_PROJECTION_REVISION,
+            "cuts": cuts_e10, "as_known_ns": None, "projection_token": None,
+        }, paged=True)
+        self.assertEqual(ok_proj["projection_completeness"], "CompleteProjectionVector")
+        ok_fact = self._call_http_entry(q, "/api/economic/read", {
+            "op": "projection_original", "projection_revision": ECONOMIC_PROJECTION_REVISION,
+            "domain_id": "E", "kind": "fact", "object_id": fk, "cuts": cuts_e10,
+        }, paged=True)
+        self.assertEqual(ok_fact["original"]["raw_utf8"], raw_src)
+        # Negative: real protocol receipt E:8 under E:6 MUST still be rejected!
+        with self.assertRaisesRegex(ValueError, r"MissingDependency.*E:8.*晚于固定切面.*E:6"):
+            self._call_http_entry(q, "/api/economic/read", {
+                "op": "projection_original", "projection_revision": ECONOMIC_PROJECTION_REVISION,
+                "domain_id": "E", "kind": "fact", "object_id": fk, "cuts": cuts_e6,
+            }, paged=True)
+
+    def test_r6_receipt_domain_ownership_binding_enforced_in_q_single_exit(self):
+        import copy
+        q = self._make_query()
+        real_cuts, fk, aid, base_owner = self._build_fixture_store(q)
+        cuts_e10 = {"E": real_cuts[("E", "10")], "B:alpha": real_cuts[("B:alpha", "6")], "B:beta": real_cuts[("B:beta", "4")]}
+
+        # Negative 1: B:alpha allocation carries E's valid cut/domain as its Applied receipt -> MUST reject!
+        def misplaced_b_alloc_receipt(domain, payload):
+            res = base_owner(domain, payload)
+            if payload["op"] == "ReadOriginalAtCut" and domain == "B:alpha" and payload["kind"] == "allocation":
+                res["original"]["receipt"] = {"kind": "Applied", "domain_id": "E", "cut": cuts_e10["E"]}
+            return res
+
+        q.owner = misplaced_b_alloc_receipt
+        with self.assertRaisesRegex(ValueError, r"回执域与期望域不符"):
+            self._call_http_entry(q, "/api/economic/read", {
+                "op": "projection_original", "projection_revision": ECONOMIC_PROJECTION_REVISION,
+                "domain_id": "B:alpha", "kind": "allocation", "object_id": aid, "cuts": cuts_e10,
+            }, paged=True)
+
+        # Negative 2: B:alpha fact's projected_record.e_receipt claims B:alpha instead of E -> MUST reject!
+        def wrong_e_receipt_domain(domain, payload):
+            res = copy.deepcopy(base_owner(domain, payload))
+            if payload["op"] == "ReadOriginalAtCut" and domain == "B:alpha" and payload["kind"] == "fact":
+                res["original"]["projected_record"]["e_receipt"] = {"kind": "Recorded", "domain_id": "B:alpha", "cut": cuts_e10["B:alpha"]}
+            return res
+
+        q.owner = wrong_e_receipt_domain
+        with self.assertRaisesRegex(ValueError, r"回执域与期望域不符"):
+            self._call_http_entry(q, "/api/economic/read", {
+                "op": "projection_original", "projection_revision": ECONOMIC_PROJECTION_REVISION,
+                "domain_id": "B:alpha", "kind": "fact", "object_id": fk, "cuts": cuts_e10,
+            }, paged=True)
+
+        # Positive: honest owner passes both B:alpha allocation and fact!
+        q.owner = base_owner
+        ok = self._call_http_entry(q, "/api/economic/read", {
+            "op": "projection_original", "projection_revision": ECONOMIC_PROJECTION_REVISION,
+            "domain_id": "B:alpha", "kind": "allocation", "object_id": aid, "cuts": cuts_e10,
+        }, paged=True)
+        self.assertEqual(ok["original"]["receipt"]["domain_id"], "B:alpha")
+
+    def test_r6_five_layer_unknown_field_rejected_at_q_exit(self):
+        base_ops = ["ReadView", "Watch", "QueryAllocation", "EconomicReadOpen", "EconomicReadPage", "EconomicReadClose"]
+        q = self._make_query(ops=base_ops)
+        real_cuts, fk, aid, base_owner = self._build_fixture_store(q, redact_witness_for_no_cmd=True)
+        cuts_e10 = {"E": real_cuts[("E", "10")], "B:alpha": real_cuts[("B:alpha", "6")], "B:beta": real_cuts[("B:beta", "4")]}
+        req = {
+            "op": "projection_original", "projection_revision": ECONOMIC_PROJECTION_REVISION,
+            "domain_id": "E", "kind": "allocation", "object_id": aid, "cuts": cuts_e10,
+        }
+        # Positive: clean whitelisted response passes
+        q.owner = base_owner
+        ok = self._call_http_entry(q, "/api/economic/read", req, paged=True)
+        self.assertEqual(ok["original"]["allocation_id"], aid)
+
+        # Negative: unknown key injected at ANY of the five layers MUST be rejected by Q exit!
+        def inject(layer):
+            def owner(domain, payload):
+                res = base_owner(domain, payload)
+                if payload["op"] == "ReadOriginalAtCut":
+                    row = res["original"]["fill_allocation_row"]
+                    w = row["x_execution_witness"]
+                    if layer == "row":
+                        row["review_new_label"] = "blue"
+                    elif layer == "witness":
+                        w["review_new_label"] = "blue"
+                    elif layer == "release":
+                        w["x_release_evidence"]["review_new_label"] = "blue"
+                    elif layer == "execute":
+                        w["x_execute_evidence"]["review_new_label"] = "blue"
+                    elif layer == "reply":
+                        w["x_execute_evidence"]["reply"]["review_new_label"] = "blue"
+                return res
+            return owner
+
+        for layer in ("row", "witness", "release", "execute", "reply"):
+            with self.subTest(layer=layer):
+                q.owner = inject(layer)
+                with self.assertRaisesRegex(ValueError, r"白名单|未声明字段|未知字段"):
+                    self._call_http_entry(q, "/api/economic/read", req, paged=True)
 
 
 if __name__ == "__main__":
