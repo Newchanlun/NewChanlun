@@ -52,7 +52,7 @@ mod capture_oos;
 pub mod data;
 pub mod decontam;
 /// ADR 0022 evidence_gate 版本化记录（#1677/#1605）——验收判据参数记录化。
-pub mod evidence_gate;
+pub use super::evidence_gate;
 /// a3 acc-highlow-power：μ̂(z_L0 | D_hi) 条件化估计量（区间套统计版，694 号；prereg
 /// highlow-a3-20260704 冻结）。继承 backtest cfg(test) 门控。
 #[cfg(test)]

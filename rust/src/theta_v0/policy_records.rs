@@ -631,37 +631,114 @@ mod tests {
         let p1 = records.profile(CostStopProfile::P1HlTestnet);
         for policy in [p0, p1] {
             assert_eq!(policy.record().label(), "#1354/cost-stop-policy/v1");
-            assert_eq!(policy.tower_base_ref, "tower-base/1");
-            assert_eq!(policy.evidence_gate_ref, "#1677/evidence-gate/v1");
-            assert_eq!(policy.symbol, "BTC");
-            assert_eq!(policy.granularity, "1m");
-            assert!(matches!(policy.slippage, CostSource::Missing));
+            assert_eq!(policy.domain(), ("BTC", "1m", "tower-base/1"));
+            assert_eq!(policy.evidence_gate_ref(), "#1677/evidence-gate/v1");
+            assert!(matches!(
+                policy.cost_sources().0,
+                CostSource::Missing { .. }
+            ));
         }
-        assert_eq!(p0.fee.tier, "VIP0");
-        assert_eq!(p1.fee.tier, "Tier 0 Base rate");
+        assert_eq!(p0.fee().tier, "VIP0");
+        assert_eq!(p1.fee().tier, "Tier 0 Base rate");
         assert!(matches!(
-            p0.latency_error,
+            p0.cost_sources().1,
             CostSource::ProxyLowerBound { .. }
         ));
-        assert!(matches!(p1.latency_error, CostSource::Missing));
+        assert!(matches!(p1.cost_sources().1, CostSource::Missing { .. }));
     }
 
     #[test]
     fn cost_stop_rejects_missing_field() {
-        let json = mutate_cost_stop(|p0| {
-            p0.as_object_mut().unwrap().remove("theta");
-        });
-        let error = parse_cost_stop(Some(&json)).unwrap_err().to_string();
-        assert!(error.contains("missing field `theta`"), "{error}");
+        for field in ["theta", "fee", "authorizer_ref"] {
+            let json = mutate_cost_stop(|p0| {
+                p0.as_object_mut().unwrap().remove(field);
+            });
+            assert_eq!(
+                parse_cost_stop(Some(&json)).unwrap_err(),
+                PolicyError::AwaitingPolicy {
+                    id: COST_STOP_ID,
+                    field: field.to_owned()
+                },
+            );
+        }
     }
 
     #[test]
     fn cost_stop_rejects_unknown_field() {
+        for field in ["fee", "slippage", "latency_error", "holding"] {
+            let json = mutate_cost_stop(|p0| {
+                p0[field]["fallback_rate"] = 123.into();
+            });
+            let error = parse_cost_stop(Some(&json)).unwrap_err().to_string();
+            assert!(
+                error.contains("unknown field `fallback_rate`"),
+                "{field}: {error}"
+            );
+        }
         let json = mutate_cost_stop(|p0| {
-            p0["fee"]["fallback_rate"] = 0.into();
+            p0["slippage"] = serde_json::json!({"kind":"Known","source_ref":"fixture/slippage","fallback_rate":123});
         });
-        let error = parse_cost_stop(Some(&json)).unwrap_err().to_string();
-        assert!(error.contains("unknown field `fallback_rate`"), "{error}");
+        assert!(parse_cost_stop(Some(&json))
+            .unwrap_err()
+            .to_string()
+            .contains("unknown field `fallback_rate`"));
+    }
+
+    #[test]
+    fn cost_stop_does_not_sign_empty_authorizer_or_accept_empty_sources() {
+        let mut raw: Value = serde_json::from_str(ACTIVE_COST_STOP_JSON).unwrap();
+        raw["profiles"]["P0"]["version"] = 2.into();
+        raw["profiles"]["P0"]["authorizer_ref"] = " ".into();
+        let error = parse_cost_stop(Some(&raw.to_string()))
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("authorizer_ref 不得为空"), "{error}");
+
+        for source in ["", "  "] {
+            let json = mutate_cost_stop(|p0| {
+                p0["slippage"] = serde_json::json!({"kind":"Known","source_ref":source});
+            });
+            let error = parse_cost_stop(Some(&json)).unwrap_err().to_string();
+            assert!(error.contains("来源引用不得为空"), "{error}");
+        }
+        let json = mutate_cost_stop(|p0| {
+            p0["latency_error"]["source_ref"] = "".into();
+        });
+        assert!(parse_cost_stop(Some(&json)).is_err());
+    }
+
+    #[test]
+    fn cost_stop_preserves_each_v1s_signed_source() {
+        let p0 = mutate_cost_stop(|p0| {
+            p0["fee"].as_object_mut().unwrap().remove("record_ref");
+        });
+        assert_eq!(
+            parse_cost_stop(Some(&p0)).unwrap_err(),
+            PolicyError::AwaitingPolicy {
+                id: COST_STOP_ID,
+                field: "fee.record_ref".to_owned()
+            }
+        );
+        let mut raw: Value = serde_json::from_str(ACTIVE_COST_STOP_JSON).unwrap();
+        raw["profiles"]["P1-hl-testnet"]["holding"]
+            .as_object_mut()
+            .unwrap()
+            .remove("designated_source");
+        assert_eq!(
+            parse_cost_stop(Some(&raw.to_string())).unwrap_err(),
+            PolicyError::AwaitingPolicy {
+                id: COST_STOP_ID,
+                field: "holding.designated_source".to_owned()
+            }
+        );
+    }
+
+    #[test]
+    fn cost_stop_rejects_foreign_record_family() {
+        let mut raw: Value = serde_json::from_str(ACTIVE_COST_STOP_JSON).unwrap();
+        raw["id"] = "foreign-family".into();
+        assert!(matches!(parse_cost_stop(Some(&raw.to_string())),
+            Err(PolicyError::Invalid { field, .. }) if field == "id"));
     }
 
     #[test]
