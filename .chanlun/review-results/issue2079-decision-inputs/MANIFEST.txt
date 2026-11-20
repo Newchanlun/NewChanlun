@@ -1,0 +1,7 @@
+# 审查对象：decision/2079 666a1a421a13132626bba1863ce2b79a33233ab4
+# 取证基线：origin/evidence/2079-endpoint-rotation 5a1ac9de73766f0a943c156f97cb467b7d690218
+# 以下为每个输入原件的 SHA-256；MANIFEST.txt 不自列。
+6770997e43257fac1ca1574eec9612833da21c0a193401e0306fbc90f168cf8b  archaeology.md
+f59e3b8760fd44814562b4f5581042257e23dcc233b705047aa19854a08eef75  canonical-plan.json
+959298d2e7b73442a3fae602f1a13e7c0605ff6c43716c668486a851c8adba28  classify.json
+b2b9b06b5fbfefdbfe37f1c2e377845c0ab73d71683fd66ad8f196e57cbf305c  draft.md
