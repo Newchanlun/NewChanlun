@@ -1,0 +1,143 @@
+{
+  "ticket": 1551,
+  "model": "gpt-6.2-sol",
+  "parsed": true,
+  "problems": [],
+  "points": [
+    {
+      "id": "Q1",
+      "question": "怎样从一条故事、family、细项或 Destination 子义务定位覆盖它的可信原件？",
+      "klass": "C",
+      "queries": [
+        {
+          "channel": "tracker",
+          "query": "\"逐子义务\" \"原件\" in:title,body,comments",
+          "command": "gh issue list --search '\"逐子义务\" \"原件\" in:title,body,comments' --state all",
+          "hits": 1
+        },
+        {
+          "channel": "repo",
+          "query": "逐子义务|US-ST-001.{0,120}US-ST-002|覆盖声明|原件定位",
+          "command": "rg -n '逐子义务|US-ST-001.{0,120}US-ST-002|覆盖声明|原件定位' analysis/ docs/ .chanlun/",
+          "hits": 6
+        }
+      ],
+      "hits": [
+        {
+          "source": "#1551 评论 7040728269",
+          "excerpt": "已准空引导，未定子义务到覆盖原件的定位。"
+        },
+        {
+          "source": "ADR 0064:25,27,82（基线）",
+          "excerpt": "逐子义务对账、证据不符不得 PASS；未提供上游覆盖键。"
+        },
+        {
+          "source": ".chanlun/review-results/issue1340-publication-20260909/view/inputs/TB02-06-EXECUTION-SLICES.md:306-311",
+          "excerpt": "验收条目逐项，ID 与具体切片绑定，不能在此片整项销项。"
+        },
+        {
+          "source": "ADR 0058:192-211",
+          "excerpt": "实际运行、证据类与结果各自须核；专用于 AT-14。"
+        }
+      ],
+      "citation": "#1551 评论 7040728269；ADR 0064:25,27,82；ADR 0058:192-211",
+      "reasoning": "已裁逐子义务行为验收，缺逐条指向真实原件的协议。US-ST-001/002 的假阳性否决观察者自报；已验收交付提供现成可信来源链。",
+      "recommended": "原件产出方以独立版本化 JSON 封装覆盖声明与精确结果定位；分别对齐规范节点、条目、切片、证据类和 profile，逐项从运行原件核验。",
+      "searchedKeywords": [
+        "逐子义务 原件",
+        "覆盖声明",
+        "原件定位"
+      ],
+      "gap": "decision",
+      "conflict": ""
+    },
+    {
+      "id": "Q2",
+      "question": "怎样判定 CI/独评覆盖 squash 前后同一最终产品？",
+      "klass": "B",
+      "queries": [
+        {
+          "channel": "tracker",
+          "query": "\"squash\" \"最终产品差异\" in:title,body,comments",
+          "command": "gh issue list --search '\"squash\" \"最终产品差异\" in:title,body,comments' --state all",
+          "hits": 1
+        },
+        {
+          "channel": "repo",
+          "query": "squash.{0,100}(差异|等价|CI)|最终产品差异|纯报告尾部",
+          "command": "rg -n 'squash.{0,100}(差异|等价|CI)|最终产品差异|纯报告尾部' analysis/ docs/ .chanlun/",
+          "hits": 4
+        }
+      ],
+      "hits": [
+        {
+          "source": ".sandcastle/docs/graph-engineering.md:237-241",
+          "excerpt": "落地 main 上实际交付，新增代码补审，不能拿其他树绿 CI。"
+        },
+        {
+          "source": ".sandcastle/CODEX-CHILD.md:45-50,65,74",
+          "excerpt": "仅同产品字节的纯报告尾部可沿用证据，扫描须如实绑定。"
+        },
+        {
+          "source": ".sandcastle/delivery-bundle.ts:83-86,156-175,248-285,306-308",
+          "excerpt": "逐路径、前后字节与 mode 核对实际差异和覆盖。"
+        },
+        {
+          "source": ".chanlun/review-results/issue1626-closeout-20261026/README.md:7",
+          "excerpt": "PR head 与 squash 后主线 SHA 分列；主线 CI 在 squash 落地点。"
+        }
+      ],
+      "citation": "graph-engineering:237-241；CODEX-CHILD:45-50,65,74；ADR 0064:62（基线）",
+      "reasoning": "[新缠论:推论] 最终产品相同才可沿用；PR 合入元数据和祖先只能连接两个提交，不能证明产品等价。用同一 squash 父提交比较完整产品前后值，保留上位纯报告尾部。",
+      "recommended": "按 GitHub 冻结落地和 Git 对象重算完整差异，前后内容和 mode 任一不同或无法查原件即 FAIL。",
+      "searchedKeywords": [],
+      "gap": "",
+      "conflict": ""
+    },
+    {
+      "id": "Q3",
+      "question": "自身 manifest 已登记实体摘要不符，是否在引导阻断？",
+      "klass": "B",
+      "queries": [
+        {
+          "channel": "tracker",
+          "query": "\"manifest\" \"摘要不符\" in:title,body,comments",
+          "command": "gh issue list --search '\"manifest\" \"摘要不符\" in:title,body,comments' --state all",
+          "hits": 1
+        },
+        {
+          "channel": "tracker",
+          "query": "\"REPORT_HASH_MISMATCH\" in:title,body,comments",
+          "command": "gh issue list --search '\"REPORT_HASH_MISMATCH\" in:title,body,comments' --state all",
+          "hits": 0
+        },
+        {
+          "channel": "repo",
+          "query": "REPORT_HASH_MISMATCH|摘要不符|已登记.{0,16}摘要|引导前提",
+          "command": "rg -n 'REPORT_HASH_MISMATCH|摘要不符|已登记.{0,16}摘要|引导前提' analysis/ docs/ .chanlun/",
+          "hits": 4
+        }
+      ],
+      "hits": [
+        {
+          "source": "ADR 0064:59-61,67（基线）",
+          "excerpt": "允许还未登记本次产物；上游受验引用失败写 FAIL。"
+        },
+        {
+          "source": ".sandcastle/CODEX-CHILD.md:54-63",
+          "excerpt": "已登记实体绑定当前版本与实体完整字节；错误则阻断。"
+        },
+        {
+          "source": ".sandcastle/delivery-bundle.ts:189-246",
+          "excerpt": "核登记、仓外与仓内实体；摘要错用 REPORT_HASH_MISMATCH。"
+        }
+      ],
+      "citation": "CODEX-CHILD:54-63；delivery-bundle.ts:189-246；#1551 评论 7040728269",
+      "reasoning": "[新缠论:推论] 未登记未来产物与已登记原件不可信不同；前者可在最终交付封包补齐，后者在确定自身身份时即可查出。",
+      "recommended": "引导第（1）步核所有已登记实体，不做完整交付预检。摘要错误 BLOCKED 且不写文件；受验对象错误仍写报告或回执 FAIL。",
+      "searchedKeywords": [],
+      "gap": "",
+      "conflict": ""
+    }
+  ]
+}

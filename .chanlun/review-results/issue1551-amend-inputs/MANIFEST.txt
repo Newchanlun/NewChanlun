@@ -1,0 +1,9 @@
+# ticket: 1551
+# revision_head: 9ad6b51c15614be207d6208c93d560eb832ea8d7
+# source_commit: 6ba72e84c55aa6d65b11cc46b7288142f4fce62b
+# checksum: SHA-256 of original file bytes
+04769adaafa642bd87976d481bff64c41fd2818d31b787ac342efc5d06a823ad  archaeology.json
+8699ecc2bedf2919885a72621d11146602ab64c924df196e23a538015a18241d  archaeology.md
+8b1db3514ab5c30351e38c2b19e968728ad8daf5fab6ad486c0569320a275d4e  canonical-plan.json
+24da362441c25426f33e436e62f1f5af7fec279569929addceffcfb9f0055508  classify.json
+cc58cdee0ca04e85ed9412fae45c64d1b3f5a43d272978536f15f64de526d0aa  draft.md
