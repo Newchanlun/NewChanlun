@@ -132,6 +132,16 @@ with tempfile.TemporaryDirectory(prefix="i1-1527-", dir="/tmp") as directory:
         ], "error", "init commit 失败：disk I/O error", "以文件大小上限模拟 init 写入失败。",
               {"RLIMIT_FSIZE_bytes": 65536, "SIGXFSZ": "ignored"}),
     ]
+    # S3 init 在隐藏路径建库（atomic_init.rs）；异常退出也不该留下其 SQLite 旁文件。
+    init_entries = sorted([*work.glob("full.sqlite*"), *work.glob(".full.sqlite.s3-init.*.tmp*")])
+    init_residual_bytes = {p.name: p.lstat().st_size for p in init_entries}
+    init_clean = all(
+        p.name == "full.sqlite.writer.lock" and not p.is_symlink()
+        and p.is_file() and init_residual_bytes[p.name] == 0
+        for p in init_entries
+    )
+    if not init_clean:
+        print("F2-init-fsize：失败后留下目标库、暂存库或旁文件", file=sys.stderr)
     # F1 已留下正常控制锁；资源不足的重试只可复用这些锁，不得新增文件或改库。
     before = {p.relative_to(work) for p in work.rglob("*")}
     db_before = db.read_bytes()
@@ -149,10 +159,11 @@ with tempfile.TemporaryDirectory(prefix="i1-1527-", dir="/tmp") as directory:
     if not fd_clean:
         print("F2b-nofile：失败后夹具文件集合或库字节改变", file=sys.stderr)
     write_json(out / "post-state.json", {
-        "init_residual_bytes": {p.name: p.stat().st_size for p in sorted(work.glob("full.sqlite*"))},
+        "init_residual_bytes": init_residual_bytes,
+        "init_clean": init_clean,
         "owner_exists": db.with_name(db.name + ".control-owner.json").exists(),
         "state_entries": sorted(p.name for p in state.iterdir()),
     })
     print(f"收据：{out}")
-    sys.exit(0 if all(results) and fd_clean else 1)
+    sys.exit(0 if all(results) and init_clean and fd_clean else 1)
 PY
