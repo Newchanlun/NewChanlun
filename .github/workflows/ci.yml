@@ -186,7 +186,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ~/.cache/newchan-rust-wheel
-          key: newchan-rust-wheel-${{ runner.os }}-py313-dev0-${{ hashFiles('rust/Cargo.toml', 'rust/Cargo.lock', 'rust/pyproject.toml', 'rust/src/**') }}
+          key: newchan-rust-wheel-${{ runner.os }}-py313-dev1-${{ hashFiles('rust/Cargo.toml', 'rust/Cargo.lock', 'rust/pyproject.toml', 'rust/src/**') }}
 
       # #297：newchan_rust 是本仓 rust/ 的 PyO3 扩展（maturin backend，
       #   rust/Cargo.toml crate-type = ["cdylib","rlib"]）。默认 feature 的依赖树只有
@@ -202,9 +202,9 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             ~/.cache/newchan-rust-target
-          key: cargo-dev0-${{ runner.os }}-${{ hashFiles('rust/Cargo.lock') }}
+          key: cargo-dev1-${{ runner.os }}-${{ hashFiles('rust/Cargo.lock') }}
           restore-keys: |
-            cargo-dev0-${{ runner.os }}-
+            cargo-dev1-${{ runner.os }}-
             cargo-${{ runner.os }}-
 
       - name: Install dependencies
@@ -237,7 +237,7 @@ jobs:
           if ! ls "$HOME/.cache/newchan-rust-wheel"/newchan_rust-*.whl >/dev/null 2>&1; then
             rm -rf "$HOME/.cache/newchan-rust-wheel"
             uv pip install --system --python "$(command -v python)" "maturin>=1.5,<2.0"
-            (cd rust && CARGO_TARGET_DIR="$HOME/.cache/newchan-rust-target" CARGO_PROFILE_DEV_DEBUG=0 maturin build --profile dev --compatibility linux --auditwheel skip --interpreter "$(command -v python)" --out "$HOME/.cache/newchan-rust-wheel")
+            (cd rust && CARGO_TARGET_DIR="$HOME/.cache/newchan-rust-target" CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_DEV_OPT_LEVEL=1 maturin build --profile dev --compatibility linux --auditwheel skip --interpreter "$(command -v python)" --out "$HOME/.cache/newchan-rust-wheel")
           fi
           uv pip install --system --python "$(command -v python)" --no-deps "$HOME/.cache/newchan-rust-wheel"/newchan_rust-*.whl
 
