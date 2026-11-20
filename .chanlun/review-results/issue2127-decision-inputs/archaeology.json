@@ -1,0 +1,752 @@
+{
+  "sourceCommit": "b9d898dccf46c2a716115eaa1215bc39c458a959",
+  "points": [
+    {
+      "id": "Q1",
+      "question": "本机部署位置是否属于业务事实",
+      "class": "B",
+      "queries": [
+        {
+          "channel": "tracker",
+          "query": "绝对路径",
+          "command": "gh issue list -R Newchanlun/NewChanlun --state all --limit 1000 --search 'in:title,body,comments 绝对路径' --json number,title,state,url",
+          "hits": 311
+        },
+        {
+          "channel": "tracker",
+          "query": "运行目录",
+          "command": "gh issue list -R Newchanlun/NewChanlun --state all --limit 1000 --search 'in:title,body,comments 运行目录' --json number,title,state,url",
+          "hits": 221
+        },
+        {
+          "channel": "tracker",
+          "query": "state_dir",
+          "command": "gh issue list -R Newchanlun/NewChanlun --state all --limit 1000 --search 'in:title,body,comments state_dir' --json number,title,state,url",
+          "hits": 4
+        },
+        {
+          "channel": "tracker",
+          "query": "out 目录",
+          "command": "gh issue list -R Newchanlun/NewChanlun --state all --limit 1000 --search 'in:title,body,comments out 目录' --json number,title,state,url",
+          "hits": 69
+        },
+        {
+          "channel": "tracker",
+          "query": "输出目录",
+          "command": "gh issue list -R Newchanlun/NewChanlun --state all --limit 1000 --search 'in:title,body,comments 输出目录' --json number,title,state,url",
+          "hits": 243
+        },
+        {
+          "channel": "tracker",
+          "query": "部署位置",
+          "command": "gh issue list -R Newchanlun/NewChanlun --state all --limit 1000 --search 'in:title,body,comments 部署位置' --json number,title,state,url",
+          "hits": 114
+        },
+        {
+          "channel": "tracker",
+          "query": "absolute path",
+          "command": "gh issue list -R Newchanlun/NewChanlun --state all --limit 1000 --search 'in:title,body,comments absolute path' --json number,title,state,url",
+          "hits": 1
+        },
+        {
+          "channel": "tracker",
+          "query": "run directory",
+          "command": "gh issue list -R Newchanlun/NewChanlun --state all --limit 1000 --search 'in:title,body,comments run directory' --json number,title,state,url",
+          "hits": 12
+        },
+        {
+          "channel": "tracker",
+          "query": "\"绝对路径\" \"提交根\"",
+          "command": "gh issue list -R Newchanlun/NewChanlun --state all --limit 1000 --search 'in:title,body,comments \"绝对路径\" \"提交根\"' --json number,title,state,url",
+          "hits": 1
+        },
+        {
+          "channel": "tracker",
+          "query": "\"运行目录\" \"双跑\"",
+          "command": "gh issue list -R Newchanlun/NewChanlun --state all --limit 1000 --search 'in:title,body,comments \"运行目录\" \"双跑\"' --json number,title,state,url",
+          "hits": 2
+        },
+        {
+          "channel": "tracker",
+          "query": "\"输出目录\" \"双跑\"",
+          "command": "gh issue list -R Newchanlun/NewChanlun --state all --limit 1000 --search 'in:title,body,comments \"输出目录\" \"双跑\"' --json number,title,state,url",
+          "hits": 3
+        },
+        {
+          "channel": "tracker",
+          "query": "\"部署位置\" \"会话\"",
+          "command": "gh issue list -R Newchanlun/NewChanlun --state all --limit 1000 --search 'in:title,body,comments \"部署位置\" \"会话\"' --json number,title,state,url",
+          "hits": 1
+        },
+        {
+          "channel": "tracker",
+          "query": "\"state_dir\" \"manifest\"",
+          "command": "gh issue list -R Newchanlun/NewChanlun --state all --limit 1000 --search 'in:title,body,comments \"state_dir\" \"manifest\"' --json number,title,state,url",
+          "hits": 4
+        },
+        {
+          "channel": "tracker",
+          "query": "\"out 目录\" \"根\"",
+          "command": "gh issue list -R Newchanlun/NewChanlun --state all --limit 1000 --search 'in:title,body,comments \"out 目录\" \"根\"' --json number,title,state,url",
+          "hits": 0
+        },
+        {
+          "channel": "repo",
+          "query": "绝对路径|运行目录|部署位置|部署路径|state_dir|run[_ -]dir(ectory)?|out 目录|out_dir|输出目录|absolute[_ -]paths?|--out([^a-z_]|$)",
+          "command": "git grep -niI -E '绝对路径|运行目录|部署位置|部署路径|state_dir|run[_ -]dir(ectory)?|out 目录|out_dir|输出目录|absolute[_ -]paths?|--out([^a-z_]|$)' b9d898dccf46c2a716115eaa1215bc39c458a959 -- docs/adr .chanlun/definitions analysis docs rust s_session CONTEXT.md .chanlun/review-results scripts",
+          "hits": 440
+        }
+      ],
+      "hits": [
+        {
+          "source": "docs/adr/0025-lav-shadow-ranking-evidence-contract.md:31",
+          "excerpt": "文件路径、目录名、生成时间或封存时间均不得充当身份。"
+        },
+        {
+          "source": "docs/adr/0059-production-session-layout-contract.md:116",
+          "excerpt": "不比较 launcher manifest `state_dir`"
+        }
+      ],
+      "citation": "ADR 0025:30–32；ADR 0059:109–121",
+      "reasoning": "#2127 在同一输入下只改 --out 就变根；同类先例把内容身份与文件位置分开，路径仍可绑定实际部署",
+      "recommended": "路径留部署层，新记录和业务承诺不含本机位置。",
+      "searched_keywords": [
+        "绝对路径",
+        "运行目录",
+        "state_dir",
+        "out 目录",
+        "输出目录",
+        "部署位置",
+        "absolute path",
+        "run directory",
+        "\"绝对路径\" \"提交根\"",
+        "\"运行目录\" \"双跑\"",
+        "\"输出目录\" \"双跑\"",
+        "\"部署位置\" \"会话\"",
+        "\"state_dir\" \"manifest\"",
+        "\"out 目录\" \"根\"",
+        "绝对路径|运行目录|部署位置|部署路径|state_dir|run[_ -]dir(ectory)?|out 目录|out_dir|输出目录|absolute[_ -]paths?|--out([^a-z_]|$)"
+      ]
+    },
+    {
+      "id": "Q2",
+      "question": "Voice 怎样不依赖本机路径并仍验证原件",
+      "class": "B",
+      "queries": [
+        {
+          "channel": "tracker",
+          "query": "bundle_raw_utf8",
+          "command": "gh issue list -R Newchanlun/NewChanlun --state all --limit 1000 --search 'in:title,body,comments bundle_raw_utf8' --json number,title,state,url",
+          "hits": 1
+        },
+        {
+          "channel": "tracker",
+          "query": "verification_raw_utf8",
+          "command": "gh issue list -R Newchanlun/NewChanlun --state all --limit 1000 --search 'in:title,body,comments verification_raw_utf8' --json number,title,state,url",
+          "hits": 1
+        },
+        {
+          "channel": "tracker",
+          "query": "BindVoice",
+          "command": "gh issue list -R Newchanlun/NewChanlun --state all --limit 1000 --search 'in:title,body,comments BindVoice' --json number,title,state,url",
+          "hits": 5
+        },
+        {
+          "channel": "tracker",
+          "query": "voice-binding",
+          "command": "gh issue list -R Newchanlun/NewChanlun --state all --limit 1000 --search 'in:title,body,comments voice-binding' --json number,title,state,url",
+          "hits": 11
+        },
+        {
+          "channel": "tracker",
+          "query": "artifacts path",
+          "command": "gh issue list -R Newchanlun/NewChanlun --state all --limit 1000 --search 'in:title,body,comments artifacts path' --json number,title,state,url",
+          "hits": 6
+        },
+        {
+          "channel": "tracker",
+          "query": "证据原件 独评",
+          "command": "gh issue list -R Newchanlun/NewChanlun --state all --limit 1000 --search 'in:title,body,comments 证据原件 独评' --json number,title,state,url",
+          "hits": 410
+        },
+        {
+          "channel": "tracker",
+          "query": "固定证据原件",
+          "command": "gh issue list -R Newchanlun/NewChanlun --state all --limit 1000 --search 'in:title,body,comments 固定证据原件' --json number,title,state,url",
+          "hits": 234
+        },
+        {
+          "channel": "tracker",
+          "query": "\"artifacts\" \"BindVoice\"",
+          "command": "gh issue list -R Newchanlun/NewChanlun --state all --limit 1000 --search 'in:title,body,comments \"artifacts\" \"BindVoice\"' --json number,title,state,url",
+          "hits": 3
+        },
+        {
+          "channel": "tracker",
+          "query": "\"证据原件\" \"BindVoice\"",
+          "command": "gh issue list -R Newchanlun/NewChanlun --state all --limit 1000 --search 'in:title,body,comments \"证据原件\" \"BindVoice\"' --json number,title,state,url",
+          "hits": 0
+        },
+        {
+          "channel": "tracker",
+          "query": "\"voice-binding-authority\"",
+          "command": "gh issue list -R Newchanlun/NewChanlun --state all --limit 1000 --search 'in:title,body,comments \"voice-binding-authority\"' --json number,title,state,url",
+          "hits": 0
+        },
+        {
+          "channel": "tracker",
+          "query": "\"verification_raw_utf8\" \"path\"",
+          "command": "gh issue list -R Newchanlun/NewChanlun --state all --limit 1000 --search 'in:title,body,comments \"verification_raw_utf8\" \"path\"' --json number,title,state,url",
+          "hits": 1
+        },
+        {
+          "channel": "repo",
+          "query": "bundle_raw_utf8|verification_raw_utf8|BindVoice|voice-binding|artifacts\\[\\]\\.path|artifacts.{0,20}path|artifact[_ -]path|独评.{0,12}原件|固定证据原件",
+          "command": "git grep -niI -E 'bundle_raw_utf8|verification_raw_utf8|BindVoice|voice-binding|artifacts\\[\\]\\.path|artifacts.{0,20}path|artifact[_ -]path|独评.{0,12}原件|固定证据原件' b9d898dccf46c2a716115eaa1215bc39c458a959 -- docs/adr .chanlun/definitions analysis docs rust s_session CONTEXT.md .chanlun/review-results scripts",
+          "hits": 87
+        }
+      ],
+      "hits": [
+        {
+          "source": "rust/src/economic_session/evidence.rs:129",
+          "excerpt": "运行时只在此处读外部文件，审计重放使用已提交 witness。"
+        },
+        {
+          "source": "rust/src/economic_session/evidence.rs:215",
+          "excerpt": "|| review[\"artifacts\"] != bundle[\"artifacts\"]"
+        }
+      ],
+      "citation": "rust/src/economic_session/evidence.rs:129–175,178–263；ADR 0025:32",
+      "reasoning": "运行时路径是实际读取位置；旧独评绑定含路径的精确字节。重放只核见证和原承诺，不能凭路径改签",
+      "recommended": "新 bundle 和独评使用逻辑角色、摘要、长度，保留精确字节与完整内容闭包。",
+      "searched_keywords": [
+        "bundle_raw_utf8",
+        "verification_raw_utf8",
+        "BindVoice",
+        "voice-binding",
+        "artifacts path",
+        "证据原件 独评",
+        "固定证据原件",
+        "\"artifacts\" \"BindVoice\"",
+        "\"证据原件\" \"BindVoice\"",
+        "\"voice-binding-authority\"",
+        "\"verification_raw_utf8\" \"path\"",
+        "bundle_raw_utf8|verification_raw_utf8|BindVoice|voice-binding|artifacts\\[\\]\\.path|artifacts.{0,20}path|artifact[_ -]path|独评.{0,12}原件|固定证据原件"
+      ]
+    },
+    {
+      "id": "Q3",
+      "question": "如何消除业务根对位置的直接及传递依赖",
+      "class": "C",
+      "queries": [
+        {
+          "channel": "tracker",
+          "query": "manifest_hash",
+          "command": "gh issue list -R Newchanlun/NewChanlun --state all --limit 1000 --search 'in:title,body,comments manifest_hash' --json number,title,state,url",
+          "hits": 3
+        },
+        {
+          "channel": "tracker",
+          "query": "manifest digest",
+          "command": "gh issue list -R Newchanlun/NewChanlun --state all --limit 1000 --search 'in:title,body,comments manifest digest' --json number,title,state,url",
+          "hits": 14
+        },
+        {
+          "channel": "tracker",
+          "query": "提交根",
+          "command": "gh issue list -R Newchanlun/NewChanlun --state all --limit 1000 --search 'in:title,body,comments 提交根' --json number,title,state,url",
+          "hits": 332
+        },
+        {
+          "channel": "tracker",
+          "query": "根摘要",
+          "command": "gh issue list -R Newchanlun/NewChanlun --state all --limit 1000 --search 'in:title,body,comments 根摘要' --json number,title,state,url",
+          "hits": 108
+        },
+        {
+          "channel": "tracker",
+          "query": "commit_root",
+          "command": "gh issue list -R Newchanlun/NewChanlun --state all --limit 1000 --search 'in:title,body,comments commit_root' --json number,title,state,url",
+          "hits": 1
+        },
+        {
+          "channel": "tracker",
+          "query": "root_hash image_hash",
+          "command": "gh issue list -R Newchanlun/NewChanlun --state all --limit 1000 --search 'in:title,body,comments root_hash image_hash' --json number,title,state,url",
+          "hits": 0
+        },
+        {
+          "channel": "tracker",
+          "query": "跨环境 回放 根",
+          "command": "gh issue list -R Newchanlun/NewChanlun --state all --limit 1000 --search 'in:title,body,comments 跨环境 回放 根' --json number,title,state,url",
+          "hits": 34
+        },
+        {
+          "channel": "tracker",
+          "query": "\"manifest_hash\" \"绝对路径\"",
+          "command": "gh issue list -R Newchanlun/NewChanlun --state all --limit 1000 --search 'in:title,body,comments \"manifest_hash\" \"绝对路径\"' --json number,title,state,url",
+          "hits": 2
+        },
+        {
+          "channel": "tracker",
+          "query": "\"提交根\" \"BindVoice\"",
+          "command": "gh issue list -R Newchanlun/NewChanlun --state all --limit 1000 --search 'in:title,body,comments \"提交根\" \"BindVoice\"' --json number,title,state,url",
+          "hits": 1
+        },
+        {
+          "channel": "tracker",
+          "query": "\"根摘要\" \"路径\"",
+          "command": "gh issue list -R Newchanlun/NewChanlun --state all --limit 1000 --search 'in:title,body,comments \"根摘要\" \"路径\"' --json number,title,state,url",
+          "hits": 1
+        },
+        {
+          "channel": "tracker",
+          "query": "\"根\" \"归档\" \"一一重命名\"",
+          "command": "gh issue list -R Newchanlun/NewChanlun --state all --limit 1000 --search 'in:title,body,comments \"根\" \"归档\" \"一一重命名\"' --json number,title,state,url",
+          "hits": 2
+        },
+        {
+          "channel": "repo",
+          "query": "manifest_hash|manifest[_ -]digest|commit_root|root_with_image_hash|提交根|根摘要|root_hash.{0,24}image_hash|previous_root.{0,32}commit_ns",
+          "command": "git grep -niI -E 'manifest_hash|manifest[_ -]digest|commit_root|root_with_image_hash|提交根|根摘要|root_hash.{0,24}image_hash|previous_root.{0,32}commit_ns' b9d898dccf46c2a716115eaa1215bc39c458a959 -- docs/adr .chanlun/definitions analysis docs rust s_session CONTEXT.md .chanlun/review-results scripts",
+          "hits": 347
+        }
+      ],
+      "hits": [
+        {
+          "source": "rust/src/economic_session/store.rs:669",
+          "excerpt": "root_with_image_hash(config, seq, prev, ns, &hash(image))"
+        },
+        {
+          "source": ".chanlun/review-results/issue1406-owner-20261020/S3-REPORT.md:131",
+          "excerpt": "原因是 meta.manifest_hash 依赖绝对路径。"
+        }
+      ],
+      "citation": "rust/src/economic_session/store.rs:665–682；finance.rs:829–855,2221–2239",
+      "reasoning": "根吃进全图像；路径存在于见证和见证摘要，另有 manifest 元数据绑定，不能靠报告替代写端。",
+      "recommended": "业务/部署清单分离，原根算法不改，改其新合约输入；旧根仍按原字段硬验。",
+      "searched_keywords": [
+        "manifest_hash",
+        "manifest digest",
+        "提交根",
+        "根摘要",
+        "commit_root",
+        "root_hash image_hash",
+        "跨环境 回放 根",
+        "\"manifest_hash\" \"绝对路径\"",
+        "\"提交根\" \"BindVoice\"",
+        "\"根摘要\" \"路径\"",
+        "\"根\" \"归档\" \"一一重命名\"",
+        "manifest_hash|manifest[_ -]digest|commit_root|root_with_image_hash|提交根|根摘要|root_hash.{0,24}image_hash|previous_root.{0,32}commit_ns"
+      ],
+      "gap": "decision"
+    },
+    {
+      "id": "Q4",
+      "question": "比较计划谁定、何时冻结、可以改名什么",
+      "class": "C",
+      "queries": [
+        {
+          "channel": "tracker",
+          "query": "非语义",
+          "command": "gh issue list -R Newchanlun/NewChanlun --state all --limit 1000 --search 'in:title,body,comments 非语义' --json number,title,state,url",
+          "hits": 547
+        },
+        {
+          "channel": "tracker",
+          "query": "重命名",
+          "command": "gh issue list -R Newchanlun/NewChanlun --state all --limit 1000 --search 'in:title,body,comments 重命名' --json number,title,state,url",
+          "hits": 412
+        },
+        {
+          "channel": "tracker",
+          "query": "一一映射",
+          "command": "gh issue list -R Newchanlun/NewChanlun --state all --limit 1000 --search 'in:title,body,comments 一一映射' --json number,title,state,url",
+          "hits": 275
+        },
+        {
+          "channel": "tracker",
+          "query": "run 身份",
+          "command": "gh issue list -R Newchanlun/NewChanlun --state all --limit 1000 --search 'in:title,body,comments run 身份' --json number,title,state,url",
+          "hits": 129
+        },
+        {
+          "channel": "tracker",
+          "query": "运行 ID",
+          "command": "gh issue list -R Newchanlun/NewChanlun --state all --limit 1000 --search 'in:title,body,comments 运行 ID' --json number,title,state,url",
+          "hits": 181
+        },
+        {
+          "channel": "tracker",
+          "query": "会话 ID 双跑",
+          "command": "gh issue list -R Newchanlun/NewChanlun --state all --limit 1000 --search 'in:title,body,comments 会话 ID 双跑' --json number,title,state,url",
+          "hits": 68
+        },
+        {
+          "channel": "tracker",
+          "query": "预声明 双跑",
+          "command": "gh issue list -R Newchanlun/NewChanlun --state all --limit 1000 --search 'in:title,body,comments 预声明 双跑' --json number,title,state,url",
+          "hits": 109
+        },
+        {
+          "channel": "tracker",
+          "query": "双跑",
+          "command": "gh issue list -R Newchanlun/NewChanlun --state all --limit 1000 --search 'in:title,body,comments 双跑' --json number,title,state,url",
+          "hits": 384
+        },
+        {
+          "channel": "tracker",
+          "query": "dual-run",
+          "command": "gh issue list -R Newchanlun/NewChanlun --state all --limit 1000 --search 'in:title,body,comments dual-run' --json number,title,state,url",
+          "hits": 52
+        },
+        {
+          "channel": "tracker",
+          "query": "可复现",
+          "command": "gh issue list -R Newchanlun/NewChanlun --state all --limit 1000 --search 'in:title,body,comments 可复现' --json number,title,state,url",
+          "hits": 897
+        },
+        {
+          "channel": "tracker",
+          "query": "reproducible replay",
+          "command": "gh issue list -R Newchanlun/NewChanlun --state all --limit 1000 --search 'in:title,body,comments reproducible replay' --json number,title,state,url",
+          "hits": 1
+        },
+        {
+          "channel": "tracker",
+          "query": "逐字节 对拍",
+          "command": "gh issue list -R Newchanlun/NewChanlun --state all --limit 1000 --search 'in:title,body,comments 逐字节 对拍' --json number,title,state,url",
+          "hits": 240
+        },
+        {
+          "channel": "tracker",
+          "query": "跨机器 回放",
+          "command": "gh issue list -R Newchanlun/NewChanlun --state all --limit 1000 --search 'in:title,body,comments 跨机器 回放' --json number,title,state,url",
+          "hits": 97
+        },
+        {
+          "channel": "tracker",
+          "query": "\"一一重命名\"",
+          "command": "gh issue list -R Newchanlun/NewChanlun --state all --limit 1000 --search 'in:title,body,comments \"一一重命名\"' --json number,title,state,url",
+          "hits": 5
+        },
+        {
+          "channel": "tracker",
+          "query": "\"非语义\" \"双跑\"",
+          "command": "gh issue list -R Newchanlun/NewChanlun --state all --limit 1000 --search 'in:title,body,comments \"非语义\" \"双跑\"' --json number,title,state,url",
+          "hits": 7
+        },
+        {
+          "channel": "tracker",
+          "query": "\"运行 ID\" \"全状态\"",
+          "command": "gh issue list -R Newchanlun/NewChanlun --state all --limit 1000 --search 'in:title,body,comments \"运行 ID\" \"全状态\"' --json number,title,state,url",
+          "hits": 2
+        },
+        {
+          "channel": "tracker",
+          "query": "\"run 身份\" \"双跑\"",
+          "command": "gh issue list -R Newchanlun/NewChanlun --state all --limit 1000 --search 'in:title,body,comments \"run 身份\" \"双跑\"' --json number,title,state,url",
+          "hits": 3
+        },
+        {
+          "channel": "tracker",
+          "query": "\"可复现\" \"双跑\"",
+          "command": "gh issue list -R Newchanlun/NewChanlun --state all --limit 1000 --search 'in:title,body,comments \"可复现\" \"双跑\"' --json number,title,state,url",
+          "hits": 6
+        },
+        {
+          "channel": "tracker",
+          "query": "\"不同目录\" \"双跑\"",
+          "command": "gh issue list -R Newchanlun/NewChanlun --state all --limit 1000 --search 'in:title,body,comments \"不同目录\" \"双跑\"' --json number,title,state,url",
+          "hits": 0
+        },
+        {
+          "channel": "tracker",
+          "query": "\"跨环境\" \"双跑\"",
+          "command": "gh issue list -R Newchanlun/NewChanlun --state all --limit 1000 --search 'in:title,body,comments \"跨环境\" \"双跑\"' --json number,title,state,url",
+          "hits": 2
+        },
+        {
+          "channel": "repo",
+          "query": "非语义|non.semantic|重命名|run[ _-]?(身份|identity)|运行[ _-]?ID|会话[ _-]?ID|一一映射|alpha.renam|reproducib|可复现|双跑|双进程|全状态对拍|dual.run|run_id",
+          "command": "git grep -niI -E '非语义|non.semantic|重命名|run[ _-]?(身份|identity)|运行[ _-]?ID|会话[ _-]?ID|一一映射|alpha.renam|reproducib|可复现|双跑|双进程|全状态对拍|dual.run|run_id' b9d898dccf46c2a716115eaa1215bc39c458a959 -- docs/adr .chanlun/definitions analysis docs rust s_session CONTEXT.md .chanlun/review-results scripts",
+          "hits": 703
+        }
+      ],
+      "hits": [
+        {
+          "source": "#1340 正文 :349",
+          "excerpt": "允许不同运行 ID 等非语义字段经过预先声明的一一重命名；禁止只比较最终净仓。"
+        },
+        {
+          "source": "#1411 正文 :12",
+          "excerpt": "只允许预先声明的一一重命名非语义run身份；任何状态差异不能沿用advisory、inconclusive或最终净仓一致而报PASS。"
+        }
+      ],
+      "citation": "#1340 C10.4:349；#1411:11–14；ADR 0056:63–88",
+      "reasoning": "同模式拥有受约束的原根与派生身份；跨模式录放闭集不能套进原根比较。",
+      "recommended": "验收夹具事前冻结，独立校验仅报告头 /run_id 的单值双射；业务根不改名、差异失败。",
+      "searched_keywords": [
+        "非语义",
+        "重命名",
+        "一一映射",
+        "run 身份",
+        "运行 ID",
+        "会话 ID 双跑",
+        "预声明 双跑",
+        "双跑",
+        "dual-run",
+        "可复现",
+        "reproducible replay",
+        "逐字节 对拍",
+        "跨机器 回放",
+        "\"一一重命名\"",
+        "\"非语义\" \"双跑\"",
+        "\"运行 ID\" \"全状态\"",
+        "\"run 身份\" \"双跑\"",
+        "\"可复现\" \"双跑\"",
+        "\"不同目录\" \"双跑\"",
+        "\"跨环境\" \"双跑\"",
+        "非语义|non.semantic|重命名|run[ _-]?(身份|identity)|运行[ _-]?ID|会话[ _-]?ID|一一映射|alpha.renam|reproducib|可复现|双跑|双进程|全状态对拍|dual.run|run_id"
+      ],
+      "gap": "decision"
+    },
+    {
+      "id": "Q5",
+      "question": "X authority_profile 冻结的 socket 位置与权威如何分层",
+      "class": "B",
+      "queries": [
+        {
+          "channel": "tracker",
+          "query": "authority_profile",
+          "command": "gh issue list -R Newchanlun/NewChanlun --state all --limit 1000 --search 'in:title,body,comments authority_profile' --json number,title,state,url",
+          "hits": 2
+        },
+        {
+          "channel": "tracker",
+          "query": "x_sim_meta",
+          "command": "gh issue list -R Newchanlun/NewChanlun --state all --limit 1000 --search 'in:title,body,comments x_sim_meta' --json number,title,state,url",
+          "hits": 2
+        },
+        {
+          "channel": "tracker",
+          "query": "socket 路径",
+          "command": "gh issue list -R Newchanlun/NewChanlun --state all --limit 1000 --search 'in:title,body,comments socket 路径' --json number,title,state,url",
+          "hits": 37
+        },
+        {
+          "channel": "tracker",
+          "query": "socket path",
+          "command": "gh issue list -R Newchanlun/NewChanlun --state all --limit 1000 --search 'in:title,body,comments socket path' --json number,title,state,url",
+          "hits": 10
+        },
+        {
+          "channel": "tracker",
+          "query": "会话 端点",
+          "command": "gh issue list -R Newchanlun/NewChanlun --state all --limit 1000 --search 'in:title,body,comments 会话 端点' --json number,title,state,url",
+          "hits": 184
+        },
+        {
+          "channel": "tracker",
+          "query": "端点",
+          "command": "gh issue list -R Newchanlun/NewChanlun --state all --limit 1000 --search 'in:title,body,comments 端点' --json number,title,state,url",
+          "hits": 418
+        },
+        {
+          "channel": "tracker",
+          "query": "端点 写者锁",
+          "command": "gh issue list -R Newchanlun/NewChanlun --state all --limit 1000 --search 'in:title,body,comments 端点 写者锁' --json number,title,state,url",
+          "hits": 138
+        },
+        {
+          "channel": "tracker",
+          "query": "X 权威端点",
+          "command": "gh issue list -R Newchanlun/NewChanlun --state all --limit 1000 --search 'in:title,body,comments X 权威端点' --json number,title,state,url",
+          "hits": 29
+        },
+        {
+          "channel": "tracker",
+          "query": "e_socket s_socket x_socket",
+          "command": "gh issue list -R Newchanlun/NewChanlun --state all --limit 1000 --search 'in:title,body,comments e_socket s_socket x_socket' --json number,title,state,url",
+          "hits": 0
+        },
+        {
+          "channel": "tracker",
+          "query": "\"authority_profile\" \"socket\"",
+          "command": "gh issue list -R Newchanlun/NewChanlun --state all --limit 1000 --search 'in:title,body,comments \"authority_profile\" \"socket\"' --json number,title,state,url",
+          "hits": 1
+        },
+        {
+          "channel": "tracker",
+          "query": "\"socket 路径\" \"writer\"",
+          "command": "gh issue list -R Newchanlun/NewChanlun --state all --limit 1000 --search 'in:title,body,comments \"socket 路径\" \"writer\"' --json number,title,state,url",
+          "hits": 3
+        },
+        {
+          "channel": "tracker",
+          "query": "\"端点\" \"会话身份\"",
+          "command": "gh issue list -R Newchanlun/NewChanlun --state all --limit 1000 --search 'in:title,body,comments \"端点\" \"会话身份\"' --json number,title,state,url",
+          "hits": 1
+        },
+        {
+          "channel": "tracker",
+          "query": "\"端点\" \"再服务\"",
+          "command": "gh issue list -R Newchanlun/NewChanlun --state all --limit 1000 --search 'in:title,body,comments \"端点\" \"再服务\"' --json number,title,state,url",
+          "hits": 5
+        },
+        {
+          "channel": "tracker",
+          "query": "\"authority_epoch\" \"冻结\"",
+          "command": "gh issue list -R Newchanlun/NewChanlun --state all --limit 1000 --search 'in:title,body,comments \"authority_epoch\" \"冻结\"' --json number,title,state,url",
+          "hits": 2
+        },
+        {
+          "channel": "repo",
+          "query": "authority[_ -](profile|endpoint)|x_sim_meta|socket[_ -]路径|socket.{0,15}(path|端点)|端点.{0,20}(路径|身份|锁|冻结|会话)|会话.{0,15}端点|(session|unix|writer|domain)[_ -]endpoint|(^|[^[:alnum:]_])[esx]_socket",
+          "command": "git grep -niI -E 'authority[_ -](profile|endpoint)|x_sim_meta|socket[_ -]路径|socket.{0,15}(path|端点)|端点.{0,20}(路径|身份|锁|冻结|会话)|会话.{0,15}端点|(session|unix|writer|domain)[_ -]endpoint|(^|[^[:alnum:]_])[esx]_socket' b9d898dccf46c2a716115eaa1215bc39c458a959 -- docs/adr .chanlun/definitions analysis docs rust s_session CONTEXT.md .chanlun/review-results scripts",
+          "hits": 346
+        }
+      ],
+      "hits": [
+        {
+          "source": "evidence/2079-design-r5:.chanlun/review-results/issue2079-design-r5/DESIGN.md:37",
+          "excerpt": "路径是否进提交根归 #2127，本裁定只要求同一布局下 k 字节不变。"
+        },
+        {
+          "source": "rust/src/history_simulation/runtime.rs:825",
+          "excerpt": "return Err(\"IdentityConflict：X 权威端点合同已冻结\".into());"
+        }
+      ],
+      "citation": "#2079 方向稿 DESIGN.md:11,37；rust/src/history_simulation/runtime.rs:790–864",
+      "reasoning": "同址位置属于域写者锁；当前 profile 同时冻结位置和权威元数据。",
+      "recommended": "路径的冻结搬到部署清单，权威与代、语义字段仍核业务，保持原址准入。",
+      "searched_keywords": [
+        "authority_profile",
+        "x_sim_meta",
+        "socket 路径",
+        "socket path",
+        "会话 端点",
+        "端点",
+        "端点 写者锁",
+        "X 权威端点",
+        "e_socket s_socket x_socket",
+        "\"authority_profile\" \"socket\"",
+        "\"socket 路径\" \"writer\"",
+        "\"端点\" \"会话身份\"",
+        "\"端点\" \"再服务\"",
+        "\"authority_epoch\" \"冻结\"",
+        "authority[_ -](profile|endpoint)|x_sim_meta|socket[_ -]路径|socket.{0,15}(path|端点)|端点.{0,20}(路径|身份|锁|冻结|会话)|会话.{0,15}端点|(session|unix|writer|domain)[_ -]endpoint|(^|[^[:alnum:]_])[esx]_socket"
+      ]
+    },
+    {
+      "id": "Q6",
+      "question": "已持久原件的不可变保留与原版本读法",
+      "class": "A",
+      "queries": [
+        {
+          "channel": "tracker",
+          "query": "只读归档",
+          "command": "gh issue list -R Newchanlun/NewChanlun --state all --limit 1000 --search 'in:title,body,comments 只读归档' --json number,title,state,url",
+          "hits": 444
+        },
+        {
+          "channel": "tracker",
+          "query": "归档 原件 AsKnown",
+          "command": "gh issue list -R Newchanlun/NewChanlun --state all --limit 1000 --search 'in:title,body,comments 归档 原件 AsKnown' --json number,title,state,url",
+          "hits": 43
+        },
+        {
+          "channel": "tracker",
+          "query": "暗迁移",
+          "command": "gh issue list -R Newchanlun/NewChanlun --state all --limit 1000 --search 'in:title,body,comments 暗迁移' --json number,title,state,url",
+          "hits": 12
+        },
+        {
+          "channel": "tracker",
+          "query": "原件 不改写",
+          "command": "gh issue list -R Newchanlun/NewChanlun --state all --limit 1000 --search 'in:title,body,comments 原件 不改写' --json number,title,state,url",
+          "hits": 569
+        },
+        {
+          "channel": "tracker",
+          "query": "旧格式 恢复",
+          "command": "gh issue list -R Newchanlun/NewChanlun --state all --limit 1000 --search 'in:title,body,comments 旧格式 恢复' --json number,title,state,url",
+          "hits": 160
+        },
+        {
+          "channel": "tracker",
+          "query": "档案 版本",
+          "command": "gh issue list -R Newchanlun/NewChanlun --state all --limit 1000 --search 'in:title,body,comments 档案 版本' --json number,title,state,url",
+          "hits": 169
+        },
+        {
+          "channel": "tracker",
+          "query": "跨代 账本",
+          "command": "gh issue list -R Newchanlun/NewChanlun --state all --limit 1000 --search 'in:title,body,comments 跨代 账本' --json number,title,state,url",
+          "hits": 283
+        },
+        {
+          "channel": "tracker",
+          "query": "\"旧原件\" \"只读\" \"账本\"",
+          "command": "gh issue list -R Newchanlun/NewChanlun --state all --limit 1000 --search 'in:title,body,comments \"旧原件\" \"只读\" \"账本\"' --json number,title,state,url",
+          "hits": 6
+        },
+        {
+          "channel": "tracker",
+          "query": "\"暗迁移\" \"Voice\"",
+          "command": "gh issue list -R Newchanlun/NewChanlun --state all --limit 1000 --search 'in:title,body,comments \"暗迁移\" \"Voice\"' --json number,title,state,url",
+          "hits": 0
+        },
+        {
+          "channel": "tracker",
+          "query": "\"只读归档\" \"AsKnown\"",
+          "command": "gh issue list -R Newchanlun/NewChanlun --state all --limit 1000 --search 'in:title,body,comments \"只读归档\" \"AsKnown\"' --json number,title,state,url",
+          "hits": 0
+        },
+        {
+          "channel": "tracker",
+          "query": "\"旧格式\" \"提交根\"",
+          "command": "gh issue list -R Newchanlun/NewChanlun --state all --limit 1000 --search 'in:title,body,comments \"旧格式\" \"提交根\"' --json number,title,state,url",
+          "hits": 0
+        },
+        {
+          "channel": "repo",
+          "query": "只读.{0,14}归档|归档.{0,14}只读|原件.{0,12}(只读|不改写)|暗迁移|旧版.{0,10}(归档|原件)|archive.{0,20}(manifest|crosswalk)|AsKnown.{0,20}(原件|迁移)",
+          "command": "git grep -niI -E '只读.{0,14}归档|归档.{0,14}只读|原件.{0,12}(只读|不改写)|暗迁移|旧版.{0,10}(归档|原件)|archive.{0,20}(manifest|crosswalk)|AsKnown.{0,20}(原件|迁移)' b9d898dccf46c2a716115eaa1215bc39c458a959 -- docs/adr .chanlun/definitions analysis docs rust s_session CONTEXT.md .chanlun/review-results scripts",
+          "hits": 35
+        }
+      ],
+      "hits": [
+        {
+          "source": "docs/adr/0051-per-bar-domain-event-identity-lifecycle-contract.md:276",
+          "excerpt": "重放得到的 `root` 与原 commit 的 `root` 逐位相等。"
+        },
+        {
+          "source": "docs/adr/0053-domain-event-withdrawal-subcontract.md:65",
+          "excerpt": "未在 init 绑定的域此后不得补绑；旧库不迁移（§5.8）。"
+        }
+      ],
+      "citation": "#1340 C09.9–11；ADR 0051:274–278,310；ADR 0053:62–71",
+      "reasoning": "旧根必须可原样复算，存量原件不改写；新版本的登记选在运行前。",
+      "recommended": "旧原件按原规则只读可核并保留依赖；新格式只新空账建档。",
+      "searched_keywords": [
+        "只读归档",
+        "归档 原件 AsKnown",
+        "暗迁移",
+        "原件 不改写",
+        "旧格式 恢复",
+        "档案 版本",
+        "跨代 账本",
+        "\"旧原件\" \"只读\" \"账本\"",
+        "\"暗迁移\" \"Voice\"",
+        "\"只读归档\" \"AsKnown\"",
+        "\"旧格式\" \"提交根\"",
+        "只读.{0,14}归档|归档.{0,14}只读|原件.{0,12}(只读|不改写)|暗迁移|旧版.{0,10}(归档|原件)|archive.{0,20}(manifest|crosswalk)|AsKnown.{0,20}(原件|迁移)"
+      ]
+    }
+  ],
+  "hit_files": [
+    "tracker-hits.tsv",
+    "repo-hits.tsv"
+  ]
+}
