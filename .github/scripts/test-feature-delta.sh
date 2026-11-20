@@ -55,6 +55,10 @@ run_delta() {
   env "${opt_env[@]}" cargo test --locked --features "$base_features,$feature" "${sel[@]}" --jobs "${CI_CARGO_JOBS:-1}" -- --exact "${part[@]}"
 }
 
+# #1875：基准 s_session 的 --lib 与 S bin 并行预编译（同一次 cargo 调度重叠前端/链接，
+#   随后 --list 直接复用产物，输出逐行不变；CI_CARGO_JOBS=1 时自动退回串行）。
+cargo test --locked --features "$base_features" --lib --bin s_structure_session --jobs "${CI_CARGO_JOBS:-1}" --no-run
+
 total=0
 for target in lib bin; do
   if [[ "$target" == lib ]]; then
