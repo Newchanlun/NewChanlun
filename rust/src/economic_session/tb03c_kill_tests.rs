@@ -230,6 +230,7 @@ fn setup_from(plan: &Plan, dir: &Path, fault: (&str, &str), target: usize) -> Ve
         expected["meta"] = dump(&fresh.db)["meta"].clone();
         assert_eq!(dump(&c.db), expected, "起点副本域 {owner} ≠ 新 init + 前缀");
     }
+    // 显式根也沿用 main：只删除刚才由 create_dir 独占创建的 init-meta。
     std::fs::remove_dir_all(&scratch).unwrap();
     configs
 }
@@ -736,12 +737,171 @@ pub(super) fn progress(work: &Path, label: &str) -> Vec<Value> {
         .map(|l| strict_json(l.as_bytes()).unwrap())
         .collect()
 }
-fn root() -> &'static PathBuf {
-    static ROOT: OnceLock<PathBuf> = OnceLock::new();
+fn default_root() -> PathBuf {
+    let nonempty = |name| std::env::var_os(name).filter(|value| !value.is_empty());
+    if let Some(path) = nonempty("CARGO_TARGET_TMPDIR")
+        .map(PathBuf::from)
+        .or_else(|| nonempty("CARGO_TARGET_DIR").map(|dir| PathBuf::from(dir).join("tmp")))
+    {
+        return std::path::absolute(&path)
+            .unwrap_or_else(|err| panic!("无法解析构建证据目录（{}）：{err}", path.display()));
+    }
+    const MANIFEST: &str = env!("CARGO_MANIFEST_DIR");
+    assert!(
+        Path::new(MANIFEST).is_dir(),
+        "编译期清单目录 {MANIFEST} 不存在或不是目录；请显式设置 TB03C_KILL_ROOT"
+    );
+    PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/target/tmp"))
+}
+
+pub(super) fn explicit_root() -> bool {
+    std::env::var_os("TB03C_KILL_ROOT").is_some()
+}
+
+fn report_evidence(path: &Path) {
+    if path.exists() {
+        eprintln!("证据目录已保留：{}", path.display());
+    } else {
+        eprintln!("证据目录不存在：{}", path.display());
+    }
+}
+
+pub(super) struct CaseDir {
+    path: PathBuf,
+    owned: Option<tempfile::TempDir>,
+}
+
+impl CaseDir {
+    pub(super) fn in_default_root(prefix: &str) -> Self {
+        Self::temporary(&default_root(), prefix)
+    }
+
+    fn temporary(root: &Path, prefix: &str) -> Self {
+        let dir = owned_temp_dir(root, prefix);
+        Self {
+            path: dir.path().to_path_buf(),
+            owned: Some(dir),
+        }
+    }
+
+    pub(super) fn path(&self) -> &Path {
+        &self.path
+    }
+
+    pub(super) fn cleanup(mut self) {
+        if let Some(dir) = self.owned.take() {
+            if let Err(err) = dir.close() {
+                report_evidence(&self.path);
+                panic!("清理测试证据目录失败（{}）：{err}", self.path.display());
+            }
+        }
+    }
+}
+
+impl Drop for CaseDir {
+    fn drop(&mut self) {
+        if std::thread::panicking() {
+            if let Some(dir) = self.owned.take() {
+                report_evidence(&dir.keep());
+            }
+        }
+    }
+}
+
+fn owned_temp_dir(root: &Path, prefix: &str) -> tempfile::TempDir {
+    std::fs::create_dir_all(root)
+        .unwrap_or_else(|err| panic!("创建默认证据根目录失败（{}）：{err}", root.display()));
+    tempfile::Builder::new()
+        .prefix(prefix)
+        .tempdir_in(root)
+        .unwrap_or_else(|err| panic!("创建测试证据目录失败（{}）：{err}", root.display()))
+}
+
+/// 显式根只附加诊断，不提前建目录或清理归档；沿用 main 的 init-meta 瞬态清理。
+pub(super) fn with_case<T>(
+    prefix: &str,
+    legacy_root: &OnceLock<PathBuf>,
+    relative: &Path,
+    run: impl FnOnce(Option<&Path>) -> T,
+) -> T {
+    if explicit_root() {
+        let _evidence = ExplicitEvidence {
+            legacy_root,
+            relative,
+        };
+        run(None)
+    } else {
+        let case = CaseDir::in_default_root(prefix);
+        let result = run(Some(case.path()));
+        case.cleanup();
+        result
+    }
+}
+
+struct ExplicitEvidence<'a> {
+    legacy_root: &'a OnceLock<PathBuf>,
+    relative: &'a Path,
+}
+
+impl Drop for ExplicitEvidence<'_> {
+    fn drop(&mut self) {
+        if !std::thread::panicking() {
+            return;
+        }
+        let run = self.legacy_root.get();
+        let case = run.map(|run| run.join(self.relative));
+        let parent = std::env::var_os("TB03C_KILL_ROOT").map(|path| {
+            if path.is_empty() {
+                PathBuf::from(".")
+            } else {
+                PathBuf::from(path)
+            }
+        });
+        let path = [case.as_ref(), run, parent.as_ref()]
+            .into_iter()
+            .flatten()
+            .find_map(|path| super::explicit_evidence_path::directory_text(path));
+        if let Some(path) = path {
+            let _ = writeln!(std::io::stderr().lock(), "证据目录：{path}");
+        }
+    }
+}
+
+fn shared_inputs() -> &'static Path {
+    // Voice witness 固定绝对路径，所有 case 读取同一份计划、快照和无故障参照。
+    // 仅持有本进程独占创建的 TempDir；SIGKILL 不调用钩子，残留也只在构建根。
+    static INPUTS: OnceLock<tempfile::TempDir> = OnceLock::new();
+    extern "C" fn cleanup() {
+        if let Some(dir) = INPUTS.get() {
+            if let Err(err) = std::fs::remove_dir_all(dir.path()) {
+                let _ = writeln!(
+                    std::io::stderr().lock(),
+                    "清理共享输入失败（{}）：{err}",
+                    dir.path().display()
+                );
+            }
+        }
+    }
+    INPUTS
+        .get_or_init(|| {
+            let dir = owned_temp_dir(&default_root(), "nc1406-s3-kill-shared-");
+            // SAFETY: 无参数的 C ABI 回调只读进程静态状态、不展开 panic。
+            assert_eq!(unsafe { libc::atexit(cleanup) }, 0, "无法登记共享输入清理");
+            dir
+        })
+        .path()
+}
+
+static ROOT: OnceLock<PathBuf> = OnceLock::new();
+
+fn root() -> &'static Path {
+    if !explicit_root() {
+        return shared_inputs();
+    }
     ROOT.get_or_init(|| {
         let p = std::env::var_os("TB03C_KILL_ROOT")
             .map(PathBuf::from)
-            .unwrap_or_else(std::env::temp_dir)
+            .expect("显式证据根未设置")
             .join(format!("nc1406-s3-kill-{}", std::process::id()));
         std::fs::create_dir_all(&p).unwrap();
         p
@@ -834,8 +994,16 @@ fn plan() -> &'static Plan {
     static PLAN: OnceLock<Plan> = OnceLock::new();
     PLAN.get_or_init(|| {
         let plan_t0 = Instant::now();
-        let space = Space::new("s3-kill-plan");
-        let configs = setup(&space.0, None);
+        let legacy;
+        let owned;
+        let scratch = if explicit_root() {
+            legacy = Space::new("s3-kill-plan");
+            &legacy.0
+        } else {
+            owned = owned_temp_dir(shared_inputs(), "plan-work-");
+            owned.path()
+        };
+        let configs = setup(scratch, None);
         let dbs = configs
             .iter()
             .map(|c| store::open(&c.db, false).unwrap().0)
@@ -1232,39 +1400,47 @@ fn run_once(plan: &Plan, target: usize, phase: &str, work: &Path) -> Value {
 /// 一个（目标步, 阶段）组合：两次全新目录、全新 A/R/C 进程，终态全表与续跑回复逐字节相同。
 /// 降时长后每组合一个测试（原为每步一个测试内串行两阶段），调度粒度减半、工作量不变。
 fn matrix(target: usize, op: &str, owner: usize, phase: &str) {
-    let plan = plan();
-    assert_eq!(plan.steps[target]["envelope"]["payload"]["op"], op);
-    assert_eq!(plan.steps[target]["owner"], owner);
     let label = format!("step{target:02}");
-    {
-        let base = root().join(&label).join(phase);
-        let work = base.join("work");
-        let mut finals = vec![];
-        for rep in 0..2 {
-            let evidence = run_once(plan, target, phase, &work);
-            let archived = base.join(format!("rep-{rep}"));
-            std::fs::rename(&work, &archived).unwrap();
-            save(&archived.join("evidence.json"), &evidence);
-            println!(
-                "S3-KILL {}",
-                canonical_json(
-                    &json!({"label":label,"op":op,"phase":phase,"rep":rep,"message_id":evidence["message_id"],"domain_id":evidence["domain_id"],"pid":evidence["pid"],"signal":evidence["signal"],"kill_seq":evidence["kill_seq"],"resend_kind":evidence["resend"]["reply"]["kind"],"resend_seq":evidence["resend"]["seq"],"final_tables_sha256":evidence["final_tables_sha256"],"raw_dir":archived})
-                )
+    let relative = Path::new(&label).join(phase);
+    with_case(
+        &format!("nc1406-s3-kill-{label}-{phase}-"),
+        &ROOT,
+        &relative,
+        |base| {
+            let plan = plan();
+            assert_eq!(plan.steps[target]["envelope"]["payload"]["op"], op);
+            assert_eq!(plan.steps[target]["owner"], owner);
+            let base = base
+                .map(Path::to_path_buf)
+                .unwrap_or_else(|| root().join(&relative));
+            let work = base.join("work");
+            let mut finals = vec![];
+            for rep in 0..2 {
+                let evidence = run_once(plan, target, phase, &work);
+                let archived = base.join(format!("rep-{rep}"));
+                std::fs::rename(&work, &archived).unwrap();
+                save(&archived.join("evidence.json"), &evidence);
+                println!(
+                    "S3-KILL {}",
+                    canonical_json(
+                        &json!({"label":label,"op":op,"phase":phase,"rep":rep,"message_id":evidence["message_id"],"domain_id":evidence["domain_id"],"pid":evidence["pid"],"signal":evidence["signal"],"kill_seq":evidence["kill_seq"],"resend_kind":evidence["resend"]["reply"]["kind"],"resend_seq":evidence["resend"]["seq"],"final_tables_sha256":evidence["final_tables_sha256"],"raw_dir":archived})
+                    )
+                );
+                finals.push((
+                    canonical_json(&evidence["final_tables"]),
+                    evidence["continuation_replies"].clone(),
+                ));
+            }
+            assert_eq!(
+                finals[0].0, finals[1].0,
+                "{label}/{phase} 两次新进程完整终态逐字节相同"
             );
-            finals.push((
-                canonical_json(&evidence["final_tables"]),
-                evidence["continuation_replies"].clone(),
-            ));
-        }
-        assert_eq!(
-            finals[0].0, finals[1].0,
-            "{label}/{phase} 两次新进程完整终态逐字节相同"
-        );
-        assert_eq!(
-            finals[0].1, finals[1].1,
-            "{label}/{phase} 两次新进程续跑回复相同"
-        );
-    }
+            assert_eq!(
+                finals[0].1, finals[1].1,
+                "{label}/{phase} 两次新进程续跑回复相同"
+            );
+        },
+    );
 }
 
 /// WE7 持久写步（评审 M2 + #1622 BindVoice）：22 步（步号 / 操作 / 所属域，0=E，1..3=B:chong-N1..N3）。
@@ -1310,14 +1486,10 @@ kill_step! {
 
 /// 评审 M3(b) 负控：提交前被杀并恢复后**跳过重送**直接续跑，终态比较函数必须报「不同」。
 /// 证明 `final_diff` 能区分「恰好一次」与「丢失一次」；断言写在返回值上，不用 should_panic。
-fn skip_resend(target: usize) -> (String, Killed) {
-    let plan = plan();
-    let work = root()
-        .join(format!("negative-skip-{target:02}"))
-        .join("work");
-    let k = kill_and_recover(plan, target, "before_commit", &work);
+fn skip_resend(plan: &Plan, target: usize, work: &Path) -> (String, Killed) {
+    let k = kill_and_recover(plan, target, "before_commit", work);
     let clock = Clock::crash(plan, k.owner, target, false);
-    let after = resume(&k, &work, plan.steps[target + 1..].to_vec());
+    let after = resume(&k, work, plan.steps[target + 1..].to_vec());
     let errors = after
         .iter()
         .filter(|l| l["reply"]["kind"] == "Error")
@@ -1331,11 +1503,9 @@ fn skip_resend(target: usize) -> (String, Killed) {
 }
 
 /// #1622 负控：BindVoice 使用不存在的 allocation_id，必须在应用查找处拒绝。
-fn bind_voice_wrong_allocation() -> String {
-    let plan = plan();
-    let work = root().join("negative-wrong-allocation").join("work");
-    std::fs::create_dir_all(&work).unwrap();
-    let configs = setup(&work, None);
+fn bind_voice_wrong_allocation(plan: &Plan, work: &Path) -> String {
+    std::fs::create_dir_all(work).unwrap();
+    let configs = setup(work, None);
     let mut dbs: Vec<rusqlite::Connection> = configs
         .iter()
         .map(|c| store::open(&c.db, false).unwrap().0)
@@ -1376,66 +1546,132 @@ fn bind_voice_wrong_allocation() -> String {
     );
     error_reason
 }
+fn negative_case(name: &str, run: impl FnOnce(&Plan, &Path)) {
+    with_case(
+        &format!("nc1406-s3-kill-{name}-"),
+        &ROOT,
+        Path::new(name),
+        |base| {
+            let plan = plan();
+            let work =
+                base.map_or_else(|| root().join(name).join("work"), |base| base.join("work"));
+            run(plan, &work);
+        },
+    );
+}
+
 #[test]
 fn tb03c_kill_negative_skip_resend_capture_fill1() {
-    let (diff, _) = skip_resend(6);
-    assert!(diff.starts_with("终态域 0："), "{diff}");
+    negative_case("negative-skip-06", |plan, work| {
+        let (diff, _) = skip_resend(plan, 6, work);
+        assert!(diff.starts_with("终态域 0："), "{diff}");
+    });
 }
 #[test]
 fn tb03c_kill_negative_skip_resend_apply_fill1_n2() {
-    let (diff, _) = skip_resend(9);
-    assert!(diff.starts_with("终态域 2："), "{diff}");
+    negative_case("negative-skip-09", |plan, work| {
+        let (diff, _) = skip_resend(plan, 9, work);
+        assert!(diff.starts_with("终态域 2："), "{diff}");
+    });
 }
 
 /// #1622 负控：BindVoice 提交前被杀后漏掉重送，域 1 的 Voice 记录与公开查询都必须缺失，
 /// 且全表与公开查询比较器都必须实际报出差异；wrong-allocation 不能替代这条覆盖。
 #[test]
 fn tb03c_kill_negative_skip_resend_bind_voice_n1() {
-    let (diff, k) = skip_resend(21);
-    assert!(diff.starts_with("终态域 1："), "{diff}");
+    negative_case("negative-skip-21", |plan, work| {
+        let (diff, k) = skip_resend(plan, 21, work);
+        assert!(diff.starts_with("终态域 1："), "{diff}");
 
-    let reference = reference();
-    assert!(
-        reference.norm_public[1]
-            .as_array()
-            .unwrap()
-            .iter()
-            .any(|r| r["kind"] == "EconomicVoice" && r["record"]["binding_id"] == "kill-voice-1"),
-        "参照公开查询必须包含 kill-voice-1，否则负控没有证明目标"
-    );
-    let clock = Clock::crash(plan(), k.owner, 21, false);
-    let queries = public(&k.configs);
-    let public_diff = compare(&queries[1], &clock, &reference.norm_public[1])
-        .expect_err("漏掉 BindVoice 后公开查询竟与参照相同");
-    assert!(public_diff.starts_with("规范化后不同："), "{public_diff}");
+        let reference = reference();
+        assert!(
+            reference.norm_public[1]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(
+                    |r| r["kind"] == "EconomicVoice" && r["record"]["binding_id"] == "kill-voice-1"
+                ),
+            "参照公开查询必须包含 kill-voice-1，否则负控没有证明目标"
+        );
+        let clock = Clock::crash(plan, k.owner, 21, false);
+        let queries = public(&k.configs);
+        let public_diff = compare(&queries[1], &clock, &reference.norm_public[1])
+            .expect_err("漏掉 BindVoice 后公开查询竟与参照相同");
+        assert!(public_diff.starts_with("规范化后不同："), "{public_diff}");
 
-    let (mut db, _) = store::open(&k.configs[1].db, false).unwrap();
-    let epoch: i64 = store::meta(&db, "writer_epoch").unwrap().parse().unwrap();
-    let query = service::handle(
-        &mut db,
-        &k.configs[1],
-        epoch,
-        epoch,
-        &json!({}),
-        &envelope(
-            "negative-bind-voice-query",
-            json!({"op":"QueryVoice","binding_id":"kill-voice-1"}),
-        ),
-    )["payload"]
-        .clone();
-    assert_eq!(query["kind"], "Error", "{query}");
-    assert_eq!(
-        query["error"], "MissingDependency：Voice 尚未绑定",
-        "{query}"
-    );
+        let (mut db, _) = store::open(&k.configs[1].db, false).unwrap();
+        let epoch: i64 = store::meta(&db, "writer_epoch").unwrap().parse().unwrap();
+        let query = service::handle(
+            &mut db,
+            &k.configs[1],
+            epoch,
+            epoch,
+            &json!({}),
+            &envelope(
+                "negative-bind-voice-query",
+                json!({"op":"QueryVoice","binding_id":"kill-voice-1"}),
+            ),
+        )["payload"]
+            .clone();
+        assert_eq!(query["kind"], "Error", "{query}");
+        assert_eq!(
+            query["error"], "MissingDependency：Voice 尚未绑定",
+            "{query}"
+        );
+    });
 }
 
 /// #1622 负控：不存在的 allocation_id 不得绑定 Voice。
 #[test]
 fn tb03c_kill_negative_bind_voice_wrong_allocation() {
-    let reason = bind_voice_wrong_allocation();
-    assert_eq!(
-        reason, "MissingDependency：Voice 开局 allocation 尚未应用",
-        "负控必须到达 allocation 查找失败，而不是其他前置错误"
+    negative_case("negative-wrong-allocation", |plan, work| {
+        let reason = bind_voice_wrong_allocation(plan, work);
+        assert_eq!(
+            reason, "MissingDependency：Voice 开局 allocation 尚未应用",
+            "负控必须到达 allocation 查找失败，而不是其他前置错误"
+        );
+    });
+}
+
+#[test]
+fn tb03c_kill_case_dir_cleanup_failure_and_zero_residual() {
+    if explicit_root() {
+        return;
+    }
+    let root = default_root();
+    let case = CaseDir::temporary(&root, "nc1406-s3-kill-unit-pass-");
+    let path = case.path().to_path_buf();
+    std::fs::write(path.join("f"), b"ok").unwrap();
+    case.cleanup();
+    assert!(!path.exists());
+    assert!(root.is_dir(), "清理用例不得删除默认根");
+
+    let case = CaseDir::temporary(&root, "nc1406-s3-kill-unit-close-error-");
+    let path = case.path().to_path_buf();
+    std::fs::remove_dir(&path).unwrap();
+    let err = std::panic::catch_unwind(|| case.cleanup())
+        .expect_err("目录已不存在，close() 失败必须判红");
+    let msg = err.downcast_ref::<String>().unwrap();
+    assert!(
+        msg.contains("清理测试证据目录失败") && msg.contains(path.to_str().unwrap()),
+        "{msg}"
     );
+}
+
+#[test]
+fn tb03c_kill_case_dir_keeps_panicking_case() {
+    if explicit_root() {
+        return;
+    }
+    let sandbox = CaseDir::temporary(&default_root(), "nc1406-s3-kill-unit-panic-");
+    let case = CaseDir::temporary(sandbox.path(), "early-assert-");
+    let path = case.path().to_path_buf();
+    let panicked = std::panic::catch_unwind(|| {
+        let _case = case;
+        panic!("模拟前置断言失败");
+    });
+    assert!(panicked.is_err());
+    assert!(path.is_dir(), "前置断言失败后须保留 {}", path.display());
+    sandbox.cleanup();
 }
