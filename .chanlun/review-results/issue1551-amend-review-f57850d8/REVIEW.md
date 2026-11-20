@@ -1,0 +1,113 @@
+# #1551 ADR 0064 修订 r2 独审（异家族终审）
+
+目标：#1323 只凭 AT-18 整图验收报告关图，合同是 ADR 0064。本审判定 r2 修订 `f57850d8b4e151a36ade953f3e79fe2736bd4c36` 能否堵住 #1391 独审发现的三处假 PASS，并核首轮 B1–B4 是否闭合。起草为 GPT 进程，本审为 Claude，全程只读。L 行号指修订后 ADR 全文。
+
+**总判：BLOCK。** 第三点（自身清单摘要在引导阶段阻断）可放行，#2021 的双父同树与 Rust 去重实例全部核实成立。阻断有两类：新规则放到真实的已关片上，要么无法求值，要么永远出不了真 PASS；逐键收据的身份核验没有数据源。四项可一轮修完。
+
+## 首轮四项
+
+| 项 | 判定 | 依据 |
+|---|---|---|
+| B1 | CLOSED | merge commit 链对同树、异树都已定义，证不出等价即失败。#2021：M=`b9d898dccf`，父为 `ed780bcd4a` 与 H=`fdda2200fb`，两树同为 `d7383eac` |
+| B2 | STILL_OPEN | 去重分支已闭合：run 43853928501、changes 日志两行、PR run 43559429852、DevSkim 43853928206 均核实。但 L100 在 ci-ok 之前的已关片上仍不可满足，反例是 #1392 的 M=`8619a20f`（阻断 2） |
+| B3 | STILL_OPEN | TB-01..TB-10 切片键已有补件票产出。6 个 Destination 键仍没有可能的产出者，反例 `(destination, DST-06, null)`（阻断 1） |
+| B4 | CLOSED | 期望键可复算：按 L72-75 的表算得非 TB-11 键 3958 个，加 6 个 Destination 共 3964。「证实」已定为逐键收据；收据身份怎么核见阻断 3 |
+
+## R1–R8
+
+| 项 | 结论 | 依据 |
+|---|---|---|
+| R1 | PASS | 修订新增或改动的引用逐条打开成立，#2021 的 run、日志、树亲核。两处瑕疵见非阻断 6 |
+| R2 | BLOCK | L75 的 destination 行与本 ADR 既有的 L33-37 无环序、L128 的 TB-11 销项规则冲突（阻断 1）。#1279 门、资金凭据硬门、三份 /1 键集未动 |
+| R3 | BLOCK | L100 的应执行作业在旧 M 上无法求值；L79、L82、L83 的机器核验没有数据源；Destination 键的真 PASS 不可达 |
+| R4 | BLOCK | 形式面通过：canonical-plan 9 处替换各唯一命中，重放与 blob 逐字相同，头部与代码清单正确。实质合同缺失：阻断 1、2、4 |
+| R5 | PASS | 没有新增宽严两档或兜底：dispatch 补跑更严，PR run 不替代 main push，EXCLUDED 不计支持，未知按产品处理 |
+| R6 | BLOCK | 新票与 #1391 因 Destination 键成环；已关片的 CI 与补审缺口没有承接票和边 |
+| R7 | PASS | P 类、userGate 为空，与评论 6861283421 一致；只定取证方法和图边 |
+| R8 | BLOCK | 换说法复搜 `"DevSkim" "例外" in:comments` 命中 #1359、#1371–#1374、#1392、#1404、#1414：已关片 resolution 写明主线红灯和获批例外，Q2 未列。Q1 对 Destination 键的裁定没有推导 TB-11 依赖 |
+
+## 阻断项
+
+### 1 Destination 键与 TB-11 成环（R2、R3、R4、R6、R8）
+
+- 位置：L75、L77、L79、L81-82、L163；new-ticket.md 第 2 项与末条。
+- 问题：destination 键的 `slice_id` 固定为 `null`，不享 L77 的 TB-11 豁免，必须有域行、映射记录和逐键 PASS。L82 要求记录覆盖该键全部判据，而它的判据含 TB-11 的验收与 resolution。
+- 反例：键 `(destination, DST-06, null, /destination_success_obligations/5)`。crosswalk 中 6 个 DST 的 `story_ids` 都含只由 TB-11 关闭的 US-ENG-10，且 `requires_all_corresponding_slices_acceptance_and_resolutions=true`。TB-11 的 resolution 就是 #1391、#1403 关票，晚于报告；记录不得指向 AT-18 输出；补件票阻塞 #1391 且来源未齐不得关闭。结果是 6 键永远 `COVERAGE_SCOPE`，或域作者剔除 TB-11 部分缩小分母。
+- 修法：destination 键不进域目录和映射，由机器聚合：所链接的 story、family、detail 键全部 PASS（TB-11 切片按 L128 走前置门），加第二节专用门和 `legacy_dispositions`。同步改 L75、L79、L157 的「DST-06 借给 DST-01」和 new-ticket。
+
+### 2 主线 CI 规则在 ci-ok 之前的已关片上无法求值（R3、R4、R6、R8）
+
+- 位置：L100、L106、L163。
+- 问题：应执行作业取「M 版 `ci-ok.needs`」，而 ci-ok 到 2026-11-07（`037b5335ea`）才引入。红灯、缺跑和用户批准的例外都没有裁定，补救只覆盖被去重跳过的 Rust。
+- 反例：#1392 的 M=`8619a20f`，该版 ci.yml 只有 test、rust-check、s-observer、fixture-drift，CI push 37545808487 与 DevSkim 37545808932 均 failure，关票评论写「用户…批准该版本及下述两项具名CI例外」。#1404 `f95a7f3e`、#1414 `465174240b` 同样双红。#1373 `2706d87f`、#1374 `c65f0219` 在该提交上没有任何 run。#1372 的 `21b7898a` 与 #1374 产品落地点 `abf5c0f8` 的 DevSkim push 为 failure。读法一：TB-01..TB-03 永远 `CI_FINAL_PRODUCT`，L163 又不许重开。读法二：needs 视为空，红灯被忽略，出假 PASS。
+- 修法：写死无 ci-ok 版本的应执行作业（该版 ci.yml 的全部 push 作业和矩阵项；该版 devskim.yml 有 push 触发时 DevSkim 适用）。对缺跑、红灯、获批例外逐一裁定，例外不得记成 SUCCESS，补救证据必须写明哪个 SHA 上的哪次 run 算数。点名承接票并接到 #1391。考古 Q2 补列这些事实，L158 补「无 ci-ok」「获批例外」两例。
+
+### 3 「交付回执」没有定义，身份核验没有数据源（R3）
+
+- 位置：L79、L82、L83；new-ticket.md 第 3 项。
+- 问题：域文件的 scope PR 与独审 run、收据的审查身份、多份交付如何区分，都交给「已验收交付回执」。main 上 `.sandcastle`、`docs`、AGENTS.md 没有这个词的定义。`deliveryManifestSchema.reviews[]` 只有 `{report, covers}`，CODEX-CHILD.md:65 明写预检不能证明审查者身份。L83 的「来源票回执精确指认的 Git blob」同样要解析自由文本评论。
+- 反例：补件作者自己生成 `at18-evidence-review.json`，填 `reviewer` 与 `review_run_id`，摘要、head、下标全对。只核摘要的实现放行，等于组装者自证，第一处假 PASS 复现；另一种实现找不到回执，永不放行。
+- 修法：指定 GitHub 或 Git 可复算的锚。域文件取第一父链上最后改动该路径的合入 PR 及其精确 head 上的 `deepagents/review`。映射与收据定义一份固定键的机读登记（author、reviewer、review_run_id、reviewed_head、两份摘要），写明存放位置和三方分离的比较规则；做不到就删去「机器核身份」，明写身份由补件票关票验收担保、机器只核票已合法关闭。
+
+### 4 已关片的最终独评绑定没有产出者（R4、R6）
+
+- 位置：L89、L91、L93-96、L163。
+- 问题：L91 要求非产品项有非作者原件按同路径、同字节核定，L96 要求差异不等时在 M 补审，L89 要求交付方提供评审原件。已关片没有交付方，补件票只管覆盖映射。
+- 反例：#1374 的 M=`c65f021959`（PR #1455，H=`c64e72501b`），两树不同，唯一 merge-base 为 `abf5c0f8`。`B→H` 与 `P1→M` 只在 `.chanlun/agent-roster-2026-09-13.md` 不等（`03d6b900→4913efaf` 对 `8a2dbc6d→3dd5a98a`）。`3dd5a98a` 是合并产生的字节，没有原件核定，按产品处理，须补审，却没有人能出、也没有计入规则。TB-03 永远 `REVIEW_FINAL_PRODUCT`。
+- 修法：点名承接票（并入补件票或另开一张，阻塞 #1391），产出已关片的机读独评绑定和必要补审，并写明这类原件怎样算作该来源票的已验收原件。L158 补一例异树且文档差异不等的夹具。
+
+## 四个专项问题
+
+- (a) 映射作者缩不了域，也挪不动收据：期望键来自固定 blob，收据按 `scope_sha256` 和下标绑定。域目录作者可以经后继交付删域，机器不比对首次冻结版，只靠独审把关（非阻断 1）。
+- (b) merge 规则对同树、异树都正确：比较 `(path, 前后 blob, mode)` 集合，同文件两侧都改或多个 merge-base 时不证明等价。缺的是补审的承接（阻断 4）。
+- (c) 新票成环（阻断 1）；不重开已关票，但缺口没有去处；只凭票面无法执行，回执格式和 Destination 键的处理都没写。
+- (d) 没有写明的放宽。风险在两处歧义读法：阻断 1 的缩域和阻断 2 的读法二。
+
+## 非阻断
+
+1. 在 ADR 钉住首次冻结域文件的摘要，机器核后继版本不删域、不降类。L163「可同步收集已关原件」与 L80「不能按已有结果选择域」相抵，改成先冻域再收集。
+2. L82「原件可机读的冲突」没有字段清单；L157 的两条借用反例没写收据取值。
+3. new-ticket「交还原验收 owner」对已关片没有承接者，写明开哪类缺口票、如何进 `source_tickets`。
+4. L94 的 `E≠H` 条款会被 update-branch 合并和 `deepagents/review` 的复用发布卡住；squash 分支缺 merge-base 兜底。
+5. `run_id` 没有类型；运行类键应要求至少一条 `run_id` 非空的记录，静态证明限定在列明的判据上。
+6. graph-engineering.md:238 只支持 squash；ci.yml 只有 1518 行，「:1459-1530」越界。
+7. workflow_dispatch 只接受分支或 tag，应写明在 M 上建 ref 并核 `head_sha`。
+8. 缺 #1551（PR #2065 合入）到新票的边和票型标签；L89「被审 head」应写成报告顶层 `head`。
+
+## 本审亲自核过的事实
+
+`gh pr view 2021` 与两棵树；run 43853928501、43559429852、43853928206 的作业结论；changes 作业 133253234569 日志第 105-106 行。七个历史 M 的 Actions run 与各版 ci.yml 有无 ci-ok。crosswalk 六个 DST 的 `story_ids` 与 US-ENG-10 的关闭切片。`c65f021959` 的父、树、merge-base 与两组差异。canonical-plan 重放。#1391、#1403、#1369、#1551 的原生边。rust-green 指纹取自服务端作业名，本审未重算。
+
+## 逐条依据原文
+
+| 规则 | 结论 | 依据 |
+|---|---|---|
+| R1 | PASS | 修订新增或改动的引用逐条打开成立：CODEX-CHILD.md:54/:56-63/:65；delivery-bundle.ts:10-17/:27-38/:116-132/:147/:189-241/:248-253，L61 所列九个引导诊断码均在 :180-:240；delivery-bundle.mts:13；review_sweep.py:276-279（merge_method=merge）；ci.yml:41-46/:76-116 与文件末尾的 ci-ok、rust-green；ci-rust-reuse.py 的 tree_entries/digest；devskim.yml 的 push 触发；ADR 0041:41/:46；分支保护 strict=true、contexts 为 deepagents/review、ci-ok、DevSkim；#1875、PR #2027。#2021 实例亲核：M=b9d898dccf 的父为 ed780bcd4a 与 H=fdda2200fb，两树同为 d7383eac，P1 是 H 的祖先；push run 43853928501 中 Rust 全 skipped、ci-ok success；changes 作业 133253234569 日志第 105-106 行即所引两行；PR run 43559429852 为 pull_request、同仓、head=H、Rust 作业与矩阵项全部 success、rust-green e2c84167…；DevSkim 43853928206 success。指纹取自服务端作业名，本审未重算。两处瑕疵不阻断：ci.yml 只有 1518 行，「:1459-1530」越界；graph-engineering.md:238 只支持 squash，merge commit 仅由 review_sweep.py 支持。 |
+| R2 | BLOCK | L75 新增的 destination 行与本 ADR 既有裁定冲突：§三 L33-37 的三阶段无环序，以及 L128「含 TB-11 的条目其 TB-11 子义务由前置实施门销项」（该句点名 US-DST-06 与 A-DST-06-01）。destination 键的 slice_id 固定为 null，不享 L77 的豁免，必须经补件映射逐键签 PASS，而它的判据含 TB-11 的验收与 resolution，只能在 #1391、#1403 之后成立。照字面走不通，唯一出路是域作者剔除 TB-11 部分，方向正是 #799 所禁的宽档接管。其余未见冲突：#1279 门、资金与凭据硬门（L13、L49）、三份 /1 键集未动，没有可调字段，没有把代理裁定记成 UserSigned。 |
+| R3 | BLOCK | 三处判据不可执行或不二值。一，L100 的应执行作业取「M 版 ci-ok.needs」，在 ci-ok 引入（037b5335ea，2026-11-07）之前的 M 上无法求值，两种读法分别得到永不通过和假 PASS。二，L79、L82、L83 的机器核验以「交付回执」为数据源，main 上没有这个词的格式或位置定义，身份与独立 run 无从二值判定。三，Destination 键的真 PASS 不可达。验收命令和三个测试名本身可执行；L157 两条借用反例没写收据取值，列为非阻断。 |
+| R4 | BLOCK | 形式面通过：canonical-plan.json 以 9ad6b51c 为基线，9 处替换各唯一命中，重放结果与 f57850d8 的 blob 逐字相同，before/after 也分别等于两版 blob；对 origin/decision/1551 只改 1 个文件、3 个 hunk；头部三行、日期、r2 标注正确，代码清单四个文件在 origin/impl/1391-at18-report 上均存在；范围未越出三点与 B1–B4。实质面不通过，合同缺失且正文不一致：Destination 键成环（阻断 1），旧 M 的 CI 分母与例外未定（阻断 2），已关片的补审没有产出者与计入规则（阻断 4）。 |
+| R5 | PASS | 没有新增同一判断的宽严两档或失败兜底。workflow_dispatch 补跑要求在确切 M 上全跑，比去重更严；PR run 不替代 main push（L106）；EXCLUDED 永不计支持、旧摘要下的声明不得迁用（L80-81）；非产品认定要求分类与逐路径非作者核定同时满足，未知按产品处理（L91）；归档日志的回执只提供 PR run ID，实质条件仍逐项重算（L105）。残余只作非阻断：域目录后继缩窄只有文字约束；历史 run 身份由独审核定；静态证明可证哪些判据没有限定。 |
+| R6 | BLOCK | L163 只接一条新票→#1391 的边，清单不完整。Destination 键使新票与 #1391 互相等待（阻断 1）。已关片在主线 CI 和最终独评上的缺口需要有人补跑、补审，L163 却禁止重开 #1359、#1370–#1374、#1392、#1404、#1414，也没点名承接票和边（阻断 2、4）。GraphQL 核得现状：#1391 blockedBy 为 #1359–#1368，#1403 blockedBy #1391，#1369 blockedBy #1551。另缺 #1551（PR #2065 合入）→新票的边，列为非阻断。 |
+| R7 | PASS | classify.json 判 P，userGate 为空，沿用 #1551 评论 6861283421，gh 取回原文为「分级：P — 票面直接裁决 #1279 关图条件及旧关联票合法去向…」。本轮修订定的是关图门的取证方法并新增一张补件票与图边，属 graph-engineering「1. 分级」明列的关图与 #1279 去向。不签资金、账户、量档、阈值或凭据，userGate 为空正确。 |
+| R8 | BLOCK | 复跑考古查询：`"REPORT_HASH_MISMATCH"` 零命中，`"TB01-PARENT-CONTRIBUTION"` 命中 #1359，rg squash/最终产品差异命中 issue1626 README，#2021 实例复现。换说法复搜 `gh issue list --search '"DevSkim" "例外" in:comments' --state closed`，命中 #1359、#1371–#1374、#1392、#1404、#1414。这些已关片的 resolution 写明主线红灯和用户批准的 CI 例外，属在案事实，Q2 没有列，于是「坚持确切 M 的 push 锚并核 ci-ok」这一裁定在它们身上不可满足。Q2 把 c65f021959 列为异树在案，却没算两组差异是否相等。Q1 是 C 类 decision，对 Destination 键的裁定没有推导 TB-11 依赖，ADR 0064 L128 这条在案先例也未列。 |
+
+## 阻塞项原文
+
+【阻断 1｜R2、R3、R4、R6、R8】Destination 键与 TB-11 成环。位置：§五子义务覆盖门 L75（destination 行）、L77（TB-11 豁免）、L79（「每个非 TB-11 四元组恰有一行」）、L81-82、§六 L163；new-ticket.md 第 2 项与可验收结果末条。问题：destination 键的 slice_id 固定为 null，不享 L77 的豁免，必须有域行、映射记录和逐键 PASS；L82 要求记录覆盖该键全部判据，L75 又要求核完整义务与链接各条目，其中含 TB-11 的验收与 resolution。这与本 ADR L33-37 的无环序和 L128 的 TB-11 销项规则冲突。反例输入：键 (destination, DST-06, null, crosswalk /destination_success_obligations/5)。crosswalk 的 6 个 DST 的 story_ids 都含 US-ENG-10（success_closure_slice_ids=[TB-11]），且 requires_all_corresponding_slices_acceptance_and_resolutions=true；SPEC-COVERAGE-INPUT destinations[5] 原文为「本图完成并通过 SPEC 实施验收前，#1279 不得关图」。TB-11 的 resolution 就是 #1391、#1403 关票，晚于报告；记录不得指向 AT-18 输出，source_tickets 不含补件票；补件票阻塞 #1391 且来源未齐不得关闭。结果是 6 个键永远 COVERAGE_SCOPE，或域作者剔除 TB-11 部分缩小分母（#799）。最小修法：destination 键不进域目录和映射，改由机器聚合得出：其链接的全部 story、family、detail 键均 PASS（TB-11 切片按 L128 走前置实施门），加第二节专用门与 legacy_dispositions（DST-06 的 #1279 去向）。同步改 L75、L79、L157 的「DST-06 借给 DST-01」反例和 new-ticket.md，并补一条 DST-06 的正例。
+
+【阻断 2｜R3、R4、R6、R8】主线 CI 规则在 ci-ok 之前的已关片上无法求值，也无法满足。位置：§五「主线 CI」L100、去重第 3 条 L106、§六 L163。问题：应执行作业取「M 版 ci-ok.needs」，而 ci-ok 到 037b5335ea（2026-11-07）才引入；「当时适用必需检查」没有机读来源；红灯、缺跑和用户批准的 CI 例外都没有裁定；补救只覆盖被去重跳过的 Rust。反例输入：#1392 的 M=8619a20f2800，该版 ci.yml 只有 test、rust-check、s-observer、fixture-drift 四个作业，CI push 37545808487 与 DevSkim push 37545808932 均 failure，关票评论写「用户于2026-10-07明确批准该版本及下述两项具名CI例外」。#1404 的 f95a7f3e（38201220739、38201220747）与 #1414 的 465174240b（38406287284、38406287440）同样双红。#1373 的 2706d87f 与 #1374 的 c65f0219 在该提交上没有任何 Actions run。#1372 的 21b7898a 与 #1374 产品落地点 abf5c0f8 的 CI 成功而 DevSkim push 为 failure（34757202251、34782751153）。读法一：缺适用门或非成功，TB-01..TB-03 永远 CI_FINAL_PRODUCT，L163 又禁止重开，真 PASS 不可达。读法二：needs 视为空，rust-check 红灯被忽略，出假 PASS。两个实现可各取一种。最小修法：（1）写死无 ci-ok 版本的应执行作业，取该版 ci.yml 在 push 事件下的全部作业和矩阵项，该版 devskim.yml 含 main 的 push 触发时 DevSkim 适用。（2）对缺跑、红灯、获批例外逐一裁定：例外不得记成 SUCCESS；若允许补救，写明哪个 SHA 上的哪类 run 算数及其为何能证明本片产品，并与 graph-engineering「不拿其他树的绿色 CI 作证」相容；不允许则明写这些 TB 判 FAIL。（3）点名承接票并接到 #1391 的 blocking 边。（4）考古 Q2 补列这些在案事实；L158 补「M 版无 ci-ok」「获批例外」两例夹具。
+
+【阻断 3｜R3】「交付回执」没有定义，收据身份的机器核验没有数据源。位置：L79「两端按补件票交付回执核该 blob 所属已合主线的 scope PR、独审 run 和该文件摘要」、L82「用已验收交付回执核收据的审查身份、独立审查 run、head、摘要和下标」、L83「多份可匹配而回执不能区分时拒收」「来源票回执精确指认的 Git blob」；new-ticket.md 第 3 项。问题：main 上 .sandcastle、docs、AGENTS.md、CONTEXT.md 均无「交付回执」的格式或位置定义；deliveryManifestSchema.reviews[] 只有 {report, covers}（delivery-bundle.ts:37），没有作者、审查者或 run 字段；CODEX-CHILD.md:65 明写预检不能证明审查者身份。收据里的 reviewer 与 review_run_id 是自报值。来源票的 resolution 与原件指认是自由文本关票评论，与 L82「不从自然语言猜」相抵。反例输入：补件作者自己生成 at18-evidence-review.json，填入 reviewer 和 review_run_id，两份摘要、reviewed_head、下标全部正确，并登记进本票清单的 reviews[].report。只核摘要与下标的实现放行，等于组装者自证，第一处假 PASS 复现；另一种实现找不到「回执」，永不放行。补件票有两次后继交付同时列在 external_manifests[] 时，「回执不能区分」同样无法判定。最小修法：指定 GitHub 或 Git 可复算的锚，并写明身份只认这一锚。域文件取输入包 head 第一父链上最后改动 .chanlun/at18/coverage-domains.json 的合入 PR 及其精确 head 上的 deepagents/review。映射与收据定义一份固定键的机读登记 {author, reviewer, review_run_id, reviewed_head, domains_sha256, scope_sha256}，写明存放位置、三方分离的比较规则和 #1391/#1403 运行方身份的取值来源；做不到机读时，删去「机器核身份」，明写身份由补件票关票验收担保、机器只核该票已合法关闭及唯一一份已登记的映射与收据。来源票的 main_sha 与原件位置同样给出机读来源，或明确归入逐键收据的核定范围。
+
+【阻断 4｜R4、R6】已关片的最终独评绑定没有产出者。位置：§五 L89「交付方提供 manifest、确切落地记录和 CI/评审原件」、L91 非产品双重认定、L93-96（「须在 M 补审」）、§六 L163。问题：L91 要求非产品项有非作者原件按同路径、同前后字节和 mode 核定，否则按产品处理；L96 要求差异不等时在 M 补审。已关片没有交付方，补件票只承担覆盖映射，补审由谁出、出了之后怎样算作该来源票的已验收原件都没写。反例输入：#1374（CLOSED）的 resolution M=c65f021959b0（PR #1455，H=c64e72501b42），tree(M)=d123107b 不等于 tree(H)=562ce236，唯一 merge-base 为 abf5c0f8。B→H 与 P1→M 各 6 条差异，只在 .chanlun/agent-roster-2026-09-13.md 不等（03d6b9006a→4913efaf1f 对 8a2dbc6d48→3dd5a98a88）。3dd5a98a88 是合并产生的字节，没有任何非作者原件核定，按 L91 算产品，按 L96 须补审，却没有人能出，TB-03 永远 REVIEW_FINAL_PRODUCT。推断：#1370–#1372 在 delivery-bundle.ts 首次入库（aa208aed38，2026-09-14）之前已关闭，没有 manifest，L91「核审查身份、所审 E 和 PASS」只能读自由文本评审报告。最小修法：点名承接票（并入补件票或在 #1323 下另开一张，阻塞 #1391），由它产出已关片的机读独评绑定 {source_ticket, M, H, E, reviewer, verdict, artifact} 和必要的补审，并写明这类原件以承接票为 ArtifactRef.ticket 时怎样计为该来源票的已验收非作者原件；L94「实际合入时已生效的正式门」对 #1909 之前的合入给出固定依据。L158 补一例异树且文档差异不等的夹具。
+
+## 不阻塞项原文
+
+1. 域目录可经后继交付缩窄而机器不拦（L80、L157、L163）。映射作者缩不了域，但域目录作者就是补件票作者，机器不比对首次冻结版。建议在 ADR 钉住首次冻结域文件的摘要，机器核后继版本不删域、不降类或 profile、不弱化 required_result；L163「可同步收集已关原件」与 L80「不能按已有结果选择域」相抵，改成先冻域再收集。两位复核一票 BLOCK、一票非阻断；我读 L79-80 后判非阻断：缩域需要独审违反明文禁令，与首次冻结的信任前提相同，机器锚的问题已并入阻断 3。
+2. L82「原件可机读的冲突」没有字段清单和读取规则，L157 的「001 借给 002」「DST-06 借给 DST-01」没写收据取值。建议给出闭合清单（例如 json_pointer 所指节点及其祖先中属于固定键名集合的字段须与声明相等，行区间定位不做机器冲突检查），并写明两条反例在收据为 PASS 时机器仍须拒收。两位复核一票 BLOCK、一票非阻断；我判非阻断：r2 已按首轮修法选定逐键收据为信任锚，这一句是纵深防御，但不补会让 #1391 与 #1403 各写一套。
+3. new-ticket.md「失读或未执行留红交还原验收 owner」对已关片没有承接者，L163 又不许重开。写明缺证时开哪类缺口票、挂在哪个父票下、如何经域重审进入 source_tickets，以及补件票带具名缺口时如何记账。
+4. L94 的 E≠H 条款要求 E..H 每个提交对每个父都只有非产品尾部，会被审后的 update-branch 合并卡住；deepagents/review 按 patch_id 复用发布时 E 取哪个 head 未定。squash 分支没有 merge 分支那样的 merge-base 兜底。
+5. 记录里的 run_id 没有类型和规范序列化；历史原件的复合身份由独审指定，「同一运行不选有利记录」在机器层无法核验。运行类键建议要求至少一条 run_id 非空的记录，静态证明限定在列明的判据类别上，以免与 L27 相抵。
+6. 引用瑕疵：L64 用 graph-engineering.md:238 支持「squash 或 merge commit」，而 :238 只规定 squash，merge commit 仅来自 review_sweep.py:276-279；L102 与考古所引 ci.yml「:1459-1530」越过文件末尾（共 1518 行），应为 :1459-1518。
+7. L106 的 workflow_dispatch 只接受分支或 tag，应写明在 M 上建 ref 并核 run.head_sha 等于 M；changes 作业日志有保留期，建议允许用与 ci.yml 相同的确定性 API 查询代替原日志行。
+8. 新票缺 #1551（或 PR #2065 合入）→新票的 blocking 边和票型标签；new-ticket.md 的可验收结果不是命令、测试名、文件存在或票状态；L89「沿被审 head 的第一父链」应写成报告顶层 head。
