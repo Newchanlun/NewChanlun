@@ -1,0 +1,313 @@
+{
+  "ticket": 2111,
+  "model": "gpt-6.2-sol",
+  "sourceCommit": "b9d898dccf46c2a716115eaa1215bc39c458a959",
+  "implementationHead": "b7e23c31bc353378b71b090499c6eeea91676c92",
+  "parsed": true,
+  "problems": [],
+  "points": [
+    {
+      "id": "Q1",
+      "question": "适用成本项均 Known 且总成本为零时，四态落哪一态？",
+      "klass": "B",
+      "hits": [
+        {
+          "source": "#2111 票面候选一；#1441 候选 b7e23c31bc353378b71b090499c6eeea91676c92:rust/src/theta_v0/cost_stop.rs:244-251",
+          "excerpt": "候选读到 total == 0 返回 NotEvaluable(ZeroTotalCost)，未过裁定。"
+        },
+        {
+          "source": "docs/adr/0035-cost-stop-policy-instance-and-base-extension-evidence.md:14,19,22；#1354 resolution 6153713798 Q1–Q3",
+          "excerpt": "原式以往返总成本作分母，区分证据不足与失败；没有把零分母解释成通过。"
+        },
+        {
+          "source": "docs/adr/0031-principal-batches-phase-predicate-corporate-actions.md:28-30；.chanlun/definitions/sanjieduan.md:7",
+          "excerpt": "本金阶段的指标在非正基数输出类型化 NotComputable，不换分母；只作另一判断的类型化类比。"
+        }
+      ],
+      "citation": "https://github.com/Newchanlun/NewChanlun/issues/2111；https://github.com/Newchanlun/NewChanlun/issues/1354#issuecomment-6153713798；ADR 0035:14,19,22；ADR 0031:28-30。",
+      "reasoning": "A_ℓ/C 在 C=0 无定义，不是测得低于 θ，也不是因少样本没有下界。不以 +∞、交叉相乘或 ε 分母把未定义变成可放行。候选代码只说明现有提案，不在权威链上。",
+      "recommended": "波幅证据合格后，全 Known 且总成本为零记 NotEvaluable(ZeroTotalCost)。",
+      "searchedKeywords": [],
+      "gap": "",
+      "conflict": "不能把 #1354 同一 resolution 里另一条「零成本筹码转移生而过闸」读成本门豁免；该条明指 growth_eligible。",
+      "queries": [
+        {
+          "channel": "tracker",
+          "query": "\"ZeroTotalCost\" in:title,body,comments",
+          "command": "gh issue list --repo Newchanlun/NewChanlun --search '\"ZeroTotalCost\" in:title,body,comments' --state all --limit 50 --json number,state,title --jq '.[]|[.number,.state,.title]|@tsv'",
+          "hits": 1
+        },
+        {
+          "channel": "tracker",
+          "query": "\"成本停止\" \"分母\" in:title,body,comments",
+          "command": "gh issue list --repo Newchanlun/NewChanlun --search '\"成本停止\" \"分母\" in:title,body,comments' --state all --limit 50 --json number,state,title --jq '.[]|[.number,.state,.title]|@tsv'",
+          "hits": 6
+        },
+        {
+          "channel": "repo",
+          "query": "ZeroTotalCost|零分母|分母为零|总成本.{0,4}(为零|为 0|= ?0)",
+          "command": "rg -n --color never --max-columns 300 --max-columns-preview 'ZeroTotalCost|零分母|分母为零|总成本.{0,4}(为零|为 0|= ?0)' analysis/ docs/ .chanlun/",
+          "hits": 17
+        },
+        {
+          "channel": "repo",
+          "query": "ratio_lb_ge_theta|往返总成本|ROUNDTRIP.{0,20}(单边|波幅)",
+          "command": "rg -n --color never --max-columns 300 --max-columns-preview 'ratio_lb_ge_theta|往返总成本|ROUNDTRIP.{0,20}(单边|波幅)' analysis/ docs/ .chanlun/",
+          "hits": 9
+        }
+      ]
+    },
+    {
+      "id": "Q2",
+      "question": "适用成本来源已满足时，零分母与 ROUNDTRIP 波幅下界检查的先后是什么？",
+      "klass": "B",
+      "hits": [
+        {
+          "source": "#1441 候选 b7e23c31bc353378b71b090499c6eeea91676c92:rust/src/theta_v0/cost_stop.rs:248-278,365-393",
+          "excerpt": "代码先判合计为零，后查波幅证据门；正成本基线测试对证据不合格与合格下界不过线给不同状态。"
+        },
+        {
+          "source": "docs/adr/0022-acceptance-criterion-parameters.md:47-64；#1441 评论 6326059290",
+          "excerpt": "样本不足须明示判不出，逐窗各自过线；#1441 绑定等同的证据门。"
+        },
+        {
+          "source": "docs/adr/0035-cost-stop-policy-instance-and-base-extension-evidence.md:14,22；#1354 resolution 6153713798 Q1、Q3",
+          "excerpt": "一为合格证据前件，二为下界比值判据；#907 既有材料不足不能当第一层通过，原文没有零分母与它的并发优先级。"
+        }
+      ],
+      "citation": "https://github.com/Newchanlun/NewChanlun/issues/1441#issuecomment-6326059290；ADR 0022:47-64；ADR 0035:14,22；候选 evaluate:248-278。",
+      "reasoning": "成本来源先按原合同解析；在成本可用的路径上，先验证是否存在可用下界，再在正分母域做数值比较。缺波幅证据为 InsufficientEvidence；有合格下界且正分母，比值不过线才给 Disabled。零分母不构成可比较的失败。",
+      "recommended": "先验波幅证据，后查分母、算 θ 比值；否决候选的零成本早返。",
+      "searchedKeywords": [],
+      "gap": "",
+      "conflict": "zero-first 会把同一零成本输入的波幅证据不足吞成 ZeroTotalCost；本门无独立绝对幅度门，故不遮掉已证明的 Disabled。",
+      "queries": [
+        {
+          "channel": "tracker",
+          "query": "\"成本停止\" \"波幅\" in:title,body,comments",
+          "command": "gh issue list --repo Newchanlun/NewChanlun --search '\"成本停止\" \"波幅\" in:title,body,comments' --state all --limit 50 --json number,state,title --jq '.[]|[.number,.state,.title]|@tsv'",
+          "hits": 7
+        },
+        {
+          "channel": "tracker",
+          "query": "\"成本门\" \"下界\" in:title,body,comments",
+          "command": "gh issue list --repo Newchanlun/NewChanlun --search '\"成本门\" \"下界\" in:title,body,comments' --state all --limit 50 --json number,state,title --jq '.[]|[.number,.state,.title]|@tsv'",
+          "hits": 14
+        },
+        {
+          "channel": "repo",
+          "query": "波幅.{0,20}(下界|证据门|不过|不足)|lb\\(r\\)",
+          "command": "rg -n --color never --max-columns 300 --max-columns-preview '波幅.{0,20}(下界|证据门|不过|不足)|lb\\(r\\)' analysis/ docs/ .chanlun/",
+          "hits": 29
+        },
+        {
+          "channel": "repo",
+          "query": "每窗各自过线|不算通过、不算失败|L0Margin",
+          "command": "rg -n --color never --max-columns 300 --max-columns-preview '每窗各自过线|不算通过、不算失败|L0Margin' analysis/ docs/ .chanlun/",
+          "hits": 16
+        }
+      ]
+    },
+    {
+      "id": "Q3",
+      "question": "签署为零与运行实测为零如何等价，有来源的零费率可否进记录？",
+      "klass": "B",
+      "hits": [
+        {
+          "source": "docs/adr/0035-cost-stop-policy-instance-and-base-extension-evidence.md:14,19,41；docs/adr/0044-cost-stop-policy-signed-instance-v1.md:24-28,55-58,77-80",
+          "excerpt": "有效域、已知来源与缺项分开；P0/P1 v1 是正费率且滑点 Missing，未列费率严格大于零的约束。"
+        },
+        {
+          "source": "#1441 候选 b7e23c31bc353378b71b090499c6eeea91676c92:rust/src/theta_v0/cost_stop.rs:69-86,136-151,227-248,282-301",
+          "excerpt": "费率来自记录固定分数（分母非零，分子允许零）；其它实测使用非负定点数并要求来源匹配。"
+        },
+        {
+          "source": "docs/adr/0057-p0-venue-profile-v2-signature.md:129-147；#1774 评论 6542854318、6723858747",
+          "excerpt": "另族 synthetic／历史回放记录允许具名零参数但不得作为本成本门的实证。此为来源边界先例，不是成本门全零样本。"
+        },
+        {
+          "source": "analysis/btc_vs_bh_structural_analysis.md:112；analysis/notional_exposure_leverage_research.md:233",
+          "excerpt": "存在零费率假设的推论层材料；不是已签真实场所，不据此推出实况。"
+        }
+      ],
+      "citation": "ADR 0035:14,19,41；ADR 0044:24-28,55-58,77-80；ADR 0057:129-147；候选 cost_stop.rs:69-86,136-151,227-248,282-301。",
+      "reasoning": "来源合法性与数值是两维；两个渠道都获得 Known 后同尺度的 0 代入同一式。费率为 0、合格滑点 > 0 时 C>0，记录拒零会错挡有定义的求值。缺项、跨域或未标定的 0 不能代替已授权来源。",
+      "recommended": "允许有效记录签署零和匹配来源的实测零等值，保留出处及适用域；费率仍从记录读取，运行值不替换已签值。",
+      "searchedKeywords": [],
+      "gap": "",
+      "conflict": "场所成交／synthetic 的零模型值不等于成本停止实测 Known。",
+      "queries": [
+        {
+          "channel": "tracker",
+          "query": "\"零费率\" in:title,body,comments",
+          "command": "gh issue list --repo Newchanlun/NewChanlun --search '\"零费率\" in:title,body,comments' --state all --limit 50 --json number,state,title --jq '.[]|[.number,.state,.title]|@tsv'",
+          "hits": 2
+        },
+        {
+          "channel": "tracker",
+          "query": "\"成本输入\" \"签署\" in:title,body,comments",
+          "command": "gh issue list --repo Newchanlun/NewChanlun --search '\"成本输入\" \"签署\" in:title,body,comments' --state all --limit 50 --json number,state,title --jq '.[]|[.number,.state,.title]|@tsv'",
+          "hits": 5
+        },
+        {
+          "channel": "repo",
+          "query": "零费(率|用|场所)|费率.{0,12}(为零|为 0|= ?0)|费率簿引用|fee: Known",
+          "command": "rg -n --color never --max-columns 300 --max-columns-preview '零费(率|用|场所)|费率.{0,12}(为零|为 0|= ?0)|费率簿引用|fee: Known' analysis/ docs/ .chanlun/",
+          "hits": 13
+        },
+        {
+          "channel": "repo",
+          "query": "缺项代 0|来源升为 Known|跨域 Unsupported|KNOWN.{0,12}零",
+          "command": "rg -n --color never --max-columns 300 --max-columns-preview '缺项代 0|来源升为 Known|跨域 Unsupported|KNOWN.{0,12}零' analysis/ docs/ .chanlun/",
+          "hits": 10
+        }
+      ]
+    },
+    {
+      "id": "Q4",
+      "question": "与 ADR 0044 的滑点 Missing、代理下界只能判失败条款的关系？",
+      "klass": "A",
+      "hits": [
+        {
+          "source": "docs/adr/0044-cost-stop-policy-signed-instance-v1.md:26-27,32,38；#1559 resolution 6311314201；#1441 评论 6311316938",
+          "excerpt": "两 v1 的滑点 Missing 已定 NotEvaluable；P0 代理延迟不能证明通过，P1 不借域。"
+        },
+        {
+          "source": "docs/adr/0035-cost-stop-policy-instance-and-base-extension-evidence.md:19,41,44；#1354 resolution 6153713798 Q2、Q5",
+          "excerpt": "适用项 Missing 不代 0，代理只给比值上界；holding 按起始级，TB-08 仅升级来源。"
+        }
+      ],
+      "citation": "https://github.com/Newchanlun/NewChanlun/issues/1559#issuecomment-6311314201；https://github.com/Newchanlun/NewChanlun/issues/1441#issuecomment-6311316938；ADR 0035:19,41,44；ADR 0044:26-27,32,38。",
+      "reasoning": "已裁 Missing、代理和有效域约束直接沿用；代理恰好合计为 0 的具体结果另列 Q6。",
+      "recommended": "",
+      "searchedKeywords": [],
+      "gap": "",
+      "conflict": "",
+      "queries": [
+        {
+          "channel": "tracker",
+          "query": "\"ProxyLowerBound\" in:title,body,comments",
+          "command": "gh issue list --repo Newchanlun/NewChanlun --search '\"ProxyLowerBound\" in:title,body,comments' --state all --limit 50 --json number,state,title --jq '.[]|[.number,.state,.title]|@tsv'",
+          "hits": 3
+        },
+        {
+          "channel": "tracker",
+          "query": "\"成本门\" \"缺项\" in:title,body,comments",
+          "command": "gh issue list --repo Newchanlun/NewChanlun --search '\"成本门\" \"缺项\" in:title,body,comments' --state all --limit 50 --json number,state,title --jq '.[]|[.number,.state,.title]|@tsv'",
+          "hits": 7
+        },
+        {
+          "channel": "repo",
+          "query": "ProxyLowerBound|UpperBoundOnly|只能判失败",
+          "command": "rg -n --color never --max-columns 300 --max-columns-preview 'ProxyLowerBound|UpperBoundOnly|只能判失败' analysis/ docs/ .chanlun/",
+          "hits": 8
+        },
+        {
+          "channel": "repo",
+          "query": "滑点.{0,12}Missing|缺项是状态|缺项代 0|代理下界充 Known",
+          "command": "rg -n --color never --max-columns 300 --max-columns-preview '滑点.{0,12}Missing|缺项是状态|缺项代 0|代理下界充 Known' analysis/ docs/ .chanlun/",
+          "hits": 11
+        }
+      ]
+    },
+    {
+      "id": "Q5",
+      "question": "是否把零成本四态或证据优先级变为可调字段？",
+      "klass": "A",
+      "hits": [
+        {
+          "source": "docs/adr/0041-degrees-of-freedom-configurable-not-excluded.md:9-30,39-48；docs/agents/doctrine-rules.md:43-55,61-77；#799、#804 已关 resolution",
+          "excerpt": "真正自由度才落版本字段；事先选定也不能选择同一判断宽严档。各级同判据。"
+        },
+        {
+          "source": "docs/adr/0022-acceptance-criterion-parameters.md:103-124；docs/adr/0035-cost-stop-policy-instance-and-base-extension-evidence.md:28",
+          "excerpt": "真正可选的统计参数、第二层规则有版本字段；下界而非点估计及逐窗而非合计保持单一固定规则。"
+        }
+      ],
+      "citation": "https://github.com/Newchanlun/NewChanlun/issues/799#issuecomment-5138056638；https://github.com/Newchanlun/NewChanlun/issues/804#issuecomment-5138190089；ADR 0041:9-30；ADR 0022:103-124。",
+      "reasoning": "极限开门在相同准入输入上严格扩张通过集合，不能藏进字段；重排并屏蔽已裁证据不足不是合法的输出选项；把已知 0 当缺失或拒绝合法费率也不成立。阈值与合法来源仍走原版本签署规则。",
+      "recommended": "",
+      "searchedKeywords": [],
+      "gap": "",
+      "conflict": "",
+      "queries": [
+        {
+          "channel": "tracker",
+          "query": "\"同一判断\" \"可调\" in:title,body,comments",
+          "command": "gh issue list --repo Newchanlun/NewChanlun --search '\"同一判断\" \"可调\" in:title,body,comments' --state all --limit 50 --json number,state,title --jq '.[]|[.number,.state,.title]|@tsv'",
+          "hits": 24
+        },
+        {
+          "channel": "tracker",
+          "query": "\"自由度通则\" \"成本\" in:title,body,comments",
+          "command": "gh issue list --repo Newchanlun/NewChanlun --search '\"自由度通则\" \"成本\" in:title,body,comments' --state all --limit 50 --json number,state,title --jq '.[]|[.number,.state,.title]|@tsv'",
+          "hits": 8
+        },
+        {
+          "channel": "repo",
+          "query": "宽严两档|备用值|改签即新版本",
+          "command": "rg -n --color never --max-columns 300 --max-columns-preview '宽严两档|备用值|改签即新版本' analysis/ docs/ .chanlun/",
+          "hits": 140
+        },
+        {
+          "channel": "repo",
+          "query": "second_layer\\.rule|合法候选保留|可调字段.{0,16}默认值",
+          "command": "rg -n --color never --max-columns 300 --max-columns-preview 'second_layer\\.rule|合法候选保留|可调字段.{0,16}默认值' analysis/ docs/ .chanlun/",
+          "hits": 22
+        }
+      ]
+    },
+    {
+      "id": "Q6",
+      "question": "有合格波幅证据，但至少一项为代理且总成本下界恰为零时如何报告？",
+      "klass": "C",
+      "hits": [
+        {
+          "source": "docs/adr/0035-cost-stop-policy-instance-and-base-extension-evidence.md:19；docs/adr/0044-cost-stop-policy-signed-instance-v1.md:27,38；#1559 resolution 6311314201",
+          "excerpt": "给了代理只可证失败的方向，未单列零代理合计。"
+        },
+        {
+          "source": "#1441 候选 b7e23c31bc353378b71b090499c6eeea91676c92:rust/src/theta_v0/cost_stop.rs:244-278,427-456",
+          "excerpt": "通用零早返尚未设计独立的零代理处理；代理测试使用正下界，无零代理断言。"
+        }
+      ],
+      "citation": "ADR 0035:19；ADR 0044:27,38；候选 cost_stop.rs:244-278,427-456。",
+      "reasoning": "C_min=0 只知真实 C≥0；对正幅度不存在可供比较的有限比值上界。幅度为 0 且真实 C>0 才可证明不过线，代理不能排除真实 C=0 时比值未定义。由逻辑边界即可推得，非缺外部场所事实或读数。",
+      "recommended": "证据合格且代理合计下界为 0 时 InsufficientEvidence(UpperBoundOnly)，不得归实际总成本为零或判通过。",
+      "searchedKeywords": [
+        "\"代理下界\" \"为零\" in:title,body,comments",
+        "\"UpperBoundOnly\" in:title,body,comments",
+        "(代理下界|ProxyLowerBound|UpperBoundOnly).{0,24}(为零|为 0|= ?0|零分母)|零.{0,16}代理下界",
+        "只能判失败|可判失败.{0,6}不可判通过|上界低于门槛"
+      ],
+      "gap": "decision",
+      "conflict": "候选早返混同 Known 0 与代理下界 0。",
+      "queries": [
+        {
+          "channel": "tracker",
+          "query": "\"代理下界\" \"为零\" in:title,body,comments",
+          "command": "gh issue list --repo Newchanlun/NewChanlun --search '\"代理下界\" \"为零\" in:title,body,comments' --state all --limit 50 --json number,state,title --jq '.[]|[.number,.state,.title]|@tsv'",
+          "hits": 2
+        },
+        {
+          "channel": "tracker",
+          "query": "\"UpperBoundOnly\" in:title,body,comments",
+          "command": "gh issue list --repo Newchanlun/NewChanlun --search '\"UpperBoundOnly\" in:title,body,comments' --state all --limit 50 --json number,state,title --jq '.[]|[.number,.state,.title]|@tsv'",
+          "hits": 1
+        },
+        {
+          "channel": "repo",
+          "query": "(代理下界|ProxyLowerBound|UpperBoundOnly).{0,24}(为零|为 0|= ?0|零分母)|零.{0,16}代理下界",
+          "command": "rg -n --color never --max-columns 300 --max-columns-preview '(代理下界|ProxyLowerBound|UpperBoundOnly).{0,24}(为零|为 0|= ?0|零分母)|零.{0,16}代理下界' analysis/ docs/ .chanlun/",
+          "hits": 0
+        },
+        {
+          "channel": "repo",
+          "query": "只能判失败|可判失败.{0,6}不可判通过|上界低于门槛",
+          "command": "rg -n --color never --max-columns 300 --max-columns-preview '只能判失败|可判失败.{0,6}不可判通过|上界低于门槛' analysis/ docs/ .chanlun/",
+          "hits": 3
+        }
+      ]
+    }
+  ]
+}
