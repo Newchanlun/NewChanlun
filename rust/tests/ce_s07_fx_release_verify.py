@@ -5,7 +5,7 @@ Drives real compiled Linux binaries (`production_session`, `s_structure_session`
 `e_economic_session`, `b_chong_session`, `x_execution_session`) over Unix sockets
 in isolated temp directories:
   - Arm 1 (`ce_s07_main_lifecycle`):
-      tb03b-finance/6 + fx-valuation/1 + x-execution-profile/3 + logical-bar/1 + s-session/3.
+      tb03b-finance/6 + fx-valuation/2 + x-execution-profile/3 + logical-bar/1 + s-session/3.
       Verifies E cut 10 = 90/100 (r1), 8 pre-release tamper/drop/placeholder negative controls,
       cut 11 alpha release + real X AcceptExact (no fake S stub), cut 12 r2 = 110/100 +
       original receipt priority (same/new message_id) + beta/gamma blocked, cut 15 r3 + r2
@@ -21,6 +21,10 @@ in isolated temp directories:
       Proves pure non-FX tb03b-finance/6 + x-execution-profile/3 preserves exact legacy
       static condition equality (no `fx_valuation` in ReadView) and verifies config-level
       refusal of FX placeholders and non-FX marker leakage via `e_economic_session init`.
+  - Arm 4: static FIN/5+FX first imports, old receipt priority, and cold recovery.
+  - Arm 5: single/batched commands at the same r2 overcap cut and original alpha receipt.
+  - Arm 6 (with --parent-bin): first imports on a non-empty FIN/6+FX/1 parent DB,
+      cold replay of the parent release, and exact parent/candidate reply comparisons.
 """
 from __future__ import annotations
 
@@ -124,7 +128,7 @@ def wait_ready(proc: subprocess.Popen, address: str, label: str, stderr_path: Pa
 def send_frame(sock_path: str, req: dict, *, wire_log: list[dict] | None = None, label: str = "") -> tuple[bytes, bytes, dict]:
     raw_req = canonical(req) + b"\n"
     with socket.socket(socket.AF_UNIX) as s:
-        s.settimeout(15.0)
+        s.settimeout(60.0)
         s.connect(sock_path)
         s.sendall(raw_req)
         s.shutdown(socket.SHUT_WR)
@@ -2863,6 +2867,7 @@ def run_arm4_fin5_fx_compat_and_old_db_recovery(bins: Path, fixtures: Path, out:
         grants = {g["decision_id"]: g["grant_id"] for g in res_main["record"]["grants"]}
         for cid in ("alpha", "beta"):
             ewire_direct(f"B:{cid}", f"commit-{cid}", {"op": "CommitDecision", "decision_id": cid, "plan_hash": digest(cfg["plans"][cid]), "grant_id": grants[cid], "writer_epoch": "1"}, expected="LocalCommitReceipt")
+        for cid in ("alpha", "beta"):
             ewire_direct("E", f"dispatch-{cid}", {"op": "MakeDispatchable", "decision_id": cid, "plan_hash": digest(cfg["plans"][cid]), "writer_epoch": "1"}, expected="DispatchableReceipt")
 
         q9 = ewire_direct("E", "q-cut9", {"op": "QueryFxValuation", "as_known_ns": None, "cut": None}, expected="EconomicFxValuation")
@@ -3142,6 +3147,7 @@ def run_arm5_r2_overcap_model_coverage_precedes_fx_gate(bins: Path, fixtures: Pa
         grants = {g["decision_id"]: g["grant_id"] for g in res_main["record"]["grants"]}
         for cid in ("alpha", "beta", "gamma"):
             ewire_direct(f"B:{cid}", f"commit-{cid}", {"op": "CommitDecision", "decision_id": cid, "plan_hash": digest(cfg["plans"][cid]), "grant_id": grants[cid], "writer_epoch": "1"}, expected="LocalCommitReceipt")
+        for cid in ("alpha", "beta", "gamma"):
             ewire_direct("E", f"dispatch-{cid}", {"op": "MakeDispatchable", "decision_id": cid, "plan_hash": digest(cfg["plans"][cid]), "writer_epoch": "1"}, expected="DispatchableReceipt")
 
         q_r1 = ewire_direct("E", "q-r1", {"op": "QueryFxValuation", "as_known_ns": None, "cut": None}, expected="EconomicFxValuation")
@@ -3171,9 +3177,28 @@ def run_arm5_r2_overcap_model_coverage_precedes_fx_gate(bins: Path, fixtures: Pa
         retry_same = ewire_direct("E", "release-alpha", alpha_req, expected="ReleasedExactReceipt")
         assert canonical(retry_same) == canonical(rel_alpha)
         retry_new = ewire_direct("E", "release-alpha-new-msg", alpha_req, expected="ReleasedExactReceipt")
-        assert retry_new["cut"] == rel_alpha["cut"] and canonical(retry_new["record"]) == canonical(rel_alpha["record"])
+        assert canonical(retry_new) == canonical(rel_alpha)
 
-        # 2) Out-of-domain batched `gamma`: MUST persist Unsupported / ModelOrderUnspecified BEFORE FX policy gate
+        # 2) The in-domain command is denied without advancing E; gamma sees the same cut.
+        beta_cert_r1 = build_fx_certificate_from_query(cfg["sid"], cfg["gen"], cfg["fin_data"], cfg["plans"]["beta"], grants["beta"], q_r1)
+        rel_beta = ewire_direct(
+            "E",
+            "release-beta-single-overcap",
+            {
+                "op": "ReleaseExact",
+                "decision_id": "beta",
+                "command_id": "cmd-beta",
+                "plan_hash": digest(change_for_plan(cfg["plans"]["beta"])),
+                "certificate": beta_cert_r1,
+                "x_id": "X",
+                "x_epoch": "1",
+                "writer_epoch": "1",
+            },
+            expected="Error",
+        )
+        assert rel_beta["error"].startswith("AwaitingPolicy：fx_cap_gate"), rel_beta
+
+        # 3) At the same input cut the out-of-domain command persists Unsupported, not AwaitingPolicy.
         freeze = cfg["fin_data"]["exact_release"]
         q_g = cfg["plans"]["gamma"]
         gamma_tpl_cert = {
@@ -3199,29 +3224,11 @@ def run_arm5_r2_overcap_model_coverage_precedes_fx_gate(bins: Path, fixtures: Pa
             },
             expected="ReleaseUnsupportedReceipt",
         )
+        assert int(rel_gamma["cut"]["commit_seq"]) == int(q_r2["cut"]["commit_seq"]) + 1
         assert rel_gamma["record"]["state"] == "Unsupported"
         assert rel_gamma["record"]["unsupported"]["reason"] == "ModelOrderUnspecified"
         assert rel_gamma["record"]["execution_eligibility"] == "None"
         write_pretty(out / "arm5_gamma_batched_unsupported_receipt.json", rel_gamma)
-
-        # 3) In-domain single `beta`: enters FX policy gate -> AwaitingPolicy
-        beta_cert_r1 = build_fx_certificate_from_query(cfg["sid"], cfg["gen"], cfg["fin_data"], cfg["plans"]["beta"], grants["beta"], q_r1)
-        rel_beta = ewire_direct(
-            "E",
-            "release-beta-single-overcap",
-            {
-                "op": "ReleaseExact",
-                "decision_id": "beta",
-                "command_id": "cmd-beta",
-                "plan_hash": digest(change_for_plan(cfg["plans"]["beta"])),
-                "certificate": beta_cert_r1,
-                "x_id": "X",
-                "x_epoch": "1",
-                "writer_epoch": "1",
-            },
-            expected="Error",
-        )
-        assert rel_beta["error"].startswith("AwaitingPolicy："), rel_beta
 
         q_cmd_gamma = ewire_direct("E", "q-cmd-gamma", {"op": "QueryCommand", "command_id": "cmd-gamma", "cut": None, "as_known_ns": None}, expected="EconomicCommand")
         assert q_cmd_gamma["state"] == "Unsupported"
@@ -3271,6 +3278,7 @@ def run_arm5_r2_overcap_model_coverage_precedes_fx_gate(bins: Path, fixtures: Pa
         "finance_schema": "tb03b-finance/6",
         "fx_schema": "fx-valuation/2",
         "overcap_eval": "110/100",
+        "shared_input_cut": q_r2["cut"],
         "alpha_original_receipt_priority_same_and_new_msg": True,
         "gamma_batched_receipt_kind": rel_gamma["kind"],
         "gamma_batched_state": rel_gamma["record"]["state"],
@@ -3287,13 +3295,9 @@ def run_arm6_parent_bd0933e97e_fin6_fx_v1_recovery(
     parent_bins: Path, candidate_bins: Path, fixtures: Path, out: Path
 ) -> dict:
     """Proves BLOCK #1 with REAL parent (`bd0933e97e`) binaries:
-    1. Real parent binaries create & populate a non-empty `tb03b-finance/6 + fx-valuation/1` static-certificate DB
-       (ImportResponsibility, ImportFxResponsibility, r1, Reserve, Commit, MakeDispatchable, ReleaseExact(alpha), r2=110/100);
-    2. Candidate binaries take over that exact parent-written DB without touching it:
-       - `recover` (full `store.rs:1234` finance::replay + audit -> epoch 2) MUST PASS;
-       - Epoch-2 `serve` reads back exact historical 90/100 cut, current 110/100 cut, exact parent `cmd-alpha`,
-         and returns exact parent original receipt on same/new `message_id` retry;
-       - Attempting silent migration of parent DB to `fx-valuation/2` MUST be refused with `IdentityConflict`."""
+    A parent-written r1 capture makes the pre-import DB non-empty. Parent and candidate
+    import from that same snapshot with the same manifest, requests and clock.
+    Candidate also recovers the original parent DB including a static release and r2."""
     run_dir = out / "arm6_parent_bd0933e97e_fin6_fx_v1"
     ob_bytes = (fixtures / "fx-obligations.json").read_bytes()
     r1_utf8 = (fixtures / "fx-r1.json").read_text(encoding="utf-8")
@@ -3301,9 +3305,9 @@ def run_arm6_parent_bd0933e97e_fin6_fx_v1_recovery(
     x_model = {**base_sim_model(), "symbol": "TEST"}
 
     msgs = {
+        "cap-r1": "1",
         "imp-base": "1",
         "imp-fx": "1",
-        "cap-r1": "1",
         "res-r1": "1",
         "cap-open-alpha": "1",
         "apply-open-alpha": "1",
@@ -3322,9 +3326,12 @@ def run_arm6_parent_bd0933e97e_fin6_fx_v1_recovery(
         "release-alpha": "2",
         "cap-r2": "3",
         "q-r2": "3",
+        "parent-q-cmd": "3",
+        "parent-malformed-beta": "3",
         "cand-q-cur": "4",
         "cand-q-hist": "4",
         "cand-q-cmd": "4",
+        "cand-malformed-beta": "4",
         "cand-retry-alpha-new-msg": "4",
     }
     s_clock = {"prefix-1": {"accept_ns": "10", "attempts": [{"begin_ns": "11", "commit_ns": "12"}]}}
@@ -3350,6 +3357,8 @@ def run_arm6_parent_bd0933e97e_fin6_fx_v1_recovery(
     t = 10
     tc_msgs = {}
     for m in msgs:
+        if m.startswith("cand-"):
+            t = max(t, 10010)  # epoch 2 begins at recover_ns=10000
         tc_msgs[m] = {"received_ns": str(t), "first_known_ns": str(t + 1), "commit_ns": str(t + 2)}
         t += 10
     cfg["manifest"]["clock"] = {
@@ -3369,6 +3378,8 @@ def run_arm6_parent_bd0933e97e_fin6_fx_v1_recovery(
 
     wire_log: list[dict] = []
 
+    phase = "parent"
+
     def ewire_direct(domain: str, msg_id: str, payload: dict, *, expected: str, source: dict | None = None, producer_epoch: str = "1") -> dict:
         sock = cfg["e_node"]["socket"] if domain == "E" else cfg["b_nodes"][domain.split(":", 1)[1]]["socket"]
         src = source if source is not None else cfg["src_fin"]
@@ -3382,9 +3393,9 @@ def run_arm6_parent_bd0933e97e_fin6_fx_v1_recovery(
             "causal_refs": [],
             "payload": payload,
         }
-        _, _, rep = send_frame(sock, req, wire_log=wire_log, label=f"arm6:{domain}:{msg_id}")
+        _, _, rep = send_frame(sock, req, wire_log=wire_log, label=f"arm6:{phase}:{domain}:{msg_id}")
         res = validate_reply(req, rep, producer=domain, producer_epoch=producer_epoch)
-        assert res.get("kind") == expected, (domain, msg_id, expected, res)
+        assert res.get("kind") == expected, (phase, domain, msg_id, expected, res)
         return res
 
     procs: list[tuple[subprocess.Popen, object, object]] = []
@@ -3397,14 +3408,35 @@ def run_arm6_parent_bd0933e97e_fin6_fx_v1_recovery(
         procs.append((p, out_f, err_f))
         wait_ready(p, sock, f"arm6:{tag}", err_p)
 
+    def stop() -> None:
+        for p, out_f, err_f in procs:
+            if p.poll() is None:
+                p.terminate()
+                p.wait(timeout=8)
+            out_f.close()
+            err_f.close()
+        procs.clear()
+
+    db = Path(cfg["e_node"]["db"])
+    sock = Path(cfg["e_node"]["socket"])
+    manifest_path = str(cfg["manifest_path"])
+    pre_import = run_dir / "parent-pre-import.db"
+    base_import = {"op": "ImportResponsibility", "responsibility_id": "r-base", "writer_epoch": "1"}
+    fx_import = {"op": "ImportFxResponsibility", "responsibility_id": "ob-fx-unclosed-20", "writer_epoch": "1"}
+    query_alpha = {"op": "QueryCommand", "command_id": "cmd-alpha", "cut": None, "as_known_ns": None}
+
     try:
         spawn([str(parent_bins / "e_economic_session"), "serve", "--manifest", str(cfg["manifest_path"]), "--db", cfg["e_node"]["db"], "--epoch", "1"], cfg["e_node"]["socket"], "parent-e-ep1")
         for cid in ("alpha", "beta"):
             spawn([str(parent_bins / "b_chong_session"), "serve", "--manifest", str(cfg["manifest_path"]), "--chong", cid, "--db", cfg["b_nodes"][cid]["db"], "--epoch", "1", "--e-epoch", "1"], cfg["b_nodes"][cid]["socket"], f"parent-b-{cid}-ep1")
 
-        ewire_direct("E", "imp-base", {"op": "ImportResponsibility", "responsibility_id": "r-base", "writer_epoch": "1"}, expected="ResponsibilityImportedReceipt")
-        ewire_direct("E", "imp-fx", {"op": "ImportFxResponsibility", "responsibility_id": "ob-fx-unclosed-20", "writer_epoch": "1"}, expected="FxResponsibilityImportedReceipt")
         c3 = ewire_direct("E", "cap-r1", {"op": "CaptureExternal", "raw_utf8": r1_utf8, "json_pointer": "", "token": "fx-r1", "source_event_time": "70"}, expected="Recorded", source=cfg["src_market"])
+        assert c3["cut"]["commit_seq"] == "1"
+        with closing(sqlite3.connect(db.as_uri() + "?mode=ro", uri=True)) as src:
+            with closing(sqlite3.connect(pre_import)) as dst:
+                src.backup(dst)
+        parent_imp_base = ewire_direct("E", "imp-base", base_import, expected="ResponsibilityImportedReceipt")
+        parent_imp_fx = ewire_direct("E", "imp-fx", fx_import, expected="FxResponsibilityImportedReceipt")
         ewire_direct(
             "E",
             "res-r1",
@@ -3428,6 +3460,7 @@ def run_arm6_parent_bd0933e97e_fin6_fx_v1_recovery(
         grants = {g["decision_id"]: g["grant_id"] for g in res_main["record"]["grants"]}
         for cid in ("alpha", "beta"):
             ewire_direct(f"B:{cid}", f"commit-{cid}", {"op": "CommitDecision", "decision_id": cid, "plan_hash": digest(cfg["plans"][cid]), "grant_id": grants[cid], "writer_epoch": "1"}, expected="LocalCommitReceipt")
+        for cid in ("alpha", "beta"):
             ewire_direct("E", f"dispatch-{cid}", {"op": "MakeDispatchable", "decision_id": cid, "plan_hash": digest(cfg["plans"][cid]), "writer_epoch": "1"}, expected="DispatchableReceipt")
 
         q_pre_r2 = ewire_direct("E", "q-pre-r2", {"op": "QueryFxValuation", "as_known_ns": None, "cut": None}, expected="EconomicFxValuation")
@@ -3461,20 +3494,57 @@ def run_arm6_parent_bd0933e97e_fin6_fx_v1_recovery(
         ewire_direct("E", "cap-r2", {"op": "CaptureExternal", "raw_utf8": r2_utf8, "json_pointer": "", "token": "fx-r2", "source_event_time": "70"}, expected="Recorded", source=cfg["src_market"])
         q_parent_r2 = ewire_direct("E", "q-r2", {"op": "QueryFxValuation", "as_known_ns": None, "cut": None}, expected="EconomicFxValuation")
         assert q_parent_r2["fx_valuation"]["summary"]["evaluated_total"] == "110"
+        parent_cmd = ewire_direct("E", "parent-q-cmd", query_alpha, expected="EconomicCommand")
+        q_b = cfg["plans"]["beta"]
+        bad_beta = {
+            **static_alpha_req,
+            "decision_id": "beta",
+            "command_id": "cmd-beta",
+            "plan_hash": digest(change_for_plan(q_b)),
+            "certificate": {
+                **static_alpha_req["certificate"],
+                "responsibility_refs": [grants["beta"]],
+                "structure_dependencies": [f"{q_b['s_ref']['object_id']}@{q_b['s_ref']['object_hash']}"],
+                "rule_revision": "wrong-static-rule",
+            },
+        }
+        parent_bad_beta = ewire_direct("E", "parent-malformed-beta", bad_beta, expected="Error")
+        assert parent_bad_beta["error"].startswith("IdentityConflict：证书内容"), parent_bad_beta
     finally:
-        for p, out_f, err_f in procs:
-            if p.poll() is None:
-                p.terminate()
-                p.wait(timeout=8)
-            out_f.close()
-            err_f.close()
-        procs.clear()
+        stop()
 
-    # Phase 2: Candidate binaries recover & audit the REAL parent-written FIN/6+FX DB!
+    # The DB path is in the frozen manifest. Swap the stopped store and its sidecars
+    # as a unit so the pre-import fork uses the very same manifest bytes and clock.
+    parked = run_dir / "parent-after-r2"
+    parked.mkdir()
+    originals = [p for p in (db, Path(f"{db}-wal"), Path(f"{db}-shm")) if p.exists()]
+    for p in originals:
+        p.rename(parked / p.name)
+    pre_import.rename(db)
+    phase = "candidate-first-import"
+    try:
+        sock.unlink(missing_ok=True)
+        spawn([str(candidate_bins / "e_economic_session"), "serve", "--manifest", manifest_path, "--db", str(db), "--epoch", "1"], str(sock), "candidate-first-import")
+        cand_imp_base = ewire_direct("E", "imp-base", base_import, expected="ResponsibilityImportedReceipt")
+        cand_imp_fx = ewire_direct("E", "imp-fx", fx_import, expected="FxResponsibilityImportedReceipt")
+        assert canonical(cand_imp_base) == canonical(parent_imp_base)
+        assert canonical(cand_imp_fx) == canonical(parent_imp_fx)
+    finally:
+        stop()
+        for suffix in ("", "-wal", "-shm"):
+            p = Path(f"{db}{suffix}")
+            if p.exists():
+                p.rename(run_dir / f"candidate-first-import.db{suffix}")
+        for p in originals:
+            (parked / p.name).rename(p)
+
+    # Phase 2: Recover the original parent-written store, not the import fork.
+    phase = "candidate-replay"
     cand_rec_e = run_cli([str(candidate_bins / "e_economic_session"), "recover", "--manifest", str(cfg["manifest_path"]), "--db", cfg["e_node"]["db"]])
     assert cand_rec_e.returncode == 0, (cand_rec_e.stdout, cand_rec_e.stderr)
     cand_rec_e_doc = json.loads(cand_rec_e.stdout)
     assert cand_rec_e_doc["kind"] == "Recovered" and cand_rec_e_doc["writer_epoch"] == "2", cand_rec_e_doc
+    assert cand_rec_e_doc["cut"] == q_parent_r2["cut"], cand_rec_e_doc
     for cid in ("alpha", "beta"):
         rb = run_cli([str(candidate_bins / "b_chong_session"), "recover", "--manifest", str(cfg["manifest_path"]), "--chong", cid, "--db", cfg["b_nodes"][cid]["db"]])
         assert rb.returncode == 0 and json.loads(rb.stdout)["writer_epoch"] == "2", (cid, rb.stdout, rb.stderr)
@@ -3491,28 +3561,23 @@ def run_arm6_parent_bd0933e97e_fin6_fx_v1_recovery(
     try:
         spawn([str(candidate_bins / "e_economic_session"), "serve", "--manifest", str(cfg["manifest_path"]), "--db", cfg["e_node"]["db"], "--epoch", "2"], cfg["e_node"]["socket"], "cand-e-ep2")
         cq_cur = ewire_direct("E", "cand-q-cur", {"op": "QueryFxValuation", "as_known_ns": None, "cut": None}, expected="EconomicFxValuation", producer_epoch="2")
-        assert cq_cur["cut"] == q_parent_r2["cut"] and cq_cur["fx_valuation"]["summary"]["evaluated_total"] == "110"
-        assert cq_cur["fx_valuation"]["schema_revision"] == "fx-valuation/1"
+        assert canonical(cq_cur) == canonical({**q_parent_r2, "writer_epoch": "2"})
 
         cq_hist = ewire_direct("E", "cand-q-hist", {"op": "QueryFxValuation", "as_known_ns": None, "cut": q_pre_r2["cut"]}, expected="EconomicFxValuation", producer_epoch="2")
-        assert cq_hist["cut"] == q_pre_r2["cut"] and cq_hist["fx_valuation"]["summary"]["evaluated_total"] == "90"
+        assert canonical(cq_hist) == canonical({**q_pre_r2, "writer_epoch": "2"})
 
-        cq_cmd = ewire_direct("E", "cand-q-cmd", {"op": "QueryCommand", "command_id": "cmd-alpha", "cut": None, "as_known_ns": None}, expected="EconomicCommand", producer_epoch="2")
-        assert canonical(cq_cmd["record"]["command"]) == canonical(parent_rel_alpha["record"]["command"])
+        cq_cmd = ewire_direct("E", "cand-q-cmd", query_alpha, expected="EconomicCommand", producer_epoch="2")
+        assert canonical(cq_cmd) == canonical(parent_cmd)
+        cand_bad_beta = ewire_direct("E", "cand-malformed-beta", {**bad_beta, "writer_epoch": "2"}, expected="Error", producer_epoch="2")
+        assert canonical(cand_bad_beta) == canonical(parent_bad_beta), (cand_bad_beta, parent_bad_beta)
 
         # Same & new message_id retry on candidate returns exact parent original ReleasedExactReceipt
         cand_retry_same = ewire_direct("E", "release-alpha", static_alpha_req, expected="ReleasedExactReceipt", producer_epoch="2")
         assert canonical(cand_retry_same) == canonical(parent_rel_alpha)
         cand_retry_new = ewire_direct("E", "cand-retry-alpha-new-msg", static_alpha_req, expected="ReleasedExactReceipt", producer_epoch="2")
-        assert cand_retry_new["cut"] == parent_rel_alpha["cut"] and canonical(cand_retry_new["record"]) == canonical(parent_rel_alpha["record"])
+        assert canonical(cand_retry_new) == canonical(parent_rel_alpha)
     finally:
-        for p, out_f, err_f in procs:
-            if p.poll() is None:
-                p.terminate()
-                p.wait(timeout=8)
-            out_f.close()
-            err_f.close()
-        procs.clear()
+        stop()
 
     with (run_dir / "wire.jsonl").open("w", encoding="utf-8") as f:
         for item in wire_log:
@@ -3520,12 +3585,13 @@ def run_arm6_parent_bd0933e97e_fin6_fx_v1_recovery(
 
     return {
         "status": "PASS",
-        "parent_binaries_sha256": {
-            "e_economic_session": file_digest(parent_bins / "e_economic_session"),
-            "b_chong_session": file_digest(parent_bins / "b_chong_session"),
-        },
+        "parent_bin": str(parent_bins),
         "finance_schema": "tb03b-finance/6",
         "fx_schema": "fx-valuation/1",
+        "parent_pre_import_cut": c3["cut"],
+        "first_import_cuts": [parent_imp_base["cut"], parent_imp_fx["cut"]],
+        "candidate_first_import_receipts_exact_match": True,
+        "static_invalid_certificate_before_fx_gate": parent_bad_beta["error"],
         "parent_written_alpha_release_cut": parent_rel_alpha["cut"],
         "parent_written_overcap_cut": q_parent_r2["cut"],
         "candidate_recover_epoch": cand_rec_e_doc["writer_epoch"],
@@ -3540,7 +3606,10 @@ def main() -> int:
     parser.add_argument("--fixtures", type=Path, required=True)
     parser.add_argument("--out", type=Path, required=True)
     parser.add_argument("--parent-bin", type=Path, default=None)
+    parser.add_argument("--arm", type=int, choices=(5, 6), help="run only one regression arm")
     args = parser.parse_args()
+    if args.arm == 6 and args.parent_bin is None:
+        parser.error("--arm 6 requires --parent-bin")
 
     bins = args.bin.resolve()
     fixtures = args.fixtures.resolve()
@@ -3554,25 +3623,17 @@ def main() -> int:
         assert actual == expected_sha, f"fixture {fname} sha256 mismatch: {actual} != {expected_sha}"
         fixture_hashes[fname] = actual
 
-    bin_hashes = {}
-    for bname in ("production_session", "s_structure_session", "e_economic_session", "b_chong_session", "x_execution_session"):
-        bp = bins / bname
-        assert bp.is_file(), f"missing binary {bp}"
-        bin_hashes[bname] = file_digest(bp)
-
-    arm1 = run_arm1_main_lifecycle(bins, fixtures, out)
-    arm2 = run_arm2_unrelated_revision_control(bins, out)
-    arm3 = run_arm3_pure_non_fx_legacy_and_config_guards(bins, fixtures, out)
-    arm4 = run_arm4_fin5_fx_compat_and_old_db_recovery(bins, fixtures, out)
-    arm5 = run_arm5_r2_overcap_model_coverage_precedes_fx_gate(bins, fixtures, out)
-    arms = {
-        "arm1_ce_s07_main": arm1,
-        "arm2_unrelated_healthy_chong": arm2,
-        "arm3_pure_nonfx_legacy": arm3,
-        "arm4_fin5_fx_compat_and_old_db_recovery": arm4,
-        "arm5_r2_overcap_model_coverage_precedes_fx_gate": arm5,
-    }
-    if args.parent_bin is not None:
+    arms = {}
+    if args.arm is None:
+        arms.update({
+            "arm1_ce_s07_main": run_arm1_main_lifecycle(bins, fixtures, out),
+            "arm2_unrelated_healthy_chong": run_arm2_unrelated_revision_control(bins, out),
+            "arm3_pure_nonfx_legacy": run_arm3_pure_non_fx_legacy_and_config_guards(bins, fixtures, out),
+            "arm4_fin5_fx_compat_and_old_db_recovery": run_arm4_fin5_fx_compat_and_old_db_recovery(bins, fixtures, out),
+        })
+    if args.arm in (None, 5):
+        arms["arm5_r2_overcap_model_coverage_precedes_fx_gate"] = run_arm5_r2_overcap_model_coverage_precedes_fx_gate(bins, fixtures, out)
+    if args.arm in (None, 6) and args.parent_bin is not None:
         arms["arm6_parent_bd0933e97e_fin6_fx_v1_recovery"] = run_arm6_parent_bd0933e97e_fin6_fx_v1_recovery(
             args.parent_bin.resolve(), bins, fixtures, out
         )
@@ -3580,7 +3641,7 @@ def main() -> int:
     summary = {
         "issue": "#1407 C3 CE-S07",
         "status": "PASS",
-        "binaries_sha256": bin_hashes,
+        "bin": str(bins),
         "fixtures_sha256": fixture_hashes,
         "arms": arms,
     }

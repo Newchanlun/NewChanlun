@@ -761,7 +761,7 @@ pub(super) fn check_fx_unsupported_certificate(
 
 /// 由冻结原件与 E 持有的 grant 组装 ExactCommand；同输入逐字节同输出。
 /// `/6`（`bind_model_ref = true`）将冻结的 `model_coverage.model_ref` 固化进命令体并进入 `command_hash`。
-/// 启用 `fx-valuation/1` 时传入 `fx_binding = Some(...)`，把真实同切面 E cut、责任、政策与市场修订固化进证书。
+/// `fx-valuation/2` 放行时传入 `fx_binding = Some(...)`，固化同切面 E cut、责任、政策与市场修订。
 pub(super) fn command(
     session_id: &str,
     session_generation: &str,

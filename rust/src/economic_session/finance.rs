@@ -1829,33 +1829,46 @@ fn release_exact(
     }
     let model_binding = contract(&config.manifest)?.model_binding;
     let fx_bound = fx_release_bound(config)?;
-    let approved = d["exact_release"]["conditions"]
-        .as_array()
-        .map_or(&[][..], Vec::as_slice);
-    super::exact_command::check_certificate_shape(&p["certificate"], approved)?;
-
-    // 业务判定顺序（恢复父版本 bd0933e97e）：
-    // 先识别模型不能表达的命令（ADR 0052 裁定二 model_coverage）并持久落 Unsupported / ModelOrderUnspecified；
-    // 只有模型可表达、可能放行的命令才进入 Pending 覆盖检查、FX 政策门与动态依赖绑定。
-    if let Some(unsupported) = super::exact_command::model_coverage(d, q) {
-        let command = super::exact_command::command(
+    let build_command = |binding: Option<&super::fx_valuation::FxReleaseBinding>| {
+        super::exact_command::command(
             &config.session,
             &config.generation,
             d,
             q,
             grant_id,
             model_binding,
-            None,
-        )?;
-        if fx_bound {
-            super::exact_command::check_fx_unsupported_certificate(
-                &p["certificate"],
-                &command["certificate"],
-                grant_id,
-            )?;
-        } else {
-            super::exact_command::check_certificate(&p["certificate"], &command["certificate"])?;
-        }
+            binding,
+        )
+    };
+    let static_command = if fx_bound {
+        let approved = d["exact_release"]["conditions"]
+            .as_array()
+            .map_or(&[][..], Vec::as_slice);
+        super::exact_command::check_certificate_shape(&p["certificate"], approved)?;
+        None
+    } else {
+        // 旧合同在任何模型或政策检查前，先逐项比对冻结证书。
+        let cmd = build_command(None)?;
+        super::exact_command::check_certificate(&p["certificate"], &cmd["certificate"])?;
+        Some(cmd)
+    };
+
+    // 业务判定顺序（恢复父版本 bd0933e97e）：
+    // 先识别模型不能表达的命令（ADR 0052 裁定二 model_coverage）并持久落 Unsupported / ModelOrderUnspecified；
+    // 只有模型可表达、可能放行的命令才进入 Pending 覆盖检查、FX 政策门与动态依赖绑定。
+    if let Some(unsupported) = super::exact_command::model_coverage(d, q) {
+        let command = match static_command {
+            Some(cmd) => cmd,
+            None => {
+                let cmd = build_command(None)?;
+                super::exact_command::check_fx_unsupported_certificate(
+                    &p["certificate"],
+                    &cmd["certificate"],
+                    grant_id,
+                )?;
+                cmd
+            }
+        };
         let mut r = old.clone();
         r["command_hash"] = json!(hash(&command));
         r["command"] = command;
@@ -1872,7 +1885,19 @@ fn release_exact(
         super::fx_valuation::forbid_reserve_bypass(pending)?;
         covered_pending(previous, coverage, pending)?;
     }
-    let command = if fx_bound {
+    let command = if let Some(cmd) = static_command {
+        super::fx_valuation::check_gate(
+            previous,
+            super::fx_valuation::GateSubject::ReleaseCommand {
+                command_id: required(p, "command_id")?,
+                grant_id,
+                owner: required(q, "owner")?,
+                policy_id: required(&d["policy"], "policy_id")?,
+                cap_currency: required(&d["policy"], "currency")?,
+            },
+        )?;
+        cmd
+    } else {
         let prev_seq = seq - 1;
         let prev_root: String =
             budget.one(c, "SELECT root FROM commits WHERE seq=?", [prev_seq], |r| {
@@ -1890,38 +1915,8 @@ fn release_exact(
             required(&d["policy"], "currency")?,
         )?;
         super::exact_command::reject_fx_placeholders_in_certificate(&p["certificate"])?;
-        let cmd = super::exact_command::command(
-            &config.session,
-            &config.generation,
-            d,
-            q,
-            grant_id,
-            model_binding,
-            Some(&binding),
-        )?;
+        let cmd = build_command(Some(&binding))?;
         super::exact_command::check_certificate(&p["certificate"], &cmd["certificate"])?;
-        cmd
-    } else {
-        let cmd = super::exact_command::command(
-            &config.session,
-            &config.generation,
-            d,
-            q,
-            grant_id,
-            model_binding,
-            None,
-        )?;
-        super::exact_command::check_certificate(&p["certificate"], &cmd["certificate"])?;
-        super::fx_valuation::check_gate(
-            previous,
-            super::fx_valuation::GateSubject::ReleaseCommand {
-                command_id: required(p, "command_id")?,
-                grant_id,
-                owner: required(q, "owner")?,
-                policy_id: required(&d["policy"], "policy_id")?,
-                cap_currency: required(&d["policy"], "currency")?,
-            },
-        )?;
         cmd
     };
     let mut r = old.clone();
