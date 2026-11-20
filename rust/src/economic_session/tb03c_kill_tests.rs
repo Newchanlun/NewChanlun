@@ -10,7 +10,8 @@ use serde_json::{json, Value};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command};
-use std::sync::OnceLock;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 const RAW: &str = include_str!("../../../s_session/tests/fixtures/tb03c_allocation/RAW.json");
@@ -137,13 +138,8 @@ fn write_voice_authority(dir: &Path) -> Value {
     })
 }
 
-fn voice_authority() -> &'static Value {
-    static AUTHORITY: OnceLock<Value> = OnceLock::new();
-    AUTHORITY.get_or_init(|| {
-        let dir = root().dir.join("voice-fixture");
-        std::fs::create_dir_all(&dir).unwrap();
-        write_voice_authority(&dir)
-    })
+fn voice_authority() -> Value {
+    root().ensure_voice_authority()
 }
 
 /// 与 C4a WE7 同一时钟形状：每条消息每个 epoch 一列，恢复后按第二列提交。
@@ -163,7 +159,7 @@ fn manifest(dir: &Path, fault: Option<(&str, &str)>) -> Value {
     }
     let chongs = (0..3).map(|i|json!({"chong_id":format!("chong-N{}",i+1),"symbol":"TEST-N","operation_level":(i+1).to_string(),"fixed_q":(["1","3","3"][i]),"db":dir.join(format!("b{i}.db")),"socket":dir.join(format!("b{i}.sock"))})).collect::<Vec<_>>();
     // #1622：添加 voice_binding 证据配置，供 BindVoice 测试使用
-    let voice_binding = voice_authority().clone();
+    let voice_binding = voice_authority();
     let mut m = json!({"schema_revision":"economic-manifest/1","session_id":SESSION,"session_generation":"1","book_revision":"tb03c-book/1",
         "e":{"db":dir.join("e.db"),"socket":dir.join("e.sock")},"chongs":chongs,"fill_manifests":[serde_json::from_str::<Value>(MANIFEST).unwrap()],
         "authorized_sources":[{"source_namespace":"testonly-tb1406","source_epoch":"fixture-epoch-1","producer_id":"tb1406-s3","producer_epoch":"1","operations":["CaptureExternal","ResolveEvidence","ApplyAllocation","BindVoice","ReadView","QueryFact","QueryAllocation","QueryVoice"]}],
@@ -737,113 +733,337 @@ pub(super) fn progress(work: &Path, label: &str) -> Vec<Value> {
         .collect()
 }
 
+pub(super) struct KillRootPlan {
+    pub(super) parent: PathBuf,
+    pub(super) preserve_on_pass: bool,
+    pub(super) may_remove_parent: bool,
+}
+
+struct RootState {
+    active: usize,
+    failed: bool,
+    voice_authority: Option<Value>,
+}
+
 pub(super) struct KillRoot {
     pub(super) dir: PathBuf,
     pub(super) preserve_on_pass: bool,
+    may_remove_parent: bool,
+    state: Mutex<RootState>,
 }
 
 impl KillRoot {
-    pub(super) fn case_dir(&self, rel: impl AsRef<Path>) -> CaseDir {
-        CaseDir {
-            path: self.dir.join(rel),
-            cleanup_on_pass: !self.preserve_on_pass,
+    pub(super) fn new(plan: KillRootPlan, run_dir_name: String) -> Self {
+        let dir = plan.parent.join(run_dir_name);
+        if plan.preserve_on_pass {
+            std::fs::create_dir_all(&dir)
+                .unwrap_or_else(|err| panic!("创建显式证据根目录失败（{}）：{err}", dir.display()));
+        }
+        Self {
+            dir,
+            preserve_on_pass: plan.preserve_on_pass,
+            may_remove_parent: plan.may_remove_parent,
+            state: Mutex::new(RootState {
+                active: 0,
+                failed: false,
+                voice_authority: None,
+            }),
         }
     }
 
-    pub(super) fn scratch_dir(&self, rel: impl AsRef<Path>) -> CaseDir {
+    pub(super) fn enter_case(&self, rel: impl AsRef<Path>) -> CaseDir<'_> {
+        self.enter(rel, !self.preserve_on_pass)
+    }
+
+    pub(super) fn enter_scratch(&self, rel: impl AsRef<Path>) -> CaseDir<'_> {
+        self.enter(rel, true)
+    }
+
+    fn enter(&self, rel: impl AsRef<Path>, cleanup_on_pass: bool) -> CaseDir<'_> {
+        let path = self.dir.join(rel);
+        let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        std::fs::create_dir_all(&path)
+            .unwrap_or_else(|err| panic!("创建测试证据目录失败（{}）：{err}", path.display()));
+        state.active += 1;
         CaseDir {
-            path: self.dir.join(rel),
-            cleanup_on_pass: true,
+            root: self,
+            path,
+            cleanup_on_pass,
+            finished: false,
+            released: false,
+        }
+    }
+
+    fn ensure_voice_authority(&self) -> Value {
+        let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        let dir = self.dir.join("voice-fixture");
+        if let Some(cached) = &state.voice_authority {
+            if dir.exists() {
+                return cached.clone();
+            }
+        }
+        std::fs::create_dir_all(&dir).unwrap_or_else(|err| {
+            panic!("创建共享 voice 夹具目录失败（{}）：{err}", dir.display())
+        });
+        let val = write_voice_authority(&dir);
+        state.voice_authority = Some(val.clone());
+        val
+    }
+
+    fn release_on_panic(&self) {
+        let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        state.failed = true;
+        state.active = state.active.saturating_sub(1);
+    }
+
+    fn release_on_pass(&self) {
+        let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        state.active = state.active.saturating_sub(1);
+        if self.preserve_on_pass || state.active > 0 || state.failed {
+            return;
+        }
+        let voice_dir = self.dir.join("voice-fixture");
+        state.voice_authority = None;
+        if voice_dir.exists() {
+            if let Err(msg) = try_remove_dir_all_checked(&voice_dir) {
+                state.failed = true;
+                panic!("{msg}");
+            }
+        }
+        if let Err(msg) = try_remove_empty_dir_checked(&self.dir) {
+            state.failed = true;
+            panic!("{msg}");
+        }
+        if self.may_remove_parent {
+            if let Some(parent) = self.dir.parent() {
+                if let Err(err) = std::fs::remove_dir(parent) {
+                    if !matches!(
+                        err.kind(),
+                        std::io::ErrorKind::NotFound | std::io::ErrorKind::DirectoryNotEmpty
+                    ) {
+                        state.failed = true;
+                        panic!("清理空构建临时父目录失败（{}）：{err}", parent.display());
+                    }
+                }
+            }
         }
     }
 }
 
-pub(super) struct CaseDir {
+pub(super) struct CaseDir<'a> {
+    root: &'a KillRoot,
     path: PathBuf,
     cleanup_on_pass: bool,
+    finished: bool,
+    released: bool,
 }
 
-impl CaseDir {
+impl CaseDir<'_> {
     pub(super) fn path(&self) -> &Path {
         &self.path
     }
+
+    pub(super) fn cleanup(mut self) {
+        self.finished = true;
+        if self.cleanup_on_pass {
+            if let Err(msg) = try_remove_dir_all_checked(&self.path) {
+                panic!("{msg}");
+            }
+        }
+        self.released = true;
+        self.root.release_on_pass();
+    }
 }
 
-impl Drop for CaseDir {
+impl Drop for CaseDir<'_> {
     fn drop(&mut self) {
         if std::thread::panicking() {
-            if self.path.exists() {
-                eprintln!("证据目录已保留：{}", self.path.display());
+            eprintln!("证据目录已保留：{}", self.path.display());
+            if !self.released {
+                self.released = true;
+                self.root.release_on_panic();
             }
             return;
         }
-        if self.cleanup_on_pass && self.path.exists() {
-            let _ = std::fs::remove_dir_all(&self.path);
+        if !self.finished {
+            if !self.released {
+                self.released = true;
+                self.root.release_on_panic();
+            }
+            panic!(
+                "内部错误：CaseDir({}) 未在成功路径显式调用 cleanup()",
+                self.path.display()
+            );
         }
     }
 }
 
-fn target_dir_from_exe(exe: &Path) -> Option<PathBuf> {
-    // Cargo 单测二进制路径形如 <target>/<profile>/deps/<bin>
-    // 或交叉编译 <target>/<triple>/<profile>/deps/<bin>。
+fn try_remove_dir_all_checked(path: &Path) -> Result<(), String> {
+    if let Err(err) = std::fs::remove_dir_all(path) {
+        if err.kind() != std::io::ErrorKind::NotFound {
+            return Err(format!("清理测试证据目录失败（{}）：{err}", path.display()));
+        }
+    }
+    if path.exists() {
+        return Err(format!("清理测试证据目录后路径仍存在：{}", path.display()));
+    }
+    Ok(())
+}
+
+fn try_remove_empty_dir_checked(path: &Path) -> Result<(), String> {
+    if let Err(err) = std::fs::remove_dir(path) {
+        if err.kind() != std::io::ErrorKind::NotFound {
+            return Err(format!(
+                "清理测试运行根目录失败（{}，目录可能存在未清理残留）：{err}",
+                path.display()
+            ));
+        }
+    }
+    if path.exists() {
+        return Err(format!(
+            "清理测试运行根目录后路径仍存在：{}",
+            path.display()
+        ));
+    }
+    Ok(())
+}
+
+fn is_cargo_target_dir_marker(dir: &Path) -> bool {
+    dir.join("CACHEDIR.TAG").is_file() || dir.join(".rustc_info.json").is_file()
+}
+
+fn target_dir_from_build_exe(exe: &Path) -> Option<PathBuf> {
+    // Cargo 单测二进制位于 …/target/<profile>/deps/<bin>、
+    // …/target/<triple>/<profile>/deps/<bin>，或自定义 --target-dir 下的
+    // <target_dir>/[<triple>/]<profile>/deps/<bin>（含 .fingerprint 与 CACHEDIR.TAG/.rustc_info.json）。
     let deps = exe.parent()?;
-    if deps.file_name() == Some(std::ffi::OsStr::new("deps")) {
-        return deps.parent()?.parent().map(Path::to_path_buf);
+    if deps.file_name() != Some(std::ffi::OsStr::new("deps")) {
+        return None;
+    }
+    let profile = deps.parent()?;
+    if profile.file_name().is_none() {
+        return None;
+    }
+    let candidate = profile.parent()?;
+    if candidate.file_name() == Some(std::ffi::OsStr::new("target")) {
+        return Some(candidate.to_path_buf());
+    }
+    if let Some(grandparent) = candidate.parent() {
+        if grandparent.file_name() == Some(std::ffi::OsStr::new("target")) {
+            return Some(grandparent.to_path_buf());
+        }
+    }
+    if profile.join(".fingerprint").is_dir() {
+        if is_cargo_target_dir_marker(candidate) {
+            return Some(candidate.to_path_buf());
+        }
+        if let Some(grandparent) = candidate.parent() {
+            if is_cargo_target_dir_marker(grandparent) {
+                return Some(grandparent.to_path_buf());
+            }
+        }
     }
     None
 }
 
-fn resolve_target_tmp_dir(
+fn absolutize(path: PathBuf, current_dir: Option<&Path>) -> Result<PathBuf, String> {
+    if path.is_absolute() {
+        return Ok(path);
+    }
+    current_dir
+        .map(|cwd| cwd.join(&path))
+        .ok_or_else(|| format!("无法将相对构建路径 {} 转为绝对路径", path.display()))
+}
+
+/// 证据根目录定位顺序：
+/// 1. 显式 `TB03C_KILL_ROOT`（显式空值报明确错误；非空时保留旧语义不清理）
+/// 2. `CARGO_TARGET_TMPDIR`（运行期或编译期设置时直接使用）
+/// 3. `CARGO_TARGET_DIR`（落 `<CARGO_TARGET_DIR>/tmp`）
+/// 4. 由 `current_exe()` 反推 Cargo 构建目录并校验布局；无法判断时报错提示设置 `TB03C_KILL_ROOT`。
+fn resolve_kill_root_plan(
+    tb03c_kill_root: Option<PathBuf>,
+    cargo_target_tmpdir: Option<PathBuf>,
     cargo_target_dir: Option<PathBuf>,
     current_exe: Option<PathBuf>,
     current_dir: Option<PathBuf>,
-) -> PathBuf {
+) -> Result<KillRootPlan, String> {
+    if let Some(dir) = tb03c_kill_root {
+        if dir.as_os_str().is_empty() {
+            return Err(
+                "TB03C_KILL_ROOT 已显式设置但为空值；请设置非空目录路径，或取消设置该环境变量以使用默认构建目录"
+                    .into(),
+            );
+        }
+        return Ok(KillRootPlan {
+            parent: dir,
+            preserve_on_pass: true,
+            may_remove_parent: false,
+        });
+    }
+    if let Some(dir) = cargo_target_tmpdir.filter(|p| !p.as_os_str().is_empty()) {
+        return Ok(KillRootPlan {
+            parent: absolutize(dir, current_dir.as_deref())?,
+            preserve_on_pass: false,
+            may_remove_parent: false,
+        });
+    }
     if let Some(dir) = cargo_target_dir.filter(|p| !p.as_os_str().is_empty()) {
-        if dir.is_absolute() {
-            return dir.join("tmp");
-        }
-        if let Some(target_dir) = current_exe.as_deref().and_then(target_dir_from_exe) {
-            return target_dir.join("tmp");
-        }
-        if let Some(cwd) = current_dir {
-            return cwd.join(dir).join("tmp");
+        let target = if dir.is_absolute() {
+            dir
+        } else if let Some(from_exe) = current_exe
+            .as_deref()
+            .and_then(target_dir_from_build_exe)
+            .filter(|p| p.file_name() == dir.file_name())
+        {
+            from_exe
+        } else {
+            absolutize(dir, current_dir.as_deref())?
+        };
+        return Ok(KillRootPlan {
+            parent: target.join("tmp"),
+            preserve_on_pass: false,
+            may_remove_parent: true,
+        });
+    }
+    if let Some(exe) = current_exe.as_deref() {
+        if let Some(target_dir) = target_dir_from_build_exe(exe) {
+            return Ok(KillRootPlan {
+                parent: target_dir.join("tmp"),
+                preserve_on_pass: false,
+                may_remove_parent: true,
+            });
         }
     }
-    if let Some(exe) = current_exe {
-        if let Some(target_dir) = target_dir_from_exe(&exe) {
-            return target_dir.join("tmp");
-        }
-        if let Some(parent) = exe.parent() {
-            return parent.join("tmp");
-        }
-    }
-    panic!("无法从 CARGO_TARGET_DIR 或 current_exe() 推导构建目录，请设置 TB03C_KILL_ROOT");
+    Err(format!(
+        "无法推导 Cargo 构建目录（未设置 TB03C_KILL_ROOT、CARGO_TARGET_TMPDIR、CARGO_TARGET_DIR，且当前二进制 {} 不符合 Cargo 构建目录布局 …/target/<profile>/deps/…）；请显式设置 TB03C_KILL_ROOT",
+        current_exe
+            .as_deref()
+            .map(|p| p.display().to_string())
+            .unwrap_or_else(|| "<unknown>".into())
+    ))
 }
 
-pub(super) fn kill_root_parent() -> (PathBuf, bool) {
-    match std::env::var_os("TB03C_KILL_ROOT").filter(|v| !v.is_empty()) {
-        Some(dir) => (PathBuf::from(dir), true),
-        None => (
-            resolve_target_tmp_dir(
-                std::env::var_os("CARGO_TARGET_DIR").map(PathBuf::from),
-                std::env::current_exe().ok(),
-                std::env::current_dir().ok(),
-            ),
-            false,
-        ),
-    }
+pub(super) fn kill_root_plan() -> KillRootPlan {
+    let cargo_target_tmpdir = std::env::var_os("CARGO_TARGET_TMPDIR")
+        .map(PathBuf::from)
+        .or_else(|| option_env!("CARGO_TARGET_TMPDIR").map(PathBuf::from));
+    resolve_kill_root_plan(
+        std::env::var_os("TB03C_KILL_ROOT").map(PathBuf::from),
+        cargo_target_tmpdir,
+        std::env::var_os("CARGO_TARGET_DIR").map(PathBuf::from),
+        std::env::current_exe().ok(),
+        std::env::current_dir().ok(),
+    )
+    .unwrap_or_else(|err| panic!("{err}"))
 }
 
 fn root() -> &'static KillRoot {
     static ROOT: OnceLock<KillRoot> = OnceLock::new();
     ROOT.get_or_init(|| {
-        let (parent, preserve_on_pass) = kill_root_parent();
-        let dir = parent.join(format!("nc1406-s3-kill-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
-        KillRoot {
-            dir,
-            preserve_on_pass,
-        }
+        KillRoot::new(
+            kill_root_plan(),
+            format!("nc1406-s3-kill-{}", std::process::id()),
+        )
     })
 }
 pub(super) fn save(path: &Path, v: &Value) {
@@ -962,10 +1182,13 @@ impl Builder {
 }
 fn plan() -> &'static Plan {
     static PLAN: OnceLock<Plan> = OnceLock::new();
+    static NEXT_SCRATCH: AtomicU64 = AtomicU64::new(0);
     PLAN.get_or_init(|| {
         let plan_t0 = Instant::now();
-        let scratch = root().scratch_dir("plan-work");
-        std::fs::create_dir_all(scratch.path()).unwrap();
+        let scratch = root().enter_scratch(format!(
+            "plan-work-{}",
+            NEXT_SCRATCH.fetch_add(1, Ordering::Relaxed)
+        ));
         let configs = setup(scratch.path(), None);
         let dbs = configs
             .iter()
@@ -1030,6 +1253,9 @@ fn plan() -> &'static Plan {
             snapshot_files: b.snapshot_files,
             norm_replies: vec![],
         };
+        drop(b.dbs);
+        drop(b.configs);
+        scratch.cleanup();
         let clock = Clock::reference(&plan);
         plan.norm_replies = plan
             .replies
@@ -1047,11 +1273,11 @@ fn reference() -> &'static Reference {
     static REFERENCE: OnceLock<Reference> = OnceLock::new();
     REFERENCE.get_or_init(|| {
         let t0 = Instant::now();
-        let plan = plan();
         // 无故障新进程重放：从空库起、同一信封、同一路径两次，回复与业务表须与进程内生成逐字相同。
         // 这两次全程重放同时证明了各快照所代表的前缀状态可由新进程从头逐步得到。
-        let ref_dir = root().case_dir("reference");
-        let base = ref_dir.path();
+        let ref_dir = root().enter_case("reference");
+        let base = ref_dir.path().to_path_buf();
+        let plan = plan();
         let work = base.join("work");
         let mut finals: Vec<(Vec<Value>, Vec<Value>)> = vec![];
         for rep in 0..2 {
@@ -1097,6 +1323,7 @@ fn reference() -> &'static Reference {
             .iter()
             .map(|q| normalize_reference(q, &clock))
             .collect();
+        ref_dir.cleanup();
         println!(
             "S3-TIME {}",
             canonical_json(&json!({"reference_ms":t0.elapsed().as_millis()}))
@@ -1132,7 +1359,8 @@ fn kill_and_recover(plan: &Plan, target: usize, phase: &str, work: &Path) -> Kil
     assert_ne!(
         plan.snapshots[target][owner],
         plan.snapshots[target + 1][owner],
-        "目标步 {target} 未改变被杀域，边界判据退化"
+        "目标步 {target} 未改变被杀域，边界判据退化（证据目录：{}）",
+        work.parent().unwrap_or(work).display()
     );
     let message = plan.steps[target]["envelope"]["message_id"]
         .as_str()
@@ -1365,16 +1593,26 @@ fn run_once(plan: &Plan, target: usize, phase: &str, work: &Path) -> Value {
 /// 一个（目标步, 阶段）组合：两次全新目录、全新 A/R/C 进程，终态全表与续跑回复逐字节相同。
 /// 降时长后每组合一个测试（原为每步一个测试内串行两阶段），调度粒度减半、工作量不变。
 fn matrix(target: usize, op: &str, owner: usize, phase: &str) {
-    let plan = plan();
-    assert_eq!(plan.steps[target]["envelope"]["payload"]["op"], op);
-    assert_eq!(plan.steps[target]["owner"], owner);
     let label = format!("step{target:02}");
     let case_dir = if root().preserve_on_pass {
-        root().case_dir(Path::new(&label).join(phase))
+        root().enter_case(Path::new(&label).join(phase))
     } else {
-        root().case_dir(format!("{label}-{phase}"))
+        root().enter_case(format!("{label}-{phase}"))
     };
-    let base = case_dir.path();
+    let base = case_dir.path().to_path_buf();
+    let plan = plan();
+    assert_eq!(
+        plan.steps[target]["envelope"]["payload"]["op"],
+        op,
+        "{label}/{phase} 目标步 op 不符（证据目录：{}）",
+        base.display()
+    );
+    assert_eq!(
+        plan.steps[target]["owner"],
+        owner,
+        "{label}/{phase} 目标步 owner 不符（证据目录：{}）",
+        base.display()
+    );
     let work = base.join("work");
     let mut finals = vec![];
     for rep in 0..2 {
@@ -1405,6 +1643,7 @@ fn matrix(target: usize, op: &str, owner: usize, phase: &str) {
         "{label}/{phase} 两次新进程续跑回复相同（证据目录：{}）",
         base.display()
     );
+    case_dir.cleanup();
 }
 
 /// WE7 持久写步（评审 M2 + #1622 BindVoice）：22 步（步号 / 操作 / 所属域，0=E，1..3=B:chong-N1..N3）。
@@ -1450,9 +1689,9 @@ kill_step! {
 
 /// 评审 M3(b) 负控：提交前被杀并恢复后**跳过重送**直接续跑，终态比较函数必须报「不同」。
 /// 证明 `final_diff` 能区分「恰好一次」与「丢失一次」；断言写在返回值上，不用 should_panic。
-fn skip_resend(target: usize) -> (String, Killed, CaseDir) {
+fn skip_resend(target: usize) -> (String, Killed, CaseDir<'static>) {
+    let case_dir = root().enter_case(format!("negative-skip-{target:02}"));
     let plan = plan();
-    let case_dir = root().case_dir(format!("negative-skip-{target:02}"));
     let work = case_dir.path().join("work");
     let k = kill_and_recover(plan, target, "before_commit", &work);
     let clock = Clock::crash(plan, k.owner, target, false);
@@ -1470,9 +1709,9 @@ fn skip_resend(target: usize) -> (String, Killed, CaseDir) {
 }
 
 /// #1622 负控：BindVoice 使用不存在的 allocation_id，必须在应用查找处拒绝。
-fn bind_voice_wrong_allocation() -> (String, CaseDir) {
+fn bind_voice_wrong_allocation() -> (String, CaseDir<'static>) {
+    let case_dir = root().enter_case("negative-wrong-allocation");
     let plan = plan();
-    let case_dir = root().case_dir("negative-wrong-allocation");
     let work = case_dir.path().join("work");
     std::fs::create_dir_all(&work).unwrap();
     let configs = setup(&work, None);
@@ -1524,6 +1763,7 @@ fn tb03c_kill_negative_skip_resend_capture_fill1() {
         "{diff}（证据目录：{}）",
         case_dir.path().display()
     );
+    case_dir.cleanup();
 }
 #[test]
 fn tb03c_kill_negative_skip_resend_apply_fill1_n2() {
@@ -1533,6 +1773,7 @@ fn tb03c_kill_negative_skip_resend_apply_fill1_n2() {
         "{diff}（证据目录：{}）",
         case_dir.path().display()
     );
+    case_dir.cleanup();
 }
 
 /// #1622 负控：BindVoice 提交前被杀后漏掉重送，域 1 的 Voice 记录与公开查询都必须缺失，
@@ -1592,6 +1833,8 @@ fn tb03c_kill_negative_skip_resend_bind_voice_n1() {
         "{query}（证据目录：{}）",
         case_dir.path().display()
     );
+    drop(db);
+    case_dir.cleanup();
 }
 
 /// #1622 负控：不存在的 allocation_id 不得绑定 Voice。
@@ -1604,80 +1847,235 @@ fn tb03c_kill_negative_bind_voice_wrong_allocation() {
         "负控必须到达 allocation 查找失败，而不是其他前置错误（证据目录：{}）",
         case_dir.path().display()
     );
+    case_dir.cleanup();
+}
+
+fn panic_payload_text(payload: Box<dyn std::any::Any + Send>) -> String {
+    if let Some(s) = payload.downcast_ref::<String>() {
+        s.clone()
+    } else if let Some(s) = payload.downcast_ref::<&str>() {
+        (*s).to_owned()
+    } else {
+        "<non-string panic>".to_owned()
+    }
 }
 
 #[test]
-fn tb03c_kill_root_and_case_dir_lifecycle() {
-    assert_eq!(
-        resolve_target_tmp_dir(
-            Some(PathBuf::from("/var/cache/target")),
-            Some(PathBuf::from("/work/rust/target/debug/deps/bin-123")),
-            Some(PathBuf::from("/work/rust")),
-        ),
-        PathBuf::from("/var/cache/target/tmp")
-    );
-    assert_eq!(
-        resolve_target_tmp_dir(
-            None,
-            Some(PathBuf::from("/work/rust/target/debug/deps/bin-123")),
-            Some(PathBuf::from("/work/rust")),
-        ),
-        PathBuf::from("/work/rust/target/tmp")
-    );
-    assert_eq!(
-        resolve_target_tmp_dir(
-            Some(PathBuf::from("rel-target")),
-            Some(PathBuf::from("/work/rel-target/release/deps/bin-123")),
-            Some(PathBuf::from("/work/rust")),
-        ),
-        PathBuf::from("/work/rel-target/tmp")
-    );
-    assert_eq!(
-        resolve_target_tmp_dir(
-            None,
-            Some(PathBuf::from(
-                "/work/rust/target/x86_64-unknown-linux-gnu/debug/deps/bin-123"
-            )),
-            None,
-        ),
-        PathBuf::from("/work/rust/target/x86_64-unknown-linux-gnu/tmp")
+fn tb03c_kill_root_resolution_order_and_validation() {
+    // 1. 显式非空 TB03C_KILL_ROOT 优先于所有构建变量与二进制路径，且保留证据。
+    let explicit = resolve_kill_root_plan(
+        Some(PathBuf::from("/ext/evidence")),
+        Some(PathBuf::from("/build/tmp")),
+        Some(PathBuf::from("/var/cache/target")),
+        Some(PathBuf::from("/work/rust/target/debug/deps/bin-123")),
+        Some(PathBuf::from("/work/rust")),
+    )
+    .unwrap();
+    assert_eq!(explicit.parent, PathBuf::from("/ext/evidence"));
+    assert!(explicit.preserve_on_pass);
+    assert!(!explicit.may_remove_parent);
+
+    // 1b. 显式空值 TB03C_KILL_ROOT="" 报明确错误，不静默切到默认清理模式或当前目录。
+    let empty_err = resolve_kill_root_plan(
+        Some(PathBuf::from("")),
+        Some(PathBuf::from("/build/tmp")),
+        Some(PathBuf::from("/var/cache/target")),
+        Some(PathBuf::from("/work/rust/target/debug/deps/bin-123")),
+        Some(PathBuf::from("/work/rust")),
+    )
+    .err()
+    .expect("显式空 TB03C_KILL_ROOT 必须报错");
+    assert!(
+        empty_err.contains("TB03C_KILL_ROOT") && empty_err.contains("空值"),
+        "{empty_err}"
     );
 
-    let sandbox = root().scratch_dir("unit-case-dir-lifecycle");
-    std::fs::create_dir_all(sandbox.path()).unwrap();
+    // 2. CARGO_TARGET_TMPDIR 优先于 CARGO_TARGET_DIR 与 current_exe（含搬离后的二进制）。
+    let target_tmpdir = resolve_kill_root_plan(
+        None,
+        Some(PathBuf::from("/build/target-tmpdir")),
+        Some(PathBuf::from("/var/cache/target")),
+        Some(PathBuf::from("/tmp/staged/unit")),
+        Some(PathBuf::from("/work/rust")),
+    )
+    .unwrap();
+    assert_eq!(target_tmpdir.parent, PathBuf::from("/build/target-tmpdir"));
+    assert!(!target_tmpdir.preserve_on_pass);
+    assert!(!target_tmpdir.may_remove_parent);
 
-    let clean_path = sandbox.path().join("pass-cleans");
-    {
-        let dir = CaseDir {
-            path: clean_path.clone(),
-            cleanup_on_pass: true,
-        };
-        std::fs::create_dir_all(dir.path()).unwrap();
-        std::fs::write(dir.path().join("f"), b"ok").unwrap();
+    // 3. CARGO_TARGET_DIR（绝对与相对）优先于 current_exe。
+    let abs_target = resolve_kill_root_plan(
+        None,
+        None,
+        Some(PathBuf::from("/var/cache/target")),
+        Some(PathBuf::from("/tmp/staged/unit")),
+        Some(PathBuf::from("/work/rust")),
+    )
+    .unwrap();
+    assert_eq!(abs_target.parent, PathBuf::from("/var/cache/target/tmp"));
+    assert!(!abs_target.preserve_on_pass);
+
+    let rel_target = resolve_kill_root_plan(
+        None,
+        None,
+        Some(PathBuf::from("rel-target")),
+        Some(PathBuf::from("/tmp/staged/unit")),
+        Some(PathBuf::from("/work/rust")),
+    )
+    .unwrap();
+    assert_eq!(
+        rel_target.parent,
+        PathBuf::from("/work/rust/rel-target/tmp")
+    );
+
+    // 4. 由 current_exe() 反推标准 Cargo 构建目录（默认布局与交叉编译布局）。
+    let std_exe = resolve_kill_root_plan(
+        None,
+        None,
+        None,
+        Some(PathBuf::from("/work/rust/target/debug/deps/bin-123")),
+        Some(PathBuf::from("/work/rust")),
+    )
+    .unwrap();
+    assert_eq!(std_exe.parent, PathBuf::from("/work/rust/target/tmp"));
+
+    let triple_exe = resolve_kill_root_plan(
+        None,
+        None,
+        None,
+        Some(PathBuf::from(
+            "/work/rust/target/x86_64-unknown-linux-gnu/release/deps/bin-123",
+        )),
+        None,
+    )
+    .unwrap();
+    assert_eq!(triple_exe.parent, PathBuf::from("/work/rust/target/tmp"));
+
+    // 4b. 自定义 --target-dir（非 target 名）通过 .fingerprint + CACHEDIR.TAG 校验。
+    let sandbox = root().enter_scratch("unit-custom-target-dir");
+    let custom_target = sandbox.path().join("custom-out");
+    let custom_deps = custom_target.join("debug").join("deps");
+    std::fs::create_dir_all(&custom_deps).unwrap();
+    std::fs::create_dir_all(custom_target.join("debug").join(".fingerprint")).unwrap();
+    std::fs::write(
+        custom_target.join("CACHEDIR.TAG"),
+        b"Signature: 8a477f597d28d172789f06886806bc55",
+    )
+    .unwrap();
+    let custom_exe = resolve_kill_root_plan(
+        None,
+        None,
+        None,
+        Some(custom_deps.join("newchan_rust-deadbeef")),
+        None,
+    )
+    .unwrap();
+    assert_eq!(custom_exe.parent, custom_target.join("tmp"));
+    sandbox.cleanup();
+
+    // 4c. 搬离构建目录的二进制（以及无 Cargo 标记的伪 deps 目录）必须报错并提示设置 TB03C_KILL_ROOT。
+    for bad_exe in ["/tmp/staged/unit", "/tmp/staged/debug/deps/unit"] {
+        let err = resolve_kill_root_plan(
+            None,
+            None,
+            None,
+            Some(PathBuf::from(bad_exe)),
+            Some(PathBuf::from("/work/rust")),
+        )
+        .err()
+        .unwrap_or_else(|| panic!("非法二进制路径 {bad_exe} 不应静默通过"));
+        assert!(err.contains("TB03C_KILL_ROOT"), "{bad_exe}: {err}");
     }
-    assert!(!clean_path.exists(), "通过且未设外部根时应删除用例目录");
+}
 
-    let keep_path = sandbox.path().join("explicit-keeps");
-    {
-        let dir = CaseDir {
-            path: keep_path.clone(),
-            cleanup_on_pass: false,
-        };
-        std::fs::create_dir_all(dir.path()).unwrap();
-        std::fs::write(dir.path().join("f"), b"ok").unwrap();
-    }
-    assert!(keep_path.exists(), "显式外部根下通过后也应保留用例目录");
+#[test]
+fn tb03c_kill_case_dir_cleanup_failure_and_zero_residual() {
+    use std::os::unix::fs::PermissionsExt;
 
-    let fail_path = sandbox.path().join("panic-keeps");
-    let panicked = std::panic::catch_unwind(|| {
-        let dir = CaseDir {
-            path: fail_path.clone(),
-            cleanup_on_pass: true,
-        };
-        std::fs::create_dir_all(dir.path()).unwrap();
-        std::fs::write(dir.path().join("f"), b"keep").unwrap();
-        panic!("simulated failure");
-    });
+    let sandbox = root().enter_scratch("unit-case-dir-lifecycle");
+
+    // 1. 正常通过：显式 cleanup() 删掉用例目录、共享 voice-fixture、运行根及空父目录，零残留。
+    let clean_parent = sandbox.path().join("zero-residual-tmp");
+    let clean_root = KillRoot::new(
+        KillRootPlan {
+            parent: clean_parent.clone(),
+            preserve_on_pass: false,
+            may_remove_parent: true,
+        },
+        "nc1406-s3-kill-unit".into(),
+    );
+    let case = clean_root.enter_case("case-pass");
+    let case_path = case.path().to_path_buf();
+    let _ = clean_root.ensure_voice_authority();
+    std::fs::write(case_path.join("f"), b"ok").unwrap();
+    assert!(clean_root.dir.join("voice-fixture").exists());
+    case.cleanup();
+    assert!(!case_path.exists(), "通过后用例目录必须已删除");
+    assert!(!clean_root.dir.exists(), "全组结束后运行根目录必须已删除");
+    assert!(!clean_parent.exists(), "空构建临时父目录必须已删除");
+
+    // 2. 清理失败（不可写子目录）必须使 cleanup() panic 并带路径，不得静默变绿。
+    let fail_cleanup_root = KillRoot::new(
+        KillRootPlan {
+            parent: sandbox.path().join("cleanup-err-tmp"),
+            preserve_on_pass: false,
+            may_remove_parent: false,
+        },
+        "nc1406-s3-kill-err".into(),
+    );
+    let locked_case = fail_cleanup_root.enter_case("locked-case");
+    let locked_case_path = locked_case.path().to_path_buf();
+    let pinned = locked_case_path.join("pinned");
+    std::fs::create_dir_all(&pinned).unwrap();
+    std::fs::write(pinned.join("record"), b"locked").unwrap();
+    std::fs::set_permissions(&pinned, std::fs::Permissions::from_mode(0o555)).unwrap();
+    let err = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        locked_case.cleanup();
+    }))
+    .expect_err("删除不可写目录失败时必须判红");
+    let msg = panic_payload_text(err);
+    assert!(
+        msg.contains("清理测试证据目录失败")
+            && msg.contains(&locked_case_path.display().to_string()),
+        "清理失败信息必须包含路径：{msg}"
+    );
+    assert!(pinned.join("record").exists());
+    std::fs::set_permissions(&pinned, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+    // 3. 守卫建立后立即 panic（未建 work 子目录）：目录已存在且被保留。
+    let panic_root = KillRoot::new(
+        KillRootPlan {
+            parent: sandbox.path().join("panic-keep-tmp"),
+            preserve_on_pass: false,
+            may_remove_parent: false,
+        },
+        "nc1406-s3-kill-panic".into(),
+    );
+    let early_path = panic_root.dir.join("early-assert-fail");
+    let panicked = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let _case = panic_root.enter_case("early-assert-fail");
+        panic!("simulated early op/owner mismatch");
+    }));
     assert!(panicked.is_err());
-    assert!(fail_path.exists(), "失败 unwind 时必须保留用例目录");
+    assert!(
+        early_path.exists(),
+        "前置断言失败时守卫目录必须已存在并保留"
+    );
+
+    // 4. 显式外部根（preserve_on_pass=true）：cleanup() 后仍保留目录与文件。
+    let explicit_root = KillRoot::new(
+        KillRootPlan {
+            parent: sandbox.path().join("explicit-keep-tmp"),
+            preserve_on_pass: true,
+            may_remove_parent: false,
+        },
+        "nc1406-s3-kill-explicit".into(),
+    );
+    let keep_case = explicit_root.enter_case("keep-case");
+    let keep_path = keep_case.path().to_path_buf();
+    std::fs::write(keep_path.join("f"), b"keep").unwrap();
+    keep_case.cleanup();
+    assert!(keep_path.join("f").exists(), "显式外部根通过后必须保留证据");
+
+    sandbox.cleanup();
 }

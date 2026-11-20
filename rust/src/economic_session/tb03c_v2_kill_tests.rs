@@ -5,7 +5,7 @@
 //! 终态与不中断基线、与 FUNDING-ORACLE.json 逐值对拍。范围是本地事务进程故障缝，不是正式 socket/S/浏览器。
 use super::tb03c_funding_tests::{chong_id, funding_record, policy_record, raw, Batch};
 use super::tb03c_kill_tests::{
-    audit_all, bound_receipt, business, compare, dump, dumps, finish, kill_root_parent,
+    audit_all, bound_receipt, business, compare, dump, dumps, finish, kill_root_plan,
     normalize_reference, parsed, progress, save, without, Clock, KillRoot,
 };
 use super::{book, service, store};
@@ -14,6 +14,7 @@ use serde_json::{json, Value};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::OnceLock;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -326,13 +327,10 @@ fn root() -> &'static KillRoot {
             .duration_since(UNIX_EPOCH)
             .unwrap()
             .as_nanos();
-        let (parent, preserve_on_pass) = kill_root_parent();
-        let dir = parent.join(format!("nc1674-v2-kill-{}-{run_ns}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
-        KillRoot {
-            dir,
-            preserve_on_pass,
-        }
+        KillRoot::new(
+            kill_root_plan(),
+            format!("nc1674-v2-kill-{}-{run_ns}", std::process::id()),
+        )
     })
 }
 
@@ -399,9 +397,13 @@ impl Builder {
     }
 }
 fn build(id: &'static str) -> Plan {
+    static NEXT_SCRATCH: AtomicU64 = AtomicU64::new(0);
     let t0 = Instant::now();
-    let scratch = root().scratch_dir(format!("plan-work-{}", tag(id)));
-    std::fs::create_dir_all(scratch.path()).unwrap();
+    let scratch = root().enter_scratch(format!(
+        "plan-work-{}-{}",
+        tag(id),
+        NEXT_SCRATCH.fetch_add(1, Ordering::Relaxed)
+    ));
     let configs = setup(scratch.path(), id, None);
     let dbs = configs
         .iter()
@@ -456,6 +458,9 @@ fn build(id: &'static str) -> Plan {
         snapshots: b.snapshots,
         norm_replies: vec![],
     };
+    drop(b.dbs);
+    drop(b.configs);
+    scratch.cleanup();
     let clock = Clock::of_at(plan.owners(), None, VALID_DAY_NS);
     plan.norm_replies = plan
         .replies
@@ -485,11 +490,11 @@ struct Reference {
 fn build_reference(plan: &Plan) -> Reference {
     let t0 = Instant::now();
     let ref_dir = if root().preserve_on_pass {
-        root().case_dir(Path::new(tag(plan.id)).join("reference"))
+        root().enter_case(Path::new(tag(plan.id)).join("reference"))
     } else {
-        root().case_dir(format!("{}-reference", tag(plan.id)))
+        root().enter_case(format!("{}-reference", tag(plan.id)))
     };
-    let base = ref_dir.path();
+    let base = ref_dir.path().to_path_buf();
     let work = base.join("work");
     let mut finals: Vec<(Vec<Value>, Vec<Value>, String)> = vec![];
     for rep in 0..2 {
@@ -541,6 +546,7 @@ fn build_reference(plan: &Plan) -> Reference {
         .iter()
         .map(|q| normalize_reference(q, &clock))
         .collect();
+    ref_dir.cleanup();
     println!(
         "V2-TIME {}",
         canonical_json(&json!({"profile":plan.id,"reference_ms":t0.elapsed().as_millis()}))
@@ -582,7 +588,8 @@ fn kill_and_recover(plan: &Plan, target: usize, phase: &str, work: &Path) -> Kil
     assert_ne!(
         plan.snapshots[target][owner],
         plan.snapshots[target + 1][owner],
-        "目标步 {target} 未改变被杀域，边界判据退化"
+        "目标步 {target} 未改变被杀域，边界判据退化（证据目录：{}）",
+        work.parent().unwrap_or(work).display()
     );
     let message = plan.steps[target]["envelope"]["message_id"]
         .as_str()
@@ -830,16 +837,26 @@ fn run_once(plan: &Plan, target: usize, phase: &str, work: &Path) -> Value {
 }
 /// 一个（profile, 目标步, 阶段）组合：两次全新目录、全新 P/A/R/C 进程，终态全表与续跑回复逐字节相同。
 fn matrix(id: &str, target: usize, op: &str, owner: usize, phase: &str) {
-    let plan = plan(id);
-    assert_eq!(plan.steps[target]["envelope"]["payload"]["op"], op);
-    assert_eq!(plan.steps[target]["owner"], owner);
     let label = format!("step{target:02}");
     let case_dir = if root().preserve_on_pass {
-        root().case_dir(Path::new(tag(id)).join(&label).join(phase))
+        root().enter_case(Path::new(tag(id)).join(&label).join(phase))
     } else {
-        root().case_dir(format!("{}-{label}-{phase}", tag(id)))
+        root().enter_case(format!("{}-{label}-{phase}", tag(id)))
     };
-    let base = case_dir.path();
+    let base = case_dir.path().to_path_buf();
+    let plan = plan(id);
+    assert_eq!(
+        plan.steps[target]["envelope"]["payload"]["op"],
+        op,
+        "{id} {label}/{phase} 目标步 op 不符（证据目录：{}）",
+        base.display()
+    );
+    assert_eq!(
+        plan.steps[target]["owner"],
+        owner,
+        "{id} {label}/{phase} 目标步 owner 不符（证据目录：{}）",
+        base.display()
+    );
     let work = base.join("work");
     let mut finals = vec![];
     for rep in 0..2 {
@@ -870,6 +887,7 @@ fn matrix(id: &str, target: usize, op: &str, owner: usize, phase: &str) {
         "{id} {label}/{phase} 两次新进程续跑回复相同（证据目录：{}）",
         base.display()
     );
+    case_dir.cleanup();
 }
 
 /// 无故障：同输入两次新进程完整重放，终态逐字节与哈希相同，meta 为 `/2`、E/B audit 通过、对黄金值。
