@@ -1,7 +1,7 @@
 # ADR 0044：成本停止 policy 签署记录 v1（P0 / P1-hl-testnet）
 
-> 正本：本文件登记 `#1354/cost-stop-policy/v1` 在 P0 与 P1-hl-testnet 的签署值；§三规定成本停止求值的零总成本边界。
-> 最后裁定：#2111（2026-11-20，P 类方法修订）；P0／P1-hl-testnet 的签署值沿用 #1559（2026-10-21，用户批复）。
+> 正本：本文件是 `#1354/cost-stop-policy/v1` 在 `P0` 与 `P1-hl-testnet` 两个 profile 上的签署值（θ 与四项成本输入的状态、来源与有效域）的正本。
+> 最后裁定：#2111（2026-11-20，P 类方法修订，依 #1909 代理独审裁定，非 UserSigned；获审版本及独审原件由主控在 PASS 后登记）；P0／P1-hl-testnet 的签署值沿用 #1559（2026-10-21，用户批复）。
 > 受影响代码清单：见「下游与受影响票」节（#2111 候选行号及基线；实现归 #1441）。
 
 **日期**：2026-10-21
@@ -55,7 +55,7 @@
 
 `Disabled` 表示证据已证明门槛不满足，不表示比值无定义。此门没有独立的绝对波幅最低值；正成本比较上的不过线仍为 `Disabled`，零总成本时不得用交叉相乘的等价式越出正分母定义域，也不填极限值、最小分母或备用判据。三种非 Enabled 结果均不放行本门；调用方保留四态及原因，不把「缺证据／不可评估」记成测得不过线，不改现有塔底和进阶复测协议。
 
-零分母处置和证据先决关系是对既有比值及证据契约的边界补全，不设可调字段（[ADR 0041](0041-degrees-of-freedom-configurable-not-excluded.md) 裁定一、二、四；#799、#804）。同一规则用于各级和各有效 profile；继续按已授权版本读取 θ 与成本来源，变动成本值或来源仍须按原合同另出版本。P0、P1-hl-testnet 两份 v1 签署值、来源与有效域不变；两版滑点仍为 Missing，按原合同输出 `NotEvaluable`。本条只定求值方法，不签任何实际取值。
+零分母处置和证据先决关系是对既有比值及证据契约的边界补全，不设可调字段（[ADR 0041](0041-degrees-of-freedom-configurable-not-excluded.md) 裁定二、四；#799、#804）。同一规则用于各级和各有效 profile；继续按已授权版本读取 θ 与成本来源，变动成本值或来源仍须按原合同另出版本。P0、P1-hl-testnet 两份 v1 签署值、来源与有效域不变；两版滑点仍为 Missing，按原合同输出 `NotEvaluable`。本条只定求值方法，不签任何实际取值。
 
 ## 签署记录
 
@@ -119,8 +119,15 @@ valid_through: 2027-10-21
 - [#2111](https://github.com/Newchanlun/NewChanlun/issues/2111) 补全 §三；实现与测试仍归 #1441。以下行号据 `impl/1441-cost-stop-policy` 取证头 `b7e23c31bc353378b71b090499c6eeea91676c92`：
   - `rust/src/theta_v0/cost_stop.rs:69-86,136-161,171-195,209-278,282-301`：签署费率和实测来源、四态、波幅证据与分母检查（旧零早返 :249-251）、来源匹配；测试 seam `:322-452,499-516`。
   - `rust/src/theta_v0/policy_records.rs:76-87,625-647`、`rust/src/theta_v0/policy_records/cost-stop.json:4-56`：继续读既有 v1，不改签值；零值用非生产夹具覆盖。
+  - 行号取自 `impl/1441-cost-stop-policy` 的 `5a4033fd9083aafaea580ef56c050c1e21ef29df`，#1441 第三轮重写后以其新头为准：`rust/src/theta_v0/cost_stop.rs:418-420` 已删 `ZeroTotalCost`；`:442-454` 定义待裁错误，`:549-551` 在证据门前返回 `Err(CostStopError::ZeroMeasuredCostAwaitingRuling2111)`；`:1054-1068` 的 `zero_measured_total_never_produces_a_four_state_result` 断言与本裁定相反；`:561-564` 在证据门后已按 §三处理零代理下界。
 - [#1602](https://github.com/xy7365527-lang/NewChanlun/issues/1602)：成本参数版本化记录以本 ADR 为数值来源。
 
 ## 溯源标签
 
-θ 倍数、VIP0 档、testnet 按主网同表、P0 holding 起始级别 L0 为 `[新缠论:选择]`；成本门方向 `[旧缠论]`（`035:30`）；其余为已裁沿用（ADR 0035、ADR 0040）。
+θ 倍数、VIP0 档、testnet 按主网同表、P0 holding 起始级别 L0 为 `[新缠论:选择]`；成本门方向 `[旧缠论]`（`035:30`）；原签署记录其余条款为已裁沿用（ADR 0035、ADR 0040）。
+
+§三（#2111）以下三条为 `[新缠论:推论]`，不属 ADR 0035「其余 `[新缠论:选择]`」：
+
+- **全 Known 零总成本归 `NotEvaluable(ZeroTotalCost)`**：ADR 0035 裁定一的 `r = A_ℓ/C` 在 `C=0` 时无定义；已有合格波幅证据，故这是不可求值，不是证据不足或已证明不过线。
+- **波幅证据先于定义域检查**：ADR 0035 裁定一继承 ADR 0022 裁定六／七；证据不合格即须明示判不出，不产出可用于判定的 `A_ℓ`，不能以分母原因替代这项证据结果。
+- **零代理下界归 `InsufficientEvidence(UpperBoundOnly)`**：ADR 0035 裁定二只许以比值上界证明失败；合成下界为零不证明实际成本为零，也不能从该下界证明一个有效的比值低于 θ。
