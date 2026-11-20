@@ -1613,7 +1613,7 @@ fn fx_release_bound_profile_accepts_verified_fx_commands_and_rejects_placeholder
                 "invalidation_sources": [format!("market-supersession:{chain}:after_rev={rev}")],
                 "required_check_stages": [stage],
                 "evidence_refs": [ecut, format!("market-raw:{chain}@rev={rev}:sha256=abc")],
-                "coverage_proof": format!("fx-valuation/1:{id}:e-cut={e_seq}:total=90/100"),
+                "coverage_proof": format!("fx-valuation/2:{id}:e-cut={e_seq}:total=90/100"),
                 "validator_capability": cap,
                 "failure_result": "Denied"
             })

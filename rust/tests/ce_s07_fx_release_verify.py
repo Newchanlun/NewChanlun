@@ -46,7 +46,8 @@ sys.path.insert(0, str(SRC / "s_session/tests"))
 from r4_anchor_fixture import TestAnchor  # noqa: E402
 from s_socket_client import canonical, decode_frame, digest, validate_reply  # noqa: E402
 
-FX_MARKER = "fx-valuation/1:release-bound"
+FX_MARKER = "fx-valuation/2:release-bound"
+FX_PROOF_PREFIX = "fx-valuation/2:"
 FIN_NS = "testonly.ce-s07.fin"
 FIN_EPOCH = "1"
 MARKET_NS = "testonly.ce-s07.fx"
@@ -66,6 +67,7 @@ FORBIDDEN_PLACEHOLDERS = (
     "controlled-invalidation",
     "controlled-evidence",
     "controlled-coverage",
+    "fx-valuation/1:release-bound",
     FX_MARKER,
 )
 
@@ -395,7 +397,7 @@ def build_fx_certificate_from_query(
                 )
             evs += retired_refs
             proof = (
-                f"fx-valuation/1:e-release-cut=E:{prev_seq}:{prev_root};"
+                f"{FX_PROOF_PREFIX}e-release-cut=E:{prev_seq}:{prev_root};"
                 f"cap={cap['policy_id']}@v{cap['policy_version']}:{summary['evaluated_total']}/{cap['cap']};"
                 f"chains={chain_proof_summary}"
             )
@@ -412,7 +414,7 @@ def build_fx_certificate_from_query(
                 quote_raws + quote_covs if quote_raws else [boundary_ref]
             )
             proof = (
-                f"fx-valuation/1:s-market-closure:e-cut=E:{prev_seq}:{prev_root};"
+                f"{FX_PROOF_PREFIX}s-market-closure:e-cut=E:{prev_seq}:{prev_root};"
                 f"structure={structure_dep};chains={chain_proof_summary}"
             )
         elif vc == "simulation-local-transaction/1":
@@ -431,7 +433,7 @@ def build_fx_certificate_from_query(
                 f"projection-manifest:{x['projection_manifest']}",
                 f"eligibility-ref:{x['eligibility_ref']}",
             ]
-            proof = f"fx-valuation/1:x-local-tx:{x_id}@{x_epoch}:e-cut=E:{prev_seq}:{prev_root}"
+            proof = f"{FX_PROOF_PREFIX}x-local-tx:{x_id}@{x_epoch}:e-cut=E:{prev_seq}:{prev_root}"
         elif vc == "model-coverage/1":
             deps = [
                 f"model-ref:{model_ref_str}",
@@ -443,7 +445,7 @@ def build_fx_certificate_from_query(
                 f"domain-id-change:{domain_id}",
             ]
             evs = [e_cut_ref, f"model-ref:{model_ref_str}"]
-            proof = f"fx-valuation/1:model-coverage:{domain_id}:{model_ref_str}:e-cut=E:{prev_seq}:{prev_root}"
+            proof = f"{FX_PROOF_PREFIX}model-coverage:{domain_id}:{model_ref_str}:e-cut=E:{prev_seq}:{prev_root}"
         else:
             raise AssertionError(f"unexpected capability {vc}")
 
@@ -568,14 +570,17 @@ def build_session_artifacts(
     cap_amount: str = "100",
     use_fx_marker_in_input: bool | None = None,
     finance_schema: str = "tb03b-finance/6",
+    fx_schema: str = "fx-valuation/2",
     authorize_x_query: bool = True,
+    plan_overrides: dict[str, dict] | None = None,
+    slot_main_members: list[str] | None = None,
 ) -> dict:
     """Writes all files needed by `production_session` and returns paths + data."""
     run_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
     sid = session_id
     gen = "1"
     fx_enabled = fx_obligations_bytes is not None
-    use_fx_marker = fx_enabled if use_fx_marker_in_input is None else use_fx_marker_in_input
+    use_fx_marker = (fx_enabled and fx_schema == "fx-valuation/2") if use_fx_marker_in_input is None else use_fx_marker_in_input
     symbol = x_model["symbol"]
 
     src_fin = {
@@ -863,13 +868,29 @@ def build_session_artifacts(
             },
         }
 
+    if plan_overrides:
+        for p in plans:
+            ov = plan_overrides.get(p["decision_id"])
+            if ov:
+                for k, v in ov.items():
+                    if k == "exact":
+                        p["exact"].update(v)
+                    elif k == "o_ref":
+                        p["o_ref"].update(v)
+                    else:
+                        p[k] = v
+                p["o_ref"]["quantity"] = p["quantity"]
+
     slots = []
-    if set(chongs) >= {"alpha", "beta"}:
-        slots.append(make_slot("slot-main", ["alpha", "beta"]))
+    if slot_main_members is not None:
+        slots.append(make_slot("slot-main", slot_main_members))
     else:
-        slots.append(make_slot("slot-main", [chongs[0]]))
-    if "gamma" in chongs:
-        slots.append(make_slot("slot-gamma", ["gamma"]))
+        if set(chongs) >= {"alpha", "beta"}:
+            slots.append(make_slot("slot-main", ["alpha", "beta"]))
+        else:
+            slots.append(make_slot("slot-main", [chongs[0]]))
+        if "gamma" in chongs:
+            slots.append(make_slot("slot-gamma", ["gamma"]))
 
     conditions = make_fx_conditions_template() if use_fx_marker else make_legacy_conditions()
     market_deps = [FX_MARKER] if use_fx_marker else ["TestOnly-market/nonfx-legacy-v6"]
@@ -1013,7 +1034,7 @@ def build_session_artifacts(
         fx_ob_path = run_dir / "fx-obligations.json"
         fx_ob_path.write_bytes(fx_obligations_bytes)
         manifest["fx_valuation"] = {
-            "schema_revision": "fx-valuation/1",
+            "schema_revision": fx_schema,
             "kind": "TestOnly",
             "obligation_input_path": str(fx_ob_path),
             "obligation_input_sha256": sha256_bytes(fx_obligations_bytes),
@@ -2240,7 +2261,7 @@ def run_arm1_main_lifecycle(bins: Path, fixtures: Path, out: Path) -> dict:
     handoff = {
         "schema_revision": "ce-s07-handoff-to-1416/1",
         "finance_schema_revision": "tb03b-finance/6",
-        "fx_valuation_schema_revision": "fx-valuation/1",
+        "fx_valuation_schema_revision": "fx-valuation/2",
         "x_profile_revision": "x-execution-profile/3",
         "s_protocol_revision": "s-session/3",
         "session_id": cfg["sid"],
@@ -2596,10 +2617,10 @@ def run_arm3_pure_non_fx_legacy_and_config_guards(bins: Path, fixtures: Path, ou
                 proc.terminate()
                 proc.wait(timeout=8)
 
-    neg_fx_dir = out / "arm3_neg_fx_v6_with_placeholders"
+    neg_fx_dir = out / "arm3_neg_fx_v6_v2_with_placeholders"
     neg_fx_cfg = build_session_artifacts(
         neg_fx_dir,
-        session_id="ce-s07-neg-fx-v6-placeholder",
+        session_id="ce-s07-neg-fx-v6-v2-placeholder",
         chongs=["alpha"],
         x_model=x_model,
         fx_obligations_bytes=(fixtures / "fx-obligations.json").read_bytes(),
@@ -2609,8 +2630,9 @@ def run_arm3_pure_non_fx_legacy_and_config_guards(bins: Path, fixtures: Path, ou
         s_socket_for_x=str(neg_fx_dir / "structure.sock"),
         use_fx_marker_in_input=False,
         finance_schema="tb03b-finance/6",
+        fx_schema="fx-valuation/2",
     )
-    bad_fx_v6_err = probe_first_import_error(neg_fx_dir, neg_fx_cfg, "neg-fx-v6-placeholders")
+    bad_fx_v6_err = probe_first_import_error(neg_fx_dir, neg_fx_cfg, "neg-fx-v6-v2-placeholders")
 
     neg_nonfx_dir = out / "arm3_neg_nonfx_v6_with_fx_marker"
     neg_nonfx_cfg = build_session_artifacts(
@@ -2628,31 +2650,82 @@ def run_arm3_pure_non_fx_legacy_and_config_guards(bins: Path, fixtures: Path, ou
     )
     bad_nonfx_v6_err = probe_first_import_error(neg_nonfx_dir, neg_nonfx_cfg, "neg-nonfx-v6-marker")
 
-    neg_fin5_dir = out / "arm3_neg_fin5_fx_with_v6_marker"
-    neg_fin5_cfg = build_session_artifacts(
-        neg_fin5_dir,
-        session_id="ce-s07-neg-fin5-marker",
+    neg_fin6_v1_dir = out / "arm3_neg_fin6_fx_v1_with_v2_marker"
+    neg_fin6_v1_cfg = build_session_artifacts(
+        neg_fin6_v1_dir,
+        session_id="ce-s07-neg-fin6-v1-marker",
         chongs=["alpha"],
         x_model=x_model,
         fx_obligations_bytes=(fixtures / "fx-obligations.json").read_bytes(),
         clock_messages={"imp-base": "1"},
         recover_bars=[],
         s_clock_events=s_clock,
-        s_socket_for_x=str(neg_fin5_dir / "structure.sock"),
+        s_socket_for_x=str(neg_fin6_v1_dir / "structure.sock"),
+        use_fx_marker_in_input=True,
+        finance_schema="tb03b-finance/6",
+        fx_schema="fx-valuation/1",
+    )
+    bad_fin6_v1_marker_err = probe_first_import_error(neg_fin6_v1_dir, neg_fin6_v1_cfg, "neg-fin6-v1-marker")
+
+    neg_fin5_v1_dir = out / "arm3_neg_fin5_fx_v1_with_v2_marker"
+    neg_fin5_v1_cfg = build_session_artifacts(
+        neg_fin5_v1_dir,
+        session_id="ce-s07-neg-fin5-v1-marker",
+        chongs=["alpha"],
+        x_model=x_model,
+        fx_obligations_bytes=(fixtures / "fx-obligations.json").read_bytes(),
+        clock_messages={"imp-base": "1"},
+        recover_bars=[],
+        s_clock_events=s_clock,
+        s_socket_for_x=str(neg_fin5_v1_dir / "structure.sock"),
         use_fx_marker_in_input=True,
         finance_schema="tb03b-finance/5",
+        fx_schema="fx-valuation/1",
         authorize_x_query=False,
     )
-    bad_fin5_marker_err = probe_first_import_error(neg_fin5_dir, neg_fin5_cfg, "neg-fin5-marker")
+    bad_fin5_marker_err = probe_first_import_error(neg_fin5_v1_dir, neg_fin5_v1_cfg, "neg-fin5-v1-marker")
+
+    neg_fin5_v2_dir = out / "arm3_neg_fin5_with_fx_v2"
+    neg_fin5_v2_cfg = build_session_artifacts(
+        neg_fin5_v2_dir,
+        session_id="ce-s07-neg-fin5-fx-v2",
+        chongs=["alpha"],
+        x_model=x_model,
+        fx_obligations_bytes=(fixtures / "fx-obligations.json").read_bytes(),
+        clock_messages={"imp-base": "1"},
+        recover_bars=[],
+        s_clock_events=s_clock,
+        s_socket_for_x=str(neg_fin5_v2_dir / "structure.sock"),
+        use_fx_marker_in_input=True,
+        finance_schema="tb03b-finance/5",
+        fx_schema="fx-valuation/2",
+        authorize_x_query=False,
+    )
+    bad_fin5_v2_init = run_cli(
+        [
+            str(bins / "e_economic_session"),
+            "init",
+            "--manifest",
+            str(neg_fin5_v2_cfg["manifest_path"]),
+            "--db",
+            neg_fin5_v2_cfg["e_node"]["db"],
+        ]
+    )
+    assert bad_fin5_v2_init.returncode != 0 and "SchemaUnsupported" in bad_fin5_v2_init.stderr, (
+        bad_fin5_v2_init.returncode,
+        bad_fin5_v2_init.stderr,
+    )
 
     return {
         "status": "PASS",
         "fx_valuation_absent_in_read_view": True,
         "legacy_release_cut": rel["cut"],
         "legacy_x_accept_state": x_acc["state"],
-        "config_guard_fx_v6_with_placeholders_refused": bad_fx_v6_err,
+        "config_guard_fx_v6_v2_with_placeholders_refused": bad_fx_v6_err,
         "config_guard_nonfx_v6_with_fx_marker_refused": bad_nonfx_v6_err,
-        "config_guard_fin5_fx_with_v6_marker_refused": bad_fin5_marker_err,
+        "config_guard_fin6_fx_v1_with_v2_marker_refused": bad_fin6_v1_marker_err,
+        "config_guard_fin5_fx_v1_with_v2_marker_refused": bad_fin5_marker_err,
+        "config_guard_fin5_with_fx_v2_init_refused": bad_fin5_v2_init.stderr.strip(),
     }
 
 
@@ -2711,6 +2784,7 @@ def run_arm4_fin5_fx_compat_and_old_db_recovery(bins: Path, fixtures: Path, out:
         cap_amount="100",
         use_fx_marker_in_input=False,
         finance_schema="tb03b-finance/5",
+        fx_schema="fx-valuation/1",
         authorize_x_query=False,
     )
     assert cfg["fin_data"]["exact_release"]["market_dependencies"] == ["TestOnly-market/nonfx-legacy-v6"]
@@ -2912,11 +2986,560 @@ def run_arm4_fin5_fx_compat_and_old_db_recovery(bins: Path, fixtures: Path, out:
     }
 
 
+def run_arm5_r2_overcap_model_coverage_precedes_fx_gate(bins: Path, fixtures: Path, out: Path) -> dict:
+    """Proves BLOCK #2 under explicit tb03b-finance/6 + fx-valuation/2:
+    During r2=110/100 overcap in the same session:
+      - Already released `alpha` (same & new message_id) still prioritizes original ReleasedExactReceipt;
+      - Out-of-domain `batched` command `gamma` hits model_coverage FIRST (bypasses FX gate) and persists
+        `Unsupported / ModelOrderUnspecified` (ReleaseUnsupportedReceipt, QueryCommand == Unsupported);
+      - In-domain `single` command `beta` enters FX policy gate and is blocked with `AwaitingPolicy`
+        (QueryCommand remains `Dispatchable`);
+      - Cold recovery to epoch 2 preserves all three states and refuses downgrade to `fx-valuation/1`."""
+    run_dir = out / "arm5_r2_overcap_model_order"
+    ob_bytes = (fixtures / "fx-obligations.json").read_bytes()
+    r1_utf8 = (fixtures / "fx-r1.json").read_text(encoding="utf-8")
+    r2_utf8 = (fixtures / "fx-r2.json").read_text(encoding="utf-8")
+    x_model = {**base_sim_model(), "symbol": "TEST"}
+
+    msgs = {
+        "imp-base": "1",
+        "imp-fx": "1",
+        "cap-r1": "1",
+        "res-r1": "1",
+        "cap-open-alpha": "1",
+        "apply-open-alpha": "1",
+        "bind-alpha": "1",
+        "prep-alpha": "1",
+        "cap-open-beta": "1",
+        "apply-open-beta": "1",
+        "bind-beta": "1",
+        "prep-beta": "1",
+        "cap-open-gamma": "1",
+        "apply-open-gamma": "1",
+        "bind-gamma": "1",
+        "prep-gamma": "1",
+        "reserve-main": "1",
+        "commit-alpha": "1",
+        "commit-beta": "1",
+        "commit-gamma": "1",
+        "dispatch-alpha": "1",
+        "dispatch-beta": "1",
+        "dispatch-gamma": "1",
+        "q-r1": "1",
+        "release-alpha": "2",
+        "cap-r2": "3",
+        "q-r2": "3",
+        "release-alpha-new-msg": "3",
+        "release-gamma-batched-overcap": "3",
+        "release-beta-single-overcap": "3",
+        "q-cmd-gamma": "3",
+        "q-cmd-beta": "3",
+        "q-ep2-gamma": "4",
+        "q-ep2-beta": "4",
+        "q-ep2-alpha": "4",
+    }
+    s_clock = {"prefix-1": {"accept_ns": "10", "attempts": [{"begin_ns": "11", "commit_ns": "12"}]}}
+    # alpha=30 (2*14+2, single), beta=25 (2*12+1, single), gamma=15 (3*5+0, batched) -> cash 70 + fx 20 = 90/100; r2 -> 110/100
+    cfg = build_session_artifacts(
+        run_dir,
+        session_id="ce-s07-r2-model-order",
+        chongs=["alpha", "beta", "gamma"],
+        x_model=x_model,
+        fx_obligations_bytes=ob_bytes,
+        clock_messages=msgs,
+        recover_bars=["4"],
+        s_clock_events=s_clock,
+        s_socket_for_x=str(run_dir / "structure.sock"),
+        baseline_amount="0",
+        cap_amount="100",
+        finance_schema="tb03b-finance/6",
+        fx_schema="fx-valuation/2",
+        plan_overrides={
+            "beta": {
+                "quantity": "2",
+                "limit_price": "12",
+                "fee_tail": "1",
+                "exact": {"first_quantity": "2", "concurrency": "single"},
+            },
+            "gamma": {
+                "slot_id": "slot-main",
+                "quantity": "3",
+                "limit_price": "5",
+                "fee_tail": "0",
+                "exact": {"first_quantity": "3", "concurrency": "batched"},
+            },
+        },
+        slot_main_members=["alpha", "beta", "gamma"],
+    )
+
+    for cmd_args, label in [
+        ([str(bins / "e_economic_session"), "init", "--manifest", str(cfg["manifest_path"]), "--db", cfg["e_node"]["db"]], "arm5-init-E"),
+        ([str(bins / "b_chong_session"), "init", "--manifest", str(cfg["manifest_path"]), "--chong", "alpha", "--db", cfg["b_nodes"]["alpha"]["db"]], "arm5-init-B-alpha"),
+        ([str(bins / "b_chong_session"), "init", "--manifest", str(cfg["manifest_path"]), "--chong", "beta", "--db", cfg["b_nodes"]["beta"]["db"]], "arm5-init-B-beta"),
+        ([str(bins / "b_chong_session"), "init", "--manifest", str(cfg["manifest_path"]), "--chong", "gamma", "--db", cfg["b_nodes"]["gamma"]["db"]], "arm5-init-B-gamma"),
+    ]:
+        res = run_cli(cmd_args)
+        assert res.returncode == 0, (label, res.stdout, res.stderr)
+
+    wire_log: list[dict] = []
+
+    def ewire_direct(domain: str, msg_id: str, payload: dict, *, expected: str, source: dict | None = None, producer_epoch: str = "1") -> dict:
+        sock = cfg["e_node"]["socket"] if domain == "E" else cfg["b_nodes"][domain.split(":", 1)[1]]["socket"]
+        src = source if source is not None else cfg["src_fin"]
+        req = {
+            "schema_revision": "economic-session/1",
+            "session_id": cfg["sid"],
+            "session_generation": cfg["gen"],
+            **src,
+            "message_id": msg_id,
+            "payload_hash": digest(payload),
+            "causal_refs": [],
+            "payload": payload,
+        }
+        _, _, rep = send_frame(sock, req, wire_log=wire_log, label=f"arm5:{domain}:{msg_id}")
+        res = validate_reply(req, rep, producer=domain, producer_epoch=producer_epoch)
+        assert res.get("kind") == expected, (domain, msg_id, expected, res)
+        return res
+
+    procs: list[tuple[subprocess.Popen, object, object]] = []
+
+    def spawn(cmd_args: list[str], sock: str, tag: str) -> None:
+        out_f = (run_dir / f"{tag}.stdout").open("wb")
+        err_p = run_dir / f"{tag}.stderr"
+        err_f = err_p.open("wb")
+        p = subprocess.Popen(cmd_args, stdin=subprocess.DEVNULL, stdout=out_f, stderr=err_f)
+        procs.append((p, out_f, err_f))
+        wait_ready(p, sock, f"arm5:{tag}", err_p)
+
+    try:
+        spawn([str(bins / "e_economic_session"), "serve", "--manifest", str(cfg["manifest_path"]), "--db", cfg["e_node"]["db"], "--epoch", "1"], cfg["e_node"]["socket"], "e-ep1")
+        for cid in ("alpha", "beta", "gamma"):
+            spawn([str(bins / "b_chong_session"), "serve", "--manifest", str(cfg["manifest_path"]), "--chong", cid, "--db", cfg["b_nodes"][cid]["db"], "--epoch", "1", "--e-epoch", "1"], cfg["b_nodes"][cid]["socket"], f"b-{cid}-ep1")
+
+        ewire_direct("E", "imp-base", {"op": "ImportResponsibility", "responsibility_id": "r-base", "writer_epoch": "1"}, expected="ResponsibilityImportedReceipt")
+        ewire_direct("E", "imp-fx", {"op": "ImportFxResponsibility", "responsibility_id": "ob-fx-unclosed-20", "writer_epoch": "1"}, expected="FxResponsibilityImportedReceipt")
+        c3 = ewire_direct("E", "cap-r1", {"op": "CaptureExternal", "raw_utf8": r1_utf8, "json_pointer": "", "token": "fx-r1", "source_event_time": "70"}, expected="Recorded", source=cfg["src_market"])
+        ewire_direct(
+            "E",
+            "res-r1",
+            {
+                "op": "ResolveEvidence",
+                "evidence_id": "ev-r1",
+                "covered": [{"fact_key": c3["fact_key"], "token": "fx-r1", "fact_hash": c3["fact_hash"]}],
+                "frontier": {"source_namespace": MARKET_NS, "source_epoch": MARKET_EPOCH, "cursor": "70"},
+                "dependency_version": "arm5-r1/1",
+            },
+            expected="Resolved",
+            source=cfg["src_market"],
+        )
+        for cid in ("alpha", "beta", "gamma"):
+            cap = ewire_direct("E", f"cap-open-{cid}", {"op": "CaptureExternal", "raw_utf8": cfg["openers"][cid], "json_pointer": "/events/0", "token": f"tok-opening-{cid}", "source_event_time": None}, expected="Recorded")
+            ewire_direct(f"B:{cid}", f"apply-open-{cid}", {"op": "ApplyAllocation", "fact_key": cap["fact_key"], "allocation_id": f"allocation-{cid}", "expected_fact_hash": cap["fact_hash"]}, expected="Applied")
+            ewire_direct(f"B:{cid}", f"bind-{cid}", cfg["voice_bindings"][cid], expected="VoiceBound")
+            ewire_direct(f"B:{cid}", f"prep-{cid}", {"op": "PrepareDecision", "decision_id": cid, "plan_hash": digest(cfg["plans"][cid]), "writer_epoch": "1"}, expected="PreparedReceipt")
+
+        res_main = ewire_direct("E", "reserve-main", {"op": "Reserve", "slot_id": "slot-main", "request_set_hash": digest(cfg["slots"]["slot-main"]["applicants"]), "writer_epoch": "1"}, expected="ReserveReceipt")
+        grants = {g["decision_id"]: g["grant_id"] for g in res_main["record"]["grants"]}
+        for cid in ("alpha", "beta", "gamma"):
+            ewire_direct(f"B:{cid}", f"commit-{cid}", {"op": "CommitDecision", "decision_id": cid, "plan_hash": digest(cfg["plans"][cid]), "grant_id": grants[cid], "writer_epoch": "1"}, expected="LocalCommitReceipt")
+            ewire_direct("E", f"dispatch-{cid}", {"op": "MakeDispatchable", "decision_id": cid, "plan_hash": digest(cfg["plans"][cid]), "writer_epoch": "1"}, expected="DispatchableReceipt")
+
+        q_r1 = ewire_direct("E", "q-r1", {"op": "QueryFxValuation", "as_known_ns": None, "cut": None}, expected="EconomicFxValuation")
+        assert q_r1["fx_valuation"]["schema_revision"] == "fx-valuation/2"
+        assert q_r1["fx_valuation"]["summary"]["evaluated_total"] == "90"
+
+        alpha_cert = build_fx_certificate_from_query(cfg["sid"], cfg["gen"], cfg["fin_data"], cfg["plans"]["alpha"], grants["alpha"], q_r1)
+        alpha_req = {
+            "op": "ReleaseExact",
+            "decision_id": "alpha",
+            "command_id": "cmd-alpha",
+            "plan_hash": digest(change_for_plan(cfg["plans"]["alpha"])),
+            "certificate": alpha_cert,
+            "x_id": "X",
+            "x_epoch": "1",
+            "writer_epoch": "1",
+        }
+        rel_alpha = ewire_direct("E", "release-alpha", alpha_req, expected="ReleasedExactReceipt")
+
+        # r2 -> 110/100 overcap
+        ewire_direct("E", "cap-r2", {"op": "CaptureExternal", "raw_utf8": r2_utf8, "json_pointer": "", "token": "fx-r2", "source_event_time": "70"}, expected="Recorded", source=cfg["src_market"])
+        q_r2 = ewire_direct("E", "q-r2", {"op": "QueryFxValuation", "as_known_ns": None, "cut": None}, expected="EconomicFxValuation")
+        assert q_r2["fx_valuation"]["summary"]["evaluated_total"] == "110"
+        assert q_r2["fx_valuation"]["summary"]["gate_status"] == "BlockedExceedsCap"
+
+        # 1) Original receipt priority for alpha
+        retry_same = ewire_direct("E", "release-alpha", alpha_req, expected="ReleasedExactReceipt")
+        assert canonical(retry_same) == canonical(rel_alpha)
+        retry_new = ewire_direct("E", "release-alpha-new-msg", alpha_req, expected="ReleasedExactReceipt")
+        assert retry_new["cut"] == rel_alpha["cut"] and canonical(retry_new["record"]) == canonical(rel_alpha["record"])
+
+        # 2) Out-of-domain batched `gamma`: MUST persist Unsupported / ModelOrderUnspecified BEFORE FX policy gate
+        freeze = cfg["fin_data"]["exact_release"]
+        q_g = cfg["plans"]["gamma"]
+        gamma_tpl_cert = {
+            "rd11_policy": freeze["rd11_policy"],
+            "responsibility_refs": [grants["gamma"]],
+            "structure_dependencies": [f"{q_g['s_ref']['object_id']}@{q_g['s_ref']['object_hash']}"],
+            "market_dependencies": freeze["market_dependencies"],
+            "rule_revision": freeze["rule_revision"],
+            "conditions": freeze["conditions"],
+        }
+        rel_gamma = ewire_direct(
+            "E",
+            "release-gamma-batched-overcap",
+            {
+                "op": "ReleaseExact",
+                "decision_id": "gamma",
+                "command_id": "cmd-gamma",
+                "plan_hash": digest(change_for_plan(q_g)),
+                "certificate": gamma_tpl_cert,
+                "x_id": "X",
+                "x_epoch": "1",
+                "writer_epoch": "1",
+            },
+            expected="ReleaseUnsupportedReceipt",
+        )
+        assert rel_gamma["record"]["state"] == "Unsupported"
+        assert rel_gamma["record"]["unsupported"]["reason"] == "ModelOrderUnspecified"
+        assert rel_gamma["record"]["execution_eligibility"] == "None"
+        write_pretty(out / "arm5_gamma_batched_unsupported_receipt.json", rel_gamma)
+
+        # 3) In-domain single `beta`: enters FX policy gate -> AwaitingPolicy
+        beta_cert_r1 = build_fx_certificate_from_query(cfg["sid"], cfg["gen"], cfg["fin_data"], cfg["plans"]["beta"], grants["beta"], q_r1)
+        rel_beta = ewire_direct(
+            "E",
+            "release-beta-single-overcap",
+            {
+                "op": "ReleaseExact",
+                "decision_id": "beta",
+                "command_id": "cmd-beta",
+                "plan_hash": digest(change_for_plan(cfg["plans"]["beta"])),
+                "certificate": beta_cert_r1,
+                "x_id": "X",
+                "x_epoch": "1",
+                "writer_epoch": "1",
+            },
+            expected="Error",
+        )
+        assert rel_beta["error"].startswith("AwaitingPolicy："), rel_beta
+
+        q_cmd_gamma = ewire_direct("E", "q-cmd-gamma", {"op": "QueryCommand", "command_id": "cmd-gamma", "cut": None, "as_known_ns": None}, expected="EconomicCommand")
+        assert q_cmd_gamma["state"] == "Unsupported"
+        q_cmd_beta = ewire_direct("E", "q-cmd-beta", {"op": "QueryCommand", "command_id": "cmd-beta", "cut": None, "as_known_ns": None}, expected="EconomicCommand")
+        assert q_cmd_beta["state"] == "Dispatchable"
+    finally:
+        for p, out_f, err_f in procs:
+            if p.poll() is None:
+                p.terminate()
+                p.wait(timeout=8)
+            out_f.close()
+            err_f.close()
+        procs.clear()
+
+    rec = run_cli([str(bins / "e_economic_session"), "recover", "--manifest", str(cfg["manifest_path"]), "--db", cfg["e_node"]["db"]])
+    assert rec.returncode == 0 and json.loads(rec.stdout)["writer_epoch"] == "2", (rec.stdout, rec.stderr)
+
+    # Verify persisted fx-valuation/2 refuses downgrade recovery to fx-valuation/1
+    dg_manifest = copy.deepcopy(cfg["manifest"])
+    dg_manifest["fx_valuation"]["schema_revision"] = "fx-valuation/1"
+    dg_mpath = write_canon(run_dir / "downgrade-v1-manifest.json", dg_manifest)
+    dg_rec = run_cli([str(bins / "e_economic_session"), "recover", "--manifest", str(dg_mpath), "--db", cfg["e_node"]["db"]])
+    assert dg_rec.returncode != 0 and "IdentityConflict" in dg_rec.stderr, (dg_rec.returncode, dg_rec.stderr)
+
+    if Path(cfg["e_node"]["socket"]).exists():
+        Path(cfg["e_node"]["socket"]).unlink()
+    try:
+        spawn([str(bins / "e_economic_session"), "serve", "--manifest", str(cfg["manifest_path"]), "--db", cfg["e_node"]["db"], "--epoch", "2"], cfg["e_node"]["socket"], "e-ep2")
+        assert ewire_direct("E", "q-ep2-gamma", {"op": "QueryCommand", "command_id": "cmd-gamma", "cut": None, "as_known_ns": None}, expected="EconomicCommand", producer_epoch="2")["state"] == "Unsupported"
+        assert ewire_direct("E", "q-ep2-beta", {"op": "QueryCommand", "command_id": "cmd-beta", "cut": None, "as_known_ns": None}, expected="EconomicCommand", producer_epoch="2")["state"] == "Dispatchable"
+        assert ewire_direct("E", "q-ep2-alpha", {"op": "QueryCommand", "command_id": "cmd-alpha", "cut": None, "as_known_ns": None}, expected="EconomicCommand", producer_epoch="2")["state"] == "ReleasedExact"
+    finally:
+        for p, out_f, err_f in procs:
+            if p.poll() is None:
+                p.terminate()
+                p.wait(timeout=8)
+            out_f.close()
+            err_f.close()
+        procs.clear()
+
+    with (run_dir / "wire.jsonl").open("w", encoding="utf-8") as f:
+        for item in wire_log:
+            f.write(json.dumps(item, ensure_ascii=False, sort_keys=True) + "\n")
+
+    return {
+        "status": "PASS",
+        "finance_schema": "tb03b-finance/6",
+        "fx_schema": "fx-valuation/2",
+        "overcap_eval": "110/100",
+        "alpha_original_receipt_priority_same_and_new_msg": True,
+        "gamma_batched_receipt_kind": rel_gamma["kind"],
+        "gamma_batched_state": rel_gamma["record"]["state"],
+        "gamma_batched_reason": rel_gamma["record"]["unsupported"]["reason"],
+        "gamma_batched_cut": rel_gamma["cut"],
+        "beta_single_overcap_error": rel_beta["error"],
+        "beta_single_query_state": q_cmd_beta["state"],
+        "downgrade_v2_to_v1_recovery_refused": dg_rec.stderr.strip(),
+        "epoch2_recovery_and_reread": "PASS",
+    }
+
+
+def run_arm6_parent_bd0933e97e_fin6_fx_v1_recovery(
+    parent_bins: Path, candidate_bins: Path, fixtures: Path, out: Path
+) -> dict:
+    """Proves BLOCK #1 with REAL parent (`bd0933e97e`) binaries:
+    1. Real parent binaries create & populate a non-empty `tb03b-finance/6 + fx-valuation/1` static-certificate DB
+       (ImportResponsibility, ImportFxResponsibility, r1, Reserve, Commit, MakeDispatchable, ReleaseExact(alpha), r2=110/100);
+    2. Candidate binaries take over that exact parent-written DB without touching it:
+       - `recover` (full `store.rs:1234` finance::replay + audit -> epoch 2) MUST PASS;
+       - Epoch-2 `serve` reads back exact historical 90/100 cut, current 110/100 cut, exact parent `cmd-alpha`,
+         and returns exact parent original receipt on same/new `message_id` retry;
+       - Attempting silent migration of parent DB to `fx-valuation/2` MUST be refused with `IdentityConflict`."""
+    run_dir = out / "arm6_parent_bd0933e97e_fin6_fx_v1"
+    ob_bytes = (fixtures / "fx-obligations.json").read_bytes()
+    r1_utf8 = (fixtures / "fx-r1.json").read_text(encoding="utf-8")
+    r2_utf8 = (fixtures / "fx-r2.json").read_text(encoding="utf-8")
+    x_model = {**base_sim_model(), "symbol": "TEST"}
+
+    msgs = {
+        "imp-base": "1",
+        "imp-fx": "1",
+        "cap-r1": "1",
+        "res-r1": "1",
+        "cap-open-alpha": "1",
+        "apply-open-alpha": "1",
+        "bind-alpha": "1",
+        "prep-alpha": "1",
+        "cap-open-beta": "1",
+        "apply-open-beta": "1",
+        "bind-beta": "1",
+        "prep-beta": "1",
+        "reserve-main": "1",
+        "commit-alpha": "1",
+        "commit-beta": "1",
+        "dispatch-alpha": "1",
+        "dispatch-beta": "1",
+        "q-pre-r2": "1",
+        "release-alpha": "2",
+        "cap-r2": "3",
+        "q-r2": "3",
+        "cand-q-cur": "4",
+        "cand-q-hist": "4",
+        "cand-q-cmd": "4",
+        "cand-retry-alpha-new-msg": "4",
+    }
+    s_clock = {"prefix-1": {"accept_ns": "10", "attempts": [{"begin_ns": "11", "commit_ns": "12"}]}}
+    # NOTE: Parent bd0933e97e fx-valuation/1 only accepted clock.kind=="TestOnly" before our logical-bar/1 extension,
+    # so we build a standard TestOnly clock manifest matching parent bd0933e97e!
+    cfg = build_session_artifacts(
+        run_dir,
+        session_id="ce-s07-parent-fin6-fx-v1",
+        chongs=["alpha", "beta"],
+        x_model=x_model,
+        fx_obligations_bytes=ob_bytes,
+        clock_messages=msgs,
+        recover_bars=["4"],
+        s_clock_events=s_clock,
+        s_socket_for_x=str(run_dir / "structure.sock"),
+        baseline_amount="0",
+        cap_amount="100",
+        use_fx_marker_in_input=False,
+        finance_schema="tb03b-finance/6",
+        fx_schema="fx-valuation/1",
+    )
+    # Patch clock to TestOnly plan (monotonic ns) so parent bd0933e97e accepts fx-valuation/1!
+    t = 10
+    tc_msgs = {}
+    for m in msgs:
+        tc_msgs[m] = {"received_ns": str(t), "first_known_ns": str(t + 1), "commit_ns": str(t + 2)}
+        t += 10
+    cfg["manifest"]["clock"] = {
+        "kind": "TestOnly",
+        "plan": {"init_ns": "1", "recover_ns": ["10000", "20000"], "messages": tc_msgs},
+    }
+    write_canon(cfg["manifest_path"], cfg["manifest"])
+
+    # Phase 1: Write non-empty FIN/6 + fx-valuation/1 DB using REAL PARENT bd0933e97e binaries!
+    for cmd_args, label in [
+        ([str(parent_bins / "e_economic_session"), "init", "--manifest", str(cfg["manifest_path"]), "--db", cfg["e_node"]["db"]], "parent-init-E"),
+        ([str(parent_bins / "b_chong_session"), "init", "--manifest", str(cfg["manifest_path"]), "--chong", "alpha", "--db", cfg["b_nodes"]["alpha"]["db"]], "parent-init-B-alpha"),
+        ([str(parent_bins / "b_chong_session"), "init", "--manifest", str(cfg["manifest_path"]), "--chong", "beta", "--db", cfg["b_nodes"]["beta"]["db"]], "parent-init-B-beta"),
+    ]:
+        res = run_cli(cmd_args)
+        assert res.returncode == 0, (label, res.stdout, res.stderr)
+
+    wire_log: list[dict] = []
+
+    def ewire_direct(domain: str, msg_id: str, payload: dict, *, expected: str, source: dict | None = None, producer_epoch: str = "1") -> dict:
+        sock = cfg["e_node"]["socket"] if domain == "E" else cfg["b_nodes"][domain.split(":", 1)[1]]["socket"]
+        src = source if source is not None else cfg["src_fin"]
+        req = {
+            "schema_revision": "economic-session/1",
+            "session_id": cfg["sid"],
+            "session_generation": cfg["gen"],
+            **src,
+            "message_id": msg_id,
+            "payload_hash": digest(payload),
+            "causal_refs": [],
+            "payload": payload,
+        }
+        _, _, rep = send_frame(sock, req, wire_log=wire_log, label=f"arm6:{domain}:{msg_id}")
+        res = validate_reply(req, rep, producer=domain, producer_epoch=producer_epoch)
+        assert res.get("kind") == expected, (domain, msg_id, expected, res)
+        return res
+
+    procs: list[tuple[subprocess.Popen, object, object]] = []
+
+    def spawn(cmd_args: list[str], sock: str, tag: str) -> None:
+        out_f = (run_dir / f"{tag}.stdout").open("wb")
+        err_p = run_dir / f"{tag}.stderr"
+        err_f = err_p.open("wb")
+        p = subprocess.Popen(cmd_args, stdin=subprocess.DEVNULL, stdout=out_f, stderr=err_f)
+        procs.append((p, out_f, err_f))
+        wait_ready(p, sock, f"arm6:{tag}", err_p)
+
+    try:
+        spawn([str(parent_bins / "e_economic_session"), "serve", "--manifest", str(cfg["manifest_path"]), "--db", cfg["e_node"]["db"], "--epoch", "1"], cfg["e_node"]["socket"], "parent-e-ep1")
+        for cid in ("alpha", "beta"):
+            spawn([str(parent_bins / "b_chong_session"), "serve", "--manifest", str(cfg["manifest_path"]), "--chong", cid, "--db", cfg["b_nodes"][cid]["db"], "--epoch", "1", "--e-epoch", "1"], cfg["b_nodes"][cid]["socket"], f"parent-b-{cid}-ep1")
+
+        ewire_direct("E", "imp-base", {"op": "ImportResponsibility", "responsibility_id": "r-base", "writer_epoch": "1"}, expected="ResponsibilityImportedReceipt")
+        ewire_direct("E", "imp-fx", {"op": "ImportFxResponsibility", "responsibility_id": "ob-fx-unclosed-20", "writer_epoch": "1"}, expected="FxResponsibilityImportedReceipt")
+        c3 = ewire_direct("E", "cap-r1", {"op": "CaptureExternal", "raw_utf8": r1_utf8, "json_pointer": "", "token": "fx-r1", "source_event_time": "70"}, expected="Recorded", source=cfg["src_market"])
+        ewire_direct(
+            "E",
+            "res-r1",
+            {
+                "op": "ResolveEvidence",
+                "evidence_id": "ev-r1",
+                "covered": [{"fact_key": c3["fact_key"], "token": "fx-r1", "fact_hash": c3["fact_hash"]}],
+                "frontier": {"source_namespace": MARKET_NS, "source_epoch": MARKET_EPOCH, "cursor": "70"},
+                "dependency_version": "parent-r1/1",
+            },
+            expected="Resolved",
+            source=cfg["src_market"],
+        )
+        for cid in ("alpha", "beta"):
+            cap = ewire_direct("E", f"cap-open-{cid}", {"op": "CaptureExternal", "raw_utf8": cfg["openers"][cid], "json_pointer": "/events/0", "token": f"tok-opening-{cid}", "source_event_time": None}, expected="Recorded")
+            ewire_direct(f"B:{cid}", f"apply-open-{cid}", {"op": "ApplyAllocation", "fact_key": cap["fact_key"], "allocation_id": f"allocation-{cid}", "expected_fact_hash": cap["fact_hash"]}, expected="Applied")
+            ewire_direct(f"B:{cid}", f"bind-{cid}", cfg["voice_bindings"][cid], expected="VoiceBound")
+            ewire_direct(f"B:{cid}", f"prep-{cid}", {"op": "PrepareDecision", "decision_id": cid, "plan_hash": digest(cfg["plans"][cid]), "writer_epoch": "1"}, expected="PreparedReceipt")
+
+        res_main = ewire_direct("E", "reserve-main", {"op": "Reserve", "slot_id": "slot-main", "request_set_hash": digest(cfg["slots"]["slot-main"]["applicants"]), "writer_epoch": "1"}, expected="ReserveReceipt")
+        grants = {g["decision_id"]: g["grant_id"] for g in res_main["record"]["grants"]}
+        for cid in ("alpha", "beta"):
+            ewire_direct(f"B:{cid}", f"commit-{cid}", {"op": "CommitDecision", "decision_id": cid, "plan_hash": digest(cfg["plans"][cid]), "grant_id": grants[cid], "writer_epoch": "1"}, expected="LocalCommitReceipt")
+            ewire_direct("E", f"dispatch-{cid}", {"op": "MakeDispatchable", "decision_id": cid, "plan_hash": digest(cfg["plans"][cid]), "writer_epoch": "1"}, expected="DispatchableReceipt")
+
+        q_pre_r2 = ewire_direct("E", "q-pre-r2", {"op": "QueryFxValuation", "as_known_ns": None, "cut": None}, expected="EconomicFxValuation")
+        assert q_pre_r2["fx_valuation"]["schema_revision"] == "fx-valuation/1"
+        assert q_pre_r2["fx_valuation"]["summary"]["evaluated_total"] == "90"
+
+        freeze = cfg["fin_data"]["exact_release"]
+        q_a = cfg["plans"]["alpha"]
+        static_alpha_req = {
+            "op": "ReleaseExact",
+            "decision_id": "alpha",
+            "command_id": "cmd-alpha",
+            "plan_hash": digest(change_for_plan(q_a)),
+            "certificate": {
+                "rd11_policy": freeze["rd11_policy"],
+                "responsibility_refs": [grants["alpha"]],
+                "structure_dependencies": [f"{q_a['s_ref']['object_id']}@{q_a['s_ref']['object_hash']}"],
+                "market_dependencies": freeze["market_dependencies"],
+                "rule_revision": freeze["rule_revision"],
+                "conditions": freeze["conditions"],
+            },
+            "x_id": "X",
+            "x_epoch": "1",
+            "writer_epoch": "1",
+        }
+        parent_rel_alpha = ewire_direct("E", "release-alpha", static_alpha_req, expected="ReleasedExactReceipt")
+        assert parent_rel_alpha["record"]["command"]["model_ref"]["content_hash"] == digest(x_model)
+        assert parent_rel_alpha["record"]["command"]["certificate"]["market_dependencies"] == ["TestOnly-market/nonfx-legacy-v6"]
+        write_pretty(out / "arm6_parent_bd0933e97e_alpha_receipt.json", parent_rel_alpha)
+
+        ewire_direct("E", "cap-r2", {"op": "CaptureExternal", "raw_utf8": r2_utf8, "json_pointer": "", "token": "fx-r2", "source_event_time": "70"}, expected="Recorded", source=cfg["src_market"])
+        q_parent_r2 = ewire_direct("E", "q-r2", {"op": "QueryFxValuation", "as_known_ns": None, "cut": None}, expected="EconomicFxValuation")
+        assert q_parent_r2["fx_valuation"]["summary"]["evaluated_total"] == "110"
+    finally:
+        for p, out_f, err_f in procs:
+            if p.poll() is None:
+                p.terminate()
+                p.wait(timeout=8)
+            out_f.close()
+            err_f.close()
+        procs.clear()
+
+    # Phase 2: Candidate binaries recover & audit the REAL parent-written FIN/6+FX DB!
+    cand_rec_e = run_cli([str(candidate_bins / "e_economic_session"), "recover", "--manifest", str(cfg["manifest_path"]), "--db", cfg["e_node"]["db"]])
+    assert cand_rec_e.returncode == 0, (cand_rec_e.stdout, cand_rec_e.stderr)
+    cand_rec_e_doc = json.loads(cand_rec_e.stdout)
+    assert cand_rec_e_doc["kind"] == "Recovered" and cand_rec_e_doc["writer_epoch"] == "2", cand_rec_e_doc
+    for cid in ("alpha", "beta"):
+        rb = run_cli([str(candidate_bins / "b_chong_session"), "recover", "--manifest", str(cfg["manifest_path"]), "--chong", cid, "--db", cfg["b_nodes"][cid]["db"]])
+        assert rb.returncode == 0 and json.loads(rb.stdout)["writer_epoch"] == "2", (cid, rb.stdout, rb.stderr)
+
+    # Candidate MUST refuse silent migration of parent fx-valuation/1 DB to fx-valuation/2
+    up_manifest = copy.deepcopy(cfg["manifest"])
+    up_manifest["fx_valuation"]["schema_revision"] = "fx-valuation/2"
+    up_mpath = write_canon(run_dir / "upgrade-v2-manifest.json", up_manifest)
+    up_rec = run_cli([str(candidate_bins / "e_economic_session"), "recover", "--manifest", str(up_mpath), "--db", cfg["e_node"]["db"]])
+    assert up_rec.returncode != 0 and "IdentityConflict" in up_rec.stderr, (up_rec.returncode, up_rec.stderr)
+
+    if Path(cfg["e_node"]["socket"]).exists():
+        Path(cfg["e_node"]["socket"]).unlink()
+    try:
+        spawn([str(candidate_bins / "e_economic_session"), "serve", "--manifest", str(cfg["manifest_path"]), "--db", cfg["e_node"]["db"], "--epoch", "2"], cfg["e_node"]["socket"], "cand-e-ep2")
+        cq_cur = ewire_direct("E", "cand-q-cur", {"op": "QueryFxValuation", "as_known_ns": None, "cut": None}, expected="EconomicFxValuation", producer_epoch="2")
+        assert cq_cur["cut"] == q_parent_r2["cut"] and cq_cur["fx_valuation"]["summary"]["evaluated_total"] == "110"
+        assert cq_cur["fx_valuation"]["schema_revision"] == "fx-valuation/1"
+
+        cq_hist = ewire_direct("E", "cand-q-hist", {"op": "QueryFxValuation", "as_known_ns": None, "cut": q_pre_r2["cut"]}, expected="EconomicFxValuation", producer_epoch="2")
+        assert cq_hist["cut"] == q_pre_r2["cut"] and cq_hist["fx_valuation"]["summary"]["evaluated_total"] == "90"
+
+        cq_cmd = ewire_direct("E", "cand-q-cmd", {"op": "QueryCommand", "command_id": "cmd-alpha", "cut": None, "as_known_ns": None}, expected="EconomicCommand", producer_epoch="2")
+        assert canonical(cq_cmd["record"]["command"]) == canonical(parent_rel_alpha["record"]["command"])
+
+        # Same & new message_id retry on candidate returns exact parent original ReleasedExactReceipt
+        cand_retry_same = ewire_direct("E", "release-alpha", static_alpha_req, expected="ReleasedExactReceipt", producer_epoch="2")
+        assert canonical(cand_retry_same) == canonical(parent_rel_alpha)
+        cand_retry_new = ewire_direct("E", "cand-retry-alpha-new-msg", static_alpha_req, expected="ReleasedExactReceipt", producer_epoch="2")
+        assert cand_retry_new["cut"] == parent_rel_alpha["cut"] and canonical(cand_retry_new["record"]) == canonical(parent_rel_alpha["record"])
+    finally:
+        for p, out_f, err_f in procs:
+            if p.poll() is None:
+                p.terminate()
+                p.wait(timeout=8)
+            out_f.close()
+            err_f.close()
+        procs.clear()
+
+    with (run_dir / "wire.jsonl").open("w", encoding="utf-8") as f:
+        for item in wire_log:
+            f.write(json.dumps(item, ensure_ascii=False, sort_keys=True) + "\n")
+
+    return {
+        "status": "PASS",
+        "parent_binaries_sha256": {
+            "e_economic_session": file_digest(parent_bins / "e_economic_session"),
+            "b_chong_session": file_digest(parent_bins / "b_chong_session"),
+        },
+        "finance_schema": "tb03b-finance/6",
+        "fx_schema": "fx-valuation/1",
+        "parent_written_alpha_release_cut": parent_rel_alpha["cut"],
+        "parent_written_overcap_cut": q_parent_r2["cut"],
+        "candidate_recover_epoch": cand_rec_e_doc["writer_epoch"],
+        "candidate_reread_and_original_receipt_retry_exact_match": True,
+        "silent_migration_v1_to_v2_refused": up_rec.stderr.strip(),
+    }
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--bin", type=Path, required=True)
     parser.add_argument("--fixtures", type=Path, required=True)
     parser.add_argument("--out", type=Path, required=True)
+    parser.add_argument("--parent-bin", type=Path, default=None)
     args = parser.parse_args()
 
     bins = args.bin.resolve()
@@ -2941,18 +3564,25 @@ def main() -> int:
     arm2 = run_arm2_unrelated_revision_control(bins, out)
     arm3 = run_arm3_pure_non_fx_legacy_and_config_guards(bins, fixtures, out)
     arm4 = run_arm4_fin5_fx_compat_and_old_db_recovery(bins, fixtures, out)
+    arm5 = run_arm5_r2_overcap_model_coverage_precedes_fx_gate(bins, fixtures, out)
+    arms = {
+        "arm1_ce_s07_main": arm1,
+        "arm2_unrelated_healthy_chong": arm2,
+        "arm3_pure_nonfx_legacy": arm3,
+        "arm4_fin5_fx_compat_and_old_db_recovery": arm4,
+        "arm5_r2_overcap_model_coverage_precedes_fx_gate": arm5,
+    }
+    if args.parent_bin is not None:
+        arms["arm6_parent_bd0933e97e_fin6_fx_v1_recovery"] = run_arm6_parent_bd0933e97e_fin6_fx_v1_recovery(
+            args.parent_bin.resolve(), bins, fixtures, out
+        )
 
     summary = {
         "issue": "#1407 C3 CE-S07",
         "status": "PASS",
         "binaries_sha256": bin_hashes,
         "fixtures_sha256": fixture_hashes,
-        "arms": {
-            "arm1_ce_s07_main": arm1,
-            "arm2_unrelated_healthy_chong": arm2,
-            "arm3_pure_nonfx_legacy": arm3,
-            "arm4_fin5_fx_compat_and_old_db_recovery": arm4,
-        },
+        "arms": arms,
     }
     write_pretty(out / "summary.json", summary)
     print("PASS CE-S07 integrated verification:", json.dumps({"status": "PASS", "out": str(out)}, ensure_ascii=False))

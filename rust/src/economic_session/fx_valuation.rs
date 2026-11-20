@@ -24,6 +24,10 @@ use std::io::Read;
 use std::path::Path;
 
 pub(super) const SCHEMA: &str = "fx-valuation/1";
+/// #1407 C3 CE-S07：显式选择、持久固定、可与既有静态 `fx-valuation/1` 区分的动态放行绑定子合同。
+/// 仅允许搭配 `tb03b-finance/6`；`init` 将 `fx-valuation/2` 持久化写入 `meta[fx_valuation_revision]`，
+/// `audit`/`recover` 严格核对不得暗迁移或降级回静态 `fx-valuation/1`。
+pub(super) const SCHEMA_RELEASE_BOUND: &str = "fx-valuation/2";
 pub(super) const QUOTE_SCHEMA: &str = "testonly-fx-quote/1";
 pub(super) const OBLIGATION_INPUT_SCHEMA: &str = "testonly-fx-obligation-input/1";
 pub(super) const META_KEY: &str = "fx_valuation_revision";
@@ -41,33 +45,38 @@ pub(super) fn enabled(config: &Config) -> bool {
         .is_some_and(|v| !v.is_null())
 }
 
-pub(super) fn bound_revision(config: &Config) -> Result<Option<&'static str>, String> {
-    if validate_config(&config.manifest)? {
-        Ok(Some(SCHEMA))
-    } else {
-        Ok(None)
-    }
+pub(super) fn release_bound_enabled(config: &Config) -> bool {
+    config
+        .manifest
+        .get(CONTRACT_FIELD)
+        .and_then(|v| v.get("schema_revision"))
+        .and_then(Value::as_str)
+        == Some(SCHEMA_RELEASE_BOUND)
 }
 
-pub(super) fn validate_config(manifest: &Value) -> Result<bool, String> {
+pub(super) fn bound_revision(config: &Config) -> Result<Option<&'static str>, String> {
+    parse_config_revision(&config.manifest)
+}
+
+fn parse_config_revision(manifest: &Value) -> Result<Option<&'static str>, String> {
     let Some(fx) = manifest.get(CONTRACT_FIELD).filter(|v| !v.is_null()) else {
-        return Ok(false);
+        return Ok(None);
     };
     if !super::store::component_clock(manifest) {
         return Err(
-            "UnsupportedCapability：fx-valuation/1 仅支持显式 TestOnly 或精确放行 logical-bar/1 模拟会话"
+            "UnsupportedCapability：fx-valuation/1 与 fx-valuation/2 仅支持显式 TestOnly 或精确放行 logical-bar/1 模拟会话"
                 .into(),
         );
     }
     if !manifest.get("finance").is_some_and(|v| !v.is_null()) {
         return Err(
-            "MissingDependency：启用 fx-valuation/1 须同时配置 finance 子合同，不得使用平行 manifest 财务清单"
+            "MissingDependency：启用 fx-valuation 须同时配置 finance 子合同，不得使用平行 manifest 财务清单"
                 .into(),
         );
     }
     if !super::book::rules(manifest)?.is_tb03c() {
         return Err(
-            "SchemaUnsupported：启用 fx-valuation/1 须同时启用 tb03c-book/1 或 /2 以支持正式 ResolveEvidence"
+            "SchemaUnsupported：启用 fx-valuation 须同时启用 tb03c-book/1 或 /2 以支持正式 ResolveEvidence"
                 .into(),
         );
     }
@@ -80,14 +89,38 @@ pub(super) fn validate_config(manifest: &Value) -> Result<bool, String> {
             "obligation_input_sha256",
         ],
     )?;
-    if fx["schema_revision"] != SCHEMA || fx["kind"] != "TestOnly" {
-        return Err("SchemaUnsupported：fx_valuation 须为 TestOnly 的 fx-valuation/1".into());
+    if fx["kind"] != "TestOnly" {
+        return Err(
+            "SchemaUnsupported：fx_valuation 须为 TestOnly 的 fx-valuation/1 或 fx-valuation/2"
+                .into(),
+        );
     }
+    let rev = match fx["schema_revision"].as_str() {
+        Some(SCHEMA) => SCHEMA,
+        Some(SCHEMA_RELEASE_BOUND) => {
+            if manifest["finance"]["schema_revision"].as_str() != Some("tb03b-finance/6") {
+                return Err(
+                    "SchemaUnsupported：fx-valuation/2 动态放行绑定仅支持 tb03b-finance/6".into(),
+                );
+            }
+            SCHEMA_RELEASE_BOUND
+        }
+        _ => {
+            return Err(
+                "SchemaUnsupported：fx_valuation 须为 TestOnly 的 fx-valuation/1 或 fx-valuation/2"
+                    .into(),
+            )
+        }
+    };
     if !Path::new(required(fx, "obligation_input_path")?).is_absolute() {
         return Err("InvalidDomain：外币义务原件路径须绝对路径".into());
     }
     digest(required(fx, "obligation_input_sha256")?)?;
-    Ok(true)
+    Ok(Some(rev))
+}
+
+pub(super) fn validate_config(manifest: &Value) -> Result<bool, String> {
+    Ok(parse_config_revision(manifest)?.is_some())
 }
 
 pub(super) fn pinned_obligation_raw(config: &Config) -> Result<String, String> {
@@ -1260,8 +1293,19 @@ fn derive_state(
         "initial_foreign_responsibilities_complete": initial_foreign_responsibilities_complete
     });
 
+    let schema_revision = match config {
+        Some(cfg) if release_bound_enabled(cfg) => SCHEMA_RELEASE_BOUND,
+        Some(_) => SCHEMA,
+        None => image
+            .get(CONTRACT_FIELD)
+            .and_then(|v| v.get("schema_revision"))
+            .and_then(Value::as_str)
+            .filter(|s| *s == SCHEMA || *s == SCHEMA_RELEASE_BOUND)
+            .unwrap_or(SCHEMA),
+    };
+
     let json = json!({
-        "schema_revision": SCHEMA,
+        "schema_revision": schema_revision,
         "kind": "TestOnly",
         "baseline_imported": baseline_imported,
         "initial_foreign_responsibilities_complete": initial_foreign_responsibilities_complete,

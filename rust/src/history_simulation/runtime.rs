@@ -173,9 +173,13 @@ fn validate_fx_release_bound_certificate(
             return Err("Unsupported：FX 放行条件清单元数据与获准 manifest 不一致".into());
         }
         check_real(&got.coverage_proof)?;
-        if !got.coverage_proof.starts_with("fx-valuation/1:") {
+        if !got
+            .coverage_proof
+            .starts_with(crate::economic_session::FX_COVERAGE_PROOF_PREFIX)
+        {
             return Err(format!(
-                "Unsupported：FX 放行条件 coverage_proof 须以 fx-valuation/1: 绑定真实切面（{}）",
+                "Unsupported：FX 放行条件 coverage_proof 须以 {} 绑定真实切面（{}）",
+                crate::economic_session::FX_COVERAGE_PROOF_PREFIX,
                 got.coverage_proof
             ));
         }

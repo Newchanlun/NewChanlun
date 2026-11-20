@@ -9,9 +9,11 @@ use serde_json::{json, Value};
 use std::collections::BTreeSet;
 
 pub(super) const AUTHORITY_WIRE: &str = "x-exact-authority/1";
-/// #1407 C3 CE-S07：冻结财务原件与 X profile 声明“由 E 在真实 ReleaseExact 切面动态绑定可核证 FX 依赖”的唯一显式标记。
-/// 纯非 FX 合同不使用该标记；真实交付的 ExactCommand 证书中也绝不得残留该标记。
-pub(crate) const FX_RELEASE_BOUND_MARKER: &str = "fx-valuation/1:release-bound";
+/// #1407 C3 CE-S07：冻结财务原件与 X profile 显式选择“由 E 在真实 ReleaseExact 切面动态绑定可核证 FX 依赖”的唯一标记
+/// （仅搭配 `tb03b-finance/6` + `fx-valuation/2`）。纯非 FX 与既有静态 `fx-valuation/1` 合同不使用该标记；
+/// 真实放行交付的 `ReleasedExact` 证书中也绝不得残留该标记。
+pub(crate) const FX_RELEASE_BOUND_MARKER: &str = "fx-valuation/2:release-bound";
+pub(crate) const FX_COVERAGE_PROOF_PREFIX: &str = "fx-valuation/2:";
 
 /// 拒绝在 FX 精确命令/条件中使用历史控制占位名、全局 latest 或布尔 admissible 代替真实依赖。
 pub(crate) fn is_fx_placeholder_text(s: &str) -> bool {
@@ -23,6 +25,7 @@ pub(crate) fn is_fx_placeholder_text(s: &str) -> bool {
                 | "controlled-invalidation"
                 | "controlled-evidence"
                 | "controlled-coverage"
+                | "fx-valuation/1:release-bound"
         )
         || s == "latest"
         || s.contains(":latest")
@@ -364,13 +367,13 @@ pub(super) fn uses_fx_release_bound_marker(d: &Value) -> bool {
     value_contains_str(&d["exact_release"], FX_RELEASE_BOUND_MARKER)
 }
 
-/// 当 E 同时启用 `fx-valuation/1` 与精确放行时，冻结 `exact_release` 必须显式声明 `fx-valuation/1:release-bound`，
+/// 当 E 显式选择 `tb03b-finance/6` + `fx-valuation/2` 时，冻结 `exact_release` 必须显式声明 `fx-valuation/2:release-bound`，
 /// 不得在冻结原件中携带 `TestOnly-market/*` 或 `controlled-*` 占位名。
 pub(super) fn validate_fx_section(d: &Value) -> Result<(), String> {
     let s = &d["exact_release"];
     if s["market_dependencies"] != json!([FX_RELEASE_BOUND_MARKER]) {
         return Err(format!(
-            "Unsupported：启用 fx-valuation/1 时 exact_release.market_dependencies 须显式声明 [{FX_RELEASE_BOUND_MARKER}]，不得使用静态占位名"
+            "Unsupported：启用 fx-valuation/2 时 exact_release.market_dependencies 须显式声明 [{FX_RELEASE_BOUND_MARKER}]，不得使用静态占位名"
         ));
     }
     let conditions = s["conditions"]
@@ -379,7 +382,7 @@ pub(super) fn validate_fx_section(d: &Value) -> Result<(), String> {
     for c in conditions {
         if !condition_uses_fx_marker(c) {
             return Err(format!(
-                "Unsupported：启用 fx-valuation/1 时获准条件清单各项须统一声明 {FX_RELEASE_BOUND_MARKER}，不得残留 controlled-* 占位名"
+                "Unsupported：启用 fx-valuation/2 时获准条件清单各项须统一声明 {FX_RELEASE_BOUND_MARKER}，不得残留 controlled-* 占位名"
             ));
         }
     }
@@ -582,7 +585,7 @@ fn build_fx_certificate(
                 }
                 evs.extend(retired_refs.iter().cloned());
                 let proof = format!(
-                    "fx-valuation/1:e-release-cut=E:{}:{};cap={}@v{}:{}/{};chains={}",
+                    "{FX_COVERAGE_PROOF_PREFIX}e-release-cut=E:{}:{};cap={}@v{}:{}/{};chains={}",
                     fx.e_prev_seq,
                     fx.e_prev_root,
                     fx.policy_id,
@@ -613,7 +616,7 @@ fn build_fx_certificate(
                     evs.extend(quote_covs.iter().cloned());
                 }
                 let proof = format!(
-                    "fx-valuation/1:s-market-closure:e-cut=E:{}:{};structure={};chains={}",
+                    "{FX_COVERAGE_PROOF_PREFIX}s-market-closure:e-cut=E:{}:{};structure={};chains={}",
                     fx.e_prev_seq, fx.e_prev_root, structure_dep, chain_proof_summary
                 );
                 (deps, invs, evs, proof)
@@ -637,7 +640,7 @@ fn build_fx_certificate(
                     format!("eligibility-ref:{eligibility_ref}"),
                 ],
                 format!(
-                    "fx-valuation/1:x-local-tx:{x_id}@{x_epoch}:e-cut=E:{}:{}",
+                    "{FX_COVERAGE_PROOF_PREFIX}x-local-tx:{x_id}@{x_epoch}:e-cut=E:{}:{}",
                     fx.e_prev_seq, fx.e_prev_root
                 ),
             ),
@@ -653,7 +656,7 @@ fn build_fx_certificate(
                 ],
                 vec![e_cut_ref.clone(), format!("model-ref:{model_ref_str}")],
                 format!(
-                    "fx-valuation/1:model-coverage:{domain_id}:{model_ref_str}:e-cut=E:{}:{}",
+                    "{FX_COVERAGE_PROOF_PREFIX}model-coverage:{domain_id}:{model_ref_str}:e-cut=E:{}:{}",
                     fx.e_prev_seq, fx.e_prev_root
                 ),
             ),
@@ -709,6 +712,51 @@ pub(super) fn reject_fx_placeholders_in_certificate(cert: &Value) -> Result<(), 
         Ok(())
     }
     walk(cert)
+}
+
+/// `fx-valuation/2` 域外命令（`model_coverage == Some(ModelOrderUnspecified)`）在进入 FX 政策门前
+/// 即判定为持久 `Unsupported`（永不放行）：此处核固定计划字段与不含静态占位名，允许未实例化的模板标记
+/// `FX_RELEASE_BOUND_MARKER` 或调用方按先前切面组装的非占位动态证书。
+pub(super) fn check_fx_unsupported_certificate(
+    given: &Value,
+    template_cert: &Value,
+    grant_id: &str,
+) -> Result<(), String> {
+    if given["rd11_policy"] != template_cert["rd11_policy"]
+        || given["rule_revision"] != template_cert["rule_revision"]
+        || given["structure_dependencies"] != template_cert["structure_dependencies"]
+        || !given["responsibility_refs"]
+            .as_array()
+            .is_some_and(|a| a.iter().any(|x| x == grant_id))
+    {
+        return Err(
+            "IdentityConflict：域外命令证书的固定政策/结构/grant 责任与冻结计划不符".into(),
+        );
+    }
+    fn walk_no_placeholder(v: &Value) -> Result<(), String> {
+        match v {
+            Value::String(s) => {
+                if is_fx_placeholder_text(s) {
+                    return Err(format!(
+                        "IdentityConflict：FX 精确命令证书不得含占位名/latest/admissible（{s}）"
+                    ));
+                }
+            }
+            Value::Array(a) => {
+                for item in a {
+                    walk_no_placeholder(item)?;
+                }
+            }
+            Value::Object(m) => {
+                for item in m.values() {
+                    walk_no_placeholder(item)?;
+                }
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+    walk_no_placeholder(given)
 }
 
 /// 由冻结原件与 E 持有的 grant 组装 ExactCommand；同输入逐字节同输出。

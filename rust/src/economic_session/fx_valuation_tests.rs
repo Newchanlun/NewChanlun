@@ -2449,6 +2449,7 @@ fn ce_s07_v6_verifiable_fx_certificate_tamper_old_receipt_priority_and_scope_con
     manifest["finance"]["structure"]["binary_sha256"] = json!(stub_sha);
     manifest["finance"]["structure"]["db"] = json!(space.dir.join("s.db"));
     manifest["finance"]["structure"]["session_id"] = json!(session_id);
+    manifest["fx_valuation"]["schema_revision"] = json!("fx-valuation/2");
     manifest["fx_valuation"]["obligation_input_path"] = json!(fx_ob_path);
     manifest["fx_valuation"]["obligation_input_sha256"] = json!(fx_ob_sha);
 
@@ -2553,17 +2554,48 @@ fn ce_s07_v6_verifiable_fx_certificate_tamper_old_receipt_priority_and_scope_con
             "pure non-FX E must reject fx-valuation/1:release-bound: {nf_err}"
         );
 
-        // FIN/5+FX 夹带新 release-bound 标记须被拒绝（不混写旧合同语义）。
+        // FIN/5+FX(v2) 组合在 Config::load 即被 SchemaUnsupported 拒绝；
+        // FIN/5+FX(v1) 与 FIN/6+FX(v1) 夹带新 release-bound 标记在首次写入被 Unsupported 拒绝。
         let mut fin5_with_marker_data = fin_data.clone();
         fin5_with_marker_data["schema_revision"] = json!("tb03b-finance/5");
         let (f5_in_path, f5_in_sha) =
             space.save_json("fin5-marker-input.json", &fin5_with_marker_data);
-        let mut fin5_marker_manifest = manifest.clone();
-        fin5_marker_manifest["e"]["db"] = json!(space.dir.join("f5m-e.db"));
-        fin5_marker_manifest["finance"]["schema_revision"] = json!("tb03b-finance/5");
-        fin5_marker_manifest["finance"]["input_path"] = json!(f5_in_path);
-        fin5_marker_manifest["finance"]["input_sha256"] = json!(f5_in_sha);
-        let (f5m_path, _) = space.save_json("fin5-marker-manifest.json", &fin5_marker_manifest);
+        let mut fin5_v2_manifest = manifest.clone();
+        fin5_v2_manifest["e"]["db"] = json!(space.dir.join("f5v2-e.db"));
+        fin5_v2_manifest["finance"]["schema_revision"] = json!("tb03b-finance/5");
+        fin5_v2_manifest["finance"]["input_path"] = json!(f5_in_path);
+        fin5_v2_manifest["finance"]["input_sha256"] = json!(f5_in_sha);
+        let (f5v2_path, _) = space.save_json("fin5-v2-manifest.json", &fin5_v2_manifest);
+        let f5v2_err = Config::load(Path::new(&f5v2_path), &space.dir.join("f5v2-e.db"), None)
+            .err()
+            .expect("FIN/5 + fx-valuation/2 must fail config load");
+        assert!(
+            f5v2_err.starts_with("SchemaUnsupported") && f5v2_err.contains("fx-valuation/2"),
+            "FIN/5 + fx-valuation/2 must fail config load: {f5v2_err}"
+        );
+
+        let mut fin6_v1_marker_manifest = manifest.clone();
+        fin6_v1_marker_manifest["e"]["db"] = json!(space.dir.join("f6v1m-e.db"));
+        fin6_v1_marker_manifest["fx_valuation"]["schema_revision"] = json!("fx-valuation/1");
+        let (f6v1m_path, _) =
+            space.save_json("fin6-v1-marker-manifest.json", &fin6_v1_marker_manifest);
+        let f6v1m_cfg =
+            Config::load(Path::new(&f6v1m_path), &space.dir.join("f6v1m-e.db"), None).unwrap();
+        init(&f6v1m_cfg).unwrap();
+        let (mut f6v1m_db, _) = open(&f6v1m_cfg.db, false).unwrap();
+        let f6v1m_resp = send(&mut f6v1m_db, &f6v1m_cfg, 1, &nf_req);
+        assert_eq!(f6v1m_resp["kind"], "Error", "{f6v1m_resp}");
+        let f6v1m_err = f6v1m_resp["error"].as_str().unwrap();
+        assert!(
+            f6v1m_err.starts_with("Unsupported")
+                && f6v1m_err.contains(super::exact_command::FX_RELEASE_BOUND_MARKER),
+            "FIN/6 + fx-valuation/1 must reject release-bound marker: {f6v1m_err}"
+        );
+
+        let mut fin5_v1_marker_manifest = fin5_v2_manifest.clone();
+        fin5_v1_marker_manifest["e"]["db"] = json!(space.dir.join("f5m-e.db"));
+        fin5_v1_marker_manifest["fx_valuation"]["schema_revision"] = json!("fx-valuation/1");
+        let (f5m_path, _) = space.save_json("fin5-marker-manifest.json", &fin5_v1_marker_manifest);
         let f5_cfg = Config::load(Path::new(&f5m_path), &space.dir.join("f5m-e.db"), None).unwrap();
         init(&f5_cfg).unwrap();
         let (mut f5_db, _) = open(&f5_cfg.db, false).unwrap();
@@ -2573,7 +2605,7 @@ fn ce_s07_v6_verifiable_fx_certificate_tamper_old_receipt_priority_and_scope_con
         assert!(
             f5_err.starts_with("Unsupported")
                 && f5_err.contains(super::exact_command::FX_RELEASE_BOUND_MARKER),
-            "FIN/5+FX must reject fx-valuation/1:release-bound marker: {f5_err}"
+            "FIN/5 + fx-valuation/1 must reject release-bound marker: {f5_err}"
         );
     }
 
@@ -2964,4 +2996,493 @@ fn ce_s07_v6_verifiable_fx_certificate_tamper_old_receipt_priority_and_scope_con
 
     audit(&s.e_db, &s.e_config).unwrap();
     assert_eq!(recover(&s.e_config).unwrap()["writer_epoch"], "2");
+
+    // 确认 meta 持久锁定 fx-valuation/2，不得降级为 fx-valuation/1 恢复。
+    let stored_fx_rev: String = s
+        .e_db
+        .query_row(
+            "SELECT v FROM meta WHERE k='fx_valuation_revision'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(stored_fx_rev, "fx-valuation/2");
+    let mut downgrade_manifest = manifest.clone();
+    downgrade_manifest["fx_valuation"]["schema_revision"] = json!("fx-valuation/1");
+    let (dg_path, _) = s
+        .space
+        .save_json("downgrade-v1-manifest.json", &downgrade_manifest);
+    let dg_cfg = Config::load(Path::new(&dg_path), &s.e_config.db, None).unwrap();
+    let dg_err = recover(&dg_cfg).unwrap_err();
+    assert!(
+        dg_err.starts_with("IdentityConflict"),
+        "fx-valuation/2 DB must refuse downgrade recovery to fx-valuation/1: {dg_err}"
+    );
+}
+
+/// 非作者财务审阅 BLOCK 项专项回归：
+/// 1) 业务判定顺序（恢复父版本 bd0933e97e）：在 r2=110/100 超限同一场景，先识别模型域外 batched 命令
+///    并写持久 `Unsupported / ModelOrderUnspecified`（不进 FX 政策门），模型域内 single 命令才进 FX 政策门
+///    被 `AwaitingPolicy` 拒绝；同时保持已放行命令同/新 message_id 原收据优先；
+/// 2) 显式合同隔离：`tb03b-finance/6 + fx-valuation/1` 静态证书完整兼容（首次 ImportResponsibility、
+///    ReleaseExact、recover/audit 均通过，且不得暗迁为 fx-valuation/2）；`fx-valuation/2` 缺依赖严格拒绝，
+///    不由失败降级转静态。
+#[test]
+fn fx_v2_model_coverage_precedes_fx_gate_and_v1_static_v6_remains_compatible() {
+    let model = crate::history_simulation::tests::model();
+
+    // --- Part A: tb03b-finance/6 + fx-valuation/2，r2=110/100 同一场景对比域外 batched vs 域内 single ---
+    {
+        let base = Ac2Session::build(
+            "order-v2-template",
+            "100",
+            "0",
+            "baseline-cash-0",
+            vec![],
+            false,
+            FX_OBLIGATIONS_RAW,
+        );
+        let space = Space::new("fx-v2-model-order");
+        let session_id = "fx-v2-model-order".to_owned();
+
+        // alpha=30 (single), beta=25 (2*12+1, single), gamma=15 (3*5+0, batched) -> 现金 70 + 外币 20 = 90/100; r2 -> 110/100
+        let mut fin_data = base.fin_data.clone();
+        decorate_fx_release_bound_v6_input(&mut fin_data, json!(model.model_ref()));
+        for p in fin_data["plans"].as_array_mut().unwrap() {
+            match p["decision_id"].as_str().unwrap() {
+                "beta" => {
+                    p["quantity"] = json!("2");
+                    p["limit_price"] = json!("12");
+                    p["fee_tail"] = json!("1");
+                    p["o_ref"]["quantity"] = json!("2");
+                    p["exact"]["first_quantity"] = json!("2");
+                    p["exact"]["concurrency"] = json!("single");
+                }
+                "gamma" => {
+                    p["slot_id"] = json!("slot-main");
+                    p["quantity"] = json!("3");
+                    p["limit_price"] = json!("5");
+                    p["fee_tail"] = json!("0");
+                    p["o_ref"]["quantity"] = json!("3");
+                    p["exact"]["first_quantity"] = json!("3");
+                    p["exact"]["concurrency"] = json!("batched");
+                }
+                _ => {}
+            }
+        }
+        let members = json!(["alpha", "beta", "gamma"]);
+        fin_data["slots"] = json!([{
+            "slot_id": "slot-main",
+            "applicants": members,
+            "input_end": {
+                "kind": "ControlledInputEnd",
+                "source_id": "ac2-r2-fixture",
+                "source_epoch": "1",
+                "watermark": "2",
+                "complete_request_hash": hash(&members),
+            }
+        }]);
+        let (fin_path, fin_sha) = space.save_json("finance-input.json", &fin_data);
+        let (fx_ob_path, fx_ob_sha) = space.save_raw("fx-obligations.json", FX_OBLIGATIONS_RAW);
+
+        let s_obj = json!({"object_id": "unit-S-object", "kind": "UnitStructuralTrustRoot", "branch": "RISING"});
+        let basis = json!({
+            "kind": "FinancialBasis",
+            "session_id": session_id,
+            "session_generation": "1",
+            "writer_epoch": "1",
+            "pending_revision": false,
+            "commit_ns": "1",
+            "snapshot": {"profile_id": "unit", "objects": [s_obj]}
+        });
+        let (basis_path, _) = space.save_json("s-basis.json", &basis);
+        let stub = space.dir.join("s-stub.sh");
+        crate::economic_session::write_test_executable(
+            &stub,
+            &format!("#!/bin/sh\nexec /bin/cat '{basis_path}'\n"),
+            0o700,
+        );
+        let stub_sha = sha256_hex(&std::fs::read(&stub).unwrap());
+
+        let mut manifest = base.e_config.manifest.clone();
+        manifest["session_id"] = json!(session_id);
+        manifest["e"]["db"] = json!(space.dir.join("e.db"));
+        manifest["e"]["socket"] = json!(space.dir.join("e.sock"));
+        for r in manifest["chongs"].as_array_mut().unwrap() {
+            let cid = r["chong_id"].as_str().unwrap().to_owned();
+            r["db"] = json!(space.dir.join(format!("{cid}.db")));
+            r["socket"] = json!(space.dir.join(format!("{cid}.sock")));
+        }
+        manifest["finance"]["schema_revision"] = json!("tb03b-finance/6");
+        manifest["finance"]["input_path"] = json!(fin_path);
+        manifest["finance"]["input_sha256"] = json!(fin_sha);
+        manifest["finance"]["structure"]["binary"] = json!(stub);
+        manifest["finance"]["structure"]["binary_sha256"] = json!(stub_sha);
+        manifest["finance"]["structure"]["db"] = json!(space.dir.join("s.db"));
+        manifest["finance"]["structure"]["session_id"] = json!(session_id);
+        manifest["fx_valuation"]["schema_revision"] = json!("fx-valuation/2");
+        manifest["fx_valuation"]["obligation_input_path"] = json!(fx_ob_path);
+        manifest["fx_valuation"]["obligation_input_sha256"] = json!(fx_ob_sha);
+        let mut bars = serde_json::Map::new();
+        for (msg, bar) in [
+            ("imp-base", "1"),
+            ("imp-fx", "1"),
+            ("cap-r1", "1"),
+            ("res-r1", "1"),
+            ("cap-open-alpha", "1"),
+            ("apply-open-alpha", "1"),
+            ("bind-alpha", "1"),
+            ("prep-alpha", "1"),
+            ("cap-open-beta", "1"),
+            ("apply-open-beta", "1"),
+            ("bind-beta", "1"),
+            ("prep-beta", "1"),
+            ("cap-open-gamma", "1"),
+            ("apply-open-gamma", "1"),
+            ("bind-gamma", "1"),
+            ("prep-gamma", "1"),
+            ("reserve-main", "1"),
+            ("commit-alpha", "1"),
+            ("commit-beta", "1"),
+            ("commit-gamma", "1"),
+            ("dispatch-alpha", "1"),
+            ("dispatch-beta", "1"),
+            ("dispatch-gamma", "1"),
+            ("release-alpha-ok", "2"),
+            ("cap-r2", "3"),
+            ("release-alpha-retry-new", "3"),
+            ("release-gamma-batched-overcap", "3"),
+            ("release-beta-single-overcap", "3"),
+        ] {
+            bars.insert(msg.to_owned(), json!(bar));
+        }
+        manifest["clock"] = json!({
+            "kind": "logical-bar/1",
+            "bars": {"init": "0", "recover": ["10"], "messages": Value::Object(bars)}
+        });
+
+        let (mpath, _) = space.save_json("manifest.json", &manifest);
+        let e_config = Config::load(Path::new(&mpath), &space.dir.join("e.db"), None).unwrap();
+        init(&e_config).unwrap();
+        let (e_db, _) = open(&e_config.db, false).unwrap();
+        let mut b_configs = Vec::new();
+        let mut b_dbs = Vec::new();
+        for name in ["alpha", "beta", "gamma"] {
+            let bc = Config::load(
+                Path::new(&mpath),
+                &space.dir.join(format!("{name}.db")),
+                Some(name),
+            )
+            .unwrap();
+            init(&bc).unwrap();
+            let (bdb, _) = open(&bc.db, false).unwrap();
+            b_configs.push((name.to_owned(), bc));
+            b_dbs.push((name.to_owned(), bdb));
+        }
+        let mut s = Ac2Session {
+            space,
+            session_id,
+            e_config,
+            e_db,
+            b_configs,
+            b_dbs,
+            fin_data,
+            opening_docs: base.opening_docs.clone(),
+            voice_payloads: base.voice_payloads.clone(),
+        };
+
+        assert_eq!(
+            s.e_fin(
+                "imp-base",
+                json!({"op": "ImportResponsibility", "responsibility_id": "baseline-cash-0", "writer_epoch": "1"})
+            )["kind"],
+            "ResponsibilityImportedReceipt"
+        );
+        assert_eq!(
+            s.e_fin(
+                "imp-fx",
+                json!({"op": "ImportFxResponsibility", "responsibility_id": "ob-fx-unclosed-20", "writer_epoch": "1"})
+            )["kind"],
+            "FxResponsibilityImportedReceipt"
+        );
+        let r1 = s.capture_fx("cap-r1", FX_R1_RAW, "tok-r1");
+        assert_eq!(s.resolve_fx("res-r1", "ev-r1", &[&r1])["kind"], "Resolved");
+        s.prepare_all_chongs();
+        let slot_main = s.slot("slot-main");
+        let res = s.e_fin(
+            "reserve-main",
+            json!({"op": "Reserve", "slot_id": "slot-main", "request_set_hash": hash(&slot_main["applicants"]), "writer_epoch": "1"}),
+        );
+        assert_eq!(res["kind"], "ReserveReceipt", "{res}");
+        let grants: std::collections::BTreeMap<String, String> = res["record"]["grants"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|g| {
+                (
+                    g["decision_id"].as_str().unwrap().to_owned(),
+                    g["grant_id"].as_str().unwrap().to_owned(),
+                )
+            })
+            .collect();
+        for name in ["alpha", "beta", "gamma"] {
+            let p = s.plan(name);
+            assert_eq!(
+                s.b_send(
+                    name,
+                    &format!("commit-{name}"),
+                    json!({"op": "CommitDecision", "decision_id": name, "plan_hash": hash(&p), "grant_id": grants[name], "writer_epoch": "1"}),
+                )["kind"],
+                "LocalCommitReceipt"
+            );
+            assert_eq!(
+                s.e_fin(
+                    &format!("dispatch-{name}"),
+                    json!({"op": "MakeDispatchable", "decision_id": name, "plan_hash": hash(&p), "writer_epoch": "1"}),
+                )["kind"],
+                "DispatchableReceipt"
+            );
+        }
+
+        // r1=90/100 放行 alpha
+        let q_r1 = s.query_fx(1, "q-r1", Value::Null, Value::Null);
+        assert_eq!(q_r1["fx_valuation"]["schema_revision"], "fx-valuation/2");
+        assert_eq!(q_r1["fx_valuation"]["summary"]["evaluated_total"], "90");
+        let alpha_payload = s.release_exact_payload_from_query(&q_r1, "alpha", &grants["alpha"]);
+        let rel_alpha = s.e_fin("release-alpha-ok", alpha_payload.clone());
+        assert_eq!(rel_alpha["kind"], "ReleasedExactReceipt", "{rel_alpha}");
+
+        // r2 -> 110/100 超限
+        assert_eq!(
+            s.capture_fx("cap-r2", FX_R2_RAW, "tok-r2")["kind"],
+            "Recorded"
+        );
+        let q_r2 = s.query_fx(1, "q-r2", Value::Null, Value::Null);
+        assert_eq!(q_r2["fx_valuation"]["summary"]["evaluated_total"], "110");
+        assert_eq!(
+            q_r2["fx_valuation"]["summary"]["gate_status"],
+            "BlockedExceedsCap"
+        );
+
+        // 1) 已放行 alpha 同/新 message_id 原收据优先
+        let retry_same = s.e_fin("release-alpha-ok", alpha_payload.clone());
+        assert_eq!(retry_same, rel_alpha);
+        let retry_new = s.e_fin("release-alpha-retry-new", alpha_payload);
+        assert_eq!(retry_new["kind"], "ReleasedExactReceipt", "{retry_new}");
+        assert_eq!(retry_new["cut"], rel_alpha["cut"]);
+        assert_eq!(retry_new["record"], rel_alpha["record"]);
+
+        // 2) 模型域外 batched 命令 gamma：不进 FX 政策门，直接写持久 Unsupported / ModelOrderUnspecified
+        let gamma_payload = s.release_exact_payload("gamma", &grants["gamma"]);
+        let rel_gamma = s.e_fin("release-gamma-batched-overcap", gamma_payload);
+        assert_eq!(
+            rel_gamma["kind"], "ReleaseUnsupportedReceipt",
+            "out-of-domain batched must persist Unsupported even during r2=110/100: {rel_gamma}"
+        );
+        assert_eq!(rel_gamma["record"]["state"], "Unsupported");
+        assert_eq!(
+            rel_gamma["record"]["unsupported"]["reason"],
+            "ModelOrderUnspecified"
+        );
+        assert_eq!(rel_gamma["record"]["execution_eligibility"], "None");
+        let q_gamma = s.e_fin(
+            "q-cmd-gamma",
+            json!({"op": "QueryCommand", "command_id": "cmd-gamma", "cut": null, "as_known_ns": null}),
+        );
+        assert_eq!(q_gamma["state"], "Unsupported", "{q_gamma}");
+
+        // 3) 模型域内 single 命令 beta：进 FX 政策门被 AwaitingPolicy 拒绝，仍为 Dispatchable
+        let beta_payload = s.release_exact_payload_from_query(&q_r1, "beta", &grants["beta"]);
+        let rel_beta = s.e_fin("release-beta-single-overcap", beta_payload);
+        assert_eq!(rel_beta["kind"], "Error", "{rel_beta}");
+        assert!(
+            rel_beta["error"]
+                .as_str()
+                .unwrap()
+                .starts_with("AwaitingPolicy"),
+            "in-domain single must hit FX gate during r2=110/100: {rel_beta}"
+        );
+        let q_beta = s.e_fin(
+            "q-cmd-beta",
+            json!({"op": "QueryCommand", "command_id": "cmd-beta", "cut": null, "as_known_ns": null}),
+        );
+        assert_eq!(q_beta["state"], "Dispatchable", "{q_beta}");
+
+        audit(&s.e_db, &s.e_config).unwrap();
+        assert_eq!(recover(&s.e_config).unwrap()["writer_epoch"], "2");
+    }
+
+    // --- Part B: 既有 tb03b-finance/6 + fx-valuation/1 静态证书保持原合同不变，且不得暗迁为 fx-valuation/2 ---
+    {
+        let base = Ac2Session::build(
+            "v6-v1-static-template",
+            "100",
+            "0",
+            "baseline-cash-0",
+            vec![],
+            false,
+            FX_OBLIGATIONS_RAW,
+        );
+        let space = Space::new("v6-v1-static-compat");
+        let session_id = "v6-v1-static-compat".to_owned();
+        let mut fin_data = base.fin_data.clone();
+        fin_data["schema_revision"] = json!("tb03b-finance/6");
+        fin_data["exact_release"]["model_coverage"]["model_ref"] = json!(model.model_ref());
+        // 保持 TestOnly-market/1407-c1 与 controlled-* 静态证书不加新标记！
+        let (fin_path, fin_sha) = space.save_json("finance-input.json", &fin_data);
+        let (fx_ob_path, fx_ob_sha) = space.save_raw("fx-obligations.json", FX_OBLIGATIONS_RAW);
+        let s_obj = json!({"object_id": "unit-S-object", "kind": "UnitStructuralTrustRoot", "branch": "RISING"});
+        let basis = json!({
+            "kind": "FinancialBasis",
+            "session_id": session_id,
+            "session_generation": "1",
+            "writer_epoch": "1",
+            "pending_revision": false,
+            "commit_ns": "1",
+            "snapshot": {"profile_id": "unit", "objects": [s_obj]}
+        });
+        let (basis_path, _) = space.save_json("s-basis.json", &basis);
+        let stub = space.dir.join("s-stub.sh");
+        crate::economic_session::write_test_executable(
+            &stub,
+            &format!("#!/bin/sh\nexec /bin/cat '{basis_path}'\n"),
+            0o700,
+        );
+        let stub_sha = sha256_hex(&std::fs::read(&stub).unwrap());
+
+        let mut manifest = base.e_config.manifest.clone();
+        manifest["session_id"] = json!(session_id);
+        manifest["e"]["db"] = json!(space.dir.join("e.db"));
+        manifest["e"]["socket"] = json!(space.dir.join("e.sock"));
+        for r in manifest["chongs"].as_array_mut().unwrap() {
+            let cid = r["chong_id"].as_str().unwrap().to_owned();
+            r["db"] = json!(space.dir.join(format!("{cid}.db")));
+            r["socket"] = json!(space.dir.join(format!("{cid}.sock")));
+        }
+        manifest["finance"]["schema_revision"] = json!("tb03b-finance/6");
+        manifest["finance"]["input_path"] = json!(fin_path);
+        manifest["finance"]["input_sha256"] = json!(fin_sha);
+        manifest["finance"]["structure"]["binary"] = json!(stub);
+        manifest["finance"]["structure"]["binary_sha256"] = json!(stub_sha);
+        manifest["finance"]["structure"]["db"] = json!(space.dir.join("s.db"));
+        manifest["finance"]["structure"]["session_id"] = json!(session_id);
+        manifest["fx_valuation"]["schema_revision"] = json!("fx-valuation/1");
+        manifest["fx_valuation"]["obligation_input_path"] = json!(fx_ob_path);
+        manifest["fx_valuation"]["obligation_input_sha256"] = json!(fx_ob_sha);
+
+        let (mpath, _) = space.save_json("manifest.json", &manifest);
+        let e_config = Config::load(Path::new(&mpath), &space.dir.join("e.db"), None).unwrap();
+        init(&e_config).unwrap();
+        let (e_db, _) = open(&e_config.db, false).unwrap();
+        let mut b_configs = Vec::new();
+        let mut b_dbs = Vec::new();
+        for name in ["alpha", "beta", "gamma"] {
+            let bc = Config::load(
+                Path::new(&mpath),
+                &space.dir.join(format!("{name}.db")),
+                Some(name),
+            )
+            .unwrap();
+            init(&bc).unwrap();
+            let (bdb, _) = open(&bc.db, false).unwrap();
+            b_configs.push((name.to_owned(), bc));
+            b_dbs.push((name.to_owned(), bdb));
+        }
+        let mut s = Ac2Session {
+            space,
+            session_id,
+            e_config,
+            e_db,
+            b_configs,
+            b_dbs,
+            fin_data,
+            opening_docs: base.opening_docs.clone(),
+            voice_payloads: base.voice_payloads.clone(),
+        };
+
+        assert_eq!(
+            s.e_fin(
+                "imp-base",
+                json!({"op": "ImportResponsibility", "responsibility_id": "baseline-cash-0", "writer_epoch": "1"})
+            )["kind"],
+            "ResponsibilityImportedReceipt"
+        );
+        assert_eq!(
+            s.e_fin(
+                "imp-fx",
+                json!({"op": "ImportFxResponsibility", "responsibility_id": "ob-fx-unclosed-20", "writer_epoch": "1"})
+            )["kind"],
+            "FxResponsibilityImportedReceipt"
+        );
+        let r1 = s.capture_fx("cap-r1", FX_R1_RAW, "tok-r1");
+        assert_eq!(s.resolve_fx("res-r1", "ev-r1", &[&r1])["kind"], "Resolved");
+        s.prepare_all_chongs();
+        let slot_main = s.slot("slot-main");
+        let res = s.e_fin(
+            "reserve-main",
+            json!({"op": "Reserve", "slot_id": "slot-main", "request_set_hash": hash(&slot_main["applicants"]), "writer_epoch": "1"}),
+        );
+        let alpha_gid = res["record"]["grants"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|g| g["decision_id"] == "alpha")
+            .unwrap()["grant_id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let alpha_plan = s.plan("alpha");
+        assert_eq!(
+            s.b_send(
+                "alpha",
+                "commit-alpha",
+                json!({"op": "CommitDecision", "decision_id": "alpha", "plan_hash": hash(&alpha_plan), "grant_id": alpha_gid, "writer_epoch": "1"}),
+            )["kind"],
+            "LocalCommitReceipt"
+        );
+        assert_eq!(
+            s.e_fin(
+                "dispatch-alpha",
+                json!({"op": "MakeDispatchable", "decision_id": "alpha", "plan_hash": hash(&alpha_plan), "writer_epoch": "1"}),
+            )["kind"],
+            "DispatchableReceipt"
+        );
+        let rel = s.e_fin(
+            "release-alpha-ok",
+            s.release_exact_payload("alpha", &alpha_gid),
+        );
+        assert_eq!(rel["kind"], "ReleasedExactReceipt", "{rel}");
+        assert_eq!(
+            rel["record"]["command"]["certificate"]["market_dependencies"],
+            json!(["TestOnly-market/1407-c1"])
+        );
+        assert_eq!(
+            rel["record"]["command"]["model_ref"],
+            json!(model.model_ref())
+        );
+        audit(&s.e_db, &s.e_config).unwrap();
+        assert_eq!(recover(&s.e_config).unwrap()["writer_epoch"], "2");
+
+        // 不得把既有 fx-valuation/1 库在 recover 时暗迁为 fx-valuation/2。
+        let stored_v1_rev: String = s
+            .e_db
+            .query_row(
+                "SELECT v FROM meta WHERE k='fx_valuation_revision'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(stored_v1_rev, "fx-valuation/1");
+        let mut upgrade_manifest = manifest.clone();
+        upgrade_manifest["fx_valuation"]["schema_revision"] = json!("fx-valuation/2");
+        let (up_path, _) = s
+            .space
+            .save_json("upgrade-v2-manifest.json", &upgrade_manifest);
+        let up_cfg = Config::load(Path::new(&up_path), &s.e_config.db, None).unwrap();
+        let up_err = recover(&up_cfg).unwrap_err();
+        assert!(
+            up_err.starts_with("IdentityConflict"),
+            "fx-valuation/1 DB must refuse silent migration to fx-valuation/2: {up_err}"
+        );
+    }
 }

@@ -279,10 +279,12 @@ fn exact_delivery_target_contract(config: &Config, d: &Value) -> Result<(), Stri
     }
     Ok(())
 }
-/// 仅在显式选择 `tb03b-finance/6`（`model_binding`）且启用 `fx-valuation/1` 时启用精确放行动态 FX 依赖绑定；
-/// 旧 `tb03b-finance/5`（含原 FIN/5+FX 夹具、非空旧库恢复/重取/重试）与纯非 FX `/5`/`/6` 均保持原静态合同不变。
+/// 仅在显式选择 `tb03b-finance/6` 且显式绑定 `fx-valuation/2` 时启用精确放行动态 FX 依赖绑定；
+/// 既有 `tb03b-finance/6` + `fx-valuation/1` 静态证书、`tb03b-finance/5` + `fx-valuation/1`
+/// 与纯非 FX `/5`/`/6` 均保持原静态合同与非空旧库恢复/重取/重试语义不变。
 fn fx_release_bound(config: &Config) -> Result<bool, String> {
-    Ok(contract(&config.manifest)?.model_binding && super::fx_valuation::enabled(config))
+    Ok(contract(&config.manifest)?.model_binding
+        && super::fx_valuation::release_bound_enabled(config))
 }
 pub(super) fn enabled(config: &Config) -> bool {
     config.manifest.get("finance").is_some_and(|v| !v.is_null())
@@ -695,7 +697,7 @@ fn input(config: &Config, raw: &str) -> Result<Value, String> {
                 super::exact_command::validate_fx_section(&d)?;
             } else if super::exact_command::uses_fx_release_bound_marker(&d) {
                 return Err(format!(
-                    "Unsupported：仅 tb03b-finance/6 且启用 fx-valuation/1 时允许声明 {}",
+                    "Unsupported：仅 tb03b-finance/6 且显式选择 fx-valuation/2 时允许声明 {}",
                     super::exact_command::FX_RELEASE_BOUND_MARKER
                 ));
             }
@@ -1827,16 +1829,50 @@ fn release_exact(
     }
     let model_binding = contract(&config.manifest)?.model_binding;
     let fx_bound = fx_release_bound(config)?;
-    let command = if fx_bound {
-        let approved = d["exact_release"]["conditions"]
-            .as_array()
-            .map_or(&[][..], Vec::as_slice);
-        super::exact_command::check_certificate_shape(&p["certificate"], approved)?;
-        let coverage = list(&d["baseline"], "covered_facts")?;
-        for pending in list(previous, "pending")? {
-            super::fx_valuation::forbid_reserve_bypass(pending)?;
-            covered_pending(previous, coverage, pending)?;
+    let approved = d["exact_release"]["conditions"]
+        .as_array()
+        .map_or(&[][..], Vec::as_slice);
+    super::exact_command::check_certificate_shape(&p["certificate"], approved)?;
+
+    // 业务判定顺序（恢复父版本 bd0933e97e）：
+    // 先识别模型不能表达的命令（ADR 0052 裁定二 model_coverage）并持久落 Unsupported / ModelOrderUnspecified；
+    // 只有模型可表达、可能放行的命令才进入 Pending 覆盖检查、FX 政策门与动态依赖绑定。
+    if let Some(unsupported) = super::exact_command::model_coverage(d, q) {
+        let command = super::exact_command::command(
+            &config.session,
+            &config.generation,
+            d,
+            q,
+            grant_id,
+            model_binding,
+            None,
+        )?;
+        if fx_bound {
+            super::exact_command::check_fx_unsupported_certificate(
+                &p["certificate"],
+                &command["certificate"],
+                grant_id,
+            )?;
+        } else {
+            super::exact_command::check_certificate(&p["certificate"], &command["certificate"])?;
         }
+        let mut r = old.clone();
+        r["command_hash"] = json!(hash(&command));
+        r["command"] = command;
+        r["state"] = json!("Unsupported");
+        r["unsupported"] = unsupported;
+        r["unsupported_seq"] = json!(seq.to_string());
+        r["unsupported_ns"] = json!(ns);
+        replace_command(next, &r);
+        return Ok(r);
+    }
+
+    let coverage = list(&d["baseline"], "covered_facts")?;
+    for pending in list(previous, "pending")? {
+        super::fx_valuation::forbid_reserve_bypass(pending)?;
+        covered_pending(previous, coverage, pending)?;
+    }
+    let command = if fx_bound {
         let prev_seq = seq - 1;
         let prev_root: String =
             budget.one(c, "SELECT root FROM commits WHERE seq=?", [prev_seq], |r| {
@@ -1876,63 +1912,49 @@ fn release_exact(
             None,
         )?;
         super::exact_command::check_certificate(&p["certificate"], &cmd["certificate"])?;
+        super::fx_valuation::check_gate(
+            previous,
+            super::fx_valuation::GateSubject::ReleaseCommand {
+                command_id: required(p, "command_id")?,
+                grant_id,
+                owner: required(q, "owner")?,
+                policy_id: required(&d["policy"], "policy_id")?,
+                cap_currency: required(&d["policy"], "currency")?,
+            },
+        )?;
         cmd
     };
     let mut r = old.clone();
     r["command_hash"] = json!(hash(&command));
     r["command"] = command;
-    if let Some(unsupported) = super::exact_command::model_coverage(d, q) {
-        r["state"] = json!("Unsupported");
-        r["unsupported"] = unsupported;
-        r["unsupported_seq"] = json!(seq.to_string());
-        r["unsupported_ns"] = json!(ns);
-    } else {
-        if !fx_bound {
-            let coverage = list(&d["baseline"], "covered_facts")?;
-            for pending in list(previous, "pending")? {
-                super::fx_valuation::forbid_reserve_bypass(pending)?;
-                covered_pending(previous, coverage, pending)?;
-            }
-            super::fx_valuation::check_gate(
-                previous,
-                super::fx_valuation::GateSubject::ReleaseCommand {
-                    command_id: required(p, "command_id")?,
-                    grant_id,
-                    owner: required(q, "owner")?,
-                    policy_id: required(&d["policy"], "policy_id")?,
-                    cap_currency: required(&d["policy"], "currency")?,
-                },
-            )?;
-        }
-        let closed = f
-            .get("closed_applicants")
-            .and_then(Value::as_array)
-            .is_some_and(|a| {
-                a.iter().any(|x| {
-                    x["slot_id"] == q["slot_id"]
-                        && x["owner"] == q["owner"]
-                        && x["applicant_epoch"] == q["applicant_epoch"]
-                        && x["applicant_generation"] == q["applicant_generation"]
-                })
-            });
-        if closed {
-            return Err("StaleWriter：原申请代际已关闭，不得 Release；全责任保留".into());
-        }
-        let slot = item(list(f, "slots")?, "slot_id", required(q, "slot_id")?)?;
-        let g = item(list(slot, "grants")?, "grant_id", grant_id)?;
-        let liability = item(list(f, "responsibilities")?, "responsibility_id", grant_id)?;
-        if liability["grant"] != *g || liability["amount"] != g["amount"] {
-            return Err("MissingDependency：E 未保留该 grant 的完整责任".into());
-        }
-        r["state"] = json!("ReleasedExact");
-        r["first_quantity"] = q["exact"]["first_quantity"].clone();
-        r["allocation_id"] = q["exact"]["allocation_id"].clone();
-        r["responsibility_ref"] = json!(grant_id);
-        r["release_seq"] = json!(seq.to_string());
-        r["release_commit_ns"] = json!(ns);
-        r["model_ref"] = super::exact_command::model_ref(d);
-        r["execution_eligibility"] = json!("ReleasedExact");
+    let closed = f
+        .get("closed_applicants")
+        .and_then(Value::as_array)
+        .is_some_and(|a| {
+            a.iter().any(|x| {
+                x["slot_id"] == q["slot_id"]
+                    && x["owner"] == q["owner"]
+                    && x["applicant_epoch"] == q["applicant_epoch"]
+                    && x["applicant_generation"] == q["applicant_generation"]
+            })
+        });
+    if closed {
+        return Err("StaleWriter：原申请代际已关闭，不得 Release；全责任保留".into());
     }
+    let slot = item(list(f, "slots")?, "slot_id", required(q, "slot_id")?)?;
+    let g = item(list(slot, "grants")?, "grant_id", grant_id)?;
+    let liability = item(list(f, "responsibilities")?, "responsibility_id", grant_id)?;
+    if liability["grant"] != *g || liability["amount"] != g["amount"] {
+        return Err("MissingDependency：E 未保留该 grant 的完整责任".into());
+    }
+    r["state"] = json!("ReleasedExact");
+    r["first_quantity"] = q["exact"]["first_quantity"].clone();
+    r["allocation_id"] = q["exact"]["allocation_id"].clone();
+    r["responsibility_ref"] = json!(grant_id);
+    r["release_seq"] = json!(seq.to_string());
+    r["release_commit_ns"] = json!(ns);
+    r["model_ref"] = super::exact_command::model_ref(d);
+    r["execution_eligibility"] = json!("ReleasedExact");
     replace_command(next, &r);
     Ok(r)
 }
