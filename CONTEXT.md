@@ -363,6 +363,13 @@ _Avoid_: 把本点自身 source_index 塞进锚（伪阳性唯一性）；三类
 
 ### 运行边界
 
+**部署位置（Deployment Location）**（[#2127](https://github.com/Newchanlun/NewChanlun/issues/2127)，[ADR 0038](docs/adr/0038-dual-run-determinism-recovery-seek-asknown.md#修订2127部署位置与双跑身份)）:
+本机运行目录、库/锁、Unix socket 和证据文件的定位。它参与合法启动、端点归属和取证，不是账本事实或会话身份；新格式的业务原件和根不依赖它。旧格式已承诺的路径按原版本保留和验证。
+_Avoid_: 把本机 socket 路径叫场所 `endpoint`；把改部署位置叫改会话身份；把路径从导出删掉当作修好了提交根。
+
+**非语义运行标签（Non-semantic Run Label）**（同上）:
+验收夹具报告头的 `run_id`，由验收方在双跑启动前冻结，只在报告头按一一映射对应。业务会话 ID、代际和原始提交根不随标签改名。
+
 **「生产」拆三义（three meanings of production）**:
 **π 引擎**指 canonical `run_theta_v0_pi`/π fill 的策略与执行家族本体；**π 组件证据 CLI**（历史名「最小生产路径 CLI」）指 `theta_backtest` 用仓内数据加载、π 引擎与内部 fill 串成的可运行闭环，只产组件证据，不是生产入口，也不等于交易场所集成；**NT 真生产**指 NautilusTrader 的 Backtest/Live runtime、真实 portfolio/order 生命周期与 broker adapter 驱动同一策略。三者须按全名使用，不以裸称“生产”互相替代。
 
