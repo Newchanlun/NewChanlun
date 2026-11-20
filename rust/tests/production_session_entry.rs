@@ -60,7 +60,7 @@ fn write_json(path: &Path, value: &Value) -> PathBuf {
 
 struct Space(tempfile::TempDir);
 impl Space {
-    /// 真实绑定 Linux Unix domain socket（s.sock/e.sock/b.sock），受 sun_path 108 字节上限约束，
+    /// 启动器先校验 --socket 的 100 字节路径上限（含 s.sock/e.sock/b.sock 文件名），
     /// 深层 worktree 下的 CARGO_TARGET_TMPDIR 可能超限；改用 `std::env::temp_dir()`（默认 /tmp，
     /// 调用方可通过短路径 TMPDIR 改写到其它盘）。
     fn new() -> Self {
