@@ -628,11 +628,15 @@ jobs:
 
       # #1640：生产增量构建的编译期模式、`/2` 资源档与出生锁在无测试钩子 feature 下另跑一遍（env 选择臂只在 testonly）。
       #   D-A：pager_probe 锁在此步设缓存实验输入执行，生产构建须不读、不生效（requested_cache_kib 为 null）。
+      # #1875：仅对本步与下方 H1 Native debug 锁共用的 s_session,s_incremental bin 局部开 opt-level=1
+      #   （debug-assertions/overflow-checks 保持 true），s_allocation_json_testonly 仍维持 -O0，第三方依赖复用。
       - name: cargo test — s_incremental 生产增量构建（#1640）
         if: ${{ !cancelled() && matrix.group == 'owned' }}
         env:
           S_NATIVE_SQLITE_CACHE_KIB: "262144"
-        run: '../.github/scripts/run-cargo-with-telemetry.sh cargo test --locked --features s_session,s_incremental --bin s_structure_session --jobs "${CI_CARGO_JOBS:-1}" -- s_allocation:: s3_serve incremental_build_full_branch_only_at_birth build_profile pager_probe history_layout_multicut_ layout_object_index_ b2_native_owner_restore_ r9a_new_cut_manifest_ bounded_layout_cc007_ layout1_generation_'
+          CARGO_PROFILE_DEV_DEBUG_ASSERTIONS: "true"
+          CARGO_PROFILE_DEV_OVERFLOW_CHECKS: "true"
+        run: '../.github/scripts/run-cargo-with-telemetry.sh cargo --config profile.dev.package.newchan_rust.opt-level=1 test --locked --features s_session,s_incremental --bin s_structure_session --jobs "${CI_CARGO_JOBS:-1}" -- s_allocation:: s3_serve incremental_build_full_branch_only_at_birth build_profile pager_probe history_layout_multicut_ layout_object_index_ b2_native_owner_restore_ r9a_new_cut_manifest_ bounded_layout_cc007_ layout1_generation_'
 
       - name: H1 私有 FD/WAL 授权边界锁（#1481 S1D）
         if: ${{ !cancelled() && (matrix.group == 'owned-h1' || (matrix.group == 'owned' && env.OWNED_SPLIT != '1')) }}
@@ -716,9 +720,12 @@ jobs:
 
       - name: H1 Native debug source suffix and receipt expiry locks（#1481 S1K）
         if: ${{ !cancelled() && matrix.group == 'owned' }}
+        env:
+          CARGO_PROFILE_DEV_DEBUG_ASSERTIONS: "true"
+          CARGO_PROFILE_DEV_OVERFLOW_CHECKS: "true"
         run: |
           set -o pipefail
-          cargo test --locked --features s_session,s_incremental --bin s_structure_session --jobs "${CI_CARGO_JOBS_RELEASE:-4}" -- --test-threads 1 --show-output --format pretty --color never v3::driver::tests::audit_owner_incremental_normal_writes_full_oracle_and_suffix v3::source_audit::source_receipt::tests::p6_raw_receipt_expired_ 2>&1 | tee "$RUNNER_TEMP/1481-native-debug.log"
+          cargo --config profile.dev.package.newchan_rust.opt-level=1 test --locked --features s_session,s_incremental --bin s_structure_session --jobs "${CI_CARGO_JOBS_RELEASE:-4}" -- --test-threads 1 --show-output --format pretty --color never v3::driver::tests::audit_owner_incremental_normal_writes_full_oracle_and_suffix v3::source_audit::source_receipt::tests::p6_raw_receipt_expired_ 2>&1 | tee "$RUNNER_TEMP/1481-native-debug.log"
           for test in \
             v3::driver::tests::audit_owner_incremental_normal_writes_full_oracle_and_suffix \
             v3::source_audit::source_receipt::tests::p6_raw_receipt_expired_before_binding_releases_budget \
