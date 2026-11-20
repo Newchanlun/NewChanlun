@@ -1987,3 +1987,163 @@ fn readonly_source_vfs_clean_close_wal_safety_and_same_process_shm_lock_ownershi
     assert!(!x_wal.exists(), "孤立 -shm 拒绝时不得创建 -wal");
     std::fs::remove_file(&x_shm).unwrap();
 }
+
+/// 独立新进程入口：验证进程启动期（早于 main/任何 SQLite 连接）已完成只读元数据守卫安装，
+/// 且 `sqlite3_config` 前置配置保持可用；随后多健康写者线程并发创建/写入 WAL 与首次只读打开
+/// 同时撞击，不修改全局 `aSyscall` 表，健康侧件权限与只读源元数据均完好。
+#[test]
+#[ignore = "仅供 #1375 独立新进程启动期守卫与并发首次打开验证调用"]
+fn readonly_source_vfs_fresh_process_startup_and_concurrent_first_open_child() {
+    use crate::history_simulation::intake::{
+        open_readonly_source_db, readonly_vfs_startup_guards_installed,
+    };
+    use rusqlite::ffi;
+    use std::os::unix::fs::{MetadataExt, PermissionsExt};
+    use std::sync::{Arc, Barrier};
+
+    // 1) 在本进程任何 SQLite 连接或 open_readonly_source_db 之前：
+    //    - 启动期守卫已就位；
+    //    - SQLite 已恢复未初始化态，sqlite3_config(SQLITE_CONFIG_GETMALLOC) 仍返回 SQLITE_OK。
+    assert!(
+        readonly_vfs_startup_guards_installed(),
+        "进程启动期构造器必须在 main() 之前完成守卫安装"
+    );
+    let mut mem = std::mem::MaybeUninit::<ffi::sqlite3_mem_methods>::uninit();
+    let cfg_rc = unsafe { ffi::sqlite3_config(ffi::SQLITE_CONFIG_GETMALLOC, mem.as_mut_ptr()) };
+    assert_eq!(
+        cfg_rc,
+        ffi::SQLITE_OK,
+        "启动期构造器必须 sqlite3_shutdown() 恢复未初始化态，不得破坏 sqlite3_config 调用方"
+    );
+
+    // 2) 准备只读来源库（非空 32768B SHM + 未 checkpoint WAL）及多个独立健康库。
+    let dir = tempfile::tempdir().unwrap();
+    let src_dir = dir.path().join("src");
+    std::fs::create_dir_all(&src_dir).unwrap();
+    let src_db = src_dir.join("x.db");
+    let src_wal = append_suffix(&src_db, "-wal");
+    let src_shm = append_suffix(&src_db, "-shm");
+    let src_writer = rusqlite::Connection::open(&src_db).unwrap();
+    src_writer
+        .execute_batch(
+            "PRAGMA journal_mode = WAL;
+             PRAGMA wal_autocheckpoint = 0;
+             CREATE TABLE t(v INTEGER);
+             INSERT INTO t VALUES (42);",
+        )
+        .unwrap();
+    // 拷贝一份独立 inode 快照，确保首次 open_readonly_source_db 走新 unixShmNode 打开路径。
+    let snap_dir = dir.path().join("snap");
+    std::fs::create_dir_all(&snap_dir).unwrap();
+    let snap_db = snap_dir.join("x.db");
+    let snap_wal = append_suffix(&snap_db, "-wal");
+    let snap_shm = append_suffix(&snap_db, "-shm");
+    std::fs::copy(&src_db, &snap_db).unwrap();
+    std::fs::copy(&src_wal, &snap_wal).unwrap();
+    std::fs::copy(&src_shm, &snap_shm).unwrap();
+    drop(src_writer);
+    let snap_shm_before = std::fs::metadata(&snap_shm).unwrap();
+    assert!(snap_shm_before.len() >= 32768);
+
+    // 准备 6 个独立健康库（先建 WAL 库后正常闭库，并设主库 0664，配合 umask 0077 验证健康线程创建
+    // WAL/SHM 时 `robust_open` 的 fchmod 透传行为完全不受影响）。
+    unsafe {
+        libc::umask(0o077);
+    }
+    let n_writers = 6usize;
+    let mut healthy_dbs = Vec::with_capacity(n_writers);
+    for i in 0..n_writers {
+        let h_db = dir.path().join(format!("healthy_{i}.db"));
+        let c = rusqlite::Connection::open(&h_db).unwrap();
+        c.execute_batch("PRAGMA journal_mode = WAL; CREATE TABLE t(v INTEGER);")
+            .unwrap();
+        drop(c);
+        std::fs::set_permissions(&h_db, std::fs::Permissions::from_mode(0o664)).unwrap();
+        assert!(!append_suffix(&h_db, "-wal").exists());
+        healthy_dbs.push(h_db);
+    }
+
+    // 3) 同一屏障同时释放：6 条健康写者线程并发写入（触发 WAL/SHM 创建与 fchmod/fchown 透传），
+    //    主线程同时首次调用 open_readonly_source_db（触发 history_sim_ro 首次注册与非空 SHM 打开）。
+    let barrier = Arc::new(Barrier::new(n_writers + 1));
+    let mut handles = Vec::with_capacity(n_writers);
+    for h_db in healthy_dbs {
+        let b = barrier.clone();
+        handles.push(std::thread::spawn(move || {
+            let c = rusqlite::Connection::open(&h_db).unwrap();
+            b.wait();
+            for k in 1..=5i64 {
+                c.execute("INSERT INTO t VALUES (?1)", [k]).unwrap();
+            }
+            let sum: i64 = c
+                .query_row("SELECT sum(v) FROM t", [], |r| r.get(0))
+                .unwrap();
+            assert_eq!(sum, 15);
+            let wal_mode = std::fs::metadata(append_suffix(&h_db, "-wal"))
+                .unwrap()
+                .mode()
+                & 0o777;
+            let shm_mode = std::fs::metadata(append_suffix(&h_db, "-shm"))
+                .unwrap()
+                .mode()
+                & 0o777;
+            assert_eq!(wal_mode, 0o664, "健康写者 WAL 权限必须保持原 fchmod 语义");
+            assert_eq!(shm_mode, 0o664, "健康写者 SHM 权限必须保持原 fchmod 语义");
+        }));
+    }
+
+    barrier.wait();
+    for _ in 0..4 {
+        let mut reader = open_readonly_source_db(&snap_db).unwrap();
+        let tx = reader.transaction().unwrap();
+        let v: i64 = tx.query_row("SELECT v FROM t", [], |r| r.get(0)).unwrap();
+        assert_eq!(v, 42);
+    }
+    for h in handles {
+        h.join().unwrap();
+    }
+
+    let snap_shm_after = std::fs::metadata(&snap_shm).unwrap();
+    assert_eq!(
+        (
+            snap_shm_before.uid(),
+            snap_shm_before.gid(),
+            snap_shm_before.mode() & 0o777,
+            snap_shm_before.ctime(),
+            snap_shm_before.ctime_nsec(),
+        ),
+        (
+            snap_shm_after.uid(),
+            snap_shm_after.gid(),
+            snap_shm_after.mode() & 0o777,
+            snap_shm_after.ctime(),
+            snap_shm_after.ctime_nsec(),
+        ),
+        "并发首次只读打开期间非空 SHM 元数据必须逐位不变"
+    );
+    println!("STARTUP_AND_CONCURRENT_FIRST_OPEN_OK");
+}
+
+#[test]
+fn readonly_source_vfs_startup_guards_precede_main_and_concurrent_first_open() {
+    let out = std::process::Command::new(std::env::current_exe().unwrap())
+        .args([
+            "--exact",
+            "economic_session::finance::tests::exact_release::x_e2e::readonly_source_vfs_fresh_process_startup_and_concurrent_first_open_child",
+            "--ignored",
+            "--nocapture",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "fresh-process startup/concurrency check failed: stdout={} stderr={}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        String::from_utf8_lossy(&out.stdout).contains("STARTUP_AND_CONCURRENT_FIRST_OPEN_OK"),
+        "missing ok marker: {}",
+        String::from_utf8_lossy(&out.stdout)
+    );
+}

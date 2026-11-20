@@ -239,10 +239,16 @@ pub(crate) fn committed_capture_batch(
 /// - 主库 (`SQLITE_OPEN_MAIN_DB`) 附 `mode=ro&readonly_shm=1` 复用默认 `unix` VFS 的 `SHARED` 锁与
 ///   `unixInodeInfo`/`unixShmNode` 引用计数（跨 Linux / macOS 与同进程写者共享 `-shm` 锁归属，
 ///   关闭只读连接绝不误释同进程 SQLite 写者的 POSIX DMS 锁）；
-/// - 注册时通过官方 SQLite VFS `xGetSystemCall`/`xSetSystemCall` 为默认 `unix` VFS 的 `fchown` 与 `fchmod`
-///   安装线程局部守卫（仅当本线程处于 `history_sim_ro` 打开/映射临界区时拦截为空操作，其余所有线程与
-///   健康连接原样透传原系统调用），确保即便以 `euid == 0`（root）读取正常非空 `-shm` 或 0 字节异权限
-///   `-shm`，也不会触发 `unixOpenSharedMemory` 的 `robustFchown`/`robust_open` 改写 owner/mode/`ctime`；
+/// - 进程加载期单线程构造器（ELF `.init_array` / Mach-O `__DATA,__mod_init_func`，在 `main()` 与任何
+///   工作线程或 SQLite 连接启动之前执行）通过官方 `xGetSystemCall`/`xSetSystemCall` 一次性为默认
+///   `unix` VFS 的 `fchown` 与 `fchmod` 安装线程局部守卫，随后立即调用 `sqlite3_shutdown()` 恢复
+///   SQLite 未初始化态（确保 `main()` 内如 `sqlite3_config` 等前置配置调用方保持完全可用）；运行期
+///   `readonly_vfs::name()` 绝不写 `aSyscall` 表，只做只读核验并按线程安全接口注册 `history_sim_ro`，
+///   从结构上彻底消除与并发健康连接的 `aSyscall` 数据竞争；
+/// - 线程局部守卫仅当本线程处于 `history_sim_ro` 打开/映射临界区时拦截 `fchown`/`fchmod` 为空操作，
+///   其余所有线程与健康连接原样透传原系统调用，确保即便以 `euid == 0`（root）读取正常非空 `-shm` 或
+///   0 字节异权限 `-shm`，也不会触发 `unixOpenSharedMemory` 的 `robustFchown`/`robust_open` 改写
+///   owner/mode/`ctime`；
 /// - WAL (`SQLITE_OPEN_WAL`) 直接以 `O_RDONLY | O_NOFOLLOW | O_CLOEXEC` 打开并仅做 `pread` / `fstat`
 ///   （SQLite 不在 `-wal` 上持 POSIX 锁），既彻底避开 0 字节只读 `-wal` 的 `robust_open`/`fchmod`，
 ///   又在 `-wal` 与 `-shm` 双缺（`ENOENT` 且 `ENOENT`，即正式 X 正常末连接 checkpoint 闭库态）下进入
@@ -259,20 +265,25 @@ mod readonly_vfs {
     use rusqlite::ffi;
     use std::cell::Cell;
     use std::ffi::{c_char, c_int, c_void, CStr, CString};
-    use std::sync::atomic::{fence, Ordering};
+    use std::sync::atomic::{fence, AtomicPtr, AtomicU8, Ordering};
     use std::sync::OnceLock;
 
     const VFS_NAME: &str = "history_sim_ro";
     const VFS_NAME_CSTR: &[u8] = b"history_sim_ro\0";
     const REAL_OFFSET: usize = (std::mem::size_of::<RoMainFile>() + 15) & !15;
 
+    const GUARD_UNINIT: u8 = 0;
+    const GUARD_INSTALLED: u8 = 1;
+    const GUARD_FAILED: u8 = 2;
+
     type SyscallPtr = unsafe extern "C" fn();
     type FchownFn = unsafe extern "C" fn(c_int, libc::uid_t, libc::gid_t) -> c_int;
     type FchmodFn = unsafe extern "C" fn(c_int, libc::mode_t) -> c_int;
 
     static REGISTERED: OnceLock<Result<&'static str, String>> = OnceLock::new();
-    static ORIG_FCHOWN: OnceLock<FchownFn> = OnceLock::new();
-    static ORIG_FCHMOD: OnceLock<FchmodFn> = OnceLock::new();
+    static STARTUP_GUARD_STATE: AtomicU8 = AtomicU8::new(GUARD_UNINIT);
+    static ORIG_FCHOWN: AtomicPtr<c_void> = AtomicPtr::new(std::ptr::null_mut());
+    static ORIG_FCHMOD: AtomicPtr<c_void> = AtomicPtr::new(std::ptr::null_mut());
 
     thread_local! {
         static SUPPRESS_METADATA_WRITES: Cell<usize> = const { Cell::new(0) };
@@ -299,9 +310,11 @@ mod readonly_vfs {
         if SUPPRESS_METADATA_WRITES.with(|depth| depth.get() > 0) {
             return 0;
         }
-        let Some(&orig) = ORIG_FCHOWN.get() else {
+        let raw = ORIG_FCHOWN.load(Ordering::Acquire);
+        if raw.is_null() {
             return 0;
-        };
+        }
+        let orig: FchownFn = std::mem::transmute(raw);
         orig(fd, uid, gid)
     }
 
@@ -309,55 +322,130 @@ mod readonly_vfs {
         if SUPPRESS_METADATA_WRITES.with(|depth| depth.get() > 0) {
             return 0;
         }
-        let Some(&orig) = ORIG_FCHMOD.get() else {
+        let raw = ORIG_FCHMOD.load(Ordering::Acquire);
+        if raw.is_null() {
             return 0;
-        };
+        }
+        let orig: FchmodFn = std::mem::transmute(raw);
         orig(fd, mode)
     }
 
-    unsafe fn install_metadata_write_guards(
-        parent: *mut ffi::sqlite3_vfs,
-    ) -> Result<(Option<SyscallPtr>, Option<SyscallPtr>), String> {
-        if (*parent).iVersion < 3 {
-            return Err("StorageUnavailable：默认 SQLite VFS 不支持系统调用拦截接口".into());
-        }
-        let (Some(get), Some(set)) = ((*parent).xGetSystemCall, (*parent).xSetSystemCall) else {
-            return Err(
-                "StorageUnavailable：默认 SQLite VFS 缺少 xGetSystemCall/xSetSystemCall".into(),
-            );
-        };
-        let orig_fchown = get(parent, c"fchown".as_ptr());
-        if let Some(raw) = orig_fchown {
-            let _ = ORIG_FCHOWN.set(std::mem::transmute::<SyscallPtr, FchownFn>(raw));
-            let rc = set(
-                parent,
-                c"fchown".as_ptr(),
-                Some(std::mem::transmute::<FchownFn, SyscallPtr>(guarded_fchown)),
-            );
-            if rc != ffi::SQLITE_OK {
-                return Err(format!(
-                    "StorageUnavailable：安装 SQLite fchown 只读守卫失败（rc={rc}）"
-                ));
+    /// 进程加载期单线程构造器：全模块唯一调用 `xSetSystemCall` 的位置。
+    /// 在 `main()` 及任何线程/SQLite 连接开始工作前一次性安装守卫，随后调用 `sqlite3_shutdown()`
+    /// 恢复未初始化态（SQLite `aSyscall` 表持久化保留已安装指针，同时不阻断 `main()` 内的
+    /// `sqlite3_config` 等前置配置）。
+    extern "C" fn install_syscall_guards_at_startup() {
+        unsafe {
+            if ffi::sqlite3_initialize() != ffi::SQLITE_OK {
+                STARTUP_GUARD_STATE.store(GUARD_FAILED, Ordering::Release);
+                return;
             }
-        }
-        let orig_fchmod = get(parent, c"fchmod".as_ptr());
-        if let Some(raw) = orig_fchmod {
-            let _ = ORIG_FCHMOD.set(std::mem::transmute::<SyscallPtr, FchmodFn>(raw));
-            let rc = set(
-                parent,
-                c"fchmod".as_ptr(),
-                Some(std::mem::transmute::<FchmodFn, SyscallPtr>(guarded_fchmod)),
-            );
-            if rc != ffi::SQLITE_OK {
-                if let Some(prev) = orig_fchown {
-                    let _ = set(parent, c"fchown".as_ptr(), Some(prev));
+            let parent = ffi::sqlite3_vfs_find(std::ptr::null());
+            let ok = if parent.is_null() || (*parent).iVersion < 3 {
+                false
+            } else if let (Some(get), Some(set)) =
+                ((*parent).xGetSystemCall, (*parent).xSetSystemCall)
+            {
+                let orig_fchown = get(parent, c"fchown".as_ptr());
+                let fchown_ok = if let Some(raw) = orig_fchown {
+                    ORIG_FCHOWN.store(raw as usize as *mut c_void, Ordering::Release);
+                    set(
+                        parent,
+                        c"fchown".as_ptr(),
+                        Some(std::mem::transmute::<FchownFn, SyscallPtr>(guarded_fchown)),
+                    ) == ffi::SQLITE_OK
+                } else {
+                    true
+                };
+                if !fchown_ok {
+                    false
+                } else {
+                    let orig_fchmod = get(parent, c"fchmod".as_ptr());
+                    let fchmod_ok = if let Some(raw) = orig_fchmod {
+                        ORIG_FCHMOD.store(raw as usize as *mut c_void, Ordering::Release);
+                        set(
+                            parent,
+                            c"fchmod".as_ptr(),
+                            Some(std::mem::transmute::<FchmodFn, SyscallPtr>(guarded_fchmod)),
+                        ) == ffi::SQLITE_OK
+                    } else {
+                        true
+                    };
+                    if !fchmod_ok {
+                        if let Some(prev) = orig_fchown {
+                            let _ = set(parent, c"fchown".as_ptr(), Some(prev));
+                        }
+                        false
+                    } else {
+                        true
+                    }
                 }
-                return Err(format!(
-                    "StorageUnavailable：安装 SQLite fchmod 只读守卫失败（rc={rc}）"
-                ));
+            } else {
+                false
+            };
+            let shutdown_ok = ffi::sqlite3_shutdown() == ffi::SQLITE_OK;
+            STARTUP_GUARD_STATE.store(
+                if ok && shutdown_ok {
+                    GUARD_INSTALLED
+                } else {
+                    GUARD_FAILED
+                },
+                Ordering::Release,
+            );
+        }
+    }
+
+    #[cfg(any(
+        target_os = "linux",
+        target_os = "freebsd",
+        target_os = "netbsd",
+        target_os = "openbsd"
+    ))]
+    #[used]
+    #[link_section = ".init_array"]
+    static STARTUP_SYSCALL_GUARD_INIT: extern "C" fn() = install_syscall_guards_at_startup;
+
+    #[cfg(target_os = "macos")]
+    #[used]
+    #[link_section = "__DATA,__mod_init_func"]
+    static STARTUP_SYSCALL_GUARD_INIT: extern "C" fn() = install_syscall_guards_at_startup;
+
+    unsafe fn verify_metadata_write_guards_installed(
+        parent: *mut ffi::sqlite3_vfs,
+    ) -> Result<(), String> {
+        let _ = std::ptr::read_volatile(&STARTUP_SYSCALL_GUARD_INIT);
+        if STARTUP_GUARD_STATE.load(Ordering::Acquire) != GUARD_INSTALLED {
+            return Err("StorageUnavailable：SQLite 只读元数据守卫未在进程启动阶段完成安装".into());
+        }
+        if (*parent).iVersion < 3 {
+            return Err("StorageUnavailable：默认 SQLite VFS 不支持系统调用只读核验".into());
+        }
+        let Some(get) = (*parent).xGetSystemCall else {
+            return Err("StorageUnavailable：默认 SQLite VFS 缺少 xGetSystemCall".into());
+        };
+        if let Some(current_fchown) = get(parent, c"fchown".as_ptr()) {
+            let expected = std::mem::transmute::<FchownFn, SyscallPtr>(guarded_fchown);
+            if current_fchown as usize != expected as usize {
+                return Err(
+                    "StorageUnavailable：默认 SQLite VFS fchown 守卫未处于进程启动期安装态".into(),
+                );
             }
         }
-        Ok((orig_fchown, orig_fchmod))
+        if let Some(current_fchmod) = get(parent, c"fchmod".as_ptr()) {
+            let expected = std::mem::transmute::<FchmodFn, SyscallPtr>(guarded_fchmod);
+            if current_fchmod as usize != expected as usize {
+                return Err(
+                    "StorageUnavailable：默认 SQLite VFS fchmod 守卫未处于进程启动期安装态".into(),
+                );
+            }
+        }
+        Ok(())
+    }
+
+    #[cfg(test)]
+    pub(super) fn startup_guards_installed() -> bool {
+        let _ = unsafe { std::ptr::read_volatile(&STARTUP_SYSCALL_GUARD_INIT) };
+        STARTUP_GUARD_STATE.load(Ordering::Acquire) == GUARD_INSTALLED
     }
 
     enum ShmMode {
@@ -400,7 +488,8 @@ mod readonly_vfs {
                     return Err("StorageUnavailable：未找到默认 SQLite VFS".into());
                 }
                 let parent_vfs = unsafe { *parent };
-                let (orig_fchown, orig_fchmod) = unsafe { install_metadata_write_guards(parent)? };
+                // 运行期绝不调用 xSetSystemCall 改写全局表，仅只读核验进程启动期已就位。
+                unsafe { verify_metadata_write_guards_installed(parent)? };
                 let sz_os_file = parent_vfs
                     .szOsFile
                     .checked_add(REAL_OFFSET as c_int)
@@ -428,14 +517,6 @@ mod readonly_vfs {
                 let rc = unsafe { ffi::sqlite3_vfs_register(raw, 0) };
                 if rc != ffi::SQLITE_OK {
                     unsafe {
-                        if let Some(set) = (*parent).xSetSystemCall {
-                            if let Some(prev) = orig_fchown {
-                                let _ = set(parent, c"fchown".as_ptr(), Some(prev));
-                            }
-                            if let Some(prev) = orig_fchmod {
-                                let _ = set(parent, c"fchmod".as_ptr(), Some(prev));
-                            }
-                        }
                         drop(Box::from_raw(raw));
                     }
                     return Err(format!(
@@ -1099,6 +1180,11 @@ fn sqlite_readonly_uri(canonical: &Path) -> Result<String, String> {
     }
     uri.push_str("?mode=ro&readonly_shm=1");
     Ok(uri)
+}
+
+#[cfg(test)]
+pub(crate) fn readonly_vfs_startup_guards_installed() -> bool {
+    readonly_vfs::startup_guards_installed()
 }
 
 /// 缺口态只读打开模拟 X 业务库：
