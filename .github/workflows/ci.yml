@@ -711,7 +711,7 @@ jobs:
         if: ${{ !cancelled() && (matrix.group == 'owned-h1' || (matrix.group == 'owned' && env.OWNED_SPLIT != '1')) }}
         run: |
           set -o pipefail
-          cargo test --release --locked --features s_session,s_incremental,s_capture_native_testonly,s_h1_lock_subset_testonly --bin s_structure_session --jobs "${CI_CARGO_JOBS_RELEASE:-4}" h1_admission_ordinary_prepolicy_bad_history_rejected_before_migration -- --test-threads 1 --show-output --format pretty --color never 2>&1 | tee "$RUNNER_TEMP/1481-ordinary.log"
+          cargo test --release --locked --config profile.release.package.newchan_rust.opt-level=0 --features s_session,s_incremental,s_capture_native_testonly,s_h1_lock_subset_testonly --bin s_structure_session --jobs "${CI_CARGO_JOBS_RELEASE:-4}" h1_admission_ordinary_prepolicy_bad_history_rejected_before_migration -- --test-threads 1 --show-output --format pretty --color never 2>&1 | tee "$RUNNER_TEMP/1481-ordinary.log"
           grep -Fx "test v3::audit_owner::construction_tests::h1_admission_ordinary_prepolicy_bad_history_rejected_before_migration ... ok" "$RUNNER_TEMP/1481-ordinary.log"
 
       - name: H1 Native debug source suffix and receipt expiry locks（#1481 S1K）
