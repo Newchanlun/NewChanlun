@@ -1,0 +1,429 @@
+{
+  "ticket": 2114,
+  "model": "gpt-6.2-sol",
+  "asOf": "2026-11-20",
+  "round": 3,
+  "sourceCommit": "b9d898dccf46c2a716115eaa1215bc39c458a959",
+  "implementationHead": "271f3fbef99d3bbdffb4581f2610eb3679c6468b",
+  "priorReviewCommit": "4c4b472039132fec54758f54bd24a0c3443cd92a",
+  "parsed": true,
+  "problems": [],
+  "points": [
+    {
+      "id": "Q1",
+      "klass": "B",
+      "question": "A 已结算、B 开放且当前严格外缘分离时，原文如何称说，本仓能否发布正式趋势？",
+      "queries": [
+        {
+          "channel": "repo",
+          "query": "第二个(同级别)?(走势)?中枢|构成趋势|开放期|未结算.{0,20}(趋势|形成)",
+          "command": "rg -n --max-columns 450 --max-columns-preview '第二个(同级别)?(走势)?中枢|构成趋势|开放期|未结算.{0,20}(趋势|形成)' analysis/ docs/ .chanlun/",
+          "hits": 122,
+          "result": "122 行"
+        },
+        {
+          "channel": "tracker",
+          "query": "\"第二个中枢\" OR \"构成趋势\" OR \"开放期\" in:title,body,comments",
+          "command": "gh issue list -R Newchanlun/NewChanlun --state all --limit 30 --search '\"第二个中枢\" OR \"构成趋势\" OR \"开放期\" in:title,body,comments' --json number,title,state,url",
+          "hits": 7,
+          "result": "#2114 OPEN、#1426 OPEN、#485 CLOSED、#1419 OPEN、#832 CLOSED、#815 CLOSED、#812 CLOSED"
+        },
+        {
+          "channel": "repo",
+          "query": "第二个同级别中枢|形成两个依次同向|中枢的新生|第二个中枢",
+          "command": "rg -n --max-columns 450 --max-columns-preview '第二个同级别中枢|形成两个依次同向|中枢的新生|第二个中枢' analysis/ docs/ .chanlun/",
+          "hits": 94,
+          "result": "94 行"
+        },
+        {
+          "channel": "tracker",
+          "query": "\"第二个同级别中枢\" OR \"形成两个依次同向\" OR \"中枢的新生\" in:title,body,comments",
+          "command": "gh issue list -R Newchanlun/NewChanlun --state all --limit 30 --search '\"第二个同级别中枢\" OR \"形成两个依次同向\" OR \"中枢的新生\" in:title,body,comments' --json number,title,state,url",
+          "hits": 1,
+          "result": "#2114 OPEN"
+        },
+        {
+          "channel": "repo",
+          "query": "中枢完成前|一个中枢的完成|第二个中枢的前三段",
+          "command": "rg -n --max-columns 450 --max-columns-preview '中枢完成前|一个中枢的完成|第二个中枢的前三段' analysis/ docs/ .chanlun/",
+          "hits": 11,
+          "result": "11 行"
+        },
+        {
+          "channel": "tracker",
+          "query": "\"中枢的完成\" OR \"中枢完成前\" OR \"第二个中枢的前三段\" in:title,body,comments",
+          "command": "gh issue list -R Newchanlun/NewChanlun --state all --limit 30 --search '\"中枢的完成\" OR \"中枢完成前\" OR \"第二个中枢的前三段\" in:title,body,comments' --json number,title,state,url",
+          "hits": 1,
+          "result": "#2114 OPEN"
+        },
+        {
+          "channel": "repo",
+          "query": "形成了|才算(下跌|上涨)|第二个(同级别)?(走势)?中枢|第二[个個]?中[枢樞]|是否延续|演化成",
+          "command": "rg -n --max-columns 450 --max-columns-preview '形成了|才算(下跌|上涨)|第二个(同级别)?(走势)?中枢|第二[个個]?中[枢樞]|是否延续|演化成' docs/chanlun/text/blog/",
+          "hits": 151,
+          "result": "151 行"
+        },
+        {
+          "channel": "repo",
+          "query": "(趋势|升势|跌势|上涨|下跌).{0,18}(成立|形成|走出来|尚未|不算)|(成立|形成|才算|就是|构成).{0,20}(趋势|升势|跌势|上涨|下跌)|两[个個](同级别)?(走势)?中枢",
+          "command": "rg -n --max-columns 450 --max-columns-preview '(趋势|升势|跌势|上涨|下跌).{0,18}(成立|形成|走出来|尚未|不算)|(成立|形成|才算|就是|构成).{0,20}(趋势|升势|跌势|上涨|下跌)|两[个個](同级别)?(走势)?中枢' docs/chanlun/text/blog/",
+          "hits": 431,
+          "result": "431 行"
+        }
+      ],
+      "hits": [
+        {
+          "source": "docs/chanlun/text/blog/036-第36课.md:26,30",
+          "excerpt": "实案 2892 > 2888；有效突破前仍可扩展，第二枢尚未走完可当下组合。"
+        },
+        {
+          "source": "docs/chanlun/text/blog/102-第102课.md:238",
+          "excerpt": "1 分钟下跌已形成；B 尚可反向三买或走 c 再标准背驰。"
+        },
+        {
+          "source": "docs/chanlun/text/blog/035-第35课.md:122",
+          "excerpt": "当下 30 分钟上涨；是否延续、是否演化为更大中枢仍待。"
+        },
+        {
+          "source": "docs/chanlun/text/blog/025-第25课.md:304–308",
+          "excerpt": "新下跌自身第二枢才算下跌；不能借旧上涨 A。"
+        },
+        {
+          "source": "docs/chanlun/text/blog/020-第20课.md:32",
+          "excerpt": "完成前波动仍可触及前枢形成更大级别枢。"
+        },
+        {
+          "source": "docs/chanlun/text/blog/041-第41课.md:317–319",
+          "excerpt": "读者问是否仅看前三段；缠师答完成与三类点关联，延伸即未完成。"
+        },
+        {
+          "source": "https://github.com/Newchanlun/NewChanlun/issues/1426#issuecomment-7041670512",
+          "excerpt": "同一前 111 根，普通续流可在第 202 根扩展。"
+        }
+      ],
+      "citation": "018:42,44；025:304–308；035:122；036:26,30；078:166；099:196,200；102:238；105:468；020:32；041:319；#1426 c7041670512",
+      "reasoning": "原文有当下趋势叫法与可变几何；并无二者等于逐 bar 正式类型信号的合同。只比较发布候选：111→202 保持身份却翻叶，故不可将普通发展制造为正式首证撤回。#799/ADR 0041 裁定二不容同一判断两档；当下读法仍有效。",
+      "recommended": "采候选 3：开放切面发布观察，双 R5 且严格分离的真实相邻首对才给正式类型。下列记录列足正反语料。",
+      "searchedKeywords": [
+        "第二个(同级别)?(走势)?中枢|构成趋势|开放期|未结算.{0,20}(趋势|形成)",
+        "\"第二个中枢\" OR \"构成趋势\" OR \"开放期\" in:title,body,comments",
+        "第二个同级别中枢|形成两个依次同向|中枢的新生|第二个中枢",
+        "\"第二个同级别中枢\" OR \"形成两个依次同向\" OR \"中枢的新生\" in:title,body,comments",
+        "中枢完成前|一个中枢的完成|第二个中枢的前三段",
+        "\"中枢的完成\" OR \"中枢完成前\" OR \"第二个中枢的前三段\" in:title,body,comments",
+        "形成了|才算(下跌|上涨)|第二个(同级别)?(走势)?中枢|第二[个個]?中[枢樞]|是否延续|演化成",
+        "(趋势|升势|跌势|上涨|下跌).{0,18}(成立|形成|走出来|尚未|不算)|(成立|形成|才算|就是|构成).{0,20}(趋势|升势|跌势|上涨|下跌)|两[个個](同级别)?(走势)?中枢"
+      ],
+      "gap": "",
+      "conflict": "第 1 轮未处理同状态称「形成」的原句；第 2 轮把技术边界标成 [旧缠论]，与这些原句相悖。"
+    },
+    {
+      "id": "Q2",
+      "klass": "B",
+      "question": "何时正式确认，如何区别中枢离开、结算、类型确认、走势实际完成和继任？",
+      "queries": [
+        {
+          "channel": "repo",
+          "query": "走势必完美|后中枢.{0,16}(结算|确认)|停在核心之外的那段回抽|破坏未证|首回试.{0,10}完成",
+          "command": "rg -n --max-columns 450 --max-columns-preview '走势必完美|后中枢.{0,16}(结算|确认)|停在核心之外的那段回抽|破坏未证|首回试.{0,10}完成' docs/chanlun/text/blog/ .chanlun/definitions/ docs/adr/",
+          "hits": 74,
+          "result": "74 行"
+        },
+        {
+          "channel": "tracker",
+          "query": "\"趋势形成\" OR \"形成时点\" OR \"走势必完美\" OR \"形成/完成\" in:title,body,comments",
+          "command": "gh issue list -R Newchanlun/NewChanlun --state all --limit 50 --search '\"趋势形成\" OR \"形成时点\" OR \"走势必完美\" OR \"形成/完成\" in:title,body,comments' --json number,title,state,url",
+          "hits": 13,
+          "result": "#2114 OPEN、#1426 OPEN、#1360 OPEN、#1429 OPEN、#1443 OPEN、#1323 OPEN、#1463 CLOSED、#871 CLOSED、#877 CLOSED、#832 CLOSED、#858 CLOSED、#854 CLOSED、#1340 OPEN"
+        },
+        {
+          "channel": "repo",
+          "query": "isTrend|IsUpTrend|IsDownTrend|CompletedTrend|TrendFormed|ProvisionalSeparation|firstRetest|thirdClassSide|known_at|first_known",
+          "command": "rg -n --max-columns 450 --max-columns-preview 'isTrend|IsUpTrend|IsDownTrend|CompletedTrend|TrendFormed|ProvisionalSeparation|firstRetest|thirdClassSide|known_at|first_known' formal/Origin/",
+          "hits": 95,
+          "result": "95 行"
+        }
+      ],
+      "hits": [
+        {
+          "source": "https://github.com/Newchanlun/NewChanlun/issues/1496",
+          "excerpt": "实际中枢破坏需离开与完成首回抽，旧塔有误关样本。"
+        },
+        {
+          "source": ".chanlun/definitions/zhongshu.md:324–360,536",
+          "excerpt": "S-3/R5 是中枢结束语义，不是走势结束。"
+        },
+        {
+          "source": "formal/Origin/CenterStates.lean:215–238；formal/Origin/TrendCompleteClassification.lean:66–80",
+          "excerpt": "前者为静态几何，后者为已完成良构三分。"
+        },
+        {
+          "source": "#1340 冻结 JSON /classification_axes/18,22,24,61",
+          "excerpt": "分别判破坏、完成分类、实例、同级连接，域不可混。"
+        }
+      ],
+      "citation": "018:42,44,64；020:60；041:319；#1496；#1340 CC-019/023/025/062；formal/Origin/ScanAssemblyMirror.lean:352–381",
+      "reasoning": "中心的两段式结束有既定谓词，但没有为走势发布首证的切面；CC-025 保护实例生命周期，CC-023 分类限定已完成，CC-062 已完成后才排除同向同级继任。若离开早于首次完成的合法回试，证据未齐，不回填；证齐时即使走势尚未完成也可以发布类型。",
+      "recommended": "同一切面收两个 R5、真实相邻连接及外缘，第一根齐证 K 线作为 known_at 输入锚；不代填走势完成或继任。",
+      "searchedKeywords": [
+        "走势必完美|后中枢.{0,16}(结算|确认)|停在核心之外的那段回抽|破坏未证|首回试.{0,10}完成",
+        "\"趋势形成\" OR \"形成时点\" OR \"走势必完美\" OR \"形成/完成\" in:title,body,comments",
+        "isTrend|IsUpTrend|IsDownTrend|CompletedTrend|TrendFormed|ProvisionalSeparation|firstRetest|thirdClassSide|known_at|first_known"
+      ],
+      "gap": "",
+      "conflict": "现头用两次单段扫描结算作临时确认，不是两端 R5。"
+    },
+    {
+      "id": "Q3",
+      "klass": "B",
+      "question": "如何据在案 R5 推导段角色并处理反向结算；同向 T3-in-c 是否是形成门？",
+      "queries": [
+        {
+          "channel": "repo",
+          "query": "两段式|c[[:space:]]*至少包含对[[:space:]]*B|T3-in-c|trend_third_class_in_c|第5段构成第三类|先挂起看下一段|停在核心之外的那段回抽",
+          "command": "rg -n --max-columns 450 --max-columns-preview '两段式|c[[:space:]]*至少包含对[[:space:]]*B|T3-in-c|trend_third_class_in_c|第5段构成第三类|先挂起看下一段|停在核心之外的那段回抽' docs/chanlun/text/blog/ .chanlun/definitions/ docs/adr/",
+          "hits": 24,
+          "result": "24 行"
+        },
+        {
+          "channel": "tracker",
+          "query": "\"两段式结算\" OR \"离开后看回抽\" OR \"不回则破坏\" in:title,body,comments",
+          "command": "gh issue list -R Newchanlun/NewChanlun --state all --limit 50 --search '\"两段式结算\" OR \"离开后看回抽\" OR \"不回则破坏\" in:title,body,comments' --json number,title,state,url",
+          "hits": 4,
+          "result": "#1496 OPEN、#2114 OPEN、#1424 OPEN、#1323 OPEN"
+        },
+        {
+          "channel": "tracker",
+          "query": "\"T3-in-c\" OR \"trend_third_class_in_c\" OR \"c至少包含对B\" in:title,body,comments",
+          "command": "gh issue list -R Newchanlun/NewChanlun --state all --limit 50 --search '\"T3-in-c\" OR \"trend_third_class_in_c\" OR \"c至少包含对B\" in:title,body,comments' --json number,title,state,url",
+          "hits": 27,
+          "result": "#1229 CLOSED、#1260 CLOSED、#1249 CLOSED、#586 CLOSED、#1275 CLOSED、#584 CLOSED、#1278 CLOSED、#487 CLOSED、#1300 CLOSED、#1291 CLOSED、#1299 CLOSED、#606 CLOSED、#993 CLOSED、#607 CLOSED、#582 CLOSED、#589 CLOSED、#1226 CLOSED、#903 CLOSED、#883 CLOSED、#812 CLOSED、#1232 CLOSED、#565 CLOSED、#608 CLOSED、#913 CLOSED、#848 CLOSED、#846 CLOSED、#817 CLOSED"
+        },
+        {
+          "channel": "repo",
+          "query": "isTrend|IsUpTrend|IsDownTrend|CompletedTrend|TrendFormed|ProvisionalSeparation|firstRetest|thirdClassSide|known_at|first_known",
+          "command": "rg -n --max-columns 450 --max-columns-preview 'isTrend|IsUpTrend|IsDownTrend|CompletedTrend|TrendFormed|ProvisionalSeparation|firstRetest|thirdClassSide|known_at|first_known' formal/Origin/",
+          "hits": 95,
+          "result": "95 行"
+        }
+      ],
+      "hits": [
+        {
+          "source": "https://github.com/Newchanlun/NewChanlun/issues/1478#issuecomment-6149640661",
+          "excerpt": "裁定一只遍历 Zn，裁定二是向 Zn 方向离开的端点；两种退场条件照旧。"
+        },
+        {
+          "source": "docs/chanlun/text/blog/061-第61课.md:44",
+          "excerpt": "第四段离开，第五段构成第三类点；作者正文。"
+        },
+        {
+          "source": ".chanlun/definitions/zhongshu.md:250–252,342–350,536",
+          "excerpt": "已有离开与回抽的两种角色解读，本票推导并由 #1496 同拍订措辞。"
+        },
+        {
+          "source": "docs/chanlun/text/blog/037-第37课.md:16–20；.chanlun/definitions/beichi.md:106–124",
+          "excerpt": "背驰结构前件先假定趋势，严守同向与新高/新低各自条件。"
+        },
+        {
+          "source": "https://github.com/Newchanlun/NewChanlun/issues/1229#issuecomment-5417718452",
+          "excerpt": "全窗后扫统一为 trend_third_class_in_c。"
+        },
+        {
+          "source": "https://github.com/Newchanlun/NewChanlun/issues/1300#issuecomment-5463525851",
+          "excerpt": "Lean IsType1 补 isTrend；当前源码 :92–97 与 :362–366 支持。"
+        }
+      ],
+      "citation": "061:44；078:58,60；102:238；037:16–20；zhongshu.md §4.1/§5.2/§5.5/§5.7/§9 R5；#1478/#1496/#1229/#1300",
+      "reasoning": "连续且方向交替的完成单元：第一个不重叠单元从外端反向回抽，前与核心相交的一段才是离开；若不相连使不重叠者本身为离开，则同一规则等待首回抽。第102课允许后枢直接反向破坏；结算用 R5，趋势方向读外缘，反向不作同向背驰前件。对反向末非 Zn 远端的比较直接继承 #1478，登记读数而非另立外缘。",
+      "recommended": "按实际角色完成即取两段见证；同对反向 R5 后严格分离则依外缘确认；保留标准背驰／一类点的全窗同向见证，完成另证。",
+      "searchedKeywords": [
+        "两段式|c[[:space:]]*至少包含对[[:space:]]*B|T3-in-c|trend_third_class_in_c|第5段构成第三类|先挂起看下一段|停在核心之外的那段回抽",
+        "\"两段式结算\" OR \"离开后看回抽\" OR \"不回则破坏\" in:title,body,comments",
+        "\"T3-in-c\" OR \"trend_third_class_in_c\" OR \"c至少包含对B\" in:title,body,comments",
+        "isTrend|IsUpTrend|IsDownTrend|CompletedTrend|TrendFormed|ProvisionalSeparation|firstRetest|thirdClassSide|known_at|first_known"
+      ],
+      "gap": "",
+      "conflict": "§5.2 与 §9 R5 把不重叠单元一概当离开；#1478 的评论没说「不等回抽之后第三单元」，其 §4.1 条款明指向 Zn 方向离开。"
+    },
+    {
+      "id": "Q4",
+      "klass": "B",
+      "question": "未确认时如何对外表述，哪些状态保留，何者不能参与准入？",
+      "queries": [
+        {
+          "channel": "repo",
+          "query": "ProvisionalSeparation|开放期严格分离|FORMED_OPEN|暂态|观察.{0,8}准入",
+          "command": "rg -n --max-columns 450 --max-columns-preview 'ProvisionalSeparation|开放期严格分离|FORMED_OPEN|暂态|观察.{0,8}准入' .chanlun/definitions/ docs/adr/",
+          "hits": 4,
+          "result": "4 行"
+        },
+        {
+          "channel": "tracker",
+          "query": "\"ProvisionalSeparation\" OR \"开放期严格分离\" OR \"待升级\" in:title,body,comments",
+          "command": "gh issue list -R Newchanlun/NewChanlun --state all --limit 50 --search '\"ProvisionalSeparation\" OR \"开放期严格分离\" OR \"待升级\" in:title,body,comments' --json number,title,state,url",
+          "hits": 1,
+          "result": "#2114 OPEN"
+        }
+      ],
+      "hits": [
+        {
+          "source": "rust/src/theta_v0/classifier/trend_formation.rs@271f3fbe:45–57,136–173",
+          "excerpt": "PairState 已有观察、扩展交接、升级待定；本票划定实例发布侧适用域。"
+        },
+        {
+          "source": "#1340 冻结 JSON /classification_axes/19,22,23,24",
+          "excerpt": "CC-020 两个有效枢及相邻性；已完成分类、技术与语义方向、实例状态各有主体。"
+        },
+        {
+          "source": "https://github.com/Newchanlun/NewChanlun/issues/1429#issuecomment-6152239745",
+          "excerpt": "仅待升级不宣告中枢不存在。"
+        }
+      ],
+      "citation": "#2114；#1426／271f3fbe；#1340 CC-020/023/024/025；#1429 c6152239745",
+      "reasoning": "先有单枢实例；B 合法新生时五叶可知，形成门未证；实例生命周期、关系几何与知识状态分别输出，避免实例回退、五叶变六叶和下游把关系当正式趋势。",
+      "recommended": "ProvisionalSeparation 含观察方向、不准入，五叶独立，同实例 FORMED_OPEN 不回退；扩展或待升级只按适用域交接。",
+      "searchedKeywords": [
+        "ProvisionalSeparation|开放期严格分离|FORMED_OPEN|暂态|观察.{0,8}准入",
+        "\"ProvisionalSeparation\" OR \"开放期严格分离\" OR \"待升级\" in:title,body,comments"
+      ],
+      "gap": "",
+      "conflict": "第 2 稿将观察叫作 CC-020 关系观察，易读为第六叶。"
+    },
+    {
+      "id": "Q5",
+      "klass": "B",
+      "question": "如何记知识时间；普通追加、数据更正、结构归属失效分别何时修订或撤回？",
+      "queries": [
+        {
+          "channel": "repo",
+          "query": "known_at|AsKnown|RecomputedWithRevision|修订.{0,8}撤回",
+          "command": "rg -n --max-columns 450 --max-columns-preview 'known_at|AsKnown|RecomputedWithRevision|修订.{0,8}撤回' docs/adr/0038-dual-run-determinism-recovery-seek-asknown.md docs/adr/0051-per-bar-domain-event-identity-lifecycle-contract.md",
+          "hits": 24,
+          "result": "24 行"
+        },
+        {
+          "channel": "tracker",
+          "query": "\"known_at\" \"撤回\" OR \"C08\" \"撤回\" in:title,body,comments",
+          "command": "gh issue list -R Newchanlun/NewChanlun --state all --limit 50 --search '\"known_at\" \"撤回\" OR \"C08\" \"撤回\" in:title,body,comments' --json number,title,state,url",
+          "hits": 14,
+          "result": "#2114 OPEN、#1719 OPEN、#1340 OPEN、#1621 CLOSED、#1461 OPEN、#1460 OPEN、#1424 OPEN、#1534 CLOSED、#1406 OPEN、#1323 OPEN、#1467 OPEN、#1557 CLOSED、#1590 CLOSED、#1336 CLOSED"
+        }
+      ],
+      "hits": [
+        {
+          "source": "docs/adr/0051-per-bar-domain-event-identity-lifecycle-contract.md:273–294",
+          "excerpt": "撤回追加、原 cut 与 AsKnown 不动；同切面 delta 可重放。"
+        },
+        {
+          "source": "https://github.com/Newchanlun/NewChanlun/issues/1621#issuecomment-6390401345",
+          "excerpt": "已合入的跨域获知时钟复核，非本票结构输入锚定义。"
+        },
+        {
+          "source": "https://github.com/Newchanlun/NewChanlun/issues/1429#issuecomment-6990012358",
+          "excerpt": "待升级中枢对保有 ID、连接；叶与方向为空。"
+        },
+        {
+          "source": "rust/src/bin/s_session_v3/content_structure.rs@271f3fbe:2790–2816",
+          "excerpt": "既有关系变更为 pending_upgrade、leaf_revised 等；不是 PairState。"
+        }
+      ],
+      "citation": "#1340 C02.3–.5、C08.2/.5/.6、AT-04；ADR 0051 §三、ADR 0038 §三；#1429 c6990012358；#1621",
+      "reasoning": "结构几何证齐所在的输入前沿与 S 实际提交、接收分列；旧 AsKnown 固定。普通发展保留同一有效关系，可变的是叶或证据；失效才追加撤回，替代在当前提交。#1429 未决和已证明失效是两种状态。",
+      "recommended": "同身份原主张有效则修订；失效才撤；待升级保留旧对叶暂空；更早重算锚只在 RecomputedWithRevision。",
+      "searchedKeywords": [
+        "known_at|AsKnown|RecomputedWithRevision|修订.{0,8}撤回",
+        "\"known_at\" \"撤回\" OR \"C08\" \"撤回\" in:title,body,comments"
+      ],
+      "gap": "",
+      "conflict": ""
+    },
+    {
+      "id": "Q6",
+      "klass": "A",
+      "question": "上下方向和各级是否用同一形成判据？",
+      "queries": [
+        {
+          "channel": "repo",
+          "query": "总缝规则|同输入同输出",
+          "command": "rg -n --max-columns 450 --max-columns-preview '总缝规则|同输入同输出' docs/agents/doctrine-rules.md docs/adr/ .chanlun/definitions/",
+          "hits": 30,
+          "result": "30 行"
+        },
+        {
+          "channel": "tracker",
+          "query": "\"总缝规则\" OR \"同输入同输出\" in:title,body,comments",
+          "command": "gh issue list -R Newchanlun/NewChanlun --state all --limit 50 --search '\"总缝规则\" OR \"同输入同输出\" in:title,body,comments' --json number,title,state,url",
+          "hits": 50,
+          "result": "#1651 OPEN、#1439 OPEN、#1486 OPEN、#1531 CLOSED、#2114 OPEN、#1669 CLOSED、#809 CLOSED、#1489 CLOSED、#1605 CLOSED、#1604 CLOSED、#1603 CLOSED、#1602 CLOSED、#1229 CLOSED、#1302 CLOSED、#1294 CLOSED、#1228 CLOSED、#1601 CLOSED、#1265 CLOSED、#1266 CLOSED、#1249 CLOSED、#1488 CLOSED、#1053 CLOSED、#1619 CLOSED、#1621 CLOSED、#1347 CLOSED、#960 CLOSED、#1350 CLOSED、#975 CLOSED、#1598 CLOSED、#804 CLOSED、#1348 CLOSED、#1790 CLOSED、#814 CLOSED、#1590 CLOSED、#816 CLOSED、#815 CLOSED、#1565 CLOSED、#1612 CLOSED、#810 CLOSED、#348 CLOSED、#1561 CLOSED、#812 CLOSED、#980 CLOSED、#984 CLOSED、#1406 OPEN、#827 CLOSED、#862 CLOSED、#826 CLOSED、#1560 CLOSED、#1559 CLOSED"
+        }
+      ],
+      "hits": [
+        {
+          "source": "https://github.com/Newchanlun/NewChanlun/issues/804#issuecomment-5138190089",
+          "excerpt": "同一判断各级一致，只有输入值可换。"
+        },
+        {
+          "source": "https://github.com/Newchanlun/NewChanlun/issues/1531#issuecomment-6381351416",
+          "excerpt": "严格唯一与级别同构落 ADR 0047。"
+        },
+        {
+          "source": "docs/agents/doctrine-rules.md:61–104",
+          "excerpt": "同输入逐位相同的行为锁，例外需权威与退出条件。"
+        }
+      ],
+      "citation": "docs/agents/doctrine-rules.md 总缝规则；#804；#1531；ADR 0047",
+      "reasoning": "级别只作输入；按语义行为而不按分支形状判断。镜像换方向及对应端点，不改变证据职责；不新增例外。",
+      "recommended": "直接沿用 #804 与 #1531 的测试锁。",
+      "searchedKeywords": [
+        "总缝规则|同输入同输出",
+        "\"总缝规则\" OR \"同输入同输出\" in:title,body,comments"
+      ],
+      "gap": "",
+      "conflict": ""
+    },
+    {
+      "id": "Q7",
+      "klass": "A",
+      "question": "严格外缘、Zn 全集与中枢成立本身是否重裁？",
+      "queries": [
+        {
+          "channel": "repo",
+          "query": "外缘分离|依次同向|后GG<前DD|后DD>前GG|Zn 总集",
+          "command": "rg -n --max-columns 450 --max-columns-preview '外缘分离|依次同向|后GG<前DD|后DD>前GG|Zn 总集' docs/chanlun/text/blog/ .chanlun/definitions/",
+          "hits": 31,
+          "result": "31 行"
+        },
+        {
+          "channel": "tracker",
+          "query": "\"外缘分离\" OR \"依次同向\" in:title,body,comments",
+          "command": "gh issue list -R Newchanlun/NewChanlun --state all --limit 50 --search '\"外缘分离\" OR \"依次同向\" in:title,body,comments' --json number,title,state,url",
+          "hits": 15,
+          "result": "#2114 OPEN、#1426 OPEN、#900 CLOSED、#1011 CLOSED、#882 CLOSED、#898 CLOSED、#894 CLOSED、#897 CLOSED、#815 CLOSED、#847 CLOSED、#322 CLOSED、#794 CLOSED、#870 CLOSED、#252 CLOSED、#787 CLOSED"
+        }
+      ],
+      "hits": [
+        {
+          "source": "https://github.com/Newchanlun/NewChanlun/issues/815#issuecomment-5173454002",
+          "excerpt": "严格外缘为同向判据，不能用核心分离替代。"
+        },
+        {
+          "source": "https://github.com/Newchanlun/NewChanlun/issues/812#issuecomment-5145337088",
+          "excerpt": "Z-6 不设候选枢。"
+        },
+        {
+          "source": ".chanlun/definitions/zhongshu.md:218–232,254–266,416–420",
+          "excerpt": "Zn、严格几何与中枢存在锚定既有正本。"
+        }
+      ],
+      "citation": "017:38,46,48；018:28；020:52,58；#815 M-2；#812 Z-6/S-7；#1478；CC-020",
+      "reasoning": "外缘只遍历所有有效 Zn，严格新生与扩展均按五叶；中枢三段成立无候选，开放是生命周期；和本票的发布门不同。",
+      "recommended": "沿用；外缘等号在核心严格分离时为扩展，核心相切不归扩展。",
+      "searchedKeywords": [
+        "外缘分离|依次同向|后GG<前DD|后DD>前GG|Zn 总集",
+        "\"外缘分离\" OR \"依次同向\" in:title,body,comments"
+      ],
+      "gap": "",
+      "conflict": ""
+    }
+  ]
+}

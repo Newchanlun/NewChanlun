@@ -1,0 +1,13 @@
+{
+  "ticket": 2114,
+  "role": "triage",
+  "model": "gpt-6.2-sol",
+  "klass": "T",
+  "reason": "相邻同级中枢的两段式结算见证、逐 bar 类型事件与修订／撤回是技术接口和状态机。#815、#812、#1478 与冻结 #1340 有在案规则；不改变 Destination ②、不改正式价格判据或交易策略，更不签资金、账户/场所、量档/容量、成本/风险阈值、凭据或权限。",
+  "parsed": true,
+  "userGate": [],
+  "sourceCommit": "b9d898dccf46c2a716115eaa1215bc39c458a959",
+  "asOf": "2026-11-20",
+  "round": 3,
+  "classificationComment": "https://github.com/Newchanlun/NewChanlun/issues/2114#issuecomment-7042051844"
+}
