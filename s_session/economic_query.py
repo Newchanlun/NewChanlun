@@ -194,7 +194,7 @@ X_EXECUTION_WITNESS_ALLOWED = frozenset({
 })
 X_ACCEPT_CLOCK_ALLOWED = frozenset({"received_ns", "first_known_ns", "commit_ns"})
 X_AUTHORITY_EVIDENCE_BASE_ALLOWED = frozenset({
-    "protocol", "session_id", "session_generation", "authority_id", "command_id", "command_hash",
+    "protocol", "session_id", "session_generation", "authority_id", "authority_epoch", "command_id", "command_hash",
     "state", "receipt_id", "release_receipt_id", "commit_ns",
 })
 X_EXECUTE_EVIDENCE_ALLOWED = frozenset({"claimed_ns", "reply"})
@@ -205,7 +205,7 @@ PROJECTED_RECORD_BASE_ALLOWED = frozenset({
     "origin_message", "origin_request_hash", "received_ns", "first_known_ns", "commit_ns",
     "recorded_seq", "cut", "e_domain_id", "e_session_id", "e_session_generation",
     "e_commit_proof", "e_commit_proof_omitted", "e_receipt", "e_resolution_proof",
-    "source_debit_proof", "b_observation", "b_origin_message", "b_origin_request_hash",
+    "b_source_debit_proof", "b_observation", "b_origin_message", "b_origin_request_hash",
 })
 
 
@@ -217,6 +217,45 @@ def _assert_whitelist_keys(obj, allowed, label):
             raise EconomicQueryError(f"{label} 存在未声明字段（不在读权白名单内）：{k}")
 
 
+_OPAQUE_SOURCE_FIELDS = frozenset({"raw_utf8", "raw_exact_text", "model_raw_utf8", "model_exact_text", "event"})
+
+
+def _source_cost_component(item):
+    # book.rs / tb03c_book.rs copy the validated source component verbatim. Derived E
+    # components have neither source_ref nor amount_text; their resolve_cut is protocol.
+    return type(item) is dict and type(item.get("source_ref")) is str and type(item.get("amount_text")) is str
+
+
+def _cut_evidence_shape(node):
+    if CUT_FIELDS == node.keys():
+        return "cut"
+    if type(node.get("kind")) is str and not node["kind"].startswith("Economic") and (
+        type(node.get("cut")) is dict and node["cut"].keys() == CUT_FIELDS
+    ):
+        return "receipt"
+    if type(node.get("witness_revision")) is str and "e_release_cut" in node:
+        return "witness"
+    return None
+
+
+def _protocol_cut_candidates(root, path=()):
+    """Enumerate cut/receipt/witness positions independently of the protocol visitor."""
+    if type(root) is dict:
+        shape = _cut_evidence_shape(root)
+        if shape is not None:
+            yield path, root
+        if shape == "cut":
+            return
+        for key, value in root.items():
+            if key not in _OPAQUE_SOURCE_FIELDS:
+                yield from _protocol_cut_candidates(value, (*path, key))
+    elif type(root) is list:
+        source_components = path[-2:] == ("book", "known_cost_components")
+        for index, value in enumerate(root):
+            if not (source_components and _source_cost_component(value)):
+                yield from _protocol_cut_candidates(value, (*path, index))
+
+
 def _verify_protocol_response_cuts(
     body,
     vector_cuts,
@@ -224,8 +263,10 @@ def _verify_protocol_response_cuts(
     *,
     verify_historical=None,
     own_domain_limit=None,
+    unlisted_paths=None,
 ):
-    """不变量 A + 回执域归属（按协议结构位置校验，绝不把来源数据内同名字段当成协议回执）。"""
+    """协议位置约束回执归属；形状兜底保证新增位置也无法带出未来切面。"""
+    checked = set()
 
     def check_cut(node, expected_domain=None):
         if type(node) is not dict or set(node) != CUT_FIELDS:
@@ -236,6 +277,7 @@ def _verify_protocol_response_cuts(
         if type(rdomain) is not str or (known_domains is not None and rdomain not in known_domains):
             raise EconomicQueryError(f"回执所属域 {rdomain} 不在固定向量中")
         verified_rcut = verify_cut(node, rdomain)
+        checked.add(id(node))
         rseq = int(verified_rcut["commit_seq"])
         if own_domain_limit is not None and rdomain == own_domain_limit[0]:
             own_cut = own_domain_limit[1]
@@ -262,6 +304,9 @@ def _verify_protocol_response_cuts(
     def check_finance_record(rec, owner_domain):
         if type(rec) is not dict:
             return
+        check_voice_basis(rec)
+        if type(rec.get("prepared")) is dict:
+            check_voice_basis(rec["prepared"].get("voice"))
         if rec.get("prepared_cut") is not None:
             exp = rec.get("owner") if type(rec.get("owner")) is str else owner_domain
             check_cut(rec["prepared_cut"], exp)
@@ -270,6 +315,8 @@ def _verify_protocol_response_cuts(
             check_cut(rec["commit_cut"], exp)
         grant = rec.get("grant")
         if type(grant) is dict:
+            if grant.get("prepared_cut") is not None:
+                check_cut(grant["prepared_cut"], grant.get("owner"))
             if grant.get("e_cut") is not None:
                 check_cut(grant["e_cut"], "E")
             orig_g = grant.get("original")
@@ -286,6 +333,11 @@ def _verify_protocol_response_cuts(
                     exp = g.get("owner") if type(g.get("owner")) is str else None
                     check_cut(g["prepared_cut"], exp)
 
+    def check_voice_basis(record):
+        ob = record.get("opening_basis") if type(record) is dict else None
+        if type(ob) is dict and ob.get("e_cut") is not None:
+            check_cut(ob["e_cut"], "E")
+
     def check_receipt(rec, expected_domain=None):
         if type(rec) is not dict:
             raise EconomicQueryError("回执非对象")
@@ -293,22 +345,25 @@ def _verify_protocol_response_cuts(
         if type(rcut) is not dict or set(rcut) != CUT_FIELDS:
             raise EconomicQueryError("回执缺失合法 cut")
         rdomain = rec.get("domain_id")
-        if rdomain is not None:
-            if type(rdomain) is not str:
-                raise EconomicQueryError("回执 domain_id 非文本")
-            if rdomain != rcut["domain_id"]:
-                raise EconomicQueryError(f"回执域 {rdomain} 与 cut 域 {rcut['domain_id']} 不符")
-            if expected_domain is not None and rdomain != expected_domain:
-                raise EconomicQueryError(f"回执域与期望域不符：期望 {expected_domain}，实际 {rdomain}")
+        if type(rdomain) is not str:
+            raise EconomicQueryError("回执缺失合法 domain_id")
+        if rdomain != rcut["domain_id"]:
+            raise EconomicQueryError(f"回执域 {rdomain} 与 cut 域 {rcut['domain_id']} 不符")
+        if expected_domain is not None and rdomain != expected_domain:
+            raise EconomicQueryError(f"回执域与期望域不符：期望 {expected_domain}，实际 {rdomain}")
+        checked.add(id(rec))
         check_cut(rcut, expected_domain)
         if type(rec.get("record")) is dict:
-            check_finance_record(rec["record"], rdomain or rcut["domain_id"])
+            check_finance_record(rec["record"], rdomain)
 
     def check_fill_row(row):
         if type(row) is not dict:
             return
-        w = row.get("x_execution_witness")
+        check_execution_witness(row.get("x_execution_witness"))
+
+    def check_execution_witness(w):
         if type(w) is dict and w.get("e_release_cut") is not None:
+            checked.add(id(w))
             check_cut(w["e_release_cut"], "E")
 
     def check_peer_proof(p):
@@ -343,7 +398,7 @@ def _verify_protocol_response_cuts(
         ecp = rec.get("e_commit_proof")
         if type(ecp) is dict and type(ecp.get("image")) is dict:
             check_image(ecp["image"], "E")
-        sdp = rec.get("source_debit_proof")
+        sdp = rec.get("b_source_debit_proof")
         if type(sdp) is dict:
             sd = sdp.get("domain_id") if type(sdp.get("domain_id")) is str else None
             if sdp.get("receipt") is not None:
@@ -365,15 +420,14 @@ def _verify_protocol_response_cuts(
                 items = book.get(list_key)
                 if type(items) is list:
                     for item in items:
-                        if type(item) is dict:
+                        if type(item) is dict and not (list_key == "known_cost_components" and _source_cost_component(item)):
                             deriv = item.get("derivation")
                             if type(deriv) is dict and deriv.get("resolve_cut") is not None:
                                 check_cut(deriv["resolve_cut"], "E")
             voice = book.get("voice")
-            if type(voice) is dict and type(voice.get("identity")) is dict:
-                ob = voice["identity"].get("opening_basis")
-                if type(ob) is dict and ob.get("e_cut") is not None:
-                    check_cut(ob["e_cut"], "E")
+            if type(voice) is dict and type(voice.get("records")) is list:
+                for record in voice["records"]:
+                    check_voice_basis(record)
         for list_key in ("recorded", "pending"):
             recs = img.get(list_key)
             if type(recs) is list:
@@ -396,6 +450,9 @@ def _verify_protocol_response_cuts(
             if type(fin.get("commands")) is list:
                 for c in fin["commands"]:
                     check_finance_record(c, owner_domain)
+            if type(fin.get("responsibilities")) is list:
+                for r in fin["responsibilities"]:
+                    check_finance_record(r, owner_domain)
         hist = img.get("history")
         if type(hist) is list:
             for h in hist:
@@ -404,8 +461,7 @@ def _verify_protocol_response_cuts(
                 ws = h.get("x_execution_witnesses")
                 if type(ws) is dict:
                     for w in ws.values():
-                        if type(w) is dict and w.get("e_release_cut") is not None:
-                            check_cut(w["e_release_cut"], "E")
+                        check_execution_witness(w)
                 if type(h.get("record")) is dict:
                     check_finance_record(h["record"], owner_domain)
                 hw = h.get("witness")
@@ -505,6 +561,22 @@ def _verify_protocol_response_cuts(
         check_original(body.get("original"), body.get("domain_id"), body.get("original_kind"))
     elif kind == "_WatchChangeImage":
         check_image(body.get("image"), body.get("domain_id"))
+
+    # Collect the difference before checking fallback positions. Identity, not value,
+    # matters: the same cut can be repeated at a listed and at an unlisted location.
+    missed = [(path, node) for path, node in _protocol_cut_candidates(body) if id(node) not in checked]
+    for path, node in missed:
+        if unlisted_paths is not None:
+            unlisted_paths.add(path)
+        if id(node) in checked:
+            continue
+        shape = _cut_evidence_shape(node)
+        if shape == "receipt":
+            check_receipt(node)
+        elif shape == "witness":
+            check_execution_witness(node)
+        else:
+            check_cut(node)
 
 
 def _verify_fill_allocation_row_whitelist(row, has_cmd):

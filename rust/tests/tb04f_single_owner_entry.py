@@ -31,6 +31,7 @@ parser = argparse.ArgumentParser(
 )
 parser.add_argument("--bin", type=Path, required=True)
 parser.add_argument("--out", type=Path, required=True)
+parser.add_argument("--read-coverage", action="store_true", help="从真实 owner 取全套读侧差分夹具")
 parser.add_argument(
     "--twice",
     action="store_true",
@@ -51,6 +52,8 @@ if args.twice:
         "--out",
         str(run / "case"),
     ]
+    if args.read_coverage:
+        child.append("--read-coverage")
     for name in ("a", "b"):
         subprocess.run(child, check=True)
         (run / "case").rename(run / name)
@@ -724,7 +727,7 @@ def business_dump(db):
         }
 
 
-def query_http_snapshot(qc_path, expected_epochs, tag, *, cuts=None, expect_complete=True):
+def query_http_snapshot(qc_path, expected_epochs, tag, *, cuts=None, expect_complete=True, coverage_cases=None, early_watch=None):
     from economic_query import EconomicQuery
     from s_readonly_server import Handler, QueryHTTPServer
 
@@ -752,9 +755,18 @@ def query_http_snapshot(qc_path, expected_epochs, tag, *, cuts=None, expect_comp
             }
             raw_req = canonical(frame)
             req = Request(base + op, data=raw_req, headers={"Content-Type": "application/json"})
-            with urlopen(req, timeout=30) as stream:
-                raw = stream.read()
+            try:
+                with urlopen(req, timeout=30) as stream:
+                    raw = stream.read()
+            except Exception as exc:
+                exc.add_note(f"经济 HTTP 入口 {op}/{payload['op']}")
+                raise
             return validate_reply(frame, decode_frame(raw), producer="Q", producer_epoch="1")
+
+        if early_watch is not None:
+            snap = qcall("snapshot", {"op": "snapshot", "cuts": None, "as_known_ns": None, "snapshot_token": None})
+            watch = qcall("watch", {"op": "watch", "cuts": early_watch})
+            return {"snapshot": snap, "watch": watch}
 
         snap = read_economic_pages(
             {"op": "snapshot", "cuts": cuts, "as_known_ns": None, "snapshot_token": None},
@@ -775,6 +787,16 @@ def query_http_snapshot(qc_path, expected_epochs, tag, *, cuts=None, expect_comp
                 {"op": "original", "kind": "command", "object_id": "cmd-alpha", "domain_id": "E", "cuts": snap_cuts},
             )
             assert cmd_orig["cuts"] == snap_cuts
+            if coverage_cases is not None:
+                from tb04f_read_cut_coverage import check
+                with urlopen(base + "ready", timeout=30) as stream:
+                    discovery = decode_frame(stream.read())
+                e_previous_seq = int(snap_cuts["E"]["commit_seq"]) - 1
+                with closing(sqlite3.connect(Path(nodes["E"]["db"]).as_uri() + "?mode=ro", uri=True)) as db:
+                    (previous_root,) = db.execute("SELECT root FROM commits WHERE seq=?", (e_previous_seq,)).fetchone()
+                previous_e = {"domain_id": "E", "commit_seq": str(e_previous_seq), "root_hash": previous_root}
+                early_docs, original_objects = coverage_cases
+                check(http.economic_query, qcall, discovery, snap_cuts, previous_e, early_docs, original_objects, run / "read-cut-coverage.json")
             return snap, cmd_orig
         return snap, None
     finally:
@@ -957,7 +979,14 @@ try:
             "Applied",
         )
         ewire(f"B:{a}", f"bind-{a}", binding[a], "VoiceBound")
+    if args.read_coverage:
+        before_import = {
+            d: ewire(d, "coverage-view-" + d, {"op": "ReadView", "cut": None, "as_known_ns": None}, "EconomicView")["cut"]
+            for d in nodes
+        }
     ewire("E", "ImportResponsibility-existing20", {"op": "ImportResponsibility", "responsibility_id": "existing20", "writer_epoch": "1"}, "ResponsibilityImportedReceipt")
+    if args.read_coverage:
+        early_docs = query_http_snapshot(qc1, epochs1, "coverage-single-frame", early_watch=before_import)
 
     # 3. Prepare → Reserve → Commit → MakeDispatchable → ReleaseExact(cmd-alpha @ bar 2)
     for a, q in plans.items():
@@ -1259,7 +1288,12 @@ try:
     assert sum(int(r["amount"]) for r in e_view["image"]["finance"]["responsibilities"]) == 90
 
     # 6b. 在 E Resolve 双件后（三域总快照 ~1.9MB < 4MiB），核验正式 HTTP 分页 CompleteVector + original(command)
-    snap_resolved_ep1, cmd_before = query_http_snapshot(qc1, epochs1, "resolved-ep1")
+    coverage_cases = (early_docs, [
+        ("E", "fact", fee_cap["fact_key"]), ("E", "allocation", fee_aid),
+        ("B:alpha", "decision", "alpha"), ("E", "grant", grants["alpha"]),
+        ("E", "command", "cmd-alpha"), ("E", "model", fee_cap["fact_key"]),
+    ]) if args.read_coverage else None
+    snap_resolved_ep1, cmd_before = query_http_snapshot(qc1, epochs1, "resolved-ep1", coverage_cases=coverage_cases)
     write("snapshot-resolved-ep1.json", snap_resolved_ep1)
     resolved_cuts = {d: v["cut"] for d, v in snap_resolved_ep1["domains"].items()}
     assert len(snap_resolved_ep1["domains"]["E"]["image"]["fill_allocations"]) == 2

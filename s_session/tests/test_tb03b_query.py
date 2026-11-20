@@ -234,7 +234,7 @@ class FinancialQueryTests(unittest.TestCase):
         def owner(domain, payload):
             if payload["op"] == "QueryDecision":
                 return {"kind": "EconomicDecision", "domain_id": domain,
-                        "decision": copy.deepcopy(self.decision), "receipts": [{"cut": self.receipt_cut}]}
+                        "decision": copy.deepcopy(self.decision), "receipts": [{"domain_id": domain, "cut": self.receipt_cut}]}
             return original_owner(domain, payload)
         self.q.owner = owner
 

@@ -264,6 +264,7 @@ fn fixed_read_document(
     let mut cuts = Vec::new();
     let mut changes = Vec::new();
     let mut allow_oversize_source = false;
+    let mut fixed_cuts = None;
     let next = match operation {
         "ReadView" => {
             exact(query, &["op", "cut", "as_known_ns"])?;
@@ -273,7 +274,11 @@ fn fixed_read_document(
         }
         super::read_projection::OP_READ_PROJECTION => {
             super::read_projection::check_projection_contract(config)?;
-            exact(query, &["op", "projection_revision", "cut", "as_known_ns"])?;
+            fixed_cuts = projection_query_cuts(
+                query,
+                &["op", "projection_revision", "cut", "as_known_ns"],
+                config,
+            )?;
             if required(query, "projection_revision")?
                 != super::read_projection::PROJECTION_REVISION
             {
@@ -292,9 +297,10 @@ fn fixed_read_document(
         }
         super::read_projection::OP_READ_ORIGINAL_AT_CUT => {
             super::read_projection::check_projection_contract(config)?;
-            exact(
+            fixed_cuts = projection_query_cuts(
                 query,
                 &["op", "projection_revision", "cut", "kind", "object_id"],
+                config,
             )?;
             if required(query, "projection_revision")?
                 != super::read_projection::PROJECTION_REVISION
@@ -383,6 +389,7 @@ fn fixed_read_document(
             epoch,
             runtime,
             &next,
+            fixed_cuts,
             &mut budget,
         )?;
         (doc, super::read_projection::KIND_PROJECTION_VIEW)
@@ -398,6 +405,7 @@ fn fixed_read_document(
             kind,
             object_id,
             &perms,
+            fixed_cuts,
             &mut budget,
         )?;
         (doc, super::read_projection::KIND_ORIGINAL_AT_CUT)
@@ -744,6 +752,43 @@ fn exact(v: &Value, keys: &[&str]) -> Result<(), String> {
         return Err("SchemaUnsupported：业务字段不完整或多余".into());
     }
     Ok(())
+}
+
+// 老调用仍只固定本域。传入显式向量时，必须由同一个本域 cut 锚定；不能以向量替代本地实读。
+fn projection_query_cuts<'a>(
+    query: &'a Value,
+    fields: &[&str],
+    config: &Config,
+) -> Result<Option<&'a serde_json::Map<String, Value>>, String> {
+    let Some(value) = query.get("fixed_cuts") else {
+        exact(query, fields)?;
+        return Ok(None);
+    };
+    let mut fields = fields.to_vec();
+    fields.push("fixed_cuts");
+    exact(query, &fields)?;
+    let cuts = value
+        .as_object()
+        .ok_or("InvalidDomain：fixed_cuts 须是域切面向量")?;
+    if query["cut"].is_null() || cuts.get(&config.domain) != query.get("cut") {
+        return Err("IdentityConflict：fixed_cuts 本域切面与请求不符".into());
+    }
+    for (domain, node) in cuts {
+        exact(node, &["domain_id", "commit_seq", "root_hash"])?;
+        if node["domain_id"] != *domain {
+            return Err("IdentityConflict：fixed_cuts 域与 cut 不符".into());
+        }
+        nonnegative(required(node, "commit_seq")?, "fixed_cuts.commit_seq")?;
+        let root = required(node, "root_hash")?;
+        if root.len() != 64
+            || !root
+                .bytes()
+                .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+        {
+            return Err("InvalidDomain：fixed_cuts 根摘要无效".into());
+        }
+    }
+    Ok(Some(cuts))
 }
 fn message_key(e: &Value) -> String {
     hash(&json!([

@@ -2,7 +2,9 @@
 //!
 //! 适用合同与三类读取成本边界：
 //! - 合同收口：仅适用于 `economic-session/1` + `tb03b-finance/6` + `tb03c-book/*`，不向 `/2` 或旧财务/旧书账开放；
-//!   不改写协议、不改原 SQLite 表结构/根链/审计、不抬 4 MiB/1 MiB 上限，不为旧 `/1` 用法新增 Job 前置。
+//!   不改写账本协议、不改原 SQLite 表结构/根链/审计、不抬 4 MiB/1 MiB 上限，不为旧 `/1` 用法新增 Job 前置。
+//! - `ReadProjection` / `ReadOriginalAtCut` 可随本域固定 `cut` 提供 `fixed_cuts`，使 owner 同时约束跨域证据；
+//!   不提供时保留本域读法，聚合端仍独立实核跨域向量。
 //! - 成本 1（完整离线重放 `audit_with_budget`）：每次 `EconomicReadOpen` 沿既有完整离线审计逐提交重放
 //!   `commits.image`（见 `store.rs::audit_with_budget`），这是全历史完整性重放开销，并非 256 KiB 分片缓冲。
 //! - 成本 2（256 KiB 分片投影扫描 `build_projection_document`）：通过 `store::stored_image_bytes_metered`
@@ -22,11 +24,13 @@ use super::store::{
     cut, metered_row, root_with_image_hash, stored_image_bytes_metered, stored_image_meta_metered,
     Config, ReadBudget, StoredImage, SCHEMA_V1,
 };
-use super::voice::exact;
+use super::tb03c_transfer::B_SOURCE_DEBIT_PROOF;
+use super::voice::{exact, OPENING_BASIS, OPENING_E_CUT, VOICE_RECORDS};
 use crate::session_protocol::{canonical_json, nonnegative, required, sha256_hex, strict_json};
 use rusqlite::Connection;
 use serde_json::{json, Map, Value};
 use sha2::{Digest, Sha256};
+use std::collections::HashSet;
 
 pub(super) const PROJECTION_REVISION: &str = "economic-read-projection/1";
 pub(super) const OP_READ_PROJECTION: &str = "ReadProjection";
@@ -488,7 +492,7 @@ fn is_omitted_peer_image_path(path: &[PathSeg], key: &str) -> bool {
             if root == "recorded"
                 && matches!(
                     proof.as_str(),
-                    "e_commit_proof" | "e_resolution_proof" | "b_source_debit_proof"
+                    "e_commit_proof" | "e_resolution_proof" | B_SOURCE_DEBIT_PROOF
                 ) =>
         {
             true
@@ -833,9 +837,10 @@ fn finalize_projection_reply(
     selected: &StoredImage,
     doc: &Value,
     perms: Option<&ReadPermissions>,
+    vector: Option<&Map<String, Value>>,
     budget: &mut ReadBudget<'_>,
 ) -> Result<Vec<u8>, String> {
-    verify_embedded_cuts_not_after_selected(config, selected, doc)?;
+    verify_embedded_cuts_not_after_selected(config, selected, doc, vector, |_| {})?;
     if let Some(p) = perms {
         if doc["kind"] == KIND_ORIGINAL_AT_CUT {
             verify_original_permission_bounds(&doc["original"], p)?;
@@ -950,6 +955,7 @@ const X_AUTHORITY_EVIDENCE_BASE_ALLOWED: &[&str] = &[
     "session_id",
     "session_generation",
     "authority_id",
+    "authority_epoch",
     "command_id",
     "command_hash",
     "state",
@@ -985,7 +991,7 @@ const PROJECTED_RECORD_BASE_ALLOWED: &[&str] = &[
     "e_commit_proof_omitted",
     "e_receipt",
     "e_resolution_proof",
-    "source_debit_proof",
+    B_SOURCE_DEBIT_PROOF,
     "b_observation",
     "b_origin_message",
     "b_origin_request_hash",
@@ -1005,497 +1011,602 @@ fn assert_whitelist_keys(val: &Value, allowed: &[&str], label: &str) -> Result<(
     Ok(())
 }
 
-fn check_protocol_cut(
-    config: &Config,
-    selected: &StoredImage,
-    expected_at_cut: &Value,
-    node: &Value,
-    expected_domain: Option<&str>,
-) -> Result<(), String> {
-    let Some(map) = node.as_object() else {
-        return Err("StorageUnavailable：内嵌cut非对象".into());
-    };
-    if !is_cut_shape(map) {
-        return Err("StorageUnavailable：内嵌cut字段不完整或多余".into());
-    }
-    let cdomain = required(node, "domain_id")?;
-    if let Some(exp) = expected_domain {
-        if cdomain != exp {
-            return Err(format!(
-                "StorageUnavailable：回执域与期望域不符：期望 {exp}，实际 {cdomain}"
-            ));
-        }
-    }
-    let cseq = nonnegative(required(node, "commit_seq")?, "cut.commit_seq")?;
-    let croot = required(node, "root_hash")?;
-    if croot.len() != 64
-        || !croot
-            .bytes()
-            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+struct CutCheck<'a> {
+    domain: &'a str,
+    selected: Value,
+    vector: Option<&'a Map<String, Value>>,
+    checked: HashSet<*const Value>,
+}
+
+#[derive(Clone, Copy)]
+enum CutEvidenceShape {
+    Cut,
+    Receipt,
+    Witness,
+}
+
+fn evidence_shape(map: &Map<String, Value>) -> Option<CutEvidenceShape> {
+    if is_cut_shape(map) {
+        Some(CutEvidenceShape::Cut)
+    } else if map
+        .get("kind")
+        .and_then(Value::as_str)
+        .is_some_and(|k| !k.starts_with("Economic"))
+        && map
+            .get("cut")
+            .and_then(Value::as_object)
+            .is_some_and(is_cut_shape)
     {
-        return Err("StorageUnavailable：内嵌cut缺少完整根摘要".into());
-    }
-    if cdomain == config.domain {
-        if cseq > selected.seq {
-            return Err(format!(
-                "MissingDependency：回执({}:{cseq})晚于请求固定cut({}:{})，拒绝泄漏未来状态",
-                config.domain, config.domain, selected.seq
-            ));
-        }
-        if cseq == selected.seq && node != expected_at_cut {
-            return Err("IdentityConflict：同序号回执根与固定切面根不符".into());
-        }
-    }
-    Ok(())
-}
-
-fn check_finance_record_cuts(
-    config: &Config,
-    selected: &StoredImage,
-    expected_at_cut: &Value,
-    rec: &Value,
-    owner_domain: Option<&str>,
-) -> Result<(), String> {
-    let Some(map) = rec.as_object() else {
-        return Ok(());
-    };
-    if let Some(pc) = map.get("prepared_cut").filter(|v| !v.is_null()) {
-        let exp = map.get("owner").and_then(Value::as_str).or(owner_domain);
-        check_protocol_cut(config, selected, expected_at_cut, pc, exp)?;
-    }
-    if let Some(cc) = map.get("commit_cut").filter(|v| !v.is_null()) {
-        let exp = map.get("owner").and_then(Value::as_str);
-        check_protocol_cut(config, selected, expected_at_cut, cc, exp)?;
-    }
-    if let Some(grant) = map.get("grant").and_then(Value::as_object) {
-        if let Some(ec) = grant.get("e_cut").filter(|v| !v.is_null()) {
-            check_protocol_cut(config, selected, expected_at_cut, ec, Some("E"))?;
-        }
-        if let Some(orig_g) = grant.get("original").and_then(Value::as_object) {
-            if let Some(pc) = orig_g.get("prepared_cut").filter(|v| !v.is_null()) {
-                let exp = orig_g.get("owner").and_then(Value::as_str).or(owner_domain);
-                check_protocol_cut(config, selected, expected_at_cut, pc, exp)?;
-            }
-        }
-    }
-    if let Some(lcr) = map.get("local_commit_receipt").and_then(Value::as_object) {
-        if let Some(ec) = lcr.get("e_cut").filter(|v| !v.is_null()) {
-            check_protocol_cut(config, selected, expected_at_cut, ec, Some("E"))?;
-        }
-    }
-    if let Some(grants) = map.get("grants").and_then(Value::as_array) {
-        for g in grants {
-            if let Some(pc) = g.get("prepared_cut").filter(|v| !v.is_null()) {
-                let exp = g.get("owner").and_then(Value::as_str);
-                check_protocol_cut(config, selected, expected_at_cut, pc, exp)?;
-            }
-        }
-    }
-    Ok(())
-}
-
-fn check_protocol_receipt(
-    config: &Config,
-    selected: &StoredImage,
-    expected_at_cut: &Value,
-    receipt: &Value,
-    expected_domain: Option<&str>,
-) -> Result<(), String> {
-    let Some(map) = receipt.as_object() else {
-        return Err("StorageUnavailable：回执非对象".into());
-    };
-    let Some(rcut) = map.get("cut") else {
-        return Err("StorageUnavailable：回执缺失cut".into());
-    };
-    let Some(rdomain) = map.get("domain_id").and_then(Value::as_str) else {
-        return Err("StorageUnavailable：回执缺失domain_id".into());
-    };
-    let cut_dom = rcut
-        .as_object()
-        .and_then(|m| m.get("domain_id"))
-        .and_then(Value::as_str);
-    if cut_dom != Some(rdomain) {
-        return Err("StorageUnavailable：原回执域与cut域不匹配".into());
-    }
-    if let Some(exp) = expected_domain {
-        if rdomain != exp {
-            return Err(format!(
-                "StorageUnavailable：回执域与期望域不符：期望 {exp}，实际 {rdomain}"
-            ));
-        }
-    }
-    check_protocol_cut(config, selected, expected_at_cut, rcut, expected_domain)?;
-    if let Some(rec) = map.get("record").filter(|v| v.is_object()) {
-        check_finance_record_cuts(config, selected, expected_at_cut, rec, Some(rdomain))?;
-    }
-    Ok(())
-}
-
-fn check_fill_row_cuts(
-    config: &Config,
-    selected: &StoredImage,
-    expected_at_cut: &Value,
-    row: &Value,
-) -> Result<(), String> {
-    if let Some(ec) = row
-        .get("x_execution_witness")
-        .and_then(|w| w.get("e_release_cut"))
-        .filter(|v| !v.is_null())
+        Some(CutEvidenceShape::Receipt)
+    } else if map.get("witness_revision").is_some_and(Value::is_string)
+        && map.contains_key("e_release_cut")
     {
-        check_protocol_cut(config, selected, expected_at_cut, ec, Some("E"))?;
+        Some(CutEvidenceShape::Witness)
+    } else {
+        None
     }
-    Ok(())
 }
 
-fn check_peer_proof_cuts(
-    config: &Config,
-    selected: &StoredImage,
-    expected_at_cut: &Value,
-    proof: &Value,
-) -> Result<(), String> {
-    let Some(map) = proof.as_object() else {
-        return Ok(());
-    };
-    let pdom = map.get("domain_id").and_then(Value::as_str);
-    if let Some(cc) = map.get("current_cut").filter(|v| !v.is_null()) {
-        check_protocol_cut(config, selected, expected_at_cut, cc, pdom)?;
-    }
-    if let Some(r) = map.get("receipt").filter(|v| !v.is_null()) {
-        check_protocol_receipt(config, selected, expected_at_cut, r, pdom)?;
-    }
-    if let Some(img) = map.get("image").filter(|v| v.is_object()) {
-        check_image_protocol_cuts(config, selected, expected_at_cut, img, pdom)?;
-    }
-    if let Some(img) = map.get("current_image").filter(|v| v.is_object()) {
-        check_image_protocol_cuts(config, selected, expected_at_cut, img, pdom)?;
-    }
-    Ok(())
+// 来源分量由 book.rs / tb03c_book.rs 原样拷贝；E 派生分量不带这两个来源字段。
+fn source_cost_component(item: &Value) -> bool {
+    item["source_ref"].is_string() && item["amount_text"].is_string()
 }
 
-fn check_record_protocol_cuts(
-    config: &Config,
-    selected: &StoredImage,
-    expected_at_cut: &Value,
-    rec: &Value,
-) -> Result<(), String> {
-    let Some(map) = rec.as_object() else {
-        return Ok(());
-    };
-    // 仅检查协议定义的证据字段，绝不把来源数据（event / raw_utf8 / raw_exact_text）内同名键当协议回执。
-    if let Some(c) = map.get("cut").filter(|v| !v.is_null()) {
-        check_protocol_cut(config, selected, expected_at_cut, c, Some("E"))?;
-    }
-    if let Some(er) = map.get("e_receipt").filter(|v| !v.is_null()) {
-        check_protocol_receipt(config, selected, expected_at_cut, er, Some("E"))?;
-    }
-    if let Some(erp) = map.get("e_resolution_proof").and_then(Value::as_object) {
-        if let Some(r) = erp.get("receipt").filter(|v| !v.is_null()) {
-            check_protocol_receipt(config, selected, expected_at_cut, r, Some("E"))?;
+impl CutCheck<'_> {
+    fn check_protocol_cut(
+        &mut self,
+        node: &Value,
+        expected_domain: Option<&str>,
+    ) -> Result<(), String> {
+        let Some(map) = node.as_object() else {
+            return Err("StorageUnavailable：内嵌cut非对象".into());
+        };
+        if !is_cut_shape(map) {
+            return Err("StorageUnavailable：内嵌cut字段不完整或多余".into());
         }
-        if let Some(img) = erp.get("image").filter(|v| v.is_object()) {
-            check_image_protocol_cuts(config, selected, expected_at_cut, img, Some("E"))?;
-        }
-        if let Some(img) = erp.get("previous_image").filter(|v| v.is_object()) {
-            check_image_protocol_cuts(config, selected, expected_at_cut, img, Some("E"))?;
-        }
-    }
-    if let Some(img) = map
-        .get("e_commit_proof")
-        .and_then(|p| p.get("image"))
-        .filter(|v| v.is_object())
-    {
-        check_image_protocol_cuts(config, selected, expected_at_cut, img, Some("E"))?;
-    }
-    if let Some(sdp) = map.get("source_debit_proof").and_then(Value::as_object) {
-        let sd = sdp.get("domain_id").and_then(Value::as_str);
-        if let Some(r) = sdp.get("receipt").filter(|v| !v.is_null()) {
-            check_protocol_receipt(config, selected, expected_at_cut, r, sd)?;
-        }
-        if let Some(img) = sdp.get("image").filter(|v| v.is_object()) {
-            check_image_protocol_cuts(config, selected, expected_at_cut, img, sd)?;
-        }
-        if let Some(img) = sdp.get("previous_image").filter(|v| v.is_object()) {
-            check_image_protocol_cuts(config, selected, expected_at_cut, img, sd)?;
-        }
-    }
-    Ok(())
-}
-
-fn check_image_protocol_cuts(
-    config: &Config,
-    selected: &StoredImage,
-    expected_at_cut: &Value,
-    img: &Value,
-    owner_domain: Option<&str>,
-) -> Result<(), String> {
-    let Some(map) = img.as_object() else {
-        return Ok(());
-    };
-    if let Some(book) = map.get("book").and_then(Value::as_object) {
-        if let Some(ec) = book
-            .get("opening_fact_ref")
-            .and_then(|r| r.get("e_cut"))
-            .filter(|v| !v.is_null())
-        {
-            check_protocol_cut(config, selected, expected_at_cut, ec, Some("E"))?;
-        }
-        for key in ["known_cost_components", "cost_events"] {
-            if let Some(items) = book.get(key).and_then(Value::as_array) {
-                for item in items {
-                    if let Some(rc) = item
-                        .get("derivation")
-                        .and_then(|d| d.get("resolve_cut"))
-                        .filter(|v| !v.is_null())
-                    {
-                        check_protocol_cut(config, selected, expected_at_cut, rc, Some("E"))?;
-                    }
-                }
-            }
-        }
-        if let Some(ec) = book
-            .get("voice")
-            .and_then(|v| v.get("identity"))
-            .and_then(|i| i.get("opening_basis"))
-            .and_then(|ob| ob.get("e_cut"))
-            .filter(|v| !v.is_null())
-        {
-            check_protocol_cut(config, selected, expected_at_cut, ec, Some("E"))?;
-        }
-    }
-    for key in ["recorded", "pending"] {
-        if let Some(recs) = map.get(key).and_then(Value::as_array) {
-            for rec in recs {
-                check_record_protocol_cuts(config, selected, expected_at_cut, rec)?;
-            }
-        }
-    }
-    if let Some(rows) = map.get("fill_allocations").and_then(Value::as_array) {
-        for row in rows {
-            check_fill_row_cuts(config, selected, expected_at_cut, row)?;
-        }
-    }
-    if let Some(fin) = map.get("finance").and_then(Value::as_object) {
-        if let Some(decs) = fin.get("decisions").and_then(Value::as_array) {
-            for d in decs {
-                check_finance_record_cuts(config, selected, expected_at_cut, d, owner_domain)?;
-            }
-        }
-        if let Some(slots) = fin.get("slots").and_then(Value::as_array) {
-            for s in slots {
-                if let Some(grants) = s.get("grants").and_then(Value::as_array) {
-                    for g in grants {
-                        check_finance_record_cuts(
-                            config,
-                            selected,
-                            expected_at_cut,
-                            g,
-                            owner_domain,
-                        )?;
-                    }
-                }
-            }
-        }
-        if let Some(cmds) = fin.get("commands").and_then(Value::as_array) {
-            for c in cmds {
-                check_finance_record_cuts(config, selected, expected_at_cut, c, owner_domain)?;
-            }
-        }
-    }
-    if let Some(hist) = map.get("history").and_then(Value::as_array) {
-        for h in hist {
-            if let Some(ws) = h.get("x_execution_witnesses").and_then(Value::as_object) {
-                for w in ws.values() {
-                    if let Some(ec) = w.get("e_release_cut").filter(|v| !v.is_null()) {
-                        check_protocol_cut(config, selected, expected_at_cut, ec, Some("E"))?;
-                    }
-                }
-            }
-            if let Some(rec) = h.get("record").filter(|v| v.is_object()) {
-                check_finance_record_cuts(config, selected, expected_at_cut, rec, owner_domain)?;
-            }
-            if let Some(hw) = h.get("witness").and_then(Value::as_object) {
-                if let Some(ps) = hw.get("prepared_proofs").and_then(Value::as_array) {
-                    for p in ps {
-                        check_peer_proof_cuts(config, selected, expected_at_cut, p)?;
-                    }
-                }
-                if let Some(gp) = hw.get("grant_proof").filter(|v| v.is_object()) {
-                    check_peer_proof_cuts(config, selected, expected_at_cut, gp)?;
-                }
-                if let Some(cp) = hw.get("commit_proof").filter(|v| v.is_object()) {
-                    check_peer_proof_cuts(config, selected, expected_at_cut, cp)?;
-                }
-            }
-        }
-    }
-    Ok(())
-}
-
-fn check_original_protocol_cuts(
-    config: &Config,
-    selected: &StoredImage,
-    expected_at_cut: &Value,
-    orig: &Value,
-    domain: &str,
-    original_kind: &str,
-) -> Result<(), String> {
-    let Some(map) = orig.as_object() else {
-        return Err("StorageUnavailable：同切面原件载荷非对象".into());
-    };
-    match original_kind {
-        "fact" => {
-            if map.get("domain_id").and_then(Value::as_str) != Some(domain) {
+        let cdomain = required(node, "domain_id")?;
+        if let Some(exp) = expected_domain {
+            if cdomain != exp {
                 return Err(format!(
-                    "StorageUnavailable：回执域与期望域不符：期望 {domain}"
+                    "StorageUnavailable：回执域与期望域不符：期望 {exp}，实际 {cdomain}"
                 ));
             }
-            let Some(recs) = map.get("receipts").and_then(Value::as_array) else {
-                return Err("StorageUnavailable：事实原件缺失回执列表".into());
-            };
-            for r in recs {
-                let exp = if domain == "E" {
-                    "E"
-                } else if r.get("kind").and_then(Value::as_str) == Some("Recorded") {
-                    "E"
-                } else {
-                    domain
+        }
+        let cseq = nonnegative(required(node, "commit_seq")?, "cut.commit_seq")?;
+        let croot = required(node, "root_hash")?;
+        if croot.len() != 64
+            || !croot
+                .bytes()
+                .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+        {
+            return Err("StorageUnavailable：内嵌cut缺少完整根摘要".into());
+        }
+        let bound = if cdomain == self.domain {
+            Some(&self.selected)
+        } else if let Some(vector) = self.vector {
+            Some(
+                vector
+                    .get(cdomain)
+                    .ok_or("MissingDependency：回执所属域不在固定向量中")?,
+            )
+        } else {
+            None
+        };
+        if let Some(bound) = bound {
+            let selected_seq = nonnegative(required(bound, "commit_seq")?, "cut.commit_seq")?;
+            if cseq > selected_seq {
+                return Err(format!("MissingDependency：回执({cdomain}:{cseq})晚于请求固定cut({cdomain}:{selected_seq})，拒绝泄漏未来状态"));
+            }
+            if cseq == selected_seq && node != bound {
+                return Err("IdentityConflict：同序号回执根与固定切面根不符".into());
+            }
+        }
+        self.checked.insert(std::ptr::from_ref(node));
+        Ok(())
+    }
+
+    fn check_finance_record_cuts(
+        &mut self,
+        rec: &Value,
+        owner_domain: Option<&str>,
+    ) -> Result<(), String> {
+        let Some(map) = rec.as_object() else {
+            return Ok(());
+        };
+        self.check_voice_basis(rec)?;
+        self.check_voice_basis(&rec["prepared"]["voice"])?;
+        if let Some(pc) = map.get("prepared_cut").filter(|v| !v.is_null()) {
+            let exp = map.get("owner").and_then(Value::as_str).or(owner_domain);
+            self.check_protocol_cut(pc, exp)?;
+        }
+        if let Some(cc) = map.get("commit_cut").filter(|v| !v.is_null()) {
+            let exp = map.get("owner").and_then(Value::as_str);
+            self.check_protocol_cut(cc, exp)?;
+        }
+        if let Some(grant) = map.get("grant").and_then(Value::as_object) {
+            if let Some(pc) = grant.get("prepared_cut").filter(|v| !v.is_null()) {
+                self.check_protocol_cut(pc, grant.get("owner").and_then(Value::as_str))?;
+            }
+            if let Some(ec) = grant.get("e_cut").filter(|v| !v.is_null()) {
+                self.check_protocol_cut(ec, Some("E"))?;
+            }
+            if let Some(orig_g) = grant.get("original").and_then(Value::as_object) {
+                if let Some(pc) = orig_g.get("prepared_cut").filter(|v| !v.is_null()) {
+                    let exp = orig_g.get("owner").and_then(Value::as_str).or(owner_domain);
+                    self.check_protocol_cut(pc, exp)?;
+                }
+            }
+        }
+        if let Some(lcr) = map.get("local_commit_receipt").and_then(Value::as_object) {
+            if let Some(ec) = lcr.get("e_cut").filter(|v| !v.is_null()) {
+                self.check_protocol_cut(ec, Some("E"))?;
+            }
+        }
+        if let Some(grants) = map.get("grants").and_then(Value::as_array) {
+            for g in grants {
+                if let Some(pc) = g.get("prepared_cut").filter(|v| !v.is_null()) {
+                    let exp = g.get("owner").and_then(Value::as_str);
+                    self.check_protocol_cut(pc, exp)?;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn check_voice_basis(&mut self, record: &Value) -> Result<(), String> {
+        if let Some(ec) = record
+            .get(OPENING_BASIS)
+            .and_then(|basis| basis.get(OPENING_E_CUT))
+            .filter(|v| !v.is_null())
+        {
+            self.check_protocol_cut(ec, Some("E"))?;
+        }
+        Ok(())
+    }
+
+    fn check_protocol_receipt(
+        &mut self,
+        receipt: &Value,
+        expected_domain: Option<&str>,
+    ) -> Result<(), String> {
+        let Some(map) = receipt.as_object() else {
+            return Err("StorageUnavailable：回执非对象".into());
+        };
+        let Some(rcut) = map.get("cut") else {
+            return Err("StorageUnavailable：回执缺失cut".into());
+        };
+        let Some(rdomain) = map.get("domain_id").and_then(Value::as_str) else {
+            return Err("StorageUnavailable：回执缺失domain_id".into());
+        };
+        let cut_dom = rcut
+            .as_object()
+            .and_then(|m| m.get("domain_id"))
+            .and_then(Value::as_str);
+        if cut_dom != Some(rdomain) {
+            return Err("StorageUnavailable：原回执域与cut域不匹配".into());
+        }
+        if let Some(exp) = expected_domain {
+            if rdomain != exp {
+                return Err(format!(
+                    "StorageUnavailable：回执域与期望域不符：期望 {exp}，实际 {rdomain}"
+                ));
+            }
+        }
+        self.checked.insert(std::ptr::from_ref(receipt));
+        self.check_protocol_cut(rcut, expected_domain)?;
+        if let Some(rec) = map.get("record").filter(|v| v.is_object()) {
+            self.check_finance_record_cuts(rec, Some(rdomain))?;
+        }
+        Ok(())
+    }
+
+    fn check_fill_row_cuts(&mut self, row: &Value) -> Result<(), String> {
+        self.check_execution_witness(&row["x_execution_witness"])
+    }
+
+    fn check_execution_witness(&mut self, witness: &Value) -> Result<(), String> {
+        if let Some(ec) = witness.get("e_release_cut").filter(|v| !v.is_null()) {
+            self.checked.insert(std::ptr::from_ref(witness));
+            self.check_protocol_cut(ec, Some("E"))?;
+        }
+        Ok(())
+    }
+
+    fn check_peer_proof_cuts(&mut self, proof: &Value) -> Result<(), String> {
+        let Some(map) = proof.as_object() else {
+            return Ok(());
+        };
+        let pdom = map.get("domain_id").and_then(Value::as_str);
+        if let Some(cc) = map.get("current_cut").filter(|v| !v.is_null()) {
+            self.check_protocol_cut(cc, pdom)?;
+        }
+        if let Some(r) = map.get("receipt").filter(|v| !v.is_null()) {
+            self.check_protocol_receipt(r, pdom)?;
+        }
+        if let Some(img) = map.get("image").filter(|v| v.is_object()) {
+            self.check_image_protocol_cuts(img, pdom)?;
+        }
+        if let Some(img) = map.get("current_image").filter(|v| v.is_object()) {
+            self.check_image_protocol_cuts(img, pdom)?;
+        }
+        Ok(())
+    }
+
+    fn check_record_protocol_cuts(&mut self, rec: &Value) -> Result<(), String> {
+        let Some(map) = rec.as_object() else {
+            return Ok(());
+        };
+        // 仅检查协议定义的证据字段，绝不把来源数据（event / raw_utf8 / raw_exact_text）内同名键当协议回执。
+        if let Some(c) = map.get("cut").filter(|v| !v.is_null()) {
+            self.check_protocol_cut(c, Some("E"))?;
+        }
+        if let Some(er) = map.get("e_receipt").filter(|v| !v.is_null()) {
+            self.check_protocol_receipt(er, Some("E"))?;
+        }
+        if let Some(erp) = map.get("e_resolution_proof").and_then(Value::as_object) {
+            if let Some(r) = erp.get("receipt").filter(|v| !v.is_null()) {
+                self.check_protocol_receipt(r, Some("E"))?;
+            }
+            if let Some(img) = erp.get("image").filter(|v| v.is_object()) {
+                self.check_image_protocol_cuts(img, Some("E"))?;
+            }
+            if let Some(img) = erp.get("previous_image").filter(|v| v.is_object()) {
+                self.check_image_protocol_cuts(img, Some("E"))?;
+            }
+        }
+        if let Some(img) = map
+            .get("e_commit_proof")
+            .and_then(|p| p.get("image"))
+            .filter(|v| v.is_object())
+        {
+            self.check_image_protocol_cuts(img, Some("E"))?;
+        }
+        if let Some(sdp) = map.get(B_SOURCE_DEBIT_PROOF).and_then(Value::as_object) {
+            let sd = sdp.get("domain_id").and_then(Value::as_str);
+            if let Some(r) = sdp.get("receipt").filter(|v| !v.is_null()) {
+                self.check_protocol_receipt(r, sd)?;
+            }
+            if let Some(img) = sdp.get("image").filter(|v| v.is_object()) {
+                self.check_image_protocol_cuts(img, sd)?;
+            }
+            if let Some(img) = sdp.get("previous_image").filter(|v| v.is_object()) {
+                self.check_image_protocol_cuts(img, sd)?;
+            }
+        }
+        Ok(())
+    }
+
+    fn check_image_protocol_cuts(
+        &mut self,
+        img: &Value,
+        owner_domain: Option<&str>,
+    ) -> Result<(), String> {
+        let Some(map) = img.as_object() else {
+            return Ok(());
+        };
+        if let Some(book) = map.get("book").and_then(Value::as_object) {
+            if let Some(ec) = book
+                .get("opening_fact_ref")
+                .and_then(|r| r.get("e_cut"))
+                .filter(|v| !v.is_null())
+            {
+                self.check_protocol_cut(ec, Some("E"))?;
+            }
+            for key in ["known_cost_components", "cost_events"] {
+                if let Some(items) = book.get(key).and_then(Value::as_array) {
+                    for item in items {
+                        if key == "known_cost_components" && source_cost_component(item) {
+                            continue;
+                        }
+                        if let Some(rc) = item
+                            .get("derivation")
+                            .and_then(|d| d.get("resolve_cut"))
+                            .filter(|v| !v.is_null())
+                        {
+                            self.check_protocol_cut(rc, Some("E"))?;
+                        }
+                    }
+                }
+            }
+            if let Some(records) = book
+                .get("voice")
+                .and_then(|voice| voice.get(VOICE_RECORDS))
+                .and_then(Value::as_array)
+            {
+                for record in records {
+                    self.check_voice_basis(record)?;
+                }
+            }
+        }
+        for key in ["recorded", "pending"] {
+            if let Some(recs) = map.get(key).and_then(Value::as_array) {
+                for rec in recs {
+                    self.check_record_protocol_cuts(rec)?;
+                }
+            }
+        }
+        if let Some(rows) = map.get("fill_allocations").and_then(Value::as_array) {
+            for row in rows {
+                self.check_fill_row_cuts(row)?;
+            }
+        }
+        if let Some(fin) = map.get("finance").and_then(Value::as_object) {
+            if let Some(decs) = fin.get("decisions").and_then(Value::as_array) {
+                for d in decs {
+                    self.check_finance_record_cuts(d, owner_domain)?;
+                }
+            }
+            if let Some(slots) = fin.get("slots").and_then(Value::as_array) {
+                for s in slots {
+                    if let Some(grants) = s.get("grants").and_then(Value::as_array) {
+                        for g in grants {
+                            self.check_finance_record_cuts(g, owner_domain)?;
+                        }
+                    }
+                }
+            }
+            if let Some(cmds) = fin.get("commands").and_then(Value::as_array) {
+                for c in cmds {
+                    self.check_finance_record_cuts(c, owner_domain)?;
+                }
+            }
+            if let Some(responsibilities) = fin.get("responsibilities").and_then(Value::as_array) {
+                for r in responsibilities {
+                    self.check_finance_record_cuts(r, owner_domain)?;
+                }
+            }
+        }
+        if let Some(hist) = map.get("history").and_then(Value::as_array) {
+            for h in hist {
+                if let Some(ws) = h.get("x_execution_witnesses").and_then(Value::as_object) {
+                    for w in ws.values() {
+                        self.check_execution_witness(w)?;
+                    }
+                }
+                if let Some(rec) = h.get("record").filter(|v| v.is_object()) {
+                    self.check_finance_record_cuts(rec, owner_domain)?;
+                }
+                if let Some(hw) = h.get("witness").and_then(Value::as_object) {
+                    if let Some(ps) = hw.get("prepared_proofs").and_then(Value::as_array) {
+                        for p in ps {
+                            self.check_peer_proof_cuts(p)?;
+                        }
+                    }
+                    if let Some(gp) = hw.get("grant_proof").filter(|v| v.is_object()) {
+                        self.check_peer_proof_cuts(gp)?;
+                    }
+                    if let Some(cp) = hw.get("commit_proof").filter(|v| v.is_object()) {
+                        self.check_peer_proof_cuts(cp)?;
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn check_original_protocol_cuts(
+        &mut self,
+        orig: &Value,
+        domain: &str,
+        original_kind: &str,
+    ) -> Result<(), String> {
+        let Some(map) = orig.as_object() else {
+            return Err("StorageUnavailable：同切面原件载荷非对象".into());
+        };
+        match original_kind {
+            "fact" => {
+                if map.get("domain_id").and_then(Value::as_str) != Some(domain) {
+                    return Err(format!(
+                        "StorageUnavailable：回执域与期望域不符：期望 {domain}"
+                    ));
+                }
+                let Some(recs) = map.get("receipts").and_then(Value::as_array) else {
+                    return Err("StorageUnavailable：事实原件缺失回执列表".into());
                 };
-                check_protocol_receipt(config, selected, expected_at_cut, r, Some(exp))?;
-            }
-            if let Some(prec) = map.get("projected_record").filter(|v| !v.is_null()) {
-                check_record_protocol_cuts(config, selected, expected_at_cut, prec)?;
-            }
-            if let Some(row) = map.get("fill_allocation_row").filter(|v| !v.is_null()) {
-                check_fill_row_cuts(config, selected, expected_at_cut, row)?;
-            }
-        }
-        "allocation" => {
-            if map.get("domain_id").and_then(Value::as_str) != Some(domain) {
-                return Err(format!(
-                    "StorageUnavailable：回执域与期望域不符：期望 {domain}"
-                ));
-            }
-            if domain == "E" {
-                let rec = map
-                    .get("resolve_receipt")
-                    .ok_or("StorageUnavailable：E 分配缺失 resolve_receipt")?;
-                check_protocol_receipt(config, selected, expected_at_cut, rec, Some("E"))?;
-                if let Some(row) = map.get("fill_allocation_row").filter(|v| !v.is_null()) {
-                    check_fill_row_cuts(config, selected, expected_at_cut, row)?;
+                for r in recs {
+                    let exp = if domain == "E" {
+                        "E"
+                    } else if r.get("kind").and_then(Value::as_str) == Some("Recorded") {
+                        "E"
+                    } else {
+                        domain
+                    };
+                    self.check_protocol_receipt(r, Some(exp))?;
                 }
-            } else {
+                if let Some(prec) = map.get("projected_record").filter(|v| !v.is_null()) {
+                    self.check_record_protocol_cuts(prec)?;
+                }
+                if let Some(row) = map.get("fill_allocation_row").filter(|v| !v.is_null()) {
+                    self.check_fill_row_cuts(row)?;
+                }
+            }
+            "allocation" => {
+                if map.get("domain_id").and_then(Value::as_str) != Some(domain) {
+                    return Err(format!(
+                        "StorageUnavailable：回执域与期望域不符：期望 {domain}"
+                    ));
+                }
+                if domain == "E" {
+                    let rec = map
+                        .get("resolve_receipt")
+                        .ok_or("StorageUnavailable：E 分配缺失 resolve_receipt")?;
+                    self.check_protocol_receipt(rec, Some("E"))?;
+                    if let Some(row) = map.get("fill_allocation_row").filter(|v| !v.is_null()) {
+                        self.check_fill_row_cuts(row)?;
+                    }
+                } else {
+                    let rec = map
+                        .get("receipt")
+                        .ok_or("StorageUnavailable：B 分配缺失 receipt")?;
+                    self.check_protocol_receipt(rec, Some(domain))?;
+                }
+                if let Some(fact) = map.get("fact").filter(|v| !v.is_null()) {
+                    self.check_original_protocol_cuts(fact, domain, "fact")?;
+                }
+            }
+            "model" => {
+                if map.get("domain_id").and_then(Value::as_str) != Some(domain) {
+                    return Err(format!(
+                        "StorageUnavailable：回执域与期望域不符：期望 {domain}"
+                    ));
+                }
+            }
+            "decision" => {
+                if map.get("domain_id").and_then(Value::as_str) != Some(domain) {
+                    return Err(format!(
+                        "StorageUnavailable：回执域与期望域不符：期望 {domain}"
+                    ));
+                }
+                let Some(recs) = map.get("receipts").and_then(Value::as_array) else {
+                    return Err("StorageUnavailable：决定原件缺失回执列表".into());
+                };
+                for r in recs {
+                    self.check_protocol_receipt(r, Some(domain))?;
+                }
+                if let Some(dec) = map.get("decision").filter(|v| v.is_object()) {
+                    self.check_finance_record_cuts(dec, Some(domain))?;
+                }
+            }
+            "grant" => {
+                if domain != "E" || map.get("domain_id").and_then(Value::as_str) != Some("E") {
+                    return Err("StorageUnavailable：回执域与期望域不符：期望 E".into());
+                }
                 let rec = map
                     .get("receipt")
-                    .ok_or("StorageUnavailable：B 分配缺失 receipt")?;
-                check_protocol_receipt(config, selected, expected_at_cut, rec, Some(domain))?;
-            }
-            if let Some(fact) = map.get("fact").filter(|v| !v.is_null()) {
-                check_original_protocol_cuts(
-                    config,
-                    selected,
-                    expected_at_cut,
-                    fact,
-                    domain,
-                    "fact",
-                )?;
-            }
-        }
-        "model" => {
-            if map.get("domain_id").and_then(Value::as_str) != Some(domain) {
-                return Err(format!(
-                    "StorageUnavailable：回执域与期望域不符：期望 {domain}"
-                ));
-            }
-        }
-        "decision" => {
-            if map.get("domain_id").and_then(Value::as_str) != Some(domain) {
-                return Err(format!(
-                    "StorageUnavailable：回执域与期望域不符：期望 {domain}"
-                ));
-            }
-            let Some(recs) = map.get("receipts").and_then(Value::as_array) else {
-                return Err("StorageUnavailable：决定原件缺失回执列表".into());
-            };
-            for r in recs {
-                check_protocol_receipt(config, selected, expected_at_cut, r, Some(domain))?;
-            }
-            if let Some(dec) = map.get("decision").filter(|v| v.is_object()) {
-                check_finance_record_cuts(config, selected, expected_at_cut, dec, Some(domain))?;
-            }
-        }
-        "grant" => {
-            if domain != "E" || map.get("domain_id").and_then(Value::as_str) != Some("E") {
-                return Err("StorageUnavailable：回执域与期望域不符：期望 E".into());
-            }
-            let rec = map
-                .get("receipt")
-                .ok_or("StorageUnavailable：授信原件缺失 receipt")?;
-            check_protocol_receipt(config, selected, expected_at_cut, rec, Some("E"))?;
-            if let Some(g) = map.get("grant").filter(|v| v.is_object()) {
-                check_finance_record_cuts(config, selected, expected_at_cut, g, Some("E"))?;
-            }
-        }
-        "command" => {
-            if domain != "E" || map.get("domain_id").and_then(Value::as_str) != Some("E") {
-                return Err("StorageUnavailable：回执域与期望域不符：期望 E".into());
-            }
-            if let Some(c) = map.get("cut").filter(|v| !v.is_null()) {
-                check_protocol_cut(config, selected, expected_at_cut, c, Some("E"))?;
-            }
-            if let Some(recs) = map.get("receipts").and_then(Value::as_array) {
-                for r in recs {
-                    check_protocol_receipt(config, selected, expected_at_cut, r, Some("E"))?;
+                    .ok_or("StorageUnavailable：授信原件缺失 receipt")?;
+                self.check_protocol_receipt(rec, Some("E"))?;
+                if let Some(g) = map.get("grant").filter(|v| v.is_object()) {
+                    self.check_finance_record_cuts(g, Some("E"))?;
                 }
             }
-            if let Some(rec) = map.get("record").filter(|v| v.is_object()) {
-                check_finance_record_cuts(config, selected, expected_at_cut, rec, Some("E"))?;
+            "command" => {
+                if domain != "E" || map.get("domain_id").and_then(Value::as_str) != Some("E") {
+                    return Err("StorageUnavailable：回执域与期望域不符：期望 E".into());
+                }
+                if let Some(c) = map.get("cut").filter(|v| !v.is_null()) {
+                    self.check_protocol_cut(c, Some("E"))?;
+                }
+                if let Some(recs) = map.get("receipts").and_then(Value::as_array) {
+                    for r in recs {
+                        self.check_protocol_receipt(r, Some("E"))?;
+                    }
+                }
+                if let Some(rec) = map.get("record").filter(|v| v.is_object()) {
+                    self.check_finance_record_cuts(rec, Some("E"))?;
+                }
             }
+            other => return Err(format!("StorageUnavailable：未知同切面原件类型：{other}")),
         }
-        other => return Err(format!("StorageUnavailable：未知同切面原件类型：{other}")),
+        Ok(())
     }
-    Ok(())
+
+    // 未列举的位置也不能带出未来切面。测试可收集差集，锁定协议访问器本身的覆盖率。
+    fn unlisted<'doc>(
+        &self,
+        node: &'doc Value,
+        path: &mut Vec<PathSeg>,
+        missing: &mut Vec<(&'doc Value, CutEvidenceShape)>,
+        observe: &mut impl FnMut(&[PathSeg]),
+    ) {
+        match node {
+            Value::Object(map) => {
+                if let Some(shape) = evidence_shape(map) {
+                    if !self.checked.contains(&std::ptr::from_ref(node)) {
+                        observe(path);
+                        missing.push((node, shape));
+                    }
+                    if matches!(shape, CutEvidenceShape::Cut) {
+                        return;
+                    }
+                }
+                for (key, value) in map {
+                    if matches!(
+                        key.as_str(),
+                        "raw_utf8"
+                            | "raw_exact_text"
+                            | "model_raw_utf8"
+                            | "model_exact_text"
+                            | "event"
+                    ) {
+                        continue;
+                    }
+                    path.push(PathSeg::Key(key.clone()));
+                    self.unlisted(value, path, missing, observe);
+                    path.pop();
+                }
+            }
+            Value::Array(items) => {
+                let components = matches!(path.as_slice(), [.., PathSeg::Key(book), PathSeg::Key(key)] if book == "book" && key == "known_cost_components");
+                for (i, value) in items.iter().enumerate() {
+                    if components && source_cost_component(value) {
+                        continue;
+                    }
+                    path.push(PathSeg::Index(i));
+                    self.unlisted(value, path, missing, observe);
+                    path.pop();
+                }
+            }
+            _ => (),
+        }
+    }
 }
 
-/// 不变量 A + 回执域归属（Rust 单域出口）：按协议定义的结构路径核验所有内嵌 cut 与回执，
-/// 绝不按键名在任意深度的来源数据（raw_exact_text / model_exact_text / event）中搜索。
+/// 同一出口检查本域切面；显式向量读还检查随请求提供的其他域界限。
 fn verify_embedded_cuts_not_after_selected(
     config: &Config,
     selected: &StoredImage,
     root: &Value,
+    vector: Option<&Map<String, Value>>,
+    mut unlisted: impl FnMut(&[PathSeg]),
 ) -> Result<(), String> {
-    let expected_at_cut = cut(config, selected.seq, &selected.root);
-    let kind = root.get("kind").and_then(Value::as_str).unwrap_or("");
-    check_protocol_cut(
-        config,
-        selected,
-        &expected_at_cut,
-        &root["cut"],
-        Some(&config.domain),
-    )?;
-    match kind {
-        KIND_PROJECTION_VIEW => check_image_protocol_cuts(
-            config,
-            selected,
-            &expected_at_cut,
-            &root["projection"],
-            Some(&config.domain),
-        ),
-        KIND_ORIGINAL_AT_CUT => {
-            let okind = root
-                .get("original_kind")
-                .and_then(Value::as_str)
-                .ok_or("StorageUnavailable：缺失 original_kind")?;
-            check_original_protocol_cuts(
-                config,
-                selected,
-                &expected_at_cut,
-                &root["original"],
-                &config.domain,
-                okind,
-            )
+    let mut checker = CutCheck {
+        domain: &config.domain,
+        selected: cut(config, selected.seq, &selected.root),
+        vector,
+        checked: HashSet::new(),
+    };
+    checker.check_protocol_cut(&root["cut"], Some(&config.domain))?;
+    match root["kind"].as_str().unwrap_or("") {
+        KIND_PROJECTION_VIEW => {
+            checker.check_image_protocol_cuts(&root["projection"], Some(&config.domain))?
         }
-        other => Err(format!("StorageUnavailable：未知投影文档类型：{other}")),
+        KIND_ORIGINAL_AT_CUT => checker.check_original_protocol_cuts(
+            &root["original"],
+            &config.domain,
+            required(root, "original_kind")?,
+        )?,
+        other => return Err(format!("StorageUnavailable：未知投影文档类型：{other}")),
     }
+    let mut missing = Vec::new();
+    checker.unlisted(root, &mut Vec::new(), &mut missing, &mut unlisted);
+    for (node, shape) in missing {
+        if checker.checked.contains(&std::ptr::from_ref(node)) {
+            continue;
+        }
+        match shape {
+            CutEvidenceShape::Cut => checker.check_protocol_cut(node, None)?,
+            CutEvidenceShape::Receipt => checker.check_protocol_receipt(node, None)?,
+            CutEvidenceShape::Witness => checker.check_execution_witness(node)?,
+        }
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+pub(super) fn assert_writer_cut_coverage(config: &Config, doc: &Value) {
+    let selected = StoredImage {
+        seq: doc["cut"]["commit_seq"].as_str().unwrap().parse().unwrap(),
+        root: doc["cut"]["root_hash"].as_str().unwrap().to_owned(),
+        previous_root: String::new(),
+        commit_ns: String::new(),
+        bytes: 0,
+    };
+    let mut missing = Vec::new();
+    verify_embedded_cuts_not_after_selected(config, &selected, doc, None, |p| {
+        missing.push(path_to_string(p));
+    })
+    .unwrap();
+    assert!(missing.is_empty(), "{}: {missing:?}", doc["kind"]);
 }
 
 fn verify_fill_allocation_row_whitelist(
@@ -2014,6 +2125,7 @@ pub(super) fn build_projection_document(
     epoch: i64,
     runtime: &Value,
     selected: &StoredImage,
+    vector: Option<&Map<String, Value>>,
     budget: &mut ReadBudget<'_>,
 ) -> Result<Vec<u8>, String> {
     let mut stream = ChunkedImageStream::new(c, selected, budget);
@@ -2051,7 +2163,7 @@ pub(super) fn build_projection_document(
         "projection": projection,
         "runtime": runtime,
     });
-    finalize_projection_reply(config, selected, &doc, None, budget)
+    finalize_projection_reply(config, selected, &doc, None, vector, budget)
 }
 
 fn check_receipt_domain(receipt: &Value, domain: &str) -> Result<(), String> {
@@ -2072,6 +2184,7 @@ pub(super) fn build_original_at_cut_document(
     kind: &str,
     object_id: &str,
     perms: &ReadPermissions,
+    vector: Option<&Map<String, Value>>,
     budget: &mut ReadBudget<'_>,
 ) -> Result<Vec<u8>, String> {
     if !ORIGINAL_AT_CUT_KINDS.contains(&kind) {
@@ -2116,7 +2229,7 @@ pub(super) fn build_original_at_cut_document(
         "object_id": object_id,
         "original": payload,
     });
-    finalize_projection_reply(config, selected, &doc, Some(perms), budget)
+    finalize_projection_reply(config, selected, &doc, Some(perms), vector, budget)
 }
 
 fn extract_fact_at_cut(
@@ -2506,6 +2619,32 @@ mod tests {
     use std::cell::Cell;
     use std::rc::Rc;
     use std::time::{Duration, Instant};
+
+    fn build_projection_document(
+        c: &Connection,
+        cfg: &Config,
+        epoch: i64,
+        runtime: &Value,
+        selected: &StoredImage,
+        budget: &mut ReadBudget<'_>,
+    ) -> Result<Vec<u8>, String> {
+        super::build_projection_document(c, cfg, epoch, runtime, selected, None, budget)
+    }
+
+    fn build_original_at_cut_document(
+        c: &Connection,
+        cfg: &Config,
+        epoch: i64,
+        selected: &StoredImage,
+        kind: &str,
+        id: &str,
+        perms: &ReadPermissions,
+        budget: &mut ReadBudget<'_>,
+    ) -> Result<Vec<u8>, String> {
+        super::build_original_at_cut_document(
+            c, cfg, epoch, selected, kind, id, perms, None, budget,
+        )
+    }
 
     fn test_conn_with_commit(
         config: &Config,
@@ -3462,6 +3601,122 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "先用 tb04f_single_owner_entry.py --read-coverage 生成真实 owner 应答"]
+    fn r7_writer_documents_have_no_unlisted_cuts() {
+        let path = std::env::var_os("ECONOMIC_READ_COVERAGE").expect("指定 read-cut-coverage.json");
+        let corpus: Value = serde_json::from_reader(std::fs::File::open(path).unwrap()).unwrap();
+        let mut kinds = std::collections::BTreeSet::new();
+        let mut views = std::collections::BTreeSet::new();
+        for doc in corpus["owner"].as_array().unwrap() {
+            let domain = doc["domain_id"].as_str().unwrap();
+            assert_writer_cut_coverage(&fin6_config(domain, &[]), doc);
+            if doc["kind"] == KIND_ORIGINAL_AT_CUT {
+                kinds.insert(doc["original_kind"].as_str().unwrap());
+            } else {
+                views.insert(domain);
+            }
+        }
+        assert_eq!(kinds, ORIGINAL_AT_CUT_KINDS.iter().copied().collect());
+        assert_eq!(views, ["E", "B:alpha", "B:beta"].into_iter().collect());
+    }
+
+    #[test]
+    fn r7_transfer_receipt_obeys_explicit_peer_vector() {
+        let cfg = fin6_config("B:beta", &["ReadView"]);
+        for source_seq in [9, 6] {
+            let alpha = fin6_config("B:alpha", &[]);
+            let e = fin6_config("E", &[]);
+            let source_cut = cut(&alpha, source_seq, &"6".repeat(64));
+            let image = json!({"recorded":[{"b_source_debit_proof":{
+                "domain_id":"B:alpha", "receipt":{"kind":"Applied", "domain_id":"B:alpha", "cut":source_cut}
+            }}]});
+            let (conn, selected) = test_conn_with_commit(&cfg, 4, &"1".repeat(64), "4", &image);
+            let vector = json!({
+                "E":cut(&e,10,&"a".repeat(64)),
+                "B:alpha":cut(&alpha,6,&"6".repeat(64)),
+                "B:beta":cut(&cfg,4,&selected.root)
+            });
+            let mut budget = ReadBudget::new(None, None);
+            let result = super::build_projection_document(
+                &conn,
+                &cfg,
+                1,
+                &Value::Null,
+                &selected,
+                vector.as_object(),
+                &mut budget,
+            );
+            if source_seq == 9 {
+                assert!(result.unwrap_err().contains("B:alpha:9"));
+            } else {
+                let doc: Value = serde_json::from_slice(&result.unwrap()).unwrap();
+                let mut missed = Vec::new();
+                verify_embedded_cuts_not_after_selected(
+                    &cfg,
+                    &selected,
+                    &doc,
+                    vector.as_object(),
+                    |p| missed.push(path_to_string(p)),
+                )
+                .unwrap();
+                assert!(missed.is_empty(), "{missed:?}");
+                assert_eq!(
+                    doc["projection"]["recorded"][0][B_SOURCE_DEBIT_PROOF]["receipt"]["cut"],
+                    source_cut
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn r7_projection_rejects_voice_and_unlisted_future_cuts() {
+        let cfg = fin6_config("E", &["ReadView"]);
+        let e12 = cut(&cfg, 12, &"c".repeat(64));
+        for image in [
+            json!({"book":{"voice":{"records":[{"opening_basis":{"e_cut":e12}}]}}}),
+            json!({"finance":{"decisions":[{"e_future_proof":{"cut":e12}}]}}),
+            json!({"leaked_receipt":{"kind":"Recorded","domain_id":"E","cut":e12}}),
+        ] {
+            let (conn, selected) = test_conn_with_commit(&cfg, 10, &"1".repeat(64), "10", &image);
+            let mut budget = ReadBudget::new(None, None);
+            let result =
+                build_projection_document(&conn, &cfg, 1, &Value::Null, &selected, &mut budget);
+            assert!(
+                matches!(result, Err(ref e) if e.starts_with("MissingDependency")),
+                "{result:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn r7_projection_preserves_writer_original_fields() {
+        let perms = ReadPermissions {
+            query_fact: true,
+            query_allocation: true,
+            ..Default::default()
+        };
+        let proof =
+            json!({"domain_id":"B:alpha", "receipt":{"kind":"Applied", "domain_id":"B:alpha"}});
+        let record = serialize_projected_record(&json!({"b_source_debit_proof": proof}), &perms);
+        let row = serialize_fill_allocation_row(
+            &json!({"x_execution_witness": {
+                "x_release_evidence": {"authority_epoch":"1"},
+                "x_execute_evidence": {"reply":{"authority_epoch":"1"}}
+            }}),
+            &perms,
+        );
+        assert_eq!(record["b_source_debit_proof"], proof);
+        assert_eq!(
+            row["x_execution_witness"]["x_release_evidence"]["authority_epoch"],
+            "1"
+        );
+        assert_eq!(
+            row["x_execution_witness"]["x_execute_evidence"]["reply"]["authority_epoch"],
+            "1"
+        );
+    }
+
+    #[test]
     fn r6_source_data_with_protocol_named_keys_succeeds_while_protocol_future_receipt_rejected() {
         let model = json!({
             "model_id": "m1",
@@ -3732,7 +3987,8 @@ mod tests {
                 "fact": null
             }
         });
-        let err = verify_embedded_cuts_not_after_selected(&cfg, &selected, &bad_doc).unwrap_err();
+        let err = verify_embedded_cuts_not_after_selected(&cfg, &selected, &bad_doc, None, |_| {})
+            .unwrap_err();
         assert!(
             err.contains("期望域") || err.contains("不匹配"),
             "wrong receipt domain must be rejected, got: {err}"
@@ -3752,6 +4008,8 @@ mod tests {
                 "fact": null
             }
         });
-        assert!(verify_embedded_cuts_not_after_selected(&cfg, &selected, &ok_doc).is_ok());
+        assert!(
+            verify_embedded_cuts_not_after_selected(&cfg, &selected, &ok_doc, None, |_| {}).is_ok()
+        );
     }
 }

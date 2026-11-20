@@ -286,19 +286,20 @@ test("R6 #1: dual-domain Watch advances 0/0->1/1, E-then-B, B-then-E, and still 
       // B:1 PrepareDecision (no E dep); E:1 Reserve references B:alpha:1 prepared_cut.
       imgs["B:alpha"][1].history.push({ kind: "PrepareDecision", record: { decision_id: "d1", prepared_cut: cutsBySeq["B:alpha"][1] } });
       imgs.E[1].history.push({ kind: "Reserve", record: { grants: [{ grant_id: "g1", owner: "B:alpha", prepared_cut: cutsBySeq["B:alpha"][1] }] } });
-    } else if (mode === "out_of_bounds") {
+    } else if (mode === "out_of_bounds" || mode === "invalid_seq") {
       // Negative control: B:1 embeds E:2 even though E only advanced to E:1!
+      const future = mode === "invalid_seq" ? {...cutsBySeq.E[2], commit_seq: "1x"} : cutsBySeq.E[2];
       imgs.E[1].recorded.push({ ...e1Rec });
       imgs["B:alpha"][1].recorded.push({
         ...e1Rec,
-        cut: cutsBySeq.E[2],
-        e_receipt: { kind: "Recorded", domain_id: "E", cut: cutsBySeq.E[2] },
+        cut: future,
+        e_receipt: { kind: "Recorded", domain_id: "E", cut: future },
       });
     }
     return imgs;
   };
 
-  function makeStrictWatchClient(mode, frontiers) {
+  function makeStrictWatchClient(mode, frontiers, strictQuery = true) {
     const imgs = makeImages(mode);
     let currentFrontier = { ...frontiers[0] };
     const snapFor = (reqCuts) => {
@@ -307,7 +308,7 @@ test("R6 #1: dual-domain Watch advances 0/0->1/1, E-then-B, B-then-E, and still 
       const bSeq = BigInt(reqCuts["B:alpha"].commit_seq);
       const bImg = imgs["B:alpha"][Number(bSeq)];
       for (const rec of bImg.recorded) {
-        if (rec.e_receipt && BigInt(rec.e_receipt.cut.commit_seq) > eSeq) {
+        if (strictQuery && rec.e_receipt && BigInt(rec.e_receipt.cut.commit_seq) > eSeq) {
           throw new Error(`MissingDependency：回执(E:${rec.e_receipt.cut.commit_seq})晚于固定切面(E:${eSeq})，拒绝未来回执（向量未就绪）`);
         }
       }
@@ -422,9 +423,75 @@ test("R6 #1: dual-domain Watch advances 0/0->1/1, E-then-B, B-then-E, and still 
     assert.equal(client.state.domains.E.cut.commit_seq, "0");
     assert.equal(client.state.domains["B:alpha"].cut.commit_seq, "0");
   }
+  // The same malformed response is sent successfully this time; only the client may reject it.
+  {
+    const { client, setFrontier } = makeStrictWatchClient("out_of_bounds", [{ E: 0, "B:alpha": 0 }], false);
+    await client.load({ cuts: { E: cutsBySeq.E[0], "B:alpha": cutsBySeq["B:alpha"][0] } });
+    setFrontier({ E: 1, "B:alpha": 1 });
+    await assert.rejects(client.watch(), /MissingDependency.*E:2/);
+    assert.equal(client.state.domains.E.cut.commit_seq, "0");
+    assert.equal(client.state.domains["B:alpha"].cut.commit_seq, "0");
+  }
+  {
+    const { client, setFrontier } = makeStrictWatchClient("invalid_seq", [{ E: 0, "B:alpha": 0 }], false);
+    await client.load({ cuts: { E: cutsBySeq.E[0], "B:alpha": cutsBySeq["B:alpha"][0] } });
+    setFrontier({ E: 1, "B:alpha": 1 });
+    await assert.rejects(client.watch(), {name: "Error", message: /整数不是规范文本/});
+    assert.equal(client.state.domains["B:alpha"].cut.commit_seq, "0");
+  }
 });
 
-test("R6 #2/#3/#4: JS decoder allows source keys named receipt/cut/witness, enforces receipt domain ownership, and rejects 5-layer unknown witness fields", async () => {
+test("R7: transfer vector, Voice records and unlisted cut paths at public exit", async (t) => {
+  const discovery = makeDiscovery();
+  const cuts = { E: makeCut("E", 10), "B:alpha": makeCut("B:alpha", 6), "B:beta": makeCut("B:beta", 4) };
+  const raw = "{}";
+  const build = (seq, mode = "transfer") => {
+    const state = makeProjectionState(discovery, cuts);
+    const view = state.domains["B:beta"];
+    if (mode === "unlisted") {
+      view.projection.finance.decisions.push({e_future_proof: {cut: makeCut("E", 12)}});
+    } else if (["voice", "source-cost", "derived-cost"].includes(mode)) {
+      view.projection.book = {chong_id: "beta", book_revision: discovery.book_revision,
+        fixed_q: "1", operation_level: "1", actual_quantity: "0", opening_quantity: "0",
+        income_book: {Pi: "0", A: "0", W: "0", R: "0"},
+        cost_totals: {acquisition_cash: "0", commission: "0", fee_only: "0"},
+        cost_basis: {K: "0"}, cost_remaining: {}, principal: {}, phase: {}};
+      if (mode === "voice") {
+        view.projection.book.voice = {records: [{opening_basis: {e_cut: makeCut("E", seq)}}]};
+      } else {
+        const cost = {derivation: {resolve_cut: makeCut("E", seq)}};
+        if (mode === "source-cost") Object.assign(cost, {source_ref: "source-evidence", amount_text: "1"});
+        view.projection.book.known_cost_components = [cost];
+      }
+    } else {
+      view.projection.recorded.push({raw_utf8: raw, raw_sha256: sha256Text(raw),
+        b_source_debit_proof: {domain_id: "B:alpha", receipt: {kind: "Applied", domain_id: "B:alpha",
+          cut: makeCut("B:alpha", seq)}}});
+    }
+    view.projection_hash = sha256Canon(view.projection);
+    view.projection_bytes = String(Buffer.byteLength(TB03A.canonical(view.projection)));
+    delete state.projection_token;
+    state.projection_token = "economic-projection-" + sha256Canon(state);
+    return state;
+  };
+  for (const state of [build(6), build(10, "voice")]) {
+    const unlisted = [];
+    await TB03A.verifyProjection(state, discovery, unlisted);
+    assert.deepEqual(unlisted, []);
+  }
+  await t.test("B:alpha:9 under B:alpha:6", () =>
+    assert.rejects(TB03A.verifyProjection(build(9), discovery), /MissingDependency.*B:alpha:9/));
+  await t.test("Voice E:12 under E:10", () =>
+    assert.rejects(TB03A.verifyProjection(build(12, "voice"), discovery), /MissingDependency.*E:12/));
+  await t.test("unlisted E:12 under E:10", () =>
+    assert.rejects(TB03A.verifyProjection(build(6, "unlisted"), discovery), /MissingDependency.*E:12/));
+  await t.test("source cost is opaque; derived cost is not", async () => {
+    await TB03A.verifyProjection(build(12, "source-cost"), discovery);
+    await assert.rejects(TB03A.verifyProjection(build(12, "derived-cost"), discovery), /MissingDependency.*E:12/);
+  });
+});
+
+test("R6 #2/#3/#4: JS decoder allows source keys named receipt/cut/witness, enforces receipt domain ownership, and rejects 5-layer unknown witness fields", async (t) => {
   const discovery = makeDiscovery(true);
   const e10 = makeCut("E", 10);
   const b6 = makeCut("B:alpha", 6);
@@ -562,7 +629,32 @@ test("R6 #2/#3/#4: JS decoder allows source keys named receipt/cut/witness, enfo
     return rep;
   };
   // #4 Positive: clean whitelisted payload succeeds
-  await TB03A.verifyProjectionOriginal(makeEAlloc(() => {}), state, discovery, "E", "allocation", "sim-command-fee:1");
+  const allocationOnly = structuredClone(discovery);
+  allocationOnly.read_projection.original_kinds = ["allocation"];
+  const verifyAllocation = (reply, d = allocationOnly) =>
+    TB03A.verifyProjectionOriginal(reply, state, d, "E", "allocation", "sim-command-fee:1");
+  await verifyAllocation(makeEAlloc(() => {}));
+  await t.test("preserves authority_epoch in both receipts", () => verifyAllocation(makeEAlloc(r => {
+    r.x_execution_witness.x_release_evidence.authority_epoch = "1";
+    r.x_execution_witness.x_execute_evidence.reply.authority_epoch = "1";
+  })));
+  for (const location of ["release", "execute"]) {
+    await t.test(`allocation-only cannot receive full ${location} command`, async () => {
+      const full = makeEAlloc(r => {
+        const w = r.x_execution_witness;
+        for (const receipt of [w.x_release_evidence, w.x_execute_evidence.reply]) {
+          receipt.command = receipt.command_ref;
+          delete receipt.command_ref;
+        }
+      });
+      await verifyAllocation(full, discovery);
+      const w = full.original.fill_allocation_row.x_execution_witness;
+      const other = location === "release" ? w.x_execute_evidence.reply : w.x_release_evidence;
+      other.command_ref = other.command;
+      delete other.command;
+      await assert.rejects(verifyAllocation(full), /未声明字段.*command/);
+    });
+  }
   // #4 Five-layer mutations must ALL reject
   const mutations = [
     ["row", (r) => { r.review_new_label = "blue"; }],
@@ -573,7 +665,7 @@ test("R6 #2/#3/#4: JS decoder allows source keys named receipt/cut/witness, enfo
   ];
   for (const [layer, fn] of mutations) {
     await assert.rejects(
-      TB03A.verifyProjectionOriginal(makeEAlloc(fn), state, discovery, "E", "allocation", "sim-command-fee:1"),
+      verifyAllocation(makeEAlloc(fn)),
       /白名单|未声明字段|未知字段/,
       `layer ${layer} must be rejected`
     );

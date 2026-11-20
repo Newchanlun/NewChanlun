@@ -1721,7 +1721,7 @@ pub(crate) fn verify_e_copy(record: &Value, config: &Config) -> Result<(), Strin
         "b_observation",
         "b_origin_message",
         "b_origin_request_hash",
-        "b_source_debit_proof",
+        super::tb03c_transfer::B_SOURCE_DEBIT_PROOF,
     ] {
         original
             .as_object_mut()
@@ -1734,7 +1734,10 @@ pub(crate) fn verify_e_copy(record: &Value, config: &Config) -> Result<(), Strin
     super::tb03c_allocation::verify_resolution(record, config)?;
     // E 实读阶段尚未附加源证明；凡本地已提交的 B 原件必须完整自持。
     if config.book_rules()?.is_tb03c()
-        && (record.get("b_observation").is_some() || record.get("b_source_debit_proof").is_some())
+        && (record.get("b_observation").is_some()
+            || record
+                .get(super::tb03c_transfer::B_SOURCE_DEBIT_PROOF)
+                .is_some())
     {
         super::tb03c_transfer::verify_source_proof(config, record)?;
     }

@@ -931,6 +931,13 @@ class R5ReadEntryEnumerationAndBudgetTests(unittest.TestCase):
             # 2) Routed through dispatch_public_read, the dispatcher exit itself rejects the leak!
             with self.assertRaisesRegex(ValueError, r"MissingDependency.*E:8.*晚于固定切面.*E:6"):
                 self._call_http_entry(q, "/api/economic/leaky_new_entry", {"op": "leaky_new_entry"}, paged=False)
+            # R5 原位置：即便整个回执藏在新应答的未知顶层字段，也不得出 Q。
+            q.leaky_new_entry = lambda payload: {
+                "kind": "EconomicProjection", "cuts": cuts_e6,
+                "leaked_receipt": {"kind": "Recorded", "domain_id": "E", "cut": real_cuts["E", "8"]},
+            }
+            with self.assertRaisesRegex(ValueError, r"MissingDependency.*E:8.*晚于固定切面.*E:6"):
+                self._call_http_entry(q, "/api/economic/leaky_new_entry", {"op": "leaky_new_entry", "cuts": cuts_e6}, paged=False)
             # 3) If a handler bypasses dispatch_public_read / _finalize_public_response, the assertion fails immediately!
             with patch.object(q, "dispatch_public_read", side_effect=lambda op, p, **kw: leaky_doc):
                 with self.assertRaises(AssertionError):
@@ -1181,6 +1188,160 @@ class R5ReadEntryEnumerationAndBudgetTests(unittest.TestCase):
                 q.owner = inject(layer)
                 with self.assertRaisesRegex(ValueError, r"白名单|未声明字段|未知字段"):
                     self._call_http_entry(q, "/api/economic/read", req, paged=True)
+
+
+    def test_r7_transfer_voice_and_unlisted_cuts_at_public_exit(self):
+        q = self._make_query()
+        real_cuts, _, _, base_owner = self._build_fixture_store(q)
+        vector = {d: real_cuts[d, s] for d, s in (("E", "10"), ("B:alpha", "6"), ("B:beta", "4"))}
+
+        def owner_with(path, seq):
+            def owner(domain, payload):
+                reply = base_owner(domain, payload)
+                if domain != "B:beta" or payload["op"] not in ("ReadProjection", "ReadView"):
+                    return reply
+                field = "projection" if payload["op"] == "ReadProjection" else "image"
+                image = reply[field]
+                if path == "transfer":
+                    frontier = vector["B:alpha"] if seq == 6 else self._cut("B:alpha", seq)
+                    image["recorded"].append({"b_source_debit_proof": {"domain_id": "B:alpha", "receipt": {
+                        "kind": "Applied", "domain_id": "B:alpha", "cut": frontier,
+                    }}})
+                else:
+                    image["finance"]["decisions"].append({"decision_id": "beta", "state": "Committed",
+                                                          "e_future_proof": {"cut": self._cut("E", seq)}})
+                raw = canonical(image)
+                reply[field + "_hash"] = hashlib.sha256(raw).hexdigest()
+                if field == "projection":
+                    reply["projection_bytes"] = str(len(raw))
+                return reply
+            return owner
+
+        for route, op in [("/api/economic/read", "projection"), ("/api/economic/read", "snapshot"),
+                          ("/api/economic/snapshot", "snapshot")]:
+            paged = route == "/api/economic/read"
+            request = {"op": op, "cuts": vector, "as_known_ns": None, op + "_token": None}
+            if op == "projection":
+                request["projection_revision"] = ECONOMIC_PROJECTION_REVISION
+            with self.subTest(op=op, paged=paged):
+                q.owner = owner_with("transfer", 6)
+                self.assertEqual(self._call_http_entry(q, route, request, paged=paged)["kind"], "Economic" + op.title())
+                for path, seq, domain in [("transfer", 9, "B:alpha"), ("unlisted", 12, "E")]:
+                    with self.subTest(path=path):
+                        q.owner = owner_with(path, seq)
+                        with self.assertRaisesRegex(ValueError, rf"MissingDependency.*{domain}:{seq}"):
+                            self._call_http_entry(q, route, request, paged=paged)
+
+        from unittest.mock import patch
+        q.owner = base_owner
+        request = {"op": "snapshot", "cuts": vector, "as_known_ns": None, "snapshot_token": None}
+        source = q.snapshot(request)
+        for path in ("voice", "leaked_receipt", "missing_domain"):
+            import copy
+            reply = copy.deepcopy(source)
+            if path == "voice":
+                reply["domains"]["B:beta"]["image"]["book"] = {"voice": {"records": [
+                    {"opening_basis": {"e_cut": self._cut("E", 12)}}]}}
+            elif path == "leaked_receipt":
+                reply[path] = {"kind": "Recorded", "domain_id": "E", "cut": self._cut("E", 12)}
+            else:
+                reply["domains"]["B:beta"]["image"]["recorded"].append({"e_receipt": {"kind": "Recorded", "cut": vector["E"]}})
+            with self.subTest(path=path), patch.object(q, "snapshot", return_value=reply):
+                with self.assertRaisesRegex(ValueError, r"MissingDependency.*E:12|回执.*domain_id"):
+                    self._call_http_entry(q, "/api/economic/snapshot", request)
+
+        # The same shape is opaque inside a source component copied by the writer,
+        # but still a protocol dependency inside an E-derived cost component.
+        for copied in (True, False):
+            reply = copy.deepcopy(source)
+            component = {"derivation": {"resolve_cut": self._cut("E", 12)}}
+            if copied:
+                component.update(source_ref="source-evidence", amount_text="1")
+            reply["domains"]["B:beta"]["image"]["book"] = {"known_cost_components": [component]}
+            with self.subTest(copied=copied), patch.object(q, "snapshot", return_value=reply):
+                if copied:
+                    self.assertEqual(self._call_http_entry(q, "/api/economic/snapshot", request), reply)
+                else:
+                    with self.assertRaisesRegex(ValueError, r"MissingDependency.*E:12"):
+                        self._call_http_entry(q, "/api/economic/snapshot", request)
+
+    def test_r7_writer_fields_survive_original_exit(self):
+        q = self._make_query()
+        real_cuts, fact, allocation, base_owner = self._build_fixture_store(q, redact_witness_for_no_cmd=False)
+        vector = {d: real_cuts[d, s] for d, s in (("E", "10"), ("B:alpha", "6"), ("B:beta", "4"))}
+        proof = {"domain_id": "B:alpha", "receipt": {"kind": "Applied", "domain_id": "B:alpha", "cut": vector["B:alpha"]}}
+
+        def owner(domain, payload):
+            reply = base_owner(domain, payload)
+            if payload["op"] == "ReadOriginalAtCut":
+                original = reply["original"]
+                if payload["kind"] == "fact":
+                    original["projected_record"]["b_source_debit_proof"] = proof
+                else:
+                    witness = original["fill_allocation_row"]["x_execution_witness"]
+                    witness["x_release_evidence"]["authority_epoch"] = "1"
+                    witness["x_execute_evidence"]["reply"]["authority_epoch"] = "1"
+            return reply
+
+        q.owner = owner
+        for domain, kind, key in (("B:alpha", "fact", fact), ("E", "allocation", allocation)):
+            with self.subTest(kind=kind):
+                reply = self._call_http_entry(q, "/api/economic/read", {"op": "projection_original",
+                    "projection_revision": ECONOMIC_PROJECTION_REVISION, "domain_id": domain,
+                    "kind": kind, "object_id": key, "cuts": vector}, paged=True)["original"]
+                if kind == "fact":
+                    self.assertEqual(reply["projected_record"]["b_source_debit_proof"], proof)
+                else:
+                    witness = reply["fill_allocation_row"]["x_execution_witness"]
+                    self.assertEqual(witness["x_release_evidence"]["authority_epoch"], "1")
+                    self.assertEqual(witness["x_execute_evidence"]["reply"]["authority_epoch"], "1")
+
+    def test_r7_read_field_sets_match_rust_writers(self):
+        import re
+        from pathlib import Path
+
+        root = Path(__file__).resolve().parents[2]
+        rust = root / "rust/src/economic_session"
+        projection = (rust / "read_projection.rs").read_text()
+        transfer = (rust / "tb03c_transfer.rs").read_text()
+        store = (rust / "store.rs").read_text()
+        js = (root / "s_session/browser/tb03a-client.js").read_text()
+        x = (root / "rust/src/history_simulation/runtime.rs").read_text()
+
+        def keys(block):
+            return set(re.findall(r'"([a-z_]+)"', block))
+
+        def block(source, name):
+            return re.search(rf"\bconst {name}\b[^=]*= [^\[]*\[(.*?)\]", source, re.S)[1]
+
+        auth_writer = re.search(r"struct Receipt<C, T> \{(.*?)\n\}", x, re.S)[1]
+        auth_base = set(re.findall(r"^\s+([a-z_]+):", auth_writer, re.M)) - {"command"}
+        js_auth_set = "X_AUTHORITY_EVIDENCE_BASE_ALLOWED" if "X_AUTHORITY_EVIDENCE_BASE_ALLOWED" in js else "X_AUTHORITY_EVIDENCE_ALLOWED"
+        for layer, read_keys in {
+            "python": economic_query.X_AUTHORITY_EVIDENCE_BASE_ALLOWED,
+            "rust": keys(block(projection, "X_AUTHORITY_EVIDENCE_BASE_ALLOWED")),
+            "browser": keys(block(js, js_auth_set)) - {"command", "command_ref"},
+        }.items():
+            with self.subTest(layer=layer, writer="X.Receipt"):
+                self.assertEqual(read_keys, auth_base)
+
+        writer = re.search(r"record\[(\w+|\"[^\"]+\")\] = proof;", transfer)[1]
+        proof_key = (writer.strip('"') if writer.startswith('"') else
+                     re.search(rf'const {writer}: &str = "([^"]+)";', transfer)[1])
+        store_fields = re.search(r"let mut original = record.clone\(\);\n\s*for key in \[(.*?)\]", store, re.S)[1]
+        writer_fields = keys(store_fields)
+        if writer in store_fields:
+            writer_fields.add(proof_key)
+        self.assertIn(proof_key, writer_fields)
+        rust_fields = block(projection, "PROJECTED_RECORD_BASE_ALLOWED")
+        rust_read = keys(rust_fields) | ({proof_key} if writer in rust_fields else set())
+        for layer, read_keys in {
+            "rust": rust_read,
+            "python": economic_query.PROJECTED_RECORD_BASE_ALLOWED,
+            "browser": keys(block(js, "PROJECTED_RECORD_ALLOWED")),
+        }.items():
+            with self.subTest(layer=layer, writer="B projected record"):
+                self.assertEqual(writer_fields - {"resolved_allocation"} - read_keys, set())
 
 
 if __name__ == "__main__":

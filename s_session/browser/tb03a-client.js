@@ -602,7 +602,7 @@
     verifyProtocolCutsAndReceipts(reply, cuts, discovery.domains);
     return reply;
   }
-  async function verifySnapshot(value, discovery) {
+  async function verifySnapshot(value, discovery, unlistedPaths) {
     revision(discovery);
     keys(value, ["kind", "session_id", "session_generation", "manifest_hash", "mode", "as_known_ns", "domains", "completeness", "snapshot_token"], "经济快照");
     need(value.kind === "EconomicSnapshot" && value.session_id === discovery.session_id &&
@@ -635,7 +635,10 @@
         integer(book.opening_quantity, false, true);
         keys(book.income_book, ["Pi", "A", "W", "R"], "利润账");
         for (const amount of Object.values(book.income_book)) integer(amount, false, true);
-        for (const amount of Object.values(book.known_cost_totals)) integer(amount, false, true);
+        const totals = book.book_revision === undefined ? book.known_cost_totals : book.cost_totals;
+        need(object(totals) && (book.book_revision === undefined || book.book_revision === discovery.book_revision),
+          "成本汇总缺失或书账版本与冻结域不同");
+        for (const amount of Object.values(totals)) integer(amount, false, true);
         need(object(book.unknown) && object(book.voice) && Array.isArray(book.known_cost_components), "缺失账簿知识状态/原始成本史");
         await verifyVoices(book, view, discovery, domain);
       }
@@ -644,7 +647,7 @@
     const vectorCuts = Object.fromEntries(
       discovery.domains.map(d => [d, value.domains[d].status === "Available" ? value.domains[d].cut : null])
     );
-    verifyProtocolCutsAndReceipts(value, vectorCuts, discovery.domains, false);
+    verifyProtocolCutsAndReceipts(value, vectorCuts, discovery.domains, false, unlistedPaths);
     const body = {...value}; delete body.snapshot_token;
     need(value.snapshot_token === "economic-snapshot-" + await sha256(body), "固定向量 token 与完整图像不同");
     return value;
@@ -674,9 +677,9 @@
     "fact_raw_sha256",
   ]);
   const X_ACCEPT_CLOCK_ALLOWED = new Set(["received_ns", "first_known_ns", "commit_ns"]);
-  const X_AUTHORITY_EVIDENCE_ALLOWED = new Set([
-    "protocol", "session_id", "session_generation", "authority_id", "command_id", "command_hash",
-    "state", "receipt_id", "release_receipt_id", "commit_ns", "command", "command_ref",
+  const X_AUTHORITY_EVIDENCE_BASE_ALLOWED = new Set([
+    "protocol", "session_id", "session_generation", "authority_id", "authority_epoch", "command_id", "command_hash",
+    "state", "receipt_id", "release_receipt_id", "commit_ns",
   ]);
   const X_EXECUTE_EVIDENCE_ALLOWED = new Set(["claimed_ns", "reply"]);
   const COMMAND_REF_ALLOWED = new Set(["command_id", "command_hash"]);
@@ -686,7 +689,7 @@
     "origin_message", "origin_request_hash", "received_ns", "first_known_ns", "commit_ns",
     "recorded_seq", "cut", "e_domain_id", "e_session_id", "e_session_generation",
     "e_commit_proof", "e_commit_proof_omitted", "e_receipt", "e_resolution_proof",
-    "source_debit_proof", "b_observation", "b_origin_message", "b_origin_request_hash",
+    "b_source_debit_proof", "b_observation", "b_origin_message", "b_origin_request_hash",
     "resolved_allocation", "resolved_allocation_ref",
   ]);
   function assertWhitelistKeys(obj, allowed, label) {
@@ -695,19 +698,20 @@
       need(allowed.has(k), label + " 存在未声明字段（不在读权白名单内）：" + k);
     }
   }
-  function verifyFillAllocationRowWhitelist(row) {
+  function verifyFillAllocationRowWhitelist(row, hasCommand) {
     assertWhitelistKeys(row, FILL_ALLOCATION_ROW_ALLOWED, "fill_allocation_row");
     if (Array.isArray(row.allocations)) {
       for (const item of row.allocations) assertWhitelistKeys(item, ALLOCATION_ITEM_ALLOWED, "fill_allocation_row.allocations[]");
     }
     if (row.x_execution_witness !== undefined && row.x_execution_witness !== null) {
       const w = row.x_execution_witness;
+      const authorityAllowed = new Set([...X_AUTHORITY_EVIDENCE_BASE_ALLOWED, hasCommand ? "command" : "command_ref"]);
       assertWhitelistKeys(w, X_EXECUTION_WITNESS_ALLOWED, "x_execution_witness");
       if (w.x_accept_clock !== undefined && w.x_accept_clock !== null) {
         assertWhitelistKeys(w.x_accept_clock, X_ACCEPT_CLOCK_ALLOWED, "x_accept_clock");
       }
       if (w.x_release_evidence !== undefined && w.x_release_evidence !== null) {
-        assertWhitelistKeys(w.x_release_evidence, X_AUTHORITY_EVIDENCE_ALLOWED, "x_release_evidence");
+        assertWhitelistKeys(w.x_release_evidence, authorityAllowed, "x_release_evidence");
         if (w.x_release_evidence.command_ref !== undefined && w.x_release_evidence.command_ref !== null) {
           assertWhitelistKeys(w.x_release_evidence.command_ref, COMMAND_REF_ALLOWED, "x_release_evidence.command_ref");
         }
@@ -715,7 +719,7 @@
       if (w.x_execute_evidence !== undefined && w.x_execute_evidence !== null) {
         assertWhitelistKeys(w.x_execute_evidence, X_EXECUTE_EVIDENCE_ALLOWED, "x_execute_evidence");
         if (w.x_execute_evidence.reply !== undefined && w.x_execute_evidence.reply !== null) {
-          assertWhitelistKeys(w.x_execute_evidence.reply, X_AUTHORITY_EVIDENCE_ALLOWED, "x_execute_evidence.reply");
+          assertWhitelistKeys(w.x_execute_evidence.reply, authorityAllowed, "x_execute_evidence.reply");
           if (w.x_execute_evidence.reply.command_ref !== undefined && w.x_execute_evidence.reply.command_ref !== null) {
             assertWhitelistKeys(w.x_execute_evidence.reply.command_ref, COMMAND_REF_ALLOWED, "x_execute_evidence.reply.command_ref");
           }
@@ -730,6 +734,30 @@
       && Object.prototype.hasOwnProperty.call(v, "commit_seq")
       && Object.prototype.hasOwnProperty.call(v, "root_hash");
   }
+  const OPAQUE_SOURCE_FIELDS = new Set(["raw_utf8", "raw_exact_text", "model_raw_utf8", "model_exact_text", "event"]);
+  // Source components are copied verbatim by book.rs/tb03c_book.rs; derived ones lack these source fields.
+  const sourceCostComponent = item => object(item) && typeof item.source_ref === "string" && typeof item.amount_text === "string";
+  function cutEvidenceShape(node) {
+    if (isCutShape(node)) return "cut";
+    if (typeof node.kind === "string" && !node.kind.startsWith("Economic") && isCutShape(node.cut)) return "receipt";
+    if (typeof node.witness_revision === "string" && Object.hasOwn(node, "e_release_cut")) return "witness";
+    return null;
+  }
+  function* protocolCutCandidates(root, path = []) {
+    if (Array.isArray(root)) {
+      const sourceComponents = path.at(-2) === "book" && path.at(-1) === "known_cost_components";
+      for (const [i, item] of root.entries()) {
+        if (!(sourceComponents && sourceCostComponent(item))) yield* protocolCutCandidates(item, [...path, i]);
+      }
+    } else if (object(root)) {
+      const shape = cutEvidenceShape(root);
+      if (shape) yield [path, root, shape];
+      if (shape === "cut") return;
+      for (const [key, value] of Object.entries(root)) {
+        if (!OPAQUE_SOURCE_FIELDS.has(key)) yield* protocolCutCandidates(value, [...path, key]);
+      }
+    }
+  }
   function visitProtocolCutsInImage(img, ownerDomain, onCut, onReceipt) {
     if (!object(img)) return;
     if (object(img.book)) {
@@ -739,15 +767,17 @@
       for (const listKey of ["known_cost_components", "cost_events"]) {
         if (Array.isArray(img.book[listKey])) {
           for (const item of img.book[listKey]) {
-            if (object(item) && object(item.derivation) && item.derivation.resolve_cut != null) {
+            if (object(item) && !(listKey === "known_cost_components" && sourceCostComponent(item))
+                && object(item.derivation) && item.derivation.resolve_cut != null) {
               onCut(item.derivation.resolve_cut, "E");
             }
           }
         }
       }
-      if (object(img.book.voice) && object(img.book.voice.identity) && object(img.book.voice.identity.opening_basis)
-          && img.book.voice.identity.opening_basis.e_cut != null) {
-        onCut(img.book.voice.identity.opening_basis.e_cut, "E");
+      if (Array.isArray(img.book.voice?.records)) {
+        for (const record of img.book.voice.records) {
+          visitVoiceBasis(record, onCut);
+        }
       }
     }
     for (const listKey of ["recorded", "pending"]) {
@@ -764,7 +794,7 @@
         if (!object(h)) continue;
         if (object(h.x_execution_witnesses)) {
           for (const w of Object.values(h.x_execution_witnesses)) {
-            if (object(w) && w.e_release_cut != null) onCut(w.e_release_cut, "E");
+            visitExecutionWitness(w, onCut);
           }
         }
         if (object(h.record)) visitProtocolCutsInFinanceRecord(h.record, ownerDomain, onCut);
@@ -791,20 +821,27 @@
     if (object(rec.e_commit_proof) && object(rec.e_commit_proof.image)) {
       visitProtocolCutsInImage(rec.e_commit_proof.image, "E", onCut, onReceipt);
     }
-    if (object(rec.source_debit_proof)) {
-      const sd = typeof rec.source_debit_proof.domain_id === "string" ? rec.source_debit_proof.domain_id : null;
-      if (rec.source_debit_proof.receipt != null) onReceipt(rec.source_debit_proof.receipt, sd);
-      if (object(rec.source_debit_proof.image)) visitProtocolCutsInImage(rec.source_debit_proof.image, sd, onCut, onReceipt);
-      if (object(rec.source_debit_proof.previous_image)) visitProtocolCutsInImage(rec.source_debit_proof.previous_image, sd, onCut, onReceipt);
+    const proof = rec.b_source_debit_proof;
+    if (object(proof)) {
+      const sd = typeof proof.domain_id === "string" ? proof.domain_id : null;
+      if (proof.receipt != null) onReceipt(proof.receipt, sd);
+      if (object(proof.image)) visitProtocolCutsInImage(proof.image, sd, onCut, onReceipt);
+      if (object(proof.previous_image)) visitProtocolCutsInImage(proof.previous_image, sd, onCut, onReceipt);
     }
   }
   function visitProtocolCutsInFillRow(row, onCut) {
-    if (object(row) && object(row.x_execution_witness) && row.x_execution_witness.e_release_cut != null) {
-      onCut(row.x_execution_witness.e_release_cut, "E");
-    }
+    if (object(row)) visitExecutionWitness(row.x_execution_witness, onCut);
+  }
+  function visitExecutionWitness(w, onCut) {
+    if (object(w) && w.e_release_cut != null) onCut(w.e_release_cut, "E", w);
+  }
+  function visitVoiceBasis(record, onCut) {
+    if (record?.opening_basis?.e_cut != null) onCut(record.opening_basis.e_cut, "E");
   }
   function visitProtocolCutsInFinanceRecord(rec, ownerDomain, onCut) {
     if (!object(rec)) return;
+    visitVoiceBasis(rec, onCut);
+    visitVoiceBasis(rec.prepared?.voice, onCut);
     if (rec.prepared_cut != null) {
       const exp = typeof rec.owner === "string" ? rec.owner : ownerDomain;
       onCut(rec.prepared_cut, exp);
@@ -814,6 +851,7 @@
       onCut(rec.commit_cut, exp);
     }
     if (object(rec.grant)) {
+      if (rec.grant.prepared_cut != null) onCut(rec.grant.prepared_cut, rec.grant.owner ?? null);
       if (rec.grant.e_cut != null) onCut(rec.grant.e_cut, "E");
       if (object(rec.grant.original) && rec.grant.original.prepared_cut != null) {
         const exp = typeof rec.grant.original.owner === "string" ? rec.grant.original.owner : ownerDomain;
@@ -845,6 +883,9 @@
     }
     if (Array.isArray(fin.commands)) {
       for (const c of fin.commands) visitProtocolCutsInFinanceRecord(c, ownerDomain, onCut);
+    }
+    if (Array.isArray(fin.responsibilities)) {
+      for (const r of fin.responsibilities) visitProtocolCutsInFinanceRecord(r, ownerDomain, onCut);
     }
   }
   function visitProtocolCutsInPeerProof(p, onCut, onReceipt) {
@@ -897,13 +938,16 @@
       if (object(orig.record)) visitProtocolCutsInFinanceRecord(orig.record, "E", onCut);
     }
   }
-  function verifyProtocolCutsAndReceipts(root, cuts, knownDomains, requireKnownDomain = true) {
-    const checkOneCut = (node, expectedDomain = null) => {
+  function verifyProtocolCutsAndReceipts(root, cuts, knownDomains, requireKnownDomain = true, unlistedPaths) {
+    const checked = new Set();
+    const checkOneCut = (node, expectedDomain = null, witness = null) => {
       need(isCutShape(node), "内嵌 cut 字段不完整或多余");
       const rdomain = node.domain_id;
       if (expectedDomain !== null) need(rdomain === expectedDomain, "回执域与期望域不符");
       need(typeof rdomain === "string" && (!requireKnownDomain || knownDomains.includes(rdomain)), "回执所属域不在固定切面向量中");
       cut(node, rdomain);
+      checked.add(node);
+      if (witness) checked.add(witness);
       if (Object.prototype.hasOwnProperty.call(cuts, rdomain) && cuts[rdomain] !== null) {
         const rseq = BigInt(node.commit_seq), cseq = BigInt(cuts[rdomain].commit_seq);
         need(rseq <= cseq, "MissingDependency：回执(" + rdomain + ":" + node.commit_seq + ")晚于固定切面(" + rdomain + ":" + cuts[rdomain].commit_seq + ")，向量未就绪");
@@ -916,6 +960,7 @@
       need(typeof rec.domain_id === "string", "回执缺失 domain_id");
       need(rec.domain_id === rec.cut.domain_id, "回执域与 cut 域不符");
       if (expectedDomain !== null) need(rec.domain_id === expectedDomain, "回执域与期望域不符");
+      checked.add(rec);
       checkOneCut(rec.cut, expectedDomain);
       if (object(rec.record)) visitProtocolCutsInFinanceRecord(rec.record, rec.domain_id, checkOneCut);
     };
@@ -926,6 +971,16 @@
         const body = root.kind === "EconomicSnapshot" ? view.image : view.projection;
         visitProtocolCutsInImage(body, domain, checkOneCut, checkOneReceipt);
       }
+    } else if (root.kind === "EconomicWatch") {
+      for (const [domain, view] of Object.entries(root.domains || {})) {
+        if (!object(view) || view.status !== "Available") continue;
+        checkOneCut(view.base_cut, domain);
+        checkOneCut(view.next_cut, domain);
+        for (const change of view.changes) {
+          checkOneCut(change.cut, domain);
+          visitProtocolCutsInImage(change.image, domain, checkOneCut, checkOneReceipt);
+        }
+      }
     } else if (root.kind === "EconomicProjectionOriginal" || root.kind === "EconomicOriginal") {
       for (const [domain, c] of Object.entries(root.cuts || {})) checkOneCut(c, domain);
       const kind = root.original_kind || (object(root.original) ? ({
@@ -933,13 +988,21 @@
       }[root.original.kind] || null) : null);
       visitProtocolCutsInOriginal(root.original, root.domain_id, kind, checkOneCut, checkOneReceipt);
     }
+    const missed = [...protocolCutCandidates(root)].filter(([, node]) => !checked.has(node));
+    for (const [path, node, shape] of missed) {
+      if (unlistedPaths) unlistedPaths.push(path);
+      if (checked.has(node)) continue;
+      if (shape === "receipt") checkOneReceipt(node);
+      else if (shape === "witness") visitExecutionWitness(node, checkOneCut);
+      else checkOneCut(node);
+    }
   }
   function collectPeerCutDependencies(img, ownerDomain, knownDomains) {
     const deps = new Map();
     const recordCut = (node) => {
       if (!isCutShape(node) || typeof node.domain_id !== "string") return;
       if (!knownDomains.includes(node.domain_id)) return;
-      const seq = BigInt(node.commit_seq);
+      const seq = integer(node.commit_seq);
       const prev = deps.get(node.domain_id);
       if (prev === undefined || seq > prev) deps.set(node.domain_id, seq);
     };
@@ -982,7 +1045,7 @@
       if (book.cost_remaining.status === "Known") integer(book.cost_remaining.value, false, true);
     }
   }
-  async function verifyProjection(value, discovery) {
+  async function verifyProjection(value, discovery, unlistedPaths) {
     need(object(discovery.read_projection), "会话未声明只读投影能力");
     keys(value, ["kind", "projection_revision", "session_id", "session_generation", "manifest_hash",
       "mode", "as_known_ns", "domains", "projection_completeness", "projection_token"], "经济投影");
@@ -1039,12 +1102,12 @@
     const vectorCuts = Object.fromEntries(
       discovery.domains.map(d => [d, value.domains[d].status === "Available" ? value.domains[d].cut : null])
     );
-    verifyProtocolCutsAndReceipts(value, vectorCuts, discovery.domains);
+    verifyProtocolCutsAndReceipts(value, vectorCuts, discovery.domains, true, unlistedPaths);
     const body = {...value}; delete body.projection_token;
     need(value.projection_token === "economic-projection-" + await sha256(body), "投影固定向量 token 与正文不符");
     return value;
   }
-  async function verifyProjectionOriginal(reply, state, discovery, domain, kind, id) {
+  async function verifyProjectionOriginal(reply, state, discovery, domain, kind, id, unlistedPaths) {
     need(state && state.kind === "EconomicProjection" && state.projection_completeness === "CompleteProjectionVector", "同切面取证需要完整投影向量");
     keys(reply, ["kind", "projection_revision", "session_id", "session_generation", "manifest_hash",
       "cuts", "domain_id", "original_kind", "object_id", "authoritative_image_hash",
@@ -1060,7 +1123,9 @@
       && reply.commit_ns === view.commit_ns && reply.writer_epoch === view.writer_epoch, "同切面原件与固定投影切面不符");
     const o = reply.original;
     need(object(o), "同切面原件载荷非对象");
-    verifyProtocolCutsAndReceipts(reply, cuts, discovery.domains);
+    verifyProtocolCutsAndReceipts(reply, cuts, discovery.domains, true, unlistedPaths);
+    const originalKinds = discovery.read_projection?.original_kinds;
+    const hasCommand = Array.isArray(originalKinds) && originalKinds.includes("command");
     const checkFact = async (f) => {
       need(object(f) && typeof f.raw_utf8 === "string", "事实原件缺 raw_utf8");
       digest(f.raw_sha256, "raw_sha256");
@@ -1072,7 +1137,7 @@
         assertWhitelistKeys(f.projected_record, PROJECTED_RECORD_ALLOWED, "projected_record");
       }
       if (f.fill_allocation_row !== undefined && f.fill_allocation_row !== null) {
-        verifyFillAllocationRowWhitelist(f.fill_allocation_row);
+        verifyFillAllocationRowWhitelist(f.fill_allocation_row, hasCommand);
       }
     };
     if (kind === "fact") await checkFact(o);
@@ -1080,7 +1145,7 @@
       const rec = domain === "E" ? o.resolve_receipt : o.receipt;
       need(object(rec), "分配回执缺失");
       if (domain === "E" && o.fill_allocation_row !== undefined && o.fill_allocation_row !== null) {
-        verifyFillAllocationRowWhitelist(o.fill_allocation_row);
+        verifyFillAllocationRowWhitelist(o.fill_allocation_row, hasCommand);
       }
       if (o.fact !== null && o.fact !== undefined) {
         await checkFact(o.fact);
@@ -1386,10 +1451,16 @@
         need(same(snapshot.domains[domain].cut, next[domain]) && same(snapshot.domains[domain].image, expected) &&
           snapshot.domains[domain].commit_ns === expectedNs, "完整变化与同切面快照或提交时间不同");
       }
+      verifyProtocolCutsAndReceipts(changes, next, this.discovery.domains, false);
       need(performance.now() < deadline, "整次追读超过事前时限，保留原切面");
       if (epoch === this.epoch) { this.state = snapshot; this.onCommit(snapshot); }
       return snapshot;
     }
   }
-  return Object.freeze({Client, verifySnapshot, verifyOriginal, verifyProjection, verifyProjectionOriginal, canonical, parse, sha256});
+  return Object.freeze({Client, verifySnapshot, verifyOriginal, verifyProjection, verifyProjectionOriginal, canonical, parse, sha256,
+    protocolCutCoverage(root, cuts, domains) {
+      const missing = [];
+      verifyProtocolCutsAndReceipts(root, cuts, domains, !["EconomicSnapshot", "EconomicWatch"].includes(root.kind), missing);
+      return missing;
+    }});
 });
