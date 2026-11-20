@@ -84,6 +84,8 @@ pub mod theta_v0;
 pub mod trading;
 mod zhongshu;
 
+#[cfg(any(test, feature = "lav_seal"))]
+pub mod at14_report;
 /// LAV 旁路排序器的证据封存层（S1 #1167）。默认 feature 不编译，仅 `lav_seal`
 /// feature 或 `cargo test` 下编译（保持 cdylib 零膨胀，见 Cargo.toml）。
 #[cfg(any(test, feature = "lav_seal"))]
