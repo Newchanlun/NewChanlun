@@ -669,6 +669,82 @@ for (const signal of ["SIGINT", "SIGTERM"] as const) {
   });
 }
 
+test("CLI 超时遵循 配置记录 < 环境变量 < 显式传参，未传参不冒充 explicit（#1606）", () => {
+  const baseArgs = (f: ReturnType<typeof fixture>) => [
+    "--import", "tsx", resolve(".sandcastle/codex-child.mts"),
+    "--ticket", "1606", "--parent-thread-id", f.options.parentThreadId,
+    "--manager-agent-id", f.options.managerAgentId, "--checkout", f.options.checkout,
+    "--expected-head", f.options.expectedHead, "--prompt-file", f.options.promptFile,
+    "--output-dir", f.options.outputDir,
+  ];
+  const cleanTimeoutEnv = (base: Record<string, string>, extra: Record<string, string> = {}) => {
+    const env: NodeJS.ProcessEnv = { ...base, ...extra };
+    if (!("SANDCASTLE_CONFIG_FILE" in extra)) delete env.SANDCASTLE_CONFIG_FILE;
+    if (!("SANDCASTLE_CHILD_IDLE_SECONDS" in extra)) delete env.SANDCASTLE_CHILD_IDLE_SECONDS;
+    if (!("SANDCASTLE_CHILD_TIMEOUT_SECONDS" in extra)) delete env.SANDCASTLE_CHILD_TIMEOUT_SECONDS;
+    return env;
+  };
+  const baseRecord = JSON.parse(readFileSync(resolve(".sandcastle/scheduler-config.json"), "utf8"));
+
+  // 1) 仅配置记录（不传 CLI、不设 env）：配置里的 1s 空闲超时真实生效，source=record，不出现 source=explicit。
+  const f1 = fixture();
+  try {
+    const cfgPath = join(f1.dir, "scheduler.json");
+    const rec = structuredClone(baseRecord);
+    rec.values.childIdleSeconds = 1;
+    rec.values.childTimeoutSeconds = 321;
+    writeFileSync(cfgPath, JSON.stringify(rec));
+    f1.fake("session(); setInterval(() => {}, 1000);");
+    const run = spawnSync(process.execPath, baseArgs(f1), {
+      env: cleanTimeoutEnv(f1.env, { SANDCASTLE_CONFIG_FILE: cfgPath }),
+      encoding: "utf8", timeout: 10000,
+    });
+    assert.equal(run.status, 1);
+    assert.match(run.stderr, /codex-child\.childIdleSeconds=1 source=record:1/);
+    assert.match(run.stderr, /codex-child\.childTimeoutSeconds=321 source=record:1/);
+    assert.doesNotMatch(run.stderr, /source=explicit:/);
+    const result = JSON.parse(readFileSync(join(f1.options.outputDir, "result.json"), "utf8"));
+    assert.equal(result.status, "failed");
+    assert.match(result.failure_reason, /空闲超时/);
+  } finally { f1.clean(); }
+
+  // 2) 环境变量覆盖（不传 CLI）：env 里的 1s/321s 真实生效，source=env，不出现 source=explicit。
+  const f2 = fixture();
+  try {
+    f2.fake("session(); setInterval(() => {}, 1000);");
+    const run = spawnSync(process.execPath, baseArgs(f2), {
+      env: cleanTimeoutEnv(f2.env, { SANDCASTLE_CHILD_IDLE_SECONDS: "1", SANDCASTLE_CHILD_TIMEOUT_SECONDS: "321" }),
+      encoding: "utf8", timeout: 10000,
+    });
+    assert.equal(run.status, 1);
+    assert.match(run.stderr, /codex-child\.childIdleSeconds=1 source=env:SANDCASTLE_CHILD_IDLE_SECONDS/);
+    assert.match(run.stderr, /codex-child\.childTimeoutSeconds=321 source=env:SANDCASTLE_CHILD_TIMEOUT_SECONDS/);
+    assert.doesNotMatch(run.stderr, /source=explicit:/);
+    const result = JSON.parse(readFileSync(join(f2.options.outputDir, "result.json"), "utf8"));
+    assert.equal(result.status, "failed");
+    assert.match(result.failure_reason, /空闲超时/);
+  } finally { f2.clean(); }
+
+  // 3) 显式 CLI 传参覆盖 env：记录 source=explicit 且按显式 1s 空闲超时生效（调用方显式传参行为不变）。
+  const f3 = fixture();
+  try {
+    f3.fake("session(); setInterval(() => {}, 1000);");
+    const run = spawnSync(process.execPath, [
+      ...baseArgs(f3), "--idle-timeout-seconds", "1", "--timeout-seconds", "15",
+    ], {
+      env: cleanTimeoutEnv(f3.env, { SANDCASTLE_CHILD_IDLE_SECONDS: "71", SANDCASTLE_CHILD_TIMEOUT_SECONDS: "321" }),
+      encoding: "utf8", timeout: 10000,
+    });
+    assert.equal(run.status, 1);
+    assert.match(run.stderr, /codex-child\.childIdleSeconds=71 source=env:SANDCASTLE_CHILD_IDLE_SECONDS/);
+    assert.match(run.stderr, /codex-child\.childIdleSeconds=1 source=explicit:idleTimeoutSeconds/);
+    assert.match(run.stderr, /codex-child\.childTimeoutSeconds=15 source=explicit:timeoutSeconds/);
+    const result = JSON.parse(readFileSync(join(f3.options.outputDir, "result.json"), "utf8"));
+    assert.equal(result.status, "failed");
+    assert.match(result.failure_reason, /空闲超时/);
+  } finally { f3.clean(); }
+});
+
 test("git 环境只留白名单：不含 CLIProxy 密钥、API/GitHub 密钥与宿主 GIT_*（#1588 A1）", () => {
   const env = gitEnvironment({
     PATH: "/bin", HOME: "/home/u", LANG: "C.UTF-8", [PROVIDER_KEY_ENV]: fixtureKey, GH_TOKEN: "fixture",
