@@ -226,8 +226,16 @@ test("AT-18 crosswalk 读取成功但投影 schema 失败，保留字节摘要�
   const invalid = Buffer.from('{"rows":[]}');
   f.bytes.set(specPaths.crosswalk_ref, invalid);
   const { report } = f.run();
-  requireFailure(report, "spec_coverage", "SCHEMA");
+  requireFailure(report, "spec_coverage.family_entry_links", "SCHEMA");
   assert.deepEqual(report.spec_coverage, { crosswalk_sha256: byteSha256(invalid), stories: [], families: [], details: [] });
+  const oneBad = setup();
+  const source = parseJsonObject(oneBad.bytes.get(specPaths.crosswalk_ref)!);
+  source.family_entry_links = "invalid";
+  oneBad.bytes.set(specPaths.crosswalk_ref, makeBytes(source));
+  const partial = oneBad.run().report;
+  requireFailure(partial, "spec_coverage.family_entry_links", "SCHEMA");
+  assert.deepEqual([partial.spec_coverage.stories.length, partial.spec_coverage.families.length,
+    partial.spec_coverage.details.length], [97, 0, 496]);
 });
 test("AT-18 OE42 不改分类，覆盖输入处分失配时单独留红", () => {
   const f = setup();

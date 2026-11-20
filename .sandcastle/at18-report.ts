@@ -794,7 +794,20 @@ export function generateAt18({ manifest, observations: obs, source, originMain, 
   });
 
   const rawCrosswalk = specBytes.crosswalk_ref;
-  const crosswalk = rawCrosswalk && derive("spec_coverage", () => deriveJson(rawCrosswalk, crosswalkFields, false), crosswalk_ref);
+  const rows = rawCrosswalk && derive("spec_coverage", () => parseJsonObject(rawCrosswalk), crosswalk_ref);
+  const projection = <T>(key: keyof Crosswalk, schema: z.ZodType<T[]>): T[] => {
+    if (!rows) return [];
+    return derive(`spec_coverage.${key}`, () => {
+      const value = schemaValue(rows[key], schema);
+      canonicalizeJcs(value);
+      return value;
+    }, crosswalk_ref) ?? [];
+  };
+  const crosswalk = rows && {
+    rows: projection("rows", crosswalkFields.shape.rows),
+    family_entry_links: projection("family_entry_links", crosswalkFields.shape.family_entry_links),
+    detailed_acceptance_links: projection("detailed_acceptance_links", crosswalkFields.shape.detailed_acceptance_links),
+  };
   const spec_coverage = buildCoverage(crosswalk, crosswalk_ref?.sha256 ?? null);
   function buildCoverage(crosswalk: Crosswalk | null, crosswalk_sha256: string | null): At18Report["spec_coverage"] {
     const collected = index("spec_coverage", obs.coverage ?? [], value => `${value.kind}:${value.id}`);
