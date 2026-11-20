@@ -5,8 +5,6 @@ use crate::session_protocol::{
 use rusqlite::{params, Connection, OpenFlags, OptionalExtension, Transaction};
 use serde_json::{json, Value};
 use std::path::{Path, PathBuf};
-#[cfg(not(target_os = "macos"))]
-use std::process::Command;
 use std::time::Duration;
 
 pub(crate) fn err(e: impl std::fmt::Display) -> String {
@@ -500,20 +498,37 @@ fn filesystem(path: &Path) -> Result<String, String> {
         }
         Ok(detail)
     }
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(target_os = "linux")]
     {
-        let o = Command::new("stat")
-            .args(["-f", "-c", "%T"])
-            .arg(target)
-            .output()
-            .map_err(err)?;
-        let k = String::from_utf8(o.stdout).map_err(err)?.trim().to_owned();
-        if !o.status.success()
-            || !["ext2/ext3", "ext4", "xfs", "btrfs", "tmpfs", "overlayfs"].contains(&k.as_str())
-        {
-            return Err(format!("StorageUnavailable：未证明本地文件系统：{k}"));
+        use std::os::unix::ffi::OsStrExt;
+        let cpath = std::ffi::CString::new(target.as_os_str().as_bytes()).map_err(err)?;
+        let mut status = std::mem::MaybeUninit::<libc::statfs>::uninit();
+        // 成功的statfs初始化整份系统结构；CString和输出空间在调用期间均有效。
+        if unsafe { libc::statfs(cpath.as_ptr(), status.as_mut_ptr()) } != 0 {
+            return Err(err(std::io::Error::last_os_error()));
         }
-        Ok(k)
+        let status = unsafe { status.assume_init() };
+        linux_local_filesystem(status.f_type as libc::c_ulong).map(str::to_owned)
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+    {
+        let _ = target;
+        Err("StorageUnavailable：未证明本地文件系统：unsupported os".into())
+    }
+}
+#[cfg(target_os = "linux")]
+fn linux_local_filesystem(fs_type: libc::c_ulong) -> Result<&'static str, String> {
+    // 魔数映射与 GNU coreutils src/stat.c human_fstype() 对放行集合的分支逐项一致；
+    // Linux 内核中 ext2/ext3/ext4 共用 0xEF53（coreutils 均输出 "ext2/ext3"）。
+    match fs_type {
+        0x0000_ef53 => Ok("ext2/ext3"),
+        0x5846_5342 => Ok("xfs"),
+        0x9123_683e => Ok("btrfs"),
+        0x0102_1994 => Ok("tmpfs"),
+        0x794c_7630 => Ok("overlayfs"),
+        _ => Err(format!(
+            "StorageUnavailable：未证明本地文件系统：f_type=0x{fs_type:x}"
+        )),
     }
 }
 pub(crate) fn open(db: &Path, read_only: bool) -> Result<(Connection, Value), String> {
@@ -1728,4 +1743,243 @@ pub(crate) fn recover(config: &Config) -> Result<Value, String> {
 pub(crate) fn immediate(c: &mut Connection) -> Result<Transaction<'_>, String> {
     c.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
         .map_err(err)
+}
+
+#[cfg(all(test, target_os = "linux"))]
+mod linux_filesystem_tests {
+    use super::{filesystem, linux_local_filesystem};
+    use std::path::{Path, PathBuf};
+    use std::process::Command;
+
+    const CHILD_DB_ENV: &str = "NC_ISSUE2113_FS_NO_SPAWN_DB";
+    const SENTINEL_ENV: &str = "NC_ISSUE2113_CREDENTIAL_SENTINEL";
+    const ALLOWED_FS: [&str; 5] = ["ext2/ext3", "xfs", "btrfs", "tmpfs", "overlayfs"];
+
+    #[repr(C)]
+    struct SockFilter {
+        code: u16,
+        jt: u8,
+        jf: u8,
+        k: u32,
+    }
+
+    #[repr(C)]
+    struct SockFprog {
+        len: u16,
+        filter: *const SockFilter,
+    }
+
+    fn deny_process_spawn_with_eperm() {
+        // 仅在独立测试子进程中安装 seccomp 过滤，禁止一切派生与 exec 系统调用。
+        let blocked: &[libc::c_long] = &[
+            libc::SYS_execve,
+            libc::SYS_execveat,
+            libc::SYS_clone,
+            libc::SYS_clone3,
+            #[cfg(any(target_arch = "x86_64", target_arch = "x86"))]
+            libc::SYS_fork,
+            #[cfg(any(target_arch = "x86_64", target_arch = "x86"))]
+            libc::SYS_vfork,
+        ];
+        let mut filter = Vec::with_capacity(blocked.len() + 3);
+        filter.push(SockFilter {
+            code: 0x20,
+            jt: 0,
+            jf: 0,
+            k: 0,
+        });
+        for (idx, &nr) in blocked.iter().enumerate() {
+            let remaining = (blocked.len() - 1 - idx) as u8;
+            filter.push(SockFilter {
+                code: 0x15,
+                jt: remaining + 1,
+                jf: 0,
+                k: nr as u32,
+            });
+        }
+        filter.push(SockFilter {
+            code: 0x06,
+            jt: 0,
+            jf: 0,
+            k: 0x7fff_0000,
+        });
+        filter.push(SockFilter {
+            code: 0x06,
+            jt: 0,
+            jf: 0,
+            k: 0x0005_0000 | (libc::EPERM as u32),
+        });
+        let prog = SockFprog {
+            len: filter.len() as u16,
+            filter: filter.as_ptr(),
+        };
+        let nnp = unsafe { libc::prctl(libc::PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) };
+        assert_eq!(
+            nnp,
+            0,
+            "PR_SET_NO_NEW_PRIVS 失败：{}",
+            std::io::Error::last_os_error()
+        );
+        let sc = unsafe { libc::prctl(libc::PR_SET_SECCOMP, libc::SECCOMP_MODE_FILTER, &prog) };
+        assert_eq!(
+            sc,
+            0,
+            "PR_SET_SECCOMP 失败：{}",
+            std::io::Error::last_os_error()
+        );
+    }
+
+    #[test]
+    fn open_durable_db_probes_filesystem_without_spawning_child_processes() {
+        if let Some(db) = std::env::var_os(CHILD_DB_ENV) {
+            assert!(
+                std::env::var_os("PATH").is_none(),
+                "子进程不得依赖 PATH 才能探测文件系统"
+            );
+            assert!(
+                std::env::var_os(SENTINEL_ENV).is_some(),
+                "子进程应持有凭据哨兵以复现 X 环境"
+            );
+            deny_process_spawn_with_eperm();
+            let (conn, storage) = crate::economic_session::open_durable_db(&PathBuf::from(db))
+                .expect("禁子进程下打开本地持久库必须成功");
+            let fs = storage["filesystem"]
+                .as_str()
+                .expect("storage.filesystem 必须是字符串")
+                .to_owned();
+            assert!(ALLOWED_FS.contains(&fs.as_str()), "非预期放行类型：{fs}");
+            drop(conn);
+            let probe = Command::new("/bin/true").status();
+            assert_eq!(
+                probe.err().and_then(|e| e.raw_os_error()),
+                Some(libc::EPERM),
+                "seccomp 过滤未生效，无法证明未产生子进程"
+            );
+            println!("\nOPEN_OK_FS={fs}");
+            std::process::exit(0);
+        }
+
+        let dir = tempfile::Builder::new()
+            .prefix("issue2113-fs")
+            .tempdir()
+            .unwrap();
+        let db = dir.path().join("x.db");
+        let output = Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "economic_session::store::linux_filesystem_tests::open_durable_db_probes_filesystem_without_spawning_child_processes",
+                "--nocapture",
+                "--test-threads=1",
+            ])
+            .env_remove("PATH")
+            .env(CHILD_DB_ENV, &db)
+            .env(SENTINEL_ENV, "sentinel-not-a-secret")
+            .output()
+            .unwrap();
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            output.status.success(),
+            "禁子进程子测试失败 status={} stdout={stdout} stderr={stderr}",
+            output.status
+        );
+        let reported = stdout
+            .lines()
+            .find_map(|line| line.strip_prefix("OPEN_OK_FS="))
+            .unwrap_or_else(|| panic!("子进程未输出打开证据：stdout={stdout} stderr={stderr}"));
+        assert!(
+            ALLOWED_FS.contains(&reported),
+            "子进程返回非放行文件系统：{reported}"
+        );
+    }
+
+    #[test]
+    fn linux_filesystem_allowlist_and_denylist_match_coreutils_contract() {
+        assert_eq!(
+            libc::EXT2_SUPER_MAGIC as libc::c_ulong,
+            libc::EXT3_SUPER_MAGIC as libc::c_ulong
+        );
+        assert_eq!(
+            libc::EXT2_SUPER_MAGIC as libc::c_ulong,
+            libc::EXT4_SUPER_MAGIC as libc::c_ulong
+        );
+        let allowed = [
+            (libc::EXT2_SUPER_MAGIC as libc::c_ulong, "ext2/ext3"),
+            (0x5846_5342 as libc::c_ulong, "xfs"),
+            (libc::BTRFS_SUPER_MAGIC as libc::c_ulong, "btrfs"),
+            (libc::TMPFS_MAGIC as libc::c_ulong, "tmpfs"),
+            (libc::OVERLAYFS_SUPER_MAGIC as libc::c_ulong, "overlayfs"),
+        ];
+        #[cfg(target_env = "gnu")]
+        assert_eq!(libc::XFS_SUPER_MAGIC as libc::c_ulong, 0x5846_5342);
+        for (magic, expected) in allowed {
+            assert_eq!(
+                linux_local_filesystem(magic),
+                Ok(expected),
+                "放行魔数 0x{magic:x} 映射不符"
+            );
+        }
+
+        let rejected = [
+            0x0000_ef51 as libc::c_ulong,            // S_MAGIC_EXT2_OLD ("ext2")
+            0x0000_137d as libc::c_ulong,            // S_MAGIC_EXT ("ext")
+            0x7372_7279 as libc::c_ulong,            // S_MAGIC_BTRFS_TEST ("btrfs_test")
+            libc::PROC_SUPER_MAGIC as libc::c_ulong, // proc
+            libc::SYSFS_MAGIC as libc::c_ulong,      // sysfs
+            0x0000_6969 as libc::c_ulong,            // nfs
+            0x6573_5546 as libc::c_ulong,            // fuse
+            0x0000_0000 as libc::c_ulong,            // unknown
+        ];
+        for magic in rejected {
+            let err = linux_local_filesystem(magic)
+                .expect_err(&format!("非放行魔数 0x{magic:x} 必须被拒"));
+            assert!(
+                err.starts_with("StorageUnavailable：未证明本地文件系统："),
+                "拒绝前缀漂移：{err}"
+            );
+            assert!(
+                err.contains(&format!("0x{magic:x}")),
+                "拒绝消息缺十六进制魔数：{err}"
+            );
+        }
+
+        let dir = tempfile::Builder::new()
+            .prefix("issue2113-real-fs")
+            .tempdir()
+            .unwrap();
+        let db = dir.path().join("ok.db");
+        let (conn, storage) =
+            crate::economic_session::open_durable_db(&db).expect("本地临时目录打开必须成功");
+        let fs = storage["filesystem"].as_str().unwrap();
+        assert_eq!(filesystem(&db).as_deref(), Ok(fs));
+        assert!(ALLOWED_FS.contains(&fs), "本地临时目录类型异常：{fs}");
+        drop(conn);
+
+        if Path::new("/dev/shm").is_dir() {
+            let shm_dir = tempfile::Builder::new()
+                .prefix("issue2113-shm")
+                .tempdir_in("/dev/shm")
+                .unwrap();
+            let shm_db = shm_dir.path().join("shm.db");
+            let (_, shm_storage) = crate::economic_session::open_durable_db(&shm_db)
+                .expect("tmpfs(/dev/shm) 打开必须成功");
+            assert_eq!(shm_storage["filesystem"], "tmpfs");
+        }
+
+        for (dir_path, expected_hex) in [("/proc", "0x9fa0"), ("/sys", "0x62656572")] {
+            if Path::new(dir_path).is_dir() {
+                let err =
+                    crate::economic_session::open_durable_db(&Path::new(dir_path).join("x.db"))
+                        .expect_err(&format!("{dir_path} 必须被拒"));
+                assert!(
+                    err.starts_with("StorageUnavailable：未证明本地文件系统："),
+                    "{dir_path} 错误前缀异常：{err}"
+                );
+                assert!(
+                    err.contains(expected_hex),
+                    "{dir_path} 错误缺 {expected_hex}：{err}"
+                );
+            }
+        }
+    }
 }
