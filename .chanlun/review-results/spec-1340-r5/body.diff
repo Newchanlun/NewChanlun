@@ -1,0 +1,61 @@
+--- body-041cbf75968c.md
++++ body-r5.md
+@@ -258,5 +258,5 @@
+ 
+ 1. 标准输入包含 source namespace/epoch、instrument、原始事件身份和修订、原始坐标、received_at、逻辑输入顺序、替代关系及来源证据。结构源遵守已裁美股 tick 边界。历史读有效 `input_source`（默认 `massive-stock-tick/1`；已获准的 Databento 校验源按原射程标注），前置缺失报 `Unsupported{reason: InputSourceUnavailable}`，不运行中切源；时间聚合、重采样或执行市场价格不得偷偷改变结构级别语义。
+-2. 一条纵向主塔只产生一份 Classification。每一级使用相同判定，级别差异只通过真实输入表达。塔底按有效 `tower_base` 构造（默认 `segment`，值域见[zhongshu.md:160–174](https://github.com/Newchanlun/NewChanlun/blob/b9d898dccf46c2a716115eaa1215bc39c458a959/.chanlun/definitions/zhongshu.md#L160-L174)），资源达到有效预算是覆盖截断，不是自然终止。唯一生产 owner 实际执行完整构造；各重、查询层、Python 外壳和前端不得重判。
++2. 一条纵向主塔只产生一份 Classification。每一级使用相同判定，级别差异只通过真实输入表达。塔底按有效 `tower_base` 构造（默认 `segment`，值域见[zhongshu.md:160–174](https://github.com/Newchanlun/NewChanlun/blob/b9d898dccf46c2a716115eaa1215bc39c458a959/.chanlun/definitions/zhongshu.md#L160-L174)）。按[#1603 裁定](https://github.com/Newchanlun/NewChanlun/issues/1603#issuecomment-6308897078)，在有效 `l_max` 处完成本级构造且下一级仍有至少 `min_parts_per_level` 个可升级单元时，报覆盖截断 `INCOMPLETE_RESOURCE_BOUND`；下一级单元不足则为自然终止 `NATURAL`，即使已经达到 `l_max`。唯一生产 owner 实际执行完整构造；各重、查询层、Python 外壳和前端不得重判。
+ 3. S 接纳自己的输入，在解释可能改变现有判定的输入前持久 BeginStructureRevision，关闭相关范围条件执行门；计算之后原子 CommitStructureRevision，公布对象、分类、关系、见证和变化。计算时的 first_known 不能改成后来的经济收件时间。
+ 4. 良构性、计算状态、知识状态、有效性与市场分类分轴。空输入、数据缺口、进行中、N/A、已撤回、未支持各有准确结果。合法原始结构到良构域的投影必须验证，不能靠先过滤反例获得分区完备。
+@@ -331,5 +331,5 @@
+ 2. 每个域一份独立 SQLite 数据库和 WAL，由该域单写者进行有限事务；不使用 ATTACH 跨域原子提交，不以共享连接或统一事务管理器串起 S/E/B。所有权威提交采用 WAL + synchronous=FULL，macOS 开启 fullfsync；锁/持久化/文件系统前件启动时验证，不满足则拒绝相应写入。SQLite 运行版本必须包含官方 WAL-reset 修复（3.51.3 及后续，或有明确修复证据的回移版本），并锁定实际依赖版本。官方说明 WAL 不用于网络文件系统且跨库不提供集合原子性；这些约束决定本提案的同机边界。[SQLite WAL](https://sqlite.org/wal.html)、[同步设置](https://sqlite.org/pragma.html#pragma_synchronous)。
+ 3. 一域损坏、阻塞或重启的试验只影响该域数据库及进程；S/E/B 之间不共享应用级锁、读写事务或故障恢复闸。共享宿主、物理磁盘或系统整体故障仍可能同时影响各域，首版不承诺跨机器高可用或磁盘灾难隔离；不能把这种整体故障用作 RF-01/RF-02 应测局部故障的替代。
+-4. S 的长期历史使用内容寻址的不可变批次对象和版本索引；先持久写完整对象，再由同一 S 事务发布可达引用，崩溃留下的不可达对象可以回收。发布读数从短事务取得固定 cut 的不可变引用，分页不持有写事务或跨请求读事务。持久 delta 按有效 `delta_retention` 策略（默认 `retain_all`）存储，落后消费者收到 Gap 并从指定 cut 重建。
++4. S 的长期历史使用内容寻址的不可变批次对象和版本索引；先持久写完整对象，再由同一 S 事务发布可达引用，崩溃留下的不可达对象可以回收。发布读数从短事务取得固定 cut 的不可变引用，分页不持有写事务或跨请求读事务。持久 delta 按有效 `delta_retention` 策略（默认 `retain_all`）存储。按[ADR 0051:284–296](https://github.com/Newchanlun/NewChanlun/blob/b9d898dccf46c2a716115eaa1215bc39c458a959/docs/adr/0051-per-bar-domain-event-identity-lifecycle-contract.md#L284-L296)，同会话、同代际、同 `writer_epoch` 且租约有效时，游标虽落后于最新 cut，只要仍在可用保留窗内且 delta 链完整可验（应用结果与对应快照逐字段相等），就返回 delta 正常续接。游标落出保留窗或续接一致性失败，才返回 Gap 并给出重建 cut；旧代际或旧 `writer_epoch` 另行拒收。
+ 5. S 条件请求按本地持久接纳序 FIFO 排队；每次结构 Commit 后、下一 Begin 前，如队列非空恰核验一项，然后让下一结构输入推进。无结构输入时仍逐项有限服务；新请求不能插到既有请求前。核验只读有限本地证书与 S 数据，不做 E/RPC/场所调用；条件不成立一次最终拒绝，不等待未来行情。该配额 1 是核验调度方案，不决定财务分配和物理订单先后。
+ 6. 每个已交付命令在 S 队列中最多一份持久就绪身份，重复交付不增加排队项或调用权。普通 busy 不拒绝，已有项在有限本地服务下推进；S 本地存储失败则准确保留交付未知和责任，恢复按原 ID 查询，不另造 Release。部署容量依据获准在途集合、证书规模和实测负载配置，核验队列和长期历史分配独立的存储预算，不能让经济订阅断线积压结构关键存储。本提案不新增发送前的跨域容量预留/租约协议，也不承诺无限过载时活性；受测有效域内的 busy、重复包和容量处理不得造成健康持续合规请求永久得不到核验。
+@@ -346,5 +346,5 @@
+ 3. 历史先从有效 `history-input-profile/1` 读取本次冻结的 `model_id/revision`、`seed`、`capacity_source`、`projection_kind`、`fee_profile` 和适用域（[ADR 0033:10–48](https://github.com/Newchanlun/NewChanlun/blob/b9d898dccf46c2a716115eaa1215bc39c458a959/docs/adr/0033-history-simulation-bar-batch-model.md#L10-L48)；[ADR 0052:258–291](https://github.com/Newchanlun/NewChanlun/blob/b9d898dccf46c2a716115eaa1215bc39c458a959/docs/adr/0052-history-input-profile-and-model-order-unspecified.md#L258-L291)）。所选 `stochastic-microevent/<rev>` 缺逐笔/盘口标定，或选 `bar_volume_derived` 而缺公式标定时，容量记 Unknown，依赖动作报 AwaitingPolicy，不撮合、不退回默认模型。订单超出已选模型适用域时，则在 E-Release 前由 `model_coverage` 持久记为 `Unsupported{reason: ModelOrderUnspecified, model_ref, domain_id, command_id}`，不释放、不执行、不生模拟外效、不回落旧臂。
+ 
+-   默认 `history-sim/bar-batch-known-frontier/1` 为确定性模型，`seed: none`，容量来源默认 `scenario_contract`。选中获准 v1 时，第 t 根 bar 只消费 t−1 收盘时已知且获准的集合；同批各重限价独立对 OHLC 判定、开盘取优，`intra_batch_order: Unknown`。限价按有效 `fill_rule`（默认至少 1 tick 的严格穿越，更大缓冲须有标定，touch 仅诊断）与既裁 GTC、费用和双滑点纪律。市价仅在具名 `exec_index` 收盘槽成交，限价逻辑先于该槽；t 收盘才知道的新挂/撤/改从 t+1 起生效。部分成交依具证容量合同（含[ADR 0033:77–116](https://github.com/Newchanlun/NewChanlun/blob/b9d898dccf46c2a716115eaa1215bc39c458a959/docs/adr/0033-history-simulation-bar-batch-model.md#L77-L116)的容量 epoch）；容量合同取 `none` 时，已准入规模内满足穿越条件才全量成交，单列为 L0 假设，不作容量证据。历史投影默认 `per_leg`，与场所对拍使用该场所冻结的同一 `projection_kind`。TestOnly 排序只验协议。
++   默认 `history-sim/bar-batch-known-frontier/1` 为确定性模型，`seed: none`，容量来源默认 `scenario_contract`。选中获准 v1 时，第 t 根 bar 只消费 t−1 收盘时已知且获准的集合；同批各重限价独立对 OHLC 判定、开盘取优，`intra_batch_order: Unknown`。限价按有效 `fill_rule`（默认至少 1 tick 的严格穿越，更大缓冲须有标定，touch 仅诊断）与既裁 GTC、费用和双滑点纪律。市价仅在具名 `exec_index` 收盘槽成交，限价逻辑先于该槽；t 收盘才知道的新挂/撤/改从 t+1 起生效。部分成交依具证容量合同（含[ADR 0033:77–116](https://github.com/Newchanlun/NewChanlun/blob/b9d898dccf46c2a716115eaa1215bc39c458a959/docs/adr/0033-history-simulation-bar-batch-model.md#L77-L116)的容量 epoch）；容量合同取 `none` 时，在已准入规模内，限价单满足其穿越条件、市价单到其具名收盘槽才按各自路径全量成交，单列为 L0 假设，不作容量证据。历史投影默认 `per_leg`，与场所对拍使用该场所冻结的同一 `projection_kind`。TestOnly 排序只验协议。
+ 4. 双跑固定原始输入及修订、政策/模型版本、时钟、随机种子、数值语义、故障与调度轨迹，比较完整结构关系、逐重状态/毛账、责任、命令/回报/分配和 AsKnown。允许不同运行 ID 等非语义字段经过预先声明的一一重命名；禁止只比较最终净仓。
+ 5. 每个 paper/live adapter 提供能力证据：身份与代际、取消/改单、累计完整性、幂等/查询范围、费用/更正、会话权限、挂单限制、时间语义及唯一外部事实来源。缺项准确 Unsupported；历史通过不表示场所已通过。
+@@ -390,5 +390,5 @@
+ | 依赖 | 已裁规则与适用域 | 实施、证明或仍缺的生效前件 |
+ |---|---|---|
+-| G-001/002 | 初始化 W（[#1342 resolution](https://github.com/Newchanlun/NewChanlun/issues/1342#issuecomment-6149622771)）：首个相邻 raw 严格非包含对出现前按 raw 留未定，不产合并组；若始终不出现则保持未定。出现时以其方向从序号 0 左折叠并发布，替代关系可查，旧 cut 不回填。同型同价端点取先，后者身份仍留；实际极值根取集合，raw 间隔取前端末根到后端首根之间（[#1343 resolution](https://github.com/Newchanlun/NewChanlun/issues/1343#issuecomment-6153028395)）。 | [#1393](https://github.com/Newchanlun/NewChanlun/issues/1393) 的 W 发布（含 `pending_since_cut`）、替代、增量和恢复对拍；[#1405](https://github.com/Newchanlun/NewChanlun/issues/1405) 承接同价行为锁，按其实际版本取证；保留对应 Lean 定义与证明义务。 |
++| G-001/002 | 初始化 W（[#1342 resolution](https://github.com/Newchanlun/NewChanlun/issues/1342#issuecomment-6149622771)）：首个相邻 raw 严格非包含对出现前按 raw 留未定，不产合并组；若始终不出现则保持未定。出现时以其方向从序号 0 左折叠并发布，替代关系可查，旧 cut 不回填。相邻同型分型在 tick 量化后价格相等时端点取先，后者身份仍留；实际极值根取集合，raw 间隔取前端末根到后端首根之间（[#1343 resolution](https://github.com/Newchanlun/NewChanlun/issues/1343#issuecomment-6153028395)）。 | [#1393](https://github.com/Newchanlun/NewChanlun/issues/1393) 的 W 发布（含 `pending_since_cut`）、替代、增量和恢复对拍；[#1405](https://github.com/Newchanlun/NewChanlun/issues/1405) 承接同价行为锁，按其实际版本取证；保留对应 Lean 定义与证明义务。 |
+ | G-007 | [#1344 resolution](https://github.com/Newchanlun/NewChanlun/issues/1344#issuecomment-6149624668)：先成分型则确认，原方向先严格越过候选极值则失效且不复活；已知前缀内均未发生则开放。同笔先处理包含并检查分型，再查越界；同段不越过开放候选。扫描按有效 `second-seq-scan-budget` 承载，扫描覆盖与语义态分开，资源耗尽不是否定。 | [#1420](https://github.com/Newchanlun/NewChanlun/issues/1420) 承接每候选折叠游标、checkpoint、失效及超 50 项的判定/恢复对拍，按实际版本取证；族 I 的 50 窗归 TB-10 旧入口处置，不参与准入。 |
+ | G-025 | [#1345 resolution](https://github.com/Newchanlun/NewChanlun/issues/1345#issuecomment-6149626626)：独立选父取同源、同有效版本及尺度、完整非空的 raw 闭窗 `[min low, max high]`；price-subset 是索引包含的派生证据，不是第二准入门，不证明血缘。缺前提报缺证，不改选。 | [#1438](https://github.com/Newchanlun/NewChanlun/issues/1438)：实际选中父和双坐标证书、缺证及真实对象对照；TB-04 消费实际证据。 |
+@@ -413,8 +413,8 @@
+ | 验收组 | 必须实际观察的结果 | 覆盖 |
+ |---|---|---|
+-| AT-01 | 每个 CC 先按有效验收类型核对象域：真正分类不漏不重；角色/集合完整保留、公式依定义计算、描述不造互斥档；真实投影、合法组合构造与程序定义对拍分别成立 | C02/03；全部 ST/CC/LC/G |
++| AT-01 | 每个 CC 先按有效验收类型核对象域：真正分类不漏不重；角色/集合完整保留、公式依定义计算、描述不造互斥档；真实投影、合法组合构造与程序定义对拍分别成立；同设 `l_max=0`、`min_parts_per_level=3`，完成 L0 后下一级仅剩 1 个可升级单元时为 `NATURAL`，剩 3 个（或更多）时为 `INCOMPLETE_RESOURCE_BOUND` | C02/03；全部 ST/CC/LC/G |
+ | AT-02 | 同输入换级别参数同判断逐位相同；全候选真值不救回选中失败；旁路不回流主塔 | C02/04；#799/#804 |
+ | AT-03 | 全分类从实际后端计算到目录、每类实例和前端；六态、扩展关系、高级对象、LevelView 桥不丢失 | C03/08；20 OB |
+-| AT-04 | 同 cut 分页/快照等于 delta 续接，Gap/代际/会话隔离正确；撤回与替代原子可查 | C08；FE-09 |
++| AT-04 | 同 cut 分页/快照等于 delta 续接，撤回与替代原子可查；同会话同代同 epoch、租约有效，`retain_all` 下最新 cut=11、游标=10 且 10→11 的 delta 完整可验，正常续接不重建；保留窗从 10 开始且 9→10 已不可用时，游标 9 收到 Gap 与重建 cut。窗内链与快照不一致时也报 Gap；旧代际/epoch 独立拒收，异会话不得续接 | C08/09；FE-09 |
+ | AT-05 | 多个具体重各自持久、重内不穿零、重间相反不仲裁、净零保留毛账；再次 Voice 不接旧回报 | C05；FE-01/02 |
+ | AT-06 | 成本/本金/增长/空头非对称、容量/频率、两类换档的成功与失败路径均依已批政策成立。反例夹具：L0、L1 均通过容量和买卖频率门，且 L1 容量足以承载测试投入；有效记录 `l_start=L1` 时首重在 L1，不在 L0 建重。 | C05；FG-018/FE-03/04/06 |
+@@ -432,5 +432,5 @@
+ | AT-18 | 六项 Destination 的实装、最终独评、落地主线及适用 CI、实体报告和下游票状态逐项核实 | C12；整图关闭 |
+ 
+-AT-17 的正式读数按[ADR 0022:97–167](https://github.com/Newchanlun/NewChanlun/blob/b9d898dccf46c2a716115eaa1215bc39c458a959/docs/adr/0022-acceptance-criterion-parameters.md#L97-L167)绑定本次运行读取评价数据前已生效的 `evidence_gate` 与已冻结的逐窗起讫表；用起讫核窗不重叠，报告逐重每窗下界、样本/块数及合计覆盖，全史区间取数据集首末 bar。用费后速率的单边分块 bootstrap 下界，每窗各自过线（下界大于 0），汇总与点估计不代门。现行 `#1677/evidence-gate/v1` 为 UTC 日历月分块、单边 95% 下界（第 5 百分位）、每窗至少 30 样本和 12 月块、至少 3 窗、合计覆盖至少全史的 1/2。用有效记录取值，不写死 v1；门缺失、越界或证据不足不报通过。
++AT-17 的正式读数按[ADR 0022:97–167](https://github.com/Newchanlun/NewChanlun/blob/b9d898dccf46c2a716115eaa1215bc39c458a959/docs/adr/0022-acceptance-criterion-parameters.md#L97-L167)绑定本次运行读取评价数据前已生效的 `evidence_gate` 与已冻结的逐窗起讫表；用起讫核窗不重叠，报告逐重每窗下界、样本/块数及合计覆盖，全史区间取数据集首末 bar。用费后速率的单边分块 bootstrap 下界，每窗各自过线（下界大于 0），汇总与点估计不代门。现行 `#1677/evidence-gate/v1` 为 UTC 日历月分块、单边 95% 下界（第 5 百分位）、每窗至少 30 样本和 12 月块、至少 3 窗、合计覆盖至少全史的 1/2。用有效记录取值，不写死 v1；门记录或字段缺失、值越界时显式报错并停止，不出验收读数；门有效但样本或窗口证据不足时，报 `InsufficientEvidence`，不报通过。
+ 
+ 
+@@ -489,2 +489,12 @@
+ - C10/AT-14：先读模型、种子与容量来源，分别验默认模型和待标定选择；P1/P2 边界保持（[ADR 0033:10–48](https://github.com/Newchanlun/NewChanlun/blob/b9d898dccf46c2a716115eaa1215bc39c458a959/docs/adr/0033-history-simulation-bar-batch-model.md#L10-L48)；[ADR 0052:258–291](https://github.com/Newchanlun/NewChanlun/blob/b9d898dccf46c2a716115eaa1215bc39c458a959/docs/adr/0052-history-input-profile-and-model-order-unspecified.md#L258-L291)）。
+ - 同类普查：核塔底/资源预算、成本第二层、退出观察期、历史结构源与 delta 保留的版本读法（[zhongshu.md:160–174](https://github.com/Newchanlun/NewChanlun/blob/b9d898dccf46c2a716115eaa1215bc39c458a959/.chanlun/definitions/zhongshu.md#L160-L174)；[ADR 0035:24–41](https://github.com/Newchanlun/NewChanlun/blob/b9d898dccf46c2a716115eaa1215bc39c458a959/docs/adr/0035-cost-stop-policy-instance-and-base-extension-evidence.md#L24-L41)；[ADR 0030:38–44](https://github.com/Newchanlun/NewChanlun/blob/b9d898dccf46c2a716115eaa1215bc39c458a959/docs/adr/0030-exit-authorization-and-liability-retirement.md#L38-L44)；[ADR 0052:304–317](https://github.com/Newchanlun/NewChanlun/blob/b9d898dccf46c2a716115eaa1215bc39c458a959/docs/adr/0052-history-input-profile-and-model-order-unspecified.md#L304-L317)；[ADR 0051:282–298](https://github.com/Newchanlun/NewChanlun/blob/b9d898dccf46c2a716115eaa1215bc39c458a959/docs/adr/0051-per-bar-domain-event-identity-lifecycle-contract.md#L282-L298)）。
++
++## 2026-11-20 R5 修订记录
++
++依据 `review-20261120-r4.json` 的所审正文 digest `041cbf75968c46d7c97cca18a22f38acad79311f459da65cb9a7324163a7478c`。
++
++- C02.2/AT-01：达到 `l_max` 且下一级仍有足够单元才报覆盖截断；同一预算验自然终止与资源截断（[#1603 裁定](https://github.com/Newchanlun/NewChanlun/issues/1603#issuecomment-6308897078)；[tower-level-budget.json:7–13](https://github.com/Newchanlun/NewChanlun/blob/b9d898dccf46c2a716115eaa1215bc39c458a959/rust/src/theta_v0/policy_records/tower-level-budget.json#L7-L13)）。
++- C09.4/AT-04：窗内可验 delta 正常续接，实际出窗或一致性失败才报 Gap，旧代际另拒（[ADR 0051:284–296](https://github.com/Newchanlun/NewChanlun/blob/b9d898dccf46c2a716115eaa1215bc39c458a959/docs/adr/0051-per-bar-domain-event-identity-lifecycle-contract.md#L284-L296)）。
++- C10.3：`none` 全量假设保留限价穿越与市价收盘槽各自的前件（[ADR 0033:10–27](https://github.com/Newchanlun/NewChanlun/blob/b9d898dccf46c2a716115eaa1215bc39c458a959/docs/adr/0033-history-simulation-bar-batch-model.md#L10-L27)；[ADR 0033:89–116](https://github.com/Newchanlun/NewChanlun/blob/b9d898dccf46c2a716115eaa1215bc39c458a959/docs/adr/0033-history-simulation-bar-batch-model.md#L89-L116)）。
++- G-002：同价取先限于相邻同型分型的精确 tick 同价（[#1343 裁定 Q1](https://github.com/Newchanlun/NewChanlun/issues/1343#issuecomment-6153028395)）。
++- AT-17：无有效 `evidence_gate` 的配置错误不出验收读数；与有效门下证据不足分开（[ADR 0022:153–167](https://github.com/Newchanlun/NewChanlun/blob/b9d898dccf46c2a716115eaa1215bc39c458a959/docs/adr/0022-acceptance-criterion-parameters.md#L153-L167)）。
