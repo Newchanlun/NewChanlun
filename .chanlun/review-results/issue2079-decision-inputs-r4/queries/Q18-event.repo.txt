@@ -1,0 +1,2 @@
+$ git grep -I -n -E 'domain-stopped|writer_closed|domain_exit_results' b9d898dccf46c2a716115eaa1215bc39c458a959 -- analysis/ docs/ .chanlun/
+退出码：1

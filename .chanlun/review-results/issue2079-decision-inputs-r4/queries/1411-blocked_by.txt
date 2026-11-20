@@ -1,0 +1,7 @@
+$ gh api repos/Newchanlun/NewChanlun/issues/1411/dependencies/blocked_by --jq '.[].number'
+退出码：0
+1381
+1399
+1481
+1423
+1570
