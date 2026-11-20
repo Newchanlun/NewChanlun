@@ -1459,7 +1459,7 @@ jobs:
       #   4 核下 -n 4 平均仅占 1.27 核（31.7% CPU）；改用 -n 8 --dist=worksteal 后 4 核 Boat 同机实测
       #   wall 降幅 46%（1.85x），通过/失败/跳过集合逐项相同、总 CPU 耗时不变。
       - name: Test pilot and Studio without external workers
-        run: python -m pytest -q -n 8 --dist=worksteal tests
+        run: python -m pytest -q -n 12 --dist=worksteal tests
       - name: Test approval-signing reader
         working-directory: .sandcastle/approval-signing
         run: python -m pytest -q tests
