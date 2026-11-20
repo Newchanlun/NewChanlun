@@ -929,6 +929,43 @@ pub fn unit_core_position(u: &UnitRange, zd: Tick, zg: Tick) -> UnitCorePosition
     }
 }
 
+/// #2114 R5 字面分支对冻结核心与相邻已完成单元的核验。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum R5Joint {
+    NotOutside,
+    BreakUnitOutward,
+    DirectionNotAlternating,
+    PrevOutsideCore,
+    JointNotConnected,
+    Proven { side: Direction },
+}
+
+/// #1496：只在前段与核心相交、两段相连交替、当前段严格在外时见证「离开＋首回抽不回」。
+/// 突破段本身朝外、关节不相连及上级占位方向的角色留 #2141 裁定；不按级别分派，也无回落（#804、#799）。
+pub fn r5_joint(zd: Tick, zg: Tick, prev: &UnitRange, cur: &UnitRange) -> R5Joint {
+    let Some(side) = unit_core_position(cur, zd, zg).leave_side() else {
+        return R5Joint::NotOutside;
+    };
+    if cur.direction == side {
+        return R5Joint::BreakUnitOutward;
+    }
+    if prev.direction != side {
+        return R5Joint::DirectionNotAlternating;
+    }
+    if !unit_core_position(prev, zd, zg).closed_overlap() {
+        return R5Joint::PrevOutsideCore;
+    }
+    let same_extreme = match side {
+        Direction::Up => prev.hi == cur.hi,
+        Direction::Down => prev.lo == cur.lo,
+    };
+    if prev.end_index == cur.start_index && same_extreme {
+        R5Joint::Proven { side }
+    } else {
+        R5Joint::JointNotConnected
+    }
+}
+
 /// 判定点位三态（契约锚 `Origin.CenterStates.classifyPosition`，闭核心区间）。
 ///
 /// `p<zd → below`，`zg<p → above`，否则 `within`。逐字对齐 `Origin.CenterStates.classifyPosition`
@@ -969,6 +1006,56 @@ mod tests {
     }
     fn down() -> Direction {
         Direction::Down
+    }
+
+    #[test]
+    fn r5_joint_proven_implies_third_cert() {
+        use super::super::super::types::Segment;
+        use super::super::signal::judge_third_cert;
+
+        let core = Center {
+            zd: 20,
+            zg: 35,
+            dd: 10,
+            gg: 40,
+            start_index: 0,
+            end_index: 20,
+        };
+        let segment = |u: UnitRange| {
+            let (start_price, end_price) = match u.direction {
+                Direction::Up => (u.lo, u.hi),
+                Direction::Down => (u.hi, u.lo),
+            };
+            Segment {
+                direction: u.direction,
+                start_index: u.start_index,
+                end_index: u.end_index,
+                start_price,
+                end_price,
+            }
+        };
+        for (prev, cur, expected) in [
+            (
+                unit(16, 20, up(), 22, 45),
+                unit(20, 24, down(), 38, 45),
+                R5Joint::Proven { side: up() },
+            ),
+            (
+                unit(16, 20, down(), 5, 25),
+                unit(20, 24, up(), 5, 15),
+                R5Joint::Proven { side: down() },
+            ),
+            // #2141：关节极值不等时，既有三类点端价门通过，R5 字面见证缺席。
+            (
+                unit(16, 20, up(), 22, 45),
+                unit(20, 24, down(), 38, 50),
+                R5Joint::JointNotConnected,
+            ),
+        ] {
+            assert_eq!(r5_joint(core.zd, core.zg, &prev, &cur), expected);
+            let cert = judge_third_cert(&core, &segment(prev), Some(prev.direction), &segment(cur));
+            assert!(cert.is_some());
+        }
     }
 
     #[test]

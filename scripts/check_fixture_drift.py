@@ -4,11 +4,11 @@ check_fixture_drift.py — Lean fixture 漂移本地 gate（GitHub issue #263，
 
 工位定位：rust 四个 parity 测试（theta_v0_buy_parity / theta_v0_classifier_parity /
 theta_v0_lean_parity / theta_v0_center_parity / certificate_chain parity）include_str! 读
-rust/tests/fixtures/ 下的机器导出 fixture（#1419 起共四个）。这些 fixture **都有** Lean #eval 机器导出器（#263「查其是否有机器导出器」
+rust/tests/fixtures/ 下的机器导出 fixture。这些 fixture **都有** Lean #eval 机器导出器（#263「查其是否有机器导出器」
 已查清：有），非手编。本脚本 regen 导出器输出到**临时文件**（绝不覆盖仓内 fixture），与仓内
 fixture 做字段级 diff——Lean 改了值但 fixture 未重落盘 = 漂移，本 gate 变红。
 
-覆盖的四个 fixture：
+覆盖的 fixture：
   1. formal/Origin/ParityFixtureExport.lean（#eval 输出整个 fixture JSON，单行 compress）
        → rust/tests/fixtures/theta_v0_parity.json
   2. formal/Origin/CenterConstruct.lean（#eval IO.println refV1FixtureJson.compress，:634）
@@ -17,9 +17,11 @@ fixture 做字段级 diff——Lean 改了值但 fixture 未重落盘 = 漂移�
        → rust/tests/fixtures/certificate_chain_parity.json
   4. formal/Origin/CenterPairFixtureExport.lean（#1419/#1424，#eval 输出五叶 8 例 JSON；不在 lake roots）
        → rust/tests/fixtures/center_pair_1424_lean.json
+  5. formal/Origin/R5WitnessFixtureExport.lean（#1496，#eval 输出 R5 关节 JSON；不在 lake roots）
+       → rust/tests/fixtures/r5_witness_1496_lean.json
 
 跑法：
-  python3 scripts/check_fixture_drift.py                    # 查全部四个 fixture（缺省）
+  python3 scripts/check_fixture_drift.py                    # 查全部 fixture（缺省）
   python3 scripts/check_fixture_drift.py --fixture parity   # 只查 theta_v0_parity.json
   python3 scripts/check_fixture_drift.py --fixture center   # 只查 theta_v0_center_parity.json
   python3 scripts/check_fixture_drift.py --fixture certificate_chain  # 只查证书链 fixture
@@ -84,6 +86,10 @@ FIXTURES = {
     "center_pair": {
         "exporter": "Origin/CenterPairFixtureExport.lean",
         "fixture": "rust/tests/fixtures/center_pair_1424_lean.json",
+    },
+    "r5_witness": {
+        "exporter": "Origin/R5WitnessFixtureExport.lean",
+        "fixture": "rust/tests/fixtures/r5_witness_1496_lean.json",
     },
 }
 

@@ -17,10 +17,10 @@
 //!
 //! 等待原因 `UNIT_NOT_COMPLETED`/`SEED_NOT_YET_EVALUABLE` 是 S0 oracle 提议名，按 r2 R1 并入 D-J schema 独审定名。
 
-use super::super::types::{Center, Segment, Tick};
+use super::super::types::{Center, Direction, Segment, Tick};
 use super::center::{
-    breaks_upward, center_pair_facts, is_zn, unit_core_position, CenterPairFacts, CenterRoles,
-    RoleVar, SeedFacts, UnitCorePosition, UnitRange,
+    breaks_upward, center_pair_facts, is_zn, r5_joint, unit_core_position, CenterPairFacts,
+    CenterRoles, R5Joint, RoleVar, SeedFacts, UnitCorePosition, UnitRange,
 };
 use super::recursive_tower::{scan_center_facts, WinMeta, WindowScanCursor};
 
@@ -115,6 +115,61 @@ pub struct CenterScanFacts {
     pub attempts: Vec<SeedAttempt>,
     /// 每个成立窗口，按扫描顺序。
     pub windows: Vec<ScanWindow>,
+}
+
+/// #1496：成立窗口的 R5 见证，按 #2114 已裁的关节分支取证。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum R5Witness {
+    Proven(R5Proof),
+    Absent(R5Gap),
+}
+
+/// 缺席不授权换判据（#799）；朝外突破、极值不等与占位方向的未裁分支见 #2141。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum R5Gap {
+    Open,
+    /// 本次扫描中第一个关节未证的更早结算窗口序号（从 0 起）。
+    UpstreamUnproven {
+        window: usize,
+    },
+    UpgradePending,
+    BreakUnitOutward,
+    DirectionNotAlternating,
+    JointNotConnected,
+}
+
+/// 共用扫描证实的离开和首次回抽；下标均相对于本次输入。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct R5Proof {
+    leave_unit: usize,
+    pullback_unit: usize,
+    side: Direction,
+    core: (Tick, Tick),
+    pullback_extreme: Tick,
+}
+
+impl R5Proof {
+    pub fn leave_unit(&self) -> usize {
+        self.leave_unit
+    }
+
+    pub fn pullback_unit(&self) -> usize {
+        self.pullback_unit
+    }
+
+    pub fn side(&self) -> Direction {
+        self.side
+    }
+
+    /// 冻结核心 `(ZD, ZG)`。
+    pub fn core(&self) -> (Tick, Tick) {
+        self.core
+    }
+
+    /// 回抽段朝核心一侧的极值：向上破取低、向下破取高。
+    pub fn pullback_extreme(&self) -> Tick {
+        self.pullback_extreme
+    }
 }
 
 /// 对已完成单元做一次全量扫描并收集事实。`build` 取塔同级所用的判据（L0 = `center_from_segments`）。
@@ -315,6 +370,57 @@ pub enum ScanState {
 }
 
 impl CenterScanFacts {
+    /// 每个窗口一项，按扫描顺序。须传共用扫描本次的完整输入；不证明输入窗起点之前的结算。
+    pub fn r5_witnesses(&self, units: &[UnitRange]) -> Vec<R5Witness> {
+        assert_eq!(units.len(), self.len, "units 必须是本次扫描的输入");
+        let mut witnesses = Vec::with_capacity(self.windows.len());
+        let mut first_unproven = None;
+        let mut center_at = 0;
+        for (window, w) in self.windows.iter().enumerate() {
+            // 升级窗的各子中枢都继承父窗口的冻结核心；首个产出就能读到。
+            let (center, _) = &self.centers[center_at];
+            center_at += w.emitted;
+            let witness = if w.exit == self.len {
+                R5Witness::Absent(R5Gap::Open)
+            } else if let Some(window) = first_unproven {
+                R5Witness::Absent(R5Gap::UpstreamUnproven { window })
+            } else {
+                let cur = &units[w.exit];
+                let joint = r5_joint(center.zd, center.zg, &units[w.exit - 1], cur);
+                // 升级只压住本窗发布，是否阻断后窗仍由原窗口关节决定。
+                if !matches!(joint, R5Joint::Proven { .. }) {
+                    first_unproven = Some(window);
+                }
+                if w.upgraded {
+                    R5Witness::Absent(R5Gap::UpgradePending)
+                } else {
+                    match joint {
+                        R5Joint::Proven { side } => R5Witness::Proven(R5Proof {
+                            leave_unit: w.exit - 1,
+                            pullback_unit: w.exit,
+                            side,
+                            core: (center.zd, center.zg),
+                            pullback_extreme: match side {
+                                Direction::Up => cur.lo,
+                                Direction::Down => cur.hi,
+                            },
+                        }),
+                        R5Joint::BreakUnitOutward => R5Witness::Absent(R5Gap::BreakUnitOutward),
+                        R5Joint::DirectionNotAlternating => {
+                            R5Witness::Absent(R5Gap::DirectionNotAlternating)
+                        }
+                        R5Joint::JointNotConnected => R5Witness::Absent(R5Gap::JointNotConnected),
+                        R5Joint::NotOutside | R5Joint::PrevOutsideCore => {
+                            unreachable!("共用扫描的末成员与冻结核心相交，退出段严格在外")
+                        }
+                    }
+                }
+            };
+            witnesses.push(witness);
+        }
+        witnesses
+    }
+
     /// 每个成立窗口的发布事实。`units` 必须是本次扫描的输入。
     pub fn window_facts(&self, units: &[UnitRange]) -> Vec<CenterWindowFacts> {
         assert_eq!(units.len(), self.len, "units 必须是本次扫描的输入");
