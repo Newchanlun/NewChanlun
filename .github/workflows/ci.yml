@@ -222,10 +222,9 @@ jobs:
           python -m pip install --upgrade pip
           pip install -e ".[test]" pytest-xdist
           pip install "nautilus_trader==1.229.0"
-          CARGO_TARGET_DIR="$HOME/.cache/newchan-rust-target" pip install ./rust
 
       - name: Build and install newchan_rust extension
-        run: pip install ./rust
+        run: CARGO_TARGET_DIR="$HOME/.cache/newchan-rust-target" pip install ./rust
 
       - name: Run tests with coverage
         # -rs 是 #324 的 090 要求：显式打印 skip 原因。
