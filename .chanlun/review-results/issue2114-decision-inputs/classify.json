@@ -1,0 +1,13 @@
+{
+  "ticket": 2114,
+  "role": "triage",
+  "model": "gpt-6.2-sol",
+  "klass": "T",
+  "reason": "相邻同级中枢的形成证据、结算切面与发布/撤回状态机，沿用 #815、#812 和 SPEC #1340，不改价格判据或交易授权。",
+  "parsed": true,
+  "userGate": [],
+  "sourceCommit": "b9d898dccf46c2a716115eaa1215bc39c458a959",
+  "asOf": "2026-11-20",
+  "round": 1,
+  "classificationComment": "https://github.com/Newchanlun/NewChanlun/issues/2114#issuecomment-7042051844"
+}
