@@ -2270,8 +2270,8 @@ mod tests {
             assert_eq!(sql1, 1);
             let f0 = s_content::frame_calls_on_thread();
             let (_, sql2) = sql_reads_during(|| reader.checked_read(&digest).unwrap().unwrap());
-            assert_eq!(sql2, 0, "干净 IMMEDIATE 事务第二次读应命中 SnapshotFrames");
-            assert_eq!(s_content::frame_calls_on_thread() - f0, 1, "命中仍重算 F");
+            assert_eq!(sql2, 0);
+            assert_eq!(s_content::frame_calls_on_thread() - f0, 1, "命中仍重新执行 F");
 
             tx.authorizer(Some(|_: AuthContext<'_>| Authorization::Deny))
                 .unwrap();
