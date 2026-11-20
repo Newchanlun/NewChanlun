@@ -2271,7 +2271,11 @@ mod tests {
             let f0 = s_content::frame_calls_on_thread();
             let (_, sql2) = sql_reads_during(|| reader.checked_read(&digest).unwrap().unwrap());
             assert_eq!(sql2, 0);
-            assert_eq!(s_content::frame_calls_on_thread() - f0, 1, "命中仍重新执行 F");
+            assert_eq!(
+                s_content::frame_calls_on_thread() - f0,
+                1,
+                "命中仍重新执行 F"
+            );
 
             tx.authorizer(Some(|_: AuthContext<'_>| Authorization::Deny))
                 .unwrap();
