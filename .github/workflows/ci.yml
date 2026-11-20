@@ -1429,26 +1429,37 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-          cache: pip
-          cache-dependency-path: |
-            .sandcastle/deepagents-pilot/requirements.lock
-            .sandcastle/deepagents-pilot/requirements*.txt
-            .sandcastle/approval-signing/pyproject.toml
+      - name: Cache uv (deepagents-pilot)
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/uv
+          key: uv-deepagents-${{ runner.os }}-py312-${{ hashFiles('.sandcastle/deepagents-pilot/requirements.lock', '.sandcastle/deepagents-pilot/requirements*.txt', '.sandcastle/approval-signing/pyproject.toml') }}
+          restore-keys: uv-deepagents-${{ runner.os }}-py312-
+      - name: Cache mypy (deepagents-pilot)
+        uses: actions/cache@v4
+        with:
+          path: .sandcastle/deepagents-pilot/.mypy_cache
+          key: mypy-deepagents-${{ runner.os }}-py312-${{ hashFiles('.sandcastle/deepagents-pilot/requirements.lock', '.sandcastle/deepagents-pilot/requirements*.txt', '.sandcastle/deepagents-pilot/pilot1742/**') }}
+          restore-keys: mypy-deepagents-${{ runner.os }}-py312-
       - uses: actions/setup-node@v4
         with:
           node-version: '22'
       - name: Install frozen pilot, Studio, and check tools
-        run: python -m pip install -r requirements-ci.txt
+        run: |
+          export UV_CACHE_DIR="$HOME/.cache/uv"
+          command -v uv >/dev/null 2>&1 || python -m pip install -q uv
+          uv pip install --system --python "$(command -v python)" -r requirements-ci.txt
       - name: Check dependency compatibility
         run: python -m pip check
       - name: Ruff
         run: python -m ruff check --select F,E9,B,I .
       - name: Mypy
         run: python -m mypy pilot1742
-      # #1875：本步串行约 9.3 min，是只改 .sandcastle 的 PR 的 CI 下限。-n 4 与托管 runner 4 核一致；
-      #   Belay 上串行与两轮 -n 4 的失败/错误集合逐项相同（84 项，均为环境依赖），耗时 655 → 252/209 s。
+      # #1875：本步串行约 9.3 min，是只改 .sandcastle 的 PR 的 CI 下限。实测包含大量子进程/sleep 等待，
+      #   4 核下 -n 4 平均仅占 1.27 核（31.7% CPU）；改用 -n 8 --dist=worksteal 后 4 核 Boat 同机实测
+      #   wall 降幅 46%（1.85x），通过/失败/跳过集合逐项相同、总 CPU 耗时不变。
       - name: Test pilot and Studio without external workers
-        run: python -m pytest -q -n 4 tests
+        run: python -m pytest -q -n 12 --dist=worksteal tests
       - name: Test approval-signing reader
         working-directory: .sandcastle/approval-signing
         run: python -m pytest -q tests
