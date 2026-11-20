@@ -99,8 +99,102 @@ impl Profile {
 
     pub fn validate(&self) -> Result<(), String> {
         self.validate_base()?;
-        validate_conditions(&self.conditions)
+        validate_conditions(&self.conditions)?;
+        validate_fx_marker_uniformity(&self.conditions)
     }
+}
+
+fn condition_is_fx_release_bound(c: &Condition) -> bool {
+    let m = crate::economic_session::FX_RELEASE_BOUND_MARKER;
+    c.dependency_set.len() == 1
+        && c.dependency_set[0] == m
+        && c.invalidation_sources.len() == 1
+        && c.invalidation_sources[0] == m
+        && c.evidence_refs.len() == 1
+        && c.evidence_refs[0] == m
+        && c.coverage_proof == m
+}
+
+fn condition_mentions_fx_marker(c: &Condition) -> bool {
+    let m = crate::economic_session::FX_RELEASE_BOUND_MARKER;
+    c.coverage_proof == m
+        || c.dependency_set.iter().any(|s| s == m)
+        || c.invalidation_sources.iter().any(|s| s == m)
+        || c.evidence_refs.iter().any(|s| s == m)
+}
+
+fn is_fx_release_bound_profile(list: &[Condition]) -> bool {
+    !list.is_empty() && list.iter().all(condition_is_fx_release_bound)
+}
+
+fn validate_fx_marker_uniformity(list: &[Condition]) -> Result<(), String> {
+    let any = list.iter().any(condition_mentions_fx_marker);
+    if any && !is_fx_release_bound_profile(list) {
+        return Err(format!(
+            "Unsupported：{} 须在获准条件清单四项内统一声明，不得混写",
+            crate::economic_session::FX_RELEASE_BOUND_MARKER
+        ));
+    }
+    Ok(())
+}
+
+fn validate_fx_release_bound_certificate(
+    c: &Certificate,
+    approved: &[Condition],
+) -> Result<(), String> {
+    validate_conditions(&c.conditions)?;
+    if c.conditions.len() != approved.len() {
+        return Err("Unsupported：FX 放行条件清单项数与获准 manifest 不等".into());
+    }
+    let marker = crate::economic_session::FX_RELEASE_BOUND_MARKER;
+    let check_real = |s: &str| -> Result<(), String> {
+        if s == marker || crate::economic_session::is_fx_placeholder_text(s) {
+            return Err(format!(
+                "Unsupported：FX 精确命令证书不得保留模板标记或占位名（{s}）"
+            ));
+        }
+        Ok(())
+    };
+    for dep in &c.market_dependencies {
+        check_real(dep)?;
+        if !dep.starts_with("fx-quote:") && !dep.starts_with("fx-boundary-empty:") {
+            return Err(format!(
+                "Unsupported：FX 精确命令 market_dependencies 须为可核证 fx-quote 或 fx-boundary-empty（{dep}）"
+            ));
+        }
+    }
+    for (got, want) in c.conditions.iter().zip(approved.iter()) {
+        if got.condition_id != want.condition_id
+            || got.authority_revision != want.authority_revision
+            || got.required_check_stages != want.required_check_stages
+            || got.validator_capability != want.validator_capability
+            || got.failure_result != want.failure_result
+        {
+            return Err("Unsupported：FX 放行条件清单元数据与获准 manifest 不一致".into());
+        }
+        check_real(&got.coverage_proof)?;
+        if !got.coverage_proof.starts_with("fx-valuation/1:") {
+            return Err(format!(
+                "Unsupported：FX 放行条件 coverage_proof 须以 fx-valuation/1: 绑定真实切面（{}）",
+                got.coverage_proof
+            ));
+        }
+        for s in got
+            .dependency_set
+            .iter()
+            .chain(got.invalidation_sources.iter())
+            .chain(got.evidence_refs.iter())
+        {
+            check_real(s)?;
+        }
+        if !got.evidence_refs.iter().any(|r| r.starts_with("e-cut:E:")) {
+            return Err(format!(
+                "MissingDependency：FX 放行条件 {} 缺少 E 提交切面证据 e-cut:E:*",
+                got.condition_id
+            ));
+        }
+    }
+    Ok(())
 }
 
 /// X 自身持有核验能力的条件；自 `1f0a42bc20` 起所有 12+6+6 写者均拒绝未支持的 X 阶段能力。
@@ -234,7 +328,7 @@ pub struct ExactCommand {
     pub certificate: Certificate,
 }
 impl ExactCommand {
-    fn validate(&self, p: &Profile, epoch: i64) -> Result<(), String> {
+    pub(crate) fn validate(&self, p: &Profile, epoch: i64) -> Result<(), String> {
         if self.session_id != p.session_id
             || self.session_generation != p.session_generation
             || self.x_id != p.x_id
@@ -290,7 +384,9 @@ impl ExactCommand {
         {
             return Err("IdentityConflict：首次提交量与 L 不同".into());
         }
-        if c.conditions != p.conditions {
+        if is_fx_release_bound_profile(&p.conditions) {
+            validate_fx_release_bound_certificate(c, &p.conditions)?;
+        } else if c.conditions != p.conditions {
             return Err("Unsupported：条件清单与获准 manifest 清单不逐项相等".into());
         }
         Ok(())

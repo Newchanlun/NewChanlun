@@ -928,7 +928,19 @@ fn release_refuses_when_e_no_longer_holds_the_full_grant_responsibility() {
     let p = release_payload(&f, "alpha");
     let (seq, _, _, image) = latest(&f.dbs[0]).unwrap();
     let mut next = image.clone();
-    let ok = release_exact(&f.configs[0], &image, &mut next, &d, &p, seq + 1, "162").unwrap();
+    let mut budget = crate::economic_session::store::ReadBudget::new(None, None);
+    let ok = release_exact(
+        &f.dbs[0],
+        &f.configs[0],
+        &image,
+        &mut next,
+        &d,
+        &p,
+        seq + 1,
+        "162",
+        &mut budget,
+    )
+    .unwrap();
     assert_eq!(ok["state"], "ReleasedExact");
     let grant = grant_id(&f, "alpha");
     let mut reduced = image.clone();
@@ -941,7 +953,18 @@ fn release_refuses_when_e_no_longer_holds_the_full_grant_responsibility() {
         }
     }
     let mut next = reduced.clone();
-    let e = release_exact(&f.configs[0], &reduced, &mut next, &d, &p, seq + 1, "162").unwrap_err();
+    let e = release_exact(
+        &f.dbs[0],
+        &f.configs[0],
+        &reduced,
+        &mut next,
+        &d,
+        &p,
+        seq + 1,
+        "162",
+        &mut budget,
+    )
+    .unwrap_err();
     assert!(
         e.starts_with("MissingDependency") && e.contains("完整责任"),
         "{e}"

@@ -53,8 +53,11 @@ pub(super) fn validate_config(manifest: &Value) -> Result<bool, String> {
     let Some(fx) = manifest.get(CONTRACT_FIELD).filter(|v| !v.is_null()) else {
         return Ok(false);
     };
-    if manifest["clock"]["kind"] != "TestOnly" {
-        return Err("UnsupportedCapability：fx-valuation/1 仅支持显式 TestOnly 会话".into());
+    if !super::store::component_clock(manifest) {
+        return Err(
+            "UnsupportedCapability：fx-valuation/1 仅支持显式 TestOnly 或精确放行 logical-bar/1 模拟会话"
+                .into(),
+        );
     }
     if !manifest.get("finance").is_some_and(|v| !v.is_null()) {
         return Err(
@@ -1829,7 +1832,14 @@ pub(super) fn check_gate(image: &Value, subject: GateSubject<'_>) -> Result<(), 
         .ok_or("StorageUnavailable：pending 形状")?;
     let coverages = extract_coverages(image);
     let derived = derive_state_from_image(None, image, recorded, pending, &coverages)?;
+    check_gate_derived(image, &derived, subject)
+}
 
+fn check_gate_derived(
+    image: &Value,
+    derived: &DerivedFxState,
+    subject: GateSubject<'_>,
+) -> Result<(), String> {
     let (subject_policy_id, subject_currency) = match subject {
         GateSubject::ReserveSlot {
             slot_id,
@@ -1911,6 +1921,285 @@ pub(super) fn check_gate(image: &Value, subject: GateSubject<'_>) -> Result<(), 
             "MissingDependency：FX 估值处于不可核状态（{other}），拒绝放行"
         )),
     }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(super) struct FxBoundQuote {
+    pub(super) chain_id: String,
+    pub(super) revision: String,
+    pub(super) source_coord: String,
+    pub(super) supersedes_revision: Option<String>,
+    pub(super) price_numerator: String,
+    pub(super) price_denominator: String,
+    pub(super) raw_sha256: String,
+    pub(super) fact_key: String,
+    pub(super) evidence_id: String,
+    pub(super) evidence_hash: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(super) struct FxRetiredQuote {
+    pub(super) chain_id: String,
+    pub(super) revision: String,
+    pub(super) retired_by_revision: String,
+    pub(super) evidence_id: String,
+    pub(super) evidence_hash: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(super) struct FxBoundObligation {
+    pub(super) responsibility_id: String,
+    pub(super) owner: String,
+    pub(super) quantity: String,
+    pub(super) unit: String,
+    pub(super) valuation_instrument: String,
+    pub(super) quote_source_namespace: String,
+    pub(super) quote_source_epoch: String,
+    pub(super) input_sha256: String,
+}
+
+/// #1407 C3 CE-S07：E 在真实 `ReleaseExact` 原子事务内从同一切面重算推导的可核证依赖集合。
+/// 绑定具体 E cut、生效 cap 政策、共同界责任、已导入外币义务、实际适用市场修订及退役证据；
+/// 不使用全局 `latest`、`admissible` 布尔或静态占位名。
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(super) struct FxReleaseBinding {
+    pub(super) e_prev_seq: i64,
+    pub(super) e_prev_root: String,
+    pub(super) grant_id: String,
+    pub(super) grant_owner: String,
+    pub(super) grant_amount: String,
+    pub(super) policy_id: String,
+    pub(super) policy_version: String,
+    pub(super) cap_amount: String,
+    pub(super) cap_currency: String,
+    pub(super) valid_through_ns: String,
+    pub(super) cash_subtotal: String,
+    pub(super) foreign_subtotal: String,
+    pub(super) evaluated_total: String,
+    pub(super) boundary_source_id: String,
+    pub(super) boundary_source_epoch: String,
+    pub(super) boundary_input_sha256: String,
+    pub(super) responsibility_refs: Vec<String>,
+    pub(super) foreign_obligations: Vec<FxBoundObligation>,
+    pub(super) active_quotes: Vec<FxBoundQuote>,
+    pub(super) retired_quotes: Vec<FxRetiredQuote>,
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(super) fn release_binding(
+    config: &Config,
+    previous: &Value,
+    prev_seq: i64,
+    prev_root: &str,
+    command_id: &str,
+    grant_id: &str,
+    owner: &str,
+    policy_id: &str,
+    cap_currency: &str,
+) -> Result<FxReleaseBinding, String> {
+    if !enabled(config) {
+        return Err("SchemaUnsupported：未启用 fx-valuation/1 子合同".into());
+    }
+    if prev_seq <= 0 || prev_root.is_empty() {
+        return Err("StorageUnavailable：ReleaseExact 缺少前序 E 提交切面".into());
+    }
+    let recorded = previous["recorded"]
+        .as_array()
+        .ok_or("StorageUnavailable：recorded 形状")?;
+    let pending = previous["pending"]
+        .as_array()
+        .ok_or("StorageUnavailable：pending 形状")?;
+    let coverages = extract_coverages(previous);
+    let derived = derive_state_from_image(Some(config), previous, recorded, pending, &coverages)?;
+    check_gate_derived(
+        previous,
+        &derived,
+        GateSubject::ReleaseCommand {
+            command_id,
+            grant_id,
+            owner,
+            policy_id,
+            cap_currency,
+        },
+    )?;
+    release_binding_from_fx_json(&derived.json, prev_seq, prev_root, grant_id, owner)
+}
+
+#[cfg(test)]
+pub(super) fn release_binding_from_query(
+    query_reply: &Value,
+    grant_id: &str,
+    owner: &str,
+) -> Result<FxReleaseBinding, String> {
+    let prev_seq = positive(
+        required(&query_reply["cut"], "commit_seq")?,
+        "query commit_seq",
+    )?;
+    let prev_root = required(&query_reply["cut"], "root_hash")?;
+    release_binding_from_fx_json(
+        &query_reply[CONTRACT_FIELD],
+        prev_seq,
+        prev_root,
+        grant_id,
+        owner,
+    )
+}
+
+fn release_binding_from_fx_json(
+    fx: &Value,
+    prev_seq: i64,
+    prev_root: &str,
+    grant_id: &str,
+    owner: &str,
+) -> Result<FxReleaseBinding, String> {
+    let cap = &fx["cap_policy"];
+    if !cap.is_object() {
+        return Err("MissingDependency：FX 放行绑定缺少生效 cap 政策".into());
+    }
+    let boundary = &fx["boundary"];
+    let summary = &fx["summary"];
+    let cash_rows = fx["cash_responsibilities"]
+        .as_array()
+        .ok_or("StorageUnavailable：fx_valuation.cash_responsibilities 形状")?;
+    let foreign_rows = fx["foreign_responsibilities"]
+        .as_array()
+        .ok_or("StorageUnavailable：fx_valuation.foreign_responsibilities 形状")?;
+    let revision_rows = fx["revisions"]
+        .as_array()
+        .ok_or("StorageUnavailable：fx_valuation.revisions 形状")?;
+
+    let grant_row = cash_rows
+        .iter()
+        .find(|r| r["responsibility_id"] == grant_id && r["owner"] == owner)
+        .ok_or("MissingDependency：FX 放行绑定未找到对应 grant 责任")?;
+    let grant_amount = required(grant_row, "amount")?.to_owned();
+
+    let mut other_resps = BTreeSet::new();
+    for r in cash_rows {
+        let rid = required(r, "responsibility_id")?;
+        if rid != grant_id {
+            other_resps.insert(rid.to_owned());
+        }
+    }
+    let mut foreign_obligations = Vec::with_capacity(foreign_rows.len());
+    let mut applied_fact_keys = BTreeSet::new();
+    for ob in foreign_rows {
+        let rid = required(ob, "responsibility_id")?.to_owned();
+        if rid != grant_id {
+            other_resps.insert(rid.clone());
+        }
+        if ob["valuation_status"] != "Evaluated" {
+            return Err(format!(
+                "MissingDependency：外币责任 {rid} 尚未完成精确估值"
+            ));
+        }
+        let applied_fk = required(ob, "applied_fact_key")?.to_owned();
+        applied_fact_keys.insert(applied_fk);
+        foreign_obligations.push(FxBoundObligation {
+            responsibility_id: rid,
+            owner: required(ob, "owner")?.to_owned(),
+            quantity: required(ob, "quantity")?.to_owned(),
+            unit: required(ob, "unit")?.to_owned(),
+            valuation_instrument: required(ob, "valuation_instrument")?.to_owned(),
+            quote_source_namespace: required(&ob["quote_source"], "source_namespace")?.to_owned(),
+            quote_source_epoch: required(&ob["quote_source"], "source_epoch")?.to_owned(),
+            input_sha256: required(ob, "input_sha256")?.to_owned(),
+        });
+    }
+    foreign_obligations.sort_by(|a, b| a.responsibility_id.cmp(&b.responsibility_id));
+
+    let mut responsibility_refs = Vec::with_capacity(1 + other_resps.len());
+    responsibility_refs.push(grant_id.to_owned());
+    responsibility_refs.extend(other_resps);
+
+    let mut active_quotes_by_chain: BTreeMap<String, FxBoundQuote> = BTreeMap::new();
+    for fk in &applied_fact_keys {
+        let rev = revision_rows
+            .iter()
+            .find(|r| r["fact_key"].as_str() == Some(fk.as_str()))
+            .ok_or("StorageUnavailable：fx_valuation.revisions 缺失已适用报价原件")?;
+        if rev["status"] != "Active" || rev["coverage_status"] != "Covered" {
+            return Err("MissingDependency：已适用 FX 报价修订未处于 Active+Covered 状态".into());
+        }
+        let chain_id = format!(
+            "{}|{}|{}|{}",
+            required(rev, "source_namespace")?,
+            required(rev, "source_epoch")?,
+            required(rev, "instrument")?,
+            required(rev, "event_id")?
+        );
+        let bound = FxBoundQuote {
+            chain_id: chain_id.clone(),
+            revision: required(rev, "revision")?.to_owned(),
+            source_coord: required(rev, "source_coord")?.to_owned(),
+            supersedes_revision: rev
+                .get("supersedes_revision")
+                .and_then(Value::as_str)
+                .map(ToOwned::to_owned),
+            price_numerator: required(rev, "price_numerator")?.to_owned(),
+            price_denominator: required(rev, "price_denominator")?.to_owned(),
+            raw_sha256: required(rev, "raw_sha256")?.to_owned(),
+            fact_key: fk.clone(),
+            evidence_id: required(rev, "evidence_id")?.to_owned(),
+            evidence_hash: required(rev, "evidence_hash")?.to_owned(),
+        };
+        active_quotes_by_chain.insert(chain_id, bound);
+    }
+
+    let participating_chains: BTreeSet<String> = active_quotes_by_chain.keys().cloned().collect();
+    let mut retired_quotes: Vec<(String, i64, FxRetiredQuote)> = Vec::new();
+    for rev in revision_rows {
+        if rev["coverage_status"] != "RetiredBySupersession" {
+            continue;
+        }
+        let chain_id = format!(
+            "{}|{}|{}|{}",
+            required(rev, "source_namespace")?,
+            required(rev, "source_epoch")?,
+            required(rev, "instrument")?,
+            required(rev, "event_id")?
+        );
+        if !participating_chains.contains(&chain_id) {
+            continue;
+        }
+        let revision = required(rev, "revision")?.to_owned();
+        let rev_num = positive(&revision, "retired revision")?;
+        retired_quotes.push((
+            chain_id.clone(),
+            rev_num,
+            FxRetiredQuote {
+                chain_id,
+                revision,
+                retired_by_revision: required(rev, "retired_by_revision")?.to_owned(),
+                evidence_id: required(rev, "evidence_id")?.to_owned(),
+                evidence_hash: required(rev, "evidence_hash")?.to_owned(),
+            },
+        ));
+    }
+    retired_quotes.sort_by(|a, b| a.0.cmp(&b.0).then_with(|| a.1.cmp(&b.1)));
+
+    Ok(FxReleaseBinding {
+        e_prev_seq: prev_seq,
+        e_prev_root: prev_root.to_owned(),
+        grant_id: grant_id.to_owned(),
+        grant_owner: owner.to_owned(),
+        grant_amount,
+        policy_id: required(cap, "policy_id")?.to_owned(),
+        policy_version: required(cap, "policy_version")?.to_owned(),
+        cap_amount: required(cap, "cap")?.to_owned(),
+        cap_currency: required(cap, "currency")?.to_owned(),
+        valid_through_ns: required(cap, "valid_through_ns")?.to_owned(),
+        cash_subtotal: required(summary, "cash_subtotal")?.to_owned(),
+        foreign_subtotal: required(summary, "foreign_evaluated_subtotal")?.to_owned(),
+        evaluated_total: required(summary, "evaluated_total")?.to_owned(),
+        boundary_source_id: required(boundary, "source_id")?.to_owned(),
+        boundary_source_epoch: required(boundary, "source_epoch")?.to_owned(),
+        boundary_input_sha256: required(boundary, "obligation_input_sha256")?.to_owned(),
+        responsibility_refs,
+        foreign_obligations,
+        active_quotes: active_quotes_by_chain.into_values().collect(),
+        retired_quotes: retired_quotes.into_iter().map(|(_, _, q)| q).collect(),
+    })
 }
 
 fn verify_grant_member(image: &Value, grant_id: &str, owner: &str) -> Result<(), String> {

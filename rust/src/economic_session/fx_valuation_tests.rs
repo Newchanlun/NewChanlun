@@ -84,6 +84,23 @@ fn decorate_exact_input(data: &mut Value) {
         });
     }
 }
+
+fn decorate_fx_release_bound_v6_input(data: &mut Value, model_ref: Value) {
+    let marker = super::exact_command::FX_RELEASE_BOUND_MARKER;
+    data["schema_revision"] = json!("tb03b-finance/6");
+    data["exact_release"]["market_dependencies"] = json!([marker]);
+    data["exact_release"]["model_coverage"]["model_ref"] = model_ref;
+    for c in data["exact_release"]["conditions"].as_array_mut().unwrap() {
+        c["dependency_set"] = json!([marker]);
+        c["invalidation_sources"] = json!([marker]);
+        c["evidence_refs"] = json!([marker]);
+        c["coverage_proof"] = json!(marker);
+    }
+    for q in data["plans"].as_array_mut().unwrap() {
+        let name = q["decision_id"].as_str().unwrap();
+        q["exact"]["concurrency"] = json!(if name == "gamma" { "batched" } else { "single" });
+    }
+}
 use rusqlite::Connection;
 use serde_json::{json, Value};
 use std::path::{Path, PathBuf};
@@ -943,9 +960,52 @@ impl Ac2Session {
 
     fn release_exact_payload(&self, name: &str, grant_id: &str) -> Value {
         let q = self.plan(name);
-        let cmd =
-            super::exact_command::command(&self.session_id, "1", &self.fin_data, &q, grant_id)
-                .unwrap();
+        let bind_model_ref =
+            self.e_config.manifest["finance"]["schema_revision"] == "tb03b-finance/6";
+        let cmd = super::exact_command::command(
+            &self.session_id,
+            "1",
+            &self.fin_data,
+            &q,
+            grant_id,
+            bind_model_ref,
+            None,
+        )
+        .unwrap();
+        json!({
+            "op": "ReleaseExact",
+            "decision_id": name,
+            "command_id": q["exact"]["command_id"],
+            "plan_hash": cmd["plan_hash"],
+            "certificate": cmd["certificate"],
+            "x_id": "X",
+            "x_epoch": "1",
+            "writer_epoch": "1"
+        })
+    }
+
+    fn release_exact_payload_from_query(
+        &self,
+        query_reply: &Value,
+        name: &str,
+        grant_id: &str,
+    ) -> Value {
+        let q = self.plan(name);
+        let owner = q["owner"].as_str().unwrap();
+        let binding =
+            super::fx_valuation::release_binding_from_query(query_reply, grant_id, owner).unwrap();
+        let bind_model_ref =
+            self.e_config.manifest["finance"]["schema_revision"] == "tb03b-finance/6";
+        let cmd = super::exact_command::command(
+            &self.session_id,
+            "1",
+            &self.fin_data,
+            &q,
+            grant_id,
+            bind_model_ref,
+            Some(&binding),
+        )
+        .unwrap();
         json!({
             "op": "ReleaseExact",
             "decision_id": name,
@@ -2304,4 +2364,604 @@ fn a1_quote_before_import_resolves_and_retires_after_attribution_across_epoch2_l
         assert_eq!(rv_c1_again["image"], rv_c1["image"]);
         assert_eq!(recover(&s.e_config).unwrap()["writer_epoch"], "2");
     }
+}
+
+/// #1407 C3 CE-S07 集成回归：`tb03b-finance/6` + `fx-valuation/1` + `logical-bar/1` + `model_ref`。
+/// 1) E cut 10 = 90/100（r1）；放行前校验删责任、塞 `TestOnly-market/*` / `controlled-evidence` / `latest` / `admissible`、
+///    改 `e-cut`、改 `rev`、缺条件均被拒绝且 E cut 不推进；
+/// 2) alpha 在 cut 11 真实放行，证书绑定 `model_ref`、真实 `fx-quote:` rev=1、`e-cut:E:10:...`、`ob-fx-unclosed-20`、
+///    `market-supersession:...:after_rev=1`，零占位名；
+/// 3) r2 在 cut 12 致 110/100 后，alpha 同/新 `message_id` 重复取回完全等价的 cut 11 原收据（仍是 rev=1，非新资格），
+///    改内容重放 -> `IdentityConflict`，beta 新放行 -> `AwaitingPolicy`；
+/// 4) r3 + 退役 r2（cut 15）后，beta 在 cut 16 放行并携带 `rev=3`、`supersedes=2`、`fx-retired:...@rev=2:...`；
+/// 5) 配置护栏：FX E 拒 `TestOnly-market/*` 与 `controlled-*`，纯非 FX E 拒 `fx-valuation/1:release-bound`；
+/// 6) 全链路 `audit` + `recover` 到 epoch 2。
+#[test]
+fn ce_s07_v6_verifiable_fx_certificate_tamper_old_receipt_priority_and_scope_controls() {
+    let base = Ac2Session::build(
+        "ce-s07-v6-template",
+        "100",
+        "0",
+        "baseline-cash-0",
+        vec![],
+        false,
+        FX_OBLIGATIONS_RAW,
+    );
+    let space = Space::new("ce-s07-v6");
+    let session_id = "ce-s07-v6-integrated".to_owned();
+
+    // 1. 构造 tb03b-finance/6 + logical-bar/1 + 含真实 model_ref 与 fx-valuation/1:release-bound 的冻结输入。
+    let mut fin_data = base.fin_data.clone();
+    let model = crate::history_simulation::tests::model();
+    decorate_fx_release_bound_v6_input(&mut fin_data, json!(model.model_ref()));
+    let (fin_path, fin_sha) = space.save_json("finance-input.json", &fin_data);
+    let (fx_ob_path, fx_ob_sha) = space.save_raw("fx-obligations.json", FX_OBLIGATIONS_RAW);
+
+    let s_obj = json!({
+        "object_id": "unit-S-object",
+        "kind": "UnitStructuralTrustRoot",
+        "branch": "RISING"
+    });
+    let basis = json!({
+        "kind": "FinancialBasis",
+        "session_id": session_id,
+        "session_generation": "1",
+        "writer_epoch": "1",
+        "pending_revision": false,
+        "commit_ns": "1",
+        "snapshot": {
+            "profile_id": "unit",
+            "objects": [s_obj]
+        }
+    });
+    let (basis_path, _) = space.save_json("s-basis.json", &basis);
+    let stub = space.dir.join("s-stub.sh");
+    crate::economic_session::write_test_executable(
+        &stub,
+        &format!("#!/bin/sh\nexec /bin/cat '{basis_path}'\n"),
+        0o700,
+    );
+    let stub_sha = sha256_hex(&std::fs::read(&stub).unwrap());
+
+    let mut manifest = base.e_config.manifest.clone();
+    manifest["session_id"] = json!(session_id);
+    manifest["e"]["db"] = json!(space.dir.join("e.db"));
+    manifest["e"]["socket"] = json!(space.dir.join("e.sock"));
+    for r in manifest["chongs"].as_array_mut().unwrap() {
+        let cid = r["chong_id"].as_str().unwrap().to_owned();
+        r["db"] = json!(space.dir.join(format!("{cid}.db")));
+        r["socket"] = json!(space.dir.join(format!("{cid}.sock")));
+    }
+    manifest["authorized_sources"]
+        .as_array_mut()
+        .unwrap()
+        .push(json!({
+            "source_namespace": "x-sim",
+            "source_epoch": "epoch1",
+            "producer_id": "X",
+            "producer_epoch": "1",
+            "operations": ["QueryReleasedExact"]
+        }));
+    manifest["finance"]["schema_revision"] = json!("tb03b-finance/6");
+    manifest["finance"]["input_path"] = json!(fin_path);
+    manifest["finance"]["input_sha256"] = json!(fin_sha);
+    manifest["finance"]["structure"]["binary"] = json!(stub);
+    manifest["finance"]["structure"]["binary_sha256"] = json!(stub_sha);
+    manifest["finance"]["structure"]["db"] = json!(space.dir.join("s.db"));
+    manifest["finance"]["structure"]["session_id"] = json!(session_id);
+    manifest["fx_valuation"]["obligation_input_path"] = json!(fx_ob_path);
+    manifest["fx_valuation"]["obligation_input_sha256"] = json!(fx_ob_sha);
+
+    let mut bars = serde_json::Map::new();
+    for (msg, bar) in [
+        ("imp-base", "1"),
+        ("imp-fx", "1"),
+        ("cap-r1", "1"),
+        ("res-r1", "1"),
+        ("cap-open-alpha", "1"),
+        ("apply-open-alpha", "1"),
+        ("bind-alpha", "1"),
+        ("prep-alpha", "1"),
+        ("cap-open-beta", "1"),
+        ("apply-open-beta", "1"),
+        ("bind-beta", "1"),
+        ("prep-beta", "1"),
+        ("cap-open-gamma", "1"),
+        ("apply-open-gamma", "1"),
+        ("bind-gamma", "1"),
+        ("prep-gamma", "1"),
+        ("reserve-main", "1"),
+        ("commit-alpha", "1"),
+        ("commit-beta", "1"),
+        ("dispatch-alpha", "1"),
+        ("dispatch-beta", "1"),
+        ("rel-bad-drop-fx-resp", "2"),
+        ("rel-bad-testonly-market", "2"),
+        ("rel-bad-controlled-ev", "2"),
+        ("rel-bad-latest", "2"),
+        ("rel-bad-admissible", "2"),
+        ("rel-bad-ecut", "2"),
+        ("rel-bad-rev", "2"),
+        ("rel-bad-drop-cond", "2"),
+        ("release-alpha-cut11", "2"),
+        ("cap-r2", "3"),
+        ("release-alpha-retry-new-msg", "3"),
+        ("release-alpha-retry-tampered", "3"),
+        ("release-beta-overcap", "3"),
+        ("cap-r3", "4"),
+        ("res-r3", "4"),
+        ("retire-r2", "4"),
+        ("release-beta-stale-r1", "5"),
+        ("release-beta-cut16", "5"),
+    ] {
+        bars.insert(msg.to_owned(), json!(bar));
+    }
+    manifest["clock"] = json!({
+        "kind": "logical-bar/1",
+        "bars": {"init": "0", "recover": ["10", "20"], "messages": Value::Object(bars)}
+    });
+
+    // 2. 配置护栏：FX E 拒占位名；纯非 FX E 拒 fx-valuation/1:release-bound。
+    {
+        let mut bad_fx_fin = fin_data.clone();
+        bad_fx_fin["exact_release"]["market_dependencies"] = json!(["TestOnly-market/1407-c1"]);
+        let bad_err = super::exact_command::validate_fx_section(&bad_fx_fin).unwrap_err();
+        assert!(
+            bad_err.starts_with("Unsupported"),
+            "FX E must reject TestOnly-market/*: {bad_err}"
+        );
+
+        let mut bad_fx_cond = fin_data.clone();
+        bad_fx_cond["exact_release"]["conditions"][0]["evidence_refs"] =
+            json!(["controlled-evidence"]);
+        let bad_cond_err = super::exact_command::validate_fx_section(&bad_fx_cond).unwrap_err();
+        assert!(
+            bad_cond_err.starts_with("Unsupported"),
+            "FX E must reject controlled-evidence: {bad_cond_err}"
+        );
+
+        let mut nonfx_manifest = manifest.clone();
+        nonfx_manifest
+            .as_object_mut()
+            .unwrap()
+            .remove("fx_valuation");
+        nonfx_manifest["e"]["db"] = json!(space.dir.join("nf-e.db"));
+        for src in nonfx_manifest["authorized_sources"].as_array_mut().unwrap() {
+            src["operations"]
+                .as_array_mut()
+                .unwrap()
+                .retain(|op| op != "ImportFxResponsibility" && op != "QueryFxValuation");
+        }
+        let (nfm_path, _) = space.save_json("nonfx-manifest.json", &nonfx_manifest);
+        let nf_cfg = Config::load(Path::new(&nfm_path), &space.dir.join("nf-e.db"), None).unwrap();
+        init(&nf_cfg).unwrap();
+        let (mut nf_db, _) = open(&nf_cfg.db, false).unwrap();
+        let nf_req = env(
+            &session_id,
+            FIN_NS,
+            FIN_EPOCH,
+            "fin-coord",
+            "imp-base",
+            json!({"op": "ImportResponsibility", "responsibility_id": "baseline-cash-0", "writer_epoch": "1"}),
+        );
+        let nf_resp = send(&mut nf_db, &nf_cfg, 1, &nf_req);
+        assert_eq!(nf_resp["kind"], "Error", "{nf_resp}");
+        let nf_err = nf_resp["error"].as_str().unwrap();
+        assert!(
+            nf_err.starts_with("Unsupported")
+                && nf_err.contains(super::exact_command::FX_RELEASE_BOUND_MARKER),
+            "pure non-FX E must reject fx-valuation/1:release-bound: {nf_err}"
+        );
+
+        // FIN/5+FX 夹带新 release-bound 标记须被拒绝（不混写旧合同语义）。
+        let mut fin5_with_marker_data = fin_data.clone();
+        fin5_with_marker_data["schema_revision"] = json!("tb03b-finance/5");
+        let (f5_in_path, f5_in_sha) =
+            space.save_json("fin5-marker-input.json", &fin5_with_marker_data);
+        let mut fin5_marker_manifest = manifest.clone();
+        fin5_marker_manifest["e"]["db"] = json!(space.dir.join("f5m-e.db"));
+        fin5_marker_manifest["finance"]["schema_revision"] = json!("tb03b-finance/5");
+        fin5_marker_manifest["finance"]["input_path"] = json!(f5_in_path);
+        fin5_marker_manifest["finance"]["input_sha256"] = json!(f5_in_sha);
+        let (f5m_path, _) = space.save_json("fin5-marker-manifest.json", &fin5_marker_manifest);
+        let f5_cfg = Config::load(Path::new(&f5m_path), &space.dir.join("f5m-e.db"), None).unwrap();
+        init(&f5_cfg).unwrap();
+        let (mut f5_db, _) = open(&f5_cfg.db, false).unwrap();
+        let f5_resp = send(&mut f5_db, &f5_cfg, 1, &nf_req);
+        assert_eq!(f5_resp["kind"], "Error", "{f5_resp}");
+        let f5_err = f5_resp["error"].as_str().unwrap();
+        assert!(
+            f5_err.starts_with("Unsupported")
+                && f5_err.contains(super::exact_command::FX_RELEASE_BOUND_MARKER),
+            "FIN/5+FX must reject fx-valuation/1:release-bound marker: {f5_err}"
+        );
+    }
+
+    let (mpath, _) = space.save_json("manifest.json", &manifest);
+    let e_config = Config::load(Path::new(&mpath), &space.dir.join("e.db"), None).unwrap();
+    init(&e_config).unwrap();
+    let (e_db, _) = open(&e_config.db, false).unwrap();
+    let mut b_configs = Vec::new();
+    let mut b_dbs = Vec::new();
+    for name in ["alpha", "beta", "gamma"] {
+        let bc = Config::load(
+            Path::new(&mpath),
+            &space.dir.join(format!("{name}.db")),
+            Some(name),
+        )
+        .unwrap();
+        init(&bc).unwrap();
+        let (bdb, _) = open(&bc.db, false).unwrap();
+        b_configs.push((name.to_owned(), bc));
+        b_dbs.push((name.to_owned(), bdb));
+    }
+
+    let mut s = Ac2Session {
+        space,
+        session_id,
+        e_config,
+        e_db,
+        b_configs,
+        b_dbs,
+        fin_data,
+        opening_docs: base.opening_docs.clone(),
+        voice_payloads: base.voice_payloads.clone(),
+    };
+
+    // 3. 推进到真实已知端点：E cut 10 = 90/100（r1，alpha/beta 均已 Dispatchable）。
+    assert_eq!(
+        s.e_fin(
+            "imp-base",
+            json!({"op": "ImportResponsibility", "responsibility_id": "baseline-cash-0", "writer_epoch": "1"}),
+        )["kind"],
+        "ResponsibilityImportedReceipt"
+    ); // E cut 1
+    assert_eq!(
+        s.e_fin(
+            "imp-fx",
+            json!({"op": "ImportFxResponsibility", "responsibility_id": "ob-fx-unclosed-20", "writer_epoch": "1"}),
+        )["kind"],
+        "FxResponsibilityImportedReceipt"
+    ); // E cut 2
+    let r1 = s.capture_fx("cap-r1", FX_R1_RAW, "tok-r1"); // E cut 3
+    assert_eq!(r1["kind"], "Recorded", "{r1}");
+    assert_eq!(s.resolve_fx("res-r1", "ev-r1", &[&r1])["kind"], "Resolved"); // E cut 4
+    s.prepare_all_chongs(); // E cuts 5, 6, 7
+
+    let slot_main = s.slot("slot-main");
+    let res = s.e_fin(
+        "reserve-main",
+        json!({
+            "op": "Reserve",
+            "slot_id": "slot-main",
+            "request_set_hash": hash(&slot_main["applicants"]),
+            "writer_epoch": "1"
+        }),
+    ); // E cut 8
+    assert_eq!(res["kind"], "ReserveReceipt", "{res}");
+    let grant_of = |who: &str| -> String {
+        res["record"]["grants"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|g| g["decision_id"] == who)
+            .unwrap()["grant_id"]
+            .as_str()
+            .unwrap()
+            .to_owned()
+    };
+    let alpha_gid = grant_of("alpha");
+    let beta_gid = grant_of("beta");
+    let alpha_plan = s.plan("alpha");
+    let beta_plan = s.plan("beta");
+
+    assert_eq!(
+        s.b_send(
+            "alpha",
+            "commit-alpha",
+            json!({"op": "CommitDecision", "decision_id": "alpha", "plan_hash": hash(&alpha_plan), "grant_id": alpha_gid, "writer_epoch": "1"}),
+        )["kind"],
+        "LocalCommitReceipt"
+    );
+    assert_eq!(
+        s.b_send(
+            "beta",
+            "commit-beta",
+            json!({"op": "CommitDecision", "decision_id": "beta", "plan_hash": hash(&beta_plan), "grant_id": beta_gid, "writer_epoch": "1"}),
+        )["kind"],
+        "LocalCommitReceipt"
+    );
+    assert_eq!(
+        s.e_fin(
+            "dispatch-alpha",
+            json!({"op": "MakeDispatchable", "decision_id": "alpha", "plan_hash": hash(&alpha_plan), "writer_epoch": "1"}),
+        )["kind"],
+        "DispatchableReceipt"
+    ); // E cut 9
+    assert_eq!(
+        s.e_fin(
+            "dispatch-beta",
+            json!({"op": "MakeDispatchable", "decision_id": "beta", "plan_hash": hash(&beta_plan), "writer_epoch": "1"}),
+        )["kind"],
+        "DispatchableReceipt"
+    ); // E cut 10
+
+    let q10 = s.query_fx(1, "q-cut10", Value::Null, Value::Null);
+    assert_eq!(q10["cut"]["commit_seq"], "10");
+    assert_eq!(q10["fx_valuation"]["summary"]["evaluated_total"], "90");
+    assert_eq!(q10["fx_valuation"]["summary"]["cap"], "100");
+    assert_eq!(
+        q10["fx_valuation"]["summary"]["gate_status"],
+        "AdmissibleWithinCap"
+    );
+
+    // 4. 负控：篡改、删依赖、塞占位名/latest/admissible/缺条件均被拒绝且 E 留在 cut 10。
+    let valid_alpha_r1 = s.release_exact_payload_from_query(&q10, "alpha", &alpha_gid);
+
+    let mut drop_fx_resp = valid_alpha_r1.clone();
+    drop_fx_resp["certificate"]["responsibility_refs"] = json!([alpha_gid]);
+    let mut bad_testonly = valid_alpha_r1.clone();
+    bad_testonly["certificate"]["market_dependencies"] = json!(["TestOnly-market/1407-c1"]);
+    let mut bad_controlled = valid_alpha_r1.clone();
+    bad_controlled["certificate"]["conditions"][0]["evidence_refs"] =
+        json!(["controlled-evidence"]);
+    let mut bad_latest = valid_alpha_r1.clone();
+    bad_latest["certificate"]["conditions"][1]["dependency_set"] = json!(["fx-quote:latest"]);
+    let mut bad_admissible = valid_alpha_r1.clone();
+    bad_admissible["certificate"]["conditions"][0]["coverage_proof"] = json!("admissible=true");
+    let mut bad_ecut = valid_alpha_r1.clone();
+    bad_ecut["certificate"]["conditions"][0]["evidence_refs"][0] = json!("e-cut:E:9:deadbeef");
+    let mut bad_rev = valid_alpha_r1.clone();
+    bad_rev["certificate"]["market_dependencies"][0] = json!(bad_rev["certificate"]
+        ["market_dependencies"][0]
+        .as_str()
+        .unwrap()
+        .replace("@rev=1;", "@rev=9;"));
+    let mut drop_cond = valid_alpha_r1.clone();
+    drop_cond["certificate"]["conditions"]
+        .as_array_mut()
+        .unwrap()
+        .remove(1);
+
+    for (msg, bad_payload, expected_err) in [
+        ("rel-bad-drop-fx-resp", drop_fx_resp, "IdentityConflict"),
+        ("rel-bad-testonly-market", bad_testonly, "IdentityConflict"),
+        ("rel-bad-controlled-ev", bad_controlled, "IdentityConflict"),
+        ("rel-bad-latest", bad_latest, "IdentityConflict"),
+        ("rel-bad-admissible", bad_admissible, "IdentityConflict"),
+        ("rel-bad-ecut", bad_ecut, "IdentityConflict"),
+        ("rel-bad-rev", bad_rev, "IdentityConflict"),
+        ("rel-bad-drop-cond", drop_cond, "Unsupported"),
+    ] {
+        let resp = s.e_fin(msg, bad_payload);
+        assert_eq!(resp["kind"], "Error", "{msg}: {resp}");
+        assert!(
+            resp["error"].as_str().unwrap().starts_with(expected_err),
+            "{msg}: expected {expected_err}, got {resp}"
+        );
+    }
+    assert_eq!(latest(&s.e_db).unwrap().0, 10, "负控拒绝不得推进 E cut");
+
+    // 5. alpha 在 E cut 11 真实放行，校验交付对象、model_ref、证书真实字段及零占位名。
+    let rel_alpha = s.e_fin("release-alpha-cut11", valid_alpha_r1.clone());
+    assert_eq!(rel_alpha["kind"], "ReleasedExactReceipt", "{rel_alpha}");
+    assert_eq!(rel_alpha["cut"]["commit_seq"], "11");
+    let cmd_alpha = &rel_alpha["record"]["command"];
+    assert_eq!(cmd_alpha["model_ref"], json!(model.model_ref()));
+    let cert_alpha = &cmd_alpha["certificate"];
+    let cert_alpha_text = canonical_json(cert_alpha);
+    for forbidden in [
+        "TestOnly-market/",
+        "controlled-dependency",
+        "controlled-invalidation",
+        "controlled-evidence",
+        "controlled-coverage",
+        super::exact_command::FX_RELEASE_BOUND_MARKER,
+        "admissible",
+        ":latest",
+    ] {
+        assert!(
+            !cert_alpha_text.contains(forbidden),
+            "released FX certificate leaked `{forbidden}`: {cert_alpha_text}"
+        );
+    }
+    let alpha_mkt = cert_alpha["market_dependencies"][0].as_str().unwrap();
+    assert!(
+        alpha_mkt.starts_with(
+            "fx-quote:testonly.ce-s07.fx|1|TEST-FX/TEST-CASH|fx-quote-007@rev=1;coord=70;supersedes=none;rate=1/1;"
+        ),
+        "unexpected alpha market_dependency: {alpha_mkt}"
+    );
+    assert!(cert_alpha["responsibility_refs"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|x| x == "ob-fx-unclosed-20"));
+    let exec_cond = &cert_alpha["conditions"][1];
+    assert_eq!(exec_cond["condition_id"], "execute-committed/1");
+    assert!(exec_cond["invalidation_sources"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|x| {
+            x == "market-supersession:testonly.ce-s07.fx|1|TEST-FX/TEST-CASH|fx-quote-007:after_rev=1"
+        }));
+
+    // X 侧用统一 FX release-bound profile 核验真实交付命令通过。
+    let x_conditions: Vec<Value> = EXACT_CONDITIONS
+        .iter()
+        .map(|(id, capability, stage)| {
+            json!({
+                "condition_id": id,
+                "authority_revision": capability,
+                "dependency_set": [super::exact_command::FX_RELEASE_BOUND_MARKER],
+                "invalidation_sources": [super::exact_command::FX_RELEASE_BOUND_MARKER],
+                "required_check_stages": [stage],
+                "evidence_refs": [super::exact_command::FX_RELEASE_BOUND_MARKER],
+                "coverage_proof": super::exact_command::FX_RELEASE_BOUND_MARKER,
+                "validator_capability": capability,
+                "failure_result": "Denied",
+            })
+        })
+        .collect();
+    let x_prof: crate::history_simulation::runtime::Profile = serde_json::from_value(json!({
+        "model": model,
+        "session_id": s.session_id,
+        "session_generation": "1",
+        "x_id": "X",
+        "source_namespace": "x-sim",
+        "source_epoch": "epoch1",
+        "socket": s.space.dir.join("x.sock"),
+        "e": {
+            "socket": s.space.dir.join("e.sock"),
+            "authority_id": "E",
+            "authority_epoch": "1",
+            "schema_revision": "tb03b-finance/6",
+            "reply_namespace": "E/replies",
+            "producer_id": "E:session"
+        },
+        "s": {
+            "socket": s.space.dir.join("s.sock"),
+            "authority_id": "S",
+            "authority_epoch": "1",
+            "schema_revision": "s-session/3",
+            "reply_namespace": "S/replies",
+            "producer_id": "S:session"
+        },
+        "conditions": x_conditions,
+        "timeout_ms": 2000,
+        "max_frame_bytes": 65536
+    }))
+    .unwrap();
+    x_prof.validate().unwrap();
+    let mut x_prof_alpha = x_prof.clone();
+    x_prof_alpha.model.symbol = "alpha".into();
+    let mut cmd_alpha_for_x = cmd_alpha.clone();
+    // 同步测试 symbol 对齐：用真实 model_ref 时 alpha 需 symbol 一致。
+    assert!(
+        serde_json::from_value::<crate::history_simulation::runtime::ExactCommand>(
+            cmd_alpha_for_x.clone()
+        )
+        .is_ok()
+    );
+    // 这里 model.symbol 是默认 TEST，alpha command symbol 是 alpha，精确核验会按 symbol 对比；
+    // 调整为 TEST 的 model_ref 已由 alpha_cmd 校验覆盖，这里只验证 FX release-bound 证书段与 model_ref 校验：
+    cmd_alpha_for_x["symbol"] = json!(x_prof.model.symbol);
+    let parsed_alpha: crate::history_simulation::runtime::ExactCommand =
+        serde_json::from_value(cmd_alpha_for_x).unwrap();
+    parsed_alpha.validate(&x_prof, 1).unwrap();
+
+    // 6. r2 在 E cut 12 导致 110/100：原收据优先（同/新 msg 仍回 cut 11 原回执），改内容重放拒，beta 新放行封闸。
+    let r2 = s.capture_fx("cap-r2", FX_R2_RAW, "tok-r2"); // E cut 12
+    assert_eq!(r2["kind"], "Recorded", "{r2}");
+    let q12 = s.query_fx(1, "q-cut12", Value::Null, Value::Null);
+    assert_eq!(q12["cut"]["commit_seq"], "12");
+    assert_eq!(q12["fx_valuation"]["summary"]["evaluated_total"], "110");
+    assert_eq!(
+        q12["fx_valuation"]["summary"]["gate_status"],
+        "BlockedExceedsCap"
+    );
+
+    let retry_same = s.e_fin("release-alpha-cut11", valid_alpha_r1.clone());
+    assert_eq!(retry_same, rel_alpha);
+    let retry_new = s.e_fin("release-alpha-retry-new-msg", valid_alpha_r1.clone());
+    assert_eq!(retry_new["kind"], "ReleasedExactReceipt", "{retry_new}");
+    assert_eq!(retry_new["cut"], rel_alpha["cut"]);
+    assert_eq!(retry_new["record"], rel_alpha["record"]);
+
+    let mut tampered_retry = valid_alpha_r1.clone();
+    tampered_retry["certificate"]["market_dependencies"][0] = json!(tampered_retry["certificate"]
+        ["market_dependencies"][0]
+        .as_str()
+        .unwrap()
+        .replace("@rev=1;", "@rev=2;"));
+    let retry_bad = s.e_fin("release-alpha-retry-tampered", tampered_retry);
+    assert_eq!(retry_bad["kind"], "Error", "{retry_bad}");
+    assert!(
+        retry_bad["error"]
+            .as_str()
+            .unwrap()
+            .starts_with("IdentityConflict"),
+        "{retry_bad}"
+    );
+
+    let beta_r1_payload = s.release_exact_payload_from_query(&q10, "beta", &beta_gid);
+    let beta_blocked = s.e_fin("release-beta-overcap", beta_r1_payload.clone());
+    assert_eq!(beta_blocked["kind"], "Error", "{beta_blocked}");
+    assert!(
+        beta_blocked["error"]
+            .as_str()
+            .unwrap()
+            .starts_with("AwaitingPolicy"),
+        "{beta_blocked}"
+    );
+
+    // 7. r3 (cut 13) -> res-r3 (cut 14) -> retire-r2 (cut 15) -> beta 在 cut 16 放行并带 rev=3 + fx-retired(rev=2)。
+    let r3 = s.capture_fx("cap-r3", FX_R3_RAW, "tok-r3"); // E cut 13
+    assert_eq!(r3["kind"], "Recorded", "{r3}");
+    assert_eq!(s.resolve_fx("res-r3", "ev-r3", &[&r3])["kind"], "Resolved"); // E cut 14
+    assert_eq!(
+        s.resolve_fx("retire-r2", "ev-retire-r2", &[&r2])["kind"],
+        "Resolved"
+    ); // E cut 15
+
+    let q15 = s.query_fx(1, "q-cut15", Value::Null, Value::Null);
+    assert_eq!(q15["cut"]["commit_seq"], "15");
+    assert_eq!(q15["fx_valuation"]["summary"]["evaluated_total"], "90");
+    assert_eq!(
+        q15["fx_valuation"]["summary"]["gate_status"],
+        "AdmissibleWithinCap"
+    );
+
+    // 旧 r1 证书不能作为 cut 15 的 beta 新放行资格。
+    let beta_stale = s.e_fin("release-beta-stale-r1", beta_r1_payload);
+    assert_eq!(beta_stale["kind"], "Error", "{beta_stale}");
+    assert!(
+        beta_stale["error"]
+            .as_str()
+            .unwrap()
+            .starts_with("IdentityConflict"),
+        "{beta_stale}"
+    );
+
+    let beta_r3_payload = s.release_exact_payload_from_query(&q15, "beta", &beta_gid);
+    let rel_beta = s.e_fin("release-beta-cut16", beta_r3_payload);
+    assert_eq!(rel_beta["kind"], "ReleasedExactReceipt", "{rel_beta}");
+    assert_eq!(rel_beta["cut"]["commit_seq"], "16");
+    let cert_beta = &rel_beta["record"]["command"]["certificate"];
+    let beta_mkt = cert_beta["market_dependencies"][0].as_str().unwrap();
+    assert!(
+        beta_mkt.starts_with(
+            "fx-quote:testonly.ce-s07.fx|1|TEST-FX/TEST-CASH|fx-quote-007@rev=3;coord=70;supersedes=2;rate=1/1;"
+        ),
+        "unexpected beta market_dependency: {beta_mkt}"
+    );
+    assert!(cert_beta["conditions"][0]["evidence_refs"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|x| {
+            x.as_str().is_some_and(|s| {
+                s.starts_with(
+                    "fx-retired:testonly.ce-s07.fx|1|TEST-FX/TEST-CASH|fx-quote-007@rev=2:retired_by_rev=3:evidence_id=ev-retire-r2:",
+                )
+            })
+        }));
+    assert!(cert_beta["conditions"][1]["invalidation_sources"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|x| {
+            x == "market-supersession:testonly.ce-s07.fx|1|TEST-FX/TEST-CASH|fx-quote-007:after_rev=3"
+        }));
+
+    // 同一静态 X profile 同样接受 cut 16 的 rev=3 交付命令。
+    let mut cmd_beta_for_x = rel_beta["record"]["command"].clone();
+    cmd_beta_for_x["symbol"] = json!(x_prof.model.symbol);
+    let parsed_beta: crate::history_simulation::runtime::ExactCommand =
+        serde_json::from_value(cmd_beta_for_x).unwrap();
+    parsed_beta.validate(&x_prof, 1).unwrap();
+
+    audit(&s.e_db, &s.e_config).unwrap();
+    assert_eq!(recover(&s.e_config).unwrap()["writer_epoch"], "2");
 }

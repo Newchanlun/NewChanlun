@@ -9,7 +9,10 @@ mod content_store;
 mod domain_event;
 mod evidence;
 mod exact_command;
-pub(crate) use exact_command::{check_condition_semantics, check_required_capabilities};
+pub(crate) use exact_command::{
+    check_condition_semantics, check_required_capabilities, is_fx_placeholder_text,
+    FX_RELEASE_BOUND_MARKER,
+};
 mod finance;
 mod finance_transport;
 mod financial_reader_resources;

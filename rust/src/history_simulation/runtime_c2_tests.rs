@@ -1547,3 +1547,161 @@ fn late_v1_archive_audits_common_12_6_invariants_without_retroactive_gates() {
         assert_eq!(ok["condition_audit_unproven"], json!([]));
     }
 }
+
+/// #1407 C3 CE-S07：X 侧 FX release-bound profile 与真实交付证书核验回归。
+/// 1) 4 项条件统一声明 `fx-valuation/1:release-bound` 的 X profile 合法；混用半模板/半静态被拒；
+/// 2) 同一静态 X profile 同时接受 rev=1 与 rev=3 的真实 FX 绑定交付命令；
+/// 3) 交付命令若残留未实例化模板 `fx-valuation/1:release-bound`、或带 `TestOnly-market/*` / `controlled-evidence` /
+///    `latest` / `admissible` / 缺 `e-cut:E:` / 缺 `fx-quote:` 前缀，均被 X 拒绝；
+/// 4) 纯非 FX 静态 profile 仍执行 `c.conditions == p.conditions` 严格相等。
+#[test]
+fn fx_release_bound_profile_accepts_verified_fx_commands_and_rejects_placeholders_or_templates() {
+    let marker = crate::economic_session::FX_RELEASE_BOUND_MARKER;
+    let d = dir("ce-s07-fx-bound-x");
+    let fx_cond = |id: &str, cap: &str, stage: &str| {
+        json!({
+            "condition_id": id,
+            "authority_revision": cap,
+            "dependency_set": [marker],
+            "invalidation_sources": [marker],
+            "required_check_stages": [stage],
+            "evidence_refs": [marker],
+            "coverage_proof": marker,
+            "validator_capability": cap,
+            "failure_result": "Denied"
+        })
+    };
+    let fx_profile_conditions = json!([
+        fx_cond("released-exact/1", "released-exact/1", "E.ReleaseExact"),
+        fx_cond(
+            "execute-committed/1",
+            "execute-committed/1",
+            "S.RequestConditionalExecution"
+        ),
+        fx_cond(
+            "simulation-local-transaction/1",
+            "simulation-local-transaction/1",
+            "X.OwnAttemptAndCall"
+        ),
+        fx_cond("model_coverage", "model-coverage/1", "E.ReleaseExact"),
+    ]);
+    let p_fx: Profile = parse(profile(&d, fx_profile_conditions.clone()));
+    p_fx.validate().unwrap();
+
+    // 混用半模板/半静态 profile 必须拒绝。
+    let mut mixed_conds = fx_profile_conditions.clone();
+    mixed_conds[0]["coverage_proof"] = json!("c");
+    let mixed_err = parse::<Profile>(profile(&d, mixed_conds))
+        .validate()
+        .unwrap_err();
+    assert!(
+        mixed_err.starts_with("Unsupported"),
+        "expected Unsupported for mixed FX marker profile, got {mixed_err}"
+    );
+
+    let make_fx_cmd = |rev: &str, e_seq: &str| {
+        let chain = "testonly.ce-s07.fx|1|TEST-FX/TEST-CASH|fx-quote-007";
+        let mkt = format!(
+            "fx-quote:{chain}@rev={rev};coord=70;supersedes=none;rate=1/1;raw_sha256=abc;fact_key=fk-{rev}"
+        );
+        let ecut = format!("e-cut:E:{e_seq}:root-{e_seq}");
+        let cond = |id: &str, cap: &str, stage: &str| {
+            json!({
+                "condition_id": id,
+                "authority_revision": cap,
+                "dependency_set": [mkt, "cap-policy:TestOnly-ac2-cap-100@v1:cap=100:currency=TEST-CASH"],
+                "invalidation_sources": [format!("market-supersession:{chain}:after_rev={rev}")],
+                "required_check_stages": [stage],
+                "evidence_refs": [ecut, format!("market-raw:{chain}@rev={rev}:sha256=abc")],
+                "coverage_proof": format!("fx-valuation/1:{id}:e-cut={e_seq}:total=90/100"),
+                "validator_capability": cap,
+                "failure_result": "Denied"
+            })
+        };
+        let conds = json!([
+            cond("released-exact/1", "released-exact/1", "E.ReleaseExact"),
+            cond(
+                "execute-committed/1",
+                "execute-committed/1",
+                "S.RequestConditionalExecution"
+            ),
+            cond(
+                "simulation-local-transaction/1",
+                "simulation-local-transaction/1",
+                "X.OwnAttemptAndCall"
+            ),
+            cond("model_coverage", "model-coverage/1", "E.ReleaseExact"),
+        ]);
+        let mut cmd = command(conds);
+        cmd["certificate"]["market_dependencies"] = json!([mkt]);
+        cmd["certificate_hash"] = json!(hash(&cmd["certificate"]));
+        cmd
+    };
+
+    // 同一静态 X profile 接受 rev=1 (cut 10) 与 rev=3 (cut 15) 的真实 FX 交付命令。
+    let c_r1: ExactCommand = parse(make_fx_cmd("1", "10"));
+    let c_r3: ExactCommand = parse(make_fx_cmd("3", "15"));
+    c_r1.validate(&p_fx, 1).unwrap();
+    c_r3.validate(&p_fx, 1).unwrap();
+
+    // 负控 1：交付命令残留未实例化模板。
+    let mut uninstantiated = command(fx_profile_conditions);
+    uninstantiated["certificate"]["market_dependencies"] = json!([marker]);
+    uninstantiated["certificate_hash"] = json!(hash(&uninstantiated["certificate"]));
+    let err = parse::<ExactCommand>(uninstantiated)
+        .validate(&p_fx, 1)
+        .unwrap_err();
+    assert!(
+        err.starts_with("Unsupported"),
+        "uninstantiated template must fail: {err}"
+    );
+
+    // 负控 2：TestOnly-market/*、controlled-evidence、latest、admissible、缺 e-cut:E:、缺 fx-quote: 前缀均被拒绝。
+    let mut bad_mkt = make_fx_cmd("1", "10");
+    bad_mkt["certificate"]["market_dependencies"] = json!(["TestOnly-market/1407-c1"]);
+    bad_mkt["certificate_hash"] = json!(hash(&bad_mkt["certificate"]));
+
+    let mut bad_ctrl = make_fx_cmd("1", "10");
+    bad_ctrl["certificate"]["conditions"][0]["evidence_refs"] = json!(["controlled-evidence"]);
+    bad_ctrl["certificate_hash"] = json!(hash(&bad_ctrl["certificate"]));
+
+    let mut bad_latest = make_fx_cmd("1", "10");
+    bad_latest["certificate"]["conditions"][1]["dependency_set"] = json!(["fx-quote:latest"]);
+    bad_latest["certificate_hash"] = json!(hash(&bad_latest["certificate"]));
+
+    let mut bad_adm = make_fx_cmd("1", "10");
+    bad_adm["certificate"]["conditions"][0]["coverage_proof"] = json!("admissible=true");
+    bad_adm["certificate_hash"] = json!(hash(&bad_adm["certificate"]));
+
+    let mut bad_no_ecut = make_fx_cmd("1", "10");
+    bad_no_ecut["certificate"]["conditions"][0]["evidence_refs"] =
+        json!(["market-raw:x@rev=1:sha256=abc"]);
+    bad_no_ecut["certificate_hash"] = json!(hash(&bad_no_ecut["certificate"]));
+
+    let mut bad_mkt_prefix = make_fx_cmd("1", "10");
+    bad_mkt_prefix["certificate"]["market_dependencies"] = json!(["custom-unverified-market"]);
+    bad_mkt_prefix["certificate_hash"] = json!(hash(&bad_mkt_prefix["certificate"]));
+
+    for (label, wire, expected_prefix) in [
+        ("TestOnly-market", bad_mkt, "Unsupported"),
+        ("controlled-evidence", bad_ctrl, "Unsupported"),
+        ("latest", bad_latest, "Unsupported"),
+        ("admissible", bad_adm, "Unsupported"),
+        ("missing-ecut", bad_no_ecut, "MissingDependency"),
+        ("bad-mkt-prefix", bad_mkt_prefix, "Unsupported"),
+    ] {
+        let e = parse::<ExactCommand>(wire).validate(&p_fx, 1).unwrap_err();
+        assert!(
+            e.starts_with(expected_prefix),
+            "{label}: expected {expected_prefix}, got {e}"
+        );
+    }
+
+    // 纯非 FX 静态 profile 仍执行 strict equality（拒绝 FX 动态条件）。
+    let p_static: Profile = parse(profile(&d, approved()));
+    let static_err = c_r1.validate(&p_static, 1).unwrap_err();
+    assert!(
+        static_err.starts_with("Unsupported"),
+        "static non-FX profile must reject FX dynamic conditions: {static_err}"
+    );
+}
