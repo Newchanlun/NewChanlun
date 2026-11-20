@@ -4,8 +4,9 @@ import { randomUUID } from "node:crypto";
 import { lstatSync, readFileSync, realpathSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { join, relative, resolve, sep } from "node:path";
 import { gitEnvironment } from "./git-environment.ts";
+import { at18GitHub } from "./at18-github.ts";
 import {
-  At18BootstrapError, At18DerivationError, deriveJson, generateAt18, observationsSchema,
+  At18BootstrapError, At18DerivationError, decodeObservations, generateAt18,
   readOwnManifest, renderSummary, type At18Source,
 } from "./at18-report.ts";
 
@@ -18,7 +19,14 @@ function run(repo: string, manifestPath: string, observationsPath: string, outpu
   const git = (...args: string[]) => execFileSync("git", ["--no-replace-objects", "-C", root, ...args], {
     stdio: ["ignore", "pipe", "pipe"], env: gitEnvironment(), maxBuffer: 64 * 1024 * 1024,
   });
+  let origin = "";
+  try { origin = git("config", "--get", "remote.origin.url").toString("utf8").trim(); }
+  catch { /* 无配置的离线仓不查询 GitHub。 */ }
   const source: At18Source = {
+    ...at18GitHub(origin, (...args) => JSON.parse(execFileSync("gh", args, {
+      stdio: ["ignore", "pipe", "pipe"], cwd: root, encoding: "utf8", timeout: 20_000,
+      maxBuffer: 8 * 1024 * 1024, env: { ...process.env, GH_HOST: "github.com", GH_PROMPT_DISABLED: "1" },
+    }))),
     readExternal(path) {
       if (inside(path) || realpathSync(path) !== path || !lstatSync(path).isFile()) throw new Error("不是仓外普通文件。");
       return readFileSync(path);
@@ -33,8 +41,8 @@ function run(repo: string, manifestPath: string, observationsPath: string, outpu
   };
 
   const manifest = readOwnManifest(source, manifestPath);
-  let observations;
-  try { observations = deriveJson(readFileSync(observationsPath), observationsSchema); }
+  let decoded;
+  try { decoded = decodeObservations(readFileSync(observationsPath)); }
   catch (error) {
     throw new At18BootstrapError(error instanceof At18DerivationError && error.check_id === "JCS_CANONICALIZE"
       ? "CONTENT_NOT_CANONICAL" : "FIXED_ITEM_UNAVAILABLE", "采集观察不可读或不合型：" +
@@ -57,10 +65,25 @@ function run(repo: string, manifestPath: string, observationsPath: string, outpu
     throw new At18BootstrapError("OUTPUT_WRITE_FAILED", error instanceof Error ? error.message : String(error));
   }
 
-  const output = generateAt18({
-    manifest, observations, source, originMain, generatedAt: new Date().toISOString(), inputBundlePath,
-  });
-  const documents = [output.inputBundleBytes, output.reportBytes, renderSummary(output.report)];
+  let output;
+  try {
+    output = generateAt18({
+      manifest, ...decoded, source, originMain, generatedAt: new Date().toISOString(), inputBundlePath,
+    });
+  } catch (error) {
+    if (error instanceof At18BootstrapError && error.inputBundleBytes) {
+      publish([inputBundlePath], [error.inputBundleBytes]);
+    }
+    throw error;
+  }
+  publish(names, [output.inputBundleBytes, output.reportBytes, renderSummary(output.report)]);
+  process.stdout.write(`${JSON.stringify({
+    overall_result: output.report.overall_result,
+    report: names[1], input_bundle: output.inputBundle ? inputBundlePath : null, summary: names[2],
+  })}\n`);
+}
+
+function publish(names: string[], documents: (Buffer | string | null)[]) {
   const staged: { temporary: string; target: string }[] = [];
   const published: string[] = [];
   try {
@@ -81,11 +104,6 @@ function run(repo: string, manifestPath: string, observationsPath: string, outpu
   } finally {
     for (const { temporary } of staged) rmSync(temporary, { force: true });
   }
-
-  process.stdout.write(`${JSON.stringify({
-    overall_result: output.report.overall_result,
-    report: names[1], input_bundle: output.inputBundle ? inputBundlePath : null, summary: names[2],
-  })}\n`);
 }
 
 const [repo, manifest, observations, output, ...extra] = process.argv.slice(2);

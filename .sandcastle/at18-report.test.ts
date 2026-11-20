@@ -1,8 +1,8 @@
 import assert from "node:assert/strict";
-import { spawnSync } from "node:child_process";
-import { mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { execFileSync, spawnSync } from "node:child_process";
+import { mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import test from "node:test";
 import { z } from "zod";
 import {
@@ -11,6 +11,9 @@ import {
   type ArtifactRef, type At18Observations, type At18Report,
 } from "./at18-report.ts";
 import type { DeliveryManifest } from "./delivery-bundle.ts";
+import { claim, legacyRules, type EvidenceClaim, type EvidenceFinding } from "./at18-evidence.ts";
+import { at18GitHub } from "./at18-github.ts";
+import { gitEnvironment } from "./git-environment.ts";
 
 const repo = join(__dirname, "..");
 const fixture = (name: string) => readFileSync(join(__dirname, "fixtures", "at18", name));
@@ -119,13 +122,69 @@ function setup() {
   crosswalk.family_entry_links.forEach(row => coverage("family", row.id, row.success_closure_slice_ids));
   crosswalk.detailed_acceptance_links.forEach(row => coverage("detail", row.id, row.success_closure_slice_ids));
 
+  // 合成独审者只认这次冻结的原字节和对应原件位置，不读后续被改写的 observations。
+  const provenance = new Map<string, EvidenceFinding[]>();
+  const attach = (ref: ArtifactRef, item: EvidenceClaim, verdict: EvidenceFinding["verdict"] = "PASS",
+    execution: EvidenceFinding["execution"] = "EXECUTED") => {
+    const key = `${ref.path}:${ref.sha256}`;
+    const contents = provenance.get(key) ?? [];
+    contents.push({ claim: structuredClone(item), verdict, execution, pointer: `/fixture/${contents.length}` });
+    provenance.set(key, contents);
+  };
+  const destinations = parseJsonObject(bytes.get(specPaths.coverage_input_ref)!).destinations as { ordinal: number; verbatim: string }[];
+  for (const d of observations.destinations!) {
+    const id = `DST-0${d.id}`;
+    attach(runtime, claim("runtime", id, "实际运行", "experiment", [head]));
+    attach(runtime, claim("destination", id, "完整义务", undefined, {
+      obligation: destinations.find(record => record.ordinal === d.id)!.verbatim,
+      products: [head], tickets: d.tickets!, downstream_status: [], remaining_obligations: [],
+    }));
+    attach(other, claim("review", id, "非作者审查最终产品", undefined, { reviewer: final_reviews[0].reviewer, commit: head }));
+  }
+  const rosters = new Map<number, { state: "OPEN" | "CLOSED"; slices: { ticket: number; state: "OPEN" | "CLOSED" }[] }>();
+  for (const tb of observations.tb_summaries) {
+    const ticket = tbTickets[tb.tb_id];
+    rosters.set(ticket, { state: tb.ticket_state, slices: tb.slices!.map(({ ticket, state }) => ({ ticket, state })) });
+    attach(other, claim("review", tb.tb_id, "非作者审查最终产品", undefined, { reviewer: final_reviews[0].reviewer, commit: head }));
+    if (tb.tb_id === "TB-11") continue;
+    attach(tb.evidence_by_class!.experiment![0], claim("runtime", tb.tb_id, "实际运行", "experiment", [head]));
+    attach(other, claim("tb", tb.tb_id, "本 TB 实体报告", undefined, { ticket, products: [head] }));
+    attach(runtime, claim("tb", tb.tb_id, "全部外部行为", undefined,
+      { ticket, products: [head], slices: tb.slices!, ticket_state: tb.ticket_state }));
+  }
+  for (const row of observations.coverage!) for (const slice of row.slices) {
+    const scope = `spec_coverage.${row.kind}:${row.id}`;
+    const preserve = row.kind === "family" && ["OE41", "OE45"].includes(row.id);
+    attach(other, claim("coverage", scope, preserve ? "排除与防混用" : "完成子义务",
+      undefined, { kind: row.kind, id: row.id, slice: slice.tb_id, main_sha: head }));
+  }
+  const permission = observations.permission!.experiment!;
+  const binding = { profile: permission.venue_profile!.sha256, capability: permission.capability_record!.sha256 };
+  for (const [key, ref] of Object.entries(permission)) attach(ref, claim("permission", "DST-05.experiment", key, "experiment", binding));
+  for (const key of ["非空运行和回退", "no_lost_rights", "no_duplicated_capital", "no_dual_write", "no_resend"]) {
+    attach(migration, claim("migration", "migration_invariants.experiment", key, "experiment"));
+  }
+  const post = observations.post_gate!.experiment!;
+  for (const key of ["gate_reached_event", "parameter_version", "first_activation"] as const) {
+    attach(post[key]!, claim("post_gate", "post_gate_records.experiment", key, "experiment"));
+  }
+  for (const row of observations.legacy_dispositions) {
+    const scope = `legacy:#${row.ticket}`;
+    const facts = { ticket: row.ticket, disposition: row.disposition, ticket_state: row.ticket_state, remaining_obligations: [] };
+    attach(other, claim("legacy", scope, legacyRules[row.ticket as keyof typeof legacyRules], undefined, facts), "PASS", "RECONCILED");
+    if (row.ticket === 1279) {
+      attach(other, claim("legacy", scope, "剩余项仅属 #1279", undefined, []));
+      attach(other, claim("legacy", scope, "未解除前置也未宣布试运行放行", undefined, facts));
+    }
+  }
+  const independentCi = structuredClone(ci_runs);
   const read = (entries: Map<string, Buffer>, path: string) => {
     const found = entries.get(path);
     if (!found) throw new Error("fixture missing");
     return found;
   };
   return {
-    bytes, external, artifact, observations, upstreamPath,
+    bytes, external, artifact, observations, upstreamPath, attach,
     run: (originMain = head, mergedMainCommit?: (candidate: string) => string | undefined) => generateAt18({
       manifest, observations, originMain, generatedAt, inputBundlePath: "/evidence/out/at18-input-bundle.json",
       source: {
@@ -133,6 +192,10 @@ function setup() {
         readBlob: (commit, path) => { assert.equal(commit, head); return read(bytes, path); },
         isAncestor: (commit, tip) => commit === head && tip === head,
         mergedMainCommit,
+        productionEnabled: () => false,
+        tbRoster: id => rosters.get(id),
+        requiredCi: () => independentCi,
+        findings: (ref, contents) => provenance.get(`${ref.path}:${byteSha256(contents)}`) ?? [],
       },
     }),
   };
@@ -145,7 +208,9 @@ function requireFailure(report: At18Report, scope: string, check: string) {
 }
 
 test("AT-18 证据齐全才 PASS；TB-11 开票状态与每条覆盖正确保留", () => {
-  const { report, inputBundle } = setup().run();
+  const f = setup();
+  f.observations.coverage = f.observations.coverage!.filter(row => row.id !== "US-ENG-10");
+  const { report, inputBundle } = f.run();
   assert.deepEqual(report.failed_checks, []);
   assert.equal(report.overall_result, "PASS");
   assert.deepEqual(Object.keys(report).length, 18);
@@ -162,6 +227,8 @@ test("AT-18 证据齐全才 PASS；TB-11 开票状态与每条覆盖正确保留
   assert.equal(tb11.gate_satisfied, true);
   assert.deepEqual(tb11.entity_reports, []);
   assert.deepEqual(tb11.evidence_by_class, { simulation: [], experiment: [], production: null });
+  assert.deepEqual(report.spec_coverage.stories.find(row => row.story_id === "US-ENG-10")?.evidence_refs,
+    [tb11.input_bundle]);
   for (const [i, story] of report.spec_coverage.stories.entries()) {
     assert.equal(story.story_id, crosswalk.rows[i].story_id);
     if (crosswalk.rows[i].success_closure_slice_ids.includes("TB-11")) assert.deepEqual(story.evidence_refs.at(-1), tb11.input_bundle);
@@ -251,24 +318,25 @@ test("AT-18 OE42 不改分类，覆盖输入处分失配时单独留红", () => 
 });
 test("AT-18 已批准但未触发的边界须有本条证据，不能用全局未执行登记代替", () => {
   const f = setup();
-  const row = f.observations.coverage!.find(item => item.kind === "story" && item.id === "US-ST-001")!;
+  const row = f.observations.coverage!.find(item => item.kind === "story" && item.id === "US-DST-03")!;
   const evidence = f.artifact("bounded", { example: "本条的 P2 专属子义务" });
+  f.attach(evidence, claim("deferral", "spec_coverage.story:US-DST-03", "获准延期本子义务", "production",
+    { kind: "story", id: "US-DST-03", gate: "ISSUE_1561_P2_FIRST_SEND" }), "PASS", "RECONCILED");
   row.deferred_gates = [{ gate: "ISSUE_1561_P2_FIRST_SEND", boundary: { outcome: "CONFIRMED", evidence_refs: [evidence] } }];
   const { report } = f.run();
   assert.equal(report.overall_result, "PASS");
-  assert.equal(report.spec_coverage.stories[0].status, "BOUNDED_DEFERRED");
+  assert.equal(report.spec_coverage.stories.find(row => row.story_id === "US-DST-03")?.status, "BOUNDED_DEFERRED");
   row.deferred_gates[0].boundary.evidence_refs = [];
-  requireFailure(f.run().report, "spec_coverage.story:US-ST-001", "COVERAGE_DEFERRED_BOUNDARY");
+  requireFailure(f.run().report, "spec_coverage.story:US-DST-03", "COVERAGE_DEFERRED_BOUNDARY");
 });
-test("AT-18 squash 合入允许对应 PR head 的独评与 CI，未绑定时拒绝", () => {
+test("AT-18 squash 只证明仓外 artifact 归属，不能推断最终产品独评或 CI 等价", () => {
   const f = setup();
   const candidate = "c".repeat(40);
   f.observations.tb_summaries[10].ci_runs![0].head_sha = candidate;
   f.observations.tb_summaries[10].final_reviews![0].reviewed_head = candidate;
-  const absent = f.run();
-  requireFailure(absent.report, "TB-11.#1403", "SLICE_REQUIRED_CI");
-  requireFailure(absent.report, "TB-11.#1403", "SLICE_INDEPENDENT_REVIEW");
-  assert.equal(f.run(head, code => code === candidate ? head : undefined).report.overall_result, "PASS");
+  const { report } = f.run(head, code => code === candidate ? head : undefined);
+  requireFailure(report, "TB-11.#1403", "SLICE_REQUIRED_CI");
+  requireFailure(report, "TB-11.#1403", "SLICE_INDEPENDENT_REVIEW");
 });
 test("AT-18 上游 manifest 各步骤失败有独立编号", () => {
   for (const [bytes, step] of [
@@ -355,4 +423,273 @@ test("AT-18 CLI 自身 manifest 缺失或不合型时 BLOCKED，退出 1 且不�
     assert.equal(JSON.parse(child.stdout).diagnostics[0].code, code);
     assert.deepEqual(readdirSync(work), ["manifest-invalid.json"]);
   }
+});
+
+const confirmed = (ref: ArtifactRef) => ({ outcome: "CONFIRMED" as const, evidence_refs: [ref] });
+
+test("AT-18 共享原件只销它实际覆盖的行；排除或未执行的子义务不能借它通过", () => {
+  const f = setup();
+  const only001 = f.artifact("one-story-only", { covers: ["US-ST-001"], excludes: ["US-ST-002"] });
+  for (const row of f.observations.coverage!.filter(row => ["US-ST-001", "US-ST-002"].includes(row.id))) {
+    for (const slice of row.slices) {
+      if (row.id === "US-ST-001") f.attach(only001, claim("coverage", "spec_coverage.story:US-ST-001",
+        "完成子义务", undefined, { kind: "story", id: row.id, slice: slice.tb_id, main_sha: head }));
+      slice.proof = confirmed(only001);
+    }
+  }
+  const { report } = f.run();
+  assert.equal(report.spec_coverage.stories[0].status, "VERIFIED");
+  assert.equal(report.spec_coverage.stories[1].status, "FAIL");
+  requireFailure(report, "spec_coverage.story:US-ST-002", "COVERAGE_TB-01");
+  const finding = claim("coverage", "spec_coverage.story:US-ST-001", "完成子义务", undefined,
+    { kind: "story", id: "US-ST-001", slice: "TB-01", main_sha: head });
+  f.attach(only001, finding, "FAIL");
+  requireFailure(f.run().report, "spec_coverage.story:US-ST-001", "COVERAGE_TB-01");
+});
+
+test("AT-18 DST-06 的原件不能给 DST-01 销项；报告保留所用原件定位", () => {
+  const f = setup();
+  const before = f.run().report;
+  assert.ok(before.destinations[0].evidence_by_class.experiment.some(ref => ref.bounded_scope.startsWith("/fixture/")));
+  const wrong = f.artifact("only-dst06", { applies_only_to: "DST-06", applies_to_dst01: false });
+  f.observations.destinations![0].obligations = confirmed(wrong);
+  const { report } = f.run();
+  requireFailure(report, "DST-01", "DESTINATION_OBLIGATIONS");
+  assert.ok(report.failed_checks.some(c => c.evidence_ref?.path === wrong.path));
+  assert.notEqual(report.content_hash, before.content_hash);
+});
+
+test("AT-18 实体报告需支持当前 TB，且 AT-18 文件须通过内部摘要", () => {
+  const f = setup();
+  const bad = f.artifact("bad-bundle", { ...f.run().inputBundle, content_hash: "0".repeat(64) });
+  f.observations.tb_summaries[1].entity_reports = [bad];
+  requireFailure(f.run().report, "TB-02", "ENTITY_REPORT_CONTENT_INVALID");
+  f.observations.tb_summaries[1].entity_reports = [f.artifact("another-tb", { tb: "TB-03" })];
+  requireFailure(f.run().report, "TB-02", "ENTITY_REPORT_SCOPE");
+});
+
+test("AT-18 旧祖先 CI/独评、捏造的当前 CI 和无非作者绑定的独评都不销项", () => {
+  const f = setup();
+  const tb = f.observations.tb_summaries[1];
+  const old = "c".repeat(40);
+  tb.ci_runs = [{ ...tb.ci_runs![0], head_sha: old }];
+  tb.final_reviews = [{ ...tb.final_reviews![0], reviewed_head: old }];
+  const { report } = f.run(head, sha => sha === old ? head : undefined);
+  requireFailure(report, "TB-02", "REQUIRED_CI");
+  requireFailure(report, "TB-02", "INDEPENDENT_REVIEW");
+  tb.ci_runs = [{ ...tb.ci_runs![0], head_sha: head, run_id: 84 }];
+  tb.final_reviews = [{ ...tb.final_reviews[0], reviewed_head: head,
+    artifact: f.artifact("author-reviewed", { reviewer_is_author: true }) }];
+  requireFailure(f.run().report, "TB-02", "REQUIRED_CI");
+  requireFailure(f.run().report, "TB-02", "INDEPENDENT_REVIEW");
+});
+
+test("AT-18 应交子票由 tracker 决定，TB-11 的正式生成阶段要求三票 OPEN", () => {
+  const f = setup();
+  const tb = f.observations.tb_summaries[1];
+  tb.expected_slice_tickets = [1373];
+  tb.slices = [{ ticket: 1373, state: "CLOSED", main_sha: head }];
+  const tb11 = f.observations.tb_summaries[10];
+  tb11.ticket_state = "CLOSED";
+  tb11.slices!.forEach(slice => { slice.state = "CLOSED"; });
+  const { report } = f.run();
+  requireFailure(report, "TB-02", "IMPLEMENTATION_SLICES");
+  requireFailure(report, "TB-02", "TB_TRACKER_SCOPE");
+  requireFailure(report, "TB-11", "TB11_STAGE_STATE");
+});
+
+test("AT-18 启动 FAIL、空仓未跑以及单向证据类冒充都不能通过", () => {
+  const f = setup();
+  f.observations.permission!.experiment!.runtime_verification = f.artifact("startup-failed", { steps_4_through_7: "FAIL" });
+  const migration = f.artifact("empty-migration", { positions: [], open_orders: [], test_executed: false });
+  f.observations.migration!.experiment!.non_empty_run = confirmed(migration);
+  f.observations.tb_summaries[9].evidence_by_class!.experiment = [migration];
+  const simulation = f.artifact("simulated-venue", { evidence_class: "simulation", venue_run: false });
+  f.attach(simulation, claim("runtime", "TB-08", "实际运行", "simulation", [head]));
+  f.observations.tb_summaries[7].evidence_by_class!.experiment = [simulation];
+  const { report } = f.run();
+  requireFailure(report, "DST-05.experiment", "RUNTIME_VERIFICATION_SUPPORT");
+  requireFailure(report, "migration_invariants.experiment", "NON_EMPTY_MIGRATION");
+  requireFailure(report, "TB-08", "RUNTIME_EVIDENCE_SCOPE");
+  assert.equal(report.destinations[4].result, "FAIL");
+  assert.equal(report.migration_invariants.experiment?.no_lost_rights, false);
+});
+
+test("AT-18 未触达必须有同槽原件；TestOnly 触达不得激活，未适用的 P2 门不能延期", () => {
+  const f = setup();
+  const source = f.artifact("already-active", { profile_id: "P1-fixture", evidence_class: "experiment",
+    growth_enabled: true, gate_reached: true });
+  f.observations.post_gate!.experiment = { status: "NOT_TRIGGERED", non_activation: confirmed(source) };
+  f.observations.unexecuted!.push({ obligation: "ADR_0036_POST_GATE_EXPERIMENT", required: false,
+    reason: "未触达", blocker_or_gap: "未触达", evidence_class: "experiment" });
+  requireFailure(f.run().report, "post_gate_records.experiment", "POST_GATE_NON_ACTIVATION");
+
+  const g = setup();
+  const gate = g.artifact("test-gate", { id: "gate", profile_id: "P1-fixture", evidence_class: "experiment",
+    known_at: "2026-11-20T00:00:00.000001Z", kind: "SimulatedGateReached", mode: "TestOnly" });
+  g.observations.post_gate!.experiment!.gate_reached_event = gate;
+  const row = g.observations.coverage!.find(e => e.id === "US-ST-001")!;
+  row.deferred_gates = [{ gate: "ISSUE_1561_P2_FIRST_SEND",
+    boundary: confirmed(g.artifact("not-applicable", { story: row.id, p2_first_send_applies: false })) }];
+  const { report } = g.run();
+  requireFailure(report, "post_gate_records.experiment", "POST_GATE_GATE_REACHED_EVENT_SUPPORT");
+  requireFailure(report, "spec_coverage.story:US-ST-001", "COVERAGE_DEFERRED_BOUNDARY");
+});
+
+test("AT-18 七张旧票逐一抵挡反处分，零年样本不能销 #1320", () => {
+  const f = setup();
+  const inverted = {
+    942: "恢复强平实验", 1096: "未核退场即删除", 1282: "旧实验代替新程序验收",
+    1304: "报告器未核实即关闭", 1319: "旧简化链作为完整发送和隔离证据",
+    1320: "单个组件样例等同七标的十年全量", 1279: "已宣布试运行放行",
+  };
+  for (const l of f.observations.legacy_dispositions) l.disposition = inverted[l.ticket as keyof typeof inverted];
+  const item1279 = f.observations.legacy_dispositions.at(-1)!;
+  item1279.remaining_obligations = ["#1323 Destination ⑥ 尚未完成"];
+  item1279.not_released = confirmed(f.artifact("trial-released", { trial_released: true }));
+  const item1320 = f.observations.legacy_dispositions[5];
+  item1320.ticket_state = "CLOSED";
+  item1320.heavy_resolved = confirmed(f.artifact("zero-year", { years: 0, instruments: 1 }));
+  f.observations.unexecuted!.pop();
+  const { report } = f.run();
+  for (const ticket of legacyTickets) requireFailure(report, `legacy:#${ticket}`, "LEGACY_DISPOSITION_EVIDENCE");
+  requireFailure(report, "legacy:#1279", "ISSUE_1279_OWN_REMAINING_ONLY");
+  requireFailure(report, "legacy:#1279", "ISSUE_1279_NOT_RELEASED");
+  requireFailure(report, "legacy:#1320", "ISSUE_1320_HEAVY_RESOLUTION_EVIDENCE");
+  assert.ok(report.legacy_dispositions.every(l => !l.disposition_valid));
+});
+
+test("AT-18 任一组同时减掉原始覆盖行和观察仍失败；坏行不抹掉其他 96 个", () => {
+  for (const [kind, field] of [["story", "rows"], ["family", "family_entry_links"],
+    ["detail", "detailed_acceptance_links"]] as const) {
+    const f = setup();
+    const cross = parseJsonObject(f.bytes.get(specPaths.crosswalk_ref)!);
+    const removed = (cross[field] as { id?: string; story_id?: string }[]).pop()!;
+    f.observations.coverage = f.observations.coverage!.filter(o => o.kind !== kind || o.id !== (removed.id ?? removed.story_id));
+    f.bytes.set(specPaths.crosswalk_ref, makeBytes(cross));
+    const { report } = f.run();
+    requireFailure(report, "spec_coverage", "CROSSWALK_ALIGNMENT");
+    requireFailure(report, "legacy:#1279", "ISSUE_1279_GRAPH_OBLIGATIONS");
+    assert.equal(report.legacy_dispositions.at(-1)!.disposition_valid, false);
+  }
+  const f = setup();
+  const cross = parseJsonObject(f.bytes.get(specPaths.crosswalk_ref)!);
+  delete (cross.rows as { story_id?: string }[])[2].story_id;
+  f.bytes.set(specPaths.crosswalk_ref, makeBytes(cross));
+  const { report } = f.run();
+  requireFailure(report, "spec_coverage.rows[2]", "SCHEMA");
+  assert.deepEqual(report.spec_coverage.stories.map(r => r.story_id),
+    crosswalk.rows.filter((_, index) => index !== 2).map(r => r.story_id));
+  assert.equal(report.spec_coverage.families.length, 345);
+  assert.equal(report.spec_coverage.details.length, 496);
+});
+
+test("AT-18 GitHub 合入查询只接受精确 head、main 和 merged=true", () => {
+  const prHead = "c".repeat(40);
+  for (const [merged, topic, exact, expected] of [
+    [true, "main", prHead, head], [false, "main", prHead, undefined],
+    [true, "other", prHead, undefined], [true, "main", "d".repeat(40), undefined],
+  ] as const) {
+    const github = at18GitHub("https://github.com/Newchanlun/NewChanlun.git", (...args) =>
+      args.includes("--slurp") ? [[{ number: 7, head: { sha: prHead }, base: { ref: "main" } }]] :
+        { merged, base: { ref: topic }, head: { sha: exact }, merge_commit_sha: head });
+    assert.equal(github.mergedMainCommit?.(prHead), expected);
+  }
+});
+
+test("AT-18 缺一个 Destination 固定条目时保留 SPEC 已知义务，但不得通过", () => {
+  const f = setup();
+  const input = parseJsonObject(f.bytes.get(specPaths.coverage_input_ref)!);
+  (input.destinations as unknown[]).pop();
+  f.bytes.set(specPaths.coverage_input_ref, makeBytes(input));
+  const { report } = f.run();
+  assert.equal(report.destinations[5].id, 6);
+  assert.ok(report.destinations[5].obligation);
+  requireFailure(report, "destinations", "DESTINATION_ALIGNMENT");
+});
+
+test("AT-18 CLI 恢复可省坏字符串、独立发布输入包、阻断自身错摘要，并接通外部 squash", t => {
+  const directory = realpathSync(mkdtempSync(join(tmpdir(), "at18-r2-")));
+  t.after(() => rmSync(directory, { recursive: true, force: true }));
+  const checkout = join(directory, "repo");
+  mkdirSync(checkout);
+  const localGit = (...args: string[]) => execFileSync("git", [
+    "-C", checkout, "-c", "user.name=AT-18 test", "-c", "user.email=at18@example.invalid",
+    "-c", "commit.gpgsign=false", "-c", "core.hooksPath=/dev/null", ...args,
+  ], { encoding: "utf8", env: gitEnvironment() }).trim();
+  for (const file of Object.values(specPaths)) {
+    const target = join(checkout, file);
+    mkdirSync(dirname(target), { recursive: true });
+    writeFileSync(target, readFileSync(join(repo, file)));
+  }
+  localGit("init", "-q", "-b", "main");
+  localGit("add", ".");
+  localGit("commit", "-qm", "AT-18 evidence fixture");
+  const actualHead = localGit("rev-parse", "HEAD");
+  localGit("update-ref", "refs/remotes/origin/main", actualHead);
+  const ownPath = join(directory, "delivery.json");
+  const obsPath = join(directory, "observations.json");
+  const own = { ...manifest, base: actualHead, head: actualHead, externalReportsRoot: directory };
+  const snapshot = () => {
+    const f = setup().observations;
+    const obs: At18Observations = {
+      production_enabled: false, bounded_domain_statement: "离线缺证试跑",
+      tb_summaries: f.tb_summaries.map(({ tb_id, ticket_state }) => ({ tb_id, ticket_state })),
+      legacy_dispositions: f.legacy_dispositions.map(({ ticket, disposition, ticket_state }) => ({ ticket, disposition, ticket_state })),
+    };
+    return obs;
+  };
+  const run = (name: string, own: DeliveryManifest, obs: At18Observations, env = process.env) => {
+    const out = join(directory, name);
+    mkdirSync(out);
+    writeFileSync(ownPath, makeBytes(own));
+    writeFileSync(obsPath, makeBytes(obs));
+    const child = spawnSync(process.execPath, ["--import", "tsx", ".sandcastle/at18-report.mts",
+      checkout, ownPath, obsPath, out], { cwd: repo, encoding: "utf8", env });
+    return { out, child, result: JSON.parse(child.stdout) };
+  };
+  const recoverable = snapshot();
+  recoverable.legacy_dispositions[0].remaining_obligations = ["保留此项", "\ud800"];
+  const repaired = run("recoverable", own, recoverable);
+  assert.equal(repaired.child.status, 0, repaired.child.stderr);
+  const report = at18ReportSchema.parse(JSON.parse(readFileSync(join(repaired.out, "at18-report.json"), "utf8")));
+  requireFailure(report, "observations.legacy_dispositions.0.remaining_obligations.1", "JCS_CANONICALIZE");
+  assert.deepEqual(report.legacy_dispositions[0].remaining_obligations, ["保留此项"]);
+
+  const fixedMissing = snapshot();
+  fixedMissing.tb_summaries.pop();
+  const partial = run("missing-fixed", own, fixedMissing);
+  assert.equal(partial.child.status, 1);
+  assert.equal(partial.result.diagnostics[0].code, "FIXED_ITEM_UNAVAILABLE");
+  assert.deepEqual(readdirSync(partial.out), ["at18-input-bundle.json"]);
+
+  const registered = join(directory, "registered.json");
+  writeFileSync(registered, "{}");
+  const badDigest = run("wrong-own-hash", { ...own, reports: [{ storage: "external", ticket: 1391,
+    base: actualHead, head: actualHead, path: registered, sha256: "0".repeat(64) }] }, snapshot());
+  assert.equal(badDigest.child.status, 1);
+  assert.equal(badDigest.result.diagnostics[0].code, "INVALID_MANIFEST");
+  assert.deepEqual(readdirSync(badDigest.out), []);
+
+  const upstreamHead = "c".repeat(40);
+  const upstreamReport = { storage: "external" as const, ticket: 1360, base: actualHead, head: upstreamHead,
+    path: registered, sha256: byteSha256(Buffer.from("{}")) };
+  const upstreamOwn = join(directory, "upstream.json");
+  writeFileSync(upstreamOwn, makeBytes({ ...own, ticket: 1360, head: upstreamHead, reports: [upstreamReport] }));
+  const squash = snapshot();
+  squash.external_manifests = [upstreamOwn];
+  squash.destinations = [{ id: 1, evidence_by_class: { experiment: [
+    { ...upstreamReport, commit: null, bounded_scope: "待核的离线仓外实体" },
+  ] } }];
+  localGit("remote", "add", "origin", "https://github.com/Newchanlun/NewChanlun.git");
+  const stub = join(directory, "gh");
+  writeFileSync(stub, `#!${process.execPath}\nconst args=process.argv.slice(2);
+    if(args[1]==="graphql") { console.log(JSON.stringify({data:{repository:{}}})); }
+    else if(args.includes("--slurp")) { console.log(JSON.stringify([[{number:7, head:{sha:${JSON.stringify(upstreamHead)}}, base:{ref:"main"}}]])); }
+    else { console.log(JSON.stringify({merged:true, head:{sha:${JSON.stringify(upstreamHead)}}, base:{ref:"main"}, merge_commit_sha:${JSON.stringify(actualHead)}})); }\n`, { mode: 0o700 });
+  const merged = run("valid-squash", own, squash, { ...process.env, PATH: `${directory}:${process.env.PATH}` });
+  assert.equal(merged.child.status, 0, merged.child.stderr);
+  const mergedReport = at18ReportSchema.parse(JSON.parse(readFileSync(join(merged.out, "at18-report.json"), "utf8")));
+  requireFailure(mergedReport, "DST-01", "RUNTIME_EVIDENCE_SCOPE");
+  assert.ok(!mergedReport.failed_checks.some(f => f.check_id === "ARTIFACT_ANCESTRY"));
 });

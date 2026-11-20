@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import { isAbsolute } from "node:path";
 import { z } from "zod";
 import { deliveryManifestSchema, type DeliveryManifest } from "./delivery-bundle.ts";
+import { claim, legacyRules, type EvidenceClaim, type EvidenceFinding } from "./at18-evidence.ts";
 
 const repoSpec = ".chanlun/review-results/issue1339-r2-spec-20260909/payload/spec";
 export const specPaths = {
@@ -190,7 +191,7 @@ const coverageObservation = z.strictObject({
   kind: z.enum(["story", "family", "detail"]), id: text, slices: z.array(z.strictObject({ tb_id: tbId, proof })),
   deferred_gates: z.array(z.strictObject({ gate: z.enum(coverageGates), boundary: proof })).optional(),
 });
-export const observationsSchema = rejectProtoKey.pipe(z.strictObject({
+const observationFields = z.strictObject({
   production_enabled: z.boolean(), bounded_domain_statement: text,
   destinations: z.array(z.strictObject({
     id: integer, ...collected, tickets: z.array(ticketScope).optional(), commits: z.array(sha).optional(),
@@ -213,7 +214,8 @@ export const observationsSchema = rejectProtoKey.pipe(z.strictObject({
   post_gate: classSlot(postObservation.optional()).optional(),
   unexecuted: z.array(unexecuted).optional(),
   permission_blocked: z.array(permissionBlocked).optional(),
-}));
+});
+export const observationsSchema = rejectProtoKey.pipe(observationFields);
 export type At18Observations = z.infer<typeof observationsSchema>;
 
 export interface At18Source {
@@ -222,6 +224,11 @@ export interface At18Source {
   isAncestor(commit: string, head: string): boolean;
   /** 采集端只能依据已合入 main、head 完全相同的 GitHub 记录返回合并 SHA。 */
   mergedMainCommit?(head: string): string | undefined;
+  /** 可信原件解读器。只接收核过的身份和原字节，不接收 observations 的射程声明。 */
+  findings?(artifact: Readonly<Omit<ArtifactRef, "bounded_scope">>, bytes: Buffer): readonly EvidenceFinding[];
+  requiredCi?(scope: string, commits: readonly string[]): readonly z.infer<typeof ciRun>[] | undefined;
+  tbRoster?(ticket: number): { state: z.infer<typeof state>; slices: z.infer<typeof downstream>[] } | undefined;
+  productionEnabled?(): boolean | undefined;
 }
 
 const crosswalkFields = z.object({
@@ -248,7 +255,7 @@ export class At18DerivationError extends Error {
 
 export class At18BootstrapError extends Error {
   constructor(readonly code: "MANIFEST_UNREADABLE" | "INVALID_MANIFEST" | "FIXED_ITEM_UNAVAILABLE" |
-    "CONTENT_NOT_CANONICAL" | "OUTPUT_WRITE_FAILED", detail: string) { super(detail); }
+    "CONTENT_NOT_CANONICAL" | "OUTPUT_WRITE_FAILED", detail: string, readonly inputBundleBytes?: Buffer) { super(detail); }
 }
 
 export const byteSha256 = (bytes: Uint8Array) => createHash("sha256").update(bytes).digest("hex");
@@ -366,14 +373,84 @@ export function deriveJson<T>(bytes: Buffer, schema: z.ZodType<T>, canonicalize 
 
 export function readOwnManifest(source: At18Source, path: string): DeliveryManifest {
   if (!externalPath.safeParse(path).success) throw new At18BootstrapError("INVALID_MANIFEST", "自身 manifest 须使用仓外绝对路径。");
+  let bytes;
+  try { bytes = source.readExternal(path); }
+  catch { throw new At18BootstrapError("MANIFEST_UNREADABLE", "自身 manifest 不可读。"); }
   try {
-    const manifest = deriveJson(deriveBytes(() => source.readExternal(path)), deliveredManifest);
+    const manifest = deriveJson(bytes, deliveredManifest);
     if (manifest.ticket !== 1391) throw new At18DerivationError("SCHEMA", "自身 manifest.ticket 须为 1391。");
+    // #1551 待定：已登记实体摘要不符先阻断两份文档；空引导清单仍合法。
+    const artifacts = [
+      ...manifest.reports, ...manifest.reviews.map(r => r.report),
+      ...manifest.checks.flatMap(check => check.evidence ?? []),
+      ...[manifest.scan.evidence, manifest.scan.disclosure?.triage].filter(item => item !== undefined),
+    ];
+    for (const artifact of artifacts) {
+      const external = artifactRefManifest(artifact);
+      const root = manifest.externalReportsRoot;
+      if (external ? !root || !externalPath.safeParse(root).success || !externalPath.safeParse(artifact.path).success ||
+          !artifact.path.startsWith(root.replace(/\/+$/, "") + "/") || external.ticket !== manifest.ticket ||
+          external.base !== manifest.base || external.head !== manifest.head : !repoPath.safeParse(artifact.path).success) {
+        throw new At18DerivationError("SCHEMA", "自身 manifest 的实体路径或版本绑定无效。");
+      }
+      const contents = deriveBytes(() => external ? source.readExternal(artifact.path) : source.readBlob(manifest.head, artifact.path));
+      if (byteSha256(contents) !== artifact.sha256) throw new At18DerivationError("SCHEMA", "自身 manifest 的已登记实体摘要不符。");
+    }
     return manifest;
   } catch (error) {
     if (!(error instanceof At18DerivationError)) throw error;
-    throw new At18BootstrapError(error.check_id === "FILE_READ" ? "MANIFEST_UNREADABLE" : "INVALID_MANIFEST", error.message);
+    throw new At18BootstrapError("INVALID_MANIFEST", error.message);
   }
+}
+
+function artifactRefManifest(artifact: DeliveryManifest["reports"][number]) {
+  // reviews/checks/scan 在现有 schema 中有时收窄为只含 path/sha256 的 TS 类型。
+  if (!("storage" in artifact)) return null;
+  return z.object({ storage: z.literal("external"), ticket: integer, base: sha, head: sha }).parse(artifact);
+}
+
+export function decodeObservations(bytes: Buffer): { observations: At18Observations; initialFailures: FailedCheck[] } {
+  const failures: FailedCheck[] = [];
+  const omit = Symbol();
+  function clean(value: unknown, schema: z.ZodType, path: (string | number)[]): unknown {
+    if (schema instanceof z.ZodOptional || schema instanceof z.ZodNullable) {
+      const cleaned = clean(value, schema.unwrap() as z.ZodType, path);
+      return cleaned === omit && schema instanceof z.ZodNullable ? null : cleaned;
+    }
+    if ((typeof value === "string" && /[\uD800-\uDFFF]/u.test(value)) ||
+        (typeof value === "number" && !Number.isFinite(value))) {
+      failures.push({ scope: ["observations", ...path].join("."), check_id: "JCS_CANONICALIZE",
+        detail: "不可规范化的原值已省略。", evidence_ref: null });
+      return omit;
+    }
+    if (schema instanceof z.ZodArray && Array.isArray(value)) {
+      return value.flatMap((item, i) => {
+        const cleaned = clean(item, schema.element as z.ZodType, [...path, i]);
+        return cleaned === omit ? [] : [cleaned];
+      });
+    }
+    if (value && typeof value === "object" && !Array.isArray(value)) {
+      const object = value as Record<string, unknown>;
+      if (schema === artifactRefSchema) {
+        return clean(value, object.storage === "in_repo" ? inRepoArtifact : artifactRefSchema.options[1], path);
+      }
+      if (schema instanceof z.ZodObject) {
+        const output: [string, unknown][] = [];
+        for (const [key, item] of Object.entries(object)) {
+          const field = Object.hasOwn(schema.shape, key) ? schema.shape[key] as z.ZodType : undefined;
+          const cleaned = field ? clean(item, field, [...path, key]) : item;
+          if (cleaned !== omit) output.push([key, cleaned]);
+          else if (!(field instanceof z.ZodOptional)) return omit;
+        }
+        return Object.fromEntries(output);
+      }
+    }
+    return value;
+  }
+  const cleaned = clean(parseJsonObject(bytes), observationFields, []);
+  if (cleaned === omit) throw new At18DerivationError("JCS_CANONICALIZE", "不可规范化的报告固定观察无法省略。");
+  canonicalizeJcs(cleaned);
+  return { observations: schemaValue(cleaned, observationsSchema), initialFailures: failures };
 }
 
 const encodeDocument = (document: object) => Buffer.from(`${JSON.stringify(document, null, 2)}\n`, "utf8");
@@ -385,12 +462,13 @@ interface GenerateArgs {
   originMain: string | null;
   generatedAt: string;
   inputBundlePath: string;
+  initialFailures?: readonly FailedCheck[];
 }
 
-export function generateAt18({ manifest, observations: obs, source, originMain, generatedAt, inputBundlePath }: GenerateArgs) {
+export function generateAt18({ manifest, observations: obs, source, originMain, generatedAt, inputBundlePath, initialFailures }: GenerateArgs) {
   const { ticket, base, head } = manifest;
   const identity = { ticket, base, head, generated_at: generatedAt };
-  const failures: FailedCheck[] = [];
+  const failures: FailedCheck[] = [...initialFailures ?? []];
   const fail = (scope: string, check_id: string, detail: string, evidence_ref: ArtifactRef | null = null) =>
     { failures.push({ scope, check_id, detail, evidence_ref }); };
   const expect = (condition: unknown, scope: string, check: string, detail: string) => {
@@ -411,9 +489,9 @@ export function generateAt18({ manifest, observations: obs, source, originMain, 
     const merge = source.mergedMainCommit?.(commit);
     return merge !== undefined && source.isAncestor(merge, head);
   };
-  const matchesMerged = (commit: string, merged: string) =>
-    commit === merged || source.mergedMainCommit?.(commit) === merged;
   expect(head === originMain, "report", "ORIGIN_MAIN_HEAD", "自身 manifest.head 不是对账时的 origin/main。");
+  expect(source.productionEnabled?.() === obs.production_enabled, "production", "DEPLOYMENT_SCOPE_UNVERIFIED",
+    "缺权威部署范围，或启用状态与观察不符。");
 
   const upstream = new Map<string, { manifest: DeliveryManifest; ref: ManifestRef }>();
   for (const manifest_path of obs.external_manifests ?? []) {
@@ -433,10 +511,12 @@ export function generateAt18({ manifest, observations: obs, source, originMain, 
   }
 
   const artifactBytes = new Map<string, Buffer>();
+  const artifactKey = (ref: ArtifactRef) => canonicalizeJcs([ref.storage,
+    ref.storage === "in_repo" ? ref.commit : `${ref.ticket}/${ref.base}/${ref.head}`, ref.path, ref.sha256]);
   function checkedRef(scope: string, field: string, ref?: ArtifactRef | null): ArtifactRef | null {
     if (!ref) return null;
     const owner = ref.storage === "in_repo" ? ref.commit : `${ref.ticket}/${ref.base}/${ref.head}`;
-    const key = canonicalizeJcs([ref.storage, owner, ref.path, ref.sha256]);
+    const key = artifactKey(ref);
     let bytes = artifactBytes.get(key);
     if (bytes) return ref;
     if (ref.storage === "external") {
@@ -472,13 +552,41 @@ export function generateAt18({ manifest, observations: obs, source, originMain, 
     values.flatMap(ref => checkedRef(scope, field, ref) ?? []);
   const fromArtifact = <T>(scope: string, field: string, ref: ArtifactRef | undefined, schema: z.ZodType<T>) => {
     if (!checkedRef(scope, field, ref) || !ref) return null;
-    const owner = ref.storage === "in_repo" ? ref.commit : `${ref.ticket}/${ref.base}/${ref.head}`;
-    const bytes = artifactBytes.get(canonicalizeJcs([ref.storage, owner, ref.path, ref.sha256]))!;
+    const bytes = artifactBytes.get(artifactKey(ref))!;
     return derive(scope, () => deriveJson(bytes, schema, false), ref);
   };
-  function proved(scope: string, check: string, detail: string, observed?: ObservedProof) {
+  const findings = new Map<string, Map<string, EvidenceFinding[]>>();
+  function support(ref: ArtifactRef, required: EvidenceClaim, executed: boolean): ArtifactRef | null {
+    const key = artifactKey(ref);
+    if (!findings.has(key)) {
+      // #1551 待定：任意文件自称覆盖或观察提交者的 CONFIRMED 都不是可信的定位。
+      const byClaim = new Map<string, EvidenceFinding[]>();
+      const { bounded_scope: _observedHint, ...binding } = ref;
+      for (const finding of source.findings?.(binding, Buffer.from(artifactBytes.get(key)!)) ?? []) {
+        canonicalizeJcs(finding.pointer);
+        const subject = canonicalizeJcs(finding.claim);
+        const records = byClaim.get(subject) ?? [];
+        records.push(finding);
+        byClaim.set(subject, records);
+      }
+      findings.set(key, byClaim);
+    }
+    const matches = findings.get(key)!.get(canonicalizeJcs(required)) ?? [];
+    if (!matches.length || matches.some(item => item.verdict !== "PASS" ||
+        (executed ? item.execution !== "EXECUTED" : item.execution === "NOT_RUN") || !item.pointer.trim())) return null;
+    return { ...ref, bounded_scope: matches.map(item => item.pointer).join("、") };
+  }
+  function checkedSupport(required: EvidenceClaim, check: string, ref: ArtifactRef | undefined, executed = false) {
+    const verified = checkedRef(required.scope, check, ref);
+    const backed = verified && support(verified, required, executed);
+    expect(backed, required.scope, check, "原件没有为本项提供可复核的支持，或与本项相反。");
+    return backed;
+  }
+  function proved(required: EvidenceClaim, check: string, detail: string, observed?: ObservedProof, executed = false) {
+    const { scope } = required;
     const evidence = checkedRefs(scope, check, observed?.evidence_refs);
-    if (observed?.outcome === "CONFIRMED" && evidence.length) return evidence;
+    const supported = evidence.flatMap(ref => support(ref, required, executed) ?? []);
+    if (observed?.outcome !== "REJECTED" && supported.length && supported.length === evidence.length) return supported;
     fail(scope, check, detail, evidence[0]);
     return [];
   }
@@ -524,6 +632,8 @@ export function generateAt18({ manifest, observations: obs, source, originMain, 
     return map;
   }
   const obligations = index("destinations", document?.destinations ?? [], d => d.ordinal);
+  if (document) expect(destinationIds.every(id => obligations.has(id)) && obligations.size === destinationIds.length,
+    "destinations", "DESTINATION_ALIGNMENT", "覆盖输入的 Destination 固定集合不完整。");
   if (destinationIds.some(id => !obligations.has(id)) && specBytes.spec_ref) {
     // 两份正本均逐字收录 Destination。缺覆盖输入仍失败，但不丢另一份正本已知的固定义务。
     const spec = derive("spec.destinations", () => deriveJson(specBytes.spec_ref!, specDestinationFields, false), spec_ref);
@@ -542,7 +652,8 @@ export function generateAt18({ manifest, observations: obs, source, originMain, 
     ...tbIds.filter(id => !tbInput.has(id)),
     ...legacyTickets.filter(id => !legacyInput.has(id)).map(id => `#${id}`),
   ];
-  if (unavailable.length) throw new At18BootstrapError("FIXED_ITEM_UNAVAILABLE", `缺固定项的实际值：${unavailable.join("、")}。`);
+  if (unavailable.length) throw new At18BootstrapError("FIXED_ITEM_UNAVAILABLE",
+    `缺固定项的实际值：${unavailable.join("、")}。`, inputBundleBytes ?? undefined);
 
   const evidenceOwners = new Map<string, string>();
   function classRefs(scope: string, cls: z.infer<typeof evidenceClass>, values?: ArtifactRef[] | null) {
@@ -558,25 +669,41 @@ export function generateAt18({ manifest, observations: obs, source, originMain, 
   }
 
   const grouped = (scope: string, byClass:
-    Partial<z.infer<typeof evidenceByClass>> | undefined, required: boolean) => {
-    const simulation = classRefs(scope, "simulation", byClass?.simulation);
-    const experiment = classRefs(scope, "experiment", byClass?.experiment);
-    const production = obs.production_enabled ? classRefs(scope, "production", byClass?.production) : null;
+    Partial<z.infer<typeof evidenceByClass>> | undefined, required: boolean, products: string[]) => {
+    const verified = (cls: z.infer<typeof evidenceClass>) => classRefs(scope, cls, byClass?.[cls]).flatMap(ref => {
+      const backed = support(ref, claim("runtime", scope, "实际运行", cls, products), true);
+      if (!backed) fail(scope, "RUNTIME_EVIDENCE_SCOPE", `原件不支持 ${cls} 槽的本项实际运行。`, ref);
+      return backed ?? [];
+    });
+    const simulation = verified("simulation");
+    const experiment = verified("experiment");
+    const production = obs.production_enabled ? verified("production") : null;
     if (!obs.production_enabled && byClass?.production != null) fail(scope, "PRODUCTION_INACTIVE", "未授权启用的生产槽位有输入。");
     if (required) expect(simulation.length || experiment.length || production?.length,
       scope, "RUNTIME_EVIDENCE", "没有可用的实际运行证据。");
     return { simulation, experiment, production };
   };
 
-  const reviews = (scope: string, values: z.infer<typeof review>[] = []) => {
-    const usable = values.filter(r => checkedRef(scope, "independent_review", r.artifact));
-    expect(usable.length > 0 && usable.every(r => r.verdict === "PASS" && integrated(r.reviewed_head)),
-      scope, "INDEPENDENT_REVIEW", "缺覆盖已合入差异的非作者 PASS 独评，或所审提交未证实进入 main。");
+  const reviews = (scope: string, commits: string[], values: z.infer<typeof review>[] = []) => {
+    // #1551 待定：§五:62(b) 证明仓外交付已合入，不证明旧 CI/独评覆盖最终产品。
+    const usable = values.flatMap(r => {
+      const ref = checkedRef(scope, "independent_review", r.artifact);
+      const backed = ref && r.verdict === "PASS" && commits.includes(r.reviewed_head) &&
+        support(ref, claim("review", scope, "非作者审查最终产品", undefined,
+          { reviewer: r.reviewer, commit: r.reviewed_head }), false);
+      return backed ? [{ ...r, artifact: backed }] : [];
+    });
+    expect(commits.length && values.length === usable.length && commits.every(c => usable.some(r => r.reviewed_head === c)),
+      scope, "INDEPENDENT_REVIEW", "缺逐最终产品提交的非作者 PASS 独评原件。");
     return usable;
   };
-  const checkCi = (scope: string, values: z.infer<typeof ciRun>[] = []) => {
-    expect(values.length && values.every(run => run.conclusion === "SUCCESS" && integrated(run.head_sha)),
-      scope, "REQUIRED_CI", "缺绑定已合入提交的必需 CI，或 CI 未全部成功。");
+  const checkCi = (scope: string, commits: string[], values: z.infer<typeof ciRun>[] = []) => {
+    const actual = source.requiredCi?.(scope, commits);
+    const byValue = (runs: readonly z.infer<typeof ciRun>[]) => runs.map(run => canonicalizeJcs(run)).sort().join("\n");
+    expect(commits.length && actual?.length && byValue(actual) === byValue(values) &&
+      actual.every(run => run.conclusion === "SUCCESS" && commits.includes(run.head_sha)) &&
+      commits.every(c => actual.some(run => run.head_sha === c)),
+    scope, "REQUIRED_CI", "缺独立取得的全部适用 CI，或未绑定最终产品提交的绿结果。");
     return values;
   };
   const main = (scope: string, sha: string | null | undefined) => {
@@ -622,6 +749,7 @@ export function generateAt18({ manifest, observations: obs, source, originMain, 
   const capabilityFields = z.object({ version: z.union([text, integer]).transform(String) });
   const permission_evidence: Record<(typeof deploymentClasses)[number], z.infer<typeof permission> | null> =
     { experiment: null, production: null };
+  const permissionRefs: Record<(typeof deploymentClasses)[number], ArtifactRef[]> = { experiment: [], production: [] };
   const migration_invariants: z.infer<typeof reportShape>["migration_invariants"] = { experiment: null, production: null };
   const post_gate_records: z.infer<typeof reportShape>["post_gate_records"] = { experiment: null, production: null };
   const permissionStart = failures.length;
@@ -633,16 +761,23 @@ export function generateAt18({ manifest, observations: obs, source, originMain, 
       expect(!observed, scope, "PRODUCTION_INACTIVE", "未启用生产权限槽位却提供了观察。");
       continue;
     }
-    const [authorization_declaration = null] = classRefs(scope, cls,
-      observed?.authorization_declaration ? [observed.authorization_declaration] : []);
-    const [runtime_verification = null] = classRefs(scope, cls,
-      observed?.runtime_verification ? [observed.runtime_verification] : []);
-    const venue = fromArtifact(scope, "venue_permission_source", observed?.venue_permission_source, sourceFields);
-    const venueDocument = checkedRef(scope, "venue_permission_document", observed?.venue_permission_document);
+    const binding = { profile: observed?.venue_profile?.sha256 ?? null, capability: observed?.capability_record?.sha256 ?? null };
+    const verify = (key: keyof NonNullable<typeof observed>) => {
+      const candidate = observed?.[key];
+      if (!candidate) return null;
+      const ref = checkedSupport(claim("permission", scope, key, cls, binding),
+        `${key.toUpperCase()}_SUPPORT`, candidate, key === "runtime_verification");
+      if (ref) permissionRefs[cls].push(ref);
+      return ref;
+    };
+    const authorization_declaration = verify("authorization_declaration");
+    const runtime_verification = verify("runtime_verification");
+    const venue = verify("venue_permission_source") && fromArtifact(scope, "venue_permission_source", observed?.venue_permission_source, sourceFields);
+    const venueDocument = verify("venue_permission_document");
     if (venue && venueDocument) expect(venue.sha256 === venueDocument.sha256,
       scope, "VENUE_PERMISSION_SOURCE_HASH", "权限来源登记的摘要与场所文档原件不符。");
-    const version = fromArtifact(scope, "capability_record", observed?.capability_record, capabilityFields);
-    const profile = checkedRef(scope, "venue_profile", observed?.venue_profile);
+    const version = verify("capability_record") && fromArtifact(scope, "capability_record", observed?.capability_record, capabilityFields);
+    const profile = verify("venue_profile");
     const slot = permission_evidence[cls] = {
       authorization_declaration, runtime_verification,
       venue_permission_fact: venue && venueDocument && venue.sha256 === venueDocument.sha256 ? venue : null,
@@ -675,15 +810,21 @@ export function generateAt18({ manifest, observations: obs, source, originMain, 
       continue;
     }
     const start = failures.length;
-    const evidence = classRefs(scope, cls, proved(scope, "NON_EMPTY_MIGRATION", "缺非空场景和实际回退证据。", observed?.non_empty_run));
+    const evidence = classRefs(scope, cls, proved(claim("migration", scope, "非空运行和回退", cls),
+      "NON_EMPTY_MIGRATION", "缺非空场景和实际回退证据。", observed?.non_empty_run, true));
     const flags = {
-      no_lost_rights: !!evidence.length && observed?.no_lost_rights === true,
-      no_duplicated_capital: !!evidence.length && observed?.no_duplicated_capital === true,
-      no_dual_write: !!evidence.length && observed?.no_dual_write === true,
-      no_resend: !!evidence.length && observed?.no_resend === true,
+      no_lost_rights: false, no_duplicated_capital: false, no_dual_write: false, no_resend: false,
     };
+    const non_empty_evidence_refs = [...evidence];
+    for (const key of migrationKeys) {
+      const proven = evidence.flatMap(ref => support(ref, claim("migration", scope, key, cls), true) ?? []);
+      flags[key] = evidence.length > 0 && proven.length === evidence.length;
+      expect(!flags[key] || observed?.[key] !== false, scope, key.toUpperCase(),
+        "观察值与所得不变量证据冲突。");
+      non_empty_evidence_refs.push(...proven);
+    }
     for (const key of migrationKeys) expect(flags[key], scope, key.toUpperCase(), `未证实迁移不变量 ${key}。`);
-    migration_invariants[cls] = { ...flags, non_empty_evidence_refs: evidence };
+    migration_invariants[cls] = { ...flags, non_empty_evidence_refs };
     migrationOk.set(cls, failures.length === start);
   }
 
@@ -696,10 +837,25 @@ export function generateAt18({ manifest, observations: obs, source, originMain, 
       pendingGate(scope, gateName, cls, true);
       continue;
     }
-    const status = observed?.status ?? "NOT_TRIGGERED";
-    const gate = fromArtifact(scope, "gate_reached_event", observed?.gate_reached_event, gateFields);
-    const version = fromArtifact(scope, "parameter_version", observed?.parameter_version, versionFields);
-    const activation = fromArtifact(scope, "first_activation", observed?.first_activation, activationFields);
+    const postRef = (key: "gate_reached_event" | "parameter_version" | "first_activation") => {
+      const ref = observed?.[key];
+      return ref ? checkedSupport(claim("post_gate", scope, key, cls),
+        `POST_GATE_${key.toUpperCase()}_SUPPORT`, ref, key !== "parameter_version") : null;
+    };
+    const gateRef = postRef("gate_reached_event");
+    const versionRef = postRef("parameter_version");
+    const activationRef = postRef("first_activation");
+    const gate = gateRef && fromArtifact(scope, "gate_reached_event", gateRef, gateFields);
+    const version = versionRef && fromArtifact(scope, "parameter_version", versionRef, versionFields);
+    const activation = activationRef && fromArtifact(scope, "first_activation", activationRef, activationFields);
+    // 未获肯定支持时只能写带 FailedCheck 的诊断槽；此处的 NOT_TRIGGERED 不可计销项。
+    const status = activation ? "TRIGGERED_AND_ENABLED" : version ? "TRIGGERED_VERSION_AUTHORIZED" :
+      gate ? "TRIGGERED_AWAITING_POLICY" : "NOT_TRIGGERED";
+    if (observed) expect(observed.status === status, scope, "POST_GATE_STATE_CONFLICT", "观察状态与原件派生状态不符。");
+    if (observed?.status === "TRIGGERED_AND_ENABLED") expect(activation, scope, "POST_GATE_ACTIVATION", "缺声称的首次启用原件。");
+    expect(!observed?.gate_reached_event || gate, scope, "POST_GATE_EVENT", "真实触达原件未获支持。");
+    expect(!observed?.parameter_version || version, scope, "POST_GATE_VERSION", "授权版本原件未获支持。");
+    expect(!observed?.first_activation || activation, scope, "POST_GATE_ACTIVATION", "首次启用原件未获支持。");
     const active = status === "TRIGGERED_AND_ENABLED";
     const authorized = active || status === "TRIGGERED_VERSION_AUTHORIZED";
     const triggered = status !== "NOT_TRIGGERED";
@@ -716,13 +872,14 @@ export function generateAt18({ manifest, observations: obs, source, originMain, 
     scope, "POST_GATE_ACTIVATION_ORDER", "首次启用与前序记录的互引或时序不符。");
     const nonActivation = active
       ? checkedRefs(scope, "non_activation_evidence", observed?.non_activation?.evidence_refs)
-      : proved(scope, "POST_GATE_NON_ACTIVATION", "缺受测运行未启用阶段能力的证据。", observed?.non_activation);
+      : proved(claim("post_gate", scope, status, cls, obs.bounded_domain_statement),
+        "POST_GATE_NON_ACTIVATION", "缺受测运行未启用阶段能力及有界声明的证据。", observed?.non_activation, true);
     if (active) expect(!observed?.non_activation, scope, "POST_GATE_STATE_CONFLICT", "已启用槽位却提供了未启用观察。");
     pendingGate(scope, gateName, cls, !active);
     post_gate_records[cls] = {
-      status, gate_reached_event: gate ? observed!.gate_reached_event! : null,
-      parameter_version: version ? observed!.parameter_version! : null,
-      first_activation: activation ? observed!.first_activation! : null,
+      status, gate_reached_event: gate ? gateRef : null,
+      parameter_version: version ? versionRef : null,
+      first_activation: activation ? activationRef : null,
       gate_reached_known_at: gate?.known_at ?? null, version_authorized_at: version?.authorized_at ?? null,
       first_activation_known_at: activation?.known_at ?? null,
       non_activation_evidence: classRefs(scope, cls, nonActivation),
@@ -738,14 +895,23 @@ export function generateAt18({ manifest, observations: obs, source, originMain, 
     expect(tickets.length, scope, "IMPLEMENTATION_TICKETS", "缺实施票和范围。");
     expect(commits.length && commits.every(commit => source.isAncestor(commit, head)),
       scope, "IMPLEMENTATION_COMMITS", "缺确切的已合入实施提交。");
-    const independent_reviews = reviews(scope, d?.independent_reviews);
     const main_sha = main(scope, d?.main_sha);
-    const ci_runs = checkCi(scope, d?.ci_runs);
-    const evidence_by_class = grouped(scope, d?.evidence_by_class, true);
+    const products = [...new Set([...(main_sha ? [main_sha] : []), ...commits])];
+    const independent_reviews = reviews(scope, products, d?.independent_reviews);
+    const ci_runs = checkCi(scope, products, d?.ci_runs);
+    const evidence_by_class = grouped(scope, d?.evidence_by_class, true, products);
     const downstream_status = d?.downstream_status ?? [];
     expect(d?.downstream_status !== undefined, scope, "DOWNSTREAM_STATUS", "缺下游票状态观察。");
     const remaining_obligations = remaining(scope, d?.remaining_obligations);
-    proved(scope, "DESTINATION_OBLIGATIONS", "缺覆盖完整 Destination 义务的实际对账。", d?.obligations);
+    const accepted = proved(claim("destination", scope, "完整义务", undefined, {
+      obligation: obligations.get(id)!.verbatim, products, tickets, downstream_status, remaining_obligations,
+    }), "DESTINATION_OBLIGATIONS", "缺覆盖完整 Destination 义务的实际对账。", d?.obligations, true);
+    for (const ref of accepted) {
+      const slot = Object.values(evidence_by_class).find(group => group?.some(other => artifactKey(other) === artifactKey(ref)));
+      if (slot) slot.push(ref);
+      else fail(scope, "DESTINATION_SUPPORT_UNBOUND", "完整义务的证明未绑定已核实的运行槽。", ref);
+    }
+    if (id === 5) for (const cls of deploymentClasses) evidence_by_class[cls]?.push(...permissionRefs[cls]);
     if ([2, 3, 5].includes(id)) expect([...migrationOk.values()].every(ok => ok),
       scope, "MIGRATION_INVARIANTS", "相关非空迁移及回退不变量未齐。");
     const passed = failures.length === start && (id !== 5 || permissionOk);
@@ -760,7 +926,11 @@ export function generateAt18({ manifest, observations: obs, source, originMain, 
     const preflight = tb_id === "TB-11";
     const start = failures.length;
     const slices = t.slices ?? [];
-    const expected = preflight ? [1391, 1403] : t.expected_slice_tickets ?? [];
+    const roster = preflight ? undefined : source.tbRoster?.(ticket);
+    const expected = preflight ? [1391, 1403] : roster?.slices.map(s => s.ticket) ?? [];
+    if (!preflight) expect(roster && roster.state === t.ticket_state &&
+      roster.slices.every(s => slices.some(observed => observed.ticket === s.ticket && observed.state === s.state)),
+    tb_id, "TB_TRACKER_SCOPE", "缺 tracker 原生票态与子片分母，或观察与其不符。");
     expect(expected.length > 0 && slices.length === expected.length && new Set(expected).size === expected.length &&
       expected.every(ticket => slices.filter(s => s.ticket === ticket).length === 1),
     tb_id, "IMPLEMENTATION_SLICES", "缺应验实施子片清单，或实际子片未齐。");
@@ -771,25 +941,45 @@ export function generateAt18({ manifest, observations: obs, source, originMain, 
     }
     if (!preflight) expect(t.ticket_state === "CLOSED", tb_id, "TB_NOT_CLOSED", "TB 票仍为 OPEN，独立关票门未满足。");
     const main_sha = main(tb_id, t.main_sha);
-    const final_reviews = reviews(tb_id, t.final_reviews);
-    const ci_runs = checkCi(tb_id, t.ci_runs);
+    const products = [...new Set([...(main_sha ? [main_sha] : []), ...slices.flatMap(s => s.main_sha ?? [])])];
+    const final_reviews = reviews(tb_id, products, t.final_reviews);
+    const ci_runs = checkCi(tb_id, products, t.ci_runs);
     const input_bundle = preflight ? inputRef : null;
-    const evidence_by_class = grouped(tb_id, preflight ? undefined : t.evidence_by_class, !preflight);
-    const entity_reports = preflight ? [] : checkedRefs(tb_id, "entity_reports", t.entity_reports);
+    const evidence_by_class = grouped(tb_id, preflight ? undefined : t.evidence_by_class, !preflight, products);
+    const entity_reports = preflight ? [] : checkedRefs(tb_id, "entity_reports", t.entity_reports).flatMap(ref => {
+      const bytes = artifactBytes.get(artifactKey(ref))!;
+      let content: Record<string, unknown> | undefined;
+      try { content = parseJsonObject(bytes); } catch { /* 原件格式由可信解读器决定。 */ }
+      if (content?.schema_version === "at18-input-bundle/1" || content?.schema_version === "at18-report/1") {
+        const valid = content.schema_version === "at18-input-bundle/1"
+          ? at18InputBundleSchema.safeParse(content).success : at18ReportSchema.safeParse(content).success;
+        if (!valid) {
+          fail(tb_id, "ENTITY_REPORT_CONTENT_INVALID", "AT-18 实体的封闭格式或内部摘要不符。", ref);
+          return [];
+        }
+      }
+      const supported = support(ref, claim("tb", tb_id, "本 TB 实体报告", undefined, { ticket, products }), false);
+      if (!supported) fail(tb_id, "ENTITY_REPORT_SCOPE", "原件未证实本 TB 的当前交付。", ref);
+      return supported ?? [];
+    });
     const remaining_obligations = preflight ? t.remaining_obligations ?? [] : remaining(tb_id, t.remaining_obligations);
     if (preflight) {
       expect(input_bundle, tb_id, "INPUT_BUNDLE_MISSING", "缺可绑定的共同输入包。");
+      expect(t.ticket_state === "OPEN" && slices.every(s => s.state === "OPEN"), tb_id, "TB11_STAGE_STATE",
+        "正式报告阶段要求 TB-11、#1391 与 #1403 均为 OPEN。");
       for (const child of expected) {
         const s = slices.find(item => item.ticket === child);
-        expect(s?.main_sha && ci_runs.some(run => matchesMerged(run.head_sha, s.main_sha!)),
+        expect(s?.main_sha && ci_runs.some(run => run.head_sha === s.main_sha),
           `${tb_id}.#${child}`, "SLICE_REQUIRED_CI", "缺子片提交对应的必需 CI。");
         expect(s?.main_sha && final_reviews.some(review => review.verdict === "PASS" &&
-          matchesMerged(review.reviewed_head, s.main_sha!)),
+          review.reviewed_head === s.main_sha),
         `${tb_id}.#${child}`, "SLICE_INDEPENDENT_REVIEW", "缺覆盖子片最终差异的 PASS 独评。");
       }
     } else {
       expect(entity_reports.length, tb_id, "ENTITY_REPORTS", "缺本 TB 已落地的实体报告。");
-      proved(tb_id, "TB_OBLIGATIONS", "缺全部外部行为的实际对账。", t.obligations);
+      entity_reports.push(...proved(claim("tb", tb_id, "全部外部行为", undefined, {
+        ticket, products, slices, ticket_state: t.ticket_state,
+      }), "TB_OBLIGATIONS", "缺全部外部行为的实际对账。", t.obligations, true));
       if (tb_id === "TB-08" || tb_id === "TB-09" || tb_id === "TB-10") {
         for (const cls of deploymentClasses) {
           if (cls === "experiment" || obs.production_enabled) expect(evidence_by_class[cls]?.length,
@@ -809,22 +999,25 @@ export function generateAt18({ manifest, observations: obs, source, originMain, 
       remaining_obligations, ticket_state: t.ticket_state, gate_satisfied: start === failures.length };
   });
 
+  const coverageStart = failures.length;
   const rawCrosswalk = specBytes.crosswalk_ref;
   const rows = rawCrosswalk && derive("spec_coverage", () => parseJsonObject(rawCrosswalk), crosswalk_ref);
-  const projection = <T>(key: keyof Crosswalk, schema: z.ZodType<T[]>): T[] => {
+  const projection = <T>(key: keyof Crosswalk, schema: z.ZodType<T>): T[] => {
     if (!rows) return [];
-    return derive(`spec_coverage.${key}`, () => {
-      const value = schemaValue(rows[key], schema);
+    const values = derive(`spec_coverage.${key}`, () => schemaValue(rows[key], z.array(z.unknown())), crosswalk_ref);
+    return values?.flatMap((raw, i) => derive(`spec_coverage.${key}[${i}]`, () => {
+      const value = schemaValue(raw, schema);
       canonicalizeJcs(value);
       return value;
-    }, crosswalk_ref) ?? [];
+    }, crosswalk_ref) ?? []) ?? [];
   };
   const crosswalk = rows && {
-    rows: projection("rows", crosswalkFields.shape.rows),
-    family_entry_links: projection("family_entry_links", crosswalkFields.shape.family_entry_links),
-    detailed_acceptance_links: projection("detailed_acceptance_links", crosswalkFields.shape.detailed_acceptance_links),
+    rows: projection("rows", crosswalkFields.shape.rows.element),
+    family_entry_links: projection("family_entry_links", crosswalkFields.shape.family_entry_links.element),
+    detailed_acceptance_links: projection("detailed_acceptance_links", crosswalkFields.shape.detailed_acceptance_links.element),
   };
   const spec_coverage = buildCoverage(crosswalk, crosswalk_ref?.sha256 ?? null);
+  const coverageOk = coverageStart === failures.length;
   function buildCoverage(crosswalk: Crosswalk | null, crosswalk_sha256: string | null): At18Report["spec_coverage"] {
     const collected = index("spec_coverage", obs.coverage ?? [], value => `${value.kind}:${value.id}`);
     const used = new Set<string>();
@@ -851,9 +1044,10 @@ export function generateAt18({ manifest, observations: obs, source, originMain, 
           else fail(scope, "COVERAGE_TB11_GATE", "TB-11 前置实施门或共同输入包缺失。");
           continue;
         }
-        evidence_refs.push(...proved(scope, `COVERAGE_${slice}`,
+        evidence_refs.push(...proved(claim("coverage", scope, preserve ? "排除与防混用" : "完成子义务",
+          undefined, { kind, id, slice, main_sha: head }), `COVERAGE_${slice}`,
           preserve ? `${slice} 缺本条的排除与防混用证据。` : `${slice} 缺本条在该切片的子义务证据。`,
-        bySlice.get(slice)?.proof));
+        bySlice.get(slice)?.proof, !preserve));
       }
       for (const id of bySlice.keys()) expect(id !== "TB-11" && slices.includes(id), scope,
         "COVERAGE_UNEXPECTED_SLICE", "观察引用了非对应切片或尝试替代 TB-11 共同输入包。");
@@ -865,7 +1059,8 @@ export function generateAt18({ manifest, observations: obs, source, originMain, 
       for (const [gate, observation] of deferred) {
         const entry = pending.get(gate);
         const isProduction = gate !== coverageGates[1];
-        evidence_refs.push(...proved(scope, "COVERAGE_DEFERRED_BOUNDARY",
+        evidence_refs.push(...proved(claim("deferral", scope, "获准延期本子义务",
+          isProduction ? "production" : "experiment", { kind, id, gate }), "COVERAGE_DEFERRED_BOUNDARY",
           `缺 ${gate} 对本条子义务适用的证据。`, observation.boundary));
         expect(entry?.required === false && entry.evidence_class === (isProduction ? "production" : "experiment") &&
           (gate === coverageGates[0] ? !obs.production_enabled :
@@ -912,15 +1107,19 @@ export function generateAt18({ manifest, observations: obs, source, originMain, 
     const item = legacyInput.get(ticket)!;
     const scope = `legacy:#${ticket}`;
     const start = failures.length;
-    const evidence_refs = proved(scope, "LEGACY_DISPOSITION_EVIDENCE", "缺旧关联票逐项去向证据。", item.disposition_proof);
     const { disposition, ticket_state, remaining_obligations = [] } = item;
+    const stateFacts = { ticket, disposition, ticket_state, remaining_obligations };
+    const evidence_refs = proved(claim("legacy", scope, legacyRules[ticket], undefined, stateFacts),
+      "LEGACY_DISPOSITION_EVIDENCE", "缺旧票原文和 ADR §四逐项相符的去向证据。", item.disposition_proof);
     if (ticket === 942 || ticket === 1282) expect(ticket_state === "CLOSED", scope,
       "LEGACY_MUST_STAY_CLOSED", "原处分须保持关闭。");
     if (ticket === 1304 && ticket_state === "CLOSED") expect(evidence_refs.length, scope,
       "LEGACY_1304_CLOSED_WITHOUT_EVIDENCE", "未核实报告器及回归锁，不得关闭 #1304。");
     if (ticket === 1320) {
       const heavyEvidence = item.heavy_resolved
-        ? proved(scope, "ISSUE_1320_HEAVY_RESOLUTION_EVIDENCE", "缺重型测量完成或合法废弃原件。", item.heavy_resolved) : [];
+        ? proved(claim("legacy", scope, "七标的各十年 1min 冻结预注册测量完成或合法废弃",
+          "simulation", ["ES", "GC", "CL", "ZN", "6E", "BRN", "DX"]),
+        "ISSUE_1320_HEAVY_RESOLUTION_EVIDENCE", "缺重型测量完成或合法废弃原件。", item.heavy_resolved) : [];
       evidence_refs.push(...heavyEvidence);
       pendingGate(scope, heavy, "simulation", heavyEvidence.length === 0);
       if (!heavyEvidence.length) expect(ticket_state === "OPEN", scope,
@@ -928,9 +1127,11 @@ export function generateAt18({ manifest, observations: obs, source, originMain, 
     }
     if (ticket === 1279) {
       expect(ticket_state === "OPEN", scope, "ISSUE_1279_MUST_STAY_OPEN", "#1279 在整图验收阶段须仍为 OPEN。");
-      evidence_refs.push(...proved(scope, "ISSUE_1279_OWN_REMAINING_ONLY", "缺证据表明剩余项只属于 #1279。", item.own_remaining_only));
-      evidence_refs.push(...proved(scope, "ISSUE_1279_NOT_RELEASED", "缺未宣布试运行放行的证据。", item.not_released));
-      expect(destinations.every(d => d.result === "PASS") && tb_summaries.slice(0, 10).every(tb => tb.gate_satisfied) &&
+      evidence_refs.push(...proved(claim("legacy", scope, "剩余项仅属 #1279", undefined, remaining_obligations),
+        "ISSUE_1279_OWN_REMAINING_ONLY", "缺证据表明剩余项只属于 #1279。", item.own_remaining_only));
+      evidence_refs.push(...proved(claim("legacy", scope, "未解除前置也未宣布试运行放行", undefined, stateFacts),
+        "ISSUE_1279_NOT_RELEASED", "缺未宣布试运行放行的证据。", item.not_released));
+      expect(coverageOk && destinations.every(d => d.result === "PASS") && tb_summaries.slice(0, 10).every(tb => tb.gate_satisfied) &&
         [...spec_coverage.stories, ...spec_coverage.families, ...spec_coverage.details].every(entry => entry.status !== "FAIL"),
       scope, "ISSUE_1279_GRAPH_OBLIGATIONS", "本图 Destination、TB 或 SPEC 覆盖义务尚未完成。");
     }
