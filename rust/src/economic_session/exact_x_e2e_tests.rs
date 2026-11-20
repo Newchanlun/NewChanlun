@@ -70,12 +70,10 @@ fn economic_tables(f: &Fixture) -> Value {
 /// 只探走 `session_transport::serve_unix*` 的 E 与 X：那里空连接由 I/O 线程读到 EOF，回输送层自己的
 /// `{"ok":false,…}` 后关闭，不入队、不到域 handler、不碰库。这里读到对端关闭才返回，并核回的正是这条
 /// 输送层拒绝——探测没有变成一条请求。受控 S 不探：它 `bind` 返回时已在 listen，且把每条连接都当请求。
-fn listening(path: &Path) -> bool {
-    let Ok(mut s) = UnixStream::connect(path) else {
-        return false;
-    };
-    // BSD/macOS 在对端已先接受并关闭连接时，shutdown(SHUT_WR) 可返回 ENOTCONN（ErrorKind::NotConnected）；
-    // 与 history_simulation_entry.py:connect_probe 对齐：忽略 NotConnected，继续读取对端关闭前写入的回复；
+fn listening_probe_stream(mut s: UnixStream) -> bool {
+    // BSD/macOS 在对端已先接受并关闭连接时，shutdown(SHUT_WR) 可返回 ENOTCONN（NotConnected），
+    // setsockopt(SO_RCVTIMEO) 可返回 EINVAL（InvalidInput）。此时对端已关闭，读端不会阻塞，
+    // 忽略这两类对端先关错误并继续读取对端关闭前写入的回复；
     // 若对端未写任何字节即关闭（如连接数瞬时受限），返回 false 由 wait_for 重试直至期限耗尽。
     if let Err(err) = s.shutdown(std::net::Shutdown::Write) {
         assert_eq!(
@@ -84,8 +82,13 @@ fn listening(path: &Path) -> bool {
             "半关闭就绪探针失败：{err}"
         );
     }
-    s.set_read_timeout(Some(std::time::Duration::from_secs(5)))
-        .unwrap();
+    if let Err(err) = s.set_read_timeout(Some(std::time::Duration::from_secs(5))) {
+        assert_eq!(
+            err.kind(),
+            std::io::ErrorKind::InvalidInput,
+            "设置就绪探针读超时失败：{err}"
+        );
+    }
     let mut reply = String::new();
     match s.read_to_string(&mut reply) {
         Ok(_) => {}
@@ -100,11 +103,27 @@ fn listening(path: &Path) -> bool {
     assert_eq!(reply["ok"], false, "空连接须止于输送层：{reply}");
     true
 }
+fn listening(path: &Path) -> bool {
+    let Ok(s) = UnixStream::connect(path) else {
+        return false;
+    };
+    listening_probe_stream(s)
+}
 
 #[test]
 fn listening_probe_tolerates_early_peer_close_and_verifies_transport_rejection() {
     let dir = tempfile::tempdir().unwrap();
     assert!(!listening(&dir.path().join("missing.sock")));
+
+    // 确定复现对端已在探针调用 shutdown/set_read_timeout 之前关闭（macOS 同时触发 ENOTCONN 与 EINVAL）。
+    let (client_empty, server_empty) = UnixStream::pair().unwrap();
+    drop(server_empty);
+    assert!(!listening_probe_stream(client_empty));
+
+    let (client_reply, mut server_reply) = UnixStream::pair().unwrap();
+    server_reply.write_all(b"{\"ok\":false}\n").unwrap();
+    drop(server_reply);
+    assert!(listening_probe_stream(client_reply));
 
     let early_path = dir.path().join("early-close.sock");
     let early_listener = UnixListener::bind(&early_path).unwrap();
@@ -141,7 +160,13 @@ fn exchange(socket: &Path, frame: &Value) -> Value {
     let mut s = UnixStream::connect(socket).unwrap();
     s.write_all(format!("{}\n", canonical_json(frame)).as_bytes())
         .unwrap();
-    s.shutdown(std::net::Shutdown::Write).unwrap();
+    if let Err(err) = s.shutdown(std::net::Shutdown::Write) {
+        assert_eq!(
+            err.kind(),
+            std::io::ErrorKind::NotConnected,
+            "半关闭测试请求失败：{err}"
+        );
+    }
     let mut line = String::new();
     BufReader::new(s).read_line(&mut line).unwrap();
     strict_json(line.trim_end().as_bytes()).unwrap()
