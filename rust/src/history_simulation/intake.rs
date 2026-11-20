@@ -239,90 +239,136 @@ pub(crate) fn committed_capture_batch(
 /// - 主库 (`SQLITE_OPEN_MAIN_DB`) 附 `mode=ro&readonly_shm=1` 复用默认 `unix` VFS 的 `SHARED` 锁与
 ///   `unixInodeInfo`/`unixShmNode` 引用计数（跨 Linux / macOS 与同进程写者共享 `-shm` 锁归属，
 ///   关闭只读连接绝不误释同进程 SQLite 写者的 POSIX DMS 锁）；
+/// - 注册时通过官方 SQLite VFS `xGetSystemCall`/`xSetSystemCall` 为默认 `unix` VFS 的 `fchown` 与 `fchmod`
+///   安装线程局部守卫（仅当本线程处于 `history_sim_ro` 打开/映射临界区时拦截为空操作，其余所有线程与
+///   健康连接原样透传原系统调用），确保即便以 `euid == 0`（root）读取正常非空 `-shm` 或 0 字节异权限
+///   `-shm`，也不会触发 `unixOpenSharedMemory` 的 `robustFchown`/`robust_open` 改写 owner/mode/`ctime`；
 /// - WAL (`SQLITE_OPEN_WAL`) 直接以 `O_RDONLY | O_NOFOLLOW | O_CLOEXEC` 打开并仅做 `pread` / `fstat`
 ///   （SQLite 不在 `-wal` 上持 POSIX 锁），既彻底避开 0 字节只读 `-wal` 的 `robust_open`/`fchmod`，
 ///   又在 `-wal` 与 `-shm` 双缺（`ENOENT` 且 `ENOENT`，即正式 X 正常末连接 checkpoint 闭库态）下进入
 ///   受检虚拟空 WAL 只读态，无需重启 X、无需 `immutable=1`、绝不创建任何文件；一旦 `-wal` 或 `-shm`
 ///   存在/中途出现/不可读/非普通文件，立即走真实 WAL 读取或显式拒绝，绝不回落陈旧主库；
-/// - SHM (`xShmMap`/`xShmLock`/`xShmBarrier`/`xShmUnmap`) 分三态：
+/// - SHM (`xShmMap`/`xShmLock`/`xShmBarrier`/`xShmUnmap`) 分两态：
 ///   1) `AbsentClean`：仅当 `-wal` 与 `-shm` 双 `ENOENT` 时返回 `SQLITE_READONLY_CANTINIT`，并在每次
 ///      `xShmMap`/`xShmLock`/`xFileSize`/`xRead` 复检双缺；
-///   2) `Delegated`：所有真实非空 `-shm`（以及权限一致且非 root 的 0 字节 `-shm`）委托默认 `unix`
-///      VFS（带 `readonly_shm=1`、禁扩展、禁独占锁、禁删除、`SQLITE_READONLY` 标记），零 `fchmod`/
-///      `fchown` 且完整保留同进程/跨平台 POSIX `unixShmNode` 锁归属；
-///   3) `RoLocal`：仅针对 0 字节且权限与主库不同（或 root）的停机快照 `-shm`（在线 SQLite 写者永不
-///      持有 0 字节 `-shm`）使用纯 `O_RDONLY | O_NOFOLLOW | O_CLOEXEC`，零 `fchmod`/`fchown`；
-/// - 绝不改动全局默认 SQLite VFS，也不影响健康财务路径、`#2078` 单批核验与旧查询。
+///   2) `Delegated`：所有存在的普通文件 `-shm`（含非空与 0 字节、root 与非 root）统一委托默认 `unix`
+///      VFS（带 `readonly_shm=1`、禁扩展、禁独占锁、禁删除、`SQLITE_READONLY` 标记及线程局部元数据写守卫），
+///      零 `fchmod`/`fchown` 且完整保留同进程/跨平台 POSIX `unixShmNode` 锁归属；
+/// - 绝不影响健康财务路径、`#2078` 单批核验与旧查询。
 mod readonly_vfs {
     use rusqlite::ffi;
+    use std::cell::Cell;
     use std::ffi::{c_char, c_int, c_void, CStr, CString};
     use std::sync::atomic::{fence, Ordering};
     use std::sync::OnceLock;
 
     const VFS_NAME: &str = "history_sim_ro";
     const VFS_NAME_CSTR: &[u8] = b"history_sim_ro\0";
-    // 与 SQLite unix VFS WAL-index POSIX 字节锁偏移保持逐字节一致：
-    // UNIX_SHM_BASE = (22 + SQLITE_SHM_NLOCK) * 4 = 120，UNIX_SHM_DMS = 128。
-    const UNIX_SHM_BASE: libc::off_t = ((22 + ffi::SQLITE_SHM_NLOCK) * 4) as libc::off_t;
-    const UNIX_SHM_DMS: libc::off_t = UNIX_SHM_BASE + ffi::SQLITE_SHM_NLOCK as libc::off_t;
     const REAL_OFFSET: usize = (std::mem::size_of::<RoMainFile>() + 15) & !15;
 
-    // 仅用于 0 字节只读快照 `-shm`（`RoLocal`，无在线 SQLite 写者可持有 0 字节 `-shm`）：
-    // Linux 使用 OFD 锁，非 Linux 使用标准 POSIX 字节锁。
-    #[cfg(target_os = "linux")]
-    const FCNTL_GETLK: c_int = libc::F_OFD_GETLK;
-    #[cfg(not(target_os = "linux"))]
-    const FCNTL_GETLK: c_int = libc::F_GETLK;
-    #[cfg(target_os = "linux")]
-    const FCNTL_SETLK: c_int = libc::F_OFD_SETLK;
-    #[cfg(not(target_os = "linux"))]
-    const FCNTL_SETLK: c_int = libc::F_SETLK;
+    type SyscallPtr = unsafe extern "C" fn();
+    type FchownFn = unsafe extern "C" fn(c_int, libc::uid_t, libc::gid_t) -> c_int;
+    type FchmodFn = unsafe extern "C" fn(c_int, libc::mode_t) -> c_int;
 
     static REGISTERED: OnceLock<Result<&'static str, String>> = OnceLock::new();
+    static ORIG_FCHOWN: OnceLock<FchownFn> = OnceLock::new();
+    static ORIG_FCHMOD: OnceLock<FchmodFn> = OnceLock::new();
 
-    struct RoShm {
-        path: CString,
-        fd: c_int,
-        dms_locked: bool,
-        mmaps: Vec<(*mut c_void, usize)>,
-        regions: Vec<*mut c_void>,
+    thread_local! {
+        static SUPPRESS_METADATA_WRITES: Cell<usize> = const { Cell::new(0) };
     }
 
-    impl RoShm {
-        fn new(path: CString) -> Self {
-            Self {
-                path,
-                fd: -1,
-                dms_locked: false,
-                mmaps: Vec::new(),
-                regions: Vec::new(),
-            }
-        }
+    struct MetadataWriteSuppressGuard;
 
-        unsafe fn unmap_and_close(&mut self) {
-            for (ptr, len) in self.mmaps.drain(..) {
-                libc::munmap(ptr, len);
-            }
-            self.regions.clear();
-            if self.fd >= 0 {
-                libc::close(self.fd);
-                self.fd = -1;
-            }
-            self.dms_locked = false;
+    impl MetadataWriteSuppressGuard {
+        #[inline]
+        fn enter() -> Self {
+            SUPPRESS_METADATA_WRITES.with(|depth| depth.set(depth.get() + 1));
+            Self
         }
+    }
+
+    impl Drop for MetadataWriteSuppressGuard {
+        #[inline]
+        fn drop(&mut self) {
+            SUPPRESS_METADATA_WRITES.with(|depth| depth.set(depth.get().saturating_sub(1)));
+        }
+    }
+
+    unsafe extern "C" fn guarded_fchown(fd: c_int, uid: libc::uid_t, gid: libc::gid_t) -> c_int {
+        if SUPPRESS_METADATA_WRITES.with(|depth| depth.get() > 0) {
+            return 0;
+        }
+        let Some(&orig) = ORIG_FCHOWN.get() else {
+            return 0;
+        };
+        orig(fd, uid, gid)
+    }
+
+    unsafe extern "C" fn guarded_fchmod(fd: c_int, mode: libc::mode_t) -> c_int {
+        if SUPPRESS_METADATA_WRITES.with(|depth| depth.get() > 0) {
+            return 0;
+        }
+        let Some(&orig) = ORIG_FCHMOD.get() else {
+            return 0;
+        };
+        orig(fd, mode)
+    }
+
+    unsafe fn install_metadata_write_guards(
+        parent: *mut ffi::sqlite3_vfs,
+    ) -> Result<(Option<SyscallPtr>, Option<SyscallPtr>), String> {
+        if (*parent).iVersion < 3 {
+            return Err("StorageUnavailable：默认 SQLite VFS 不支持系统调用拦截接口".into());
+        }
+        let (Some(get), Some(set)) = ((*parent).xGetSystemCall, (*parent).xSetSystemCall) else {
+            return Err(
+                "StorageUnavailable：默认 SQLite VFS 缺少 xGetSystemCall/xSetSystemCall".into(),
+            );
+        };
+        let orig_fchown = get(parent, c"fchown".as_ptr());
+        if let Some(raw) = orig_fchown {
+            let _ = ORIG_FCHOWN.set(std::mem::transmute::<SyscallPtr, FchownFn>(raw));
+            let rc = set(
+                parent,
+                c"fchown".as_ptr(),
+                Some(std::mem::transmute::<FchownFn, SyscallPtr>(guarded_fchown)),
+            );
+            if rc != ffi::SQLITE_OK {
+                return Err(format!(
+                    "StorageUnavailable：安装 SQLite fchown 只读守卫失败（rc={rc}）"
+                ));
+            }
+        }
+        let orig_fchmod = get(parent, c"fchmod".as_ptr());
+        if let Some(raw) = orig_fchmod {
+            let _ = ORIG_FCHMOD.set(std::mem::transmute::<SyscallPtr, FchmodFn>(raw));
+            let rc = set(
+                parent,
+                c"fchmod".as_ptr(),
+                Some(std::mem::transmute::<FchmodFn, SyscallPtr>(guarded_fchmod)),
+            );
+            if rc != ffi::SQLITE_OK {
+                if let Some(prev) = orig_fchown {
+                    let _ = set(parent, c"fchown".as_ptr(), Some(prev));
+                }
+                return Err(format!(
+                    "StorageUnavailable：安装 SQLite fchmod 只读守卫失败（rc={rc}）"
+                ));
+            }
+        }
+        Ok((orig_fchown, orig_fchmod))
     }
 
     enum ShmMode {
         Uninit,
         AbsentClean,
         Delegated,
-        RoLocal(RoShm),
     }
 
     struct RoMainState {
         wal_path: CString,
         shm_path: CString,
-        db_mode: u32,
         shm_mode: ShmMode,
     }
 
@@ -354,6 +400,7 @@ mod readonly_vfs {
                     return Err("StorageUnavailable：未找到默认 SQLite VFS".into());
                 }
                 let parent_vfs = unsafe { *parent };
+                let (orig_fchown, orig_fchmod) = unsafe { install_metadata_write_guards(parent)? };
                 let sz_os_file = parent_vfs
                     .szOsFile
                     .checked_add(REAL_OFFSET as c_int)
@@ -381,6 +428,14 @@ mod readonly_vfs {
                 let rc = unsafe { ffi::sqlite3_vfs_register(raw, 0) };
                 if rc != ffi::SQLITE_OK {
                     unsafe {
+                        if let Some(set) = (*parent).xSetSystemCall {
+                            if let Some(prev) = orig_fchown {
+                                let _ = set(parent, c"fchown".as_ptr(), Some(prev));
+                            }
+                            if let Some(prev) = orig_fchmod {
+                                let _ = set(parent, c"fchmod".as_ptr(), Some(prev));
+                            }
+                        }
                         drop(Box::from_raw(raw));
                     }
                     return Err(format!(
@@ -441,61 +496,6 @@ mod readonly_vfs {
             return Err(libc::EINVAL);
         }
         Ok(fd)
-    }
-
-    unsafe fn open_ro_regular(path: *const c_char) -> Result<c_int, c_int> {
-        open_ro_regular_errno(path).map_err(|_| ffi::SQLITE_CANTOPEN)
-    }
-
-    unsafe fn fcntl_setlk(
-        fd: c_int,
-        l_type: libc::c_short,
-        start: libc::off_t,
-        len: libc::off_t,
-    ) -> c_int {
-        let mut fl: libc::flock = std::mem::zeroed();
-        fl.l_type = l_type;
-        fl.l_whence = libc::SEEK_SET as libc::c_short;
-        fl.l_start = start;
-        fl.l_len = len;
-        loop {
-            if libc::fcntl(fd, FCNTL_SETLK, &fl) == 0 {
-                return ffi::SQLITE_OK;
-            }
-            match std::io::Error::last_os_error().raw_os_error() {
-                Some(libc::EINTR) => continue,
-                Some(libc::EACCES | libc::EAGAIN) => return ffi::SQLITE_BUSY,
-                _ => return ffi::SQLITE_IOERR_LOCK,
-            }
-        }
-    }
-
-    unsafe fn try_acquire_shm_dms(shm: &mut RoShm) -> c_int {
-        let mut fl: libc::flock = std::mem::zeroed();
-        fl.l_type = libc::F_WRLCK as libc::c_short;
-        fl.l_whence = libc::SEEK_SET as libc::c_short;
-        fl.l_start = UNIX_SHM_DMS;
-        fl.l_len = 1;
-        loop {
-            if libc::fcntl(shm.fd, FCNTL_GETLK, &mut fl) == 0 {
-                break;
-            }
-            if std::io::Error::last_os_error().raw_os_error() == Some(libc::EINTR) {
-                continue;
-            }
-            return ffi::SQLITE_IOERR_LOCK;
-        }
-        if fl.l_type == libc::F_UNLCK as libc::c_short {
-            return ffi::SQLITE_READONLY_CANTINIT;
-        }
-        if fl.l_type == libc::F_WRLCK as libc::c_short {
-            return ffi::SQLITE_BUSY;
-        }
-        let rc = fcntl_setlk(shm.fd, libc::F_RDLCK as libc::c_short, UNIX_SHM_DMS, 1);
-        if rc == ffi::SQLITE_OK {
-            shm.dms_locked = true;
-        }
-        rc
     }
 
     unsafe extern "C" fn ro_open(
@@ -581,29 +581,20 @@ mod readonly_vfs {
         let Ok(shm_path) = CString::new(shm_bytes) else {
             return ffi::SQLITE_CANTOPEN;
         };
-        let mut db_st: libc::stat = std::mem::zeroed();
-        let db_mode = if libc::lstat(name, &mut db_st) == 0 {
-            let m = (db_st.st_mode as u32) & 0o777;
-            if m != 0 {
-                m
-            } else {
-                0o644
-            }
-        } else {
-            0o644
-        };
         let real = file
             .cast::<u8>()
             .add(REAL_OFFSET)
             .cast::<ffi::sqlite3_file>();
         (*real).pMethods = std::ptr::null();
         let mut child_out: c_int = 0;
-        let rc = open(parent, name, real, ro_flags, &mut child_out);
+        let rc = {
+            let _guard = MetadataWriteSuppressGuard::enter();
+            open(parent, name, real, ro_flags, &mut child_out)
+        };
         if !(*real).pMethods.is_null() {
             let state = Box::into_raw(Box::new(RoMainState {
                 wal_path,
                 shm_path,
-                db_mode,
                 shm_mode: ShmMode::Uninit,
             }));
             file.cast::<RoMainFile>().write(RoMainFile {
@@ -944,7 +935,10 @@ mod readonly_vfs {
         let Some(shm_map) = methods.xShmMap else {
             return ffi::SQLITE_IOERR_SHMMAP;
         };
-        let rc = shm_map(real, page, size, 0, out);
+        let rc = {
+            let _guard = MetadataWriteSuppressGuard::enter();
+            shm_map(real, page, size, 0, out)
+        };
         if rc == ffi::SQLITE_OK {
             if !(*out).is_null() || page == 0 {
                 ffi::SQLITE_READONLY
@@ -954,89 +948,6 @@ mod readonly_vfs {
         } else {
             rc
         }
-    }
-
-    unsafe fn ro_local_shm_map(
-        shm: &mut RoShm,
-        page: c_int,
-        size: c_int,
-        out: *mut *mut c_void,
-    ) -> c_int {
-        if shm.fd < 0 {
-            let fd = match open_ro_regular(shm.path.as_ptr()) {
-                Ok(fd) => fd,
-                Err(rc) => return rc,
-            };
-            shm.fd = fd;
-            let rc = try_acquire_shm_dms(shm);
-            if rc != ffi::SQLITE_OK {
-                if rc != ffi::SQLITE_READONLY_CANTINIT {
-                    libc::close(shm.fd);
-                    shm.fd = -1;
-                }
-                return rc;
-            }
-        } else if !shm.dms_locked {
-            let rc = try_acquire_shm_dms(shm);
-            if rc != ffi::SQLITE_OK {
-                return rc;
-            }
-        }
-
-        let page_idx = page as usize;
-        if page_idx < shm.regions.len() {
-            *out = shm.regions[page_idx];
-            return ffi::SQLITE_READONLY;
-        }
-
-        let sz_region = size as usize;
-        let os_page = libc::sysconf(libc::_SC_PAGESIZE).max(1) as usize;
-        let n_per_map = (os_page / sz_region).max(1);
-        let Some(n_req) = page_idx
-            .checked_add(n_per_map)
-            .map(|v| (v / n_per_map) * n_per_map)
-        else {
-            return ffi::SQLITE_IOERR_SHMSIZE;
-        };
-        let Some(n_byte) = (n_req as i64).checked_mul(sz_region as i64) else {
-            return ffi::SQLITE_IOERR_SHMSIZE;
-        };
-
-        let mut st: libc::stat = std::mem::zeroed();
-        if libc::fstat(shm.fd, &mut st) != 0 {
-            return ffi::SQLITE_IOERR_SHMSIZE;
-        }
-        if (st.st_size as i64) < n_byte {
-            return if page == 0 {
-                ffi::SQLITE_READONLY
-            } else {
-                ffi::SQLITE_IOERR_SHMSIZE
-            };
-        }
-
-        while shm.regions.len() < n_req {
-            let map_len = sz_region * n_per_map;
-            let map_off = (shm.regions.len() * sz_region) as libc::off_t;
-            let ptr = libc::mmap(
-                std::ptr::null_mut(),
-                map_len,
-                libc::PROT_READ,
-                libc::MAP_SHARED,
-                shm.fd,
-                map_off,
-            );
-            if ptr == libc::MAP_FAILED {
-                return ffi::SQLITE_IOERR_SHMMAP;
-            }
-            shm.mmaps.push((ptr, map_len));
-            for i in 0..n_per_map {
-                shm.regions
-                    .push(ptr.cast::<u8>().add(i * sz_region).cast::<c_void>());
-            }
-        }
-
-        *out = shm.regions[page_idx];
-        ffi::SQLITE_READONLY
     }
 
     unsafe extern "C" fn ro_shm_map(
@@ -1069,17 +980,8 @@ mod readonly_vfs {
                 if (st.st_mode as u32 & libc::S_IFMT as u32) != libc::S_IFREG as u32 {
                     return ffi::SQLITE_CANTOPEN;
                 }
-                let shm_mode_bits = (st.st_mode as u32) & 0o777;
-                if st.st_size == 0 && (shm_mode_bits != state.db_mode || libc::geteuid() == 0) {
-                    state.shm_mode = ShmMode::RoLocal(RoShm::new(state.shm_path.clone()));
-                    match &mut state.shm_mode {
-                        ShmMode::RoLocal(shm) => ro_local_shm_map(shm, page, size, out),
-                        _ => unreachable!(),
-                    }
-                } else {
-                    state.shm_mode = ShmMode::Delegated;
-                    delegated_shm_map(file, page, size, out)
-                }
+                state.shm_mode = ShmMode::Delegated;
+                delegated_shm_map(file, page, size, out)
             }
             ShmMode::AbsentClean => {
                 if both_sidecars_absent(&state.wal_path, &state.shm_path) {
@@ -1089,7 +991,6 @@ mod readonly_vfs {
                 }
             }
             ShmMode::Delegated => delegated_shm_map(file, page, size, out),
-            ShmMode::RoLocal(shm) => ro_local_shm_map(shm, page, size, out),
         }
     }
 
@@ -1124,27 +1025,6 @@ mod readonly_vfs {
                     call(real, offset, n, flags)
                 })
             }
-            ShmMode::RoLocal(shm) => {
-                if shm.fd < 0 || offset < 0 || n <= 0 || offset + n > ffi::SQLITE_SHM_NLOCK {
-                    return ffi::SQLITE_IOERR_SHMLOCK;
-                }
-                let l_type = if flags & ffi::SQLITE_SHM_UNLOCK != 0 {
-                    libc::F_UNLCK as libc::c_short
-                } else {
-                    libc::F_RDLCK as libc::c_short
-                };
-                let rc = fcntl_setlk(
-                    shm.fd,
-                    l_type,
-                    UNIX_SHM_BASE + offset as libc::off_t,
-                    n as libc::off_t,
-                );
-                if rc == ffi::SQLITE_IOERR_LOCK {
-                    ffi::SQLITE_IOERR_SHMLOCK
-                } else {
-                    rc
-                }
-            }
             ShmMode::Uninit => ffi::SQLITE_IOERR_SHMLOCK,
         }
     }
@@ -1173,10 +1053,6 @@ mod readonly_vfs {
                 methods
                     .xShmUnmap
                     .map_or(ffi::SQLITE_OK, |call| call(real, 0))
-            }
-            ShmMode::RoLocal(mut shm) => {
-                shm.unmap_and_close();
-                ffi::SQLITE_OK
             }
             ShmMode::AbsentClean | ShmMode::Uninit => ffi::SQLITE_OK,
         }
@@ -1228,8 +1104,9 @@ fn sqlite_readonly_uri(canonical: &Path) -> Result<String, String> {
 /// 缺口态只读打开模拟 X 业务库：
 /// 1) 规范化路径并按 SQLite URI 语法逐字节百分号编码，附 `mode=ro&readonly_shm=1`，
 ///    通过非默认 `history_sim_ro` VFS 只读打开：
-///    - 真实非空 `-shm` 复用 `unix` VFS `unixShmNode` 引用计数（保障 Linux/macOS 同进程 POSIX 锁归属）；
-///    - `-wal` 永远纯 `O_RDONLY | O_NOFOLLOW | O_CLOEXEC` 直读，0 字节异权限 `-shm` 亦零 `fchmod`/`fchown`；
+///    - 所有存在的普通文件 `-shm` 统一复用 `unix` VFS `unixShmNode` 引用计数（保障 Linux/macOS
+///      同进程 POSIX 锁归属），并在临界区经线程局部守卫屏蔽 `fchown`/`fchmod`（`euid == 0` 亦零改元数据）；
+///    - `-wal` 永远纯 `O_RDONLY | O_NOFOLLOW | O_CLOEXEC` 直读，零 `fchmod`/`fchown`；
 ///    - 仅当 `-wal` 与 `-shm` 双 `ENOENT`（正式 X 末连接正常闭库态）允许受检只读主库，绝不建文件、绝不 `immutable`；
 /// 2) 打开后核对 `Connection::path()` 与规范化绝对路径完全一致，并开启 `query_only` 与内存临时库。
 pub(crate) fn open_readonly_source_db(db: &Path) -> Result<Connection, String> {

@@ -1673,53 +1673,66 @@ fn readonly_source_vfs_preserves_zero_byte_readonly_sidecar_modes_without_fchmod
     std::fs::set_permissions(&x_shm, std::fs::Permissions::from_mode(0o644)).unwrap();
 }
 
+/// 外部独立子进程探测指定 `-shm` 文件 byte 128 (UNIX_SHM_DMS) 的 POSIX 锁类型，
+/// 避免多线程测试中裸 `fork()` 继承其他线程 `FD_CLOEXEC` 套接字句柄。
+#[test]
+#[ignore = "仅供 #1375 具名子进程外部 F_GETLK 探测调用"]
+fn readonly_source_vfs_dms_probe_child() {
+    use std::ffi::CString;
+    use std::os::unix::ffi::OsStrExt;
+
+    let path = std::env::var_os("I1375_SHM_PROBE_PATH").expect("probe path required");
+    let cpath = CString::new(path.as_bytes()).unwrap();
+    let res = unsafe {
+        let fd = libc::open(cpath.as_ptr(), libc::O_RDONLY | libc::O_CLOEXEC);
+        assert!(fd >= 0, "open shm for F_GETLK failed");
+        let mut fl: libc::flock = std::mem::zeroed();
+        fl.l_type = libc::F_WRLCK as libc::c_short;
+        fl.l_whence = libc::SEEK_SET as libc::c_short;
+        fl.l_start = 128;
+        fl.l_len = 1;
+        assert_eq!(libc::fcntl(fd, libc::F_GETLK, &mut fl), 0, "F_GETLK failed");
+        libc::close(fd);
+        fl.l_type as i32
+    };
+    println!("DMS_LOCK_TYPE={res}");
+}
+
 #[test]
 fn readonly_source_vfs_clean_close_wal_safety_and_same_process_shm_lock_ownership() {
     use crate::history_simulation::intake::open_readonly_source_db;
     use std::ffi::CString;
     use std::os::unix::ffi::OsStrExt;
-    use std::os::unix::fs::PermissionsExt;
+    use std::os::unix::fs::{MetadataExt, PermissionsExt};
 
-    // 外部子进程 F_GETLK 探测指定文件 byte 128 (UNIX_SHM_DMS) 的锁类型：
+    // 外部子进程（经 execve，零裸 fork 继承 fd）F_GETLK 探测指定文件 byte 128 (UNIX_SHM_DMS) 的锁类型：
     // 只有跨进程探测才能看到父进程在 -shm 上持有的 POSIX F_RDLCK。
     fn probe_external_dms_lock(shm: &Path) -> libc::c_short {
-        let cpath = CString::new(shm.as_os_str().as_bytes()).unwrap();
-        let mut pipefd = [-1i32; 2];
-        assert_eq!(unsafe { libc::pipe(pipefd.as_mut_ptr()) }, 0);
-        let pid = unsafe { libc::fork() };
-        assert!(pid >= 0, "fork failed");
-        if pid == 0 {
-            unsafe {
-                libc::close(pipefd[0]);
-                let fd = libc::open(cpath.as_ptr(), libc::O_RDONLY | libc::O_CLOEXEC);
-                let mut res: i32 = -1;
-                if fd >= 0 {
-                    let mut fl: libc::flock = std::mem::zeroed();
-                    fl.l_type = libc::F_WRLCK as libc::c_short;
-                    fl.l_whence = libc::SEEK_SET as libc::c_short;
-                    fl.l_start = 128;
-                    fl.l_len = 1;
-                    if libc::fcntl(fd, libc::F_GETLK, &mut fl) == 0 {
-                        res = fl.l_type as i32;
-                    }
-                    libc::close(fd);
-                }
-                let bytes = res.to_ne_bytes();
-                let _ = libc::write(pipefd[1], bytes.as_ptr().cast(), bytes.len());
-                libc::close(pipefd[1]);
-                libc::_exit(0);
-            }
-        }
-        unsafe {
-            libc::close(pipefd[1]);
-            let mut buf = [0u8; 4];
-            let n = libc::read(pipefd[0], buf.as_mut_ptr().cast(), buf.len());
-            libc::close(pipefd[0]);
-            let mut status = 0i32;
-            libc::waitpid(pid, &mut status, 0);
-            assert_eq!(n, 4, "failed to read child F_GETLK probe");
-            i32::from_ne_bytes(buf) as libc::c_short
-        }
+        let out = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "economic_session::finance::tests::exact_release::x_e2e::readonly_source_vfs_dms_probe_child",
+                "--ignored",
+                "--nocapture",
+            ])
+            .env("I1375_SHM_PROBE_PATH", shm.as_os_str())
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "dms probe child failed: stdout={} stderr={}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        let val = stdout
+            .lines()
+            .find_map(|line| line.strip_prefix("DMS_LOCK_TYPE="))
+            .expect("missing DMS_LOCK_TYPE line")
+            .trim()
+            .parse::<i32>()
+            .unwrap();
+        val as libc::c_short
     }
 
     let dir = tempfile::tempdir().unwrap();
@@ -1777,8 +1790,15 @@ fn readonly_source_vfs_clean_close_wal_safety_and_same_process_shm_lock_ownershi
         "二次关闭同进程只读连接后写者 DMS 锁仍须完好"
     );
 
-    // 2) 停机遗留未 checkpoint WAL 快照：必须读出 WAL 中的最新行（+40 => 43），绝不回落陈旧主库。
+    // 2) 停机遗留未 checkpoint WAL + 正常非空 SHM（32768 字节，独立 inode 无同进程 unixShmNode）：
+    //    必须读出 WAL 中的最新行（+40 => 43），且无论普通用户或 root（同 owner / 异 owner）
+    //    均绝不改写非空 SHM 的 uid/gid/mode/ctime（零 fchown/fchmod/IN_ATTRIB）。
     writer.execute("INSERT INTO t VALUES (40)", []).unwrap();
+    assert_eq!(
+        probe_external_dms_lock(&x_shm),
+        libc::F_RDLCK as libc::c_short,
+        "关闭只读连接后写者继续追加 WAL 仍须持有 DMS 锁"
+    );
     let stopped_dir = dir.path().join("x-stopped-wal");
     std::fs::create_dir_all(&stopped_dir).unwrap();
     let s_db = stopped_dir.join("x.db");
@@ -1787,6 +1807,12 @@ fn readonly_source_vfs_clean_close_wal_safety_and_same_process_shm_lock_ownershi
     std::fs::copy(&x_db, &s_db).unwrap();
     std::fs::copy(&x_wal, &s_wal).unwrap();
     std::fs::copy(&x_shm, &s_shm).unwrap();
+    let s_shm_meta_before = std::fs::metadata(&s_shm).unwrap();
+    assert!(
+        s_shm_meta_before.len() >= 32768,
+        "预期非空 SHM 至少 32768 字节，实际 {}",
+        s_shm_meta_before.len()
+    );
     let before_stopped = dir_file_digests(&stopped_dir);
     #[cfg(target_os = "linux")]
     let w_stopped = LinuxDirWatcher::with_mask(
@@ -1807,9 +1833,79 @@ fn readonly_source_vfs_clean_close_wal_safety_and_same_process_shm_lock_ownershi
             .unwrap();
         assert_eq!(v, 43, "停机遗留 WAL 须完整读出未 checkpoint 最新行");
     }
+    let s_shm_meta_after = std::fs::metadata(&s_shm).unwrap();
+    assert_eq!(
+        (
+            s_shm_meta_before.uid(),
+            s_shm_meta_before.gid(),
+            s_shm_meta_before.mode() & 0o777,
+            s_shm_meta_before.ctime(),
+            s_shm_meta_before.ctime_nsec(),
+        ),
+        (
+            s_shm_meta_after.uid(),
+            s_shm_meta_after.gid(),
+            s_shm_meta_after.mode() & 0o777,
+            s_shm_meta_after.ctime(),
+            s_shm_meta_after.ctime_nsec(),
+        ),
+        "读取正常非空 SHM（含同 owner root）绝不得触发 fchown/fchmod 改写 owner/mode/ctime"
+    );
     #[cfg(target_os = "linux")]
     assert!(w_stopped.drain().is_empty(), "停机 WAL 只读不得产生写事件");
     assert_eq!(before_stopped, dir_file_digests(&stopped_dir));
+
+    // 当以 root（euid == 0）运行时，额外验证异 owner（65534:65534）非空 SHM 亦零 fchown/零 ctime 变更。
+    if unsafe { libc::geteuid() } == 0 {
+        let c_s_shm = CString::new(s_shm.as_os_str().as_bytes()).unwrap();
+        assert_eq!(
+            unsafe { libc::chown(c_s_shm.as_ptr(), 65534, 65534) },
+            0,
+            "root 夹具设置异 owner SHM 失败"
+        );
+        let diff_before = std::fs::metadata(&s_shm).unwrap();
+        assert_eq!((diff_before.uid(), diff_before.gid()), (65534, 65534));
+        #[cfg(target_os = "linux")]
+        let w_diff = LinuxDirWatcher::with_mask(
+            &stopped_dir,
+            libc::IN_CREATE
+                | libc::IN_MODIFY
+                | libc::IN_DELETE
+                | libc::IN_MOVED_FROM
+                | libc::IN_MOVED_TO
+                | libc::IN_ATTRIB
+                | libc::IN_CLOSE_WRITE,
+        );
+        {
+            let mut reader = open_readonly_source_db(&s_db).unwrap();
+            let tx = reader.transaction().unwrap();
+            let v: i64 = tx
+                .query_row("SELECT sum(v) FROM t", [], |r| r.get(0))
+                .unwrap();
+            assert_eq!(v, 43);
+        }
+        let diff_after = std::fs::metadata(&s_shm).unwrap();
+        assert_eq!(
+            (
+                diff_before.uid(),
+                diff_before.gid(),
+                diff_before.ctime(),
+                diff_before.ctime_nsec(),
+            ),
+            (
+                diff_after.uid(),
+                diff_after.gid(),
+                diff_after.ctime(),
+                diff_after.ctime_nsec(),
+            ),
+            "root 读取异 owner 非空 SHM 绝不得改写 uid/gid 或 ctime"
+        );
+        #[cfg(target_os = "linux")]
+        assert!(
+            w_diff.drain().is_empty(),
+            "root 读取异 owner 非空 SHM 不得触发 IN_ATTRIB 或目录写事件"
+        );
+    }
 
     // 3) 有 WAL 但缺 SHM：必须显式拒绝，绝不可跳过 WAL 读陈旧主库，且不得建 SHM。
     std::fs::remove_file(&s_shm).unwrap();
