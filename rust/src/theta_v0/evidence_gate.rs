@@ -5,6 +5,13 @@
 
 use std::fmt;
 
+#[cfg(any(test, feature = "s_session", feature = "backtest_bin"))]
+mod qualifications;
+#[cfg(any(test, feature = "s_session", feature = "backtest_bin"))]
+pub use qualifications::WindowGap;
+#[cfg(any(test, feature = "s_session", feature = "backtest_bin"))]
+pub(crate) use qualifications::{QualifiedWindow, WindowSpan};
+
 use super::policy_records::{
     invalid, parse_header, read_str, read_u32, PolicyError, PolicyRef, ACTIVE_EVIDENCE_GATE_JSON,
     EVIDENCE_GATE_ID,

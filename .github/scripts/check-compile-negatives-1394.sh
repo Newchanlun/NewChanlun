@@ -55,4 +55,7 @@ check issue1394_capture_callback_refusal src/bin/s_session_v2/content_store.rs -
 check issue1394_closed_owner_refusal src/bin/s_session_v3/audit_store.rs "" || status=1
 check issue1890_read_snapshot_refusal src/bin/s_session_v3/history.rs "" "E0308|E0599|E0616" 9 || status=1
 check issue1890_snapshot_query_refusal src/bin/s_session_v3/history.rs "" "E0451" 1 || status=1
+
+# #1441：11 条 crate 外注入反例，均应在 s_structure_session 目标的负例块内被拒。
+check issue1441_cost_stop_refusal src/bin/s_session_v3/cost_stop_refusal.rs "" "E0061|E0277|E0308|E0422|E0425|E0433|E0599|E0616" 11 || status=1
 exit $status
