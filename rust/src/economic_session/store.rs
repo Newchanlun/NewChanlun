@@ -5,7 +5,7 @@ use crate::session_protocol::{
 use rusqlite::{params, Connection, OpenFlags, OptionalExtension, Transaction};
 use serde_json::{json, Value};
 use std::path::{Path, PathBuf};
-#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+#[cfg(not(target_os = "macos"))]
 use std::process::Command;
 use std::time::Duration;
 
@@ -458,152 +458,6 @@ fn canonical_target(p: &Path) -> Result<PathBuf, String> {
             .join(p.file_name().ok_or("InvalidDomain：路径无文件名")?))
     }
 }
-/// #2113：在 glibc ≥ 2.24 上与原 Command 的 posix_spawnp 路径等价，区别只在空环境。
-/// #2113：旧 glibc 找不到 stat 时可能由子进程退出 127，仍拒绝开库，但没有 ENOENT 报文。
-/// #2113：旧 glibc 不再经 shell 执行无 shebang 的 stat，保持失败关闭。
-/// 由 libc 在一个子进程中按原 PATH 查找，保留顺序、默认值和错误规则；
-/// 不手写遍历、不固定 PATH，也不把 PATH 或任何其他环境项传给 stat。
-#[cfg(target_os = "linux")]
-fn stat_output(target: &Path) -> std::io::Result<std::process::Output> {
-    use std::ffi::CString;
-    use std::fs::File;
-    use std::io::{self, Error, ErrorKind, Read};
-    use std::mem::MaybeUninit;
-    use std::os::fd::{AsFd, AsRawFd, OwnedFd};
-    use std::os::unix::{ffi::OsStrExt, process::ExitStatusExt};
-    use std::ptr;
-
-    let check = |code| {
-        if code == 0 {
-            Ok(())
-        } else {
-            Err(Error::from_raw_os_error(code))
-        }
-    };
-    let target = CString::new(target.as_os_str().as_bytes())
-        .map_err(|_| Error::new(ErrorKind::InvalidInput, "nul byte found in provided data"))?;
-    let argv = [c"stat", c"-f", c"-c", c"%T", target.as_c_str()].map(|arg| arg.as_ptr().cast_mut());
-    let argv = [argv[0], argv[1], argv[2], argv[3], argv[4], ptr::null_mut()];
-    let envp = [ptr::null_mut()];
-
-    // Command::output 的 stdin 是 /dev/null，stdout 与 stderr 都是 CLOEXEC 管道。
-    let stdin = File::open("/dev/null")?;
-    let (stdout, stdout_write) = io::pipe()?;
-    let (stderr, stderr_write) = io::pipe()?;
-    let mut sources: [OwnedFd; 3] = [stdin.into(), stdout_write.into(), stderr_write.into()];
-    for fd in &mut sources {
-        if fd.as_raw_fd() <= libc::STDERR_FILENO {
-            // 若父进程关过标准 fd，确保 dup2 动作不会覆盖后续动作的源。
-            *fd = fd.as_fd().try_clone_to_owned()?;
-        }
-    }
-
-    struct Actions(libc::posix_spawn_file_actions_t);
-    impl Drop for Actions {
-        fn drop(&mut self) {
-            // SAFETY: Actions 只在 init 成功后构造，并且仅在此处销毁。
-            unsafe { libc::posix_spawn_file_actions_destroy(&mut self.0) };
-        }
-    }
-    struct Attrs(libc::posix_spawnattr_t);
-    impl Drop for Attrs {
-        fn drop(&mut self) {
-            // SAFETY: Attrs 只在 init 成功后构造，并且仅在此处销毁。
-            unsafe { libc::posix_spawnattr_destroy(&mut self.0) };
-        }
-    }
-    let mut pid = 0;
-    // SAFETY: 所有 libc 结构 init 成功后才读取或设置；文件动作引用仍持有的 fd，
-    // argv/envp 以空指针结尾且所指内容存活至调用返回；生产会话启动后不修改进程环境。
-    unsafe {
-        let mut actions = MaybeUninit::uninit();
-        check(libc::posix_spawn_file_actions_init(actions.as_mut_ptr()))?;
-        let mut actions = Actions(actions.assume_init());
-        for (source, dest) in sources
-            .iter()
-            .zip([libc::STDIN_FILENO, libc::STDOUT_FILENO, libc::STDERR_FILENO])
-        {
-            check(libc::posix_spawn_file_actions_adddup2(
-                &mut actions.0,
-                source.as_raw_fd(),
-                dest,
-            ))?;
-        }
-
-        let mut attrs = MaybeUninit::uninit();
-        check(libc::posix_spawnattr_init(attrs.as_mut_ptr()))?;
-        let mut attrs = Attrs(attrs.assume_init());
-        let mut default_signals = MaybeUninit::uninit();
-        // 与默认构建的 Command::output 一样恢复 SIGPIPE 默认处置，继承信号屏蔽字。
-        if libc::sigemptyset(default_signals.as_mut_ptr()) != 0
-            || libc::sigaddset(default_signals.as_mut_ptr(), libc::SIGPIPE) != 0
-        {
-            return Err(Error::last_os_error());
-        }
-        check(libc::posix_spawnattr_setsigdefault(&mut attrs.0, default_signals.as_ptr()))?;
-        check(libc::posix_spawnattr_setflags(&mut attrs.0, libc::POSIX_SPAWN_SETSIGDEF as _))?;
-        check(libc::posix_spawnp(
-            &mut pid,
-            c"stat".as_ptr(),
-            &actions.0,
-            &attrs.0,
-            argv.as_ptr(),
-            envp.as_ptr(),
-        ))?;
-    }
-    drop(sources);
-
-    let mut readers = [stdout, stderr];
-    let mut data = [Vec::new(), Vec::new()];
-    let mut fds = readers.each_ref().map(|r| libc::pollfd {
-        fd: r.as_raw_fd(),
-        events: libc::POLLIN,
-        revents: 0,
-    });
-    let read_result = (|| -> io::Result<()> {
-        let mut buf = [0; 8192];
-        while fds.iter().any(|fd| fd.fd >= 0) {
-            // SAFETY: fds 指向完整、可写的数组，管道由 readers 保持打开。
-            if unsafe { libc::poll(fds.as_mut_ptr(), fds.len() as _, -1) } < 0 {
-                let e = Error::last_os_error();
-                if e.kind() == ErrorKind::Interrupted {
-                    continue;
-                }
-                return Err(e);
-            }
-            for (i, fd) in fds.iter_mut().enumerate() {
-                if fd.revents == 0 {
-                    continue;
-                }
-                match readers[i].read(&mut buf) {
-                    Ok(0) => fd.fd = -1,
-                    Ok(n) => data[i].extend_from_slice(&buf[..n]),
-                    Err(e) if e.kind() == ErrorKind::Interrupted => (),
-                    Err(e) => return Err(e),
-                }
-            }
-        }
-        Ok(())
-    })();
-    // 即使读失败也关闭管道后回收子进程，避免子进程阻塞于写入。
-    drop(readers);
-    let mut status = 0;
-    // SAFETY: pid 来自本次成功的 posix_spawnp，status 是可写的 wait 状态槽。
-    while unsafe { libc::waitpid(pid, &mut status, 0) } < 0 {
-        let e = Error::last_os_error();
-        if e.kind() != ErrorKind::Interrupted {
-            return Err(e);
-        }
-    }
-    read_result?;
-    let [stdout, stderr] = data;
-    Ok(std::process::Output {
-        status: std::process::ExitStatus::from_raw(status),
-        stdout,
-        stderr,
-    })
-}
-
 fn filesystem(path: &Path) -> Result<String, String> {
     let target = if path.exists() {
         path.canonicalize().map_err(err)?
@@ -648,10 +502,16 @@ fn filesystem(path: &Path) -> Result<String, String> {
     }
     #[cfg(not(target_os = "macos"))]
     {
+        let mut stat = Command::new("stat");
         #[cfg(target_os = "linux")]
-        let o = stat_output(&target).map_err(err)?;
-        #[cfg(not(target_os = "linux"))]
-        let o = Command::new("stat")
+        // #2113：不改 PATH，保留标准库原有的查找和启动路径。
+        // 只移除枚举时已有的键；之后新设的键仍会继承。生产会话启动后不修改环境。
+        for (key, _) in std::env::vars_os() {
+            if key != "PATH" {
+                stat.env_remove(key);
+            }
+        }
+        let o = stat
             .args(["-f", "-c", "%T"])
             .arg(target)
             .output()
@@ -666,56 +526,46 @@ fn filesystem(path: &Path) -> Result<String, String> {
     }
 }
 #[cfg(all(test, target_os = "linux"))]
-mod linux_filesystem_tests {
-    use std::fs;
-    use std::os::unix::fs::PermissionsExt;
-    use std::process::Command;
-
-    #[test]
-    fn durable_db_stat_receives_empty_environment() {
-        const PROBE: &str = "NEWCHAN_2113_STAT_ENV_SENTINEL";
-        // 修改独立测试进程的环境，不影响并行跑的其他测试。
-        if std::env::var_os(PROBE).is_some() {
-            let db = std::env::current_dir().unwrap().join("probe.db");
-            let (_, evidence) = crate::economic_session::open_durable_db(&db).unwrap();
-            assert_eq!(evidence["filesystem"], "tmpfs");
-            assert_eq!(std::env::var(PROBE).unwrap(), "synthetic");
-            // 只计 exec 环境的 NUL 分隔符，不保留键值或统计 shell 后补的变量。
-            let count = fs::read_to_string("stat-env-count").unwrap();
-            assert_eq!(count.trim(), "0", "stat 继承了父进程环境");
-            return;
-        }
-
-        let dir = tempfile::tempdir().unwrap();
-        let stat = dir.path().join("stat");
-        fs::write(
-            &stat,
-            "#!/bin/sh\n/usr/bin/tr -cd '\\000' </proc/$$/environ >stat-env-nuls || exit 1\n/usr/bin/wc -c <stat-env-nuls >stat-env-count || exit 1\nprintf 'tmpfs\\n'\n",
-        )
-        .unwrap();
-        fs::set_permissions(&stat, fs::Permissions::from_mode(0o700)).unwrap();
-        let output = Command::new(std::env::current_exe().unwrap())
-            .args([
-                "--exact",
-                "economic_session::store::linux_filesystem_tests::durable_db_stat_receives_empty_environment",
-            ])
-            .current_dir(dir.path())
-            .env_clear()
-            .env("PATH", dir.path())
-            .env(PROBE, "synthetic")
-            .output()
-            .unwrap();
-        assert!(
-            output.status.success(),
-            "{}\n{}",
-            String::from_utf8_lossy(&output.stdout),
-            String::from_utf8_lossy(&output.stderr),
-        );
-        assert_eq!(
-            fs::read_to_string(dir.path().join("stat-env-count")).unwrap().trim(),
-            "0"
-        );
+#[test]
+fn durable_db_stat_preserves_only_path() {
+    const SENTINEL: &str = "NEWCHAN_2113_STAT_ENV_SENTINEL";
+    // 只改自启测试进程的环境，不影响并行测试宿主。
+    if std::env::var_os(SENTINEL).is_some() {
+        let db = std::env::current_dir().unwrap().join("probe.db");
+        let (_, evidence) = crate::economic_session::open_durable_db(&db).unwrap();
+        assert_eq!(evidence["filesystem"], "tmpfs");
+        assert_eq!(std::env::var(SENTINEL).unwrap(), "synthetic");
+        // 记录 exec 初始环境的键，不记录值或 shell 后补的变量。
+        let keys = std::fs::read("stat-env-keys").unwrap();
+        assert!(keys == b"PATH\0", "stat 应只继承 PATH");
+        return;
     }
+
+    let dir = tempfile::tempdir().unwrap();
+    crate::economic_session::write_test_executable(
+        &dir.path().join("stat"),
+        "#!/bin/sh\n/usr/bin/cut -z -d= -f1 </proc/$$/environ >stat-env-keys || exit 1\nprintf 'tmpfs\\n'\n",
+        0o700,
+    );
+    let output = Command::new(std::env::current_exe().unwrap())
+        .args([
+            "--exact",
+            "economic_session::store::durable_db_stat_preserves_only_path",
+        ])
+        .current_dir(dir.path())
+        .env_clear()
+        .env("PATH", dir.path())
+        .env(SENTINEL, "synthetic")
+        .env("NEWCHAN_2113_VENUE_CREDENTIAL", "synthetic-not-a-secret")
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr),
+    );
+    assert!(dir.path().join("stat-env-keys").is_file());
 }
 
 pub(crate) fn open(db: &Path, read_only: bool) -> Result<(Connection, Value), String> {
