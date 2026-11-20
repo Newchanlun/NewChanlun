@@ -1,0 +1,74 @@
+[
+  {
+    "number": 2113,
+    "state": "OPEN",
+    "title": "[bug] X 打开持久库时启动的 stat 子进程继承凭据键（ADR 0039 验收 13，#1383 取证发现）",
+    "url": "https://github.com/Newchanlun/NewChanlun/issues/2113"
+  },
+  {
+    "number": 2134,
+    "state": "OPEN",
+    "title": "[grilling] X 执行 profile 凭据环境变量名的合法取值：现在不设限，可取 PATH、带分隔符的名字等（#2113 前置）",
+    "url": "https://github.com/Newchanlun/NewChanlun/issues/2134"
+  },
+  {
+    "number": 1618,
+    "state": "OPEN",
+    "title": "[task] #1588 转票：sandcastle 失败可见性与本机 cargo 垫片余项（GH Actions 评审整段 diff、绝对路径绕过、蜂群、implementer/failed、health-monitor）",
+    "url": "https://github.com/Newchanlun/NewChanlun/issues/1618"
+  },
+  {
+    "number": 1393,
+    "state": "OPEN",
+    "title": "[impl] TB-02-U 未建方向与全包含前缀的获准工程实例（SPEC #1340）",
+    "url": "https://github.com/Newchanlun/NewChanlun/issues/1393"
+  },
+  {
+    "number": 363,
+    "state": "CLOSED",
+    "title": "M4 逐级稀疏性判据同步：二次裁剪路径进逐级解释项（#355 MED-C）",
+    "url": "https://github.com/Newchanlun/NewChanlun/issues/363"
+  },
+  {
+    "number": 445,
+    "state": "CLOSED",
+    "title": "🗺️ 交付纪律：票据可溯、验收项可验证、豁免须自带证据",
+    "url": "https://github.com/Newchanlun/NewChanlun/issues/445"
+  },
+  {
+    "number": 1116,
+    "state": "CLOSED",
+    "title": "[task] 安全：S_net cache 移除未校验 pickle 反序列化",
+    "url": "https://github.com/Newchanlun/NewChanlun/issues/1116"
+  },
+  {
+    "number": 627,
+    "state": "CLOSED",
+    "title": "[簿记] 引用链补洞：补充十三引用档 thirdclass-level-doctrine-research-20260727.md 仓内缺失（#574/ADR-0008 上报②）",
+    "url": "https://github.com/Newchanlun/NewChanlun/issues/627"
+  },
+  {
+    "number": 1141,
+    "state": "CLOSED",
+    "title": "[task] CI rust-check 在 rust-lld 链接阶段连续 signal 7 / Bus error，cargo test 无法完成",
+    "url": "https://github.com/Newchanlun/NewChanlun/issues/1141"
+  },
+  {
+    "number": 1644,
+    "state": "CLOSED",
+    "title": "[grilling] P6 来源审计持久台账与清单全闭包核验，与 #1481 方案三合审（#1612 切片 4）",
+    "url": "https://github.com/Newchanlun/NewChanlun/issues/1644"
+  },
+  {
+    "number": 1323,
+    "state": "OPEN",
+    "title": "🗺️ 完整生产程序接线总单：#787 严格多重赋格落地 → 旧实现收敛 → 历史回放与 paper 同核",
+    "url": "https://github.com/Newchanlun/NewChanlun/issues/1323"
+  },
+  {
+    "number": 1532,
+    "state": "CLOSED",
+    "title": "[grilling] FU-12 旧引擎/简化臂逐入口终态（#1323，新增）",
+    "url": "https://github.com/Newchanlun/NewChanlun/issues/1532"
+  }
+]

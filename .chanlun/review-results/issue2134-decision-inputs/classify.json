@@ -1,0 +1,7 @@
+{
+  "ticket": 2134,
+  "class": "T",
+  "reason": "在 ADR 0039 的唯一 launcher 与 X 凭据隔离合同下，裁定部署字段的技术准入域、双入口拒绝时点以及 #2113 的验收边界；不改变真实场所、账户、权限、资金或发送政策。",
+  "user_gate": [],
+  "sourceCommit": "b9d898dccf46c2a716115eaa1215bc39c458a959"
+}

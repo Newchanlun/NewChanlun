@@ -1,0 +1,170 @@
+[
+  {
+    "number": 2134,
+    "state": "OPEN",
+    "title": "[grilling] X 执行 profile 凭据环境变量名的合法取值：现在不设限，可取 PATH、带分隔符的名字等（#2113 前置）",
+    "url": "https://github.com/Newchanlun/NewChanlun/issues/2134"
+  },
+  {
+    "number": 1503,
+    "state": "OPEN",
+    "title": "[task] Codex 多模型指令治理：共同正本与 Claude 适配加载",
+    "url": "https://github.com/Newchanlun/NewChanlun/issues/1503"
+  },
+  {
+    "number": 2070,
+    "state": "OPEN",
+    "title": "[#1742] OrbStack 新镜像 47cbe347 / bec4d55 受控 Docker 准入",
+    "url": "https://github.com/Newchanlun/NewChanlun/issues/2070"
+  },
+  {
+    "number": 1764,
+    "state": "OPEN",
+    "title": "[bug] codex-child 普通请求用量超窗导致每步压缩，阻塞 Sandcastle 复杂实施",
+    "url": "https://github.com/Newchanlun/NewChanlun/issues/1764"
+  },
+  {
+    "number": 1770,
+    "state": "OPEN",
+    "title": "[impl] #1523-API X 内 HL 场所 adapter 离线合同（环境、凭据、请求与回报原件映射）",
+    "url": "https://github.com/Newchanlun/NewChanlun/issues/1770"
+  },
+  {
+    "number": 1510,
+    "state": "OPEN",
+    "title": "[task] 本机空间清理与 Windows SSH 存储/运行环境勘察",
+    "url": "https://github.com/Newchanlun/NewChanlun/issues/1510"
+  },
+  {
+    "number": 1409,
+    "state": "OPEN",
+    "title": "[impl] TB-05-C 双边界崩溃、旧写者与不补发（SPEC #1340）",
+    "url": "https://github.com/Newchanlun/NewChanlun/issues/1409"
+  },
+  {
+    "number": 1169,
+    "state": "CLOSED",
+    "title": "[impl] S3 搭建隔离 provider 运行面与凭据绑定",
+    "url": "https://github.com/Newchanlun/NewChanlun/issues/1169"
+  },
+  {
+    "number": 1351,
+    "state": "CLOSED",
+    "title": "[grilling] 首个具名场所账户与验证权限 profile（#1323，FU-04）",
+    "url": "https://github.com/Newchanlun/NewChanlun/issues/1351"
+  },
+  {
+    "number": 1530,
+    "state": "CLOSED",
+    "title": "[grilling] FU-08 生产入口与唯一 owner（#1323，新增）",
+    "url": "https://github.com/Newchanlun/NewChanlun/issues/1530"
+  },
+  {
+    "number": 1567,
+    "state": "CLOSED",
+    "title": "[grilling] s-admission 首份锚的签发与无锚库接管（#1527）",
+    "url": "https://github.com/Newchanlun/NewChanlun/issues/1567"
+  },
+  {
+    "number": 1018,
+    "state": "CLOSED",
+    "title": "[task] .sandcastle/SECURITY.md（蜂群靶子 B）",
+    "url": "https://github.com/Newchanlun/NewChanlun/issues/1018"
+  },
+  {
+    "number": 1340,
+    "state": "OPEN",
+    "title": "📋 SPEC：完整生产程序、结构全分类与逐重经营（#1323，R2）",
+    "url": "https://github.com/Newchanlun/NewChanlun/issues/1340"
+  },
+  {
+    "number": 1149,
+    "state": "CLOSED",
+    "title": "[grilling] 裁定 LAV 历史 shadow pilot 的样本、指标、预算与退出门",
+    "url": "https://github.com/Newchanlun/NewChanlun/issues/1149"
+  },
+  {
+    "number": 1001,
+    "state": "CLOSED",
+    "title": "[grilling] 实施票链的沙盒形态：claude CLI 进镜像 vs 实装切 prime-agent",
+    "url": "https://github.com/Newchanlun/NewChanlun/issues/1001"
+  },
+  {
+    "number": 1002,
+    "state": "CLOSED",
+    "title": "[grilling] 工蜂模型矩阵：票型×模型×effort 到 prime-agent provider 参数的映射",
+    "url": "https://github.com/Newchanlun/NewChanlun/issues/1002"
+  },
+  {
+    "number": 1128,
+    "state": "CLOSED",
+    "title": "[task] Sandcastle 显式模型 registry：Claude 默认 + DeepSeek v4-pro 可选实装",
+    "url": "https://github.com/Newchanlun/NewChanlun/issues/1128"
+  },
+  {
+    "number": 1560,
+    "state": "CLOSED",
+    "title": "[grilling] FU-07 余项：系统风险条件 SR v1 阈值与退出动作表签署（#1323，P 类）",
+    "url": "https://github.com/Newchanlun/NewChanlun/issues/1560"
+  },
+  {
+    "number": 999,
+    "state": "CLOSED",
+    "title": "[research] Sandcastle 官方用法调研：GitHub 仓库 + AI Hero 资料",
+    "url": "https://github.com/Newchanlun/NewChanlun/issues/999"
+  },
+  {
+    "number": 1182,
+    "state": "CLOSED",
+    "title": "[impl] sandcastle 自动拾取：launchd 常驻 claim 循环（#1182 裁定落地）",
+    "url": "https://github.com/Newchanlun/NewChanlun/issues/1182"
+  },
+  {
+    "number": 1532,
+    "state": "CLOSED",
+    "title": "[grilling] FU-12 旧引擎/简化臂逐入口终态（#1323，新增）",
+    "url": "https://github.com/Newchanlun/NewChanlun/issues/1532"
+  },
+  {
+    "number": 996,
+    "state": "CLOSED",
+    "title": "Sandcastle 落地：prime-agent 自定义 provider 适配 + 一次性设置向导",
+    "url": "https://github.com/Newchanlun/NewChanlun/issues/996"
+  },
+  {
+    "number": 1323,
+    "state": "OPEN",
+    "title": "🗺️ 完整生产程序接线总单：#787 严格多重赋格落地 → 旧实现收敛 → 历史回放与 paper 同核",
+    "url": "https://github.com/Newchanlun/NewChanlun/issues/1323"
+  },
+  {
+    "number": 1142,
+    "state": "CLOSED",
+    "title": "[task] Prime remote-child Core MVP 本地原型：durable admission + parent-only family",
+    "url": "https://github.com/Newchanlun/NewChanlun/issues/1142"
+  },
+  {
+    "number": 1185,
+    "state": "CLOSED",
+    "title": "[bug] Sandcastle agent-implement preflight：jq 字符串里 `\\s` 无效转义致 run 失败",
+    "url": "https://github.com/Newchanlun/NewChanlun/issues/1185"
+  },
+  {
+    "number": 1120,
+    "state": "CLOSED",
+    "title": "[research] pstack 候选 Skills → Prime Agent 运行时兼容矩阵",
+    "url": "https://github.com/Newchanlun/NewChanlun/issues/1120"
+  },
+  {
+    "number": 1538,
+    "state": "CLOSED",
+    "title": "[grilling] FU-16 paper/live 与回放同核边界（#1323，新增）",
+    "url": "https://github.com/Newchanlun/NewChanlun/issues/1538"
+  },
+  {
+    "number": 1488,
+    "state": "CLOSED",
+    "title": "[impl] S 写者构造降阶：增量构造与去除作废中间根（承接 #1481 M7、#1419 S0b）",
+    "url": "https://github.com/Newchanlun/NewChanlun/issues/1488"
+  }
+]

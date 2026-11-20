@@ -1,0 +1,962 @@
+查询	路径	行	判定或排除理由
+G1	.sandcastle/deepagents-pilot/pilot1742/github_app.py	281	研发代理、CI、GitHub App 或评审工具的环境或旧实现扫描；不是产品 launcher / X profile
+G1	.sandcastle/deepagents-pilot/review_preflight.py	56	研发代理、CI、GitHub App 或评审工具的环境或旧实现扫描；不是产品 launcher / X profile
+G1	.sandcastle/deepagents-pilot/review_preflight.py	73	研发代理、CI、GitHub App 或评审工具的环境或旧实现扫描；不是产品 launcher / X profile
+G1	.sandcastle/deepagents-pilot/tests/test_github_app.py	99	研发代理、CI、GitHub App 或评审工具的环境或旧实现扫描；不是产品 launcher / X profile
+G1	CONTEXT.md	370	正本语义：场所政策与部署管道分开，或相邻概念；没有新增键
+G1	CONTEXT.md	404	正本语义：场所政策与部署管道分开，或相邻概念；没有新增键
+G1	CONTEXT.md	405	正本语义：场所政策与部署管道分开，或相邻概念；没有新增键
+G1	CONTEXT.md	408	正本语义：场所政策与部署管道分开，或相邻概念；没有新增键
+G1	docs/adr/0028-first-capability-verification-profile.md	22	权威背景：场所 profile 作用域和授权，另于部署键
+G1	docs/adr/0028-first-capability-verification-profile.md	95	权威背景：场所 profile 作用域和授权，另于部署键
+G1	docs/adr/0038-dual-run-determinism-recovery-seek-asknown.md	23	场所版本、恢复规则；credential_scope 是政策名
+G1	docs/adr/0038-dual-run-determinism-recovery-seek-asknown.md	127	场所版本、恢复规则；credential_scope 是政策名
+G1	docs/adr/0039-production-entry-inventory-and-unique-launcher.md	27	正本：唯一 launcher、凭据隔离/B13，或相关历史清单；逐行回查
+G1	docs/adr/0039-production-entry-inventory-and-unique-launcher.md	287	正本：唯一 launcher、凭据隔离/B13，或相关历史清单；逐行回查
+G1	docs/adr/0039-production-entry-inventory-and-unique-launcher.md	428	正本：唯一 launcher、凭据隔离/B13，或相关历史清单；逐行回查
+G1	docs/adr/0039-production-entry-inventory-and-unique-launcher.md	511	正本：唯一 launcher、凭据隔离/B13，或相关历史清单；逐行回查
+G1	docs/adr/0048-legacy-engine-module-level-dispositions.md	99	正本背景：旧入口影子与不收编旧注入源，不是新准入键
+G1	docs/adr/0048-legacy-engine-module-level-dispositions.md	311	正本背景：旧入口影子与不收编旧注入源，不是新准入键
+G1	docs/adr/0048-legacy-engine-module-level-dispositions.md	464	正本背景：旧入口影子与不收编旧注入源，不是新准入键
+G1	docs/adr/0062-fu18-venue-account-permission-binding.md	25	正本：部署字段改名、作用域/权限分界，未分配具体键
+G1	docs/adr/0062-fu18-venue-account-permission-binding.md	32	正本：部署字段改名、作用域/权限分界，未分配具体键
+G1	docs/adr/0062-fu18-venue-account-permission-binding.md	40	正本：部署字段改名、作用域/权限分界，未分配具体键
+G1	docs/adr/0062-fu18-venue-account-permission-binding.md	57	正本：部署字段改名、作用域/权限分界，未分配具体键
+G1	docs/adr/0062-fu18-venue-account-permission-binding.md	138	正本：部署字段改名、作用域/权限分界，未分配具体键
+G1	docs/adr/0062-fu18-venue-account-permission-binding.md	147	正本：部署字段改名、作用域/权限分界，未分配具体键
+G1	docs/adr/0062-fu18-venue-account-permission-binding.md	164	正本：部署字段改名、作用域/权限分界，未分配具体键
+G1	docs/adr/0062-fu18-venue-account-permission-binding.md	205	正本：部署字段改名、作用域/权限分界，未分配具体键
+G1	docs/adr/0062-fu18-venue-account-permission-binding.md	206	正本：部署字段改名、作用域/权限分界，未分配具体键
+G1	docs/adr/0062-fu18-venue-account-permission-binding.md	208	正本：部署字段改名、作用域/权限分界，未分配具体键
+G1	docs/adr/0062-fu18-venue-account-permission-binding.md	212	正本：部署字段改名、作用域/权限分界，未分配具体键
+G1	docs/adr/0062-fu18-venue-account-permission-binding.md	220	正本：部署字段改名、作用域/权限分界，未分配具体键
+G1	docs/adr/0062-fu18-venue-account-permission-binding.md	221	正本：部署字段改名、作用域/权限分界，未分配具体键
+G1	docs/adr/0062-fu18-venue-account-permission-binding.md	225	正本：部署字段改名、作用域/权限分界，未分配具体键
+G1	docs/adr/0062-fu18-venue-account-permission-binding.md	237	正本：部署字段改名、作用域/权限分界，未分配具体键
+G1	docs/adr/0062-fu18-venue-account-permission-binding.md	279	正本：部署字段改名、作用域/权限分界，未分配具体键
+G1	docs/runbook_production_session.md	44	runbook 邻接：路径、构建、S 控制或一般状态，不是另一键
+G1	docs/runbook_production_session.md	67	直接：/1 部署样例、明确的基名与凭据管道
+G1	docs/runbook_production_session.md	70	直接：/1 部署样例、明确的基名与凭据管道
+G1	docs/runbook_production_session.md	72	直接：/1 部署样例、明确的基名与凭据管道
+G1	docs/runbook_production_session.md	76	直接：/1 部署样例、明确的基名与凭据管道
+G1	rust/src/bin/production_session.rs	9	邻接：launcher 的装配/状态或一般路径，不是另一 X 键
+G1	rust/src/bin/production_session.rs	185	直接：launcher 解析 X profile 与读文件顺序
+G1	rust/src/bin/production_session.rs	187	直接：launcher 解析 X profile 与读文件顺序
+G1	rust/src/bin/x_execution_session.rs	21	直接：X profile 校验/持锁/开库/取环境凭据
+G1	rust/src/bin/x_execution_session.rs	26	直接：X profile 校验/持锁/开库/取环境凭据
+G1	rust/src/bin/x_execution_session.rs	59	直接：X profile 校验/持锁/开库/取环境凭据
+G1	rust/src/bin/x_execution_session.rs	62	直接：X profile 校验/持锁/开库/取环境凭据
+G1	rust/src/bin/x_execution_session.rs	220	直接：X profile 校验/持锁/开库/取环境凭据
+G1	rust/src/history_simulation/README.md	4	只有 profile 版本与回放输入结构，没有注入键例子
+G1	rust/tests/history_simulation_entry.py	123	直接：history simulation 的无值占位键，须改名
+G1	rust/tests/production_session_entry.rs	29	直接：合成 X 启动配置、入口行为或凭据隔离观察
+G1	rust/tests/production_session_entry.rs	246	测试临时路径、/proc 采样、状态或其他入口夹具，非额外 X 键
+G1	rust/tests/production_session_entry.rs	247	直接：合成 X 启动配置、入口行为或凭据隔离观察
+G1	rust/tests/production_session_entry.rs	521	直接：合成 X 启动配置、入口行为或凭据隔离观察
+G2	.github/scripts/gen-prod-banned-literals.py	25	研发代理、CI、GitHub App 或评审工具的环境或旧实现扫描；不是产品 launcher / X profile
+G2	.sandcastle/agent-workflows/shared/agent.ts	47	研发代理、CI、GitHub App 或评审工具的环境或旧实现扫描；不是产品 launcher / X profile
+G2	.sandcastle/agent-workflows/shared/agent.ts	76	研发代理、CI、GitHub App 或评审工具的环境或旧实现扫描；不是产品 launcher / X profile
+G2	.sandcastle/agent-workflows/shared/agent.ts	234	研发代理、CI、GitHub App 或评审工具的环境或旧实现扫描；不是产品 launcher / X profile
+G2	.sandcastle/agent-workflows/shared/agent.ts	250	研发代理、CI、GitHub App 或评审工具的环境或旧实现扫描；不是产品 launcher / X profile
+G2	.sandcastle/codex-child.test.ts	95	研发代理、CI、GitHub App 或评审工具的环境或旧实现扫描；不是产品 launcher / X profile
+G2	.sandcastle/codex-child.ts	29	研发代理、CI、GitHub App 或评审工具的环境或旧实现扫描；不是产品 launcher / X profile
+G2	.sandcastle/codex-child.ts	39	研发代理、CI、GitHub App 或评审工具的环境或旧实现扫描；不是产品 launcher / X profile
+G2	.sandcastle/deepagents-pilot/REVIEW-PREFLIGHT.md	96	研发代理、CI、GitHub App 或评审工具的环境或旧实现扫描；不是产品 launcher / X profile
+G2	.sandcastle/deepagents-pilot/review_preflight.py	56	研发代理、CI、GitHub App 或评审工具的环境或旧实现扫描；不是产品 launcher / X profile
+G2	.sandcastle/deepagents-pilot/review_preflight.py	266	研发代理、CI、GitHub App 或评审工具的环境或旧实现扫描；不是产品 launcher / X profile
+G2	.sandcastle/deepagents-pilot/review_preflight.py	267	研发代理、CI、GitHub App 或评审工具的环境或旧实现扫描；不是产品 launcher / X profile
+G2	.sandcastle/deepagents-pilot/review_preflight.py	269	研发代理、CI、GitHub App 或评审工具的环境或旧实现扫描；不是产品 launcher / X profile
+G2	.sandcastle/deepagents-pilot/review_preflight.py	271	研发代理、CI、GitHub App 或评审工具的环境或旧实现扫描；不是产品 launcher / X profile
+G2	.sandcastle/deepagents-pilot/tests/test_review_preflight.py	621	研发代理、CI、GitHub App 或评审工具的环境或旧实现扫描；不是产品 launcher / X profile
+G2	.sandcastle/deepagents-pilot/tests/test_review_preflight.py	622	研发代理、CI、GitHub App 或评审工具的环境或旧实现扫描；不是产品 launcher / X profile
+G2	.sandcastle/deepagents-pilot/tests/test_review_preflight.py	624	研发代理、CI、GitHub App 或评审工具的环境或旧实现扫描；不是产品 launcher / X profile
+G2	.sandcastle/deepagents-pilot/tests/test_review_preflight.py	640	研发代理、CI、GitHub App 或评审工具的环境或旧实现扫描；不是产品 launcher / X profile
+G2	.sandcastle/deepagents-pilot/tests/test_review_preflight.py	644	研发代理、CI、GitHub App 或评审工具的环境或旧实现扫描；不是产品 launcher / X profile
+G2	.sandcastle/deepagents-pilot/tests/test_review_preflight.py	652	研发代理、CI、GitHub App 或评审工具的环境或旧实现扫描；不是产品 launcher / X profile
+G2	.sandcastle/deepagents-pilot/tests/test_review_preflight.py	1039	研发代理、CI、GitHub App 或评审工具的环境或旧实现扫描；不是产品 launcher / X profile
+G2	.sandcastle/deepagents-pilot/tests/test_review_preflight.py	1040	研发代理、CI、GitHub App 或评审工具的环境或旧实现扫描；不是产品 launcher / X profile
+G2	.sandcastle/deepagents-pilot/tests/test_review_preflight.py	1041	研发代理、CI、GitHub App 或评审工具的环境或旧实现扫描；不是产品 launcher / X profile
+G2	.sandcastle/deepagents-pilot/tests/test_review_preflight.py	1042	研发代理、CI、GitHub App 或评审工具的环境或旧实现扫描；不是产品 launcher / X profile
+G2	.sandcastle/docker-isolation.test.mts	157	研发代理、CI、GitHub App 或评审工具的环境或旧实现扫描；不是产品 launcher / X profile
+G2	.sandcastle/docker-isolation.test.mts	206	研发代理、CI、GitHub App 或评审工具的环境或旧实现扫描；不是产品 launcher / X profile
+G2	.sandcastle/docker-isolation.test.mts	260	研发代理、CI、GitHub App 或评审工具的环境或旧实现扫描；不是产品 launcher / X profile
+G2	.sandcastle/docker-isolation.test.mts	266	研发代理、CI、GitHub App 或评审工具的环境或旧实现扫描；不是产品 launcher / X profile
+G2	.sandcastle/migrate-claude-data-surface/RUNBOOK.md	221	研发代理、CI、GitHub App 或评审工具的环境或旧实现扫描；不是产品 launcher / X profile
+G2	.sandcastle/migrate-claude-data-surface/claude-migrate.sh	166	研发代理、CI、GitHub App 或评审工具的环境或旧实现扫描；不是产品 launcher / X profile
+G2	.sandcastle/orphan-container.mts	35	研发代理、CI、GitHub App 或评审工具的环境或旧实现扫描；不是产品 launcher / X profile
+G2	.sandcastle/orphan-container.test.mts	57	研发代理、CI、GitHub App 或评审工具的环境或旧实现扫描；不是产品 launcher / X profile
+G2	.sandcastle/orphan-container.test.mts	60	研发代理、CI、GitHub App 或评审工具的环境或旧实现扫描；不是产品 launcher / X profile
+G2	.sandcastle/verify-workflows.py	594	研发代理、CI、GitHub App 或评审工具的环境或旧实现扫描；不是产品 launcher / X profile
+G2	.sandcastle/verify-workflows.py	602	研发代理、CI、GitHub App 或评审工具的环境或旧实现扫描；不是产品 launcher / X profile
+G2	.sandcastle/verify-workflows.py	662	研发代理、CI、GitHub App 或评审工具的环境或旧实现扫描；不是产品 launcher / X profile
+G2	.sandcastle/verify-workflows.py	669	研发代理、CI、GitHub App 或评审工具的环境或旧实现扫描；不是产品 launcher / X profile
+G2	docs/adr/0039-production-entry-inventory-and-unique-launcher.md	126	正本：唯一 launcher、凭据隔离/B13，或相关历史清单；逐行回查
+G2	docs/adr/0039-production-entry-inventory-and-unique-launcher.md	134	正本：唯一 launcher、凭据隔离/B13，或相关历史清单；逐行回查
+G2	docs/adr/0039-production-entry-inventory-and-unique-launcher.md	137	正本：唯一 launcher、凭据隔离/B13，或相关历史清单；逐行回查
+G2	docs/adr/0039-production-entry-inventory-and-unique-launcher.md	261	正本：唯一 launcher、凭据隔离/B13，或相关历史清单；逐行回查
+G2	docs/adr/0039-production-entry-inventory-and-unique-launcher.md	346	正本：唯一 launcher、凭据隔离/B13，或相关历史清单；逐行回查
+G2	docs/adr/0039-production-entry-inventory-and-unique-launcher.md	371	正本：唯一 launcher、凭据隔离/B13，或相关历史清单；逐行回查
+G2	docs/adr/0039-production-entry-inventory-and-unique-launcher.md	473	正本：唯一 launcher、凭据隔离/B13，或相关历史清单；逐行回查
+G2	docs/adr/0039-production-entry-inventory-and-unique-launcher.md	475	正本：唯一 launcher、凭据隔离/B13，或相关历史清单；逐行回查
+G2	docs/adr/0048-legacy-engine-module-level-dispositions.md	311	正本背景：旧入口影子与不收编旧注入源，不是新准入键
+G2	rust/src/bin/s_session_v2/s_fact_cache.rs	1178	仅 S/Q 的环境隔离、测试或 admission；无 X 注入键
+G2	rust/src/bin/s_structure_session.rs	2343	仅 S/Q 的环境隔离、测试或 admission；无 X 注入键
+G2	rust/src/theta_v0/env_registry.rs	21	结构/回测旧环境变量的登记及用途；不作为 X 凭据注入命名空间
+G2	rust/src/theta_v0/env_registry.rs	22	结构/回测旧环境变量的登记及用途；不作为 X 凭据注入命名空间
+G2	rust/src/theta_v0/env_registry.rs	23	结构/回测旧环境变量的登记及用途；不作为 X 凭据注入命名空间
+G2	rust/src/theta_v0/env_registry.rs	26	结构/回测旧环境变量的登记及用途；不作为 X 凭据注入命名空间
+G2	rust/src/theta_v0/env_registry.rs	27	结构/回测旧环境变量的登记及用途；不作为 X 凭据注入命名空间
+G2	rust/src/theta_v0/env_registry.rs	46	结构/回测旧环境变量的登记及用途；不作为 X 凭据注入命名空间
+G2	rust/src/theta_v0/env_registry.rs	146	结构/回测旧环境变量的登记及用途；不作为 X 凭据注入命名空间
+G2	rust/src/theta_v0/env_registry.rs	147	结构/回测旧环境变量的登记及用途；不作为 X 凭据注入命名空间
+G2	rust/src/theta_v0/env_registry.rs	154	结构/回测旧环境变量的登记及用途；不作为 X 凭据注入命名空间
+G2	rust/src/theta_v0/env_registry.rs	161	结构/回测旧环境变量的登记及用途；不作为 X 凭据注入命名空间
+G2	rust/src/theta_v0/env_registry.rs	168	结构/回测旧环境变量的登记及用途；不作为 X 凭据注入命名空间
+G2	rust/src/theta_v0/env_registry.rs	175	结构/回测旧环境变量的登记及用途；不作为 X 凭据注入命名空间
+G2	rust/src/theta_v0/env_registry.rs	182	结构/回测旧环境变量的登记及用途；不作为 X 凭据注入命名空间
+G2	rust/src/theta_v0/env_registry.rs	189	结构/回测旧环境变量的登记及用途；不作为 X 凭据注入命名空间
+G2	rust/src/theta_v0/env_registry.rs	196	结构/回测旧环境变量的登记及用途；不作为 X 凭据注入命名空间
+G2	rust/src/theta_v0/env_registry.rs	203	结构/回测旧环境变量的登记及用途；不作为 X 凭据注入命名空间
+G2	rust/src/theta_v0/env_registry.rs	211	结构/回测旧环境变量的登记及用途；不作为 X 凭据注入命名空间
+G2	rust/src/theta_v0/env_registry.rs	218	结构/回测旧环境变量的登记及用途；不作为 X 凭据注入命名空间
+G2	rust/src/theta_v0/env_registry.rs	226	结构/回测旧环境变量的登记及用途；不作为 X 凭据注入命名空间
+G2	rust/src/theta_v0/env_registry.rs	233	结构/回测旧环境变量的登记及用途；不作为 X 凭据注入命名空间
+G2	rust/src/theta_v0/env_registry.rs	240	结构/回测旧环境变量的登记及用途；不作为 X 凭据注入命名空间
+G2	rust/src/theta_v0/env_registry.rs	247	结构/回测旧环境变量的登记及用途；不作为 X 凭据注入命名空间
+G2	rust/src/theta_v0/env_registry.rs	254	结构/回测旧环境变量的登记及用途；不作为 X 凭据注入命名空间
+G2	rust/src/theta_v0/env_registry.rs	261	结构/回测旧环境变量的登记及用途；不作为 X 凭据注入命名空间
+G2	rust/src/theta_v0/env_registry.rs	268	结构/回测旧环境变量的登记及用途；不作为 X 凭据注入命名空间
+G2	rust/src/theta_v0/env_registry.rs	275	结构/回测旧环境变量的登记及用途；不作为 X 凭据注入命名空间
+G2	rust/src/theta_v0/env_registry.rs	282	结构/回测旧环境变量的登记及用途；不作为 X 凭据注入命名空间
+G2	rust/src/theta_v0/env_registry.rs	289	结构/回测旧环境变量的登记及用途；不作为 X 凭据注入命名空间
+G2	rust/src/theta_v0/env_registry.rs	296	结构/回测旧环境变量的登记及用途；不作为 X 凭据注入命名空间
+G2	rust/src/theta_v0/env_registry.rs	303	结构/回测旧环境变量的登记及用途；不作为 X 凭据注入命名空间
+G2	rust/src/theta_v0/env_registry.rs	310	结构/回测旧环境变量的登记及用途；不作为 X 凭据注入命名空间
+G2	rust/src/theta_v0/env_registry.rs	317	结构/回测旧环境变量的登记及用途；不作为 X 凭据注入命名空间
+G2	rust/src/theta_v0/env_registry.rs	324	结构/回测旧环境变量的登记及用途；不作为 X 凭据注入命名空间
+G2	rust/src/theta_v0/env_registry.rs	331	结构/回测旧环境变量的登记及用途；不作为 X 凭据注入命名空间
+G2	rust/src/theta_v0/env_registry.rs	338	结构/回测旧环境变量的登记及用途；不作为 X 凭据注入命名空间
+G2	rust/src/theta_v0/env_registry.rs	345	结构/回测旧环境变量的登记及用途；不作为 X 凭据注入命名空间
+G2	rust/src/theta_v0/env_registry.rs	355	结构/回测旧环境变量的登记及用途；不作为 X 凭据注入命名空间
+G2	rust/src/theta_v0/env_registry.rs	362	结构/回测旧环境变量的登记及用途；不作为 X 凭据注入命名空间
+G2	rust/src/theta_v0/env_registry.rs	370	结构/回测旧环境变量的登记及用途；不作为 X 凭据注入命名空间
+G2	rust/src/theta_v0/env_registry.rs	377	结构/回测旧环境变量的登记及用途；不作为 X 凭据注入命名空间
+G2	rust/src/theta_v0/env_registry.rs	384	结构/回测旧环境变量的登记及用途；不作为 X 凭据注入命名空间
+G2	rust/src/theta_v0/env_registry.rs	391	结构/回测旧环境变量的登记及用途；不作为 X 凭据注入命名空间
+G2	rust/src/theta_v0/env_registry.rs	398	结构/回测旧环境变量的登记及用途；不作为 X 凭据注入命名空间
+G2	rust/src/theta_v0/env_registry.rs	405	结构/回测旧环境变量的登记及用途；不作为 X 凭据注入命名空间
+G2	rust/src/theta_v0/env_registry.rs	415	结构/回测旧环境变量的登记及用途；不作为 X 凭据注入命名空间
+G2	rust/src/theta_v0/env_registry.rs	422	结构/回测旧环境变量的登记及用途；不作为 X 凭据注入命名空间
+G2	rust/src/theta_v0/env_registry.rs	429	结构/回测旧环境变量的登记及用途；不作为 X 凭据注入命名空间
+G2	rust/src/theta_v0/env_registry.rs	436	结构/回测旧环境变量的登记及用途；不作为 X 凭据注入命名空间
+G2	rust/src/theta_v0/env_registry.rs	443	结构/回测旧环境变量的登记及用途；不作为 X 凭据注入命名空间
+G2	rust/src/theta_v0/env_registry.rs	450	结构/回测旧环境变量的登记及用途；不作为 X 凭据注入命名空间
+G2	rust/src/theta_v0/env_registry.rs	457	结构/回测旧环境变量的登记及用途；不作为 X 凭据注入命名空间
+G2	rust/src/theta_v0/env_registry.rs	464	结构/回测旧环境变量的登记及用途；不作为 X 凭据注入命名空间
+G2	rust/src/theta_v0/env_registry.rs	471	结构/回测旧环境变量的登记及用途；不作为 X 凭据注入命名空间
+G2	rust/src/theta_v0/env_registry.rs	478	结构/回测旧环境变量的登记及用途；不作为 X 凭据注入命名空间
+G2	rust/src/theta_v0/env_registry.rs	487	结构/回测旧环境变量的登记及用途；不作为 X 凭据注入命名空间
+G2	rust/src/theta_v0/env_registry.rs	494	结构/回测旧环境变量的登记及用途；不作为 X 凭据注入命名空间
+G2	rust/src/theta_v0/env_registry.rs	501	结构/回测旧环境变量的登记及用途；不作为 X 凭据注入命名空间
+G2	rust/src/theta_v0/env_registry.rs	508	结构/回测旧环境变量的登记及用途；不作为 X 凭据注入命名空间
+G2	rust/src/theta_v0/env_registry.rs	515	结构/回测旧环境变量的登记及用途；不作为 X 凭据注入命名空间
+G2	rust/src/theta_v0/env_registry.rs	522	结构/回测旧环境变量的登记及用途；不作为 X 凭据注入命名空间
+G2	rust/src/theta_v0/env_registry.rs	529	结构/回测旧环境变量的登记及用途；不作为 X 凭据注入命名空间
+G2	rust/src/theta_v0/env_registry.rs	536	结构/回测旧环境变量的登记及用途；不作为 X 凭据注入命名空间
+G2	rust/src/theta_v0/env_registry.rs	543	结构/回测旧环境变量的登记及用途；不作为 X 凭据注入命名空间
+G2	rust/src/theta_v0/env_registry.rs	550	结构/回测旧环境变量的登记及用途；不作为 X 凭据注入命名空间
+G2	rust/src/theta_v0/env_registry.rs	557	结构/回测旧环境变量的登记及用途；不作为 X 凭据注入命名空间
+G2	rust/src/theta_v0/env_registry.rs	564	结构/回测旧环境变量的登记及用途；不作为 X 凭据注入命名空间
+G2	rust/src/theta_v0/env_registry.rs	571	结构/回测旧环境变量的登记及用途；不作为 X 凭据注入命名空间
+G2	rust/src/theta_v0/env_registry.rs	578	结构/回测旧环境变量的登记及用途；不作为 X 凭据注入命名空间
+G2	rust/src/theta_v0/env_registry.rs	585	结构/回测旧环境变量的登记及用途；不作为 X 凭据注入命名空间
+G2	rust/src/theta_v0/env_registry.rs	592	结构/回测旧环境变量的登记及用途；不作为 X 凭据注入命名空间
+G2	rust/src/theta_v0/env_registry.rs	599	结构/回测旧环境变量的登记及用途；不作为 X 凭据注入命名空间
+G2	rust/src/theta_v0/env_registry.rs	606	结构/回测旧环境变量的登记及用途；不作为 X 凭据注入命名空间
+G2	rust/src/theta_v0/env_registry.rs	616	结构/回测旧环境变量的登记及用途；不作为 X 凭据注入命名空间
+G2	rust/src/theta_v0/env_registry.rs	621	结构/回测旧环境变量的登记及用途；不作为 X 凭据注入命名空间
+G2	rust/src/theta_v0/env_registry.rs	626	结构/回测旧环境变量的登记及用途；不作为 X 凭据注入命名空间
+G2	rust/src/theta_v0/env_registry.rs	631	结构/回测旧环境变量的登记及用途；不作为 X 凭据注入命名空间
+G2	s_session/README.md	17	仅 S/Q 的环境隔离、测试或 admission；无 X 注入键
+G2	s_session/README.md	18	仅 S/Q 的环境隔离、测试或 admission；无 X 注入键
+G2	s_session/launch_s.sh	93	仅 S/Q 的环境隔离、测试或 admission；无 X 注入键
+G2	s_session/launch_s.sh	94	仅 S/Q 的环境隔离、测试或 admission；无 X 注入键
+G2	s_session/s_service_control.py	600	仅 S/Q 的环境隔离、测试或 admission；无 X 注入键
+G2	s_session/s_service_control.py	603	仅 S/Q 的环境隔离、测试或 admission；无 X 注入键
+G2	s_session/tests/issue1527_recovery/test_python_r4.py	280	仅 S/Q 的环境隔离、测试或 admission；无 X 注入键
+G2	s_session/tests/test_tb01c_runtime_environment.py	60	仅 S/Q 的环境隔离、测试或 admission；无 X 注入键
+G2	s_session/tests/test_tb01c_runtime_environment.py	61	仅 S/Q 的环境隔离、测试或 admission；无 X 注入键
+G2	s_session/tests/test_tb01c_runtime_environment.py	64	仅 S/Q 的环境隔离、测试或 admission；无 X 注入键
+G2	s_session/tests/test_tb01c_runtime_environment.py	65	仅 S/Q 的环境隔离、测试或 admission；无 X 注入键
+G2	s_session/tests/test_tb01c_runtime_environment.py	67	仅 S/Q 的环境隔离、测试或 admission；无 X 注入键
+G2	s_session/tests/test_tb01c_runtime_environment.py	95	仅 S/Q 的环境隔离、测试或 admission；无 X 注入键
+G2	s_session/tests/test_tb02a_runtime.py	36	仅 S/Q 的环境隔离、测试或 admission；无 X 注入键
+G2	s_session/tests/test_tb02a_runtime.py	46	仅 S/Q 的环境隔离、测试或 admission；无 X 注入键
+G2	s_session/tests/test_tb02a_runtime.py	47	仅 S/Q 的环境隔离、测试或 admission；无 X 注入键
+G3	.github/workflows/agent-implement-pr.yml	100	研发代理、CI、GitHub App 或评审工具的环境或旧实现扫描；不是产品 launcher / X profile
+G3	.github/workflows/agent-implement.yml	169	研发代理、CI、GitHub App 或评审工具的环境或旧实现扫描；不是产品 launcher / X profile
+G3	.github/workflows/agent-review.yml	98	研发代理、CI、GitHub App 或评审工具的环境或旧实现扫描；不是产品 launcher / X profile
+G3	.sandcastle/Dockerfile	74	研发代理、CI、GitHub App 或评审工具的环境或旧实现扫描；不是产品 launcher / X profile
+G3	.sandcastle/README.md	71	研发代理、CI、GitHub App 或评审工具的环境或旧实现扫描；不是产品 launcher / X profile
+G3	.sandcastle/SECURITY.md	3	研发代理、CI、GitHub App 或评审工具的环境或旧实现扫描；不是产品 launcher / X profile
+G3	.sandcastle/SECURITY.md	52	研发代理、CI、GitHub App 或评审工具的环境或旧实现扫描；不是产品 launcher / X profile
+G3	.sandcastle/agent-workflows/shared/agent.ts	18	研发代理、CI、GitHub App 或评审工具的环境或旧实现扫描；不是产品 launcher / X profile
+G3	.sandcastle/agent-workflows/shared/agent.ts	34	研发代理、CI、GitHub App 或评审工具的环境或旧实现扫描；不是产品 launcher / X profile
+G3	.sandcastle/claim-loop.mts	30	研发代理、CI、GitHub App 或评审工具的环境或旧实现扫描；不是产品 launcher / X profile
+G3	.sandcastle/claim-loop.mts	123	研发代理、CI、GitHub App 或评审工具的环境或旧实现扫描；不是产品 launcher / X profile
+G3	.sandcastle/claim-loop.mts	132	研发代理、CI、GitHub App 或评审工具的环境或旧实现扫描；不是产品 launcher / X profile
+G3	.sandcastle/claim-loop.mts	150	研发代理、CI、GitHub App 或评审工具的环境或旧实现扫描；不是产品 launcher / X profile
+G3	.sandcastle/claim-loop.mts	164	研发代理、CI、GitHub App 或评审工具的环境或旧实现扫描；不是产品 launcher / X profile
+G3	.sandcastle/claim-loop.mts	216	研发代理、CI、GitHub App 或评审工具的环境或旧实现扫描；不是产品 launcher / X profile
+G3	.sandcastle/claim-loop.mts	255	研发代理、CI、GitHub App 或评审工具的环境或旧实现扫描；不是产品 launcher / X profile
+G3	.sandcastle/deepagents-pilot/REVIEW-PREFLIGHT.md	114	研发代理、CI、GitHub App 或评审工具的环境或旧实现扫描；不是产品 launcher / X profile
+G3	.sandcastle/deepagents-pilot/pilot1742/github_app.py	156	研发代理、CI、GitHub App 或评审工具的环境或旧实现扫描；不是产品 launcher / X profile
+G3	.sandcastle/deepagents-pilot/pilot1742/github_app.py	158	研发代理、CI、GitHub App 或评审工具的环境或旧实现扫描；不是产品 launcher / X profile
+G3	.sandcastle/deepagents-pilot/pilot1742/github_app.py	160	研发代理、CI、GitHub App 或评审工具的环境或旧实现扫描；不是产品 launcher / X profile
+G3	.sandcastle/deepagents-pilot/pilot1742/github_app.py	166	研发代理、CI、GitHub App 或评审工具的环境或旧实现扫描；不是产品 launcher / X profile
+G3	.sandcastle/deepagents-pilot/pilot1742/github_app.py	238	研发代理、CI、GitHub App 或评审工具的环境或旧实现扫描；不是产品 launcher / X profile
+G3	.sandcastle/deepagents-pilot/pilot1742/github_app.py	239	研发代理、CI、GitHub App 或评审工具的环境或旧实现扫描；不是产品 launcher / X profile
+G3	.sandcastle/deepagents-pilot/review_preflight.py	272	研发代理、CI、GitHub App 或评审工具的环境或旧实现扫描；不是产品 launcher / X profile
+G3	.sandcastle/deepagents-pilot/tests/test_external_review.py	1775	研发代理、CI、GitHub App 或评审工具的环境或旧实现扫描；不是产品 launcher / X profile
+G3	.sandcastle/deepagents-pilot/tests/test_external_review.py	1810	研发代理、CI、GitHub App 或评审工具的环境或旧实现扫描；不是产品 launcher / X profile
+G3	.sandcastle/docs/graph-engineering.md	109	研发代理、CI、GitHub App 或评审工具的环境或旧实现扫描；不是产品 launcher / X profile
+G3	.sandcastle/fixtures/issue1606/claim-loop-before.mts	27	研发代理、CI、GitHub App 或评审工具的环境或旧实现扫描；不是产品 launcher / X profile
+G3	.sandcastle/fixtures/issue1606/claim-loop-before.mts	120	研发代理、CI、GitHub App 或评审工具的环境或旧实现扫描；不是产品 launcher / X profile
+G3	.sandcastle/fixtures/issue1606/claim-loop-before.mts	129	研发代理、CI、GitHub App 或评审工具的环境或旧实现扫描；不是产品 launcher / X profile
+G3	.sandcastle/fixtures/issue1606/claim-loop-before.mts	147	研发代理、CI、GitHub App 或评审工具的环境或旧实现扫描；不是产品 launcher / X profile
+G3	.sandcastle/fixtures/issue1606/claim-loop-before.mts	158	研发代理、CI、GitHub App 或评审工具的环境或旧实现扫描；不是产品 launcher / X profile
+G3	.sandcastle/fixtures/issue1606/claim-loop-before.mts	159	研发代理、CI、GitHub App 或评审工具的环境或旧实现扫描；不是产品 launcher / X profile
+G3	.sandcastle/fixtures/issue1606/claim-loop-before.mts	164	研发代理、CI、GitHub App 或评审工具的环境或旧实现扫描；不是产品 launcher / X profile
+G3	.sandcastle/fixtures/issue1606/claim-loop-before.mts	165	研发代理、CI、GitHub App 或评审工具的环境或旧实现扫描；不是产品 launcher / X profile
+G3	.sandcastle/fixtures/issue1606/claim-loop-before.mts	203	研发代理、CI、GitHub App 或评审工具的环境或旧实现扫描；不是产品 launcher / X profile
+G3	.sandcastle/fixtures/issue1606/claim-loop-before.mts	242	研发代理、CI、GitHub App 或评审工具的环境或旧实现扫描；不是产品 launcher / X profile
+G3	.sandcastle/main-swarm.mts	39	研发代理、CI、GitHub App 或评审工具的环境或旧实现扫描；不是产品 launcher / X profile
+G3	.sandcastle/main-swarm.mts	71	研发代理、CI、GitHub App 或评审工具的环境或旧实现扫描；不是产品 launcher / X profile
+G3	.sandcastle/main-swarm.mts	93	研发代理、CI、GitHub App 或评审工具的环境或旧实现扫描；不是产品 launcher / X profile
+G3	.sandcastle/main-swarm.mts	103	研发代理、CI、GitHub App 或评审工具的环境或旧实现扫描；不是产品 launcher / X profile
+G3	.sandcastle/main-swarm.mts	116	研发代理、CI、GitHub App 或评审工具的环境或旧实现扫描；不是产品 launcher / X profile
+G3	.sandcastle/main-swarm.mts	123	研发代理、CI、GitHub App 或评审工具的环境或旧实现扫描；不是产品 launcher / X profile
+G3	.sandcastle/main-swarm.mts	136	研发代理、CI、GitHub App 或评审工具的环境或旧实现扫描；不是产品 launcher / X profile
+G3	.sandcastle/main-swarm.mts	178	研发代理、CI、GitHub App 或评审工具的环境或旧实现扫描；不是产品 launcher / X profile
+G3	.sandcastle/main.mts	55	研发代理、CI、GitHub App 或评审工具的环境或旧实现扫描；不是产品 launcher / X profile
+G3	.sandcastle/main.mts	96	研发代理、CI、GitHub App 或评审工具的环境或旧实现扫描；不是产品 launcher / X profile
+G3	.sandcastle/main.mts	99	研发代理、CI、GitHub App 或评审工具的环境或旧实现扫描；不是产品 launcher / X profile
+G3	.sandcastle/main.mts	119	研发代理、CI、GitHub App 或评审工具的环境或旧实现扫描；不是产品 launcher / X profile
+G3	.sandcastle/main.mts	167	研发代理、CI、GitHub App 或评审工具的环境或旧实现扫描；不是产品 launcher / X profile
+G3	.sandcastle/main.mts	202	研发代理、CI、GitHub App 或评审工具的环境或旧实现扫描；不是产品 launcher / X profile
+G3	.sandcastle/main.mts	217	研发代理、CI、GitHub App 或评审工具的环境或旧实现扫描；不是产品 launcher / X profile
+G3	.sandcastle/main.mts	276	研发代理、CI、GitHub App 或评审工具的环境或旧实现扫描；不是产品 launcher / X profile
+G3	.sandcastle/main.mts	278	研发代理、CI、GitHub App 或评审工具的环境或旧实现扫描；不是产品 launcher / X profile
+G3	.sandcastle/main.mts	291	研发代理、CI、GitHub App 或评审工具的环境或旧实现扫描；不是产品 launcher / X profile
+G3	.sandcastle/review-context.mts	358	研发代理、CI、GitHub App 或评审工具的环境或旧实现扫描；不是产品 launcher / X profile
+G3	.sandcastle/swarm-implement-prompt.md	1	研发代理、CI、GitHub App 或评审工具的环境或旧实现扫描；不是产品 launcher / X profile
+G3	.sandcastle/swarm-prompts.test.mts	126	研发代理、CI、GitHub App 或评审工具的环境或旧实现扫描；不是产品 launcher / X profile
+G3	.sandcastle/swarm-prompts.test.mts	129	研发代理、CI、GitHub App 或评审工具的环境或旧实现扫描；不是产品 launcher / X profile
+G3	.sandcastle/swarm-prompts.test.mts	130	研发代理、CI、GitHub App 或评审工具的环境或旧实现扫描；不是产品 launcher / X profile
+G3	.sandcastle/swarm-prompts.test.mts	131	研发代理、CI、GitHub App 或评审工具的环境或旧实现扫描；不是产品 launcher / X profile
+G3	.sandcastle/swarm-prompts.test.mts	135	研发代理、CI、GitHub App 或评审工具的环境或旧实现扫描；不是产品 launcher / X profile
+G3	CONTEXT.md	370	正本语义：场所政策与部署管道分开，或相邻概念；没有新增键
+G3	CONTEXT.md	392	正本语义：场所政策与部署管道分开，或相邻概念；没有新增键
+G3	CONTEXT.md	403	正本语义：场所政策与部署管道分开，或相邻概念；没有新增键
+G3	CONTEXT.md	408	正本语义：场所政策与部署管道分开，或相邻概念；没有新增键
+G3	docs/adr/0028-first-capability-verification-profile.md	34	权威背景：场所 profile 作用域和授权，另于部署键
+G3	docs/adr/0028-first-capability-verification-profile.md	36	权威背景：场所 profile 作用域和授权，另于部署键
+G3	docs/adr/0028-first-capability-verification-profile.md	46	权威背景：场所 profile 作用域和授权，另于部署键
+G3	docs/adr/0028-first-capability-verification-profile.md	95	权威背景：场所 profile 作用域和授权，另于部署键
+G3	docs/adr/0039-production-entry-inventory-and-unique-launcher.md	24	正本：唯一 launcher、凭据隔离/B13，或相关历史清单；逐行回查
+G3	docs/adr/0039-production-entry-inventory-and-unique-launcher.md	25	正本：唯一 launcher、凭据隔离/B13，或相关历史清单；逐行回查
+G3	docs/adr/0039-production-entry-inventory-and-unique-launcher.md	59	正本：唯一 launcher、凭据隔离/B13，或相关历史清单；逐行回查
+G3	docs/adr/0039-production-entry-inventory-and-unique-launcher.md	162	正本：唯一 launcher、凭据隔离/B13，或相关历史清单；逐行回查
+G3	docs/adr/0039-production-entry-inventory-and-unique-launcher.md	244	正本：唯一 launcher、凭据隔离/B13，或相关历史清单；逐行回查
+G3	docs/adr/0039-production-entry-inventory-and-unique-launcher.md	287	正本：唯一 launcher、凭据隔离/B13，或相关历史清单；逐行回查
+G3	docs/adr/0039-production-entry-inventory-and-unique-launcher.md	450	正本：唯一 launcher、凭据隔离/B13，或相关历史清单；逐行回查
+G3	docs/adr/0039-production-entry-inventory-and-unique-launcher.md	507	正本：唯一 launcher、凭据隔离/B13，或相关历史清单；逐行回查
+G3	docs/adr/0039-production-entry-inventory-and-unique-launcher.md	511	正本：唯一 launcher、凭据隔离/B13，或相关历史清单；逐行回查
+G3	docs/adr/0048-legacy-engine-module-level-dispositions.md	99	正本背景：旧入口影子与不收编旧注入源，不是新准入键
+G3	docs/adr/0048-legacy-engine-module-level-dispositions.md	242	正本背景：旧入口影子与不收编旧注入源，不是新准入键
+G3	docs/adr/0048-legacy-engine-module-level-dispositions.md	311	正本背景：旧入口影子与不收编旧注入源，不是新准入键
+G3	docs/adr/0048-legacy-engine-module-level-dispositions.md	460	正本背景：旧入口影子与不收编旧注入源，不是新准入键
+G3	docs/adr/0048-legacy-engine-module-level-dispositions.md	464	正本背景：旧入口影子与不收编旧注入源，不是新准入键
+G3	docs/adr/0059-production-session-layout-contract.md	35	S/X 布局、进程锁与组装，不规定注入键
+G3	docs/adr/0062-fu18-venue-account-permission-binding.md	1	正本：部署字段改名、作用域/权限分界，未分配具体键
+G3	docs/adr/0062-fu18-venue-account-permission-binding.md	3	正本：部署字段改名、作用域/权限分界，未分配具体键
+G3	docs/adr/0062-fu18-venue-account-permission-binding.md	9	正本：部署字段改名、作用域/权限分界，未分配具体键
+G3	docs/adr/0062-fu18-venue-account-permission-binding.md	19	正本：部署字段改名、作用域/权限分界，未分配具体键
+G3	docs/adr/0062-fu18-venue-account-permission-binding.md	25	正本：部署字段改名、作用域/权限分界，未分配具体键
+G3	docs/adr/0062-fu18-venue-account-permission-binding.md	30	正本：部署字段改名、作用域/权限分界，未分配具体键
+G3	docs/adr/0062-fu18-venue-account-permission-binding.md	33	正本：部署字段改名、作用域/权限分界，未分配具体键
+G3	docs/adr/0062-fu18-venue-account-permission-binding.md	40	正本：部署字段改名、作用域/权限分界，未分配具体键
+G3	docs/adr/0062-fu18-venue-account-permission-binding.md	86	正本：部署字段改名、作用域/权限分界，未分配具体键
+G3	docs/adr/0062-fu18-venue-account-permission-binding.md	151	正本：部署字段改名、作用域/权限分界，未分配具体键
+G3	docs/adr/0062-fu18-venue-account-permission-binding.md	153	正本：部署字段改名、作用域/权限分界，未分配具体键
+G3	docs/adr/0062-fu18-venue-account-permission-binding.md	206	正本：部署字段改名、作用域/权限分界，未分配具体键
+G3	docs/adr/0062-fu18-venue-account-permission-binding.md	209	正本：部署字段改名、作用域/权限分界，未分配具体键
+G3	docs/adr/0062-fu18-venue-account-permission-binding.md	256	正本：部署字段改名、作用域/权限分界，未分配具体键
+G3	docs/adr/0062-fu18-venue-account-permission-binding.md	279	正本：部署字段改名、作用域/权限分界，未分配具体键
+G3	docs/adr/0062-fu18-venue-account-permission-binding.md	281	正本：部署字段改名、作用域/权限分界，未分配具体键
+G3	docs/adr/0063-position-bearing-migration-rollback.md	13	带仓迁移的旧凭据权限隔离，不规定注入键
+G3	docs/adr/0063-position-bearing-migration-rollback.md	59	带仓迁移的旧凭据权限隔离，不规定注入键
+G3	docs/agents/wayfinder-workflow.md	104	流程和用户权限判断，只约束授权，不分配产品键
+G3	docs/agents/wayfinder-workflow.md	114	流程和用户权限判断，只约束授权，不分配产品键
+G3	docs/runbook_production_session.md	76	直接：/1 部署样例、明确的基名与凭据管道
+G3	rust/src/bin/production_session.rs	9	邻接：launcher 的装配/状态或一般路径，不是另一 X 键
+G3	rust/src/bin/production_session.rs	10	邻接：launcher 的装配/状态或一般路径，不是另一 X 键
+G3	rust/src/bin/production_session.rs	216	直接：构造子进程环境、启动与注入顺序
+G3	rust/src/bin/production_session.rs	218	直接：构造子进程环境、启动与注入顺序
+G3	rust/src/bin/s_session_v3/financial_session_tests.rs	1106	仅 S/Q 的环境隔离、测试或 admission；无 X 注入键
+G3	rust/src/bin/s_session_v3/financial_session_tests.rs	1157	仅 S/Q 的环境隔离、测试或 admission；无 X 注入键
+G3	rust/src/bin/s_session_v3/financial_session_tests.rs	1187	仅 S/Q 的环境隔离、测试或 admission；无 X 注入键
+G3	rust/src/economic_session/finance_real_s_tests.rs	49	E/B 非 X 测试或传输环境；用于共享层回归，不是 X 凭据配置
+G3	rust/src/economic_session/finance_real_s_tests.rs	87	E/B 非 X 测试或传输环境；用于共享层回归，不是 X 凭据配置
+G3	rust/src/economic_session/finance_real_s_tests.rs	137	E/B 非 X 测试或传输环境；用于共享层回归，不是 X 凭据配置
+G3	rust/src/economic_session/finance_transport.rs	288	E/B 非 X 测试或传输环境；用于共享层回归，不是 X 凭据配置
+G3	rust/src/economic_session/sr_expansion_tests.rs	1058	E/B 非 X 测试或传输环境；用于共享层回归，不是 X 凭据配置
+G3	rust/src/economic_session/sr_expansion_tests.rs	1096	E/B 非 X 测试或传输环境；用于共享层回归，不是 X 凭据配置
+G3	rust/src/economic_session/sr_expansion_tests.rs	1132	E/B 非 X 测试或传输环境；用于共享层回归，不是 X 凭据配置
+G3	rust/tests/production_session_entry.rs	273	测试临时路径、/proc 采样、状态或其他入口夹具，非额外 X 键
+G3	rust/tests/production_session_entry.rs	297	测试临时路径、/proc 采样、状态或其他入口夹具，非额外 X 键
+G3	rust/tests/production_session_entry.rs	352	直接：合成 X 启动配置、入口行为或凭据隔离观察
+G3	rust/tests/production_session_entry.rs	353	测试临时路径、/proc 采样、状态或其他入口夹具，非额外 X 键
+G3	rust/tests/production_session_entry.rs	521	直接：合成 X 启动配置、入口行为或凭据隔离观察
+G3	rust/tests/production_session_entry.rs	559	直接：合成 X 启动配置、入口行为或凭据隔离观察
+G3	rust/tests/production_session_entry.rs	1016	直接：合成 X 启动配置、入口行为或凭据隔离观察
+G3	rust/tests/production_session_entry.rs	1017	测试临时路径、/proc 采样、状态或其他入口夹具，非额外 X 键
+G3	rust/tests/production_session_entry.rs	1063	直接：合成 X 启动配置、入口行为或凭据隔离观察
+G4	docs/runbook_production_session.md	35	runbook 邻接：路径、构建、S 控制或一般状态，不是另一键
+G4	docs/runbook_production_session.md	40	runbook 邻接：路径、构建、S 控制或一般状态，不是另一键
+G4	docs/runbook_production_session.md	53	runbook 邻接：路径、构建、S 控制或一般状态，不是另一键
+G4	docs/runbook_production_session.md	54	runbook 邻接：路径、构建、S 控制或一般状态，不是另一键
+G4	docs/runbook_production_session.md	64	runbook 邻接：路径、构建、S 控制或一般状态，不是另一键
+G4	docs/runbook_production_session.md	72	直接：/1 部署样例、明确的基名与凭据管道
+G4	docs/runbook_production_session.md	76	直接：/1 部署样例、明确的基名与凭据管道
+G4	docs/runbook_production_session.md	77	直接：/1 部署样例、明确的基名与凭据管道
+G4	docs/runbook_production_session.md	79	直接：/1 部署样例、明确的基名与凭据管道
+G4	docs/runbook_production_session.md	95	runbook 邻接：路径、构建、S 控制或一般状态，不是另一键
+G4	docs/runbook_production_session.md	130	runbook 邻接：路径、构建、S 控制或一般状态，不是另一键
+G4	docs/runbook_production_session.md	131	runbook 邻接：路径、构建、S 控制或一般状态，不是另一键
+G4	docs/runbook_production_session.md	136	runbook 邻接：路径、构建、S 控制或一般状态，不是另一键
+G4	docs/runbook_production_session.md	143	runbook 邻接：路径、构建、S 控制或一般状态，不是另一键
+G4	docs/runbook_production_session.md	145	runbook 邻接：路径、构建、S 控制或一般状态，不是另一键
+G4	docs/runbook_production_session.md	157	runbook 邻接：路径、构建、S 控制或一般状态，不是另一键
+G4	docs/runbook_production_session.md	160	runbook 邻接：路径、构建、S 控制或一般状态，不是另一键
+G4	docs/runbook_production_session.md	161	runbook 邻接：路径、构建、S 控制或一般状态，不是另一键
+G4	docs/runbook_production_session.md	163	runbook 邻接：路径、构建、S 控制或一般状态，不是另一键
+G4	docs/runbook_production_session.md	164	runbook 邻接：路径、构建、S 控制或一般状态，不是另一键
+G4	docs/runbook_production_session.md	165	runbook 邻接：路径、构建、S 控制或一般状态，不是另一键
+G4	docs/runbook_production_session.md	168	runbook 邻接：路径、构建、S 控制或一般状态，不是另一键
+G4	docs/runbook_production_session.md	174	runbook 邻接：路径、构建、S 控制或一般状态，不是另一键
+G4	docs/runbook_production_session.md	180	runbook 邻接：路径、构建、S 控制或一般状态，不是另一键
+G4	docs/runbook_production_session.md	193	runbook 邻接：路径、构建、S 控制或一般状态，不是另一键
+G4	docs/runbook_production_session.md	203	runbook 邻接：路径、构建、S 控制或一般状态，不是另一键
+G4	rust/src/bin/production_session.rs	9	邻接：launcher 的装配/状态或一般路径，不是另一 X 键
+G4	rust/src/bin/production_session.rs	19	邻接：launcher 的装配/状态或一般路径，不是另一 X 键
+G4	rust/src/bin/production_session.rs	20	邻接：launcher 的装配/状态或一般路径，不是另一 X 键
+G4	rust/src/bin/production_session.rs	38	邻接：launcher 的装配/状态或一般路径，不是另一 X 键
+G4	rust/src/bin/production_session.rs	58	邻接：launcher 的装配/状态或一般路径，不是另一 X 键
+G4	rust/src/bin/production_session.rs	98	邻接：launcher 的装配/状态或一般路径，不是另一 X 键
+G4	rust/src/bin/production_session.rs	100	邻接：launcher 的装配/状态或一般路径，不是另一 X 键
+G4	rust/src/bin/production_session.rs	105	邻接：launcher 的装配/状态或一般路径，不是另一 X 键
+G4	rust/src/bin/production_session.rs	108	邻接：launcher 的装配/状态或一般路径，不是另一 X 键
+G4	rust/src/bin/production_session.rs	109	邻接：launcher 的装配/状态或一般路径，不是另一 X 键
+G4	rust/src/bin/production_session.rs	110	邻接：launcher 的装配/状态或一般路径，不是另一 X 键
+G4	rust/src/bin/production_session.rs	117	邻接：launcher 的装配/状态或一般路径，不是另一 X 键
+G4	rust/src/bin/production_session.rs	119	邻接：launcher 的装配/状态或一般路径，不是另一 X 键
+G4	rust/src/bin/production_session.rs	120	邻接：launcher 的装配/状态或一般路径，不是另一 X 键
+G4	rust/src/bin/production_session.rs	124	邻接：launcher 的装配/状态或一般路径，不是另一 X 键
+G4	rust/src/bin/production_session.rs	125	邻接：launcher 的装配/状态或一般路径，不是另一 X 键
+G4	rust/src/bin/production_session.rs	177	直接：launcher 解析 X profile 与读文件顺序
+G4	rust/src/bin/production_session.rs	185	直接：launcher 解析 X profile 与读文件顺序
+G4	rust/src/bin/production_session.rs	187	直接：launcher 解析 X profile 与读文件顺序
+G4	rust/src/bin/production_session.rs	192	直接：launcher 解析 X profile 与读文件顺序
+G4	rust/src/bin/production_session.rs	194	邻接：launcher 的装配/状态或一般路径，不是另一 X 键
+G4	rust/src/bin/production_session.rs	199	邻接：launcher 的装配/状态或一般路径，不是另一 X 键
+G4	rust/src/bin/production_session.rs	203	邻接：launcher 的装配/状态或一般路径，不是另一 X 键
+G4	rust/src/bin/production_session.rs	205	邻接：launcher 的装配/状态或一般路径，不是另一 X 键
+G4	rust/src/bin/production_session.rs	209	邻接：launcher 的装配/状态或一般路径，不是另一 X 键
+G4	rust/src/bin/production_session.rs	210	邻接：launcher 的装配/状态或一般路径，不是另一 X 键
+G4	rust/src/bin/production_session.rs	212	邻接：launcher 的装配/状态或一般路径，不是另一 X 键
+G4	rust/src/bin/production_session.rs	216	直接：构造子进程环境、启动与注入顺序
+G4	rust/src/bin/production_session.rs	219	直接：构造子进程环境、启动与注入顺序
+G4	rust/src/bin/production_session.rs	232	邻接：launcher 的装配/状态或一般路径，不是另一 X 键
+G4	rust/src/bin/production_session.rs	239	邻接：launcher 的装配/状态或一般路径，不是另一 X 键
+G4	rust/src/bin/production_session.rs	247	邻接：launcher 的装配/状态或一般路径，不是另一 X 键
+G4	rust/src/bin/production_session.rs	253	邻接：launcher 的装配/状态或一般路径，不是另一 X 键
+G4	rust/src/bin/production_session.rs	254	邻接：launcher 的装配/状态或一般路径，不是另一 X 键
+G4	rust/src/bin/production_session.rs	257	邻接：launcher 的装配/状态或一般路径，不是另一 X 键
+G4	rust/src/bin/production_session.rs	259	邻接：launcher 的装配/状态或一般路径，不是另一 X 键
+G4	rust/src/bin/production_session.rs	277	邻接：launcher 的装配/状态或一般路径，不是另一 X 键
+G4	rust/src/bin/production_session.rs	278	邻接：launcher 的装配/状态或一般路径，不是另一 X 键
+G4	rust/src/bin/production_session.rs	299	邻接：launcher 的装配/状态或一般路径，不是另一 X 键
+G4	rust/src/bin/production_session.rs	307	邻接：launcher 的装配/状态或一般路径，不是另一 X 键
+G4	rust/src/bin/production_session.rs	329	邻接：launcher 的装配/状态或一般路径，不是另一 X 键
+G4	rust/src/bin/production_session.rs	330	邻接：launcher 的装配/状态或一般路径，不是另一 X 键
+G4	rust/src/bin/production_session.rs	331	邻接：launcher 的装配/状态或一般路径，不是另一 X 键
+G4	rust/src/bin/production_session.rs	334	邻接：launcher 的装配/状态或一般路径，不是另一 X 键
+G4	rust/src/bin/production_session.rs	343	邻接：launcher 的装配/状态或一般路径，不是另一 X 键
+G4	rust/src/bin/production_session.rs	351	邻接：launcher 的装配/状态或一般路径，不是另一 X 键
+G4	rust/src/bin/production_session.rs	353	邻接：launcher 的装配/状态或一般路径，不是另一 X 键
+G4	rust/src/bin/production_session.rs	359	邻接：launcher 的装配/状态或一般路径，不是另一 X 键
+G4	rust/src/bin/production_session.rs	373	邻接：launcher 的装配/状态或一般路径，不是另一 X 键
+G4	rust/src/bin/production_session.rs	374	邻接：launcher 的装配/状态或一般路径，不是另一 X 键
+G4	rust/src/bin/production_session.rs	375	邻接：launcher 的装配/状态或一般路径，不是另一 X 键
+G4	rust/src/bin/production_session.rs	376	邻接：launcher 的装配/状态或一般路径，不是另一 X 键
+G4	rust/src/bin/production_session.rs	393	直接：构造子进程环境、启动与注入顺序
+G4	rust/src/bin/production_session.rs	412	直接：构造子进程环境、启动与注入顺序
+G4	rust/src/bin/production_session.rs	445	直接：构造子进程环境、启动与注入顺序
+G4	rust/src/bin/x_execution_session.rs	18	邻接：X 库和参数语义，不是另一键
+G4	rust/src/bin/x_execution_session.rs	26	直接：X profile 校验/持锁/开库/取环境凭据
+G4	rust/src/bin/x_execution_session.rs	32	直接：X profile 校验/持锁/开库/取环境凭据
+G4	rust/src/bin/x_execution_session.rs	38	直接：X profile 校验/持锁/开库/取环境凭据
+G4	rust/src/bin/x_execution_session.rs	39	直接：X profile 校验/持锁/开库/取环境凭据
+G4	rust/src/bin/x_execution_session.rs	59	直接：X profile 校验/持锁/开库/取环境凭据
+G4	rust/src/bin/x_execution_session.rs	62	直接：X profile 校验/持锁/开库/取环境凭据
+G4	rust/src/bin/x_execution_session.rs	93	邻接：X 库和参数语义，不是另一键
+G4	rust/src/bin/x_execution_session.rs	98	邻接：X 库和参数语义，不是另一键
+G4	rust/src/bin/x_execution_session.rs	137	邻接：X 库和参数语义，不是另一键
+G4	rust/src/bin/x_execution_session.rs	152	邻接：X 库和参数语义，不是另一键
+G4	rust/src/bin/x_execution_session.rs	200	直接：X profile 校验/持锁/开库/取环境凭据
+G4	rust/src/bin/x_execution_session.rs	203	直接：X profile 校验/持锁/开库/取环境凭据
+G4	rust/src/bin/x_execution_session.rs	208	直接：X profile 校验/持锁/开库/取环境凭据
+G4	rust/src/bin/x_execution_session.rs	216	直接：X profile 校验/持锁/开库/取环境凭据
+G4	rust/src/bin/x_execution_session.rs	217	直接：X profile 校验/持锁/开库/取环境凭据
+G4	rust/src/bin/x_execution_session.rs	220	直接：X profile 校验/持锁/开库/取环境凭据
+G4	rust/src/bin/x_execution_session.rs	221	直接：X profile 校验/持锁/开库/取环境凭据
+G4	rust/src/bin/x_execution_session.rs	228	直接：X profile 校验/持锁/开库/取环境凭据
+G4	rust/src/bin/x_execution_session.rs	230	邻接：X 库和参数语义，不是另一键
+G4	rust/src/economic_session/store.rs	7	文件路径、状态或其他 store 测试，不是 X 注入或 stat 环境合同
+G4	rust/src/economic_session/store.rs	92	文件路径、状态或其他 store 测试，不是 X 注入或 stat 环境合同
+G4	rust/src/economic_session/store.rs	117	文件路径、状态或其他 store 测试，不是 X 注入或 stat 环境合同
+G4	rust/src/economic_session/store.rs	122	文件路径、状态或其他 store 测试，不是 X 注入或 stat 环境合同
+G4	rust/src/economic_session/store.rs	127	文件路径、状态或其他 store 测试，不是 X 注入或 stat 环境合同
+G4	rust/src/economic_session/store.rs	134	文件路径、状态或其他 store 测试，不是 X 注入或 stat 环境合同
+G4	rust/src/economic_session/store.rs	135	文件路径、状态或其他 store 测试，不是 X 注入或 stat 环境合同
+G4	rust/src/economic_session/store.rs	158	文件路径、状态或其他 store 测试，不是 X 注入或 stat 环境合同
+G4	rust/src/economic_session/store.rs	162	文件路径、状态或其他 store 测试，不是 X 注入或 stat 环境合同
+G4	rust/src/economic_session/store.rs	176	文件路径、状态或其他 store 测试，不是 X 注入或 stat 环境合同
+G4	rust/src/economic_session/store.rs	190	文件路径、状态或其他 store 测试，不是 X 注入或 stat 环境合同
+G4	rust/src/economic_session/store.rs	191	文件路径、状态或其他 store 测试，不是 X 注入或 stat 环境合同
+G4	rust/src/economic_session/store.rs	199	文件路径、状态或其他 store 测试，不是 X 注入或 stat 环境合同
+G4	rust/src/economic_session/store.rs	274	文件路径、状态或其他 store 测试，不是 X 注入或 stat 环境合同
+G4	rust/src/economic_session/store.rs	402	文件路径、状态或其他 store 测试，不是 X 注入或 stat 环境合同
+G4	rust/src/economic_session/store.rs	443	文件路径、状态或其他 store 测试，不是 X 注入或 stat 环境合同
+G4	rust/src/economic_session/store.rs	444	文件路径、状态或其他 store 测试，不是 X 注入或 stat 环境合同
+G4	rust/src/economic_session/store.rs	450	文件路径、状态或其他 store 测试，不是 X 注入或 stat 环境合同
+G4	rust/src/economic_session/store.rs	461	直接：文件系统探测和 SQLite 打开顺序；macOS 与 Linux 分支
+G4	rust/src/economic_session/store.rs	462	直接：文件系统探测和 SQLite 打开顺序；macOS 与 Linux 分支
+G4	rust/src/economic_session/store.rs	463	直接：文件系统探测和 SQLite 打开顺序；macOS 与 Linux 分支
+G4	rust/src/economic_session/store.rs	465	直接：文件系统探测和 SQLite 打开顺序；macOS 与 Linux 分支
+G4	rust/src/economic_session/store.rs	473	直接：文件系统探测和 SQLite 打开顺序；macOS 与 Linux 分支
+G4	rust/src/economic_session/store.rs	474	直接：文件系统探测和 SQLite 打开顺序；macOS 与 Linux 分支
+G4	rust/src/economic_session/store.rs	475	直接：文件系统探测和 SQLite 打开顺序；macOS 与 Linux 分支
+G4	rust/src/economic_session/store.rs	476	直接：文件系统探测和 SQLite 打开顺序；macOS 与 Linux 分支
+G4	rust/src/economic_session/store.rs	479	直接：文件系统探测和 SQLite 打开顺序；macOS 与 Linux 分支
+G4	rust/src/economic_session/store.rs	490	直接：文件系统探测和 SQLite 打开顺序；macOS 与 Linux 分支
+G4	rust/src/economic_session/store.rs	491	直接：文件系统探测和 SQLite 打开顺序；macOS 与 Linux 分支
+G4	rust/src/economic_session/store.rs	492	直接：文件系统探测和 SQLite 打开顺序；macOS 与 Linux 分支
+G4	rust/src/economic_session/store.rs	495	直接：文件系统探测和 SQLite 打开顺序；macOS 与 Linux 分支
+G4	rust/src/economic_session/store.rs	496	直接：文件系统探测和 SQLite 打开顺序；macOS 与 Linux 分支
+G4	rust/src/economic_session/store.rs	505	直接：文件系统探测和 SQLite 打开顺序；macOS 与 Linux 分支
+G4	rust/src/economic_session/store.rs	511	直接：文件系统探测和 SQLite 打开顺序；macOS 与 Linux 分支
+G4	rust/src/economic_session/store.rs	519	直接：文件系统探测和 SQLite 打开顺序；macOS 与 Linux 分支
+G4	rust/src/economic_session/store.rs	523	直接：文件系统探测和 SQLite 打开顺序；macOS 与 Linux 分支
+G4	rust/src/economic_session/store.rs	588	文件路径、状态或其他 store 测试，不是 X 注入或 stat 环境合同
+G4	rust/src/economic_session/store.rs	591	文件路径、状态或其他 store 测试，不是 X 注入或 stat 环境合同
+G4	rust/src/economic_session/store.rs	1367	文件路径、状态或其他 store 测试，不是 X 注入或 stat 环境合同
+G4	rust/tests/history_simulation_entry.py	8	测试临时路径、进程或状态断言，不是另一键
+G4	rust/tests/history_simulation_entry.py	9	测试临时路径、进程或状态断言，不是另一键
+G4	rust/tests/history_simulation_entry.py	10	测试临时路径、进程或状态断言，不是另一键
+G4	rust/tests/history_simulation_entry.py	23	测试临时路径、进程或状态断言，不是另一键
+G4	rust/tests/history_simulation_entry.py	24	测试临时路径、进程或状态断言，不是另一键
+G4	rust/tests/history_simulation_entry.py	33	测试临时路径、进程或状态断言，不是另一键
+G4	rust/tests/history_simulation_entry.py	39	测试临时路径、进程或状态断言，不是另一键
+G4	rust/tests/history_simulation_entry.py	42	测试临时路径、进程或状态断言，不是另一键
+G4	rust/tests/history_simulation_entry.py	62	测试临时路径、进程或状态断言，不是另一键
+G4	rust/tests/history_simulation_entry.py	63	测试临时路径、进程或状态断言，不是另一键
+G4	rust/tests/history_simulation_entry.py	65	测试临时路径、进程或状态断言，不是另一键
+G4	rust/tests/history_simulation_entry.py	71	测试临时路径、进程或状态断言，不是另一键
+G4	rust/tests/history_simulation_entry.py	72	测试临时路径、进程或状态断言，不是另一键
+G4	rust/tests/history_simulation_entry.py	73	测试临时路径、进程或状态断言，不是另一键
+G4	rust/tests/history_simulation_entry.py	82	测试临时路径、进程或状态断言，不是另一键
+G4	rust/tests/history_simulation_entry.py	92	测试临时路径、进程或状态断言，不是另一键
+G4	rust/tests/history_simulation_entry.py	95	测试临时路径、进程或状态断言，不是另一键
+G4	rust/tests/history_simulation_entry.py	99	测试临时路径、进程或状态断言，不是另一键
+G4	rust/tests/history_simulation_entry.py	116	测试临时路径、进程或状态断言，不是另一键
+G4	rust/tests/history_simulation_entry.py	117	测试临时路径、进程或状态断言，不是另一键
+G4	rust/tests/history_simulation_entry.py	118	测试临时路径、进程或状态断言，不是另一键
+G4	rust/tests/history_simulation_entry.py	121	测试临时路径、进程或状态断言，不是另一键
+G4	rust/tests/history_simulation_entry.py	123	直接：history simulation 的无值占位键，须改名
+G4	rust/tests/history_simulation_entry.py	149	测试临时路径、进程或状态断言，不是另一键
+G4	rust/tests/history_simulation_entry.py	154	测试临时路径、进程或状态断言，不是另一键
+G4	rust/tests/history_simulation_entry.py	172	测试临时路径、进程或状态断言，不是另一键
+G4	rust/tests/history_simulation_entry.py	193	测试临时路径、进程或状态断言，不是另一键
+G4	rust/tests/history_simulation_entry.py	205	测试临时路径、进程或状态断言，不是另一键
+G4	rust/tests/history_simulation_entry.py	207	测试临时路径、进程或状态断言，不是另一键
+G4	rust/tests/history_simulation_entry.py	209	测试临时路径、进程或状态断言，不是另一键
+G4	rust/tests/history_simulation_entry.py	212	测试临时路径、进程或状态断言，不是另一键
+G4	rust/tests/history_simulation_entry.py	216	测试临时路径、进程或状态断言，不是另一键
+G4	rust/tests/history_simulation_entry.py	220	测试临时路径、进程或状态断言，不是另一键
+G4	rust/tests/history_simulation_entry.py	226	测试临时路径、进程或状态断言，不是另一键
+G4	rust/tests/history_simulation_entry.py	227	测试临时路径、进程或状态断言，不是另一键
+G4	rust/tests/history_simulation_entry.py	240	测试临时路径、进程或状态断言，不是另一键
+G4	rust/tests/history_simulation_entry.py	246	测试临时路径、进程或状态断言，不是另一键
+G4	rust/tests/history_simulation_entry.py	251	测试临时路径、进程或状态断言，不是另一键
+G4	rust/tests/history_simulation_entry.py	257	测试临时路径、进程或状态断言，不是另一键
+G4	rust/tests/history_simulation_entry.py	261	测试临时路径、进程或状态断言，不是另一键
+G4	rust/tests/history_simulation_entry.py	265	测试临时路径、进程或状态断言，不是另一键
+G4	rust/tests/history_simulation_entry.py	273	测试临时路径、进程或状态断言，不是另一键
+G4	rust/tests/history_simulation_entry.py	278	测试临时路径、进程或状态断言，不是另一键
+G4	rust/tests/history_simulation_entry.py	280	测试临时路径、进程或状态断言，不是另一键
+G4	rust/tests/history_simulation_entry.py	282	测试临时路径、进程或状态断言，不是另一键
+G4	rust/tests/history_simulation_entry.py	289	测试临时路径、进程或状态断言，不是另一键
+G4	rust/tests/history_simulation_entry.py	298	测试临时路径、进程或状态断言，不是另一键
+G4	rust/tests/history_simulation_entry.py	303	测试临时路径、进程或状态断言，不是另一键
+G4	rust/tests/history_simulation_entry.py	306	测试临时路径、进程或状态断言，不是另一键
+G4	rust/tests/history_simulation_entry.py	307	测试临时路径、进程或状态断言，不是另一键
+G4	rust/tests/history_simulation_entry.py	313	测试临时路径、进程或状态断言，不是另一键
+G4	rust/tests/history_simulation_entry.py	325	测试临时路径、进程或状态断言，不是另一键
+G4	rust/tests/history_simulation_entry.py	428	测试临时路径、进程或状态断言，不是另一键
+G4	rust/tests/history_simulation_entry.py	431	测试临时路径、进程或状态断言，不是另一键
+G4	rust/tests/history_simulation_entry.py	434	测试临时路径、进程或状态断言，不是另一键
+G4	rust/tests/production_session_entry.rs	3	直接：合成 X 启动配置、入口行为或凭据隔离观察
+G4	rust/tests/production_session_entry.rs	21	测试临时路径、/proc 采样、状态或其他入口夹具，非额外 X 键
+G4	rust/tests/production_session_entry.rs	29	直接：合成 X 启动配置、入口行为或凭据隔离观察
+G4	rust/tests/production_session_entry.rs	30	直接：合成 X 启动配置、入口行为或凭据隔离观察
+G4	rust/tests/production_session_entry.rs	34	测试临时路径、/proc 采样、状态或其他入口夹具，非额外 X 键
+G4	rust/tests/production_session_entry.rs	37	测试临时路径、/proc 采样、状态或其他入口夹具，非额外 X 键
+G4	rust/tests/production_session_entry.rs	40	测试临时路径、/proc 采样、状态或其他入口夹具，非额外 X 键
+G4	rust/tests/production_session_entry.rs	43	测试临时路径、/proc 采样、状态或其他入口夹具，非额外 X 键
+G4	rust/tests/production_session_entry.rs	44	测试临时路径、/proc 采样、状态或其他入口夹具，非额外 X 键
+G4	rust/tests/production_session_entry.rs	56	测试临时路径、/proc 采样、状态或其他入口夹具，非额外 X 键
+G4	rust/tests/production_session_entry.rs	57	测试临时路径、/proc 采样、状态或其他入口夹具，非额外 X 键
+G4	rust/tests/production_session_entry.rs	58	测试临时路径、/proc 采样、状态或其他入口夹具，非额外 X 键
+G4	rust/tests/production_session_entry.rs	71	测试临时路径、/proc 采样、状态或其他入口夹具，非额外 X 键
+G4	rust/tests/production_session_entry.rs	72	测试临时路径、/proc 采样、状态或其他入口夹具，非额外 X 键
+G4	rust/tests/production_session_entry.rs	76	测试临时路径、/proc 采样、状态或其他入口夹具，非额外 X 键
+G4	rust/tests/production_session_entry.rs	77	测试临时路径、/proc 采样、状态或其他入口夹具，非额外 X 键
+G4	rust/tests/production_session_entry.rs	87	测试临时路径、/proc 采样、状态或其他入口夹具，非额外 X 键
+G4	rust/tests/production_session_entry.rs	89	测试临时路径、/proc 采样、状态或其他入口夹具，非额外 X 键
+G4	rust/tests/production_session_entry.rs	123	测试临时路径、/proc 采样、状态或其他入口夹具，非额外 X 键
+G4	rust/tests/production_session_entry.rs	124	测试临时路径、/proc 采样、状态或其他入口夹具，非额外 X 键
+G4	rust/tests/production_session_entry.rs	125	测试临时路径、/proc 采样、状态或其他入口夹具，非额外 X 键
+G4	rust/tests/production_session_entry.rs	138	测试临时路径、/proc 采样、状态或其他入口夹具，非额外 X 键
+G4	rust/tests/production_session_entry.rs	145	测试临时路径、/proc 采样、状态或其他入口夹具，非额外 X 键
+G4	rust/tests/production_session_entry.rs	159	测试临时路径、/proc 采样、状态或其他入口夹具，非额外 X 键
+G4	rust/tests/production_session_entry.rs	163	测试临时路径、/proc 采样、状态或其他入口夹具，非额外 X 键
+G4	rust/tests/production_session_entry.rs	170	测试临时路径、/proc 采样、状态或其他入口夹具，非额外 X 键
+G4	rust/tests/production_session_entry.rs	171	测试临时路径、/proc 采样、状态或其他入口夹具，非额外 X 键
+G4	rust/tests/production_session_entry.rs	175	测试临时路径、/proc 采样、状态或其他入口夹具，非额外 X 键
+G4	rust/tests/production_session_entry.rs	177	测试临时路径、/proc 采样、状态或其他入口夹具，非额外 X 键
+G4	rust/tests/production_session_entry.rs	178	测试临时路径、/proc 采样、状态或其他入口夹具，非额外 X 键
+G4	rust/tests/production_session_entry.rs	182	测试临时路径、/proc 采样、状态或其他入口夹具，非额外 X 键
+G4	rust/tests/production_session_entry.rs	189	测试临时路径、/proc 采样、状态或其他入口夹具，非额外 X 键
+G4	rust/tests/production_session_entry.rs	193	测试临时路径、/proc 采样、状态或其他入口夹具，非额外 X 键
+G4	rust/tests/production_session_entry.rs	197	测试临时路径、/proc 采样、状态或其他入口夹具，非额外 X 键
+G4	rust/tests/production_session_entry.rs	198	测试临时路径、/proc 采样、状态或其他入口夹具，非额外 X 键
+G4	rust/tests/production_session_entry.rs	199	测试临时路径、/proc 采样、状态或其他入口夹具，非额外 X 键
+G4	rust/tests/production_session_entry.rs	200	测试临时路径、/proc 采样、状态或其他入口夹具，非额外 X 键
+G4	rust/tests/production_session_entry.rs	203	测试临时路径、/proc 采样、状态或其他入口夹具，非额外 X 键
+G4	rust/tests/production_session_entry.rs	210	测试临时路径、/proc 采样、状态或其他入口夹具，非额外 X 键
+G4	rust/tests/production_session_entry.rs	218	测试临时路径、/proc 采样、状态或其他入口夹具，非额外 X 键
+G4	rust/tests/production_session_entry.rs	228	测试临时路径、/proc 采样、状态或其他入口夹具，非额外 X 键
+G4	rust/tests/production_session_entry.rs	238	直接：合成 X 启动配置、入口行为或凭据隔离观察
+G4	rust/tests/production_session_entry.rs	239	测试临时路径、/proc 采样、状态或其他入口夹具，非额外 X 键
+G4	rust/tests/production_session_entry.rs	240	直接：合成 X 启动配置、入口行为或凭据隔离观察
+G4	rust/tests/production_session_entry.rs	241	直接：合成 X 启动配置、入口行为或凭据隔离观察
+G4	rust/tests/production_session_entry.rs	242	直接：合成 X 启动配置、入口行为或凭据隔离观察
+G4	rust/tests/production_session_entry.rs	245	测试临时路径、/proc 采样、状态或其他入口夹具，非额外 X 键
+G4	rust/tests/production_session_entry.rs	247	直接：合成 X 启动配置、入口行为或凭据隔离观察
+G4	rust/tests/production_session_entry.rs	251	测试临时路径、/proc 采样、状态或其他入口夹具，非额外 X 键
+G4	rust/tests/production_session_entry.rs	253	测试临时路径、/proc 采样、状态或其他入口夹具，非额外 X 键
+G4	rust/tests/production_session_entry.rs	255	测试临时路径、/proc 采样、状态或其他入口夹具，非额外 X 键
+G4	rust/tests/production_session_entry.rs	256	测试临时路径、/proc 采样、状态或其他入口夹具，非额外 X 键
+G4	rust/tests/production_session_entry.rs	263	测试临时路径、/proc 采样、状态或其他入口夹具，非额外 X 键
+G4	rust/tests/production_session_entry.rs	265	测试临时路径、/proc 采样、状态或其他入口夹具，非额外 X 键
+G4	rust/tests/production_session_entry.rs	277	测试临时路径、/proc 采样、状态或其他入口夹具，非额外 X 键
+G4	rust/tests/production_session_entry.rs	292	测试临时路径、/proc 采样、状态或其他入口夹具，非额外 X 键
+G4	rust/tests/production_session_entry.rs	294	测试临时路径、/proc 采样、状态或其他入口夹具，非额外 X 键
+G4	rust/tests/production_session_entry.rs	305	测试临时路径、/proc 采样、状态或其他入口夹具，非额外 X 键
+G4	rust/tests/production_session_entry.rs	306	测试临时路径、/proc 采样、状态或其他入口夹具，非额外 X 键
+G4	rust/tests/production_session_entry.rs	310	测试临时路径、/proc 采样、状态或其他入口夹具，非额外 X 键
+G4	rust/tests/production_session_entry.rs	311	测试临时路径、/proc 采样、状态或其他入口夹具，非额外 X 键
+G4	rust/tests/production_session_entry.rs	323	测试临时路径、/proc 采样、状态或其他入口夹具，非额外 X 键
+G4	rust/tests/production_session_entry.rs	324	测试临时路径、/proc 采样、状态或其他入口夹具，非额外 X 键
+G4	rust/tests/production_session_entry.rs	325	测试临时路径、/proc 采样、状态或其他入口夹具，非额外 X 键
+G4	rust/tests/production_session_entry.rs	326	测试临时路径、/proc 采样、状态或其他入口夹具，非额外 X 键
+G4	rust/tests/production_session_entry.rs	329	测试临时路径、/proc 采样、状态或其他入口夹具，非额外 X 键
+G4	rust/tests/production_session_entry.rs	331	测试临时路径、/proc 采样、状态或其他入口夹具，非额外 X 键
+G4	rust/tests/production_session_entry.rs	335	测试临时路径、/proc 采样、状态或其他入口夹具，非额外 X 键
+G4	rust/tests/production_session_entry.rs	337	测试临时路径、/proc 采样、状态或其他入口夹具，非额外 X 键
+G4	rust/tests/production_session_entry.rs	338	测试临时路径、/proc 采样、状态或其他入口夹具，非额外 X 键
+G4	rust/tests/production_session_entry.rs	339	测试临时路径、/proc 采样、状态或其他入口夹具，非额外 X 键
+G4	rust/tests/production_session_entry.rs	340	测试临时路径、/proc 采样、状态或其他入口夹具，非额外 X 键
+G4	rust/tests/production_session_entry.rs	344	测试临时路径、/proc 采样、状态或其他入口夹具，非额外 X 键
+G4	rust/tests/production_session_entry.rs	346	直接：合成 X 启动配置、入口行为或凭据隔离观察
+G4	rust/tests/production_session_entry.rs	352	直接：合成 X 启动配置、入口行为或凭据隔离观察
+G4	rust/tests/production_session_entry.rs	362	测试临时路径、/proc 采样、状态或其他入口夹具，非额外 X 键
+G4	rust/tests/production_session_entry.rs	363	测试临时路径、/proc 采样、状态或其他入口夹具，非额外 X 键
+G4	rust/tests/production_session_entry.rs	379	测试临时路径、/proc 采样、状态或其他入口夹具，非额外 X 键
+G4	rust/tests/production_session_entry.rs	423	测试临时路径、/proc 采样、状态或其他入口夹具，非额外 X 键
+G4	rust/tests/production_session_entry.rs	424	测试临时路径、/proc 采样、状态或其他入口夹具，非额外 X 键
+G4	rust/tests/production_session_entry.rs	436	测试临时路径、/proc 采样、状态或其他入口夹具，非额外 X 键
+G4	rust/tests/production_session_entry.rs	450	测试临时路径、/proc 采样、状态或其他入口夹具，非额外 X 键
+G4	rust/tests/production_session_entry.rs	451	测试临时路径、/proc 采样、状态或其他入口夹具，非额外 X 键
+G4	rust/tests/production_session_entry.rs	452	测试临时路径、/proc 采样、状态或其他入口夹具，非额外 X 键
+G4	rust/tests/production_session_entry.rs	456	测试临时路径、/proc 采样、状态或其他入口夹具，非额外 X 键
+G4	rust/tests/production_session_entry.rs	462	直接：合成 X 启动配置、入口行为或凭据隔离观察
+G4	rust/tests/production_session_entry.rs	466	直接：合成 X 启动配置、入口行为或凭据隔离观察
+G4	rust/tests/production_session_entry.rs	485	测试临时路径、/proc 采样、状态或其他入口夹具，非额外 X 键
+G4	rust/tests/production_session_entry.rs	486	测试临时路径、/proc 采样、状态或其他入口夹具，非额外 X 键
+G4	rust/tests/production_session_entry.rs	487	测试临时路径、/proc 采样、状态或其他入口夹具，非额外 X 键
+G4	rust/tests/production_session_entry.rs	493	测试临时路径、/proc 采样、状态或其他入口夹具，非额外 X 键
+G4	rust/tests/production_session_entry.rs	497	测试临时路径、/proc 采样、状态或其他入口夹具，非额外 X 键
+G4	rust/tests/production_session_entry.rs	502	测试临时路径、/proc 采样、状态或其他入口夹具，非额外 X 键
+G4	rust/tests/production_session_entry.rs	508	测试临时路径、/proc 采样、状态或其他入口夹具，非额外 X 键
+G4	rust/tests/production_session_entry.rs	509	测试临时路径、/proc 采样、状态或其他入口夹具，非额外 X 键
+G4	rust/tests/production_session_entry.rs	512	测试临时路径、/proc 采样、状态或其他入口夹具，非额外 X 键
+G4	rust/tests/production_session_entry.rs	519	直接：合成 X 启动配置、入口行为或凭据隔离观察
+G4	rust/tests/production_session_entry.rs	521	直接：合成 X 启动配置、入口行为或凭据隔离观察
+G4	rust/tests/production_session_entry.rs	526	直接：合成 X 启动配置、入口行为或凭据隔离观察
+G4	rust/tests/production_session_entry.rs	530	直接：合成 X 启动配置、入口行为或凭据隔离观察
+G4	rust/tests/production_session_entry.rs	541	直接：合成 X 启动配置、入口行为或凭据隔离观察
+G4	rust/tests/production_session_entry.rs	555	测试临时路径、/proc 采样、状态或其他入口夹具，非额外 X 键
+G4	rust/tests/production_session_entry.rs	559	直接：合成 X 启动配置、入口行为或凭据隔离观察
+G4	rust/tests/production_session_entry.rs	560	测试临时路径、/proc 采样、状态或其他入口夹具，非额外 X 键
+G4	rust/tests/production_session_entry.rs	572	测试临时路径、/proc 采样、状态或其他入口夹具，非额外 X 键
+G4	rust/tests/production_session_entry.rs	583	测试临时路径、/proc 采样、状态或其他入口夹具，非额外 X 键
+G4	rust/tests/production_session_entry.rs	590	直接：合成 X 启动配置、入口行为或凭据隔离观察
+G4	rust/tests/production_session_entry.rs	597	测试临时路径、/proc 采样、状态或其他入口夹具，非额外 X 键
+G4	rust/tests/production_session_entry.rs	599	测试临时路径、/proc 采样、状态或其他入口夹具，非额外 X 键
+G4	rust/tests/production_session_entry.rs	605	测试临时路径、/proc 采样、状态或其他入口夹具，非额外 X 键
+G4	rust/tests/production_session_entry.rs	606	测试临时路径、/proc 采样、状态或其他入口夹具，非额外 X 键
+G4	rust/tests/production_session_entry.rs	607	测试临时路径、/proc 采样、状态或其他入口夹具，非额外 X 键
+G4	rust/tests/production_session_entry.rs	626	测试临时路径、/proc 采样、状态或其他入口夹具，非额外 X 键
+G4	rust/tests/production_session_entry.rs	632	测试临时路径、/proc 采样、状态或其他入口夹具，非额外 X 键
+G4	rust/tests/production_session_entry.rs	644	测试临时路径、/proc 采样、状态或其他入口夹具，非额外 X 键
+G4	rust/tests/production_session_entry.rs	647	测试临时路径、/proc 采样、状态或其他入口夹具，非额外 X 键
+G4	rust/tests/production_session_entry.rs	658	测试临时路径、/proc 采样、状态或其他入口夹具，非额外 X 键
+G4	rust/tests/production_session_entry.rs	679	测试临时路径、/proc 采样、状态或其他入口夹具，非额外 X 键
+G4	rust/tests/production_session_entry.rs	697	测试临时路径、/proc 采样、状态或其他入口夹具，非额外 X 键
+G4	rust/tests/production_session_entry.rs	713	测试临时路径、/proc 采样、状态或其他入口夹具，非额外 X 键
+G4	rust/tests/production_session_entry.rs	752	测试临时路径、/proc 采样、状态或其他入口夹具，非额外 X 键
+G4	rust/tests/production_session_entry.rs	756	测试临时路径、/proc 采样、状态或其他入口夹具，非额外 X 键
+G4	rust/tests/production_session_entry.rs	773	测试临时路径、/proc 采样、状态或其他入口夹具，非额外 X 键
+G4	rust/tests/production_session_entry.rs	774	测试临时路径、/proc 采样、状态或其他入口夹具，非额外 X 键
+G4	rust/tests/production_session_entry.rs	775	测试临时路径、/proc 采样、状态或其他入口夹具，非额外 X 键
+G4	rust/tests/production_session_entry.rs	819	测试临时路径、/proc 采样、状态或其他入口夹具，非额外 X 键
+G4	rust/tests/production_session_entry.rs	838	测试临时路径、/proc 采样、状态或其他入口夹具，非额外 X 键
+G4	rust/tests/production_session_entry.rs	865	测试临时路径、/proc 采样、状态或其他入口夹具，非额外 X 键
+G4	rust/tests/production_session_entry.rs	866	测试临时路径、/proc 采样、状态或其他入口夹具，非额外 X 键
+G4	rust/tests/production_session_entry.rs	868	测试临时路径、/proc 采样、状态或其他入口夹具，非额外 X 键
+G4	rust/tests/production_session_entry.rs	886	测试临时路径、/proc 采样、状态或其他入口夹具，非额外 X 键
+G4	rust/tests/production_session_entry.rs	892	测试临时路径、/proc 采样、状态或其他入口夹具，非额外 X 键
+G4	rust/tests/production_session_entry.rs	930	测试临时路径、/proc 采样、状态或其他入口夹具，非额外 X 键
+G4	rust/tests/production_session_entry.rs	932	测试临时路径、/proc 采样、状态或其他入口夹具，非额外 X 键
+G4	rust/tests/production_session_entry.rs	935	测试临时路径、/proc 采样、状态或其他入口夹具，非额外 X 键
+G4	rust/tests/production_session_entry.rs	986	测试临时路径、/proc 采样、状态或其他入口夹具，非额外 X 键
+G4	rust/tests/production_session_entry.rs	990	测试临时路径、/proc 采样、状态或其他入口夹具，非额外 X 键
+G4	rust/tests/production_session_entry.rs	992	测试临时路径、/proc 采样、状态或其他入口夹具，非额外 X 键
+G4	rust/tests/production_session_entry.rs	1016	直接：合成 X 启动配置、入口行为或凭据隔离观察
+G4	rust/tests/production_session_entry.rs	1024	测试临时路径、/proc 采样、状态或其他入口夹具，非额外 X 键
+G4	rust/tests/production_session_entry.rs	1042	测试临时路径、/proc 采样、状态或其他入口夹具，非额外 X 键
+G4	rust/tests/production_session_entry.rs	1048	测试临时路径、/proc 采样、状态或其他入口夹具，非额外 X 键
+G4	rust/tests/production_session_entry.rs	1063	直接：合成 X 启动配置、入口行为或凭据隔离观察
+G4	rust/tests/production_session_entry.rs	1071	测试临时路径、/proc 采样、状态或其他入口夹具，非额外 X 键
+G5	.chanlun/definitions/qujiantao.md	242	结构教义、原文或历史波段/编号同字；未涉及进程注入键
+G5	CONTEXT.md	49	正本语义：场所政策与部署管道分开，或相邻概念；没有新增键
+G5	CONTEXT.md	96	正本语义：场所政策与部署管道分开，或相邻概念；没有新增键
+G5	CONTEXT.md	370	正本语义：场所政策与部署管道分开，或相邻概念；没有新增键
+G5	CONTEXT.md	403	正本语义：场所政策与部署管道分开，或相邻概念；没有新增键
+G5	analysis/_btc_dseg_report.json	4405	回测/行情结果或路径编号命中；未定义 X 启动字段，不作正本
+G5	analysis/_btc_dseg_report.json	5383	回测/行情结果或路径编号命中；未定义 X 启动字段，不作正本
+G5	analysis/_btc_dseg_report.json	5910	回测/行情结果或路径编号命中；未定义 X 启动字段，不作正本
+G5	analysis/_rev_tranche_path3_section.md	16	回测/行情结果或路径编号命中；未定义 X 启动字段，不作正本
+G5	analysis/_tencent_warrants_results.json	15	回测/行情结果或路径编号命中；未定义 X 启动字段，不作正本
+G5	analysis/_tencent_warrants_results.json	97	回测/行情结果或路径编号命中；未定义 X 启动字段，不作正本
+G5	analysis/_tencent_warrants_results.json	135	回测/行情结果或路径编号命中；未定义 X 启动字段，不作正本
+G5	analysis/_tencent_warrants_results.json	154	回测/行情结果或路径编号命中；未定义 X 启动字段，不作正本
+G5	analysis/_tencent_warrants_results.json	363	回测/行情结果或路径编号命中；未定义 X 启动字段，不作正本
+G5	analysis/_tencent_warrants_results.json	421	回测/行情结果或路径编号命中；未定义 X 启动字段，不作正本
+G5	analysis/_tencent_warrants_results.json	797	回测/行情结果或路径编号命中；未定义 X 启动字段，不作正本
+G5	analysis/_tencent_warrants_results.json	1081	回测/行情结果或路径编号命中；未定义 X 启动字段，不作正本
+G5	analysis/_tencent_warrants_results.json	1086	回测/行情结果或路径编号命中；未定义 X 启动字段，不作正本
+G5	analysis/_tencent_warrants_results.json	1594	回测/行情结果或路径编号命中；未定义 X 启动字段，不作正本
+G5	analysis/_tencent_warrants_results.json	2016	回测/行情结果或路径编号命中；未定义 X 启动字段，不作正本
+G5	analysis/_tencent_warrants_results.json	3327	回测/行情结果或路径编号命中；未定义 X 启动字段，不作正本
+G5	analysis/_tencent_warrants_results.json	3479	回测/行情结果或路径编号命中；未定义 X 启动字段，不作正本
+G5	analysis/_tencent_warrants_results.json	3536	回测/行情结果或路径编号命中；未定义 X 启动字段，不作正本
+G5	analysis/_tencent_warrants_results.json	4141	回测/行情结果或路径编号命中；未定义 X 启动字段，不作正本
+G5	analysis/_tencent_warrants_results.json	4920	回测/行情结果或路径编号命中；未定义 X 启动字段，不作正本
+G5	analysis/_tencent_warrants_results.json	4976	回测/行情结果或路径编号命中；未定义 X 启动字段，不作正本
+G5	analysis/_tencent_warrants_results.json	5129	回测/行情结果或路径编号命中；未定义 X 启动字段，不作正本
+G5	analysis/_tencent_warrants_results.json	5526	回测/行情结果或路径编号命中；未定义 X 启动字段，不作正本
+G5	analysis/_tencent_warrants_results.json	5944	回测/行情结果或路径编号命中；未定义 X 启动字段，不作正本
+G5	analysis/_tencent_warrants_results.json	5987	回测/行情结果或路径编号命中；未定义 X 启动字段，不作正本
+G5	analysis/_tencent_warrants_results.json	6438	回测/行情结果或路径编号命中；未定义 X 启动字段，不作正本
+G5	analysis/_tw_q4_eff_gearing_results.json	208	回测/行情结果或路径编号命中；未定义 X 启动字段，不作正本
+G5	analysis/_tw_q4_eff_gearing_results.json	346	回测/行情结果或路径编号命中；未定义 X 启动字段，不作正本
+G5	analysis/_tw_q4_eff_gearing_results.json	558	回测/行情结果或路径编号命中；未定义 X 启动字段，不作正本
+G5	analysis/_tw_q4_eff_gearing_results.json	1544	回测/行情结果或路径编号命中；未定义 X 启动字段，不作正本
+G5	analysis/dual_settle_results/NTR.md	3	回测/行情结果或路径编号命中；未定义 X 启动字段，不作正本
+G5	analysis/fugue_complete_backtest_1min.md	323	回测/行情结果或路径编号命中；未定义 X 启动字段，不作正本
+G5	analysis/fugue_complete_backtest_1min.md	541	回测/行情结果或路径编号命中；未定义 X 启动字段，不作正本
+G5	analysis/fugue_complete_macd_backtest_1min.md	312	回测/行情结果或路径编号命中；未定义 X 启动字段，不作正本
+G5	analysis/fugue_complete_macd_backtest_1min.md	535	回测/行情结果或路径编号命中；未定义 X 启动字段，不作正本
+G5	analysis/fugue_complete_persistence_filtered_backtest_1min.md	315	回测/行情结果或路径编号命中；未定义 X 启动字段，不作正本
+G5	analysis/fugue_complete_persistence_filtered_backtest_1min.md	537	回测/行情结果或路径编号命中；未定义 X 启动字段，不作正本
+G5	analysis/fugue_enhanced_addon_backtest_1min.md	309	回测/行情结果或路径编号命中；未定义 X 启动字段，不作正本
+G5	analysis/fugue_enhanced_addon_backtest_1min.md	544	回测/行情结果或路径编号命中；未定义 X 启动字段，不作正本
+G5	analysis/fugue_full_fsm_backtest_1min.md	265	回测/行情结果或路径编号命中；未定义 X 启动字段，不作正本
+G5	analysis/fugue_full_fsm_backtest_1min.md	1380	回测/行情结果或路径编号命中；未定义 X 启动字段，不作正本
+G5	analysis/fugue_full_fsm_backtest_1min.md	1481	回测/行情结果或路径编号命中；未定义 X 启动字段，不作正本
+G5	analysis/fugue_full_fsm_backtest_1min.md	1675	回测/行情结果或路径编号命中；未定义 X 启动字段，不作正本
+G5	analysis/fugue_full_fsm_backtest_1min.md	1681	回测/行情结果或路径编号命中；未定义 X 启动字段，不作正本
+G5	analysis/fugue_full_fsm_backtest_1min.md	1703	回测/行情结果或路径编号命中；未定义 X 启动字段，不作正本
+G5	analysis/fugue_interval_nesting_backtest_1min.md	311	回测/行情结果或路径编号命中；未定义 X 启动字段，不作正本
+G5	analysis/fugue_interval_nesting_backtest_1min.md	546	回测/行情结果或路径编号命中；未定义 X 启动字段，不作正本
+G5	analysis/fugue_level_routed_backtest_1min.md	348	回测/行情结果或路径编号命中；未定义 X 启动字段，不作正本
+G5	analysis/fugue_level_routed_backtest_1min.md	516	回测/行情结果或路径编号命中；未定义 X 启动字段，不作正本
+G5	analysis/fugue_longonly_backtest_1min.md	237	回测/行情结果或路径编号命中；未定义 X 启动字段，不作正本
+G5	analysis/fugue_longonly_backtest_1min.md	295	回测/行情结果或路径编号命中；未定义 X 启动字段，不作正本
+G5	analysis/fugue_movetype_backtest_1min.md	296	回测/行情结果或路径编号命中；未定义 X 启动字段，不作正本
+G5	analysis/fugue_movetype_backtest_1min.md	368	回测/行情结果或路径编号命中；未定义 X 启动字段，不作正本
+G5	analysis/fugue_multilevel_ph_backtest_1min.md	264	回测/行情结果或路径编号命中；未定义 X 启动字段，不作正本
+G5	analysis/fugue_multilevel_ph_backtest_1min.md	331	回测/行情结果或路径编号命中；未定义 X 启动字段，不作正本
+G5	analysis/fugue_no_addon_backtest_1min.md	298	回测/行情结果或路径编号命中；未定义 X 启动字段，不作正本
+G5	analysis/fugue_no_addon_backtest_1min.md	383	回测/行情结果或路径编号命中；未定义 X 启动字段，不作正本
+G5	analysis/fugue_no_addon_backtest_1min.md	535	回测/行情结果或路径编号命中；未定义 X 启动字段，不作正本
+G5	analysis/fugue_persistence_macd_backtest_1min.md	311	回测/行情结果或路径编号命中；未定义 X 启动字段，不作正本
+G5	analysis/fugue_persistence_macd_backtest_1min.md	534	回测/行情结果或路径编号命中；未定义 X 启动字段，不作正本
+G5	analysis/fugue_regime_filter_backtest_1min.md	282	回测/行情结果或路径编号命中；未定义 X 启动字段，不作正本
+G5	analysis/fugue_regime_filter_backtest_1min.md	337	回测/行情结果或路径编号命中；未定义 X 启动字段，不作正本
+G5	analysis/fugue_twolayer_backtest_1min.md	343	回测/行情结果或路径编号命中；未定义 X 启动字段，不作正本
+G5	analysis/fugue_with_short_backtest_1min.md	392	回测/行情结果或路径编号命中；未定义 X 启动字段，不作正本
+G5	analysis/fugue_with_short_backtest_1min.md	549	回测/行情结果或路径编号命中；未定义 X 启动字段，不作正本
+G5	analysis/interval_nesting_forward_positioning.md	166	回测/行情结果或路径编号命中；未定义 X 启动字段，不作正本
+G5	analysis/m1_vi_rust_results_on.json	628	回测/行情结果或路径编号命中；未定义 X 启动字段，不作正本
+G5	analysis/nested_recursive_fugue_results.md	18	回测/行情结果或路径编号命中；未定义 X 启动字段，不作正本
+G5	analysis/organic_fugue_rust_backtest.md	21	回测/行情结果或路径编号命中；未定义 X 启动字段，不作正本
+G5	analysis/organic_fugue_rust_backtest.md	22	回测/行情结果或路径编号命中；未定义 X 启动字段，不作正本
+G5	analysis/rev_tranche_path3_diag.py	6	回测/行情结果或路径编号命中；未定义 X 启动字段，不作正本
+G5	docs/adr/0001-graded-exit-and-shortdiff-doctrine.md	215	工程技术规则层级/编号同名，未设 X 环境键
+G5	docs/adr/0001-graded-exit-and-shortdiff-doctrine.md	217	工程技术规则层级/编号同名，未设 X 环境键
+G5	docs/adr/0001-graded-exit-and-shortdiff-doctrine.md	219	工程技术规则层级/编号同名，未设 X 环境键
+G5	docs/adr/0021-venue-selection-deferred.md	75	场所选择与激活，不是注入键
+G5	docs/adr/0028-first-capability-verification-profile.md	13	权威背景：场所 profile 作用域和授权，另于部署键
+G5	docs/adr/0028-first-capability-verification-profile.md	55	权威背景：场所 profile 作用域和授权，另于部署键
+G5	docs/adr/0028-first-capability-verification-profile.md	71	权威背景：场所 profile 作用域和授权，另于部署键
+G5	docs/adr/0028-first-capability-verification-profile.md	81	权威背景：场所 profile 作用域和授权，另于部署键
+G5	docs/adr/0028-first-capability-verification-profile.md	91	权威背景：场所 profile 作用域和授权，另于部署键
+G5	docs/adr/0028-first-capability-verification-profile.md	93	权威背景：场所 profile 作用域和授权，另于部署键
+G5	docs/adr/0030-exit-authorization-and-liability-retirement.md	70	退出授权和最大责任，不规定部署键
+G5	docs/adr/0030-exit-authorization-and-liability-retirement.md	74	退出授权和最大责任，不规定部署键
+G5	docs/adr/0033-history-simulation-bar-batch-model.md	38	历史模拟成批与 P1 对照，未定义凭据键
+G5	docs/adr/0039-production-entry-inventory-and-unique-launcher.md	58	正本：唯一 launcher、凭据隔离/B13，或相关历史清单；逐行回查
+G5	docs/adr/0039-production-entry-inventory-and-unique-launcher.md	261	正本：唯一 launcher、凭据隔离/B13，或相关历史清单；逐行回查
+G5	docs/adr/0039-production-entry-inventory-and-unique-launcher.md	286	正本：唯一 launcher、凭据隔离/B13，或相关历史清单；逐行回查
+G5	docs/adr/0039-production-entry-inventory-and-unique-launcher.md	325	正本：唯一 launcher、凭据隔离/B13，或相关历史清单；逐行回查
+G5	docs/adr/0039-production-entry-inventory-and-unique-launcher.md	359	正本：唯一 launcher、凭据隔离/B13，或相关历史清单；逐行回查
+G5	docs/adr/0039-production-entry-inventory-and-unique-launcher.md	360	正本：唯一 launcher、凭据隔离/B13，或相关历史清单；逐行回查
+G5	docs/adr/0039-production-entry-inventory-and-unique-launcher.md	370	正本：唯一 launcher、凭据隔离/B13，或相关历史清单；逐行回查
+G5	docs/adr/0039-production-entry-inventory-and-unique-launcher.md	371	正本：唯一 launcher、凭据隔离/B13，或相关历史清单；逐行回查
+G5	docs/adr/0039-production-entry-inventory-and-unique-launcher.md	372	正本：唯一 launcher、凭据隔离/B13，或相关历史清单；逐行回查
+G5	docs/adr/0039-production-entry-inventory-and-unique-launcher.md	383	正本：唯一 launcher、凭据隔离/B13，或相关历史清单；逐行回查
+G5	docs/adr/0039-production-entry-inventory-and-unique-launcher.md	384	正本：唯一 launcher、凭据隔离/B13，或相关历史清单；逐行回查
+G5	docs/adr/0039-production-entry-inventory-and-unique-launcher.md	390	正本：唯一 launcher、凭据隔离/B13，或相关历史清单；逐行回查
+G5	docs/adr/0039-production-entry-inventory-and-unique-launcher.md	401	正本：唯一 launcher、凭据隔离/B13，或相关历史清单；逐行回查
+G5	docs/adr/0039-production-entry-inventory-and-unique-launcher.md	407	正本：唯一 launcher、凭据隔离/B13，或相关历史清单；逐行回查
+G5	docs/adr/0039-production-entry-inventory-and-unique-launcher.md	444	正本：唯一 launcher、凭据隔离/B13，或相关历史清单；逐行回查
+G5	docs/adr/0039-production-entry-inventory-and-unique-launcher.md	445	正本：唯一 launcher、凭据隔离/B13，或相关历史清单；逐行回查
+G5	docs/adr/0039-production-entry-inventory-and-unique-launcher.md	450	正本：唯一 launcher、凭据隔离/B13，或相关历史清单；逐行回查
+G5	docs/adr/0039-production-entry-inventory-and-unique-launcher.md	485	正本：唯一 launcher、凭据隔离/B13，或相关历史清单；逐行回查
+G5	docs/adr/0039-production-entry-inventory-and-unique-launcher.md	491	正本：唯一 launcher、凭据隔离/B13，或相关历史清单；逐行回查
+G5	docs/adr/0039-production-entry-inventory-and-unique-launcher.md	493	正本：唯一 launcher、凭据隔离/B13，或相关历史清单；逐行回查
+G5	docs/adr/0039-production-entry-inventory-and-unique-launcher.md	494	正本：唯一 launcher、凭据隔离/B13，或相关历史清单；逐行回查
+G5	docs/adr/0039-production-entry-inventory-and-unique-launcher.md	495	正本：唯一 launcher、凭据隔离/B13，或相关历史清单；逐行回查
+G5	docs/adr/0039-production-entry-inventory-and-unique-launcher.md	498	正本：唯一 launcher、凭据隔离/B13，或相关历史清单；逐行回查
+G5	docs/adr/0039-production-entry-inventory-and-unique-launcher.md	507	正本：唯一 launcher、凭据隔离/B13，或相关历史清单；逐行回查
+G5	docs/adr/0039-production-entry-inventory-and-unique-launcher.md	509	正本：唯一 launcher、凭据隔离/B13，或相关历史清单；逐行回查
+G5	docs/adr/0039-production-entry-inventory-and-unique-launcher.md	512	正本：唯一 launcher、凭据隔离/B13，或相关历史清单；逐行回查
+G5	docs/adr/0040-funding-signature-and-chong-derivation.md	34	资金签署/逐重派生，不规定部署键
+G5	docs/adr/0040-funding-signature-and-chong-derivation.md	63	资金签署/逐重派生，不规定部署键
+G5	docs/adr/0040-funding-signature-and-chong-derivation.md	84	资金签署/逐重派生，不规定部署键
+G5	docs/adr/0040-funding-signature-and-chong-derivation.md	119	资金签署/逐重派生，不规定部署键
+G5	docs/adr/0040-funding-signature-and-chong-derivation.md	162	资金签署/逐重派生，不规定部署键
+G5	docs/adr/0040-funding-signature-and-chong-derivation.md	168	资金签署/逐重派生，不规定部署键
+G5	docs/adr/0040-funding-signature-and-chong-derivation.md	254	资金签署/逐重派生，不规定部署键
+G5	docs/adr/0040-funding-signature-and-chong-derivation.md	291	资金签署/逐重派生，不规定部署键
+G5	docs/adr/0040-funding-signature-and-chong-derivation.md	311	资金签署/逐重派生，不规定部署键
+G5	docs/adr/0043-chong-reversal-account-continuity.md	45	反转账户连续性，不规定部署键
+G5	docs/adr/0043-chong-reversal-account-continuity.md	60	反转账户连续性，不规定部署键
+G5	docs/adr/0044-cost-stop-policy-signed-instance-v1.md	1	成本阈值签署，不规定部署键
+G5	docs/adr/0044-cost-stop-policy-signed-instance-v1.md	3	成本阈值签署，不规定部署键
+G5	docs/adr/0044-cost-stop-policy-signed-instance-v1.md	67	成本阈值签署，不规定部署键
+G5	docs/adr/0044-cost-stop-policy-signed-instance-v1.md	71	成本阈值签署，不规定部署键
+G5	docs/adr/0045-sr-v1-policy-signed.md	1	SR 条件、权限引用，不规定部署键
+G5	docs/adr/0045-sr-v1-policy-signed.md	3	SR 条件、权限引用，不规定部署键
+G5	docs/adr/0045-sr-v1-policy-signed.md	35	SR 条件、权限引用，不规定部署键
+G5	docs/adr/0045-sr-v1-policy-signed.md	43	SR 条件、权限引用，不规定部署键
+G5	docs/adr/0045-sr-v1-policy-signed.md	84	SR 条件、权限引用，不规定部署键
+G5	docs/adr/0045-sr-v1-policy-signed.md	86	SR 条件、权限引用，不规定部署键
+G5	docs/adr/0047-level-isomorphism-and-no-fallback-locks.md	45	结构级别同构/兜底，不规定部署键
+G5	docs/adr/0048-legacy-engine-module-level-dispositions.md	107	正本背景：旧入口影子与不收编旧注入源，不是新准入键
+G5	docs/adr/0048-legacy-engine-module-level-dispositions.md	222	正本背景：旧入口影子与不收编旧注入源，不是新准入键
+G5	docs/adr/0048-legacy-engine-module-level-dispositions.md	314	正本背景：旧入口影子与不收编旧注入源，不是新准入键
+G5	docs/adr/0048-legacy-engine-module-level-dispositions.md	373	正本背景：旧入口影子与不收编旧注入源，不是新准入键
+G5	docs/adr/0048-legacy-engine-module-level-dispositions.md	399	正本背景：旧入口影子与不收编旧注入源，不是新准入键
+G5	docs/adr/0048-legacy-engine-module-level-dispositions.md	421	正本背景：旧入口影子与不收编旧注入源，不是新准入键
+G5	docs/adr/0048-legacy-engine-module-level-dispositions.md	422	正本背景：旧入口影子与不收编旧注入源，不是新准入键
+G5	docs/adr/0048-legacy-engine-module-level-dispositions.md	438	正本背景：旧入口影子与不收编旧注入源，不是新准入键
+G5	docs/adr/0048-legacy-engine-module-level-dispositions.md	439	正本背景：旧入口影子与不收编旧注入源，不是新准入键
+G5	docs/adr/0048-legacy-engine-module-level-dispositions.md	448	正本背景：旧入口影子与不收编旧注入源，不是新准入键
+G5	docs/adr/0048-legacy-engine-module-level-dispositions.md	460	正本背景：旧入口影子与不收编旧注入源，不是新准入键
+G5	docs/adr/0048-legacy-engine-module-level-dispositions.md	462	正本背景：旧入口影子与不收编旧注入源，不是新准入键
+G5	docs/adr/0056-three-mode-shared-core-adapter-boundary.md	5	adapter 同核装配与真实外效边界，不分配 X 环境键
+G5	docs/adr/0056-three-mode-shared-core-adapter-boundary.md	26	adapter 同核装配与真实外效边界，不分配 X 环境键
+G5	docs/adr/0056-three-mode-shared-core-adapter-boundary.md	35	adapter 同核装配与真实外效边界，不分配 X 环境键
+G5	docs/adr/0056-three-mode-shared-core-adapter-boundary.md	36	adapter 同核装配与真实外效边界，不分配 X 环境键
+G5	docs/adr/0056-three-mode-shared-core-adapter-boundary.md	42	adapter 同核装配与真实外效边界，不分配 X 环境键
+G5	docs/adr/0056-three-mode-shared-core-adapter-boundary.md	46	adapter 同核装配与真实外效边界，不分配 X 环境键
+G5	docs/adr/0056-three-mode-shared-core-adapter-boundary.md	109	adapter 同核装配与真实外效边界，不分配 X 环境键
+G5	docs/adr/0056-three-mode-shared-core-adapter-boundary.md	111	adapter 同核装配与真实外效边界，不分配 X 环境键
+G5	docs/adr/0056-three-mode-shared-core-adapter-boundary.md	120	adapter 同核装配与真实外效边界，不分配 X 环境键
+G5	docs/adr/0056-three-mode-shared-core-adapter-boundary.md	127	adapter 同核装配与真实外效边界，不分配 X 环境键
+G5	docs/adr/0056-three-mode-shared-core-adapter-boundary.md	129	adapter 同核装配与真实外效边界，不分配 X 环境键
+G5	docs/adr/0056-three-mode-shared-core-adapter-boundary.md	137	adapter 同核装配与真实外效边界，不分配 X 环境键
+G5	docs/adr/0056-three-mode-shared-core-adapter-boundary.md	139	adapter 同核装配与真实外效边界，不分配 X 环境键
+G5	docs/adr/0056-three-mode-shared-core-adapter-boundary.md	144	adapter 同核装配与真实外效边界，不分配 X 环境键
+G5	docs/adr/0056-three-mode-shared-core-adapter-boundary.md	146	adapter 同核装配与真实外效边界，不分配 X 环境键
+G5	docs/adr/0056-three-mode-shared-core-adapter-boundary.md	147	adapter 同核装配与真实外效边界，不分配 X 环境键
+G5	docs/adr/0056-three-mode-shared-core-adapter-boundary.md	148	adapter 同核装配与真实外效边界，不分配 X 环境键
+G5	docs/adr/0057-p0-venue-profile-v2-signature.md	162	P0 模拟配置与授权，不规定部署键
+G5	docs/adr/0057-p0-venue-profile-v2-signature.md	174	P0 模拟配置与授权，不规定部署键
+G5	docs/adr/0057-p0-venue-profile-v2-signature.md	237	P0 模拟配置与授权，不规定部署键
+G5	docs/adr/0058-replay-shell-mapping-and-legacy-replay-dispositions.md	7	回放壳与旧入口处置，非 X 凭据键
+G5	docs/adr/0058-replay-shell-mapping-and-legacy-replay-dispositions.md	16	回放壳与旧入口处置，非 X 凭据键
+G5	docs/adr/0058-replay-shell-mapping-and-legacy-replay-dispositions.md	25	回放壳与旧入口处置，非 X 凭据键
+G5	docs/adr/0058-replay-shell-mapping-and-legacy-replay-dispositions.md	37	回放壳与旧入口处置，非 X 凭据键
+G5	docs/adr/0058-replay-shell-mapping-and-legacy-replay-dispositions.md	116	回放壳与旧入口处置，非 X 凭据键
+G5	docs/adr/0058-replay-shell-mapping-and-legacy-replay-dispositions.md	120	回放壳与旧入口处置，非 X 凭据键
+G5	docs/adr/0058-replay-shell-mapping-and-legacy-replay-dispositions.md	154	回放壳与旧入口处置，非 X 凭据键
+G5	docs/adr/0058-replay-shell-mapping-and-legacy-replay-dispositions.md	216	回放壳与旧入口处置，非 X 凭据键
+G5	docs/adr/0058-replay-shell-mapping-and-legacy-replay-dispositions.md	217	回放壳与旧入口处置，非 X 凭据键
+G5	docs/adr/0058-replay-shell-mapping-and-legacy-replay-dispositions.md	234	回放壳与旧入口处置，非 X 凭据键
+G5	docs/adr/0058-replay-shell-mapping-and-legacy-replay-dispositions.md	235	回放壳与旧入口处置，非 X 凭据键
+G5	docs/adr/0058-replay-shell-mapping-and-legacy-replay-dispositions.md	249	回放壳与旧入口处置，非 X 凭据键
+G5	docs/adr/0058-replay-shell-mapping-and-legacy-replay-dispositions.md	250	回放壳与旧入口处置，非 X 凭据键
+G5	docs/adr/0058-replay-shell-mapping-and-legacy-replay-dispositions.md	265	回放壳与旧入口处置，非 X 凭据键
+G5	docs/adr/0059-production-session-layout-contract.md	28	S/X 布局、进程锁与组装，不规定注入键
+G5	docs/adr/0059-production-session-layout-contract.md	85	S/X 布局、进程锁与组装，不规定注入键
+G5	docs/adr/0059-production-session-layout-contract.md	174	S/X 布局、进程锁与组装，不规定注入键
+G5	docs/adr/0059-production-session-layout-contract.md	180	S/X 布局、进程锁与组装，不规定注入键
+G5	docs/adr/0059-production-session-layout-contract.md	186	S/X 布局、进程锁与组装，不规定注入键
+G5	docs/adr/0060-fill-position-single-authority-and-crosswalk.md	20	成交/持仓唯一真账，不规定部署键
+G5	docs/adr/0060-fill-position-single-authority-and-crosswalk.md	59	成交/持仓唯一真账，不规定部署键
+G5	docs/adr/0060-fill-position-single-authority-and-crosswalk.md	115	成交/持仓唯一真账，不规定部署键
+G5	docs/adr/0060-fill-position-single-authority-and-crosswalk.md	206	成交/持仓唯一真账，不规定部署键
+G5	docs/adr/0060-fill-position-single-authority-and-crosswalk.md	209	成交/持仓唯一真账，不规定部署键
+G5	docs/adr/0060-fill-position-single-authority-and-crosswalk.md	211	成交/持仓唯一真账，不规定部署键
+G5	docs/adr/0060-fill-position-single-authority-and-crosswalk.md	213	成交/持仓唯一真账，不规定部署键
+G5	docs/adr/0060-fill-position-single-authority-and-crosswalk.md	219	成交/持仓唯一真账，不规定部署键
+G5	docs/adr/0062-fu18-venue-account-permission-binding.md	3	正本：部署字段改名、作用域/权限分界，未分配具体键
+G5	docs/adr/0062-fu18-venue-account-permission-binding.md	4	正本：部署字段改名、作用域/权限分界，未分配具体键
+G5	docs/adr/0062-fu18-venue-account-permission-binding.md	11	正本：部署字段改名、作用域/权限分界，未分配具体键
+G5	docs/adr/0062-fu18-venue-account-permission-binding.md	12	正本：部署字段改名、作用域/权限分界，未分配具体键
+G5	docs/adr/0062-fu18-venue-account-permission-binding.md	19	正本：部署字段改名、作用域/权限分界，未分配具体键
+G5	docs/adr/0062-fu18-venue-account-permission-binding.md	44	正本：部署字段改名、作用域/权限分界，未分配具体键
+G5	docs/adr/0062-fu18-venue-account-permission-binding.md	61	正本：部署字段改名、作用域/权限分界，未分配具体键
+G5	docs/adr/0062-fu18-venue-account-permission-binding.md	92	正本：部署字段改名、作用域/权限分界，未分配具体键
+G5	docs/adr/0062-fu18-venue-account-permission-binding.md	99	正本：部署字段改名、作用域/权限分界，未分配具体键
+G5	docs/adr/0062-fu18-venue-account-permission-binding.md	101	正本：部署字段改名、作用域/权限分界，未分配具体键
+G5	docs/adr/0062-fu18-venue-account-permission-binding.md	106	正本：部署字段改名、作用域/权限分界，未分配具体键
+G5	docs/adr/0062-fu18-venue-account-permission-binding.md	135	正本：部署字段改名、作用域/权限分界，未分配具体键
+G5	docs/adr/0062-fu18-venue-account-permission-binding.md	147	正本：部署字段改名、作用域/权限分界，未分配具体键
+G5	docs/adr/0062-fu18-venue-account-permission-binding.md	151	正本：部署字段改名、作用域/权限分界，未分配具体键
+G5	docs/adr/0062-fu18-venue-account-permission-binding.md	178	正本：部署字段改名、作用域/权限分界，未分配具体键
+G5	docs/adr/0062-fu18-venue-account-permission-binding.md	184	正本：部署字段改名、作用域/权限分界，未分配具体键
+G5	docs/adr/0062-fu18-venue-account-permission-binding.md	205	正本：部署字段改名、作用域/权限分界，未分配具体键
+G5	docs/adr/0062-fu18-venue-account-permission-binding.md	206	正本：部署字段改名、作用域/权限分界，未分配具体键
+G5	docs/adr/0062-fu18-venue-account-permission-binding.md	207	正本：部署字段改名、作用域/权限分界，未分配具体键
+G5	docs/adr/0062-fu18-venue-account-permission-binding.md	208	正本：部署字段改名、作用域/权限分界，未分配具体键
+G5	docs/adr/0062-fu18-venue-account-permission-binding.md	210	正本：部署字段改名、作用域/权限分界，未分配具体键
+G5	docs/adr/0062-fu18-venue-account-permission-binding.md	234	正本：部署字段改名、作用域/权限分界，未分配具体键
+G5	docs/adr/0062-fu18-venue-account-permission-binding.md	256	正本：部署字段改名、作用域/权限分界，未分配具体键
+G5	docs/adr/0062-fu18-venue-account-permission-binding.md	261	正本：部署字段改名、作用域/权限分界，未分配具体键
+G5	docs/adr/0062-fu18-venue-account-permission-binding.md	266	正本：部署字段改名、作用域/权限分界，未分配具体键
+G5	docs/adr/0062-fu18-venue-account-permission-binding.md	270	正本：部署字段改名、作用域/权限分界，未分配具体键
+G5	docs/adr/0062-fu18-venue-account-permission-binding.md	275	正本：部署字段改名、作用域/权限分界，未分配具体键
+G5	docs/adr/0062-fu18-venue-account-permission-binding.md	280	正本：部署字段改名、作用域/权限分界，未分配具体键
+G5	docs/adr/0062-fu18-venue-account-permission-binding.md	285	正本：部署字段改名、作用域/权限分界，未分配具体键
+G5	docs/adr/0062-fu18-venue-account-permission-binding.md	286	正本：部署字段改名、作用域/权限分界，未分配具体键
+G5	docs/adr/0063-position-bearing-migration-rollback.md	117	带仓迁移的旧凭据权限隔离，不规定注入键
+G5	docs/adr/0063-position-bearing-migration-rollback.md	122	带仓迁移的旧凭据权限隔离，不规定注入键
+G5	docs/chanlun/mineru/缠中说禅-股市技术理论/58681e7d-7da5-4786-93b5-f862d8b9dd1d_model.json	10878	结构教义、原文或历史波段/编号同字；未涉及进程注入键
+G5	docs/chanlun/mineru/缠中说禅-股市技术理论/58681e7d-7da5-4786-93b5-f862d8b9dd1d_model.json	10880	结构教义、原文或历史波段/编号同字；未涉及进程注入键
+G5	docs/chanlun/text/blog/069-第69课.md	471	结构教义、原文或历史波段/编号同字；未涉及进程注入键
+G5	docs/chanlun/text/tiandao/INDEX.md	4	结构教义、原文或历史波段/编号同字；未涉及进程注入键
+G5	docs/chanlun/text/tiandao/ocr/ch03.md	749	结构教义、原文或历史波段/编号同字；未涉及进程注入键
+G5	docs/chanlun/text/tiandao/ocr/ch03.md	780	结构教义、原文或历史波段/编号同字；未涉及进程注入键
+G5	docs/runbook_production_session.md	3	runbook 邻接：路径、构建、S 控制或一般状态，不是另一键
+G5	docs/runbook_production_session.md	207	runbook 邻接：路径、构建、S 控制或一般状态，不是另一键
+G5	docs/runbook_production_session.md	212	runbook 邻接：路径、构建、S 控制或一般状态，不是另一键
+G6	.sandcastle/deepagents-pilot/pilot1742/github_app.py	281	研发代理、CI、GitHub App 或评审工具的环境或旧实现扫描；不是产品 launcher / X profile
+G6	.sandcastle/deepagents-pilot/review_preflight.py	56	研发代理、CI、GitHub App 或评审工具的环境或旧实现扫描；不是产品 launcher / X profile
+G6	.sandcastle/deepagents-pilot/review_preflight.py	73	研发代理、CI、GitHub App 或评审工具的环境或旧实现扫描；不是产品 launcher / X profile
+G6	.sandcastle/deepagents-pilot/tests/test_github_app.py	99	研发代理、CI、GitHub App 或评审工具的环境或旧实现扫描；不是产品 launcher / X profile
+G6	CONTEXT.md	370	正本语义：场所政策与部署管道分开，或相邻概念；没有新增键
+G6	CONTEXT.md	404	正本语义：场所政策与部署管道分开，或相邻概念；没有新增键
+G6	CONTEXT.md	405	正本语义：场所政策与部署管道分开，或相邻概念；没有新增键
+G6	CONTEXT.md	408	正本语义：场所政策与部署管道分开，或相邻概念；没有新增键
+G6	docs/adr/0028-first-capability-verification-profile.md	22	权威背景：场所 profile 作用域和授权，另于部署键
+G6	docs/adr/0028-first-capability-verification-profile.md	95	权威背景：场所 profile 作用域和授权，另于部署键
+G6	docs/adr/0038-dual-run-determinism-recovery-seek-asknown.md	23	场所版本、恢复规则；credential_scope 是政策名
+G6	docs/adr/0038-dual-run-determinism-recovery-seek-asknown.md	127	场所版本、恢复规则；credential_scope 是政策名
+G6	docs/adr/0039-production-entry-inventory-and-unique-launcher.md	27	正本：唯一 launcher、凭据隔离/B13，或相关历史清单；逐行回查
+G6	docs/adr/0039-production-entry-inventory-and-unique-launcher.md	287	正本：唯一 launcher、凭据隔离/B13，或相关历史清单；逐行回查
+G6	docs/adr/0039-production-entry-inventory-and-unique-launcher.md	428	正本：唯一 launcher、凭据隔离/B13，或相关历史清单；逐行回查
+G6	docs/adr/0039-production-entry-inventory-and-unique-launcher.md	511	正本：唯一 launcher、凭据隔离/B13，或相关历史清单；逐行回查
+G6	docs/adr/0048-legacy-engine-module-level-dispositions.md	99	正本背景：旧入口影子与不收编旧注入源，不是新准入键
+G6	docs/adr/0048-legacy-engine-module-level-dispositions.md	311	正本背景：旧入口影子与不收编旧注入源，不是新准入键
+G6	docs/adr/0048-legacy-engine-module-level-dispositions.md	464	正本背景：旧入口影子与不收编旧注入源，不是新准入键
+G6	docs/adr/0062-fu18-venue-account-permission-binding.md	25	正本：部署字段改名、作用域/权限分界，未分配具体键
+G6	docs/adr/0062-fu18-venue-account-permission-binding.md	32	正本：部署字段改名、作用域/权限分界，未分配具体键
+G6	docs/adr/0062-fu18-venue-account-permission-binding.md	40	正本：部署字段改名、作用域/权限分界，未分配具体键
+G6	docs/adr/0062-fu18-venue-account-permission-binding.md	57	正本：部署字段改名、作用域/权限分界，未分配具体键
+G6	docs/adr/0062-fu18-venue-account-permission-binding.md	138	正本：部署字段改名、作用域/权限分界，未分配具体键
+G6	docs/adr/0062-fu18-venue-account-permission-binding.md	147	正本：部署字段改名、作用域/权限分界，未分配具体键
+G6	docs/adr/0062-fu18-venue-account-permission-binding.md	164	正本：部署字段改名、作用域/权限分界，未分配具体键
+G6	docs/adr/0062-fu18-venue-account-permission-binding.md	205	正本：部署字段改名、作用域/权限分界，未分配具体键
+G6	docs/adr/0062-fu18-venue-account-permission-binding.md	206	正本：部署字段改名、作用域/权限分界，未分配具体键
+G6	docs/adr/0062-fu18-venue-account-permission-binding.md	208	正本：部署字段改名、作用域/权限分界，未分配具体键
+G6	docs/adr/0062-fu18-venue-account-permission-binding.md	212	正本：部署字段改名、作用域/权限分界，未分配具体键
+G6	docs/adr/0062-fu18-venue-account-permission-binding.md	220	正本：部署字段改名、作用域/权限分界，未分配具体键
+G6	docs/adr/0062-fu18-venue-account-permission-binding.md	221	正本：部署字段改名、作用域/权限分界，未分配具体键
+G6	docs/adr/0062-fu18-venue-account-permission-binding.md	225	正本：部署字段改名、作用域/权限分界，未分配具体键
+G6	docs/adr/0062-fu18-venue-account-permission-binding.md	237	正本：部署字段改名、作用域/权限分界，未分配具体键
+G6	docs/adr/0062-fu18-venue-account-permission-binding.md	279	正本：部署字段改名、作用域/权限分界，未分配具体键
+G6	docs/runbook_production_session.md	44	runbook 邻接：路径、构建、S 控制或一般状态，不是另一键
+G6	docs/runbook_production_session.md	67	直接：/1 部署样例、明确的基名与凭据管道
+G6	docs/runbook_production_session.md	70	直接：/1 部署样例、明确的基名与凭据管道
+G6	docs/runbook_production_session.md	72	直接：/1 部署样例、明确的基名与凭据管道
+G6	docs/runbook_production_session.md	76	直接：/1 部署样例、明确的基名与凭据管道
+G6	rust/src/bin/production_session.rs	9	邻接：launcher 的装配/状态或一般路径，不是另一 X 键
+G6	rust/src/bin/production_session.rs	185	直接：launcher 解析 X profile 与读文件顺序
+G6	rust/src/bin/production_session.rs	187	直接：launcher 解析 X profile 与读文件顺序
+G6	rust/src/bin/x_execution_session.rs	21	直接：X profile 校验/持锁/开库/取环境凭据
+G6	rust/src/bin/x_execution_session.rs	26	直接：X profile 校验/持锁/开库/取环境凭据
+G6	rust/src/bin/x_execution_session.rs	59	直接：X profile 校验/持锁/开库/取环境凭据
+G6	rust/src/bin/x_execution_session.rs	62	直接：X profile 校验/持锁/开库/取环境凭据
+G6	rust/src/bin/x_execution_session.rs	220	直接：X profile 校验/持锁/开库/取环境凭据
+G6	rust/src/history_simulation/README.md	4	只有 profile 版本与回放输入结构，没有注入键例子
+G6	rust/tests/history_simulation_entry.py	123	直接：history simulation 的无值占位键，须改名
+G6	rust/tests/production_session_entry.rs	29	直接：合成 X 启动配置、入口行为或凭据隔离观察
+G6	rust/tests/production_session_entry.rs	246	测试临时路径、/proc 采样、状态或其他入口夹具，非额外 X 键
+G6	rust/tests/production_session_entry.rs	247	直接：合成 X 启动配置、入口行为或凭据隔离观察
+G6	rust/tests/production_session_entry.rs	521	直接：合成 X 启动配置、入口行为或凭据隔离观察
+G7	docs/adr/0062-fu18-venue-account-permission-binding.md	225	正本：部署字段改名、作用域/权限分界，未分配具体键
+G7	docs/adr/0062-fu18-venue-account-permission-binding.md	237	正本：部署字段改名、作用域/权限分界，未分配具体键
+G7	docs/runbook_production_session.md	76	直接：/1 部署样例、明确的基名与凭据管道
+G7	rust/src/bin/production_session.rs	185	直接：launcher 解析 X profile 与读文件顺序
+G7	rust/src/bin/x_execution_session.rs	26	直接：X profile 校验/持锁/开库/取环境凭据
+G7	rust/src/bin/x_execution_session.rs	62	直接：X profile 校验/持锁/开库/取环境凭据
+G7	rust/src/bin/x_execution_session.rs	220	直接：X profile 校验/持锁/开库/取环境凭据
+G7	rust/tests/production_session_entry.rs	245	测试临时路径、/proc 采样、状态或其他入口夹具，非额外 X 键

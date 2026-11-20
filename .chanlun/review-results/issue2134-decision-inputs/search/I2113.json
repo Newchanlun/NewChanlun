@@ -1,0 +1,113 @@
+{
+  "body": "Part of #1323（TB-09，挂在 #1365 下）。由 #1383 的 B13 独立取证发现。\n\n## 现象\n\nLinux 上，持久库打开时用子进程探测文件系统类型：`rust/src/economic_session/store.rs:505` 执行 `Command::new(\"stat\").args([\"-f\",\"-c\",\"%T\"])`，没有清理环境，子进程继承父进程的全部环境变量。`x_execution_session` 持有凭据键，所以它启动的这个 `stat` 也拿到了凭据键。\n\n#1383 第三轮把 B13 的取样改到内核边界（对 launcher 整棵进程树抓每一次 exec 及其环境），在未改生产源码的两种 Linux 构建上都抓到了：X 打开持久库时启动的 `stat` 收到了合成的凭据哨兵键。测试提交 `impl/1383-b12-b13` @ `2de3a4694a174db312aac6644f92011a058da2aa`，证据在 Mac `/Volumes/AgentStorage/issue1383-b12-b13/r3/`。\n\n## 为什么是缺陷\n\nADR 0039 验收 13（`docs/adr/0039-production-entry-inventory-and-unique-launcher.md:371`）要求凭据键只出现在 `x_execution_session`。X 把凭据环境原样传给它自己拉起的辅助进程，凭据的可达范围就超出了 X 进程本身。`stat` 是系统程序，直接风险低；但这条路径说明 X 侧没有「拉起子进程时不带凭据」的保证，将来换成别的辅助程序同样会漏。\n\n## 修复方向（由实施者定，行为不变）\n\n文件系统类型的放行集合必须逐字不变（`ext2/ext3`、`ext4`、`xfs`、`btrfs`、`tmpfs`、`overlayfs`，其余拒绝并报 `StorageUnavailable：未证明本地文件系统`）。两种做法取改动最小且能证明等价的一种：\n\n1. 保留子进程，但以清空的环境启动（只给它运行所需的最小环境），并确认程序查找不依赖被清掉的变量。\n2. 不再起子进程，直接用系统调用取文件系统类型（macOS 分支已经是这种做法）。需要证明魔数到名称的映射与 `stat -f -c %T` 在放行集合上完全一致。\n\n同时全仓核一遍 X 进程可达路径上其他会拉起子进程的位置，列出清单。\n\n## 验收\n\n- 在 `impl/1383-b12-b13` 的内核级取样测试下，X 的任何子孙进程都不再出现凭据键；E、B、S 行为不变。\n- 文件系统类型判定在放行集合与拒绝集合上的结果与修复前逐项相同（给出对照表与测试）。\n- 生产行为除「子进程不再继承凭据环境」外无变化。\n",
+  "comments": [
+    {
+      "id": "IC_kwDORJC4uM8AAAABo8H1kQ",
+      "author": {
+        "login": "xy7365527-lang"
+      },
+      "authorAssociation": "MEMBER",
+      "body": "**非作者独审（GPT-6.2 Astra）：BLOCK @ `277137e6d3f4e512c73d678922616066a1a6ad0f`**（`fix/2113-stat-child-env`，Linux 改用 `libc::statfs`）\n\n凭据泄漏已修掉：X 打开持久库不再启动 `stat`，#1383 的内核级取样 `credential_key_only_in_x_child` 在两档构建都通过；放行集合的五个魔数映射正确（对照 coreutils 9.4 `human_fstype`）；独立核过，修复后 X 的生产可达路径上没有其他子进程启动点。\n\n阻断原因是票面第三条验收「除子进程不再继承凭据环境外，生产行为无变化」没满足：\n\n1. HIGH `store.rs:505–511`：32 位 glibc 上的窄 `statfs` 在大卷上会先返回 `EOVERFLOW`，本地卷被误拒（按 glibc 源推出，未做 32 位实机复跑）。\n2. MED `store.rs:527–530`：拒绝报文实测改变，同一 `/proc` 路径由 `…未证明本地文件系统：proc` 变为 `…：f_type=0x9fa0`。\n3. MED `store.rs:507–508`：目标消失、无权限等错误路径的报文改变。\n4. MED `store.rs:513–516`：非 Linux、非 macOS 分支由按输出判断改成固定拒绝。\n\n**主控裁定的返修方向**：改用票面的做法 1——保留 `stat` 子进程、以清空的环境启动。这样放行集合、拒绝报文、错误路径、32 位与其他平台全部保持原样，需要证明的只剩「子进程拿不到父进程环境」。返修已发回原作者，验收含修复前后逐字报文对照，以及一条删掉清环境即变红的负控。\n\n报告原件在 Mac 内盘 `/Users/silencehan/.t3/evidence/issue2113-stat-child-env/non-author-astra-277137e6/REPORT.md`。",
+      "createdAt": "2026-11-20T14:42:10Z",
+      "includesCreatedEdit": false,
+      "isMinimized": false,
+      "minimizedReason": "",
+      "reactionGroups": [],
+      "url": "https://github.com/Newchanlun/NewChanlun/issues/2113#issuecomment-7042364817",
+      "viewerDidAuthor": true
+    },
+    {
+      "id": "IC_kwDORJC4uM8AAAABo_y1zA",
+      "author": {
+        "login": "xy7365527-lang"
+      },
+      "authorAssociation": "MEMBER",
+      "body": "**第二轮非作者独审（GPT-6.2 Astra）：BLOCK @ `ed92d7dd26d1a55247dda3cd1f8698a9d859ab83`**（保留 `stat` 子进程、清空环境、手写按父 PATH 逐目录查找）\n\n已成立的部分：\n- 凭据隔离通过：#1383 的内核级取样 `credential_key_only_in_x_child` 两档构建通过，独审独立复跑也通过；删掉清环境那一行后新测试读到 62 字节环境并失败。\n- 上一轮四条（32 位大卷、拒绝报文、错误路径报文、非 Linux 非 macOS 分支）全部关闭；净差异只有 `store.rs` 新增 104 行，macOS 与其他平台的原调用逐字保留。\n- 选中同一个 GNU `stat` 时，六条路径（含 `/proc`、`/sys`、目标消失、无权限）的退出状态、stdout 与完整报文逐字相同。\n- X 的生产可达路径上只有这一处子进程启动。\n- 证据目录里的沙盒令牌：按形状核验命中 0，已脱敏 8 处，对应沙盒已回收。\n\n阻断在手写的 PATH 查找：\n1. HIGH `store.rs:482–495`：PATH 首项长 4097 字节、后项有效时，origin/main 找到后项并放行 `tmpfs`，候选在首项终止并返回 `StorageUnavailable：File name too long (os error 36)`——同一路径、同一 `stat`，放拒结果变了。\n2. MED `store.rs:468–488`：四次未命中、第五项成功时，基线只用 1 个子进程，候选用了 5 个。\n\n**第三轮做法（主控采纳独审建议）**：不再补手写循环，也不改成固定系统 PATH（那会跳过原本优先的程序）。改为直接调用 `posix_spawnp`：程序名交给 libc 按父进程的 PATH 查找一次，`envp` 传空。独审在远端做过原语试验：超长首项之后能找到后项的程序、只产生一个子进程、argv[0] 正确、环境项为零。返修已发回，验收包含独审对照表里每一行在 origin/main 与新代码上的逐字对照。\n\n报告原件在 Mac 内盘 `/Users/silencehan/.t3/evidence/issue2113-stat-child-env/non-author-astra-ed92d7dd/REPORT.md`。",
+      "createdAt": "2026-11-20T17:31:45Z",
+      "includesCreatedEdit": false,
+      "isMinimized": false,
+      "minimizedReason": "",
+      "reactionGroups": [],
+      "url": "https://github.com/Newchanlun/NewChanlun/issues/2113#issuecomment-7046215116",
+      "viewerDidAuthor": true
+    },
+    {
+      "id": "IC_kwDORJC4uM8AAAABo_7vxw",
+      "author": {
+        "login": "xy7365527-lang"
+      },
+      "authorAssociation": "MEMBER",
+      "body": "**主控裁定：「行为逐项相同」的判定域（T 类技术取舍，交下一轮独审核对）**\n\n第三轮实施者在动手前按停止条款交回了一个事实：origin/main 自身的行为就随 glibc 版本而变。Rust 标准库在 glibc ≥ 2.24 上用 `posix_spawnp` 启动 `stat`（exec 失败以错误码返回，没有 ENOEXEC 的 shell 回退），在更旧的 glibc 上退回 fork + `execvp`（有 shell 回退）。实测（Rust 1.99.1，真实 glibc 2.23 运行时）：\n\n| 情形 | origin/main @ glibc 2.23 | 直接 `posix_spawnp` + 空环境 @ glibc 2.23 |\n|---|---|---|\n| PATH 里没有 `stat` | 回传 ENOENT，报文 `os error 2` | 调用返回 0，子进程退出 127、stdout 空 → 报「未证明本地文件系统」 |\n| 首选 `stat` 是无 shebang 的可执行文本 | 经 `/bin/sh` 执行，输出 `tmpfs` 并放行 | 子进程退出 127 → 拒绝 |\n\n所以不存在一种写法能在所有 glibc 版本上与基线逐字等价，票面验收里的「逐项相同」要先说清在哪个运行时上判。裁定：\n\n1. **判定域是本仓实际构建并在 CI 验证的运行时：glibc ≥ 2.24**（仓库 CI 为 2.39），即基线自己走 `posix_spawnp` 的范围。在此范围内新代码须与 origin/main 逐字等价：放拒结果、stdout、完整报文、子进程个数。\n2. **判定域之外不要求等价，但必须失败关闭**。上表两种差异都是报文不同或「原本放行变成拒绝」，没有「原本拒绝变成放行」；不认识的运行时上宁可拒绝开库。实施者须确认旧 glibc 上不存在反方向的差异。\n3. 不为旧 glibc 另写 fork + exec 分支，也不做运行时版本探测切换两套实现。不采用「清空环境后只透传父进程 PATH」的写法：它在旧 glibc 上与基线一致，但在实际运行时上会把 ENOEXEC 的情形从报错拒绝变成经 shell 执行，方向相反。不采用固定系统 PATH：会跳过原本优先的程序。\n\n实施：Linux 上直接调用 `posix_spawnp`，程序名交给 libc 按父进程的 PATH 查找一次，`envp` 传空；判定域与旧 glibc 上的差异写进函数文档注释。仓库目前没有把 glibc 下限写成部署前件；若独审认为应把「glibc ≥ 2.24」落成正式的部署约束（文档或启动检查），另开票处理，不在本票内扩张。",
+      "createdAt": "2026-11-20T17:38:10Z",
+      "includesCreatedEdit": false,
+      "isMinimized": false,
+      "minimizedReason": "",
+      "reactionGroups": [],
+      "url": "https://github.com/Newchanlun/NewChanlun/issues/2113#issuecomment-7046361031",
+      "viewerDidAuthor": true
+    },
+    {
+      "id": "IC_kwDORJC4uM8AAAABpAn9Rg",
+      "author": {
+        "login": "xy7365527-lang"
+      },
+      "authorAssociation": "MEMBER",
+      "body": "## 第三轮独审 BLOCK，方向再换；一条主控裁定作废（2026-11-21）\n\n**第三轮（候选 `ca7f5595`，改用 `posix_spawnp` FFI）被独审打回**，三条阻断：标准输入已关或描述符吃紧时，判定域内的合法环境被误拒；glibc 2.23 上反向放行；musl 上行为未定义。另有一条中等问题：E/B 的辅助子进程丢了 PATH。\n\n**作废**：我在上一轮给的裁定「只在 glibc ≥ 2.24 上判等价」作废。它把正确性押在一个运行库版本域上，而域内外都被举出了反例。\n\n**第四轮方向**：不再自己实现查找或 spawn。保留 `Command::new(\"stat\")`，对继承来的环境键逐个 `env_remove`，只留 PATH；不 `env_clear`、不改 PATH 的值。这样标准库走的 spawn 路径与主线逐字相同，验收口径是「在每个测过的运行库上与 origin/main 行为一致」。\n\n**第四轮中途的新发现（作者报、我已在主线复核）**：「PATH 不是凭据」这个前提生产代码并不保证。`rust/src/bin/production_session.rs:185` 与 `rust/src/bin/x_execution_session.rs:59–63` 对 `credential_scope.env` 只查非空，`production_session.rs:440–446` 会把同名凭据写进 X 的环境；profile 把凭据键设成 `PATH` 时，保留 PATH 就等于把凭据留给了 stat 子进程。\n\n**裁定**：范围扩大到这两个 profile 校验入口——凭据键等于 stat 子进程保留的那个继承键时，以 `InvalidDomain` 拒绝，时点早于读凭据文件、启动域和开库；保留键用一个共享常量表达，三处引用同一个。只拒这一个键，其他保留名单不在本票。前置条件：作者先在主线上实测这种 profile 现状本来就起不来（预期是 X 的 PATH 被覆盖后找不到 `stat`、开库失败）；现状若能起来，停下回报，不自行决定。\n\n工位：GPT-6.2 Sol，沿用原 worktree。候选出来后照旧走非作者独审。\n",
+      "createdAt": "2026-11-20T18:11:27Z",
+      "includesCreatedEdit": false,
+      "isMinimized": false,
+      "minimizedReason": "",
+      "reactionGroups": [],
+      "url": "https://github.com/Newchanlun/NewChanlun/issues/2113#issuecomment-7047085382",
+      "viewerDidAuthor": true
+    },
+    {
+      "id": "IC_kwDORJC4uM8AAAABpAsfMw",
+      "author": {
+        "login": "xy7365527-lang"
+      },
+      "authorAssociation": "MEMBER",
+      "body": "补记（2026-11-21）：上一条里「范围扩大到两个 profile 校验入口」的裁定**撤回**。作者按前置条件在主线 `b9d898dc` 实测：`credential_scope.env=PATH`、值为含系统目录的路径清单时，launcher 与 X 能正常启动——拒绝它是对现有可启动 profile 的收窄，不属本票。\n\n本票回到只改 `store.rs`。修复的声明范围写成「stat 子进程除 PATH 外不带任何继承的环境键」；凭据键恰为 PATH 时值照旧传给子进程，作为明写的残留交付，由 #2134 处理键名的取值范围。",
+      "createdAt": "2026-11-20T18:14:51Z",
+      "includesCreatedEdit": false,
+      "isMinimized": false,
+      "minimizedReason": "",
+      "reactionGroups": [],
+      "url": "https://github.com/Newchanlun/NewChanlun/issues/2113#issuecomment-7047159603",
+      "viewerDidAuthor": true
+    },
+    {
+      "id": "IC_kwDORJC4uM8AAAABpBGbug",
+      "author": {
+        "login": "xy7365527-lang"
+      },
+      "authorAssociation": "MEMBER",
+      "body": "## 第四轮独审 BLOCK，本票改为等 #2134（2026-11-21）\n\n候选 `bf8e6dfee8e659b5ff84e40786e41db71da292ee`（只改 `store.rs`，Linux 上对继承键逐个 `env_remove`、只留 PATH）。非作者独审（GPT-6.2 Astra）结论：\n\n- **已成立的部分**：正常 profile 下真实 `stat` 子进程不再收到 X 的凭据键（内核边界取证，E/B/X 三域子进程都只有 PATH，值与输入逐字相同）；上一轮「E/B 辅助子进程丢 PATH」已关闭；移除非 PATH 键不改变标准库的 spawn 分派，关闭标准描述符、低 fd 上限、PATH 各种形态、4097 字节首项、脚本、非 UTF-8 键值的对照与主线全部相同；B13 两档通过。\n- **HIGH**：配置名不等于字面 `PATH` 时，凭据值仍可能进入 `stat`——含分隔符的名字（`PATH=<串>`）在内核里编码成键 `PATH`，过滤循环不会删它。超出了已明写的残留范围。\n- **MED**：内核环境里的空名记录标准库枚举不到，子进程环境未重建时原样透传。\n- **LOW**：宿主环境预先带有测试哨兵时，新增测试会误入子模式。\n\n四轮四次打回。前三轮的前提是「可以自己实现查找或 spawn 而与主线等价」，第四轮的前提是「不定键名的合法取值也能收干净」，都不成立。**不再出第五个补丁**：先由 #2134 裁定凭据键名的合法取值（已改为决策票，本票 blocked by #2134），裁定落地后本票在其上收口——届时修复的声明才写得成一句不带例外的话。候选 `bf8e6dfe` 的过滤循环保留作为收口时的基础。\n\n独审报告：Mac 内盘 `/Users/silencehan/.t3/evidence/issue2113-stat-child-env/non-author-astra-bf8e6dfe/REPORT.md`。\n",
+      "createdAt": "2026-11-20T18:35:16Z",
+      "includesCreatedEdit": false,
+      "isMinimized": false,
+      "minimizedReason": "",
+      "reactionGroups": [],
+      "url": "https://github.com/Newchanlun/NewChanlun/issues/2113#issuecomment-7047584698",
+      "viewerDidAuthor": true
+    }
+  ],
+  "labels": [
+    {
+      "id": "LA_kwDORJC4uM8AAAACXFrayw",
+      "name": "bug",
+      "description": "Something isn't working",
+      "color": "d73a4a"
+    },
+    {
+      "id": "LA_kwDORJC4uM8AAAACsmdtEw",
+      "name": "ready-for-agent",
+      "description": "",
+      "color": "FBCA04"
+    }
+  ],
+  "number": 2113,
+  "state": "OPEN",
+  "title": "[bug] X 打开持久库时启动的 stat 子进程继承凭据键（ADR 0039 验收 13，#1383 取证发现）",
+  "url": "https://github.com/Newchanlun/NewChanlun/issues/2113"
+}

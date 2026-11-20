@@ -1,0 +1,104 @@
+[
+  {
+    "number": 2113,
+    "state": "OPEN",
+    "title": "[bug] X 打开持久库时启动的 stat 子进程继承凭据键（ADR 0039 验收 13，#1383 取证发现）",
+    "url": "https://github.com/Newchanlun/NewChanlun/issues/2113"
+  },
+  {
+    "number": 2134,
+    "state": "OPEN",
+    "title": "[grilling] X 执行 profile 凭据环境变量名的合法取值：现在不设限，可取 PATH、带分隔符的名字等（#2113 前置）",
+    "url": "https://github.com/Newchanlun/NewChanlun/issues/2134"
+  },
+  {
+    "number": 1383,
+    "state": "OPEN",
+    "title": "[impl] TB-09-A 目标部署预检实际拒绝旧写入口绕过（SPEC #1340）",
+    "url": "https://github.com/Newchanlun/NewChanlun/issues/1383"
+  },
+  {
+    "number": 1769,
+    "state": "OPEN",
+    "title": "[impl] #1523-L production_session 与 x_execution_session 可运行骨架（ADR 0039 迁移步骤 1）",
+    "url": "https://github.com/Newchanlun/NewChanlun/issues/1769"
+  },
+  {
+    "number": 1365,
+    "state": "OPEN",
+    "title": "TB-09 验收汇总：目标部署旧写入口隔离及X排他（SPEC #1340）",
+    "url": "https://github.com/Newchanlun/NewChanlun/issues/1365"
+  },
+  {
+    "number": 1503,
+    "state": "OPEN",
+    "title": "[task] Codex 多模型指令治理：共同正本与 Claude 适配加载",
+    "url": "https://github.com/Newchanlun/NewChanlun/issues/1503"
+  },
+  {
+    "number": 1401,
+    "state": "OPEN",
+    "title": "[impl] TB-09-B X换代必须隔离旧发送者并保留在途责任（SPEC #1340）",
+    "url": "https://github.com/Newchanlun/NewChanlun/issues/1401"
+  },
+  {
+    "number": 1510,
+    "state": "OPEN",
+    "title": "[task] 本机空间清理与 Windows SSH 存储/运行环境勘察",
+    "url": "https://github.com/Newchanlun/NewChanlun/issues/1510"
+  },
+  {
+    "number": 1674,
+    "state": "CLOSED",
+    "title": "[impl] TB-03-C tb03c-book/2 持久边界的新进程与 SIGKILL 恢复对拍（#1406 AC5）",
+    "url": "https://github.com/Newchanlun/NewChanlun/issues/1674"
+  },
+  {
+    "number": 1588,
+    "state": "CLOSED",
+    "title": "[task] 工程债清零：main 上 DevSkim 红、基线失败测试、CI 时长与内存二次增长",
+    "url": "https://github.com/Newchanlun/NewChanlun/issues/1588"
+  },
+  {
+    "number": 1530,
+    "state": "CLOSED",
+    "title": "[grilling] FU-08 生产入口与唯一 owner（#1323，新增）",
+    "url": "https://github.com/Newchanlun/NewChanlun/issues/1530"
+  },
+  {
+    "number": 1535,
+    "state": "CLOSED",
+    "title": "[grilling] FU-13 带仓迁移、回退、责任退休（#1323，新增）",
+    "url": "https://github.com/Newchanlun/NewChanlun/issues/1535"
+  },
+  {
+    "number": 1340,
+    "state": "OPEN",
+    "title": "📋 SPEC：完整生产程序、结构全分类与逐重经营（#1323，R2）",
+    "url": "https://github.com/Newchanlun/NewChanlun/issues/1340"
+  },
+  {
+    "number": 1393,
+    "state": "OPEN",
+    "title": "[impl] TB-02-U 未建方向与全包含前缀的获准工程实例（SPEC #1340）",
+    "url": "https://github.com/Newchanlun/NewChanlun/issues/1393"
+  },
+  {
+    "number": 1532,
+    "state": "CLOSED",
+    "title": "[grilling] FU-12 旧引擎/简化臂逐入口终态（#1323，新增）",
+    "url": "https://github.com/Newchanlun/NewChanlun/issues/1532"
+  },
+  {
+    "number": 1323,
+    "state": "OPEN",
+    "title": "🗺️ 完整生产程序接线总单：#787 严格多重赋格落地 → 旧实现收敛 → 历史回放与 paper 同核",
+    "url": "https://github.com/Newchanlun/NewChanlun/issues/1323"
+  },
+  {
+    "number": 1527,
+    "state": "OPEN",
+    "title": "[task] 建立正式 producer/R4/CLI 恢复路径：R4 消费端与失败收据进 main（成功收据拆至 #1675）",
+    "url": "https://github.com/Newchanlun/NewChanlun/issues/1527"
+  }
+]

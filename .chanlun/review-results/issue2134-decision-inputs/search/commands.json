@@ -1,0 +1,289 @@
+{
+  "G1": {
+    "cmd": "git grep -n -I -i -E 'credential_scope|credential_source|x-execution-profile|NC_X_[A-Za-z0-9_]+|UNUSED_SIMULATION_CREDENTIAL|NEWCHAN_2113_VENUE_CREDENTIAL' b9d898dccf46c2a716115eaa1215bc39c458a959 -- docs/adr .chanlun/definitions analysis docs rust s_session CONTEXT.md config scripts formal .github .sandcastle",
+    "status": 0,
+    "lines": 54,
+    "hits": 54,
+    "query": "credential_scope|credential_source|x-execution-profile|NC_X_[A-Za-z0-9_]+|UNUSED_SIMULATION_CREDENTIAL|NEWCHAN_2113_VENUE_CREDENTIAL"
+  },
+  "G2": {
+    "cmd": "git grep -n -I -i -E '凭据键(名)?|凭据名|环境变量名|环境键(名)?|保留键(名)?|env[ _-]?key|environment variable name|LD_PRELOAD|LD_LIBRARY_PATH|DYLD_[A-Z_]+|HYPERLIQUID_PRIVATE_KEY' b9d898dccf46c2a716115eaa1215bc39c458a959 -- docs/adr .chanlun/definitions analysis docs rust s_session CONTEXT.md config scripts formal .github .sandcastle",
+    "status": 0,
+    "lines": 140,
+    "hits": 140,
+    "query": "凭据键(名)?|凭据名|环境变量名|环境键(名)?|保留键(名)?|env[ _-]?key|environment variable name|LD_PRELOAD|LD_LIBRARY_PATH|DYLD_[A-Z_]+|HYPERLIQUID_PRIVATE_KEY"
+  },
+  "G3": {
+    "cmd": "git grep -n -I -i -E '凭据.{0,45}(注入|子进程|作用域|硬门|来源)|环境(继承|注入|清空)|清空.{0,12}环境|clean[ _-]?env|env_(clear|remove)|只有 PATH|只留 PATH|继承.{0,18}PATH' b9d898dccf46c2a716115eaa1215bc39c458a959 -- docs/adr .chanlun/definitions analysis docs rust s_session CONTEXT.md config scripts formal .github .sandcastle",
+    "status": 0,
+    "lines": 129,
+    "hits": 129,
+    "query": "凭据.{0,45}(注入|子进程|作用域|硬门|来源)|环境(继承|注入|清空)|清空.{0,12}环境|clean[ _-]?env|env_(clear|remove)|只有 PATH|只留 PATH|继承.{0,18}PATH"
+  },
+  "G4": {
+    "cmd": "git grep -n -I -i -E 'PATH|stat|credential' b9d898dccf46c2a716115eaa1215bc39c458a959 -- rust/src/bin/production_session.rs rust/src/bin/x_execution_session.rs rust/src/economic_session/store.rs rust/tests/production_session_entry.rs rust/tests/history_simulation_entry.py docs/runbook_production_session.md",
+    "status": 0,
+    "lines": 339,
+    "hits": 339,
+    "query": "PATH|stat|credential"
+  },
+  "G5": {
+    "cmd": "git grep -n -I -i -E '1383|1769|2113|2134|1540|FU-18|P1-hl-testnet' b9d898dccf46c2a716115eaa1215bc39c458a959 -- docs/adr .chanlun/definitions analysis docs CONTEXT.md",
+    "status": 0,
+    "lines": 237,
+    "hits": 237,
+    "query": "1383|1769|2113|2134|1540|FU-18|P1-hl-testnet"
+  },
+  "G6": {
+    "cmd": "git grep -n -I -i -E 'credential_scope|credential_source|x-execution-profile|NC_X_VENUE_CREDENTIAL|UNUSED_SIMULATION_CREDENTIAL' b9d898dccf46c2a716115eaa1215bc39c458a959",
+    "status": 0,
+    "lines": 54,
+    "hits": 54,
+    "query": "credential_scope|credential_source|x-execution-profile|NC_X_VENUE_CREDENTIAL|UNUSED_SIMULATION_CREDENTIAL"
+  },
+  "T01": {
+    "cmd": "gh issue list -R Newchanlun/NewChanlun --state all --limit 100 --search '\"credential_scope\" in:title,body,comments' --json number,title,state,url",
+    "status": 0,
+    "lines": 1,
+    "hits": 11,
+    "query": "\"credential_scope\" in:title,body,comments"
+  },
+  "T02": {
+    "cmd": "gh issue list -R Newchanlun/NewChanlun --state all --limit 100 --search '\"credential_source\" in:title,body,comments' --json number,title,state,url",
+    "status": 0,
+    "lines": 1,
+    "hits": 2,
+    "query": "\"credential_source\" in:title,body,comments"
+  },
+  "T03": {
+    "cmd": "gh issue list -R Newchanlun/NewChanlun --state all --limit 100 --search '\"x-execution-profile\" in:title,body,comments' --json number,title,state,url",
+    "status": 0,
+    "lines": 1,
+    "hits": 2,
+    "query": "\"x-execution-profile\" in:title,body,comments"
+  },
+  "T04": {
+    "cmd": "gh issue list -R Newchanlun/NewChanlun --state all --limit 100 --search '\"凭据键\" in:title,body,comments' --json number,title,state,url",
+    "status": 0,
+    "lines": 1,
+    "hits": 6,
+    "query": "\"凭据键\" in:title,body,comments"
+  },
+  "T05": {
+    "cmd": "gh issue list -R Newchanlun/NewChanlun --state all --limit 100 --search '\"环境变量名\" in:title,body,comments' --json number,title,state,url",
+    "status": 0,
+    "lines": 1,
+    "hits": 4,
+    "query": "\"环境变量名\" in:title,body,comments"
+  },
+  "T06": {
+    "cmd": "gh issue list -R Newchanlun/NewChanlun --state all --limit 100 --search '\"保留键\" in:title,body,comments' --json number,title,state,url",
+    "status": 0,
+    "lines": 1,
+    "hits": 2,
+    "query": "\"保留键\" in:title,body,comments"
+  },
+  "T07": {
+    "cmd": "gh issue list -R Newchanlun/NewChanlun --state all --limit 100 --search '\"env key\" \"credential\" in:title,body,comments' --json number,title,state,url",
+    "status": 0,
+    "lines": 1,
+    "hits": 1,
+    "query": "\"env key\" \"credential\" in:title,body,comments"
+  },
+  "T08": {
+    "cmd": "gh issue list -R Newchanlun/NewChanlun --state all --limit 100 --search '\"注入\" \"凭据\" in:title,body,comments' --json number,title,state,url",
+    "status": 0,
+    "lines": 1,
+    "hits": 28,
+    "query": "\"注入\" \"凭据\" in:title,body,comments"
+  },
+  "T09": {
+    "cmd": "gh issue list -R Newchanlun/NewChanlun --state all --limit 100 --search '\"PATH\" \"stat\" in:title,body,comments' --json number,title,state,url",
+    "status": 0,
+    "lines": 1,
+    "hits": 12,
+    "query": "\"PATH\" \"stat\" in:title,body,comments"
+  },
+  "T10": {
+    "cmd": "gh issue list -R Newchanlun/NewChanlun --state all --limit 100 --search '\"LD_PRELOAD\" in:title,body,comments' --json number,title,state,url",
+    "status": 0,
+    "lines": 1,
+    "hits": 1,
+    "query": "\"LD_PRELOAD\" in:title,body,comments"
+  },
+  "T11": {
+    "cmd": "gh issue list -R Newchanlun/NewChanlun --state all --limit 100 --search '\"LD_LIBRARY_PATH\" in:title,body,comments' --json number,title,state,url",
+    "status": 0,
+    "lines": 1,
+    "hits": 3,
+    "query": "\"LD_LIBRARY_PATH\" in:title,body,comments"
+  },
+  "T12": {
+    "cmd": "gh issue list -R Newchanlun/NewChanlun --state all --limit 100 --search '\"环境继承\" in:title,body,comments' --json number,title,state,url",
+    "status": 0,
+    "lines": 1,
+    "hits": 0,
+    "query": "\"环境继承\" in:title,body,comments"
+  },
+  "T13": {
+    "cmd": "gh issue list -R Newchanlun/NewChanlun --state all --limit 100 --search '\"env_clear\" in:title,body,comments' --json number,title,state,url",
+    "status": 0,
+    "lines": 1,
+    "hits": 1,
+    "query": "\"env_clear\" in:title,body,comments"
+  },
+  "T14": {
+    "cmd": "gh issue list -R Newchanlun/NewChanlun --state all --limit 100 --search '\"clean env\" in:title,body,comments' --json number,title,state,url",
+    "status": 0,
+    "lines": 1,
+    "hits": 0,
+    "query": "\"clean env\" in:title,body,comments"
+  },
+  "T15": {
+    "cmd": "gh issue list -R Newchanlun/NewChanlun --state all --limit 100 --search '\"NC_X_VENUE_CREDENTIAL\" in:title,body,comments' --json number,title,state,url",
+    "status": 0,
+    "lines": 1,
+    "hits": 1,
+    "query": "\"NC_X_VENUE_CREDENTIAL\" in:title,body,comments"
+  },
+  "T16": {
+    "cmd": "gh issue list -R Newchanlun/NewChanlun --state all --limit 100 --search '\"环境\" \"B13\" in:title,body,comments' --json number,title,state,url",
+    "status": 0,
+    "lines": 1,
+    "hits": 6,
+    "query": "\"环境\" \"B13\" in:title,body,comments"
+  },
+  "T17": {
+    "cmd": "gh issue list -R Newchanlun/NewChanlun --state all --limit 100 --search '\"凭据\" \"子进程\" in:title,body,comments' --json number,title,state,url",
+    "status": 0,
+    "lines": 1,
+    "hits": 17,
+    "query": "\"凭据\" \"子进程\" in:title,body,comments"
+  },
+  "T18": {
+    "cmd": "gh issue list -R Newchanlun/NewChanlun --state all --limit 100 --search '\"执行 profile\" \"环境\" in:title,body,comments' --json number,title,state,url",
+    "status": 0,
+    "lines": 1,
+    "hits": 1,
+    "query": "\"执行 profile\" \"环境\" in:title,body,comments"
+  },
+  "T19": {
+    "cmd": "gh issue list -R Newchanlun/NewChanlun --state all --limit 100 --search '\"空名\" \"环境\" in:title,body,comments' --json number,title,state,url",
+    "status": 0,
+    "lines": 1,
+    "hits": 2,
+    "query": "\"空名\" \"环境\" in:title,body,comments"
+  },
+  "T20": {
+    "cmd": "gh issue list -R Newchanlun/NewChanlun --state all --limit 100 --search '\"env_remove\" in:title,body,comments' --json number,title,state,url",
+    "status": 0,
+    "lines": 1,
+    "hits": 1,
+    "query": "\"env_remove\" in:title,body,comments"
+  },
+  "T21": {
+    "cmd": "gh issue list -R Newchanlun/NewChanlun --state all --limit 100 --search '\"凭据\" \"权限\" \"FU-18\" in:title,body,comments' --json number,title,state,url",
+    "status": 0,
+    "lines": 1,
+    "hits": 6,
+    "query": "\"凭据\" \"权限\" \"FU-18\" in:title,body,comments"
+  },
+  "I2134": {
+    "cmd": "gh issue view 2134 -R Newchanlun/NewChanlun --json number,title,state,url,body,comments,labels",
+    "status": 0,
+    "lines": 1,
+    "hits": 1,
+    "query": "#2134"
+  },
+  "I2113": {
+    "cmd": "gh issue view 2113 -R Newchanlun/NewChanlun --json number,title,state,url,body,comments,labels",
+    "status": 0,
+    "lines": 1,
+    "hits": 1,
+    "query": "#2113"
+  },
+  "I1383": {
+    "cmd": "gh issue view 1383 -R Newchanlun/NewChanlun --json number,title,state,url,body,comments,labels",
+    "status": 0,
+    "lines": 1,
+    "hits": 1,
+    "query": "#1383"
+  },
+  "I1365": {
+    "cmd": "gh issue view 1365 -R Newchanlun/NewChanlun --json number,title,state,url,body,comments,labels",
+    "status": 0,
+    "lines": 1,
+    "hits": 1,
+    "query": "#1365"
+  },
+  "I1540": {
+    "cmd": "gh issue view 1540 -R Newchanlun/NewChanlun --json number,title,state,url,body,comments,labels",
+    "status": 0,
+    "lines": 1,
+    "hits": 1,
+    "query": "#1540"
+  },
+  "I1769": {
+    "cmd": "gh issue view 1769 -R Newchanlun/NewChanlun --json number,title,state,url,body,comments,labels",
+    "status": 0,
+    "lines": 1,
+    "hits": 1,
+    "query": "#1769"
+  },
+  "I1770": {
+    "cmd": "gh issue view 1770 -R Newchanlun/NewChanlun --json number,title,state,url,body,comments,labels",
+    "status": 0,
+    "lines": 1,
+    "hits": 1,
+    "query": "#1770"
+  },
+  "I1561": {
+    "cmd": "gh issue view 1561 -R Newchanlun/NewChanlun --json number,title,state,url,body,comments,labels",
+    "status": 0,
+    "lines": 1,
+    "hits": 1,
+    "query": "#1561"
+  },
+  "I1299": {
+    "cmd": "gh issue view 1299 -R Newchanlun/NewChanlun --json number,title,state,url,body,comments,labels",
+    "status": 0,
+    "lines": 1,
+    "hits": 1,
+    "query": "#1299"
+  },
+  "I1323": {
+    "cmd": "gh issue view 1323 -R Newchanlun/NewChanlun --json number,title,state,url,body,comments,labels",
+    "status": 0,
+    "lines": 1,
+    "hits": 1,
+    "query": "#1323"
+  },
+  "G7": {
+    "cmd": "git grep -n -I -i -E 'credential_scope\\.(env|file)|credential_source\\.(env|file)|x-profile\\.json|凭据(键名|环境变量名)|X.{0,22}凭据.{0,24}注入' b9d898dccf46c2a716115eaa1215bc39c458a959 -- .chanlun analysis docs rust s_session scripts trading_system tests src",
+    "status": 0,
+    "lines": 8,
+    "hits": 8,
+    "query": "credential_scope\\.(env|file)|credential_source\\.(env|file)|x-profile\\.json|凭据(键名|环境变量名)|X.{0,22}凭据.{0,24}注入"
+  },
+  "T22": {
+    "cmd": "gh issue list -R Newchanlun/NewChanlun --state all --limit 100 --search '\"部署\" \"凭据\" \"x-execution-profile\" in:title,body,comments' --json number,title,state,url",
+    "status": 0,
+    "lines": 1,
+    "hits": 1,
+    "query": "\"部署\" \"凭据\" \"x-execution-profile\" in:title,body,comments"
+  },
+  "T23": {
+    "cmd": "gh issue list -R Newchanlun/NewChanlun --state all --limit 100 --search '\"clean\" \"credential_scope\" in:title,body,comments' --json number,title,state,url",
+    "status": 0,
+    "lines": 1,
+    "hits": 3,
+    "query": "\"clean\" \"credential_scope\" in:title,body,comments"
+  },
+  "T24": {
+    "cmd": "gh issue list -R Newchanlun/NewChanlun --state all --limit 100 --search '\"x-profile.json\" in:title,body,comments' --json number,title,state,url",
+    "status": 0,
+    "lines": 1,
+    "hits": 0,
+    "query": "\"x-profile.json\" in:title,body,comments"
+  }
+}

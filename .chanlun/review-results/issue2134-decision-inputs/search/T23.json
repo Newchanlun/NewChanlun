@@ -1,0 +1,20 @@
+[
+  {
+    "number": 1769,
+    "state": "OPEN",
+    "title": "[impl] #1523-L production_session 与 x_execution_session 可运行骨架（ADR 0039 迁移步骤 1）",
+    "url": "https://github.com/Newchanlun/NewChanlun/issues/1769"
+  },
+  {
+    "number": 1530,
+    "state": "CLOSED",
+    "title": "[grilling] FU-08 生产入口与唯一 owner（#1323，新增）",
+    "url": "https://github.com/Newchanlun/NewChanlun/issues/1530"
+  },
+  {
+    "number": 1532,
+    "state": "CLOSED",
+    "title": "[grilling] FU-12 旧引擎/简化臂逐入口终态（#1323，新增）",
+    "url": "https://github.com/Newchanlun/NewChanlun/issues/1532"
+  }
+]

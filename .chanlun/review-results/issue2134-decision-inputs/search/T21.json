@@ -1,0 +1,38 @@
+[
+  {
+    "number": 1551,
+    "state": "OPEN",
+    "title": "[grilling] FU-20 #1279 关票门与整图报告（#1323，新增）",
+    "url": "https://github.com/Newchanlun/NewChanlun/issues/1551"
+  },
+  {
+    "number": 1540,
+    "state": "CLOSED",
+    "title": "[grilling] FU-18 受控场所、账户、权限（#1323，新增）",
+    "url": "https://github.com/Newchanlun/NewChanlun/issues/1540"
+  },
+  {
+    "number": 1561,
+    "state": "CLOSED",
+    "title": "[grilling] FU-04 余项：目标生产 profile P2 的场所、账户与首次发送授权（#1323，P 类）",
+    "url": "https://github.com/Newchanlun/NewChanlun/issues/1561"
+  },
+  {
+    "number": 1323,
+    "state": "OPEN",
+    "title": "🗺️ 完整生产程序接线总单：#787 严格多重赋格落地 → 旧实现收敛 → 历史回放与 paper 同核",
+    "url": "https://github.com/Newchanlun/NewChanlun/issues/1323"
+  },
+  {
+    "number": 1539,
+    "state": "CLOSED",
+    "title": "[grilling] FU-17 成交/持仓唯一真账与 crosswalk（#1323，新增）",
+    "url": "https://github.com/Newchanlun/NewChanlun/issues/1539"
+  },
+  {
+    "number": 1538,
+    "state": "CLOSED",
+    "title": "[grilling] FU-16 paper/live 与回放同核边界（#1323，新增）",
+    "url": "https://github.com/Newchanlun/NewChanlun/issues/1538"
+  }
+]

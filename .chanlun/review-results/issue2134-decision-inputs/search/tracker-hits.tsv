@@ -1,0 +1,122 @@
+查询	票	状态	标题	链接	已读评论数	判定或排除理由
+T01	2134	OPEN	[grilling] X 执行 profile 凭据环境变量名的合法取值：现在不设限，可取 PATH、带分隔符的名字等（#2113 前置）	https://github.com/Newchanlun/NewChanlun/issues/2134		本票：正文及更正评论，未见重题
+T01	1769	OPEN	[impl] #1523-L production_session 与 x_execution_session 可运行骨架（ADR 0039 迁移步骤 1）	https://github.com/Newchanlun/NewChanlun/issues/1769		直接：launcher/X 骨架和夹具先例，不给键域裁定
+T01	2113	OPEN	[bug] X 打开持久库时启动的 stat 子进程继承凭据键（ADR 0039 验收 13，#1383 取证发现）	https://github.com/Newchanlun/NewChanlun/issues/2113		直接：四轮反例、已撤回的单拒 PATH 和现行依赖
+T01	1400	OPEN	[impl] TB-08-B 具名场所只读能力与事实完整性接入会话（SPEC #1340）	https://github.com/Newchanlun/NewChanlun/issues/1400		真实只读能力与端点，另有权限门，不定义注入键
+T01	1537	CLOSED	[grilling] FU-15 双跑确定性、恢复、seek、AsKnown（#1323，新增）	https://github.com/Newchanlun/NewChanlun/issues/1537		恢复/AsKnown 使用场所版本政策，不定义管道键
+T01	1567	CLOSED	[grilling] s-admission 首份锚的签发与无锚库接管（#1527）	https://github.com/Newchanlun/NewChanlun/issues/1567		S admission 发行/接管，环境是 S 白名单，不是 X
+T01	1561	CLOSED	[grilling] FU-04 余项：目标生产 profile P2 的场所、账户与首次发送授权（#1323，P 类）	https://github.com/Newchanlun/NewChanlun/issues/1561		相关：P2 非激活、授权与 P1 射程，不给注入键
+T01	1530	CLOSED	[grilling] FU-08 生产入口与唯一 owner（#1323，新增）	https://github.com/Newchanlun/NewChanlun/issues/1530		直接：ADR 0039 的 launcher 与凭据隔离，没有合法名域
+T01	1351	CLOSED	[grilling] 首个具名场所账户与验证权限 profile（#1323，FU-04）	https://github.com/Newchanlun/NewChanlun/issues/1351		相关：P1 权限与场所 profile，不是注入键
+T01	1532	CLOSED	[grilling] FU-12 旧引擎/简化臂逐入口终态（#1323，新增）	https://github.com/Newchanlun/NewChanlun/issues/1532		相关：旧引擎凭据源处置，不是 X 键域
+T01	1599	CLOSED	[grilling] 风控、退出、争用、成交、场所 profile、会计与活假设正本的被否候选改写为可选值（#1586 A-04~A-08/A-11/B-09）	https://github.com/Newchanlun/NewChanlun/issues/1599		调整场所/风险等参数自由度，不定义注入键
+T02	2134	OPEN	[grilling] X 执行 profile 凭据环境变量名的合法取值：现在不设限，可取 PATH、带分隔符的名字等（#2113 前置）	https://github.com/Newchanlun/NewChanlun/issues/2134		本票：正文及更正评论，未见重题
+T02	1540	CLOSED	[grilling] FU-18 受控场所、账户、权限（#1323，新增）	https://github.com/Newchanlun/NewChanlun/issues/1540		直接：ADR 0062 字段换名及权限硬门，没有键名语法
+T03	2134	OPEN	[grilling] X 执行 profile 凭据环境变量名的合法取值：现在不设限，可取 PATH、带分隔符的名字等（#2113 前置）	https://github.com/Newchanlun/NewChanlun/issues/2134		本票：正文及更正评论，未见重题
+T03	1381	OPEN	[impl] TB-07-A 完整历史输入推动全部权威域并生成可追溯回放（SPEC #1340）	https://github.com/Newchanlun/NewChanlun/issues/1381		历史回放走同一 X；不是生产凭据使用实例
+T04	2113	OPEN	[bug] X 打开持久库时启动的 stat 子进程继承凭据键（ADR 0039 验收 13，#1383 取证发现）	https://github.com/Newchanlun/NewChanlun/issues/2113		直接：四轮反例、已撤回的单拒 PATH 和现行依赖
+T04	2134	OPEN	[grilling] X 执行 profile 凭据环境变量名的合法取值：现在不设限，可取 PATH、带分隔符的名字等（#2113 前置）	https://github.com/Newchanlun/NewChanlun/issues/2134		本票：正文及更正评论，未见重题
+T04	1383	OPEN	[impl] TB-09-A 目标部署预检实际拒绝旧写入口绕过（SPEC #1340）	https://github.com/Newchanlun/NewChanlun/issues/1383		直接：B13 全树内核取样与 #2113 依赖
+T04	1323	OPEN	🗺️ 完整生产程序接线总单：#787 严格多重赋格落地 → 旧实现收敛 → 历史回放与 paper 同核	https://github.com/Newchanlun/NewChanlun/issues/1323		相关：总图、N-1 授权、#2113 前沿；没有键域定义
+T04	1530	CLOSED	[grilling] FU-08 生产入口与唯一 owner（#1323，新增）	https://github.com/Newchanlun/NewChanlun/issues/1530		直接：ADR 0039 的 launcher 与凭据隔离，没有合法名域
+T04	1532	CLOSED	[grilling] FU-12 旧引擎/简化臂逐入口终态（#1323，新增）	https://github.com/Newchanlun/NewChanlun/issues/1532		相关：旧引擎凭据源处置，不是 X 键域
+T05	2134	OPEN	[grilling] X 执行 profile 凭据环境变量名的合法取值：现在不设限，可取 PATH、带分隔符的名字等（#2113 前置）	https://github.com/Newchanlun/NewChanlun/issues/2134		本票：正文及更正评论，未见重题
+T05	1606	OPEN	[impl] Sandcastle 调度参数集中到版本化配置记录（#1586 C-29/C-30）	https://github.com/Newchanlun/NewChanlun/issues/1606		Sandcastle 调度配置及研发环境，不是 X profile
+T05	953	CLOSED	[task] 编排者手工：开 Binance API key 并放到 ~/.config/binance/env（map #931）	https://github.com/Newchanlun/NewChanlun/issues/953		Binance 用户手工授权，不是唯一 X profile
+T05	996	CLOSED	Sandcastle 落地：prime-agent 自定义 provider 适配 + 一次性设置向导	https://github.com/Newchanlun/NewChanlun/issues/996		prime-agent provider 向导；是研发代理环境
+T06	2134	OPEN	[grilling] X 执行 profile 凭据环境变量名的合法取值：现在不设限，可取 PATH、带分隔符的名字等（#2113 前置）	https://github.com/Newchanlun/NewChanlun/issues/2134		本票：正文及更正评论，未见重题
+T06	2113	OPEN	[bug] X 打开持久库时启动的 stat 子进程继承凭据键（ADR 0039 验收 13，#1383 取证发现）	https://github.com/Newchanlun/NewChanlun/issues/2113		直接：四轮反例、已撤回的单拒 PATH 和现行依赖
+T07	1800	OPEN	[task] CLIProxy 本机客户端密钥受控轮换与消费者恢复	https://github.com/Newchanlun/NewChanlun/issues/1800		CLIProxy 密钥轮换，不能当场所凭据先例
+T08	2134	OPEN	[grilling] X 执行 profile 凭据环境变量名的合法取值：现在不设限，可取 PATH、带分隔符的名字等（#2113 前置）	https://github.com/Newchanlun/NewChanlun/issues/2134		本票：正文及更正评论，未见重题
+T08	1503	OPEN	[task] Codex 多模型指令治理：共同正本与 Claude 适配加载	https://github.com/Newchanlun/NewChanlun/issues/1503		Codex/Claude 指令与运行环境，非 X
+T08	2070	OPEN	[#1742] OrbStack 新镜像 47cbe347 / bec4d55 受控 Docker 准入	https://github.com/Newchanlun/NewChanlun/issues/2070		OrbStack 研发镜像准入，非生产 X
+T08	1764	OPEN	[bug] codex-child 普通请求用量超窗导致每步压缩，阻塞 Sandcastle 复杂实施	https://github.com/Newchanlun/NewChanlun/issues/1764		Codex 子代理调用压缩，非生产子进程
+T08	1770	OPEN	[impl] #1523-API X 内 HL 场所 adapter 离线合同（环境、凭据、请求与回报原件映射）	https://github.com/Newchanlun/NewChanlun/issues/1770		相关：离线 X adapter 读 X 环境，未定义键域
+T08	1510	OPEN	[task] 本机空间清理与 Windows SSH 存储/运行环境勘察	https://github.com/Newchanlun/NewChanlun/issues/1510		Mac/Windows 存储环境勘察，非 X profile
+T08	1409	OPEN	[impl] TB-05-C 双边界崩溃、旧写者与不补发（SPEC #1340）	https://github.com/Newchanlun/NewChanlun/issues/1409		双边界崩溃与不补发，非 X 环境准入
+T08	1169	CLOSED	[impl] S3 搭建隔离 provider 运行面与凭据绑定	https://github.com/Newchanlun/NewChanlun/issues/1169		S3 隔离 provider，凭据服务于代理
+T08	1351	CLOSED	[grilling] 首个具名场所账户与验证权限 profile（#1323，FU-04）	https://github.com/Newchanlun/NewChanlun/issues/1351		相关：P1 权限与场所 profile，不是注入键
+T08	1530	CLOSED	[grilling] FU-08 生产入口与唯一 owner（#1323，新增）	https://github.com/Newchanlun/NewChanlun/issues/1530		直接：ADR 0039 的 launcher 与凭据隔离，没有合法名域
+T08	1567	CLOSED	[grilling] s-admission 首份锚的签发与无锚库接管（#1527）	https://github.com/Newchanlun/NewChanlun/issues/1567		S admission 发行/接管，环境是 S 白名单，不是 X
+T08	1018	CLOSED	[task] .sandcastle/SECURITY.md（蜂群靶子 B）	https://github.com/Newchanlun/NewChanlun/issues/1018		蜂群工具威胁模型；不裁 X profile
+T08	1340	OPEN	📋 SPEC：完整生产程序、结构全分类与逐重经营（#1323，R2）	https://github.com/Newchanlun/NewChanlun/issues/1340		相关：SPEC 的唯一 X/隔离验收，未定义键名语法
+T08	1149	CLOSED	[grilling] 裁定 LAV 历史 shadow pilot 的样本、指标、预算与退出门	https://github.com/Newchanlun/NewChanlun/issues/1149		LAV shadow pilot 研究射程，不是生产注入
+T08	1001	CLOSED	[grilling] 实施票链的沙盒形态：claude CLI 进镜像 vs 实装切 prime-agent	https://github.com/Newchanlun/NewChanlun/issues/1001		代理沙盒形态，与生产写者无关
+T08	1002	CLOSED	[grilling] 工蜂模型矩阵：票型×模型×effort 到 prime-agent provider 参数的映射	https://github.com/Newchanlun/NewChanlun/issues/1002		代理模型分派，与生产写者无关
+T08	1128	CLOSED	[task] Sandcastle 显式模型 registry：Claude 默认 + DeepSeek v4-pro 可选实装	https://github.com/Newchanlun/NewChanlun/issues/1128		模型 registry，不是场所凭据准入
+T08	1560	CLOSED	[grilling] FU-07 余项：系统风险条件 SR v1 阈值与退出动作表签署（#1323，P 类）	https://github.com/Newchanlun/NewChanlun/issues/1560		风险条件与真实签署，不是环境键
+T08	999	CLOSED	[research] Sandcastle 官方用法调研：GitHub 仓库 + AI Hero 资料	https://github.com/Newchanlun/NewChanlun/issues/999		Sandcastle 工具研究；不是 X 运行时
+T08	1182	CLOSED	[impl] sandcastle 自动拾取：launchd 常驻 claim 循环（#1182 裁定落地）	https://github.com/Newchanlun/NewChanlun/issues/1182		Sandcastle launchd 环境，非产品 launcher
+T08	1532	CLOSED	[grilling] FU-12 旧引擎/简化臂逐入口终态（#1323，新增）	https://github.com/Newchanlun/NewChanlun/issues/1532		相关：旧引擎凭据源处置，不是 X 键域
+T08	996	CLOSED	Sandcastle 落地：prime-agent 自定义 provider 适配 + 一次性设置向导	https://github.com/Newchanlun/NewChanlun/issues/996		prime-agent provider 向导；是研发代理环境
+T08	1323	OPEN	🗺️ 完整生产程序接线总单：#787 严格多重赋格落地 → 旧实现收敛 → 历史回放与 paper 同核	https://github.com/Newchanlun/NewChanlun/issues/1323		相关：总图、N-1 授权、#2113 前沿；没有键域定义
+T08	1142	CLOSED	[task] Prime remote-child Core MVP 本地原型：durable admission + parent-only family	https://github.com/Newchanlun/NewChanlun/issues/1142		Prime remote-child admission，非 X profile
+T08	1185	CLOSED	[bug] Sandcastle agent-implement preflight：jq 字符串里 `\s` 无效转义致 run 失败	https://github.com/Newchanlun/NewChanlun/issues/1185		Sandcastle preflight，非产品 launcher
+T08	1120	CLOSED	[research] pstack 候选 Skills → Prime Agent 运行时兼容矩阵	https://github.com/Newchanlun/NewChanlun/issues/1120		Prime Agent runtime 能力对照，不是 X
+T08	1538	CLOSED	[grilling] FU-16 paper/live 与回放同核边界（#1323，新增）	https://github.com/Newchanlun/NewChanlun/issues/1538		paper/live 与回放共核，非键名合同
+T08	1488	CLOSED	[impl] S 写者构造降阶：增量构造与去除作废中间根（承接 #1481 M7、#1419 S0b）	https://github.com/Newchanlun/NewChanlun/issues/1488		S 写者去中间根，非 X 进程环境
+T09	2113	OPEN	[bug] X 打开持久库时启动的 stat 子进程继承凭据键（ADR 0039 验收 13，#1383 取证发现）	https://github.com/Newchanlun/NewChanlun/issues/2113		直接：四轮反例、已撤回的单拒 PATH 和现行依赖
+T09	2134	OPEN	[grilling] X 执行 profile 凭据环境变量名的合法取值：现在不设限，可取 PATH、带分隔符的名字等（#2113 前置）	https://github.com/Newchanlun/NewChanlun/issues/2134		本票：正文及更正评论，未见重题
+T09	1618	OPEN	[task] #1588 转票：sandcastle 失败可见性与本机 cargo 垫片余项（GH Actions 评审整段 diff、绝对路径绕过、蜂群、implementer/failed、health-monitor）	https://github.com/Newchanlun/NewChanlun/issues/1618		CI/Sandcastle 失败可见性与本地 cargo 垫片，非 stat 隔离
+T09	1393	OPEN	[impl] TB-02-U 未建方向与全包含前缀的获准工程实例（SPEC #1340）	https://github.com/Newchanlun/NewChanlun/issues/1393		TB-02-U 结构前缀，不是环境命名空间
+T09	363	CLOSED	M4 逐级稀疏性判据同步：二次裁剪路径进逐级解释项（#355 MED-C）	https://github.com/Newchanlun/NewChanlun/issues/363		M4 稀疏性裁剪，不定义进程凭据
+T09	445	CLOSED	🗺️ 交付纪律：票据可溯、验收项可验证、豁免须自带证据	https://github.com/Newchanlun/NewChanlun/issues/445		通用验收纪律，不定义注入键
+T09	1116	CLOSED	[task] 安全：S_net cache 移除未校验 pickle 反序列化	https://github.com/Newchanlun/NewChanlun/issues/1116		S_net 反序列化约束，不是 X 注入
+T09	627	CLOSED	[簿记] 引用链补洞：补充十三引用档 thirdclass-level-doctrine-research-20260727.md 仓内缺失（#574/ADR-0008 上报②）	https://github.com/Newchanlun/NewChanlun/issues/627		三买教义引用修复，不涉运行环境
+T09	1141	CLOSED	[task] CI rust-check 在 rust-lld 链接阶段连续 signal 7 / Bus error，cargo test 无法完成	https://github.com/Newchanlun/NewChanlun/issues/1141		CI 链接和 PATH 背景，不是持久库 stat
+T09	1644	CLOSED	[grilling] P6 来源审计持久台账与清单全闭包核验，与 #1481 方案三合审（#1612 切片 4）	https://github.com/Newchanlun/NewChanlun/issues/1644		S 归档与仓库来源审计语义，非 X 环境
+T09	1323	OPEN	🗺️ 完整生产程序接线总单：#787 严格多重赋格落地 → 旧实现收敛 → 历史回放与 paper 同核	https://github.com/Newchanlun/NewChanlun/issues/1323		相关：总图、N-1 授权、#2113 前沿；没有键域定义
+T09	1532	CLOSED	[grilling] FU-12 旧引擎/简化臂逐入口终态（#1323，新增）	https://github.com/Newchanlun/NewChanlun/issues/1532		相关：旧引擎凭据源处置，不是 X 键域
+T10	2134	OPEN	[grilling] X 执行 profile 凭据环境变量名的合法取值：现在不设限，可取 PATH、带分隔符的名字等（#2113 前置）	https://github.com/Newchanlun/NewChanlun/issues/2134		本票：正文及更正评论，未见重题
+T11	2134	OPEN	[grilling] X 执行 profile 凭据环境变量名的合法取值：现在不设限，可取 PATH、带分隔符的名字等（#2113 前置）	https://github.com/Newchanlun/NewChanlun/issues/2134		本票：正文及更正评论，未见重题
+T11	1198	CLOSED	[impl] 小转大情况二程序：L级候选二卖判据＋turn_class投影行＋L-重程序臂（#1195 裁定落地）	https://github.com/Newchanlun/NewChanlun/issues/1198		L2 二卖教义/程序臂，非 X 环境
+T11	1086	CLOSED	[impl] 3a 统一扫描：两路合一 + 前沿缓存合一 + 双域对拍（SPEC #1085 S1）	https://github.com/Newchanlun/NewChanlun/issues/1086		结构缓存双域对拍，不是 X 进程环境
+T13	2113	OPEN	[bug] X 打开持久库时启动的 stat 子进程继承凭据键（ADR 0039 验收 13，#1383 取证发现）	https://github.com/Newchanlun/NewChanlun/issues/2113		直接：四轮反例、已撤回的单拒 PATH 和现行依赖
+T15	2134	OPEN	[grilling] X 执行 profile 凭据环境变量名的合法取值：现在不设限，可取 PATH、带分隔符的名字等（#2113 前置）	https://github.com/Newchanlun/NewChanlun/issues/2134		本票：正文及更正评论，未见重题
+T16	2113	OPEN	[bug] X 打开持久库时启动的 stat 子进程继承凭据键（ADR 0039 验收 13，#1383 取证发现）	https://github.com/Newchanlun/NewChanlun/issues/2113		直接：四轮反例、已撤回的单拒 PATH 和现行依赖
+T16	1383	OPEN	[impl] TB-09-A 目标部署预检实际拒绝旧写入口绕过（SPEC #1340）	https://github.com/Newchanlun/NewChanlun/issues/1383		直接：B13 全树内核取样与 #2113 依赖
+T16	1769	OPEN	[impl] #1523-L production_session 与 x_execution_session 可运行骨架（ADR 0039 迁移步骤 1）	https://github.com/Newchanlun/NewChanlun/issues/1769		直接：launcher/X 骨架和夹具先例，不给键域裁定
+T16	1530	CLOSED	[grilling] FU-08 生产入口与唯一 owner（#1323，新增）	https://github.com/Newchanlun/NewChanlun/issues/1530		直接：ADR 0039 的 launcher 与凭据隔离，没有合法名域
+T16	1532	CLOSED	[grilling] FU-12 旧引擎/简化臂逐入口终态（#1323，新增）	https://github.com/Newchanlun/NewChanlun/issues/1532		相关：旧引擎凭据源处置，不是 X 键域
+T16	1394	CLOSED	[impl] TB-03-B 财务准备、责任先增与本地提交史（SPEC #1340）	https://github.com/Newchanlun/NewChanlun/issues/1394		TB-03-B 持久提交验收，不是 X 凭据子进程
+T17	2113	OPEN	[bug] X 打开持久库时启动的 stat 子进程继承凭据键（ADR 0039 验收 13，#1383 取证发现）	https://github.com/Newchanlun/NewChanlun/issues/2113		直接：四轮反例、已撤回的单拒 PATH 和现行依赖
+T17	2134	OPEN	[grilling] X 执行 profile 凭据环境变量名的合法取值：现在不设限，可取 PATH、带分隔符的名字等（#2113 前置）	https://github.com/Newchanlun/NewChanlun/issues/2134		本票：正文及更正评论，未见重题
+T17	1383	OPEN	[impl] TB-09-A 目标部署预检实际拒绝旧写入口绕过（SPEC #1340）	https://github.com/Newchanlun/NewChanlun/issues/1383		直接：B13 全树内核取样与 #2113 依赖
+T17	1769	OPEN	[impl] #1523-L production_session 与 x_execution_session 可运行骨架（ADR 0039 迁移步骤 1）	https://github.com/Newchanlun/NewChanlun/issues/1769		直接：launcher/X 骨架和夹具先例，不给键域裁定
+T17	1365	OPEN	TB-09 验收汇总：目标部署旧写入口隔离及X排他（SPEC #1340）	https://github.com/Newchanlun/NewChanlun/issues/1365		相关：TB-09 父票及 P1 验收域，不给注入键
+T17	1503	OPEN	[task] Codex 多模型指令治理：共同正本与 Claude 适配加载	https://github.com/Newchanlun/NewChanlun/issues/1503		Codex/Claude 指令与运行环境，非 X
+T17	1401	OPEN	[impl] TB-09-B X换代必须隔离旧发送者并保留在途责任（SPEC #1340）	https://github.com/Newchanlun/NewChanlun/issues/1401		X 换代和最大责任，未定义凭据键
+T17	1510	OPEN	[task] 本机空间清理与 Windows SSH 存储/运行环境勘察	https://github.com/Newchanlun/NewChanlun/issues/1510		Mac/Windows 存储环境勘察，非 X profile
+T17	1674	CLOSED	[impl] TB-03-C tb03c-book/2 持久边界的新进程与 SIGKILL 恢复对拍（#1406 AC5）	https://github.com/Newchanlun/NewChanlun/issues/1674		E/B 持久化崩溃测试，非注入键
+T17	1588	CLOSED	[task] 工程债清零：main 上 DevSkim 红、基线失败测试、CI 时长与内存二次增长	https://github.com/Newchanlun/NewChanlun/issues/1588		工程债/CI 回归，非生产 X 环境
+T17	1530	CLOSED	[grilling] FU-08 生产入口与唯一 owner（#1323，新增）	https://github.com/Newchanlun/NewChanlun/issues/1530		直接：ADR 0039 的 launcher 与凭据隔离，没有合法名域
+T17	1535	CLOSED	[grilling] FU-13 带仓迁移、回退、责任退休（#1323，新增）	https://github.com/Newchanlun/NewChanlun/issues/1535		带仓迁移与回退，凭据政策不是环境键
+T17	1340	OPEN	📋 SPEC：完整生产程序、结构全分类与逐重经营（#1323，R2）	https://github.com/Newchanlun/NewChanlun/issues/1340		相关：SPEC 的唯一 X/隔离验收，未定义键名语法
+T17	1393	OPEN	[impl] TB-02-U 未建方向与全包含前缀的获准工程实例（SPEC #1340）	https://github.com/Newchanlun/NewChanlun/issues/1393		TB-02-U 结构前缀，不是环境命名空间
+T17	1532	CLOSED	[grilling] FU-12 旧引擎/简化臂逐入口终态（#1323，新增）	https://github.com/Newchanlun/NewChanlun/issues/1532		相关：旧引擎凭据源处置，不是 X 键域
+T17	1323	OPEN	🗺️ 完整生产程序接线总单：#787 严格多重赋格落地 → 旧实现收敛 → 历史回放与 paper 同核	https://github.com/Newchanlun/NewChanlun/issues/1323		相关：总图、N-1 授权、#2113 前沿；没有键域定义
+T17	1527	OPEN	[task] 建立正式 producer/R4/CLI 恢复路径：R4 消费端与失败收据进 main（成功收据拆至 #1675）	https://github.com/Newchanlun/NewChanlun/issues/1527		S 正式生产输入及 R4/CLI，非 X 键名
+T18	2134	OPEN	[grilling] X 执行 profile 凭据环境变量名的合法取值：现在不设限，可取 PATH、带分隔符的名字等（#2113 前置）	https://github.com/Newchanlun/NewChanlun/issues/2134		本票：正文及更正评论，未见重题
+T19	2134	OPEN	[grilling] X 执行 profile 凭据环境变量名的合法取值：现在不设限，可取 PATH、带分隔符的名字等（#2113 前置）	https://github.com/Newchanlun/NewChanlun/issues/2134		本票：正文及更正评论，未见重题
+T19	2113	OPEN	[bug] X 打开持久库时启动的 stat 子进程继承凭据键（ADR 0039 验收 13，#1383 取证发现）	https://github.com/Newchanlun/NewChanlun/issues/2113		直接：四轮反例、已撤回的单拒 PATH 和现行依赖
+T20	2113	OPEN	[bug] X 打开持久库时启动的 stat 子进程继承凭据键（ADR 0039 验收 13，#1383 取证发现）	https://github.com/Newchanlun/NewChanlun/issues/2113		直接：四轮反例、已撤回的单拒 PATH 和现行依赖
+T21	1551	OPEN	[grilling] FU-20 #1279 关票门与整图报告（#1323，新增）	https://github.com/Newchanlun/NewChanlun/issues/1551		整图关票门/ADR 0064 占号，非 X 准入
+T21	1540	CLOSED	[grilling] FU-18 受控场所、账户、权限（#1323，新增）	https://github.com/Newchanlun/NewChanlun/issues/1540		直接：ADR 0062 字段换名及权限硬门，没有键名语法
+T21	1561	CLOSED	[grilling] FU-04 余项：目标生产 profile P2 的场所、账户与首次发送授权（#1323，P 类）	https://github.com/Newchanlun/NewChanlun/issues/1561		相关：P2 非激活、授权与 P1 射程，不给注入键
+T21	1323	OPEN	🗺️ 完整生产程序接线总单：#787 严格多重赋格落地 → 旧实现收敛 → 历史回放与 paper 同核	https://github.com/Newchanlun/NewChanlun/issues/1323		相关：总图、N-1 授权、#2113 前沿；没有键域定义
+T21	1539	CLOSED	[grilling] FU-17 成交/持仓唯一真账与 crosswalk（#1323，新增）	https://github.com/Newchanlun/NewChanlun/issues/1539		成交/持仓唯一真账，非注入键
+T21	1538	CLOSED	[grilling] FU-16 paper/live 与回放同核边界（#1323，新增）	https://github.com/Newchanlun/NewChanlun/issues/1538		paper/live 与回放共核，非键名合同
+I2134	2134	OPEN	[grilling] X 执行 profile 凭据环境变量名的合法取值：现在不设限，可取 PATH、带分隔符的名字等（#2113 前置）	https://github.com/Newchanlun/NewChanlun/issues/2134	1	本票：正文及更正评论，未见重题
+I2113	2113	OPEN	[bug] X 打开持久库时启动的 stat 子进程继承凭据键（ADR 0039 验收 13，#1383 取证发现）	https://github.com/Newchanlun/NewChanlun/issues/2113	6	直接：四轮反例、已撤回的单拒 PATH 和现行依赖
+I1383	1383	OPEN	[impl] TB-09-A 目标部署预检实际拒绝旧写入口绕过（SPEC #1340）	https://github.com/Newchanlun/NewChanlun/issues/1383	3	直接：B13 全树内核取样与 #2113 依赖
+I1365	1365	OPEN	TB-09 验收汇总：目标部署旧写入口隔离及X排他（SPEC #1340）	https://github.com/Newchanlun/NewChanlun/issues/1365	2	相关：TB-09 父票及 P1 验收域，不给注入键
+I1540	1540	CLOSED	[grilling] FU-18 受控场所、账户、权限（#1323，新增）	https://github.com/Newchanlun/NewChanlun/issues/1540	6	直接：ADR 0062 字段换名及权限硬门，没有键名语法
+I1769	1769	OPEN	[impl] #1523-L production_session 与 x_execution_session 可运行骨架（ADR 0039 迁移步骤 1）	https://github.com/Newchanlun/NewChanlun/issues/1769	11	直接：launcher/X 骨架和夹具先例，不给键域裁定
+I1770	1770	OPEN	[impl] #1523-API X 内 HL 场所 adapter 离线合同（环境、凭据、请求与回报原件映射）	https://github.com/Newchanlun/NewChanlun/issues/1770	1	相关：离线 X adapter 读 X 环境，未定义键域
+I1561	1561	CLOSED	[grilling] FU-04 余项：目标生产 profile P2 的场所、账户与首次发送授权（#1323，P 类）	https://github.com/Newchanlun/NewChanlun/issues/1561	7	相关：P2 非激活、授权与 P1 射程，不给注入键
+I1299	1299	CLOSED	[task] T3-in-c 喂给名分声明：rt 份 P1 线退役拷贝冻结 + advance_cp_lifecycles 第三处点名（tail5，零行为变更）	https://github.com/Newchanlun/NewChanlun/issues/1299	1	推进 C 线模块名分，P1 系同名，不属场所键
+I1323	1323	OPEN	🗺️ 完整生产程序接线总单：#787 严格多重赋格落地 → 旧实现收敛 → 历史回放与 paper 同核	https://github.com/Newchanlun/NewChanlun/issues/1323	40	相关：总图、N-1 授权、#2113 前沿；没有键域定义
+T22	2134	OPEN	[grilling] X 执行 profile 凭据环境变量名的合法取值：现在不设限，可取 PATH、带分隔符的名字等（#2113 前置）	https://github.com/Newchanlun/NewChanlun/issues/2134		本票：正文及更正评论，未见重题
+T23	1769	OPEN	[impl] #1523-L production_session 与 x_execution_session 可运行骨架（ADR 0039 迁移步骤 1）	https://github.com/Newchanlun/NewChanlun/issues/1769		直接：launcher/X 骨架和夹具先例，不给键域裁定
+T23	1530	CLOSED	[grilling] FU-08 生产入口与唯一 owner（#1323，新增）	https://github.com/Newchanlun/NewChanlun/issues/1530		直接：ADR 0039 的 launcher 与凭据隔离，没有合法名域
+T23	1532	CLOSED	[grilling] FU-12 旧引擎/简化臂逐入口终态（#1323，新增）	https://github.com/Newchanlun/NewChanlun/issues/1532		相关：旧引擎凭据源处置，不是 X 键域

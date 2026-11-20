@@ -1,0 +1,38 @@
+[
+  {
+    "number": 2113,
+    "state": "OPEN",
+    "title": "[bug] X 打开持久库时启动的 stat 子进程继承凭据键（ADR 0039 验收 13，#1383 取证发现）",
+    "url": "https://github.com/Newchanlun/NewChanlun/issues/2113"
+  },
+  {
+    "number": 2134,
+    "state": "OPEN",
+    "title": "[grilling] X 执行 profile 凭据环境变量名的合法取值：现在不设限，可取 PATH、带分隔符的名字等（#2113 前置）",
+    "url": "https://github.com/Newchanlun/NewChanlun/issues/2134"
+  },
+  {
+    "number": 1383,
+    "state": "OPEN",
+    "title": "[impl] TB-09-A 目标部署预检实际拒绝旧写入口绕过（SPEC #1340）",
+    "url": "https://github.com/Newchanlun/NewChanlun/issues/1383"
+  },
+  {
+    "number": 1323,
+    "state": "OPEN",
+    "title": "🗺️ 完整生产程序接线总单：#787 严格多重赋格落地 → 旧实现收敛 → 历史回放与 paper 同核",
+    "url": "https://github.com/Newchanlun/NewChanlun/issues/1323"
+  },
+  {
+    "number": 1530,
+    "state": "CLOSED",
+    "title": "[grilling] FU-08 生产入口与唯一 owner（#1323，新增）",
+    "url": "https://github.com/Newchanlun/NewChanlun/issues/1530"
+  },
+  {
+    "number": 1532,
+    "state": "CLOSED",
+    "title": "[grilling] FU-12 旧引擎/简化臂逐入口终态（#1323，新增）",
+    "url": "https://github.com/Newchanlun/NewChanlun/issues/1532"
+  }
+]

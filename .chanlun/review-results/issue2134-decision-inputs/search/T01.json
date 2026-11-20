@@ -1,0 +1,68 @@
+[
+  {
+    "number": 2134,
+    "state": "OPEN",
+    "title": "[grilling] X 执行 profile 凭据环境变量名的合法取值：现在不设限，可取 PATH、带分隔符的名字等（#2113 前置）",
+    "url": "https://github.com/Newchanlun/NewChanlun/issues/2134"
+  },
+  {
+    "number": 1769,
+    "state": "OPEN",
+    "title": "[impl] #1523-L production_session 与 x_execution_session 可运行骨架（ADR 0039 迁移步骤 1）",
+    "url": "https://github.com/Newchanlun/NewChanlun/issues/1769"
+  },
+  {
+    "number": 2113,
+    "state": "OPEN",
+    "title": "[bug] X 打开持久库时启动的 stat 子进程继承凭据键（ADR 0039 验收 13，#1383 取证发现）",
+    "url": "https://github.com/Newchanlun/NewChanlun/issues/2113"
+  },
+  {
+    "number": 1400,
+    "state": "OPEN",
+    "title": "[impl] TB-08-B 具名场所只读能力与事实完整性接入会话（SPEC #1340）",
+    "url": "https://github.com/Newchanlun/NewChanlun/issues/1400"
+  },
+  {
+    "number": 1537,
+    "state": "CLOSED",
+    "title": "[grilling] FU-15 双跑确定性、恢复、seek、AsKnown（#1323，新增）",
+    "url": "https://github.com/Newchanlun/NewChanlun/issues/1537"
+  },
+  {
+    "number": 1567,
+    "state": "CLOSED",
+    "title": "[grilling] s-admission 首份锚的签发与无锚库接管（#1527）",
+    "url": "https://github.com/Newchanlun/NewChanlun/issues/1567"
+  },
+  {
+    "number": 1561,
+    "state": "CLOSED",
+    "title": "[grilling] FU-04 余项：目标生产 profile P2 的场所、账户与首次发送授权（#1323，P 类）",
+    "url": "https://github.com/Newchanlun/NewChanlun/issues/1561"
+  },
+  {
+    "number": 1530,
+    "state": "CLOSED",
+    "title": "[grilling] FU-08 生产入口与唯一 owner（#1323，新增）",
+    "url": "https://github.com/Newchanlun/NewChanlun/issues/1530"
+  },
+  {
+    "number": 1351,
+    "state": "CLOSED",
+    "title": "[grilling] 首个具名场所账户与验证权限 profile（#1323，FU-04）",
+    "url": "https://github.com/Newchanlun/NewChanlun/issues/1351"
+  },
+  {
+    "number": 1532,
+    "state": "CLOSED",
+    "title": "[grilling] FU-12 旧引擎/简化臂逐入口终态（#1323，新增）",
+    "url": "https://github.com/Newchanlun/NewChanlun/issues/1532"
+  },
+  {
+    "number": 1599,
+    "state": "CLOSED",
+    "title": "[grilling] 风控、退出、争用、成交、场所 profile、会计与活假设正本的被否候选改写为可选值（#1586 A-04~A-08/A-11/B-09）",
+    "url": "https://github.com/Newchanlun/NewChanlun/issues/1599"
+  }
+]

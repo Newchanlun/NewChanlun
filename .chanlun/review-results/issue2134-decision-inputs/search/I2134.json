@@ -1,0 +1,32 @@
+{
+  "body": "挂在 TB-09 汇总 #1365 下（#1323 直挂子票已满 100 张）。由 #2113（stat 子进程继承凭据键）第四轮返修时发现；不阻塞 #2113。\n\n## 现象\n\nX 执行 profile 的 `credential_scope.env`（ADR 0062 改名后的 `credential_source.env`）指定「凭据以哪个环境变量名注入 X 子进程」。两个校验入口都只查它非空：\n\n- `rust/src/bin/production_session.rs:185` 读取，`:440–446` 以该名把凭据值写进 X 的启动环境；\n- `rust/src/bin/x_execution_session.rs:59–63` 同样只查非空。\n\n所以这个名字可以是 `PATH`，也可以是 `LD_PRELOAD`、`LD_LIBRARY_PATH` 这类**改变进程行为**的键。实测（#2113 R4 工位，主线 `b9d898dc`，Boat，合成值）：`credential_scope.env=PATH`、凭据文件内容是一串含系统目录的路径清单时，launcher 与 X 正常启动（四域、S/E/B socket、`x_execution_session serving`，退出 0）。证据在 Mac 内盘 `/Users/silencehan/.t3/evidence/issue2113-stat-child-env/r4/boat-baseline-collision.log`。\n\n## 为什么是个问题\n\n1. 「凭据文件」的内容可以借这个通道变成对 X 的任意环境注入——文件名义上是凭据，实际可以改 X 的可执行查找路径或动态库加载。\n2. #2113 的修法是让 X 开库时起的 `stat` 子进程除 PATH 外不带任何继承键。凭据键恰好是 PATH 时，这处修复对它无效（值照旧传给子进程）。#2113 把这一点作为明写的残留交付，指向本票。\n3. ADR 0039:287 只规定「凭据只写进 X 子进程的启动环境」，没有规定键名的取值范围；ADR 0062 重定义了凭据来源字段，也没有约束键名。\n\n## 要定的事\n\n- 凭据键名的合法取值：固定为一个名字、限定前缀（例如仓内 runbook 用的 `NC_X_VENUE_CREDENTIAL`），还是给一份禁止名单。\n- 拒绝的时点与类别（预期 `InvalidDomain`，早于读凭据文件、启动域、开库），launcher 与 X 两个入口一致。\n- 这是对现在能启动的 profile 的收窄，要说明是否有在用的 profile 受影响（仓内 runbook 与测试用的都是专用名字，未见受影响者；部署侧的 profile 需要核）。\n\n## 已查过的地方\n\n- tracker：`gh issue list --search \"credential_scope env 保留键 OR 环境变量名\" --state all`、`\"x-execution-profile/2 OR credential_source\"`，无同题票。\n- 仓内：`rg -n credential_scope`，命中 ADR 0028/0038/0039/0048/0062、`CONTEXT.md:370,404–408`、`docs/runbook_production_session.md:72,76`，均未约束键名。\n\n## 不做\n\n不在 #2113 里顺手改（那张票只收 `store.rs`）。本票不涉及任何真实凭据；实测一律用合成值。\n",
+  "comments": [
+    {
+      "id": "IC_kwDORJC4uM8AAAABpBGYSg",
+      "author": {
+        "login": "xy7365527-lang"
+      },
+      "authorAssociation": "MEMBER",
+      "body": "## 改为决策票，并成为 #2113 的前置（2026-11-21）\n\n#2113 第四轮候选 `bf8e6dfe` 被非作者独审打回，阻断点正落在本票的题目上，而且比开票时写的更宽：\n\n- **不止字面 `PATH`。** launcher（`rust/src/bin/production_session.rs:185`）接受含分隔符的非空名字。名字写成 `PATH=<任意串>` 时，写进 X 环境的那条记录在内核看来键仍是 `PATH`——两个不同的配置名编码成同一个内核键。独审用中性标签实跑确认了「两条同名记录」这一编码事实，生产可达性由读码确认。\n- **空名原始项**：内核环境里没有名字的记录，Rust 标准库枚举不到；子进程环境未被重建时它原样透传。配置名被要求非空，这一条从 profile 走不到，但它说明「按枚举到的键逐个移除」本身不是完备的过滤。\n- 独审认可「字面 `PATH` 作为明写残留交本票」，但指出它不是唯一例外。报告在 Mac 内盘 `/Users/silencehan/.t3/evidence/issue2113-stat-child-env/non-author-astra-bf8e6dfe/REPORT.md`。\n\n#2113 已经四轮四次被打回，前三轮栽在「自己实现查找/spawn 与主线不等价」，第四轮栽在键名。共同的前提是「不先定键名的合法取值，也能把 stat 子进程的环境收干净」——这个前提不成立。所以顺序改为：**先在本票裁定键名的合法取值，#2113 再在它之上收口**。已加原生依赖：#2113 blocked by 本票。\n\n## 要裁的问题（在原「要定的事」之上补充）\n\n1. 合法键名的形状：固定一个名字、限定前缀，还是「可移植环境变量名文法（字母或下划线开头，只含字母、数字、下划线）减去一份保留名单」。含 `=`、空字节、空名一律不合法这一点是否写成硬规则。\n2. 保留名单的范围：只有 `PATH`，还是连同 `LD_PRELOAD`、`LD_LIBRARY_PATH` 等改变进程行为的键；名单怎样维护才不成为一份会过期的清单。\n3. 这是对现在能启动的 profile 的收窄。主线上 `credential_scope.env=PATH`（值为含系统目录的路径清单）实测能启动；`PATH=<串>` 这种名字能否启动需要实测。裁定要说明收窄的依据，以及有没有在用的 profile 受影响。\n4. 两个入口（launcher 与 X）同一规则、同一拒绝类别与时点；ADR 0062 把字段改名为 `credential_source.env`，裁定对新旧字段名同样生效。\n5. 裁定落定后，#2113 的声明范围可以写成什么（预期：合法键名下，stat 子进程除 `PATH` 外不带任何继承键，且凭据不可能位于内核键 `PATH` 之下）。\n\n本票不涉及任何真实凭据的接触或授予，只收紧校验；实测一律用合成值。\n",
+      "createdAt": "2026-11-20T18:35:14Z",
+      "includesCreatedEdit": false,
+      "isMinimized": false,
+      "minimizedReason": "",
+      "reactionGroups": [],
+      "url": "https://github.com/Newchanlun/NewChanlun/issues/2134#issuecomment-7047583818",
+      "viewerDidAuthor": true
+    }
+  ],
+  "labels": [
+    {
+      "id": "LA_kwDORJC4uM8AAAACsmCkpg",
+      "name": "wayfinder:grilling",
+      "description": "",
+      "color": "D93F0B"
+    }
+  ],
+  "number": 2134,
+  "state": "OPEN",
+  "title": "[grilling] X 执行 profile 凭据环境变量名的合法取值：现在不设限，可取 PATH、带分隔符的名字等（#2113 前置）",
+  "url": "https://github.com/Newchanlun/NewChanlun/issues/2134"
+}

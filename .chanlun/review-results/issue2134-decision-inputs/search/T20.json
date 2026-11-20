@@ -1,0 +1,8 @@
+[
+  {
+    "number": 2113,
+    "state": "OPEN",
+    "title": "[bug] X 打开持久库时启动的 stat 子进程继承凭据键（ADR 0039 验收 13，#1383 取证发现）",
+    "url": "https://github.com/Newchanlun/NewChanlun/issues/2113"
+  }
+]
