@@ -11,8 +11,10 @@ test=false 求值；任一集合为真即生产可达，判违规。未知谓词
 或其他表达式——后者记为不可解析，名单外即违规），增量生产构建可达的只准读 PRODUCTION_ENV，
 默认构建另准 DEFAULT_BUILD_ONLY_ENV / DEFAULT_BUILD_ONLY_ENV_ARGS；改函数名绕不过此轴。
 已知盲区：`use std::env::var` 后裸调 `var(..)`、别名 `use std::env as e`、turbofish、`env::vars()` 遍历。
-第三条轴（#2009 方向 1）：沿同一 crate 模块图检查管辖面内生产可达字符串字面量，
+第三条轴（#2009 方向 1）：从 crate 根沿 `mod` 声明按各生产配置分别求可达闭包并合并，
+检查生产可达代码（排除 `#[cfg(test)]`、`#[test]` 与非生产 feature 门控）中的字符串字面量，
 禁止出现 `SAVEPOINT`、`ROLLBACK TO` 或对 `schema_version` 的赋值（`schema_version\s*=(?!=)`）。
+已知边界：只检单个 `&str`/`c"..."` 字面量，不拼接 `concat!`/`format!` 跨片段拆分的关键字，也不检字节串 `b"..."`。
 
 用法：python3 .github/scripts/check-prod-no-test-hooks.py [仓根]
 exit 0 = 无违规；exit 1 = 有违规（逐条打出 文件:行）。
@@ -156,6 +158,8 @@ NON_LITERAL = "<非字面量参数 "
 RAW_SQL_PATTERN = re.compile(r"\bsavepoint\b|\brollback\s+to\b|\bschema_version\s*=(?!=)", re.I)
 _RAW_STR_HEAD = re.compile(r'(?:b|c)?r(#*)"')
 _WS = re.compile(r"\s+")
+_TEST_ATTR = re.compile(r"^#\[\s*(?:::\s*)?(?:(?:core|std)\s*::\s*prelude\s*::\s*v1\s*::\s*)?test\s*\]$")
+_PATH_ATTR = re.compile(r'^#\[\s*path\s*=\s*"([^"]+)"\s*\]$')
 
 
 def parse_cfg(text: str):
@@ -293,9 +297,8 @@ def load_gen():
     return _GEN
 
 
-def _string_literal_lines(text: str, gen) -> list[int]:
-    """按与 gen.lex 一致的词法顺序，返回每个字符串字面量的 1-based 起始行号。"""
-    lines: list[int] = []
+def _lex_with_lines(text: str, gen):
+    """单遍 O(n) 词法扫描，产出 (1-based 起始行, kind, value)，复用 gen 的字符串转义与标识符规则。"""
     index, size, line = 0, len(text), 1
     while index < size:
         char = text[index]
@@ -318,28 +321,40 @@ def _string_literal_lines(text: str, gen) -> list[int]:
             line += text.count("\n", index, end)
             index = end
         elif char == "#" and (text.startswith("[", index + 1) or text.startswith("![", index + 1)):
+            start_line = line
             end = text.index("[", index) + 1
             depth = 1
-            while depth:
+            while depth and end < size:
+                if text[end] in "bcr" and (raw := _RAW_STR_HEAD.match(text, end)) and (
+                    end == 0 or not (text[end - 1].isalnum() or text[end - 1] == "_")
+                ):
+                    hashes = raw.group(1)
+                    end = text.index('"' + hashes, raw.end()) + 1 + len(hashes)
+                    continue
                 if text[end] == '"':
                     end = gen.skip_string(text, end)
                     continue
                 depth += {"[": 1, "]": -1}.get(text[end], 0)
                 end += 1
+            yield (start_line, "attr", _WS.sub(" ", text[index:end]))
             line += text.count("\n", index, end)
             index = end
         else:
             raw = _RAW_STR_HEAD.match(text, index) if char in "bcr" else None
             if raw and (index == 0 or not (text[index - 1].isalnum() or text[index - 1] == "_")):
-                lines.append(line)
+                start_line = line
                 hashes = raw.group(1)
-                end = text.index('"' + hashes, raw.end()) + 1 + len(hashes)
-                line += text.count("\n", index, end)
-                index = end
+                start = raw.end()
+                end = text.index('"' + hashes, start)
+                yield (start_line, "str", None if char == "b" else text[start:end])
+                next_index = end + 1 + len(hashes)
+                line += text.count("\n", index, next_index)
+                index = next_index
             elif char == '"' or (char in "bc" and text[index + 1 : index + 2] == '"'):
-                lines.append(line)
+                start_line = line
                 quote = index if char == '"' else index + 1
                 end = gen.skip_string(text, quote)
+                yield (start_line, "str", None if char == "b" else gen.unescape(text[quote + 1 : end - 1]))
                 line += text.count("\n", index, end)
                 index = end
             elif char == "'":
@@ -352,40 +367,139 @@ def _string_literal_lines(text: str, gen) -> list[int]:
                 line += text.count("\n", index, end)
                 index = end
             elif (match := gen.IDENT.match(text, index)):
+                yield (line, "ident", match.group(0))
                 index = match.end()
             else:
+                yield (line, "punct", char)
                 index += 1
-    return lines
 
 
-def _walk_crate_graph(root: Path) -> tuple[list, list[tuple[Path, list]]]:
-    """复用 gen 的 crate 模块图遍历与 cfg 链求值，一次产出环境变量读取与管辖面字面量。"""
+def _resolve_child_mod(
+    path: Path, mod_name: str, explicit_path: str | None, is_dir_owner: bool, inline_dirs: list[str], gen
+) -> Path | None:
+    if not inline_dirs:
+        target = gen.child_path(path, mod_name, explicit_path, is_dir_owner)
+        if target is not None and not target.is_file() and explicit_path and not is_dir_owner:
+            alt = path.parent / path.stem / explicit_path
+            if alt.is_file():
+                return alt
+        return target
+    base = (path.parent if is_dir_owner else path.parent / path.stem).joinpath(*inline_dirs)
+    if explicit_path:
+        return base / explicit_path
+    for candidate in (base / f"{mod_name}.rs", base / mod_name / "mod.rs"):
+        if candidate.is_file():
+            return candidate
+    return None
+
+
+def _parse_module_file(path: Path, is_dir_owner: bool, gen):
+    """解析单个模块文件，返回 (file_gates, literals, mod_edges)，复用 gen.parse_attr。"""
+    tokens = list(_lex_with_lines(path.read_text(encoding="utf-8"), gen))
+    file_gates: list = []
+    frames: list[tuple[list, int, bool]] = []
+    scope: list = []
+    inline_dirs: list[str] = []
+    pending: list[tuple[object, int]] = []
+    explicit_path: str | None = None
+    depth = 0
+    signature = False
+    literals: list[tuple[int, str | None, list]] = []
+    mods: list[tuple[Path, list, bool]] = []
+    for pos, (line, kind, value) in enumerate(tokens):
+        if kind == "attr":
+            if value.startswith("#![cfg("):
+                gate = gen.parse_attr(value)
+                file_gates.append(gate)
+                scope.insert(len(file_gates) - 1, gate)
+            elif value.startswith("#[cfg("):
+                pending.append((gen.parse_attr(value), depth))
+            elif _TEST_ATTR.match(value):
+                pending.append((("word", "test"), depth))
+            elif (match := _PATH_ATTR.match(value)):
+                explicit_path = match.group(1)
+        elif kind == "str":
+            literals.append((line, value, scope + [tree for tree, _ in pending]))
+        if kind == "ident" and value == "fn":
+            signature = True
+        if kind == "punct":
+            if value in "{;":
+                signature = False
+            if value in "([":
+                depth += 1
+            elif value in ")]":
+                depth -= 1
+                pending = [(tree, at) for tree, at in pending if at <= depth]
+            elif value == "," and not signature:
+                pending = [(tree, at) for tree, at in pending if at < depth]
+            elif value == "{":
+                pushed = [tree for tree, _ in pending]
+                is_inline_mod = (
+                    pos >= 2 and tokens[pos - 2][1:] == ("ident", "mod") and tokens[pos - 1][1] == "ident"
+                )
+                frames.append((pushed, depth, is_inline_mod))
+                if pushed:
+                    scope.extend(pushed)
+                if is_inline_mod:
+                    inline_dirs.append(explicit_path or tokens[pos - 1][2])
+                pending, explicit_path = [], None
+            elif value == "}":
+                gates, depth, is_inline_mod = frames.pop() if frames else ([], 0, False)
+                if gates:
+                    del scope[len(scope) - len(gates) :]
+                if is_inline_mod and inline_dirs:
+                    inline_dirs.pop()
+                following = tokens[pos + 1] if pos + 1 < len(tokens) else None
+                pending = [(tree, depth) for tree in gates] if following and following[1:] == ("ident", "else") else []
+            elif value == ";":
+                if pos >= 2 and tokens[pos - 2][1:] == ("ident", "mod") and tokens[pos - 1][1] == "ident":
+                    target = _resolve_child_mod(
+                        path, tokens[pos - 1][2], explicit_path, is_dir_owner, inline_dirs, gen
+                    )
+                    if target is not None:
+                        mods.append((target.resolve(), scope + [tree for tree, _ in pending], target.name == "mod.rs"))
+                pending, explicit_path = [], None
+    return file_gates, literals, mods
+
+
+def _collect_prod_raw_sql_scope(root: Path) -> tuple[set[Path], dict[Path, dict[int, tuple[int, str | None]]]]:
+    """按 gen.PRODUCTION 各配置分别从 CRATE_ROOTS 求生产可达闭包并合并，与声明顺序无关。"""
     gen = load_gen()
     root = root.resolve()
-    queue = [(root / crate, [], True) for crate in gen.CRATE_ROOTS]
-    seen: set[Path] = set()
-    env_reads: list = []
-    scoped_files: list[tuple[Path, list]] = []
-    while queue:
-        path, chain, is_dir_owner = queue.pop(0)
-        path = path.resolve()
-        if path in seen or not path.is_file():
-            continue
-        seen.add(path)
-        file_literals: list = []
-        gen.walk(path, chain, is_dir_owner, file_literals, queue, env_reads)
-        if gen.in_scope(root, path):
-            scoped_files.append((path, file_literals))
-    return env_reads, scoped_files
+    parsed_cache: dict[tuple[Path, bool], tuple[list, list, list]] = {}
+    prod_files: set[Path] = set()
+    prod_literals: dict[Path, dict[int, tuple[int, str | None]]] = {}
+    for features, test in gen.PRODUCTION:
+        queue = [((root / crate).resolve(), True) for crate in gen.CRATE_ROOTS]
+        visited: set[tuple[Path, bool]] = set()
+        while queue:
+            path, is_dir_owner = queue.pop(0)
+            key = (path, is_dir_owner)
+            if key in visited or not path.is_file():
+                continue
+            visited.add(key)
+            if key not in parsed_cache:
+                parsed_cache[key] = _parse_module_file(path, is_dir_owner, gen)
+            file_gates, literals, mods = parsed_cache[key]
+            if not gen.reachable(file_gates, features, test):
+                continue
+            prod_files.add(path)
+            seen_lits = prod_literals.setdefault(path, {})
+            for lit_idx, (line, value, chain) in enumerate(literals):
+                if gen.reachable(chain, features, test):
+                    seen_lits[lit_idx] = (line, value)
+            for target, edge_chain, child_dir in mods:
+                if gen.reachable(edge_chain, features, test):
+                    queue.append((target, child_dir))
+    return prod_files, prod_literals
 
 
-def env_violations(root: Path, reads: list | None = None) -> list[str]:
+def env_violations(root: Path) -> list[str]:
     """沿 crate 模块图（含 `#[cfg] mod x;` 与 fn/块作用域）求每处环境变量读取的 cfg 链。"""
     gen = load_gen()
     root = root.resolve()
-    if reads is None:
-        reads = []
-        gen.collect(root, reads)
+    reads: list = []
+    gen.collect(root, reads)
     violations = []
     for name, chain, path in reads:
         if not gen.in_scope(root, path.resolve()) or name in PRODUCTION_ENV:
@@ -399,29 +513,22 @@ def env_violations(root: Path, reads: list | None = None) -> list[str]:
     return violations
 
 
-def raw_sql_violations(root: Path, scoped_files: list[tuple[Path, list]] | None = None) -> list[str]:
-    """#2009 第三条轴：管辖面内生产可达字符串字面量禁含 SAVEPOINT / ROLLBACK TO / schema_version 写。"""
-    gen = load_gen()
+def raw_sql_violations(root: Path) -> list[str]:
+    """#2009 第三条轴：crate 生产可达闭包内字符串字面量禁含 SAVEPOINT / ROLLBACK TO / schema_version 写。"""
     root = root.resolve()
-    if scoped_files is None:
-        _, scoped_files = _walk_crate_graph(root)
+    _, prod_literals = _collect_prod_raw_sql_scope(root)
     violations: list[str] = []
-    for path, file_literals in scoped_files:
-        hits = [
-            (index, match.group(0))
-            for index, (value, chain) in enumerate(file_literals)
-            if value is not None
-            and (match := RAW_SQL_PATTERN.search(value)) is not None
-            and any(gen.reachable(chain, features, test) for features, test in gen.PRODUCTION)
-        ]
-        if not hits:
-            continue
-        lines = _string_literal_lines(path.read_text(encoding="utf-8"), gen)
-        rel = path.resolve().relative_to(root).as_posix()
-        for index, matched in hits:
-            violations.append(
-                f"{rel}:{lines[index]}: 生产可达字符串字面量含禁用裸 SQL 模式（{matched}，#2009）"
-            )
+    for path in sorted(prod_literals):
+        rel = path.relative_to(root).as_posix()
+        for _, (line, value) in sorted(prod_literals[path].items()):
+            if value is None:
+                continue
+            match = RAW_SQL_PATTERN.search(value)
+            if match is not None:
+                matched = _WS.sub(" ", match.group(0))
+                violations.append(
+                    f"{rel}:{line}: 生产可达字符串字面量含禁用裸 SQL 模式（{matched}，#2009）"
+                )
     return violations
 
 
@@ -440,9 +547,8 @@ def main() -> int:
                 continue
             seen.add(path)
             violations.extend(scan(path, path.relative_to(root).as_posix()))
-    env_reads, scoped_files = _walk_crate_graph(root)
-    violations.extend(env_violations(root, env_reads))
-    violations.extend(raw_sql_violations(root, scoped_files))
+    violations.extend(env_violations(root))
+    violations.extend(raw_sql_violations(root))
     for violation in violations:
         print(f"::error::{violation}")
     print(f"check-prod-no-test-hooks violations={len(violations)}")
