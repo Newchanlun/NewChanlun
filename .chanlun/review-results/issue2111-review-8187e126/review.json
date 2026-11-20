@@ -1,0 +1,60 @@
+{
+ "ticket": 2111,
+ "reviewed_head": "8187e126c3af1911dbfad16ae36e210ac4de0832",
+ "verdict": "PASS",
+ "criteria": [
+  {
+   "r": "R1",
+   "verdict": "PASS",
+   "basis": "首轮 BLOCK 已关。ADR 0044@8187e126:127 把「已裁沿用」限于原签署记录，:129-133 给 §三 三条标 [新缠论:推论]；:58 改为只引 ADR 0041 裁定二、四。三条我逐条开原文核过，都是推论不是选择：① ADR 0035:14 的 r=A_ℓ/(…)、「全部定点整数」、「InsufficientEvidence 与 Fail 分开」，C=0 时比值无值，通过与失败都无法成立，证据已合格，四态里只剩 NotEvaluable；② 0035:14 的 evidence_gate 继承 ADR 0022 裁定六/七，0022:49-51「≥30 才出判据…不足则明写判不出…不出验收读数」，零早返会在双缺陷角落吞掉这条明写义务，所以先后顺序是被既有义务定出来的；Missing 仍在前，因为 0035:19 把它定为政策层 AwaitingPolicy，门不运行；③ 0035:19「只得 UpperBoundOnly：可判失败，不可判通过」，0035:22 把滑点代理列为 InsufficientEvidence 的成因，C_min=0 时既证不了失败也不许判通过。推论以所选前件为条件，仓内有先例（0041:75、0022:124）。5a4033fd 的 cost_stop.rs:418-420、442-454、549-551、561-564、1054-1068 与 b7e23c31 的 :171-195、:249-251 我逐行打开吻合；0062:4、0063:4 先例属实；评论 7042363636、7042010826 在票。"
+  },
+  {
+   "r": "R2",
+   "verdict": "PASS",
+   "basis": "实质未变（§三不变性 diff 我实跑 rc=0）。三条推论按 ADR 0041:9 不是自由度；真正的选择仍在 ADR 0035 threshold.form（0035:53 选择）这一层，零成本放行要改形态出新版本，标签没有把合法候选封死，也没有把已裁推论改成可调。「零→放行」若做成字段是同一准入的宽严两档（0041:11-13）。:4 记「依 #1909 代理独审裁定，非 UserSigned」，签署块 authorizer 仍是 #1559 用户批复，没有把代理裁定记成 UserSigned，也没有签任何值。各级同规则，级别只经 holding 适用性作为输入，符合 #804。与 qujiantao.md §4.1/4.2（只给方向、参数不入正本）不冲突。"
+  },
+  {
+   "r": "R3",
+   "verdict": "PASS",
+   "basis": "draft.md 验收清单与首轮逐字相同（我对 evidence/2111-decision-inputs 与 -r2 两版做了 diff）。命令一在 8187e126 上 rc=0；MANIFEST 六个 sha256 全 OK。四个复用测试在 5a4033fd 存在（cost_stop.rs:765、918、922、927）。五个新测试名各有精确期望状态，票状态项二值。"
+  },
+  {
+   "r": "R4",
+   "verdict": "PASS",
+   "basis": "canonical-plan 以 b9d898dc 为源，四条替换各唯一命中，重放结果、plan.after 与落地 blob（ff746bff）逐字相同；draft 内 canonical_edit 与 plan.edit 相同且只有一个。138e9377→8187e126 只动 :3、:4、:58、:122、:127-133，签署记录与被否方案两节逐字未变。:3 与 main 原字节一致，:4 日期 2026-11-20、票号、授权来源齐，:5 指向的代码清单存在且行号成立。只定 TB-02-S 求值方法，未越出 #1323 Destination 与 SPEC #1340。"
+  },
+  {
+   "r": "R5",
+   "verdict": "PASS",
+   "basis": "本轮无新分支。§三 新增结果全部非 Enabled；:56 明禁交叉相乘越域、极限值、最小分母和备用判据；没有「严格档判不出换宽松档放行」的路径，也没有可调字段。"
+  },
+  {
+   "r": "R6",
+   "verdict": "PASS",
+   "basis": "我用 gh api dependencies 复查：#2111 无上游、只阻 #1441；#1441 上游 #1440（open）、#1359/#1354（closed）、#2111（open），下游 #1443、#1444。与草稿 :47 一致，相对首轮无增删。"
+  },
+  {
+   "r": "R7",
+   "verdict": "PASS",
+   "basis": "classify.json 为 P，分级评论 7042010826 在票。graph-engineering §1 把费用参数与本仓无先例的新取舍列为 P，且「拿不准一律判 P」。userGate=[] 正确：不签 θ、成本值、账户或权限，只把 C=0 归到非 Enabled，方向更严。相对首轮只有 round 1→2。"
+  },
+  {
+   "r": "R8",
+   "verdict": "PASS",
+   "basis": "我复跑 5 条 rg（Q1 得 17、Q2 得 16、Q4 得 8、Q6 得 0 与 3，全部吻合）和 4 条 gh（ZeroTotalCost 得 #2111；「代理下界 为零」得 #2111/#1340；UpperBoundOnly 多出 #2111，属 archaeology:5 声明的动态新增；ProxyLowerBound 三票吻合）。对 Q2、Q6 换说法复搜（证据先于/早返；C_min、下界合计为零；「零成本 成本门」只得 #1354，archaeology:41 已区分为 growth_eligible），未见漏裁。Q5 已由 A 改 B，附两路查询、推理链和默认处置；考古对照覆盖 Q1-Q6；无 A 点被重开，无留给用户的点；Q6 的推导在 archaeology:221 与草稿候选 5。"
+  }
+ ],
+ "blocking": [],
+ "non_blocking": [
+  "ADR 0044@8187e126 :45 与 :127-129：§三 首段的两条规则没有溯源标签，即「签署零与合格实测零同为 0、来源各自保留」和「零费率可进入合法记录」（考古 Q3，B 类）。Missing 先判一句已在行内写明依 §二与 ADR 0035 裁定二。:58 的「不设可调字段」只主张零分母与证据先决，所以没有错误主张。下次修订在 :133 后补一句：§三 首段沿用 ADR 0035 裁定一、二、五的来源门与缺项规则。",
+  "ADR 0044@8187e126 :3：整行回退到 main 原字节，括注恢复了，首轮写的「§三规定成本停止求值的零总成本边界」也一起没了。正本行现在只说签署值，不含 §三。:4 与 §三 标题已标 #2111，所以不误导。下次修订在句末补「；§三为零总成本求值边界的正本（#2111）」。",
+  "ADR 0044@8187e126 :4：「获审版本及独审原件由主控在 PASS 后登记」没写登记在哪里，也缺 ADR 0041:45 要求的作者与独审身份。落地 blob 必须等于获审 after（graph-engineering §5），这几项只能外置。主控在 #2111 resolution 评论里写明获审 head 8187e126、目标 blob ff746bff、起草模型、独审家族和独审原件路径即可，不用改本 head。",
+  "ADR 0044@8187e126 :122：「#1441 第三轮重写后以其新头为准」有两种读法，也没直说 #1441 要做什么。行号在 5a4033fd 上逐行成立。下次修订改为「以下行号取自第二轮被 BLOCK 的头 5a4033fd；#1441 须恢复 ZeroTotalCost、删除 Err 路径、把零判定移到证据门之后并替换 :1054-1068 的测试，重写后行号另核」。",
+  "ADR 0044@8187e126 :132：标签写「不能以分母原因替代这项证据结果」，比正文宽。Missing 和来源不合格也是分母侧原因，却按 :45 先于波幅检查。正文顺序写得明确，实现不会做错。下次修订改成「零总成本的定义域原因」。",
+  "ADR 0044@8187e126 :131-133：三条推论以 ADR 0035 threshold.form=ratio_lb_ge_theta（0035:53 选择）和所引 evidence_gate 版本（0022:88 选择）为前件，标签没写这个条件和出口。下次修订补半句：改形态或改证据门版本须另裁并按新版本重推导。",
+  "draft.md:88 与 archaeology.md:186-188：Q5 的出处首项是本裁定自己新写的「溯源标签 §三条目」，属自引。真实前件 ADR 0035:14,19、ADR 0022:47-64 已在 archaeology.json 的 citation 里。两份都不是落地件。",
+  "draft.md:33：`git diff --check HEAD^ HEAD` 在两提交的分支上只查本轮增量。我另跑了 b9d898dc..8187e126，rc=0。比较基宜改为源提交。",
+  "首轮已提、按引用专修规定未纳入的实质补充仍然开放：C<0（做市返佣）无归属；复测遇非 Enabled 与 ADR 0035:22「否则 Disabled」的字面张力；全零 profile 在比值形态下到不了 Enabled 的代价与出口；两个测试断言偏弱及四个无锁格子；035:30 的方向论证。归 #1441 第三轮和 ADR 0044 下次实质修订。"
+ ],
+ "report_markdown": "# #2111 第 2 轮异家族非作者独审（终审）\n\n**总裁定：PASS，R1–R8 全过，无阻塞项。** 本 PASS 只绑定 `origin/decision/2111` = `8187e126c3af1911dbfad16ae36e210ac4de0832`，目标 blob `ff746bff6d1c5187c0356de30b0234e1abe59f9d`（sha256 `3724c4c0…ac60b710`）。正文再变即失效。\n\n审查对象只改 `docs/adr/0044-cost-stop-policy-signed-instance-v1.md`，父提交 `138e9377`，源提交 `b9d898dc`。起草是 GPT，我是 Claude 家族。全程只读，没跑 cargo，没发评论。四名分项审阅者没有报出阻塞级发现，我自己开卷复核后同意。\n\n## 逐条结论\n\n| 规则 | 结论 | 依据 |\n|---|---|---|\n| R1 | PASS | 首轮 BLOCK 已关：:127 收窄「已裁沿用」，:129-133 给 §三 三条标推论并写明所据裁定，:58 只引 ADR 0041 裁定二、四。所有新增引用回查成立。 |\n| R2 | PASS | 三条是推论不是选择；选择仍留在 ADR 0035 的 threshold.form。没有把代理裁定记成 UserSigned。 |\n| R3 | PASS | 验收清单与首轮逐字相同；命令实跑 rc=0，MANIFEST 六个哈希全 OK。 |\n| R4 | PASS | canonical-plan 四条替换各唯一命中，重放等于落地 blob；三行头、日期、代码清单正确。 |\n| R5 | PASS | 新增结果全部非 Enabled，:56 明禁越域与备用判据。 |\n| R6 | PASS | 原生边复查：#2111 只阻 #1441；#1441 阻 #1443、#1444。 |\n| R7 | PASS | P 类成立，分级评论在票，userGate 为空正确。 |\n| R8 | PASS | 复跑 5 条 rg、4 条 gh 全部吻合；Q5 已改 B；换说法复搜无漏裁。 |\n\n## (a) 六项返修逐项核对\n\n1. **溯源标签**：已做。三条推导我分别打开原文核过。\n   - 全 Known 零总成本归 `NotEvaluable(ZeroTotalCost)`。ADR 0035:14 写 `r = A_ℓ/(…)`、「全部定点整数」、「InsufficientEvidence 与 Fail 分开」。C=0 时比值没有值，通过和失败都无法成立；证据已合格，也不是证据不足。四态封闭（ADR 0044 §二.6），只剩 NotEvaluable。成立。\n   - 波幅证据先于定义域检查。0035:14 的 evidence_gate 继承 ADR 0022 裁定六/七；0022:49-51 写「≥30 才出判据…不足则明写判不出…不出验收读数」。零早返会在「证据不足且 C=0」的角落吞掉这条明写义务，而既有裁定没有要求报告零分母。顺序是被既有义务定出来的。Missing 仍排在前面，因为 0035:19 把它定为政策层的 AwaitingPolicy，门不运行。成立。\n   - 零代理下界归 `InsufficientEvidence(UpperBoundOnly)`。0035:19 写「只得 UpperBoundOnly：可判失败，不可判通过」，0035:22 把滑点代理列为证据不足的成因。C_min=0 时没有可比的有限上界，也排除不了真实 C=0。成立。\n\n   三条都以 ADR 0035 所选的比值形态和所引证据门版本为前件。以所选前件推出的结论标推论，仓内有先例（ADR 0041:75、ADR 0022:124）。零成本放行要改 threshold.form 出新版本，这条出口没有被标签封死。\n2. **:58 援引**：已改为「ADR 0041 裁定二、四；#799、#804」。裁定二的判别句和裁定四的真错排除足以支撑「不设可调字段」。\n3. **考古 Q5**：`archaeology.md:155`、json、`draft.md:88` 都已由 A 改 B，附推理链和默认处置。\n4. **代码清单**：5a4033fd 的 `cost_stop.rs:418-420`（ZeroTotalCost 已删）、`:442-454`（待裁错误）、`:549-551`（证据门前返回 Err）、`:561-564`（证据门后零代理）、`:1054-1068`（相反的测试）逐行吻合。b7e23c31 是它的祖先，旧行号仍成立。\n5. **授权来源**：:4 写「依 #1909 代理独审裁定，非 UserSigned」，与 ADR 0063:4 体例一致。签署块的 authorizer 仍是 #1559 用户批复。\n6. **头行括注**：:3 与 main 原字节完全一致。\n\n## (b) 本轮是否只改引用\n\n是。`git diff 138e9377 8187e126` 只动 :3、:4、:58、:122、:127-133。CHANGES-r2 给的 §三 不变性命令我实跑 rc=0。签署记录与被否方案两节逐字未变。草稿两版对比，裁定段、候选段、验收清单都没动，只多了新头代码行、授权句、三行引用自证和 Q5 行。\n\n## 不阻塞项（留给下次修订或 resolution 评论）\n\n1. :45 首段有两条规则没有溯源标签：两类零值同为 0，零费率可入记录。:58 没有对它们主张不可调，所以不构成错误援引。补一句沿用 ADR 0035 裁定一、二、五即可。\n2. :3 整行回退后，正本行不再提 §三。句末补一个分句。\n3. :4 没写登记位置，也缺作者与独审身份（ADR 0041:45）。**主控在 #2111 resolution 评论里写明获审 head、目标 blob、起草模型、独审家族和原件路径**，不用改本 head。\n4. :122 的「第三轮重写后以其新头为准」有歧义，也没直说 #1441 要恢复 ZeroTotalCost、删 Err 路径、挪零判定、换测试。\n5. :132 的「分母原因」比正文宽，宜改成「零总成本的定义域原因」。\n6. :131-133 没写推论的前件条件（比值形态、证据门版本）和出口。\n7. `draft.md:88` 与 `archaeology.md:186-188` 的 Q5 出处首项自引本裁定的标签；真实前件在 archaeology.json 里。\n8. `draft.md:33` 的 `HEAD^` 只查本轮增量；我另跑源提交到 head，rc=0。\n9. 首轮留下的实质补充仍开放：C<0、复测与 0035:22 的字面张力、全零 profile 的代价与出口、测试断言与四个无锁格子、035:30 方向论证。\n\n## 我实际执行的核验\n\n- 两轮 diff、相对 main 的全量 diff、`git diff --check`（两种比较基）。\n- canonical-plan 重放、plan 与草稿编辑块比对、MANIFEST 哈希。\n- ADR 0035、0041、0022 全文相关节，0062/0063 头行，0031:28-30，0057:129-147，qujiantao.md §4，035 课 :30 与界 :38。\n- 两个 #1441 头上的被引代码行与四个复用测试名。\n- 票面、两条评论、原生依赖边；5 条 rg、6 条 gh 查询。\n\n相关路径：`/home/workspace/src/NewChanlun/docs/adr/0044-cost-stop-policy-signed-instance-v1.md`、`/home/workspace/src/NewChanlun/docs/adr/0035-cost-stop-policy-instance-and-base-extension-evidence.md`、`/home/workspace/src/NewChanlun/docs/adr/0022-acceptance-criterion-parameters.md`、`/home/workspace/src/NewChanlun/docs/adr/0041-degrees-of-freedom-configurable-not-excluded.md`、`/home/workspace/src/NewChanlun/.sandcastle/docs/graph-engineering.md`。"
+}
