@@ -510,3 +510,9 @@ ADR 0039 的编号按 main 顺序分配：落地时取 `docs/adr/` 现有最大�
 
 1. **凭据来源。** :285 的「profile 的 `credential_scope` 指向的来源」读作 X 执行 profile 的 `credential_source.{env,file}`（由 `credential_scope.{env,file}` 改名）。`credential_scope` 只指 ADR 0028:22 的作用域政策字段（ADR 0062 裁定二）。
 2. **启动门。** :287-288 对 `experiment` profile 同样生效（ADR 0062 裁定五），作为独立的发送前置件，不是 ADR 0045 SR-3 的失效触发，拒发不产生 SR-3 记录。X 按 ADR 0062「发送门（8 步）」核验，拒发词汇按 ADR 0062 裁定六。拒发在当前 `writer_epoch` 内为终态并拦截一切写请求（ADR 0062 裁定七），**仅对 `P1-hl-testnet`（`experiment`）签署**；production（P2）下拒发期间撤单、reduce-only 平仓与急停是否放行是真金取舍，属 P 类，在 P2 激活时另裁（#1561 后继），本条不预裁。
+
+## 修订（#2134，X 凭据注入键名，2026-11-20）
+
+1. **键名。** X 执行 profile 必须显式指定一个凭据注入键。推荐 `NC_X_VENUE_CREDENTIAL`；也可在该名字后加一个下划线和一个非空后缀。后缀首字节须为 ASCII 字母或数字，其余字节只许 ASCII 字母、数字或下划线；全名最多 64 字节，区分大小写，按原字节使用。空名、等号、NUL、空白、非 ASCII 和专用命名空间外的名字一律不合法。该命名空间只用于 X 凭据注入，不作查找路径、动态加载或其他进程控制变量；不维护逐项禁止名单。在 Linux/macOS 的 `name=value` 启动环境中，首个等号就是键值分隔符；合规名字只编码为同名键，不可能编码成 `PATH`。
+2. **入口与拒绝。** launcher 装读 X profile 与 X 自己读 profile 的 `serve`（含单独启动）用同一个键名谓词。旧 `x-execution-profile/1` 的 `credential_scope.env` 与 [ADR 0062](0062-fu18-venue-account-permission-binding.md) 的 `x-execution-profile/2` 的 `credential_source.env` 同口径。各版本只取自己定义的字段，任何模式均不得用旧字段、默认值、别名、去空白或大小写转换挽救不合法值。缺字段、非字符串或不合规均报 `InvalidDomain`；launcher 在读凭据文件、创建状态及启动任何域（含 init）前拒绝，X 在持写者锁、开库或取环境凭据前拒绝。拒绝信息指出字段及合法形状，不回显原输入或凭据。
+3. **隔离与生效。** 本修订只限名字，不改凭据来源、作用域、发送门、交易与账本判据。读用真实凭据和授予权限仍按 [ADR 0041](0041-degrees-of-freedom-configurable-not-excluded.md) 的独立用户授权；文书裁定不代签。现有配置若取命名空间外的名字，部署方须在启用新版本前改成合规名字并同步已有获授权的注入配置，不设旧配置豁免。键名校验和 Linux `stat` 子进程环境收口由 #2113 一并实现；本节不把校验等同于清理单启 X 时外部传入的原始环境，也不把文书合入当作验收 13 已通过。

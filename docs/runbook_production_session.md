@@ -75,6 +75,7 @@ S `serve` 需要 admission 锚（`<db>.control-owner.json` + `state/s-admission/
 - `mode` 必须等于 manifest `profile`。
 - 凭据：launcher 读 `credential_scope.file`，只以 `credential_scope.env` 注入 X 子进程；S/E/B 以清空环境启动
   （只放回 PATH 与 S 的两个 admission 声明变量），launcher 自身环境不写凭据。凭据值永不落库、不打印。
+- 使用上例的 `NC_X_VENUE_CREDENTIAL`。需要区分配置时可用 `NC_X_VENUE_CREDENTIAL_P1` 等专用名；后缀以 ASCII 字母或数字起首，只含 ASCII 字母、数字或下划线，全名最多 64 字节。不要用 `PATH` 等进程控制名。按 [ADR 0039「修订（#2134）」](adr/0039-production-entry-inventory-and-unique-launcher.md#修订2134x-凭据注入键名2026-11-20)，#2113 实现后，launcher 和单启 X 都会在打开任何域库之前以 `InvalidDomain` 拒绝不合法的键名；launcher 也不会先读凭据文件。`x-execution-profile/2` 改填 `credential_source.env`，规则相同。已有配置需改名时，由部署方在升级前同步更新 profile 与获授权的注入配置，不迁移或打印凭据值。
 - experiment/production 缺凭据：X 在构造任何传输之前以 `MissingDependency` 非 0 退出。
 - production 缺 `tb09_fingerprint`：X 持久化 `send_state=refused`、`send_refusal_reason=MissingTb09Fingerprint`。
 - 写调用（`submit`/`cancel`）恒返回 `UnsupportedCapability`；本步不含任何场所写代码。
