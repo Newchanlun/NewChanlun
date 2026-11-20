@@ -546,18 +546,18 @@ jobs:
       #   单次 CI 托管作业峰值 21 → 22，仍在 20 并发上限内排队消化。下面是 R12 的原注释。
       # Boat 上五组同时开工；退回 ubuntu-latest 时取 4（#1875 R12：3 槽时 release-locks 要排队约 19 分钟，任何顺序下界都约 48 分钟；
       #   4 槽按实测时长模拟约 40 分钟，单次 CI 托管 Linux 作业峰值 20，不超过 20，见 run 42019882083）。
-      max-parallel: ${{ (vars.CI_BOAT_RUNNERS != 'off' && github.actor == 'xy7365527-lang' && github.triggering_actor == 'xy7365527-lang' && (github.event_name != 'pull_request' || github.event.pull_request.user.login == 'xy7365527-lang')) && 8 || 5 }}
+      max-parallel: ${{ (vars.CI_BOAT_RUNNERS != 'off' && github.actor == 'xy7365527-lang' && github.triggering_actor == 'xy7365527-lang' && (github.event_name != 'pull_request' || github.event.pull_request.user.login == 'xy7365527-lang')) && 8 || 6 }}
       matrix:
         # 按托管路径实测时长从长到短排，空出的槽先给长的（#1875 R12）。
         # #1875 P353-5/7：Boat 上把 owned 的 release 档 H1 各步拆到 owned-h1；native 的测试按名字分成 a/b 两份
         #   （CI_TEST_PART），各占一台机器，同机负载与不拆时相同。托管路径只拆 owned/owned-h1，native 不拆（20 并发上限）。
         #   economic 开 opt-level 1 后不再拆：run 42452395669（9950X）a/b 各编译约 90 s、测试 182/267 s，合并后估约 10 min，
         #   仍短于 release-locks（13.0 min，run 42454217164）；每轮少 1 次 Boat 启动和 1 次重复编译。
-        #   content 并入 owned-h1（两条路径都是）：两组都是 opt-level 0，hc-ci-slim 上 content 3.5 min、owned-h1 4.9 min
-        #   （run 42462233357），合并约 8.4 min，仍短于 release-locks 12.4 min，Boat 每轮少 1 次启动；托管机上两组合计
-        #   12–17 min，短于同轮最长作业 22–31 min（11-08 五轮）。content 步骤只看 matrix.group，不再按 runner 重新判定：
-        #   单个作业重跑时 runner 判定会重新求值，而矩阵不会重新展开，按 runner 判定会让 content 被整组跳过（#2005 独审）。
-        group: ${{ fromJSON((vars.CI_BOAT_RUNNERS != 'off' && github.actor == 'xy7365527-lang' && github.triggering_actor == 'xy7365527-lang' && (github.event_name != 'pull_request' || github.event.pull_request.user.login == 'xy7365527-lang')) && '["native-a","native-b","release-locks","owned","owned-h1","economic"]' || '["native","release-locks","owned","owned-h1","economic"]') }}
+        #   content 独立成组（两条路径都排在末尾）：owned-h1 在托管慢机上合跑 content + 两次 H1 release 构建达 16.4 min
+        #   （run 44701996953：981 s），其中 content 四步（debug）占 240–320 s；独立后 5 个重型组在 t=0 优先占位，content
+        #   随 fixture-drift（~85 s）释放的槽位并行跑完（总约 5–6 min），owned-h1 直降 4–5 min。两条路径统一按 matrix.group
+        #   判定，避免单个作业重跑时 runner 表达式重求值跳过步骤（#2005 独审）。
+        group: ${{ fromJSON((vars.CI_BOAT_RUNNERS != 'off' && github.actor == 'xy7365527-lang' && github.triggering_actor == 'xy7365527-lang' && (github.event_name != 'pull_request' || github.event.pull_request.user.login == 'xy7365527-lang')) && '["native-a","native-b","release-locks","owned","owned-h1","economic","content"]' || '["native","release-locks","owned","owned-h1","economic","content"]') }}
     runs-on: ${{ (vars.CI_BOAT_RUNNERS != 'off' && github.actor == 'xy7365527-lang' && github.triggering_actor == 'xy7365527-lang' && (github.event_name != 'pull_request' || github.event.pull_request.user.login == 'xy7365527-lang')) && 'boat-large/from=hc-ci-slim' || 'ubuntu-latest' }}
     timeout-minutes: ${{ startsWith(matrix.group, 'native') && 90 || 60 }}
     env:
@@ -581,22 +581,22 @@ jobs:
       # #1404：成员来源回归单列先执行，避免已登记的默认域失败使本片新锁被跳过。
       #   #1588：该用例同时在 S bin 分片里执行（拆前即两处执行），本步保留其独立可见的信号。
       - name: cargo test — TB-02-C member source binding
-        if: ${{ !cancelled() && matrix.group == 'owned-h1' }}
+        if: ${{ !cancelled() && matrix.group == 'content' }}
         run: ../.github/scripts/run-cargo-with-telemetry.sh cargo test --locked --features s_session --bin s_structure_session tb02c_member_relations_bind_only_the_member_sources --jobs "${CI_CARGO_JOBS:-1}"
 
       # #1608：#1394 的两个编译负例只在 --cfg 下编译；此处断言它们仍被类型边界拒绝（E0308 落在负例块内）。
       #   放在 TB-02-C 单测之后复用已编好的 s_session 依赖；负例在类型检查阶段即失败，不做代码生成。
       - name: 编译负例 — #1394 类型边界仍拒绝旧写法（#1608）
-        if: ${{ !cancelled() && matrix.group == 'owned-h1' }}
+        if: ${{ !cancelled() && matrix.group == 'content' }}
         run: ../.github/scripts/check-compile-negatives-1394.sh
 
       # #1394 C：内容编码在 s_session feature 下供多个 owner 共用；只测 S bin 不会执行库测试。
       - name: cargo test — 完整内容编码与共享图校验（#1394）
-        if: ${{ !cancelled() && matrix.group == 'owned-h1' }}
+        if: ${{ !cancelled() && matrix.group == 'content' }}
         run: ../.github/scripts/run-cargo-with-telemetry.sh cargo test --locked --features s_session --lib --jobs "${CI_CARGO_JOBS:-1}" s_content
 
       - name: cargo test — 内容向量、持久序列与累计资源（#1394）
-        if: ${{ !cancelled() && matrix.group == 'owned-h1' }}
+        if: ${{ !cancelled() && matrix.group == 'content' }}
         run: ../.github/scripts/run-cargo-with-telemetry.sh cargo test --locked --features s_session --test s_content_contract --test s_content_sequence --test s_content_job --test s_content_path --jobs "${CI_CARGO_JOBS:-1}"
 
       # #1394 G-1：economic_session（含 P-14 读法锁、finance、content_store、store、finance_transport）
