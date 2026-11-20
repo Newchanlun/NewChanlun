@@ -136,6 +136,54 @@ runs:
         flock "$cfg.lock" bash -c 'grep -qF "[profile.dev.package.\"*\"]" "$1" 2>/dev/null || printf "[profile.dev.package.\"*\"]\nopt-level = 2\n" >> "$1"' _ "$cfg"
         cat "$cfg" 2>/dev/null || echo "(no $cfg yet)"
 
+    # #1875：缓存已编译的第三方依赖产物（严格排除本仓 newchan_rust 与 incremental），仅托管 runner 启用
+    #   （自托管 Boat 沿用 R10 跳过上传）。键含 rustc -vV、PYO3_PYTHON、dev debug 与 config.toml 哈希及
+    #   Cargo.lock；拆 job 后单作业磁盘空闲 ≥ 83 GB，不再受 #1141 单作业 14 GB 磁盘峰值限制。
+    - name: Compute compiled third-party dependency cache key (#1875)
+      id: deps-cache-key
+      if: runner.environment != 'self-hosted'
+      shell: bash
+      run: |
+        cfg="${CARGO_HOME:-$HOME/.cargo}/config.toml"
+        fp=$(
+          {
+            rustc -vV
+            "$PYO3_PYTHON" -V 2>&1
+            printf 'dev_debug=%s\n' "${CARGO_PROFILE_DEV_DEBUG:-default}"
+            cat "$cfg" 2>/dev/null || true
+          } | sha256sum | cut -c1-16
+        )
+        echo "fp=$fp" >> "$GITHUB_OUTPUT"
+        echo "deps_cache_fp=$fp"
+
+    - name: Cache compiled third-party Cargo dependencies (dev) (#1875)
+      id: cargo-deps-dev-cache
+      if: runner.environment != 'self-hosted' && github.job != 'rust-test-production-session'
+      uses: actions/cache@v4
+      with:
+        path: |
+          rust/target/debug/deps/lib*
+          rust/target/debug/build
+          rust/target/debug/.fingerprint
+          !rust/target/debug/deps/libnewchan_rust*
+          !rust/target/debug/.fingerprint/newchan_rust-*
+          !rust/target/debug/.fingerprint/newchan_rust-*/**
+        key: ${{ runner.os }}-${{ runner.arch }}-cargo-deps-dev-${{ github.job == 'rust-test-default' && 'default' || 's-session' }}-v1-${{ steps.deps-cache-key.outputs.fp }}-${{ hashFiles('rust/Cargo.lock') }}
+
+    - name: Cache compiled third-party Cargo dependencies (release) (#1875)
+      id: cargo-deps-release-cache
+      if: runner.environment != 'self-hosted' && (github.job == 'rust-test-s-session-extras' || github.job == 'rust-test-production-session')
+      uses: actions/cache@v4
+      with:
+        path: |
+          rust/target/release/deps/lib*
+          rust/target/release/build
+          rust/target/release/.fingerprint
+          !rust/target/release/deps/libnewchan_rust*
+          !rust/target/release/.fingerprint/newchan_rust-*
+          !rust/target/release/.fingerprint/newchan_rust-*/**
+        key: ${{ runner.os }}-${{ runner.arch }}-cargo-deps-rel-v1-${{ github.job }}-${{ steps.deps-cache-key.outputs.fp }}-${{ hashFiles('rust/Cargo.lock') }}
+
     # 遥测包装器的边界快照对 `du target` 失败即判红；拆 job 后首个 cargo 步可能就是被包装的那一步，
     # 此时 target 尚不存在，故预先建空目录（不影响构建产物）。
     - name: Record cache result and post-cache resources (#1141)
