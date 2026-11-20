@@ -290,18 +290,19 @@ impl NestLifecycleBook {
 
     /// #1719 首次绑定只可在原建仓 bar 登记；重发不覆盖原对象/政策/注册钟。
     /// 升级只接收已经由原迁移规则认可、且 provider 精确选中的新 B。
-    /// 缺账、冲突、未知政策版本、迟绑均返回 Rejected，不为旧对象猜配身份。
-    /// v2 绑定在首次出生登记的同一步消费出生前已留档的匹配 Broken 事实；v1 不重评。
+    /// 缺账、冲突、空版本返回 Rejected，不为旧对象猜配身份。
+    /// 单独登记只绑定；v2 出生当步清账须由同批出生的伴随绑定喂入触发。
     pub fn register_center_bridge(&mut self, binding: HypothesisBridge) -> BridgeRegistration {
-        self.register_center_bridge_with_revisions(binding).0
+        self.register_center_bridge_with_revisions(binding, false).0
     }
 
     pub(super) fn register_center_bridge_with_revisions(
         &mut self,
         binding: HypothesisBridge,
+        born_in_step: bool,
     ) -> (BridgeRegistration, Vec<LifecycleRevision>) {
-        let Ok(policy_version) =
-            CompletionPolicyVersion::parse_at_bridge_boundary(&binding.policy.version)
+        let Some(policy_version) =
+            CompletionPolicyVersion::for_component_binding(&binding.policy.version)
         else {
             return (BridgeRegistration::Rejected, Vec::new());
         };
@@ -365,7 +366,8 @@ impl NestLifecycleBook {
         let revisions = match policy_version {
             CompletionPolicyVersion::V1 => Vec::new(),
             CompletionPolicyVersion::V2 => {
-                if binding.policy.anchor == CompletionAnchor::CenterBreak
+                if born_in_step
+                    && binding.policy.anchor == CompletionAnchor::CenterBreak
                     && entry_last_as_of == binding.registered_at
                 {
                     self.apply_pre_archived_breaks_at_birth(key, binding, meta)
@@ -391,7 +393,7 @@ impl NestLifecycleBook {
             .filter(|(identity, archived)| {
                 identity.level == key.level
                     && identity.center_id == bridge.center_id
-                    && archived.archived_at < bridge.registered_at
+                    && archived.archived_at <= bridge.registered_at
                     && archived.archived_seq < meta.registered_seq
             })
             .map(|(identity, archived)| (*identity, *archived))
@@ -474,8 +476,7 @@ impl NestLifecycleBook {
                         debug_assert_eq!(meta.policy_version, CompletionPolicyVersion::V2);
                         if entry.observed_at == bridge.registered_at
                             && entry.last_as_of == bridge.registered_at
-                            && fact.known_at() < bridge.registered_at
-                            && archived.archived_at < bridge.registered_at
+                            && archived.archived_at <= bridge.registered_at
                             && archived.archived_seq < meta.registered_seq
                         {
                             (CenterBreakOutcome::Applied, Some(bridge.registered_at))
@@ -985,11 +986,11 @@ impl NestLifecycleBook {
                                         "v2 出生当步 consumed_at == registered_at：{key:?}"
                                     );
                                     assert!(
-                                        audit.fact.known_at() < audit.application_at,
-                                        "v2 出生当步保留早于出生钟的原 fact_known_at：{key:?}"
+                                        audit.fact.known_at() <= audit.application_at,
+                                        "v2 出生当步保留不晚于出生钟的原 fact_known_at：{key:?}"
                                     );
                                     assert!(
-                                        audit.fact_archived_at < audit.bridge.registered_at
+                                        audit.fact_archived_at <= audit.bridge.registered_at
                                             && audit.fact_archived_seq
                                                 < audit.target_registered_seq,
                                         "v2 出生当步须满足出生前已留档的因果先后：{key:?}"

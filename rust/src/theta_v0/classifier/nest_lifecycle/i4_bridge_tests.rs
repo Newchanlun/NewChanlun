@@ -915,6 +915,8 @@ fn i4_bridge_v2_birth_step_applies_pre_archived_fact_at_birth_and_preserves_know
         &[f.1.clone()],
     );
     assert_eq!(accepted, vec![BridgeRegistration::Accepted]);
+    let entry = book.get(&f.1.lifecycle_key).unwrap();
+    assert_eq!(entry.state, NestEventState::Invalidated);
     assert_eq!(delta.len(), 3);
     assert_eq!(delta[0].kind, LifecycleRevisionKind::Observed);
     assert_eq!(delta[0].as_of, 95);
@@ -933,8 +935,6 @@ fn i4_bridge_v2_birth_step_applies_pre_archived_fact_at_birth_and_preserves_know
     );
     assert_eq!(delta[2].as_of, 95);
 
-    let entry = book.get(&f.1.lifecycle_key).unwrap();
-    assert_eq!(entry.state, NestEventState::Invalidated);
     assert_eq!(
         entry.invalidated_reason,
         Some(InvalidatedReason::CenterBreak)
@@ -946,6 +946,15 @@ fn i4_bridge_v2_birth_step_applies_pre_archived_fact_at_birth_and_preserves_know
     assert_eq!(entry.structure_end_at, None);
     assert_eq!(entry.confirmed_at, None);
     assert!(book.consumable_closed().is_empty());
+    // 从完整组件修订链读取两个 cut，确认后来的出生清账未回填 94。
+    let last_revision_at = |cut| {
+        entry
+            .revisions
+            .iter()
+            .rfind(|revision| revision.as_of <= cut)
+    };
+    assert!(last_revision_at(94).is_none());
+    assert_eq!(last_revision_at(95), delta.last());
 
     assert_eq!(book.center_break_audits().len(), 1);
     let audit = &book.center_break_audits()[0];
@@ -1115,25 +1124,61 @@ fn i4_bridge_v2_advanced_to_96_before_reeval_remains_late_pending_recovery() {
     );
     delayed_book.assert_invariants();
 
-    // 路径 3：事实在 bar 95 或未来 bar 110 才留档（非出生前已留档），即使在 95 登记前到达也不走出生当步。
-    for non_prior_archive in [95, 110] {
-        let mut late_archive_book = NestLifecycleBook::new();
-        late_archive_book.apply_center_break(&fact_k94, non_prior_archive);
-        open_bindings(&mut late_archive_book, &[f_95.clone()]);
-        assert_eq!(
-            late_archive_book.get(&f_95.1.lifecycle_key).unwrap().state,
-            NestEventState::Provisional
-        );
-        assert!(late_archive_book.center_break_audits().is_empty());
-        assert_eq!(
-            late_archive_book
-                .apply_center_break(&fact_k94, non_prior_archive.max(96))
-                .attempts[0]
-                .outcome,
-            CenterBreakOutcome::LatePendingRecovery
-        );
-        late_archive_book.assert_invariants();
-    }
+    // 路径 3：调用顺序虽更早，留档钟为 110，不能给 bar 95 出生清账。
+    let mut late_archive_book = NestLifecycleBook::new();
+    late_archive_book.apply_center_break(&fact_k94, 110);
+    open_bindings(&mut late_archive_book, &[f_95.clone()]);
+    assert_eq!(
+        late_archive_book.get(&f_95.1.lifecycle_key).unwrap().state,
+        NestEventState::Provisional
+    );
+    assert!(late_archive_book.center_break_audits().is_empty());
+    assert_eq!(
+        late_archive_book
+            .apply_center_break(&fact_k94, 111)
+            .attempts[0]
+            .outcome,
+        CenterBreakOutcome::LatePendingRecovery
+    );
+    late_archive_book.assert_invariants();
+}
+
+#[test]
+fn i4_bridge_v2_same_bar_requires_archive_before_birth_and_binding_in_birth_step() {
+    let v2 = CompletionPolicy::v2(CompletionAnchor::CenterBreak);
+    let f = selected_fixture(1, 0, 0, 20, 95, &v2);
+    let fact = broken_fixture(f.2, 1, 90, 94);
+    let feed = ReplayBarFeed {
+        as_of: 95,
+        phases: &[PanProviderPhase::Live(f.0)],
+    };
+    let material = ForceMaterial::unavailable(&[]);
+
+    // 同为 95，先留档，后在出生步骤伴随登记：序号证明留档在先。
+    let mut before_birth = NestLifecycleBook::new();
+    before_birth.apply_center_break(&fact, 95);
+    open_bindings(&mut before_birth, &[f.clone()]);
+    let audit = &before_birth.center_break_audits()[0];
+    assert_eq!(audit.fact.known_at(), 94);
+    assert_eq!(audit.fact_archived_at, audit.application_at);
+    assert!(audit.fact_archived_seq < audit.target_registered_seq);
+    before_birth.assert_invariants();
+
+    // 同样的钟值与留档/登记序号，先出生后补绑：第二次喂入不得冒充出生步骤。
+    let mut after_birth = NestLifecycleBook::new();
+    feed_replay_bar(&mut after_birth, &feed, &material);
+    after_birth.apply_center_break(&fact, 95);
+    open_bindings(&mut after_birth, &[f.clone()]);
+    assert_eq!(
+        after_birth.get(&f.1.lifecycle_key).unwrap().state,
+        NestEventState::Provisional
+    );
+    assert!(after_birth.center_break_audits().is_empty());
+    assert_eq!(
+        after_birth.apply_center_break(&fact, 95).attempts[0].outcome,
+        CenterBreakOutcome::LatePendingRecovery
+    );
+    after_birth.assert_invariants();
 }
 
 #[test]
@@ -1157,7 +1202,7 @@ fn i4_bridge_unknown_policy_version_is_rejected_without_falling_back_to_v1() {
         Ok(CompletionPolicyVersion::V2)
     );
 
-    // 生产解析器拒绝所有未登记字符串（含 synthetic-*），不得默认为 v1。
+    // 生产解析器拒绝所有未登记字符串（含 opaque 与 synthetic-*），不得默认为 v1。
     for rejected in [
         "",
         " ",
@@ -1168,6 +1213,7 @@ fn i4_bridge_unknown_policy_version_is_rejected_without_falling_back_to_v1() {
         " #1719/center-break-completion/v2",
         "unknown-policy/1",
         "synthetic-i4/1",
+        "historical/provider-revision-17",
     ] {
         assert!(
             CompletionPolicyVersion::parse(rejected).is_err(),
@@ -1179,39 +1225,32 @@ fn i4_bridge_unknown_policy_version_is_rejected_without_falling_back_to_v1() {
                 .is_err()
         );
     }
+}
 
-    // 账本登记边界同样拒绝未知版本字符串，不得回落到 v1 语义。
-    for unknown in [
-        "",
-        " ",
-        "v1",
-        "v2",
-        "#1719/center-break-completion/v3",
+#[test]
+fn i4_bridge_legacy_opaque_versions_keep_v1_semantics_and_original_strings() {
+    for legacy in [
+        "synthetic-i4/1",
+        "historical/provider-revision-17",
         "#1719/center-break-completion/v2 ",
-        "unknown-policy/1",
-        "synthetic-",
     ] {
-        let p = policy(unknown, CompletionAnchor::CenterBreak);
+        let p = policy(legacy, CompletionAnchor::CenterBreak);
         let f = selected_fixture(1, 0, 0, 20, 95, &p);
         let mut book = NestLifecycleBook::new();
-        let (_, _, accepted) = feed_replay_bar_with_bridges(
-            &mut book,
-            &ReplayBarFeed {
-                as_of: 95,
-                phases: &[PanProviderPhase::Live(f.0)],
-            },
-            &ForceMaterial::unavailable(&[]),
-            &[f.1.clone()],
-        );
+        let fact = broken_fixture(f.2, 1, 90, 94);
+        book.apply_center_break(&fact, 94);
+        open_bindings(&mut book, &[f.clone()]);
+        assert_eq!(book.bridges().get(&f.1.lifecycle_key).unwrap().policy, p);
         assert_eq!(
-            accepted,
-            vec![BridgeRegistration::Rejected],
-            "登记边界必须拒绝未知版本：{unknown:?}"
+            book.get(&f.1.lifecycle_key).unwrap().state,
+            NestEventState::Provisional
         );
-        assert!(book.bridges().is_empty());
-        let attempt = book.apply_center_break(&broken_fixture(f.2, 1, 100, 100), 100);
+        let attempt = book.apply_center_break(&fact, 96);
         assert!(attempt.revisions.is_empty());
-        assert_eq!(attempt.attempts[0].outcome, CenterBreakOutcome::NoTarget);
+        assert_eq!(
+            attempt.attempts[0].outcome,
+            CenterBreakOutcome::LatePendingRecovery
+        );
         book.assert_invariants();
     }
 }

@@ -267,6 +267,12 @@ pub fn feed_replay_bar_with_bridges(
     Vec<BridgeRegistration>,
 ) {
     let (mut delta, stats) = feed_replay_bar(book, feed, material);
+    // 同一个 bar 可以喂多次；只有这批实际建仓的对象才在出生当步。
+    let newborns: BTreeSet<_> = delta
+        .iter()
+        .filter(|revision| revision.kind == LifecycleRevisionKind::Observed)
+        .map(|revision| revision.key)
+        .collect();
     let registrations = bindings
         .iter()
         .map(|binding| {
@@ -278,7 +284,10 @@ pub fn feed_replay_bar_with_bridges(
                 });
             if supplied {
                 let (registration, break_revisions) =
-                    book.register_center_bridge_with_revisions(binding.clone());
+                    book.register_center_bridge_with_revisions(
+                        binding.clone(),
+                        newborns.contains(&binding.lifecycle_key),
+                    );
                 delta.extend(break_revisions);
                 registration
             } else {

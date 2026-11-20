@@ -31,8 +31,7 @@ impl CompletionPolicyVersion {
         }
     }
 
-    /// 生产版本解析器：只接受 ADR 0003 §1 已登记的具名版本；未知或未签字符串一律拒绝，
-    /// 不得默认为 v1。
+    /// 生产版本解析器：只接受 ADR 0003 §1 已登记的具名版本。签名由生产调用方核验。
     pub fn parse(raw: &str) -> Result<Self, UnknownCompletionPolicyVersion> {
         match raw {
             CENTER_BREAK_COMPLETION_POLICY_V1 => Ok(Self::V1),
@@ -43,34 +42,17 @@ impl CompletionPolicyVersion {
         }
     }
 
-    /// 登记边界解析：生产构建与 `parse` 严格一致；仅单元测试兼容既有 `synthetic-*` 夹具
-    /// （按 v1 语义执行），未知字符串仍一律拒绝，不落到 v1。
-    pub(super) fn parse_at_bridge_boundary(
-        raw: &str,
-    ) -> Result<Self, UnknownCompletionPolicyVersion> {
-        #[cfg(test)]
-        {
-            Self::parse(raw).or_else(|err| {
-                if is_legacy_synthetic_fixture_version(raw) {
-                    Ok(Self::V1)
-                } else {
-                    Err(err)
-                }
-            })
-        }
-        #[cfg(not(test))]
-        {
-            Self::parse(raw)
+    /// 旧组件绑定合同接受非空 opaque 版本；保留原串，不把它登记为具名 v1。
+    /// 新生产输入须经过严格的 `parse`，不能以组件接纳结果代替版本校验。
+    pub(super) fn for_component_binding(raw: &str) -> Option<Self> {
+        if raw.trim().is_empty() {
+            None
+        } else if raw == Self::V2.as_str() {
+            Some(Self::V2)
+        } else {
+            Some(Self::V1)
         }
     }
-}
-
-#[cfg(test)]
-fn is_legacy_synthetic_fixture_version(raw: &str) -> bool {
-    raw.trim() == raw
-        && raw
-            .strip_prefix("synthetic-")
-            .is_some_and(|suffix| !suffix.is_empty())
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -79,7 +61,7 @@ pub enum CompletionAnchor {
     CenterBreak,
 }
 
-/// 调用方提供已签具名版本；组件不代填版本或切换政策。
+/// 生产调用方提供已签具名版本；组件保留调用方的原版本字符串。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CompletionPolicy {
     pub version: String,
