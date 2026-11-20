@@ -647,7 +647,7 @@ jobs:
         run: |
           set -o pipefail
           # #1481 S1K：接替 history36h 的全部 h1_ release 锁，保留正式准入逐名收据。
-          cargo test --release --locked --features s_session,s_incremental,s_h1_lock_subset_testonly --bin s_structure_session --jobs "${CI_CARGO_JOBS_RELEASE:-4}" h1_ -- --test-threads 1 --show-output --format pretty --color never 2>&1 | tee "$RUNNER_TEMP/1481-admission.log"
+          cargo test --release --locked --features s_session,s_incremental,s_h1_lock_subset_testonly --bin s_structure_session --jobs "${CI_CARGO_JOBS_RELEASE:-4}" h1_ -- --test-threads "${RUST_TEST_THREADS:-4}" --show-output --format pretty --color never 2>&1 | tee "$RUNNER_TEMP/1481-admission.log"
           for test in \
             h1_admission_cold_prefixes_match_full_canonical \
             h1_admission_cold_negative_classes_match_full_oracle \
