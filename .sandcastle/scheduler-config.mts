@@ -53,7 +53,8 @@ const fields = {
 type Checked<T> = T extends (value: unknown) => value is infer V ? V : never;
 export type SchedulerValues = { [K in keyof typeof fields]: Checked<(typeof fields)[K]> };
 export type SchedulerKey = keyof SchedulerValues;
-const keys = Object.keys(fields) as SchedulerKey[];
+export const SCHEDULER_KEYS: readonly SchedulerKey[] = Object.freeze(Object.keys(fields) as SchedulerKey[]);
+const keys = SCHEDULER_KEYS;
 function object(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
