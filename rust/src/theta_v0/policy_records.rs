@@ -73,6 +73,19 @@ pub const ACTIVE_ARM_SUB_EXPIRY_JSON: &str = include_str!("policy_records/arm-su
 pub const ACTIVE_RESEARCH_STATS_JSON: &str = include_str!("policy_records/research-stats.json");
 /// 当前生效的 evidence_gate 记录；与 C-19 不合并。
 pub const ACTIVE_EVIDENCE_GATE_JSON: &str = include_str!("policy_records/evidence-gate.json");
+/// ADR 0044：成本停止记录族与两份在册 profile。
+pub const COST_STOP_ID: &str = "#1354/cost-stop-policy";
+pub const ACTIVE_COST_STOP_JSON: &str = include_str!("policy_records/cost-stop.json");
+
+pub fn parse_cost_stop(
+    text: Option<&str>,
+) -> Result<super::cost_stop::CostStopRecords, PolicyError> {
+    super::cost_stop::CostStopRecords::parse(text)
+}
+
+pub fn active_cost_stop() -> Result<super::cost_stop::CostStopRecords, PolicyError> {
+    parse_cost_stop(Some(ACTIVE_COST_STOP_JSON))
+}
 /// 当前生效的 L3 探针资金 profile。
 pub const ACTIVE_L3_PROBE_PROFILE_JSON: &str = include_str!("policy_records/l3-probe-profile.json");
 /// 当前生效的 W-VERIFY 探针资金 profile。
@@ -602,6 +615,83 @@ mod tests {
     const TOWER_V2_L3: &str =
         r#"{"id":"tower-level-budget","version":2,"fields":{"l_max":{"value":3}}}"#;
     const MACD_V2: &str = r#"{"id":"macd-force","version":2,"fields":{"fast":{"value":5},"slow":{"value":35},"signal":{"value":5}}}"#;
+
+    fn mutate_cost_stop(change: impl FnOnce(&mut Value)) -> String {
+        let mut json: Value = serde_json::from_str(ACTIVE_COST_STOP_JSON).unwrap();
+        change(&mut json["profiles"]["P0"]);
+        json.to_string()
+    }
+
+    #[test]
+    fn cost_stop_loads_both_adr_0044_profiles() {
+        use super::super::cost_stop::{CostSource, CostStopProfile};
+
+        let records = active_cost_stop().unwrap();
+        let p0 = records.profile(CostStopProfile::P0);
+        let p1 = records.profile(CostStopProfile::P1HlTestnet);
+        for policy in [p0, p1] {
+            assert_eq!(policy.record().label(), "#1354/cost-stop-policy/v1");
+            assert_eq!(policy.tower_base_ref, "tower-base/1");
+            assert_eq!(policy.evidence_gate_ref, "#1677/evidence-gate/v1");
+            assert_eq!(policy.symbol, "BTC");
+            assert_eq!(policy.granularity, "1m");
+            assert!(matches!(policy.slippage, CostSource::Missing));
+        }
+        assert_eq!(p0.fee.tier, "VIP0");
+        assert_eq!(p1.fee.tier, "Tier 0 Base rate");
+        assert!(matches!(
+            p0.latency_error,
+            CostSource::ProxyLowerBound { .. }
+        ));
+        assert!(matches!(p1.latency_error, CostSource::Missing));
+    }
+
+    #[test]
+    fn cost_stop_rejects_missing_field() {
+        let json = mutate_cost_stop(|p0| {
+            p0.as_object_mut().unwrap().remove("theta");
+        });
+        let error = parse_cost_stop(Some(&json)).unwrap_err().to_string();
+        assert!(error.contains("missing field `theta`"), "{error}");
+    }
+
+    #[test]
+    fn cost_stop_rejects_unknown_field() {
+        let json = mutate_cost_stop(|p0| {
+            p0["fee"]["fallback_rate"] = 0.into();
+        });
+        let error = parse_cost_stop(Some(&json)).unwrap_err().to_string();
+        assert!(error.contains("unknown field `fallback_rate`"), "{error}");
+    }
+
+    #[test]
+    fn cost_stop_rejects_theta_below_one() {
+        // ADR 0035:14：约束而非默认值；等于下界的整数对仍合法。
+        let bad = mutate_cost_stop(|p0| {
+            let numerator = p0["theta"]["numerator"].as_u64().unwrap();
+            p0["theta"]["denominator"] = (numerator + 1).into();
+        });
+        let error = parse_cost_stop(Some(&bad)).unwrap_err().to_string();
+        assert!(error.contains("theta：分子不得小于分母"), "{error}");
+        let at_floor =
+            mutate_cost_stop(|p0| p0["theta"]["numerator"] = p0["theta"]["denominator"].clone());
+        assert!(parse_cost_stop(Some(&at_floor)).is_ok());
+    }
+
+    #[test]
+    fn cost_stop_reports_absent_and_malformed_records() {
+        assert!(matches!(
+            parse_cost_stop(None),
+            Err(PolicyError::RecordMissing { id: COST_STOP_ID })
+        ));
+        assert!(matches!(
+            parse_cost_stop(Some("{")),
+            Err(PolicyError::Invalid {
+                id: COST_STOP_ID,
+                ..
+            })
+        ));
+    }
 
     #[test]
     fn active_records_carry_current_values_and_version_1() {
