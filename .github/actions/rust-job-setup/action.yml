@@ -56,6 +56,9 @@ runs:
           echo "own_crate_opt_level=1"
         fi
         echo "RUST_TEST_THREADS=4" >> "$GITHUB_ENV"
+        # #1875：CI dev/test 作业不运行 gdb/lldb，panic 位置由编译期 Location 给出，无需完整 DWARF；
+        #   debug=0 保留 debug-assertions/overflow-checks 与全部测试覆盖，同时压降编译耗时 ~32%、target 体积 4x。
+        echo "CARGO_PROFILE_DEV_DEBUG=0" >> "$GITHUB_ENV"
         # #1875 R7/R13：`--jobs 1` 是 #1141 的磁盘预算处置（当时托管 runner 约 14 GB 空闲，并发链接写满磁盘）。
         #   现在按工作区实际空闲决定：≥ 40 GB 按核数并行编译，否则退回 1（release 档退回原来的 4）。
         #   实测托管 runner 根分区 154 GB、作业内最低空闲 83 GB（run 42028458748），Boat large 约 112 GB。
