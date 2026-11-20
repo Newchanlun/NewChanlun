@@ -1897,7 +1897,7 @@ if (typeof module !== 'object' || !module.exports) {
   return Object.freeze({LIMIT_FIELDS, parseLimits, validateConfig, Job});
 });
 
-/* exact source q3-values.js SHA256 2d881fd06f538218ac73291fde4ba6ea0bb5679ba8480c6c6f047e2e3f84fe4e */
+/* exact source q3-values.js SHA256 7377159966fb781e35d29ee1189e1f27f66fcb76b88e026286ac15e17e497d4e */
 /* #1394：现有 Q3 消费者的私有值访问器。普通值与图值共用字段/位置遍历。 */
 (function (root, factory) {
   const common = typeof module === "object" && module.exports;
@@ -2451,7 +2451,7 @@ if (typeof module !== 'object' || !module.exports) {
         },
         last = null,
         items = [],
-        graphs = [];
+        bool;
       do {
         this.check();
         const reply = await this.request(request);
@@ -2481,17 +2481,26 @@ if (typeof module !== 'object' || !module.exports) {
             partial: true,
           });
           items.push(inner);
+        } else if (ref.kind === "bool") {
+          if (bool === undefined) {
+            const raw = proof.graph.nodes().find((x) => x.root === ref.root);
+            need(
+              raw && (raw.tag === "01" || raw.tag === "02"),
+              "布尔节点缺失或tag非法",
+            );
+            bool = raw.tag === "02";
+          }
+          items.push(...reply.items);
         } else if (unit === "bytes") items.push(unhex(reply.items));
         else if (unit === "items")
           for (const item of reply.items) items.push(item);
         else items.push(...reply.items);
-        graphs.push(proof.graph);
         if (proof.done) break;
         last = proof.next_token;
         request = { op: "content", content_token: last };
       } while (true);
       this.check();
-      return { items, graphs };
+      return ref.kind === "bool" ? { items, bool } : { items };
     }
     async *entries(v) {
       const loaded = await this.load(v);
@@ -2525,9 +2534,8 @@ if (typeof module !== 'object' || !module.exports) {
       this.check();
       if (v.kind === "null") return null;
       if (v.kind === "bool") {
-        const graph = loaded.graphs[0],
-          raw = graph.nodes().find((x) => x.root === v.ref.root);
-        return raw.tag === "02";
+        need(typeof loaded.bool === "boolean", "布尔标量未提取");
+        return loaded.bool;
       }
       const decoder = new TextDecoder("utf-8", {
         fatal: true,

@@ -551,7 +551,7 @@
         },
         last = null,
         items = [],
-        graphs = [];
+        bool;
       do {
         this.check();
         const reply = await this.request(request);
@@ -581,17 +581,26 @@
             partial: true,
           });
           items.push(inner);
+        } else if (ref.kind === "bool") {
+          if (bool === undefined) {
+            const raw = proof.graph.nodes().find((x) => x.root === ref.root);
+            need(
+              raw && (raw.tag === "01" || raw.tag === "02"),
+              "布尔节点缺失或tag非法",
+            );
+            bool = raw.tag === "02";
+          }
+          items.push(...reply.items);
         } else if (unit === "bytes") items.push(unhex(reply.items));
         else if (unit === "items")
           for (const item of reply.items) items.push(item);
         else items.push(...reply.items);
-        graphs.push(proof.graph);
         if (proof.done) break;
         last = proof.next_token;
         request = { op: "content", content_token: last };
       } while (true);
       this.check();
-      return { items, graphs };
+      return ref.kind === "bool" ? { items, bool } : { items };
     }
     async *entries(v) {
       const loaded = await this.load(v);
@@ -625,9 +634,8 @@
       this.check();
       if (v.kind === "null") return null;
       if (v.kind === "bool") {
-        const graph = loaded.graphs[0],
-          raw = graph.nodes().find((x) => x.root === v.ref.root);
-        return raw.tag === "02";
+        need(typeof loaded.bool === "boolean", "布尔标量未提取");
+        return loaded.bool;
       }
       const decoder = new TextDecoder("utf-8", {
         fatal: true,
