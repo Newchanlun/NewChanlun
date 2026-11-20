@@ -53,8 +53,18 @@ impl WindowReading {
     pub fn nonempty_blocks(&self) -> usize {
         self.blocks.len()
     }
-    pub fn max_month_cluster(&self) -> usize {
+    pub fn max_month_count(&self) -> usize {
         self.blocks.iter().map(|&(_, n)| n).max().unwrap_or(0)
+    }
+    /// 最大月桶样本数 / 窗内全部样本数，返回约分后的整数对。
+    /// 口径见 #907 `p907_cost_gate_level.rs:128–146,166–170`；合格窗至少有一个样本。
+    pub fn max_month_cluster(&self) -> (usize, usize) {
+        let (numerator, denominator) = (self.max_month_count(), self.samples());
+        let (mut gcd, mut remainder) = (denominator, numerator);
+        while remainder != 0 {
+            (gcd, remainder) = (remainder, gcd % remainder);
+        }
+        (numerator / gcd, denominator / gcd)
     }
     /// (UTC 年 × 12 + 月 - 1, 样本数)。
     pub fn month_blocks(&self) -> &[(i64, usize)] {

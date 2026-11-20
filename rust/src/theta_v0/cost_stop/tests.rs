@@ -591,7 +591,7 @@ fn blocks_equal_distinct_utc_months() {
         (
             first.samples(),
             first.nonempty_blocks(),
-            first.max_month_cluster()
+            first.max_month_count()
         ),
         (30, 12, 3)
     );
@@ -616,6 +616,46 @@ fn blocks_equal_distinct_utc_months() {
         missing_month.eval(0),
         AmplitudeGap::Window(WindowGap::TooFewBlocks { got: 11, need: 12 }),
     );
+}
+
+#[test]
+fn max_month_cluster_reports_exact_share() {
+    let base = Case::p0(0, [0; 3], &[AT_GATE; 3]).eval(0);
+
+    let mut doubled = Case::p0(0, [0; 3], &[AT_GATE; 3]);
+    let samples = doubled.run["samples"].as_array_mut().unwrap();
+    let additional: Vec<_> = samples
+        .iter()
+        .map(|sample| {
+            let t = sample[0].as_i64().unwrap() + 600;
+            json!([t, t, AT_GATE])
+        })
+        .collect();
+    samples.extend(additional);
+    samples.sort_unstable_by_key(|sample| sample[0].as_i64().unwrap());
+    let doubled = doubled.eval(0);
+
+    let mut concentrated = Case::p0(0, [0; 3], &[AT_GATE; 3]);
+    let t = FIRST + 60;
+    concentrated.run["samples"]
+        .as_array_mut()
+        .unwrap()
+        .insert(0, json!([t, t, AT_GATE]));
+    let concentrated = concentrated.eval(0);
+
+    for (outcome, count, total, share) in [
+        (base, 3, 30, (1, 10)),
+        (doubled, 6, 60, (1, 10)),
+        (concentrated, 4, 31, (4, 31)),
+    ] {
+        assert_eq!(outcome.status(), CostStopStatus::Enabled);
+        let reading = &outcome.windows()[0];
+        assert_eq!(
+            (reading.max_month_count(), reading.samples()),
+            (count, total)
+        );
+        assert_eq!(reading.max_month_cluster(), share);
+    }
 }
 
 #[test]
