@@ -1,0 +1,39 @@
+ba74fd6344df5d03d3a8c5b6a5a2c9d8bef7a8b6:.chanlun/definitions/qushi.md:244:- **R5 段角色 [新缠论:推论]。** `018:64`、`020:60`、`061:44`【正文】给出「离开＋其后回抽不回」，第 61 课例中第五段本身构成三类点。冻结 CC-019 明定用完成的首回抽：上涨回试低点 `> ZG`、下跌回抽高点 `< ZD`，相等不成点。端点相连、方向交替的已完成单元流中，第一个全区间不重叠单元从核心外出发；前段与核心相交并走到同一外端，是离开；当前反向单元朝核心回抽，仍整段在外，已证不回，不再等下一索引。该推导包含 [中枢正本](zhongshu.md) §4.1（#1478 裁定二）登记的向 `Zn` 方向离开情形。§5.2、§9 R5 的「先挂起看下一段」只用于首不重叠段本身为离开、尚缺回抽见证（例如端点不相连的上级输入）；首回抽回核心则继续延伸，按既有 `Zn` 更新外缘，不能以晚一段回抽顶替失败的首回抽。#1496 同拍订正两处措辞并交共用 R5 见证；#1426 只消费，裸 `Settled`、`break_unit`、升级和吸收均不代证。§4.1 退场条件①、②与 #1496 明列不在范围的端点前提重审保持不变。
+ba74fd6344df5d03d3a8c5b6a5a2c9d8bef7a8b6:.chanlun/definitions/zhongshu.md:232:**落码补齐（[#1478](https://github.com/xy7365527-lang/NewChanlun/issues/1478) 裁定一，2026-10-13）**：GG/DD 的「n 遍历所有 Zn」此前只落在正本；生产塔（`recursive_tower.rs:524-527`）、旧线（`rust/src/zhongshu.rs:72-87`、`src/newchan/a_zhongshu_v1.py:100-101`／`:108-109`）与 Lean（`CenterConstruct.lean:408-417` `extendWeak`、`:442-443` seed）都对**全部**成员单元取极值，seed 三段同样全取（`center.rs:170`／`:176` `compute_gg`／`compute_dd`）。分歧只出现在末成员为非 `Zn` 单元时：端点相连、方向交替的序列里，内部非 `Zn` 单元的两端是相邻 `Zn` 的端点，被覆盖；只有末非 `Zn` 成员的远端不属任何 `Zn`。按 #793 这是 #812 受影响代码清单的缺项，不是新分歧；本轮没有生产实测读数反对 `Zn` 口径，生产代码不行使否决权。**落地**：塔与 Lean 并入 [#1419](https://github.com/xy7365527-lang/NewChanlun/issues/1419) 的共用扫描（R8）批次，同拍改、同一次基线重生成；**不允许出现「S 发 `Zn` 外缘、塔留全单元外缘」的中间态**（同一量两种值，#804）。`Zn` 判别：与 seed 第一单元同向的成员，即与第一单元的序号差 `(j−i)` 为偶数。清单见 §9 R21–R27、L9–L11、P14–P16。元教训同 Z-6 订正：承重的是「数哪些段」。
+ba74fd6344df5d03d3a8c5b6a5a2c9d8bef7a8b6:.chanlun/definitions/zhongshu.md:250:**端点条款（[#1478](https://github.com/xy7365527-lang/NewChanlun/issues/1478) 裁定二，2026-10-13；原文未讲的端点，按权威分层由 Lean 管）**：`020:56` 的延伸测试对象是 `Zn` 的 `[dn, gn]`。对端点相连、方向交替的单元序列，内部非 `Zn` 单元恒重叠（`Zn_{k+1}` 重叠 ⟹ 其前的非 `Zn` 单元重叠），所以「测全部单元」与「只测 `Zn`」在成员集上只差一处：向 `Zn` 方向离开时停在核心之外的那段回抽。原文没讲它的归属 ⟹ 采 Lean 全单元口径（`extendWeak`，塔同）：**该回抽段为连接段（突破段）**，前中枢末成员是它之前的 `Zn`，下一中枢自它后一单元起扫（Z-5 `last + 2` 不变）。
+ba74fd6344df5d03d3a8c5b6a5a2c9d8bef7a8b6:.chanlun/definitions/zhongshu.md:252:**退场条件**：① 日后找到原文依据推翻本端点，或 [#1434](https://github.com/xy7365527-lang/NewChanlun/issues/1434)（三类点）／[#1424](https://github.com/xy7365527-lang/NewChanlun/issues/1424)（中枢关系）实测出与原文语义冲突的读数 ⟹ 改 Lean 定义并同拍改塔；② 上级单元（端点不相连、方向交替无保证，[#1429](https://github.com/xy7365527-lang/NewChanlun/issues/1429)）上两种测试若给出不同成员集，须另裁。L0 上「全单元测试」与「`Zn` 测试 ＋ 本端点条款」等价，由对拍测试锁（#804 ①）。**代价照实**：全单元口径使上升趋势中两中枢之间的 L0 连接段是一段向下的回抽；`Zn` 口径会让该回抽成为前中枢末成员、下一中枢换向起扫，两者给出不同的下一中枢。缠论直觉站在哪边原文未定，这正是退场条件①要接住的。
+ba74fd6344df5d03d3a8c5b6a5a2c9d8bef7a8b6:.chanlun/definitions/zhongshu.md:554:| R23 | `rust/src/theta_v0/classifier/center.rs:170`／`:176` `compute_gg`／`compute_dd`（调用点 `:257-258` `center_from_segments`、`:294-295` `center_from_window`） | seed 外缘三段全取 | **改**：取第 1、3 段；端点相连时值不变，仍须改，以免上级输入不相连时出错 | S-7（#1478） | #1419 |
+ba74fd6344df5d03d3a8c5b6a5a2c9d8bef7a8b6:CONTEXT.md:256:与中枢方向一致的成员单元（`020-第20课.md:52`【正文】），即与 seed 第一单元同向、序号差为偶数的成员。GG/G/D/DD 只遍历 Zn（ZG/ZD 的取法见正本 §1.2、§3）。端点相连时，内部非 Zn 单元的端点被相邻 Zn 覆盖，故全单元外缘与 Zn 外缘只在末成员为非 Zn 时不同。
+ba74fd6344df5d03d3a8c5b6a5a2c9d8bef7a8b6:formal/Formal/DivergenceNesting.lean:436:/-- 观测价是否真越过原方向极值（「创出顺 t.origDir 新极值」的客观判据，L0）。 -/
+ba74fd6344df5d03d3a8c5b6a5a2c9d8bef7a8b6:formal/Formal/DivergenceNesting.lean:453:  （事件后实际出现的沿原方向极值价）与 law 字段 `makesNewExtreme_sound`：
+ba74fd6344df5d03d3a8c5b6a5a2c9d8bef7a8b6:formal/Formal/DivergenceNesting.lean:457:  /-- 事件后实际观测到的沿原方向极值价（可观测证据，判定须对照它）。 -/
+ba74fd6344df5d03d3a8c5b6a5a2c9d8bef7a8b6:formal/Origin/CenterComplete.lean:83:def DirAlternates (s1 s2 s3 : Segment) : Prop :=
+ba74fd6344df5d03d3a8c5b6a5a2c9d8bef7a8b6:formal/Origin/CenterComplete.lean:86:instance (s1 s2 s3 : Segment) : Decidable (DirAlternates s1 s2 s3) := by
+ba74fd6344df5d03d3a8c5b6a5a2c9d8bef7a8b6:formal/Origin/CenterComplete.lean:87:  unfold DirAlternates; exact inferInstanceAs (Decidable (_ ∧ _))
+ba74fd6344df5d03d3a8c5b6a5a2c9d8bef7a8b6:formal/Origin/CenterComplete.lean:93:theorem dirAlternates_first_third_same (s1 s2 s3 : Segment) (h : DirAlternates s1 s2 s3) :
+ba74fd6344df5d03d3a8c5b6a5a2c9d8bef7a8b6:formal/Origin/CenterComplete.lean:137:  1. **方向交替**（§6.1 典型形态下-上-下/上-下-上）——`DirAlternates s1 s2 s3`。
+ba74fd6344df5d03d3a8c5b6a5a2c9d8bef7a8b6:formal/Origin/CenterComplete.lean:148:  DirAlternates s1 s2 s3 ∧
+ba74fd6344df5d03d3a8c5b6a5a2c9d8bef7a8b6:formal/Origin/CenterComplete.lean:159:  DirAlternates s1 s2 s3 ∧
+ba74fd6344df5d03d3a8c5b6a5a2c9d8bef7a8b6:formal/Origin/CenterComplete.lean:249:  完整判据查方向交替（第一支）：要求 s1.dir ≠ s2.dir，但三段全 up ⟹ DirAlternates 不成立 ⟹ 完整
+ba74fd6344df5d03d3a8c5b6a5a2c9d8bef7a8b6:formal/Origin/CenterComplete.lean:256:  -- h.1 是 DirAlternates（口径 B 第一支），要求 s1.dir ≠ s2.dir，但都是 up
+ba74fd6344df5d03d3a8c5b6a5a2c9d8bef7a8b6:formal/Origin/CenterComplete.lean:257:  have halt : DirAlternates sameDirSeg1 sameDirSeg2 sameDirSeg3 := h.1
+ba74fd6344df5d03d3a8c5b6a5a2c9d8bef7a8b6:formal/Origin/CenterComplete.lean:258:  unfold DirAlternates sameDirSeg1 sameDirSeg2 at halt
+ba74fd6344df5d03d3a8c5b6a5a2c9d8bef7a8b6:formal/Origin/CenterComplete.lean:277:theorem noSpan_dirAlternates : DirAlternates noSpanSeg1 noSpanSeg2 noSpanSeg3 := by
+ba74fd6344df5d03d3a8c5b6a5a2c9d8bef7a8b6:formal/Origin/CenterComplete.lean:278:  unfold DirAlternates noSpanSeg1 noSpanSeg2 noSpanSeg3; decide
+ba74fd6344df5d03d3a8c5b6a5a2c9d8bef7a8b6:formal/Origin/CenterComplete.lean:321:    DirAlternates noSpanSeg1 noSpanSeg2 noSpanSeg3 ∧
+ba74fd6344df5d03d3a8c5b6a5a2c9d8bef7a8b6:formal/Origin/CenterComplete.lean:354:    unfold DirAlternates trueCenterSeg1 trueCenterSeg2 trueCenterSeg3; decide
+ba74fd6344df5d03d3a8c5b6a5a2c9d8bef7a8b6:formal/Origin/CenterComplete.lean:382:    (h : CenterConfirmedComplete s1 s2 s3) : DirAlternates s1 s2 s3 := h.1
+ba74fd6344df5d03d3a8c5b6a5a2c9d8bef7a8b6:formal/Origin/CenterConstruction.lean:281:    线段，须方向交替，CenterComplete.lean DirAlternates），(2) 中枢延伸/新生/扩展的发展态串接
+ba74fd6344df5d03d3a8c5b6a5a2c9d8bef7a8b6:rust/src/theta_v0/backtest/econ_positive/xzd.rs:404:/// L0 完整判据 `DirAlternates` 需要真方向——见 center.rs 诚实有效域声明）。`tower[0]` 本就是
+ba74fd6344df5d03d3a8c5b6a5a2c9d8bef7a8b6:rust/src/theta_v0/classifier/center.rs:7://!   1. **方向交替** `DirAlternates`：`s1.dir≠s2.dir ∧ s2.dir≠s3.dir`（§6.1 典型形态
+ba74fd6344df5d03d3a8c5b6a5a2c9d8bef7a8b6:rust/src/theta_v0/classifier/center.rs:79:/// 完整判据 `DirAlternates` 的必要输入（旧 `UnitRange` 丢弃方向，无法判方向交替——G4 缺口根源）。
+ba74fd6344df5d03d3a8c5b6a5a2c9d8bef7a8b6:rust/src/theta_v0/classifier/center.rs:88:    /// 走势单元方向（完整判据 `DirAlternates` 的输入；对齐 `Origin.Segment.direction`）。
+ba74fd6344df5d03d3a8c5b6a5a2c9d8bef7a8b6:rust/src/theta_v0/classifier/center.rs:180:/// 三段方向交替判定（契约锚 `Origin.CenterComplete.DirAlternates`，CenterComplete.lean:61-62）。
+ba74fd6344df5d03d3a8c5b6a5a2c9d8bef7a8b6:rust/src/theta_v0/classifier/center.rs:217:/// 1. **方向交替** `dir_alternates`（§6.1，`DirAlternates`）。
+ba74fd6344df5d03d3a8c5b6a5a2c9d8bef7a8b6:rust/src/theta_v0/classifier/center.rs:242:    // 支1：方向交替（§6.1，DirAlternates）。
+ba74fd6344df5d03d3a8c5b6a5a2c9d8bef7a8b6:rust/src/theta_v0/classifier/pipeline.rs:138:/// L0 单元 = parser 线段（**含方向**，完整判据 `DirAlternates` 的输入）；`[lo,hi]` 对齐
+ba74fd6344df5d03d3a8c5b6a5a2c9d8bef7a8b6:rust/src/theta_v0/parser/feature_seq.rs:662:    /// - 并列：入元素 ⊃ 末元素、段方向极值相等、另一侧严格越过、末元素是峰候选：a、b 无缺口 ⟹
+ba74fd6344df5d03d3a8c5b6a5a2c9d8bef7a8b6:rust/src/theta_v0/parser/feature_seq.rs:756:                // 携带段方向极值的笔（`067:38`）；合并取 min/max 不改 b 的 P 侧极值。
+ba74fd6344df5d03d3a8c5b6a5a2c9d8bef7a8b6:rust/src/theta_v0/parser/second_kind.rs:170:    // #1344：P = 首特征序列分型中心元素 apex 的方向极值。
+ba74fd6344df5d03d3a8c5b6a5a2c9d8bef7a8b6:rust/src/theta_v0/parser/second_kind.rs:184:/// 第二特征序列方向极值（向上线段确认看新向下段、向下线段看新向上段的极值）。
+ba74fd6344df5d03d3a8c5b6a5a2c9d8bef7a8b6:rust/src/theta_v0/parser/segment.rs:903:/// `s0`/`s1` 是段首/末笔在 `strokes` 中的索引。端点价取方向极值（向上：起点 low、终点 high；

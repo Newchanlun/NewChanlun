@@ -1,0 +1,26 @@
+[
+  {
+    "number": 1360,
+    "state": "OPEN",
+    "title": "TB-02 验收汇总：全部结构分类及构造子义务（SPEC #1340）",
+    "url": "https://github.com/Newchanlun/NewChanlun/issues/1360"
+  },
+  {
+    "number": 1340,
+    "state": "OPEN",
+    "title": "📋 SPEC：完整生产程序、结构全分类与逐重经营（#1323，R2）",
+    "url": "https://github.com/Newchanlun/NewChanlun/issues/1340"
+  },
+  {
+    "number": 1424,
+    "state": "OPEN",
+    "title": "[impl] TB-02-F 相邻中枢发展与扩展关系（SPEC #1340）",
+    "url": "https://github.com/Newchanlun/NewChanlun/issues/1424"
+  },
+  {
+    "number": 1435,
+    "state": "OPEN",
+    "title": "[impl] TB-02-M 小转大发生见证与高级结果（SPEC #1340）",
+    "url": "https://github.com/Newchanlun/NewChanlun/issues/1435"
+  }
+]

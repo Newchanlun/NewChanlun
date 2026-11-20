@@ -1,0 +1,26 @@
+结果	命令	退出码	命中数
+tracker-Q1-1.json	gh issue list -R Newchanlun/NewChanlun --state all --limit 1000 --search '端点相连' --json number,title,state,url	0	127
+tracker-Q1-2.json	gh issue list -R Newchanlun/NewChanlun --state all --limit 1000 --search '关节极值' --json number,title,state,url	0	77
+tracker-Q1-3.json	"gh issue list -R Newchanlun/NewChanlun --state all --limit 1000 --search '""方向极值"" 中枢' --json number,title,state,url"	0	2
+tracker-Q1-4.json	"gh issue list -R Newchanlun/NewChanlun --state all --limit 1000 --search '""回抽"" ""端点""' --json number,title,state,url"	0	22
+tracker-Q2-1.json	gh issue list -R Newchanlun/NewChanlun --state all --limit 1000 --search '退场条件' --json number,title,state,url	0	334
+tracker-Q2-2.json	"gh issue list -R Newchanlun/NewChanlun --state all --limit 1000 --search '""离开段"" ""回抽段""' --json number,title,state,url"	0	3
+tracker-Q2-3.json	"gh issue list -R Newchanlun/NewChanlun --state all --limit 1000 --search '""越出后返回""' --json number,title,state,url"	0	3
+tracker-Q2-4.json	"gh issue list -R Newchanlun/NewChanlun --state all --limit 1000 --search '""续扫锚"" 中枢' --json number,title,state,url"	0	9
+tracker-Q2-5.json	gh issue list -R Newchanlun/NewChanlun --state all --limit 1000 --search C@u29 --json number,title,state,url	0	3
+tracker-Q3-1.json	"gh issue list -R Newchanlun/NewChanlun --state all --limit 1000 --search '""占位方向""' --json number,title,state,url"	0	1
+tracker-Q3-2.json	"gh issue list -R Newchanlun/NewChanlun --state all --limit 1000 --search '""方向占位"" 中枢' --json number,title,state,url"	0	0
+tracker-Q3-3.json	"gh issue list -R Newchanlun/NewChanlun --state all --limit 1000 --search '""非语义方向"" 三类' --json number,title,state,url"	0	0
+tracker-Q3-4.json	"gh issue list -R Newchanlun/NewChanlun --state all --limit 1000 --search '""首回试"" 次级别' --json number,title,state,url"	0	4
+tracker-Q4-1.json	"gh issue list -R Newchanlun/NewChanlun --state all --limit 1000 --search '""Zn"" ""外缘""' --json number,title,state,url"	0	15
+tracker-Q4-2.json	"gh issue list -R Newchanlun/NewChanlun --state all --limit 1000 --search '""内部非"" ""端点""' --json number,title,state,url"	0	2
+tracker-Q4-3.json	"gh issue list -R Newchanlun/NewChanlun --state all --limit 1000 --search '""非 Zn"" ""末成员""' --json number,title,state,url"	0	1
+repo-Q1.txt	git grep -nI -E '端点相连|关节极值|方向极值|端点不相连|JointNotConnected|DirAlternates' ba74fd6344df5d03d3a8c5b6a5a2c9d8bef7a8b6 -- .chanlun/definitions docs/adr analysis docs formal rust CONTEXT.md ':(exclude)docs/chanlun/text'	0	39
+repo-Q2.txt	git grep -nI -E '退场条件②|离开段.{0,16}回抽段|越出后返回|首回试|首回抽|last_member\s*\+\s*2|refSeg4Break|BreakUnitOutward|C@u29|tb1424-prep-r2|续扫锚' ba74fd6344df5d03d3a8c5b6a5a2c9d8bef7a8b6 -- .chanlun/definitions docs/adr analysis docs formal rust CONTEXT.md ':(exclude)docs/chanlun/text'	0	25
+repo-Q3.txt	git grep -nI -E '占位方向|方向.{0,5}占位|外缘占位|非语义方向|技术突破方向|center_own_dir_at|leave_anchor' ba74fd6344df5d03d3a8c5b6a5a2c9d8bef7a8b6 -- .chanlun/definitions docs/adr analysis docs formal rust CONTEXT.md ':(exclude)docs/chanlun/text'	0	67
+repo-Q4.txt	git grep -nI -E '相邻.{0,4}Zn.{0,7}(端点|覆盖)|非.{0,3}Zn.{0,8}(极值|远端|成员)|Zn.{0,14}(聚合|外缘)|zn_extrema|extendWeak_nonZn_member' ba74fd6344df5d03d3a8c5b6a5a2c9d8bef7a8b6 -- .chanlun/definitions docs/adr analysis docs formal rust CONTEXT.md ':(exclude)docs/chanlun/text'	0	10
+blog-legs.txt	git grep -nI -E '离开.{0,14}(中枢|区间)|中枢.{0,12}(离开|脱离)|离开.{0,36}(回抽|回试|回拉|回跌|回调)|回抽.{0,22}(中枢|低点|高点)|回试.{0,22}(中枢|低点|高点)|回拉.{0,22}(中枢|低点|高点)' ba74fd6344df5d03d3a8c5b6a5a2c9d8bef7a8b6 -- docs/chanlun/text/blog	0	168
+blog-nonreturn.txt	git grep -nI -E '(不[能再]?回(到|去|落|跌)|不重新回到|不重回|不(再)?触及|不返回|不(跌|升)破[ Zz]*(ZG|ZD|中枢)|跌不回|升不回).{0,18}(中枢|区间|三类|[Zz][GgDd])|中枢.{0,24}(不回|不重回|不[能再]?回来|不重新回到|不触及|破坏)' ba74fd6344df5d03d3a8c5b6a5a2c9d8bef7a8b6 -- docs/chanlun/text/blog	0	48
+blog-t3.txt	git grep -nI -E '(第三类|三类买卖|三买|三卖|三买卖).{0,24}(定理|回抽|回试|回拉|低点|高点|破坏|完成|完结|结束|延伸)|(完成|完结|结束|延伸|破坏|回抽|回试|回拉|低点|高点).{0,25}(第三类|三买|三卖)|第三类买卖点定理' ba74fd6344df5d03d3a8c5b6a5a2c9d8bef7a8b6 -- docs/chanlun/text/blog	0	144
+blog-ends.txt	git grep -nI -E '(线段|笔|走势类型|反弹|回试|回抽).{0,18}(端点|关节|连接点|起点|结束点|分界点|终点|最高点|最低点|高低点)|(端点|结合点|分界点|连接点|起点|终点|最高点|最低点).{0,18}(线段|笔|走势类型)|[a-z][12][=＝][a-z][12]|特征序列.{0,14}(缺口|区间)' ba74fd6344df5d03d3a8c5b6a5a2c9d8bef7a8b6 -- docs/chanlun/text/blog	0	58
+blog-extension.txt	git grep -nI -E '中[枢樞].{0,14}(延伸|破坏|重叠|不重叠|完成|完结)|(延伸|破坏|完成|完结).{0,10}中枢|[dD]n.{0,30}[gG]n|遍历.{0,12}Zn' ba74fd6344df5d03d3a8c5b6a5a2c9d8bef7a8b6 -- docs/chanlun/text/blog	0	264

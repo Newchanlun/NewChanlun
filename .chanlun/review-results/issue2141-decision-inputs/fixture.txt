@@ -1,0 +1,25 @@
+价格保留夹具原整数单位，u 下标从 0 开始
+u dir start end lo hi source_start source_end
+0 DOWN 10 74 7756973000000 7773905000000 7773905000000 7759246000000
+1 UP 74 189 7755323000000 7798000000000 7759246000000 7798000000000
+2 DOWN 189 373 7762000000000 7798000000000 7798000000000 7762000000000
+3 UP 373 416 7762000000000 7796680000000 7762000000000 7796680000000
+4 DOWN 416 520 7656433000000 7822000000000 7796680000000 7656433000000
+5 UP 520 574 7656433000000 7709591000000 7656433000000 7686801000000
+seed [0,1,2], core (7762000000000, 7773905000000)
+prev->cur Kjoint extremum(prev/end,next/start) equal stroke_end/start equal cur_closed_overlap
+0->1 True (7756973000000, 7755323000000) False (7759246000000, 7759246000000) True True
+1->2 True (7798000000000, 7798000000000) True (7798000000000, 7798000000000) True True
+2->3 True (7762000000000, 7762000000000) True (7762000000000, 7762000000000) True True
+3->4 True (7796680000000, 7822000000000) False (7796680000000, 7796680000000) True True
+4->5 True (7656433000000, 7656433000000) True (7656433000000, 7656433000000) True False
+baseline j, terminal, connector, next: 5 4 5 6
+members [0, 1, 2, 3, 4] Zn [0, 2, 4] Zn metrics {'DD': 7656433000000, 'D': 7762000000000, 'G': 7773905000000, 'GG': 7822000000000} all-member metrics {'DD': 7656433000000, 'D': 7762000000000, 'G': 7773905000000, 'GG': 7822000000000}
+u1.lo uncovered by adjacent Zn: 7755323000000 7756973000000 7762000000000
+u3.hi mismatched but covered: 7796680000000 7798000000000 7822000000000
+worked C rows in synthetic ticks: core [25,35], prefix metrics {'DD': 20, 'D': 25, 'G': 35, 'GG': 40}
+return/non-Zn D/R bounds ('UP', 36, 50) ('DOWN', 33, 50) side UP Zn metrics {'DD': 20, 'D': 33, 'G': 35, 'GG': 50}
+touch/non-Zn D/R bounds ('UP', 36, 50) ('DOWN', 35, 50) side UP Zn metrics {'DD': 20, 'D': 35, 'G': 35, 'GG': 50}
+no-return/non-Zn D/R bounds ('UP', 36, 50) ('DOWN', 37, 50) side UP Zn metrics {'DD': 20, 'D': 25, 'G': 35, 'GG': 40}
+return/Zn D/R bounds ('DOWN', 10, 24) ('UP', 10, 28) side DOWN Zn metrics unresolved (keep prefix)
+no-return/Zn D/R bounds ('DOWN', 10, 24) ('UP', 10, 24) side DOWN Zn metrics {'DD': 20, 'D': 25, 'G': 35, 'GG': 40}

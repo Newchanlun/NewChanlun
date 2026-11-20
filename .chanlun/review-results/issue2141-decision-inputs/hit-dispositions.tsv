@@ -1,0 +1,1086 @@
+路	查询	对象	状态	摘录	逐项分诊
+tracker	tracker-Q1-1;tracker-Q1-2;tracker-Q2-1;tracker-Q4-2	59	CLOSED	🗺️ 全定义策略端到端落地收口：v1 真链验收 + 剩余接线	该标题讨论其他票的归口或执行对象；不作为本票权威；未逐条拉正文。
+tracker	tracker-Q2-1	61	CLOSED	[research] χ 量纲三方案（绝对额/收益率/归一化）教义与数据证据收集	该标题讨论其他票的归口或执行对象；不作为本票权威；未逐条拉正文。
+tracker	tracker-Q2-1	68	CLOSED	[task] C1 双仓生产接线（nautilus 真相源 NETTING→dual、TW 接线、F-01 deprecated 处置）	该标题讨论其他票的归口或执行对象；不作为本票权威；未逐条拉正文。
+tracker	tracker-Q2-1	105	CLOSED	[grilling] wf7 ✗ 后续方向：真链门覆盖率治理 / 门形态重议 / 接受存档	该标题讨论其他票的归口或执行对象；不作为本票权威；未逐条拉正文。
+tracker	tracker-Q1-2;tracker-Q2-1	106	CLOSED	🗺️ 内在级别多视窗端到端：买卖点级别身份在 L0 上的独立体现	点、下钻、力度或候选对象，不是本枢 D/R 的成员和续扫。
+tracker	tracker-Q2-1	109	CLOSED	📋 SPEC：内在级别多视窗端到端（级别层叠投影）	该标题讨论其他票的归口或执行对象；不作为本票权威；未逐条拉正文。
+tracker	tracker-Q2-1	126	CLOSED	🗺️ 塔侧跨级链增产：让塔产出更多多级确认事件	该标题讨论其他票的归口或执行对象；不作为本票权威；未逐条拉正文。
+tracker	tracker-Q2-1	135	CLOSED	🗺️ 按级别管理出场：多级别仓位的独立出场机制	资金/经营/订单/账本合同的退场，无权决 R5 结构。
+tracker	tracker-Q2-1	137	CLOSED	V4 出场路径 + 完全平仓 vs 短差出场分流审计	该标题讨论其他票的归口或执行对象；不作为本票权威；未逐条拉正文。
+tracker	tracker-Q2-1	138	CLOSED	出场机制精确盘点：#136/#137 审计是否已覆盖四种出场的级别感知	该标题讨论其他票的归口或执行对象；不作为本票权威；未逐条拉正文。
+tracker	tracker-Q1-4	144	CLOSED	研究：周期同构猜想的条件化证明——次级别走势类型在父级别是否必有买卖点投影	点、下钻、力度或候选对象，不是本枢 D/R 的成员和续扫。
+tracker	tracker-Q2-1	154	CLOSED	端到端覆盖盘点：现有代码距完整端到端（含独立多空双开）差什么	该标题讨论其他票的归口或执行对象；不作为本票权威；未逐条拉正文。
+tracker	tracker-Q1-2;tracker-Q2-1	157	CLOSED	[grilling] 独立反向声部准入语义：多重赋格双开的裁定	该标题讨论其他票的归口或执行对象；不作为本票权威；未逐条拉正文。
+tracker	tracker-Q2-1	162	CLOSED	[research] XZD 通道在主线 m8_e2e 为何 0 笔：L1 C3 硬门惰性根因	点、下钻、力度或候选对象，不是本枢 D/R 的成员和续扫。
+tracker	tracker-Q1-3	163	CLOSED	[grilling] 链式确认的最小实现形态：compose 链逐级确认如何替代并集跳查	该标题讨论其他票的归口或执行对象；不作为本票权威；未逐条拉正文。
+tracker	tracker-Q1-2;tracker-Q2-1	168	CLOSED	[grilling] 多视窗实现路线的执行切分：T 线票型与验收口径	该标题讨论其他票的归口或执行对象；不作为本票权威；未逐条拉正文。
+tracker	tracker-Q1-2	170	CLOSED	[task] T1 键域重锚：provider 携带三元锚 + 单键域增写（组锚@ℓ 包含层单一来源）	该标题讨论其他票的归口或执行对象；不作为本票权威；未逐条拉正文。
+tracker	tracker-Q1-2	172	CLOSED	[task] T3 严格链判定：typed_lookup_multi 重写 + 链谱系 + 并集降 shadow	该标题讨论其他票的归口或执行对象；不作为本票权威；未逐条拉正文。
+tracker	tracker-Q2-1	173	CLOSED	[task] T4 旧桥退役：typed_lookup/by_end/comparison 装置删除	该标题讨论其他票的归口或执行对象；不作为本票权威；未逐条拉正文。
+tracker	tracker-Q2-1	174	CLOSED	出场通道结构收敛（ADR 0001 教义-生产接线图）	该标题讨论其他票的归口或执行对象；不作为本票权威；未逐条拉正文。
+tracker	tracker-Q2-1	176	CLOSED	勘察：SplitLegLedger 接线代价（分账本+多级毛暴露递归+父仓冻结）	资金/经营/订单/账本合同的退场，无权决 R5 结构。
+tracker	tracker-Q2-1	190	CLOSED	研究：工作线进化史——小转大、泥球关节点与未用的蓝图	该标题讨论其他票的归口或执行对象；不作为本票权威；未逐条拉正文。
+tracker	tracker-Q1-1;tracker-Q2-1	193	CLOSED	Spec：会计层对准已有蓝图（地图 #174 出口，2026-07-23 定稿）	该标题讨论其他票的归口或执行对象；不作为本票权威；未逐条拉正文。
+tracker	tracker-Q2-1	204	CLOSED	终验A 复审：条目 1/3/4 判定翻转核对（#174 收口）	该标题讨论其他票的归口或执行对象；不作为本票权威；未逐条拉正文。
+tracker	tracker-Q1-2	205	CLOSED	[research] 方向见证分歧与多级链零闭合的机制分类（T3 shadow 469 例 + 闭合失败首因）	该标题讨论其他票的归口或执行对象；不作为本票权威；未逐条拉正文。
+tracker	tracker-Q1-2;tracker-Q2-1	206	CLOSED	[grilling] T3 shadow 后续三裁：方向键粒度 / 多级零闭合归因与供给侧 / 出场侧旧桥去向	该标题讨论其他票的归口或执行对象；不作为本票权威；未逐条拉正文。
+tracker	tracker-Q1-2;tracker-Q2-1	207	CLOSED	[task] T5a 方向退役：键域与链查询去方向分量 + shadow 重跑（#206 Q1）	该标题讨论其他票的归口或执行对象；不作为本票权威；未逐条拉正文。
+tracker	tracker-Q1-2	208	CLOSED	[task] T5b 出场侧迁链 + 旧出场桥删除（#206 Q3）	该标题讨论其他票的归口或执行对象；不作为本票权威；未逐条拉正文。
+tracker	tracker-Q2-1	209	CLOSED	修复 fold：一类候选关全部同级本仓腿（S7 级别内全平的实装）	该标题讨论其他票的归口或执行对象；不作为本票权威；未逐条拉正文。
+tracker	tracker-Q1-1;tracker-Q1-2	215	CLOSED	[spec] 背书失败原因测量装置：逐事件四桶计数 + 按级分解（#214 实装依据）	该标题讨论其他票的归口或执行对象；不作为本票权威；未逐条拉正文。
+tracker	tracker-Q1-2	218	CLOSED	[task] owner 归属修正实装：二类载体修填同级别 + 判同机制换两元锚（路线 B）	该标题讨论其他票的归口或执行对象；不作为本票权威；未逐条拉正文。
+tracker	tracker-Q1-2;tracker-Q2-1	219	CLOSED	[spec] owner 归属修正实装（路线 B）：归属/确认分层 + 二类载体一类点锚 + 两族判同（#218 实装依据）	该标题讨论其他票的归口或执行对象；不作为本票权威；未逐条拉正文。
+tracker	tracker-Q1-1	221	CLOSED	🗺️ orphan 处置图：「实现了但没装」资产清点与去向裁定（Lean 孤岛 + 老线 → 端到端补充）	该标题讨论其他票的归口或执行对象；不作为本票权威；未逐条拉正文。
+tracker	tracker-Q1-1;tracker-Q2-1	225	CLOSED	[grilling] 处置判据：孤儿资产去向（接线/归档/删除）的裁定标准	该标题讨论其他票的归口或执行对象；不作为本票权威；未逐条拉正文。
+tracker	tracker-Q2-1	232	CLOSED	[spec] V3 NestLifecycleBook 重建：活假设状态机（实装卡+勘误+#78 修复合并规格，#231 实装依据）	该标题讨论其他票的归口或执行对象；不作为本票权威；未逐条拉正文。
+tracker	tracker-Q2-4	241	CLOSED	[research] 滑动扫描 vs 唯一分解：中枢分解三形态不一致的未决教义问题（自 #221 划出）	相邻结构议题；标题对象/verdict 不足以断言新增 R5 归属，作为近邻而非已裁。
+tracker	tracker-Q1-1	246	CLOSED	[grilling] 相切算不算「重合区间」：特征序列缺口判据的 rust↔Lean 定义分歧（第67课原文裁定）	相切是特征序列缺口边界；不处理首回抽角色。
+tracker	tracker-Q1-1	248	CLOSED	相切=重合 口径落码：feature_seq 缺口 + segment 三笔起点两处同批改（#246 裁定）	该标题讨论其他票的归口或执行对象；不作为本票权威；未逐条拉正文。
+tracker	tracker-Q1-1;tracker-Q1-4;tracker-Q2-1	250	CLOSED	🗺️ wf7 跨级链死活判定：稀薄是教义事实还是实现限制	该标题讨论其他票的归口或执行对象；不作为本票权威；未逐条拉正文。
+tracker	tracker-Q2-1	251	CLOSED	[task] 卡点定位图：重跑 wf7 链归因，读出 verdict × first_gap × status 分布	该标题讨论其他票的归口或执行对象；不作为本票权威；未逐条拉正文。
+tracker	tracker-Q1-1;tracker-Q1-2	254	CLOSED	[grilling] 真链判据：跨级链配对的真假，有没有独立于身份桥的判定标准	该标题讨论其他票的归口或执行对象；不作为本票权威；未逐条拉正文。
+tracker	tracker-Q1-4	257	CLOSED	[task] 形式化缺口补齐：Lift 实现 + Context 展开 + 中枢内蕴含证明（六项全做）	相邻结构议题；标题对象/verdict 不足以断言新增 R5 归属，作为近邻而非已裁。
+tracker	tracker-Q2-1	268	CLOSED	📋 SPEC：翻向守卫事件化——只杀真翻向、不误杀出生对立（#261 裁定）	该标题讨论其他票的归口或执行对象；不作为本票权威；未逐条拉正文。
+tracker	tracker-Q2-1	269	CLOSED	翻向守卫事件化：事件谓词 + 判据改造 + 红环转绿（T1）	该标题讨论其他票的归口或执行对象；不作为本票权威；未逐条拉正文。
+tracker	tracker-Q2-1	278	CLOSED	🗺️ 多空双开与反向操作对齐：散装域处置 + 对冲腿名分 + 狭义短差（盘背减补）	该标题讨论其他票的归口或执行对象；不作为本票权威；未逐条拉正文。
+tracker	tracker-Q2-1	287	CLOSED	[grilling] 持仓阶段机对齐 spec：两层成本 + 阶段源唯一 + 转移规则 + 0 成本后短差行为	资金/经营/订单/账本合同的退场，无权决 R5 结构。
+tracker	tracker-Q1-1	288	CLOSED	legacy+Python 相切=重合 同批切口径（#277 裁定：rust segment.rs 两谓词 + a_segment_v1.py 三处 + 声明作废 + golden 重锚）	该标题讨论其他票的归口或执行对象；不作为本票权威；未逐条拉正文。
+tracker	tracker-Q1-4	290	CLOSED	中枢侧相切旧口径残余三处：golden 重锚 + a_center_v0 + a_level_fsm（#246 全域另案）	旧相切核心修订非本票；回抽相切沿 CC-019。
+tracker	tracker-Q2-1	300	CLOSED	[P0b] 证书索引 + cert-gated exit Lean 形式化（价值序 P0b，编排者指定 Opus 5 实装）	点、下钻、力度或候选对象，不是本枢 D/R 的成员和续扫。
+tracker	tracker-Q1-1	307	CLOSED	[task] #248 成交/净值全窗量化：相切=重合口径对成交笔数与账户净值的生产影响（②c 签字包前置，backtest_bin 通道已解锁）	资金/经营/订单/账本合同的退场，无权决 R5 结构。
+tracker	tracker-Q2-1	309	CLOSED	[task] LEE M3 事件门控：Ledger_ℓ 只在 clock_ℓ 事件时点重估目标（设计文档 §D M3，订单流与 M0 分叉起點，独立评审强制）	该标题讨论其他票的归口或执行对象；不作为本票权威；未逐条拉正文。
+tracker	tracker-Q1-1	324	CLOSED	Python 测试面 CI 环境适配 8 项：平台浮点 6 + 数据 fixture 2（#297 CI 首跑浮出，既有账非 #297 所致）	基础设施或历史载体；不构成离开/回抽的判据。
+tracker	tracker-Q2-1	336	CLOSED	R3：中枢事件机改消费塔链——废弃独立复算，单一真相源（#330 裁定，阻塞 #292）	先例为共用 owner，不定义两腿。
+tracker	tracker-Q2-1	356	CLOSED	级别帽深层缺口：下单量 t_lee 未经 Σcap_ℓ 二次裁剪（#351 浮出，账本已裁物理未裁）	资金/经营/订单/账本合同的退场，无权决 R5 结构。
+tracker	tracker-Q1-1	390	CLOSED	🗺️ 验收判据口径唯一性：什么算验收，越线的怎么办	该标题讨论其他票的归口或执行对象；不作为本票权威；未逐条拉正文。
+tracker	tracker-Q1-1;tracker-Q2-1	394	CLOSED	chi_open_gate_lcb 死代码处置：删 / 接线 / 登记（原 map #390 子票，前提塌后改造）	该标题讨论其他票的归口或执行对象；不作为本票权威；未逐条拉正文。
+tracker	tracker-Q1-1	395	CLOSED	[grilling] 已用第二套口径算出的结论怎么处置	该标题讨论其他票的归口或执行对象；不作为本票权威；未逐条拉正文。
+tracker	tracker-Q1-2;tracker-Q2-1	396	CLOSED	interp.rs fold 双驱动合并：规则2 输入源提为参数，消除 67 行人工同步	该标题讨论其他票的归口或执行对象；不作为本票权威；未逐条拉正文。
+tracker	tracker-Q2-1	398	CLOSED	coverage.rs 拆分成果合并落地：三个 commit 从 worktree 合进 main（#359 关票依据订正）	该标题讨论其他票的归口或执行对象；不作为本票权威；未逐条拉正文。
+tracker	tracker-Q1-1;tracker-Q2-1	402	CLOSED	[grilling] 活假设账本接生产三题：喂数节拍 / seg_c_full 复活 / Invalidated 唯一通道	资金/经营/订单/账本合同的退场，无权决 R5 结构。
+tracker	tracker-Q1-1	406	CLOSED	影子评审：#394 chi_open_gate_lcb 接线（两轴，新上下文禁自评）	该标题讨论其他票的归口或执行对象；不作为本票权威；未逐条拉正文。
+tracker	tracker-Q2-1	411	CLOSED	pi_bsp_timing 全量数据集 233s：34 万 bar 跑满两年多，窗口化仅需 0.3s	该标题讨论其他票的归口或执行对象；不作为本票权威；未逐条拉正文。
+tracker	tracker-Q1-1;tracker-Q2-1	421	CLOSED	📋 SPEC：活假设账本接生产（三前置已清）	资金/经营/订单/账本合同的退场，无权决 R5 结构。
+tracker	tracker-Q1-2	424	CLOSED	归档订正：walkforward 补口径声明 + oddeven 撤回机制C判定 + 两处援引改措辞（#395 裁定执行项）	该标题讨论其他票的归口或执行对象；不作为本票权威；未逐条拉正文。
+tracker	tracker-Q2-1	436	CLOSED	[#119 评审浮出] #114 编号复用导致 git log --grep 定位失效（票据溯源风险）	该标题讨论其他票的归口或执行对象；不作为本票权威；未逐条拉正文。
+tracker	tracker-Q2-1	439	CLOSED	[#117 评审浮出] admission.rs「纯移动/零语义改动」文档声明与 git 历史不符	该标题讨论其他票的归口或执行对象；不作为本票权威；未逐条拉正文。
+tracker	tracker-Q1-1	449	CLOSED	[grilling] 判据层禁引 nest 产物：禁令死活（守卫当前红 + 条款无批准记录）	该标题讨论其他票的归口或执行对象；不作为本票权威；未逐条拉正文。
+tracker	tracker-Q1-1	453	CLOSED	影子评审：#438 required-features 盲区结构闭合（两轴，新上下文禁自评）	该标题讨论其他票的归口或执行对象；不作为本票权威；未逐条拉正文。
+tracker	tracker-Q2-1	463	CLOSED	[research] fill 两家族的名分：π 家族 vs v1/dual 是世代关系还是并列口径（#433 重构前置）	该标题讨论其他票的归口或执行对象；不作为本票权威；未逐条拉正文。
+tracker	tracker-Q2-1	467	CLOSED	📋 SPEC（2026-07-28 重裁）：链门语义订正——π 单门双覆盖钉案 + 出场归因统计落可达臂（#433 交棒件）	该标题讨论其他票的归口或执行对象；不作为本票权威；未逐条拉正文。
+tracker	tracker-Q2-4	485	CLOSED	[SPEC] 高级别三类点产出链修复：anchor 门 + 归属链 + 终态切换（#473）	旧点产出 anchor 归属，未实现 R5 挂起。
+tracker	tracker-Q1-4	498	CLOSED	逐笔归因审计：#486 trades 差异 → 新增三类点信号链（090 逐条归因）	相邻结构议题；标题对象/verdict 不足以断言新增 R5 归属，作为近邻而非已裁。
+tracker	tracker-Q2-1	500	CLOSED	🗺️ 仓库世代名分单源化 + 按名分物理清算（卫生宪法图）	该标题讨论其他票的归口或执行对象；不作为本票权威；未逐条拉正文。
+tracker	tracker-Q1-1;tracker-Q1-2;tracker-Q2-1	529	CLOSED	📒 塔内原生化长线：跨级链塔内原生终局（E2E-O + Consume_at + N0-N7）	该标题讨论其他票的归口或执行对象；不作为本票权威；未逐条拉正文。
+tracker	tracker-Q1-1;tracker-Q2-1	574	CLOSED	[grilling] T2 买卖点身份账本语义定义链（#465 裁定 A）	点、下钻、力度或候选对象，不是本枢 D/R 的成员和续扫。
+tracker	tracker-Q1-2	582	CLOSED	[map] 一类点分档与 Reset 名义：37:18 否则域的教义定稿 + 实装 spec	该标题讨论其他票的归口或执行对象；不作为本票权威；未逐条拉正文。
+tracker	tracker-Q2-1	592	CLOSED	[wayfinder] 有洞 frontier 产窗死活：真实数据 45% 占比的教义裁决输入（#578 发现）	该标题讨论其他票的归口或执行对象；不作为本票权威；未逐条拉正文。
+tracker	tracker-Q2-1	597	CLOSED	[wayfinder:map] PanLive 全层级完成前可见（L2/L3 + 身份桥接语义）	该标题讨论其他票的归口或执行对象；不作为本票权威；未逐条拉正文。
+tracker	tracker-Q2-1	603	CLOSED	[wayfinder] 身份桥接放宽实装：档2 pending 槽排队 + 档1 暂认中枢严格同锚（#599 裁定）	相邻结构议题；标题对象/verdict 不足以断言新增 R5 归属，作为近邻而非已裁。
+tracker	tracker-Q1-1	605	CLOSED	[debt] 死路径清除 + p123 两长函数 + 失效措辞订正（#448 S-H2 连带）	该标题讨论其他票的归口或执行对象；不作为本票权威；未逐条拉正文。
+tracker	tracker-Q2-1	614	CLOSED	[task] 双线并轨工程：kimi-nest-mainline-20260717 与 main 收束为单一现役线	该标题讨论其他票的归口或执行对象；不作为本票权威；未逐条拉正文。
+tracker	tracker-Q1-1	638	CLOSED	[task] 交易层消费三类点成立证据包（#575 消费方接线 2/3）	相邻结构议题；标题对象/verdict 不足以断言新增 R5 归属，作为近邻而非已裁。
+tracker	tracker-Q2-1	659	CLOSED	[grilling] 结构止损价名分重估：79 课降级后，pivot/ZG 止损价算什么	该标题讨论其他票的归口或执行对象；不作为本票权威；未逐条拉正文。
+tracker	tracker-Q2-2	666	CLOSED	[grilling] N4 事件↔BSP 稳定身份边形态裁定（map #529）	点、下钻、力度或候选对象，不是本枢 D/R 的成员和续扫。
+tracker	tracker-Q1-1	674	CLOSED	影子评审：#257 Lift/Context 1–3 项（两轴，新上下文禁自评）	该标题讨论其他票的归口或执行对象；不作为本票权威；未逐条拉正文。
+tracker	tracker-Q2-1	691	CLOSED	N3 硬化二轮：p123 探针见证面与节拍参数覆盖 + 断言措辞 + enum 扩展守卫（#676 双轴 LOW/INFO）	该标题讨论其他票的归口或执行对象；不作为本票权威；未逐条拉正文。
+tracker	tracker-Q2-1	695	CLOSED	📒 欠账总账归口：68 笔逐笔终态（deprecated 核销 + 孤儿名分 + 现役处置）	该标题讨论其他票的归口或执行对象；不作为本票权威；未逐条拉正文。
+tracker	tracker-Q2-1	716	CLOSED	[task] L15 closed_loop 旧出场判定路径退役（map #695）	该标题讨论其他票的归口或执行对象；不作为本票权威；未逐条拉正文。
+tracker	tracker-Q2-1	733	CLOSED	[task] L41 #614 并线 ⚠ 尾六条清理批（map #695）	该标题讨论其他票的归口或执行对象；不作为本票权威；未逐条拉正文。
+tracker	tracker-Q2-1	734	CLOSED	[task] L46 ADR 0001 文本债修订（含 L13 两项 + L12 加注，map #695）	该标题讨论其他票的归口或执行对象；不作为本票权威；未逐条拉正文。
+tracker	tracker-Q1-2;tracker-Q2-1	737	CLOSED	🗺️ 证书为什么没被放行：环节 × 性质拆账 + 修复路线裁定（原题「塔为什么产不出证书」已由本图证伪）	点、下钻、力度或候选对象，不是本枢 D/R 的成员和续扫。
+tracker	tracker-Q1-2;tracker-Q2-1	740	CLOSED	[grilling] missing_cert 成因定案 + 修复路线裁定（map #737）	该标题讨论其他票的归口或执行对象；不作为本票权威；未逐条拉正文。
+tracker	tracker-Q1-2	741	CLOSED	[research] 最精确点位系统方法考证：《市场天道》六章 + 27/49/61/102 课——逐级无跳与精度（#685 备料④，map #529）	该标题讨论其他票的归口或执行对象；不作为本票权威；未逐条拉正文。
+tracker	tracker-Q2-1	743	CLOSED	[map] 端到端模块化：递归走势类型本体下的深模块收敛（fable 勘察 C1-C6 路线）	该标题讨论其他票的归口或执行对象；不作为本票权威；未逐条拉正文。
+tracker	tracker-Q2-1	756	CLOSED	📋 SPEC：端到端模块化（map #743）——递归走势类型本体下的深模块收敛实施总单	该标题讨论其他票的归口或执行对象；不作为本票权威；未逐条拉正文。
+tracker	tracker-Q2-1	766	CLOSED	[task] #644 尾部收口批：tests.rs 重审 + 门控/对拍载体/登记订正（#758 MED/LOW）	该标题讨论其他票的归口或执行对象；不作为本票权威；未逐条拉正文。
+tracker	tracker-Q1-2	767	CLOSED	🗺️ 本仓 wayfinder 工作流正本：路由表、四票型形态、并行纪律	该标题讨论其他票的归口或执行对象；不作为本票权威；未逐条拉正文。
+tracker	tracker-Q2-1	768	CLOSED	[research] 三方口径差异清单：视频 vs skill 正文 vs ask-matt（map #767）	该标题讨论其他票的归口或执行对象；不作为本票权威；未逐条拉正文。
+tracker	tracker-Q2-1	769	CLOSED	[grilling] 原型票在本仓的形态与准入判据：0/0 怎么破（map #767）	该标题讨论其他票的归口或执行对象；不作为本票权威；未逐条拉正文。
+tracker	tracker-Q1-1;tracker-Q1-2	771	CLOSED	[grilling] 两种图分家：一次寻路图 vs 长驻总账图（map #767）	该标题讨论其他票的归口或执行对象；不作为本票权威；未逐条拉正文。
+tracker	tracker-Q2-1	773	CLOSED	[task] 工作流正本落盘 + AGENTS.md 挂指针（map #767 收口）	该标题讨论其他票的归口或执行对象；不作为本票权威；未逐条拉正文。
+tracker	tracker-Q1-1;tracker-Q1-2	775	CLOSED	[grilling] spec 的两种名分：交棒件 vs 总说明书（map #767）	该标题讨论其他票的归口或执行对象；不作为本票权威；未逐条拉正文。
+tracker	tracker-Q2-1	776	CLOSED	[grilling] 并行吞吐：HITL 瓶颈与 batch 化（map #767）	该标题讨论其他票的归口或执行对象；不作为本票权威；未逐条拉正文。
+tracker	tracker-Q1-2	779	CLOSED	[grilling] 走图会话的开场：HITL 票要不要固化开场模板（map #767）	基础设施或历史载体；不构成离开/回抽的判据。
+tracker	tracker-Q2-1	784	CLOSED	wayfinder 正本自动进上下文：UserPromptSubmit hook（CC + Kimi 双侧）	该标题讨论其他票的归口或执行对象；不作为本票权威；未逐条拉正文。
+tracker	tracker-Q1-1;tracker-Q1-2;tracker-Q1-4;tracker-Q2-1;tracker-Q2-4;tracker-Q4-1	787	CLOSED	🗺️ 缠论量化交易系统统一架构正本：疆域测绘 → 三层推导链 → 线的归位	该标题讨论其他票的归口或执行对象；不作为本票权威；未逐条拉正文。
+tracker	tracker-Q1-4	789	CLOSED	[task] 重复实现普查：七概念在仓内各实现了几遍、是否等价（map #787）	该标题讨论其他票的归口或执行对象；不作为本票权威；未逐条拉正文。
+tracker	tracker-Q1-4;tracker-Q2-1	793	CLOSED	[grilling] 教义收敛的方法与次序：40 套口径怎么收、谁说了算、正本放哪（map #787）	原文、Lean、生产事实三方权限分工。
+tracker	tracker-Q1-2	798	CLOSED	[task] ② 丢弃样本抽样核对：父级该不该丢 + 次级别有没有留住（map #737）	该标题讨论其他票的归口或执行对象；不作为本票权威；未逐条拉正文。
+tracker	tracker-Q2-1	799	CLOSED	[grilling] 递归式统一怎么落地：判定模块每级复用的形态、验收判据与例外（map #787）	收敛通则；禁止几何失败后改宽门。
+tracker	tracker-Q2-1	801	CLOSED	[research] 递归自相似系统的模块化方法论：找一套能落到本仓的（map #787，喂 #799）	该标题讨论其他票的归口或执行对象；不作为本票权威；未逐条拉正文。
+tracker	tracker-Q2-1	802	CLOSED	[task] 区间套的纵向下钻是不是真递归：rung 恒真是合理省略还是递归缺失（map #787，喂 #799）	点、下钻、力度或候选对象，不是本枢 D/R 的成员和续扫。
+tracker	tracker-Q1-2;tracker-Q2-1	804	CLOSED	[grilling] 总缝规则：级别差异只准进数据不准进分支——措辞、举证门、适用域与机械锁（map #787）	同输入跨级同输出。
+tracker	tracker-Q2-1	805	CLOSED	[research] 三处递归是不是同一个逻辑：按层切开看 T / 区间套下钻 / 算子 N 的同构性（map #787，喂 #799）	点、下钻、力度或候选对象，不是本枢 D/R 的成员和续扫。
+tracker	tracker-Q2-1	808	CLOSED	[task] recursive_t 的退场条款：供电清单 + 什么时候可以死 + 谁负责杀（map #787）	该标题讨论其他票的归口或执行对象；不作为本票权威；未逐条拉正文。
+tracker	tracker-Q2-1	809	CLOSED	[task] 总缝规则过筛：#789 的约 40 套口径逐条分类，清点第二批的真分歧面（map #787）	该标题讨论其他票的归口或执行对象；不作为本票权威；未逐条拉正文。
+tracker	tracker-Q1-2;tracker-Q1-4;tracker-Q2-1;tracker-Q2-4;tracker-Q4-1	812	CLOSED	[grilling] 中枢的教义正本：7 组分歧 + E1 例外的退场条件（map #787 第二批 1/6）	S-3、S-7、Z-5、Z-6 权威。
+tracker	tracker-Q1-1;tracker-Q1-2;tracker-Q2-1	813	CLOSED	[grilling] 笔与线段的教义正本：9 组分歧，两概念合并不拆（map #787 第二批 2/6）	笔段正本历史锚；实际段端使用现行 xianduan。
+tracker	tracker-Q2-1	814	CLOSED	[grilling] 背驰的教义正本：5 组分歧，4 条违规的收敛方向（map #787 第二批 3/6）	点、下钻、力度或候选对象，不是本枢 D/R 的成员和续扫。
+tracker	tracker-Q1-1;tracker-Q2-1	815	CLOSED	[grilling] 走势类型与级别的教义正本：4 组分歧，含「级别是递归还是涌现簇」（map #787 第二批 4/6）	外缘分离与走势类型；不单定首回抽。
+tracker	tracker-Q1-1;tracker-Q1-2;tracker-Q2-1	817	CLOSED	[grilling] 区间套的教义正本：6 组分歧，最烂一块，排最后（map #787 第二批 6/6）	点、下钻、力度或候选对象，不是本枢 D/R 的成员和续扫。
+tracker	tracker-Q4-1	819	CLOSED	[research] 中枢延伸与升级时 ZG/ZD 怎么算：第20/33课原文对勘（map #787，喂 #812）	冻结核心与升级；继承。
+tracker	tracker-Q2-4	820	CLOSED	[research] 中枢结算后的续扫锚：突破段归谁，原文支持 A/B/C 哪种（map #787，喂 #812）	续扫 A/B/C 判例；原文留白依 Lean C。
+tracker	tracker-Q2-1	823	CLOSED	[research] 中枢发展情景全集：全部定理通读 + 博文/天道/仓内三方对照（map #787，喂 #812）	发展情景，区分延伸与扩展。
+tracker	tracker-Q1-1;tracker-Q1-2	824	CLOSED	[research] 《市场天道》讲中心定理时的 GG/DD 角色：外缘 vs 核心，含 4.15–4.23 补读（map #787，喂 #812 Z-8）	G/D、GG/DD 与核心分工。
+tracker	tracker-Q1-1;tracker-Q1-2;tracker-Q2-1	825	CLOSED	[task] 《市场天道》全书 OCR 入仓 + 全书索引 + 差集清单：完整性基础设施（map #787，喂 #812 与第二批全部概念票）	该标题讨论其他票的归口或执行对象；不作为本票权威；未逐条拉正文。
+tracker	tracker-Q1-1	826	CLOSED	[task] 探针：塔的分解 vs 第38课「同级别分解」是不是同一个——横向递归的实测（map #787，喂 #812 S-6）	该标题讨论其他票的归口或执行对象；不作为本票权威；未逐条拉正文。
+tracker	tracker-Q1-1;tracker-Q2-1	828	CLOSED	[grilling] 三层耦合假设为什么打架：结构耦合 × 会计独立 × 分解空白（map #787）	该标题讨论其他票的归口或执行对象；不作为本票权威；未逐条拉正文。
+tracker	tracker-Q1-2;tracker-Q2-1	830	CLOSED	[research] 递归怎么终止、循环定义怎么破：最低级别中枢的原文考据（map #787，喂 #812 S-5）	相邻结构议题；标题对象/verdict 不足以断言新增 R5 归属，作为近邻而非已裁。
+tracker	tracker-Q2-1	832	CLOSED	[research] 分区卷钱的机械：同级别分解多重赋格操作系统的原文系统性通读与重构（map #787，喂 #828）	该标题讨论其他票的归口或执行对象；不作为本票权威；未逐条拉正文。
+tracker	tracker-Q2-1	833	CLOSED	[grilling] 目标函数不同源：原文求(成本↓,筹码↑)、本仓求净值 Sharpe，验收标准用哪把尺子（map #787）	资金/经营/订单/账本合同的退场，无权决 R5 结构。
+tracker	tracker-Q2-1	834	CLOSED	[grilling] 跨区仲裁：两个级别同时给出相反动作时以谁为准（map #787，#828 欠下三块之一）	该标题讨论其他票的归口或执行对象；不作为本票权威；未逐条拉正文。
+tracker	tracker-Q2-1	835	CLOSED	[grilling] 分区比例：各级别分多少筹码、按什么键分（map #787，#828 欠下三块之一）	资金/经营/订单/账本合同的退场，无权决 R5 结构。
+tracker	tracker-Q2-1	836	CLOSED	[grilling] 总账口径：多区同时满仓算不算杠杆、毛账与净账的缺口怎么处置（map #787，#828 欠下三块之一）	该标题讨论其他票的归口或执行对象；不作为本票权威；未逐条拉正文。
+tracker	tracker-Q2-1	838	CLOSED	[research] 缠师凭什么说「不可能发生」：反向持仓在原文系统里为何无法表示，本仓少了哪一样（map #787，喂 #834）	该标题讨论其他票的归口或执行对象；不作为本票权威；未逐条拉正文。
+tracker	tracker-Q1-2;tracker-Q2-1	839	CLOSED	[grilling] 分区卷钱的机械在双向市场上长什么样：形态定型（map #787，四张会计票的前置）	该标题讨论其他票的归口或执行对象；不作为本票权威；未逐条拉正文。
+tracker	tracker-Q2-1	840	CLOSED	[research] 三阶段/多重赋格/立体性各自挂在哪根轴上：横向同级别分解 vs 纵向区间套的表述分离（map #787，喂 #839）	点、下钻、力度或候选对象，不是本枢 D/R 的成员和续扫。
+tracker	tracker-Q2-1	842	CLOSED	[prototype] 分区卷钱的机械 v0：双向市场下的完整形态，逐条标注原文/推论/自定（map #787，本仓首张原型票）	该标题讨论其他票的归口或执行对象；不作为本票权威；未逐条拉正文。
+tracker	tracker-Q1-2;tracker-Q2-1	843	CLOSED	[research] 仓位管理的原文正本：机动资金比例、一次性买入、头寸上限与借贷禁令——博文 112 处「仓位」+ 天道第 7 章（10 节全未覆盖）（map #787，喂 #842）	资金/经营/订单/账本合同的退场，无权决 R5 结构。
+tracker	tracker-Q1-4	846	CLOSED	[task] 探针：一类点向下递归是不是真的无中断——逐级找一类点/类一类点的实测（map #787，验证 ADR 0013 裁定七）	该标题讨论其他票的归口或执行对象；不作为本票权威；未逐条拉正文。
+tracker	tracker-Q1-1;tracker-Q2-1	847	CLOSED	📋 SPEC：统一架构结构层实施总单（map #787 交棒）——重的实例化 + 操作级别挂载 + 区间套下钻接线	点、下钻、力度或候选对象，不是本枢 D/R 的成员和续扫。
+tracker	tracker-Q2-1	853	CLOSED	[grilling] 新验收判据的参数：成本下降速率的通过阈值、最小样本量、置信下界与频率合成（map #787，ADR 0015 裁定六毕业）	资金/经营/订单/账本合同的退场，无权决 R5 结构。
+tracker	tracker-Q1-1;tracker-Q1-2;tracker-Q1-4;tracker-Q2-1	854	CLOSED	🗺️ 力度与背驰的精确定义：测度论重建与「背驰必转折」的可证性	点、下钻、力度或候选对象，不是本枢 D/R 的成员和续扫。
+tracker	tracker-Q1-1;tracker-Q1-2;tracker-Q2-1	856	CLOSED	[task] 探针：ED 的数据检验——确认延伸边上，后段的中枢停留级别分布是否真的一阶随机占优（map #854）	相邻结构议题；标题对象/verdict 不足以断言新增 R5 归属，作为近邻而非已裁。
+tracker	tracker-Q1-1	857	CLOSED	[task] 勘察：EX 穷尽性的真实缺口——Lean 走势分类只到标签层，语义完全性还缺什么（map #854）	该标题讨论其他票的归口或执行对象；不作为本票权威；未逐条拉正文。
+tracker	tracker-Q2-1	862	CLOSED	[grilling] 力度的教义正本：两层结构 + 五套实现的处置（map #787，从 #814 D-1 拆出）	点、下钻、力度或候选对象，不是本枢 D/R 的成员和续扫。
+tracker	tracker-Q2-1	863	CLOSED	[task] 探针：反向规律 RD 的陈述与对照检验——ED 倒过来那条能不能立（map #854）	该标题讨论其他票的归口或执行对象；不作为本票权威；未逐条拉正文。
+tracker	tracker-Q2-1	864	CLOSED	[task] 第三轮推导：把 72/30 课的两个动力学前提加进约束集重推——地基没进过前两轮（map #854）	该标题讨论其他票的归口或执行对象；不作为本票权威；未逐条拉正文。
+tracker	tracker-Q1-2	867	CLOSED	[task] 第五轮推导：先修靶（命题级别指标化）+ 三条未走过的路（map #854）	该标题讨论其他票的归口或执行对象；不作为本票权威；未逐条拉正文。
+tracker	tracker-Q1-2;tracker-Q2-1	868	CLOSED	[task] 纵向路线（改写版）：价格充分有效 ⟺ 路径空间完备？+ 有限链能证到多弱（map #854）	该标题讨论其他票的归口或执行对象；不作为本票权威；未逐条拉正文。
+tracker	tracker-Q2-1	869	CLOSED	[grilling] 主命题的正式陈述：背驰是不是当下可判定 + 转折指什么 + 正式写法（map #854）	点、下钻、力度或候选对象，不是本枢 D/R 的成员和续扫。
+tracker	tracker-Q1-1;tracker-Q2-1	870	CLOSED	[bug] 下钻 92% 对不上：修完判据后重测 301 条并归因——多少是判据缺陷、多少是转折没定义完整、多少是市场事实	该标题讨论其他票的归口或执行对象；不作为本票权威；未逐条拉正文。
+tracker	tracker-Q1-2;tracker-Q2-1	872	CLOSED	[task] 把已定的力度定义接到生产塔上：段→笔映射在生产链上不存在 + 五套实现收编 + 盘整背驰度量层（map #854 下游）	点、下钻、力度或候选对象，不是本枢 D/R 的成员和续扫。
+tracker	tracker-Q1-1;tracker-Q1-2	873	CLOSED	[grilling] 力度的定义能不能从约束集推出来——兼复核 D-2 的名分裁定（map #854）	点、下钻、力度或候选对象，不是本枢 D/R 的成员和续扫。
+tracker	tracker-Q1-1	874	CLOSED	[task] 探针：力度定义的两侧可落地性勘察——Rust 塔能不能算速度 + Lean ForceMeasure 能不能承实数（map #854）	点、下钻、力度或候选对象，不是本枢 D/R 的成员和续扫。
+tracker	tracker-Q1-2	875	CLOSED	[task] 形式化实装：力度定义进 Lean——ForceMeasure 实例化为速度净增量（路径 1 的判据，map #854）	点、下钻、力度或候选对象，不是本枢 D/R 的成员和续扫。
+tracker	tracker-Q1-1	876	CLOSED	[grilling] 力度定义落在哪条链上：递归塔没有 bar 计数，速度算不出来——改定义 / 装坐标 / 限定域（map #854）	点、下钻、力度或候选对象，不是本枢 D/R 的成员和续扫。
+tracker	tracker-Q1-1	879	CLOSED	[impl] S1：「重」成为一等实体 ⟨标的, 操作级别, 专属筹码⟩（SPEC #847 拆出）	资金/经营/订单/账本合同的退场，无权决 R5 结构。
+tracker	tracker-Q1-2	884	CLOSED	[impl] S4-c：二类点整类缺失——no_new_low 硬闸与 101:32 正面冲突（SPEC #847 拆出，判据挡于 #816）	该标题讨论其他票的归口或执行对象；不作为本票权威；未逐条拉正文。
+tracker	tracker-Q2-1	889	CLOSED	[impl] S6：#840 遗留三条——049:60 级别门控 / w_ℓ 注释 / TStage 命名（SPEC #847 拆出）	该标题讨论其他票的归口或执行对象；不作为本票权威；未逐条拉正文。
+tracker	tracker-Q2-1	890	CLOSED	[impl] S7：毛敞口接进决策路径（SPEC #847 拆出）	该标题讨论其他票的归口或执行对象；不作为本票权威；未逐条拉正文。
+tracker	tracker-Q2-1	894	CLOSED	[task] 探针：M-1/M-2/M-4 三个触发率——多中枢盘整块占比 + 核心/外缘判据差集 + XZD 门死活（map #787，喂 #815 落地）	相邻结构议题；标题对象/verdict 不足以断言新增 R5 归属，作为近邻而非已裁。
+tracker	tracker-Q2-1	895	CLOSED	[task] 勘察：复合走势为什么只带一个中枢——centers: vec![center] 是教义选择还是实现丢失（map #787，喂 #815 M-1 与 #870）	相邻结构议题；标题对象/verdict 不足以断言新增 R5 归属，作为近邻而非已裁。
+tracker	tracker-Q2-1	900	CLOSED	[bug] rmove_dir 三臂与 fallback 四处缺陷：第三臂字段不保真 / 三中枢只比首尾 / 单子 fallback 改义 / 兼容缝未登记（追溯评审查出，主控逐条核实）	相邻结构议题；标题对象/verdict 不足以断言新增 R5 归属，作为近邻而非已裁。
+tracker	tracker-Q1-1;tracker-Q2-1	907	CLOSED	[task] 探针：成本门咬在哪一级——逐级算「平均买卖点间波幅 ÷（交易成本+误差）」（map #787，喂 #817 N-2 阶段二上限）	点、下钻、力度或候选对象，不是本枢 D/R 的成员和续扫。
+tracker	tracker-Q1-1;tracker-Q1-2;tracker-Q2-1	908	CLOSED	[task] 探针：NestInterval 那条链上被套的两个区间是不是父子——给 N-1「价格包含恒真」补有效域（map #787，喂 #817 N-1/N-6）	该标题讨论其他票的归口或执行对象；不作为本票权威；未逐条拉正文。
+tracker	tracker-Q1-1;tracker-Q2-1	911	CLOSED	[task] 探针：按补齐后的四条判据重测 rung 长度分布——N-6 退场条款到底触发没触发（map #787）	该标题讨论其他票的归口或执行对象；不作为本票权威；未逐条拉正文。
+tracker	tracker-Q1-2	914	CLOSED	[grilling] 量层·分子：一份筹码内部，各结构级别信号触发时动多少量（map #787，从 #835 拆出，承接 #348）	资金/经营/订单/账本合同的退场，无权决 R5 结构。
+tracker	tracker-Q1-1;tracker-Q1-2	915	CLOSED	[task] 探针：逐级测「能容纳的资金量」与「信号频率」——ADR 0016 裁定三/四的落地前置（map #787，从 #835 毕业）	资金/经营/订单/账本合同的退场，无权决 R5 结构。
+tracker	tracker-Q2-1	926	CLOSED	[task] 勘察：生产三条成交回路的订单排序与寿命语义现状（喂 ADR 0018 裁定四的接口改动）	资金/经营/订单/账本合同的退场，无权决 R5 结构。
+tracker	tracker-Q2-1	927	CLOSED	[grilling] 订单接口：事件流 → 状态流（ADR 0018 裁定四的硬约束落地形态）	该标题讨论其他票的归口或执行对象；不作为本票权威；未逐条拉正文。
+tracker	tracker-Q1-1;tracker-Q1-2	931	CLOSED	🗺️ 多层资金的执行场所：真隔离能力测绘 → 场所选定 → 约束回写架构	资金/经营/订单/账本合同的退场，无权决 R5 结构。
+tracker	tracker-Q1-1;tracker-Q2-1	932	CLOSED	[task] 实测：Binance 子账户能不能当「重」的隔离槽——股票永续可用性 + 配额 + 强平边界（map #931）	该标题讨论其他票的归口或执行对象；不作为本票权威；未逐条拉正文。
+tracker	tracker-Q2-1	933	CLOSED	[task] 探针：BingX / Hyperliquid 股票永续的冲击成本——每一重能装多少钱（map #931）	资金/经营/订单/账本合同的退场，无权决 R5 结构。
+tracker	tracker-Q2-1	935	CLOSED	[grilling] 跳空四件事怎么处置：untradable 接停牌、两条路径时间戳语义不一、gap_ok 计数、缺口三分类（map #931）	该标题讨论其他票的归口或执行对象；不作为本票权威；未逐条拉正文。
+tracker	tracker-Q1-1;tracker-Q2-1	940	CLOSED	[task] 探针：回测喂真实股价 K 线 vs 实盘喂永续 24/7 K 线，跑出的笔和中枢差多少（map #931）	相邻结构议题；标题对象/verdict 不足以断言新增 R5 归属，作为近邻而非已裁。
+tracker	tracker-Q1-1;tracker-Q2-1	941	CLOSED	[grilling] 结构识别喂哪套 K 线：真实股价（有跳空）vs 永续 24/7（有休市 bar）vs 时段过滤（map #931）	该标题讨论其他票的归口或执行对象；不作为本票权威；未逐条拉正文。
+tracker	tracker-Q2-1	942	CLOSED	[task] 实测：两家的隔离能否真正落地——需凭证/真实下单的 10 问（map #931）	该标题讨论其他票的归口或执行对象；不作为本票权威；未逐条拉正文。
+tracker	tracker-Q1-4	944	CLOSED	[task] 探针：24.6% 端点失配落在买卖点上还是震荡端点上——ADR 0020 裁定二的验证（map #931）	点、下钻、力度或候选对象，不是本枢 D/R 的成员和续扫。
+tracker	tracker-Q2-1	945	CLOSED	[task] 勘察：生产下单层消费哪条买卖点链——笔中枢还是线段中枢（map #931）	相邻结构议题；标题对象/verdict 不足以断言新增 R5 归属，作为近邻而非已裁。
+tracker	tracker-Q1-2	946	CLOSED	[grilling] ADR 0020 裁定二重裁：买卖点层只有 43.4% 对齐，安排还成不成立（map #931）	点、下钻、力度或候选对象，不是本枢 D/R 的成员和续扫。
+tracker	tracker-Q2-1	949	CLOSED	[grilling] 三套 NT 实现并存怎么收：Rust+Python 在用 / Rust-native 不消费 BSP / 实盘臂是骨架（map #931）	点、下钻、力度或候选对象，不是本枢 D/R 的成员和续扫。
+tracker	tracker-Q2-1	950	CLOSED	[grilling] 四条互不相通的下单链怎么统一：BSP 壳 / S_Θ / T 引擎 / 未接的 voice（map #787）	点、下钻、力度或候选对象，不是本枢 D/R 的成员和续扫。
+tracker	tracker-Q2-1	951	CLOSED	[impl] theta_v0 PyO3 出口 + recursive_t 执刀（#808 退场条款落地，#787 关图前置）	该标题讨论其他票的归口或执行对象；不作为本票权威；未逐条拉正文。
+tracker	tracker-Q2-1	960	CLOSED	[grilling] 乙层目标模块图：按甲层口径定稿（map #787）	该标题讨论其他票的归口或执行对象；不作为本票权威；未逐条拉正文。
+tracker	tracker-Q2-1	961	CLOSED	[grilling] 丙层线的归位：按乙层模块图切线——六条旧线归位 + 新线开在哪（map #787）	该标题讨论其他票的归口或执行对象；不作为本票权威；未逐条拉正文。
+tracker	tracker-Q2-1	967	CLOSED	[map] tick 级 L0 观察臂：逐笔成交作 A0 的平行链（与现役 1min 并存）	资金/经营/订单/账本合同的退场，无权决 R5 结构。
+tracker	tracker-Q2-1	976	CLOSED	[task] G2 前探针：五套力度实现清点与差集（位置/IO/判定路径归属/#799 对照臂候选）	点、下钻、力度或候选对象，不是本枢 D/R 的成员和续扫。
+tracker	tracker-Q1-1	977	CLOSED	[task] 探针：#854 三个未验证欠账实测——近似误差 / MACD 代理一致性 / μ(D) 分布（OKLO+BRN）	点、下钻、力度或候选对象，不是本枢 D/R 的成员和续扫。
+tracker	tracker-Q2-1	985	CLOSED	[grilling] G4 力度定义的三个数学订正：稳态假设 / 生产口径实为 TV / TV 对照候选（codex 对抗验证产物）	点、下钻、力度或候选对象，不是本枢 D/R 的成员和续扫。
+tracker	tracker-Q2-1	987	CLOSED	📋 SPEC：力度接生产塔实施总单（map #974 交棒）——同色化 + 反查载体 + 收编切换 + 退役 + 基线	点、下钻、力度或候选对象，不是本枢 D/R 的成员和续扫。
+tracker	tracker-Q1-1;tracker-Q2-1	994	CLOSED	[grilling] TV 候选终裁：6.7:1 跨八市实证已达标——处决 / 降格为观测量 / 维持挂起（#985 开票条件达成）	该标题讨论其他票的归口或执行对象；不作为本票权威；未逐条拉正文。
+tracker	tracker-Q1-1	1013	CLOSED	影子评审：#922 坏 tick 闸（commit a1d09cf44a）	该标题讨论其他票的归口或执行对象；不作为本票权威；未逐条拉正文。
+tracker	tracker-Q1-1;tracker-Q1-4;tracker-Q2-1	1014	CLOSED	影子评审：#905 三类「第一次回抽」显式化（commit 5387e06f32）	#905 独立先例，前件为共享枢轴。
+tracker	tracker-Q2-1	1028	CLOSED	[grilling] ADR 0013 裁定七重议：判据链完整后「逐级无空档」仍 92.7% 不成立（#870 二轮结论）	该标题讨论其他票的归口或执行对象；不作为本票权威；未逐条拉正文。
+tracker	tracker-Q2-1	1047	CLOSED	[task] 模型路由表与「本体不下场」教义退役落文（三处文档同步）	该标题讨论其他票的归口或执行对象；不作为本票权威；未逐条拉正文。
+tracker	tracker-Q2-1	1055	CLOSED	🗺️ 五候选架构深化：扫描唯一 / E2E-O 簿装配 / Massive 抓取（improve-codebase-architecture 2026-08-18）	该标题讨论其他票的归口或执行对象；不作为本票权威；未逐条拉正文。
+tracker	tracker-Q2-1	1058	CLOSED	[grilling] 替代防线选型：P1 硬门退役后装配层不变量由什么接管	该标题讨论其他票的归口或执行对象；不作为本票权威；未逐条拉正文。
+tracker	tracker-Q2-1	1073	CLOSED	[impl] S10 残留：硬编码停止级拆除 + 注释订正重核（SPEC #847 拆出，验收线无票留痕）	该标题讨论其他票的归口或执行对象；不作为本票权威；未逐条拉正文。
+tracker	tracker-Q2-1	1077	CLOSED	📋 SPEC：五候选架构深化实施总单（map #1055 交棒）——3a/3b 扫描唯一 + E2E-O 装配 + Massive/K4 抓取	该标题讨论其他票的归口或执行对象；不作为本票权威；未逐条拉正文。
+tracker	tracker-Q2-1	1085	CLOSED	📋 SPEC：五候选架构深化实施总单（map #1055 图内）——扫描唯一 / E2E-O 装配 / Massive 尾巴	该标题讨论其他票的归口或执行对象；不作为本票权威；未逐条拉正文。
+tracker	tracker-Q2-1	1096	OPEN	[debt] 旧 engine 整体退役：勘察残余消费面 + 退役或收编（#987 图外欠账，#991 I-3 划出）	该标题讨论其他票的归口或执行对象；不作为本票权威；未逐条拉正文。
+tracker	tracker-Q2-1	1100	CLOSED	🗺️ 远端 main 谱系扶正 → Sandcastle 调度复原	基础设施或历史载体；不构成离开/回抽的判据。
+tracker	tracker-Q2-1	1104	CLOSED	[task] 远端主线终验：Actions / fresh clone / worktree / main-rewritten 退场	该标题讨论其他票的归口或执行对象；不作为本票权威；未逐条拉正文。
+tracker	tracker-Q2-1	1106	CLOSED	[research] 私有仓 CodeQL / DevSkim：code scanning 未启用的授权与收敛路径	基础设施或历史载体；不构成离开/回抽的判据。
+tracker	tracker-Q2-1	1108	CLOSED	[task] 安全工作流按授权收敛：禁用 CodeQL + DevSkim artifact/findings gate	基础设施或历史载体；不构成离开/回抽的判据。
+tracker	tracker-Q1-1;tracker-Q2-1	1116	CLOSED	[task] 安全：S_net cache 移除未校验 pickle 反序列化	该标题讨论其他票的归口或执行对象；不作为本票权威；未逐条拉正文。
+tracker	tracker-Q1-1;tracker-Q2-1	1117	CLOSED	[task] 安全：FengLiang 公网 daemon 默认链改用 TLS	该标题讨论其他票的归口或执行对象；不作为本票权威；未逐条拉正文。
+tracker	tracker-Q2-1	1119	CLOSED	🗺️ Prime Agent pstack-lite：Matt Wayfinder 总控下的精选移植	基础设施或历史载体；不构成离开/回抽的判据。
+tracker	tracker-Q2-1	1125	CLOSED	[grilling] pstack-lite 验收与试点退出标准	资金/经营/订单/账本合同的退场，无权决 R5 结构。
+tracker	tracker-Q1-1	1126	CLOSED	[task] Prime 上游 Discussion/RFC：remote-child/v1 + durable admission / broker 分层	该标题讨论其他票的归口或执行对象；不作为本票权威；未逐条拉正文。
+tracker	tracker-Q2-1	1129	CLOSED	SPEC：Prime Agent pstack-lite 首批精选移植	该标题讨论其他票的归口或执行对象；不作为本票权威；未逐条拉正文。
+tracker	tracker-Q2-1	1133	CLOSED	pstack-lite 04：移植 pstack-blast-radius 并接结构图与靶向验证	该标题讨论其他票的归口或执行对象；不作为本票权威；未逐条拉正文。
+tracker	tracker-Q2-1	1139	CLOSED	pstack-lite 10：完成 10 个真实任务试点并作 go/no-go 裁决	该标题讨论其他票的归口或执行对象；不作为本票权威；未逐条拉正文。
+tracker	tracker-Q1-1;tracker-Q2-1	1141	CLOSED	[task] CI rust-check 在 rust-lld 链接阶段连续 signal 7 / Bus error，cargo test 无法完成	基础设施或历史载体；不构成离开/回抽的判据。
+tracker	tracker-Q2-1	1145	CLOSED	[grilling] 裁定 llm-as-a-verifier 的唯一职责与接入接缝	该标题讨论其他票的归口或执行对象；不作为本票权威；未逐条拉正文。
+tracker	tracker-Q2-1	1150	OPEN	反向根 R2：显式根标记 expand——多根残留时禁止隐式认父	该标题讨论其他票的归口或执行对象；不作为本票权威；未逐条拉正文。
+tracker	tracker-Q1-1	1166	CLOSED	📋 SPEC：LAV 旁路排序器接入实施总单（map #1143 交棒）——deepseek-v4-pro 原生 pairwise+PPT 排序信号	该标题讨论其他票的归口或执行对象；不作为本票权威；未逐条拉正文。
+tracker	tracker-Q1-1	1172	CLOSED	[impl] S6 计算指标并执行 GO/NO-GO 收口	该标题讨论其他票的归口或执行对象；不作为本票权威；未逐条拉正文。
+tracker	tracker-Q2-1	1173	CLOSED	[smoke] Sandcastle 官方链路真实烟测：agent:implement → Draft PR → agent:review	基础设施或历史载体；不构成离开/回抽的判据。
+tracker	tracker-Q1-1;tracker-Q2-1	1204	CLOSED	[grilling] BSP 点锚口径 + level-1 生成面：出场候选的 −δ 段在别处、锚点落在 δ 向子段（#1152 41/42，门维持关后的重评线）	点、下钻、力度或候选对象，不是本枢 D/R 的成员和续扫。
+tracker	tracker-Q2-1	1226	CLOSED	🗺️ 判据完全分类化：全仓转折/买卖点判定对齐缠师完全分类轴 + 全部重测（#1220/#1223 先例扩展）	点、下钻、力度或候选对象，不是本枢 D/R 的成员和续扫。
+tracker	tracker-Q2-2	1272	CLOSED	[research] 三买后结构分段：离开段+回抽+再离开是否同属一个段 c？c 的边界与三买点在 c 中的位置（#1226 线，037 课）	整段 c 内含三类，不定左右成员边界。
+tracker	tracker-Q2-1	1275	CLOSED	📋 SPEC：全仓转折/买卖点判定判据完全分类化（map #1226 实施总单）	点、下钻、力度或候选对象，不是本枢 D/R 的成员和续扫。
+tracker	tracker-Q1-2;tracker-Q2-1	1278	CLOSED	🗺️ 结构判据统一判别：全仓全侧判定点分类 + 结构判据正本 + 对拍锁网（#1226 续图）	该标题讨论其他票的归口或执行对象；不作为本票权威；未逐条拉正文。
+tracker	tracker-Q2-1	1286	CLOSED	[grilling] G3：Python 背驰缺 Extreme——侧定位裁定（逐处对齐 / 冻结对照臂 / 退役）（#1278 批二首烤）	点、下钻、力度或候选对象，不是本枢 D/R 的成员和续扫。
+tracker	tracker-Q2-4	1296	CLOSED	[impl] #812 中枢正本五项处置（L1/L2/L5/L6/L7）Lean 落地（sliceE G-1，#1278 批三）	Lean refStep/end+2 是在案边界。
+tracker	tracker-Q2-1	1304	OPEN	🗺️ 功能回测：生产回放验收系统（回测重定位——研发回测冻结归档，回放回测转正为功能件）	基础设施或历史载体；不构成离开/回抽的判据。
+tracker	tracker-Q2-1	1321	CLOSED	[grilling] 完整生产程序声明边界：M1 的 π 批量链、organic 赋格/声部链与 paper 执行链如何归名	该标题讨论其他票的归口或执行对象；不作为本票权威；未逐条拉正文。
+tracker	tracker-Q1-1;tracker-Q1-2;tracker-Q1-4;tracker-Q2-1;tracker-Q4-1	1323	OPEN	🗺️ 完整生产程序接线总单：#787 严格多重赋格落地 → 旧实现收敛 → 历史回放与 paper 同核	基础设施或历史载体；不构成离开/回抽的判据。
+tracker	tracker-Q1-2	1324	CLOSED	[task] 扩展 Archify：无箭头 association、edge bridge、嵌套 containment 与 Voice depth ruler（#1323 前置）	该标题讨论其他票的归口或执行对象；不作为本票权威；未逐条拉正文。
+tracker	tracker-Q2-1	1333	OPEN	[grilling] 完整 B 集成设计审计：C1–C6 seam、owner、N=2 tracer 与 SPEC 交棒	该标题讨论其他票的归口或执行对象；不作为本票权威；未逐条拉正文。
+tracker	tracker-Q2-1	1335	CLOSED	[task] GPT-6 独立全链扫描：新 Archify 后的调用、契约与测试锁取证	该标题讨论其他票的归口或执行对象；不作为本票权威；未逐条拉正文。
+tracker	tracker-Q2-1	1336	CLOSED	[task] GPT-6 独立完整新方案：多候选软件组织、接口与验证路径	该标题讨论其他票的归口或执行对象；不作为本票权威；未逐条拉正文。
+tracker	tracker-Q1-1;tracker-Q2-1	1339	CLOSED	[task] 完整多重赋格与结构状态可观察性：需求、验收范围及架构选型约束	该标题讨论其他票的归口或执行对象；不作为本票权威；未逐条拉正文。
+tracker	tracker-Q1-1;tracker-Q1-2;tracker-Q2-1;tracker-Q3-4;tracker-Q4-1	1340	OPEN	📋 SPEC：完整生产程序、结构全分类与逐重经营（#1323，R2）	CC-017/018/019/022/024、C08。
+tracker	tracker-Q1-2	1342	CLOSED	[grilling] 初始包含方向策略及全包含前缀输出（#1323，G-001）	该标题讨论其他票的归口或执行对象；不作为本票权威；未逐条拉正文。
+tracker	tracker-Q1-1;tracker-Q1-2;tracker-Q2-1	1343	CLOSED	[grilling] 同价极值端点及对象身份的确定性实例（#1323，G-002）	笔极值根与组锚区分，不等于腿角色。
+tracker	tracker-Q1-2	1344	CLOSED	[grilling] 第二特征序列扫描域与 continuation 边界（#1323，G-007）	该标题讨论其他票的归口或执行对象；不作为本票权威；未逐条拉正文。
+tracker	tracker-Q1-2	1345	CLOSED	[grilling] 独立选父 NestInterval 的价格投影（#1323，G-025）	该标题讨论其他票的归口或执行对象；不作为本票权威；未逐条拉正文。
+tracker	tracker-Q1-1;tracker-Q2-1	1347	CLOSED	[grilling] Type2/3 N/A 在递归证书中的合成处置（#1323，G-028）	点、下钻、力度或候选对象，不是本枢 D/R 的成员和续扫。
+tracker	tracker-Q2-1	1350	CLOSED	[grilling] 净额外效与部分成交费用的分配归属（#1323，FU-03）	资金/经营/订单/账本合同的退场，无权决 R5 结构。
+tracker	tracker-Q1-1;tracker-Q2-1	1351	CLOSED	[grilling] 首个具名场所账户与验证权限 profile（#1323，FU-04）	资金/经营/订单/账本合同的退场，无权决 R5 结构。
+tracker	tracker-Q2-1	1352	CLOSED	[grilling] 完整退出授权与责任退休 policy（#1323，FU-07）	资金/经营/订单/账本合同的退场，无权决 R5 结构。
+tracker	tracker-Q2-1	1353	CLOSED	[grilling] 完整历史模拟执行模型：多重并发、混合订单与同 slot 次序（#1323，C10.3）	该标题讨论其他票的归口或执行对象；不作为本票权威；未逐条拉正文。
+tracker	tracker-Q2-1	1354	CLOSED	[grilling] 成本停止 policy 实例与基底进阶证据（#1323，G-029）	资金/经营/订单/账本合同的退场，无权决 R5 结构。
+tracker	tracker-Q2-1	1358	OPEN	[grilling] 首次触闸后的经营评价参数（#1323，FU-05）	资金/经营/订单/账本合同的退场，无权决 R5 结构。
+tracker	tracker-Q1-1	1359	CLOSED	TB-01 验收汇总：正式结构和只读观察（SPEC #1340）	该标题讨论其他票的归口或执行对象；不作为本票权威；未逐条拉正文。
+tracker	tracker-Q1-1;tracker-Q3-4	1360	OPEN	TB-02 验收汇总：全部结构分类及构造子义务（SPEC #1340）	总表，只登记下游归属。
+tracker	tracker-Q2-1	1361	OPEN	TB-03 验收汇总：持久重经营与事实应用（SPEC #1340）	资金/经营/订单/账本合同的退场，无权决 R5 结构。
+tracker	tracker-Q2-1	1364	OPEN	TB-06 验收汇总：完整阶段、换档与尾账（SPEC #1340）	该标题讨论其他票的归口或执行对象；不作为本票权威；未逐条拉正文。
+tracker	tracker-Q2-1	1365	OPEN	TB-09 验收汇总：目标部署旧写入口隔离及X排他（SPEC #1340）	基础设施或历史载体；不构成离开/回抽的判据。
+tracker	tracker-Q2-1	1368	OPEN	TB-10 验收汇总：带仓迁移、旧入口终态及默认启用（SPEC #1340）	该标题讨论其他票的归口或执行对象；不作为本票权威；未逐条拉正文。
+tracker	tracker-Q1-2;tracker-Q2-1	1370	CLOSED	[impl] TB-01-A 正式Rust结构会话将同次计算的分型、持久快照和证据交到浏览器（SPEC #1340）	基础设施或历史载体；不构成离开/回抽的判据。
+tracker	tracker-Q2-1	1371	CLOSED	[impl] TB-01-B 原始更正驱动原子撤回并在真实进程恢复后保留浏览器历史（SPEC #1340）	基础设施或历史载体；不构成离开/回抽的判据。
+tracker	tracker-Q1-1;tracker-Q2-1	1372	CLOSED	[impl] TB-01-C 固定结构cut分页与断线续接在持续输入和独立重启下保持同源（SPEC #1340）	该标题讨论其他票的归口或执行对象；不作为本票权威；未逐条拉正文。
+tracker	tracker-Q1-1;tracker-Q1-2;tracker-Q2-1	1373	CLOSED	[impl] TB-02-A 已定方向与无同价竞争的包含及局部分型（SPEC #1340）	该标题讨论其他票的归口或执行对象；不作为本票权威；未逐条拉正文。
+tracker	tracker-Q2-1	1374	CLOSED	[impl] TB-03-A 非空持久重、固定 Q 与 Voice 身份（SPEC #1340）	该标题讨论其他票的归口或执行对象；不作为本票权威；未逐条拉正文。
+tracker	tracker-Q2-1	1375	OPEN	[impl] TB-04-A 外部先接纳封闸与精确 Resolve（SPEC #1340）	该标题讨论其他票的归口或执行对象；不作为本票权威；未逐条拉正文。
+tracker	tracker-Q1-1;tracker-Q2-1	1376	OPEN	[impl] TB-05-A 经济全故障时结构正式持续（SPEC #1340）	该标题讨论其他票的归口或执行对象；不作为本票权威；未逐条拉正文。
+tracker	tracker-Q2-1	1377	OPEN	[impl] TB-06-A 满仓基线与回本前短差回补（SPEC #1340）	该标题讨论其他票的归口或执行对象；不作为本票权威；未逐条拉正文。
+tracker	tracker-Q2-1	1378	OPEN	[impl] TB-06-B 本金回收与多空五阶段签名（SPEC #1340）	该标题讨论其他票的归口或执行对象；不作为本票权威；未逐条拉正文。
+tracker	tracker-Q2-1	1379	OPEN	[impl] TB-06-D 固定身份权利转移与唯一激活（SPEC #1340）	该标题讨论其他票的归口或执行对象；不作为本票权威；未逐条拉正文。
+tracker	tracker-Q2-1	1380	OPEN	[impl] TB-06-G 结构撤回、业务退出与在途保留（SPEC #1340）	资金/经营/订单/账本合同的退场，无权决 R5 结构。
+tracker	tracker-Q1-1;tracker-Q2-1	1381	OPEN	[impl] TB-07-A 完整历史输入推动全部权威域并生成可追溯回放（SPEC #1340）	基础设施或历史载体；不构成离开/回抽的判据。
+tracker	tracker-Q2-1	1382	OPEN	[impl] TB-08-A 历史与paper模式由同一入口使用受控adapter（SPEC #1340）	该标题讨论其他票的归口或执行对象；不作为本票权威；未逐条拉正文。
+tracker	tracker-Q2-1	1383	OPEN	[impl] TB-09-A 目标部署预检实际拒绝旧写入口绕过（SPEC #1340）	基础设施或历史载体；不构成离开/回抽的判据。
+tracker	tracker-Q2-1	1384	OPEN	[impl] TB-10-A 图表与Python结构入口改接唯一S（SPEC #1340）	该标题讨论其他票的归口或执行对象；不作为本票权威；未逐条拉正文。
+tracker	tracker-Q2-1	1385	OPEN	[impl] TB-10-B 旧策略和多重装配入口完成R2迁移准备（SPEC #1340）	该标题讨论其他票的归口或执行对象；不作为本票权威；未逐条拉正文。
+tracker	tracker-Q2-1	1386	OPEN	[impl] TB-10-C Organic与positional核心旧经济臂隔离准备（SPEC #1340）	该标题讨论其他票的归口或执行对象；不作为本票权威；未逐条拉正文。
+tracker	tracker-Q2-1	1387	OPEN	[impl] TB-10-D positional延续与fusion变体旧写权隔离准备（SPEC #1340）	该标题讨论其他票的归口或执行对象；不作为本票权威；未逐条拉正文。
+tracker	tracker-Q2-1	1388	OPEN	[impl] TB-10-E 混合经济臂及旧π组织完成逐族迁移准备（SPEC #1340）	该标题讨论其他票的归口或执行对象；不作为本票权威；未逐条拉正文。
+tracker	tracker-Q2-1	1389	OPEN	[impl] TB-10-F 严格构造费用统计与形式锁收编（SPEC #1340）	该标题讨论其他票的归口或执行对象；不作为本票权威；未逐条拉正文。
+tracker	tracker-Q2-1	1390	OPEN	[impl] TB-10-G 探针研究及封存支持的退出准备（SPEC #1340）	资金/经营/订单/账本合同的退场，无权决 R5 结构。
+tracker	tracker-Q2-1	1391	OPEN	[impl] TB-11-A 完整程序验收与旧关联票义务逐项对账（SPEC #1340）	该标题讨论其他票的归口或执行对象；不作为本票权威；未逐条拉正文。
+tracker	tracker-Q1-2;tracker-Q2-1	1392	CLOSED	[impl] TB-02-B 无同价竞争域的新笔成立、延伸与确认（SPEC #1340）	该标题讨论其他票的归口或执行对象；不作为本票权威；未逐条拉正文。
+tracker	tracker-Q1-2;tracker-Q2-1	1393	OPEN	[impl] TB-02-U 未建方向与全包含前缀的获准工程实例（SPEC #1340）	该标题讨论其他票的归口或执行对象；不作为本票权威；未逐条拉正文。
+tracker	tracker-Q1-1;tracker-Q2-1	1394	CLOSED	[impl] TB-03-B 财务准备、责任先增与本地提交史（SPEC #1340）	资金/经营/订单/账本合同的退场，无权决 R5 结构。
+tracker	tracker-Q2-1	1395	OPEN	[impl] TB-04-B 可共同满足域的完整slot与毛责任保留（SPEC #1340）	资金/经营/订单/账本合同的退场，无权决 R5 结构。
+tracker	tracker-Q2-1	1396	OPEN	[impl] TB-05-B 分区与恢复期间的真实获知前沿（SPEC #1340）	基础设施或历史载体；不构成离开/回抽的判据。
+tracker	tracker-Q2-1	1397	OPEN	[impl] TB-06-H 退出后迟到尾账与责任重开（SPEC #1340）	资金/经营/订单/账本合同的退场，无权决 R5 结构。
+tracker	tracker-Q2-1	1398	OPEN	[impl] TB-06-I 完整经济事件样本与闸门前统计（SPEC #1340）	该标题讨论其他票的归口或执行对象；不作为本票权威；未逐条拉正文。
+tracker	tracker-Q2-1	1399	OPEN	[impl] TB-07-B 历史seek与修订重算各自保留真实获知时间（SPEC #1340）	该标题讨论其他票的归口或执行对象；不作为本票权威；未逐条拉正文。
+tracker	tracker-Q2-1	1400	OPEN	[impl] TB-08-B 具名场所只读能力与事实完整性接入会话（SPEC #1340）	资金/经营/订单/账本合同的退场，无权决 R5 结构。
+tracker	tracker-Q2-1	1401	OPEN	[impl] TB-09-B X换代必须隔离旧发送者并保留在途责任（SPEC #1340）	资金/经营/订单/账本合同的退场，无权决 R5 结构。
+tracker	tracker-Q2-1	1402	OPEN	[impl] TB-10-H 非空持仓与尾责迁移及回退不丢权利（SPEC #1340）	该标题讨论其他票的归口或执行对象；不作为本票权威；未逐条拉正文。
+tracker	tracker-Q2-1	1403	OPEN	[impl] TB-11-B 独立总验与主线证据满足整图关票门（SPEC #1340）	该标题讨论其他票的归口或执行对象；不作为本票权威；未逐条拉正文。
+tracker	tracker-Q2-1	1404	CLOSED	[impl] TB-02-C 线段 seed 与第一种终结（SPEC #1340）	相邻结构议题；标题对象/verdict 不足以断言新增 R5 归属，作为近邻而非已裁。
+tracker	tracker-Q1-1;tracker-Q1-2;tracker-Q2-1	1405	CLOSED	[impl] TB-02-V 同价端点与极值身份的获准工程实例（SPEC #1340）	源 parser 同价边界，旧 C 复核前置。
+tracker	tracker-Q1-1;tracker-Q1-2;tracker-Q2-1	1406	OPEN	[impl] TB-03-C 受控事实唯一应用与原经济归属（SPEC #1340）	该标题讨论其他票的归口或执行对象；不作为本票权威；未逐条拉正文。
+tracker	tracker-Q2-1	1407	OPEN	[impl] TB-04-C 不可改精确交付与阶段条件清单（SPEC #1340）	该标题讨论其他票的归口或执行对象；不作为本票权威；未逐条拉正文。
+tracker	tracker-Q2-1	1408	OPEN	[impl] TB-04-I 并发资金政策的正式实例与保留结果（SPEC #1340）	资金/经营/订单/账本合同的退场，无权决 R5 结构。
+tracker	tracker-Q2-1	1409	OPEN	[impl] TB-05-C 双边界崩溃、旧写者与不补发（SPEC #1340）	基础设施或历史载体；不构成离开/回抽的判据。
+tracker	tracker-Q2-1	1410	OPEN	[impl] TB-06-J 触闸后参数生效与评价（SPEC #1340）	该标题讨论其他票的归口或执行对象；不作为本票权威；未逐条拉正文。
+tracker	tracker-Q2-1	1411	OPEN	[impl] TB-07-C 完整会话双进程与崩溃恢复保持全状态一致（SPEC #1340）	基础设施或历史载体；不构成离开/回抽的判据。
+tracker	tracker-Q2-1	1412	OPEN	[impl] TB-08-C 获准场所调用及回报完成严格逐重闭环（SPEC #1340）	资金/经营/订单/账本合同的退场，无权决 R5 结构。
+tracker	tracker-Q2-1	1413	OPEN	[impl] TB-10-I 默认启动只到新核并核全入口排除边界（SPEC #1340）	该标题讨论其他票的归口或执行对象；不作为本票权威；未逐条拉正文。
+tracker	tracker-Q2-1	1414	CLOSED	[impl] TB-02-D 已裁第二特征序列与带缺口终结（SPEC #1340）	该标题讨论其他票的归口或执行对象；不作为本票权威；未逐条拉正文。
+tracker	tracker-Q2-1	1415	OPEN	[impl] TB-03-D 受控事实的依据绑定与重内量约束（SPEC #1340）	该标题讨论其他票的归口或执行对象；不作为本票权威；未逐条拉正文。
+tracker	tracker-Q2-1	1416	OPEN	[impl] TB-04-D S 条件核验与稳定点公平服务（SPEC #1340）	该标题讨论其他票的归口或执行对象；不作为本票权威；未逐条拉正文。
+tracker	tracker-Q2-1	1417	OPEN	[impl] TB-05-D 坏重保界而健康重实际新增（SPEC #1340）	该标题讨论其他票的归口或执行对象；不作为本票权威；未逐条拉正文。
+tracker	tracker-Q2-1	1418	OPEN	[impl] TB-07-D 回放验收报告器与生产改动回归锁上线（SPEC #1340）	基础设施或历史载体；不构成离开/回抽的判据。
+tracker	tracker-Q1-1;tracker-Q2-1;tracker-Q4-1	1419	OPEN	[impl] TB-02-E 中枢 seed、核心、外缘与成员（SPEC #1340）	D-A Zn 方向，L3 旧读数有限，R8 来源。
+tracker	tracker-Q1-1;tracker-Q2-1	1420	CLOSED	[impl] TB-02-W 扫描边界、续扫与恢复的获准实例（SPEC #1340）	基础设施或历史载体；不构成离开/回抽的判据。
+tracker	tracker-Q2-1	1421	OPEN	[impl] TB-03-E 既成退出事实后的Voice换代与持久重（SPEC #1340）	资金/经营/订单/账本合同的退场，无权决 R5 结构。
+tracker	tracker-Q2-1	1422	OPEN	[impl] TB-04-E X 一次占有与实际受控调用（SPEC #1340）	该标题讨论其他票的归口或执行对象；不作为本票权威；未逐条拉正文。
+tracker	tracker-Q2-1	1423	OPEN	[impl] TB-05-E 既有持仓、订单与事实责任的非空恢复（SPEC #1340）	资金/经营/订单/账本合同的退场，无权决 R5 结构。
+tracker	tracker-Q1-1;tracker-Q2-1;tracker-Q2-3;tracker-Q2-5;tracker-Q3-4;tracker-Q4-1	1424	OPEN	[impl] TB-02-F 相邻中枢发展与扩展关系（SPEC #1340）	根裁 5 报 C@u29、同项目替代正控。
+tracker	tracker-Q2-1	1425	OPEN	[impl] TB-04-F 单一明确归属的回报应用与责任减保留（SPEC #1340）	资金/经营/订单/账本合同的退场，无权决 R5 结构。
+tracker	tracker-Q1-1;tracker-Q1-4;tracker-Q2-1	1426	OPEN	[impl] TB-02-G 完成走势三分与形成/完成分轴（SPEC #1340）	CC-024 与 #2114；只消费见证。
+tracker	tracker-Q2-1	1427	OPEN	[impl] TB-04-G 订单首次量与取消改单的剩余额度（SPEC #1340）	该标题讨论其他票的归口或执行对象；不作为本票权威；未逐条拉正文。
+tracker	tracker-Q2-1	1428	OPEN	[impl] TB-04-J 多重及配对分配政策的正式事实实例（SPEC #1340）	该标题讨论其他票的归口或执行对象；不作为本票权威；未逐条拉正文。
+tracker	tracker-Q1-1;tracker-Q1-4;tracker-Q2-1;tracker-Q2-4;tracker-Q4-1	1429	OPEN	[impl] TB-02-H 九段升级、自然递归与全级同判据（SPEC #1340）	后续上级素材、R22，不承担本票角色裁定。
+tracker	tracker-Q2-1	1430	OPEN	[impl] TB-04-H 两道交付窗口与完整条件交错汇验（SPEC #1340）	该标题讨论其他票的归口或执行对象；不作为本票权威；未逐条拉正文。
+tracker	tracker-Q2-1	1431	OPEN	[impl] TB-02-I 同级别操作分解与只读多读法（SPEC #1340）	分解读法不回流构造。
+tracker	tracker-Q2-1	1432	OPEN	[impl] TB-02-J 结构配对、精确力度与 MACD 辅助（SPEC #1340）	力度消费者，不以力度补 R5。
+tracker	tracker-Q2-1	1433	OPEN	[impl] TB-02-K 背驰、一类点及 NE/Turn 桥（SPEC #1340）	一类/完成消费者，不替回抽判定。
+tracker	tracker-Q2-1	1434	OPEN	[impl] TB-02-L 三类首回试、位置三态与六态（SPEC #1340）	严格同源三类点，端点退场①实测。
+tracker	tracker-Q2-1;tracker-Q3-4	1435	OPEN	[impl] TB-02-M 小转大发生见证与高级结果（SPEC #1340）	该标题讨论其他票的归口或执行对象；不作为本票权威；未逐条拉正文。
+tracker	tracker-Q2-1	1436	OPEN	[impl] TB-02-N 二类构成与无同级一类的补充分支（SPEC #1340）	该标题讨论其他票的归口或执行对象；不作为本票权威；未逐条拉正文。
+tracker	tracker-Q2-1	1437	OPEN	[impl] TB-02-O BSP 全标签、确认与多级联立（SPEC #1340）	多点完成分类消费者，不另判 R5。
+tracker	tracker-Q1-2;tracker-Q2-1	1438	OPEN	[impl] TB-02-P 区间套坐标与选父几何（SPEC #1340）	点、下钻、力度或候选对象，不是本枢 D/R 的成员和续扫。
+tracker	tracker-Q2-1	1439	OPEN	[impl] TB-02-Q 候选全集与固定选中后门（SPEC #1340）	该标题讨论其他票的归口或执行对象；不作为本票权威；未逐条拉正文。
+tracker	tracker-Q2-1	1440	OPEN	[impl] TB-02-R 已裁Type1完整链与原始N/A事实（SPEC #1340）	该标题讨论其他票的归口或执行对象；不作为本票权威；未逐条拉正文。
+tracker	tracker-Q2-1	1441	OPEN	[impl] TB-02-S 成本停止与基底进阶的具名证据（SPEC #1340）	资金/经营/订单/账本合同的退场，无权决 R5 结构。
+tracker	tracker-Q2-1	1442	OPEN	[impl] TB-02-X Type2/3 N/A合成处置的获准实例（SPEC #1340）	该标题讨论其他票的归口或执行对象；不作为本票权威；未逐条拉正文。
+tracker	tracker-Q1-2;tracker-Q2-1	1443	OPEN	[impl] TB-02-T 全分类组合、全对象变化与同源闭包汇验（SPEC #1340）	组合验收，不增设规则。
+tracker	tracker-Q2-1	1444	OPEN	[impl] TB-06-C 容量规模与频率开重的独立门（SPEC #1340）	该标题讨论其他票的归口或执行对象；不作为本票权威；未逐条拉正文。
+tracker	tracker-Q2-1	1445	OPEN	[impl] TB-06-E 行情换档与原重持续经营（SPEC #1340）	资金/经营/订单/账本合同的退场，无权决 R5 结构。
+tracker	tracker-Q2-1	1446	OPEN	[impl] TB-06-F 赚股增长与资金溢出换档（SPEC #1340）	资金/经营/订单/账本合同的退场，无权决 R5 结构。
+tracker	tracker-Q1-1;tracker-Q2-1	1460	OPEN	🗺️ 独立产品前端：完整结构、逐重经营、证据与历史联查	资金/经营/订单/账本合同的退场，无权决 R5 结构。
+tracker	tracker-Q2-1	1463	CLOSED	[task] 级别递归归一化现状核验：生产路径、完整性缺口与产品能力	该标题讨论其他票的归口或执行对象；不作为本票权威；未逐条拉正文。
+tracker	tracker-Q1-1;tracker-Q1-4;tracker-Q2-1;tracker-Q4-1	1465	OPEN	🗺️ 订单事件作为缠论递归基底：合法构造与增量价值	该标题讨论其他票的归口或执行对象；不作为本票权威；未逐条拉正文。
+tracker	tracker-Q1-1;tracker-Q1-2;tracker-Q1-4;tracker-Q2-1;tracker-Q4-1	1467	OPEN	[research] 订单基底候选构造与合法性证据	该标题讨论其他票的归口或执行对象；不作为本票权威；未逐条拉正文。
+tracker	tracker-Q1-1;tracker-Q2-1	1468	OPEN	[grilling] 订单递归增量价值的用途与实验对照	该标题讨论其他票的归口或执行对象；不作为本票权威；未逐条拉正文。
+tracker	tracker-Q1-1;tracker-Q1-2;tracker-Q2-1;tracker-Q4-1	1469	OPEN	[grilling] 订单事件实验的架构能力与条件性改造边界	该标题讨论其他票的归口或执行对象；不作为本票权威；未逐条拉正文。
+tracker	tracker-Q1-1	1472	OPEN	[task] 对齐 Wayfinder 与 Codex goal 续跑、阻塞和验收边界	基础设施或历史载体；不构成离开/回抽的判据。
+tracker	tracker-Q1-1;tracker-Q1-2;tracker-Q1-4;tracker-Q2-1;tracker-Q2-4;tracker-Q4-1;tracker-Q4-2;tracker-Q4-3	1478	CLOSED	[grilling] 中枢外缘 GG/DD 的遍历范围落码与延伸测试的末成员端点（#1323，CC-017/ST-012/ST-016；#812 S-7 受影响代码清单补齐）	外缘与末端角色两条裁定。
+tracker	tracker-Q1-1;tracker-Q2-1	1481	OPEN	[impl] S 写者审计核心降阶：Δ 单代判据、写者生涯前缀夹持与线性冷启动（承接 §5.9.2 全 9011 双跑）	基础设施或历史载体；不构成离开/回抽的判据。
+tracker	tracker-Q1-1;tracker-Q2-1	1488	CLOSED	[impl] S 写者构造降阶：增量构造与去除作废中间根（承接 #1481 M7、#1419 S0b）	基础设施或历史载体；不构成离开/回抽的判据。
+tracker	tracker-Q2-1	1489	CLOSED	[grilling] S 内容编码让每代新增可达节点有界：有序数组插入稳定、CC-007 只重发变化项、CC-054/056 增量表示（#1323，承接 #1481 阶段 0）	该标题讨论其他票的归口或执行对象；不作为本票权威；未逐条拉正文。
+tracker	tracker-Q2-1	1490	CLOSED	[grilling] 线段第一种情况的确认时点、转折点两侧包含与段端门失败去向（071:30/32/42，承接 #1487，收 xianduan V-5）	分界证明独立于区间标准化；不改线段规则。
+tracker	tracker-Q1-1	1491	OPEN	[impl] S 写者内容布局 bounded-layout/1：出生序累计数组、CC-007 单元批记录与分型只出生一次（承接 #1489）	基础设施或历史载体；不构成离开/回抽的判据。
+tracker	tracker-Q1-1;tracker-Q1-2;tracker-Q2-1	1493	CLOSED	[impl] TB-02-X 线段第一种情况候选三态、转折点窗、先破判据与段端门 fail-closed（承接 #1490，修 #1487）	V-18 已观测实际段端非段内极值。
+tracker	tracker-Q1-1	1495	CLOSED	[task] Lean 线段第一种情况：先破判据定义式、转折点窗三态与等价引理，行号注订正（#1490 X-31）	相邻结构议题；标题对象/verdict 不足以断言新增 R5 归属，作为近邻而非已裁。
+tracker	tracker-Q1-1;tracker-Q1-2;tracker-Q1-4;tracker-Q2-3;tracker-Q2-5	1496	OPEN	[impl] 中枢两段式结算 R5：离开后看回抽，回则延伸、不回则破坏（承接 zhongshu.md §9 R5、A-ST-013-02 后半）	首片边界及旧反例转述；后续 owner。
+tracker	tracker-Q2-1	1502	OPEN	[task] CLIProxy Claude/Antigravity 按额度重置时间调度并保持会话亲和	基础设施或历史载体；不构成离开/回抽的判据。
+tracker	tracker-Q2-1	1503	OPEN	[task] Codex 多模型指令治理：共同正本与 Claude 适配加载	基础设施或历史载体；不构成离开/回抽的判据。
+tracker	tracker-Q1-1	1510	OPEN	[task] 本机空间清理与 Windows SSH 存储/运行环境勘察	基础设施或历史载体；不构成离开/回抽的判据。
+tracker	tracker-Q2-1	1523	OPEN	[impl] TB-04/08/09 纵片 A：nautilus 0.62 HL 适配器与正式 paper launcher	该标题讨论其他票的归口或执行对象；不作为本票权威；未逐条拉正文。
+tracker	tracker-Q2-1	1525	OPEN	[impl] TB-04 纵片 C：RiskGate 与订单责任回路接线	资金/经营/订单/账本合同的退场，无权决 R5 结构。
+tracker	tracker-Q1-1;tracker-Q2-1	1527	OPEN	[task] 建立正式 producer/R4/CLI 恢复路径：R4 消费端与失败收据进 main（成功收据拆至 #1675）	基础设施或历史载体；不构成离开/回抽的判据。
+tracker	tracker-Q1-1;tracker-Q2-1	1530	CLOSED	[grilling] FU-08 生产入口与唯一 owner（#1323，新增）	该标题讨论其他票的归口或执行对象；不作为本票权威；未逐条拉正文。
+tracker	tracker-Q2-1	1531	CLOSED	[grilling] FU-09 严格判据唯一、级别同构锁（#1323，新增）	该标题讨论其他票的归口或执行对象；不作为本票权威；未逐条拉正文。
+tracker	tracker-Q2-1	1532	CLOSED	[grilling] FU-12 旧引擎/简化臂逐入口终态（#1323，新增）	该标题讨论其他票的归口或执行对象；不作为本票权威；未逐条拉正文。
+tracker	tracker-Q1-1;tracker-Q2-1	1533	CLOSED	[grilling] FU-10 逐 bar Classification→旁路/下钻→Chong（#1323，新增）	该标题讨论其他票的归口或执行对象；不作为本票权威；未逐条拉正文。
+tracker	tracker-Q1-1;tracker-Q2-1	1534	CLOSED	[grilling] FU-11 逐 bar 事件、身份、生命周期合同（#1323，新增）	该标题讨论其他票的归口或执行对象；不作为本票权威；未逐条拉正文。
+tracker	tracker-Q1-1;tracker-Q2-1	1535	CLOSED	[grilling] FU-13 带仓迁移、回退、责任退休（#1323，新增）	资金/经营/订单/账本合同的退场，无权决 R5 结构。
+tracker	tracker-Q2-1	1536	CLOSED	[grilling] FU-14 完整历史数据与模型 profile（#1323，新增）	该标题讨论其他票的归口或执行对象；不作为本票权威；未逐条拉正文。
+tracker	tracker-Q1-1;tracker-Q2-1	1537	CLOSED	[grilling] FU-15 双跑确定性、恢复、seek、AsKnown（#1323，新增）	基础设施或历史载体；不构成离开/回抽的判据。
+tracker	tracker-Q2-1	1538	CLOSED	[grilling] FU-16 paper/live 与回放同核边界（#1323，新增）	基础设施或历史载体；不构成离开/回抽的判据。
+tracker	tracker-Q2-1	1539	CLOSED	[grilling] FU-17 成交/持仓唯一真账与 crosswalk（#1323，新增）	资金/经营/订单/账本合同的退场，无权决 R5 结构。
+tracker	tracker-Q2-1	1540	CLOSED	[grilling] FU-18 受控场所、账户、权限（#1323，新增）	资金/经营/订单/账本合同的退场，无权决 R5 结构。
+tracker	tracker-Q2-1	1550	CLOSED	[grilling] FU-19 #1304 接入映射（#1323，新增）	该标题讨论其他票的归口或执行对象；不作为本票权威；未逐条拉正文。
+tracker	tracker-Q2-1	1551	OPEN	[grilling] FU-20 #1279 关票门与整图报告（#1323，新增）	该标题讨论其他票的归口或执行对象；不作为本票权威；未逐条拉正文。
+tracker	tracker-Q2-1	1552	OPEN	[impl] TB-03-B2 统一 source 上的真实验收（拆自 #1394）	该标题讨论其他票的归口或执行对象；不作为本票权威；未逐条拉正文。
+tracker	tracker-Q1-2;tracker-Q2-1	1557	CLOSED	[grilling] FU-01/03 余项：共同 cap、固定 Q 与本金批次的数值签署（#1323，P 类）	资金/经营/订单/账本合同的退场，无权决 R5 结构。
+tracker	tracker-Q2-1	1558	CLOSED	[grilling] FU-02 余项：量档与逐级容量 C(ℓ) 的数值签署（#1323，P 类）	资金/经营/订单/账本合同的退场，无权决 R5 结构。
+tracker	tracker-Q1-2;tracker-Q2-1	1560	CLOSED	[grilling] FU-07 余项：系统风险条件 SR v1 阈值与退出动作表签署（#1323，P 类）	资金/经营/订单/账本合同的退场，无权决 R5 结构。
+tracker	tracker-Q1-1;tracker-Q2-1	1561	CLOSED	[grilling] FU-04 余项：目标生产 profile P2 的场所、账户与首次发送授权（#1323，P 类）	资金/经营/订单/账本合同的退场，无权决 R5 结构。
+tracker	tracker-Q1-1	1565	CLOSED	[grilling] S3 后继串如何发布 W 初始化对象（pending_since_cut 与生成态约束）（#1419/#1393）	该标题讨论其他票的归口或执行对象；不作为本票权威；未逐条拉正文。
+tracker	tracker-Q1-2;tracker-Q2-1	1567	CLOSED	[grilling] s-admission 首份锚的签发与无锚库接管（#1527）	该标题讨论其他票的归口或执行对象；不作为本票权威；未逐条拉正文。
+tracker	tracker-Q1-1;tracker-Q2-1	1568	CLOSED	[task] S init 在磁盘满时留下 4096 字节残留库，重试需人工清理	该标题讨论其他票的归口或执行对象；不作为本票权威；未逐条拉正文。
+tracker	tracker-Q1-1;tracker-Q2-1	1590	CLOSED	[grilling] 重回 0 换向后三阶段状态、闸门进度与本金/成本账的延续或重置（承接 ADR 0040）	资金/经营/订单/账本合同的退场，无权决 R5 结构。
+tracker	tracker-Q2-1	1598	CLOSED	[grilling] 量档、成本与历史模拟正本的选择项改写为可选值字段（#1586 A-01/A-09/A-10/B-05；A-02 拆至 #1677）	资金/经营/订单/账本合同的退场，无权决 R5 结构。
+tracker	tracker-Q2-1	1599	CLOSED	[grilling] 风控、退出、争用、成交、场所 profile、会计与活假设正本的被否候选改写为可选值（#1586 A-04~A-08/A-11/B-09）	资金/经营/订单/账本合同的退场，无权决 R5 结构。
+tracker	tracker-Q2-1	1601	CLOSED	[impl] 资金与下单基数接 funding-record：回放总投入、NT 生产 nav 与起始操作级别（#1586 C-01/C-02/C-22）	资金/经营/订单/账本合同的退场，无权决 R5 结构。
+tracker	tracker-Q2-1	1602	CLOSED	[impl] 执行成本、风控与声部参数、场所 tick 与坏 tick 闸落版本化记录（#1586 C-06/C-08/C-17/C-18）	资金/经营/订单/账本合同的退场，无权决 R5 结构。
+tracker	tracker-Q2-1	1605	CLOSED	[impl] 回测与验收统计常数并入验收口径版本化记录（#1586 C-19）	该标题讨论其他票的归口或执行对象；不作为本票权威；未逐条拉正文。
+tracker	tracker-Q2-1	1610	CLOSED	[decision] ADR 0040 三条 Codex 评审未答：降额版本绕过 ADR 0029 Σ责任≤cap、q_ref 解析不到逐重 Q、L1 缺冻结 tier_quantity	资金/经营/订单/账本合同的退场，无权决 R5 结构。
+tracker	tracker-Q1-1;tracker-Q1-2;tracker-Q2-1	1612	CLOSED	[grilling] S 写者增量路径是否升格为生产路径，及 #1488 范围拆分（承接 #1488 S4）	基础设施或历史载体；不构成离开/回抽的判据。
+tracker	tracker-Q2-1	1618	OPEN	[task] #1588 转票：sandcastle 失败可见性与本机 cargo 垫片余项（GH Actions 评审整段 diff、绝对路径绕过、蜂群、implementer/failed、health-monitor）	该标题讨论其他票的归口或执行对象；不作为本票权威；未逐条拉正文。
+tracker	tracker-Q2-1	1619	CLOSED	[grilling] #1406 WE-1/WE-2 映射原定义丢失，需考古恢复或重裁（承接 #1406）	基础设施或历史载体；不构成离开/回抽的判据。
+tracker	tracker-Q1-1;tracker-Q2-1	1621	CLOSED	[impl] #1406 遗留：known_at 绑定可审计时间与跨域时刻先后不变式	该标题讨论其他票的归口或执行对象；不作为本票权威；未逐条拉正文。
+tracker	tracker-Q2-1	1622	CLOSED	[impl] #1406 遗留：BindVoice 故障缝覆盖	该标题讨论其他票的归口或执行对象；不作为本票权威；未逐条拉正文。
+tracker	tracker-Q2-1	1626	CLOSED	[impl] #1600 承接：trend_scope 与 tower_base 代码侧改读版本化字段，Lean 同步（Q-4、Q-6～Q-8、X-38、Q-2）	该标题讨论其他票的归口或执行对象；不作为本票权威；未逐条拉正文。
+tracker	tracker-Q1-1;tracker-Q1-2;tracker-Q2-1	1627	CLOSED	[grilling] 正本冲突：qujiantao §4.5.2「延伸到笔」与 zhongshu §2.1、beichi.md:459（#1600 考古登记）	基底值域，无新的两段式裁定。
+tracker	tracker-Q1-1	1642	OPEN	[impl] S 写者六阶段 Δ_R 化：段 B 前按 object_id 键的构造增量（#1612 切片 3a）	基础设施或历史载体；不构成离开/回抽的判据。
+tracker	tracker-Q1-1;tracker-Q2-1	1644	CLOSED	[grilling] P6 来源审计持久台账与清单全闭包核验，与 #1481 方案三合审（#1612 切片 4）	该标题讨论其他票的归口或执行对象；不作为本票权威；未逐条拉正文。
+tracker	tracker-Q2-1	1647	OPEN	[impl] S 写者 P6：审计台账与本代候选核验 Δ 化（来源审计②③、清单④，#1644 裁定）	基础设施或历史载体；不构成离开/回抽的判据。
+tracker	tracker-Q2-1	1654	CLOSED	[impl] #1627 承接：recursive_t A0Source::Stroke 名分与交易阶梯「笔=a0」注释对齐 zhongshu §2.1.1（C2、C3）	该标题讨论其他票的归口或执行对象；不作为本票权威；未逐条拉正文。
+tracker	tracker-Q1-1	1657	CLOSED	[impl] s-admission 首签与撤销操作员命令 + 合同版本校验 + 三组负控（#1567 裁定，#1527 成功收据前置）	该标题讨论其他票的归口或执行对象；不作为本票权威；未逐条拉正文。
+tracker	tracker-Q1-1	1672	CLOSED	[impl] TB-03-C/S6a FIN/2 域上 TB03C Capture/Resolve/Apply 首个正例与恢复（#1406 AC1/AC5）	基础设施或历史载体；不构成离开/回抽的判据。
+tracker	tracker-Q1-1;tracker-Q2-1	1673	OPEN	[impl] TB-03-C/S5 正式会话入口的财务链+TB03C 合链运行与公共查询核对（#1406 AC1/AC4 后端）	资金/经营/订单/账本合同的退场，无权决 R5 结构。
+tracker	tracker-Q1-1;tracker-Q2-1	1678	CLOSED	[impl] health-monitor 自愈：服务未加载时改走 launchctl bootstrap（拆自 #1547 判据 4）	该标题讨论其他票的归口或执行对象；不作为本票权威；未逐条拉正文。
+tracker	tracker-Q1-1	1695	OPEN	[task] Belay 美国远程开发环境部署（复用现有 Kookeey）	基础设施或历史载体；不构成离开/回抽的判据。
+tracker	tracker-Q2-1	1717	OPEN	[impl] 政策增量 I2：SR 扩量新版本及冻结退出同核消费	资金/经营/订单/账本合同的退场，无权决 R5 结构。
+tracker	tracker-Q1-1	1719	OPEN	[impl] 政策增量 I4：center_break 到活假设第二层清账桥	该标题讨论其他票的归口或执行对象；不作为本票权威；未逐条拉正文。
+tracker	tracker-Q1-1;tracker-Q2-1	1742	OPEN	[task] Deep Agents / LangGraph 与 pstack、Wayfinder、Sandcastle 独立集成试点	基础设施或历史载体；不构成离开/回抽的判据。
+tracker	tracker-Q2-1	1768	OPEN	[impl] TB-07-E B/E 域事件外壳 domain-event/1 映射与 delta/Gap 读口（ADR 0051，#1534）	该标题讨论其他票的归口或执行对象；不作为本票权威；未逐条拉正文。
+tracker	tracker-Q1-1;tracker-Q2-1	1769	OPEN	[impl] #1523-L production_session 与 x_execution_session 可运行骨架（ADR 0039 迁移步骤 1）	基础设施或历史载体；不构成离开/回抽的判据。
+tracker	tracker-Q1-1;tracker-Q2-1	1770	OPEN	[impl] #1523-API X 内 HL 场所 adapter 离线合同（环境、凭据、请求与回报原件映射）	资金/经营/订单/账本合同的退场，无权决 R5 结构。
+tracker	tracker-Q2-1	1774	CLOSED	[grilling] P0 venue profile v2: sign replay and production cost inputs (#1323)	该标题讨论其他票的归口或执行对象；不作为本票权威；未逐条拉正文。
+tracker	tracker-Q2-1	1783	CLOSED	[grilling] bounded-layout/1 CC-007.development_batch entries 次序：窗口序 vs 出生序（ADR 0037 §二）	该标题讨论其他票的归口或执行对象；不作为本票权威；未逐条拉正文。
+tracker	tracker-Q2-1	1786	CLOSED	[grilling] #1572 逐项结算：生产读法、v3 legacy 空集验收、运行时缓存清单归类	基础设施或历史载体；不构成离开/回抽的判据。
+tracker	tracker-Q2-1	1790	CLOSED	[grilling] 订正 ADR 0054：中段出生不造成两序分叉（身份含前缀链），验收命题改为“出生构成窗口序后缀”	该标题讨论其他票的归口或执行对象；不作为本票权威；未逐条拉正文。
+tracker	tracker-Q1-1	1800	OPEN	[task] CLIProxy 本机客户端密钥受控轮换与消费者恢复	基础设施或历史载体；不构成离开/回抽的判据。
+tracker	tracker-Q2-1	1818	OPEN	[grilling] production_session 并发写域与 S admission 测量域布局合同（#1781 前置）	该标题讨论其他票的归口或执行对象；不作为本票权威；未逐条拉正文。
+tracker	tracker-Q2-1	1823	OPEN	[task] production_session 中 S 崩溃后残留 s.socket 的重启行为：只读复现、归属与测试规格（#1818 规则 5 承接）	该标题讨论其他票的归口或执行对象；不作为本票权威；未逐条拉正文。
+tracker	tracker-Q2-1	1862	OPEN	📋 SPEC：Boat Queued 操作员状态与恢复速查（#1742/#1804 生产首票）	基础设施或历史载体；不构成离开/回抽的判据。
+tracker	tracker-Q2-1	1875	OPEN	[task] ci.yml 墙钟提速 2 倍（hillclimb，指纹不变，承接 #1722/#1588）	该标题讨论其他票的归口或执行对象；不作为本票权威；未逐条拉正文。
+tracker	tracker-Q1-1	1977	OPEN	[task] 同实体中枢对修订分支（inputs_revised，previous 非空）缺完整历史锁覆盖（#1855 改锁承接）	历史关系修订/输入和旧 C 不同。
+tracker	tracker-Q2-1	2029	OPEN	[bug] tb03c_kill 证据目录不清理、production_session_entry 写死 /tmp，共享机 /tmp 被占满	该标题讨论其他票的归口或执行对象；不作为本票权威；未逐条拉正文。
+tracker	tracker-Q4-1	2073	OPEN	formal: Phase2 Claim5 的 CenterDerivedAt 外缘与 Phase 1 Zn 外缘统一（承接 #1855）	重切外缘一致性，归 R22 同源消费。
+tracker	tracker-Q1-1;tracker-Q2-1	2079	OPEN	[grilling] 正常关停或崩溃后，谁有权重新提供原会话端点（#1411 / #1823）	基础设施或历史载体；不构成离开/回抽的判据。
+tracker	tracker-Q1-2	2111	OPEN	[grilling] 成本停止：全部成本实测为零时的四态归属与检查顺序（ADR 0044，#1441 独审发现）	资金/经营/订单/账本合同的退场，无权决 R5 结构。
+tracker	tracker-Q1-1;tracker-Q1-4;tracker-Q2-3;tracker-Q4-1	2114	OPEN	[grilling] 趋势形成的正式确认时点：后中枢仍开放时的严格分离算不算已形成（#1426 独审发现）	相连文字分支、版本、首证和未裁范围。
+tracker	tracker-Q1-1	2127	OPEN	[grilling] 运行目录与 socket 的绝对路径进入 E/B 提交根：算账本事实还是非语义运行身份（#1425 复跑发现，#1411 双跑前置）	资金/经营/订单/账本合同的退场，无权决 R5 结构。
+tracker	tracker-Q2-1	2130	OPEN	[task] 生产会话运维 runbook：结束孤儿、拒绝态清场、目录整改、退役对象清理（承接 #2079）	基础设施或历史载体；不构成离开/回抽的判据。
+tracker	tracker-Q1-1;tracker-Q1-2;tracker-Q1-3;tracker-Q1-4;tracker-Q2-1;tracker-Q2-2;tracker-Q2-4;tracker-Q2-5;tracker-Q3-1;tracker-Q4-1	2141	OPEN	[grilling] 中枢结算的两处未裁边界：关节极值不等的反向回抽算不算已证、首个不重叠段本身是离开时怎么结算（#1496 前置，退场条件②）	当前票，明确四问。
+repo	repo-Q1	.chanlun/definitions/qushi.md:244		- **R5 段角色 [新缠论:推论]。** `018:64`、`020:60`、`061:44`【正文】给出「离开＋其后回抽不回」，第 61 课例中第五段本身构成三类点。冻结 CC-019 明定用完成的首回抽：上涨回试低点 `> ZG`、下跌回抽高点 `< ZD`，相等不成点。	固定 #2114 正文；继承已裁字面分支与版本合同。
+repo	repo-Q1	.chanlun/definitions/zhongshu.md:232		**落码补齐（[#1478](https://github.com/xy7365527-lang/NewChanlun/issues/1478) 裁定一，2026-10-13）**：GG/DD 的「n 遍历所有 Zn」此前只落在正本；生产塔（`recursive_tower.rs	正本/历史登记；旧句按本票限定，不拿未实装条目作行为证据。
+repo	repo-Q1	.chanlun/definitions/zhongshu.md:250		**端点条款（[#1478](https://github.com/xy7365527-lang/NewChanlun/issues/1478) 裁定二，2026-10-13；原文未讲的端点，按权威分层由 Lean 管）**：`020:56` 的延伸测试对象是 `Zn` 的 `[	正本/历史登记；旧句按本票限定，不拿未实装条目作行为证据。
+repo	repo-Q1	.chanlun/definitions/zhongshu.md:252		**退场条件**：① 日后找到原文依据推翻本端点，或 [#1434](https://github.com/xy7365527-lang/NewChanlun/issues/1434)（三类点）／[#1424](https://github.com/xy7365527-lang/	正本/历史登记；旧句按本票限定，不拿未实装条目作行为证据。
+repo	repo-Q1	.chanlun/definitions/zhongshu.md:554		| R23 | `rust/src/theta_v0/classifier/center.rs:170`／`:176` `compute_gg`／`compute_dd`（调用点 `:257-258` `center_from_segments`、`:294-295` `cent	正本/历史登记；旧句按本票限定，不拿未实装条目作行为证据。
+repo	repo-Q1	CONTEXT.md:256		与中枢方向一致的成员单元（`020-第20课.md:52`【正文】），即与 seed 第一单元同向、序号差为偶数的成员。GG/G/D/DD 只遍历 Zn（ZG/ZD 的取法见正本 §1.2、§3）。端点相连时，内部非 Zn 单元的端点被相邻 Zn 覆盖，故全单元外缘与 Zn 外缘	Zn 词条分工；本票不改词表。
+repo	repo-Q1	formal/Formal/DivergenceNesting.lean:436		/-- 观测价是否真越过原方向极值（「创出顺 t.origDir 新极值」的客观判据，L0）。 -/	下钻力度/方向合格性，不是结算。
+repo	repo-Q1	formal/Formal/DivergenceNesting.lean:453		（事件后实际出现的沿原方向极值价）与 law 字段 `makesNewExtreme_sound`：	下钻力度/方向合格性，不是结算。
+repo	repo-Q1	formal/Formal/DivergenceNesting.lean:457		/-- 事件后实际观测到的沿原方向极值价（可观测证据，判定须对照它）。 -/	下钻力度/方向合格性，不是结算。
+repo	repo-Q1	formal/Origin/CenterComplete.lean:83		def DirAlternates (s1 s2 s3 : Segment) : Prop :=	Lean seed 的交替及共同核心，不是 R5 角色。
+repo	repo-Q1	formal/Origin/CenterComplete.lean:86		instance (s1 s2 s3 : Segment) : Decidable (DirAlternates s1 s2 s3) := by	Lean seed 的交替及共同核心，不是 R5 角色。
+repo	repo-Q1	formal/Origin/CenterComplete.lean:87		unfold DirAlternates; exact inferInstanceAs (Decidable (_ ∧ _))	Lean seed 的交替及共同核心，不是 R5 角色。
+repo	repo-Q1	formal/Origin/CenterComplete.lean:93		theorem dirAlternates_first_third_same (s1 s2 s3 : Segment) (h : DirAlternates s1 s2 s3) :	Lean seed 的交替及共同核心，不是 R5 角色。
+repo	repo-Q1	formal/Origin/CenterComplete.lean:137		1. **方向交替**（§6.1 典型形态下-上-下/上-下-上）——`DirAlternates s1 s2 s3`。	Lean seed 的交替及共同核心，不是 R5 角色。
+repo	repo-Q1	formal/Origin/CenterComplete.lean:148		DirAlternates s1 s2 s3 ∧	Lean seed 的交替及共同核心，不是 R5 角色。
+repo	repo-Q1	formal/Origin/CenterComplete.lean:159		DirAlternates s1 s2 s3 ∧	Lean seed 的交替及共同核心，不是 R5 角色。
+repo	repo-Q1	formal/Origin/CenterComplete.lean:249		完整判据查方向交替（第一支）：要求 s1.dir ≠ s2.dir，但三段全 up ⟹ DirAlternates 不成立 ⟹ 完整	Lean seed 的交替及共同核心，不是 R5 角色。
+repo	repo-Q1	formal/Origin/CenterComplete.lean:256		-- h.1 是 DirAlternates（口径 B 第一支），要求 s1.dir ≠ s2.dir，但都是 up	Lean seed 的交替及共同核心，不是 R5 角色。
+repo	repo-Q1	formal/Origin/CenterComplete.lean:257		have halt : DirAlternates sameDirSeg1 sameDirSeg2 sameDirSeg3 := h.1	Lean seed 的交替及共同核心，不是 R5 角色。
+repo	repo-Q1	formal/Origin/CenterComplete.lean:258		unfold DirAlternates sameDirSeg1 sameDirSeg2 at halt	Lean seed 的交替及共同核心，不是 R5 角色。
+repo	repo-Q1	formal/Origin/CenterComplete.lean:277		theorem noSpan_dirAlternates : DirAlternates noSpanSeg1 noSpanSeg2 noSpanSeg3 := by	Lean seed 的交替及共同核心，不是 R5 角色。
+repo	repo-Q1	formal/Origin/CenterComplete.lean:278		unfold DirAlternates noSpanSeg1 noSpanSeg2 noSpanSeg3; decide	Lean seed 的交替及共同核心，不是 R5 角色。
+repo	repo-Q1	formal/Origin/CenterComplete.lean:321		DirAlternates noSpanSeg1 noSpanSeg2 noSpanSeg3 ∧	Lean seed 的交替及共同核心，不是 R5 角色。
+repo	repo-Q1	formal/Origin/CenterComplete.lean:354		unfold DirAlternates trueCenterSeg1 trueCenterSeg2 trueCenterSeg3; decide	Lean seed 的交替及共同核心，不是 R5 角色。
+repo	repo-Q1	formal/Origin/CenterComplete.lean:382		(h : CenterConfirmedComplete s1 s2 s3) : DirAlternates s1 s2 s3 := h.1	Lean seed 的交替及共同核心，不是 R5 角色。
+repo	repo-Q1	formal/Origin/CenterConstruction.lean:281		线段，须方向交替，CenterComplete.lean DirAlternates），(2) 中枢延伸/新生/扩展的发展态串接	Lean seed 价区间及归并公式，非 R5。
+repo	repo-Q1	rust/src/theta_v0/backtest/econ_positive/xzd.rs:404		/// L0 完整判据 `DirAlternates` 需要真方向——见 center.rs 诚实有效域声明）。`tower[0]` 本就是	同词的实现/辅助入口；不是本票权威，保留原行供复查。
+repo	repo-Q1	rust/src/theta_v0/classifier/center.rs:7		//!   1. **方向交替** `DirAlternates`：`s1.dir≠s2.dir ∧ s2.dir≠s3.dir`（§6.1 典型形态	现有 Zn、seed 与几何谓词；分开值与角色。
+repo	repo-Q1	rust/src/theta_v0/classifier/center.rs:79		/// 完整判据 `DirAlternates` 的必要输入（旧 `UnitRange` 丢弃方向，无法判方向交替——G4 缺口根源）。	现有 Zn、seed 与几何谓词；分开值与角色。
+repo	repo-Q1	rust/src/theta_v0/classifier/center.rs:88		/// 走势单元方向（完整判据 `DirAlternates` 的输入；对齐 `Origin.Segment.direction`）。	现有 Zn、seed 与几何谓词；分开值与角色。
+repo	repo-Q1	rust/src/theta_v0/classifier/center.rs:180		/// 三段方向交替判定（契约锚 `Origin.CenterComplete.DirAlternates`，CenterComplete.lean:61-62）。	现有 Zn、seed 与几何谓词；分开值与角色。
+repo	repo-Q1	rust/src/theta_v0/classifier/center.rs:217		/// 1. **方向交替** `dir_alternates`（§6.1，`DirAlternates`）。	现有 Zn、seed 与几何谓词；分开值与角色。
+repo	repo-Q1	rust/src/theta_v0/classifier/center.rs:242		// 支1：方向交替（§6.1，DirAlternates）。	现有 Zn、seed 与几何谓词；分开值与角色。
+repo	repo-Q1	rust/src/theta_v0/classifier/pipeline.rs:138		/// L0 单元 = parser 线段（**含方向**，完整判据 `DirAlternates` 的输入）；`[lo,hi]` 对齐	代码事实：线段投影或传递方向与锚；不独证 R5。
+repo	repo-Q1	rust/src/theta_v0/parser/feature_seq.rs:662		/// - 并列：入元素 ⊃ 末元素、段方向极值相等、另一侧严格越过、末元素是峰候选：a、b 无缺口 ⟹	线段/特征终结规则或几何类型说明，不裁中枢结算。
+repo	repo-Q1	rust/src/theta_v0/parser/feature_seq.rs:756		// 携带段方向极值的笔（`067:38`）；合并取 min/max 不改 b 的 P 侧极值。	线段/特征终结规则或几何类型说明，不裁中枢结算。
+repo	repo-Q1	rust/src/theta_v0/parser/second_kind.rs:170		// #1344：P = 首特征序列分型中心元素 apex 的方向极值。	线段/特征终结规则或几何类型说明，不裁中枢结算。
+repo	repo-Q1	rust/src/theta_v0/parser/second_kind.rs:184		/// 第二特征序列方向极值（向上线段确认看新向下段、向下线段看新向上段的极值）。	线段/特征终结规则或几何类型说明，不裁中枢结算。
+repo	repo-Q1	rust/src/theta_v0/parser/segment.rs:903		/// `s0`/`s1` 是段首/末笔在 `strokes` 中的索引。端点价取方向极值（向上：起点 low、终点 high；	线段/特征终结规则或几何类型说明，不裁中枢结算。
+repo	repo-Q2	.chanlun/definitions/fenjie.md:17		| 构造口径（塔扫描） | [zhongshu.md](zhongshu.md) Z/S 全组（#812） | 中枢构造全程：seed 三段 / 中心定理一延伸 / 九段重切 / 续扫锚 C（Z-5） |	读法指针与旧行号，不给 R5 腿归属。
+repo	repo-Q2	.chanlun/definitions/fenjie.md:28		| 续扫锚 B 口径（`i=j`）改 C 口径（跳过突破段） | zhongshu.md R8/Z-5——**已裁待落地** | #812 |	读法指针与旧行号，不给 R5 腿归属。
+repo	repo-Q2	.chanlun/definitions/fenjie.md:41		| `rust/src/theta_v0/classifier/recursive_tower.rs` | 构造口径：canonical 中枢链（seed :792-794 / 延伸吸收 :795-797 / 续扫锚 `i=j` :857——**R8 待改 C** / ≥9 段重	读法指针与旧行号，不给 R5 腿归属。
+repo	repo-Q2	.chanlun/definitions/fenjie.md:45		**待落地 / 在途指针**（不在清单正文）：R8 续扫锚改 C 落地后回填本清单；#1087 签收后桥侧新增一列（对齐验收在 #1087）。	读法指针与旧行号，不给 R5 腿归属。
+repo	repo-Q2	.chanlun/definitions/qushi.md:244		- **R5 段角色 [新缠论:推论]。** `018:64`、`020:60`、`061:44`【正文】给出「离开＋其后回抽不回」，第 61 课例中第五段本身构成三类点。冻结 CC-019 明定用完成的首回抽：上涨回试低点 `> ZG`、下跌回抽高点 `< ZD`，相等不成点。	固定 #2114 正文；继承已裁字面分支与版本合同。
+repo	repo-Q2	.chanlun/definitions/zhongshu.md:350		⟹ **「不重叠」必须配上「没回来」才不算延伸。** 反例：`units[j]` 离开核心、`units[j+1]` 回到核心内——塔在 `j` 处结算并从续扫锚继续（可能再切出第二个中枢），而按定理三中枢**根本没被破坏**，应记为一个延伸中的中枢。	正本/历史登记；旧句按本票限定，不拿未实装条目作行为证据。
+repo	repo-Q2	.chanlun/definitions/zhongshu.md:398		### 6.1 【Z-5】续扫锚 = 跳过突破段（`last + 2`）	正本/历史登记；旧句按本票限定，不拿未实装条目作行为证据。
+repo	repo-Q2	.chanlun/definitions/zhongshu.md:539		| R8 | `rust/src/theta_v0/classifier/recursive_tower.rs:804` `i = j` | 续扫锚 = **突破段本身**（B 口径） | **改为 C 口径**（跳过突破段） | Z-5 | **★清单新增**——裁定只点了 `	正本/历史登记；旧句按本票限定，不拿未实装条目作行为证据。
+repo	repo-Q2	.chanlun/definitions/zhongshu.md:547		| R16 | `rust/src/zhongshu.rs:224` `(break_seg_idx - 2).max(seg_end_idx)` | 续扫锚 A 口径 | **改为 C**（`last + 2`） | Z-5 | |	正本/历史登记；旧句按本票限定，不拿未实装条目作行为证据。
+repo	repo-Q2	.chanlun/definitions/zhongshu.md:569		| L6 | `formal/Origin/CenterConstruct.lean:429` / `:459` 续扫锚 `i = endE + 2`（原 A 口径 `max(jOut-2, end)`） | A 口径 | **改为 C**。**已落地 = [#1296](htt	正本/历史登记；旧句按本票限定，不拿未实装条目作行为证据。
+repo	repo-Q2	.chanlun/definitions/zhongshu.md:585		| P6 | `src/newchan/a_zhongshu_v1.py:164` `i = max(break_seg_idx - 2, seg_end_idx)`（+ 文档串 `:10`/`:128`） | 续扫锚 A 口径 | **改为 C** | Z-5 | **★行号补	正本/历史登记；旧句按本票限定，不拿未实装条目作行为证据。
+repo	repo-Q2	.chanlun/definitions/zhongshu.md:586		| P7 | `src/newchan/a_zhongshu_v1.py:171` `zhongshu_from_segments` | 段中枢主算法 | **符合本正本，逻辑不动**（续扫锚随 P6 改） | Z-1 / S-2 | |	正本/历史登记；旧句按本票限定，不拿未实装条目作行为证据。
+repo	repo-Q2	.chanlun/definitions/zhongshu.md:606		| [#1429](https://github.com/xy7365527-lang/NewChanlun/issues/1429) TB-02-H | ≥9 段子窗 `Zn` 聚合（R22）；§4.1 端点条款退场条件②（上级单元） |	正本/历史登记；旧句按本票限定，不拿未实装条目作行为证据。
+repo	repo-Q2	.chanlun/definitions/zhongshu.md:610		**代价照实（合并声明）**：Z-5（续扫锚）与 S-3（破坏判据）都会改变中枢个数，走势类型与买卖点随之变，**回测基线全部重跑**（同一批，不额外新增一次）。	正本/历史登记；旧句按本票限定，不拿未实装条目作行为证据。
+repo	repo-Q2	.chanlun/definitions/zhongshu.md:681		- 新增：固定三行头、递归基条款、循环定义破解 +「成交笔 ≠ 缠论笔」防误用注、四指标分工、升级阈值（含「须有波动」前置）、中枢破坏 ≡ 三类点 + 三条推论、续扫锚、不设候选态、不区分形态排除句、PH-中枢排除句、受影响代码清单（Rust 20 / Lean 8 / Py	正本/历史登记；旧句按本票限定，不拿未实装条目作行为证据。
+repo	repo-Q2	docs/spec/maimai_rules_v1.md:237		c. 在离开段之后，找到第一个反方向段（回试/回抽段）	旧说明从 settled 枚举反向腿，预设本票待证的问题。
+repo	repo-Q2	formal/Origin/CenterConstruct.lean:323		+ gg/dd/settled 生命周期 + 结算后续扫锚（本文件按 #812 Z-5 改 C 口径 `end+2`，	旧单哨兵参考、聚合与续扫；旧定理不是新两段行为。
+repo	repo-Q2	formal/Origin/CenterConstruct.lean:585		def refSeg4Break : Segment := { direction := Direction.up, startIndex := 4, endIndex := 5, startPrice := 25, endPrice := 22 }	旧单哨兵参考、聚合与续扫；旧定理不是新两段行为。
+repo	repo-Q2	formal/Origin/CenterConstruct.lean:597		[refSeg0..refSeg2, refSeg3Ext, refSeg4Break]：核心 [12,15]，第四段延伸（count→4），	旧单哨兵参考、聚合与续扫；旧定理不是新两段行为。
+repo	repo-Q2	formal/Origin/CenterConstruct.lean:601		(refZhongshusFromComponents [refSeg0, refSeg1, refSeg2, refSeg3Ext, refSeg4Break]).head?.map	旧单哨兵参考、聚合与续扫；旧定理不是新两段行为。
+repo	repo-Q2	formal/Origin/CenterConstruct.lean:645		((refZhongshusFromComponents [refSeg0, refSeg1, refSeg2, refSeg3Ext, refSeg4Break]).map refZhongshuJson).toArray),	旧单哨兵参考、聚合与续扫；旧定理不是新两段行为。
+repo	repo-Q2	rust/src/theta_v0/classifier/signal/cert.rs:608		/// 要素4（区间套定位）失败：离开段之后无同向回抽段 ⟹ None。	现有三类或趋势 c 的消费者/测试，旧证书不授权几何兜底。
+repo	repo-Q2	rust/src/theta_v0/classifier/tests/third_class_anchor.rs:350		// 场景 A：首对成功（卖3 于首回试）+ 第二次回试同样合法 ⟹ 只产一枚。	代码测试锚，限所涉输入，不能扩判。
+repo	repo-Q2	rust/tests/theta_v0_center_parity.rs:82		// ── fixture 三 case 的 rust 输入（必须与 Lean refSeg0..refSeg4Break 同价位编码）─────	代码测试锚，限所涉输入，不能扩判。
+repo	repo-Q2	rust/tests/theta_v0_center_parity.rs:95		// Lean refSeg0/refSeg1/refSeg2/refSeg3Ext/refSeg4Break 对应（CenterConstruct.lean § 5.5.2/5.5.3）。	代码测试锚，限所涉输入，不能扩判。
+repo	repo-Q3	.chanlun/definitions/zhongshu.md:370		当前实现对 L≥1 用方向 provenance 门（`leave_anchor`）保守拒绝，**该门不是教义判据**，是方向推导不可靠时的兜底，属实现层欠账（`mod.rs:461`/`:623`：L0 分支不消费 anchor，仅 L≥1 在投影点派生，`None` = fa	正本/历史登记；旧句按本票限定，不拿未实装条目作行为证据。
+repo	repo-Q3	docs/adr/0011-operation-decomposition-layer.md:43		实查 `rust/src/theta_v0/classifier/recursive_tower.rs:938-954`：块的唯一用途是经 `center_own_dir_at(blocks, idx)` 给单元定方向，喂塔往上爬 ⟹ 块站在构造链上。	同级别 S 读法及其验收，与唯一主塔分开。
+repo	repo-Q3	formal/Origin/UnifiedScanMirrorBridge.lean:265		/-- `center_own_dir_at`：C0 无入边；其余只从入边所属 Trend 块取得方向。 -/	固定镜像 seed 交替的证明，不决定失配回抽。
+repo	repo-Q3	rust/src/bin/p112_trend_predicate_caseaudit.rs:38		use newchan_rust::theta_v0::classifier::decompose::{center_own_dir_at, center_trend_gate};	诊断或输出镜像，不进判据。
+repo	repo-Q3	rust/src/bin/p112_trend_predicate_caseaudit.rs:930		.map(|i| center_own_dir_at(&classification.levels[0].moves, i))	诊断或输出镜像，不进判据。
+repo	repo-Q3	rust/src/bin/p86_anchor_hypothesis.rs:424		// 不与 `run` 本身 1:1——把它的 blocks 喂给 `run` 的投影会让 `center_own_dir_at` 索引落到	诊断或输出镜像，不进判据。
+repo	repo-Q3	rust/src/bin/s2_lean_mirror_extract.rs:2414		segment(&value.leave, value.leave_anchor, None),	投影镜像代码不裁定义。
+repo	repo-Q3	rust/src/bin/s2_lean_mirror_extract.rs:2722		segment(&value.leave, value.leave_anchor, None),	投影镜像代码不裁定义。
+repo	repo-Q3	rust/src/theta_v0/classifier/decompose.rs:207		pub fn center_own_dir_at(blocks: &[MoveBlock], i: usize) -> Option<Direction> {	走势块方向来源，区分趋势与盘整。
+repo	repo-Q3	rust/src/theta_v0/classifier/decompose.rs:225		/// B₁（与 [`center_own_dir_at`] 的 i==0→None **有意不同**——kind 版是批式查询无前缀稳定约束，	走势块方向来源，区分趋势与盘整。
+repo	repo-Q3	rust/src/theta_v0/classifier/decompose.rs:411		fn center_own_dir_at_equals_trend_gate_pointwise() {	走势块方向来源，区分趋势与盘整。
+repo	repo-Q3	rust/src/theta_v0/classifier/decompose.rs:424		center_own_dir_at(&blocks, i),	走势块方向来源，区分趋势与盘整。
+repo	repo-Q3	rust/src/theta_v0/classifier/diag/cand_delta.rs:29		///   #1052 点锚迁移同源——旧 `center_own_dir_at(levels[ℓ-1].moves, i)` 的中心域/单元域错位	诊断读数不进准入。
+repo	repo-Q3	rust/src/theta_v0/classifier/diag/cand_delta.rs:182		// ★3b 口径订正（P1 退役收口）：旧 P1 镜像的 `center_own_dir_at(pb, i)` 用单元下标	诊断读数不进准入。
+repo	repo-Q3	rust/src/theta_v0/classifier/diag/cp_recall_audit.rs:183		leave_anchor: Option<Direction>,	诊断读数不进准入。
+repo	repo-Q3	rust/src/theta_v0/classifier/diag/cp_recall_audit.rs:186		match (leave_anchor, retest.direction) {	诊断读数不进准入。
+repo	repo-Q3	rust/src/theta_v0/classifier/diag/cp_recall_audit.rs:287		let leave_anchor = match anchor_dirs {	诊断读数不进准入。
+repo	repo-Q3	rust/src/theta_v0/classifier/diag/cp_recall_audit.rs:291		let atom = if signal::judge_third_cert(&object.b_center, &leave, leave_anchor, &retest)	诊断读数不进准入。
+repo	repo-Q3	rust/src/theta_v0/classifier/diag/cp_recall_audit.rs:296		recall_failure_atom(&object.b_center, &leave, leave_anchor, &retest)	诊断读数不进准入。
+repo	repo-Q3	rust/src/theta_v0/classifier/diag/cp_recall_audit.rs:372		.map(|i| decompose::center_own_dir_at(parent_blocks, i))	诊断读数不进准入。
+repo	repo-Q3	rust/src/theta_v0/classifier/diag/s2_mirror_capture.rs:47		pub leave_anchor: Option<Direction>,	诊断读数不进准入。
+repo	repo-Q3	rust/src/theta_v0/classifier/diag/s2_mirror_capture.rs:564		pub leave_anchor: Option<Direction>,	诊断读数不进准入。
+repo	repo-Q3	rust/src/theta_v0/classifier/diag/s2_mirror_capture.rs:990		leave_anchor: Option<Direction>,	诊断读数不进准入。
+repo	repo-Q3	rust/src/theta_v0/classifier/diag/s2_mirror_capture.rs:1001		leave_anchor,	诊断读数不进准入。
+repo	repo-Q3	rust/src/theta_v0/classifier/lean_mirror.rs:692		option(&value.leave_anchor, |value| actual_direction(*value).to_string()),	投影镜像代码不裁定义。
+repo	repo-Q3	rust/src/theta_v0/classifier/pipeline.rs:239		decompose::center_own_dir_at(lower_blocks, idx).unwrap_or_else(|| m.fold_direction(prev))	代码事实：线段投影或传递方向与锚；不独证 R5。
+repo	repo-Q3	rust/src/theta_v0/classifier/pipeline.rs:1758		.map(|i| decompose::center_own_dir_at(pb, i))	代码事实：线段投影或传递方向与锚；不独证 R5。
+repo	repo-Q3	rust/src/theta_v0/classifier/recursive_tower.rs:58		use super::decompose::{center_own_dir_at, MoveBlock};	源码/测试刻画旧扫描及上级投影，代码不是教义授权。
+repo	repo-Q3	rust/src/theta_v0/classifier/recursive_tower.rs:268		/// 主来源是次级别走势类型方向（ownership Trend 块，[`center_own_dir_at`]），仅当中枢落	源码/测试刻画旧扫描及上级投影，代码不是教义授权。
+repo	repo-Q3	rust/src/theta_v0/classifier/recursive_tower.rs:271		/// ★诚实有效域：上级走势的方向是**外缘占位**（首单元下移/上移），**不**冒充 §6.1 意义的	源码/测试刻画旧扫描及上级投影，代码不是教义授权。
+repo	repo-Q3	rust/src/theta_v0/classifier/recursive_tower.rs:719		/// 几何路径用——上级中枢检测在外缘区间上做，方向是外缘占位）。	源码/测试刻画旧扫描及上级投影，代码不是教义授权。
+repo	repo-Q3	rust/src/theta_v0/classifier/recursive_tower.rs:723		/// 跨层传参（把上一级中枢链的 blocks 喂给下一级塔）不违反任何类型约束，`center_own_dir_at`	源码/测试刻画旧扫描及上级投影，代码不是教义授权。
+repo	repo-Q3	rust/src/theta_v0/classifier/recursive_tower.rs:740		/// - 中枢 i 按 ownership 落 **Trend(d) 块**（[`center_own_dir_at`]）⟹ 方向 = d（次级别走势类型方向）；	源码/测试刻画旧扫描及上级投影，代码不是教义授权。
+repo	repo-Q3	rust/src/theta_v0/classifier/recursive_tower.rs:742		///   （[`LeveledMove::fold_direction`] 外缘占位，标注：此路径的方向不携带走势类型语义，仅结构占位	源码/测试刻画旧扫描及上级投影，代码不是教义授权。
+repo	repo-Q3	rust/src/theta_v0/classifier/recursive_tower.rs:760		direction: center_own_dir_at(blocks, idx).unwrap_or_else(|| m.fold_direction(prev)),	源码/测试刻画旧扫描及上级投影，代码不是教义授权。
+repo	repo-Q3	rust/src/theta_v0/classifier/recursive_tower.rs:803		direction: center_own_dir_at(blocks, idx).unwrap_or_else(|| m.fold_direction(prev)),	源码/测试刻画旧扫描及上级投影，代码不是教义授权。
+repo	repo-Q3	rust/src/theta_v0/classifier/recursive_tower.rs:1409		let leave_anchor = match anchor_dirs {	源码/测试刻画旧扫描及上级投影，代码不是教义授权。
+repo	repo-Q3	rust/src/theta_v0/classifier/recursive_tower.rs:1413		let Some(cert) = signal::judge_third_cert(&object.b_center, &leave, leave_anchor, &retest)	源码/测试刻画旧扫描及上级投影，代码不是教义授权。
+repo	repo-Q3	rust/src/theta_v0/classifier/recursive_tower.rs:1473		leave_anchor,	源码/测试刻画旧扫描及上级投影，代码不是教义授权。
+repo	repo-Q3	rust/src/theta_v0/classifier/recursive_tower.rs:1483		leave_anchor,	源码/测试刻画旧扫描及上级投影，代码不是教义授权。
+repo	repo-Q3	rust/src/theta_v0/classifier/recursive_tower.rs:3389		/// ★#332 显影：跨层 `blocks`（上一级中枢链的分解）喂给下一级塔投影 ⟹ `center_own_dir_at`	源码/测试刻画旧扫描及上级投影，代码不是教义授权。
+repo	repo-Q3	rust/src/theta_v0/classifier/recursive_tower.rs:3437		.map(|i| center_own_dir_at(&blocks, i))	源码/测试刻画旧扫描及上级投影，代码不是教义授权。
+repo	repo-Q3	rust/src/theta_v0/classifier/scan.rs:3		//! 生产门查走逐点口径（[`decompose::center_own_dir_at`]/[`decompose::center_block_kind_at`]/	扫描变量或对拍的实现边界，不做语义来源。
+repo	repo-Q3	rust/src/theta_v0/classifier/scan.rs:33		center_block_kind, center_block_kind_at, center_block_lift_at, center_own_dir_at, decompose,	扫描变量或对拍的实现边界，不做语义来源。
+repo	repo-Q3	rust/src/theta_v0/classifier/scan.rs:111		leave_anchor: Option<Direction>,	扫描变量或对拍的实现边界，不做语义来源。
+repo	repo-Q3	rust/src/theta_v0/classifier/scan.rs:131		leave_anchor,	扫描变量或对拍的实现边界，不做语义来源。
+repo	repo-Q3	rust/src/theta_v0/classifier/scan.rs:181		.then(|| center_own_dir_at(blocks, center_index))	扫描变量或对拍的实现边界，不做语义来源。
+repo	repo-Q3	rust/src/theta_v0/classifier/scan.rs:216		.map(|index| center_own_dir_at(blocks, index).map(Into::into))	扫描变量或对拍的实现边界，不做语义来源。
+repo	repo-Q3	rust/src/theta_v0/classifier/scan.rs:232		let direction = center_own_dir_at(blocks, index)?;	扫描变量或对拍的实现边界，不做语义来源。
+repo	repo-Q3	rust/src/theta_v0/classifier/scan.rs:484		center_own_dir_at(blocks, center_index).map(|direction| (center_index, direction))	扫描变量或对拍的实现边界，不做语义来源。
+repo	repo-Q3	rust/src/theta_v0/classifier/scan.rs:533		/// prefix+tail 全量重跑。生产门查逐点（`center_own_dir_at`/`center_block_kind_at`/	扫描变量或对拍的实现边界，不做语义来源。
+repo	repo-Q3	rust/src/theta_v0/classifier/scan.rs:651		center_own_dir_at(blocks, c_idx).map(|d| (c_idx, d))	扫描变量或对拍的实现边界，不做语义来源。
+repo	repo-Q3	rust/src/theta_v0/classifier/scan.rs:1034		// 判据单一：#1057 Q2 生产门查逐点口径（center_own_dir_at/center_block_kind_at/lift_at）——	扫描变量或对拍的实现边界，不做语义来源。
+repo	repo-Q3	rust/src/theta_v0/classifier/scan.rs:1157		center_own_dir_at(&blocks, c_idx).map(|d| (c_idx, d))	扫描变量或对拍的实现边界，不做语义来源。
+repo	repo-Q3	rust/src/theta_v0/classifier/scan/wire.rs:666		pub leave_anchor: Option<Direction>,	扫描变量或对拍的实现边界，不做语义来源。
+repo	repo-Q3	rust/src/theta_v0/classifier/signal.rs:92		center_own_dir_at, center_trend_gate, decompose, MoveBlock,	现有三类或趋势 c 的消费者/测试，旧证书不授权几何兜底。
+repo	repo-Q3	rust/src/theta_v0/classifier/signal.rs:269		/// ★Q7-#1 裁定C：`leave_anchor` = leave 段的方向锚资格——三类的离开/突破段须有锚（fallback ⟹	现有三类或趋势 c 的消费者/测试，旧证书不授权几何兜底。
+repo	repo-Q3	rust/src/theta_v0/classifier/signal.rs:298		leave_anchor: Option<Direction>,	现有三类或趋势 c 的消费者/测试，旧证书不授权几何兜底。
+repo	repo-Q3	rust/src/theta_v0/classifier/signal.rs:303		match (leave_anchor, retest.dir) {	现有三类或趋势 c 的消费者/测试，旧证书不授权几何兜底。
+repo	repo-Q3	rust/src/theta_v0/classifier/signal.rs:350		leave_anchor: Option<Direction>,	现有三类或趋势 c 的消费者/测试，旧证书不授权几何兜底。
+repo	repo-Q3	rust/src/theta_v0/classifier/signal.rs:353		judge_third_cert(c, leave_seg, leave_anchor, retest_seg).map(|cert| cert.point)	现有三类或趋势 c 的消费者/测试，旧证书不授权几何兜底。
+repo	repo-Q3	rust/src/theta_v0/classifier/signal.rs:1175		/// 类别用 pointwise `center_own_dir_at`/`center_block_kind_at`（O(log C)/段），不 materialize O(C) 数组；	现有三类或趋势 c 的消费者/测试，旧证书不授权几何兜底。
+repo	repo-Q3	rust/src/theta_v0/classifier/signal.rs:1273		center_own_dir_at(blocks, c_idx).map(|d| (c_idx, d))	现有三类或趋势 c 的消费者/测试，旧证书不授权几何兜底。
+repo	repo-Q3	rust/src/theta_v0/classifier/signal.rs:1365		/// resume 路径读 pointwise `center_own_dir_at`/`center_block_kind_at`——两者逐点等价，测试锁定），	现有三类或趋势 c 的消费者/测试，旧证书不授权几何兜底。
+repo	repo-Q3	rust/src/theta_v0/classifier/signal.rs:1571		// census 传 `center_own_dir_at` 派生锚（仅用于尾部 parity 对拍调用；生产三类仍消费之）。	现有三类或趋势 c 的消费者/测试，旧证书不授权几何兜底。
+repo	repo-Q3	rust/src/theta_v0/classifier/tests/pipeline_geometry.rs:52		// L1[2] 回拉不创新低（lo=112 >= L1[1].lo=80）；L1[0]/L1[1] 外缘占位方向同 Down	代码测试锚，限所涉输入，不能扩判。
+repo	repo-Q3	rust/src/theta_v0/classifier/tests/pipeline_geometry.rs:816		.map(|i| decompose::center_own_dir_at(pb, i))	代码测试锚，限所涉输入，不能扩判。
+repo	repo-Q4	.chanlun/definitions/qushi.md:244		- **R5 段角色 [新缠论:推论]。** `018:64`、`020:60`、`061:44`【正文】给出「离开＋其后回抽不回」，第 61 课例中第五段本身构成三类点。冻结 CC-019 明定用完成的首回抽：上涨回试低点 `> ZG`、下跌回抽高点 `< ZD`，相等不成点。	固定 #2114 正文；继承已裁字面分支与版本合同。
+repo	repo-Q4	.chanlun/definitions/qushi.md:246		- **末成员端点 [新缠论:推论]。** 按 #1478 裁定一，非 `Zn` 末成员离开段的远端不入 GG/DD；无论破坏与配对同向还是反向，只要已裁 `Zn` 外缘未重叠且其他前件仍成立，新生叶不变。第 111 根下行反控（原续流至 123 根沿用同一 A）若把 A 的同向	固定 #2114 正文；继承已裁字面分支与版本合同。
+repo	repo-Q4	.chanlun/definitions/zhongshu.md:232		**落码补齐（[#1478](https://github.com/xy7365527-lang/NewChanlun/issues/1478) 裁定一，2026-10-13）**：GG/DD 的「n 遍历所有 Zn」此前只落在正本；生产塔（`recursive_tower.rs	正本/历史登记；旧句按本票限定，不拿未实装条目作行为证据。
+repo	repo-Q4	.chanlun/definitions/zhongshu.md:360		进外缘 `GG`/`DD`，**不动核心 `[ZD, ZG]`**。依据：第 20 课定义 `GG`/`DD` 时逐字写「n 遍历中枢中所有 Zn」，外缘本就要吃掉延伸期内所有波动极值；`030-第30课.md:150` 是 `ZG/ZD` 与 `GG/DD` 的分工声明。（#1	正本/历史登记；旧句按本票限定，不拿未实装条目作行为证据。
+repo	repo-Q4	.chanlun/definitions/zhongshu.md:557		| R26 | `rust/src/theta_v0/classifier/center.rs:312` `classify_relation` | 中心定理二消费 dd/gg | 以 `Zn` 外缘为输入；`Zn` 外缘落地前 [#1424](https://github.co	正本/历史登记；旧句按本票限定，不拿未实装条目作行为证据。
+repo	repo-Q4	.chanlun/definitions/zhongshu.md:604		| [#1419](https://github.com/xy7365527-lang/NewChanlun/issues/1419) TB-02-E 中枢事实 | [#1478](https://github.com/xy7365527-lang/NewChanlun/issu	正本/历史登记；旧句按本票限定，不拿未实装条目作行为证据。
+repo	repo-Q4	.chanlun/definitions/zhongshu.md:605		| [#1424](https://github.com/xy7365527-lang/NewChanlun/issues/1424) TB-02-F 中枢关系 | `classify_relation` 以 `Zn` 外缘为输入；`Zn` 外缘落地前不得验收（R26） |	正本/历史登记；旧句按本票限定，不拿未实装条目作行为证据。
+repo	repo-Q4	.chanlun/definitions/zhongshu.md:606		| [#1429](https://github.com/xy7365527-lang/NewChanlun/issues/1429) TB-02-H | ≥9 段子窗 `Zn` 聚合（R22）；§4.1 端点条款退场条件②（上级单元） |	正本/历史登记；旧句按本票限定，不拿未实装条目作行为证据。
+repo	repo-Q4	.chanlun/definitions/zhongshu.md:621		- **退场条件**：#1429 落 R22（子窗 `Zn` 聚合）时消失，同拍改 Lean；	正本/历史登记；旧句按本票限定，不拿未实装条目作行为证据。
+repo	repo-Q4	CONTEXT.md:256		与中枢方向一致的成员单元（`020-第20课.md:52`【正文】），即与 seed 第一单元同向、序号差为偶数的成员。GG/G/D/DD 只遍历 Zn（ZG/ZD 的取法见正本 §1.2、§3）。端点相连时，内部非 Zn 单元的端点被相邻 Zn 覆盖，故全单元外缘与 Zn 外缘	Zn 词条分工；本票不改词表。
+blog	五词族并集	017:190		缠中说禅走势中枢的概念：某级别类型走势中，被至少三个连续次级别类型走势所重叠的部分，称为缠中说禅走势中枢。次级别的走势怎样去重叠高级别??? 60分钟K线图去模拟日K线图吗?? 请举例	发展/重叠语境，未单凭该行扩 R5。
+blog	五词族并集	017:406		【注：盘整维持需次级别离开次级别返回（或者次以下级别）。若次级别离开，次级别回抽不返回中枢，即突破盘整，也就是3买。	同词语境或图文转述；保留原行供复查，未据该行下规则。
+blog	五词族并集	017:1098		错，次级别的前三个走势类型都是完成的才构成该级别的中枢，完成的走势类型，在次级别图上是很明显的，根本就不用看到再下面的级别去。	同词语境或图文转述；保留原行供复查，未据该行下规则。
+blog	五词族并集	017:1126		2、中枢重叠点区间段还有什么作用？对后面的上涨或下跌分析有作用吗？	发展/重叠语境，未单凭该行扩 R5。
+blog	五词族并集	017:1146		２、两个同向中枢能否的轻微重叠，假如是一个向上的趋势，第二个中枢的下边与第一个中枢的上边有重叠，这种情况会不会出现？	发展/重叠语境，未单凭该行扩 R5。
+blog	五词族并集	017:1150		这将会构成高一级别的中枢。而在本级别中，也将这看成一个中枢。在一个趋势中，中枢之间是绝对不重叠的。	发展/重叠语境，未单凭该行扩 R5。
+blog	五词族并集	018:24		缠中说禅走势中枢：某级别走势类型中，被至少三个连续次级别走势类型所重叠的部分。具体的计算以前三个连续次级别的重叠为准，严格的公式可以这样表示：次级别的连续三个走势类型A、B、C，分别的高、低点是a1\a2,b1\b2,c1\	发展/重叠语境，未单凭该行扩 R5。
+blog	五词族并集	018:28		缠中说禅趋势：在任何级别的任何走势中，某完成的走势类型至少包含两个以上依次同向的缠中说禅走势中枢，就称为该级别的缠中说禅趋势。该方向向上就称为上涨，向下就称为下跌。注意，趋势中的缠中说禅走势中枢之间必须绝对不存在重叠。	发展/重叠语境，未单凭该行扩 R5。
+blog	五词族并集	018:40		这里最大的也是唯一的难点在于“走势类型的延伸”。例如一个盘整，三个重叠的连续次级别走势类型后，盘整就可以随时完成，也就是说，只要三个重叠的连续次级别走势类型走出来后，盘整随时结束都是完美的，但这可以不结束，可以不断延伸下去，	发展/重叠语境，未单凭该行扩 R5。
+blog	五词族并集	018:42		同样，面对趋势，形成两个依次同向的缠中说禅走势中枢后，任何趋势都可以随时结束而完美，但也可以不断地延伸下去，形成更多的中枢。这种情况在实际操作中太常见了，如果这趋势是向上的，会不断上涨，看看600519之类的图，如果把复权算	有操作／力度语境，本行不能取代可证的首回抽构造。
+blog	五词族并集	018:44		如何判别“走势类型延伸”是否结束？这里，必须首先搞清楚，“走势类型延伸”的实质是什么？对于趋势来说，其“延伸”就在于同级别的同向“缠中说禅走势中枢”不断产生；而对于盘整来说，其“延伸”就在于不能产生新的“缠中说禅走势中枢”。	发展/重叠语境，未单凭该行扩 R5。
+blog	五词族并集	018:46		(娇注：判断盘整延伸结束是产生3买卖。判断趋势延伸结束是同级别走势回拉中枢--3买卖后扩展或者非标准趋势延伸9段成大中枢。出3买卖趋势有延伸可能--中枢上移或者扩展大中枢的前者，不出3买卖盘整延伸。	含编注，不能整行引作作者；取舍见阅读表。
+blog	五词族并集	018:48		一句话，次级别走势或者本级别能否回到中枢为判断标准。趋势类型后走势回中枢，趋势延伸结束。盘整类型后次级别不能拉回中枢，盘整延伸结束。）	发展/重叠语境，未单凭该行扩 R5。
+blog	五词族并集	018:54		由定义知道，“缠中说禅走势中枢”的产生原因以及判断标准，也就是其“生”问题已经解决，那余下的就是其“住、坏、灭”的问题。也就是说，一个“缠中说禅走势中枢”是如何“维持”以及最终被“破坏”进而废弃的。先考虑其“维持”的问题。维	三类／波动应用用语，保留为复查线索；不以单条索引推码级归属。
+blog	五词族并集	018:56		“缠中说禅走势中枢定理二”：在盘整中，无论是离开还是返回“缠中说禅走势中枢”的走势类型必然是次级别以下的。	同词语境或图文转述；保留原行供复查，未据该行下规则。
+blog	五词族并集	018:64		某级别“缠中说禅走势中枢”的破坏，当且仅当一个次级别走势离开该“缠中说禅走势中枢”后，其后的次级别回抽走势不重新回到该“缠中说禅走势中枢”内。	承重或反向样例。作者与限定按 READING.md 成段核。
+blog	五词族并集	019:116		这个问题以后会说到，关键是前后两个中枢不能有重叠，否则只是构成更大级别的盘整。	发展/重叠语境，未单凭该行扩 R5。
+blog	五词族并集	019:130		注意谈论这个问题的前提，谈论的是中枢的离开与返回问题。如果以一个次级别的盘整类型离开中枢，返回当然不可能也是盘整类型，否则就构成一个大级别的盘整类型，这就与原中枢维持的前提矛盾了。	同词语境或图文转述；保留原行供复查，未据该行下规则。
+blog	五词族并集	019:132		对于围绕中枢的运动，离开中枢的趋势是正趋势，返回的是反趋势。	同词语境或图文转述；保留原行供复查，未据该行下规则。
+blog	五词族并集	019:164		当然不是所有都在其中，否则怎么会去探讨离开与返回中枢的运动定理？都在其中了，哪里还有什么离开、返回？	同词语境或图文转述；保留原行供复查，未据该行下规则。
+blog	五词族并集	019:390		“禅主”，从以上理解，是不是中枢后，走势继续延伸，就是盘整？但这种围绕中枢的盘整运动以什么信号标志结束呢？以前你说过盘整后的转折是关键	发展/重叠语境，未单凭该行扩 R5。
+blog	五词族并集	019:394		带有一个中枢的走势类型就是盘整，但盘整可以不断延续下去，不断围绕中枢运动，这叫盘整的延伸。	发展/重叠语境，未单凭该行扩 R5。
+blog	五词族并集	019:404		600832的30分钟中枢是不是与5分钟的走势重叠后，再看5分钟的前三段，那么中枢区间应该是11.40---11.13之间，这样理解对吗？30分钟里我指的是12.11日到12月19日的区间。	发展/重叠语境，未单凭该行扩 R5。
+blog	五词族并集	019:458		天天在认真学习中，主要的收获：第一买点，实战中有收获。特别想学习楼主的缠中说禅走势中枢理论，她是看图时的核心问题，十七讲时觉得自己懂了，十八讲师问题就来了：某级别走势类型中，缠中说禅走势中枢时直观的，不需要看次级别的图就能看	发展/重叠语境，未单凭该行扩 R5。
+blog	五词族并集	019:484		日线的几根K线不可能形成什么日线中枢，日线中枢只能到30分钟图上出现三段完成的有重叠的走势类型中找。	发展/重叠语境，未单凭该行扩 R5。
+blog	五词族并集	019:510		怎么可能是连续三个下跌？下跌+下跌还是 下跌，只能算一个走势类型。中枢停留的级别越小，趋势的力度越大，缺口不等于中枢，只是连接中枢的最低级别。缺口表明离开原来中枢的力量比较大，但如果缺口以后出现一个很大级别的中枢，这就证明其	同词语境或图文转述；保留原行供复查，未据该行下规则。
+blog	五词族并集	019:524		不过，由于新股，有一个更实用的方法。就是把上市前看成一种上涨，开盘到低点的回试看成一个上涨中的30分钟中枢，昨天突破到今天的盘整开始形成第二个中枢，这个中枢的时间有点短，次级别的三个走势还没完全走出来，从纯技术上，还有从这里	同词语境或图文转述；保留原行供复查，未据该行下规则。
+blog	五词族并集	019:600		当然也可以了 你只不过这样就是放大了走势中枢的重叠部分而已 从0.803到0.686 放大到了0.803到0.617 但是在日线上只有一个走势中枢的事实并没有改变。	发展/重叠语境，未单凭该行扩 R5。
+blog	五词族并集	019:662		"3. 此后在5分钟级别图上,由12.22(10:35后)到12.27(10:25),形成一个""缠中说禅""走势中枢.区间为(7.46,7.85).其后的走势,一直是围绕这个中枢即做一个并未脱离此中枢的运动."	同词语境或图文转述；保留原行供复查，未据该行下规则。
+blog	五词族并集	019:800		什么是最基础的？对于宝钢，站在30分钟图上，一个典型的趋势延伸，就是2个中枢本来就可以完成趋势，但这个数量是可以一直延伸下去的，走出同级别的20个中枢也是可以的，这种走势是投资中最好的一种情况了，应该珍惜，至于如何判断其结束	发展/重叠语境，未单凭该行扩 R5。
+blog	五词族并集	019:814		那只是中枢延伸，不是第三类买点。这个问题的答案，周五揭晓。	三类／波动应用用语，保留为复查线索；不以单条索引推码级归属。
+blog	五词族并集	019:878		那是除权的问题，如果你不习惯这样看，可以把他复权来看。但习惯了其实无所谓，例如，站在月线或季线图的角度，你可以认为该除权构成一次急促的下跌，刚好构成一个标准的背驰走势，因此由此可见，在月线上，该股至少要回抽月线的中枢，因此上	同词语境或图文转述；保留原行供复查，未据该行下规则。
+blog	五词族并集	019:1198		按缠姐以前所说的上市前看成是一个上涨，上市当天就形成了一个中枢，该中枢应该是一个上涨中枢，由于上涨中枢应该有不止一个，所以一个涨停之后马上形成了第二个中枢（12.26一天内完成）。	同词语境或图文转述；保留原行供复查，未据该行下规则。
+blog	五词族并集	019:1200		第二个中枢完成之后又形成下跌走势，然后在12.27,09:45-12.18,13:45时间段内，形成一个中枢；然后12.29,09:45-12.29,15:00形成一个中枢，今天又形成一个中枢，但是这个中枢还没完成，如果是这	有读者问题，须以署名应答上下文核归属；不以该行独证。
+blog	五词族并集	019:1282		中枢必须由三个次级别完成的走势类型构成，这是必须的。	同词语境或图文转述；保留原行供复查，未据该行下规则。
+blog	五词族并集	019:1292		LZ，好今天600832算不算离开了30分钟级别的中枢，而且5分钟一个走势类型的回调没有回到中枢内。我判断的中枢是11.55--10.96	同词语境或图文转述；保留原行供复查，未据该行下规则。
+blog	五词族并集	019:1302		给你一个思考，请看，该股在5分钟图上，今天早上9点半到10点，就是一个典型的离开中枢进一步形成趋势的走势，相应在10点，有一个的典型的5分钟上的第三类买点（娇：递归级别1分3买）。后面5分钟图上的上升就是很自然的，由于这个买	有操作／力度语境，本行不能取代可证的首回抽构造。
+blog	五词族并集	019:1304		在30分钟图上，并没形成中枢的离开，因为有重叠。站在5分钟图的角度，11。58元是一个关键位置，该位置不能触及，这样就能形成一个5分钟的上涨，进而逐步带出30分钟走势的变化。否则，就要玩盘整转上涨的游戏，这样，至少在5分钟图	发展/重叠语境，未单凭该行扩 R5。
+blog	五词族并集	019:1364		还没有形成。对于趋势来说，如果真不形成中枢是好事情，证明上涨有动力。大盘从8月到现在，就没形成过日线上的中枢，所以才这么强。当然，该股要不形成，就必须从明天开始，不能回跌了，马上突破，否则就形成日线的中枢。	同词语境或图文转述；保留原行供复查，未据该行下规则。
+blog	五词族并集	020:16		前面已经很明确地指出，缠中说禅走势中枢由前三个连续次级别走势类型的重叠部分确定，其后的走势有两种情况：	发展/重叠语境，未单凭该行扩 R5。
+blog	五词族并集	020:18		一、该走势中枢的延伸。	发展/重叠语境，未单凭该行扩 R5。
+blog	五词族并集	020:22		（注：二之1类：中枢新生，二之2类：产生新同级别中枢后和前中枢扩张成大中枢）而在趋势里，同级别的前后缠中说禅走势中枢是不能有任何重叠的，这包括任何围绕走势中枢产生的任何瞬间波动之间的重叠（娇注：中枢新生）。	含编注，不能整行引作作者；取舍见阅读表。
+blog	五词族并集	020:24		因此，如果三个连续次级别走势类型的重叠区间虽然不和前面的走势中枢有任何重叠，但围绕该中枢产生的波动触及前面走势中枢延续时的某个瞬间波动区间，这时候，就不能认为该走势类型是趋势，而只是产生一个更大级别的缠中说禅走势中枢（注：中	含编注，不能整行引作作者；取舍见阅读表。
+blog	五词族并集	020:26		（注：前段落讲述3类情况；1、中枢延伸； 2、新生不重叠本级别中枢； 3、 新本级别中枢波动触及前中枢延续波动区间产生高级别中枢）	含编注，不能整行引作作者；取舍见阅读表。
+blog	五词族并集	020:30		一、走势中枢以及其延伸。这种情况下，所有围绕走势中枢产生的前后两个次级波动都必须至少有一个触及走势中枢的区间。否则，就必然产生一个新的三次连续次级走势类型的重叠部分离开原来的走势中枢，这与走势中枢的延续矛盾。	承重或反向样例。作者与限定按 READING.md 成段核。
+blog	五词族并集	020:32		二、一个走势中枢完成前，其波动触及上一个走势中枢或延伸时的某个瞬间波动区间，由此产生更大级别的走势中枢。	发展/重叠语境，未单凭该行扩 R5。
+blog	五词族并集	020:34		一个简单的例子就能区别以上的情况：例如，一个股票开盘立刻封涨停，那么，只能算是一分钟级别上出现了走势中枢的延伸，无论这个延伸有多长时间，都不可能产生更大级别的走势中枢。如果该股票第二天开始继续开盘涨停，那么就形成一个一分钟级	发展/重叠语境，未单凭该行扩 R5。
+blog	五词族并集	020:36		换言之，走势中枢的延伸与不断产生新的走势中枢并相应围绕波动互不重叠而形成趋势，在这两种情况下（注：中枢延伸和趋势的情况下），一定不可能形成更大级别的走势中枢。	含编注，不能整行引作作者；取舍见阅读表。
+blog	五词族并集	020:38		而要形成一个更大级别的走势中枢，必然要采取第三种的方式：就是围绕新的同级别走势中枢产生后的波动与围绕前中枢的某个波动区间产生重叠。由此可马上得到一个重要的定理：	发展/重叠语境，未单凭该行扩 R5。
+blog	五词族并集	020:44		缠中说禅走势级别延续定理二：更大级别缠中说禅走势中枢产生，当且仅当围绕连续两个同级别缠中说禅走势中枢产生的波动区间产生重叠。	发展/重叠语境，未单凭该行扩 R5。
+blog	五词族并集	020:52		对于第一种有a1=b1,b2=c2；对第二种有a2=b2,b1=c1。但无论是哪种情况，中枢的公式都可以简化为[max（a2,c2），min（a1,c1）]。显然，A、C段，其方向与中枢形成的方向是一致的，由此可见，在中枢的	承重或反向样例。作者与限定按 READING.md 成段核。
+blog	五词族并集	020:56		缠中说禅走势中枢中心定理一：走势中枢的延伸等价于任意区间[dn，gn]与[ZD，ZG]有重叠。换言之，若有Zn，使得dn>ZG或gn<ZD，则必然产生高级别的走势中枢或趋势及延续。（注：3买卖点后中枢移动趋势延续或者3买卖点	承重或反向样例。作者与限定按 READING.md 成段核。
+blog	五词族并集	020:60		由定理一，可以得到第三类买卖点定理：一个次级别走势类型向上离开缠中说禅走势中枢，然后以一个次级别走势类型回试，其低点不跌破ZG，则构成第三类买点；一个次级别走势类型向下离开缠中说禅走势中枢，然后以一个次级别走势类型回抽，其高	承重或反向样例。作者与限定按 READING.md 成段核。
+blog	五词族并集	020:62		例如，工商银行在12月14日构成典型的日线级别第三类买点；北辰实业在11月14日构成典型的日线级别第三类买点；000803在1月20日构成典型的日线级别第三类卖点。注意，第三类买卖点比第一、二类要后知后觉，但如果抓得好，往往	承重或反向样例。作者与限定按 READING.md 成段核。
+blog	五词族并集	020:114		为方便起见，以后都把这些与中枢方向一致的次级别走势类型称为Z走势段，按中枢中的时间顺序，分别记为Zn等，而相应的高、低点分别记为gn、dn,定义四个指标,GG=max(gn),G=min(gn),D=max(dn),DD=m	同词语境或图文转述；保留原行供复查，未据该行下规则。
+blog	五词族并集	020:116		缠中说禅走势中枢中心定理一：走势中枢的延伸等价于任意区间[dn，gn]与[ZD，ZG]有重叠。换言之，若有Zn，使得dn>ZG或gn<ZD，则必然产生高级别的走势中枢或趋势及延续。	发展/重叠语境，未单凭该行扩 R5。
+blog	五词族并集	020:148		请稳缠姐，这段话中“为方便起见，以后都把这些与中枢方向一致的次级别走势类型称为Z走势段，按中枢中的时间顺序，分别记为Zn等，而相应的高、低点分别记为gn、dn,定义四个指标,GG=max(gn),G=min(gn),D=ma	同词语境或图文转述；保留原行供复查，未据该行下规则。
+blog	五词族并集	020:160		缠姐给讲一讲离开和回到中枢吧？我怎么越来越糊涂了。	同词语境或图文转述；保留原行供复查，未据该行下规则。
+blog	五词族并集	020:194		各位不要把东西混了，中枢的离开返回是针对围绕中枢的运动说的，这里研究的是中枢自身的变化，也就是中枢延续与产生新中枢以及产生更高级别的中枢这三种情况的问题。	同词语境或图文转述；保留原行供复查，未据该行下规则。
+blog	五词族并集	020:270		请问缠姐，“工商银行在12月14日构成典型的日线级别第三类买点”；是不是说工商银行在30分钟线上12.12,10:00-12.15,10:00形成了一个中枢，再根据“由定理一，可以得到第三类买卖点定理：一个次级别走势类型向上	有读者问题，须以署名应答上下文核归属；不以该行独证。
+blog	五词族并集	020:320		你的理解错误，该股月线的中枢在哪里？根据中枢回抽的次级别原则，10。2元的中枢下沿应该被一个次级别的，也就是最多是周线的走势类型所回抽，由此，你自己也可以判断大概需要的时间。	同词语境或图文转述；保留原行供复查，未据该行下规则。
+blog	五词族并集	020:322		注意，我上次说的是回抽中枢，而不是补缺口，因为前者是理论所保证的，后者并没有什么必然性。	同词语境或图文转述；保留原行供复查，未据该行下规则。
+blog	五词族并集	020:348		不对.你那是仅仅是当C1>b1(a1=b1),及a2>b2(c2=b2)时.	同词语境或图文转述；保留原行供复查，未据该行下规则。
+blog	五词族并集	020:394		4. 600377在日线上7月18日至9月7日行成日线上的两个中枢，如果要找第三类的买点是以脱离稍早前的中枢为准还是脱离后面的中枢为准？如果以稍早前的为准那么应该第三类买点还没出现吧？我不是要买这只股票只是借来分析。	三类／波动应用用语，保留为复查线索；不以单条索引推码级归属。
+blog	五词族并集	020:400		宁沪上在那段时间根本就没有什么第三类买点，反而是一个第一类买点很清楚。并不是有中枢就有第三类买点的，因为中枢是可以延伸、还可以扩张的。必须符合第三类买点所必须满足的条件才有第三类买点、卖点也一样。	三类／波动应用用语，保留为复查线索；不以单条索引推码级归属。
+blog	五词族并集	020:466		答:不能,第二类是形成中枢的高低点,第三类是次级趋势突破原中枢并回调时不触及中枢时产生的,所以不能.	三类／波动应用用语，保留为复查线索；不以单条索引推码级归属。
+blog	五词族并集	021:48		显然，第一类买点与第二类买点是前后出现的，不可能产生重合，而第一类与第三类买点，一个在中枢之下、一个在中枢之上，也不可能产生重合。只有第二类买点与第三类买点是可能产生重合的，这种情况就是：但第一类买点出现后，一个次级别的走势	三类／波动应用用语，保留为复查线索；不以单条索引推码级归属。
+blog	五词族并集	021:52		补充一句，站在特大型牛市的角度，中国就从来没出现过熊市，大家打开上海的年线图就可以看到，从1992年到2005年，一个完美的年级别缠中说禅中枢的三段次级别走势完成，时间刚好是13年，一个完美的时间之窗。	同词语境或图文转述；保留原行供复查，未据该行下规则。
+blog	五词族并集	021:66		缠中说禅升跌完备性定理：市场中的任何向上与下跌，都必然从三类缠中说禅买卖点中的某一类开始以及结束。换言之，市场走势完全由这样的线段构成，线段的端点是某级别三类缠中说禅买卖点中的某一类。	构件或定位语境，不以单行建立 R5；相关段见阅读表。
+blog	五词族并集	021:68		思考题：任何一个线段，其端点必然是一买点及一卖点，请完全列出各类买卖点之间可能的组合。如果一线段的端点是同级别的买卖点，有什么组合是绝对不可能出现的。	构件或定位语境，不以单行建立 R5；相关段见阅读表。
+blog	五词族并集	021:72		绝对不可能出现的是线段端点为3买卖开头即绝对不可能出现的是3买-1卖 3买-2卖 1买-3卖 2买-3卖)	构件或定位语境，不以单行建立 R5；相关段见阅读表。
+blog	五词族并集	021:520		1、工行日线级别的调整需要30分钟图上3个连续走势（下跌-上涨-下跌），完成一个“缠中说禅中枢”，现在是第二个走势阶段；	同词语境或图文转述；保留原行供复查，未据该行下规则。
+blog	五词族并集	021:526		2、600779从30分钟图看，12月20日14.58-1月05日12.37为第一段下跌走势，然后到1月9日14.08为第二段上涨走势，到1月10日13.47为第二段下跌走势，已经有连续三个走势，完成一个中枢（13.47-1	发展/重叠语境，未单凭该行扩 R5。
+blog	五词族并集	021:578		1、工行日线级别的调整需要30分钟图上3个连续走势（下跌-上涨-下跌），完成一个“缠中说禅中枢”，现在是第二个走势阶段；	同词语境或图文转述；保留原行供复查，未据该行下规则。
+blog	五词族并集	021:584		2、600779从30分钟图看，12月20日14.58-1月05日12.37为第一段下跌走势，然后到1月9日14.08为第二段上涨走势，到1月10日13.47为第二段下跌走势，已经有连续三个走势，完成一个中枢（13.47-1	发展/重叠语境，未单凭该行扩 R5。
+blog	五词族并集	022:120		缠姐，这是昨天你和一个同学的问答：1、工行日线级别的调整需要30分钟图上3个连续走势（下跌-上涨-下跌），完成一个“缠中说禅中枢”，现在是第二个走势阶段；	同词语境或图文转述；保留原行供复查，未据该行下规则。
+blog	五词族并集	022:184		就回答你一个，山东人，（ 600777）本ID进去的位置是一个周线级别中枢的第三类买点。该周线中枢是一个延伸形态，在图形上是一个标准的三角型，一般中枢的延伸，如果是收敛形态，都会走成三角形，这以后会说到.其他自己去研究。	三类／波动应用用语，保留为复查线索；不以单条索引推码级归属。
+blog	五词族并集	022:204		(注：中枢延伸没有3买。中枢次次级别离开后做同级别中枢没有3买，表示走势强劲。）	含编注，不能整行引作作者；取舍见阅读表。
+blog	五词族并集	022:708		"呵呵。再问“本ID""一句，如果手上的股票30分钟图都出现男上位，那要折腾的日子岂不很长，因为要至少完成1个中枢（请问这个中枢暂时是指30分钟图上吗）。这个时候除了坐以待毙或者安慰自己是做高级别股票的，还有什么补救措施。。"	有读者问题，须以署名应答上下文核归属；不以该行独证。
+blog	五词族并集	023:46		（注：此处3买清一色属于递归级别的5分3买，一分类型离开和1分类型回抽10日线左右，30分MACD回抽0轴不破。在此处是作为日3买登场。）	含编注，不能整行引作作者；取舍见阅读表。
+blog	五词族并集	023:190		中枢有三种命运：延伸、扩展、新生	发展/重叠语境，未单凭该行扩 R5。
+blog	五词族并集	023:298		走势中枢的延伸与不断产生新的走势中枢并相应围绕波动互不重叠而形成趋势，在这两种情况下，一定不可能形成更大级别的走势中枢。而要形成一个更大级别的走势中枢，必然要采取第三种的方式，就是围绕新的同级别走势中枢产生后的波动与围绕前中	发展/重叠语境，未单凭该行扩 R5。
+blog	五词族并集	023:302		缠中说禅走势中枢中心定理一：走势中枢的延伸等价于任意区间[dn，gn]与[ZD，ZG]有重叠。换言之，若有Zn，使得dn>ZG或gn<ZD，则必然产生高级别的走势中枢或趋势及延续。	发展/重叠语境，未单凭该行扩 R5。
+blog	五词族并集	023:306		怎么会有矛盾，自己画图一下就明白了？不是中枢的延伸，就是中枢的扩展，也就是产生高级别的走势中枢；或者中枢的新生，就是趋势及延续.	发展/重叠语境，未单凭该行扩 R5。
+blog	五词族并集	023:342		例如在盘整后(30分种线的中枢),以次级别(5分钟)走势向上走,在5分钟线上还没有形成中枢前,前可以看做是中枢(30分种)的离开,但在形成第一个5分钟线上的中枢后,此时如何看待当下(30分钟)的走势?	同词语境或图文转述；保留原行供复查，未据该行下规则。
+blog	五词族并集	023:346		注意，有几个概念必须搞清楚：一，即使形成一个5分钟的中枢，依然有回跌入原30分钟中枢的可能。二、离开中枢，并不意味着中枢不会继续延续，只要这个离开只是次级别的，而下一个次级别的回抽一样有可能重新回到原中枢而使得中枢延续。三、	三类／波动应用用语，保留为复查线索；不以单条索引推码级归属。
+blog	五词族并集	023:520		其实已经说的很浅显了，逻辑关系很清楚。首先把中枢的数学公式搞清楚，然后把中枢的延伸、扩展、新生搞清楚，然后再把握好各类的买卖点，一步步来，仔细研究一下就明白了。	发展/重叠语境，未单凭该行扩 R5。
+blog	五词族并集	023:534		不对，在日线上，这段时间没有第一、二类的买点，30分钟上当然是有的。不过12月28日那一周却是一个精确的周线上的第三类买点。这个日线上的次级别回抽有点特殊，形成一种奔走行的走势，就是B段的上冲比较厉害，C段的回拉只是稍微跌破	三类／波动应用用语，保留为复查线索；不以单条索引推码级归属。
+blog	五词族并集	023:566		在图形上是一个标准的三角型，一般中枢的延伸，如果是收敛形态，都会走成三角形，这以后会说到。	发展/重叠语境，未单凭该行扩 R5。
+blog	五词族并集	023:640		就回答你一个，山东人，本ID进去的位置是一个周线级别中枢的第三类买点。该周线中枢是一个延伸形态，在图形上是一个标准的三角型，一般中枢的延伸，如果是收敛形态，都会走成三角形，这以后会说到。	三类／波动应用用语，保留为复查线索；不以单条索引推码级归属。
+blog	五词族并集	023:648		"2 根据""缠中说禅中枢""第三类买卖点定理：一个次级别走势类型向上离开缠中说禅走势中枢，然后以一个次级别走势类型回试，其低点不跌破ZG，则构成第三类买点；更根据老大的已知条件.在12.19-12.21时,量能激增,向上突破.由"	三类／波动应用用语，保留为复查线索；不以单条索引推码级归属。
+blog	五词族并集	023:720		这个不准确，为什么？因为如果是日线上的，那1月5日就构成了，因为只需要一个30分钟级别的回试不回原来日线中枢就可以了。但如果是周线上的，那第三类买点必须是日线级别的回抽，也就是有三段30分钟上的走势类型构成，目前只有一段，现	三类／波动应用用语，保留为复查线索；不以单条索引推码级归属。
+blog	五词族并集	023:722		中线该股问题不大，但站在短线角度，最快速的就是30分钟回抽所对应的日线上的第三类买点。例如对该股，1月5日的第三类买点介入后，在5分钟发现背驰后离开，然后就去换另外的日线第三类买点的股票，这样资金利用率的高了。当然，如果没有	有操作／力度语境，本行不能取代可证的首回抽构造。
+blog	五词族并集	023:772		以日线的第三类买点。要找这个买点，就看一个30分钟的回抽，而该回抽低点，就看5分钟的背弛。必须三个级别共同来才可以。	三类／波动应用用语，保留为复查线索；不以单条索引推码级归属。
+blog	五词族并集	023:820		不对，在日线上，这段时间没有第一、二类的买点，30分钟上当然是有的。不过12月28日那一周却是一个精确的周线上的第三类买点。这个日线上的次级别回抽有点特殊，形成一种奔走行的走势，就是B段的上冲比较厉害，C段的回拉只是稍微跌破	三类／波动应用用语，保留为复查线索；不以单条索引推码级归属。
+blog	五词族并集	023:988		lz,对“第三类买卖点定理”中的“……，其低点不升破ZD，则构成第三类卖点。”，应为“其高点不升破ZD，则构成第三类卖点。”，不知对不对？	三类／波动应用用语，保留为复查线索；不以单条索引推码级归属。
+blog	五词族并集	023:1064		是在周线的中枢里，但在日线的中枢外，而对于日线上的第三类买点，只要一个30分钟级别的回抽不破日线中枢就可以了。有时候不同级别的中枢缠绕在一起，会对判断产生困难，关于这方面的事情，以后会说到。	三类／波动应用用语，保留为复查线索；不以单条索引推码级归属。
+blog	五词族并集	023:1104		日线的第三类买点,由离开日线中枢(在30分钟线上)的次级别走势类型(由5分钟线确定)回抽不再回到日线中枢的ZG产生,而这个回抽是由日线中枢的次级别(5分钟线上)走势类型来确定.	三类／波动应用用语，保留为复查线索；不以单条索引推码级归属。
+blog	五词族并集	023:1106		而要完成该回抽走势类型(5分钟线确定),需要包含2个该回抽走势类型的次级别中枢(在1分钟线上).	同词语境或图文转述；保留原行供复查，未据该行下规则。
+blog	五词族并集	023:1108		所以介入点一定是5分钟线上的回抽走势类型完成后,即产生新的走势(1分钟线上的新中枢).这时才代表回抽走势类型的完成.	同词语境或图文转述；保留原行供复查，未据该行下规则。
+blog	五词族并集	024:44		那么，有没有盘整背驰后回跌形成第三类买点的例子，其实这种例子太多了，第三类买点，有一种情况就是这样构成的。例如，000002 万科的15 分钟图，12 月15 日10 点45 分，构成一个盘整背驰，所以要出来，其后的次级别回	三类／波动应用用语，保留为复查线索；不以单条索引推码级归属。
+blog	五词族并集	024:126		好好把上面的补一下，一个趋势，有两个中枢，因此至少就有6段走势，然后加上前面低部回拉的第一段，最后冲刺的一段，还有连接两个中枢的一段，至少有9段走势是明确无误的。	同词语境或图文转述；保留原行供复查，未据该行下规则。
+blog	五词族并集	024:156		600832的走势比较复杂，12月8日是一个日线的第三类买点。一般这种买点出现后，肯定会回升，但并不一定就能形成趋势上涨，还可能演化成复杂的中枢扩张，该股就属于后者。因此站在大的角度看，该股现在已经逐步在摆脱这巨大的周线中枢	三类／波动应用用语，保留为复查线索；不以单条索引推码级归属。
+blog	五词族并集	024:158		1月17日，是一个三段30分钟回拉的日线第三类买点。注意，第三类买点的结束位置不一定是整个回拉的最低位置。因为一个三段回来，C段并不一定创新低。	承重或反向样例。作者与限定按 READING.md 成段核。
+blog	五词族并集	024:160		在复杂的回拉中，还有三角形5段回拉的，只要最后一次回拉不回到原来的中枢就可以了。	承重或反向样例。作者与限定按 READING.md 成段核。
+blog	五词族并集	024:230		000002万科的15分钟图，12月15日10点45分，构成一个盘整背驰，所以要出来，其后的次级别回跌并不重新回到前面的中枢里，就在18日9点45分构成了标准的第三类买点，这时候就该重新回补了。	三类／波动应用用语，保留为复查线索；不以单条索引推码级归属。
+blog	五词族并集	025:40		用最近涨得最厉害的一个股票来说明，000572。该股票的力度，其实是和他在日线与周线上出现双重的第二类买点有关（波浪3浪3），相应地，就有了MACD双重在0轴停留形成第一个中枢的情况。在周线上，该股从20051209到200	有操作／力度语境，本行不能取代可证的首回抽构造。
+blog	五词族并集	025:52		必须注意，MACD在0轴附近盘整以及回抽0轴所形成的中枢，不一定就是相应级别的中枢，而是至少是该级别的中枢。例如日线MACD的0轴盘整与回拉，至少构成日线的中枢，但也可以构成周线的中枢，这时候就意味着日线出现三段走势。	有操作／力度语境，本行不能取代可证的首回抽构造。
+blog	五词族并集	025:118		对大盘的中线走势，本ID早已经指明，最恶劣的就是在这里形成一个周线的缠中说禅走势中枢，而牛市的第一波走势，还没有完成，也就是有关成分股的行情，在调整后仍将继续，这是无疑的。只是二、三线的成分股，更有机会。当然，一线的股票机会	同词语境或图文转述；保留原行供复查，未据该行下规则。
+blog	五词族并集	025:196		连接两同向趋势的盘整中枢，当然要比那两趋势的中枢级别高，否则就归到其中一个趋势去了。搞明白中枢就可以，盘整不用管，只要把中枢的确立、延伸、扩展、新生等搞明白，自然就明白盘整。	发展/重叠语境，未单凭该行扩 R5。
+blog	五词族并集	025:220		由于触及最高点，使得存在演化成大中枢的危险，但由于回试如果是两次的，那只要下一次不跌破这个位置，那就会使得中枢的脱离得到确认。所以，现在是一个震荡时期，站在短线的角度，是最好玩的，上不去就给，跌下来只要不有效跌破2870，就	同词语境或图文转述；保留原行供复查，未据该行下规则。
+blog	五词族并集	025:262		-----------大概2870只是日线三段中枢的高高点（从30分钟图表看），而不是日线中枢高点2840，楼主文章强调的可能是不触及中枢高点，当然只要回试触及三段的最高点，仍可能形成更大级别的中枢，例如周线中枢，至于二次回	同词语境或图文转述；保留原行供复查，未据该行下规则。
+blog	五词族并集	025:266		在突破中，第一次很低级别的回抽，只要不跌回中枢里面，而是触及围绕中枢震荡的外围高点，就象这次的2870，那还不能肯定就一定会构成更大级别的中枢。为什么？因为例如下面的中枢是日线级别的，如果第一次的回拉只是5分钟级别的，那很可	同词语境或图文转述；保留原行供复查，未据该行下规则。
+blog	五词族并集	025:282		"请问缠老师: 按照""趋势中的缠中说禅走势中枢之间必须绝对不存在重叠。""的要求,我发现600497在05年3月14日开始到05年7月27日结束的下跌趋势中,两个日线中枢的外缘是重叠的.我判断的中枢是05.3.30--05.5."	有读者问题，须以署名应答上下文核归属；不以该行独证。
+blog	五词族并集	025:284		==用高点比高点低、低点比低点低来定义下跌，这算是下跌，但用最精确的中枢来定义，这不构成下跌，只是一个中枢的复杂延伸构成，没有两个中枢。注意，有了中枢以后，对下跌、盘整的判断一定以中枢的角度看，其他的角度，都可以先放下了。	发展/重叠语境，未单凭该行扩 R5。
+blog	五词族并集	025:308		至于从顶上直接打破上升最后一个中枢的情况，一般情况下都会回拉过来形成大的中枢。如果连回拉都不拉，直接在下面形成中枢，而同样需要再跌破这中枢然后在下面形成第二个中枢才算下跌。但这种情况十分罕见，基本只出现在除权后。或者毁灭性利	同词语境或图文转述；保留原行供复查，未据该行下规则。
+blog	五词族并集	025:533		好好总结，第三类买点一定要等到次次级别的背驰或双次回拉确认，该股是军工里的三线，等二线把空间打开了，自然有机会。	三类／波动应用用语，保留为复查线索；不以单条索引推码级归属。
+blog	五词族并集	025:535		(加注：K线图级别日3买要求30分级别走势离开，和30分走势回抽，而30分走势起码由3段5分图级别走势组成的最简单类型的3买叫双次回拉，若是5段5分的盘整走势或者9段5分的趋势组成的3买,图形就不一样了，分解操作，无论哪种最	有操作／力度语境，本行不能取代可证的首回抽构造。
+blog	五词族并集	025:649		===有MACD就不要用上下位了，道理是一样的，而MACD更直观。大家注意了，让大家知道今天大盘上来的第二类买点在哪里，第一类买点就是10点57分的2720，第二类买点就是1330的2771，MACD对应双回抽0轴站稳。第三	有操作／力度语境，本行不能取代可证的首回抽构造。
+blog	五词族并集	025:737		算了，都离开底部了，没必要再买了。其实，这次大跌，用第三类买点的方法可以找到一大堆股票，看看今天创新高涨停的，有不少就是从周五的第三类买点的结束位置起来的。学会了方法，自己都能找到好股票，不一定要跟本ID的，本ID不是庄家，	三类／波动应用用语，保留为复查线索；不以单条索引推码级归属。
+blog	五词族并集	026:157		唯一的区别是上次比较明显的看出5分钟的回拉是一个走势类型，而这次回拉，我没有看出中枢。	同词语境或图文转述；保留原行供复查，未据该行下规则。
+blog	五词族并集	026:299		比如日线，当一个30分钟趋势上去后回抽，然后用5分钟来判断回抽的30分钟趋势是否完成，如果完成但没有跌入上一个日线中枢的高点（还是GG点？？？）就算是第三买点吗？？？判断30分钟趋势是否完成是看5分钟有没有背驰吗？还有如果在	有操作／力度语境，本行不能取代可证的首回抽构造。
+blog	五词族并集	026:325		博主姐姐，有问题，想不通了：根据缠中说禅走势级别延续定理一：在更大级别缠中说禅走势中枢产生前，该级别走势类型将延续。所以某级别走势类型转折就意味着中枢扩张已经发生了。但是在说到第二类买点的时候，二类买点在中枢上的时候出现中枢	发展/重叠语境，未单凭该行扩 R5。
+blog	五词族并集	026:531		那是最标准的情况，85%的情况，当然也有例外的，有些强势的股票，可能第一个中枢就根本不回抽0轴也是可能的，因为MACD毕竟只是辅助，如果都准确的，那还不如直接用MACD了。格力1分钟15.5有背驰，如果是按这去买的，没买错，	有操作／力度语境，本行不能取代可证的首回抽构造。
+blog	五词族并集	027:14		趋势，一定有至少两个同级别中枢，对于背驰来说，肯定不会发生在第一个中枢之后，肯定是至少是第二个中枢之后，对于那种延伸的趋势来说，很有可能在发生第100个中枢以后才背驰，当然，这种情况，一般来说，一百年见不到几次。第二个中枢后	发展/重叠语境，未单凭该行扩 R5。
+blog	五词族并集	027:74		补充一个本ID理论的学历标准精通找出各级别中枢的，是幼儿圆毕业精通分别中枢的新生、延伸、扩展的，是学前班毕业精通分辨盘整背驰与背驰，躲过盘整背驰转化为第三类买卖点的是小学毕业	三类／波动应用用语，保留为复查线索；不以单条索引推码级归属。
+blog	五词族并集	027:310		其中第二个中枢，是跌破一个大的30分钟以上级别中枢的次级别回拉，构成一个第三类卖点。	三类／波动应用用语，保留为复查线索；不以单条索引推码级归属。
+blog	五词族并集	027:756		------------------------------缠姐, 关于背驰的ABC三段, 有时候B段反向运动力度太大, 造成MACD回抽过分,(中枢级别过高??) 图型就很难看懂, 是不是这就会变成一个大中枢呢??	有操作／力度语境，本行不能取代可证的首回抽构造。
+blog	五词族并集	027:762		------------------------------------是回抽0轴了, 但回抽过分是不是又变成大中枢呢??	同词语境或图文转述；保留原行供复查，未据该行下规则。
+blog	五词族并集	027:806		[匿名] 缠文观止 2007-02-05 16:41:46这么快就到第三页了，我把问题再贴一遍啊，方便缠MM看。－－－－－－－－－－－－－－－－－－“缠中说禅走势中枢定理三”：某级别“缠中说禅走势中枢”的破坏，当且仅当一个次	三类／波动应用用语，保留为复查线索；不以单条索引推码级归属。
+blog	五词族并集	027:848		－－－－－－－－－－－－－－任何级别走势类型，至少有一个中枢，这个中枢至少由3段连续次级别走势的重叠构成。所以，盘整走势至少有三段以上次级别，那趋势至少有两个中枢，就至少有六段次级别走势类型构成了。	发展/重叠语境，未单凭该行扩 R5。
+blog	五词族并集	027:854		[匿名] 学习中 2007-02-05 23:17:14[匿名] 缠中说缠 2007-02-05 22:28:14任何级别走势类型，至少有一个中枢，这个中枢至少由3段连续次级别走势的重叠构成。所以，盘整走势至少有三段以上次级	发展/重叠语境，未单凭该行扩 R5。
+blog	五词族并集	028:268		其中第二个中枢，是跌破一个大的30分钟以上级别中枢的次级别回拉，构成一个第三类卖点。而从MACD开，从第二个中枢开始的一段，与从第一中枢开始的一段，力度上也没有特别的减少，所以这时候就是特别小心会产生第三个中枢。一般来说，从	有操作／力度语境，本行不能取代可证的首回抽构造。
+blog	五词族并集	028:304		实在不好意思还没明白，还麻烦老师详解：中枢由三段次级别完成的走势重叠部分构成，那在次级别走势图上，两个三段走势之间也必然是完成的走势段(跳空除外)，否则和分解定理冲突。（缠中说禅走势分解定理一”：任何级别的任何走势，都可以分	发展/重叠语境，未单凭该行扩 R5。
+blog	五词族并集	028:308		跳空的级别是无限低的，不构成任何中枢中的一段。这和分解定理没有什么矛盾的。上涨、下跌都是完成了的走势类型，是比中枢以及连接中枢的要大的概念，不要搞混了。走势类型的级别只与其中包含的中枢有关。例如，包含一个日线中枢的走势类型，	同词语境或图文转述；保留原行供复查，未据该行下规则。
+blog	五词族并集	028:322		完全可能。5分钟的背驰至少制造一个5分钟的走势类型，但还可以制造更大级别的，但这都要通过中枢的扩展完成。因此，一个1分钟的背驰，当然也可以构成大顶或大底。	发展/重叠语境，未单凭该行扩 R5。
+blog	五词族并集	028:328		例如，今天大盘5分钟的背驰制造出一个5分钟的三段走势来，也就是说，这个反弹就此结束，在理论上也是成立的。因为已经达到5分钟背驰所能制造的最低级别走势要求。那么，其后反弹的继续依靠什么？就不是背驰的力量了，要靠中枢的延伸与扩展	发展/重叠语境，未单凭该行扩 R5。
+blog	五词族并集	028:330		背驰是制造底部，制造第一类买点的，而中枢扩展、延伸是制造第二、三类买点的。	三类／波动应用用语，保留为复查线索；不以单条索引推码级归属。
+blog	五词族并集	028:356		5分钟背驰引发的5分钟上涨在今早11点后的1分钟背驰中结束，然后进入一个5分钟中枢的震荡，该震荡后能否构成第二类买点，有待今后两日的走势，无须预测。(娇注：后震荡成递归级别5分中枢，一个5分中枢后接一个1分中枢背驰完成递归级	含编注，不能整行引作作者；取舍见阅读表。
+blog	五词族并集	028:378		缠中说禅：2007-02-08 15:10:09大盘没什么可说的，就是昨天说的在这里形成一个中枢，今天下午拉起一波，构成5分钟图上的盘整背驰，这个5分钟的中枢就像30分钟的中枢扩展。明天还要继续完成确认这个中枢，如果看不明白	有读者问题，须以署名应答上下文核归属；不以该行独证。
+blog	五词族并集	028:750		按定义，中枢由三段次级别完成的走势重叠部分构成，那么在次级别走势图上，两个三段走势之间也必然是0个或多个完成的走势，否则和前面的定理冲突。假如两个三段走势之间没有另外走势，那么它们首尾相连，也就是说跳空前的那根K线既属于前面	发展/重叠语境，未单凭该行扩 R5。
+blog	五词族并集	028:764		实在不好意思还没明白，还麻烦老师详解：中枢由三段次级别完成的走势重叠部分构成，那在次级别走势图上，两个三段走势之间也必然是完成的走势段(跳空除外)，否则和分解定理冲突。（缠中说禅走势分解定理一”：任何级别的任何走势，都可以分	发展/重叠语境，未单凭该行扩 R5。
+blog	五词族并集	028:770		跳空的级别是无限低的，不构成任何中枢中的一段。这和分解定理没有什么矛盾的。上涨、下跌都是完成了的走势类型，是比中枢以及连接中枢的要大的概念，不要搞混了。走势类型的级别只与其中包含的中枢有关。例如，包含一个日线中枢的走势类型，	承重或反向样例。作者与限定按 READING.md 成段核。
+blog	五词族并集	028:800		完全可能。5分钟的背驰至少制造一个5分钟的走势类型，但还可以制造更大级别的，但这都要通过中枢的扩展完成。因此，一个1分钟的背驰，当然也可以构成大顶或大底。	发展/重叠语境，未单凭该行扩 R5。
+blog	五词族并集	028:808		例如，今天大盘5分钟的背驰制造出一个5分钟的三段走势来，也就是说，这个反弹就此结束，在理论上也是成立的。因为已经达到5分钟背驰所能制造的最低级别走势要求。那么，其后反弹的继续依靠什么？就不是背驰的力量了，要靠中枢的延伸与扩展	发展/重叠语境，未单凭该行扩 R5。
+blog	五词族并集	028:810		背驰是制造底部，制造第一类买点的，而中枢扩展、延伸是制造第二、三类买点的。	三类／波动应用用语，保留为复查线索；不以单条索引推码级归属。
+blog	五词族并集	028:848		问题4：完成的走势类型为什么在此级别图上很明显，因为前面所说的高低点原因吗？＝＝＝＝＝＝＝＝＝＝＝＝＝＝＝＝＝＝＝完成的走势类型，构其中枢的三段连续走势，其高低点通常要破10均线，且5、10通常会湿吻，当然很明显。	同词语境或图文转述；保留原行供复查，未据该行下规则。
+blog	五词族并集	028:1052		那当然，这就演化成中枢的扩展或走势延伸中的新中枢等情况了。	发展/重叠语境，未单凭该行扩 R5。
+blog	五词族并集	029:38		这二种情况就是发生转折的两种情况，原理是一样的，只是相应的力度有区别。当反弹至少要重新触及最后一个中枢，这样，将发生转折，也就是出现盘整与上涨两种情况，对于上面5分钟下跌的例子，就意味着，将出现5分钟级别更大的盘整或5分钟级	发展/重叠语境，未单凭该行扩 R5。
+blog	五词族并集	029:42		而一个30分钟的盘整，至少有3个5分钟的走势类型，而1个5分钟的走势类型，至少有3个1分钟的走势类型，也就是一个30分钟的盘整，就至少有9个1分钟的走势类型，这和上面a+A+b+B+c的数量是一致的。从这数量平衡的角度，就知	发展/重叠语境，未单凭该行扩 R5。
+blog	五词族并集	029:44		有人可能还有疑问，如果下跌最后一个中枢扩展，例如5分钟扩展成30分钟，那和5分钟级别下跌+30分钟级别盘整有什么区别？这区别大了，因为在“5分钟级别下跌+30分钟级别盘整”，也就是“下跌+盘整”中，下跌和盘整都是完成的走势类	发展/重叠语境，未单凭该行扩 R5。
+blog	五词族并集	029:52		以上三种情况，就完全分类了某级别背驰后的级别与力度，也就是某级别的第一类买点后将发生怎么样的情况，而第一类卖点的情况是一样的，只是方向相反。注意，这里说的是最精确的情况，由于第一种情况很少发生且和第二种情况有所类似，所以粗糙	同词语境或图文转述；保留原行供复查，未据该行下规则。
+blog	五词族并集	029:58		而对于实际的操作，这两种情况并没有多大的区别，例如是盘整还是上涨，关键看突破第一个中枢后是否形成第三类买点，而操作中，是在第一、二类买点先买了，然后观察第三类买点是否出现，出现就继续持有，否则就可以抛出，因此在操作上，不会造	有操作／力度语境，本行不能取代可证的首回抽构造。
+blog	五词族并集	029:68		3、然后在反弹的第一次次级别回试后买入那些反弹能达到最后一个中枢的股票而且最好是突破该中枢的而且回试后能站稳的，根据走势必完美，一定还有一个次级别的向上走势类型，如果这走势类型出现盘整背驰，那就要出掉，如果不出现，那就要恭喜	有操作／力度语境，本行不能取代可证的首回抽构造。
+blog	五词族并集	029:92		每日解盘（2007-02-09 15:09:19 )缠中说禅：2007-02-09 15:09:19今天大盘没什么可说的，就是围绕一直强调的2720点震荡。有经验的人一看，就应该知道这个中枢是一个三角形，今天尾盘的杀跌是其第	含编注，不能整行引作作者；取舍见阅读表。
+blog	五词族并集	029:244		不存在这个问题，你当时就可以判断的。前面有关于中枢延伸的标准定义，中枢是否延伸、扩展，有标准的数学公式的，自己好好找找，看当时的图就可以判断。	发展/重叠语境，未单凭该行扩 R5。
+blog	五词族并集	029:328		第一个问题，把中枢的扩展、延伸分别清楚。这两种情况是绝对不可以混淆的。前面有精确的数学公式，请找一下好好研究。至于背驰的问题，背驰就一定转折，这可以严格地证明。没有什么循环的，因为背驰，所以不可能产生走势的延伸，就这么简单。	有操作／力度语境，本行不能取代可证的首回抽构造。
+blog	五词族并集	029:334		楼主能不能对中枢，中枢延伸，扩张，盘整以及第一二三类买卖点多留一些作业，然后进行点评，基础扎实了，才能更好的学习	三类／波动应用用语，保留为复查线索；不以单条索引推码级归属。
+blog	五词族并集	029:344		问题一：趋势＋盘整，盘整的中枢级别高于趋势吗？（这时盘整不能叫次级走势吧？）那第三类买点是在盘整结束后吗，还是盘整中第一个次级别走势的结束点？趋势＋反趋势组合，就不存在这些疑问。	三类／波动应用用语，保留为复查线索；不以单条索引推码级归属。
+blog	五词族并集	029:358		问题三：盘整＋盘整，如果以一个次级别的盘整类型离开中枢，返回当然不可能也是盘整类型，否则就构成一个大级别的盘整类型，这就与原中枢维持的前提矛盾了。怎么理解呢？离开和返回中枢的两个次级盘整走势，无论哪个属于Z走势段，都有【dn	发展/重叠语境，未单凭该行扩 R5。
+blog	五词族并集	029:362		注意，这里说的盘整＋盘整，是在第三类买点的前提下的，后一个盘整的低点不会跌回前面中枢之内，这时候，无论后面怎么走，都至少有一个【dn,gn】不与中枢重叠，就不会是延伸了。	承重或反向样例。作者与限定按 READING.md 成段核。
+blog	五词族并集	029:404		4、 在一个上涨大趋势的延伸中，假如其最后中枢前后两段次级趋势没有发生背驰，而股价因利空产生连续跌停走势，这种情况背驰就不能够提前给出信号了吧？看不到背驰，怎么操作呢？	有操作／力度语境，本行不能取代可证的首回抽构造。
+blog	五词族并集	030:64		妹妹你好！我觉得自己现在的操作基本上都是成功的，但有一点把握得不好，中枢完成后继续上涨的一段，大概会涨到什么幅度？虽然妹妹说过走得晚不如走得早，但我总是紧张过度，看着点苗头就跑了请问是不是中枢的前后两段大致对称？就好像一只蝴	有读者问题，须以署名应答上下文核归属；不以该行独证。
+blog	五词族并集	030:88		第二个问题：同向的1、2、3个中枢，中枢2与中枢1有重叠，中枢3与中枢2有重叠但不与中枢1重叠，这种情况的走势是否只是中枢1的扩搌？其中枢的区间就是中枢1的区间吗？祝福老师新年快乐！！！健康美丽！ ！ ！	发展/重叠语境，未单凭该行扩 R5。
+blog	五词族并集	030:92		其实没必要考虑什么头肩顶。中枢扩展有精确的数学定义，在一个中枢还延伸的时候，只有一个中枢，不存在中枢1、2的问题。	发展/重叠语境，未单凭该行扩 R5。
+blog	五词族并集	030:142		由定理一，可以得到第三类买卖点定理：一个次级别走势类型向上离开缠中说禅走势中枢，然后以一个次级别走势类型回试，其低点不跌破ZG，则构成第三类买点；-------------	三类／波动应用用语，保留为复查线索；不以单条索引推码级归属。
+blog	五词族并集	030:146		按前面分类，此回试虽然没跌破ZG，但跌破GG，那新中枢还是原中枢级别的扩展，而不是上涨中新生一个，这个也一样能参与吗？	发展/重叠语境，未单凭该行扩 R5。
+blog	五词族并集	030:266		开盘买入600607上实医药，缠妹妹，我是用30分钟的第三类买点进行操作的对不对，但是有个疑问：第三类买点怎么样才能买在最低点上？我今天还买入了000581,但是却买的不对，在30分钟线上，我以为它要脱离中枢向上，并拌有大的	有读者问题，须以署名应答上下文核归属；不以该行独证。
+blog	五词族并集	030:280		000581这种骗线是很容易判别的，关键就是次级别的回抽不能又到中枢里，只要耐心等待次级别的发展就可以，不要次级别还没走出来就冲进去，这样就容易被骗。	同词语境或图文转述；保留原行供复查，未据该行下规则。
+blog	五词族并集	031:76		其实散户挣钱真的很简单，就像这14只股票，基本的节奏都不大一样，利用技术，把涨幅大的换成涨幅小的，这样的利用率就高了。就像，一开始基本都有的000999，1月25日翻倍进入调整，而000416在1月26日见到洗盘回试的低点，	同词语境或图文转述；保留原行供复查，未据该行下规则。
+blog	五词族并集	031:243		有一些问题,烦请姐姐指点,谢谢!(放假就不问了!)一、以下判断对吗?1、 2个中枢趋势背驰组成: 1个大一级别中枢+A一段上涨(包含2个本级中枢由次级别三段构成)+B 1个大一级别中枢+C 一段上涨(包含2个本级中枢由次级别	有读者问题，须以署名应答上下文核归属；不以该行独证。
+blog	五词族并集	031:262		2007-02-26 16:00:16博主，来问问题了，上次说的大盘2980开始的5分钟下跌，第一个中枢为什么不是从1301035开始的，而是从1301055开始算起的呢？在1301055至1301310是不是这个中枢的前三	发展/重叠语境，未单凭该行扩 R5。
+blog	五词族并集	031:264		**35那个是前面走势类型的中枢，同一个走势类型的中枢，和下跌+盘整里盘整的中枢，要搞清楚区别。一般标记中枢，都说前三段，后面的延伸，可说可不说，关键你知道是延伸就行，否则每个中枢都说那么仔细，这文章就没法写，太长了。**	发展/重叠语境，未单凭该行扩 R5。
+blog	五词族并集	031:301		[匿名] 请教 2007-02-26 16:19:36缠师，盘整背驰中没看明白：其中提到的ABC三段，是指组成这段盘整走势中枢的三段重叠走势吗？==中枢里的ABC三段，站在次级别上看，就是三个完成的走势类型的叠加，这 很好理	有读者问题，须以署名应答上下文核归属；不以该行独证。
+blog	五词族并集	031:313		上次说的大盘2980开始的5分钟下跌第一个中枢为什么不是从1301035开始的，而是从1301055开始算起的呢？在1301055至1301310是不是这个中枢的前三段，之后的是中枢的延伸？--35那个是前面走势类型的中枢，	发展/重叠语境，未单凭该行扩 R5。
+blog	五词族并集	031:315		**35那个是前面走势类型的中枢，同一个走势类型的中枢，和下跌+盘整里盘整的中枢，要搞清楚区别。一般标记中枢，都说前三段，后面的延伸，可说可不说，关键你知道是延伸就行，否则每个中枢都说那么仔细，这文章就没法写，太长了。**	发展/重叠语境，未单凭该行扩 R5。
+blog	五词族并集	031:361		[匿名] 请教 2007-02-26 17:07:26或者，难道整个盘整走势本身就是个中枢，而不像趋势那样，有前面的连接段和后面的背驰段？==某级别的盘整是包含相应级别一个中枢的走势类型，盘整和中枢不是一个概念，像中枢的延伸	有读者问题，须以署名应答上下文核归属；不以该行独证。
+blog	五词族并集	031:363		**某级别的盘整是包含相应级别一个中枢的走势类型，盘整和中枢不是一个概念，像中枢的延伸、扩展等都在盘整里。盘整是一个不精确的概念，一定要用中枢的精确来精确之，**	发展/重叠语境，未单凭该行扩 R5。
+blog	五词族并集	031:386		[匿名] 大盘 2007-02-26 20:19:26春节假期对博主的炒股课程文章重新学习了一遍，有了更深的体会，当然细节方面仍然有不少不懂的地方，特别是对于盘整走势的判断问题，归纳起来，学习盘整走势中遇到的疑难问题有如下几	同词语境或图文转述；保留原行供复查，未据该行下规则。
+blog	五词族并集	031:388		**粗略看了一下你的问题，都是基本概念没搞清楚。（1）盘整走势结束后发生转折的问题：盘整走势结束后如果接下来是上涨走势，一定有某级别离开盘整中枢低点的下跌背驰段吗？如果是盘整+下跌，又一定有离开盘整中枢高点的上升背驰段吗？*	同词语境或图文转述；保留原行供复查，未据该行下规则。
+blog	五词族并集	031:416		2、如何判断一个盘整的开始与结束？比如说一个上涨趋势完成后，对应的走势必然是盘整或下跌，那么当形成一个中枢的时候，我如何判断他是一个盘整还是一个下跌趋势的第一个中枢，是不是应该等等看？还有，趋势可以根据背驰来判断其结束，那么	三类／波动应用用语，保留为复查线索；不以单条索引推码级归属。
+blog	五词族并集	031:418		3、上涨的中枢是下上下，下跌的中枢是上下上，那么一个盘整的中枢是什么？？？==怎么到现在还问这种问题？盘整的中枢和趋势的中枢又有什么不同？中枢就是中枢，哪里有什么盘整、趋势的。你可以说是趋势中产生的中枢，但不可以说盘整中产生	同词语境或图文转述；保留原行供复查，未据该行下规则。
+blog	五词族并集	031:512		你看那几根线，上下都没有1分钟三根以上的重叠，所以不能算是有1分钟的中枢。在最弱的情况下，明天1分钟第二中枢出现后，背弛，然后形成一个大的5分钟中枢，甚至延伸为30分钟的，然后再下跌，这种可能性是不能排除的。没必要预测，看当	发展/重叠语境，未单凭该行扩 R5。
+blog	五词族并集	031:846		[匿名] 兰兰 2007-02-15 16:34:46缠姐:刚才您回答小鸟关于大盘中枢问题,我认为是从1048到1337才有三段,1048到1329好像没有三段? 请指点,谢谢!==第三段是1114到1129，前三段的级别一	有读者问题，须以署名应答上下文核归属；不以该行独证。
+blog	五词族并集	031:848		**第三段是1114到1129，前三段的级别一定是一样的，按你那种分法，就不一样了。其实后面都是中枢的延伸。**	发展/重叠语境，未单凭该行扩 R5。
+blog	五词族并集	031:859		1048到1129，一个明显的上升中调整形成的中枢，三段很明显的，后面是该中枢的延伸。1413是第三类买点，确认中枢的完结。	三类／波动应用用语，保留为复查线索；不以单条索引推码级归属。
+blog	五词族并集	031:881		[匿名] 大盘2007-02-15 16:01:01请问博主，第3类买点有一种是盘整背离后不跌破中枢高点形成的，是不是还有不是盘整背离形成的第3类买点？，例如趋势中形成第2个中枢的第1段次级别下行走势。还有，对于不断形成新的	有读者问题，须以署名应答上下文核归属；不以该行独证。
+blog	五词族并集	031:912		[匿名] 越看越迷糊2007-02-15 17:06:10缠mm好！看到最后反而有个最基础的问题迷糊了。还是关于走势中枢的，缠mm说过，上升趋势的走势中枢由下上下三段重叠得到，假如“上”这段较长，两个“下”段都很短，以致于三	发展/重叠语境，未单凭该行扩 R5。
+blog	五词族并集	031:916		[匿名] 越看越迷糊2007-02-15 17:20:30缠中说禅 2007-02-15 17:08:46[匿名] 越看越迷糊2007-02-15 17:06:10缠mm好！看到最后反而有个最基础的问题迷糊了。还是关于走势中	发展/重叠语境，未单凭该行扩 R5。
+blog	五词族并集	031:918		==临走回答你，那就不形成中枢，谁告诉你下上下一定形成中枢的？没重叠哪里有中枢？下了，再见。**********关键是这种走势很可能发生，即在一个上升趋势中，每一次回调都距离上一次的高点很远，从而形成强势上涨，而不形成走势中	发展/重叠语境，未单凭该行扩 R5。
+blog	五词族并集	031:920		当然是后面才会形成中枢，妹妹说过，在日线上，如果不形成日线中枢，证明走势强劲，要到更高的位置才形成中枢。没有形成中枢，证明走势没有完结，这很好理解。	同词语境或图文转述；保留原行供复查，未据该行下规则。
+blog	五词族并集	032:30		详细说，在上面例子30分钟的a+A+b+B+c里，A是已出现的，是一个30分钟的中枢，这可以用定义严格判别，没有任何含糊、预测的地方。而b段一定不可以出现30分钟的中枢，也就是只能最多是5分钟级别的。如果b段一个5分钟级别的	有操作／力度语境，本行不能取代可证的首回抽构造。
+blog	五词族并集	032:93		[匿名] 小鸟 2007-02-28 15:16:28妹妹来了吗？现在是5分钟中枢第一段吧？==现在的走势很简单，今天早上就是一个5分钟的中枢，下午出现第三类买点后离开，现在问题的关键就是在上面是否能再出现一个中枢，如果这中	三类／波动应用用语，保留为复查线索；不以单条索引推码级归属。
+blog	五词族并集	032:95		**现在的走势很简单，今天早上就是一个5分钟的中枢，下午出现第三类买点后离开，现在问题的关键就是在上面是否能再出现一个中枢，如果这中枢能站稳5天线以及2915，那么就可以期待再冲3000了。如果不行，那就下来形成一个30分钟	三类／波动应用用语，保留为复查线索；不以单条索引推码级归属。
+blog	五词族并集	032:105		[匿名] 酒吧心情 2007-02-28 15:32:05今天早上看了缠JJ的课程,虽然没有立即领悟是什么意思.但是今天确实有不小的收获,特别是1351的第三买点.不过还有问题需要JJ 指教，1335的那个回抽到2809的为	有读者问题，须以署名应答上下文核归属；不以该行独证。
+blog	五词族并集	032:122		[匿名] 快 2007-02-28 15:35:27现在应该说第一个5分钟中枢快完成了吧?==	同词语境或图文转述；保留原行供复查，未据该行下规则。
+blog	五词族并集	032:124		你还没理解今天的课程，早上已经形成，而下午出现第三类买点，那就确认结束了。	三类／波动应用用语，保留为复查线索；不以单条索引推码级归属。
+blog	五词族并集	032:139		[匿名] 惊鸿一慕 2007-02-28 15:44:33谢谢缠姐姐的理论，昨天在26.67把600888卖了，进入日线背驰段立即清仓！今天下午在23.60又全部补回来了，赚了13％，真爽！缠姐姐，今天600888的低位买点	有读者问题，须以署名应答上下文核归属；不以该行独证。
+blog	五词族并集	032:141		**这只能算依然在中枢里的震荡，这个中枢级别很大，一旦往上突破，空间不小，短线就看什么时候突破了，确认以一个至少是日线上的第三类买点为标准。可以参考一下60043222元那次回抽，不过那个中枢没这个大，突破起来就比较轻松。*	三类／波动应用用语，保留为复查线索；不以单条索引推码级归属。
+blog	五词族并集	032:160		[匿名] 箭梦弦歌 2007-02-28 15:56:25在a`+B形成过程中，我唯一的依据是盘整的回抽越来越高，所以认为可能不能跌破本中枢，直到第三类买点形成，才最终确认a+B形成了------我的想法对吗？缠mm，盼回答	有操作／力度语境，本行不能取代可证的首回抽构造。
+blog	五词族并集	032:165		[匿名] 大盘 2007-02-28 16:01:36请问博主，为什么不可以认为上海指数1月以来到目前都还是在1月形成的日线中枢里震荡延伸行情呢，不是每次30分钟上升后又30分钟回到中枢里吗，日线中枢的扩展不是要前后两个不重	有读者问题，须以署名应答上下文核归属；不以该行独证。
+blog	五词族并集	032:175		[匿名] 大盘 2007-02-28 16:10:38请问博主：关于中枢扩展，例如第2个5分钟中枢出现顶部背离，随后的下跌扩展成30分钟的中枢，如果随后的下跌特别厉害，不仅跌破第一个5分钟的中枢高高点（或者震荡的高高点），而	有读者问题，须以署名应答上下文核归属；不以该行独证。
+blog	五词族并集	033:16		例如，5分钟级别的中枢不断延伸，出现9段以上的1分钟次级别走势。站在30分钟级别的中枢角度，3个5分钟级别的走势重合就形成了，而9段以上的1分钟次级别走势，每3段构成一个5分钟的中枢，这样也就可以解释成这是一个30分钟的中枢	发展/重叠语境，未单凭该行扩 R5。
+blog	五词族并集	033:18		另外一种多义性，是因为模本的简略造成的。不同级别的图，其实就是对真实走势不同精度的一种模本，例如，一个年线图当然没有1个分笔图的精确度高，很多重要的细节都不可能在大级别的图里看到。而所谓走势的级别，从最严格的意义上说，可以从	构件或定位语境，不以单行建立 R5；相关段见阅读表。
+blog	五词族并集	033:26		现在先别管什么力不力的，可以从纯粹中枢的角度对背驰给出另外的释义。对a+A+b+B+c，背驰的大概意思就是c段的力度比b的小了。那么，站在B这个中枢的角度，不妨先假设b+B+c是一个向上的过程，那么b可以看成是向下离开中枢B	同词语境或图文转述；保留原行供复查，未据该行下规则。
+blog	五词族并集	033:30		同样，站在纯中枢的角度，a+A+b+B，其中B级别大于A的这种情况就很简单了，这时候，并不必然地B后面就接着原方向继续，而是可以进行反方向的运行。例如，a+A+b+B是向下的，而a+A+b其实可以看成是对B一个向上离开的回拉	有操作／力度语境，本行不能取代可证的首回抽构造。
+blog	五词族并集	033:34		由于相应的a+A+b是一个1分钟的走势，那天故意提早开盘前发帖子，等于是现场直播B的形成，但1分钟的走势，估计能看到或保留的不多，那就用15分钟图来代替。02270945到02280945，刚好4小时，构成a+A+b，其中的	有操作／力度语境，本行不能取代可证的首回抽构造。
+blog	五词族并集	033:48		总体围绕中枢的操作原则很简单，每次向下离开中枢只要出现底背驰，那就可以介入了，然后看相应回拉出现顶背驰的位置是否能超越前面一个向上离开的顶背驰高点，不行一定要走，行也可以走，但次级别回抽一旦不重新回到中枢里，就意味着第三类买	有操作／力度语境，本行不能取代可证的首回抽构造。
+blog	五词族并集	033:188		一旦出现6段的延伸，加上形成中枢本身那三段，就构成更大级别的中枢了。	发展/重叠语境，未单凭该行扩 R5。
+blog	五词族并集	033:244		缠中说禅：2007-03-06 15:22:36今天大盘在昨天底背驰的基础上展开，大家有点观察的，都能发现这围绕中枢的震荡，基本都至少是三波完成的，例如从底背驰到顶背驰，都有上下上的过程，今天早上就是这下的一段。由于大盘突破	同词语境或图文转述；保留原行供复查，未据该行下规则。
+blog	五词族并集	033:368		一旦出现6段的延伸，加上形成中枢本身那三段，就构成更大级别的中枢了。	发展/重叠语境，未单凭该行扩 R5。
+blog	五词族并集	033:390		CCTV：2007-03-03 22:58:55 说错了，现在这次应该也不能算是完全形成周线中枢，只是有可能形成，好象也就延伸了一段，按楼主的理论，暂时只能算是日线的延伸。===这是对的，从20070104算起，前几课小缠说	含编注，不能整行引作作者；取舍见阅读表。
+blog	五词族并集	033:445		2007-03-06 15:31:40老大好，两个同级中枢扩张后，这时是高级中枢已经完成了，还是高级别的中枢第三段还没开始呢？	发展/重叠语境，未单凭该行扩 R5。
+blog	五词族并集	033:527		当下性，如果大盘的急跌破坏了内在结构，自然就不会呈现出第三类买点来，当下性是最关键的。	三类／波动应用用语，保留为复查线索；不以单条索引推码级归属。
+blog	五词族并集	033:539		盘下午是一分钟级别以下的背驰。（注：这里的MACD没有明显的离开0轴后回拉0轴）	含编注，不能整行引作作者；取舍见阅读表。
+blog	五词族并集	033:547		[匿名] 咕咚2007-03-06 16:16:48缠姐好～～～～下面是您对大势的评价：对大盘的判断，很久以前已经说过了，现在不过是特大牛市第一波中的一个调整，可能会演化成周线中枢，前提是这次盘整后不出现向上突破走势，因为目	发展/重叠语境，未单凭该行扩 R5。
+blog	五词族并集	033:549		**日线的完整中枢，其实是1月4日到2月6日，虽然在上面可以看到有明显的9段，但都不是30分钟级别的，都是5分钟级别，所以到2月6日才严格地构成日线的中枢所需要的三段，当然，你也可以看成是由5分钟中枢延伸而来的。三个5分钟是	发展/重叠语境，未单凭该行扩 R5。
+blog	五词族并集	034:48		缠中说禅：2007-03-08 15:30:24昨天尾盘与今天早盘构成的5分钟回试，没有重新跌回2958原30分钟中枢，就构成完美的第三类买点，其后的走势都很规范。2915点的压力在尾盘突破，但还需要确认。从纯技术的角度，现	三类／波动应用用语，保留为复查线索；不以单条索引推码级归属。
+blog	五词族并集	034:72		[匿名] 惊鸿一慕2007-03-06 16:29:56缠姐姐，请问用MACD辅助判断顶背驰，是否存在红柱子长度、红柱子面积、黄白线判断的优先次序？例如600598北大荒5分钟图上，3月5日9：45分创新高9.24，红柱子也	有读者问题，须以署名应答上下文核归属；不以该行独证。
+blog	五词族并集	034:74		**一般来说，最重要的是黄白线，柱子面积之和一般在复杂走势里重要。当其实这都不是最关键的，最关键是要各级别配套地看，才能知道哪个背驰的力度大，否则，每一个1分钟以下的背驰都要动，那就会累死。但如果中枢就是5、30分钟的，每次	同词语境或图文转述；保留原行供复查，未据该行下规则。
+blog	五词族并集	034:156		2007-03-08 16:00:50引用：“昨天尾盘与今天早盘构成的5分钟回试”分析：我认为这是个2个一分钟中枢由于波动区间重叠而形成的5分钟的盘整走势。问题：请问缠师，这个盘整走势的背弛我怎么看不明白啊，今早的下跌一段力	有读者问题，须以署名应答上下文核归属；不以该行独证。
+blog	五词族并集	034:188		2007-03-08 15:38:10老大，关于您回复的大盘1月9日到2月6日是日线中枢，这么说是不是可以认为5分级别的9段就构成了日线级别的中枢。也就是说次次级别当延伸了6段，加上原来次次级别的中枢三段，这时就构成了本级中	发展/重叠语境，未单凭该行扩 R5。
+blog	五词族并集	035:18		上面就用最低级别的中枢把走势在最低级别上进行了完全分类，而三个连续的最低级别走势类型之间，如果发生重叠关系，也就是三个最低级别走势类型所分别经过的价格区间有交集，那么就形成了高一级别的缠中说禅中枢。有了该中枢定义，依照在最低	有操作／力度语境，本行不能取代可证的首回抽构造。
+blog	五词族并集	035:54		2007-03-12 15:20:28 今天的大盘没什么可说的，今天上周五完成的30分钟中枢的延伸过程，只要5分钟的回试不跌破2911的中枢上沿，那么就要形成第三类买点，至于后面是形成中枢新生而延续上涨，还是中枢的扩展成日线	三类／波动应用用语，保留为复查线索；不以单条索引推码级归属。
+blog	五词族并集	035:64		任何走势都逃不过本ID的理论，大盘每天的走势就是免费的、最鲜活的教程。你必须随时能回答，现在大盘在干什么，例如，今天整天就对2911中枢上的震荡，早上的跳水看似恐怖，但却在2911附近止住，证明其向上的动力还是强的。但由于没	三类／波动应用用语，保留为复查线索；不以单条索引推码级归属。
+blog	五词族并集	035:110		2007-03-12 15:36:48今天的大盘没什么可说的，今天上周五完成的30分钟中枢的延伸过程，只要5分钟的回试不跌破2911的中枢上沿----------------------------2911在哪里, 请缠姐指	发展/重叠语境，未单凭该行扩 R5。
+blog	五词族并集	035:122		2007-03-12 15:45:36缠姐, 为什么到目前位置还拿2911 是的中枢来判定.而不拿临近的中枢呢??=这次上来就是两个中枢2858下面一个，2911下面一个，从而形成30分钟级别的上涨，(注：这两个30分中枢震	含编注，不能整行引作作者；取舍见阅读表。
+blog	五词族并集	035:156		2007-03-12 16:16:06=对，第二个30分钟中枢从2871到2911。这次上来的走势，如同标准的教科书，好好仔细研究中枢的扩展、延伸等问题。	发展/重叠语境，未单凭该行扩 R5。
+blog	五词族并集	035:170		2007-03-12 16:12:33对于奔走型,我常识着说下自己的看法.就是不断的进行中枢延伸.......然后一旦有突破中枢,然后回抽不破最高点ZG, 就说明有第三买点,对于大盘来说,就是上攻.	三类／波动应用用语，保留为复查线索；不以单条索引推码级归属。
+blog	五词族并集	035:176		=对，第二个30分钟中枢从2892到2911。这次上来的走势，如同标准的教科书，好好仔细研究中枢的扩展、延伸等问题。	发展/重叠语境，未单凭该行扩 R5。
+blog	五词族并集	036:26		而这种根据结合律的最佳组合，是根据市场当下的走势随时变化的，而所有的变化，都符合理论要求且不会影响实际操作，是对实际操作起着更有力的帮助。例如，在最近走势中，30分钟图上，2760到2858这30分钟中枢，03081000的	有操作／力度语境，本行不能取代可证的首回抽构造。
+blog	五词族并集	036:30		注意，这种重新组合，不涉及任何预测性，有人可能要问，那么为什么不一开始就把03081000的5分钟回抽组合到03051330开始的这段5分钟走势中？因为这种组合不利于操作，站在这种组合下，030810005分钟回抽的第三类买	含编注，不能整行引作作者；取舍见阅读表。
+blog	五词族并集	036:34		还有一种更重要的应用，就是在中枢的震荡中。围绕中枢的震荡，不一定都是次级别的，例如，一个日线中枢，围绕他的震荡，完全可以是30分钟以下的任意级别，甚至是一个跳空缺口，例如有些股票，完全可以今天一字涨停，明天一字跌停，跳来跳去	同词语境或图文转述；保留原行供复查，未据该行下规则。
+blog	五词族并集	036:36		不过，更有实际意义的是，上面的a如果不再围绕日线震荡（注：跳出中枢），例如，假设 a是一个5分钟级别的，而其后一个5分钟级别的反抽也不回到中枢里，按照日线中枢，这并不构成第三类买卖点，但对于A30-m30，可能就构成30分钟	含编注，不能整行引作作者；取舍见阅读表。
+blog	五词族并集	036:163		1. 例如一个标准日线下跌趋势走完后，随后形成转折后第一个日线中枢，如果接下来一个30分钟离开中枢后又返回中枢，再接着又一次30分钟离开，然后30分钟回试低点不怕日线中枢高点的情况，算不算3买？	同词语境或图文转述；保留原行供复查，未据该行下规则。
+blog	五词族并集	036:165		2. 日线上涨形成2个日线中枢以后，一个30分钟离开第2个日线中枢，然后30回试低点不跌破第2个日线中枢高点，是不是3买。	同词语境或图文转述；保留原行供复查，未据该行下规则。
+blog	五词族并集	036:169		==只要次级别离开次级别回抽不回到中枢的都算。但如果是那些连续延伸的上涨中第4、5个中枢，其第三买点出现中枢扩展就几乎是百分百的事情。第三买点后能否出现上涨趋势而不是更大级别中枢，如何判断，这才是关键，这在以后会说到	承重或反向样例。作者与限定按 READING.md 成段核。
+blog	五词族并集	036:175		袖珍中小板的，值得中线关注。无非两种走势，一种是在开盘附近震荡出一个中枢后向上，一个是向下，向下的其实更有潜力，向下无非就两波，一旦出现日线背驰，就是中线大牛股。看看以前中小板中的走势就明白。向上突破的，可以在中枢震荡低点介	有读者问题，须以署名应答上下文核归属；不以该行独证。
+blog	五词族并集	036:185		由于目前的上证指数已经突破3000点，也就是突破了上周的2978高点，因此从走势组合来看，似乎完全可以说周线中枢并没有最终形成，因为如果看作周线中枢，似乎日线的下走势没有走完，因此站在60分钟角度来看，1.24-3.5日形成	含编注，不能整行引作作者；取舍见阅读表。
+blog	五词族并集	037:22		对c的内部进行分析，由于c包含B的第三类买卖点，则c至少包含两个次级别中枢，否则满足不了次级别离开后次级别回拉不重回中枢的条件。这两个中枢构成次级别趋势的关系，是最标准最常见的情况，这种情况下，就可以继续套用a+A+b+B+	三类／波动应用用语，保留为复查线索；不以单条索引推码级归属。
+blog	五词族并集	037:42		每日解盘(2007-03-16 11:51:32)现在如果要摆脱目前的中枢，没有金融股的配合基本是不可能的。但金融股由于某类人掌握得比较厉害，短线的攻击没问题，但一个持续的攻击，就有点困难了。不过金融股在中线角度，依然还是一	含编注，不能整行引作作者；取舍见阅读表。
+blog	五词族并集	037:177		关于中枢、扩展、延伸等的精确定义，都有了，要理解就好好去研究相应的公式。	发展/重叠语境，未单凭该行扩 R5。
+blog	五词族并集	037:203		定理三：某级别“缠中说禅走势中枢”的破坏，当且仅当一个次级别走势离开该“缠中说禅走势中枢”后，其后的次级别回抽走势不重新回到该“缠中说禅走势中枢”内。这定理三中的两个次级别走势的组合只有三种：趋势+盘整，趋势+反趋势，盘整+	三类／波动应用用语，保留为复查线索；不以单条索引推码级归属。
+blog	五词族并集	037:215		2007-03-20 17:47:27读缠MM文章，渐渐悟其精义。希望做缠的颜回。很少有机会能请教到，今天幸得一机会。大盘从0104调整到现在，从30分钟K线图上分明有16段了。按照博主的理论，3段30分钟的形成日线中枢，9	有读者问题，须以署名应答上下文核归属；不以该行独证。
+blog	五词族并集	037:259		还有个关于第三买点问题，比如一个“下上下”的30F中枢，第三段“下”完成后紧接着一个5F走势向上突破，接着又是一段向下的5F回抽走势不破30F中枢。这个5F回抽走势如果是盘整的话，完全可能不断延伸，怎么确定其结束点呢？好像看	三类／波动应用用语，保留为复查线索；不以单条索引推码级归属。
+blog	五词族并集	037:265		像盘整延伸的问题，根本就无须去预测，只要走出第三类买卖点，自然就结束。至于什么时候走出，这涉及预测，任何涉及预测的，都是或然的。当然，可以有很多配套的手段使得准确率高达90%以上，但这另外的问题。	三类／波动应用用语，保留为复查线索；不以单条索引推码级归属。
+blog	五词族并集	037:321		关于上下影线的问题对于两个中枢间的上下影线重叠，有时这仅仅是一非常快带的波动，而如果就将此认为扩展，觉得不妥，不知如何处理，比如说，海尔沽权的0.001，这个下影应该是可以忽略的吧。	发展/重叠语境，未单凭该行扩 R5。
+blog	五词族并集	037:327		中枢算的是重叠部分，既然这样，一个偶然的波动就不会算到中枢里了。围绕中枢的波动，在理论上是可以任意价位的，但这不构成任何实质影响。	发展/重叠语境，未单凭该行扩 R5。
+blog	五词族并集	038:22		对于这种同级别分解视角下的操作，永远只针对一个正在完成着的同级别中枢，一旦该中枢完成，就继续关注下一个同级别中枢。注意，在这种同级别的分解中，是不需要中枢延伸或扩展的概念的，对30分钟来说，只要5分钟级别的三段上下上或下上下	有操作／力度语境，本行不能取代可证的首回抽构造。
+blog	五词族并集	038:24		有人可能马上要问，同级别分解的次级别分解是否也是同级别分解的。答案是，不需要。这里在思维上可能很难转过弯，因为一般人都喜欢把一个原则在各级别中统一运用，但实际上，你完全可以采取这样的分解形式，就是只要某级别中进行同级别分解，	有操作／力度语境，本行不能取代可证的首回抽构造。
+blog	五词族并集	038:26		说得深入一点，走势分解、组合的难点在于走势有级别，而高级别的走势是由低级别构成的，处理走势有两种最基本的方法，一种是纯粹按中枢来，一种是纯粹按走势类型来，但更有效的是在不同级别中组合运用。因此，完全合理、不违反任何理论原则的	发展/重叠语境，未单凭该行扩 R5。
+blog	五词族并集	038:92		2007-03-21 15:41:09我终于明白了，老师的理论今天又浅显了，以前总是为了买点错失了做短差的机会，现在知道了，也就是这样，当一个股票突破中枢上去，如果没有背持是可以继续持有的，出现了背持就卖，回来不破中枢高点又	有操作／力度语境，本行不能取代可证的首回抽构造。
+blog	五词族并集	038:146		=可能当然有，124与227的连线，现在也没突破，所以汉奸在技术上是有发难的条件的。大盘从从去年上来，算上去年5月份后的日中枢，也有两个了，上涨形态出现背驰也是很合理的，除非能在上面再延伸一个日中枢。形态是走出来的，没必要预	发展/重叠语境，未单凭该行扩 R5。
+blog	五词族并集	038:158		2007-03-21 16:14:10lz能不能一个问题一个问题给说说清楚？比如第三类买点，第一次次级别回抽回到中枢，第二次没回，算不算？很多人有这个疑问再比如上面问的盘整背驰，按LZ的文章，是对12日上海的5分钟图，是不是	三类／波动应用用语，保留为复查线索；不以单条索引推码级归属。
+blog	五词族并集	038:160		=第三买买点怎么可能有第一次次级别回抽回到中枢的可能？能回到中枢就不是第三类买点了，第二次没回，那才是第三类买点。	三类／波动应用用语，保留为复查线索；不以单条索引推码级归属。
+blog	五词族并集	038:176		2007-03-21 16:23:48------问题是你定义过第三类买点必须是第一次回抽才行，	三类／波动应用用语，保留为复查线索；不以单条索引推码级归属。
+blog	五词族并集	038:180		=你的理解出现问题，如果跌回中枢里，连回抽都算不上，还是围绕中枢的震荡。第一次回抽不到中枢，这是第三类买卖点，上去再回抽，如果同样不回到中枢里，但这就不是第三类买卖点了。第三类买卖点，和中枢延伸的结束是一回事情，关于中枢的延	三类／波动应用用语，保留为复查线索；不以单条索引推码级归属。
+blog	五词族并集	038:212		2007-03-21 16:14:10lz能不能一个问题一个问题给说说清楚？比如第三类买点，第一次次级别回抽回到中枢，第二次没回，算不算？很多人有这个疑问	三类／波动应用用语，保留为复查线索；不以单条索引推码级归属。
+blog	五词族并集	038:214		缠主：大盘2月28日13日13：37分和13：51分缠主不是说两次回抽才形成第三类买点么？前一次有重叠，后一次才真正的算第三类买点，这不是两次么？	三类／波动应用用语，保留为复查线索；不以单条索引推码级归属。
+blog	五词族并集	038:258		背驰、盘整背驰，都是走势分段的依据，所谓第三类买卖对盘整结束的确认，最终也要看其内部结构的背驰、盘整背驰。不是等真跌了才问卖不卖，而是涨的时候一旦进入背驰的区间套里，就要陆续走，当然，资金小的可以等到最后几个价位，资金大的就	三类／波动应用用语，保留为复查线索；不以单条索引推码级归属。
+blog	五词族并集	038:300		3、级别分解中的起点问题，走势中任意一高低点都可做一个走势类型的分界点吗？=当然不是，必须是前面走势类型的结束点。	同词语境或图文转述；保留原行供复查，未据该行下规则。
+blog	五词族并集	039:50		缠中说禅：2007-03-23 15:18:15 今天大盘没什么可说的，周四、周五的血战已经在周三提前预告。今天中行主动示弱，不让汉奸有借利好出货的机会，为大盘以后的发展留下很大的余地。不过汉奸不会因为这两天的折腾而死心，那	含编注，不能整行引作作者；取舍见阅读表。
+blog	五词族并集	039:90		特别在下午2：40点以后，3买或者2买接近形成（出现底背离段了），但是还没有彻底走完的情况下，因为如果次日买入，虽然大涨，但是可能次日就又会出现一个可观的回试低点。	有操作／力度语境，本行不能取代可证的首回抽构造。
+blog	五词族并集	039:201		1) 判断Ai+3是否落回Ai高点意义何在？不论是否落回高点，接下来向上的一段都是看它是否背驰而确定是否出掉？----判断Ai+3是否落回Ai高点意义何在，不回落，说明一个中枢也没有形成，也就不可能结束该段上升走势。回落意味	三类／波动应用用语，保留为复查线索；不以单条索引推码级归属。
+blog	五词族并集	039:211		3）Ai+k+4之后，又如何开始新的程序？看Ai+k+5落回那个高点？Ai+k+2（机械化操作？），还是A+i+k（中枢高点，看是否落回中枢形成三买？）------------------------Ai+k+4如果盘整背离	有操作／力度语境，本行不能取代可证的首回抽构造。
+blog	五词族并集	040:36		2007-03-27 21:41:16[匿名] 新手 2007-03-27 21:31:21缠妹妹对今天大盘在13：38分的处没有形成背驰而上涨有何看法，我今天全部做空了，没有跌，因为也没发现底背，在低位也没有补回，后来全涨	有读者问题，须以署名应答上下文核归属；不以该行独证。
+blog	五词族并集	041:102		[匿名] 头大也得看 2007-04-02 20:35:05请教博主或理解的同学：关于中枢扩张例 三个以上5F中枢扩张成为一个30分钟中枢，问一：是否必须为三个5F中枢全部完成才可以形成30F中枢？=	有读者问题，须以署名应答上下文核归属；不以该行独证。
+blog	五词族并集	041:142		缠姐好，对于第三买点的形成还有点疑问，为什么你说次级别回抽在次级别图中只要回拉两次就可以了，我想，即使这个次级别回抽是盘整走势，也应该最少有五段，那就是有三次回拉才完整，不知该如何理解	三类／波动应用用语，保留为复查线索；不以单条索引推码级归属。
+blog	五词族并集	041:174		[匿名] 也许认识你2007-04-02 21:17:23博主，中枢的问题。最近和大家讨论问题，发现中枢还是无法统一定义。本级别中枢由次级别连续3个走势类型重叠而成。上涨中枢，次级别走势类型分别是：下跌＋上涨＋下跌	发展/重叠语境，未单凭该行扩 R5。
+blog	五词族并集	041:182		还是概念混乱，上涨、下跌都至少有两个以上次级别中枢，是3个次级别走势类型的重合部分构成中枢，而不是3个次级别中枢的重合构成中枢。构成中枢的次级别走势类型显然都是完成的，而次级别中枢对于次级别走势来说却不一定是完成的。请把中枢	同词语境或图文转述；保留原行供复查，未据该行下规则。
+blog	五词族并集	041:200		[匿名] IBM 2007-04-02 21:28:26多日来一直学习博主的理论，但总是很迷糊。今天看了601991，在3月29日形成日线级的第三买点，我的看法是否正确，请各位高手批评。==日线的第三类买点至少是一个30分钟	三类／波动应用用语，保留为复查线索；不以单条索引推码级归属。
+blog	五词族并集	041:202		**日线的第三类买点至少是一个30分钟的回拉，不可能是一天完成的。这股票的30分钟级别第三类买点在30分钟图上不难发现，只是比29日要早点，不妨去研究一下。**	三类／波动应用用语，保留为复查线索；不以单条索引推码级归属。
+blog	五词族并集	041:259		同级别分解，不允许盘整里的中枢延伸，因此3段次级别就是了，不存在任意的问题。	发展/重叠语境，未单凭该行扩 R5。
+blog	五词族并集	041:317		[匿名] 九头鸟 2007-04-02 22:14:02“一个走势中枢完成前，其波动触及上一个走势中枢或延伸时的某个瞬间波动区间，由此产生更大级别的走势中枢。”缠姐，这句话是否指必须是第二个中枢的前三段和第一个中枢的任何一段	发展/重叠语境，未单凭该行扩 R5。
+blog	五词族并集	041:319		概念有问题，一个中枢的完成，是和第三类买卖点相关的。如果一个中枢延伸，就证明没完成。	承重或反向样例。作者与限定按 READING.md 成段核。
+blog	五词族并集	042:86		=盘整背驰如果不演化成a+B`然后继续原方向向上，就肯定要跌破或升破该位置，这和不能突破中枢就一定要回拉中枢是一个道理。其实，盘整背驰后，90%的a+B`基本都会跌破或升破该位置，但这没有必然绝对性，和前面那种情况不同。	同词语境或图文转述；保留原行供复查，未据该行下规则。
+blog	五词族并集	042:142		2007-04-04 15:43:33楼主好，请教关于非同级分解的问题。同级别分解规则：在某级别中，不定义中枢延伸，允许该级别上的盘整+盘整连接；与此同时，规定该级别以下的所有级别，都允许中枢延伸，不允许盘整+盘整连接；至于	有读者问题，须以署名应答上下文核归属；不以该行独证。
+blog	五词族并集	042:146		一个30分钟的趋势，如果有N个30分钟的不延伸的中枢，根本不存在被分解的问题，只会被30分钟的同级别分解看成一个趋势。如果其中有一个中枢延伸出6段，那就自然被分解成两个30分钟的盘整，这没什么可难理解的。	发展/重叠语境，未单凭该行扩 R5。
+blog	五词族并集	042:237		还有一个问题：如何选择分析的中枢．假定一个５分钟级别的图形上，走势突破原来的中枢，形成了一段新的走势，其中形成了一个新的＂中枢＂，但围绕此新＂中枢＂的波动，有与之前中枢重叠的地方或者两个中枢有重叠的地方，该怎么选择要分析的中	有读者问题，须以署名应答上下文核归属；不以该行独证。
+blog	五词族并集	043:38		有人可能要问，第一种情况中如果是5分钟级别的回跌，也会形成一个比1分钟级别大的中枢，那和第二种情况有什么区别？这区别太大了，在第一种情况中，其回跌是必然的，而第二种情况，在形成一个比1分钟大的中枢后，并不必然回跌，可以往上突	发展/重叠语境，未单凭该行扩 R5。
+blog	五词族并集	043:48		不妨还是以上面向上30分钟级别的a+A+b+B+c为例子，在c中出现一个1分钟级别背驰，不妨假设后面演化出一个30分钟中枢C，如果C和B没有任何重叠，那就意味着原来的a+A+b+B+c并不是一个完成了的30分钟走势类型，该走	含编注，不能整行引作作者；取舍见阅读表。
+blog	五词族并集	043:283		2007-04-09 21:42:47缠老师：有2个问题请教：1：在上一课中“如果C和B有重合，那么a+A+b+B+c+C=a+A+b+（B+c+C），其中（B+c+C）必然演化成一个日线中枢，那么a+A+b+B+c只是一个	含编注，不能整行引作作者；取舍见阅读表。
+blog	五词族并集	043:291		请缠老师指点。。另外能否专门讲讲中枢扩张的划分？=C当然不一定是完成的。扩展后的划分和一般中枢正常的划分没什么区别。	发展/重叠语境，未单凭该行扩 R5。
+blog	五词族并集	044:18		首先，c至少要包含一个5分钟的中枢，否则，中枢B就不可能完成，因为这样不可能形成一个第三类的买点。	三类／波动应用用语，保留为复查线索；不以单条索引推码级归属。
+blog	五词族并集	044:38		如果一个按30分钟级别操作的投资者，那么，对于一个5分钟的回调，是必然在其承受的范围之内，否则可以把操作的级别调到5分钟。那么，对于一个30分钟的走势类型，一个小于30分钟级别的顶背驰，必然首先至少要导致一个5分钟级别的向下	有操作／力度语境，本行不能取代可证的首回抽构造。
+blog	五词族并集	044:42		娇注：跌破那个高点后会扩展成更大级别日中枢--进行时非完成时。根据定理，原30分走势类型结束，所以先离开。)	含编注，不能整行引作作者；取舍见阅读表。
+blog	五词族并集	044:104		感觉A2回中枢的力度比A0离开中枢的力度要大得多，虽然A2没创新高，严格说这不能叫盘背吧？	同词语境或图文转述；保留原行供复查，未据该行下规则。
+blog	五词族并集	044:229		2007-04-11 15:48:27缠中说禅2007-04-10 15:37:11[匿名] 缠心雕龙2007-04-10 15:30:44博主好，请教盘整背驰的问题：三段走势“上下上”，设为A0A1A2，假如A0最短，A1	有读者问题，须以署名应答上下文核归属；不以该行独证。
+blog	五词族并集	044:262		3、min(C5)--------否则C5形成C的三买，此时C已结束，对于中枢扩展来说，B,C如果要扩展成日线中枢，根据中枢定义，至少要9段5分钟走势才能形成日线级别的中枢，此时，B中若只有三段次级走势，则目前B,C,再加上	三类／波动应用用语，保留为复查线索；不以单条索引推码级归属。
+blog	五词族并集	045:22		一个30分钟的走势类型，最低标准，就要形成一个30分钟的中枢，一旦这中枢形成，该走势类型随时结束都是符合理论的。这样，最弱的走势类型(注：上涨调整反之最强），就是该中枢一完成就结束。	含编注，不能整行引作作者；取舍见阅读表。
+blog	五词族并集	045:50		大盘为什么要出现1分钟底背弛才能回头？今天连1分钟的顶背弛都没出现过，只是1分钟级别以下的，下午的跳水，把那中枢第三段给完成了，当然就可以继续上。至于大盘加不加速，这属于预测，最好把这习惯给改了。	同词语境或图文转述；保留原行供复查，未据该行下规则。
+blog	五词族并集	046:26		二、两个中枢（单边走势）显然，这根据两中枢的前后方向可以分为向上、向下两种，一般地，讨论向上的情况，向下的情况反过来就是。两个中枢，显然不能有重叠的地方，否则就会转化成上面的情形。因此，这种形态，最大的特点就是这两个中枢之间	发展/重叠语境，未单凭该行扩 R5。
+blog	五词族并集	046:36		每日解盘(2007-04-18 15:38:33)今天是一个比较强的强平衡市，从纯技术的角度，一旦明天不能马上从这里往上突破，就至少会出现盘整级别延伸。也就是说，明天如果不能出现这两天震荡所形成中枢的第三类买点，则有下破5天	三类／波动应用用语，保留为复查线索；不以单条索引推码级归属。
+blog	五词族并集	046:114		2007-04-18 16:00:32注意，以上三种情况中枢的位置不一定是前三根30分钟K线的重叠，可以是后面几根的。-------请问缠姐，今天大盘应该属于哪种？一个中枢？那么是前三根K线的重叠吗？还有上个问题看到你的回答	有读者问题，须以署名应答上下文核归属；不以该行独证。
+blog	五词族并集	046:152		向上的走势a+A+b+B+c，A、B是30f中枢，如果c是一个强劲的1f走势，且已经有c对b不背驰了（但B没有出现严格意义上的三买），此时能认为B完成了吗？==完成是一种形态，和幅度无关。这种情况，很正常，次级别总是从次次级	承重或反向样例。作者与限定按 READING.md 成段核。
+blog	五词族并集	047:24		下午开盘后，到1330点，就知道，第三类可能不存在了，因为当日一个连续3个30分钟K线的重合已经出现，也就是当日的中枢出现了，也就是说，到1330分钟，市场已经自己给出了选择，市场不可能出现227那天的无中枢下跌，最多就是一	有操作／力度语境，本行不能取代可证的首回抽构造。
+blog	五词族并集	047:26		上面的分析，在大盘1330没真正继续破位前，就可以100%明确地给出，里面都是纯逻辑的推理，和任何预测无关。假设你已经在1108的第三类卖点出去了，而且你又是小级别操作者，那你需要的就是回补，所以有了如上分析，你就可以耐心等	有操作／力度语境，本行不能取代可证的首回抽构造。
+blog	五词族并集	047:34		实际走势，在该第二波的分笔背驰（看1分钟图1443的MACD柱子，该K线还是所谓的早晨之星）后，大盘出现大幅度回拉，这其实是理论100%保证的事情。注意，并不是下跌的分笔背驰就一定存在大幅回拉，而是这天的当日平衡市的走势类型	有操作／力度语境，本行不能取代可证的首回抽构造。
+blog	五词族并集	047:42		当然，如果你对当日走势的辅助判断有更深的了解，那么用当日对冲等方法来降低成本，也是可以做到的，但这只能在下节继续了。有时间，可以去研究一下与大盘节奏不同个股的走势，感受一下大盘这外在因数对个股的影响是如何首先必须有个股的内在	三类／波动应用用语，保留为复查线索；不以单条索引推码级归属。
+blog	五词族并集	047:88		==如果你是30分钟级别操作的，就看从该30分钟中枢离开的那段走势里的中枢变化，具体的，后面都会说到。	有操作／力度语境，本行不能取代可证的首回抽构造。
+blog	五词族并集	047:125		2007-04-23 21:29:13缠MM一再教我们不追高买股票可在这样的牛市普涨中,眨眼就涨上去了!不追就踏空呀能不能教我们一点点牛市追股的技巧?==第三买点，如果你技术好，胆子大，就把级别定低点。	三类／波动应用用语，保留为复查线索；不以单条索引推码级归属。
+blog	五词族并集	047:127		**第三买点，如果你技术好，胆子大，就把级别定低点。**	三类／波动应用用语，保留为复查线索；不以单条索引推码级归属。
+blog	五词族并集	047:161		2007-04-23 21:59:55缠姐好请问，1、30分钟图上，如果一段5分钟走势中有三根K线有重叠，是否这三根K线可以看成是5分钟级别走势的一个中枢？2、这三根K线是否必须红绿相间，如果是三根红线有重叠可不可以算成一个	有读者问题，须以署名应答上下文核归属；不以该行独证。
+blog	五词族并集	048:66		就算你对本ID的理论只有幼儿园水平，那今天的走势都一定难不到你。一开盘的低开，然后很快拉回3688到3699的前天小中枢，这就意味着，中枢震荡依然继续，没什么大问题。前三30分钟走出来后，这平衡市的形态以及震荡幅度就基本确立	三类／波动应用用语，保留为复查线索；不以单条索引推码级归属。
+blog	五词族并集	048:86		请问缠主从大点看，从04240931开始的3689到3745的5分钟中枢延伸什么时候结束，就看明后两天是否形成第三类买卖点了，这一切无须预测，大盘自然告诉你。	有读者问题，须以署名应答上下文核归属；不以该行独证。
+blog	五词族并集	049:28		第一种情况：显然，这中枢在延伸中，而后两种情况，分别可以用第三类买卖点分为两小类。	三类／波动应用用语，保留为复查线索；不以单条索引推码级归属。
+blog	五词族并集	049:30		第二种情况(分两类)： 1、当下之前未出现该中枢第三类卖点。2、当下之前已出现该中枢第三类卖点（正出现也包括在这种情况下，按最严格的定义，这最精确的卖点，是瞬间完成的，而具有操作意义的第三类卖点，其实是一个包含该最精确卖点的	有操作／力度语境，本行不能取代可证的首回抽构造。
+blog	五词族并集	049:36		对于第二种第1类，由于中枢震荡依旧，因此，先找出该中枢前面震荡的某段，与之用类似背驰比较力度的方法，用MACD辅助判断，找出向下离开中枢的当下该段走势，看成背驰判断里的背驰段，然后再根据该段走势的次级别走势逐步按区间套的办法	有操作／力度语境，本行不能取代可证的首回抽构造。
+blog	五词族并集	049:38		注意，用来比较的某段，最标准的情况，当然是前面最近向下的，一般情况下，中枢震荡都是逐步收敛的，这样，如果继续是中枢震荡，后面的向下离开力度一定比前一个小。当然，还有些特殊的中枢震荡，会出现扩张的情况，就是比前一个的力度还要大	含编注，不能整行引作作者；取舍见阅读表。
+blog	五词族并集	049:40		对于第二种第2类，由于该中枢已经结束，那就去分析包含该第三类卖点的次级别走势类型的完成，用背驰的方法确定买点。当然，还有更干脆的办法，就是不参与这种走势，因为此后只能是形成一个新的下跌中枢或者演化成一个更大级别的中枢，那完全	有操作／力度语境，本行不能取代可证的首回抽构造。
+blog	五词族并集	049:52		在成本为0后的挣筹码操作中道理是一样的。也就是说，在确定了买卖级别后，那种中枢完成后的向上移动时的差价是不能做的，中枢向上移动时(娇注：3买后非背驰向上，或者中枢后非盘背向上)，就应该满仓，这才是最正确的仓位。而在围绕中枢差	含编注，不能整行引作作者；取舍见阅读表。
+blog	五词族并集	049:54		那么，如果这个中枢完成的向上移动出现背驰，就要把所有筹码抛出，因为这个级别的走势类型完成，要等待下一个买点了。如果不背驰，就意味着有一个新中枢的形成，注意，小级别转大级别其实并不复杂，一样可以看成一个新中枢，只是该中枢有可能	同词语境或图文转述；保留原行供复查，未据该行下规则。
+blog	五词族并集	049:60		该模式的关键只参与确定操作级别的盘整与上涨，对盘整用中枢震荡方法处理，保证成本降低以及筹码不丢失（成本为0后是筹码增加，当然，对于小级别的操作，不会出现成本为0的情况），在中枢第三类买点后持股直到新中枢出现继续中枢震荡操作，	有操作／力度语境，本行不能取代可证的首回抽构造。
+blog	五词族并集	049:62		这里必须注意，中枢震荡中出现的类似盘整背驰的走势段，与中枢完成的向上移动出现的背驰段是不同的，两者分别在第三类买点的前后，在出现第三类买点之前，中枢未被破坏，当然有所谓的中枢震荡，其后，中枢已经完成就无所谓中枢震荡了，所以这	承重或反向样例。作者与限定按 READING.md 成段核。
+blog	五词族并集	049:68		以上的方法是对固定操作品种来说的，也就是不换股。还有一种更激进的操作方法，就是不断换股，也就是不参与中枢震荡，只在第三类买点买入，一旦形成新中枢就退出。例如操作级别是30分钟，那么中枢完成向上时一旦出现一个5分钟向下级别后下	有操作／力度语境，本行不能取代可证的首回抽构造。
+blog	五词族并集	049:82		打开走势图，找当下之前最后一个操作级别中枢。一、当下在该中枢之中。处理：因为在中枢里，由于这时候怎么演化都是对的，不操作是最好的操作，等待其演化成第二、三类，当然，如果你技术好点，可以判断出次级别的第二类买点，这些买点很多情	有操作／力度语境，本行不能取代可证的首回抽构造。
+blog	五词族并集	049:84		三、当下在该中枢之上。1类当下之前未出现该中枢第三类买点处理：这时候不存在合适的买点，等待。2类当下之前己出现该中枢第三类买点处理：如果离该买点的形成与位置不远，可以介入，但最好就是刚形成时介入，若一旦从该买点开始已出现次级	有操作／力度语境，本行不能取代可证的首回抽构造。
+blog	五词族并集	049:134		2007-04-26 21:45:33姐姐好,两个次级别中枢的波动区间有重叠则扩展为本级别的中枢,那么扩展出来的这个本级别中枢是在这两个有重叠的次级别中枢形成后就完成了还是没完成呢?请姐姐回答	发展/重叠语境，未单凭该行扩 R5。
+blog	五词族并集	050:72		在三买中,趋势+盘整,是最有力度的,而盘整的级别又大于趋势,因此,在某级别三买点中,一个次次级别的趋势(最好是跳空缺口)离开,再一个次级别盘整是最有力度的!但如果这样理解跟三买定理相矛盾,而且在工商银行12月14日日线三买中	三类／波动应用用语，保留为复查线索；不以单条索引推码级归属。
+blog	五词族并集	050:78		例如一个30分钟中枢形成后，一个包含两个以上中枢的5分钟上涨趋势离开，然后以一个只有一个5分钟中枢的5分钟盘整走势返回不跌破30分钟中枢高点，那就是博主说的通过趋势+盘整来结束或者破获中枢的情况。至于你说的次次级别离开然后次	发展/重叠语境，未单凭该行扩 R5。
+blog	五词族并集	050:146		有一个疑问是关于小级别背驰转大级别走势的。有了小转大以后，又多了很多不确定性。假设日线级别的背驰已经发生，走势处在背驰后回拉最后一个日中枢的过程中，回拉段会因为小转大而被破坏、导致尚未回到最后一个日中枢就出现再转折吗？	三类／波动应用用语，保留为复查线索；不以单条索引推码级归属。
+blog	五词族并集	050:270		2007-05-08 16:06:28博主好！请问博主：如果按5分钟级别的操作，你说的：“在中枢第三类买点后持股直到新中枢出现继续中枢震荡操作，中途不参与短差。”这里所说的是不是指在形成新的5分钟中枢必须等待这个级别中枢完成	有读者问题，须以署名应答上下文核归属；不以该行独证。
+blog	五词族并集	051:68		在第三类买点出现，中枢完结前，震荡继续。用分时中枢概念看，昨天是一平衡市，今天也是，但今天中枢的位置向上移了，明天就面临三种选择，强的继续上移，中的围绕今天中枢震荡，弱的回试昨天中枢，从而让一般概念意义上的中枢形成级别扩展。	三类／波动应用用语，保留为复查线索；不以单条索引推码级归属。
+blog	五词族并集	051:170		关于大盘，给那些不学无术的多头空头上上课。今天最重要的位置，还是前几天说的4040点，早上受压制，下午受支持，都是这个位置，那么这个位置就是决定中枢震荡是否能级别扩展的关键位置，(娇：3买可能）站稳，就会形成中枢震荡的级别扩	发展/重叠语境，未单凭该行扩 R5。
+blog	五词族并集	051:172		关于中枢延伸与扩展的定义，在课程里都有，自己学去。	发展/重叠语境，未单凭该行扩 R5。
+blog	五词族并集	051:312		2007-05-09 15:53:16请教缠姐:在一个a+A+b+B+c上涨走势中，b和c段用ＭＡＣＤ看符合背驰的条件，是否这就代表趋势背驰？其中的Ａ和Ｂ是否都要有三买才算完成？没有三买b和c段只能算盘整背驰？这问题困扰多时	有读者问题，须以署名应答上下文核归属；不以该行独证。
+blog	五词族并集	051:314		==这在课程里强调过的，B当然要出现第三类买点，否则B就没结束，都是围绕B的震荡，用盘整背驰就足以。	三类／波动应用用语，保留为复查线索；不以单条索引推码级归属。
+blog	五词族并集	051:316		=====c里面要形成第3类买点必须要有两个次级别中枢， 一个c1离开B， 一个c2向B回拉， 都不进中枢， 背驰的话是不是一定要突破c1, c2高点才背驰？ 还有经常有时候不出现两个c1, c2就下来了	同词语境或图文转述；保留原行供复查，未据该行下规则。
+blog	五词族并集	052:44		今天的走势，在技术上十分规范，早上先冲到最近反复强调的4040上，然后回调，并在第四根30分钟K线突破向上，并在下午确认4050上下单边区间的有效性。明天的走势就很简单了，如果这单边区间不被跌破，大盘将继续向上拓展区间，否则	发展/重叠语境，未单凭该行扩 R5。
+blog	五词族并集	052:220		[匿名] 大盘2007-05-18 16:09:08请问博主：在1分钟图表上有时1分钟中枢三段加延伸段超过6段（但是小于9段）的情况，在5分钟图表中也通常可以看出下上下和上下上的三段，但是按照定义这应该仍然是1分钟级别。如果	有读者问题，须以署名应答上下文核归属；不以该行独证。
+blog	五词族并集	052:242		2007-05-21 15:27:00请问博主，某下跌或上涨的走势类型中，某级别围绕两个中枢振荡的次级别走势发生重叠而形成中枢扩张。	有读者问题，须以署名应答上下文核归属；不以该行独证。
+blog	五词族并集	052:244		请问：1.这个扩张的中枢是否发生重叠后就完成了？	有读者问题，须以署名应答上下文核归属；不以该行独证。
+blog	五词族并集	052:246		2.这个扩张后的中枢如果完成或没完成那他的次级别走势的三段该如何算起？如何区分？==	发展/重叠语境，未单凭该行扩 R5。
+blog	五词族并集	052:318		20课原文：“而中枢的形成无非两种，一种是回升形成的，一种是回调形成的。对于第一种有a1=b1,b2=c2；对第二种有a2=b2,b1=c1。但无论是哪种情况，中枢的公式都可以简化为[max（a2,c2），min（a1,c1	同词语境或图文转述；保留原行供复查，未据该行下规则。
+blog	五词族并集	052:320		上面原文似乎隐含着一个前提：即构成本级中枢的每段次级别走势，其起点和终点就是该次级走势的最高点或最低点，否则谈不上a1=b1,b2=c2或a2=b2,b1=c1。那么一段完成的走势类型，其起点和终点一定是该走势类型的最高点或	同词语境或图文转述；保留原行供复查，未据该行下规则。
+blog	五词族并集	052:395		2007-05-22 15:46:56妹妹那个第三类买卖点的定义是一个次级别走势离开， 然后再以另一个次级别走势回调不进本级别的中枢， 也就是至少要有两个中枢才形成第三类买卖点。妹妹又说一个中枢破坏的前提是出现这个中枢的第三	三类／波动应用用语，保留为复查线索；不以单条索引推码级归属。
+blog	五词族并集	052:401		离开中枢必须是次级别，回试也必须是次级别，单在中枢上有一个次级别的中枢并不能绝对保证安全，例如，很多跳空后的岛型反转就是这样。第三类买卖点后可以演化成更大级别的震荡，当然有可能两者的位置特别近，所以要选择大级别的操作，这样才	有操作／力度语境，本行不能取代可证的首回抽构造。
+blog	五词族并集	052:466		2007-05-22 16:21:43离开中枢必须是次级别，回试也必须是次级别，单在中枢上有一个次级别的中枢并不能绝对保证安全，例如，很多跳空后的岛型反转就是这样。第三类买卖点后可以演化成更大级别的震荡，当然有可能两者的位置	有读者问题，须以署名应答上下文核归属；不以该行独证。
+blog	五词族并集	052:470		===========妹妹我又糊涂了， 为什么离开的那个次级别中枢可以在原中枢之内啊？ 离开的意思不是不在原中枢啊？ 不是离开的跟回试的都不到原中枢？---你说的是中枢，中枢不是走势的全部，中枢上面离开了也就是离开。围绕中枢	三类／波动应用用语，保留为复查线索；不以单条索引推码级归属。
+blog	五词族并集	052:472		**你说的是中枢，中枢不是走势的全部，中枢上面离开了也就是离开。围绕中枢的震荡，只要是价格不在中枢里，就是离开，只是这种离开一般都被抽回来了。第三类买卖点之所以重要，就是离开后抽不回来了。**	三类／波动应用用语，保留为复查线索；不以单条索引推码级归属。
+blog	五词族并集	052:516		第二类买点的定义很明确，就是例如一个30分钟的第一类买点，一个5分钟次级别上去后，一个5分钟回试不破低点，那就是第二类买点，你说他该在哪一段？用结合进行次级别分解，只能在第二段。	同词语境或图文转述；保留原行供复查，未据该行下规则。
+blog	五词族并集	053:18		一个最简单的例子，三个5分钟级别的走势重叠构成一个30分钟中枢，站在30分钟级别的角度，5分钟的走势都可以看成就是一个线段，没有内部结构的，这线段的高低点就是对应5分钟走势的高低点；而站在5分钟的次级别1分钟上看，每段5分钟	有操作／力度语境，本行不能取代可证的首回抽构造。
+blog	五词族并集	053:32		而对于第三类买卖点，其意义就是对付中枢结束的，一个级别的中枢结束，无非面对两种情况，转成更大的中枢或上涨下跌直到形成新的该级别中枢。第三类买卖点就是告诉什么时候发生这种事情的，而在第二、三买卖点之间，都是中枢震荡，这时候，是	三类／波动应用用语，保留为复查线索；不以单条索引推码级归属。
+blog	五词族并集	053:54		1、第三类买卖点定理：一个次级别走势类型向上离开缠中说禅走势中枢，然后以一个次级别走势类型回试，其低点不跌破ZG，则构成第三类买点；一个次级别走势类型向下离开缠中说禅走势中枢，然后以一个次级别走势类型回抽，其高点不升破ZD，	三类／波动应用用语，保留为复查线索；不以单条索引推码级归属。
+blog	五词族并集	053:56		2、离开与回抽均必须次级别的“2007-05-22 答疑中离开中枢必须是次级别，回试也必须是次级别，单在中枢上有一个次级别的中枢并不能绝对保证安全，例如，很多跳空后的岛型反转就是这样。第三类买卖点后可以演化成更大级别的震荡，	有操作／力度语境，本行不能取代可证的首回抽构造。
+blog	五词族并集	053:58		3、课程36中大盘例题，说明按照结合律，离开中枢的次级别趋势的第二个中枢未触及中枢的情况下，该第二个中枢可视为第三类买点。	三类／波动应用用语，保留为复查线索；不以单条索引推码级归属。
+blog	五词族并集	053:60		课程37中“如果a+A+b+B+c是上涨，c一定要创出新高；a+A+b+B+c是下跌，c一定要创出新低。否则，就算c包含B的第三类买卖点，也可以对围绕B的次级别震荡用盘整背驰的方式进行判断。对c的内部进行分析，由于c包含B的	三类／波动应用用语，保留为复查线索；不以单条索引推码级归属。
+blog	五词族并集	053:62		4、课程92中“中枢震荡中次级别的类型其实是很重要的，如果是一个趋势类型，Zn又出现相应的配合，那么一定要注意变盘的发生，特别那种最后一个次级别中枢在中枢之外的，一旦下一个次级别走势在该次级别中枢区间完成，震荡就会出现变盘。	三类／波动应用用语，保留为复查线索；不以单条索引推码级归属。
+blog	五词族并集	053:66		6、课程18中““缠中说禅走势中枢”定理三：某级别“缠中说禅走势中枢”的破坏，当且仅当一个次级别走势离开该“缠中说禅走势中枢”后，其后的次级别回抽走势不重新回到该“缠中说禅走势中枢”内。这定理三中的两个次级别走势的组合只有三	三类／波动应用用语，保留为复查线索；不以单条索引推码级归属。
+blog	五词族并集	053:68		7、课程24“用MACD判断背驰，首先要有两段同向的趋势。同向趋势之间一定有一个盘整或反向趋势连接，把这三段分别称为A、B、C段。显然，B的中枢级别比A、C里的中枢级别都要大，否则A、B、C就连成一个大的趋势或大的中枢了。A	有操作／力度语境，本行不能取代可证的首回抽构造。
+blog	五词族并集	053:70		如此，究竟次级别趋势离开时，第二个次级别中枢不触及中枢的情况到底是否第三类买卖点？另外从实际走势来看，离开段次次级别+次级别回抽这样的组合是允许的（如6124~4778这个5分趋势中，最后中枢离开段中没有1分中枢，但回抽段中	三类／波动应用用语，保留为复查线索；不以单条索引推码级归属。
+blog	五词族并集	053:72		三、关于次级别是否可以盘整+盘整缠2008-1-8日解盘：1、如果在今天跳空附近站住，这样，5200点那5分钟上来的1分钟上涨就形成，该1分钟上涨结束后，就是对应那5分钟的第三类买点，然后，就有绝大的可能形成4800上来的5	三类／波动应用用语，保留为复查线索；不以单条索引推码级归属。
+blog	五词族并集	053:75		(娇加注：一 同级别分解下3买可以盘加盘；二 3买的次级别离开和次级别回抽的次级别与中枢构成有关，扩展中枢与走势类型中枢的次级别有不同；三 3买非同级别分解下趋势加盘整模式中盘整的级别大于趋势的级别含义为盘整的整个中枢级别为	含编注，不能整行引作作者；取舍见阅读表。
+blog	五词族并集	054:20		这图有个条件，就是d1=g2，d2=g4。其实这条件有还是没有，并不影响分析，但有这些条件，就会增加分析的难度。这里，就从18.5元（设为g0）开始分析。	同词语境或图文转述；保留原行供复查，未据该行下规则。
+blog	五词族并集	054:22		昨天刚好谈到，当你以某级别分析图形时，就先假设了次级别是线段。这图里，除了最后一个，其余每一个dngn、gndn+1都是1分钟以下级别的，所以都可以看成没有内部结构的线段。	构件或定位语境，不以单行建立 R5；相关段见阅读表。
+blog	五词族并集	054:24		我们就从g0开始，当下地进入图形中。显然，当下走到g1时，由于只有两段，所以不形成任何中枢，当然，如果你是一个分笔操作者，那么g1就构成一个第二类卖点了。当走势发展到d2时，一个1分钟级别的中枢就形成，区间是[d1,g1]。	有操作／力度语境，本行不能取代可证的首回抽构造。
+blog	五词族并集	054:30		其实，由于d1=g2，所以当行情发展到d3，就可以当下地用结合律对走势进行多样性分析。这时候，有如下等式：	同词语境或图文转述；保留原行供复查，未据该行下规则。
+blog	五词族并集	054:54		三个小括弧里的1分钟中枢重叠构成了大括弧里的5分钟高一级别中枢。中枢的区间是[d2，g5]，注意，这时候，就要把1分钟的走势当成线段，小括弧里的都是线段，高低点就是这线段的端点。这样一来，后面的走势就十分简单了，例如，g7就	构件或定位语境，不以单行建立 R5；相关段见阅读表。
+blog	五词族并集	054:56		2、按照第二种分解，相应的5分钟中枢要到g6点才完成，这样g0g6= g0d1+d1g1+g1d2+{（d2g2+g2d3+d3g3）+（g3d4+d4g4+g4d5）+（d5g5+g5d6+d6g6）}	同词语境或图文转述；保留原行供复查，未据该行下规则。
+blog	五词族并集	054:172		请问博主：这是一定必然保证的吗？为什么不能出现从第一买点开始一段次级别上，然后次级别回试，第三段上之后再不跌破第一段的高点的情况呢？或反过来的卖点。是不是这必须考虑时间的无限性呢？那“后面至少还有一段次级别”，这次级别是不是	有读者问题，须以署名应答上下文核归属；不以该行独证。
+blog	五词族并集	054:174		3 按照第二种分解，相应的5分钟中枢要到g6点才完成，这样g0g6= g0d1+d1g1+g1d2+{（d2g2+g2d3+d3g3）+（g3d4+d4g4+g4d5）+（d5g5+g5d6+d6g6）}	同词语境或图文转述；保留原行供复查，未据该行下规则。
+blog	五词族并集	054:178		是因为G6D7不是五分的次级别吧？第三买卖点要求的是次级别的离开，次级别回试不破中枢。==次级别离开，次级别返回不重回中枢。	三类／波动应用用语，保留为复查线索；不以单条索引推码级归属。
+blog	五词族并集	055:22		因此，对于一个大级别的买的过程，或者说一个大的建仓过程，买必然是反复的，买中有卖，不断灵活地根据当下的走势去调整建仓的成本与数量，底部区域可以进行最复杂的中枢延伸与扩展，唯一的目的只有一个，取得足够的、成本不断降低的筹码。这	发展/重叠语境，未单凭该行扩 R5。
+blog	五词族并集	057:32		线段有了以后，一切都好分析了。当然，在当下时，例如在今早9点30分钟，是没有后面的线段的，但线段的标准，是一样的。你可以很精细地分析56段，是一个上下上的内部结构，其中下一段是跳空缺口，但无论如何，这就是一个线段。不过，由于	构件或定位语境，不以单行建立 R5；相关段见阅读表。
+blog	五词族并集	057:40		当行情走到6点时，34、45、56这三段，就可以看成是一个1分钟中枢了，当然，这种分法和原来[4087，4122]中枢的分解不同，但站在多义性的角度，这是绝对符合结合律的，当然是一个分解的方法。这分法，就使得23、67成为这	同词语境或图文转述；保留原行供复查，未据该行下规则。
+blog	五词族并集	057:90		“由于前面12、23、34 构成的中枢只有1 分钟级别的，那么其构成第三类卖点的次级别就是1 分钟以下级别的线段，这时候，就要考察一个有上下上结构的1 分钟的次级别结构了，而56 段显然符合这个结构，有明显的上下上，而45	构件或定位语境，不以单行建立 R5；相关段见阅读表。
+blog	五词族并集	057:94		b、1类买卖点是根据围绕中枢的背驰，2类买卖点是“次级别上，次级别下，不创新低或盘整背驰的定义”，3类买卖点是“确定次级别离开与反抽中枢”。	同词语境或图文转述；保留原行供复查，未据该行下规则。
+blog	五词族并集	059:42		对于19-45这个未完成的5分钟走势类型，可以进行仔细的研究。由于29比24低，则22-31也构成一个5分钟中枢，而该中枢，就对应着另一种分解。但无论如何分解，19-45至少是一个未完成5分钟走势类型的结论不变。当然，站在这	三类／波动应用用语，保留为复查线索；不以单条索引推码级归属。
+blog	五词族并集	059:48		由上面的分析，对短线的走势就有一个明确的结论，只要关于42-45的1分钟中枢的震荡不出现第三类卖点，或者即使出现，但其后扩张的走势不触及22-31这5分钟中枢震荡区间，那么大盘的震荡就是强势的，即使最终形成30分钟以上级别中	有操作／力度语境，本行不能取代可证的首回抽构造。
+blog	五词族并集	059:56		今天的走势没什么可讲的，昨天都已经描述得很清楚了。技术、心理、政策等压力，都需要在这里震荡消化。由于今天没完全补上缺口，因此该位置依然是短线的关键，当然，上面说的42-45的1分钟中枢，已经延伸9段，成为一个5分钟中枢了，后	发展/重叠语境，未单凭该行扩 R5。
+blog	五词族并集	060:24		在心理层面上，A1这第一个反弹的起点，有着很强的心理暗示意义，而再次的跌破，使得这A1的价格成了一个很重要的心理位，而交易本质上都是预期的，这价位就构成了一种实在的预期分类：	同词语境或图文转述；保留原行供复查，未据该行下规则。
+blog	五词族并集	060:54		这里必须强调突发消息对市场走势以及操作的影响是不必过于在意的，本质上，任何突发的消息，不过增加了一个市场预期的当下分力，因此，最终还是要看合力本身，或者说是市场走势本身。一般情况下，由于背驰的精确定位需要用区间套的方法，所以	有操作／力度语境，本行不能取代可证的首回抽构造。
+blog	五词族并集	060:58		注意，突发消息破坏的级别越大，越不一定等相应级别的第二类卖点。例如，一个向下缺口把一个日线级别的上涨给破坏了(娇:到中枢），那么，消息出来当天盘中的1分钟，甚至线段的第二类卖点，都是一个好的走人机会，如果要等日线级别的第二类	有操作／力度语境，本行不能取代可证的首回抽构造。
+blog	五词族并集	060:66		今天的走势昨天已经说得很清楚，4224点下不出现第三类卖点，就是强势震荡。今天的走势，显然符合这个要求。4224点，就是上图61这位置，从60开始的1分钟中枢[4224，4254]，今后两天就看这中枢的第三类买卖点。换言之，	三类／波动应用用语，保留为复查线索；不以单条索引推码级归属。
+blog	五词族并集	060:74		一、创新高后回试的，这可以用第三类买点来把握；	三类／波动应用用语，保留为复查线索；不以单条索引推码级归属。
+blog	五词族并集	060:76		二、在前期高位下盘整蓄势的，这可以用小级别的第三类买点把握其突破，或在震荡低点介入；	三类／波动应用用语，保留为复查线索；不以单条索引推码级归属。
+blog	五词族并集	061:44		如果说72的判断有点难度，需要知道区间套的精确定位，那么74的第二类卖点，就一点难度都没有了。唯一有点需要分辨的就是，这第二类卖点，同时又是一个1分钟中枢的第三类卖点，究竟哪个中枢？显然不是70-73这个，因为这里需要满足结	承重或反向样例。作者与限定按 READING.md 成段核。
+blog	五词族并集	061:48		对于60-69这个5分钟中枢，69的4244点是一个关键位置，如果在其下出现第三类卖点，那么走势至少将扩展成一个30分钟中枢，调整的幅度与压力就大了。而对于72开始的走势，73很重要，要重新走强，必须冲破73这一点，该点位置	三类／波动应用用语，保留为复查线索；不以单条索引推码级归属。
+blog	五词族并集	061:86		站在中枢的角度，75-84这个5分钟中枢下边在4188点，如果后面的走势不能重新站上去，就要提防形成5分钟第三卖点。而前面已经说过，现在的情况46-87已经构成一个30分钟的中枢，短线的问题只是这中枢的第三段是否完成。其后就	三类／波动应用用语，保留为复查线索；不以单条索引推码级归属。
+blog	五词族并集	064:28		至于110-111。红箭头那两个为什么不是最终精确定位的背驰点？这都是些以前就应该解决的简单问题。像第一个红箭头位置，第一次略微跌破109那位置，这时候把已经出现的面积和前面108-109的对应面积之和比，已经十分接近，也就	三类／波动应用用语，保留为复查线索；不以单条索引推码级归属。
+blog	五词族并集	064:46		今日解盘：3919颈线折磨你(2007-07-03 15:30:02)一回来，N多的腐败活动，今晚又要看演出，所以只能粗略说说。今天的大盘，就是在这N天反复强调的3919颈线下进行的蓄势，现在，图形上头肩底的雏形已经基本按剧	有读者问题，须以署名应答上下文核归属；不以该行独证。
+blog	五词族并集	064:412		2007-07-11 16:10:04大,如果一段上涨,中间没有三笔,但却是一段走势中的高低点,那么是不是一条线段呢，如今天600505的11点28分到11点38分,中间显然不构成三笔,那么这一段是不是一条线段呢,盼复=必须	构件或定位语境，不以单行建立 R5；相关段见阅读表。
+blog	五词族并集	064:414		**必须至少三笔，如果没有，那一笔肯定是归于前面一段，后者后面一段没完成。至于，在盘整中，三笔之间的高低点是可以有奔走型或扩张型等形态，这在以后再说。**	构件或定位语境，不以单行建立 R5；相关段见阅读表。
+blog	五词族并集	065:44		对于从向上一笔开始的，其中的分型构成这样的序列：d1g1d2g2d3g3…dngn（其中di代表第i个底，gi代表第i个顶）。如果找到i和j，j>=i+2,使得dj<=gi,那么称向上线段被笔破坏。	构件或定位语境，不以单行建立 R5；相关段见阅读表。
+blog	五词族并集	066:66		缠JJ，一笔是否也有类似线段那样得三角形态或奔走形态？或者说，一笔之中的非顶、底K线是否允许超出顶底的范围呢？顶或底是否一定为一笔的最高点或最低点呢？--	构件或定位语境，不以单行建立 R5；相关段见阅读表。
+blog	五词族并集	067:18		定义：序列X1X2…Xn成为以向上笔开始线段的特征序列；序列S1S2…Sn成为以向下笔开始线段的特征序列。特征序列两相邻元素间没有重合区间，称为该序列的一个缺口。	构件或定位语境，不以单行建立 R5；相关段见阅读表。
+blog	五词族并集	067:28		特征序列的顶分型中，第一和第二元素间不存在特征序列的缺口，那么该线段在该顶分型的高点处结束，该高点是该线段的终点；特征序列的底分型中，第一和第二元素间不存在特征序列的缺口，那么该线段在该底分型的低点处结束，该低点是该线段的终	含编注，不能整行引作作者；取舍见阅读表。
+blog	五词族并集	067:38		特征序列的顶分型中，第一和第二元素间存在特征序列的缺口，如果从该分型最高点开始的向下一笔开始的序列的特征序列出现底分型，那么该线段在该顶分型的高点处结束，该高点是该线段的终点；特征序列的底分型中，第一和第二元素间存在特征序列	构件或定位语境，不以单行建立 R5；相关段见阅读表。
+blog	五词族并集	067:46		强调，在第二种情况下，后一特征序列不一定封闭前一特征序列相应的缺口，而且，第二个序列中的分型，不分第一二种情况，只要有分型就可以。	构件或定位语境，不以单行建立 R5；相关段见阅读表。
+blog	五词族并集	067:126		分段分析：这个图g2处的顶分型显然是第一种情况，但是由于特征元素g2d3和g3d4完全是包含关系，根本没有形成第三个特征元素，显然顶分型不成立，因此该图只有一个线段，即d1-g4是一个线段。关于这种情况，71课中也有详细论述	构件或定位语境，不以单行建立 R5；相关段见阅读表。
+blog	五词族并集	067:140		分段分析：此图中g2的顶分型显然是第一种情况，且g2d3直接破坏了线段d1g2，但后面d5并没有下破d3，因此这的情况非常特殊。现在，如果将g2d3和g3d4进行合并，就可以得到新的特征元素g2d4，因此就有g1d2、g2d	构件或定位语境，不以单行建立 R5；相关段见阅读表。
+blog	五词族并集	067:170		这里是第一种情况，也就是特征序列缺口被第一笔就封闭的情况，没必须探讨第二段特征序列分型的问题，那是第二种情况考虑的问题。	构件或定位语境，不以单行建立 R5；相关段见阅读表。
+blog	五词族并集	067:180		特征序列的顶分型中，第一和第二元素间不存在特征序列的缺口，那么该线段在该顶分型的高点处结束，该高点是该线段的终点；特征序列的底分型中，第一和第二元素间不存在特征序列的缺口，那么该线段在该底分型的低点处结束，该低点是该线段的终	构件或定位语境，不以单行建立 R5；相关段见阅读表。
+blog	五词族并集	067:184		特征序列的顶分型中，第一和第二元素间存在特征序列的缺口，如果从该分型最高点开始的向下一笔开始的序列的特征序列出现底分型，那么该线段在该顶分型的高点处结束，该高点是该线段的终点；特征序列的底分型中，第一和第二元素间存在特征序列	构件或定位语境，不以单行建立 R5；相关段见阅读表。
+blog	五词族并集	067:194		==还是没搞清楚，这里是第一种情况，不存在特征序列的缺口，这种情况，任何三笔其实都构成对前面线段的破坏。	构件或定位语境，不以单行建立 R5；相关段见阅读表。
+blog	五词族并集	067:196		麻烦的是第二种情况，在那种情况下，并不是任何三笔都能构成破坏，就算最终特征序列元素间的缺口被封闭了。注意，在第二种情况下，即使封闭，肯定不是被第一个给封闭的，因为这样就变成第一种情况了。	构件或定位语境，不以单行建立 R5；相关段见阅读表。
+blog	五词族并集	067:202		2007-08-16 16:54:21这里是第一种情况，也就是特征序列缺口被第一笔就封闭的情况，没必须探讨第二段特征序列分型的问题，那是第二种情况考虑的问题。========	构件或定位语境，不以单行建立 R5；相关段见阅读表。
+blog	五词族并集	067:330		2007-08-02 16:17:40新学 不好意思问题1.怎样判断一个走势类型为完成的2.如可确定中枢震荡形成或完成	同词语境或图文转述；保留原行供复查，未据该行下规则。
+blog	五词族并集	067:334		这在课程里都有，要把这问题说清楚，要把所有课程说一遍，所以还是请把课程通读一遍。例如，某中枢震荡的结束就是形成该中枢的第三类买卖点，这在课程里说过N次了，所以还是请先把课程研究一下。	三类／波动应用用语，保留为复查线索；不以单条索引推码级归属。
+blog	五词族并集	067:404		"2007-08-02 16:42:11姐姐，昨晚的新课程看得我很晕，我的理解水平太差了。1.在标准特征序列里，构成分型的三个相邻元素。是指构成分型的三笔吗？2.""特征序列的顶分型中，第一和第二元素间不存在特征序列的缺口，那么"	构件或定位语境，不以单行建立 R5；相关段见阅读表。
+blog	五词族并集	068:124		显然，8-11已经极为标准地形成1分钟中枢，11-13可以看成该中枢的一个延伸。而13-14，这个对中枢的离开后形成14-15的回抽，构成1分钟中枢的类第三类买点（严格来说，一个线段是不能构成买点的，只能是一个类买点，因为在	构件或定位语境，不以单行建立 R5；相关段见阅读表。
+blog	五词族并集	068:154		目前在4600点上下的这个5分钟中枢震荡，对应的是4300点那个，也就是说，3900点上来，已经出现第二个5分钟中枢，因此，该5分钟的上涨类型是可以确立了。但正如昨天所说，一般第二个以后中枢的第三类买点，即使出现，最后演化成	有操作／力度语境，本行不能取代可证的首回抽构造。
+blog	五词族并集	069:144		线段走完的划分，多少有些滞后性质，因为至少需要类顶分型中一个下的一笔后才能最终确定，虽然可以根据macd辅助提前判断，但是有时即使是放量强势拉升后的线段回跌力度也很大，可以6％上下，有时又只有1％多，形成类3买，那麽从操作程	有读者问题，须以署名应答上下文核归属；不以该行独证。
+blog	五词族并集	069:164		也可以是，只是看成14-17，后面的就是中枢延伸。	发展/重叠语境，未单凭该行扩 R5。
+blog	五词族并集	069:208		从4200上来的走势，从下图就可以看到，一种走势类型划分已经逐步明朗。1-14是一个1分钟的上涨走势，从14-27，是一个5分钟的中枢，27-32，是对该5分钟中枢的离开，该离开与回抽依然没有完成，就看明后两天的发展。如果能	承重或反向样例。作者与限定按 READING.md 成段核。
+blog	五词族并集	069:226		当然，没有阳光下也同样没有新鲜事。今天的走势，唯一的特点，就是没有新鲜事。从上周起，本ID不断强调热点开始蔓延，今天，这热点已经开始燎原。50-300-二、三线，本ID已经给股票的热点蔓延画出了线路图，现在，不过是按着线路图	三类／波动应用用语，保留为复查线索；不以单条索引推码级归属。
+blog	五词族并集	069:302		[匿名] 新浪网友2007-08-14 15:56:06为什么第三买点不是33？==如果是33，前面离开的一分钟走势就是未完成的。而现在，离开是27-32，回抽是32-35，都是标准的1分钟走势类型。	承重或反向样例。作者与限定按 READING.md 成段核。
+blog	五词族并集	069:304		**如果是33，前面离开的一分钟走势就是未完成的。而现在，离开是27-32，回抽是32-35，都是标准的1分钟走势类型。**	同词语境或图文转述；保留原行供复查，未据该行下规则。
+blog	五词族并集	069:383		二.下列情况是不是包含关系?假设n和n-1 k线的高低点为gn.,dn, gn-1,dn-1 .1.gn=gn-1且dn>dn-1;2. dn=dn-1.且gn<gn-1;3. dn=dn-1.且gn=gn-1;	同词语境或图文转述；保留原行供复查，未据该行下规则。
+blog	五词族并集	069:423		--临走回答一下，这问题太典型，就是概念没搞清楚。5分钟中枢，只要3个1分钟走势类型有重合就可以，不是一定要里面的所有段都重合。所有都重合，只是其中一个特殊的情况，这叫又线段延伸九段后形成5分钟中枢，在这种情况下，同样可以看	构件或定位语境，不以单行建立 R5；相关段见阅读表。
+blog	五词族并集	070:24		例如，到今天，走势一种最明显的划分已经自动走出来，就是8-17构成5分钟中枢，该中枢是4300点那个5分钟中枢上来后的一个新的5分钟中枢，这个中枢，在刚形成时，我们已经指出，而且任何学过本ID理论的，都可以当下指出。一般来说	发展/重叠语境，未单凭该行扩 R5。
+blog	五词族并集	070:32		3、中枢延伸，或出现第三类买卖点后扩展成大级别的30分钟中枢。	三类／波动应用用语，保留为复查线索；不以单条索引推码级归属。
+blog	五词族并集	070:36		这个5分钟中枢，最终至少要完成的，至于是否继续扩展出大的30分钟中枢，还是出现新5分钟中枢的第三类买点继续上涨，再形成新的5分钟中枢，这无须预测，与8-17那5分钟中枢一样对待，如此而已。	三类／波动应用用语，保留为复查线索；不以单条索引推码级归属。
+blog	五词族并集	070:38		那么，如果是按30分钟操作的，这些5分钟的中枢移动、震荡之类的活动根本无须理睬，只要看明白就是，根本无须操作；如果是按5分钟级别操作，那么就是不参与大于5分钟级别的震荡，那么就等5分钟上涨出现背驰后走人；如果是按1分钟级别操	有操作／力度语境，本行不能取代可证的首回抽构造。
+blog	五词族并集	070:46		在今天的背驰判断中，关键是知道哪一段相比，显然，27-32与35-38这两段去比。而实际的对比中，看1分钟图，去加两段对应的那些MACD，太麻烦，所以可以看5分钟图。这里，把5分钟图给放上来了，图上，相应对比的两段已经标记出	有操作／力度语境，本行不能取代可证的首回抽构造。
+blog	五词族并集	070:48		其实，只要基本概念明确，这些分析，在当下都不是什么难事。这里必须提醒一下，1分钟图上38标记的位置用红箭头给出，显然，那不是最高的位置。为什么？没有人规定分段的结束位置一定是最高、最低的，关键要有至少三笔，因为从37开始到最	构件或定位语境，不以单行建立 R5；相关段见阅读表。
+blog	五词族并集	070:124		2007-07-31 16:10:56缠JJ，一笔是否也有类似线段那样得三角形态或奔走形态？或者说，一笔之中的非顶、底K线是否允许超出顶底的范围呢？顶或底是否一定为一笔的最高点或最低点呢？	构件或定位语境，不以单行建立 R5；相关段见阅读表。
+blog	五词族并集	070:148		一笔，只有一顶一底，如果顶接着顶，那其中一个肯定不是真正的顶。这是在笔的范围里说的。在笔里，当然没有什么三角形之类的东西，笔就是一线段，两个端点。	构件或定位语境，不以单行建立 R5；相关段见阅读表。
+blog	五词族并集	070:238		当然，如果一定要坚持9点25那竞价不算，那么自然不是一笔，那就把36标记到4915点那最高点就可以。	构件或定位语境，不以单行建立 R5；相关段见阅读表。
+blog	五词族并集	070:274		这里是第一种情况，也就是特征序列缺口被第一笔就封闭的情况，没必须探讨第二段特征序列分型的问题，那是第二种情况考虑的问题。	构件或定位语境，不以单行建立 R5；相关段见阅读表。
+blog	五词族并集	070:292		特征序列的顶分型中，第一和第二元素间不存在特征序列的缺口，那么该线段在该顶分型的高点处结束，该高点是该线段的终点；特征序列的底分型中，第一和第二元素间不存在特征序列的缺口，那么该线段在该底分型的低点处结束，该低点是该线段的终	构件或定位语境，不以单行建立 R5；相关段见阅读表。
+blog	五词族并集	070:296		特征序列的顶分型中，第一和第二元素间存在特征序列的缺口，如果从该分型最高点开始的向下一笔开始的序列的特征序列出现底分型，那么该线段在该顶分型的高点处结束，该高点是该线段的终点；特征序列的底分型中，第一和第二元素间存在特征序列	构件或定位语境，不以单行建立 R5；相关段见阅读表。
+blog	五词族并集	070:308		==还是没搞清楚，这里是第一种情况，不存在特征序列的缺口，这种情况，任何三笔其实都构成对前面线段的破坏。	构件或定位语境，不以单行建立 R5；相关段见阅读表。
+blog	五词族并集	070:310		麻烦的是第二种情况，在那种情况下，并不是任何三笔都能构成破坏，就算最终特征序列元素间的缺口被封闭了。注意，在第二种情况下，即使封闭，肯定不是被第一个给封闭的，因为这样就变成第一种情况了。	构件或定位语境，不以单行建立 R5；相关段见阅读表。
+blog	五词族并集	071:24		而当前一段被笔破坏时，显然，最早破坏的一笔如果不是转折点开始的第一笔，那么，特征序列的分型结构也能成立，因为在这种情况下，转折点前的最后一个特征序列元素与转折点后第一个特征元素之间肯定有缺口，而且后者与最早破坏那笔肯定不是包	构件或定位语境，不以单行建立 R5；相关段见阅读表。
+blog	五词族并集	071:34		在67课里，把线段的划分分为两种情况，显然，分清楚是哪种情况，对划分线段十分关键。其实，在那里已经把问题说得很清楚，判断的标准只有一个，就是特征序列的分型中，第一和第二元素间存不存在特征序列的缺口。从上面的分析可以知道，这个	承重或反向样例。作者与限定按 READING.md 成段核。
+blog	五词族并集	071:38		其实，线段的划分，都是可以当下完成的，无非是如下的程序：假设某转折点是两线段的分界点，然后对此用线段划分的两种情况去考察是否满足，如果满足其中一种，那么这点就是真正的线段的分界点；如果不满足，那就不是，原来的线段依然延续，就	承重或反向样例。作者与限定按 READING.md 成段核。
+blog	五词族并集	071:122		回到上海指数，从纯技术的角度，下图里的8-49可以看成是一个30分钟中枢，但更可以看成是，对于8-17这个5分钟中枢，17-38的1分钟走势5分钟背驰后，必须有一个回拉至少回到8-17这个5分钟中枢里。显然，49已经跌破14	同词语境或图文转述；保留原行供复查，未据该行下规则。
+blog	五词族并集	072:42		其实，光用形态学，就足以形成一套有效的操作体系。只是在形态学中，由于没有背驰的概念，所以第一买卖点是抓不住了，但第二买卖点是肯定没问题的。单纯用形态学去操作，就是任何对最后一个中枢的回拉后第一个与回拉反向的不创新高或新低的中	有操作／力度语境，本行不能取代可证的首回抽构造。
+blog	五词族并集	072:44		就算按照这么简单的方法，也可以很容易判断现在在日线上的操作思路，例如，去年5月和今年5月后的调整，算是同级别的，那么，其后的卖点就是，万一回拉4335点之下，任何第一次向4335点上的与回拉级别相同的不创新高的反抽都是卖点。	有操作／力度语境，本行不能取代可证的首回抽构造。
+blog	五词族并集	072:48		如果一直没有回拉回到4335点，又在上面形成新的同级别中枢，那么操作的标杆就进一步提到那个中枢上，如此类推。按照这种方法，那么从2005年中到现在，你都应该持股不动，为什么？因为没有卖点。	有操作／力度语境，本行不能取代可证的首回抽构造。
+blog	五词族并集	072:128		目前，技术上的条件没有任何变化，日线上，背驰段依然成立去等待最后的确认或破坏，短线，30分钟的中枢震荡依然，超短线，最后一个5分钟的中枢震荡依然，按照这些技术界限，与自己的操作级别，不难根据当下的走势去选择自己的操作。	有操作／力度语境，本行不能取代可证的首回抽构造。
+blog	五词族并集	072:152		今天的走势，从纯技术的角度，连一个线段都不一定100%确认完成了，为什么？因为都没100%满足线段完成的条件。该线段完成的判断，显然属于第一种情况，本来第一种情况是属于相对简单的。但由于特征序列的分型一直没有最终完成，每一次	构件或定位语境，不以单行建立 R5；相关段见阅读表。
+blog	五词族并集	073:18		在你的操作级别下，中枢上移中，是不存在着任何理论上短差机会的，除非这种上移结束进入新中枢的形成与震荡。而中枢震荡，就是短差的理论天堂。只要在任何的中枢震荡向上的离开段卖点区域走掉，必然有机会在其后的中枢震荡中回补回来，唯一需	有操作／力度语境，本行不能取代可证的首回抽构造。
+blog	五词族并集	073:24		一个月线级别的上涨，在年线级别上，可能就是一个中枢震荡中的一个小段。站在年中枢的角度，如果这上涨是从年中枢之下向中枢的回拉，那么，中枢的位置，显然就构成需要消化的阻力；如果是年中枢之上对中枢的离开，那么中枢就有反拉作用。这都	同词语境或图文转述；保留原行供复查，未据该行下规则。
+blog	五词族并集	073:100		图形上，49点开始的走势简直是教科书。52-55的1分钟中枢，55-58的线段离开，58-59的回抽不跌回形成1分钟的第三类买点。然后，后面唯一的两种可能，更大级别中枢，与继续中枢上移直到出现新的1分钟中枢。显然，走势选择了	构件或定位语境，不以单行建立 R5；相关段见阅读表。
+blog	五词族并集	075:143		[匿名] 新浪网友 删除此人所有评论2007-08-30 16:39:52老大.请问三买后的向上段和离开中枢的向上段比较盘整背驰,有时候回落形成中枢,有时候只是稍稍回落又继续涨不形成中枢,有办法预判吗?谢谢==那就是那段根本	有读者问题，须以署名应答上下文核归属；不以该行独证。
+blog	五词族并集	076:66		程式化震荡后，才是问题的关键。从纯技术的角度，下图中，62-71的5分钟中枢突破后，71-80是一个标准的1分钟上涨，也就是次级别的离开，而80-83是一个标准的1分钟盘整回拉，也就是说83是教科书式的62-71的5分钟第三	三类／波动应用用语，保留为复查线索；不以单条索引推码级归属。
+blog	五词族并集	076:128		石猴 2007-09-05  16:35:10在7475上面，08311055那下来一笔，封闭了缺口，后面也先跌破这一笔的结束点，为什么不是线段呢？=这只是笔破坏，没有线段破坏。	构件或定位语境，不以单行建立 R5；相关段见阅读表。
+blog	五词族并集	076:146		2007-09-05  16:47:16老大,一个线段有时离开中枢力度很大没有背驰,但不一定形成三买卖点.怎样预判?==第三类买卖点，必须是回拉的力度没有离开的力度大才可能形成。如果回拉走势都没有出来，怎么可能预判？离开的力	构件或定位语境，不以单行建立 R5；相关段见阅读表。
+blog	五词族并集	077:76		如果我们坚持线段的最终破坏回补特征序列缺口情况，那么，如果线段C对线段B还是第二种情况，那么线段C的区间肯定就在线段A特征序列缺口与线段B特征序列缺口之间，如此类推，总会出现一个线段X，使得对应前面的线段是回补特征序列缺口，	构件或定位语境，不以单行建立 R5；相关段见阅读表。
+blog	五词族并集	078:42		这个向下的线段，如果破了该向上笔的底，那么，原来的线段B就是没结束，在继续延续。这种情况下，如果那向上笔突破线段B的高点，这时候就会出现，线段的开始点并不是最高点的情况。（注意，和这个情况一样，昨天的贴图里，81那点应该在0	承重或反向样例。作者与限定按 READING.md 成段核。
+blog	五词族并集	078:58		注意，这里必须提醒一句，就是这在以前也曾说过，就是，如果线段中，最高或最低点不是线段的端点，那么，在任何以线段为基础的分析中，例如把线段为基础构成最小级别的中枢等，都可以把该线段标准化为最高低点都在端点。因为，在以线段为基础	承重或反向样例。作者与限定按 READING.md 成段核。
+blog	五词族并集	078:60		经过标准化处理后，所有向上线段都是以最低点开始最高点结束，向下线段都是以最高点开始最低点结束，这样，所以线段的连接，就形成一条延续不断、首尾相连的折线，这样，复杂的图形，就会十分地标准化，也为后面的中枢、走势类型等分析提供了	承重或反向样例。作者与限定按 READING.md 成段核。
+blog	五词族并集	078:259		[匿名] 天眼    2007-09-10  16:34:36老大,一笔中允不允许存在最高点不是笔的端点?==当然。顶上如果还有顶，那第一个顶就不是顶。	构件或定位语境，不以单行建立 R5；相关段见阅读表。
+blog	五词族并集	078:266		[匿名] 新手无知2007-09-10  16:43:04看了一些课程，似懂非懂。请教缠：1。是不是所有的买卖点的发现都有滞后性？而不是当时（当下）能确定的？---我的理解：买卖点出现在线段的端点，而线段端点的确定需要下一个	有读者问题，须以署名应答上下文核归属；不以该行独证。
+blog	五词族并集	078:274		一个是中长线的问题，一个是短线的问题，怎么会搞混在一起？中长线，就是要让这个泡沫行情至少能延伸两年，这就需要行情走得稳健，不引发政策的大规模干预，政策就算不干预，本ID在该干什么的时候自然也要什么，目的只有一个，让行情延伸得	发展/重叠语境，未单凭该行扩 R5。
+blog	五词族并集	080:42		二、中枢震荡的卖点都是出现在向上离开中枢时	同词语境或图文转述；保留原行供复查，未据该行下规则。
+blog	五词族并集	080:44		这也是本ID理论中最简单的结论了，那么，在最近形成的5分钟中枢中，任何向上离开5333点(注：5分ZG 5337）的震荡，最终都将形成卖点，当然，该卖点后回抽如果回不到5333点，可能形成第三类买点，但这是卖点后的事情，没有	含编注，不能整行引作作者；取舍见阅读表。
+blog	五词族并集	080:46		现在，我们可以很客观地面对这样一个问题，就是，一个离开5333点的中枢震荡把指数带到了5395点，该震荡对应的线段出现明显的类背驰然后出现明显的破坏，这时候，我们可以很理智地判断当下的形势：	构件或定位语境，不以单行建立 R5；相关段见阅读表。
+blog	五词族并集	080:58		3、短线中枢震荡已经出现卖点，如果在这个位置卖，就算后面周的顶分型不成立，也有震荡的低点以及第三类买点可以重新介入。	构件或定位语境，不以单行建立 R5；相关段见阅读表。
+blog	五词族并集	080:116		那么，现在后面的走势如何，很简单，84-93这个1分钟的走势类型离开76-85这个5分钟中枢后，就要看一个1分钟的走势类型的反抽能否出现回到79这一点，也就是5265点之上。不行，就构成这5分钟中枢的第三类卖点，后面至少要扩	三类／波动应用用语，保留为复查线索；不以单条索引推码级归属。
+blog	五词族并集	080:224		因此，按照正确的划分，大盘的走势比错误划分中显示出更强的趋势，也就是93开始的回抽，是一个标准的线段类上涨，连1分钟中枢还没构成。当然，明天开盘一跌破96，1分钟中枢就形成，而如果不破，97开始的线段依旧延伸，后面的线段回抽	构件或定位语境，不以单行建立 R5；相关段见阅读表。
+blog	五词族并集	080:316		真能有效战胜市场的，还是要学会用本ID的理论去当下的操作。上周一个绝妙的短差，然后又一个绝妙的回补点，从那5025点的93开始，一个1分钟中枢类型都没完成，但你明白本ID的理论的，就可以看着他按照理论的规范一步步地生长出来，	有操作／力度语境，本行不能取代可证的首回抽构造。
+blog	五词族并集	080:465		线段纠缠很久了，问一个看待走势如何像花开花落的问题背驰买点后，形成两个完全不重叠的1分钟中枢，如果第2个1分钟中枢没有出现三买而是通过9段延伸形成5分钟中枢，这5分钟中枢暂时也没有与第1个1分钟中枢有如何重叠，那么我们当下是	构件或定位语境，不以单行建立 R5；相关段见阅读表。
+blog	五词族并集	081:90		至于超短线来说，昨天问题的答案在图里就有了，分不清楚的，请好好研究一下。目前，就是102-105的一个中枢震荡。注意，目前这个离开原来5分钟中枢的走势并没有完成，所以还谈不上回抽，那今天震荡的低点，刚好在78之上，也就看出，	同词语境或图文转述；保留原行供复查，未据该行下规则。
+blog	五词族并集	081:224		缠MM，我在前一个贴子对此有回复，并对你的定义做了如下补充，你看可以吗？我同意“两种情况的区分标准按第一笔是否构成笔破坏”，这应该也是缠MM的原意。问题是这句话在特征序列中不好体现，所以缠MM才用缺口描述。因此我补充修改为：	构件或定位语境，不以单行建立 R5；相关段见阅读表。
+blog	五词族并集	081:334		今天的划分太简单，就省下来不帖了，再次说一下，那200图的上传空间也太小了。现在那1分钟已经延伸出5分钟中枢来了，现在就看这1分钟的离开后回抽是否形成5分钟的第三类买点，不是，就再次震荡，那又有什么不可以的？	三类／波动应用用语，保留为复查线索；不以单条索引推码级归属。
+blog	五词族并集	081:466		1.怎么能够在当下地准确判断一线段的结束点，而不需等到下一线段反抽很远了才能确定	构件或定位语境，不以单行建立 R5；相关段见阅读表。
+blog	五词族并集	081:598		大盘现在，没什么可说的，106开始的5分钟中枢的1分钟离开已经出现，如果能回抽形成第三类买点，那就继续折腾下去，大不了，就搞出一个30分钟中枢，那就更好玩了。	三类／波动应用用语，保留为复查线索；不以单条索引推码级归属。
+blog	五词族并集	082:24		现在，我们可以深入分析这三根K线的不同情况。首先，一个完全没有包含关系的分型结构，意味着市场双方都是直截了当，没有太多犹豫。包含关系（只要不是直接把阳线以长阴线吃掉）意味着一种犹豫，一种不确定的观望等，一般在小级别上，都会有	构件或定位语境，不以单行建立 R5；相关段见阅读表。
+blog	五词族并集	082:42		可以100%肯定的，要不出现笔并最终有效破坏该顶分型，那一定要出现某级别的第三类买点，否则就算有短时间的新高，也一定是假突破。所以结合小级别的中枢判断，顶分型是否延伸为笔，是可以当下一目了然的。	构件或定位语境，不以单行建立 R5；相关段见阅读表。
+blog	五词族并集	082:86		今天早上的上攻，一没有突破昨天的第三类卖点，(3卖后盘背能否逆转成中继分型还得看有无3买）二反而是形成标准的顶分型第三根K线的上冲，不管你相信不相信本ID的理论，反正后面的走势，如教科书般。现在的走势十分简单，一个1分钟的走	构件或定位语境，不以单行建立 R5；相关段见阅读表。
+blog	五词族并集	083:42		今天的走势，出于对明天大量放出资金的憧憬，走出了应有的回升行情。技术上，昨天特别强调的1分钟结束后的回拉，并没有出现第三类卖点，短线依然继续保持中枢震荡。从中线图上看，大盘目前对于多方最大的危险，就是圆顶，因此，多方如果不希	三类／波动应用用语，保留为复查线索；不以单条索引推码级归属。
+blog	五词族并集	083:50		明天最后一天，就看解冻的资金能忽悠进来多少了，这个越来越向30分钟靠的震荡什么时候结束，看图就知道，第三买卖点。	三类／波动应用用语，保留为复查线索；不以单条索引推码级归属。
+blog	五词族并集	083:66		本ID什么都不相信，市场让本ID看到什么就干什么，这就是本ID理论的唯一中心与基本点。例如下图中，132的第三类卖点后，到137的1分钟完成，走势极端标准完美。有兴趣的可以量一下130-131，与136-137，长度基本相等	三类／波动应用用语，保留为复查线索；不以单条索引推码级归属。
+blog	五词族并集	083:72		节后的走势，十分清楚，就是首先要完成这个1分钟的离开，从目前的情况看，这1分钟的离开走势是首先是线段的类上涨的可能性太大了，除非有特别的大消息，当线段类上涨结束后，必然形成1分钟中枢，该中枢后，1分钟的走势无论是盘整还是上涨	构件或定位语境，不以单行建立 R5；相关段见阅读表。
+blog	五词族并集	084:102		7月初，在3600点下，本ID严正宣布要做多，不允许行情按汉奸的方式运行到2000点去，为什么？因为任何跌破3100点的走势都将导致2年多以来的中枢上移趋势被破坏。	三类／波动应用用语，保留为复查线索；不以单条索引推码级归属。
+blog	五词族并集	084:116		六、现在唯一不配合的，就是回跌的空间还不足够，如果现在已经突破6100点，那更好。因为这次回跌，本ID并不希望破坏2005年上来的中枢上移格局，因此，这次的中期顶部阻击，会采取一种反复折腾、诱敌深入的模式，而不是如3600点	三类／波动应用用语，保留为复查线索；不以单条索引推码级归属。
+blog	五词族并集	086:28		三、在一个大级别的中枢震荡中，这样，一个小级别的第三类卖点，其意义就看这是否延伸出大级别的第三类卖点，如果没有这种危险，本质上不构成大的操作机会，只是一个短线震荡机会。而且，很有可能，一个小级别的第三类卖点后，反而延伸出大级	有操作／力度语境，本行不能取代可证的首回抽构造。
+blog	五词族并集	086:66		在一个大中枢里，是没有大买卖点的，因为出现第三类卖买点，就意味着这中枢被破坏了。这种大中枢中的小买卖点，只会制造中枢震荡。因此，这里买卖点通说，就是这类买卖点，一般不具有小级别的操作意义，这是最容易把多空搞乱的。	承重或反向样例。作者与限定按 READING.md 成段核。
+blog	五词族并集	086:70		但是，其中有一种买卖点，往往具有大级别的操作意义，就是大级别中枢震荡中，次级别的买卖点。例如，一个5分钟的震荡里面的1分钟级别买卖点，就具有5分钟级别的操作意义。因为该买卖点后，无非两种情况：1、就是继续5分钟中枢震荡；2、	承重或反向样例。作者与限定按 READING.md 成段核。
+blog	五词族并集	086:80		当然，有一种稳妥的办法，给那些对大级别背驰判断没信心的，就是都在第二类买点介入，当然，实际操作中，你可以完全不管第二类买点形成中的背驰问题，反正第一类买点次级别上去后，次级别回跌，只要不破第一类买点的位置，就介入。这样，只要	有操作／力度语境，本行不能取代可证的首回抽构造。
+blog	五词族并集	087:106		下面的走势很简单，这个新的一分钟中枢是否继续向下延伸出新的1分钟下跌走势，也就是这1分钟中枢是否有第三类卖点。而从大的方面看，这次反弹的调整，级别将至少向5分钟级别扩展。	三类／波动应用用语，保留为复查线索；不以单条索引推码级归属。
+blog	五词族并集	087:108		当然，操作上第一个中枢的第三类卖点在该级别中是最后的走人机会，后面的都没意义了，也就是说，对于这次调整的逃避，191是第一类卖点，因为前面线段类上涨走势出现类背驰，而193是第二类卖点，因为站在线段的角度，就是第二类卖点，而	有操作／力度语境，本行不能取代可证的首回抽构造。
+blog	五词族并集	087:110		195以后，针对这个调整来说，任何的卖出，都是太晚了，这意味着随时面临下跌走势的结束。很多人喜欢在第二个中枢才考虑第三类卖点，那是晚之又晚，所以经常卖了，就被反转夹空，那是一点都不奇怪的。当然，很有可能卖了以后继续延续下跌，	有操作／力度语境，本行不能取代可证的首回抽构造。
+blog	五词族并集	088:26		下图中，191的背弛宣告前一走势类型的死亡。按道理，新的走势类型，是从191开始分析的，但这时候，新的走势类型连第一段线段都没走出来，甚至走到193的位置，也依然轮廓不明，因此，这时候，就是典型的中阴身阶段，必须借助前面18	有操作／力度语境，本行不能取代可证的首回抽构造。
+blog	五词族并集	088:32		当然，后面的195的第三类卖点，也是站在中阴阶段的角度说的。但这一点是一个中阴阶段与新的走势类型确立阶段的分界点，195出来以后，新的走势类型最开始的形态就确立了，也就是至少是一个线段的类下跌走势。这时候，分析的重心，就可以	构件或定位语境，不以单行建立 R5；相关段见阅读表。
+blog	五词族并集	088:98		今天的中石油，如昨天所说，38元上线段底背驰后形成较强反弹，然后形成一个1分钟的中枢在40元上下，这是该股形成的第一个1分钟中枢，因此给后面的操作具有最重要的指导意义。后面的走势无非两种：一、以这1分钟中枢震荡扩展出大的中枢	有操作／力度语境，本行不能取代可证的首回抽构造。
+blog	五词族并集	088:190		特别强调，并不是任何反弹都是任何人有资格玩的。站在本ID理论的角度，这个反弹完全可以就已经结束了，为什么？因为最基本的回抽最后一个中枢的幅度已经达到，所以，现在关键是回来那一下能否构成第二类买点，如果不行，那狂乱的夜的吻别就	同词语境或图文转述；保留原行供复查，未据该行下规则。
+blog	五词族并集	088:330		市场继续在这里折腾，这个5分钟的中枢震荡，将继续向更大级别延伸，因此，最终的突破方向，其级别意义就更大了，暂时，估计还需要一定的时间。	发展/重叠语境，未单凭该行扩 R5。
+blog	五词族并集	089:44		而这5分钟中枢成立后，就必然100%面临一个破坏的问题，也就是一个延伸或着第三买卖点的问题，而这也是超级幼儿园的问题，不懂就回头学。	三类／波动应用用语，保留为复查线索；不以单条索引推码级归属。
+blog	五词族并集	089:46		当然，如果这中枢不断延伸，搞成30分钟中枢了，那就按30分钟中枢的第三买卖点来处理，如此类推，总要面临某一个级别的第三买卖点去结束这个中枢震荡。	三类／波动应用用语，保留为复查线索；不以单条索引推码级归属。
+blog	五词族并集	089:296		大盘的走势，不太错乱。本ID在前面说了，跌破5000点，只是一个空头陷阱，而120天线有基本支持，即使继续下跌，也不过是继续构造空头陷阱。今天大盘拉回5000点之上，使得一个更大级别的中枢在扩展开来。（注：拉回5000点，而	含编注，不能整行引作作者；取舍见阅读表。
+blog	五词族并集	090:40		一般来说，某一级别的布林通道收口，就意味着比这低级别的某个中阴过程要级别扩展或结束了，一般都对应着有相应的第三类买卖点。	三类／波动应用用语，保留为复查线索；不以单条索引推码级归属。
+blog	五词族并集	091:282		后面的走势，很简单，只要向下笔的回跌不回到5240点下，那么就是第三类买点成立，后面只有两种情况：一、顶背驰回跌构成5分钟中枢；二、没顶背驰，继续中枢上移构成第三个1分钟中枢。	构件或定位语境，不以单行建立 R5；相关段见阅读表。
+blog	五词族并集	091:284		注意，纯理论上说，一般第二个中枢以后的第三类买点都没有介入价值，你只要持有等到整个走势类型完成就可以，因为根据正确的操作，你必须在第一个中枢的第三类买点就完成最后的介入，以后的都是没多大意义的。	有操作／力度语境，本行不能取代可证的首回抽构造。
+blog	五词族并集	091:290		站在中线角度，其实哪种走势都没大问题。为什么？即使是在这里震荡出5分钟甚至30分钟中枢，最终只要出现第三类买点，就可以延伸出5分钟或30分钟的上涨类型，这在中线上更牛。至于，继续1分钟中枢上移，只不过把最终必然要形成的5分钟	三类／波动应用用语，保留为复查线索；不以单条索引推码级归属。
+blog	五词族并集	092:16		中枢震荡，最终一定以某级别的第三类买卖点结束。但问题是，如何预先给出有参考价值的提示，也就是如何去监控这震荡是在逐步走强，还是逐步走弱，这是一个有操作价值的问题。当然，顺便地，可以为每次的震荡高低点的把握给出一个大致的区间。	承重或反向样例。作者与限定按 READING.md 成段核。
+blog	五词族并集	092:36		另外，中枢震荡中次级别的类型其实是很重要的，如果是一个趋势类型，Zn又出现相应的配合，那么一定要注意变盘的发生，特别那种最后一个次级别中枢在中枢之外的，一旦下一个次级别走势在该次级别中枢区间完成，震荡就会出现变盘。(娇注：类	含编注，不能整行引作作者；取舍见阅读表。
+blog	五词族并集	092:58		估计这次4800点上来的1分钟走势，虽然很标准，但也不一定都能分解对，下面有图，其中286、296是第一、二个中枢的第三类买卖点。297顶背驰后，最少跌回287下，这点已经完成，所以这5分钟中枢的扩展是逃不掉了。	三类／波动应用用语，保留为复查线索；不以单条索引推码级归属。
+blog	五词族并集	092:198		1、如果在今天跳空附近站住，这样，5200点那5分钟上来的1分钟上涨就形成，该1分钟上涨结束后，就是对应那5分钟的第三类买点，然后，就有绝大的可能形成4800上来的5分钟上涨，最坏，也就是一大的30分钟中枢。	三类／波动应用用语，保留为复查线索；不以单条索引推码级归属。
+blog	五词族并集	092:310		所以，指数在这个时间段犹疑一下，并不是太严重的事情，目前技术上，继续是原来说的第二种情况，在5462点附近震荡出一个5分钟中枢，大不了向一个30分钟的延伸去，所以指数依然继续抽两下，哆嗦十下的节奏。	发展/重叠语境，未单凭该行扩 R5。
+blog	五词族并集	094:24		1、一个最小的机会，就是大盘线段下移后形成的线段类背驰，这里对应这两个目标，最好的是回拉上面的1分钟中枢从而形成5分钟中枢，剩下的就是形成第二个1分钟的下跌中枢。	构件或定位语境，不以单行建立 R5；相关段见阅读表。
+blog	五词族并集	096:140		下面，请好好分析一下580989的图，里面的标准性一目了然，60分钟上从2.3下来的底背驰（注：60分图为3个中枢的下跌背驰），然后今天回拉到第一个红箭头指出的中枢中，完全符合本ID的理论最低回拉幅度的走势。后面很简单，首先	含编注，不能整行引作作者；取舍见阅读表。
+blog	五词族并集	096:196		首先还是说580989，你看那中枢的力量是多么巨大，早上的远离，后面的回拉，一切如教科书一般，围绕这个原来的中枢进行震荡，这在昨天已经说了，后面震荡逐步减少，由于该中枢大致在0.6一线，依次向下的震荡空间是存在的。想想一个中	同词语境或图文转述；保留原行供复查，未据该行下规则。
+blog	五词族并集	097:134		有了这个中枢震荡的大结构，对后面的市场走势就有了一个很宏观的把握。显然，目前这个中枢的中间位置，会在很长时间内反复见到。像2500点、6100点，都如同580989在0.976的那样的瞬间震荡位置，而目前位置，就如同最近58	三类／波动应用用语，保留为复查线索；不以单条索引推码级归属。
+blog	五词族并集	098:16		一个背驰后，无论是盘整背驰还是真正的背驰，理论只能保证其回拉原来的中枢，这是正确的思维方式，那么，回拉之后如何，这涉及预测。正确的思维是，把回拉后出现的情况进行完全的分类，根据每种分类对应的后果，决定你自己的对策。	同词语境或图文转述；保留原行供复查，未据该行下规则。
+blog	五词族并集	098:100		技术上，本ID已经说得超明确，就是原来最后那中枢的扩展，这震荡什么时候结束的唯一标准，就是出现第三类买卖点，其他一切都是废话。	三类／波动应用用语，保留为复查线索；不以单条索引推码级归属。
+blog	五词族并集	098:130		一、下面最大的机会，就是6124点下来30分钟走势类型结束后的向上30分钟走势类型，这机会在酝酿中，也就是在中阴阶段。但那30分钟的向上类型，最坏的情况，就是一个盘整，并不一定走出上涨类型，这是必须明确的。如果是盘整，就在这	发展/重叠语境，未单凭该行扩 R5。
+blog	五词族并集	099:30		由此可见，因为划分中的这种情况，我们就很明确地知道，走势的最大特点就是，连接中枢的走势级别一定小于中枢，换言之，一个走势级别完成后必然面临至少大一级别的中枢震荡。例如，一个5分钟的上涨结束后，必然至少要有一个30分钟的中枢震	同词语境或图文转述；保留原行供复查，未据该行下规则。
+blog	五词族并集	099:136		今天继续延续4695点浦发闹剧所制造的线段类下跌，在下午2点后最终出现一个类底背驰。该类下跌出现三个类中枢，类背驰后的回拉如理论所要求的最低幅度回到最后一个类中枢，也就是至少制造了一个1分钟中枢。最坏的情况，这中枢是一个新的	构件或定位语境，不以单行建立 R5；相关段见阅读表。
+blog	五词族并集	099:196		今天的短线走势是超级教科书的，一开始就跌破上周的1分钟中枢，那中枢，只能回到三个类中枢类下跌的最后一个，超级弱，因此跌破一点都不奇怪。然后早上那最大的反弹构成第三类卖点，然后继续下跌，下午那波反弹完成第二个1分钟中枢的构造，	三类／波动应用用语，保留为复查线索；不以单条索引推码级归属。
+blog	五词族并集	100:24		例如，现在的上海指数，从6124点下来，是一个30分钟的下跌，现在处在最近一个中枢的中枢震荡之中，只要不出现第三类卖点，这震荡还是有效的。而5分钟层次上，是离开第一个中枢向下移动中，由于第三类卖点没有形成，所有是否形成5分钟	三类／波动应用用语，保留为复查线索；不以单条索引推码级归属。
+blog	五词族并集	100:34		因此，这三层次构成的完全分类就给出了最完美的操作指示。首先，第一个必然且一定是最先出现的变化，就是1分钟层次的底背驰。如果连这都不出现，其他两个层次是不会有任何状态变化的。而这底背驰后，必然出现回拉，这里就面临两个完全分类：	有操作／力度语境，本行不能取代可证的首回抽构造。
+blog	五词族并集	100:36		（娇注：实际走势出现5分3卖后扩展5分中枢并且碰到前5分中枢。30分中枢震荡，向下离开为1分趋势，向上为5分盘背。）	含编注，不能整行引作作者；取舍见阅读表。
+blog	五词族并集	100:38		显然，这两种5分钟的新变化，都不会导致30分钟层次有状态变化。但，其中的其一种，却隐含着30分钟即将可能面临变化，因为5分钟下跌一旦结束回拉构成30分钟第三类卖点，那么30分钟层次就会有所变化了。	三类／波动应用用语，保留为复查线索；不以单条索引推码级归属。
+blog	五词族并集	100:170		由于这些因素不是市场能完全控制的，因此，走一步算一步是最好的操作思路。如果按本ID的理论，那这一切都无须考虑，因为，4331上下的震荡已经延伸为5分钟级别的，那么，就看这中枢的第三类买卖点就可以，其他都可以当成中枢震荡处理。	有操作／力度语境，本行不能取代可证的首回抽构造。
+blog	五词族并集	101:20		第一类买卖点就是背驰点，第三类买卖点就是中枢破坏点，这都是很清楚的。而这第二类买卖点，好象还是有很多不明白。	有读者问题，须以署名应答上下文核归属；不以该行独证。
+blog	五词族并集	101:22		其实，所谓第二类买点，就是第一类买点的次级别回抽结束后再次探底或回试的那个次级别走势的结束点。这个定义在前面说得很清楚。例如，一个5分钟底背驰后，第一类买点上去的1分钟走势结束后，回头肯定有一个1分钟的向下走势，这走势的结束	同词语境或图文转述；保留原行供复查，未据该行下规则。
+blog	五词族并集	101:42		注意，只有在这回升的中阴状态下才有第一、二类买点，中阴状态结束后，所有的中枢震荡只存在第三类买卖点以及中枢震荡的买卖点，就不存在第一、二类买卖点了。	三类／波动应用用语，保留为复查线索；不以单条索引推码级归属。
+blog	五词族并集	101:76		技术上，一个标准的线段下跌类背驰后回到最后一个类中枢形成新的1分钟中枢，因此，该中枢的最终演化决定大盘短线走势。大点的角度，原来4331上下的5分钟震荡依然没有被破坏，因为第三类卖点没出现。	构件或定位语境，不以单行建立 R5；相关段见阅读表。
+blog	五词族并集	101:80		今天最重要的是，MACD的红柱子依然保持，所以，只要该中枢的震荡不被破坏，大盘逐步好转的机会还是极大的，毕竟平安的事情告一段落，但是，平安顶风，会有很坏的示范效应，所以，大盘可能还要不断受到类似消息的影响，最终解决问题，还是	有操作／力度语境，本行不能取代可证的首回抽构造。
+blog	五词族并集	105:448		后面具体的走势，如果你真喜欢预测闹着玩，那也很容易，从3786点下来这最后一跌，显然要走出至少两个中枢，否则这还是前面中枢的震荡，这就还不是最后一跌了。那么。现在在3300点上有一个中枢了，因此，这一轮下跌要完成，最标准的走	同词语境或图文转述；保留原行供复查，未据该行下规则。
+blog	五词族并集	106:110		昨天，一个包含性K线，构造出短线的第二类买点后回拉到5日线附近，大盘短线已到临界点。当然，最干脆的走势就是今天中长阳突破2762点确认笔走势，而反过来，若大盘依然在2762点下犹疑，那最晚下周初，大盘中继中枢扩展完成后向下延	构件或定位语境，不以单行建立 R5；相关段见阅读表。
+blog	五词族并集	106:142		2762点下的三角反弹构成2924点下来的第一个中枢，然后是新一段的下跌，那么，后面的演化无非两种：两段力度对比（30或60分钟），后一段强于前一段，则还需要一个中枢后的下跌背驰才有机会完成2924点开始的下跌；反之，则29	同词语境或图文转述；保留原行供复查，未据该行下规则。
+blog	五词族并集	106:144		大的角度，目前7月3日开始的中枢震荡暂时还没出现第三类卖点，依然可以看成是该中枢震荡的延续，除非2924点开始的向下次级别走势类型完成后，其后的次级别反弹不能重回该中枢，才能确认中枢的彻底破坏。	三类／波动应用用语，保留为复查线索；不以单条索引推码级归属。
+blog	五词族并集	106:146		因此，综上所述，目前最大的短线机会，就是2924点下来的走势类型结束点构成的买点，其后至少有一个2924点下来同一级别的反弹。密切关注短线买点，就是本周最大的任务。	同词语境或图文转述；保留原行供复查，未据该行下规则。
+blog	五词族并集	106:280		从基本面上看，时间刚好极端配合，这次级别的反弹，最弱的就是平台式的，也就是连2500点都碰不到，然后基本对应上那什么会结束，最后的机会给管理层，如果还如此，后面不第三类卖点才怪了，这点必须有清醒认识，而这在原来三级别反弹的分	三类／波动应用用语，保留为复查线索；不以单条索引推码级归属。
+blog	五词族并集	107:20		某级别的中枢都是由三个以上次级别走势类型重叠构成，也就是说，一个30分钟的中枢，一定涉及上下上的三个5分钟走势类型。这就是构成我们操作绝对性的最坚实基础。	有操作／力度语境，本行不能取代可证的首回抽构造。
+blog	五词族并集	107:26		注意，这只是统一的处理方法，其实实际操作中，一旦第一上与下出现后，可能的走势形式，就有了很大的绝对性确认了，例如，一个30分钟中枢后接一个第三类买点，然后非背驰力度地强劲拉升，那你就完全可以开始坐轿子，等第二中枢，甚至第三、	有操作／力度语境，本行不能取代可证的首回抽构造。
+blog	五词族并集	107:140		在目前条件下，中线角度，出现各级别中枢不断扩展叠合以完成底部构造的可能性越来越大，也就是说，先横住了，然后再等到那共振时间的出现，产生突破的第一推动力。	发展/重叠语境，未单凭该行扩 R5。
+blog	五词族并集	108:14		何谓底部？这里给出精确的定义，以后就不会糊涂一片了。底部都是分级别的，如果站在精确走势类型的角度，那么第一类买点出现后一直到该买点所引发的中枢第一次走出第三类买卖点前，都可以看成底部构造的过程。只不过如果是第三类卖点先出现，	三类／波动应用用语，保留为复查线索；不以单条索引推码级归属。
+blog	五词族并集	108:160		上周已经明确说过，本周值得关注的就是这个反弹了，一个完美的两小中枢构成的下跌后在早上完成最终背驰，恰好配合上CPI的跳水利好，大盘盘中有了较大反弹。显然，后面受阻5日线，因此，下面的任务是5日线的攻关。但最终决定反弹级别与高	同词语境或图文转述；保留原行供复查，未据该行下规则。

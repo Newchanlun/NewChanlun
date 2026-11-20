@@ -1,0 +1,56 @@
+[
+  {
+    "number": 2141,
+    "state": "OPEN",
+    "title": "[grilling] 中枢结算的两处未裁边界：关节极值不等的反向回抽算不算已证、首个不重叠段本身是离开时怎么结算（#1496 前置，退场条件②）",
+    "url": "https://github.com/Newchanlun/NewChanlun/issues/2141"
+  },
+  {
+    "number": 1429,
+    "state": "OPEN",
+    "title": "[impl] TB-02-H 九段升级、自然递归与全级同判据（SPEC #1340）",
+    "url": "https://github.com/Newchanlun/NewChanlun/issues/1429"
+  },
+  {
+    "number": 1478,
+    "state": "CLOSED",
+    "title": "[grilling] 中枢外缘 GG/DD 的遍历范围落码与延伸测试的末成员端点（#1323，CC-017/ST-012/ST-016；#812 S-7 受影响代码清单补齐）",
+    "url": "https://github.com/Newchanlun/NewChanlun/issues/1478"
+  },
+  {
+    "number": 1296,
+    "state": "CLOSED",
+    "title": "[impl] #812 中枢正本五项处置（L1/L2/L5/L6/L7）Lean 落地（sliceE G-1，#1278 批三）",
+    "url": "https://github.com/Newchanlun/NewChanlun/issues/1296"
+  },
+  {
+    "number": 820,
+    "state": "CLOSED",
+    "title": "[research] 中枢结算后的续扫锚：突破段归谁，原文支持 A/B/C 哪种（map #787，喂 #812）",
+    "url": "https://github.com/Newchanlun/NewChanlun/issues/820"
+  },
+  {
+    "number": 485,
+    "state": "CLOSED",
+    "title": "[SPEC] 高级别三类点产出链修复：anchor 门 + 归属链 + 终态切换（#473）",
+    "url": "https://github.com/Newchanlun/NewChanlun/issues/485"
+  },
+  {
+    "number": 241,
+    "state": "CLOSED",
+    "title": "[research] 滑动扫描 vs 唯一分解：中枢分解三形态不一致的未决教义问题（自 #221 划出）",
+    "url": "https://github.com/Newchanlun/NewChanlun/issues/241"
+  },
+  {
+    "number": 812,
+    "state": "CLOSED",
+    "title": "[grilling] 中枢的教义正本：7 组分歧 + E1 例外的退场条件（map #787 第二批 1/6）",
+    "url": "https://github.com/Newchanlun/NewChanlun/issues/812"
+  },
+  {
+    "number": 787,
+    "state": "CLOSED",
+    "title": "🗺️ 缠论量化交易系统统一架构正本：疆域测绘 → 三层推导链 → 线的归位",
+    "url": "https://github.com/Newchanlun/NewChanlun/issues/787"
+  }
+]

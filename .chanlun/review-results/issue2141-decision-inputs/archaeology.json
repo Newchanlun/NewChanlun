@@ -1,0 +1,253 @@
+{
+  "points": [
+    {
+      "id": "Q1",
+      "question": "关节极值不等但回抽在外是否已证",
+      "class": "C",
+      "queries": [
+        {
+          "channel": "tracker",
+          "query": "端点相连",
+          "command": "gh issue list -R Newchanlun/NewChanlun --state all --limit 1000 --search '端点相连' --json number,title,state,url",
+          "hits": 127
+        },
+        {
+          "channel": "tracker",
+          "query": "关节极值",
+          "command": "gh issue list -R Newchanlun/NewChanlun --state all --limit 1000 --search '关节极值' --json number,title,state,url",
+          "hits": 77
+        },
+        {
+          "channel": "tracker",
+          "query": "\"方向极值\" 中枢",
+          "command": "gh issue list -R Newchanlun/NewChanlun --state all --limit 1000 --search '\"方向极值\" 中枢' --json number,title,state,url",
+          "hits": 2
+        },
+        {
+          "channel": "tracker",
+          "query": "\"回抽\" \"端点\"",
+          "command": "gh issue list -R Newchanlun/NewChanlun --state all --limit 1000 --search '\"回抽\" \"端点\"' --json number,title,state,url",
+          "hits": 22
+        },
+        {
+          "channel": "repo",
+          "query": "端点相连|关节极值|方向极值|端点不相连|JointNotConnected|DirAlternates",
+          "command": "git grep -nI -E '端点相连|关节极值|方向极值|端点不相连|JointNotConnected|DirAlternates' ba74fd6344df5d03d3a8c5b6a5a2c9d8bef7a8b6 -- .chanlun/definitions docs/adr analysis docs formal rust CONTEXT.md ':(exclude)docs/chanlun/text'",
+          "hits": 39
+        }
+      ],
+      "hits": [
+        {
+          "source": ".chanlun/definitions/qushi.md:244",
+          "excerpt": "已裁相连交替分支"
+        },
+        {
+          "source": "docs/chanlun/text/blog/078-第78课.md:42,58–60",
+          "excerpt": "真实分界与标准化相接的权威及边界"
+        },
+        {
+          "source": "docs/chanlun/text/blog/081-第81课.md:504–508",
+          "excerpt": "端点不能覆盖途中穿回"
+        }
+      ],
+      "citation": ".chanlun/definitions/qushi.md:244",
+      "reasoning": "本地独立极值投影与原文讨论的首尾相连折线不是同一量。",
+      "recommended": "保持 #2114，裸失配投影不证角色；独立角色桥尚未定。",
+      "searched_keywords": [
+        "端点相连",
+        "关节极值",
+        "JointNotConnected"
+      ],
+      "gap": "decision",
+      "conflict": "本地独立极值投影与原文讨论的首尾相连折线不是同一量。"
+    },
+    {
+      "id": "Q2",
+      "question": "首个不重叠段确为离开的成员、连接、续扫与外缘",
+      "class": "C",
+      "queries": [
+        {
+          "channel": "tracker",
+          "query": "退场条件",
+          "command": "gh issue list -R Newchanlun/NewChanlun --state all --limit 1000 --search '退场条件' --json number,title,state,url",
+          "hits": 334
+        },
+        {
+          "channel": "tracker",
+          "query": "\"离开段\" \"回抽段\"",
+          "command": "gh issue list -R Newchanlun/NewChanlun --state all --limit 1000 --search '\"离开段\" \"回抽段\"' --json number,title,state,url",
+          "hits": 3
+        },
+        {
+          "channel": "tracker",
+          "query": "\"越出后返回\"",
+          "command": "gh issue list -R Newchanlun/NewChanlun --state all --limit 1000 --search '\"越出后返回\"' --json number,title,state,url",
+          "hits": 3
+        },
+        {
+          "channel": "tracker",
+          "query": "\"续扫锚\" 中枢",
+          "command": "gh issue list -R Newchanlun/NewChanlun --state all --limit 1000 --search '\"续扫锚\" 中枢' --json number,title,state,url",
+          "hits": 9
+        },
+        {
+          "channel": "tracker",
+          "query": "C@u29",
+          "command": "gh issue list -R Newchanlun/NewChanlun --state all --limit 1000 --search C@u29 --json number,title,state,url",
+          "hits": 3
+        },
+        {
+          "channel": "repo",
+          "query": "退场条件②|离开段.{0,16}回抽段|越出后返回|首回试|首回抽|last_member\\s*\\+\\s*2|refSeg4Break|BreakUnitOutward|C@u29|tb1424-prep-r2|续扫锚",
+          "command": "git grep -nI -E '退场条件②|离开段.{0,16}回抽段|越出后返回|首回试|首回抽|last_member\\s*\\+\\s*2|refSeg4Break|BreakUnitOutward|C@u29|tb1424-prep-r2|续扫锚' ba74fd6344df5d03d3a8c5b6a5a2c9d8bef7a8b6 -- .chanlun/definitions docs/adr analysis docs formal rust CONTEXT.md ':(exclude)docs/chanlun/text'",
+          "hits": 25
+        }
+      ],
+      "hits": [
+        {
+          "source": "https://github.com/Newchanlun/NewChanlun/issues/1478#issuecomment-6149640661",
+          "excerpt": "两个端点/外缘裁定"
+        },
+        {
+          "source": ".chanlun/definitions/zhongshu.md:252,398–410",
+          "excerpt": "条件②和 Z-5"
+        },
+        {
+          "source": "docs/chanlun/text/blog/020-第20课.md:30,52,56,60,62",
+          "excerpt": "相邻触及、Zn 和首次回抽"
+        },
+        {
+          "source": "https://github.com/Newchanlun/NewChanlun/issues/1424#issuecomment-6160553615",
+          "excerpt": "报告 C@u29；原件缺失"
+        }
+      ],
+      "citation": "https://github.com/Newchanlun/NewChanlun/issues/1478#issuecomment-6149640661",
+      "reasoning": "旧扫描单哨兵当结算；若全吸收外侧 Zn，又违反中心定理一。",
+      "recommended": "待 R，有证后返回或破坏，非 Zn 离开的返回及不回的 Z-5 已定；区间外 Zn 返回的成员组织未决。",
+      "searched_keywords": [
+        "退场条件②",
+        "离开段 回抽段",
+        "续扫锚",
+        "C@u29"
+      ],
+      "gap": "decision",
+      "conflict": "旧扫描单哨兵当结算；若全吸收外侧 Zn，又违反中心定理一。"
+    },
+    {
+      "id": "Q3",
+      "question": "占位方向能否作离开或回抽",
+      "class": "C",
+      "queries": [
+        {
+          "channel": "tracker",
+          "query": "\"占位方向\"",
+          "command": "gh issue list -R Newchanlun/NewChanlun --state all --limit 1000 --search '\"占位方向\"' --json number,title,state,url",
+          "hits": 1
+        },
+        {
+          "channel": "tracker",
+          "query": "\"方向占位\" 中枢",
+          "command": "gh issue list -R Newchanlun/NewChanlun --state all --limit 1000 --search '\"方向占位\" 中枢' --json number,title,state,url",
+          "hits": 0
+        },
+        {
+          "channel": "tracker",
+          "query": "\"非语义方向\" 三类",
+          "command": "gh issue list -R Newchanlun/NewChanlun --state all --limit 1000 --search '\"非语义方向\" 三类' --json number,title,state,url",
+          "hits": 0
+        },
+        {
+          "channel": "tracker",
+          "query": "\"首回试\" 次级别",
+          "command": "gh issue list -R Newchanlun/NewChanlun --state all --limit 1000 --search '\"首回试\" 次级别' --json number,title,state,url",
+          "hits": 4
+        },
+        {
+          "channel": "repo",
+          "query": "占位方向|方向.{0,5}占位|外缘占位|非语义方向|技术突破方向|center_own_dir_at|leave_anchor",
+          "command": "git grep -nI -E '占位方向|方向.{0,5}占位|外缘占位|非语义方向|技术突破方向|center_own_dir_at|leave_anchor' ba74fd6344df5d03d3a8c5b6a5a2c9d8bef7a8b6 -- .chanlun/definitions docs/adr analysis docs formal rust CONTEXT.md ':(exclude)docs/chanlun/text'",
+          "hits": 67
+        }
+      ],
+      "hits": [
+        {
+          "source": "docs/chanlun/text/blog/018-第18课.md:64–66",
+          "excerpt": "盘整可能当一腿"
+        },
+        {
+          "source": "rust/src/theta_v0/classifier/recursive_tower.rs:794–824@4402c64d",
+          "excerpt": "ownership 及外缘占位来源"
+        },
+        {
+          "source": "https://github.com/Newchanlun/NewChanlun/issues/1429#issuecomment-7000557985",
+          "excerpt": "上级组合材料方向非默认 Up"
+        }
+      ],
+      "citation": "docs/chanlun/text/blog/018-第18课.md:64–66",
+      "reasoning": "同一枚举把趋势来源与占位压扁。",
+      "recommended": "占位不充角色；已完成且真实角色有独立源证者仍可参与。",
+      "searched_keywords": [
+        "占位方向",
+        "非语义方向",
+        "leave_anchor"
+      ],
+      "gap": "decision",
+      "conflict": "同一枚举把趋势来源与占位压扁。"
+    },
+    {
+      "id": "Q4",
+      "question": "限定内部非 Zn 极值覆盖",
+      "class": "C",
+      "queries": [
+        {
+          "channel": "tracker",
+          "query": "\"Zn\" \"外缘\"",
+          "command": "gh issue list -R Newchanlun/NewChanlun --state all --limit 1000 --search '\"Zn\" \"外缘\"' --json number,title,state,url",
+          "hits": 15
+        },
+        {
+          "channel": "tracker",
+          "query": "\"内部非\" \"端点\"",
+          "command": "gh issue list -R Newchanlun/NewChanlun --state all --limit 1000 --search '\"内部非\" \"端点\"' --json number,title,state,url",
+          "hits": 2
+        },
+        {
+          "channel": "tracker",
+          "query": "\"非 Zn\" \"末成员\"",
+          "command": "gh issue list -R Newchanlun/NewChanlun --state all --limit 1000 --search '\"非 Zn\" \"末成员\"' --json number,title,state,url",
+          "hits": 1
+        },
+        {
+          "channel": "repo",
+          "query": "相邻.{0,4}Zn.{0,7}(端点|覆盖)|非.{0,3}Zn.{0,8}(极值|远端|成员)|Zn.{0,14}(聚合|外缘)|zn_extrema|extendWeak_nonZn_member",
+          "command": "git grep -nI -E '相邻.{0,4}Zn.{0,7}(端点|覆盖)|非.{0,3}Zn.{0,8}(极值|远端|成员)|Zn.{0,14}(聚合|外缘)|zn_extrema|extendWeak_nonZn_member' ba74fd6344df5d03d3a8c5b6a5a2c9d8bef7a8b6 -- .chanlun/definitions docs/adr analysis docs formal rust CONTEXT.md ':(exclude)docs/chanlun/text'",
+          "hits": 10
+        }
+      ],
+      "hits": [
+        {
+          "source": "docs/chanlun/text/blog/020-第20课.md:52,54",
+          "excerpt": "只遍历 Zn"
+        },
+        {
+          "source": ".chanlun/definitions/zhongshu.md:232,360",
+          "excerpt": "旧证明泛出适用域"
+        },
+        {
+          "source": "s_session/tests/fixtures/tb02e-real/btc-tail50k-first600.json@4402c64d",
+          "excerpt": "内部 u1.lo 小于两个邻 Zn 的 lo"
+        }
+      ],
+      "citation": "docs/chanlun/text/blog/020-第20课.md:52,54",
+      "reasoning": "真实 L0 前缀已反证内部极值总由两边覆盖。",
+      "recommended": "只限定覆盖推导，合法 Zn 聚合不变。",
+      "searched_keywords": [
+        "Zn 外缘",
+        "相邻 Zn 覆盖",
+        "zn_extrema"
+      ],
+      "gap": "decision",
+      "conflict": "真实 L0 前缀已反证内部极值总由两边覆盖。"
+    }
+  ]
+}

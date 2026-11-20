@@ -1,0 +1,67 @@
+ba74fd6344df5d03d3a8c5b6a5a2c9d8bef7a8b6:.chanlun/definitions/zhongshu.md:370:当前实现对 L≥1 用方向 provenance 门（`leave_anchor`）保守拒绝，**该门不是教义判据**，是方向推导不可靠时的兜底，属实现层欠账（`mod.rs:461`/`:623`：L0 分支不消费 anchor，仅 L≥1 在投影点派生，`None` = fallback）。
+ba74fd6344df5d03d3a8c5b6a5a2c9d8bef7a8b6:docs/adr/0011-operation-decomposition-layer.md:43:实查 `rust/src/theta_v0/classifier/recursive_tower.rs:938-954`：块的唯一用途是经 `center_own_dir_at(blocks, idx)` 给单元定方向，喂塔往上爬 ⟹ 块站在构造链上。
+ba74fd6344df5d03d3a8c5b6a5a2c9d8bef7a8b6:formal/Origin/UnifiedScanMirrorBridge.lean:265:/-- `center_own_dir_at`：C0 无入边；其余只从入边所属 Trend 块取得方向。 -/
+ba74fd6344df5d03d3a8c5b6a5a2c9d8bef7a8b6:rust/src/bin/p112_trend_predicate_caseaudit.rs:38:use newchan_rust::theta_v0::classifier::decompose::{center_own_dir_at, center_trend_gate};
+ba74fd6344df5d03d3a8c5b6a5a2c9d8bef7a8b6:rust/src/bin/p112_trend_predicate_caseaudit.rs:930:        .map(|i| center_own_dir_at(&classification.levels[0].moves, i))
+ba74fd6344df5d03d3a8c5b6a5a2c9d8bef7a8b6:rust/src/bin/p86_anchor_hypothesis.rs:424:        // 不与 `run` 本身 1:1——把它的 blocks 喂给 `run` 的投影会让 `center_own_dir_at` 索引落到
+ba74fd6344df5d03d3a8c5b6a5a2c9d8bef7a8b6:rust/src/bin/s2_lean_mirror_extract.rs:2414:        segment(&value.leave, value.leave_anchor, None),
+ba74fd6344df5d03d3a8c5b6a5a2c9d8bef7a8b6:rust/src/bin/s2_lean_mirror_extract.rs:2722:        segment(&value.leave, value.leave_anchor, None),
+ba74fd6344df5d03d3a8c5b6a5a2c9d8bef7a8b6:rust/src/theta_v0/classifier/decompose.rs:207:pub fn center_own_dir_at(blocks: &[MoveBlock], i: usize) -> Option<Direction> {
+ba74fd6344df5d03d3a8c5b6a5a2c9d8bef7a8b6:rust/src/theta_v0/classifier/decompose.rs:225:/// B₁（与 [`center_own_dir_at`] 的 i==0→None **有意不同**——kind 版是批式查询无前缀稳定约束，
+ba74fd6344df5d03d3a8c5b6a5a2c9d8bef7a8b6:rust/src/theta_v0/classifier/decompose.rs:411:    fn center_own_dir_at_equals_trend_gate_pointwise() {
+ba74fd6344df5d03d3a8c5b6a5a2c9d8bef7a8b6:rust/src/theta_v0/classifier/decompose.rs:424:                    center_own_dir_at(&blocks, i),
+ba74fd6344df5d03d3a8c5b6a5a2c9d8bef7a8b6:rust/src/theta_v0/classifier/diag/cand_delta.rs:29:///   #1052 点锚迁移同源——旧 `center_own_dir_at(levels[ℓ-1].moves, i)` 的中心域/单元域错位
+ba74fd6344df5d03d3a8c5b6a5a2c9d8bef7a8b6:rust/src/theta_v0/classifier/diag/cand_delta.rs:182:            // ★3b 口径订正（P1 退役收口）：旧 P1 镜像的 `center_own_dir_at(pb, i)` 用单元下标
+ba74fd6344df5d03d3a8c5b6a5a2c9d8bef7a8b6:rust/src/theta_v0/classifier/diag/cp_recall_audit.rs:183:    leave_anchor: Option<Direction>,
+ba74fd6344df5d03d3a8c5b6a5a2c9d8bef7a8b6:rust/src/theta_v0/classifier/diag/cp_recall_audit.rs:186:    match (leave_anchor, retest.direction) {
+ba74fd6344df5d03d3a8c5b6a5a2c9d8bef7a8b6:rust/src/theta_v0/classifier/diag/cp_recall_audit.rs:287:        let leave_anchor = match anchor_dirs {
+ba74fd6344df5d03d3a8c5b6a5a2c9d8bef7a8b6:rust/src/theta_v0/classifier/diag/cp_recall_audit.rs:291:        let atom = if signal::judge_third_cert(&object.b_center, &leave, leave_anchor, &retest)
+ba74fd6344df5d03d3a8c5b6a5a2c9d8bef7a8b6:rust/src/theta_v0/classifier/diag/cp_recall_audit.rs:296:            recall_failure_atom(&object.b_center, &leave, leave_anchor, &retest)
+ba74fd6344df5d03d3a8c5b6a5a2c9d8bef7a8b6:rust/src/theta_v0/classifier/diag/cp_recall_audit.rs:372:                .map(|i| decompose::center_own_dir_at(parent_blocks, i))
+ba74fd6344df5d03d3a8c5b6a5a2c9d8bef7a8b6:rust/src/theta_v0/classifier/diag/s2_mirror_capture.rs:47:    pub leave_anchor: Option<Direction>,
+ba74fd6344df5d03d3a8c5b6a5a2c9d8bef7a8b6:rust/src/theta_v0/classifier/diag/s2_mirror_capture.rs:564:    pub leave_anchor: Option<Direction>,
+ba74fd6344df5d03d3a8c5b6a5a2c9d8bef7a8b6:rust/src/theta_v0/classifier/diag/s2_mirror_capture.rs:990:    leave_anchor: Option<Direction>,
+ba74fd6344df5d03d3a8c5b6a5a2c9d8bef7a8b6:rust/src/theta_v0/classifier/diag/s2_mirror_capture.rs:1001:        leave_anchor,
+ba74fd6344df5d03d3a8c5b6a5a2c9d8bef7a8b6:rust/src/theta_v0/classifier/lean_mirror.rs:692:        option(&value.leave_anchor, |value| actual_direction(*value).to_string()),
+ba74fd6344df5d03d3a8c5b6a5a2c9d8bef7a8b6:rust/src/theta_v0/classifier/pipeline.rs:239:        decompose::center_own_dir_at(lower_blocks, idx).unwrap_or_else(|| m.fold_direction(prev))
+ba74fd6344df5d03d3a8c5b6a5a2c9d8bef7a8b6:rust/src/theta_v0/classifier/pipeline.rs:1758:                .map(|i| decompose::center_own_dir_at(pb, i))
+ba74fd6344df5d03d3a8c5b6a5a2c9d8bef7a8b6:rust/src/theta_v0/classifier/recursive_tower.rs:58:use super::decompose::{center_own_dir_at, MoveBlock};
+ba74fd6344df5d03d3a8c5b6a5a2c9d8bef7a8b6:rust/src/theta_v0/classifier/recursive_tower.rs:268:    /// 主来源是次级别走势类型方向（ownership Trend 块，[`center_own_dir_at`]），仅当中枢落
+ba74fd6344df5d03d3a8c5b6a5a2c9d8bef7a8b6:rust/src/theta_v0/classifier/recursive_tower.rs:271:    /// ★诚实有效域：上级走势的方向是**外缘占位**（首单元下移/上移），**不**冒充 §6.1 意义的
+ba74fd6344df5d03d3a8c5b6a5a2c9d8bef7a8b6:rust/src/theta_v0/classifier/recursive_tower.rs:719:/// 几何路径用——上级中枢检测在外缘区间上做，方向是外缘占位）。
+ba74fd6344df5d03d3a8c5b6a5a2c9d8bef7a8b6:rust/src/theta_v0/classifier/recursive_tower.rs:723:/// 跨层传参（把上一级中枢链的 blocks 喂给下一级塔）不违反任何类型约束，`center_own_dir_at`
+ba74fd6344df5d03d3a8c5b6a5a2c9d8bef7a8b6:rust/src/theta_v0/classifier/recursive_tower.rs:740:/// - 中枢 i 按 ownership 落 **Trend(d) 块**（[`center_own_dir_at`]）⟹ 方向 = d（次级别走势类型方向）；
+ba74fd6344df5d03d3a8c5b6a5a2c9d8bef7a8b6:rust/src/theta_v0/classifier/recursive_tower.rs:742:///   （[`LeveledMove::fold_direction`] 外缘占位，标注：此路径的方向不携带走势类型语义，仅结构占位
+ba74fd6344df5d03d3a8c5b6a5a2c9d8bef7a8b6:rust/src/theta_v0/classifier/recursive_tower.rs:760:                direction: center_own_dir_at(blocks, idx).unwrap_or_else(|| m.fold_direction(prev)),
+ba74fd6344df5d03d3a8c5b6a5a2c9d8bef7a8b6:rust/src/theta_v0/classifier/recursive_tower.rs:803:            direction: center_own_dir_at(blocks, idx).unwrap_or_else(|| m.fold_direction(prev)),
+ba74fd6344df5d03d3a8c5b6a5a2c9d8bef7a8b6:rust/src/theta_v0/classifier/recursive_tower.rs:1409:        let leave_anchor = match anchor_dirs {
+ba74fd6344df5d03d3a8c5b6a5a2c9d8bef7a8b6:rust/src/theta_v0/classifier/recursive_tower.rs:1413:        let Some(cert) = signal::judge_third_cert(&object.b_center, &leave, leave_anchor, &retest)
+ba74fd6344df5d03d3a8c5b6a5a2c9d8bef7a8b6:rust/src/theta_v0/classifier/recursive_tower.rs:1473:            leave_anchor,
+ba74fd6344df5d03d3a8c5b6a5a2c9d8bef7a8b6:rust/src/theta_v0/classifier/recursive_tower.rs:1483:                    leave_anchor,
+ba74fd6344df5d03d3a8c5b6a5a2c9d8bef7a8b6:rust/src/theta_v0/classifier/recursive_tower.rs:3389:    /// ★#332 显影：跨层 `blocks`（上一级中枢链的分解）喂给下一级塔投影 ⟹ `center_own_dir_at`
+ba74fd6344df5d03d3a8c5b6a5a2c9d8bef7a8b6:rust/src/theta_v0/classifier/recursive_tower.rs:3437:            .map(|i| center_own_dir_at(&blocks, i))
+ba74fd6344df5d03d3a8c5b6a5a2c9d8bef7a8b6:rust/src/theta_v0/classifier/scan.rs:3://! 生产门查走逐点口径（[`decompose::center_own_dir_at`]/[`decompose::center_block_kind_at`]/
+ba74fd6344df5d03d3a8c5b6a5a2c9d8bef7a8b6:rust/src/theta_v0/classifier/scan.rs:33:    center_block_kind, center_block_kind_at, center_block_lift_at, center_own_dir_at, decompose,
+ba74fd6344df5d03d3a8c5b6a5a2c9d8bef7a8b6:rust/src/theta_v0/classifier/scan.rs:111:        leave_anchor: Option<Direction>,
+ba74fd6344df5d03d3a8c5b6a5a2c9d8bef7a8b6:rust/src/theta_v0/classifier/scan.rs:131:                    leave_anchor,
+ba74fd6344df5d03d3a8c5b6a5a2c9d8bef7a8b6:rust/src/theta_v0/classifier/scan.rs:181:                    .then(|| center_own_dir_at(blocks, center_index))
+ba74fd6344df5d03d3a8c5b6a5a2c9d8bef7a8b6:rust/src/theta_v0/classifier/scan.rs:216:            .map(|index| center_own_dir_at(blocks, index).map(Into::into))
+ba74fd6344df5d03d3a8c5b6a5a2c9d8bef7a8b6:rust/src/theta_v0/classifier/scan.rs:232:                let direction = center_own_dir_at(blocks, index)?;
+ba74fd6344df5d03d3a8c5b6a5a2c9d8bef7a8b6:rust/src/theta_v0/classifier/scan.rs:484:            center_own_dir_at(blocks, center_index).map(|direction| (center_index, direction))
+ba74fd6344df5d03d3a8c5b6a5a2c9d8bef7a8b6:rust/src/theta_v0/classifier/scan.rs:533:/// prefix+tail 全量重跑。生产门查逐点（`center_own_dir_at`/`center_block_kind_at`/
+ba74fd6344df5d03d3a8c5b6a5a2c9d8bef7a8b6:rust/src/theta_v0/classifier/scan.rs:651:                center_own_dir_at(blocks, c_idx).map(|d| (c_idx, d))
+ba74fd6344df5d03d3a8c5b6a5a2c9d8bef7a8b6:rust/src/theta_v0/classifier/scan.rs:1034:// 判据单一：#1057 Q2 生产门查逐点口径（center_own_dir_at/center_block_kind_at/lift_at）——
+ba74fd6344df5d03d3a8c5b6a5a2c9d8bef7a8b6:rust/src/theta_v0/classifier/scan.rs:1157:            center_own_dir_at(&blocks, c_idx).map(|d| (c_idx, d))
+ba74fd6344df5d03d3a8c5b6a5a2c9d8bef7a8b6:rust/src/theta_v0/classifier/scan/wire.rs:666:    pub leave_anchor: Option<Direction>,
+ba74fd6344df5d03d3a8c5b6a5a2c9d8bef7a8b6:rust/src/theta_v0/classifier/signal.rs:92:    center_own_dir_at, center_trend_gate, decompose, MoveBlock,
+ba74fd6344df5d03d3a8c5b6a5a2c9d8bef7a8b6:rust/src/theta_v0/classifier/signal.rs:269:/// ★Q7-#1 裁定C：`leave_anchor` = leave 段的方向锚资格——三类的离开/突破段须有锚（fallback ⟹
+ba74fd6344df5d03d3a8c5b6a5a2c9d8bef7a8b6:rust/src/theta_v0/classifier/signal.rs:298:    leave_anchor: Option<Direction>,
+ba74fd6344df5d03d3a8c5b6a5a2c9d8bef7a8b6:rust/src/theta_v0/classifier/signal.rs:303:    match (leave_anchor, retest.dir) {
+ba74fd6344df5d03d3a8c5b6a5a2c9d8bef7a8b6:rust/src/theta_v0/classifier/signal.rs:350:    leave_anchor: Option<Direction>,
+ba74fd6344df5d03d3a8c5b6a5a2c9d8bef7a8b6:rust/src/theta_v0/classifier/signal.rs:353:    judge_third_cert(c, leave_seg, leave_anchor, retest_seg).map(|cert| cert.point)
+ba74fd6344df5d03d3a8c5b6a5a2c9d8bef7a8b6:rust/src/theta_v0/classifier/signal.rs:1175:/// 类别用 pointwise `center_own_dir_at`/`center_block_kind_at`（O(log C)/段），不 materialize O(C) 数组；
+ba74fd6344df5d03d3a8c5b6a5a2c9d8bef7a8b6:rust/src/theta_v0/classifier/signal.rs:1273:                center_own_dir_at(blocks, c_idx).map(|d| (c_idx, d))
+ba74fd6344df5d03d3a8c5b6a5a2c9d8bef7a8b6:rust/src/theta_v0/classifier/signal.rs:1365:/// resume 路径读 pointwise `center_own_dir_at`/`center_block_kind_at`——两者逐点等价，测试锁定），
+ba74fd6344df5d03d3a8c5b6a5a2c9d8bef7a8b6:rust/src/theta_v0/classifier/signal.rs:1571:    // census 传 `center_own_dir_at` 派生锚（仅用于尾部 parity 对拍调用；生产三类仍消费之）。
+ba74fd6344df5d03d3a8c5b6a5a2c9d8bef7a8b6:rust/src/theta_v0/classifier/tests/pipeline_geometry.rs:52:    // L1[2] 回拉不创新低（lo=112 >= L1[1].lo=80）；L1[0]/L1[1] 外缘占位方向同 Down
+ba74fd6344df5d03d3a8c5b6a5a2c9d8bef7a8b6:rust/src/theta_v0/classifier/tests/pipeline_geometry.rs:816:                        .map(|i| decompose::center_own_dir_at(pb, i))

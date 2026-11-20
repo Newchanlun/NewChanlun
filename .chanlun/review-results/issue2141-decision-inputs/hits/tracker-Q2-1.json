@@ -1,0 +1,2006 @@
+[
+  {
+    "number": 2130,
+    "state": "OPEN",
+    "title": "[task] 生产会话运维 runbook：结束孤儿、拒绝态清场、目录整改、退役对象清理（承接 #2079）",
+    "url": "https://github.com/Newchanlun/NewChanlun/issues/2130"
+  },
+  {
+    "number": 2141,
+    "state": "OPEN",
+    "title": "[grilling] 中枢结算的两处未裁边界：关节极值不等的反向回抽算不算已证、首个不重叠段本身是离开时怎么结算（#1496 前置，退场条件②）",
+    "url": "https://github.com/Newchanlun/NewChanlun/issues/2141"
+  },
+  {
+    "number": 2029,
+    "state": "OPEN",
+    "title": "[bug] tb03c_kill 证据目录不清理、production_session_entry 写死 /tmp，共享机 /tmp 被占满",
+    "url": "https://github.com/Newchanlun/NewChanlun/issues/2029"
+  },
+  {
+    "number": 2079,
+    "state": "OPEN",
+    "title": "[grilling] 正常关停或崩溃后，谁有权重新提供原会话端点（#1411 / #1823）",
+    "url": "https://github.com/Newchanlun/NewChanlun/issues/2079"
+  },
+  {
+    "number": 1096,
+    "state": "OPEN",
+    "title": "[debt] 旧 engine 整体退役：勘察残余消费面 + 退役或收编（#987 图外欠账，#991 I-3 划出）",
+    "url": "https://github.com/Newchanlun/NewChanlun/issues/1096"
+  },
+  {
+    "number": 1387,
+    "state": "OPEN",
+    "title": "[impl] TB-10-D positional延续与fusion变体旧写权隔离准备（SPEC #1340）",
+    "url": "https://github.com/Newchanlun/NewChanlun/issues/1387"
+  },
+  {
+    "number": 1407,
+    "state": "OPEN",
+    "title": "[impl] TB-04-C 不可改精确交付与阶段条件清单（SPEC #1340）",
+    "url": "https://github.com/Newchanlun/NewChanlun/issues/1407"
+  },
+  {
+    "number": 1385,
+    "state": "OPEN",
+    "title": "[impl] TB-10-B 旧策略和多重装配入口完成R2迁移准备（SPEC #1340）",
+    "url": "https://github.com/Newchanlun/NewChanlun/issues/1385"
+  },
+  {
+    "number": 1823,
+    "state": "OPEN",
+    "title": "[task] production_session 中 S 崩溃后残留 s.socket 的重启行为：只读复现、归属与测试规格（#1818 规则 5 承接）",
+    "url": "https://github.com/Newchanlun/NewChanlun/issues/1823"
+  },
+  {
+    "number": 1386,
+    "state": "OPEN",
+    "title": "[impl] TB-10-C Organic与positional核心旧经济臂隔离准备（SPEC #1340）",
+    "url": "https://github.com/Newchanlun/NewChanlun/issues/1386"
+  },
+  {
+    "number": 1388,
+    "state": "OPEN",
+    "title": "[impl] TB-10-E 混合经济臂及旧π组织完成逐族迁移准备（SPEC #1340）",
+    "url": "https://github.com/Newchanlun/NewChanlun/issues/1388"
+  },
+  {
+    "number": 1862,
+    "state": "OPEN",
+    "title": "📋 SPEC：Boat Queued 操作员状态与恢复速查（#1742/#1804 生产首票）",
+    "url": "https://github.com/Newchanlun/NewChanlun/issues/1862"
+  },
+  {
+    "number": 1551,
+    "state": "OPEN",
+    "title": "[grilling] FU-20 #1279 关票门与整图报告（#1323，新增）",
+    "url": "https://github.com/Newchanlun/NewChanlun/issues/1551"
+  },
+  {
+    "number": 1368,
+    "state": "OPEN",
+    "title": "TB-10 验收汇总：带仓迁移、旧入口终态及默认启用（SPEC #1340）",
+    "url": "https://github.com/Newchanlun/NewChanlun/issues/1368"
+  },
+  {
+    "number": 1384,
+    "state": "OPEN",
+    "title": "[impl] TB-10-A 图表与Python结构入口改接唯一S（SPEC #1340）",
+    "url": "https://github.com/Newchanlun/NewChanlun/issues/1384"
+  },
+  {
+    "number": 1390,
+    "state": "OPEN",
+    "title": "[impl] TB-10-G 探针研究及封存支持的退出准备（SPEC #1340）",
+    "url": "https://github.com/Newchanlun/NewChanlun/issues/1390"
+  },
+  {
+    "number": 1380,
+    "state": "OPEN",
+    "title": "[impl] TB-06-G 结构撤回、业务退出与在途保留（SPEC #1340）",
+    "url": "https://github.com/Newchanlun/NewChanlun/issues/1380"
+  },
+  {
+    "number": 1769,
+    "state": "OPEN",
+    "title": "[impl] #1523-L production_session 与 x_execution_session 可运行骨架（ADR 0039 迁移步骤 1）",
+    "url": "https://github.com/Newchanlun/NewChanlun/issues/1769"
+  },
+  {
+    "number": 1673,
+    "state": "OPEN",
+    "title": "[impl] TB-03-C/S5 正式会话入口的财务链+TB03C 合链运行与公共查询核对（#1406 AC1/AC4 后端）",
+    "url": "https://github.com/Newchanlun/NewChanlun/issues/1673"
+  },
+  {
+    "number": 1389,
+    "state": "OPEN",
+    "title": "[impl] TB-10-F 严格构造费用统计与形式锁收编（SPEC #1340）",
+    "url": "https://github.com/Newchanlun/NewChanlun/issues/1389"
+  },
+  {
+    "number": 1413,
+    "state": "OPEN",
+    "title": "[impl] TB-10-I 默认启动只到新核并核全入口排除边界（SPEC #1340）",
+    "url": "https://github.com/Newchanlun/NewChanlun/issues/1413"
+  },
+  {
+    "number": 1304,
+    "state": "OPEN",
+    "title": "🗺️ 功能回测：生产回放验收系统（回测重定位——研发回测冻结归档，回放回测转正为功能件）",
+    "url": "https://github.com/Newchanlun/NewChanlun/issues/1304"
+  },
+  {
+    "number": 1770,
+    "state": "OPEN",
+    "title": "[impl] #1523-API X 内 HL 场所 adapter 离线合同（环境、凭据、请求与回报原件映射）",
+    "url": "https://github.com/Newchanlun/NewChanlun/issues/1770"
+  },
+  {
+    "number": 1717,
+    "state": "OPEN",
+    "title": "[impl] 政策增量 I2：SR 扩量新版本及冻结退出同核消费",
+    "url": "https://github.com/Newchanlun/NewChanlun/issues/1717"
+  },
+  {
+    "number": 1397,
+    "state": "OPEN",
+    "title": "[impl] TB-06-H 退出后迟到尾账与责任重开（SPEC #1340）",
+    "url": "https://github.com/Newchanlun/NewChanlun/issues/1397"
+  },
+  {
+    "number": 1525,
+    "state": "OPEN",
+    "title": "[impl] TB-04 纵片 C：RiskGate 与订单责任回路接线",
+    "url": "https://github.com/Newchanlun/NewChanlun/issues/1525"
+  },
+  {
+    "number": 1375,
+    "state": "OPEN",
+    "title": "[impl] TB-04-A 外部先接纳封闸与精确 Resolve（SPEC #1340）",
+    "url": "https://github.com/Newchanlun/NewChanlun/issues/1375"
+  },
+  {
+    "number": 1423,
+    "state": "OPEN",
+    "title": "[impl] TB-05-E 既有持仓、订单与事实责任的非空恢复（SPEC #1340）",
+    "url": "https://github.com/Newchanlun/NewChanlun/issues/1423"
+  },
+  {
+    "number": 1552,
+    "state": "OPEN",
+    "title": "[impl] TB-03-B2 统一 source 上的真实验收（拆自 #1394）",
+    "url": "https://github.com/Newchanlun/NewChanlun/issues/1552"
+  },
+  {
+    "number": 1441,
+    "state": "OPEN",
+    "title": "[impl] TB-02-S 成本停止与基底进阶的具名证据（SPEC #1340）",
+    "url": "https://github.com/Newchanlun/NewChanlun/issues/1441"
+  },
+  {
+    "number": 1818,
+    "state": "OPEN",
+    "title": "[grilling] production_session 并发写域与 S admission 测量域布局合同（#1781 前置）",
+    "url": "https://github.com/Newchanlun/NewChanlun/issues/1818"
+  },
+  {
+    "number": 1421,
+    "state": "OPEN",
+    "title": "[impl] TB-03-E 既成退出事实后的Voice换代与持久重（SPEC #1340）",
+    "url": "https://github.com/Newchanlun/NewChanlun/issues/1421"
+  },
+  {
+    "number": 1416,
+    "state": "OPEN",
+    "title": "[impl] TB-04-D S 条件核验与稳定点公平服务（SPEC #1340）",
+    "url": "https://github.com/Newchanlun/NewChanlun/issues/1416"
+  },
+  {
+    "number": 1412,
+    "state": "OPEN",
+    "title": "[impl] TB-08-C 获准场所调用及回报完成严格逐重闭环（SPEC #1340）",
+    "url": "https://github.com/Newchanlun/NewChanlun/issues/1412"
+  },
+  {
+    "number": 1503,
+    "state": "OPEN",
+    "title": "[task] Codex 多模型指令治理：共同正本与 Claude 适配加载",
+    "url": "https://github.com/Newchanlun/NewChanlun/issues/1503"
+  },
+  {
+    "number": 1379,
+    "state": "OPEN",
+    "title": "[impl] TB-06-D 固定身份权利转移与唯一激活（SPEC #1340）",
+    "url": "https://github.com/Newchanlun/NewChanlun/issues/1379"
+  },
+  {
+    "number": 1358,
+    "state": "OPEN",
+    "title": "[grilling] 首次触闸后的经营评价参数（#1323，FU-05）",
+    "url": "https://github.com/Newchanlun/NewChanlun/issues/1358"
+  },
+  {
+    "number": 1419,
+    "state": "OPEN",
+    "title": "[impl] TB-02-E 中枢 seed、核心、外缘与成员（SPEC #1340）",
+    "url": "https://github.com/Newchanlun/NewChanlun/issues/1419"
+  },
+  {
+    "number": 1376,
+    "state": "OPEN",
+    "title": "[impl] TB-05-A 经济全故障时结构正式持续（SPEC #1340）",
+    "url": "https://github.com/Newchanlun/NewChanlun/issues/1376"
+  },
+  {
+    "number": 1402,
+    "state": "OPEN",
+    "title": "[impl] TB-10-H 非空持仓与尾责迁移及回退不丢权利（SPEC #1340）",
+    "url": "https://github.com/Newchanlun/NewChanlun/issues/1402"
+  },
+  {
+    "number": 1428,
+    "state": "OPEN",
+    "title": "[impl] TB-04-J 多重及配对分配政策的正式事实实例（SPEC #1340）",
+    "url": "https://github.com/Newchanlun/NewChanlun/issues/1428"
+  },
+  {
+    "number": 1377,
+    "state": "OPEN",
+    "title": "[impl] TB-06-A 满仓基线与回本前短差回补（SPEC #1340）",
+    "url": "https://github.com/Newchanlun/NewChanlun/issues/1377"
+  },
+  {
+    "number": 1340,
+    "state": "OPEN",
+    "title": "📋 SPEC：完整生产程序、结构全分类与逐重经营（#1323，R2）",
+    "url": "https://github.com/Newchanlun/NewChanlun/issues/1340"
+  },
+  {
+    "number": 1364,
+    "state": "OPEN",
+    "title": "TB-06 验收汇总：完整阶段、换档与尾账（SPEC #1340）",
+    "url": "https://github.com/Newchanlun/NewChanlun/issues/1364"
+  },
+  {
+    "number": 1410,
+    "state": "OPEN",
+    "title": "[impl] TB-06-J 触闸后参数生效与评价（SPEC #1340）",
+    "url": "https://github.com/Newchanlun/NewChanlun/issues/1410"
+  },
+  {
+    "number": 1439,
+    "state": "OPEN",
+    "title": "[impl] TB-02-Q 候选全集与固定选中后门（SPEC #1340）",
+    "url": "https://github.com/Newchanlun/NewChanlun/issues/1439"
+  },
+  {
+    "number": 1468,
+    "state": "OPEN",
+    "title": "[grilling] 订单递归增量价值的用途与实验对照",
+    "url": "https://github.com/Newchanlun/NewChanlun/issues/1468"
+  },
+  {
+    "number": 1422,
+    "state": "OPEN",
+    "title": "[impl] TB-04-E X 一次占有与实际受控调用（SPEC #1340）",
+    "url": "https://github.com/Newchanlun/NewChanlun/issues/1422"
+  },
+  {
+    "number": 1768,
+    "state": "OPEN",
+    "title": "[impl] TB-07-E B/E 域事件外壳 domain-event/1 映射与 delta/Gap 读口（ADR 0051，#1534）",
+    "url": "https://github.com/Newchanlun/NewChanlun/issues/1768"
+  },
+  {
+    "number": 1398,
+    "state": "OPEN",
+    "title": "[impl] TB-06-I 完整经济事件样本与闸门前统计（SPEC #1340）",
+    "url": "https://github.com/Newchanlun/NewChanlun/issues/1398"
+  },
+  {
+    "number": 1618,
+    "state": "OPEN",
+    "title": "[task] #1588 转票：sandcastle 失败可见性与本机 cargo 垫片余项（GH Actions 评审整段 diff、绝对路径绕过、蜂群、implementer/failed、health-monitor）",
+    "url": "https://github.com/Newchanlun/NewChanlun/issues/1618"
+  },
+  {
+    "number": 1429,
+    "state": "OPEN",
+    "title": "[impl] TB-02-H 九段升级、自然递归与全级同判据（SPEC #1340）",
+    "url": "https://github.com/Newchanlun/NewChanlun/issues/1429"
+  },
+  {
+    "number": 1481,
+    "state": "OPEN",
+    "title": "[impl] S 写者审计核心降阶：Δ 单代判据、写者生涯前缀夹持与线性冷启动（承接 §5.9.2 全 9011 双跑）",
+    "url": "https://github.com/Newchanlun/NewChanlun/issues/1481"
+  },
+  {
+    "number": 1445,
+    "state": "OPEN",
+    "title": "[impl] TB-06-E 行情换档与原重持续经营（SPEC #1340）",
+    "url": "https://github.com/Newchanlun/NewChanlun/issues/1445"
+  },
+  {
+    "number": 1444,
+    "state": "OPEN",
+    "title": "[impl] TB-06-C 容量规模与频率开重的独立门（SPEC #1340）",
+    "url": "https://github.com/Newchanlun/NewChanlun/issues/1444"
+  },
+  {
+    "number": 1424,
+    "state": "OPEN",
+    "title": "[impl] TB-02-F 相邻中枢发展与扩展关系（SPEC #1340）",
+    "url": "https://github.com/Newchanlun/NewChanlun/issues/1424"
+  },
+  {
+    "number": 1333,
+    "state": "OPEN",
+    "title": "[grilling] 完整 B 集成设计审计：C1–C6 seam、owner、N=2 tracer 与 SPEC 交棒",
+    "url": "https://github.com/Newchanlun/NewChanlun/issues/1333"
+  },
+  {
+    "number": 1361,
+    "state": "OPEN",
+    "title": "TB-03 验收汇总：持久重经营与事实应用（SPEC #1340）",
+    "url": "https://github.com/Newchanlun/NewChanlun/issues/1361"
+  },
+  {
+    "number": 1647,
+    "state": "OPEN",
+    "title": "[impl] S 写者 P6：审计台账与本代候选核验 Δ 化（来源审计②③、清单④，#1644 裁定）",
+    "url": "https://github.com/Newchanlun/NewChanlun/issues/1647"
+  },
+  {
+    "number": 1469,
+    "state": "OPEN",
+    "title": "[grilling] 订单事件实验的架构能力与条件性改造边界",
+    "url": "https://github.com/Newchanlun/NewChanlun/issues/1469"
+  },
+  {
+    "number": 1523,
+    "state": "OPEN",
+    "title": "[impl] TB-04/08/09 纵片 A：nautilus 0.62 HL 适配器与正式 paper launcher",
+    "url": "https://github.com/Newchanlun/NewChanlun/issues/1523"
+  },
+  {
+    "number": 1426,
+    "state": "OPEN",
+    "title": "[impl] TB-02-G 完成走势三分与形成/完成分轴（SPEC #1340）",
+    "url": "https://github.com/Newchanlun/NewChanlun/issues/1426"
+  },
+  {
+    "number": 1395,
+    "state": "OPEN",
+    "title": "[impl] TB-04-B 可共同满足域的完整slot与毛责任保留（SPEC #1340）",
+    "url": "https://github.com/Newchanlun/NewChanlun/issues/1395"
+  },
+  {
+    "number": 1406,
+    "state": "OPEN",
+    "title": "[impl] TB-03-C 受控事实唯一应用与原经济归属（SPEC #1340）",
+    "url": "https://github.com/Newchanlun/NewChanlun/issues/1406"
+  },
+  {
+    "number": 1323,
+    "state": "OPEN",
+    "title": "🗺️ 完整生产程序接线总单：#787 严格多重赋格落地 → 旧实现收敛 → 历史回放与 paper 同核",
+    "url": "https://github.com/Newchanlun/NewChanlun/issues/1323"
+  },
+  {
+    "number": 1425,
+    "state": "OPEN",
+    "title": "[impl] TB-04-F 单一明确归属的回报应用与责任减保留（SPEC #1340）",
+    "url": "https://github.com/Newchanlun/NewChanlun/issues/1425"
+  },
+  {
+    "number": 1427,
+    "state": "OPEN",
+    "title": "[impl] TB-04-G 订单首次量与取消改单的剩余额度（SPEC #1340）",
+    "url": "https://github.com/Newchanlun/NewChanlun/issues/1427"
+  },
+  {
+    "number": 1408,
+    "state": "OPEN",
+    "title": "[impl] TB-04-I 并发资金政策的正式实例与保留结果（SPEC #1340）",
+    "url": "https://github.com/Newchanlun/NewChanlun/issues/1408"
+  },
+  {
+    "number": 1396,
+    "state": "OPEN",
+    "title": "[impl] TB-05-B 分区与恢复期间的真实获知前沿（SPEC #1340）",
+    "url": "https://github.com/Newchanlun/NewChanlun/issues/1396"
+  },
+  {
+    "number": 1430,
+    "state": "OPEN",
+    "title": "[impl] TB-04-H 两道交付窗口与完整条件交错汇验（SPEC #1340）",
+    "url": "https://github.com/Newchanlun/NewChanlun/issues/1430"
+  },
+  {
+    "number": 1378,
+    "state": "OPEN",
+    "title": "[impl] TB-06-B 本金回收与多空五阶段签名（SPEC #1340）",
+    "url": "https://github.com/Newchanlun/NewChanlun/issues/1378"
+  },
+  {
+    "number": 1433,
+    "state": "OPEN",
+    "title": "[impl] TB-02-K 背驰、一类点及 NE/Turn 桥（SPEC #1340）",
+    "url": "https://github.com/Newchanlun/NewChanlun/issues/1433"
+  },
+  {
+    "number": 1467,
+    "state": "OPEN",
+    "title": "[research] 订单基底候选构造与合法性证据",
+    "url": "https://github.com/Newchanlun/NewChanlun/issues/1467"
+  },
+  {
+    "number": 1446,
+    "state": "OPEN",
+    "title": "[impl] TB-06-F 赚股增长与资金溢出换档（SPEC #1340）",
+    "url": "https://github.com/Newchanlun/NewChanlun/issues/1446"
+  },
+  {
+    "number": 1409,
+    "state": "OPEN",
+    "title": "[impl] TB-05-C 双边界崩溃、旧写者与不补发（SPEC #1340）",
+    "url": "https://github.com/Newchanlun/NewChanlun/issues/1409"
+  },
+  {
+    "number": 1437,
+    "state": "OPEN",
+    "title": "[impl] TB-02-O BSP 全标签、确认与多级联立（SPEC #1340）",
+    "url": "https://github.com/Newchanlun/NewChanlun/issues/1437"
+  },
+  {
+    "number": 1434,
+    "state": "OPEN",
+    "title": "[impl] TB-02-L 三类首回试、位置三态与六态（SPEC #1340）",
+    "url": "https://github.com/Newchanlun/NewChanlun/issues/1434"
+  },
+  {
+    "number": 1442,
+    "state": "OPEN",
+    "title": "[impl] TB-02-X Type2/3 N/A合成处置的获准实例（SPEC #1340）",
+    "url": "https://github.com/Newchanlun/NewChanlun/issues/1442"
+  },
+  {
+    "number": 1393,
+    "state": "OPEN",
+    "title": "[impl] TB-02-U 未建方向与全包含前缀的获准工程实例（SPEC #1340）",
+    "url": "https://github.com/Newchanlun/NewChanlun/issues/1393"
+  },
+  {
+    "number": 1150,
+    "state": "OPEN",
+    "title": "反向根 R2：显式根标记 expand——多根残留时禁止隐式认父",
+    "url": "https://github.com/Newchanlun/NewChanlun/issues/1150"
+  },
+  {
+    "number": 1399,
+    "state": "OPEN",
+    "title": "[impl] TB-07-B 历史seek与修订重算各自保留真实获知时间（SPEC #1340）",
+    "url": "https://github.com/Newchanlun/NewChanlun/issues/1399"
+  },
+  {
+    "number": 1435,
+    "state": "OPEN",
+    "title": "[impl] TB-02-M 小转大发生见证与高级结果（SPEC #1340）",
+    "url": "https://github.com/Newchanlun/NewChanlun/issues/1435"
+  },
+  {
+    "number": 1436,
+    "state": "OPEN",
+    "title": "[impl] TB-02-N 二类构成与无同级一类的补充分支（SPEC #1340）",
+    "url": "https://github.com/Newchanlun/NewChanlun/issues/1436"
+  },
+  {
+    "number": 1417,
+    "state": "OPEN",
+    "title": "[impl] TB-05-D 坏重保界而健康重实际新增（SPEC #1340）",
+    "url": "https://github.com/Newchanlun/NewChanlun/issues/1417"
+  },
+  {
+    "number": 1742,
+    "state": "OPEN",
+    "title": "[task] Deep Agents / LangGraph 与 pstack、Wayfinder、Sandcastle 独立集成试点",
+    "url": "https://github.com/Newchanlun/NewChanlun/issues/1742"
+  },
+  {
+    "number": 1431,
+    "state": "OPEN",
+    "title": "[impl] TB-02-I 同级别操作分解与只读多读法（SPEC #1340）",
+    "url": "https://github.com/Newchanlun/NewChanlun/issues/1431"
+  },
+  {
+    "number": 1438,
+    "state": "OPEN",
+    "title": "[impl] TB-02-P 区间套坐标与选父几何（SPEC #1340）",
+    "url": "https://github.com/Newchanlun/NewChanlun/issues/1438"
+  },
+  {
+    "number": 1382,
+    "state": "OPEN",
+    "title": "[impl] TB-08-A 历史与paper模式由同一入口使用受控adapter（SPEC #1340）",
+    "url": "https://github.com/Newchanlun/NewChanlun/issues/1382"
+  },
+  {
+    "number": 1432,
+    "state": "OPEN",
+    "title": "[impl] TB-02-J 结构配对、精确力度与 MACD 辅助（SPEC #1340）",
+    "url": "https://github.com/Newchanlun/NewChanlun/issues/1432"
+  },
+  {
+    "number": 1875,
+    "state": "OPEN",
+    "title": "[task] ci.yml 墙钟提速 2 倍（hillclimb，指纹不变，承接 #1722/#1588）",
+    "url": "https://github.com/Newchanlun/NewChanlun/issues/1875"
+  },
+  {
+    "number": 1383,
+    "state": "OPEN",
+    "title": "[impl] TB-09-A 目标部署预检实际拒绝旧写入口绕过（SPEC #1340）",
+    "url": "https://github.com/Newchanlun/NewChanlun/issues/1383"
+  },
+  {
+    "number": 1440,
+    "state": "OPEN",
+    "title": "[impl] TB-02-R 已裁Type1完整链与原始N/A事实（SPEC #1340）",
+    "url": "https://github.com/Newchanlun/NewChanlun/issues/1440"
+  },
+  {
+    "number": 1502,
+    "state": "OPEN",
+    "title": "[task] CLIProxy Claude/Antigravity 按额度重置时间调度并保持会话亲和",
+    "url": "https://github.com/Newchanlun/NewChanlun/issues/1502"
+  },
+  {
+    "number": 1400,
+    "state": "OPEN",
+    "title": "[impl] TB-08-B 具名场所只读能力与事实完整性接入会话（SPEC #1340）",
+    "url": "https://github.com/Newchanlun/NewChanlun/issues/1400"
+  },
+  {
+    "number": 1391,
+    "state": "OPEN",
+    "title": "[impl] TB-11-A 完整程序验收与旧关联票义务逐项对账（SPEC #1340）",
+    "url": "https://github.com/Newchanlun/NewChanlun/issues/1391"
+  },
+  {
+    "number": 1403,
+    "state": "OPEN",
+    "title": "[impl] TB-11-B 独立总验与主线证据满足整图关票门（SPEC #1340）",
+    "url": "https://github.com/Newchanlun/NewChanlun/issues/1403"
+  },
+  {
+    "number": 1401,
+    "state": "OPEN",
+    "title": "[impl] TB-09-B X换代必须隔离旧发送者并保留在途责任（SPEC #1340）",
+    "url": "https://github.com/Newchanlun/NewChanlun/issues/1401"
+  },
+  {
+    "number": 1415,
+    "state": "OPEN",
+    "title": "[impl] TB-03-D 受控事实的依据绑定与重内量约束（SPEC #1340）",
+    "url": "https://github.com/Newchanlun/NewChanlun/issues/1415"
+  },
+  {
+    "number": 1365,
+    "state": "OPEN",
+    "title": "TB-09 验收汇总：目标部署旧写入口隔离及X排他（SPEC #1340）",
+    "url": "https://github.com/Newchanlun/NewChanlun/issues/1365"
+  },
+  {
+    "number": 1381,
+    "state": "OPEN",
+    "title": "[impl] TB-07-A 完整历史输入推动全部权威域并生成可追溯回放（SPEC #1340）",
+    "url": "https://github.com/Newchanlun/NewChanlun/issues/1381"
+  },
+  {
+    "number": 1465,
+    "state": "OPEN",
+    "title": "🗺️ 订单事件作为缠论递归基底：合法构造与增量价值",
+    "url": "https://github.com/Newchanlun/NewChanlun/issues/1465"
+  },
+  {
+    "number": 1532,
+    "state": "CLOSED",
+    "title": "[grilling] FU-12 旧引擎/简化臂逐入口终态（#1323，新增）",
+    "url": "https://github.com/Newchanlun/NewChanlun/issues/1532"
+  },
+  {
+    "number": 1560,
+    "state": "CLOSED",
+    "title": "[grilling] FU-07 余项：系统风险条件 SR v1 阈值与退出动作表签署（#1323，P 类）",
+    "url": "https://github.com/Newchanlun/NewChanlun/issues/1560"
+  },
+  {
+    "number": 1527,
+    "state": "OPEN",
+    "title": "[task] 建立正式 producer/R4/CLI 恢复路径：R4 消费端与失败收据进 main（成功收据拆至 #1675）",
+    "url": "https://github.com/Newchanlun/NewChanlun/issues/1527"
+  },
+  {
+    "number": 1535,
+    "state": "CLOSED",
+    "title": "[grilling] FU-13 带仓迁移、回退、责任退休（#1323，新增）",
+    "url": "https://github.com/Newchanlun/NewChanlun/issues/1535"
+  },
+  {
+    "number": 1540,
+    "state": "CLOSED",
+    "title": "[grilling] FU-18 受控场所、账户、权限（#1323，新增）",
+    "url": "https://github.com/Newchanlun/NewChanlun/issues/1540"
+  },
+  {
+    "number": 1539,
+    "state": "CLOSED",
+    "title": "[grilling] FU-17 成交/持仓唯一真账与 crosswalk（#1323，新增）",
+    "url": "https://github.com/Newchanlun/NewChanlun/issues/1539"
+  },
+  {
+    "number": 1443,
+    "state": "OPEN",
+    "title": "[impl] TB-02-T 全分类组合、全对象变化与同源闭包汇验（SPEC #1340）",
+    "url": "https://github.com/Newchanlun/NewChanlun/issues/1443"
+  },
+  {
+    "number": 1550,
+    "state": "CLOSED",
+    "title": "[grilling] FU-19 #1304 接入映射（#1323，新增）",
+    "url": "https://github.com/Newchanlun/NewChanlun/issues/1550"
+  },
+  {
+    "number": 1790,
+    "state": "CLOSED",
+    "title": "[grilling] 订正 ADR 0054：中段出生不造成两序分叉（身份含前缀链），验收命题改为“出生构成窗口序后缀”",
+    "url": "https://github.com/Newchanlun/NewChanlun/issues/1790"
+  },
+  {
+    "number": 1460,
+    "state": "OPEN",
+    "title": "🗺️ 独立产品前端：完整结构、逐重经营、证据与历史联查",
+    "url": "https://github.com/Newchanlun/NewChanlun/issues/1460"
+  },
+  {
+    "number": 1654,
+    "state": "CLOSED",
+    "title": "[impl] #1627 承接：recursive_t A0Source::Stroke 名分与交易阶梯「笔=a0」注释对齐 zhongshu §2.1.1（C2、C3）",
+    "url": "https://github.com/Newchanlun/NewChanlun/issues/1654"
+  },
+  {
+    "number": 1561,
+    "state": "CLOSED",
+    "title": "[grilling] FU-04 余项：目标生产 profile P2 的场所、账户与首次发送授权（#1323，P 类）",
+    "url": "https://github.com/Newchanlun/NewChanlun/issues/1561"
+  },
+  {
+    "number": 1599,
+    "state": "CLOSED",
+    "title": "[grilling] 风控、退出、争用、成交、场所 profile、会计与活假设正本的被否候选改写为可选值（#1586 A-04~A-08/A-11/B-09）",
+    "url": "https://github.com/Newchanlun/NewChanlun/issues/1599"
+  },
+  {
+    "number": 1478,
+    "state": "CLOSED",
+    "title": "[grilling] 中枢外缘 GG/DD 的遍历范围落码与延伸测试的末成员端点（#1323，CC-017/ST-012/ST-016；#812 S-7 受影响代码清单补齐）",
+    "url": "https://github.com/Newchanlun/NewChanlun/issues/1478"
+  },
+  {
+    "number": 1530,
+    "state": "CLOSED",
+    "title": "[grilling] FU-08 生产入口与唯一 owner（#1323，新增）",
+    "url": "https://github.com/Newchanlun/NewChanlun/issues/1530"
+  },
+  {
+    "number": 1783,
+    "state": "CLOSED",
+    "title": "[grilling] bounded-layout/1 CC-007.development_batch entries 次序：窗口序 vs 出生序（ADR 0037 §二）",
+    "url": "https://github.com/Newchanlun/NewChanlun/issues/1783"
+  },
+  {
+    "number": 1601,
+    "state": "CLOSED",
+    "title": "[impl] 资金与下单基数接 funding-record：回放总投入、NT 生产 nav 与起始操作级别（#1586 C-01/C-02/C-22）",
+    "url": "https://github.com/Newchanlun/NewChanlun/issues/1601"
+  },
+  {
+    "number": 1590,
+    "state": "CLOSED",
+    "title": "[grilling] 重回 0 换向后三阶段状态、闸门进度与本金/成本账的延续或重置（承接 ADR 0040）",
+    "url": "https://github.com/Newchanlun/NewChanlun/issues/1590"
+  },
+  {
+    "number": 1602,
+    "state": "CLOSED",
+    "title": "[impl] 执行成本、风控与声部参数、场所 tick 与坏 tick 闸落版本化记录（#1586 C-06/C-08/C-17/C-18）",
+    "url": "https://github.com/Newchanlun/NewChanlun/issues/1602"
+  },
+  {
+    "number": 1786,
+    "state": "CLOSED",
+    "title": "[grilling] #1572 逐项结算：生产读法、v3 legacy 空集验收、运行时缓存清单归类",
+    "url": "https://github.com/Newchanlun/NewChanlun/issues/1786"
+  },
+  {
+    "number": 1567,
+    "state": "CLOSED",
+    "title": "[grilling] s-admission 首份锚的签发与无锚库接管（#1527）",
+    "url": "https://github.com/Newchanlun/NewChanlun/issues/1567"
+  },
+  {
+    "number": 1619,
+    "state": "CLOSED",
+    "title": "[grilling] #1406 WE-1/WE-2 映射原定义丢失，需考古恢复或重裁（承接 #1406）",
+    "url": "https://github.com/Newchanlun/NewChanlun/issues/1619"
+  },
+  {
+    "number": 1774,
+    "state": "CLOSED",
+    "title": "[grilling] P0 venue profile v2: sign replay and production cost inputs (#1323)",
+    "url": "https://github.com/Newchanlun/NewChanlun/issues/1774"
+  },
+  {
+    "number": 1352,
+    "state": "CLOSED",
+    "title": "[grilling] 完整退出授权与责任退休 policy（#1323，FU-07）",
+    "url": "https://github.com/Newchanlun/NewChanlun/issues/1352"
+  },
+  {
+    "number": 1533,
+    "state": "CLOSED",
+    "title": "[grilling] FU-10 逐 bar Classification→旁路/下钻→Chong（#1323，新增）",
+    "url": "https://github.com/Newchanlun/NewChanlun/issues/1533"
+  },
+  {
+    "number": 1644,
+    "state": "CLOSED",
+    "title": "[grilling] P6 来源审计持久台账与清单全闭包核验，与 #1481 方案三合审（#1612 切片 4）",
+    "url": "https://github.com/Newchanlun/NewChanlun/issues/1644"
+  },
+  {
+    "number": 1538,
+    "state": "CLOSED",
+    "title": "[grilling] FU-16 paper/live 与回放同核边界（#1323，新增）",
+    "url": "https://github.com/Newchanlun/NewChanlun/issues/1538"
+  },
+  {
+    "number": 1610,
+    "state": "CLOSED",
+    "title": "[decision] ADR 0040 三条 Codex 评审未答：降额版本绕过 ADR 0029 Σ责任≤cap、q_ref 解析不到逐重 Q、L1 缺冻结 tier_quantity",
+    "url": "https://github.com/Newchanlun/NewChanlun/issues/1610"
+  },
+  {
+    "number": 1627,
+    "state": "CLOSED",
+    "title": "[grilling] 正本冲突：qujiantao §4.5.2「延伸到笔」与 zhongshu §2.1、beichi.md:459（#1600 考古登记）",
+    "url": "https://github.com/Newchanlun/NewChanlun/issues/1627"
+  },
+  {
+    "number": 1678,
+    "state": "CLOSED",
+    "title": "[impl] health-monitor 自愈：服务未加载时改走 launchctl bootstrap（拆自 #1547 判据 4）",
+    "url": "https://github.com/Newchanlun/NewChanlun/issues/1678"
+  },
+  {
+    "number": 1347,
+    "state": "CLOSED",
+    "title": "[grilling] Type2/3 N/A 在递归证书中的合成处置（#1323，G-028）",
+    "url": "https://github.com/Newchanlun/NewChanlun/issues/1347"
+  },
+  {
+    "number": 1557,
+    "state": "CLOSED",
+    "title": "[grilling] FU-01/03 余项：共同 cap、固定 Q 与本金批次的数值签署（#1323，P 类）",
+    "url": "https://github.com/Newchanlun/NewChanlun/issues/1557"
+  },
+  {
+    "number": 1605,
+    "state": "CLOSED",
+    "title": "[impl] 回测与验收统计常数并入验收口径版本化记录（#1586 C-19）",
+    "url": "https://github.com/Newchanlun/NewChanlun/issues/1605"
+  },
+  {
+    "number": 1612,
+    "state": "CLOSED",
+    "title": "[grilling] S 写者增量路径是否升格为生产路径，及 #1488 范围拆分（承接 #1488 S4）",
+    "url": "https://github.com/Newchanlun/NewChanlun/issues/1612"
+  },
+  {
+    "number": 1534,
+    "state": "CLOSED",
+    "title": "[grilling] FU-11 逐 bar 事件、身份、生命周期合同（#1323，新增）",
+    "url": "https://github.com/Newchanlun/NewChanlun/issues/1534"
+  },
+  {
+    "number": 1536,
+    "state": "CLOSED",
+    "title": "[grilling] FU-14 完整历史数据与模型 profile（#1323，新增）",
+    "url": "https://github.com/Newchanlun/NewChanlun/issues/1536"
+  },
+  {
+    "number": 1537,
+    "state": "CLOSED",
+    "title": "[grilling] FU-15 双跑确定性、恢复、seek、AsKnown（#1323，新增）",
+    "url": "https://github.com/Newchanlun/NewChanlun/issues/1537"
+  },
+  {
+    "number": 1488,
+    "state": "CLOSED",
+    "title": "[impl] S 写者构造降阶：增量构造与去除作废中间根（承接 #1481 M7、#1419 S0b）",
+    "url": "https://github.com/Newchanlun/NewChanlun/issues/1488"
+  },
+  {
+    "number": 1489,
+    "state": "CLOSED",
+    "title": "[grilling] S 内容编码让每代新增可达节点有界：有序数组插入稳定、CC-007 只重发变化项、CC-054/056 增量表示（#1323，承接 #1481 阶段 0）",
+    "url": "https://github.com/Newchanlun/NewChanlun/issues/1489"
+  },
+  {
+    "number": 1621,
+    "state": "CLOSED",
+    "title": "[impl] #1406 遗留：known_at 绑定可审计时间与跨域时刻先后不变式",
+    "url": "https://github.com/Newchanlun/NewChanlun/issues/1621"
+  },
+  {
+    "number": 1568,
+    "state": "CLOSED",
+    "title": "[task] S init 在磁盘满时留下 4096 字节残留库，重试需人工清理",
+    "url": "https://github.com/Newchanlun/NewChanlun/issues/1568"
+  },
+  {
+    "number": 1531,
+    "state": "CLOSED",
+    "title": "[grilling] FU-09 严格判据唯一、级别同构锁（#1323，新增）",
+    "url": "https://github.com/Newchanlun/NewChanlun/issues/1531"
+  },
+  {
+    "number": 1351,
+    "state": "CLOSED",
+    "title": "[grilling] 首个具名场所账户与验证权限 profile（#1323，FU-04）",
+    "url": "https://github.com/Newchanlun/NewChanlun/issues/1351"
+  },
+  {
+    "number": 1598,
+    "state": "CLOSED",
+    "title": "[grilling] 量档、成本与历史模拟正本的选择项改写为可选值字段（#1586 A-01/A-09/A-10/B-05；A-02 拆至 #1677）",
+    "url": "https://github.com/Newchanlun/NewChanlun/issues/1598"
+  },
+  {
+    "number": 1343,
+    "state": "CLOSED",
+    "title": "[grilling] 同价极值端点及对象身份的确定性实例（#1323，G-002）",
+    "url": "https://github.com/Newchanlun/NewChanlun/issues/1343"
+  },
+  {
+    "number": 1490,
+    "state": "CLOSED",
+    "title": "[grilling] 线段第一种情况的确认时点、转折点两侧包含与段端门失败去向（071:30/32/42，承接 #1487，收 xianduan V-5）",
+    "url": "https://github.com/Newchanlun/NewChanlun/issues/1490"
+  },
+  {
+    "number": 1558,
+    "state": "CLOSED",
+    "title": "[grilling] FU-02 余项：量档与逐级容量 C(ℓ) 的数值签署（#1323，P 类）",
+    "url": "https://github.com/Newchanlun/NewChanlun/issues/1558"
+  },
+  {
+    "number": 1493,
+    "state": "CLOSED",
+    "title": "[impl] TB-02-X 线段第一种情况候选三态、转折点窗、先破判据与段端门 fail-closed（承接 #1490，修 #1487）",
+    "url": "https://github.com/Newchanlun/NewChanlun/issues/1493"
+  },
+  {
+    "number": 1354,
+    "state": "CLOSED",
+    "title": "[grilling] 成本停止 policy 实例与基底进阶证据（#1323，G-029）",
+    "url": "https://github.com/Newchanlun/NewChanlun/issues/1354"
+  },
+  {
+    "number": 1286,
+    "state": "CLOSED",
+    "title": "[grilling] G3：Python 背驰缺 Extreme——侧定位裁定（逐处对齐 / 冻结对照臂 / 退役）（#1278 批二首烤）",
+    "url": "https://github.com/Newchanlun/NewChanlun/issues/1286"
+  },
+  {
+    "number": 1404,
+    "state": "CLOSED",
+    "title": "[impl] TB-02-C 线段 seed 与第一种终结（SPEC #1340）",
+    "url": "https://github.com/Newchanlun/NewChanlun/issues/1404"
+  },
+  {
+    "number": 1047,
+    "state": "CLOSED",
+    "title": "[task] 模型路由表与「本体不下场」教义退役落文（三处文档同步）",
+    "url": "https://github.com/Newchanlun/NewChanlun/issues/1047"
+  },
+  {
+    "number": 1626,
+    "state": "CLOSED",
+    "title": "[impl] #1600 承接：trend_scope 与 tower_base 代码侧改读版本化字段，Lean 同步（Q-4、Q-6～Q-8、X-38、Q-2）",
+    "url": "https://github.com/Newchanlun/NewChanlun/issues/1626"
+  },
+  {
+    "number": 1394,
+    "state": "CLOSED",
+    "title": "[impl] TB-03-B 财务准备、责任先增与本地提交史（SPEC #1340）",
+    "url": "https://github.com/Newchanlun/NewChanlun/issues/1394"
+  },
+  {
+    "number": 1350,
+    "state": "CLOSED",
+    "title": "[grilling] 净额外效与部分成交费用的分配归属（#1323，FU-03）",
+    "url": "https://github.com/Newchanlun/NewChanlun/issues/1350"
+  },
+  {
+    "number": 1420,
+    "state": "CLOSED",
+    "title": "[impl] TB-02-W 扫描边界、续扫与恢复的获准实例（SPEC #1340）",
+    "url": "https://github.com/Newchanlun/NewChanlun/issues/1420"
+  },
+  {
+    "number": 1622,
+    "state": "CLOSED",
+    "title": "[impl] #1406 遗留：BindVoice 故障缝覆盖",
+    "url": "https://github.com/Newchanlun/NewChanlun/issues/1622"
+  },
+  {
+    "number": 1353,
+    "state": "CLOSED",
+    "title": "[grilling] 完整历史模拟执行模型：多重并发、混合订单与同 slot 次序（#1323，C10.3）",
+    "url": "https://github.com/Newchanlun/NewChanlun/issues/1353"
+  },
+  {
+    "number": 1405,
+    "state": "CLOSED",
+    "title": "[impl] TB-02-V 同价端点与极值身份的获准工程实例（SPEC #1340）",
+    "url": "https://github.com/Newchanlun/NewChanlun/issues/1405"
+  },
+  {
+    "number": 1463,
+    "state": "CLOSED",
+    "title": "[task] 级别递归归一化现状核验：生产路径、完整性缺口与产品能力",
+    "url": "https://github.com/Newchanlun/NewChanlun/issues/1463"
+  },
+  {
+    "number": 1392,
+    "state": "CLOSED",
+    "title": "[impl] TB-02-B 无同价竞争域的新笔成立、延伸与确认（SPEC #1340）",
+    "url": "https://github.com/Newchanlun/NewChanlun/issues/1392"
+  },
+  {
+    "number": 1339,
+    "state": "CLOSED",
+    "title": "[task] 完整多重赋格与结构状态可观察性：需求、验收范围及架构选型约束",
+    "url": "https://github.com/Newchanlun/NewChanlun/issues/1339"
+  },
+  {
+    "number": 1414,
+    "state": "CLOSED",
+    "title": "[impl] TB-02-D 已裁第二特征序列与带缺口终结（SPEC #1340）",
+    "url": "https://github.com/Newchanlun/NewChanlun/issues/1414"
+  },
+  {
+    "number": 1275,
+    "state": "CLOSED",
+    "title": "📋 SPEC：全仓转折/买卖点判定判据完全分类化（map #1226 实施总单）",
+    "url": "https://github.com/Newchanlun/NewChanlun/issues/1275"
+  },
+  {
+    "number": 1226,
+    "state": "CLOSED",
+    "title": "🗺️ 判据完全分类化：全仓转折/买卖点判定对齐缠师完全分类轴 + 全部重测（#1220/#1223 先例扩展）",
+    "url": "https://github.com/Newchanlun/NewChanlun/issues/1226"
+  },
+  {
+    "number": 1055,
+    "state": "CLOSED",
+    "title": "🗺️ 五候选架构深化：扫描唯一 / E2E-O 簿装配 / Massive 抓取（improve-codebase-architecture 2026-08-18）",
+    "url": "https://github.com/Newchanlun/NewChanlun/issues/1055"
+  },
+  {
+    "number": 1278,
+    "state": "CLOSED",
+    "title": "🗺️ 结构判据统一判别：全仓全侧判定点分类 + 结构判据正本 + 对拍锁网（#1226 续图）",
+    "url": "https://github.com/Newchanlun/NewChanlun/issues/1278"
+  },
+  {
+    "number": 1374,
+    "state": "CLOSED",
+    "title": "[impl] TB-03-A 非空持久重、固定 Q 与 Voice 身份（SPEC #1340）",
+    "url": "https://github.com/Newchanlun/NewChanlun/issues/1374"
+  },
+  {
+    "number": 1125,
+    "state": "CLOSED",
+    "title": "[grilling] pstack-lite 验收与试点退出标准",
+    "url": "https://github.com/Newchanlun/NewChanlun/issues/1125"
+  },
+  {
+    "number": 1418,
+    "state": "OPEN",
+    "title": "[impl] TB-07-D 回放验收报告器与生产改动回归锁上线（SPEC #1340）",
+    "url": "https://github.com/Newchanlun/NewChanlun/issues/1418"
+  },
+  {
+    "number": 1336,
+    "state": "CLOSED",
+    "title": "[task] GPT-6 独立完整新方案：多候选软件组织、接口与验证路径",
+    "url": "https://github.com/Newchanlun/NewChanlun/issues/1336"
+  },
+  {
+    "number": 900,
+    "state": "CLOSED",
+    "title": "[bug] rmove_dir 三臂与 fallback 四处缺陷：第三臂字段不保真 / 三中枢只比首尾 / 单子 fallback 改义 / 兼容缝未登记（追溯评审查出，主控逐条核实）",
+    "url": "https://github.com/Newchanlun/NewChanlun/issues/900"
+  },
+  {
+    "number": 1335,
+    "state": "CLOSED",
+    "title": "[task] GPT-6 独立全链扫描：新 Archify 后的调用、契约与测试锁取证",
+    "url": "https://github.com/Newchanlun/NewChanlun/issues/1335"
+  },
+  {
+    "number": 812,
+    "state": "CLOSED",
+    "title": "[grilling] 中枢的教义正本：7 组分歧 + E1 例外的退场条件（map #787 第二批 1/6）",
+    "url": "https://github.com/Newchanlun/NewChanlun/issues/812"
+  },
+  {
+    "number": 960,
+    "state": "CLOSED",
+    "title": "[grilling] 乙层目标模块图：按甲层口径定稿（map #787）",
+    "url": "https://github.com/Newchanlun/NewChanlun/issues/960"
+  },
+  {
+    "number": 1411,
+    "state": "OPEN",
+    "title": "[impl] TB-07-C 完整会话双进程与崩溃恢复保持全状态一致（SPEC #1340）",
+    "url": "https://github.com/Newchanlun/NewChanlun/issues/1411"
+  },
+  {
+    "number": 529,
+    "state": "CLOSED",
+    "title": "📒 塔内原生化长线：跨级链塔内原生终局（E2E-O + Consume_at + N0-N7）",
+    "url": "https://github.com/Newchanlun/NewChanlun/issues/529"
+  },
+  {
+    "number": 716,
+    "state": "CLOSED",
+    "title": "[task] L15 closed_loop 旧出场判定路径退役（map #695）",
+    "url": "https://github.com/Newchanlun/NewChanlun/issues/716"
+  },
+  {
+    "number": 1370,
+    "state": "CLOSED",
+    "title": "[impl] TB-01-A 正式Rust结构会话将同次计算的分型、持久快照和证据交到浏览器（SPEC #1340）",
+    "url": "https://github.com/Newchanlun/NewChanlun/issues/1370"
+  },
+  {
+    "number": 1371,
+    "state": "CLOSED",
+    "title": "[impl] TB-01-B 原始更正驱动原子撤回并在真实进程恢复后保留浏览器历史（SPEC #1340）",
+    "url": "https://github.com/Newchanlun/NewChanlun/issues/1371"
+  },
+  {
+    "number": 173,
+    "state": "CLOSED",
+    "title": "[task] T4 旧桥退役：typed_lookup/by_end/comparison 装置删除",
+    "url": "https://github.com/Newchanlun/NewChanlun/issues/173"
+  },
+  {
+    "number": 137,
+    "state": "CLOSED",
+    "title": "V4 出场路径 + 完全平仓 vs 短差出场分流审计",
+    "url": "https://github.com/Newchanlun/NewChanlun/issues/137"
+  },
+  {
+    "number": 1373,
+    "state": "CLOSED",
+    "title": "[impl] TB-02-A 已定方向与无同价竞争的包含及局部分型（SPEC #1340）",
+    "url": "https://github.com/Newchanlun/NewChanlun/issues/1373"
+  },
+  {
+    "number": 933,
+    "state": "CLOSED",
+    "title": "[task] 探针：BingX / Hyperliquid 股票永续的冲击成本——每一重能装多少钱（map #931）",
+    "url": "https://github.com/Newchanlun/NewChanlun/issues/933"
+  },
+  {
+    "number": 967,
+    "state": "CLOSED",
+    "title": "[map] tick 级 L0 观察臂：逐笔成交作 A0 的平行链（与现役 1min 并存）",
+    "url": "https://github.com/Newchanlun/NewChanlun/issues/967"
+  },
+  {
+    "number": 853,
+    "state": "CLOSED",
+    "title": "[grilling] 新验收判据的参数：成本下降速率的通过阈值、最小样本量、置信下界与频率合成（map #787，ADR 0015 裁定六毕业）",
+    "url": "https://github.com/Newchanlun/NewChanlun/issues/853"
+  },
+  {
+    "number": 1321,
+    "state": "CLOSED",
+    "title": "[grilling] 完整生产程序声明边界：M1 的 π 批量链、organic 赋格/声部链与 paper 执行链如何归名",
+    "url": "https://github.com/Newchanlun/NewChanlun/issues/1321"
+  },
+  {
+    "number": 961,
+    "state": "CLOSED",
+    "title": "[grilling] 丙层线的归位：按乙层模块图切线——六条旧线归位 + 新线开在哪（map #787）",
+    "url": "https://github.com/Newchanlun/NewChanlun/issues/961"
+  },
+  {
+    "number": 1116,
+    "state": "CLOSED",
+    "title": "[task] 安全：S_net cache 移除未校验 pickle 反序列化",
+    "url": "https://github.com/Newchanlun/NewChanlun/issues/1116"
+  },
+  {
+    "number": 733,
+    "state": "CLOSED",
+    "title": "[task] L41 #614 并线 ⚠ 尾六条清理批（map #695）",
+    "url": "https://github.com/Newchanlun/NewChanlun/issues/733"
+  },
+  {
+    "number": 890,
+    "state": "CLOSED",
+    "title": "[impl] S7：毛敞口接进决策路径（SPEC #847 拆出）",
+    "url": "https://github.com/Newchanlun/NewChanlun/issues/890"
+  },
+  {
+    "number": 804,
+    "state": "CLOSED",
+    "title": "[grilling] 总缝规则：级别差异只准进数据不准进分支——措辞、举证门、适用域与机械锁（map #787）",
+    "url": "https://github.com/Newchanlun/NewChanlun/issues/804"
+  },
+  {
+    "number": 300,
+    "state": "CLOSED",
+    "title": "[P0b] 证书索引 + cert-gated exit Lean 形式化（价值序 P0b，编排者指定 Opus 5 实装）",
+    "url": "https://github.com/Newchanlun/NewChanlun/issues/300"
+  },
+  {
+    "number": 862,
+    "state": "CLOSED",
+    "title": "[grilling] 力度的教义正本：两层结构 + 五套实现的处置（map #787，从 #814 D-1 拆出）",
+    "url": "https://github.com/Newchanlun/NewChanlun/issues/862"
+  },
+  {
+    "number": 1139,
+    "state": "CLOSED",
+    "title": "pstack-lite 10：完成 10 个真实任务试点并作 go/no-go 裁决",
+    "url": "https://github.com/Newchanlun/NewChanlun/issues/1139"
+  },
+  {
+    "number": 985,
+    "state": "CLOSED",
+    "title": "[grilling] G4 力度定义的三个数学订正：稳态假设 / 生产口径实为 TV / TV 对照候选（codex 对抗验证产物）",
+    "url": "https://github.com/Newchanlun/NewChanlun/issues/985"
+  },
+  {
+    "number": 951,
+    "state": "CLOSED",
+    "title": "[impl] theta_v0 PyO3 出口 + recursive_t 执刀（#808 退场条款落地，#787 关图前置）",
+    "url": "https://github.com/Newchanlun/NewChanlun/issues/951"
+  },
+  {
+    "number": 994,
+    "state": "CLOSED",
+    "title": "[grilling] TV 候选终裁：6.7:1 跨八市实证已达标——处决 / 降格为观测量 / 维持挂起（#985 开票条件达成）",
+    "url": "https://github.com/Newchanlun/NewChanlun/issues/994"
+  },
+  {
+    "number": 1085,
+    "state": "CLOSED",
+    "title": "📋 SPEC：五候选架构深化实施总单（map #1055 图内）——扫描唯一 / E2E-O 装配 / Massive 尾巴",
+    "url": "https://github.com/Newchanlun/NewChanlun/issues/1085"
+  },
+  {
+    "number": 799,
+    "state": "CLOSED",
+    "title": "[grilling] 递归式统一怎么落地：判定模块每级复用的形态、验收判据与例外（map #787）",
+    "url": "https://github.com/Newchanlun/NewChanlun/issues/799"
+  },
+  {
+    "number": 950,
+    "state": "CLOSED",
+    "title": "[grilling] 四条互不相通的下单链怎么统一：BSP 壳 / S_Θ / T 引擎 / 未接的 voice（map #787）",
+    "url": "https://github.com/Newchanlun/NewChanlun/issues/950"
+  },
+  {
+    "number": 911,
+    "state": "CLOSED",
+    "title": "[task] 探针：按补齐后的四条判据重测 rung 长度分布——N-6 退场条款到底触发没触发（map #787）",
+    "url": "https://github.com/Newchanlun/NewChanlun/issues/911"
+  },
+  {
+    "number": 1073,
+    "state": "CLOSED",
+    "title": "[impl] S10 残留：硬编码停止级拆除 + 注释订正重核（SPEC #847 拆出，验收线无票留痕）",
+    "url": "https://github.com/Newchanlun/NewChanlun/issues/1073"
+  },
+  {
+    "number": 1058,
+    "state": "CLOSED",
+    "title": "[grilling] 替代防线选型：P1 硬门退役后装配层不变量由什么接管",
+    "url": "https://github.com/Newchanlun/NewChanlun/issues/1058"
+  },
+  {
+    "number": 106,
+    "state": "CLOSED",
+    "title": "🗺️ 内在级别多视窗端到端：买卖点级别身份在 L0 上的独立体现",
+    "url": "https://github.com/Newchanlun/NewChanlun/issues/106"
+  },
+  {
+    "number": 836,
+    "state": "CLOSED",
+    "title": "[grilling] 总账口径：多区同时满仓算不算杠杆、毛账与净账的缺口怎么处置（map #787，#828 欠下三块之一）",
+    "url": "https://github.com/Newchanlun/NewChanlun/issues/836"
+  },
+  {
+    "number": 467,
+    "state": "CLOSED",
+    "title": "📋 SPEC（2026-07-28 重裁）：链门语义订正——π 单门双覆盖钉案 + 出场归因统计落可达臂（#433 交棒件）",
+    "url": "https://github.com/Newchanlun/NewChanlun/issues/467"
+  },
+  {
+    "number": 1372,
+    "state": "CLOSED",
+    "title": "[impl] TB-01-C 固定结构cut分页与断线续接在持续输入和独立重启下保持同源（SPEC #1340）",
+    "url": "https://github.com/Newchanlun/NewChanlun/issues/1372"
+  },
+  {
+    "number": 787,
+    "state": "CLOSED",
+    "title": "🗺️ 缠论量化交易系统统一架构正本：疆域测绘 → 三层推导链 → 线的归位",
+    "url": "https://github.com/Newchanlun/NewChanlun/issues/787"
+  },
+  {
+    "number": 1104,
+    "state": "CLOSED",
+    "title": "[task] 远端主线终验：Actions / fresh clone / worktree / main-rewritten 退场",
+    "url": "https://github.com/Newchanlun/NewChanlun/issues/1104"
+  },
+  {
+    "number": 1145,
+    "state": "CLOSED",
+    "title": "[grilling] 裁定 llm-as-a-verifier 的唯一职责与接入接缝",
+    "url": "https://github.com/Newchanlun/NewChanlun/issues/1145"
+  },
+  {
+    "number": 1100,
+    "state": "CLOSED",
+    "title": "🗺️ 远端 main 谱系扶正 → Sandcastle 调度复原",
+    "url": "https://github.com/Newchanlun/NewChanlun/issues/1100"
+  },
+  {
+    "number": 207,
+    "state": "CLOSED",
+    "title": "[task] T5a 方向退役：键域与链查询去方向分量 + shadow 重跑（#206 Q1）",
+    "url": "https://github.com/Newchanlun/NewChanlun/issues/207"
+  },
+  {
+    "number": 839,
+    "state": "CLOSED",
+    "title": "[grilling] 分区卷钱的机械在双向市场上长什么样：形态定型（map #787，四张会计票的前置）",
+    "url": "https://github.com/Newchanlun/NewChanlun/issues/839"
+  },
+  {
+    "number": 817,
+    "state": "CLOSED",
+    "title": "[grilling] 区间套的教义正本：6 组分歧，最烂一块，排最后（map #787 第二批 6/6）",
+    "url": "https://github.com/Newchanlun/NewChanlun/issues/817"
+  },
+  {
+    "number": 908,
+    "state": "CLOSED",
+    "title": "[task] 探针：NestInterval 那条链上被套的两个区间是不是父子——给 N-1「价格包含恒真」补有效域（map #787，喂 #817 N-1/N-6）",
+    "url": "https://github.com/Newchanlun/NewChanlun/issues/908"
+  },
+  {
+    "number": 987,
+    "state": "CLOSED",
+    "title": "📋 SPEC：力度接生产塔实施总单（map #974 交棒）——同色化 + 反查载体 + 收编切换 + 退役 + 基线",
+    "url": "https://github.com/Newchanlun/NewChanlun/issues/987"
+  },
+  {
+    "number": 1077,
+    "state": "CLOSED",
+    "title": "📋 SPEC：五候选架构深化实施总单（map #1055 交棒）——3a/3b 扫描唯一 + E2E-O 装配 + Massive/K4 抓取",
+    "url": "https://github.com/Newchanlun/NewChanlun/issues/1077"
+  },
+  {
+    "number": 814,
+    "state": "CLOSED",
+    "title": "[grilling] 背驰的教义正本：5 组分歧，4 条违规的收敛方向（map #787 第二批 3/6）",
+    "url": "https://github.com/Newchanlun/NewChanlun/issues/814"
+  },
+  {
+    "number": 592,
+    "state": "CLOSED",
+    "title": "[wayfinder] 有洞 frontier 产窗死活：真实数据 45% 占比的教义裁决输入（#578 发现）",
+    "url": "https://github.com/Newchanlun/NewChanlun/issues/592"
+  },
+  {
+    "number": 872,
+    "state": "CLOSED",
+    "title": "[task] 把已定的力度定义接到生产塔上：段→笔映射在生产链上不存在 + 五套实现收编 + 盘整背驰度量层（map #854 下游）",
+    "url": "https://github.com/Newchanlun/NewChanlun/issues/872"
+  },
+  {
+    "number": 808,
+    "state": "CLOSED",
+    "title": "[task] recursive_t 的退场条款：供电清单 + 什么时候可以死 + 谁负责杀（map #787）",
+    "url": "https://github.com/Newchanlun/NewChanlun/issues/808"
+  },
+  {
+    "number": 870,
+    "state": "CLOSED",
+    "title": "[bug] 下钻 92% 对不上：修完判据后重测 301 条并归因——多少是判据缺陷、多少是转折没定义完整、多少是市场事实",
+    "url": "https://github.com/Newchanlun/NewChanlun/issues/870"
+  },
+  {
+    "number": 691,
+    "state": "CLOSED",
+    "title": "N3 硬化二轮：p123 探针见证面与节拍参数覆盖 + 断言措辞 + enum 扩展守卫（#676 双轴 LOW/INFO）",
+    "url": "https://github.com/Newchanlun/NewChanlun/issues/691"
+  },
+  {
+    "number": 847,
+    "state": "CLOSED",
+    "title": "📋 SPEC：统一架构结构层实施总单（map #787 交棒）——重的实例化 + 操作级别挂载 + 区间套下钻接线",
+    "url": "https://github.com/Newchanlun/NewChanlun/issues/847"
+  },
+  {
+    "number": 309,
+    "state": "CLOSED",
+    "title": "[task] LEE M3 事件门控：Ledger_ℓ 只在 clock_ℓ 事件时点重估目标（设计文档 §D M3，订单流与 M0 分叉起點，独立评审强制）",
+    "url": "https://github.com/Newchanlun/NewChanlun/issues/309"
+  },
+  {
+    "number": 659,
+    "state": "CLOSED",
+    "title": "[grilling] 结构止损价名分重估：79 课降级后，pivot/ZG 止损价算什么",
+    "url": "https://github.com/Newchanlun/NewChanlun/issues/659"
+  },
+  {
+    "number": 784,
+    "state": "CLOSED",
+    "title": "wayfinder 正本自动进上下文：UserPromptSubmit hook（CC + Kimi 双侧）",
+    "url": "https://github.com/Newchanlun/NewChanlun/issues/784"
+  },
+  {
+    "number": 695,
+    "state": "CLOSED",
+    "title": "📒 欠账总账归口：68 笔逐笔终态（deprecated 核销 + 孤儿名分 + 现役处置）",
+    "url": "https://github.com/Newchanlun/NewChanlun/issues/695"
+  },
+  {
+    "number": 1028,
+    "state": "CLOSED",
+    "title": "[grilling] ADR 0013 裁定七重议：判据链完整后「逐级无空档」仍 92.7% 不成立（#870 二轮结论）",
+    "url": "https://github.com/Newchanlun/NewChanlun/issues/1028"
+  },
+  {
+    "number": 1133,
+    "state": "CLOSED",
+    "title": "pstack-lite 04：移植 pstack-blast-radius 并接结构图与靶向验证",
+    "url": "https://github.com/Newchanlun/NewChanlun/issues/1133"
+  },
+  {
+    "number": 1141,
+    "state": "CLOSED",
+    "title": "[task] CI rust-check 在 rust-lld 链接阶段连续 signal 7 / Bus error，cargo test 无法完成",
+    "url": "https://github.com/Newchanlun/NewChanlun/issues/1141"
+  },
+  {
+    "number": 1204,
+    "state": "CLOSED",
+    "title": "[grilling] BSP 点锚口径 + level-1 生成面：出场候选的 −δ 段在别处、锚点落在 δ 向子段（#1152 41/42，门维持关后的重评线）",
+    "url": "https://github.com/Newchanlun/NewChanlun/issues/1204"
+  },
+  {
+    "number": 268,
+    "state": "CLOSED",
+    "title": "📋 SPEC：翻向守卫事件化——只杀真翻向、不误杀出生对立（#261 裁定）",
+    "url": "https://github.com/Newchanlun/NewChanlun/issues/268"
+  },
+  {
+    "number": 949,
+    "state": "CLOSED",
+    "title": "[grilling] 三套 NT 实现并存怎么收：Rust+Python 在用 / Rust-native 不消费 BSP / 实盘臂是骨架（map #931）",
+    "url": "https://github.com/Newchanlun/NewChanlun/issues/949"
+  },
+  {
+    "number": 269,
+    "state": "CLOSED",
+    "title": "翻向守卫事件化：事件谓词 + 判据改造 + 红环转绿（T1）",
+    "url": "https://github.com/Newchanlun/NewChanlun/issues/269"
+  },
+  {
+    "number": 603,
+    "state": "CLOSED",
+    "title": "[wayfinder] 身份桥接放宽实装：档2 pending 槽排队 + 档1 暂认中枢严格同锚（#599 裁定）",
+    "url": "https://github.com/Newchanlun/NewChanlun/issues/603"
+  },
+  {
+    "number": 889,
+    "state": "CLOSED",
+    "title": "[impl] S6：#840 遗留三条——049:60 级别门控 / w_ℓ 注释 / TStage 命名（SPEC #847 拆出）",
+    "url": "https://github.com/Newchanlun/NewChanlun/issues/889"
+  },
+  {
+    "number": 927,
+    "state": "CLOSED",
+    "title": "[grilling] 订单接口：事件流 → 状态流（ADR 0018 裁定四的硬约束落地形态）",
+    "url": "https://github.com/Newchanlun/NewChanlun/issues/927"
+  },
+  {
+    "number": 926,
+    "state": "CLOSED",
+    "title": "[task] 勘察：生产三条成交回路的订单排序与寿命语义现状（喂 ADR 0018 裁定四的接口改动）",
+    "url": "https://github.com/Newchanlun/NewChanlun/issues/926"
+  },
+  {
+    "number": 838,
+    "state": "CLOSED",
+    "title": "[research] 缠师凭什么说「不可能发生」：反向持仓在原文系统里为何无法表示，本仓少了哪一样（map #787，喂 #834）",
+    "url": "https://github.com/Newchanlun/NewChanlun/issues/838"
+  },
+  {
+    "number": 809,
+    "state": "CLOSED",
+    "title": "[task] 总缝规则过筛：#789 的约 40 套口径逐条分类，清点第二批的真分歧面（map #787）",
+    "url": "https://github.com/Newchanlun/NewChanlun/issues/809"
+  },
+  {
+    "number": 842,
+    "state": "CLOSED",
+    "title": "[prototype] 分区卷钱的机械 v0：双向市场下的完整形态，逐条标注原文/推论/自定（map #787，本仓首张原型票）",
+    "url": "https://github.com/Newchanlun/NewChanlun/issues/842"
+  },
+  {
+    "number": 976,
+    "state": "CLOSED",
+    "title": "[task] G2 前探针：五套力度实现清点与差集（位置/IO/判定路径归属/#799 对照臂候选）",
+    "url": "https://github.com/Newchanlun/NewChanlun/issues/976"
+  },
+  {
+    "number": 793,
+    "state": "CLOSED",
+    "title": "[grilling] 教义收敛的方法与次序：40 套口径怎么收、谁说了算、正本放哪（map #787）",
+    "url": "https://github.com/Newchanlun/NewChanlun/issues/793"
+  },
+  {
+    "number": 336,
+    "state": "CLOSED",
+    "title": "R3：中枢事件机改消费塔链——废弃独立复算，单一真相源（#330 裁定，阻塞 #292）",
+    "url": "https://github.com/Newchanlun/NewChanlun/issues/336"
+  },
+  {
+    "number": 935,
+    "state": "CLOSED",
+    "title": "[grilling] 跳空四件事怎么处置：untradable 接停牌、两条路径时间戳语义不一、gap_ok 计数、缺口三分类（map #931）",
+    "url": "https://github.com/Newchanlun/NewChanlun/issues/935"
+  },
+  {
+    "number": 864,
+    "state": "CLOSED",
+    "title": "[task] 第三轮推导：把 72/30 课的两个动力学前提加进约束集重推——地基没进过前两轮（map #854）",
+    "url": "https://github.com/Newchanlun/NewChanlun/issues/864"
+  },
+  {
+    "number": 832,
+    "state": "CLOSED",
+    "title": "[research] 分区卷钱的机械：同级别分解多重赋格操作系统的原文系统性通读与重构（map #787，喂 #828）",
+    "url": "https://github.com/Newchanlun/NewChanlun/issues/832"
+  },
+  {
+    "number": 574,
+    "state": "CLOSED",
+    "title": "[grilling] T2 买卖点身份账本语义定义链（#465 裁定 A）",
+    "url": "https://github.com/Newchanlun/NewChanlun/issues/574"
+  },
+  {
+    "number": 402,
+    "state": "CLOSED",
+    "title": "[grilling] 活假设账本接生产三题：喂数节拍 / seg_c_full 复活 / Invalidated 唯一通道",
+    "url": "https://github.com/Newchanlun/NewChanlun/issues/402"
+  },
+  {
+    "number": 1117,
+    "state": "CLOSED",
+    "title": "[task] 安全：FengLiang 公网 daemon 默认链改用 TLS",
+    "url": "https://github.com/Newchanlun/NewChanlun/issues/1117"
+  },
+  {
+    "number": 813,
+    "state": "CLOSED",
+    "title": "[grilling] 笔与线段的教义正本：9 组分歧，两概念合并不拆（map #787 第二批 2/6）",
+    "url": "https://github.com/Newchanlun/NewChanlun/issues/813"
+  },
+  {
+    "number": 135,
+    "state": "CLOSED",
+    "title": "🗺️ 按级别管理出场：多级别仓位的独立出场机制",
+    "url": "https://github.com/Newchanlun/NewChanlun/issues/135"
+  },
+  {
+    "number": 157,
+    "state": "CLOSED",
+    "title": "[grilling] 独立反向声部准入语义：多重赋格双开的裁定",
+    "url": "https://github.com/Newchanlun/NewChanlun/issues/157"
+  },
+  {
+    "number": 1108,
+    "state": "CLOSED",
+    "title": "[task] 安全工作流按授权收敛：禁用 CodeQL + DevSkim artifact/findings gate",
+    "url": "https://github.com/Newchanlun/NewChanlun/issues/1108"
+  },
+  {
+    "number": 398,
+    "state": "CLOSED",
+    "title": "coverage.rs 拆分成果合并落地：三个 commit 从 worktree 合进 main（#359 关票依据订正）",
+    "url": "https://github.com/Newchanlun/NewChanlun/issues/398"
+  },
+  {
+    "number": 833,
+    "state": "CLOSED",
+    "title": "[grilling] 目标函数不同源：原文求(成本↓,筹码↑)、本仓求净值 Sharpe，验收标准用哪把尺子（map #787）",
+    "url": "https://github.com/Newchanlun/NewChanlun/issues/833"
+  },
+  {
+    "number": 463,
+    "state": "CLOSED",
+    "title": "[research] fill 两家族的名分：π 家族 vs v1/dual 是世代关系还是并列口径（#433 重构前置）",
+    "url": "https://github.com/Newchanlun/NewChanlun/issues/463"
+  },
+  {
+    "number": 439,
+    "state": "CLOSED",
+    "title": "[#117 评审浮出] admission.rs「纯移动/零语义改动」文档声明与 git 历史不符",
+    "url": "https://github.com/Newchanlun/NewChanlun/issues/439"
+  },
+  {
+    "number": 835,
+    "state": "CLOSED",
+    "title": "[grilling] 分区比例：各级别分多少筹码、按什么键分（map #787，#828 欠下三块之一）",
+    "url": "https://github.com/Newchanlun/NewChanlun/issues/835"
+  },
+  {
+    "number": 206,
+    "state": "CLOSED",
+    "title": "[grilling] T3 shadow 后续三裁：方向键粒度 / 多级零闭合归因与供给侧 / 出场侧旧桥去向",
+    "url": "https://github.com/Newchanlun/NewChanlun/issues/206"
+  },
+  {
+    "number": 773,
+    "state": "CLOSED",
+    "title": "[task] 工作流正本落盘 + AGENTS.md 挂指针（map #767 收口）",
+    "url": "https://github.com/Newchanlun/NewChanlun/issues/773"
+  },
+  {
+    "number": 776,
+    "state": "CLOSED",
+    "title": "[grilling] 并行吞吐：HITL 瓶颈与 batch 化（map #767）",
+    "url": "https://github.com/Newchanlun/NewChanlun/issues/776"
+  },
+  {
+    "number": 737,
+    "state": "CLOSED",
+    "title": "🗺️ 证书为什么没被放行：环节 × 性质拆账 + 修复路线裁定（原题「塔为什么产不出证书」已由本图证伪）",
+    "url": "https://github.com/Newchanlun/NewChanlun/issues/737"
+  },
+  {
+    "number": 815,
+    "state": "CLOSED",
+    "title": "[grilling] 走势类型与级别的教义正本：4 组分歧，含「级别是递归还是涌现簇」（map #787 第二批 4/6）",
+    "url": "https://github.com/Newchanlun/NewChanlun/issues/815"
+  },
+  {
+    "number": 743,
+    "state": "CLOSED",
+    "title": "[map] 端到端模块化：递归走势类型本体下的深模块收敛（fable 勘察 C1-C6 路线）",
+    "url": "https://github.com/Newchanlun/NewChanlun/issues/743"
+  },
+  {
+    "number": 834,
+    "state": "CLOSED",
+    "title": "[grilling] 跨区仲裁：两个级别同时给出相反动作时以谁为准（map #787，#828 欠下三块之一）",
+    "url": "https://github.com/Newchanlun/NewChanlun/issues/834"
+  },
+  {
+    "number": 411,
+    "state": "CLOSED",
+    "title": "pi_bsp_timing 全量数据集 233s：34 万 bar 跑满两年多，窗口化仅需 0.3s",
+    "url": "https://github.com/Newchanlun/NewChanlun/issues/411"
+  },
+  {
+    "number": 168,
+    "state": "CLOSED",
+    "title": "[grilling] 多视窗实现路线的执行切分：T 线票型与验收口径",
+    "url": "https://github.com/Newchanlun/NewChanlun/issues/168"
+  },
+  {
+    "number": 204,
+    "state": "CLOSED",
+    "title": "终验A 复审：条目 1/3/4 判定翻转核对（#174 收口）",
+    "url": "https://github.com/Newchanlun/NewChanlun/issues/204"
+  },
+  {
+    "number": 190,
+    "state": "CLOSED",
+    "title": "研究：工作线进化史——小转大、泥球关节点与未用的蓝图",
+    "url": "https://github.com/Newchanlun/NewChanlun/issues/190"
+  },
+  {
+    "number": 176,
+    "state": "CLOSED",
+    "title": "勘察：SplitLegLedger 接线代价（分账本+多级毛暴露递归+父仓冻结）",
+    "url": "https://github.com/Newchanlun/NewChanlun/issues/176"
+  },
+  {
+    "number": 278,
+    "state": "CLOSED",
+    "title": "🗺️ 多空双开与反向操作对齐：散装域处置 + 对冲腿名分 + 狭义短差（盘背减补）",
+    "url": "https://github.com/Newchanlun/NewChanlun/issues/278"
+  },
+  {
+    "number": 1014,
+    "state": "CLOSED",
+    "title": "影子评审：#905 三类「第一次回抽」显式化（commit 5387e06f32）",
+    "url": "https://github.com/Newchanlun/NewChanlun/issues/1014"
+  },
+  {
+    "number": 766,
+    "state": "CLOSED",
+    "title": "[task] #644 尾部收口批：tests.rs 重审 + 门控/对拍载体/登记订正（#758 MED/LOW）",
+    "url": "https://github.com/Newchanlun/NewChanlun/issues/766"
+  },
+  {
+    "number": 941,
+    "state": "CLOSED",
+    "title": "[grilling] 结构识别喂哪套 K 线：真实股价（有跳空）vs 永续 24/7（有休市 bar）vs 时段过滤（map #931）",
+    "url": "https://github.com/Newchanlun/NewChanlun/issues/941"
+  },
+  {
+    "number": 894,
+    "state": "CLOSED",
+    "title": "[task] 探针：M-1/M-2/M-4 三个触发率——多中枢盘整块占比 + 核心/外缘判据差集 + XZD 门死活（map #787，喂 #815 落地）",
+    "url": "https://github.com/Newchanlun/NewChanlun/issues/894"
+  },
+  {
+    "number": 251,
+    "state": "CLOSED",
+    "title": "[task] 卡点定位图：重跑 wf7 链归因，读出 verdict × first_gap × status 分布",
+    "url": "https://github.com/Newchanlun/NewChanlun/issues/251"
+  },
+  {
+    "number": 500,
+    "state": "CLOSED",
+    "title": "🗺️ 仓库世代名分单源化 + 按名分物理清算（卫生宪法图）",
+    "url": "https://github.com/Newchanlun/NewChanlun/issues/500"
+  },
+  {
+    "number": 138,
+    "state": "CLOSED",
+    "title": "出场机制精确盘点：#136/#137 审计是否已覆盖四种出场的级别感知",
+    "url": "https://github.com/Newchanlun/NewChanlun/issues/138"
+  },
+  {
+    "number": 225,
+    "state": "CLOSED",
+    "title": "[grilling] 处置判据：孤儿资产去向（接线/归档/删除）的裁定标准",
+    "url": "https://github.com/Newchanlun/NewChanlun/issues/225"
+  },
+  {
+    "number": 843,
+    "state": "CLOSED",
+    "title": "[research] 仓位管理的原文正本：机动资金比例、一次性买入、头寸上限与借贷禁令——博文 112 处「仓位」+ 天道第 7 章（10 节全未覆盖）（map #787，喂 #842）",
+    "url": "https://github.com/Newchanlun/NewChanlun/issues/843"
+  },
+  {
+    "number": 1173,
+    "state": "CLOSED",
+    "title": "[smoke] Sandcastle 官方链路真实烟测：agent:implement → Draft PR → agent:review",
+    "url": "https://github.com/Newchanlun/NewChanlun/issues/1173"
+  },
+  {
+    "number": 907,
+    "state": "CLOSED",
+    "title": "[task] 探针：成本门咬在哪一级——逐级算「平均买卖点间波幅 ÷（交易成本+误差）」（map #787，喂 #817 N-2 阶段二上限）",
+    "url": "https://github.com/Newchanlun/NewChanlun/issues/907"
+  },
+  {
+    "number": 105,
+    "state": "CLOSED",
+    "title": "[grilling] wf7 ✗ 后续方向：真链门覆盖率治理 / 门形态重议 / 接受存档",
+    "url": "https://github.com/Newchanlun/NewChanlun/issues/105"
+  },
+  {
+    "number": 250,
+    "state": "CLOSED",
+    "title": "🗺️ wf7 跨级链死活判定：稀薄是教义事实还是实现限制",
+    "url": "https://github.com/Newchanlun/NewChanlun/issues/250"
+  },
+  {
+    "number": 825,
+    "state": "CLOSED",
+    "title": "[task] 《市场天道》全书 OCR 入仓 + 全书索引 + 差集清单：完整性基础设施（map #787，喂 #812 与第二批全部概念票）",
+    "url": "https://github.com/Newchanlun/NewChanlun/issues/825"
+  },
+  {
+    "number": 868,
+    "state": "CLOSED",
+    "title": "[task] 纵向路线（改写版）：价格充分有效 ⟺ 路径空间完备？+ 有限链能证到多弱（map #854）",
+    "url": "https://github.com/Newchanlun/NewChanlun/issues/868"
+  },
+  {
+    "number": 856,
+    "state": "CLOSED",
+    "title": "[task] 探针：ED 的数据检验——确认延伸边上，后段的中枢停留级别分布是否真的一阶随机占优（map #854）",
+    "url": "https://github.com/Newchanlun/NewChanlun/issues/856"
+  },
+  {
+    "number": 942,
+    "state": "CLOSED",
+    "title": "[task] 实测：两家的隔离能否真正落地——需凭证/真实下单的 10 问（map #931）",
+    "url": "https://github.com/Newchanlun/NewChanlun/issues/942"
+  },
+  {
+    "number": 1106,
+    "state": "CLOSED",
+    "title": "[research] 私有仓 CodeQL / DevSkim：code scanning 未启用的授权与收敛路径",
+    "url": "https://github.com/Newchanlun/NewChanlun/issues/1106"
+  },
+  {
+    "number": 869,
+    "state": "CLOSED",
+    "title": "[grilling] 主命题的正式陈述：背驰是不是当下可判定 + 转折指什么 + 正式写法（map #854）",
+    "url": "https://github.com/Newchanlun/NewChanlun/issues/869"
+  },
+  {
+    "number": 895,
+    "state": "CLOSED",
+    "title": "[task] 勘察：复合走势为什么只带一个中枢——centers: vec![center] 是教义选择还是实现丢失（map #787，喂 #815 M-1 与 #870）",
+    "url": "https://github.com/Newchanlun/NewChanlun/issues/895"
+  },
+  {
+    "number": 828,
+    "state": "CLOSED",
+    "title": "[grilling] 三层耦合假设为什么打架：结构耦合 × 会计独立 × 分解空白（map #787）",
+    "url": "https://github.com/Newchanlun/NewChanlun/issues/828"
+  },
+  {
+    "number": 801,
+    "state": "CLOSED",
+    "title": "[research] 递归自相似系统的模块化方法论：找一套能落到本仓的（map #787，喂 #799）",
+    "url": "https://github.com/Newchanlun/NewChanlun/issues/801"
+  },
+  {
+    "number": 940,
+    "state": "CLOSED",
+    "title": "[task] 探针：回测喂真实股价 K 线 vs 实盘喂永续 24/7 K 线，跑出的笔和中枢差多少（map #931）",
+    "url": "https://github.com/Newchanlun/NewChanlun/issues/940"
+  },
+  {
+    "number": 854,
+    "state": "CLOSED",
+    "title": "🗺️ 力度与背驰的精确定义：测度论重建与「背驰必转折」的可证性",
+    "url": "https://github.com/Newchanlun/NewChanlun/issues/854"
+  },
+  {
+    "number": 436,
+    "state": "CLOSED",
+    "title": "[#119 评审浮出] #114 编号复用导致 git log --grep 定位失效（票据溯源风险）",
+    "url": "https://github.com/Newchanlun/NewChanlun/issues/436"
+  },
+  {
+    "number": 932,
+    "state": "CLOSED",
+    "title": "[task] 实测：Binance 子账户能不能当「重」的隔离槽——股票永续可用性 + 配额 + 强平边界（map #931）",
+    "url": "https://github.com/Newchanlun/NewChanlun/issues/932"
+  },
+  {
+    "number": 740,
+    "state": "CLOSED",
+    "title": "[grilling] missing_cert 成因定案 + 修复路线裁定（map #737）",
+    "url": "https://github.com/Newchanlun/NewChanlun/issues/740"
+  },
+  {
+    "number": 614,
+    "state": "CLOSED",
+    "title": "[task] 双线并轨工程：kimi-nest-mainline-20260717 与 main 收束为单一现役线",
+    "url": "https://github.com/Newchanlun/NewChanlun/issues/614"
+  },
+  {
+    "number": 1119,
+    "state": "CLOSED",
+    "title": "🗺️ Prime Agent pstack-lite：Matt Wayfinder 总控下的精选移植",
+    "url": "https://github.com/Newchanlun/NewChanlun/issues/1119"
+  },
+  {
+    "number": 830,
+    "state": "CLOSED",
+    "title": "[research] 递归怎么终止、循环定义怎么破：最低级别中枢的原文考据（map #787，喂 #812 S-5）",
+    "url": "https://github.com/Newchanlun/NewChanlun/issues/830"
+  },
+  {
+    "number": 734,
+    "state": "CLOSED",
+    "title": "[task] L46 ADR 0001 文本债修订（含 L13 两项 + L12 加注，map #695）",
+    "url": "https://github.com/Newchanlun/NewChanlun/issues/734"
+  },
+  {
+    "number": 162,
+    "state": "CLOSED",
+    "title": "[research] XZD 通道在主线 m8_e2e 为何 0 笔：L1 C3 硬门惰性根因",
+    "url": "https://github.com/Newchanlun/NewChanlun/issues/162"
+  },
+  {
+    "number": 394,
+    "state": "CLOSED",
+    "title": "chi_open_gate_lcb 死代码处置：删 / 接线 / 登记（原 map #390 子票，前提塌后改造）",
+    "url": "https://github.com/Newchanlun/NewChanlun/issues/394"
+  },
+  {
+    "number": 356,
+    "state": "CLOSED",
+    "title": "级别帽深层缺口：下单量 t_lee 未经 Σcap_ℓ 二次裁剪（#351 浮出，账本已裁物理未裁）",
+    "url": "https://github.com/Newchanlun/NewChanlun/issues/356"
+  },
+  {
+    "number": 61,
+    "state": "CLOSED",
+    "title": "[research] χ 量纲三方案（绝对额/收益率/归一化）教义与数据证据收集",
+    "url": "https://github.com/Newchanlun/NewChanlun/issues/61"
+  },
+  {
+    "number": 823,
+    "state": "CLOSED",
+    "title": "[research] 中枢发展情景全集：全部定理通读 + 博文/天道/仓内三方对照（map #787，喂 #812）",
+    "url": "https://github.com/Newchanlun/NewChanlun/issues/823"
+  },
+  {
+    "number": 1129,
+    "state": "CLOSED",
+    "title": "SPEC：Prime Agent pstack-lite 首批精选移植",
+    "url": "https://github.com/Newchanlun/NewChanlun/issues/1129"
+  },
+  {
+    "number": 805,
+    "state": "CLOSED",
+    "title": "[research] 三处递归是不是同一个逻辑：按层切开看 T / 区间套下钻 / 算子 N 的同构性（map #787，喂 #799）",
+    "url": "https://github.com/Newchanlun/NewChanlun/issues/805"
+  },
+  {
+    "number": 68,
+    "state": "CLOSED",
+    "title": "[task] C1 双仓生产接线（nautilus 真相源 NETTING→dual、TW 接线、F-01 deprecated 处置）",
+    "url": "https://github.com/Newchanlun/NewChanlun/issues/68"
+  },
+  {
+    "number": 840,
+    "state": "CLOSED",
+    "title": "[research] 三阶段/多重赋格/立体性各自挂在哪根轴上：横向同级别分解 vs 纵向区间套的表述分离（map #787，喂 #839）",
+    "url": "https://github.com/Newchanlun/NewChanlun/issues/840"
+  },
+  {
+    "number": 421,
+    "state": "CLOSED",
+    "title": "📋 SPEC：活假设账本接生产（三前置已清）",
+    "url": "https://github.com/Newchanlun/NewChanlun/issues/421"
+  },
+  {
+    "number": 193,
+    "state": "CLOSED",
+    "title": "Spec：会计层对准已有蓝图（地图 #174 出口，2026-07-23 定稿）",
+    "url": "https://github.com/Newchanlun/NewChanlun/issues/193"
+  },
+  {
+    "number": 209,
+    "state": "CLOSED",
+    "title": "修复 fold：一类候选关全部同级本仓腿（S7 级别内全平的实装）",
+    "url": "https://github.com/Newchanlun/NewChanlun/issues/209"
+  },
+  {
+    "number": 945,
+    "state": "CLOSED",
+    "title": "[task] 勘察：生产下单层消费哪条买卖点链——笔中枢还是线段中枢（map #931）",
+    "url": "https://github.com/Newchanlun/NewChanlun/issues/945"
+  },
+  {
+    "number": 287,
+    "state": "CLOSED",
+    "title": "[grilling] 持仓阶段机对齐 spec：两层成本 + 阶段源唯一 + 转移规则 + 0 成本后短差行为",
+    "url": "https://github.com/Newchanlun/NewChanlun/issues/287"
+  },
+  {
+    "number": 154,
+    "state": "CLOSED",
+    "title": "端到端覆盖盘点：现有代码距完整端到端（含独立多空双开）差什么",
+    "url": "https://github.com/Newchanlun/NewChanlun/issues/154"
+  },
+  {
+    "number": 396,
+    "state": "CLOSED",
+    "title": "interp.rs fold 双驱动合并：规则2 输入源提为参数，消除 67 行人工同步",
+    "url": "https://github.com/Newchanlun/NewChanlun/issues/396"
+  },
+  {
+    "number": 768,
+    "state": "CLOSED",
+    "title": "[research] 三方口径差异清单：视频 vs skill 正文 vs ask-matt（map #767）",
+    "url": "https://github.com/Newchanlun/NewChanlun/issues/768"
+  },
+  {
+    "number": 126,
+    "state": "CLOSED",
+    "title": "🗺️ 塔侧跨级链增产：让塔产出更多多级确认事件",
+    "url": "https://github.com/Newchanlun/NewChanlun/issues/126"
+  },
+  {
+    "number": 59,
+    "state": "CLOSED",
+    "title": "🗺️ 全定义策略端到端落地收口：v1 真链验收 + 剩余接线",
+    "url": "https://github.com/Newchanlun/NewChanlun/issues/59"
+  },
+  {
+    "number": 863,
+    "state": "CLOSED",
+    "title": "[task] 探针：反向规律 RD 的陈述与对照检验——ED 倒过来那条能不能立（map #854）",
+    "url": "https://github.com/Newchanlun/NewChanlun/issues/863"
+  },
+  {
+    "number": 232,
+    "state": "CLOSED",
+    "title": "[spec] V3 NestLifecycleBook 重建：活假设状态机（实装卡+勘误+#78 修复合并规格，#231 实装依据）",
+    "url": "https://github.com/Newchanlun/NewChanlun/issues/232"
+  },
+  {
+    "number": 802,
+    "state": "CLOSED",
+    "title": "[task] 区间套的纵向下钻是不是真递归：rung 恒真是合理省略还是递归缺失（map #787，喂 #799）",
+    "url": "https://github.com/Newchanlun/NewChanlun/issues/802"
+  },
+  {
+    "number": 769,
+    "state": "CLOSED",
+    "title": "[grilling] 原型票在本仓的形态与准入判据：0/0 怎么破（map #767）",
+    "url": "https://github.com/Newchanlun/NewChanlun/issues/769"
+  },
+  {
+    "number": 756,
+    "state": "CLOSED",
+    "title": "📋 SPEC：端到端模块化（map #743）——递归走势类型本体下的深模块收敛实施总单",
+    "url": "https://github.com/Newchanlun/NewChanlun/issues/756"
+  },
+  {
+    "number": 174,
+    "state": "CLOSED",
+    "title": "出场通道结构收敛（ADR 0001 教义-生产接线图）",
+    "url": "https://github.com/Newchanlun/NewChanlun/issues/174"
+  },
+  {
+    "number": 109,
+    "state": "CLOSED",
+    "title": "📋 SPEC：内在级别多视窗端到端（级别层叠投影）",
+    "url": "https://github.com/Newchanlun/NewChanlun/issues/109"
+  },
+  {
+    "number": 597,
+    "state": "CLOSED",
+    "title": "[wayfinder:map] PanLive 全层级完成前可见（L2/L3 + 身份桥接语义）",
+    "url": "https://github.com/Newchanlun/NewChanlun/issues/597"
+  },
+  {
+    "number": 219,
+    "state": "CLOSED",
+    "title": "[spec] owner 归属修正实装（路线 B）：归属/确认分层 + 二类载体一类点锚 + 两族判同（#218 实装依据）",
+    "url": "https://github.com/Newchanlun/NewChanlun/issues/219"
+  }
+]

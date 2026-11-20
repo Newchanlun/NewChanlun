@@ -1,0 +1,134 @@
+[
+  {
+    "number": 2141,
+    "state": "OPEN",
+    "title": "[grilling] 中枢结算的两处未裁边界：关节极值不等的反向回抽算不算已证、首个不重叠段本身是离开时怎么结算（#1496 前置，退场条件②）",
+    "url": "https://github.com/Newchanlun/NewChanlun/issues/2141"
+  },
+  {
+    "number": 1496,
+    "state": "OPEN",
+    "title": "[impl] 中枢两段式结算 R5：离开后看回抽，回则延伸、不回则破坏（承接 zhongshu.md §9 R5、A-ST-013-02 后半）",
+    "url": "https://github.com/Newchanlun/NewChanlun/issues/1496"
+  },
+  {
+    "number": 1429,
+    "state": "OPEN",
+    "title": "[impl] TB-02-H 九段升级、自然递归与全级同判据（SPEC #1340）",
+    "url": "https://github.com/Newchanlun/NewChanlun/issues/1429"
+  },
+  {
+    "number": 1467,
+    "state": "OPEN",
+    "title": "[research] 订单基底候选构造与合法性证据",
+    "url": "https://github.com/Newchanlun/NewChanlun/issues/1467"
+  },
+  {
+    "number": 1478,
+    "state": "CLOSED",
+    "title": "[grilling] 中枢外缘 GG/DD 的遍历范围落码与延伸测试的末成员端点（#1323，CC-017/ST-012/ST-016；#812 S-7 受影响代码清单补齐）",
+    "url": "https://github.com/Newchanlun/NewChanlun/issues/1478"
+  },
+  {
+    "number": 1426,
+    "state": "OPEN",
+    "title": "[impl] TB-02-G 完成走势三分与形成/完成分轴（SPEC #1340）",
+    "url": "https://github.com/Newchanlun/NewChanlun/issues/1426"
+  },
+  {
+    "number": 2114,
+    "state": "OPEN",
+    "title": "[grilling] 趋势形成的正式确认时点：后中枢仍开放时的严格分离算不算已形成（#1426 独审发现）",
+    "url": "https://github.com/Newchanlun/NewChanlun/issues/2114"
+  },
+  {
+    "number": 1465,
+    "state": "OPEN",
+    "title": "🗺️ 订单事件作为缠论递归基底：合法构造与增量价值",
+    "url": "https://github.com/Newchanlun/NewChanlun/issues/1465"
+  },
+  {
+    "number": 1014,
+    "state": "CLOSED",
+    "title": "影子评审：#905 三类「第一次回抽」显式化（commit 5387e06f32）",
+    "url": "https://github.com/Newchanlun/NewChanlun/issues/1014"
+  },
+  {
+    "number": 944,
+    "state": "CLOSED",
+    "title": "[task] 探针：24.6% 端点失配落在买卖点上还是震荡端点上——ADR 0020 裁定二的验证（map #931）",
+    "url": "https://github.com/Newchanlun/NewChanlun/issues/944"
+  },
+  {
+    "number": 498,
+    "state": "CLOSED",
+    "title": "逐笔归因审计：#486 trades 差异 → 新增三类点信号链（090 逐条归因）",
+    "url": "https://github.com/Newchanlun/NewChanlun/issues/498"
+  },
+  {
+    "number": 144,
+    "state": "CLOSED",
+    "title": "研究：周期同构猜想的条件化证明——次级别走势类型在父级别是否必有买卖点投影",
+    "url": "https://github.com/Newchanlun/NewChanlun/issues/144"
+  },
+  {
+    "number": 290,
+    "state": "CLOSED",
+    "title": "中枢侧相切旧口径残余三处：golden 重锚 + a_center_v0 + a_level_fsm（#246 全域另案）",
+    "url": "https://github.com/Newchanlun/NewChanlun/issues/290"
+  },
+  {
+    "number": 1323,
+    "state": "OPEN",
+    "title": "🗺️ 完整生产程序接线总单：#787 严格多重赋格落地 → 旧实现收敛 → 历史回放与 paper 同核",
+    "url": "https://github.com/Newchanlun/NewChanlun/issues/1323"
+  },
+  {
+    "number": 846,
+    "state": "CLOSED",
+    "title": "[task] 探针：一类点向下递归是不是真的无中断——逐级找一类点/类一类点的实测（map #787，验证 ADR 0013 裁定七）",
+    "url": "https://github.com/Newchanlun/NewChanlun/issues/846"
+  },
+  {
+    "number": 257,
+    "state": "CLOSED",
+    "title": "[task] 形式化缺口补齐：Lift 实现 + Context 展开 + 中枢内蕴含证明（六项全做）",
+    "url": "https://github.com/Newchanlun/NewChanlun/issues/257"
+  },
+  {
+    "number": 793,
+    "state": "CLOSED",
+    "title": "[grilling] 教义收敛的方法与次序：40 套口径怎么收、谁说了算、正本放哪（map #787）",
+    "url": "https://github.com/Newchanlun/NewChanlun/issues/793"
+  },
+  {
+    "number": 789,
+    "state": "CLOSED",
+    "title": "[task] 重复实现普查：七概念在仓内各实现了几遍、是否等价（map #787）",
+    "url": "https://github.com/Newchanlun/NewChanlun/issues/789"
+  },
+  {
+    "number": 812,
+    "state": "CLOSED",
+    "title": "[grilling] 中枢的教义正本：7 组分歧 + E1 例外的退场条件（map #787 第二批 1/6）",
+    "url": "https://github.com/Newchanlun/NewChanlun/issues/812"
+  },
+  {
+    "number": 250,
+    "state": "CLOSED",
+    "title": "🗺️ wf7 跨级链死活判定：稀薄是教义事实还是实现限制",
+    "url": "https://github.com/Newchanlun/NewChanlun/issues/250"
+  },
+  {
+    "number": 854,
+    "state": "CLOSED",
+    "title": "🗺️ 力度与背驰的精确定义：测度论重建与「背驰必转折」的可证性",
+    "url": "https://github.com/Newchanlun/NewChanlun/issues/854"
+  },
+  {
+    "number": 787,
+    "state": "CLOSED",
+    "title": "🗺️ 缠论量化交易系统统一架构正本：疆域测绘 → 三层推导链 → 线的归位",
+    "url": "https://github.com/Newchanlun/NewChanlun/issues/787"
+  }
+]

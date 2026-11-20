@@ -1,0 +1,20 @@
+[
+  {
+    "number": 2141,
+    "state": "OPEN",
+    "title": "[grilling] 中枢结算的两处未裁边界：关节极值不等的反向回抽算不算已证、首个不重叠段本身是离开时怎么结算（#1496 前置，退场条件②）",
+    "url": "https://github.com/Newchanlun/NewChanlun/issues/2141"
+  },
+  {
+    "number": 1272,
+    "state": "CLOSED",
+    "title": "[research] 三买后结构分段：离开段+回抽+再离开是否同属一个段 c？c 的边界与三买点在 c 中的位置（#1226 线，037 课）",
+    "url": "https://github.com/Newchanlun/NewChanlun/issues/1272"
+  },
+  {
+    "number": 666,
+    "state": "CLOSED",
+    "title": "[grilling] N4 事件↔BSP 稳定身份边形态裁定（map #529）",
+    "url": "https://github.com/Newchanlun/NewChanlun/issues/666"
+  }
+]

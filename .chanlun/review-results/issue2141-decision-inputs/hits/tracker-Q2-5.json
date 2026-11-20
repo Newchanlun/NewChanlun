@@ -1,0 +1,20 @@
+[
+  {
+    "number": 1496,
+    "state": "OPEN",
+    "title": "[impl] 中枢两段式结算 R5：离开后看回抽，回则延伸、不回则破坏（承接 zhongshu.md §9 R5、A-ST-013-02 后半）",
+    "url": "https://github.com/Newchanlun/NewChanlun/issues/1496"
+  },
+  {
+    "number": 2141,
+    "state": "OPEN",
+    "title": "[grilling] 中枢结算的两处未裁边界：关节极值不等的反向回抽算不算已证、首个不重叠段本身是离开时怎么结算（#1496 前置，退场条件②）",
+    "url": "https://github.com/Newchanlun/NewChanlun/issues/2141"
+  },
+  {
+    "number": 1424,
+    "state": "OPEN",
+    "title": "[impl] TB-02-F 相邻中枢发展与扩展关系（SPEC #1340）",
+    "url": "https://github.com/Newchanlun/NewChanlun/issues/1424"
+  }
+]
