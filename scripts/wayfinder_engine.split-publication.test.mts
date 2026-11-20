@@ -1,15 +1,36 @@
-import { test } from 'node:test';
+import { describe, test } from 'node:test';
 import assert from 'node:assert/strict';
-import { spawnSync } from 'node:child_process';
+import { execFile } from 'node:child_process';
 import { mkdtempSync, mkdirSync, readFileSync, writeFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { specBodyDigest, specRulingBody, splitTicketBody } from './wayfinder_engine.mts';
 
+const runNode = (root: string): Promise<{ status: number | null; stdout: string; stderr: string }> =>
+  new Promise((resolve) => {
+    execFile(
+      process.execPath,
+      ['--experimental-strip-types', 'scripts/wayfinder_engine.mts', '--live', '--once'],
+      {
+        cwd: root,
+        env: { ...process.env, PATH: `${root}:${process.env.PATH}`, FIXTURE: root, GH_REPO: 'fixture/repo', WAYFINDER_ORCHESTRATOR: 'fixture', WAYFINDER_GH_MAX_ATTEMPTS: '1' },
+        encoding: 'utf8',
+        timeout: 30000,
+      },
+      (err, stdout, stderr) => {
+        const code = err && typeof (err as NodeJS.ErrnoException & { code?: unknown }).code === 'number'
+          ? (err as unknown as { code: number }).code
+          : err ? 1 : 0;
+        resolve({ status: code, stdout: stdout ?? '', stderr: stderr ?? '' });
+      },
+    );
+  });
+
 const repo = new URL('../', import.meta.url);
+describe('split-publication transactions', { concurrency: 4 }, () => {
 for (const label of ['sandcastle', 'deepagents:queue']) {
   for (const fault of ['create', 'link', 'link-ack', 'edge', 'edge-ack', 'block', 'receipt', 'publish', 'title-only', 'title-only-edge', 'title-only-held', 'stale-body', 'forged', 'parked', 'legacy-race', 'unknown-dependency', 'cycle', 'none']) {
-    test(`${label} 拆票事务：${fault} 中断后恢复，依赖完整才发布且不重复创建`, () => {
+    test(`${label} 拆票事务：${fault} 中断后恢复，依赖完整才发布且不重复创建`, async () => {
       const root = mkdtempSync(join(tmpdir(), 'split-publication-'));
       try {
         mkdirSync(join(root, 'scripts')); mkdirSync(join(root, '.sandcastle'));
@@ -43,25 +64,25 @@ else if(a[0]==='api') {
  else {console.error('unexpected '+cmd);process.exit(74);}
 } else {console.error('unexpected '+cmd);process.exit(74);}
 `, {mode:0o755});
-        const run = () => spawnSync(process.execPath, ['--experimental-strip-types','scripts/wayfinder_engine.mts','--live','--once'],{cwd:root,env:{...process.env,PATH:`${root}:${process.env.PATH}`,FIXTURE:root,GH_REPO:'fixture/repo',WAYFINDER_ORCHESTRATOR:'fixture',WAYFINDER_GH_MAX_ATTEMPTS:'1'},encoding:'utf8',timeout:30000});
+        const run = () => runNode(root);
         const read = () => JSON.parse(readFileSync(join(root,'state.json'),'utf8'));
         const initial = JSON.parse(readFileSync(join(root,'state.json'),'utf8'));
-        const first=run(); assert.equal(first.status,0,first.stderr);
+        const first=await run(); assert.equal(first.status,0,first.stderr);
         assert.deepEqual(read().violations,[], '依赖不完整期间已经可消费');
         if (fault==='title-only-held') {
           for (let n=0;n<2;n++) {
             const held=read().issues[0];
             assert.deepEqual(held.labels,['deepagents','deepagents:queue'],'迁移不得摘除在途持有的放行标签');
             assert.equal(held.body,'原实施票的额外验收条件','持有期间不改实施合同');
-            if(n===0) run();
+            if(n===0) await run();
           }
           // 生产释放（executor release，排空后）只摘镜像；放行标签与票面其他部分不动。
           const released=read(); released.issues[0].labels=released.issues[0].labels.filter((l: string)=>l!=='deepagents'); writeFileSync(join(root,'state.json'),JSON.stringify(released));
-          for(let n=0;n<3;n++) run();
+          for(let n=0;n<3;n++) await run();
           assert.equal(read().issues.length,2,'释放后恢复迁移，不重复建票');
           if (label==='sandcastle') {
             assert.equal(read().issues[0].body,'原实施票的额外验收条件','旧入口未冻结时释放后也不改写');
-            assert.match(run().stderr,/旧 Sandcastle 入口未冻结/);
+            assert.match((await run()).stderr,/旧 Sandcastle 入口未冻结/);
             return;
           }
           assert.match(read().issues[0].body,/wayfinder-published:/,'释放后完成发布');
@@ -75,7 +96,7 @@ else if(a[0]==='api') {
           // 旧 Sandcastle 入口未冻结：要改票面的迁移一律不做，票面原样；旧消费者此时领走的票不会被改写。
           assert.match(first.stdout+first.stderr,/旧 Sandcastle 入口未冻结/);
           const before = initial;
-          for(let n=0;n<2;n++){const r=run();assert.equal(r.status,0,r.stderr);}
+          for(let n=0;n<2;n++){const r=await run();assert.equal(r.status,0,r.stderr);}
           const after=read();
           for (const i of after.issues as Array<{number:number;body:string;labels:string[]}>) {
             const was=(before.issues as Array<{number:number;body:string}>).find(b=>b.number===i.number);
@@ -96,7 +117,7 @@ else if(a[0]==='api') {
         }
         if (fault==='block') assert.ok(read().issues.every((i: {labels:string[]}) => i.labels.length===0),'当前 BLOCK 不得发布');
         const s=read(); s.blocked=false; writeFileSync(join(root,'state.json'),JSON.stringify(s));
-        for(let n=0;n<3;n++){const r=run();assert.equal(r.status,0,r.stderr);assert.doesNotMatch(r.stderr,/unexpected|执行失败|释放失败|拉取 tracker 状态失败/);}
+        for(let n=0;n<3;n++){const r=await run();assert.equal(r.status,0,r.stderr);assert.doesNotMatch(r.stderr,/unexpected|执行失败|释放失败|拉取 tracker 状态失败/);}
         const done=read(); assert.equal(done.issues.length,2,'创建后失联不能重复建票');
         if (fault.startsWith('title-only')) assert.match(done.issues[0].body,/原实施票的额外验收条件/);
         // 准入只认全文唯一的 Part of [SPEC #n]；迁移或恢复后的票必须指向当前 SPEC #2，且不带旧版计划内容。
@@ -121,14 +142,15 @@ else if(a[0]==='api') {
         if (fault==='parked') {
           // 维护者用 hold 标签停放已发布票：引擎不再补 ready-for-agent，图也不再反复拆票。
           const parked=read(); parked.issues[1].labels=parked.issues[1].labels.filter((l: string)=>l!=='ready-for-agent').concat('needs-info'); writeFileSync(join(root,'state.json'),JSON.stringify(parked));
-          for(let n=0;n<2;n++){const r=run();assert.equal(r.status,0,r.stderr);}
+          for(let n=0;n<2;n++){const r=await run();assert.equal(r.status,0,r.stderr);}
           assert.ok(!read().issues[1].labels.includes('ready-for-agent'),'hold 停放的票不得被补回 ready-for-agent');
-          assert.doesNotMatch(run().stdout,/拆 tracer-bullet 实装票/,'停放后图视为已拆齐');
+          assert.doesNotMatch((await run()).stdout,/拆 tracer-bullet 实装票/,'停放后图视为已拆齐');
         }
       } finally {rmSync(root,{recursive:true,force:true});}
     });
   }
 }
+});
 
 test('未发布票正文：按当前 SPEC 重写引擎部分，保留票上其他文字，重复调用不变', () => {
   const id = '<!-- wayfinder-ticket:2:S1 -->';
