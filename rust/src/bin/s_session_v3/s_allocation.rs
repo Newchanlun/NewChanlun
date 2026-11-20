@@ -100,7 +100,10 @@ fn audit_impl(
         return Err("SNativeAdmissionUnsupported：显式父域只适用于Native捕获臂".into());
     }
     let profile = match mode {
-        Mode::Ordinary => return state::audit(tx),
+        Mode::Ordinary => {
+            let clean = context.and_then(|c| c.clean_immediate_for(tx));
+            return state::audit_with_clean_immediate(tx, clean);
+        }
         Mode::Owned(profile) => Some(profile),
         Mode::CapturedNative => None,
     };

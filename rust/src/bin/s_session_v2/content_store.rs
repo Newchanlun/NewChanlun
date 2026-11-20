@@ -141,23 +141,43 @@ fn read_material_reserved(
             .optional()
             .map_err(storage_error)?
     } else {
-        let mut statement = newchan_rust::sqlite_checked::CheckedStatement::prepare(
-            conn,
-            c"SELECT tag, body FROM s_content_nodes WHERE digest=?1",
-        )
-        .map_err(storage_error)?;
-        statement.bind_blob(1, digest).map_err(storage_error)?;
-        let row = match statement.next().map_err(storage_error)? {
-            Some(mut row) => {
-                let tag = row.integer(0).map_err(storage_error)?;
-                let (body, permit) =
-                    native_body_reserved(work, row.blob(1).map_err(storage_error)?)?;
+        let mut stmt = conn.prepare_cached(READ_NODE_SQL).map_err(storage_error)?;
+        let mut rows = stmt.query(params![&digest[..]]).map_err(storage_error)?;
+        match rows.next().map_err(storage_error)? {
+            Some(row) => {
+                let tag = match row.get_ref(0).map_err(storage_error)? {
+                    rusqlite::types::ValueRef::Integer(v) => v,
+                    other => {
+                        return Err(storage_error(rusqlite::Error::InvalidColumnType(
+                            0,
+                            String::new(),
+                            other.data_type(),
+                        )));
+                    }
+                };
+                let bytes = match row.get_ref(1).map_err(storage_error)? {
+                    rusqlite::types::ValueRef::Blob(b) => b,
+                    other => {
+                        return Err(storage_error(rusqlite::Error::InvalidColumnType(
+                            1,
+                            String::new(),
+                            other.data_type(),
+                        )));
+                    }
+                };
+                // SAFETY：仅查询当前连接的只读错误码以捕捉 SQLITE_NOMEM，不改连接状态。
+                let code = unsafe { rusqlite::ffi::sqlite3_errcode(conn.handle()) };
+                if code & 255 == rusqlite::ffi::SQLITE_NOMEM {
+                    return Err(storage_error(rusqlite::Error::SqliteFailure(
+                        rusqlite::ffi::Error::new(code),
+                        None,
+                    )));
+                }
+                let (body, permit) = native_body_reserved(work, bytes)?;
                 Some((tag, body, permit))
             }
             None => None,
-        };
-        statement.finalize().map_err(storage_error)?;
-        row
+        }
     };
     let Some(row) = result else {
         return Ok(None);
@@ -1029,6 +1049,7 @@ impl NodeSink for TxStore<'_, '_> {
 /// `issue1890_read_snapshot_refusal`）。已核原件表挂在这里，随作用域丢弃，不跨作用域。
 pub(super) struct ReadSnapshot<'s> {
     tx: &'s Transaction<'s>,
+    clean_immediate: Option<u64>,
     frames: std::cell::RefCell<SnapshotFrames>,
 }
 
@@ -1105,6 +1126,17 @@ impl<'s> ReadSnapshot<'s> {
     pub(super) fn new(tx: &'s Transaction<'_>) -> Self {
         Self {
             tx,
+            clean_immediate: None,
+            frames: Default::default(),
+        }
+    }
+    /// #1890/#1875：仅由刚开启 BEGIN IMMEDIATE 且尚未写入任何行的审计入口构造；
+    /// 任何 DML（含 SAVEPOINT 内写后回滚）都会永久推进 `total_changes`，令缓存立即且永久失效；
+    /// DDL / authorizer / temp 遮蔽仍由门 3/4 与 `sqlite3_expired` 拦截。
+    pub(super) fn new_clean_immediate(tx: &'s Transaction<'_>, entry_changes: u64) -> Self {
+        Self {
+            tx,
+            clean_immediate: Some(entry_changes),
             frames: Default::default(),
         }
     }
@@ -1131,6 +1163,7 @@ impl<'s> ReadSnapshot<'s> {
         Ok(ReadStore {
             conn: self.tx,
             same_material: None,
+            clean_immediate: self.clean_immediate,
             frames: Some(&self.frames),
         })
     }
@@ -1266,10 +1299,32 @@ impl<'s> ReadSnapshot<'s> {
 /// 已核原件表：只收 F 核验通过的 Found；Missing、错误不入表。计入字节 = 正文长度 +
 /// 每条目固定开销，入表前先按剩余额度筛选。
 /// 表只在一个纪元内有效：纪元变化、或任一门不成立，整表作废。
+/// `NodeDigest` 已是 32 字节 SHA-256 摘要，直接取前 8 字节作散列，避免热路径重复 SipHash。
+#[derive(Default)]
+struct DigestPrefixHasher(u64);
+impl std::hash::Hasher for DigestPrefixHasher {
+    #[inline]
+    fn finish(&self) -> u64 {
+        self.0
+    }
+    #[inline]
+    fn write(&mut self, bytes: &[u8]) {
+        if bytes.len() >= 8 {
+            self.0 = u64::from_ne_bytes(bytes[..8].try_into().unwrap());
+        } else {
+            let mut buf = [0u8; 8];
+            buf[..bytes.len()].copy_from_slice(bytes);
+            self.0 = u64::from_ne_bytes(buf);
+        }
+    }
+}
+type DigestBuildHasher = std::hash::BuildHasherDefault<DigestPrefixHasher>;
+
 #[derive(Default)]
 struct SnapshotFrames {
     epoch: Option<SnapshotEpoch>,
-    frames: std::collections::HashMap<NodeDigest, s_content::job::CheckedFrame>,
+    read_stmt: usize,
+    frames: hashbrown::HashMap<NodeDigest, s_content::job::CheckedFrame, DigestBuildHasher>,
     bytes: usize,
 }
 /// (`SQLITE_FCNTL_DATA_VERSION` of main, `total_changes`)：任一连接提交、或本连接写过
@@ -1305,6 +1360,7 @@ impl SnapshotFrames {
 pub(super) struct ReadStore<'a> {
     conn: &'a Connection,
     same_material: Option<SameMaterial>,
+    clean_immediate: Option<u64>,
     /// 只有经 [`ReadSnapshot::store`] 取得的读者才有表；作用域外的读者每次真读。
     frames: Option<&'a std::cell::RefCell<SnapshotFrames>>,
 }
@@ -1316,6 +1372,7 @@ impl<'a> ReadStore<'a> {
         Ok(Self {
             conn: tx,
             same_material: None,
+            clean_immediate: None,
             frames: None,
         })
     }
@@ -1329,69 +1386,119 @@ impl<'a> ReadStore<'a> {
     /// 变化即整表作废，读取与基线一样走 SQL。
     fn frames(&self) -> Option<std::cell::RefMut<'a, SnapshotFrames>> {
         let mut frames = self.frames?.borrow_mut();
-        let epoch = self.snapshot_epoch();
-        if epoch.is_none() || frames.epoch != epoch {
-            *frames = SnapshotFrames {
-                epoch,
-                ..SnapshotFrames::default()
-            };
+        let checked = self.snapshot_epoch_checked(frames.epoch, frames.read_stmt);
+        match checked {
+            Some((epoch, read_stmt)) => {
+                if frames.epoch != Some(epoch) {
+                    *frames = SnapshotFrames {
+                        epoch: Some(epoch),
+                        read_stmt,
+                        ..SnapshotFrames::default()
+                    };
+                } else {
+                    frames.read_stmt = read_stmt;
+                }
+                Some(frames)
+            }
+            None => {
+                if frames.epoch.is_some() || !frames.frames.is_empty() {
+                    *frames = SnapshotFrames::default();
+                }
+                None
+            }
         }
-        epoch.map(|_| frames)
     }
 
-    /// 四道门全部成立时给出纪元，否则 None：
-    /// 1. main 已建立读快照（`SQLITE_TXN_READ`）；
-    /// 2. 所有库（含 temp）都不超过 READ，即本事务哪儿都没写过（含 DDL、SAVEPOINT 内写后回滚）；
-    /// 3. temp 里没有遮蔽不带库名 `s_content_nodes` 的同名**表**（ATTACH 排在 main 之后，遮蔽不了）。
-    ///    `sqlite3_table_column_metadata` 对视图直接返回错误，所以这道门看不见 temp **视图**；
-    /// 4. 节点读语句已在本连接预编译，且所有同文副本都未过期（authorizer 更换、schema 变化会令其
-    ///    过期；基线下一次读会重新编译并询问授权器，所以过期时交给真实读取）。temp 视图的遮蔽靠
-    ///    这道门挡住：任何 temp schema 变更都会令本连接全部语句过期。调整本门时须保住这一覆盖。
+    #[cfg(test)]
+    fn snapshot_epoch(&self) -> Option<SnapshotEpoch> {
+        self.snapshot_epoch_checked(None, 0).map(|(epoch, _)| epoch)
+    }
+
+    /// 四道门全部成立时给出 `(纪元, 已核节点读语句指针)`，否则 None：
+    /// 1. 普通只读事务：main 为 `SQLITE_TXN_READ` 且全库不超过 READ；
+    ///    刚开启且未写入的 `BEGIN IMMEDIATE`（`clean_immediate = Some(entry_changes)`）：
+    ///    main 为 `SQLITE_TXN_WRITE`、temp 不超过 READ 且 `total_changes == entry_changes`；
+    /// 2. temp 里没有遮蔽不带库名 `s_content_nodes` 的同名表（首次建立纪元或语句变化时查，
+    ///    后续任何 temp schema 变更都会令全部语句过期并由门 4 立即挡住）；
+    /// 3. 节点读语句已在本连接预编译，且所有同文副本均未过期；
+    /// 4. `SQLITE_FCNTL_DATA_VERSION` + `total_changes` 组成纪元防 ABA。
     ///
     /// 全部走 FFI，不执行 SQL，不调用授权器。
-    fn snapshot_epoch(&self) -> Option<SnapshotEpoch> {
+    fn snapshot_epoch_checked(
+        &self,
+        prev_epoch: Option<SnapshotEpoch>,
+        cached_stmt: usize,
+    ) -> Option<(SnapshotEpoch, usize)> {
         use rusqlite::ffi;
-        // SAFETY：句柄只在本次调用内借给只读查询（事务状态、表元数据、语句列表与过期标记、
-        // pager 数据版本）；不关闭、不转移、不改连接或语句状态。库名、表名均为以 NUL 结尾的
-        // 静态字面量，表元数据的输出指针全部传空；语句指针经 `sqlite3_next_stmt` 逐个取得、
-        // 当场使用，不保留（本连接单线程使用，期间不会有语句被 finalize）。
         let db = unsafe { self.conn.handle() };
-        if unsafe { ffi::sqlite3_txn_state(db, c"main".as_ptr()) } != ffi::SQLITE_TXN_READ
-            || unsafe { ffi::sqlite3_txn_state(db, std::ptr::null()) } != ffi::SQLITE_TXN_READ
-        {
-            return None;
-        }
-        let shadowed = unsafe {
-            ffi::sqlite3_table_column_metadata(
-                db,
-                c"temp".as_ptr(),
-                c"s_content_nodes".as_ptr(),
-                std::ptr::null(),
-                std::ptr::null_mut(),
-                std::ptr::null_mut(),
-                std::ptr::null_mut(),
-                std::ptr::null_mut(),
-                std::ptr::null_mut(),
-            )
-        } == ffi::SQLITE_OK;
-        if shadowed {
-            return None;
-        }
-        let mut live = false;
-        let mut stmt = unsafe { ffi::sqlite3_next_stmt(db, std::ptr::null_mut()) };
-        while !stmt.is_null() {
-            let sql = unsafe { ffi::sqlite3_sql(stmt) };
-            if !sql.is_null()
-                && unsafe { std::ffi::CStr::from_ptr(sql) }.to_bytes() == READ_NODE_SQL.as_bytes()
-            {
-                if unsafe { ffi::sqlite3_expired(stmt) } != 0 {
+        let total_changes = self.conn.total_changes();
+        match self.clean_immediate {
+            None => {
+                if unsafe { ffi::sqlite3_txn_state(db, c"main".as_ptr()) } != ffi::SQLITE_TXN_READ
+                    || unsafe { ffi::sqlite3_txn_state(db, std::ptr::null()) }
+                        != ffi::SQLITE_TXN_READ
+                {
                     return None;
                 }
-                live = true;
+            }
+            Some(entry_changes) => {
+                if total_changes != entry_changes
+                    || unsafe { ffi::sqlite3_txn_state(db, c"main".as_ptr()) }
+                        != ffi::SQLITE_TXN_WRITE
+                    || unsafe { ffi::sqlite3_txn_state(db, c"temp".as_ptr()) }
+                        > ffi::SQLITE_TXN_READ
+                {
+                    return None;
+                }
+            }
+        }
+        let mut live_stmt: usize = 0;
+        let mut stmt = unsafe { ffi::sqlite3_next_stmt(db, std::ptr::null_mut()) };
+        while !stmt.is_null() {
+            if unsafe { ffi::sqlite3_expired(stmt) } != 0 {
+                let sql = unsafe { ffi::sqlite3_sql(stmt) };
+                if !sql.is_null()
+                    && unsafe { std::ffi::CStr::from_ptr(sql) }.to_bytes()
+                        == READ_NODE_SQL.as_bytes()
+                {
+                    return None;
+                }
+            } else if cached_stmt != 0 && stmt as usize == cached_stmt {
+                let sql = unsafe { ffi::sqlite3_sql(stmt) };
+                if !sql.is_null()
+                    && unsafe { std::ffi::CStr::from_ptr(sql) }.to_bytes()
+                        == READ_NODE_SQL.as_bytes()
+                {
+                    live_stmt = cached_stmt;
+                }
+            } else if cached_stmt == 0 && live_stmt == 0 {
+                let sql = unsafe { ffi::sqlite3_sql(stmt) };
+                if !sql.is_null()
+                    && unsafe { std::ffi::CStr::from_ptr(sql) }.to_bytes()
+                        == READ_NODE_SQL.as_bytes()
+                {
+                    live_stmt = stmt as usize;
+                }
             }
             stmt = unsafe { ffi::sqlite3_next_stmt(db, stmt) };
         }
-        if !live {
+        if live_stmt == 0 && cached_stmt != 0 {
+            let mut stmt = unsafe { ffi::sqlite3_next_stmt(db, std::ptr::null_mut()) };
+            while !stmt.is_null() {
+                if unsafe { ffi::sqlite3_expired(stmt) } == 0 {
+                    let sql = unsafe { ffi::sqlite3_sql(stmt) };
+                    if !sql.is_null()
+                        && unsafe { std::ffi::CStr::from_ptr(sql) }.to_bytes()
+                            == READ_NODE_SQL.as_bytes()
+                    {
+                        live_stmt = stmt as usize;
+                        break;
+                    }
+                }
+                stmt = unsafe { ffi::sqlite3_next_stmt(db, stmt) };
+            }
+        }
+        if live_stmt == 0 {
             return None;
         }
         let mut version: u32 = 0;
@@ -1403,7 +1510,31 @@ impl<'a> ReadStore<'a> {
                 (&mut version as *mut u32).cast(),
             )
         };
-        (rc == ffi::SQLITE_OK).then(|| [u64::from(version), self.conn.total_changes()])
+        if rc != ffi::SQLITE_OK {
+            return None;
+        }
+        let epoch = [u64::from(version), total_changes];
+        let need_shadow_check =
+            prev_epoch != Some(epoch) || cached_stmt == 0 || live_stmt != cached_stmt;
+        if need_shadow_check {
+            let shadowed = unsafe {
+                ffi::sqlite3_table_column_metadata(
+                    db,
+                    c"temp".as_ptr(),
+                    c"s_content_nodes".as_ptr(),
+                    std::ptr::null(),
+                    std::ptr::null_mut(),
+                    std::ptr::null_mut(),
+                    std::ptr::null_mut(),
+                    std::ptr::null_mut(),
+                    std::ptr::null_mut(),
+                )
+            } == ffi::SQLITE_OK;
+            if shadowed {
+                return None;
+            }
+        }
+        Some((epoch, live_stmt))
     }
 
     fn checked_read_sql(
@@ -1614,6 +1745,7 @@ mod tests {
         let mut reader = ReadStore {
             conn: &conn,
             same_material: Some(SameMaterial::default()),
+            clean_immediate: None,
             frames: None,
         };
         assert!(reader.checked_read(&digest).unwrap().is_some());
@@ -2115,6 +2247,95 @@ mod tests {
                 .unwrap();
             assert!(reader.checked_read(&digest).unwrap().is_some());
         }
+        drop(conn);
+        std::fs::remove_file(path).unwrap();
+    }
+
+    /// #1890/#1875：干净 BEGIN IMMEDIATE（未写入）允许命中 SnapshotFrames，
+    /// 并在 SAVEPOINT 写后回滚、DELETE、DROP TABLE、temp 遮蔽、authorizer 变更与跨事务 ABA 时立即失效。
+    #[test]
+    fn read_snapshot_clean_immediate_reuses_and_drops_on_all_adversarial_mutations() {
+        use rusqlite::hooks::{AuthContext, Authorization};
+        use rusqlite::TransactionBehavior;
+        let (path, mut conn, digest) = snapshot_fixture();
+        let external = Connection::open(&path).unwrap();
+        {
+            let tx = conn
+                .transaction_with_behavior(TransactionBehavior::Immediate)
+                .unwrap();
+            let entry = tx.total_changes();
+            let snap = ReadSnapshot::new_clean_immediate(&tx, entry);
+            let mut reader = snap.store().unwrap();
+            let (_, sql1) = sql_reads_during(|| reader.checked_read(&digest).unwrap().unwrap());
+            assert_eq!(sql1, 1);
+            let f0 = s_content::frame_calls_on_thread();
+            let (_, sql2) = sql_reads_during(|| reader.checked_read(&digest).unwrap().unwrap());
+            assert_eq!(sql2, 0, "干净 IMMEDIATE 事务第二次读应命中 SnapshotFrames");
+            assert_eq!(s_content::frame_calls_on_thread() - f0, 1, "命中仍重算 F");
+
+            tx.authorizer(Some(|_: AuthContext<'_>| Authorization::Deny))
+                .unwrap();
+            assert_eq!(
+                reader.checked_read(&digest).unwrap_err().code(),
+                code::SOURCE
+            );
+            tx.authorizer(None::<fn(AuthContext<'_>) -> Authorization>)
+                .unwrap();
+            cached(&mut reader, &digest);
+
+            tx.execute_batch("SAVEPOINT imm1890").unwrap();
+            let fresh = s_content::frame(s_content::tag::BOOL_FALSE, &[]);
+            TxStore::new(&tx)
+                .unwrap()
+                .put(fresh, s_content::tag::BOOL_FALSE, &[])
+                .unwrap();
+            assert!(reader.checked_read(&fresh).unwrap().is_some());
+            tx.execute_batch("ROLLBACK TO imm1890; RELEASE imm1890")
+                .unwrap();
+            assert!(reader.checked_read(&fresh).unwrap().is_none());
+            assert_eq!(reader.read(&fresh).unwrap(), NodeRead::Missing);
+            tx.execute(
+                "DELETE FROM s_content_nodes WHERE digest=?1",
+                params![&digest[..]],
+            )
+            .unwrap();
+            assert!(reader.checked_read(&digest).unwrap().is_none());
+        }
+        {
+            let tx = conn
+                .transaction_with_behavior(TransactionBehavior::Immediate)
+                .unwrap();
+            let snap = ReadSnapshot::new_clean_immediate(&tx, tx.total_changes());
+            let mut reader = snap.store().unwrap();
+            cached(&mut reader, &digest);
+            tx.execute_batch("COMMIT").unwrap();
+            external
+                .execute(
+                    "UPDATE s_content_nodes SET body=x'01' WHERE digest=?1",
+                    params![&digest[..]],
+                )
+                .unwrap();
+            tx.execute_batch("BEGIN IMMEDIATE").unwrap();
+            assert_eq!(
+                reader.checked_read(&digest).unwrap_err().code(),
+                code::NODE_DIGEST
+            );
+            tx.execute_batch("COMMIT").unwrap();
+            external
+                .execute(
+                    "UPDATE s_content_nodes SET body=x'' WHERE digest=?1",
+                    params![&digest[..]],
+                )
+                .unwrap();
+            tx.execute_batch("BEGIN IMMEDIATE").unwrap();
+            cached(&mut reader, &digest);
+            tx.execute_batch(
+                "CREATE TEMP VIEW s_content_nodes AS SELECT * FROM main.s_content_nodes WHERE 0",
+            )
+            .unwrap();
+            assert!(reader.checked_read(&digest).unwrap().is_none());
+        }
+        drop(external);
         drop(conn);
         std::fs::remove_file(path).unwrap();
     }

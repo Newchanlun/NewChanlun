@@ -163,6 +163,29 @@ pub(super) fn audit(tx: &Transaction<'_>) -> Result<AuditedState, String> {
     audit_until(tx, None)
 }
 
+pub(super) fn audit_with_clean_immediate(
+    tx: &Transaction<'_>,
+    clean_immediate: Option<u64>,
+) -> Result<AuditedState, String> {
+    audit_core_fresh_with_policy_and_snapshot(
+        tx,
+        None,
+        None,
+        None,
+        false,
+        None,
+        None,
+        None,
+        RetentionReport::Skip,
+        #[cfg(feature = "s_incremental")]
+        None,
+        None,
+        history::SourcePolicy::Ordinary,
+        clean_immediate,
+    )
+    .map(|(audited, _)| audited)
+}
+
 pub(super) fn audit_until(
     tx: &Transaction<'_>,
     deadline: Option<std::time::Instant>,
@@ -786,11 +809,47 @@ fn audit_core_fresh_with_policy(
     external_capture: Option<&sc::AuditCapture>,
     fresh: Option<(v2::ControlHistory, super::business_json::RawEvents)>,
     retention_report: RetentionReport,
+    #[cfg(feature = "s_incremental")] source_cache: Option<
+        &mut super::cross_request_source_cache::Trial<'_>,
+    >,
+    work: Option<&sc::capture_allocation::scratch::WorkScope>,
+    policy: history::SourcePolicy,
+) -> Result<(AuditedState, Option<Value>), String> {
+    audit_core_fresh_with_policy_and_snapshot(
+        tx,
+        deadline,
+        max_render_bytes,
+        budget,
+        enable_prototype_capture,
+        owned_budget,
+        external_capture,
+        fresh,
+        retention_report,
+        #[cfg(feature = "s_incremental")]
+        source_cache,
+        work,
+        policy,
+        None,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn audit_core_fresh_with_policy_and_snapshot(
+    tx: &Transaction<'_>,
+    deadline: Option<std::time::Instant>,
+    max_render_bytes: Option<u64>,
+    budget: Option<&dyn audit_budget::Budget>,
+    enable_prototype_capture: bool,
+    owned_budget: Option<&sc::capture_allocation::OwnedBudget>,
+    external_capture: Option<&sc::AuditCapture>,
+    fresh: Option<(v2::ControlHistory, super::business_json::RawEvents)>,
+    retention_report: RetentionReport,
     #[cfg(feature = "s_incremental")] mut source_cache: Option<
         &mut super::cross_request_source_cache::Trial<'_>,
     >,
     work: Option<&sc::capture_allocation::scratch::WorkScope>,
     policy: history::SourcePolicy,
+    clean_immediate: Option<u64>,
 ) -> Result<(AuditedState, Option<Value>), String> {
     #[cfg(all(test, feature = "s_incremental"))]
     FULL_AUDIT_CALLS.with(|calls| calls.set(calls.get() + 1));
@@ -928,7 +987,10 @@ fn audit_core_fresh_with_policy(
         super::ordinary_materials::OrdinaryAuditMaterials::new(OrdinaryAuditSeal { _private: () })
     });
     // #1890：首个节点读者之前进入只读快照作用域；同名遮蔽后本函数再拿不到事务本身。
-    let tx = &ReadSnapshot::new(tx);
+    let tx = &match clean_immediate {
+        Some(entry_changes) => ReadSnapshot::new_clean_immediate(tx, entry_changes),
+        None => ReadSnapshot::new(tx),
+    };
     let verified_history = history::read_verified_public_history(
         tx,
         raw.view(),
