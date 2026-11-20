@@ -29,13 +29,17 @@
         "a": { "dd": 3000, "zd": 4000, "zg": 5500, "gg": 6000, "member_units": [0, 4], "break_unit": 4 },
         "b": { "dd": 2100, "zd": 2200, "zg": 2800, "gg": 2900, "member_units": [5, 8], "break_unit_at_123": 8 },
         "connector_direction": "UP",
-        "leaf": "DOWN_NEWBIRTH"
+        "leaf": "DOWN_NEWBIRTH",
+        "full_outer_a_dd": 2500,
+        "full_outer_leaf": "DOWN_EXPANSION"
       },
       "up_mirror": {
         "a": { "dd": 2500, "zd": 3000, "zg": 4500, "gg": 5500, "member_units": [0, 4], "break_unit": 4 },
         "b": { "dd": 5600, "zd": 5700, "zg": 6300, "gg": 6400, "member_units": [5, 8], "break_unit_at_123": 8 },
         "connector_direction": "DOWN",
-        "leaf": "UP_NEWBIRTH"
+        "leaf": "UP_NEWBIRTH",
+        "full_outer_a_gg": 6000,
+        "full_outer_leaf": "UP_EXPANSION"
       }
     }
   },

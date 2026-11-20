@@ -8,7 +8,7 @@ use std::collections::BTreeSet;
 use serde_json::Value;
 
 use newchan_rust::theta_v0::classifier::center::{
-    center_from_segments, center_from_window, PairLeaf, UnitRange,
+    center_from_segments, center_from_window, center_pair_facts, PairLeaf, UnitRange,
 };
 use newchan_rust::theta_v0::classifier::center_scan::{
     l0_units, scan_center_facts_full, PairOutcome,
@@ -348,6 +348,52 @@ fn up_mirror_123() {
     assert_eq!(p123.connectors(), p111.connectors());
 }
 
+/// 测试 1/2 的双向反控：110 根仍是单枢；111 根若错用 A 的全成员外缘，几何判据会给扩展。
+#[test]
+fn cut_110_and_full_member_outer_edge_controls() {
+    let (down, up, d) = fixture_123_bars();
+    let exp = &d["bars_123_down"]["expected"];
+    let cut = exp["prefix_before_separation"].as_u64().unwrap() as usize;
+    assert_eq!(cut, 110);
+    for (bars, direction, fixture, want) in [
+        (
+            &down,
+            Direction::Down,
+            &exp["down"],
+            PairLeaf::DownExpansion,
+        ),
+        (&up, Direction::Up, &exp["up_mirror"], PairLeaf::UpExpansion),
+    ] {
+        let r110 = judge_trend_formation(0, &parse_l0_units(&bars[..cut]));
+        assert!(
+            r110.consolidation().is_some(),
+            "cut-110 {direction:?} 应为单枢"
+        );
+        assert!(r110.pairs().is_empty(), "cut-110 {direction:?} 不应有对");
+
+        let r111 = judge_trend_formation(0, &parse_l0_units(&bars[..111]));
+        let [pair] = r111.pairs() else {
+            panic!("cut-111 {direction:?} 应恰有一对");
+        };
+        let a = pair.left().center().unwrap();
+        let b = pair.right().center().unwrap();
+        let members = pair.left().members().units();
+        let wrong_a = Center {
+            dd: members.iter().map(|u| u.lo).min().unwrap(),
+            gg: members.iter().map(|u| u.hi).max().unwrap(),
+            ..a
+        };
+        let (edge, name) = match direction {
+            Direction::Down => (wrong_a.dd, "full_outer_a_dd"),
+            Direction::Up => (wrong_a.gg, "full_outer_a_gg"),
+        };
+        assert_eq!(edge, fixture[name].as_i64().unwrap());
+        let leaf = center_pair_facts(&wrong_a, &b).leaf;
+        assert_eq!(leaf, want);
+        assert_eq!(leaf.as_str(), fixture["full_outer_leaf"].as_str().unwrap());
+    }
+}
+
 /// 3. `open_b_fork_202_never_formed`（R1-a）：111..=202 每个前缀均无已形成，末切面为 `ExpansionHandoff`。
 #[test]
 fn open_b_fork_202_never_formed() {
@@ -389,10 +435,14 @@ fn open_b_fork_202_never_formed() {
                 "分叉第 {n} 根不得报 TrendFormed"
             );
         }
-        // 仅在单元序列构成前缀延伸时校验 M1-M4（DESIGN §7 末句、主控裁定 #5）。
-        if u.starts_with(&prev_units) {
-            assert_monotone_pair(&prev_res, &r, &mut dummy_hits);
-        }
+        // `segments_valid_prefix()` 只裁段端失败、不证明跨 bar 稳定（见 parser/mod.rs:103-106,145-157
+        // 及模块头「调用方负责只传解析器的稳定前缀；见 #2114」）。
+        // 独审逐次比较本夹具的 91 次追加，单元前缀无失配；这里先断言前缀，再验 M1–M4。
+        assert!(
+            u.starts_with(&prev_units),
+            "分叉第 {n} 根预期保持单元前缀单调延伸，不得静默跳过 M1-M4"
+        );
+        assert_monotone_pair(&prev_res, &r, &mut dummy_hits);
         prev_units = u;
         prev_res = r;
     }
@@ -1158,229 +1208,250 @@ fn parity_with_shared_scan() {
     }
 }
 
-/// 17. `public_surface_lock`：`include_str!` 读模块源码，剥离注释后断言 DESIGN §3、§4 的
-///     禁用项、唯一自由公开入口、精确公开类型/方法清单与零公开字段。
+/// 17. 源码文本锁只提示 DESIGN §3、§4 的回归；外部不能用字面量构造证据由第 18 项编译负例验证。
 #[test]
 fn public_surface_lock() {
-    // 剥离 // 与 /* ... */ 注释，保留原始换行。
-    fn strip_comments(src: &str) -> String {
-        let bytes = src.as_bytes();
-        let mut out = String::with_capacity(src.len());
-        let mut i = 0;
-        let mut in_str = false;
-        while i < bytes.len() {
-            if in_str {
-                let c = bytes[i] as char;
-                out.push(c);
-                if c == '\\' && i + 1 < bytes.len() {
-                    i += 1;
-                    out.push(bytes[i] as char);
-                } else if c == '"' {
-                    in_str = false;
-                }
-                i += 1;
-                continue;
-            }
-            if bytes[i] == b'"' {
-                in_str = true;
-                out.push('"');
-                i += 1;
-            } else if i + 1 < bytes.len() && bytes[i] == b'/' && bytes[i + 1] == b'/' {
-                while i < bytes.len() && bytes[i] != b'\n' {
-                    i += 1;
-                }
-            } else if i + 1 < bytes.len() && bytes[i] == b'/' && bytes[i + 1] == b'*' {
-                i += 2;
-                let mut depth = 1usize;
-                while i + 1 < bytes.len() && depth > 0 {
-                    if bytes[i] == b'/' && bytes[i + 1] == b'*' {
-                        depth += 1;
-                        i += 2;
-                    } else if bytes[i] == b'*' && bytes[i + 1] == b'/' {
-                        depth -= 1;
-                        i += 2;
-                    } else {
-                        if bytes[i] == b'\n' {
-                            out.push('\n');
-                        }
-                        i += 1;
-                    }
-                }
-            } else {
-                out.push(bytes[i] as char);
-                i += 1;
-            }
-        }
-        out
-    }
+    check_public_surface(TREND_FORMATION_SRC).unwrap();
 
-    let code = strip_comments(TREND_FORMATION_SRC);
+    let with_async = format!("{TREND_FORMATION_SRC}\npub async fn x() {{}}\n");
+    assert!(check_public_surface(&with_async).is_err());
 
-    // DESIGN §4 禁用符号与可见性/构造/派生禁令。
-    for forbidden in [
-        "Direction::Up",
-        "Direction::Down",
-        "UPGRADE_TOTAL_SEGMENTS",
-        "center_pair_facts",
-        "pair_domain_ok",
-        "pub(crate)",
-        "pub(super)",
-        "fn new(",
-        "fn try_new(",
-        "Default",
-        "Deserialize",
-        "impl From",
-        "pub type ",
-        "pub const ",
-        "pub trait ",
-        "pub use ",
-    ] {
-        assert!(
-            !code.contains(forbidden),
-            "模块非注释源码不得包含禁用项 `{forbidden}`"
-        );
-    }
+    let with_string = format!("{TREND_FORMATION_SRC}\nconst _: &str = \"Default\";\n");
+    check_public_surface(&with_string).unwrap();
 
-    // 解析公开类型、私有函数、自由公开函数与公开方法清单。
-    let mut pub_structs = BTreeSet::new();
-    let mut pub_enums = BTreeSet::new();
-    let mut free_pub_fns = BTreeSet::new();
-    let mut pub_methods = BTreeSet::new();
-    let mut private_fns = BTreeSet::new();
-    let mut in_pub_struct = false;
-    let mut brace_depth: usize = 0;
-
-    for raw_line in code.lines() {
-        let line = raw_line.trim();
-        if line.is_empty() {
-            continue;
-        }
-        if let Some(rest) = line.strip_prefix("pub struct ") {
-            let name = rest
-                .split(|c: char| !c.is_ascii_alphanumeric() && c != '_')
-                .next()
-                .unwrap();
-            pub_structs.insert(name.to_string());
-            in_pub_struct = true;
-        } else if let Some(rest) = line.strip_prefix("pub enum ") {
-            let name = rest
-                .split(|c: char| !c.is_ascii_alphanumeric() && c != '_')
-                .next()
-                .unwrap();
-            pub_enums.insert(name.to_string());
-        } else if in_pub_struct && brace_depth == 1 {
-            assert!(
-                !line.starts_with("pub ") && !line.starts_with("pub("),
-                "公开结构体不得含公开字段：{line}"
-            );
-        }
-
-        if let Some(rest) = line.strip_prefix("pub fn ") {
-            let name = rest
-                .split(|c: char| !c.is_ascii_alphanumeric() && c != '_')
-                .next()
-                .unwrap()
-                .to_string();
-            if brace_depth == 0 {
-                free_pub_fns.insert(name);
-            } else {
-                assert!(
-                    line.contains("&self") || line.contains("self)"),
-                    "impl 块中的 pub fn 必须带 self（禁止关联构造器）：{line}"
-                );
-                pub_methods.insert(name);
-            }
-        } else if let Some(rest) = line.strip_prefix("fn ") {
-            let name = rest
-                .split(|c: char| !c.is_ascii_alphanumeric() && c != '_')
-                .next()
-                .unwrap()
-                .to_string();
-            private_fns.insert(name);
-        }
-
-        for ch in line.chars() {
-            match ch {
-                '{' => brace_depth += 1,
-                '}' => {
-                    brace_depth = brace_depth.saturating_sub(1);
-                    if brace_depth == 0 {
-                        in_pub_struct = false;
-                    }
-                }
-                _ => {}
-            }
-        }
-    }
-
-    assert_eq!(
-        free_pub_fns,
-        BTreeSet::from(["judge_trend_formation".to_string()]),
-        "不带 self 的公开函数只能是 judge_trend_formation"
-    );
-    assert_eq!(
-        pub_structs,
-        BTreeSet::from([
-            "CenterNode".to_string(),
-            "FormedTrend".to_string(),
-            "PairJudgment".to_string(),
-            "TrendFormation".to_string(),
-            "UnitSpan".to_string(),
-        ]),
-        "公开结构体集合必须与 DESIGN §3 一致"
-    );
-    assert_eq!(
-        pub_enums,
-        BTreeSet::from(["PairState".to_string()]),
-        "公开枚举只能是 PairState"
-    );
-    assert_eq!(
-        private_fns,
-        BTreeSet::from([
-            "confirmed".to_string(),
-            "seed_build".to_string(),
-            "span".to_string(),
-        ]),
-        "私有函数只能是 seed_build、span、confirmed"
-    );
-    assert_eq!(
-        pub_methods,
-        BTreeSet::from([
-            "break_unit".to_string(),
-            "center".to_string(),
-            "centers".to_string(),
-            "connectors".to_string(),
-            "consolidation".to_string(),
-            "direction".to_string(),
-            "final_pairs".to_string(),
-            "formed".to_string(),
-            "is_final".to_string(),
-            "is_settled".to_string(),
-            "left".to_string(),
-            "members".to_string(),
-            "ordinal".to_string(),
-            "outcome".to_string(),
-            "pair".to_string(),
-            "pairs".to_string(),
-            "range".to_string(),
-            "right".to_string(),
-            "state".to_string(),
-            "unit_count".to_string(),
-            "unit_level".to_string(),
-            "units".to_string(),
-        ]),
-        "公开方法清单必须与 DESIGN §3 一致"
-    );
+    let with_comment = TREND_FORMATION_SRC.replace("pub fn range", "pub /* Default */ fn range");
+    assert_ne!(with_comment, TREND_FORMATION_SRC);
+    check_public_surface(&with_comment).unwrap();
 }
 
-// 18. 编译负例（DESIGN §10 #18）：五个证据结构体字面量构造均须报 E0451（块长 ≤ 20 行）。
+// 只切分源码锁所需的标识符、标点；注释与字符串内容不参加匹配。
+fn surface_tokens(mut src: &str) -> Vec<&str> {
+    let mut tokens = Vec::new();
+    while let Some(c) = src.chars().next() {
+        if c.is_whitespace() {
+            src = &src[c.len_utf8()..];
+        } else if src.starts_with("//") {
+            src = src.find('\n').map_or("", |end| &src[end..]);
+        } else if let Some(rest) = src.strip_prefix("/*") {
+            src = rest;
+            let mut depth = 1;
+            while depth != 0 {
+                let end = src.find(['/', '*']).expect("未闭合的块注释");
+                match &src[end..] {
+                    s if s.starts_with("/*") => {
+                        depth += 1;
+                        src = &s[2..];
+                    }
+                    s if s.starts_with("*/") => {
+                        depth -= 1;
+                        src = &s[2..];
+                    }
+                    s => src = &s[1..],
+                }
+            }
+        } else {
+            // 普通、字节、C 字符串及其 raw 形式。
+            let literal = src.strip_prefix(['b', 'c']).unwrap_or(src);
+            if let Some(rest) = literal.strip_prefix('"') {
+                let mut escaped = false;
+                let end = rest
+                    .find(|ch| {
+                        let closing = !escaped && ch == '"';
+                        escaped = !escaped && ch == '\\';
+                        closing
+                    })
+                    .expect("未闭合的字符串");
+                src = &rest[end + 1..];
+                continue;
+            }
+            if let Some(raw) = literal.strip_prefix('r') {
+                let hashes = raw.len() - raw.trim_start_matches('#').len();
+                if let Some(rest) = raw[hashes..].strip_prefix('"') {
+                    let close = format!("\"{}", &raw[..hashes]);
+                    let end = rest.find(&close).expect("未闭合的 raw 字符串");
+                    src = &rest[end + close.len()..];
+                    continue;
+                }
+            }
+            // 字符字面量（包括字节字符）不应把括号传给源码锁；生命周期不是字符字面量。
+            if let Some(rest) = literal.strip_prefix('\'') {
+                let end = if let Some(escaped) = rest.strip_prefix('\\') {
+                    escaped
+                        .get(1..)
+                        .and_then(|tail| tail.find('\''))
+                        .map(|n| n + 3)
+                } else if let Some(ch) = rest.chars().next() {
+                    let len = ch.len_utf8();
+                    rest[len..].starts_with('\'').then_some(len + 1)
+                } else {
+                    None
+                };
+                if let Some(end) = end {
+                    src = &rest[end..];
+                    continue;
+                }
+            }
+            let ident = src.strip_prefix("r#").unwrap_or(src);
+            let end = ident
+                .find(|ch: char| !(ch.is_alphanumeric() || ch == '_'))
+                .unwrap_or(ident.len());
+            if end != 0 {
+                tokens.push(&ident[..end]);
+                src = &ident[end..];
+            } else {
+                let (token, rest) = src.split_at(c.len_utf8());
+                tokens.push(token);
+                src = rest;
+            }
+        }
+    }
+    tokens
+}
+
+fn after_group<'a, 's>(tokens: &'a [&'s str], open: &str, close: &str) -> &'a [&'s str] {
+    if tokens.first() != Some(&open) {
+        return tokens;
+    }
+    let mut depth = 1;
+    for (i, token) in tokens.iter().enumerate().skip(1) {
+        if *token == open {
+            depth += 1;
+        } else if *token == close {
+            depth -= 1;
+            if depth == 0 {
+                return &tokens[i + 1..];
+            }
+        }
+    }
+    panic!("未闭合的 {open}");
+}
+
+fn group_contents<'a, 's>(tokens: &'a [&'s str], open: &str, close: &str) -> &'a [&'s str] {
+    let end = tokens.len() - after_group(tokens, open, close).len();
+    &tokens[1..end - 1]
+}
+
+fn check_public_surface(src: &str) -> Result<(), String> {
+    let tokens = surface_tokens(src);
+    let forbidden_trait = |name| matches!(name, "Default" | "From" | "Deserialize");
+    let mut public = Vec::new();
+    let mut private = Vec::new();
+    let mut depth = 0;
+    let mut owner = "";
+    for i in 0..tokens.len() {
+        let tail = &tokens[i..];
+        match tail {
+            ["{", ..] => depth += 1,
+            ["}", ..] => {
+                depth -= 1;
+                if depth == 0 {
+                    owner = "";
+                }
+            }
+            ["#", "[", "derive" | "cfg_attr", ..] => {
+                let attr = group_contents(&tail[1..], "[", "]");
+                let forbidden = attr.windows(2).enumerate().any(|(j, pair)| {
+                    pair == ["derive", "("]
+                        && group_contents(&attr[j + 1..], "(", ")")
+                            .iter()
+                            .any(|name| forbidden_trait(name))
+                });
+                if forbidden {
+                    return Err("禁用 Default / From / Deserialize 派生".into());
+                }
+            }
+            ["impl", rest @ ..] => {
+                let head = after_group(rest, "<", ">");
+                // 读取 trait/类型路径末段，而非泛型实参、where 约束或函数体。
+                let path_end = head
+                    .iter()
+                    .position(|t| matches!(*t, "<" | "for" | "where" | "{"));
+                if let Some(end) = path_end.filter(|&end| end > 0) {
+                    let name = head[end - 1];
+                    let after_type = after_group(&head[end..], "<", ">");
+                    if after_type.first() == Some(&"for") {
+                        if forbidden_trait(name) {
+                            return Err(format!("禁用 impl {name}"));
+                        }
+                    } else if depth == 0 {
+                        owner = name;
+                    }
+                }
+            }
+            ["Direction", ":", ":", "Up" | "Down", ..]
+            | ["UPGRADE_TOTAL_SEGMENTS" | "center_pair_facts" | "pair_domain_ok", ..]
+            | ["fn", "new" | "try_new", ..] => {
+                return Err(format!("禁用 token：{:?}", tail.get(..2)))
+            }
+            ["pub", "fn" | "struct" | "enum", name, rest @ ..] => {
+                let kind = tail[1];
+                if depth == 0 {
+                    public.push(("", kind, *name));
+                } else if depth == 1 && !owner.is_empty() && kind == "fn" {
+                    if !matches!(rest, ["(", "&", "self", ..] | ["(", "self", ..]) {
+                        return Err(format!("公开方法 {owner}::{name} 必须接收 self"));
+                    }
+                    public.push((owner, kind, *name));
+                } else {
+                    return Err(format!("禁止在此公开 {kind} {name}"));
+                }
+            }
+            ["pub", "(" | "async" | "const" | "unsafe" | "extern" | "union" | "trait" | "type"
+            | "static" | "mod" | "use" | "macro", ..] => {
+                return Err(format!("禁用公开项：pub {}", tail[1]));
+            }
+            ["pub", ..] => return Err(format!("不允许公开字段或未知公开项：{:?}", tail.get(1))),
+            // `fn(...)` 是函数指针类型（如 seed_build 的返回类型），不是函数声明。
+            ["fn", "(", ..] => {}
+            ["fn", name, ..] if depth == 0 && tokens.get(i.wrapping_sub(1)) != Some(&"pub") => {
+                private.push(*name);
+            }
+            _ => {}
+        }
+    }
+
+    let mut expected = vec![
+        ("", "fn", "judge_trend_formation"),
+        ("", "enum", "PairState"),
+    ];
+    for (ty, methods) in [
+        ("UnitSpan", "range units"),
+        ("CenterNode", "ordinal members break_unit is_settled center"),
+        (
+            "PairJudgment",
+            "left right connectors outcome state is_final formed",
+        ),
+        ("FormedTrend", "direction pair"),
+        (
+            "TrendFormation",
+            "unit_level unit_count centers pairs final_pairs consolidation",
+        ),
+    ] {
+        expected.push(("", "struct", ty));
+        expected.extend(methods.split_whitespace().map(|method| (ty, "fn", method)));
+    }
+    public.sort_unstable();
+    expected.sort_unstable();
+    if public != expected {
+        return Err(format!(
+            "公开面与 DESIGN §3 不符：实际 {public:?}，期望 {expected:?}"
+        ));
+    }
+    private.sort_unstable();
+    if private != ["confirmed", "seed_build", "span"] {
+        return Err(format!("私有自由函数与 DESIGN §4 不符：{private:?}"));
+    }
+    Ok(())
+}
+// 18. 编译负例（DESIGN §10 #18）：五个证据结构体完整字面量构造均须被拒（5 条 E0451 + 1 条私有类型
+//     `trend_formation::Chain` 错误，块长 ≤ 20 行）。
 // cargo rustc --locked --test trend_formation_1426 -- --cfg issue1426_fabricated_evidence_refusal
 #[cfg(issue1426_fabricated_evidence_refusal)]
 #[rustfmt::skip]
-fn fabricated_evidence_literals_must_fail(u1: UnitSpan, u2: UnitSpan, c: CenterNode, p: &PairJudgment, t: TrendFormation) {
+fn fabricated_evidence_literals_must_fail(u1: UnitSpan, u2: UnitSpan, c: CenterNode, p: &PairJudgment) {
     let _ = UnitSpan { start: 0, units: Box::new([]) };
     let _ = CenterNode { ordinal: 0, members: u1, break_unit: None, center: None };
     let _ = PairJudgment { left: c.clone(), right: c, connectors: u2, outcome: PairOutcome::PendingUpgrade };
-    let _ = TrendFormation { unit_level: 0, unit_count: 0, ..t };
     let _ = FormedTrend { pair: p, direction: Direction::Up };
+    let _ = TrendFormation { unit_level: 0, unit_count: 0, chain: todo!() };
 }

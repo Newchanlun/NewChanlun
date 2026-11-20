@@ -29,8 +29,17 @@
 //!   （`docs/agents/doctrine-rules.md:102-104`），不占总缝规则（#804）例外配额。
 //! - **#2114 趋势正式确认时点**：唯一落点在私有函数 `confirmed()`；#2114 裁定落地前取保守口径（左右两端
 //!   均已结算才输出 [`PairState::TrendFormed`]，否则输出 [`PairState::ProvisionalSeparation`]）。
-//! - **K 线级稳定性**：前缀单调性仅对单元前缀成立；调用方负责只传解析器的稳定前缀（见 #2114）。L0 调用方
-//!   通常传 `l0_units(layer.segments_valid_prefix())`。
+//! - **K 线级稳定性**：前缀单调性仅对单元前缀成立；调用方负责只传解析器的稳定前缀（见 #2114）。
+//!   `layer.segments_valid_prefix()` 仅按段端失败截断、无标记时返回整本段表，不证明跨 bar 稳定
+//!   （`parser/mod.rs:103-106,145-157`），不得据此承诺 K 线级单调。
+//! - **下游接口与凭据约束**：需要「趋势已形成」依据的下游接口应接收 [`FormedTrend`]，或从真实
+//!   [`PairJudgment`] / [`TrendFormation`] 读取并核实 [`PairJudgment::formed`]；不得接收 [`PairState`]
+//!   标签或裸 [`Direction`] 作为凭据（任何调用方均可直接写出 `PairState::TrendFormed { .. }`，标签与裸方向
+//!   仅作只读投影）。若需绑定特定级别或账本身份，下游须同步保留相应账本上下文。
+//! - **凭据生命周期与方向计算**：[`FormedTrend`] 绑定的是签发它的 [`PairJudgment`] 而非原
+//!   [`TrendFormation`] 账本——直接让借来的凭据逃出将释放的原账本会报 `E0515`，但克隆真对、释放原账本后再从
+//!   克隆签发凭据可以成功且是允许的。[`PairJudgment::state`] 每次读叶现算，[`PairJudgment::formed`] 在签发
+//!   凭据时取本次算出的方向并由 [`FormedTrend::direction`] 返回。
 //! - **范围**：本模块只判形成侧，结果是全部节点加全部相邻对的台账，不做同向延续分组，不断言走势完成、
 //!   不设中阴态、不改 `s_session` 发布面。
 
@@ -40,7 +49,11 @@ use super::super::types::{Center, Direction};
 use super::center::{center_from_segments, center_from_window, PairLeaf, UnitRange};
 use super::center_scan::{scan_center_facts_full, PairOutcome};
 
-/// 相邻中枢对的形成侧状态（由该对的 [`PairOutcome`] 与结算态现算，不存储、不装载证据）。
+/// 相邻中枢对的形成侧只读投影标签（由该对的 [`PairOutcome`] 与结算态现算，不存储、不装载证据）。
+///
+/// 任何调用方均可直接手写 `PairState::TrendFormed { .. }`，故本枚举**不得作为下游接口的「已形成」凭据入参**；
+/// 需要「已形成」依据时应接收 [`FormedTrend`]，或从真实 [`PairJudgment`] / [`TrendFormation`] 调用
+/// [`PairJudgment::formed`]。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum PairState {
     /// 趋势已形成：外缘严格分离且满足 `confirmed()` 确认点（#2114 唯一落点）。
@@ -160,7 +173,9 @@ impl PairJudgment {
         self.right.is_settled()
     }
 
-    /// 已形成趋势凭据：当且仅当 `state()` 为 [`PairState::TrendFormed`] 时返回 `Some`。
+    /// 已形成趋势凭据：当且仅当 [`Self::state`]（每次读叶现算）为 [`PairState::TrendFormed`] 时
+    /// 签发 [`FormedTrend`]，并在签发时取本次方向。凭据生命周期绑定本 `PairJudgment` 而非原
+    /// [`TrendFormation`] 账本：直接借出将释放的原账本报 `E0515`，克隆真对、释放原账本后再从克隆签发允许。
     pub fn formed(&self) -> Option<FormedTrend<'_>> {
         match self.state() {
             PairState::TrendFormed { direction } => Some(FormedTrend {
@@ -173,6 +188,10 @@ impl PairJudgment {
 }
 
 /// 已形成趋势的只读凭据（字段私有，仅由 [`PairJudgment::formed`] 签发）。
+///
+/// 生命周期绑定签发它的 [`PairJudgment`]（而非原 [`TrendFormation`] 账本）；方向在签发时自叶读取并随凭据保存，
+/// [`Self::direction`] 返回该签发方向。下游需要「已形成」依据时应收本类型或真 [`PairJudgment`] / [`TrendFormation`]，
+/// 不得收 [`PairState`] 或裸 [`Direction`]。
 #[derive(Debug, Clone, Copy)]
 pub struct FormedTrend<'a> {
     pair: &'a PairJudgment,
