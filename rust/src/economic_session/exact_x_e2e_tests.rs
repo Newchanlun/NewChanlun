@@ -2015,7 +2015,7 @@ fn readonly_source_vfs_fresh_process_startup_and_concurrent_first_open_child() {
     assert_eq!(
         cfg_rc,
         ffi::SQLITE_OK,
-        "启动期构造器必须 sqlite3_shutdown() 恢复未初始化态，不得破坏 sqlite3_config 调用方"
+        "启动期构造器必须通过 sqlite3_shutdown() 将 isInit 归零，不得破坏 sqlite3_config 调用方"
     );
 
     // 2) 准备只读来源库（非空 32768B SHM + 未 checkpoint WAL）及多个独立健康库。
@@ -2150,12 +2150,25 @@ fn readonly_source_vfs_startup_guards_precede_main_and_concurrent_first_open() {
     );
 }
 
-/// 独立新进程负向入口：在启动期构造器正常完成安装后，通过默认 VFS 的 `xSetSystemCall(NULL, NULL)`
-/// 将 `aSyscall` 表复位回默认系统调用，再断言首次 `open_readonly_source_db` 失败关闭并返回
-/// `StorageUnavailable`，且来源库的 `-shm` 元数据（属主、权限、ctime）与目录内容均不变。
-#[test]
-#[ignore = "仅供 #1375 独立新进程守卫缺失失败关闭负向验证调用"]
-fn readonly_source_vfs_fail_closed_when_syscall_table_reset_child() {
+const I1375_RUN_SYSCALL_RESET_CHILD_ENV: &str = "I1375_RUN_SYSCALL_RESET_CHILD";
+
+enum SyscallResetTarget {
+    All,
+    FchownOnly,
+    FchmodOnly,
+}
+
+fn run_fail_closed_syscall_reset_child(
+    target: SyscallResetTarget,
+    expected_err_fragment: &str,
+    ok_marker: &str,
+) {
+    // 复位进程级 SQLite aSyscall 表且不恢复；未由父测试显式置位专用环境变量时直接返回，
+    // 避免手工带 `--ignored` 运行时误伤同进程其他测试。
+    if std::env::var(I1375_RUN_SYSCALL_RESET_CHILD_ENV).as_deref() != Ok("1") {
+        return;
+    }
+
     use crate::history_simulation::intake::{
         open_readonly_source_db, readonly_vfs_startup_guards_installed,
     };
@@ -2212,7 +2225,7 @@ fn readonly_source_vfs_fail_closed_when_syscall_table_reset_child() {
             | libc::IN_CLOSE_WRITE,
     );
 
-    // 复位默认 unix VFS 的全部系统调用表项回编译期默认值（恢复裸 fchown/fchmod）；
+    // 按目标复位默认 unix VFS 的整表或单项系统调用槽位回编译期默认值；
     // 此时 STARTUP_GUARD_STATE 仍为 GUARD_INSTALLED，全靠 verify_metadata_write_guards_installed
     // 回读核验表项地址来拦截。
     unsafe {
@@ -2223,21 +2236,77 @@ fn readonly_source_vfs_fail_closed_when_syscall_table_reset_child() {
             (*parent).iVersion >= 3,
             "默认 SQLite VFS 应支持 iVersion >= 3"
         );
+        let get = (*parent)
+            .xGetSystemCall
+            .expect("默认 SQLite VFS 缺少 xGetSystemCall");
         let set = (*parent)
             .xSetSystemCall
             .expect("默认 SQLite VFS 缺少 xSetSystemCall");
-        assert_eq!(
-            set(parent, std::ptr::null(), None),
-            ffi::SQLITE_OK,
-            "xSetSystemCall(NULL, NULL) 复位默认表应返回 SQLITE_OK"
-        );
+        let before_fchown =
+            get(parent, c"fchown".as_ptr()).expect("默认 SQLite VFS 应暴露 fchown 槽位") as usize;
+        let before_fchmod =
+            get(parent, c"fchmod".as_ptr()).expect("默认 SQLite VFS 应暴露 fchmod 槽位") as usize;
+
+        match target {
+            SyscallResetTarget::All => {
+                assert_eq!(
+                    set(parent, std::ptr::null(), None),
+                    ffi::SQLITE_OK,
+                    "xSetSystemCall(NULL, NULL) 复位默认表应返回 SQLITE_OK"
+                );
+                let after_fchown = get(parent, c"fchown".as_ptr()).unwrap() as usize;
+                let after_fchmod = get(parent, c"fchmod".as_ptr()).unwrap() as usize;
+                assert_ne!(
+                    after_fchown, before_fchown,
+                    "整表复位后 fchown 槽位应离开守卫"
+                );
+                assert_ne!(
+                    after_fchmod, before_fchmod,
+                    "整表复位后 fchmod 槽位应离开守卫"
+                );
+            }
+            SyscallResetTarget::FchownOnly => {
+                assert_eq!(
+                    set(parent, c"fchown".as_ptr(), None),
+                    ffi::SQLITE_OK,
+                    "xSetSystemCall(\"fchown\", NULL) 单项复位应返回 SQLITE_OK"
+                );
+                let after_fchown = get(parent, c"fchown".as_ptr()).unwrap() as usize;
+                let after_fchmod = get(parent, c"fchmod".as_ptr()).unwrap() as usize;
+                assert_ne!(
+                    after_fchown, before_fchown,
+                    "单项复位 fchown 后其槽位应离开守卫"
+                );
+                assert_eq!(
+                    after_fchmod, before_fchmod,
+                    "单项复位 fchown 不得改动 fchmod 守卫槽位"
+                );
+            }
+            SyscallResetTarget::FchmodOnly => {
+                assert_eq!(
+                    set(parent, c"fchmod".as_ptr(), None),
+                    ffi::SQLITE_OK,
+                    "xSetSystemCall(\"fchmod\", NULL) 单项复位应返回 SQLITE_OK"
+                );
+                let after_fchown = get(parent, c"fchown".as_ptr()).unwrap() as usize;
+                let after_fchmod = get(parent, c"fchmod".as_ptr()).unwrap() as usize;
+                assert_eq!(
+                    after_fchown, before_fchown,
+                    "单项复位 fchmod 不得改动 fchown 守卫槽位"
+                );
+                assert_ne!(
+                    after_fchmod, before_fchmod,
+                    "单项复位 fchmod 后其槽位应离开守卫"
+                );
+            }
+        }
     }
 
     let err = open_readonly_source_db(&snap_db)
-        .expect_err("默认 VFS 系统调用表被复位后，open_readonly_source_db 必须失败关闭");
+        .expect_err("默认 VFS 系统调用守卫被复位后，open_readonly_source_db 必须失败关闭");
     assert!(
-        err.starts_with("StorageUnavailable"),
-        "守卫缺失必须返回 StorageUnavailable，实际：{err}"
+        err.starts_with("StorageUnavailable") && err.contains(expected_err_fragment),
+        "守卫回读拦截错误必须返回 StorageUnavailable 并包含 `{expected_err_fragment}`，实际：{err}"
     );
 
     let snap_shm_after = std::fs::metadata(&snap_shm).unwrap();
@@ -2268,29 +2337,85 @@ fn readonly_source_vfs_fail_closed_when_syscall_table_reset_child() {
         watcher.drain().is_empty(),
         "失败关闭期间不得产生任何目录写或 IN_ATTRIB 事件"
     );
-    println!("FAIL_CLOSED_ON_SYSCALL_RESET_OK");
+    println!("{ok_marker}");
 }
 
-#[test]
-fn readonly_source_vfs_fail_closed_when_syscall_table_reset() {
+fn run_fail_closed_syscall_reset_parent(child_test_path: &str, ok_marker: &str) {
     let out = std::process::Command::new(std::env::current_exe().unwrap())
-        .args([
-            "--exact",
-            "economic_session::finance::tests::exact_release::x_e2e::readonly_source_vfs_fail_closed_when_syscall_table_reset_child",
-            "--ignored",
-            "--nocapture",
-        ])
+        .args(["--exact", child_test_path, "--ignored", "--nocapture"])
+        .env(I1375_RUN_SYSCALL_RESET_CHILD_ENV, "1")
         .output()
         .unwrap();
     assert!(
         out.status.success(),
-        "fresh-process fail-closed check failed: stdout={} stderr={}",
+        "fresh-process fail-closed check ({child_test_path}) failed: stdout={} stderr={}",
         String::from_utf8_lossy(&out.stdout),
         String::from_utf8_lossy(&out.stderr)
     );
     assert!(
-        String::from_utf8_lossy(&out.stdout).contains("FAIL_CLOSED_ON_SYSCALL_RESET_OK"),
-        "missing ok marker: {}",
+        String::from_utf8_lossy(&out.stdout).contains(ok_marker),
+        "missing ok marker ({ok_marker}): {}",
         String::from_utf8_lossy(&out.stdout)
+    );
+}
+
+/// 独立新进程负向入口：在启动期构造器正常完成安装后，通过默认 VFS 的 `xSetSystemCall(NULL, NULL)`
+/// 将 `aSyscall` 整表复位回默认系统调用，再断言首次 `open_readonly_source_db` 失败关闭并返回
+/// 守卫回读分支的 `StorageUnavailable` 错误，且来源库 `-shm` 元数据与目录内容不变。
+#[test]
+#[ignore = "仅供 #1375 独立新进程守卫缺失失败关闭负向验证调用（须设 I1375_RUN_SYSCALL_RESET_CHILD=1）"]
+fn readonly_source_vfs_fail_closed_when_syscall_table_reset_child() {
+    run_fail_closed_syscall_reset_child(
+        SyscallResetTarget::All,
+        "守卫未处于进程启动期安装态",
+        "FAIL_CLOSED_ON_SYSCALL_RESET_OK",
+    );
+}
+
+#[test]
+fn readonly_source_vfs_fail_closed_when_syscall_table_reset() {
+    run_fail_closed_syscall_reset_parent(
+        "economic_session::finance::tests::exact_release::x_e2e::readonly_source_vfs_fail_closed_when_syscall_table_reset_child",
+        "FAIL_CLOSED_ON_SYSCALL_RESET_OK",
+    );
+}
+
+/// 独立新进程负向入口：仅复位 `fchown` 系统调用槽位（保持 `fchmod` 守卫不变），断言
+/// `open_readonly_source_db` 命中 `fchown` 回读分支失败关闭且不改动来源库元数据。
+#[test]
+#[ignore = "仅供 #1375 独立新进程 fchown 单项守卫缺失失败关闭负向验证调用（须设 I1375_RUN_SYSCALL_RESET_CHILD=1）"]
+fn readonly_source_vfs_fail_closed_when_fchown_syscall_reset_child() {
+    run_fail_closed_syscall_reset_child(
+        SyscallResetTarget::FchownOnly,
+        "fchown 守卫未处于进程启动期安装态",
+        "FAIL_CLOSED_ON_FCHOWN_RESET_OK",
+    );
+}
+
+#[test]
+fn readonly_source_vfs_fail_closed_when_fchown_syscall_reset() {
+    run_fail_closed_syscall_reset_parent(
+        "economic_session::finance::tests::exact_release::x_e2e::readonly_source_vfs_fail_closed_when_fchown_syscall_reset_child",
+        "FAIL_CLOSED_ON_FCHOWN_RESET_OK",
+    );
+}
+
+/// 独立新进程负向入口：仅复位 `fchmod` 系统调用槽位（保持 `fchown` 守卫不变），断言
+/// `open_readonly_source_db` 命中 `fchmod` 回读分支失败关闭且不改动来源库元数据。
+#[test]
+#[ignore = "仅供 #1375 独立新进程 fchmod 单项守卫缺失失败关闭负向验证调用（须设 I1375_RUN_SYSCALL_RESET_CHILD=1）"]
+fn readonly_source_vfs_fail_closed_when_fchmod_syscall_reset_child() {
+    run_fail_closed_syscall_reset_child(
+        SyscallResetTarget::FchmodOnly,
+        "fchmod 守卫未处于进程启动期安装态",
+        "FAIL_CLOSED_ON_FCHMOD_RESET_OK",
+    );
+}
+
+#[test]
+fn readonly_source_vfs_fail_closed_when_fchmod_syscall_reset() {
+    run_fail_closed_syscall_reset_parent(
+        "economic_session::finance::tests::exact_release::x_e2e::readonly_source_vfs_fail_closed_when_fchmod_syscall_reset_child",
+        "FAIL_CLOSED_ON_FCHMOD_RESET_OK",
     );
 }

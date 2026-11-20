@@ -248,8 +248,8 @@ pub(crate) fn committed_capture_batch(
 ///   （调用后仅清 `bCoreMutex`/`bFullMutex` 而保留原 `xMutexAlloc`，`rusqlite` 靠
 ///   `sqlite3_mutex_alloc(0)` 返回魔数 `8` 判定的单线程拒绝也会失效）；同次 `sqlite3_shutdown()`
 ///   还会重置自动扩展并清空 `sqlite3_temp_directory`/`sqlite3_data_directory`。仓内无 `SINGLETHREAD`、
-///   自动扩展或上述两个目录变量的使用方（仅有 `s_content/capture_allocation/sqlite.rs` 使用
-///   `GETMALLOC`/`MALLOC`）。运行期 `readonly_vfs::name()` 绝不写 `aSyscall` 表，只做只读核验并按
+///   自动扩展或上述两个目录变量的使用方（`s_content/capture_allocation/sqlite.rs` 为 `GETMALLOC`/
+///   `MALLOC` 的唯一生产调用方）。运行期 `readonly_vfs::name()` 绝不写 `aSyscall` 表，只做只读核验并按
 ///   线程安全接口注册 `history_sim_ro`，从结构上消除与并发健康连接的 `aSyscall` 数据竞争；
 /// - 线程局部守卫仅当本线程处于 `history_sim_ro` 打开/映射临界区时拦截 `fchown`/`fchmod` 为空操作，
 ///   其余所有线程与健康连接原样透传原系统调用，确保即便以 `euid == 0`（root）读取正常非空 `-shm` 或
@@ -343,8 +343,8 @@ mod readonly_vfs {
     /// `sqlite3MutexInit()` 选定互斥实现，且 `sqlite3MutexEnd()` 不清 `xMutexAlloc`，因此加载后
     /// 不支持切到 `SQLITE_CONFIG_SINGLETHREAD`（`rusqlite` 靠 `sqlite3_mutex_alloc(0)` 返回魔数
     /// 识别单线程模式的拒绝也会失效）；同次关停还会重置自动扩展并清空
-    /// `sqlite3_temp_directory`/`sqlite3_data_directory`。仓内无上述接口使用方（仅
-    /// `s_content/capture_allocation/sqlite.rs` 调用 `GETMALLOC`/`MALLOC`）。
+    /// `sqlite3_temp_directory`/`sqlite3_data_directory`。仓内无上述接口使用方（`s_content/capture_allocation/sqlite.rs`
+    /// 为 `GETMALLOC`/`MALLOC` 的唯一生产调用方）。
     extern "C" fn install_syscall_guards_at_startup() {
         unsafe {
             if ffi::sqlite3_initialize() != ffi::SQLITE_OK {
@@ -394,7 +394,7 @@ mod readonly_vfs {
             } else {
                 false
             };
-            // 将 isInit 归零以保留 GETMALLOC/MALLOC/PCACHE2/MUTEX 等 sqlite3_config 配置；
+            // 将 isInit 归零，使 GETMALLOC/MALLOC/PCACHE2/MUTEX 等 sqlite3_config 配置项仍可用；
             // 同时会重置自动扩展并清空 sqlite3_temp_directory / sqlite3_data_directory，且不清
             // 已选定的 xMutexAlloc（仓内无使用方，加载后不支持切到 SINGLETHREAD）。
             let shutdown_ok = ffi::sqlite3_shutdown() == ffi::SQLITE_OK;
