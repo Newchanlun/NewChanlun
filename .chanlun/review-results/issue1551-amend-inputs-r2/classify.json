@@ -1,0 +1,12 @@
+{
+  "ticket": 1551,
+  "role": "triage",
+  "model": "gpt-6.2-sol",
+  "klass": "P",
+  "reason": "修订 AT-18 整图验收与 #1279 的 #1323 侧关图前置，属于 graph-engineering「1. 分级」明列的关图与 #1279 去向；沿用 #1551 分级评论 6861283421。",
+  "parsed": true,
+  "userGate": [],
+  "sourceCommit": "9ad6b51c15614be207d6208c93d560eb832ea8d7",
+  "asOf": "2026-11-20",
+  "round": 2
+}
