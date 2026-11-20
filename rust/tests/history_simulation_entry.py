@@ -62,11 +62,14 @@ def check_listening_predicate():
             t2.join(5); assert not t2.is_alive()
         assert ready.exists() and not listening(ready), 'a closed stale socket file is not ready'
     assert not Path(root).exists()
+LAST_EXCHANGE={}
 def request(path,op,payload):
     with socket.socket(socket.AF_UNIX) as s:
         s.settimeout(5); s.connect(str(path)); s.sendall((canonical({'protocol':'x-exact-simulation/1','op':op,'payload':payload})+'\n').encode())
         s.shutdown(socket.SHUT_WR)
-        r=json.loads(s.makefile('rb').readline())
+        raw=s.makefile('rb').readline()
+        r=json.loads(raw)
+    LAST_EXCHANGE.clear(); LAST_EXCHANGE.update(op=op,reply=r)
     if r.get('kind')=='SimulationBatch': CLOCK['bar']=max(CLOCK['bar'],r['bar_index']+1)
     return r
 class Authority:
@@ -252,7 +255,8 @@ def run(name):
         # Invalid input cannot consume S eligibility or poison Accepted with MayHaveCalled.
         invalid_ohlc=batch(0,[a]); invalid_ohlc['bar']['low']=111
         sibling=copy.deepcopy(a); sibling['order'].update(command_id='a-conflict',eligibility_ref='S:a-conflict')
-        assert request(xp,'AcceptExact',command(sibling))['state']=='Accepted'
+        sibling_reply=request(xp,'AcceptExact',command(sibling))
+        assert sibling_reply.get('state')=='Accepted',(name,sibling_reply)
         invalid_close=batch(0,[a,sibling])
         invalid_bust=batch(0,[a]); invalid_bust['scenario_busts']=[dict(exec_id='missing',quantity=1,scenario_ref='missing')]
         before=len(s.calls)
@@ -481,6 +485,16 @@ def run(name):
         assert blocked.returncode!=0 and b'InvalidDomain' in blocked.stderr
         print(name+': PASS '+('test runtime with post-claim exit43' if fixture else 'production X binary')+', invalid input stays Accepted, unsent S failures stay Accepted, sent-but-unknown stays query-only, S reply loss/query-only recovery, unique S authorization, pending epoch2 rejected without writes, full fee/bust replay, frozen binding, atomic first initialization recovery')
         return tables
+    except Exception:
+        log.flush()
+        x_log=(directory/'x.log').read_text(errors='replace')
+        sys.stderr.write(
+            f"\n[diag:{name}] last_exchange={LAST_EXCHANGE!r}\n"
+            f"[diag:{name}] p_poll={p.poll()!r} e_alive={e.thread.is_alive()} s_alive={s.thread.is_alive()} "
+            f"e_calls={len(e.calls)} s_calls={len(s.calls)} sockets={str(sockets)!r}\n"
+            f"[diag:{name}] x.log:\n{x_log}\n"
+        )
+        raise
     finally:
         if p.poll() is None: p.terminate(); p.wait(5)
         log.close(); e.sock.close(); s.sock.close()

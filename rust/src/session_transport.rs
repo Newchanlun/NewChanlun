@@ -1067,18 +1067,26 @@ mod tests {
         );
     }
 
+    fn short_socket_dir() -> tempfile::TempDir {
+        tempfile::Builder::new()
+            .prefix("st-")
+            .tempdir_in("/tmp")
+            .unwrap()
+    }
+
+    fn trigger_listener_poll_hup(raw_fd: std::os::fd::RawFd) {
+        let (broken, peer) = UnixStream::pair().unwrap();
+        drop(peer);
+        // SAFETY: raw_fd 仍归 listener 持有；dup2 原子替换底层描述符而不释放 raw_fd 号，
+        // 避免并发线程复用描述符，并使 Linux 与 macOS 的 poll 均稳定返回 POLLHUP。
+        assert_ne!(unsafe { libc::dup2(broken.as_raw_fd(), raw_fd) }, -1);
+        drop(broken);
+    }
+
     #[test]
     fn abnormal_listener_shutdown_marks_uncertain_and_returns_error() {
-        let dir = std::env::temp_dir().join(format!(
-            "transport-abnormal-exit-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
-        std::fs::create_dir_all(&dir).unwrap();
-        let sock = dir.join("e.sock");
+        let dir = short_socket_dir();
+        let sock = dir.path().join("e.sock");
         let listener = UnixListener::bind(&sock).unwrap();
         let raw_fd = listener.as_raw_fd();
         let uncertain = Arc::new(AtomicBool::new(false));
@@ -1092,8 +1100,7 @@ mod tests {
         };
         let killer = std::thread::spawn(move || {
             std::thread::sleep(Duration::from_millis(40));
-            // SAFETY: raw_fd 仍被 serve_listener_inner 中的 listener 持有，shutdown 触发异常 poll/accept 而不释放描述符。
-            unsafe { libc::shutdown(raw_fd, libc::SHUT_RDWR) };
+            trigger_listener_poll_hup(raw_fd);
         });
         let result = serve_listener_inner(
             listener,
@@ -1105,7 +1112,6 @@ mod tests {
             |_: &TimedJob| json!({"ok":true}),
         );
         killer.join().unwrap();
-        let _ = std::fs::remove_dir_all(&dir);
         let err = result.unwrap_err();
         assert!(err.starts_with("TransportUnavailable："), "{err}");
         assert!(uncertain.load(Ordering::SeqCst));
@@ -1113,16 +1119,8 @@ mod tests {
 
     #[test]
     fn accept_thread_panic_marks_uncertain_and_returns_error() {
-        let dir = std::env::temp_dir().join(format!(
-            "transport-accept-panic-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
-        std::fs::create_dir_all(&dir).unwrap();
-        let sock = dir.join("e.sock");
+        let dir = short_socket_dir();
+        let sock = dir.path().join("e.sock");
         let uncertain = Arc::new(AtomicBool::new(false));
         let bounds = TransportBounds {
             frame: 4096,
@@ -1140,7 +1138,6 @@ mod tests {
             uncertain.clone(),
             |_, _| json!({"ok":true}),
         );
-        let _ = std::fs::remove_dir_all(&dir);
         let err = result.unwrap_err();
         assert!(err.contains("accept线程异常中止"), "{err}");
         assert!(uncertain.load(Ordering::SeqCst));
@@ -1148,16 +1145,8 @@ mod tests {
 
     #[test]
     fn explicit_stop_returns_ok_and_preserves_clean_uncertain_flag() {
-        let dir = std::env::temp_dir().join(format!(
-            "transport-clean-stop-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
-        std::fs::create_dir_all(&dir).unwrap();
-        let sock = dir.join("e.sock");
+        let dir = short_socket_dir();
+        let sock = dir.path().join("e.sock");
         let stop = Arc::new(AtomicBool::new(false));
         let stop_check = stop.clone();
         let uncertain = Arc::new(AtomicBool::new(false));
@@ -1182,30 +1171,20 @@ mod tests {
             |_, _| json!({"ok":true}),
         );
         stopper.join().unwrap();
-        let _ = std::fs::remove_dir_all(&dir);
         result.unwrap();
         assert!(!uncertain.load(Ordering::SeqCst));
     }
 
     #[test]
     fn same_tick_poll_hard_error_beats_stop_signal() {
-        let dir = std::env::temp_dir().join(format!(
-            "transport-same-tick-err-stop-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
-        std::fs::create_dir_all(&dir).unwrap();
-        let sock = dir.join("e.sock");
+        let dir = short_socket_dir();
+        let sock = dir.path().join("e.sock");
         let listener = UnixListener::bind(&sock).unwrap();
         let raw_fd = listener.as_raw_fd();
-        // 先 shutdown listener，使首次 poll 立刻返回 POLLHUP/POLLERR；
+        // 先令 listener 描述符在首次 poll 即返回 POLLHUP；
         // 同时让 stop_fn 在首轮顶部返回 false、紧随 poll 返回后的同拍检查返回 true，
         // 证明已观察到的硬错误优先于同拍停止信号，不被吞成清洁退出。
-        // SAFETY: raw_fd 仍归 listener 所有，shutdown 触发异常 revents 而不关闭描述符。
-        unsafe { libc::shutdown(raw_fd, libc::SHUT_RDWR) };
+        trigger_listener_poll_hup(raw_fd);
         let checks = Arc::new(AtomicUsize::new(0));
         let checks_in_loop = checks.clone();
         let uncertain = Arc::new(AtomicBool::new(false));
@@ -1228,7 +1207,6 @@ mod tests {
             Some(uncertain.clone()),
             |_: &TimedJob| json!({"ok":true}),
         );
-        let _ = std::fs::remove_dir_all(&dir);
         let err = result.unwrap_err();
         assert!(err.contains("listener poll异常状态"), "{err}");
         assert!(uncertain.load(Ordering::SeqCst));
