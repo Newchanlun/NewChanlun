@@ -1,0 +1,88 @@
+# #1551 ADR 0064 修订独审（异家族终审）
+
+目标：#1323 只凭 AT-18 整图验收报告关图，合同是 ADR 0064。本审判定修订 `9ad6b51c15614be207d6208c93d560eb832ea8d7`（对 `6ba72e84` +24/-3）能否堵住 #1391 独审发现的三处假 PASS。起草模型 gpt-6.2-sol，本审为 Claude。全程只读，未改文件、未评论、未跑 cargo。下文 L 行号指修订后 ADR 全文。
+
+**总判：BLOCK。** 第三点（自身清单摘要在引导阶段阻断）可放行。第一、二点照字面实施，要么永远出不了真 PASS，要么仍留假 PASS。四个阻断项可以一轮修完。
+
+| 项 | 结论 | 依据 |
+|---|---|---|
+| R1 | PASS | CODEX-CHILD.md:54-63、delivery-bundle.ts:83-86/:116-132/:147/:156-175/:189-246/:248-285/:306-308、delivery-bundle.mts:13、ADR 0041:41、ADR 0058:190-211 及两个锚点逐条打开，均成立 |
+| R2 | PASS | 未动 #1279 门、资金凭据硬门和三份 /1 键集，无可调字段，无 UserSigned 冒记。「来源票可自报」经两位复核降级，我读 L64 后同意 |
+| R3 | BLOCK | B1、B4：merge 落地和覆盖声明的结论由实现决定，验收 L124、L125 写不出确定的正例 |
+| R4 | BLOCK | canonical-plan 六处替换各唯一命中，重放与 blob 逐字相同，无关章节未丢。实质合同缺失：B1 至 B4 |
+| R5 | BLOCK | 等价链与引导门未增宽松档。但 obligation 节点没有规范值，核验宽度随声明方所选节点变化（B4） |
+| R6 | BLOCK | B3：新增上游交付物，却写「不新增 blocking 边」，未点名票 |
+| R7 | PASS | P 类，userGate 为空。关图与 #1279 去向是第 1 节明列的 P 类，与评论 6861283421 一致；三点只定证据方法 |
+| R8 | BLOCK | 复跑三组 rg 与三条 gh 查询，命中都能复现。换「merge_method、同树、第二父」复搜，查到 ci.yml:41-42 与 review_sweep.py:279 两条在案机制未列（B1、B2）。Q1 的 C 类裁定未处理已关交付（B3） |
+
+## 阻断项
+
+### B1 合并提交落地没有等价链（R3、R4、R8）
+
+- 位置：L74-76 两条链，基线 L64「交付按 squash 合入」，验收 L125。
+- 问题：自动合入用 `merge_method=merge`（review_sweep.py:279）。近 300 个 first-parent 提交里 134 个是双父。链 2 要求 M 单父，对它们不成立。链 1 的「实际主线交付链」和合并提交按哪个父取差都没定义。
+- 反例：PR #2021（TB-04-C #1407），H=`fdda2200fb`，M=`b9d898dccf`，父为 `ed780bcd4a` 与 H，tree(M)=tree(H)，独评绑定 H。按第一父取差得到整份产品差异，报 `REVIEW_FINAL_PRODUCT`；按 H 取差为空，通过。#1391 与 #1403 可各取一种。另有 27 个双父落地 tree(M)≠tree(H)，含 TB 落地 `c65f021959`。
+- 修法：增设第 3 条 merge commit 链。GitHub 证实 merged、`head.sha=H`、`merge_commit_sha=M`，M 恰有两父且第二父为 H。tree(M)=tree(H) 时直接等价。否则取 B=merge-base(P1,H)，比较 B→H 与 P1→M 的产品路径集、前后 blob 字节和 mode，全等才等价，不等须对 M 补审。链 1 改为比较 E 与 M 两棵树。L64 改成「squash 或 merge commit」。L125 补 merge 的正反例。
+
+### B2 主线 CI 被去重跳过时怎么算（R4、R8）
+
+- 位置：L73「缺跑或跳过必需检查不算成功……不能用 PR CI 顶替」，L74、L76 的「CI……E=H」，L125。
+- 问题：ci.yml:41-46、:82-116（#1875、#2027）规定 merge commit 与 PR head 同树且 PR run 的 rust-green 真实成功时，main 的 push run 跳过全部 Rust 作业。正文没说这种跳过怎么算，也没说「应有项」取作业还是取分支必需检查。L74、L76 又允许 CI 的 E=H，与 L73 末句相抵。
+- 反例：M=`b9d898dccf` 的 push run 43853928501，rust-check、rust-test-*、rust-green 全为 skipped，ci-ok 为 success，该合入改了 15 个 rust/ 文件。按作业读，Rust 片永远 `CI_FINAL_PRODUCT`。按 ci-ok 读，主线 run 没测 Rust，这句落空。deepagents/review 只出现在 PR head，按分支必需检查算主线应有项也永远缺项。
+- 修法：写明主线应有项是 M 上 ci.yml push run 的 ci-ok 与 DevSkim，deepagents/review 只在 PR head 核。被去重跳过的 Rust 作业要独立复算前提后才计为已执行：M 双父，tree(M)=tree(H)，`rust/Cargo.lock` 未变，H 上本仓 pull_request run 的 rust-green 为 success 且必需作业逐项 SUCCESS，记下该 run 的 run_id 与 head_sha。合入改动全在跳过集内时 Rust 作业不属应有项。前提不成立判 `CI_FINAL_PRODUCT`，或对 M 以 workflow_dispatch 补跑。写明链 2 只用于独评。L125 补一正一反。考古 Q2 补列这两条先例。
+
+### B3 已关闭上游片没有覆盖原件的产出者（R6、R4、R8）
+
+- 位置：L70「覆盖原件由负责该子义务的上游执行方随实际结果封包，随该票交付」，L130「不新增或删除 blocking 边」，草稿受影响票表「上游实施子片……边变化 无」。
+- 问题：修订给 TB-01..TB-10 各片和 #1418 新增了 `at18-evidence-scope/1` 交付物，没有点名票，也没给已关交付留补件通道。L70 又禁止 #1391 自编索引。
+- 反例：crosswalk rows[0] US-ST-001 的 `success_closure_slice_ids=[TB-01,TB-02,TB-07]`。键 (story, US-ST-001, TB-01, …) 只能由 TB-01 执行方出，而 #1359、#1370、#1371、#1372 均已 CLOSED，origin/main 上查不到任何 at18-evidence-scope。该子义务恒为 `COVERAGE_SCOPE`，整图永远 FAIL。#1373、#1374、#1392、#1404、#1414 同理。
+- 修法：写明已关片的覆盖原件由哪张票产出（新补件票，或各 TB 汇总票名下的补件子片），作为独立仓外交付，自带 manifest，经非作者独审逐条核「声明到原件记录」。写明其 `ArtifactRef.ticket` 取补件票，「来源票」核验认它。第六节列出受影响票，接补件票到 #1391 的 blocking 边，改写「不新增 blocking 边」，草稿表同步。考古 Q1 列出已关交付与 TB01-PARENT-CONTRIBUTION.json（`runtime_acceptance=NOT_EVALUATED`，只是分配账）并写取舍。
+
+### B4 覆盖声明缺期望键与「证实」判据（R3、R4、R5）
+
+- 位置：L68-70，验收 L124。
+- 问题一：L69 把 `obligation={path,sha256,pointer}` 列进键，却没按 kind 定节点。crosswalk 的 rows 与 destination_success_obligations 不带 `source_json_pointer`。故事同时在 SPEC.json `/stories/i` 和 crosswalk `/rows/i`，Destination 同时在 crosswalk 和 SPEC-COVERAGE-INPUT.json `/destinations/i`。必需的 evidence_class、profile_id 也导不出，`runtime_profile_gate` 是散文。「已批准的切片验收记录」不在输入包 10 键内，#1403 复现不了应核集。
+- 反例一：上游声明 US-ST-001 指向 SPEC.json `/stories/0`，#1391 期望 crosswalk `/rows/0`，真证据报 `COVERAGE_SCOPE`。实现若改收任意可解析指针，family ST-001 的声明指向 `/requirements/0/acceptance_points/0`，「全核」只核这一点。
+- 问题二：「证实所报结论」没有可执行判据。records 只有 `{artifact,pointer}`，被指节点没有身份字段，也没禁止不同键共用同一节点。
+- 反例二：覆盖原件给 US-ST-002 写 `VERIFIED`，records 指向 US-ST-001 的结果节点，写明的机械检查全过。impl 分支 at18-evidence.ts:1-2 仍注明「未接入经批准的解读器时，不存在肯定支持」。两位复核对此一票 BLOCK、一票非阻断。我判 BLOCK：伪造有上游独审兜着，但节点无身份字段两人都认，两套实现会各写一套判据。
+- 修法：（1）按 kind 定死期望键。story 取 crosswalk `/rows/<i>`，family 与 detail 取 SPEC-COVERAGE-INPUT.json 中 crosswalk 的 `source_json_pointer`，destination 取 crosswalk `/destination_success_obligations/<i>`。path 只限输入包三个 ref，节点 ID 等于 `Claim.id`，期望切片集取该条目的 `success_closure_slice_ids`。（2）写明必需的 evidence_class 与 profile_id 从哪个机读字段导出，导不出就给固定表。（3）删去「切片验收记录」，或绑进输入包并升 /2。（4）给「证实」定判据，二选一：结果节点带 `{kind,id,slice_id,evidence_class,profile_id,verdict}` 并与 Claim 逐字段相等；或明定信任锚为上游非作者独审原件逐声明覆盖覆盖原件的 sha256，并列出机械核对清单。无此合同的原件不计覆盖。（5）L124 补负例「用 001 的记录给 002 写 VERIFIED 须报 `COVERAGE_SCOPE`」，并写测试文件与命令。
+
+## 非阻断项（建议同轮顺手改）
+
+1. L75 禁止按后缀分类，L77 却援引按后缀分类的 delivery-bundle.ts:249-253。写成两项同时满足才算非产品。
+2. L70「复核其来源票」、L77「已验收」没有可执行检查。写成 `ArtifactRef.ticket` 属于该切片的实施票或 B3 的补件票。
+3. Claim 没有 run_id 和受测提交，L70「同一次运行」机器认不出。
+4. L71 改了 evidence_refs 的通过语义而版本仍是 /1。写明在首份正式报告前生效。
+5. L5 代码清单的两个文件只在 impl/1391-at18-report 上，漏了 at18-evidence.ts、at18-github.ts 和 #1403 总验器。修订分支没有 PR，应写明并入 #2065 head 后重跑正式门。
+6. L125 的 `d4f14d7889`、`bc2efc7e72` 不是本仓对象，改成夹具角色名。三项验收补测试文件与命令。
+7. L61 引 :189-246，其中 :243、:245 与「未登记产物仍可引导」相抵。逐个列出引导阶段适用的诊断码。
+8. L69 的 `obligation.sha256` 绑输入包 head，规范文件一改全部声明失效，重发责任未写。
+9. 考古所引 `/Volumes/AgentStorage/.../REPORT.md` 本机读不到，也没进 MANIFEST.txt。封一份带 sha256 的可读副本。
+
+## 本审亲自核过的事实
+
+`git log --first-parent -300 origin/main` 单父 166、双父 134，双父中同树 107、异树 27。`gh run view 43853928501` 的作业结论。`gh issue view` 确认 #1359、#1370 至 #1374、#1392、#1404、#1414 为 CLOSED。python 读 crosswalk、SPEC.json、SPEC-COVERAGE-INPUT.json 的键。canonical-plan 重放。分支保护必需检查为 deepagents/review、ci-ok、DevSkim，strict 开，线性历史关。
+
+
+## 必须修（完整）
+
+1. 【B1｜R3、R4、R8】合并提交落地没有等价链。位置：§五 L74-76 两条等价链，基线 L64「交付按 squash 合入」，验收 L125。问题：本仓自动合入用 merge commit（.sandcastle/deepagents-pilot/pilot1742/review_sweep.py:279，merge_method=merge），origin/main 近 300 个 first-parent 提交中 134 个是双父。链 2 要求 M 只有一个父提交，对它们不成立；链 1 的「实际主线交付链」和合并提交按哪个父逐提交取差都没定义。反例输入：PR #2021（TB-04-C #1407），H=fdda2200fb，M=b9d898dccf，父为 ed780bcd4a 与 fdda2200fb，tree(M)=tree(H)，独评绑定 H。按第一父取差得到整份产品差异，报 REVIEW_FINAL_PRODUCT；按 H 取差为空，通过。#1391 与 #1403 可各取一种读法。另有 27 个双父落地 tree(M)≠tree(H)（含 TB 落地 c65f021959），已落地提交无法重落。最小修法：增设第 3 条 merge commit 链。GitHub 证实 PR merged、head.sha=H、merge_commit_sha=M，M 恰有两父且第二父为 H。tree(M)=tree(H) 时直接等价。否则取 B=merge-base(P1,H)，比较 B→H 与 P1→M 的产品路径集、前后 blob 字节和 mode，全等才等价，不等记 REVIEW_FINAL_PRODUCT 并要求对 M 补审。链 1 改为比较 E 与 M 两棵树的差异，并写明祖先关系含 merge 的第二父链。L64 的 squash 断言改为「squash 或 merge commit」。L125 补 merge commit 的正例和反例。
+
+2. 【B2｜R4、R8】主线 CI 被工作流去重跳过时怎么算没有规定，且正文自相抵触。位置：§五 L73「缺跑或跳过必需检查不算成功……适用的主线 CI 仍须来自实际 main 运行，不能用 PR CI 顶替」，L74 与 L76 的「CI 或独评……E=H」，验收 L125「移除应有主线 CI 不能过门」。问题：.github/workflows/ci.yml:41-46、:82-116（#1875、#2027）规定 merge commit 与 PR head 同树且 PR run 的 rust-green 真实成功时，main 的 push run 跳过全部 Rust 作业。正文没说这种跳过怎么算，也没说「应有项」取工作流作业还是取分支必需检查。L74、L76 允许 CI 的 E=H，与 L73 末句相抵。反例输入：M=b9d898dccf 的 push run 43853928501，rust-check、rust-test-default、rust-test-s-session、rust-test-production-session、rust-green 全为 skipped，ci-ok 为 success；该合入相对第一父改了 15 个 rust/ 文件。按作业读，Rust 片永远 CI_FINAL_PRODUCT，整图出不了真 PASS。按 ci-ok 读，主线 run 没测 Rust，「主线 CI 覆盖产品」落空。deepagents/review 只出现在 PR head，按分支必需检查算主线应有项也永远缺项。最小修法：写明主线应有项是 M 上 ci.yml push run 的 ci-ok 与 DevSkim，deepagents/review 只在 PR head 核。被去重跳过的 Rust 作业要独立复算去重前提后才计为已执行：M 双父，tree(M)=tree(第二父 H)，rust/Cargo.lock 未变，H 上本仓 pull_request 的 ci.yml run 中 rust-green 为 success 且必需作业逐项 SUCCESS，并记下该 PR run 的 run_id 与 head_sha。合入改动全在 ci.yml 跳过集内时，Rust 作业不属应有项。前提不成立判 CI_FINAL_PRODUCT，或对 M 以 workflow_dispatch 补跑全量。写明链 2 只用于独评。L125 补一例去重跳过的正例和一例前提不成立的反例。考古 Q2 把 ci.yml:41-46 与 review_sweep.py:279 列为在案先例。
+
+3. 【B3｜R6、R4、R8】已关闭上游片没有覆盖原件的产出者，受影响票与 blocking 边不完整。位置：§五 L70「覆盖原件由负责该子义务的上游执行方随实际结果封包，随该票交付按第三节验收」及同段「单独维护的对账索引」不得代证，§六 L130「本 ADR 不新增或删除 blocking 边」，草稿「受影响票与 blocking 边变化」表中「上游实施子片（含 #1418）……边变化 无」。问题：修订给 TB-01..TB-10 各实施片和 #1418 新增 at18-evidence-scope/1 交付物，没有点名票，也没给已关闭交付留补件通道；#1391 又不得自编索引。反例输入：IMPLEMENTATION-CROSSWALK.json rows[0] US-ST-001 的 success_closure_slice_ids=[TB-01,TB-02,TB-07]。键 (story, US-ST-001, TB-01, …) 的声明只能由 TB-01 执行方出，而 #1359、#1370、#1371、#1372 均已 CLOSED，origin/main 上查不到任何 at18-evidence-scope。该子义务恒为 COVERAGE_SCOPE，整图永远 FAIL。#1373、#1374、#1392、#1404、#1414 同理。最小修法：在 §五 写明已关闭片的覆盖原件由哪张票产出（新开补件票，或各 TB 汇总票名下的补件子片），作为独立仓外交付，自带 manifest，经非作者独审逐条核「声明到原件记录」的映射。写明这类覆盖原件的 ArtifactRef.ticket 取补件票，「来源票」核验认它。§六 列出受影响票（未关实施票、#1418、各 TB 汇总票、补件票），接上补件票到 #1391 的 blocking 边，改写「不新增 blocking 边」，草稿受影响票表同步。考古 Q1 列出已关交付与 TB01-PARENT-CONTRIBUTION.json（runtime_acceptance=NOT_EVALUATED，只是分配账，不是覆盖声明）并写明取舍。
+
+4. 【B4｜R3、R4、R5】覆盖声明缺期望键的推导规则与「证实」判据。位置：§五 L68-70，验收 L124。问题一：L69 把 obligation={path,sha256,pointer} 列进键，L68 给了四个来源，却没按 kind 定节点。crosswalk 的 rows 与 destination_success_obligations 不带 source_json_pointer；故事同时在 SPEC.json /stories/i 和 crosswalk /rows/i，Destination 同时在 crosswalk /destination_success_obligations/i 和 SPEC-COVERAGE-INPUT.json /destinations/i。每条子义务必需的 evidence_class、profile_id 也导不出，rows 的 runtime_profile_gate 是散文。「同一 head 上已批准的切片验收记录」不在输入包 10 键内，#1403 复现不了应核集。反例输入一：上游声明 {story, US-ST-001, TB-02} 的 obligation 指向 SPEC.json /stories/0，#1391 期望 crosswalk /rows/0，键不中，真证据报 COVERAGE_SCOPE。实现若改收任意可解析指针，family ST-001 的声明指向 /requirements/0/acceptance_points/0，「节点有多项判据时全核」只核这一个验收点。问题二：「证实所报结论」没有可执行判据。records 只有 {artifact,pointer}，被指节点没有身份字段，也没禁止不同键共用同一节点。反例输入二：覆盖原件给 US-ST-002 写 result=VERIFIED，records 指向 US-ST-001 的结果节点；键精确、ArtifactRef 合法、pointer 可解析，写明的机械检查全过。impl 分支 .sandcastle/at18-evidence.ts:1-2 仍注明「未接入经批准的解读器时，不存在肯定支持」。两位复核对问题二一票 BLOCK、一票非阻断；我读 L69-70 后判 BLOCK：伪造有上游非作者独审兜着，但记录节点无身份字段两人都认，#1391 与 #1403 会各写一套判据。最小修法：（1）按 kind 定死期望键：story 取 crosswalk /rows/<i>，family 与 detail 取 SPEC-COVERAGE-INPUT.json 中 crosswalk 的 source_json_pointer，destination 取 crosswalk /destination_success_obligations/<i>；path 只限输入包三个 ref；节点 ID 必须等于 Claim.id；期望切片集取该条目的 success_closure_slice_ids。（2）写明每个（条目，切片）必需的 evidence_class 与 profile_id 从哪个机读字段导出，导不出就给固定表。（3）删去「切片验收记录」，或绑进输入包并升 /2。（4）给「证实」定判据，二选一：结果记录节点带 {kind,id,slice_id,evidence_class,profile_id,verdict} 并与 Claim 逐字段相等；或明定信任锚为上游非作者独审原件逐声明覆盖覆盖原件的 sha256，并列出生成器与总验器的机械核对清单。无此合同的原件不计覆盖。（5）L124 补负例「用 001 的记录给 002 写 VERIFIED，须报 COVERAGE_SCOPE」，并写出测试文件与命令。
+
+## 非阻塞
+
+- L75 禁止按路径后缀推定分类，L77 却援引按后缀分类的 delivery-bundle.ts:249-253，且 deliveryManifestSchema 没有逐路径的非产品核定字段。建议写成两项同时满足才算非产品：delivery-bundle.ts:249-253 判为非产品，且审查原件逐路径核定；任一不满足按产品变化处理。
+- L70「复核其来源票」与 L77「已验收的 manifest」没有可执行检查。建议写成：覆盖原件的 ArtifactRef.ticket 属于该切片的实施票或 B3 指定的补件票。
+- Claim 的 8 个键里没有 run_id 和受测提交，L70「同一次运行」机器认不出；旧产品版本上的 VERIFIED 声明不受 L73-77 的最终产品绑定约束。建议 Claim 增加 run_id 与 tested_commit，并要求受测提交按同一等价链对齐 M。
+- L71 改了 evidence_refs 与 evidence_by_class 的通过语义（现在须含覆盖原件），版本仍是 /1，与 L58「改变字段语义须升 /2」不合。目前没有正式 /1 报告，建议写明本修订在首份正式报告前生效。
+- L5 受影响代码清单所列 .sandcastle/at18-report.ts、.mts 只存在于 impl/1391-at18-report，origin/main 与修订 head 上都没有；漏列 at18-evidence.ts、at18-github.ts 与 #1403 总验器（未落码）。修订分支 decision/1551-adr0064-amend 没有 PR，建议写明并入 #2065 head 后在新 head 上重跑 deepagents/review。
+- L125 的 d4f14d7889、bc2efc7e72 不是本仓 Git 对象，是独审合成仓库里的 SHA。建议改成「祖先提交 A、落地提交 B」这类夹具角色名。L124-126 三项验收补测试文件与命令。
+- L61 引 delivery-bundle.ts:189-246，其中 :243 MISSING_REPORT_DECLARATION 与 :245 REPORT_DECLARATION_REQUIRED 和 L62「未登记产物仍可引导」相抵。建议逐个列出引导阶段适用的诊断码，并明写这两项不适用。
+- L69 的 obligation.sha256 绑输入包 head 上的 blob，上游交付时输入包尚不存在；规范 JSON 一改，全部已交付声明失效，重发责任与触发条件未写。
+- 考古各 Q 的「实测依据」指向 /Volumes/AgentStorage/issue1391-at18/non-author-astra-b22fd496/REPORT.md，本审查机器读不到，evidence/1551-amend-inputs 的 MANIFEST.txt 也没登记它。三处反例只能经 #1551 评论 7040728269 间接佐证。建议封一份带 sha256 的可读副本。
+- tb_summaries[].evidence_by_class、entity_reports、PermissionSlot 各层、MigrationSlot.non_empty_evidence_refs 不在覆盖声明约束内，仍可放入不覆盖本项的原件。这是基线已有的缺口，超出本次三点范围，建议写明它们由各自既有规则独立核验，或纳入 kind。
