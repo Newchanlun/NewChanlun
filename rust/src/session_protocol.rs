@@ -11,10 +11,16 @@ use std::fmt;
 pub fn sha256_hex(bytes: &[u8]) -> String {
     #[cfg(feature = "s_incremental")]
     note_hash(bytes.len());
+    const HEX: &[u8; 16] = b"0123456789abcdef";
     let mut h = Sha256::new();
     h.update(bytes);
     let d = h.finalize();
-    d.iter().map(|b| format!("{b:02x}")).collect()
+    let mut out = [0u8; 64];
+    for (i, &b) in d.iter().enumerate() {
+        out[i * 2] = HEX[(b >> 4) as usize];
+        out[i * 2 + 1] = HEX[(b & 0x0f) as usize];
+    }
+    std::str::from_utf8(&out).unwrap().to_owned()
 }
 
 /// 规范十进制整数：`0` 或 `-?[1-9][0-9]*`（无 `+`、无空白、无前导零、`-0` 非规范）。
@@ -132,32 +138,58 @@ pub fn positive_typed<'a>(s: &'a str, field: &'a str) -> Result<i64, ProtocolErr
     Ok(n)
 }
 
-pub fn canonical_json(v: &Value) -> String {
+fn write_canonical_json(out: &mut Vec<u8>, v: &Value) {
+    use std::io::Write;
     match v {
         Value::Object(map) => {
-            let mut keys: Vec<&String> = map.keys().collect();
-            keys.sort();
-            let parts: Vec<String> = keys
-                .iter()
-                .map(|k| {
-                    format!(
-                        "{}:{}",
-                        serde_json::to_string(k).unwrap(),
-                        canonical_json(&map[*k])
-                    )
-                })
-                .collect();
-            format!("{{{}}}", parts.join(","))
+            out.push(b'{');
+            let mut first = true;
+            if map.keys().is_sorted() {
+                for (k, val) in map {
+                    if !first {
+                        out.push(b',');
+                    }
+                    first = false;
+                    serde_json::to_writer(&mut *out, k).unwrap();
+                    out.push(b':');
+                    write_canonical_json(out, val);
+                }
+            } else {
+                let mut keys: Vec<&String> = map.keys().collect();
+                keys.sort();
+                for k in keys {
+                    if !first {
+                        out.push(b',');
+                    }
+                    first = false;
+                    serde_json::to_writer(&mut *out, k).unwrap();
+                    out.push(b':');
+                    write_canonical_json(out, &map[k]);
+                }
+            }
+            out.push(b'}');
         }
         Value::Array(arr) => {
-            let parts: Vec<String> = arr.iter().map(canonical_json).collect();
-            format!("[{}]", parts.join(","))
+            out.push(b'[');
+            for (i, item) in arr.iter().enumerate() {
+                if i > 0 {
+                    out.push(b',');
+                }
+                write_canonical_json(out, item);
+            }
+            out.push(b']');
         }
-        Value::String(s) => serde_json::to_string(s).unwrap(),
-        Value::Number(n) => n.to_string(),
-        Value::Bool(b) => b.to_string(),
-        Value::Null => "null".to_string(),
+        Value::String(s) => serde_json::to_writer(&mut *out, s).unwrap(),
+        Value::Number(n) => write!(out, "{n}").unwrap(),
+        Value::Bool(b) => out.extend_from_slice(if *b { b"true" } else { b"false" }),
+        Value::Null => out.extend_from_slice(b"null"),
     }
+}
+
+pub fn canonical_json(v: &Value) -> String {
+    let mut out = Vec::new();
+    write_canonical_json(&mut out, v);
+    String::from_utf8(out).unwrap()
 }
 
 pub fn required<'a>(v: &'a Value, k: &str) -> Result<&'a str, String> {
@@ -214,10 +246,17 @@ impl<'de> Deserialize<'de> for Strict {
             fn visit_map<A: MapAccess<'de>>(self, mut a: A) -> Result<Strict, A::Error> {
                 let mut v = serde_json::Map::new();
                 while let Some(k) = a.next_key::<String>()? {
-                    if v.contains_key(&k) {
-                        return Err(serde::de::Error::custom(format!("duplicate key {k}")));
+                    match v.entry(k) {
+                        serde_json::map::Entry::Occupied(e) => {
+                            return Err(serde::de::Error::custom(format!(
+                                "duplicate key {}",
+                                e.key()
+                            )));
+                        }
+                        serde_json::map::Entry::Vacant(e) => {
+                            e.insert(a.next_value::<Strict>()?.0);
+                        }
                     }
-                    v.insert(k, a.next_value::<Strict>()?.0);
                 }
                 Ok(Strict(Value::Object(v)))
             }
