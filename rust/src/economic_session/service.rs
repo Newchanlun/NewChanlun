@@ -517,13 +517,11 @@ fn paged_read(
             let request_hash = hash(e);
             let query = &p["query"];
             // 分页权限不隐含扩大原逻辑查询权限。
-            let projection_perms = if matches!(
-                query.get("op").and_then(Value::as_str),
-                Some(
-                    super::read_projection::OP_READ_PROJECTION
-                        | super::read_projection::OP_READ_ORIGINAL_AT_CUT
-                )
-            ) {
+            let projection_perms = if query
+                .get("op")
+                .and_then(Value::as_str)
+                .is_some_and(|op| super::read_projection::PROJECTION_READ_OPS.contains(&op))
+            {
                 Some(super::read_projection::check_authorization(
                     config, e, query,
                 )?)

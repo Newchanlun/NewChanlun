@@ -3,8 +3,18 @@
 from pathlib import Path
 import time
 
-from economic_query import EconomicQueryError, integer, text
+from economic_query import EconomicQuery, EconomicQueryError, integer, text
 from s_socket_client import canonical, decode_frame, digest, reply_envelope
+
+
+ECONOMIC_POST_ROUTES = {
+    **{
+        f"/api/economic/{op}": op
+        for op, (_, _, single_frame) in EconomicQuery.PUBLIC_READ_DISPATCH.items()
+        if single_frame
+    },
+    "/api/economic/read": "read",
+}
 
 
 HEADER = {"schema_revision", "session_id", "session_generation", "source_namespace", "source_epoch",
@@ -68,7 +78,7 @@ def get(handler):
 
 
 def post(handler):
-    if handler.path not in ("/api/economic/snapshot", "/api/economic/watch", "/api/economic/original", "/api/economic/read"):
+    if handler.path not in ECONOMIC_POST_ROUTES:
         return False
     query = getattr(handler.server, "economic_query", None)
     if query is None:
@@ -98,14 +108,14 @@ def post(handler):
         candidate = decode_frame(b"".join(chunks))
         payload = validate_request(candidate, query)
         request = candidate
-        op = handler.path.rsplit("/", 1)[1]
+        op = ECONOMIC_POST_ROUTES[handler.path]
         with query.capture(request, operation_deadline):
             if op == "read":
                 result = query.read(payload, request, deadline=operation_deadline)
             else:
                 if payload.get("op") != op:
                     raise EconomicQueryError("路由与 op 不符")
-                result = {"snapshot": query.snapshot, "watch": query.watch, "original": query.original}[op](payload)
+                result = query.dispatch_public_read(op, payload)
         status = 200
     except (ValueError, KeyError, TypeError, UnicodeError, RecursionError, OSError) as exc:
         result, status = {"ok": False, "error": "EconomicQueryUnavailable", "detail": str(exc)}, 400

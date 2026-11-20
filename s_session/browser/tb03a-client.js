@@ -640,12 +640,56 @@
       }
     }
     need(value.completeness === (complete ? "CompleteVector" : "PartialVector"), "域完整性声明与实际结果不同");
+    const vectorCuts = Object.fromEntries(
+      discovery.domains.map(d => [d, value.domains[d].status === "Available" ? value.domains[d].cut : null])
+    );
+    verifyEmbeddedCutsAgainstVector(value, vectorCuts, discovery.domains, false);
     const body = {...value}; delete body.snapshot_token;
     need(value.snapshot_token === "economic-snapshot-" + await sha256(body), "固定向量 token 与完整图像不同");
     return value;
   }
   const PROJECTION_REV = "economic-read-projection/1";
   const PROJECTION_ORIG_KINDS = ["fact", "allocation", "decision", "grant", "command", "model"];
+  function isCutShape(v) {
+    if (!object(v)) return false;
+    const ks = Object.keys(v);
+    return ks.length === 3 && Object.prototype.hasOwnProperty.call(v, "domain_id")
+      && Object.prototype.hasOwnProperty.call(v, "commit_seq")
+      && Object.prototype.hasOwnProperty.call(v, "root_hash");
+  }
+  function verifyEmbeddedCutsAgainstVector(root, cuts, knownDomains, requireKnownDomain = true) {
+    const stack = [[root, null]];
+    while (stack.length > 0) {
+      const [node, parentKey] = stack.pop();
+      if (Array.isArray(node)) {
+        const elemKey = parentKey === "receipts" ? "receipts[]" : null;
+        for (let i = node.length - 1; i >= 0; i--) stack.push([node[i], elemKey]);
+        continue;
+      }
+      if (!object(node)) continue;
+      const cutShape = isCutShape(node);
+      const cutKey = parentKey !== null && (parentKey === "cut" || parentKey.endsWith("_cut"));
+      if (cutShape || cutKey) {
+        need(cutShape, "内嵌 cut 字段不完整或多余");
+        const rdomain = node.domain_id;
+        need(typeof rdomain === "string" && (!requireKnownDomain || knownDomains.includes(rdomain)), "回执所属域不在固定切面向量中");
+        cut(node, rdomain);
+        if (Object.prototype.hasOwnProperty.call(cuts, rdomain) && cuts[rdomain] !== null) {
+          const rseq = BigInt(node.commit_seq), cseq = BigInt(cuts[rdomain].commit_seq);
+          need(rseq <= cseq, "MissingDependency：回执(" + rdomain + ":" + node.commit_seq + ")晚于固定切面(" + rdomain + ":" + cuts[rdomain].commit_seq + ")，向量未就绪");
+          if (rseq === cseq) need(same(node, cuts[rdomain]), "同序号回执根与固定切面根不符");
+        }
+      }
+      if (["receipt", "e_receipt", "resolve_receipt", "receipts[]"].includes(parentKey)) {
+        need(isCutShape(node.cut), "回执缺失合法 cut");
+      }
+      if (typeof node.domain_id === "string" && isCutShape(node.cut)) {
+        need(node.domain_id === node.cut.domain_id, "回执域与 cut 域不符");
+      }
+      const ks = Object.keys(node).sort();
+      for (let i = ks.length - 1; i >= 0; i--) stack.push([node[ks[i]], ks[i]]);
+    }
+  }
   async function utf8Sha256(text) {
     return bytesHash(new TextEncoder().encode(text));
   }
@@ -731,6 +775,10 @@
       await verifyProjectedBook(proj.book, domain, discovery);
     }
     need(value.projection_completeness === (complete ? "CompleteProjectionVector" : "PartialProjectionVector"), "投影完整性声明与域状态不符");
+    const vectorCuts = Object.fromEntries(
+      discovery.domains.map(d => [d, value.domains[d].status === "Available" ? value.domains[d].cut : null])
+    );
+    verifyEmbeddedCutsAgainstVector(value, vectorCuts, discovery.domains);
     const body = {...value}; delete body.projection_token;
     need(value.projection_token === "economic-projection-" + await sha256(body), "投影固定向量 token 与正文不符");
     return value;
@@ -751,38 +799,19 @@
       && reply.commit_ns === view.commit_ns && reply.writer_epoch === view.writer_epoch, "同切面原件与固定投影切面不符");
     const o = reply.original;
     need(object(o), "同切面原件载荷非对象");
-    const checkCutInVector = (rcut, rdomain, expectedDomain = null) => {
-      if (expectedDomain !== null) need(rdomain === expectedDomain, "回执域与期望域不符");
-      need(typeof rdomain === "string" && Object.prototype.hasOwnProperty.call(cuts, rdomain), "回执所属域不在固定切面向量中");
-      cut(rcut, rdomain);
-      const rseq = BigInt(rcut.commit_seq), cseq = BigInt(cuts[rdomain].commit_seq);
-      need(rseq <= cseq, "回执(" + rdomain + ":" + rcut.commit_seq + ")晚于固定切面(" + rdomain + ":" + cuts[rdomain].commit_seq + ")，向量未就绪");
-      if (rseq === cseq) need(same(rcut, cuts[rdomain]), "同序号回执根与固定切面根不符");
-    };
+    verifyEmbeddedCutsAgainstVector(reply, cuts, discovery.domains);
     const checkFact = async (f) => {
       need(object(f) && typeof f.raw_utf8 === "string", "事实原件缺 raw_utf8");
       digest(f.raw_sha256, "raw_sha256");
       need(await utf8Sha256(f.raw_utf8) === f.raw_sha256, "事实原件精确字节与 raw_sha256 不符");
       need(object(f.raw_exact_text) && f.raw_exact_text.representation === "ExactDecimalIntegerTextProjection"
         && f.raw_exact_text.raw_sha256 === f.raw_sha256, "事实精确文本视图绑定不符");
-      for (const r of (f.receipts || [])) {
-        need(object(r), "事实回执非对象");
-        checkCutInVector(r.cut, r.domain_id);
-      }
-      if (domain !== "E" && object(f.projected_record)) {
-        const prec = f.projected_record;
-        if (object(prec.e_receipt)) checkCutInVector(prec.e_receipt.cut, prec.e_receipt.domain_id, "E");
-        if (object(prec.cut)) checkCutInVector(prec.cut, "E", "E");
-        if (object(prec.e_resolution_proof) && object(prec.e_resolution_proof.receipt)) {
-          checkCutInVector(prec.e_resolution_proof.receipt.cut, prec.e_resolution_proof.receipt.domain_id, "E");
-        }
-      }
+      need(Array.isArray(f.receipts), "事实回执缺失");
     };
     if (kind === "fact") await checkFact(o);
     else if (kind === "allocation") {
       const rec = domain === "E" ? o.resolve_receipt : o.receipt;
       need(object(rec), "分配回执缺失");
-      checkCutInVector(rec.cut, rec.domain_id || domain, domain);
       if (o.fact !== null && o.fact !== undefined) {
         await checkFact(o.fact);
       } else {
@@ -803,7 +832,6 @@
       const recs = kind === "grant" ? [o.receipt] : (o.receipts || []);
       for (const r of recs) {
         need(object(r), "财务回执非对象");
-        checkCutInVector(r.cut, r.domain_id || domain, domain);
       }
     }
     return reply;

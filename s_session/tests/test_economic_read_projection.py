@@ -490,5 +490,528 @@ class ProjectionR4CounterexampleTests(unittest.TestCase):
             self.assertEqual(cap["original_kinds"], ["fact", "allocation", "decision", "grant", "command", "model"])
 
 
+class R5ReadEntryEnumerationAndBudgetTests(unittest.TestCase):
+    """#1425 R5：从路由表/分发表动态枚举全部读侧入口，验证不变量 A、不变量 B 与历史根共享缓存预算。"""
+
+    def setUp(self):
+        self._msg_seq = 0
+        self._tmps = []
+
+    def tearDown(self):
+        for tmp in reversed(self._tmps):
+            tmp.cleanup()
+
+    def _make_query(self, ops=None):
+        import tempfile
+        from pathlib import Path
+        tmp = tempfile.TemporaryDirectory(prefix="r5-proj-")
+        self._tmps.append(tmp)
+        root = Path(tmp.name)
+        src = {"source_namespace": "q-ns", "source_epoch": "1", "producer_id": "reader", "producer_epoch": "1"}
+        ops = ops or [
+            "ReadView", "Watch", "QueryFact", "QueryAllocation", "QueryDecision",
+            "QueryGrant", "QueryCommand", "EconomicReadOpen", "EconomicReadPage", "EconomicReadClose",
+        ]
+        manifest = {
+            "schema_revision": "economic-manifest/1",
+            "protocol_revision": "economic-session/1",
+            "book_revision": "tb03c-book/1",
+            "finance": {"schema_revision": "tb03b-finance/6"},
+            "session_id": "sess-r5",
+            "session_generation": "1",
+            "authorized_sources": [{**src, "operations": ops}],
+            "e": {"socket": str(root / "e.sock")},
+            "chongs": [
+                {"chong_id": "alpha", "socket": str(root / "alpha.sock")},
+                {"chong_id": "beta", "socket": str(root / "beta.sock")},
+            ],
+        }
+        (root / "manifest.json").write_bytes(canonical(manifest))
+        cfg = {
+            "schema_revision": "economic-query/1",
+            "manifest": "manifest.json",
+            "manifest_hash": digest(manifest),
+            "query_source": src,
+            "producer_epoch": "1",
+            "expected_epochs": {"E": "1", "B:alpha": "1", "B:beta": "1"},
+            "resources": {
+                "max_frame_bytes": "1048576", "timeout_ms": "1000", "operation_timeout_ms": "4000",
+                "max_reply_bytes": "1048576", "max_cached_bytes": "4194304",
+                "max_snapshots": "4", "max_domains": "3", "max_changes": "10",
+            },
+        }
+        (root / "query.json").write_bytes(canonical(cfg))
+        return economic_query.EconomicQuery(root / "query.json")
+
+    def _cut(self, domain, seq, tag="ok"):
+        return {"domain_id": domain, "commit_seq": str(seq), "root_hash": digest([domain, str(seq), tag])}
+
+    def _enumerated_http_entries(self):
+        import economic_http
+        entries = []
+        for path, op in economic_http.ECONOMIC_POST_ROUTES.items():
+            if op == "read":
+                for lop, (_, paged_ok, _) in economic_query.EconomicQuery.PUBLIC_READ_DISPATCH.items():
+                    if paged_ok:
+                        entries.append((path, lop))
+            else:
+                entries.append((path, op))
+        return entries
+
+    def _call_http_entry(self, q, path, payload, *, paged=False):
+        import io
+        from types import SimpleNamespace
+        import economic_http
+        from s_socket_client import decode_frame, validate_reply
+
+        def send_once(body_payload):
+            self._msg_seq += 1
+            req = {
+                "schema_revision": q.protocol_revision,
+                "session_id": q.session,
+                "session_generation": q.generation,
+                **q.source,
+                "message_id": f"enum-{self._msg_seq}",
+                "causal_refs": [],
+                "payload": body_payload,
+                "payload_hash": digest(body_payload),
+            }
+            raw = canonical(req)
+            sent = []
+            handler = SimpleNamespace(
+                path=path,
+                rfile=io.BytesIO(raw),
+                headers=SimpleNamespace(get_all=lambda name, default: [str(len(raw))], get=lambda name: None),
+                connection=SimpleNamespace(settimeout=lambda seconds: None),
+                server=SimpleNamespace(
+                    economic_query=q,
+                    resources={
+                        "max_frame_bytes": q.resources["max_frame_bytes"],
+                        "max_reply_bytes": q.resources["max_reply_bytes"],
+                        "socket_read_timeout_ms": q.resources["timeout_ms"],
+                    },
+                ),
+                _send_json=lambda value, status=200: sent.append((value, status)),
+                _send_bytes=lambda value, status=200: sent.append((decode_frame(value), status)),
+            )
+            self.assertTrue(economic_http.post(handler), f"route {path} not handled")
+            resp, status = sent[0]
+            if status != 200:
+                raise economic_query.EconomicQueryError(resp.get("detail") or resp.get("error") or str(resp))
+            reply_payload = validate_reply(req, resp, producer="Q", producer_epoch=q.query_epoch)
+            if reply_payload.get("ok") is False or "error" in reply_payload:
+                raise economic_query.EconomicQueryError(reply_payload.get("detail") or reply_payload.get("error"))
+            return reply_payload
+
+        if paged:
+            return read_economic_pages(
+                payload,
+                lambda page_payload, _rem: send_once(page_payload),
+                session_id=q.session,
+                session_generation=q.generation,
+                producer_id="Q:" + q.session,
+                producer_epoch=q.query_epoch,
+                manifest_hash=q.manifest_hash,
+                owner_epochs=q.epochs,
+                deadline=time.monotonic() + 10,
+            )
+        return send_once(payload)
+
+    def _build_fixture_store(self, q, *, redact_witness_for_no_cmd=True):
+        real_cuts = {
+            ("E", "4"): self._cut("E", 4),
+            ("E", "5"): self._cut("E", 5),
+            ("E", "6"): self._cut("E", 6),
+            ("E", "8"): self._cut("E", 8),
+            ("E", "10"): self._cut("E", 10),
+            ("B:alpha", "4"): self._cut("B:alpha", 4),
+            ("B:alpha", "5"): self._cut("B:alpha", 5),
+            ("B:alpha", "6"): self._cut("B:alpha", 6),
+            ("B:beta", "4"): self._cut("B:beta", 4),
+        }
+        model_obj = {"model_id": "m1", "revision": "r1"}
+        model_raw = canonical(model_obj).decode("utf-8")
+        model_hash = hashlib.sha256(model_raw.encode("utf-8")).hexdigest()
+        fee_doc = {
+            "format": "history-sim-economic-originals/1",
+            "model": model_obj,
+            "model_content_hash": model_hash,
+            "event": {"kind": "fee", "command_id": "cmd-alpha", "amount": 1},
+        }
+        raw_fee = canonical(fee_doc).decode("utf-8")
+        raw_sha = hashlib.sha256(raw_fee.encode("utf-8")).hexdigest()
+        fk = "f" * 64
+        fh = "e" * 64
+        aid = "sim-command-fee:1"
+        full_cmd = {"command_id": "cmd-alpha", "allocation_id": "alloc-alpha", "model_ref": {"model_id": "m1", "revision": "r1", "content_hash": model_hash}, "secret": "full-e-cmd"}
+        cmd_hash = digest(full_cmd)
+        cmd_record = {"decision_id": "alpha", "command_id": "cmd-alpha", "state": "ReleasedExact", "command": full_cmd}
+
+        def make_witness(include_cmd):
+            rel_ev = {
+                "protocol": "x-exact-authority/1", "session_id": q.session, "session_generation": q.generation,
+                "authority_id": "E", "command_id": "cmd-alpha", "command_hash": cmd_hash,
+                "state": "ReleasedExact", "receipt_id": "rel-1", "release_receipt_id": None, "commit_ns": "2",
+            }
+            exec_reply = {
+                "protocol": "x-exact-authority/1", "session_id": q.session, "session_generation": q.generation,
+                "authority_id": "S", "command_id": "cmd-alpha", "command_hash": cmd_hash,
+                "state": "ExecuteCommitted", "receipt_id": "elig-1", "release_receipt_id": "rel-1", "commit_ns": "2",
+            }
+            if include_cmd:
+                rel_ev["command"] = full_cmd
+                exec_reply["command"] = full_cmd
+            else:
+                rel_ev["command_ref"] = {"command_id": "cmd-alpha", "command_hash": cmd_hash}
+                exec_reply["command_ref"] = {"command_id": "cmd-alpha", "command_hash": cmd_hash}
+            return {
+                "witness_revision": "x-sim-execution-witness/1",
+                "x_profile_revision": "x-execution-profile/3",
+                "x_id": "X", "x_epoch": "1", "session_id": q.session, "session_generation": q.generation,
+                "source_namespace": "x-sim", "source_epoch": "1", "model_content_hash": model_hash,
+                "command_id": "cmd-alpha", "command_hash": cmd_hash,
+                "e_release_receipt_key": "rel-1", "e_release_cut": real_cuts[("E", "6")], "e_release_commit_ns": "2",
+                "x_release_evidence": rel_ev,
+                "x_accept_clock": {"received_ns": "2", "first_known_ns": "2", "commit_ns": "2"},
+                "x_command_state": "Observed",
+                "x_execute_evidence": {"claimed_ns": "2", "reply": exec_reply},
+                "attempt_batch_id": "b2", "attempt_batch_bar_index": "2",
+                "attempt_batch_request_sha256": "1" * 64, "attempt_batch_receipt_sha256": "2" * 64,
+                "originals_batch_id": "b3", "originals_batch_bar_index": "3",
+                "originals_batch_receipt_sha256": "3" * 64, "fact_raw_sha256": raw_sha,
+            }
+
+        b6_recorded_item = {
+            "fact_key": fk,
+            "fact_hash": fh,
+            "raw_sha256": raw_sha,
+            "json_pointer": "/event",
+            "raw_utf8": raw_fee,
+            "cut": real_cuts[("E", "8")],
+            "e_receipt": {"kind": "Recorded", "domain_id": "E", "fact_key": fk, "cut": real_cuts[("E", "8")]},
+            "e_resolution_proof": {
+                "receipt": {"kind": "Resolved", "domain_id": "E", "evidence_id": "ev-fee", "cut": real_cuts[("E", "10")]},
+            },
+            "event": {"event": "history-sim-unresolved/1"},
+        }
+
+        def domain_image(domain, seq):
+            fin = {
+                "schema_revision": "tb03b-finance/6",
+                "rights": [], "decisions": [], "slots": [], "responsibilities": [], "commands": [],
+            }
+            img = {"book": None, "recorded": [], "pending": [], "applied": [], "unmatched": [], "history": [], "finance": fin}
+            if domain == "B:alpha" and seq == "6":
+                img["recorded"] = [b6_recorded_item]
+                img["finance"]["decisions"] = [{"decision_id": "alpha", "state": "Committed", "e_future_proof": {"cut": real_cuts[("E", "8")]}}]
+            elif domain == "E" and seq in ("6", "8", "10"):
+                img["finance"]["commands"] = [cmd_record]
+                img["history"] = [
+                    {"kind": "MakeDispatchable", "record": cmd_record, "commit_seq": "5", "commit_ns": "5", "first_known_ns": "5"},
+                    {"kind": "ReleaseExact", "record": cmd_record, "commit_seq": "6", "commit_ns": "6", "first_known_ns": "6"},
+                ]
+            return img
+
+        def fake_owner(domain, payload):
+            op = payload["op"]
+            if op == "ReadView":
+                req_cut = payload["cut"] or real_cuts[(domain, "6" if domain != "B:beta" else "4")]
+                expected = real_cuts.get((domain, req_cut["commit_seq"]))
+                if expected is None or req_cut != expected:
+                    raise economic_query.EconomicQueryError("IdentityConflict：cut根不匹配")
+                img = domain_image(domain, expected["commit_seq"])
+                return {"kind": "EconomicView", "domain_id": domain, "cut": expected, "commit_ns": expected["commit_seq"],
+                        "image": img, "image_hash": digest(img)}
+            if op == "Watch":
+                after = payload["after_cut"]
+                if domain == "B:alpha" and after["commit_seq"] == "5":
+                    img6 = domain_image("B:alpha", "6")
+                    return {"kind": "EconomicChanges", "domain_id": domain, "cut": real_cuts[("B:alpha", "6")],
+                            "changes": [{"cut": real_cuts[("B:alpha", "6")], "image": img6, "image_hash": digest(img6), "commit_ns": "6"}]}
+                if domain == "E" and after["commit_seq"] == "4":
+                    img5 = domain_image("E", "5")
+                    return {"kind": "EconomicChanges", "domain_id": domain, "cut": real_cuts[("E", "5")],
+                            "changes": [{"cut": real_cuts[("E", "5")], "image": img5, "image_hash": digest(img5), "commit_ns": "5"}]}
+                return {"kind": "EconomicChanges", "domain_id": domain, "cut": after, "changes": []}
+            if op == "QueryDecision":
+                return {
+                    "kind": "EconomicDecision", "domain_id": domain,
+                    "decision": {"decision_id": "alpha", "state": "Committed", "e_future_proof": {"cut": real_cuts[("E", "8")]}},
+                    "receipts": [{"kind": "LocalCommitReceipt", "domain_id": domain, "cut": real_cuts[(domain, "6")]}],
+                }
+            if op == "ReadProjection":
+                req_cut = payload["cut"] or real_cuts[(domain, "10" if domain == "E" else ("6" if domain == "B:alpha" else "4"))]
+                expected = real_cuts.get((domain, req_cut["commit_seq"]))
+                if expected is None or req_cut != expected:
+                    raise economic_query.EconomicQueryError("IdentityConflict：cut根不匹配")
+                img = domain_image(domain, expected["commit_seq"])
+                enc = canonical(img)
+                return {
+                    "kind": "EconomicProjectionView", "projection_revision": ECONOMIC_PROJECTION_REVISION,
+                    "domain_id": domain, "session_id": q.session, "session_generation": q.generation,
+                    "cut": expected, "commit_ns": expected["commit_seq"], "writer_epoch": q.epochs[domain],
+                    "audit_verified": True, "authoritative_image_hash": digest(["auth", domain, expected["commit_seq"]]),
+                    "authoritative_image_bytes": "1024", "projection_hash": hashlib.sha256(enc).hexdigest(),
+                    "projection_bytes": str(len(enc)), "omitted_peer_images": [], "projection": img, "runtime": {},
+                }
+            if op == "ReadOriginalAtCut":
+                req_cut = payload["cut"]
+                kind = payload["kind"]
+                obj_id = payload["object_id"]
+                has_cmd = "QueryCommand" in q.authorized_read_ops
+                has_fact = "QueryFact" in q.authorized_read_ops
+                has_alloc = "QueryAllocation" in q.authorized_read_ops
+                if kind == "fact":
+                    orig = {
+                        "kind": "EconomicFactAtCut", "domain_id": domain, "fact_key": fk, "fact_hash": fh,
+                        "raw_sha256": raw_sha, "json_pointer": "/event", "raw_utf8": raw_fee,
+                        "raw_exact_text": {"representation": "ExactDecimalIntegerTextProjection", "raw_sha256": raw_sha, "value": fee_doc},
+                        "projected_record": b6_recorded_item,
+                        "fill_allocation_row": None,
+                        "receipts": [
+                            {"kind": "Recorded", "domain_id": "E", "cut": real_cuts[("E", "8")]},
+                            {"kind": "Applied", "domain_id": "B:alpha", "cut": real_cuts[("B:alpha", "6")]},
+                        ] if domain == "B:alpha" else [{"kind": "Recorded", "domain_id": "E", "cut": real_cuts[("E", "8")]}],
+                    }
+                elif kind == "allocation":
+                    if domain == "E":
+                        orig = {
+                            "kind": "EconomicAllocationAtCut", "domain_id": "E", "allocation_id": aid,
+                            "fill_allocation_row": {
+                                "fact_key": fk, "fact_hash": fh, "source_kind": "history_sim_fee",
+                                "evidence_id": "ev-fee",
+                                "x_execution_witness": make_witness(has_cmd or (not redact_witness_for_no_cmd)),
+                                "allocations": [{"allocation_id": aid, "chong_id": "alpha"}],
+                            },
+                            "resolve_receipt": {"kind": "Resolved", "domain_id": "E", "cut": real_cuts[("E", "10")]},
+                            "fact_ref": {"fact_key": fk, "fact_hash": fh},
+                            "fact": None if not has_fact else {
+                                "kind": "EconomicFactAtCut", "domain_id": "E", "fact_key": fk, "fact_hash": fh,
+                                "raw_sha256": raw_sha, "json_pointer": "/event", "raw_utf8": raw_fee,
+                                "raw_exact_text": {"representation": "ExactDecimalIntegerTextProjection", "raw_sha256": raw_sha, "value": fee_doc},
+                                "projected_record": b6_recorded_item, "fill_allocation_row": None,
+                                "receipts": [{"kind": "Recorded", "domain_id": "E", "cut": real_cuts[("E", "8")]}],
+                            },
+                        }
+                    else:
+                        orig = {
+                            "kind": "EconomicAllocationAtCut", "domain_id": "B:alpha", "allocation_id": aid,
+                            "applied_entry": {"allocation_id": aid, "fact_key": fk, "fact_hash": fh},
+                            "application": {"allocation_id": aid},
+                            "receipt": {"kind": "Applied", "domain_id": "B:alpha", "cut": real_cuts[("B:alpha", "6")]},
+                            "fact_ref": {"fact_key": fk, "fact_hash": fh},
+                            "fact": None if not has_fact else {
+                                "kind": "EconomicFactAtCut", "domain_id": "B:alpha", "fact_key": fk, "fact_hash": fh,
+                                "raw_sha256": raw_sha, "json_pointer": "/event", "raw_utf8": raw_fee,
+                                "raw_exact_text": {"representation": "ExactDecimalIntegerTextProjection", "raw_sha256": raw_sha, "value": fee_doc},
+                                "projected_record": b6_recorded_item, "fill_allocation_row": None,
+                                "receipts": [
+                                    {"kind": "Recorded", "domain_id": "E", "cut": real_cuts[("E", "8")]},
+                                    {"kind": "Applied", "domain_id": "B:alpha", "cut": real_cuts[("B:alpha", "6")]},
+                                ],
+                            },
+                        }
+                elif kind == "model":
+                    if obj_id == "cmd-alpha" and not has_cmd:
+                        raise economic_query.EconomicQueryError("InvalidDomain：未获准 QueryCommand")
+                    if obj_id == fk and not has_fact:
+                        raise economic_query.EconomicQueryError("InvalidDomain：未获准 QueryFact")
+                    orig = {
+                        "kind": "EconomicModelAtCut", "domain_id": domain, "object_id": obj_id,
+                        "model_ref": {"model_id": "m1", "revision": "r1", "content_hash": model_hash},
+                        "model_raw_utf8": model_raw if has_fact else None,
+                        "model_exact_text": {"representation": "ExactDecimalIntegerTextProjection", "content_hash": model_hash, "value": model_obj} if has_fact else None,
+                        "source_fact_key": fk if has_fact else None,
+                    }
+                elif kind == "command":
+                    if not has_cmd:
+                        raise economic_query.EconomicQueryError("InvalidDomain：未获准 QueryCommand")
+                    orig = {
+                        "kind": "EconomicCommand", "domain_id": "E", "command_id": "cmd-alpha",
+                        "state": "ReleasedExact", "record": cmd_record, "cut": req_cut,
+                        "receipts": [{"kind": "ReleasedExactReceipt", "domain_id": "E", "cut": real_cuts[("E", "6")]}],
+                    }
+                else:
+                    orig = {"kind": "EconomicDecision", "domain_id": domain, "decision": {"decision_id": "alpha"}, "receipts": [{"kind": "LocalCommitReceipt", "domain_id": domain, "cut": real_cuts[(domain, "6")]}]}
+                return {
+                    "kind": "EconomicOriginalAtCut", "projection_revision": ECONOMIC_PROJECTION_REVISION,
+                    "domain_id": domain, "session_id": q.session, "session_generation": q.generation,
+                    "cut": req_cut, "commit_ns": req_cut["commit_seq"], "writer_epoch": q.epochs[domain],
+                    "audit_verified": True, "authoritative_image_hash": digest(["auth", domain, req_cut["commit_seq"]]),
+                    "authoritative_image_bytes": "2048", "original_kind": kind, "object_id": obj_id, "original": orig,
+                }
+            raise AssertionError(f"unexpected owner op: {payload}")
+
+        return real_cuts, fk, aid, fake_owner
+
+    def test_enumerates_every_read_entry_from_routes_and_dispatch_for_invariant_a_and_mutation_sensitivity(self):
+        q = self._make_query()
+        real_cuts, fk, aid, fake_owner = self._build_fixture_store(q)
+        q.owner = fake_owner
+
+        cuts_e6 = {"E": real_cuts[("E", "6")], "B:alpha": real_cuts[("B:alpha", "6")], "B:beta": real_cuts[("B:beta", "4")]}
+        cuts_watch_e6 = {"E": real_cuts[("E", "6")], "B:alpha": real_cuts[("B:alpha", "5")], "B:beta": real_cuts[("B:beta", "4")]}
+        cuts_e10 = {"E": real_cuts[("E", "10")], "B:alpha": real_cuts[("B:alpha", "6")], "B:beta": real_cuts[("B:beta", "4")]}
+
+        request_builders = {
+            "snapshot": lambda: {"op": "snapshot", "cuts": cuts_e6, "as_known_ns": None, "snapshot_token": None},
+            "watch": lambda: {"op": "watch", "cuts": cuts_watch_e6},
+            "original": lambda: {"op": "original", "kind": "decision", "domain_id": "B:alpha", "object_id": "alpha", "cuts": cuts_e6},
+            "projection": lambda: {"op": "projection", "projection_revision": ECONOMIC_PROJECTION_REVISION, "cuts": cuts_e6, "as_known_ns": None, "projection_token": None},
+            "projection_original": lambda: {"op": "projection_original", "projection_revision": ECONOMIC_PROJECTION_REVISION, "domain_id": "B:alpha", "kind": "allocation", "object_id": aid, "cuts": cuts_e6},
+        }
+
+        entries = self._enumerated_http_entries()
+        self.assertGreaterEqual(len(entries), 7)
+
+        # Every single route+op exported by ECONOMIC_POST_ROUTES / PUBLIC_READ_DISPATCH MUST reject E:8/E:10 under E:6!
+        for path, op in entries:
+            self.assertIn(op, request_builders, f"新增读侧入口 ({path}, {op}) 未纳入不变量 A 枚举测试")
+            paged = path == "/api/economic/read"
+            with self.subTest(path=path, op=op, paged=paged):
+                with self.assertRaisesRegex(ValueError, r"MissingDependency.*E:8.*晚于固定切面.*E:6"):
+                    self._call_http_entry(q, path, request_builders[op](), paged=paged)
+
+        # Positive controls: E:10 / B:alpha:6 / B:beta:4 succeeds for projection & projection_original; E:4->E:5 watch succeeds!
+        ok_proj = self._call_http_entry(q, "/api/economic/read", {
+            "op": "projection", "projection_revision": ECONOMIC_PROJECTION_REVISION,
+            "cuts": cuts_e10, "as_known_ns": None, "projection_token": None,
+        }, paged=True)
+        self.assertEqual(ok_proj["projection_completeness"], "CompleteProjectionVector")
+        ok_orig = self._call_http_entry(q, "/api/economic/read", {
+            "op": "projection_original", "projection_revision": ECONOMIC_PROJECTION_REVISION,
+            "domain_id": "B:alpha", "kind": "allocation", "object_id": aid, "cuts": cuts_e10,
+        }, paged=True)
+        self.assertEqual(ok_orig["kind"], "EconomicProjectionOriginal")
+        ok_watch = self._call_http_entry(q, "/api/economic/watch", {
+            "op": "watch",
+            "cuts": {"E": real_cuts[("E", "4")], "B:alpha": real_cuts[("B:alpha", "4")], "B:beta": real_cuts[("B:beta", "4")]},
+        }, paged=False)
+        self.assertEqual(ok_watch["domains"]["E"]["next_cut"]["commit_seq"], "5")
+
+        # Mutation sensitivity proof: if a newly added read entry bypasses _finalize_public_response,
+        # the exact same enumeration test fails immediately!
+        import economic_http
+        orig_dispatch = dict(economic_query.EconomicQuery.PUBLIC_READ_DISPATCH)
+        orig_routes = dict(economic_http.ECONOMIC_POST_ROUTES)
+        try:
+            q.leaky_new_entry = lambda payload: {
+                "kind": "EconomicProjection", "cuts": cuts_e6,
+                "leaked_receipt": {"kind": "Recorded", "domain_id": "E", "cut": real_cuts[("E", "8")]},
+            }
+            economic_query.EconomicQuery.PUBLIC_READ_DISPATCH["leaky_new_entry"] = ("leaky_new_entry", False, True)
+            economic_http.ECONOMIC_POST_ROUTES["/api/economic/leaky_new_entry"] = "leaky_new_entry"
+            mutated_entries = self._enumerated_http_entries()
+            self.assertIn(("/api/economic/leaky_new_entry", "leaky_new_entry"), mutated_entries)
+            # 1) Fails because new entry isn't covered in request_builders
+            uncovered = [e for e in mutated_entries if e[1] not in request_builders]
+            self.assertEqual(uncovered, [("/api/economic/leaky_new_entry", "leaky_new_entry")])
+            # 2) Even if a request builder is added, an unguarded entry fails the invariant A rejection assertion!
+            with self.assertRaises(AssertionError):
+                with self.assertRaisesRegex(ValueError, r"MissingDependency"):
+                    self._call_http_entry(q, "/api/economic/leaky_new_entry", {"op": "leaky_new_entry"}, paged=False)
+        finally:
+            economic_query.EconomicQuery.PUBLIC_READ_DISPATCH.clear()
+            economic_query.EconomicQuery.PUBLIC_READ_DISPATCH.update(orig_dispatch)
+            economic_http.ECONOMIC_POST_ROUTES.clear()
+            economic_http.ECONOMIC_POST_ROUTES.update(orig_routes)
+
+    def test_enumerates_three_single_permissions_for_invariant_b(self):
+        base_ops = ["ReadView", "Watch", "EconomicReadOpen", "EconomicReadPage", "EconomicReadClose"]
+        for perm in ("QueryCommand", "QueryFact", "QueryAllocation"):
+            q = self._make_query(ops=base_ops + [perm])
+            real_cuts, fk, aid, fake_owner = self._build_fixture_store(q, redact_witness_for_no_cmd=True)
+            q.owner = fake_owner
+            cuts_e10 = {"E": real_cuts[("E", "10")], "B:alpha": real_cuts[("B:alpha", "6")], "B:beta": real_cuts[("B:beta", "4")]}
+
+            def ask(domain, kind, obj_id):
+                return self._call_http_entry(q, "/api/economic/read", {
+                    "op": "projection_original", "projection_revision": ECONOMIC_PROJECTION_REVISION,
+                    "domain_id": domain, "kind": kind, "object_id": obj_id, "cuts": cuts_e10,
+                }, paged=True)["original"]
+
+            with self.subTest(single_permission=perm):
+                if perm == "QueryCommand":
+                    m = ask("E", "model", "cmd-alpha")
+                    self.assertTrue(m["model_ref"])
+                    self.assertIsNone(m["model_raw_utf8"])
+                    c = ask("E", "command", "cmd-alpha")
+                    self.assertEqual(c["kind"], "EconomicCommand")
+                    for bad_kind, bad_id in (("fact", fk), ("allocation", aid), ("model", fk)):
+                        with self.assertRaises(ValueError):
+                            ask("E", bad_kind, bad_id)
+                elif perm == "QueryFact":
+                    m = ask("E", "model", fk)
+                    self.assertTrue(m["model_raw_utf8"])
+                    f = ask("E", "fact", fk)
+                    self.assertIsNone(f["fill_allocation_row"])
+                    for bad_kind, bad_id in (("command", "cmd-alpha"), ("allocation", aid), ("model", "cmd-alpha")):
+                        with self.assertRaises(ValueError):
+                            ask("E", bad_kind, bad_id)
+                elif perm == "QueryAllocation":
+                    a = ask("E", "allocation", aid)
+                    self.assertIsNone(a["fact"])
+                    self.assertEqual(a["fact_ref"]["fact_key"], fk)
+                    w = a["fill_allocation_row"]["x_execution_witness"]
+                    self.assertIsNone(w["x_release_evidence"].get("command"))
+                    self.assertIsNone(w["x_execute_evidence"]["reply"].get("command"))
+                    self.assertEqual(w["x_release_evidence"]["command_ref"]["command_id"], "cmd-alpha")
+                    for bad_kind, bad_id in (("command", "cmd-alpha"), ("fact", fk), ("model", "cmd-alpha")):
+                        with self.assertRaises(ValueError):
+                            ask("E", bad_kind, bad_id)
+                    # Even if a rogue owner tries to leak command inside witness, Q's single exit rejects it!
+                    _, _, _, leaky_owner = self._build_fixture_store(q, redact_witness_for_no_cmd=False)
+                    q.owner = leaky_owner
+                    with self.assertRaisesRegex(ValueError, "QueryCommand"):
+                        ask("E", "allocation", aid)
+
+    def test_verified_cuts_cache_shares_budget_counts_metadata_and_evicts_lru(self):
+        q = self._make_query()
+        self.assertEqual(q.cached_bytes, 0)
+        self.assertEqual(q.metadata_bytes, 0)
+        self.assertEqual(len(q._verified_cuts_cache), 0)
+
+        c1 = ("E", "1", "1" * 64)
+        c2 = ("E", "2", "2" * 64)
+        c3 = ("E", "3", "3" * 64)
+        entry_cost = len(canonical(list(c1)))
+        self.assertGreater(entry_cost, 64)
+
+        # Restrict shared budget to hold at most 2 historical cut references (2 * entry_cost < limit < 3 * entry_cost).
+        q.resources["max_cached_bytes"] = entry_cost * 2 + 20
+        economic_query.EconomicQuery._remember_verified_cut(q, c1)
+        self.assertEqual(q.metadata_bytes, entry_cost)
+        self.assertEqual(list(q._verified_cuts_cache), [c1])
+
+        economic_query.EconomicQuery._remember_verified_cut(q, c2)
+        self.assertEqual(q.metadata_bytes, entry_cost * 2)
+        self.assertEqual(list(q._verified_cuts_cache), [c1, c2])
+
+        # Touch c1 so c2 becomes LRU; adding c3 must evict c2 and keep total <= max_cached_bytes!
+        self.assertTrue(economic_query.EconomicQuery._has_verified_cut(q, c1))
+        economic_query.EconomicQuery._remember_verified_cut(q, c3)
+        self.assertEqual(list(q._verified_cuts_cache), [c1, c3])
+        self.assertEqual(q.metadata_bytes, entry_cost * 2)
+        self.assertLessEqual(q.cached_bytes + q.metadata_bytes, q.resources["max_cached_bytes"])
+
+        # Body cache admission shares the SAME budget and evicts oldest verified cut(s) to make room!
+        body_bytes = b"x" * (entry_cost + 10)
+        with q.lock:
+            q._cache_put_locked("snap-1", body_bytes)
+        self.assertEqual(q.cached_bytes, len(body_bytes))
+        self.assertEqual(list(q._verified_cuts_cache), [c3])
+        self.assertEqual(q.metadata_bytes, entry_cost)
+        self.assertLessEqual(q.cached_bytes + q.metadata_bytes, q.resources["max_cached_bytes"])
+
+        # Entry count cap (MAX_VERIFIED_CUTS) also evicts oldest cuts even with 4 MiB byte budget.
+        q2 = self._make_query()
+        for i in range(economic_query.MAX_VERIFIED_CUTS + 5):
+            economic_query.EconomicQuery._remember_verified_cut(q2, ("E", str(i), f"{i:064x}"))
+        self.assertEqual(len(q2._verified_cuts_cache), economic_query.MAX_VERIFIED_CUTS)
+        self.assertEqual(q2.metadata_bytes, sum(q2._verified_cuts_cache.values()))
+        self.assertNotIn(("E", "0", f"{0:064x}"), q2._verified_cuts_cache)
+        self.assertIn(("E", str(economic_query.MAX_VERIFIED_CUTS + 4), f"{economic_query.MAX_VERIFIED_CUTS + 4:064x}"), q2._verified_cuts_cache)
+
+
 if __name__ == "__main__":
     unittest.main()

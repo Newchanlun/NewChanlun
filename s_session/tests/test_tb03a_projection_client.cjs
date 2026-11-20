@@ -154,18 +154,55 @@ test("R4 #2: verifyProjectionOriginal rejects E:8 Recorded under E:6 / B:alpha:6
     },
   });
 
-  // Counterexample: E:6 / B:alpha:6 / B:beta:4 must reject E:8 receipt!
+  // Counterexample: E:6 / B:alpha:6 / B:beta:4 must reject E:8 receipt in BOTH main projection and original!
   const cutsE6 = { E: e6, "B:alpha": b6, "B:beta": beta4 };
   const stateE6 = makeProjectionState(discovery, cutsE6);
   await TB03A.verifyProjection(stateE6, discovery);
+
+  const leakyStateE6 = makeProjectionState(discovery, cutsE6);
+  leakyStateE6.domains["B:alpha"].projection.recorded.push({
+    fact_key: "f".repeat(64),
+    fact_hash: "e".repeat(64),
+    raw_sha256: rawSha,
+    raw_utf8: rawFee,
+    cut: e8,
+    e_receipt: { kind: "Recorded", domain_id: "E", cut: e8 },
+    e_resolution_proof: { receipt: { kind: "Resolved", domain_id: "E", cut: e10 } },
+  });
+  const leakyProjEnc = TB03A.canonical(leakyStateE6.domains["B:alpha"].projection);
+  leakyStateE6.domains["B:alpha"].projection_hash = sha256Text(leakyProjEnc);
+  leakyStateE6.domains["B:alpha"].projection_bytes = String(Buffer.byteLength(leakyProjEnc, "utf8"));
+  const leakyBody = { ...leakyStateE6 };
+  delete leakyBody.projection_token;
+  leakyStateE6.projection_token = "economic-projection-" + sha256Canon(leakyBody);
+  await assert.rejects(
+    TB03A.verifyProjection(leakyStateE6, discovery),
+    /MissingDependency.*E:8.*晚于固定切面.*E:6/
+  );
+
   await assert.rejects(
     TB03A.verifyProjectionOriginal(buildReply(cutsE6, stateE6), stateE6, discovery, "B:alpha", "allocation", "sim-command-fee:1"),
     /E:8.*晚于固定切面.*E:6/
   );
 
-  // Positive case: E:10 / B:alpha:6 / B:beta:4 must succeed!
+  // Positive case: E:10 / B:alpha:6 / B:beta:4 must succeed for BOTH main projection (with E:8/E:10) and original!
   const cutsE10 = { E: e10, "B:alpha": b6, "B:beta": beta4 };
   const stateE10 = makeProjectionState(discovery, cutsE10);
+  stateE10.domains["B:alpha"].projection.recorded.push({
+    fact_key: "f".repeat(64),
+    fact_hash: "e".repeat(64),
+    raw_sha256: rawSha,
+    raw_utf8: rawFee,
+    cut: e8,
+    e_receipt: { kind: "Recorded", domain_id: "E", cut: e8 },
+    e_resolution_proof: { receipt: { kind: "Resolved", domain_id: "E", cut: e10 } },
+  });
+  const okProjEnc = TB03A.canonical(stateE10.domains["B:alpha"].projection);
+  stateE10.domains["B:alpha"].projection_hash = sha256Text(okProjEnc);
+  stateE10.domains["B:alpha"].projection_bytes = String(Buffer.byteLength(okProjEnc, "utf8"));
+  const okBody = { ...stateE10 };
+  delete okBody.projection_token;
+  stateE10.projection_token = "economic-projection-" + sha256Canon(okBody);
   await TB03A.verifyProjection(stateE10, discovery);
   const ok = await TB03A.verifyProjectionOriginal(
     buildReply(cutsE10, stateE10),
