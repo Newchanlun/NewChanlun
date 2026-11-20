@@ -53,6 +53,7 @@ class TestNormalReconnect:
 
         round_idx = 0
         round2_done = asyncio.Event()
+        stop_called = asyncio.Event()
 
         async def subscribe_fn(_symbols):
             nonlocal round_idx
@@ -66,7 +67,7 @@ class TestNormalReconnect:
                     yield item
                 round2_done.set()
                 # 挂起直到 stop，避免空流循环
-                await asyncio.sleep(10)
+                await stop_called.wait()
 
         async def fetch_history(_sym, _start, _end):
             return []
@@ -84,6 +85,7 @@ class TestNormalReconnect:
         async def stop_after():
             await round2_done.wait()
             rle.stop()
+            stop_called.set()
 
         await asyncio.gather(rle.run(), stop_after())
 
@@ -113,12 +115,13 @@ class TestBackoffEscalation:
             # 第5次成功
 
         connected_event = asyncio.Event()
+        stop_called = asyncio.Event()
 
         async def subscribe_fn(_symbols):
             # 通知测试：已成功连接并进入消费阶段
             connected_event.set()
             # 挂起直到 stop，避免空流导致无限循环
-            await asyncio.sleep(10)
+            await stop_called.wait()
             return
             yield  # noqa: unreachable — 使其成为 async generator
 
@@ -139,6 +142,7 @@ class TestBackoffEscalation:
         async def stop_after_connected():
             await connected_event.wait()
             rle.stop()
+            stop_called.set()
 
         await asyncio.gather(rle.run(), stop_after_connected())
 
@@ -222,6 +226,7 @@ class TestGapDetection:
 
         round_idx = 0
         round2_done = asyncio.Event()
+        stop_called = asyncio.Event()
 
         async def connect_fn():
             pass
@@ -235,7 +240,7 @@ class TestGapDetection:
             else:
                 yield ("ES", _make_bar(_ts(8), 108.0))
                 round2_done.set()
-                await asyncio.sleep(10)
+                await stop_called.wait()
 
         rle = ReconnectingLiveEngine(
             engine=engine,
@@ -250,6 +255,7 @@ class TestGapDetection:
         async def stop_after():
             await round2_done.wait()
             rle.stop()
+            stop_called.set()
 
         await asyncio.gather(rle.run(), stop_after())
 
@@ -343,6 +349,7 @@ class TestStateContinuity:
 
         round_idx = 0
         round2_done = asyncio.Event()
+        stop_called = asyncio.Event()
 
         async def connect_fn():
             pass
@@ -356,7 +363,7 @@ class TestStateContinuity:
             else:
                 yield ("ES", _make_bar(_ts(11), 111.0))
                 round2_done.set()
-                await asyncio.sleep(10)
+                await stop_called.wait()
 
         async def fetch_history(_sym, _start, _end):
             return []
@@ -374,6 +381,7 @@ class TestStateContinuity:
         async def stop_after():
             await round2_done.wait()
             rle.stop()
+            stop_called.set()
 
         await asyncio.gather(rle.run(), stop_after())
 
