@@ -1,0 +1,1 @@
+.chanlun/review-results/issue1340-publication-20260909/view/inputs/TB01-PARENT-CONTRIBUTION.md:1:> 仅转换链接的阅读版；[原字节](../../payload/inputs/TB01-PARENT-CONTRIBUTION.md) SHA256 `cfd615b57a5210e2b27ac1e47edc4e222800fdf3a447614b5c989939bd85c211`。原稿状态是发生时记录，当前发布范围与限制见归档根 README。

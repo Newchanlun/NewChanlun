@@ -1,0 +1,7 @@
+keys 4071 {'TB-01': 722, 'TB-02': 659, 'TB-03': 456, 'TB-04': 462, 'TB-05': 219, 'TB-06': 189, 'TB-07': 881, 'TB-08': 89, 'TB-09': 145, 'TB-10': 136, 'TB-11': 113}
+without_leaf 654 {'TB-01': 638, 'TB-07': 4, 'TB-08': 2, 'TB-09': 5, 'TB-10': 5}
+TB01_omitted_stories ['US-DST-01', 'US-DST-02', 'US-DST-04']
+every_destination_links_US-ENG-10 True
+current_residual_paths 483
+traditional_non_report_paths 319
+roster_retained True

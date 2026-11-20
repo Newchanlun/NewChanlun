@@ -1,0 +1,2 @@
+docs/adr/0064-at18-whole-graph-acceptance-and-closeout.md:1:# ADR 0064：AT-18 整图验收报告与关票门
+docs/adr/0064-at18-whole-graph-acceptance-and-closeout.md:3:> 正本：本文件是 #1323 AT-18 六项 Destination 逐项核验、TB-01..11 关票门、旧关联票去向与整图报告的正本。

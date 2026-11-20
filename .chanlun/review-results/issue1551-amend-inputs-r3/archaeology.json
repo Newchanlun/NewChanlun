@@ -1,0 +1,162 @@
+{
+  "source_commit": "6ba72e84c55aa6d65b11cc46b7288142f4fce62b",
+  "main": "b9d898dccf46c2a716115eaa1215bc39c458a959",
+  "points": [
+    {
+      "id": "Q1",
+      "tracker_query": "gh issue list --state all --limit 10 --search '\"AT-18\" \"主线\"' --json number,state,title,url",
+      "repo_query": "rg -n -m 2 'AT-18|整图验收' .sandcastle/docs/graph-engineering.md docs/adr/0041* docs/adr/0064* .github/workflows/{ci,devskim}.yml .chanlun/review-results/issue1340-publication-20260909/view/inputs/TB01-*",
+      "tracker_hits": [
+        2131,
+        2133,
+        2132,
+        1551,
+        1403,
+        1369,
+        1365,
+        1368,
+        1391,
+        1367
+      ],
+      "repo_matches": 2
+    },
+    {
+      "id": "Q2",
+      "tracker_query": "gh issue list --state all --limit 10 --search '\"DevSkim\" \"例外\" in:comments' --json number,state,title,url",
+      "repo_query": "rg -n -m 2 'ci-ok|merge_method' .sandcastle/docs/graph-engineering.md docs/adr/0041* docs/adr/0064* .github/workflows/{ci,devskim}.yml .chanlun/review-results/issue1340-publication-20260909/view/inputs/TB01-*",
+      "tracker_hits": [
+        1606,
+        1385,
+        1411,
+        1551,
+        1375,
+        1414,
+        1404,
+        1392,
+        1374,
+        1495
+      ],
+      "repo_matches": 4
+    },
+    {
+      "id": "Q3",
+      "tracker_query": "gh issue list --state all --limit 10 --search '\"审查\" \"精确 head\" in:comments' --json number,state,title,url",
+      "repo_query": "rg -n -m 2 '非作者|正式门' .sandcastle/docs/graph-engineering.md docs/adr/0041* docs/adr/0064* .github/workflows/{ci,devskim}.yml .chanlun/review-results/issue1340-publication-20260909/view/inputs/TB01-*",
+      "tracker_hits": [
+        2070,
+        1742,
+        1719,
+        1717,
+        1523,
+        1716,
+        1640,
+        1768,
+        1419,
+        1715
+      ],
+      "repo_matches": 5
+    },
+    {
+      "id": "Q4",
+      "tracker_query": "gh issue list --state all --limit 10 --search '\"场所实验\" \"凭据\"' --json number,state,title,url",
+      "repo_query": "rg -n -m 2 '用户授权|凭据接触' .sandcastle/docs/graph-engineering.md docs/adr/0041* docs/adr/0064* .github/workflows/{ci,devskim}.yml .chanlun/review-results/issue1340-publication-20260909/view/inputs/TB01-*",
+      "tracker_hits": [
+        2133,
+        1551
+      ],
+      "repo_matches": 2
+    },
+    {
+      "id": "Q5",
+      "tracker_query": "gh issue list --state all --limit 10 --search '\"证据\" \"P1\" \"P2\"' --json number,state,title,url",
+      "repo_query": "rg -n -m 2 'PRESERVED_BOUNDARY|exclusion_boundary|证据类' .sandcastle/docs/graph-engineering.md docs/adr/0041* docs/adr/0064* .github/workflows/{ci,devskim}.yml .chanlun/review-results/issue1340-publication-20260909/view/inputs/TB01-*",
+      "tracker_hits": [
+        1467,
+        1465,
+        1365,
+        1768,
+        1340,
+        1323,
+        1419,
+        1572,
+        1527,
+        1540
+      ],
+      "repo_matches": 2
+    },
+    {
+      "id": "Q6",
+      "tracker_query": "gh issue list --state all --limit 10 --search '\"AT-18\" \"摘要\" in:comments' --json number,state,title,url",
+      "repo_query": "rg -n -m 2 'deliveryManifestSchema|sha256|at14-report/1' .sandcastle/docs/graph-engineering.md docs/adr/0041* docs/adr/0064* .github/workflows/{ci,devskim}.yml .chanlun/review-results/issue1340-publication-20260909/view/inputs/TB01-*",
+      "tracker_hits": [
+        1551
+      ],
+      "repo_matches": 6
+    },
+    {
+      "id": "Q7",
+      "tracker_query": "gh issue list --state all --limit 10 --search '\"TB-02-X\"' --json number,state,title,url",
+      "repo_query": "rg -n -m 2 'TB-02-X|PARENT-CONTRIBUTION' .sandcastle/docs/graph-engineering.md docs/adr/0041* docs/adr/0064* .github/workflows/{ci,devskim}.yml .chanlun/review-results/issue1340-publication-20260909/view/inputs/TB01-*",
+      "tracker_hits": [
+        1442,
+        1634,
+        1441,
+        1440,
+        1978,
+        1360,
+        1493,
+        1490,
+        1604,
+        1347
+      ],
+      "repo_matches": 1
+    },
+    {
+      "id": "Q8",
+      "tracker_query": "gh issue list --state all --limit 10 --search '\"review_sweep\" \"strict\"' --json number,state,title,url",
+      "repo_query": "rg -n -m 2 '不得放宽|strict' .sandcastle/docs/graph-engineering.md docs/adr/0041* docs/adr/0064* .github/workflows/{ci,devskim}.yml .chanlun/review-results/issue1340-publication-20260909/view/inputs/TB01-*",
+      "tracker_hits": [
+        1926,
+        1742
+      ],
+      "repo_matches": 3
+    },
+    {
+      "id": "Q9",
+      "tracker_query": "gh issue list --state all --limit 10 --search '\"workflow_dispatch\" \"ci-ok\" in:comments' --json number,state,title,url",
+      "repo_query": "rg -n -m 2 'workflow_dispatch|ci-ok' .sandcastle/docs/graph-engineering.md docs/adr/0041* docs/adr/0064* .github/workflows/{ci,devskim}.yml .chanlun/review-results/issue1340-publication-20260909/view/inputs/TB01-*",
+      "tracker_hits": [
+        1924
+      ],
+      "repo_matches": 4
+    },
+    {
+      "id": "Q10",
+      "tracker_query": "gh issue list --state all --limit 10 --search '\"DevSkim\" \"无运行\" in:comments' --json number,state,title,url",
+      "repo_query": "rg -n -m 2 '无报告|未检验' .sandcastle/docs/graph-engineering.md docs/adr/0041* docs/adr/0064* .github/workflows/{ci,devskim}.yml .chanlun/review-results/issue1340-publication-20260909/view/inputs/TB01-*",
+      "tracker_hits": [
+        1551,
+        1599
+      ],
+      "repo_matches": 2
+    },
+    {
+      "id": "Q11",
+      "tracker_query": "gh issue list --state all --limit 10 --search '\"TB-01\" \"浏览器\"' --json number,state,title,url",
+      "repo_query": "rg -n -m 2 '耐久|浏览器|NOT_EVALUATED' .sandcastle/docs/graph-engineering.md docs/adr/0041* docs/adr/0064* .github/workflows/{ci,devskim}.yml .chanlun/review-results/issue1340-publication-20260909/view/inputs/TB01-*",
+      "tracker_hits": [
+        2132,
+        1415,
+        1551,
+        1406,
+        1419,
+        1424,
+        1426,
+        1429,
+        1393,
+        1439
+      ],
+      "repo_matches": 8
+    }
+  ]
+}

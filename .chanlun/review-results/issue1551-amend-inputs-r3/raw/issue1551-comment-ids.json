@@ -1,0 +1,7 @@
+{"first":"AT-18候选已完成，尚未生效。候选 /Volumes/AgentStorage/issue1551-at18-20261107/draft.md（77行）、affected.md；非作者review_1551_acceptance_contract只读审查PASS见同目录review.md。本次仅候选合同审查，不是运行验收或正式helper登记绑定。","url":"https://github.com/Newchanlun/NewChanlun/issues/1551#issuecomment-6698872684"}
+{"first":"#1535 协议裁定已由 #2064 合入 main ed780bcd，正本为 ADR 0063。整图证据汇总请区分协议已落地与 #1368/#1402 实际迁移/恢复验收未完成；TB-09/10/11 及 #1279 继续保留原验收义务。","url":"https://github.com/Newchanlun/NewChanlun/issues/1551#issuecomment-6860921097"}
+{"first":"分级：P — 票面直接裁决 #1279 关图条件及旧关联票合法去向，属于 graph-engineering.md「1. 分级」明列的 P 类事项。","url":"https://github.com/Newchanlun/NewChanlun/issues/1551#issuecomment-6861283421"}
+{"first":"本条依 #1909 代理独审裁定","url":"https://github.com/Newchanlun/NewChanlun/issues/1551#issuecomment-6861637686"}
+{"first":"## ADR 0064（PR #2065）需要明定的三处——来自 #1391 实现的非作者独审","url":"https://github.com/Newchanlun/NewChanlun/issues/1551#issuecomment-7040728269"}
+{"first":"**裁决暂停（review_blocked）：ADR 0064 修订第 2 轮异家族独审 BLOCK @ `f57850d8b4e151a36ade953f3e79fe2736bd4c36`**","url":"https://github.com/Newchanlun/NewChanlun/issues/1551#issuecomment-7042797850"}
+{"first":"退回：换证据模型后整链重跑（第三稿）","url":"https://github.com/Newchanlun/NewChanlun/issues/1551#issuecomment-7047086314"}

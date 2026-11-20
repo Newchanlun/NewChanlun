@@ -1,0 +1,8 @@
+candidate=a20ba0bb018f2bcb6a4a93392ea7a2b6e2f928c2 base=6ba72e84c55aa6d65b11cc46b7288142f4fce62b inputs_base=b9d898dccf46c2a716115eaa1215bc39c458a959
+git diff --check: PASS；仅 ADR 0064 和 graph-engineering.md 两个文件。
+canonical_edit: 主替换 11 处、同步 1 处，逐步唯一且重放等于提交。
+第四节除 #1279 去向所用前因子外全文不变。
+40 个实测闸后提交：全树/App status/PR 绑定条件成立。15 个历史提交：13 DevSkim 红、3 CI failure、2 无对应工作流。
+13 票底册覆盖已核历史提交，#1493 仍待迁原生父票，#1279 和 #2133 OPEN。
+规则依赖可拓扑排序：R01 → R02 → R08 → R09 → R03 → R10 → R04.static → TB11-pre → R05 → R06 → R07 → R11 → R04.final → Key → SpecEntry → TB01-10 → Legacy → Destination → Report → 1391-close → 1403-close → 1369-close → 1340-close → 1323-close
+未运行 Rust、Actions、#1391/#1403 业务验收；本记录是作者起草检查。
