@@ -151,15 +151,28 @@ function assert(cond, msg) {
     await send("Runtime.enable");
     await send("Network.enable");
     await send("Page.navigate", { url: url.href });
-    await settle();
+    // R4：页面默认走完整快照（保留既有快照/Watch 入口）；在超大 cut 6 上应诚实报错（严格拒裸整数/超4MiB），
+    // 同时探明 owner 支持投影后启用独立「读取固定切面投影」按钮。
+    await settle("typeof client !== 'undefined' && client.discovery !== null && !busy");
+    const initialState = await evaluate("({status: document.getElementById('status').textContent, watchDisabled: document.getElementById('watch').disabled, projDisabled: document.getElementById('projection-current').disabled, committed: client.state !== null})");
+    assert(!initialState.projDisabled, "projection-current button must be enabled after real owner probe: " + JSON.stringify(initialState));
+    assert(initialState.watchDisabled, "watch button must be disabled without CompleteVector snapshot: " + JSON.stringify(initialState));
+    // 显式点击独立「读取固定切面投影」按钮切换到只读投影视图！
+    await evaluate("document.getElementById('projection-current').click()");
+    await settle("client.state !== null && client.state.kind === 'EconomicProjection' && !busy");
+    const projWatchDisabled = await evaluate("document.getElementById('watch').disabled");
+    assert(projWatchDisabled, "watch button must remain disabled in EconomicProjection view");
+    const capText = await evaluate("document.getElementById('capabilities').textContent");
+    assert(capText.includes("不支持 Watch"), "capabilities text must state Watch unsupported in projection: " + capText);
 
     const discovery = await evaluate("client.discovery");
     const cut6State = await evaluate("client.state");
     const cut6Dom = await evaluate("document.body.innerText");
     const readLogAfterCut6 = await evaluate("client.readLog");
 
-    assert(discovery.read_projection && discovery.read_projection.schema_revision === "economic-read-projection/1",
-      "discovery must advertise economic-read-projection/1");
+    assert(discovery.read_projection && discovery.read_projection.schema_revision === "economic-read-projection/1"
+      && discovery.read_projection.watch_supported === false,
+      "discovery must advertise economic-read-projection/1 with watch_supported=false");
     assert(cut6State.kind === "EconomicProjection", "state.kind must be EconomicProjection");
     assert(cut6State.projection_revision === "economic-read-projection/1", "projection_revision mismatch");
     assert(cut6State.projection_completeness === "CompleteProjectionVector",
@@ -303,6 +316,12 @@ function assert(cond, msg) {
         const res = {};
         const cut5State = client.state;
         try {
+          await client.watch();
+          res.watchOnProjection = { rejected: false };
+        } catch (e) {
+          res.watchOnProjection = { rejected: true, error: e.message };
+        }
+        try {
           await client.projectionOriginal(cut5State, "B:alpha", "fact", ${JSON.stringify(expected.fee_fact_key)});
           res.feeFactAtCut5 = { rejected: false };
         } catch (e) {
@@ -313,6 +332,37 @@ function assert(cond, msg) {
           res.feeAllocAtCut5 = { rejected: false };
         } catch (e) {
           res.feeAllocAtCut5 = { rejected: true, error: e.message };
+        }
+        if (${JSON.stringify(Boolean(expected && expected.e6_b6_b4_cuts))}) {
+          const e6Cuts = ${JSON.stringify((expected && expected.e6_b6_b4_cuts) || null)};
+          try {
+            await client.query({
+              op: "projection_original",
+              projection_revision: "economic-read-projection/1",
+              domain_id: "B:alpha",
+              kind: "allocation",
+              object_id: ${JSON.stringify(expected.fee_allocation_id)},
+              cuts: e6Cuts,
+            });
+            res.e6VectorFeeAlloc = { rejected: false };
+          } catch (e) {
+            res.e6VectorFeeAlloc = { rejected: true, error: e.message };
+          }
+        }
+        const badNonTargetCuts = JSON.parse(JSON.stringify(${JSON.stringify(cut5Cuts)}));
+        badNonTargetCuts["B:beta"].root_hash = "0".repeat(64);
+        try {
+          await client.query({
+            op: "projection_original",
+            projection_revision: "economic-read-projection/1",
+            domain_id: "B:alpha",
+            kind: "fact",
+            object_id: ${JSON.stringify(expected.fill_fact_key || expected.fee_fact_key)},
+            cuts: badNonTargetCuts,
+          });
+          res.nonTargetBetaWrongRoot = { rejected: false };
+        } catch (e) {
+          res.nonTargetBetaWrongRoot = { rejected: true, error: e.message };
         }
         const badSeqCuts = JSON.parse(JSON.stringify(${JSON.stringify(cut5Cuts)}));
         badSeqCuts["B:alpha"].commit_seq = "99";
@@ -365,6 +415,14 @@ function assert(cond, msg) {
           beta_status: legacySnap.domains["B:beta"].status,
         };
       })()`);
+      assert(negatives.watchOnProjection.rejected && negatives.watchOnProjection.error.includes("Watch"),
+        "watchOnProjection must reject clearly: " + JSON.stringify(negatives.watchOnProjection));
+      if (expected && expected.e6_b6_b4_cuts) {
+        assert(negatives.e6VectorFeeAlloc.rejected && negatives.e6VectorFeeAlloc.error.includes("E:8"),
+          "e6VectorFeeAlloc must reject E:8 under E:6 cut: " + JSON.stringify(negatives.e6VectorFeeAlloc));
+      }
+      assert(negatives.nonTargetBetaWrongRoot.rejected && negatives.nonTargetBetaWrongRoot.error.includes("B:beta"),
+        "nonTargetBetaWrongRoot must reject non-target B:beta wrong root: " + JSON.stringify(negatives.nonTargetBetaWrongRoot));
       assert(negatives.feeFactAtCut5.rejected && negatives.feeFactAtCut5.error.includes("MissingDependency"),
         "feeFactAtCut5 must reject with MissingDependency: " + JSON.stringify(negatives.feeFactAtCut5));
       assert(negatives.feeAllocAtCut5.rejected && negatives.feeAllocAtCut5.error.includes("MissingDependency"),

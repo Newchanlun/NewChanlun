@@ -50,6 +50,7 @@ def get(handler):
     if query is None:
         handler._send_json({"ok": False, "error": "EconomicQueryNotConfigured"}, 503)
     else:
+        probed_projection = query.discover_read_projection()
         handler._send_json({"schema_revision": "economic-discovery/1", "session_id": query.session,
                             "session_generation": query.generation, "producer_epoch": query.query_epoch,
                             "manifest_hash": query.manifest_hash, "domains": list(query.nodes),
@@ -60,12 +61,7 @@ def get(handler):
                                if query.manifest.get("clock", {}).get("kind") == "logical-bar/1" else {}),
                             **({"read_pages": {"schema_revision":"economic-read-pages/1", "owner_epochs":query.epochs}}
                                if query.command_read_pages else {}),
-                            **({"read_projection": {
-                                "schema_revision": "economic-read-projection/1",
-                                "transport_revision": "economic-read-pages/1",
-                                "owner_epochs": query.epochs,
-                                "original_kinds": ["fact", "allocation", "decision", "grant", "command", "model"],
-                            }} if query.read_projection_available else {}),
+                            **({"read_projection": probed_projection} if probed_projection is not None else {}),
                             **({"book_revision": query.book_revision} if query.book_revision is not None else {}),
                             **({"finance_revision": query.finance_revision} if query.manifest.get("finance") else {})})
     return True

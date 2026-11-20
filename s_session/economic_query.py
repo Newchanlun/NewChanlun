@@ -304,6 +304,51 @@ def _correction_predecessor(row, event, rows, verified_event):
             raise EconomicQueryError("更正政策引用与具名原分配不同")
 
 
+def _verify_x_execution_witness(witness, row):
+    _exact(witness, {
+        "witness_revision", "x_profile_revision", "x_id", "x_epoch",
+        "session_id", "session_generation", "source_namespace", "source_epoch",
+        "model_content_hash", "command_id", "command_hash",
+        "e_release_receipt_key", "e_release_cut", "e_release_commit_ns",
+        "x_release_evidence", "x_accept_clock", "x_command_state",
+        "x_execute_evidence", "attempt_batch_id", "attempt_batch_bar_index",
+        "attempt_batch_request_sha256", "attempt_batch_receipt_sha256",
+        "originals_batch_id", "originals_batch_bar_index",
+        "originals_batch_receipt_sha256", "fact_raw_sha256",
+    }, "X/3 执行因果见证")
+    if witness["witness_revision"] != "x-sim-execution-witness/1":
+        raise EconomicQueryError("未知 X 执行因果见证版本")
+    if witness["x_profile_revision"] != "x-execution-profile/3":
+        raise EconomicQueryError("模拟分配见证仅接受 x-execution-profile/3")
+    if witness["command_id"] != row["command_id"] or witness["x_command_state"] != "Observed":
+        raise EconomicQueryError("X/3 执行因果见证命令身份或终态不符")
+    for key in ("x_id", "session_id", "source_namespace", "source_epoch",
+                "e_release_receipt_key", "attempt_batch_id", "originals_batch_id"):
+        text(witness[key], key)
+    integer(witness["x_epoch"], "x_epoch", positive=True)
+    integer(witness["session_generation"], "session_generation", positive=True)
+    integer(witness["e_release_commit_ns"], "e_release_commit_ns")
+    attempt_bar = integer(witness["attempt_batch_bar_index"], "attempt_batch_bar_index")
+    originals_bar = integer(witness["originals_batch_bar_index"], "originals_batch_bar_index")
+    if originals_bar < attempt_bar:
+        raise EconomicQueryError("X/3 结果批 bar 早于占有批 bar")
+    for key in ("model_content_hash", "command_hash", "attempt_batch_request_sha256",
+                "attempt_batch_receipt_sha256", "originals_batch_receipt_sha256", "fact_raw_sha256"):
+        _hash(witness[key], key)
+    verify_cut(witness["e_release_cut"], "E")
+    x_rel = witness["x_release_evidence"]
+    x_exec = witness["x_execute_evidence"]
+    if (type(x_rel) is not dict or x_rel.get("receipt_id") != witness["e_release_receipt_key"]
+            or x_rel.get("release_receipt_id") is not None
+            or x_rel.get("state") != "ReleasedExact"):
+        raise EconomicQueryError("X/3 release_evidence 与 E 原放行回执不符")
+    if (type(x_exec) is not dict or type(x_exec.get("reply")) is not dict
+            or x_exec["reply"].get("state") != "ExecuteCommitted"
+            or x_exec["reply"].get("release_receipt_id") != witness["e_release_receipt_key"]
+            or x_exec.get("claimed_ns") != witness["attempt_batch_bar_index"]):
+        raise EconomicQueryError("X/3 execute_evidence 与 S 执行及占有批不符")
+
+
 def _verify_history_sim_allocation_row(row, image, rows, verified, verified_event):
     kind = row["source_kind"]
     if kind == "history_sim_fill":
@@ -311,18 +356,21 @@ def _verify_history_sim_allocation_row(row, image, rows, verified, verified_even
             "fact_key", "fact_hash", "projection_kind", "source_kind",
             "command_id", "grant_id", "responsibility_ref", "plan_hash",
             "command_plan_hash", "command_hash", "symbol",
-            "fill_allocation_policy_id", "policy_revision", "evidence_id", "allocations",
+            "fill_allocation_policy_id", "policy_revision", "evidence_id",
+            "x_execution_witness", "allocations",
         }
     elif kind == "history_sim_fee":
         expected_fields = {
             "fact_key", "fact_hash", "projection_kind", "source_kind",
             "command_id", "grant_id", "responsibility_ref",
             "original_fact_key", "original_allocation_id", "symbol",
-            "fill_allocation_policy_id", "policy_revision", "evidence_id", "allocations",
+            "fill_allocation_policy_id", "policy_revision", "evidence_id",
+            "x_execution_witness", "allocations",
         }
     else:
         raise EconomicQueryError("未知模拟分配来源类型")
     _exact(row, expected_fields, "模拟分配记录")
+    _verify_x_execution_witness(row["x_execution_witness"], row)
     _hash(row["fact_key"], "fact_key")
     _hash(row["fact_hash"], "fact_hash")
     if row["projection_kind"] != "per_leg":
@@ -604,6 +652,8 @@ class EconomicQuery:
         self.open_records = {}
         self.metadata_bytes = 0
         self.budget = threading.local()
+        self._probed_projection_epochs = None
+        self._verified_cuts_cache = set()
 
     @property
     def command_read_pages(self):
@@ -611,10 +661,110 @@ class EconomicQuery:
                 and {"EconomicReadOpen", "EconomicReadPage", "EconomicReadClose"} <= self.authorized_read_ops)
 
     @property
-    def read_projection_available(self):
-        return (self.finance_revision == "tb03b-finance/6"
+    def read_projection_configured(self):
+        return (self.protocol_revision == "economic-session/1"
+                and self.finance_revision == "tb03b-finance/6"
                 and self.book_revision in TB03C_BOOKS
                 and {"EconomicReadOpen", "EconomicReadPage", "EconomicReadClose"} <= self.authorized_read_ops)
+
+    @property
+    def read_projection_available(self):
+        return self.read_projection_configured
+
+    @property
+    def projection_original_kinds(self):
+        ops = self.authorized_read_ops
+        kinds = []
+        if "QueryFact" in ops:
+            kinds.append("fact")
+        if "QueryAllocation" in ops:
+            kinds.append("allocation")
+        if "QueryDecision" in ops:
+            kinds.append("decision")
+        if "QueryGrant" in ops:
+            kinds.append("grant")
+        if "QueryCommand" in ops:
+            kinds.append("command")
+        if "QueryFact" in ops or "QueryCommand" in ops:
+            kinds.append("model")
+        return tuple(kinds)
+
+    def _probe_domain_projection(self, domain):
+        """实测单个 owner 是否真正实现 economic-read-projection/1（Open 确认后即 Close，不从配置盲猜）。"""
+        query = {
+            "op": "ReadProjection",
+            "projection_revision": ECONOMIC_PROJECTION_REVISION,
+            "cut": None,
+            "as_known_ns": None,
+        }
+        remaining = min(self._remaining_ms(), 30000)
+        open_req = self.request({
+            "schema_revision": "economic-read-pages/1",
+            "op": "EconomicReadOpen",
+            "query": query,
+            "requested_remaining_ms": str(remaining),
+        })
+        wire = exchange(self.nodes[domain], open_req,
+                        timeout_ms=min(remaining, self.resources["timeout_ms"]),
+                        max_frame_bytes=min(1048576, self.resources["max_frame_bytes"]),
+                        evidence=getattr(self.budget, "wire_scope", None),
+                        logical_deadline=self.budget.deadline)
+        if wire["transport"] != "Received":
+            return False
+        opened = validate_reply(open_req, wire["response"], producer=domain,
+                                producer_epoch=self.epochs[domain])
+        if (type(opened) is not dict or opened.get("kind") != "EconomicReadOpened"
+                or opened.get("schema_revision") != "economic-read-pages/1"):
+            return False
+        descriptor = opened.get("descriptor")
+        if (type(descriptor) is not dict
+                or descriptor.get("document_kind") != "EconomicProjectionView"
+                or descriptor.get("session_id") != self.session
+                or descriptor.get("session_generation") != self.generation
+                or descriptor.get("manifest_hash") != self.manifest_hash
+                or opened.get("descriptor_sha256") != digest(descriptor)):
+            return False
+        transfer_id = descriptor.get("transfer_id")
+        if type(transfer_id) is str and re.fullmatch(r"[0-9a-f]{32}", transfer_id):
+            close_req = self.request({
+                "schema_revision": "economic-read-pages/1",
+                "op": "EconomicReadClose",
+                "transfer_id": transfer_id,
+                "descriptor_sha256": opened["descriptor_sha256"],
+            })
+            try:
+                exchange(self.nodes[domain], close_req,
+                         timeout_ms=min(self._remaining_ms(), self.resources["timeout_ms"]),
+                         max_frame_bytes=min(1048576, self.resources["max_frame_bytes"]),
+                         evidence=getattr(self.budget, "wire_scope", None),
+                         logical_deadline=self.budget.deadline)
+            except (OSError, ValueError, KeyError, TypeError):
+                pass
+        return True
+
+    def discover_read_projection(self, *, deadline=None):
+        """面向 /api/economic/ready：仅当全部 owner 实际探明支持 ReadProjection 时才声明能力与可用动作。"""
+        if not self.read_projection_configured:
+            return None
+        epoch_key = tuple(sorted(self.epochs.items()))
+        with self.lock:
+            probed = self._probed_projection_epochs == epoch_key
+        if not probed:
+            self._start(deadline)
+            self.budget.paged = True
+            results = self._parallel_domains(lambda d: {"status": "Available"} if self._probe_domain_projection(d) else {"status": "Unavailable"})
+            if not all(v.get("status") == "Available" for v in results.values()):
+                return None
+            with self.lock:
+                self._probed_projection_epochs = epoch_key
+        return {
+            "schema_revision": ECONOMIC_PROJECTION_REVISION,
+            "transport_revision": "economic-read-pages/1",
+            "owner_epochs": dict(self.epochs),
+            "original_kinds": list(self.projection_original_kinds),
+            "watch_supported": False,
+            "available_actions": ["projection", "projection_original"],
+        }
 
     def _start(self, deadline=None):
         own_deadline = time.monotonic() + self.resources["operation_timeout_ms"] / 1000
@@ -1298,8 +1448,49 @@ class EconomicQuery:
                 self._cache_put_locked(ptoken, encoded)
         return result
 
+    def _verified_vector_cached(self, cuts):
+        """判断完整域切面向量是否已由本 Q 实核并保留在缓存中（仅认完整向量）。"""
+        lock = getattr(self, "lock", None)
+        cache = getattr(self, "cache", None)
+        if lock is None or cache is None:
+            return False
+        with lock:
+            if hasattr(self, "_expire_transfers_locked"):
+                self._expire_transfers_locked()
+            entries = list(cache.values())
+        for encoded in entries:
+            try:
+                doc = decode_frame(encoded)
+            except (ValueError, UnicodeError, TypeError):
+                continue
+            kind = doc.get("kind")
+            if kind == "EconomicProjection" and doc.get("projection_completeness") == "CompleteProjectionVector":
+                cached_cuts = {d: v.get("cut") for d, v in doc.get("domains", {}).items()}
+                if cached_cuts == cuts:
+                    return True
+            elif kind == "EconomicSnapshot" and doc.get("completeness") == "CompleteVector":
+                cached_cuts = {d: v.get("cut") for d, v in doc.get("domains", {}).items()}
+                if cached_cuts == cuts:
+                    return True
+        return False
+
+    def _check_projection_original_permission(self, domain, kind):
+        ops = getattr(self, "authorized_read_ops", None)
+        if not isinstance(ops, (set, frozenset)):
+            return
+        needed = {
+            "fact": {"QueryFact"},
+            "allocation": {"QueryAllocation"},
+            "decision": {"QueryDecision"},
+            "grant": {"QueryGrant"},
+            "command": {"QueryCommand"},
+            "model": {"QueryCommand", "QueryFact"} if domain == "E" else {"QueryFact"},
+        }[kind]
+        if not (ops & needed):
+            raise EconomicQueryError(f"Q 来源未获准读取 {domain} 的 {kind} 原件")
+
     def projection_original(self, payload, *, deadline=None):
-        """#1425 方案 1：按同一固定 cut 向量展开成交、因果费用、分配回执、决定、grant、命令或模型原件。"""
+        """#1425 方案 1：按同一已核固定 cut 向量展开原件，并按每条回执自身域的前沿与真根校验。"""
         if not self.read_projection_available:
             raise EconomicQueryError("当前会话未显式启用 economic-read-projection/1")
         self._start(deadline)
@@ -1315,6 +1506,18 @@ class EconomicQuery:
             raise EconomicQueryError("同切面原件必须固定完整域向量")
         for name, cut in cuts.items():
             verify_cut(cut, name)
+        self._check_projection_original_permission(domain, kind)
+        # 1. 向量实核：若未命中本 Q 已核完整切面缓存，则实核全部非目标域的固定 cut 真根，禁止放行非目标域错根。
+        other_domains = [d for d in self.nodes if d != domain]
+        if other_domains and not self._verified_vector_cached(cuts):
+            checked = self._parallel_domains(
+                lambda d: {"status": "Available"} if d == domain else self.projection_view(d, cuts[d])
+            )
+            for other in other_domains:
+                if checked[other].get("status") != "Available":
+                    raise EconomicQueryError(
+                        f"非目标域 {other} 固定切面未通过实核：{checked[other].get('error', '不可用')}"
+                    )
         response = self.owner(domain, {
             "op": "ReadOriginalAtCut",
             "projection_revision": ECONOMIC_PROJECTION_REVISION,
@@ -1336,25 +1539,82 @@ class EconomicQuery:
         orig = response.get("original")
         if type(orig) is not dict:
             raise EconomicQueryError("owner 同切面原件载荷非对象")
-        # 校验原件精确字节未被改写（raw_utf8 -> raw_sha256，model_raw_utf8 -> model_ref.content_hash）
+
+        verified_cuts = {(d, c["commit_seq"], c["root_hash"]) for d, c in cuts.items()}
+        cached_cuts = getattr(self, "_verified_cuts_cache", None)
+        if isinstance(cached_cuts, set):
+            verified_cuts |= cached_cuts
+
+        def check_cut_against_vector(rcut, rdomain, *, expected_domain=None):
+            if expected_domain is not None and rdomain != expected_domain:
+                raise EconomicQueryError(f"回执域 {rdomain} 与期望域 {expected_domain} 不符")
+            if rdomain not in cuts:
+                raise EconomicQueryError(f"回执所属域 {rdomain} 不在固定向量中")
+            verified_rcut = verify_cut(rcut, rdomain)
+            rseq = int(verified_rcut["commit_seq"])
+            cseq = int(cuts[rdomain]["commit_seq"])
+            if rseq > cseq:
+                raise EconomicQueryError(
+                    f"MissingDependency：回执({rdomain}:{rseq})晚于固定切面({rdomain}:{cseq})，向量未就绪"
+                )
+            if rseq == cseq:
+                if verified_rcut != cuts[rdomain]:
+                    raise EconomicQueryError(f"同序号回执({rdomain}:{rseq})根与固定切面根不符")
+                return
+            key = (rdomain, verified_rcut["commit_seq"], verified_rcut["root_hash"])
+            if key not in verified_cuts:
+                self.projection_view(rdomain, verified_rcut)
+                verified_cuts.add(key)
+                if isinstance(cached_cuts, set):
+                    cached_cuts.add(key)
+
+        ops = getattr(self, "authorized_read_ops", None)
+        has_query_fact = not isinstance(ops, (set, frozenset)) or ("QueryFact" in ops)
+
+        # 2. 校验原件精确字节未被改写，并按每条回执自身域的前沿与真根逐项校验（含 B 内嵌 E 回执与 E Resolve 证明）。
         def check_fact_obj(fobj):
+            if type(fobj) is not dict:
+                raise EconomicQueryError("同切面事实原件载荷非对象")
             raw = text(fobj.get("raw_utf8"), "raw_utf8")
             raw_hash = fobj.get("raw_sha256")
             _hash(raw_hash, "raw_sha256")
             if hashlib.sha256(raw.encode("utf-8")).hexdigest() != raw_hash:
                 raise EconomicQueryError("同切面事实原件 raw_utf8 与 raw_sha256 不符")
             for r in fobj.get("receipts", []):
-                rcut = verify_cut(r.get("cut"), r.get("domain_id"))
-                if r.get("domain_id") == domain and int(rcut["commit_seq"]) > int(cuts[domain]["commit_seq"]):
-                    raise EconomicQueryError("同切面事实回执晚于固定 cut")
+                if type(r) is not dict:
+                    raise EconomicQueryError("同切面事实回执非对象")
+                check_cut_against_vector(r.get("cut"), r.get("domain_id"))
+            prec = fobj.get("projected_record")
+            if domain != "E" and type(prec) is dict:
+                if type(prec.get("e_receipt")) is dict:
+                    check_cut_against_vector(prec["e_receipt"].get("cut"), prec["e_receipt"].get("domain_id"), expected_domain="E")
+                if type(prec.get("cut")) is dict:
+                    check_cut_against_vector(prec["cut"], "E", expected_domain="E")
+                res_proof = prec.get("e_resolution_proof")
+                if type(res_proof) is dict and type(res_proof.get("receipt")) is dict:
+                    check_cut_against_vector(res_proof["receipt"].get("cut"), res_proof["receipt"].get("domain_id"), expected_domain="E")
+
         if kind == "fact":
             check_fact_obj(orig)
         elif kind == "allocation":
-            check_fact_obj(orig.get("fact", {}))
             rec_key = "resolve_receipt" if domain == "E" else "receipt"
-            rcut = verify_cut(orig.get(rec_key, {}).get("cut"), domain)
-            if int(rcut["commit_seq"]) > int(cuts[domain]["commit_seq"]):
-                raise EconomicQueryError("同切面分配回执晚于固定 cut")
+            rec_obj = orig.get(rec_key)
+            if type(rec_obj) is not dict:
+                raise EconomicQueryError("同切面分配缺回执")
+            check_cut_against_vector(rec_obj.get("cut"), rec_obj.get("domain_id", domain), expected_domain=domain)
+            fact_obj = orig.get("fact")
+            if fact_obj is not None:
+                if not has_query_fact:
+                    raise EconomicQueryError("未获准 QueryFact 却返回事实原件")
+                check_fact_obj(fact_obj)
+            else:
+                if has_query_fact:
+                    raise EconomicQueryError("同切面分配缺事实原件")
+                fref = orig.get("fact_ref")
+                if type(fref) is not dict:
+                    raise EconomicQueryError("同切面分配缺具名 fact_ref")
+                _hash(fref.get("fact_key"), "fact_ref.fact_key")
+                _hash(fref.get("fact_hash"), "fact_ref.fact_hash")
         elif kind == "model":
             mr = orig.get("model_ref")
             if type(mr) is not dict:
@@ -1362,14 +1622,16 @@ class EconomicQuery:
             mh = mr.get("content_hash")
             _hash(mh, "model_ref.content_hash")
             if orig.get("model_raw_utf8") is not None:
+                if not has_query_fact:
+                    raise EconomicQueryError("未获准 QueryFact 却返回模型原字节")
                 if hashlib.sha256(orig["model_raw_utf8"].encode("utf-8")).hexdigest() != mh:
                     raise EconomicQueryError("同切面模型原件字节与 model_ref.content_hash 不符")
         elif kind in ("decision", "grant", "command"):
             recs = [orig["receipt"]] if kind == "grant" else orig.get("receipts", [])
             for r in recs:
-                rcut = verify_cut(r.get("cut"), domain)
-                if int(rcut["commit_seq"]) > int(cuts[domain]["commit_seq"]):
-                    raise EconomicQueryError("同切面财务回执晚于固定 cut")
+                if type(r) is not dict:
+                    raise EconomicQueryError("同切面财务回执非对象")
+                check_cut_against_vector(r.get("cut"), r.get("domain_id", domain), expected_domain=domain)
         return {
             "kind": "EconomicProjectionOriginal",
             "projection_revision": ECONOMIC_PROJECTION_REVISION,

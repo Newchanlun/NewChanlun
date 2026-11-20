@@ -751,7 +751,14 @@
       && reply.commit_ns === view.commit_ns && reply.writer_epoch === view.writer_epoch, "同切面原件与固定投影切面不符");
     const o = reply.original;
     need(object(o), "同切面原件载荷非对象");
-    const maxSeq = BigInt(cuts[domain].commit_seq);
+    const checkCutInVector = (rcut, rdomain, expectedDomain = null) => {
+      if (expectedDomain !== null) need(rdomain === expectedDomain, "回执域与期望域不符");
+      need(typeof rdomain === "string" && Object.prototype.hasOwnProperty.call(cuts, rdomain), "回执所属域不在固定切面向量中");
+      cut(rcut, rdomain);
+      const rseq = BigInt(rcut.commit_seq), cseq = BigInt(cuts[rdomain].commit_seq);
+      need(rseq <= cseq, "回执(" + rdomain + ":" + rcut.commit_seq + ")晚于固定切面(" + rdomain + ":" + cuts[rdomain].commit_seq + ")，向量未就绪");
+      if (rseq === cseq) need(same(rcut, cuts[rdomain]), "同序号回执根与固定切面根不符");
+    };
     const checkFact = async (f) => {
       need(object(f) && typeof f.raw_utf8 === "string", "事实原件缺 raw_utf8");
       digest(f.raw_sha256, "raw_sha256");
@@ -759,16 +766,30 @@
       need(object(f.raw_exact_text) && f.raw_exact_text.representation === "ExactDecimalIntegerTextProjection"
         && f.raw_exact_text.raw_sha256 === f.raw_sha256, "事实精确文本视图绑定不符");
       for (const r of (f.receipts || [])) {
-        cut(r.cut, r.domain_id);
-        if (r.domain_id === domain) need(BigInt(r.cut.commit_seq) <= maxSeq, "事实回执晚于固定切面");
+        need(object(r), "事实回执非对象");
+        checkCutInVector(r.cut, r.domain_id);
+      }
+      if (domain !== "E" && object(f.projected_record)) {
+        const prec = f.projected_record;
+        if (object(prec.e_receipt)) checkCutInVector(prec.e_receipt.cut, prec.e_receipt.domain_id, "E");
+        if (object(prec.cut)) checkCutInVector(prec.cut, "E", "E");
+        if (object(prec.e_resolution_proof) && object(prec.e_resolution_proof.receipt)) {
+          checkCutInVector(prec.e_resolution_proof.receipt.cut, prec.e_resolution_proof.receipt.domain_id, "E");
+        }
       }
     };
     if (kind === "fact") await checkFact(o);
     else if (kind === "allocation") {
-      await checkFact(o.fact);
       const rec = domain === "E" ? o.resolve_receipt : o.receipt;
-      cut(rec.cut, domain);
-      need(BigInt(rec.cut.commit_seq) <= maxSeq, "分配回执晚于固定切面");
+      need(object(rec), "分配回执缺失");
+      checkCutInVector(rec.cut, rec.domain_id || domain, domain);
+      if (o.fact !== null && o.fact !== undefined) {
+        await checkFact(o.fact);
+      } else {
+        need(object(o.fact_ref), "未连带事实时缺具名 fact_ref");
+        digest(o.fact_ref.fact_key, "fact_ref.fact_key");
+        digest(o.fact_ref.fact_hash, "fact_ref.fact_hash");
+      }
     } else if (kind === "model") {
       need(object(o.model_ref), "模型原件缺 model_ref");
       digest(o.model_ref.content_hash, "model_ref.content_hash");
@@ -781,8 +802,8 @@
     } else if (["decision", "grant", "command"].includes(kind)) {
       const recs = kind === "grant" ? [o.receipt] : (o.receipts || []);
       for (const r of recs) {
-        cut(r.cut, domain);
-        need(BigInt(r.cut.commit_seq) <= maxSeq, "财务回执晚于固定切面");
+        need(object(r), "财务回执非对象");
+        checkCutInVector(r.cut, r.domain_id || domain, domain);
       }
     }
     return reply;
@@ -825,9 +846,11 @@
         Object.values(d.read_pages.owner_epochs).forEach(n=>integer(n,true));
       }
       if(d.read_projection!==undefined){
-        keys(d.read_projection,["schema_revision","transport_revision","owner_epochs","original_kinds"],"经济投影能力");
+        keys(d.read_projection,["schema_revision","transport_revision","owner_epochs","original_kinds","watch_supported","available_actions"],"经济投影能力");
         need(d.finance_revision==="tb03b-finance/6" && d.read_projection.schema_revision===PROJECTION_REV
-          && d.read_projection.transport_revision==="economic-read-pages/1","未知经济投影合同");
+          && d.read_projection.transport_revision==="economic-read-pages/1"
+          && d.read_projection.watch_supported===false
+          && same(d.read_projection.available_actions,["projection","projection_original"]),"未知经济投影合同");
         keys(d.read_projection.owner_epochs,d.domains,"投影 owner 代际");
         Object.values(d.read_projection.owner_epochs).forEach(n=>integer(n,true));
         need(Array.isArray(d.read_projection.original_kinds)
@@ -992,7 +1015,10 @@
       return verifyOriginal(result,state,this.discovery,domain,kind,id);
     }
     async watch() {
-      need(this.state !== null && this.state.completeness === "CompleteVector", "需先取得完整向量才可续接");
+      need(this.state !== null && this.state.kind === "EconomicSnapshot" && this.state.completeness === "CompleteVector",
+        this.state && this.state.kind === "EconomicProjection"
+          ? "只读投影视图不支持旧 Watch，请先切换到完整快照并取得 CompleteVector"
+          : "需先取得完整向量才可续接");
       const epoch = ++this.epoch, before = this.state;
       const deadline = performance.now() + Number(this.discovery.operation_timeout_ms);
       const cuts = Object.fromEntries(Object.entries(before.domains).map(([d, v]) => [d, v.cut]));

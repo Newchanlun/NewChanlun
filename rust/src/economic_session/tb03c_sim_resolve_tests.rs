@@ -9,7 +9,7 @@ use crate::history_simulation::{
         Bar, Batch, Capacity, Change, FeeProfile, FeeRole, Model, Order, OrderKind, Rate, Rounding,
         Side,
     },
-    store as x_store,
+    runtime as x_runtime, store as x_store, EXACT_PROFILE_REVISION,
 };
 use crate::session_protocol::{canonical_json, sha256_hex};
 use serde_json::{json, Value};
@@ -78,10 +78,13 @@ fn sim_model() -> Model {
 
 struct Env {
     _space: Space,
+    dir: std::path::PathBuf,
     configs: Vec<store::Config>,
     dbs: Vec<rusqlite::Connection>,
     epochs: Vec<i64>,
     x_conn: rusqlite::Connection,
+    x_db_path: std::path::PathBuf,
+    x_profile: Option<x_runtime::Profile>,
     data: Value,
     plans: [Value; 2],
     openings: [Value; 2],
@@ -91,16 +94,96 @@ struct Env {
 
 impl Env {
     fn build(tag: &str, alpha_family: &str) -> Self {
+        Self::build_with_x(tag, alpha_family, false, SESSION, "1")
+    }
+
+    fn build_bare_x(tag: &str, alpha_family: &str) -> Self {
+        Self::build_with_x(tag, alpha_family, true, SESSION, "1")
+    }
+
+    fn build_with_x(
+        tag: &str,
+        alpha_family: &str,
+        bare_x: bool,
+        x_session: &str,
+        x_generation: &str,
+    ) -> Self {
         let space = Space::new(tag);
         let dir = space.0.clone();
         let model = sim_model();
         let model_val = serde_json::to_value(&model).unwrap();
         let model_hash = book::hash(&model_val);
 
-        // 初始化真实 X 模拟库（冻结绝对路径与模型摘要）
         let x_db = dir.join("x.db");
         let mut x_conn = rusqlite::Connection::open(&x_db).unwrap();
-        x_store::initialize(&mut x_conn, &model, "x-sim", "epoch1").unwrap();
+        let x_profile = if bare_x {
+            // 裸撮合 store：只有 x_sim_* 表，没有 X/3 x_meta、authority_profile 或 x_exact_commands
+            x_store::initialize(&mut x_conn, &model, "x-sim", "epoch1").unwrap();
+            None
+        } else {
+            let conds: Vec<x_runtime::Condition> = CONDITIONS
+                .iter()
+                .map(|(id, cap, stage)| x_runtime::Condition {
+                    condition_id: (*id).into(),
+                    authority_revision: (*cap).into(),
+                    dependency_set: vec!["controlled-dependency".into()],
+                    invalidation_sources: vec!["controlled-invalidation".into()],
+                    required_check_stages: vec![(*stage).into()],
+                    evidence_refs: vec!["controlled-evidence".into()],
+                    coverage_proof: "controlled-coverage".into(),
+                    validator_capability: (*cap).into(),
+                    failure_result: "Denied".into(),
+                })
+                .collect();
+            let profile = x_runtime::Profile {
+                model: model.clone(),
+                session_id: x_session.into(),
+                session_generation: x_generation.into(),
+                x_id: "X".into(),
+                source_namespace: "x-sim".into(),
+                source_epoch: "epoch1".into(),
+                socket: dir.join("x.sock").to_str().unwrap().into(),
+                e: x_runtime::Authority {
+                    socket: dir.join("e.sock").to_str().unwrap().into(),
+                    authority_id: "E".into(),
+                    authority_epoch: "1".into(),
+                    schema_revision: "economic-session/1".into(),
+                    reply_namespace: "economic-session/replies".into(),
+                    producer_id: format!("E:{x_session}"),
+                },
+                s: x_runtime::Authority {
+                    socket: dir.join("s.sock").to_str().unwrap().into(),
+                    authority_id: "S".into(),
+                    authority_epoch: "1".into(),
+                    schema_revision: "s-session/1".into(),
+                    reply_namespace: "s-session/replies".into(),
+                    producer_id: format!("S:{x_session}"),
+                },
+                conditions: conds,
+                timeout_ms: 5000,
+                max_frame_bytes: 16_777_216,
+            };
+            let tx = x_conn.transaction().unwrap();
+            tx.execute_batch(
+                "CREATE TABLE IF NOT EXISTS x_meta(key TEXT PRIMARY KEY, value TEXT NOT NULL);",
+            )
+            .unwrap();
+            for (k, v) in [
+                ("profile_revision", EXACT_PROFILE_REVISION),
+                ("profile_mode", "simulation"),
+                ("history_simulation", "true"),
+                ("writer_epoch", "1"),
+            ] {
+                tx.execute(
+                    "INSERT INTO x_meta(key, value) VALUES(?1, ?2)",
+                    rusqlite::params![k, v],
+                )
+                .unwrap();
+            }
+            x_runtime::initialize_in_transaction(&tx, &profile, 1).unwrap();
+            tx.commit().unwrap();
+            Some(profile)
+        };
 
         let s_object =
             json!({"object_id":"unit-S-object","kind":"UnitStructuralTrustRoot","branch":"RISING"});
@@ -490,10 +573,13 @@ impl Env {
 
         Self {
             _space: space,
+            dir,
             configs,
             dbs,
             epochs,
             x_conn,
+            x_db_path: x_db,
+            x_profile,
             data,
             plans: [plans[0].clone(), plans[1].clone()],
             openings: [openings[0].clone(), openings[1].clone()],
@@ -554,7 +640,14 @@ impl Env {
         self.send_as(E, ("x-sim", "epoch1", "X", "1"), msg, p)
     }
 
-    fn resolve(&mut self, msg: &str, evidence_id: &str, records: &[&Value], cursor: &str) -> Value {
+    fn resolve_with_batch(
+        &mut self,
+        msg: &str,
+        evidence_id: &str,
+        records: &[&Value],
+        cursor: &str,
+        x_batch: Option<Value>,
+    ) -> Value {
         let covered: Vec<Value> = records
             .iter()
             .map(|r| {
@@ -565,14 +658,52 @@ impl Env {
                 })
             })
             .collect();
-        let p = json!({
+        let mut p = json!({
             "op": "ResolveEvidence",
             "evidence_id": evidence_id,
             "covered": covered,
             "frontier": {"source_namespace": "x-sim", "source_epoch": "epoch1", "cursor": cursor},
             "dependency_version": "tb1425-deps/1"
         });
+        if let Some(xb) = x_batch {
+            p["x_batch"] = xb;
+        }
         self.send_as(E, ("x-sim", "epoch1", "resolver", "1"), msg, p)
+    }
+
+    fn resolve(
+        &mut self,
+        msg: &str,
+        evidence_id: &str,
+        records: &[&Value],
+        cursor: &str,
+        batch_id: &str,
+        batch_digest: &str,
+    ) -> Value {
+        self.resolve_with_batch(
+            msg,
+            evidence_id,
+            records,
+            cursor,
+            Some(json!({
+                "x_id": "X",
+                "x_epoch": "1",
+                "batch_id": batch_id,
+                "batch_receipt_sha256": batch_digest
+            })),
+        )
+    }
+
+    fn batch_receipt_sha256(&self, batch_id: &str) -> String {
+        let raw: String = self
+            .x_conn
+            .query_row(
+                "SELECT result FROM x_sim_batches WHERE id=?1",
+                [batch_id],
+                |r| r.get(0),
+            )
+            .unwrap();
+        sha256_hex(raw.as_bytes())
     }
 
     fn image(&self, owner: usize) -> Value {
@@ -686,8 +817,179 @@ impl Env {
         (rel, grant_alpha)
     }
 
-    /// X 推进 bar 0..3，在 bar 2 接纳来自 E ReleaseExact 的精确订单，bar 3 产出 (fill, fee) 两件原件
-    fn run_x_to_bar3(&mut self, order: Order) -> (Value, Value) {
+    /// X/3 推进 bar 0..3：通过真实 E `QueryReleasedExact` 接纳放行命令、在 b2（claimed_ns=2，0 经济原件）占用并提交、
+    /// 在 b3 产出 (fill, fee) 两件原件；返回 `(fill_doc, fee_doc, b3_receipt_sha256, b2_receipt_sha256)`。
+    fn run_x3_to_bar3(&mut self, rel: &Value, order: Order) -> (Value, Value, String, String) {
+        let mk_bar = |idx: i64, o: i64, h: i64, l: i64, c: i64| Bar {
+            index: idx,
+            open: o,
+            high: h,
+            low: l,
+            close: c,
+        };
+        for idx in [0, 1] {
+            x_store::commit_batch(
+                &mut self.x_conn,
+                &Batch {
+                    request_id: format!("b{idx}"),
+                    known_frontier_cut: format!("frontier{idx}"),
+                    bar: mk_bar(idx, 16, 17, 15, 16),
+                    close_changes: vec![],
+                    capacity: Capacity::None,
+                    scenario_busts: vec![],
+                },
+            )
+            .unwrap();
+        }
+        let mut b2 = Batch {
+            request_id: "b2".into(),
+            known_frontier_cut: "frontier2".into(),
+            bar: mk_bar(2, 16, 17, 15, 16),
+            close_changes: vec![Change::Submit {
+                order: order.clone(),
+            }],
+            capacity: Capacity::None,
+            scenario_busts: vec![],
+        };
+        b2.normalize();
+        if let Some(profile) = self.x_profile.clone() {
+            // 向 E 走真实 QueryReleasedExact 取得权威放行应答（本条 release_receipt_id 恒为 null）。
+            let cmd_val = rel["record"]["command"].clone();
+            let cmd_hash = rel["record"]["command_hash"].as_str().unwrap().to_owned();
+            let qrel = self.send_as(
+                E,
+                ("x-sim", "epoch1", "X", "1"),
+                "query",
+                json!({
+                    "op": "QueryReleasedExact",
+                    "protocol": x_runtime::AUTHORITY_WIRE,
+                    "session_id": profile.session_id,
+                    "session_generation": profile.session_generation,
+                    "authority_id": "E",
+                    "authority_epoch": "1",
+                    "command_id": order.command_id,
+                    "command_hash": cmd_hash,
+                    "command": cmd_val,
+                    "release_receipt_id": null
+                }),
+            );
+            let rel_reply = if qrel.get("kind") == Some(&json!("Error")) {
+                // 异会话/异化身负控中，X 自己的 DB 持该异会话自洽的 release_evidence
+                json!({
+                    "protocol": x_runtime::AUTHORITY_WIRE,
+                    "session_id": profile.session_id,
+                    "session_generation": profile.session_generation,
+                    "authority_id": "E",
+                    "authority_epoch": "1",
+                    "command_id": order.command_id,
+                    "command_hash": book::hash(&json!({
+                        "command_id": cmd_val["command_id"],
+                        "logical_order_family": cmd_val["logical_order_family"],
+                        "first_quantity": cmd_val["first_quantity"],
+                        "allocation_id": cmd_val["allocation_id"],
+                        "session_id": profile.session_id,
+                        "session_generation": profile.session_generation,
+                        "x_id": cmd_val["x_id"],
+                        "x_epoch": cmd_val["x_epoch"],
+                        "symbol": cmd_val["symbol"],
+                        "projection_kind": cmd_val["projection_kind"],
+                        "model_ref": cmd_val["model_ref"],
+                        "change": cmd_val["change"],
+                        "plan_hash": cmd_val["plan_hash"],
+                        "certificate_hash": cmd_val["certificate_hash"],
+                        "certificate": cmd_val["certificate"],
+                    })),
+                    "command": {
+                        "command_id": cmd_val["command_id"],
+                        "logical_order_family": cmd_val["logical_order_family"],
+                        "first_quantity": cmd_val["first_quantity"],
+                        "allocation_id": cmd_val["allocation_id"],
+                        "session_id": profile.session_id,
+                        "session_generation": profile.session_generation,
+                        "x_id": cmd_val["x_id"],
+                        "x_epoch": cmd_val["x_epoch"],
+                        "symbol": cmd_val["symbol"],
+                        "projection_kind": cmd_val["projection_kind"],
+                        "model_ref": cmd_val["model_ref"],
+                        "change": cmd_val["change"],
+                        "plan_hash": cmd_val["plan_hash"],
+                        "certificate_hash": cmd_val["certificate_hash"],
+                        "certificate": cmd_val["certificate"],
+                    },
+                    "state": "ReleasedExact",
+                    "receipt_id": rel["receipt_key"],
+                    "release_receipt_id": null,
+                    "commit_ns": "2"
+                })
+            } else {
+                assert_eq!(qrel["state"], "ReleasedExact", "{qrel}");
+                assert!(qrel["release_receipt_id"].is_null(), "{qrel}");
+                assert_eq!(qrel["receipt_id"], rel["receipt_key"], "{qrel}");
+                qrel
+            };
+            let rel_cmd = rel_reply["command"].clone();
+            let rel_hash = rel_reply["command_hash"].as_str().unwrap().to_owned();
+            let rel_rid = rel_reply["receipt_id"].as_str().unwrap().to_owned();
+            let s_exec_reply = json!({
+                "protocol": x_runtime::AUTHORITY_WIRE,
+                "session_id": profile.session_id,
+                "session_generation": profile.session_generation,
+                "authority_id": "S",
+                "authority_epoch": "1",
+                "command_id": order.command_id,
+                "command_hash": rel_hash,
+                "command": rel_cmd,
+                "state": "ExecuteCommitted",
+                "receipt_id": order.eligibility_ref,
+                "release_receipt_id": rel_rid,
+                "commit_ns": "2"
+            });
+            let exec_ev = json!({"reply": s_exec_reply, "claimed_ns": "2"});
+            let accept_clock = json!({"received_ns": "2", "first_known_ns": "2", "commit_ns": "2"});
+            let b2_raw = canonical_json(&serde_json::to_value(&b2).unwrap());
+            self.x_conn
+                .execute(
+                    "INSERT INTO x_exact_commands(id,command,release_receipt,state,attempt_batch,accept_clock,release_evidence,execute_evidence) VALUES(?1,?2,?3,'Observed',?4,?5,?6,?7)",
+                    rusqlite::params![
+                        order.command_id,
+                        canonical_json(&rel_cmd),
+                        rel_rid,
+                        b2_raw,
+                        canonical_json(&accept_clock),
+                        canonical_json(&rel_reply),
+                        canonical_json(&exec_ev),
+                    ],
+                )
+                .unwrap();
+        }
+        let b2_res = x_store::commit_batch(&mut self.x_conn, &b2).unwrap();
+        assert_eq!(b2_res["originals"].as_array().unwrap().len(), 0, "{b2_res}");
+        let b3 = x_store::commit_batch(
+            &mut self.x_conn,
+            &Batch {
+                request_id: "b3".into(),
+                known_frontier_cut: "frontier3".into(),
+                bar: mk_bar(3, 14, 15, 13, 14),
+                close_changes: vec![],
+                capacity: Capacity::None,
+                scenario_busts: vec![],
+            },
+        )
+        .unwrap();
+        let originals = b3["originals"].as_array().unwrap();
+        assert_eq!(originals.len(), 2, "{b3}");
+        if self.x_profile.is_some() {
+            // 确认该 X/3 库通过正式冷审（全批重演 + accept + execute_evidence + claimed_ns=2）
+            let summary = x_runtime::inspect_history(&self.x_db_path).unwrap();
+            assert_eq!(summary["profile_revision"], EXACT_PROFILE_REVISION);
+        }
+        let b2_sha = self.batch_receipt_sha256("b2");
+        let b3_sha = self.batch_receipt_sha256("b3");
+        (originals[0].clone(), originals[1].clone(), b3_sha, b2_sha)
+    }
+
+    /// 裸 store 推进（仅用于负控：无 X/3 命令接纳与占有链）
+    fn run_bare_x_to_bar3(&mut self, order: Order) -> (Value, Value, String) {
         let mk_bar = |idx: i64, o: i64, h: i64, l: i64, c: i64| Bar {
             index: idx,
             open: o,
@@ -735,7 +1037,8 @@ impl Env {
         .unwrap();
         let originals = b3["originals"].as_array().unwrap();
         assert_eq!(originals.len(), 2, "{b3}");
-        (originals[0].clone(), originals[1].clone())
+        let b3_sha = self.batch_receipt_sha256("b3");
+        (originals[0].clone(), originals[1].clone(), b3_sha)
     }
 }
 
@@ -757,7 +1060,7 @@ fn alpha_order() -> Order {
 fn tb04f_single_owner_fresh_db_fill_and_fee_resolve_apply_recover_and_negatives() {
     let mut env = Env::build("tb04f-single-owner-ok", "family-alpha");
     let (rel, grant_alpha) = env.setup_released_alpha();
-    let (fill_doc, fee_doc) = env.run_x_to_bar3(alpha_order());
+    let (fill_doc, fee_doc, b3_sha, b2_sha) = env.run_x3_to_bar3(&rel, alpha_order());
 
     // 确认 X 两件原件同游标 3，fill 2*14=28 带 fee=1，独立 fee=1 前件为该 fill
     assert_eq!(fill_doc["event"]["source"]["source_cursor"], "3");
@@ -795,9 +1098,50 @@ fn tb04f_single_owner_fresh_db_fill_and_fee_resolve_apply_recover_and_negatives(
     );
     assert_eq!(store::latest(&env.dbs[ALPHA]).unwrap(), b_before);
 
-    // 负控 2：fill 尚未 Resolve 时先 Resolve fee 必须被拒（AwaitingDependency）
+    // 负控 1b：缺 x_batch 或指定无经济原件的占有批 b2 或错摘要均被拒，保 Pending
     let e_before = store::latest(&env.dbs[E]).unwrap();
-    let early_fee_res = env.resolve("resolve-fee-early", "ev-fee-early", &[&fee_rec], "3");
+    let no_batch = env.resolve_with_batch("resolve-bad", "ev-no-batch", &[&fill_rec], "3", None);
+    assert_eq!(no_batch["kind"], "Error", "{no_batch}");
+    assert!(
+        no_batch["error"].as_str().unwrap().contains("x_batch"),
+        "{no_batch}"
+    );
+    let wrong_b2 = env.resolve("resolve-bad", "ev-b2", &[&fill_rec], "3", "b2", &b2_sha);
+    assert_eq!(wrong_b2["kind"], "Error", "{wrong_b2}");
+    assert!(
+        wrong_b2["error"]
+            .as_str()
+            .unwrap()
+            .contains("不包含该模拟原件"),
+        "{wrong_b2}"
+    );
+    let bad_digest = env.resolve(
+        "resolve-bad",
+        "ev-bad-sha",
+        &[&fill_rec],
+        "3",
+        "b3",
+        &"0".repeat(64),
+    );
+    assert_eq!(bad_digest["kind"], "Error", "{bad_digest}");
+    assert!(
+        bad_digest["error"]
+            .as_str()
+            .unwrap()
+            .starts_with("IdentityConflict"),
+        "{bad_digest}"
+    );
+    assert_eq!(store::latest(&env.dbs[E]).unwrap(), e_before);
+
+    // 负控 2：fill 尚未 Resolve 时先 Resolve fee 必须被拒（AwaitingDependency）
+    let early_fee_res = env.resolve(
+        "resolve-fee-early",
+        "ev-fee-early",
+        &[&fee_rec],
+        "3",
+        "b3",
+        &b3_sha,
+    );
     assert_eq!(early_fee_res["kind"], "Error", "{early_fee_res}");
     assert!(
         early_fee_res["error"]
@@ -808,17 +1152,24 @@ fn tb04f_single_owner_fresh_db_fill_and_fee_resolve_apply_recover_and_negatives(
     );
     assert_eq!(store::latest(&env.dbs[E]).unwrap(), e_before);
 
-    // 2. E.ResolveEvidence：先 fill 后 fee（同游标 3 不吞费！）
-    let res_fill = env.resolve("resolve-fill", "ev-fill", &[&fill_rec], "3");
+    // 2. E.ResolveEvidence：先 fill 后 fee（占有批 b2 ≠ 结果批 b3；同游标 3 不吞费！）
+    let res_fill = env.resolve("resolve-fill", "ev-fill", &[&fill_rec], "3", "b3", &b3_sha);
     assert_eq!(res_fill["kind"], "Resolved", "{res_fill}");
     assert_eq!(
-        env.resolve("retry-resolve-fill", "ev-fill", &[&fill_rec], "3"),
+        env.resolve(
+            "retry-resolve-fill",
+            "ev-fill",
+            &[&fill_rec],
+            "3",
+            "b3",
+            &b3_sha
+        ),
         res_fill
     );
-    let res_fee = env.resolve("resolve-fee", "ev-fee", &[&fee_rec], "3");
+    let res_fee = env.resolve("resolve-fee", "ev-fee", &[&fee_rec], "3", "b3", &b3_sha);
     assert_eq!(res_fee["kind"], "Resolved", "{res_fee}");
 
-    // 核验 E 分配行：完整 FIN plan hash != command.change hash；allocation_id 为 E 派生，非 alloc-alpha / allocation-alpha
+    // 核验 E 分配行及自持 X/3 执行见证（占有批 b2、结果批 b3、E 原放行回执键、release_receipt_id=null）
     let e_img = env.image(E);
     assert!(e_img["pending"].as_array().unwrap().is_empty());
     let rows = e_img["fill_allocations"].as_array().unwrap();
@@ -833,6 +1184,14 @@ fn tb04f_single_owner_fresh_db_fill_and_fee_resolve_apply_recover_and_negatives(
         rel["record"]["command"]["plan_hash"]
     );
     assert_ne!(rows[0]["plan_hash"], rows[0]["command_plan_hash"]);
+    let w0 = &rows[0]["x_execution_witness"];
+    assert_eq!(w0["attempt_batch_id"], "b2");
+    assert_eq!(w0["attempt_batch_bar_index"], "2");
+    assert_eq!(w0["originals_batch_id"], "b3");
+    assert_eq!(w0["originals_batch_bar_index"], "3");
+    assert_eq!(w0["e_release_receipt_key"], rel["receipt_key"]);
+    assert!(w0["x_release_evidence"]["release_receipt_id"].is_null());
+    assert_eq!(w0["x_command_state"], "Observed");
     let fill_alloc = &rows[0]["allocations"][0];
     let fill_alloc_id = fill_alloc["allocation_id"].as_str().unwrap().to_owned();
     assert!(fill_alloc_id.starts_with("sim-command:"), "{fill_alloc}");
@@ -973,12 +1332,18 @@ fn tb04f_single_owner_fresh_db_fill_and_fee_resolve_apply_recover_and_negatives(
     assert_eq!(env.image(ALPHA)["book"], book_after);
     assert_eq!(env.image(ALPHA)["applied"].as_array().unwrap().len(), 3);
 
-    // 5. 关库冷恢复 + 离线 audit（关闭全部连接并逐域 recover + audit）
+    // 5. 关库冷恢复 + 彻底离线重放（先删除 x.db 验证 E/B 冷恢复不依赖活 X，再删除 e.db 验证 B 离线重放不依赖活 E/X！）
     let snap_before: Vec<Value> = (0..3).map(|i| env.image(i)).collect();
     for i in 0..3 {
         store::audit(&env.dbs[i], &env.configs[i]).unwrap();
     }
     env.dbs.clear();
+    // 删除 x.db，证明 E 与 B 冷恢复完全离线、不依赖活 X！
+    drop(std::mem::replace(
+        &mut env.x_conn,
+        rusqlite::Connection::open_in_memory().unwrap(),
+    ));
+    std::fs::remove_file(&env.x_db_path).unwrap();
     for i in 0..3 {
         let rec = store::recover(&env.configs[i]).unwrap();
         assert_eq!(rec["kind"], "Recovered", "{rec}");
@@ -989,40 +1354,167 @@ fn tb04f_single_owner_fresh_db_fill_and_fee_resolve_apply_recover_and_negatives(
     }
     let snap_after: Vec<Value> = (0..3).map(|i| env.image(i)).collect();
     assert_eq!(snap_before, snap_after, "冷恢复后三域业务镜像逐值相等");
+    // 进一步删除 e.db（及 WAL/SHM），证明 B:alpha 完整离线重放既不依赖活 X 也不依赖活 E！
+    env.dbs.clear();
+    for suffix in ["", "-wal", "-shm"] {
+        let p = env.dir.join(format!("e.db{suffix}"));
+        if p.exists() {
+            std::fs::remove_file(&p).unwrap();
+        }
+    }
+    let rec_alpha = store::recover(&env.configs[ALPHA]).unwrap();
+    assert_eq!(rec_alpha["kind"], "Recovered", "{rec_alpha}");
+    let (alpha_db, _) = store::open(&env.configs[ALPHA].db, false).unwrap();
+    store::audit(&alpha_db, &env.configs[ALPHA]).unwrap();
+    assert_eq!(store::latest(&alpha_db).unwrap().3, snap_before[ALPHA]);
 }
 
 #[test]
-fn tb04f_single_owner_batch_resolve_and_wrong_command_over_qty_family_mismatch_negatives() {
-    // 子例 A：同一批 ResolveEvidence([fill, fee]) 按因果序一次通过，且验证超出 grant 数量的模拟成交被拒
-    let mut env = Env::build("tb04f-batch-and-bounds", "family-alpha");
-    let _ = env.setup_released_alpha();
-    // 构造一个同 command_id 但 quantity=3（超出 grant.quantity=2）的订单在 X 中撮合
-    let mut over_order = alpha_order();
-    over_order.quantity = 3;
-    let (over_fill, _over_fee) = env.run_x_to_bar3(over_order);
-    let rec = env.x_capture("capture-fill", &over_fill, "tok-over");
-    assert_eq!(rec["kind"], "Recorded", "{rec}");
-    let e_before = store::latest(&env.dbs[E]).unwrap();
-    let rej = env.resolve("resolve-bad", "ev-over", &[&rec], "3");
+fn tb04f_bare_store_and_cross_session_x_keep_pending_and_block_b_applied() {
+    // 反例 1（REVIEW #1）：裸撮合 store（无 X/3 x_meta / authority_profile / x_exact_commands）
+    // 首件 CaptureExternal 仍按原合同记录事实为 Pending，但 ResolveEvidence 必须被拒、保 Pending、B 不可 Applied！
+    let mut bare = Env::build_bare_x("tb04f-bare-store-neg", "family-alpha");
+    let _ = bare.setup_released_alpha();
+    let (fill_doc, fee_doc, b3_sha) = bare.run_bare_x_to_bar3(alpha_order());
+    let fill_rec = bare.x_capture("capture-fill", &fill_doc, "tok-fill");
+    assert_eq!(fill_rec["kind"], "Recorded", "{fill_rec}");
+    let fee_rec = bare.x_capture("capture-fee", &fee_doc, "tok-fee");
+    assert_eq!(fee_rec["kind"], "Recorded", "{fee_rec}");
+    assert_eq!(bare.image(E)["pending"].as_array().unwrap().len(), 2);
+
+    let e_before = store::latest(&bare.dbs[E]).unwrap();
+    let rej = bare.resolve("resolve-fill", "ev-bare", &[&fill_rec], "3", "b3", &b3_sha);
     assert_eq!(rej["kind"], "Error", "{rej}");
     assert!(
         rej["error"]
             .as_str()
             .unwrap()
-            .contains("超出原 grant 授权数量"),
-        "{rej}"
+            .starts_with("MissingDependency"),
+        "bare store resolve must fail MissingDependency: {rej}"
     );
+    assert_eq!(store::latest(&bare.dbs[E]).unwrap(), e_before);
+    assert_eq!(bare.image(E)["pending"].as_array().unwrap().len(), 2);
+
+    let b_before = store::latest(&bare.dbs[ALPHA]).unwrap();
+    let app = bare.biz_named(
+        ALPHA,
+        "apply-before-resolve",
+        json!({"op":"ApplyAllocation","fact_key":fill_rec["fact_key"],"allocation_id":"alloc-alpha","expected_fact_hash":fill_rec["fact_hash"]}),
+    );
+    assert_eq!(app["kind"], "Error", "{app}");
+    assert!(
+        app["error"]
+            .as_str()
+            .unwrap()
+            .starts_with("AwaitingDependency"),
+        "{app}"
+    );
+    assert_eq!(store::latest(&bare.dbs[ALPHA]).unwrap(), b_before);
+
+    // 反例 2：异会话 X/3 库（虽有完整 X/3 表和相同 command_id，但 session_id 不同）必须被拒、保 Pending！
+    let mut other_sess = Env::build_with_x(
+        "tb04f-cross-session-neg",
+        "family-alpha",
+        false,
+        "other-session",
+        "1",
+    );
+    let (rel_os, _) = other_sess.setup_released_alpha();
+    let (os_fill, _, os_b3_sha, _) = other_sess.run_x3_to_bar3(&rel_os, alpha_order());
+    let os_rec = other_sess.x_capture("capture-fill", &os_fill, "tok-fill");
+    assert_eq!(os_rec["kind"], "Recorded", "{os_rec}");
+    let os_rej = other_sess.resolve(
+        "resolve-fill",
+        "ev-other-sess",
+        &[&os_rec],
+        "3",
+        "b3",
+        &os_b3_sha,
+    );
+    assert_eq!(os_rej["kind"], "Error", "{os_rej}");
+    assert!(
+        os_rej["error"].as_str().unwrap().contains("会话或化身不同"),
+        "cross-session X must reject: {os_rej}"
+    );
+    assert_eq!(other_sess.image(E)["pending"].as_array().unwrap().len(), 1);
+
+    // 反例 3：同会话但 X/3 中该命令绑定了另一笔 E 放行回执键，必须被拒、保 Pending！
+    let mut wrong_rel = Env::build("tb04f-wrong-release-neg", "family-alpha");
+    let (rel_wr, _) = wrong_rel.setup_released_alpha();
+    let (wr_fill, _, wr_b3_sha, _) = wrong_rel.run_x3_to_bar3(&rel_wr, alpha_order());
+    // 篡改 X 中该命令的 release_receipt 与 release_evidence.receipt_id 为另一放行回执键
+    let fake_rid = "tb03b-finance/6:ReleaseExact:0000000000000000000000000000000000000000000000000000000000000000";
+    let (rel_ev_raw, exec_ev_raw): (String, String) = wrong_rel
+        .x_conn
+        .query_row(
+            "SELECT release_evidence, execute_evidence FROM x_exact_commands WHERE id='cmd-alpha'",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .unwrap();
+    let mut rel_ev: Value = serde_json::from_str(&rel_ev_raw).unwrap();
+    let mut exec_ev: Value = serde_json::from_str(&exec_ev_raw).unwrap();
+    rel_ev["receipt_id"] = json!(fake_rid);
+    exec_ev["reply"]["release_receipt_id"] = json!(fake_rid);
+    wrong_rel
+        .x_conn
+        .execute(
+            "UPDATE x_exact_commands SET release_receipt=?1, release_evidence=?2, execute_evidence=?3 WHERE id='cmd-alpha'",
+            rusqlite::params![fake_rid, canonical_json(&rel_ev), canonical_json(&exec_ev)],
+        )
+        .unwrap();
+    let wr_rec = wrong_rel.x_capture("capture-fill", &wr_fill, "tok-fill");
+    assert_eq!(wr_rec["kind"], "Recorded", "{wr_rec}");
+    let wr_rej = wrong_rel.resolve(
+        "resolve-fill",
+        "ev-wrong-rel",
+        &[&wr_rec],
+        "3",
+        "b3",
+        &wr_b3_sha,
+    );
+    assert_eq!(wr_rej["kind"], "Error", "{wr_rej}");
+    assert!(
+        wr_rej["error"]
+            .as_str()
+            .unwrap()
+            .starts_with("IdentityConflict"),
+        "wrong E release receipt must reject: {wr_rej}"
+    );
+    assert_eq!(wrong_rel.image(E)["pending"].as_array().unwrap().len(), 1);
+}
+
+#[test]
+fn tb04f_single_owner_batch_resolve_and_wrong_command_over_qty_family_mismatch_negatives() {
+    // 子例 A：裸 store 构造超出 grant 数量的模拟成交被拒（并由 X/3 因果链 + grant 数量上限双重保护）
+    let mut env = Env::build_bare_x("tb04f-batch-and-bounds", "family-alpha");
+    let _ = env.setup_released_alpha();
+    let mut over_order = alpha_order();
+    over_order.quantity = 3;
+    let (over_fill, _over_fee, over_b3_sha) = env.run_bare_x_to_bar3(over_order);
+    let rec = env.x_capture("capture-fill", &over_fill, "tok-over");
+    assert_eq!(rec["kind"], "Recorded", "{rec}");
+    let e_before = store::latest(&env.dbs[E]).unwrap();
+    let rej = env.resolve("resolve-bad", "ev-over", &[&rec], "3", "b3", &over_b3_sha);
+    assert_eq!(rej["kind"], "Error", "{rej}");
     assert_eq!(store::latest(&env.dbs[E]).unwrap(), e_before);
 
     // 子例 B：未知 command_id（无 ReleasedExact 记录）必须保留 Pending 并返回原 MissingDependency
-    let mut env_cmd = Env::build("tb04f-unknown-cmd", "family-alpha");
+    let mut env_cmd = Env::build_bare_x("tb04f-unknown-cmd", "family-alpha");
     let _ = env_cmd.setup_released_alpha();
     let mut foreign = alpha_order();
     foreign.command_id = "cmd-not-released".into();
-    let (foreign_fill, _) = env_cmd.run_x_to_bar3(foreign);
+    let (foreign_fill, _, foreign_b3_sha) = env_cmd.run_bare_x_to_bar3(foreign);
     let frec = env_cmd.x_capture("capture-fill", &foreign_fill, "tok-foreign");
     assert_eq!(frec["kind"], "Recorded", "{frec}");
-    let frej = env_cmd.resolve("resolve-bad", "ev-foreign", &[&frec], "3");
+    let frej = env_cmd.resolve(
+        "resolve-bad",
+        "ev-foreign",
+        &[&frec],
+        "3",
+        "b3",
+        &foreign_b3_sha,
+    );
     assert_eq!(frej["kind"], "Error", "{frej}");
     assert!(
         frej["error"]
@@ -1032,14 +1524,21 @@ fn tb04f_single_owner_batch_resolve_and_wrong_command_over_qty_family_mismatch_n
         "{frej}"
     );
 
-    // 子例 C：B:alpha 开账 family_id 与命令 logical_order_family 不同 → Unmatched(family_mismatch)，
+    // 子例 C：真实 X/3 同批 ResolveEvidence([fill, fee]) + B:alpha 开账 family_id 与命令不符 → Unmatched(family_mismatch)，
     // 且后续费用因前件未 Applied 被 AwaitingDependency 挡住
     let mut env_fam = Env::build("tb04f-family-mismatch", "family-other");
-    let _ = env_fam.setup_released_alpha();
-    let (fill_doc, fee_doc) = env_fam.run_x_to_bar3(alpha_order());
+    let (rel_fam, _) = env_fam.setup_released_alpha();
+    let (fill_doc, fee_doc, fam_b3_sha, _) = env_fam.run_x3_to_bar3(&rel_fam, alpha_order());
     let fill_rec = env_fam.x_capture("capture-fill", &fill_doc, "tok-fill");
     let fee_rec = env_fam.x_capture("capture-fee", &fee_doc, "tok-fee");
-    let batch = env_fam.resolve("resolve-batch", "ev-batch", &[&fill_rec, &fee_rec], "3");
+    let batch = env_fam.resolve(
+        "resolve-batch",
+        "ev-batch",
+        &[&fill_rec, &fee_rec],
+        "3",
+        "b3",
+        &fam_b3_sha,
+    );
     assert_eq!(batch["kind"], "Resolved", "{batch}");
     let rows = env_fam.image(E)["fill_allocations"]
         .as_array()
@@ -1089,7 +1588,7 @@ fn tb04f_single_owner_refuses_fin5_without_version_relaxation() {
         rel["record"]["command"]["model_ref"]["content_hash"],
         expected_hash
     );
-    let (fill_doc, _) = env.run_x_to_bar3(alpha_order());
+    let (fill_doc, _, b3_sha, _) = env.run_x3_to_bar3(&rel, alpha_order());
     let fill_rec = env.x_capture("capture-fill", &fill_doc, "tok-fill");
     assert_eq!(fill_rec["kind"], "Recorded", "{fill_rec}");
 
@@ -1117,8 +1616,18 @@ fn tb04f_single_owner_refuses_fin5_without_version_relaxation() {
 
     let mut fin5_img = e_img.clone();
     fin5_img["finance"]["schema_revision"] = json!("tb03b-finance/5");
-    let err_resolve =
-        super::tb03c_sim_resolve::resolve(&fin5_cfg, &mut fin5_img, &fact, "ev-fin5").unwrap_err();
+    let dummy_payload = json!({
+        "x_batch": {"x_id": "X", "x_epoch": "1", "batch_id": "b3", "batch_receipt_sha256": b3_sha}
+    });
+    let err_resolve = super::tb03c_sim_resolve::resolve(
+        &fin5_cfg,
+        &mut fin5_img,
+        &fact,
+        "ev-fin5",
+        &dummy_payload,
+        None,
+    )
+    .unwrap_err();
     assert!(
         err_resolve.starts_with("VersionUnsupported"),
         "expected VersionUnsupported from resolve, got: {err_resolve}"

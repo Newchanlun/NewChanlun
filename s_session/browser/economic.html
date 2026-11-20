@@ -13,6 +13,8 @@
 <p class="muted">受控历史事实 · 只读。各重独立保存；本金、阶段或开局依据缺失时会明确显示。</p>
 <div class="controls">
 <button id="current">读取当前账簿</button><button id="watch">读取后续变化</button>
+<button id="projection-current" disabled>读取固定切面投影</button>
+<label>视图模式 <select id="view-mode"><option value="snapshot">完整快照（支持 Watch）</option><option value="projection" disabled>只读投影（同切面取证，无 Watch）</option></select></label>
 <label>已保存切面 <select id="history"><option value="">请选择</option></select></label>
 <button id="revisit">回看所选切面</button>
 <label><span id="time-label">当时可知时间（纳秒）</span> <input id="known-at" type="text" inputmode="numeric" size="20"></label>
@@ -20,6 +22,7 @@
 <label>指定切面向量 <input id="cuts-json" type="text" size="32" placeholder='{"E":...}'></label>
 <button id="load-cuts">按切面向量回看</button>
 </div>
+<div id="capabilities" class="muted"></div>
 <div id="status" class="status" role="status"></div><div id="cuts"></div>
 <main id="books"></main><section id="external"></section>
 <script src="/tb01c-client.js"></script><script src="/tb03a-client.js"></script>
@@ -114,7 +117,7 @@ function render(state) {
   books.replaceChildren();external.replaceChildren();
   cuts.replaceChildren(el("p","会话 "+state.session_id+" · 化身 "+state.session_generation+(projMode?" · 协议 economic-read-projection/1（投影完整性单列，非全原像）":""),"muted"));
   for(const [domain,view] of Object.entries(state.domains)){
-    const cutText=view.status==="Available"?("提交 "+view.cut.commit_seq+" · 根 "+view.cut.root_hash+(projMode?(" · 权威原像 "+view.authoritative_image_bytes+" B ("+view.authoritative_image_hash.slice(0,12)+"…) · 投影 "+view.projection_bytes+" B ("+view.projection_hash.slice(0,12)+"…) · 省略证明镜像 "+view.omitted_peer_images.length+" 处"):"")):"不可用";
+    const cutText=view.status==="Available"?(projMode?("提交 "+view.cut.commit_seq+" · 根 "+view.cut.root_hash+" · 权威原像 "+view.authoritative_image_bytes+" B ("+view.authoritative_image_hash.slice(0,12)+"…) · 投影 "+view.projection_bytes+" B ("+view.projection_hash.slice(0,12)+"…) · 省略证明镜像 "+view.omitted_peer_images.length+" 处"):("提交 "+view.cut.commit_seq+" · "+view.cut.root_hash)):"不可用";
     cuts.append(el("div",domain+" · "+cutText));
     const card=el("article");card.dataset.domain=domain;
     if(view.status!=="Available"){card.append(el("h2",domain),el("div",view.error,"error"));books.append(card);continue;}
@@ -189,24 +192,59 @@ function render(state) {
   }
 }
 let busy=false;
+function syncControls(){
+  const d=client.discovery, state=client.state;
+  const hasProj=Boolean(d && d.read_projection);
+  const projBtn=document.getElementById("projection-current");
+  const modeSel=document.getElementById("view-mode");
+  const projOpt=modeSel.querySelector('option[value="projection"]');
+  const watchBtn=document.getElementById("watch");
+  const cap=document.getElementById("capabilities");
+  if(d && d.clock_kind==="logical-bar/1")document.getElementById("time-label").textContent="当时可知 bar";
+  projBtn.disabled=busy || !hasProj;
+  projOpt.disabled=!hasProj;
+  if(!hasProj && modeSel.value==="projection")modeSel.value="snapshot";
+  const canWatch=!busy && state!==null && state.kind==="EconomicSnapshot" && state.completeness==="CompleteVector";
+  watchBtn.disabled=!canWatch;
+  if(isProjectionState(state)){
+    watchBtn.title="投影视图不支持旧 Watch，请点击「读取当前账簿」切回完整快照后再读取后续变化";
+    const kinds=(d && d.read_projection ? d.read_projection.original_kinds : []).join(" / ")||"无";
+    cap.textContent="当前模式：只读投影（economic-read-projection/1）· 可用动作：固定切面投影、按时间/切面回看投影、同切面按需取证（"+kinds+"）· 不支持 Watch（完整快照后可用）";
+  }else{
+    watchBtn.title=canWatch?"基于已核完整快照读取后续变化":"需先取得完整快照 CompleteVector 才可读取后续变化";
+    cap.textContent="当前模式：完整快照（EconomicSnapshot）· 可用动作：读取当前账簿、读取后续变化（Watch）、按时间/切面回看、查询原件"+(hasProj?" · 已探明支持独立只读投影（点击「读取固定切面投影」或切换视图模式使用）":" · 当前 owner 未提供只读投影");
+  }
+}
 async function run(action){
   if(busy)return;busy=true;
   const buttons=[...document.querySelectorAll(".controls button")],status=document.getElementById("status");
   for(const button of buttons)button.disabled=true;
   status.textContent="正在读取并核对账簿，请稍候…";status.className="status";status.setAttribute("aria-busy","true");
   try{await action();}catch(error){status.textContent="读取未通过核对；保留上次已核切面。"+error.message;status.className="status error";}
-  finally{busy=false;for(const button of buttons)button.disabled=false;status.removeAttribute("aria-busy");}
+  finally{busy=false;for(const button of buttons)button.disabled=false;status.removeAttribute("aria-busy");syncControls();}
 }
-async function loadCurrent(opts={}){
+async function loadBySelectedMode(opts={}){
   const d=await client.discover();
-  if(d.read_projection)return client.loadProjection(opts);
+  syncControls();
+  const mode=document.getElementById("view-mode").value;
+  if(mode==="projection"){
+    if(!d.read_projection)throw new Error("当前 owner 未探明支持 economic-read-projection/1");
+    return client.loadProjection(opts);
+  }
   return client.load(opts);
 }
-document.getElementById("current").onclick=()=>run(()=>loadCurrent());
+document.getElementById("current").onclick=()=>run(async()=>{document.getElementById("view-mode").value="snapshot";await client.load();});
+document.getElementById("projection-current").onclick=()=>run(async()=>{document.getElementById("view-mode").value="projection";await client.loadProjection();});
 document.getElementById("watch").onclick=()=>run(()=>client.watch());
-document.getElementById("revisit").onclick=()=>run(()=>{const state=saved.get(document.getElementById("history").value);if(!state)throw new Error("请先选一个切面");return loadCurrent({cuts:Object.fromEntries(Object.entries(state.domains).map(([d,v])=>[d,v.cut]))});});
-document.getElementById("as-known").onclick=()=>run(()=>loadCurrent({asKnown:document.getElementById("known-at").value}));
-document.getElementById("load-cuts").onclick=()=>run(()=>{const raw=document.getElementById("cuts-json").value.trim();if(!raw)throw new Error("请输入切面向量 JSON");return loadCurrent({cuts:TB03A.parse(raw)});});
-run(()=>loadCurrent());
+document.getElementById("revisit").onclick=()=>run(()=>{
+  const state=saved.get(document.getElementById("history").value);
+  if(!state)throw new Error("请先选一个切面");
+  const cuts=Object.fromEntries(Object.entries(state.domains).map(([d,v])=>[d,v.cut]));
+  if(isProjectionState(state)){document.getElementById("view-mode").value="projection";return client.loadProjection({cuts});}
+  document.getElementById("view-mode").value="snapshot";return client.load({cuts});
+});
+document.getElementById("as-known").onclick=()=>run(()=>loadBySelectedMode({asKnown:document.getElementById("known-at").value}));
+document.getElementById("load-cuts").onclick=()=>run(()=>{const raw=document.getElementById("cuts-json").value.trim();if(!raw)throw new Error("请输入切面向量 JSON");return loadBySelectedMode({cuts:TB03A.parse(raw)});});
+run(async()=>{await client.discover();syncControls();await client.load();});
 </script>
 </body></html>

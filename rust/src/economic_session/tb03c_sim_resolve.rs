@@ -28,9 +28,361 @@ use serde_json::{json, Value};
 pub(super) const SOURCE_FILL: &str = "history_sim_fill";
 pub(super) const SOURCE_FEE: &str = "history_sim_fee";
 const REQUIRED_FINANCE_REV: &str = "tb03b-finance/6";
+const REQUIRED_X_PROFILE_REV: &str = crate::history_simulation::EXACT_PROFILE_REVISION;
 
 pub(super) fn is_history_sim(event: &Value) -> bool {
     event["event"] == intake::EVENT
+}
+
+pub(super) fn parse_x_batch<'a>(
+    payload: &'a Value,
+) -> Result<(&'a str, i64, &'a str, &'a str), String> {
+    let xb = payload
+        .get("x_batch")
+        .filter(|v| v.is_object())
+        .ok_or("MissingDependency：模拟外部事实 Resolve 必须指定同会话 X/3 已提交原批（x_batch），Pending 保留")?;
+    super::voice::exact(xb, &["x_id", "x_epoch", "batch_id", "batch_receipt_sha256"])?;
+    let x_id = required(xb, "x_id")?;
+    let x_epoch = positive(required(xb, "x_epoch")?, "x_batch.x_epoch")?;
+    let batch_id = required(xb, "batch_id")?;
+    let batch_digest = required(xb, "batch_receipt_sha256")?;
+    digest(batch_digest)?;
+    Ok((x_id, x_epoch, batch_id, batch_digest))
+}
+
+fn sim_fact_command_id(fact: &Value) -> Result<(String, Value), String> {
+    let raw_utf8 = required(fact, "raw_utf8")?;
+    let doc = strict_json(raw_utf8.as_bytes())?;
+    if doc["format"] != RAW_FORMAT {
+        return Err("SchemaUnsupported：非模拟原件格式".into());
+    }
+    let raw = &doc["event"];
+    let kind = required(raw, "kind")?;
+    if kind == "bust" {
+        return Err("Unsupported：模拟 bust 更正尚缺单一明确原责任域更正合同，Pending 保留".into());
+    }
+    if kind != "fill" && kind != "fee" {
+        return Err("SchemaUnsupported：未知模拟原件种类".into());
+    }
+    let command_id = if kind == "fill" {
+        required(&raw["fill"], "command_id")?
+    } else {
+        required(raw, "command_id")?
+    };
+    Ok((command_id.to_owned(), doc))
+}
+
+/// 实时写路径（`service.rs::resolve_evidence`）使用：在 E 事务内核对真实持久 `ReleasedExactReceipt`，
+/// 并通过 `intake::verify_execution_causal_chain` 核对同会话同化身 X/3 已占用命令与具名结果批，
+/// 生成供 E/B 离线重放的自持见证（map: `fact_key -> witness`）。
+pub(super) fn verify_live_x_witnesses(
+    e_tx: &rusqlite::Connection,
+    config: &Config,
+    previous: &Value,
+    payload: &Value,
+    order: &[String],
+) -> Result<Option<Value>, String> {
+    let recorded = previous["recorded"]
+        .as_array()
+        .ok_or("StorageUnavailable：recorded 形状")?;
+    let mut sim_facts = Vec::new();
+    for k in order {
+        let fact = recorded
+            .iter()
+            .find(|f| f["fact_key"] == k.as_str())
+            .ok_or("MissingDependency：Resolve 缺持久原事实")?;
+        if is_history_sim(&fact["event"]) {
+            sim_facts.push((k.as_str(), fact));
+        }
+    }
+    if sim_facts.is_empty() {
+        return Ok(None);
+    }
+    if previous.get("finance").is_none()
+        || !super::finance::exact_release_selected(&config.manifest)
+    {
+        return Err(
+            "MissingDependency：模拟外部事实缺命令归属/成本/利润分量证明，Pending 保留".into(),
+        );
+    }
+    if config.manifest["finance"]["schema_revision"] != REQUIRED_FINANCE_REV {
+        return Err(
+            "VersionUnsupported：单一明确原责任域模拟成交/费用归属仅接受 tb03b-finance/6（命令体固化 model_ref），拒绝 tb03b-finance/5"
+                .into(),
+        );
+    }
+    let (x_id, x_epoch, batch_id, batch_digest) = parse_x_batch(payload)?;
+    let selector = intake::XBatchSelector {
+        x_id,
+        x_epoch,
+        batch_id,
+        batch_receipt_sha256: batch_digest,
+    };
+    let commands = previous["finance"]["commands"]
+        .as_array()
+        .ok_or("StorageUnavailable：财务命令集合缺失")?;
+    let mut witnesses = serde_json::Map::new();
+    for (fk, fact) in sim_facts {
+        let (command_id, _doc) = sim_fact_command_id(fact)?;
+        let matches: Vec<&Value> = commands
+            .iter()
+            .filter(|c| c["command_id"] == command_id.as_str())
+            .collect();
+        if matches.is_empty() {
+            return Err(
+                "MissingDependency：模拟外部事实缺命令归属/成本/利润分量证明，Pending 保留".into(),
+            );
+        }
+        if matches.len() != 1 {
+            return Err("StorageUnavailable：E 存在重复 command_id 记录".into());
+        }
+        let cmd = matches[0];
+        if cmd["state"] != "ReleasedExact" {
+            return Err("MissingDependency：原命令未处于 ReleasedExact 终态，Pending 保留".into());
+        }
+        if cmd["command"]["x_id"] != x_id || cmd["command"]["x_epoch"] != x_epoch.to_string() {
+            return Err("IdentityConflict：x_batch 目标执行域与 E ReleasedExact 命令不符".into());
+        }
+        let e_release_key = super::finance::receipt_key_for(config, "ReleaseExact", &command_id)?;
+        let e_release_receipt = super::store::row(e_tx, "receipts", &e_release_key)?
+            .ok_or("MissingDependency：E 缺该命令持久 ReleasedExactReceipt，Pending 保留")?;
+        if e_release_receipt["kind"] != "ReleasedExactReceipt"
+            || e_release_receipt["receipt_key"] != e_release_key
+            || e_release_receipt["record"] != *cmd
+            || e_release_receipt["cut"]["domain_id"] != "E"
+        {
+            return Err("StorageUnavailable：E 持久 ReleasedExactReceipt 与命令状态不符".into());
+        }
+        let witness = intake::verify_execution_causal_chain(
+            &config.manifest,
+            &selector,
+            &command_id,
+            &cmd["command"],
+            required(cmd, "command_hash")?,
+            &e_release_key,
+            required(cmd, "release_commit_ns")?,
+            &e_release_receipt["cut"],
+            required(fact, "raw_utf8")?,
+            required(fact, "raw_sha256")?,
+        )?;
+        witnesses.insert(fk.to_owned(), witness);
+    }
+    Ok(Some(Value::Object(witnesses)))
+}
+
+fn assert_no_json_numbers(v: &Value) -> Result<(), String> {
+    match v {
+        Value::Null | Value::Bool(_) | Value::String(_) => Ok(()),
+        Value::Number(_) => Err("InvalidDomain：X 执行见证不得包含裸 JSON 数值".into()),
+        Value::Array(items) => {
+            for item in items {
+                assert_no_json_numbers(item)?;
+            }
+            Ok(())
+        }
+        Value::Object(map) => {
+            for val in map.values() {
+                assert_no_json_numbers(val)?;
+            }
+            Ok(())
+        }
+    }
+}
+
+/// 纯离线校验证据中自持的 X/3 执行因果见证（不打开 x.db、不连活 E/X，供 E/B 冷恢复重放）。
+pub(super) fn verify_offline_witness(
+    config: &Config,
+    previous: &Value,
+    payload: &Value,
+    fact: &Value,
+    cmd: &Value,
+    doc: &Value,
+    witness: &Value,
+) -> Result<(), String> {
+    assert_no_json_numbers(witness)?;
+    super::voice::exact(
+        witness,
+        &[
+            "witness_revision",
+            "x_profile_revision",
+            "x_id",
+            "x_epoch",
+            "session_id",
+            "session_generation",
+            "source_namespace",
+            "source_epoch",
+            "model_content_hash",
+            "command_id",
+            "command_hash",
+            "e_release_receipt_key",
+            "e_release_cut",
+            "e_release_commit_ns",
+            "x_release_evidence",
+            "x_accept_clock",
+            "x_command_state",
+            "x_execute_evidence",
+            "attempt_batch_id",
+            "attempt_batch_bar_index",
+            "attempt_batch_request_sha256",
+            "attempt_batch_receipt_sha256",
+            "originals_batch_id",
+            "originals_batch_bar_index",
+            "originals_batch_receipt_sha256",
+            "fact_raw_sha256",
+        ],
+    )?;
+    let (x_id, x_epoch, batch_id, batch_digest) = parse_x_batch(payload)?;
+    if witness["witness_revision"] != intake::X_EXECUTION_WITNESS_REVISION
+        || witness["x_profile_revision"] != REQUIRED_X_PROFILE_REV
+    {
+        return Err("VersionUnsupported：X 执行见证版本非 X/3".into());
+    }
+    if witness["session_id"] != config.session
+        || witness["session_generation"] != config.generation
+        || witness["x_id"] != x_id
+        || witness["x_epoch"] != x_epoch.to_string()
+        || witness["x_id"] != cmd["command"]["x_id"]
+        || witness["x_epoch"] != cmd["command"]["x_epoch"]
+    {
+        return Err("IdentityConflict：X 执行见证会话、化身或目标 X 身份不符".into());
+    }
+    if let Some(binding) = config
+        .manifest
+        .get("history_simulation_source")
+        .filter(|v| v.is_object())
+    {
+        if witness["source_namespace"] != binding["source_namespace"]
+            || witness["source_epoch"] != binding["source_epoch"]
+            || witness["model_content_hash"] != binding["model_content_hash"]
+        {
+            return Err("IdentityConflict：X 执行见证来源或模型摘要与冻结配置不符".into());
+        }
+    }
+    if witness["source_namespace"] != fact["event"]["source"]["source_namespace"]
+        || witness["source_epoch"] != fact["event"]["source"]["source_epoch"]
+        || witness["model_content_hash"] != doc["model_content_hash"]
+        || witness["fact_raw_sha256"] != fact["raw_sha256"]
+    {
+        return Err("IdentityConflict：X 执行见证与事实来源、模型或原件摘要不符".into());
+    }
+    let command_id = required(cmd, "command_id")?;
+    let command_hash = required(cmd, "command_hash")?;
+    let expected_release_key = super::finance::receipt_key_for(config, "ReleaseExact", command_id)?;
+    let release_commit_ns = required(cmd, "release_commit_ns")?;
+    let release_bar = nonnegative(release_commit_ns, "release_commit_ns")?;
+    if witness["command_id"] != command_id
+        || witness["command_hash"] != command_hash
+        || witness["e_release_receipt_key"] != expected_release_key
+        || witness["e_release_commit_ns"] != release_commit_ns
+    {
+        return Err("IdentityConflict：X 执行见证未绑定本笔 E 原放行命令与回执键".into());
+    }
+    let e_cut = &witness["e_release_cut"];
+    super::voice::exact(e_cut, &["domain_id", "commit_seq", "root_hash"])?;
+    if e_cut["domain_id"] != "E" {
+        return Err("IdentityConflict：e_release_cut 域非 E".into());
+    }
+    digest(required(e_cut, "root_hash")?)?;
+    let e_cut_seq = nonnegative(required(e_cut, "commit_seq")?, "e_release_cut.commit_seq")?;
+    // 离线核 E 历史中确有同序号、同提交时刻、同命令的 ReleaseExact 事件。
+    let rel_event = previous["history"]
+        .as_array()
+        .ok_or("StorageUnavailable：E history 缺失")?
+        .iter()
+        .find(|ev| {
+            ev["kind"] == "ReleaseExact"
+                && ev["record"]["command_id"] == command_id
+                && ev["commit_seq"] == e_cut_seq.to_string()
+                && ev["commit_ns"] == release_commit_ns
+        })
+        .ok_or("IdentityConflict：E 历史中无与见证 e_release_cut 匹配的 ReleaseExact 提交")?;
+    if rel_event["record"] != *cmd {
+        return Err("IdentityConflict：E 历史 ReleaseExact 记录与当前命令不符".into());
+    }
+    // 核 X release_evidence（x-exact-authority/1，本条 release_receipt_id 恒为 null）。
+    let x_rel = &witness["x_release_evidence"];
+    if x_rel["protocol"] != "x-exact-authority/1"
+        || x_rel["session_id"] != config.session
+        || x_rel["session_generation"] != config.generation
+        || x_rel["authority_id"] != "E"
+        || x_rel["command_id"] != command_id
+        || x_rel["command_hash"] != command_hash
+        || x_rel["command"] != cmd["command"]
+        || x_rel["state"] != "ReleasedExact"
+        || x_rel["receipt_id"] != expected_release_key
+        || !x_rel["release_receipt_id"].is_null()
+        || x_rel["commit_ns"] != release_commit_ns
+    {
+        return Err("IdentityConflict：离线 X release_evidence 与 E 原放行回执不符".into());
+    }
+    // 核 X accept_clock 因果序。
+    let clock = &witness["x_accept_clock"];
+    let recv_ns = nonnegative(
+        required(clock, "received_ns")?,
+        "x_accept_clock.received_ns",
+    )?;
+    let first_ns = nonnegative(
+        required(clock, "first_known_ns")?,
+        "x_accept_clock.first_known_ns",
+    )?;
+    let commit_ns = nonnegative(required(clock, "commit_ns")?, "x_accept_clock.commit_ns")?;
+    if recv_ns > first_ns || first_ns > commit_ns || first_ns < release_bar {
+        return Err("InvalidDomain：X 接纳时钟早于 E 放行或内部倒退".into());
+    }
+    if witness["x_command_state"] != "Observed" {
+        return Err("MissingDependency：X 命令见证非 Observed 占有终态".into());
+    }
+    // 核占有批与结果批（允许 b2 占有、b3 产原件，不强制两批 ID 相等）。
+    required(witness, "attempt_batch_id")?;
+    let attempt_bar = nonnegative(
+        required(witness, "attempt_batch_bar_index")?,
+        "attempt_batch_bar_index",
+    )?;
+    digest(required(witness, "attempt_batch_request_sha256")?)?;
+    digest(required(witness, "attempt_batch_receipt_sha256")?)?;
+    if witness["originals_batch_id"] != batch_id
+        || witness["originals_batch_receipt_sha256"] != batch_digest
+    {
+        return Err("IdentityConflict：X 执行见证结果批与 Resolve 请求 x_batch 不符".into());
+    }
+    let originals_bar = nonnegative(
+        required(witness, "originals_batch_bar_index")?,
+        "originals_batch_bar_index",
+    )?;
+    let doc_bar = doc["bar"]["index"]
+        .as_i64()
+        .filter(|&v| v >= 0)
+        .ok_or("InvalidDomain：模拟原件 bar.index 非法")?;
+    if originals_bar != doc_bar || attempt_bar < release_bar || originals_bar < attempt_bar {
+        return Err("IdentityConflict：X 占有批、结果批与原件 bar 因果序不成立".into());
+    }
+    // 核 S 执行证明 execute_evidence。
+    let x_exec = &witness["x_execute_evidence"];
+    let s_reply = &x_exec["reply"];
+    let claimed_ns = nonnegative(
+        required(x_exec, "claimed_ns")?,
+        "x_execute_evidence.claimed_ns",
+    )?;
+    let s_commit_ns = nonnegative(
+        required(s_reply, "commit_ns")?,
+        "x_execute_evidence.reply.commit_ns",
+    )?;
+    let eligibility = required(&cmd["command"]["change"]["order"], "eligibility_ref")?;
+    if s_reply["protocol"] != "x-exact-authority/1"
+        || s_reply["session_id"] != config.session
+        || s_reply["session_generation"] != config.generation
+        || s_reply["command_id"] != command_id
+        || s_reply["command_hash"] != command_hash
+        || s_reply["command"] != cmd["command"]
+        || s_reply["state"] != "ExecuteCommitted"
+        || s_reply["release_receipt_id"] != expected_release_key
+        || s_reply["receipt_id"] != eligibility
+        || claimed_ns != attempt_bar
+        || claimed_ns < s_commit_ns
+    {
+        return Err("IdentityConflict：离线 X execute_evidence 未绑定 S 执行或占有批时刻".into());
+    }
+    Ok(())
 }
 
 fn derived_units(model: &Model) -> Value {
@@ -98,13 +450,16 @@ pub(super) fn check_pending(
     Ok(())
 }
 
-/// 纯函数：从 E 自身持久图像中的 `tb03b-finance/6` `ReleasedExact` 命令与保留 grant 责任推导单一明确原责任域的逐重分配。
-/// 不碰 SQLite/磁盘，供 `tb03c_allocation::verify_resolution` 在 B 冷恢复时离线重放。
+/// 纯函数：从 E 自身持久图像中的 `tb03b-finance/6` `ReleasedExact` 命令、保留 grant 责任与
+/// 自持 X/3 执行因果见证推导单一明确原责任域的逐重分配。
+/// 不碰 SQLite/磁盘，供 E 审计与 `tb03c_allocation::verify_resolution` 在 B 冷恢复时离线重放。
 pub(super) fn resolve(
     config: &Config,
     next: &mut Value,
     fact: &Value,
     evidence_id: &str,
+    payload: &Value,
+    witness: Option<&Value>,
 ) -> Result<(), String> {
     let raw_utf8 = required(fact, "raw_utf8")?;
     let doc = strict_json(raw_utf8.as_bytes())?;
@@ -268,6 +623,9 @@ pub(super) fn resolve(
     if derived_units(&model) != grant["units"] {
         return Err("InvalidDomain：模拟原件量纲与原 grant 量纲不符".into());
     }
+    let witness =
+        witness.ok_or("MissingDependency：模拟外部事实缺 X/3 执行因果见证，Pending 保留")?;
+    verify_offline_witness(config, next, payload, fact, &cmd, &doc, witness)?;
 
     // 汇总同 (command_id, grant_id) 已持久分配的累计数量与累计成本金额
     let mut cum_qty = 0i64;
@@ -353,6 +711,7 @@ pub(super) fn resolve(
             "fill_allocation_policy_id": super::tb03c_per_leg::POLICY,
             "policy_revision": model.revision,
             "evidence_id": evidence_id,
+            "x_execution_witness": witness,
             "allocations": [allocation],
         })
     } else {
@@ -460,6 +819,7 @@ pub(super) fn resolve(
             "fill_allocation_policy_id": super::tb03c_per_leg::POLICY,
             "policy_revision": model.revision,
             "evidence_id": evidence_id,
+            "x_execution_witness": witness,
             "allocations": [allocation],
         })
     };

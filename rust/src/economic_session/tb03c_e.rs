@@ -128,22 +128,36 @@ pub(super) fn evidence_body(payload: &Value) -> Value {
     body
 }
 
-/// 纯函数：校验证据并返回移除被覆盖 Pending 后的图像与被覆盖的 fact_key（按证据顺序）。
-pub(super) fn resolve_image(
+/// 校验 ResolveEvidence 的公共载荷与前置 Pending/前沿检查，返回按证据顺序的 `fact_key` 列表。
+pub(super) fn check_resolve_preconditions(
     config: &Config,
     previous: &Value,
     payload: &Value,
-) -> Result<(Value, Vec<String>), String> {
-    super::voice::exact(
-        payload,
-        &[
-            "op",
-            "evidence_id",
-            "covered",
-            "frontier",
-            "dependency_version",
-        ],
-    )?;
+) -> Result<(Vec<String>, bool), String> {
+    if payload.get("x_batch").is_some() {
+        super::voice::exact(
+            payload,
+            &[
+                "op",
+                "evidence_id",
+                "covered",
+                "frontier",
+                "dependency_version",
+                "x_batch",
+            ],
+        )?;
+    } else {
+        super::voice::exact(
+            payload,
+            &[
+                "op",
+                "evidence_id",
+                "covered",
+                "frontier",
+                "dependency_version",
+            ],
+        )?;
+    }
     required(payload, "evidence_id")?;
     required(payload, "dependency_version")?;
     let frontier = &payload["frontier"];
@@ -169,12 +183,14 @@ pub(super) fn resolve_image(
     let recorded = previous["recorded"]
         .as_array()
         .ok_or("StorageUnavailable：recorded 形状")?;
+    let mut has_sim = false;
     for k in &order {
         let fact = recorded
             .iter()
             .find(|f| f["fact_key"] == k.as_str())
             .ok_or("MissingDependency：Resolve 缺持久原事实")?;
         if super::tb03c_sim_resolve::is_history_sim(&fact["event"]) {
+            has_sim = true;
             super::tb03c_sim_resolve::check_pending(
                 config, previous, covered, fact, frontier, cursor,
             )?;
@@ -253,6 +269,63 @@ pub(super) fn resolve_image(
             return Err("MissingDependency：证据来源前沿未到达该事实".into());
         }
     }
+    if has_sim {
+        super::tb03c_sim_resolve::parse_x_batch(payload)?;
+    } else if payload.get("x_batch").is_some() {
+        return Err("SchemaUnsupported：非模拟外部事实 Resolve 不得夹带 x_batch".into());
+    }
+    Ok((order, has_sim))
+}
+
+/// 纯函数：校验证据并返回移除被覆盖 Pending 后的图像与被覆盖的 fact_key（按证据顺序）。
+#[cfg_attr(not(test), allow(dead_code))]
+pub(super) fn resolve_image(
+    config: &Config,
+    previous: &Value,
+    payload: &Value,
+) -> Result<(Value, Vec<String>), String> {
+    resolve_image_with_witnesses(config, previous, payload, None)
+}
+
+/// 纯函数：支持模拟事实自持 X/3 执行因果见证的 Resolve 图像推导（离线可用，不碰 SQLite/磁盘）。
+pub(super) fn resolve_image_with_witnesses(
+    config: &Config,
+    previous: &Value,
+    payload: &Value,
+    witnesses: Option<&Value>,
+) -> Result<(Value, Vec<String>), String> {
+    let (order, has_sim) = check_resolve_preconditions(config, previous, payload)?;
+    let keys: BTreeSet<String> = order.iter().cloned().collect();
+    let pending = previous["pending"]
+        .as_array()
+        .ok_or("StorageUnavailable：pending 形状")?;
+    let recorded = previous["recorded"]
+        .as_array()
+        .ok_or("StorageUnavailable：recorded 形状")?;
+    let witness_map = if has_sim {
+        let map = witnesses
+            .and_then(Value::as_object)
+            .ok_or("MissingDependency：模拟外部事实 Resolve 缺 X/3 执行因果见证，Pending 保留")?;
+        let sim_keys: BTreeSet<&str> = order
+            .iter()
+            .filter_map(|k| {
+                recorded
+                    .iter()
+                    .find(|f| f["fact_key"] == k.as_str())
+                    .filter(|f| super::tb03c_sim_resolve::is_history_sim(&f["event"]))
+                    .map(|_| k.as_str())
+            })
+            .collect();
+        if map.len() != sim_keys.len() || !sim_keys.iter().all(|k| map.contains_key(*k)) {
+            return Err("IdentityConflict：X/3 执行因果见证键集与覆盖模拟事实不符".into());
+        }
+        Some(map)
+    } else {
+        if witnesses.is_some() {
+            return Err("StorageUnavailable：非模拟 Resolve 不得夹带 X/3 执行因果见证".into());
+        }
+        None
+    };
     let mut next = previous.clone();
     for k in &order {
         let fact = recorded
@@ -260,11 +333,14 @@ pub(super) fn resolve_image(
             .find(|f| f["fact_key"] == k.as_str())
             .ok_or("StorageUnavailable：Pending 缺原件")?;
         if super::tb03c_sim_resolve::is_history_sim(&fact["event"]) {
+            let w = witness_map.and_then(|m| m.get(k.as_str()));
             super::tb03c_sim_resolve::resolve(
                 config,
                 &mut next,
                 fact,
                 required(payload, "evidence_id")?,
+                payload,
+                w,
             )?;
         } else {
             super::tb03c_allocation::resolve(
@@ -283,10 +359,20 @@ pub(super) fn resolve_image(
     Ok((next, order))
 }
 
-pub(super) fn resolve_history(request: &Value, covered: &[String], seq: i64, ns: &str) -> Value {
+pub(super) fn resolve_history_with_witnesses(
+    request: &Value,
+    covered: &[String],
+    seq: i64,
+    ns: &str,
+    witnesses: Option<&Value>,
+) -> Value {
     let payload = &request["payload"];
-    json!({"kind":"ResolveEvidence","evidence_id":payload["evidence_id"],"evidence":evidence_body(payload),"covered":covered,"commit_seq":seq.to_string(),"commit_ns":ns,
-        "origin_message":{"source_namespace":request["source_namespace"],"source_epoch":request["source_epoch"],"message_id":request["message_id"]},"origin_request_hash":hash(request)})
+    let mut entry = json!({"kind":"ResolveEvidence","evidence_id":payload["evidence_id"],"evidence":evidence_body(payload),"covered":covered,"commit_seq":seq.to_string(),"commit_ns":ns,
+        "origin_message":{"source_namespace":request["source_namespace"],"source_epoch":request["source_epoch"],"message_id":request["message_id"]},"origin_request_hash":hash(request)});
+    if let Some(w) = witnesses {
+        entry["x_execution_witnesses"] = w.clone();
+    }
+    entry
 }
 
 pub(super) fn resolve_receipt(config: &Config, history: &Value, cut: Value) -> Value {
@@ -337,8 +423,24 @@ pub(super) fn replay(
     {
         return Err("StorageUnavailable：Resolve 原消息绑定改变".into());
     }
-    let (mut next, covered) = resolve_image(config, previous, payload)?;
-    let expected = resolve_history(&request, &covered, seq, ns);
+    let witnesses = event.get("x_execution_witnesses");
+    let (mut next, covered) = resolve_image_with_witnesses(config, previous, payload, witnesses)?;
+    if let Some(wmap) = witnesses.and_then(Value::as_object) {
+        for w in wmap.values() {
+            let rk = required(w, "e_release_receipt_key")?;
+            let rel_receipt = super::store::metered_row(c, "receipts", rk, budget)?
+                .ok_or("StorageUnavailable：E 审计缺见证引用的 ReleasedExactReceipt")?;
+            if rel_receipt["kind"] != "ReleasedExactReceipt"
+                || rel_receipt["receipt_key"] != rk
+                || rel_receipt["cut"] != w["e_release_cut"]
+            {
+                return Err(
+                    "StorageUnavailable：E 审计中见证的 ReleasedExactReceipt 与持久回执不符".into(),
+                );
+            }
+        }
+    }
+    let expected = resolve_history_with_witnesses(&request, &covered, seq, ns, witnesses);
     if event != &expected {
         return Err("StorageUnavailable：Resolve 事件与原消息/提交不符".into());
     }

@@ -486,8 +486,18 @@ pub(super) fn verify_resolution(record: &Value, config: &Config) -> Result<(), S
     {
         return Err("StorageUnavailable：Resolve 原消息授权/操作不符".into());
     }
-    let (mut next, covered) = super::tb03c_e::resolve_image(&ec, previous, &request["payload"])?;
-    let history = super::tb03c_e::resolve_history(&request, &covered, seq, ns);
+    let witnesses = proof["image"]["history"]
+        .as_array()
+        .and_then(|a| a.last())
+        .and_then(|e| e.get("x_execution_witnesses"));
+    let (mut next, covered) = super::tb03c_e::resolve_image_with_witnesses(
+        &ec,
+        previous,
+        &request["payload"],
+        witnesses,
+    )?;
+    let history =
+        super::tb03c_e::resolve_history_with_witnesses(&request, &covered, seq, ns, witnesses);
     next["history"]
         .as_array_mut()
         .unwrap()

@@ -456,6 +456,8 @@ messages = {
     "capture-sim-fill-retry": "3",
     "capture-sim-fee": "3",
     "apply-fill-before-resolve": "3",
+    "resolve-no-x-batch": "3",
+    "resolve-wrong-b2": "3",
     "resolve-fee-before-fill": "3",
     "resolve-sim-fill": "3",
     "resolve-sim-fill-retry": "3",
@@ -1097,11 +1099,16 @@ try:
             "kind": {"kind": "limit", "price": int(ord_in["kind"]["price"])},
         },
     }
-    xwire("x-bar-2", "AdvanceBar", bar(2, [local_change]), "SimulationBatch")
+    b2 = xwire("x-bar-2", "AdvanceBar", bar(2, [local_change]), "SimulationBatch")
+    assert b2["originals"] == [], b2
+    b2_sha = hashlib.sha256(canonical(b2)).hexdigest()
     signer.join(5)
     b3 = xwire("x-bar-3", "AdvanceBar", bar(3), "SimulationBatch")
     assert [o["event"]["kind"] for o in b3["originals"]] == ["fill", "fee"]
+    b3_sha = hashlib.sha256(canonical(b3)).hexdigest()
     fill_doc, fee_doc = b3["originals"]
+    x_batch_b3 = {"x_id": "X", "x_epoch": "1", "batch_id": "b3", "batch_receipt_sha256": b3_sha}
+    x_batch_b2 = {"x_id": "X", "x_epoch": "1", "batch_id": "b2", "batch_receipt_sha256": b2_sha}
 
     # 5. X 来源送两件原件进 E.CaptureExternal（幂等重试核验）
     fill_cap = ewire(
@@ -1159,8 +1166,40 @@ try:
     assert err_early_apply["error"].startswith("AwaitingDependency"), err_early_apply
     assert same(business_dump(alpha_db), alpha_before)
 
-    # 负控 B：fill 未 Resolve 前先 Resolve fee 被拒
+    # 负控 B0：缺 x_batch 或指定无原件的占有批 b2 均被拒，保 Pending
     e_before = business_dump(e_db)
+    err_no_batch = ewire(
+        "E",
+        "resolve-no-x-batch",
+        {
+            "op": "ResolveEvidence",
+            "evidence_id": "ev-no-x-batch",
+            "covered": [{"fact_key": fill_cap["fact_key"], "fact_hash": fill_cap["fact_hash"], "token": fill_cap["token"]}],
+            "frontier": {"source_namespace": "x-sim", "source_epoch": "epoch1", "cursor": "3"},
+            "dependency_version": "tb1425-deps/1",
+        },
+        "Error",
+        source=src_resolver,
+    )
+    assert "x_batch" in err_no_batch["error"], err_no_batch
+    err_wrong_b2 = ewire(
+        "E",
+        "resolve-wrong-b2",
+        {
+            "op": "ResolveEvidence",
+            "evidence_id": "ev-wrong-b2",
+            "covered": [{"fact_key": fill_cap["fact_key"], "fact_hash": fill_cap["fact_hash"], "token": fill_cap["token"]}],
+            "frontier": {"source_namespace": "x-sim", "source_epoch": "epoch1", "cursor": "3"},
+            "dependency_version": "tb1425-deps/1",
+            "x_batch": x_batch_b2,
+        },
+        "Error",
+        source=src_resolver,
+    )
+    assert "不包含该模拟原件" in err_wrong_b2["error"], err_wrong_b2
+    assert same(business_dump(e_db), e_before)
+
+    # 负控 B：fill 未 Resolve 前先 Resolve fee 被拒
     err_early_fee_res = ewire(
         "E",
         "resolve-fee-before-fill",
@@ -1170,6 +1209,7 @@ try:
             "covered": [{"fact_key": fee_cap["fact_key"], "fact_hash": fee_cap["fact_hash"], "token": fee_cap["token"]}],
             "frontier": {"source_namespace": "x-sim", "source_epoch": "epoch1", "cursor": "3"},
             "dependency_version": "tb1425-deps/1",
+            "x_batch": x_batch_b3,
         },
         "Error",
         source=src_resolver,
@@ -1177,13 +1217,14 @@ try:
     assert err_early_fee_res["error"].startswith("AwaitingDependency"), err_early_fee_res
     assert same(business_dump(e_db), e_before)
 
-    # 6. 具名工作方 resolver 调用 E.ResolveEvidence（先 fill 后 fee，同游标 3 不吞费）
+    # 6. 具名工作方 resolver 调用 E.ResolveEvidence（先 fill 后 fee，绑定 X/3 占有批 b2 与结果批 b3，同游标 3 不吞费）
     res_fill_payload = {
         "op": "ResolveEvidence",
         "evidence_id": "ev-sim-fill",
         "covered": [{"fact_key": fill_cap["fact_key"], "fact_hash": fill_cap["fact_hash"], "token": fill_cap["token"]}],
         "frontier": {"source_namespace": "x-sim", "source_epoch": "epoch1", "cursor": "3"},
         "dependency_version": "tb1425-deps/1",
+        "x_batch": x_batch_b3,
     }
     res_fill = ewire("E", "resolve-sim-fill", res_fill_payload, "Resolved", source=src_resolver)
     assert same(ewire("E", "resolve-sim-fill-retry", res_fill_payload, "Resolved", source=src_resolver), res_fill)
@@ -1196,6 +1237,7 @@ try:
             "covered": [{"fact_key": fee_cap["fact_key"], "fact_hash": fee_cap["fact_hash"], "token": fee_cap["token"]}],
             "frontier": {"source_namespace": "x-sim", "source_epoch": "epoch1", "cursor": "3"},
             "dependency_version": "tb1425-deps/1",
+            "x_batch": x_batch_b3,
         },
         "Resolved",
         source=src_resolver,
@@ -1208,6 +1250,12 @@ try:
     fee_aid = rows[1]["allocations"][0]["allocation_id"]
     assert fill_aid.startswith("sim-command:") and fee_aid.startswith("sim-command-fee:")
     assert rows[0]["plan_hash"] != rows[0]["command_plan_hash"]
+    w0 = rows[0]["x_execution_witness"]
+    assert w0["attempt_batch_id"] == "b2" and w0["attempt_batch_bar_index"] == "2"
+    assert w0["originals_batch_id"] == "b3" and w0["originals_batch_bar_index"] == "3"
+    assert w0["e_release_receipt_key"] == rel["receipt_key"]
+    assert w0["x_release_evidence"]["release_receipt_id"] is None
+    assert w0["x_command_state"] == "Observed"
     assert sum(int(r["amount"]) for r in e_view["image"]["finance"]["responsibilities"]) == 90
 
     # 6b. 在 E Resolve 双件后（三域总快照 ~1.9MB < 4MiB），核验正式 HTTP 分页 CompleteVector + original(command)

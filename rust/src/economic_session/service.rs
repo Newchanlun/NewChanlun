@@ -178,10 +178,11 @@ fn read_object(fields: &Value, raw_field: &str, raw: &[u8]) -> Result<Vec<u8>, S
     append_read_bytes(&mut out, b"}")?;
     Ok(out)
 }
-fn selected_image_meta(
+fn selected_image_meta_metered(
     c: &Connection,
     config: &Config,
     query: &Value,
+    budget: &mut ReadBudget<'_>,
 ) -> Result<StoredImage, String> {
     if !query["cut"].is_null() && !query["as_known_ns"].is_null() {
         return Err("InvalidDomain：cut与AsKnown不能同时指定".into());
@@ -195,21 +196,22 @@ fn selected_image_meta(
         nonnegative(required(wanted, "commit_seq")?, "commit_seq")?
     } else if !query["as_known_ns"].is_null() {
         let ns = nonnegative(required(query, "as_known_ns")?, "as_known_ns")?;
-        c.query_row(
-            "SELECT max(seq) FROM commits WHERE CAST(commit_ns AS INTEGER)<=?",
-            [ns],
-            |r| r.get::<_, Option<i64>>(0),
-        )
-        .map_err(err)?
-        .ok_or("MissingDependency：AsKnown早于域创世")?
+        budget
+            .one(
+                c,
+                "SELECT max(seq) FROM commits WHERE CAST(commit_ns AS INTEGER)<=?",
+                [ns],
+                |r| r.get::<_, Option<i64>>(0),
+            )?
+            .ok_or("MissingDependency：AsKnown早于域创世")?
     } else {
-        c.query_row("SELECT max(seq) FROM commits", [], |r| {
-            r.get::<_, Option<i64>>(0)
-        })
-        .map_err(err)?
-        .ok_or("MissingDependency：域无创世cut")?
+        budget
+            .one(c, "SELECT max(seq) FROM commits", [], |r| {
+                r.get::<_, Option<i64>>(0)
+            })?
+            .ok_or("MissingDependency：域无创世cut")?
     };
-    let image = stored_image(c, selected, READ_CACHE)?;
+    let image = stored_image_metered(c, selected, READ_CACHE, budget)?;
     if !query["cut"].is_null() && query["cut"] != cut(config, image.seq, &image.root) {
         return Err("IdentityConflict：cut根不匹配".into());
     }
@@ -218,18 +220,19 @@ fn selected_image_meta(
 fn fixed_image_bytes(
     c: &Connection,
     image: &StoredImage,
-    deadline: std::time::Instant,
+    budget: &mut ReadBudget<'_>,
 ) -> Result<Vec<u8>, String> {
-    check_operation_deadline(None, Some(deadline))?;
-    let raw = stored_image_bytes(c, image, 0, image.bytes)?;
+    budget.before()?;
+    let raw = stored_image_bytes_metered(c, image, 0, image.bytes, budget)?;
     let parsed = crate::session_protocol::strict_json(&raw)
         .map_err(|e| format!("StorageUnavailable：持久图像解析失败：{e}"))?;
     if canonical_json(&parsed).as_bytes() != raw.as_slice() {
         return Err("StorageUnavailable：持久图像不是原canonical字节".into());
     }
-    check_operation_deadline(None, Some(deadline))?;
+    budget.before()?;
     Ok(raw)
 }
+#[allow(clippy::too_many_arguments)]
 fn fixed_read_document(
     c: &mut Connection,
     config: &Config,
@@ -237,10 +240,26 @@ fn fixed_read_document(
     runtime: &Value,
     query: &Value,
     deadline: std::time::Instant,
+    projection_perms: Option<super::read_projection::ReadPermissions>,
 ) -> Result<(Vec<u8>, Vec<StoredImage>, StoredImage, &'static str, bool), String> {
     let tx = c.transaction().map_err(err)?;
     check_operation_deadline(None, Some(deadline))?;
     check_epoch(&tx, epoch)?;
+    let mut job = if config.revision()? == SCHEMA_V2 {
+        Some(new_content_job(&tx, config)?)
+    } else {
+        None
+    };
+    let effective_deadline = if let Some(j) = job.as_mut() {
+        deadline.min(
+            j.first_read_deadline()
+                .map_err(|e| format!("Incomplete：内容 job 截止：{e}"))?,
+        )
+    } else {
+        deadline
+    };
+    let mut budget = ReadBudget::new(job.as_mut(), Some(effective_deadline));
+    budget.before()?;
     let operation = required(query, "op")?;
     let mut cuts = Vec::new();
     let mut changes = Vec::new();
@@ -248,24 +267,31 @@ fn fixed_read_document(
     let next = match operation {
         "ReadView" => {
             exact(query, &["op", "cut", "as_known_ns"])?;
-            let selected = selected_image_meta(&tx, config, query)?;
+            let selected = selected_image_meta_metered(&tx, config, query, &mut budget)?;
             cuts.push(selected.clone());
             selected
         }
         super::read_projection::OP_READ_PROJECTION => {
+            super::read_projection::check_projection_contract(config)?;
             exact(query, &["op", "projection_revision", "cut", "as_known_ns"])?;
             if required(query, "projection_revision")?
                 != super::read_projection::PROJECTION_REVISION
             {
                 return Err("SchemaUnsupported：未知只读经济投影版本".into());
             }
-            let selected =
-                super::read_projection::select_projection_meta(&tx, config, query, false)?;
+            let selected = super::read_projection::select_projection_meta(
+                &tx,
+                config,
+                query,
+                false,
+                &mut budget,
+            )?;
             cuts.push(selected.clone());
             allow_oversize_source = true;
             selected
         }
         super::read_projection::OP_READ_ORIGINAL_AT_CUT => {
+            super::read_projection::check_projection_contract(config)?;
             exact(
                 query,
                 &["op", "projection_revision", "cut", "kind", "object_id"],
@@ -275,8 +301,13 @@ fn fixed_read_document(
             {
                 return Err("SchemaUnsupported：未知只读经济投影版本".into());
             }
-            let selected =
-                super::read_projection::select_projection_meta(&tx, config, query, true)?;
+            let selected = super::read_projection::select_projection_meta(
+                &tx,
+                config,
+                query,
+                true,
+                &mut budget,
+            )?;
             cuts.push(selected.clone());
             allow_oversize_source = true;
             selected
@@ -286,35 +317,40 @@ fn fixed_read_document(
             let after = if query["after_cut"].is_null() {
                 -1
             } else {
-                let selected = selected_image_meta(
+                let selected = selected_image_meta_metered(
                     &tx,
                     config,
                     &json!({"cut":query["after_cut"],"as_known_ns":null}),
+                    &mut budget,
                 )?;
                 let seq = selected.seq;
                 cuts.push(selected);
                 seq
             };
-            let next = selected_image_meta(&tx, config, &json!({"cut":null,"as_known_ns":null}))?;
-            let count: i64 = tx
-                .query_row(
-                    "SELECT count(*) FROM commits WHERE seq>? AND seq<=?",
-                    params![after, next.seq],
-                    |r| r.get(0),
-                )
-                .map_err(err)?;
+            let next = selected_image_meta_metered(
+                &tx,
+                config,
+                &json!({"cut":null,"as_known_ns":null}),
+                &mut budget,
+            )?;
+            let count: i64 = budget.one(
+                &tx,
+                "SELECT count(*) FROM commits WHERE seq>? AND seq<=?",
+                params![after, next.seq],
+                |r| r.get(0),
+            )?;
             if count < 0 || count > READ_CHANGES as i64 {
                 return Err("QueryBudgetExceeded：完整Watch超过32条".into());
             }
-            let mut statement = tx
-                .prepare("SELECT seq FROM commits WHERE seq>? AND seq<=? ORDER BY seq")
-                .map_err(err)?;
-            let rows = statement
-                .query_map(params![after, next.seq], |r| r.get::<_, i64>(0))
-                .map_err(err)?;
+            let seqs: Vec<i64> = budget.all(
+                &tx,
+                "SELECT seq FROM commits WHERE seq>? AND seq<=? ORDER BY seq",
+                params![after, next.seq],
+                |r| r.get::<_, i64>(0),
+            )?;
             let mut total = 0usize;
-            for row in rows {
-                let image = stored_image(&tx, row.map_err(err)?, READ_CACHE)?;
+            for seq in seqs {
+                let image = stored_image_metered(&tx, seq, READ_CACHE, &mut budget)?;
                 total = total
                     .checked_add(image.bytes)
                     .filter(|n| *n <= READ_CACHE)
@@ -334,15 +370,10 @@ fn fixed_read_document(
             )
         }
     };
-    // 每次 open 沿原审计核一次；所有 SQL 的检查共享本读截止。续页不重跑历史。
-    let mut job = if config.revision()? == SCHEMA_V2 {
-        Some(new_content_job(&tx, config)?)
-    } else {
-        None
-    };
-    audit_with_deadline(&tx, config, job.as_mut(), Some(deadline))?;
+    // 每次 open 沿既有完整离线审计核一次；所有 SQL 共用同一 ReadBudget 与最早期限。续页不重跑历史。
+    audit_with_budget(&tx, config, &mut budget)?;
     let (document, kind) = if operation == "ReadView" {
-        let raw = fixed_image_bytes(&tx, &next, deadline)?;
+        let raw = fixed_image_bytes(&tx, &next, &mut budget)?;
         let fields = json!({"kind":"EconomicView","domain_id":config.domain,"cut":cut(config,next.seq,&next.root),"image_hash":sha256_hex(&raw),"image":null,"commit_ns":next.commit_ns,"writer_epoch":epoch.to_string(),"runtime":runtime});
         (read_object(&fields, "image", &raw)?, "EconomicView")
     } else if operation == super::read_projection::OP_READ_PROJECTION {
@@ -352,13 +383,13 @@ fn fixed_read_document(
             epoch,
             runtime,
             &next,
-            job.as_mut(),
-            deadline,
+            &mut budget,
         )?;
         (doc, super::read_projection::KIND_PROJECTION_VIEW)
     } else if operation == super::read_projection::OP_READ_ORIGINAL_AT_CUT {
         let kind = required(query, "kind")?;
         let object_id = required(query, "object_id")?;
+        let perms = projection_perms.unwrap_or_default();
         let doc = super::read_projection::build_original_at_cut_document(
             &tx,
             config,
@@ -366,15 +397,15 @@ fn fixed_read_document(
             &next,
             kind,
             object_id,
-            job.as_mut(),
-            deadline,
+            &perms,
+            &mut budget,
         )?;
         (doc, super::read_projection::KIND_ORIGINAL_AT_CUT)
     } else {
         let mut array = Vec::new();
         append_read_bytes(&mut array, b"[")?;
         for (index, image) in changes.iter().enumerate() {
-            let raw = fixed_image_bytes(&tx, image, deadline)?;
+            let raw = fixed_image_bytes(&tx, image, &mut budget)?;
             let fields = json!({"cut":cut(config,image.seq,&image.root),"image_hash":sha256_hex(&raw),"image":null,"commit_ns":image.commit_ns});
             let change = read_object(&fields, "image", &raw)?;
             if index != 0 {
@@ -386,7 +417,7 @@ fn fixed_read_document(
         let fields = json!({"kind":"EconomicChanges","domain_id":config.domain,"cut":cut(config,next.seq,&next.root),"changes":null,"writer_epoch":epoch.to_string()});
         (read_object(&fields, "changes", &array)?, "EconomicChanges")
     };
-    check_operation_deadline(None, Some(deadline))?;
+    budget.before()?;
     tx.commit().map_err(err)?;
     Ok((document, cuts, next, kind, allow_oversize_source))
 }
@@ -486,19 +517,22 @@ fn paged_read(
             let request_hash = hash(e);
             let query = &p["query"];
             // 分页权限不隐含扩大原逻辑查询权限。
-            if matches!(
+            let projection_perms = if matches!(
                 query.get("op").and_then(Value::as_str),
                 Some(
                     super::read_projection::OP_READ_PROJECTION
                         | super::read_projection::OP_READ_ORIGINAL_AT_CUT
                 )
             ) {
-                super::read_projection::check_authorization(config, e, query)?;
+                Some(super::read_projection::check_authorization(
+                    config, e, query,
+                )?)
             } else {
                 let mut logical_request = e.clone();
                 logical_request["payload"] = query.clone();
                 config.authorized(&logical_request)?;
-            }
+                None
+            };
             if let Some(entry) = state
                 .entries
                 .values_mut()
@@ -546,7 +580,7 @@ fn paged_read(
             // 先签去重身份：任何审计/编码失败都不能用相同 open 消息重开时间窗。
             state.entries.insert(id.clone(), entry);
             let (document, cuts, next, kind, allow_oversize_source_cut) =
-                fixed_read_document(c, config, epoch, runtime, query, deadline)?;
+                fixed_read_document(c, config, epoch, runtime, query, deadline, projection_perms)?;
             let mut fixed_cuts = serde_json::Map::new();
             fixed_cuts.insert(config.domain.clone(), cut(config, next.seq, &next.root));
             let mut owner_epochs = serde_json::Map::new();
@@ -657,7 +691,8 @@ fn handle_paged_read(
             let code = if error.starts_with("SchemaUnsupported")
                 && (error.contains("只读分页版本")
                     || error.contains("分页只接受")
-                    || error.contains("未知只读分页操作"))
+                    || error.contains("未知只读分页操作")
+                    || error.contains("economic-read-projection/1"))
             {
                 "SchemaUnsupported"
             } else if error.starts_with("IdentityConflict")
@@ -669,6 +704,8 @@ fn handle_paged_read(
                 "MissingDependency"
             } else if error.starts_with("SnapshotExpired")
                 || error.starts_with("Incomplete：经济操作最早绝对期限已过")
+                || (error.starts_with("Incomplete")
+                    && (error.contains("DEADLINE") || error.contains("deadline")))
             {
                 "TransferExpired"
             } else if error.starts_with("QueryBudgetExceeded") || error.starts_with("Incomplete") {
@@ -950,7 +987,11 @@ fn resolve_evidence(
         tx.commit().map_err(err)?;
         return Ok(r);
     }
-    let (mut next, covered) = tb03c_e::resolve_image(config, &image, p)?;
+    let (order, _) = tb03c_e::check_resolve_preconditions(config, &image, p)?;
+    let witnesses =
+        super::tb03c_sim_resolve::verify_live_x_witnesses(&tx, config, &image, p, &order)?;
+    let (mut next, covered) =
+        tb03c_e::resolve_image_with_witnesses(config, &image, p, witnesses.as_ref())?;
     let seq = seq.checked_add(1).ok_or("InvalidDomain：commit seq溢出")?;
     let recovered_ns: String = tx
         .query_row(
@@ -963,7 +1004,7 @@ fn resolve_evidence(
         .max(nonnegative(&recovered_ns, "epoch at_ns")?)
         .to_string();
     let (_, _, ns) = clocks(config, e, &floor, epoch)?;
-    let event = tb03c_e::resolve_history(e, &covered, seq, &ns);
+    let event = tb03c_e::resolve_history_with_witnesses(e, &covered, seq, &ns, witnesses.as_ref());
     next["history"].as_array_mut().unwrap().push(event.clone());
     sync_pending(&tx, &next)?;
     let cut = append(&tx, config, seq, &prev, &ns, &next)?;

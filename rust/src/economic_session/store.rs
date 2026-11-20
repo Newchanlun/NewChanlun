@@ -746,14 +746,20 @@ pub(super) struct StoredImage {
 }
 
 pub(super) fn stored_image_meta(c: &Connection, seq: i64) -> Result<StoredImage, String> {
-    let row: Option<(String, String, String, i64)> = c
-        .query_row(
-            "SELECT root,prev_root,commit_ns,length(CAST(image AS BLOB)) FROM commits WHERE seq=?",
-            [seq],
-            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
-        )
-        .optional()
-        .map_err(err)?;
+    stored_image_meta_metered(c, seq, &mut ReadBudget::new(None, None))
+}
+
+pub(super) fn stored_image_meta_metered(
+    c: &Connection,
+    seq: i64,
+    budget: &mut ReadBudget<'_>,
+) -> Result<StoredImage, String> {
+    let row: Option<(String, String, String, i64)> = budget.optional(
+        c,
+        "SELECT root,prev_root,commit_ns,length(CAST(image AS BLOB)) FROM commits WHERE seq=?",
+        [seq],
+        |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+    )?;
     let (root, previous_root, commit_ns, bytes) =
         row.ok_or("MissingDependency：指定历史cut不存在")?;
     let bytes = usize::try_from(bytes).map_err(err)?;
@@ -774,19 +780,39 @@ pub(super) fn stored_image(
     seq: i64,
     maximum: usize,
 ) -> Result<StoredImage, String> {
+    stored_image_metered(c, seq, maximum, &mut ReadBudget::new(None, None))
+}
+
+pub(super) fn stored_image_metered(
+    c: &Connection,
+    seq: i64,
+    maximum: usize,
+    budget: &mut ReadBudget<'_>,
+) -> Result<StoredImage, String> {
     // CAST 为 BLOB 很关键：SQLite TEXT 的 length/substr 是字符数，并非 UTF-8 字节数。
-    let image = stored_image_meta(c, seq)?;
+    let image = stored_image_meta_metered(c, seq, budget)?;
     if image.bytes > maximum {
         return Err("Incomplete：完整持久图像超出读取逻辑字节帽".into());
     }
     Ok(image)
 }
 
+#[cfg(test)]
 pub(super) fn stored_image_bytes(
     c: &Connection,
     image: &StoredImage,
     offset: usize,
     count: usize,
+) -> Result<Vec<u8>, String> {
+    stored_image_bytes_metered(c, image, offset, count, &mut ReadBudget::new(None, None))
+}
+
+pub(super) fn stored_image_bytes_metered(
+    c: &Connection,
+    image: &StoredImage,
+    offset: usize,
+    count: usize,
+    budget: &mut ReadBudget<'_>,
 ) -> Result<Vec<u8>, String> {
     let end = offset
         .checked_add(count)
@@ -796,14 +822,12 @@ pub(super) fn stored_image_bytes(
         i64::try_from(offset.checked_add(1).ok_or("InvalidDomain：页offset溢出")?).map_err(err)?;
     let count_sql = i64::try_from(end - offset).map_err(err)?;
     let size_sql = i64::try_from(image.bytes).map_err(err)?;
-    let bytes: Option<Vec<u8>> = c
-        .query_row(
-            "SELECT substr(CAST(image AS BLOB),?,?) FROM commits WHERE seq=? AND root=? AND prev_root=? AND commit_ns=? AND length(CAST(image AS BLOB))=?",
-            params![start, count_sql, image.seq, image.root, image.previous_root, image.commit_ns, size_sql],
-            |r| r.get(0),
-        )
-        .optional()
-        .map_err(err)?;
+    let bytes: Option<Vec<u8>> = budget.optional(
+        c,
+        "SELECT substr(CAST(image AS BLOB),?,?) FROM commits WHERE seq=? AND root=? AND prev_root=? AND commit_ns=? AND length(CAST(image AS BLOB))=?",
+        params![start, count_sql, image.seq, image.root, image.previous_root, image.commit_ns, size_sql],
+        |r| r.get(0),
+    )?;
     let bytes = bytes.ok_or("IdentityConflict：固定cut原图像身份已改变")?;
     if bytes.len() != count {
         return Err("StorageUnavailable：原图像页截短".into());
