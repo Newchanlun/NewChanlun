@@ -6150,12 +6150,31 @@ pub(super) mod construction_tests {
         owner: &AuditConnection,
     ) -> source_audit::Counts {
         let active = owner.begin(TransactionBehavior::Deferred).unwrap();
+        let before = active.tx().total_changes();
         let audited = state::audit(active.tx()).unwrap();
-        owner.assert_complete_matches_audited(active.tx(), &audited);
-        let actual = b2_assert_counts_match_audited(owner, active.tx(), &audited);
+        let actual = assert_shared_cold_at_cut(owner, active.tx(), &audited);
+        assert_eq!(
+            active.tx().total_changes(),
+            before,
+            "S4 共用冷审计期间发生写入"
+        );
         drop(audited);
         active.read_end().unwrap();
         actual
+    }
+
+    fn assert_shared_cold_at_cut(
+        owner: &AuditConnection,
+        tx: &Transaction<'_>,
+        cold: &state::AuditedState,
+    ) -> source_audit::Counts {
+        assert_eq!(
+            cold.cuts.last().unwrap().metadata.generation,
+            meta_i64(tx, "generation").unwrap(),
+            "冷审计发布代次与 S4 事务切面不符"
+        );
+        owner.assert_complete_matches_audited(tx, cold);
+        b2_assert_counts_match_audited(owner, tx, cold)
     }
 
     fn b2_assert_counts_match_audited(
@@ -6191,6 +6210,41 @@ pub(super) mod construction_tests {
         drop(reader);
         drop(source);
         actual
+    }
+
+    fn compare_shared_cold_at_pinned_cut(use_later_commit: bool) {
+        let mut f = prepared::tests::Fixture::new();
+        let owner = AuditConnection::open(&f.db_path()).unwrap();
+        let mut runtime = prepared::Runtime::with_mode(s_allocation::Mode::CapturedNative);
+        let mut c = context();
+        let envelope = b2_envelope(1);
+        let token = b2_accept_begin(&owner, &envelope, &mut c);
+        let (receipt, ended) = owner
+            .publish(&mut runtime, &token, &envelope, &mut c)
+            .unwrap();
+        assert_eq!(receipt.generation, 1);
+        owner.continue_with(ended).unwrap();
+
+        let old = owner.begin(TransactionBehavior::Deferred).unwrap();
+        let (next, token) = f.accept_begin(2, ("next", 20, 8, 16, 6, 12), 1);
+        assert_eq!(f.publish(&next, &token).unwrap().generation, 2);
+        let later = f.conn.transaction().unwrap();
+        assert_eq!(meta_i64(old.tx(), "generation").unwrap(), 1);
+        assert_eq!(meta_i64(&later, "generation").unwrap(), 2);
+        let cold = state::audit(if use_later_commit { &later } else { old.tx() }).unwrap();
+        assert_shared_cold_at_cut(&owner, old.tx(), &cold);
+        old.read_end().unwrap();
+    }
+
+    #[test]
+    fn s4_shared_cold_accepts_pinned_cut_after_commit() {
+        compare_shared_cold_at_pinned_cut(false);
+    }
+
+    #[test]
+    #[should_panic(expected = "冷审计发布代次与 S4 事务切面不符")]
+    fn s4_shared_cold_rejects_later_commit_at_pinned_cut() {
+        compare_shared_cold_at_pinned_cut(true);
     }
 
     #[test]
