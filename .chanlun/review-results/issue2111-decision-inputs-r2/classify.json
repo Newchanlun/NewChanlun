@@ -1,0 +1,13 @@
+{
+  "ticket": 2111,
+  "role": "triage",
+  "model": "gpt-6.2-sol",
+  "klass": "P",
+  "reason": "这是本仓未裁的成本准入边界，会改变能否开启下钻，不是四态接口的机械实现；不签实际取值。",
+  "parsed": true,
+  "userGate": [],
+  "sourceCommit": "b9d898dccf46c2a716115eaa1215bc39c458a959",
+  "asOf": "2026-11-20",
+  "round": 2,
+  "commentUrl": "https://github.com/Newchanlun/NewChanlun/issues/2111#issuecomment-7042010826"
+}
