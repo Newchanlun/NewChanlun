@@ -5711,6 +5711,7 @@ fn r14_source_keeper_seal_and_next_request_share_explicit_parent() {
 #[cfg(all(test, feature = "s_incremental"))]
 pub(super) mod construction_tests {
     use super::*;
+    use std::cell::RefCell;
 
     include!("audit_owner/b2_source_fault_tests.rs");
     #[cfg(unix)]
@@ -6144,15 +6145,15 @@ pub(super) mod construction_tests {
         begun.token
     }
 
+    type S4AfterPin = Box<dyn FnOnce(&Transaction<'_>)>;
     thread_local! {
-        static S4_AFTER_PIN: std::cell::RefCell<Option<(u64, Box<dyn FnOnce()>)>> =
-            const { std::cell::RefCell::new(None) };
+        static S4_AFTER_PIN: RefCell<Option<(u64, S4AfterPin)>> = const { RefCell::new(None) };
     }
 
     struct S4AfterPinGuard;
 
     impl S4AfterPinGuard {
-        fn arm(owner: &AuditConnection, hook: impl FnOnce() + 'static) -> Self {
+        fn arm(owner: &AuditConnection, hook: impl FnOnce(&Transaction<'_>) + 'static) -> Self {
             S4_AFTER_PIN.with(|slot| {
                 let mut slot = slot.borrow_mut();
                 assert!(slot.is_none(), "S4 快照同步点不能嵌套");
@@ -6170,7 +6171,7 @@ pub(super) mod construction_tests {
         }
     }
 
-    fn run_s4_after_pin(owner: &AuditConnection) {
+    fn run_s4_after_pin(owner: &AuditConnection, tx: &Transaction<'_>) {
         let hook = S4_AFTER_PIN.with(|slot| {
             let mut slot = slot.borrow_mut();
             if slot.as_ref().is_some_and(|(life, _)| *life == owner.life) {
@@ -6180,7 +6181,7 @@ pub(super) mod construction_tests {
             }
         });
         if let Some(hook) = hook {
-            hook();
+            hook(tx);
         }
     }
 
@@ -6190,7 +6191,8 @@ pub(super) mod construction_tests {
         owner: &AuditConnection,
     ) -> source_audit::Counts {
         let active = owner.begin(TransactionBehavior::Deferred).unwrap();
-        run_s4_after_pin(owner);
+        // begin 已读 main.meta 固定 WAL 快照；在正常冷读前让夹具的第二连接提交。
+        run_s4_after_pin(owner, active.tx());
         let before = active.tx().total_changes();
         let audited = state::audit(active.tx()).unwrap();
         let actual = assert_shared_cold_at_cut(owner, active.tx(), &audited);
@@ -6274,22 +6276,20 @@ pub(super) mod construction_tests {
         assert_eq!(meta_i64(&owner.connection, "generation").unwrap(), 1);
 
         let writer = std::rc::Rc::clone(&f);
-        let committed = std::rc::Rc::new(std::cell::Cell::new(false));
-        let committed_in_hook = std::rc::Rc::clone(&committed);
-        let _guard = S4AfterPinGuard::arm(&owner, move || {
+        let _guard = S4AfterPinGuard::arm(&owner, move |pinned| {
             let mut writer = writer.borrow_mut();
             let (next, token) = writer.accept_begin(2, ("next", 20, 8, 16, 6, 12), 1);
             assert_eq!(writer.publish(&next, &token).unwrap().generation, 2);
             assert_eq!(meta_i64(&writer.conn, "generation").unwrap(), 2);
-            committed_in_hook.set(true);
+            assert_eq!(
+                meta_i64(pinned, "generation").unwrap(),
+                1,
+                "第二连接提交后，S4 固定的切面仍须是第 1 代"
+            );
         });
 
         let counts = assert_complete_and_b2_counts(&owner);
-        assert!(
-            committed.get(),
-            "第二连接须在旧快照固定后、冷审计读取前提交"
-        );
-        assert!(counts.objects > 0 && counts.effective > 0);
+        assert_eq!(counts.effective, 1, "旧切面只有一根生效 K 线");
         assert!(owner.connection.is_autocommit());
         assert_eq!(meta_i64(&owner.connection, "generation").unwrap(), 2);
     }
