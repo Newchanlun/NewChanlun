@@ -1,6 +1,6 @@
 {
-  "schema": "tb1426-trend-formation/2",
-  "note": "TB-02-G 形成侧验收夹具：123 根双向 OHLC 原序列取自 #1426 评论 issuecomment-7023365989（2026-11-19）；202 根开放期翻转分叉取自非作者独审复现（保留前 111 根，仅追加 91 根 OHLC）；9011 链 1262→1527→1883 为合成夹具，取自 #1426 评论 issuecomment-7022141473 与 pairs.tsv 的中枢级数值，非逐根复放。",
+  "schema": "tb1426-trend-formation/3",
+  "note": "TB-02-G 形成侧验收夹具（r3）：123 根双向 OHLC 原序列取自 #1426 评论 issuecomment-7023365989（2026-11-19）；202 根开放期翻转分叉取自非作者独审复现（保留前 111 根，仅追加 91 根 OHLC）。",
   "bars_123_down": {
     "source": "Newchanlun/NewChanlun#1426 issuecomment-7023365989 (2026-11-19)",
     "mirror_offset": 8500,
@@ -29,21 +29,13 @@
         "a": { "dd": 3000, "zd": 4000, "zg": 5500, "gg": 6000, "member_units": [0, 4], "break_unit": 4 },
         "b": { "dd": 2100, "zd": 2200, "zg": 2800, "gg": 2900, "member_units": [5, 8], "break_unit_at_123": 8 },
         "connector_direction": "UP",
-        "leaf": "DOWN_NEWBIRTH",
-        "provisional_kind_at_111": "PROVISIONAL_DOWN_SEPARATION",
-        "formation_kind_at_123": "DOWN_TREND_FORMED",
-        "full_outer_a_dd": 2500,
-        "full_outer_leaf": "DOWN_EXPANSION"
+        "leaf": "DOWN_NEWBIRTH"
       },
       "up_mirror": {
         "a": { "dd": 2500, "zd": 3000, "zg": 4500, "gg": 5500, "member_units": [0, 4], "break_unit": 4 },
         "b": { "dd": 5600, "zd": 5700, "zg": 6300, "gg": 6400, "member_units": [5, 8], "break_unit_at_123": 8 },
         "connector_direction": "DOWN",
-        "leaf": "UP_NEWBIRTH",
-        "provisional_kind_at_111": "PROVISIONAL_UP_SEPARATION",
-        "formation_kind_at_123": "UP_TREND_FORMED",
-        "full_outer_a_gg": 6000,
-        "full_outer_leaf": "UP_EXPANSION"
+        "leaf": "UP_NEWBIRTH"
       }
     }
   },
@@ -70,105 +62,7 @@
       "b_gg_at_202": 3411,
       "b_member_units_at_202": [5, 10],
       "connector_raw_span": [49, 61],
-      "leaf_at_202": "DOWN_EXPANSION",
-      "kind_at_111": "PROVISIONAL_DOWN_SEPARATION",
-      "kind_at_202": "HANDOFF_TO_UPPER_LEVEL"
-    }
-  },
-  "chain_9011_synthetic": {
-    "synthetic": true,
-    "note": "合成，取自 #1426 评论的中枢级数值（issuecomment-7022141473 与 /Volumes/AgentStorage/issue1426-swarm-witness-20261119/pairs.tsv），9011 根原始 K 线不在本仓，不声称逐根复放。",
-    "pending_prefix_center_301": {
-      "synthetic_unit_indices": true,
-      "note": "窗口单元下标为合成连续编号，成员总数 11 与冻结 CC-016（segment:1:301..989）及突破段 segment:1:1212 对齐，外缘 DD/GG 未定义。",
-      "anchor": 301,
-      "window_index": 0,
-      "member_units": [0, 11],
-      "member_count": 11,
-      "break_unit": 11,
-      "actual_member_ids": [
-        "segment:1:301",
-        "segment:1:347",
-        "segment:1:429",
-        "segment:1:558",
-        "segment:1:653",
-        "segment:1:678",
-        "segment:1:709",
-        "segment:1:775",
-        "segment:1:856",
-        "segment:1:937",
-        "segment:1:989"
-      ],
-      "connector_to_1262": {
-        "label": "segment:1:1212",
-        "anchor": 1212,
-        "unit_index": 11,
-        "start_index": 1212,
-        "end_index": 1262,
-        "direction": "DOWN",
-        "lo": 18093,
-        "hi": 20221
-      }
-    },
-    "centers": [
-      {
-        "label": "A_1262",
-        "anchor": 1262,
-        "dd": 18093,
-        "zd": 19847,
-        "zg": 20927,
-        "gg": 24098,
-        "start_index": 1262,
-        "end_index": 1489
-      },
-      {
-        "label": "B_1527",
-        "anchor": 1527,
-        "dd": 23290,
-        "zd": 24895,
-        "zg": 25751,
-        "gg": 33743,
-        "start_index": 1527,
-        "end_index": 1815
-      },
-      {
-        "label": "C_1883",
-        "anchor": 1883,
-        "dd": 32149,
-        "zd": 49616,
-        "zg": 50568,
-        "gg": 53684,
-        "start_index": 1883,
-        "end_index": 2558
-      }
-    ],
-    "connectors": [
-      {
-        "label": "segment:1:1489",
-        "start_index": 1489,
-        "end_index": 1527,
-        "direction": "DOWN",
-        "lo": 23290,
-        "hi": 24098
-      },
-      {
-        "label": "segment:1:1815",
-        "start_index": 1815,
-        "end_index": 1883,
-        "direction": "DOWN",
-        "lo": 32149,
-        "hi": 33743
-      }
-    ],
-    "expected": {
-      "ab_core_gap": 3968,
-      "ab_outer_diff": -808,
-      "ab_leaf": "UP_EXPANSION",
-      "bc_core_gap": 23865,
-      "bc_outer_diff": -1594,
-      "bc_leaf": "UP_EXPANSION",
-      "non_adjacent_ac_outer_diff": 8051,
-      "chain_formation_kind": "HANDOFF_TO_UPPER_LEVEL"
+      "leaf_at_202": "DOWN_EXPANSION"
     }
   }
 }

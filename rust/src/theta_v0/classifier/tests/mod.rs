@@ -11,4 +11,3 @@ mod pipeline_geometry;
 mod rebase_txn;
 mod third_class_anchor;
 mod tower_policy;
-mod trend_formation_1426;
