@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""#1640 §2.3 第 2 层：s_incremental 生产构建不含测试钩子（源码机检，不编译）。
+r"""#1640 §2.3 第 2 层：s_incremental 生产构建不含测试钩子（源码机检，不编译）。
 
 扫描本 PR 写集（`PR_WRITE_SET`，含 `rust/src/bin/s_structure_session.rs`）及其模块目录
 （`MODULE_DIRS`）里名字像测试钩子的 `fn` / `static` / `thread_local!`。cfg 门由小型求值器
@@ -11,6 +11,8 @@ test=false 求值；任一集合为真即生产可达，判违规。未知谓词
 或其他表达式——后者记为不可解析，名单外即违规），增量生产构建可达的只准读 PRODUCTION_ENV，
 默认构建另准 DEFAULT_BUILD_ONLY_ENV / DEFAULT_BUILD_ONLY_ENV_ARGS；改函数名绕不过此轴。
 已知盲区：`use std::env::var` 后裸调 `var(..)`、别名 `use std::env as e`、turbofish、`env::vars()` 遍历。
+第三条轴（#2009 方向 1）：沿同一 crate 模块图检查管辖面内生产可达字符串字面量，
+禁止出现 `SAVEPOINT`、`ROLLBACK TO` 或对 `schema_version` 的赋值（`schema_version\s*=(?!=)`）。
 
 用法：python3 .github/scripts/check-prod-no-test-hooks.py [仓根]
 exit 0 = 无违规；exit 1 = 有违规（逐条打出 文件:行）。
@@ -150,6 +152,10 @@ DEFAULT_BUILD_ONLY_ENV_ARGS: dict[str, set[str]] = {
     "rust/src/bin/s_session_v3/s_allocation.rs": {"name"},
 }
 NON_LITERAL = "<非字面量参数 "
+# 第三条轴（#2009 方向 1）：生产可达字符串字面量禁含 SAVEPOINT、ROLLBACK TO 或 schema_version 写。
+RAW_SQL_PATTERN = re.compile(r"\bsavepoint\b|\brollback\s+to\b|\bschema_version\s*=(?!=)", re.I)
+_RAW_STR_HEAD = re.compile(r'(?:b|c)?r(#*)"')
+_WS = re.compile(r"\s+")
 
 
 def parse_cfg(text: str):
@@ -287,11 +293,99 @@ def load_gen():
     return _GEN
 
 
-def env_violations(root: Path) -> list[str]:
+def _string_literal_lines(text: str, gen) -> list[int]:
+    """按与 gen.lex 一致的词法顺序，返回每个字符串字面量的 1-based 起始行号。"""
+    lines: list[int] = []
+    index, size, line = 0, len(text), 1
+    while index < size:
+        char = text[index]
+        if char.isspace():
+            end = _WS.match(text, index).end()
+            line += text.count("\n", index, end)
+            index = end
+        elif char == "/" and text.startswith("//", index):
+            end = text.find("\n", index)
+            index = size if end < 0 else end
+        elif char == "/" and text.startswith("/*", index):
+            depth, end = 1, index + 2
+            while depth and end < size:
+                if text.startswith("/*", end):
+                    depth, end = depth + 1, end + 2
+                elif text.startswith("*/", end):
+                    depth, end = depth - 1, end + 2
+                else:
+                    end += 1
+            line += text.count("\n", index, end)
+            index = end
+        elif char == "#" and (text.startswith("[", index + 1) or text.startswith("![", index + 1)):
+            end = text.index("[", index) + 1
+            depth = 1
+            while depth:
+                if text[end] == '"':
+                    end = gen.skip_string(text, end)
+                    continue
+                depth += {"[": 1, "]": -1}.get(text[end], 0)
+                end += 1
+            line += text.count("\n", index, end)
+            index = end
+        else:
+            raw = _RAW_STR_HEAD.match(text, index) if char in "bcr" else None
+            if raw and (index == 0 or not (text[index - 1].isalnum() or text[index - 1] == "_")):
+                lines.append(line)
+                hashes = raw.group(1)
+                end = text.index('"' + hashes, raw.end()) + 1 + len(hashes)
+                line += text.count("\n", index, end)
+                index = end
+            elif char == '"' or (char in "bc" and text[index + 1 : index + 2] == '"'):
+                lines.append(line)
+                quote = index if char == '"' else index + 1
+                end = gen.skip_string(text, quote)
+                line += text.count("\n", index, end)
+                index = end
+            elif char == "'":
+                if text[index + 1 : index + 2] == "\\":
+                    end = text.index("'", index + 3) + 1
+                elif index + 2 < size and text[index + 2] == "'":
+                    end = index + 3
+                else:
+                    end = index + 1
+                line += text.count("\n", index, end)
+                index = end
+            elif (match := gen.IDENT.match(text, index)):
+                index = match.end()
+            else:
+                index += 1
+    return lines
+
+
+def _walk_crate_graph(root: Path) -> tuple[list, list[tuple[Path, list]]]:
+    """复用 gen 的 crate 模块图遍历与 cfg 链求值，一次产出环境变量读取与管辖面字面量。"""
+    gen = load_gen()
+    root = root.resolve()
+    queue = [(root / crate, [], True) for crate in gen.CRATE_ROOTS]
+    seen: set[Path] = set()
+    env_reads: list = []
+    scoped_files: list[tuple[Path, list]] = []
+    while queue:
+        path, chain, is_dir_owner = queue.pop(0)
+        path = path.resolve()
+        if path in seen or not path.is_file():
+            continue
+        seen.add(path)
+        file_literals: list = []
+        gen.walk(path, chain, is_dir_owner, file_literals, queue, env_reads)
+        if gen.in_scope(root, path):
+            scoped_files.append((path, file_literals))
+    return env_reads, scoped_files
+
+
+def env_violations(root: Path, reads: list | None = None) -> list[str]:
     """沿 crate 模块图（含 `#[cfg] mod x;` 与 fn/块作用域）求每处环境变量读取的 cfg 链。"""
     gen = load_gen()
-    reads: list = []
-    gen.collect(root, reads)
+    root = root.resolve()
+    if reads is None:
+        reads = []
+        gen.collect(root, reads)
     violations = []
     for name, chain, path in reads:
         if not gen.in_scope(root, path.resolve()) or name in PRODUCTION_ENV:
@@ -302,6 +396,32 @@ def env_violations(root: Path) -> list[str]:
         elif (gen.reachable(chain, DEFAULT_BUILD, False) and name not in DEFAULT_BUILD_ONLY_ENV
               and name.removeprefix(NON_LITERAL).rstrip(">") not in DEFAULT_BUILD_ONLY_ENV_ARGS.get(rel, set())):
             violations.append(f"{rel}: 环境变量 {name} 在默认 s_session 构建可达（未列入 DEFAULT_BUILD_ONLY_ENV）")
+    return violations
+
+
+def raw_sql_violations(root: Path, scoped_files: list[tuple[Path, list]] | None = None) -> list[str]:
+    """#2009 第三条轴：管辖面内生产可达字符串字面量禁含 SAVEPOINT / ROLLBACK TO / schema_version 写。"""
+    gen = load_gen()
+    root = root.resolve()
+    if scoped_files is None:
+        _, scoped_files = _walk_crate_graph(root)
+    violations: list[str] = []
+    for path, file_literals in scoped_files:
+        hits = [
+            (index, match.group(0))
+            for index, (value, chain) in enumerate(file_literals)
+            if value is not None
+            and (match := RAW_SQL_PATTERN.search(value)) is not None
+            and any(gen.reachable(chain, features, test) for features, test in gen.PRODUCTION)
+        ]
+        if not hits:
+            continue
+        lines = _string_literal_lines(path.read_text(encoding="utf-8"), gen)
+        rel = path.resolve().relative_to(root).as_posix()
+        for index, matched in hits:
+            violations.append(
+                f"{rel}:{lines[index]}: 生产可达字符串字面量含禁用裸 SQL 模式（{matched}，#2009）"
+            )
     return violations
 
 
@@ -320,7 +440,9 @@ def main() -> int:
                 continue
             seen.add(path)
             violations.extend(scan(path, path.relative_to(root).as_posix()))
-    violations.extend(env_violations(root))
+    env_reads, scoped_files = _walk_crate_graph(root)
+    violations.extend(env_violations(root, env_reads))
+    violations.extend(raw_sql_violations(root, scoped_files))
     for violation in violations:
         print(f"::error::{violation}")
     print(f"check-prod-no-test-hooks violations={len(violations)}")
