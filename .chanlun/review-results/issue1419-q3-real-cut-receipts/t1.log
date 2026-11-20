@@ -2,7 +2,7 @@ TAP version 13
 # Subtest: 真实S3 W：导出出自 W 唯一写者规则串且恢复后写者纪元为2
 ok 1 - 真实S3 W：导出出自 W 唯一写者规则串且恢复后写者纪元为2
   ---
-  duration_ms: 0.360334
+  duration_ms: 0.392708
   type: 'test'
   ...
 1..1
@@ -13,22 +13,22 @@ ok 1 - 真实S3 W：导出出自 W 唯一写者规则串且恢复后写者纪元
 # cancelled 0
 # skipped 0
 # todo 0
-# duration_ms 513.973791
-        0.55 real         0.63 user         0.12 sys
-           694370304  maximum resident set size
+# duration_ms 465.112625
+        0.51 real         0.61 user         0.08 sys
+           692912128  maximum resident set size
                    0  average shared memory size
                    0  average unshared data size
                    0  average unshared stack size
-               46602  page reclaims
-                   3  page faults
+               47046  page reclaims
+                   1  page faults
                    0  swaps
                    0  block input operations
                    0  block output operations
                   15  messages sent
-                   4  messages received
+                   5  messages received
                    0  signals received
-                   1  voluntary context switches
-                3177  involuntary context switches
-           457410896  instructions retired
-           182816484  cycles elapsed
-            17024992  peak memory footprint
+                  21  voluntary context switches
+                2114  involuntary context switches
+           598893260  instructions retired
+           222016257  cycles elapsed
+            21351040  peak memory footprint

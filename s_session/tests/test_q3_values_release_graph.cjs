@@ -143,20 +143,27 @@ if (process.env.Q3_RELEASE_GRAPH_PROBE === "1") {
 
   test("Reader 对全值域与跨片读取产出逐值一致结果并完成闭包核验", async () => {
     const jt = await C.encodeJSONText('{"inner_bool_f":false,"inner_bool_t":true,"k":"v"}');
+    const exactNumToken = "9007199254740993";
+    const exactNum = await C.encode({ t: "number", token: exactNumToken });
     const sample = {
       b_true: true,
       b_false: false,
       nil: null,
       str: "alpha-beta-".repeat(25),
-      num_text: "9007199254740993",
+      num: C.refEdge(exactNum.ref),
       arr: [true, false, null, "x", "y", "z", { nested: true }],
       embedded: C.refEdge(jt.ref),
     };
-    const src = await buildMockContentSource(sample, jt.nodes);
+    const src = await buildMockContentSource(sample, [...jt.nodes, ...exactNum.nodes]);
     const stored = new Set();
+    let numPages = 0;
     const reader = new V.Reader({
       anchor: src.anchor,
-      request: src.request,
+      request: async (req) => {
+        const rep = await src.request(req);
+        if (rep.target_ref.root === exactNum.ref.root) numPages++;
+        return rep;
+      },
       check: () => {},
       accept: async () => {},
       store: async (n) => stored.add(n.root),
@@ -173,7 +180,12 @@ if (process.env.Q3_RELEASE_GRAPH_PROBE === "1") {
     assert.equal(await (await rootVal.field("b_false")).scalar(), false);
     assert.equal(await (await rootVal.field("nil")).scalar(), null);
     assert.equal(await (await rootVal.field("str")).scalar(), sample.str);
-    assert.equal(await (await rootVal.field("num_text")).scalar(), sample.num_text);
+    const numVal = await rootVal.field("num");
+    const numScalar = await numVal.scalar();
+    assert.equal(numVal.kind, "number");
+    assert.ok(V.isNumber(numScalar));
+    assert.equal(numScalar.token, exactNumToken);
+    assert.equal(numPages, 8);
     assert.equal(
       await (await rootVal.field("embedded")).scalar(),
       '{"inner_bool_f":false,"inner_bool_t":true,"k":"v"}',
