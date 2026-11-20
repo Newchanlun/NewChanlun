@@ -57,6 +57,8 @@ _SPEC.loader.exec_module(_checker)
 
 ESCAPES = {"n": "\n", "t": "\t", "r": "\r", "0": "\0", "\\": "\\", '"': '"', "'": "'"}
 IDENT = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
+RAW_STR = re.compile(r'(?:b|c)?r(#*)"')
+WS = re.compile(r"\s+")
 
 
 def outcomes(tree, features, test) -> frozenset:
@@ -125,11 +127,11 @@ def lex(text: str):
     while index < size:
         char = text[index]
         if char.isspace():
-            index += 1
-        elif text.startswith("//", index):
+            index = WS.match(text, index).end()
+        elif char == "/" and text.startswith("//", index):
             index = text.find("\n", index)
             index = size if index < 0 else index
-        elif text.startswith("/*", index):
+        elif char == "/" and text.startswith("/*", index):
             depth, index = 1, index + 2
             while depth and index < size:
                 if text.startswith("/*", index):
@@ -148,14 +150,14 @@ def lex(text: str):
                     continue
                 depth += {"[": 1, "]": -1}.get(text[index], 0)
                 index += 1
-            yield ("attr", re.sub(r"\s+", " ", text[start:index]))
+            yield ("attr", WS.sub(" ", text[start:index]))
         else:
-            raw = re.match(r'(?:b|c)?r(#*)"', text[index:])
+            raw = RAW_STR.match(text, index) if char in "bcr" else None
             if raw and (index == 0 or not (text[index - 1].isalnum() or text[index - 1] == "_")):
                 hashes = raw.group(1)
-                start = index + raw.end()
+                start = raw.end()
                 end = text.index('"' + hashes, start)
-                byte = text[index] == "b"
+                byte = char == "b"
                 yield ("str", None if byte else text[start:end])
                 index = end + 1 + len(hashes)
             elif char == '"' or (char in "bc" and text[index + 1 : index + 2] == '"'):
@@ -170,8 +172,8 @@ def lex(text: str):
                     index += 3
                 else:
                     index += 1
-            elif IDENT.match(text, index):
-                name = IDENT.match(text, index).group(0)
+            elif (match := IDENT.match(text, index)):
+                name = match.group(0)
                 yield ("ident", name)
                 index += len(name)
             else:
@@ -210,18 +212,20 @@ def walk(path: Path, chain, is_dir_owner: bool, literals: list, queue: list, env
                 consts[head[names[-1] + 1][1]] = value
     file_chain = list(chain)
     frames: list[tuple[list, int]] = []
+    scope = list(file_chain)
     pending: list[tuple[object, int]] = []
     explicit_path = None
     depth = 0
     signature = False  # fn 签名内（到 `{`/`;` 为止）：返回类型泛型里的逗号不结束该 fn 的 cfg
     for position, (kind, value) in enumerate(tokens):
-        scope = file_chain + [tree for gates, _ in frames for tree in gates]
         if kind == "attr":
             if value.startswith("#![cfg("):
-                file_chain.append(parse_attr(value))
+                gate = parse_attr(value)
+                file_chain.append(gate)
+                scope.insert(len(file_chain) - 1, gate)
             elif value.startswith("#[cfg("):
                 pending.append((parse_attr(value), depth))
-            elif re.match(r'#\[path = "', value):
+            elif value.startswith('#[path = "'):
                 explicit_path = value.split('"')[1]
         elif kind == "str":
             literals.append((value, scope + [tree for tree, _ in pending]))
@@ -245,10 +249,15 @@ def walk(path: Path, chain, is_dir_owner: bool, literals: list, queue: list, env
             elif value == "," and not signature:
                 pending = [(tree, at) for tree, at in pending if at < depth]
             elif value == "{":
-                frames.append(([tree for tree, _ in pending], depth))
+                pushed = [tree for tree, _ in pending]
+                frames.append((pushed, depth))
+                if pushed:
+                    scope.extend(pushed)
                 pending, explicit_path = [], None
             elif value == "}":
                 gates, depth = frames.pop() if frames else ([], 0)
+                if gates:
+                    del scope[len(scope) - len(gates) :]
                 following = tokens[position + 1] if position + 1 < len(tokens) else None
                 pending = [(tree, depth) for tree in gates] if following == ("ident", "else") else []
             elif value == ";":
