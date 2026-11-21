@@ -1,0 +1,282 @@
+{
+  "18c8569c9d02bcf61cb2fa8994bb8b5ee22c32e7": {
+    "changed_graph_paths": [],
+    "parent": "a8018a2bb3f04b3dfd9fba1b648eb27bc947f85d"
+  },
+  "1b125af68ac1ceef7fb1693dbd352aa40c502f77": {
+    "changed_graph_paths": [
+      ".github/1488-uo-locks.txt",
+      ".github/1488-uo-release-locks.txt",
+      ".github/devskim-reviewed-1488.json",
+      ".github/scripts/run-1488-driver-ci.py",
+      ".github/workflows/ci.yml",
+      ".github/workflows/issue-1488-driver-six.yml",
+      ".github/workflows/issue-1488-uo-iter.yml",
+      ".github/workflows/issue-1552-c1.yml",
+      ".github/workflows/s4-read-trace-29ad.yml",
+      "rust/src/bin/s_session_v3/driver.rs"
+    ],
+    "parent": "ddacd324ba36dd70d0a40dc5f496d281572be8c6"
+  },
+  "2267aa7584d36bd53db43cb665e7bea665ed5aba": {
+    "changed_graph_paths": [
+      ".github/devskim-baseline.json"
+    ],
+    "parent": "8ac2521bd7c784b730d08a29943541c97753abd4"
+  },
+  "2db67fdafe2d4f5d565bb01b13e071b82067f673": {
+    "changed_graph_paths": [],
+    "parent": "a9e689b0e4dd1516181314557aadef45693a5da2"
+  },
+  "3cd162ea4c3c8c73a0d6b8c6866894a0204e78bc": {
+    "changed_graph_paths": [
+      ".github/workflows/ci-macos.yml",
+      ".github/workflows/ci.yml",
+      "rust/src/bin/x_execution_session.rs",
+      "rust/src/economic_session/book.rs",
+      "rust/src/economic_session/mod.rs",
+      "rust/src/economic_session/service.rs",
+      "rust/src/economic_session/tb03c_e.rs",
+      "rust/src/lib.rs"
+    ],
+    "parent": "f04287f897972b60541f2214ea37117ec0756bb8"
+  },
+  "3eb179b16a2081ba6813618a19f35aaa29bdc9dd": {
+    "changed_graph_paths": [
+      "rust/src/bin/s_session_v3/audit_owner.rs",
+      "rust/src/bin/s_session_v3/driver.rs"
+    ],
+    "parent": "569366e0c27af60c145acfe91a77463057a4bd31"
+  },
+  "3f70f9e8e435dfca311fe4d440e4e5e5d1d92a8a": {
+    "changed_graph_paths": [
+      ".chanlun/definitions/qujiantao.md",
+      ".chanlun/definitions/xianduan.md",
+      ".github/devskim-baseline.json",
+      ".github/workflows/devskim.yml",
+      "docs/adr/0039-production-entry-inventory-and-unique-launcher.md"
+    ],
+    "parent": "eca793e99b6af1f594e93251aabdf94870ec598e"
+  },
+  "40ce4c56b9780390b5ebaca7c711ca253d0be44b": {
+    "changed_graph_paths": [
+      ".sandcastle/decision-claimer.mts",
+      "CONTEXT.md",
+      "docs/adr/0022-acceptance-criterion-parameters.md",
+      "docs/adr/0039-production-entry-inventory-and-unique-launcher.md",
+      "docs/adr/0048-legacy-engine-module-level-dispositions.md",
+      "docs/agents/generation-constitution.md",
+      "rust/src/fugue_v3/mod.rs",
+      "rust/src/lib.rs",
+      "rust/src/recursive_t/rec_engine.rs",
+      "rust/src/recursive_t/stream.rs",
+      "rust/src/trading/mod.rs"
+    ],
+    "parent": "5d8c421a906727d39177f4412f8f101fa7b6b2cd"
+  },
+  "4bfce0c6571657e9a5da8a34ab57105a82c0fd0b": {
+    "changed_graph_paths": [
+      "rust/src/bin/s_session_v3/driver.rs"
+    ],
+    "parent": "8415a413b5f6765c5e8c1bbbea4fd82ce3222fa9"
+  },
+  "4e82578aa384da6d81fdea23e57d87edde63db51": {
+    "changed_graph_paths": [
+      ".github/workflows/ci.yml"
+    ],
+    "parent": "3eb179b16a2081ba6813618a19f35aaa29bdc9dd"
+  },
+  "569366e0c27af60c145acfe91a77463057a4bd31": {
+    "changed_graph_paths": [],
+    "parent": "8086ceba2a4162ba649175dcfa129ec83dd2bf4c"
+  },
+  "594856a9212c0a533d9d990a71b366668fc26b24": {
+    "changed_graph_paths": [
+      ".github/devskim-reviewed-1488.json"
+    ],
+    "parent": "df12751ee35f21d63a15fdec453d9745eede8070"
+  },
+  "5d8c421a906727d39177f4412f8f101fa7b6b2cd": {
+    "changed_graph_paths": [],
+    "parent": "d10bd3b51e642cd68288dd3d6958491f538593a7"
+  },
+  "67f63591bd2f6d3b73b108d9a5a87d25511b3368": {
+    "changed_graph_paths": [
+      ".sandcastle/decision-claimer.mts"
+    ],
+    "parent": "bd54d4b28ec4f83d596837f84f1f861dd085124c"
+  },
+  "6c3e21dd27ecad6c8bc99321193bf04f43a86309": {
+    "changed_graph_paths": [
+      ".github/workflows/ci.yml"
+    ],
+    "parent": "4e82578aa384da6d81fdea23e57d87edde63db51"
+  },
+  "7012ddb24791abe65051c97842215fd0c4306119": {
+    "changed_graph_paths": [],
+    "parent": "8a6fb694742e68d59a5ad073c40ea521d4a8a657"
+  },
+  "71249892232fd4fbdd6b0d595cb4aafb10bf04bb": {
+    "changed_graph_paths": [
+      ".github/workflows/ci.yml",
+      ".github/workflows/devskim.yml"
+    ],
+    "parent": "18c8569c9d02bcf61cb2fa8994bb8b5ee22c32e7"
+  },
+  "7caf9b39f1dd4d3e12204d11cb13b3730dc4c9ce": {
+    "changed_graph_paths": [
+      ".github/devskim-reviewed-1488.json",
+      ".github/workflows/ci.yml"
+    ],
+    "parent": "83c4d9c975126f74f08fee556a271144f4cc24a9"
+  },
+  "8086ceba2a4162ba649175dcfa129ec83dd2bf4c": {
+    "changed_graph_paths": [],
+    "parent": "dc138be710c4b062219643756c3b7d5ab52fba3d"
+  },
+  "83c4d9c975126f74f08fee556a271144f4cc24a9": {
+    "changed_graph_paths": [
+      ".sandcastle/deepagents-pilot/pilot1742/review_sweep.py",
+      ".sandcastle/deepagents-pilot/tests/test_review_sweep.py"
+    ],
+    "parent": "67f63591bd2f6d3b73b108d9a5a87d25511b3368"
+  },
+  "8415a413b5f6765c5e8c1bbbea4fd82ce3222fa9": {
+    "changed_graph_paths": [],
+    "parent": "c112bdad83a5abcca43c85b11cbdba7b8a7fa4ce"
+  },
+  "8a6fb694742e68d59a5ad073c40ea521d4a8a657": {
+    "changed_graph_paths": [],
+    "parent": "40ce4c56b9780390b5ebaca7c711ca253d0be44b"
+  },
+  "8ac2521bd7c784b730d08a29943541c97753abd4": {
+    "changed_graph_paths": [
+      "CONTEXT.md",
+      "docs/adr/0039-production-entry-inventory-and-unique-launcher.md",
+      "docs/adr/0048-legacy-engine-module-level-dispositions.md"
+    ],
+    "parent": "998ed47036122251ca8ef37ae75a380b524e71e7"
+  },
+  "923d5f1187fefc549f810643390068884c36ba9e": {
+    "changed_graph_paths": [],
+    "parent": "594856a9212c0a533d9d990a71b366668fc26b24"
+  },
+  "998ed47036122251ca8ef37ae75a380b524e71e7": {
+    "changed_graph_paths": [
+      ".github/workflows/ci.yml"
+    ],
+    "parent": "f4f03cade5813b0ac4cc2c8541a843b89c53961d"
+  },
+  "a8018a2bb3f04b3dfd9fba1b648eb27bc947f85d": {
+    "changed_graph_paths": [
+      ".github/scripts/run-1488-delta-ci.py",
+      ".github/scripts/test_run_1488_delta_ci.py",
+      ".github/workflows/ci.yml"
+    ],
+    "parent": "2267aa7584d36bd53db43cb665e7bea665ed5aba"
+  },
+  "a9e689b0e4dd1516181314557aadef45693a5da2": {
+    "changed_graph_paths": [
+      ".github/devskim-reviewed-1488.json",
+      ".sandcastle/codex-child.ts"
+    ],
+    "parent": "b5c0009a48ec594712f6326d2ccfdaabcd39f2bd"
+  },
+  "b5c0009a48ec594712f6326d2ccfdaabcd39f2bd": {
+    "changed_graph_paths": [
+      ".chanlun/review-results/issue1538-decision-20261028/closeout-receipts.md",
+      ".chanlun/review-results/issue1538-decision-20261028/review1796.json",
+      ".chanlun/review-results/issue1538-decision-20261028/review1796.md"
+    ],
+    "parent": "7012ddb24791abe65051c97842215fd0c4306119"
+  },
+  "b9d898dccf46c2a716115eaa1215bc39c458a959": {
+    "changed_graph_paths": [
+      ".github/devskim-reviewed-1488.json",
+      "rust/src/economic_session/domain_event.rs",
+      "rust/src/economic_session/finance.rs",
+      "rust/src/economic_session/finance_tests.rs",
+      "rust/src/economic_session/mod.rs",
+      "rust/src/economic_session/service.rs",
+      "rust/src/economic_session/store.rs"
+    ],
+    "parent": "ed780bcd4a6f667c29107e0c9d8ce3b8856beecb"
+  },
+  "bd54d4b28ec4f83d596837f84f1f861dd085124c": {
+    "changed_graph_paths": [
+      ".github/devskim-reviewed-1488.json",
+      ".sandcastle/README.md",
+      ".sandcastle/decision-claimer.mts",
+      ".sandcastle/main-swarm.mts",
+      ".sandcastle/main.mts",
+      "CONTEXT.md",
+      "docs/adr/0035-cost-stop-policy-instance-and-base-extension-evidence.md",
+      "docs/adr/0056-three-mode-shared-core-adapter-boundary.md",
+      "scripts/wayfinder_engine.shell.test.mts"
+    ],
+    "parent": "b5cd3fee352e5f7199233de628da05ff06c5798f"
+  },
+  "c112bdad83a5abcca43c85b11cbdba7b8a7fa4ce": {
+    "changed_graph_paths": [
+      ".github/workflows/ci.yml"
+    ],
+    "parent": "6c3e21dd27ecad6c8bc99321193bf04f43a86309"
+  },
+  "d10bd3b51e642cd68288dd3d6958491f538593a7": {
+    "changed_graph_paths": [],
+    "parent": "923d5f1187fefc549f810643390068884c36ba9e"
+  },
+  "dc138be710c4b062219643756c3b7d5ab52fba3d": {
+    "changed_graph_paths": [],
+    "parent": "1b125af68ac1ceef7fb1693dbd352aa40c502f77"
+  },
+  "ddacd324ba36dd70d0a40dc5f496d281572be8c6": {
+    "changed_graph_paths": [
+      ".chanlun/review-results/issue1394-content-v3-20260916/inputs/content-format-vectors.json",
+      ".github/devskim-baseline.json",
+      "rust/src/s_content.rs",
+      "rust/tests/s_content_contract.rs",
+      "rust/tests/s_content_sequence.rs",
+      "s_session/tests/test_s_content_job_v3.cjs",
+      "s_session/tests/test_s_content_v3.cjs"
+    ],
+    "parent": "3cd162ea4c3c8c73a0d6b8c6866894a0204e78bc"
+  },
+  "df12751ee35f21d63a15fdec453d9745eede8070": {
+    "changed_graph_paths": [
+      ".github/workflows/ci.yml"
+    ],
+    "parent": "3f70f9e8e435dfca311fe4d440e4e5e5d1d92a8a"
+  },
+  "eca793e99b6af1f594e93251aabdf94870ec598e": {
+    "changed_graph_paths": [
+      ".github/scripts/run-1488-delta-ci.py",
+      ".github/scripts/test_run_1488_delta_ci.py"
+    ],
+    "parent": "f9501449cefd134579c3df31406c0431784061e9"
+  },
+  "ed780bcd4a6f667c29107e0c9d8ce3b8856beecb": {
+    "changed_graph_paths": [],
+    "parent": "2db67fdafe2d4f5d565bb01b13e071b82067f673"
+  },
+  "f04287f897972b60541f2214ea37117ec0756bb8": {
+    "changed_graph_paths": [
+      ".sandcastle/README.md",
+      ".sandcastle/deepagents-pilot/pilot1742/review_sweep.py",
+      ".sandcastle/deepagents-pilot/tests/test_review_sweep.py"
+    ],
+    "parent": "71249892232fd4fbdd6b0d595cb4aafb10bf04bb"
+  },
+  "f4f03cade5813b0ac4cc2c8541a843b89c53961d": {
+    "changed_graph_paths": [
+      "s_session/tests/issue1527_recovery/native_n1_tests.rs"
+    ],
+    "parent": "7caf9b39f1dd4d3e12204d11cb13b3730dc4c9ce"
+  },
+  "f9501449cefd134579c3df31406c0431784061e9": {
+    "changed_graph_paths": [
+      ".github/workflows/ci.yml"
+    ],
+    "parent": "4bfce0c6571657e9a5da8a34ab57105a82c0fd0b"
+  }
+}

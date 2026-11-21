@@ -1,0 +1,6902 @@
+[
+  {
+    "commit": "6dc7cd0c87e9d5222d721d3a4941897dcc1eabb7",
+    "declared": [],
+    "epoch": 1794158598,
+    "mentions": [
+      1381
+    ],
+    "parent": "beec08218e1cd74e8f619cad14e71acce1a81681",
+    "prs": [
+      1914
+    ],
+    "references": [
+      {
+        "ticket": 1381,
+        "url": "https://github.com/Newchanlun/NewChanlun/pull/1914"
+      }
+    ],
+    "subject": "Merge pull request #1914 from Newchanlun/codex/1774-replay-v3-20261107",
+    "tb_markers": []
+  },
+  {
+    "commit": "722b1da086a354baa1f63946f6951b619cbd9b6e",
+    "declared": [
+      1978
+    ],
+    "epoch": 1794150171,
+    "mentions": [
+      1393,
+      1978
+    ],
+    "parent": "7e76a033cec435df33c639f96127fe7db6d65c9a",
+    "prs": [
+      1987
+    ],
+    "references": [
+      {
+        "ticket": 1393,
+        "url": "https://github.com/Newchanlun/NewChanlun/pull/1987"
+      },
+      {
+        "ticket": 1493,
+        "url": "https://github.com/Newchanlun/NewChanlun/pull/1987"
+      },
+      {
+        "ticket": 1978,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1978#issuecomment-6717106199"
+      },
+      {
+        "ticket": 1978,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1978#issuecomment-6717149079"
+      },
+      {
+        "ticket": 1978,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1978#issuecomment-6719732687"
+      },
+      {
+        "ticket": 1978,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1978#issuecomment-6986102332"
+      },
+      {
+        "ticket": 1978,
+        "url": "https://github.com/Newchanlun/NewChanlun/pull/1987"
+      }
+    ],
+    "subject": "Merge pull request #1987 from Newchanlun/opus/1978-first-segment-feature-start",
+    "tb_markers": []
+  },
+  {
+    "commit": "6cd2f8a5f84d257d026096385bf58a13c938edb9",
+    "declared": [
+      1488
+    ],
+    "epoch": 1794130020,
+    "mentions": [
+      1488
+    ],
+    "parent": "fd7ee9aacc4dc881e12097eaef35f06f35b343bf",
+    "prs": [
+      1997
+    ],
+    "references": [],
+    "subject": "Merge pull request #1997 from Newchanlun/hillclimb/1488-lpt-followup",
+    "tb_markers": []
+  },
+  {
+    "commit": "6d4d066058c978bfcd1471bd68aef2a3a79628d5",
+    "declared": [],
+    "epoch": 1794118059,
+    "mentions": [
+      1488
+    ],
+    "parent": "95864d0ba8da25e34a256f2d0a259050f13f028c",
+    "prs": [
+      1990
+    ],
+    "references": [
+      {
+        "ticket": 1488,
+        "url": "https://github.com/Newchanlun/NewChanlun/pull/1990"
+      }
+    ],
+    "subject": "Merge pull request #1990 from Newchanlun/hillclimb/batch-12",
+    "tb_markers": []
+  },
+  {
+    "commit": "bf42ad905856dbf8ccc5b315a242366db76098a4",
+    "declared": [],
+    "epoch": 1794108728,
+    "mentions": [],
+    "parent": "6a97845bf19f302b7b247b3d9c2c6ace9f31cddb",
+    "prs": [
+      1940
+    ],
+    "references": [
+      {
+        "ticket": 1606,
+        "url": "https://github.com/Newchanlun/NewChanlun/pull/1940"
+      }
+    ],
+    "subject": "Merge pull request #1940 from Newchanlun/review/1937-identity",
+    "tb_markers": []
+  },
+  {
+    "commit": "6a97845bf19f302b7b247b3d9c2c6ace9f31cddb",
+    "declared": [],
+    "epoch": 1794103839,
+    "mentions": [],
+    "parent": "c7ef5c5d91b927ba7bf42290a4708514596c190b",
+    "prs": [
+      1976
+    ],
+    "references": [],
+    "subject": "Merge pull request #1976 from Newchanlun/hillclimb/tb02w-design-cuts",
+    "tb_markers": [
+      "TB-02-W"
+    ]
+  },
+  {
+    "commit": "c7ef5c5d91b927ba7bf42290a4708514596c190b",
+    "declared": [],
+    "epoch": 1794099127,
+    "mentions": [],
+    "parent": "f0492560977191c8a33e0a4eb767bacbabbc04d1",
+    "prs": [
+      1918
+    ],
+    "references": [
+      {
+        "ticket": 1488,
+        "url": "https://github.com/Newchanlun/NewChanlun/pull/1918"
+      }
+    ],
+    "subject": "Merge pull request #1918 from Newchanlun/hillclimb/ci-path-filter",
+    "tb_markers": []
+  },
+  {
+    "commit": "f0492560977191c8a33e0a4eb767bacbabbc04d1",
+    "declared": [],
+    "epoch": 1794090014,
+    "mentions": [
+      1481,
+      1645
+    ],
+    "parent": "0d145f3a3e81d54878b8df5340d034b4133ded33",
+    "prs": [
+      1912
+    ],
+    "references": [
+      {
+        "ticket": 1481,
+        "url": "https://github.com/Newchanlun/NewChanlun/pull/1912"
+      },
+      {
+        "ticket": 1645,
+        "url": "https://github.com/Newchanlun/NewChanlun/pull/1912"
+      }
+    ],
+    "subject": "Merge pull request #1912 from Newchanlun/hillclimb/untrack-tmp",
+    "tb_markers": []
+  },
+  {
+    "commit": "3d61fb72944f577ea3b758b54001c2a7544b04dc",
+    "declared": [],
+    "epoch": 1794004295,
+    "mentions": [
+      1488
+    ],
+    "parent": "9b436af2d2c1ef21c7c3c4378637ea14765d2e6d",
+    "prs": [
+      1906
+    ],
+    "references": [
+      {
+        "ticket": 1407,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1407#issuecomment-6698841364"
+      },
+      {
+        "ticket": 1488,
+        "url": "https://github.com/Newchanlun/NewChanlun/pull/1906"
+      },
+      {
+        "ticket": 1768,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1768#issuecomment-6697967730"
+      }
+    ],
+    "subject": "Merge pull request #1906 from xy7365527-lang/hillclimb/batch-1902-1894-1893",
+    "tb_markers": []
+  },
+  {
+    "commit": "9b436af2d2c1ef21c7c3c4378637ea14765d2e6d",
+    "declared": [],
+    "epoch": 1794002419,
+    "mentions": [],
+    "parent": "979da0c634c1fb75dde2023d3d2abe6515d1845a",
+    "prs": [
+      1905
+    ],
+    "references": [
+      {
+        "ticket": 1381,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1381#issuecomment-6697786422"
+      }
+    ],
+    "subject": "Merge pull request #1905 from xy7365527-lang/t3/decision-feedback-loop-repair",
+    "tb_markers": []
+  },
+  {
+    "commit": "9ae28877b3e697dfebaa367d42cd9c3e19ee1b2f",
+    "declared": [],
+    "epoch": 1793938643,
+    "mentions": [],
+    "parent": "bbfee65768a8dee69842fc9cf954fd36f17cb71a",
+    "prs": [
+      1884
+    ],
+    "references": [
+      {
+        "ticket": 1845,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1845#issuecomment-6677776654"
+      }
+    ],
+    "subject": "Merge pull request #1884 from xy7365527-lang/claude/1742-review-preflight",
+    "tb_markers": []
+  },
+  {
+    "commit": "bbfee65768a8dee69842fc9cf954fd36f17cb71a",
+    "declared": [],
+    "epoch": 1793932832,
+    "mentions": [
+      1716
+    ],
+    "parent": "115c7e7d6ccc576277331a98ebaaba4e0e3be22e",
+    "prs": [
+      1888
+    ],
+    "references": [
+      {
+        "ticket": 1716,
+        "url": "https://github.com/Newchanlun/NewChanlun/pull/1888"
+      }
+    ],
+    "subject": "Merge pull request #1888 from xy7365527-lang/hillclimb/ci-boat-opt2",
+    "tb_markers": []
+  },
+  {
+    "commit": "115c7e7d6ccc576277331a98ebaaba4e0e3be22e",
+    "declared": [],
+    "epoch": 1793912794,
+    "mentions": [
+      1488
+    ],
+    "parent": "895b8ac41366f72aafb423453203de9df8cfd1d9",
+    "prs": [
+      1885
+    ],
+    "references": [
+      {
+        "ticket": 1488,
+        "url": "https://github.com/Newchanlun/NewChanlun/pull/1885"
+      }
+    ],
+    "subject": "Merge pull request #1885 from xy7365527-lang/hillclimb/ci-boat",
+    "tb_markers": []
+  },
+  {
+    "commit": "c91fd3bc377bf64808f00bb0c482671d6e8d8238",
+    "declared": [],
+    "epoch": 1793624806,
+    "mentions": [],
+    "parent": "9c0e4e90cef5bf493732f371882f47c1e8c948d2",
+    "prs": [
+      1648
+    ],
+    "references": [
+      {
+        "ticket": 1608,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1608#issuecomment-6320353216"
+      }
+    ],
+    "subject": "test: restore standalone ForceL lock and macOS warnings gate (#1648)",
+    "tb_markers": []
+  },
+  {
+    "commit": "9c0e4e90cef5bf493732f371882f47c1e8c948d2",
+    "declared": [
+      1481
+    ],
+    "epoch": 1793623022,
+    "mentions": [
+      1481,
+      1647
+    ],
+    "parent": "67df861ee909efae902450b8f02b88e957f3a74c",
+    "prs": [
+      1838
+    ],
+    "references": [
+      {
+        "ticket": 1481,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1481#issuecomment-6987784360"
+      },
+      {
+        "ticket": 1481,
+        "url": "https://github.com/Newchanlun/NewChanlun/pull/1838"
+      },
+      {
+        "ticket": 1647,
+        "url": "https://github.com/Newchanlun/NewChanlun/pull/1838"
+      }
+    ],
+    "subject": "feat(history): 接通 H1 正式冷认证准入 (#1838)",
+    "tb_markers": []
+  },
+  {
+    "commit": "67df861ee909efae902450b8f02b88e957f3a74c",
+    "declared": [
+      1845
+    ],
+    "epoch": 1793586985,
+    "mentions": [
+      1845
+    ],
+    "parent": "d77a89b572ba3b3896d486f0fa5d02753d29a6f0",
+    "prs": [
+      1850
+    ],
+    "references": [
+      {
+        "ticket": 1845,
+        "url": "https://github.com/Newchanlun/NewChanlun/pull/1850"
+      }
+    ],
+    "subject": "归档写者准入实现的独审与验收证据",
+    "tb_markers": []
+  },
+  {
+    "commit": "d77a89b572ba3b3896d486f0fa5d02753d29a6f0",
+    "declared": [],
+    "epoch": 1793586952,
+    "mentions": [
+      1769,
+      1781
+    ],
+    "parent": "eab5dd106c42daf1ee5cbc3898a08898479e7f9b",
+    "prs": [
+      1843
+    ],
+    "references": [
+      {
+        "ticket": 1769,
+        "url": "https://github.com/Newchanlun/NewChanlun/pull/1843"
+      },
+      {
+        "ticket": 1781,
+        "url": "https://github.com/Newchanlun/NewChanlun/pull/1843"
+      }
+    ],
+    "subject": "归档生产会话布局裁定与验收证据",
+    "tb_markers": []
+  },
+  {
+    "commit": "eab5dd106c42daf1ee5cbc3898a08898479e7f9b",
+    "declared": [
+      1845
+    ],
+    "epoch": 1793580002,
+    "mentions": [
+      1845
+    ],
+    "parent": "876fab8fbf2ea5f20611f83690b6d01dcd614e1a",
+    "prs": [
+      1846
+    ],
+    "references": [
+      {
+        "ticket": 1845,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1845#issuecomment-6677776654"
+      },
+      {
+        "ticket": 1845,
+        "url": "https://github.com/Newchanlun/NewChanlun/pull/1846"
+      }
+    ],
+    "subject": "S 会话写锁内声明自核与入口隔离",
+    "tb_markers": []
+  },
+  {
+    "commit": "876fab8fbf2ea5f20611f83690b6d01dcd614e1a",
+    "declared": [],
+    "epoch": 1793577071,
+    "mentions": [
+      1425
+    ],
+    "parent": "784bc6d77016a216d085d0a63564c7937e325ed1",
+    "prs": [
+      1844
+    ],
+    "references": [
+      {
+        "ticket": 1425,
+        "url": "https://github.com/Newchanlun/NewChanlun/pull/1844"
+      }
+    ],
+    "subject": "docs: publish FU-17 accounting and recovery ruling (#1844)",
+    "tb_markers": []
+  },
+  {
+    "commit": "784bc6d77016a216d085d0a63564c7937e325ed1",
+    "declared": [
+      1527
+    ],
+    "epoch": 1793566403,
+    "mentions": [
+      1419,
+      1527,
+      1640
+    ],
+    "parent": "60133aca03773ce8d338243f46accea7ca891a2b",
+    "prs": [
+      1830
+    ],
+    "references": [
+      {
+        "ticket": 1419,
+        "url": "https://github.com/Newchanlun/NewChanlun/pull/1830"
+      },
+      {
+        "ticket": 1527,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1527#issuecomment-6563780145"
+      },
+      {
+        "ticket": 1527,
+        "url": "https://github.com/Newchanlun/NewChanlun/pull/1830"
+      },
+      {
+        "ticket": 1640,
+        "url": "https://github.com/Newchanlun/NewChanlun/pull/1830"
+      }
+    ],
+    "subject": "E6 受限源码组件：N1 原生恢复与 VFS 记账（#1527 组件） (#1830)",
+    "tb_markers": []
+  },
+  {
+    "commit": "60133aca03773ce8d338243f46accea7ca891a2b",
+    "declared": [
+      1719
+    ],
+    "epoch": 1793514240,
+    "mentions": [
+      1719
+    ],
+    "parent": "a2d1d63766f367d064510341bd27c20dc7ce8763",
+    "prs": [
+      1833
+    ],
+    "references": [
+      {
+        "ticket": 1527,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1527#issuecomment-6563780145"
+      },
+      {
+        "ticket": 1719,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1719#issuecomment-6553495463"
+      },
+      {
+        "ticket": 1719,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1719#issuecomment-6554407781"
+      },
+      {
+        "ticket": 1719,
+        "url": "https://github.com/Newchanlun/NewChanlun/pull/1833"
+      }
+    ],
+    "subject": "I4: land bridge and lifecycle component (#1833)",
+    "tb_markers": []
+  },
+  {
+    "commit": "a2d1d63766f367d064510341bd27c20dc7ce8763",
+    "declared": [],
+    "epoch": 1793509456,
+    "mentions": [],
+    "parent": "5c341d8047722ca4dd4e3c25b78f2c6d637af7f9",
+    "prs": [
+      1829
+    ],
+    "references": [
+      {
+        "ticket": 1719,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1719#issuecomment-6554407781"
+      }
+    ],
+    "subject": "docs: archive FU-19 publication evidence (#1829)",
+    "tb_markers": []
+  },
+  {
+    "commit": "5c341d8047722ca4dd4e3c25b78f2c6d637af7f9",
+    "declared": [
+      1606
+    ],
+    "epoch": 1793508336,
+    "mentions": [
+      1606
+    ],
+    "parent": "b0db7a8d71f929318e539a57c9dd42161f4fbec6",
+    "prs": [
+      1724
+    ],
+    "references": [
+      {
+        "ticket": 1606,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1606#issuecomment-6553557626"
+      },
+      {
+        "ticket": 1606,
+        "url": "https://github.com/Newchanlun/NewChanlun/pull/1724"
+      }
+    ],
+    "subject": "#1606 调度参数版本化及超时域校验",
+    "tb_markers": []
+  },
+  {
+    "commit": "b0db7a8d71f929318e539a57c9dd42161f4fbec6",
+    "declared": [
+      1769
+    ],
+    "epoch": 1793507257,
+    "mentions": [
+      1381,
+      1769
+    ],
+    "parent": "446f111227dc36f32c6b4d04b87587ec563a923a",
+    "prs": [
+      1822
+    ],
+    "references": [
+      {
+        "ticket": 1381,
+        "url": "https://github.com/Newchanlun/NewChanlun/pull/1822"
+      },
+      {
+        "ticket": 1606,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1606#issuecomment-6553557626"
+      },
+      {
+        "ticket": 1675,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1675#issuecomment-6696637977"
+      },
+      {
+        "ticket": 1769,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1769#issuecomment-6553414052"
+      },
+      {
+        "ticket": 1769,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1769#issuecomment-6690651743"
+      },
+      {
+        "ticket": 1769,
+        "url": "https://github.com/Newchanlun/NewChanlun/pull/1822"
+      }
+    ],
+    "subject": "feat(s-session): 持久 System 时钟组件（#1769 FU-16）",
+    "tb_markers": []
+  },
+  {
+    "commit": "446f111227dc36f32c6b4d04b87587ec563a923a",
+    "declared": [],
+    "epoch": 1793503297,
+    "mentions": [
+      1781
+    ],
+    "parent": "3a01bed557aa5168d7af5243e9faec5854ab10e0",
+    "prs": [
+      1826
+    ],
+    "references": [
+      {
+        "ticket": 1781,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1781"
+      },
+      {
+        "ticket": 1781,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1781#issuecomment-6552830418"
+      },
+      {
+        "ticket": 1781,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1781#issuecomment-6564153691"
+      },
+      {
+        "ticket": 1781,
+        "url": "https://github.com/Newchanlun/NewChanlun/pull/1826"
+      },
+      {
+        "ticket": 1845,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1845"
+      }
+    ],
+    "subject": "docs(adr): publish production session layout contract",
+    "tb_markers": []
+  },
+  {
+    "commit": "3a01bed557aa5168d7af5243e9faec5854ab10e0",
+    "declared": [],
+    "epoch": 1793498932,
+    "mentions": [
+      1368,
+      1381,
+      1411,
+      1413,
+      1418,
+      1523,
+      1769
+    ],
+    "parent": "71df2ae749664714e6bff10f8f71d9e15cc4c815",
+    "prs": [
+      1821
+    ],
+    "references": [
+      {
+        "ticket": 1368,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1368#issuecomment-6552164063"
+      },
+      {
+        "ticket": 1368,
+        "url": "https://github.com/Newchanlun/NewChanlun/pull/1821"
+      },
+      {
+        "ticket": 1381,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1381#issuecomment-6552163356"
+      },
+      {
+        "ticket": 1381,
+        "url": "https://github.com/Newchanlun/NewChanlun/pull/1821"
+      },
+      {
+        "ticket": 1411,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1411#issuecomment-6552160331"
+      },
+      {
+        "ticket": 1411,
+        "url": "https://github.com/Newchanlun/NewChanlun/pull/1821"
+      },
+      {
+        "ticket": 1413,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1413#issuecomment-6552161099"
+      },
+      {
+        "ticket": 1413,
+        "url": "https://github.com/Newchanlun/NewChanlun/pull/1821"
+      },
+      {
+        "ticket": 1418,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1418#issuecomment-6552161859"
+      },
+      {
+        "ticket": 1418,
+        "url": "https://github.com/Newchanlun/NewChanlun/pull/1821"
+      },
+      {
+        "ticket": 1523,
+        "url": "https://github.com/Newchanlun/NewChanlun/pull/1821"
+      },
+      {
+        "ticket": 1769,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1769#issuecomment-6552162569"
+      },
+      {
+        "ticket": 1769,
+        "url": "https://github.com/Newchanlun/NewChanlun/pull/1821"
+      }
+    ],
+    "subject": "docs: publish FU-19 replay shell and legacy dispositions (#1821)",
+    "tb_markers": []
+  },
+  {
+    "commit": "71df2ae749664714e6bff10f8f71d9e15cc4c815",
+    "declared": [
+      1481
+    ],
+    "epoch": 1793491106,
+    "mentions": [
+      1481
+    ],
+    "parent": "9de18e606b2c0330162a83e2a030898b46c3690f",
+    "prs": [
+      1816
+    ],
+    "references": [
+      {
+        "ticket": 1411,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1411#issuecomment-6552160331"
+      },
+      {
+        "ticket": 1481,
+        "url": "https://github.com/Newchanlun/NewChanlun/pull/1816"
+      },
+      {
+        "ticket": 1647,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1647#issuecomment-6548666096"
+      }
+    ],
+    "subject": "feat(1481): H1 consumes P6 complete qualification (#1816)",
+    "tb_markers": []
+  },
+  {
+    "commit": "9de18e606b2c0330162a83e2a030898b46c3690f",
+    "declared": [
+      1769
+    ],
+    "epoch": 1793486988,
+    "mentions": [
+      1383,
+      1524,
+      1769,
+      1770,
+      1781
+    ],
+    "parent": "94285e4162226267a2c1f33eec2ef7af4f1cd3b9",
+    "prs": [
+      1817
+    ],
+    "references": [
+      {
+        "ticket": 1383,
+        "url": "https://github.com/Newchanlun/NewChanlun/pull/1817"
+      },
+      {
+        "ticket": 1524,
+        "url": "https://github.com/Newchanlun/NewChanlun/pull/1817"
+      },
+      {
+        "ticket": 1769,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1769#issuecomment-6550200104"
+      },
+      {
+        "ticket": 1769,
+        "url": "https://github.com/Newchanlun/NewChanlun/pull/1817"
+      },
+      {
+        "ticket": 1770,
+        "url": "https://github.com/Newchanlun/NewChanlun/pull/1817"
+      },
+      {
+        "ticket": 1781,
+        "url": "https://github.com/Newchanlun/NewChanlun/pull/1817"
+      }
+    ],
+    "subject": "test(production): verify original eight acceptance cases on signed S configuration",
+    "tb_markers": []
+  },
+  {
+    "commit": "ba3ad68112f2304453583c50c0e55382c6f3670f",
+    "declared": [],
+    "epoch": 1793478541,
+    "mentions": [
+      1769
+    ],
+    "parent": "6be589b842a1cd7f084b39efe66fa8c8a01f36f5",
+    "prs": [
+      1811
+    ],
+    "references": [
+      {
+        "ticket": 1640,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1640#issuecomment-6569656189"
+      },
+      {
+        "ticket": 1640,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1640#issuecomment-6704051757"
+      },
+      {
+        "ticket": 1769,
+        "url": "https://github.com/Newchanlun/NewChanlun/pull/1811"
+      }
+    ],
+    "subject": "feat: bind signed synthetic policy for structure writer (#1811)",
+    "tb_markers": []
+  },
+  {
+    "commit": "6be589b842a1cd7f084b39efe66fa8c8a01f36f5",
+    "declared": [
+      1647
+    ],
+    "epoch": 1793470936,
+    "mentions": [
+      1481,
+      1640,
+      1647
+    ],
+    "parent": "7d720616d3ac03eca0584844df3bb322001fbfc6",
+    "prs": [
+      1813
+    ],
+    "references": [
+      {
+        "ticket": 1640,
+        "url": "https://github.com/Newchanlun/NewChanlun/pull/1813"
+      },
+      {
+        "ticket": 1647,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1647#issuecomment-6548666096"
+      }
+    ],
+    "subject": "feat: produce complete P6 cover and certified ledger facts (#1813)",
+    "tb_markers": []
+  },
+  {
+    "commit": "7d720616d3ac03eca0584844df3bb322001fbfc6",
+    "declared": [
+      1640
+    ],
+    "epoch": 1793459279,
+    "mentions": [
+      1602,
+      1640,
+      1769
+    ],
+    "parent": "457902e3c371d1f1c9611bb083415067f061f4d2",
+    "prs": [
+      1812
+    ],
+    "references": [
+      {
+        "ticket": 1602,
+        "url": "https://github.com/Newchanlun/NewChanlun/pull/1812"
+      },
+      {
+        "ticket": 1640,
+        "url": "https://github.com/Newchanlun/NewChanlun/pull/1812"
+      },
+      {
+        "ticket": 1769,
+        "url": "https://github.com/Newchanlun/NewChanlun/pull/1812"
+      }
+    ],
+    "subject": "test: add isolated TestOnly launcher diagnostic evidence (#1812)",
+    "tb_markers": []
+  },
+  {
+    "commit": "457902e3c371d1f1c9611bb083415067f061f4d2",
+    "declared": [
+      1481
+    ],
+    "epoch": 1793431064,
+    "mentions": [
+      1481,
+      1647
+    ],
+    "parent": "38256274f3785c1117d89501c3e62276921c5c38",
+    "prs": [
+      1810
+    ],
+    "references": [
+      {
+        "ticket": 1481,
+        "url": "https://github.com/Newchanlun/NewChanlun/pull/1810"
+      },
+      {
+        "ticket": 1647,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1647#issuecomment-6542854006"
+      },
+      {
+        "ticket": 1647,
+        "url": "https://github.com/Newchanlun/NewChanlun/pull/1810"
+      }
+    ],
+    "subject": "feat: integrate H1 request closure and P6 source partitions (#1810)",
+    "tb_markers": []
+  },
+  {
+    "commit": "38256274f3785c1117d89501c3e62276921c5c38",
+    "declared": [
+      1481
+    ],
+    "epoch": 1793421221,
+    "mentions": [
+      1481,
+      1647
+    ],
+    "parent": "3654ba8189eae85415671e4233832bfe0234f0c9",
+    "prs": [
+      1809
+    ],
+    "references": [
+      {
+        "ticket": 1481,
+        "url": "https://github.com/Newchanlun/NewChanlun/pull/1809"
+      },
+      {
+        "ticket": 1647,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1647#issuecomment-6536846179"
+      },
+      {
+        "ticket": 1647,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1647#issuecomment-6537968879"
+      },
+      {
+        "ticket": 1647,
+        "url": "https://github.com/Newchanlun/NewChanlun/pull/1809"
+      }
+    ],
+    "subject": "feat: land verified H1 cold audit and P6 raw ledger components (#1809)",
+    "tb_markers": []
+  },
+  {
+    "commit": "3654ba8189eae85415671e4233832bfe0234f0c9",
+    "declared": [
+      1647
+    ],
+    "epoch": 1793402358,
+    "mentions": [
+      1647
+    ],
+    "parent": "cefef5be6cf19c7907874112f310ad4291c77000",
+    "prs": [
+      1808
+    ],
+    "references": [
+      {
+        "ticket": 1647,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1647#issuecomment-6535612471"
+      },
+      {
+        "ticket": 1647,
+        "url": "https://github.com/Newchanlun/NewChanlun/pull/1808"
+      }
+    ],
+    "subject": "交付 P6 持久审计台账首组件",
+    "tb_markers": []
+  },
+  {
+    "commit": "cefef5be6cf19c7907874112f310ad4291c77000",
+    "declared": [
+      1640
+    ],
+    "epoch": 1793366603,
+    "mentions": [
+      1640
+    ],
+    "parent": "6d18ed82a610916d0f928da898ec47cb78bbcf6f",
+    "prs": [
+      1757
+    ],
+    "references": [
+      {
+        "ticket": 1419,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1419#issuecomment-6523960621"
+      },
+      {
+        "ticket": 1640,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1640#issuecomment-6444895077"
+      },
+      {
+        "ticket": 1640,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1640#issuecomment-6523959928"
+      },
+      {
+        "ticket": 1640,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1640#issuecomment-6526826657"
+      },
+      {
+        "ticket": 1640,
+        "url": "https://github.com/Newchanlun/NewChanlun/pull/1757"
+      },
+      {
+        "ticket": 1647,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1647#issuecomment-6532860364"
+      },
+      {
+        "ticket": 1647,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1647#issuecomment-6535612471"
+      }
+    ],
+    "subject": "perf(s-session): 生产增量先行片与 S4 冷恢复组件",
+    "tb_markers": []
+  },
+  {
+    "commit": "6d18ed82a610916d0f928da898ec47cb78bbcf6f",
+    "declared": [
+      1552
+    ],
+    "epoch": 1793339798,
+    "mentions": [
+      1437,
+      1552
+    ],
+    "parent": "266aedfa1174513968205a0ff88fb371dd60a675",
+    "prs": [
+      1807
+    ],
+    "references": [
+      {
+        "ticket": 1437,
+        "url": "https://github.com/Newchanlun/NewChanlun/pull/1807"
+      },
+      {
+        "ticket": 1552,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1552#issuecomment-6516346885"
+      },
+      {
+        "ticket": 1552,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1552#issuecomment-6517182004"
+      },
+      {
+        "ticket": 1552,
+        "url": "https://github.com/Newchanlun/NewChanlun/pull/1807"
+      },
+      {
+        "ticket": 1640,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1640#issuecomment-6523959928"
+      }
+    ],
+    "subject": "fix(financial-reader): C1 闭包末节点精确预算",
+    "tb_markers": []
+  },
+  {
+    "commit": "266aedfa1174513968205a0ff88fb371dd60a675",
+    "declared": [],
+    "epoch": 1793254083,
+    "mentions": [
+      1768
+    ],
+    "parent": "9e6eb6f46c3a1f686d6da8a016738999daa5a4b4",
+    "prs": [
+      1802
+    ],
+    "references": [
+      {
+        "ticket": 1491,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1491#issuecomment-6504989789"
+      },
+      {
+        "ticket": 1527,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1527#issuecomment-6510878368"
+      },
+      {
+        "ticket": 1552,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1552#issuecomment-6514751584"
+      },
+      {
+        "ticket": 1552,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1552#issuecomment-6516346885"
+      },
+      {
+        "ticket": 1768,
+        "url": "https://github.com/Newchanlun/NewChanlun/pull/1802"
+      }
+    ],
+    "subject": "docs(review-results): #1778 裁定实体报告入仓存档",
+    "tb_markers": []
+  },
+  {
+    "commit": "9e6eb6f46c3a1f686d6da8a016738999daa5a4b4",
+    "declared": [
+      1769
+    ],
+    "epoch": 1793243629,
+    "mentions": [
+      1523,
+      1769
+    ],
+    "parent": "ac319f31e79b11e83e6ec9e222b947ba2e647e14",
+    "prs": [
+      1773
+    ],
+    "references": [
+      {
+        "ticket": 1383,
+        "url": "https://github.com/Newchanlun/NewChanlun/pull/1773"
+      },
+      {
+        "ticket": 1524,
+        "url": "https://github.com/Newchanlun/NewChanlun/pull/1773"
+      },
+      {
+        "ticket": 1641,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1641#issuecomment-6487205970"
+      },
+      {
+        "ticket": 1645,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1645#issuecomment-6487206545"
+      },
+      {
+        "ticket": 1769,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1769#issuecomment-6454366398"
+      },
+      {
+        "ticket": 1769,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1769#issuecomment-6486907364"
+      },
+      {
+        "ticket": 1769,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1769#issuecomment-6488382517"
+      },
+      {
+        "ticket": 1769,
+        "url": "https://github.com/Newchanlun/NewChanlun/pull/1773"
+      },
+      {
+        "ticket": 1770,
+        "url": "https://github.com/Newchanlun/NewChanlun/pull/1773"
+      },
+      {
+        "ticket": 1781,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1781"
+      },
+      {
+        "ticket": 1781,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1781#issuecomment-6482405688"
+      },
+      {
+        "ticket": 1845,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1845"
+      }
+    ],
+    "subject": "feat: integrate staged production session component (#1773)",
+    "tb_markers": []
+  },
+  {
+    "commit": "ac319f31e79b11e83e6ec9e222b947ba2e647e14",
+    "declared": [],
+    "epoch": 1793239177,
+    "mentions": [],
+    "parent": "c5da72d0efae6e9bbedad91c326e95bbbcc4c477",
+    "prs": [
+      1797
+    ],
+    "references": [
+      {
+        "ticket": 1769,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1769#issuecomment-6486907364"
+      }
+    ],
+    "subject": "fix(#1742): 在管理员窗口明确取消发布验收操作 (#1797)",
+    "tb_markers": []
+  },
+  {
+    "commit": "c5da72d0efae6e9bbedad91c326e95bbbcc4c477",
+    "declared": [],
+    "epoch": 1793238739,
+    "mentions": [
+      1382
+    ],
+    "parent": "0bace7c395ca92bb1be12f698fc31930bfefd69c",
+    "prs": [
+      1799
+    ],
+    "references": [
+      {
+        "ticket": 1382,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1382#issuecomment-6483602060"
+      },
+      {
+        "ticket": 1382,
+        "url": "https://github.com/Newchanlun/NewChanlun/pull/1799"
+      },
+      {
+        "ticket": 1769,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1769#issuecomment-6486907364"
+      }
+    ],
+    "subject": "docs(1538): FU-16 承接收据与独审归档 (#1799)",
+    "tb_markers": []
+  },
+  {
+    "commit": "0bace7c395ca92bb1be12f698fc31930bfefd69c",
+    "declared": [
+      1491
+    ],
+    "epoch": 1793238013,
+    "mentions": [
+      1419,
+      1481,
+      1491
+    ],
+    "parent": "df9feea2a9fbf7d327684d81e3e1039ca8e75ffc",
+    "prs": [
+      1780
+    ],
+    "references": [
+      {
+        "ticket": 1419,
+        "url": "https://github.com/Newchanlun/NewChanlun/pull/1780"
+      },
+      {
+        "ticket": 1481,
+        "url": "https://github.com/Newchanlun/NewChanlun/pull/1780"
+      },
+      {
+        "ticket": 1491,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1491#issuecomment-6463281797"
+      },
+      {
+        "ticket": 1491,
+        "url": "https://github.com/Newchanlun/NewChanlun/pull/1780"
+      },
+      {
+        "ticket": 1789,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1789#issuecomment-6482406495"
+      }
+    ],
+    "subject": "feat: add bounded CC-007 batches and CC-054 request order (#1780)",
+    "tb_markers": []
+  },
+  {
+    "commit": "df9feea2a9fbf7d327684d81e3e1039ca8e75ffc",
+    "declared": [],
+    "epoch": 1793234609,
+    "mentions": [
+      1768
+    ],
+    "parent": "6b0a3bd44a61f758c75422b048728d034395c982",
+    "prs": [
+      1779
+    ],
+    "references": [
+      {
+        "ticket": 1768,
+        "url": "https://github.com/Newchanlun/NewChanlun/pull/1779"
+      }
+    ],
+    "subject": "docs: land domain event withdrawal subcontract (PR #1779)",
+    "tb_markers": []
+  },
+  {
+    "commit": "6b0a3bd44a61f758c75422b048728d034395c982",
+    "declared": [],
+    "epoch": 1793233440,
+    "mentions": [
+      1640
+    ],
+    "parent": "5dc1eb9435c32bee6f9ead274ee3c87cac694ef8",
+    "prs": [
+      1795
+    ],
+    "references": [
+      {
+        "ticket": 1640,
+        "url": "https://github.com/Newchanlun/NewChanlun/pull/1795"
+      }
+    ],
+    "subject": "docs(adr-0057): 落地 #1774 P0 profile 分离与可调延迟裁定",
+    "tb_markers": []
+  },
+  {
+    "commit": "5dc1eb9435c32bee6f9ead274ee3c87cac694ef8",
+    "declared": [
+      1523
+    ],
+    "epoch": 1793232829,
+    "mentions": [
+      1382,
+      1383,
+      1523,
+      1524,
+      1525,
+      1769,
+      1770
+    ],
+    "parent": "a966e1116f2f544930167720695ac8ff07fd7f6a",
+    "prs": [
+      1771
+    ],
+    "references": [
+      {
+        "ticket": 1382,
+        "url": "https://github.com/Newchanlun/NewChanlun/pull/1771"
+      },
+      {
+        "ticket": 1383,
+        "url": "https://github.com/Newchanlun/NewChanlun/pull/1771"
+      },
+      {
+        "ticket": 1523,
+        "url": "https://github.com/Newchanlun/NewChanlun/pull/1771"
+      },
+      {
+        "ticket": 1524,
+        "url": "https://github.com/Newchanlun/NewChanlun/pull/1771"
+      },
+      {
+        "ticket": 1525,
+        "url": "https://github.com/Newchanlun/NewChanlun/pull/1771"
+      },
+      {
+        "ticket": 1769,
+        "url": "https://github.com/Newchanlun/NewChanlun/pull/1771"
+      },
+      {
+        "ticket": 1770,
+        "url": "https://github.com/Newchanlun/NewChanlun/pull/1771"
+      }
+    ],
+    "subject": "docs(adr-0039): 记录 #1523 组件叶与来源边界裁定",
+    "tb_markers": []
+  },
+  {
+    "commit": "af15e1a9920954b9505d01273e0b9035b25d9317",
+    "declared": [],
+    "epoch": 1793228461,
+    "mentions": [],
+    "parent": "4c10229eacaa21a8744e57d409b579359ca7cd97",
+    "prs": [
+      1796
+    ],
+    "references": [
+      {
+        "ticket": 1381,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1381#issuecomment-6483601000"
+      },
+      {
+        "ticket": 1382,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1382#issuecomment-6483602060"
+      },
+      {
+        "ticket": 1400,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1400#issuecomment-6483603004"
+      },
+      {
+        "ticket": 1523,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1523#issuecomment-6483603898"
+      },
+      {
+        "ticket": 1524,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1524#issuecomment-6483604982"
+      },
+      {
+        "ticket": 1525,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1525#issuecomment-6483606062"
+      },
+      {
+        "ticket": 1769,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1769#issuecomment-6483606985"
+      },
+      {
+        "ticket": 1770,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1770#issuecomment-6483607928"
+      }
+    ],
+    "subject": "docs(adr): ADR 0056 三模式同核 adapter 边界（#1538 P 类裁定正本，Part of #1323）",
+    "tb_markers": []
+  },
+  {
+    "commit": "4c10229eacaa21a8744e57d409b579359ca7cd97",
+    "declared": [
+      1718
+    ],
+    "epoch": 1793226541,
+    "mentions": [
+      1718
+    ],
+    "parent": "d8a50b3060a7b9a99d5dec0374df3ed62f01b13d",
+    "prs": [
+      1731
+    ],
+    "references": [
+      {
+        "ticket": 1381,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1381#issuecomment-6491735550"
+      },
+      {
+        "ticket": 1411,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1411#issuecomment-6491736313"
+      },
+      {
+        "ticket": 1523,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1523#issuecomment-6491737125"
+      },
+      {
+        "ticket": 1718,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1718#issuecomment-6491722979"
+      },
+      {
+        "ticket": 1718,
+        "url": "https://github.com/Newchanlun/NewChanlun/pull/1731"
+      }
+    ],
+    "subject": "feat(diagnostic): 交付诊断成交与冻结恢复组件（#1718）",
+    "tb_markers": []
+  },
+  {
+    "commit": "3087582e45a7504825af5b6464b22b949d91b903",
+    "declared": [
+      1657
+    ],
+    "epoch": 1793194852,
+    "mentions": [
+      1657,
+      1670
+    ],
+    "parent": "ca5a8b16ae085306feaf42417bcb225e6c833911",
+    "prs": [
+      1791
+    ],
+    "references": [
+      {
+        "ticket": 1657,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1657#issuecomment-6470827190"
+      },
+      {
+        "ticket": 1657,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1657#issuecomment-6470848134"
+      },
+      {
+        "ticket": 1657,
+        "url": "https://github.com/Newchanlun/NewChanlun/pull/1791"
+      },
+      {
+        "ticket": 1670,
+        "url": "https://github.com/Newchanlun/NewChanlun/pull/1791"
+      }
+    ],
+    "subject": "Merge pull request #1791 from xy7365527-lang/codex/1657-closeout-20261028",
+    "tb_markers": []
+  },
+  {
+    "commit": "ca5a8b16ae085306feaf42417bcb225e6c833911",
+    "declared": [
+      1768
+    ],
+    "epoch": 1793194066,
+    "mentions": [
+      1768
+    ],
+    "parent": "7218a7baabca810a2605bae2bf8b0d6275127b29",
+    "prs": [
+      1772
+    ],
+    "references": [
+      {
+        "ticket": 1768,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1768#issuecomment-6453282206"
+      },
+      {
+        "ticket": 1768,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1768#issuecomment-6455325479"
+      },
+      {
+        "ticket": 1768,
+        "url": "https://github.com/Newchanlun/NewChanlun/pull/1772"
+      }
+    ],
+    "subject": "Merge pull request #1772 from xy7365527-lang/sandcastle/issue-1768",
+    "tb_markers": [
+      "TB-07-E"
+    ]
+  },
+  {
+    "commit": "7218a7baabca810a2605bae2bf8b0d6275127b29",
+    "declared": [],
+    "epoch": 1793194060,
+    "mentions": [
+      1491
+    ],
+    "parent": "df0ec357ab804a04b7a2e9ae77e50391c7c7317a",
+    "prs": [
+      1792
+    ],
+    "references": [
+      {
+        "ticket": 1491,
+        "url": "https://github.com/Newchanlun/NewChanlun/pull/1792"
+      }
+    ],
+    "subject": "Merge pull request #1792 from xy7365527-lang/decision/1790",
+    "tb_markers": []
+  },
+  {
+    "commit": "df0ec357ab804a04b7a2e9ae77e50391c7c7317a",
+    "declared": [
+      1657
+    ],
+    "epoch": 1793185619,
+    "mentions": [
+      1527,
+      1657,
+      1675
+    ],
+    "parent": "0b3097aae8540da7b13e172a2b1e5497c63e0eec",
+    "prs": [
+      1710
+    ],
+    "references": [
+      {
+        "ticket": 1527,
+        "url": "https://github.com/Newchanlun/NewChanlun/pull/1710"
+      },
+      {
+        "ticket": 1657,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1657#issuecomment-6398684185"
+      },
+      {
+        "ticket": 1657,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1657#issuecomment-6470827190"
+      },
+      {
+        "ticket": 1657,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1657#issuecomment-6470848134"
+      },
+      {
+        "ticket": 1657,
+        "url": "https://github.com/Newchanlun/NewChanlun/pull/1710"
+      },
+      {
+        "ticket": 1675,
+        "url": "https://github.com/Newchanlun/NewChanlun/pull/1710"
+      }
+    ],
+    "subject": "Merge pull request #1710 from xy7365527-lang/codex/issue1657-admission-cli",
+    "tb_markers": []
+  },
+  {
+    "commit": "38076b97565bdda5a4b12777eaae2974bb14b18d",
+    "declared": [],
+    "epoch": 1793184484,
+    "mentions": [
+      1640,
+      1641
+    ],
+    "parent": "9c1e1f9c10299b822723d9fb6f5a3d7673b0da17",
+    "prs": [
+      1788
+    ],
+    "references": [
+      {
+        "ticket": 1640,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1640#issuecomment-6465247774"
+      },
+      {
+        "ticket": 1640,
+        "url": "https://github.com/Newchanlun/NewChanlun/pull/1788"
+      },
+      {
+        "ticket": 1641,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1641#issuecomment-6465248755"
+      },
+      {
+        "ticket": 1641,
+        "url": "https://github.com/Newchanlun/NewChanlun/pull/1788"
+      }
+    ],
+    "subject": "Merge pull request #1788 from xy7365527-lang/decision/1786",
+    "tb_markers": []
+  },
+  {
+    "commit": "9c1e1f9c10299b822723d9fb6f5a3d7673b0da17",
+    "declared": [],
+    "epoch": 1793184476,
+    "mentions": [
+      1491
+    ],
+    "parent": "58039c602cf243de4bed8355eb2059bf1f54f4dc",
+    "prs": [
+      1784
+    ],
+    "references": [
+      {
+        "ticket": 1491,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1491#issuecomment-6463281797"
+      },
+      {
+        "ticket": 1491,
+        "url": "https://github.com/Newchanlun/NewChanlun/pull/1784"
+      }
+    ],
+    "subject": "Merge pull request #1784 from xy7365527-lang/decision/1783",
+    "tb_markers": []
+  },
+  {
+    "commit": "5123c9e2736573dd1c1232311c9c63ba0a1abc80",
+    "declared": [
+      1491
+    ],
+    "epoch": 1793145252,
+    "mentions": [
+      1491
+    ],
+    "parent": "c0c5a369a49852e0fa5a724e57d9adbfab205975",
+    "prs": [
+      1760
+    ],
+    "references": [
+      {
+        "ticket": 1491,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1491#issuecomment-6445721945"
+      },
+      {
+        "ticket": 1491,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1491#issuecomment-6456573187"
+      },
+      {
+        "ticket": 1491,
+        "url": "https://github.com/Newchanlun/NewChanlun/pull/1760"
+      },
+      {
+        "ticket": 1585,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1585#issuecomment-6457105185"
+      },
+      {
+        "ticket": 1601,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1601#issuecomment-6457107870"
+      },
+      {
+        "ticket": 1621,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1621#issuecomment-6457099143"
+      },
+      {
+        "ticket": 1666,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1666#issuecomment-6457109977"
+      },
+      {
+        "ticket": 1670,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1670#issuecomment-6457101122"
+      },
+      {
+        "ticket": 1672,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1672#issuecomment-6457103210"
+      },
+      {
+        "ticket": 1678,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1678#issuecomment-6457111804"
+      }
+    ],
+    "subject": "Merge pull request #1760 from xy7365527-lang/sandcastle/issue-1491",
+    "tb_markers": []
+  },
+  {
+    "commit": "7b842b69a1a8fefb61b116152e6400d89aa4a254",
+    "declared": [],
+    "epoch": 1793123342,
+    "mentions": [
+      1768
+    ],
+    "parent": "da03a10ee028fdb1f31ed0db2b5b42184e52ac54",
+    "prs": [
+      1766
+    ],
+    "references": [
+      {
+        "ticket": 1768,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1768"
+      }
+    ],
+    "subject": "docs: land approved domain-event identity contract (#1766)",
+    "tb_markers": []
+  },
+  {
+    "commit": "da03a10ee028fdb1f31ed0db2b5b42184e52ac54",
+    "declared": [
+      1488
+    ],
+    "epoch": 1793099157,
+    "mentions": [
+      1488
+    ],
+    "parent": "00fdf0dd4ada8dcdcc886359f56573889ea63d54",
+    "prs": [
+      1753
+    ],
+    "references": [
+      {
+        "ticket": 1419,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1419#issuecomment-6440624074"
+      },
+      {
+        "ticket": 1419,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1419#issuecomment-6442649937"
+      },
+      {
+        "ticket": 1429,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1429#issuecomment-6445108239"
+      },
+      {
+        "ticket": 1488,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1488#issuecomment-6440370171"
+      },
+      {
+        "ticket": 1488,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1488#issuecomment-6441764941"
+      },
+      {
+        "ticket": 1488,
+        "url": "https://github.com/Newchanlun/NewChanlun/pull/1753"
+      },
+      {
+        "ticket": 1491,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1491#issuecomment-6440402308"
+      },
+      {
+        "ticket": 1640,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1640#issuecomment-6440403027"
+      },
+      {
+        "ticket": 1640,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1640#issuecomment-6444540232"
+      }
+    ],
+    "subject": "docs(1488): 归档遗留分支与文书工位最终处置证据",
+    "tb_markers": []
+  },
+  {
+    "commit": "00fdf0dd4ada8dcdcc886359f56573889ea63d54",
+    "declared": [],
+    "epoch": 1793084718,
+    "mentions": [],
+    "parent": "7ab832241e39456bd0330cd03dea63e7e6068c0a",
+    "prs": [
+      1739
+    ],
+    "references": [
+      {
+        "ticket": 1406,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1406#issuecomment-6435999759"
+      },
+      {
+        "ticket": 1552,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1552#issuecomment-6439326287"
+      },
+      {
+        "ticket": 1737,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1737#issuecomment-6435909011"
+      },
+      {
+        "ticket": 1737,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1737#issuecomment-6435976266"
+      },
+      {
+        "ticket": 1737,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1737#issuecomment-6436721359"
+      },
+      {
+        "ticket": 1737,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1737#issuecomment-6543303978"
+      },
+      {
+        "ticket": 1737,
+        "url": "https://github.com/Newchanlun/NewChanlun/pull/1739"
+      }
+    ],
+    "subject": "docs: 归档1737验收报告与精确扫描登记 (#1739)",
+    "tb_markers": []
+  },
+  {
+    "commit": "7ab832241e39456bd0330cd03dea63e7e6068c0a",
+    "declared": [],
+    "epoch": 1793080104,
+    "mentions": [
+      1626
+    ],
+    "parent": "88ed1628b10b40324e165d3305d69a52d1914be6",
+    "prs": [
+      1734
+    ],
+    "references": [
+      {
+        "ticket": 1626,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1626#issuecomment-6409146471"
+      },
+      {
+        "ticket": 1626,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1626#issuecomment-6434819069"
+      },
+      {
+        "ticket": 1626,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1626#issuecomment-6435909538"
+      },
+      {
+        "ticket": 1626,
+        "url": "https://github.com/Newchanlun/NewChanlun/pull/1734"
+      },
+      {
+        "ticket": 1737,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1737#issuecomment-6435909011"
+      }
+    ],
+    "subject": "docs: 归档1626交付与验收证据 (#1734)",
+    "tb_markers": []
+  },
+  {
+    "commit": "88ed1628b10b40324e165d3305d69a52d1914be6",
+    "declared": [
+      1678
+    ],
+    "epoch": 1793078661,
+    "mentions": [
+      1678
+    ],
+    "parent": "67e9c42205e4b98af137f203cdbc0cae66fe3d30",
+    "prs": [
+      1740
+    ],
+    "references": [
+      {
+        "ticket": 1406,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1406#issuecomment-6434092426"
+      },
+      {
+        "ticket": 1678,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1678#issuecomment-6418878078"
+      },
+      {
+        "ticket": 1678,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1678#issuecomment-6434497325"
+      },
+      {
+        "ticket": 1678,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1678#issuecomment-6435570528"
+      },
+      {
+        "ticket": 1678,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1678#issuecomment-6457111804"
+      },
+      {
+        "ticket": 1678,
+        "url": "https://github.com/Newchanlun/NewChanlun/pull/1740"
+      }
+    ],
+    "subject": "docs: 归档1678工位处置证据 (#1740)",
+    "tb_markers": []
+  },
+  {
+    "commit": "67e9c42205e4b98af137f203cdbc0cae66fe3d30",
+    "declared": [
+      1406,
+      1488
+    ],
+    "epoch": 1793074758,
+    "mentions": [
+      1406,
+      1488
+    ],
+    "parent": "f7f57ce42ea5738c0e7bbe8815e296ec33f28b05",
+    "prs": [
+      1741
+    ],
+    "references": [
+      {
+        "ticket": 1406,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1406#issuecomment-6434092426"
+      },
+      {
+        "ticket": 1406,
+        "url": "https://github.com/Newchanlun/NewChanlun/pull/1741"
+      },
+      {
+        "ticket": 1488,
+        "url": "https://github.com/Newchanlun/NewChanlun/pull/1741"
+      }
+    ],
+    "subject": "[#1406/#1488] 精确登记 C6a loopback 验收误报 (PR #1741)",
+    "tb_markers": []
+  },
+  {
+    "commit": "f7f57ce42ea5738c0e7bbe8815e296ec33f28b05",
+    "declared": [
+      1672
+    ],
+    "epoch": 1793070232,
+    "mentions": [
+      1406,
+      1672
+    ],
+    "parent": "75568405c87f561fd8c7d2c1217d378b0b66c431",
+    "prs": [
+      1748
+    ],
+    "references": [
+      {
+        "ticket": 1406,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1406#issuecomment-6431986884"
+      },
+      {
+        "ticket": 1406,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1406#issuecomment-6433221246"
+      },
+      {
+        "ticket": 1406,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1406#issuecomment-6434092426"
+      },
+      {
+        "ticket": 1406,
+        "url": "https://github.com/Newchanlun/NewChanlun/pull/1748"
+      },
+      {
+        "ticket": 1672,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1672#issuecomment-6431666497"
+      },
+      {
+        "ticket": 1672,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1672#issuecomment-6433220742"
+      },
+      {
+        "ticket": 1672,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1672#issuecomment-6433472335"
+      },
+      {
+        "ticket": 1672,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1672#issuecomment-6457103210"
+      },
+      {
+        "ticket": 1672,
+        "url": "https://github.com/Newchanlun/NewChanlun/pull/1748"
+      }
+    ],
+    "subject": "docs: 归档 1672 FIN/2 交付证据 (#1748)",
+    "tb_markers": []
+  },
+  {
+    "commit": "75568405c87f561fd8c7d2c1217d378b0b66c431",
+    "declared": [],
+    "epoch": 1793067256,
+    "mentions": [
+      1602
+    ],
+    "parent": "0a96a09bde89e50b7c4102b4ca898b716cd219c0",
+    "prs": [
+      1735
+    ],
+    "references": [
+      {
+        "ticket": 1602,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1602#issuecomment-6432120874"
+      },
+      {
+        "ticket": 1602,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1602#issuecomment-6432267373"
+      },
+      {
+        "ticket": 1602,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1602#issuecomment-6433223413"
+      },
+      {
+        "ticket": 1602,
+        "url": "https://github.com/Newchanlun/NewChanlun/pull/1735"
+      }
+    ],
+    "subject": "docs: archive issue1602 delivery evidence",
+    "tb_markers": []
+  },
+  {
+    "commit": "0a96a09bde89e50b7c4102b4ca898b716cd219c0",
+    "declared": [],
+    "epoch": 1793067226,
+    "mentions": [
+      1601,
+      1666
+    ],
+    "parent": "7744d59079517f024d93d7471db68c0ca625d07b",
+    "prs": [
+      1730
+    ],
+    "references": [
+      {
+        "ticket": 1601,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1601#issuecomment-6432119497"
+      },
+      {
+        "ticket": 1601,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1601#issuecomment-6433221871"
+      },
+      {
+        "ticket": 1601,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1601#issuecomment-6457107870"
+      },
+      {
+        "ticket": 1601,
+        "url": "https://github.com/Newchanlun/NewChanlun/pull/1730"
+      },
+      {
+        "ticket": 1666,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1666#issuecomment-6432120410"
+      },
+      {
+        "ticket": 1666,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1666#issuecomment-6433222901"
+      },
+      {
+        "ticket": 1666,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1666#issuecomment-6457109977"
+      },
+      {
+        "ticket": 1666,
+        "url": "https://github.com/Newchanlun/NewChanlun/pull/1730"
+      }
+    ],
+    "subject": "docs: archive issue1666 and issue1601 acceptance evidence",
+    "tb_markers": []
+  },
+  {
+    "commit": "7744d59079517f024d93d7471db68c0ca625d07b",
+    "declared": [
+      1585
+    ],
+    "epoch": 1793067189,
+    "mentions": [
+      1585
+    ],
+    "parent": "d7bd79ca185b76b038d0484ed4e05d96c98b58d5",
+    "prs": [
+      1729
+    ],
+    "references": [
+      {
+        "ticket": 1585,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1585#issuecomment-6432119945"
+      },
+      {
+        "ticket": 1585,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1585#issuecomment-6433222344"
+      },
+      {
+        "ticket": 1585,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1585#issuecomment-6457105185"
+      },
+      {
+        "ticket": 1585,
+        "url": "https://github.com/Newchanlun/NewChanlun/pull/1729"
+      }
+    ],
+    "subject": "docs: archive issue1585 acceptance evidence",
+    "tb_markers": []
+  },
+  {
+    "commit": "d7bd79ca185b76b038d0484ed4e05d96c98b58d5",
+    "declared": [],
+    "epoch": 1793067155,
+    "mentions": [
+      1601
+    ],
+    "parent": "b9a84b01467772d847f9d222207a305136761bf4",
+    "prs": [
+      1728
+    ],
+    "references": [
+      {
+        "ticket": 1385,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1385#issuecomment-7023892735"
+      },
+      {
+        "ticket": 1601,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1601#issuecomment-6432119497"
+      },
+      {
+        "ticket": 1601,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1601#issuecomment-6433221871"
+      },
+      {
+        "ticket": 1601,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1601#issuecomment-6457107870"
+      },
+      {
+        "ticket": 1601,
+        "url": "https://github.com/Newchanlun/NewChanlun/pull/1728"
+      }
+    ],
+    "subject": "docs: archive issue1601 acceptance evidence",
+    "tb_markers": []
+  },
+  {
+    "commit": "b9a84b01467772d847f9d222207a305136761bf4",
+    "declared": [
+      1672
+    ],
+    "epoch": 1793062096,
+    "mentions": [
+      1672
+    ],
+    "parent": "fcfdb0f71042d7634bb44002d8b915de414ee6e5",
+    "prs": [
+      1702
+    ],
+    "references": [
+      {
+        "ticket": 1406,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1406#issuecomment-6431366625"
+      },
+      {
+        "ticket": 1406,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1406#issuecomment-6431986884"
+      },
+      {
+        "ticket": 1406,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1406#issuecomment-6433221246"
+      },
+      {
+        "ticket": 1406,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1406#issuecomment-6435999759"
+      },
+      {
+        "ticket": 1672,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1672#issuecomment-6390052040"
+      },
+      {
+        "ticket": 1672,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1672#issuecomment-6426521364"
+      },
+      {
+        "ticket": 1672,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1672#issuecomment-6431362495"
+      },
+      {
+        "ticket": 1672,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1672#issuecomment-6433220742"
+      },
+      {
+        "ticket": 1672,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1672#issuecomment-6457103210"
+      },
+      {
+        "ticket": 1672,
+        "url": "https://github.com/Newchanlun/NewChanlun/pull/1702"
+      },
+      {
+        "ticket": 1737,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1737#issuecomment-6435976266"
+      }
+    ],
+    "subject": "Sandcastle #1672: FIN/2 四独立 HFS+ 载体 WE7 正例与恢复 (#1702)",
+    "tb_markers": []
+  },
+  {
+    "commit": "fcfdb0f71042d7634bb44002d8b915de414ee6e5",
+    "declared": [
+      1488
+    ],
+    "epoch": 1793062065,
+    "mentions": [
+      1488
+    ],
+    "parent": "cf72a9f91050a4b6af7ac4b6e0c2b9f0364a2584",
+    "prs": [
+      1744
+    ],
+    "references": [
+      {
+        "ticket": 1488,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1488#issuecomment-6440370171"
+      },
+      {
+        "ticket": 1488,
+        "url": "https://github.com/Newchanlun/NewChanlun/pull/1744"
+      }
+    ],
+    "subject": "docs(1488): 归档余六旧容器保全移除事实 (#1744)",
+    "tb_markers": []
+  },
+  {
+    "commit": "cf72a9f91050a4b6af7ac4b6e0c2b9f0364a2584",
+    "declared": [
+      1716
+    ],
+    "epoch": 1793057015,
+    "mentions": [
+      1716
+    ],
+    "parent": "bea0a169f99293e90429ec834b69cb6a34a1958f",
+    "prs": [
+      1743
+    ],
+    "references": [
+      {
+        "ticket": 1406,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1406#issuecomment-6429255478"
+      },
+      {
+        "ticket": 1670,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1670#issuecomment-6429253952"
+      },
+      {
+        "ticket": 1670,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1670#issuecomment-6445233673"
+      },
+      {
+        "ticket": 1670,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1670#issuecomment-6457101122"
+      },
+      {
+        "ticket": 1715,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1715#issuecomment-6429252559"
+      },
+      {
+        "ticket": 1715,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1715#issuecomment-6445234696"
+      },
+      {
+        "ticket": 1716,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1716#issuecomment-6427482700"
+      },
+      {
+        "ticket": 1716,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1716#issuecomment-6429736753"
+      },
+      {
+        "ticket": 1716,
+        "url": "https://github.com/Newchanlun/NewChanlun/pull/1743"
+      }
+    ],
+    "subject": "perf(economic_session): #1716 Reserve 去重重复结构校验并记阶段计时 (#1743)",
+    "tb_markers": []
+  },
+  {
+    "commit": "bea0a169f99293e90429ec834b69cb6a34a1958f",
+    "declared": [
+      1670
+    ],
+    "epoch": 1793051595,
+    "mentions": [
+      1406,
+      1621,
+      1670
+    ],
+    "parent": "0fe8e2f3c91a9df22128214ed6232bdf9f68b700",
+    "prs": [
+      1697
+    ],
+    "references": [
+      {
+        "ticket": 1406,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1406#issuecomment-6428403120"
+      },
+      {
+        "ticket": 1406,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1406#issuecomment-6429255478"
+      },
+      {
+        "ticket": 1406,
+        "url": "https://github.com/Newchanlun/NewChanlun/pull/1697"
+      },
+      {
+        "ticket": 1444,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1444#issuecomment-6428399547"
+      },
+      {
+        "ticket": 1445,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1445#issuecomment-6428400675"
+      },
+      {
+        "ticket": 1446,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1446#issuecomment-6428401780"
+      },
+      {
+        "ticket": 1621,
+        "url": "https://github.com/Newchanlun/NewChanlun/pull/1697"
+      },
+      {
+        "ticket": 1670,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1670#issuecomment-6382554027"
+      },
+      {
+        "ticket": 1670,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1670#issuecomment-6388070199"
+      },
+      {
+        "ticket": 1670,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1670#issuecomment-6428392017"
+      },
+      {
+        "ticket": 1670,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1670#issuecomment-6429253952"
+      },
+      {
+        "ticket": 1670,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1670#issuecomment-6445233673"
+      },
+      {
+        "ticket": 1670,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1670#issuecomment-6457101122"
+      },
+      {
+        "ticket": 1670,
+        "url": "https://github.com/Newchanlun/NewChanlun/pull/1697"
+      },
+      {
+        "ticket": 1715,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1715#issuecomment-6428390874"
+      },
+      {
+        "ticket": 1715,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1715#issuecomment-6429252559"
+      },
+      {
+        "ticket": 1715,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1715#issuecomment-6445234696"
+      },
+      {
+        "ticket": 1737,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1737#issuecomment-6435976266"
+      }
+    ],
+    "subject": "[#1670] per_leg 来源逐腿归属成功实例 (#1697)",
+    "tb_markers": []
+  },
+  {
+    "commit": "0fe8e2f3c91a9df22128214ed6232bdf9f68b700",
+    "declared": [
+      1715
+    ],
+    "epoch": 1793051583,
+    "mentions": [
+      1444,
+      1445,
+      1446,
+      1715,
+      1716
+    ],
+    "parent": "c0b660603922196dad357f0a3f53a5ee79b1f546",
+    "prs": [
+      1733
+    ],
+    "references": [
+      {
+        "ticket": 1444,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1444#issuecomment-6428399547"
+      },
+      {
+        "ticket": 1444,
+        "url": "https://github.com/Newchanlun/NewChanlun/pull/1733"
+      },
+      {
+        "ticket": 1445,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1445#issuecomment-6428400675"
+      },
+      {
+        "ticket": 1445,
+        "url": "https://github.com/Newchanlun/NewChanlun/pull/1733"
+      },
+      {
+        "ticket": 1446,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1446#issuecomment-6428401780"
+      },
+      {
+        "ticket": 1446,
+        "url": "https://github.com/Newchanlun/NewChanlun/pull/1733"
+      },
+      {
+        "ticket": 1715,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1715#issuecomment-6409236689"
+      },
+      {
+        "ticket": 1715,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1715#issuecomment-6428390874"
+      },
+      {
+        "ticket": 1715,
+        "url": "https://github.com/Newchanlun/NewChanlun/pull/1733"
+      },
+      {
+        "ticket": 1716,
+        "url": "https://github.com/Newchanlun/NewChanlun/pull/1733"
+      }
+    ],
+    "subject": "feat(economic_session): freeze per-chong quantity calibration in tb03c-book/3 (#1733)",
+    "tb_markers": []
+  },
+  {
+    "commit": "499841b59265c5395ccdd40b92684b5864802f4f",
+    "declared": [
+      1717
+    ],
+    "epoch": 1793039415,
+    "mentions": [
+      1716,
+      1717
+    ],
+    "parent": "3b1a1841cd11898174983ebf092e11273bb63994",
+    "prs": [
+      1736
+    ],
+    "references": [
+      {
+        "ticket": 1380,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1380#issuecomment-6424201227"
+      },
+      {
+        "ticket": 1422,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1422#issuecomment-6424202251"
+      },
+      {
+        "ticket": 1552,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1552#issuecomment-6424203111"
+      },
+      {
+        "ticket": 1716,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1716#issuecomment-6426361223"
+      },
+      {
+        "ticket": 1717,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1717#issuecomment-6409633828"
+      },
+      {
+        "ticket": 1717,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1717#issuecomment-6410719609"
+      },
+      {
+        "ticket": 1717,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1717#issuecomment-6424199411"
+      },
+      {
+        "ticket": 1717,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1717#issuecomment-6425720601"
+      },
+      {
+        "ticket": 1717,
+        "url": "https://github.com/Newchanlun/NewChanlun/pull/1736"
+      }
+    ],
+    "subject": "feat(economic_session): #1717 SR 扩量评估接入正式 E 写口与持久恢复 (#1736)",
+    "tb_markers": []
+  },
+  {
+    "commit": "3b1a1841cd11898174983ebf092e11273bb63994",
+    "declared": [
+      1716
+    ],
+    "epoch": 1793034384,
+    "mentions": [
+      1408,
+      1552,
+      1716
+    ],
+    "parent": "06dd4a3fa8a703b5248786331d309e16b5c27996",
+    "prs": [
+      1732
+    ],
+    "references": [
+      {
+        "ticket": 1408,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1408#issuecomment-6424041899"
+      },
+      {
+        "ticket": 1408,
+        "url": "https://github.com/Newchanlun/NewChanlun/pull/1732"
+      },
+      {
+        "ticket": 1552,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1552#issuecomment-6424042707"
+      },
+      {
+        "ticket": 1552,
+        "url": "https://github.com/Newchanlun/NewChanlun/pull/1732"
+      },
+      {
+        "ticket": 1716,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1716#issuecomment-6409237208"
+      },
+      {
+        "ticket": 1716,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1716#issuecomment-6412536911"
+      },
+      {
+        "ticket": 1716,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1716#issuecomment-6422378705"
+      },
+      {
+        "ticket": 1716,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1716#issuecomment-6424041120"
+      },
+      {
+        "ticket": 1716,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1716#issuecomment-6426361223"
+      },
+      {
+        "ticket": 1716,
+        "url": "https://github.com/Newchanlun/NewChanlun/pull/1732"
+      }
+    ],
+    "subject": "#1716 I1-C：签署 cap 原子激活落在内容域新合同 tb03b-finance/4，签署原件绑定资金 profile (#1732)",
+    "tb_markers": []
+  },
+  {
+    "commit": "06dd4a3fa8a703b5248786331d309e16b5c27996",
+    "declared": [
+      1527
+    ],
+    "epoch": 1793021164,
+    "mentions": [
+      1488,
+      1527,
+      1602,
+      1657
+    ],
+    "parent": "d310c46dd2710c6faf3c946e8e3e05b48f1034de",
+    "prs": [
+      1714
+    ],
+    "references": [
+      {
+        "ticket": 1488,
+        "url": "https://github.com/Newchanlun/NewChanlun/pull/1714"
+      },
+      {
+        "ticket": 1527,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1527#issuecomment-6409559203"
+      },
+      {
+        "ticket": 1527,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1527#issuecomment-6412537683"
+      },
+      {
+        "ticket": 1527,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1527#issuecomment-6417156464"
+      },
+      {
+        "ticket": 1527,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1527#issuecomment-6418376733"
+      },
+      {
+        "ticket": 1527,
+        "url": "https://github.com/Newchanlun/NewChanlun/pull/1714"
+      },
+      {
+        "ticket": 1657,
+        "url": "https://github.com/Newchanlun/NewChanlun/pull/1714"
+      }
+    ],
+    "subject": "fix(#1527): integrate admitted writer lifecycle after #1488 (#1714)",
+    "tb_markers": []
+  },
+  {
+    "commit": "d310c46dd2710c6faf3c946e8e3e05b48f1034de",
+    "declared": [],
+    "epoch": 1793003491,
+    "mentions": [],
+    "parent": "b0bab458f04d2afea3282475c56e6134236c8a52",
+    "prs": [
+      1738
+    ],
+    "references": [
+      {
+        "ticket": 1406,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1406#issuecomment-6435999759"
+      },
+      {
+        "ticket": 1737,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1737#issuecomment-6410729531"
+      },
+      {
+        "ticket": 1737,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1737#issuecomment-6411636647"
+      },
+      {
+        "ticket": 1737,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1737#issuecomment-6435976266"
+      },
+      {
+        "ticket": 1737,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1737#issuecomment-6543303978"
+      },
+      {
+        "ticket": 1737,
+        "url": "https://github.com/Newchanlun/NewChanlun/pull/1738"
+      }
+    ],
+    "subject": "test(transport): synchronize expired reply assertion with client EOF (#1738)",
+    "tb_markers": []
+  },
+  {
+    "commit": "b0bab458f04d2afea3282475c56e6134236c8a52",
+    "declared": [
+      1602
+    ],
+    "epoch": 1792993403,
+    "mentions": [
+      1602
+    ],
+    "parent": "df7beb0c8da5d8f3b6053f85813b86613dcc6849",
+    "prs": [
+      1681
+    ],
+    "references": [
+      {
+        "ticket": 1399,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1399#issuecomment-6411518662"
+      },
+      {
+        "ticket": 1602,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1602#issuecomment-6325635316"
+      },
+      {
+        "ticket": 1602,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1602#issuecomment-6388913596"
+      },
+      {
+        "ticket": 1602,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1602#issuecomment-6389765340"
+      },
+      {
+        "ticket": 1602,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1602#issuecomment-6409863841"
+      },
+      {
+        "ticket": 1602,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1602#issuecomment-6432120874"
+      },
+      {
+        "ticket": 1602,
+        "url": "https://github.com/Newchanlun/NewChanlun/pull/1681"
+      },
+      {
+        "ticket": 1621,
+        "url": "https://github.com/Newchanlun/NewChanlun/pull/1681"
+      },
+      {
+        "ticket": 1717,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1717#issuecomment-6409633828"
+      }
+    ],
+    "subject": "Sandcastle #1602: [impl] 执行成本、风控与声部参数、场所 tick 与坏 tick 闸落版本化记录（#1586 C-06/C-08/C-17/C-18） (#1681)",
+    "tb_markers": []
+  },
+  {
+    "commit": "df7beb0c8da5d8f3b6053f85813b86613dcc6849",
+    "declared": [
+      1626
+    ],
+    "epoch": 1792988224,
+    "mentions": [
+      1626
+    ],
+    "parent": "b1c0ba1a587b4a8133c3bfa97950ef3f8a1f9b2d",
+    "prs": [
+      1693
+    ],
+    "references": [
+      {
+        "ticket": 1626,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1626#issuecomment-6381501581"
+      },
+      {
+        "ticket": 1626,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1626#issuecomment-6389065881"
+      },
+      {
+        "ticket": 1626,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1626#issuecomment-6389325092"
+      },
+      {
+        "ticket": 1626,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1626#issuecomment-6389495267"
+      },
+      {
+        "ticket": 1626,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1626#issuecomment-6389618938"
+      },
+      {
+        "ticket": 1626,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1626#issuecomment-6390321386"
+      },
+      {
+        "ticket": 1626,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1626#issuecomment-6403335551"
+      },
+      {
+        "ticket": 1626,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1626#issuecomment-6408993641"
+      },
+      {
+        "ticket": 1626,
+        "url": "https://github.com/Newchanlun/NewChanlun/pull/1693"
+      }
+    ],
+    "subject": "Sandcastle #1626: [impl] #1600 承接：trend_scope 与 tower_base 代码侧改读版本化字段，Lean 同步（Q-4、Q-6～Q-8、X-38、Q-2） (#1693)",
+    "tb_markers": []
+  },
+  {
+    "commit": "b1c0ba1a587b4a8133c3bfa97950ef3f8a1f9b2d",
+    "declared": [],
+    "epoch": 1792983249,
+    "mentions": [
+      1411,
+      1413
+    ],
+    "parent": "ce7b29c52bfc01abe4fe80cf3b1f70a11aa1cf32",
+    "prs": [
+      1726
+    ],
+    "references": [
+      {
+        "ticket": 1411,
+        "url": "https://github.com/Newchanlun/NewChanlun/pull/1726"
+      },
+      {
+        "ticket": 1413,
+        "url": "https://github.com/Newchanlun/NewChanlun/pull/1726"
+      },
+      {
+        "ticket": 1715,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1715#issuecomment-6408036344"
+      },
+      {
+        "ticket": 1716,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1716#issuecomment-6408053360"
+      },
+      {
+        "ticket": 1719,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1719#issuecomment-6407441782"
+      },
+      {
+        "ticket": 1719,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1719#issuecomment-6408092260"
+      }
+    ],
+    "subject": "docs: 归档 #1516 token 前提核验与独审证据 (#1726)",
+    "tb_markers": []
+  },
+  {
+    "commit": "ce7b29c52bfc01abe4fe80cf3b1f70a11aa1cf32",
+    "declared": [
+      1488
+    ],
+    "epoch": 1792983244,
+    "mentions": [
+      1488
+    ],
+    "parent": "40f11b540f02666a854bcf48e5ee259ff88af8bb",
+    "prs": [
+      1725
+    ],
+    "references": [
+      {
+        "ticket": 1488,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1488#issuecomment-6440370171"
+      },
+      {
+        "ticket": 1488,
+        "url": "https://github.com/Newchanlun/NewChanlun/pull/1725"
+      }
+    ],
+    "subject": "docs(#1488): 收录工位释放证据与剩余恢复条件 (#1725)",
+    "tb_markers": []
+  },
+  {
+    "commit": "40f11b540f02666a854bcf48e5ee259ff88af8bb",
+    "declared": [],
+    "epoch": 1792982027,
+    "mentions": [],
+    "parent": "a46ab454a83db3a3d1ad5fc3f54ca2db1b394d87",
+    "prs": [
+      1713
+    ],
+    "references": [
+      {
+        "ticket": 1602,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1602#issuecomment-6407150649"
+      }
+    ],
+    "subject": "[#1598 #1599 #1610] 已批准政策正本与量纲订正 (#1713)",
+    "tb_markers": []
+  },
+  {
+    "commit": "a46ab454a83db3a3d1ad5fc3f54ca2db1b394d87",
+    "declared": [
+      1601
+    ],
+    "epoch": 1792981829,
+    "mentions": [
+      1601
+    ],
+    "parent": "7fe402cd79b0afdad87ed2a828d6d75fb8ade07b",
+    "prs": [
+      1680
+    ],
+    "references": [
+      {
+        "ticket": 1601,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1601#issuecomment-6325629172"
+      },
+      {
+        "ticket": 1601,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1601#issuecomment-6388395133"
+      },
+      {
+        "ticket": 1601,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1601#issuecomment-6432119497"
+      },
+      {
+        "ticket": 1601,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1601#issuecomment-6457107870"
+      },
+      {
+        "ticket": 1601,
+        "url": "https://github.com/Newchanlun/NewChanlun/pull/1680"
+      },
+      {
+        "ticket": 1715,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1715"
+      },
+      {
+        "ticket": 1716,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1716"
+      },
+      {
+        "ticket": 1717,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1717"
+      },
+      {
+        "ticket": 1718,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1718"
+      },
+      {
+        "ticket": 1719,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1719"
+      }
+    ],
+    "subject": "Sandcastle #1601: [impl] 资金与下单基数接 funding-record：回放总投入、NT 生产 nav 与起始操作级别（#1586 C-01/C-02/C-22） (#1680)",
+    "tb_markers": []
+  },
+  {
+    "commit": "7fe402cd79b0afdad87ed2a828d6d75fb8ade07b",
+    "declared": [
+      1585
+    ],
+    "epoch": 1792981823,
+    "mentions": [
+      1493,
+      1581,
+      1585
+    ],
+    "parent": "f8072dc9cbe34b34b468a9aa05772693d0acf187",
+    "prs": [
+      1664
+    ],
+    "references": [
+      {
+        "ticket": 1493,
+        "url": "https://github.com/Newchanlun/NewChanlun/pull/1664"
+      },
+      {
+        "ticket": 1581,
+        "url": "https://github.com/Newchanlun/NewChanlun/pull/1664"
+      },
+      {
+        "ticket": 1585,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1585#issuecomment-6313676169"
+      },
+      {
+        "ticket": 1585,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1585#issuecomment-6315376460"
+      },
+      {
+        "ticket": 1585,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1585#issuecomment-6316166103"
+      },
+      {
+        "ticket": 1585,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1585#issuecomment-6317397809"
+      },
+      {
+        "ticket": 1585,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1585#issuecomment-6318111078"
+      },
+      {
+        "ticket": 1585,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1585#issuecomment-6432119945"
+      },
+      {
+        "ticket": 1585,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1585#issuecomment-6457105185"
+      },
+      {
+        "ticket": 1585,
+        "url": "https://github.com/Newchanlun/NewChanlun/pull/1664"
+      }
+    ],
+    "subject": "backtest/diag: #1585 非 classifier 入口的段账本直读路径处理 segment_parse_invalid（X-39） (#1664)",
+    "tb_markers": []
+  },
+  {
+    "commit": "f8072dc9cbe34b34b468a9aa05772693d0acf187",
+    "declared": [
+      1678
+    ],
+    "epoch": 1792981293,
+    "mentions": [
+      1678
+    ],
+    "parent": "a74b3b9db5b7b3df0aeab938a45e4d50b9df8d8f",
+    "prs": [
+      1720
+    ],
+    "references": [
+      {
+        "ticket": 1678,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1678#issuecomment-6418805412"
+      },
+      {
+        "ticket": 1678,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1678#issuecomment-6457111804"
+      },
+      {
+        "ticket": 1678,
+        "url": "https://github.com/Newchanlun/NewChanlun/pull/1720"
+      }
+    ],
+    "subject": "[#1678] 修正 MACD 增量标度计量并验证线性负控 (#1720)",
+    "tb_markers": []
+  },
+  {
+    "commit": "a74b3b9db5b7b3df0aeab938a45e4d50b9df8d8f",
+    "declared": [
+      1666
+    ],
+    "epoch": 1792981280,
+    "mentions": [
+      1666
+    ],
+    "parent": "d02410fc8703ab40b7afc69d10bb793f22574396",
+    "prs": [
+      1667
+    ],
+    "references": [
+      {
+        "ticket": 1666,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1666#issuecomment-6323981996"
+      },
+      {
+        "ticket": 1666,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1666#issuecomment-6404578929"
+      },
+      {
+        "ticket": 1666,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1666#issuecomment-6432120410"
+      },
+      {
+        "ticket": 1666,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1666#issuecomment-6432267879"
+      },
+      {
+        "ticket": 1666,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1666#issuecomment-6457109977"
+      },
+      {
+        "ticket": 1666,
+        "url": "https://github.com/Newchanlun/NewChanlun/pull/1667"
+      }
+    ],
+    "subject": "s-session/3: #1666 原子 init 遗留 L1–L5（已发布收尾失败改成功附告警、link 回退与 EINVAL 收窄测试、SIGKILL 命中断言） (#1667)",
+    "tb_markers": []
+  },
+  {
+    "commit": "d02410fc8703ab40b7afc69d10bb793f22574396",
+    "declared": [
+      1605
+    ],
+    "epoch": 1792980636,
+    "mentions": [
+      1605,
+      1669,
+      1674
+    ],
+    "parent": "5b7a517e25989f21d4078e4751a713a046c625bb",
+    "prs": [
+      1721
+    ],
+    "references": [
+      {
+        "ticket": 1488,
+        "url": "https://github.com/Newchanlun/NewChanlun/pull/1721"
+      },
+      {
+        "ticket": 1605,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1605#issuecomment-6404209771"
+      },
+      {
+        "ticket": 1605,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1605#issuecomment-6407018202"
+      },
+      {
+        "ticket": 1605,
+        "url": "https://github.com/Newchanlun/NewChanlun/pull/1721"
+      },
+      {
+        "ticket": 1669,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1669#issuecomment-6407019110"
+      },
+      {
+        "ticket": 1669,
+        "url": "https://github.com/Newchanlun/NewChanlun/pull/1721"
+      },
+      {
+        "ticket": 1674,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1674#issuecomment-6407043936"
+      },
+      {
+        "ticket": 1674,
+        "url": "https://github.com/Newchanlun/NewChanlun/pull/1721"
+      }
+    ],
+    "subject": "docs(#1605,#1669,#1674): 入仓最终独审与主线收尾凭据 (#1721)",
+    "tb_markers": []
+  },
+  {
+    "commit": "5b7a517e25989f21d4078e4751a713a046c625bb",
+    "declared": [],
+    "epoch": 1792979692,
+    "mentions": [],
+    "parent": "3a6866ad15c9e3f4f51ba26c7dc7b63a749c9107",
+    "prs": [
+      1704
+    ],
+    "references": [
+      {
+        "ticket": 1360,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1360#issuecomment-6404225320"
+      },
+      {
+        "ticket": 1361,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1361#issuecomment-6404225841"
+      },
+      {
+        "ticket": 1362,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1362#issuecomment-6404226433"
+      },
+      {
+        "ticket": 1364,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1364#issuecomment-6404226890"
+      }
+    ],
+    "subject": "[FU-10] Chong 每bar追溯与逐重独立性正本 (#1533) (#1704)",
+    "tb_markers": []
+  },
+  {
+    "commit": "3a6866ad15c9e3f4f51ba26c7dc7b63a749c9107",
+    "declared": [
+      1621,
+      1622
+    ],
+    "epoch": 1792973283,
+    "mentions": [
+      1621,
+      1622
+    ],
+    "parent": "2804ae501caae07c93f95ce0010551a704352ce4",
+    "prs": [
+      1703
+    ],
+    "references": [
+      {
+        "ticket": 1621,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1621#issuecomment-6390401345"
+      },
+      {
+        "ticket": 1621,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1621#issuecomment-6398094591"
+      },
+      {
+        "ticket": 1621,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1621#issuecomment-6457041808"
+      },
+      {
+        "ticket": 1621,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1621#issuecomment-6457099143"
+      },
+      {
+        "ticket": 1621,
+        "url": "https://github.com/Newchanlun/NewChanlun/pull/1703"
+      },
+      {
+        "ticket": 1622,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1622#issuecomment-6390401630"
+      },
+      {
+        "ticket": 1622,
+        "url": "https://github.com/Newchanlun/NewChanlun/pull/1703"
+      }
+    ],
+    "subject": "docs: #1621 #1622 归档关票核验与X承接 (#1703)",
+    "tb_markers": []
+  },
+  {
+    "commit": "99df2ed762201236b89f0e81c0276cb3aa847f0a",
+    "declared": [
+      1678
+    ],
+    "epoch": 1792962385,
+    "mentions": [
+      1621,
+      1678
+    ],
+    "parent": "92dc58eafcb8cd71b51b0a2b5ed8a4406e1ea581",
+    "prs": [
+      1699
+    ],
+    "references": [
+      {
+        "ticket": 1411,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1411#issuecomment-6405083806"
+      },
+      {
+        "ticket": 1413,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1413#issuecomment-6405083410"
+      },
+      {
+        "ticket": 1621,
+        "url": "https://github.com/Newchanlun/NewChanlun/pull/1699"
+      },
+      {
+        "ticket": 1678,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1678#issuecomment-6383118929"
+      },
+      {
+        "ticket": 1678,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1678#issuecomment-6387490414"
+      },
+      {
+        "ticket": 1678,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1678#issuecomment-6403292124"
+      },
+      {
+        "ticket": 1678,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1678#issuecomment-6403927849"
+      },
+      {
+        "ticket": 1678,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1678#issuecomment-6418805412"
+      },
+      {
+        "ticket": 1678,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1678#issuecomment-6457111804"
+      },
+      {
+        "ticket": 1678,
+        "url": "https://github.com/Newchanlun/NewChanlun/pull/1699"
+      }
+    ],
+    "subject": "[#1678] 归档 launchd 真实自愈验收 (#1699)",
+    "tb_markers": []
+  },
+  {
+    "commit": "92dc58eafcb8cd71b51b0a2b5ed8a4406e1ea581",
+    "declared": [
+      1674
+    ],
+    "epoch": 1792962353,
+    "mentions": [
+      1406,
+      1621,
+      1674
+    ],
+    "parent": "7cacd14135d12e2339fce58cd1c87cd0ee132ee0",
+    "prs": [
+      1684
+    ],
+    "references": [
+      {
+        "ticket": 1406,
+        "url": "https://github.com/Newchanlun/NewChanlun/pull/1684"
+      },
+      {
+        "ticket": 1621,
+        "url": "https://github.com/Newchanlun/NewChanlun/pull/1684"
+      },
+      {
+        "ticket": 1626,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1626#issuecomment-6403280177"
+      },
+      {
+        "ticket": 1626,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1626#issuecomment-6403335551"
+      },
+      {
+        "ticket": 1669,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1669#issuecomment-6407019110"
+      },
+      {
+        "ticket": 1674,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1674#issuecomment-6326632846"
+      },
+      {
+        "ticket": 1674,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1674#issuecomment-6381181200"
+      },
+      {
+        "ticket": 1674,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1674#issuecomment-6383160941"
+      },
+      {
+        "ticket": 1674,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1674#issuecomment-6388030968"
+      },
+      {
+        "ticket": 1674,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1674#issuecomment-6391658687"
+      },
+      {
+        "ticket": 1674,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1674#issuecomment-6403291650"
+      },
+      {
+        "ticket": 1674,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1674#issuecomment-6407043936"
+      },
+      {
+        "ticket": 1674,
+        "url": "https://github.com/Newchanlun/NewChanlun/pull/1684"
+      }
+    ],
+    "subject": "Sandcastle #1674: [impl] TB-03-C tb03c-book/2 持久边界的新进程与 SIGKILL 恢复对拍（#1406 AC5） (#1684)",
+    "tb_markers": [
+      "TB-03-C"
+    ]
+  },
+  {
+    "commit": "7cacd14135d12e2339fce58cd1c87cd0ee132ee0",
+    "declared": [
+      1669
+    ],
+    "epoch": 1792962298,
+    "mentions": [
+      1378,
+      1406,
+      1669
+    ],
+    "parent": "025d2eb5a717811cd9f8b3bcaa35a19da7478ba0",
+    "prs": [
+      1676
+    ],
+    "references": [
+      {
+        "ticket": 1378,
+        "url": "https://github.com/Newchanlun/NewChanlun/pull/1676"
+      },
+      {
+        "ticket": 1406,
+        "url": "https://github.com/Newchanlun/NewChanlun/pull/1676"
+      },
+      {
+        "ticket": 1669,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1669#issuecomment-6326095104"
+      },
+      {
+        "ticket": 1669,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1669#issuecomment-6381179927"
+      },
+      {
+        "ticket": 1669,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1669#issuecomment-6388539280"
+      },
+      {
+        "ticket": 1669,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1669#issuecomment-6403269528"
+      },
+      {
+        "ticket": 1669,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1669#issuecomment-6407019110"
+      },
+      {
+        "ticket": 1669,
+        "url": "https://github.com/Newchanlun/NewChanlun/pull/1676"
+      }
+    ],
+    "subject": "economic_session：空头资格蕴含性质锁（ADR 0043 订正式）与 Lean 覆盖面声明 (#1676)",
+    "tb_markers": []
+  },
+  {
+    "commit": "025d2eb5a717811cd9f8b3bcaa35a19da7478ba0",
+    "declared": [
+      1605
+    ],
+    "epoch": 1792962192,
+    "mentions": [
+      1398,
+      1410,
+      1441,
+      1605
+    ],
+    "parent": "8bbe4499d983e674d435261b207a6556715600b4",
+    "prs": [
+      1705
+    ],
+    "references": [
+      {
+        "ticket": 1398,
+        "url": "https://github.com/Newchanlun/NewChanlun/pull/1705"
+      },
+      {
+        "ticket": 1410,
+        "url": "https://github.com/Newchanlun/NewChanlun/pull/1705"
+      },
+      {
+        "ticket": 1441,
+        "url": "https://github.com/Newchanlun/NewChanlun/pull/1705"
+      },
+      {
+        "ticket": 1488,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1488#issuecomment-6404778357"
+      },
+      {
+        "ticket": 1488,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1488#issuecomment-6440370171"
+      },
+      {
+        "ticket": 1605,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1605#issuecomment-6391350526"
+      },
+      {
+        "ticket": 1605,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1605#issuecomment-6397255356"
+      },
+      {
+        "ticket": 1605,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1605#issuecomment-6403269084"
+      },
+      {
+        "ticket": 1605,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1605#issuecomment-6404179200"
+      },
+      {
+        "ticket": 1605,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1605#issuecomment-6404209771"
+      },
+      {
+        "ticket": 1605,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1605#issuecomment-6407018202"
+      },
+      {
+        "ticket": 1605,
+        "url": "https://github.com/Newchanlun/NewChanlun/pull/1705"
+      }
+    ],
+    "subject": "Sandcastle #1605: [impl] 回测与验收统计常数并入验收口径版本化记录（#1586 C-19） (#1705)",
+    "tb_markers": []
+  },
+  {
+    "commit": "8bbe4499d983e674d435261b207a6556715600b4",
+    "declared": [
+      1488
+    ],
+    "epoch": 1792962118,
+    "mentions": [
+      1488,
+      1608,
+      1642,
+      1645
+    ],
+    "parent": "13ed4d45c8ff85175819ca987690328ab2a247a4",
+    "prs": [
+      1711
+    ],
+    "references": [
+      {
+        "ticket": 1381,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1381#issuecomment-7023742841"
+      },
+      {
+        "ticket": 1419,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1419#issuecomment-6440624074"
+      },
+      {
+        "ticket": 1488,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1488#issuecomment-6398752436"
+      },
+      {
+        "ticket": 1488,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1488#issuecomment-6400035192"
+      },
+      {
+        "ticket": 1488,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1488#issuecomment-6400772300"
+      },
+      {
+        "ticket": 1488,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1488#issuecomment-6403234483"
+      },
+      {
+        "ticket": 1488,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1488#issuecomment-6404778357"
+      },
+      {
+        "ticket": 1488,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1488#issuecomment-6440370171"
+      },
+      {
+        "ticket": 1488,
+        "url": "https://github.com/Newchanlun/NewChanlun/pull/1711"
+      },
+      {
+        "ticket": 1491,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1491#issuecomment-6440402308"
+      },
+      {
+        "ticket": 1527,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1527#issuecomment-6403243162"
+      },
+      {
+        "ticket": 1640,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1640#issuecomment-6439040024"
+      },
+      {
+        "ticket": 1640,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1640#issuecomment-6440403027"
+      },
+      {
+        "ticket": 1642,
+        "url": "https://github.com/Newchanlun/NewChanlun/pull/1711"
+      },
+      {
+        "ticket": 1645,
+        "url": "https://github.com/Newchanlun/NewChanlun/pull/1711"
+      }
+    ],
+    "subject": "[#1488] 收齐 P2 原生编译门与精确验收封包 (#1711)",
+    "tb_markers": []
+  },
+  {
+    "commit": "13ed4d45c8ff85175819ca987690328ab2a247a4",
+    "declared": [
+      1621,
+      1622
+    ],
+    "epoch": 1792878255,
+    "mentions": [
+      1620,
+      1621,
+      1622
+    ],
+    "parent": "3ff38accdd93a3fddac6e1a5274b7cb7d192ac0f",
+    "prs": [
+      1688
+    ],
+    "references": [
+      {
+        "ticket": 1488,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1488#issuecomment-6398159525"
+      },
+      {
+        "ticket": 1488,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1488#issuecomment-6400772300"
+      },
+      {
+        "ticket": 1605,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1605#issuecomment-6397255356"
+      },
+      {
+        "ticket": 1621,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1621#issuecomment-6382773793"
+      },
+      {
+        "ticket": 1621,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1621#issuecomment-6387468118"
+      },
+      {
+        "ticket": 1621,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1621#issuecomment-6390401345"
+      },
+      {
+        "ticket": 1621,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1621#issuecomment-6398094591"
+      },
+      {
+        "ticket": 1621,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1621#issuecomment-6457099143"
+      },
+      {
+        "ticket": 1621,
+        "url": "https://github.com/Newchanlun/NewChanlun/pull/1688"
+      },
+      {
+        "ticket": 1622,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1622#issuecomment-6364588015"
+      },
+      {
+        "ticket": 1622,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1622#issuecomment-6364936194"
+      },
+      {
+        "ticket": 1622,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1622#issuecomment-6382774134"
+      },
+      {
+        "ticket": 1622,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1622#issuecomment-6387602941"
+      },
+      {
+        "ticket": 1622,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1622#issuecomment-6390401630"
+      },
+      {
+        "ticket": 1622,
+        "url": "https://github.com/Newchanlun/NewChanlun/pull/1688"
+      },
+      {
+        "ticket": 1670,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1670#issuecomment-6417253088"
+      },
+      {
+        "ticket": 1674,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1674#issuecomment-6391658687"
+      }
+    ],
+    "subject": "[#1621 #1622] 时钟因果与 BindVoice SIGKILL 恢复集成 (#1688)",
+    "tb_markers": []
+  },
+  {
+    "commit": "3ff38accdd93a3fddac6e1a5274b7cb7d192ac0f",
+    "declared": [
+      1678
+    ],
+    "epoch": 1792781107,
+    "mentions": [
+      1678
+    ],
+    "parent": "3ca3a362795cce29edbdf49424828b9009e2b779",
+    "prs": [
+      1682
+    ],
+    "references": [
+      {
+        "ticket": 1621,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1621#issuecomment-6381239334"
+      },
+      {
+        "ticket": 1678,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1678#issuecomment-6325975716"
+      },
+      {
+        "ticket": 1678,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1678#issuecomment-6383118929"
+      },
+      {
+        "ticket": 1678,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1678#issuecomment-6418805412"
+      },
+      {
+        "ticket": 1678,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1678#issuecomment-6457111804"
+      },
+      {
+        "ticket": 1678,
+        "url": "https://github.com/Newchanlun/NewChanlun/pull/1682"
+      }
+    ],
+    "subject": "Sandcastle #1678: [impl] health-monitor 自愈：服务未加载时改走 launchctl bootstrap（拆自 #1547 判据 4） (#1682)",
+    "tb_markers": []
+  },
+  {
+    "commit": "3ca3a362795cce29edbdf49424828b9009e2b779",
+    "declared": [
+      1683
+    ],
+    "epoch": 1792780054,
+    "mentions": [
+      1406,
+      1683
+    ],
+    "parent": "4a9c4073a19b1f74f4e0768dca34dba35282aea4",
+    "prs": [
+      1685
+    ],
+    "references": [
+      {
+        "ticket": 1683,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1683#issuecomment-6326951704"
+      },
+      {
+        "ticket": 1683,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1683#issuecomment-6364378663"
+      },
+      {
+        "ticket": 1683,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1683#issuecomment-6372013184"
+      },
+      {
+        "ticket": 1683,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1683#issuecomment-6990597677"
+      },
+      {
+        "ticket": 1683,
+        "url": "https://github.com/Newchanlun/NewChanlun/pull/1685"
+      }
+    ],
+    "subject": "Merge pull request #1685 from xy7365527-lang/sandcastle/issue-1683",
+    "tb_markers": []
+  },
+  {
+    "commit": "4a9c4073a19b1f74f4e0768dca34dba35282aea4",
+    "declared": [
+      1671
+    ],
+    "epoch": 1792780041,
+    "mentions": [
+      1406,
+      1671
+    ],
+    "parent": "31cdcdf2adeccc82da8dd4301458d4c14155e0cf",
+    "prs": [
+      1687
+    ],
+    "references": [
+      {
+        "ticket": 1671,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1671#issuecomment-6328086294"
+      },
+      {
+        "ticket": 1671,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1671#issuecomment-6372014241"
+      },
+      {
+        "ticket": 1671,
+        "url": "https://github.com/Newchanlun/NewChanlun/pull/1687"
+      }
+    ],
+    "subject": "Merge pull request #1687 from xy7365527-lang/sandcastle/issue-1671",
+    "tb_markers": [
+      "TB-03-C"
+    ]
+  },
+  {
+    "commit": "31cdcdf2adeccc82da8dd4301458d4c14155e0cf",
+    "declared": [
+      1621
+    ],
+    "epoch": 1792771180,
+    "mentions": [
+      1621
+    ],
+    "parent": "e67def13a172b9b9fc05e762900930630d5c9184",
+    "prs": [
+      1691
+    ],
+    "references": [
+      {
+        "ticket": 1621,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1621#issuecomment-6381239334"
+      },
+      {
+        "ticket": 1621,
+        "url": "https://github.com/Newchanlun/NewChanlun/pull/1691"
+      },
+      {
+        "ticket": 1669,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1669#issuecomment-6372192317"
+      },
+      {
+        "ticket": 1669,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1669#issuecomment-6381179927"
+      },
+      {
+        "ticket": 1670,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1670#issuecomment-6372193438"
+      },
+      {
+        "ticket": 1670,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1670#issuecomment-6381180342"
+      },
+      {
+        "ticket": 1672,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1672#issuecomment-6372194491"
+      },
+      {
+        "ticket": 1672,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1672#issuecomment-6381180817"
+      }
+    ],
+    "subject": "[#1621] 修正时钟合同：精确 Gregorian UTC + Python golden 对拍 (#1691)",
+    "tb_markers": []
+  },
+  {
+    "commit": "e67def13a172b9b9fc05e762900930630d5c9184",
+    "declared": [
+      1620
+    ],
+    "epoch": 1792764646,
+    "mentions": [
+      1406,
+      1620
+    ],
+    "parent": "7010949cbdd4d8e208a937bbf4b43eb3640e5c4a",
+    "prs": [
+      1690
+    ],
+    "references": [
+      {
+        "ticket": 1620,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1620#issuecomment-6365224685"
+      },
+      {
+        "ticket": 1620,
+        "url": "https://github.com/Newchanlun/NewChanlun/pull/1690"
+      },
+      {
+        "ticket": 1621,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1621#issuecomment-6381239334"
+      }
+    ],
+    "subject": "[#1620] Python 读者 tb03c-book/2 对拍修复",
+    "tb_markers": []
+  },
+  {
+    "commit": "7010949cbdd4d8e208a937bbf4b43eb3640e5c4a",
+    "declared": [
+      1604
+    ],
+    "epoch": 1792752449,
+    "mentions": [
+      1405,
+      1420,
+      1493,
+      1581,
+      1603,
+      1604,
+      1626,
+      1653
+    ],
+    "parent": "344d4da15d59b520b0aee6f4332d9a14a48f7d1a",
+    "prs": [
+      1663
+    ],
+    "references": [
+      {
+        "ticket": 1420,
+        "url": "https://github.com/Newchanlun/NewChanlun/pull/1663"
+      },
+      {
+        "ticket": 1493,
+        "url": "https://github.com/Newchanlun/NewChanlun/pull/1663"
+      },
+      {
+        "ticket": 1604,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1604#issuecomment-6313378175"
+      },
+      {
+        "ticket": 1604,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1604#issuecomment-6315375790"
+      },
+      {
+        "ticket": 1604,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1604#issuecomment-6316669838"
+      },
+      {
+        "ticket": 1604,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1604#issuecomment-6319635273"
+      },
+      {
+        "ticket": 1604,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1604#issuecomment-6320689130"
+      },
+      {
+        "ticket": 1604,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1604#issuecomment-6363222675"
+      },
+      {
+        "ticket": 1604,
+        "url": "https://github.com/Newchanlun/NewChanlun/pull/1663"
+      },
+      {
+        "ticket": 1653,
+        "url": "https://github.com/Newchanlun/NewChanlun/pull/1663"
+      }
+    ],
+    "subject": "segment: #1604 线段尾窗与相切边界并入具名记录（second-seq-scan-budget/2、segment-second/2） (#1663)",
+    "tb_markers": []
+  },
+  {
+    "commit": "344d4da15d59b520b0aee6f4332d9a14a48f7d1a",
+    "declared": [],
+    "epoch": 1792748829,
+    "mentions": [
+      1383,
+      1385,
+      1398,
+      1406,
+      1413,
+      1429,
+      1523,
+      1605
+    ],
+    "parent": "e4c634e1f7b544b7538da868273f456883359ca4",
+    "prs": [
+      1679
+    ],
+    "references": [
+      {
+        "ticket": 1383,
+        "url": "https://github.com/Newchanlun/NewChanlun/pull/1679"
+      },
+      {
+        "ticket": 1385,
+        "url": "https://github.com/Newchanlun/NewChanlun/pull/1679"
+      },
+      {
+        "ticket": 1398,
+        "url": "https://github.com/Newchanlun/NewChanlun/pull/1679"
+      },
+      {
+        "ticket": 1406,
+        "url": "https://github.com/Newchanlun/NewChanlun/pull/1679"
+      },
+      {
+        "ticket": 1413,
+        "url": "https://github.com/Newchanlun/NewChanlun/pull/1679"
+      },
+      {
+        "ticket": 1429,
+        "url": "https://github.com/Newchanlun/NewChanlun/pull/1679"
+      },
+      {
+        "ticket": 1523,
+        "url": "https://github.com/Newchanlun/NewChanlun/pull/1679"
+      },
+      {
+        "ticket": 1605,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1605#issuecomment-6326056784"
+      },
+      {
+        "ticket": 1605,
+        "url": "https://github.com/Newchanlun/NewChanlun/pull/1679"
+      }
+    ],
+    "subject": "decision 批量：#1619 sanjieduan §6、#1531 ADR 0047、#1532 ADR 0048、#1677 ADR 0022 修订 (#1679)",
+    "tb_markers": []
+  },
+  {
+    "commit": "e4c634e1f7b544b7538da868273f456883359ca4",
+    "declared": [],
+    "epoch": 1792611482,
+    "mentions": [
+      1415,
+      1653
+    ],
+    "parent": "66c409e7e3236617e4020c27144049ab7c380e15",
+    "prs": [
+      1661
+    ],
+    "references": [
+      {
+        "ticket": 1415,
+        "url": "https://github.com/Newchanlun/NewChanlun/pull/1661"
+      },
+      {
+        "ticket": 1606,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1606#issuecomment-6324427808"
+      },
+      {
+        "ticket": 1653,
+        "url": "https://github.com/Newchanlun/NewChanlun/pull/1661"
+      },
+      {
+        "ticket": 1672,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1672#issuecomment-6327836452"
+      },
+      {
+        "ticket": 1678,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1678"
+      }
+    ],
+    "subject": "sandcastle：harvest.sh 改为推分支 + 开 PR + 票面登记 (#1661)",
+    "tb_markers": []
+  },
+  {
+    "commit": "66c409e7e3236617e4020c27144049ab7c380e15",
+    "declared": [
+      1653
+    ],
+    "epoch": 1792607391,
+    "mentions": [
+      1576,
+      1581,
+      1603,
+      1653
+    ],
+    "parent": "5797d2269e0bd78b4284409aff7420b81ce99c73",
+    "prs": [
+      1662
+    ],
+    "references": [
+      {
+        "ticket": 1406,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1406#issuecomment-6324262170"
+      },
+      {
+        "ticket": 1576,
+        "url": "https://github.com/Newchanlun/NewChanlun/pull/1662"
+      },
+      {
+        "ticket": 1581,
+        "url": "https://github.com/Newchanlun/NewChanlun/pull/1662"
+      },
+      {
+        "ticket": 1603,
+        "url": "https://github.com/Newchanlun/NewChanlun/pull/1662"
+      },
+      {
+        "ticket": 1604,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1604#issuecomment-6316669838"
+      },
+      {
+        "ticket": 1653,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1653#issuecomment-6311896923"
+      },
+      {
+        "ticket": 1653,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1653#issuecomment-6315374877"
+      },
+      {
+        "ticket": 1653,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1653#issuecomment-6315400277"
+      },
+      {
+        "ticket": 1653,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1653#issuecomment-6324854611"
+      },
+      {
+        "ticket": 1653,
+        "url": "https://github.com/Newchanlun/NewChanlun/pull/1662"
+      }
+    ],
+    "subject": "classifier：段账本拒读终止态 ParseInvalid 与 #1603/#1576 遗留低优先修补 (#1662)",
+    "tb_markers": []
+  },
+  {
+    "commit": "5797d2269e0bd78b4284409aff7420b81ce99c73",
+    "declared": [
+      1630
+    ],
+    "epoch": 1792603311,
+    "mentions": [
+      1630,
+      1634
+    ],
+    "parent": "21b145250ec0d65e7d7148eed32594490dc763cc",
+    "prs": [
+      1659
+    ],
+    "references": [
+      {
+        "ticket": 1415,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1415#issuecomment-6324054892"
+      },
+      {
+        "ticket": 1630,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1630#issuecomment-6311896146"
+      },
+      {
+        "ticket": 1630,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1630#issuecomment-6315373982"
+      },
+      {
+        "ticket": 1630,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1630#issuecomment-6323502443"
+      },
+      {
+        "ticket": 1630,
+        "url": "https://github.com/Newchanlun/NewChanlun/pull/1659"
+      },
+      {
+        "ticket": 1634,
+        "url": "https://github.com/Newchanlun/NewChanlun/pull/1659"
+      },
+      {
+        "ticket": 1666,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1666#issuecomment-6323981996"
+      },
+      {
+        "ticket": 1666,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1666#issuecomment-6457109977"
+      }
+    ],
+    "subject": "探针：replay-drop 超线性定位为 #1582 前的段重扫跨度，加 rescan_span 读数 (#1659)",
+    "tb_markers": []
+  },
+  {
+    "commit": "21b145250ec0d65e7d7148eed32594490dc763cc",
+    "declared": [],
+    "epoch": 1792599078,
+    "mentions": [
+      1405
+    ],
+    "parent": "b0a21955109643c9f325687f77485f99aa619049",
+    "prs": [
+      1631
+    ],
+    "references": [
+      {
+        "ticket": 1405,
+        "url": "https://github.com/Newchanlun/NewChanlun/pull/1631"
+      }
+    ],
+    "subject": "launcher stop 在 Linux 上观察不到已回收进程的退出：ps 显式 LINES 消除 procps 告警 (#1631)",
+    "tb_markers": []
+  },
+  {
+    "commit": "b0a21955109643c9f325687f77485f99aa619049",
+    "declared": [
+      1608
+    ],
+    "epoch": 1792594439,
+    "mentions": [
+      1394,
+      1608
+    ],
+    "parent": "2df3eebec7cea98cac9126a3999294f8c096cd46",
+    "prs": [
+      1632
+    ],
+    "references": [
+      {
+        "ticket": 1394,
+        "url": "https://github.com/Newchanlun/NewChanlun/pull/1632"
+      },
+      {
+        "ticket": 1608,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1608#issuecomment-6320353216"
+      },
+      {
+        "ticket": 1608,
+        "url": "https://github.com/Newchanlun/NewChanlun/pull/1632"
+      }
+    ],
+    "subject": "Rust 编译告警清零 + CI -D warnings 防回潮 + #1394 编译负例入 CI (#1632)",
+    "tb_markers": []
+  },
+  {
+    "commit": "aa1c3885f8adc1d79c08641424b3ce30a15536f1",
+    "declared": [],
+    "epoch": 1792585207,
+    "mentions": [
+      1527
+    ],
+    "parent": "2ccc1182bd8c7b1aab388914deb2c43606ef4afb",
+    "prs": [
+      1656
+    ],
+    "references": [
+      {
+        "ticket": 1527,
+        "url": "https://github.com/Newchanlun/NewChanlun/pull/1656"
+      },
+      {
+        "ticket": 1666,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1666"
+      },
+      {
+        "ticket": 1666,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1666#issuecomment-6323981996"
+      }
+    ],
+    "subject": "s-session/3 init 暂存建库后原子发布，失败可原路径重试 (#1656)",
+    "tb_markers": []
+  },
+  {
+    "commit": "2ccc1182bd8c7b1aab388914deb2c43606ef4afb",
+    "declared": [],
+    "epoch": 1792582951,
+    "mentions": [],
+    "parent": "001c70a65937357570aec969c8960ae5d68645c0",
+    "prs": [
+      1650
+    ],
+    "references": [
+      {
+        "ticket": 1657,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1657#issuecomment-6315188062"
+      }
+    ],
+    "subject": "docs：订正 DEVSKIM-TRIAGE §7.2 措辞，补 #1593 尾部补审记录 (#1650)",
+    "tb_markers": []
+  },
+  {
+    "commit": "001c70a65937357570aec969c8960ae5d68645c0",
+    "declared": [],
+    "epoch": 1792582944,
+    "mentions": [
+      1481,
+      1645
+    ],
+    "parent": "1879c6a632b0afd65387b3878ee9af855c1417df",
+    "prs": [
+      1646
+    ],
+    "references": [
+      {
+        "ticket": 1481,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1481"
+      },
+      {
+        "ticket": 1481,
+        "url": "https://github.com/Newchanlun/NewChanlun/pull/1646"
+      },
+      {
+        "ticket": 1491,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1491#issuecomment-6308981491"
+      },
+      {
+        "ticket": 1640,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1640#issuecomment-6308987091"
+      },
+      {
+        "ticket": 1641,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1641#issuecomment-6308987525"
+      },
+      {
+        "ticket": 1645,
+        "url": "https://github.com/Newchanlun/NewChanlun/pull/1646"
+      },
+      {
+        "ticket": 1647,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1647"
+      },
+      {
+        "ticket": 1647,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1647#issuecomment-6309011298"
+      },
+      {
+        "ticket": 1647,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1647#issuecomment-6532860364"
+      }
+    ],
+    "subject": "spec：P6 S 审计台账与写前闭包核验 Δ 读法修订记录 (#1646)",
+    "tb_markers": []
+  },
+  {
+    "commit": "1879c6a632b0afd65387b3878ee9af855c1417df",
+    "declared": [],
+    "epoch": 1792582924,
+    "mentions": [
+      1657
+    ],
+    "parent": "63ecebf8f815fa5ac3ac274f9af60cf9e9fa4250",
+    "prs": [
+      1658
+    ],
+    "references": [
+      {
+        "ticket": 1365,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1365#issuecomment-6311318961"
+      },
+      {
+        "ticket": 1368,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1368#issuecomment-6311319599"
+      },
+      {
+        "ticket": 1380,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1380#issuecomment-6311317628"
+      },
+      {
+        "ticket": 1412,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1412#issuecomment-6311318272"
+      },
+      {
+        "ticket": 1413,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1413#issuecomment-6311320230"
+      },
+      {
+        "ticket": 1441,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1441#issuecomment-6311316938"
+      },
+      {
+        "ticket": 1527,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1527#issuecomment-6311320864"
+      },
+      {
+        "ticket": 1602,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1602#issuecomment-6323188250"
+      },
+      {
+        "ticket": 1657,
+        "url": "https://github.com/Newchanlun/NewChanlun/pull/1658"
+      }
+    ],
+    "subject": "decision：P 类批复落地——ADR 0044/0045/0046 与 ADR 0028 P2 处置 (#1658)",
+    "tb_markers": []
+  },
+  {
+    "commit": "63ecebf8f815fa5ac3ac274f9af60cf9e9fa4250",
+    "declared": [],
+    "epoch": 1792580672,
+    "mentions": [
+      1626
+    ],
+    "parent": "d07fc2043895a3d1e1d333cfaccb4f50efb890fa",
+    "prs": [
+      1655
+    ],
+    "references": [
+      {
+        "ticket": 1626,
+        "url": "https://github.com/Newchanlun/NewChanlun/pull/1655"
+      }
+    ],
+    "subject": "#1627 a₀ 构件值域收敛到 zhongshu §2.1.1（qujiantao/beichi/level_recursion 改指针） (#1655)",
+    "tb_markers": []
+  },
+  {
+    "commit": "d07fc2043895a3d1e1d333cfaccb4f50efb890fa",
+    "declared": [],
+    "epoch": 1792576531,
+    "mentions": [
+      1378,
+      1406,
+      1415,
+      1421,
+      1651
+    ],
+    "parent": "02b5b571eb872e92a5325f5bd02f966097f27cf9",
+    "prs": [
+      1652
+    ],
+    "references": [
+      {
+        "ticket": 1378,
+        "url": "https://github.com/Newchanlun/NewChanlun/pull/1652"
+      },
+      {
+        "ticket": 1406,
+        "url": "https://github.com/Newchanlun/NewChanlun/pull/1652"
+      },
+      {
+        "ticket": 1415,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1415#issuecomment-6310430906"
+      },
+      {
+        "ticket": 1415,
+        "url": "https://github.com/Newchanlun/NewChanlun/pull/1652"
+      },
+      {
+        "ticket": 1421,
+        "url": "https://github.com/Newchanlun/NewChanlun/pull/1652"
+      },
+      {
+        "ticket": 1601,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1601#issuecomment-6310424234"
+      },
+      {
+        "ticket": 1601,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1601#issuecomment-6323186242"
+      },
+      {
+        "ticket": 1651,
+        "url": "https://github.com/Newchanlun/NewChanlun/pull/1652"
+      }
+    ],
+    "subject": "#1590 落地：ADR 0043 重回 0 换向单账延续与声部开局资金 policy (#1652)",
+    "tb_markers": []
+  },
+  {
+    "commit": "02b5b571eb872e92a5325f5bd02f966097f27cf9",
+    "declared": [],
+    "epoch": 1792564088,
+    "mentions": [
+      1372,
+      1385,
+      1406,
+      1493
+    ],
+    "parent": "da537bfbcb38712914d8c0054746f871f1143515",
+    "prs": [
+      1593
+    ],
+    "references": [
+      {
+        "ticket": 1372,
+        "url": "https://github.com/Newchanlun/NewChanlun/pull/1593"
+      },
+      {
+        "ticket": 1385,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1385#issuecomment-6287947049"
+      },
+      {
+        "ticket": 1385,
+        "url": "https://github.com/Newchanlun/NewChanlun/pull/1593"
+      },
+      {
+        "ticket": 1406,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1406#issuecomment-6302451174"
+      },
+      {
+        "ticket": 1406,
+        "url": "https://github.com/Newchanlun/NewChanlun/pull/1593"
+      },
+      {
+        "ticket": 1488,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1488#issuecomment-6313932461"
+      },
+      {
+        "ticket": 1493,
+        "url": "https://github.com/Newchanlun/NewChanlun/pull/1593"
+      },
+      {
+        "ticket": 1527,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1527#issuecomment-6310720344"
+      },
+      {
+        "ticket": 1576,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1576#issuecomment-6310501161"
+      },
+      {
+        "ticket": 1581,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1581#issuecomment-6309751245"
+      },
+      {
+        "ticket": 1603,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1603#issuecomment-6308897078"
+      }
+    ],
+    "subject": "#1588 devskim：源码面误报处置、归档/测试数据按精确条目入基线、step summary 截断 (#1593)",
+    "tb_markers": []
+  },
+  {
+    "commit": "da537bfbcb38712914d8c0054746f871f1143515",
+    "declared": [
+      1629
+    ],
+    "epoch": 1792562643,
+    "mentions": [
+      1393,
+      1629
+    ],
+    "parent": "12e7e1632246e66938b9053517f6787fcac85902",
+    "prs": [
+      1633
+    ],
+    "references": [
+      {
+        "ticket": 1393,
+        "url": "https://github.com/Newchanlun/NewChanlun/pull/1633"
+      },
+      {
+        "ticket": 1629,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1629#issuecomment-6306476884"
+      },
+      {
+        "ticket": 1629,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1629#issuecomment-6310334575"
+      },
+      {
+        "ticket": 1629,
+        "url": "https://github.com/Newchanlun/NewChanlun/pull/1633"
+      },
+      {
+        "ticket": 1634,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1634"
+      }
+    ],
+    "subject": "perf(#1629): 端点来源并集改为共享子树指针相等剪枝，完整事实入口全史 39 s (#1633)",
+    "tb_markers": []
+  },
+  {
+    "commit": "12e7e1632246e66938b9053517f6787fcac85902",
+    "declared": [],
+    "epoch": 1792561095,
+    "mentions": [
+      1481,
+      1491,
+      1634
+    ],
+    "parent": "7835d593f37a51f08f8e61df734f29360d9e9114",
+    "prs": [
+      1638
+    ],
+    "references": [
+      {
+        "ticket": 1481,
+        "url": "https://github.com/Newchanlun/NewChanlun/pull/1638"
+      },
+      {
+        "ticket": 1488,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1488"
+      },
+      {
+        "ticket": 1488,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1488#issuecomment-6308321650"
+      },
+      {
+        "ticket": 1491,
+        "url": "https://github.com/Newchanlun/NewChanlun/pull/1638"
+      },
+      {
+        "ticket": 1634,
+        "url": "https://github.com/Newchanlun/NewChanlun/pull/1638"
+      },
+      {
+        "ticket": 1647,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1647#issuecomment-6309011298"
+      }
+    ],
+    "subject": "ADR 0042：S 写者增量路径为唯一生产生成路径（#1612） (#1638)",
+    "tb_markers": []
+  },
+  {
+    "commit": "7835d593f37a51f08f8e61df734f29360d9e9114",
+    "declared": [],
+    "epoch": 1792559899,
+    "mentions": [
+      1581,
+      1603,
+      1629
+    ],
+    "parent": "084ebd700fedc74ddb531ac4da4f13196c07fb29",
+    "prs": [
+      1637
+    ],
+    "references": [
+      {
+        "ticket": 1581,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1581#issuecomment-6309751245"
+      },
+      {
+        "ticket": 1603,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1603#issuecomment-6308897078"
+      },
+      {
+        "ticket": 1603,
+        "url": "https://github.com/Newchanlun/NewChanlun/pull/1637"
+      }
+    ],
+    "subject": "review-results: 合入列车关票补评审记录（#1581/#1603/#1597/#1629）(#1637)",
+    "tb_markers": []
+  },
+  {
+    "commit": "084ebd700fedc74ddb531ac4da4f13196c07fb29",
+    "declared": [
+      1581
+    ],
+    "epoch": 1792559866,
+    "mentions": [
+      1493,
+      1581
+    ],
+    "parent": "d4e6a20230b801d2656eb37899f0faf0863051e1",
+    "prs": [
+      1584
+    ],
+    "references": [
+      {
+        "ticket": 1493,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1493#issuecomment-6292806300"
+      },
+      {
+        "ticket": 1493,
+        "url": "https://github.com/Newchanlun/NewChanlun/pull/1584"
+      },
+      {
+        "ticket": 1581,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1581#issuecomment-6284704539"
+      },
+      {
+        "ticket": 1581,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1581#issuecomment-6309751245"
+      },
+      {
+        "ticket": 1581,
+        "url": "https://github.com/Newchanlun/NewChanlun/pull/1584"
+      }
+    ],
+    "subject": "X-37: Rust 下游读段端门 fail-closed 标记（#1581）(#1584)",
+    "tb_markers": []
+  },
+  {
+    "commit": "d4e6a20230b801d2656eb37899f0faf0863051e1",
+    "declared": [],
+    "epoch": 1792559480,
+    "mentions": [
+      1394,
+      1488
+    ],
+    "parent": "6c6acd5fe08d80f7bfd08b796d4dfebac5cabfdf",
+    "prs": [
+      1628
+    ],
+    "references": [
+      {
+        "ticket": 1394,
+        "url": "https://github.com/Newchanlun/NewChanlun/pull/1628"
+      },
+      {
+        "ticket": 1488,
+        "url": "https://github.com/Newchanlun/NewChanlun/pull/1628"
+      },
+      {
+        "ticket": 1629,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1629"
+      }
+    ],
+    "subject": "#1597 完整事实入口来源坐标改共享表示：留存 Θ(n²) → O(n log n) (#1628)",
+    "tb_markers": []
+  },
+  {
+    "commit": "6c6acd5fe08d80f7bfd08b796d4dfebac5cabfdf",
+    "declared": [],
+    "epoch": 1792554513,
+    "mentions": [
+      1604,
+      1626
+    ],
+    "parent": "408f858f357630ad965939ba909f3e5400808429",
+    "prs": [
+      1625
+    ],
+    "references": [
+      {
+        "ticket": 1415,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1415#issuecomment-6324054892"
+      },
+      {
+        "ticket": 1488,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1488#issuecomment-6309085745"
+      },
+      {
+        "ticket": 1488,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1488#issuecomment-6309285237"
+      },
+      {
+        "ticket": 1604,
+        "url": "https://github.com/Newchanlun/NewChanlun/pull/1625"
+      },
+      {
+        "ticket": 1608,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1608#issuecomment-6309269846"
+      },
+      {
+        "ticket": 1626,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1626"
+      },
+      {
+        "ticket": 1647,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1647#issuecomment-6309011298"
+      },
+      {
+        "ticket": 1647,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1647#issuecomment-6534406162"
+      }
+    ],
+    "subject": "#1600 线段与区间套正本选择项落可调字段：tangency、selector_keys、trend_scope、tower_base（#1586 A-12~A-15） (#1625)",
+    "tb_markers": []
+  },
+  {
+    "commit": "999348fa2e4a99e6389971e8492cb94e64f85417",
+    "declared": [],
+    "epoch": 1792554481,
+    "mentions": [
+      1406
+    ],
+    "parent": "11532aaf62119aaf698317a28ab556c425e3099f",
+    "prs": [
+      1615
+    ],
+    "references": [
+      {
+        "ticket": 1406,
+        "url": "https://github.com/Newchanlun/NewChanlun/pull/1615"
+      }
+    ],
+    "subject": "#1588 sandcastle：评审提示改摘要渲染+体积闸 FAIL-loud，工蜂本机禁 cargo 垫片 (#1615)",
+    "tb_markers": []
+  },
+  {
+    "commit": "11532aaf62119aaf698317a28ab556c425e3099f",
+    "declared": [
+      1603
+    ],
+    "epoch": 1792554464,
+    "mentions": [
+      1368,
+      1602,
+      1603
+    ],
+    "parent": "f6248b6f75900b5489d3c3792ea968489589a0a9",
+    "prs": [
+      1624
+    ],
+    "references": [
+      {
+        "ticket": 1368,
+        "url": "https://github.com/Newchanlun/NewChanlun/pull/1624"
+      },
+      {
+        "ticket": 1602,
+        "url": "https://github.com/Newchanlun/NewChanlun/pull/1624"
+      },
+      {
+        "ticket": 1603,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1603#issuecomment-6304058385"
+      },
+      {
+        "ticket": 1603,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1603#issuecomment-6305566175"
+      },
+      {
+        "ticket": 1603,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1603#issuecomment-6308897078"
+      },
+      {
+        "ticket": 1603,
+        "url": "https://github.com/Newchanlun/NewChanlun/pull/1624"
+      }
+    ],
+    "subject": "#1603 级别塔 l_max 与 MACD 参数改读版本化记录，达上界标资源截断（#1586 C-09/C-10） (#1624)",
+    "tb_markers": []
+  },
+  {
+    "commit": "f6248b6f75900b5489d3c3792ea968489589a0a9",
+    "declared": [],
+    "epoch": 1792554458,
+    "mentions": [],
+    "parent": "75022b3b9c6757b7ff39a0aa20b200606afbe8e6",
+    "prs": [
+      1623
+    ],
+    "references": [
+      {
+        "ticket": 1488,
+        "url": "https://github.com/Newchanlun/NewChanlun/pull/1623"
+      }
+    ],
+    "subject": "docs(#1588): 工程债清零总台账、P3 收集与各分片非作者独审记录 (#1623)",
+    "tb_markers": []
+  },
+  {
+    "commit": "75022b3b9c6757b7ff39a0aa20b200606afbe8e6",
+    "declared": [
+      1406
+    ],
+    "epoch": 1792554452,
+    "mentions": [
+      1374,
+      1394,
+      1406,
+      1425
+    ],
+    "parent": "cd5b273d37209ead5757ce769fcccd03ae90dd04",
+    "prs": [
+      1616
+    ],
+    "references": [
+      {
+        "ticket": 1394,
+        "url": "https://github.com/Newchanlun/NewChanlun/pull/1616"
+      },
+      {
+        "ticket": 1406,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1406#issuecomment-6302451174"
+      },
+      {
+        "ticket": 1406,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1406#issuecomment-6307682288"
+      },
+      {
+        "ticket": 1406,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1406#issuecomment-6324262170"
+      },
+      {
+        "ticket": 1406,
+        "url": "https://github.com/Newchanlun/NewChanlun/pull/1616"
+      },
+      {
+        "ticket": 1425,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1425#issuecomment-6296926599"
+      },
+      {
+        "ticket": 1425,
+        "url": "https://github.com/Newchanlun/NewChanlun/pull/1616"
+      },
+      {
+        "ticket": 1620,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1620"
+      },
+      {
+        "ticket": 1620,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1620#issuecomment-6324233437"
+      },
+      {
+        "ticket": 1621,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1621#issuecomment-6324234340"
+      },
+      {
+        "ticket": 1622,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1622#issuecomment-6324235227"
+      },
+      {
+        "ticket": 1674,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1674"
+      }
+    ],
+    "subject": "#1406 TB-03-C：C0–C6a 并入 main + C8 资金签署绑定 + S1 合链 + S3 SIGKILL 矩阵 (#1616)",
+    "tb_markers": [
+      "TB-03-C"
+    ]
+  },
+  {
+    "commit": "e759a5c9e1f0743cf46531171c921ecacb72e240",
+    "declared": [],
+    "epoch": 1792554437,
+    "mentions": [
+      1392,
+      1393,
+      1419,
+      1488,
+      1608
+    ],
+    "parent": "439be775606e596369fb3dedbd7482b2db235832",
+    "prs": [
+      1611
+    ],
+    "references": [
+      {
+        "ticket": 1392,
+        "url": "https://github.com/Newchanlun/NewChanlun/pull/1611"
+      },
+      {
+        "ticket": 1393,
+        "url": "https://github.com/Newchanlun/NewChanlun/pull/1611"
+      },
+      {
+        "ticket": 1419,
+        "url": "https://github.com/Newchanlun/NewChanlun/pull/1611"
+      },
+      {
+        "ticket": 1488,
+        "url": "https://github.com/Newchanlun/NewChanlun/pull/1611"
+      },
+      {
+        "ticket": 1608,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1608#issuecomment-6289302297"
+      },
+      {
+        "ticket": 1608,
+        "url": "https://github.com/Newchanlun/NewChanlun/pull/1611"
+      }
+    ],
+    "subject": "#1588 p3fix：预检 git 白名单环境（A1）、bi.md 指针订正（A3）、恢复 type1_funnel_dx 上涨 broke 臂（A6） (#1611)",
+    "tb_markers": []
+  },
+  {
+    "commit": "439be775606e596369fb3dedbd7482b2db235832",
+    "declared": [],
+    "epoch": 1792554431,
+    "mentions": [
+      1488,
+      1493,
+      1527
+    ],
+    "parent": "8933cca597fc263e305b7babd76c8be60b7b11f3",
+    "prs": [
+      1596
+    ],
+    "references": [
+      {
+        "ticket": 1488,
+        "url": "https://github.com/Newchanlun/NewChanlun/pull/1596"
+      },
+      {
+        "ticket": 1493,
+        "url": "https://github.com/Newchanlun/NewChanlun/pull/1596"
+      },
+      {
+        "ticket": 1527,
+        "url": "https://github.com/Newchanlun/NewChanlun/pull/1596"
+      },
+      {
+        "ticket": 1630,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1630#issuecomment-6323502443"
+      }
+    ],
+    "subject": "#1588 memory 分片：解析回放逐 bar 写时整表拷贝修复 + 事实坐标容量收缩 (#1596)",
+    "tb_markers": []
+  },
+  {
+    "commit": "8933cca597fc263e305b7babd76c8be60b7b11f3",
+    "declared": [],
+    "epoch": 1792554426,
+    "mentions": [
+      1394,
+      1420,
+      1488,
+      1493
+    ],
+    "parent": "e4edf7b7fb8e10a124ed3da5e45e8298afdfedc7",
+    "prs": [
+      1594
+    ],
+    "references": [
+      {
+        "ticket": 1394,
+        "url": "https://github.com/Newchanlun/NewChanlun/pull/1594"
+      },
+      {
+        "ticket": 1420,
+        "url": "https://github.com/Newchanlun/NewChanlun/pull/1594"
+      },
+      {
+        "ticket": 1488,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1488#issuecomment-6285663552"
+      },
+      {
+        "ticket": 1488,
+        "url": "https://github.com/Newchanlun/NewChanlun/pull/1594"
+      },
+      {
+        "ticket": 1493,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1493#issuecomment-6285729554"
+      },
+      {
+        "ticket": 1493,
+        "url": "https://github.com/Newchanlun/NewChanlun/pull/1594"
+      }
+    ],
+    "subject": "docs(#1588 tests): 三组基线失败测试的复现、根因与处置（A 转 #1488 / B 判平台限定 / C 稳定但锁失效转 #1493） (#1594)",
+    "tb_markers": []
+  },
+  {
+    "commit": "e4edf7b7fb8e10a124ed3da5e45e8298afdfedc7",
+    "declared": [],
+    "epoch": 1792554420,
+    "mentions": [
+      1493
+    ],
+    "parent": "df6e68093052c105600c7905ea5de371196dd5c1",
+    "prs": [
+      1592
+    ],
+    "references": [
+      {
+        "ticket": 1493,
+        "url": "https://github.com/Newchanlun/NewChanlun/pull/1592"
+      }
+    ],
+    "subject": "ci(#1588) ci-time：拆 rust-check 并行 job + s_session bin 测试分片 (#1592)",
+    "tb_markers": []
+  },
+  {
+    "commit": "df6e68093052c105600c7905ea5de371196dd5c1",
+    "declared": [],
+    "epoch": 1792505676,
+    "mentions": [],
+    "parent": "24c2fa068fc546aa47ddbcf68583641e8b31d732",
+    "prs": [
+      1591
+    ],
+    "references": [
+      {
+        "ticket": 1368,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1368#issuecomment-6285961611"
+      },
+      {
+        "ticket": 1406,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1406#issuecomment-6293394059"
+      },
+      {
+        "ticket": 1406,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1406#issuecomment-6293947339"
+      },
+      {
+        "ticket": 1406,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1406#issuecomment-6302451174"
+      },
+      {
+        "ticket": 1601,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1601"
+      },
+      {
+        "ticket": 1602,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1602"
+      },
+      {
+        "ticket": 1603,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1603"
+      },
+      {
+        "ticket": 1603,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1603#issuecomment-6304058385"
+      },
+      {
+        "ticket": 1603,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1603#issuecomment-6305566175"
+      },
+      {
+        "ticket": 1604,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1604"
+      },
+      {
+        "ticket": 1605,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1605"
+      },
+      {
+        "ticket": 1606,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1606"
+      },
+      {
+        "ticket": 1608,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1608#issuecomment-6309269846"
+      },
+      {
+        "ticket": 1634,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1634#issuecomment-6306937374"
+      }
+    ],
+    "subject": "ADR 0041 自由度通则：原文无定论的合法候选落为可调字段（#1586） (#1591)",
+    "tb_markers": []
+  },
+  {
+    "commit": "24c2fa068fc546aa47ddbcf68583641e8b31d732",
+    "declared": [
+      1493
+    ],
+    "epoch": 1792496926,
+    "mentions": [
+      1394,
+      1420,
+      1488,
+      1493,
+      1581
+    ],
+    "parent": "a0522447ca0c846779ad35d4fa4c3fcffac1e204",
+    "prs": [
+      1582
+    ],
+    "references": [
+      {
+        "ticket": 1394,
+        "url": "https://github.com/Newchanlun/NewChanlun/pull/1582"
+      },
+      {
+        "ticket": 1420,
+        "url": "https://github.com/Newchanlun/NewChanlun/pull/1582"
+      },
+      {
+        "ticket": 1493,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1493#issuecomment-6283106225"
+      },
+      {
+        "ticket": 1493,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1493#issuecomment-6283978680"
+      },
+      {
+        "ticket": 1493,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1493#issuecomment-6283988878"
+      },
+      {
+        "ticket": 1493,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1493#issuecomment-6285404110"
+      },
+      {
+        "ticket": 1493,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1493#issuecomment-6285729554"
+      },
+      {
+        "ticket": 1493,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1493#issuecomment-6287964291"
+      },
+      {
+        "ticket": 1493,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1493#issuecomment-6287979297"
+      },
+      {
+        "ticket": 1493,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1493#issuecomment-6292806300"
+      },
+      {
+        "ticket": 1493,
+        "url": "https://github.com/Newchanlun/NewChanlun/pull/1582"
+      },
+      {
+        "ticket": 1497,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1497#issuecomment-6287979907"
+      },
+      {
+        "ticket": 1581,
+        "url": "https://github.com/Newchanlun/NewChanlun/pull/1582"
+      },
+      {
+        "ticket": 1603,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1603#issuecomment-6305566175"
+      },
+      {
+        "ticket": 1604,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1604"
+      },
+      {
+        "ticket": 1978,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1978#issuecomment-6715928923"
+      }
+    ],
+    "subject": "TB-02-X #1493：未决第二种候选封段、有缺口 c⊂b 合并保 b、零计数锁与归叶表（xianduan v2.4） (#1582)",
+    "tb_markers": [
+      "TB-02-X"
+    ]
+  },
+  {
+    "commit": "a0522447ca0c846779ad35d4fa4c3fcffac1e204",
+    "declared": [],
+    "epoch": 1792491396,
+    "mentions": [],
+    "parent": "bf871af9cef9f0be86cad4eadebd691981af39ab",
+    "prs": [
+      1595
+    ],
+    "references": [
+      {
+        "ticket": 1368,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1368#issuecomment-6285961611"
+      },
+      {
+        "ticket": 1601,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1601"
+      },
+      {
+        "ticket": 1602,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1602"
+      },
+      {
+        "ticket": 1603,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1603"
+      },
+      {
+        "ticket": 1603,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1603#issuecomment-6305566175"
+      },
+      {
+        "ticket": 1604,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1604"
+      },
+      {
+        "ticket": 1605,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1605"
+      },
+      {
+        "ticket": 1606,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1606"
+      },
+      {
+        "ticket": 1608,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1608"
+      }
+    ],
+    "subject": "review-results: #1586 自由度审计 AUDIT.md 与两轮非作者独审记录 (#1595)",
+    "tb_markers": []
+  },
+  {
+    "commit": "bf871af9cef9f0be86cad4eadebd691981af39ab",
+    "declared": [],
+    "epoch": 1792487719,
+    "mentions": [],
+    "parent": "0a1f2b1d93088e727f32b4fb9edd87c86d0b6993",
+    "prs": [
+      1589
+    ],
+    "references": [
+      {
+        "ticket": 1493,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1493#issuecomment-6289738478"
+      },
+      {
+        "ticket": 1601,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1601"
+      },
+      {
+        "ticket": 1602,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1602"
+      },
+      {
+        "ticket": 1603,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1603"
+      },
+      {
+        "ticket": 1604,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1604"
+      },
+      {
+        "ticket": 1605,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1605"
+      },
+      {
+        "ticket": 1606,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1606"
+      },
+      {
+        "ticket": 1608,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1608"
+      }
+    ],
+    "subject": "decision(#1557/#1558): 资金签署记录与重的确定性推导（ADR 0040） (#1589)",
+    "tb_markers": []
+  },
+  {
+    "commit": "0a1f2b1d93088e727f32b4fb9edd87c86d0b6993",
+    "declared": [],
+    "epoch": 1792485808,
+    "mentions": [
+      1394,
+      1488
+    ],
+    "parent": "1d70db893f9e2763545677680a9ff86206b3b905",
+    "prs": [
+      1587
+    ],
+    "references": [
+      {
+        "ticket": 1394,
+        "url": "https://github.com/Newchanlun/NewChanlun/pull/1587"
+      },
+      {
+        "ticket": 1488,
+        "url": "https://github.com/Newchanlun/NewChanlun/pull/1587"
+      }
+    ],
+    "subject": "Merge pull request #1587 from xy7365527-lang/codex/discipline-squash-20261020",
+    "tb_markers": []
+  },
+  {
+    "commit": "1d70db893f9e2763545677680a9ff86206b3b905",
+    "declared": [],
+    "epoch": 1792477885,
+    "mentions": [],
+    "parent": "c185f77ae0dde2192ca4405966d609fab7e0aac4",
+    "prs": [
+      1580
+    ],
+    "references": [
+      {
+        "ticket": 1608,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1608"
+      }
+    ],
+    "subject": "Merge pull request #1580 from xy7365527-lang/codex/decision-archaeology-gate-20261020",
+    "tb_markers": []
+  },
+  {
+    "commit": "c185f77ae0dde2192ca4405966d609fab7e0aac4",
+    "declared": [],
+    "epoch": 1792477880,
+    "mentions": [
+      1383,
+      1413
+    ],
+    "parent": "d2f20aaca866f7a649a950fd3a829238214dcd82",
+    "prs": [
+      1579
+    ],
+    "references": [
+      {
+        "ticket": 1383,
+        "url": "https://github.com/Newchanlun/NewChanlun/pull/1579"
+      },
+      {
+        "ticket": 1413,
+        "url": "https://github.com/Newchanlun/NewChanlun/pull/1579"
+      }
+    ],
+    "subject": "Merge pull request #1579 from xy7365527-lang/decision/1530",
+    "tb_markers": []
+  },
+  {
+    "commit": "d2f20aaca866f7a649a950fd3a829238214dcd82",
+    "declared": [
+      1394
+    ],
+    "epoch": 1792477117,
+    "mentions": [
+      1394
+    ],
+    "parent": "6badaa60494740702c217abc9921809de3899ce0",
+    "prs": [
+      1583
+    ],
+    "references": [
+      {
+        "ticket": 1368,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1368#issuecomment-6285961611"
+      },
+      {
+        "ticket": 1394,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1394#issuecomment-6283430332"
+      },
+      {
+        "ticket": 1394,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1394#issuecomment-6284766661"
+      },
+      {
+        "ticket": 1394,
+        "url": "https://github.com/Newchanlun/NewChanlun/pull/1583"
+      },
+      {
+        "ticket": 1601,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1601"
+      },
+      {
+        "ticket": 1602,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1602"
+      },
+      {
+        "ticket": 1603,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1603"
+      },
+      {
+        "ticket": 1604,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1604"
+      },
+      {
+        "ticket": 1605,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1605"
+      },
+      {
+        "ticket": 1606,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1606"
+      }
+    ],
+    "subject": "Merge pull request #1583 from xy7365527-lang/codex/1394-close-docs-20261020",
+    "tb_markers": []
+  },
+  {
+    "commit": "6badaa60494740702c217abc9921809de3899ce0",
+    "declared": [
+      1394
+    ],
+    "epoch": 1792462821,
+    "mentions": [
+      1394,
+      1405,
+      1552
+    ],
+    "parent": "bc401fc5b328882edacb372b9e398ba7fa1041b7",
+    "prs": [
+      1573
+    ],
+    "references": [
+      {
+        "ticket": 1381,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1381#issuecomment-7023742841"
+      },
+      {
+        "ticket": 1394,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1394#issuecomment-6278559427"
+      },
+      {
+        "ticket": 1394,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1394#issuecomment-6283430332"
+      },
+      {
+        "ticket": 1394,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1394#issuecomment-6284766661"
+      },
+      {
+        "ticket": 1394,
+        "url": "https://github.com/Newchanlun/NewChanlun/pull/1573"
+      },
+      {
+        "ticket": 1399,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1399#issuecomment-6989275346"
+      },
+      {
+        "ticket": 1405,
+        "url": "https://github.com/Newchanlun/NewChanlun/pull/1573"
+      },
+      {
+        "ticket": 1419,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1419#issuecomment-6298135750"
+      },
+      {
+        "ticket": 1488,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1488#issuecomment-6283089448"
+      },
+      {
+        "ticket": 1488,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1488#issuecomment-6283355919"
+      },
+      {
+        "ticket": 1488,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1488#issuecomment-6283674405"
+      },
+      {
+        "ticket": 1488,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1488#issuecomment-6285917639"
+      },
+      {
+        "ticket": 1488,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1488#issuecomment-6298134855"
+      },
+      {
+        "ticket": 1491,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1491#issuecomment-6309121665"
+      },
+      {
+        "ticket": 1493,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1493#issuecomment-6283106225"
+      },
+      {
+        "ticket": 1493,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1493#issuecomment-6283978680"
+      },
+      {
+        "ticket": 1493,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1493#issuecomment-6285729554"
+      },
+      {
+        "ticket": 1552,
+        "url": "https://github.com/Newchanlun/NewChanlun/pull/1573"
+      }
+    ],
+    "subject": "Merge pull request #1573 from xy7365527-lang/codex/1394-ac123-closeout-20261019",
+    "tb_markers": [
+      "TB-03-B"
+    ]
+  },
+  {
+    "commit": "bc401fc5b328882edacb372b9e398ba7fa1041b7",
+    "declared": [],
+    "epoch": 1792456038,
+    "mentions": [
+      1393,
+      1394,
+      1419,
+      1488,
+      1493,
+      1527
+    ],
+    "parent": "262f8c863e1f84d134633aaba8c14fb10cef9a9e",
+    "prs": [
+      1578
+    ],
+    "references": [
+      {
+        "ticket": 1393,
+        "url": "https://github.com/Newchanlun/NewChanlun/pull/1578"
+      },
+      {
+        "ticket": 1394,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1394#issuecomment-6284766661"
+      },
+      {
+        "ticket": 1394,
+        "url": "https://github.com/Newchanlun/NewChanlun/pull/1578"
+      },
+      {
+        "ticket": 1419,
+        "url": "https://github.com/Newchanlun/NewChanlun/pull/1578"
+      },
+      {
+        "ticket": 1488,
+        "url": "https://github.com/Newchanlun/NewChanlun/pull/1578"
+      },
+      {
+        "ticket": 1493,
+        "url": "https://github.com/Newchanlun/NewChanlun/pull/1578"
+      },
+      {
+        "ticket": 1527,
+        "url": "https://github.com/Newchanlun/NewChanlun/pull/1578"
+      }
+    ],
+    "subject": "Merge pull request #1578 from xy7365527-lang/codex/graph-engine-fix-20261020",
+    "tb_markers": []
+  },
+  {
+    "commit": "262f8c863e1f84d134633aaba8c14fb10cef9a9e",
+    "declared": [
+      1576
+    ],
+    "epoch": 1792456025,
+    "mentions": [
+      1368,
+      1405,
+      1576
+    ],
+    "parent": "28df886697b90b9aa83f8803418f3ae40b8ac2b2",
+    "prs": [
+      1577
+    ],
+    "references": [
+      {
+        "ticket": 1368,
+        "url": "https://github.com/Newchanlun/NewChanlun/pull/1577"
+      },
+      {
+        "ticket": 1394,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1394#issuecomment-6284766661"
+      },
+      {
+        "ticket": 1405,
+        "url": "https://github.com/Newchanlun/NewChanlun/pull/1577"
+      },
+      {
+        "ticket": 1576,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1576#issuecomment-6279363768"
+      },
+      {
+        "ticket": 1576,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1576#issuecomment-6310501161"
+      },
+      {
+        "ticket": 1576,
+        "url": "https://github.com/Newchanlun/NewChanlun/pull/1577"
+      }
+    ],
+    "subject": "Merge pull request #1577 from xy7365527-lang/codex/1576-serve-stale-begin-20261020",
+    "tb_markers": []
+  },
+  {
+    "commit": "28df886697b90b9aa83f8803418f3ae40b8ac2b2",
+    "declared": [
+      1405
+    ],
+    "epoch": 1792447356,
+    "mentions": [
+      1405
+    ],
+    "parent": "59088aef41139f9d120953dccbbbce8d025c408a",
+    "prs": [
+      1574
+    ],
+    "references": [
+      {
+        "ticket": 1394,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1394#issuecomment-6284766661"
+      },
+      {
+        "ticket": 1405,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1405#issuecomment-6277672524"
+      },
+      {
+        "ticket": 1405,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1405#issuecomment-6277690121"
+      },
+      {
+        "ticket": 1405,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1405#issuecomment-6279005024"
+      },
+      {
+        "ticket": 1405,
+        "url": "https://github.com/Newchanlun/NewChanlun/pull/1574"
+      },
+      {
+        "ticket": 1576,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1576#issuecomment-6310501161"
+      }
+    ],
+    "subject": "Merge pull request #1574 from xy7365527-lang/codex/1405-closegap-20261020",
+    "tb_markers": []
+  },
+  {
+    "commit": "59088aef41139f9d120953dccbbbce8d025c408a",
+    "declared": [],
+    "epoch": 1792446662,
+    "mentions": [
+      1393,
+      1394,
+      1419
+    ],
+    "parent": "b63a3fd5869fda266f11613b6bc9f02fb3d77bfb",
+    "prs": [
+      1575
+    ],
+    "references": [
+      {
+        "ticket": 1393,
+        "url": "https://github.com/Newchanlun/NewChanlun/pull/1575"
+      },
+      {
+        "ticket": 1394,
+        "url": "https://github.com/Newchanlun/NewChanlun/pull/1575"
+      },
+      {
+        "ticket": 1419,
+        "url": "https://github.com/Newchanlun/NewChanlun/pull/1575"
+      }
+    ],
+    "subject": "Merge pull request #1575 from xy7365527-lang/decision/1565",
+    "tb_markers": []
+  },
+  {
+    "commit": "b63a3fd5869fda266f11613b6bc9f02fb3d77bfb",
+    "declared": [
+      1420
+    ],
+    "epoch": 1792442466,
+    "mentions": [
+      1394,
+      1405,
+      1420
+    ],
+    "parent": "b34b0278ee780c03f3c49c9cf027bbd2545d1134",
+    "prs": [
+      1569
+    ],
+    "references": [
+      {
+        "ticket": 1394,
+        "url": "https://github.com/Newchanlun/NewChanlun/pull/1569"
+      },
+      {
+        "ticket": 1405,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1405#issuecomment-6277278144"
+      },
+      {
+        "ticket": 1405,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1405#issuecomment-6277672524"
+      },
+      {
+        "ticket": 1405,
+        "url": "https://github.com/Newchanlun/NewChanlun/pull/1569"
+      },
+      {
+        "ticket": 1420,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1420#issuecomment-6268123108"
+      },
+      {
+        "ticket": 1420,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1420#issuecomment-6268764762"
+      },
+      {
+        "ticket": 1420,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1420#issuecomment-6276859723"
+      },
+      {
+        "ticket": 1420,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1420#issuecomment-6277258952"
+      },
+      {
+        "ticket": 1420,
+        "url": "https://github.com/Newchanlun/NewChanlun/pull/1569"
+      },
+      {
+        "ticket": 1493,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1493#issuecomment-6277042184"
+      },
+      {
+        "ticket": 1493,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1493#issuecomment-6281134745"
+      },
+      {
+        "ticket": 1493,
+        "url": "https://github.com/Newchanlun/NewChanlun/pull/1569"
+      },
+      {
+        "ticket": 1495,
+        "url": "https://github.com/Newchanlun/NewChanlun/pull/1569"
+      },
+      {
+        "ticket": 1576,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1576#issuecomment-6279363768"
+      },
+      {
+        "ticket": 1576,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1576#issuecomment-6310501161"
+      }
+    ],
+    "subject": "Merge pull request #1569 from xy7365527-lang/codex/1420-scan-boundary-onmain-20261019",
+    "tb_markers": [
+      "TB-02-W"
+    ]
+  },
+  {
+    "commit": "b34b0278ee780c03f3c49c9cf027bbd2545d1134",
+    "declared": [
+      1405
+    ],
+    "epoch": 1792442458,
+    "mentions": [
+      1405,
+      1420
+    ],
+    "parent": "5baeb030a6ecd79ed58048c62e536ef6f5440fb2",
+    "prs": [
+      1571
+    ],
+    "references": [
+      {
+        "ticket": 1405,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1405#issuecomment-6270543288"
+      },
+      {
+        "ticket": 1405,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1405#issuecomment-6276858989"
+      },
+      {
+        "ticket": 1405,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1405#issuecomment-6277278144"
+      },
+      {
+        "ticket": 1405,
+        "url": "https://github.com/Newchanlun/NewChanlun/pull/1571"
+      },
+      {
+        "ticket": 1420,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1420#issuecomment-6277258952"
+      },
+      {
+        "ticket": 1493,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1493#issuecomment-6277042184"
+      }
+    ],
+    "subject": "Merge pull request #1571 from xy7365527-lang/codex/1405-recovery-v4-onmain-20261019",
+    "tb_markers": []
+  },
+  {
+    "commit": "5baeb030a6ecd79ed58048c62e536ef6f5440fb2",
+    "declared": [],
+    "epoch": 1792409967,
+    "mentions": [],
+    "parent": "2517b126252a39a3d000ec83e15d171bcb91b648",
+    "prs": [
+      1566
+    ],
+    "references": [
+      {
+        "ticket": 1394,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1394#issuecomment-6278559427"
+      },
+      {
+        "ticket": 1405,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1405#issuecomment-6269441396"
+      },
+      {
+        "ticket": 1405,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1405#issuecomment-6270543288"
+      },
+      {
+        "ticket": 1405,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1405#issuecomment-6277278144"
+      },
+      {
+        "ticket": 1405,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1405#issuecomment-6277672524"
+      },
+      {
+        "ticket": 1405,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1405#issuecomment-6279005024"
+      },
+      {
+        "ticket": 1420,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1420#issuecomment-6268123108"
+      },
+      {
+        "ticket": 1420,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1420#issuecomment-6268764762"
+      }
+    ],
+    "subject": "Merge pull request #1566 from xy7365527-lang/codex/1547-claimer-retry-20261019",
+    "tb_markers": []
+  },
+  {
+    "commit": "2517b126252a39a3d000ec83e15d171bcb91b648",
+    "declared": [],
+    "epoch": 1792409733,
+    "mentions": [
+      1392,
+      1393,
+      1405,
+      1493
+    ],
+    "parent": "4aea4f72efd694e470ef405e0cd32d0a08beb38b",
+    "prs": [
+      1564
+    ],
+    "references": [
+      {
+        "ticket": 1392,
+        "url": "https://github.com/Newchanlun/NewChanlun/pull/1564"
+      },
+      {
+        "ticket": 1393,
+        "url": "https://github.com/Newchanlun/NewChanlun/pull/1564"
+      },
+      {
+        "ticket": 1405,
+        "url": "https://github.com/Newchanlun/NewChanlun/pull/1564"
+      },
+      {
+        "ticket": 1493,
+        "url": "https://github.com/Newchanlun/NewChanlun/pull/1564"
+      }
+    ],
+    "subject": "Merge pull request #1564 from xy7365527-lang/codex/known-red-tests-20261019",
+    "tb_markers": []
+  },
+  {
+    "commit": "4aea4f72efd694e470ef405e0cd32d0a08beb38b",
+    "declared": [],
+    "epoch": 1792400344,
+    "mentions": [],
+    "parent": "bc81a8bfb6df0eaa9cef81e3739dbbee4afbf5e8",
+    "prs": [
+      1556
+    ],
+    "references": [
+      {
+        "ticket": 1419,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1419#issuecomment-6265160238"
+      },
+      {
+        "ticket": 1419,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1419#issuecomment-6440624074"
+      },
+      {
+        "ticket": 1420,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1420#issuecomment-6264982501"
+      },
+      {
+        "ticket": 1634,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1634#issuecomment-6306937374"
+      }
+    ],
+    "subject": "Merge pull request #1556 from xy7365527-lang/codex/main-ci-hygiene-20261019",
+    "tb_markers": []
+  },
+  {
+    "commit": "210b4094045adc999ec938a9bf99ac80d5eecc82",
+    "declared": [
+      1405
+    ],
+    "epoch": 1792398752,
+    "mentions": [
+      1394,
+      1405
+    ],
+    "parent": "9c858158805b522dc9d51c55cee78b6d8c7529c6",
+    "prs": [
+      1553
+    ],
+    "references": [
+      {
+        "ticket": 1394,
+        "url": "https://github.com/Newchanlun/NewChanlun/pull/1553"
+      },
+      {
+        "ticket": 1405,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1405#issuecomment-6263135631"
+      },
+      {
+        "ticket": 1405,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1405#issuecomment-6269441396"
+      },
+      {
+        "ticket": 1405,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1405#issuecomment-6277278144"
+      },
+      {
+        "ticket": 1405,
+        "url": "https://github.com/Newchanlun/NewChanlun/pull/1553"
+      },
+      {
+        "ticket": 1419,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1419#issuecomment-6263624544"
+      },
+      {
+        "ticket": 1420,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1420#issuecomment-6264982501"
+      },
+      {
+        "ticket": 1420,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1420#issuecomment-6268764762"
+      },
+      {
+        "ticket": 1420,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1420#issuecomment-6277258952"
+      }
+    ],
+    "subject": "Merge pull request #1553 from xy7365527-lang/codex/1405-same-price-onmain-20261019",
+    "tb_markers": [
+      "TB-02-V"
+    ]
+  },
+  {
+    "commit": "9c858158805b522dc9d51c55cee78b6d8c7529c6",
+    "declared": [],
+    "epoch": 1792396089,
+    "mentions": [],
+    "parent": "fd1dd50a8c703c1ee8d44142da83ab89ad6682ba",
+    "prs": [
+      1549
+    ],
+    "references": [
+      {
+        "ticket": 1405,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1405#issuecomment-6262441469"
+      },
+      {
+        "ticket": 1405,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1405#issuecomment-6262661665"
+      },
+      {
+        "ticket": 1405,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1405#issuecomment-6262677300"
+      },
+      {
+        "ticket": 1405,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1405#issuecomment-6269441396"
+      },
+      {
+        "ticket": 1405,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1405#issuecomment-6270543288"
+      },
+      {
+        "ticket": 1405,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1405#issuecomment-6277278144"
+      }
+    ],
+    "subject": "Merge pull request #1549 from xy7365527-lang/codex/1547-graph-skills",
+    "tb_markers": []
+  },
+  {
+    "commit": "fd1dd50a8c703c1ee8d44142da83ab89ad6682ba",
+    "declared": [],
+    "epoch": 1792393447,
+    "mentions": [
+      1393
+    ],
+    "parent": "3315ed1d59ba31ffbad3f0b959702eaa92f4ddbd",
+    "prs": [
+      1548
+    ],
+    "references": [
+      {
+        "ticket": 1393,
+        "url": "https://github.com/Newchanlun/NewChanlun/pull/1548"
+      },
+      {
+        "ticket": 1606,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1606#issuecomment-6324427808"
+      }
+    ],
+    "subject": "Merge pull request #1548 from xy7365527-lang/codex/1547-graph-engineering",
+    "tb_markers": []
+  },
+  {
+    "commit": "3315ed1d59ba31ffbad3f0b959702eaa92f4ddbd",
+    "declared": [
+      1495
+    ],
+    "epoch": 1792291776,
+    "mentions": [
+      1495
+    ],
+    "parent": "0c397d20de4076dbb6f7caa62738fc04cf72322f",
+    "prs": [
+      1529
+    ],
+    "references": [
+      {
+        "ticket": 1393,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1393#issuecomment-6245407347"
+      },
+      {
+        "ticket": 1394,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1394#issuecomment-6245343437"
+      },
+      {
+        "ticket": 1405,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1405#issuecomment-6245091786"
+      },
+      {
+        "ticket": 1495,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1495#issuecomment-6245096249"
+      },
+      {
+        "ticket": 1495,
+        "url": "https://github.com/Newchanlun/NewChanlun/pull/1529"
+      },
+      {
+        "ticket": 1527,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1527#issuecomment-6245487063"
+      }
+    ],
+    "subject": "Merge pull request #1529 from xy7365527-lang/codex/1495-resume-closeout-20261018",
+    "tb_markers": []
+  },
+  {
+    "commit": "0c397d20de4076dbb6f7caa62738fc04cf72322f",
+    "declared": [],
+    "epoch": 1792248832,
+    "mentions": [
+      1406
+    ],
+    "parent": "4172c3fc4653b2a940e658ced6bd2c00acb1355a",
+    "prs": [],
+    "references": [
+      {
+        "ticket": 1495,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1495#issuecomment-6244726449"
+      }
+    ],
+    "subject": "ci: add 60min timeout to rust-check job",
+    "tb_markers": []
+  },
+  {
+    "commit": "ce6573b40594059d7911c87872f871f87d39680f",
+    "declared": [],
+    "epoch": 1792242880,
+    "mentions": [
+      1394,
+      1419
+    ],
+    "parent": "8d84e21e2c9e9800a22900c2d4c67878310c1ab9",
+    "prs": [],
+    "references": [],
+    "subject": "docs(#1323): 下一会话行动计划（2026-10-17）",
+    "tb_markers": []
+  },
+  {
+    "commit": "fdc5c6a7fd2fcb6b8d436d419984c1c826b669f6",
+    "declared": [
+      1495
+    ],
+    "epoch": 1792040829,
+    "mentions": [
+      1493,
+      1495
+    ],
+    "parent": "64fbe7ad5ce9afa883f80b4f0599fefb156a4e3d",
+    "prs": [
+      1501
+    ],
+    "references": [
+      {
+        "ticket": 1493,
+        "url": "https://github.com/Newchanlun/NewChanlun/pull/1501"
+      },
+      {
+        "ticket": 1495,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1495#issuecomment-6244726449"
+      },
+      {
+        "ticket": 1495,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1495#issuecomment-6245096249"
+      },
+      {
+        "ticket": 1495,
+        "url": "https://github.com/Newchanlun/NewChanlun/pull/1501"
+      }
+    ],
+    "subject": "Merge pull request #1501 from xy7365527-lang/codex/1495-lean-recovery-20261015",
+    "tb_markers": []
+  },
+  {
+    "commit": "64fbe7ad5ce9afa883f80b4f0599fefb156a4e3d",
+    "declared": [
+      1406
+    ],
+    "epoch": 1792035603,
+    "mentions": [
+      1406
+    ],
+    "parent": "a54d1ced816745748b5482229c748be05cc75749",
+    "prs": [
+      1500
+    ],
+    "references": [
+      {
+        "ticket": 1406,
+        "url": "https://github.com/Newchanlun/NewChanlun/pull/1500"
+      }
+    ],
+    "subject": "docs(#1406): 同步多空资格与阶段单向蕴含 (#1500)",
+    "tb_markers": []
+  },
+  {
+    "commit": "a54d1ced816745748b5482229c748be05cc75749",
+    "declared": [
+      1406
+    ],
+    "epoch": 1791954676,
+    "mentions": [
+      1406
+    ],
+    "parent": "dedf11f047b9c809c167b35e728e4a2ee8bf3494",
+    "prs": [
+      1498
+    ],
+    "references": [
+      {
+        "ticket": 1380,
+        "url": "https://github.com/Newchanlun/NewChanlun/pull/1498"
+      },
+      {
+        "ticket": 1394,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1394#issuecomment-6278559427"
+      },
+      {
+        "ticket": 1397,
+        "url": "https://github.com/Newchanlun/NewChanlun/pull/1498"
+      },
+      {
+        "ticket": 1406,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1406#issuecomment-6161055625"
+      },
+      {
+        "ticket": 1406,
+        "url": "https://github.com/Newchanlun/NewChanlun/pull/1498"
+      }
+    ],
+    "subject": "Merge approved PR #1498: ADR 0032 修订——累计分配改配额法（#1406）",
+    "tb_markers": []
+  },
+  {
+    "commit": "dedf11f047b9c809c167b35e728e4a2ee8bf3494",
+    "declared": [],
+    "epoch": 1791946769,
+    "mentions": [
+      1419,
+      1493
+    ],
+    "parent": "6525fa0f7a9baec490bd6cc81e954e2b37f3217f",
+    "prs": [
+      1494
+    ],
+    "references": [
+      {
+        "ticket": 1405,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1405#issuecomment-6159630374"
+      },
+      {
+        "ticket": 1419,
+        "url": "https://github.com/Newchanlun/NewChanlun/pull/1494"
+      },
+      {
+        "ticket": 1493,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1493#issuecomment-6246533234"
+      },
+      {
+        "ticket": 1493,
+        "url": "https://github.com/Newchanlun/NewChanlun/pull/1494"
+      },
+      {
+        "ticket": 1495,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1495"
+      }
+    ],
+    "subject": "Merge approved PR #1494: xianduan v2.3 第一种情况候选三态与转折点窗（#1490）",
+    "tb_markers": []
+  },
+  {
+    "commit": "6525fa0f7a9baec490bd6cc81e954e2b37f3217f",
+    "declared": [],
+    "epoch": 1791946076,
+    "mentions": [
+      1481,
+      1488,
+      1491
+    ],
+    "parent": "7c6ee7502656f337101f2f1169ececbf45278d48",
+    "prs": [
+      1492
+    ],
+    "references": [
+      {
+        "ticket": 1481,
+        "url": "https://github.com/Newchanlun/NewChanlun/pull/1492"
+      },
+      {
+        "ticket": 1488,
+        "url": "https://github.com/Newchanlun/NewChanlun/pull/1492"
+      },
+      {
+        "ticket": 1491,
+        "url": "https://github.com/Newchanlun/NewChanlun/pull/1492"
+      }
+    ],
+    "subject": "Merge approved PR #1492: ADR 0037 S 内容布局 bounded-layout/1（#1489）",
+    "tb_markers": []
+  },
+  {
+    "commit": "7c6ee7502656f337101f2f1169ececbf45278d48",
+    "declared": [],
+    "epoch": 1791929674,
+    "mentions": [
+      1370
+    ],
+    "parent": "65d522346f15bc13a289e7ae26c7985584fa45c5",
+    "prs": [
+      1485
+    ],
+    "references": [
+      {
+        "ticket": 1370,
+        "url": "https://github.com/Newchanlun/NewChanlun/pull/1485"
+      },
+      {
+        "ticket": 1493,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1493"
+      }
+    ],
+    "subject": "Merge approved PR #1485: 让 s_session 与 backtest_bin 测试步在既有红之后仍执行",
+    "tb_markers": []
+  },
+  {
+    "commit": "65d522346f15bc13a289e7ae26c7985584fa45c5",
+    "declared": [],
+    "epoch": 1791922770,
+    "mentions": [
+      1366,
+      1439
+    ],
+    "parent": "1f5cdf768da2d0b8dbde9ade8df930c2aaddd0a9",
+    "prs": [
+      1484
+    ],
+    "references": [
+      {
+        "ticket": 1366,
+        "url": "https://github.com/Newchanlun/NewChanlun/pull/1484"
+      },
+      {
+        "ticket": 1439,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1439#issuecomment-6154426535"
+      },
+      {
+        "ticket": 1439,
+        "url": "https://github.com/Newchanlun/NewChanlun/pull/1484"
+      }
+    ],
+    "subject": "Merge approved PR #1484: 落 #1346 Comparable/Sel_Θ 到 C(J,t) 的适用域桥",
+    "tb_markers": []
+  },
+  {
+    "commit": "1f5cdf768da2d0b8dbde9ade8df930c2aaddd0a9",
+    "declared": [],
+    "epoch": 1791920420,
+    "mentions": [],
+    "parent": "b09bd8eda41bbfda0ef073dbf44378f7307767eb",
+    "prs": [
+      1483
+    ],
+    "references": [
+      {
+        "ticket": 1368,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1368#issuecomment-6153743834"
+      },
+      {
+        "ticket": 1394,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1394#issuecomment-6153728414"
+      },
+      {
+        "ticket": 1398,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1398#issuecomment-6153729131"
+      },
+      {
+        "ticket": 1402,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1402#issuecomment-6153729845"
+      },
+      {
+        "ticket": 1406,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1406#issuecomment-6153730471"
+      },
+      {
+        "ticket": 1410,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1410#issuecomment-6153731229"
+      },
+      {
+        "ticket": 1421,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1421#issuecomment-6153732436"
+      },
+      {
+        "ticket": 1439,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1439#issuecomment-6154426535"
+      },
+      {
+        "ticket": 1441,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1441#issuecomment-6153733292"
+      },
+      {
+        "ticket": 1444,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1444#issuecomment-6153733935"
+      },
+      {
+        "ticket": 1444,
+        "url": "https://github.com/Newchanlun/NewChanlun/pull/1483"
+      },
+      {
+        "ticket": 1445,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1445#issuecomment-6153734595"
+      },
+      {
+        "ticket": 1446,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1446#issuecomment-6153735220"
+      }
+    ],
+    "subject": "Merge approved PR #1483: 落 #1323 资金/经营 policy 组 grilling 裁定（ADR 0034–0036）",
+    "tb_markers": []
+  },
+  {
+    "commit": "b09bd8eda41bbfda0ef073dbf44378f7307767eb",
+    "declared": [],
+    "epoch": 1791918177,
+    "mentions": [
+      1405
+    ],
+    "parent": "3da0b2c872e6e7d69ffcfe29f989a08491d92dd1",
+    "prs": [
+      1482
+    ],
+    "references": [
+      {
+        "ticket": 1405,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1405#issuecomment-6153035249"
+      },
+      {
+        "ticket": 1405,
+        "url": "https://github.com/Newchanlun/NewChanlun/pull/1482"
+      }
+    ],
+    "subject": "Merge approved PR #1482: 落 #1343 同价端点与极值根集裁定",
+    "tb_markers": []
+  },
+  {
+    "commit": "3da0b2c872e6e7d69ffcfe29f989a08491d92dd1",
+    "declared": [],
+    "epoch": 1791907256,
+    "mentions": [],
+    "parent": "621620ecffad5f51b2b4e7fabd2a43f106b090b8",
+    "prs": [
+      1480
+    ],
+    "references": [
+      {
+        "ticket": 1368,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1368#issuecomment-6153743834"
+      },
+      {
+        "ticket": 1394,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1394#issuecomment-6153728414"
+      },
+      {
+        "ticket": 1398,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1398#issuecomment-6153729131"
+      },
+      {
+        "ticket": 1405,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1405#issuecomment-6153035249"
+      },
+      {
+        "ticket": 1406,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1406#issuecomment-6153730471"
+      },
+      {
+        "ticket": 1410,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1410#issuecomment-6153731229"
+      },
+      {
+        "ticket": 1421,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1421#issuecomment-6153732436"
+      },
+      {
+        "ticket": 1441,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1441#issuecomment-6153733292"
+      },
+      {
+        "ticket": 1444,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1444#issuecomment-6153733935"
+      },
+      {
+        "ticket": 1446,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1446#issuecomment-6153735220"
+      }
+    ],
+    "subject": "Merge approved PR #1480: Sandcastle Codex 工蜂改经本机 CLIProxy 的 OAuth claude-opus-5-5",
+    "tb_markers": []
+  },
+  {
+    "commit": "621620ecffad5f51b2b4e7fabd2a43f106b090b8",
+    "declared": [],
+    "epoch": 1791906882,
+    "mentions": [
+      1419,
+      1420
+    ],
+    "parent": "465174240b989a1d99f99a047fbb46b3ee215f49",
+    "prs": [
+      1479
+    ],
+    "references": [
+      {
+        "ticket": 1393,
+        "url": "https://github.com/Newchanlun/NewChanlun/pull/1479"
+      },
+      {
+        "ticket": 1419,
+        "url": "https://github.com/Newchanlun/NewChanlun/pull/1479"
+      },
+      {
+        "ticket": 1420,
+        "url": "https://github.com/Newchanlun/NewChanlun/pull/1479"
+      }
+    ],
+    "subject": "Merge approved PR #1479: 落 #1323 grilling 裁定（ADR 0028–0033 与结构教义正本）",
+    "tb_markers": []
+  },
+  {
+    "commit": "465174240b989a1d99f99a047fbb46b3ee215f49",
+    "declared": [
+      1414
+    ],
+    "epoch": 1791898564,
+    "mentions": [
+      1360,
+      1392,
+      1404,
+      1405,
+      1414
+    ],
+    "parent": "f95a7f3ebc0ce84ec2d2f8a8d71b5030b19f89b9",
+    "prs": [
+      1477
+    ],
+    "references": [
+      {
+        "ticket": 1360,
+        "url": "https://github.com/Newchanlun/NewChanlun/pull/1477"
+      },
+      {
+        "ticket": 1392,
+        "url": "https://github.com/Newchanlun/NewChanlun/pull/1477"
+      },
+      {
+        "ticket": 1404,
+        "url": "https://github.com/Newchanlun/NewChanlun/pull/1477"
+      },
+      {
+        "ticket": 1405,
+        "url": "https://github.com/Newchanlun/NewChanlun/pull/1477"
+      },
+      {
+        "ticket": 1414,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1414#issuecomment-6146963944"
+      },
+      {
+        "ticket": 1414,
+        "url": "https://github.com/Newchanlun/NewChanlun/pull/1477"
+      }
+    ],
+    "subject": "Merge approved PR #1477: TB-02-D 第二特征序列终结与笔/段破坏事实（#1414）",
+    "tb_markers": [
+      "TB-02-D"
+    ]
+  },
+  {
+    "commit": "f95a7f3ebc0ce84ec2d2f8a8d71b5030b19f89b9",
+    "declared": [
+      1404
+    ],
+    "epoch": 1791776915,
+    "mentions": [
+      1360,
+      1404
+    ],
+    "parent": "8619a20f2800095e6bb9ec20ba2607a744740f91",
+    "prs": [
+      1473
+    ],
+    "references": [
+      {
+        "ticket": 1360,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1360#issuecomment-6117546729"
+      },
+      {
+        "ticket": 1360,
+        "url": "https://github.com/Newchanlun/NewChanlun/pull/1473"
+      },
+      {
+        "ticket": 1404,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1404#issuecomment-6117508188"
+      },
+      {
+        "ticket": 1404,
+        "url": "https://github.com/Newchanlun/NewChanlun/pull/1473"
+      }
+    ],
+    "subject": "Merge pull request #1473 from xy7365527-lang/codex/1404-seed-first-20261007",
+    "tb_markers": [
+      "TB-02-C"
+    ]
+  },
+  {
+    "commit": "8619a20f2800095e6bb9ec20ba2607a744740f91",
+    "declared": [
+      1392
+    ],
+    "epoch": 1791328696,
+    "mentions": [
+      1360,
+      1392,
+      1405
+    ],
+    "parent": "6f99b36c64e0560febdb08e5d1f8e781d2af9299",
+    "prs": [
+      1458
+    ],
+    "references": [
+      {
+        "ticket": 1360,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1360#issuecomment-6027575268"
+      },
+      {
+        "ticket": 1360,
+        "url": "https://github.com/Newchanlun/NewChanlun/pull/1458"
+      },
+      {
+        "ticket": 1392,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1392#issuecomment-6027480656"
+      },
+      {
+        "ticket": 1392,
+        "url": "https://github.com/Newchanlun/NewChanlun/pull/1458"
+      },
+      {
+        "ticket": 1394,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1394#issuecomment-6113981376"
+      },
+      {
+        "ticket": 1394,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1394#issuecomment-6116542024"
+      },
+      {
+        "ticket": 1405,
+        "url": "https://github.com/Newchanlun/NewChanlun/pull/1458"
+      }
+    ],
+    "subject": "Merge PR #1458: TB-02-B 无同价竞争新笔事实与增量追加验收",
+    "tb_markers": [
+      "TB-02-B"
+    ]
+  },
+  {
+    "commit": "6f99b36c64e0560febdb08e5d1f8e781d2af9299",
+    "declared": [],
+    "epoch": 1789365968,
+    "mentions": [],
+    "parent": "c65f021959b0caec1f385459de3d6049f99f7244",
+    "prs": [
+      1457
+    ],
+    "references": [
+      {
+        "ticket": 1373,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1373#issuecomment-5659880295"
+      },
+      {
+        "ticket": 1374,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1374#issuecomment-5659882019"
+      }
+    ],
+    "subject": "Merge approved PR #1457: Codex-managed Sandcastle workers and delivery preflight",
+    "tb_markers": []
+  },
+  {
+    "commit": "c65f021959b0caec1f385459de3d6049f99f7244",
+    "declared": [
+      1374
+    ],
+    "epoch": 1789365941,
+    "mentions": [
+      1374
+    ],
+    "parent": "2706d87f7306d03afac2148297eb7a7be579cbf8",
+    "prs": [
+      1455
+    ],
+    "references": [
+      {
+        "ticket": 1374,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1374#issuecomment-5659882019"
+      },
+      {
+        "ticket": 1374,
+        "url": "https://github.com/Newchanlun/NewChanlun/pull/1455"
+      }
+    ],
+    "subject": "Merge approved PR #1455: complete TB-03-A delivery reports",
+    "tb_markers": [
+      "TB-03-A"
+    ]
+  },
+  {
+    "commit": "2706d87f7306d03afac2148297eb7a7be579cbf8",
+    "declared": [
+      1373
+    ],
+    "epoch": 1789365933,
+    "mentions": [
+      1373
+    ],
+    "parent": "abf5c0f8491fc066a0f2bc47ab4defdb120035c1",
+    "prs": [
+      1453
+    ],
+    "references": [
+      {
+        "ticket": 1360,
+        "url": "https://github.com/Newchanlun/NewChanlun/pull/1453"
+      },
+      {
+        "ticket": 1373,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1373#issuecomment-5659880295"
+      },
+      {
+        "ticket": 1373,
+        "url": "https://github.com/Newchanlun/NewChanlun/pull/1453"
+      },
+      {
+        "ticket": 1385,
+        "url": "https://github.com/Newchanlun/NewChanlun/pull/1453"
+      }
+    ],
+    "subject": "Merge approved PR #1453: OHLC integration and reviewed delivery",
+    "tb_markers": [
+      "TB-02-A"
+    ]
+  },
+  {
+    "commit": "abf5c0f8491fc066a0f2bc47ab4defdb120035c1",
+    "declared": [
+      1374
+    ],
+    "epoch": 1789333522,
+    "mentions": [
+      1359,
+      1374,
+      1385
+    ],
+    "parent": "65298686cf3e7c9e94e0b9ceeb83aebad2b5530b",
+    "prs": [
+      1454
+    ],
+    "references": [
+      {
+        "ticket": 1359,
+        "url": "https://github.com/Newchanlun/NewChanlun/pull/1454"
+      },
+      {
+        "ticket": 1374,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1374#issuecomment-5659882019"
+      },
+      {
+        "ticket": 1374,
+        "url": "https://github.com/Newchanlun/NewChanlun/pull/1454"
+      },
+      {
+        "ticket": 1385,
+        "url": "https://github.com/Newchanlun/NewChanlun/pull/1454"
+      }
+    ],
+    "subject": "Merge pull request #1454 from xy7365527-lang/codex/1374-codex",
+    "tb_markers": [
+      "TB-03-A"
+    ]
+  },
+  {
+    "commit": "65298686cf3e7c9e94e0b9ceeb83aebad2b5530b",
+    "declared": [
+      1372
+    ],
+    "epoch": 1789305046,
+    "mentions": [
+      1359,
+      1372,
+      1385
+    ],
+    "parent": "21b7898a19baa4d17c5885d122ea57ed882e4f73",
+    "prs": [
+      1452
+    ],
+    "references": [
+      {
+        "ticket": 1359,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1359"
+      },
+      {
+        "ticket": 1359,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1359#issuecomment-5653549133"
+      },
+      {
+        "ticket": 1359,
+        "url": "https://github.com/Newchanlun/NewChanlun/pull/1452"
+      },
+      {
+        "ticket": 1372,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1372"
+      },
+      {
+        "ticket": 1372,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1372#issuecomment-5653539776"
+      },
+      {
+        "ticket": 1372,
+        "url": "https://github.com/Newchanlun/NewChanlun/pull/1452"
+      },
+      {
+        "ticket": 1385,
+        "url": "https://github.com/Newchanlun/NewChanlun/pull/1452"
+      }
+    ],
+    "subject": "Merge pull request #1452 from xy7365527-lang/codex/1372-delivery-tail",
+    "tb_markers": []
+  },
+  {
+    "commit": "21b7898a19baa4d17c5885d122ea57ed882e4f73",
+    "declared": [
+      1372
+    ],
+    "epoch": 1789302534,
+    "mentions": [
+      1359,
+      1372,
+      1385
+    ],
+    "parent": "e46cf3bca6a67da821f9ab046507563b8133f6d9",
+    "prs": [
+      1451
+    ],
+    "references": [
+      {
+        "ticket": 1359,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1359#issuecomment-5653549133"
+      },
+      {
+        "ticket": 1359,
+        "url": "https://github.com/Newchanlun/NewChanlun/pull/1451"
+      },
+      {
+        "ticket": 1372,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1372#issuecomment-5653539776"
+      },
+      {
+        "ticket": 1372,
+        "url": "https://github.com/Newchanlun/NewChanlun/pull/1451"
+      },
+      {
+        "ticket": 1385,
+        "url": "https://github.com/Newchanlun/NewChanlun/pull/1451"
+      }
+    ],
+    "subject": "Merge pull request #1451 from xy7365527-lang/codex/1372-codex",
+    "tb_markers": []
+  },
+  {
+    "commit": "e46cf3bca6a67da821f9ab046507563b8133f6d9",
+    "declared": [
+      1371
+    ],
+    "epoch": 1789244373,
+    "mentions": [
+      1359,
+      1371,
+      1372,
+      1385
+    ],
+    "parent": "d2219e8e014a5d55c091f8eda62ffb9dd8154953",
+    "prs": [
+      1450
+    ],
+    "references": [
+      {
+        "ticket": 1359,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1359"
+      },
+      {
+        "ticket": 1359,
+        "url": "https://github.com/Newchanlun/NewChanlun/pull/1450"
+      },
+      {
+        "ticket": 1371,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1371"
+      },
+      {
+        "ticket": 1371,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1371#issuecomment-5648582221"
+      },
+      {
+        "ticket": 1371,
+        "url": "https://github.com/Newchanlun/NewChanlun/pull/1450"
+      },
+      {
+        "ticket": 1372,
+        "url": "https://github.com/Newchanlun/NewChanlun/pull/1450"
+      },
+      {
+        "ticket": 1385,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1385#issuecomment-5648592872"
+      },
+      {
+        "ticket": 1385,
+        "url": "https://github.com/Newchanlun/NewChanlun/pull/1450"
+      }
+    ],
+    "subject": "Merge pull request #1450: #1371 扫描与交付尾报告归档",
+    "tb_markers": []
+  },
+  {
+    "commit": "d2219e8e014a5d55c091f8eda62ffb9dd8154953",
+    "declared": [
+      1371
+    ],
+    "epoch": 1789241925,
+    "mentions": [
+      1371,
+      1372,
+      1385
+    ],
+    "parent": "2212eba31e0b7419907e622e79f02f7c2cc37706",
+    "prs": [
+      1449
+    ],
+    "references": [
+      {
+        "ticket": 1371,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1371#issuecomment-5648426046"
+      },
+      {
+        "ticket": 1371,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1371#issuecomment-5648582221"
+      },
+      {
+        "ticket": 1371,
+        "url": "https://github.com/Newchanlun/NewChanlun/pull/1449"
+      },
+      {
+        "ticket": 1372,
+        "url": "https://github.com/Newchanlun/NewChanlun/pull/1449"
+      }
+    ],
+    "subject": "Merge pull request #1449: #1371 S 结构会话的持久化、更正与恢复",
+    "tb_markers": []
+  },
+  {
+    "commit": "2212eba31e0b7419907e622e79f02f7c2cc37706",
+    "declared": [
+      1370
+    ],
+    "epoch": 1788968327,
+    "mentions": [
+      1370,
+      1371,
+      1385
+    ],
+    "parent": "bd354b92c851d2d192fd3b9d9994708379808ecd",
+    "prs": [
+      1447
+    ],
+    "references": [
+      {
+        "ticket": 1370,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1370#issuecomment-5599935726"
+      },
+      {
+        "ticket": 1370,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1370#issuecomment-5604744871"
+      },
+      {
+        "ticket": 1370,
+        "url": "https://github.com/Newchanlun/NewChanlun/pull/1447"
+      },
+      {
+        "ticket": 1371,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1371#issuecomment-5604910995"
+      },
+      {
+        "ticket": 1371,
+        "url": "https://github.com/Newchanlun/NewChanlun/pull/1447"
+      },
+      {
+        "ticket": 1385,
+        "url": "https://github.com/Newchanlun/NewChanlun/pull/1447"
+      }
+    ],
+    "subject": "Merge pull request #1447 from xy7365527-lang/codex/1323-tb01-a-1370",
+    "tb_markers": []
+  },
+  {
+    "commit": "bd354b92c851d2d192fd3b9d9994708379808ecd",
+    "declared": [],
+    "epoch": 1788968208,
+    "mentions": [
+      1370,
+      1385
+    ],
+    "parent": "644075a6abcbfcda74815daed68e06eff6ddaf63",
+    "prs": [
+      1341
+    ],
+    "references": [
+      {
+        "ticket": 1359,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1359#issuecomment-5596948782"
+      },
+      {
+        "ticket": 1360,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1360#issuecomment-5596949206"
+      },
+      {
+        "ticket": 1361,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1361#issuecomment-5596949858"
+      },
+      {
+        "ticket": 1362,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1362#issuecomment-5596950412"
+      },
+      {
+        "ticket": 1363,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1363#issuecomment-5596951048"
+      },
+      {
+        "ticket": 1364,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1364#issuecomment-5596951569"
+      },
+      {
+        "ticket": 1365,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1365#issuecomment-5596953282"
+      },
+      {
+        "ticket": 1366,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1366#issuecomment-5596952172"
+      },
+      {
+        "ticket": 1367,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1367#issuecomment-5596952705"
+      },
+      {
+        "ticket": 1368,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1368#issuecomment-5596953839"
+      },
+      {
+        "ticket": 1369,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1369#issuecomment-5596954490"
+      },
+      {
+        "ticket": 1370,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1370#issuecomment-5599935726"
+      },
+      {
+        "ticket": 1370,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1370#issuecomment-5604744871"
+      },
+      {
+        "ticket": 1370,
+        "url": "https://github.com/Newchanlun/NewChanlun/pull/1341"
+      },
+      {
+        "ticket": 1385,
+        "url": "https://github.com/Newchanlun/NewChanlun/pull/1341"
+      }
+    ],
+    "subject": "Merge pull request #1341 from xy7365527-lang/codex/1323-spec-publication-20260909",
+    "tb_markers": []
+  },
+  {
+    "commit": "e965c993b1fdfd9bc5a79e9b97da61df64153114",
+    "declared": [],
+    "epoch": 1788048853,
+    "mentions": [],
+    "parent": "fa5b614ccbee3e3ae6b4a35f89fba03507a0a88d",
+    "prs": [],
+    "references": [
+      {
+        "ticket": 1523,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1523"
+      }
+    ],
+    "subject": "feat(nautilus): #1310——nautilus 0.62.0 依赖接入 + θ 信号 ThetaPiStream 桥接 Strategy + #916 销（rustc 1.98 工具链升级随票） review: #1310——(合入自 sandbox 两段)",
+    "tb_markers": []
+  },
+  {
+    "commit": "fa5b614ccbee3e3ae6b4a35f89fba03507a0a88d",
+    "declared": [],
+    "epoch": 1788046649,
+    "mentions": [],
+    "parent": "604b2d77ed84e82688e5c2703813263aaaf0b488",
+    "prs": [],
+    "references": [
+      {
+        "ticket": 1525,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1525"
+      }
+    ],
+    "subject": "feat(python): #1311——paper 风控四条 RiskGate 落码（单笔≤1%/净持仓上限/频率熔断/kill switch）+ 15 触发测试（#1283 Q3） review: #1311——__getattr__ 惰性导入契约订正（PEP 562）+ importlib 上移",
+    "tb_markers": []
+  },
+  {
+    "commit": "860353767d198c7f04c60b01749a12a9a358eaa7",
+    "declared": [],
+    "epoch": 1781818365,
+    "mentions": [],
+    "parent": "a65e8e76a69f3a72bc275f4e3b4ebdf97dc7f4c8",
+    "prs": [],
+    "references": [
+      {
+        "ticket": 1385,
+        "url": "https://github.com/Newchanlun/NewChanlun/issues/1385#issuecomment-7021955669"
+      }
+    ],
+    "subject": "feat(recursive_t): T vs v3 nf 信号 L3 对照（阶段2）+ fugue_v3 nf 明细 instrumentation",
+    "tb_markers": []
+  }
+]

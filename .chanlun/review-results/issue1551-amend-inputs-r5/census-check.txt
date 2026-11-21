@@ -1,0 +1,14 @@
+R3 regression: 15 -> 18 commits; 483 -> 493 PRE paths
+#1406 #1616 alone: 90 additional surviving paths over R3, of which 89 untouched
+#1359 and #1372 share #1452 without duplicating paths
+Known #1405 CI failures match the exact historical run IDs
+R5 full evidence: 115 unique landings, 1025 exact PRE paths
+r5: verified 4 census pins; 62 tickets, 133 pairs, 115 unique landings, 1025 PRE paths
+r5: 33 non-native mappings with 61 exclusive commits; 6 invalid mapping fixtures rejected
+DST-01: 68 R10 ticket/scope pairs, 62 R10 ticket IDs, 116 unique commits including F
+DST-02: 68 R10 ticket/scope pairs, 62 R10 ticket IDs, 116 unique commits including F
+DST-03: 68 R10 ticket/scope pairs, 62 R10 ticket IDs, 116 unique commits including F
+DST-04: 68 R10 ticket/scope pairs, 62 R10 ticket IDs, 116 unique commits including F
+DST-05: 68 R10 ticket/scope pairs, 62 R10 ticket IDs, 116 unique commits including F
+DST-06: 68 R10 ticket/scope pairs, 62 R10 ticket IDs, 116 unique commits including F
+r5: 9/9 files replay byte-for-byte; state inversion 8/8 stable and summary state-only 21 -> 41

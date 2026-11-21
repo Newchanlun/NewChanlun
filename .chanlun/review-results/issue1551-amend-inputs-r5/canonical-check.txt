@@ -1,0 +1,6 @@
+docs/adr/0064-at18-whole-graph-acceptance-and-closeout.md: 5 unique replacements, 99564 bytes, equal
+.sandcastle/docs/graph-engineering.md: 1 unique replacements, 41528 bytes, equal
+canonical-edit.mts: equal blob bytes: docs/adr/0064-at18-whole-graph-acceptance-and-closeout.md
+canonical-edit.mts: equal blob bytes: .sandcastle/docs/graph-engineering.md
+Independent byte replay: both edits equal candidate; draft has 7 sections, 2 tables Q1-Q11, and 1 byte-identical primary fence.
+Existing ADR 0036 is the exact original prefix plus 4 lines; no other live ADR changed. Graph sync preserves line count.

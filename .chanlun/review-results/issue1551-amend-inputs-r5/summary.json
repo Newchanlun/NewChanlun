@@ -1,0 +1,191 @@
+{
+  "enumerated_pre_gate_main_commits": 2987,
+  "gate": "bd54d4b28ec4f83d596837f84f1f861dd085124c",
+  "landing_tickets": 62,
+  "observed_main": "b9d898dccf46c2a716115eaa1215bc39c458a959",
+  "open_ticket_landings": {
+    "1366": {
+      "commits": [
+        "8d84e21e2c9e9800a22900c2d4c67878310c1ab9",
+        "bb635ab26a33108130e4c4d63140d94f6e431d49"
+      ],
+      "surviving": 8,
+      "untouched": 6
+    },
+    "1368": {
+      "commits": [
+        "344d4da15d59b520b0aee6f4332d9a14a48f7d1a"
+      ],
+      "surviving": 10,
+      "untouched": 6
+    },
+    "1381": {
+      "commits": [
+        "6dc7cd0c87e9d5222d721d3a4941897dcc1eabb7",
+        "9636ccb5f718cf9e6a7246774d79dc13957ebe37"
+      ],
+      "surviving": 11,
+      "untouched": 11
+    },
+    "1406": {
+      "commits": [
+        "02b5b571eb872e92a5325f5bd02f966097f27cf9",
+        "64fbe7ad5ce9afa883f80b4f0599fefb156a4e3d",
+        "67e9c42205e4b98af137f203cdbc0cae66fe3d30",
+        "75022b3b9c6757b7ff39a0aa20b200606afbe8e6",
+        "a54d1ced816745748b5482229c748be05cc75749"
+      ],
+      "surviving": 143,
+      "untouched": 129
+    },
+    "1481": {
+      "commits": [
+        "3654ba8189eae85415671e4233832bfe0234f0c9",
+        "38256274f3785c1117d89501c3e62276921c5c38",
+        "457902e3c371d1f1c9611bb083415067f061f4d2",
+        "6be589b842a1cd7f084b39efe66fa8c8a01f36f5",
+        "71df2ae749664714e6bff10f8f71d9e15cc4c815",
+        "9c0e4e90cef5bf493732f371882f47c1e8c948d2"
+      ],
+      "surviving": 56,
+      "untouched": 52
+    },
+    "1491": {
+      "commits": [
+        "0bace7c395ca92bb1be12f698fc31930bfefd69c",
+        "5123c9e2736573dd1c1232311c9c63ba0a1abc80"
+      ],
+      "surviving": 23,
+      "untouched": 20
+    },
+    "1523": {
+      "commits": [
+        "5dc1eb9435c32bee6f9ead274ee3c87cac694ef8"
+      ],
+      "surviving": 1,
+      "untouched": 0
+    },
+    "1527": {
+      "commits": [
+        "06dd4a3fa8a703b5248786331d309e16b5c27996",
+        "6fe5ebea8cdb6c3b434d3c10b6e2e089437b91ca",
+        "784bc6d77016a216d085d0a63564c7937e325ed1",
+        "aa1c3885f8adc1d79c08641424b3ce30a15536f1",
+        "beec08218e1cd74e8f619cad14e71acce1a81681"
+      ],
+      "surviving": 82,
+      "untouched": 77
+    },
+    "1552": {
+      "commits": [
+        "6d18ed82a610916d0f928da898ec47cb78bbcf6f"
+      ],
+      "surviving": 2,
+      "untouched": 2
+    },
+    "1606": {
+      "commits": [
+        "5c341d8047722ca4dd4e3c25b78f2c6d637af7f9"
+      ],
+      "surviving": 19,
+      "untouched": 12
+    },
+    "1640": {
+      "commits": [
+        "6d4d066058c978bfcd1471bd68aef2a3a79628d5",
+        "7d720616d3ac03eca0584844df3bb322001fbfc6",
+        "ba3ad68112f2304453583c50c0e55382c6f3670f",
+        "cefef5be6cf19c7907874112f310ad4291c77000"
+      ],
+      "surviving": 106,
+      "untouched": 95
+    },
+    "1647": {
+      "commits": [
+        "3654ba8189eae85415671e4233832bfe0234f0c9",
+        "6be589b842a1cd7f084b39efe66fa8c8a01f36f5"
+      ],
+      "surviving": 13,
+      "untouched": 11
+    },
+    "1715": {
+      "commits": [
+        "0fe8e2f3c91a9df22128214ed6232bdf9f68b700"
+      ],
+      "surviving": 12,
+      "untouched": 9
+    },
+    "1716": {
+      "commits": [
+        "3b1a1841cd11898174983ebf092e11273bb63994",
+        "cf72a9f91050a4b6af7ac4b6e0c2b9f0364a2584"
+      ],
+      "surviving": 19,
+      "untouched": 12
+    },
+    "1717": {
+      "commits": [
+        "499841b59265c5395ccdd40b92684b5864802f4f"
+      ],
+      "surviving": 8,
+      "untouched": 3
+    },
+    "1718": {
+      "commits": [
+        "4c10229eacaa21a8744e57d409b579359ca7cd97"
+      ],
+      "surviving": 8,
+      "untouched": 7
+    },
+    "1719": {
+      "commits": [
+        "60133aca03773ce8d338243f46accea7ca891a2b"
+      ],
+      "surviving": 11,
+      "untouched": 11
+    },
+    "1768": {
+      "commits": [
+        "ca5a8b16ae085306feaf42417bcb225e6c833911"
+      ],
+      "surviving": 5,
+      "untouched": 1
+    },
+    "1769": {
+      "commits": [
+        "6fe5ebea8cdb6c3b434d3c10b6e2e089437b91ca",
+        "9de18e606b2c0330162a83e2a030898b46c3690f",
+        "9e6eb6f46c3a1f686d6da8a016738999daa5a4b4",
+        "b0db7a8d71f929318e539a57c9dd42161f4fbec6",
+        "c5da72d0efae6e9bbedad91c326e95bbbcc4c477"
+      ],
+      "surviving": 23,
+      "untouched": 17
+    },
+    "1845": {
+      "commits": [
+        "67df861ee909efae902450b8f02b88e957f3a74c",
+        "eab5dd106c42daf1ee5cbc3898a08898479e7f9b"
+      ],
+      "surviving": 14,
+      "untouched": 12
+    },
+    "1978": {
+      "commits": [
+        "722b1da086a354baa1f63946f6951b619cbd9b6e"
+      ],
+      "surviving": 19,
+      "untouched": 18
+    }
+  },
+  "p0": "b5cd3fee352e5f7199233de628da05ff06c5798f",
+  "path_dispositions": {
+    "ABSENT_F": 10,
+    "ABSENT_P0": 1978,
+    "SURVIVING_POSTGATE_TOUCHED": 47,
+    "SURVIVING_UNTOUCHED": 978
+  },
+  "pre_gate_landing_commits": 115,
+  "pre_paths": 1025,
+  "ticket_commit_pairs": 133
+}
