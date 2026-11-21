@@ -9,7 +9,7 @@ import hashlib
 import json
 import re
 from collections.abc import Collection, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import Enum
 from types import MappingProxyType
 from typing import Any, Literal
@@ -75,14 +75,34 @@ _COMMENT_MARKER_RE = re.compile(
     r"^<!--\s*deepagents:review-findings\s+pr=(?P<pr>[1-9]\d*)\s+round=(?P<round>[1-9]\d*)\s+head=(?P<head>\S+)\s*-->$"
 )
 
-_LIST_PREFIX_PATTERN = r"(?:(?:[-*+]|\d+[.)])[ \t]+)*"
-_LIST_MARKER_RE = re.compile(r"^(?:[-*+]|\d+[.)])(?=[ \t])")
-_LIST_ITEM_START_RE = re.compile(r"^ {0,3}(?:[-*+]|\d+[.)])[ \t]+")
 _FENCE_OPEN_BACKTICK_BODY_RE = re.compile(r"^(`{3,})[^`]*$")
 _FENCE_OPEN_TILDE_BODY_RE = re.compile(r"^(~{3,}).*$")
-_BLOCKQUOTE_START_RE = re.compile(rf"^{_LIST_PREFIX_PATTERN}>")
-_ATX_HEADING_RE = re.compile(r"^ {0,3}#{1,6}(?:[ \t]|$)")
-_THEMATIC_BREAK_RE = re.compile(r"^ {0,3}(?:(?:-[ \t]*){3,}|(?:\*[ \t]*){3,}|(?:_[ \t]*){3,})$")
+_ATX_HEADING_BODY_RE = re.compile(r"^#{1,6}(?:[ \t]|$)")
+_SETEXT_UNDERLINE_BODY_RE = re.compile(r"^(?:=+|-+)[ \t]*$")
+_THEMATIC_BREAK_BODY_RE = re.compile(r"^(?:(?:-[ \t]*){3,}|(?:\*[ \t]*){3,}|(?:_[ \t]*){3,})$")
+_LIST_ITEM_MARKER_BODY_RE = re.compile(r"^(?:(?P<bullet>[-*+])|(?P<num>\d{1,9})[.)])(?=[ \t]|$)")
+_HTML_BLOCK_1_START_RE = re.compile(r"^<(?:pre|script|style|textarea)(?:[ \t>]|$)", re.IGNORECASE)
+_HTML_BLOCK_1_END_RE = re.compile(r"</(?:pre|script|style|textarea)>", re.IGNORECASE)
+_HTML_BLOCK_4_START_RE = re.compile(r"^<![A-Za-z]")
+_HTML_BLOCK_6_TAGS = (
+    "address|article|aside|base|basefont|blockquote|body|caption|center|col|colgroup|"
+    "dd|details|dialog|dir|div|dl|dt|fieldset|figcaption|figure|footer|form|frame|frameset|"
+    "h1|h2|h3|h4|h5|h6|head|header|hr|html|iframe|legend|li|link|main|menu|menuitem|nav|"
+    "noframes|ol|optgroup|option|p|param|search|section|summary|table|tbody|td|tfoot|th|"
+    "thead|title|tr|track|ul"
+)
+_HTML_BLOCK_6_START_RE = re.compile(
+    rf"^</?(?:{_HTML_BLOCK_6_TAGS})(?:[ \t>]|/>|$)",
+    re.IGNORECASE,
+)
+_HTML_OPEN_TAG_PATTERN = (
+    r"<[A-Za-z][A-Za-z0-9-]*"
+    r"(?:[ \t]+[A-Za-z_:][A-Za-z0-9_.:-]*(?:[ \t]*=[ \t]*(?:[^\s\"'=<>`]+|'[^']*'|\"[^\"]*\"))?)*"
+    r"[ \t]*/?>"
+)
+_HTML_CLOSE_TAG_PATTERN = r"</[A-Za-z][A-Za-z0-9-]*[ \t]*>"
+_HTML_BLOCK_7_START_RE = re.compile(rf"^(?:{_HTML_OPEN_TAG_PATTERN}|{_HTML_CLOSE_TAG_PATTERN})[ \t]*$")
+_INLINE_HTML_COMMENT_RE = re.compile(r"<!--(?:>|->|.*?-->)", re.DOTALL)
 
 _WONTFIX_HEAD_RE = re.compile(
     r"^(?:(?:[-*+]|\d+[.)])\s+)?"
@@ -469,81 +489,389 @@ def _extract_comment_file_and_line(comment: Mapping[str, Any]) -> tuple[str | No
     return file_path, line
 
 
-def _leading_indent_columns(line: str) -> int:
-    cols = 0
-    for ch in line:
-        if ch == " ":
-            cols += 1
-        elif ch == "\t":
-            cols += 4 - (cols % 4)
-        else:
-            break
-    return cols
+class _LineCursor:
+    """按 CommonMark §2.2 4 列制表位精确追踪行内位置、虚拟列与半展开 Tab。"""
 
+    __slots__ = ("line", "pos", "col", "partial")
 
-def _match_opening_fence(line: str) -> tuple[str, int, int] | None:
-    """按 CommonMark §4.5 / §5.2 识别开代码围栏，返回 (fence_char, fence_len, container_col)。"""
-    pos = 0
-    col = 0
-    container_col = 0
-    n = len(line)
-    while True:
-        ws_pos = pos
-        ws_col = col
-        while ws_pos < n and line[ws_pos] in (" ", "\t"):
-            if line[ws_pos] == " ":
-                ws_col += 1
+    def __init__(self, line: str) -> None:
+        self.line = line
+        self.pos = 0
+        self.col = 0
+        self.partial = 0
+
+    def save(self) -> tuple[int, int, int]:
+        return (self.pos, self.col, self.partial)
+
+    def restore(self, state: tuple[int, int, int]) -> None:
+        self.pos, self.col, self.partial = state
+
+    def indent_ahead(self) -> int:
+        cols = self.partial
+        col = self.col + self.partial
+        pos = self.pos
+        line = self.line
+        n = len(line)
+        while pos < n:
+            ch = line[pos]
+            if ch == " ":
+                cols += 1
+                col += 1
+                pos += 1
+            elif ch == "\t":
+                step = 4 - (col % 4)
+                cols += step
+                col += step
+                pos += 1
             else:
-                ws_col += 4 - (ws_col % 4)
-            ws_pos += 1
+                break
+        return cols
 
-        if ws_col - container_col > 3:
-            return None
+    def is_blank(self) -> bool:
+        pos = self.pos
+        line = self.line
+        n = len(line)
+        while pos < n:
+            if line[pos] not in (" ", "\t"):
+                return False
+            pos += 1
+        return True
 
-        rest = line[ws_pos:]
-        list_match = _LIST_MARKER_RE.match(rest)
-        if list_match:
-            marker_len = list_match.end()
-            after_marker_pos = ws_pos + marker_len
-            after_marker_col = ws_col + marker_len
-            content_pos = after_marker_pos
-            content_col = after_marker_col
-            while content_pos < n and line[content_pos] in (" ", "\t"):
-                if line[content_pos] == " ":
-                    content_col += 1
+    def advance_cols(self, count: int) -> int:
+        consumed = 0
+        line = self.line
+        n = len(line)
+        while consumed < count:
+            if self.partial > 0:
+                take = min(self.partial, count - consumed)
+                self.partial -= take
+                self.col += take
+                consumed += take
+            elif self.pos < n:
+                ch = line[self.pos]
+                if ch == " ":
+                    self.pos += 1
+                    self.col += 1
+                    consumed += 1
+                elif ch == "\t":
+                    step = 4 - (self.col % 4)
+                    self.pos += 1
+                    need = count - consumed
+                    if step <= need:
+                        self.col += step
+                        consumed += step
+                    else:
+                        self.col += need
+                        self.partial = step - need
+                        consumed += need
                 else:
-                    content_col += 4 - (content_col % 4)
-                content_pos += 1
-            if content_col - after_marker_col >= 5:
-                return None
-            container_col = content_col
-            pos = content_pos
-            col = content_col
+                    break
+            else:
+                break
+        return consumed
+
+    def peek_char(self) -> str:
+        if self.partial > 0:
+            return " "
+        if self.pos < len(self.line):
+            return self.line[self.pos]
+        return ""
+
+    def advance_chars(self, count: int) -> None:
+        self.pos += count
+        self.col += count
+
+    def rest_text(self) -> str:
+        if self.partial > 0:
+            return (" " * self.partial) + self.line[self.pos :]
+        return self.line[self.pos :]
+
+
+@dataclass
+class _BlockQuote:
+    pass
+
+
+@dataclass
+class _ListItem:
+    padding: int
+    has_content: bool = False
+
+
+@dataclass
+class _FencedCode:
+    fence_char: str
+    fence_len: int
+
+
+@dataclass
+class _IndentedCode:
+    pass
+
+
+@dataclass
+class _HTMLBlock:
+    kind: int
+
+
+@dataclass
+class _Paragraph:
+    lines: list[str]
+
+
+_Container = _BlockQuote | _ListItem
+_Leaf = _FencedCode | _IndentedCode | _HTMLBlock | _Paragraph
+
+
+def _match_html_block_start(rest: str, *, allow_type7: bool) -> int | None:
+    if not rest.startswith("<"):
+        return None
+    if _HTML_BLOCK_1_START_RE.match(rest):
+        return 1
+    if rest.startswith("<!--"):
+        return 2
+    if rest.startswith("<?"):
+        return 3
+    if _HTML_BLOCK_4_START_RE.match(rest):
+        return 4
+    if rest.startswith("<![CDATA["):
+        return 5
+    if _HTML_BLOCK_6_START_RE.match(rest):
+        return 6
+    if allow_type7 and _HTML_BLOCK_7_START_RE.match(rest):
+        return 7
+    return None
+
+
+def _is_html_block_end(kind: int, text: str) -> bool:
+    if kind == 1:
+        return bool(_HTML_BLOCK_1_END_RE.search(text))
+    if kind == 2:
+        return "-->" in text
+    if kind == 3:
+        return "?>" in text
+    if kind == 4:
+        return ">" in text
+    if kind == 5:
+        return "]]>" in text
+    return False
+
+
+def _extract_visible_paragraph_lines(body: str) -> list[str]:
+    """按 CommonMark Phase-1 容器栈 + 叶子块模型提取非引用可见段落行。"""
+    containers: list[_Container] = []
+    leaf: _Leaf | None = None
+    visible_lines: list[str] = []
+
+    def close_leaf(*, emit: bool = True) -> None:
+        nonlocal leaf
+        if emit and isinstance(leaf, _Paragraph) and not any(isinstance(c, _BlockQuote) for c in containers):
+            cleaned = _INLINE_HTML_COMMENT_RE.sub("", "\n".join(leaf.lines))
+            for para_line in cleaned.splitlines():
+                stripped = para_line.strip()
+                if stripped:
+                    visible_lines.append(stripped)
+        leaf = None
+
+    def close_unmatched(matched_count: int) -> None:
+        if matched_count < len(containers):
+            close_leaf()
+            del containers[matched_count:]
+
+    def mark_parent_has_content() -> None:
+        if containers and isinstance(containers[-1], _ListItem):
+            containers[-1].has_content = True
+
+    for raw_line in body.splitlines():
+        cursor = _LineCursor(raw_line)
+
+        # 1. 从外到内匹配已打开容器栈
+        matched = 0
+        for container in containers:
+            if isinstance(container, _BlockQuote):
+                indent = cursor.indent_ahead()
+                if indent <= 3:
+                    saved = cursor.save()
+                    cursor.advance_cols(indent)
+                    if cursor.peek_char() == ">":
+                        cursor.advance_chars(1)
+                        if cursor.peek_char() in (" ", "\t"):
+                            cursor.advance_cols(1)
+                        matched += 1
+                        continue
+                    cursor.restore(saved)
+                break
+            else:
+                if cursor.is_blank():
+                    if not container.has_content:
+                        break
+                    matched += 1
+                    continue
+                if cursor.indent_ahead() >= container.padding:
+                    cursor.advance_cols(container.padding)
+                    matched += 1
+                    continue
+                break
+
+        # 2. 全部容器匹配时，先续接或闭合非段落叶子块
+        if matched == len(containers) and leaf is not None and not isinstance(leaf, _Paragraph):
+            if isinstance(leaf, _FencedCode):
+                if not cursor.is_blank() and cursor.indent_ahead() <= 3:
+                    saved = cursor.save()
+                    cursor.advance_cols(cursor.indent_ahead())
+                    rest = cursor.rest_text()
+                    if re.fullmatch(rf"{re.escape(leaf.fence_char)}{{{leaf.fence_len},}}[ \t]*", rest):
+                        leaf = None
+                        continue
+                    cursor.restore(saved)
+                continue
+            if isinstance(leaf, _HTMLBlock):
+                if leaf.kind in (6, 7):
+                    if cursor.is_blank():
+                        leaf = None
+                    continue
+                if _is_html_block_end(leaf.kind, cursor.rest_text()):
+                    leaf = None
+                continue
+            if isinstance(leaf, _IndentedCode):
+                if cursor.is_blank() or cursor.indent_ahead() >= 4:
+                    continue
+                leaf = None
+
+        if matched < len(containers) and not isinstance(leaf, _Paragraph):
+            close_unmatched(matched)
+
+        if cursor.is_blank():
+            close_unmatched(matched)
+            if isinstance(leaf, _Paragraph):
+                close_leaf()
             continue
 
-        bt_match = _FENCE_OPEN_BACKTICK_BODY_RE.match(rest)
-        if bt_match:
-            marker = bt_match.group(1)
-            return marker[0], len(marker), container_col
-        tilde_match = _FENCE_OPEN_TILDE_BODY_RE.match(rest)
-        if tilde_match:
-            marker = tilde_match.group(1)
-            return marker[0], len(marker), container_col
-        return None
+        # 3. 按 CommonMark 优先级开启新容器或叶子块
+        line_consumed = False
+        while True:
+            if cursor.is_blank():
+                line_consumed = True
+                break
 
+            indent = cursor.indent_ahead()
+            same_container_para = matched == len(containers) and isinstance(leaf, _Paragraph)
+            any_open_para = isinstance(leaf, _Paragraph)
 
-def _is_closing_fence(line: str, fence_char: str, fence_len: int, container_col: int) -> bool:
-    if _leading_indent_columns(line) > container_col + 3:
-        return False
-    return bool(re.fullmatch(rf"[ \t]*{re.escape(fence_char)}{{{fence_len},}}[ \t]*", line))
+            if indent >= 4:
+                if any_open_para:
+                    break
+                close_unmatched(matched)
+                mark_parent_has_content()
+                leaf = _IndentedCode()
+                line_consumed = True
+                break
 
+            saved = cursor.save()
+            cursor.advance_cols(indent)
+            rest = cursor.rest_text()
 
-def _is_block_interrupt(line: str) -> bool:
-    return bool(_ATX_HEADING_RE.match(line) or _THEMATIC_BREAK_RE.match(line))
+            if rest.startswith(">"):
+                close_unmatched(matched)
+                close_leaf()
+                cursor.advance_chars(1)
+                if cursor.peek_char() in (" ", "\t"):
+                    cursor.advance_cols(1)
+                mark_parent_has_content()
+                containers.append(_BlockQuote())
+                matched = len(containers)
+                continue
 
+            if _ATX_HEADING_BODY_RE.match(rest):
+                close_unmatched(matched)
+                close_leaf()
+                mark_parent_has_content()
+                line_consumed = True
+                break
 
-def _is_list_item_start(line: str) -> bool:
-    return _leading_indent_columns(line) <= 3 and bool(_LIST_ITEM_START_RE.match(line))
+            bt_match = _FENCE_OPEN_BACKTICK_BODY_RE.match(rest)
+            tilde_match = _FENCE_OPEN_TILDE_BODY_RE.match(rest) if bt_match is None else None
+            fence_match = bt_match or tilde_match
+            if fence_match is not None:
+                close_unmatched(matched)
+                close_leaf()
+                mark_parent_has_content()
+                marker = fence_match.group(1)
+                leaf = _FencedCode(fence_char=marker[0], fence_len=len(marker))
+                line_consumed = True
+                break
+
+            html_kind = _match_html_block_start(rest, allow_type7=not any_open_para)
+            if html_kind is not None:
+                close_unmatched(matched)
+                close_leaf()
+                mark_parent_has_content()
+                if html_kind in (1, 2, 3, 4, 5) and _is_html_block_end(html_kind, rest):
+                    leaf = None
+                else:
+                    leaf = _HTMLBlock(kind=html_kind)
+                line_consumed = True
+                break
+
+            if same_container_para and _SETEXT_UNDERLINE_BODY_RE.match(rest):
+                close_leaf(emit=False)
+                line_consumed = True
+                break
+
+            if _THEMATIC_BREAK_BODY_RE.match(rest):
+                close_unmatched(matched)
+                close_leaf()
+                mark_parent_has_content()
+                line_consumed = True
+                break
+
+            list_match = _LIST_ITEM_MARKER_BODY_RE.match(rest)
+            if list_match is not None:
+                marker_width = list_match.end()
+                is_bullet = list_match.group("bullet") is not None
+                ordered_num = int(list_match.group("num")) if not is_bullet else 0
+                after_marker_state = cursor.save()
+                cursor.advance_chars(marker_width)
+                is_empty_item = cursor.is_blank()
+                can_open_list = (not same_container_para) or (
+                    (not is_empty_item) and (is_bullet or ordered_num == 1)
+                )
+                if can_open_list:
+                    close_unmatched(matched)
+                    close_leaf()
+                    if is_empty_item:
+                        padding = indent + marker_width + 1
+                    else:
+                        spaces_after = cursor.indent_ahead()
+                        if spaces_after >= 5:
+                            padding = indent + marker_width + 1
+                            cursor.advance_cols(1)
+                        else:
+                            padding = indent + marker_width + spaces_after
+                            cursor.advance_cols(spaces_after)
+                    mark_parent_has_content()
+                    containers.append(_ListItem(padding=padding, has_content=False))
+                    matched = len(containers)
+                    continue
+                cursor.restore(after_marker_state)
+
+            cursor.restore(saved)
+            break
+
+        if line_consumed:
+            continue
+
+        # 4. 段落续行（含 BlockQuote / ListItem 惰性续行）或开启新段落
+        text_line = cursor.rest_text().strip()
+        if isinstance(leaf, _Paragraph):
+            leaf.lines.append(text_line)
+        else:
+            close_unmatched(matched)
+            mark_parent_has_content()
+            leaf = _Paragraph(lines=[text_line])
+
+    close_leaf()
+    return visible_lines
 
 
 def parse_wontfix_replies(
@@ -551,7 +879,7 @@ def parse_wontfix_replies(
     *,
     allowed_authors: Collection[str],
 ) -> tuple[AuthorReply, ...]:
-    """解析白名单作者的 `不修：<理由>` 回复；拒绝机器人、缺失 comment_id 或非白名单作者，并隔离代码块与引用续行。"""
+    """解析白名单作者的 `不修：<理由>` 回复；拒绝机器人、缺失 comment_id 或非白名单作者，并按 CommonMark 隔离非可见块。"""
     allowed = _normalize_str_collection(
         allowed_authors,
         "allowed_authors",
@@ -579,49 +907,9 @@ def parse_wontfix_replies(
             continue
         fallback_file, fallback_line = _extract_comment_file_and_line(comment)
 
-        fence_char: str | None = None
-        fence_len = 0
-        fence_container_col = 0
-        in_blockquote = False
         directive_index = 0
-        for raw_line in body.splitlines():
-            if fence_char is not None:
-                if _is_closing_fence(raw_line, fence_char, fence_len, fence_container_col):
-                    fence_char = None
-                    fence_len = 0
-                    fence_container_col = 0
-                continue
-
-            stripped = raw_line.strip()
-            if not stripped:
-                in_blockquote = False
-                continue
-
-            opened = _match_opening_fence(raw_line)
-            if opened is not None:
-                in_blockquote = False
-                fence_char, fence_len, fence_container_col = opened
-                continue
-
-            # 必须在 .strip() 之前识别缩进代码块（4 空格或制表符）
-            if _leading_indent_columns(raw_line) >= 4:
-                continue
-
-            if _BLOCKQUOTE_START_RE.match(stripped):
-                in_blockquote = True
-                continue
-
-            if _is_block_interrupt(raw_line):
-                in_blockquote = False
-                continue
-
-            if in_blockquote:
-                if _is_list_item_start(raw_line):
-                    in_blockquote = False
-                else:
-                    continue
-
-            match = _WONTFIX_HEAD_RE.match(stripped)
+        for visible_line in _extract_visible_paragraph_lines(body):
+            match = _WONTFIX_HEAD_RE.match(visible_line)
             if not match:
                 continue
             reason = match.group("reason").strip()
@@ -832,44 +1120,79 @@ def accept_quick_pass_findings(
     return tuple(accepted)
 
 
-def _normalize_prior_important_sources(
-    raw: Mapping[str, Collection[str]] | None,
-) -> dict[str, frozenset[str]]:
-    if raw is None:
-        return {}
-    if not isinstance(raw, Mapping):
-        raise ConvergenceError(f"prior_important_sources 必须是映射：{raw!r}")
-    normalized: dict[str, frozenset[str]] = {}
-    for raw_fid, raw_models in raw.items():
-        fid = _require_non_empty_str(raw_fid, "prior_important_sources key").lower()
-        models = _normalize_str_collection(
-            raw_models,
-            f"prior_important_sources[{fid!r}]",
-            require_non_empty=False,
-            lowercase=False,
-        )
-        real_models = frozenset(m for m in models if m.lower() != _PRIOR_ROUND_PLACEHOLDER)
-        if fid in normalized:
-            normalized[fid] = normalized[fid] | real_models
-        else:
-            normalized[fid] = real_models
-    return normalized
+@dataclass(frozen=True)
+class RoundCandidates:
+    """强校验且不可伪造的单轮核实候选集合：严格隔离本轮当前面板发现与跨轮保留历史 Important。"""
+
+    panel: ReviewPanel
+    current_round_findings: tuple[Finding, ...]
+    prior_important: tuple[Finding, ...] = ()
+    findings: tuple[Finding, ...] = field(init=False)
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.panel, ReviewPanel):
+            raise ConvergenceError("RoundCandidates.panel 必须是 ReviewPanel")
+        if not isinstance(self.current_round_findings, tuple):
+            raise ConvergenceError("RoundCandidates.current_round_findings 必须是 Finding 元组")
+        if not isinstance(self.prior_important, tuple):
+            raise ConvergenceError("RoundCandidates.prior_important 必须是 Finding 元组")
+
+        allowed_finders = frozenset(m.strip() for m in self.panel.finder_models)
+        verifier_family = self.panel.verifier_family
+
+        batches: list[tuple[str, Sequence[Finding]]] = []
+        for item in self.current_round_findings:
+            if not isinstance(item, Finding):
+                raise ConvergenceError(f"current_round_findings 元素必须是 Finding：{item!r}")
+            if not item.source_models:
+                raise ConvergenceError(f"本轮发现 {item.finding_id} 缺少 source_models，禁止绕过面板归属校验")
+            unknown_models = [m.strip() for m in item.source_models if m.strip() not in allowed_finders]
+            if unknown_models:
+                raise ConvergenceError(
+                    f"本轮发现 {item.finding_id} 的来源模型 {unknown_models!r} 不在 panel.finder_models 中"
+                )
+            batches.append((item.source_models[0].strip(), (item,)))
+
+        prior_seen: set[str] = set()
+        for item in self.prior_important:
+            if not isinstance(item, Finding):
+                raise ConvergenceError(f"prior_important 元素必须是 Finding：{item!r}")
+            if item.severity != Severity.IMPORTANT:
+                raise ConvergenceError(f"prior_important 仅允许 Important 发现，收到 {item.severity.value}")
+            fid = item.finding_id
+            if fid in prior_seen:
+                raise ConvergenceError(f"prior_important 含重复指纹 {fid}，禁止同指纹注入多份历史条目")
+            prior_seen.add(fid)
+
+            real_models = _real_source_models(item.source_models)
+            if not real_models:
+                raise ConvergenceError(f"历史发现 {fid} 缺少真实 finder source_models，禁止绕过异家族核实校验")
+            for src_model in real_models:
+                src_family = infer_model_family(src_model)
+                if verifier_family is not None and src_family == verifier_family:
+                    raise ConvergenceError(
+                        f"核实者模型 {self.panel.verifier_model!r}（家族 {verifier_family}）"
+                        f"不得与历史发现 {fid} 来源模型 {src_model!r} 同家族"
+                    )
+            batches.append((real_models[0], (item,)))
+
+        merged = merge_and_dedupe_findings(batches) if batches else ()
+        object.__setattr__(self, "findings", merged)
 
 
 def parse_verifier_output(
     payload: Mapping[str, Any],
-    candidate_findings: Sequence[Finding],
+    candidates: RoundCandidates,
     *,
-    panel: ReviewPanel,
     verifier_model: str,
     author_replies: Sequence[AuthorReply] = (),
     consumed_reply_keys: Collection[str] = (),
     consumed_comment_ids: Collection[str] = (),
-    prior_important_sources: Mapping[str, Collection[str]] | None = None,
 ) -> tuple[VerifiedFinding, ...]:
-    """解析核实者裁决并强制与审查面板及候选清单 1:1 绑定（fail-closed）。"""
-    if not isinstance(panel, ReviewPanel):
-        raise ConvergenceError("panel 必须是 ReviewPanel")
+    """解析核实者裁决并强制与强校验的 RoundCandidates 及审查面板 1:1 绑定（fail-closed）。"""
+    if not isinstance(candidates, RoundCandidates):
+        raise ConvergenceError("candidates 必须是经面板强校验的 RoundCandidates")
+    panel = candidates.panel
     if not panel.require_verifier:
         raise ConvergenceError("panel.require_verifier=False 必须走 accept_quick_pass_findings，禁止调用 parse_verifier_output")
     model = _require_non_empty_str(verifier_model, "verifier_model")
@@ -877,8 +1200,6 @@ def parse_verifier_output(
     if model != expected_verifier:
         raise ConvergenceError(f"verifier_model={model!r} 与 panel.verifier_model={expected_verifier!r} 不一致")
     verifier_family = infer_model_family(model)
-    allowed_finders = frozenset(m.strip() for m in panel.finder_models)
-    normalized_prior_sources = _normalize_prior_important_sources(prior_important_sources)
 
     if not isinstance(payload, Mapping):
         raise ConvergenceError("verifier 输出必须是对象")
@@ -889,13 +1210,10 @@ def parse_verifier_output(
     candidates_by_id: dict[str, Finding] = {}
     ordered_ids: list[str] = []
     candidate_list: list[Finding] = []
-    for candidate in candidate_findings:
-        if not isinstance(candidate, Finding):
-            raise ConvergenceError(f"candidate_findings 元素必须是 Finding：{candidate!r}")
+    for candidate in candidates.findings:
         cid = candidate.finding_id
         if cid in candidates_by_id:
-            raise ConvergenceError(f"candidate_findings 含重复指纹 {cid}，请先合并去重")
-
+            raise ConvergenceError(f"candidates.findings 含重复指纹 {cid}")
         real_models = _real_source_models(candidate.source_models)
         if not real_models:
             raise ConvergenceError(f"候选发现 {cid} 缺少真实 finder source_models，禁止绕过异家族核实校验")
@@ -905,15 +1223,6 @@ def parse_verifier_output(
                 raise ConvergenceError(
                     f"核实者模型 {model!r}（家族 {verifier_family}）不得与候选发现 {cid} 来源模型 {src_model!r} 同家族"
                 )
-        allowed_for_candidate = allowed_finders
-        if candidate.severity == Severity.IMPORTANT and cid in normalized_prior_sources:
-            allowed_for_candidate = allowed_finders | normalized_prior_sources[cid]
-        unknown_sources = [m for m in real_models if m not in allowed_for_candidate]
-        if unknown_sources:
-            raise ConvergenceError(
-                f"候选发现 {cid} 的来源模型 {unknown_sources!r} 不在允许的 finder 来源集合中"
-            )
-
         candidates_by_id[cid] = candidate
         ordered_ids.append(cid)
         candidate_list.append(candidate)
@@ -988,7 +1297,10 @@ class RoundHistoryEntry:
                 raise ConvergenceError("unresolved_important 元素必须是 Finding")
             if item.severity != Severity.IMPORTANT:
                 raise ConvergenceError(f"unresolved_important 仅允许 Important 发现，收到 {item.severity.value}")
-            unresolved_ids.add(item.finding_id)
+            fid = item.finding_id
+            if fid in unresolved_ids:
+                raise ConvergenceError(f"unresolved_important 含重复指纹：{fid}")
+            unresolved_ids.add(fid)
         if not isinstance(self.resolved_fingerprints, frozenset):
             raise ConvergenceError("resolved_fingerprints 必须是 frozenset[str]")
         for fp in self.resolved_fingerprints:
@@ -1128,42 +1440,38 @@ def build_round_candidates(
     plan: RoundPlan,
     finder_batches: Sequence[tuple[str, Sequence[Finding]]],
     *,
-    panel: ReviewPanel | None = None,
-) -> tuple[Finding, ...]:
-    """合并本轮 finder 新发现与上一轮未解除的 Important 发现，完整保留原有真实 source_models。"""
+    panel: ReviewPanel,
+) -> RoundCandidates:
+    """校验本轮 finder 批次归属当前面板并与上一轮未解除 Important 归约，产出不可伪造的 RoundCandidates。"""
     if not isinstance(plan, RoundPlan):
         raise ConvergenceError("plan 必须是 RoundPlan")
-    allowed_finders: frozenset[str] | None = None
-    if panel is not None:
-        if not isinstance(panel, ReviewPanel):
-            raise ConvergenceError("panel 必须是 ReviewPanel 或 None")
-        allowed_finders = frozenset(m.strip() for m in panel.finder_models)
+    if not isinstance(panel, ReviewPanel):
+        raise ConvergenceError("panel 必须是 ReviewPanel")
+    allowed_finders = frozenset(m.strip() for m in panel.finder_models)
 
-    batches: list[tuple[str, Sequence[Finding]]] = []
+    validated_batches: list[tuple[str, Sequence[Finding]]] = []
     for source_model, findings in finder_batches:
         model = _require_non_empty_str(source_model, "source_model")
-        if allowed_finders is not None and model not in allowed_finders:
+        if model not in allowed_finders:
             raise ConvergenceError(f"本轮 finder 批次来源模型 {model!r} 不在 panel.finder_models 中")
+        batch_items: list[Finding] = []
         for item in findings:
             if not isinstance(item, Finding):
                 raise ConvergenceError(f"finder_batches 元素必须是 Finding：{item!r}")
-            if allowed_finders is not None:
-                unknown_item_models = [m for m in _real_source_models(item.source_models) if m not in allowed_finders]
-                if unknown_item_models:
-                    raise ConvergenceError(
-                        f"本轮发现 {item.finding_id} 的来源模型 {unknown_item_models!r} 不在 panel.finder_models 中"
-                    )
-        batches.append((model, findings))
+            unknown_item_models = [m.strip() for m in item.source_models if m.strip() not in allowed_finders]
+            if unknown_item_models:
+                raise ConvergenceError(
+                    f"本轮发现 {item.finding_id} 的来源模型 {unknown_item_models!r} 不在 panel.finder_models 中"
+                )
+            batch_items.append(item)
+        validated_batches.append((model, batch_items))
 
-    if plan.unresolved_prior_important:
-        prior_by_model: dict[str, list[Finding]] = {}
-        for item in plan.unresolved_prior_important:
-            real_models = _real_source_models(item.source_models)
-            model_key = real_models[0] if real_models else _PRIOR_ROUND_PLACEHOLDER
-            prior_by_model.setdefault(model_key, []).append(item)
-        for model_key, items in prior_by_model.items():
-            batches.append((model_key, items))
-    return merge_and_dedupe_findings(batches)
+    current_round_findings = merge_and_dedupe_findings(validated_batches) if validated_batches else ()
+    return RoundCandidates(
+        panel=panel,
+        current_round_findings=current_round_findings,
+        prior_important=plan.unresolved_prior_important,
+    )
 
 
 def select_postable_findings(

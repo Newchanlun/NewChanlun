@@ -13,6 +13,7 @@ from pilot1742.review_convergence import (
     Finding,
     RenderedComment,
     ReviewPanel,
+    RoundCandidates,
     RoundHistoryEntry,
     Severity,
     VerificationVerdict,
@@ -68,6 +69,19 @@ def _finding(
         evidence=evidence,
         class_scope=class_scope,
         source_models=source_models,
+    )
+
+
+def _candidates(
+    findings: tuple[Finding, ...] | list[Finding],
+    *,
+    panel: ReviewPanel = DEFAULT_PANEL,
+    prior_important: tuple[Finding, ...] = (),
+) -> RoundCandidates:
+    return RoundCandidates(
+        panel=panel,
+        current_round_findings=tuple(findings),
+        prior_important=prior_important,
     )
 
 
@@ -396,8 +410,7 @@ def test_quick_pass_explicit_entry_and_panel_isolation() -> None:
     with pytest.raises(ConvergenceError):
         parse_verifier_output(
             {"verdicts": [{"finding_id": f_imp.finding_id, "verdict": "confirmed", "verifier_evidence": "ok"}]},
-            [f_imp],
-            panel=fast_panel,
+            RoundCandidates(panel=fast_panel, current_round_findings=(f_imp,)),
             verifier_model="claude-opus-5-5",
         )
 
@@ -423,18 +436,25 @@ def test_parse_verifier_output_enforces_exact_candidate_bijection_and_panel_bind
     }
     verified = parse_verifier_output(
         payload,
-        [f_imp, f_nit, f_pre],
-        panel=DEFAULT_PANEL,
+        _candidates([f_imp, f_nit, f_pre]),
         verifier_model="claude-opus-5-5",
     )
-    assert [v.finding.finding_id for v in verified] == [f_imp.finding_id, f_nit.finding_id, f_pre.finding_id]
+    assert [v.finding.finding_id for v in verified] == [f_imp.finding_id, f_pre.finding_id, f_nit.finding_id]
     assert is_blocking_finding(verified[0]) is True
     assert is_blocking_finding(verified[1]) is False
     assert is_blocking_finding(verified[2]) is False
 
+    # 拒绝直接传入裸 Finding 列表绕过 RoundCandidates 类型边界
+    with pytest.raises(ConvergenceError):
+        parse_verifier_output(
+            payload,
+            [f_imp, f_nit, f_pre],  # type: ignore[arg-type]
+            verifier_model="claude-opus-5-5",
+        )
+
 
 def test_parse_verifier_output_rejects_same_family_candidate_and_mismatched_panel_verifier() -> None:
-    # 即使 panel 本身合法，若某个候选发现实际来自与 verifier 同家族的模型，必须拒收
+    # 即使 panel 本身合法，若某个候选发现实际来自与 verifier 同家族的模型，RoundCandidates 构造期即拒收
     f_same_family = _finding(
         file="a.py",
         category="c1",
@@ -442,30 +462,22 @@ def test_parse_verifier_output_rejects_same_family_candidate_and_mismatched_pane
         source_models=("claude-sonnet-4-6",),
     )
     with pytest.raises(ConvergenceError):
-        parse_verifier_output(
-            {"verdicts": [{"finding_id": f_same_family.finding_id, "verdict": "confirmed", "verifier_evidence": "ok"}]},
-            [f_same_family],
-            panel=DEFAULT_PANEL,
-            verifier_model="claude-opus-5-5",
-        )
+        RoundCandidates(panel=DEFAULT_PANEL, current_round_findings=(f_same_family,))
+    with pytest.raises(ConvergenceError):
+        RoundCandidates(panel=DEFAULT_PANEL, current_round_findings=(), prior_important=(f_same_family,))
 
-    # 候选发现仅含占位符或空 source_models 也不允许绕过异家族检查
+    # 候选发现仅含占位符或空 source_models 也不允许绕过异家族与面板归属检查
     f_no_source = _finding(file="a.py", category="c1", failure_scenario="s1", source_models=())
     with pytest.raises(ConvergenceError):
-        parse_verifier_output(
-            {"verdicts": [{"finding_id": f_no_source.finding_id, "verdict": "confirmed", "verifier_evidence": "ok"}]},
-            [f_no_source],
-            panel=DEFAULT_PANEL,
-            verifier_model="claude-opus-5-5",
-        )
+        RoundCandidates(panel=DEFAULT_PANEL, current_round_findings=(f_no_source,))
+    with pytest.raises(ConvergenceError):
+        RoundCandidates(panel=DEFAULT_PANEL, current_round_findings=(), prior_important=(f_no_source,))
+
     f_only_placeholder = _finding(file="a.py", category="c1", failure_scenario="s1", source_models=("prior-round",))
     with pytest.raises(ConvergenceError):
-        parse_verifier_output(
-            {"verdicts": [{"finding_id": f_only_placeholder.finding_id, "verdict": "confirmed", "verifier_evidence": "ok"}]},
-            [f_only_placeholder],
-            panel=DEFAULT_PANEL,
-            verifier_model="claude-opus-5-5",
-        )
+        RoundCandidates(panel=DEFAULT_PANEL, current_round_findings=(f_only_placeholder,))
+    with pytest.raises(ConvergenceError):
+        RoundCandidates(panel=DEFAULT_PANEL, current_round_findings=(), prior_important=(f_only_placeholder,))
 
     # 跨轮 carry-over 时 build_round_candidates 必须完整保留原有真实 source_models，防新轮换用同家族核实者
     f_prior_from_claude = _finding(
@@ -479,23 +491,24 @@ def test_parse_verifier_output_rejects_same_family_candidate_and_mismatched_pane
         HEAD_2,
         [RoundHistoryEntry(1, HEAD_1, frozenset({f_prior_from_claude.finding_id}), (f_prior_from_claude,))],
     )
-    candidates2 = build_round_candidates(plan2, [])
-    assert candidates2[0].source_models == ("claude-opus-5-5", "kimi-k3.1-pro")
+    # 若新轮面板核实者为 claude（与历史来源同家族），build_round_candidates 即立刻拒绝
     with pytest.raises(ConvergenceError):
-        parse_verifier_output(
-            {"verdicts": [{"finding_id": f_prior_from_claude.finding_id, "verdict": "confirmed", "verifier_evidence": "ok"}]},
-            candidates2,
-            panel=DEFAULT_PANEL,
-            verifier_model="claude-opus-5-5",
-        )
+        build_round_candidates(plan2, [], panel=DEFAULT_PANEL)
+    # 换用异家族核实者（gemini）时，build_round_candidates 合法保留原有全部真实 source_models
+    gemini_verifier_panel = ReviewPanel(
+        finder_models=("gpt-6-astra", "gpt-6.1-sol"),
+        verifier_model="gemini-4-neon",
+        require_verifier=True,
+    )
+    candidates2 = build_round_candidates(plan2, [], panel=gemini_verifier_panel)
+    assert candidates2.findings[0].source_models == ("claude-opus-5-5", "kimi-k3.1-pro")
 
     # verifier_model 与 panel.verifier_model 不一致 -> 拒收
     f_ok = _finding(source_models=("gpt-6-astra",))
     with pytest.raises(ConvergenceError):
         parse_verifier_output(
             {"verdicts": [{"finding_id": f_ok.finding_id, "verdict": "confirmed", "verifier_evidence": "ok"}]},
-            [f_ok],
-            panel=DEFAULT_PANEL,
+            _candidates([f_ok]),
             verifier_model="gemini-4-neon",
         )
 
@@ -507,7 +520,7 @@ def test_parse_verifier_output_binds_candidate_sources_to_panel_and_allows_prior
         require_verifier=True,
     )
 
-    # 复审反例：面板为双 gpt-6.1-sol + claude-opus-5-5，面板外 gemini-2.5-pro 候选必须立即拒绝
+    # 复审反例：面板为双 gpt-6.1-sol + claude-opus-5-5，面板外 gemini-2.5-pro 本轮候选必须立即拒绝
     f_foreign = _finding(
         file="pilot1742/foreign.py",
         line=12,
@@ -516,12 +529,7 @@ def test_parse_verifier_output_binds_candidate_sources_to_panel_and_allows_prior
         source_models=("gemini-2.5-pro",),
     )
     with pytest.raises(ConvergenceError):
-        parse_verifier_output(
-            {"verdicts": [{"finding_id": f_foreign.finding_id, "verdict": "confirmed", "verifier_evidence": "ok"}]},
-            [f_foreign],
-            panel=panel,
-            verifier_model="claude-opus-5-5",
-        )
+        RoundCandidates(panel=panel, current_round_findings=(f_foreign,))
 
     # 混合来源（含面板外模型）同样必须拒绝
     f_mixed_foreign = _finding(
@@ -532,18 +540,9 @@ def test_parse_verifier_output_binds_candidate_sources_to_panel_and_allows_prior
         source_models=("gpt-6.1-sol", "gemini-2.5-pro"),
     )
     with pytest.raises(ConvergenceError):
-        parse_verifier_output(
-            {
-                "verdicts": [
-                    {"finding_id": f_mixed_foreign.finding_id, "verdict": "confirmed", "verifier_evidence": "ok"}
-                ]
-            },
-            [f_mixed_foreign],
-            panel=panel,
-            verifier_model="claude-opus-5-5",
-        )
+        RoundCandidates(panel=panel, current_round_findings=(f_mixed_foreign,))
 
-    # 跨轮继承的 unresolved_prior_important 可通过显式 prior_important_sources 放行其历史真实 finder 模型，但仍强制异家族
+    # 跨轮继承的 unresolved_prior_important 通过 build_round_candidates 校验进入 RoundCandidates.prior_important，仍强制异家族
     f_prior_kimi = _finding(
         severity=Severity.IMPORTANT,
         file="pilot1742/prior_carry.py",
@@ -562,153 +561,137 @@ def test_parse_verifier_output_binds_candidate_sources_to_panel_and_allows_prior
         plan2.prior_important_sources["tamper"] = frozenset({"gemini-2.5-pro"})  # type: ignore[index]
 
     candidates2 = build_round_candidates(plan2, [], panel=panel)
-    # 未显式传 prior_important_sources 时仍拒绝
-    with pytest.raises(ConvergenceError):
-        parse_verifier_output(
-            {"verdicts": [{"finding_id": f_prior_kimi.finding_id, "verdict": "confirmed", "verifier_evidence": "ok"}]},
-            candidates2,
-            panel=panel,
-            verifier_model="claude-opus-5-5",
-        )
-    # 显式传入 plan2.prior_important_sources 且 verifier 异家族 -> 放行
+    assert isinstance(candidates2, RoundCandidates)
     verified_prior = parse_verifier_output(
         {"verdicts": [{"finding_id": f_prior_kimi.finding_id, "verdict": "confirmed", "verifier_evidence": "仍存在"}]},
         candidates2,
-        panel=panel,
         verifier_model="claude-opus-5-5",
-        prior_important_sources=plan2.prior_important_sources,
     )
     assert len(verified_prior) == 1
     assert verified_prior[0].finding.finding_id == f_prior_kimi.finding_id
 
-    # 若 verifier 与历史 finder 同家族，即便在 prior_important_sources 中也必须拒收
+    # 若 verifier 与历史 finder 同家族，build_round_candidates 与直接构造 RoundCandidates 均必须拒收
     kimi_verifier_panel = ReviewPanel(
         finder_models=("gpt-6.1-sol", "gpt-6.1-sol"),
         verifier_model="kimi-k3.1-pro",
         require_verifier=True,
     )
     with pytest.raises(ConvergenceError):
-        parse_verifier_output(
-            {"verdicts": [{"finding_id": f_prior_kimi.finding_id, "verdict": "confirmed", "verifier_evidence": "ok"}]},
-            candidates2,
-            panel=kimi_verifier_panel,
-            verifier_model="kimi-k3.1-pro",
-            prior_important_sources=plan2.prior_important_sources,
-        )
+        build_round_candidates(plan2, [], panel=kimi_verifier_panel)
+    with pytest.raises(ConvergenceError):
+        RoundCandidates(panel=kimi_verifier_panel, current_round_findings=(), prior_important=(f_prior_kimi,))
 
-    # 非 Important 发现不得借 prior_important_sources 放行面板外模型
+    # 非 Important 发现不得借 prior_important 放行面板外模型
     f_foreign_nit = _finding(
         severity=Severity.NIT,
         file="pilot1742/foreign_nit.py",
         line=5,
         category="面板外 Nit",
-        failure_scenario="非阻断项不得走 prior_important_sources",
+        failure_scenario="非阻断项不得走 prior_important",
         source_models=("gemini-2.5-pro",),
     )
     with pytest.raises(ConvergenceError):
-        parse_verifier_output(
-            {"verdicts": [{"finding_id": f_foreign_nit.finding_id, "verdict": "confirmed", "verifier_evidence": "ok"}]},
-            [f_foreign_nit],
-            panel=panel,
-            verifier_model="claude-opus-5-5",
-            prior_important_sources={f_foreign_nit.finding_id: frozenset({"gemini-2.5-pro"})},
-        )
+        RoundCandidates(panel=panel, current_round_findings=(), prior_important=(f_foreign_nit,))
 
 
-def test_prior_important_exemption_rejects_new_out_of_panel_source_and_allows_legit_old_finder() -> None:
-    """R4 复审反例：历史豁免仅豁免该指纹的历史真实来源模型，绝不放行本轮新混入的面板外来源。"""
+def test_round_candidates_blocks_retired_model_tampering_in_new_round() -> None:
+    """R5 复审反例 4：第 1 轮 gemini-2.5-pro 报 p.py:12；第 2 轮面板已无 Gemini，退役模型绝不能提交 p.py:3 篡改行号与证据。"""
     panel_r2 = ReviewPanel(
         finder_models=("gpt-6.1-sol", "gpt-6.1-sol"),
         verifier_model="claude-opus-5-5",
         require_verifier=True,
     )
 
-    # 第 1 轮 gpt-6.1-sol 报 p.py:12
-    f_r1_sol = _finding(
+    # 第 1 轮 gemini-2.5-pro 报 p.py:12
+    f_r1_gemini = _finding(
         severity=Severity.IMPORTANT,
         file="p.py",
         line=12,
         category="状态损坏",
         failure_scenario="并发写未加锁导致状态回退",
-        evidence="p.py:12 无锁写入",
-        source_models=("gpt-6.1-sol",),
+        evidence="第 1 轮 p.py:12 无锁写入",
+        source_models=("gemini-2.5-pro",),
     )
     plan2 = plan_next_round(
         BASE_SHA,
         HEAD_2,
-        [RoundHistoryEntry(1, HEAD_1, frozenset({f_r1_sol.finding_id}), (f_r1_sol,))],
+        [RoundHistoryEntry(1, HEAD_1, frozenset({f_r1_gemini.finding_id}), (f_r1_gemini,))],
     )
-    assert plan2.prior_important_sources == {f_r1_sol.finding_id: frozenset({"gpt-6.1-sol"})}
+    assert plan2.prior_important_sources == {f_r1_gemini.finding_id: frozenset({"gemini-2.5-pro"})}
 
-    # 第 2 轮混入面板外 gemini-2.5-pro 的同指纹发现（p.py:3，更长证据企图篡改行号与证据）
-    f_r2_foreign = _finding(
+    # 第 2 轮已退役的 gemini-2.5-pro 企图用同指纹提交 p.py:3 与超长伪造证据
+    f_r2_gemini_tamper = _finding(
         severity=Severity.IMPORTANT,
         file="p.py",
         line=3,
         category="状态损坏",
         failure_scenario="并发写未加锁导致状态回退",
-        evidence="p.py:3 面板外来源篡改的超长伪造证据内容",
+        evidence="p.py:3 退役模型篡改的超长伪造证据内容，企图覆盖第 1 轮行号与证据",
         source_models=("gemini-2.5-pro",),
     )
-    assert f_r2_foreign.finding_id == f_r1_sol.finding_id
+    assert f_r2_gemini_tamper.finding_id == f_r1_gemini.finding_id
 
-    # 1) build_round_candidates 传入 panel 时在合并前即拒绝面板外批次或伪造 source_models
-    with pytest.raises(ConvergenceError):
-        build_round_candidates(plan2, [("gemini-2.5-pro", [f_r2_foreign])], panel=panel_r2)
-    with pytest.raises(ConvergenceError):
-        build_round_candidates(plan2, [("gpt-6.1-sol", [f_r2_foreign])], panel=panel_r2)
+    # 1) build_round_candidates 的 panel 为必填关键字参数，调用方无法省略 panel 绕过校验
+    with pytest.raises(TypeError):
+        build_round_candidates(plan2, [("gemini-2.5-pro", [f_r2_gemini_tamper])])  # type: ignore[call-arg]
 
-    # 2) 即使调用方未向 build_round_candidates 传 panel，parse_verifier_output 也必须按逐模型校验拒绝 gemini-2.5-pro
-    merged_tampered = build_round_candidates(plan2, [("gemini-2.5-pro", [f_r2_foreign])])
-    assert merged_tampered[0].source_models == ("gemini-2.5-pro", "gpt-6.1-sol")
+    # 2) 传入 panel_r2 时，无论批次标 gemini-2.5-pro 还是伪装标 gpt-6.1-sol，均在合并前被拒绝
     with pytest.raises(ConvergenceError):
-        parse_verifier_output(
-            {"verdicts": [{"finding_id": f_r1_sol.finding_id, "verdict": "confirmed", "verifier_evidence": "ok"}]},
-            merged_tampered,
+        build_round_candidates(plan2, [("gemini-2.5-pro", [f_r2_gemini_tamper])], panel=panel_r2)
+    with pytest.raises(ConvergenceError):
+        build_round_candidates(plan2, [("gpt-6.1-sol", [f_r2_gemini_tamper])], panel=panel_r2)
+
+    # 3) 直接构造 RoundCandidates 企图把退役模型塞进 current_round_findings 或重复塞进 prior_important -> 全部拒绝
+    with pytest.raises(ConvergenceError):
+        RoundCandidates(
             panel=panel_r2,
-            verifier_model="claude-opus-5-5",
-            prior_important_sources=plan2.prior_important_sources,
+            current_round_findings=(f_r2_gemini_tamper,),
+            prior_important=plan2.unresolved_prior_important,
+        )
+    with pytest.raises(ConvergenceError):
+        RoundCandidates(
+            panel=panel_r2,
+            current_round_findings=(),
+            prior_important=(f_r1_gemini, f_r2_gemini_tamper),
         )
 
-    # 3) 合法历史模型切换：第 1 轮面板曾用旧 finder gpt-6.0-astra，第 2 轮面板换成 gpt-6.1-sol 且仅传当前面板新批次 -> 放行
-    f_r1_old_finder = _finding(
-        severity=Severity.IMPORTANT,
-        file="p.py",
-        line=12,
-        category="状态损坏",
-        failure_scenario="并发写未加锁导致状态回退",
-        evidence="第 1 轮 gpt-6.0-astra 证据",
-        source_models=("gpt-6.0-astra",),
+    # 4) 合法保留第 1 轮未解除的 gemini-2.5-pro 发现 -> 第 2 轮行号仍为 12、证据原封不动，并可由异家族 claude 核实
+    candidates_carry = build_round_candidates(plan2, [], panel=panel_r2)
+    assert len(candidates_carry.findings) == 1
+    assert candidates_carry.findings[0].line == 12
+    assert candidates_carry.findings[0].evidence == "第 1 轮 p.py:12 无锁写入"
+    assert candidates_carry.findings[0].source_models == ("gemini-2.5-pro",)
+    verified_carry = parse_verifier_output(
+        {"verdicts": [{"finding_id": f_r1_gemini.finding_id, "verdict": "confirmed", "verifier_evidence": "仍存在"}]},
+        candidates_carry,
+        verifier_model="claude-opus-5-5",
     )
-    plan2_migrated = plan_next_round(
-        BASE_SHA,
-        HEAD_2,
-        [RoundHistoryEntry(1, HEAD_1, frozenset({f_r1_old_finder.finding_id}), (f_r1_old_finder,))],
-    )
+    assert len(verified_carry) == 1
+    assert verified_carry[0].finding.line == 12
+
+    # 5) 合法历史模型切换 + 当前面板 finder 复现补充 -> 放行并归约合并
     f_r2_current_finder = _finding(
         severity=Severity.IMPORTANT,
         file="p.py",
         line=12,
         category="状态损坏",
         failure_scenario="并发写未加锁导致状态回退",
-        evidence="第 2 轮 gpt-6.1-sol 补充复现证据",
+        evidence="第 2 轮 gpt-6.1-sol 补充复现证据内容",
         source_models=("gpt-6.1-sol",),
     )
     candidates_migrated = build_round_candidates(
-        plan2_migrated,
+        plan2,
         [("gpt-6.1-sol", [f_r2_current_finder])],
         panel=panel_r2,
     )
-    assert candidates_migrated[0].source_models == ("gpt-6.0-astra", "gpt-6.1-sol")
+    assert candidates_migrated.findings[0].source_models == ("gemini-2.5-pro", "gpt-6.1-sol")
     verified_migrated = parse_verifier_output(
-        {"verdicts": [{"finding_id": f_r1_old_finder.finding_id, "verdict": "confirmed", "verifier_evidence": "仍存在"}]},
+        {"verdicts": [{"finding_id": f_r1_gemini.finding_id, "verdict": "confirmed", "verifier_evidence": "仍存在"}]},
         candidates_migrated,
-        panel=panel_r2,
         verifier_model="claude-opus-5-5",
-        prior_important_sources=plan2_migrated.prior_important_sources,
     )
     assert len(verified_migrated) == 1
-    assert verified_migrated[0].finding.finding_id == f_r1_old_finder.finding_id
+    assert verified_migrated[0].finding.finding_id == f_r1_gemini.finding_id
 
 
 def test_parse_verifier_output_rejects_invented_missing_duplicate_or_empty_evidence() -> None:
@@ -724,8 +707,7 @@ def test_parse_verifier_output_rejects_invented_missing_duplicate_or_empty_evide
                     {"finding_id": "deadbeef12345678", "verdict": "confirmed", "verifier_evidence": "新问题"},
                 ]
             },
-            [f1],
-            panel=DEFAULT_PANEL,
+            _candidates([f1]),
             verifier_model="claude-opus-5-5",
         )
 
@@ -733,8 +715,7 @@ def test_parse_verifier_output_rejects_invented_missing_duplicate_or_empty_evide
     with pytest.raises(ConvergenceError):
         parse_verifier_output(
             {"verdicts": [{"finding_id": f1.finding_id, "verdict": "confirmed", "verifier_evidence": "ok"}]},
-            [f1, f2],
-            panel=DEFAULT_PANEL,
+            _candidates([f1, f2]),
             verifier_model="claude-opus-5-5",
         )
 
@@ -747,8 +728,7 @@ def test_parse_verifier_output_rejects_invented_missing_duplicate_or_empty_evide
                     {"finding_id": f1.finding_id, "verdict": "rejected", "verifier_evidence": "ok2"},
                 ]
             },
-            [f1],
-            panel=DEFAULT_PANEL,
+            _candidates([f1]),
             verifier_model="claude-opus-5-5",
         )
 
@@ -756,8 +736,7 @@ def test_parse_verifier_output_rejects_invented_missing_duplicate_or_empty_evide
     with pytest.raises(ConvergenceError):
         parse_verifier_output(
             {"verdicts": [{"finding_id": f1.finding_id, "verdict": "confirmed", "verifier_evidence": "   "}]},
-            [f1],
-            panel=DEFAULT_PANEL,
+            _candidates([f1]),
             verifier_model="claude-opus-5-5",
         )
 
@@ -787,8 +766,7 @@ def test_resolved_by_wontfix_without_author_reply_fails_closed() -> None:
                     }
                 ]
             },
-            [f_imp],
-            panel=DEFAULT_PANEL,
+            _candidates([f_imp]),
             verifier_model="claude-opus-5-5",
             author_replies=(),
         )
@@ -1027,12 +1005,31 @@ def test_parse_wontfix_replies_enforces_commonmark_closing_fence_indent_and_list
                 [
                     "- ~~~text",
                     "      ~~~",
-                    "[33333333] 不修：缩进 6 超过 2+3 不得提前闭合",
+                    "  [33333333] 不修：列表内缩进 6 超过 2+3 不得提前闭合",
                 ]
             ),
         }
     ]
     assert parse_wontfix_replies(list_close_over_indented, allowed_authors={"alice"}) == ()
+
+    # 若后续行退缩回顶层（缩进 0 < 2），按 CommonMark 退出列表项并关闭其内部未闭围栏 -> 顶层真实回复正常解析
+    list_over_indented_then_top_level = [
+        {
+            "id": 9140,
+            "user": {"login": "alice", "type": "User"},
+            "body": "\n".join(
+                [
+                    "- ~~~text",
+                    "      ~~~",
+                    "[33333333] 不修：退缩至顶层后退出列表项与内部未闭围栏",
+                ]
+            ),
+        }
+    ]
+    parsed_unindented = parse_wontfix_replies(list_over_indented_then_top_level, allowed_authors={"alice"})
+    assert [(r.finding_id, r.reason) for r in parsed_unindented] == [
+        ("33333333", "退缩至顶层后退出列表项与内部未闭围栏"),
+    ]
 
     # 列表内临界缩进 5（== 2+3）应正常闭合
     list_close_boundary = [
@@ -1113,6 +1110,157 @@ def test_parse_wontfix_replies_enforces_commonmark_closing_fence_indent_and_list
     assert parse_wontfix_replies(quoted_list, allowed_authors={"alice"}) == ()
 
 
+def test_parse_wontfix_replies_commonmark_phase1_container_stack_and_html_blocks() -> None:
+    """R5 复审反例 1–3：容器栈出栈关闭未闭叶子块、列表 5 空格缩进代码、HTML 注释与全 7 类 HTML 块。"""
+    # R5 反例 1a：列表内未闭围栏后紧跟顶层 ~~~ -> 先关闭 ListItem 与内部围栏，顶层 ~~~ 开新顶层围栏 -> 0 条
+    list_exit_opens_top_fence = [
+        {
+            "id": 930,
+            "user": {"login": "alice", "type": "User"},
+            "body": "\n".join(
+                [
+                    "- ~~~text",
+                    "  示例",
+                    "~~~",
+                    "[abc12345] 不修：顶层新围栏内示例",
+                ]
+            ),
+        },
+        {
+            "id": 931,
+            "user": {"login": "alice", "type": "User"},
+            "body": "\n".join(
+                [
+                    "- ~~~text",
+                    "  示例",
+                    " ~~~",
+                    "[abc12345] 不修：1 空格退缩列表后开新顶层围栏",
+                ]
+            ),
+        },
+        {
+            "id": 932,
+            "user": {"login": "alice", "type": "User"},
+            "body": "\n".join(
+                [
+                    "- - ~~~text",
+                    "    示例",
+                    "  ~~~",
+                    "  [abc12345] 不修：退缩内层列表后在外层列表开新围栏",
+                ]
+            ),
+        },
+    ]
+    assert parse_wontfix_replies(list_exit_opens_top_fence, allowed_authors={"alice"}) == ()
+
+    # R5 反例 1b：列表内未闭围栏后空行再顶层真实回复 -> 退出 ListItem 并关闭内部未闭围栏 -> 1 条
+    list_exit_then_real_reply = [
+        {
+            "id": 933,
+            "user": {"login": "alice", "type": "User"},
+            "body": "\n".join(
+                [
+                    "- ~~~text",
+                    "  示例",
+                    "",
+                    "[abc12345] 不修：真实理由",
+                ]
+            ),
+        }
+    ]
+    parsed_exit_real = parse_wontfix_replies(list_exit_then_real_reply, allowed_authors={"alice"})
+    assert [(r.finding_id, r.reason, r.comment_id) for r in parsed_exit_real] == [
+        ("abc12345", "真实理由", "933"),
+    ]
+
+    # R5 反例 2：列表项标记后 >= 5 空格（或双 Tab）按 CommonMark §5.2 判为 IndentedCode -> 0 条；1..4 空格（或单 Tab）判为段落 -> 1 条
+    list_indented_code_cases = [
+        {"id": 934, "user": {"login": "alice", "type": "User"}, "body": "-     [abc12345] 不修：5 空格缩进代码"},
+        {"id": 935, "user": {"login": "alice", "type": "User"}, "body": "1.     [def67890] 不修：有序列表 5 空格缩进代码"},
+        {"id": 936, "user": {"login": "alice", "type": "User"}, "body": "-\t\t[11223344] 不修：双 Tab 缩进代码"},
+        {
+            "id": 937,
+            "user": {"login": "alice", "type": "User"},
+            "body": "- 正常说明\n\n      [22334455] 不修：列表空行后 6 空格缩进代码",
+        },
+    ]
+    assert parse_wontfix_replies(list_indented_code_cases, allowed_authors={"alice"}) == ()
+
+    list_valid_indent_cases = [
+        {"id": 938, "user": {"login": "alice", "type": "User"}, "body": "- [abc12345] 不修：1 空格正常列表"},
+        {"id": 939, "user": {"login": "alice", "type": "User"}, "body": "-    [def67890] 不修：4 空格临界正常列表"},
+        {"id": 940, "user": {"login": "alice", "type": "User"}, "body": "-\t[11223344] 不修：单 Tab 正常列表"},
+        {"id": 941, "user": {"login": "alice", "type": "User"}, "body": "1.    [22334455] 不修：有序列表 4 空格正常列表"},
+    ]
+    parsed_valid_list = parse_wontfix_replies(list_valid_indent_cases, allowed_authors={"alice"})
+    assert [(r.finding_id, r.comment_id) for r in parsed_valid_list] == [
+        ("abc12345", "938"),
+        ("def67890", "939"),
+        ("11223344", "940"),
+        ("22334455", "941"),
+    ]
+
+    # R5 反例 3：HTML 注释（单行/多行/行内）与全部 7 类 CommonMark HTMLBlock
+    html_block_cases = [
+        {
+            "id": 942,
+            "user": {"login": "alice", "type": "User"},
+            "body": "\n".join(
+                [
+                    "<!-- [11111111] 不修：单行注释示例 -->",
+                    "<!--",
+                    "[22222222] 不修：多行注释示例",
+                    "-->",
+                    "<!-- note --> [33333333] 不修：Type 2 块同行尾部",
+                    "<pre>",
+                    "[44444444] 不修：Type 1 pre 块内",
+                    "</pre>",
+                    "<script>",
+                    "[55555555] 不修：Type 1 script 块内",
+                    "</script>",
+                    "<?php",
+                    "[66666666] 不修：Type 3 PI 块内",
+                    "?>",
+                    "<!DOCTYPE html",
+                    "[77777777] 不修：Type 4 声明块内",
+                    ">",
+                    "<![CDATA[",
+                    "[88888888] 不修：Type 5 CDATA 块内",
+                    "]]>",
+                    "<details>",
+                    "<summary>折叠模板</summary>",
+                    "[99999999] 不修：Type 6 details 块内",
+                    "</details>",
+                    "",
+                    "<custom-box>",
+                    "[aaaaaaaa] 不修：Type 7 自定义标签块内",
+                    "</custom-box>",
+                    "",
+                    "段落说明 <!--",
+                    "[bbbbbbbb] 不修：跨行行内注释示例",
+                    "-->",
+                    "[cccccccc] <!-- 行内备注 --> 不修：真实回复",
+                ]
+            ),
+        },
+        {
+            "id": 943,
+            "user": {"login": "alice", "type": "User"},
+            "body": "\n".join(
+                [
+                    "> 引用段落",
+                    "<span>Type 7 不可中断引用</span>",
+                    "[dddddddd] 不修：仍在惰性引用续行内",
+                ]
+            ),
+        },
+    ]
+    parsed_html = parse_wontfix_replies(html_block_cases, allowed_authors={"alice"})
+    assert [(r.finding_id, r.reason, r.comment_id) for r in parsed_html] == [
+        ("cccccccc", "真实回复", "942"),
+    ]
+
+
 def test_parse_wontfix_replies_and_author_reply_require_real_comment_id() -> None:
     f_imp = _finding(severity=Severity.IMPORTANT)
 
@@ -1137,8 +1285,7 @@ def test_parse_wontfix_replies_and_author_reply_require_real_comment_id() -> Non
                     }
                 ]
             },
-            [f_imp],
-            panel=DEFAULT_PANEL,
+            _candidates([f_imp]),
             verifier_model="claude-opus-5-5",
             author_replies=parsed,
         )
@@ -1197,8 +1344,7 @@ def test_bind_author_replies_rejects_ambiguous_and_supports_multi_reply_comment(
                     {"finding_id": f_a2.finding_id, "verdict": "confirmed", "verifier_evidence": "still broken"},
                 ]
             },
-            [f_a1, f_a2],
-            panel=DEFAULT_PANEL,
+            _candidates([f_a1, f_a2]),
             verifier_model="claude-opus-5-5",
             author_replies=[ambiguous_path_reply],
         )
@@ -1236,7 +1382,7 @@ def test_multi_round_convergence_reopen_cannot_reuse_old_wontfix_reply() -> None
     replies_r2 = parse_wontfix_replies(old_comment, allowed_authors={"alice"})
     history = [dec1.to_history_entry(HEAD_1, rendered=rendered1)]
     plan2 = plan_next_round(BASE_SHA, HEAD_2, history, author_replies=replies_r2)
-    candidates2 = build_round_candidates(plan2, [])
+    candidates2 = build_round_candidates(plan2, [], panel=DEFAULT_PANEL)
     verified2 = parse_verifier_output(
         {
             "verdicts": [
@@ -1248,11 +1394,9 @@ def test_multi_round_convergence_reopen_cannot_reuse_old_wontfix_reply() -> None
             ]
         },
         candidates2,
-        panel=DEFAULT_PANEL,
         verifier_model="claude-opus-5-5",
         author_replies=plan2.author_replies,
         consumed_reply_keys=plan2.consumed_reply_keys,
-        prior_important_sources=plan2.prior_important_sources,
     )
     dec2 = evaluate_round(
         plan2.round_number,
@@ -1288,8 +1432,7 @@ def test_multi_round_convergence_reopen_cannot_reuse_old_wontfix_reply() -> None
                     }
                 ]
             },
-            [f_imp],
-            panel=DEFAULT_PANEL,
+            _candidates([f_imp]),
             verifier_model="claude-opus-5-5",
             author_replies=replies_r2,
             consumed_reply_keys=plan3.consumed_reply_keys,
@@ -1317,8 +1460,7 @@ def test_multi_round_convergence_reopen_cannot_reuse_old_wontfix_reply() -> None
                 }
             ]
         },
-        [f_imp],
-        panel=DEFAULT_PANEL,
+        _candidates([f_imp]),
         verifier_model="claude-opus-5-5",
         author_replies=plan3_with_new.author_replies,
         consumed_reply_keys=plan3_with_new.consumed_reply_keys,
@@ -1353,7 +1495,7 @@ def test_reopen_consumes_all_prior_replies_including_unselected_siblings_and_all
     assert [r.comment_id for r in replies_r2] == ["101", "102"]
 
     plan2 = plan_next_round(BASE_SHA, HEAD_2, history, author_replies=replies_r2)
-    candidates2 = build_round_candidates(plan2, [])
+    candidates2 = build_round_candidates(plan2, [], panel=DEFAULT_PANEL)
     verified2 = parse_verifier_output(
         {
             "verdicts": [
@@ -1365,11 +1507,9 @@ def test_reopen_consumes_all_prior_replies_including_unselected_siblings_and_all
             ]
         },
         candidates2,
-        panel=DEFAULT_PANEL,
         verifier_model="claude-opus-5-5",
         author_replies=plan2.author_replies,
         consumed_reply_keys=plan2.consumed_reply_keys,
-        prior_important_sources=plan2.prior_important_sources,
     )
     assert verified2[0].author_reply is not None
     assert verified2[0].author_reply.comment_id == "102"
@@ -1396,8 +1536,7 @@ def test_reopen_consumes_all_prior_replies_including_unselected_siblings_and_all
                     }
                 ]
             },
-            [f_imp],
-            panel=DEFAULT_PANEL,
+            _candidates([f_imp]),
             verifier_model="claude-opus-5-5",
             author_replies=replies_r2,
             consumed_reply_keys=plan3.consumed_reply_keys,
@@ -1420,8 +1559,7 @@ def test_reopen_consumes_all_prior_replies_including_unselected_siblings_and_all
                 }
             ]
         },
-        [f_imp],
-        panel=DEFAULT_PANEL,
+        _candidates([f_imp]),
         verifier_model="claude-opus-5-5",
         author_replies=plan3_new.author_replies,
         consumed_reply_keys=plan3_new.consumed_reply_keys,
@@ -1473,11 +1611,9 @@ def test_reopen_blocks_inline_comment_reuse_even_when_github_diff_line_shifts() 
             ]
         },
         candidates2,
-        panel=DEFAULT_PANEL,
         verifier_model="claude-opus-5-5",
         author_replies=plan2.author_replies,
         consumed_reply_keys=plan2.consumed_reply_keys,
-        prior_important_sources=plan2.prior_important_sources,
     )
     dec2 = evaluate_round(plan2.round_number, verified2, already_posted=plan2.already_posted_fingerprints)
     rendered2 = render_findings_comment(1928, HEAD_2, dec2)
@@ -1531,8 +1667,7 @@ def test_reopen_blocks_inline_comment_reuse_even_when_github_diff_line_shifts() 
                     }
                 ]
             },
-            [f_r3_reopened],
-            panel=DEFAULT_PANEL,
+            _candidates([f_r3_reopened]),
             verifier_model="claude-opus-5-5",
             author_replies=replies_r3,
             consumed_reply_keys=plan3.consumed_reply_keys,
@@ -1578,8 +1713,7 @@ def test_resolved_by_fix_and_rejected_also_consume_matching_replies() -> None:
                 {"finding_id": f_rej.finding_id, "verdict": "rejected", "verifier_evidence": "误报驳回"},
             ]
         },
-        [f_fix, f_rej],
-        panel=DEFAULT_PANEL,
+        _candidates([f_fix, f_rej]),
         verifier_model="claude-opus-5-5",
         author_replies=replies,
     )
