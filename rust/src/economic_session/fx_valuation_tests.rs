@@ -21,12 +21,14 @@ fn fx_quote_reference_escapes_field_and_chain_delimiters() {
         encode_reference(&["TEST-FX/TEST-CASH", "q@x:y;z,w=1"]),
         "TEST-FX/TEST-CASH|q%40x%3Ay%3Bz%2Cw%3D1"
     );
-    assert!(!super::exact_command::is_fx_placeholder_text(
-        "fx-quote:latest|1|A/B|q@rev=1"
-    ));
-    assert!(super::exact_command::is_fx_placeholder_text(
-        "fx-quote:latest"
-    ));
+    assert_eq!(
+        encode_reference(&["desk:latest:20261119"]),
+        "desk%3Alatest%3A20261119"
+    );
+    assert_eq!(
+        encode_reference(&["ledger|latest:20261119", "1"]),
+        "ledger%7Clatest%3A20261119|1"
+    );
 }
 
 const EXACT_CONDITIONS: [(&str, &str, &str); 4] = [
@@ -2393,7 +2395,7 @@ fn a1_quote_before_import_resolves_and_retires_after_attribution_across_epoch2_l
 /// 3) r2 在 cut 12 致 110/100 后，alpha 同/新 `message_id` 重复取回完全等价的 cut 11 原收据（仍是 rev=1，非新资格），
 ///    改内容重放 -> `IdentityConflict`，beta 新放行 -> `AwaitingPolicy`；
 /// 4) r3 + 退役 r2（cut 15）后，beta 在 cut 16 放行并携带 `rev=3`、`supersedes=2`、`fx-retired:...@rev=2:...`；
-/// 5) 配置护栏：FX E 拒 `TestOnly-market/*` 与 `controlled-*`，纯非 FX E 拒 `fx-valuation/1:release-bound`；
+/// 5) 配置护栏：FX E 拒 `TestOnly-market/*` 与 `controlled-*`，纯非 FX E 拒 FX/2 显式市场模板；
 /// 6) 全链路 `audit` + `recover` 到 epoch 2。
 #[test]
 fn ce_s07_v6_verifiable_fx_certificate_tamper_old_receipt_priority_and_scope_controls() {
@@ -2409,7 +2411,7 @@ fn ce_s07_v6_verifiable_fx_certificate_tamper_old_receipt_priority_and_scope_con
     let space = Space::new("ce-s07-v6");
     let session_id = "ce-s07-v6-integrated".to_owned();
 
-    // 1. 构造 tb03b-finance/6 + logical-bar/1 + 含真实 model_ref 与 fx-valuation/1:release-bound 的冻结输入。
+    // 1. 构造 tb03b-finance/6 + logical-bar/1 + 含真实 model_ref 与 FX/2 显式模板的冻结输入。
     let mut fin_data = base.fin_data.clone();
     let model = crate::history_simulation::tests::model();
     decorate_fx_release_bound_v6_input(&mut fin_data, json!(model.model_ref()));
@@ -2521,7 +2523,7 @@ fn ce_s07_v6_verifiable_fx_certificate_tamper_old_receipt_priority_and_scope_con
         "bars": {"init": "0", "recover": ["10", "20"], "messages": Value::Object(bars)}
     });
 
-    // 2. 配置护栏：FX E 拒占位名；纯非 FX E 拒 fx-valuation/1:release-bound。
+    // 2. 配置护栏：FX/2 要求完整模板；无 FX 禁止显式市场模板。
     {
         let mut bad_fx_fin = fin_data.clone();
         bad_fx_fin["exact_release"]["market_dependencies"] = json!(["TestOnly-market/1407-c1"]);
@@ -2570,11 +2572,11 @@ fn ce_s07_v6_verifiable_fx_certificate_tamper_old_receipt_priority_and_scope_con
         assert!(
             nf_err.starts_with("Unsupported")
                 && nf_err.contains(super::exact_command::FX_RELEASE_BOUND_MARKER),
-            "pure non-FX E must reject fx-valuation/1:release-bound: {nf_err}"
+            "pure non-FX E must reject the FX/2 market template: {nf_err}"
         );
 
         // FIN/5+FX(v2) 组合在 Config::load 即被 SchemaUnsupported 拒绝；
-        // FIN/5+FX(v1) 与 FIN/6+FX(v1) 夹带新 release-bound 标记在首次写入被 Unsupported 拒绝。
+        // FX/1 的文本即使与整套 FX/2 模板字面相同，仍是静态合同。
         let mut fin5_with_marker_data = fin_data.clone();
         fin5_with_marker_data["schema_revision"] = json!("tb03b-finance/5");
         let (f5_in_path, f5_in_sha) =
@@ -2603,12 +2605,9 @@ fn ce_s07_v6_verifiable_fx_certificate_tamper_old_receipt_priority_and_scope_con
         init(&f6v1m_cfg).unwrap();
         let (mut f6v1m_db, _) = open(&f6v1m_cfg.db, false).unwrap();
         let f6v1m_resp = send(&mut f6v1m_db, &f6v1m_cfg, 1, &nf_req);
-        assert_eq!(f6v1m_resp["kind"], "Error", "{f6v1m_resp}");
-        let f6v1m_err = f6v1m_resp["error"].as_str().unwrap();
-        assert!(
-            f6v1m_err.starts_with("Unsupported")
-                && f6v1m_err.contains(super::exact_command::FX_RELEASE_BOUND_MARKER),
-            "FIN/6 + fx-valuation/1 must reject release-bound marker: {f6v1m_err}"
+        assert_eq!(
+            f6v1m_resp["kind"], "ResponsibilityImportedReceipt",
+            "{f6v1m_resp}"
         );
 
         let mut fin5_v1_marker_manifest = fin5_v2_manifest.clone();
@@ -2619,12 +2618,9 @@ fn ce_s07_v6_verifiable_fx_certificate_tamper_old_receipt_priority_and_scope_con
         init(&f5_cfg).unwrap();
         let (mut f5_db, _) = open(&f5_cfg.db, false).unwrap();
         let f5_resp = send(&mut f5_db, &f5_cfg, 1, &nf_req);
-        assert_eq!(f5_resp["kind"], "Error", "{f5_resp}");
-        let f5_err = f5_resp["error"].as_str().unwrap();
-        assert!(
-            f5_err.starts_with("Unsupported")
-                && f5_err.contains(super::exact_command::FX_RELEASE_BOUND_MARKER),
-            "FIN/5 + fx-valuation/1 must reject release-bound marker: {f5_err}"
+        assert_eq!(
+            f5_resp["kind"], "ResponsibilityImportedReceipt",
+            "{f5_resp}"
         );
     }
 
@@ -2800,22 +2796,7 @@ fn ce_s07_v6_verifiable_fx_certificate_tamper_old_receipt_priority_and_scope_con
     let cmd_alpha = &rel_alpha["record"]["command"];
     assert_eq!(cmd_alpha["model_ref"], json!(model.model_ref()));
     let cert_alpha = &cmd_alpha["certificate"];
-    let cert_alpha_text = canonical_json(cert_alpha);
-    for forbidden in [
-        "TestOnly-market/",
-        "controlled-dependency",
-        "controlled-invalidation",
-        "controlled-evidence",
-        "controlled-coverage",
-        super::exact_command::FX_RELEASE_BOUND_MARKER,
-        "admissible",
-        ":latest",
-    ] {
-        assert!(
-            !cert_alpha_text.contains(forbidden),
-            "released FX certificate leaked `{forbidden}`: {cert_alpha_text}"
-        );
-    }
+    assert_eq!(*cert_alpha, valid_alpha_r1["certificate"]);
     let alpha_mkt = cert_alpha["market_dependencies"][0].as_str().unwrap();
     assert!(
         alpha_mkt.starts_with(

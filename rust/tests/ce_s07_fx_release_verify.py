@@ -6,7 +6,7 @@ Drives real compiled Linux binaries (`production_session`, `s_structure_session`
 in isolated temp directories:
   - Arm 1 (`ce_s07_main_lifecycle`):
       tb03b-finance/6 + fx-valuation/2 + x-execution-profile/3 + logical-bar/1 + s-session/3.
-      Verifies E cut 10 = 90/100 (r1), 8 pre-release tamper/drop/placeholder negative controls,
+      Verifies E cut 10 = 90/100 (r1), 9 pre-release tamper/drop/placeholder negative controls,
       cut 11 alpha release + real X AcceptExact (no fake S stub), cut 12 r2 = 110/100 +
       original receipt priority (same/new message_id) + beta/gamma blocked, cut 15 r3 + r2
       retirement = 90/100, cut 16 beta release + real X AcceptExact, cut 17 gamma reserve = 95/100,
@@ -25,8 +25,8 @@ in isolated temp directories:
   - Arm 5: single/batched commands at the same r2 overcap cut and original alpha receipt.
   - Arm 6 (with --parent-bin): first imports on a non-empty FIN/6+FX/1 parent DB,
       cold replay of the parent release, and exact parent/candidate reply comparisons.
-  - Regressions: a static rule name identical to the template marker (with --parent-bin),
-      and a dynamic release with two delimiter-bearing quote sources.
+  - Regressions: static rule and evidence names identical to the FX/2 marker (with --parent-bin);
+      two delimiter-bearing quote sources; and separate `:latest:` evidence and boundary IDs.
 """
 from __future__ import annotations
 
@@ -89,15 +89,6 @@ FIXTURE_DIGESTS = {
         0x77, 0x02, 0xf1, 0x0e, 0xfe, 0x8c, 0x77, 0x36,
     )).hex(),
 }
-FORBIDDEN_PLACEHOLDERS = (
-    "TestOnly-market/",
-    "controlled-dependency",
-    "controlled-invalidation",
-    "controlled-evidence",
-    "controlled-coverage",
-    "fx-valuation/1:release-bound",
-    FX_MARKER,
-)
 
 
 def sha256_bytes(data: bytes) -> str:
@@ -288,6 +279,7 @@ def quote_chain(revision: dict) -> tuple[str, str, str, str]:
 
 
 def fx_reference(*parts: str) -> str:
+    """Encode individual FX/2 certificate components, never the stored source or evidence ID."""
     return "|".join(quote(part, safe="/") for part in parts)
 
 
@@ -356,12 +348,13 @@ def build_fx_certificate_from_query(
         f"cap-policy:{cap['policy_id']}@v{cap['policy_version']}:"
         f"cap={cap['cap']}:{cap['currency']}:valid_through={cap['valid_through_ns']}"
     )
+    boundary_source = fx_reference(boundary["source_id"], boundary["source_epoch"])
     boundary_ref = (
-        f"fx-boundary:{boundary['source_id']}|{boundary['source_epoch']}:"
+        f"fx-boundary:{boundary_source}:"
         f"input_sha256={boundary['obligation_input_sha256']}"
     )
     empty_boundary_dep = (
-        f"fx-boundary-empty:{boundary['source_id']}|{boundary['source_epoch']}:"
+        f"fx-boundary-empty:{boundary_source}:"
         f"input_sha256={boundary['obligation_input_sha256']}"
     )
     exposure_ref = (
@@ -389,7 +382,7 @@ def build_fx_certificate_from_query(
         quote_invs.append(f"market-supersession:{chain_id}:after_rev={rev['revision']}")
         quote_covs.append(
             f"e-quote-coverage:{chain_id}@rev={rev['revision']}:"
-            f"evidence_id={rev['evidence_id']}:evidence_hash={rev['evidence_hash']}"
+            f"evidence_id={fx_reference(rev['evidence_id'])}:evidence_hash={rev['evidence_hash']}"
         )
         quote_raws.append(
             f"market-raw:{chain_id}@rev={rev['revision']}:raw_sha256={rev['raw_sha256']}"
@@ -398,7 +391,7 @@ def build_fx_certificate_from_query(
     market_dependencies = quote_deps if quote_deps else [empty_boundary_dep]
     retired_refs = [
         f"fx-retired:{fx_reference(*chain)}@rev={rev['revision']}:retired_by_rev={rev['retired_by_revision']}:"
-        f"evidence_id={rev['evidence_id']}:evidence_hash={rev['evidence_hash']}"
+        f"evidence_id={fx_reference(rev['evidence_id'])}:evidence_hash={rev['evidence_hash']}"
         for chain, rev in retired_quotes
     ]
     ob_deps = [
@@ -426,14 +419,14 @@ def build_fx_certificate_from_query(
             invs = [
                 f"e-pending:E:{cap['policy_id']}:{cap['currency']}",
                 f"cap-policy-change:{cap['policy_id']}@v{cap['policy_version']}",
-                f"fx-boundary-change:{boundary['source_id']}|{boundary['source_epoch']}:{boundary['obligation_input_sha256']}",
+                f"fx-boundary-change:{boundary_source}:{boundary['obligation_input_sha256']}",
             ] + quote_invs
             evs = [e_cut_ref, exposure_ref]
             if quote_covs:
                 evs += quote_covs
             else:
                 evs.append(
-                    f"e-empty-fx-boundary:{boundary['source_id']}|{boundary['source_epoch']}:{boundary['obligation_input_sha256']}"
+                    f"e-empty-fx-boundary:{boundary_source}:{boundary['obligation_input_sha256']}"
                 )
             evs += retired_refs
             proof = (
@@ -447,7 +440,7 @@ def build_fx_certificate_from_query(
                 quote_invs
                 if quote_invs
                 else [
-                    f"fx-boundary-change:{boundary['source_id']}|{boundary['source_epoch']}:{boundary['obligation_input_sha256']}"
+                    f"fx-boundary-change:{boundary_source}:{boundary['obligation_input_sha256']}"
                 ]
             )
             evs = [e_cut_ref, f"structure-ref:{structure_dep}"] + (
@@ -511,22 +504,6 @@ def build_fx_certificate_from_query(
         "rule_revision": s["rule_revision"],
         "conditions": built_conditions,
     }
-
-
-def assert_no_fx_placeholders(obj, path: str = "root") -> None:
-    if isinstance(obj, str):
-        for pat in FORBIDDEN_PLACEHOLDERS:
-            assert pat not in obj, f"forbidden placeholder {pat!r} found at {path}: {obj!r}"
-        assert obj != "latest" and ":latest" not in obj, f"latest found at {path}: {obj!r}"
-        assert (
-            obj != "admissible" and not obj.startswith("admissible:") and not obj.startswith("admissible=")
-        ), f"admissible bool token found at {path}: {obj!r}"
-    elif isinstance(obj, list):
-        for idx, item in enumerate(obj):
-            assert_no_fx_placeholders(item, f"{path}[{idx}]")
-    elif isinstance(obj, dict):
-        for k, v in obj.items():
-            assert_no_fx_placeholders(v, f"{path}.{k}")
 
 
 def make_opening_doc(chong_name: str, symbol: str, op_level: str, fixed: str, qty: str) -> dict:
@@ -1573,6 +1550,7 @@ def run_arm1_main_lifecycle(bins: Path, fixtures: Path, out: Path) -> dict:
         "neg-drop-fx-resp",
         "neg-tamper-rate",
         "neg-stale-cut",
+        "neg-forged-evidence",
     ]
     clock_messages = {m: "1" for m in setup_msgs}
     for m in neg_msgs:
@@ -1760,10 +1738,9 @@ def run_arm1_main_lifecycle(bins: Path, fixtures: Path, out: Path) -> dict:
         assert q10["fx_valuation"]["summary"]["gate_status"] == "AdmissibleWithinCap"
         write_pretty(out / "e_cut10_fx_valuation.json", q10)
 
-        # 3. 8 pre-release tamper/drop/placeholder negative controls at E cut 10
+        # 3. 9 pre-release tamper/drop/placeholder negative controls at E cut 10
         alpha_plan = cfg["plans"]["alpha"]
         alpha_cert = build_fx_certificate_from_query(cfg["sid"], cfg["gen"], cfg["fin_data"], alpha_plan, grants["alpha"], q10)
-        assert_no_fx_placeholders(alpha_cert)
         alpha_change = change_for_plan(alpha_plan)
 
         def release_req(decision_id: str, cert: dict) -> dict:
@@ -1814,13 +1791,20 @@ def run_arm1_main_lifecycle(bins: Path, fixtures: Path, out: Path) -> dict:
         ]
         neg_cases.append(("neg-stale-cut", c_stale))
 
+        c_forged = copy.deepcopy(alpha_cert)
+        evidence = c_forged["conditions"][0]["evidence_refs"]
+        coverage_idx = next(i for i, ref in enumerate(evidence) if ref.startswith("e-quote-coverage:"))
+        assert ":evidence_id=ev-r1:" in evidence[coverage_idx]
+        evidence[coverage_idx] = evidence[coverage_idx].replace(":evidence_id=ev-r1:", ":evidence_id=forged:")
+        neg_cases.append(("neg-forged-evidence", c_forged))
+
         neg_results = {}
         for msg_id, bad_cert in neg_cases:
             err = sess.ewire("E", msg_id, release_req("alpha", bad_cert), expected="Error")
             assert err["error"].startswith("IdentityConflict："), (msg_id, err)
             neg_results[msg_id] = err["error"]
 
-        # Confirm E stayed at cut 10 after all 8 rejected attempts
+        # Confirm E stayed at cut 10 after all 9 rejected attempts
         q10_check = sess.ewire("E", "q-cut10", {"op": "QueryFxValuation", "as_known_ns": None, "cut": None}, expected="EconomicFxValuation")
         assert q10_check["cut"]["commit_seq"] == "10"
 
@@ -1828,7 +1812,7 @@ def run_arm1_main_lifecycle(bins: Path, fixtures: Path, out: Path) -> dict:
         rel_alpha = sess.ewire("E", "release-alpha", release_req("alpha", alpha_cert), expected="ReleasedExactReceipt")
         assert rel_alpha["cut"]["commit_seq"] == "11"
         cmd_alpha = rel_alpha["record"]["command"]
-        assert_no_fx_placeholders(cmd_alpha)
+        assert cmd_alpha["certificate"] == alpha_cert
         assert cmd_alpha["model_ref"]["content_hash"] == digest(x_model)
         assert "ob-fx-unclosed-20" in cmd_alpha["certificate"]["responsibility_refs"]
         assert any(
@@ -1854,15 +1838,18 @@ def run_arm1_main_lifecycle(bins: Path, fixtures: Path, out: Path) -> dict:
         tampered_cert["certificate"]["market_dependencies"] = ["TestOnly-market/1407-c1"]
         tampered_cert["certificate_hash"] = digest(tampered_cert["certificate"])
         x_tampered_ph = sess.xwire("accept-alpha-placeholder", "AcceptExact", tampered_cert, expected="Error")
-        assert (
-            x_tampered_ph["error"]
-            == "Unsupported：FX 精确命令证书不得保留模板标记或占位名（TestOnly-market/1407-c1）"
-        ), x_tampered_ph
+        assert x_tampered_ph["error"].startswith("Unsupported：FX market_dependencies"), x_tampered_ph
 
         tampered_e_mismatch = copy.deepcopy(cmd_alpha)
-        tampered_e_mismatch["certificate"]["market_dependencies"] = [
-            s.replace("rate=1/1", "rate=9/1") for s in tampered_e_mismatch["certificate"]["market_dependencies"]
-        ]
+        et = tampered_e_mismatch["certificate"]
+        old_market, = et["market_dependencies"]
+        new_market = old_market.replace("rate=1/1", "rate=9/1")
+        assert new_market != old_market
+        et["market_dependencies"] = [new_market]
+        for condition in et["conditions"]:
+            condition["dependency_set"] = [
+                new_market if ref == old_market else ref for ref in condition["dependency_set"]
+            ]
         tampered_e_mismatch["certificate_hash"] = digest(tampered_e_mismatch["certificate"])
         x_tampered_e = sess.xwire("accept-alpha-e-mismatch", "AcceptExact", tampered_e_mismatch, expected="Error")
         assert "IdentityConflict" in x_tampered_e["error"], x_tampered_e
@@ -1995,11 +1982,10 @@ def run_arm1_main_lifecycle(bins: Path, fixtures: Path, out: Path) -> dict:
 
         # 8. E cut 16: ReleaseExact(beta) with rev=3 + retired rev=2 + cut 15
         beta_cert_r3 = build_fx_certificate_from_query(cfg["sid"], cfg["gen"], cfg["fin_data"], beta_plan, grants["beta"], q15)
-        assert_no_fx_placeholders(beta_cert_r3)
         rel_beta = sess.ewire("E", "release-beta", release_req("beta", beta_cert_r3), expected="ReleasedExactReceipt")
         assert rel_beta["cut"]["commit_seq"] == "16"
         cmd_beta = rel_beta["record"]["command"]
-        assert_no_fx_placeholders(cmd_beta)
+        assert cmd_beta["certificate"] == beta_cert_r3
         assert any(
             d.startswith(f"fx-quote:{MARKET_NS}|1|TEST-FX/TEST-CASH|fx-quote-007@rev=3;")
             and "supersedes=2;" in d
@@ -2450,7 +2436,6 @@ def run_arm2_unrelated_revision_control(bins: Path, out: Path) -> dict:
         assert q_pre["fx_valuation"]["summary"]["gate_status"] == "AdmissibleWithinCap"
 
         cert = build_fx_certificate_from_query(cfg["sid"], cfg["gen"], cfg["fin_data"], cfg["plans"]["alpha"], grant_id, q_pre)
-        assert_no_fx_placeholders(cert)
         assert cert["market_dependencies"][0].startswith("fx-boundary-empty:")
         rel = sess.ewire(
             "E",
@@ -2606,7 +2591,7 @@ def run_arm3_pure_non_fx_legacy_and_config_guards(bins: Path, fixtures: Path, ou
         sess.stop()
 
     # Config-level guard negative controls via real e_economic_session init + first ImportResponsibility
-    def probe_first_import_error(neg_dir: Path, neg_cfg: dict, label: str) -> str:
+    def probe_first_import(neg_dir: Path, neg_cfg: dict, label: str, *, expected: str = "Error") -> str:
         init_res = run_cli(
             [
                 str(bins / "e_economic_session"),
@@ -2650,9 +2635,11 @@ def run_arm3_pure_non_fx_legacy_and_config_guards(bins: Path, fixtures: Path, ou
                 }
                 _, _, rep = send_frame(neg_cfg["e_node"]["socket"], req, label=label)
                 res = validate_reply(req, rep, producer="E", producer_epoch="1")
-                assert res.get("kind") == "Error", (label, res)
-                assert res["error"].startswith("Unsupported"), (label, res)
-                return res["error"]
+                assert res.get("kind") == expected, (label, res)
+                if expected == "Error":
+                    assert res["error"].startswith("Unsupported"), (label, res)
+                    return res["error"]
+                return res["cut"]["commit_seq"]
             finally:
                 proc.terminate()
                 proc.wait(timeout=8)
@@ -2672,7 +2659,7 @@ def run_arm3_pure_non_fx_legacy_and_config_guards(bins: Path, fixtures: Path, ou
         finance_schema="tb03b-finance/6",
         fx_schema="fx-valuation/2",
     )
-    bad_fx_v6_err = probe_first_import_error(neg_fx_dir, neg_fx_cfg, "neg-fx-v6-v2-placeholders")
+    bad_fx_v6_err = probe_first_import(neg_fx_dir, neg_fx_cfg, "neg-fx-v6-v2-placeholders")
 
     neg_nonfx_dir = out / "arm3_neg_nonfx_v6_with_fx_marker"
     neg_nonfx_cfg = build_session_artifacts(
@@ -2688,42 +2675,46 @@ def run_arm3_pure_non_fx_legacy_and_config_guards(bins: Path, fixtures: Path, ou
         use_fx_marker_in_input=True,
         finance_schema="tb03b-finance/6",
     )
-    bad_nonfx_v6_err = probe_first_import_error(neg_nonfx_dir, neg_nonfx_cfg, "neg-nonfx-v6-marker")
+    bad_nonfx_v6_err = probe_first_import(neg_nonfx_dir, neg_nonfx_cfg, "neg-nonfx-v6-marker")
 
-    neg_fin6_v1_dir = out / "arm3_neg_fin6_fx_v1_with_v2_marker"
-    neg_fin6_v1_cfg = build_session_artifacts(
-        neg_fin6_v1_dir,
-        session_id="ce-s07-neg-fin6-v1-marker",
+    fin6_v1_dir = out / "arm3_neg_fin6_fx_v1_with_v2_marker"
+    fin6_v1_cfg = build_session_artifacts(
+        fin6_v1_dir,
+        session_id="ce-s07-fin6-v1-static-text",
         chongs=["alpha"],
         x_model=x_model,
         fx_obligations_bytes=(fixtures / "fx-obligations.json").read_bytes(),
         clock_messages={"imp-base": "1"},
         recover_bars=[],
         s_clock_events=s_clock,
-        s_socket_for_x=str(neg_fin6_v1_dir / "structure.sock"),
+        s_socket_for_x=str(fin6_v1_dir / "structure.sock"),
         use_fx_marker_in_input=True,
         finance_schema="tb03b-finance/6",
         fx_schema="fx-valuation/1",
     )
-    bad_fin6_v1_marker_err = probe_first_import_error(neg_fin6_v1_dir, neg_fin6_v1_cfg, "neg-fin6-v1-marker")
+    fin6_static_cut = probe_first_import(
+        fin6_v1_dir, fin6_v1_cfg, "fin6-v1-static-text", expected="ResponsibilityImportedReceipt",
+    )
 
-    neg_fin5_v1_dir = out / "arm3_neg_fin5_fx_v1_with_v2_marker"
-    neg_fin5_v1_cfg = build_session_artifacts(
-        neg_fin5_v1_dir,
-        session_id="ce-s07-neg-fin5-v1-marker",
+    fin5_v1_dir = out / "arm3_neg_fin5_fx_v1_with_v2_marker"
+    fin5_v1_cfg = build_session_artifacts(
+        fin5_v1_dir,
+        session_id="ce-s07-fin5-v1-static-text",
         chongs=["alpha"],
         x_model=x_model,
         fx_obligations_bytes=(fixtures / "fx-obligations.json").read_bytes(),
         clock_messages={"imp-base": "1"},
         recover_bars=[],
         s_clock_events=s_clock,
-        s_socket_for_x=str(neg_fin5_v1_dir / "structure.sock"),
+        s_socket_for_x=str(fin5_v1_dir / "structure.sock"),
         use_fx_marker_in_input=True,
         finance_schema="tb03b-finance/5",
         fx_schema="fx-valuation/1",
         authorize_x_query=False,
     )
-    bad_fin5_marker_err = probe_first_import_error(neg_fin5_v1_dir, neg_fin5_v1_cfg, "neg-fin5-v1-marker")
+    fin5_static_cut = probe_first_import(
+        fin5_v1_dir, fin5_v1_cfg, "fin5-v1-static-text", expected="ResponsibilityImportedReceipt",
+    )
 
     neg_fin5_v2_dir = out / "arm3_neg_fin5_with_fx_v2"
     neg_fin5_v2_cfg = build_session_artifacts(
@@ -2763,8 +2754,8 @@ def run_arm3_pure_non_fx_legacy_and_config_guards(bins: Path, fixtures: Path, ou
         "legacy_x_accept_state": x_acc["state"],
         "config_guard_fx_v6_v2_with_placeholders_refused": bad_fx_v6_err,
         "config_guard_nonfx_v6_with_fx_marker_refused": bad_nonfx_v6_err,
-        "config_guard_fin6_fx_v1_with_v2_marker_refused": bad_fin6_v1_marker_err,
-        "config_guard_fin5_fx_v1_with_v2_marker_refused": bad_fin5_marker_err,
+        "fin6_fx_v1_static_text_import_cut": fin6_static_cut,
+        "fin5_fx_v1_static_text_import_cut": fin5_static_cut,
         "config_guard_fin5_with_fx_v2_init_refused": bad_fin5_v2_init.stderr.strip(),
     }
 
@@ -3029,6 +3020,7 @@ def run_arm4_fin5_fx_compat_and_old_db_recovery(bins: Path, fixtures: Path, out:
 
 def run_arm5_r2_overcap_model_coverage_precedes_fx_gate(
     bins: Path, fixtures: Path, out: Path, *, colliding_sources: bool = False,
+    first_evidence_id: str = "ev-r1", boundary_source_id: str | None = None,
 ) -> dict:
     """Proves BLOCK #2 under explicit tb03b-finance/6 + fx-valuation/2:
     During r2=110/100 overcap in the same session:
@@ -3047,6 +3039,8 @@ def run_arm5_r2_overcap_model_coverage_precedes_fx_gate(
         first = {"source_namespace": MARKET_NS, "source_epoch": "daily|1"}
         second = {"source_namespace": f"{MARKET_NS}|daily", "source_epoch": MARKET_EPOCH}
         portfolio = json.loads(ob_bytes)
+        if boundary_source_id is not None:
+            portfolio["source_id"] = boundary_source_id
         ob1, = portfolio["obligations"]
         ob1.update(quantity="10", quote_source=first)
         portfolio["obligations"].append(dict(ob1, responsibility_id="ob-second", quote_source=second))
@@ -3209,7 +3203,7 @@ def run_arm5_r2_overcap_model_coverage_precedes_fx_gate(
         c3 = capture_quote("cap-r1", "fx-r1", r1_utf8, market)
         if colliding_sources:
             second_r1 = capture_quote("cap-second", "fx-second", r1_utf8, second_market)
-        resolve_quote("res-r1", "ev-r1", "fx-r1", c3, market)
+        resolve_quote("res-r1", first_evidence_id, "fx-r1", c3, market)
         if colliding_sources:
             resolve_quote("res-second", "ev-second", "fx-second", second_r1, second_market)
         for cid in ("alpha", "beta", "gamma"):
@@ -3250,8 +3244,19 @@ def run_arm5_r2_overcap_model_coverage_precedes_fx_gate(
                 f"{MARKET_NS}%7Cdaily|1|TEST-FX/TEST-CASH|fx-quote-007",
             )
             assert {r["chain_id"] for r in fx["supersession_chains"]} == {first_chain, second_chain}
+            for capture, evidence_id in ((c3, first_evidence_id), (second_r1, "ev-second")):
+                row = next(r for r in fx["revisions"] if r["fact_key"] == capture["fact_key"])
+                assert (row["coverage_status"], row["evidence_id"]) == ("Covered", evidence_id), row
             rel_cert = rel_alpha["record"]["command"]["certificate"]
             assert len(rel_cert["market_dependencies"]) == 2
+            e_release = next(c for c in rel_cert["conditions"] if c["validator_capability"] == "released-exact/1")
+            if first_evidence_id == "desk:latest:20261119":
+                assert any(":evidence_id=desk%3Alatest%3A20261119:evidence_hash=" in value
+                           for value in e_release["evidence_refs"]), e_release
+            if boundary_source_id == "ledger:latest:20261119":
+                assert fx["boundary"]["source_id"] == boundary_source_id
+                assert any(value.startswith("fx-boundary:ledger%3Alatest%3A20261119|")
+                           for value in e_release["dependency_set"]), e_release
             for chain, capture in ((first_chain, c3), (second_chain, second_r1)):
                 assert any(dep.startswith(f"fx-quote:{chain}@rev=1;") and
                            dep.endswith(f";fact_key={capture['fact_key']}")
@@ -3282,7 +3287,9 @@ def run_arm5_r2_overcap_model_coverage_precedes_fx_gate(
             write_pretty(run_dir / "beta_receipt.json", rel_beta)
             write_pretty(run_dir / "pre_alpha_valuation.json", q_r1)
             write_pretty(run_dir / "pre_beta_valuation.json", q_final)
+            assert rel_alpha["record"]["state"] == rel_beta["record"]["state"] == "ReleasedExact"
             return {"status": "PASS", "first_release_cut": rel_alpha["cut"], "second_release_cut": rel_beta["cut"],
+                    "first_evidence_id": first_evidence_id, "boundary_source_id": fx["boundary"]["source_id"],
                     "market_dependencies": rel_cert["market_dependencies"], "retirement_evidence": retirement}
 
         # r2 -> 110/100 overcap
@@ -3415,7 +3422,7 @@ def run_arm5_r2_overcap_model_coverage_precedes_fx_gate(
 
 def run_arm6_parent_bd0933e97e_fin6_fx_v1_recovery(
     parent_bins: Path, candidate_bins: Path, fixtures: Path, out: Path,
-    *, static_rule_revision: str | None = None,
+    *, static_rule_revision: str | None = None, static_evidence_ref: str | None = None,
 ) -> dict:
     """Proves BLOCK #1 with REAL parent (`bd0933e97e`) binaries:
     A parent-written r1 capture makes the pre-import DB non-empty. Parent and candidate
@@ -3476,9 +3483,12 @@ def run_arm6_parent_bd0933e97e_fin6_fx_v1_recovery(
         finance_schema="tb03b-finance/6",
         fx_schema="fx-valuation/1",
     )
+    freeze = cfg["fin_data"]["exact_release"]
     if static_rule_revision is not None:
-        # Only the ordinary rule name changes; this is still an entirely static contract.
-        cfg["fin_data"]["exact_release"]["rule_revision"] = static_rule_revision
+        freeze["rule_revision"] = static_rule_revision
+    if static_evidence_ref is not None:
+        freeze["conditions"][0]["evidence_refs"].append(static_evidence_ref)
+    if static_rule_revision is not None or static_evidence_ref is not None:
         ptr = cfg["manifest"]["finance"]
         ptr["input_sha256"] = file_digest(write_canon(Path(ptr["input_path"]), cfg["fin_data"]))
     # Patch clock to TestOnly plan (monotonic ns) so parent bd0933e97e accepts fx-valuation/1!
@@ -3617,7 +3627,10 @@ def run_arm6_parent_bd0933e97e_fin6_fx_v1_recovery(
         parent_rel_alpha = ewire_direct("E", "release-alpha", static_alpha_req, expected="ReleasedExactReceipt")
         assert parent_rel_alpha["record"]["command"]["model_ref"]["content_hash"] == digest(x_model)
         assert parent_rel_alpha["record"]["command"]["certificate"]["market_dependencies"] == ["TestOnly-market/nonfx-legacy-v6"]
-        assert parent_rel_alpha["record"]["command"]["certificate"]["rule_revision"] == freeze["rule_revision"]
+        assert parent_rel_alpha["cut"]["commit_seq"] == "10"
+        assert parent_rel_alpha["record"]["command"]["certificate"] == static_alpha_req["certificate"]
+        if static_evidence_ref is not None:
+            assert static_evidence_ref in parent_rel_alpha["record"]["command"]["certificate"]["conditions"][0]["evidence_refs"]
         write_pretty(out / "arm6_parent_bd0933e97e_alpha_receipt.json", parent_rel_alpha)
 
         ewire_direct("E", "cap-r2", {"op": "CaptureExternal", "raw_utf8": r2_utf8, "json_pointer": "", "token": "fx-r2", "source_event_time": "70"}, expected="Recorded", source=cfg["src_market"])
@@ -3718,6 +3731,7 @@ def run_arm6_parent_bd0933e97e_fin6_fx_v1_recovery(
         "finance_schema": "tb03b-finance/6",
         "fx_schema": "fx-valuation/1",
         "static_rule_revision": freeze["rule_revision"],
+        "static_evidence_refs": freeze["conditions"][0]["evidence_refs"],
         "parent_pre_import_cut": c3["cut"],
         "first_import_cuts": [parent_imp_base["cut"], parent_imp_fx["cut"]],
         "candidate_first_import_receipts_exact_match": True,
@@ -3773,8 +3787,18 @@ def main() -> int:
             regressions["b1_static_rule_name"] = run_arm6_parent_bd0933e97e_fin6_fx_v1_recovery(
                 args.parent_bin.resolve(), bins, fixtures, out / "b1", static_rule_revision=FX_MARKER,
             )
+            regressions["b1_static_evidence_ref"] = run_arm6_parent_bd0933e97e_fin6_fx_v1_recovery(
+                args.parent_bin.resolve(), bins, fixtures, out / "b1-evidence", static_evidence_ref=FX_MARKER,
+            )
         regressions["b2_two_price_feeds"] = run_arm5_r2_overcap_model_coverage_precedes_fx_gate(
             bins, fixtures, out, colliding_sources=True,
+        )
+
+        regressions["b2_concrete_evidence_id"] = run_arm5_r2_overcap_model_coverage_precedes_fx_gate(
+            bins, fixtures, out / "evidence", colliding_sources=True, first_evidence_id="desk:latest:20261119",
+        )
+        regressions["b2_concrete_boundary_source"] = run_arm5_r2_overcap_model_coverage_precedes_fx_gate(
+            bins, fixtures, out / "boundary", colliding_sources=True, boundary_source_id="ledger:latest:20261119",
         )
 
     summary = {

@@ -695,7 +695,10 @@ fn input(config: &Config, raw: &str) -> Result<Value, String> {
         if config.domain == "E" {
             if fx_release_bound(config)? {
                 super::exact_command::validate_fx_section(&d)?;
-            } else if super::exact_command::declares_fx_binding(&d["exact_release"]) {
+            } else if !super::fx_valuation::enabled(config)
+                && super::exact_command::requests_fx_binding(&d["exact_release"])
+            {
+                // 无 FX 的显式市场模板是错配；已持久选择的 FX/1 完全按静态合同处理。
                 return Err(format!(
                     "Unsupported：仅 tb03b-finance/6 且显式选择 fx-valuation/2 时允许声明 {}",
                     super::exact_command::FX_RELEASE_BOUND_MARKER
@@ -1914,7 +1917,6 @@ fn release_exact(
             required(&d["policy"], "policy_id")?,
             required(&d["policy"], "currency")?,
         )?;
-        super::exact_command::reject_fx_placeholders_in_certificate(&p["certificate"])?;
         let cmd = build_command(Some(&binding))?;
         super::exact_command::check_certificate(&p["certificate"], &cmd["certificate"])?;
         cmd

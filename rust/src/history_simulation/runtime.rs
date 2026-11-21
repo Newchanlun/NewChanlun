@@ -115,20 +115,13 @@ fn condition_is_fx_release_bound(c: &Condition) -> bool {
         && c.coverage_proof == m
 }
 
-fn condition_mentions_fx_marker(c: &Condition) -> bool {
-    let m = crate::economic_session::FX_RELEASE_BOUND_MARKER;
-    c.coverage_proof == m
-        || c.dependency_set.iter().any(|s| s == m)
-        || c.invalidation_sources.iter().any(|s| s == m)
-        || c.evidence_refs.iter().any(|s| s == m)
-}
-
 fn is_fx_release_bound_profile(list: &[Condition]) -> bool {
     !list.is_empty() && list.iter().all(condition_is_fx_release_bound)
 }
 
 fn validate_fx_marker_uniformity(list: &[Condition]) -> Result<(), String> {
-    let any = list.iter().any(condition_mentions_fx_marker);
+    // 一项的四个槽完整声明才是模板；单独出现在静态证据里的同名字符串只是数据。
+    let any = list.iter().any(condition_is_fx_release_bound);
     if any && !is_fx_release_bound_profile(list) {
         return Err(format!(
             "Unsupported：{} 须在获准条件清单四项内统一声明，不得混写",
@@ -146,23 +139,9 @@ fn validate_fx_release_bound_certificate(
     if c.conditions.len() != approved.len() {
         return Err("Unsupported：FX 放行条件清单项数与获准 manifest 不等".into());
     }
-    let marker = crate::economic_session::FX_RELEASE_BOUND_MARKER;
-    let check_real = |s: &str| -> Result<(), String> {
-        if s == marker || crate::economic_session::is_fx_placeholder_text(s) {
-            return Err(format!(
-                "Unsupported：FX 精确命令证书不得保留模板标记或占位名（{s}）"
-            ));
-        }
-        Ok(())
-    };
-    for dep in &c.market_dependencies {
-        check_real(dep)?;
-        if !dep.starts_with("fx-quote:") && !dep.starts_with("fx-boundary-empty:") {
-            return Err(format!(
-                "Unsupported：FX 精确命令 market_dependencies 须为可核证 fx-quote 或 fx-boundary-empty（{dep}）"
-            ));
-        }
-    }
+    let refs = crate::economic_session::FxReleaseReferences::new(
+        c.market_dependencies.iter().map(String::as_str),
+    )?;
     for (got, want) in c.conditions.iter().zip(approved.iter()) {
         if got.condition_id != want.condition_id
             || got.authority_revision != want.authority_revision
@@ -172,31 +151,12 @@ fn validate_fx_release_bound_certificate(
         {
             return Err("Unsupported：FX 放行条件清单元数据与获准 manifest 不一致".into());
         }
-        check_real(&got.coverage_proof)?;
-        if !got
-            .coverage_proof
-            .starts_with(crate::economic_session::FX_COVERAGE_PROOF_PREFIX)
-        {
-            return Err(format!(
-                "Unsupported：FX 放行条件 coverage_proof 须以 {} 绑定真实切面（{}）",
-                crate::economic_session::FX_COVERAGE_PROOF_PREFIX,
-                got.coverage_proof
-            ));
-        }
-        for s in got
-            .dependency_set
-            .iter()
-            .chain(got.invalidation_sources.iter())
-            .chain(got.evidence_refs.iter())
-        {
-            check_real(s)?;
-        }
-        if !got.evidence_refs.iter().any(|r| r.starts_with("e-cut:E:")) {
-            return Err(format!(
-                "MissingDependency：FX 放行条件 {} 缺少 E 提交切面证据 e-cut:E:*",
-                got.condition_id
-            ));
-        }
+        refs.validate_condition(
+            got.dependency_set.iter().map(String::as_str),
+            got.invalidation_sources.iter().map(String::as_str),
+            got.evidence_refs.iter().map(String::as_str),
+            &got.coverage_proof,
+        )?;
     }
     Ok(())
 }

@@ -1549,9 +1549,9 @@ fn late_v1_archive_audits_common_12_6_invariants_without_retroactive_gates() {
 }
 
 /// #1407 C3 CE-S07：X 侧 FX release-bound profile 与真实交付证书核验回归。
-/// 1) 4 项条件统一声明 `fx-valuation/1:release-bound` 的 X profile 合法；混用半模板/半静态被拒；
+/// 1) 4 项条件统一声明 `fx-valuation/2:release-bound` 的 X profile 合法；混用半模板/半静态被拒；
 /// 2) 同一静态 X profile 同时接受 rev=1 与 rev=3 的真实 FX 绑定交付命令；
-/// 3) 交付命令若残留未实例化模板 `fx-valuation/1:release-bound`、或带 `TestOnly-market/*` / `controlled-evidence` /
+/// 3) 交付命令若残留未实例化模板 `fx-valuation/2:release-bound`、或带 `TestOnly-market/*` / `controlled-evidence` /
 ///    `latest` / `admissible` / 缺 `e-cut:E:` / 缺 `fx-quote:` 前缀，均被 X 拒绝；
 /// 4) 纯非 FX 静态 profile 仍执行 `c.conditions == p.conditions` 严格相等。
 #[test]
@@ -1600,19 +1600,23 @@ fn fx_release_bound_profile_accepts_verified_fx_commands_and_rejects_placeholder
     );
 
     let make_fx_cmd = |rev: &str, e_seq: &str| {
-        let chain = "testonly.ce-s07.fx|1|TEST-FX/TEST-CASH|fx-quote-007";
+        let chain = "latest|1|TEST-FX/TEST-CASH|fx-quote-007";
         let mkt = format!(
             "fx-quote:{chain}@rev={rev};coord=70;supersedes=none;rate=1/1;raw_sha256=abc;fact_key=fk-{rev}"
         );
-        let ecut = format!("e-cut:E:{e_seq}:root-{e_seq}");
+        let ecut = format!("e-cut:E:{e_seq}:{}", "a".repeat(64));
         let cond = |id: &str, cap: &str, stage: &str| {
             json!({
                 "condition_id": id,
                 "authority_revision": cap,
-                "dependency_set": [mkt, "cap-policy:TestOnly-ac2-cap-100@v1:cap=100:currency=TEST-CASH"],
+                "dependency_set": [mkt, "cap-policy:ledger:latest:20261119@v1:cap=100:currency=TEST-CASH"],
                 "invalidation_sources": [format!("market-supersession:{chain}:after_rev={rev}")],
                 "required_check_stages": [stage],
-                "evidence_refs": [ecut, format!("market-raw:{chain}@rev={rev}:sha256=abc")],
+                "evidence_refs": [
+                    ecut,
+                    format!("market-raw:{chain}@rev={rev}:sha256=abc"),
+                    format!("e-quote-coverage:{chain}@rev={rev}:evidence_id=desk%3Alatest%3A20261119:evidence_hash=abc")
+                ],
                 "coverage_proof": format!("fx-valuation/2:{id}:e-cut={e_seq}:total=90/100"),
                 "validator_capability": cap,
                 "failure_result": "Denied"
@@ -1698,7 +1702,13 @@ fn fx_release_bound_profile_accepts_verified_fx_commands_and_rejects_placeholder
     }
 
     // 纯非 FX 静态 profile 仍执行 strict equality（拒绝 FX 动态条件）。
-    let p_static: Profile = parse(profile(&d, approved()));
+    let mut static_conditions = approved();
+    static_conditions[0]["evidence_refs"] = json!([marker, "desk:latest:20261119"]);
+    let p_static: Profile = parse(profile(&d, static_conditions.clone()));
+    p_static.validate().unwrap();
+    parse::<ExactCommand>(command(static_conditions))
+        .validate(&p_static, 1)
+        .unwrap();
     let static_err = c_r1.validate(&p_static, 1).unwrap_err();
     assert!(
         static_err.starts_with("Unsupported"),
