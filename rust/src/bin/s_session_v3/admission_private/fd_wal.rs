@@ -91,8 +91,22 @@ impl Source {
         Ok(Self { file, identity })
     }
 
+    #[inline]
     fn unchanged(&self) -> bool {
-        Self::identity(&self.file).is_ok_and(|now| now == self.identity)
+        let Ok(m) = self.file.metadata() else {
+            return false;
+        };
+        m.is_file()
+            && m.nlink() == 1
+            && m.dev() == self.identity.dev
+            && m.ino() == self.identity.ino
+            && m.len() == self.identity.len
+            && m.mtime() == self.identity.mtime
+            && m.mtime_nsec() == self.identity.mtime_nsec
+            && m.uid() == self.identity.uid
+            && m.mode() == self.identity.mode
+            && m.ctime() == self.identity.ctime
+            && m.ctime_nsec() == self.identity.ctime_nsec
     }
 }
 
@@ -125,7 +139,11 @@ impl Context<'_> {
             _ => None,
         }
     }
+    #[inline]
     fn take_fault(&self, f: Fault) -> bool {
+        if self.fault.load(Ordering::Relaxed) == 0 {
+            return false;
+        }
         self.fault
             .compare_exchange(f as i32, 0, Ordering::SeqCst, Ordering::SeqCst)
             .is_ok()
@@ -316,19 +334,24 @@ unsafe extern "C" fn read(
         if amount == 0 {
             return ffi::SQLITE_OK;
         }
-        // SAFETY: SQLite 承诺 out 可写 amount 字节；先清零满足 short-read 合同。
+        // SAFETY: SQLite 承诺 out 可写 amount 字节；short-read 及错误路径清零未读尾部。
         let buf = unsafe { std::slice::from_raw_parts_mut(out.cast::<u8>(), amount as usize) };
-        buf.fill(0);
-        if ctx.take_fault(Fault::ReadPanic) {
-            panic!("1504 controlled callback panic");
-        }
-        if ctx.take_fault(Fault::ReadIo) {
-            return ffi::SQLITE_IOERR_READ;
-        }
-        if ctx.take_fault(Fault::ReadShort) {
-            return ffi::SQLITE_IOERR_SHORT_READ;
+        if ctx.fault.load(Ordering::Relaxed) != 0 {
+            if ctx.take_fault(Fault::ReadPanic) {
+                buf.fill(0);
+                panic!("1504 controlled callback panic");
+            }
+            if ctx.take_fault(Fault::ReadIo) {
+                buf.fill(0);
+                return ffi::SQLITE_IOERR_READ;
+            }
+            if ctx.take_fault(Fault::ReadShort) {
+                buf.fill(0);
+                return ffi::SQLITE_IOERR_SHORT_READ;
+            }
         }
         let Some(source) = ctx.source(f.kind) else {
+            buf.fill(0);
             // #1527：MainOnly 介质（WAL 头库、无 -wal 文件）由 SQLite 在独占模式下打开一个
             // 只读空 WAL；没有任何字节可读，按 short-read 合同返回全零，不发生 I/O。
             if f.kind == WAL && ctx.wal.is_none() {
@@ -337,11 +360,13 @@ unsafe extern "C" fn read(
             return ffi::SQLITE_IOERR_READ;
         };
         if !source.unchanged() {
+            buf.fill(0);
             return ffi::SQLITE_IOERR_FSTAT;
         }
         let mut done = 0;
         while done < buf.len() {
             if !ctx.before_io() {
+                buf[done..].fill(0);
                 return ffi::SQLITE_IOERR_READ;
             }
             let part = if ctx.take_fault(Fault::ReadInterrupted) {
@@ -354,6 +379,7 @@ unsafe extern "C" fn read(
             match part {
                 Ok(0) => {
                     if !ctx.after_read(0) {
+                        buf[done..].fill(0);
                         return ffi::SQLITE_IOERR_READ;
                     }
                     break;
@@ -362,29 +388,31 @@ unsafe extern "C" fn read(
                     #[cfg(test)]
                     super::s4_read_trace::read(f.kind, offset + done as i64, n);
                     done += n;
-                    ctx.read_bytes.fetch_add(n as u64, Ordering::SeqCst);
+                    ctx.read_bytes.fetch_add(n as u64, Ordering::Relaxed);
                     if !ctx.after_read(n as u64) {
+                        buf[done..].fill(0);
                         return ffi::SQLITE_IOERR_READ;
                     }
                 }
                 Err(_) => {
                     let _ = ctx.after_read(0);
+                    buf[done..].fill(0);
                     return ffi::SQLITE_IOERR_READ;
                 }
             }
         }
         if !source.unchanged() {
+            buf[done..].fill(0);
             return ffi::SQLITE_IOERR_FSTAT;
         }
         if done < buf.len() {
+            buf[done..].fill(0);
             ffi::SQLITE_IOERR_SHORT_READ
         } else {
             ffi::SQLITE_OK
         }
     });
-    guarded(ctx, || {
-        ctx.record("read", f.kind, offset, amount.into(), rc)
-    })
+    ctx.record("read", f.kind, offset, amount.into(), rc)
 }
 
 unsafe fn file_event(file: *mut ffi::sqlite3_file, op: &'static str, a: i64, rc: i32) -> i32 {
