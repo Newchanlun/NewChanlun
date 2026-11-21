@@ -1,6 +1,6 @@
 ============================= test session starts ==============================
 platform darwin -- Python 3.12.13, pytest-9.0.3, pluggy-1.6.0 -- /opt/homebrew/opt/python@3.12/bin/python3.12
-rootdir: /private/tmp/wt-2129-r1
+rootdir: /private/tmp/wt-2129-r2
 configfile: pyproject.toml
 plugins: timeout-2.4.0
 collecting ... collected 6 items
@@ -19,4 +19,4 @@ tests/test_retired_references.py::test_whole_archived_directories_remain_checked
     self._warn_or_fail_if_strict(f"Unknown config option: {key}\n")
 
 -- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
-========================= 6 passed, 1 warning in 3.76s =========================
+========================= 6 passed, 1 warning in 3.75s =========================

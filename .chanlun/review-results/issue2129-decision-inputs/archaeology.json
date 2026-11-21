@@ -68,7 +68,7 @@
           "channel": "tracker",
           "query": "authorized_sources OR current-recovery",
           "command": "gh issue list --repo Newchanlun/NewChanlun --search 'authorized_sources OR current-recovery' --state all --limit 40 --json number,title,state --jq '.[] | [.number,.state,.title]|@tsv'",
-          "hits": 8
+          "hits": 9
         },
         {
           "channel": "repo",

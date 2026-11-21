@@ -1,13 +1,13 @@
 diff --git a/docs/adr/0073-simulation-x-recovery-authority-binding.md b/docs/adr/0073-simulation-x-recovery-authority-binding.md
 new file mode 100644
-index 0000000..14fddde
+index 0000000..2d708a6
 --- /dev/null
 +++ b/docs/adr/0073-simulation-x-recovery-authority-binding.md
 @@ -0,0 +1,85 @@
 +# ADR 0073：simulation X 凭域恢复回执续接权威纪元
 +
 +> 正本：本文件规定完整历史会话在 E/S 正式恢复后，simulation X 如何续接同一权威。
-+> 最后裁定：[#2129](https://github.com/Newchanlun/NewChanlun/issues/2129)（2026-11-21，T 类候选，待独审）。
++> 最后裁定：[#2129](https://github.com/Newchanlun/NewChanlun/issues/2129)（2026-11-21，T 类，依 #1323 Notes N-1 预授权判定；代理独审裁定，非 UserSigned）。
 +> 受影响代码清单：见文末。
 +
 +## 问题
@@ -84,8 +84,8 @@ index 0000000..14fddde
 +
 +本条依 #1323 Notes N-1 预授权判定。用户 2026-10-18 原话：「其实很多技术的东西 完全不需要我来做 我完全信任你的判断」。本票只为正式历史双跑选择有原件证明的恢复 seam，未开启真实场所调用、实盘权限或新资金政策；候选需非作者 R1–R8 独审通过才可落地。
 +
-+受影响代码行号：
++受影响代码行号（未单列基线的路径以 `b9d898dccf46c2a716115eaa1215bc39c458a959` 为准）：
 +
-+- X 接口、接纳与恢复：`rust/src/bin/x_execution_session.rs:118–162、:202–234`；`rust/src/history_simulation/runtime.rs:28–95、:296–448、:468–528、:594–640、:682–750、:790–857、:866–941`（区分当前/历史绑定、写前证据、幂等、启动及输出）。
++- X 接口、接纳与恢复：`rust/src/bin/x_execution_session.rs:118–162、:202–234`；`rust/src/history_simulation/runtime.rs:28–95、:296–448、:468–528、:594–640、:682–750、:790–864、:866–941`（区分当前/历史绑定、写前证据、幂等、启动及输出）。
 +- E 来源与历史：`rust/src/economic_session/store.rs:299–306、:355–395、:797–805、:993–1004`；[E 目标代检查与原收据](https://github.com/Newchanlun/NewChanlun/blob/329be34f5a9ca9c2bcc38ae75783304cc654904c/rust/src/economic_session/finance.rs#L2347-L2407)，[E 具名 CLI](https://github.com/Newchanlun/NewChanlun/blob/329be34f5a9ca9c2bcc38ae75783304cc654904c/rust/src/economic_session/service.rs#L1570-L1636)，[具名回执](https://github.com/Newchanlun/NewChanlun/blob/329be34f5a9ca9c2bcc38ae75783304cc654904c/rust/src/economic_session/recovery.rs#L81-L152)（后三项为 #2082 基线）。
-+- launcher 装配：[核当前回执](https://github.com/Newchanlun/NewChanlun/blob/329be34f5a9ca9c2bcc38ae75783304cc654904c/rust/src/bin/production_session.rs#L249-L342)、[E/B 有效代与 X 启动](https://github.com/Newchanlun/NewChanlun/blob/329be34f5a9ca9c2bcc38ae75783304cc654904c/rust/src/bin/production_session.rs#L553-L599)（#2082 基线）；S 的接缝消费 #2128，保留本域 gate。现有夹具入口：`rust/src/economic_session/exact_x_e2e_tests.rs:227–285`、`rust/tests/history_simulation_entry.rs:3–26`、`rust/tests/production_session_entry.rs`。
++- launcher 装配：[核当前回执](https://github.com/Newchanlun/NewChanlun/blob/329be34f5a9ca9c2bcc38ae75783304cc654904c/rust/src/bin/production_session.rs#L249-L342)、[E/B 有效代与 X 启动](https://github.com/Newchanlun/NewChanlun/blob/329be34f5a9ca9c2bcc38ae75783304cc654904c/rust/src/bin/production_session.rs#L553-L595)（#2082 基线）；S 的接缝消费 #2128，保留本域 gate。现有夹具入口：`rust/src/economic_session/exact_x_e2e_tests.rs:228–284`、`rust/tests/history_simulation_entry.rs:3–33`、`rust/tests/production_session_entry.rs`。

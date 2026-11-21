@@ -29,7 +29,7 @@ E/S 恢复升代后，X 冻结的权威代与 E 的授权来源怎样跟随
 
 | 路 | 查询词 | 命令 | 命中数 |
 |---|---|---|---|
-| tracker | authorized_sources OR current-recovery | `gh issue list --repo Newchanlun/NewChanlun --search 'authorized_sources OR current-recovery' --state all --limit 40 --json number,title,state --jq '.[] \| [.number,.state,.title]\|@tsv'` | 8 |
+| tracker | authorized_sources OR current-recovery | `gh issue list --repo Newchanlun/NewChanlun --search 'authorized_sources OR current-recovery' --state all --limit 40 --json number,title,state --jq '.[] \| [.number,.state,.title]\|@tsv'` | 9 |
 | repo | authorized_sources\|来源纪元\|producer_epoch\|单写者 | `git grep -n -E 'authorized_sources\|来源纪元\|producer_epoch\|单写者' b9d898dccf46c2a716115eaa1215bc39c458a959 -- docs/adr .chanlun analysis` | 128 |
 
 命中：
