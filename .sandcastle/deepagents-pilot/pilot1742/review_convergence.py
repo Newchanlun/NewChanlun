@@ -1975,28 +1975,23 @@ def _extract_atx_heading_text(rest: str) -> str:
     return content
 
 
-def _split_gfm_table_row(line: str, *, require_pipe: bool) -> list[str] | None:
-    """按 GFM §4.10 将表格行拆分为单元格列表。
+def _split_gfm_table_row(line: str, *, require_pipe: bool = True) -> list[str] | None:
+    """按 GFM §4.10 / `pandoc -f gfm` 规则将表格行拆分为单元格列表。
 
     - 剥离首尾 ASCII 空格/制表符；
-    - 仅将前面连续反斜杠个数为偶数的 `|` 视作未转义分隔符（奇数个为转义 `\\|`）；
+    - 索引 `idx` 处的 `|` 被转义，当且仅当紧邻前字符为 `\\`（`idx > 0 and stripped[idx - 1] == "\\"`）；
     - 若 `require_pipe=True` 且全行不存在未转义 `|`，返回 None；
-    - 剥离首部单个未转义 `|` 与尾部单个未转义 `|`（尾部转义 `\\|` 不剥离）；
+    - 剥离首部单个未转义 `|` 与尾部单个未转义 `|`（尾部紧邻 `\\` 的 `|` 不剥离）；
     - 按剩余未转义 `|` 切分单元格，每格去除首尾 ASCII 空格/制表符并将 `\\|` 还原为 `|`。
     """
     stripped = line.strip(" \t")
     if not stripped:
         return None if require_pipe else []
-    pipe_positions: list[int] = []
-    for idx, ch in enumerate(stripped):
-        if ch == "|":
-            bs_count = 0
-            j = idx - 1
-            while j >= 0 and stripped[j] == "\\":
-                bs_count += 1
-                j -= 1
-            if bs_count % 2 == 0:
-                pipe_positions.append(idx)
+    pipe_positions: list[int] = [
+        idx
+        for idx, ch in enumerate(stripped)
+        if ch == "|" and not (idx > 0 and stripped[idx - 1] == "\\")
+    ]
     if require_pipe and not pipe_positions:
         return None
     if len(pipe_positions) == 1 and len(stripped) == 1:
@@ -2027,28 +2022,6 @@ def _is_gfm_table_delimiter_row(line: str, expected_cols: int) -> bool:
     if cells is None or len(cells) != expected_cols:
         return False
     return all(_GFM_TABLE_DELIM_CELL_RE.fullmatch(cell) is not None for cell in cells)
-
-
-def _can_interrupt_gfm_table(rest: str) -> bool:
-    """判定缩进 <= 3 的非空行是否开启可打断 GFM 表格的块级元素。"""
-    if rest.startswith(">"):
-        return True
-    if _ATX_HEADING_BODY_RE.match(rest) is not None:
-        return True
-    if _FENCE_OPEN_BACKTICK_BODY_RE.match(rest) is not None or _FENCE_OPEN_TILDE_BODY_RE.match(rest) is not None:
-        return True
-    if _match_html_block_start(rest, allow_type7=False) is not None:
-        return True
-    if _THEMATIC_BREAK_BODY_RE.match(rest) is not None:
-        return True
-    list_match = _LIST_ITEM_MARKER_BODY_RE.match(rest)
-    if list_match is not None:
-        marker_width = list_match.end()
-        is_bullet = list_match.group("bullet") is not None
-        ordered_num = int(list_match.group("num")) if not is_bullet else 0
-        is_empty_item = not rest[marker_width:].strip(" \t")
-        return (not is_empty_item) and (is_bullet or ordered_num == 1)
-    return False
 
 
 def _is_html_suppressed(state: _HtmlSuppressState) -> bool:
@@ -2173,23 +2146,11 @@ def _parse_commonmark_blocks(
                 if cursor.is_blank():
                     close_leaf()
                     continue
-                if cursor.indent_ahead() <= 3:
-                    saved = cursor.save()
-                    cursor.advance_cols(cursor.indent_ahead())
-                    if _can_interrupt_gfm_table(cursor.rest_text()):
-                        cursor.restore(saved)
-                        close_leaf()
-                    else:
-                        cursor.restore(saved)
-                        row_cells = _split_gfm_table_row(cursor.rest_text(), require_pipe=False)
-                        if row_cells is not None:
-                            leaf.body_rows.append(tuple(row_cells[: len(leaf.header_cells)]))
-                        continue
-                else:
-                    row_cells = _split_gfm_table_row(cursor.rest_text(), require_pipe=False)
-                    if row_cells is not None:
-                        leaf.body_rows.append(tuple(row_cells[: len(leaf.header_cells)]))
+                row_cells = _split_gfm_table_row(cursor.rest_text(), require_pipe=True)
+                if row_cells is not None:
+                    leaf.body_rows.append(tuple(row_cells[: len(leaf.header_cells)]))
                     continue
+                close_leaf()
 
         if matched < len(containers) and not isinstance(leaf, _Paragraph):
             close_unmatched(matched)
@@ -3999,17 +3960,151 @@ def _format_location(finding: Finding) -> str:
     return f"{norm_file}:{finding.line}" if finding.line is not None else norm_file
 
 
+def _wrap_markdown_code_span(text: str) -> str:
+    """按 CommonMark §6.1 用最短安全反引号序列将单行字面文本包裹为行内代码。"""
+    single = re.sub(r"[\r\n]+", " ", text)
+    max_run = max((len(m.group(0)) for m in re.finditer(r"`+", single)), default=0)
+    fence = "`" * (max_run + 1)
+    if (
+        single.startswith("`")
+        or single.endswith("`")
+        or (single.startswith(" ") and single.endswith(" ") and bool(single.strip(" ")))
+    ):
+        return f"{fence} {single} {fence}"
+    return f"{fence}{single}{fence}"
+
+
+def _has_visible_inline_gfm_text(single_line: str) -> tuple[bool, bool]:
+    """判定单行文本作为行内内容渲染时：(是否含可见基字符, 扫描结束后是否泄漏未闭合 HTML 抑制态)。"""
+    state = _HtmlSuppressState(suppressed_tags=_SILENT_INLINE_HTML_TAGS)
+    visible = False
+    for line_tokens in _scan_inline_dual(single_line, frozenset(), state):
+        display_text = "".join(d_part for _, d_part in line_tokens)
+        if _clean_display_reason(display_text):
+            visible = True
+    return visible, _is_html_suppressed(state)
+
+
+def _format_bullet_markdown_field(
+    label: str,
+    text: str,
+    *,
+    bullet_prefix: str = "  - ",
+    content_indent: str = "    ",
+) -> str:
+    """将 Markdown 字段渲染到子列表项，保全缩进代码块与块级结构并保持单行普通文本原样。"""
+    if "\n" not in text and "\r" not in text:
+        cursor = _LineCursor(text)
+        indent = cursor.indent_ahead()
+        if indent < 4:
+            cursor.advance_cols(indent)
+            rest = cursor.rest_text()
+            is_block_start = (
+                rest.startswith(">")
+                or _ATX_HEADING_BODY_RE.match(rest) is not None
+                or _FENCE_OPEN_BACKTICK_BODY_RE.match(rest) is not None
+                or _FENCE_OPEN_TILDE_BODY_RE.match(rest) is not None
+                or _match_html_block_start(rest, allow_type7=True) is not None
+                or _THEMATIC_BREAK_BODY_RE.match(rest) is not None
+                or _LIST_ITEM_MARKER_BODY_RE.match(rest) is not None
+            )
+            if not is_block_start:
+                visible, suppressed = _has_visible_inline_gfm_text(text)
+                if visible and not suppressed:
+                    return f"{bullet_prefix}{label}{text}"
+
+    indented_lines = [
+        f"{content_indent}{line}" if line else ""
+        for line in _split_commonmark_lines(text)
+    ]
+    return f"{bullet_prefix}{label}\n\n" + "\n".join(indented_lines)
+
+
+def _format_inline_markdown_field(text: str, *, collapse_whitespace: bool = False) -> str:
+    """将 Markdown 字段安全格式化为单行行内文本，防止缩进代码或块级文本在单行位置丧失可见性。"""
+    doc_blocks, _ = _parse_commonmark_blocks(text, include_all_visible_blocks=True)
+    has_code_block = any(kind == "code" for kind, _ in doc_blocks)
+    if not has_code_block and "\n" not in text and "\r" not in text:
+        candidate = _single_line(text) if collapse_whitespace else text
+        visible, suppressed = _has_visible_inline_gfm_text(candidate)
+        if visible and not suppressed:
+            return candidate
+        return _wrap_markdown_code_span(_single_line(text))
+
+    if has_code_block:
+        parts: list[str] = []
+        suppress_state = _HtmlSuppressState(suppressed_tags=_SILENT_INLINE_HTML_TAGS)
+        for kind, block_text in doc_blocks:
+            if kind == "html":
+                visible_chunks: list[str] = []
+                _update_html_suppress_state(block_text, suppress_state, visible_chunks=visible_chunks)
+                html_text = _single_line(" ".join(visible_chunks))
+                if _clean_display_reason(html_text):
+                    parts.append(html_text)
+                continue
+            if _is_html_suppressed(suppress_state):
+                continue
+            if kind == "code":
+                code_single = _single_line(block_text)
+                if _clean_display_reason(code_single):
+                    parts.append(_wrap_markdown_code_span(code_single))
+                continue
+            seg = _single_line(block_text)
+            seg_visible, seg_suppressed = _has_visible_inline_gfm_text(seg)
+            if seg_visible and not seg_suppressed:
+                parts.append(seg)
+            elif seg_visible:
+                parts.append(_wrap_markdown_code_span(seg))
+        if parts:
+            joined = " ".join(parts)
+            joined_visible, joined_suppressed = _has_visible_inline_gfm_text(joined)
+            if joined_visible and not joined_suppressed:
+                return joined
+
+    single = _single_line(text)
+    visible, suppressed = _has_visible_inline_gfm_text(single)
+    if visible and not suppressed:
+        return single
+    return _wrap_markdown_code_span(single)
+
+
+def _clip_formatted_inline(formatted: str, max_len: int) -> str:
+    """在预算上限内安全截断单行 Markdown 片段，若为反引号行内代码则保持闭合反引号完整。"""
+    if len(formatted) <= max_len:
+        return formatted
+    if max_len < 4:
+        return ""
+    if formatted.startswith("`"):
+        k = 0
+        while k < len(formatted) and formatted[k] == "`":
+            k += 1
+        if len(formatted) > 2 * k and formatted.endswith("`" * k):
+            inner = formatted[k:-k]
+            if len(inner) >= 2 and inner.startswith(" ") and inner.endswith(" "):
+                inner = inner[1:-1]
+            for take in range(min(len(inner), max_len - 3), 0, -1):
+                candidate = inner[:take].rstrip()
+                if not candidate:
+                    return ""
+                wrapped = _wrap_markdown_code_span(f"{candidate}…")
+                if len(wrapped) <= max_len:
+                    return wrapped
+            return ""
+    clipped = formatted[: max_len - 1].rstrip()
+    return f"{clipped}…" if clipped else ""
+
+
 def _render_new_blocking_item(vf: VerifiedFinding) -> str:
     f = vf.finding
     fid = f.finding_id
     loc = _format_location(f)
     lines = [
-        f"- `[{fid}]` `{loc}` — **{f.category}**",
-        f"  - 失败场景：{f.failure_scenario}",
-        f"  - 核实证据：{vf.verifier_evidence}",
+        f"- `[{fid}]` `{loc}` — **{_format_inline_markdown_field(f.category)}**",
+        _format_bullet_markdown_field("失败场景：", f.failure_scenario),
+        _format_bullet_markdown_field("核实证据：", vf.verifier_evidence),
     ]
     if f.class_scope:
-        lines.append(f"  - 同类范围：{f.class_scope}")
+        lines.append(_format_bullet_markdown_field("同类范围：", f.class_scope))
     lines.append(f"  - 处置：请在新提交中修复，或回复 `[{fid}] 不修：<理由>`")
     return "\n".join(lines)
 
@@ -4028,7 +4123,9 @@ def _render_compact_new_blocking_item(vf: VerifiedFinding) -> str:
     f = vf.finding
     fid = f.finding_id
     loc = _format_location(f)
-    return f"- `[{fid}]` `{loc}` — {f.category}：{f.failure_scenario}（回复 `[{fid}] 不修：<理由>`）"
+    cat = _format_inline_markdown_field(f.category)
+    scen = _format_inline_markdown_field(f.failure_scenario)
+    return f"- `[{fid}]` `{loc}` — {cat}：{scen}（回复 `[{fid}] 不修：<理由>`）"
 
 
 _COMPACT_DESC_MAX_CHARS = 400
@@ -4044,12 +4141,12 @@ def _render_non_blocking_item(vf: VerifiedFinding) -> str:
     fid = f.finding_id
     loc = _format_location(f)
     lines = [
-        f"- `[{fid}]` [{f.severity.value}] `{loc}` — **{f.category}**",
-        f"  - 失败场景：{f.failure_scenario}",
-        f"  - 核实证据：{vf.verifier_evidence}",
+        f"- `[{fid}]` [{f.severity.value}] `{loc}` — **{_format_inline_markdown_field(f.category)}**",
+        _format_bullet_markdown_field("失败场景：", f.failure_scenario),
+        _format_bullet_markdown_field("核实证据：", vf.verifier_evidence),
     ]
     if f.class_scope:
-        lines.append(f"  - 同类范围：{f.class_scope}")
+        lines.append(_format_bullet_markdown_field("同类范围：", f.class_scope))
     return "\n".join(lines)
 
 
@@ -4062,22 +4159,29 @@ def _render_compact_non_blocking_item(vf: VerifiedFinding, max_item_chars: int) 
     if len(base) > max_item_chars:
         return None
 
-    desc = f"{_single_line(f.category)}：{_single_line(f.failure_scenario)}"
+    cat_fmt = _format_inline_markdown_field(f.category, collapse_whitespace=True)
+    scen_fmt = _format_inline_markdown_field(f.failure_scenario, collapse_whitespace=True)
+    desc = f"{cat_fmt}：{scen_fmt}"
     desc_budget = max_item_chars - len(base) - len(" — ")
     if len(desc) > desc_budget or len(desc) > _COMPACT_DESC_MAX_CHARS:
         cap_desc = min(desc_budget, _COMPACT_DESC_MAX_CHARS)
         if cap_desc >= 4:
-            clipped_desc = desc[: cap_desc - 1].rstrip()
-            if clipped_desc:
-                head = f"{base} — {clipped_desc}…"
+            scen_budget = cap_desc - len(cat_fmt) - 1
+            clipped_scen = _clip_formatted_inline(scen_fmt, scen_budget) if scen_budget >= 4 else ""
+            if clipped_scen:
+                head = f"{base} — {cat_fmt}：{clipped_scen}"
             else:
-                return base
+                clipped_cat = _clip_formatted_inline(cat_fmt, cap_desc)
+                if clipped_cat:
+                    head = f"{base} — {clipped_cat}"
+                else:
+                    return base
         else:
             return base
     else:
         head = f"{base} — {desc}"
 
-    ev = _single_line(vf.verifier_evidence)
+    ev = _format_inline_markdown_field(vf.verifier_evidence, collapse_whitespace=True)
     ev_prefix = "（核实证据："
     ev_suffix = "）"
     ev_budget = max_item_chars - len(head) - len(ev_prefix) - len(ev_suffix)
@@ -4086,10 +4190,9 @@ def _render_compact_non_blocking_item(vf: VerifiedFinding, max_item_chars: int) 
     if len(ev) <= ev_budget and len(ev) <= _COMPACT_EVIDENCE_MAX_CHARS:
         return f"{head}{ev_prefix}{ev}{ev_suffix}"
     cap = min(ev_budget, _COMPACT_EVIDENCE_MAX_CHARS)
-    if cap >= 4:
-        clipped_ev = ev[: cap - 1].rstrip()
-        if clipped_ev:
-            return f"{head}{ev_prefix}{clipped_ev}…{ev_suffix}"
+    clipped_ev = _clip_formatted_inline(ev, cap)
+    if clipped_ev:
+        return f"{head}{ev_prefix}{clipped_ev}{ev_suffix}"
     return head
 
 
@@ -4121,14 +4224,22 @@ def _render_blocking_section_with_budget(
         if vf.finding.finding_id not in postable_ids:
             continue
         f = vf.finding
-        suffix = f" — {f.category}：{f.failure_scenario}"
+        cat_fmt = _format_inline_markdown_field(f.category)
+        scen_fmt = _format_inline_markdown_field(f.failure_scenario)
+        suffix = f" — {cat_fmt}：{scen_fmt}"
         if len(suffix) <= extra_budget:
             minimal_lines[idx] += suffix
             extra_budget -= len(suffix)
         elif extra_budget >= 4:
-            clipped = suffix[: extra_budget - 1].rstrip()
-            if clipped:
-                minimal_lines[idx] += f"{clipped}…"
+            content_budget = extra_budget - len(" — ")
+            scen_budget = content_budget - len(cat_fmt) - 1
+            clipped_scen = _clip_formatted_inline(scen_fmt, scen_budget) if scen_budget >= 4 else ""
+            if clipped_scen:
+                minimal_lines[idx] += f" — {cat_fmt}：{clipped_scen}"
+            else:
+                clipped_cat = _clip_formatted_inline(cat_fmt, content_budget)
+                if clipped_cat:
+                    minimal_lines[idx] += f" — {clipped_cat}"
             extra_budget = 0
 
     return f"{header}\n\n{section_header}" + "\n".join(minimal_lines) + note
@@ -4199,13 +4310,19 @@ def render_findings_comment(
     if decision.resolved_findings or decision.rejected_findings:
         for vf in decision.resolved_findings:
             label = "已修复" if vf.verdict == VerificationVerdict.RESOLVED_BY_FIX else "作者确认不修"
-            reply_note = f"（理由：{vf.author_reply.reason}）" if vf.author_reply is not None else ""
+            reply_note = (
+                f"（理由：{_format_inline_markdown_field(vf.author_reply.reason)}）"
+                if vf.author_reply is not None
+                else ""
+            )
+            ev_inline = _format_inline_markdown_field(vf.verifier_evidence)
             disposition_lines.append(
-                f"- `[{vf.finding.finding_id}]` `{_format_location(vf.finding)}` — {label}{reply_note}：{vf.verifier_evidence}"
+                f"- `[{vf.finding.finding_id}]` `{_format_location(vf.finding)}` — {label}{reply_note}：{ev_inline}"
             )
         for vf in decision.rejected_findings:
+            ev_inline = _format_inline_markdown_field(vf.verifier_evidence)
             disposition_lines.append(
-                f"- `[{vf.finding.finding_id}]` `{_format_location(vf.finding)}` — 核实驳回：{vf.verifier_evidence}"
+                f"- `[{vf.finding.finding_id}]` `{_format_location(vf.finding)}` — 核实驳回：{ev_inline}"
             )
     disposition_section = (
         "### 已解除与核实驳回摘要\n\n" + "\n".join(disposition_lines) if disposition_lines else ""

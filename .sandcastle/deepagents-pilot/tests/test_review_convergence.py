@@ -25,6 +25,8 @@ from pilot1742.review_convergence import (
     VerificationVerdict,
     VerifiedFinding,
     VerifiedRound,
+    _has_visible_gfm_text,
+    _parse_commonmark_blocks,
     accept_quick_pass_findings,
     bind_author_replies,
     build_round_candidates,
@@ -7249,7 +7251,7 @@ def test_r16_gfm_pipe_table_visibility_and_wontfix_isolation() -> None:
         "| &#8203; |\n| --- |\n| ~~&#8203;~~ |",
         "[x]: /demo\n\n| [&#8203;][x] |\n| --- |",
         "<template>\n\n| visible |\n| --- |\n\n</template>",
-        "| &#8203; |\n| --- |\n    <!-- hidden -->",
+        "| &#8203; |\n| --- |\n    <!-- hidden --> | extra",
         "| &#8203; |\n| --- |\n| <script>alert(1)</script> |",
     )
     for bad_table in invisible_table_samples:
@@ -7300,6 +7302,7 @@ def test_r16_gfm_pipe_table_visibility_and_wontfix_isolation() -> None:
         "| &#8203; | &#8203; |\n| --- | --- |\n| x\\\\| y |",
         "| &#8203; |\n| --- |\n| x\\\\\\| |",
         "| &#8203; |\n| --- |\n| x\\|",
+        "| &#8203; |\n| --- |\n    <!-- hidden -->",
         "| demo.py:42\n| ---",
         "demo.py:42 |\n--- |",
         "> | demo.py:42 |\n> | --- |",
@@ -7337,12 +7340,12 @@ def test_r16_gfm_pipe_table_visibility_and_wontfix_isolation() -> None:
         {
             "id": 9203,
             "user": {"login": "alice", "type": "User"},
-            "body": "| a | b |\n| --- | --- |\ndemo.py:42 不修：无竖线表体续行",
+            "body": "| a |\n| --- |\n    demo.py:42 不修：x | y",
         },
         {
             "id": 9204,
             "user": {"login": "alice", "type": "User"},
-            "body": "| a |\n| --- |\n    demo.py:42 不修：4空格缩进不打断表格",
+            "body": "| a |\n| --- |\n    demo.py:42 不修：表格闭合后的4空格缩进代码",
         },
         {
             "id": 9205,
@@ -7357,7 +7360,7 @@ def test_r16_gfm_pipe_table_visibility_and_wontfix_isolation() -> None:
     ]
     assert parse_wontfix_replies(table_only_comments, allowed_authors={"alice"}) == ()
 
-    # 表格闭合后的正文段落、打断表格的列表项均正常解析为回复
+    # 表格闭合后的正文段落、无竖线续行及打断表格的列表项均正常解析为回复
     after_table_replies = parse_wontfix_replies(
         [
             {
@@ -7375,6 +7378,11 @@ def test_r16_gfm_pipe_table_visibility_and_wontfix_isolation() -> None:
                 "user": {"login": "alice", "type": "User"},
                 "body": "| a |\n| --- |\n1. demo.py:42 不修：有序列表打断表格",
             },
+            {
+                "id": 9214,
+                "user": {"login": "alice", "type": "User"},
+                "body": "| a | b |\n| --- | --- |\ndemo.py:42 不修：无竖线立即闭合表格",
+            },
         ],
         allowed_authors={"alice"},
     )
@@ -7382,6 +7390,7 @@ def test_r16_gfm_pipe_table_visibility_and_wontfix_isolation() -> None:
         ("9211", "demo.py", 42, "正文理由"),
         ("9212", "demo.py", 42, "无序列表打断表格"),
         ("9213", "demo.py", 42, "有序列表打断表格"),
+        ("9214", "demo.py", 42, "无竖线立即闭合表格"),
     ]
 
 
@@ -7440,6 +7449,11 @@ def test_r16_indented_code_preserves_leading_indent_across_all_markdown_entries(
         rendered = render_findings_comment(1928, HEAD_1, dec_blocked)
         assert parse_comment_marker(rendered.body) == (1928, 1, HEAD_1)
         assert good_code in rendered.body
+        rendered_blocks, _ = _parse_commonmark_blocks(rendered.body, include_all_visible_blocks=True)
+        expected_literal = good_code.lstrip(" \t")
+        code_blocks = [txt for kind, txt in rendered_blocks if kind == "code"]
+        assert code_blocks.count(expected_literal) == 2
+        assert _has_visible_gfm_text(rendered.body)
         hist_entry = dec_blocked.to_history_entry(rendered=rendered)
         assert fid in hist_entry.posted_fingerprints
 
@@ -7454,6 +7468,9 @@ def test_r16_indented_code_preserves_leading_indent_across_all_markdown_entries(
         assert vr_rejected.verdicts[0].verifier_evidence == good_code
         dec_pass = evaluate_round(vr_rejected)
         assert dec_pass.outcome == RoundOutcome.PASS
+        rendered_pass = render_findings_comment(1928, HEAD_1, dec_pass)
+        assert f"`{expected_literal}`" in rendered_pass.body
+        assert _has_visible_gfm_text(rendered_pass.body)
 
     f_base = _finding(severity=Severity.IMPORTANT, file="pilot1742/demo.py", line=42)
     cand_base = _candidates([f_base])
@@ -7519,3 +7536,289 @@ def test_r16_indented_code_preserves_leading_indent_across_all_markdown_entries(
                 cand_base,
                 verifier_model="claude-opus-5-5",
             )
+
+
+def test_r17_gfm_table_escape_continuation_and_comment_visibility() -> None:
+    """R17 回归：覆盖反斜杠紧邻竖线转义、无未转义竖线即闭合表格，以及评论全路径缩进代码可读性保全。"""
+    # --- Important 1: GFM 表格紧邻前字符 `\` 转义判定 ---
+    escaped_pipe_table_comments = [
+        {
+            "id": 9701,
+            "user": {"login": "alice", "type": "User"},
+            "body": "a\\|b | c\n--- | ---\ndemo.py:42 不修：表内示例 | A",
+        },
+        {
+            "id": 9702,
+            "user": {"login": "alice", "type": "User"},
+            "body": "a\\\\|b | c\n--- | ---\ndemo.py:42 不修：表内示例 | A",
+        },
+        {
+            "id": 9703,
+            "user": {"login": "alice", "type": "User"},
+            "body": "a\\\\\\|b | c\n--- | ---\ndemo.py:42 不修：表内示例 | A",
+        },
+        {
+            "id": 9704,
+            "user": {"login": "alice", "type": "User"},
+            "body": "a\\\\\\\\|b | c\n--- | ---\ndemo.py:42 不修：表内示例 | A",
+        },
+        {
+            "id": 9705,
+            "user": {"login": "alice", "type": "User"},
+            "body": "| a\\\\|\n| --- |\n| demo.py:42 不修：末尾转义竖线单列表 |",
+        },
+    ]
+    assert parse_wontfix_replies(escaped_pipe_table_comments, allowed_authors={"alice"}) == ()
+
+    f_probe = _finding(severity=Severity.IMPORTANT, file="pilot1742/demo.py", line=42)
+    cand_probe = _candidates([f_probe])
+    # 1 列表格内 `\\|` 仍被转义，不会误切成 2 列而丢弃可见文本
+    for ev in (
+        "| &#8203; |\n| --- |\n| &#8203;\\\\| visible |",
+        "| &#8203; |\n| --- |\n| a\\\\|",
+    ):
+        vr = parse_verifier_output(
+            _verifier_payload(cand_probe, [{"finding_id": f_probe.finding_id, "verdict": "rejected", "verifier_evidence": ev}]),
+            cand_probe,
+            verifier_model="claude-opus-5-5",
+        )
+        assert vr.verdicts[0].verifier_evidence == ev
+
+    # --- Important 2: 含未转义 `|` 才续接表体，无 `|` 立即闭合表格 ---
+    cont_replies = parse_wontfix_replies(
+        [
+            {
+                "id": 9711,
+                "user": {"login": "alice", "type": "User"},
+                "body": "| &#8203; |\n| --- |\n2. demo.py:42 不修：保留旧接口",
+            },
+            {
+                "id": 9712,
+                "user": {"login": "alice", "type": "User"},
+                "body": "| a |\n| --- |\ndemo.py:42 不修：仅含转义竖线 a\\|b",
+            },
+            {
+                "id": 9713,
+                "user": {"login": "alice", "type": "User"},
+                "body": "| a |\n| --- |\ndemo.py:42 不修：无竖线普通段落",
+            },
+        ],
+        allowed_authors={"alice"},
+    )
+    assert [(r.comment_id, r.file, r.line, r.reason) for r in cont_replies] == [
+        ("9711", "demo.py", 42, "保留旧接口"),
+        ("9712", "demo.py", 42, "仅含转义竖线 a|b"),
+        ("9713", "demo.py", 42, "无竖线普通段落"),
+    ]
+
+    still_in_table_comments = [
+        {
+            "id": 9721,
+            "user": {"login": "alice", "type": "User"},
+            "body": "| a |\n| --- |\n    demo.py:42 不修：x | y",
+        },
+        {
+            "id": 9722,
+            "user": {"login": "alice", "type": "User"},
+            "body": "| a |\n| --- |\n2. demo.py:42 不修：x | y",
+        },
+        {
+            "id": 9723,
+            "user": {"login": "alice", "type": "User"},
+            "body": "| a |\n| --- |\n- demo.py:42 不修：x | y",
+        },
+        {
+            "id": 9724,
+            "user": {"login": "alice", "type": "User"},
+            "body": "| a |\n| --- |\n> demo.py:42 不修：x | y",
+        },
+        {
+            "id": 9725,
+            "user": {"login": "alice", "type": "User"},
+            "body": "| a |\n| --- |\n# demo.py:42 不修：x | y",
+        },
+    ]
+    assert parse_wontfix_replies(still_in_table_comments, allowed_authors={"alice"}) == ()
+
+    # 表格后无 `|` 缩进代码块闭合表格并成为可见代码块；含未转义 `|` 留在表体行则第 2 列丢弃、整段不可见
+    vr_table_code = parse_verifier_output(
+        _verifier_payload(
+            cand_probe,
+            [{"finding_id": f_probe.finding_id, "verdict": "rejected", "verifier_evidence": "| &#8203; |\n| --- |\n    <!-- hidden -->"}],
+        ),
+        cand_probe,
+        verifier_model="claude-opus-5-5",
+    )
+    assert vr_table_code.verdicts[0].verifier_evidence == "| &#8203; |\n| --- |\n    <!-- hidden -->"
+    with pytest.raises(ConvergenceError):
+        parse_verifier_output(
+            _verifier_payload(
+                cand_probe,
+                [{"finding_id": f_probe.finding_id, "verdict": "rejected", "verifier_evidence": "| &#8203; |\n| --- |\n    <!-- hidden --> | extra"}],
+            ),
+            cand_probe,
+            verifier_model="claude-opus-5-5",
+        )
+
+    # --- Important 3: render_findings_comment 全路径保全缩进代码与块级可见性 ---
+    indented_cases = (
+        ("    <!-- hidden -->", "<!-- hidden -->"),
+        ("\t<!-- hidden -->", "<!-- hidden -->"),
+        ("    &#x3164;", "&#x3164;"),
+        ("\t&#x3164;", "&#x3164;"),
+        ("    <span></span>", "<span></span>"),
+    )
+    for raw_code, literal in indented_cases:
+        f_imp = _finding(
+            severity=Severity.IMPORTANT,
+            file="pilot1742/demo.py",
+            line=42,
+            category="阻断缩进",
+            failure_scenario=raw_code,
+            evidence=raw_code,
+        )
+        f_nit = _finding(
+            severity=Severity.NIT,
+            file="pilot1742/demo.py",
+            line=50,
+            category="非阻断缩进",
+            failure_scenario=raw_code,
+            evidence=raw_code,
+        )
+        f_fix = _finding(
+            severity=Severity.IMPORTANT,
+            file="pilot1742/demo.py",
+            line=60,
+            category="已修复项",
+            failure_scenario="修复前触发异常",
+            evidence="修复前堆栈",
+        )
+        f_rej = _finding(
+            severity=Severity.IMPORTANT,
+            file="pilot1742/demo.py",
+            line=70,
+            category="核实驳回项",
+            failure_scenario="疑似空值",
+            evidence="疑似路径",
+        )
+        # R1 先产生 f_fix 阻断项，再进 R2 验证 resolved_by_fix 与 rejected/confirmed/nit 的完整评论渲染
+        c_r1 = build_round_candidates(
+            round_number=1,
+            head_sha=HEAD_1,
+            panel=DEFAULT_PANEL,
+            finder_batches=_batches_for_panel([f_fix], round_number=1, head_sha=HEAD_1),
+        )
+        v_r1 = parse_verifier_output(
+            _verifier_payload(c_r1, [{"finding_id": f_fix.finding_id, "verdict": "confirmed", "verifier_evidence": "R1 确证"}]),
+            c_r1,
+            verifier_model="claude-opus-5-5",
+        )
+        d_r1 = evaluate_round(v_r1)
+        e_r1 = d_r1.to_history_entry(rendered=render_findings_comment(1928, HEAD_1, d_r1))
+        plan_r2 = plan_next_round(BASE_SHA, HEAD_2, [e_r1])
+        cand_all = build_round_candidates(
+            round_number=2,
+            head_sha=HEAD_2,
+            panel=DEFAULT_PANEL,
+            finder_batches=_batches_for_panel([f_imp, f_nit, f_rej], round_number=2, head_sha=HEAD_2),
+            history=plan_r2.history,
+        )
+        vr_all = parse_verifier_output(
+            _verifier_payload(
+                cand_all,
+                [
+                    {"finding_id": f_imp.finding_id, "verdict": "confirmed", "verifier_evidence": raw_code},
+                    {"finding_id": f_nit.finding_id, "verdict": "confirmed", "verifier_evidence": raw_code},
+                    {"finding_id": f_fix.finding_id, "verdict": "resolved_by_fix", "verifier_evidence": raw_code},
+                    {"finding_id": f_rej.finding_id, "verdict": "rejected", "verifier_evidence": raw_code},
+                ],
+            ),
+            cand_all,
+            verifier_model="claude-opus-5-5",
+        )
+        dec_all = evaluate_round(vr_all)
+
+        # 1) 全量渲染：阻断项与非阻断项均保留嵌套缩进代码块，已解除/驳回摘要使用安全行内代码
+        full_rendered = render_findings_comment(1928, HEAD_2, dec_all)
+        assert not full_rendered.truncated
+        full_blocks, _ = _parse_commonmark_blocks(full_rendered.body, include_all_visible_blocks=True)
+        code_block_texts = [txt.strip("\n") for kind, txt in full_blocks if kind == "code"]
+        # f_imp (失败场景+核实证据) + f_nit (失败场景+核实证据) = 4 个嵌套缩进代码块
+        assert code_block_texts.count(literal) == 4
+        assert f"已修复：`{literal}`" in full_rendered.body
+        assert f"核实驳回：`{literal}`" in full_rendered.body
+        assert _has_visible_gfm_text(full_rendered.body)
+
+        # 2) 非阻断项紧凑降级渲染（预算容得下完整阻断项，但逼迫非阻断项降级为紧凑单行）
+        f_nit_long = _finding(
+            severity=Severity.NIT,
+            file="pilot1742/demo.py",
+            line=51,
+            category="超长非阻断",
+            failure_scenario=raw_code,
+            evidence=raw_code,
+            class_scope="同类范围：" + ("X" * 300),
+        )
+        cand_nb_compact = _candidates([f_imp, f_nit_long])
+        vr_nb_compact = parse_verifier_output(
+            _verifier_payload(
+                cand_nb_compact,
+                [
+                    {"finding_id": f_imp.finding_id, "verdict": "confirmed", "verifier_evidence": raw_code},
+                    {"finding_id": f_nit_long.finding_id, "verdict": "confirmed", "verifier_evidence": raw_code},
+                ],
+            ),
+            cand_nb_compact,
+            verifier_model="claude-opus-5-5",
+        )
+        dec_nb_compact = evaluate_round(vr_nb_compact)
+        full_nb_len = len(render_findings_comment(1928, HEAD_1, dec_nb_compact).body)
+        compact_nb_rendered = render_findings_comment(1928, HEAD_1, dec_nb_compact, max_chars=full_nb_len - 80)
+        assert compact_nb_rendered.truncated
+        assert f_nit_long.finding_id in compact_nb_rendered.posted_fingerprints
+        assert f"超长非阻断：`{literal}`" in compact_nb_rendered.body
+        assert f"（核实证据：`{literal}`）" in compact_nb_rendered.body
+
+        # 3) 阻断项紧凑降级与极紧预算截断（_render_compact_new_blocking_item & _render_blocking_section_with_budget）
+        cand_imp_only = _candidates([f_imp])
+        vr_imp_only = parse_verifier_output(
+            _verifier_payload(
+                cand_imp_only,
+                [{"finding_id": f_imp.finding_id, "verdict": "confirmed", "verifier_evidence": raw_code}],
+            ),
+            cand_imp_only,
+            verifier_model="claude-opus-5-5",
+        )
+        dec_imp_only = evaluate_round(vr_imp_only)
+        full_imp_len = len(render_findings_comment(1928, HEAD_1, dec_imp_only).body)
+        # 触发紧凑单行阻断渲染
+        compact_imp_rendered = render_findings_comment(1928, HEAD_1, dec_imp_only, max_chars=full_imp_len - 10)
+        assert compact_imp_rendered.truncated
+        assert f"阻断缩进：`{literal}`" in compact_imp_rendered.body
+        # 触发极紧预算截断分支（比紧凑版再短，测试反引号截断仍保持闭合）
+        tight_budget = len(compact_imp_rendered.body) - 25
+        tight_imp_rendered = render_findings_comment(1928, HEAD_1, dec_imp_only, max_chars=tight_budget)
+        assert tight_imp_rendered.truncated
+        assert len(tight_imp_rendered.body) <= tight_budget
+        # 确认无孤立未闭合反引号：每行反引号数均为偶数
+        for rendered_line in tight_imp_rendered.body.split("\n"):
+            assert rendered_line.count("`") % 2 == 0
+
+    # 含反引号的缩进代码在紧凑/摘要路径下按 CommonMark §6.1 使用双反引号包裹
+    backtick_code = "    `<!-- inner -->`"
+    f_bt = _finding(
+        severity=Severity.IMPORTANT,
+        file="pilot1742/demo.py",
+        line=88,
+        category="反引号缩进",
+        failure_scenario=backtick_code,
+        evidence=backtick_code,
+    )
+    cand_bt = _candidates([f_bt])
+    vr_bt = parse_verifier_output(
+        _verifier_payload(cand_bt, [{"finding_id": f_bt.finding_id, "verdict": "rejected", "verifier_evidence": backtick_code}]),
+        cand_bt,
+        verifier_model="claude-opus-5-5",
+    )
+    rendered_bt = render_findings_comment(1928, HEAD_1, evaluate_round(vr_bt))
+    assert "核实驳回：`` `<!-- inner -->` ``" in rendered_bt.body
