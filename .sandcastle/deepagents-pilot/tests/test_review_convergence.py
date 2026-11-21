@@ -543,7 +543,7 @@ def test_parse_verifier_output_binds_candidate_sources_to_panel_and_allows_prior
             verifier_model="claude-opus-5-5",
         )
 
-    # 跨轮继承的 unresolved_prior_important 可通过显式 prior_important_ids 放行其历史 finder 模型，但仍强制异家族
+    # 跨轮继承的 unresolved_prior_important 可通过显式 prior_important_sources 放行其历史真实 finder 模型，但仍强制异家族
     f_prior_kimi = _finding(
         severity=Severity.IMPORTANT,
         file="pilot1742/prior_carry.py",
@@ -557,8 +557,12 @@ def test_parse_verifier_output_binds_candidate_sources_to_panel_and_allows_prior
         HEAD_2,
         [RoundHistoryEntry(1, HEAD_1, frozenset({f_prior_kimi.finding_id}), (f_prior_kimi,))],
     )
-    candidates2 = build_round_candidates(plan2, [])
-    # 未显式传 prior_important_ids 时仍拒绝
+    assert plan2.prior_important_sources == {f_prior_kimi.finding_id: frozenset({"kimi-k3.1-pro"})}
+    with pytest.raises(TypeError):
+        plan2.prior_important_sources["tamper"] = frozenset({"gemini-2.5-pro"})  # type: ignore[index]
+
+    candidates2 = build_round_candidates(plan2, [], panel=panel)
+    # 未显式传 prior_important_sources 时仍拒绝
     with pytest.raises(ConvergenceError):
         parse_verifier_output(
             {"verdicts": [{"finding_id": f_prior_kimi.finding_id, "verdict": "confirmed", "verifier_evidence": "ok"}]},
@@ -566,18 +570,18 @@ def test_parse_verifier_output_binds_candidate_sources_to_panel_and_allows_prior
             panel=panel,
             verifier_model="claude-opus-5-5",
         )
-    # 显式传入 plan2.prior_important_ids 且 verifier 异家族 -> 放行
+    # 显式传入 plan2.prior_important_sources 且 verifier 异家族 -> 放行
     verified_prior = parse_verifier_output(
         {"verdicts": [{"finding_id": f_prior_kimi.finding_id, "verdict": "confirmed", "verifier_evidence": "仍存在"}]},
         candidates2,
         panel=panel,
         verifier_model="claude-opus-5-5",
-        prior_important_ids=plan2.prior_important_ids,
+        prior_important_sources=plan2.prior_important_sources,
     )
     assert len(verified_prior) == 1
     assert verified_prior[0].finding.finding_id == f_prior_kimi.finding_id
 
-    # 若 verifier 与历史 finder 同家族，即便在 prior_important_ids 中也必须拒收
+    # 若 verifier 与历史 finder 同家族，即便在 prior_important_sources 中也必须拒收
     kimi_verifier_panel = ReviewPanel(
         finder_models=("gpt-6.1-sol", "gpt-6.1-sol"),
         verifier_model="kimi-k3.1-pro",
@@ -589,16 +593,16 @@ def test_parse_verifier_output_binds_candidate_sources_to_panel_and_allows_prior
             candidates2,
             panel=kimi_verifier_panel,
             verifier_model="kimi-k3.1-pro",
-            prior_important_ids=plan2.prior_important_ids,
+            prior_important_sources=plan2.prior_important_sources,
         )
 
-    # 非 Important 发现不得借 prior_important_ids 放行面板外模型
+    # 非 Important 发现不得借 prior_important_sources 放行面板外模型
     f_foreign_nit = _finding(
         severity=Severity.NIT,
         file="pilot1742/foreign_nit.py",
         line=5,
         category="面板外 Nit",
-        failure_scenario="非阻断项不得走 prior_important_ids",
+        failure_scenario="非阻断项不得走 prior_important_sources",
         source_models=("gemini-2.5-pro",),
     )
     with pytest.raises(ConvergenceError):
@@ -607,8 +611,104 @@ def test_parse_verifier_output_binds_candidate_sources_to_panel_and_allows_prior
             [f_foreign_nit],
             panel=panel,
             verifier_model="claude-opus-5-5",
-            prior_important_ids=frozenset({f_foreign_nit.finding_id}),
+            prior_important_sources={f_foreign_nit.finding_id: frozenset({"gemini-2.5-pro"})},
         )
+
+
+def test_prior_important_exemption_rejects_new_out_of_panel_source_and_allows_legit_old_finder() -> None:
+    """R4 复审反例：历史豁免仅豁免该指纹的历史真实来源模型，绝不放行本轮新混入的面板外来源。"""
+    panel_r2 = ReviewPanel(
+        finder_models=("gpt-6.1-sol", "gpt-6.1-sol"),
+        verifier_model="claude-opus-5-5",
+        require_verifier=True,
+    )
+
+    # 第 1 轮 gpt-6.1-sol 报 p.py:12
+    f_r1_sol = _finding(
+        severity=Severity.IMPORTANT,
+        file="p.py",
+        line=12,
+        category="状态损坏",
+        failure_scenario="并发写未加锁导致状态回退",
+        evidence="p.py:12 无锁写入",
+        source_models=("gpt-6.1-sol",),
+    )
+    plan2 = plan_next_round(
+        BASE_SHA,
+        HEAD_2,
+        [RoundHistoryEntry(1, HEAD_1, frozenset({f_r1_sol.finding_id}), (f_r1_sol,))],
+    )
+    assert plan2.prior_important_sources == {f_r1_sol.finding_id: frozenset({"gpt-6.1-sol"})}
+
+    # 第 2 轮混入面板外 gemini-2.5-pro 的同指纹发现（p.py:3，更长证据企图篡改行号与证据）
+    f_r2_foreign = _finding(
+        severity=Severity.IMPORTANT,
+        file="p.py",
+        line=3,
+        category="状态损坏",
+        failure_scenario="并发写未加锁导致状态回退",
+        evidence="p.py:3 面板外来源篡改的超长伪造证据内容",
+        source_models=("gemini-2.5-pro",),
+    )
+    assert f_r2_foreign.finding_id == f_r1_sol.finding_id
+
+    # 1) build_round_candidates 传入 panel 时在合并前即拒绝面板外批次或伪造 source_models
+    with pytest.raises(ConvergenceError):
+        build_round_candidates(plan2, [("gemini-2.5-pro", [f_r2_foreign])], panel=panel_r2)
+    with pytest.raises(ConvergenceError):
+        build_round_candidates(plan2, [("gpt-6.1-sol", [f_r2_foreign])], panel=panel_r2)
+
+    # 2) 即使调用方未向 build_round_candidates 传 panel，parse_verifier_output 也必须按逐模型校验拒绝 gemini-2.5-pro
+    merged_tampered = build_round_candidates(plan2, [("gemini-2.5-pro", [f_r2_foreign])])
+    assert merged_tampered[0].source_models == ("gemini-2.5-pro", "gpt-6.1-sol")
+    with pytest.raises(ConvergenceError):
+        parse_verifier_output(
+            {"verdicts": [{"finding_id": f_r1_sol.finding_id, "verdict": "confirmed", "verifier_evidence": "ok"}]},
+            merged_tampered,
+            panel=panel_r2,
+            verifier_model="claude-opus-5-5",
+            prior_important_sources=plan2.prior_important_sources,
+        )
+
+    # 3) 合法历史模型切换：第 1 轮面板曾用旧 finder gpt-6.0-astra，第 2 轮面板换成 gpt-6.1-sol 且仅传当前面板新批次 -> 放行
+    f_r1_old_finder = _finding(
+        severity=Severity.IMPORTANT,
+        file="p.py",
+        line=12,
+        category="状态损坏",
+        failure_scenario="并发写未加锁导致状态回退",
+        evidence="第 1 轮 gpt-6.0-astra 证据",
+        source_models=("gpt-6.0-astra",),
+    )
+    plan2_migrated = plan_next_round(
+        BASE_SHA,
+        HEAD_2,
+        [RoundHistoryEntry(1, HEAD_1, frozenset({f_r1_old_finder.finding_id}), (f_r1_old_finder,))],
+    )
+    f_r2_current_finder = _finding(
+        severity=Severity.IMPORTANT,
+        file="p.py",
+        line=12,
+        category="状态损坏",
+        failure_scenario="并发写未加锁导致状态回退",
+        evidence="第 2 轮 gpt-6.1-sol 补充复现证据",
+        source_models=("gpt-6.1-sol",),
+    )
+    candidates_migrated = build_round_candidates(
+        plan2_migrated,
+        [("gpt-6.1-sol", [f_r2_current_finder])],
+        panel=panel_r2,
+    )
+    assert candidates_migrated[0].source_models == ("gpt-6.0-astra", "gpt-6.1-sol")
+    verified_migrated = parse_verifier_output(
+        {"verdicts": [{"finding_id": f_r1_old_finder.finding_id, "verdict": "confirmed", "verifier_evidence": "仍存在"}]},
+        candidates_migrated,
+        panel=panel_r2,
+        verifier_model="claude-opus-5-5",
+        prior_important_sources=plan2_migrated.prior_important_sources,
+    )
+    assert len(verified_migrated) == 1
+    assert verified_migrated[0].finding.finding_id == f_r1_old_finder.finding_id
 
 
 def test_parse_verifier_output_rejects_invented_missing_duplicate_or_empty_evidence() -> None:
@@ -777,11 +877,11 @@ def test_parse_wontfix_replies_enforces_author_whitelist_and_markdown_isolation(
 
     replies = parse_wontfix_replies(comments, allowed_authors={"alice", "bob"})
     assert len(replies) == 5
-    assert replies[0] == AuthorReply("abc12345", None, None, "上层入口已保证非空", "104", "ALICE")
-    assert replies[1] == AuthorReply("def67890", None, None, "兼容性要求保留旧行为", "104", "ALICE")
-    assert replies[2] == AuthorReply(None, "pilot1742/foo.py", 42, "此处仅用于离线诊断", "104", "ALICE")
-    assert replies[3] == AuthorReply(None, "pilot1742/bar.py", None, "整文件为只读测试夹具", "104", "ALICE")
-    assert replies[4] == AuthorReply(None, "pilot1742/inline.py", 77, "热路径刻意避免额外拷贝", "105", "Bob")
+    assert replies[0] == AuthorReply("abc12345", None, None, "上层入口已保证非空", "104", "ALICE", 0)
+    assert replies[1] == AuthorReply("def67890", None, None, "兼容性要求保留旧行为", "104", "ALICE", 1)
+    assert replies[2] == AuthorReply(None, "pilot1742/foo.py", 42, "此处仅用于离线诊断", "104", "ALICE", 2)
+    assert replies[3] == AuthorReply(None, "pilot1742/bar.py", None, "整文件为只读测试夹具", "104", "ALICE", 3)
+    assert replies[4] == AuthorReply(None, "pilot1742/inline.py", 77, "热路径刻意避免额外拷贝", "105", "Bob", 0)
 
     # 空或非集合 allowed_authors 必须 fail-closed
     with pytest.raises(ConvergenceError):
@@ -858,6 +958,159 @@ def test_parse_wontfix_replies_isolates_list_fences_and_lazy_blockquote_continua
         ("22222222", "围栏闭合后的真实回复", "903"),
         ("44444444", "空行退出引用后的真实回复", "903"),
     ]
+
+
+def test_parse_wontfix_replies_enforces_commonmark_closing_fence_indent_and_list_blockquote_interrupt() -> None:
+    # R4 反例 1a：顶层 ~~~text（container_col=0）内四格缩进 ~~~ 不能闭合围栏 -> 0 条回复
+    top_indented_close = [
+        {
+            "id": 910,
+            "user": {"login": "alice", "type": "User"},
+            "body": "\n".join(
+                [
+                    "~~~text",
+                    "    ~~~",
+                    "[abc12345] 不修：示例",
+                ]
+            ),
+        },
+        {
+            "id": 911,
+            "user": {"login": "alice", "type": "User"},
+            "body": "\n".join(
+                [
+                    "~~~text",
+                    "\t~~~",
+                    "[abc12345] 不修：制表符缩进闭合同样无效",
+                ]
+            ),
+        },
+        {
+            "id": 912,
+            "user": {"login": "alice", "type": "User"},
+            "body": "\n".join(
+                [
+                    "   ~~~text",
+                    "    ~~~",
+                    "[abc12345] 不修：开围栏缩进 3 格时容器列仍为 0，4 格不能闭合",
+                ]
+            ),
+        },
+    ]
+    assert parse_wontfix_replies(top_indented_close, allowed_authors={"alice"}) == ()
+
+    # R4 反例 1b：列表内 - ~~~text（container_col=2），缩进 2 正常闭合；缩进 6（> 2+3）不提前闭合
+    list_close_ok = [
+        {
+            "id": 913,
+            "user": {"login": "alice", "type": "User"},
+            "body": "\n".join(
+                [
+                    "- ~~~text",
+                    "  [11111111] 不修：列表围栏内示例",
+                    "  ~~~",
+                    "[22222222] 不修：2 格缩进闭合后的真实回复",
+                ]
+            ),
+        }
+    ]
+    parsed_list_ok = parse_wontfix_replies(list_close_ok, allowed_authors={"alice"})
+    assert [(r.finding_id, r.reason, r.comment_id) for r in parsed_list_ok] == [
+        ("22222222", "2 格缩进闭合后的真实回复", "913"),
+    ]
+
+    list_close_over_indented = [
+        {
+            "id": 914,
+            "user": {"login": "alice", "type": "User"},
+            "body": "\n".join(
+                [
+                    "- ~~~text",
+                    "      ~~~",
+                    "[33333333] 不修：缩进 6 超过 2+3 不得提前闭合",
+                ]
+            ),
+        }
+    ]
+    assert parse_wontfix_replies(list_close_over_indented, allowed_authors={"alice"}) == ()
+
+    # 列表内临界缩进 5（== 2+3）应正常闭合
+    list_close_boundary = [
+        {
+            "id": 915,
+            "user": {"login": "alice", "type": "User"},
+            "body": "\n".join(
+                [
+                    "- ~~~text",
+                    "     ~~~",
+                    "[44444444] 不修：临界 5 格闭合后的真实回复",
+                ]
+            ),
+        }
+    ]
+    parsed_list_boundary = parse_wontfix_replies(list_close_boundary, allowed_authors={"alice"})
+    assert [(r.finding_id, r.reason) for r in parsed_list_boundary] == [
+        ("44444444", "临界 5 格闭合后的真实回复"),
+    ]
+
+    # R4 反例 2：CommonMark §5.1 列表项中断引用块 vs 惰性续行 vs 引用内列表
+    list_interrupts_quote = [
+        {
+            "id": 920,
+            "user": {"login": "alice", "type": "User"},
+            "body": "\n".join(
+                [
+                    "> 示例",
+                    "- [abc12345] 不修：理由",
+                ]
+            ),
+        },
+        {
+            "id": 921,
+            "user": {"login": "alice", "type": "User"},
+            "body": "\n".join(
+                [
+                    "> 示例",
+                    "1. [def67890] 不修：有序列表同样中断引用",
+                ]
+            ),
+        },
+    ]
+    parsed_interrupt = parse_wontfix_replies(list_interrupts_quote, allowed_authors={"alice"})
+    assert [(r.finding_id, r.reason, r.comment_id) for r in parsed_interrupt] == [
+        ("abc12345", "理由", "920"),
+        ("def67890", "有序列表同样中断引用", "921"),
+    ]
+
+    # 对照 1：普通无列表前缀的惰性引用续行仍返回 0 条
+    lazy_plain_continuation = [
+        {
+            "id": 922,
+            "user": {"login": "alice", "type": "User"},
+            "body": "\n".join(
+                [
+                    "> 示例",
+                    "[abc12345] 不修：理由",
+                ]
+            ),
+        }
+    ]
+    assert parse_wontfix_replies(lazy_plain_continuation, allowed_authors={"alice"}) == ()
+
+    # 对照 2：显式 > 前缀的引用内列表仍返回 0 条
+    quoted_list = [
+        {
+            "id": 923,
+            "user": {"login": "alice", "type": "User"},
+            "body": "\n".join(
+                [
+                    "> 示例",
+                    "> - [abc12345] 不修：理由",
+                ]
+            ),
+        }
+    ]
+    assert parse_wontfix_replies(quoted_list, allowed_authors={"alice"}) == ()
 
 
 def test_parse_wontfix_replies_and_author_reply_require_real_comment_id() -> None:
@@ -999,7 +1252,7 @@ def test_multi_round_convergence_reopen_cannot_reuse_old_wontfix_reply() -> None
         verifier_model="claude-opus-5-5",
         author_replies=plan2.author_replies,
         consumed_reply_keys=plan2.consumed_reply_keys,
-        prior_important_ids=plan2.prior_important_ids,
+        prior_important_sources=plan2.prior_important_sources,
     )
     dec2 = evaluate_round(
         plan2.round_number,
@@ -1116,7 +1369,7 @@ def test_reopen_consumes_all_prior_replies_including_unselected_siblings_and_all
         verifier_model="claude-opus-5-5",
         author_replies=plan2.author_replies,
         consumed_reply_keys=plan2.consumed_reply_keys,
-        prior_important_ids=plan2.prior_important_ids,
+        prior_important_sources=plan2.prior_important_sources,
     )
     assert verified2[0].author_reply is not None
     assert verified2[0].author_reply.comment_id == "102"
@@ -1175,6 +1428,139 @@ def test_reopen_consumes_all_prior_replies_including_unselected_siblings_and_all
     )
     assert verified3[0].author_reply is not None
     assert verified3[0].author_reply.comment_id == "103"
+
+
+def test_reopen_blocks_inline_comment_reuse_even_when_github_diff_line_shifts() -> None:
+    """R4 复审反例：第 2 轮消费行内评论 101（line=12），第 3 轮仅因新提交漂移至 line=13，仍必须拒绝复用。"""
+    f_r1 = _finding(
+        severity=Severity.IMPORTANT,
+        file="pilot1742/shifted.py",
+        line=12,
+        category="边界校验",
+        failure_scenario="缺失前置校验触发异常",
+        evidence="第 12 行未校验输入",
+    )
+    dec1 = evaluate_round(1, [_verified(f_r1, VerificationVerdict.CONFIRMED)])
+    rendered1 = render_findings_comment(1928, HEAD_1, dec1)
+    history = [dec1.to_history_entry(HEAD_1, rendered=rendered1)]
+
+    # 第 2 轮消费行内评论 101（line=12, original_line=12）
+    inline_r2 = [
+        {
+            "id": 101,
+            "user": {"login": "alice", "type": "User"},
+            "path": "pilot1742/shifted.py",
+            "line": 12,
+            "original_line": 12,
+            "body": "不修：上层调用方已保证非空",
+        }
+    ]
+    replies_r2 = parse_wontfix_replies(inline_r2, allowed_authors={"alice"})
+    assert len(replies_r2) == 1
+    assert replies_r2[0].line == 12
+    assert replies_r2[0].directive_index == 0
+
+    plan2 = plan_next_round(BASE_SHA, HEAD_2, history, author_replies=replies_r2)
+    candidates2 = build_round_candidates(plan2, [], panel=DEFAULT_PANEL)
+    verified2 = parse_verifier_output(
+        {
+            "verdicts": [
+                {
+                    "finding_id": f_r1.finding_id,
+                    "verdict": "resolved_by_wontfix",
+                    "verifier_evidence": "核实上层确已校验",
+                }
+            ]
+        },
+        candidates2,
+        panel=DEFAULT_PANEL,
+        verifier_model="claude-opus-5-5",
+        author_replies=plan2.author_replies,
+        consumed_reply_keys=plan2.consumed_reply_keys,
+        prior_important_sources=plan2.prior_important_sources,
+    )
+    dec2 = evaluate_round(plan2.round_number, verified2, already_posted=plan2.already_posted_fingerprints)
+    rendered2 = render_findings_comment(1928, HEAD_2, dec2)
+    entry2 = dec2.to_history_entry(HEAD_2, rendered=rendered2)
+    assert replies_r2[0].reply_key in entry2.consumed_reply_keys
+    history.append(entry2)
+
+    # 第 3 轮新提交把同指纹问题移到第 13 行，GitHub 将未编辑的评论 101 偏移为 line=13, original_line=12
+    f_r3_reopened = _finding(
+        severity=Severity.IMPORTANT,
+        file="pilot1742/shifted.py",
+        line=13,
+        category="边界校验",
+        failure_scenario="缺失前置校验触发异常",
+        evidence="第 13 行未校验输入",
+    )
+    assert f_r3_reopened.finding_id == f_r1.finding_id
+    inline_r3_shifted = [
+        {
+            "id": 101,
+            "user": {"login": "alice", "type": "User"},
+            "path": "pilot1742/shifted.py",
+            "line": 13,
+            "original_line": 12,
+            "body": "不修：上层调用方已保证非空",
+        }
+    ]
+    replies_r3 = parse_wontfix_replies(inline_r3_shifted, allowed_authors={"alice"})
+    assert len(replies_r3) == 1
+    assert replies_r3[0].line == 13
+    assert replies_r3[0].reply_key == replies_r2[0].reply_key
+
+    plan3 = plan_next_round(BASE_SHA, HEAD_3, history, author_replies=replies_r3)
+    assert plan3.author_replies == ()
+    assert (
+        bind_author_replies(
+            [f_r3_reopened],
+            replies_r3,
+            consumed_reply_keys=plan3.consumed_reply_keys,
+        )
+        == {}
+    )
+    with pytest.raises(ConvergenceError):
+        parse_verifier_output(
+            {
+                "verdicts": [
+                    {
+                        "finding_id": f_r3_reopened.finding_id,
+                        "verdict": "resolved_by_wontfix",
+                        "verifier_evidence": "试图借行号漂移复用已消费旧评论 101",
+                    }
+                ]
+            },
+            [f_r3_reopened],
+            panel=DEFAULT_PANEL,
+            verifier_model="claude-opus-5-5",
+            author_replies=replies_r3,
+            consumed_reply_keys=plan3.consumed_reply_keys,
+        )
+
+    # 同一评论 200 内多条指向同文件不同行的不修指令因 directive_index 不同互不冲突
+    f_line10 = _finding(file="pilot1742/multi.py", line=10, category="cat1", failure_scenario="scen1")
+    f_line20 = _finding(file="pilot1742/multi.py", line=20, category="cat2", failure_scenario="scen2")
+    multi_dir_comment = [
+        {
+            "id": 200,
+            "user": {"login": "alice", "type": "User"},
+            "body": (
+                "pilot1742/multi.py:10 不修：第一条理由\n"
+                "pilot1742/multi.py:20 不修：第二条理由\n"
+            ),
+        }
+    ]
+    parsed_multi = parse_wontfix_replies(multi_dir_comment, allowed_authors={"alice"})
+    assert [r.directive_index for r in parsed_multi] == [0, 1]
+    assert parsed_multi[0].reply_key != parsed_multi[1].reply_key
+    bound_after_consuming_first = bind_author_replies(
+        [f_line10, f_line20],
+        parsed_multi,
+        consumed_reply_keys={parsed_multi[0].reply_key},
+    )
+    assert set(bound_after_consuming_first.keys()) == {f_line20.finding_id}
+    assert bound_after_consuming_first[f_line20.finding_id].directive_index == 1
 
 
 def test_resolved_by_fix_and_rejected_also_consume_matching_replies() -> None:

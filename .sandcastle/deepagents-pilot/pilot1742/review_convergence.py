@@ -11,6 +11,7 @@ import re
 from collections.abc import Collection, Mapping, Sequence
 from dataclasses import dataclass
 from enum import Enum
+from types import MappingProxyType
 from typing import Any, Literal
 
 MAX_AUTO_ROUNDS = 3
@@ -75,8 +76,10 @@ _COMMENT_MARKER_RE = re.compile(
 )
 
 _LIST_PREFIX_PATTERN = r"(?:(?:[-*+]|\d+[.)])[ \t]+)*"
-_FENCE_OPEN_BACKTICK_RE = re.compile(rf"^[ \t]*{_LIST_PREFIX_PATTERN}(`{{3,}})[^`]*$")
-_FENCE_OPEN_TILDE_RE = re.compile(rf"^[ \t]*{_LIST_PREFIX_PATTERN}(~{{3,}}).*$")
+_LIST_MARKER_RE = re.compile(r"^(?:[-*+]|\d+[.)])(?=[ \t])")
+_LIST_ITEM_START_RE = re.compile(r"^ {0,3}(?:[-*+]|\d+[.)])[ \t]+")
+_FENCE_OPEN_BACKTICK_BODY_RE = re.compile(r"^(`{3,})[^`]*$")
+_FENCE_OPEN_TILDE_BODY_RE = re.compile(r"^(~{3,}).*$")
 _BLOCKQUOTE_START_RE = re.compile(rf"^{_LIST_PREFIX_PATTERN}>")
 _ATX_HEADING_RE = re.compile(r"^ {0,3}#{1,6}(?:[ \t]|$)")
 _THEMATIC_BREAK_RE = re.compile(r"^ {0,3}(?:(?:-[ \t]*){3,}|(?:\*[ \t]*){3,}|(?:_[ \t]*){3,})$")
@@ -380,6 +383,7 @@ class AuthorReply:
     reason: str
     comment_id: str
     author: str | None = None
+    directive_index: int = 0
 
     def __post_init__(self) -> None:
         if self.finding_id is not None:
@@ -393,23 +397,24 @@ class AuthorReply:
         _require_non_empty_str(self.comment_id, "comment_id")
         if self.author is not None:
             _require_non_empty_str(self.author, "author")
+        if type(self.directive_index) is not int or self.directive_index < 0:
+            raise ConvergenceError(f"AuthorReply.directive_index 必须是非负整数：{self.directive_index!r}")
 
     @property
     def reply_key(self) -> str:
-        """稳定唯一消费键：同一评论内多条不同锚点回复互不冲突，且跨轮次重放（含原评论编辑）保持一致。"""
+        """稳定唯一消费键：基于评论身份与指令序号生成，不受 diff 行号漂移影响，且同评论多条指令互不冲突。"""
         cid = self.comment_id.strip()
         author = self.author.strip().lower() if self.author is not None else ""
         norm_id = self.finding_id.strip().lower() if self.finding_id is not None else ""
         norm_file = _normalize_file(self.file) if self.file is not None else ""
-        norm_line = "" if self.line is None else str(self.line)
         canonical = json.dumps(
-            [cid, author, norm_id, norm_file, norm_line],
+            [cid, author, self.directive_index, norm_id, norm_file],
             ensure_ascii=False,
             separators=(",", ":"),
         )
         digest = hashlib.sha256(canonical.encode("utf-8")).hexdigest()[:16]
-        anchor = f"id:{norm_id}" if norm_id else f"loc:{norm_file}:{norm_line or '*'}"
-        return f"{cid}|{anchor}|{digest}"
+        anchor = f"id:{norm_id}" if norm_id else f"file:{norm_file or '*'}"
+        return f"{cid}#{self.directive_index}|{anchor}|{digest}"
 
 
 def _extract_comment_id(comment: Mapping[str, Any]) -> str | None:
@@ -476,24 +481,69 @@ def _leading_indent_columns(line: str) -> int:
     return cols
 
 
-def _match_opening_fence(line: str) -> tuple[str, int] | None:
-    bt_match = _FENCE_OPEN_BACKTICK_RE.match(line)
-    if bt_match:
-        marker = bt_match.group(1)
-        return marker[0], len(marker)
-    tilde_match = _FENCE_OPEN_TILDE_RE.match(line)
-    if tilde_match:
-        marker = tilde_match.group(1)
-        return marker[0], len(marker)
-    return None
+def _match_opening_fence(line: str) -> tuple[str, int, int] | None:
+    """按 CommonMark §4.5 / §5.2 识别开代码围栏，返回 (fence_char, fence_len, container_col)。"""
+    pos = 0
+    col = 0
+    container_col = 0
+    n = len(line)
+    while True:
+        ws_pos = pos
+        ws_col = col
+        while ws_pos < n and line[ws_pos] in (" ", "\t"):
+            if line[ws_pos] == " ":
+                ws_col += 1
+            else:
+                ws_col += 4 - (ws_col % 4)
+            ws_pos += 1
+
+        if ws_col - container_col > 3:
+            return None
+
+        rest = line[ws_pos:]
+        list_match = _LIST_MARKER_RE.match(rest)
+        if list_match:
+            marker_len = list_match.end()
+            after_marker_pos = ws_pos + marker_len
+            after_marker_col = ws_col + marker_len
+            content_pos = after_marker_pos
+            content_col = after_marker_col
+            while content_pos < n and line[content_pos] in (" ", "\t"):
+                if line[content_pos] == " ":
+                    content_col += 1
+                else:
+                    content_col += 4 - (content_col % 4)
+                content_pos += 1
+            if content_col - after_marker_col >= 5:
+                return None
+            container_col = content_col
+            pos = content_pos
+            col = content_col
+            continue
+
+        bt_match = _FENCE_OPEN_BACKTICK_BODY_RE.match(rest)
+        if bt_match:
+            marker = bt_match.group(1)
+            return marker[0], len(marker), container_col
+        tilde_match = _FENCE_OPEN_TILDE_BODY_RE.match(rest)
+        if tilde_match:
+            marker = tilde_match.group(1)
+            return marker[0], len(marker), container_col
+        return None
 
 
-def _is_closing_fence(line: str, fence_char: str, fence_len: int) -> bool:
+def _is_closing_fence(line: str, fence_char: str, fence_len: int, container_col: int) -> bool:
+    if _leading_indent_columns(line) > container_col + 3:
+        return False
     return bool(re.fullmatch(rf"[ \t]*{re.escape(fence_char)}{{{fence_len},}}[ \t]*", line))
 
 
 def _is_block_interrupt(line: str) -> bool:
     return bool(_ATX_HEADING_RE.match(line) or _THEMATIC_BREAK_RE.match(line))
+
+
+def _is_list_item_start(line: str) -> bool:
+    return _leading_indent_columns(line) <= 3 and bool(_LIST_ITEM_START_RE.match(line))
 
 
 def parse_wontfix_replies(
@@ -531,12 +581,15 @@ def parse_wontfix_replies(
 
         fence_char: str | None = None
         fence_len = 0
+        fence_container_col = 0
         in_blockquote = False
+        directive_index = 0
         for raw_line in body.splitlines():
             if fence_char is not None:
-                if _is_closing_fence(raw_line, fence_char, fence_len):
+                if _is_closing_fence(raw_line, fence_char, fence_len, fence_container_col):
                     fence_char = None
                     fence_len = 0
+                    fence_container_col = 0
                 continue
 
             stripped = raw_line.strip()
@@ -547,7 +600,7 @@ def parse_wontfix_replies(
             opened = _match_opening_fence(raw_line)
             if opened is not None:
                 in_blockquote = False
-                fence_char, fence_len = opened
+                fence_char, fence_len, fence_container_col = opened
                 continue
 
             # 必须在 .strip() 之前识别缩进代码块（4 空格或制表符）
@@ -563,7 +616,10 @@ def parse_wontfix_replies(
                 continue
 
             if in_blockquote:
-                continue
+                if _is_list_item_start(raw_line):
+                    in_blockquote = False
+                else:
+                    continue
 
             match = _WONTFIX_HEAD_RE.match(stripped)
             if not match:
@@ -598,8 +654,10 @@ def parse_wontfix_replies(
                     reason=reason,
                     comment_id=comment_id,
                     author=author,
+                    directive_index=directive_index,
                 )
             )
+            directive_index += 1
     return tuple(replies)
 
 
@@ -774,6 +832,30 @@ def accept_quick_pass_findings(
     return tuple(accepted)
 
 
+def _normalize_prior_important_sources(
+    raw: Mapping[str, Collection[str]] | None,
+) -> dict[str, frozenset[str]]:
+    if raw is None:
+        return {}
+    if not isinstance(raw, Mapping):
+        raise ConvergenceError(f"prior_important_sources 必须是映射：{raw!r}")
+    normalized: dict[str, frozenset[str]] = {}
+    for raw_fid, raw_models in raw.items():
+        fid = _require_non_empty_str(raw_fid, "prior_important_sources key").lower()
+        models = _normalize_str_collection(
+            raw_models,
+            f"prior_important_sources[{fid!r}]",
+            require_non_empty=False,
+            lowercase=False,
+        )
+        real_models = frozenset(m for m in models if m.lower() != _PRIOR_ROUND_PLACEHOLDER)
+        if fid in normalized:
+            normalized[fid] = normalized[fid] | real_models
+        else:
+            normalized[fid] = real_models
+    return normalized
+
+
 def parse_verifier_output(
     payload: Mapping[str, Any],
     candidate_findings: Sequence[Finding],
@@ -783,7 +865,7 @@ def parse_verifier_output(
     author_replies: Sequence[AuthorReply] = (),
     consumed_reply_keys: Collection[str] = (),
     consumed_comment_ids: Collection[str] = (),
-    prior_important_ids: Collection[str] = frozenset(),
+    prior_important_sources: Mapping[str, Collection[str]] | None = None,
 ) -> tuple[VerifiedFinding, ...]:
     """解析核实者裁决并强制与审查面板及候选清单 1:1 绑定（fail-closed）。"""
     if not isinstance(panel, ReviewPanel):
@@ -795,12 +877,8 @@ def parse_verifier_output(
     if model != expected_verifier:
         raise ConvergenceError(f"verifier_model={model!r} 与 panel.verifier_model={expected_verifier!r} 不一致")
     verifier_family = infer_model_family(model)
-    allowed_finders = {m.strip() for m in panel.finder_models}
-    allowed_prior_ids = _normalize_str_collection(
-        prior_important_ids,
-        "prior_important_ids",
-        lowercase=True,
-    )
+    allowed_finders = frozenset(m.strip() for m in panel.finder_models)
+    normalized_prior_sources = _normalize_prior_important_sources(prior_important_sources)
 
     if not isinstance(payload, Mapping):
         raise ConvergenceError("verifier 输出必须是对象")
@@ -827,13 +905,14 @@ def parse_verifier_output(
                 raise ConvergenceError(
                     f"核实者模型 {model!r}（家族 {verifier_family}）不得与候选发现 {cid} 来源模型 {src_model!r} 同家族"
                 )
-        is_carried_prior_important = cid in allowed_prior_ids and candidate.severity == Severity.IMPORTANT
-        if not is_carried_prior_important:
-            unknown_sources = [m for m in real_models if m not in allowed_finders]
-            if unknown_sources:
-                raise ConvergenceError(
-                    f"候选发现 {cid} 的来源模型 {unknown_sources!r} 不在 panel.finder_models 中"
-                )
+        allowed_for_candidate = allowed_finders
+        if candidate.severity == Severity.IMPORTANT and cid in normalized_prior_sources:
+            allowed_for_candidate = allowed_finders | normalized_prior_sources[cid]
+        unknown_sources = [m for m in real_models if m not in allowed_for_candidate]
+        if unknown_sources:
+            raise ConvergenceError(
+                f"候选发现 {cid} 的来源模型 {unknown_sources!r} 不在允许的 finder 来源集合中"
+            )
 
         candidates_by_id[cid] = candidate
         ordered_ids.append(cid)
@@ -962,6 +1041,18 @@ class RoundPlan:
     def prior_important_ids(self) -> frozenset[str]:
         return frozenset(f.finding_id for f in self.unresolved_prior_important)
 
+    @property
+    def prior_important_sources(self) -> Mapping[str, frozenset[str]]:
+        mapping: dict[str, frozenset[str]] = {}
+        for item in self.unresolved_prior_important:
+            fid = item.finding_id
+            real = frozenset(_real_source_models(item.source_models))
+            if fid in mapping:
+                mapping[fid] = mapping[fid] | real
+            else:
+                mapping[fid] = real
+        return MappingProxyType(mapping)
+
 
 def _active_posted_fingerprints(history: Sequence[RoundHistoryEntry]) -> frozenset[str]:
     """回放历史轮次中仍处于活跃态的已贴指纹；已解除或被核实驳回的发现会移出，允许重新确认后完整贴出。"""
@@ -1036,9 +1127,34 @@ def plan_next_round(
 def build_round_candidates(
     plan: RoundPlan,
     finder_batches: Sequence[tuple[str, Sequence[Finding]]],
+    *,
+    panel: ReviewPanel | None = None,
 ) -> tuple[Finding, ...]:
     """合并本轮 finder 新发现与上一轮未解除的 Important 发现，完整保留原有真实 source_models。"""
-    batches: list[tuple[str, Sequence[Finding]]] = list(finder_batches)
+    if not isinstance(plan, RoundPlan):
+        raise ConvergenceError("plan 必须是 RoundPlan")
+    allowed_finders: frozenset[str] | None = None
+    if panel is not None:
+        if not isinstance(panel, ReviewPanel):
+            raise ConvergenceError("panel 必须是 ReviewPanel 或 None")
+        allowed_finders = frozenset(m.strip() for m in panel.finder_models)
+
+    batches: list[tuple[str, Sequence[Finding]]] = []
+    for source_model, findings in finder_batches:
+        model = _require_non_empty_str(source_model, "source_model")
+        if allowed_finders is not None and model not in allowed_finders:
+            raise ConvergenceError(f"本轮 finder 批次来源模型 {model!r} 不在 panel.finder_models 中")
+        for item in findings:
+            if not isinstance(item, Finding):
+                raise ConvergenceError(f"finder_batches 元素必须是 Finding：{item!r}")
+            if allowed_finders is not None:
+                unknown_item_models = [m for m in _real_source_models(item.source_models) if m not in allowed_finders]
+                if unknown_item_models:
+                    raise ConvergenceError(
+                        f"本轮发现 {item.finding_id} 的来源模型 {unknown_item_models!r} 不在 panel.finder_models 中"
+                    )
+        batches.append((model, findings))
+
     if plan.unresolved_prior_important:
         prior_by_model: dict[str, list[Finding]] = {}
         for item in plan.unresolved_prior_important:
