@@ -1068,7 +1068,7 @@ def _write_run(
     pr_number: int,
     head_sha: str | None,
     registered_at_ns: int | None,
-    attempt: int,
+    attempt: int | None,
     verdict: str | None,
     reviews: list[dict[str, object]] | None = None,
     receipts: dict[str, dict[str, object]] | None = None,
@@ -1079,8 +1079,9 @@ def _write_run(
     target: dict[str, object] = {
         "pr_number": pr_number,
         "base_sha": "0" * 40,
-        "attempt": attempt,
     }
+    if attempt is not None:
+        target["attempt"] = attempt
     if head_sha is not None:
         target["head_sha"] = head_sha
     if registered_at_ns is not None:
@@ -4837,3 +4838,285 @@ def test_r15_reused_pass_runs_vs_stale_reuse_markdown(tmp_path: Path) -> None:
     assert m_mix.fresh_pass_runs == 1
     md_mix = render_baseline_markdown(m_mix)
     assert "沿用历史 PASS（`reused_from` 且终态为 `PASS`）：`1`（含非 `PASS` 复用总计 `2`）" in md_mix
+
+
+def test_r16_missing_attempt_unknown_tie_and_controls(tmp_path: Path) -> None:
+    # Important 1：同时间戳内缺失 attempt 为未知（None），绝不默认填 0 编造 PASS 领先于 attempt=2 的 BLOCK
+    for order_name, pass_dir, block_dir in [
+        ("pass_first", "a-pass", "b-block"),
+        ("block_first", "b-pass", "a-block"),
+    ]:
+        runs_tie = tmp_path / f"missing_attempt_tie_{order_name}"
+        runs_tie.mkdir()
+        _write_run(
+            runs_tie,
+            pass_dir,
+            pr_number=1601,
+            head_sha="b" * 40,
+            registered_at_ns=100,
+            attempt=None,
+            verdict="PASS",
+        )
+        _write_run(
+            runs_tie,
+            block_dir,
+            pr_number=1601,
+            head_sha="a" * 40,
+            registered_at_ns=100,
+            attempt=2,
+            verdict="BLOCK",
+        )
+        m_tie = analyze_review_runs(runs_tie)
+        assert m_tie.corrupted_files == (), order_name
+        assert m_tie.unorderable_runs == 0, order_name
+        assert m_tie.rounds_to_first_pass_all.prs_counted == 0, order_name
+        assert m_tie.rounds_to_first_pass_all.bucket_1 == 0, order_name
+        assert m_tie.rounds_to_first_pass_effective.prs_counted == 0, order_name
+        assert m_tie.prs_first_pass_reused == 0, order_name
+
+    # 同时间戳混有复用 PASS 与新产生 PASS 且存在缺失 attempt：同样歧义跳过
+    runs_mix_reuse = tmp_path / "missing_attempt_mixed_reuse"
+    runs_mix_reuse.mkdir()
+    _write_run(
+        runs_mix_reuse,
+        "a-fresh-pass",
+        pr_number=1602,
+        head_sha="a" * 40,
+        registered_at_ns=100,
+        attempt=None,
+        verdict="PASS",
+    )
+    _write_run(
+        runs_mix_reuse,
+        "b-reused-pass",
+        pr_number=1602,
+        head_sha="a" * 40,
+        registered_at_ns=100,
+        attempt=2,
+        verdict="PASS",
+        reused_from="prev-pass",
+    )
+    m_mix_reuse = analyze_review_runs(runs_mix_reuse)
+    assert m_mix_reuse.unorderable_runs == 0
+    assert m_mix_reuse.rounds_to_first_pass_all.prs_counted == 0
+    assert m_mix_reuse.rounds_to_first_pass_effective.prs_counted == 0
+    assert m_mix_reuse.prs_first_pass_reused == 0
+
+    # 正对照 1：单条 PASS 省略 attempt -> 无同时间戳并列，bucket_1 == 1
+    runs_single = tmp_path / "single_pass_missing_attempt"
+    runs_single.mkdir()
+    _write_run(
+        runs_single,
+        "p1603-r1",
+        pr_number=1603,
+        head_sha="a" * 40,
+        registered_at_ns=100,
+        attempt=None,
+        verdict="PASS",
+    )
+    m_single = analyze_review_runs(runs_single)
+    assert m_single.unorderable_runs == 0
+    assert m_single.rounds_to_first_pass_all.prs_counted == 1
+    assert m_single.rounds_to_first_pass_all.bucket_1 == 1
+    assert m_single.rounds_to_first_pass_effective.prs_counted == 1
+    assert m_single.rounds_to_first_pass_effective.bucket_1 == 1
+
+    # 正对照 2：不同时间戳 ts=100 BLOCK(attempt=None) + ts=200 PASS(attempt=None) -> bucket_2 == 1
+    runs_diff_ts = tmp_path / "diff_ts_missing_attempt"
+    runs_diff_ts.mkdir()
+    _write_run(
+        runs_diff_ts,
+        "p1604-r1",
+        pr_number=1604,
+        head_sha="a" * 40,
+        registered_at_ns=100,
+        attempt=None,
+        verdict="BLOCK",
+    )
+    _write_run(
+        runs_diff_ts,
+        "p1604-r2",
+        pr_number=1604,
+        head_sha="b" * 40,
+        registered_at_ns=200,
+        attempt=None,
+        verdict="PASS",
+    )
+    m_diff_ts = analyze_review_runs(runs_diff_ts)
+    assert m_diff_ts.unorderable_runs == 0
+    assert m_diff_ts.rounds_to_first_pass_all.prs_counted == 1
+    assert m_diff_ts.rounds_to_first_pass_all.bucket_2 == 1
+    assert m_diff_ts.rounds_to_first_pass_effective.prs_counted == 1
+    assert m_diff_ts.rounds_to_first_pass_effective.bucket_2 == 1
+
+    # 正对照 3：同时间戳全为同型 fresh PASS（含缺失 attempt）、严格更早时间戳并列缺失 attempt BLOCK、
+    # 以及同时间戳 attempt 均已知且可分出先后 -> 均确定计入
+    runs_det = tmp_path / "deterministic_controls"
+    runs_det.mkdir()
+    # PR 1605：ts=100 双同型 fresh PASS（其中一条 attempt=None）-> 1 轮
+    _write_run(runs_det, "p1605-p1", pr_number=1605, head_sha="a" * 40, registered_at_ns=100, attempt=None, verdict="PASS")
+    _write_run(runs_det, "p1605-p2", pr_number=1605, head_sha="a" * 40, registered_at_ns=100, attempt=2, verdict="PASS")
+    # PR 1606：ts=100 双 BLOCK(attempt=None) + ts=200 PASS(attempt=None) -> 3 轮（早期组求和满足交换律）
+    _write_run(runs_det, "p1606-b1", pr_number=1606, head_sha="a" * 40, registered_at_ns=100, attempt=None, verdict="BLOCK")
+    _write_run(runs_det, "p1606-b2", pr_number=1606, head_sha="a" * 40, registered_at_ns=100, attempt=None, verdict="BLOCK")
+    _write_run(runs_det, "p1606-p3", pr_number=1606, head_sha="b" * 40, registered_at_ns=200, attempt=None, verdict="PASS")
+    # PR 1607：同 ts=100 但 attempt 全已知（BLOCK attempt=1 < PASS attempt=2）-> 2 轮
+    _write_run(runs_det, "p1607-b1", pr_number=1607, head_sha="a" * 40, registered_at_ns=100, attempt=1, verdict="BLOCK")
+    _write_run(runs_det, "p1607-p2", pr_number=1607, head_sha="b" * 40, registered_at_ns=100, attempt=2, verdict="PASS")
+    m_det = analyze_review_runs(runs_det)
+    assert m_det.unorderable_runs == 0
+    assert m_det.rounds_to_first_pass_all.prs_counted == 3
+    assert m_det.rounds_to_first_pass_all.bucket_1 == 1
+    assert m_det.rounds_to_first_pass_all.bucket_2 == 1
+    assert m_det.rounds_to_first_pass_all.bucket_3 == 1
+    assert m_det.rounds_to_first_pass_effective.prs_counted == 3
+    assert m_det.rounds_to_first_pass_effective.bucket_1 == 1
+    assert m_det.rounds_to_first_pass_effective.bucket_2 == 1
+    assert m_det.rounds_to_first_pass_effective.bucket_3 == 1
+
+
+def test_r16_severity_tag_nonblocking_and_mustfix_variants() -> None:
+    # Important 2：无连字符/下划线同义词元 nonblocking / non_blocking 与 mustfix / must_fix
+    assert classify_finding_heuristic("[P2/nonblocking] 数据丢失", "blocked") == "non_blocking_or_nit"
+    assert classify_finding_heuristic("[P2/non_blocking] 数据丢失", "blocked") == "non_blocking_or_nit"
+    assert classify_finding_heuristic("[mustfix/信息] 数据丢失", "blocked") == "blocking_substantive"
+    assert classify_finding_heuristic("[must_fix/信息] 数据丢失", "blocked") == "blocking_substantive"
+
+    assert _parse_leading_severity_tag("[P2/nonblocking] 数据丢失") == "non_blocking"
+    assert _parse_leading_severity_tag("[P2/non_blocking] 数据丢失") == "non_blocking"
+    assert _parse_leading_severity_tag("[non_blocking/P2] 数据丢失") == "non_blocking"
+    assert _parse_leading_severity_tag("[P2][nonblocking] 数据丢失") == "non_blocking"
+    assert _parse_leading_severity_tag("[P2][non_blocking] 数据丢失") == "non_blocking"
+    assert _parse_leading_severity_tag("[mustfix/信息] 数据丢失") == "blocking"
+    assert _parse_leading_severity_tag("[must_fix/信息] 数据丢失") == "blocking"
+    assert classify_finding_heuristic("non_blocking: 建议后续整理", "blocked") == "non_blocking_or_nit"
+    assert classify_finding_heuristic("must_fix: 修复状态分叉", "blocked") == "blocking_substantive"
+
+
+def test_r16_narrowed_bug_locations_exclude_unrelated_lines() -> None:
+    # Important 3：#1904/#1994/#1944 精确收窄至缺陷行本身，剔除无关中间行
+    cases = load_cases(CANONICAL_CASES)
+    by_id = {c.case_id: c for c in cases}
+
+    case_1904 = by_id["bug-1904-nonce-substring-row-match"]
+    assert len(case_1904.bug_locations) == 1
+    assert case_1904.bug_locations[0].all_ranges == ((540, 540), (564, 564))
+
+    case_1994 = by_id["bug-1994-review-identity-sweep-gap"]
+    assert len(case_1994.bug_locations) == 2
+    assert case_1994.bug_locations[0].all_ranges == (
+        (1108, 1109),
+        (1111, 1113),
+        (1143, 1143),
+        (1148, 1148),
+        (1158, 1158),
+    )
+    assert case_1994.bug_locations[1].all_ranges == ((69, 70), (83, 83), (87, 87))
+
+    case_1944 = by_id["bug-1944-recover-stale-disk-divergence"]
+    assert len(case_1944.bug_locations) == 1
+    assert case_1944.bug_locations[0].all_ranges == (
+        (910, 910),
+        (913, 914),
+        (920, 920),
+        (923, 923),
+        (926, 926),
+    )
+
+    # Codex R15 最小反例：仅提交 #1904 中间无关行 552（await holding;），line_tolerance=0 不得命中
+    unrelated_552 = score_predictions(
+        (case_1904,),
+        (
+            CasePrediction(
+                case_id=case_1904.case_id,
+                verdict="BLOCK",
+                findings=(
+                    PredictedFinding(
+                        file=".sandcastle/deployment-acceptance.test.mts",
+                        line_start=552,
+                        line_end=552,
+                        severity="blocking",
+                        summary="无关中间行",
+                    ),
+                ),
+            ),
+        ),
+        line_tolerance=0,
+    )
+    assert unrelated_552.bug_case_recall == 0.0
+    assert unrelated_552.case_details[0].matched_locations == 0
+
+    for exact_line in (540, 564):
+        hit = score_predictions(
+            (case_1904,),
+            (
+                CasePrediction(
+                    case_id=case_1904.case_id,
+                    verdict="BLOCK",
+                    findings=(
+                        PredictedFinding(
+                            file=".sandcastle/deployment-acceptance.test.mts",
+                            line_start=exact_line,
+                            line_end=exact_line,
+                            severity="blocking",
+                            summary="精确命中 includes('-14') 缺陷行",
+                        ),
+                    ),
+                ),
+            ),
+            line_tolerance=0,
+        )
+        assert hit.bug_case_recall == 1.0, exact_line
+        assert hit.case_details[0].matched_locations == 1, exact_line
+
+    # #1994 与 #1944 剔除的无关中间行在 line_tolerance=0 下也不得误命中
+    unrelated_1994 = score_predictions(
+        (case_1994,),
+        (
+            CasePrediction(
+                case_id=case_1994.case_id,
+                verdict="BLOCK",
+                findings=(
+                    PredictedFinding(
+                        file=".sandcastle/deepagents-pilot/pilot1742/external_review.py",
+                        line_start=1120,
+                        line_end=1120,
+                        severity="blocking",
+                        summary="无关的读取异常处理行",
+                    ),
+                    PredictedFinding(
+                        file=".sandcastle/deepagents-pilot/pilot1742/github_app.py",
+                        line_start=85,
+                        line_end=85,
+                        severity="blocking",
+                        summary="无关的权限正则校验行",
+                    ),
+                ),
+            ),
+        ),
+        line_tolerance=0,
+    )
+    assert unrelated_1994.bug_case_recall == 0.0
+    assert unrelated_1994.case_details[0].matched_locations == 0
+
+    unrelated_1944 = score_predictions(
+        (case_1944,),
+        (
+            CasePrediction(
+                case_id=case_1944.case_id,
+                verdict="BLOCK",
+                findings=(
+                    PredictedFinding(
+                        file=".sandcastle/deepagents-pilot/pilot1742/external_review.py",
+                        line_start=927,
+                        line_end=927,
+                        severity="blocking",
+                        summary="早退分支之外的 verdict 计算行",
+                    ),
+                ),
+            ),
+        ),
+        line_tolerance=0,
+    )
+    assert unrelated_1944.bug_case_recall == 0.0
+    assert unrelated_1944.case_details[0].matched_locations == 0

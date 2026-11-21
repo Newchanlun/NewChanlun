@@ -86,24 +86,24 @@ _IMMEDIATE_REF_BRACKET_RE = re.compile(r"^\[([^\[\]\n]{1,999})\]")
 _BRACKET_LINE_COORD_RE = re.compile(r":\d")
 _BRACKET_FILE_EXT_RE = re.compile(r"\.[A-Za-z0-9]{1,8}(?![A-Za-z0-9])")
 _KNOWN_ASCII_SEVERITY_WORD_RE = re.compile(
-    r"^(?:p[0-3]|block(?:er|ing)?|important|critical|must[- ]?fix|high|medium|med|low|"
-    r"minor|major|nit|info|non[- ]?blocking|optional|suggestion|style|warning|warn|error|bug|security)$",
+    r"^(?:p[0-3]|block(?:er|ing)?|important|critical|must[-_ ]?fix|high|medium|med|low|"
+    r"minor|major|nit|info|non[-_ ]?blocking|optional|suggestion|style|warning|warn|error|bug|security)$",
     re.IGNORECASE,
 )
 _EXPLICIT_NON_BLOCKING_OVERRIDE_RE = re.compile(
     r"(?:(?<!不是)(?<!并非)(?<!不属于)(?:非阻断|不阻断)|"
-    r"(?<!not\s)(?<!not\sa\s)(?<![A-Za-z0-9])non[- ]?blocking(?![A-Za-z0-9])|"
+    r"(?<!not\s)(?<!not\sa\s)(?<![A-Za-z0-9])non[-_ ]?blocking(?![A-Za-z0-9])|"
     r"(?<![A-Za-z0-9])nit(?![A-Za-z0-9]))",
     re.IGNORECASE,
 )
 _LEADING_COLON_TAG_RE = re.compile(r"^(?:(?:\*\*|__)\s*)?([^:\n：\[\【\]\】`*]{1,24}?)(?:\s*(?:\*\*|__))?\s*[:：](?!\d)")
 _TAG_SPLIT_RE = re.compile(r"[\s/／·・,，、\-—:：|｜()（）]+")
 _STRICT_NON_BLOCKING_COLON_TOKEN = (
-    r"(?:非阻断|不阻断|non[- ]?blocking|nit|minor|low|info|p3|低|信息|提示|建议|可选|"
+    r"(?:非阻断|不阻断|non[-_ ]?blocking|nit|minor|low|info|p3|低|信息|提示|建议|可选|"
     r"核实通过|确认无(?:问题|误)|通过)"
 )
 _STRICT_BLOCKING_COLON_TOKEN = (
-    r"(?:阻断|block(?:er|ing)?|important|critical|must[- ]?fix|严重|重要|高|p[012])"
+    r"(?:阻断|block(?:er|ing)?|important|critical|must[-_ ]?fix|严重|重要|高|p[012])"
 )
 _STRICT_COLON_NON_BLOCKING_RE = re.compile(
     rf"^(?:{_STRICT_NON_BLOCKING_COLON_TOKEN}"
@@ -117,7 +117,18 @@ _STRICT_COLON_BLOCKING_RE = re.compile(
     re.IGNORECASE,
 )
 _TIER1_NON_BLOCKING_TAG_TOKENS: frozenset[str] = frozenset(
-    {"非阻断", "不阻断", "non-blocking", "nit", "minor", "low", "低", "p3"}
+    {
+        "非阻断",
+        "不阻断",
+        "non-blocking",
+        "nonblocking",
+        "non_blocking",
+        "nit",
+        "minor",
+        "low",
+        "低",
+        "p3",
+    }
 )
 _TIER2_BLOCKING_TAG_TOKENS: frozenset[str] = frozenset(
     {
@@ -128,6 +139,8 @@ _TIER2_BLOCKING_TAG_TOKENS: frozenset[str] = frozenset(
         "important",
         "critical",
         "must-fix",
+        "mustfix",
+        "must_fix",
         "严重",
         "重要",
         "高",
@@ -2675,7 +2688,7 @@ def _parse_optional_nonneg_int_field(data: dict[str, Any] | None, key: str) -> t
 @dataclass(frozen=True)
 class _RunTimelineRecord:
     registered_at_ns: int
-    attempt: int
+    attempt: int | None
     dir_name: str
     head_sha: str
     verdict: str
@@ -2963,7 +2976,7 @@ def analyze_review_runs(
             prs_with_unorderable_run.add(run_pr_number)
 
         resolved_reg_at_ns = next(iter(reg_values))
-        attempt = next(iter(att_values), 0) if has_valid_attempt else 0
+        attempt: int | None = next(iter(att_values), None) if has_valid_attempt else None
         pr_timeline[run_pr_number].append(
             _RunTimelineRecord(
                 registered_at_ns=resolved_reg_at_ns,
@@ -2986,28 +2999,52 @@ def analyze_review_runs(
     )
 
     for pr_number, records in sorted(pr_timeline.items()):
-        ordered_runs = sorted(records, key=lambda r: (r.registered_at_ns, r.attempt, r.dir_name))
+        ordered_runs = sorted(
+            records,
+            key=lambda r: (r.registered_at_ns, r.attempt is None, r.attempt if r.attempt is not None else 0, r.dir_name),
+        )
 
         if pr_number not in prs_with_unorderable_run:
-            grouped_by_causal_key: dict[tuple[int, int], list[_RunTimelineRecord]] = defaultdict(list)
+            grouped_by_ts: dict[int, list[_RunTimelineRecord]] = defaultdict(list)
             for rec in records:
-                grouped_by_causal_key[(rec.registered_at_ns, rec.attempt)].append(rec)
+                grouped_by_ts[rec.registered_at_ns].append(rec)
 
             earlier_runs: list[_RunTimelineRecord] = []
-            first_pass_group: list[_RunTimelineRecord] | None = None
-            for causal_key in sorted(grouped_by_causal_key):
-                group = grouped_by_causal_key[causal_key]
-                if any(r.verdict == "PASS" for r in group):
-                    first_pass_group = group
+            first_pass_ts_group: list[_RunTimelineRecord] | None = None
+            for ts in sorted(grouped_by_ts):
+                ts_group = grouped_by_ts[ts]
+                if any(r.verdict == "PASS" for r in ts_group):
+                    first_pass_ts_group = ts_group
                     break
-                earlier_runs.extend(group)
+                earlier_runs.extend(ts_group)
 
-            if first_pass_group is not None:
-                has_non_pass = any(r.verdict != "PASS" for r in first_pass_group)
-                has_mixed_reuse = len({r.is_reused for r in first_pass_group}) > 1
-                if not has_non_pass and not has_mixed_reuse:
+            if first_pass_ts_group is not None:
+                resolved_pass_group: list[_RunTimelineRecord] | None = None
+                if len(first_pass_ts_group) == 1:
+                    resolved_pass_group = first_pass_ts_group
+                elif any(r.attempt is None for r in first_pass_ts_group):
+                    has_non_pass = any(r.verdict != "PASS" for r in first_pass_ts_group)
+                    has_mixed_reuse = len({r.is_reused for r in first_pass_ts_group}) > 1
+                    if not has_non_pass and not has_mixed_reuse:
+                        resolved_pass_group = first_pass_ts_group
+                else:
+                    grouped_by_attempt: dict[int, list[_RunTimelineRecord]] = defaultdict(list)
+                    for rec in first_pass_ts_group:
+                        if rec.attempt is not None:
+                            grouped_by_attempt[rec.attempt].append(rec)
+                    for att in sorted(grouped_by_attempt):
+                        att_group = grouped_by_attempt[att]
+                        if any(r.verdict == "PASS" for r in att_group):
+                            has_non_pass = any(r.verdict != "PASS" for r in att_group)
+                            has_mixed_reuse = len({r.is_reused for r in att_group}) > 1
+                            if not has_non_pass and not has_mixed_reuse:
+                                resolved_pass_group = att_group
+                            break
+                        earlier_runs.extend(att_group)
+
+                if resolved_pass_group is not None:
                     rounds_all.append(len(earlier_runs) + 1)
-                    if first_pass_group[0].is_reused:
+                    if resolved_pass_group[0].is_reused:
                         prs_first_pass_reused += 1
                     else:
                         # 有效评审轮次：仅计真实新产生正式裁定（PASS / BLOCK 且非 reused_from）的轮次。

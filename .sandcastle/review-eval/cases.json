@@ -111,7 +111,13 @@
         {
           "file": ".sandcastle/deepagents-pilot/pilot1742/external_review.py",
           "line_start": 910,
-          "line_end": 927,
+          "line_end": 910,
+          "extra_ranges": [
+            [913, 914],
+            [920, 920],
+            [923, 923],
+            [926, 926]
+          ],
           "summary": "recover_stale 在 Stale、回执缺失、重验不一致及会话复用四条早退分支直接返回内存 STALE 而未写回磁盘 outcome.json，导致磁盘残留旧 PASS。",
           "category": "state_divergence"
         }
@@ -150,8 +156,11 @@
       "bug_locations": [
         {
           "file": ".sandcastle/deployment-acceptance.test.mts",
-          "line_start": 539,
-          "line_end": 565,
+          "line_start": 540,
+          "line_end": 540,
+          "extra_ranges": [
+            [564, 564]
+          ],
           "summary": "使用 includes('-14') 匹配行消费文件名而非按完整 nonce+row 前缀精确匹配，nonce 随机含 '-14' 子串时触发误报。",
           "category": "flaky_substring_match"
         }
@@ -205,8 +214,9 @@
         {
           "file": ".sandcastle/deepagents-pilot/pilot1742/external_review.py",
           "line_start": 1108,
-          "line_end": 1126,
+          "line_end": 1109,
           "extra_ranges": [
+            [1111, 1113],
             [1143, 1143],
             [1148, 1148],
             [1158, 1158]
@@ -219,7 +229,8 @@
           "line_start": 69,
           "line_end": 70,
           "extra_ranges": [
-            [82, 87]
+            [83, 83],
+            [87, 87]
           ],
           "summary": "frozen dataclass AppIdentity 的 installation_permissions 存为普通可变 dict，实例创建后仍可原地篡改权限集合。",
           "category": "immutability_violation"
