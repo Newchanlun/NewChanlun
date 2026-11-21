@@ -571,7 +571,7 @@ fn resolve_indexed_templates_pending_core(
 ) -> Result<PendingRefTemplates, String> {
     #[cfg(test)]
     crate::v3::diagnostic_s4_read_trace::begin(tx, "ord_pub_births_objects");
-    let objects = object_births(tx, &metadata, store);
+    let objects = object_births(tx, &metadata, store, projection.as_deref_mut());
     #[cfg(test)]
     crate::v3::diagnostic_s4_read_trace::end(tx, "ord_pub_births_objects", &objects);
     let objects = objects?;
@@ -1081,6 +1081,7 @@ fn object_births(
     tx: &Transaction<'_>,
     m: &MetadataView<'_>,
     store: &(impl CodecStore + ?Sized),
+    mut projection: Option<&mut PublicationProjection<'_, '_>>,
 ) -> Result<NativeTree<NodeDigest, ObjectBirth>, String> {
     let mut out = NativeTree::default();
     let latest = generation_admitted(tx, store)?.max(m.generation);
@@ -1122,7 +1123,10 @@ fn object_births(
                 b.reason = None;
                 b.superseded = None;
             }
-            let digest = hash_view(store, VV::String(&id))?;
+            let digest = match projection.as_deref_mut() {
+                Some(p) => p.string_digest(store, &id)?,
+                None => hash_view(store, VV::String(&id))?,
+            };
             if out
                 .insert_admitted(digest, b, store)
                 .map_err(err)?
@@ -1287,9 +1291,9 @@ fn resolve_record_batch_projected(
     stored_batch: &str,
     m: &MetadataView<'_>,
     batch: &str,
-    projection: Option<&mut PublicationProjection<'_, '_>>,
+    mut projection: Option<&mut PublicationProjection<'_, '_>>,
 ) -> Result<(), String> {
-    let value = match projection {
+    let value = match projection.as_deref_mut() {
         Some(p) => p.read_batch(store, record.view())?,
         None => store
             .lookup_field_ref(record.view(), "batch_id")
@@ -1316,7 +1320,11 @@ fn resolve_record_batch_projected(
         if stored_batch == batch {
             return Err(err("旧出生记录不得换成本批身份"));
         }
-        if value.digest().map_err(err)? != hash_view(store, VV::String(stored_batch))? {
+        let expected_digest = match projection {
+            Some(p) => p.batch_digest(store, stored_batch)?,
+            None => hash_view(store, VV::String(stored_batch))?,
+        };
+        if value.digest().map_err(err)? != expected_digest {
             return Err(err("batch_id 与独立记录不同"));
         }
     }
@@ -1367,6 +1375,11 @@ fn resolve_objects(
     }
     let mut seen = NativeSet::default();
     let mut cursor = store.array_cursor(array.view()).map_err(err)?;
+    let items = if cursor.is_none() && store.audit_full_array_scan() {
+        Some(store.lookup_array_ref(array.view()).map_err(err)?)
+    } else {
+        None
+    };
     for i in 0..n {
         let path = PublicationPath::new(
             store,
@@ -1377,6 +1390,8 @@ fn resolve_objects(
         )?;
         let record = if let Some(cursor) = &mut cursor {
             store.next_array_member(cursor).map_err(err)?
+        } else if let Some(items) = &items {
+            store.native_ref_clone(&items[i as usize]).map_err(err)?
         } else {
             store
                 .lookup_ref(array.view(), &[PathStep::Index(i)])
@@ -1440,12 +1455,21 @@ fn resolve_objects(
                 }),
             ),
         ] {
+            let expected_digest = match (projection.as_deref_mut(), v) {
+                (Some(p), VV::String(s)) => p.string_digest(store, s)?,
+                (Some(_), VV::Json(sc::capture_allocation::audit_json::JsonView::Null)) => {
+                    static NULL_DIGEST: std::sync::OnceLock<NodeDigest> =
+                        std::sync::OnceLock::new();
+                    *NULL_DIGEST.get_or_init(|| sc::frame(sc::tag::NULL, &[]))
+                }
+                _ => hash_view(store, v)?,
+            };
             if fields
                 .get_admitted(store, k)?
                 .ok_or_else(|| err(format!("缺{k}")))?
                 .digest()
                 .map_err(err)?
-                != hash_view(store, v)?
+                != expected_digest
             {
                 return Err(err(format!("{k} 与独立记录不同")));
             }
@@ -3087,6 +3111,7 @@ pub(crate) struct PublicationProjection<'scope, 'tx> {
     current: std::collections::HashMap<PublicationKey, std::rc::Rc<RefFields<'static>>>,
     batch_previous: std::collections::HashMap<PublicationKey, ContentRef>,
     batch_current: std::collections::HashMap<PublicationKey, ContentRef>,
+    batch_digests: std::collections::HashMap<String, NodeDigest>,
     peak_bytes: usize,
 }
 type PublicationKey = (String, String, &'static str, Option<u64>);
@@ -3115,6 +3140,25 @@ impl<'scope, 'tx> PublicationProjection<'scope, 'tx> {
             current: Default::default(),
             batch_previous: Default::default(),
             batch_current: Default::default(),
+            batch_digests: Default::default(),
+            peak_bytes: 0,
+        })
+    }
+    pub(crate) fn new_for_snapshot(
+        tx: &'scope Transaction<'tx>,
+        store: &HashReader<'_>,
+    ) -> Result<Self, String> {
+        if !store.ordinary_bound_births_qualified() {
+            return Err(err("ordinary投影需要同事务只读原件"));
+        }
+        Ok(Self {
+            transaction: tx,
+            reader: store as *const _ as *const (),
+            previous: Default::default(),
+            current: Default::default(),
+            batch_previous: Default::default(),
+            batch_current: Default::default(),
+            batch_digests: Default::default(),
             peak_bytes: 0,
         })
     }
@@ -3165,10 +3209,32 @@ impl<'scope, 'tx> PublicationProjection<'scope, 'tx> {
         self.batch_current.insert(k, value.clone());
         Ok(value.into())
     }
+    fn string_digest(
+        &mut self,
+        store: &(impl CodecStore + ?Sized),
+        value: &str,
+    ) -> Result<NodeDigest, String> {
+        if let Some(&digest) = self.batch_digests.get(value) {
+            return Ok(digest);
+        }
+        let digest = hash_view(store, VV::String(value))?;
+        self.batch_digests.insert(value.to_owned(), digest);
+        Ok(digest)
+    }
+    fn batch_digest(
+        &mut self,
+        store: &mut (impl CodecStore + ?Sized),
+        stored_batch: &str,
+    ) -> Result<NodeDigest, String> {
+        self.string_digest(store, stored_batch)
+    }
     pub(crate) fn commit_cut(&mut self) {
         self.measure();
         self.previous = std::mem::take(&mut self.current);
         self.batch_previous = std::mem::take(&mut self.batch_current);
+        if self.previous.is_empty() && self.batch_previous.is_empty() {
+            self.batch_digests.clear();
+        }
         self.measure();
     }
     fn measure(&mut self) {
