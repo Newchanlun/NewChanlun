@@ -8173,7 +8173,7 @@
     "DS173237|s_session/tests/test_tb03c_query.py|175",
     "DS173237|s_session/tests/test_tb03c_query.py|176",
     "DS173237|s_session/tests/test_tb03c_query.py|177",
-    "DS197836|rust/src/economic_session/service.rs|310",
+    "DS197836|rust/src/economic_session/service.rs|383",
     "DS197836|s_session/s_socket_client.py|137",
     "DS197836|s_session/tests/test_tb03c_query_runtime_contract.py|712",
     "DS440010|.github/scripts/run-1406-c6a.py|760",
@@ -52259,7 +52259,7 @@
         "DS173237|s_session/tests/test_tb03c_query.py|175": "SHA-256 测试期望值/输入摘要锁（字段名即 sha256、fact_hash、fact_key 等内容摘要），非凭据；#1406/#1493 新入 main 的测试，按精确键入基线。",
         "DS173237|s_session/tests/test_tb03c_query.py|176": "SHA-256 测试期望值/输入摘要锁（字段名即 sha256、fact_hash、fact_key 等内容摘要），非凭据；#1406/#1493 新入 main 的测试，按精确键入基线。",
         "DS173237|s_session/tests/test_tb03c_query.py|177": "SHA-256 测试期望值/输入摘要锁（字段名即 sha256、fact_hash、fact_key 等内容摘要），非凭据；#1406/#1493 新入 main 的测试，按精确键入基线。",
-        "DS197836|rust/src/economic_session/service.rs|310": "同一行内哈希的对象是内容（请求体、镜像字节、空串），时间字段只是并列字段，并非对时间值取哈希；#1406 新入 main，按精确键入基线。",
+        "DS197836|rust/src/economic_session/service.rs|383": "同一行内哈希的对象是内容（请求体、镜像字节、空串），时间字段只是并列字段，并非对时间值取哈希；#1406 新入 main，按精确键入基线。",
         "DS197836|s_session/s_socket_client.py|137": "同一行内哈希的对象是内容（请求体、镜像字节、空串），时间字段只是并列字段，并非对时间值取哈希；#1406 新入 main，按精确键入基线。",
         "DS197836|s_session/tests/test_tb03c_query_runtime_contract.py|712": "同一行内哈希的对象是内容（请求体、镜像字节、空串），时间字段只是并列字段，并非对时间值取哈希；#1406 新入 main，按精确键入基线。",
         "DS440010|.github/scripts/run-1406-c6a.py|760": "该行比较 GITHUB_SHA 与 EXPECTED_SHA 两个提交号环境变量，与 SSL/TLS 版本无关，规则误报；#1406 新入 main 的脚本，按精确键入基线。"

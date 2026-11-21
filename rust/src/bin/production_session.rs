@@ -369,7 +369,9 @@ fn run() -> Result<i32, String> {
     let mut failed = spawned.is_err();
 
     // ── 监督 ──
-    while !STOP.load(Ordering::SeqCst) && !failed {
+    while !failed {
+        // 收到停止请求后先完成最后一轮监督，不能把已退出的域当作正常停服回收。
+        let stopping = STOP.load(Ordering::SeqCst);
         for sup in children.iter_mut().filter(|c| c.status.is_none()) {
             if let Ok(Some(status)) = sup.child.try_wait() {
                 sup.status = Some(status);
@@ -379,6 +381,9 @@ fn run() -> Result<i32, String> {
                 );
                 failed |= sup.critical;
             }
+        }
+        if stopping || failed {
+            break;
         }
         std::thread::sleep(Duration::from_millis(100));
     }
