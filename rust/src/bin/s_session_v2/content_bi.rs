@@ -3305,41 +3305,70 @@ mod tests {
             }
         }
         assert_eq!(cases.len(), 18 + 2 + 14, "三份冻结原始账的例数");
-        let mut summary = Summary::default();
-        let mut generations = 0usize;
-        for (name, bars, every_prefix) in &cases {
-            let rows: Vec<Row> = bars
-                .iter()
-                .enumerate()
-                .map(|(seq, bar)| Row {
-                    coord: bar["raw_index"].as_i64().expect("raw_index"),
-                    high: bar["high"].as_i64().expect("high"),
-                    low: bar["low"].as_i64().expect("low"),
-                    revision: 1,
-                    seq: seq as i64,
+        let workers = std::thread::available_parallelism()
+            .map(|n| n.get())
+            .unwrap_or(1)
+            .clamp(1, 4)
+            .min(cases.len());
+        let next = std::sync::atomic::AtomicUsize::new(0);
+        let results: Vec<(Summary, usize)> = std::thread::scope(|scope| {
+            let handles: Vec<_> = (0..workers)
+                .map(|_| {
+                    scope.spawn(|| {
+                        let mut local_summary = Summary::default();
+                        let mut local_generations = 0usize;
+                        loop {
+                            let idx = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                            let Some((name, bars, every_prefix)) = cases.get(idx) else {
+                                break;
+                            };
+                            let rows: Vec<Row> = bars
+                                .iter()
+                                .enumerate()
+                                .map(|(seq, bar)| Row {
+                                    coord: bar["raw_index"].as_i64().expect("raw_index"),
+                                    high: bar["high"].as_i64().expect("high"),
+                                    low: bar["low"].as_i64().expect("low"),
+                                    revision: 1,
+                                    seq: seq as i64,
+                                })
+                                .collect();
+                            let len = rows.len();
+                            let prefixes: Vec<usize> = if *every_prefix {
+                                (1..=len).collect()
+                            } else {
+                                vec![len / 4, len / 2, len * 3 / 4, len]
+                            };
+                            let started = std::time::Instant::now();
+                            let mut harness = Harness::new();
+                            let mut previous: Option<Generation> = None;
+                            for prefix in prefixes {
+                                let generation = run_generation(
+                                    &mut harness,
+                                    &rows[..prefix],
+                                    previous.as_ref(),
+                                    &format!("{name} 前缀{prefix}"),
+                                );
+                                local_summary.observe(&generation.oracle);
+                                local_generations += 1;
+                                previous = Some(generation);
+                            }
+                            eprintln!("#804 对拍 {name}: {len} 根，{:?}", started.elapsed());
+                        }
+                        (local_summary, local_generations)
+                    })
                 })
                 .collect();
-            let len = rows.len();
-            let prefixes: Vec<usize> = if *every_prefix {
-                (1..=len).collect()
-            } else {
-                vec![len / 4, len / 2, len * 3 / 4, len]
-            };
-            let started = std::time::Instant::now();
-            let mut harness = Harness::new();
-            let mut previous: Option<Generation> = None;
-            for prefix in prefixes {
-                let generation = run_generation(
-                    &mut harness,
-                    &rows[..prefix],
-                    previous.as_ref(),
-                    &format!("{name} 前缀{prefix}"),
-                );
-                summary.observe(&generation.oracle);
-                generations += 1;
-                previous = Some(generation);
+            handles.into_iter().map(|h| h.join().unwrap()).collect()
+        });
+        let mut summary = Summary::default();
+        let mut generations = 0usize;
+        for (local_summary, local_generations) in results {
+            summary.kinds.extend(local_summary.kinds);
+            for (change, count) in local_summary.changes {
+                *summary.changes.entry(change).or_insert(0) += count;
             }
-            eprintln!("#804 对拍 {name}: {len} 根，{:?}", started.elapsed());
+            generations += local_generations;
         }
         assert!(generations > cases.len(), "逐代续接对拍不是假空");
         for kind in KINDS {
