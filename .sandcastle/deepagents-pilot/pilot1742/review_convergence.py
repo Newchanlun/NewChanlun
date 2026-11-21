@@ -160,7 +160,7 @@ _COMMONMARK_ENTITY_RE = re.compile(
     r"&(?:#[0-9]{1,7}|#[Xx][0-9A-Fa-f]{1,6}|[A-Za-z][A-Za-z0-9]{1,31});"
 )
 _INVISIBLE_STRIP_CATEGORIES = frozenset({"Cf", "Cc", "Cs", "Zl", "Zp"})
-_INVISIBLE_CHECK_CATEGORIES = frozenset({"Cf", "Cc", "Cs", "Zl", "Zp", "Zs"})
+_INVISIBLE_CHECK_CATEGORIES = frozenset({"Cf", "Cc", "Cs", "Cn", "Co", "Zl", "Zp", "Zs", "Mn", "Me", "Mc"})
 
 _WONTFIX_HEAD_RE = re.compile(
     r"^(?:(?:[-*+]|[0-9]+[.)])[ \t]+)?"
@@ -416,11 +416,15 @@ def merge_and_dedupe_findings(finder_batches: Sequence[tuple[str, Sequence[Findi
 
 
 def infer_model_family(model: str) -> str:
-    """识别模型所属家族；未知模型 fail-closed 拒绝，避免伪异家族绕过独立核实。"""
+    """识别模型所属家族；未知模型或同时命中多个家族均 fail-closed 拒绝，避免伪异家族绕过独立核实。"""
     normalized = _require_non_empty_str(model, "model").lower()
-    for family, pattern in _MODEL_FAMILY_PATTERNS:
-        if pattern.search(normalized):
-            return family
+    matched_families = {family for family, pattern in _MODEL_FAMILY_PATTERNS if pattern.search(normalized)}
+    if len(matched_families) > 1:
+        raise ConvergenceError(
+            f"模型名 {model!r} 同时命中多个模型家族 {sorted(matched_families)!r}，无法判定独立跨家族核实"
+        )
+    if len(matched_families) == 1:
+        return next(iter(matched_families))
     raise ConvergenceError(f"无法识别模型家族：{model!r}")
 
 
@@ -1101,7 +1105,7 @@ def _find_matching_bracket(
 
 
 def _clean_display_reason(raw: str) -> str:
-    """剥离行内匹配哨兵与不可见格式/控制/代理/分隔字符，再校验存在真实可见字符。"""
+    """剥离行内匹配哨兵与不可见格式/控制/代理/分隔字符，保留正文组合记号并校验至少含一个可见基字符。"""
     cleaned = "".join(
         ch for ch in raw if ch != "\x01" and unicodedata.category(ch) not in _INVISIBLE_STRIP_CATEGORIES
     ).strip()
@@ -2123,11 +2127,17 @@ def parse_wontfix_replies(
                 )
             )
 
-        # 同评论内针对同一 target_finding_id 或同一显式 (file, line) 出现不同理由的冲突指令时拒收歧义
+        # 同评论内针对同一 target_finding_id（含前后端缀重叠）或同一显式 (file, line) 出现不同理由的冲突指令时拒收歧义
         conflicting_ids = {fid for fid, reasons in id_reasons.items() if len(reasons) > 1}
         conflicting_locs = {loc for loc, reasons in loc_reasons.items() if len(reasons) > 1}
         for item in comment_replies:
-            if item.finding_id is not None and item.finding_id in conflicting_ids:
+            if item.finding_id is not None and (
+                item.finding_id in conflicting_ids
+                or any(
+                    item.finding_id.startswith(cfid) or cfid.startswith(item.finding_id)
+                    for cfid in conflicting_ids
+                )
+            ):
                 continue
             if (
                 item.finding_id is None
@@ -2168,7 +2178,7 @@ def _analyze_author_replies(
         lowercase=True,
     )
 
-    # 校验并识别同评论内针对同一 target_finding_id 或同一显式 (file, line) 的冲突指令（即使直接构造 AuthorReply 也拒收）
+    # 校验并识别同评论内针对同一字面量或同一解析后目标指纹 fid 的冲突指令（含缩写+全长、ID+坐标混写）
     validated_replies: list[AuthorReply] = []
     comment_id_reasons: dict[tuple[str, str], set[str]] = {}
     comment_loc_reasons: dict[tuple[str, str, int | None], set[str]] = {}
@@ -2188,22 +2198,14 @@ def _analyze_author_replies(
     conflicting_comment_ids = {pair for pair, reasons in comment_id_reasons.items() if len(reasons) > 1}
     conflicting_comment_locs = {triple for triple, reasons in comment_loc_reasons.items() if len(reasons) > 1}
 
-    best_by_id: dict[str, tuple[int, AuthorReply]] = {}
     matched_keys_by_id: dict[str, set[str]] = {}
+    comment_target_reasons: dict[tuple[str, str], set[str]] = {}
+    resolved_entries: list[tuple[str, str, int, AuthorReply]] = []
     for reply in validated_replies:
         cid = reply.comment_id.strip()
         if reply.reply_key in consumed_keys:
             continue
         if cid in consumed_cids:
-            continue
-        if reply.finding_id is not None and (cid, reply.finding_id.strip().lower()) in conflicting_comment_ids:
-            continue
-        if (
-            reply.finding_id is None
-            and not reply.is_inline_anchor
-            and reply.file is not None
-            and (cid, _normalize_file(reply.file), reply.line) in conflicting_comment_locs
-        ):
             continue
 
         matches, specificity = _match_reply_targets(
@@ -2227,6 +2229,24 @@ def _analyze_author_replies(
         if _resolved_reply_key(cid, target_id) in consumed_keys:
             continue
 
+        norm_reason = _normalize_fingerprint_text(reply.reason, "reason")
+        comment_target_reasons.setdefault((cid, target_id), set()).add(norm_reason)
+        resolved_entries.append((cid, target_id, specificity, reply))
+
+    conflicting_comment_targets = {pair for pair, reasons in comment_target_reasons.items() if len(reasons) > 1}
+    best_by_id: dict[str, tuple[int, AuthorReply]] = {}
+    for cid, target_id, specificity, reply in resolved_entries:
+        if (cid, target_id) in conflicting_comment_targets:
+            continue
+        if reply.finding_id is not None and (cid, reply.finding_id.strip().lower()) in conflicting_comment_ids:
+            continue
+        if (
+            reply.finding_id is None
+            and not reply.is_inline_anchor
+            and reply.file is not None
+            and (cid, _normalize_file(reply.file), reply.line) in conflicting_comment_locs
+        ):
+            continue
         current = best_by_id.get(target_id)
         if current is None or specificity >= current[0]:
             best_by_id[target_id] = (specificity, reply)
@@ -2450,13 +2470,17 @@ class RoundHistoryEntry:
         object.__setattr__(self, "relocated_fingerprints", norm_relocated)
 
 
-def _validate_history_chain(history: Sequence[RoundHistoryEntry]) -> tuple[frozenset[str], dict[str, str]]:
-    """校验连续轮次历史链的完整性、会话唯一性、跨轮异家族核实与未解除 Important 守恒，返回 (全部历史 session_id, 每条未解除项最后定位提交 SHA)。"""
+def _validate_history_chain(
+    history: Sequence[RoundHistoryEntry],
+) -> tuple[frozenset[str], dict[str, tuple[str, str, int | None] | None]]:
+    """校验连续轮次历史链的完整性、会话唯一性、跨轮异家族核实、解除依据与未解除 Important 守恒，返回 (全部历史 session_id, 每条未解除项成对定位锚点)。"""
     allowed_historical_finders: set[str] = set()
     historical_session_ids: set[str] = set()
+    historical_consumed_reply_keys: set[str] = set()
+    prev_entry: RoundHistoryEntry | None = None
     prev_unresolved_sources: dict[str, frozenset[str]] = {}
     prev_unresolved_ids: set[str] = set()
-    located_head_by_fp: dict[str, str] = {}
+    located_anchor_by_fp: dict[str, tuple[str, str, int | None] | None] = {}
     for idx, entry in enumerate(history, start=1):
         if not isinstance(entry, RoundHistoryEntry):
             raise ConvergenceError(f"history[{idx - 1}] 必须是 RoundHistoryEntry")
@@ -2489,7 +2513,7 @@ def _validate_history_chain(history: Sequence[RoundHistoryEntry]) -> tuple[froze
         allowed_historical_finders.update(entry_finders)
 
         seen_hist_ids: set[str] = set()
-        next_located_head: dict[str, str] = {}
+        next_located_anchor: dict[str, tuple[str, str, int | None] | None] = {}
         for item in entry.unresolved_important:
             if item.severity != Severity.IMPORTANT:
                 raise ConvergenceError(f"历史未解除发现仅允许 Important，收到 {item.severity.value}")
@@ -2523,17 +2547,46 @@ def _validate_history_chain(history: Sequence[RoundHistoryEntry]) -> tuple[froze
                     f"历史第 {idx} 轮未解除发现 {fid} 的来源模型 {unknown_models!r} "
                     f"既不在当轮 panel.finder_models 中，也非合法累计历史结转来源"
                 )
+            item_loc = (_normalize_file(item.file), item.line)
             if fid in prev_unresolved_ids:
                 if fid in entry.relocated_fingerprints:
                     if not (set(real_models) & entry_finders):
                         raise ConvergenceError(
                             f"历史第 {idx} 轮声明重新定位了发现 {fid}，但其 source_models {real_models!r} 不含当轮任何 finder"
                         )
-                    next_located_head[fid] = entry.head_sha
+                    next_located_anchor[fid] = (entry.head_sha, item_loc[0], item_loc[1])
                 else:
-                    next_located_head[fid] = located_head_by_fp[fid]
+                    prev_anchor = located_anchor_by_fp.get(fid)
+                    if prev_anchor is not None and (prev_anchor[1], prev_anchor[2]) == item_loc:
+                        next_located_anchor[fid] = prev_anchor
+                    else:
+                        next_located_anchor[fid] = None
             else:
-                next_located_head[fid] = entry.head_sha
+                next_located_anchor[fid] = (entry.head_sha, item_loc[0], item_loc[1])
+
+        for raw_fp in entry.resolved_fingerprints:
+            norm_fp = raw_fp.strip().lower()
+            can_resolve_by_fix = (
+                prev_entry is not None
+                and norm_fp in prev_unresolved_sources
+                and entry.head_sha != prev_entry.head_sha
+            )
+            if not can_resolve_by_fix:
+                suffix = f":resolved:{norm_fp}"
+                has_wontfix_proof = any(
+                    rk not in historical_consumed_reply_keys
+                    and rk.startswith("comment:")
+                    and rk.endswith(suffix)
+                    and len(rk) > len("comment:") + len(suffix)
+                    and bool(rk[len("comment:") : -len(suffix)].strip())
+                    for rk in entry.consumed_reply_keys
+                )
+                if not has_wontfix_proof:
+                    raise ConvergenceError(
+                        f"历史第 {idx} 轮将发现 {norm_fp} 标为已解除（resolved_fingerprints），"
+                        "但既不满足新提交修复条件（须为前轮结转项且 head_sha 相对前轮有新提交），"
+                        "也缺少未被前轮消费过的作者不修回复消费记录（comment:<id>:resolved:<fp>）"
+                    )
 
         unaccounted = prev_unresolved_ids - (seen_hist_ids | entry.resolved_fingerprints | entry.rejected_fingerprints)
         if unaccounted:
@@ -2541,18 +2594,20 @@ def _validate_history_chain(history: Sequence[RoundHistoryEntry]) -> tuple[froze
                 f"历史第 {idx} 轮遗漏了前轮未解除的 Important 发现（无结转/解除/驳回记录）：{sorted(unaccounted)!r}"
             )
 
+        historical_consumed_reply_keys.update(entry.consumed_reply_keys)
+        prev_entry = entry
         if entry.outcome == RoundOutcome.PASS:
             prev_unresolved_sources = {}
             prev_unresolved_ids = set()
-            located_head_by_fp = {}
+            located_anchor_by_fp = {}
         else:
             prev_unresolved_sources = {
                 f.finding_id: frozenset(_real_source_models(f.source_models))
                 for f in entry.unresolved_important
             }
             prev_unresolved_ids = seen_hist_ids
-            located_head_by_fp = next_located_head
-    return frozenset(historical_session_ids), located_head_by_fp
+            located_anchor_by_fp = next_located_anchor
+    return frozenset(historical_session_ids), located_anchor_by_fp
 
 
 @dataclass(frozen=True)
@@ -2625,7 +2680,7 @@ class RoundCandidates:
             )
 
         verifier_family = self.panel.verifier_family
-        historical_session_ids, located_head_by_fp = _validate_history_chain(self.history)
+        historical_session_ids, located_anchor_by_fp = _validate_history_chain(self.history)
 
         if not self.history or self.history[-1].outcome == RoundOutcome.PASS:
             prior_important: tuple[Finding, ...] = ()
@@ -2690,7 +2745,8 @@ class RoundCandidates:
                     source_models=combined_sources,
                 )
             else:
-                if located_head_by_fp.get(fp) != norm_head:
+                anchor = located_anchor_by_fp.get(fp)
+                if anchor is None or anchor != (norm_head, _normalize_file(prior.file), prior.line):
                     stale_fps.add(fp)
                 merged_by_fp[fp] = Finding(
                     severity=Severity.IMPORTANT,
@@ -3422,8 +3478,16 @@ class RenderedComment:
 
 def parse_comment_marker(body: str) -> tuple[int, int, str] | None:
     lines = _split_commonmark_lines(body) if body else []
-    first_line = lines[0].strip(" \t") if lines else ""
-    match = _COMMENT_MARKER_RE.match(first_line)
+    if not lines:
+        return None
+    first_line = lines[0]
+    leading_spaces = 0
+    while leading_spaces < len(first_line) and first_line[leading_spaces] == " ":
+        leading_spaces += 1
+    if leading_spaces >= 4 or (leading_spaces < len(first_line) and first_line[leading_spaces] == "\t"):
+        return None
+    candidate = first_line[leading_spaces:].rstrip(" \t")
+    match = _COMMENT_MARKER_RE.match(candidate)
     if not match:
         return None
     return int(match.group("pr")), int(match.group("round")), _normalize_commit_sha(match.group("head"), "head")

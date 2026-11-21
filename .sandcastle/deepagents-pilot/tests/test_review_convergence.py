@@ -4920,3 +4920,494 @@ def test_r10_important7_machine_comment_filter_uses_parse_comment_marker_only() 
         )
         == ()
     )
+
+
+def test_r11_important1_history_chain_requires_valid_resolution_basis() -> None:
+    """R10 Important 1：历史链校验每条 resolved_fingerprints 的合法解除依据（同 HEAD 或非结转项必须有未复用消费键）。"""
+    f1 = _finding(severity=Severity.IMPORTANT, file="pilot1742/demo.py", line=42)
+    f2 = _finding(
+        severity=Severity.IMPORTANT,
+        file="pilot1742/other.py",
+        line=15,
+        category="边界",
+        failure_scenario="空切片越界",
+    )
+    e1 = RoundHistoryEntry(
+        1,
+        HEAD_1,
+        frozenset({f1.finding_id}),
+        (f1,),
+        panel=DEFAULT_PANEL,
+        finder_session_ids=frozenset({"r11-i1-r1-1", "r11-i1-r1-2"}),
+    )
+
+    # 核心反例：第 2 轮仍在同一 HEAD_1，无消费键却将 f1 标为 resolved_fingerprints -> 必须拒收
+    e2_same_head_unproven = RoundHistoryEntry(
+        2,
+        HEAD_1,
+        frozenset(),
+        (),
+        panel=DEFAULT_PANEL,
+        finder_session_ids=frozenset({"r11-i1-r2-1", "r11-i1-r2-2"}),
+        resolved_fingerprints=frozenset({f1.finding_id}),
+        consumed_reply_keys=frozenset(),
+    )
+    with pytest.raises(ConvergenceError):
+        plan_next_round(BASE_SHA, HEAD_1, (e1, e2_same_head_unproven))
+    with pytest.raises(ConvergenceError):
+        RoundCandidates(
+            round_number=3,
+            head_sha=HEAD_1,
+            panel=DEFAULT_PANEL,
+            finder_batches=_batches_for_panel([], round_number=3, head_sha=HEAD_1),
+            history=(e1, e2_same_head_unproven),
+        )
+
+    # 伪造空 comment_id 消费键同样拒收
+    e2_empty_cid = RoundHistoryEntry(
+        2,
+        HEAD_1,
+        frozenset(),
+        (),
+        panel=DEFAULT_PANEL,
+        finder_session_ids=frozenset({"r11-i1-r2e-1", "r11-i1-r2e-2"}),
+        resolved_fingerprints=frozenset({f1.finding_id}),
+        consumed_reply_keys=frozenset({f"comment::resolved:{f1.finding_id}"}),
+    )
+    with pytest.raises(ConvergenceError):
+        plan_next_round(BASE_SHA, HEAD_1, (e1, e2_empty_cid))
+
+    # 第 1 轮直接标 resolved_fingerprints 但无消费键 -> 拒收
+    e1_unproven = RoundHistoryEntry(
+        1,
+        HEAD_1,
+        frozenset(),
+        (),
+        panel=DEFAULT_PANEL,
+        finder_session_ids=frozenset({"r11-i1-u1-1", "r11-i1-u1-2"}),
+        resolved_fingerprints=frozenset({f1.finding_id}),
+        consumed_reply_keys=frozenset(),
+    )
+    with pytest.raises(ConvergenceError):
+        plan_next_round(BASE_SHA, HEAD_2, (e1_unproven,))
+
+    # 第 2 轮即使推进到 HEAD_2，非前轮结转项 f2 标 resolved_fingerprints 且无消费键 -> 拒收
+    e2_non_prior_unproven = RoundHistoryEntry(
+        2,
+        HEAD_2,
+        frozenset(),
+        (),
+        panel=DEFAULT_PANEL,
+        finder_session_ids=frozenset({"r11-i1-np-1", "r11-i1-np-2"}),
+        resolved_fingerprints=frozenset({f1.finding_id, f2.finding_id}),
+        consumed_reply_keys=frozenset(),
+    )
+    with pytest.raises(ConvergenceError):
+        plan_next_round(BASE_SHA, HEAD_3, (e1, e2_non_prior_unproven))
+
+    # 正向对照 1：同 HEAD_1 但携带合法 comment:10:resolved:<fp> 消费键 -> 合法通过
+    e2_same_head_wontfix = RoundHistoryEntry(
+        2,
+        HEAD_1,
+        frozenset(),
+        (),
+        panel=DEFAULT_PANEL,
+        finder_session_ids=frozenset({"r11-i1-ok-1", "r11-i1-ok-2"}),
+        resolved_fingerprints=frozenset({f1.finding_id}),
+        consumed_reply_keys=frozenset({f"comment:10:resolved:{f1.finding_id}"}),
+    )
+    plan3_wontfix = plan_next_round(BASE_SHA, HEAD_1, (e1, e2_same_head_wontfix))
+    assert plan3_wontfix.round_number == 3
+    c3_wontfix = build_round_candidates(
+        round_number=3,
+        head_sha=HEAD_1,
+        panel=DEFAULT_PANEL,
+        finder_batches=_batches_for_panel([], round_number=3, head_sha=HEAD_1),
+        history=(e1, e2_same_head_wontfix),
+    )
+    assert c3_wontfix.prior_important == ()
+
+    # 正向对照 2：新提交 HEAD_2 解除前轮结转项 f1（RESOLVED_BY_FIX）无需消费键 -> 合法通过
+    e2_new_head_fix = RoundHistoryEntry(
+        2,
+        HEAD_2,
+        frozenset(),
+        (),
+        panel=DEFAULT_PANEL,
+        finder_session_ids=frozenset({"r11-i1-fix-1", "r11-i1-fix-2"}),
+        resolved_fingerprints=frozenset({f1.finding_id}),
+        consumed_reply_keys=frozenset(),
+    )
+    plan3_fix = plan_next_round(BASE_SHA, HEAD_3, (e1, e2_new_head_fix))
+    assert plan3_fix.round_number == 3
+
+
+def test_r11_important2_paired_anchor_recovery_marks_stale_on_unproven_relocation() -> None:
+    """R10 Important 2：成对追踪 (head_sha, file, line) 定位锚点，坐标变化且缺重定位证明时强制判为过期。"""
+    f1_line42 = _finding(severity=Severity.IMPORTANT, file="pilot1742/demo.py", line=42)
+    f1_line20 = _finding(severity=Severity.IMPORTANT, file="pilot1742/demo.py", line=20)
+    assert f1_line42.finding_id == f1_line20.finding_id
+    fid = f1_line42.finding_id
+
+    # 第 1 轮在 HEAD_1 的 demo.py:42 确认 f1
+    c1 = build_round_candidates(
+        round_number=1,
+        head_sha=HEAD_1,
+        panel=DEFAULT_PANEL,
+        finder_batches=_batches_for_panel([f1_line42], round_number=1, head_sha=HEAD_1),
+    )
+    v1 = parse_verifier_output(
+        _verifier_payload(c1, [{"finding_id": fid, "verdict": "confirmed", "verifier_evidence": "r1 确认于第 42 行"}]),
+        c1,
+        verifier_model="claude-opus-5-5",
+    )
+    dec1 = evaluate_round(v1)
+    e1 = dec1.to_history_entry(rendered=render_findings_comment(1928, HEAD_1, dec1))
+
+    # 第 2 轮在 HEAD_2 重新定位到第 20 行并确认，恢复历史时省略 relocated_fingerprints
+    c2 = build_round_candidates(
+        round_number=2,
+        head_sha=HEAD_2,
+        panel=DEFAULT_PANEL,
+        finder_batches=_batches_for_panel([f1_line20], round_number=2, head_sha=HEAD_2),
+        history=(e1,),
+    )
+    v2 = parse_verifier_output(
+        _verifier_payload(c2, [{"finding_id": fid, "verdict": "confirmed", "verifier_evidence": "r2 移至第 20 行"}]),
+        c2,
+        verifier_model="claude-opus-5-5",
+    )
+    dec2 = evaluate_round(v2)
+    e2 = dec2.to_history_entry(rendered=render_findings_comment(1928, HEAD_2, dec2))
+    e2_without_reloc = RoundHistoryEntry(
+        round_number=e2.round_number,
+        head_sha=e2.head_sha,
+        posted_fingerprints=e2.posted_fingerprints,
+        unresolved_important=e2.unresolved_important,
+        panel=e2.panel,
+        finder_session_ids=e2.finder_session_ids,
+        resolved_fingerprints=e2.resolved_fingerprints,
+        consumed_reply_keys=e2.consumed_reply_keys,
+        rejected_fingerprints=e2.rejected_fingerprints,
+        pending_non_blocking=e2.pending_non_blocking,
+        outcome=e2.outcome,
+    )
+
+    # 第 3 轮回到 HEAD_1 且 finder 无新发现 -> 因第 2 轮坐标从 42 变为 20 且缺重定位证明，强制标为 stale
+    c3 = build_round_candidates(
+        round_number=3,
+        head_sha=HEAD_1,
+        panel=DEFAULT_PANEL,
+        finder_batches=_batches_for_panel([], round_number=3, head_sha=HEAD_1),
+        history=(e1, e2_without_reloc),
+    )
+    assert fid in c3.stale_location_fingerprints
+
+    inline_line20 = parse_wontfix_replies(
+        [
+            {
+                "id": 2101,
+                "user": {"login": "alice", "type": "User"},
+                "path": "pilot1742/demo.py",
+                "side": "RIGHT",
+                "line": 20,
+                "body": "不修：保留",
+            }
+        ],
+        allowed_authors={"alice"},
+    )
+    assert bind_author_replies(c3.findings, inline_line20, stale_location_fingerprints=c3.stale_location_fingerprints) == {}
+    with pytest.raises(ConvergenceError):
+        parse_verifier_output(
+            _verifier_payload(
+                c3,
+                [{"finding_id": fid, "verdict": "resolved_by_wontfix", "verifier_evidence": "试图借未证明坐标放行"}],
+            ),
+            c3,
+            verifier_model="claude-opus-5-5",
+            author_replies=inline_line20,
+        )
+
+    # 仅显式 [finding_id] 可合法解除
+    explicit_reply = parse_wontfix_replies(
+        [{"id": 2102, "user": {"login": "alice", "type": "User"}, "body": f"[{fid}] 不修：显式指纹确认保留"}],
+        allowed_authors={"alice"},
+    )
+    v3_ok = parse_verifier_output(
+        _verifier_payload(
+            c3,
+            [{"finding_id": fid, "verdict": "resolved_by_wontfix", "verifier_evidence": "显式指纹回复有效"}],
+        ),
+        c3,
+        verifier_model="claude-opus-5-5",
+        author_replies=explicit_reply,
+    )
+    assert v3_ok.verdicts[0].verdict is VerificationVerdict.RESOLVED_BY_WONTFIX
+
+    # 正向对照：第 2 轮未重定位且坐标保持第 42 行不变 -> 第 3 轮回到 HEAD_1 时成对锚点匹配，非 stale
+    e2_unchanged_42 = RoundHistoryEntry(
+        2,
+        HEAD_2,
+        frozenset({fid}),
+        (f1_line42,),
+        panel=DEFAULT_PANEL,
+        finder_session_ids=frozenset({"r11-i2-u2-1", "r11-i2-u2-2"}),
+    )
+    c3_back_to_h1 = build_round_candidates(
+        round_number=3,
+        head_sha=HEAD_1,
+        panel=DEFAULT_PANEL,
+        finder_batches=_batches_for_panel([], round_number=3, head_sha=HEAD_1),
+        history=(e1, e2_unchanged_42),
+    )
+    assert c3_back_to_h1.stale_location_fingerprints == frozenset()
+
+
+def test_r11_important3_infer_model_family_rejects_multi_family_prefixes() -> None:
+    """R10 Important 3：模型名同时命中多个家族时 fail-closed 拒收，禁止路由前缀伪装异家族。"""
+    with pytest.raises(ConvergenceError):
+        ReviewPanel(("deepseek-chat", "deepseek-chat"), "openai/deepseek-chat")
+
+    for ambiguous_model in (
+        "openai/deepseek-chat",
+        "anthropic/gpt-6",
+        "google/claude-opus-5-5",
+        "moonshot/gemini-4-neon",
+        "openai:qwen3-coder",
+        "claude-gpt-bridge",
+    ):
+        with pytest.raises(ConvergenceError):
+            infer_model_family(ambiguous_model)
+
+    expected_single_family = {
+        "gpt-6.1-sol": "openai",
+        "gpt-6.2-astra": "openai",
+        "openai/gpt-6.1-sol": "openai",
+        "claude-opus-5-5": "anthropic",
+        "anthropic/claude-opus-5-5": "anthropic",
+        "kimi-k3.1-pro": "moonshot",
+        "gemini-4-neon": "google",
+        "deepseek-chat": "deepseek",
+        "qwen3-coder": "qwen",
+        "mistral-large": "mistral",
+        "meta-llama-3.1": "meta",
+    }
+    for model_name, expected_family in expected_single_family.items():
+        assert infer_model_family(model_name) == expected_family
+
+
+def test_r11_important4_same_comment_conflict_grouped_by_resolved_target_fingerprint() -> None:
+    """R10 Important 4：同评论冲突检查按解析后目标指纹 fid 分组，封堵缩写+全长与混合锚点不同理由绕过。"""
+    f1 = _finding(severity=Severity.IMPORTANT, file="pilot1742/demo.py", line=42)
+    f2 = _finding(
+        severity=Severity.IMPORTANT,
+        file="pilot1742/other.py",
+        line=10,
+        category="边界",
+        failure_scenario="独立发现不受影响",
+    )
+    fid = f1.finding_id
+    short_id = fid[:8]
+
+    # 核心反例：单候选 F，同评论含 [F[:8]] 不修：理由甲 与 [F] 不修：理由乙 -> 不绑定，resolved_by_wontfix 抛 ConvergenceError
+    parsed_conflict = parse_wontfix_replies(
+        [
+            {
+                "id": 2201,
+                "user": {"login": "alice", "type": "User"},
+                "body": f"[{short_id}] 不修：理由甲\n[{fid}] 不修：理由乙",
+            }
+        ],
+        allowed_authors={"alice"},
+    )
+    assert bind_author_replies([f1], parsed_conflict) == {}
+    cand = _candidates([f1])
+    with pytest.raises(ConvergenceError):
+        parse_verifier_output(
+            _verifier_payload(
+                cand,
+                [{"finding_id": fid, "verdict": "resolved_by_wontfix", "verifier_evidence": "试图绕过同评论冲突"}],
+            ),
+            cand,
+            verifier_model="claude-opus-5-5",
+            author_replies=parsed_conflict,
+        )
+
+    # 直接构造 AuthorReply（绕过 parse_wontfix_replies）同样拒收
+    direct_short_full = [
+        AuthorReply(short_id, None, None, "理由甲", "2202", "alice"),
+        AuthorReply(fid, None, None, "理由乙", "2202", "alice"),
+    ]
+    assert bind_author_replies([f1], direct_short_full) == {}
+
+    # 同评论混写显式 ID 与显式文件路径+行号指向同一 F 且理由不同 -> 不得用高优先级 ID 覆盖不同理由
+    mixed_anchor = parse_wontfix_replies(
+        [
+            {
+                "id": 2203,
+                "user": {"login": "alice", "type": "User"},
+                "body": f"[{fid}] 不修：理由甲\npilot1742/demo.py:42 不修：理由乙",
+            }
+        ],
+        allowed_authors={"alice"},
+    )
+    assert bind_author_replies([f1], mixed_anchor) == {}
+
+    # 同评论走私前缀：[F[:8]] 理由甲 + [F] 理由乙 + [F] 理由丙 -> 全部拒收
+    smuggled_prefix = parse_wontfix_replies(
+        [
+            {
+                "id": 2204,
+                "user": {"login": "alice", "type": "User"},
+                "body": f"[{short_id}] 不修：理由甲\n[{fid}] 不修：理由乙\n[{fid}] 不修：理由丙",
+            }
+        ],
+        allowed_authors={"alice"},
+    )
+    assert smuggled_prefix == ()
+    assert (
+        bind_author_replies(
+            [f1],
+            [
+                AuthorReply(short_id, None, None, "理由甲", "2204", "alice"),
+                AuthorReply(fid, None, None, "理由乙", "2204", "alice"),
+                AuthorReply(fid, None, None, "理由丙", "2204", "alice"),
+            ],
+        )
+        == {}
+    )
+
+    # 同一行内评论多行不同理由 -> 拒收
+    inline_conflict = parse_wontfix_replies(
+        [
+            {
+                "id": 2205,
+                "user": {"login": "alice", "type": "User"},
+                "path": "pilot1742/demo.py",
+                "side": "RIGHT",
+                "line": 42,
+                "body": "不修：理由甲\n不修：理由乙",
+            }
+        ],
+        allowed_authors={"alice"},
+    )
+    assert bind_author_replies([f1], inline_conflict) == {}
+
+    # 正向对照：同评论内缩写 + 全长理由完全相同 -> 不误报冲突；且同评论内另一独立发现 f2 仍可正常绑定
+    same_reason_plus_other = parse_wontfix_replies(
+        [
+            {
+                "id": 2206,
+                "user": {"login": "alice", "type": "User"},
+                "body": f"[{short_id}] 不修：保留兼容性\n[{fid}] 不修：保留兼容性\n[{f2.finding_id}] 不修：另一独立理由",
+            }
+        ],
+        allowed_authors={"alice"},
+    )
+    bound_ok = bind_author_replies([f1, f2], same_reason_plus_other)
+    assert set(bound_ok.keys()) == {fid, f2.finding_id}
+    assert bound_ok[fid].reason == "保留兼容性"
+    assert bound_ok[f2.finding_id].reason == "另一独立理由"
+
+    # 同评论中 f1 冲突但 f2 不冲突 -> 仅拒收 f1，f2 照常绑定
+    partial_conflict = parse_wontfix_replies(
+        [
+            {
+                "id": 2207,
+                "user": {"login": "alice", "type": "User"},
+                "body": f"[{short_id}] 不修：理由甲\n[{fid}] 不修：理由乙\n[{f2.finding_id}] 不修：独立合法理由",
+            }
+        ],
+        allowed_authors={"alice"},
+    )
+    bound_partial = bind_author_replies([f1, f2], partial_conflict)
+    assert set(bound_partial.keys()) == {f2.finding_id}
+
+
+def test_r11_important5_reason_requires_visible_base_character() -> None:
+    """R10 Important 5：理由必须含至少一个可见基字符，拒绝纯变体选择符与组合附加符号，同时保留合法 emoji/变音符。"""
+    f1 = _finding(severity=Severity.IMPORTANT, file="pilot1742/demo.py", line=42)
+    fid = f1.finding_id
+
+    def parse_one(body: str) -> tuple[AuthorReply, ...]:
+        return parse_wontfix_replies(
+            [{"id": 2301, "user": {"login": "alice", "type": "User"}, "body": body}],
+            allowed_authors={"alice"},
+        )
+
+    # 核心反例：纯变体选择符与组合附加符号 -> 0 条回复
+    for invisible_body in (
+        f"[{fid}] 不修：&#xFE0F;",
+        f"[{fid}] 不修：&#x0301;&#xFE0F;",
+        f"[{fid}] 不修：&#xFE0E;",
+        f"[{fid}] 不修：\u20dd",
+        f"[{fid}] 不修：\u0903",
+        f"[{fid}] 不修：**&#xFE0F;**",
+        f"[{fid}] 不修：[&#xFE0F;](https://example.com)",
+    ):
+        assert parse_one(invisible_body) == (), f"expected 0 replies for {invisible_body!r}"
+
+    # 端到端验证 resolved_by_wontfix 抛 ConvergenceError
+    cand = _candidates([f1])
+    with pytest.raises(ConvergenceError):
+        parse_verifier_output(
+            _verifier_payload(
+                cand,
+                [{"finding_id": fid, "verdict": "resolved_by_wontfix", "verifier_evidence": "试图用变体选择符充当理由"}],
+            ),
+            cand,
+            verifier_model="claude-opus-5-5",
+            author_replies=parse_one(f"[{fid}] 不修：&#xFE0F;"),
+        )
+
+    # AuthorReply 直接构造同样拒收
+    for bad_reason in ("\ufe0f", "\u0301\ufe0f", "\ufe0e", "\u20dd", "\u0903", "\ue000"):
+        with pytest.raises(ConvergenceError):
+            AuthorReply(fid, None, None, bad_reason, "2302", "alice")
+
+    # 正向对照：含可见基字符的 emoji（保留 \ufe0f）与组合音标文本完整保留
+    emoji_replies = parse_one(f"[{fid}] 不修：⚠️ 保留兼容性")
+    assert [(r.finding_id, r.reason) for r in emoji_replies] == [(fid, "⚠️ 保留兼容性")]
+    assert "\ufe0f" in emoji_replies[0].reason
+
+    cafe_nfc = parse_one(f"[{fid}] 不修：café")
+    assert [(r.finding_id, r.reason) for r in cafe_nfc] == [(fid, "café")]
+    cafe_nfd = parse_one(f"[{fid}] 不修：cafe\u0301")
+    assert [(r.finding_id, r.reason) for r in cafe_nfd] == [(fid, "cafe\u0301")]
+
+
+def test_r11_important6_parse_comment_marker_requires_0_to_3_leading_spaces() -> None:
+    """R10 Important 6：parse_comment_marker 仅接受 0–3 空格缩进，4 空格或 Tab 缩进代码块不当作机器评论标记。"""
+    head_ones = "1" * 40
+    marker_line = f"<!-- deepagents:review-findings pr=1 round=1 head={head_ones} -->"
+
+    # 核心反例：4 空格缩进代码块内的机器标记不视为机器评论，后续人类回复正常提取
+    indented_4_body = f"    {marker_line}\n\n[abcdef12] 不修：保留"
+    assert parse_comment_marker(indented_4_body) is None
+    replies_4 = parse_wontfix_replies(
+        [{"id": 2401, "user": {"login": "alice", "type": "User"}, "body": indented_4_body}],
+        allowed_authors={"alice"},
+    )
+    assert [(r.finding_id, r.reason) for r in replies_4] == [("abcdef12", "保留")]
+
+    # Tab 及 1..3 空格后接 Tab（展开均 >= 4 列）同样不视为机器评论
+    for tab_prefix in ("\t", " \t", "  \t", "   \t", "     "):
+        indented_body = f"{tab_prefix}{marker_line}\n\n[abcdef12] 不修：缩进代码块后回复"
+        assert parse_comment_marker(indented_body) is None
+        parsed = parse_wontfix_replies(
+            [{"id": 2402, "user": {"login": "alice", "type": "User"}, "body": indented_body}],
+            allowed_authors={"alice"},
+        )
+        assert [(r.finding_id, r.reason) for r in parsed] == [("abcdef12", "缩进代码块后回复")]
+
+    # 正向对照：0–3 空格缩进（含尾部空格/Tab）仍被识别为机器评论并跳过
+    for valid_prefix in ("", " ", "  ", "   "):
+        valid_body = f"{valid_prefix}{marker_line}  \t\n\n[abcdef12] 不修：机器评论内示范"
+        assert parse_comment_marker(valid_body) == (1, 1, head_ones)
+        assert (
+            parse_wontfix_replies(
+                [{"id": 2403, "user": {"login": "alice", "type": "User"}, "body": valid_body}],
+                allowed_authors={"alice"},
+            )
+            == ()
+        )
