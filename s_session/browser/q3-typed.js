@@ -56,21 +56,141 @@
     const value = await S(v); need(values.includes(value), message); return value;
   }
   async function array(v, message) { v = V.of(v); need((v.kind) === "array", message); return v; }
+  const SHA_RE = /^[a-f0-9]{64}$/,
+    UINT_RE = /^(?:0|[1-9][0-9]*|-1)$/,
+    SINT_RE = /^(?:0|[1-9][0-9]*|-[1-9][0-9]*)$/,
+    BAR_KEYS = ["source_coord", "open", "high", "low", "close"],
+    REL_KEYS = ["axis", "value", "reference", "reference_value", "order"],
+    OHLC_AXES = ["open", "high", "low", "close"];
+  function wf(s) {
+    need(typeof s === "string", "要求 UTF-8 文本");
+    if (typeof s.isWellFormed === "function") {
+      need(s.isWellFormed(), "孤立 Unicode 代理项");
+      return s;
+    }
+    for (let i = 0; i < s.length; i++) {
+      let c = s.charCodeAt(i);
+      if (c >= 0xd800 && c <= 0xdbff) {
+        c = s.charCodeAt(++i);
+        need(c >= 0xdc00 && c <= 0xdfff, "孤立 Unicode 代理项");
+      } else need(c < 0xdc00 || c > 0xdfff, "孤立 Unicode 代理项");
+    }
+    return s;
+  }
+  function isPlainObj(p) {
+    return p !== null && typeof p === "object" && !Array.isArray(p) && !V.isNumber(p) && !(p instanceof V.Value);
+  }
+  function plainKeysCheck(p, expected, name) {
+    need(isPlainObj(p), name + " 完整对象不符");
+    const ks = Object.keys(p);
+    for (let i = 0; i < ks.length; i++) wf(ks[i]);
+    if (ks.length !== expected.length) need(false, name + " 完整字段不符");
+    for (let i = 0; i < expected.length; i++)
+      if (!Object.hasOwn(p, expected[i])) need(false, name + " 完整字段不符");
+  }
+  function plainT(x) {
+    if (typeof x !== "string") return null;
+    wf(x);
+    need(x.length > 0, "身份文本为空");
+    return x;
+  }
+  function plainI(x, positive = false, frontier = false) {
+    if (typeof x !== "string") return null;
+    wf(x);
+    need(x.length <= 19 && UINT_RE.test(x), "精确整数必须是规范文本");
+    const n = BigInt(x);
+    need(n >= (frontier ? -1n : positive ? 1n : 0n) && n <= 9223372036854775807n, "精确整数超出 i64 域");
+    return n;
+  }
+  function plainN(x) {
+    if (typeof x !== "string") return null;
+    wf(x);
+    need(x.length <= 20 && SINT_RE.test(x), "价格须为规范整数文本");
+    const n = BigInt(x);
+    need(n >= -9223372036854775808n && n <= 9223372036854775807n, "价格超出 i64");
+    return n;
+  }
+  function tryPlainReference(p, name, revisionMessage) {
+    if (!isPlainObj(p)) return false;
+    for (let i = 0; i < REF_KEYS.length; i++) {
+      const k = REF_KEYS[i];
+      if (Object.hasOwn(p, k) && p[k] instanceof V.Value) return false;
+    }
+    plainKeysCheck(p, REF_KEYS, name);
+    for (let i = 0; i < REF_KEYS.length; i++) {
+      const val = p[REF_KEYS[i]];
+      if (plainT(val) === null) return false;
+    }
+    need(SHA_RE.test(p.payload_hash), "SHA-256 文本不规范");
+    plainI(p.input_revision, true);
+    plainI(p.revision, true);
+    plainI(p.seq);
+    plainI(p.source_coord);
+    need(p.input_revision === p.revision, revisionMessage);
+    return true;
+  }
+  function tryPlainBarRef(p) {
+    if (!isPlainObj(p)) return false;
+    for (let i = 0; i < BAR_KEYS.length; i++) {
+      const k = BAR_KEYS[i];
+      if (Object.hasOwn(p, k) && typeof p[k] !== "string") return false;
+    }
+    plainKeysCheck(p, BAR_KEYS, "BarRef");
+    plainI(p.source_coord);
+    plainN(p.open);
+    plainN(p.high);
+    plainN(p.low);
+    plainN(p.close);
+    return true;
+  }
   async function texts(v) {
-    v = await array(v, "要求文本数组"); for await (const item of v.items()) await T(item); return v;
+    v = await array(v, "要求文本数组");
+    if (!v.reader) {
+      const arr = v.plain;
+      for (let i = 0; i < arr.length; i++) {
+        need(Object.hasOwn(arr, i), "稀疏数组");
+        const item = arr[i];
+        if (typeof item === "string") plainT(item);
+        else await T(item);
+      }
+      return v;
+    }
+    for await (const item of v.items()) await T(item); return v;
   }
   async function coordinates(v) {
     v = await array(v, "要求完整坐标数组"); let last = -1n;
+    if (!v.reader) {
+      const arr = v.plain;
+      for (let i = 0; i < arr.length; i++) {
+        need(Object.hasOwn(arr, i), "稀疏数组");
+        const item = arr[i];
+        const n = typeof item === "string" ? plainI(item) : await I(item);
+        need(n > last, "来源坐标未严格递增/重复"); last = n;
+      }
+      return v;
+    }
     for await (const item of v.items()) { const n = await I(item); need(n > last, "来源坐标未严格递增/重复"); last = n; }
     return v;
   }
   async function coordinateSet(v) {
-    const result = new Set(); for await (const item of (await coordinates(v)).items()) result.add(await S(item)); return result;
+    const c = await coordinates(v), result = new Set();
+    if (!c.reader) {
+      const arr = c.plain;
+      for (let i = 0; i < arr.length; i++) {
+        const item = arr[i];
+        result.add(typeof item === "string" ? wf(item) : await S(item));
+      }
+      return result;
+    }
+    for await (const item of c.items()) result.add(await S(item)); return result;
   }
-  async function digest(v) { const value = await S(v); need(/^[a-f0-9]{64}$/.test(value), "SHA-256 文本不规范"); }
+  async function digest(v) { const value = await S(v); need(SHA_RE.test(value), "SHA-256 文本不规范"); }
   async function barRef(v) {
-    await keys(v, ["source_coord", "open", "high", "low", "close"], "BarRef"); await I(await field(v, "source_coord"));
-    for (const k of ["open", "high", "low", "close"]) await N(await field(v, k));
+    if (v instanceof V.Value) {
+      if (!v.reader && tryPlainBarRef(v.plain)) return;
+    } else if (tryPlainBarRef(v)) return;
+    await keys(v, BAR_KEYS, "BarRef"); await I(await field(v, "source_coord"));
+    for (const k of OHLC_AXES) await N(await field(v, k));
   }
   async function direction(v) { if (!(isNull(v))) await enumValue(v, ["UP", "DOWN"], "未知方向枚举"); }
   async function directionEvidence(v) {
@@ -82,6 +202,9 @@
     need(await equal(await field(v, "established_at"), await field(incoming, "source_coord")), "方向建立坐标与原 incoming 不同");
   }
   async function reference(v, name, revisionMessage) {
+    if (v instanceof V.Value) {
+      if (!v.reader && tryPlainReference(v.plain, name, revisionMessage)) return;
+    } else if (tryPlainReference(v, name, revisionMessage)) return;
     await keys(v, REF_KEYS, name); for await (const entry of V.of(v).entries()) await T(entry.value);
     await digest(await field(v, "payload_hash")); await I(await field(v, "input_revision"), true); await I(await field(v, "revision"), true);
     await I(await field(v, "seq")); await I(await field(v, "source_coord"));
@@ -116,12 +239,29 @@
       need((why === "fact_removed") === isNull(superseded), "撤回原因/目标不符"); if (!(isNull(superseded))) await T(superseded);
     }
     const refs = await array(await field(record, "input_refs"), "typed input_refs 不是数组"), coords = await coordinates(await field(record, "source_coords"));
-    const coordIterator = coords.items()[Symbol.asyncIterator]();
-    for await (const ref of refs.items()) {
-      await reference(ref, "typed input_ref", "输入修订引用不同"); const next = await coordIterator.next();
-      need(!next.done && await equal(next.value, await field(ref, "source_coord")), "typed 源引用/坐标不一一对应");
+    if (!refs.reader && !coords.reader) {
+      const rArr = refs.plain, cArr = coords.plain;
+      for (let idx = 0; idx < rArr.length; idx++) {
+        need(Object.hasOwn(rArr, idx), "稀疏数组");
+        const r = rArr[idx];
+        if (!tryPlainReference(r, "typed input_ref", "输入修订引用不同"))
+          await reference(r, "typed input_ref", "输入修订引用不同");
+        need(idx < cArr.length, "typed 源引用/坐标不一一对应");
+        const c = cArr[idx];
+        const eq = typeof c === "string" && isPlainObj(r) && typeof r.source_coord === "string"
+          ? c === r.source_coord
+          : await equal(c, await field(r, "source_coord"));
+        need(eq, "typed 源引用/坐标不一一对应");
+      }
+      need(rArr.length === cArr.length, "typed 源引用/坐标不一一对应");
+    } else {
+      const coordIterator = coords.items()[Symbol.asyncIterator]();
+      for await (const ref of refs.items()) {
+        await reference(ref, "typed input_ref", "输入修订引用不同"); const next = await coordIterator.next();
+        need(!next.done && await equal(next.value, await field(ref, "source_coord")), "typed 源引用/坐标不一一对应");
+      }
+      need((await coordIterator.next()).done, "typed 源引用/坐标不一一对应");
     }
-    need((await coordIterator.next()).done, "typed 源引用/坐标不一一对应");
     const p = await field(record, "payload");
     if (SEGMENT_KINDS.includes(kind)) validateSegmentPayload(kind, await plain(p));
     else if (BI_KINDS.includes(kind)) await validateBiPayload(kind, p);
@@ -178,15 +318,51 @@
       if (bounded) { /* 后续单元由 CC-007.development_batch 承载，跨对象绑定见 bindDevelopmentBatches。 */ } else {
       const sub = await field(p, "subsequent_development"); await keys(sub, ["status", "reason", "bars"], "后续已知事实"); const subsequent = await array(await field(sub, "bars"), "后续 bars 不完整");
       need(await subsequent.length() > 0n ? await eqField(sub, "status", "observed") && await eqField(sub, "reason", null) : await eqField(sub, "status", "insufficient_knowledge") && await eqField(sub, "reason", "no_subsequent_bar"), "后续状态与原件不一致");
+      if (!subsequent.reader && prices.every(pr => !pr.reader && isPlainObj(pr.plain) && typeof pr.plain.name === "string" && typeof pr.plain.value === "string")) {
+        const refNames = prices.map(pr => pr.plain.name), refVals = prices.map(pr => pr.plain.value);
+        const subArr = subsequent.plain;
+        for (let ei = 0; ei < subArr.length; ei++) {
+          need(Object.hasOwn(subArr, ei), "稀疏数组");
+          const ep = subArr[ei];
+          if (isPlainObj(ep) && Object.keys(ep).length === 2 && Object.hasOwn(ep, "bar") && Object.hasOwn(ep, "relations") && tryPlainBarRef(ep.bar) && Array.isArray(ep.relations)) {
+            const barP = ep.bar, rels = ep.relations;
+            need(rels.length === 24, "后续四价×六参考关系不完整");
+            let fallback = false;
+            for (let ri = 0; ri < 24; ri++) {
+              need(Object.hasOwn(rels, ri), "稀疏数组");
+              const r = rels[ri];
+              if (!isPlainObj(r)) { fallback = true; break; }
+              const rks = Object.keys(r);
+              for (let ki = 0; ki < rks.length; ki++) wf(rks[ki]);
+              need(rks.length === 5 && Object.hasOwn(r, "axis") && Object.hasOwn(r, "value") && Object.hasOwn(r, "reference") && Object.hasOwn(r, "reference_value") && Object.hasOwn(r, "order"), "后续关系 完整字段不符");
+              const axis = OHLC_AXES[ri >>> 0 < 6 ? 0 : ri < 12 ? 1 : ri < 18 ? 2 : 3], mod = ri % 6;
+              if (r.axis instanceof V.Value || r.value instanceof V.Value || r.reference instanceof V.Value || r.reference_value instanceof V.Value || r.order instanceof V.Value) { fallback = true; break; }
+              need(r.axis === axis && r.value === barP[axis] && r.reference === refNames[mod] && r.reference_value === refVals[mod], "后续关系来源不同");
+              need(typeof r.order === "string" && (r.order === "LT" || r.order === "EQ" || r.order === "GT"), "后续关系来源不同");
+            }
+            if (!fallback) continue;
+          }
+          const entry = V.of(ep);
+          await keys(entry, ["bar", "relations"], "后续 bar"); const bar = await field(entry, "bar"); await barRef(bar);
+          const relations = await array(await field(entry, "relations"), "后续四价×六参考关系不完整"); need(await relations.length() === 24n, "后续四价×六参考关系不完整"); let i = 0;
+          for await (const r of relations.items()) {
+            const axis = OHLC_AXES[Math.floor(i / 6)], ref = prices[i++ % 6];
+            await keys(r, REL_KEYS, "后续关系");
+            need(await eqField(r, "axis", axis) && await equal(await field(r, "value"), await field(bar, axis)) && await equal(await field(r, "reference"), await field(ref, "name")) && await equal(await field(r, "reference_value"), await field(ref, "value")), "后续关系来源不同");
+            await enumValue(await field(r, "order"), ["LT", "EQ", "GT"], "后续关系来源不同");
+          }
+        }
+      } else {
       for await (const entry of subsequent.items()) {
         await keys(entry, ["bar", "relations"], "后续 bar"); const bar = await field(entry, "bar"); await barRef(bar);
         const relations = await array(await field(entry, "relations"), "后续四价×六参考关系不完整"); need(await relations.length() === 24n, "后续四价×六参考关系不完整"); let i = 0;
         for await (const r of relations.items()) {
-          const axis = ["open", "high", "low", "close"][Math.floor(i / 6)], ref = prices[i++ % 6];
-          await keys(r, ["axis", "value", "reference", "reference_value", "order"], "后续关系");
+          const axis = OHLC_AXES[Math.floor(i / 6)], ref = prices[i++ % 6];
+          await keys(r, REL_KEYS, "后续关系");
           need(await eqField(r, "axis", axis) && await equal(await field(r, "value"), await field(bar, axis)) && await equal(await field(r, "reference"), await field(ref, "name")) && await equal(await field(r, "reference_value"), await field(ref, "value")), "后续关系来源不同");
           await enumValue(await field(r, "order"), ["LT", "EQ", "GT"], "后续关系来源不同");
         }
+      }
       }
       }
     } else if (kind === DEVELOPMENT_BATCH_KIND) {

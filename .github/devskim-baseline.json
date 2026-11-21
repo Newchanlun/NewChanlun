@@ -52120,13 +52120,16 @@
     "DS173237|.chanlun/review-results/issue1778-decision-20261028/review1779-sync.json|4",
     "DS173237|.chanlun/review-results/issue1778-decision-20261028/review1779-sync.json|5",
     "DS173237|.chanlun/review-results/issue1778-decision-20261028/review1779-sync.json|6",
-    "DS172411|s_session/browser/tb01c-client.js|5235",
-    "DS172411|s_session/browser/tb01c-client.js|5334",
-    "DS172411|s_session/browser/tb01c-client.js|5874",
-    "DS172411|s_session/browser/tb01c-client.js|6882",
-    "DS172411|s_session/browser/tb01c-client.js|7120",
-    "DS173237|s_session/browser/tb01c-client.js|6696",
-    "DS173237|s_session/browser/tb01c-client.js|6816"
+    "DS172411|s_session/browser/q3-consumer.js|1854",
+    "DS172411|s_session/browser/q3-consumer.js|1953",
+    "DS172411|s_session/browser/q3-consumer.js|2493",
+    "DS172411|s_session/browser/tb01c-client.js|5600",
+    "DS172411|s_session/browser/tb01c-client.js|5699",
+    "DS172411|s_session/browser/tb01c-client.js|6239",
+    "DS172411|s_session/browser/tb01c-client.js|7247",
+    "DS172411|s_session/browser/tb01c-client.js|7485",
+    "DS173237|s_session/browser/tb01c-client.js|7061",
+    "DS173237|s_session/browser/tb01c-client.js|7181"
   ],
   "updates": [
     {
@@ -52445,26 +52448,28 @@
     },
     {
       "pull_request": 2115,
-      "source_head": "870c06c113",
-      "actions_run": 44753519290,
-      "actions_job": 136347177798,
-      "added_findings": 7,
+      "source_head": "wave13-plain-fastpath",
+      "added_findings": 10,
       "rule_counts": {
-        "DS172411": 5,
+        "DS172411": 8,
         "DS173237": 2
       },
       "scope": [
+        "s_session/browser/q3-consumer.js",
         "s_session/browser/tb01c-client.js"
       ],
-      "reason": "PR #2115 优化 q3-values.js 与 s-content-v3.js 后重生成 tb01c-client.js，使后段 7 条既有基线键整体下移 +91 行；逐行比对与 base 文本逐字节相同，无新增告警面。原有清单顺序不变，仅追加移位键。",
+      "reason": "PR #2115 Wave 13 优化 q3-values.js、q3-typed.js、q3-consumer.js 并重生成 tb01c-client.js，使 q3-consumer.js 3 条与 tb01c-client.js 7 条既有基线键分别下移 +93 与 +456 行；逐行比对与 base 文本逐字节相同，无新增告警面。原有清单顺序不变，仅追加移位键。",
       "entries": {
-        "DS172411|s_session/browser/tb01c-client.js|5235": "与 base 键 DS172411|s_session/browser/tb01c-client.js|5144 同一行文本，行号漂移（+91），逐行比对内容不变。",
-        "DS172411|s_session/browser/tb01c-client.js|5334": "与 base 键 DS172411|s_session/browser/tb01c-client.js|5243 同一行文本，行号漂移（+91），逐行比对内容不变。",
-        "DS172411|s_session/browser/tb01c-client.js|5874": "与 base 键 DS172411|s_session/browser/tb01c-client.js|5783 同一行文本，行号漂移（+91），逐行比对内容不变。",
-        "DS172411|s_session/browser/tb01c-client.js|6882": "与 base 键 DS172411|s_session/browser/tb01c-client.js|6791 同一行文本，行号漂移（+91），逐行比对内容不变。",
-        "DS172411|s_session/browser/tb01c-client.js|7120": "与 base 键 DS172411|s_session/browser/tb01c-client.js|7029 同一行文本，行号漂移（+91），逐行比对内容不变。",
-        "DS173237|s_session/browser/tb01c-client.js|6696": "与 base 键 DS173237|s_session/browser/tb01c-client.js|6605 同一行文本，行号漂移（+91），逐行比对内容不变。",
-        "DS173237|s_session/browser/tb01c-client.js|6816": "与 base 键 DS173237|s_session/browser/tb01c-client.js|6725 同一行文本，行号漂移（+91），逐行比对内容不变。"
+        "DS172411|s_session/browser/q3-consumer.js|1854": "与 base 键 DS172411|s_session/browser/q3-consumer.js|1761 同一行文本，行号漂移（+93），逐行比对内容不变。",
+        "DS172411|s_session/browser/q3-consumer.js|1953": "与 base 键 DS172411|s_session/browser/q3-consumer.js|1860 同一行文本，行号漂移（+93），逐行比对内容不变。",
+        "DS172411|s_session/browser/q3-consumer.js|2493": "与 base 键 DS172411|s_session/browser/q3-consumer.js|2400 同一行文本，行号漂移（+93），逐行比对内容不变。",
+        "DS172411|s_session/browser/tb01c-client.js|5600": "与 base 键 DS172411|s_session/browser/tb01c-client.js|5144 同一行文本，行号漂移（+456），逐行比对内容不变。",
+        "DS172411|s_session/browser/tb01c-client.js|5699": "与 base 键 DS172411|s_session/browser/tb01c-client.js|5243 同一行文本，行号漂移（+456），逐行比对内容不变。",
+        "DS172411|s_session/browser/tb01c-client.js|6239": "与 base 键 DS172411|s_session/browser/tb01c-client.js|5783 同一行文本，行号漂移（+456），逐行比对内容不变。",
+        "DS172411|s_session/browser/tb01c-client.js|7247": "与 base 键 DS172411|s_session/browser/tb01c-client.js|6791 同一行文本，行号漂移（+456），逐行比对内容不变。",
+        "DS172411|s_session/browser/tb01c-client.js|7485": "与 base 键 DS172411|s_session/browser/tb01c-client.js|7029 同一行文本，行号漂移（+456），逐行比对内容不变。",
+        "DS173237|s_session/browser/tb01c-client.js|7061": "与 base 键 DS173237|s_session/browser/tb01c-client.js|6605 同一行文本，行号漂移（+456），逐行比对内容不变。",
+        "DS173237|s_session/browser/tb01c-client.js|7181": "与 base 键 DS173237|s_session/browser/tb01c-client.js|6725 同一行文本，行号漂移（+456），逐行比对内容不变。"
       }
     }
   ]

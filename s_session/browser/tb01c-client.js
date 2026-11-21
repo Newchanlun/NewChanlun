@@ -1934,7 +1934,7 @@ if (typeof module !== 'object' || !module.exports) {
   return Object.freeze({LIMIT_FIELDS, parseLimits, validateConfig, Job});
 });
 
-/* exact source q3-values.js SHA256 341e5bb4483575359918a87e689cd17c45dddd8bac239cd8895b492878d5520f */
+/* exact source q3-values.js SHA256 3ad70ad54669491e905d3e6e5cf2538379665cd57a0f63e0d079c400fc0572a5 */
 /* #1394：现有 Q3 消费者的私有值访问器。普通值与图值共用字段/位置遍历。 */
 (function (root, factory) {
   const common = typeof module === "object" && module.exports;
@@ -2004,6 +2004,67 @@ if (typeof module !== 'object' || !module.exports) {
     wellFormed(s);
     return JSON.stringify(s);
   }
+  const INT_RE = /^(?:0|[1-9][0-9]*|-1)$/,
+    PRICE_RE = /^(?:0|[1-9][0-9]*|-[1-9][0-9]*)$/;
+  function plainKind(p) {
+    const ty = typeof p;
+    if (ty === "string") return "string";
+    if (ty === "object") {
+      if (p === null) return "null";
+      if (Array.isArray(p)) return "array";
+      if (p[NUMBER] === true) return "number";
+      return "object";
+    }
+    if (ty === "boolean") return "bool";
+    return "invalid";
+  }
+  function equalPlain(a, b) {
+    if (a instanceof Value) {
+      if (a.reader) return null;
+      a = a.plain;
+    }
+    if (b instanceof Value) {
+      if (b.reader) return null;
+      b = b.plain;
+    }
+    if (a === b) {
+      const ka = plainKind(a);
+      if (ka === "string" || ka === "bool" || ka === "null" || ka === "number")
+        return true;
+    }
+    const ka = plainKind(a),
+      kb = plainKind(b);
+    if (ka !== kb) return false;
+    if (ka === "string" || ka === "bool" || ka === "null") return a === b;
+    if (ka === "number") return a.token === b.token;
+    if (ka === "array") {
+      if (a.length !== b.length) return false;
+      for (let idx = 0; idx < a.length; idx++) {
+        need(Object.hasOwn(a, idx), "稀疏数组");
+        need(Object.hasOwn(b, idx), "稀疏数组");
+        const r = equalPlain(a[idx], b[idx]);
+        if (r === null) return null;
+        if (!r) return false;
+      }
+      return true;
+    }
+    if (ka === "object") {
+      const ak = Object.keys(a),
+        bk = Object.keys(b);
+      if (ak.length !== bk.length) return false;
+      for (let idx = 0; idx < ak.length; idx++) wellFormed(ak[idx]);
+      for (let idx = 0; idx < bk.length; idx++) wellFormed(bk[idx]);
+      for (let idx = 0; idx < ak.length; idx++) {
+        const k = ak[idx];
+        if (!Object.hasOwn(b, k)) return false;
+        const r = equalPlain(a[k], b[k]);
+        if (r === null) return null;
+        if (!r) return false;
+      }
+      return true;
+    }
+    return null;
+  }
   class Value {
     constructor(plain, reader = null, ref = null, path = []) {
       this.plain = plain;
@@ -2019,55 +2080,52 @@ if (typeof module !== 'object' || !module.exports) {
       if (this.reader) this.reader.check();
     }
     get kind() {
-      return this.reader
-        ? this.ref.kind
-        : this.plain === null
-          ? "null"
-          : isNumber(this.plain)
-            ? "number"
-            : Array.isArray(this.plain)
-              ? "array"
-              : typeof this.plain === "object"
-                ? "object"
-                : typeof this.plain === "boolean"
-                  ? "bool"
-                  : typeof this.plain === "string"
-                    ? "string"
-                    : "invalid";
+      return this.reader ? this.ref.kind : plainKind(this.plain);
     }
     async length() {
-      await this.check();
-      need(["array", "object"].includes(this.kind), "要求完整容器");
-      return this.reader
-        ? BigInt(this.ref.extent)
-        : BigInt(
-            Array.isArray(this.plain)
-              ? this.plain.length
-              : Object.keys(this.plain).length,
-          );
+      if (this.reader) {
+        this.reader.check();
+        const k = this.ref.kind;
+        need(k === "array" || k === "object", "要求完整容器");
+        return BigInt(this.ref.extent);
+      }
+      const k = plainKind(this.plain);
+      need(k === "array" || k === "object", "要求完整容器");
+      return BigInt(
+        k === "array" ? this.plain.length : Object.keys(this.plain).length,
+      );
     }
     async scalar() {
-      await this.check();
-      if (this.kind === "json_text") {
+      if (!this.reader) {
+        const k = plainKind(this.plain);
+        need(
+          k === "string" || k === "number" || k === "bool" || k === "null",
+          "要求标量",
+        );
+        return this.plain;
+      }
+      this.reader.check();
+      if (this.ref.kind === "json_text") {
         let result = "";
         for await (const c of canonicalChunks(await this.reader.inner(this)))
           result += c;
         return result;
       }
+      const k = this.ref.kind;
       need(
-        ["string", "number", "bool", "null"].includes(this.kind),
+        k === "string" || k === "number" || k === "bool" || k === "null",
         "要求标量",
       );
-      if (!this.reader) return this.plain;
       return this.reader.scalar(this);
     }
     async *entries() {
-      await this.check();
-      need(this.kind === "object", "要求对象");
       if (this.reader) {
+        this.reader.check();
+        need(this.ref.kind === "object", "要求对象");
         yield* this.reader.entries(this);
         return;
       }
+      need(plainKind(this.plain) === "object", "要求对象");
       let previous = null;
       for (const key of Object.keys(this.plain).sort(cmp)) {
         wellFormed(key);
@@ -2080,12 +2138,13 @@ if (typeof module !== 'object' || !module.exports) {
       }
     }
     async *items() {
-      await this.check();
-      need(this.kind === "array", "要求数组");
       if (this.reader) {
+        this.reader.check();
+        need(this.ref.kind === "array", "要求数组");
         for await (const e of this.reader.entries(this)) yield e.value;
         return;
       }
+      need(Array.isArray(this.plain), "要求数组");
       for (let i = 0; i < this.plain.length; i++) {
         need(Object.hasOwn(this.plain, i), "稀疏数组");
         yield Value.of(this.plain[i]);
@@ -2094,13 +2153,10 @@ if (typeof module !== 'object' || !module.exports) {
     async field(key) {
       wellFormed(key);
       if (!this.reader) {
-        // #1394 整合（根裁定 A）：普通值按自有属性直接取字段。旧路径每取一个字段都经 entries() 把全部键
-        // 按 UTF-8 重排、每次比较都编码（剖析：TextEncoder.encode 53%、cmp 12%）。JS 对象键不会重复，
-        // entries() 的顺序断言对普通值恒真；其余检查与先后次序不变：参数键 → 对象类型 → 全部键的孤立
-        // 代理项 → 缺字段。图值路径不变。
-        await this.check();
-        need(this.kind === "object", "要求对象");
-        for (const k of Object.keys(this.plain)) wellFormed(k);
+        // #1394 整合（根裁定 A）：普通值按自有属性直接取字段，零排序零微任务。
+        need(plainKind(this.plain) === "object", "要求对象");
+        const ks = Object.keys(this.plain);
+        for (let idx = 0; idx < ks.length; idx++) wellFormed(ks[idx]);
         if (Object.hasOwn(this.plain, key)) return Value.of(this.plain[key]);
         throw new Error("缺完整字段：" + key);
       }
@@ -2108,11 +2164,30 @@ if (typeof module !== 'object' || !module.exports) {
       throw new Error("缺完整字段：" + key);
     }
     async has(key) {
+      if (!this.reader) {
+        need(plainKind(this.plain) === "object", "要求对象");
+        const ks = Object.keys(this.plain);
+        for (let idx = 0; idx < ks.length; idx++) wellFormed(ks[idx]);
+        return Object.hasOwn(this.plain, key);
+      }
       for await (const e of this.entries()) if (e.key === key) return true;
       return false;
     }
     async at(index) {
       index = BigInt(index);
+      if (!this.reader) {
+        const k = plainKind(this.plain);
+        need(k === "array" || k === "object", "要求完整容器");
+        const len = BigInt(
+          k === "array" ? this.plain.length : Object.keys(this.plain).length,
+        );
+        need(index >= 0n && index < len, "数组索引越界");
+        need(k === "array", "要求数组");
+        const idx = Number(index);
+        for (let i = 0; i <= idx; i++)
+          need(Object.hasOwn(this.plain, i), "稀疏数组");
+        return Value.of(this.plain[idx]);
+      }
       need(index >= 0n && index < (await this.length()), "数组索引越界");
       let i = 0n;
       for await (const v of this.items()) {
@@ -2127,7 +2202,6 @@ if (typeof module !== 'object' || !module.exports) {
     v = of(v);
     need(v.kind === "object", name + " 完整对象不符");
     if (!v.reader) {
-      await v.check();
       const actual = Object.keys(v.plain);
       for (let idx = 0; idx < actual.length; idx++) wellFormed(actual[idx]);
       need(
@@ -2146,20 +2220,30 @@ if (typeof module !== 'object' || !module.exports) {
     );
     return v;
   }
+  function checkS(v) {
+    wellFormed(v);
+    return v;
+  }
   async function S(v) {
+    if (typeof v === "string") return checkS(v);
+    if (v instanceof Value && !v.reader && typeof v.plain === "string")
+      return checkS(v.plain);
     const s = await of(v).scalar();
     wellFormed(s);
     return s;
   }
   async function T(v) {
-    const s = await S(v);
+    let s;
+    if (typeof v === "string") s = checkS(v);
+    else if (v instanceof Value && !v.reader && typeof v.plain === "string")
+      s = checkS(v.plain);
+    else s = await S(v);
     need(s.length > 0, "身份文本为空");
     return s;
   }
-  async function I(v, positive = false, frontier = false) {
-    const s = await S(v);
+  function parseI(s, positive, frontier) {
     need(
-      s.length <= 19 && /^(?:0|[1-9][0-9]*|-1)$/.test(s),
+      s.length <= 19 && INT_RE.test(s),
       "精确整数必须是规范文本",
     );
     const n = BigInt(s);
@@ -2169,10 +2253,17 @@ if (typeof module !== 'object' || !module.exports) {
     );
     return n;
   }
-  async function N(v) {
-    const s = await S(v);
+  async function I(v, positive = false, frontier = false) {
+    let s;
+    if (typeof v === "string") s = checkS(v);
+    else if (v instanceof Value && !v.reader && typeof v.plain === "string")
+      s = checkS(v.plain);
+    else s = await S(v);
+    return parseI(s, positive, frontier);
+  }
+  function parseN(s) {
     need(
-      s.length <= 20 && /^(?:0|[1-9][0-9]*|-[1-9][0-9]*)$/.test(s),
+      s.length <= 20 && PRICE_RE.test(s),
       "价格须为规范整数文本",
     );
     const n = BigInt(s);
@@ -2182,16 +2273,45 @@ if (typeof module !== 'object' || !module.exports) {
     );
     return n;
   }
+  async function N(v) {
+    let s;
+    if (typeof v === "string") s = checkS(v);
+    else if (v instanceof Value && !v.reader && typeof v.plain === "string")
+      s = checkS(v.plain);
+    else s = await S(v);
+    return parseN(s);
+  }
   async function list(v) {
+    v = of(v);
+    if (!v.reader) {
+      need(Array.isArray(v.plain), "要求数组");
+      const a = new Array(v.plain.length);
+      for (let idx = 0; idx < v.plain.length; idx++) {
+        need(Object.hasOwn(v.plain, idx), "稀疏数组");
+        const item = v.plain[idx];
+        if (item instanceof Value) a[idx] = await item.scalar();
+        else {
+          const k = plainKind(item);
+          need(
+            k === "string" || k === "number" || k === "bool" || k === "null",
+            "要求标量",
+          );
+          a[idx] = item;
+        }
+      }
+      return a;
+    }
     const a = [];
-    for await (const item of of(v).items()) a.push(await item.scalar());
+    for await (const item of v.items()) a.push(await item.scalar());
     return a;
   }
   async function equal(a, b) {
+    const fast = equalPlain(a, b);
+    if (fast !== null) return fast;
     a = of(a);
     b = of(b);
-    await a.check();
-    await b.check();
+    if (a.reader) a.reader.check();
+    if (b.reader) b.reader.check();
     if (a.kind !== b.kind) return false;
     if (["null", "bool", "string", "number"].includes(a.kind)) {
       const x = await a.scalar(),
@@ -2200,30 +2320,6 @@ if (typeof module !== 'object' || !module.exports) {
     }
     if (a.kind === "json_text") {
       return equal(await a.reader.inner(a), await b.reader.inner(b));
-    }
-    if (!a.reader && !b.reader) {
-      if (a.kind === "array") {
-        const ax = a.plain,
-          bx = b.plain;
-        if (ax.length !== bx.length) return false;
-        for (let idx = 0; idx < ax.length; idx++) {
-          need(Object.hasOwn(ax, idx), "稀疏数组");
-          need(Object.hasOwn(bx, idx), "稀疏数组");
-          if (!(await equal(ax[idx], bx[idx]))) return false;
-        }
-        return true;
-      }
-      const ak = Object.keys(a.plain),
-        bk = Object.keys(b.plain);
-      if (ak.length !== bk.length) return false;
-      for (let idx = 0; idx < ak.length; idx++) wellFormed(ak[idx]);
-      for (let idx = 0; idx < bk.length; idx++) wellFormed(bk[idx]);
-      for (let idx = 0; idx < ak.length; idx++) {
-        const k = ak[idx];
-        if (!Object.hasOwn(b.plain, k) || !(await equal(a.plain[k], b.plain[k])))
-          return false;
-      }
-      return true;
     }
     if ((await a.length()) !== (await b.length())) return false;
     const ai = a.kind === "object" ? a.entries() : a.items(),
@@ -2691,7 +2787,7 @@ if (typeof module !== 'object' || !module.exports) {
   });
 });
 
-/* exact source q3-typed.js SHA256 0fbf100eb54fe808c0a399379f66c1c7c578327783e1e1b40a9fb23e0878ac4f */
+/* exact source q3-typed.js SHA256 a7a18202dd19333000c95ec0c26f286d86222f2e5e178e83141280a2eeafdb16 */
 /* #1394：typed 与形态来源的同一判据；只把访问迁为完整异步 Value 遍历。 */
 (function (root, factory) {
   const api = factory(typeof module === "object" && module.exports ? require("./q3-values.js") : root.Q3Values);
@@ -2750,21 +2846,141 @@ if (typeof module !== 'object' || !module.exports) {
     const value = await S(v); need(values.includes(value), message); return value;
   }
   async function array(v, message) { v = V.of(v); need((v.kind) === "array", message); return v; }
+  const SHA_RE = /^[a-f0-9]{64}$/,
+    UINT_RE = /^(?:0|[1-9][0-9]*|-1)$/,
+    SINT_RE = /^(?:0|[1-9][0-9]*|-[1-9][0-9]*)$/,
+    BAR_KEYS = ["source_coord", "open", "high", "low", "close"],
+    REL_KEYS = ["axis", "value", "reference", "reference_value", "order"],
+    OHLC_AXES = ["open", "high", "low", "close"];
+  function wf(s) {
+    need(typeof s === "string", "要求 UTF-8 文本");
+    if (typeof s.isWellFormed === "function") {
+      need(s.isWellFormed(), "孤立 Unicode 代理项");
+      return s;
+    }
+    for (let i = 0; i < s.length; i++) {
+      let c = s.charCodeAt(i);
+      if (c >= 0xd800 && c <= 0xdbff) {
+        c = s.charCodeAt(++i);
+        need(c >= 0xdc00 && c <= 0xdfff, "孤立 Unicode 代理项");
+      } else need(c < 0xdc00 || c > 0xdfff, "孤立 Unicode 代理项");
+    }
+    return s;
+  }
+  function isPlainObj(p) {
+    return p !== null && typeof p === "object" && !Array.isArray(p) && !V.isNumber(p) && !(p instanceof V.Value);
+  }
+  function plainKeysCheck(p, expected, name) {
+    need(isPlainObj(p), name + " 完整对象不符");
+    const ks = Object.keys(p);
+    for (let i = 0; i < ks.length; i++) wf(ks[i]);
+    if (ks.length !== expected.length) need(false, name + " 完整字段不符");
+    for (let i = 0; i < expected.length; i++)
+      if (!Object.hasOwn(p, expected[i])) need(false, name + " 完整字段不符");
+  }
+  function plainT(x) {
+    if (typeof x !== "string") return null;
+    wf(x);
+    need(x.length > 0, "身份文本为空");
+    return x;
+  }
+  function plainI(x, positive = false, frontier = false) {
+    if (typeof x !== "string") return null;
+    wf(x);
+    need(x.length <= 19 && UINT_RE.test(x), "精确整数必须是规范文本");
+    const n = BigInt(x);
+    need(n >= (frontier ? -1n : positive ? 1n : 0n) && n <= 9223372036854775807n, "精确整数超出 i64 域");
+    return n;
+  }
+  function plainN(x) {
+    if (typeof x !== "string") return null;
+    wf(x);
+    need(x.length <= 20 && SINT_RE.test(x), "价格须为规范整数文本");
+    const n = BigInt(x);
+    need(n >= -9223372036854775808n && n <= 9223372036854775807n, "价格超出 i64");
+    return n;
+  }
+  function tryPlainReference(p, name, revisionMessage) {
+    if (!isPlainObj(p)) return false;
+    for (let i = 0; i < REF_KEYS.length; i++) {
+      const k = REF_KEYS[i];
+      if (Object.hasOwn(p, k) && p[k] instanceof V.Value) return false;
+    }
+    plainKeysCheck(p, REF_KEYS, name);
+    for (let i = 0; i < REF_KEYS.length; i++) {
+      const val = p[REF_KEYS[i]];
+      if (plainT(val) === null) return false;
+    }
+    need(SHA_RE.test(p.payload_hash), "SHA-256 文本不规范");
+    plainI(p.input_revision, true);
+    plainI(p.revision, true);
+    plainI(p.seq);
+    plainI(p.source_coord);
+    need(p.input_revision === p.revision, revisionMessage);
+    return true;
+  }
+  function tryPlainBarRef(p) {
+    if (!isPlainObj(p)) return false;
+    for (let i = 0; i < BAR_KEYS.length; i++) {
+      const k = BAR_KEYS[i];
+      if (Object.hasOwn(p, k) && typeof p[k] !== "string") return false;
+    }
+    plainKeysCheck(p, BAR_KEYS, "BarRef");
+    plainI(p.source_coord);
+    plainN(p.open);
+    plainN(p.high);
+    plainN(p.low);
+    plainN(p.close);
+    return true;
+  }
   async function texts(v) {
-    v = await array(v, "要求文本数组"); for await (const item of v.items()) await T(item); return v;
+    v = await array(v, "要求文本数组");
+    if (!v.reader) {
+      const arr = v.plain;
+      for (let i = 0; i < arr.length; i++) {
+        need(Object.hasOwn(arr, i), "稀疏数组");
+        const item = arr[i];
+        if (typeof item === "string") plainT(item);
+        else await T(item);
+      }
+      return v;
+    }
+    for await (const item of v.items()) await T(item); return v;
   }
   async function coordinates(v) {
     v = await array(v, "要求完整坐标数组"); let last = -1n;
+    if (!v.reader) {
+      const arr = v.plain;
+      for (let i = 0; i < arr.length; i++) {
+        need(Object.hasOwn(arr, i), "稀疏数组");
+        const item = arr[i];
+        const n = typeof item === "string" ? plainI(item) : await I(item);
+        need(n > last, "来源坐标未严格递增/重复"); last = n;
+      }
+      return v;
+    }
     for await (const item of v.items()) { const n = await I(item); need(n > last, "来源坐标未严格递增/重复"); last = n; }
     return v;
   }
   async function coordinateSet(v) {
-    const result = new Set(); for await (const item of (await coordinates(v)).items()) result.add(await S(item)); return result;
+    const c = await coordinates(v), result = new Set();
+    if (!c.reader) {
+      const arr = c.plain;
+      for (let i = 0; i < arr.length; i++) {
+        const item = arr[i];
+        result.add(typeof item === "string" ? wf(item) : await S(item));
+      }
+      return result;
+    }
+    for await (const item of c.items()) result.add(await S(item)); return result;
   }
-  async function digest(v) { const value = await S(v); need(/^[a-f0-9]{64}$/.test(value), "SHA-256 文本不规范"); }
+  async function digest(v) { const value = await S(v); need(SHA_RE.test(value), "SHA-256 文本不规范"); }
   async function barRef(v) {
-    await keys(v, ["source_coord", "open", "high", "low", "close"], "BarRef"); await I(await field(v, "source_coord"));
-    for (const k of ["open", "high", "low", "close"]) await N(await field(v, k));
+    if (v instanceof V.Value) {
+      if (!v.reader && tryPlainBarRef(v.plain)) return;
+    } else if (tryPlainBarRef(v)) return;
+    await keys(v, BAR_KEYS, "BarRef"); await I(await field(v, "source_coord"));
+    for (const k of OHLC_AXES) await N(await field(v, k));
   }
   async function direction(v) { if (!(isNull(v))) await enumValue(v, ["UP", "DOWN"], "未知方向枚举"); }
   async function directionEvidence(v) {
@@ -2776,6 +2992,9 @@ if (typeof module !== 'object' || !module.exports) {
     need(await equal(await field(v, "established_at"), await field(incoming, "source_coord")), "方向建立坐标与原 incoming 不同");
   }
   async function reference(v, name, revisionMessage) {
+    if (v instanceof V.Value) {
+      if (!v.reader && tryPlainReference(v.plain, name, revisionMessage)) return;
+    } else if (tryPlainReference(v, name, revisionMessage)) return;
     await keys(v, REF_KEYS, name); for await (const entry of V.of(v).entries()) await T(entry.value);
     await digest(await field(v, "payload_hash")); await I(await field(v, "input_revision"), true); await I(await field(v, "revision"), true);
     await I(await field(v, "seq")); await I(await field(v, "source_coord"));
@@ -2810,12 +3029,29 @@ if (typeof module !== 'object' || !module.exports) {
       need((why === "fact_removed") === isNull(superseded), "撤回原因/目标不符"); if (!(isNull(superseded))) await T(superseded);
     }
     const refs = await array(await field(record, "input_refs"), "typed input_refs 不是数组"), coords = await coordinates(await field(record, "source_coords"));
-    const coordIterator = coords.items()[Symbol.asyncIterator]();
-    for await (const ref of refs.items()) {
-      await reference(ref, "typed input_ref", "输入修订引用不同"); const next = await coordIterator.next();
-      need(!next.done && await equal(next.value, await field(ref, "source_coord")), "typed 源引用/坐标不一一对应");
+    if (!refs.reader && !coords.reader) {
+      const rArr = refs.plain, cArr = coords.plain;
+      for (let idx = 0; idx < rArr.length; idx++) {
+        need(Object.hasOwn(rArr, idx), "稀疏数组");
+        const r = rArr[idx];
+        if (!tryPlainReference(r, "typed input_ref", "输入修订引用不同"))
+          await reference(r, "typed input_ref", "输入修订引用不同");
+        need(idx < cArr.length, "typed 源引用/坐标不一一对应");
+        const c = cArr[idx];
+        const eq = typeof c === "string" && isPlainObj(r) && typeof r.source_coord === "string"
+          ? c === r.source_coord
+          : await equal(c, await field(r, "source_coord"));
+        need(eq, "typed 源引用/坐标不一一对应");
+      }
+      need(rArr.length === cArr.length, "typed 源引用/坐标不一一对应");
+    } else {
+      const coordIterator = coords.items()[Symbol.asyncIterator]();
+      for await (const ref of refs.items()) {
+        await reference(ref, "typed input_ref", "输入修订引用不同"); const next = await coordIterator.next();
+        need(!next.done && await equal(next.value, await field(ref, "source_coord")), "typed 源引用/坐标不一一对应");
+      }
+      need((await coordIterator.next()).done, "typed 源引用/坐标不一一对应");
     }
-    need((await coordIterator.next()).done, "typed 源引用/坐标不一一对应");
     const p = await field(record, "payload");
     if (SEGMENT_KINDS.includes(kind)) validateSegmentPayload(kind, await plain(p));
     else if (BI_KINDS.includes(kind)) await validateBiPayload(kind, p);
@@ -2872,15 +3108,51 @@ if (typeof module !== 'object' || !module.exports) {
       if (bounded) { /* 后续单元由 CC-007.development_batch 承载，跨对象绑定见 bindDevelopmentBatches。 */ } else {
       const sub = await field(p, "subsequent_development"); await keys(sub, ["status", "reason", "bars"], "后续已知事实"); const subsequent = await array(await field(sub, "bars"), "后续 bars 不完整");
       need(await subsequent.length() > 0n ? await eqField(sub, "status", "observed") && await eqField(sub, "reason", null) : await eqField(sub, "status", "insufficient_knowledge") && await eqField(sub, "reason", "no_subsequent_bar"), "后续状态与原件不一致");
+      if (!subsequent.reader && prices.every(pr => !pr.reader && isPlainObj(pr.plain) && typeof pr.plain.name === "string" && typeof pr.plain.value === "string")) {
+        const refNames = prices.map(pr => pr.plain.name), refVals = prices.map(pr => pr.plain.value);
+        const subArr = subsequent.plain;
+        for (let ei = 0; ei < subArr.length; ei++) {
+          need(Object.hasOwn(subArr, ei), "稀疏数组");
+          const ep = subArr[ei];
+          if (isPlainObj(ep) && Object.keys(ep).length === 2 && Object.hasOwn(ep, "bar") && Object.hasOwn(ep, "relations") && tryPlainBarRef(ep.bar) && Array.isArray(ep.relations)) {
+            const barP = ep.bar, rels = ep.relations;
+            need(rels.length === 24, "后续四价×六参考关系不完整");
+            let fallback = false;
+            for (let ri = 0; ri < 24; ri++) {
+              need(Object.hasOwn(rels, ri), "稀疏数组");
+              const r = rels[ri];
+              if (!isPlainObj(r)) { fallback = true; break; }
+              const rks = Object.keys(r);
+              for (let ki = 0; ki < rks.length; ki++) wf(rks[ki]);
+              need(rks.length === 5 && Object.hasOwn(r, "axis") && Object.hasOwn(r, "value") && Object.hasOwn(r, "reference") && Object.hasOwn(r, "reference_value") && Object.hasOwn(r, "order"), "后续关系 完整字段不符");
+              const axis = OHLC_AXES[ri >>> 0 < 6 ? 0 : ri < 12 ? 1 : ri < 18 ? 2 : 3], mod = ri % 6;
+              if (r.axis instanceof V.Value || r.value instanceof V.Value || r.reference instanceof V.Value || r.reference_value instanceof V.Value || r.order instanceof V.Value) { fallback = true; break; }
+              need(r.axis === axis && r.value === barP[axis] && r.reference === refNames[mod] && r.reference_value === refVals[mod], "后续关系来源不同");
+              need(typeof r.order === "string" && (r.order === "LT" || r.order === "EQ" || r.order === "GT"), "后续关系来源不同");
+            }
+            if (!fallback) continue;
+          }
+          const entry = V.of(ep);
+          await keys(entry, ["bar", "relations"], "后续 bar"); const bar = await field(entry, "bar"); await barRef(bar);
+          const relations = await array(await field(entry, "relations"), "后续四价×六参考关系不完整"); need(await relations.length() === 24n, "后续四价×六参考关系不完整"); let i = 0;
+          for await (const r of relations.items()) {
+            const axis = OHLC_AXES[Math.floor(i / 6)], ref = prices[i++ % 6];
+            await keys(r, REL_KEYS, "后续关系");
+            need(await eqField(r, "axis", axis) && await equal(await field(r, "value"), await field(bar, axis)) && await equal(await field(r, "reference"), await field(ref, "name")) && await equal(await field(r, "reference_value"), await field(ref, "value")), "后续关系来源不同");
+            await enumValue(await field(r, "order"), ["LT", "EQ", "GT"], "后续关系来源不同");
+          }
+        }
+      } else {
       for await (const entry of subsequent.items()) {
         await keys(entry, ["bar", "relations"], "后续 bar"); const bar = await field(entry, "bar"); await barRef(bar);
         const relations = await array(await field(entry, "relations"), "后续四价×六参考关系不完整"); need(await relations.length() === 24n, "后续四价×六参考关系不完整"); let i = 0;
         for await (const r of relations.items()) {
-          const axis = ["open", "high", "low", "close"][Math.floor(i / 6)], ref = prices[i++ % 6];
-          await keys(r, ["axis", "value", "reference", "reference_value", "order"], "后续关系");
+          const axis = OHLC_AXES[Math.floor(i / 6)], ref = prices[i++ % 6];
+          await keys(r, REL_KEYS, "后续关系");
           need(await eqField(r, "axis", axis) && await equal(await field(r, "value"), await field(bar, axis)) && await equal(await field(r, "reference"), await field(ref, "name")) && await equal(await field(r, "reference_value"), await field(ref, "value")), "后续关系来源不同");
           await enumValue(await field(r, "order"), ["LT", "EQ", "GT"], "后续关系来源不同");
         }
+      }
       }
       }
     } else if (kind === DEVELOPMENT_BATCH_KIND) {
@@ -3471,7 +3743,7 @@ if (typeof module !== 'object' || !module.exports) {
     TB02_KINDS: Object.freeze(TB02_KINDS), BI_KINDS, SEGMENT_KINDS: Object.freeze(SEGMENT_KINDS)});
 });
 
-/* exact source q3-consumer.js SHA256 e36843e3b9772c9bb477776ce961a675bb66498e3b598c719f6ec02a10378054 */
+/* exact source q3-consumer.js SHA256 1d9780d6e44ee0952a6f8d22ea7ebf03a0b2fd40470abc1d6055929809ee8045 */
 /* #1394：Q3完整消费者；只供既有tb01c页面调用，没有产品路由或默认资源。 */
 (function (root, factory) {
   const common = typeof module === "object" && module.exports;
@@ -3888,7 +4160,74 @@ if (typeof module !== 'object' || !module.exports) {
     const raw = await auditRaw(snapshot, charge),
       groups = new Map(),
       shapes = new Map(),
-      records = [];
+      records = [],
+      rawRefById = new Map(),
+      rawRefEffective = new Map(),
+      rawPlainById = new Map(),
+      rawPlainEffective = new Map();
+    for (const [k, r] of raw.byId) {
+      const rr = await rawReference(r);
+      rawRefById.set(k, rr);
+      if (!r.reader && r.plain && typeof r.plain === "object") {
+        let ok = true;
+        const p = {};
+        for (let idx = 0; idx < RAWREF.length; idx++) {
+          const fk = RAWREF[idx], val = r.plain[fk];
+          if (typeof val !== "string") { ok = false; break; }
+          p[fk] = val;
+        }
+        if (ok) rawPlainById.set(k, p);
+      }
+    }
+    for (const [coord, r] of raw.effective) {
+      const rr = await rawReference(r);
+      rawRefEffective.set(coord, rr);
+      if (!r.reader && r.plain && typeof r.plain === "object") {
+        let ok = true;
+        const p = {};
+        for (let idx = 0; idx < RAWREF.length; idx++) {
+          const fk = RAWREF[idx], val = r.plain[fk];
+          if (typeof val !== "string") { ok = false; break; }
+          p[fk] = val;
+        }
+        if (ok) rawPlainEffective.set(coord, p);
+      }
+    }
+    function checkRefPlain(p, active) {
+      if (!p || typeof p !== "object" || Array.isArray(p) || p instanceof V.Value) return false;
+      const ks = Object.keys(p);
+      if (ks.length !== RAWREF.length) return false;
+      for (let idx = 0; idx < RAWREF.length; idx++) {
+        const fk = RAWREF[idx];
+        if (!Object.hasOwn(p, fk) || typeof p[fk] !== "string") return false;
+      }
+      if (p.identity_key.length === 0) return false;
+      if (typeof p.identity_key.isWellFormed === "function") {
+        for (let idx = 0; idx < ks.length; idx++) if (!ks[idx].isWellFormed()) return false;
+        for (let idx = 0; idx < RAWREF.length; idx++) if (!p[RAWREF[idx]].isWellFormed()) return false;
+      } else {
+        return false;
+      }
+      const key = JSON.stringify([p.identity_key, p.revision]);
+      const exp = rawPlainById.get(key);
+      if (!exp) {
+        if (!raw.byId.has(key)) need(false, "对象八键来源未绑定独立完整原始历史");
+        return false;
+      }
+      for (let idx = 0; idx < RAWREF.length; idx++) {
+        const fk = RAWREF[idx];
+        if (p[fk] !== exp[fk]) need(false, "对象八键来源未绑定独立完整原始历史");
+      }
+      if (active) {
+        const eff = rawPlainEffective.get(p.source_coord);
+        if (!eff) return false;
+        for (let idx = 0; idx < RAWREF.length; idx++) {
+          const fk = RAWREF[idx];
+          if (p[fk] !== eff[fk]) need(false, "活动对象使用旧修订");
+        }
+      }
+      return true;
+    }
     for (const family of ["objects", "withdrawn_objects"])
       for await (const record of (await f(snapshot, family)).items()) {
         charge();
@@ -3899,30 +4238,56 @@ if (typeof module !== 'object' || !module.exports) {
         const refs = await f(record, "input_refs"),
           active = (await s(record, "lifecycle")) === "active";
         async function checkRef(ref) {
+          if (ref instanceof V.Value) {
+            if (!ref.reader && checkRefPlain(ref.plain, active)) return;
+          } else if (checkRefPlain(ref, active)) return;
           await keys(ref, RAWREF, "来源八键");
-          const r = raw.byId.get(
-            JSON.stringify([
-              await t(ref, "identity_key"),
-              await s(ref, "revision"),
-            ]),
-          );
+          const rKey = JSON.stringify([
+            await t(ref, "identity_key"),
+            await s(ref, "revision"),
+          ]);
+          const r = rawRefById.get(rKey);
           need(
-            r && (await equal(ref, await rawReference(r))),
+            r && (await equal(ref, r)),
             "对象八键来源未绑定独立完整原始历史",
           );
-          if (active)
+          if (active) {
+            const effCoord = await s(ref, "source_coord");
+            const effRef = rawRefEffective.get(effCoord) || (await rawReference({}));
             need(
-              await equal(
-                ref,
-                await rawReference(
-                  raw.effective.get(await s(ref, "source_coord")) || {},
-                ),
-              ),
+              await equal(ref, effRef),
               "活动对象使用旧修订",
             );
+          }
         }
         if (typed.TB02_KINDS.includes(kind)) {
-          for await (const ref of refs.items()) await checkRef(ref);
+          if (!refs.reader && Array.isArray(refs.plain)) {
+            const arr = refs.plain;
+            for (let idx = 0; idx < arr.length; idx++) {
+              need(Object.hasOwn(arr, idx), "稀疏数组");
+              if (!checkRefPlain(arr[idx], active)) await checkRef(of(arr[idx]));
+            }
+          } else {
+            for await (const ref of refs.items()) await checkRef(ref);
+          }
+        } else if (!refs.reader && Array.isArray(refs.plain)) {
+          const gArr = refs.plain;
+          for (let gi = 0; gi < gArr.length; gi++) {
+            need(Object.hasOwn(gArr, gi), "稀疏数组");
+            const group = of(gArr[gi]);
+            for (const name of ["raw_refs", "dependency_refs"]) {
+              const listV = await f(group, name);
+              if (!listV.reader && Array.isArray(listV.plain)) {
+                const arr = listV.plain;
+                for (let idx = 0; idx < arr.length; idx++) {
+                  need(Object.hasOwn(arr, idx), "稀疏数组");
+                  if (!checkRefPlain(arr[idx], active)) await checkRef(of(arr[idx]));
+                }
+              } else {
+                for await (const ref of listV.items()) await checkRef(ref);
+              }
+            }
+          }
         } else
           for await (const group of refs.items())
             for (const name of ["raw_refs", "dependency_refs"])

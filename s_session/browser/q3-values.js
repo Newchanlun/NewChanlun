@@ -67,6 +67,67 @@
     wellFormed(s);
     return JSON.stringify(s);
   }
+  const INT_RE = /^(?:0|[1-9][0-9]*|-1)$/,
+    PRICE_RE = /^(?:0|[1-9][0-9]*|-[1-9][0-9]*)$/;
+  function plainKind(p) {
+    const ty = typeof p;
+    if (ty === "string") return "string";
+    if (ty === "object") {
+      if (p === null) return "null";
+      if (Array.isArray(p)) return "array";
+      if (p[NUMBER] === true) return "number";
+      return "object";
+    }
+    if (ty === "boolean") return "bool";
+    return "invalid";
+  }
+  function equalPlain(a, b) {
+    if (a instanceof Value) {
+      if (a.reader) return null;
+      a = a.plain;
+    }
+    if (b instanceof Value) {
+      if (b.reader) return null;
+      b = b.plain;
+    }
+    if (a === b) {
+      const ka = plainKind(a);
+      if (ka === "string" || ka === "bool" || ka === "null" || ka === "number")
+        return true;
+    }
+    const ka = plainKind(a),
+      kb = plainKind(b);
+    if (ka !== kb) return false;
+    if (ka === "string" || ka === "bool" || ka === "null") return a === b;
+    if (ka === "number") return a.token === b.token;
+    if (ka === "array") {
+      if (a.length !== b.length) return false;
+      for (let idx = 0; idx < a.length; idx++) {
+        need(Object.hasOwn(a, idx), "稀疏数组");
+        need(Object.hasOwn(b, idx), "稀疏数组");
+        const r = equalPlain(a[idx], b[idx]);
+        if (r === null) return null;
+        if (!r) return false;
+      }
+      return true;
+    }
+    if (ka === "object") {
+      const ak = Object.keys(a),
+        bk = Object.keys(b);
+      if (ak.length !== bk.length) return false;
+      for (let idx = 0; idx < ak.length; idx++) wellFormed(ak[idx]);
+      for (let idx = 0; idx < bk.length; idx++) wellFormed(bk[idx]);
+      for (let idx = 0; idx < ak.length; idx++) {
+        const k = ak[idx];
+        if (!Object.hasOwn(b, k)) return false;
+        const r = equalPlain(a[k], b[k]);
+        if (r === null) return null;
+        if (!r) return false;
+      }
+      return true;
+    }
+    return null;
+  }
   class Value {
     constructor(plain, reader = null, ref = null, path = []) {
       this.plain = plain;
@@ -82,55 +143,52 @@
       if (this.reader) this.reader.check();
     }
     get kind() {
-      return this.reader
-        ? this.ref.kind
-        : this.plain === null
-          ? "null"
-          : isNumber(this.plain)
-            ? "number"
-            : Array.isArray(this.plain)
-              ? "array"
-              : typeof this.plain === "object"
-                ? "object"
-                : typeof this.plain === "boolean"
-                  ? "bool"
-                  : typeof this.plain === "string"
-                    ? "string"
-                    : "invalid";
+      return this.reader ? this.ref.kind : plainKind(this.plain);
     }
     async length() {
-      await this.check();
-      need(["array", "object"].includes(this.kind), "要求完整容器");
-      return this.reader
-        ? BigInt(this.ref.extent)
-        : BigInt(
-            Array.isArray(this.plain)
-              ? this.plain.length
-              : Object.keys(this.plain).length,
-          );
+      if (this.reader) {
+        this.reader.check();
+        const k = this.ref.kind;
+        need(k === "array" || k === "object", "要求完整容器");
+        return BigInt(this.ref.extent);
+      }
+      const k = plainKind(this.plain);
+      need(k === "array" || k === "object", "要求完整容器");
+      return BigInt(
+        k === "array" ? this.plain.length : Object.keys(this.plain).length,
+      );
     }
     async scalar() {
-      await this.check();
-      if (this.kind === "json_text") {
+      if (!this.reader) {
+        const k = plainKind(this.plain);
+        need(
+          k === "string" || k === "number" || k === "bool" || k === "null",
+          "要求标量",
+        );
+        return this.plain;
+      }
+      this.reader.check();
+      if (this.ref.kind === "json_text") {
         let result = "";
         for await (const c of canonicalChunks(await this.reader.inner(this)))
           result += c;
         return result;
       }
+      const k = this.ref.kind;
       need(
-        ["string", "number", "bool", "null"].includes(this.kind),
+        k === "string" || k === "number" || k === "bool" || k === "null",
         "要求标量",
       );
-      if (!this.reader) return this.plain;
       return this.reader.scalar(this);
     }
     async *entries() {
-      await this.check();
-      need(this.kind === "object", "要求对象");
       if (this.reader) {
+        this.reader.check();
+        need(this.ref.kind === "object", "要求对象");
         yield* this.reader.entries(this);
         return;
       }
+      need(plainKind(this.plain) === "object", "要求对象");
       let previous = null;
       for (const key of Object.keys(this.plain).sort(cmp)) {
         wellFormed(key);
@@ -143,12 +201,13 @@
       }
     }
     async *items() {
-      await this.check();
-      need(this.kind === "array", "要求数组");
       if (this.reader) {
+        this.reader.check();
+        need(this.ref.kind === "array", "要求数组");
         for await (const e of this.reader.entries(this)) yield e.value;
         return;
       }
+      need(Array.isArray(this.plain), "要求数组");
       for (let i = 0; i < this.plain.length; i++) {
         need(Object.hasOwn(this.plain, i), "稀疏数组");
         yield Value.of(this.plain[i]);
@@ -157,13 +216,10 @@
     async field(key) {
       wellFormed(key);
       if (!this.reader) {
-        // #1394 整合（根裁定 A）：普通值按自有属性直接取字段。旧路径每取一个字段都经 entries() 把全部键
-        // 按 UTF-8 重排、每次比较都编码（剖析：TextEncoder.encode 53%、cmp 12%）。JS 对象键不会重复，
-        // entries() 的顺序断言对普通值恒真；其余检查与先后次序不变：参数键 → 对象类型 → 全部键的孤立
-        // 代理项 → 缺字段。图值路径不变。
-        await this.check();
-        need(this.kind === "object", "要求对象");
-        for (const k of Object.keys(this.plain)) wellFormed(k);
+        // #1394 整合（根裁定 A）：普通值按自有属性直接取字段，零排序零微任务。
+        need(plainKind(this.plain) === "object", "要求对象");
+        const ks = Object.keys(this.plain);
+        for (let idx = 0; idx < ks.length; idx++) wellFormed(ks[idx]);
         if (Object.hasOwn(this.plain, key)) return Value.of(this.plain[key]);
         throw new Error("缺完整字段：" + key);
       }
@@ -171,11 +227,30 @@
       throw new Error("缺完整字段：" + key);
     }
     async has(key) {
+      if (!this.reader) {
+        need(plainKind(this.plain) === "object", "要求对象");
+        const ks = Object.keys(this.plain);
+        for (let idx = 0; idx < ks.length; idx++) wellFormed(ks[idx]);
+        return Object.hasOwn(this.plain, key);
+      }
       for await (const e of this.entries()) if (e.key === key) return true;
       return false;
     }
     async at(index) {
       index = BigInt(index);
+      if (!this.reader) {
+        const k = plainKind(this.plain);
+        need(k === "array" || k === "object", "要求完整容器");
+        const len = BigInt(
+          k === "array" ? this.plain.length : Object.keys(this.plain).length,
+        );
+        need(index >= 0n && index < len, "数组索引越界");
+        need(k === "array", "要求数组");
+        const idx = Number(index);
+        for (let i = 0; i <= idx; i++)
+          need(Object.hasOwn(this.plain, i), "稀疏数组");
+        return Value.of(this.plain[idx]);
+      }
       need(index >= 0n && index < (await this.length()), "数组索引越界");
       let i = 0n;
       for await (const v of this.items()) {
@@ -190,7 +265,6 @@
     v = of(v);
     need(v.kind === "object", name + " 完整对象不符");
     if (!v.reader) {
-      await v.check();
       const actual = Object.keys(v.plain);
       for (let idx = 0; idx < actual.length; idx++) wellFormed(actual[idx]);
       need(
@@ -209,20 +283,30 @@
     );
     return v;
   }
+  function checkS(v) {
+    wellFormed(v);
+    return v;
+  }
   async function S(v) {
+    if (typeof v === "string") return checkS(v);
+    if (v instanceof Value && !v.reader && typeof v.plain === "string")
+      return checkS(v.plain);
     const s = await of(v).scalar();
     wellFormed(s);
     return s;
   }
   async function T(v) {
-    const s = await S(v);
+    let s;
+    if (typeof v === "string") s = checkS(v);
+    else if (v instanceof Value && !v.reader && typeof v.plain === "string")
+      s = checkS(v.plain);
+    else s = await S(v);
     need(s.length > 0, "身份文本为空");
     return s;
   }
-  async function I(v, positive = false, frontier = false) {
-    const s = await S(v);
+  function parseI(s, positive, frontier) {
     need(
-      s.length <= 19 && /^(?:0|[1-9][0-9]*|-1)$/.test(s),
+      s.length <= 19 && INT_RE.test(s),
       "精确整数必须是规范文本",
     );
     const n = BigInt(s);
@@ -232,10 +316,17 @@
     );
     return n;
   }
-  async function N(v) {
-    const s = await S(v);
+  async function I(v, positive = false, frontier = false) {
+    let s;
+    if (typeof v === "string") s = checkS(v);
+    else if (v instanceof Value && !v.reader && typeof v.plain === "string")
+      s = checkS(v.plain);
+    else s = await S(v);
+    return parseI(s, positive, frontier);
+  }
+  function parseN(s) {
     need(
-      s.length <= 20 && /^(?:0|[1-9][0-9]*|-[1-9][0-9]*)$/.test(s),
+      s.length <= 20 && PRICE_RE.test(s),
       "价格须为规范整数文本",
     );
     const n = BigInt(s);
@@ -245,16 +336,45 @@
     );
     return n;
   }
+  async function N(v) {
+    let s;
+    if (typeof v === "string") s = checkS(v);
+    else if (v instanceof Value && !v.reader && typeof v.plain === "string")
+      s = checkS(v.plain);
+    else s = await S(v);
+    return parseN(s);
+  }
   async function list(v) {
+    v = of(v);
+    if (!v.reader) {
+      need(Array.isArray(v.plain), "要求数组");
+      const a = new Array(v.plain.length);
+      for (let idx = 0; idx < v.plain.length; idx++) {
+        need(Object.hasOwn(v.plain, idx), "稀疏数组");
+        const item = v.plain[idx];
+        if (item instanceof Value) a[idx] = await item.scalar();
+        else {
+          const k = plainKind(item);
+          need(
+            k === "string" || k === "number" || k === "bool" || k === "null",
+            "要求标量",
+          );
+          a[idx] = item;
+        }
+      }
+      return a;
+    }
     const a = [];
-    for await (const item of of(v).items()) a.push(await item.scalar());
+    for await (const item of v.items()) a.push(await item.scalar());
     return a;
   }
   async function equal(a, b) {
+    const fast = equalPlain(a, b);
+    if (fast !== null) return fast;
     a = of(a);
     b = of(b);
-    await a.check();
-    await b.check();
+    if (a.reader) a.reader.check();
+    if (b.reader) b.reader.check();
     if (a.kind !== b.kind) return false;
     if (["null", "bool", "string", "number"].includes(a.kind)) {
       const x = await a.scalar(),
@@ -263,30 +383,6 @@
     }
     if (a.kind === "json_text") {
       return equal(await a.reader.inner(a), await b.reader.inner(b));
-    }
-    if (!a.reader && !b.reader) {
-      if (a.kind === "array") {
-        const ax = a.plain,
-          bx = b.plain;
-        if (ax.length !== bx.length) return false;
-        for (let idx = 0; idx < ax.length; idx++) {
-          need(Object.hasOwn(ax, idx), "稀疏数组");
-          need(Object.hasOwn(bx, idx), "稀疏数组");
-          if (!(await equal(ax[idx], bx[idx]))) return false;
-        }
-        return true;
-      }
-      const ak = Object.keys(a.plain),
-        bk = Object.keys(b.plain);
-      if (ak.length !== bk.length) return false;
-      for (let idx = 0; idx < ak.length; idx++) wellFormed(ak[idx]);
-      for (let idx = 0; idx < bk.length; idx++) wellFormed(bk[idx]);
-      for (let idx = 0; idx < ak.length; idx++) {
-        const k = ak[idx];
-        if (!Object.hasOwn(b.plain, k) || !(await equal(a.plain[k], b.plain[k])))
-          return false;
-      }
-      return true;
     }
     if ((await a.length()) !== (await b.length())) return false;
     const ai = a.kind === "object" ? a.entries() : a.items(),
