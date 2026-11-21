@@ -98,24 +98,6 @@ _EXPLICIT_NON_BLOCKING_OVERRIDE_RE = re.compile(
 )
 _LEADING_COLON_TAG_RE = re.compile(r"^(?:(?:\*\*|__)\s*)?([^:\n：\[\【\]\】`*]{1,24}?)(?:\s*(?:\*\*|__))?\s*[:：](?!\d)")
 _TAG_SPLIT_RE = re.compile(r"[\s/／·・,，、\-—:：|｜()（）]+")
-_STRICT_NON_BLOCKING_COLON_TOKEN = (
-    r"(?:非阻断|不阻断|non[-_ ]?blocking|nit|minor|low|info|p3|低|信息|提示|建议|可选|"
-    r"核实通过|确认无(?:问题|误)|通过)"
-)
-_STRICT_BLOCKING_COLON_TOKEN = (
-    r"(?:阻断|block(?:er|ing)?|important|critical|must[-_ ]?fix|严重|重要|高|p[012])"
-)
-_STRICT_COLON_NON_BLOCKING_RE = re.compile(
-    rf"^(?:{_STRICT_NON_BLOCKING_COLON_TOKEN}"
-    rf"|{_STRICT_BLOCKING_COLON_TOKEN}\s+{_STRICT_NON_BLOCKING_COLON_TOKEN}"
-    rf"|{_STRICT_NON_BLOCKING_COLON_TOKEN}\s+{_STRICT_NON_BLOCKING_COLON_TOKEN}"
-    rf"|{_STRICT_NON_BLOCKING_COLON_TOKEN}\s+{_STRICT_BLOCKING_COLON_TOKEN})$",
-    re.IGNORECASE,
-)
-_STRICT_COLON_BLOCKING_RE = re.compile(
-    rf"^(?:{_STRICT_BLOCKING_COLON_TOKEN})(?:\s+{_STRICT_BLOCKING_COLON_TOKEN})*$",
-    re.IGNORECASE,
-)
 _TIER1_NON_BLOCKING_TAG_TOKENS: frozenset[str] = frozenset(
     {
         "非阻断",
@@ -165,11 +147,14 @@ _TIER3_NON_BLOCKING_TAG_TOKENS: frozenset[str] = frozenset(
         "确认无误",
     }
 )
+_ALL_KNOWN_SEVERITY_TAG_TOKENS: frozenset[str] = (
+    _TIER1_NON_BLOCKING_TAG_TOKENS | _TIER2_BLOCKING_TAG_TOKENS | _TIER3_NON_BLOCKING_TAG_TOKENS
+)
 _TIER3_VERIFIED_OK_TAG_RE = re.compile(r"^已核.*(?:无问题|未发现问题)$")
 _NON_BLOCKING_NIT_RE = re.compile(
     r"(?:[\[\【]\s*nit\s*[\]\】]|(?<![A-Za-z0-9])nit\s*[:：]|"
     r"(?<!不是)(?<!并非)(?<!不属于)(?<!不是一个)(?<!并非是)(?:非阻断|不阻断)|"
-    r"(?<!not\s)(?<!not\sa\s)(?<![A-Za-z0-9])non[- ]?blocking(?![A-Za-z0-9])|"
+    r"(?<!not\s)(?<!not\sa\s)(?<![A-Za-z0-9])non[-_ ]?blocking(?![A-Za-z0-9])|"
     r"(?<!不是)(?<!并非)(?<!非)建议后续|"
     r"(?<!不是)(?<!并非)(?<!非)(?<!不是建议)(?<!并非建议)(?<!非建议)(?<!不是可选)(?<!并非可选)(?<!非可选)后续跟进|"
     r"(?<!不是)(?<!并非)(?<!非)可选(?:后续)?(?:建议|优化|改进|项)|"
@@ -2551,10 +2536,9 @@ def _parse_leading_severity_tag(
     if colon_match:
         prefix = colon_match.group(1).strip(" *_")
         if prefix and "/" not in prefix and "\\" not in prefix and "." not in prefix:
-            if _STRICT_COLON_NON_BLOCKING_RE.fullmatch(prefix):
-                return "non_blocking"
-            if _STRICT_COLON_BLOCKING_RE.fullmatch(prefix):
-                return "blocking"
+            colon_tokens = _tokenize_severity_tag(prefix)
+            if colon_tokens and all(tok in _ALL_KNOWN_SEVERITY_TAG_TOKENS for tok in colon_tokens):
+                return _classify_severity_tag_text(prefix)
     return None
 
 

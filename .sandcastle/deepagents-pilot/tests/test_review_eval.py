@@ -3615,8 +3615,8 @@ def test_r10_compare_scores_tracks_matched_location_index_sets_and_validates_jso
                 findings=(
                     PredictedFinding(
                         file="rust/src/theta_v0/parser/segment.rs",
-                        line_start=538,
-                        line_end=538,
+                        line_start=573,
+                        line_end=573,
                         severity="blocking",
                     ),
                 ),
@@ -5005,8 +5005,7 @@ def test_r16_narrowed_bug_locations_exclude_unrelated_lines() -> None:
     case_1994 = by_id["bug-1994-review-identity-sweep-gap"]
     assert len(case_1994.bug_locations) == 2
     assert case_1994.bug_locations[0].all_ranges == (
-        (1108, 1109),
-        (1111, 1113),
+        (1108, 1111),
         (1143, 1143),
         (1148, 1148),
         (1158, 1158),
@@ -5120,3 +5119,131 @@ def test_r16_narrowed_bug_locations_exclude_unrelated_lines() -> None:
     )
     assert unrelated_1944.bug_case_recall == 0.0
     assert unrelated_1944.case_details[0].matched_locations == 0
+
+
+def test_r17_case_1994_and_1978_loc0_precision() -> None:
+    cases = load_cases(CANONICAL_CASES)
+    by_id = {c.case_id: c for c in cases}
+
+    # Important 1：#1994 loc[0] 包含第 1110 行默认回退赋值，剔除第 1112..1113 行相对路径校验
+    case_1994 = by_id["bug-1994-review-identity-sweep-gap"]
+    assert case_1994.bug_locations[0].all_ranges == (
+        (1108, 1111),
+        (1143, 1143),
+        (1148, 1148),
+        (1158, 1158),
+    )
+    ext_file = ".sandcastle/deepagents-pilot/pilot1742/external_review.py"
+
+    hit_1110 = score_predictions(
+        (case_1994,),
+        (
+            CasePrediction(
+                case_id=case_1994.case_id,
+                verdict="BLOCK",
+                findings=(PredictedFinding(file=ext_file, line_start=1110, line_end=1110, severity="blocking"),),
+            ),
+        ),
+        line_tolerance=0,
+    )
+    assert hit_1110.case_details[0].matched_location_indices == (0,)
+    assert hit_1110.bug_case_recall == 1.0
+
+    for excluded_line in (1112, 1113):
+        miss = score_predictions(
+            (case_1994,),
+            (
+                CasePrediction(
+                    case_id=case_1994.case_id,
+                    verdict="BLOCK",
+                    findings=(
+                        PredictedFinding(
+                            file=ext_file,
+                            line_start=excluded_line,
+                            line_end=excluded_line,
+                            severity="blocking",
+                        ),
+                    ),
+                ),
+            ),
+            line_tolerance=0,
+        )
+        assert miss.case_details[0].matched_location_indices == (), excluded_line
+        assert miss.bug_case_recall == 0.0, excluded_line
+
+    # Important 2：#1978 loc[0] 收窄至 572..583 + 588，剔除测试钩子/计数器（584..587）与空行（590）
+    case_1978 = by_id["bug-1978-segment-seed-scan-revert"]
+    assert case_1978.bug_locations[0].all_ranges == ((572, 583), (588, 588))
+    seg_file = "rust/src/theta_v0/parser/segment.rs"
+
+    for excluded_seg_line in (546, 584, 586, 587, 589, 590):
+        miss_seg = score_predictions(
+            (case_1978,),
+            (
+                CasePrediction(
+                    case_id=case_1978.case_id,
+                    verdict="BLOCK",
+                    findings=(
+                        PredictedFinding(
+                            file=seg_file,
+                            line_start=excluded_seg_line,
+                            line_end=excluded_seg_line,
+                            severity="blocking",
+                        ),
+                    ),
+                ),
+            ),
+            line_tolerance=0,
+        )
+        assert miss_seg.case_details[0].matched_location_indices == (), excluded_seg_line
+        assert miss_seg.bug_case_recall == 0.0, excluded_seg_line
+
+    for included_seg_line in (573, 588):
+        hit_seg = score_predictions(
+            (case_1978,),
+            (
+                CasePrediction(
+                    case_id=case_1978.case_id,
+                    verdict="BLOCK",
+                    findings=(
+                        PredictedFinding(
+                            file=seg_file,
+                            line_start=included_seg_line,
+                            line_end=included_seg_line,
+                            severity="blocking",
+                        ),
+                    ),
+                ),
+            ),
+            line_tolerance=0,
+        )
+        assert hit_seg.case_details[0].matched_location_indices == (0,), included_seg_line
+        assert hit_seg.bug_case_recall == 1.0, included_seg_line
+
+
+def test_r17_colon_tag_reuses_three_tier_classifier_and_body_non_blocking_underscore() -> None:
+    # Important 3：冒号标签经识别门控后复用与方括号完全一致的三层分级
+    assert classify_finding_heuristic("[must_fix 信息] 数据丢失", "blocked") == "blocking_substantive"
+    assert classify_finding_heuristic("must_fix 信息: 数据丢失", "blocked") == "blocking_substantive"
+    assert _parse_leading_severity_tag("must_fix 信息: 数据丢失") == "blocking"
+    assert classify_finding_heuristic("non_blocking P2: 说明", "blocked") == "non_blocking_or_nit"
+    assert _parse_leading_severity_tag("non_blocking P2: 说明") == "non_blocking"
+    assert classify_finding_heuristic("信息: 补充说明", "blocked") == "non_blocking_or_nit"
+    assert _parse_leading_severity_tag("信息: 补充说明") == "non_blocking"
+    assert classify_finding_heuristic("src/low:1 数据丢失", "blocked") == "blocking_substantive"
+    assert _parse_leading_severity_tag("src/low:1 数据丢失") is None
+
+    # 识别门控：含未知句首词或路径分隔符时绝不误判为冒号严重度标签
+    assert _parse_leading_severity_tag("注意 信息: 数据丢失") is None
+    assert classify_finding_heuristic("注意 信息: 数据丢失", "blocked") == "blocking_substantive"
+    assert _parse_leading_severity_tag("P1 信息泄露: 密钥暴露") is None
+    assert classify_finding_heuristic("P1 信息泄露: 密钥暴露", "blocked") == "blocking_substantive"
+    assert _parse_leading_severity_tag("P2/非阻断: 数据丢失") is None
+
+    # Important 4：正文启发式覆盖 nonblocking / non_blocking / non-blocking / non blocking 且保留否定保护
+    assert classify_finding_heuristic("This is nonblocking.", "blocked") == "non_blocking_or_nit"
+    assert classify_finding_heuristic("This is non_blocking.", "blocked") == "non_blocking_or_nit"
+    assert classify_finding_heuristic("This is non-blocking.", "blocked") == "non_blocking_or_nit"
+    assert classify_finding_heuristic("This is non blocking.", "blocked") == "non_blocking_or_nit"
+    assert classify_finding_heuristic("This is not non_blocking.", "blocked") == "blocking_substantive"
+    assert classify_finding_heuristic("This is not a non_blocking issue.", "blocked") == "blocking_substantive"

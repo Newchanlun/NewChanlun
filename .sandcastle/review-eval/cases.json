@@ -15,8 +15,11 @@
       "bug_locations": [
         {
           "file": "rust/src/theta_v0/parser/segment.rs",
-          "line_start": 538,
-          "line_end": 590,
+          "line_start": 572,
+          "line_end": 583,
+          "extra_ranges": [
+            [588, 588]
+          ],
           "summary": "rescan_from_first_start 假定流首段终结仍由种子扫描决定，违背 xianduan §7.1 第 5 条按流首段自身特征序列终结的裁定。",
           "category": "spec_violation"
         },
@@ -214,9 +217,8 @@
         {
           "file": ".sandcastle/deepagents-pilot/pilot1742/external_review.py",
           "line_start": 1108,
-          "line_end": 1109,
+          "line_end": 1111,
           "extra_ranges": [
-            [1111, 1113],
             [1143, 1143],
             [1148, 1148],
             [1158, 1158]
