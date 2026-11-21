@@ -90,12 +90,13 @@ _KNOWN_ASCII_SEVERITY_WORD_RE = re.compile(
     r"minor|major|nit|info|non[-_ ]?blocking|optional|suggestion|style|warning|warn|error|bug|security)$",
     re.IGNORECASE,
 )
-_ZH_NEGATION_PREFIX_PATTERN = r"(?:(?:并不是|并非是|不属于|不是|并非|绝非)(?:\s*一?[个项条类种])?\s*|非\s*)"
-_EN_NEGATION_PREFIX_PATTERN = r"(?<![A-Za-z0-9_])(?:not|no|never|(?:is|are|was|were)n['’]t)[\s-]+(?:(?:a|an|the)[\s-]+)?"
-_ZH_EXPLICIT_NON_BLOCKING_PHRASE_RE = re.compile(
-    rf"(?P<neg>{_ZH_NEGATION_PREFIX_PATTERN})?"
-    r"(?P<hit>非阻断|不阻断|不构成阻断|不作为阻断(?:理由|项|依据)?|不单独(?:判|作为|构成)?阻断)"
+_ZH_NEGATION_HEAD_PATTERN = (
+    r"(?:并不是|并非是|并非只是|并非仅仅|不只是|不仅是|不属于|不是|并非|绝非|"
+    r"不能(?:被)?(?:算作?|视为|当作?|归为|说成?)?|"
+    r"不应(?:被)?(?:算作?|视为|当作?|归为)?|"
+    r"不可(?:被)?(?:算作?|视为|当作?)?)"
 )
+_ZH_NEGATION_MODIFIER_PATTERN = r"(?:所谓|单纯|简单|仅仅|只是|一个|一种|一项|一条|一类|个|项|条|类|种|的|地|是)*"
 _TAG_NEGATION_TOKENS: frozenset[str] = frozenset(
     {
         "not",
@@ -105,10 +106,24 @@ _TAG_NEGATION_TOKENS: frozenset[str] = frozenset(
         "aren't",
         "wasn't",
         "weren't",
+        "don't",
+        "doesn't",
+        "didn't",
+        "can't",
+        "couldn't",
+        "shouldn't",
+        "wouldn't",
         "isn’t",
         "aren’t",
         "wasn’t",
         "weren’t",
+        "don’t",
+        "doesn’t",
+        "didn’t",
+        "can’t",
+        "couldn’t",
+        "shouldn’t",
+        "wouldn’t",
         "非",
         "并非",
         "不是",
@@ -116,14 +131,21 @@ _TAG_NEGATION_TOKENS: frozenset[str] = frozenset(
         "并不是",
         "不属于",
         "并非是",
-        "不是一个",
-        "并非一个",
-        "并不是一个",
+        "并非只是",
+        "并非仅仅",
+        "不只是",
+        "不仅是",
+        "不能",
+        "不应",
+        "不可",
     }
 )
-_TAG_NEGATION_DETERMINERS: frozenset[str] = frozenset({"a", "an", "the", "个", "一个", "项", "一项", "条", "一条", "是"})
+_TAG_ZH_NEGATION_TOKEN_RE = re.compile(
+    rf"^(?:{_ZH_NEGATION_HEAD_PATTERN}{_ZH_NEGATION_MODIFIER_PATTERN}|(?<![是除无])非)$"
+)
+_TAG_CONTRAST_TOKENS: frozenset[str] = frozenset({"but", "yet", "however", "但", "但是", "不过", "然而", "却"})
 _TAG_ZH_NEG_ASCII_SPLIT_RE = re.compile(
-    r"^(并不是一个|不是一个|并非一个|并不是|并非是|不属于|不是|并非|绝非|非)([a-z][a-z0-9_]*)$"
+    rf"^({_ZH_NEGATION_HEAD_PATTERN}{_ZH_NEGATION_MODIFIER_PATTERN}|(?<![是除无])非)([a-z][a-z0-9_]*)$"
 )
 _EXPLICIT_NON_BLOCKING_OVERRIDE_TOKENS: frozenset[str] = frozenset(
     {
@@ -131,6 +153,14 @@ _EXPLICIT_NON_BLOCKING_OVERRIDE_TOKENS: frozenset[str] = frozenset(
         "不阻断",
         "未阻断",
         "不构成阻断",
+        "不作为阻断",
+        "不作为阻断理由",
+        "不作为阻断项",
+        "不作为阻断依据",
+        "不单独阻断",
+        "不单独判阻断",
+        "不单独作为阻断",
+        "不单独构成阻断",
         "non-blocking",
         "nonblocking",
         "non_blocking",
@@ -138,17 +168,10 @@ _EXPLICIT_NON_BLOCKING_OVERRIDE_TOKENS: frozenset[str] = frozenset(
     }
 )
 _LEADING_COLON_TAG_RE = re.compile(r"^(?:(?:\*\*|__)\s*)?([^:\n：\[\【\]\】`*]{1,24}?)(?:\s*(?:\*\*|__))?\s*[:：](?!\d)")
-_TAG_SPLIT_RE = re.compile(r"[\s/／·・,，、\-—:：|｜()（）]+")
-_TIER1_NON_BLOCKING_TAG_TOKENS: frozenset[str] = frozenset(
+_TAG_CLAUSE_SPLIT_RE = re.compile(r"[,，、;；/／|｜·・—:：()（）]+")
+_TAG_CLAUSE_TOKEN_SPLIT_RE = re.compile(r'[\s\-"“”「」『』《》]+')
+_TIER1_NON_BLOCKING_TAG_TOKENS: frozenset[str] = _EXPLICIT_NON_BLOCKING_OVERRIDE_TOKENS | frozenset(
     {
-        "非阻断",
-        "不阻断",
-        "未阻断",
-        "不构成阻断",
-        "non-blocking",
-        "nonblocking",
-        "non_blocking",
-        "nit",
         "minor",
         "low",
         "低",
@@ -197,9 +220,8 @@ _ALL_KNOWN_SEVERITY_TAG_TOKENS: frozenset[str] = (
     _TIER1_NON_BLOCKING_TAG_TOKENS | _TIER2_BLOCKING_TAG_TOKENS | _TIER3_NON_BLOCKING_TAG_TOKENS
 )
 _TIER3_VERIFIED_OK_TAG_RE = re.compile(r"^已核.*(?:无问题|未发现问题)$")
-_NON_BLOCKING_NIT_RE = re.compile(
-    rf"(?P<neg>{_ZH_NEGATION_PREFIX_PATTERN}|{_EN_NEGATION_PREFIX_PATTERN})?"
-    r"(?P<hit>"
+_NON_BLOCKING_BODY_HIT_RE = re.compile(
+    r"(?:"
     r"[\[\【]\s*nit\s*[\]\】]|"
     r"(?<![A-Za-z0-9_])nit\s*[:：]|"
     r"非阻断|不阻断|不构成阻断|不作为阻断(?:理由|项|依据)?|不单独(?:判|作为|构成)?阻断|"
@@ -211,6 +233,26 @@ _NON_BLOCKING_NIT_RE = re.compile(
     r"(?<![A-Za-z0-9_])minor(?![A-Za-z0-9_])|"
     r"仅作记录|低优先级"
     r")",
+    re.IGNORECASE,
+)
+_BODY_CLAUSE_BOUNDARY_RE = re.compile(r"[。！？!?；;，,\n]")
+_BODY_CONJUNCTION_RESET_RE = re.compile(
+    r"(?:所以|因此|故|从而|于是|但是|不过|然而|但|"
+    r"(?<![A-Za-z0-9_])(?:so|therefore|thus|but|however)(?![A-Za-z0-9_]))",
+    re.IGNORECASE,
+)
+_ZH_BODY_NEGATION_SUFFIX_RE = re.compile(
+    rf"(?:{_ZH_NEGATION_HEAD_PATTERN}|(?<![是除无])非)"
+    r"(?:[\s\"'“”‘’「」『』《》（()【\[]*"
+    r"(?:所谓|单纯|简单|仅仅|只是|一个|一种|一项|一条|一类|个|项|条|类|种|的|地|是))*"
+    r"[\s\"'“‘「『《（(【\[]*$"
+)
+_EN_BODY_NEGATION_SUFFIX_RE = re.compile(
+    r"(?<![A-Za-z0-9_])"
+    r"(?:not|no|never|(?:is|are|was|were|do|does|did|can|could|should|would)n['’]t)"
+    r"(?:[\s\-\"'“”‘’「」『』《》（()【\[]+"
+    r"(?:just|merely|simply|only|really|actually|strictly|purely|truly|even|a|an|the|any|some|minor|non[-_ ]?blocking))*"
+    r"[\s\-\"'“‘「『《（(【\[]+$",
     re.IGNORECASE,
 )
 _BLOCKING_MARKER_RE = re.compile(
@@ -1597,18 +1639,28 @@ def load_dispositions(jsonl_path: Path) -> tuple[DispositionEntry, ...]:
     return tuple(entries)
 
 
-def _has_affirmative_zh_non_blocking_phrase(text: str) -> bool:
-    return any(match.group("neg") is None for match in _ZH_EXPLICIT_NON_BLOCKING_PHRASE_RE.finditer(text))
+def _is_negated_body_prefix(prefix: str) -> bool:
+    """判断同一子句（且在最近因果/转折词之后）的紧邻前缀是否以中英文否定表达收尾。"""
+    clause = _BODY_CLAUSE_BOUNDARY_RE.split(prefix)[-1]
+    tail = _BODY_CONJUNCTION_RESET_RE.split(clause)[-1]
+    if not tail:
+        return False
+    return bool(_ZH_BODY_NEGATION_SUFFIX_RE.search(tail) or _EN_BODY_NEGATION_SUFFIX_RE.search(tail))
 
 
 def _has_non_blocking_body_signal(text: str) -> bool:
-    return any(match.group("neg") is None for match in _NON_BLOCKING_NIT_RE.finditer(text))
+    return any(
+        not _is_negated_body_prefix(text[: match.start()])
+        for match in _NON_BLOCKING_BODY_HIT_RE.finditer(text)
+    )
 
 
-def _tokenize_severity_tag(tag_text: str) -> list[str]:
-    split_tokens = [tok.lower() for tok in _TAG_SPLIT_RE.split(tag_text.strip()) if tok]
+def _tokenize_severity_tag_clause(clause: str) -> list[str]:
     raw_tokens: list[str] = []
-    for tok in split_tokens:
+    for part in _TAG_CLAUSE_TOKEN_SPLIT_RE.split(clause.strip()):
+        tok = part.strip("'’‘").lower()
+        if not tok:
+            continue
         zh_ascii = _TAG_ZH_NEG_ASCII_SPLIT_RE.fullmatch(tok)
         if zh_ascii:
             raw_tokens.append(zh_ascii.group(1))
@@ -1633,41 +1685,52 @@ def _tokenize_severity_tag(tag_text: str) -> list[str]:
     return tokens
 
 
-def _affirmative_severity_tag_tokens(tokens: Sequence[str]) -> list[str]:
-    """剔除被前导否定词（及可选冠词/量词）否定的词元，仅保留肯定声明的词元。"""
+def _tokenize_severity_tag(tag_text: str) -> list[str]:
+    tokens: list[str] = []
+    for clause in _TAG_CLAUSE_SPLIT_RE.split(tag_text.strip()):
+        if clause.strip():
+            tokens.extend(_tokenize_severity_tag_clause(clause))
+    return tokens
+
+
+def _is_tag_negation_token(tok: str) -> bool:
+    if tok in _ALL_KNOWN_SEVERITY_TAG_TOKENS:
+        return False
+    return tok in _TAG_NEGATION_TOKENS or bool(_TAG_ZH_NEGATION_TOKEN_RE.fullmatch(tok))
+
+
+def _affirmative_severity_tag_tokens(tag_text: str) -> list[str]:
+    """按分句作用域剔除标签中被否定的词元，仅保留肯定声明的词元。"""
     affirmative: list[str] = []
-    for idx, tok in enumerate(tokens):
-        if idx >= 1 and tokens[idx - 1] in _TAG_NEGATION_TOKENS:
+    for clause in _TAG_CLAUSE_SPLIT_RE.split(tag_text.strip()):
+        if not clause.strip():
             continue
-        if (
-            idx >= 2
-            and tokens[idx - 2] in _TAG_NEGATION_TOKENS
-            and tokens[idx - 1] in _TAG_NEGATION_DETERMINERS
-        ):
-            continue
-        affirmative.append(tok)
+        negated = False
+        for tok in _tokenize_severity_tag_clause(clause):
+            if tok in _TAG_CONTRAST_TOKENS:
+                negated = False
+                continue
+            if _is_tag_negation_token(tok):
+                negated = True
+                continue
+            if not negated:
+                affirmative.append(tok)
     return affirmative
 
 
 def _is_explicit_non_blocking_override_tag(tag_text: str) -> bool:
-    """判断后置方括号标签是否肯定声明了显式非阻断/Nit 覆盖（排除否定语境）。"""
-    affirmative = _affirmative_severity_tag_tokens(_tokenize_severity_tag(tag_text))
+    """判断后置方括号标签是否肯定声明了显式非阻断/Nit 覆盖（仅做整词匹配并排除否定语境）。"""
+    affirmative = _affirmative_severity_tag_tokens(tag_text)
     if not affirmative:
         return False
-    return any(
-        tok in _EXPLICIT_NON_BLOCKING_OVERRIDE_TOKENS or _has_affirmative_zh_non_blocking_phrase(tok)
-        for tok in affirmative
-    )
+    return any(tok in _EXPLICIT_NON_BLOCKING_OVERRIDE_TOKENS for tok in affirmative)
 
 
 def _classify_severity_tag_text(tag_text: str) -> Literal["blocking", "non_blocking"] | None:
-    affirmative = _affirmative_severity_tag_tokens(_tokenize_severity_tag(tag_text))
+    affirmative = _affirmative_severity_tag_tokens(tag_text)
     if not affirmative:
         return None
-    if any(
-        tok in _TIER1_NON_BLOCKING_TAG_TOKENS or _has_affirmative_zh_non_blocking_phrase(tok)
-        for tok in affirmative
-    ):
+    if any(tok in _TIER1_NON_BLOCKING_TAG_TOKENS for tok in affirmative):
         return "non_blocking"
     if any(tok in _TIER2_BLOCKING_TAG_TOKENS for tok in affirmative):
         return "blocking"

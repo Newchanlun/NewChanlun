@@ -5450,3 +5450,113 @@ def test_r19_negated_severity_tags_and_post_tag_override_guards() -> None:
     ):
         assert _parse_leading_severity_tag(override_case) == "non_blocking", override_case
         assert classify_finding_heuristic(override_case, "blocked") == "non_blocking_or_nit", override_case
+
+
+def test_r20_tag_exact_token_clause_negation_and_body_quote_modifier_penetration() -> None:
+    # Important 1：标签词元只做整词集合匹配，禁止子串匹配，消除 [P1/不阻断非法请求] 回归
+    assert _parse_leading_severity_tag("[P1/不阻断非法请求] 鉴权失败仍放行") == "blocking"
+    assert classify_finding_heuristic("[P1/不阻断非法请求] 鉴权失败仍放行", "blocked") == "blocking_substantive"
+    assert _parse_leading_severity_tag("[P1][不阻断非法请求] 鉴权失败仍放行") == "blocking"
+    assert classify_finding_heuristic("[P1][不阻断非法请求] 鉴权失败仍放行", "blocked") == "blocking_substantive"
+    assert _is_explicit_non_blocking_override_tag("不阻断非法请求") is False
+    assert _classify_severity_tag_text("P1/不阻断非法请求") == "blocking"
+    assert _classify_severity_tag_text("不阻断非法请求") is None
+    assert _classify_severity_tag_text("不构成阻断校验缺失") is None
+
+    # 精确整词补齐：标点分句后的独立整词仍正确识别为 non_blocking_or_nit
+    for exact_tag_case in (
+        "[P2][说明，非阻断] 记录以供知悉",
+        "[P2][说明，不构成阻断] 记录以供知悉",
+        "[P2][不作为阻断] 属于设计取舍",
+        "[P2][不作为阻断项] 属于设计取舍",
+        "[P2][不作为阻断依据] 属于设计取舍",
+        "[P2][不单独阻断] 记录即可",
+        "[P2][不单独作为阻断] 记录即可",
+        "[P2][不单独构成阻断] 记录即可",
+        "[不作为阻断] 属于设计取舍",
+        "[不单独构成阻断] 记录即可",
+    ):
+        assert _parse_leading_severity_tag(exact_tag_case) == "non_blocking", exact_tag_case
+        assert classify_finding_heuristic(exact_tag_case, "blocked") == "non_blocking_or_nit", exact_tag_case
+
+    # Important 2：正文否定前缀穿透引号/括号与中英文修饰词
+    for body_negated in (
+        "这并非“不构成阻断”，必须修复。",
+        "这不是「非阻断」，而是严重越界。",
+        "不能算作“不作为阻断理由”",
+        "非“不构成阻断”，必须立即修复。",
+        "非「非阻断」，存在越权漏洞。",
+        "这不是一个「非阻断」项，必须修复。",
+        "这绝非所谓“不单独阻断”的问题。",
+        "这并非单纯的（不阻断）问题。",
+        "不应视为「非阻断」项。",
+        "不可当作“不作为阻断依据”。",
+        'This is not "non-blocking".',
+        "This is not 'non-blocking'.",
+        "This is not (non-blocking).",
+        "This is not just a minor issue.",
+        "Not merely a nit: drops writes.",
+        "This is not simply a non-blocking follow-up.",
+        "This isn't really a minor issue.",
+        "This is not only a minor nit: drops writes.",
+        "This is not a non-blocking nit: drops writes.",
+        "未阻断非法请求",
+        "因而不再生效阻断",
+        "因此未解决此阻断",
+    ):
+        assert is_non_blocking_or_nit_finding(body_negated, "blocked") is False, body_negated
+        assert classify_finding_heuristic(body_negated, "blocked") == "blocking_substantive", body_negated
+
+    # 正文正例：因果/转折词后及逗号分句后的肯定非阻断措辞不被前文否定误排
+    for body_affirmative in (
+        "没有影响所以不构成阻断",
+        "文件不存在，但不阻断",
+        "不是大问题，所以非阻断",
+        "并非核心路径，因此不作为阻断理由",
+        "并非致命缺陷但属于非阻断",
+        "是非，非阻断",
+        "It is not critical, but minor.",
+        "It is not critical therefore non-blocking.",
+        "【残余风险，知悉即可】沿用时不读新 base 上的相关源码，CI 也不是必需检查。属于设计取舍，不作为阻断理由。",
+        "【中】.sandcastle/decision-claimer.mts:686 代理与用户共用账号，目前资金消费方仍只认 UserSigned，所以不构成阻断。",
+        "【说明】执行器 approval.py 仍是签名门，当前行为更严格，属于已知依赖，不构成阻断。",
+        "[中，待核实授权] 新增授权来源与生效边界节，所以不单独判阻断；",
+        "[说明] 已有 Queued claim 重启时行为偏严格，不构成阻断，记录以供知悉。",
+        "[附注] events.jsonl 引用了已删证据，goal 已被 SUPERSEDE，所以不单独阻断。",
+    ):
+        assert is_non_blocking_or_nit_finding(body_affirmative, "blocked") is True, body_affirmative
+        assert classify_finding_heuristic(body_affirmative, "blocked") == "non_blocking_or_nit", body_affirmative
+
+    # Important 3：按分句作用域处理标签否定，根治跨词否定与转折恢复
+    for tag_negated_blocking in (
+        "[P1][not just a nit] Drops writes.",
+        "[P1][not merely a nit] Drops writes.",
+        "[P1][not simply a minor nit] Drops writes.",
+        "[P1][not only a non-blocking issue] Drops writes.",
+        "[P1][并非只是一个 nit] 丢写",
+        "[P1][并非只是一个nit] 丢写",
+        "[P1][并非仅仅是 非阻断] 丢写",
+        "[P1][不能算作 非阻断] 丢写",
+        '[P1][not "nit"] Drops writes.',
+        "[P1][并非“非阻断”] 丢写",
+        "[P1][isn't just a nit] Drops writes.",
+        "[not just a nit] Drops writes.",
+        "[not merely a minor issue] Drops writes.",
+        "[P1][not a nit but blocking] Drops writes.",
+    ):
+        assert classify_finding_heuristic(tag_negated_blocking, "blocked") == "blocking_substantive", tag_negated_blocking
+
+    # 跨子句肯定标签与转折词恢复肯定作用域
+    for tag_affirmative_nb in (
+        "[P1][not a nit, non-blocking] Follow-up only.",
+        "[P1][not just a nit, non-blocking] Follow-up only.",
+        "[P1][not blocking but nit] Naming tweak.",
+        "[P1][并非阻断 但 非阻断] 可后续整理",
+        "[P2][说明，非阻断] 记录以供知悉",
+        "[P2][非阻断] 可后续优化",
+        "[P2][nit] 命名微调",
+        "[P2][non-blocking] follow-up",
+        "[P2][不构成阻断] 属于已知依赖",
+    ):
+        assert _parse_leading_severity_tag(tag_affirmative_nb) == "non_blocking", tag_affirmative_nb
+        assert classify_finding_heuristic(tag_affirmative_nb, "blocked") == "non_blocking_or_nit", tag_affirmative_nb
