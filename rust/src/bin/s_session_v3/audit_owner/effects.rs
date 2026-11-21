@@ -1816,6 +1816,15 @@ pub(super) fn audit_native_source(
                 let sc::job::ScopedNodeRead::Found { tag, body } = node else {
                     return Err((construction_state::stale("实际effects新增原件缺失")).into());
                 };
+                #[cfg(test)]
+                let observed = super::SOURCE_APPEND_ALLOCATIONS.with(|rows| {
+                    if rows.borrow().is_none() {
+                        return None;
+                    }
+                    capture.owner_index_next_growth(digest).map(|growth| {
+                        (growth, access.budget.remaining(), super::allocation_probe::Window::start())
+                    })
+                });
                 let appended = match body.into_parts() {
                     (body, None) => capture.append_original_for_owner(
                         *digest,
@@ -1837,6 +1846,21 @@ pub(super) fn audit_native_source(
                         })
                     }
                 };
+                #[cfg(test)]
+                if let Some((growth, parent_remaining, window)) = observed {
+                    let measured = window.finish();
+                    super::SOURCE_APPEND_ALLOCATIONS.with(|rows| {
+                        rows.borrow_mut().as_mut().unwrap().push(json!({
+                            "growth": growth,
+                            "cap": cap,
+                            "j_cap": j.cap,
+                            "parent_remaining": parent_remaining,
+                            "allocated": measured["allocated_bytes"],
+                            "released": measured["released_bytes"],
+                            "appended": matches!(appended, Ok(true)),
+                        }))
+                    });
+                }
                 if !appended.map_err(publish_err)? {
                     return Err((construction_state::stale("原件追加预算未消费")).into());
                 }

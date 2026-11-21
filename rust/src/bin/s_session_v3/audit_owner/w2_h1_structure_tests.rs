@@ -364,7 +364,11 @@ fn w2_h1_roundtrip_selected(envelopes: &[Value], mut check: impl FnMut(usize, &V
     for (offset, envelope) in envelopes.iter().enumerate() {
         let n = offset + 1;
         let before = state::full_audit_calls_for_test();
-        let handled = online.handle(envelope.clone());
+        let handled = if M8D_P3_LOCK.with(std::cell::Cell::get).is_some_and(|lock| lock.name == "ef") {
+            issue1642_observe(&mut online, envelope, "ef", n).0
+        } else {
+            online.handle(envelope.clone())
+        };
         h1_m8d_jcap_cd_g23_ef_g26_first_refusal(n, &handled);
         assert_eq!(handled.unwrap()["kind"], "Committed", "在线第 {n} 代");
         assert_eq!(state::full_audit_calls_for_test(), before);
@@ -798,4 +802,128 @@ fn w2_h1_cold_ef_seed_pair_qualification_and_canonical_matches_online() {
     let mut checks = W2H1EfChecks::default();
     w2_h1_roundtrip_selected(&envelopes, |n, snapshot| checks.check(n, snapshot));
     assert!(checks.center_progress && checks.pair_reborn);
+}
+
+/// 只观察原工作域和父账，观测不进入发布门。父拒与局部超帽必须分开判。
+fn issue1642_observe(
+    driver: &mut driver::Driver,
+    envelope: &Value,
+    label: &str,
+    n: usize,
+) -> (Result<Value, String>, Vec<Value>, Vec<Value>) {
+    super::SOURCE_APPEND_ALLOCATIONS.with(|p| *p.borrow_mut() = Some(Vec::new()));
+    super::native::PARENT_REFUSAL.with(|p| p.set(Some(None)));
+    let (result, stages, _) = state::traced(false, || driver.handle(envelope.clone()));
+    let allocations = super::SOURCE_APPEND_ALLOCATIONS.with(|p| p.borrow_mut().take().unwrap());
+    let refusal = super::native::PARENT_REFUSAL.with(|p| p.take().unwrap());
+    let refusals = refusal.into_iter().map(|r| serde_json::to_value(r).unwrap()).collect::<Vec<_>>();
+    if !allocations.is_empty() {
+        println!("SOURCE_INDEX_GROWTH lock={label} g={n} {}", json!(allocations));
+    }
+    if let Err(error) = &result {
+        println!(
+            "SOURCE_INDEX_REFUSAL lock={label} g={n} error={error} parent={} stages={}",
+            json!(refusals),
+            state::stage_rows(&stages),
+        );
+    }
+    (result, allocations, refusals)
+}
+
+fn issue1642_persisted_receipt(db: &Path, g: i64) -> Value {
+    let conn = Connection::open_with_flags(db, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap();
+    conn.query_row(
+        "SELECT m.status,m.receipt_id,p.batch_id,lower(hex(p.manifest_root)),
+                lower(hex(p.snapshot_root)),lower(hex(p.delta_root))
+         FROM s_input_messages m
+         LEFT JOIN s_content_publications p ON p.generation=m.first_published_generation
+         WHERE m.accepted_seq=?1",
+        [g - 1],
+        |row| {
+            Ok(json!({
+                "status": row.get::<_, String>(0)?,
+                "receipt_id": row.get::<_, String>(1)?,
+                "batch_id": row.get::<_, Option<String>>(2)?,
+                "manifest_root": row.get::<_, String>(3)?,
+                "snapshot_root": row.get::<_, String>(4)?,
+                "delta_root": row.get::<_, String>(5)?,
+            }))
+        },
+    ).unwrap()
+}
+
+fn issue1424_assert_persisted_pair(db: &Path, g: i64) {
+    use newchan_rust::s_content as sc;
+    let mut conn = Connection::open_with_flags(db, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap();
+    let tx = conn.transaction().unwrap();
+    let mut rows = tx.prepare(
+        "SELECT kind,lower(hex(birth_wire_root)) FROM s_content_objects
+         WHERE kind IN ('CC-016.center','CC-020.center_pair') AND first_known_generation<=?1
+           AND (withdrawn_generation IS NULL OR withdrawn_generation>?1)",
+    ).unwrap();
+    let mut source = content_store::ReadStore::new(&tx).unwrap();
+    let mut centers = std::collections::BTreeMap::new();
+    let mut pair = None;
+    for row in rows.query_map([g], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))).unwrap() {
+        let (kind, root) = row.unwrap();
+        let mut wire = Vec::new();
+        let reference = sc::content_ref_of(&mut source, &format!("{}{root}", sc::ROOT_PREFIX)).unwrap();
+        sc::render_refview(&mut source, (&reference).into(), &mut wire).unwrap();
+        let wire: Value = serde_json::from_slice(&wire).unwrap();
+        assert_eq!(wire["kind"], kind);
+        let data = &wire["payload"]["data"];
+        if kind == "CC-016.center" {
+            centers.insert(data["entity_id"].as_str().unwrap().to_owned(), wire);
+        } else if data["leaf"] == "DOWN_NEWBIRTH" {
+            assert!(pair.replace(wire).is_none(), "见证恰有一对下行新生");
+        }
+    }
+    let pair = pair.expect("已发布切面必须有 DOWN_NEWBIRTH");
+    let p = &pair["payload"]["data"];
+    assert_eq!(p["status"], "EVALUATED");
+    let a = &centers[p["a_center_id"].as_str().unwrap()];
+    let b = &centers[p["b_center_id"].as_str().unwrap()];
+    assert_eq!(a["payload"]["data"]["entity_revision"], p["a_revision"]);
+    assert_eq!(b["payload"]["data"]["entity_revision"], p["b_revision"]);
+    assert_eq!(a["payload"]["data"]["settled"], true);
+    assert_eq!(b["payload"]["data"]["settled"], g == 123);
+    println!("ISSUE1424_PUBLIC g={g} {}", json!({"A":a,"B":b,"pair":pair}));
+}
+
+fn issue1424_down_123() -> Vec<Value> {
+    // #1426 issuecomment-7023365989 的 #1424 下行原始见证，逐根原坐标追加。
+    let rows: Vec<W2H1Row> = serde_json::from_str(include_str!(
+        "../../../../tests/fixtures/w2_h1_1424_down_newbirth_123.json"
+    )).unwrap();
+    assert_eq!(rows.len(), 123);
+    rows.iter().enumerate().map(|(i, row)| {
+        assert_eq!(row.1, i as i64);
+        assert_eq!(row.6, 1);
+        w2_h1_envelope(i as i64 + 1, &[*row])
+    }).collect()
+}
+
+#[test]
+fn issue1642_issue1424_down_newbirth_signed_budget() {
+    let envelopes = issue1424_down_123();
+    let fixture = W2H1Fixture::new(envelopes.len());
+    let mut writer = fixture.open(&fixture.db);
+    for (i, envelope) in envelopes.iter().enumerate() {
+        let n = i + 1;
+        let before = state::full_audit_calls_for_test();
+        let (result, _, _) = issue1642_observe(&mut writer, envelope, "down-newbirth", n);
+        assert_eq!(state::full_audit_calls_for_test(), before);
+        let persisted = issue1642_persisted_receipt(&fixture.db, n as i64);
+        println!("ISSUE1424_RECEIPT g={n} {persisted}");
+        let reply = result.unwrap();
+        assert_eq!(reply["kind"], "Committed");
+        assert_eq!(reply["publication"]["structure_cut"], format!("cut-{n}"));
+        assert_eq!(reply["publication"]["input_frontier"], i.to_string());
+        assert_eq!(persisted["status"], "Committed");
+        assert_eq!(persisted["receipt_id"], reply["receipt_id"]);
+        assert_eq!(persisted["batch_id"], reply["publication"]["index_frontier"]);
+        if matches!(n, 111 | 123) {
+            issue1424_assert_persisted_pair(&fixture.db, n as i64);
+        }
+    }
 }
