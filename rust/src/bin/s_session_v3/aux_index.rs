@@ -94,7 +94,14 @@ fn text(
     r: &(impl AuxRef + ?Sized),
     k: &str,
 ) -> Result<TextValue, String> {
-    let value = scalar(s, r, k)?;
+    let leaf = field(s, r, k)?;
+    if leaf.kind() == Kind::String {
+        return bj::read_text(s, leaf.view()).map_err(err);
+    }
+    if !matches!(leaf.kind(), Kind::Null | Kind::Bool | Kind::Number) {
+        return Err(err(format!("{k}不是标量")));
+    }
+    let value = render(s, &leaf)?;
     let value = value
         .view()
         .as_str()
@@ -106,7 +113,14 @@ fn integer(
     r: &(impl AuxRef + ?Sized),
     k: &str,
 ) -> Result<i64, String> {
-    scalar(s, r, k)?
+    let leaf = field(s, r, k)?;
+    if leaf.kind() == Kind::Number {
+        return bj::read_i64(s, leaf.view(), k).map_err(err);
+    }
+    if !matches!(leaf.kind(), Kind::Null | Kind::Bool | Kind::String) {
+        return Err(err(format!("{k}不是标量")));
+    }
+    render(s, &leaf)?
         .view()
         .as_i64()
         .ok_or_else(|| err(format!("{k}不是i64")))

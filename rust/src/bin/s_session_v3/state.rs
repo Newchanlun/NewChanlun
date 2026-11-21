@@ -1020,12 +1020,17 @@ fn audit_core_fresh_with_policy(
     } else {
         None
     };
+    let mut ordinary_raw_cache = if budget.is_none() && native_sources.is_none() {
+        Some(source_audit::OrdinaryRawCache::new(raw.view().len()))
+    } else {
+        None
+    };
     let mut previous = -1i64;
     for cut in cuts {
         let mut audit_cut =
             |store: &mut history::HashReader<'_>,
              proofs: Option<&mut source_audit::OrdinaryProofs>| {
-                audit_one_cut_sources(
+                audit_one_cut_sources_with_raw_cache(
                     cut,
                     raw.view(),
                     store,
@@ -1033,6 +1038,7 @@ fn audit_core_fresh_with_policy(
                     object_sweep.as_ref(),
                     &mut native_sources,
                     proofs,
+                    ordinary_raw_cache.as_mut(),
                     previous,
                     deadline,
                     budget,
@@ -1136,6 +1142,7 @@ fn audit_core_fresh_with_policy(
 }
 
 /// 与历史 manifest 核配套的单代来源、Counts、变化集合及 catalog 判据。
+#[cfg(feature = "s_incremental")]
 fn audit_one_cut_sources(
     cut: &history::PublishedCut,
     raw: super::business_json::RawEventsView<'_>,
@@ -1144,6 +1151,41 @@ fn audit_one_cut_sources(
     object_sweep: Option<&object_index::HistorySweep>,
     native_sources: &mut Option<source_audit::NativeSourceAudit<'_>>,
     proofs: Option<&mut source_audit::OrdinaryProofs>,
+    previous: i64,
+    deadline: Option<std::time::Instant>,
+    budget: Option<&dyn audit_budget::Budget>,
+    source_cache: Option<&mut super::cross_request_source_cache::Trial<'_>>,
+    owner_source: Option<&super::audit_owner::OwnerSourceCheck>,
+    certified: bool,
+    cold_counts: Option<source_audit::Counts>,
+) -> Result<(), String> {
+    audit_one_cut_sources_with_raw_cache(
+        cut,
+        raw,
+        store,
+        objects,
+        object_sweep,
+        native_sources,
+        proofs,
+        None,
+        previous,
+        deadline,
+        budget,
+        source_cache,
+        owner_source,
+        certified,
+        cold_counts,
+    )
+}
+fn audit_one_cut_sources_with_raw_cache(
+    cut: &history::PublishedCut,
+    raw: super::business_json::RawEventsView<'_>,
+    store: &mut history::HashReader<'_>,
+    objects: &[object_index::Entry],
+    object_sweep: Option<&object_index::HistorySweep>,
+    native_sources: &mut Option<source_audit::NativeSourceAudit<'_>>,
+    proofs: Option<&mut source_audit::OrdinaryProofs>,
+    raw_cache: Option<&mut source_audit::OrdinaryRawCache>,
     previous: i64,
     deadline: Option<std::time::Instant>,
     budget: Option<&dyn audit_budget::Budget>,
@@ -1187,7 +1229,7 @@ fn audit_one_cut_sources(
         ));
     }
     let counts = if let Some(proofs) = proofs {
-        source_audit::audit_generated_with_proofs(
+        source_audit::audit_generated_with_proofs_and_raw_cache(
             store,
             cut.roots.generated_state.view(),
             prefix,
@@ -1196,6 +1238,7 @@ fn audit_one_cut_sources(
             deadline,
             budget,
             proofs,
+            raw_cache,
         )?
     } else if let Some(counts) = cached_counts {
         if let Some(native) = native_sources.as_mut() {

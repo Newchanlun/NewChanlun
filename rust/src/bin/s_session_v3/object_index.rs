@@ -615,6 +615,10 @@ impl CandidateFixedFields {
         bj::render_json(s, r)
     }
     fn text(&self, s: &mut (impl CodecStore + ?Sized), name: &str) -> Result<TextValue, String> {
+        let r = self.get(name)?;
+        if r.kind() == Kind::String {
+            return bj::read_text(s, r);
+        }
         let value = self.scalar(s, name)?;
         let view = value.view();
         let text = view
@@ -623,6 +627,10 @@ impl CandidateFixedFields {
         s.native_text(text)
     }
     fn integer(&self, s: &mut (impl CodecStore + ?Sized), name: &str) -> Result<i64, String> {
+        let r = self.get(name)?;
+        if r.kind() == Kind::Number {
+            return bj::read_i64(s, r, name);
+        }
         self.scalar(s, name)?
             .view()
             .as_i64()
@@ -858,6 +866,7 @@ fn effective_life(e: &Entry, g: i64) -> Result<LifeView<'_>, String> {
 pub(super) struct HistoryObjects<'capture> {
     entries: sc::CodecVec<Entry>,
     native: Option<NativeProjection<'capture>>,
+    loaded_withdrawn_wires: Option<Vec<Option<RefValue>>>,
     /// 库内 meta `rule_revision` 的布局（[`Layout::of_library`]）；投影与审计次序同源。
     layout: Layout,
 }
@@ -1003,7 +1012,20 @@ impl HistoryObjects<'_> {
         if !s.ordinary_bound_births_qualified() || self.native.is_some() {
             return Err(err("出生根复用不属于普通只读完整索引上下文"));
         }
-        at_cut_projected_bound(s, self.layout, &self.entries, g, None, None, true)
+        let n = self.entries.len();
+        let cache = self
+            .loaded_withdrawn_wires
+            .get_or_insert_with(|| (0..n).map(|_| None).collect());
+        at_cut_projected_bound_with_cache(
+            s,
+            self.layout,
+            &self.entries,
+            g,
+            None,
+            None,
+            true,
+            Some(cache.as_mut_slice()),
+        )
     }
 
     pub(super) fn at_cut(
@@ -1308,8 +1330,20 @@ fn at_cut_projected_bound(
     index: &[Entry],
     g: i64,
     budget: Option<&dyn super::audit_budget::Budget>,
+    native: Option<&mut NativeProjection<'_>>,
+    bound_births: bool,
+) -> Result<(Built, Built, Built), String> {
+    at_cut_projected_bound_with_cache(s, layout, index, g, budget, native, bound_births, None)
+}
+fn at_cut_projected_bound_with_cache(
+    s: &mut (impl CodecStore + ?Sized),
+    layout: Layout,
+    index: &[Entry],
+    g: i64,
+    budget: Option<&dyn super::audit_budget::Budget>,
     mut native: Option<&mut NativeProjection<'_>>,
     bound_births: bool,
+    mut withdrawn_cache: Option<&mut [Option<RefValue>]>,
 ) -> Result<(Built, Built, Built), String> {
     let allocation = s.allocation_budget();
     let mut active = bj::new_work(allocation.as_ref());
@@ -1357,6 +1391,20 @@ fn at_cut_projected_bound(
                         && matches!(e.life.view().batch, BatchView::Existing(_))
                     {
                         s.native_ref_clone(&e.birth_wire).map_err(err)?
+                    } else if life.withdrawn_generation.is_some() {
+                        if let Some(cache) = withdrawn_cache.as_deref_mut() {
+                            if let Some(cached) = cache.get(ordinal).and_then(Option::as_ref) {
+                                s.native_ref_clone(cached).map_err(err)?
+                            } else {
+                                let w = wire_at(s, e, g)?;
+                                if let Some(slot) = cache.get_mut(ordinal) {
+                                    *slot = Some(s.native_ref_clone(&w).map_err(err)?);
+                                }
+                                w
+                            }
+                        } else {
+                            wire_at(s, e, g)?
+                        }
                     } else {
                         wire_at(s, e, g)?
                     }
@@ -1957,6 +2005,7 @@ pub(super) fn load_for_history<'capture>(
     Ok(HistoryObjects {
         entries,
         native,
+        loaded_withdrawn_wires: None,
         layout,
     })
 }
@@ -2294,6 +2343,7 @@ pub(super) fn restore_for_owner<'a>(
     Ok(HistoryObjects {
         entries,
         native,
+        loaded_withdrawn_wires: None,
         layout,
     })
 }
@@ -6737,10 +6787,7 @@ impl<'a> OwnerFields<'a> {
     }
     fn integer(&self, s: &mut (impl CodecRead + ?Sized), k: &str) -> Result<i64, String> {
         let r = self.get(s, k)?;
-        bj::render_json(s, r.view())?
-            .view()
-            .as_i64()
-            .ok_or_else(|| err(format!("{k}不是i64")))
+        bj::read_i64(s, r.view(), k)
     }
     fn equal(
         &self,
@@ -6827,10 +6874,7 @@ fn integer_ref(
     k: &str,
 ) -> Result<i64, String> {
     let v = field_ref(s, r, k)?;
-    bj::render_json(s, v.view())?
-        .view()
-        .as_i64()
-        .ok_or_else(|| err(format!("{k}不是i64")))
+    bj::read_i64(s, v.view(), k)
 }
 
 #[cfg(feature = "s_incremental")]

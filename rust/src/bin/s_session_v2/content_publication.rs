@@ -1287,9 +1287,9 @@ fn resolve_record_batch_projected(
     stored_batch: &str,
     m: &MetadataView<'_>,
     batch: &str,
-    projection: Option<&mut PublicationProjection<'_, '_>>,
+    mut projection: Option<&mut PublicationProjection<'_, '_>>,
 ) -> Result<(), String> {
-    let value = match projection {
+    let value = match projection.as_deref_mut() {
         Some(p) => p.read_batch(store, record.view())?,
         None => store
             .lookup_field_ref(record.view(), "batch_id")
@@ -1316,7 +1316,11 @@ fn resolve_record_batch_projected(
         if stored_batch == batch {
             return Err(err("旧出生记录不得换成本批身份"));
         }
-        if value.digest().map_err(err)? != hash_view(store, VV::String(stored_batch))? {
+        let expected_digest = match projection {
+            Some(p) => p.batch_digest(store, stored_batch)?,
+            None => hash_view(store, VV::String(stored_batch))?,
+        };
+        if value.digest().map_err(err)? != expected_digest {
             return Err(err("batch_id 与独立记录不同"));
         }
     }
@@ -3094,6 +3098,7 @@ pub(crate) struct PublicationProjection<'scope, 'tx> {
     current: std::collections::HashMap<PublicationKey, std::rc::Rc<RefFields<'static>>>,
     batch_previous: std::collections::HashMap<PublicationKey, ContentRef>,
     batch_current: std::collections::HashMap<PublicationKey, ContentRef>,
+    batch_digests: std::collections::HashMap<String, NodeDigest>,
     peak_bytes: usize,
 }
 type PublicationKey = (String, String, &'static str, Option<u64>);
@@ -3122,6 +3127,7 @@ impl<'scope, 'tx> PublicationProjection<'scope, 'tx> {
             current: Default::default(),
             batch_previous: Default::default(),
             batch_current: Default::default(),
+            batch_digests: Default::default(),
             peak_bytes: 0,
         })
     }
@@ -3139,6 +3145,7 @@ impl<'scope, 'tx> PublicationProjection<'scope, 'tx> {
             current: Default::default(),
             batch_previous: Default::default(),
             batch_current: Default::default(),
+            batch_digests: Default::default(),
             peak_bytes: 0,
         })
     }
@@ -3189,10 +3196,25 @@ impl<'scope, 'tx> PublicationProjection<'scope, 'tx> {
         self.batch_current.insert(k, value.clone());
         Ok(value.into())
     }
+    fn batch_digest(
+        &mut self,
+        store: &mut (impl CodecStore + ?Sized),
+        stored_batch: &str,
+    ) -> Result<NodeDigest, String> {
+        if let Some(&digest) = self.batch_digests.get(stored_batch) {
+            return Ok(digest);
+        }
+        let digest = hash_view(store, VV::String(stored_batch))?;
+        self.batch_digests.insert(stored_batch.to_owned(), digest);
+        Ok(digest)
+    }
     pub(crate) fn commit_cut(&mut self) {
         self.measure();
         self.previous = std::mem::take(&mut self.current);
         self.batch_previous = std::mem::take(&mut self.batch_current);
+        if self.previous.is_empty() && self.batch_previous.is_empty() {
+            self.batch_digests.clear();
+        }
         self.measure();
     }
     fn measure(&mut self) {

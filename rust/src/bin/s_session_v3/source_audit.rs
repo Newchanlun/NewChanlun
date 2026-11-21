@@ -323,6 +323,10 @@ fn text_value<'a>(
     r: impl Into<sc::RefView<'a>>,
     k: &str,
 ) -> Result<bj::TextValue, String> {
+    let r = r.into();
+    if r.kind() == Kind::String {
+        return bj::read_text(s, r);
+    }
     let value = scalar_value(s, r)?;
     let v = value.view();
     let text = v.as_str().ok_or_else(|| err(format!("{k}不是文本")))?;
@@ -1722,6 +1726,17 @@ pub(super) fn audit_generated_for_audit<'a>(
     )
 }
 
+pub(super) struct OrdinaryRawCache {
+    by_ordinal: Vec<Option<Source>>,
+}
+impl OrdinaryRawCache {
+    pub(super) fn new(len: usize) -> Self {
+        Self {
+            by_ordinal: vec![None; len],
+        }
+    }
+}
+#[cfg(all(test, feature = "s_incremental"))]
 pub(super) fn audit_generated_with_proofs(
     s: &mut super::history::HashReader<'_>,
     state: sc::RefView<'_>,
@@ -1732,8 +1747,23 @@ pub(super) fn audit_generated_with_proofs(
     budget: Option<&dyn super::audit_budget::Budget>,
     proofs: &mut OrdinaryProofs,
 ) -> Result<Counts, String> {
+    audit_generated_with_proofs_and_raw_cache(
+        s, state, raw, profile, rule, deadline, budget, proofs, None,
+    )
+}
+pub(super) fn audit_generated_with_proofs_and_raw_cache(
+    s: &mut super::history::HashReader<'_>,
+    state: sc::RefView<'_>,
+    raw: RawEventsView<'_>,
+    profile: &str,
+    rule: &str,
+    deadline: Option<std::time::Instant>,
+    budget: Option<&dyn super::audit_budget::Budget>,
+    proofs: &mut OrdinaryProofs,
+    raw_cache: Option<&mut OrdinaryRawCache>,
+) -> Result<Counts, String> {
     proofs.begin(profile, rule);
-    audit_generated_in_store(
+    audit_generated_in_store_with_raw_cache(
         &mut super::audit_store::StoreView::for_audit(s),
         state,
         raw,
@@ -1746,6 +1776,7 @@ pub(super) fn audit_generated_with_proofs(
         None,
         None,
         Some(proofs),
+        raw_cache,
         #[cfg(feature = "s_incremental")]
         None,
     )
@@ -2367,11 +2398,47 @@ fn audit_generated_in_store(
     rule: &str,
     deadline: Option<std::time::Instant>,
     budget: Option<&dyn super::audit_budget::Budget>,
+    native_identity: Option<&mut NativeWitnessIdentityMemo<'_>>,
+    native_sources: Option<&mut NativeSourceMemo<'_>>,
+    native_fields: Option<&mut NativeFieldMemo<'_>>,
+    native_ledger: Option<&mut NativeRawLedger<'_>>,
+    ordinary: Option<&mut OrdinaryProofs>,
+    #[cfg(feature = "s_incremental")] exports: Option<
+        &mut source_receipt::source_facts::SourceExports,
+    >,
+) -> Result<Counts, String> {
+    audit_generated_in_store_with_raw_cache(
+        s,
+        state,
+        raw_prefix,
+        profile,
+        rule,
+        deadline,
+        budget,
+        native_identity,
+        native_sources,
+        native_fields,
+        native_ledger,
+        ordinary,
+        None,
+        #[cfg(feature = "s_incremental")]
+        exports,
+    )
+}
+fn audit_generated_in_store_with_raw_cache(
+    s: &mut super::audit_store::StoreView<'_, '_>,
+    state: sc::RefView<'_>,
+    raw_prefix: RawEventsView<'_>,
+    profile: &str,
+    rule: &str,
+    deadline: Option<std::time::Instant>,
+    budget: Option<&dyn super::audit_budget::Budget>,
     mut native_identity: Option<&mut NativeWitnessIdentityMemo<'_>>,
     mut native_sources: Option<&mut NativeSourceMemo<'_>>,
     native_fields: Option<&mut NativeFieldMemo<'_>>,
     native_ledger: Option<&mut NativeRawLedger<'_>>,
     mut ordinary: Option<&mut OrdinaryProofs>,
+    mut raw_cache: Option<&mut OrdinaryRawCache>,
     #[cfg(feature = "s_incremental")] mut exports: Option<
         &mut source_receipt::source_facts::SourceExports,
     >,
@@ -2420,7 +2487,7 @@ fn audit_generated_in_store(
         ordinary_raw = bj::new_map(allocation.as_ref());
         #[cfg(feature = "s_incremental")]
         let mut seqs = bj::new_map(allocation.as_ref());
-        for event in ordinary_effective.iter() {
+        for (ordinal, event) in ordinary_effective.iter_with_ordinals() {
             super::history::check_deadline(deadline)?;
             let coord = bj::coord(event)?;
             #[cfg(feature = "s_incremental")]
@@ -2431,13 +2498,16 @@ fn audit_generated_in_store(
                 s.native_map_room(&mut seqs).map_err(err)?;
                 seqs.insert(coord, seq).map_err(err)?;
             }
-            let wire = bj::RawReference::new(event, false)?;
-            let numeric = bj::RawReference::new(event, true)?;
-            s.native_map_room(&mut ordinary_raw).map_err(err)?;
-            ordinary_raw
-                .insert(
-                    coord,
-                    Source {
+            let source = if budget.is_none() {
+                if let Some(cached) = raw_cache
+                    .as_deref()
+                    .and_then(|c| c.by_ordinal.get(ordinal).copied().flatten())
+                {
+                    cached
+                } else {
+                    let wire = bj::RawReference::new(event, false)?;
+                    let numeric = bj::RawReference::new(event, true)?;
+                    let src = Source {
                         wire: super::history::hash_json_in_store(s, wire.view(), deadline, budget)?,
                         numeric: super::history::hash_json_in_store(
                             s,
@@ -2447,9 +2517,32 @@ fn audit_generated_in_store(
                         )?,
                         raw: super::history::hash_json_in_store(s, event, deadline, budget)?,
                         bar: source_pending::raw_bar(s, event, deadline, budget)?,
-                    },
-                )
-                .map_err(err)?;
+                    };
+                    if let Some(slot) = raw_cache
+                        .as_deref_mut()
+                        .and_then(|c| c.by_ordinal.get_mut(ordinal))
+                    {
+                        *slot = Some(src);
+                    }
+                    src
+                }
+            } else {
+                let wire = bj::RawReference::new(event, false)?;
+                let numeric = bj::RawReference::new(event, true)?;
+                Source {
+                    wire: super::history::hash_json_in_store(s, wire.view(), deadline, budget)?,
+                    numeric: super::history::hash_json_in_store(
+                        s,
+                        numeric.view(),
+                        deadline,
+                        budget,
+                    )?,
+                    raw: super::history::hash_json_in_store(s, event, deadline, budget)?,
+                    bar: source_pending::raw_bar(s, event, deadline, budget)?,
+                }
+            };
+            s.native_map_room(&mut ordinary_raw).map_err(err)?;
+            ordinary_raw.insert(coord, source).map_err(err)?;
         }
         #[cfg(feature = "s_incremental")]
         {
