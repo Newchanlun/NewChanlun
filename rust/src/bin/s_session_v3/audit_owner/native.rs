@@ -335,6 +335,8 @@ struct Ledger {
 // 不改Ledger布局（控制块M=Layout([AtomicUsize;2])⊕Layout(Ledger)=128属合同常量）。
 #[cfg(test)]
 static CENSUS: Mutex<Vec<(usize, Vec<CensusEvent>)>> = Mutex::new(Vec::new());
+#[cfg(test)]
+static CENSUS_ARMED: AtomicUsize = AtomicUsize::new(0);
 /// #1488 P2-4：单笔许可事件；kind=None为Permit/总账许可，其余为Native/Layout/Metadata分项。
 #[cfg(test)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, serde::Serialize)]
@@ -656,17 +658,20 @@ impl Budget {
         let mut census = CENSUS.lock().unwrap();
         census.retain(|(armed, _)| *armed != key);
         census.push((key, Vec::with_capacity(CENSUS_CAPACITY)));
+        CENSUS_ARMED.store(census.len(), Ordering::Release);
     }
     /// #1488 P2-4：取出并撤防；未布防返回空。
     #[cfg(test)]
     pub(crate) fn census_take(&self) -> Vec<CensusEvent> {
         let key = Arc::as_ptr(&self.0) as usize;
         let mut census = CENSUS.lock().unwrap();
-        census
+        let out = census
             .iter()
             .position(|(armed, _)| *armed == key)
             .map(|i| census.swap_remove(i).1)
-            .unwrap_or_default()
+            .unwrap_or_default();
+        CENSUS_ARMED.store(census.len(), Ordering::Release);
+        out
     }
     /// 工作域和新块一起预检；预算拒绝不能先接纳原件或改变峰值。
     fn preflight_codec_vec<T>(
@@ -1564,14 +1569,14 @@ impl Ledger {
             .ok_or(ScratchFailure::Budget)?;
         let total = self
             .live
-            .load(Ordering::Acquire)
+            .load(Ordering::Relaxed)
             .checked_add(bytes)
             .filter(|n| *n <= d.total_limit)
             .ok_or(ScratchFailure::Budget)?;
         let part = kind
             .map(|k| {
                 let (live, peak) = self.component(k);
-                live.load(Ordering::Acquire)
+                live.load(Ordering::Relaxed)
                     .checked_add(bytes)
                     .map(|n| (live, peak, n))
                     .ok_or(ScratchFailure::Ledger)
@@ -1589,17 +1594,23 @@ impl Ledger {
         d.low_water = d.low_water.min(next);
         if let Some((live, peak, n)) = part {
             live.store(n, Ordering::Release);
-            peak.fetch_max(n, Ordering::Relaxed);
+            if n > peak.load(Ordering::Relaxed) {
+                peak.store(n, Ordering::Relaxed);
+            }
         }
         self.live.store(total, Ordering::Release);
-        self.peak.fetch_max(total, Ordering::Relaxed);
+        if total > self.peak.load(Ordering::Relaxed) {
+            self.peak.store(total, Ordering::Relaxed);
+        }
+        let serial = u64::from(d.serial);
+        drop(d);
         #[cfg(test)]
         self.census_note(true, kind, bytes);
-        Ok(u64::from(d.serial))
+        Ok(serial)
     }
     #[cfg(test)]
     fn census_note(&self, reserve: bool, kind: Option<ScratchCharge>, bytes: usize) {
-        if bytes == 0 {
+        if bytes == 0 || CENSUS_ARMED.load(Ordering::Acquire) == 0 {
             return;
         }
         let key = self as *const Self as usize;
@@ -1630,7 +1641,7 @@ impl Ledger {
         let mut d = self.domain.lock().map_err(|_| ScratchFailure::Ledger)?;
         let total = self
             .live
-            .load(Ordering::Acquire)
+            .load(Ordering::Relaxed)
             .checked_sub(bytes)
             .ok_or(ScratchFailure::Ledger)?;
         if origin > u64::from(d.serial) {
@@ -1646,7 +1657,7 @@ impl Ledger {
         let part = kind
             .map(|k| {
                 let (live, _) = self.component(k);
-                live.load(Ordering::Acquire)
+                live.load(Ordering::Relaxed)
                     .checked_sub(bytes)
                     .map(|n| (live, n))
                     .ok_or(ScratchFailure::Ledger)
@@ -1657,6 +1668,7 @@ impl Ledger {
         if let Some((live, n)) = part {
             live.store(n, Ordering::Release);
         }
+        drop(d);
         #[cfg(test)]
         self.census_note(false, kind, bytes);
         Ok(())
@@ -1688,12 +1700,14 @@ impl ScratchParent for Ledger {
             .ok_or(ScratchFailure::Ledger)?;
         let native = self
             .native_live
-            .load(Ordering::Acquire)
+            .load(Ordering::Relaxed)
             .checked_add(bytes)
             .ok_or(ScratchFailure::Ledger)?;
         d.moved_in = moved_in;
         self.native_live.store(native, Ordering::Release);
-        self.native_peak.fetch_max(native, Ordering::Relaxed);
+        if native > self.native_peak.load(Ordering::Relaxed) {
+            self.native_peak.store(native, Ordering::Relaxed);
+        }
         // 活动MoveIn的字节是当前域真实预留，返还按当前origin回补A；fixture池仍是旧origin 0。
         Ok(if d.state & MOVING != 0 {
             u64::from(d.serial)
