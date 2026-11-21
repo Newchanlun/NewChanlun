@@ -668,7 +668,7 @@ def test_evaluate_high_risk_approval_empty_diff_and_self_protection_fail_closed(
     assert empty_res.assessment.tier is RiskTier.HIGH
     assert empty_res.assessment.all_paths == ()
 
-    # 修改自保路径 + 传入被篡改的自定义策略（企图将 .sandcastle/** 标为 LOW）-> 依然强制 HIGH
+    # 预览入口即使传入被篡改的自定义策略（企图将 .sandcastle/** 标为 LOW），自保路径仍强制 HIGH
     head_sha = _commit_file(
         repo,
         ".sandcastle/deepagents-pilot/pilot1742/review_risk.py",
@@ -682,13 +682,58 @@ def test_evaluate_high_risk_approval_empty_diff_and_self_protection_fail_closed(
         low_risk_patterns=(".sandcastle/**",),
         low_risk_excludes=(),
     )
+    preview_res = assess_diff(repo, base_sha, head_sha, policy=tampered_policy)
+    assert preview_res.assessment.tier is RiskTier.HIGH
+    assert [m.path for m in preview_res.assessment.matched_high_paths] == [
+        ".sandcastle/deepagents-pilot/pilot1742/review_risk.py"
+    ]
+
+    # 正式签批准入入口拒绝注入自定义策略（必须固定读取宿主受信 DEFAULT_POLICY_PATH）
+    with pytest.raises(TypeError):
+        evaluate_high_risk_approval(
+            repo_root=repo,
+            base_sha=base_sha,
+            head_sha=head_sha,
+            pr_number=1931,
+            desk_folder=tmp_path / "desk-reject-policy",
+            policy=tampered_policy,  # type: ignore[call-arg]
+            approvals=approvals,
+            now=NOW,
+        )
+
+    # 即使候选仓库内覆盖了缺实盘规则的 review-risk-tiers.json，准入仍按宿主受信策略拦住实盘改动
+    live_repo = tmp_path / "repo-tampered-candidate-json"
+    live_base = _init_repo(live_repo)
+    _commit_file(
+        live_repo,
+        ".sandcastle/review-risk-tiers.json",
+        '{"schema_version":"review-risk-tiers/1","high_risk_categories":{"x":["x.txt"]},"deep_ai_only_patterns":[],"low_risk_patterns":["**"],"low_risk_excludes":[]}\n',
+        "candidate tries to weaken json",
+    )
+    live_only_base = _commit_file(live_repo, "README.md", "# readme\n", "base after candidate json")
+    live_head = _commit_file(live_repo, "trading_system/live/order.py", "def send(): pass\n", "touch live order")
+    live_res = evaluate_high_risk_approval(
+        repo_root=live_repo,
+        base_sha=live_only_base,
+        head_sha=live_head,
+        pr_number=1932,
+        desk_folder=tmp_path / "desk-live-trusted-policy",
+        approvals=approvals,
+        now=NOW,
+    )
+    assert live_res.required is True
+    assert live_res.satisfied is False
+    assert live_res.status == "awaiting_human"
+    assert live_res.assessment.tier is RiskTier.HIGH
+    assert [m.path for m in live_res.assessment.matched_high_paths] == ["trading_system/live/order.py"]
+    assert live_base != live_head
+
     protected_res = evaluate_high_risk_approval(
         repo_root=repo,
         base_sha=base_sha,
         head_sha=head_sha,
         pr_number=1931,
         desk_folder=tmp_path / "desk-self-protect",
-        policy=tampered_policy,
         approvals=approvals,
         now=NOW,
     )

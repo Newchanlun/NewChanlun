@@ -545,18 +545,18 @@ def evaluate_high_risk_approval(
     head_sha: str,
     pr_number: int,
     desk_folder: Path,
-    policy: RiskPolicy | None = None,
     approvals: SignedApprovals | None = None,
     generation: int = 1,
     now: datetime | None = None,
 ) -> HighRiskApprovalResult:
-    """在准入边界直接重算真实 git diff 风险，并复用 ApprovalDesk 与 CommitTarget 评估签批状态。"""
+    """在准入边界直接按宿主受信策略重算真实 git diff 风险，并复用 ApprovalDesk 与 CommitTarget 评估签批状态。"""
     if type(pr_number) is not int or pr_number <= 0:
         raise RiskPolicyError(f"pr_number 必须为正整数：{pr_number!r}")
     if type(generation) is not int or generation <= 0:
         raise RiskPolicyError(f"generation 必须为正整数：{generation!r}")
 
-    diff_assessment = assess_diff(repo_root, base_sha, head_sha, policy=policy)
+    trusted_policy = load_policy(DEFAULT_POLICY_PATH)
+    diff_assessment = assess_diff(repo_root, base_sha, head_sha, policy=trusted_policy)
     assessment = diff_assessment.assessment
 
     if not assessment.requires_human_approval:
