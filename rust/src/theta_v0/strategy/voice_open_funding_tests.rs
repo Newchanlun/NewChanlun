@@ -349,6 +349,83 @@ fn zero_quantity_does_not_return_a_transfer() {
     assert_eq!(before.phase_events.len(), 2);
 }
 
+fn reexposure_boundary_ledger(free: i64, p_recovered: i64) -> VoiceOpenLedger {
+    let mut ledger = recovered_ledger();
+    ledger.tw.free = free;
+    ledger.tw.withdrawn = 10;
+    ledger.p_recovered = p_recovered;
+    ledger
+}
+
+#[test]
+fn zero_quantity_precedes_insufficient_recovered_principal() {
+    let before = reexposure_boundary_ledger(-10, 9);
+    let snapshot = before.clone();
+    for policy in [AVAILABLE, TOPUP, FULL, FULL_TOPUP] {
+        assert_eq!(
+            evaluate_voice_open_funding(&before, 60, policy, 30),
+            Err(VoiceOpenFundingError::QuantityZero),
+            "{policy:?}",
+        );
+        assert_eq!(before, snapshot);
+    }
+}
+
+#[test]
+fn positive_quantity_requires_full_recovered_principal() {
+    let before = reexposure_boundary_ledger(-9, 9);
+    let snapshot = before.clone();
+    assert_eq!(
+        evaluate_voice_open_funding(&before, 60, AVAILABLE, 30),
+        Err(VoiceOpenFundingError::QuantityZero),
+    );
+    assert_eq!(before, snapshot);
+    for policy in [TOPUP, FULL, FULL_TOPUP] {
+        assert_eq!(
+            evaluate_voice_open_funding(&before, 60, policy, 30),
+            Err(VoiceOpenFundingError::InsufficientRecoveredPrincipal {
+                requested: 10,
+                available: 9,
+            }),
+            "{policy:?}",
+        );
+        assert_eq!(before, snapshot);
+    }
+}
+
+#[test]
+fn positive_quantity_with_full_recovered_principal_appends_one_reexposure() {
+    let before = reexposure_boundary_ledger(-9, 10);
+    let snapshot = before.clone();
+    assert_eq!(
+        evaluate_voice_open_funding(&before, 60, AVAILABLE, 30),
+        Err(VoiceOpenFundingError::QuantityZero),
+    );
+    assert_eq!(before, snapshot);
+    let event = TwEvent::ReexposePrincipal(10);
+    let appended = [PhaseEvent {
+        event,
+        known_at: 30,
+    }];
+    for policy in [TOPUP, FULL, FULL_TOPUP] {
+        let after = evaluate_voice_open_funding(&before, 60, policy, 30).expect("本金足额");
+        assert_eq!(after.opening_quantity, 1, "{policy:?}");
+        assert_eq!(after.reexpose_amount, 10);
+        assert_eq!(after.reexpose_event, Some(event));
+        assert_eq!(after.ledger.tw.free, 1);
+        assert_eq!(after.ledger.tw.withdrawn, 0);
+        assert_eq!(after.ledger.p_recovered, 0);
+        assert_eq!(
+            after
+                .ledger
+                .phase_events
+                .split_at(before.phase_events.len()),
+            (before.phase_events.as_slice(), appended.as_slice()),
+        );
+        assert_eq!(before, snapshot);
+    }
+}
+
 #[test]
 fn updates_each_recovery_balance_by_the_same_amount() {
     let mut before = recovered_ledger();

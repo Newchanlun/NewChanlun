@@ -180,29 +180,31 @@ pub fn evaluate_voice_open_funding(
         return Err(VoiceOpenFundingError::QuantityZero);
     }
 
-    let reexpose_amount = policy.reexpose_amount(&ledger.tw, fixed_q);
-    let (tw, p_recovered, reexpose_event) = if reexpose_amount == 0 {
+    let planned_reexpose = policy.reexpose_amount(&ledger.tw, fixed_q);
+    let available_after = i128::from(ledger.tw.free) + i128::from(planned_reexpose);
+    if available_after <= 0 {
+        return Err(VoiceOpenFundingError::QuantityZero);
+    }
+
+    let (tw, p_recovered, reexpose_event) = if planned_reexpose == 0 {
         (ledger.tw, ledger.p_recovered, None)
     } else {
-        let event = TwEvent::ReexposePrincipal(reexpose_amount);
-        if reexpose_amount > ledger.p_recovered {
+        if planned_reexpose > ledger.p_recovered {
             return Err(VoiceOpenFundingError::InsufficientRecoveredPrincipal {
-                requested: reexpose_amount,
+                requested: planned_reexpose,
                 available: ledger.p_recovered,
             });
         }
+        let event = TwEvent::ReexposePrincipal(planned_reexpose);
         let tw = tw_step_legal(&ledger.tw, event).map_err(|error| match error {
             TwTransitionError::IllegalTransition => VoiceOpenFundingError::IllegalReexposure,
             TwTransitionError::RepresentationOverflow => VoiceOpenFundingError::AmountOutOfRange,
         })?;
         // 0 < amount <= p_recovered，且 p_recovered 本来就在 [0, P]。
-        (tw, ledger.p_recovered - reexpose_amount, Some(event))
+        (tw, ledger.p_recovered - planned_reexpose, Some(event))
     };
 
-    let opening_quantity = fixed_q.min(tw.free.max(0));
-    if opening_quantity == 0 {
-        return Err(VoiceOpenFundingError::QuantityZero);
-    }
+    let opening_quantity = fixed_q.min(tw.free);
     let mut projected = ledger.clone();
     projected.tw = tw;
     projected.p_recovered = p_recovered;
@@ -212,7 +214,7 @@ pub fn evaluate_voice_open_funding(
     Ok(VoiceOpenFunding {
         opening_quantity,
         reexpose_event,
-        reexpose_amount,
+        reexpose_amount: planned_reexpose,
         ledger: projected,
     })
 }
