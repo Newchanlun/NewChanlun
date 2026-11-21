@@ -109,8 +109,8 @@
           "excerpt": "两个端点/外缘裁定"
         },
         {
-          "source": ".chanlun/definitions/zhongshu.md:252,398–410",
-          "excerpt": "条件②和 Z-5"
+          "source": ".chanlun/definitions/zhongshu.md §4.1/§4.4–4.7/§6.1",
+          "excerpt": "条件②、九段升级优先和 Z-5"
         },
         {
           "source": "docs/chanlun/text/blog/020-第20课.md:30,52,56,60,62",
@@ -122,8 +122,8 @@
         }
       ],
       "citation": "https://github.com/Newchanlun/NewChanlun/issues/1478#issuecomment-6149640661",
-      "reasoning": "旧扫描单哨兵当结算；若全吸收外侧 Zn，又违反中心定理一。",
-      "recommended": "待 R，有证后返回或破坏，非 Zn 离开的返回及不回的 Z-5 已定；区间外 Zn 返回的成员组织未决。",
+      "reasoning": "旧扫描单哨兵当结算；不加条件从 j+2 续验会越过九段门；强纳外侧 Zn 则违反中心定理一。",
+      "recommended": "待 R，有证后返回或破坏；非 Zn 离开后返回，接纳后不足 9 从 j+2 续验母窗，达到 9 交 #1429 按 S-4/Z-4 重切。区间外 Zn 已返回的成员组织仍未决；不回才走 Z-5。",
       "searched_keywords": [
         "退场条件②",
         "离开段 回抽段",
@@ -131,7 +131,7 @@
         "C@u29"
       ],
       "gap": "decision",
-      "conflict": "旧扫描单哨兵当结算；若全吸收外侧 Zn，又违反中心定理一。"
+      "conflict": "旧扫描单哨兵当结算；不加条件从 j+2 续验会越过九段门；强纳外侧 Zn 则违反中心定理一。"
     },
     {
       "id": "Q3",

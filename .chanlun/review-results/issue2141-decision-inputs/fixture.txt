@@ -23,3 +23,6 @@ touch/non-Zn D/R bounds ('UP', 36, 50) ('DOWN', 35, 50) side UP Zn metrics {'DD'
 no-return/non-Zn D/R bounds ('UP', 36, 50) ('DOWN', 37, 50) side UP Zn metrics {'DD': 20, 'D': 25, 'G': 35, 'GG': 40}
 return/Zn D/R bounds ('DOWN', 10, 24) ('UP', 10, 28) side DOWN Zn metrics unresolved (keep prefix)
 no-return/Zn D/R bounds ('DOWN', 10, 24) ('UP', 10, 24) side DOWN Zn metrics {'DD': 20, 'D': 25, 'G': 35, 'GG': 40}
+return/non-Zn 3+2=5: no break or connector; resume mother window at j+2
+return/non-Zn 7+2=9: no break or connector; upgrade (#1429); no mother-window scan
+nonalternating members: seed-direction indices 0/2/3, GG=60 (positional GG=55)

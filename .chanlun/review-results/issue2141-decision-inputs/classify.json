@@ -4,5 +4,5 @@
   "reason": "#2114 仅裁严格相连交替分支，#1478 只裁一个末端归属；不相连且首段本身离开的成员与推进涉及本仓未裁的构造边界，超出纯既定接口补接；按拿不准判 P。",
   "user_gate": [],
   "stage": "author_draft",
-  "sourceCommit": "ba74fd6344df5d03d3a8c5b6a5a2c9d8bef7a8b6"
+  "sourceCommit": "0f11ebe6952badfcc2ad4a6c67eb542ef07b4385"
 }

@@ -70,3 +70,27 @@ for name, side, dep, ret, selected in [
     assert not inside(seq[3],(25,35))
     assert inside(seq[4],(25,35)) == ("return/" in name and not name.startswith("no-") or name.startswith("touch"))
     print(name,"D/R bounds",dep,ret,"side",side,"Zn metrics",znvals(selected,seq) if selected else "unresolved (keep prefix)")
+
+
+# 同一接纳前提，只改变已有的有波动成员数；返回不产生破坏或连接。
+dep, retest = spread([("UP", 36, 50), ("DOWN", 33, 50)])
+assert not inside(dep, (25, 35)) and inside(retest, (25, 35))
+assert all(u["lo"] < u["hi"] for u in (dep, retest))
+assert dep["dir"] != base[0]["dir"]
+for wave_count, expect_upgrade in [(3, False), (7, True)]:
+    admitted = wave_count + 2
+    assert (admitted >= 9) == expect_upgrade
+    action = "upgrade (#1429); no mother-window scan" if expect_upgrade else "resume mother window at j+2"
+    print(f"return/non-Zn {wave_count}+2={admitted}: no break or connector; {action}")
+
+# 方向与下标的结果在非交替成员域内不同。
+nonalternating = spread([
+    ("DOWN", 20, 40), ("UP", 20, 40), ("DOWN", 25, 35),
+    ("DOWN", 25, 60), ("UP", 30, 55),
+])
+assert all(inside(u, (25, 35)) for u in nonalternating)
+by_direction = [i for i, u in enumerate(nonalternating) if u["dir"] == nonalternating[0]["dir"]]
+assert by_direction == [0, 2, 3]
+assert znvals(by_direction, nonalternating)["GG"] == 60
+assert znvals([0, 2, 4], nonalternating)["GG"] == 55
+print("nonalternating members: seed-direction indices 0/2/3, GG=60 (positional GG=55)")
