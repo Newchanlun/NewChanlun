@@ -48,7 +48,7 @@ _CM_THEMATIC_BREAK_RE = re.compile(r"^(?:(?:\*[ \t]*){3,}|(?:-[ \t]*){3,}|(?:_[ 
 _CM_SETEXT_UNDERLINE_RE = re.compile(r"^(?:=+|-+)[ \t]*$")
 _CM_ATX_HEADING_RE = re.compile(r"^#{1,6}(?:[ \t]|$)")
 _CM_OPEN_FENCE_RE = re.compile(r"^(?P<fence>`{3,}|~{3,})(?P<info>.*)$")
-_CM_LIST_MARKER_RE = re.compile(r"^(?P<marker>[-*+]|\d{1,9}[.)])(?=$|[ \t])")
+_CM_LIST_MARKER_RE = re.compile(r"^(?P<marker>[-*+]|[0-9]{1,9}[.)])(?=$|[ \t])")
 _CM_HTML_TYPE1_START_RE = re.compile(r"^<(?:pre|script|style|textarea)(?:[ \t>]|$)", re.IGNORECASE)
 _CM_HTML_TYPE1_END_RE = re.compile(r"</(?:pre|script|style|textarea)>", re.IGNORECASE)
 _CM_HTML_TYPE6_START_RE = re.compile(
@@ -930,6 +930,13 @@ def _finding_matches_location(
     )
 
 
+def _finding_sort_key(finding: PredictedFinding) -> tuple[str, int, int, str, str]:
+    norm_file = _norm_path(finding.file)
+    f_start = -1 if finding.line_start is None else finding.line_start
+    eff_end = f_start if finding.line_end is None else finding.line_end
+    return (norm_file, f_start, eff_end, finding.severity, finding.summary)
+
+
 def _match_findings_to_locations(
     locations: Sequence[BugLocation],
     blocking_findings: Sequence[PredictedFinding],
@@ -937,11 +944,16 @@ def _match_findings_to_locations(
     line_tolerance: int,
     max_finding_span: int,
 ) -> tuple[int, ...]:
-    """在阻断发现与真实缺陷位置之间求一对一最大二分图匹配，返回命中的 location 索引元组。"""
+    """在真实缺陷位置与阻断发现之间求一对一最大二分图匹配，返回最小字典序的命中 location 索引元组。
+
+    按横截拟阵性质以缺陷位置下标 0..L-1 升序作为左侧顶点依次寻找增广路，并对右侧发现按规范键排序，
+    确保最大匹配基数与 matched_location_indices 对 findings 的任意排列完全不变。
+    """
+    ordered_findings = sorted(blocking_findings, key=_finding_sort_key)
     adj: list[list[int]] = [
         [
-            loc_idx
-            for loc_idx, loc in enumerate(locations)
+            f_idx
+            for f_idx, finding in enumerate(ordered_findings)
             if _finding_matches_location(
                 loc,
                 finding,
@@ -949,24 +961,26 @@ def _match_findings_to_locations(
                 max_finding_span=max_finding_span,
             )
         ]
-        for finding in blocking_findings
+        for loc in locations
     ]
-    loc_match: dict[int, int] = {}
+    finding_match: dict[int, int] = {}
 
-    def _try_augment(f_idx: int, visited: set[int]) -> bool:
-        for loc_idx in adj[f_idx]:
-            if loc_idx in visited:
+    def _try_augment(loc_idx: int, visited_findings: set[int]) -> bool:
+        for f_idx in adj[loc_idx]:
+            if f_idx in visited_findings:
                 continue
-            visited.add(loc_idx)
-            if loc_idx not in loc_match or _try_augment(loc_match[loc_idx], visited):
-                loc_match[loc_idx] = f_idx
+            visited_findings.add(f_idx)
+            if f_idx not in finding_match or _try_augment(finding_match[f_idx], visited_findings):
+                finding_match[f_idx] = loc_idx
                 return True
         return False
 
-    for f_idx in range(len(blocking_findings)):
-        _try_augment(f_idx, set())
+    matched_locs: list[int] = []
+    for loc_idx in range(len(locations)):
+        if _try_augment(loc_idx, set()):
+            matched_locs.append(loc_idx)
 
-    return tuple(sorted(loc_match.keys()))
+    return tuple(matched_locs)
 
 
 def score_predictions(
@@ -1660,14 +1674,12 @@ def _cm_parse_link_title(buf: str, start: int) -> int | None:
     return None
 
 
-def _cm_parse_link_ref_def_at(buf: str, pos: int) -> tuple[int, str, str, bool, bool] | None:
-    """按 CommonMark §4.7 从段落行首位置解析单条链接引用定义。"""
+def _cm_parse_ref_label_brackets(buf: str, start: int) -> tuple[int, str] | None:
+    """按 CommonMark §4.7 解析 `[label]` 链接标签，返回 (闭合 `]` 之后下标, 规范化标签)；失败返回 None。"""
     n = len(buf)
-    if pos >= n or buf[pos] != "[":
+    if start >= n or buf[start] != "[":
         return None
-
-    # 1) 链接标签（1..999 字符，含至少一个非空白字符，不允许未转义 `[` / `]`）
-    i = pos + 1
+    i = start + 1
     label_chars = 0
     has_non_ws = False
     while i < n:
@@ -1692,13 +1704,21 @@ def _cm_parse_link_ref_def_at(buf: str, pos: int) -> tuple[int, str, str, bool, 
             label_chars += 1
         if label_chars > 999:
             return None
-
     if i >= n or buf[i] != "]" or label_chars == 0 or not has_non_ws:
         return None
-    norm_label = _normalize_markdown_link_label(buf[pos + 1 : i])
+    norm_label = _normalize_markdown_link_label(buf[start + 1 : i])
     if not norm_label:
         return None
-    i += 1
+    return (i + 1, norm_label)
+
+
+def _cm_parse_link_ref_def_at(buf: str, pos: int) -> tuple[int, str, str, bool, bool] | None:
+    """按 CommonMark §4.7 从段落行首位置解析单条链接引用定义。"""
+    n = len(buf)
+    label_parsed = _cm_parse_ref_label_brackets(buf, pos)
+    if label_parsed is None:
+        return None
+    i, norm_label = label_parsed
 
     # 2) 冒号 + 可选空白（至多一个换行）
     if i >= n or buf[i] != ":":
@@ -1800,7 +1820,11 @@ def _cm_parse_link_ref_def_at(buf: str, pos: int) -> tuple[int, str, str, bool, 
     return None
 
 
-def _cm_flush_paragraph_link_defs(para_lines: list[_CmParaLine], out_defs: list[_CmLinkRefDef]) -> bool:
+def _cm_flush_paragraph_link_defs(
+    para_lines: list[_CmParaLine],
+    out_defs: list[_CmLinkRefDef],
+    out_visible_chunks: list[str] | None = None,
+) -> bool:
     """从段落起点剥离全部连续 CommonMark §4.7 链接引用定义，返回是否仍剩余普通段落文本。"""
     if not para_lines:
         return False
@@ -1816,6 +1840,7 @@ def _cm_flush_paragraph_link_defs(para_lines: list[_CmParaLine], out_defs: list[
         offset += len(pline.text)
     buf = "".join(buf_parts)
 
+    kept_segments: list[str] = []
     pos = 0
     buf_len = len(buf)
     while pos < buf_len:
@@ -1824,17 +1849,23 @@ def _cm_flush_paragraph_link_defs(para_lines: list[_CmParaLine], out_defs: list[
             break
         next_pos, norm_label, destination, is_angle_dest, has_title = parsed
         src_line = buf_start_to_line[pos]
-        out_defs.append(
-            _CmLinkRefDef(
-                norm_label=norm_label,
-                bracket_open_pos=src_line.start_offset,
-                start_line_idx=src_line.line_idx,
-                destination=destination,
-                is_angle_dest=is_angle_dest,
-                has_title=has_title,
-            )
+        ref_def = _CmLinkRefDef(
+            norm_label=norm_label,
+            bracket_open_pos=src_line.start_offset,
+            start_line_idx=src_line.line_idx,
+            destination=destination,
+            is_angle_dest=is_angle_dest,
+            has_title=has_title,
         )
+        out_defs.append(ref_def)
+        if ref_def.start_line_idx == 0 and not _is_real_markdown_link_destination(ref_def):
+            kept_segments.append(buf[pos:next_pos])
         pos = next_pos
+
+    if pos < buf_len:
+        kept_segments.append(buf[pos:])
+    if out_visible_chunks is not None and kept_segments:
+        out_visible_chunks.append("".join(kept_segments))
 
     para_lines.clear()
     return pos < buf_len
@@ -1875,9 +1906,10 @@ def _cm_html_block_ends_on_line(html_type: int, rest: str) -> bool:
     return False
 
 
-def _extract_commonmark_link_ref_defs(text: str) -> list[_CmLinkRefDef]:
-    """按 CommonMark 块级结构与 §4.7 提取全部有效链接引用定义（忽略围栏/缩进代码块与 HTML 块）。"""
+def _parse_commonmark_blocks(text: str) -> tuple[list[_CmLinkRefDef], list[str]]:
+    """按 CommonMark 块级结构提取全部 §4.7 链接引用定义与可见正文文本块（排除代码块、HTML 块与链接定义）。"""
     out_defs: list[_CmLinkRefDef] = []
+    visible_chunks: list[str] = []
     containers: list[_CmContainer] = []
     leaf_kind: Literal["none", "paragraph", "fenced_code", "indented_code", "html_block"] = "none"
     para_lines: list[_CmParaLine] = []
@@ -1888,7 +1920,7 @@ def _extract_commonmark_link_ref_defs(text: str) -> list[_CmLinkRefDef]:
     def _close_leaf() -> None:
         nonlocal leaf_kind, fence_char, fence_len, html_type
         if leaf_kind == "paragraph":
-            _cm_flush_paragraph_link_defs(para_lines, out_defs)
+            _cm_flush_paragraph_link_defs(para_lines, out_defs, visible_chunks)
         leaf_kind = "none"
         fence_char = ""
         fence_len = 0
@@ -1999,7 +2031,7 @@ def _extract_commonmark_link_ref_defs(text: str) -> list[_CmLinkRefDef]:
             if _CM_THEMATIC_BREAK_RE.match(rest):
                 break
 
-            # 4c) 列表项（`-`/`*`/`+` 或 `\d{1,9}[.)]`）
+            # 4c) 列表项（`-`/`*`/`+` 或 `[0-9]{1,9}[.)]`）
             list_match = _CM_LIST_MARKER_RE.match(rest)
             if list_match is None:
                 break
@@ -2008,7 +2040,10 @@ def _extract_commonmark_link_ref_defs(text: str) -> list[_CmLinkRefDef]:
             after_marker_col = nonws_col + len(marker)
             spaces_after, content_idx, content_col, _ = _cm_skip_ws_cols(content, after_marker_idx, after_marker_col, 0)
             item_is_blank = content_idx >= len(content)
-            if leaf_kind == "paragraph" and not opened_new_container:
+            # 按 CommonMark §5.2：仅当当前行处于已匹配的普通段落内部（all_matched 且未开启新容器）时，
+            # 空列表项与起始序号 != 1 的有序列表项不得打断段落；若已退至外层/兄弟容器层级（not all_matched），
+            # 则任意合法序号（如 `2.`）或空项均可结束前一个容器并开启新列表项。
+            if leaf_kind == "paragraph" and all_matched and not opened_new_container:
                 if item_is_blank:
                     break
                 if marker[-1] in (".", ")") and int(marker[:-1]) != 1:
@@ -2049,7 +2084,7 @@ def _extract_commonmark_link_ref_defs(text: str) -> list[_CmLinkRefDef]:
 
         # 5b) Setext 标题下划线（段落所有前导均是链接引用定义时，按 §4.7 不构成 setext 标题）
         if leaf_kind == "paragraph" and all_matched and not opened_new_container and indent_cols <= 3 and _CM_SETEXT_UNDERLINE_RE.match(rest):
-            has_remaining_para = _cm_flush_paragraph_link_defs(para_lines, out_defs)
+            has_remaining_para = _cm_flush_paragraph_link_defs(para_lines, out_defs, visible_chunks)
             leaf_kind = "none"
             if has_remaining_para:
                 continue
@@ -2072,6 +2107,9 @@ def _extract_commonmark_link_ref_defs(text: str) -> list[_CmLinkRefDef]:
             _close_leaf()
             if not opened_new_container:
                 del containers[matched_count:]
+            heading_text = re.sub(r"[ \t]+#+[ \t]*$", "", rest.lstrip("#").strip(" \t"))
+            if heading_text:
+                visible_chunks.append(heading_text)
             continue
 
         # 5e) 围栏代码块（``` 或 ~~~）
@@ -2091,7 +2129,8 @@ def _extract_commonmark_link_ref_defs(text: str) -> list[_CmLinkRefDef]:
 
         # 5f) HTML 块（类型 1–7）
         if indent_cols <= 3:
-            detected_html = _cm_detect_html_block_type(rest, can_interrupt_paragraph=(leaf_kind == "paragraph"))
+            in_paragraph = leaf_kind == "paragraph" and all_matched and not opened_new_container
+            detected_html = _cm_detect_html_block_type(rest, can_interrupt_paragraph=in_paragraph)
             if detected_html is not None:
                 _close_leaf()
                 if not opened_new_container:
@@ -2109,6 +2148,12 @@ def _extract_commonmark_link_ref_defs(text: str) -> list[_CmLinkRefDef]:
         para_lines.append(_CmParaLine(line_idx=line.line_idx, start_offset=line.start_offset + nonws_idx, text=rest))
 
     _close_leaf()
+    return (out_defs, visible_chunks)
+
+
+def _extract_commonmark_link_ref_defs(text: str) -> list[_CmLinkRefDef]:
+    """按 CommonMark 块级结构与 §4.7 提取全部有效链接引用定义（忽略围栏/缩进代码块与 HTML 块）。"""
+    out_defs, _ = _parse_commonmark_blocks(text)
     return out_defs
 
 
@@ -2119,13 +2164,225 @@ def _is_real_markdown_link_destination(ref_def: _CmLinkRefDef) -> bool:
     return bool(_CM_REAL_LINK_DEST_CHAR_RE.search(ref_def.destination))
 
 
-def _extract_markdown_link_ref_defs(text: str) -> dict[str, tuple[int, ...]]:
-    """按 CommonMark 块结构与 §4.7 提取有效 Markdown 链接引用定义的规范化标签及其 `[` 起始偏移。"""
+def _extract_markdown_link_refs_and_visible_body(text: str) -> tuple[dict[str, tuple[int, ...]], str]:
+    """单次解析 CommonMark 块结构，返回 (有效链接引用定义映射, 可见正文纯块文本)。"""
+    raw_defs, visible_chunks = _parse_commonmark_blocks(text)
     refs: dict[str, list[int]] = defaultdict(list)
-    for ref_def in _extract_commonmark_link_ref_defs(text):
+    for ref_def in raw_defs:
         if ref_def.start_line_idx > 0 or _is_real_markdown_link_destination(ref_def):
             refs[ref_def.norm_label].append(ref_def.bracket_open_pos)
-    return {label: tuple(offsets) for label, offsets in refs.items()}
+    return ({label: tuple(offsets) for label, offsets in refs.items()}, "\n".join(visible_chunks))
+
+
+def _extract_markdown_link_ref_defs(text: str) -> dict[str, tuple[int, ...]]:
+    """按 CommonMark 块结构与 §4.7 提取有效 Markdown 链接引用定义的规范化标签及其 `[` 起始偏移。"""
+    refs, _ = _extract_markdown_link_refs_and_visible_body(text)
+    return refs
+
+
+def _cm_find_code_span_end(buf: str, start: int) -> int | None:
+    """按 CommonMark §6.1 查找反引号行内代码跨度的结束下标；未闭合返回 None。"""
+    n = len(buf)
+    if start >= n or buf[start] != "`":
+        return None
+    tick_len = 0
+    while start + tick_len < n and buf[start + tick_len] == "`":
+        tick_len += 1
+    i = start + tick_len
+    while i < n:
+        if buf[i] == "`":
+            run = 0
+            while i + run < n and buf[i + run] == "`":
+                run += 1
+            if run == tick_len:
+                return i + run
+            i += run
+        else:
+            i += 1
+    return None
+
+
+def _cm_find_matching_bracket(buf: str, start: int) -> int | None:
+    """查找从 `[` 开始的配对 `]`（跳过反斜杠转义、反引号代码跨度与嵌套平衡方括号）。"""
+    n = len(buf)
+    if start >= n or buf[start] != "[":
+        return None
+    i = start + 1
+    depth = 1
+    while i < n:
+        ch = buf[i]
+        if ch == "\\" and i + 1 < n and buf[i + 1] in _CM_ASCII_PUNCT:
+            i += 2
+            continue
+        if ch == "`":
+            code_end = _cm_find_code_span_end(buf, i)
+            if code_end is not None:
+                i = code_end
+                continue
+            while i < n and buf[i] == "`":
+                i += 1
+            continue
+        if ch == "[":
+            depth += 1
+        elif ch == "]":
+            depth -= 1
+            if depth == 0:
+                return i
+        i += 1
+    return None
+
+
+def _cm_parse_inline_link_tail(buf: str, start: int) -> int | None:
+    """按 CommonMark §6.5 解析内联链接的 `(...)` 部分，返回闭合 `)` 之后下标；失败返回 None。"""
+    n = len(buf)
+    if start >= n or buf[start] != "(":
+        return None
+    i = start + 1
+    while i < n and buf[i] in (" ", "\t", "\n"):
+        i += 1
+    if i < n and buf[i] == ")":
+        return i + 1
+    if i >= n:
+        return None
+    if buf[i] == "<":
+        i += 1
+        while i < n:
+            ch = buf[i]
+            if ch == "\n" or ch == "<":
+                return None
+            if ch == "\\" and i + 1 < n and buf[i + 1] in _CM_ASCII_PUNCT:
+                i += 2
+                continue
+            if ch == ">":
+                i += 1
+                break
+            i += 1
+        else:
+            return None
+    else:
+        dest_start = i
+        paren_depth = 0
+        while i < n:
+            ch = buf[i]
+            code = ord(ch)
+            if code <= 0x20 or code == 0x7F:
+                break
+            if ch == "\\" and i + 1 < n and buf[i + 1] in _CM_ASCII_PUNCT:
+                i += 2
+                continue
+            if ch == "(":
+                paren_depth += 1
+                if paren_depth > 32:
+                    return None
+                i += 1
+            elif ch == ")":
+                if paren_depth == 0:
+                    break
+                paren_depth -= 1
+                i += 1
+            else:
+                i += 1
+        if i == dest_start or paren_depth != 0:
+            return None
+    ws_start = i
+    while i < n and buf[i] in (" ", "\t", "\n"):
+        i += 1
+    if i < n and buf[i] == ")":
+        return i + 1
+    if i > ws_start and i < n and buf[i] in ('"', "'", "("):
+        title_end = _cm_parse_link_title(buf, i)
+        if title_end is None:
+            return None
+        i = title_end
+        while i < n and buf[i] in (" ", "\t", "\n"):
+            i += 1
+        if i < n and buf[i] == ")":
+            return i + 1
+    return None
+
+
+def _unwrap_markdown_links(body: str, defined_link_refs: dict[str, tuple[int, ...]]) -> str:
+    """将可见正文中的 Markdown 链接解包为纯文本标签，去掉方括号外壳。"""
+    out: list[str] = []
+    i = 0
+    n = len(body)
+    while i < n:
+        ch = body[i]
+        if ch == "\\" and i + 1 < n and body[i + 1] in _CM_ASCII_PUNCT:
+            out.append(body[i : i + 2])
+            i += 2
+            continue
+        if ch == "`":
+            code_end = _cm_find_code_span_end(body, i)
+            if code_end is not None:
+                out.append(body[i:code_end])
+                i = code_end
+                continue
+            tick_end = i
+            while tick_end < n and body[tick_end] == "`":
+                tick_end += 1
+            out.append(body[i:tick_end])
+            i = tick_end
+            continue
+        if ch == "[":
+            close_idx = _cm_find_matching_bracket(body, i)
+            if close_idx is not None:
+                label_text = body[i + 1 : close_idx]
+                after = close_idx + 1
+                # 1) 内联链接 [label](...)
+                if after < n and body[after] == "(":
+                    inline_end = _cm_parse_inline_link_tail(body, after)
+                    if inline_end is not None:
+                        out.append(label_text)
+                        i = inline_end
+                        continue
+                # 2) 折叠引用链接 [label][]
+                if after + 1 < n and body[after : after + 2] == "[]":
+                    label_parsed = _cm_parse_ref_label_brackets(body, i)
+                    if label_parsed is not None and label_parsed[0] == after and label_parsed[1] in defined_link_refs:
+                        out.append(label_text)
+                        i = after + 2
+                        continue
+                else:
+                    # 3) 完整引用链接 [label][ref]
+                    ref_parsed = _cm_parse_ref_label_brackets(body, after) if after < n and body[after] == "[" else None
+                    if ref_parsed is not None:
+                        ref_end, ref_norm = ref_parsed
+                        if ref_norm in defined_link_refs:
+                            out.append(label_text)
+                            i = ref_end
+                            continue
+                    else:
+                        # 4) 快捷引用链接 [label]（未后接 `[]` 或合法 `[ref]`）
+                        label_parsed = _cm_parse_ref_label_brackets(body, i)
+                        if (
+                            label_parsed is not None
+                            and label_parsed[0] == after
+                            and label_parsed[1] in defined_link_refs
+                        ):
+                            out.append(label_text)
+                            i = after
+                            continue
+        out.append(ch)
+        i += 1
+    return "".join(out)
+
+
+def _body_text_for_non_blocking_heuristic(
+    text: str,
+    defined_link_refs: dict[str, tuple[int, ...]] | None = None,
+    *,
+    visible_body: str | None = None,
+) -> str:
+    """构造用于正文非阻断/Nit 兜底匹配的纯文本（剥离代码块与链接定义，并解包 Markdown 链接外壳）。"""
+    if visible_body is None or defined_link_refs is None:
+        parsed_refs, parsed_body = _extract_markdown_link_refs_and_visible_body(text)
+        effective_refs = parsed_refs if defined_link_refs is None else defined_link_refs
+        effective_body = parsed_body if visible_body is None else visible_body
+    else:
+        effective_refs = defined_link_refs
+        effective_body = visible_body
+    return _unwrap_markdown_links(effective_body, effective_refs)
 
 
 def _has_external_markdown_link_ref_def(
@@ -2140,9 +2397,14 @@ def _has_external_markdown_link_ref_def(
     return any(def_pos != bracket_open_pos for def_pos in offsets)
 
 
-def _parse_leading_severity_tag(text: str) -> Literal["blocking", "non_blocking"] | None:
+def _parse_leading_severity_tag(
+    text: str,
+    *,
+    defined_link_refs: dict[str, tuple[int, ...]] | None = None,
+) -> Literal["blocking", "non_blocking"] | None:
     """解析行首显式严重度标签（支持列表符号、Markdown 粗体、连续中英文方括号标签与冒号前导）。"""
-    defined_link_refs = _extract_markdown_link_ref_defs(text)
+    if defined_link_refs is None:
+        defined_link_refs = _extract_markdown_link_ref_defs(text)
 
     cleaned = text.lstrip()
     cleaned_offset = len(text) - len(cleaned)
@@ -2223,12 +2485,14 @@ def is_non_blocking_or_nit_finding(text: str, receipt_result_status: str) -> boo
     """启发式判断单条发现是否属于 Nit / 非阻断级别（行首显式标签优先，正文启发式仅兜底无标签发现）。"""
     if receipt_result_status == "completed":
         return True
-    leading = _parse_leading_severity_tag(text)
+    defined_link_refs, visible_body = _extract_markdown_link_refs_and_visible_body(text)
+    leading = _parse_leading_severity_tag(text, defined_link_refs=defined_link_refs)
     if leading == "non_blocking":
         return True
     if leading == "blocking":
         return False
-    return bool(_NON_BLOCKING_NIT_RE.search(text))
+    body_text = _body_text_for_non_blocking_heuristic(text, defined_link_refs, visible_body=visible_body)
+    return bool(_NON_BLOCKING_NIT_RE.search(body_text))
 
 
 def is_style_or_format_finding(text: str) -> bool:

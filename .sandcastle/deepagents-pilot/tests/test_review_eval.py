@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import itertools
 import json
 import subprocess
 from pathlib import Path
@@ -18,6 +19,7 @@ from pilot1742.review_eval import (
     EvalScore,
     EvalValidationError,
     PredictedFinding,
+    _body_text_for_non_blocking_heuristic,
     _extract_markdown_link_ref_defs,
     _git_blob_line_count,
     _git_diff_added_ranges,
@@ -3736,3 +3738,207 @@ def test_r10_compare_scores_tracks_matched_location_index_sets_and_validates_jso
     bad_oob["case_details"][0]["matched_location_indices"] = [2]
     with pytest.raises(EvalValidationError, match="超出 expected_locations"):
         _score_from_dict(bad_oob)
+
+
+def test_r11_bipartite_matching_permutation_invariant_lex_min() -> None:
+    # 1) R10 Important 1 核心反例：真值位置 30, 10, 50（索引 0, 1, 2），发现第 20, 40 行（容差 15）
+    # 无论发现按 (20, 40) 还是 (40, 20) 输入，按横截拟阵升序增广必然唯一命中 (0, 1)
+    three_loc_case = (
+        EvalCase(
+            case_id="bug-matroid-order-invariance",
+            kind="bug",
+            title="等价最大匹配必须与发现输入顺序完全无关",
+            base_sha=SHA_1,
+            head_sha=SHA_2,
+            bug_locations=(
+                BugLocation(file="a.py", line_start=30, line_end=30, summary="l0", category="bug"),
+                BugLocation(file="a.py", line_start=10, line_end=10, summary="l1", category="bug"),
+                BugLocation(file="a.py", line_start=50, line_end=50, summary="l2", category="bug"),
+            ),
+        ),
+    )
+    f20 = PredictedFinding(file="a.py", line_start=20, line_end=20, severity="blocking", summary="f20")
+    f40 = PredictedFinding(file="a.py", line_start=40, line_end=40, severity="blocking", summary="f40")
+
+    score_20_40 = score_predictions(
+        three_loc_case,
+        (CasePrediction(case_id="bug-matroid-order-invariance", verdict="BLOCK", findings=(f20, f40)),),
+    )
+    score_40_20 = score_predictions(
+        three_loc_case,
+        (CasePrediction(case_id="bug-matroid-order-invariance", verdict="BLOCK", findings=(f40, f20)),),
+    )
+    assert score_20_40.case_details[0].matched_location_indices == (0, 1)
+    assert score_40_20.case_details[0].matched_location_indices == (0, 1)
+    assert score_20_40.case_details[0].matched_blocking_findings == 2
+    assert score_40_20.case_details[0].matched_blocking_findings == 2
+
+    cmp_perm = compare_scores(score_20_40, score_40_20)
+    assert cmp_perm.unchanged_cases == ("bug-matroid-order-invariance",)
+    assert cmp_perm.mixed_cases == ()
+    assert cmp_perm.improved_cases == ()
+    assert cmp_perm.regressed_cases == ()
+
+    # 2) 多位置多发现全排列不变性（4! = 24 种输入排列全部产出唯一最小字典序匹配）
+    five_loc_case = (
+        EvalCase(
+            case_id="bug-matroid-all-perms",
+            kind="bug",
+            title="四发现全排列不变性验证",
+            base_sha=SHA_1,
+            head_sha=SHA_2,
+            bug_locations=(
+                BugLocation(file="m.py", line_start=30, line_end=30, summary="l0", category="bug"),
+                BugLocation(file="m.py", line_start=10, line_end=10, summary="l1", category="bug"),
+                BugLocation(file="m.py", line_start=50, line_end=50, summary="l2", category="bug"),
+                BugLocation(file="m.py", line_start=70, line_end=70, summary="l3", category="bug"),
+                BugLocation(file="m.py", line_start=90, line_end=90, summary="l4", category="bug"),
+            ),
+        ),
+    )
+    findings_pool = (
+        PredictedFinding(file="m.py", line_start=20, line_end=20, severity="blocking", summary="a"),
+        PredictedFinding(file="m.py", line_start=40, line_end=40, severity="blocking", summary="b"),
+        PredictedFinding(file="m.py", line_start=80, line_end=80, severity="blocking", summary="c"),
+        PredictedFinding(file="m.py", line_start=20, line_end=20, severity="important", summary="dup-a"),
+    )
+    baseline_score = score_predictions(
+        five_loc_case,
+        (CasePrediction(case_id="bug-matroid-all-perms", verdict="BLOCK", findings=findings_pool),),
+    )
+    assert baseline_score.case_details[0].matched_location_indices == (0, 1, 3)
+    for perm in itertools.permutations(findings_pool):
+        perm_score = score_predictions(
+            five_loc_case,
+            (CasePrediction(case_id="bug-matroid-all-perms", verdict="BLOCK", findings=perm),),
+        )
+        assert perm_score.case_details[0].matched_location_indices == (0, 1, 3)
+        assert perm_score.case_details[0].matched_blocking_findings == 3
+        cmp_p = compare_scores(baseline_score, perm_score)
+        assert cmp_p.unchanged_cases == ("bug-matroid-all-perms",)
+        assert cmp_p.mixed_cases == ()
+
+
+def test_r11_commonmark_ascii_ordered_digits_and_sibling_items() -> None:
+    # 1) R10 Important 2：禁止全角数字等非 ASCII Unicode 数字被当作 CommonMark 有序列表标记
+    assert classify_finding_heuristic("[P2] [非阻断] 说明\n\n１. [非阻断]: /demo", "blocked") == "non_blocking_or_nit"
+    assert classify_finding_heuristic("[P2] [非阻断] 说明\n\n١. [非阻断]: /demo", "blocked") == "non_blocking_or_nit"
+    assert _extract_markdown_link_ref_defs("１. [非阻断]: /demo") == {}
+    assert _extract_markdown_link_ref_defs("1. [非阻断]: /demo") == {"非阻断": (3,)}
+
+    # 2) R10 Important 3：已打开列表内兄弟序号（2. / 0. / 99. 等）合法开启新列表项，顶层段落后 2. 仍不得打断段落
+    assert (
+        classify_finding_heuristic("[P2] [非阻断] 说明\n\n1. text\n2. [非阻断]: /demo", "blocked")
+        == "blocking_substantive"
+    )
+    assert (
+        classify_finding_heuristic("[P2] [非阻断] 说明\n\n1. text\n2. ```\n[非阻断]: /demo", "blocked")
+        == "blocking_substantive"
+    )
+    assert (
+        classify_finding_heuristic("[P2] [非阻断] 说明\n\npara\n2. [非阻断]: /demo", "blocked")
+        == "non_blocking_or_nit"
+    )
+
+    # 衍生嵌套边界：缩进在 1. 段落内部的 2. 仍不得打断段落；内层/外层已开列表兄弟项 2. 均可正常开启；围栏内缩进不提取
+    assert (
+        classify_finding_heuristic("[P2] [非阻断] 说明\n\n1. a\n   2. [非阻断]: /demo", "blocked")
+        == "non_blocking_or_nit"
+    )
+    assert (
+        classify_finding_heuristic("[P2] [非阻断] 说明\n\n1. a\n   1. b\n   2. [非阻断]: /demo", "blocked")
+        == "blocking_substantive"
+    )
+    assert (
+        classify_finding_heuristic("[P2] [非阻断] 说明\n\n1. a\n   1. b\n2. [非阻断]: /demo", "blocked")
+        == "blocking_substantive"
+    )
+    assert (
+        classify_finding_heuristic("[P2] [非阻断] 说明\n\n1. text\n2. ```\n   [非阻断]: /demo", "blocked")
+        == "non_blocking_or_nit"
+    )
+    assert _extract_markdown_link_ref_defs("1. text\n2. [非阻断]: /demo") == {"非阻断": (11,)}
+    assert _extract_markdown_link_ref_defs("1. text\n2. ```\n[非阻断]: /demo") == {"非阻断": (15,)}
+    assert _extract_markdown_link_ref_defs("para\n2. [非阻断]: /demo") == {}
+
+
+def test_r11_body_fallback_unwraps_markdown_links_and_ignores_code_and_defs(tmp_path: Path) -> None:
+    # 1) R10 Important 4 全部 5 组核心反例
+    shortcut_link = "[nit] 数据丢失\n\n[nit]: /demo"
+    inline_link = "[nit](src/nit#L1) 数据丢失"
+    full_ref_link = "[nit][loc] 数据丢失\n\n[loc]: /demo"
+    fenced_code_nit = "数据丢失\n\n```text\n[nit] 示例代码\n```"
+    real_nit_body = "数据丢失（[nit] 仅样式建议）"
+
+    assert classify_finding_heuristic(shortcut_link, "blocked") == "blocking_substantive"
+    assert classify_finding_heuristic(inline_link, "blocked") == "blocking_substantive"
+    assert classify_finding_heuristic(full_ref_link, "blocked") == "blocking_substantive"
+    assert classify_finding_heuristic(fenced_code_nit, "blocked") == "blocking_substantive"
+    assert classify_finding_heuristic(real_nit_body, "blocked") == "non_blocking_or_nit"
+
+    # 2) 直接校验 _body_text_for_non_blocking_heuristic 解包与过滤行为
+    assert _body_text_for_non_blocking_heuristic(shortcut_link, _extract_markdown_link_ref_defs(shortcut_link)) == "nit 数据丢失"
+    assert _body_text_for_non_blocking_heuristic(inline_link, {}) == "nit 数据丢失"
+    assert _body_text_for_non_blocking_heuristic(full_ref_link, _extract_markdown_link_ref_defs(full_ref_link)) == "nit 数据丢失"
+    assert _body_text_for_non_blocking_heuristic(fenced_code_nit, {}) == "数据丢失"
+    assert _body_text_for_non_blocking_heuristic(real_nit_body, {}) == real_nit_body
+
+    # 3) 衍生边界：折叠引用链接、缩进代码块、HTML 注释块、反斜杠转义、仅含链接定义、含括号目标的内联链接、反引号前缀干扰
+    assert classify_finding_heuristic("[nit][] 数据丢失\n\n[nit]: /demo", "blocked") == "blocking_substantive"
+    assert classify_finding_heuristic("数据丢失\n\n    [nit] 示例代码", "blocked") == "blocking_substantive"
+    assert classify_finding_heuristic("数据丢失\n\n<!--\n[nit] 注释\n-->", "blocked") == "blocking_substantive"
+    assert classify_finding_heuristic("数据丢失\n\n[nit]: /demo", "blocked") == "blocking_substantive"
+    assert classify_finding_heuristic("[nit](src/a(1).py \"title ) here\") 数据丢失", "blocked") == "blocking_substantive"
+    assert classify_finding_heuristic("`arr[` 缺少校验，见 [nit](src/nit#L1) 数据丢失", "blocked") == "blocking_substantive"
+    assert classify_finding_heuristic("数据丢失 \\[nit] 仅样式建议\n\n[nit]: /demo", "blocked") == "non_blocking_or_nit"
+    assert classify_finding_heuristic("[nit] 仅样式建议\n\n```markdown\n[nit]: /demo\n```", "blocked") == "non_blocking_or_nit"
+    assert classify_finding_heuristic("[说明]: 建议后续优化", "blocked") == "non_blocking_or_nit"
+    assert classify_finding_heuristic("数据丢失 [nit] 问题\n\n1. text\n2. [nit]: /demo", "blocked") == "blocking_substantive"
+
+    # 4) 端到端统计验证：4 条真实阻断反例全部计入 subsequent_head_pass_total_block_findings，真实 Nit 排除
+    runs_dir = tmp_path / "runs"
+    runs_dir.mkdir()
+    _write_run(
+        runs_dir,
+        "p1111-r1-block",
+        pr_number=1111,
+        head_sha="a" * 40,
+        registered_at_ns=100,
+        attempt=1,
+        verdict="BLOCK",
+        receipts={
+            "claude-opus-5-5": {
+                "run_id": "run-p1111-r1-block",
+                "status": "completed",
+                "model": "claude-opus-5-5",
+                "result": {
+                    "status": "blocked",
+                    "findings": [
+                        shortcut_link,
+                        inline_link,
+                        full_ref_link,
+                        fenced_code_nit,
+                        real_nit_body,
+                    ],
+                },
+            }
+        },
+    )
+    _write_run(
+        runs_dir,
+        "p1111-r2-pass",
+        pr_number=1111,
+        head_sha="b" * 40,
+        registered_at_ns=200,
+        attempt=2,
+        verdict="PASS",
+    )
+    metrics = analyze_review_runs(runs_dir)
+    assert metrics.corrupted_files == ()
+    assert metrics.finding_heuristic_categories == {
+        "blocking_substantive": 4,
+        "non_blocking_or_nit": 1,
+    }
+    assert metrics.subsequent_head_pass_total_block_findings == 4
+    assert metrics.subsequent_head_pass_inferred_fixed == 4
+    assert metrics.subsequent_head_pass_undeterminable_findings == 0
