@@ -8,6 +8,7 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+from collections import Counter
 from collections.abc import Collection, Mapping, Sequence
 from dataclasses import dataclass, field
 from enum import Enum
@@ -20,8 +21,13 @@ COMMENT_MARKER_PREFIX = "<!-- deepagents:review-findings"
 _PRIOR_ROUND_PLACEHOLDER = "prior-round"
 
 ReviewScope = Literal["full_pr", "incremental_diff"]
-RoundOutcome = Literal["pass", "blocked", "non_convergent"]
 GitHubStatusState = Literal["success", "failure"]
+
+
+class RoundOutcome(str, Enum):
+    PASS = "pass"
+    BLOCKED = "blocked"
+    NON_CONVERGENT = "non_convergent"
 
 
 class ConvergenceError(ValueError):
@@ -58,7 +64,10 @@ class VerificationVerdict(Enum):
     RESOLVED_BY_WONTFIX = "resolved_by_wontfix"
 
 
-_VERDICT_VALUES: dict[str, VerificationVerdict] = {v.value: v for v in VerificationVerdict}
+_VERDICT_VALUES: dict[str, VerificationVerdict] = {
+    **{v.value: v for v in VerificationVerdict},
+    "false_positive": VerificationVerdict.REJECTED,
+}
 
 _MODEL_FAMILY_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
     ("anthropic", re.compile(r"(?:^|[-/_:.])(claude|anthropic)(?:$|[-/_:.0-9])")),
@@ -97,23 +106,42 @@ _HTML_BLOCK_6_START_RE = re.compile(
 )
 _HTML_OPEN_TAG_PATTERN = (
     r"<[A-Za-z][A-Za-z0-9-]*"
-    r"(?:[ \t]+[A-Za-z_:][A-Za-z0-9_.:-]*(?:[ \t]*=[ \t]*(?:[^\s\"'=<>`]+|'[^']*'|\"[^\"]*\"))?)*"
+    r"(?:[ \t]+[A-Za-z_:][A-Za-z0-9_.:-]*(?:[ \t]*=[ \t]*(?:[^ \t\n\"'=<>`]+|'[^']*'|\"[^\"]*\"))?)*"
     r"[ \t]*/?>"
 )
 _HTML_CLOSE_TAG_PATTERN = r"</[A-Za-z][A-Za-z0-9-]*[ \t]*>"
 _HTML_BLOCK_7_START_RE = re.compile(rf"^(?:{_HTML_OPEN_TAG_PATTERN}|{_HTML_CLOSE_TAG_PATTERN})[ \t]*$")
-_INLINE_HTML_COMMENT_RE = re.compile(r"<!--(?:>|->|.*?-->)", re.DOTALL)
+
+_COMMONMARK_LINE_ENDING_RE = re.compile(r"\r\n|\n|\r")
+_ASCII_PUNCTUATION = frozenset(r"""!"#$%&'()*+,-./:;<=>?@[\]^_`{|}~""")
+_AUTOLINK_URI_RE = re.compile(r"<[A-Za-z][A-Za-z0-9+.-]{1,31}:[^\x00-\x20<>]*>")
+_AUTOLINK_EMAIL_RE = re.compile(
+    r"<[a-zA-Z0-9.!#$%&'*+/=?^_`{|}~-]+@"
+    r"[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?"
+    r"(?:\.[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?)*>"
+)
+_INLINE_HTML_OPEN_TAG_PATTERN = (
+    r"<[A-Za-z][A-Za-z0-9-]*"
+    r"(?:[ \t\n]+[A-Za-z_:][A-Za-z0-9_.:-]*(?:[ \t\n]*=[ \t\n]*(?:[^ \t\n\"'=<>`]+|'[^']*'|\"[^\"]*\"))?)*"
+    r"[ \t\n]*/?>"
+)
+_INLINE_HTML_CLOSE_TAG_PATTERN = r"</[A-Za-z][A-Za-z0-9-]*[ \t\n]*>"
+_INLINE_RAW_HTML_RE = re.compile(
+    rf"(?:<!--(?:>|->|.*?-->)|<\?.*?\?>|<![A-Za-z][^>]*>|<!\[CDATA\[.*?\]\]>|"
+    rf"{_INLINE_HTML_CLOSE_TAG_PATTERN}|{_INLINE_HTML_OPEN_TAG_PATTERN})",
+    re.DOTALL,
+)
 
 _WONTFIX_HEAD_RE = re.compile(
-    r"^(?:(?:[-*+]|\d+[.)])\s+)?"
+    r"^(?:(?:[-*+]|\d+[.)])[ \t]+)?"
     r"(?:"
-    r"`?\[(?P<id_bracket>[0-9a-fA-F]{6,16})\]`?\s*不修"
-    r"|`?(?P<id_bare>[0-9a-fA-F]{8,16})`?\s+不修"
-    r"|不修\s*[（(\[]\s*(?P<id_paren>[0-9a-fA-F]{6,16})\s*[）)\]]"
-    r"|不修\s*[（(]\s*(?P<path_paren>[^\s:：()（）]+?)(?::(?P<line_paren>[1-9]\d*))?\s*[）)]"
-    r"|`?(?P<path_prefix>(?:\./)?[A-Za-z0-9_.+-]+(?:/[A-Za-z0-9_.+-]+)*\.[A-Za-z0-9_+-]+)(?::(?P<line_prefix>[1-9]\d*))?`?\s+不修"
+    r"`?\[(?P<id_bracket>[0-9a-fA-F]{6,16})\]`?[ \t]*不修"
+    r"|`?(?P<id_bare>[0-9a-fA-F]{8,16})`?[ \t]+不修"
+    r"|不修[ \t]*[（(\[][ \t]*(?P<id_paren>[0-9a-fA-F]{6,16})[ \t]*[）)\]]"
+    r"|不修[ \t]*[（(][ \t]*(?P<path_paren>[^\s:：()（）]+?)(?::(?P<line_paren>[1-9]\d*))?[ \t]*[）)]"
+    r"|`?(?P<path_prefix>(?:\./)?[A-Za-z0-9_.+-]+(?:/[A-Za-z0-9_.+-]+)*\.[A-Za-z0-9_+-]+)(?::(?P<line_prefix>[1-9]\d*))?`?[ \t]+不修"
     r"|不修"
-    r")\s*[:：]\s*(?P<reason>.*)$"
+    r")[ \t]*[:：][ \t]*(?P<reason>.*)$"
 )
 
 
@@ -395,6 +423,12 @@ class ReviewPanel:
         return infer_model_family(self.verifier_model) if self.verifier_model is not None else None
 
 
+def _resolved_reply_key(comment_id: str, finding_fingerprint: str) -> str:
+    cid = _require_non_empty_str(comment_id, "comment_id")
+    fp = _require_non_empty_str(finding_fingerprint, "finding_fingerprint").lower()
+    return f"comment:{cid}:resolved:{fp}"
+
+
 @dataclass(frozen=True)
 class AuthorReply:
     finding_id: str | None
@@ -403,7 +437,6 @@ class AuthorReply:
     reason: str
     comment_id: str
     author: str | None = None
-    directive_index: int = 0
 
     def __post_init__(self) -> None:
         if self.finding_id is not None:
@@ -417,24 +450,21 @@ class AuthorReply:
         _require_non_empty_str(self.comment_id, "comment_id")
         if self.author is not None:
             _require_non_empty_str(self.author, "author")
-        if type(self.directive_index) is not int or self.directive_index < 0:
-            raise ConvergenceError(f"AuthorReply.directive_index 必须是非负整数：{self.directive_index!r}")
+
+    @property
+    def target_finding_id(self) -> str | None:
+        return self.finding_id.strip().lower() if self.finding_id is not None else None
 
     @property
     def reply_key(self) -> str:
-        """稳定唯一消费键：基于评论身份与指令序号生成，不受 diff 行号漂移影响，且同评论多条指令互不冲突。"""
+        """顺序无关的稳定消费键：解耦同评论内指令顺序与 diff 行号漂移。"""
         cid = self.comment_id.strip()
-        author = self.author.strip().lower() if self.author is not None else ""
-        norm_id = self.finding_id.strip().lower() if self.finding_id is not None else ""
-        norm_file = _normalize_file(self.file) if self.file is not None else ""
-        canonical = json.dumps(
-            [cid, author, self.directive_index, norm_id, norm_file],
-            ensure_ascii=False,
-            separators=(",", ":"),
-        )
-        digest = hashlib.sha256(canonical.encode("utf-8")).hexdigest()[:16]
-        anchor = f"id:{norm_id}" if norm_id else f"file:{norm_file or '*'}"
-        return f"{cid}#{self.directive_index}|{anchor}|{digest}"
+        if self.finding_id is not None:
+            norm_id = self.finding_id.strip().lower()
+            return f"comment:{cid}:finding:{norm_id}"
+        norm_reason = _normalize_fingerprint_text(self.reason, "reason")
+        digest = hashlib.sha256(norm_reason.encode("utf-8")).hexdigest()[:16]
+        return f"comment:{cid}:inline:{digest}"
 
 
 def _extract_comment_id(comment: Mapping[str, Any]) -> str | None:
@@ -643,34 +673,476 @@ def _match_html_block_start(rest: str, *, allow_type7: bool) -> int | None:
     return None
 
 
-def _is_html_block_end(kind: int, text: str) -> bool:
+def _is_html_block_end(kind: int, text: str, *, is_opening_line: bool = False) -> bool:
     if kind == 1:
         return bool(_HTML_BLOCK_1_END_RE.search(text))
     if kind == 2:
-        return "-->" in text
+        haystack = text[4:] if is_opening_line and text.startswith("<!--") else text
+        return "-->" in haystack
     if kind == 3:
-        return "?>" in text
+        haystack = text[2:] if is_opening_line and text.startswith("<?") else text
+        return "?>" in haystack
     if kind == 4:
-        return ">" in text
+        haystack = text[2:] if is_opening_line and text.startswith("<!") else text
+        return ">" in haystack
     if kind == 5:
-        return "]]>" in text
+        haystack = text[9:] if is_opening_line and text.startswith("<![CDATA[") else text
+        return "]]>" in haystack
     return False
 
 
+def _split_commonmark_lines(text: str) -> list[str]:
+    """按 CommonMark §2.1 / §2.3 规则切分行：将 NUL 替换为 U+FFFD，且仅以 CRLF/LF/CR 断行。"""
+    if not text:
+        return []
+    normalized = text.replace("\x00", "\ufffd")
+    lines = _COMMONMARK_LINE_ENDING_RE.split(normalized)
+    if normalized.endswith(("\r\n", "\n", "\r")):
+        lines.pop()
+    return lines
+
+
+def _normalize_link_label(raw_label: str) -> str:
+    return re.sub(r"[ \t\n]+", " ", raw_label.strip(" \t\n")).casefold()
+
+
+def _skip_ws_at_most_one_nl(text: str, pos: int) -> tuple[int, bool]:
+    n = len(text)
+    i = pos
+    while i < n and text[i] in (" ", "\t"):
+        i += 1
+    saw_nl = False
+    if i < n and text[i] == "\n":
+        saw_nl = True
+        i += 1
+        while i < n and text[i] in (" ", "\t"):
+            i += 1
+    return i, saw_nl
+
+
+def _parse_link_destination(text: str, pos: int) -> int | None:
+    n = len(text)
+    if pos >= n:
+        return None
+    if text[pos] == "<":
+        i = pos + 1
+        while i < n:
+            ch = text[i]
+            if ch in ("\n", "<"):
+                return None
+            if ch == "\\" and i + 1 < n and text[i + 1] in _ASCII_PUNCTUATION:
+                i += 2
+                continue
+            if ch == ">":
+                return i + 1
+            i += 1
+        return None
+
+    i = pos
+    depth = 0
+    while i < n:
+        ch = text[i]
+        if ch == " " or ord(ch) <= 0x1F or ord(ch) == 0x7F:
+            break
+        if ch == "\\":
+            if i + 1 < n and text[i + 1] in _ASCII_PUNCTUATION:
+                i += 2
+                continue
+            i += 1
+            continue
+        if ch == "(":
+            depth += 1
+            if depth > 32:
+                return None
+            i += 1
+        elif ch == ")":
+            if depth == 0:
+                break
+            depth -= 1
+            i += 1
+        else:
+            i += 1
+    if i == pos or depth != 0:
+        return None
+    return i
+
+
+def _parse_link_title(text: str, pos: int) -> int | None:
+    n = len(text)
+    if pos >= n:
+        return None
+    opener = text[pos]
+    if opener == '"':
+        closer = '"'
+    elif opener == "'":
+        closer = "'"
+    elif opener == "(":
+        closer = ")"
+    else:
+        return None
+    i = pos + 1
+    while i < n:
+        ch = text[i]
+        if ch == "\\":
+            if i + 1 < n and text[i + 1] in _ASCII_PUNCTUATION:
+                i += 2
+                continue
+            i += 1
+            continue
+        if ch == closer:
+            return i + 1
+        if opener == "(" and ch == "(":
+            return None
+        i += 1
+    return None
+
+
+def _consume_line_end(text: str, pos: int) -> int | None:
+    n = len(text)
+    i = pos
+    while i < n and text[i] in (" ", "\t"):
+        i += 1
+    if i == n:
+        return n
+    if text[i] == "\n":
+        return i + 1
+    return None
+
+
+def _match_link_label_brackets(text: str, pos: int) -> tuple[int, str] | None:
+    n = len(text)
+    if pos >= n or text[pos] != "[":
+        return None
+    i = pos + 1
+    label_start = i
+    label_len = 0
+    has_non_ws = False
+    while i < n:
+        ch = text[i]
+        if ch == "]":
+            break
+        if ch == "[":
+            return None
+        if ch == "\\" and i + 1 < n and text[i + 1] in _ASCII_PUNCTUATION:
+            label_len += 2
+            has_non_ws = True
+            i += 2
+        else:
+            if ch not in (" ", "\t", "\n"):
+                has_non_ws = True
+            label_len += 1
+            i += 1
+        if label_len > 999:
+            return None
+    if i >= n or text[i] != "]" or label_len == 0 or not has_non_ws:
+        return None
+    return i + 1, _normalize_link_label(text[label_start:i])
+
+
+def _match_single_link_ref_def(text: str, start: int) -> tuple[int, str] | None:
+    n = len(text)
+    i = start
+    spaces = 0
+    while i < n and text[i] == " " and spaces < 3:
+        i += 1
+        spaces += 1
+    label_match = _match_link_label_brackets(text, i)
+    if label_match is None:
+        return None
+    i, norm_label = label_match
+    if i >= n or text[i] != ":":
+        return None
+    i += 1
+    i, _ = _skip_ws_at_most_one_nl(text, i)
+    dest_end = _parse_link_destination(text, i)
+    if dest_end is None:
+        return None
+
+    no_title_eol = _consume_line_end(text, dest_end)
+    ws_end, _ = _skip_ws_at_most_one_nl(text, dest_end)
+    if ws_end > dest_end:
+        title_end = _parse_link_title(text, ws_end)
+        if title_end is not None:
+            after_title_eol = _consume_line_end(text, title_end)
+            if after_title_eol is not None:
+                return after_title_eol, norm_label
+    if no_title_eol is not None:
+        return no_title_eol, norm_label
+    return None
+
+
+def _strip_leading_link_ref_defs(
+    paragraph_text: str,
+    defined_labels: set[str] | None = None,
+) -> str:
+    """按 CommonMark §4.7 剥离段落开头的全部合法链接引用定义，并记录定义标签。"""
+    pos = 0
+    n = len(paragraph_text)
+    while pos < n:
+        matched = _match_single_link_ref_def(paragraph_text, pos)
+        if matched is None:
+            break
+        next_pos, norm_label = matched
+        if defined_labels is not None:
+            defined_labels.add(norm_label)
+        pos = next_pos
+    return paragraph_text[pos:]
+
+
+def _find_code_span_end(text: str, start: int) -> tuple[int, int]:
+    """返回 (tick_end, found_end)；未闭合时 found_end 为 -1。"""
+    n = len(text)
+    tick_end = start
+    while tick_end < n and text[tick_end] == "`":
+        tick_end += 1
+    tick_len = tick_end - start
+    j = tick_end
+    while j < n:
+        if text[j] == "`":
+            run_start = j
+            while j < n and text[j] == "`":
+                j += 1
+            if j - run_start == tick_len:
+                return tick_end, j
+        else:
+            j += 1
+    return tick_end, -1
+
+
+def _match_inline_link_dest_title(text: str, pos: int) -> int | None:
+    n = len(text)
+    if pos >= n or text[pos] != "(":
+        return None
+    i = pos + 1
+    while i < n and text[i] in (" ", "\t", "\n"):
+        i += 1
+    if i < n and text[i] == ")":
+        return i + 1
+    dest_end = _parse_link_destination(text, i)
+    if dest_end is None:
+        return None
+    i = dest_end
+    ws_start = i
+    while i < n and text[i] in (" ", "\t", "\n"):
+        i += 1
+    if i < n and text[i] == ")":
+        return i + 1
+    if i > ws_start:
+        title_end = _parse_link_title(text, i)
+        if title_end is None:
+            return None
+        i = title_end
+        while i < n and text[i] in (" ", "\t", "\n"):
+            i += 1
+        if i < n and text[i] == ")":
+            return i + 1
+    return None
+
+
+def _match_link_tail(
+    text: str,
+    open_bracket: int,
+    close_bracket: int,
+    defined_labels: frozenset[str],
+) -> int | None:
+    """在 `]` 之后匹配行内 `(dest title)` 或引用 `[label]` / `[]` / 简写引用。"""
+    n = len(text)
+    after = close_bracket + 1
+    if after < n and text[after] == "(":
+        inline_end = _match_inline_link_dest_title(text, after)
+        if inline_end is not None:
+            return inline_end
+    if defined_labels:
+        if after < n and text[after] == "[":
+            if after + 1 < n and text[after + 1] == "]":
+                self_label = _match_link_label_brackets(text, open_bracket)
+                if self_label is not None and self_label[0] == close_bracket + 1 and self_label[1] in defined_labels:
+                    return after + 2
+            ref_label = _match_link_label_brackets(text, after)
+            if ref_label is not None and ref_label[1] in defined_labels:
+                return ref_label[0]
+        else:
+            self_label = _match_link_label_brackets(text, open_bracket)
+            if self_label is not None and self_label[0] == close_bracket + 1 and self_label[1] in defined_labels:
+                return close_bracket + 1
+    return None
+
+
+def _find_matching_bracket(
+    text: str,
+    open_pos: int,
+    *,
+    allow_nested_links: bool,
+    defined_labels: frozenset[str],
+) -> int:
+    n = len(text)
+    i = open_pos + 1
+    depth = 1
+    while i < n:
+        ch = text[i]
+        if ch == "\\" and i + 1 < n and text[i + 1] in _ASCII_PUNCTUATION:
+            i += 2
+            continue
+        if ch == "`":
+            tick_end, found_end = _find_code_span_end(text, i)
+            i = found_end if found_end != -1 else tick_end
+            continue
+        if ch == "<":
+            auto_m = _AUTOLINK_URI_RE.match(text, i) or _AUTOLINK_EMAIL_RE.match(text, i)
+            if auto_m is not None:
+                i = auto_m.end()
+                continue
+            html_m = _INLINE_RAW_HTML_RE.match(text, i)
+            if html_m is not None:
+                i = html_m.end()
+                continue
+            i += 1
+            continue
+        if ch == "!" and i + 1 < n and text[i + 1] == "[":
+            img_close = _find_matching_bracket(
+                text,
+                i + 1,
+                allow_nested_links=True,
+                defined_labels=defined_labels,
+            )
+            if img_close == -1:
+                return -1
+            img_end = _match_link_tail(text, i + 1, img_close, defined_labels)
+            i = img_end if img_end is not None else img_close + 1
+            continue
+        if ch == "[":
+            if not allow_nested_links:
+                inner_close = _find_matching_bracket(
+                    text,
+                    i,
+                    allow_nested_links=False,
+                    defined_labels=defined_labels,
+                )
+                if inner_close == -1:
+                    return -1
+                if _match_link_tail(text, i, inner_close, defined_labels) is not None:
+                    return -1
+                i = inner_close + 1
+                continue
+            depth += 1
+            i += 1
+            continue
+        if ch == "]":
+            depth -= 1
+            if depth == 0:
+                return i
+            i += 1
+            continue
+        i += 1
+    return -1
+
+
+def _scan_inline_visible(text: str, defined_labels: frozenset[str] = frozenset()) -> str:
+    """CommonMark §6 段落行内单遍扫描器：屏蔽代码跨度、自动链接、原始 HTML 与链接/图片隐藏部分。"""
+    out: list[str] = []
+    n = len(text)
+    i = 0
+    while i < n:
+        ch = text[i]
+        # 1. 反斜杠转义（§2.4）与反斜杠硬换行（§6.7）
+        if ch == "\\" and i + 1 < n:
+            nxt = text[i + 1]
+            if nxt in _ASCII_PUNCTUATION:
+                out.append(nxt)
+                i += 2
+                continue
+            if nxt == "\n":
+                out.append("\n")
+                i += 2
+                continue
+            out.append(ch)
+            i += 1
+            continue
+
+        # 2. 行内代码跨度（§6.1）
+        if ch == "`":
+            tick_end, found_end = _find_code_span_end(text, i)
+            if found_end != -1:
+                out.append("\u200b")
+                i = found_end
+            else:
+                out.append(text[i:tick_end])
+                i = tick_end
+            continue
+
+        # 3. 自动链接（§6.5）与行内原始 HTML（§6.6）
+        if ch == "<":
+            auto_m = _AUTOLINK_URI_RE.match(text, i) or _AUTOLINK_EMAIL_RE.match(text, i)
+            if auto_m is not None:
+                out.append("\u200b")
+                i = auto_m.end()
+                continue
+            html_m = _INLINE_RAW_HTML_RE.match(text, i)
+            if html_m is not None:
+                i = html_m.end()
+                continue
+            out.append(ch)
+            i += 1
+            continue
+
+        # 4. 行内/引用图片（§6.4）
+        if ch == "!" and i + 1 < n and text[i + 1] == "[":
+            close_bracket = _find_matching_bracket(
+                text,
+                i + 1,
+                allow_nested_links=True,
+                defined_labels=defined_labels,
+            )
+            if close_bracket != -1:
+                img_end = _match_link_tail(text, i + 1, close_bracket, defined_labels)
+                if img_end is not None:
+                    out.append("\u200b")
+                    i = img_end
+                    continue
+            out.append(ch)
+            i += 1
+            continue
+
+        # 5. 行内/引用链接（§6.3）
+        if ch == "[":
+            close_bracket = _find_matching_bracket(
+                text,
+                i,
+                allow_nested_links=False,
+                defined_labels=defined_labels,
+            )
+            if close_bracket != -1:
+                link_end = _match_link_tail(text, i, close_bracket, defined_labels)
+                if link_end is not None:
+                    inner_visible = _scan_inline_visible(text[i + 1 : close_bracket], defined_labels)
+                    out.append(inner_visible)
+                    if link_end > close_bracket + 1:
+                        out.append("\u200b")
+                    i = link_end
+                    continue
+            out.append(ch)
+            i += 1
+            continue
+
+        # 6. 普通字符原样输出
+        out.append(ch)
+        i += 1
+    return "".join(out)
+
+
 def _extract_visible_paragraph_lines(body: str) -> list[str]:
-    """按 CommonMark Phase-1 容器栈 + 叶子块模型提取非引用可见段落行。"""
+    """按 CommonMark Phase-1 容器栈/叶子块 + §4.7 链接引用定义剥离 + §6 行内扫描提取非引用可见段落行。"""
     containers: list[_Container] = []
     leaf: _Leaf | None = None
-    visible_lines: list[str] = []
+    defined_labels: set[str] = set()
+    visible_paragraphs: list[str] = []
 
     def close_leaf(*, emit: bool = True) -> None:
         nonlocal leaf
-        if emit and isinstance(leaf, _Paragraph) and not any(isinstance(c, _BlockQuote) for c in containers):
-            cleaned = _INLINE_HTML_COMMENT_RE.sub("", "\n".join(leaf.lines))
-            for para_line in cleaned.splitlines():
-                stripped = para_line.strip()
-                if stripped:
-                    visible_lines.append(stripped)
+        if isinstance(leaf, _Paragraph):
+            remaining = _strip_leading_link_ref_defs("\n".join(leaf.lines), defined_labels)
+            if emit and remaining and not any(isinstance(c, _BlockQuote) for c in containers):
+                visible_paragraphs.append(remaining)
         leaf = None
 
     def close_unmatched(matched_count: int) -> None:
@@ -682,7 +1154,7 @@ def _extract_visible_paragraph_lines(body: str) -> list[str]:
         if containers and isinstance(containers[-1], _ListItem):
             containers[-1].has_content = True
 
-    for raw_line in body.splitlines():
+    for raw_line in _split_commonmark_lines(body):
         cursor = _LineCursor(raw_line)
 
         # 1. 从外到内匹配已打开容器栈
@@ -806,7 +1278,7 @@ def _extract_visible_paragraph_lines(body: str) -> list[str]:
                 close_unmatched(matched)
                 close_leaf()
                 mark_parent_has_content()
-                if html_kind in (1, 2, 3, 4, 5) and _is_html_block_end(html_kind, rest):
+                if html_kind in (1, 2, 3, 4, 5) and _is_html_block_end(html_kind, rest, is_opening_line=True):
                     leaf = None
                 else:
                     leaf = _HTMLBlock(kind=html_kind)
@@ -814,9 +1286,16 @@ def _extract_visible_paragraph_lines(body: str) -> list[str]:
                 break
 
             if same_container_para and _SETEXT_UNDERLINE_BODY_RE.match(rest):
-                close_leaf(emit=False)
-                line_consumed = True
-                break
+                assert isinstance(leaf, _Paragraph)
+                remaining_before_setext = _strip_leading_link_ref_defs("\n".join(leaf.lines), defined_labels)
+                if remaining_before_setext:
+                    leaf = None
+                    line_consumed = True
+                    break
+                # 仅含链接引用定义的段落不可变成 Setext 标题：先关闭该空段落，再按普通块继续解析当前行
+                leaf = None
+                same_container_para = False
+                any_open_para = False
 
             if _THEMATIC_BREAK_BODY_RE.match(rest):
                 close_unmatched(matched)
@@ -861,8 +1340,8 @@ def _extract_visible_paragraph_lines(body: str) -> list[str]:
         if line_consumed:
             continue
 
-        # 4. 段落续行（含 BlockQuote / ListItem 惰性续行）或开启新段落
-        text_line = cursor.rest_text().strip()
+        # 4. 段落续行（含 BlockQuote / ListItem 惰性续行）或开启新段落；按 CommonMark §4.8 仅剥离 ASCII 空格/制表符
+        text_line = cursor.rest_text().strip(" \t")
         if isinstance(leaf, _Paragraph):
             leaf.lines.append(text_line)
         else:
@@ -871,6 +1350,15 @@ def _extract_visible_paragraph_lines(body: str) -> list[str]:
             leaf = _Paragraph(lines=[text_line])
 
     close_leaf()
+
+    frozen_labels = frozenset(defined_labels)
+    visible_lines: list[str] = []
+    for para_text in visible_paragraphs:
+        scanned = _scan_inline_visible(para_text, frozen_labels)
+        for para_line in _split_commonmark_lines(scanned):
+            stripped = para_line.strip(" \t")
+            if stripped:
+                visible_lines.append(stripped)
     return visible_lines
 
 
@@ -907,7 +1395,9 @@ def parse_wontfix_replies(
             continue
         fallback_file, fallback_line = _extract_comment_file_and_line(comment)
 
-        directive_index = 0
+        comment_replies: list[AuthorReply] = []
+        id_reasons: dict[str, set[str]] = {}
+        seen_exact: set[tuple[str | None, str | None, int | None, str]] = set()
         for visible_line in _extract_visible_paragraph_lines(body):
             match = _WONTFIX_HEAD_RE.match(visible_line)
             if not match:
@@ -934,7 +1424,16 @@ def parse_wontfix_replies(
                 file_path = None
                 line_num = None
 
-            replies.append(
+            norm_reason = _normalize_fingerprint_text(reason, "reason")
+            exact_sig = (finding_id, file_path, line_num, norm_reason)
+            if exact_sig in seen_exact:
+                continue
+            seen_exact.add(exact_sig)
+
+            if finding_id is not None:
+                id_reasons.setdefault(finding_id, set()).add(norm_reason)
+
+            comment_replies.append(
                 AuthorReply(
                     finding_id=finding_id,
                     file=file_path,
@@ -942,10 +1441,15 @@ def parse_wontfix_replies(
                     reason=reason,
                     comment_id=comment_id,
                     author=author,
-                    directive_index=directive_index,
                 )
             )
-            directive_index += 1
+
+        # 同评论内针对同一 target_finding_id 出现不同理由的冲突指令时拒收歧义，绝不靠下标编号
+        conflicting_ids = {fid for fid, reasons in id_reasons.items() if len(reasons) > 1}
+        for item in comment_replies:
+            if item.finding_id is not None and item.finding_id in conflicting_ids:
+                continue
+            replies.append(item)
     return tuple(replies)
 
 
@@ -956,7 +1460,7 @@ def _analyze_author_replies(
     consumed_reply_keys: Collection[str] = (),
     consumed_comment_ids: Collection[str] = (),
 ) -> tuple[dict[str, AuthorReply], dict[str, frozenset[str]]]:
-    """同时计算唯一绑定回复与每个发现关联的全部未消费回复键（供处置时一并消费，防重开复用旧评论）。"""
+    """同时计算唯一绑定回复与每个发现关联的全部未消费回复键（含 reply_key 与 comment:resolved:fp）。"""
     finding_list: list[Finding] = []
     seen_ids: set[str] = set()
     for item in findings:
@@ -971,15 +1475,28 @@ def _analyze_author_replies(
     consumed_keys = _normalize_str_collection(consumed_reply_keys, "consumed_reply_keys")
     consumed_cids = _normalize_str_collection(consumed_comment_ids, "consumed_comment_ids")
 
-    best_by_id: dict[str, tuple[int, AuthorReply]] = {}
-    matched_keys_by_id: dict[str, set[str]] = {}
+    # 校验并识别同评论内针对同一 target_finding_id 的冲突指令（即使直接构造 AuthorReply 绕过解析器也拒收）
+    validated_replies: list[AuthorReply] = []
+    comment_id_reasons: dict[tuple[str, str], set[str]] = {}
     for reply in replies:
         if not isinstance(reply, AuthorReply):
             raise ConvergenceError(f"replies 元素必须是 AuthorReply：{reply!r}")
         cid = _require_non_empty_str(reply.comment_id, "reply.comment_id")
+        validated_replies.append(reply)
+        if reply.finding_id is not None and reply.reply_key not in consumed_keys and cid not in consumed_cids:
+            key_pair = (cid, reply.finding_id.strip().lower())
+            comment_id_reasons.setdefault(key_pair, set()).add(_normalize_fingerprint_text(reply.reason, "reason"))
+    conflicting_comment_ids = {pair for pair, reasons in comment_id_reasons.items() if len(reasons) > 1}
+
+    best_by_id: dict[str, tuple[int, AuthorReply]] = {}
+    matched_keys_by_id: dict[str, set[str]] = {}
+    for reply in validated_replies:
+        cid = reply.comment_id.strip()
         if reply.reply_key in consumed_keys:
             continue
         if cid in consumed_cids:
+            continue
+        if reply.finding_id is not None and (cid, reply.finding_id.strip().lower()) in conflicting_comment_ids:
             continue
 
         matches: list[Finding]
@@ -1000,13 +1517,18 @@ def _analyze_author_replies(
             continue
 
         for matched_finding in matches:
-            matched_keys_by_id.setdefault(matched_finding.finding_id, set()).add(reply.reply_key)
+            keys_set = matched_keys_by_id.setdefault(matched_finding.finding_id, set())
+            keys_set.add(reply.reply_key)
+            keys_set.add(_resolved_reply_key(cid, matched_finding.finding_id))
 
         # 命中 0 个或超过 1 个活跃候选均拒绝绑定（绝不让一条歧义回复解除多个发现）
         if len(matches) != 1:
             continue
 
         target_id = matches[0].finding_id
+        if _resolved_reply_key(cid, target_id) in consumed_keys:
+            continue
+
         current = best_by_id.get(target_id)
         if current is None or specificity >= current[0]:
             best_by_id[target_id] = (specificity, reply)
@@ -1078,198 +1600,6 @@ def is_blocking_finding(verified_finding: VerifiedFinding) -> bool:
     return verified_finding.is_blocking
 
 
-def accept_quick_pass_findings(
-    panel: ReviewPanel,
-    findings: Sequence[Finding],
-) -> tuple[VerifiedFinding, ...]:
-    """低风险快审显式直通入口（仅允许 panel.require_verifier=False，避免与异家族核实混用）。"""
-    if not isinstance(panel, ReviewPanel):
-        raise ConvergenceError("panel 必须是 ReviewPanel")
-    if panel.require_verifier:
-        raise ConvergenceError("当前审查面板要求独立核实（require_verifier=True），禁止走快审直通入口")
-
-    allowed_finders = {m.strip() for m in panel.finder_models}
-    seen_ids: set[str] = set()
-    accepted: list[VerifiedFinding] = []
-    quick_model = f"quick-pass:{panel.finder_models[0].strip()}"
-    for item in findings:
-        if not isinstance(item, Finding):
-            raise ConvergenceError(f"findings 元素必须是 Finding：{item!r}")
-        fid = item.finding_id
-        if fid in seen_ids:
-            raise ConvergenceError(f"findings 含重复指纹 {fid}，请先合并去重")
-        seen_ids.add(fid)
-
-        real_models = _real_source_models(item.source_models)
-        if not real_models:
-            raise ConvergenceError(f"快审发现 {fid} 缺少真实 finder 模型来源")
-        unknown_sources = [m for m in real_models if m not in allowed_finders]
-        if unknown_sources:
-            raise ConvergenceError(
-                f"快审发现 {fid} 的来源模型 {unknown_sources!r} 不在 panel.finder_models 中"
-            )
-        accepted.append(
-            VerifiedFinding(
-                finding=item,
-                verdict=VerificationVerdict.CONFIRMED,
-                verifier_model=quick_model,
-                verifier_evidence=f"低风险快审直通（免独立核实，来源：{', '.join(real_models)}）：{item.evidence}",
-                author_reply=None,
-            )
-        )
-    return tuple(accepted)
-
-
-@dataclass(frozen=True)
-class RoundCandidates:
-    """强校验且不可伪造的单轮核实候选集合：严格隔离本轮当前面板发现与跨轮保留历史 Important。"""
-
-    panel: ReviewPanel
-    current_round_findings: tuple[Finding, ...]
-    prior_important: tuple[Finding, ...] = ()
-    findings: tuple[Finding, ...] = field(init=False)
-
-    def __post_init__(self) -> None:
-        if not isinstance(self.panel, ReviewPanel):
-            raise ConvergenceError("RoundCandidates.panel 必须是 ReviewPanel")
-        if not isinstance(self.current_round_findings, tuple):
-            raise ConvergenceError("RoundCandidates.current_round_findings 必须是 Finding 元组")
-        if not isinstance(self.prior_important, tuple):
-            raise ConvergenceError("RoundCandidates.prior_important 必须是 Finding 元组")
-
-        allowed_finders = frozenset(m.strip() for m in self.panel.finder_models)
-        verifier_family = self.panel.verifier_family
-
-        batches: list[tuple[str, Sequence[Finding]]] = []
-        for item in self.current_round_findings:
-            if not isinstance(item, Finding):
-                raise ConvergenceError(f"current_round_findings 元素必须是 Finding：{item!r}")
-            if not item.source_models:
-                raise ConvergenceError(f"本轮发现 {item.finding_id} 缺少 source_models，禁止绕过面板归属校验")
-            unknown_models = [m.strip() for m in item.source_models if m.strip() not in allowed_finders]
-            if unknown_models:
-                raise ConvergenceError(
-                    f"本轮发现 {item.finding_id} 的来源模型 {unknown_models!r} 不在 panel.finder_models 中"
-                )
-            batches.append((item.source_models[0].strip(), (item,)))
-
-        prior_seen: set[str] = set()
-        for item in self.prior_important:
-            if not isinstance(item, Finding):
-                raise ConvergenceError(f"prior_important 元素必须是 Finding：{item!r}")
-            if item.severity != Severity.IMPORTANT:
-                raise ConvergenceError(f"prior_important 仅允许 Important 发现，收到 {item.severity.value}")
-            fid = item.finding_id
-            if fid in prior_seen:
-                raise ConvergenceError(f"prior_important 含重复指纹 {fid}，禁止同指纹注入多份历史条目")
-            prior_seen.add(fid)
-
-            real_models = _real_source_models(item.source_models)
-            if not real_models:
-                raise ConvergenceError(f"历史发现 {fid} 缺少真实 finder source_models，禁止绕过异家族核实校验")
-            for src_model in real_models:
-                src_family = infer_model_family(src_model)
-                if verifier_family is not None and src_family == verifier_family:
-                    raise ConvergenceError(
-                        f"核实者模型 {self.panel.verifier_model!r}（家族 {verifier_family}）"
-                        f"不得与历史发现 {fid} 来源模型 {src_model!r} 同家族"
-                    )
-            batches.append((real_models[0], (item,)))
-
-        merged = merge_and_dedupe_findings(batches) if batches else ()
-        object.__setattr__(self, "findings", merged)
-
-
-def parse_verifier_output(
-    payload: Mapping[str, Any],
-    candidates: RoundCandidates,
-    *,
-    verifier_model: str,
-    author_replies: Sequence[AuthorReply] = (),
-    consumed_reply_keys: Collection[str] = (),
-    consumed_comment_ids: Collection[str] = (),
-) -> tuple[VerifiedFinding, ...]:
-    """解析核实者裁决并强制与强校验的 RoundCandidates 及审查面板 1:1 绑定（fail-closed）。"""
-    if not isinstance(candidates, RoundCandidates):
-        raise ConvergenceError("candidates 必须是经面板强校验的 RoundCandidates")
-    panel = candidates.panel
-    if not panel.require_verifier:
-        raise ConvergenceError("panel.require_verifier=False 必须走 accept_quick_pass_findings，禁止调用 parse_verifier_output")
-    model = _require_non_empty_str(verifier_model, "verifier_model")
-    expected_verifier = _require_non_empty_str(panel.verifier_model, "panel.verifier_model")
-    if model != expected_verifier:
-        raise ConvergenceError(f"verifier_model={model!r} 与 panel.verifier_model={expected_verifier!r} 不一致")
-    verifier_family = infer_model_family(model)
-
-    if not isinstance(payload, Mapping):
-        raise ConvergenceError("verifier 输出必须是对象")
-    raw_verdicts = payload.get("verdicts")
-    if not isinstance(raw_verdicts, list):
-        raise ConvergenceError("verifier 输出缺少 verdicts 列表")
-
-    candidates_by_id: dict[str, Finding] = {}
-    ordered_ids: list[str] = []
-    candidate_list: list[Finding] = []
-    for candidate in candidates.findings:
-        cid = candidate.finding_id
-        if cid in candidates_by_id:
-            raise ConvergenceError(f"candidates.findings 含重复指纹 {cid}")
-        real_models = _real_source_models(candidate.source_models)
-        if not real_models:
-            raise ConvergenceError(f"候选发现 {cid} 缺少真实 finder source_models，禁止绕过异家族核实校验")
-        for src_model in real_models:
-            src_family = infer_model_family(src_model)
-            if src_family == verifier_family:
-                raise ConvergenceError(
-                    f"核实者模型 {model!r}（家族 {verifier_family}）不得与候选发现 {cid} 来源模型 {src_model!r} 同家族"
-                )
-        candidates_by_id[cid] = candidate
-        ordered_ids.append(cid)
-        candidate_list.append(candidate)
-
-    bound_replies, matched_keys_by_id = _analyze_author_replies(
-        candidate_list,
-        author_replies,
-        consumed_reply_keys=consumed_reply_keys,
-        consumed_comment_ids=consumed_comment_ids,
-    )
-
-    verdicts_by_id: dict[str, VerifiedFinding] = {}
-    for idx, item in enumerate(raw_verdicts):
-        if not isinstance(item, Mapping):
-            raise ConvergenceError(f"verdicts[{idx}] 必须是对象")
-        fid = _require_non_empty_str(item.get("finding_id"), f"verdicts[{idx}].finding_id").lower()
-        if fid not in candidates_by_id:
-            raise ConvergenceError(f"核实者不得引入候选清单外的新发现：{fid}")
-        if fid in verdicts_by_id:
-            raise ConvergenceError(f"核实者对同一发现重复裁决：{fid}")
-        verdict = parse_verification_verdict(item.get("verdict"))
-        raw_evidence = item["verifier_evidence"] if "verifier_evidence" in item else item.get("evidence")
-        verifier_evidence = _require_non_empty_str(raw_evidence, f"verdicts[{idx}].verifier_evidence")
-        finding = candidates_by_id[fid]
-        matched_reply: AuthorReply | None = None
-        if verdict == VerificationVerdict.RESOLVED_BY_WONTFIX:
-            matched_reply = bound_replies.get(fid)
-            if matched_reply is None:
-                raise ConvergenceError(
-                    f"发现 {fid} 裁决为 resolved_by_wontfix，但缺少唯一匹配且未消费的作者不修回复"
-                )
-        verdicts_by_id[fid] = VerifiedFinding(
-            finding=finding,
-            verdict=verdict,
-            verifier_model=model,
-            verifier_evidence=verifier_evidence,
-            author_reply=matched_reply,
-            related_reply_keys=tuple(sorted(matched_keys_by_id.get(fid, ()))),
-        )
-
-    missing = [cid for cid in ordered_ids if cid not in verdicts_by_id]
-    if missing:
-        raise ConvergenceError(f"核实者遗漏候选发现：{', '.join(missing)}")
-
-    return tuple(verdicts_by_id[cid] for cid in ordered_ids)
-
-
 @dataclass(frozen=True)
 class RoundHistoryEntry:
     round_number: int
@@ -1280,17 +1610,27 @@ class RoundHistoryEntry:
     consumed_reply_keys: frozenset[str] = frozenset()
     rejected_fingerprints: frozenset[str] = frozenset()
     pending_non_blocking: tuple[VerifiedFinding, ...] = ()
+    panel: ReviewPanel | None = None
+    outcome: RoundOutcome | None = None
 
     def __post_init__(self) -> None:
         if type(self.round_number) is not int or self.round_number <= 0:
             raise ConvergenceError(f"round_number 必须是正整数：{self.round_number!r}")
-        _require_non_empty_str(self.head_sha, "head_sha")
+        norm_head = _require_non_empty_str(self.head_sha, "head_sha")
+        object.__setattr__(self, "head_sha", norm_head)
         if not isinstance(self.posted_fingerprints, frozenset):
             raise ConvergenceError("posted_fingerprints 必须是 frozenset[str]")
         for fp in self.posted_fingerprints:
             _require_non_empty_str(fp, "posted_fingerprints[]")
         if not isinstance(self.unresolved_important, tuple):
             raise ConvergenceError("unresolved_important 必须是 Finding 元组")
+        if self.panel is not None and not isinstance(self.panel, ReviewPanel):
+            raise ConvergenceError("RoundHistoryEntry.panel 必须是 ReviewPanel 或 None")
+
+        panel_verifier_family = self.panel.verifier_family if self.panel is not None else None
+        panel_finders = (
+            frozenset(m.strip() for m in self.panel.finder_models) if self.panel is not None else frozenset()
+        )
         unresolved_ids: set[str] = set()
         for item in self.unresolved_important:
             if not isinstance(item, Finding):
@@ -1301,6 +1641,38 @@ class RoundHistoryEntry:
             if fid in unresolved_ids:
                 raise ConvergenceError(f"unresolved_important 含重复指纹：{fid}")
             unresolved_ids.add(fid)
+            real_models = _real_source_models(item.source_models)
+            if not real_models:
+                raise ConvergenceError(f"历史未解除发现 {fid} 缺少真实 finder source_models")
+            for src_model in real_models:
+                src_family = infer_model_family(src_model)
+                if panel_verifier_family is not None and src_family == panel_verifier_family:
+                    raise ConvergenceError(
+                        f"历史轮次 {self.round_number} 核实者与未解除发现 {fid} 来源模型 {src_model!r} 同家族"
+                    )
+            if self.panel is not None and self.round_number == 1:
+                unknown = [m for m in real_models if m not in panel_finders]
+                if unknown:
+                    raise ConvergenceError(
+                        f"第 1 轮历史未解除发现 {fid} 的来源模型 {unknown!r} 不在 panel.finder_models 中"
+                    )
+
+        if self.outcome is None:
+            if not self.unresolved_important:
+                derived_outcome = RoundOutcome.PASS
+            elif self.round_number > MAX_AUTO_ROUNDS:
+                derived_outcome = RoundOutcome.NON_CONVERGENT
+            else:
+                derived_outcome = RoundOutcome.BLOCKED
+            object.__setattr__(self, "outcome", derived_outcome)
+        else:
+            if not isinstance(self.outcome, RoundOutcome):
+                raise ConvergenceError(f"RoundHistoryEntry.outcome 必须是 RoundOutcome：{self.outcome!r}")
+            if self.outcome == RoundOutcome.PASS and self.unresolved_important:
+                raise ConvergenceError("outcome=PASS 时 unresolved_important 必须为空")
+            if self.outcome != RoundOutcome.PASS and not self.unresolved_important:
+                raise ConvergenceError("outcome 非 PASS 时 unresolved_important 不能为空")
+
         if not isinstance(self.resolved_fingerprints, frozenset):
             raise ConvergenceError("resolved_fingerprints 必须是 frozenset[str]")
         for fp in self.resolved_fingerprints:
@@ -1337,6 +1709,426 @@ class RoundHistoryEntry:
 
 
 @dataclass(frozen=True)
+class FinderBatch:
+    """单个独立 finder 会话的产出批次：强绑定模型名、会话 ID 与每条发现的来源归属。"""
+
+    model: str
+    session_id: str
+    findings: tuple[Finding, ...] = ()
+
+    def __post_init__(self) -> None:
+        norm_model = _require_non_empty_str(self.model, "FinderBatch.model")
+        norm_session = _require_non_empty_str(self.session_id, "FinderBatch.session_id")
+        object.__setattr__(self, "model", norm_model)
+        object.__setattr__(self, "session_id", norm_session)
+        if not isinstance(self.findings, tuple):
+            raise ConvergenceError("FinderBatch.findings 必须是 Finding 元组")
+        for item in self.findings:
+            if not isinstance(item, Finding):
+                raise ConvergenceError(f"FinderBatch.findings 元素必须是 Finding：{item!r}")
+            if not item.source_models:
+                raise ConvergenceError(f"FinderBatch 发现 {item.finding_id} 缺少 source_models")
+            item_models = {m.strip() for m in item.source_models}
+            if item_models != {norm_model}:
+                raise ConvergenceError(
+                    f"FinderBatch(model={norm_model!r}) 的发现 {item.finding_id} "
+                    f"来源模型 {item.source_models!r} 必须非空且仅含 {norm_model!r}"
+                )
+
+
+@dataclass(frozen=True)
+class RoundCandidates:
+    """不可绕过的单轮核实候选单一事实源：强绑定轮次、HEAD、面板、完整 finder 批次与连续历史链。"""
+
+    round_number: int
+    head_sha: str
+    panel: ReviewPanel
+    finder_batches: tuple[FinderBatch, ...]
+    history: tuple[RoundHistoryEntry, ...] = ()
+    prior_important: tuple[Finding, ...] = field(init=False)
+    current_round_findings: tuple[Finding, ...] = field(init=False)
+    findings: tuple[Finding, ...] = field(init=False)
+
+    def __post_init__(self) -> None:
+        if type(self.round_number) is not int or self.round_number < 1:
+            raise ConvergenceError(f"RoundCandidates.round_number 必须是 >= 1 的整数：{self.round_number!r}")
+        norm_head = _require_non_empty_str(self.head_sha, "RoundCandidates.head_sha")
+        object.__setattr__(self, "head_sha", norm_head)
+        if not isinstance(self.panel, ReviewPanel):
+            raise ConvergenceError("RoundCandidates.panel 必须是 ReviewPanel")
+        if not isinstance(self.finder_batches, tuple):
+            raise ConvergenceError("RoundCandidates.finder_batches 必须是 FinderBatch 元组")
+        for batch in self.finder_batches:
+            if not isinstance(batch, FinderBatch):
+                raise ConvergenceError(f"RoundCandidates.finder_batches 元素必须是 FinderBatch：{batch!r}")
+        if not isinstance(self.history, tuple):
+            raise ConvergenceError("RoundCandidates.history 必须是 RoundHistoryEntry 元组")
+        if len(self.history) != self.round_number - 1:
+            raise ConvergenceError(
+                f"历史链长度必须等于 round_number - 1：期望 {self.round_number - 1}，实际 {len(self.history)}"
+            )
+
+        verifier_family = self.panel.verifier_family
+        prev_unresolved_sources: dict[str, frozenset[str]] = {}
+        for idx, entry in enumerate(self.history, start=1):
+            if not isinstance(entry, RoundHistoryEntry):
+                raise ConvergenceError(f"history[{idx - 1}] 必须是 RoundHistoryEntry")
+            if entry.round_number != idx:
+                raise ConvergenceError(f"history 轮次必须从 1 连续递增：期望 {idx}，实际 {entry.round_number}")
+            _require_non_empty_str(entry.head_sha, f"history[{idx - 1}].head_sha")
+
+            seen_hist_ids: set[str] = set()
+            for item in entry.unresolved_important:
+                if item.severity != Severity.IMPORTANT:
+                    raise ConvergenceError(f"历史未解除发现仅允许 Important，收到 {item.severity.value}")
+                fid = item.finding_id
+                if fid in seen_hist_ids:
+                    raise ConvergenceError(f"history[{idx - 1}].unresolved_important 含重复指纹 {fid}")
+                seen_hist_ids.add(fid)
+                real_models = _real_source_models(item.source_models)
+                if not real_models:
+                    raise ConvergenceError(f"历史发现 {fid} 缺少真实 finder source_models，禁止绕过异家族核实校验")
+                for src_model in real_models:
+                    src_family = infer_model_family(src_model)
+                    if verifier_family is not None and src_family == verifier_family:
+                        raise ConvergenceError(
+                            f"核实者模型 {self.panel.verifier_model!r}（家族 {verifier_family}）"
+                            f"不得与历史发现 {fid} 来源模型 {src_model!r} 同家族"
+                        )
+                    if entry.panel is not None and entry.panel.verifier_family is not None:
+                        if src_family == entry.panel.verifier_family:
+                            raise ConvergenceError(
+                                f"历史第 {idx} 轮核实者模型 {entry.panel.verifier_model!r} "
+                                f"不得与发现 {fid} 来源模型 {src_model!r} 同家族"
+                            )
+                if entry.panel is not None:
+                    allowed_in_entry = frozenset(m.strip() for m in entry.panel.finder_models) | (
+                        prev_unresolved_sources.get(fid, frozenset())
+                    )
+                    unknown_models = [m for m in real_models if m not in allowed_in_entry]
+                    if unknown_models:
+                        raise ConvergenceError(
+                            f"历史第 {idx} 轮未解除发现 {fid} 的来源模型 {unknown_models!r} "
+                            f"既不在当轮 panel.finder_models 中，也非前轮结转来源"
+                        )
+
+            if entry.outcome == RoundOutcome.PASS:
+                prev_unresolved_sources = {}
+            else:
+                prev_unresolved_sources = {
+                    f.finding_id: frozenset(_real_source_models(f.source_models))
+                    for f in entry.unresolved_important
+                }
+
+        if not self.history or self.history[-1].outcome == RoundOutcome.PASS:
+            prior_important: tuple[Finding, ...] = ()
+        else:
+            prior_important = self.history[-1].unresolved_important
+
+        # 校验 finder 批次完备性：逐槽位多重集精确匹配 panel.finder_models 且会话 ID 互不重复
+        if len(self.finder_batches) != len(self.panel.finder_models):
+            raise ConvergenceError(
+                f"finder_batches 数量必须与 panel.finder_models 一致："
+                f"期望 {len(self.panel.finder_models)} 批，实际收到 {len(self.finder_batches)} 批"
+            )
+        expected_models = Counter(m.strip() for m in self.panel.finder_models)
+        actual_models = Counter(b.model for b in self.finder_batches)
+        if actual_models != expected_models:
+            raise ConvergenceError(
+                f"finder_batches 模型分布 {dict(actual_models)!r} 与 panel.finder_models {dict(expected_models)!r} 不匹配"
+            )
+        session_ids = [b.session_id for b in self.finder_batches]
+        if len(set(session_ids)) != len(session_ids):
+            raise ConvergenceError(f"本轮 finder_batches 存在重复 session_id：{session_ids!r}")
+
+        # 1. 轮内合并（保留当前轮最新定位）
+        current_round_findings = merge_and_dedupe_findings([(b.model, b.findings) for b in self.finder_batches])
+
+        # 2. 跨轮结转合并：同指纹在本轮重现时保留当前轮新定位与证据，锁定 severity=IMPORTANT 并合并 source_models
+        current_by_fp = {f.finding_id: f for f in current_round_findings}
+        merged_by_fp: dict[str, Finding] = dict(current_by_fp)
+        for prior in prior_important:
+            fp = prior.finding_id
+            prior_sources = set(_real_source_models(prior.source_models))
+            if fp in current_by_fp:
+                cur = current_by_fp[fp]
+                combined_sources = tuple(sorted(set(_real_source_models(cur.source_models)) | prior_sources))
+                merged_by_fp[fp] = Finding(
+                    severity=Severity.IMPORTANT,
+                    file=_normalize_file(cur.file),
+                    line=cur.line,
+                    category=cur.category,
+                    failure_scenario=cur.failure_scenario,
+                    evidence=cur.evidence,
+                    class_scope=cur.class_scope,
+                    source_models=combined_sources,
+                )
+            else:
+                merged_by_fp[fp] = Finding(
+                    severity=Severity.IMPORTANT,
+                    file=_normalize_file(prior.file),
+                    line=prior.line,
+                    category=prior.category,
+                    failure_scenario=prior.failure_scenario,
+                    evidence=prior.evidence,
+                    class_scope=prior.class_scope,
+                    source_models=tuple(sorted(prior_sources)),
+                )
+
+        merged = tuple(sorted(merged_by_fp.values(), key=_finding_sort_key))
+        object.__setattr__(self, "prior_important", prior_important)
+        object.__setattr__(self, "current_round_findings", current_round_findings)
+        object.__setattr__(self, "findings", merged)
+
+
+def build_round_candidates(
+    *,
+    round_number: int,
+    head_sha: str,
+    panel: ReviewPanel,
+    finder_batches: Sequence[FinderBatch],
+    history: Sequence[RoundHistoryEntry] = (),
+) -> RoundCandidates:
+    """构建经完整面板、会话唯一性与连续历史链强校验的 RoundCandidates。"""
+    if not isinstance(finder_batches, Sequence) or isinstance(finder_batches, (str, bytes)):
+        raise ConvergenceError("finder_batches 必须是 FinderBatch 序列")
+    if not isinstance(history, Sequence) or isinstance(history, (str, bytes)):
+        raise ConvergenceError("history 必须是 RoundHistoryEntry 序列")
+    return RoundCandidates(
+        round_number=round_number,
+        head_sha=head_sha,
+        panel=panel,
+        finder_batches=tuple(finder_batches),
+        history=tuple(history),
+    )
+
+
+@dataclass(frozen=True)
+class VerifiedRound:
+    """核实后的整轮不可变结果：强绑定 RoundCandidates 与一一对应的 VerifiedFinding 元组。"""
+
+    candidates: RoundCandidates
+    verdicts: tuple[VerifiedFinding, ...]
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.candidates, RoundCandidates):
+            raise ConvergenceError("VerifiedRound.candidates 必须是 RoundCandidates")
+        if not isinstance(self.verdicts, tuple):
+            raise ConvergenceError("VerifiedRound.verdicts 必须是 VerifiedFinding 元组")
+
+        candidates_by_id = {f.finding_id: f for f in self.candidates.findings}
+        prior_important_ids = frozenset(f.finding_id for f in self.candidates.prior_important)
+        history_consumed: frozenset[str] = frozenset().union(
+            *(entry.consumed_reply_keys for entry in self.candidates.history)
+        )
+        panel = self.candidates.panel
+
+        expected_verifier: str
+        if panel.require_verifier:
+            expected_verifier = _require_non_empty_str(panel.verifier_model, "panel.verifier_model")
+            verifier_family = infer_model_family(expected_verifier)
+        else:
+            expected_verifier = f"quick-pass:{panel.finder_models[0].strip()}"
+            verifier_family = None
+
+        seen_ids: set[str] = set()
+        for vf in self.verdicts:
+            if not isinstance(vf, VerifiedFinding):
+                raise ConvergenceError(f"VerifiedRound.verdicts 元素必须是 VerifiedFinding：{vf!r}")
+            fid = vf.finding.finding_id
+            if fid not in candidates_by_id:
+                raise ConvergenceError(f"VerifiedRound 包含候选清单外的发现：{fid}")
+            if fid in seen_ids:
+                raise ConvergenceError(f"VerifiedRound 含重复裁决指纹：{fid}")
+            if vf.finding != candidates_by_id[fid]:
+                raise ConvergenceError(f"VerifiedRound 发现 {fid} 与 candidates.findings 不一致")
+            if vf.verifier_model.strip() != expected_verifier:
+                raise ConvergenceError(
+                    f"VerifiedRound 发现 {fid} 的 verifier_model={vf.verifier_model!r} 与期望 {expected_verifier!r} 不一致"
+                )
+            if verifier_family is not None:
+                for src_model in _real_source_models(vf.finding.source_models):
+                    if infer_model_family(src_model) == verifier_family:
+                        raise ConvergenceError(
+                            f"核实者模型 {expected_verifier!r}（家族 {verifier_family}）"
+                            f"不得与发现 {fid} 来源模型 {src_model!r} 同家族"
+                        )
+            if vf.verdict == VerificationVerdict.RESOLVED_BY_FIX and fid not in prior_important_ids:
+                raise ConvergenceError(
+                    f"发现 {fid} 不在本轮 prior_important 中，禁止标记为 resolved_by_fix（误报请标为 rejected/false_positive）"
+                )
+            if vf.verdict == VerificationVerdict.RESOLVED_BY_WONTFIX:
+                assert vf.author_reply is not None
+                if (
+                    vf.author_reply.reply_key in history_consumed
+                    or _resolved_reply_key(vf.author_reply.comment_id, fid) in history_consumed
+                ):
+                    raise ConvergenceError(
+                        f"发现 {fid} 绑定的作者不修回复（comment_id={vf.author_reply.comment_id}）已在历史轮次被消费，禁止复用"
+                    )
+            seen_ids.add(fid)
+
+        missing = [f.finding_id for f in self.candidates.findings if f.finding_id not in seen_ids]
+        if missing:
+            raise ConvergenceError(f"VerifiedRound 遗漏候选发现：{', '.join(missing)}")
+
+    @property
+    def round_number(self) -> int:
+        return self.candidates.round_number
+
+    @property
+    def head_sha(self) -> str:
+        return self.candidates.head_sha
+
+    @property
+    def panel(self) -> ReviewPanel:
+        return self.candidates.panel
+
+    @property
+    def history(self) -> tuple[RoundHistoryEntry, ...]:
+        return self.candidates.history
+
+
+def accept_quick_pass_findings(candidates: RoundCandidates) -> VerifiedRound:
+    """低风险快审显式直通入口（仅允许 panel.require_verifier=False，并强绑定 RoundCandidates）。"""
+    if not isinstance(candidates, RoundCandidates):
+        raise ConvergenceError("candidates 必须是经面板强校验的 RoundCandidates")
+    panel = candidates.panel
+    if panel.require_verifier:
+        raise ConvergenceError("当前审查面板要求独立核实（require_verifier=True），禁止走快审直通入口")
+
+    quick_model = f"quick-pass:{panel.finder_models[0].strip()}"
+    accepted: list[VerifiedFinding] = []
+    for item in candidates.findings:
+        real_models = _real_source_models(item.source_models)
+        if not real_models:
+            raise ConvergenceError(f"快审发现 {item.finding_id} 缺少真实 finder 模型来源")
+        accepted.append(
+            VerifiedFinding(
+                finding=item,
+                verdict=VerificationVerdict.CONFIRMED,
+                verifier_model=quick_model,
+                verifier_evidence=f"低风险快审直通（免独立核实，来源：{', '.join(real_models)}）：{item.evidence}",
+                author_reply=None,
+            )
+        )
+    return VerifiedRound(candidates=candidates, verdicts=tuple(accepted))
+
+
+def parse_verifier_output(
+    payload: Mapping[str, Any],
+    candidates: RoundCandidates,
+    *,
+    verifier_model: str,
+    author_replies: Sequence[AuthorReply] = (),
+    consumed_reply_keys: Collection[str] = (),
+    consumed_comment_ids: Collection[str] = (),
+) -> VerifiedRound:
+    """解析核实者裁决并强制绑定 round_number、head_sha、审查面板与候选集（fail-closed）。"""
+    if not isinstance(candidates, RoundCandidates):
+        raise ConvergenceError("candidates 必须是经面板强校验的 RoundCandidates")
+    panel = candidates.panel
+    if not panel.require_verifier:
+        raise ConvergenceError("panel.require_verifier=False 必须走 accept_quick_pass_findings，禁止调用 parse_verifier_output")
+    model = _require_non_empty_str(verifier_model, "verifier_model")
+    expected_verifier = _require_non_empty_str(panel.verifier_model, "panel.verifier_model")
+    if model != expected_verifier:
+        raise ConvergenceError(f"verifier_model={model!r} 与 panel.verifier_model={expected_verifier!r} 不一致")
+    verifier_family = infer_model_family(model)
+
+    if not isinstance(payload, Mapping):
+        raise ConvergenceError("verifier 输出必须是对象")
+    raw_round = payload.get("round_number")
+    if type(raw_round) is not int or raw_round != candidates.round_number:
+        raise ConvergenceError(
+            f"verifier 输出 round_number={raw_round!r} 缺失或与 candidates.round_number={candidates.round_number} 不匹配"
+        )
+    raw_head = payload.get("head_sha")
+    payload_head = _require_non_empty_str(raw_head, "verifier.head_sha")
+    if payload_head != candidates.head_sha:
+        raise ConvergenceError(
+            f"verifier 输出 head_sha={payload_head!r} 与 candidates.head_sha={candidates.head_sha!r} 不匹配"
+        )
+    raw_verdicts = payload.get("verdicts")
+    if not isinstance(raw_verdicts, list):
+        raise ConvergenceError("verifier 输出缺少 verdicts 列表")
+
+    candidates_by_id: dict[str, Finding] = {}
+    ordered_ids: list[str] = []
+    candidate_list: list[Finding] = []
+    for candidate in candidates.findings:
+        cid = candidate.finding_id
+        if cid in candidates_by_id:
+            raise ConvergenceError(f"candidates.findings 含重复指纹 {cid}")
+        real_models = _real_source_models(candidate.source_models)
+        if not real_models:
+            raise ConvergenceError(f"候选发现 {cid} 缺少真实 finder source_models，禁止绕过异家族核实校验")
+        for src_model in real_models:
+            src_family = infer_model_family(src_model)
+            if src_family == verifier_family:
+                raise ConvergenceError(
+                    f"核实者模型 {model!r}（家族 {verifier_family}）不得与候选发现 {cid} 来源模型 {src_model!r} 同家族"
+                )
+        candidates_by_id[cid] = candidate
+        ordered_ids.append(cid)
+        candidate_list.append(candidate)
+
+    history_consumed: frozenset[str] = frozenset().union(*(entry.consumed_reply_keys for entry in candidates.history))
+    extra_consumed = _normalize_str_collection(consumed_reply_keys, "consumed_reply_keys")
+    effective_consumed = history_consumed | extra_consumed
+
+    bound_replies, matched_keys_by_id = _analyze_author_replies(
+        candidate_list,
+        author_replies,
+        consumed_reply_keys=effective_consumed,
+        consumed_comment_ids=consumed_comment_ids,
+    )
+
+    prior_important_ids = frozenset(f.finding_id for f in candidates.prior_important)
+    verdicts_by_id: dict[str, VerifiedFinding] = {}
+    for idx, item in enumerate(raw_verdicts):
+        if not isinstance(item, Mapping):
+            raise ConvergenceError(f"verdicts[{idx}] 必须是对象")
+        fid = _require_non_empty_str(item.get("finding_id"), f"verdicts[{idx}].finding_id").lower()
+        if fid not in candidates_by_id:
+            raise ConvergenceError(f"核实者不得引入候选清单外的新发现：{fid}")
+        if fid in verdicts_by_id:
+            raise ConvergenceError(f"核实者对同一发现重复裁决：{fid}")
+        verdict = parse_verification_verdict(item.get("verdict"))
+        raw_evidence = item["verifier_evidence"] if "verifier_evidence" in item else item.get("evidence")
+        verifier_evidence = _require_non_empty_str(raw_evidence, f"verdicts[{idx}].verifier_evidence")
+        if verdict == VerificationVerdict.RESOLVED_BY_FIX and fid not in prior_important_ids:
+            raise ConvergenceError(
+                f"发现 {fid} 不在本轮 prior_important 中，禁止标记为 resolved_by_fix（若属误报请标为 false_positive/rejected）"
+            )
+        finding = candidates_by_id[fid]
+        matched_reply: AuthorReply | None = None
+        if verdict == VerificationVerdict.RESOLVED_BY_WONTFIX:
+            matched_reply = bound_replies.get(fid)
+            if matched_reply is None:
+                raise ConvergenceError(
+                    f"发现 {fid} 裁决为 resolved_by_wontfix，但缺少唯一匹配且未消费的作者不修回复"
+                )
+        verdicts_by_id[fid] = VerifiedFinding(
+            finding=finding,
+            verdict=verdict,
+            verifier_model=model,
+            verifier_evidence=verifier_evidence,
+            author_reply=matched_reply,
+            related_reply_keys=tuple(sorted(matched_keys_by_id.get(fid, ()))),
+        )
+
+    missing = [cid for cid in ordered_ids if cid not in verdicts_by_id]
+    if missing:
+        raise ConvergenceError(f"核实者遗漏候选发现：{', '.join(missing)}")
+
+    return VerifiedRound(
+        candidates=candidates,
+        verdicts=tuple(verdicts_by_id[cid] for cid in ordered_ids),
+    )
+
+
+@dataclass(frozen=True)
 class RoundPlan:
     round_number: int
     review_scope: ReviewScope
@@ -1348,6 +2140,7 @@ class RoundPlan:
     consumed_reply_keys: frozenset[str] = frozenset()
     exceeds_auto_rounds: bool = False
     pending_non_blocking: tuple[VerifiedFinding, ...] = ()
+    history: tuple[RoundHistoryEntry, ...] = ()
 
     @property
     def prior_important_ids(self) -> frozenset[str]:
@@ -1383,6 +2176,15 @@ def _active_posted_fingerprints(history: Sequence[RoundHistoryEntry]) -> frozens
     return frozenset(active)
 
 
+def _is_reply_obviously_consumed(reply: AuthorReply, consumed_reply_keys: frozenset[str]) -> bool:
+    if reply.reply_key in consumed_reply_keys:
+        return True
+    if reply.finding_id is not None and len(reply.finding_id.strip()) == 16:
+        if _resolved_reply_key(reply.comment_id, reply.finding_id) in consumed_reply_keys:
+            return True
+    return False
+
+
 def plan_next_round(
     base_sha: str,
     head_sha: str,
@@ -1394,13 +2196,14 @@ def plan_next_round(
     for reply in author_replies:
         if not isinstance(reply, AuthorReply):
             raise ConvergenceError(f"author_replies 元素必须是 AuthorReply：{reply!r}")
-    for idx, entry in enumerate(history, start=1):
+    history_tuple = tuple(history)
+    for idx, entry in enumerate(history_tuple, start=1):
         if not isinstance(entry, RoundHistoryEntry):
             raise ConvergenceError(f"history[{idx - 1}] 必须是 RoundHistoryEntry")
         if entry.round_number != idx:
             raise ConvergenceError(f"history 轮次必须从 1 连续递增：期望 {idx}，实际 {entry.round_number}")
 
-    if not history:
+    if not history_tuple:
         return RoundPlan(
             round_number=1,
             review_scope="full_pr",
@@ -1412,65 +2215,32 @@ def plan_next_round(
             consumed_reply_keys=frozenset(),
             exceeds_auto_rounds=False,
             pending_non_blocking=(),
+            history=(),
         )
 
-    prev = history[-1]
+    prev = history_tuple[-1]
     round_number = prev.round_number + 1
-    already_posted = _active_posted_fingerprints(history)
-    consumed_reply_keys: frozenset[str] = frozenset().union(*(entry.consumed_reply_keys for entry in history))
-    active_replies = tuple(reply for reply in author_replies if reply.reply_key not in consumed_reply_keys)
+    already_posted = _active_posted_fingerprints(history_tuple)
+    consumed_reply_keys: frozenset[str] = frozenset().union(*(entry.consumed_reply_keys for entry in history_tuple))
+    active_replies = tuple(
+        reply for reply in author_replies if not _is_reply_obviously_consumed(reply, consumed_reply_keys)
+    )
     pending_non_blocking = tuple(
         vf for vf in prev.pending_non_blocking if vf.finding.finding_id not in already_posted
     )
+    unresolved_prior = () if prev.outcome == RoundOutcome.PASS else prev.unresolved_important
     return RoundPlan(
         round_number=round_number,
         review_scope="incremental_diff",
         diff_base_sha=prev.head_sha,
         diff_head_sha=head,
-        unresolved_prior_important=prev.unresolved_important,
+        unresolved_prior_important=unresolved_prior,
         author_replies=active_replies,
         already_posted_fingerprints=already_posted,
         consumed_reply_keys=consumed_reply_keys,
         exceeds_auto_rounds=round_number > MAX_AUTO_ROUNDS,
         pending_non_blocking=pending_non_blocking,
-    )
-
-
-def build_round_candidates(
-    plan: RoundPlan,
-    finder_batches: Sequence[tuple[str, Sequence[Finding]]],
-    *,
-    panel: ReviewPanel,
-) -> RoundCandidates:
-    """校验本轮 finder 批次归属当前面板并与上一轮未解除 Important 归约，产出不可伪造的 RoundCandidates。"""
-    if not isinstance(plan, RoundPlan):
-        raise ConvergenceError("plan 必须是 RoundPlan")
-    if not isinstance(panel, ReviewPanel):
-        raise ConvergenceError("panel 必须是 ReviewPanel")
-    allowed_finders = frozenset(m.strip() for m in panel.finder_models)
-
-    validated_batches: list[tuple[str, Sequence[Finding]]] = []
-    for source_model, findings in finder_batches:
-        model = _require_non_empty_str(source_model, "source_model")
-        if model not in allowed_finders:
-            raise ConvergenceError(f"本轮 finder 批次来源模型 {model!r} 不在 panel.finder_models 中")
-        batch_items: list[Finding] = []
-        for item in findings:
-            if not isinstance(item, Finding):
-                raise ConvergenceError(f"finder_batches 元素必须是 Finding：{item!r}")
-            unknown_item_models = [m.strip() for m in item.source_models if m.strip() not in allowed_finders]
-            if unknown_item_models:
-                raise ConvergenceError(
-                    f"本轮发现 {item.finding_id} 的来源模型 {unknown_item_models!r} 不在 panel.finder_models 中"
-                )
-            batch_items.append(item)
-        validated_batches.append((model, batch_items))
-
-    current_round_findings = merge_and_dedupe_findings(validated_batches) if validated_batches else ()
-    return RoundCandidates(
-        panel=panel,
-        current_round_findings=current_round_findings,
-        prior_important=plan.unresolved_prior_important,
+        history=history_tuple,
     )
 
 
@@ -1492,6 +2262,8 @@ def select_postable_findings(
 @dataclass(frozen=True)
 class RoundDecision:
     round_number: int
+    head_sha: str
+    panel: ReviewPanel
     outcome: RoundOutcome
     github_state: GitHubStatusState
     description: str
@@ -1514,13 +2286,17 @@ class RoundDecision:
 
     def to_history_entry(
         self,
-        head_sha: str,
+        head_sha: str | None = None,
         *,
         rendered: RenderedComment,
     ) -> RoundHistoryEntry:
-        """基于实际渲染结果生成轮次历史，作为已贴指纹与待补发非阻断项的唯一权威更新入口。"""
+        """基于实际渲染结果生成轮次历史，作为已贴指纹、面板、HEAD 与待补发非阻断项的唯一权威更新入口。"""
         if not isinstance(rendered, RenderedComment):
             raise ConvergenceError("rendered 必须是 RenderedComment")
+        if head_sha is not None:
+            norm_sha = _require_non_empty_str(head_sha, "head_sha")
+            if norm_sha != self.head_sha:
+                raise ConvergenceError(f"head_sha={norm_sha!r} 与 RoundDecision.head_sha={self.head_sha!r} 不一致")
         omitted_ids = frozenset(vf.finding.finding_id for vf in rendered.omitted_non_blocking)
         if omitted_ids != rendered.omitted_non_blocking_fingerprints:
             raise ConvergenceError("rendered.omitted_non_blocking 与 omitted_non_blocking_fingerprints 不一致")
@@ -1539,35 +2315,40 @@ class RoundDecision:
             raise ConvergenceError("rendered.omitted_non_blocking 不得包含已贴出或已解除/驳回的发现指纹")
         return RoundHistoryEntry(
             round_number=self.round_number,
-            head_sha=_require_non_empty_str(head_sha, "head_sha"),
+            head_sha=self.head_sha,
             posted_fingerprints=self.retained_posted_fingerprints | rendered.posted_fingerprints,
             unresolved_important=self.unresolved_important,
             resolved_fingerprints=self.resolved_fingerprints,
             rejected_fingerprints=self.rejected_fingerprints,
             consumed_reply_keys=self.consumed_reply_keys,
             pending_non_blocking=rendered.omitted_non_blocking,
+            panel=self.panel,
+            outcome=self.outcome,
         )
 
 
 def evaluate_round(
-    round_number: int,
-    verified: Sequence[VerifiedFinding],
+    verified: VerifiedRound,
     *,
-    already_posted: frozenset[str] = frozenset(),
-    pending_non_blocking: Sequence[VerifiedFinding] = (),
     author_replies: Sequence[AuthorReply] = (),
     max_auto_rounds: int = MAX_AUTO_ROUNDS,
 ) -> RoundDecision:
-    if type(round_number) is not int or round_number <= 0:
-        raise ConvergenceError(f"round_number 必须是正整数：{round_number!r}")
+    """基于经强校验绑定的 VerifiedRound 计算单轮收敛裁决（不再接受松散 round_number 与裸 verdicts）。"""
+    if not isinstance(verified, VerifiedRound):
+        raise ConvergenceError("verified 必须是 VerifiedRound")
     if type(max_auto_rounds) is not int or max_auto_rounds <= 0:
         raise ConvergenceError(f"max_auto_rounds 必须是正整数：{max_auto_rounds!r}")
 
+    round_number = verified.round_number
+    head_sha = verified.head_sha
+    panel = verified.panel
+    history = verified.history
+    already_posted = _active_posted_fingerprints(history)
+    pending_non_blocking = history[-1].pending_non_blocking if history else ()
+
     seen: set[str] = set()
     ordered: list[VerifiedFinding] = []
-    for vf in verified:
-        if not isinstance(vf, VerifiedFinding):
-            raise ConvergenceError(f"verified 元素必须是 VerifiedFinding：{vf!r}")
+    for vf in verified.verdicts:
         fid = vf.finding.finding_id
         if fid in seen:
             raise ConvergenceError(f"verified 含重复指纹：{fid}")
@@ -1577,10 +2358,6 @@ def evaluate_round(
     pending_seen: set[str] = set()
     carried_non_blocking: list[VerifiedFinding] = []
     for vf in pending_non_blocking:
-        if not isinstance(vf, VerifiedFinding):
-            raise ConvergenceError(f"pending_non_blocking 元素必须是 VerifiedFinding：{vf!r}")
-        if vf.verdict != VerificationVerdict.CONFIRMED or vf.is_blocking:
-            raise ConvergenceError("pending_non_blocking 仅允许核实成立的非阻断发现")
         fid = vf.finding.finding_id
         if fid in pending_seen:
             raise ConvergenceError(f"pending_non_blocking 含重复指纹：{fid}")
@@ -1610,8 +2387,10 @@ def evaluate_round(
 
     consumed_keys: set[str] = set()
     for vf in (*resolved, *rejected):
+        fid = vf.finding.finding_id
         if vf.author_reply is not None:
             consumed_keys.add(vf.author_reply.reply_key)
+            consumed_keys.add(_resolved_reply_key(vf.author_reply.comment_id, fid))
         consumed_keys.update(vf.related_reply_keys)
     if author_replies:
         _, matched_keys_by_id = _analyze_author_replies(
@@ -1625,12 +2404,12 @@ def evaluate_round(
     if not blocking:
         n_nit = sum(1 for vf in non_blocking if vf.finding.severity == Severity.NIT)
         n_pre = sum(1 for vf in non_blocking if vf.finding.severity == Severity.PRE_EXISTING)
-        outcome: RoundOutcome = "pass"
+        outcome: RoundOutcome = RoundOutcome.PASS
         github_state: GitHubStatusState = "success"
         stop_auto_rereview = False
         description = f"审查通过：0 项 Important，{n_nit} 项 Nit，{n_pre} 项 Pre-existing"
     elif round_number > max_auto_rounds:
-        outcome = "non_convergent"
+        outcome = RoundOutcome.NON_CONVERGENT
         github_state = "failure"
         stop_auto_rereview = True
         description = (
@@ -1639,13 +2418,15 @@ def evaluate_round(
             else f"已 {max_auto_rounds} 轮未收敛，请重新考虑方案"
         )
     else:
-        outcome = "blocked"
+        outcome = RoundOutcome.BLOCKED
         github_state = "failure"
         stop_auto_rereview = False
         description = f"发现 {len(blocking)} 项未解除的 Important 问题（第 {round_number}/{max_auto_rounds} 轮）"
 
     return RoundDecision(
         round_number=round_number,
+        head_sha=head_sha,
+        panel=panel,
         outcome=outcome,
         github_state=github_state,
         description=description,
@@ -1690,7 +2471,8 @@ class RenderedComment:
 
 
 def parse_comment_marker(body: str) -> tuple[int, int, str] | None:
-    first_line = body.splitlines()[0].strip() if body else ""
+    lines = _split_commonmark_lines(body) if body else []
+    first_line = lines[0].strip(" \t") if lines else ""
     match = _COMMENT_MARKER_RE.match(first_line)
     if not match:
         return None
@@ -1850,6 +2632,8 @@ def render_findings_comment(
     sha = _require_non_empty_str(head_sha, "head_sha")
     if not isinstance(decision, RoundDecision):
         raise ConvergenceError("decision 必须是 RoundDecision")
+    if sha != decision.head_sha:
+        raise ConvergenceError(f"head_sha={sha!r} 与 decision.head_sha={decision.head_sha!r} 不一致")
     if type(max_chars) is not int or max_chars <= 0:
         raise ConvergenceError(f"max_chars 必须是正整数：{max_chars!r}")
 
