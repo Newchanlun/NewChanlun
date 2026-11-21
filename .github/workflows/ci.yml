@@ -1133,12 +1133,8 @@ jobs:
       # #1875：具名锁 4 路并行（run-1488-delta-ci.py 每条仍是独立进程、--exact，逐条核对哈希与日志、结果按计划顺序）。
       #   托管 runner 也取 4，与同类 4 核托管机上 extras 的 RUST_TEST_THREADS=4 同口径；串行时 A/B/C 锁曾是托管路径的关键路径（run 42373511176：22.1 min）。
       CI_1488_TEST_JOBS: "4"
-      # #1875：仅对 --bin s_structure_session 开本仓 opt-level=1（--lib 保持 opt-level=0，避免重编全部 3700+ 库单测）；
-      #   debug-assertions 与 overflow-checks 显式保持开启，与 rust-job-setup R4 同口径。
-      CARGO_PROFILE_DEV_DEBUG_ASSERTIONS: "true"
-      CARGO_PROFILE_DEV_OVERFLOW_CHECKS: "true"
+      # #1875：关 debuginfo（与 PR #2102 同口径），第三方依赖在下方开 opt-level=2 并缓存；本仓保持 dev opt-level=0。
       CARGO_PROFILE_DEV_DEBUG: "0"
-      CI_1488_BIN_OPT_LEVEL1: "1"
     defaults:
       run:
         shell: bash
@@ -1225,11 +1221,7 @@ jobs:
           run_suite() {
             local suite=$1 filter=$2 binary
             shift 2
-            local config_args=()
-            if [[ "${CI_1488_BIN_OPT_LEVEL1:-}" == "1" && " $* " == *" --bin s_structure_session "* ]]; then
-              config_args=(--config profile.dev.package.newchan_rust.opt-level=1)
-            fi
-            run_logged "$suite-build" ../.github/scripts/cargo-eacces-retry.sh cargo "${config_args[@]}" test --offline --locked -j 6 --features "$FEATURES" --no-run --message-format=json "$@"
+            run_logged "$suite-build" ../.github/scripts/cargo-eacces-retry.sh cargo test --offline --locked -j 6 --features "$FEATURES" --no-run --message-format=json "$@"
             binary=$(python3 - "$RUNNER_TEMP/1488-$suite-build.log" <<'PY'
           import json, os, pathlib, sys
           artifacts = set()
@@ -1271,6 +1263,8 @@ jobs:
               }
             done
           }
+          # #1875：并行预编 --lib 与 --bin s_structure_session，避免后续 --lib 串行重跑 ~54s。
+          run_logged prebuild ../.github/scripts/cargo-eacces-retry.sh cargo test --offline --locked -j 6 --features "$FEATURES" --no-run --lib --bin s_structure_session
           run_suite native-fields native_candidate_fields --bin s_structure_session
           require_passed native-fields \
             v3::object_index::tests::native_candidate_fields_component_exact_metadata_slot_and_late_null_gates \

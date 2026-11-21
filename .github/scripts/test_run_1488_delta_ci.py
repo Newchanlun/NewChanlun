@@ -166,34 +166,6 @@ class ParallelRunTest(unittest.TestCase):
         names = {lock["name"] for lock in MODULE.LOCKS}
         self.assertEqual([n for n in saved if n not in names], [])
 
-    def test_bin_opt_level1_applies_only_to_bin_target(self):
-        import os
-        saved_opt = os.environ.get("CI_1488_BIN_OPT_LEVEL1")
-        try:
-            os.environ["CI_1488_BIN_OPT_LEVEL1"] = "1"
-            os.environ["CI_1488_TEST_JOBS"] = "1"
-            report_bin = {"targets": {}}
-            self.assertTrue(MODULE.run_target(self.tmp, self.tmp, self.tmp, "bin", "Native", report_bin))
-            build_bin = report_bin["targets"]["bin"]["commands"][0]["argv"]
-            self.assertIn("--config", build_bin)
-            self.assertIn("profile.dev.package.newchan_rust.opt-level=1", build_bin)
-
-            report_lib = {"targets": {}}
-            self.assertTrue(MODULE.run_target(self.tmp, self.tmp, self.tmp, "lib", "Native", report_lib))
-            build_lib = report_lib["targets"]["lib"]["commands"][0]["argv"]
-            self.assertNotIn("--config", build_lib)
-
-            os.environ.pop("CI_1488_BIN_OPT_LEVEL1", None)
-            report_off = {"targets": {}}
-            self.assertTrue(MODULE.run_target(self.tmp, self.tmp, self.tmp, "bin", "Native", report_off))
-            build_off = report_off["targets"]["bin"]["commands"][0]["argv"]
-            self.assertNotIn("--config", build_off)
-        finally:
-            if saved_opt is None:
-                os.environ.pop("CI_1488_BIN_OPT_LEVEL1", None)
-            else:
-                os.environ["CI_1488_BIN_OPT_LEVEL1"] = saved_opt
-
 
 if __name__ == "__main__":
     unittest.main()
