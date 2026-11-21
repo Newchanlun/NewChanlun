@@ -5480,12 +5480,15 @@ pub(super) fn cold_index_slots_for_test(
     for entry in digest_shards {
         counts[shard_of(entry)] += 1;
     }
-    counts.into_iter().map(|n| match n {
-        0 => 0,
-        1..=3 => 4 + 16,
-        4..=7 => 8 + 16,
-        _ => (n * 8 / 7).next_power_of_two() + 16,
-    }).sum()
+    counts
+        .into_iter()
+        .map(|n| match n {
+            0 => 0,
+            1..=3 => 4 + 16,
+            4..=7 => 8 + 16,
+            _ => (n * 8 / 7).next_power_of_two() + 16,
+        })
+        .sum()
 }
 
 #[cfg(all(test, feature = "s_capture_native_testonly"))]
@@ -5791,13 +5794,17 @@ fn r14_source_keeper_seal_and_next_request_share_explicit_parent() {
                 // 和 hashbrown `capacity_to_buckets`（<4 条 4 桶，<8 条 8 桶，否则 ⌊n·8/7⌋ 取 2 的幂）加每表
                 // 16 字节控制组推出槽数；空片不建表。负控：旧选择器 `digest[0] % 16` 得 2304，单表得 2064。
                 assert_eq!(digest_shards.len(), R14_NODES, "索引条目数等于来源节点数");
-                let derived_slots = |shard_of: &dyn Fn(&(newchan_rust::s_content::NodeDigest, usize)) -> usize| {
-                    cold_index_slots_for_test(&digest_shards, shard_of)
-                };
+                let derived_slots =
+                    |shard_of: &dyn Fn(&(newchan_rust::s_content::NodeDigest, usize)) -> usize| {
+                        cold_index_slots_for_test(&digest_shards, shard_of)
+                    };
                 let sharded_slots = derived_slots(&|(_, shard)| *shard);
                 let index_growth = (sharded_slots - R14_INDEX_SLOTS) * slot_before_p2a;
                 let sealed_before_p2a = sealed_before_p2a_for(current_len)
-                    + schema_growth + rule_growth + index_growth + expected_headers;
+                    + schema_growth
+                    + rule_growth
+                    + index_growth
+                    + expected_headers;
                 assert_eq!(
                     derived_slots(&|(digest, _)| usize::from(digest[0]) % 16),
                     2304,

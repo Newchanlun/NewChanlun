@@ -9841,7 +9841,9 @@ mod native_owner_codec_bridge_tests {
         parent
             .native_limit
             .store(fixed + one_shard, Ordering::SeqCst);
-        let failed = run(&parent, |work| NativeCaptureIndex::from_keys(keys.iter(), Some(work)));
+        let failed = run(&parent, |work| {
+            NativeCaptureIndex::from_keys(keys.iter(), Some(work))
+        });
         assert!(matches!(
             failed,
             Err(WorkError::Resource(ScratchFailure::Budget))

@@ -364,7 +364,10 @@ fn w2_h1_roundtrip_selected(envelopes: &[Value], mut check: impl FnMut(usize, &V
     for (offset, envelope) in envelopes.iter().enumerate() {
         let n = offset + 1;
         let before = state::full_audit_calls_for_test();
-        let handled = if M8D_P3_LOCK.with(std::cell::Cell::get).is_some_and(|lock| lock.name == "ef") {
+        let handled = if M8D_P3_LOCK
+            .with(std::cell::Cell::get)
+            .is_some_and(|lock| lock.name == "ef")
+        {
             issue1642_observe(&mut online, envelope, "ef", n).0
         } else {
             online.handle(envelope.clone())
@@ -816,9 +819,15 @@ fn issue1642_observe(
     let (result, stages, _) = state::traced(false, || driver.handle(envelope.clone()));
     let allocations = super::SOURCE_APPEND_ALLOCATIONS.with(|p| p.borrow_mut().take().unwrap());
     let refusal = super::native::PARENT_REFUSAL.with(|p| p.take().unwrap());
-    let refusals = refusal.into_iter().map(|r| serde_json::to_value(r).unwrap()).collect::<Vec<_>>();
+    let refusals = refusal
+        .into_iter()
+        .map(|r| serde_json::to_value(r).unwrap())
+        .collect::<Vec<_>>();
     if !allocations.is_empty() {
-        println!("SOURCE_INDEX_GROWTH lock={label} g={n} {}", json!(allocations));
+        println!(
+            "SOURCE_INDEX_GROWTH lock={label} g={n} {}",
+            json!(allocations)
+        );
     }
     if let Err(error) = &result {
         println!(
@@ -849,25 +858,35 @@ fn issue1642_persisted_receipt(db: &Path, g: i64) -> Value {
                 "delta_root": row.get::<_, String>(5)?,
             }))
         },
-    ).unwrap()
+    )
+    .unwrap()
 }
 
 fn issue1424_assert_persisted_pair(db: &Path, g: i64) {
     use newchan_rust::s_content as sc;
-    let mut conn = Connection::open_with_flags(db, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap();
+    let mut conn =
+        Connection::open_with_flags(db, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap();
     let tx = conn.transaction().unwrap();
-    let mut rows = tx.prepare(
-        "SELECT kind,lower(hex(birth_wire_root)) FROM s_content_objects
+    let mut rows = tx
+        .prepare(
+            "SELECT kind,lower(hex(birth_wire_root)) FROM s_content_objects
          WHERE kind IN ('CC-016.center','CC-020.center_pair') AND first_known_generation<=?1
            AND (withdrawn_generation IS NULL OR withdrawn_generation>?1)",
-    ).unwrap();
+        )
+        .unwrap();
     let mut source = content_store::ReadStore::new(&tx).unwrap();
     let mut centers = std::collections::BTreeMap::new();
     let mut pair = None;
-    for row in rows.query_map([g], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))).unwrap() {
+    for row in rows
+        .query_map([g], |r| {
+            Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
+        })
+        .unwrap()
+    {
         let (kind, root) = row.unwrap();
         let mut wire = Vec::new();
-        let reference = sc::content_ref_of(&mut source, &format!("{}{root}", sc::ROOT_PREFIX)).unwrap();
+        let reference =
+            sc::content_ref_of(&mut source, &format!("{}{root}", sc::ROOT_PREFIX)).unwrap();
         sc::render_refview(&mut source, (&reference).into(), &mut wire).unwrap();
         let wire: Value = serde_json::from_slice(&wire).unwrap();
         assert_eq!(wire["kind"], kind);
@@ -887,20 +906,27 @@ fn issue1424_assert_persisted_pair(db: &Path, g: i64) {
     assert_eq!(b["payload"]["data"]["entity_revision"], p["b_revision"]);
     assert_eq!(a["payload"]["data"]["settled"], true);
     assert_eq!(b["payload"]["data"]["settled"], g == 123);
-    println!("ISSUE1424_PUBLIC g={g} {}", json!({"A":a,"B":b,"pair":pair}));
+    println!(
+        "ISSUE1424_PUBLIC g={g} {}",
+        json!({"A":a,"B":b,"pair":pair})
+    );
 }
 
 fn issue1424_down_123() -> Vec<Value> {
     // #1426 issuecomment-7023365989 的 #1424 下行原始见证，逐根原坐标追加。
     let rows: Vec<W2H1Row> = serde_json::from_str(include_str!(
         "../../../../tests/fixtures/w2_h1_1424_down_newbirth_123.json"
-    )).unwrap();
+    ))
+    .unwrap();
     assert_eq!(rows.len(), 123);
-    rows.iter().enumerate().map(|(i, row)| {
-        assert_eq!(row.1, i as i64);
-        assert_eq!(row.6, 1);
-        w2_h1_envelope(i as i64 + 1, &[*row])
-    }).collect()
+    rows.iter()
+        .enumerate()
+        .map(|(i, row)| {
+            assert_eq!(row.1, i as i64);
+            assert_eq!(row.6, 1);
+            w2_h1_envelope(i as i64 + 1, &[*row])
+        })
+        .collect()
 }
 
 #[test]
@@ -921,7 +947,10 @@ fn issue1642_issue1424_down_newbirth_signed_budget() {
         assert_eq!(reply["publication"]["input_frontier"], i.to_string());
         assert_eq!(persisted["status"], "Committed");
         assert_eq!(persisted["receipt_id"], reply["receipt_id"]);
-        assert_eq!(persisted["batch_id"], reply["publication"]["index_frontier"]);
+        assert_eq!(
+            persisted["batch_id"],
+            reply["publication"]["index_frontier"]
+        );
         if matches!(n, 111 | 123) {
             issue1424_assert_persisted_pair(&fixture.db, n as i64);
         }
@@ -935,7 +964,10 @@ fn issue1642_signed_writer_still_refuses_source_growth_one_byte_over_local_cap()
     let envelopes = issue1424_down_123();
     let fixture = W2H1Fixture::new(8);
     let mut writer = fixture.open(&fixture.db);
-    assert_eq!(writer.handle(envelopes[0].clone()).unwrap()["kind"], "Committed");
+    assert_eq!(
+        writer.handle(envelopes[0].clone()).unwrap()["kind"],
+        "Committed"
+    );
     for (i, envelope) in envelopes[..8].iter().enumerate().skip(1) {
         SOURCE_APPEND_CAP_AT_GROWTH.with(|p| p.set(Some(1)));
         let before = state::full_audit_calls_for_test();
@@ -958,7 +990,10 @@ fn issue1642_signed_writer_still_refuses_source_growth_one_byte_over_local_cap()
             assert!(pending["batch_id"].is_null());
             let prior = issue1642_persisted_receipt(&fixture.db, i as i64);
             assert_eq!(prior["status"], "Committed");
-            println!("ISSUE1642_SMALL_CAP g={} pending={pending} prior={prior}", i + 1);
+            println!(
+                "ISSUE1642_SMALL_CAP g={} pending={pending} prior={prior}",
+                i + 1
+            );
             return;
         }
         assert_eq!(result.unwrap()["kind"], "Committed");

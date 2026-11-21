@@ -77,11 +77,7 @@ impl<'step, 'tx, 'conn> StepReader<'step, 'tx, 'conn> {
             let CaptureNodes::Native(native) = &capture.nodes else {
                 return Err(work.reject(capture_allocation::scratch::ScratchFailure::Ledger));
             };
-            if native
-                .nodes
-                .permits()
-                .any(|p| !p.belongs_to_parent(work))
-            {
+            if native.nodes.permits().any(|p| !p.belongs_to_parent(work)) {
                 return Err(work.reject(capture_allocation::scratch::ScratchFailure::Ledger));
             }
             Ok(Self {

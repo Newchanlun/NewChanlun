@@ -1822,7 +1822,11 @@ pub(super) fn audit_native_source(
                         return None;
                     }
                     capture.owner_index_next_growth(digest).map(|growth| {
-                        (growth, access.budget.remaining(), super::allocation_probe::Window::start())
+                        (
+                            growth,
+                            access.budget.remaining(),
+                            super::allocation_probe::Window::start(),
+                        )
                     })
                 });
                 let appended = match body.into_parts() {
