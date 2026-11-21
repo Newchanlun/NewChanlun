@@ -42,7 +42,7 @@ _STYLE_FORMAT_RE = re.compile(
 _LEADING_LIST_PREFIX_RE = re.compile(r"^(?:[-*•]\s+|\d+[.)]\s+)")
 _LEADING_BOLD_PREFIX_RE = re.compile(r"^(?:\*\*|__)\s*")
 _LEADING_BRACKET_TAG_RE = re.compile(
-    r"^(?:(?:\*\*|__)\s*)?(?P<open>[\[\【])(?P<tag>[^\]\】\n]{1,64})(?P<close>[\]\】])(?:\s*(?:\*\*|__))?\s*"
+    r"^(?:(?:\*\*|__)\s*)?(?P<open>[\[\【])(?P<tag>[^\[\【\]\】\n\x01]{1,64})(?P<close>[\]\】])(?:\s*(?:\*\*|__))?\s*"
 )
 _CM_LINE_END_RE = re.compile(r"\r\n|\n|\r")
 _CM_THEMATIC_BREAK_RE = re.compile(r"^(?:(?:\*[ \t]*){3,}|(?:-[ \t]*){3,}|(?:_[ \t]*){3,})$")
@@ -168,8 +168,8 @@ _EXPLICIT_NON_BLOCKING_OVERRIDE_TOKENS: frozenset[str] = frozenset(
     }
 )
 _LEADING_COLON_TAG_RE = re.compile(r"^(?:(?:\*\*|__)\s*)?([^:\n：\[\【\]\】`*]{1,24}?)(?:\s*(?:\*\*|__))?\s*[:：](?!\d)")
-_TAG_CLAUSE_SPLIT_RE = re.compile(r"[,，、;；/／|｜·・—:：()（）]+")
-_TAG_CLAUSE_TOKEN_SPLIT_RE = re.compile(r'[\s\-"“”「」『』《》]+')
+_TAG_CLAUSE_SPLIT_RE = re.compile(r"[,，、;；/／|｜·・—:：]+")
+_TAG_CLAUSE_TOKEN_SPLIT_RE = re.compile(r'[\s\-"“”「」『』《》()（）]+')
 _TIER1_NON_BLOCKING_TAG_TOKENS: frozenset[str] = _EXPLICIT_NON_BLOCKING_OVERRIDE_TOKENS | frozenset(
     {
         "minor",
@@ -204,6 +204,11 @@ _TIER3_NON_BLOCKING_TAG_TOKENS: frozenset[str] = frozenset(
         "信息级",
         "提示",
         "建议",
+        "建议后续",
+        "建议后续跟进",
+        "后续跟进",
+        "仅作记录",
+        "低优先级",
         "可选",
         "通过",
         "核实通过",
@@ -224,7 +229,9 @@ _NON_BLOCKING_BODY_HIT_RE = re.compile(
     r"(?:"
     r"[\[\【]\s*nit\s*[\]\】]|"
     r"(?<![A-Za-z0-9_])nit\s*[:：]|"
-    r"非阻断|不阻断|不构成阻断|不作为阻断(?:理由|项|依据)?|不单独(?:判|作为|构成)?阻断|"
+    r"非阻断|"
+    r"(?:不阻断|不构成阻断|不作为阻断(?:理由|项|依据)?|不单独(?:判|作为|构成)?阻断)"
+    r"(?=$|[\s，,。；;！!？?、)）\]】\"”'’」』]|(?:合入|合并|发布|本\s*PR|该\s*PR|PR|CI|项|性|理由|依据))|"
     r"(?<![A-Za-z0-9_])non[-_ ]?blocking(?![A-Za-z0-9_])|"
     r"(?:可选\s*)?建议后续(?:跟进)?|"
     r"(?:可选\s*)?后续跟进|"
@@ -235,7 +242,7 @@ _NON_BLOCKING_BODY_HIT_RE = re.compile(
     r")",
     re.IGNORECASE,
 )
-_BODY_CLAUSE_BOUNDARY_RE = re.compile(r"[。！？!?；;，,\n]")
+_BODY_CLAUSE_BOUNDARY_RE = re.compile(r"[。！？!?；;，,]")
 _BODY_CONJUNCTION_RESET_RE = re.compile(
     r"(?:所以|因此|故|从而|于是|但是|不过|然而|但|"
     r"(?<![A-Za-z0-9_])(?:so|therefore|thus|but|however)(?![A-Za-z0-9_]))",
@@ -2624,13 +2631,13 @@ def _mask_inline_non_prose_in_block(block: str, defined_link_refs: AbstractSet[s
     return "".join(out)
 
 
-def _parse_leading_severity_tag(
+def _parse_leading_severity_tag_with_body(
     text: str,
     *,
     defined_link_refs: AbstractSet[str] | None = None,
     visible_blocks: tuple[str, ...] | None = None,
-) -> Literal["blocking", "non_blocking"] | None:
-    """解析首个可见块的行首显式严重度标签（先经单遍行内屏蔽，再支持列表符号/粗体/连续方括号与冒号前导）。"""
+) -> tuple[Literal["blocking", "non_blocking"] | None, int | None, str | None]:
+    """解析首个可见块的行首显式严重度标签，并返回首块下标与跳过行首非路径方括号标签后的正文余部。"""
     if defined_link_refs is None or visible_blocks is None:
         parsed_refs, parsed_blocks = _extract_markdown_link_refs_and_visible_blocks(text)
         effective_refs: AbstractSet[str] = parsed_refs.keys() if defined_link_refs is None else defined_link_refs
@@ -2639,9 +2646,10 @@ def _parse_leading_severity_tag(
         effective_refs = defined_link_refs
         effective_blocks = visible_blocks
 
-    first_visible = next((blk for blk in effective_blocks if blk.strip()), None)
-    if first_visible is None:
-        return None
+    first_visible_entry = next(((idx, blk) for idx, blk in enumerate(effective_blocks) if blk.strip()), None)
+    if first_visible_entry is None:
+        return (None, None, None)
+    first_visible_idx, first_visible = first_visible_entry
     masked_target = _mask_inline_non_prose_in_block(first_visible, effective_refs)
 
     cleaned = masked_target.lstrip()
@@ -2679,19 +2687,22 @@ def _parse_leading_severity_tag(
             break
         bracket_tags.append(tag_content)
         pos += bracket_match.end()
+
+    first_visible_body = unbold[pos:] if bracket_tags else masked_target
+
     if bracket_tags:
         first_classified: Literal["blocking", "non_blocking"] | None = None
         for tag in bracket_tags:
             tag_cls = _classify_severity_tag_text(tag)
             if first_classified is None:
                 if tag_cls == "non_blocking":
-                    return "non_blocking"
+                    return ("non_blocking", first_visible_idx, first_visible_body)
                 if tag_cls == "blocking":
                     first_classified = "blocking"
             elif _is_explicit_non_blocking_override_tag(tag):
-                return "non_blocking"
+                return ("non_blocking", first_visible_idx, first_visible_body)
         if first_classified is not None:
-            return first_classified
+            return (first_classified, first_visible_idx, first_visible_body)
 
     colon_match = _LEADING_COLON_TAG_RE.match(cleaned)
     if colon_match:
@@ -2699,8 +2710,23 @@ def _parse_leading_severity_tag(
         if prefix and "/" not in prefix and "\\" not in prefix and "." not in prefix:
             colon_tokens = _tokenize_severity_tag(prefix)
             if colon_tokens and all(tok in _ALL_KNOWN_SEVERITY_TAG_TOKENS for tok in colon_tokens):
-                return _classify_severity_tag_text(prefix)
-    return None
+                return (_classify_severity_tag_text(prefix), first_visible_idx, first_visible_body)
+    return (None, first_visible_idx, first_visible_body)
+
+
+def _parse_leading_severity_tag(
+    text: str,
+    *,
+    defined_link_refs: AbstractSet[str] | None = None,
+    visible_blocks: tuple[str, ...] | None = None,
+) -> Literal["blocking", "non_blocking"] | None:
+    """解析首个可见块的行首显式严重度标签（先经单遍行内屏蔽，再支持列表符号/粗体/连续方括号与冒号前导）。"""
+    leading, _, _ = _parse_leading_severity_tag_with_body(
+        text,
+        defined_link_refs=defined_link_refs,
+        visible_blocks=visible_blocks,
+    )
+    return leading
 
 
 def is_non_blocking_or_nit_finding(text: str, receipt_result_status: str) -> bool:
@@ -2709,7 +2735,7 @@ def is_non_blocking_or_nit_finding(text: str, receipt_result_status: str) -> boo
         return True
     defined_link_refs, visible_blocks = _extract_markdown_link_refs_and_visible_blocks(text)
     ref_labels = defined_link_refs.keys()
-    leading = _parse_leading_severity_tag(
+    leading, first_visible_idx, first_visible_body = _parse_leading_severity_tag_with_body(
         text,
         defined_link_refs=ref_labels,
         visible_blocks=visible_blocks,
@@ -2718,10 +2744,15 @@ def is_non_blocking_or_nit_finding(text: str, receipt_result_status: str) -> boo
         return True
     if leading == "blocking":
         return False
-    return any(
-        _has_non_blocking_body_signal(_mask_inline_non_prose_in_block(block, ref_labels))
-        for block in visible_blocks
-    )
+    for idx, block in enumerate(visible_blocks):
+        masked_block = (
+            first_visible_body
+            if idx == first_visible_idx and first_visible_body is not None
+            else _mask_inline_non_prose_in_block(block, ref_labels)
+        )
+        if _has_non_blocking_body_signal(masked_block):
+            return True
+    return False
 
 
 def is_style_or_format_finding(text: str) -> bool:

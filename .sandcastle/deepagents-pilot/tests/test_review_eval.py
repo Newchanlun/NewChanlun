@@ -5560,3 +5560,73 @@ def test_r20_tag_exact_token_clause_negation_and_body_quote_modifier_penetration
     ):
         assert _parse_leading_severity_tag(tag_affirmative_nb) == "non_blocking", tag_affirmative_nb
         assert classify_finding_heuristic(tag_affirmative_nb, "blocked") == "non_blocking_or_nit", tag_affirmative_nb
+
+
+def test_r21_unrecognized_bracket_prefix_body_boundary_soft_wrap_and_tag_parens() -> None:
+    # Important 1：未识别行首方括号标签不得回落正文子串重扫，且正文“不阻断”不得命中业务宾语
+    for blocking_case in (
+        "[不阻断非法请求] 鉴权失败仍放行",
+        "鉴权模块不阻断非法请求，鉴权失败仍放行。",
+        "网关层不阻断越权调用，导致数据泄露。",
+        "防火墙不阻断恶意流量，绕过访问控制。",
+        "- **[不阻断非法请求]** 鉴权失败仍放行",
+        "[并非仅作记录] 必须修复越权问题",
+        "[并非低优先级] 存在数据丢失",
+    ):
+        assert is_non_blocking_or_nit_finding(blocking_case, "blocked") is False, blocking_case
+        assert classify_finding_heuristic(blocking_case, "blocked") == "blocking_substantive", blocking_case
+
+    # 正向对照：合法非阻断标签与真实自述（含句末/标点/合入/PR/CI 等合法后界）保持 non_blocking_or_nit
+    for non_blocking_case in (
+        "[仅作记录] 补充说明",
+        "[低优先级] 可延后清理",
+        "[建议后续] 补充监控指标",
+        "[建议后续跟进] 补充监控指标",
+        "[后续跟进] 整理文档",
+        "属于设计取舍，不作为阻断理由。",
+        "当前行为更严格，不构成阻断。",
+        "此处不阻断合入，可后续补齐。",
+        "该告警不阻断 CI，可延后处理。",
+        "该问题不阻断本 PR，记录即可。",
+        "【说明】执行器 approval.py 仍是签名门，当前行为更严格，属于已知依赖，不构成阻断。",
+        "[中，待核实授权] 新增授权来源与生效边界节，所以不单独判阻断；",
+        "[附注] events.jsonl 引用了已删证据，goal 已被 SUPERSEDE，所以不单独阻断。",
+    ):
+        assert is_non_blocking_or_nit_finding(non_blocking_case, "blocked") is True, non_blocking_case
+        assert classify_finding_heuristic(non_blocking_case, "blocked") == "non_blocking_or_nit", non_blocking_case
+
+    # Tier 2 阻断词仍优先于新增 Tier 3 非阻断标签
+    assert _parse_leading_severity_tag("[P1/低优先级] 越权漏洞") == "blocking"
+    assert classify_finding_heuristic("[P1/低优先级] 越权漏洞", "blocked") == "blocking_substantive"
+
+    # Important 2：段落内 Markdown 软换行不截断正文否定，空行分段落仍独立判定
+    for soft_wrap_negated in (
+        "This is not\nnon-blocking. It drops writes.",
+        "这并非\n“不构成阻断”，必须修复。",
+        "这不是\n非阻断，必须修复。",
+        "This is not a\nminor issue. It drops writes.",
+    ):
+        assert is_non_blocking_or_nit_finding(soft_wrap_negated, "blocked") is False, soft_wrap_negated
+        assert classify_finding_heuristic(soft_wrap_negated, "blocked") == "blocking_substantive", soft_wrap_negated
+
+    assert is_non_blocking_or_nit_finding("This is not a problem.\n\nnon-blocking.", "blocked") is True
+    assert classify_finding_heuristic("This is not a problem.\n\nnon-blocking.", "blocked") == "non_blocking_or_nit"
+
+    # Important 3：标签圆括号 ()（）作为词元分组符而非分句符，不重置否定作用域
+    for paren_negated_tag in (
+        "[P1][not (nit)] Drops writes.",
+        "[P1][并非（非阻断）] 丢写",
+        "[not (nit)] Drops writes.",
+        "[并非（非阻断）] 丢写",
+        "[P1][not (non-blocking)] Drops writes.",
+        "[P1][不是(不构成阻断)] 丢写",
+    ):
+        assert is_non_blocking_or_nit_finding(paren_negated_tag, "blocked") is False, paren_negated_tag
+        assert classify_finding_heuristic(paren_negated_tag, "blocked") == "blocking_substantive", paren_negated_tag
+
+    assert _is_explicit_non_blocking_override_tag("not (nit)") is False
+    assert _is_explicit_non_blocking_override_tag("并非（非阻断）") is False
+    assert _parse_leading_severity_tag("[P2][说明（非阻断）] 可延后") == "non_blocking"
+    assert classify_finding_heuristic("[P2][说明（非阻断）] 可延后", "blocked") == "non_blocking_or_nit"
+    assert _parse_leading_severity_tag("[说明（非阻断）] 可延后") == "non_blocking"
+    assert classify_finding_heuristic("[说明（非阻断）] 可延后", "blocked") == "non_blocking_or_nit"
