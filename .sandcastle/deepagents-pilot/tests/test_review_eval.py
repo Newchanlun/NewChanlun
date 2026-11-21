@@ -17,6 +17,8 @@ from pilot1742.review_eval import (
     EvalCase,
     EvalValidationError,
     PredictedFinding,
+    _git_blob_line_count,
+    _git_diff_added_ranges,
     _parse_leading_severity_tag,
     _parse_unified_diff_added_ranges,
     analyze_review_runs,
@@ -2713,3 +2715,363 @@ def test_corrupted_identity_without_outcome_counts_missing_outcome_runs(tmp_path
     assert metrics.verdict_counts == {"CORRUPTED_IDENTITY": 1}
     assert metrics.missing_outcome_runs == 1
     assert metrics.corrupted_files == ("bad-pr-no-outcome/target.json",)
+
+
+def test_validate_cases_rejects_non_blob_tree_path_and_strict_lf_blob_line_count(tmp_path: Path) -> None:
+    # 1) 临时 Git 仓：目录 scripts 下有文件修改，将 bug_location 指向目录 "scripts" 必须被非 blob 校验拒绝
+    repo = tmp_path / "tree-repo"
+    repo.mkdir()
+    _git(repo, "init", "-q", "-b", "main")
+    _git(repo, "config", "user.name", "Test")
+    _git(repo, "config", "user.email", "test@example.invalid")
+    scripts_dir = repo / "scripts"
+    scripts_dir.mkdir()
+    (scripts_dir / "tool.py").write_text("line1\n", encoding="utf-8")
+    _git(repo, "add", "scripts/tool.py")
+    _git(repo, "commit", "-qm", "base")
+    base_sha = _git(repo, "rev-parse", "HEAD")
+
+    (scripts_dir / "tool.py").write_text("line1_mod\n", encoding="utf-8")
+    _git(repo, "add", "scripts/tool.py")
+    _git(repo, "commit", "-qm", "head")
+    head_sha = _git(repo, "rev-parse", "HEAD")
+
+    tree_case = EvalCase(
+        case_id="bug-tree-dir",
+        kind="bug",
+        title="目录路径伪装缺陷位置",
+        base_sha=base_sha,
+        head_sha=head_sha,
+        bug_locations=(BugLocation(file="scripts", line_start=1, line_end=1, summary="s", category="c"),),
+    )
+    with pytest.raises(EvalValidationError, match="不是 Git blob 文件：scripts（实际类型：tree）"):
+        validate_cases((tree_case,), repo_root=repo)
+
+    # 2) 真实主仓案例 bug-2016-spec-revocation-regression 将 file 改为目录 "scripts", line 213 同样必须被拒绝
+    if _is_full_git_checkout(REPO_ROOT):
+        canonical = load_cases(CANONICAL_CASES)
+        case_2016 = next(c for c in canonical if c.case_id == "bug-2016-spec-revocation-regression")
+        tampered_2016 = EvalCase(
+            case_id=case_2016.case_id,
+            kind=case_2016.kind,
+            title=case_2016.title,
+            base_sha=case_2016.base_sha,
+            head_sha=case_2016.head_sha,
+            fix_sha=case_2016.fix_sha,
+            bug_locations=(
+                BugLocation(file="scripts", line_start=213, line_end=213, summary="s", category="c"),
+            ),
+        )
+        with pytest.raises(EvalValidationError, match="不是 Git blob 文件：scripts（实际类型：tree）"):
+            validate_cases((tampered_2016,), repo_root=REPO_ROOT)
+
+    # 3) _git_blob_line_count 严格按 LF 计数（空文件、无尾换行、含孤立 CR / \x0b / \x0c / U+2028）
+    (repo / "empty.txt").write_bytes(b"")
+    (repo / "no_eol.txt").write_bytes(b"a\rb\x0bc\x0cd")
+    (repo / "two_lines.txt").write_bytes("first\u2028inside\nsecond\rinline\n".encode())
+    _git(repo, "add", "empty.txt", "no_eol.txt", "two_lines.txt")
+    _git(repo, "commit", "-qm", "blobs")
+    blob_sha = _git(repo, "rev-parse", "HEAD")
+    assert _git_blob_line_count(repo, f"{blob_sha}:empty.txt") == 0
+    assert _git_blob_line_count(repo, f"{blob_sha}:no_eol.txt") == 1
+    assert _git_blob_line_count(repo, f"{blob_sha}:two_lines.txt") == 2
+
+
+def test_unified_diff_and_git_diff_strict_lf_for_u2028_and_inline_cr(tmp_path: Path) -> None:
+    # 1) 直接送 UTF-8 编码的 "first\u2028inside\nsecond\n" 到 git diff --no-index -U0 -- /dev/null -
+    payload = "first\u2028inside\nsecond\n".encode()
+    proc = subprocess.run(
+        ["git", "diff", "--no-index", "-U0", "--", "/dev/null", "-"],
+        input=payload,
+        capture_output=True,
+        check=False,
+    )
+    assert proc.returncode == 1
+    assert _parse_unified_diff_added_ranges(proc.stdout.decode("utf-8", errors="replace")) == ((1, 2),)
+
+    # 2) 临时 Git 仓真实提交包含 U+2028、行内孤立 \r 与其他非 LF 控制符，diff 与 blob 行数必须完全对齐 Git LF 行号
+    repo = tmp_path / "lf-repo"
+    repo.mkdir()
+    _git(repo, "init", "-q", "-b", "main")
+    _git(repo, "config", "user.name", "Test")
+    _git(repo, "config", "user.email", "test@example.invalid")
+    (repo / "placeholder.txt").write_bytes(b"init\n")
+    _git(repo, "add", "placeholder.txt")
+    _git(repo, "commit", "-qm", "base")
+    base_sha = _git(repo, "rev-parse", "HEAD")
+
+    (repo / "u2028.txt").write_bytes("first\u2028inside\nsecond\n".encode())
+    (repo / "inline_cr.txt").write_bytes(b"alpha\rbeta\ngamma\x0b\x0c\xe2\x80\xa9delta\n")
+    _git(repo, "add", "u2028.txt", "inline_cr.txt")
+    _git(repo, "commit", "-qm", "head")
+    head_sha = _git(repo, "rev-parse", "HEAD")
+
+    assert _git_blob_line_count(repo, f"{head_sha}:u2028.txt") == 2
+    assert _git_diff_added_ranges(repo, base_sha, head_sha, "u2028.txt") == ((1, 2),)
+    assert _git_blob_line_count(repo, f"{head_sha}:inline_cr.txt") == 2
+    assert _git_diff_added_ranges(repo, base_sha, head_sha, "inline_cr.txt") == ((1, 2),)
+
+    valid_case = EvalCase(
+        case_id="lf-valid",
+        kind="bug",
+        title="含 U+2028 与行内 CR 的两行文件",
+        base_sha=base_sha,
+        head_sha=head_sha,
+        bug_locations=(
+            BugLocation(file="u2028.txt", line_start=1, line_end=2, summary="s1", category="c"),
+            BugLocation(file="inline_cr.txt", line_start=1, line_end=2, summary="s2", category="c"),
+        ),
+    )
+    validate_cases((valid_case,), repo_root=repo)
+
+    out_of_bounds = EvalCase(
+        case_id="lf-oob",
+        kind="bug",
+        title="第 3 行不存在",
+        base_sha=base_sha,
+        head_sha=head_sha,
+        bug_locations=(BugLocation(file="u2028.txt", line_start=3, line_end=3, summary="s", category="c"),),
+    )
+    with pytest.raises(EvalValidationError, match="行号越界：3 > 2"):
+        validate_cases((out_of_bounds,), repo_root=repo)
+
+
+def test_r6_severity_tag_and_body_heuristic_counterexamples(tmp_path: Path) -> None:
+    # R6 三条核心反例在 receipt_result_status="blocked" 下均必须归为 blocking_substantive
+    counterexamples = (
+        "src/low:1 数据丢失",
+        "[P2] 数据丢失，可选方案是先缓存",
+        "这不是非阻断建议，必须修复",
+    )
+    for text in counterexamples:
+        assert is_non_blocking_or_nit_finding(text, "blocked") is False, text
+        assert classify_finding_heuristic(text, "blocked") == "blocking_substantive", text
+
+    # 衍生边界：无扩展名路径/file:line、裸可选技术词、被否定的非阻断/不阻断/non-blocking
+    assert _parse_leading_severity_tag("src/low:1 数据丢失") is None
+    assert _parse_leading_severity_tag("low:12 数据丢失") is None
+    assert _parse_leading_severity_tag("src/info:3 权限绕过") is None
+    assert _parse_leading_severity_tag("[P2] 数据丢失，可选方案是先缓存") == "blocking"
+    assert _parse_leading_severity_tag("P2: 数据丢失") == "blocking"
+    assert _parse_leading_severity_tag("p2:1 数据丢失") is None
+    assert _parse_leading_severity_tag("这不是非阻断：必须修复") is None
+
+    for blocking_body in (
+        "数据丢失，可选方案是先缓存",
+        "可选路径绕过鉴权",
+        "可选参数未校验导致崩溃",
+        "并非不阻断，必须修复",
+        "这不属于非阻断项，必须修复",
+        "This is not non-blocking, must fix",
+        "This is not a non-blocking issue",
+    ):
+        assert is_non_blocking_or_nit_finding(blocking_body, "blocked") is False, blocking_body
+        assert classify_finding_heuristic(blocking_body, "blocked") == "blocking_substantive", blocking_body
+
+    # 真实历史语料保持正确归类
+    assert _parse_leading_severity_tag("[P2/非阻断] 可稍后清理") == "non_blocking"
+    assert classify_finding_heuristic("[P2/非阻断] 可稍后清理", "blocked") == "non_blocking_or_nit"
+    assert classify_finding_heuristic("[Nit] formatting", "blocked") == "non_blocking_or_nit"
+    assert (
+        classify_finding_heuristic(
+            "【nit】`.sandcastle/decision-claimer.mts:622` 的 close 回调新增了 `signal` 参数，但没有使用。",
+            "blocked",
+        )
+        == "non_blocking_or_nit"
+    )
+    assert (
+        classify_finding_heuristic(
+            "[阻断] `.sandcastle/docs/maintenance-1742.md:193` 尚未满足发布条件，不是可选后续优化。",
+            "blocked",
+        )
+        == "blocking_substantive"
+    )
+    assert classify_finding_heuristic("这是可选优化，可后续整理", "blocked") == "non_blocking_or_nit"
+    assert classify_finding_heuristic("这是可选后续建议", "blocked") == "non_blocking_or_nit"
+
+    # 端到端 BLOCK 运行：3 条反例全部计入 subsequent_head_pass_total_block_findings，且后续不同 head PASS 时全部计入推定已修
+    runs_dir = tmp_path / "runs"
+    runs_dir.mkdir()
+    _write_run(
+        runs_dir,
+        "p901-r1-block",
+        pr_number=901,
+        head_sha="a" * 40,
+        registered_at_ns=100,
+        attempt=1,
+        verdict="BLOCK",
+        receipts={
+            "claude-opus-5-5": {
+                "run_id": "run-p901-r1-block",
+                "status": "completed",
+                "model": "claude-opus-5-5",
+                "result": {
+                    "status": "blocked",
+                    "findings": [
+                        *counterexamples,
+                        "[P2/非阻断] 可稍后清理",
+                    ],
+                },
+            }
+        },
+    )
+    _write_run(
+        runs_dir,
+        "p901-r2-pass",
+        pr_number=901,
+        head_sha="b" * 40,
+        registered_at_ns=200,
+        attempt=2,
+        verdict="PASS",
+    )
+    metrics = analyze_review_runs(runs_dir)
+    assert metrics.corrupted_files == ()
+    assert metrics.finding_heuristic_categories == {
+        "blocking_substantive": 3,
+        "non_blocking_or_nit": 1,
+    }
+    assert metrics.subsequent_head_pass_total_block_findings == 3
+    assert metrics.subsequent_head_pass_inferred_fixed == 3
+    assert metrics.subsequent_head_pass_undeterminable_findings == 0
+
+
+def test_duplicate_receipt_key_excluded_from_subsequent_head_pass_metrics(tmp_path: Path) -> None:
+    # 1) R6 最小反例：同目录 X/Y 双回执均声明 model="M" + outcome BLOCK + 后续不同 head PASS
+    same_dir_runs = tmp_path / "same-dir-block-then-pass"
+    run_dup = same_dir_runs / "run-1-block"
+    run_dup.mkdir(parents=True)
+    (run_dup / "target.json").write_text(
+        json.dumps({"run_id": "R", "pr_number": 1, "head_sha": "a" * 40, "registered_at_ns": 10, "attempt": 1}),
+        encoding="utf-8",
+    )
+    (run_dup / "outcome.json").write_text(json.dumps({"verdict": "BLOCK"}), encoding="utf-8")
+    for sub_name, finding_text in (("X", "[阻断] 重复键发现 X"), ("Y", "[阻断] 重复键发现 Y")):
+        sub = run_dup / sub_name
+        sub.mkdir()
+        (sub / "receipt.json").write_text(
+            json.dumps(
+                {
+                    "status": "completed",
+                    "model": "M",
+                    "result": {"status": "blocked", "findings": [finding_text]},
+                }
+            ),
+            encoding="utf-8",
+        )
+    _write_run(
+        same_dir_runs,
+        "run-2-pass",
+        pr_number=1,
+        head_sha="b" * 40,
+        registered_at_ns=20,
+        attempt=2,
+        verdict="PASS",
+    )
+
+    same_metrics = analyze_review_runs(same_dir_runs)
+    assert same_metrics.corrupted_files == (
+        "run-1-block/X/receipt.json",
+        "run-1-block/Y/receipt.json",
+    )
+    assert same_metrics.total_receipts == 2
+    assert same_metrics.total_findings == 2
+    assert same_metrics.subsequent_head_pass_total_block_findings == 0
+    assert same_metrics.subsequent_head_pass_inferred_fixed == 0
+    assert same_metrics.subsequent_head_pass_undeterminable_findings == 0
+    with pytest.raises(EvalValidationError, match="重复回执键"):
+        analyze_review_runs(
+            same_dir_runs,
+            dispositions=(
+                DispositionEntry(
+                    run_id="R",
+                    pr_number=1,
+                    model="M",
+                    finding_index=0,
+                    disposition=DispositionLabel.FIXED,
+                ),
+            ),
+        )
+
+    # 2) 跨目录重复键 (R2, M)（含可排序 BLOCK、不可排序 BLOCK、后续不同 head PASS，以及同目录非歧义模型 M2）
+    cross_dir_runs = tmp_path / "cross-dir-block-then-pass"
+    d1 = cross_dir_runs / "dir-1-block"
+    (d1 / "M").mkdir(parents=True)
+    (d1 / "M2").mkdir(parents=True)
+    (d1 / "target.json").write_text(
+        json.dumps({"run_id": "R2", "pr_number": 2, "head_sha": "c" * 40, "registered_at_ns": 10, "attempt": 1}),
+        encoding="utf-8",
+    )
+    (d1 / "outcome.json").write_text(json.dumps({"verdict": "BLOCK"}), encoding="utf-8")
+    (d1 / "M" / "receipt.json").write_text(
+        json.dumps(
+            {
+                "status": "completed",
+                "model": "M",
+                "result": {"status": "blocked", "findings": ["[阻断] 跨目录重复 M-1"]},
+            }
+        ),
+        encoding="utf-8",
+    )
+    (d1 / "M2" / "receipt.json").write_text(
+        json.dumps(
+            {
+                "status": "completed",
+                "model": "M2",
+                "result": {"status": "blocked", "findings": ["[阻断] 非歧义模型 M2"]},
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    # dir-2 无时间戳（不可排序 BLOCK），同样声明 (R2, M)，不得计入 undeterminable_block_findings
+    d2 = cross_dir_runs / "dir-2-unorderable-block"
+    (d2 / "M").mkdir(parents=True)
+    (d2 / "target.json").write_text(
+        json.dumps({"run_id": "R2", "pr_number": 2, "head_sha": "c" * 40}),
+        encoding="utf-8",
+    )
+    (d2 / "outcome.json").write_text(json.dumps({"verdict": "BLOCK"}), encoding="utf-8")
+    (d2 / "M" / "receipt.json").write_text(
+        json.dumps(
+            {
+                "status": "completed",
+                "model": "M",
+                "result": {"status": "blocked", "findings": ["[阻断] 跨目录重复 M-2"]},
+            }
+        ),
+        encoding="utf-8",
+    )
+    _write_run(
+        cross_dir_runs,
+        "dir-3-pass",
+        pr_number=2,
+        head_sha="d" * 40,
+        registered_at_ns=20,
+        attempt=2,
+        verdict="PASS",
+    )
+
+    cross_metrics = analyze_review_runs(cross_dir_runs)
+    assert cross_metrics.corrupted_files == (
+        "dir-1-block/M/receipt.json",
+        "dir-2-unorderable-block/M/receipt.json",
+    )
+    assert cross_metrics.total_receipts == 3
+    assert cross_metrics.total_findings == 3
+    # 仅非歧义的 M2（1 条）进入可判定分母与推定已修分子；重复键 (R2, M) 两条均不进入分母/分子/不可判定
+    assert cross_metrics.subsequent_head_pass_total_block_findings == 1
+    assert cross_metrics.subsequent_head_pass_inferred_fixed == 1
+    assert cross_metrics.subsequent_head_pass_undeterminable_findings == 0
+    with pytest.raises(EvalValidationError, match="重复回执键"):
+        analyze_review_runs(
+            cross_dir_runs,
+            dispositions=(
+                DispositionEntry(
+                    run_id="R2",
+                    pr_number=2,
+                    model="M",
+                    finding_index=0,
+                    disposition=DispositionLabel.FIXED,
+                ),
+            ),
+        )
