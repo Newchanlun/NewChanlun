@@ -2315,7 +2315,7 @@ def test_docker_context_at_admission_supervisor_and_recovery_boundaries(lane, mo
         monkeypatch.setenv("DOCKER_CONTEXT", context)
     for key in ("DOCKER_HOST", "DOCKER_CONFIG", "DOCKER_TLS_VERIFY", "DOCKER_CERT_PATH", "SECRET_TOKEN"):
         monkeypatch.setenv(key, "fixture-must-not-pass")
-    monkeypatch.setenv("SANDCASTLE_MAIN_MODEL", "fixture-not-the-review-model")
+    monkeypatch.setenv("SANDCASTLE_MAIN_MODEL", "kimi-k3.1-pro")
     monkeypatch.setenv("CLIPROXY_LOCAL_KEY", "fixture-worker-only")
     monkeypatch.setenv("SANDCASTLE_APPARMOR_ABSENT", "accept")  # #2071：部署的 AppArmor 策略声明要到准入与监督子进程
     trace = tmp_path / "docker-calls.jsonl"
@@ -2325,7 +2325,8 @@ def test_docker_context_at_admission_supervisor_and_recovery_boundaries(lane, mo
     docker.write_text(f'''#!{sys.executable}
 import json, os, sys
 assert os.environ.get("DOCKER_CONTEXT") == {context!r}
-assert not any(k in os.environ for k in ("DOCKER_HOST", "DOCKER_CONFIG", "DOCKER_TLS_VERIFY", "DOCKER_CERT_PATH", "SECRET_TOKEN", "SANDCASTLE_MAIN_MODEL"))
+assert not any(k in os.environ for k in ("DOCKER_HOST", "DOCKER_CONFIG", "DOCKER_TLS_VERIFY", "DOCKER_CERT_PATH", "SECRET_TOKEN"))
+assert os.environ.get("SANDCASTLE_MAIN_MODEL") == ("kimi-k3.1-pro" if sys.argv[1:] == ["info"] else None)
 with open({str(trace)!r}, "a") as f:
     f.write(json.dumps({{"context": os.environ.get("DOCKER_CONTEXT", "orbstack"), "args": sys.argv[1:]}}) + "\\n")
 if os.environ.get("DOCKER_CONTEXT") == "missing-context":
@@ -2342,7 +2343,8 @@ if sys.argv[1:4] == ["ps", "-a", "-q"]:
 import json, os, runpy, subprocess, sys
 from pathlib import Path
 assert os.environ.get("DOCKER_CONTEXT") == {context!r}
-assert not any(k in os.environ for k in ("DOCKER_HOST", "DOCKER_CONFIG", "DOCKER_TLS_VERIFY", "DOCKER_CERT_PATH", "SECRET_TOKEN", "SANDCASTLE_MAIN_MODEL"))
+assert not any(k in os.environ for k in ("DOCKER_HOST", "DOCKER_CONFIG", "DOCKER_TLS_VERIFY", "DOCKER_CERT_PATH", "SECRET_TOKEN"))
+assert os.environ.get("SANDCASTLE_MAIN_MODEL") == "kimi-k3.1-pro"
 admission = sys.argv[1:] == ["--admission-only"]
 assert os.environ.get("SANDCASTLE_APPARMOR_ABSENT") == "accept"
 assert os.environ.get("CLIPROXY_LOCAL_KEY") == (None if admission else "fixture-worker-only")

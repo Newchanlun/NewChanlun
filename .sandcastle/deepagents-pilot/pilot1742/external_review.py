@@ -45,6 +45,9 @@ from .patch_read import FrozenPatch, reads_candidate_patch
 from .run import DEFAULT_HOME, SOURCE_REPO, _ps_rows, supervisor_alive
 from .vm_trim import DOCKER_ENV, trim_vm_disk
 
+# Worker 准入复验依部署的起草模型校验异家族；不扩大宿主 Docker 回收环境。
+REVIEW_WORKER_ENV = (*DOCKER_ENV, "SANDCASTLE_MAIN_MODEL")
+
 # 正式 GPT 双审（EXTERNAL-REVIEW.md）；不同模型各走独立 checkout、进程与 session。
 MODELS = ("gpt-6.2-sol", "gpt-6.2-astra")
 POLICY = "external-pr-v2-gpt62"
@@ -767,7 +770,7 @@ class ExternalReview:
     def _deployment_admission(self, controller: str) -> dict | None:
         """与正式派发同一组部署准入（worker --admission-only，在正在执行的代码所在仓库运行）：controller 已提交、
         head 等于 controller，当前镜像和隔离合同有 accepted 记录。不通过返回 None。"""
-        env = {k: os.environ[k] for k in DOCKER_ENV if k in os.environ}
+        env = {k: os.environ[k] for k in REVIEW_WORKER_ENV if k in os.environ}
         try:
             done = subprocess.run([*self.launcher, "--admission-only"], env=env, cwd=SOURCE_REPO, stdin=subprocess.DEVNULL,
                                   capture_output=True, text=True, timeout=300)
@@ -935,7 +938,7 @@ class ExternalReview:
                       "merge_base_sha": target.merge_base_sha, "controller_code_head": target.controller_code_head,
                       "checkout": str(checkout), "prompt": frozen.prompt, "mode": "review"}
             _save(worker / "launch.json", launch)
-            env = {k: os.environ[k] for k in (*DOCKER_ENV, "CLIPROXY_LOCAL_KEY")
+            env = {k: os.environ[k] for k in (*REVIEW_WORKER_ENV, "CLIPROXY_LOCAL_KEY")
                    if k in os.environ}
             with open(worker / "supervisor.log", "ab", opener=lambda p, f: os.open(p, f, 0o600)) as log:
                 try:
