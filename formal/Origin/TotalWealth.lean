@@ -61,7 +61,7 @@ namespace NewChanlun.Origin.TotalWealth
   兄弟已由 #889 R8 改名 `FlatTStage`，划界见 `ledger.rs`/`t_engine.rs` 两侧枚举文档）。
   - `costReduction`（① 降成本）：短差，Σ|units| 守恒（"买入多少卖出多少不增仓"）。
   - `capitalRecovered`（② 退本金）：本金部分/全额移出在险池（free→withdrawn）。
-  - `earningShares`（③ 增股数）：本金已全退，纯利润买更多 units，Σ|units| 单调增。
+  - `earningShares`（③ 增股数）：全退本金后进入；期内本金回流不撤销已达阶段。
 -/
 inductive TStage where
   | costReduction
@@ -83,7 +83,7 @@ def TStage.rank : TStage → Nat
 
   - `free : Int`：自由现金/在险池（NAV 的现金部分）。
   - `holding : Int`：当前持仓市值 Σ units·c（NAV 的市值部分；c 是**外生价格**，见不同构理由1）。
-  - `withdrawn : Int`：已退本金（退本金阶段移出在险池的现金，clear 时归还 free）。
+  - `withdrawn : Int`：已退本金（退本金阶段移出在险池的现金，显式回流或整重终结时归还 free）。
   - `notionalIn : Int`：本 campaign 投入本金 K（退本金目标；enter 记 m·c，clear 重置 0）。
   - `stage : TStage`：当前阶段（带历史/路径依赖的状态机分量，单向不可逆）。
   - `openLegacyLegs : Nat`：未闭合**旧 ShareConserving（legacy）降成本腿**计数（OQ-9 扩维新维度，
@@ -122,6 +122,7 @@ def TWState.tw (s : TWState) : Int := s.free + s.holding + s.withdrawn
     ★诚实（rawStep/legalStep 双层）：twStep（raw 层）对 enterEarning **不加入口守卫**——raw 层
     保留「带未闭合 legacy 腿进入 EarningShares」这条算术路径作为 violation witness。合法性由独立谓词
     `LegalEnterEarning` 承载（见 §1.5 OQ-9 gate）。
+  - `reexposePrincipal amount`：ADR 0043 期内本金回流（withdrawn→free），不推进或重置阶段。
   - `clearCampaign`：campaign 结束（withdrawn→free 归还，stage 重置 CostReduction，legacy 腿/cumNetCash 清零）。
 -/
 inductive TWEvent where
@@ -129,6 +130,7 @@ inductive TWEvent where
   | openShareLeg
   | closeShareLeg (profit : Int)
   | recoverCapital (w : Int)
+  | reexposePrincipal (amount : Int)
   | enterEarning
   | clearCampaign
 deriving Repr
@@ -156,6 +158,7 @@ theorem advanceTo_rank_ge (current target : TStage) :
   - `recoverCapital w`：free→withdrawn 转 w ⟹ TW 不变；stage 推进 capitalRecovered（单向）。
   - `enterEarning`：纯 stage 切换 earningShares（单向），无资金变动 ⟹ TW 不变。
     ★raw 层无入口守卫（保留 violation witness）；合法性由 LegalEnterEarning（§1.5）排除。
+  - `reexposePrincipal amount`：期内 withdrawn→free 转 amount；保持阶段与其它账项。
   - `clearCampaign`：withdrawn→free 归还 ⟹ TW 不变；stage 重置 + legacy 腿/cumNetCash 清零
     （campaign 边界，新 campaign 起点，非回退）。
 
@@ -172,6 +175,8 @@ def twStep (s : TWState) : TWEvent → TWState
       { s with openLegacyLegs := s.openLegacyLegs - 1, cumNetCash := s.cumNetCash + profit }
   | TWEvent.recoverCapital w =>
       { s with free := s.free - w, withdrawn := s.withdrawn + w, stage := advanceTo s.stage TStage.capitalRecovered }
+  | TWEvent.reexposePrincipal amount =>
+      { s with free := s.free + amount, withdrawn := s.withdrawn - amount }
   | TWEvent.enterEarning =>
       { s with stage := advanceTo s.stage TStage.earningShares }
   | TWEvent.clearCampaign =>
@@ -200,6 +205,7 @@ theorem stage_rank_monotone (s : TWState) (e : TWEvent)
   | closeShareLeg p => simp only [twStep, Nat.le_refl]
   | recoverCapital w =>
       simp only [twStep]; exact advanceTo_rank_ge s.stage TStage.capitalRecovered
+  | reexposePrincipal _ => exact Nat.le_refl _
   | enterEarning =>
       simp only [twStep]; exact advanceTo_rank_ge s.stage TStage.earningShares
   | clearCampaign => exact absurd rfl hne
@@ -219,6 +225,7 @@ theorem earning_no_regress (s : TWState) (e : TWEvent)
   | recoverCapital w =>
       simp only [twStep, advanceTo, hstage]
       rw [if_neg (by decide)]
+  | reexposePrincipal _ => exact hstage
   | enterEarning =>
       simp only [twStep, advanceTo, hstage]
       rw [if_pos (by decide)]
@@ -260,6 +267,7 @@ def LegalEnterEarning (s : TWState) : Prop := s.openLegacyLegs = 0
   - `enterEarning`：须 `LegalEnterEarning s`（openLegacyLegs = 0）。
   - `openShareLeg`：须 `s.stage.rank < TStage.earningShares.rank`（修正1：earning 阶段不再开 legacy 腿）。
   - `closeShareLeg p`：须 `s.openLegacyLegs ≥ 1`（有腿才能闭，否则幽灵）。
+  - `reexposePrincipal a`：须 `0 < a ∧ a ≤ s.withdrawn`（只能回流已退本金余额）。
   - `clearCampaign`：须 `s.openLegacyLegs = 0`（修正4(b)：结束前先清 legacy 腿）。
   - 其余（shortDiff/recoverCapital）：无额外约束。
 
@@ -269,6 +277,7 @@ def LegalTransition (s : TWState) : TWEvent → Prop
   | TWEvent.enterEarning => LegalEnterEarning s
   | TWEvent.openShareLeg => s.stage.rank < TStage.earningShares.rank
   | TWEvent.closeShareLeg _ => s.openLegacyLegs ≥ 1
+  | TWEvent.reexposePrincipal amount => 0 < amount ∧ amount ≤ s.withdrawn
   | TWEvent.clearCampaign => s.openLegacyLegs = 0
   | _ => True
 
@@ -326,6 +335,7 @@ theorem oq9inv_preserved (s : TWState) (e : TWEvent)
       · rw [if_pos hse] at hst; exact absurd hst (by decide)
       · rw [if_neg hse] at hst
         exact hinv hst
+  | reexposePrincipal _ => exact hinv
   | enterEarning =>
       simp only [LegalTransition, LegalEnterEarning] at hlegal
       intro _
@@ -416,6 +426,48 @@ theorem oq9_witness_path_illegal (s : TWState)
     (twStep s TWEvent.enterEarning).openLegacyLegs = 0 := by
   simp only [LegalTransition, LegalEnterEarning] at hlegal
   simp only [twStep, hlegal]
+
+/-! ## ADR 0043 / #1651：已退本金回流不是整重终结 -/
+
+/-- 回流只转移现金；保留阶段、未平腿、净现金口径、名义本金、持仓量及持仓市值。 -/
+theorem reexposePrincipal_preserves_ledger (s : TWState) (a : Int) :
+    let t := twStep s (TWEvent.reexposePrincipal a)
+    t.tw = s.tw ∧ t.stage = s.stage ∧ t.openLegacyLegs = s.openLegacyLegs ∧
+      t.cumNetCash = s.cumNetCash ∧ t.notionalIn = s.notionalIn ∧
+      t.units = s.units ∧ t.holding = s.holding :=
+  ⟨twStep_preserves_tw s _, rfl, rfl, rfl, rfl, rfl, rfl⟩
+
+/-- 有名义本金的重即使全额回流也不同于终结：只有终结清零名义本金。 -/
+theorem reexposePrincipal_full_ne_clearCampaign (s : TWState) (h : s.notionalIn ≠ 0) :
+    twStep s (TWEvent.reexposePrincipal s.withdrawn) ≠ twStep s TWEvent.clearCampaign :=
+  fun heq => h (congrArg TWState.notionalIn heq)
+
+/-- 两种事件在同一合法、已全退本金的增股态都可执行，但到达不同的账本态。 -/
+theorem reexposePrincipal_distinct_legal_witness :
+    ∃ s : TWState,
+      LegalTransition s (TWEvent.reexposePrincipal s.withdrawn) ∧
+      LegalTransition s TWEvent.clearCampaign ∧
+      twStep s (TWEvent.reexposePrincipal s.withdrawn) ≠ twStep s TWEvent.clearCampaign := by
+  let s : TWState := ⟨10, 0, 100, 100, .earningShares, 0, 11, 0⟩
+  exact ⟨s, ⟨by decide, by decide⟩, rfl, reexposePrincipal_full_ne_clearCampaign s (by decide)⟩
+
+/-- 非正或超余额的数值仍可作 raw 见证，但都是非法转移。 -/
+theorem reexposePrincipal_illegal (s : TWState) (a : Int)
+    (hout : a ≤ 0 ∨ s.withdrawn < a) :
+    ¬ LegalTransition s (TWEvent.reexposePrincipal a) := by
+  simp only [LegalTransition]
+  omega
+
+/-- 已达到 P 的账本一旦回流至 P 以下，就失去回收资格；补足差额后恢复。 -/
+theorem reexposePrincipal_recovery_cycle (s : TWState) (a p r : Int)
+    (_h_recovered : p ≤ s.withdrawn)
+    (hlegal : LegalTransition s (TWEvent.reexposePrincipal a))
+    (hshort : s.withdrawn - a < p) (hrestore : p - (s.withdrawn - a) ≤ r) :
+    let after := twStep s (TWEvent.reexposePrincipal a)
+    LegalChain s [TWEvent.reexposePrincipal a, TWEvent.recoverCapital r] ∧
+      ¬ p ≤ after.withdrawn ∧
+      p ≤ (twStep after (TWEvent.recoverCapital r)).withdrawn := by
+  refine ⟨⟨hlegal, trivial, trivial⟩, ?_, ?_⟩ <;> simp only [twStep] <;> omega
 
 /-! ════════════════════════════════════════════════════════════════════════
   ## §1.6 C22 成本口径版（#893 S8-c，2026-08-18）：双开在成本坐标下**不抵消**
@@ -639,13 +691,22 @@ def RiskPolicy.baseline : RiskPolicy := { kappa := 0, kappa_nonneg := Int.le_ref
 
 /--
   最坏损失 `lWc`（契约锚 PDF §10 `L^wc`，L0 缠论「降成本」语义）：仍在险的本金
-  `max(0, notionalIn − withdrawn)`。退本金推进 ⟹ 在险本金递减 ⟹ L^wc→0（缠师第31课「成本为0后」）。
+  `max(0, notionalIn − withdrawn)`。退本金可使在险本金归零，期内回流可使其再度转正。
 -/
 def lWc (s : TWState) : Int := max 0 (s.notionalIn - s.withdrawn)
 
 /-- `lWc` 下界 0（L0 辅助）：在险本金非负（`max 0 _ ≥ 0`）。 -/
 theorem lWc_nonneg (s : TWState) : lWc s ≥ 0 := by
   unfold lWc; omega
+
+/-- P 取名义本金时，回流使在险本金转正，重新退足本金后归零。 -/
+theorem reexposePrincipal_lWc_cycle (s : TWState) (a r : Int)
+    (hshort : s.withdrawn - a < s.notionalIn)
+    (hrestore : s.notionalIn - (s.withdrawn - a) ≤ r) :
+    let after := twStep s (TWEvent.reexposePrincipal a)
+    0 < lWc after ∧ lWc (twStep after (TWEvent.recoverCapital r)) = 0 := by
+  simp only [lWc, twStep]
+  omega
 
 /--
   状态依赖 barrier `etaStar`（契约锚 PDF §10 `η⋆(x_t)=L^wc_{t+1}(x_t)+κ·Q_t`）：进入 EarningShares 的
@@ -725,7 +786,7 @@ theorem accounting_verdict_is_not_isomorphic (v : IsomorphismVerdict) :
 
   本文件**证**（L0，machine-checked，无 sorry/admit/axiom，**native 重证，不 import legacy**）：
   1. 缠论取本金三阶段账本 `TWState`（free/holding/withdrawn/notionalIn/stage/openLegacyLegs/
-     cumNetCash）+ TStage 三态 + `TWEvent` 六算子 + `twStep` 全函数。
+     cumNetCash、units）+ TStage 三态 + `TWEvent` 七算子 + `twStep` 全函数。
   2. `twStep_preserves_tw`（TW=free+holding+withdrawn 守恒，缠师第31课守恒律 L0 结构形式）。
   3. `stage_rank_monotone` + `earning_no_regress`（stage 单向不可逆，OQ-9 campaign 内结构形式）。
   4. OQ-9 gate 扩维消解全套：`LegalEnterEarning`/`LegalTransition`/`OQ9Inv`/`oq9inv_preserved`/
@@ -736,6 +797,11 @@ theorem accounting_verdict_is_not_isomorphic (v : IsomorphismVerdict) :
   6. ★★不同构三反例：`not_isomorphic_stage_collapses`（理由2 最强）+ `not_isomorphic_conservation_switches`
      （理由3）+ `not_isomorphic_exogenous_price`（理由1 codex 修正版）。
   7. 诚实标签 `accounting_verdict_is_not_isomorphic`（裁定 = notIsomorphic，无"大致兼容"）。
+
+  ADR 0043 裁定五覆盖面：本模块验证 TW 守恒、三阶段 latch 单向不可逆
+  （`stage_rank_monotone` / `earning_no_regress`）、OQ-9 合法性和多头侧回收谓词
+  `withdrawn ≥ P`（P 取 `notionalIn` 时对应 `lWc = 0`）。空头扩量资格
+  （累计费后已实现利润 ≥ Σ P_b）以及跨方向、跨级别一致性由 Rust #804 同输入同输出锁承担。
 
   本文件**不证**（formalization-validity-domain 诚实边界）：
   - ✗ TW 数值反映实盘真实盈亏（L0 结构守恒；数值正确性/跨 bar 价格 L2/L3，Rust prove_tw_neutral 守卫）。

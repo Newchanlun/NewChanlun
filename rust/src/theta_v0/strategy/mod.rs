@@ -133,6 +133,7 @@ pub(crate) mod shadow;
 /// 本仓成本基不动断言。
 pub mod short_diff_bucket;
 pub mod voice;
+pub mod voice_open_funding;
 
 use super::classifier::recursive_tower::{ElementId, LeveledMove};
 use super::classifier::{self, Classification};
