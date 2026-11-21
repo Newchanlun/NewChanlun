@@ -8675,3 +8675,156 @@ def test_r20_important3_code_locations_safely_wrap_backtick_filenames() -> None:
     assert "docs/a`b.md:11" in all_disp_spans
     assert "`a.md:22" in all_disp_spans
     assert "docs/a``b.md:33" in all_disp_spans
+
+
+# ── R21 精准回归（Codex R19 全部 3 项 Important：指纹归一化彻底解耦块解析） ─────────
+
+
+def _r21_probe(a: str, b: str, *, category: bool = False) -> tuple[Finding, Finding, tuple[Finding, ...]]:
+    """复刻 Codex R19 probe(...) 构造：测试两组输入指纹与 merge_and_dedupe_findings 归并结果。"""
+    if category:
+        f1 = Finding(Severity.IMPORTANT, "pilot1742/demo.py", 10, a, "boom", "e1")
+        f2 = Finding(Severity.IMPORTANT, "pilot1742/demo.py", 20, b, "boom", "e2")
+    else:
+        f1 = Finding(Severity.IMPORTANT, "pilot1742/demo.py", 10, "bug", a, "e1")
+        f2 = Finding(Severity.IMPORTANT, "pilot1742/demo.py", 20, "bug", b, "e2")
+    merged = merge_and_dedupe_findings([("gpt-6-astra", [f1, f2])])
+    return f1, f2, merged
+
+
+def test_r21_important1_multiline_code_span_preserves_trailing_spaces_before_newline() -> None:
+    """R21 Important 1：跨行代码跨度保留换行前空格（匹配 pandoc -f gfm），且保持既有行内代码大小写与空白语义。"""
+    # 1. Codex R19 原例：Run `a  \nb` (3 spaces) vs Run `a\nb` (1 space)
+    f1, f2, merged = _r21_probe("Run `a  \nb`", "Run `a\nb`")
+    assert f1.finding_id != f2.finding_id
+    assert len(merged) == 2
+    assert {item.finding_id for item in merged} == {f1.finding_id, f2.finding_id}
+    assert _normalize_fingerprint_text("Run `a  \nb`", "failure_scenario", allow_code_blocks=True) == "run `a   b`"
+    assert _normalize_fingerprint_text("Run `a\nb`", "failure_scenario", allow_code_blocks=True) == "run `a b`"
+
+    # 2. CRLF 与 CommonMark §4.8 段落续行前导空格规整（匹配 pandoc -f gfm）
+    assert fingerprint("pilot1742/demo.py", "bug", "Run `a  \r\nb`") == f1.finding_id
+    assert fingerprint("pilot1742/demo.py", "bug", "Run `a\r\nb`") == f2.finding_id
+    assert fingerprint("pilot1742/demo.py", "bug", "Run `a\n  b`") == f2.finding_id
+    assert fingerprint("pilot1742/demo.py", "bug", "Run `a  \n  b`") == f1.finding_id
+
+    # 3. 既有单行代码大小写区分与叙述空白折叠回归校验
+    fa, fb, merged_ab = _r21_probe("GET `/A` returns 500", "GET `/a` returns 500")
+    assert fa.finding_id != fb.finding_id
+    assert len(merged_ab) == 2
+
+    fc1, fc2, merged_same = _r21_probe("GET `/A` returns 500", "get  `/A`  Returns 500")
+    assert fc1.finding_id == fc2.finding_id
+    assert len(merged_same) == 1
+    assert merged_same[0].finding_id == fc1.finding_id
+
+
+def test_r21_important2_link_reference_definitions_and_inline_link_targets_preserved() -> None:
+    """R21 Important 2：链接引用定义绝不剥离，且引用定义、内联链接与自动链接目标严格保留大小写。"""
+    # 1. Codex R19 原例：[endpoint]: /v1/users vs /v2/users
+    f1, f2, merged = _r21_probe(
+        "GET [endpoint] fails\n\n[endpoint]: /v1/users",
+        "GET [endpoint] fails\n\n[endpoint]: /v2/users",
+    )
+    assert f1.finding_id != f2.finding_id
+    assert len(merged) == 2
+    assert {item.finding_id for item in merged} == {f1.finding_id, f2.finding_id}
+
+    # 2. 链接引用定义目标大小写敏感：/v1/A vs /v1/a
+    f_up, f_lo, merged_case = _r21_probe(
+        "GET [endpoint] fails\n\n[endpoint]: /v1/A",
+        "GET [endpoint] fails\n\n[endpoint]: /v1/a",
+    )
+    assert f_up.finding_id != f_lo.finding_id
+    assert len(merged_case) == 2
+    assert {item.finding_id for item in merged_case} == {f_up.finding_id, f_lo.finding_id}
+
+    # 3. 链接引用定义标签大小写不敏感、尖括号等价与多行写法归一到同 ID
+    assert fingerprint(
+        "pilot1742/demo.py", "bug", "GET [endpoint] fails\n\n[ENDPOINT]:\n  </v1/A>"
+    ) == f_up.finding_id
+
+    # 4. 内联链接目标保留大小写，叙述与链接文字照常折叠空白转小写
+    il_up, il_lo, merged_il = _r21_probe("GET [ep](/v1/A) fails", "GET [ep](/v1/a) fails")
+    assert il_up.finding_id != il_lo.finding_id
+    assert len(merged_il) == 2
+    assert fingerprint("pilot1742/demo.py", "bug", "get  [EP](</v1/A>)  Fails") == il_up.finding_id
+
+    # 5. 自动链接 URI 保留路径大小写
+    auto_up, auto_lo, merged_auto = _r21_probe(
+        "See <https://api.example.com/v1/A>",
+        "See <https://api.example.com/v1/a>",
+    )
+    assert auto_up.finding_id != auto_lo.finding_id
+    assert len(merged_auto) == 2
+
+
+def test_r21_important3_category_vs_indented_code_and_merge_id_invariance() -> None:
+    """R21 Important 3：category 按行内标签归一化与输入/归并 100% 一致，failure_scenario 缩进代码块保留大小写，归并永不突变 ID。"""
+    # 1. Codex R19 原例：category="    GET /A" vs "    GET /a" -> 输入、指纹、归并语义完全一致，合并为 1 条且 ID 不变
+    c1, c2, merged_cat = _r21_probe("    GET /A", "    GET /a", category=True)
+    assert c1.finding_id == c2.finding_id
+    assert len(merged_cat) == 1
+    assert merged_cat[0].finding_id == c1.finding_id
+    assert merged_cat[0].category == "GET /A"
+    assert fingerprint("pilot1742/demo.py", "GET /A", "boom") == c1.finding_id
+
+    # 与 parse_finder_output 入口解析出的 Finding 指纹完全一致
+    parsed_cat = parse_finder_output(
+        {
+            "findings": [
+                {
+                    "severity": "Important",
+                    "file": "pilot1742/demo.py",
+                    "line": 10,
+                    "category": "    GET /A",
+                    "failure_scenario": "boom",
+                    "evidence": "e1",
+                }
+            ]
+        },
+        source_model="gpt-6-astra",
+    )
+    assert parsed_cat[0].finding_id == c1.finding_id
+
+    # category 带前导空格但含行内反引号代码：仍保留代码大小写且归并后 ID 不突变
+    cc1, cc2, merged_cat_code = _r21_probe("    GET `/A`", "    GET `/a`", category=True)
+    assert cc1.finding_id != cc2.finding_id
+    assert len(merged_cat_code) == 2
+    assert {item.finding_id for item in merged_cat_code} == {cc1.finding_id, cc2.finding_id}
+
+    # 2. failure_scenario 4 空格 / Tab 缩进代码块保留大小写，且归并后保留 2 条且 ID 不变
+    s1, s2, merged_scen = _r21_probe("    GET /A", "    GET /a", category=False)
+    assert s1.finding_id != s2.finding_id
+    assert len(merged_scen) == 2
+    assert {item.finding_id for item in merged_scen} == {s1.finding_id, s2.finding_id}
+    assert fingerprint("pilot1742/demo.py", "bug", "\tGET /A") == s1.finding_id
+    assert fingerprint("pilot1742/demo.py", "bug", "\tGET /a") == s2.finding_id
+
+    # 段落内 4 空格续行不开启缩进代码块，空行后与 ATX 标题后开启缩进代码块
+    assert fingerprint("pilot1742/demo.py", "bug", "Intro\n    GET /A") == fingerprint(
+        "pilot1742/demo.py", "bug", "intro get /a"
+    )
+    assert fingerprint("pilot1742/demo.py", "bug", "Intro\n\n    GET /A") != fingerprint(
+        "pilot1742/demo.py", "bug", "Intro\n\n    GET /a"
+    )
+    assert fingerprint("pilot1742/demo.py", "bug", "# Route\n    GET /A") != fingerprint(
+        "pilot1742/demo.py", "bug", "# Route\n    GET /a"
+    )
+
+    # 3. 混合批量归并不变量：输出 ID 集合与输入分组 ID 集合严格相等、永不突变、永不重复
+    mixed = [
+        Finding(Severity.IMPORTANT, "pilot1742/demo.py", 10, "    GET /A", "boom", "e1"),
+        Finding(Severity.NIT, "pilot1742/demo.py", 11, "  get /a  ", "boom", "e2"),
+        Finding(Severity.IMPORTANT, "pilot1742/demo.py", 12, "    GET `/A`", "Run `a  \nb`", "e3"),
+        Finding(Severity.IMPORTANT, "pilot1742/demo.py", 13, "    GET `/a`", "Run `a\nb`", "e4"),
+        Finding(Severity.IMPORTANT, "pilot1742/demo.py", 14, "bug", "    GET /A", "e5"),
+        Finding(Severity.IMPORTANT, "pilot1742/demo.py", 15, "bug", "    GET /a", "e6"),
+        Finding(Severity.IMPORTANT, "pilot1742/demo.py", 16, "bug", "GET [ep] fails\n\n[ep]: /v1/A", "e7"),
+        Finding(Severity.IMPORTANT, "pilot1742/demo.py", 17, "bug", "GET [ep] fails\n\n[ep]: /v1/a", "e8"),
+    ]
+    expected_ids = {f.finding_id for f in mixed}
+    merged_mixed = merge_and_dedupe_findings([("gpt-6-astra", mixed)])
+    merged_ids = [f.finding_id for f in merged_mixed]
+    assert len(merged_ids) == len(set(merged_ids))
+    assert set(merged_ids) == expected_ids

@@ -265,41 +265,213 @@ def _normalize_line(raw: Any) -> int | None:
 
 
 def _normalize_inline_fingerprint_text(chunk: str) -> str:
-    """在单段/块内归一化指纹文本：保留 CommonMark §6.1 行内代码的大小写与内部水平空格，仅对普通叙述折叠空白并转小写。"""
+    """在单段/行内归一化指纹文本：按 CommonMark §6.1 保留行内代码跨度大小写与内部全部空格（含跨行代码跨度换行前空格），并保留自动链接与内联链接目标大小写；仅对普通叙述折叠空白并转小写。"""
+    normalized = _COMMONMARK_LINE_ENDING_RE.sub("\n", chunk.replace("\x00", "\ufffd"))
     out: list[str] = []
-    for seg_kind, seg_raw in _tokenize_inline_clip_segments(chunk):
-        if seg_kind == "code":
-            k = 0
-            while k < len(seg_raw) and seg_raw[k] == "`":
-                k += 1
-            inner = _COMMONMARK_LINE_ENDING_RE.sub("\n", seg_raw[k : len(seg_raw) - k])
-            out.append(_wrap_markdown_code_span(_extract_code_span_text(inner)))
-        else:
-            out.append(re.sub(r"\s+", " ", seg_raw).lower())
+    plain_buf: list[str] = []
+    n = len(normalized)
+    i = 0
+
+    def flush_plain() -> None:
+        if plain_buf:
+            out.append(re.sub(r"\s+", " ", "".join(plain_buf)).lower())
+            plain_buf.clear()
+
+    while i < n:
+        ch = normalized[i]
+        if ch == "\\" and i + 1 < n and normalized[i + 1] in _ASCII_PUNCTUATION:
+            plain_buf.append(normalized[i : i + 2])
+            i += 2
+            continue
+        if ch == "`":
+            tick_end, found_end = _find_code_span_end(normalized, i)
+            if found_end != -1:
+                flush_plain()
+                tick_len = tick_end - i
+                inner = normalized[tick_end : found_end - tick_len]
+                out.append(_wrap_markdown_code_span(_extract_code_span_text(inner)))
+                i = found_end
+            else:
+                plain_buf.append(normalized[i:tick_end])
+                i = tick_end
+            continue
+        if ch == "<":
+            auto_uri_m = _AUTOLINK_URI_RE.match(normalized, i)
+            if auto_uri_m is not None:
+                flush_plain()
+                out.append(auto_uri_m.group(0))
+                i = auto_uri_m.end()
+                continue
+            auto_email_m = _AUTOLINK_EMAIL_RE.match(normalized, i)
+            if auto_email_m is not None:
+                flush_plain()
+                out.append(auto_email_m.group(0).lower())
+                i = auto_email_m.end()
+                continue
+            html_m = _INLINE_RAW_HTML_RE.match(normalized, i)
+            if html_m is not None:
+                plain_buf.append(html_m.group(0))
+                i = html_m.end()
+                continue
+        if ch == "[" or (ch == "!" and i + 1 < n and normalized[i + 1] == "["):
+            is_image = ch == "!"
+            bracket_pos = i + 1 if is_image else i
+            close_bracket = _find_matching_bracket(
+                normalized,
+                bracket_pos,
+                allow_nested_links=is_image,
+                defined_labels=frozenset(),
+            )
+            if close_bracket != -1 and close_bracket + 1 < n and normalized[close_bracket + 1] == "(":
+                inline_parts = _match_inline_link_dest_title_parts(normalized, close_bracket + 1)
+                if inline_parts is not None:
+                    end_pos, dest_val, title_val = inline_parts
+                    flush_plain()
+                    norm_label = _normalize_inline_fingerprint_text(normalized[bracket_pos + 1 : close_bracket])
+                    title_suffix = f" \x00title\x00{title_val}" if title_val else ""
+                    prefix = "!" if is_image else ""
+                    out.append(f"{prefix}[{norm_label}]({dest_val}{title_suffix})")
+                    i = end_pos
+                    continue
+        plain_buf.append(ch)
+        i += 1
+
+    flush_plain()
     return "".join(out).strip()
 
 
-def _normalize_fingerprint_text(raw: Any, field_name: str) -> str:
+def _normalize_fingerprint_text(
+    raw: Any,
+    field_name: str,
+    *,
+    allow_code_blocks: bool = False,
+) -> str:
+    """无损指纹归一化：不调用 _parse_commonmark_blocks，避免剥离链接引用定义或误删跨行代码跨度换行前空格。
+
+    - allow_code_blocks=False（category / reason 等行内标签字段）：直接对 raw.strip() 走行内代码与链接感知归一化，
+      与输入解析及归并择优的 .strip() 语义严格一致，杜绝前导空格触发伪缩进代码块导致归并后 ID 突变。
+    - allow_code_blocks=True（failure_scenario 等 Markdown 块级字段）：按行顺序识别围栏/缩进代码块、
+      链接引用定义（保留目标大小写且绝不剥离）及普通非代码块（绝不剥离行尾空格以保全跨行代码跨度）。
+    """
     text = _require_non_empty_str(raw, field_name)
     assert isinstance(raw, str)
-    doc_blocks, _ = _parse_commonmark_blocks(raw, include_all_visible_blocks=True)
-    if not doc_blocks:
+    if not allow_code_blocks:
         return _normalize_inline_fingerprint_text(text)
 
     parts: list[str] = []
-    for kind, block_text in doc_blocks:
-        if kind == "code":
-            code_lines = _split_commonmark_lines(block_text)
-            while code_lines and not code_lines[0].strip(" \t"):
-                code_lines.pop(0)
-            while code_lines and not code_lines[-1].strip(" \t"):
-                code_lines.pop()
-            code_body = "\n".join(code_lines)
+    non_code_lines: list[str] = []
+    indented_lines: list[str] | None = None
+    fence_state: tuple[str, int, int, list[str]] | None = None
+
+    def flush_code_block(code_lines: list[str]) -> None:
+        trimmed = list(code_lines)
+        while trimmed and not trimmed[0].strip(" \t"):
+            trimmed.pop(0)
+        while trimmed and not trimmed[-1].strip(" \t"):
+            trimmed.pop()
+        if trimmed:
+            code_body = "\n".join(trimmed)
             parts.append(f"\x00code\x00{code_body}\x00")
-        else:
-            norm_block = _normalize_inline_fingerprint_text(block_text)
+
+    def flush_non_code() -> None:
+        if not non_code_lines:
+            return
+        raw_block = "\n".join(non_code_lines)
+        non_code_lines.clear()
+
+        pos = 0
+        block_len = len(raw_block)
+        while pos < block_len:
+            matched = _match_single_link_ref_def_parts(raw_block, pos)
+            if matched is None:
+                break
+            next_pos, norm_label, dest_val, title_val = matched
+            if title_val:
+                parts.append(f"\x00linkdef\x00[{norm_label}]: {dest_val}\x00{title_val}\x00")
+            else:
+                parts.append(f"\x00linkdef\x00[{norm_label}]: {dest_val}\x00")
+            pos = next_pos
+
+        remaining = raw_block[pos:]
+        if remaining:
+            # 按 CommonMark §4.8 仅跳过段落每行前导 ASCII 空格/Tab，严禁剥离行尾空格（保全跨行代码跨度换行前空格）
+            para_text = "\n".join(line.lstrip(" \t") for line in remaining.split("\n"))
+            norm_block = _normalize_inline_fingerprint_text(para_text)
             if norm_block:
                 parts.append(norm_block)
+
+    for raw_line in _split_commonmark_lines(raw):
+        cursor = _LineCursor(raw_line)
+
+        if fence_state is not None:
+            fence_char, fence_len, fence_indent, fenced_lines = fence_state
+            if not cursor.is_blank() and cursor.indent_ahead() <= 3:
+                saved = cursor.save()
+                cursor.advance_cols(cursor.indent_ahead())
+                rest = cursor.rest_text()
+                if re.fullmatch(rf"{re.escape(fence_char)}{{{fence_len},}}[ \t]*", rest):
+                    flush_code_block(fenced_lines)
+                    fence_state = None
+                    continue
+                cursor.restore(saved)
+            if fence_indent > 0:
+                cursor.advance_cols(min(fence_indent, cursor.indent_ahead()))
+            fenced_lines.append(cursor.rest_text())
+            continue
+
+        if indented_lines is not None:
+            if cursor.is_blank():
+                cursor.advance_cols(4)
+                indented_lines.append(cursor.rest_text())
+                continue
+            if cursor.indent_ahead() >= 4:
+                cursor.advance_cols(4)
+                indented_lines.append(cursor.rest_text())
+                continue
+            flush_code_block(indented_lines)
+            indented_lines = None
+
+        if cursor.is_blank():
+            flush_non_code()
+            continue
+
+        indent = cursor.indent_ahead()
+        if indent >= 4:
+            if not non_code_lines:
+                cursor.advance_cols(4)
+                indented_lines = [cursor.rest_text()]
+                continue
+            non_code_lines.append(raw_line)
+            continue
+
+        saved = cursor.save()
+        cursor.advance_cols(indent)
+        rest = cursor.rest_text()
+
+        bt_match = _FENCE_OPEN_BACKTICK_BODY_RE.match(rest)
+        tilde_match = _FENCE_OPEN_TILDE_BODY_RE.match(rest) if bt_match is None else None
+        fence_match = bt_match or tilde_match
+        if fence_match is not None:
+            flush_non_code()
+            marker = fence_match.group(1)
+            fence_state = (marker[0], len(marker), indent, [])
+            continue
+
+        if _ATX_HEADING_BODY_RE.match(rest):
+            flush_non_code()
+            non_code_lines.append(raw_line)
+            flush_non_code()
+            continue
+
+        cursor.restore(saved)
+        non_code_lines.append(raw_line)
+
+    if fence_state is not None:
+        flush_code_block(fence_state[3])
+    if indented_lines is not None:
+        flush_code_block(indented_lines)
+    flush_non_code()
+
     if not parts:
         return _normalize_inline_fingerprint_text(text)
     return " ".join(parts)
@@ -476,8 +648,8 @@ def parse_verification_verdict(raw: Any) -> VerificationVerdict:
 def fingerprint(file: str, category: str, failure_scenario: str) -> str:
     """按 #1927 第 6 条生成去重指纹（文件 + 类别 + 失败场景），取 sha256 前 16 位 hex。"""
     norm_file = _normalize_file(file)
-    norm_category = _normalize_fingerprint_text(category, "category")
-    norm_scenario = _normalize_fingerprint_text(failure_scenario, "failure_scenario")
+    norm_category = _normalize_fingerprint_text(category, "category", allow_code_blocks=False)
+    norm_scenario = _normalize_fingerprint_text(failure_scenario, "failure_scenario", allow_code_blocks=True)
     canonical = json.dumps([norm_file, norm_category, norm_scenario], ensure_ascii=False, separators=(",", ":"))
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()[:16]
 
@@ -622,7 +794,17 @@ def merge_and_dedupe_findings(finder_batches: Sequence[tuple[str, Sequence[Findi
             if not isinstance(item, Finding):
                 raise ConvergenceError(f"finder_batches 元素必须是 Finding：{item!r}")
             grouped.setdefault(item.finding_id, []).append((model, item))
-    reduced = [_reduce_finding_group(entries) for entries in grouped.values()]
+    reduced: list[Finding] = []
+    seen_merged_ids: set[str] = set()
+    for group_id, entries in grouped.items():
+        merged = _reduce_finding_group(entries)
+        merged_id = merged.finding_id
+        if merged_id != group_id or merged_id in seen_merged_ids:
+            raise ConvergenceError(
+                f"归并分组指纹不变量被破坏：原分组 {group_id!r}，归并后 {merged_id!r}"
+            )
+        seen_merged_ids.add(merged_id)
+        reduced.append(merged)
     return tuple(sorted(reduced, key=_finding_sort_key))
 
 
@@ -731,7 +913,7 @@ class AuthorReply:
             if self.line is not None:
                 return f"comment:{cid}:loc:{norm_file}:{self.line}"
             return f"comment:{cid}:loc:{norm_file}"
-        norm_reason = _normalize_fingerprint_text(self.reason, "reason")
+        norm_reason = _normalize_fingerprint_text(self.reason, "reason", allow_code_blocks=False)
         digest = hashlib.sha256(norm_reason.encode("utf-8")).hexdigest()[:16]
         return f"comment:{cid}:inline:{digest}"
 
@@ -1124,7 +1306,13 @@ def _match_link_label_brackets(text: str, pos: int) -> tuple[int, str] | None:
     return i + 1, _normalize_link_label(text[label_start:i])
 
 
-def _match_single_link_ref_def(text: str, start: int) -> tuple[int, str] | None:
+def _normalize_link_destination_literal(raw_dest: str) -> str:
+    if len(raw_dest) >= 2 and raw_dest[0] == "<" and raw_dest[-1] == ">":
+        return raw_dest[1:-1]
+    return raw_dest
+
+
+def _match_single_link_ref_def_parts(text: str, start: int) -> tuple[int, str, str, str | None] | None:
     n = len(text)
     i = start
     spaces = 0
@@ -1142,6 +1330,7 @@ def _match_single_link_ref_def(text: str, start: int) -> tuple[int, str] | None:
     dest_end = _parse_link_destination(text, i)
     if dest_end is None:
         return None
+    dest_val = _normalize_link_destination_literal(text[i:dest_end])
 
     no_title_eol = _consume_line_end(text, dest_end)
     ws_end, _ = _skip_ws_at_most_one_nl(text, dest_end)
@@ -1150,10 +1339,18 @@ def _match_single_link_ref_def(text: str, start: int) -> tuple[int, str] | None:
         if title_end is not None:
             after_title_eol = _consume_line_end(text, title_end)
             if after_title_eol is not None:
-                return after_title_eol, norm_label
+                title_val = re.sub(r"\s+", " ", text[ws_end + 1 : title_end - 1]).strip()
+                return after_title_eol, norm_label, dest_val, title_val
     if no_title_eol is not None:
-        return no_title_eol, norm_label
+        return no_title_eol, norm_label, dest_val, None
     return None
+
+
+def _match_single_link_ref_def(text: str, start: int) -> tuple[int, str] | None:
+    matched = _match_single_link_ref_def_parts(text, start)
+    if matched is None:
+        return None
+    return matched[0], matched[1]
 
 
 def _strip_leading_link_ref_defs(
@@ -1194,7 +1391,7 @@ def _find_code_span_end(text: str, start: int) -> tuple[int, int]:
     return tick_end, -1
 
 
-def _match_inline_link_dest_title(text: str, pos: int) -> int | None:
+def _match_inline_link_dest_title_parts(text: str, pos: int) -> tuple[int, str, str | None] | None:
     n = len(text)
     if pos >= n or text[pos] != "(":
         return None
@@ -1202,26 +1399,33 @@ def _match_inline_link_dest_title(text: str, pos: int) -> int | None:
     while i < n and text[i] in (" ", "\t", "\n"):
         i += 1
     if i < n and text[i] == ")":
-        return i + 1
+        return i + 1, "", None
     dest_end = _parse_link_destination(text, i)
     if dest_end is None:
         return None
+    dest_val = _normalize_link_destination_literal(text[i:dest_end])
     i = dest_end
     ws_start = i
     while i < n and text[i] in (" ", "\t", "\n"):
         i += 1
     if i < n and text[i] == ")":
-        return i + 1
+        return i + 1, dest_val, None
     if i > ws_start:
         title_end = _parse_link_title(text, i)
         if title_end is None:
             return None
+        title_val = re.sub(r"\s+", " ", text[i + 1 : title_end - 1]).strip()
         i = title_end
         while i < n and text[i] in (" ", "\t", "\n"):
             i += 1
         if i < n and text[i] == ")":
-            return i + 1
+            return i + 1, dest_val, title_val
     return None
+
+
+def _match_inline_link_dest_title(text: str, pos: int) -> int | None:
+    matched = _match_inline_link_dest_title_parts(text, pos)
+    return matched[0] if matched is not None else None
 
 
 def _match_link_tail(
@@ -2587,7 +2791,7 @@ def parse_wontfix_replies(
                 file_path = None
                 line_num = None
 
-            norm_reason = _normalize_fingerprint_text(reason, "reason")
+            norm_reason = _normalize_fingerprint_text(reason, "reason", allow_code_blocks=False)
             exact_sig = (finding_id, file_path, line_num, is_inline_anchor, norm_reason)
             if exact_sig in seen_exact:
                 continue
@@ -2669,7 +2873,7 @@ def _analyze_author_replies(
                         matched_keys_by_id.setdefault(loc_finding.finding_id, set()).add(reply.reply_key)
             continue
 
-        norm_reason = _normalize_fingerprint_text(reply.reason, "reason")
+        norm_reason = _normalize_fingerprint_text(reply.reason, "reason", allow_code_blocks=False)
         for matched_finding in matches:
             matched_fid = matched_finding.finding_id
             keys_set = matched_keys_by_id.setdefault(matched_fid, set())
