@@ -6330,3 +6330,528 @@ def test_r13_important4_verifier_evidence_and_finding_text_require_visible_base_
             verifier_model="claude-opus-5-5",
         )
         assert vr.verdicts[0].verifier_evidence == good_evidence
+
+
+def test_r14_important1_cross_head_first_seen_loc_reply_conflicts_with_stale_finding() -> None:
+    """R13 Important 1：首次读入的跨 HEAD 无 ID 坐标/行内回复若命中过期结转发现坐标，判为歧义拒收，并在过期发现离场时消费旧回复。"""
+    f_a = _finding(
+        severity=Severity.IMPORTANT,
+        file="pilot1742/demo.py",
+        line=42,
+        category="空值解引用",
+        failure_scenario="第 1 轮缺陷 A：第 42 行未判空",
+    )
+    f_b = _finding(
+        severity=Severity.IMPORTANT,
+        file="pilot1742/demo.py",
+        line=42,
+        category="越界访问",
+        failure_scenario="第 2 轮新缺陷 B：第 42 行索引越界",
+    )
+    f_c = _finding(
+        severity=Severity.IMPORTANT,
+        file="pilot1742/demo.py",
+        line=42,
+        category="除零风险",
+        failure_scenario="第 3 轮新缺陷 C：第 42 行未校验分母为零",
+    )
+    f_other = _finding(
+        severity=Severity.IMPORTANT,
+        file="pilot1742/other.py",
+        line=10,
+        category="资源泄漏",
+        failure_scenario="其他文件第 10 行未关闭句柄",
+    )
+    assert len({f_a.finding_id, f_b.finding_id, f_c.finding_id, f_other.finding_id}) == 4
+
+    # 1) 第 1 轮在 HEAD_1 确认 A（此时尚无作者回复）
+    c1 = build_round_candidates(
+        round_number=1,
+        head_sha=HEAD_1,
+        panel=DEFAULT_PANEL,
+        finder_batches=_batches_for_panel([f_a], round_number=1, head_sha=HEAD_1),
+    )
+    v1 = parse_verifier_output(
+        _verifier_payload(
+            c1,
+            [{"finding_id": f_a.finding_id, "verdict": "confirmed", "verifier_evidence": "A 确认阻断"}],
+        ),
+        c1,
+        verifier_model="claude-opus-5-5",
+    )
+    dec1 = evaluate_round(v1)
+    e1 = dec1.to_history_entry(rendered=render_findings_comment(1928, HEAD_1, dec1))
+    assert e1.bound_reply_targets == frozenset()
+
+    # 两轮之间作者发评论（首次读入）：pilot1742/demo.py:42 不修：保留 A
+    stale_loc_replies = parse_wontfix_replies(
+        [
+            {
+                "id": 3101,
+                "user": {"login": "alice", "type": "User"},
+                "body": "pilot1742/demo.py:42 不修：保留 A",
+            }
+        ],
+        allowed_authors={"alice"},
+    )
+    assert len(stale_loc_replies) == 1
+    stale_loc_key = stale_loc_replies[0].reply_key
+
+    # 同坐标行内回复与同文件无行号坐标回复同样应判歧义
+    stale_inline_replies = parse_wontfix_replies(
+        [
+            {
+                "id": 3102,
+                "user": {"login": "alice", "type": "User"},
+                "path": "pilot1742/demo.py",
+                "line": 42,
+                "side": "RIGHT",
+                "body": "不修：保留 A（行内）",
+            }
+        ],
+        allowed_authors={"alice"},
+    )
+    stale_file_replies = parse_wontfix_replies(
+        [
+            {
+                "id": 3103,
+                "user": {"login": "alice", "type": "User"},
+                "body": "不修(pilot1742/demo.py)：保留 A（文件级）",
+            }
+        ],
+        allowed_authors={"alice"},
+    )
+
+    # 2) 第 2 轮换 HEAD_2：A 结转过期，新发现 B 出现在同一 demo.py:42
+    plan2 = plan_next_round(BASE_SHA, HEAD_2, [e1], author_replies=stale_loc_replies)
+    c2 = build_round_candidates(
+        round_number=2,
+        head_sha=HEAD_2,
+        panel=DEFAULT_PANEL,
+        finder_batches=_batches_for_panel([f_b], round_number=2, head_sha=HEAD_2),
+        history=plan2.history,
+    )
+    assert c2.stale_location_fingerprints == frozenset({f_a.finding_id})
+
+    # bind_author_replies 既不绑定 A 也不绑定 B
+    for candidate_replies in (stale_loc_replies, stale_inline_replies, stale_file_replies):
+        assert (
+            bind_author_replies(
+                c2.findings,
+                candidate_replies,
+                stale_location_fingerprints=c2.stale_location_fingerprints,
+            )
+            == {}
+        )
+
+    # parse_verifier_output 给 A=resolved_by_fix、B=resolved_by_wontfix 必须抛 ConvergenceError
+    with pytest.raises(ConvergenceError):
+        parse_verifier_output(
+            _verifier_payload(
+                c2,
+                [
+                    {"finding_id": f_a.finding_id, "verdict": "resolved_by_fix", "verifier_evidence": "A 已修复"},
+                    {"finding_id": f_b.finding_id, "verdict": "resolved_by_wontfix", "verifier_evidence": "试图误用保留 A 的评论解除 B"},
+                ],
+            ),
+            c2,
+            verifier_model="claude-opus-5-5",
+            author_replies=stale_loc_replies,
+        )
+
+    # 直接构造 VerifiedRound 绕过 parse_verifier_output 同样抛 ConvergenceError
+    with pytest.raises(ConvergenceError):
+        VerifiedRound(
+            candidates=c2,
+            verdicts=(
+                _verified(
+                    f_a,
+                    VerificationVerdict.RESOLVED_BY_FIX,
+                    verifier_evidence="A 已修复",
+                    round_number=2,
+                    head_sha=HEAD_2,
+                ),
+                _verified(
+                    f_b,
+                    VerificationVerdict.RESOLVED_BY_WONTFIX,
+                    verifier_evidence="绕过 parse_verifier_output 误绑 B",
+                    round_number=2,
+                    head_sha=HEAD_2,
+                    author_reply=stale_loc_replies[0],
+                ),
+            ),
+        )
+
+    # 3) 第 2 轮合法裁决：A=resolved_by_fix、B=confirmed -> 旧回复在第 2 轮记入 consumed_reply_keys（无需重传 author_replies 亦成立）
+    v2 = parse_verifier_output(
+        _verifier_payload(
+            c2,
+            [
+                {"finding_id": f_a.finding_id, "verdict": "resolved_by_fix", "verifier_evidence": "A 已修复"},
+                {"finding_id": f_b.finding_id, "verdict": "confirmed", "verifier_evidence": "B 为新问题，继续阻断"},
+            ],
+        ),
+        c2,
+        verifier_model="claude-opus-5-5",
+        author_replies=stale_loc_replies,
+    )
+    dec2 = evaluate_round(v2)
+    assert dec2.outcome == RoundOutcome.BLOCKED
+    assert stale_loc_key in dec2.consumed_reply_keys
+    assert all(k != stale_loc_key for k, _ in dec2.bound_reply_targets)
+    e2 = dec2.to_history_entry(rendered=render_findings_comment(1928, HEAD_2, dec2))
+    assert stale_loc_key in e2.consumed_reply_keys
+
+    # 4) 第 3 轮 A 离场后，该旧回复不能复活误解除 B 或新发现 C
+    plan3 = plan_next_round(BASE_SHA, HEAD_3, [e1, e2], author_replies=stale_loc_replies)
+    assert stale_loc_key in plan3.consumed_reply_keys
+    assert plan3.author_replies == ()
+    c3 = build_round_candidates(
+        round_number=3,
+        head_sha=HEAD_3,
+        panel=DEFAULT_PANEL,
+        finder_batches=_batches_for_panel([f_b, f_c], round_number=3, head_sha=HEAD_3),
+        history=plan3.history,
+    )
+    with pytest.raises(ConvergenceError):
+        parse_verifier_output(
+            _verifier_payload(
+                c3,
+                [
+                    {"finding_id": f_b.finding_id, "verdict": "resolved_by_wontfix", "verifier_evidence": "试图在第 3 轮复活旧回复解除 B"},
+                    {"finding_id": f_c.finding_id, "verdict": "confirmed", "verifier_evidence": "C 阻断"},
+                ],
+            ),
+            c3,
+            verifier_model="claude-opus-5-5",
+            author_replies=stale_loc_replies,
+        )
+
+    # 4b) 仅过期发现 A 在第 2 轮被修复（第 2 轮同行尚无 B），旧回复同样被消费，第 3 轮新发现 C 不能被复活解除
+    c2_only_a = build_round_candidates(
+        round_number=2,
+        head_sha=HEAD_2,
+        panel=DEFAULT_PANEL,
+        finder_batches=_batches_for_panel([], round_number=2, head_sha=HEAD_2),
+        history=plan2.history,
+    )
+    v2_only_a = parse_verifier_output(
+        _verifier_payload(
+            c2_only_a,
+            [{"finding_id": f_a.finding_id, "verdict": "resolved_by_fix", "verifier_evidence": "A 已修复"}],
+        ),
+        c2_only_a,
+        verifier_model="claude-opus-5-5",
+        author_replies=stale_loc_replies,
+    )
+    dec2_only_a = evaluate_round(v2_only_a)
+    assert dec2_only_a.outcome == RoundOutcome.PASS
+    assert stale_loc_key in dec2_only_a.consumed_reply_keys
+    assert all(k != stale_loc_key for k, _ in dec2_only_a.bound_reply_targets)
+    e2_only_a = dec2_only_a.to_history_entry(rendered=render_findings_comment(1928, HEAD_2, dec2_only_a))
+    c3_new_c = build_round_candidates(
+        round_number=3,
+        head_sha=HEAD_3,
+        panel=DEFAULT_PANEL,
+        finder_batches=_batches_for_panel([f_c], round_number=3, head_sha=HEAD_3),
+        history=(e1, e2_only_a),
+    )
+    with pytest.raises(ConvergenceError):
+        parse_verifier_output(
+            _verifier_payload(
+                c3_new_c,
+                [{"finding_id": f_c.finding_id, "verdict": "resolved_by_wontfix", "verifier_evidence": "试图在第 3 轮复活旧回复解除 C"}],
+            ),
+            c3_new_c,
+            verifier_model="claude-opus-5-5",
+            author_replies=stale_loc_replies,
+        )
+
+    # 5) 正向对照：
+    # ① 写显式 [B_id] 不修：... 仍精确绑定 B
+    explicit_b_reply = parse_wontfix_replies(
+        [{"id": 3104, "user": {"login": "alice", "type": "User"}, "body": f"[{f_b.finding_id}] 不修：明确针对 B"}],
+        allowed_authors={"alice"},
+    )
+    assert set(
+        bind_author_replies(
+            c2.findings,
+            explicit_b_reply,
+            stale_location_fingerprints=c2.stale_location_fingerprints,
+        )
+    ) == {f_b.finding_id}
+    v2_explicit_b = parse_verifier_output(
+        _verifier_payload(
+            c2,
+            [
+                {"finding_id": f_a.finding_id, "verdict": "resolved_by_fix", "verifier_evidence": "A 已修复"},
+                {"finding_id": f_b.finding_id, "verdict": "resolved_by_wontfix", "verifier_evidence": "显式 ID 解除 B"},
+            ],
+        ),
+        c2,
+        verifier_model="claude-opus-5-5",
+        author_replies=explicit_b_reply,
+    )
+    assert evaluate_round(v2_explicit_b).outcome == RoundOutcome.PASS
+
+    # ② 写其他文件/行号（other.py:10，未命中任何过期发现坐标）仍正常绑定 other.py:10 上的新发现
+    c2_with_other = build_round_candidates(
+        round_number=2,
+        head_sha=HEAD_2,
+        panel=DEFAULT_PANEL,
+        finder_batches=_batches_for_panel([f_other], round_number=2, head_sha=HEAD_2),
+        history=plan2.history,
+    )
+    other_loc_reply = parse_wontfix_replies(
+        [{"id": 3105, "user": {"login": "alice", "type": "User"}, "body": "pilot1742/other.py:10 不修：生命周期由上层管理"}],
+        allowed_authors={"alice"},
+    )
+    assert set(
+        bind_author_replies(
+            c2_with_other.findings,
+            other_loc_reply,
+            stale_location_fingerprints=c2_with_other.stale_location_fingerprints,
+        )
+    ) == {f_other.finding_id}
+
+    # ③ 第 2 轮 A 在新 HEAD 被重新定位到第 20 行（不在 stale_location_fingerprints 中），第 20 行回复仍正常绑定 A
+    f_a_line20 = _finding(
+        severity=Severity.IMPORTANT,
+        file="pilot1742/demo.py",
+        line=20,
+        category="空值解引用",
+        failure_scenario="第 1 轮缺陷 A：第 42 行未判空",
+    )
+    assert f_a_line20.finding_id == f_a.finding_id
+    c2_reloc = build_round_candidates(
+        round_number=2,
+        head_sha=HEAD_2,
+        panel=DEFAULT_PANEL,
+        finder_batches=_batches_for_panel([f_a_line20], round_number=2, head_sha=HEAD_2),
+        history=plan2.history,
+    )
+    assert c2_reloc.stale_location_fingerprints == frozenset()
+    reloc_reply = parse_wontfix_replies(
+        [{"id": 3106, "user": {"login": "alice", "type": "User"}, "body": "pilot1742/demo.py:20 不修：新行号处确认不修"}],
+        allowed_authors={"alice"},
+    )
+    assert set(
+        bind_author_replies(
+            c2_reloc.findings,
+            reloc_reply,
+            stale_location_fingerprints=c2_reloc.stale_location_fingerprints,
+        )
+    ) == {f_a.finding_id}
+
+
+def test_r14_important2_verified_round_preserves_explicit_bound_reply_targets() -> None:
+    """R13 Important 2：VerifiedRound 保留并校验显式传入的 bound_reply_targets，不再丢失单轮显式绑定。"""
+    f_a = _finding(
+        severity=Severity.IMPORTANT,
+        file="pilot1742/demo.py",
+        line=42,
+        category="空值解引用",
+        failure_scenario="A：第 42 行未判空",
+    )
+    f_b = _finding(
+        severity=Severity.IMPORTANT,
+        file="pilot1742/demo.py",
+        line=42,
+        category="越界访问",
+        failure_scenario="B：第 42 行越界",
+    )
+    assert f_a.finding_id != f_b.finding_id
+
+    reply = AuthorReply(None, "pilot1742/demo.py", 42, "仅针对 A 保持旧逻辑", "3201", "alice")
+    explicit_targets = {reply.reply_key: f_a.finding_id}
+
+    # 1) Codex R13 最小反例：A、B 同在 demo.py:42，历史为空，传入 bound_reply_targets={reply.reply_key: A.finding_id}
+    bound = bind_author_replies([f_a, f_b], [reply], bound_reply_targets=explicit_targets)
+    assert bound == {f_a.finding_id: reply}
+
+    c1 = build_round_candidates(
+        round_number=1,
+        head_sha=HEAD_1,
+        panel=DEFAULT_PANEL,
+        finder_batches=_batches_for_panel([f_a, f_b], round_number=1, head_sha=HEAD_1),
+    )
+    v1 = parse_verifier_output(
+        _verifier_payload(
+            c1,
+            [
+                {"finding_id": f_a.finding_id, "verdict": "resolved_by_wontfix", "verifier_evidence": "采信对 A 的显式锁定不修理由"},
+                {"finding_id": f_b.finding_id, "verdict": "confirmed", "verifier_evidence": "B 仍构成阻断"},
+            ],
+        ),
+        c1,
+        verifier_model="claude-opus-5-5",
+        author_replies=[reply],
+        bound_reply_targets=explicit_targets,
+    )
+    assert v1.bound_reply_targets == frozenset({(reply.reply_key, f_a.finding_id)})
+
+    dec1 = evaluate_round(v1)
+    assert dec1.outcome == RoundOutcome.BLOCKED
+    assert [vf.finding.finding_id for vf in dec1.resolved_findings] == [f_a.finding_id]
+    assert [vf.finding.finding_id for vf in dec1.blocking_findings] == [f_b.finding_id]
+    assert (reply.reply_key, f_a.finding_id) in dec1.bound_reply_targets
+    assert reply.reply_key in dec1.consumed_reply_keys
+
+    e1 = dec1.to_history_entry(rendered=render_findings_comment(1928, HEAD_1, dec1))
+    assert (reply.reply_key, f_a.finding_id) in e1.bound_reply_targets
+    assert reply.reply_key in e1.consumed_reply_keys
+
+    # 2) VerifiedRound 必须强校验 bound_reply_targets：非法类型/格式、与历史矛盾指纹、跨目标误用均抛 ConvergenceError
+    vf_a_confirmed = _verified(f_a, VerificationVerdict.CONFIRMED, verifier_evidence="A 成立", round_number=1, head_sha=HEAD_1)
+    vf_b_confirmed = _verified(f_b, VerificationVerdict.CONFIRMED, verifier_evidence="B 成立", round_number=1, head_sha=HEAD_1)
+    with pytest.raises(ConvergenceError):
+        VerifiedRound(
+            candidates=c1,
+            verdicts=(vf_a_confirmed, vf_b_confirmed),
+            bound_reply_targets=[(reply.reply_key, f_a.finding_id)],  # type: ignore[arg-type]
+        )
+    with pytest.raises(ConvergenceError):
+        VerifiedRound(
+            candidates=c1,
+            verdicts=(vf_a_confirmed, vf_b_confirmed),
+            bound_reply_targets=frozenset({(f"comment:3201:finding:{f_a.finding_id}", f_a.finding_id)}),
+        )
+    with pytest.raises(ConvergenceError):
+        VerifiedRound(
+            candidates=c1,
+            verdicts=(
+                vf_a_confirmed,
+                _verified(
+                    f_b,
+                    VerificationVerdict.RESOLVED_BY_WONTFIX,
+                    verifier_evidence="试图用锁定到 A 的回复解除 B",
+                    round_number=1,
+                    head_sha=HEAD_1,
+                    author_reply=reply,
+                ),
+            ),
+            bound_reply_targets=frozenset({(reply.reply_key, f_a.finding_id)}),
+        )
+
+    # 与历史轮次已锁定指纹冲突 -> VerifiedRound 立即抛 ConvergenceError
+    c2 = build_round_candidates(
+        round_number=2,
+        head_sha=HEAD_2,
+        panel=DEFAULT_PANEL,
+        finder_batches=_batches_for_panel([f_b], round_number=2, head_sha=HEAD_2),
+        history=(e1,),
+    )
+    with pytest.raises(ConvergenceError):
+        VerifiedRound(
+            candidates=c2,
+            verdicts=(_verified(f_b, VerificationVerdict.CONFIRMED, verifier_evidence="B 成立", round_number=2, head_sha=HEAD_2),),
+            bound_reply_targets=frozenset({(reply.reply_key, f_b.finding_id)}),
+        )
+
+
+def test_r14_important3_gfm_rendered_visibility_for_verifier_evidence_and_finding_text() -> None:
+    """R13 Important 3：按 GFM 渲染后可见性校验 verifier_evidence 与发现核心字段，封堵 HTML 实体/注释/空标签/链接定义等不可见证据。"""
+    f1 = _finding(severity=Severity.IMPORTANT, file="pilot1742/demo.py", line=42)
+    fid = f1.finding_id
+    cand = _candidates([f1])
+
+    invisible_markdown_samples = (
+        "&#x3164;",
+        "**&#x3164;**",
+        "*&#x3164;*",
+        "__&#x3164;__",
+        "_&#x3164;_",
+        "~~&#x3164;~~",
+        "&#8203;",
+        "&nbsp;",
+        "<!-- hidden -->",
+        "<!-- 伪证据 -->",
+        "<span>&#xFE0F;</span>",
+        "<span></span>",
+        "[x]: /demo",
+        "[&#x3164;](https://example.com)",
+        "```python\n```",
+        "```\n\u3164\n```",
+    )
+    for bad_md in invisible_markdown_samples:
+        with pytest.raises(ConvergenceError):
+            parse_verifier_output(
+                _verifier_payload(
+                    cand,
+                    [{"finding_id": fid, "verdict": "rejected", "verifier_evidence": bad_md}],
+                ),
+                cand,
+                verifier_model="claude-opus-5-5",
+            )
+        with pytest.raises(ConvergenceError):
+            VerifiedFinding(
+                finding=f1,
+                verdict=VerificationVerdict.REJECTED,
+                verifier_model="claude-opus-5-5",
+                verifier_evidence=bad_md,
+                round_number=1,
+                head_sha=HEAD_1,
+            )
+        with pytest.raises(ConvergenceError):
+            _finding(failure_scenario=bad_md)
+        with pytest.raises(ConvergenceError):
+            _finding(evidence=bad_md)
+        with pytest.raises(ConvergenceError):
+            parse_finder_output(
+                {
+                    "findings": [
+                        {
+                            "severity": "Important",
+                            "file": "pilot1742/demo.py",
+                            "line": 42,
+                            "category": "空值解引用",
+                            "failure_scenario": bad_md,
+                            "evidence": "真实证据",
+                        }
+                    ]
+                },
+                source_model="gpt-6-astra",
+            )
+        with pytest.raises(ConvergenceError):
+            parse_finder_output(
+                {
+                    "findings": [
+                        {
+                            "severity": "Important",
+                            "file": "pilot1742/demo.py",
+                            "line": 42,
+                            "category": "空值解引用",
+                            "failure_scenario": "真实场景",
+                            "evidence": bad_md,
+                        }
+                    ]
+                },
+                source_model="gpt-6-astra",
+            )
+
+    # 正向对照：普通中英文、行内代码、代码块/多行、&amp; 实体、emoji 全部正常通过
+    valid_markdown_samples = (
+        "核实第 42 行已通过判空保护",
+        "Confirmed null check at line 42",
+        "输入 `&nbsp;` 会触发异常",
+        "`&nbsp;`",
+        "已复现：\n```python\nassert x is not None\n```",
+        "```python\nassert x is not None\n```",
+        "条件 a &amp; b 在空输入下恒为假",
+        "&amp;",
+        "⚠️ 核实存在空指针风险",
+        "⚠️",
+    )
+    for good_md in valid_markdown_samples:
+        vr = parse_verifier_output(
+            _verifier_payload(
+                cand,
+                [{"finding_id": fid, "verdict": "rejected", "verifier_evidence": good_md}],
+            ),
+            cand,
+            verifier_model="claude-opus-5-5",
+        )
+        assert vr.verdicts[0].verifier_evidence == good_md
+        f_ok = _finding(failure_scenario=good_md, evidence=good_md)
+        assert f_ok.failure_scenario == good_md
+        assert f_ok.evidence == good_md

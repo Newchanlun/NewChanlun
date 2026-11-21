@@ -223,6 +223,16 @@ def _require_visible_text(raw: Any, field_name: str) -> str:
     return text
 
 
+def _require_visible_markdown_text(raw: Any, field_name: str) -> str:
+    """要求字段在 GFM 渲染后至少包含 1 个可见基字符（封堵 HTML 实体/注释/空标签/链接引用定义等不可见占位文本）。"""
+    text = _require_visible_text(raw, field_name)
+    for _, line_tokens in _extract_visible_paragraph_lines(text, include_fenced_code=True):
+        display_text = "".join(d_part for _, d_part in line_tokens)
+        if _clean_display_reason(display_text):
+            return text
+    raise ConvergenceError(f"{field_name} 在 Markdown/GFM 渲染后不包含任何可见字符：{raw!r}")
+
+
 def _normalize_commit_sha(raw: Any, field_name: str) -> str:
     value = _require_non_empty_str(raw, field_name)
     if not _COMMIT_SHA_HEX_RE.fullmatch(value):
@@ -450,8 +460,8 @@ class Finding:
         _normalize_file(self.file)
         _normalize_line(self.line)
         _require_visible_text(self.category, "category")
-        _require_visible_text(self.failure_scenario, "failure_scenario")
-        _require_visible_text(self.evidence, "evidence")
+        _require_visible_markdown_text(self.failure_scenario, "failure_scenario")
+        _require_visible_markdown_text(self.evidence, "evidence")
         if self.class_scope is not None:
             _require_visible_text(self.class_scope, "class_scope")
         if not isinstance(self.source_models, tuple):
@@ -480,8 +490,10 @@ def parse_finder_output(payload: Mapping[str, Any], *, source_model: str) -> tup
         file_path = _normalize_file(item.get("file"))
         line = _normalize_line(item.get("line"))
         category = _require_visible_text(item.get("category"), f"findings[{idx}].category")
-        failure_scenario = _require_visible_text(item.get("failure_scenario"), f"findings[{idx}].failure_scenario")
-        evidence = _require_visible_text(item.get("evidence"), f"findings[{idx}].evidence")
+        failure_scenario = _require_visible_markdown_text(
+            item.get("failure_scenario"), f"findings[{idx}].failure_scenario"
+        )
+        evidence = _require_visible_markdown_text(item.get("evidence"), f"findings[{idx}].evidence")
         raw_scope = item.get("class_scope")
         if raw_scope is None:
             class_scope: str | None = None
@@ -853,6 +865,7 @@ class _ListItem:
 class _FencedCode:
     fence_char: str
     fence_len: int
+    lines: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -1917,12 +1930,16 @@ def _extract_display_slice(tokens: Sequence[tuple[str, str]], start_match_pos: i
     return "".join(parts)
 
 
-def _extract_visible_paragraph_lines(body: str) -> list[tuple[str, list[tuple[str, str]]]]:
+def _extract_visible_paragraph_lines(
+    body: str,
+    *,
+    include_fenced_code: bool = False,
+) -> list[tuple[str, list[tuple[str, str]]]]:
     """按 CommonMark Phase-1 容器栈/叶子块 + §4.7 链接引用定义剥离 + 跨块持久 HTML 抑制栈 + §6 双流扫描提取非引用可见段落行。"""
     containers: list[_Container] = []
     leaf: _Leaf | None = None
     defined_labels: set[str] = set()
-    doc_blocks: list[tuple[Literal["paragraph", "html"], str]] = []
+    doc_blocks: list[tuple[Literal["paragraph", "html", "code"], str]] = []
 
     def close_leaf(*, emit: bool = True) -> None:
         nonlocal leaf
@@ -1933,6 +1950,9 @@ def _extract_visible_paragraph_lines(body: str) -> list[tuple[str, list[tuple[st
         elif isinstance(leaf, _HTMLBlock):
             if emit and leaf.lines and not any(isinstance(c, _BlockQuote) for c in containers):
                 doc_blocks.append(("html", "\n".join(leaf.lines)))
+        elif isinstance(leaf, _FencedCode):
+            if include_fenced_code and emit and leaf.lines and not any(isinstance(c, _BlockQuote) for c in containers):
+                doc_blocks.append(("code", "\n".join(leaf.lines)))
         leaf = None
 
     def close_unmatched(matched_count: int) -> None:
@@ -1983,9 +2003,10 @@ def _extract_visible_paragraph_lines(body: str) -> list[tuple[str, list[tuple[st
                     cursor.advance_cols(cursor.indent_ahead())
                     rest = cursor.rest_text()
                     if re.fullmatch(rf"{re.escape(leaf.fence_char)}{{{leaf.fence_len},}}[ \t]*", rest):
-                        leaf = None
+                        close_leaf()
                         continue
                     cursor.restore(saved)
+                leaf.lines.append(cursor.rest_text())
                 continue
             if isinstance(leaf, _HTMLBlock):
                 if leaf.kind in (6, 7):
@@ -2150,12 +2171,42 @@ def _extract_visible_paragraph_lines(body: str) -> list[tuple[str, list[tuple[st
         if block_kind == "html":
             _update_html_suppress_state(block_text, html_suppress_state)
             continue
+        if block_kind == "code":
+            if (
+                html_suppress_state.in_comment
+                or html_suppress_state.raw_text_tag is not None
+                or html_suppress_state.in_open_tag
+                or any(t in _SILENT_INLINE_HTML_TAGS for t in html_suppress_state.tag_stack)
+            ):
+                continue
+            for code_line in block_text.split("\n"):
+                if code_line:
+                    visible_lines.append((code_line, [("\x01", code_line)]))
+            continue
         for line_tokens in _scan_inline_dual(block_text, frozen_labels, html_suppress_state):
             raw_match = "".join(m for m, _ in line_tokens)
             stripped_match = raw_match.strip(" \t")
             if stripped_match:
                 visible_lines.append((raw_match, line_tokens))
     return visible_lines
+
+
+def _match_reply_location(
+    reply: AuthorReply,
+    findings: Sequence[Finding],
+) -> tuple[list[Finding], int]:
+    """仅按坐标（行内锚定 / file:line / 仅 file）匹配发现，不含过期或锁定过滤。"""
+    if reply.is_inline_anchor:
+        if reply.file is None or reply.line is None:
+            return [], 0
+        norm_file = _normalize_file(reply.file)
+        return [f for f in findings if _normalize_file(f.file) == norm_file and f.line == reply.line], 2
+    if reply.file is not None:
+        norm_file = _normalize_file(reply.file)
+        if reply.line is not None:
+            return [f for f in findings if _normalize_file(f.file) == norm_file and f.line == reply.line], 2
+        return [f for f in findings if _normalize_file(f.file) == norm_file], 1
+    return [], 0
 
 
 def _match_reply_targets(
@@ -2169,6 +2220,8 @@ def _match_reply_targets(
 
     - 对属于 stale_location_fingerprints 的跨 HEAD 结转且未在新 HEAD 重新定位的发现，
       仅允许显式 reply.finding_id 匹配，严禁按 (file, line) / 行内锚定或文件坐标绑定。
+    - 对无显式 finding_id 且未在 bound_reply_targets 中显式锁定到非过期目标的坐标/行内回复，
+      只要其坐标也命中了任何过期结转发现，即判为跨 HEAD 坐标歧义并返回空匹配，严禁排掉过期发现后把同坐标新发现当作唯一目标。
     - 对已在 bound_reply_targets 中锁定目标指纹的 loc / inline 回复，仅允许匹配该锁定指纹，禁止改绑其他发现。
     """
     if reply.finding_id is not None:
@@ -2180,33 +2233,17 @@ def _match_reply_targets(
         else frozenset()
     )
     pinned_fid = bound_reply_targets.get(reply.reply_key) if bound_reply_targets else None
-    if reply.is_inline_anchor:
-        if reply.file is None or reply.line is None:
-            return [], 0
-        norm_file = _normalize_file(reply.file)
-        matched = [
-            f
-            for f in findings
-            if f.finding_id not in stale and _normalize_file(f.file) == norm_file and f.line == reply.line
-        ]
-        specificity = 2
-    elif reply.file is not None:
-        norm_file = _normalize_file(reply.file)
-        if reply.line is not None:
-            matched = [
-                f
-                for f in findings
-                if f.finding_id not in stale and _normalize_file(f.file) == norm_file and f.line == reply.line
-            ]
-            specificity = 2
-        else:
-            matched = [f for f in findings if f.finding_id not in stale and _normalize_file(f.file) == norm_file]
-            specificity = 1
-    else:
+    raw_matched, specificity = _match_reply_location(reply, findings)
+    if not raw_matched:
         return [], 0
     if pinned_fid is not None:
-        matched = [f for f in matched if f.finding_id == pinned_fid]
-    return matched, specificity
+        if pinned_fid in stale:
+            return [], 0
+        matched = [f for f in raw_matched if f.finding_id == pinned_fid]
+        return matched, specificity
+    if stale and any(f.finding_id in stale for f in raw_matched):
+        return [], 0
+    return raw_matched, specificity
 
 
 def parse_wontfix_replies(
@@ -2349,6 +2386,11 @@ def _analyze_author_replies(
             bound_reply_targets=pinned_targets,
         )
         if not matches:
+            if reply.finding_id is None and reply.reply_key not in pinned_targets and stale_fps:
+                raw_loc_matches, _ = _match_reply_location(reply, finding_list)
+                if any(f.finding_id in stale_fps for f in raw_loc_matches):
+                    for loc_finding in raw_loc_matches:
+                        matched_keys_by_id.setdefault(loc_finding.finding_id, set()).add(reply.reply_key)
             continue
 
         norm_reason = _normalize_fingerprint_text(reply.reason, "reason")
@@ -2433,7 +2475,7 @@ class VerifiedFinding:
         if not isinstance(self.verdict, VerificationVerdict):
             raise ConvergenceError("VerifiedFinding.verdict 必须是 VerificationVerdict")
         _require_non_empty_str(self.verifier_model, "verifier_model")
-        _require_visible_text(self.verifier_evidence, "verifier_evidence")
+        _require_visible_markdown_text(self.verifier_evidence, "verifier_evidence")
         if type(self.round_number) is not int or self.round_number < 1:
             raise ConvergenceError(f"VerifiedFinding.round_number 必须是 >= 1 的整数：{self.round_number!r}")
         norm_head = _normalize_commit_sha(self.head_sha, "VerifiedFinding.head_sha")
@@ -2940,6 +2982,7 @@ class VerifiedRound:
 
     candidates: RoundCandidates
     verdicts: tuple[VerifiedFinding, ...]
+    bound_reply_targets: frozenset[tuple[str, str]] = frozenset()
 
     def __post_init__(self) -> None:
         if not isinstance(self.candidates, RoundCandidates):
@@ -2953,6 +2996,16 @@ class VerifiedRound:
             *(entry.consumed_reply_keys for entry in self.candidates.history)
         )
         history_bound_targets = _collect_history_bound_targets(self.candidates.history)
+        explicit_bound_targets = _validate_bound_reply_targets_frozenset(
+            self.bound_reply_targets,
+            "VerifiedRound.bound_reply_targets",
+        )
+        effective_bound_targets = dict(history_bound_targets)
+        _merge_bound_reply_targets(
+            effective_bound_targets,
+            explicit_bound_targets,
+            "VerifiedRound.bound_reply_targets",
+        )
         panel = self.candidates.panel
 
         expected_verifier: str
@@ -3003,26 +3056,26 @@ class VerifiedRound:
                         "禁止标记为 resolved_by_fix"
                     )
             for rk in vf.related_reply_keys:
-                pinned_for_rk = history_bound_targets.get(rk)
+                pinned_for_rk = effective_bound_targets.get(rk)
                 if pinned_for_rk is not None and pinned_for_rk != fid:
                     raise ConvergenceError(
-                        f"发现 {fid} 的 related_reply_keys 包含已在历史轮次锁定到发现 {pinned_for_rk} 的回复键 {rk!r}"
+                        f"发现 {fid} 的 related_reply_keys 包含已锁定到发现 {pinned_for_rk} 的回复键 {rk!r}"
                     )
             if vf.verdict == VerificationVerdict.RESOLVED_BY_WONTFIX:
                 if vf.author_reply is None:
                     raise ConvergenceError(f"发现 {fid} 裁决为 resolved_by_wontfix 但缺少 author_reply")
                 _require_non_empty_str(vf.author_reply.author, "author_reply.author")
-                pinned_fid = history_bound_targets.get(vf.author_reply.reply_key)
+                pinned_fid = effective_bound_targets.get(vf.author_reply.reply_key)
                 if pinned_fid is not None and pinned_fid != fid:
                     raise ConvergenceError(
                         f"发现 {fid} 绑定的作者不修回复（{vf.author_reply.reply_key}）"
-                        f"已在历史轮次锁定到发现 {pinned_fid}，禁止改绑到其他指纹"
+                        f"已锁定到发现 {pinned_fid}，禁止改绑到其他指纹"
                     )
                 matched_targets, _ = _match_reply_targets(
                     vf.author_reply,
                     self.candidates.findings,
                     stale_location_fingerprints=self.candidates.stale_location_fingerprints,
-                    bound_reply_targets=history_bound_targets,
+                    bound_reply_targets=effective_bound_targets,
                 )
                 if len(matched_targets) != 1 or matched_targets[0].finding_id != fid:
                     raise ConvergenceError(
@@ -3175,7 +3228,7 @@ def parse_verifier_output(
             raise ConvergenceError(f"核实者对同一发现重复裁决：{fid}")
         verdict = parse_verification_verdict(item.get("verdict"))
         raw_evidence = item["verifier_evidence"] if "verifier_evidence" in item else item.get("evidence")
-        verifier_evidence = _require_visible_text(raw_evidence, f"verdicts[{idx}].verifier_evidence")
+        verifier_evidence = _require_visible_markdown_text(raw_evidence, f"verdicts[{idx}].verifier_evidence")
         if verdict == VerificationVerdict.RESOLVED_BY_FIX:
             if fid not in prior_important_ids:
                 raise ConvergenceError(
@@ -3213,6 +3266,7 @@ def parse_verifier_output(
     return VerifiedRound(
         candidates=candidates,
         verdicts=tuple(verdicts_by_id[cid] for cid in ordered_ids),
+        bound_reply_targets=frozenset(extra_bound_targets.items()),
     )
 
 
@@ -3542,6 +3596,16 @@ def evaluate_round(
 
     history_consumed: frozenset[str] = frozenset().union(*(entry.consumed_reply_keys for entry in history))
     history_bound_targets = _collect_history_bound_targets(history)
+    verified_bound_targets = _validate_bound_reply_targets_frozenset(
+        verified.bound_reply_targets,
+        "verified.bound_reply_targets",
+    )
+    effective_bound_targets = dict(history_bound_targets)
+    _merge_bound_reply_targets(
+        effective_bound_targets,
+        verified_bound_targets,
+        "verified.bound_reply_targets",
+    )
 
     consumed_keys: set[str] = set()
     for vf in (*resolved, *rejected):
@@ -3550,7 +3614,7 @@ def evaluate_round(
             consumed_keys.add(vf.author_reply.reply_key)
             consumed_keys.add(_resolved_reply_key(vf.author_reply.comment_id, fid))
         consumed_keys.update(vf.related_reply_keys)
-    for rk, pinned_fid in history_bound_targets.items():
+    for rk, pinned_fid in effective_bound_targets.items():
         if pinned_fid in cleared_ids:
             consumed_keys.add(rk)
     matched_keys_by_id: dict[str, frozenset[str]] = {}
@@ -3560,12 +3624,13 @@ def evaluate_round(
             author_replies,
             consumed_reply_keys=history_consumed,
             stale_location_fingerprints=verified.candidates.stale_location_fingerprints,
-            bound_reply_targets=history_bound_targets,
+            bound_reply_targets=effective_bound_targets,
         )
         for fid in cleared_ids:
             consumed_keys.update(matched_keys_by_id.get(fid, ()))
 
-    bound_targets: dict[str, str] = dict(history_bound_targets)
+    bound_targets: dict[str, str] = dict(effective_bound_targets)
+    stale_fps = verified.candidates.stale_location_fingerprints
     round_loc_inline_targets: dict[str, set[str]] = {}
     for vf in effective_verified:
         fid = vf.finding.finding_id
@@ -3583,10 +3648,12 @@ def evaluate_round(
             pinned = bound_targets[rk]
             if any(fid != pinned for fid in target_fids):
                 raise ConvergenceError(
-                    f"回复键 {rk!r} 已在历史轮次锁定到发现 {pinned!r}，不得改绑到 {sorted(target_fids)!r}"
+                    f"回复键 {rk!r} 已锁定到发现 {pinned!r}，不得改绑到 {sorted(target_fids)!r}"
                 )
         elif len(target_fids) == 1:
-            bound_targets[rk] = next(iter(target_fids))
+            only_fid = next(iter(target_fids))
+            if only_fid not in stale_fps:
+                bound_targets[rk] = only_fid
         else:
             # 同一 loc/inline 回复在本轮同时命中多个发现属歧义回复，标记为已消费以防后续轮次改绑新发现
             consumed_keys.add(rk)
