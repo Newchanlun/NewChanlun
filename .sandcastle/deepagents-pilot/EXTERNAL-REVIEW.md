@@ -24,7 +24,7 @@ export PYTHONPATH=.sandcastle/approval-signing:.sandcastle/deepagents-pilot
 
 需要在 Colima 验收和审阅、但全局默认是 OrbStack 时，在启动 controller 的环境中设置 `DOCKER_CONTEXT=colima`，不修改全局默认。该值沿部署准入、监督、容器/卷检查与回收、VM trim 传递；不存在或不可用的显式 context 按原失败路径处理，不重试默认 daemon。未设置时仍由 Docker 使用原默认 context。launchd 托管时，在实际加载的 `com.newchanlun.deepagents-executor.plist` 的 `EnvironmentVariables` 中设置该值；部署验收命令也须显式使用同一 context。
 
-这是宿主进程的定位变量，不进入审阅容器。`DOCKER_HOST`、`DOCKER_CONFIG`、TLS 覆盖和任意 secret env 仍不转发。审查模型由 `MODELS → launch.json.model → codexWorker({model})` 决定，不依赖转发 `SANDCASTLE_MAIN_MODEL`；正式审阅准入不调用主控模型探针。
+这是宿主进程的定位变量，不进入审阅容器。`DOCKER_HOST`、`DOCKER_CONFIG`、TLS 覆盖和任意 secret env 仍不转发。审查模型由 `MODELS → launch.json.model → codexWorker({model})` 决定。`SANDCASTLE_MAIN_MODEL` 仅传给宿主的准入与监督进程，用于按部署的起草模型核对验收独审是否异家族；它不选择审查模型，也不进入审阅容器。正式审阅准入不调用主控模型探针。
 
 同一部署的派发、恢复与回收须使用同一 context；旧 run 没有持久化 context 绑定，不能换 daemon 后接管。部署新代码后，部署 owner 必须按新 controller head 重新绑定 Docker 准入，不能沿用旧 controller head 的验收。隔离 fake 测试不代替这一步。
 
