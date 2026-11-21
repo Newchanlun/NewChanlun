@@ -72,6 +72,11 @@ class BugLocation:
     line_end: int
     summary: str
     category: str
+    extra_ranges: tuple[tuple[int, int], ...] = ()
+
+    @property
+    def all_ranges(self) -> tuple[tuple[int, int], ...]:
+        return ((self.line_start, self.line_end), *self.extra_ranges)
 
 
 @dataclass(frozen=True)
@@ -141,6 +146,7 @@ class EvalScore:
     coverage_rate: float
     bug_cases: int
     clean_cases: int
+    decided_clean_cases: int
     recalled_bug_cases: int
     total_bug_locations: int
     matched_bug_locations: int
@@ -149,7 +155,7 @@ class EvalScore:
     matched_blocking_findings: int
     bug_case_recall: float
     bug_location_recall: float
-    clean_false_positive_rate: float
+    clean_false_positive_rate: float | None
     blocking_precision: float
     f1: float
     line_tolerance: int
@@ -167,7 +173,7 @@ class ScoreComparison:
 
     bug_case_recall_delta: float
     bug_location_recall_delta: float
-    clean_false_positive_rate_delta: float
+    clean_false_positive_rate_delta: float | None
     blocking_precision_delta: float
     f1_delta: float
     coverage_rate_delta: float
@@ -295,6 +301,19 @@ def _parse_bug_location(raw: Any, prefix: str) -> BugLocation:
     line_end = _require_int(raw.get("line_end"), f"{prefix}.line_end")
     if line_start < 1 or line_end < line_start:
         raise EvalValidationError(f"{prefix} 行号区间非法：{line_start}..{line_end}")
+    raw_extra = raw.get("extra_ranges", [])
+    if not isinstance(raw_extra, list):
+        raise EvalValidationError(f"{prefix}.extra_ranges 必须是数组")
+    extra_ranges: list[tuple[int, int]] = []
+    for r_idx, rng in enumerate(raw_extra):
+        r_prefix = f"{prefix}.extra_ranges[{r_idx}]"
+        if not isinstance(rng, list) or len(rng) != 2:
+            raise EvalValidationError(f"{r_prefix} 必须是长度为 2 的整数数组")
+        r_start = _require_int(rng[0], f"{r_prefix}[0]")
+        r_end = _require_int(rng[1], f"{r_prefix}[1]")
+        if r_start < 1 or r_end < r_start:
+            raise EvalValidationError(f"{r_prefix} 行号区间非法：{r_start}..{r_end}")
+        extra_ranges.append((r_start, r_end))
     summary = _require_nonempty_str(raw.get("summary"), f"{prefix}.summary")
     category = _require_nonempty_str(raw.get("category"), f"{prefix}.category")
     return BugLocation(
@@ -303,6 +322,7 @@ def _parse_bug_location(raw: Any, prefix: str) -> BugLocation:
         line_end=line_end,
         summary=summary,
         category=category,
+        extra_ranges=tuple(extra_ranges),
     )
 
 
@@ -433,6 +453,7 @@ def compute_cases_fingerprint(cases: Sequence[EvalCase]) -> str:
                     "file": _norm_path(loc.file),
                     "line_start": loc.line_start,
                     "line_end": loc.line_end,
+                    "extra_ranges": [[r_start, r_end] for r_start, r_end in loc.extra_ranges],
                 }
                 for loc in c.bug_locations
             ],
@@ -472,10 +493,11 @@ def validate_cases(cases: Sequence[EvalCase], repo_root: Path | None = None) -> 
             for loc in case.bug_locations:
                 if not _norm_path(loc.file):
                     raise EvalValidationError(f"{case.case_id} 存在空文件路径")
-                if loc.line_start < 1 or loc.line_end < loc.line_start:
-                    raise EvalValidationError(
-                        f"{case.case_id} 的 {loc.file} 行号非法：{loc.line_start}..{loc.line_end}"
-                    )
+                for r_start, r_end in loc.all_ranges:
+                    if r_start < 1 or r_end < r_start:
+                        raise EvalValidationError(
+                            f"{case.case_id} 的 {loc.file} 行号非法：{r_start}..{r_end}"
+                        )
         elif case.kind == "clean":
             if case.bug_locations:
                 raise EvalValidationError(f"clean 案 {case.case_id} 的 bug_locations 必须为空")
@@ -499,21 +521,22 @@ def validate_cases(cases: Sequence[EvalCase], repo_root: Path | None = None) -> 
                 if cache_key not in line_count_cache:
                     line_count_cache[cache_key] = _git_blob_line_count(repo_root, obj_spec)
                 total_lines = line_count_cache[cache_key]
-                if loc.line_end > total_lines:
-                    raise EvalValidationError(
-                        f"{case.case_id} 的 {norm_file} 行号越界：{loc.line_end} > {total_lines}"
-                    )
                 diff_key = (case.base_sha, case.head_sha, norm_file)
                 if diff_key not in diff_hunk_cache:
                     diff_hunk_cache[diff_key] = _git_diff_added_ranges(
                         repo_root, case.base_sha, case.head_sha, norm_file
                     )
                 added_ranges = diff_hunk_cache[diff_key]
-                if not any(loc.line_start <= h_end and loc.line_end >= h_start for h_start, h_end in added_ranges):
-                    raise EvalValidationError(
-                        f"{case.case_id} 的 {norm_file}:{loc.line_start}..{loc.line_end} "
-                        f"未与 {case.base_sha[:10]}..{case.head_sha[:10]} 的新增/修改 diff hunk 相交"
-                    )
+                for r_start, r_end in loc.all_ranges:
+                    if r_end > total_lines:
+                        raise EvalValidationError(
+                            f"{case.case_id} 的 {norm_file} 行号越界：{r_end} > {total_lines}"
+                        )
+                    if not any(r_start <= h_end and r_end >= h_start for h_start, h_end in added_ranges):
+                        raise EvalValidationError(
+                            f"{case.case_id} 的 {norm_file}:{r_start}..{r_end} "
+                            f"未与 {case.base_sha[:10]}..{case.head_sha[:10]} 的新增/修改 diff hunk 相交"
+                        )
 
 
 def load_predictions(path: Path) -> tuple[CasePrediction, ...]:
@@ -607,7 +630,10 @@ def _finding_matches_location(
         return False
     if _norm_path(loc.file) != _norm_path(finding.file):
         return False
-    return f_start <= loc.line_end + line_tolerance and f_end >= max(1, loc.line_start - line_tolerance)
+    return any(
+        f_start <= r_end + line_tolerance and f_end >= max(1, r_start - line_tolerance)
+        for r_start, r_end in loc.all_ranges
+    )
 
 
 def _match_findings_to_locations(
@@ -664,7 +690,7 @@ def score_predictions(
     - evaluated_cases 仅计实际产生裁定（PASS / BLOCK）的案例数；FAILED 计入 failed_cases、MISSING 计入 missing_cases，两者均计入未裁定覆盖缺口（coverage_rate = evaluated_cases / total_cases）。
     - bug_case_recall：真实 bug 案被判 BLOCK 且至少一条阻断/Important 发现命中真实 bug_location 的比例。
     - bug_location_recall：所有真实 bug_location 中经规范坐标去重后一对一最大匹配命中的比例（闭区间跨度超过 max_finding_span 的宽区间发现不计命中）。
-    - clean_false_positive_rate：已实际裁定（PASS / BLOCK）的真实 clean 案中只要 verdict == BLOCK 一律计为误报（FAILED / MISSING 不充当零误报分母）。
+    - clean_false_positive_rate：已实际裁定（PASS / BLOCK）的真实 clean 案中只要 verdict == BLOCK 一律计为误报（FAILED / MISSING 不充当零误报分母）；当已裁定 clean 案数 decided_clean_cases == 0 时返回 None（不可计算）。
     - blocking_precision：所有阻断/Important 发现（含重复副本）中经去重一对一匹配计为真阳性的比例（重复发现惩罚精确率且不领取额外位置召回）。
     - f1：blocking_precision 与 bug_location_recall 的调和平均。
     """
@@ -695,7 +721,7 @@ def score_predictions(
     clean_cases = 0
     evaluated_cases = 0
     failed_cases = 0
-    evaluated_clean_cases = 0
+    decided_clean_cases = 0
     missing_cases = 0
     recalled_bug_cases = 0
     total_bug_locations = 0
@@ -782,7 +808,7 @@ def score_predictions(
         else:
             clean_cases += 1
             if case_pred.verdict in ("PASS", "BLOCK"):
-                evaluated_clean_cases += 1
+                decided_clean_cases += 1
             # 干净 PR 只要终态为 BLOCK 一律计为误报（无论 findings 为空、仅含 nit 或含 important/blocking）。
             is_fp = case_pred.verdict == "BLOCK"
             if is_fp:
@@ -805,7 +831,9 @@ def score_predictions(
     coverage_rate = evaluated_cases / len(cases) if cases else 0.0
     bug_case_recall = recalled_bug_cases / bug_cases if bug_cases else 0.0
     bug_location_recall = matched_bug_locations / total_bug_locations if total_bug_locations else 0.0
-    clean_false_positive_rate = clean_false_positive_cases / evaluated_clean_cases if evaluated_clean_cases else 0.0
+    clean_false_positive_rate: float | None = (
+        round(clean_false_positive_cases / decided_clean_cases, 6) if decided_clean_cases > 0 else None
+    )
     blocking_precision = matched_blocking_findings / total_blocking_findings if total_blocking_findings else 0.0
     f1 = (
         2.0 * blocking_precision * bug_location_recall / (blocking_precision + bug_location_recall)
@@ -821,6 +849,7 @@ def score_predictions(
         coverage_rate=round(coverage_rate, 6),
         bug_cases=bug_cases,
         clean_cases=clean_cases,
+        decided_clean_cases=decided_clean_cases,
         recalled_bug_cases=recalled_bug_cases,
         total_bug_locations=total_bug_locations,
         matched_bug_locations=matched_bug_locations,
@@ -829,7 +858,7 @@ def score_predictions(
         matched_blocking_findings=matched_blocking_findings,
         bug_case_recall=round(bug_case_recall, 6),
         bug_location_recall=round(bug_location_recall, 6),
-        clean_false_positive_rate=round(clean_false_positive_rate, 6),
+        clean_false_positive_rate=clean_false_positive_rate,
         blocking_precision=round(blocking_precision, 6),
         f1=round(f1, 6),
         line_tolerance=line_tolerance,
@@ -879,6 +908,20 @@ def _score_from_dict(raw: dict[str, Any]) -> EvalScore:
                 )
             )
         cases_fp = _require_nonempty_str(raw["cases_fingerprint"], "cases_fingerprint")
+        decided_clean_cases = _require_int(raw["decided_clean_cases"], "decided_clean_cases")
+        if decided_clean_cases < 0:
+            raise EvalValidationError(f"decided_clean_cases 不能为负：{decided_clean_cases}")
+        raw_clean_fp_rate = raw["clean_false_positive_rate"]
+        if raw_clean_fp_rate is None:
+            clean_false_positive_rate: float | None = None
+        elif isinstance(raw_clean_fp_rate, bool) or not isinstance(raw_clean_fp_rate, (int, float)):
+            raise EvalValidationError("clean_false_positive_rate 必须是数值或 null")
+        else:
+            clean_false_positive_rate = float(raw_clean_fp_rate)
+        if decided_clean_cases == 0 and clean_false_positive_rate is not None:
+            raise EvalValidationError("decided_clean_cases 为 0 时 clean_false_positive_rate 必须为 null")
+        if decided_clean_cases > 0 and clean_false_positive_rate is None:
+            raise EvalValidationError("decided_clean_cases 大于 0 时 clean_false_positive_rate 不能为 null")
         return EvalScore(
             total_cases=int(raw["total_cases"]),
             evaluated_cases=int(raw["evaluated_cases"]),
@@ -887,6 +930,7 @@ def _score_from_dict(raw: dict[str, Any]) -> EvalScore:
             coverage_rate=float(raw["coverage_rate"]),
             bug_cases=int(raw["bug_cases"]),
             clean_cases=int(raw["clean_cases"]),
+            decided_clean_cases=decided_clean_cases,
             recalled_bug_cases=int(raw["recalled_bug_cases"]),
             total_bug_locations=int(raw["total_bug_locations"]),
             matched_bug_locations=int(raw["matched_bug_locations"]),
@@ -895,7 +939,7 @@ def _score_from_dict(raw: dict[str, Any]) -> EvalScore:
             matched_blocking_findings=int(raw["matched_blocking_findings"]),
             bug_case_recall=float(raw["bug_case_recall"]),
             bug_location_recall=float(raw["bug_location_recall"]),
-            clean_false_positive_rate=float(raw["clean_false_positive_rate"]),
+            clean_false_positive_rate=clean_false_positive_rate,
             blocking_precision=float(raw["blocking_precision"]),
             f1=float(raw["f1"]),
             line_tolerance=int(raw["line_tolerance"]),
@@ -1003,10 +1047,21 @@ def compare_scores(before: EvalScore, after: EvalScore) -> ScoreComparison:
             else:
                 unchanged.append(case_id)
 
+    clean_fp_delta: float | None = (
+        None
+        if (
+            before.decided_clean_cases == 0
+            or after.decided_clean_cases == 0
+            or before.clean_false_positive_rate is None
+            or after.clean_false_positive_rate is None
+        )
+        else round(after.clean_false_positive_rate - before.clean_false_positive_rate, 6)
+    )
+
     return ScoreComparison(
         bug_case_recall_delta=round(after.bug_case_recall - before.bug_case_recall, 6),
         bug_location_recall_delta=round(after.bug_location_recall - before.bug_location_recall, 6),
-        clean_false_positive_rate_delta=round(after.clean_false_positive_rate - before.clean_false_positive_rate, 6),
+        clean_false_positive_rate_delta=clean_fp_delta,
         blocking_precision_delta=round(after.blocking_precision - before.blocking_precision, 6),
         f1_delta=round(after.f1 - before.f1, 6),
         coverage_rate_delta=round(after.coverage_rate - before.coverage_rate, 6),
@@ -1165,7 +1220,7 @@ def analyze_review_runs(
 
     all_prs: set[int] = set()
     prs_with_any_pass: set[int] = set()
-    prs_with_unorderable_pass: set[int] = set()
+    unorderable_pass_heads_by_pr: dict[int, set[str | None]] = defaultdict(set)
     pr_timeline: dict[int, list[_RunTimelineRecord]] = defaultdict(list)
     undeterminable_block_findings = 0
 
@@ -1220,16 +1275,34 @@ def analyze_review_runs(
         else:
             verdict_counts["MISSING_OUTCOME"] += 1
 
-        target_source = target_data or (
-            outcome_data.get("target") if outcome_data and isinstance(outcome_data.get("target"), dict) else None
-        )
-        raw_target_run_id = target_source.get("run_id") if isinstance(target_source, dict) else None
-        target_run_id = (
-            raw_target_run_id.strip()
-            if isinstance(raw_target_run_id, str) and raw_target_run_id.strip()
+        outcome_target = (
+            outcome_data.get("target")
+            if outcome_data is not None and isinstance(outcome_data.get("target"), dict)
             else None
         )
-        run_dir_run_ids = {rid for rid in (outcome_run_id, target_run_id) if rid is not None}
+        target_source = target_data or outcome_target
+        raw_target_file_run_id = target_data.get("run_id") if isinstance(target_data, dict) else None
+        target_file_run_id = (
+            raw_target_file_run_id.strip()
+            if isinstance(raw_target_file_run_id, str) and raw_target_file_run_id.strip()
+            else None
+        )
+        raw_outcome_target_run_id = outcome_target.get("run_id") if isinstance(outcome_target, dict) else None
+        outcome_target_run_id = (
+            raw_outcome_target_run_id.strip()
+            if isinstance(raw_outcome_target_run_id, str) and raw_outcome_target_run_id.strip()
+            else None
+        )
+        target_run_id = target_file_run_id or outcome_target_run_id
+        run_dir_run_ids = {
+            rid for rid in (outcome_run_id, target_file_run_id, outcome_target_run_id) if rid is not None
+        }
+        run_id_conflict = len(run_dir_run_ids) > 1
+        if run_id_conflict:
+            if outcome_data is not None and (outcome_run_id is not None or outcome_target_run_id is not None):
+                corrupted_files.append(str(outcome_path.relative_to(runs_dir)))
+            if target_data is not None and target_file_run_id is not None:
+                corrupted_files.append(str(target_path.relative_to(runs_dir)))
 
         run_pr_number: int | None = None
         if isinstance(target_source, dict):
@@ -1251,7 +1324,9 @@ def analyze_review_runs(
                 if isinstance(receipt_run_id_raw, str) and receipt_run_id_raw.strip()
                 else None
             )
-            if receipt_run_id is not None and any(receipt_run_id != rid for rid in run_dir_run_ids):
+            if run_id_conflict or (
+                receipt_run_id is not None and any(receipt_run_id != rid for rid in run_dir_run_ids)
+            ):
                 corrupted_files.append(str(receipt_path.relative_to(runs_dir)))
                 continue
 
@@ -1288,10 +1363,12 @@ def analyze_review_runs(
 
         reg_raw = target_source.get("registered_at_ns") if isinstance(target_source, dict) else None
         has_valid_ts = isinstance(reg_raw, int) and not isinstance(reg_raw, bool) and reg_raw > 0
+        raw_head = target_source.get("head_sha") if isinstance(target_source, dict) else None
+        head_sha = raw_head.strip() if isinstance(raw_head, str) else ""
         if run_pr_number is None or not has_valid_ts:
             unorderable_runs += 1
             if run_pr_number is not None and verdict == "PASS":
-                prs_with_unorderable_pass.add(run_pr_number)
+                unorderable_pass_heads_by_pr[run_pr_number].add(head_sha or None)
             if verdict == "BLOCK" and run_blocking_findings > 0:
                 undeterminable_block_findings += run_blocking_findings
             continue
@@ -1300,8 +1377,6 @@ def analyze_review_runs(
         assert isinstance(reg_raw, int)
         att_raw = target_source.get("attempt")
         attempt = att_raw if isinstance(att_raw, int) and not isinstance(att_raw, bool) else 0
-        raw_head = target_source.get("head_sha")
-        head_sha = raw_head.strip() if isinstance(raw_head, str) else ""
         pr_timeline[run_pr_number].append(
             _RunTimelineRecord(
                 registered_at_ns=reg_raw,
@@ -1342,6 +1417,7 @@ def analyze_review_runs(
                 )
                 rounds_effective.append(fresh_effective_until_pass)
 
+        unorderable_pass_heads = unorderable_pass_heads_by_pr.get(pr_number, set())
         for rec in ordered_runs:
             if rec.verdict != "BLOCK" or rec.blocking_finding_count <= 0:
                 continue
@@ -1356,10 +1432,13 @@ def analyze_review_runs(
             has_diff_head_pass = any(
                 later.head_sha and later.head_sha != rec.head_sha for later in strictly_later_passes
             )
+            has_unorderable_diff_or_missing_head_pass = any(
+                h is None or h != rec.head_sha for h in unorderable_pass_heads
+            )
             if has_diff_head_pass:
                 total_block_findings += rec.blocking_finding_count
                 inferred_fixed += rec.blocking_finding_count
-            elif pr_number in prs_with_unorderable_pass or any(
+            elif has_unorderable_diff_or_missing_head_pass or any(
                 not later.head_sha for later in strictly_later_passes
             ):
                 undeterminable_block_findings += rec.blocking_finding_count
@@ -1596,7 +1675,7 @@ def render_baseline_markdown(metrics: BaselineMetrics) -> str:
             "### 4.3 后续 head 转 PASS 推定（启发式）",
             "",
             f"- 可判定 BLOCK 运行中的非 Nit 阻断发现总数：`{metrics.subsequent_head_pass_total_block_findings}`",
-            f"- 缺合法时间戳/`head_sha` 或同 PR 存在不可排序 PASS 而不可判定的 BLOCK 发现条数：`{metrics.subsequent_head_pass_undeterminable_findings}`",
+            f"- 缺合法时间戳/`head_sha` 或同 PR 存在不可排序的不同/缺失 `head_sha` PASS 而不可判定的 BLOCK 发现条数：`{metrics.subsequent_head_pass_undeterminable_findings}`",
             f"- 同 PR 后续更晚时间戳出现不同非空 `head_sha` 且终态转 PASS 的推定已修条数：`{metrics.subsequent_head_pass_inferred_fixed}`（`{_fmt_pct(metrics.subsequent_head_pass_inferred_rate)}`）",
             "",
             "## 五、显式去向台账统计（`load_dispositions`）",

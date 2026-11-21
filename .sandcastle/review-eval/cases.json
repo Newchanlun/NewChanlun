@@ -224,7 +224,10 @@
         {
           "file": ".sandcastle/deepagents-pilot/pilot1742/agent.py",
           "line_start": 284,
-          "line_end": 355,
+          "line_end": 284,
+          "extra_ranges": [
+            [355, 355]
+          ],
           "summary": "未同步核对 .github/devskim-reviewed-1488.json 的文件哈希钉住约束即改写 agent.py（第 284 行与第 355 行），导致 DevSkim 已审误报清单整体失效。",
           "category": "ci_gate_breakage"
         }

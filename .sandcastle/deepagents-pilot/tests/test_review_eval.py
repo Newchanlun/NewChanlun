@@ -19,6 +19,7 @@ from pilot1742.review_eval import (
     PredictedFinding,
     analyze_review_runs,
     compare_scores,
+    compute_cases_fingerprint,
     load_cases,
     load_dispositions,
     main,
@@ -145,7 +146,9 @@ def test_canonical_cases_json_schema_valid() -> None:
     assert len(case_1950.bug_locations) == 1
     assert case_1950.bug_locations[0].file == ".sandcastle/deepagents-pilot/pilot1742/agent.py"
     assert case_1950.bug_locations[0].line_start == 284
-    assert case_1950.bug_locations[0].line_end == 355
+    assert case_1950.bug_locations[0].line_end == 284
+    assert case_1950.bug_locations[0].extra_ranges == ((355, 355),)
+    assert case_1950.bug_locations[0].all_ranges == ((284, 284), (355, 355))
 
 
 def test_canonical_cases_json_git_history_verified() -> None:
@@ -341,6 +344,204 @@ def test_validate_cases_checks_git_repo_line_bounds_and_diff_hunks(tmp_path: Pat
         text=True,
     )
     assert _is_full_git_checkout(shallow_repo) is False
+
+    # extra_ranges 校验：每个离散区间都必须不越界且与 diff hunk 相交
+    (repo / "multi.py").write_text("a1\na2\na3\na4\na5\na6\n", encoding="utf-8")
+    _git(repo, "add", "multi.py")
+    _git(repo, "commit", "-qm", "multi-base")
+    m_base = _git(repo, "rev-parse", "HEAD")
+
+    (repo / "multi.py").write_text("a1_mod\na2\na3\na4\na5\na6_mod\n", encoding="utf-8")
+    _git(repo, "add", "multi.py")
+    _git(repo, "commit", "-qm", "multi-head")
+    m_head = _git(repo, "rev-parse", "HEAD")
+
+    ok_extra = EvalCase(
+        case_id="ok-extra",
+        kind="bug",
+        title="双离散改动点均命中 diff hunk",
+        base_sha=m_base,
+        head_sha=m_head,
+        bug_locations=(
+            BugLocation(
+                file="multi.py",
+                line_start=1,
+                line_end=1,
+                extra_ranges=((6, 6),),
+                summary="两处离散改动",
+                category="bug",
+            ),
+        ),
+    )
+    validate_cases((ok_extra,), repo_root=repo)
+
+    extra_non_diff = EvalCase(
+        case_id="extra-non-diff",
+        kind="bug",
+        title="extra_ranges 指向未改动中间行",
+        base_sha=m_base,
+        head_sha=m_head,
+        bug_locations=(
+            BugLocation(
+                file="multi.py",
+                line_start=1,
+                line_end=1,
+                extra_ranges=((3, 3),),
+                summary="未改动行",
+                category="bug",
+            ),
+        ),
+    )
+    with pytest.raises(EvalValidationError, match="diff hunk"):
+        validate_cases((extra_non_diff,), repo_root=repo)
+
+    extra_oob = EvalCase(
+        case_id="extra-oob",
+        kind="bug",
+        title="extra_ranges 越界",
+        base_sha=m_base,
+        head_sha=m_head,
+        bug_locations=(
+            BugLocation(
+                file="multi.py",
+                line_start=1,
+                line_end=1,
+                extra_ranges=((99, 99),),
+                summary="越界",
+                category="bug",
+            ),
+        ),
+    )
+    with pytest.raises(EvalValidationError, match="行号越界"):
+        validate_cases((extra_oob,), repo_root=repo)
+
+
+def test_discrete_extra_ranges_matching_and_fingerprint_for_case_1950(tmp_path: Path) -> None:
+    cases = load_cases(CANONICAL_CASES)
+    case_1950 = next(c for c in cases if c.case_id == "bug-1950-agent-devskim-hash-revert")
+    target_cases = (case_1950,)
+    target_file = ".sandcastle/deepagents-pilot/pilot1742/agent.py"
+
+    # 1) line_tolerance=0 报 284 行命中（1.0）
+    score_284 = score_predictions(
+        target_cases,
+        (
+            CasePrediction(
+                case_id=case_1950.case_id,
+                verdict="BLOCK",
+                findings=(PredictedFinding(file=target_file, line_start=284, line_end=284, severity="blocking"),),
+            ),
+        ),
+        line_tolerance=0,
+    )
+    assert score_284.bug_case_recall == pytest.approx(1.0)
+    assert score_284.bug_location_recall == pytest.approx(1.0)
+    assert score_284.blocking_precision == pytest.approx(1.0)
+
+    # 2) line_tolerance=0 报 355 行命中（1.0）
+    score_355 = score_predictions(
+        target_cases,
+        (
+            CasePrediction(
+                case_id=case_1950.case_id,
+                verdict="BLOCK",
+                findings=(PredictedFinding(file=target_file, line_start=355, line_end=355, severity="blocking"),),
+            ),
+        ),
+        line_tolerance=0,
+    )
+    assert score_355.bug_case_recall == pytest.approx(1.0)
+    assert score_355.bug_location_recall == pytest.approx(1.0)
+    assert score_355.blocking_precision == pytest.approx(1.0)
+
+    # 3) line_tolerance=0 报未改动的第 320 行绝不命中（0.0）
+    score_320 = score_predictions(
+        target_cases,
+        (
+            CasePrediction(
+                case_id=case_1950.case_id,
+                verdict="BLOCK",
+                findings=(PredictedFinding(file=target_file, line_start=320, line_end=320, severity="blocking"),),
+            ),
+        ),
+        line_tolerance=0,
+    )
+    assert score_320.bug_case_recall == pytest.approx(0.0)
+    assert score_320.bug_location_recall == pytest.approx(0.0)
+    assert score_320.blocking_precision == pytest.approx(0.0)
+
+    # 4) 同时报 284 与 355 仍只计 1 个位置命中，且多报一条拉低 precision 为 0.5
+    score_both = score_predictions(
+        target_cases,
+        (
+            CasePrediction(
+                case_id=case_1950.case_id,
+                verdict="BLOCK",
+                findings=(
+                    PredictedFinding(file=target_file, line_start=284, line_end=284, severity="blocking"),
+                    PredictedFinding(file=target_file, line_start=355, line_end=355, severity="blocking"),
+                ),
+            ),
+        ),
+        line_tolerance=0,
+    )
+    assert score_both.matched_bug_locations == 1
+    assert score_both.bug_location_recall == pytest.approx(1.0)
+    assert score_both.total_blocking_findings == 2
+    assert score_both.matched_blocking_findings == 1
+    assert score_both.blocking_precision == pytest.approx(0.5)
+
+    # 5) extra_ranges 变更影响 cases_fingerprint；非法 JSON extra_ranges 被 load_cases 拒绝
+    alt_case = EvalCase(
+        case_id=case_1950.case_id,
+        kind="bug",
+        title=case_1950.title,
+        base_sha=case_1950.base_sha,
+        head_sha=case_1950.head_sha,
+        bug_locations=(
+            BugLocation(
+                file=target_file,
+                line_start=284,
+                line_end=284,
+                extra_ranges=(),
+                summary="s",
+                category="c",
+            ),
+        ),
+    )
+    assert compute_cases_fingerprint((case_1950,)) != compute_cases_fingerprint((alt_case,))
+
+    bad_extra_json = tmp_path / "bad_extra.json"
+    bad_extra_json.write_text(
+        json.dumps(
+            {
+                "schema_version": SCHEMA_VERSION,
+                "cases": [
+                    {
+                        "case_id": "bad-extra",
+                        "kind": "bug",
+                        "title": "bad",
+                        "base_sha": SHA_1,
+                        "head_sha": SHA_2,
+                        "fix_sha": None,
+                        "bug_locations": [
+                            {
+                                "file": "a.py",
+                                "line_start": 10,
+                                "line_end": 10,
+                                "extra_ranges": [[20, 15]],
+                                "summary": "s",
+                                "category": "c",
+                            }
+                        ],
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    with pytest.raises(EvalValidationError, match="行号区间非法"):
+        load_cases(bad_extra_json)
 
 
 def test_score_predictions_tolerance_clean_fp_and_compare() -> None:
@@ -624,9 +825,10 @@ def test_missing_predictions_rejected_by_default_and_explicit_in_partial_mode() 
     assert by_id["bug-beta"].verdict == "MISSING"
     assert by_id["clean-two"].verdict == "MISSING"
 
-    # 若没有任何已评 clean 案，clean_false_positive_rate 为 0.0 且 coverage_rate 暴露缺口
+    # 若没有任何已裁定 clean 案，decided_clean_cases == 0 且 clean_false_positive_rate 为 None（绝不伪装成 0.0）
     no_clean_partial = score_predictions(cases, (partial_preds[0],), allow_partial=True)
-    assert no_clean_partial.clean_false_positive_rate == pytest.approx(0.0)
+    assert no_clean_partial.decided_clean_cases == 0
+    assert no_clean_partial.clean_false_positive_rate is None
     assert no_clean_partial.coverage_rate == pytest.approx(0.25)
 
 
@@ -684,11 +886,14 @@ def test_missing_and_failed_never_grant_improved_and_failed_lowers_coverage() ->
     assert after_missing.evaluated_cases == 0
     assert after_missing.failed_cases == 0
     assert after_missing.missing_cases == 4
+    assert after_missing.decided_clean_cases == 0
+    assert after_missing.clean_false_positive_rate is None
     assert after_missing.coverage_rate == pytest.approx(0.0)
     cmp_missing = compare_scores(before, after_missing)
     assert cmp_missing.improved_cases == ()
     assert cmp_missing.regressed_cases == ("bug-recalled", "clean-1886")
     assert cmp_missing.undecided_cases == ("bug-unrecalled", "clean-1877")
+    assert cmp_missing.clean_false_positive_rate_delta is None
     assert cmp_missing.coverage_rate_delta == pytest.approx(-1.0)
 
     # 2) clean-1877 从 BLOCK -> FAILED：绝不进 improved_cases，且 FAILED 降低 coverage_rate、不充当 clean 零误报分母
@@ -723,6 +928,57 @@ def test_missing_and_failed_never_grant_improved_and_failed_lowers_coverage() ->
     cmp_recover_from_failed = compare_scores(after_failed, before)
     assert cmp_recover_from_failed.improved_cases == ("clean-1886",)
     assert cmp_recover_from_failed.undecided_cases == ("bug-recalled", "bug-unrecalled", "clean-1877")
+
+
+def test_single_clean_case_block_to_failed_or_missing_yields_none_fp_rate_and_delta(tmp_path: Path) -> None:
+    single_clean = (
+        EvalCase(case_id="clean-1877", kind="clean", title="唯一 clean 案", base_sha=SHA_1, head_sha=SHA_2),
+    )
+    before = score_predictions(
+        single_clean,
+        (
+            CasePrediction(
+                case_id="clean-1877",
+                verdict="BLOCK",
+                findings=(PredictedFinding(file="c.py", line_start=1, line_end=1, severity="blocking"),),
+            ),
+        ),
+    )
+    assert before.decided_clean_cases == 1
+    assert before.clean_false_positive_rate == pytest.approx(1.0)
+
+    # 1) 唯一 clean 案从 BLOCK -> FAILED：绝不报告 clean_false_positive_rate=0.0 或 delta=-1.0
+    after_failed = score_predictions(
+        single_clean,
+        (CasePrediction(case_id="clean-1877", verdict="FAILED"),),
+    )
+    assert after_failed.decided_clean_cases == 0
+    assert after_failed.clean_false_positive_rate is None
+    cmp_failed = compare_scores(before, after_failed)
+    assert cmp_failed.clean_false_positive_rate_delta is None
+    assert cmp_failed.improved_cases == ()
+    assert cmp_failed.undecided_cases == ("clean-1877",)
+
+    # 2) 唯一 clean 案从 BLOCK -> MISSING（allow_partial=True）：同样为 None
+    after_missing = score_predictions(single_clean, (), allow_partial=True)
+    assert after_missing.decided_clean_cases == 0
+    assert after_missing.clean_false_positive_rate is None
+    cmp_missing = compare_scores(before, after_missing)
+    assert cmp_missing.clean_false_positive_rate_delta is None
+    assert cmp_missing.improved_cases == ()
+    assert cmp_missing.undecided_cases == ("clean-1877",)
+
+    # 3) CLI JSON 序列化与 _score_from_dict 往返兼容 null
+    before_json = tmp_path / "before.json"
+    after_json = tmp_path / "after.json"
+    cmp_json = tmp_path / "cmp.json"
+    before_json.write_text(json.dumps(before.to_dict()), encoding="utf-8")
+    after_json.write_text(json.dumps(after_failed.to_dict()), encoding="utf-8")
+    assert json.loads(after_json.read_text(encoding="utf-8"))["clean_false_positive_rate"] is None
+    assert main(["compare", "--before", str(before_json), "--after", str(after_json), "--out-json", str(cmp_json)]) == 0
+    cmp_payload = json.loads(cmp_json.read_text(encoding="utf-8"))
+    assert cmp_payload["clean_false_positive_rate_delta"] is None
+    assert cmp_payload["improved_cases"] == []
 
 
 def test_compare_scores_enforces_compatibility_and_catches_precision_regression() -> None:
@@ -1216,6 +1472,107 @@ def test_analyze_review_runs_unorderable_and_missing_head_sha(tmp_path: Path) ->
     assert metrics.subsequent_head_pass_inferred_rate == pytest.approx(0.5)
 
 
+def test_unorderable_pass_same_head_vs_different_head_dual_control(tmp_path: Path) -> None:
+    # 对照 A：无时间戳 PASS 用不同 head B -> 无法确认先后，可判定 0、不可判定 1、推定已修 0
+    diff_head_dir = tmp_path / "diff-head"
+    diff_head_dir.mkdir()
+    _write_run(
+        diff_head_dir,
+        "p501-r1-block",
+        pr_number=501,
+        head_sha="a" * 40,
+        registered_at_ns=100,
+        attempt=1,
+        verdict="BLOCK",
+        receipts={
+            "claude-opus-5-5": {
+                "status": "completed",
+                "model": "claude-opus-5-5",
+                "result": {"status": "blocked", "findings": ["[P1] 真实阻断缺陷"]},
+            }
+        },
+    )
+    _write_run(
+        diff_head_dir,
+        "p501-r2-pass-nots-head-b",
+        pr_number=501,
+        head_sha="b" * 40,
+        registered_at_ns=None,
+        attempt=2,
+        verdict="PASS",
+    )
+    diff_metrics = analyze_review_runs(diff_head_dir)
+    assert diff_metrics.subsequent_head_pass_total_block_findings == 0
+    assert diff_metrics.subsequent_head_pass_undeterminable_findings == 1
+    assert diff_metrics.subsequent_head_pass_inferred_fixed == 0
+
+    # 对照 B：无时间戳 PASS 改用相同 head A -> 无论先后都不满足“换 head 后 PASS”，可判定 1、不可判定 0、推定已修 0
+    same_head_dir = tmp_path / "same-head"
+    same_head_dir.mkdir()
+    _write_run(
+        same_head_dir,
+        "p502-r1-block",
+        pr_number=502,
+        head_sha="a" * 40,
+        registered_at_ns=100,
+        attempt=1,
+        verdict="BLOCK",
+        receipts={
+            "claude-opus-5-5": {
+                "status": "completed",
+                "model": "claude-opus-5-5",
+                "result": {"status": "blocked", "findings": ["[P1] 真实阻断缺陷"]},
+            }
+        },
+    )
+    _write_run(
+        same_head_dir,
+        "p502-r2-pass-nots-head-a",
+        pr_number=502,
+        head_sha="a" * 40,
+        registered_at_ns=None,
+        attempt=2,
+        verdict="PASS",
+    )
+    same_metrics = analyze_review_runs(same_head_dir)
+    assert same_metrics.subsequent_head_pass_total_block_findings == 1
+    assert same_metrics.subsequent_head_pass_undeterminable_findings == 0
+    assert same_metrics.subsequent_head_pass_inferred_fixed == 0
+
+    # 对照 C：无时间戳 PASS 缺 head_sha -> 不可判定 1
+    missing_head_dir = tmp_path / "missing-head"
+    missing_head_dir.mkdir()
+    _write_run(
+        missing_head_dir,
+        "p503-r1-block",
+        pr_number=503,
+        head_sha="a" * 40,
+        registered_at_ns=100,
+        attempt=1,
+        verdict="BLOCK",
+        receipts={
+            "claude-opus-5-5": {
+                "status": "completed",
+                "model": "claude-opus-5-5",
+                "result": {"status": "blocked", "findings": ["[P1] 真实阻断缺陷"]},
+            }
+        },
+    )
+    _write_run(
+        missing_head_dir,
+        "p503-r2-pass-nots-nohead",
+        pr_number=503,
+        head_sha=None,
+        registered_at_ns=None,
+        attempt=2,
+        verdict="PASS",
+    )
+    missing_metrics = analyze_review_runs(missing_head_dir)
+    assert missing_metrics.subsequent_head_pass_total_block_findings == 0
+    assert missing_metrics.subsequent_head_pass_undeterminable_findings == 1
+    assert missing_metrics.subsequent_head_pass_inferred_fixed == 0
+
+
 def test_dispositions_reject_duplicates_and_dangling_references(tmp_path: Path) -> None:
     runs_dir = tmp_path / "runs"
     runs_dir.mkdir()
@@ -1370,6 +1727,81 @@ def test_conflicting_receipt_run_id_marked_corrupted_and_rejected_by_disposition
                     ),
                 ),
             )
+
+
+def test_conflicting_outcome_and_target_run_id_rejects_omitted_and_tagged_receipts(tmp_path: Path) -> None:
+    runs_dir = tmp_path / "runs"
+    runs_dir.mkdir()
+
+    # 精确反例：outcome.run_id="A" + target.run_id="B" + 回执省略 run_id（另附一条显式带 run_id="A" 的回执）
+    run_conflict = runs_dir / "run-conflict"
+    run_conflict.mkdir()
+    (run_conflict / "target.json").write_text(
+        json.dumps(
+            {
+                "run_id": "B",
+                "pr_number": 403,
+                "base_sha": "0" * 40,
+                "head_sha": "c" * 40,
+                "registered_at_ns": 300,
+                "attempt": 1,
+            }
+        ),
+        encoding="utf-8",
+    )
+    (run_conflict / "outcome.json").write_text(
+        json.dumps({"run_id": "A", "verdict": "BLOCK", "reviews": [{"model": "M", "verdict": "BLOCK"}]}),
+        encoding="utf-8",
+    )
+    m_omitted = run_conflict / "M"
+    m_omitted.mkdir()
+    (m_omitted / "receipt.json").write_text(
+        json.dumps(
+            {
+                "status": "completed",
+                "model": "M",
+                "result": {"status": "blocked", "findings": ["[P1] 省略 run_id 的回执发现"]},
+            }
+        ),
+        encoding="utf-8",
+    )
+    m_tagged = run_conflict / "M2"
+    m_tagged.mkdir()
+    (m_tagged / "receipt.json").write_text(
+        json.dumps(
+            {
+                "run_id": "A",
+                "status": "completed",
+                "model": "M2",
+                "result": {"status": "blocked", "findings": ["[P1] 自带 run_id=A 的回执发现"]},
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    metrics = analyze_review_runs(runs_dir)
+    assert "run-conflict/outcome.json" in metrics.corrupted_files
+    assert "run-conflict/target.json" in metrics.corrupted_files
+    assert "run-conflict/M/receipt.json" in metrics.corrupted_files
+    assert "run-conflict/M2/receipt.json" in metrics.corrupted_files
+    assert metrics.total_receipts == 0
+    assert metrics.total_findings == 0
+
+    for bad_run_id in ("A", "B", "run-conflict"):
+        for model_name in ("M", "M2"):
+            with pytest.raises(EvalValidationError, match="不存在的回执"):
+                analyze_review_runs(
+                    runs_dir,
+                    dispositions=(
+                        DispositionEntry(
+                            run_id=bad_run_id,
+                            pr_number=403,
+                            model=model_name,
+                            finding_index=0,
+                            disposition=DispositionLabel.FIXED,
+                        ),
+                    ),
+                )
 
 
 def test_cli_end_to_end_and_exit_codes(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:

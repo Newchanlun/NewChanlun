@@ -60,10 +60,10 @@ PYTHONPATH=../approval-signing "$VENV_PY" -m pilot1742.review_eval baseline-stat
 - `severity` 合法值：`blocking`、`important`、`nit`、`pre_existing`、`info`。
 - 仅 `blocking` / `important` 计入 bug 定位匹配与 `blocking_precision`；进入二分图一对一匹配前会按规范坐标 `(file, line_start, line_end)` 去重（重复副本仍计入精确率分母，不可领取额外位置召回），闭区间跨度（`line_end - line_start + 1`）超过 `--max-finding-span`（默认 `120` 行）的宽区间发现不计命中。
 - 干净 PR 只要终态为 `BLOCK` 一律计为误报（无论 findings 为空、仅含 `nit` 还是含 `blocking`）；仅在 `verdict: "PASS"` 时非阻断 `nit` 不计误报。
-- `score` 默认要求预测覆盖全部 `case_id`；`evaluated_cases` 仅计实际产生 `PASS` / `BLOCK` 裁定的案例，`FAILED`（`failed_cases`）与 `--allow-partial` 下的 `MISSING`（`missing_cases`）均计入覆盖缺口（`coverage_rate = evaluated_cases / total_cases`），不充当 clean 零误报分母，且在 `compare` 中绝不进入 `improved_cases`（从正常状态退化进 `regressed_cases`，其余归入 `undecided_cases`）。
+- `score` 默认要求预测覆盖全部 `case_id`；`evaluated_cases` 仅计实际产生 `PASS` / `BLOCK` 裁定的案例，`FAILED`（`failed_cases`）与 `--allow-partial` 下的 `MISSING`（`missing_cases`）均计入覆盖缺口（`coverage_rate = evaluated_cases / total_cases`），不充当 clean 零误报分母；当已裁定 clean 案数 `decided_clean_cases == 0` 时，`clean_false_positive_rate` 与 `compare` 产出的 `clean_false_positive_rate_delta` 均为 `null`（不可计算），且在 `compare` 中未裁定案例绝不进入 `improved_cases`（从正常状态退化进 `regressed_cases`，其余归入 `undecided_cases`）。
 
 ## 如何新增事故/回滚案例
 
 1. 用 `git show` 核实引入缺陷的提交（`head_sha`）、其审查基线（`base_sha`）以及后续回退/修复提交（`fix_sha`），均须填完整 40 位小写 SHA（不允许带空白字符）。
-2. 用 `git diff -U0 <base_sha> <head_sha> -- <file>` 与 `git show <head_sha>:<file>` 核实每个 `bug_location` 的相对路径与 `line_start..line_end`，确保定位落在 `base_sha..head_sha` 实际新增/修改的行范围内。
+2. 用 `git diff -U0 <base_sha> <head_sha> -- <file>` 与 `git show <head_sha>:<file>` 核实每个 `bug_location` 的相对路径与 `line_start..line_end`（若同一逻辑缺陷分散在同一文件的多个离散改动点，可用可选字段 `"extra_ranges": [[start, end], ...]` 逐一列出离散可接受区间，避免用大跨度把中间未改动行包进去），确保每个区间均落在 `base_sha..head_sha` 实际新增/修改的行范围内。
 3. 追加到 `cases.json` 后，在完整历史仓库（非浅克隆）执行 `PYTHONPATH=../approval-signing "$VENV_PY" -m pilot1742.review_eval validate-cases --cases ../review-eval/cases.json --repo-root ../..` 确认全量校验（含对象存在性、行号界限与 diff hunk 归属核验）通过。
