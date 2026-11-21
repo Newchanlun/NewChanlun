@@ -80,6 +80,31 @@ pub(super) fn reference(s: &str, field: &str) -> Result<(), String> {
     domain_name(s, field)
 }
 
+/// S 的已登记语法：逻辑名，或 [逻辑名+]组件/版本(+组件/版本)*。
+/// 加号只分隔规则组件，斜杠只连接组件与版本号。每个组件仍排除文件名。
+#[cfg(unix)]
+pub(super) fn s_rule_revision(s: &str) -> Result<(), String> {
+    let mut parts = s.split('+').peekable();
+    let valid = if let Some(first) = parts.next() {
+        let versioned = |part: &str| {
+            part.split_once('/').is_some_and(|(name, revision)| {
+                let revision = revision.strip_prefix('v').unwrap_or(revision);
+                is_name(name)
+                    && !revision.is_empty()
+                    && revision.bytes().all(|b| b.is_ascii_digit())
+            })
+        };
+        if parts.peek().is_none() {
+            is_name(first) || versioned(first)
+        } else {
+            (is_name(first) || versioned(first)) && parts.all(versioned)
+        }
+    } else {
+        false
+    };
+    checked(valid, "S rule_revision", "结构规则版本")
+}
+
 /// 行情源的 ASCII 单码可带指数前缀 `^` 或期货/外汇后缀 `=F`、`=X` 等。
 /// BASE/QUOTE 仍要求两侧均为大写 ASCII 资产代码。
 pub(super) fn instrument(s: &str, field: &str) -> Result<(), String> {

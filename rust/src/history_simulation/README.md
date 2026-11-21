@@ -154,11 +154,10 @@ StorageUnavailable 拒启。启动时把实际读到的存储证据写到 stderr
 按表为空补绑。事务内初始化函数接收Transaction类型，不接受裸Connection。
 
 
-## 已知缺口（#1381 R6 正式门登记，本片不改行为）
+## 已知缺口（#1381 R6 正式门登记）
 
-- 回复超帧静默断开：批结果与原件内嵌完整 families 与 model，并随历史增长。
-  AdvanceBar/QueryBatch 回复超过 `max_frame_bytes` 时，`session_transport` 的 serve 循环
-  不报错、直接关连接；批已提交，调用方只见 EOF。长历史下会出现。
+- 批结果和模型原件随历史增长，可能超过 `max_frame_bytes`。启用权威恢复的档返回
+  `ResponseTooLarge`；批提交不撤销。其他档保留旧协议行为（超限时连接关闭）。
 - 确定 Denied 永久停住 pending：S 返回 Denied 被当作 MissingDependency，命令停在
   ExecutionRequested，pending 批不清除；其后异批 AdvanceBar、新 AcceptExact、换 writer epoch
   全被拒绝。需区分「确定拒绝且未调用」与「结果不确定」；换代接管政策另开票。
@@ -166,5 +165,49 @@ StorageUnavailable 拒启。启动时把实际读到的存储证据写到 stderr
   两者同时可成才报 ModelOrderUnspecified；bar 须连续，此时模拟不可恢复。
 - Model 尚缺 ADR 0033「版本合同字段（v1）」要求的字段（input_domain、带条款 id 的
   price_rules、capacity_source、unsupported_domains、clock/known_frontier_cut 等）。#1381 不关。
-- 启动重放两次：`x_execution_session` 的 persist 与 `runtime::serve` 各调用一次
-  initialize_in_transaction，两次都经 validate_existing 从空状态重放全部历史批。
+## 权威恢复（ADR 0073，切片 1）
+
+在新空库的 `x-simulation-authority/2` 业务档内同时声明
+`recovery_identity: {e_manifest_hash, s_config}`，在独立部署档声明
+`recovery_domains: {e_db, e_manifest, s_db}`。E 使用 `economic-manifest/2` 业务摘要；
+S 使用 `s-recovery/1` 回执里的冻结 config。未声明这组字段的既有 /2、旧混合 profile
+都按各自旧合同继续读和同址启服，不接受就地添加恢复资格。
+
+受控装配先对每个选中域执行它的正式 `current-recovery` 并确认该域按获准代启动，
+再以仅启动方可访问的普通文件通过 `serve --authority-rebind FILE` 转交：
+
+```sh
+handoff=$(mktemp)
+jq -n --arg db "$e_db" --slurpfile current "$verified_e_receipt" '{
+  schema_revision:"x-authority-rebind-input/1", domains:["E"],
+  e:{verification:"current-recovery", db:$db, receipt:$current[0]}
+}' > "$handoff"
+```
+
+`verified_e_receipt` 是正式 CLI 已通过验真的完整 `NamedRecoveryReceipt` 文件。两域同换写
+`domains: ["E","S"]` 并同时提供 `e`、`s`，顺序和缺项都检查。启动端以 E
+原库作只读复核：无 WAL/SHM 时用 immutable 读取并检查介质未变化；有副文件时只将
+主库及存在的 WAL 复制到 X 的私有临时目录，待确认源介质未变化后复核私有副本。
+X 的系统临时目录（可用 `TMPDIR` 指定）必须在 E 部署目录之外。无法确定一致性
+就拒绝本次重绑。S 核验由域的准入和可信装配负责。该输入不对接客 socket 开放。
+X 持原锁提交单条 `x-authority-binding/1`，之后才开放交换；部署路径不落业务履历。
+重试提交过的同一尾部转换只读回；普通启动从履历尾部恢复且不追加。
+
+新交换只走当前向量。S 请求第一次发送前封存原帧。丢回应后，X 用当前 S 的
+`QueryExecuteCommitted` 携带 `original_attempt`；只有当前信封内的
+`ExecuteCommittedOriginal.original_reply` 能按原尝试（含历史代、原请求因果）
+独立核证时，才续接执行。NoRecord 或缺证明时保留原 pending，不重发。
+`QueryCommand` 与同内容 `AcceptExact` 重送返回紧凑摘要：外层是当前绑定及其 E/S 代、
+X 写代和读证时刻；`s_execution` 是原 S 请求的绑定及代、原执行收据和原提交时刻。
+`authority_history` 按事件保留原绑定、因果事件号、规范记录及各原件的 SHA-256；
+若通过新 S 读回，另列当时的 S 应答代和读证时刻。`batch_result` 区分待发布与已发布，
+已发布时带发布绑定、结果摘要与读取引用。超长收据 ID 不内嵌（规范编码超过 512 字节
+时 `receipt_id` 为 null），可按同一收据项的 `event_seq`、`part` 取完整原回包。
+
+通过 `QueryAuthorityOriginal` 按引用只读取回原件，如
+`{"event_seq":3,"part":"original_reply"}`。事件的 `parts` 给出可分别取回的原帧；
+`part:"record"` 可取完整事件，批结果用 `result_event_seq` 和 `part:"result"` 取回。
+返回 `AuthorityOriginal.original`；若单件装入应答后仍超帧，返回 `ResponseTooLarge`。
+离线 `audit` 仍核验全量原件与各自发生时的绑定。
+
+切片 1 的 S 使用合同行为夹具；正式 launcher 与生产 S 恢复介质准入归切片 2。

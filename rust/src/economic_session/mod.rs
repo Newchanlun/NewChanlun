@@ -17,6 +17,10 @@ mod financial_reader_resources;
 mod phase_trace;
 mod quantity_calibration;
 mod recovery;
+#[cfg(unix)]
+pub(crate) use recovery::{validate_recovery_id, verify_x_current_recovery};
+#[cfg(unix)]
+mod recovery_snapshot;
 mod service;
 mod sr_expansion;
 mod store;
@@ -37,6 +41,13 @@ pub fn open_durable_db(
     db: &std::path::Path,
 ) -> Result<(rusqlite::Connection, serde_json::Value), String> {
     store::open(db, false)
+}
+
+/// 只续接既有的 WAL 写库；禁止建库、切换日志模式或替换原介质。
+pub fn reopen_durable_writer(
+    db: &std::path::Path,
+) -> Result<(rusqlite::Connection, serde_json::Value), String> {
+    store::reopen_writer(db)
 }
 
 #[cfg(test)]
