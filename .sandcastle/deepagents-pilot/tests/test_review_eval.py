@@ -19,10 +19,12 @@ from pilot1742.review_eval import (
     EvalScore,
     EvalValidationError,
     PredictedFinding,
+    _classify_severity_tag_text,
     _extract_markdown_link_ref_defs,
     _git_blob_line_count,
     _git_diff_added_ranges,
     _git_diff_tree_status_map,
+    _is_explicit_non_blocking_override_tag,
     _mask_inline_non_prose_in_block,
     _parse_commonmark_blocks,
     _parse_leading_severity_tag,
@@ -5300,3 +5302,151 @@ def test_r18_identifier_word_boundaries_tier3_pass_tags_and_narrow_style_format(
     assert is_style_or_format_finding("排版问题需要调整") is True
     assert is_style_or_format_finding("格式对齐建议") is True
     assert is_style_or_format_finding("import order_id mismatch") is False
+
+
+def test_r19_zh_non_blocking_body_phrases_and_negation_guards() -> None:
+    # Important 1：最小复现与 6 条真实 Opus BLOCK 非阻断措辞
+    for text in (
+        "不作为阻断理由。",
+        "不构成阻断。",
+        "不单独阻断。",
+        "不单独判阻断；",
+        "不单独作为阻断。",
+        "不单独构成阻断。",
+        "不作为阻断项。",
+        "不作为阻断依据。",
+        "【残余风险，知悉即可】沿用时不读新 base 上的相关源码，CI 也不是必需检查。属于设计取舍，不作为阻断理由。",
+        "【中】.sandcastle/decision-claimer.mts:686 代理与用户共用账号，目前资金消费方仍只认 UserSigned，所以不构成阻断。",
+        "【说明】执行器 approval.py 仍是签名门，当前行为更严格，属于已知依赖，不构成阻断。",
+        "[中，待核实授权] 新增授权来源与生效边界节，所以不单独判阻断；",
+        "[说明] 已有 Queued claim 重启时行为偏严格，不构成阻断，记录以供知悉。",
+        "[附注] events.jsonl 引用了已删证据，goal 已被 SUPERSEDE，所以不单独阻断。",
+    ):
+        assert is_non_blocking_or_nit_finding(text, "blocked") is True, text
+        assert classify_finding_heuristic(text, "blocked") == "non_blocking_or_nit", text
+
+    # 负例 1：缺陷行为描述严禁误降级
+    for defect_text in (
+        "未阻断非法请求",
+        "因而不再生效阻断",
+        "因此未解决此阻断",
+    ):
+        assert is_non_blocking_or_nit_finding(defect_text, "blocked") is False, defect_text
+        assert classify_finding_heuristic(defect_text, "blocked") == "blocking_substantive", defect_text
+
+    # 负例 2：中英文否定前缀（含多空白、连写与双否定）严禁误降级
+    for negated_text in (
+        "并非不构成阻断",
+        "不是不作为阻断理由",
+        "并非不单独阻断",
+        "并非不单独判阻断",
+        "不是非阻断",
+        "并非不阻断",
+        "绝非不构成阻断",
+        "并不是非阻断",
+        "并非是非阻断",
+        "不是一个非阻断问题",
+        "不属于非阻断项",
+        "This is not   non-blocking.",
+        "This is not\ta\tnon_blocking issue.",
+        "This is not  an  minor issue.",
+        "This is not   a   nit: drops writes.",
+        "This is not minor.",
+        "This is not a nit: must fix.",
+        "不是可选后续跟进，必须修复。",
+        "并非建议后续跟进，必须修复。",
+    ):
+        assert is_non_blocking_or_nit_finding(negated_text, "blocked") is False, negated_text
+        assert classify_finding_heuristic(negated_text, "blocked") == "blocking_substantive", negated_text
+
+    # 负例 3：行首显式阻断标签主导（除非存在后置肯定非阻断标签）
+    assert classify_finding_heuristic("【阻断】数据丢失，此处不构成阻断的假设不成立。", "blocked") == "blocking_substantive"
+    assert classify_finding_heuristic("[阻断] 权限校验缺失，不作为阻断理由的说法无效。", "blocked") == "blocking_substantive"
+
+
+def test_r19_negated_severity_tags_and_post_tag_override_guards() -> None:
+    # Important 2：R18 最小复现 + 行首与后置标签否定 Nit / 非阻断 / 阻断
+    for blocking_case in (
+        "[P1][not a nit] Drops writes.",
+        "[P1][not  a  nit] Drops writes.",
+        "[P1][not\tnon-blocking] Drops writes.",
+        "[P1][not nit] Drops writes.",
+        "[P1][no nit] Drops writes.",
+        "[P1][never nit] Drops writes.",
+        "[P1][not non-blocking] Drops writes.",
+        "[P1][not non_blocking] Drops writes.",
+        "[P1][not nonblocking] Drops writes.",
+        "[P1][并非非阻断] 数据丢失",
+        "[P1][并非 非阻断] 数据丢失",
+        "[P1][不是不阻断] 数据丢失",
+        "[P1][并非不构成阻断] 数据丢失",
+        "[P1][非nit] 丢写",
+        "[P1][并非 nit] 数据丢失",
+        "[P1][绝非不作为阻断理由] 数据丢失",
+        "[P1][并不是非阻断] 数据丢失",
+        "[P1][不属于非阻断] 数据丢失",
+        "[P1][并非non-blocking] 数据丢失",
+        "[not a nit] Drops writes.",
+        "[not  a  nit] Drops writes.",
+        "[not non-blocking] Drops writes.",
+        "[not\tnon-blocking] Drops writes.",
+        "[not-non-blocking] Drops writes.",
+        "[并非 非阻断] 数据丢失",
+        "[并非非阻断] 数据丢失",
+        "[不是不阻断] 数据丢失",
+        "[并非不构成阻断] 数据丢失",
+        "[非 nit] 丢写",
+        "[非nit] 丢写",
+        "[不是 一个 nit] 丢写",
+        "[并非 个 非阻断] 丢写",
+        "[P1/not a nit] Drops writes.",
+        "[P1/并非非阻断] 数据丢失",
+    ):
+        assert classify_finding_heuristic(blocking_case, "blocked") == "blocking_substantive", blocking_case
+
+    # 独立标签/后置覆盖辅助函数精确语义验证
+    assert _is_explicit_non_blocking_override_tag("not a nit") is False
+    assert _is_explicit_non_blocking_override_tag("not  a  nit") is False
+    assert _is_explicit_non_blocking_override_tag("not\tnon-blocking") is False
+    assert _is_explicit_non_blocking_override_tag("no nit") is False
+    assert _is_explicit_non_blocking_override_tag("并非非阻断") is False
+    assert _is_explicit_non_blocking_override_tag("不是不阻断") is False
+    assert _is_explicit_non_blocking_override_tag("非nit") is False
+    assert _is_explicit_non_blocking_override_tag("并非不构成阻断") is False
+    assert _classify_severity_tag_text("not a nit") is None
+    assert _classify_severity_tag_text("not non-blocking") is None
+    assert _classify_severity_tag_text("并非 非阻断") is None
+    assert _classify_severity_tag_text("非 nit") is None
+
+    # 被否定的阻断 token 不得误判为 blocking
+    for negated_blocking_tag in (
+        "not blocking",
+        "not a blocker",
+        "not  a  blocker",
+        "not critical",
+        "not must-fix",
+        "并非 阻断",
+        "非 阻断",
+        "不是 阻断",
+    ):
+        assert _classify_severity_tag_text(negated_blocking_tag) is None, negated_blocking_tag
+        assert _parse_leading_severity_tag(f"[{negated_blocking_tag}] minor cleanup") is None, negated_blocking_tag
+    assert classify_finding_heuristic("[not blocking] minor cleanup", "blocked") == "non_blocking_or_nit"
+    assert classify_finding_heuristic("[not a blocker] minor cleanup", "blocked") == "non_blocking_or_nit"
+
+    # 肯定的后置显式非阻断标签继续正确覆盖前导阻断标签
+    for override_case in (
+        "[P2][非阻断] 可后续优化",
+        "[P2][不阻断] 可后续优化",
+        "[P2][未阻断] 可后续优化",
+        "[P2][nit] 命名微调",
+        "[P2][non-blocking] follow-up",
+        "[P2][nonblocking] follow-up",
+        "[P2][non_blocking] follow-up",
+        "[P2][不构成阻断] 属于已知依赖",
+        "[P2][不作为阻断理由] 属于设计取舍",
+        "[P2][不单独判阻断] 待核实授权",
+        "[P2][说明，非阻断] 记录以供知悉",
+    ):
+        assert _parse_leading_severity_tag(override_case) == "non_blocking", override_case
+        assert classify_finding_heuristic(override_case, "blocked") == "non_blocking_or_nit", override_case

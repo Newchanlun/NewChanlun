@@ -90,11 +90,52 @@ _KNOWN_ASCII_SEVERITY_WORD_RE = re.compile(
     r"minor|major|nit|info|non[-_ ]?blocking|optional|suggestion|style|warning|warn|error|bug|security)$",
     re.IGNORECASE,
 )
-_EXPLICIT_NON_BLOCKING_OVERRIDE_RE = re.compile(
-    r"(?:(?<!不是)(?<!并非)(?<!不属于)(?:非阻断|不阻断)|"
-    r"(?<!not\s)(?<!not\sa\s)(?<![A-Za-z0-9_])non[-_ ]?blocking(?![A-Za-z0-9_])|"
-    r"(?<![A-Za-z0-9_])nit(?![A-Za-z0-9_]))",
-    re.IGNORECASE,
+_ZH_NEGATION_PREFIX_PATTERN = r"(?:(?:并不是|并非是|不属于|不是|并非|绝非)(?:\s*一?[个项条类种])?\s*|非\s*)"
+_EN_NEGATION_PREFIX_PATTERN = r"(?<![A-Za-z0-9_])(?:not|no|never|(?:is|are|was|were)n['’]t)[\s-]+(?:(?:a|an|the)[\s-]+)?"
+_ZH_EXPLICIT_NON_BLOCKING_PHRASE_RE = re.compile(
+    rf"(?P<neg>{_ZH_NEGATION_PREFIX_PATTERN})?"
+    r"(?P<hit>非阻断|不阻断|不构成阻断|不作为阻断(?:理由|项|依据)?|不单独(?:判|作为|构成)?阻断)"
+)
+_TAG_NEGATION_TOKENS: frozenset[str] = frozenset(
+    {
+        "not",
+        "no",
+        "never",
+        "isn't",
+        "aren't",
+        "wasn't",
+        "weren't",
+        "isn’t",
+        "aren’t",
+        "wasn’t",
+        "weren’t",
+        "非",
+        "并非",
+        "不是",
+        "绝非",
+        "并不是",
+        "不属于",
+        "并非是",
+        "不是一个",
+        "并非一个",
+        "并不是一个",
+    }
+)
+_TAG_NEGATION_DETERMINERS: frozenset[str] = frozenset({"a", "an", "the", "个", "一个", "项", "一项", "条", "一条", "是"})
+_TAG_ZH_NEG_ASCII_SPLIT_RE = re.compile(
+    r"^(并不是一个|不是一个|并非一个|并不是|并非是|不属于|不是|并非|绝非|非)([a-z][a-z0-9_]*)$"
+)
+_EXPLICIT_NON_BLOCKING_OVERRIDE_TOKENS: frozenset[str] = frozenset(
+    {
+        "非阻断",
+        "不阻断",
+        "未阻断",
+        "不构成阻断",
+        "non-blocking",
+        "nonblocking",
+        "non_blocking",
+        "nit",
+    }
 )
 _LEADING_COLON_TAG_RE = re.compile(r"^(?:(?:\*\*|__)\s*)?([^:\n：\[\【\]\】`*]{1,24}?)(?:\s*(?:\*\*|__))?\s*[:：](?!\d)")
 _TAG_SPLIT_RE = re.compile(r"[\s/／·・,，、\-—:：|｜()（）]+")
@@ -103,6 +144,7 @@ _TIER1_NON_BLOCKING_TAG_TOKENS: frozenset[str] = frozenset(
         "非阻断",
         "不阻断",
         "未阻断",
+        "不构成阻断",
         "non-blocking",
         "nonblocking",
         "non_blocking",
@@ -156,13 +198,19 @@ _ALL_KNOWN_SEVERITY_TAG_TOKENS: frozenset[str] = (
 )
 _TIER3_VERIFIED_OK_TAG_RE = re.compile(r"^已核.*(?:无问题|未发现问题)$")
 _NON_BLOCKING_NIT_RE = re.compile(
-    r"(?:[\[\【]\s*nit\s*[\]\】]|(?<![A-Za-z0-9_])nit\s*[:：]|"
-    r"(?<!不是)(?<!并非)(?<!不属于)(?<!不是一个)(?<!并非是)(?:非阻断|不阻断)|"
-    r"(?<!not\s)(?<!not\sa\s)(?<![A-Za-z0-9_])non[-_ ]?blocking(?![A-Za-z0-9_])|"
-    r"(?<!不是)(?<!并非)(?<!非)建议后续|"
-    r"(?<!不是)(?<!并非)(?<!非)(?<!不是建议)(?<!并非建议)(?<!非建议)(?<!不是可选)(?<!并非可选)(?<!非可选)后续跟进|"
-    r"(?<!不是)(?<!并非)(?<!非)可选(?:后续)?(?:建议|优化|改进|项)|"
-    r"顺手|(?<![A-Za-z0-9_])minor(?![A-Za-z0-9_])|仅作记录|低优先级)",
+    rf"(?P<neg>{_ZH_NEGATION_PREFIX_PATTERN}|{_EN_NEGATION_PREFIX_PATTERN})?"
+    r"(?P<hit>"
+    r"[\[\【]\s*nit\s*[\]\】]|"
+    r"(?<![A-Za-z0-9_])nit\s*[:：]|"
+    r"非阻断|不阻断|不构成阻断|不作为阻断(?:理由|项|依据)?|不单独(?:判|作为|构成)?阻断|"
+    r"(?<![A-Za-z0-9_])non[-_ ]?blocking(?![A-Za-z0-9_])|"
+    r"(?:可选\s*)?建议后续(?:跟进)?|"
+    r"(?:可选\s*)?后续跟进|"
+    r"可选(?:后续)?(?:建议|优化|改进|项)|"
+    r"顺手|"
+    r"(?<![A-Za-z0-9_])minor(?![A-Za-z0-9_])|"
+    r"仅作记录|低优先级"
+    r")",
     re.IGNORECASE,
 )
 _BLOCKING_MARKER_RE = re.compile(
@@ -1549,8 +1597,24 @@ def load_dispositions(jsonl_path: Path) -> tuple[DispositionEntry, ...]:
     return tuple(entries)
 
 
+def _has_affirmative_zh_non_blocking_phrase(text: str) -> bool:
+    return any(match.group("neg") is None for match in _ZH_EXPLICIT_NON_BLOCKING_PHRASE_RE.finditer(text))
+
+
+def _has_non_blocking_body_signal(text: str) -> bool:
+    return any(match.group("neg") is None for match in _NON_BLOCKING_NIT_RE.finditer(text))
+
+
 def _tokenize_severity_tag(tag_text: str) -> list[str]:
-    raw_tokens = [tok.lower() for tok in _TAG_SPLIT_RE.split(tag_text.strip()) if tok]
+    split_tokens = [tok.lower() for tok in _TAG_SPLIT_RE.split(tag_text.strip()) if tok]
+    raw_tokens: list[str] = []
+    for tok in split_tokens:
+        zh_ascii = _TAG_ZH_NEG_ASCII_SPLIT_RE.fullmatch(tok)
+        if zh_ascii:
+            raw_tokens.append(zh_ascii.group(1))
+            raw_tokens.append(zh_ascii.group(2))
+        else:
+            raw_tokens.append(tok)
     tokens: list[str] = []
     i = 0
     while i < len(raw_tokens):
@@ -1569,17 +1633,47 @@ def _tokenize_severity_tag(tag_text: str) -> list[str]:
     return tokens
 
 
+def _affirmative_severity_tag_tokens(tokens: Sequence[str]) -> list[str]:
+    """剔除被前导否定词（及可选冠词/量词）否定的词元，仅保留肯定声明的词元。"""
+    affirmative: list[str] = []
+    for idx, tok in enumerate(tokens):
+        if idx >= 1 and tokens[idx - 1] in _TAG_NEGATION_TOKENS:
+            continue
+        if (
+            idx >= 2
+            and tokens[idx - 2] in _TAG_NEGATION_TOKENS
+            and tokens[idx - 1] in _TAG_NEGATION_DETERMINERS
+        ):
+            continue
+        affirmative.append(tok)
+    return affirmative
+
+
+def _is_explicit_non_blocking_override_tag(tag_text: str) -> bool:
+    """判断后置方括号标签是否肯定声明了显式非阻断/Nit 覆盖（排除否定语境）。"""
+    affirmative = _affirmative_severity_tag_tokens(_tokenize_severity_tag(tag_text))
+    if not affirmative:
+        return False
+    return any(
+        tok in _EXPLICIT_NON_BLOCKING_OVERRIDE_TOKENS or _has_affirmative_zh_non_blocking_phrase(tok)
+        for tok in affirmative
+    )
+
+
 def _classify_severity_tag_text(tag_text: str) -> Literal["blocking", "non_blocking"] | None:
-    tokens = _tokenize_severity_tag(tag_text)
-    if not tokens:
+    affirmative = _affirmative_severity_tag_tokens(_tokenize_severity_tag(tag_text))
+    if not affirmative:
         return None
-    if any(tok in _TIER1_NON_BLOCKING_TAG_TOKENS for tok in tokens):
+    if any(
+        tok in _TIER1_NON_BLOCKING_TAG_TOKENS or _has_affirmative_zh_non_blocking_phrase(tok)
+        for tok in affirmative
+    ):
         return "non_blocking"
-    if any(tok in _TIER2_BLOCKING_TAG_TOKENS for tok in tokens):
+    if any(tok in _TIER2_BLOCKING_TAG_TOKENS for tok in affirmative):
         return "blocking"
-    compact = "".join(tokens)
+    compact = "".join(affirmative)
     if (
-        any(tok in _TIER3_NON_BLOCKING_TAG_TOKENS or _TIER3_VERIFIED_OK_TAG_RE.fullmatch(tok) for tok in tokens)
+        any(tok in _TIER3_NON_BLOCKING_TAG_TOKENS or _TIER3_VERIFIED_OK_TAG_RE.fullmatch(tok) for tok in affirmative)
         or compact in _TIER3_NON_BLOCKING_TAG_TOKENS
         or _TIER3_VERIFIED_OK_TAG_RE.fullmatch(compact)
     ):
@@ -2531,7 +2625,7 @@ def _parse_leading_severity_tag(
                     return "non_blocking"
                 if tag_cls == "blocking":
                     first_classified = "blocking"
-            elif _EXPLICIT_NON_BLOCKING_OVERRIDE_RE.search(tag) or "未阻断" in _tokenize_severity_tag(tag):
+            elif _is_explicit_non_blocking_override_tag(tag):
                 return "non_blocking"
         if first_classified is not None:
             return first_classified
@@ -2562,7 +2656,7 @@ def is_non_blocking_or_nit_finding(text: str, receipt_result_status: str) -> boo
     if leading == "blocking":
         return False
     return any(
-        _NON_BLOCKING_NIT_RE.search(_mask_inline_non_prose_in_block(block, ref_labels))
+        _has_non_blocking_body_signal(_mask_inline_non_prose_in_block(block, ref_labels))
         for block in visible_blocks
     )
 
