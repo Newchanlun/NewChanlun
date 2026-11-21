@@ -66,11 +66,33 @@ impl WatchedFile {
         Ok(held)
     }
 }
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct WalHeader {
+    bytes: [u8; 32],
+    len: u8,
+}
+impl WalHeader {
+    #[inline]
+    fn as_slice(&self) -> &[u8] {
+        &self.bytes[..self.len as usize]
+    }
+    #[inline]
+    fn len(&self) -> usize {
+        self.len as usize
+    }
+}
+impl std::ops::Deref for WalHeader {
+    type Target = [u8];
+    #[inline]
+    fn deref(&self) -> &[u8] {
+        self.as_slice()
+    }
+}
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct Files {
     main: Stamp,
     wal: Stamp,
-    wal_header: Vec<u8>,
+    wal_header: WalHeader,
 }
 #[derive(Debug, PartialEq, Eq)]
 struct Controls([CodecVec<(i64, CodecVec<u8>)>; 2]);
@@ -204,11 +226,15 @@ impl Clamp {
         use std::os::unix::fs::FileExt;
         let main = self.main.stamp(&self.integrity_refusal)?;
         let wal = self.wal.stamp(&self.integrity_refusal)?;
-        let mut header = vec![0; (wal.len.min(32)) as usize];
-        if !header.is_empty() {
+        let header_len = wal.len.min(32) as usize;
+        let mut header = WalHeader {
+            bytes: [0u8; 32],
+            len: header_len as u8,
+        };
+        if header_len != 0 {
             self.wal
                 .file
-                .read_exact_at(&mut header, 0)
+                .read_exact_at(&mut header.bytes[..header_len], 0)
                 .map_err(|error| {
                     self.integrity_refusal.set(true);
                     stale(error)
@@ -449,7 +475,7 @@ impl Controls {
         let admission = NativeAdmission(work);
         let mut used = 0usize;
         for (i, sql) in Self::SQL.into_iter().enumerate() {
-            let mut statement = connection.prepare(sql).map_err(stale)?;
+            let mut statement = connection.prepare_cached(sql).map_err(stale)?;
             let columns = statement.column_count();
             let mut rows = statement.query([]).map_err(stale)?;
             while let Some(row) = rows.next().map_err(stale)? {
