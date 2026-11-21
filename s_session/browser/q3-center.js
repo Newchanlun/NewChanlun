@@ -794,9 +794,13 @@
     for (const r of records) needE(!isCenterFamily(r.kind) || CENTER_KINDS.includes(r.kind), "CANDIDATE_KIND", "未声明的中枢 kind（不发 candidate）");
     for (const r of records) needF(!isPairFamily(r.kind) || PAIR_KINDS.includes(r.kind), "CANDIDATE_KIND", "未声明的中枢对 kind");
     const version = records.find(r => r.kind === CENTER_KINDS[6]);
+    const pairVersion = records.find(r => r.kind === PAIR_KINDS[4]);
+    const centerPolicy = version?.payload.policy_version, pairPolicy = pairVersion?.payload.policy_version;
     const ids = new Set(version?.payload.data.r5_deferred_object_ids ?? []);
     const deferredAssignments = new Set();
     if (ids.size) {
+      needE(centerPolicy === CENTER_TUPLE[2] && version.payload.data.waiting_reasons.includes(R5_DEFERRED),
+        "DEFERRED", "仅现行中枢版本可声明 R5 待重算原件");
       const retainable = new Set([...CENTER_KINDS.slice(0, 5), ...PAIR_KINDS.slice(0, 3)]);
       const pending = records.find(r => r.kind === CENTER_KINDS[1] &&
         !ids.has(r.object_id) && r.payload.data.r5_pending_unit != null);
@@ -810,8 +814,20 @@
       }
       records = records.filter(r => !ids.has(r.object_id));
     }
-    validateCenterLinks(records, axes, deferredAssignments);
+    // 明确保留的历史原件已经分离，其余对象必须按自身所属的本代策略解释。
     validatePairVersionCount(records);
+    for (const r of records) {
+      if (CENTER_KINDS.includes(r.kind))
+        needE((centerPolicy === CENTER_TUPLE[2] || centerPolicy === LEGACY_CENTER_TUPLE[2]) &&
+          r.payload.policy_version === centerPolicy, "POLICY_MIX", "活动中枢族对象策略须与中枢版本根一致");
+      if (PAIR_KINDS.includes(r.kind))
+        needF((pairPolicy === PAIR_TUPLE[2] || pairPolicy === LEGACY_PAIR_TUPLE[2]) &&
+          r.payload.policy_version === pairPolicy, "POLICY_MIX", "活动中枢对族对象策略须与中枢对版本根一致");
+    }
+    if (version && pairVersion)
+      needF((centerPolicy === CENTER_TUPLE[2]) === (pairPolicy === PAIR_TUPLE[2]),
+        "POLICY_MIX", "中枢与中枢对版本根须属于同一策略世代");
+    validateCenterLinks(records, axes, deferredAssignments);
     validatePairLinks(records, axes);
     // 旧逐片链接只在有中枢族对象时才绑目录轴；22 轴 cut 无中枢对象时 CC-016…022 也须恰为空，不得挂他族对象。
     if (axes !== null && Object.hasOwn(axes, "CC-016"))

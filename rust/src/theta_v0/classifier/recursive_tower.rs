@@ -112,10 +112,11 @@ pub struct ElementId {
 }
 
 /// 扫描证书及其原生段身份；投影可重排中枢或截取下级流，不能借用其它流的同序号证书。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, PartialEq, Eq)]
 pub struct NativeR5Settlement {
     pub(super) proof: R5Proof,
-    pub(super) source: [(ElementId, UnitRange); 3],
+    /// 从 seed 首段到首回抽（含）的连续原生段，绑定冻结核心与成员域。
+    pub(super) source: Box<[(ElementId, UnitRange)]>,
 }
 
 impl NativeR5Settlement {
@@ -129,19 +130,17 @@ impl NativeR5Settlement {
         if !matches!(directions, R5DirectionSource::Native) {
             return None;
         }
-        let [Some(seed), Some(leave), Some(pullback)] =
-            [proof.seed_unit(), proof.leave_unit(), proof.pullback_unit()].map(|i| {
-                let m = moves.get(i)?;
+        let span = proof.seed_unit()..=proof.pullback_unit();
+        let source = moves
+            .get(span.clone())?
+            .iter()
+            .zip(units.get(span)?)
+            .map(|(m, &unit)| {
                 (m.id.level == 0 && matches!(m.rmove, RMove::Segment { .. }))
-                    .then(|| (m.id, units[i]))
+                    .then_some((m.id, unit))
             })
-        else {
-            return None;
-        };
-        Some(Rc::new(Self {
-            proof,
-            source: [seed, leave, pullback],
-        }))
+            .collect::<Option<Box<[_]>>>()?;
+        Some(Rc::new(Self { proof, source }))
     }
 }
 

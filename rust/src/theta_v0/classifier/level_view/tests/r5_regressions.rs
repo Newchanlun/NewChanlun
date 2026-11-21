@@ -191,9 +191,93 @@ fn r5_b3_ordinary_and_resident_consume_native_settlements() {
             Some(ConfirmState::Confirmed(_))
         ));
 
+        let cropped_lower = assemble_level_view(
+            config,
+            query,
+            LevelViewMaterial {
+                lower_legs: &lower[10..],
+                ..material()
+            },
+        )
+        .unwrap();
+        assert_eq!(state(&cropped_lower), Some(ConfirmState::Confirmed(at)));
+
         // Projection of one run uses entity identity, not its new index (0).
         let mut cropped = projection.clone();
         cropped.seeds = cropped.seeds[b..=b].to_vec();
         assert_eq!(cropped.native_settlements(&lower), [proofs[b]]);
+    }
+}
+
+#[test]
+fn r5_b3_revised_seed_cannot_reuse_old_window_settlement() {
+    let original = native_stream(6);
+    let mut revised = original.clone();
+    // 顶点 61 是两条相邻原生段的同一高点。只修订这一个源顶点。
+    assert_eq!((revised[60].hi, revised[61].hi), (91, 91));
+    revised[60].hi = 93;
+    revised[61].hi = 93;
+    let (old_projection, old_lower) = native_projection(&original);
+    let (new_projection, new_lower) = native_projection(&revised);
+    let facts = scan_center_facts_full(&revised, center_from_segments);
+    let window = facts.windows.iter().find(|w| w.seed_at == 58).unwrap();
+    let core = facts.attempts.iter().find(|a| a.at == 58).unwrap().facts;
+    assert_eq!((core.zd, core.zg), (85, 93));
+    assert!(window.upgraded);
+
+    let coords = (0..=96).collect::<Vec<_>>();
+    let mut hist = vec![0.0; coords.len()];
+    hist[56..64].fill(8.0);
+    let dif = vec![0.0; coords.len()];
+    for (label, projection, lower, expected) in [
+        (
+            "original / original",
+            &old_projection,
+            &old_lower,
+            ConfirmState::Confirmed(66),
+        ),
+        (
+            "revised / revised",
+            &new_projection,
+            &new_lower,
+            ConfirmState::Scanning,
+        ),
+        (
+            "original / revised",
+            &old_projection,
+            &new_lower,
+            ConfirmState::Scanning,
+        ),
+    ] {
+        let centers = projection
+            .seeds
+            .iter()
+            .map(|s| s.center)
+            .collect::<Vec<_>>();
+        let view = assemble_level_view(
+            C2LevelViewConfig { enabled: true },
+            LevelViewQuery {
+                level: 1,
+                coordinate_window: CoordinateWindow { start: 0, end: 96 },
+                as_of: 96,
+                version: C2VersionTuple::auto_pairing(),
+            },
+            LevelViewMaterial {
+                projection: ProjectionMaterial::ExactThree(projection),
+                move_blocks: &decompose(&centers),
+                lower_legs: lower,
+                hist: &hist,
+                dif: &dif,
+                close_src: &coords,
+            },
+        )
+        .unwrap();
+        let states = view
+            .pair_confirmations
+            .iter()
+            .filter(|item| centers[item.pair_id.block_end_center].start_index == 58)
+            .map(|item| item.state)
+            .collect::<Vec<_>>();
+        assert_eq!(states, [expected], "{label}");
     }
 }

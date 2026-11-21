@@ -1350,6 +1350,41 @@ test("#1496 R5 B4：拒绝方向颠倒且价端断开的假向下破坏", () => 
   assert.throws(() => C.validateCenterFamilyCut(fake, axes22(fake)), /TB02E_SETTLEMENT/);
 });
 
+test("#1496 R5 B4：只改旧中枢版本根不能放行现行的假向下破坏", () => {
+  const mixed = currentLiteralCut();
+  mixed.find(r => r.kind === C.CENTER_KINDS[6]).payload.policy_version = C.LEGACY_CENTER_TUPLE[2];
+  for (const {kind, payload} of mixed) {
+    if (C.CENTER_KINDS.includes(kind)) C.validateCenterPayload(kind, payload);
+    if (C.PAIR_KINDS.includes(kind)) C.validatePairPayload(kind, payload);
+  }
+  assert.throws(() => C.validateCenterFamilyCut(mixed, axes22(mixed)), /TB02E_POLICY_MIX/);
+});
+
+test("#1496 R5 B4：未列入保留清单的旧族对象和杂拼版本根均拒收", () => {
+  const current = currentLiteralCut();
+  current.find(r => r.kind === C.CENTER_KINDS[1]).payload.data.break_up = true;
+  setLiteralPullback(current, "DOWN", "19", "22", "STRICT_ABOVE");
+  C.validateCenterFamilyCut(current, axes22(current));
+
+  for (const [kind, policy, validate, reason] of [
+    [C.CENTER_KINDS[2], C.LEGACY_CENTER_TUPLE[2], C.validateCenterPayload, /TB02E_POLICY_MIX/],
+    [C.PAIR_KINDS[2], C.LEGACY_PAIR_TUPLE[2], C.validatePairPayload, /TB02F_POLICY_MIX/],
+  ]) {
+    const mixed = copy(current);
+    const row = mixed.find(r => r.kind === kind);
+    row.payload.policy_version = policy;
+    validate(kind, row.payload);
+    assert.throws(() => C.validateCenterFamilyCut(mixed, axes22(mixed)), reason);
+  }
+
+  const mixed = copy(current);
+  for (const row of mixed.filter(r => C.PAIR_KINDS.includes(r.kind))) {
+    row.payload.policy_version = C.LEGACY_PAIR_TUPLE[2];
+    C.validatePairPayload(row.kind, row.payload);
+  }
+  assert.throws(() => C.validateCenterFamilyCut(mixed, axes22(mixed)), /TB02F_POLICY_MIX/);
+});
+
 test("#1496 R5 B4：字面结算必须和同 cut 的方向、关节与完成状态一致", () => {
   const rows = currentLiteralCut();
   const center = rows.find(r => r.kind === C.CENTER_KINDS[1]).payload.data;
