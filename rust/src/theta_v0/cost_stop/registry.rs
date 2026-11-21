@@ -37,13 +37,40 @@ const APPROVAL_1559: Authority = Authority::Registered {
     reference: "https://github.com/xy7365527-lang/NewChanlun/issues/1559#issuecomment-6310844461",
 };
 
+// 登记摘要以字节保存；编译期转回身份校验使用的小写十六进制。
+const fn encode_sha256(bytes: [u8; 32]) -> [u8; 64] {
+    let digits = b"0123456789abcdef";
+    let mut hex = [0; 64];
+    let mut i = 0;
+    while i < bytes.len() {
+        hex[2 * i] = digits[(bytes[i] >> 4) as usize];
+        hex[2 * i + 1] = digits[(bytes[i] & 0xf) as usize];
+        i += 1;
+    }
+    hex
+}
+
+const fn hex_str(hex: &[u8; 64]) -> &str {
+    match std::str::from_utf8(hex) {
+        Ok(hex) => hex,
+        Err(_) => panic!("登记摘要不是 UTF-8"),
+    }
+}
+
 static REGISTERED: &[Row] = &[
     Row {
         kind: OriginalKind::Policy,
         key: "#1354/cost-stop-policy/P0@1",
         path: "rust/src/theta_v0/policy_records/cost-stop/P0.v1.json",
         bytes: include_bytes!("../policy_records/cost-stop/P0.v1.json"),
-        sha256: "c2dd8b508f657b4ba80b902e1c0cd8f1e3e38fdca4ba33aee89ef97d6d5d4a72",
+        sha256: {
+            const HEX: [u8; 64] = encode_sha256([
+                0xc2, 0xdd, 0x8b, 0x50, 0x8f, 0x65, 0x7b, 0x4b, 0xa8, 0x0b, 0x90, 0x2e, 0x1c, 0x0c,
+                0xd8, 0xf1, 0xe3, 0xe3, 0x8f, 0xdc, 0xa4, 0xba, 0x33, 0xae, 0xe8, 0x9e, 0xf9, 0x7d,
+                0x6d, 0x5d, 0x4a, 0x72,
+            ]);
+            hex_str(&HEX)
+        },
         authority: APPROVAL_1559,
     },
     Row {
@@ -51,7 +78,14 @@ static REGISTERED: &[Row] = &[
         key: "#1354/cost-stop-policy/P1-hl-testnet@1",
         path: "rust/src/theta_v0/policy_records/cost-stop/P1-hl-testnet.v1.json",
         bytes: include_bytes!("../policy_records/cost-stop/P1-hl-testnet.v1.json"),
-        sha256: "bdef9c95a33a68652e32f8ed18805cf22223f881fa296c6cde20bee47f9f0856",
+        sha256: {
+            const HEX: [u8; 64] = encode_sha256([
+                0xbd, 0xef, 0x9c, 0x95, 0xa3, 0x3a, 0x68, 0x65, 0x2e, 0x32, 0xf8, 0xed, 0x18, 0x80,
+                0x5c, 0xf2, 0x22, 0x23, 0xf8, 0x81, 0xfa, 0x29, 0x6c, 0x6c, 0xde, 0x20, 0xbe, 0xe4,
+                0x7f, 0x9f, 0x08, 0x56,
+            ]);
+            hex_str(&HEX)
+        },
         authority: APPROVAL_1559,
     },
     Row {
@@ -59,7 +93,14 @@ static REGISTERED: &[Row] = &[
         key: "#1677/evidence-gate/v1",
         path: "rust/src/theta_v0/policy_records/evidence-gate.json",
         bytes: ACTIVE_EVIDENCE_GATE_JSON.as_bytes(),
-        sha256: "ca0f2ecb9c82df6ef2f93cfe00bc646743f3fd87cfa20414432dcd4c3e27d2f7",
+        sha256: {
+            const HEX: [u8; 64] = encode_sha256([
+                0xca, 0x0f, 0x2e, 0xcb, 0x9c, 0x82, 0xdf, 0x6e, 0xf2, 0xf9, 0x3c, 0xfe, 0x00, 0xbc,
+                0x64, 0x67, 0x43, 0xf3, 0xfd, 0x87, 0xcf, 0xa2, 0x04, 0x14, 0x43, 0x2d, 0xcd, 0x4c,
+                0x3e, 0x27, 0xd2, 0xf7,
+            ]);
+            hex_str(&HEX)
+        },
         authority: Authority::Registered {
             reference: "docs/adr/0022-acceptance-criterion-parameters.md#修订",
         },
