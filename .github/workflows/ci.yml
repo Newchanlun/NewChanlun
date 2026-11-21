@@ -597,7 +597,7 @@ jobs:
 
       - name: cargo test — 内容向量、持久序列与累计资源（#1394）
         if: ${{ !cancelled() && matrix.group == 'owned-h1' }}
-        run: ../.github/scripts/run-cargo-with-telemetry.sh cargo test --locked --features s_session --test s_content_contract --test s_content_sequence --test s_content_job --test s_content_path --jobs "${CI_CARGO_JOBS:-1}"
+        run: ../.github/scripts/run-cargo-with-telemetry.sh cargo test --locked --features s_session --test s_content_contract --test s_content_sequence --test s_content_job --test s_content_path --test cost_stop_public_surface --jobs "${CI_CARGO_JOBS:-1}"
 
       # #1394 G-1：economic_session（含 P-14 读法锁、finance、content_store、store、finance_transport）
       #   与 session_transport / session_protocol 的库测试此前没有任何 CI 步执行。2026-10-14 在 Linux

@@ -73,6 +73,8 @@ pub const ACTIVE_ARM_SUB_EXPIRY_JSON: &str = include_str!("policy_records/arm-su
 pub const ACTIVE_RESEARCH_STATS_JSON: &str = include_str!("policy_records/research-stats.json");
 /// 当前生效的 evidence_gate 记录；与 C-19 不合并。
 pub const ACTIVE_EVIDENCE_GATE_JSON: &str = include_str!("policy_records/evidence-gate.json");
+/// ADR 0044：成本停止记录族与两份在册 profile。
+pub const COST_STOP_ID: &str = "#1354/cost-stop-policy";
 /// 当前生效的 L3 探针资金 profile。
 pub const ACTIVE_L3_PROBE_PROFILE_JSON: &str = include_str!("policy_records/l3-probe-profile.json");
 /// 当前生效的 W-VERIFY 探针资金 profile。

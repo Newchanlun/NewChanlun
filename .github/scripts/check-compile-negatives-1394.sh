@@ -5,7 +5,7 @@
 # #1890：只读快照负例另允许 E0599（无此方法）、E0616（私有字段）；白名单负例只允许 E0451（私有字段构造），
 #   并要求错误条数恰好等于负例行数（第 5 参数），防止一行被拒就掩盖其余几行意外编译通过。
 # 任一不满足即失败：负例意外编译通过，或因别处的无关错误失败，都不能当作「边界仍然拒绝」。
-# 用法：在 rust/ 目录下运行。
+# 用法：在 rust/ 目录下运行：`check-compile-negatives-1394.sh [all|s_session|default]`（默认 all）。
 set -uo pipefail
 
 check() {
@@ -50,9 +50,22 @@ check() {
   echo "PASS ${cfg}: rc=${rc}，$(printf '%s\n' "$errors" | wc -l | tr -d ' ') 条 ${codes}，均在 ${file}:${start}+20 内"
 }
 
+suite="${1:-all}"
 status=0
-check issue1394_capture_callback_refusal src/bin/s_session_v2/content_store.rs --test || status=1
-check issue1394_closed_owner_refusal src/bin/s_session_v3/audit_store.rs "" || status=1
-check issue1890_read_snapshot_refusal src/bin/s_session_v3/history.rs "" "E0308|E0599|E0616" 9 || status=1
-check issue1890_snapshot_query_refusal src/bin/s_session_v3/history.rs "" "E0451" 1 || status=1
+case "$suite" in
+  all|s_session)
+    check issue1394_capture_callback_refusal src/bin/s_session_v2/content_store.rs --test || status=1
+    check issue1394_closed_owner_refusal src/bin/s_session_v3/audit_store.rs "" || status=1
+    check issue1890_read_snapshot_refusal src/bin/s_session_v3/history.rs "" "E0308|E0599|E0616" 9 || status=1
+    check issue1890_snapshot_query_refusal src/bin/s_session_v3/history.rs "" "E0451" 1 || status=1
+    # #1441：11 条 crate 外注入反例，均应在 s_structure_session 目标的负例块内被拒。
+    check issue1441_cost_stop_refusal src/bin/s_session_v3/cost_stop_refusal.rs "" "E0061|E0277|E0308|E0422|E0425|E0433|E0599|E0616" 11 || status=1
+    ;;
+  default)
+    ;;
+  *)
+    echo "usage: $0 [all|s_session|default]" >&2
+    exit 64
+    ;;
+esac
 exit $status
