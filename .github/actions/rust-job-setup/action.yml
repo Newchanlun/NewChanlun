@@ -158,7 +158,7 @@ runs:
 
     - name: Cache compiled third-party Cargo dependencies (dev) (#1875)
       id: cargo-deps-dev-cache
-      if: runner.environment != 'self-hosted' && github.job != 'rust-test-production-session'
+      if: runner.environment != 'self-hosted' && github.job != 'rust-test-production-session' && github.job != 'rust-test-default'
       uses: actions/cache@v4
       with:
         path: |
@@ -168,11 +168,11 @@ runs:
           !rust/target/debug/deps/libnewchan_rust*
           !rust/target/debug/.fingerprint/newchan_rust-*
           !rust/target/debug/.fingerprint/newchan_rust-*/**
-        key: ${{ runner.os }}-${{ runner.arch }}-cargo-deps-dev-${{ github.job == 'rust-test-default' && 'default' || 's-session' }}-v1-${{ steps.deps-cache-key.outputs.fp }}-${{ hashFiles('rust/Cargo.lock') }}
+        key: ${{ runner.os }}-${{ runner.arch }}-cargo-deps-dev-s-session-v1-${{ steps.deps-cache-key.outputs.fp }}-${{ hashFiles('rust/Cargo.lock') }}
 
     - name: Cache compiled third-party Cargo dependencies (release) (#1875)
       id: cargo-deps-release-cache
-      if: runner.environment != 'self-hosted' && (github.job == 'rust-test-s-session-extras' || github.job == 'rust-test-production-session')
+      if: runner.environment != 'self-hosted' && (github.job == 'rust-test-s-session-extra-groups' || github.job == 'rust-test-production-session')
       uses: actions/cache@v4
       with:
         path: |
