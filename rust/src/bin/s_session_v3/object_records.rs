@@ -425,15 +425,15 @@ fn read_typed_record(
 ) -> Result<TypedRecord, RecordError> {
     let what = "泛型 typed 记录";
     let record = store.native_built_ref(view.record)?;
-    expect_object_shape(store, record.view(), what, &TYPED_RECORD_FIELDS)?;
+    let fields = expect_object_fields(store, record.view(), what, &TYPED_RECORD_FIELDS)?;
 
-    let object_id = read_text(store, record.view(), "object_id", what)?;
-    let object_revision = read_int(store, record.view(), "object_revision", what)?;
-    let kind = read_text(store, record.view(), "kind", what)?;
-    let fact_key = read_text(store, record.view(), "fact_key", what)?;
-    let first_known_generation = read_int(store, record.view(), "first_known_generation", what)?;
-    let first_known_cut = read_text(store, record.view(), "first_known_cut", what)?;
-    let published_generation = read_int(store, record.view(), "published_generation", what)?;
+    let object_id = read_text_field(store, &fields, "object_id", what)?;
+    let object_revision = read_int_field(store, &fields, "object_revision", what)?;
+    let kind = read_text_field(store, &fields, "kind", what)?;
+    let fact_key = read_text_field(store, &fields, "fact_key", what)?;
+    let first_known_generation = read_int_field(store, &fields, "first_known_generation", what)?;
+    let first_known_cut = read_text_field(store, &fields, "first_known_cut", what)?;
+    let published_generation = read_int_field(store, &fields, "published_generation", what)?;
 
     if object_id != view.object_id {
         return Err(RecordError::Source {
@@ -487,24 +487,14 @@ fn read_typed_record(
         });
     }
 
-    let payload = read_edge(store, record.view(), "payload", Kind::Object, what)?;
-    let input_refs = read_edge(store, record.view(), "input_refs", Kind::Array, what)?;
-    let source_coords = read_edge(store, record.view(), "source_coords", Kind::Array, what)?;
-    let payload_json = read_edge(store, record.view(), "payload_json", Kind::JsonText, what)?;
-    let input_refs_json = read_edge(
-        store,
-        record.view(),
-        "input_refs_json",
-        Kind::JsonText,
-        what,
-    )?;
-    let source_coords_json = read_edge(
-        store,
-        record.view(),
-        "source_coords_json",
-        Kind::JsonText,
-        what,
-    )?;
+    let payload = read_edge_field(store, &fields, "payload", Kind::Object, what)?;
+    let input_refs = read_edge_field(store, &fields, "input_refs", Kind::Array, what)?;
+    let source_coords = read_edge_field(store, &fields, "source_coords", Kind::Array, what)?;
+    let payload_json = read_edge_field(store, &fields, "payload_json", Kind::JsonText, what)?;
+    let input_refs_json = read_edge_field(store, &fields, "input_refs_json", Kind::JsonText, what)?;
+    let source_coords_json =
+        read_edge_field(store, &fields, "source_coords_json", Kind::JsonText, what)?;
+    drop(fields);
     for (name, edge, built) in [
         ("payload", &payload, view.payload),
         ("input_refs", &input_refs, view.input_refs),
@@ -548,22 +538,22 @@ fn read_shape_record(
 ) -> Result<ShapeRecord, RecordError> {
     let what = "CC-006 记录";
     let record = store.native_built_ref(&source.record)?;
-    expect_object_shape(store, record.view(), what, &SHAPE_RECORD_FIELDS)?;
+    let fields = expect_object_fields(store, record.view(), what, &SHAPE_RECORD_FIELDS)?;
 
-    let object_id = read_text(store, record.view(), "object_id", what)?;
-    let object_revision = read_int(store, record.view(), "object_revision", what)?;
-    let kind = read_text(store, record.view(), "kind", what)?;
-    let branch = read_text(store, record.view(), "branch", what)?;
-    let dir_ab = read_text(store, record.view(), "dir_ab", what)?;
-    let dir_bc = read_text(store, record.view(), "dir_bc", what)?;
+    let object_id = read_text_field(store, &fields, "object_id", what)?;
+    let object_revision = read_int_field(store, &fields, "object_revision", what)?;
+    let kind = read_text_field(store, &fields, "kind", what)?;
+    let branch = read_text_field(store, &fields, "branch", what)?;
+    let dir_ab = read_text_field(store, &fields, "dir_ab", what)?;
+    let dir_bc = read_text_field(store, &fields, "dir_bc", what)?;
     let window = [
-        read_int(store, record.view(), "window_start", what)?,
-        read_int(store, record.view(), "window_mid", what)?,
-        read_int(store, record.view(), "window_end", what)?,
+        read_int_field(store, &fields, "window_start", what)?,
+        read_int_field(store, &fields, "window_mid", what)?,
+        read_int_field(store, &fields, "window_end", what)?,
     ];
-    let first_known_generation = read_int(store, record.view(), "first_known_generation", what)?;
-    let first_known_cut = read_text(store, record.view(), "first_known_cut", what)?;
-    let published_generation = read_int(store, record.view(), "published_generation", what)?;
+    let first_known_generation = read_int_field(store, &fields, "first_known_generation", what)?;
+    let first_known_cut = read_text_field(store, &fields, "first_known_cut", what)?;
+    let published_generation = read_int_field(store, &fields, "published_generation", what)?;
 
     if kind != CC006_SHAPE_KIND {
         return Err(RecordError::Kind {
@@ -620,27 +610,17 @@ fn read_shape_record(
     }
 
     // `comparisons` 不是 §5.2 的获准 0x07 位置：这里要求真实数组根，文本视图形态显式拒绝。
-    let comparisons = read_edge(store, record.view(), "comparisons", Kind::Array, what)?;
-    let input_refs = read_edge(store, record.view(), "input_refs", Kind::Array, what)?;
-    let source_coords = read_edge(store, record.view(), "source_coords", Kind::Array, what)?;
+    let comparisons = read_edge_field(store, &fields, "comparisons", Kind::Array, what)?;
+    let input_refs = read_edge_field(store, &fields, "input_refs", Kind::Array, what)?;
+    let source_coords = read_edge_field(store, &fields, "source_coords", Kind::Array, what)?;
+    let input_refs_json = read_edge_field(store, &fields, "input_refs_json", Kind::JsonText, what)?;
+    let source_coords_json =
+        read_edge_field(store, &fields, "source_coords_json", Kind::JsonText, what)?;
+    drop(fields);
     // 公开 `input_refs` 是 producer 同次构造的独立边（原 generic 字符串源叶），不是生成态
     // 数值叶的别名；本模块只核有界外壳后借根（见 [`check_wire_input_refs`]）。
     let wire_input_refs = store.native_built_ref(&source.wire_input_refs)?;
     let wire_input_refs = check_wire_input_refs(store, wire_input_refs)?;
-    let input_refs_json = read_edge(
-        store,
-        record.view(),
-        "input_refs_json",
-        Kind::JsonText,
-        what,
-    )?;
-    let source_coords_json = read_edge(
-        store,
-        record.view(),
-        "source_coords_json",
-        Kind::JsonText,
-        what,
-    )?;
     for (name, edge, built) in [
         ("comparisons", &comparisons, &source.comparisons),
         ("input_refs", &input_refs, &source.input_refs),
@@ -961,19 +941,51 @@ pub(crate) fn reproject_stored_wire_view(
 ) -> Result<Built, RecordError> {
     use sc::{capture_allocation::audit_json::JsonView as J, ValueView as B};
     let what = "持久对象 wire";
-    let id_ref = store.lookup_ref(birth, &[PathStep::Field("object_id".into())])?;
-    let id = crate::v3::business_json::read_text(store, id_ref.view())
-        .map_err(|detail| RecordError::Source { what, detail })?;
-    let kind_ref = store.lookup_ref(birth, &[PathStep::Field("kind".into())])?;
-    let kind = crate::v3::business_json::read_text(store, kind_ref.view())
-        .map_err(|detail| RecordError::Source { what, detail })?;
-    validate_life_view(life, current_generation, id.as_str())?;
-    let names: &[&str] = if kind.as_str() == CC006_SHAPE_KIND {
-        &SHAPE_WIRE_FIELDS
+    let candidate_names: Option<&[&str]> = if birth.kind() == Kind::Object {
+        match birth.extent() {
+            Some(n) if n == SHAPE_WIRE_FIELDS.len() as u64 => Some(&SHAPE_WIRE_FIELDS),
+            Some(n) if n == TYPED_WIRE_FIELDS.len() as u64 => Some(&TYPED_WIRE_FIELDS),
+            _ => None,
+        }
     } else {
-        &TYPED_WIRE_FIELDS
+        None
     };
-    let values = store.lookup_fields_ref(birth, names)?;
+    let (names, values) = 'load: {
+        if let Some(names) = candidate_names {
+            match store.lookup_fields_ref(birth, names) {
+                Ok(values) => {
+                    if let (Some(id_view), Some(kind_view)) =
+                        (values.get("object_id"), values.get("kind"))
+                    {
+                        let id = read_wire_text_view(store, id_view, what)?;
+                        let kind = read_wire_text_view(store, kind_view, what)?;
+                        if (kind.as_str() == CC006_SHAPE_KIND)
+                            == (names.len() == SHAPE_WIRE_FIELDS.len())
+                        {
+                            validate_life_view(life, current_generation, id.as_str())?;
+                            break 'load (names, values);
+                        }
+                    }
+                }
+                Err(error) if !is_field_shape_error(&error) => {
+                    return Err(RecordError::Codec(error));
+                }
+                Err(_) => {}
+            }
+        }
+        let id_ref = store.lookup_field_ref(birth, "object_id")?;
+        let id = read_wire_text_view(store, id_ref.view(), what)?;
+        let kind_ref = store.lookup_field_ref(birth, "kind")?;
+        let kind = read_wire_text_view(store, kind_ref.view(), what)?;
+        validate_life_view(life, current_generation, id.as_str())?;
+        let names: &[&str] = if kind.as_str() == CC006_SHAPE_KIND {
+            &SHAPE_WIRE_FIELDS
+        } else {
+            &TYPED_WIRE_FIELDS
+        };
+        let values = store.lookup_fields_ref(birth, names)?;
+        (names, values)
+    };
     let first = crate::v3::business_json::Decimal::new(life.first_known_generation);
     let published = crate::v3::business_json::Decimal::new(life.published_generation);
     let withdrawn = life
@@ -1094,7 +1106,18 @@ fn check_wire_input_refs(
                 ),
             });
         }
-        let merged = resolve_field(store, group.view(), what, "merged_index")?;
+        const WIRE_GROUP_FIELDS: [&str; 3] = ["merged_index", "raw_refs", "dependency_refs"];
+        let group_fields = match store.lookup_subset_ref(group.view(), &WIRE_GROUP_FIELDS) {
+            Ok(fields) => fields,
+            Err(error) if is_field_shape_error(&error) => {
+                for name in WIRE_GROUP_FIELDS {
+                    resolve_field(store, group.view(), what, name)?;
+                }
+                return Err(RecordError::Codec(error));
+            }
+            Err(error) => return Err(RecordError::Codec(error)),
+        };
+        let merged = field_view(&group_fields, "merged_index", what)?;
         if merged.kind() != Kind::String {
             return Err(RecordError::Source {
                 what,
@@ -1104,8 +1127,19 @@ fn check_wire_input_refs(
                 ),
             });
         }
-        read_edge(store, group.view(), "raw_refs", Kind::Array, what)?;
-        read_edge(store, group.view(), "dependency_refs", Kind::Array, what)?;
+        for name in ["raw_refs", "dependency_refs"] {
+            let target = field_view(&group_fields, name, what)?;
+            if target.kind() != Kind::Array {
+                return Err(RecordError::Source {
+                    what,
+                    detail: format!(
+                        "字段 `{name}` 必须是 {}（{:?}）",
+                        Kind::Array.name(),
+                        target.kind()
+                    ),
+                });
+            }
+        }
     }
     Ok(reference)
 }
@@ -1305,12 +1339,23 @@ fn index_path(index: u64) -> Vec<PathStep> {
 /// 对象字段集 exact 核：字段数相等 + 每个声明键可定位。
 ///
 /// 对象键唯一（§5.2）⟹ 计数相等且全键在场即无缺无多；本函数不展开任何子图。
-fn expect_object_shape(
+fn is_field_shape_error(error: &CodecError) -> bool {
+    matches!(
+        error.code(),
+        path_code::PATH_FIELD_MISSING
+            | path_code::PATH_INDEX_RANGE
+            | sc::code::SEQUENCE_SHAPE
+            | sc::code::OBJECT_KEY_ORDER
+            | sc::code::DUPLICATE_KEY
+    )
+}
+
+fn expect_object_fields<'a>(
     store: &mut (impl CodecRead + ?Sized),
     root: sc::RefView<'_>,
     what: &'static str,
-    fields: &[&str],
-) -> Result<(), RecordError> {
+    fields: &[&'a str],
+) -> Result<super::audit_store::RefFields<'a>, RecordError> {
     if root.kind() != Kind::Object {
         return Err(RecordError::Source {
             what,
@@ -1332,10 +1377,172 @@ fn expect_object_shape(
             })
         }
     }
-    for name in fields {
-        resolve_field(store, root, what, name)?;
+    match store.lookup_subset_ref(root, fields) {
+        Ok(values) => Ok(values),
+        Err(error) if is_field_shape_error(&error) => {
+            for name in fields {
+                resolve_field(store, root, what, name)?;
+            }
+            Err(RecordError::Codec(error))
+        }
+        Err(error) => Err(RecordError::Codec(error)),
     }
-    Ok(())
+}
+
+fn field_view<'a>(
+    fields: &'a super::audit_store::RefFields<'_>,
+    name: &str,
+    what: &'static str,
+) -> Result<sc::RefView<'a>, RecordError> {
+    fields.get(name).ok_or_else(|| RecordError::Source {
+        what,
+        detail: format!("缺字段 `{name}`"),
+    })
+}
+
+fn is_plain_json_str(s: &str) -> bool {
+    !s.bytes().any(|b| b == b'"' || b == b'\\' || b < 0x20)
+}
+
+fn parse_plain_json_string(bytes: &[u8]) -> Option<&str> {
+    if bytes.len() < 2 || bytes[0] != b'"' || bytes[bytes.len() - 1] != b'"' {
+        return None;
+    }
+    let inner = &bytes[1..bytes.len() - 1];
+    if inner.iter().any(|&b| b == b'"' || b == b'\\' || b < 0x20) {
+        return None;
+    }
+    std::str::from_utf8(inner).ok()
+}
+
+fn parse_plain_json_i64(bytes: &[u8]) -> Option<i64> {
+    if bytes == b"0" {
+        return Some(0);
+    }
+    let digits = bytes.strip_prefix(b"-").unwrap_or(bytes);
+    if digits.is_empty()
+        || !matches!(digits[0], b'1'..=b'9')
+        || !digits[1..].iter().all(|b| b.is_ascii_digit())
+    {
+        return None;
+    }
+    std::str::from_utf8(bytes).ok()?.parse::<i64>().ok()
+}
+
+fn read_wire_text_view(
+    store: &mut (impl CodecRead + ?Sized),
+    target: sc::RefView<'_>,
+    what: &'static str,
+) -> Result<super::business_json::TextValue, RecordError> {
+    if target.kind() == Kind::String {
+        let bytes = record_bytes(store, target)?;
+        if let Some(text) = parse_plain_json_string(bytes.bytes()) {
+            return store
+                .native_text(text)
+                .map_err(|detail| RecordError::Source { what, detail });
+        }
+    }
+    crate::v3::business_json::read_text(store, target)
+        .map_err(|detail| RecordError::Source { what, detail })
+}
+
+fn read_text_field(
+    store: &mut (impl CodecRead + ?Sized),
+    fields: &super::audit_store::RefFields<'_>,
+    name: &str,
+    what: &'static str,
+) -> Result<super::business_json::TextValue, RecordError> {
+    let target = field_view(fields, name, what)?;
+    if target.kind() != Kind::String {
+        return Err(RecordError::Source {
+            what,
+            detail: format!("字段 `{name}` 必须是字符串（{:?}）", target.kind()),
+        });
+    }
+    let bytes = record_bytes(store, target)?;
+    if let Some(text) = parse_plain_json_string(bytes.bytes()) {
+        return store
+            .native_text(text)
+            .map_err(|detail| RecordError::Source { what, detail });
+    }
+    let value = super::business_json::legacy_json_owner_admitted(
+        bytes.bytes(),
+        store.allocation_budget().as_ref(),
+        store.codec_work(),
+    )
+    .map_err(|error| RecordError::Source {
+        what,
+        detail: format!("`{name}` 规范渲染不是合法 JSON：{error}"),
+    })?;
+    let view = value.view();
+    let text = view.as_str().ok_or_else(|| RecordError::Source {
+        what,
+        detail: format!("字段 `{name}` 渲染不是字符串"),
+    })?;
+    store
+        .native_text(text)
+        .map_err(|detail| RecordError::Source { what, detail })
+}
+
+fn read_int_field(
+    store: &mut (impl CodecRead + ?Sized),
+    fields: &super::audit_store::RefFields<'_>,
+    name: &str,
+    what: &'static str,
+) -> Result<i64, RecordError> {
+    let target = field_view(fields, name, what)?;
+    if target.kind() != Kind::Number {
+        return Err(RecordError::Source {
+            what,
+            detail: format!(
+                "字段 `{name}` 必须是精确整数（{:?}；浮点/布尔/null/文本一律拒绝）",
+                target.kind()
+            ),
+        });
+    }
+    let bytes = record_bytes(store, target)?;
+    if let Some(n) = parse_plain_json_i64(bytes.bytes()) {
+        return Ok(n);
+    }
+    let value = super::business_json::legacy_json_owner_admitted(
+        bytes.bytes(),
+        store.allocation_budget().as_ref(),
+        store.codec_work(),
+    )
+    .map_err(|error| RecordError::Source {
+        what,
+        detail: format!("`{name}` 规范渲染不是合法 JSON：{error}"),
+    })?;
+    value.view().as_i64().ok_or_else(|| RecordError::Source {
+        what,
+        detail: format!("字段 `{name}` 不是 i64"),
+    })
+}
+
+fn read_edge_field(
+    store: &mut (impl CodecRead + ?Sized),
+    fields: &super::audit_store::RefFields<'_>,
+    name: &str,
+    expect: Kind,
+    what: &'static str,
+) -> Result<super::audit_store::RefValue, RecordError> {
+    let target = fields
+        .get_admitted(store, name)?
+        .ok_or_else(|| RecordError::Source {
+            what,
+            detail: format!("缺字段 `{name}`"),
+        })?;
+    if target.kind() != expect {
+        return Err(RecordError::Source {
+            what,
+            detail: format!(
+                "字段 `{name}` 必须是 {}（{:?}）",
+                expect.name(),
+                target.kind()
+            ),
+        });
+    }
+    Ok(target)
 }
 
 /// 路径定位（只沿路径触碰节点）：缺字段/越界映射为 `Source`，其余编码错误原样上报。
@@ -1611,6 +1818,18 @@ fn check_fact_key_kind(
     kind: &str,
     what: &'static str,
 ) -> Result<(), RecordError> {
+    if is_plain_json_str(kind) {
+        if let Some(slot) = fact_key
+            .strip_prefix("[\"")
+            .and_then(|rest| rest.strip_prefix(kind))
+            .and_then(|rest| rest.strip_prefix("\",\""))
+            .and_then(|rest| rest.strip_suffix("\"]"))
+        {
+            if is_plain_json_str(slot) {
+                return Ok(());
+            }
+        }
+    }
     let parsed = super::business_json::legacy_json_owner_admitted(
         fact_key.as_bytes(),
         store.allocation_budget().as_ref(),
