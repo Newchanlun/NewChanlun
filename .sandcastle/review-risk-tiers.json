@@ -16,10 +16,7 @@
       ".sandcastle/deepagents-pilot/pilot1742/approval.py",
       ".sandcastle/deepagents-pilot/pilot1742/review_risk.py",
       ".sandcastle/review-risk-tiers.json",
-      "**/*.env",
-      "**/*.env.*",
-      "**/.env",
-      "**/.env.*",
+      "**/*.env*",
       "**/*.pem"
     ]
   },

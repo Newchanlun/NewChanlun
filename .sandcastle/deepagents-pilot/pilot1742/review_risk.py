@@ -11,9 +11,10 @@ from __future__ import annotations
 
 import json
 import re
+import shlex
 import subprocess
 from collections.abc import Iterable, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 from enum import Enum
 from functools import lru_cache
@@ -112,10 +113,26 @@ def _compile_segment_regex(pattern_segment: str) -> re.Pattern[str]:
     return re.compile(r"\A" + "".join(parts) + r"\Z", re.DOTALL)
 
 
-def match_glob(path: str, pattern: str) -> bool:
+def _fold_segments(segments: tuple[str, ...]) -> tuple[str, ...]:
+    return tuple(seg.casefold() for seg in segments)
+
+
+def _validate_optional_sha(raw: str | None, field_name: str) -> str | None:
+    if raw is None:
+        return None
+    try:
+        return str(parse_sha(raw))
+    except ValueError as exc:
+        raise RiskPolicyError(f"{field_name} 非法：{exc}") from exc
+
+
+def match_glob(path: str, pattern: str, *, case_sensitive: bool = True) -> bool:
     """按 POSIX 路径段匹配：单段 `*`/`?` 不跨 `/`，`**` 匹配零或多层目录（末尾 `/**` 至少匹配一层）。"""
     path_segs = tuple(normalize_repo_path(path).split("/"))
     pat_segs = validate_glob_pattern(pattern)
+    if not case_sensitive:
+        path_segs = _fold_segments(path_segs)
+        pat_segs = _fold_segments(pat_segs)
     return _match_segments(path_segs, pat_segs)
 
 
@@ -171,13 +188,25 @@ def _merge_mandatory_high_risk(
 
 @dataclass(frozen=True)
 class RiskPolicy:
-    """不可变风险分级策略；构造时强制注入不可绕过的代码级高风险自保集。"""
+    """不可变风险分级策略；构造时强制注入不可绕过的代码级高风险自保集，并预解析全部 glob 段。"""
 
     schema_version: str
     high_risk_categories: Mapping[str, tuple[str, ...]]
     deep_ai_only_patterns: tuple[str, ...]
     low_risk_patterns: tuple[str, ...]
     low_risk_excludes: tuple[str, ...]
+    _high_risk_segments: tuple[tuple[str, tuple[tuple[str, tuple[str, ...]], ...]], ...] = field(
+        init=False, repr=False, compare=False
+    )
+    _deep_ai_segments: tuple[tuple[str, tuple[str, ...]], ...] = field(
+        init=False, repr=False, compare=False
+    )
+    _low_risk_segments: tuple[tuple[str, ...], ...] = field(
+        init=False, repr=False, compare=False
+    )
+    _low_exclude_segments: tuple[tuple[str, ...], ...] = field(
+        init=False, repr=False, compare=False
+    )
 
     def __post_init__(self) -> None:
         if self.schema_version != SCHEMA_VERSION:
@@ -188,12 +217,26 @@ class RiskPolicy:
         deep = tuple(dict.fromkeys(self.deep_ai_only_patterns))
         low = tuple(dict.fromkeys(self.low_risk_patterns))
         excludes = tuple(dict.fromkeys(self.low_risk_excludes))
-        for pattern in (*deep, *low, *excludes):
-            validate_glob_pattern(pattern)
+        high_segments = tuple(
+            (
+                category,
+                tuple((pattern, _fold_segments(validate_glob_pattern(pattern))) for pattern in patterns),
+            )
+            for category, patterns in frozen_high.items()
+        )
+        deep_segments = tuple(
+            (pattern, _fold_segments(validate_glob_pattern(pattern))) for pattern in deep
+        )
+        low_segments = tuple(validate_glob_pattern(pattern) for pattern in low)
+        exclude_segments = tuple(_fold_segments(validate_glob_pattern(pattern)) for pattern in excludes)
         object.__setattr__(self, "high_risk_categories", frozen_high)
         object.__setattr__(self, "deep_ai_only_patterns", deep)
         object.__setattr__(self, "low_risk_patterns", low)
         object.__setattr__(self, "low_risk_excludes", excludes)
+        object.__setattr__(self, "_high_risk_segments", high_segments)
+        object.__setattr__(self, "_deep_ai_segments", deep_segments)
+        object.__setattr__(self, "_low_risk_segments", low_segments)
+        object.__setattr__(self, "_low_exclude_segments", exclude_segments)
 
 
 @dataclass(frozen=True)
@@ -206,6 +249,8 @@ class RiskAssessment:
     matched_deep_paths: tuple[MatchedPath, ...]
     all_paths: tuple[str, ...]
     reason: str
+    base_sha: str | None = None
+    head_sha: str | None = None
 
     def __post_init__(self) -> None:
         if self.tier is RiskTier.HIGH:
@@ -213,6 +258,8 @@ class RiskAssessment:
                 raise RiskPolicyError("HIGH 档必须要求人工签批、深审且禁止补丁沿用")
         elif self.tier is RiskTier.LOW and self.requires_human_approval:
             raise RiskPolicyError("LOW 档不应要求人工签批")
+        _validate_optional_sha(self.base_sha, "base_sha")
+        _validate_optional_sha(self.head_sha, "head_sha")
 
 
 @dataclass(frozen=True)
@@ -285,17 +332,26 @@ def load_policy(path: Path = DEFAULT_POLICY_PATH) -> RiskPolicy:
     )
 
 
-def classify_paths(paths: Iterable[str], policy: RiskPolicy | None = None) -> RiskAssessment:
+def classify_paths(
+    paths: Iterable[str],
+    policy: RiskPolicy | None = None,
+    *,
+    base_sha: str | None = None,
+    head_sha: str | None = None,
+) -> RiskAssessment:
     """对改动路径集执行 fail-closed 风险分档。
 
     合同：
     - 任意非法路径（空串、`..`、绝对路径、反斜杠、NUL）立即抛 RiskPolicyError；
     - 空路径集（如空提交或基线异常）按 fail-closed 判 HIGH，绝不降级为 LOW；
+    - 保护类规则（高风险、深审、低风险排除）大小写不敏感，防止大小写拼写变体绕过降档；
     - 命中任一高风险或代码级自保路径 -> HIGH + DEEP + 人工签批 + 禁止补丁沿用；
     - 未命中高风险但命中仅深审路径 -> NORMAL + DEEP + 免人工签批；
-    - 全部路径命中低风险且无排除项 -> LOW + QUICK + 免人工签批；
+    - 全部路径命中低风险（大小写敏感）且无排除项 -> LOW + QUICK + 免人工签批；
     - 其余 -> NORMAL + STANDARD + 免人工签批。
     """
+    validated_base = _validate_optional_sha(base_sha, "base_sha")
+    validated_head = _validate_optional_sha(head_sha, "head_sha")
     active_policy = load_policy() if policy is None else policy
     normalized = tuple(sorted({normalize_repo_path(p) for p in paths}))
 
@@ -309,6 +365,8 @@ def classify_paths(paths: Iterable[str], policy: RiskPolicy | None = None) -> Ri
             matched_deep_paths=(),
             all_paths=(),
             reason="空路径集：按 fail-closed 规则提升为高风险，禁止降级放行",
+            base_sha=validated_base,
+            head_sha=validated_head,
         )
 
     matched_high: list[MatchedPath] = []
@@ -317,25 +375,26 @@ def classify_paths(paths: Iterable[str], policy: RiskPolicy | None = None) -> Ri
 
     for path in normalized:
         path_segs = tuple(path.split("/"))
-        for category, patterns in active_policy.high_risk_categories.items():
-            for pattern in patterns:
-                if _match_segments(path_segs, validate_glob_pattern(pattern)):
+        folded_path_segs = _fold_segments(path_segs)
+        for category, compiled_patterns in active_policy._high_risk_segments:
+            for pattern, pat_segs in compiled_patterns:
+                if _match_segments(folded_path_segs, pat_segs):
                     matched_high.append(MatchedPath(path=path, category=category, pattern=pattern))
                     break
 
-        for pattern in active_policy.deep_ai_only_patterns:
-            if _match_segments(path_segs, validate_glob_pattern(pattern)):
+        for pattern, pat_segs in active_policy._deep_ai_segments:
+            if _match_segments(folded_path_segs, pat_segs):
                 matched_deep.append(MatchedPath(path=path, category="deep_ai_only", pattern=pattern))
                 break
 
         if all_low:
             is_low = any(
-                _match_segments(path_segs, validate_glob_pattern(pattern))
-                for pattern in active_policy.low_risk_patterns
+                _match_segments(path_segs, pat_segs)
+                for pat_segs in active_policy._low_risk_segments
             )
             is_excluded = any(
-                _match_segments(path_segs, validate_glob_pattern(pattern))
-                for pattern in active_policy.low_risk_excludes
+                _match_segments(folded_path_segs, pat_segs)
+                for pat_segs in active_policy._low_exclude_segments
             )
             if not is_low or is_excluded:
                 all_low = False
@@ -351,6 +410,8 @@ def classify_paths(paths: Iterable[str], policy: RiskPolicy | None = None) -> Ri
             matched_deep_paths=tuple(matched_deep),
             all_paths=normalized,
             reason=f"命中高风险类别（{categories}），须用户 Secure Enclave 签批且禁止补丁沿用",
+            base_sha=validated_base,
+            head_sha=validated_head,
         )
 
     if matched_deep:
@@ -363,6 +424,8 @@ def classify_paths(paths: Iterable[str], policy: RiskPolicy | None = None) -> Ri
             matched_deep_paths=tuple(matched_deep),
             all_paths=normalized,
             reason="命中深审配置路径（CI/审查规则），走深度 AI 审查且免人工签批",
+            base_sha=validated_base,
+            head_sha=validated_head,
         )
 
     if all_low:
@@ -375,6 +438,8 @@ def classify_paths(paths: Iterable[str], policy: RiskPolicy | None = None) -> Ri
             matched_deep_paths=(),
             all_paths=normalized,
             reason="全部改动均属于低风险文档路径，走快速审查",
+            base_sha=validated_base,
+            head_sha=validated_head,
         )
 
     return RiskAssessment(
@@ -386,11 +451,13 @@ def classify_paths(paths: Iterable[str], policy: RiskPolicy | None = None) -> Ri
         matched_deep_paths=(),
         all_paths=normalized,
         reason="常规代码路径，走标准审查",
+        base_sha=validated_base,
+        head_sha=validated_head,
     )
 
 
 def extract_diff_paths(repo_root: Path, base_sha: str, head_sha: str) -> tuple[str, ...]:
-    """用 `git diff-tree -r -M -C --no-commit-id --name-status -z` 提取变更路径（重命名/复制同时含旧新路径）。"""
+    """用 `git diff-tree -r -M -C --find-copies-harder --no-commit-id --name-status -z` 提取变更路径（重命名/复制含旧新路径）。"""
     try:
         base = parse_sha(base_sha)
         head = parse_sha(head_sha)
@@ -406,6 +473,7 @@ def extract_diff_paths(repo_root: Path, base_sha: str, head_sha: str) -> tuple[s
             "-r",
             "-M",
             "-C",
+            "--find-copies-harder",
             "--no-commit-id",
             "--name-status",
             "-z",
@@ -466,8 +534,14 @@ def assess_diff(
     head_sha: str,
     policy: RiskPolicy | None = None,
 ) -> RiskAssessment:
-    """从 git diff 提取变更路径（含重命名旧新路径）并返回风险评估。"""
-    return classify_paths(extract_diff_paths(repo_root, base_sha, head_sha), policy=policy)
+    """从 git diff 提取变更路径（含重命名/复制旧新路径）并返回强绑定提交身份的风险评估。"""
+    try:
+        base = parse_sha(base_sha)
+        head = parse_sha(head_sha)
+    except ValueError as exc:
+        raise RiskPolicyError(f"diff SHA 非法：{exc}") from exc
+    paths = extract_diff_paths(repo_root, str(base), str(head))
+    return classify_paths(paths, policy=policy, base_sha=str(base), head_sha=str(head))
 
 
 def evaluate_high_risk_approval(
@@ -489,6 +563,12 @@ def evaluate_high_risk_approval(
         head = parse_sha(head_sha)
     except ValueError as exc:
         raise RiskPolicyError(f"head_sha 非法：{exc}") from exc
+    if assessment.head_sha is None:
+        raise RiskPolicyError("风险评估未绑定 head_sha，拒绝用于准入判定")
+    if assessment.head_sha != str(head):
+        raise RiskPolicyError(
+            f"风险评估绑定的 head_sha（{assessment.head_sha}）与待评估 head_sha（{head}）不匹配，拒绝跨提交复用"
+        )
 
     if not assessment.requires_human_approval:
         return HighRiskApprovalResult(
@@ -526,5 +606,5 @@ def evaluate_high_risk_approval(
         reason=decision.reason,
         head_sha=str(head),
         request_path=decision.request_path,
-        sign_command=f"{SIGN_COMMAND} '{decision.request_path}'",
+        sign_command=f"{SIGN_COMMAND} {shlex.quote(decision.request_path)}",
     )
