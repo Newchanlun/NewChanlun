@@ -1768,7 +1768,8 @@ pub(super) fn build_ef_units(
             SeedInput, SeedRule,
         },
         center_scan::{
-            scan_center_facts_full, PairOutcome, ScanState, SeedFromSelf, UnitAssignment,
+            scan_center_facts_full, PairOutcome, R5Boundary, ScanState, SeedFromSelf,
+            UnitAssignment,
         },
     };
     let units = Vec::try_from_iter(
@@ -1822,6 +1823,22 @@ pub(super) fn build_ef_units(
             || !prior_versions.contains(crate::tb02f::KINDS[4]))
     {
         return Err("EF prior 缺中心或中枢对版本根".into());
+    }
+    // 对没有结算证据的前边界，后缀未被扫描，不是经过扫描后证实缺席。
+    // 仅省略 CC-055「withdrawn」仍会触发 object_diff 的按槽撤回，故在生成
+    // 当前候选前拒绝本批，让上一发布切面原样留存。混合发布需独立的待重算槽位。
+    if let Some(R5Boundary::Pending { tested, .. }) = facts.windows.last().map(|w| w.boundary) {
+        for ((kind, entity), _) in &previous {
+            if kind.as_str() != crate::tb02e::KINDS[1] || center_ids.contains(entity) {
+                continue;
+            }
+            let before_unresolved = ids[..tested]
+                .iter()
+                .any(|id| anchor(id) == center_anchor(entity));
+            if !before_unresolved {
+                return Err("R5_RECOMPUTE_DEFERRED：未决窗口下游的既有中枢缺重算证据".into());
+            }
+        }
     }
     let old = |kind: &str, entity: &str| {
         previous

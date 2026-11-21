@@ -3152,19 +3152,33 @@ mod tests {
         }
     }
 
-    /// 余数并入末子中枢：10/11 段 ⟹ 仍 3 个子中枢（末子窗 4/5 段）；12 段 ⟹ 4 个。
+    /// #2141 §4.5：九段即交重切，余数是后续候选，不回填已升级窗。
     #[test]
-    fn remainder_segments_merge_into_last_subcenter() {
+    fn upgrade_stops_at_nine_and_leaves_remainder_to_next_seed() {
+        use super::super::center_scan::scan_center_facts_full;
         let build = super::super::center::center_from_segments;
-        for (n, expect_k, last_win) in [(10, 3, (6, 9)), (11, 3, (6, 10)), (12, 4, (9, 11))] {
+        for n in 9..=12 {
             let units = upgrade_units(n);
-            let windowed = detect_centers_windowed(&units, build);
+            let scan = scan_center_facts_full(&units, build);
+            assert_eq!(scan.windows[0].boundary, R5Boundary::Upgrade);
+            assert_eq!(scan.windows[0].exit, 9);
+            assert_eq!(scan.windows[0].emitted, 3);
             assert_eq!(
-                windowed.len(),
-                expect_k,
-                "{n} 段 ⟹ ⌊n/3⌋={expect_k} 个子中枢"
+                scan.centers[..3]
+                    .iter()
+                    .map(|(_, win)| *win)
+                    .collect::<Vec<_>>(),
+                [(0, 2), (3, 5), (6, 8)]
             );
-            assert_eq!(windowed[expect_k - 1].1, last_win, "{n} 段末子窗吸收余数");
+            assert!(scan.metas[..3].iter().all(|m| m.settlement.is_none()));
+            if n == 12 {
+                assert_eq!(scan.centers.len(), 4);
+                assert_eq!(scan.centers[3].1, (9, 11));
+                assert_eq!(scan.windows[1].boundary, R5Boundary::Open);
+            } else {
+                assert_eq!(scan.centers.len(), 3);
+                assert_eq!(scan.cursor.consumed, 9);
+            }
         }
     }
 
@@ -3216,21 +3230,19 @@ mod tests {
     #[test]
     fn compose_trend_run_payload_collects_continuation_centers() {
         use super::super::cand_predicate::rmove_dir;
-        // wA=[8,16] core[12,15]；wB=[18,26] core[22,25]（B.dd=18>A.gg=16 ⟹ 上延续）；
-        // wC=[26,30] core[28,29]（C.dd=26 不严格大于 B.gg=26、C.gg=30>B.dd ⟹ LevelExpansion 断链）。
-        // ★#1419 R8：组间各插一个连接段（c1=[16,18] 在 core_A 之上、c2=[26,27] 在 core_B 之上），
-        // 结算后被跳过、不进任何窗口；旧夹具让 wB/wC 首段兼任前组突破段，只在旧 B 口径下成立。
+        // A [8,17]、B [18,27] 外缘分离，C [27,32] 触及 B 外缘。
+        // u2→u3 同高 17、u6→u7 同高 27；两回抽最低点分别严格高于 ZG=15/25。
         let units = vec![
-            unit(0, 4, up(), 8, 16),
-            unit(4, 8, down(), 12, 16),
-            unit(8, 12, up(), 12, 15),
-            unit(12, 16, up(), 16, 18),
-            unit(16, 20, up(), 18, 26),
-            unit(20, 24, down(), 22, 26),
-            unit(24, 28, up(), 22, 25),
-            unit(28, 32, up(), 26, 27),
-            unit(32, 36, up(), 26, 30),
-            unit(36, 40, down(), 28, 30),
+            unit(0, 4, up(), 8, 15),
+            unit(4, 8, down(), 12, 15),
+            unit(8, 12, up(), 12, 17),
+            unit(12, 16, down(), 16, 17),
+            unit(16, 20, up(), 18, 25),
+            unit(20, 24, down(), 22, 25),
+            unit(24, 28, up(), 22, 27),
+            unit(28, 32, down(), 26, 27),
+            unit(32, 36, up(), 27, 32),
+            unit(36, 40, down(), 28, 32),
             unit(40, 44, up(), 28, 29),
         ];
         let moves: Vec<LeveledMove> = units
@@ -3389,24 +3401,20 @@ mod tests {
     /// 多级递归塔：L0 → L1 → L2，每级 descend 取回下级走势（级别严格递减）。
     #[test]
     fn multi_level_tower_descend_decreases_level() {
-        // 11 段 L0（三组 + 两连接段）「核心分离、外缘重叠」（task #142 延伸语义：全重叠 fixture 会被吸收为
-        // 1 个延伸中枢，多级塔须组间 non-extension 分离——首段 d>ZG 终止前组延伸；
-        // 三组外缘共同重叠 [152,180] 非空 ⟹ L2 几何中枢成立）。★#1419 R8：组间各插一个连接段
-        // （c1=[51,54] 在核心_1 之上、c2=[151,154] 在核心_2 之上），结算后被跳过、不进任何窗口。
-        // ★#1419 S2（Zn 外缘）：外缘只聚合与组首段同向（↑）的第 1、3 段，组宽极值放在 ↑ 段上；
-        // 旧夹具把宽极值放在中间 ↓ 段（非 Zn），Zn 口径下三组外缘 [0,50]/[55,160]/[155,300] 不再共同重叠。
+        // 三窗核心 [40,50] / [55,150] / [155,280] 分离，三个完整走势区间交在 [151,180]。
+        // 两个下行回抽与前一上行离开同高，且低点严格高于前枢 ZG（#2114、#2141 §5.2）。
         let ranges = [
             (0, 200),
             (40, 50),
-            (40, 60), // 组1 核心 [40,50]，Zn 外缘 [0,200]
-            (51, 54), // c1：lo=51>50 non-ext，突破段（连接段）
-            (52, 180),
+            (40, 60),
+            (51, 60),
+            (51, 180),
             (55, 150),
-            (55, 160),  // 组2 核心 [55,150]，Zn 外缘 [52,180]
-            (151, 154), // c2：lo=151>150 non-ext
-            (152, 300),
+            (55, 154),
+            (151, 154),
+            (151, 300),
+            (155, 300),
             (155, 280),
-            (155, 290), // 组3 核心 [155,280]，Zn 外缘 [152,300]
         ];
         let units: Vec<UnitRange> = ranges
             .iter()
@@ -3552,28 +3560,29 @@ mod tests {
     #[test]
     #[should_panic(expected = "跨层错配")]
     fn project_to_units_rejects_cross_level_blocks() {
-        // 三组各 3 段，组间抬升 100（组内交叠成中枢、组间不交叠 ⟹ 依次上移的 3 个中枢
-        // ⟹ decompose 给 Trend(Up) 块，方向非 None，错位读方向才可见）。★#1419 R8：组间各插一个
-        // 连接段 [base+65, base+70]（在前组核心 [base+40, base+60] 之上），结算后被跳过。
-        let mut units: Vec<UnitRange> = Vec::new();
-        let dir_at = |i: usize| if i % 2 == 0 { up() } else { down() };
-        for g in 0..3 {
-            let base = g as Tick * 100;
-            if g > 0 {
-                let i = units.len();
-                units.push(unit(i * 4, i * 4 + 4, dir_at(i), base - 35, base - 30));
-            }
-            for off in 0..3 {
-                let i = units.len();
-                units.push(unit(
-                    i * 4,
-                    i * 4 + 4,
-                    dir_at(i),
-                    base + 40 - off,
-                    base + 60 + off,
-                ));
-            }
-        }
+        // 真实 #2114 字面关节：两回抽与相邻离开共享坐标和高点，
+        // 低点 65 > 60、168 > 165。三窗外缘严格分离，故能产生 Trend blocks。
+        let ranges = [
+            (20, 60),
+            (40, 60),
+            (40, 70),
+            (65, 70),
+            (100, 165),
+            (140, 165),
+            (140, 170),
+            (168, 170),
+            (200, 265),
+            (240, 265),
+            (240, 270),
+        ];
+        let units: Vec<UnitRange> = ranges
+            .iter()
+            .enumerate()
+            .map(|(i, &(lo, hi))| {
+                let dir = if i % 2 == 0 { up() } else { down() };
+                unit(i * 4, i * 4 + 4, dir, lo, hi)
+            })
+            .collect();
         let moves: Vec<LeveledMove> = units
             .iter()
             .enumerate()

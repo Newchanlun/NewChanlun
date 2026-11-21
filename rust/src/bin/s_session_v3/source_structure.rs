@@ -2015,11 +2015,11 @@ mod ef_entity_tests {
         o.sources = SourceCoords::Original(sc::CodecVec::from_plain(r.sources.clone()));
         o
     }
-    fn unit(n: &sc::MemoryNodes, k: usize, completed: bool) -> SegUnit {
+    fn unit(n: &sc::MemoryNodes, k: usize, range: Option<(i64, i64)>) -> SegUnit {
         SegUnit {
             unit_id: SText::new(&format!("segment:{k}"), n).unwrap(),
             object_id: SText::new(&format!("obj3-seg{k}"), n).unwrap(),
-            range: completed.then(|| UnitRange {
+            range: range.map(|(lo, hi)| UnitRange {
                 start_index: k * 10,
                 end_index: k * 10 + 10,
                 direction: if k % 2 == 0 {
@@ -2027,8 +2027,8 @@ mod ef_entity_tests {
                 } else {
                     Direction::Down
                 },
-                lo: RANGES[k].0,
-                hi: RANGES[k].1,
+                lo,
+                hi,
             }),
             sources: SVec::from_iter([k], n).unwrap(),
         }
@@ -2053,9 +2053,26 @@ mod ef_entity_tests {
         generation: i64,
         prior: &[Built],
     ) -> Cut {
+        cut_ranges(n, producer, &RANGES[..completed], generation, prior).unwrap()
+    }
+
+    fn cut_ranges(
+        n: &mut sc::MemoryNodes,
+        producer: &mut Cc004Producer,
+        ranges: &[(i64, i64)],
+        generation: i64,
+        prior: &[Built],
+    ) -> Result<Cut, sc::ContextError> {
+        let completed = ranges.len();
         let inputs = UnitInputs {
-            completed: SVec::from_iter((0..completed).map(|k| unit(n, k, true)), n).unwrap(),
-            in_progress: Some(unit(n, completed, false)),
+            completed: SVec::from_iter(
+                ranges
+                    .iter()
+                    .enumerate()
+                    .map(|(k, &range)| unit(n, k, Some(range))),
+                n,
+            )?,
+            in_progress: Some(unit(n, completed, None)),
         };
         let known = sc::write_value(
             n,
@@ -2078,8 +2095,7 @@ mod ef_entity_tests {
                 known_at: &known,
                 all_sources: &sources,
             },
-        )
-        .unwrap();
+        )?;
         let mut rows: std::vec::Vec<Row> = (0..=completed).map(segment_row).collect();
         rows.push(Row {
             kind: "CC-056.segment_version".into(),
@@ -2109,9 +2125,9 @@ mod ef_entity_tests {
                 sources: coords(n, &source).unwrap().iter().copied().collect(),
             });
         }
-        Cut { rows, records }
+        Ok(Cut { rows, records })
     }
-    fn cuts() -> (sc::MemoryNodes, Cut, Cut) {
+    fn factory() -> (sc::MemoryNodes, Cc004Producer) {
         let mut n = sc::MemoryNodes::default();
         let mut producer = Cc004Producer::new(tb02a::PROFILE, crate::V3_STRUCTURE_RULE_REVISION);
         for i in 0..RANGES.len() + 1 {
@@ -2132,6 +2148,11 @@ mod ef_entity_tests {
                 )
                 .unwrap();
         }
+        (n, producer)
+    }
+
+    fn cuts() -> (sc::MemoryNodes, Cut, Cut) {
+        let (mut n, mut producer) = factory();
         let first = cut(&mut n, &mut producer, RANGES.len() - 1, 28, &[]);
         let records = first.records.clone();
         let second = cut(&mut n, &mut producer, RANGES.len(), 29, &records);
@@ -2195,6 +2216,53 @@ mod ef_entity_tests {
         assert_eq!(b["settled_known_at"]["generation"], "29");
         assert_eq!(c["settled_known_at"], b["settled_known_at"]);
         assert_eq!(a["entity_id"], c["entity_id"]);
+    }
+
+    #[test]
+    fn r5_pending_predecessor_cannot_publish_withdrawals_for_unscanned_centers() {
+        let (mut nodes, mut producer) = factory();
+        let before = cut(&mut nodes, &mut producer, 15, 28, &[]);
+        assert_eq!(data_of(&before.rows, "CC-016.center").len(), 3);
+        assert_eq!(data_of(&before.rows, "CC-020.center_pair").len(), 2);
+
+        let mut broken_joint = RANGES[..15].to_vec();
+        // 原右窗种子及其身份不变。仅把 u5 的高点由 260 改为 259，
+        // 使 u4→u5 无法证明价端相接；u5 仍完整处在核心 [140,180] 上方。
+        broken_joint[5].1 = 259;
+        let from_empty = cut_ranges(&mut nodes, &mut producer, &broken_joint, 29, &[]).unwrap();
+        let centers = data_of(&from_empty.rows, "CC-016.center");
+        assert_eq!(centers.len(), 1);
+        assert_eq!(centers[0]["r5_pending_unit"], "segment:5");
+        assert_eq!(centers[0]["settled"], false);
+
+        let refused = cut_ranges(
+            &mut nodes,
+            &mut producer,
+            &broken_joint,
+            29,
+            &before.records,
+        );
+        assert!(matches!(refused, Err(e) if e.to_string().contains("R5_RECOMPUTE_DEFERRED")));
+
+        // 关节可证后正常生成同身份的修订，不把最后一窗的成员增长冒充身份消失。
+        let proved = cut(&mut nodes, &mut producer, RANGES.len(), 30, &before.records);
+        let old_tail = data_of(&before.rows, "CC-016.center")[2];
+        let tail = data_of(&proved.rows, "CC-016.center")[2];
+        assert_eq!(tail["entity_id"], old_tail["entity_id"]);
+        assert_eq!(
+            tail["members"].as_array().unwrap().len(),
+            old_tail["members"].as_array().unwrap().len() + 1
+        );
+        assert_eq!(tail["formed_known_at"], old_tail["formed_known_at"]);
+        let changes = data_of(&proved.rows, "CC-055.center_change");
+        assert!(changes.iter().all(|v| v["change"] != "withdrawn"));
+        let added = changes
+            .iter()
+            .find(|v| v["entity_id"] == tail["entity_id"] && v["change"] == "member_added")
+            .unwrap();
+        assert_eq!(added["known_at"]["generation"], "30");
+        assert_eq!(added["before"], *old_tail);
+        assert_eq!(added["after"], *tail);
     }
 
     #[test]

@@ -1794,9 +1794,9 @@ mod tests {
 
     #[test]
     fn third_buy_extracted_bit_exact() {
-        // 中枢核心 [100,200] end_index=12。后续：向上线段离开（端点 250 > zg=200），
+        // 中枢核心 [100,200]。末成员 [12,16] 触核心并向上离开（终点 250 > ZG），
         // 向下回试低点 210 > zg=200（不入中枢）⟹ 3 买。
-        let c = center(100, 200, 12);
+        let c = center(100, 200, 16);
         let segs = vec![
             seg(Direction::Up, 12, 16, 150, 250),   // 离开：端点 250 > 200
             seg(Direction::Down, 16, 20, 250, 210), // 回试：低点 210 > 200 → 3 买
@@ -1814,11 +1814,10 @@ mod tests {
             Some(200),
         ); // 3 买止损 = zg（#218 面 A 载体形态：Center 变体读出）
     }
-
     #[test]
     fn third_buy_rejected_when_retest_reenters() {
         // 回试低点 190 < zg=200（重新跌破进入中枢）⟹ 不是 3 买。
-        let c = center(100, 200, 12);
+        let c = center(100, 200, 16);
         let segs = vec![
             seg(Direction::Up, 12, 16, 150, 250),
             seg(Direction::Down, 16, 20, 250, 190), // 回试 190 < 200 → 入中枢，非 3 买
@@ -1832,7 +1831,7 @@ mod tests {
         // 回试低点 == zg=200（边界临界点）：严格口径 `> zg` ⟹ 非第三类买点。
         // retest==zg=单点重叠仍触及闭区间中枢 [ZD,ZG]=中枢延伸（中心定理一）=非终结=非第三类。
         // 逐字段对齐 Lean IsType3Buy（zg < retracePrice，严格）。codex 裁决 2026-06-27。
-        let c = center(100, 200, 12);
+        let c = center(100, 200, 16);
         let segs = vec![
             seg(Direction::Up, 12, 16, 150, 250),
             seg(Direction::Down, 16, 20, 250, 200), // 回试 == zg → 触及中枢 → 非 3 买（严格排除等号）
@@ -1847,7 +1846,7 @@ mod tests {
     #[test]
     fn third_sell_extracted_bit_exact() {
         // 镜像：向下离开（端点 50 < zd=100），向上回抽高点 90 < zd=100 ⟹ 3 卖。
-        let c = center(100, 200, 12);
+        let c = center(100, 200, 16);
         let segs = vec![
             seg(Direction::Down, 12, 16, 150, 50), // 离开：端点 50 < 100
             seg(Direction::Up, 16, 20, 50, 90),    // 回抽：高点 90 < 100 → 3 卖
@@ -1868,7 +1867,7 @@ mod tests {
     #[test]
     fn no_leave_no_third_signal() {
         // 线段未离开中枢（端点 180 < zg=200）⟹ 无第三类（且方向不破中枢，无第一类）。
-        let c = center(100, 200, 12);
+        let c = center(100, 200, 16);
         let segs = vec![
             seg(Direction::Up, 12, 16, 150, 180),   // 未离开（180 < 200）
             seg(Direction::Down, 16, 20, 180, 160), // 端点 160 ∈ [100,200]，未破中枢下沿
@@ -1880,12 +1879,13 @@ mod tests {
     #[test]
     fn third_buy_has_center_invariant() {
         // 不变量：含 3 类 bit ⟹ center 必 Some（strategy 3 类止损 unwrap 安全）。
-        let c = center(100, 200, 12);
+        let c = center(100, 200, 16);
         let segs = vec![
             seg(Direction::Up, 12, 16, 150, 250),
             seg(Direction::Down, 16, 20, 250, 210),
         ];
         let points = extract_third_only(&[c], &segs);
+        assert_eq!(points.len(), 1, "先证一次非空三类");
         for p in &points {
             if p.bits.buy3 || p.bits.sell3 {
                 assert!(p.center.is_some(), "含 3 类 bit ⟹ center 必 Some");
@@ -1899,18 +1899,18 @@ mod tests {
         assert!(points.is_empty());
     }
 
-    // ★探索性测试（揭示 bug，testing-override 生成态例外）：坐实「同一 retest 端点对所有
+    // 「同一 retest 端点对所有
     //   zg < retest 的前驱中枢重复产出」的重复机制。修复后此测试断言**唯一归属最近中枢**。
     #[test]
     fn third_buy_belongs_only_to_nearest_center_not_all_predecessors() {
-        // 三个前驱中枢，zg 递增：C0[10,20] end=2、C1[30,40] end=14、C2[50,60] end=26。
-        // 离开+回试发生在 C2 之后：向上离开（端点 90 > 60），向下回试低点 70 > 60（不入 C2）。
+        // 三个前驱中枢，zg 递增：C0[10,20] end=2、C1[30,40] end=14、C2[50,60] end=30。
+        // 末成员越出 C2 后：向上离开（端点 90 > 60），向下回试低点 70 > 60（不入 C2）。
         // bug 语义：retest 端点 70 同时满足 70 > C0.zg=20、70 > C1.zg=40、70 > C2.zg=60 ⟹ 旧码产 3 个 bsp。
         // 正确语义（第18课定理三「该中枢」+ 第49课「当下之前最后一个中枢」）：retest 只归属刚离开的
-        //   最近中枢 C2（end=26，离 leave 段最近）⟹ 唯一 1 个 bsp，center=C2。
+        //   最近中枢 C2（end=30，离开末成员的右边界）⟹ 唯一 1 个 bsp，center=C2。
         let c0 = center(10, 20, 2);
         let c1 = center(30, 40, 14);
-        let c2 = center(50, 60, 26);
+        let c2 = center(50, 60, 30);
         let segs = vec![
             seg(Direction::Up, 27, 30, 60, 90), // 离开 C2 上方（端点 90 > 60）
             seg(Direction::Down, 30, 34, 90, 70), // 回试低点 70 > 60（不入 C2）→ 3 买（仅归属 C2）

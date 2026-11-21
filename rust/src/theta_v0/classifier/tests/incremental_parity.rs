@@ -166,20 +166,39 @@ fn cand_cache_guard_accepts_incremental_contract() {
     );
 }
 
-/// ★classify 的 `tower` 字段（逐级走势塔快照）——tower 非空 + depth≥1 真嵌套存在。
-///
-/// 三组 L0（+2 连接段，#1419 R8）→ 3 个 L1 走势 → L2 中枢（几何路径）：tower[1] 含 sub_moves 非空的
-/// LeveledMove（RMove::Compose，depth=1 真嵌套）。坐实：导出桥正确产出真嵌套塔。
+/// 两次已证上破：回抽 u3、u7 分别高于冻结核心 [40,50]、[55,150]，
+/// 且逐对同高 60、154，坐标首尾相接。三个 L1 包络重叠于 [151,180]。
+fn r5_nested_segments() -> Vec<Segment> {
+    [
+        (0, 200),
+        (40, 50),
+        (40, 60),
+        (51, 60),
+        (51, 180),
+        (55, 150),
+        (55, 154),
+        (151, 154),
+        (151, 300),
+        (155, 300),
+        (155, 280),
+    ]
+    .into_iter()
+    .enumerate()
+    .map(|(i, (lo, hi))| {
+        let start = i * 4;
+        if i % 2 == 0 {
+            seg(Direction::Up, start, start + 4, lo, hi)
+        } else {
+            seg(Direction::Down, start, start + 4, hi, lo)
+        }
+    })
+    .collect()
+}
+
 #[test]
 fn classify_tower_depth_ge1_true_nesting() {
     let cfg = ThetaConfig::default();
-    // 三组 up-down-up（每组 → 一个 L1 走势；组间连接段见夹具），三个 L1 走势外缘重叠成 L2 中枢。
-    // ★task #142 延伸语义诚实重算（同 end_to_end_second_buy_via_l1_l2_geometric 推导）：三组
-    // 核心分离（组B 首段 hi=115<ZD_A=120、组C 首段 lo=115>ZG_B=114 ⟹ non-extension，PDF §5
-    // Step3），三个 L1 走势区间 O_A=[110,150]/O_B=[80,125]/O_C=[112,148] 共同相交 ⟹ L2 核心 [112,125]
-    // 非空（组B 中枢 Zn 外缘为 [80,115]，走势区间含非 Zn 高点 125，见 [`three_group_segments`]）。
-    // ★#1419 R8：组间各插一个连接段，见 [`three_group_segments`]。
-    let segments = three_group_segments();
+    let segments = r5_nested_segments();
     let closes = three_group_closes();
     let layer = ParseLayer {
         segments: Rc::new(segments),
@@ -1178,38 +1197,23 @@ fn incremental_tower_preserves_b2_second_buy() {
 }
 
 /// ★codex 反例（cascade reset 完备性，L1 构造）：L0 frontier 末段**内点改写**——
-/// 上级投影 `UnitRange(lo,hi)` bit-identical 但底层 `sub_moves` 变。
-///
-/// 场景：三组 + 两连接段（task #142 核心分离 fixture，#1419 R8 版），末段 seg[10] `Up[40,44]` end_price 从 147 改写
-/// 为 140。140 是组 C 外缘内点（组 C max-hi=148(seg[8]/seg[9]) / min-lo=112(seg[9]/seg[10].sp)
-/// 不变）⟹ L0 该窗口中枢 gg/dd 不变 ⟹ L1 输入投影 `project_to_units` bit-identical。但 seg[10]
-/// 的 lo/hi 从 [112,147] 变 [112,140] ⟹ L0 upper_moves[2].sub_moves[2] 深嵌套坐标变。
-///
-/// 旧守卫（仅比对本级 `project_to_units` 投影）：L0 reset 正确，但 L1 frontier_mutated=false
-/// 漏 reset ⟹ `cache.levels[1].upper_moves` 深嵌套 sub_moves 陈旧（仍 [112,147]）+ BSP memo
-/// （key 仅三长度）复用陈旧 BSP ⟹ 与全量发散。
-/// cascade reset 修复：L0 变异 → 强制 reset L1+（无条件跟随下级），深嵌套 sub_moves 重建为 [112,140]。
-///
-/// **L1**（合成构造，验证管线完备性，非真实数据假设——formalization-validity-domain 231号）。
+/// 上级投影不变，但下层末段的高点 280→275；级联重建必须带上新叶子。
 #[test]
 fn cascade_reset_on_frontier_interior_rewrite() {
     let cfg = ThetaConfig::default();
-    // ★task #142 延伸语义诚实重算：三组核心分离 fixture（同 end_to_end_second_buy_via_l1_l2_geometric
-    // 推导——组B 首段 hi=115<ZD_A=120、组C 首段 lo=115>ZG_B=114 ⟹ non-extension，PDF §5 Step3）。
-    // ★#1419 R8：组间各插一个连接段，见 [`three_group_segments`]；v1 末段 = seg[10] `Up[40,44]` 112→147。
-    let base = three_group_segments();
+    let base = r5_nested_segments();
     let closes = three_group_closes();
     let merged = Rc::new(bars_from_closes(&closes));
 
-    // v1: 末段 end_price=147。
+    // v1: 末段 end_price=280。
     let layer_v1 = ParseLayer {
         segments: Rc::new(base.clone()),
         merged_bars: merged.clone(),
         ..Default::default()
     };
-    // v2: 仅末段 end_price 改写 147→140（组 C 外缘内点，L1 投影不变，L0 sub_moves 变）。
+    // v2: 仅末段 end_price 改写 280→275（组 C 外缘内点，L1 投影不变，L0 sub_moves 变）。
     let mut v2_segs = base.clone();
-    v2_segs[10].end_price = 140;
+    v2_segs[10].end_price = 275;
     let layer_v2 = ParseLayer {
         segments: Rc::new(v2_segs),
         merged_bars: merged.clone(),
@@ -1217,7 +1221,7 @@ fn cascade_reset_on_frontier_interior_rewrite() {
     };
 
     // 前提自检（codex 反例成立的必要条件）：L1 投影输入 v1==v2 bit-identical（守卫看不到变异），
-    // 但 L0 末段 sub_moves 已变（147→140）。若此前提不成立，本测试不构成反例。
+    // 但 L0 末段 sub_moves 已变（280→275）。若此前提不成立，本测试不构成反例。
     let mk_l1_units = |segs: &Rc<Vec<Segment>>| {
         let l0_units: Vec<UnitRange> = segs.iter().map(segment_to_unit).collect();
         let moves_l0: Vec<LeveledMove> = l0_units
@@ -1242,8 +1246,10 @@ fn cascade_reset_on_frontier_interior_rewrite() {
         );
         recursive_tower::project_to_units(&upper, &decompose::decompose(&c))
     };
+    let baseline = mk_l1_units(&layer_v1.segments);
+    assert_eq!(baseline.len(), 3, "前提：复现两个已结算关节及第三窗");
     assert_eq!(
-        mk_l1_units(&layer_v1.segments),
+        baseline,
         mk_l1_units(&layer_v2.segments),
         "前提：L1 投影输入 v1==v2（守卫的本级投影比对看不到此变异）"
     );
@@ -1259,10 +1265,10 @@ fn cascade_reset_on_frontier_interior_rewrite() {
     let full_tower_v2 = __co12.tower;
 
     // ★核心断言（latent 陈旧检测，非仅返回值）：cache 内 L1 深嵌套 sub_moves 末段坐标必须 == v2
-    // 的 [112,140]。返回的 Classification/tower 不消费 cache 内 L1 upper_moves 的深 subs（tower 用
+    // 的 [155,275]。返回的 Classification/tower 不消费 cache 内 L1 upper_moves 的深 subs（tower 用
     // 新鲜 moves_tower 快照），故陈旧在返回值里 latent——但它喂 BSP（extract_second_for_level）+
     // 下一 bar 的 L2 投影。直接断言 cache 深 subs，捕获 latent 陈旧（640：不靠返回值碰巧相等）。
-    // 推导（task #142 fixture；#1419 R8 后末段为 seg[10]）：v2 seg[10] = Up 112→140 ⟹ 区间 [112,140]（v1 为 [112,147]）。
+    // 推导（task #142 fixture；#1419 R8 后末段为 seg[10]）：v2 seg[10] = Up 155→275 ⟹ 区间 [155,275]（v1 为 [155,280]）。
     let l0_seg8_full = classify(&layer_v2, &cfg, &[]).tower[0]
         .last()
         .unwrap()
@@ -1272,21 +1278,21 @@ fn cascade_reset_on_frontier_interior_rewrite() {
         l0_seg8_full,
         descend::RMove::Segment {
             direction: Direction::Up,
-            lo: 112,
-            hi: 140
+            lo: 155,
+            hi: 275
         },
-        "前提：v2 全量 L0 末段 == [112,140]"
+        "前提：v2 全量 L0 末段 == [155,275]"
     );
-    // cache.L1.upper_moves[0].sub_moves[2](groupC).sub_moves[2](seg[8]) 应 == [112,140]。
+    // cache.L1.upper_moves[0].sub_moves[2](groupC).sub_moves[2](seg[10]) 应 == [155,275]。
     let l1_deep = &cache.levels[1].upper_moves[0].sub_moves[2].sub_moves[2].rmove;
     assert_eq!(
         *l1_deep,
         descend::RMove::Segment {
             direction: Direction::Up,
-            lo: 112,
-            hi: 140
+            lo: 155,
+            hi: 275
         },
-        "cascade: cache L1 深嵌套 seg[8] == v2 [112,140]（陈旧则 [112,147]——L1 漏 cascade reset）"
+        "cascade: cache L1 深嵌套 seg[10] == v2 [155,275]（陈旧则 [155,280]——L1 漏 cascade reset）"
     );
 
     // 返回值也须 bit-exact（cascade 后 L1 重建，tower/Classification 全对齐）。
@@ -1302,7 +1308,7 @@ fn cascade_reset_on_frontier_interior_rewrite() {
 }
 
 /// ★on2w2 G7（epoch 递增覆盖性）：L0 尾段重划场景（= A12 bar3020 假命中场景）**必须** bump
-/// forest_epoch。复用 `cascade_reset_on_frontier_interior_rewrite` 的 v1→v2 fixture——v2 仅末段
+/// forest_epoch。旧三组 fixture 中 v2 仅末段
 /// end_price 147→140（组 C 外缘内点，L1 投影 bit-identical，L0 sub_moves 变）。这是 gen 快路当年
 /// 假命中返陈旧森林的精确形态（TowerCache::generation 靠 l0_is_root blunt 兜底才没漏）。
 ///

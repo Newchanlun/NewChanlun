@@ -1591,17 +1591,17 @@ fn no_center_terminates_recursion() {
 #[test]
 fn end_to_end_third_buy_signal() {
     let cfg = ThetaConfig::default();
-    // 段0-2：三段在 [100,200] 重叠 ⟹ seed 中枢，核心 [ZD,ZG]=[100,200] 冻结，end_index=12。
-    // 段3：向上离开——延伸语义下（PDF §5 Step3，task #142）离开段必须与冻结核心不相交：
-    //   lo=205 > ZG=200 ⟹ non-extension（旧 fixture lo=150 ≤ 200 会被 Step2 吸收进中枢 ⟹ 无离开段）。
-    // 段4：向下回试低点 210 > zg=200（严格不触闭区间）⟹ 3 买 @ source_index=20。
+    // #2114 字面见证：前三段成核心 [100,200]；末成员向上到 250，
+    // u3 从同一坐标、同一高点反向回试，全段 [210,250] 在核心上方。
+    // 回试右端 source_index=20。
+    // 不再插入只能靠旧单哨兵通过的同向外段。
     let layer = ParseLayer {
         segments: Rc::new(vec![
             seg(Direction::Up, 0, 4, 100, 200),
             seg(Direction::Down, 4, 8, 200, 100),
-            seg(Direction::Up, 8, 12, 100, 200),
-            seg(Direction::Up, 12, 16, 205, 250), // 离开中枢上方（lo=205>ZG ⟹ non-extension）
-            seg(Direction::Down, 16, 20, 250, 210), // 回试低点 > zg → 3 买
+            // 末成员同时担当已证离开。
+            seg(Direction::Up, 8, 12, 100, 250),
+            seg(Direction::Down, 12, 20, 250, 210), // 回试低点 > ZG → 3 买
         ]),
         ..Default::default()
     };
