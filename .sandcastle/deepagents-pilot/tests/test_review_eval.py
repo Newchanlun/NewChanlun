@@ -19,11 +19,12 @@ from pilot1742.review_eval import (
     EvalScore,
     EvalValidationError,
     PredictedFinding,
-    _body_text_for_non_blocking_heuristic,
     _extract_markdown_link_ref_defs,
     _git_blob_line_count,
     _git_diff_added_ranges,
     _git_diff_tree_status_map,
+    _mask_inline_non_prose_in_block,
+    _parse_commonmark_blocks,
     _parse_leading_severity_tag,
     _parse_unified_diff_added_ranges,
     _score_from_dict,
@@ -3876,12 +3877,25 @@ def test_r11_body_fallback_unwraps_markdown_links_and_ignores_code_and_defs(tmp_
     assert classify_finding_heuristic(fenced_code_nit, "blocked") == "blocking_substantive"
     assert classify_finding_heuristic(real_nit_body, "blocked") == "non_blocking_or_nit"
 
-    # 2) 直接校验 _body_text_for_non_blocking_heuristic 解包与过滤行为
-    assert _body_text_for_non_blocking_heuristic(shortcut_link, _extract_markdown_link_ref_defs(shortcut_link)) == "nit 数据丢失"
-    assert _body_text_for_non_blocking_heuristic(inline_link, {}) == "nit 数据丢失"
-    assert _body_text_for_non_blocking_heuristic(full_ref_link, _extract_markdown_link_ref_defs(full_ref_link)) == "nit 数据丢失"
-    assert _body_text_for_non_blocking_heuristic(fenced_code_nit, {}) == "数据丢失"
-    assert _body_text_for_non_blocking_heuristic(real_nit_body, {}) == real_nit_body
+    # 2) 直接校验 _parse_commonmark_blocks 与 _mask_inline_non_prose_in_block 逐块占位屏蔽行为
+    shortcut_defs, shortcut_blocks = _parse_commonmark_blocks(shortcut_link)
+    assert shortcut_blocks == ("[nit] 数据丢失",)
+    assert _mask_inline_non_prose_in_block(shortcut_blocks[0], {d.norm_label for d in shortcut_defs}) == " \x01  数据丢失"
+
+    _, inline_blocks = _parse_commonmark_blocks(inline_link)
+    assert inline_blocks == (inline_link,)
+    assert _mask_inline_non_prose_in_block(inline_blocks[0], set()) == " \x01  数据丢失"
+
+    full_defs, full_blocks = _parse_commonmark_blocks(full_ref_link)
+    assert full_blocks == ("[nit][loc] 数据丢失",)
+    assert _mask_inline_non_prose_in_block(full_blocks[0], {d.norm_label for d in full_defs}) == " \x01  数据丢失"
+
+    _, fenced_blocks = _parse_commonmark_blocks(fenced_code_nit)
+    assert fenced_blocks == ("数据丢失",)
+
+    _, real_nit_blocks = _parse_commonmark_blocks(real_nit_body)
+    assert real_nit_blocks == (real_nit_body,)
+    assert _mask_inline_non_prose_in_block(real_nit_blocks[0], set()) == real_nit_body
 
     # 3) 衍生边界：折叠引用链接、缩进代码块、HTML 注释块、反斜杠转义、仅含链接定义、含括号目标的内联链接、反引号前缀干扰
     assert classify_finding_heuristic("[nit][] 数据丢失\n\n[nit]: /demo", "blocked") == "blocking_substantive"
@@ -3941,4 +3955,141 @@ def test_r11_body_fallback_unwraps_markdown_links_and_ignores_code_and_defs(tmp_
     }
     assert metrics.subsequent_head_pass_total_block_findings == 4
     assert metrics.subsequent_head_pass_inferred_fixed == 4
+    assert metrics.subsequent_head_pass_undeterminable_findings == 0
+
+
+def test_r12_block_isolated_visible_blocks_and_inline_masking(tmp_path: Path) -> None:
+    # 1) R11 4 项 Important 核心反例与回归对拍
+    lead_def_p1 = "[nit]: /demo\n\n[P1] 数据丢失"
+    lead_def_nit = "[P1]: /demo\n\n[nit] 命名建议"
+    link_colon = "说明 [nit](/doc): 数据丢失"
+    cross_para_unclosed_link = "数据丢失 [nit](\n\n/demo)"
+    inline_code_nit = "数据丢失，输入 `[nit]` 会触发错误"
+    shortcut_ref_nit = "[nit] 数据丢失\n\n[nit]: /demo"
+    full_ref_p1 = "[P1] [nit][location] 数据丢失\n\n[location]: src/nit#L1"
+    inline_path_p1 = "[P1] [src/low:1](src/low#L1) 数据丢失"
+    tilde_fence_non_blocking = "[P2] [非阻断] 说明\n\n~~~markdown\n[非阻断]: 示例\n~~~"
+    real_nit_paren = "数据丢失（[nit] 仅样式建议）"
+
+    assert classify_finding_heuristic(lead_def_p1, "blocked") == "blocking_substantive"
+    assert classify_finding_heuristic(lead_def_nit, "blocked") == "non_blocking_or_nit"
+    assert classify_finding_heuristic(link_colon, "blocked") == "blocking_substantive"
+    assert classify_finding_heuristic(cross_para_unclosed_link, "blocked") == "non_blocking_or_nit"
+    assert classify_finding_heuristic(inline_code_nit, "blocked") == "blocking_substantive"
+    assert classify_finding_heuristic(shortcut_ref_nit, "blocked") == "blocking_substantive"
+    assert classify_finding_heuristic(full_ref_p1, "blocked") == "blocking_substantive"
+    assert classify_finding_heuristic(inline_path_p1, "blocked") == "blocking_substantive"
+    assert classify_finding_heuristic(tilde_fence_non_blocking, "blocked") == "non_blocking_or_nit"
+    assert classify_finding_heuristic(real_nit_paren, "blocked") == "non_blocking_or_nit"
+
+    # 2) Important 1：_parse_commonmark_blocks 返回独立 visible_blocks，行首解析只看首个非空可见块
+    defs_1, blocks_1 = _parse_commonmark_blocks(lead_def_p1)
+    assert [d.norm_label for d in defs_1] == ["nit"]
+    assert blocks_1 == ("[P1] 数据丢失",)
+    assert _parse_leading_severity_tag(lead_def_p1) == "blocking"
+
+    defs_2, blocks_2 = _parse_commonmark_blocks(lead_def_nit)
+    assert [d.norm_label for d in defs_2] == ["p1"]
+    assert blocks_2 == ("[nit] 命名建议",)
+    assert _parse_leading_severity_tag(lead_def_nit) == "non_blocking"
+
+    # 前置链接定义在引用块/列表/同段落/多条定义时，行首严重度均准确落在首个可见正文块
+    assert _parse_leading_severity_tag("> [nit]: /demo\n\n[P1] 数据丢失") == "blocking"
+    assert _parse_leading_severity_tag("- [P1]: /demo\n\n[nit] 命名建议") == "non_blocking"
+    assert _parse_leading_severity_tag("[nit]: /demo\n[P1] 数据丢失") == "blocking"
+    assert _parse_leading_severity_tag("[nit]: /demo\n\n[P1]: 阻断说明") == "blocking"
+    assert _parse_leading_severity_tag("[P1]: 数据丢失") == "blocking"
+    assert _parse_leading_severity_tag("[P1] [nit] 数据丢失\n\n> [nit]: src/nit#L1") == "blocking"
+    assert _parse_leading_severity_tag(tilde_fence_non_blocking) == "non_blocking"
+    # 纯缩进/围栏代码块不含可见正文块，不误判为行首 Nit 标签
+    assert _parse_leading_severity_tag("    [nit] 示例代码") is None
+    assert classify_finding_heuristic("    [nit] 示例代码", "blocked") == "blocking_substantive"
+    assert _parse_leading_severity_tag("```text\n[nit] 示例代码\n```") is None
+    assert classify_finding_heuristic("```text\n[nit] 示例代码\n```", "blocked") == "blocking_substantive"
+
+    # 3) Important 2：链接/图片/自动链接/行内 HTML 统一屏蔽为隔离占位符 " \x01 "，绝不与紧邻冒号拼接出伪标签
+    assert _mask_inline_non_prose_in_block(link_colon, set()) == "说明  \x01 : 数据丢失"
+    assert classify_finding_heuristic("说明 [nit](/doc)：数据丢失", "blocked") == "blocking_substantive"
+    assert classify_finding_heuristic("[nit](/doc): 数据丢失", "blocked") == "blocking_substantive"
+    assert classify_finding_heuristic("说明 ![nit](/img.png): 数据丢失", "blocked") == "blocking_substantive"
+    assert classify_finding_heuristic("说明 ![nit][img]: 数据丢失\n\n[img]: /img.png", "blocked") == "blocking_substantive"
+    assert classify_finding_heuristic("说明 [![nit](/img.png)](/doc): 数据丢失", "blocked") == "blocking_substantive"
+    assert classify_finding_heuristic("说明 [nit][ref]: 数据丢失\n\n[ref]: /doc", "blocked") == "blocking_substantive"
+    assert classify_finding_heuristic("说明 [nit][]: 数据丢失\n\n[nit]: /doc", "blocked") == "blocking_substantive"
+    assert classify_finding_heuristic("说明 [nit]: 数据丢失\n\n[nit]: /doc", "blocked") == "blocking_substantive"
+    assert classify_finding_heuristic("数据丢失 <!-- [nit] --> 必须修复", "blocked") == "blocking_substantive"
+    assert classify_finding_heuristic('数据丢失 <span title="nit: demo">必须修复</span>', "blocked") == "blocking_substantive"
+    assert classify_finding_heuristic("数据丢失 <https://example.com/nit:1> 必须修复", "blocked") == "blocking_substantive"
+    assert classify_finding_heuristic("数据丢失 <![CDATA[[nit]]]> 必须修复", "blocked") == "blocking_substantive"
+    assert classify_finding_heuristic("数据丢失 <?pi nit:1?> 必须修复", "blocked") == "blocking_substantive"
+    assert classify_finding_heuristic("数据丢失 <!DOCTYPE nit:1> 必须修复", "blocked") == "blocking_substantive"
+    # 快捷引用链接后接未闭合 `(` 或 `[` 不触发快捷屏蔽
+    assert _mask_inline_non_prose_in_block("数据丢失 [nit](", {"nit"}) == "数据丢失 [nit]("
+    assert _mask_inline_non_prose_in_block("数据丢失 [nit][missing]", {"nit"}) == "数据丢失 [nit][missing]"
+
+    # 4) Important 3：每个段落独立进入 visible_blocks，绝不跨空行拼接行内链接或代码跨度
+    _, split_blocks = _parse_commonmark_blocks(cross_para_unclosed_link)
+    assert split_blocks == ("数据丢失 [nit](", "/demo)")
+    assert classify_finding_heuristic("数据丢失 `[nit]\n\n` 仅样式建议", "blocked") == "non_blocking_or_nit"
+    assert classify_finding_heuristic("数据丢失 [nit][\n\nloc]\n\n[loc]: /demo", "blocked") == "non_blocking_or_nit"
+    # 对照：同一段落内的单换行软回车内联链接合法闭合，仍正确屏蔽
+    assert classify_finding_heuristic("数据丢失 [nit](\n/demo)", "blocked") == "blocking_substantive"
+
+    # 5) Important 4：单/多反引号行内代码跨度屏蔽为 " \x01 "，未闭合反引号与反斜杠转义保持语义准确
+    assert _mask_inline_non_prose_in_block(inline_code_nit, set()) == "数据丢失，输入  \x01  会触发错误"
+    assert classify_finding_heuristic("数据丢失，输入 `` `[nit]` `` 会触发错误", "blocked") == "blocking_substantive"
+    assert classify_finding_heuristic("数据丢失，标记 `非阻断` 与 `minor` 会触发解析错误", "blocked") == "blocking_substantive"
+    assert classify_finding_heuristic("数据丢失，字段 `nit`: 未做边界校验", "blocked") == "blocking_substantive"
+    assert classify_finding_heuristic("`[nit]` 导致服务崩溃", "blocked") == "blocking_substantive"
+    assert classify_finding_heuristic("**`[nit]`** 导致服务崩溃", "blocked") == "blocking_substantive"
+    assert classify_finding_heuristic("[P1] `[nit]` 导致服务崩溃", "blocked") == "blocking_substantive"
+    assert classify_finding_heuristic("数据丢失 ``未闭合 [nit] 仅样式建议", "blocked") == "non_blocking_or_nit"
+    assert classify_finding_heuristic("数据丢失 \\`[nit]` 仅样式建议", "blocked") == "non_blocking_or_nit"
+
+    # 6) 端到端统计验证：全部 4 项 Important 反例在 BLOCK -> PASS 统计口径中精确分流
+    runs_dir = tmp_path / "runs"
+    runs_dir.mkdir()
+    _write_run(
+        runs_dir,
+        "p1212-r1-block",
+        pr_number=1212,
+        head_sha="a" * 40,
+        registered_at_ns=100,
+        attempt=1,
+        verdict="BLOCK",
+        receipts={
+            "claude-opus-5-5": {
+                "run_id": "run-p1212-r1-block",
+                "status": "completed",
+                "model": "claude-opus-5-5",
+                "result": {
+                    "status": "blocked",
+                    "findings": [
+                        lead_def_p1,
+                        lead_def_nit,
+                        link_colon,
+                        cross_para_unclosed_link,
+                        inline_code_nit,
+                    ],
+                },
+            }
+        },
+    )
+    _write_run(
+        runs_dir,
+        "p1212-r2-pass",
+        pr_number=1212,
+        head_sha="b" * 40,
+        registered_at_ns=200,
+        attempt=2,
+        verdict="PASS",
+    )
+    metrics = analyze_review_runs(runs_dir)
+    assert metrics.corrupted_files == ()
+    assert metrics.finding_heuristic_categories == {
+        "blocking_substantive": 3,
+        "non_blocking_or_nit": 2,
+    }
+    assert metrics.subsequent_head_pass_total_block_findings == 3
+    assert metrics.subsequent_head_pass_inferred_fixed == 3
     assert metrics.subsequent_head_pass_undeterminable_findings == 0
