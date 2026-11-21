@@ -656,6 +656,8 @@ pub(super) struct Stager {
     nodes: std::collections::BTreeMap<[u8; 32], Node>,
     /// staging 内部引用了一个本代未生成的节点（只可能是实现缺陷）：记录后由 `stage_complete` 拒绝。
     missing_ref: Option<[u8; 32]>,
+    tracking_depth: usize,
+    inserted_log: Vec<[u8; 32]>,
 }
 
 impl Stager {
@@ -680,6 +682,8 @@ impl Stager {
             index,
             nodes: std::collections::BTreeMap::new(),
             missing_ref: None,
+            tracking_depth: 0,
+            inserted_log: Vec::new(),
         })
     }
 
@@ -692,10 +696,19 @@ impl Stager {
         &self.params
     }
 
+    fn insert_node(&mut self, id: [u8; 32], node: Node) {
+        if !self.nodes.contains_key(&id) {
+            self.nodes.insert(id, node);
+            if self.tracking_depth > 0 {
+                self.inserted_log.push(id);
+            }
+        }
+    }
+
     fn leaf(&mut self, bytes: Vec<u8>) -> Child {
         let id = node_id(KIND_LEAF, &bytes);
         if !self.nodes.contains_key(&id) {
-            self.nodes.insert(
+            self.insert_node(
                 id,
                 Node {
                     kind: KIND_LEAF,
@@ -739,7 +752,7 @@ impl Stager {
         }
         let id = node_id(KIND_SEQ, &payload);
         if !self.nodes.contains_key(&id) {
-            self.nodes.insert(
+            self.insert_node(
                 id,
                 Node {
                     kind: KIND_SEQ,
@@ -824,18 +837,40 @@ impl Stager {
         inner: Value,
         target: &[u8],
     ) -> Result<Option<Child>, String> {
-        let snapshot = self.nodes.clone();
-        let mut children = Vec::with_capacity(3);
-        children.push(Child::Lit(b"\"".to_vec()));
-        children.push(self.intern(&inner, true)?);
-        children.push(Child::Lit(b"\"".to_vec()));
-        let candidate = self.seq(children);
-        let expanded = self.expand_staged(&candidate)?;
-        if expanded == target {
-            Ok(Some(candidate))
-        } else {
-            self.nodes = snapshot;
-            Ok(None)
+        let mark = self.inserted_log.len();
+        let prev_missing = self.missing_ref;
+        self.tracking_depth += 1;
+        let attempt = (|| -> Result<Option<Child>, String> {
+            let mut children = Vec::with_capacity(3);
+            children.push(Child::Lit(b"\"".to_vec()));
+            children.push(self.intern(&inner, true)?);
+            children.push(Child::Lit(b"\"".to_vec()));
+            let candidate = self.seq(children);
+            let expanded = self.expand_staged(&candidate)?;
+            if expanded == target {
+                Ok(Some(candidate))
+            } else {
+                Ok(None)
+            }
+        })();
+        self.tracking_depth -= 1;
+        match attempt {
+            Ok(Some(candidate)) => {
+                if self.tracking_depth == 0 {
+                    self.inserted_log.clear();
+                }
+                Ok(Some(candidate))
+            }
+            other => {
+                for id in self.inserted_log.drain(mark..) {
+                    self.nodes.remove(&id);
+                }
+                self.missing_ref = prev_missing;
+                if self.tracking_depth == 0 {
+                    self.inserted_log.clear();
+                }
+                other
+            }
         }
     }
 
@@ -966,6 +1001,10 @@ fn push_escaped(out: &mut Vec<u8>, text: &str) {
 ///
 /// 不做「解析→宽松回写→猜回原件」：拆分的候选展开必须与目标字节逐字节相等，否则退回整段作叶。
 fn decomposable_json_text(text: &str) -> Option<Value> {
+    let trimmed = text.trim_start();
+    if !matches!(trimmed.as_bytes().first(), Some(b'{' | b'[')) {
+        return None;
+    }
     let parsed = v2::strict_json(text.as_bytes()).ok()?;
     match parsed {
         Value::Object(_) | Value::Array(_) => Some(parsed),
