@@ -120,6 +120,83 @@ pub(super) struct RawRefSpec {
     pub source_coord: String,
 }
 
+struct I64Buf {
+    bytes: [u8; 20],
+    start: usize,
+}
+impl I64Buf {
+    #[inline]
+    fn from_i64(value: i64) -> Self {
+        let neg = value < 0;
+        let mut mag = value.unsigned_abs();
+        let mut bytes = [0u8; 20];
+        let mut start = 20;
+        loop {
+            start -= 1;
+            bytes[start] = b'0' + (mag % 10) as u8;
+            mag /= 10;
+            if mag == 0 {
+                break;
+            }
+        }
+        if neg {
+            start -= 1;
+            bytes[start] = b'-';
+        }
+        Self { bytes, start }
+    }
+    #[inline]
+    fn from_usize(mut value: usize) -> Self {
+        let mut bytes = [0u8; 20];
+        let mut start = 20;
+        loop {
+            start -= 1;
+            bytes[start] = b'0' + (value % 10) as u8;
+            value /= 10;
+            if value == 0 {
+                break;
+            }
+        }
+        Self { bytes, start }
+    }
+    #[inline]
+    fn as_str(&self) -> &str {
+        std::str::from_utf8(&self.bytes[self.start..]).expect("decimal ASCII")
+    }
+}
+#[inline]
+fn borrowed_number(buf: &I64Buf) -> Result<sc::BorrowedNumberToken<'_>, ProducerError> {
+    sc::BorrowedNumberToken::parse(buf.as_str()).map_err(|error| ProducerError::Type {
+        what: "数字 token",
+        detail: error.to_string(),
+    })
+}
+
+#[derive(PartialEq, Eq)]
+struct PreparedRawKey {
+    source_index: usize,
+    revision: i64,
+    input_revision: String,
+    open: i64,
+    high: i64,
+    low: i64,
+    close: i64,
+}
+impl PreparedRawKey {
+    #[inline]
+    fn matches(&self, source_index: usize, revision: i64, input_revision: &str, bar: &Bar) -> bool {
+        self.source_index == source_index
+            && self.revision == revision
+            && self.open == bar.open
+            && self.high == bar.high
+            && self.low == bar.low
+            && self.close == bar.close
+            && self.input_revision == input_revision
+    }
+}
+
+type FractalHistoryKey = ([usize; 3], [i64; 6], usize);
+
 impl RawRefSpec {
     pub(super) fn from_event(
         event: newchan_rust::s_content::capture_allocation::audit_json::JsonView<'_>,
@@ -144,6 +221,39 @@ impl RawRefSpec {
                 .ok_or("StorageUnavailable：raw.seq 不是 i64")?,
             source_coord: text("source_coord")?,
         })
+    }
+
+    fn write_value(&self, store: &mut dyn NodeStore) -> Result<Built, ProducerError> {
+        use sc::ValueView as V;
+        let rev_buf = I64Buf::from_i64(self.revision);
+        let seq_buf = I64Buf::from_i64(self.seq);
+        let fields = [
+            ("identity_key", V::String(&self.identity_key)),
+            ("payload_hash", V::String(&self.payload_hash)),
+            ("receipt_id", V::String(&self.receipt_id)),
+            ("event_id", V::String(&self.event_id)),
+            ("input_revision", V::String(&self.input_revision)),
+            ("revision", V::String(rev_buf.as_str())),
+            ("seq", V::String(seq_buf.as_str())),
+            ("source_coord", V::String(&self.source_coord)),
+        ];
+        Ok(sc::write_value_view(store, V::Object(&fields))?)
+    }
+    fn write_shape_value(&self, store: &mut dyn NodeStore) -> Result<Built, ProducerError> {
+        use sc::ValueView as V;
+        let rev_buf = I64Buf::from_i64(self.revision);
+        let seq_buf = I64Buf::from_i64(self.seq);
+        let fields = [
+            ("identity_key", V::String(&self.identity_key)),
+            ("payload_hash", V::String(&self.payload_hash)),
+            ("receipt_id", V::String(&self.receipt_id)),
+            ("event_id", V::String(&self.event_id)),
+            ("input_revision", V::String(&self.input_revision)),
+            ("revision", V::Number(borrowed_number(&rev_buf)?)),
+            ("seq", V::Number(borrowed_number(&seq_buf)?)),
+            ("source_coord", V::String(&self.source_coord)),
+        ];
+        Ok(sc::write_value_view(store, V::Object(&fields))?)
     }
 
     /// 有界小对象（八字段全文本），不是巨大载荷。
@@ -639,7 +749,7 @@ pub(super) struct Cc004Producer {
     /// CC-006 旧生成态源引用数组 memo（数值叶）：与 `ref_arrays` 同源绑定、同坐标失效。
     shape_ref_arrays: ArrayCache,
     /// CC-007 后续历史 memo：按 `(参考集指纹, end)` **保留**（交错窗口互不驱逐）。
-    fractal_histories: HashMap<(String, usize), FractalHistory>,
+    fractal_histories: HashMap<FractalHistoryKey, FractalHistory>,
     /// CC-007 测量面计数（不参与判据）：新求值单元 / 续接复用单元 / 源修订失效单元。
     history_computed: usize,
     history_reused: usize,
@@ -655,7 +765,7 @@ pub(super) struct Cc004Producer {
     /// 当前 prepare 的独立见证，防止两份 raw 值在同一 source epoch 内交错消费。
     prepared_snapshot: Rc<()>,
     /// 上次准备的实际坐标和精确内容键；全 producer 仅一份，不按窗口重复存储。
-    prepared_raw_keys: Vec<(usize, String)>,
+    prepared_raw_keys: Vec<PreparedRawKey>,
     delta_binding: Option<crate::v3::audit_owner::RawAdvanceBinding>,
     delta_epoch: Option<u64>,
 }
@@ -824,10 +934,10 @@ impl Cc004Producer {
                 return Ok(false);
             }
         }
-        let built = sc::write_value(&mut *store, &spec.to_value())?;
+        let built = spec.write_value(&mut *store)?;
         // 同一份登记事实的第二种编码：CC-006 旧生成态（`revision`/`seq` 数值）。两叶同写同换，
         // 任一源版本变化都不得留下旧编码的叶。
-        let shape_built = sc::write_value(&mut *store, &spec.to_shape_value()?)?;
+        let shape_built = spec.write_shape_value(&mut *store)?;
         let changed = match self.sources.get(&coord) {
             Some((_, root)) => *root != built.digest,
             None => true,
@@ -993,10 +1103,7 @@ impl Cc004Producer {
         generation: i64,
         cut: &str,
     ) -> Result<Cc004Object, ProducerError> {
-        let fact_key = canonical_json(&json!([
-            CC004_STEP_KIND,
-            view.incoming.source_index.to_string()
-        ]));
+        let fact_key = format!("[\"{CC004_STEP_KIND}\",\"{}\"]", view.incoming.source_index);
         let payload_value = self.step_payload_value(store, view)?;
         let input_refs = self.source_refs_array(&mut *store, view.coords)?;
         let source_coords = self.coords_array(&mut *store, view.coords)?;
@@ -1019,17 +1126,13 @@ impl Cc004Producer {
         if view.evidence.is_none() && reasons.is_empty() {
             reasons.push("direction_not_yet_established");
         }
-        let key = CValue::Array(vec![
-            CValue::String(CC004_STEP_KIND.to_string()),
-            CValue::String(view.incoming.source_index.to_string()),
-        ]);
-        let request = self.request_value(
-            key,
+        object.request = Some(write_request_with_id(
+            &mut *store,
+            &object.fact_key,
             Some(&object.object_id),
             &reasons,
             &object.source_coords,
-        )?;
-        object.request = Some(sc::write_value(&mut *store, &request)?);
+        )?);
         Ok(object)
     }
 
@@ -1094,37 +1197,32 @@ impl Cc004Producer {
         };
         let identity = self.typed_identity(kind, &fact_key, &payload, &input_refs)?;
         let object_id = object_id_of(&identity);
-        let record_value = CValue::Object(vec![
-            ("object_id".to_string(), CValue::String(object_id.clone())),
-            ("object_revision".to_string(), number(OBJECT_REVISION)?),
-            ("kind".to_string(), CValue::String(kind.to_string())),
-            ("fact_key".to_string(), CValue::String(fact_key.clone())),
-            ("payload".to_string(), CValue::Edge(payload.digest)),
-            ("input_refs".to_string(), CValue::Edge(input_refs.digest)),
+        let rev_buf = I64Buf::from_i64(OBJECT_REVISION);
+        let gen_buf = I64Buf::from_i64(generation);
+        let rev_num = borrowed_number(&rev_buf)?;
+        let gen_num = borrowed_number(&gen_buf)?;
+        let record_fields = [
+            ("object_id", sc::ValueView::String(&object_id)),
+            ("object_revision", sc::ValueView::Number(rev_num)),
+            ("kind", sc::ValueView::String(kind)),
+            ("fact_key", sc::ValueView::String(&fact_key)),
+            ("payload", sc::ValueView::Edge(payload.digest)),
+            ("input_refs", sc::ValueView::Edge(input_refs.digest)),
+            ("source_coords", sc::ValueView::Edge(source_coords.digest)),
+            ("payload_json", sc::ValueView::Edge(payload_json.digest)),
             (
-                "source_coords".to_string(),
-                CValue::Edge(source_coords.digest),
+                "input_refs_json",
+                sc::ValueView::Edge(input_refs_json.digest),
             ),
             (
-                "payload_json".to_string(),
-                CValue::Edge(payload_json.digest),
+                "source_coords_json",
+                sc::ValueView::Edge(source_coords_json.digest),
             ),
-            (
-                "input_refs_json".to_string(),
-                CValue::Edge(input_refs_json.digest),
-            ),
-            (
-                "source_coords_json".to_string(),
-                CValue::Edge(source_coords_json.digest),
-            ),
-            ("first_known_generation".to_string(), number(generation)?),
-            (
-                "first_known_cut".to_string(),
-                CValue::String(cut.to_string()),
-            ),
-            ("published_generation".to_string(), number(generation)?),
-        ]);
-        let record = sc::write_value(&mut *store, &record_value)?;
+            ("first_known_generation", sc::ValueView::Number(gen_num)),
+            ("first_known_cut", sc::ValueView::String(cut)),
+            ("published_generation", sc::ValueView::Number(gen_num)),
+        ];
+        let record = sc::write_value_view(&mut *store, sc::ValueView::Object(&record_fields))?;
         Ok(TypedObject {
             object_id,
             identity,
@@ -1374,8 +1472,8 @@ impl Cc004Producer {
         sources: &CoordsRef,
     ) -> Result<Built, ProducerError> {
         let coords = self.coords_array(&mut *store, sources)?;
-        let request = self.request_value(key, None, reasons, &coords)?;
-        Ok(sc::write_value(&mut *store, &request)?)
+        let request_id = canonical_text(&key)?;
+        write_request_with_id(&mut *store, &request_id, None, reasons, &coords)
     }
 
     /// 构造 CC-054 知识状态对象与观察（供正式 S3 生成态接线）。
@@ -1437,7 +1535,7 @@ impl Cc004Producer {
                 ),
             ),
         ]);
-        let fact_key = canonical_json(&json!([CC054_KNOWLEDGE_KIND, "TB-02-A"]));
+        let fact_key = format!("[\"{CC054_KNOWLEDGE_KIND}\",\"TB-02-A\"]");
         let input_refs = self.source_refs_array(&mut *store, raw_coords)?;
         let source_coords = self.coords_array(&mut *store, raw_coords)?;
         let object = self.typed_object(
@@ -1451,12 +1549,13 @@ impl Cc004Producer {
             cut,
         )?;
         let mut observations: Vec<Built> = Vec::with_capacity(waiting_reasons.len());
+        let frontier_buf = I64Buf::from_i64(frontier);
+        let reason_views = ReasonViews(&waiting_reasons);
         for reason in &waiting_reasons {
-            let reason_views = ReasonViews(&waiting_reasons);
             observations.push(write_knowledge_observation(
                 store,
                 reason,
-                &frontier.to_string(),
+                frontier_buf.as_str(),
                 object.source_coords.digest,
                 &reason_views,
             )?);
@@ -1532,7 +1631,7 @@ impl Cc004Producer {
         let coords = coords_ref_from_slice(&[coord]);
         let input_refs = self.source_refs_array(&mut *store, &coords)?;
         let source_coords = self.coords_array(&mut *store, &coords)?;
-        let fact_key = canonical_json(&json!([CC007_DEVELOPMENT_BATCH_KIND, coord.to_string()]));
+        let fact_key = format!("[\"{CC007_DEVELOPMENT_BATCH_KIND}\",\"{coord}\"]");
         self.typed_object_built(
             store,
             CC007_DEVELOPMENT_BATCH_KIND,
@@ -1590,22 +1689,28 @@ impl Cc004Producer {
                 Some((spec, _)) => (spec.revision, spec.input_revision.as_str()),
                 None => return Err(ProducerError::MissingSource(coord)),
             };
-            let key = fractal_unit_key(coord, revision, input_revision, bar)?;
             if first_difference.is_none() {
                 match self.prepared_raw_keys.get(index) {
-                    Some((old_coord, old_key))
-                        if *old_coord == bar.source_index && old_key == &key => {}
+                    Some(old) if old.matches(bar.source_index, revision, input_revision, bar) => {}
                     previous => {
                         // 插入/替换同时取旧新坐标较小值，坐标稀疏时也不漏失效窗口。
                         first_difference =
-                            Some(previous.map_or(coord, |(old, _)| coord.min(*old as i64)));
+                            Some(previous.map_or(coord, |old| coord.min(old.source_index as i64)));
                     }
                 }
             }
-            keys.push((bar.source_index, key));
+            keys.push(PreparedRawKey {
+                source_index: bar.source_index,
+                revision,
+                input_revision: input_revision.to_string(),
+                open: bar.open,
+                high: bar.high,
+                low: bar.low,
+                close: bar.close,
+            });
         }
         if first_difference.is_none() && self.prepared_raw_keys.len() > raw_bars.len() {
-            first_difference = Some(self.prepared_raw_keys[raw_bars.len()].0 as i64);
+            first_difference = Some(self.prepared_raw_keys[raw_bars.len()].source_index as i64);
         }
         if let Some(changed) = first_difference {
             changed_floor = Some(changed_floor.map_or(changed, |floor| floor.min(changed)));
@@ -1656,14 +1761,17 @@ impl Cc004Producer {
                 what: "冷来源",
                 detail,
             })?;
-            let key = fractal_unit_key(
-                row.bar.source_index as i64,
-                spec.revision,
-                &spec.input_revision,
-                &row.bar,
-            )?;
+            let key = PreparedRawKey {
+                source_index: row.bar.source_index,
+                revision: spec.revision,
+                input_revision: spec.input_revision.clone(),
+                open: row.bar.open,
+                high: row.bar.high,
+                low: row.bar.low,
+                close: row.bar.close,
+            };
             self.bind_source(store, row.bar.source_index as i64, spec)?;
-            keys.push((row.bar.source_index, key));
+            keys.push(key);
         }
         self.prepared_raw_keys = keys;
         self.unprepared_floor = None;
@@ -1773,10 +1881,15 @@ impl Cc004Producer {
                 .sources
                 .get(&coord)
                 .ok_or(ProducerError::MissingSource(coord))?;
-            keys.push((
-                bar.source_index,
-                fractal_unit_key(coord, spec.revision, &spec.input_revision, bar)?,
-            ));
+            keys.push(PreparedRawKey {
+                source_index: bar.source_index,
+                revision: spec.revision,
+                input_revision: spec.input_revision.clone(),
+                open: bar.open,
+                high: bar.high,
+                low: bar.low,
+                close: bar.close,
+            });
         }
         if let Some(floor) = self.unprepared_floor {
             for history in self.fractal_histories.values_mut() {
@@ -2015,25 +2128,51 @@ impl Cc004Producer {
         })?;
         // 严格递增序与 source 存在已由 `prepare_raw_history` 一次核完（不在此逐窗口重扫）。
         // 六个参考价（三组 × 高/低；名字/轴与全量配方逐字相同）。
+        let ref_specs = [
+            ("left.high", left.bar.source_index, "high", left.bar.high),
+            ("left.low", left.bar.source_index, "low", left.bar.low),
+            ("mid.high", mid.bar.source_index, "high", mid.bar.high),
+            ("mid.low", mid.bar.source_index, "low", mid.bar.low),
+            ("right.high", right.bar.source_index, "high", right.bar.high),
+            ("right.low", right.bar.source_index, "low", right.bar.low),
+        ];
         let mut references: Vec<CValue> = Vec::with_capacity(6);
-        let mut reference_meta: Vec<(String, i64)> = Vec::with_capacity(6);
-        for (label, view) in [("left", left), ("mid", mid), ("right", right)] {
-            for (axis, price) in [("high", view.bar.high), ("low", view.bar.low)] {
-                let name = format!("{label}.{axis}");
-                references.push(CValue::Object(vec![
-                    ("name".to_string(), CValue::String(name.clone())),
-                    (
-                        "source_coord".to_string(),
-                        CValue::String(view.bar.source_index.to_string()),
-                    ),
-                    ("axis".to_string(), CValue::String(axis.to_string())),
-                    ("value".to_string(), CValue::String(price.to_string())),
-                ]));
-                reference_meta.push((name, price));
-            }
+        for (name, source_index, axis, price) in ref_specs {
+            references.push(CValue::Object(vec![
+                ("name".to_string(), CValue::String(name.to_string())),
+                (
+                    "source_coord".to_string(),
+                    CValue::String(source_index.to_string()),
+                ),
+                ("axis".to_string(), CValue::String(axis.to_string())),
+                ("value".to_string(), CValue::String(price.to_string())),
+            ]));
         }
+        let reference_meta: [(&'static str, i64); 6] = [
+            ("left.high", left.bar.high),
+            ("left.low", left.bar.low),
+            ("mid.high", mid.bar.high),
+            ("mid.low", mid.bar.low),
+            ("right.high", right.bar.high),
+            ("right.low", right.bar.low),
+        ];
         let references_value = CValue::Array(references);
-        let refs_key = canonical_text(&references_value)?;
+        let history_key: FractalHistoryKey = (
+            [
+                left.bar.source_index,
+                mid.bar.source_index,
+                right.bar.source_index,
+            ],
+            [
+                left.bar.high,
+                left.bar.low,
+                mid.bar.high,
+                mid.bar.low,
+                right.bar.high,
+                right.bar.low,
+            ],
+            end,
+        );
         // 后续历史：坐标 > 右组末成员的全部原始 bar（升序表上做分区定位）。
         let tail_start = raw_bars.partition_point(|bar| bar.source_index <= end);
         let tail_len = raw_bars.len() - tail_start;
@@ -2049,7 +2188,7 @@ impl Cc004Producer {
             crate::v3::layout::Layout::Sorted => false,
             crate::v3::layout::Layout::Bounded1 => true,
         };
-        let cached = self.fractal_histories.remove(&(refs_key.clone(), end));
+        let cached = self.fractal_histories.remove(&history_key);
         // 截断不先落 split 前缀根：保留数与新尾在循环后一次 `sequence_rebuild_suffix`（#1488 S3）。
         let mut invalidated_from = None;
         let (previous, mut covered, mut union_tail, mut prefixes) = match cached {
@@ -2130,14 +2269,10 @@ impl Cc004Producer {
                 let built = sc::write_value(&mut *store, &value)?;
                 built
             };
-            let unit = CValue::Object(vec![
-                ("bar".to_string(), bar_value(bar)),
-                ("relations".to_string(), CValue::Edge(relations.digest)),
-            ]);
             let leaf = {
                 #[cfg(test)]
                 let _phase = tests::emission_phase("fractal_unit_write_value");
-                sc::write_value(&mut *store, &unit)?.digest
+                write_bar_unit(&mut *store, bar, relations.digest)?.digest
             };
             leaves.push(leaf);
             let coord_index = tail_start + appended_from + offset;
@@ -2192,7 +2327,7 @@ impl Cc004Producer {
         };
         let no_future = covered == 0;
         self.fractal_histories.insert(
-            (refs_key, end),
+            history_key,
             FractalHistory {
                 end,
                 tail_start,
@@ -2306,8 +2441,10 @@ impl Cc004Producer {
             ));
         }
         let payload_value = CValue::Object(payload_fields);
-        let window_text: Vec<String> = shape.window.iter().map(ToString::to_string).collect();
-        let fact_key = canonical_json(&json!([CC007_FRACTAL_KIND, window_text.clone()]));
+        let fact_key = format!(
+            "[\"{CC007_FRACTAL_KIND}\",[\"{}\",\"{}\",\"{}\"]]",
+            shape.window[0], shape.window[1], shape.window[2]
+        );
         // 同 kernel 的方向/封口证据递推完整 raw 前缀；右组 sources 加去重 tail
         // 恰为完整生效 raw（含稀疏坐标）。只有不可伪造的同次 parser 窗承载此命题。
         // 首窗仍在原位置走原 array 构造（含原 put）；成功后如 ArrayCache 一样仅 memo
@@ -2349,45 +2486,38 @@ impl Cc004Producer {
         } else {
             Vec::new()
         };
-        let slot_key = || {
-            CValue::Array(vec![
-                CValue::String(CC007_FRACTAL_KIND.to_string()),
-                CValue::Array(
-                    window_text
-                        .iter()
-                        .map(|coord| CValue::String(coord.clone()))
-                        .collect(),
-                ),
-            ])
-        };
         let mut requests: Vec<Built> = Vec::with_capacity(3);
         let label_coords = coords_ref_from_slice(&label_sources);
-        let mut slots = vec![
-            ("shape_description", Vec::new(), shape.sources.clone()),
-            (
-                "descriptive_labels",
-                vec!["no_settled_numeric_rule"],
-                label_coords,
-            ),
-        ];
+        let mut slots: Vec<(&'static str, &[&'static str], CoordsRef)> = Vec::with_capacity(3);
+        slots.push(("shape_description", &[], shape.sources.clone()));
+        slots.push((
+            "descriptive_labels",
+            &["no_settled_numeric_rule"],
+            label_coords,
+        ));
         // bounded-layout/1：后续发展请求只在尚无后续 bar 时作待决请求发出（来源＝基础来源）；
         // 有后续 bar 时已实现发展由单元批记录承载，不再挂请求。
         if !bounded || no_future {
             slots.push((
                 "subsequent_development",
-                request_reasons.clone(),
+                request_reasons.as_slice(),
                 all_sources.clone(),
             ));
         }
         for (label, reasons, sources) in slots {
-            let key = CValue::Array(vec![slot_key(), CValue::String(label.to_string())]);
+            let request_id = format!("[{},\"{label}\"]", object.fact_key);
             let coords = if shared.is_some() && label == "subsequent_development" {
                 object.source_coords.clone()
             } else {
                 self.coords_array(&mut *store, &sources)?
             };
-            let request = self.request_value(key, Some(&object.object_id), &reasons, &coords)?;
-            requests.push(sc::write_value(&mut *store, &request)?);
+            requests.push(write_request_with_id(
+                &mut *store,
+                &request_id,
+                Some(&object.object_id),
+                reasons,
+                &coords,
+            )?);
         }
         let mut knowledge_reasons = request_reasons.clone();
         knowledge_reasons.push("no_settled_numeric_rule");
@@ -2480,40 +2610,48 @@ impl Cc004Producer {
             };
             return Err(ProducerError::WindowNotClassified(reason));
         };
-        let comparisons_value = CValue::Array(
-            comparisons
-                .iter()
-                .map(|comparison| {
-                    CValue::Object(vec![
-                        (
-                            "axis".to_string(),
-                            CValue::String(comparison.axis.as_str().to_string()),
-                        ),
-                        (
-                            "pair".to_string(),
-                            CValue::String(comparison.pair.as_str().to_string()),
-                        ),
-                        (
-                            "prev".to_string(),
-                            CValue::String(comparison.prev.to_string()),
-                        ),
-                        (
-                            "cur".to_string(),
-                            CValue::String(comparison.cur.to_string()),
-                        ),
-                        ("strict_up".to_string(), CValue::Bool(comparison.strict_up)),
-                        ("held".to_string(), CValue::Bool(comparison.held)),
-                    ])
-                })
-                .collect(),
-        );
-        let comparisons = sc::write_value(&mut *store, &comparisons_value)?;
+        let comparisons = {
+            use sc::capture_allocation::audit_json::JsonView as J;
+            use sc::ValueView as V;
+            let bufs: [(I64Buf, I64Buf); 4] = std::array::from_fn(|i| {
+                (
+                    I64Buf::from_i64(comparisons[i].prev),
+                    I64Buf::from_i64(comparisons[i].cur),
+                )
+            });
+            let objs: [[(&str, V<'_>); 6]; 4] = std::array::from_fn(|i| {
+                let c = &comparisons[i];
+                [
+                    ("axis", V::String(c.axis.as_str())),
+                    ("pair", V::String(c.pair.as_str())),
+                    ("prev", V::String(bufs[i].0.as_str())),
+                    ("cur", V::String(bufs[i].1.as_str())),
+                    ("strict_up", V::Json(J::Bool(c.strict_up))),
+                    ("held", V::Json(J::Bool(c.held))),
+                ]
+            });
+            let elems = [
+                V::Object(&objs[0]),
+                V::Object(&objs[1]),
+                V::Object(&objs[2]),
+                V::Object(&objs[3]),
+            ];
+            sc::write_value_view(&mut *store, V::Array(&elems))?
+        };
         // 两组来源引用，同一次生成、同一份坐标集合与 dependency 计算，只换叶编码与 memo：
         // - `groups`（数值叶）：旧生成态，进十二字段身份、记录边与 `input_refs_json` 内部值；
         // - `wire_groups`（文本叶 + 字符串 merged_index）：公开 wire 的 `input_refs`（旧
         //   `project_input_refs` 投影结果），不参与身份。
-        let mut groups: Vec<CValue> = Vec::with_capacity(3);
-        let mut wire_groups: Vec<CValue> = Vec::with_capacity(3);
+        let mut group_meta: [(I64Buf, NodeDigest, NodeDigest, NodeDigest, NodeDigest); 3] =
+            std::array::from_fn(|_| {
+                (
+                    I64Buf::from_i64(0),
+                    [0u8; 32],
+                    [0u8; 32],
+                    [0u8; 32],
+                    [0u8; 32],
+                )
+            });
         // 三组来源并集 = 右组来源链（归纳嵌套前缀性；逐前缀对拍见测试）。
         let sources = group_sources_coords(right);
         for (offset, view) in [left, mid, right].iter().enumerate() {
@@ -2525,32 +2663,55 @@ impl Cc004Producer {
                 self.source_refs_array_in(&mut *store, &members, RefEncoding::ShapeInteger)?;
             let shape_dependency =
                 self.group_dependency_array(&mut *store, view, RefEncoding::ShapeInteger)?;
-            groups.push(CValue::Object(vec![
-                ("merged_index".to_string(), number(index)?),
-                ("raw_refs".to_string(), CValue::Edge(shape_raw.digest)),
-                (
-                    "dependency_refs".to_string(),
-                    CValue::Edge(shape_dependency.digest),
-                ),
-            ]));
             let wire_raw =
                 self.source_refs_array_in(&mut *store, &members, RefEncoding::WireText)?;
             let wire_dependency =
                 self.group_dependency_array(&mut *store, view, RefEncoding::WireText)?;
-            wire_groups.push(CValue::Object(vec![
-                (
-                    "merged_index".to_string(),
-                    CValue::String(index.to_string()),
-                ),
-                ("raw_refs".to_string(), CValue::Edge(wire_raw.digest)),
-                (
-                    "dependency_refs".to_string(),
-                    CValue::Edge(wire_dependency.digest),
-                ),
-            ]));
+            group_meta[offset] = (
+                I64Buf::from_i64(index),
+                shape_raw.digest,
+                shape_dependency.digest,
+                wire_raw.digest,
+                wire_dependency.digest,
+            );
         }
-        let input_refs = sc::write_value(&mut *store, &CValue::Array(groups))?;
-        let wire_input_refs = sc::write_value(&mut *store, &CValue::Array(wire_groups))?;
+        let input_refs = {
+            use sc::ValueView as V;
+            let nums = [
+                borrowed_number(&group_meta[0].0)?,
+                borrowed_number(&group_meta[1].0)?,
+                borrowed_number(&group_meta[2].0)?,
+            ];
+            let objs: [[(&str, V<'_>); 3]; 3] = std::array::from_fn(|i| {
+                [
+                    ("merged_index", V::Number(nums[i])),
+                    ("raw_refs", V::Edge(group_meta[i].1)),
+                    ("dependency_refs", V::Edge(group_meta[i].2)),
+                ]
+            });
+            let elems = [
+                V::Object(&objs[0]),
+                V::Object(&objs[1]),
+                V::Object(&objs[2]),
+            ];
+            sc::write_value_view(&mut *store, V::Array(&elems))?
+        };
+        let wire_input_refs = {
+            use sc::ValueView as V;
+            let objs: [[(&str, V<'_>); 3]; 3] = std::array::from_fn(|i| {
+                [
+                    ("merged_index", V::String(group_meta[i].0.as_str())),
+                    ("raw_refs", V::Edge(group_meta[i].3)),
+                    ("dependency_refs", V::Edge(group_meta[i].4)),
+                ]
+            });
+            let elems = [
+                V::Object(&objs[0]),
+                V::Object(&objs[1]),
+                V::Object(&objs[2]),
+            ];
+            sc::write_value_view(&mut *store, V::Array(&elems))?
+        };
         let input_refs_json = Built {
             digest: put_json_text_node(&mut *store, &input_refs.digest)?,
             kind: Kind::JsonText,
@@ -2562,87 +2723,81 @@ impl Cc004Producer {
             kind: Kind::JsonText,
             extent: None,
         };
-        let identity = self.shape_identity(ShapeIdentity {
+        let w_bufs = window.map(I64Buf::from_usize);
+        let h_bufs = [left.bar.high, mid.bar.high, right.bar.high].map(I64Buf::from_i64);
+        let l_bufs = [left.bar.low, mid.bar.low, right.bar.low].map(I64Buf::from_i64);
+        let identity = self.shape_identity_borrowed(ShapeIdentityView {
             branch: branch.as_str(),
             dir_ab: dir_str(dir_ab),
             dir_bc: dir_str(dir_bc),
-            window: window.map(|coord| coord.to_string()),
-            highs: [left.bar.high, mid.bar.high, right.bar.high].map(|price| price.to_string()),
-            lows: [left.bar.low, mid.bar.low, right.bar.low].map(|price| price.to_string()),
+            window: [w_bufs[0].as_str(), w_bufs[1].as_str(), w_bufs[2].as_str()],
+            highs: [h_bufs[0].as_str(), h_bufs[1].as_str(), h_bufs[2].as_str()],
+            lows: [l_bufs[0].as_str(), l_bufs[1].as_str(), l_bufs[2].as_str()],
             comparisons: &comparisons,
             input_refs: &input_refs,
         })?;
         let object_id = object_id_of(&identity);
-        let record_value = CValue::Object(vec![
-            ("object_id".to_string(), CValue::String(object_id.clone())),
-            ("object_revision".to_string(), number(OBJECT_REVISION)?),
+        let w0 = i64::try_from(window[0])
+            .map_err(|_| ProducerError::Overflow(format!("源坐标 {} 超出 i64", window[0])))?;
+        let w1 = i64::try_from(window[1])
+            .map_err(|_| ProducerError::Overflow(format!("源坐标 {} 超出 i64", window[1])))?;
+        let w2 = i64::try_from(window[2])
+            .map_err(|_| ProducerError::Overflow(format!("源坐标 {} 超出 i64", window[2])))?;
+        let rev_buf = I64Buf::from_i64(OBJECT_REVISION);
+        let w0_buf = I64Buf::from_i64(w0);
+        let w1_buf = I64Buf::from_i64(w1);
+        let w2_buf = I64Buf::from_i64(w2);
+        let gen_buf = I64Buf::from_i64(generation);
+        let rev_num = borrowed_number(&rev_buf)?;
+        let gen_num = borrowed_number(&gen_buf)?;
+        let record_fields = [
+            ("object_id", sc::ValueView::String(&object_id)),
+            ("object_revision", sc::ValueView::Number(rev_num)),
+            ("kind", sc::ValueView::String(CC006_SHAPE_KIND)),
+            ("branch", sc::ValueView::String(branch.as_str())),
             (
-                "kind".to_string(),
-                CValue::String(CC006_SHAPE_KIND.to_string()),
-            ),
-            (
-                "branch".to_string(),
-                CValue::String(branch.as_str().to_string()),
-            ),
-            (
-                "window_start".to_string(),
-                number(i64::try_from(window[0]).map_err(|_| {
-                    ProducerError::Overflow(format!("源坐标 {} 超出 i64", window[0]))
-                })?)?,
-            ),
-            (
-                "window_mid".to_string(),
-                number(i64::try_from(window[1]).map_err(|_| {
-                    ProducerError::Overflow(format!("源坐标 {} 超出 i64", window[1]))
-                })?)?,
-            ),
-            (
-                "window_end".to_string(),
-                number(i64::try_from(window[2]).map_err(|_| {
-                    ProducerError::Overflow(format!("源坐标 {} 超出 i64", window[2]))
-                })?)?,
+                "window_start",
+                sc::ValueView::Number(borrowed_number(&w0_buf)?),
             ),
             (
-                "dir_ab".to_string(),
-                CValue::String(dir_str(dir_ab).to_string()),
+                "window_mid",
+                sc::ValueView::Number(borrowed_number(&w1_buf)?),
             ),
             (
-                "dir_bc".to_string(),
-                CValue::String(dir_str(dir_bc).to_string()),
+                "window_end",
+                sc::ValueView::Number(borrowed_number(&w2_buf)?),
             ),
-            ("comparisons".to_string(), CValue::Edge(comparisons.digest)),
-            ("input_refs".to_string(), CValue::Edge(input_refs.digest)),
+            ("dir_ab", sc::ValueView::String(dir_str(dir_ab))),
+            ("dir_bc", sc::ValueView::String(dir_str(dir_bc))),
+            ("comparisons", sc::ValueView::Edge(comparisons.digest)),
+            ("input_refs", sc::ValueView::Edge(input_refs.digest)),
+            ("source_coords", sc::ValueView::Edge(source_coords.digest)),
             (
-                "source_coords".to_string(),
-                CValue::Edge(source_coords.digest),
+                "input_refs_json",
+                sc::ValueView::Edge(input_refs_json.digest),
             ),
             (
-                "input_refs_json".to_string(),
-                CValue::Edge(input_refs_json.digest),
+                "source_coords_json",
+                sc::ValueView::Edge(source_coords_json.digest),
             ),
-            (
-                "source_coords_json".to_string(),
-                CValue::Edge(source_coords_json.digest),
-            ),
-            ("first_known_generation".to_string(), number(generation)?),
-            (
-                "first_known_cut".to_string(),
-                CValue::String(cut.to_string()),
-            ),
-            ("published_generation".to_string(), number(generation)?),
-        ]);
-        let record = sc::write_value(&mut *store, &record_value)?;
-        let key = CValue::Array(vec![
-            CValue::String(CC006_SHAPE_KIND.to_string()),
-            CValue::Array(
-                window
-                    .iter()
-                    .map(|coord| CValue::String(coord.to_string()))
-                    .collect(),
-            ),
-        ]);
-        let request = self.request_value(key, Some(&object_id), &[], &source_coords)?;
-        let request = sc::write_value(&mut *store, &request)?;
+            ("first_known_generation", sc::ValueView::Number(gen_num)),
+            ("first_known_cut", sc::ValueView::String(cut)),
+            ("published_generation", sc::ValueView::Number(gen_num)),
+        ];
+        let record = sc::write_value_view(&mut *store, sc::ValueView::Object(&record_fields))?;
+        let request_id = format!(
+            "[\"{CC006_SHAPE_KIND}\",[\"{}\",\"{}\",\"{}\"]]",
+            w_bufs[0].as_str(),
+            w_bufs[1].as_str(),
+            w_bufs[2].as_str()
+        );
+        let request = write_request_with_id(
+            &mut *store,
+            &request_id,
+            Some(&object_id),
+            &[],
+            &source_coords,
+        )?;
         Ok(Cc006Object {
             object_id,
             identity,
@@ -2721,7 +2876,7 @@ impl Cc004Producer {
         let reasons = group_reasons(view);
         // 来源集合与全量配方 `group_sources` 同值：共享链拼接，不展开证据前缀。
         let sources = group_sources_coords(view);
-        let fact_key = canonical_json(&json!([CC005_GROUP_KIND, anchor.to_string()]));
+        let fact_key = format!("[\"{CC005_GROUP_KIND}\",\"{anchor}\"]");
         let payload_value = self.group_payload_value(store, index, view, &reasons)?;
         let input_refs = self.source_refs_array(&mut *store, &sources)?;
         let source_coords = self.coords_array(&mut *store, &sources)?;
@@ -2735,17 +2890,13 @@ impl Cc004Producer {
             generation,
             cut,
         )?;
-        let key = CValue::Array(vec![
-            CValue::String(CC005_GROUP_KIND.to_string()),
-            CValue::String(anchor.to_string()),
-        ]);
-        let request = self.request_value(
-            key,
+        object.request = Some(write_request_with_id(
+            &mut *store,
+            &object.fact_key,
             Some(&object.object_id),
             &reasons,
             &object.source_coords,
-        )?;
-        object.request = Some(sc::write_value(&mut *store, &request)?);
+        )?);
         Ok(object)
     }
 
@@ -3164,9 +3315,9 @@ fn put_array_node(
     count: u64,
     seq_root: &NodeDigest,
 ) -> Result<NodeDigest, CodecError> {
-    let mut body = Vec::with_capacity(40);
-    body.extend_from_slice(&sc::checked_frame_len(count)?);
-    body.extend_from_slice(seq_root);
+    let mut body = [0u8; 40];
+    body[..8].copy_from_slice(&sc::checked_frame_len(count)?);
+    body[8..].copy_from_slice(seq_root);
     let digest = sc::frame(sc::tag::ARRAY, &body);
     store.put(digest, sc::tag::ARRAY, &body)?;
     Ok(digest)
@@ -3262,7 +3413,8 @@ fn coord_text_root(
     if let Some(root) = memo.get(&coord) {
         return Ok(*root);
     }
-    let built = sc::write_value(&mut *store, &CValue::String(coord.to_string()))?;
+    let buf = I64Buf::from_i64(coord);
+    let built = sc::write_value_view(&mut *store, sc::ValueView::String(buf.as_str()))?;
     memo.insert(coord, built.digest);
     Ok(built.digest)
 }
@@ -3330,6 +3482,90 @@ impl sc::capture_allocation::audit_json::JsonArray for ReasonViews<'_> {
             .map(|reason| sc::capture_allocation::audit_json::JsonView::String(reason))
     }
 }
+fn write_request_with_id(
+    store: &mut dyn NodeStore,
+    request_id: &str,
+    subject_id: Option<&str>,
+    reasons: &[&'static str],
+    source_coords: &Built,
+) -> Result<Built, ProducerError> {
+    use sc::capture_allocation::audit_json::JsonView as J;
+    use sc::ValueView as V;
+    let insufficient = reasons.iter().any(|reason| {
+        matches!(
+            *reason,
+            "fewer_than_three_merged_bars" | "no_subsequent_bar" | "direction_not_yet_established"
+        )
+    });
+    let axes = [
+        (
+            "input_quality",
+            V::String(if insufficient {
+                "INSUFFICIENT"
+            } else {
+                "SUFFICIENT"
+            }),
+        ),
+        (
+            "applicability",
+            V::String(if reasons.is_empty() {
+                "IN_DOMAIN"
+            } else {
+                "DOMAIN_PROOF_MISSING"
+            }),
+        ),
+        (
+            "computation",
+            V::String(if reasons.is_empty() {
+                "COMPLETE"
+            } else {
+                "INCOMPLETE"
+            }),
+        ),
+        ("validity", V::String("CURRENT")),
+    ];
+    let reason_views = ReasonViews(reasons);
+    let fields = [
+        ("request_id", V::String(request_id)),
+        (
+            "subject_id",
+            match subject_id {
+                Some(id) => V::String(id),
+                None => V::Json(J::Null),
+            },
+        ),
+        ("axes", V::Object(&axes)),
+        ("reasons", V::Json(J::BorrowedArray(&reason_views))),
+        ("source_coords", V::Edge(source_coords.digest)),
+    ];
+    Ok(sc::write_value_view(store, V::Object(&fields))?)
+}
+
+fn write_bar_unit(
+    store: &mut dyn NodeStore,
+    bar: &Bar,
+    relations_digest: NodeDigest,
+) -> Result<Built, ProducerError> {
+    use sc::ValueView as V;
+    let sc_buf = I64Buf::from_usize(bar.source_index);
+    let o_buf = I64Buf::from_i64(bar.open);
+    let h_buf = I64Buf::from_i64(bar.high);
+    let l_buf = I64Buf::from_i64(bar.low);
+    let c_buf = I64Buf::from_i64(bar.close);
+    let bar_fields = [
+        ("source_coord", V::String(sc_buf.as_str())),
+        ("open", V::String(o_buf.as_str())),
+        ("high", V::String(h_buf.as_str())),
+        ("low", V::String(l_buf.as_str())),
+        ("close", V::String(c_buf.as_str())),
+    ];
+    let unit_fields = [
+        ("bar", V::Object(&bar_fields)),
+        ("relations", V::Edge(relations_digest)),
+    ];
+    Ok(sc::write_value_view(store, V::Object(&unit_fields))?)
+}
+
 fn write_knowledge_observation(
     store: &mut dyn NodeStore,
     reason: &str,
@@ -3439,7 +3675,7 @@ fn fractal_unit_key(
 }
 
 /// 一根后续 bar 的 4 轴 × 6 参考价 = 24 个比较单元（顺序与全量入口相同）。
-fn fractal_relations(bar: &Bar, references: &[(String, i64)]) -> Vec<CValue> {
+fn fractal_relations<S: AsRef<str>>(bar: &Bar, references: &[(S, i64)]) -> Vec<CValue> {
     let mut relations: Vec<CValue> = Vec::with_capacity(24);
     for (axis, price) in [
         ("open", bar.open),
@@ -3451,7 +3687,10 @@ fn fractal_relations(bar: &Bar, references: &[(String, i64)]) -> Vec<CValue> {
             relations.push(CValue::Object(vec![
                 ("axis".to_string(), CValue::String(axis.to_string())),
                 ("value".to_string(), CValue::String(price.to_string())),
-                ("reference".to_string(), CValue::String(name.clone())),
+                (
+                    "reference".to_string(),
+                    CValue::String(name.as_ref().to_string()),
+                ),
                 (
                     "reference_value".to_string(),
                     CValue::String(target.to_string()),
