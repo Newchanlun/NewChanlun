@@ -1,0 +1,377 @@
+{
+  "attributions": [
+    {
+      "attribution_scopes": [
+        "TB-03"
+      ],
+      "sources": [
+        "https://github.com/Newchanlun/NewChanlun/issues/1394",
+        "https://github.com/Newchanlun/NewChanlun/issues/1481"
+      ],
+      "ticket": 1481
+    },
+    {
+      "attribution_scopes": [
+        "TB-02",
+        "TB-03"
+      ],
+      "sources": [
+        "https://github.com/Newchanlun/NewChanlun/issues/1419",
+        "https://github.com/Newchanlun/NewChanlun/issues/1481",
+        "https://github.com/Newchanlun/NewChanlun/issues/1488"
+      ],
+      "ticket": 1488
+    },
+    {
+      "attribution_scopes": [
+        "TB-02",
+        "TB-03"
+      ],
+      "sources": [
+        "https://github.com/Newchanlun/NewChanlun/issues/1481",
+        "https://github.com/Newchanlun/NewChanlun/issues/1488",
+        "https://github.com/Newchanlun/NewChanlun/issues/1491"
+      ],
+      "ticket": 1491
+    },
+    {
+      "attribution_scopes": [
+        "TB-02"
+      ],
+      "sources": [
+        "https://github.com/Newchanlun/NewChanlun/issues/1493",
+        "https://github.com/Newchanlun/NewChanlun/issues/1495"
+      ],
+      "ticket": 1495
+    },
+    {
+      "attribution_scopes": [
+        "TB-10"
+      ],
+      "sources": [
+        "https://github.com/Newchanlun/NewChanlun/issues/1368",
+        "https://github.com/Newchanlun/NewChanlun/issues/1576"
+      ],
+      "ticket": 1576
+    },
+    {
+      "attribution_scopes": [
+        "TB-02"
+      ],
+      "sources": [
+        "https://github.com/Newchanlun/NewChanlun/issues/1493",
+        "https://github.com/Newchanlun/NewChanlun/issues/1581"
+      ],
+      "ticket": 1581
+    },
+    {
+      "attribution_scopes": [
+        "TB-02"
+      ],
+      "sources": [
+        "https://github.com/Newchanlun/NewChanlun/issues/1581",
+        "https://github.com/Newchanlun/NewChanlun/issues/1585"
+      ],
+      "ticket": 1585
+    },
+    {
+      "attribution_scopes": [
+        "GRAPH"
+      ],
+      "sources": [
+        "https://github.com/Newchanlun/NewChanlun/issues/1586",
+        "https://github.com/Newchanlun/NewChanlun/issues/1601"
+      ],
+      "ticket": 1601
+    },
+    {
+      "attribution_scopes": [
+        "GRAPH"
+      ],
+      "sources": [
+        "https://github.com/Newchanlun/NewChanlun/issues/1586",
+        "https://github.com/Newchanlun/NewChanlun/issues/1602"
+      ],
+      "ticket": 1602
+    },
+    {
+      "attribution_scopes": [
+        "TB-02"
+      ],
+      "sources": [
+        "https://github.com/Newchanlun/NewChanlun/issues/1360",
+        "https://github.com/Newchanlun/NewChanlun/issues/1603"
+      ],
+      "ticket": 1603
+    },
+    {
+      "attribution_scopes": [
+        "TB-02"
+      ],
+      "sources": [
+        "https://github.com/Newchanlun/NewChanlun/issues/1360",
+        "https://github.com/Newchanlun/NewChanlun/issues/1604"
+      ],
+      "ticket": 1604
+    },
+    {
+      "attribution_scopes": [
+        "GRAPH"
+      ],
+      "sources": [
+        "https://github.com/Newchanlun/NewChanlun/issues/1586",
+        "https://github.com/Newchanlun/NewChanlun/issues/1605"
+      ],
+      "ticket": 1605
+    },
+    {
+      "attribution_scopes": [
+        "GRAPH"
+      ],
+      "sources": [
+        "https://github.com/Newchanlun/NewChanlun/issues/1586",
+        "https://github.com/Newchanlun/NewChanlun/issues/1606"
+      ],
+      "ticket": 1606
+    },
+    {
+      "attribution_scopes": [
+        "TB-03"
+      ],
+      "sources": [
+        "https://github.com/Newchanlun/NewChanlun/issues/1394",
+        "https://github.com/Newchanlun/NewChanlun/issues/1608",
+        "https://github.com/Newchanlun/NewChanlun/pull/1632"
+      ],
+      "ticket": 1608
+    },
+    {
+      "attribution_scopes": [
+        "TB-03"
+      ],
+      "sources": [
+        "https://github.com/Newchanlun/NewChanlun/issues/1406",
+        "https://github.com/Newchanlun/NewChanlun/issues/1620"
+      ],
+      "ticket": 1620
+    },
+    {
+      "attribution_scopes": [
+        "TB-03"
+      ],
+      "sources": [
+        "https://github.com/Newchanlun/NewChanlun/issues/1406",
+        "https://github.com/Newchanlun/NewChanlun/issues/1621"
+      ],
+      "ticket": 1621
+    },
+    {
+      "attribution_scopes": [
+        "TB-03"
+      ],
+      "sources": [
+        "https://github.com/Newchanlun/NewChanlun/issues/1406",
+        "https://github.com/Newchanlun/NewChanlun/issues/1622"
+      ],
+      "ticket": 1622
+    },
+    {
+      "attribution_scopes": [
+        "TB-02"
+      ],
+      "sources": [
+        "https://github.com/Newchanlun/NewChanlun/issues/1600",
+        "https://github.com/Newchanlun/NewChanlun/issues/1626"
+      ],
+      "ticket": 1626
+    },
+    {
+      "attribution_scopes": [
+        "TB-07"
+      ],
+      "sources": [
+        "https://github.com/Newchanlun/NewChanlun/issues/1366",
+        "https://github.com/Newchanlun/NewChanlun/issues/1597",
+        "https://github.com/Newchanlun/NewChanlun/issues/1629"
+      ],
+      "ticket": 1629
+    },
+    {
+      "attribution_scopes": [
+        "TB-07"
+      ],
+      "sources": [
+        "https://github.com/Newchanlun/NewChanlun/issues/1366",
+        "https://github.com/Newchanlun/NewChanlun/issues/1597",
+        "https://github.com/Newchanlun/NewChanlun/issues/1630"
+      ],
+      "ticket": 1630
+    },
+    {
+      "attribution_scopes": [
+        "TB-02",
+        "TB-03"
+      ],
+      "sources": [
+        "https://github.com/Newchanlun/NewChanlun/issues/1481",
+        "https://github.com/Newchanlun/NewChanlun/issues/1488",
+        "https://github.com/Newchanlun/NewChanlun/issues/1640"
+      ],
+      "ticket": 1640
+    },
+    {
+      "attribution_scopes": [
+        "TB-03"
+      ],
+      "sources": [
+        "https://github.com/Newchanlun/NewChanlun/issues/1481",
+        "https://github.com/Newchanlun/NewChanlun/issues/1644",
+        "https://github.com/Newchanlun/NewChanlun/issues/1647"
+      ],
+      "ticket": 1647
+    },
+    {
+      "attribution_scopes": [
+        "TB-02",
+        "TB-10"
+      ],
+      "sources": [
+        "https://github.com/Newchanlun/NewChanlun/issues/1576",
+        "https://github.com/Newchanlun/NewChanlun/issues/1581",
+        "https://github.com/Newchanlun/NewChanlun/issues/1603",
+        "https://github.com/Newchanlun/NewChanlun/issues/1653"
+      ],
+      "ticket": 1653
+    },
+    {
+      "attribution_scopes": [
+        "TB-01",
+        "TB-02"
+      ],
+      "sources": [
+        "https://github.com/Newchanlun/NewChanlun/issues/1527",
+        "https://github.com/Newchanlun/NewChanlun/issues/1567",
+        "https://github.com/Newchanlun/NewChanlun/issues/1657"
+      ],
+      "ticket": 1657
+    },
+    {
+      "attribution_scopes": [
+        "TB-01",
+        "TB-02"
+      ],
+      "sources": [
+        "https://github.com/Newchanlun/NewChanlun/issues/1527",
+        "https://github.com/Newchanlun/NewChanlun/issues/1568",
+        "https://github.com/Newchanlun/NewChanlun/issues/1666",
+        "https://github.com/Newchanlun/NewChanlun/pull/1656"
+      ],
+      "ticket": 1666
+    },
+    {
+      "attribution_scopes": [
+        "GRAPH"
+      ],
+      "sources": [
+        "https://github.com/Newchanlun/NewChanlun/issues/1547",
+        "https://github.com/Newchanlun/NewChanlun/issues/1678"
+      ],
+      "ticket": 1678
+    },
+    {
+      "attribution_scopes": [
+        "GRAPH"
+      ],
+      "sources": [
+        "https://github.com/Newchanlun/NewChanlun/issues/1340#issuecomment-6403536453",
+        "https://github.com/Newchanlun/NewChanlun/issues/1715"
+      ],
+      "ticket": 1715
+    },
+    {
+      "attribution_scopes": [
+        "GRAPH"
+      ],
+      "sources": [
+        "https://github.com/Newchanlun/NewChanlun/issues/1340#issuecomment-6403536453",
+        "https://github.com/Newchanlun/NewChanlun/issues/1716"
+      ],
+      "ticket": 1716
+    },
+    {
+      "attribution_scopes": [
+        "GRAPH"
+      ],
+      "sources": [
+        "https://github.com/Newchanlun/NewChanlun/issues/1340#issuecomment-6403536453",
+        "https://github.com/Newchanlun/NewChanlun/issues/1717"
+      ],
+      "ticket": 1717
+    },
+    {
+      "attribution_scopes": [
+        "GRAPH"
+      ],
+      "sources": [
+        "https://github.com/Newchanlun/NewChanlun/issues/1340#issuecomment-6403536453",
+        "https://github.com/Newchanlun/NewChanlun/issues/1718"
+      ],
+      "ticket": 1718
+    },
+    {
+      "attribution_scopes": [
+        "GRAPH"
+      ],
+      "sources": [
+        "https://github.com/Newchanlun/NewChanlun/issues/1340#issuecomment-6403536453",
+        "https://github.com/Newchanlun/NewChanlun/issues/1719"
+      ],
+      "ticket": 1719
+    },
+    {
+      "attribution_scopes": [
+        "TB-03"
+      ],
+      "sources": [
+        "https://github.com/Newchanlun/NewChanlun/issues/1406#issuecomment-6302451174",
+        "https://github.com/Newchanlun/NewChanlun/issues/1737"
+      ],
+      "ticket": 1737
+    },
+    {
+      "attribution_scopes": [
+        "GRAPH"
+      ],
+      "sources": [
+        "https://github.com/Newchanlun/NewChanlun/issues/1818",
+        "https://github.com/Newchanlun/NewChanlun/issues/1845",
+        "https://github.com/Newchanlun/NewChanlun/pull/1773"
+      ],
+      "ticket": 1845
+    }
+  ],
+  "p0": "b5cd3fee352e5f7199233de628da05ff06c5798f",
+  "schema_version": "at18-landing-census/1",
+  "sources": [
+    {
+      "path": ".chanlun/at18/pregate/all-first-parent.jsonl",
+      "role": "history",
+      "sha256": "e96aadd3913b66b68286b2334720c3877cfd5f980e5fb03b3fe162c6af2c4fbf"
+    },
+    {
+      "path": ".chanlun/at18/pregate/sources.json",
+      "role": "relations",
+      "sha256": "31d57f2f7e89b8786607cb34e975850d551e02a3cdc9b5a4def99ff216ec9af2"
+    },
+    {
+      "path": ".chanlun/at18/pregate/candidate-signals.json",
+      "role": "signals",
+      "sha256": "c28eb8aa7f1218e278a5130d30a24f45ebea422fc5403c87ae1bf4ace4db5b09"
+    },
+    {
+      "path": ".chanlun/at18/pregate/adjudication.json",
+      "role": "adjudication",
+      "sha256": "09f162df532e56ae53c55bb2478ea57ed01439154f9992878c27525d89f9c669"
+    }
+  ]
+}

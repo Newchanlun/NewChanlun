@@ -215,14 +215,14 @@ fn apply_with_observation(
 }
 
 fn open(m: &Value, level: &str, batch: &Batch) -> Result<Value, String> {
-    apply(m, &book::empty_image(), &raw(level, batch), 0).map(|r| r.0)
+    apply(m, &book::empty_image(), &self::raw(level, batch), 0).map(|r| r.0)
 }
 
 fn open_at(m: &Value, level: &str, batch: &Batch, observation_ns: &str) -> Result<Value, String> {
     apply_with_observation(
         m,
         &book::empty_image(),
-        &raw(level, batch),
+        &self::raw(level, batch),
         0,
         Some(observation_ns),
     )
@@ -269,7 +269,7 @@ fn rules_resolve_exactly_three_values() {
     // `book::apply` 不得绕过资金合同直接跑 `/2`。
     assert!(book::apply(
         &book::empty_image(),
-        &record_for_raw(&raw("0", &Batch::ok(100000, P0)), "/events/0"),
+        &record_for_raw(&self::raw("0", &Batch::ok(100000, P0)), "/events/0"),
         1,
         "10",
         book::Rules::Tb03cV2
@@ -647,21 +647,21 @@ fn missing_funding_pieces_are_typed_rejections() {
 fn appended_batch_and_q_rebase_await_new_signature_in_b() {
     let space = Space::new("c8-b-wait");
     let m = profile_manifest(&space, P0);
-    let raw = raw("0", &Batch::ok(100000, P0));
-    let image = apply(&m, &book::empty_image(), &raw, 0).unwrap().0;
-    let appended = apply(&m, &image, &raw, 1).unwrap_err();
+    let original = raw("0", &Batch::ok(100000, P0));
+    let image = apply(&m, &book::empty_image(), &original, 0).unwrap().0;
+    let appended = apply(&m, &image, &original, 1).unwrap_err();
     assert_eq!(
         appended,
         "AwaitingPolicy：funding_revision (S,ℓ)=(BTC,L0)；追加投入须签新版 funding-record"
     );
-    let rebase = apply(&m, &image, &raw, 2).unwrap_err();
+    let rebase = apply(&m, &image, &original, 2).unwrap_err();
     assert_eq!(
         rebase,
         "AwaitingPolicy：q_rebase (S,ℓ)=(BTC,L0)；现役 Q 不自动改写，须签新版本"
     );
-    assert_eq!(apply(&m, &image, &raw, 2).unwrap_err(), rebase);
+    assert_eq!(apply(&m, &image, &original, 2).unwrap_err(), rebase);
     // `/1` 的 q_rebase 文案逐字不变。
-    let rec = record_for_raw(&raw, "/events/2");
+    let rec = record_for_raw(&original, "/events/2");
     assert_eq!(
         book::apply(&image, &rec, 3, "30", book::Rules::Tb03cV1).unwrap_err(),
         "AwaitingPolicy：capacity；C(ℓ) 未签署，fixed_q 不变"
@@ -687,14 +687,14 @@ fn v2_domain_binds_revision_waits_in_e_and_replays() {
     store::init(&bc).unwrap();
     let (mut e, _) = store::open(&ec.db, false).unwrap();
     let (mut b, _) = store::open(&bc.db, false).unwrap();
-    let raw = raw("0", &Batch::ok(100000, P0));
-    let doc: Value = serde_json::from_str(&raw).unwrap();
+    let original = raw("0", &Batch::ok(100000, P0));
+    let doc: Value = serde_json::from_str(&original).unwrap();
     let mut receipts = vec![];
     for i in 0..3 {
         let event = &doc["events"][i];
         let cap = envelope(
             &format!("cap-{i}"),
-            json!({"op":"CaptureExternal","raw_utf8":raw,"json_pointer":format!("/events/{i}"),"token":format!("tok-{i}"),"source_event_time":event["source"]["source_event_time"]}),
+            json!({"op":"CaptureExternal","raw_utf8":original,"json_pointer":format!("/events/{i}"),"token":format!("tok-{i}"),"source_event_time":event["source"]["source_event_time"]}),
         );
         let captured = service::handle(&mut e, &ec, 1, 1, &json!({}), &cap)["payload"].clone();
         assert_eq!(captured["kind"], "Recorded", "{captured}");
@@ -776,11 +776,11 @@ fn unknown_capacity_opening_waits_in_e_and_resolve_cannot_clear_it() {
     let (ec, bc) = wire(&space, &m, &chong);
     let (mut e, _) = store::open(&ec.db, false).unwrap();
     let (mut b, _) = store::open(&bc.db, false).unwrap();
-    let raw = raw("3", &Batch::ok(1, P0));
-    let doc: Value = serde_json::from_str(&raw).unwrap();
+    let original = raw("3", &Batch::ok(1, P0));
+    let doc: Value = serde_json::from_str(&original).unwrap();
     let event = &doc["events"][0];
     let captured = service::handle(&mut e, &ec, 1, 1, &json!({}), &envelope("cap-0",
-        json!({"op":"CaptureExternal","raw_utf8":raw,"json_pointer":"/events/0","token":"tok-0","source_event_time":event["source"]["source_event_time"]})))["payload"].clone();
+        json!({"op":"CaptureExternal","raw_utf8":original,"json_pointer":"/events/0","token":"tok-0","source_event_time":event["source"]["source_event_time"]})))["payload"].clone();
     assert_eq!(captured["kind"], "Recorded", "{captured}");
     let e_image = store::latest(&e).unwrap().3;
     assert_eq!(
@@ -881,8 +881,8 @@ fn b_application_cannot_observe_fact_before_e_commit() {
     let (ec, bc) = wire(&space, &m, &chong);
     let (mut e, _) = store::open(&ec.db, false).unwrap();
     let (mut b, _) = store::open(&bc.db, false).unwrap();
-    let raw = raw("0", &Batch::ok(100000, P0));
-    let doc: Value = serde_json::from_str(&raw).unwrap();
+    let original = raw("0", &Batch::ok(100000, P0));
+    let doc: Value = serde_json::from_str(&original).unwrap();
     let event = &doc["events"][0];
     let captured = service::handle(
         &mut e,
@@ -892,7 +892,7 @@ fn b_application_cannot_observe_fact_before_e_commit() {
         &json!({}),
         &envelope(
             "cap-0",
-            json!({"op":"CaptureExternal","raw_utf8":raw,"json_pointer":"/events/0","token":"tok-clock","source_event_time":event["source"]["source_event_time"]}),
+            json!({"op":"CaptureExternal","raw_utf8":original,"json_pointer":"/events/0","token":"tok-clock","source_event_time":event["source"]["source_event_time"]}),
         ),
     )["payload"]
         .clone();
@@ -945,7 +945,13 @@ fn known_at_binds_to_auditable_observation_time_with_cross_domain_invariant() {
 
     // 基准：观察时间 = 签署生效日当日（2026-10-20）
     let base_ns = "1792454400000000000";
-    let r1 = apply_with_observation(&m, &book::empty_image(), &raw("0", &base), 0, Some(base_ns));
+    let r1 = apply_with_observation(
+        &m,
+        &book::empty_image(),
+        &self::raw("0", &base),
+        0,
+        Some(base_ns),
+    );
     assert_eq!(kind(&r1), "Applied", "观察时间 = 签署生效日当日应通过");
 
     // 变异负控 1：观察时间早于签署生效日（2026-10-19）
@@ -953,7 +959,7 @@ fn known_at_binds_to_auditable_observation_time_with_cross_domain_invariant() {
     let r2 = apply_with_observation(
         &m,
         &book::empty_image(),
-        &raw("0", &base),
+        &self::raw("0", &base),
         0,
         Some(early_ns),
     );
@@ -967,7 +973,13 @@ fn known_at_binds_to_auditable_observation_time_with_cross_domain_invariant() {
 
     // 变异负控 2：观察时间晚于有效期（2027-10-21，签署有效期到2027-10-20）
     let late_ns = "1824076800000000000";
-    let r3 = apply_with_observation(&m, &book::empty_image(), &raw("0", &base), 0, Some(late_ns));
+    let r3 = apply_with_observation(
+        &m,
+        &book::empty_image(),
+        &self::raw("0", &base),
+        0,
+        Some(late_ns),
+    );
     assert!(
         r3.as_ref().unwrap_err().starts_with("PolicyExpired"),
         "观察时间晚于有效期应拒绝，实际错误：{:?}",
@@ -980,7 +992,7 @@ fn known_at_binds_to_auditable_observation_time_with_cross_domain_invariant() {
     let r4 = apply_with_observation(
         &m,
         &book::empty_image(),
-        &raw("0", &base),
+        &self::raw("0", &base),
         0,
         Some(valid_ns),
     );
@@ -998,7 +1010,7 @@ fn known_at_binds_to_auditable_observation_time_with_cross_domain_invariant() {
         apply_with_observation(
             &m,
             &book::empty_image(),
-            &raw("0", &base),
+            &self::raw("0", &base),
             0,
             Some(valid_ns)
         ),

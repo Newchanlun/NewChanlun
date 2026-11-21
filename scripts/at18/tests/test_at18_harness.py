@@ -169,6 +169,42 @@ def test_frozen_opening(repo):
     assert lint(repo).returncode == 0
 
 
+def test_formal_pregate_replays_frozen_landing_fields_and_cure_inventory():
+    from registry import FIXED_CURES
+
+    reg, *_ = load(ROOT)
+    prefix = ".chanlun/at18/pregate/"
+    frozen = read(ROOT, prefix + "landings.json")
+    registered = reg["pregate"]["landings"]
+    assert [{k: row[k] for k in ("ticket", "commits", "attribution_scopes")} for row in registered] == frozen["by_ticket"]
+    assert len(registered) == 62 and len({commit for row in registered for commit in row["commits"]}) == 115
+
+    # 括号内是正式 Jobs API 的历史失败身份，不以当前 cure 覆写历史结论。
+    failures = {(row["ticket"], row["run_id"]): row["commit"] for row in read(ROOT, prefix + "historical-deviations.json")
+                if row["workflow"] == ".github/workflows/ci.yml" and row["observed"] == "FAILURE"}
+    catalog = read(ROOT, prefix + "cure-sources.json")
+    assert len(failures) == len(catalog) == 21
+    assert failures.keys() == {(row["ticket"], row["run_id"]) for row in catalog}
+    expected = {(row["ticket"], failures[row["ticket"], row["run_id"]], row["run_id"],
+                 target["kind"], target["target"], target["check_id"])
+                for row in catalog for target in row["targets"]}
+    fixed = {(ticket, commit, None, "test", target) for ticket, (commit, target) in FIXED_CURES.items()}
+    actual = {(row["ticket"], c["commit"], c["run_id"], c["kind"], c["target"], c["check_id"])
+              for row in registered for c in row["cure_checks"]}
+    assert {entry[:5] for entry in actual if entry[2] is None} == fixed
+    assert {entry for entry in actual if entry[2] is not None} == expected
+    assert all(row["jobs"] and row["targets"] for row in catalog)
+
+
+def test_typescript_node_selector_uses_ci_loader_without_changing_js_selection(repo):
+    from check_selector import command
+
+    check = bind(repo, NODE_CASE, runner="node-test", selector="run.entry+1", source="trial/test_exact.mts")
+    assert command(check, repo)[:4] == ["node", "--import", "tsx", "--test"]
+    check["source"]["path"] = "trial/test_exact.mjs"
+    assert command(check, repo)[:2] == ["node", "--test"]
+
+
 @pytest.mark.parametrize(("damage", "code"), [
     ("source", "CHECK_SOURCE_DRIFT"), ("adapter", "adapter_contract_sha256"),
     ("adapter-unknown", "REGISTRY_INVALID"), ("adapter-alternative", "REGISTRY_INVALID"),

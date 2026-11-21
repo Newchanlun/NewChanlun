@@ -1,0 +1,263 @@
+{
+  "admitted_related": {
+    "1495": {
+      "source": "https://github.com/Newchanlun/NewChanlun/issues/1495",
+      "reason": "TB-02-X 的 Lean 形式化交付"
+    },
+    "1527": {
+      "source": "https://github.com/Newchanlun/NewChanlun/issues/1527",
+      "reason": "票型为 task，票面明确是 Destination ① 恢复实施"
+    },
+    "1608": {
+      "source": "https://github.com/Newchanlun/NewChanlun/pull/1632",
+      "reason": "混合产品明确含 #1394 编译负例进入正式 CI"
+    },
+    "1737": {
+      "source": "https://github.com/Newchanlun/NewChanlun/issues/1737",
+      "reason": "由 #1406 正式交棒的真实验收测试债"
+    }
+  },
+  "additional_associations": [
+    {
+      "ticket": 1359,
+      "commit": "65298686cf3e7c9e94e0b9ceeb83aebad2b5530b",
+      "role": "CLOSEOUT",
+      "source": "https://github.com/Newchanlun/NewChanlun/issues/1359#issuecomment-5653549133"
+    },
+    {
+      "ticket": 1404,
+      "commit": "2517b126252a39a3d000ec83e15d171bcb91b648",
+      "role": "CALIBRATION_LOCK",
+      "source": "https://github.com/Newchanlun/NewChanlun/pull/1564"
+    },
+    {
+      "ticket": 1414,
+      "commit": "2517b126252a39a3d000ec83e15d171bcb91b648",
+      "role": "CALIBRATION_LOCK",
+      "source": "https://github.com/Newchanlun/NewChanlun/pull/1564"
+    },
+    {
+      "ticket": 1406,
+      "commit": "02b5b571eb872e92a5325f5bd02f966097f27cf9",
+      "role": "INTEGRATION_LOCK",
+      "source": "https://github.com/Newchanlun/NewChanlun/issues/1406#issuecomment-6302451174"
+    },
+    {
+      "ticket": 1626,
+      "commit": "6c6acd5fe08d80f7bfd08b796d4dfebac5cabfdf",
+      "role": "PRODUCT_PRECURSOR",
+      "source": "https://github.com/Newchanlun/NewChanlun/pull/1625"
+    },
+    {
+      "ticket": 1629,
+      "commit": "d4e6a20230b801d2656eb37899f0faf0863051e1",
+      "role": "PRODUCT_PRECURSOR",
+      "source": "https://github.com/Newchanlun/NewChanlun/pull/1628"
+    },
+    {
+      "ticket": 1372,
+      "commit": "21b145250ec0d65e7d7148eed32594490dc763cc",
+      "role": "SERVICE_STOP_FIX",
+      "source": "https://github.com/Newchanlun/NewChanlun/pull/1631"
+    },
+    {
+      "ticket": 1405,
+      "commit": "21b145250ec0d65e7d7148eed32594490dc763cc",
+      "role": "SERVICE_STOP_FIX",
+      "source": "https://github.com/Newchanlun/NewChanlun/pull/1631"
+    },
+    {
+      "ticket": 1394,
+      "commit": "b0a21955109643c9f325687f77485f99aa619049",
+      "role": "INTEGRATION_LOCK",
+      "source": "https://github.com/Newchanlun/NewChanlun/pull/1632"
+    },
+    {
+      "ticket": 1581,
+      "commit": "7835d593f37a51f08f8e61df734f29360d9e9114",
+      "role": "CLOSEOUT",
+      "source": "https://github.com/Newchanlun/NewChanlun/issues/1581#issuecomment-6309751245"
+    },
+    {
+      "ticket": 1603,
+      "commit": "7835d593f37a51f08f8e61df734f29360d9e9114",
+      "role": "CLOSEOUT",
+      "source": "https://github.com/Newchanlun/NewChanlun/issues/1603#issuecomment-6308897078"
+    },
+    {
+      "ticket": 1629,
+      "commit": "7835d593f37a51f08f8e61df734f29360d9e9114",
+      "role": "CLOSEOUT",
+      "source": "https://github.com/Newchanlun/NewChanlun/pull/1637"
+    },
+    {
+      "ticket": 1527,
+      "commit": "aa1c3885f8adc1d79c08641424b3ce30a15536f1",
+      "role": "ATOMIC_INIT_FIX",
+      "source": "https://github.com/Newchanlun/NewChanlun/pull/1656"
+    },
+    {
+      "ticket": 1576,
+      "commit": "66c409e7e3236617e4020c27144049ab7c380e15",
+      "role": "FOLLOWUP_FIX",
+      "source": "https://github.com/Newchanlun/NewChanlun/pull/1662"
+    },
+    {
+      "ticket": 1581,
+      "commit": "66c409e7e3236617e4020c27144049ab7c380e15",
+      "role": "FOLLOWUP_FIX",
+      "source": "https://github.com/Newchanlun/NewChanlun/pull/1662"
+    },
+    {
+      "ticket": 1368,
+      "commit": "344d4da15d59b520b0aee6f4332d9a14a48f7d1a",
+      "role": "RETIREMENT_DISPOSITION",
+      "source": "https://github.com/Newchanlun/NewChanlun/pull/1679"
+    },
+    {
+      "ticket": 1669,
+      "commit": "d02410fc8703ab40b7afc69d10bb793f22574396",
+      "role": "CLOSEOUT",
+      "source": "https://github.com/Newchanlun/NewChanlun/pull/1721"
+    },
+    {
+      "ticket": 1674,
+      "commit": "d02410fc8703ab40b7afc69d10bb793f22574396",
+      "role": "CLOSEOUT",
+      "source": "https://github.com/Newchanlun/NewChanlun/pull/1721"
+    },
+    {
+      "ticket": 1601,
+      "commit": "d7bd79ca185b76b038d0484ed4e05d96c98b58d5",
+      "role": "CLOSEOUT",
+      "source": "https://github.com/Newchanlun/NewChanlun/pull/1728"
+    },
+    {
+      "ticket": 1601,
+      "commit": "0a96a09bde89e50b7c4102b4ca898b716cd219c0",
+      "role": "CLOSEOUT",
+      "source": "https://github.com/Newchanlun/NewChanlun/pull/1730"
+    },
+    {
+      "ticket": 1626,
+      "commit": "7ab832241e39456bd0330cd03dea63e7e6068c0a",
+      "role": "CLOSEOUT",
+      "source": "https://github.com/Newchanlun/NewChanlun/issues/1626#issuecomment-6435909536"
+    },
+    {
+      "ticket": 1602,
+      "commit": "75568405c87f561fd8c7d2c1217d378b0b66c431",
+      "role": "CLOSEOUT",
+      "source": "https://github.com/Newchanlun/NewChanlun/pull/1735"
+    },
+    {
+      "ticket": 1737,
+      "commit": "d310c46dd2710c6faf3c946e8e3e05b48f1034de",
+      "role": "FOLLOWUP_TEST",
+      "source": "https://github.com/Newchanlun/NewChanlun/pull/1738"
+    },
+    {
+      "ticket": 1737,
+      "commit": "00fdf0dd4ada8dcdcc886359f56573889ea63d54",
+      "role": "CLOSEOUT",
+      "source": "https://github.com/Newchanlun/NewChanlun/pull/1739"
+    },
+    {
+      "ticket": 1769,
+      "commit": "c5da72d0efae6e9bbedad91c326e95bbbcc4c477",
+      "role": "CLOSEOUT",
+      "source": "https://github.com/Newchanlun/NewChanlun/pull/1799"
+    },
+    {
+      "ticket": 1640,
+      "commit": "ba3ad68112f2304453583c50c0e55382c6f3670f",
+      "role": "PRODUCT_PROFILE",
+      "source": "https://github.com/Newchanlun/NewChanlun/pull/1811"
+    },
+    {
+      "ticket": 1481,
+      "commit": "6be589b842a1cd7f084b39efe66fa8c8a01f36f5",
+      "role": "PRODUCT",
+      "source": "https://github.com/Newchanlun/NewChanlun/pull/1813"
+    },
+    {
+      "ticket": 1392,
+      "commit": "3d61fb72944f577ea3b758b54001c2a7544b04dc",
+      "role": "NODE_STDIN_TEST_FIX",
+      "source": "https://github.com/Newchanlun/NewChanlun/pull/1894"
+    },
+    {
+      "ticket": 1404,
+      "commit": "3d61fb72944f577ea3b758b54001c2a7544b04dc",
+      "role": "NODE_STDIN_TEST_FIX",
+      "source": "https://github.com/Newchanlun/NewChanlun/pull/1894"
+    },
+    {
+      "ticket": 1414,
+      "commit": "3d61fb72944f577ea3b758b54001c2a7544b04dc",
+      "role": "NODE_STDIN_TEST_FIX",
+      "source": "https://github.com/Newchanlun/NewChanlun/pull/1894"
+    },
+    {
+      "ticket": 1381,
+      "commit": "6dc7cd0c87e9d5222d721d3a4941897dcc1eabb7",
+      "role": "REPLAY_PROFILE",
+      "source": "https://github.com/Newchanlun/NewChanlun/pull/1914"
+    },
+    {
+      "ticket": 1381,
+      "commit": "9636ccb5f718cf9e6a7246774d79dc13957ebe37",
+      "role": "REPLAY_PROFILE",
+      "source": "https://github.com/Newchanlun/NewChanlun/pull/1947"
+    },
+    {
+      "ticket": 1420,
+      "commit": "6a97845bf19f302b7b247b3d9c2c6ace9f31cddb",
+      "role": "PRODUCT_TEST",
+      "source": "https://github.com/Newchanlun/NewChanlun/pull/1976"
+    },
+    {
+      "ticket": 1640,
+      "commit": "6d4d066058c978bfcd1471bd68aef2a3a79628d5",
+      "role": "S4_PERFORMANCE_FIX",
+      "source": "https://github.com/Newchanlun/NewChanlun/pull/1990"
+    },
+    {
+      "ticket": 1527,
+      "commit": "beec08218e1cd74e8f619cad14e71acce1a81681",
+      "role": "WRITER_LOCK_FIX",
+      "source": "https://github.com/Newchanlun/NewChanlun/pull/2007"
+    },
+    {
+      "ticket": 1527,
+      "commit": "6fe5ebea8cdb6c3b434d3c10b6e2e089437b91ca",
+      "role": "WRITER_LOCK_FIX",
+      "source": "https://github.com/Newchanlun/NewChanlun/pull/2010"
+    },
+    {
+      "ticket": 1769,
+      "commit": "6fe5ebea8cdb6c3b434d3c10b6e2e089437b91ca",
+      "role": "WRITER_LOCK_FIX",
+      "source": "https://github.com/Newchanlun/NewChanlun/pull/2010"
+    },
+    {
+      "ticket": 1366,
+      "commit": "bb635ab26a33108130e4c4d63140d94f6e431d49",
+      "role": "LEGACY_1304_LEDGER_EXPORT",
+      "source": "https://github.com/Newchanlun/NewChanlun/issues/1517"
+    },
+    {
+      "ticket": 1366,
+      "commit": "8d84e21e2c9e9800a22900c2d4c67878310c1ab9",
+      "role": "LEGACY_1304_REPLAY_COMPARISON",
+      "source": "https://github.com/Newchanlun/NewChanlun/issues/1518"
+    },
+    {
+      "ticket": 1481,
+      "commit": "3654ba8189eae85415671e4233832bfe0234f0c9",
+      "role": "PRODUCT",
+      "source": "https://github.com/Newchanlun/NewChanlun/issues/1481"
+    }
+  ],
+  "rejected_signals": []
+}

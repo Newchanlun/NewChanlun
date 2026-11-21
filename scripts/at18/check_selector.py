@@ -29,7 +29,8 @@ def command(check, root):
     if runner == "node-test":
         require(source.endswith((".mjs", ".js", ".cjs", ".ts", ".mts", ".cts")) and selector.strip() == selector,
                 "CHECK_SELECTOR", selector)
-        return ["node", "--test", "--test-name-pattern", "^" + re.sub(r"([\\.^$*+?{}\[\]|()])", r"\\\1", selector) + "$",
+        loader = ["--import", "tsx"] if source.endswith((".ts", ".mts", ".cts")) else []
+        return ["node", *loader, "--test", "--test-name-pattern", "^" + re.sub(r"([\\.^$*+?{}\[\]|()])", r"\\\1", selector) + "$",
                 "--test-reporter", str(root / "scripts/at18/node_reporter.mjs"), source]
     require(source.endswith(".rs"), "CHECK_SELECTOR", selector)
     kind, target, features, name = selection(selector)

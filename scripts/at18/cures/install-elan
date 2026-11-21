@@ -1,0 +1,20 @@
+#!/usr/bin/env python3
+"""R11：对 run 42467231009 失败的安装步骤做隔离冷装。"""
+import os
+import subprocess
+from pathlib import Path
+
+import yaml
+
+if Path(os.environ["AT18_KEYS_FILE"]).read_text().strip() != "[]":
+    raise SystemExit("历史安装补救不承担 AT-18 业务键")
+ci = yaml.safe_load(Path(".github/workflows/ci.yml").read_bytes())
+step, = (s for s in ci["jobs"]["fixture-drift"]["steps"] if s.get("name") == "Install elan")
+work = Path(os.environ["AT18_KEYS_FILE"]).parent
+home = work / "elan-home"
+home.mkdir()
+env = {**os.environ, "HOME": str(home), "ELAN_HOME": str(home / ".elan"),
+       "CACHE_HIT": "false", "RUNNER_TEMP": str(work), "GITHUB_PATH": str(work / "gha-path")}
+subprocess.run(["bash", "-euo", "pipefail", "-c", step["run"]], env=env, check=True)
+subprocess.run([home / ".elan/bin/elan", "--version"], env=env, check=True)
+Path(os.environ["AT18_WITNESS_FILE"]).write_text('{"schema_version":"at18-key-witness/1","entries":[]}\n')

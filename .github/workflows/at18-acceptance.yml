@@ -47,6 +47,9 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: "22"
+      - name: Install Sandcastle's locked TypeScript test loader
+        if: matrix.group == 'r11-node'
+        run: npm ci --ignore-scripts
       - id: run
         env:
           AT18_GROUP: ${{ matrix.group }}

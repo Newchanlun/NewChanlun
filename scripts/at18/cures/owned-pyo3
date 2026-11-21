@@ -1,0 +1,12 @@
+#!/usr/bin/env bash
+# 复跑历史 Owned 步骤。工作流的 Python 3.13 与仓内锁版 PyO3 相容。
+# 历史失败发生在测试启动前；步骤原样含一条先前就标记 ignored 的测试。
+set -euo pipefail
+test "$(cat "$AT18_KEYS_FILE")" = '[]'
+(
+  cd rust
+  export PYO3_PYTHON
+  PYO3_PYTHON="$(command -v python3)"
+  cargo test --locked --features s_session,s_allocation_json_testonly --bin s_structure_session v3::history
+)
+printf '%s\n' '{"schema_version":"at18-key-witness/1","entries":[]}' > "$AT18_WITNESS_FILE"
