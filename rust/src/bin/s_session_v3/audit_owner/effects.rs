@@ -31,25 +31,6 @@ pub(super) enum Table {
     Node,
 }
 impl Table {
-    pub(super) const ALL: [Self; 17] = [
-        Self::Meta,
-        Self::Raw,
-        Self::Ohlc,
-        Self::Message,
-        Self::Phase,
-        Self::Protocol,
-        Self::Epoch,
-        Self::Delta,
-        Self::Publication,
-        Self::Object,
-        Self::Witness,
-        Self::Relation,
-        Self::Observation,
-        Self::Catalog,
-        Self::Delivery,
-        Self::Policy,
-        Self::Node,
-    ];
     pub(super) fn name(self) -> &'static str {
         match self {
             Self::Meta => "meta",
@@ -123,8 +104,28 @@ impl Table {
             Self::Node => "SELECT rowid,* FROM main.\"s_content_nodes\" ORDER BY rowid",
         }
     }
+    #[inline]
     fn parse(s: &str) -> Option<Self> {
-        Self::ALL.into_iter().find(|t| t.name() == s)
+        match s {
+            "meta" => Some(Self::Meta),
+            "raw_events" => Some(Self::Raw),
+            "raw_ohlc" => Some(Self::Ohlc),
+            "s_input_messages" => Some(Self::Message),
+            "s_clock_events" => Some(Self::Phase),
+            "s_protocol_meta" => Some(Self::Protocol),
+            "writer_epoch_history" => Some(Self::Epoch),
+            "structure_deltas" => Some(Self::Delta),
+            "s_content_publications" => Some(Self::Publication),
+            "s_content_objects" => Some(Self::Object),
+            "s_content_witnesses" => Some(Self::Witness),
+            "s_content_relations" => Some(Self::Relation),
+            "s_content_observations" => Some(Self::Observation),
+            "catalog" => Some(Self::Catalog),
+            "s_delivery_refs" => Some(Self::Delivery),
+            "s_delivery_policy" => Some(Self::Policy),
+            "s_content_nodes" => Some(Self::Node),
+            _ => None,
+        }
     }
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -713,6 +714,7 @@ impl Recording {
         let mut used = initial;
         let mut peak = used.max(journal.peak);
         let mut lower = (Table::Meta, 0usize);
+        let mut table_schema: Option<(Table, Vec<(String, i64, i64)>)> = None;
         for key in journal.keys {
             if lower.0 != key.table {
                 lower = (key.table, 0);
@@ -749,7 +751,15 @@ impl Recording {
                 return Err(invalid("rowid 效果非唯一"));
             }
             if let Some(row) = rows.rows.first() {
-                verify_storage(tx, key.table, row)?;
+                let cols = match &table_schema {
+                    Some((t, cols)) if *t == key.table => cols.as_slice(),
+                    _ => {
+                        let loaded = load_table_schema(tx, key.table)?;
+                        table_schema = Some((key.table, loaded));
+                        table_schema.as_ref().unwrap().1.as_slice()
+                    }
+                };
+                verify_storage_with_schema(key.table, cols, row)?;
             }
             let new = rows.rows.pop();
             let row_header_bytes = rows.manual_heap_bytes();
@@ -789,10 +799,11 @@ impl Recording {
         }
         if journal.set_required {
             for stage in &journal.stages {
+                let target = (stage.kind.table(), stage.rowid);
                 let actual = changes
-                    .iter()
-                    .find(|c| c.table == stage.kind.table() && c.rowid == stage.rowid)
-                    .and_then(|c| c.new.as_ref());
+                    .binary_search_by_key(&target, |c| (c.table, c.rowid))
+                    .ok()
+                    .and_then(|idx| changes[idx].new.as_ref());
                 if actual != Some(&stage.row) {
                     return Err(construction_state::stale(
                         "stage即时原件与最终effects不一致",
@@ -1002,10 +1013,58 @@ pub(super) fn optional_integer(c: &SqlCell) -> Result<Option<i64>, String> {
         integer(c).map(Some)
     }
 }
+fn load_table_schema(
+    tx: &Transaction<'_>,
+    table: Table,
+) -> Result<Vec<(String, i64, i64)>, String> {
+    let mut stmt = tx
+        .prepare_cached("SELECT type,\"notnull\",pk FROM pragma_table_info(?1) ORDER BY cid")
+        .map_err(invalid)?;
+    let mut columns = stmt.query([table.name()]).map_err(invalid)?;
+    let mut out = Vec::with_capacity(12);
+    while let Some(c) = columns.next().map_err(invalid)? {
+        out.push((
+            c.get::<_, String>(0).map_err(invalid)?,
+            c.get(1).map_err(invalid)?,
+            c.get(2).map_err(invalid)?,
+        ));
+    }
+    Ok(out)
+}
+fn verify_storage_with_schema(
+    table: Table,
+    cols: &[(String, i64, i64)],
+    row: &[SqlCell],
+) -> Result<(), String> {
+    use rusqlite::types::Type;
+    let mut count = 0;
+    for (col_type, notnull, pk) in cols {
+        count += 1;
+        let cell = row.get(count).ok_or_else(|| invalid("效果原件缺列"))?;
+        let (kind, bytes) = match cell {
+            SqlCell::Null => (Type::Null, None),
+            SqlCell::Integer(_) => (Type::Integer, None),
+            SqlCell::Real(_) => (Type::Real, None),
+            SqlCell::Text(b) => (Type::Text, Some(b.as_ref())),
+            SqlCell::Blob(_) => (Type::Blob, None),
+        };
+        if !v2::valid_storage_cell(col_type.as_str(), *notnull, *pk, kind, bytes) {
+            return Err(invalid(format!(
+                "{} 第{}列实际类型/非空约束损坏",
+                table.name(),
+                count - 1
+            )));
+        }
+    }
+    if count + 1 != row.len() {
+        return Err(invalid("效果原件列数不符"));
+    }
+    Ok(())
+}
 fn verify_storage(tx: &Transaction<'_>, table: Table, row: &[SqlCell]) -> Result<(), String> {
     use rusqlite::types::Type;
     let mut stmt = tx
-        .prepare("SELECT type,\"notnull\",pk FROM pragma_table_info(?1) ORDER BY cid")
+        .prepare_cached("SELECT type,\"notnull\",pk FROM pragma_table_info(?1) ORDER BY cid")
         .map_err(invalid)?;
     let mut columns = stmt.query([table.name()]).map_err(invalid)?;
     let mut count = 0;
@@ -1019,8 +1078,9 @@ fn verify_storage(tx: &Transaction<'_>, table: Table, row: &[SqlCell]) -> Result
             SqlCell::Text(b) => (Type::Text, Some(b.as_ref())),
             SqlCell::Blob(_) => (Type::Blob, None),
         };
+        let col_type = c.get_ref(0).map_err(invalid)?.as_str().map_err(invalid)?;
         if !v2::valid_storage_cell(
-            &c.get::<_, String>(0).map_err(invalid)?,
+            col_type,
             c.get(1).map_err(invalid)?,
             c.get(2).map_err(invalid)?,
             kind,
