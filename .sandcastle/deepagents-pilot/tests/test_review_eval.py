@@ -5746,3 +5746,59 @@ def test_r23_collapsed_bracket_residual_and_strict_non_blocking_gate_phrase() ->
             legitimate_gate_case
         )
 
+
+def test_r24_colon_dot_gate_terminators_and_bare_non_blocking_clause_guard() -> None:
+    # Important 1：完整门禁短语后的终止标点支持中文冒号 `：`、英文冒号 `:` 与独立英文句号 `.`（排除标识符/小数点）
+    for gate_terminator_ok in (
+        "不阻断 PR：仅需补一条注释。",
+        "不阻断 PR.",
+        "不阻断 PR: comment",
+        "不阻断 CI：仅作提示。",
+        "不阻断 CI.",
+        "不阻断 PR. Next sentence",
+        "该告警不阻断 CI，可延后处理。",
+        "此处不阻断合入，可后续补齐。",
+    ):
+        assert is_non_blocking_or_nit_finding(gate_terminator_ok, "blocked") is True, gate_terminator_ok
+        assert classify_finding_heuristic(gate_terminator_ok, "blocked") == "non_blocking_or_nit", gate_terminator_ok
+
+    for dot_identifier_blocking in (
+        "鉴权模块不阻断 PR.foo 路径上的越权请求。",
+        "不阻断 PR.foo 越权",
+        "不阻断 CI.1 校验失败。",
+        "不阻断 PR._internal 访问。",
+        "不阻断 1.2 版本降级绕过。",
+    ):
+        assert is_non_blocking_or_nit_finding(dot_identifier_blocking, "blocked") is False, dot_identifier_blocking
+        assert classify_finding_heuristic(dot_identifier_blocking, "blocked") == "blocking_substantive", (
+            dot_identifier_blocking
+        )
+
+    # Important 2：区分“系统业务行为以裸‘不阻断’收句”与“独立评审结论‘不阻断’”
+    for runtime_action_blocking in (
+        "鉴权失败后，系统只告警、不阻断，未授权写入仍然成功。",
+        "鉴权失败后，系统只告警但不阻断，未授权写入仍然成功。",
+        "限流器降级后仅打点、不阻断，恶意流量直接穿透。",
+        "鉴权失败后，系统只告警、不阻断。",
+        "鉴权模块不阻断。",
+        "策略校验命中黑名单时仅记录日志、不阻断：导致越权继续执行。",
+    ):
+        assert is_non_blocking_or_nit_finding(runtime_action_blocking, "blocked") is False, runtime_action_blocking
+        assert classify_finding_heuristic(runtime_action_blocking, "blocked") == "blocking_substantive", (
+            runtime_action_blocking
+        )
+
+    for standalone_verdict_nb in (
+        "这是精度问题，不阻断。",
+        "不在 CI 路径上，所以不阻断。",
+        "文件不存在，但不阻断。",
+        "小问题（不阻断）。",
+        "不阻断。",
+        "不阻断.",
+        "问题影响面极小，目前暂不阻断。",
+        "仅影响日志格式，本项不阻断：后续清理即可。",
+    ):
+        assert is_non_blocking_or_nit_finding(standalone_verdict_nb, "blocked") is True, standalone_verdict_nb
+        assert classify_finding_heuristic(standalone_verdict_nb, "blocked") == "non_blocking_or_nit", (
+            standalone_verdict_nb
+        )

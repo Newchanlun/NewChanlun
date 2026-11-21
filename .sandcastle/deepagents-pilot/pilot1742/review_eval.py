@@ -224,14 +224,17 @@ _ALL_KNOWN_SEVERITY_TAG_TOKENS: frozenset[str] = (
     _TIER1_NON_BLOCKING_TAG_TOKENS | _TIER2_BLOCKING_TAG_TOKENS | _TIER3_NON_BLOCKING_TAG_TOKENS
 )
 _TIER3_VERIFIED_OK_TAG_RE = re.compile(r"^已核.*(?:无问题|未发现问题)$")
+_ZH_NON_BLOCKING_TAIL_END_PATTERN = r"(?:$|[，,。；;：:！!？?、)）\]】\"”'’」』]|\.(?![A-Za-z0-9_]))"
+_ZH_EXPLICIT_GATE_OBJ_PATTERN = r"(?:(?:(?:本|该)\s*)?(?:PR|CI)(?:\s*(?:合入|合并|发布|检查|门禁))?|合入|合并|发布)"
 _NON_BLOCKING_BODY_HIT_RE = re.compile(
     r"(?:"
     r"[\[\【]\s*nit\s*[\]\】]|"
     r"(?<![A-Za-z0-9_])nit\s*[:：]|"
     r"非阻断|"
-    r"(?:不阻断|不构成阻断|不作为阻断(?:理由|项|依据)?|不单独(?:判|作为|构成)?阻断)"
-    r"(?=\s*(?:(?:(?:本|该)\s*)?(?:PR|CI)(?:\s*(?:合入|合并|发布|检查|门禁))?|合入|合并|发布)?"
-    r"\s*(?:$|[，,。；;！!？?、)）\]】\"”'’」』]))|"
+    r"(?:不构成阻断|不作为阻断(?:理由|项|依据)?|不单独(?:判|作为|构成)?阻断)"
+    rf"(?=\s*(?:{_ZH_EXPLICIT_GATE_OBJ_PATTERN})?\s*{_ZH_NON_BLOCKING_TAIL_END_PATTERN})|"
+    rf"不阻断(?=\s*{_ZH_EXPLICIT_GATE_OBJ_PATTERN}\s*{_ZH_NON_BLOCKING_TAIL_END_PATTERN})|"
+    rf"(?P<bare_zh_non_block>不阻断)(?=\s*{_ZH_NON_BLOCKING_TAIL_END_PATTERN})|"
     r"(?<![A-Za-z0-9_])non[-_ ]?blocking(?![A-Za-z0-9_])|"
     r"(?:可选\s*)?建议后续(?:跟进)?|"
     r"(?:可选\s*)?后续跟进|"
@@ -241,6 +244,12 @@ _NON_BLOCKING_BODY_HIT_RE = re.compile(
     r"仅作记录|低优先级"
     r")",
     re.IGNORECASE,
+)
+_ZH_STANDALONE_CLAUSE_BOUNDARY_RE = re.compile(r"[。！？!?；;，,：:（(【\[]")
+_ZH_STANDALONE_VERDICT_PREFIX_RE = re.compile(
+    r"^(?:(?:所以|因此|故此|故|从而|于是|但是|但|不过|然而|暂时|暂|仍然|仍|"
+    r"本条|该条|本项|该项|此项|此问题|该问题|这里|此处|这|目前|当前|因而|"
+    r"均|都|也|亦|先|且|并|属于|属)\s*)*$"
 )
 _BODY_CLAUSE_BOUNDARY_RE = re.compile(r"[。！？!?；;，,]")
 _BODY_CONJUNCTION_RESET_RE = re.compile(
@@ -1655,11 +1664,21 @@ def _is_negated_body_prefix(prefix: str) -> bool:
     return bool(_ZH_BODY_NEGATION_SUFFIX_RE.search(tail) or _EN_BODY_NEGATION_SUFFIX_RE.search(tail))
 
 
+def _is_standalone_zh_verdict_clause_prefix(prefix: str) -> bool:
+    """判断裸“不阻断”所在当前子句前缀是否为独立评审结论位（空或仅含纯评审结论引导词）。"""
+    clause_prefix = _ZH_STANDALONE_CLAUSE_BOUNDARY_RE.split(prefix)[-1].strip()
+    return bool(_ZH_STANDALONE_VERDICT_PREFIX_RE.fullmatch(clause_prefix))
+
+
 def _has_non_blocking_body_signal(text: str) -> bool:
-    return any(
-        not _is_negated_body_prefix(text[: match.start()])
-        for match in _NON_BLOCKING_BODY_HIT_RE.finditer(text)
-    )
+    for match in _NON_BLOCKING_BODY_HIT_RE.finditer(text):
+        prefix = text[: match.start()]
+        if _is_negated_body_prefix(prefix):
+            continue
+        if match.group("bare_zh_non_block") is not None and not _is_standalone_zh_verdict_clause_prefix(prefix):
+            continue
+        return True
+    return False
 
 
 def _tokenize_severity_tag_clause(clause: str) -> list[str]:
