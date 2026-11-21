@@ -264,9 +264,45 @@ def _normalize_line(raw: Any) -> int | None:
     return raw
 
 
+def _normalize_inline_fingerprint_text(chunk: str) -> str:
+    """在单段/块内归一化指纹文本：保留 CommonMark §6.1 行内代码的大小写与内部水平空格，仅对普通叙述折叠空白并转小写。"""
+    out: list[str] = []
+    for seg_kind, seg_raw in _tokenize_inline_clip_segments(chunk):
+        if seg_kind == "code":
+            k = 0
+            while k < len(seg_raw) and seg_raw[k] == "`":
+                k += 1
+            inner = _COMMONMARK_LINE_ENDING_RE.sub("\n", seg_raw[k : len(seg_raw) - k])
+            out.append(_wrap_markdown_code_span(_extract_code_span_text(inner)))
+        else:
+            out.append(re.sub(r"\s+", " ", seg_raw).lower())
+    return "".join(out).strip()
+
+
 def _normalize_fingerprint_text(raw: Any, field_name: str) -> str:
     text = _require_non_empty_str(raw, field_name)
-    return re.sub(r"\s+", " ", text).lower()
+    assert isinstance(raw, str)
+    doc_blocks, _ = _parse_commonmark_blocks(raw, include_all_visible_blocks=True)
+    if not doc_blocks:
+        return _normalize_inline_fingerprint_text(text)
+
+    parts: list[str] = []
+    for kind, block_text in doc_blocks:
+        if kind == "code":
+            code_lines = _split_commonmark_lines(block_text)
+            while code_lines and not code_lines[0].strip(" \t"):
+                code_lines.pop(0)
+            while code_lines and not code_lines[-1].strip(" \t"):
+                code_lines.pop()
+            code_body = "\n".join(code_lines)
+            parts.append(f"\x00code\x00{code_body}\x00")
+        else:
+            norm_block = _normalize_inline_fingerprint_text(block_text)
+            if norm_block:
+                parts.append(norm_block)
+    if not parts:
+        return _normalize_inline_fingerprint_text(text)
+    return " ".join(parts)
 
 
 def _normalize_str_collection(
@@ -4027,6 +4063,10 @@ def _format_location(finding: Finding) -> str:
     return f"{norm_file}:{finding.line}" if finding.line is not None else norm_file
 
 
+def _format_code_location(finding: Finding) -> str:
+    return _wrap_markdown_code_span(_format_location(finding))
+
+
 def _wrap_markdown_code_span(text: str) -> str:
     """按 CommonMark §6.1 用最短安全反引号序列将单行字面文本包裹为行内代码。"""
     single = re.sub(r"[\r\n]+", " ", text)
@@ -4278,21 +4318,11 @@ def _format_inline_markdown_field(text: str, *, collapse_whitespace: bool = Fals
 
     if has_code_block or len(doc_blocks) > 1:
         parts: list[str] = []
-        suppress_state = _HtmlSuppressState(suppressed_tags=_SILENT_INLINE_HTML_TAGS)
-        has_raw_html_block = False
         for kind, block_text in doc_blocks:
             if kind == "html":
-                has_raw_html_block = True
-                visible_chunks: list[str] = []
-                _update_html_suppress_state(block_text, suppress_state, visible_chunks=visible_chunks)
-                html_text = _single_line(" ".join(visible_chunks))
-                if _clean_display_reason(html_text):
-                    if _contains_raw_html_outside_code(html_text) or _has_visible_inline_gfm_text(html_text)[1]:
-                        parts.append(_wrap_markdown_code_span(html_text))
-                    else:
-                        parts.append(_escape_unmatched_backticks(html_text))
-                continue
-            if _is_html_suppressed(suppress_state):
+                html_literal = re.sub(r"[\r\n]+", " ", block_text).strip()
+                if html_literal:
+                    parts.append(_wrap_markdown_code_span(html_literal))
                 continue
             if kind == "code":
                 code_literal = re.sub(r"[\r\n]+", " ", block_text.strip("\r\n"))
@@ -4300,12 +4330,14 @@ def _format_inline_markdown_field(text: str, *, collapse_whitespace: bool = Fals
                     parts.append(_wrap_markdown_code_span(code_literal))
                 continue
             seg = _single_line(block_text)
+            if not seg:
+                continue
             seg_visible, seg_suppressed = _has_visible_inline_gfm_text(seg)
             if seg_visible and not seg_suppressed and not _contains_raw_html_outside_code(seg):
                 parts.append(_escape_unmatched_backticks(seg))
-            elif seg_visible:
+            elif seg_visible or seg_suppressed or _contains_raw_html_outside_code(seg):
                 parts.append(_wrap_markdown_code_span(seg))
-        if parts and not _is_html_suppressed(suppress_state) and (has_code_block or not has_raw_html_block):
+        if parts:
             joined = " ".join(parts)
             joined_visible, joined_suppressed = _has_visible_inline_gfm_text(joined)
             if joined_visible and not joined_suppressed and not _contains_raw_html_outside_code(joined):
@@ -4485,9 +4517,9 @@ def _clip_formatted_inline(formatted: str, max_len: int) -> str:
 def _render_new_blocking_item(vf: VerifiedFinding) -> str:
     f = vf.finding
     fid = f.finding_id
-    loc = _format_location(f)
+    loc = _format_code_location(f)
     lines = [
-        f"- `[{fid}]` `{loc}` — **{_format_inline_markdown_field(f.category)}**",
+        f"- `[{fid}]` {loc} — **{_format_inline_markdown_field(f.category)}**",
         _format_bullet_markdown_field("失败场景：", f.failure_scenario),
         _format_bullet_markdown_field("核实证据：", vf.verifier_evidence),
     ]
@@ -4498,22 +4530,22 @@ def _render_new_blocking_item(vf: VerifiedFinding) -> str:
 
 
 def _render_prior_blocking_summary(prior_blocking: Sequence[VerifiedFinding]) -> str:
-    refs = "、".join(f"`[{vf.finding.finding_id}]` `{_format_location(vf.finding)}`" for vf in prior_blocking)
+    refs = "、".join(f"`[{vf.finding.finding_id}]` {_format_code_location(vf.finding)}" for vf in prior_blocking)
     return f"- 前轮已贴出且仍未解除：{refs}"
 
 
 def _render_minimal_blocking_item(vf: VerifiedFinding) -> str:
     f = vf.finding
-    return f"- `[{f.finding_id}]` `{_format_location(f)}`"
+    return f"- `[{f.finding_id}]` {_format_code_location(f)}"
 
 
 def _render_compact_new_blocking_item(vf: VerifiedFinding) -> str:
     f = vf.finding
     fid = f.finding_id
-    loc = _format_location(f)
+    loc = _format_code_location(f)
     cat = _format_inline_markdown_field(f.category)
     scen = _format_inline_markdown_field(f.failure_scenario)
-    return f"- `[{fid}]` `{loc}` — {cat}：{scen}（回复 `[{fid}] 不修：<理由>`）"
+    return f"- `[{fid}]` {loc} — {cat}：{scen}（回复 `[{fid}] 不修：<理由>`）"
 
 
 _COMPACT_DESC_MAX_CHARS = 400
@@ -4556,9 +4588,9 @@ def _single_line(text: str) -> str:
 def _render_non_blocking_item(vf: VerifiedFinding) -> str:
     f = vf.finding
     fid = f.finding_id
-    loc = _format_location(f)
+    loc = _format_code_location(f)
     lines = [
-        f"- `[{fid}]` [{f.severity.value}] `{loc}` — **{_format_inline_markdown_field(f.category)}**",
+        f"- `[{fid}]` [{f.severity.value}] {loc} — **{_format_inline_markdown_field(f.category)}**",
         _format_bullet_markdown_field("失败场景：", f.failure_scenario),
         _format_bullet_markdown_field("核实证据：", vf.verifier_evidence),
     ]
@@ -4571,8 +4603,8 @@ def _render_compact_non_blocking_item(vf: VerifiedFinding, max_item_chars: int) 
     """在预算受限时将超长非阻断项降级为紧凑单行版，避免单条超长证据导致整条蒸发。"""
     f = vf.finding
     fid = f.finding_id
-    loc = _format_location(f)
-    base = f"- `[{fid}]` [{f.severity.value}] `{loc}`"
+    loc = _format_code_location(f)
+    base = f"- `[{fid}]` [{f.severity.value}] {loc}"
     if len(base) > max_item_chars:
         return None
 
@@ -4732,7 +4764,7 @@ def render_findings_comment(
                 if vf.author_reply is not None
                 else ""
             )
-            disp_label = f"`[{vf.finding.finding_id}]` `{_format_location(vf.finding)}` — {label}{reply_note}："
+            disp_label = f"`[{vf.finding.finding_id}]` {_format_code_location(vf.finding)} — {label}{reply_note}："
             disposition_lines.append(
                 _format_bullet_markdown_field(
                     disp_label,
@@ -4742,7 +4774,7 @@ def render_findings_comment(
                 )
             )
         for vf in decision.rejected_findings:
-            disp_label = f"`[{vf.finding.finding_id}]` `{_format_location(vf.finding)}` — 核实驳回："
+            disp_label = f"`[{vf.finding.finding_id}]` {_format_code_location(vf.finding)} — 核实驳回："
             disposition_lines.append(
                 _format_bullet_markdown_field(
                     disp_label,

@@ -28,12 +28,22 @@ from pilot1742.review_convergence import (
     _clip_formatted_inline,
     _contains_raw_html_outside_code,
     _escape_unmatched_backticks,
+    _extract_code_span_text,
+    _format_code_location,
     _format_inline_markdown_field,
     _format_nested_fenced_code,
     _has_visible_gfm_text,
     _leaves_html_suppressed,
+    _normalize_fingerprint_text,
     _parse_commonmark_blocks,
+    _render_compact_new_blocking_item,
+    _render_compact_non_blocking_item,
+    _render_minimal_blocking_item,
+    _render_new_blocking_item,
+    _render_non_blocking_item,
+    _render_prior_blocking_summary,
     _single_line,
+    _tokenize_inline_clip_segments,
     accept_quick_pass_findings,
     bind_author_replies,
     build_round_candidates,
@@ -8404,3 +8414,264 @@ def test_r19_single_line_preserves_inline_code_span_whitespace_in_compact_mode()
     compact_imp = render_findings_comment(1928, HEAD_1, dec_imp, max_chars=full_imp_len - 80)
     assert compact_imp.truncated
     assert f"Run `{code}`" in compact_imp.body
+
+
+# ── R20 精准回归（Codex R18 全部 3 项 Important）──────────────────────────────────
+
+
+def test_r20_important1_fingerprint_preserves_code_case_and_whitespace() -> None:
+    """R20 Important 1：指纹归一化保留行内代码与代码块大小写及内部水平空格，仅对普通叙述折叠空白并转小写。"""
+    # 1. Codex R18 最小复现：GET `/A` returns 500 (line 10) 与 GET `/a` returns 500 (line 42) 不得误合并
+    f_upper = _finding(
+        severity=Severity.IMPORTANT,
+        file="pilot1742/routes.py",
+        line=10,
+        category="http-500",
+        failure_scenario="GET `/A` returns 500",
+        evidence="uppercase route crashes",
+    )
+    f_lower = _finding(
+        severity=Severity.IMPORTANT,
+        file="pilot1742/routes.py",
+        line=42,
+        category="http-500",
+        failure_scenario="GET `/a` returns 500",
+        evidence="lowercase route crashes",
+    )
+    assert f_upper.finding_id != f_lower.finding_id
+    merged_distinct = merge_and_dedupe_findings([("gpt-6-astra", [f_upper, f_lower])])
+    assert len(merged_distinct) == 2
+    assert {item.line for item in merged_distinct} == {10, 42}
+    assert {item.failure_scenario for item in merged_distinct} == {"GET `/A` returns 500", "GET `/a` returns 500"}
+
+    # 2. 叙述文本大小写与多空白仍正常去重
+    f_upper_prose_variant = _finding(
+        severity=Severity.IMPORTANT,
+        file="pilot1742/routes.py",
+        line=10,
+        category="HTTP-500",
+        failure_scenario="get  `/A`  Returns   500",
+        evidence="same uppercase route",
+    )
+    assert f_upper.finding_id == f_upper_prose_variant.finding_id
+    merged_same = merge_and_dedupe_findings(
+        [("gpt-6-astra", [f_upper]), ("gpt-6.1-sol", [f_upper_prose_variant])]
+    )
+    assert len(merged_same) == 1
+    assert merged_same[0].source_models == ("gpt-6-astra", "gpt-6.1-sol")
+
+    # 3. 缩进代码块与围栏代码块保留大小写与内部水平空格
+    indented_a = '    assert "A" == "a"'
+    indented_b = '    assert "a" == "a"'
+    assert fingerprint("pilot1742/a.py", "bug", indented_a) != fingerprint("pilot1742/a.py", "bug", indented_b)
+
+    fenced_a = '```\nassert "A" == "a"\n```'
+    fenced_b = '```\nassert "a" == "a"\n```'
+    assert fingerprint("pilot1742/a.py", "bug", fenced_a) != fingerprint("pilot1742/a.py", "bug", fenced_b)
+    assert fingerprint("pilot1742/a.py", "bug", indented_a) == fingerprint("pilot1742/a.py", "bug", fenced_a)
+
+    assert fingerprint("pilot1742/a.py", "bug", '    assert "a  b"') != fingerprint(
+        "pilot1742/a.py", "bug", '    assert "a b"'
+    )
+
+    # 4. 行内代码保留内部水平空格，且 CommonMark §6.1 等价定界符归一到同指纹
+    assert fingerprint("pilot1742/a.py", "bug", 'Run `assert "a  b"`') != fingerprint(
+        "pilot1742/a.py", "bug", 'Run `assert "a b"`'
+    )
+    assert fingerprint("pilot1742/a.py", "bug", "GET `/A` returns 500") == fingerprint(
+        "pilot1742/a.py", "bug", "get `` /A `` returns 500"
+    )
+
+    # 5. 普通纯叙述与退化分隔线输入保持既有归一化语义
+    assert _normalize_fingerprint_text("Race  Condition", "category") == "race condition"
+    assert _normalize_fingerprint_text("---", "category") == "---"
+
+
+def test_r20_important2_inline_markdown_preserves_html_blocks_alongside_code_blocks() -> None:
+    """R20 Important 2：含代码块时不再静默丢弃同字段中的原始 HTML 块，改为隔离为可见行内代码字面量。"""
+    repro = "Repro:\n\n<!-- REQUIRED -->\n\n    check()"
+
+    # 1. Codex R18 最小复现：_format_inline_markdown_field 同时保留 HTML 注释与缩进代码块
+    formatted = _format_inline_markdown_field(repro)
+    assert formatted == "Repro: `<!-- REQUIRED -->` `check()`"
+    assert not _contains_raw_html_outside_code(formatted)
+    assert not _leaves_html_suppressed(formatted)
+
+    # 2. 变体：HTML 块内部双空格、反引号、未闭合 HTML 块、表格单元格内纯 HTML、段落内 <script> 均安全隔离保留
+    assert (
+        _format_inline_markdown_field("Repro:\n\n<!-- a  b -->\n\n    check()")
+        == "Repro: `<!-- a  b -->` `check()`"
+    )
+    assert (
+        _format_inline_markdown_field("Repro:\n\n<!-- `tick` -->\n\n    check()")
+        == "Repro: ``<!-- `tick` -->`` `check()`"
+    )
+    unclosed_fmt = _format_inline_markdown_field("Repro:\n\n<!-- OPEN\n\n    check()")
+    assert "<!-- OPEN" in unclosed_fmt
+    assert "check()" in unclosed_fmt
+    assert not _contains_raw_html_outside_code(unclosed_fmt)
+    assert not _leaves_html_suppressed(unclosed_fmt)
+
+    table_html_fmt = _format_inline_markdown_field("| h1 | h2 |\n| --- | --- |\n| <!-- CELL --> | ok |")
+    assert "`<!-- CELL -->`" in table_html_fmt
+    assert "ok" in table_html_fmt
+    assert not _contains_raw_html_outside_code(table_html_fmt)
+
+    script_para_fmt = _format_inline_markdown_field("See <script>x</script>\n\n    check()")
+    assert "`See <script>x</script>` `check()`" == script_para_fmt
+    assert not _contains_raw_html_outside_code(script_para_fmt)
+
+    # 3. 放入已确认 Important（evidence='E'*900, max_chars=400），评论源码同时可见 <!-- REQUIRED --> 与 check()
+    f_imp = _finding(
+        severity=Severity.IMPORTANT,
+        file="pilot1742/demo.py",
+        line=42,
+        category="html-block",
+        failure_scenario=repro,
+        evidence="E" * 900,
+    )
+    cand = _candidates([f_imp])
+    vr = parse_verifier_output(
+        _verifier_payload(cand, [{"finding_id": f_imp.finding_id, "verdict": "confirmed", "verifier_evidence": "E" * 900}]),
+        cand,
+        verifier_model="claude-opus-5-5",
+    )
+    dec = evaluate_round(vr)
+    rendered = render_findings_comment(1928, HEAD_1, dec, max_chars=400)
+    assert rendered.truncated
+    assert len(rendered.body) <= 400
+    assert "Repro: `<!-- REQUIRED -->` `check()`" in rendered.body
+    body_after_marker = "\n".join(rendered.body.split("\n")[1:])
+    assert not _contains_raw_html_outside_code(body_after_marker)
+    assert not _leaves_html_suppressed(rendered.body)
+
+
+def test_r20_important3_code_locations_safely_wrap_backtick_filenames() -> None:
+    """R20 Important 3：全部 7 处评论位置渲染点统一复用 _format_code_location，精确保全含反引号合法文件名。"""
+
+    def extract_code_spans(line: str) -> list[str]:
+        spans: list[str] = []
+        for kind, raw in _tokenize_inline_clip_segments(line):
+            if kind == "code":
+                k = 0
+                while k < len(raw) and raw[k] == "`":
+                    k += 1
+                spans.append(_extract_code_span_text(raw[k : len(raw) - k]))
+        return spans
+
+    # 1. 普通路径与多种反引号边界路径
+    f_plain = _finding(file="pilot1742/demo.py", line=42)
+    assert _format_code_location(f_plain) == "`pilot1742/demo.py:42`"
+
+    cases = (
+        ("docs/a`b.md", 42, "``docs/a`b.md:42``", "docs/a`b.md:42"),
+        ("`a.md", 42, "`` `a.md:42 ``", "`a.md:42"),
+        ("a.md`", None, "`` a.md` ``", "a.md`"),
+        ("docs/a``b.md", 42, "```docs/a``b.md:42```", "docs/a``b.md:42"),
+    )
+    for raw_file, raw_line, expected_md, expected_plain in cases:
+        f_case = _finding(file=raw_file, line=raw_line)
+        rendered_loc = _format_code_location(f_case)
+        assert rendered_loc == expected_md
+        assert extract_code_spans(rendered_loc) == [expected_plain]
+
+    # 2. 全部 7 处位置渲染点逐一验证 docs/a`b.md:42 精确保真
+    f_bt = _finding(
+        severity=Severity.IMPORTANT,
+        file="docs/a`b.md",
+        line=42,
+        category="backtick-path",
+        failure_scenario="含反引号路径触发解析问题",
+        evidence="确认路径含反引号",
+    )
+    vf_imp = _verified(f_bt, VerificationVerdict.CONFIRMED)
+    expected_loc_plain = "docs/a`b.md:42"
+    expected_loc_md = "``docs/a`b.md:42``"
+
+    # (1) _render_new_blocking_item
+    item_new = _render_new_blocking_item(vf_imp)
+    assert expected_loc_md in item_new.split("\n")[0]
+    assert expected_loc_plain in extract_code_spans(item_new.split("\n")[0])
+
+    # (2) _render_prior_blocking_summary
+    item_prior = _render_prior_blocking_summary([vf_imp])
+    assert expected_loc_md in item_prior
+    assert expected_loc_plain in extract_code_spans(item_prior)
+
+    # (3) _render_minimal_blocking_item
+    item_min = _render_minimal_blocking_item(vf_imp)
+    assert expected_loc_md in item_min
+    assert expected_loc_plain in extract_code_spans(item_min)
+
+    # (4) _render_compact_new_blocking_item
+    item_compact_imp = _render_compact_new_blocking_item(vf_imp)
+    assert expected_loc_md in item_compact_imp
+    assert expected_loc_plain in extract_code_spans(item_compact_imp)
+
+    # (5) _render_non_blocking_item & (6) _render_compact_non_blocking_item
+    f_bt_nit = _finding(
+        severity=Severity.NIT,
+        file="docs/a`b.md",
+        line=42,
+        category="backtick-nit",
+        failure_scenario="非阻断反引号路径",
+        evidence="非阻断证据",
+    )
+    vf_nit = _verified(f_bt_nit, VerificationVerdict.CONFIRMED)
+    item_nb = _render_non_blocking_item(vf_nit)
+    assert expected_loc_md in item_nb.split("\n")[0]
+    assert expected_loc_plain in extract_code_spans(item_nb.split("\n")[0])
+
+    item_compact_nb = _render_compact_non_blocking_item(vf_nit, 200)
+    assert item_compact_nb is not None
+    assert expected_loc_md in item_compact_nb
+    assert expected_loc_plain in extract_code_spans(item_compact_nb)
+
+    # (7) render_findings_comment 的 disposition_lines（RESOLVED_BY_FIX / RESOLVED_BY_WONTFIX / REJECTED）
+    f_bt_fix = _finding(severity=Severity.IMPORTANT, file="docs/a`b.md", line=11, category="fix-bt")
+    f_bt_wf = _finding(severity=Severity.IMPORTANT, file="`a.md", line=22, category="wf-bt")
+    f_bt_rej = _finding(severity=Severity.IMPORTANT, file="docs/a``b.md", line=33, category="rej-bt")
+    reply_wf = AuthorReply(
+        comment_id="c-r20-wf",
+        author="alice",
+        finding_id=f_bt_wf.finding_id,
+        file=None,
+        line=None,
+        reason="保留现有文件名",
+    )
+    e1_prev = RoundHistoryEntry(
+        1,
+        HEAD_1,
+        frozenset({f_bt_fix.finding_id, f_bt_wf.finding_id}),
+        (f_bt_fix, f_bt_wf),
+        panel=DEFAULT_PANEL,
+        finder_session_ids=frozenset({"r1-bt-1", "r1-bt-2"}),
+    )
+    cand_disp = build_round_candidates(
+        round_number=2,
+        head_sha=HEAD_2,
+        panel=DEFAULT_PANEL,
+        finder_batches=_batches_for_panel([f_bt_rej], round_number=2, head_sha=HEAD_2),
+        history=(e1_prev,),
+    )
+    vr_disp = parse_verifier_output(
+        _verifier_payload(
+            cand_disp,
+            [
+                {"finding_id": f_bt_fix.finding_id, "verdict": "resolved_by_fix", "verifier_evidence": "已修复"},
+                {"finding_id": f_bt_wf.finding_id, "verdict": "resolved_by_wontfix", "verifier_evidence": "确认不修"},
+                {"finding_id": f_bt_rej.finding_id, "verdict": "rejected", "verifier_evidence": "误报"},
+            ],
+        ),
+        cand_disp,
+        verifier_model="claude-opus-5-5",
+        author_replies=[reply_wf],
+    )
+    rendered_disp = render_findings_comment(1928, HEAD_2, evaluate_round(vr_disp))
+    assert "``docs/a`b.md:11``" in rendered_disp.body
+    assert "`` `a.md:22 ``" in rendered_disp.body
+    assert "```docs/a``b.md:33```" in rendered_disp.body
+    all_disp_spans = [span for ln in rendered_disp.body.split("\n") for span in extract_code_spans(ln)]
+    assert "docs/a`b.md:11" in all_disp_spans
+    assert "`a.md:22" in all_disp_spans
+    assert "docs/a``b.md:33" in all_disp_spans
