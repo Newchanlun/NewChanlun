@@ -589,6 +589,10 @@ def rebind_attempts():
         save(handoff(1))
         assert '原 X 库' in refused(argv(True))
         assert not db.exists() and not Path(str(db)+'.writer.lock').exists()
+        db.touch()
+        refused(argv(True))
+        assert db.read_bytes()==b''
+        db.rename(ROOT/'uninitialized.db')
         p=start()
         observed,ready,lost,pending=map(cmd,['o','a','b','next'])
         for val in (observed,ready,lost,pending):
@@ -631,6 +635,11 @@ def rebind_attempts():
         with sqlite3.connect(legacy) as conn: legacy_before=list(conn.iterdump())
         save(handoff(1))
         assert '就地升级' in refused(argv(True,legacy,legacy_profile))
+        edited_outer=copy.deepcopy(outer)
+        edited_outer['history_simulation']['deployment']['db']=str(legacy)
+        edited_profile=ROOT/'attempted-upgrade.json'
+        edited_profile.write_text(canonical(edited_outer))
+        assert '禁止切换部署合同版本' in refused(argv(True,legacy,edited_profile))
         with sqlite3.connect(legacy) as conn: assert legacy_before==list(conn.iterdump())
         print('authority_rebind_rejects_invalid_transition: malformed/old/query/wrong S context/no X DB rejected without writes')
 
@@ -694,6 +703,7 @@ def rebind_attempts():
         assert s.calls[-1]['op']=='RequestConditionalExecution' and s.calls[-1]['authority_epoch']=='3'
         assert len(s.records)==4 and len(s.calls)==call_count+1
         stop_x(p); p=None; audit()
+        before=dump(); save(combined); refused(argv(True)); assert dump()==before
         # 新旧向量中的 E 代可能相同，仍不能把旧事件改标为另一绑定。
         with sqlite3.connect(db) as conn:
             conn.execute("UPDATE x_authority_events SET binding_seq=1 WHERE command_id='o' AND phase='accept'")

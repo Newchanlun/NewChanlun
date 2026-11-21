@@ -846,8 +846,10 @@ fn workload(
         assert_eq!(current, received);
         assert_eq!(current["writer_epoch"], "2");
         let after = business(&edb, "deployment");
-        for t in ["commits", "receipts", "facts", "tokens"] {
-            assert_eq!(after[t], ebefore[t], "{t} changed during E recovery");
+        for (table, before) in ebefore.as_object().unwrap() {
+            if !matches!(table.as_str(), "meta" | "epochs") {
+                assert_eq!(&after[table], before, "{table} changed during E recovery");
+            }
         }
         assert_eq!(std::fs::read(&ec_manifest).unwrap(), manifest_bytes);
         *e_service = spawn_domain(&edb, &ec_manifest, false, "2", "2");
@@ -1089,10 +1091,14 @@ fn workload(
             .arg("--recovery-request")
             .arg(&p2)));
             assert_eq!(now["writer_epoch"], "3");
-            assert_refused(
+            let stale = run_refusal(
                 domain_command("current-recovery", &edb, &ec_manifest, false)
                     .arg("--recovery-request")
                     .arg(&p1),
+            );
+            assert!(
+                !stale.status.success()
+                    && String::from_utf8_lossy(&stale.stderr).contains("StaleWriter")
             );
             assert_eq!(
                 successful_json(run(domain_command(
@@ -1144,13 +1150,11 @@ fn workload(
     assert_eq!(bx["profile_mode"], "simulation");
     if recovery.is_some() {
         let archive = tempfile::tempdir().unwrap();
-        for suffix in ["", "-wal", "-shm"] {
-            let path = space.path(&format!("x.db{suffix}"));
-            if path.exists() {
-                std::fs::rename(path, archive.path().join(format!("x.db{suffix}"))).unwrap();
-            }
-        }
-        let relocated = archive.path().join("x.db");
+        let offline = archive.path().join("formerly-online");
+        let original = space.0.path().canonicalize().unwrap();
+        std::fs::rename(&original, &offline).unwrap();
+        assert!(!original.exists(), "原 X/E/S 部署必须不可访问");
+        let relocated = offline.join("x.db");
         assert_eq!(
             successful_json(run(Command::new(x_bin())
                 .arg("audit")

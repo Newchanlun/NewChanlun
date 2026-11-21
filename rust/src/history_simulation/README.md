@@ -177,15 +177,15 @@ S 使用 `s-recovery/1` 回执里的冻结 config。未声明这组字段的既�
 受控装配先对每个选中域执行它的正式 `current-recovery` 并确认该域按获准代启动，
 再以仅启动方可访问的普通文件通过 `serve --authority-rebind FILE` 转交：
 
-```json
-{
-  "schema_revision": "x-authority-rebind-input/1",
-  "domains": ["E"],
-  "e": {"verification": "current-recovery", "db": "/deployment/e.db", "receipt": {}}
-}
+```sh
+handoff=$(mktemp)
+jq -n --arg db "$e_db" --slurpfile current "$verified_e_receipt" '{
+  schema_revision:"x-authority-rebind-input/1", domains:["E"],
+  e:{verification:"current-recovery", db:$db, receipt:$current[0]}
+}' > "$handoff"
 ```
 
-上例 `receipt` 位置必须放原 CLI 的完整 `NamedRecoveryReceipt`。两域同换写
+`verified_e_receipt` 是正式 CLI 已通过验真的完整 `NamedRecoveryReceipt` 文件。两域同换写
 `domains: ["E","S"]` 并同时提供 `e`、`s`，顺序和缺项都检查。启动端以 E
 原库作只读复核；S 核验由域的准入和可信装配负责。该输入不对接客 socket 开放。
 X 持原锁提交单条 `x-authority-binding/1`，之后才开放交换；部署路径不落业务履历。
