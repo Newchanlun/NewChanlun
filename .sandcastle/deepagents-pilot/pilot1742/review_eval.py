@@ -66,7 +66,6 @@ _CM_HTML_TYPE7_START_RE = re.compile(
     r"[ \t]*/?>|</[A-Za-z][A-Za-z0-9-]*[ \t]*>)[ \t]*$"
 )
 _CM_ASCII_PUNCT: frozenset[str] = frozenset("!\"#$%&'()*+,-./:;<=>?@[\\]^_`{|}~")
-_CM_REAL_LINK_DEST_CHAR_RE = re.compile(r"[/\\#?:.@]")
 _INLINE_MASK_PLACEHOLDER = " \x01 "
 _CM_URI_AUTOLINK_RE = re.compile(r"<[A-Za-z][A-Za-z0-9+.-]{1,31}:[^\x00-\x20\x7f<>]*>")
 _CM_EMAIL_AUTOLINK_RE = re.compile(
@@ -1691,8 +1690,8 @@ def _cm_parse_link_title(buf: str, start: int) -> int | None:
     return None
 
 
-def _cm_parse_ref_label_brackets(buf: str, start: int) -> tuple[int, str] | None:
-    """按 CommonMark §4.7 解析 `[label]` 链接标签，返回 (闭合 `]` 之后下标, 规范化标签)；失败返回 None。"""
+def _cm_scan_bracket_label(buf: str, start: int) -> tuple[int, str | None] | None:
+    """按 CommonMark §4.7/§6.3 扫描无嵌套方括号 `[...]`（至多 999 字符），返回 (闭合 `]` 之后下标, 规范化标签或 None)。"""
     n = len(buf)
     if start >= n or buf[start] != "[":
         return None
@@ -1721,12 +1720,20 @@ def _cm_parse_ref_label_brackets(buf: str, start: int) -> tuple[int, str] | None
             label_chars += 1
         if label_chars > 999:
             return None
-    if i >= n or buf[i] != "]" or label_chars == 0 or not has_non_ws:
+    if i >= n or buf[i] != "]":
         return None
+    if label_chars == 0 or not has_non_ws:
+        return (i + 1, None)
     norm_label = _normalize_markdown_link_label(buf[start + 1 : i])
-    if not norm_label:
+    return (i + 1, norm_label or None)
+
+
+def _cm_parse_ref_label_brackets(buf: str, start: int) -> tuple[int, str] | None:
+    """按 CommonMark §4.7 解析 `[label]` 链接标签，返回 (闭合 `]` 之后下标, 规范化标签)；失败返回 None。"""
+    scanned = _cm_scan_bracket_label(buf, start)
+    if scanned is None or scanned[1] is None:
         return None
-    return (i + 1, norm_label)
+    return (scanned[0], scanned[1])
 
 
 def _cm_parse_link_ref_def_at(buf: str, pos: int) -> tuple[int, str, str, bool, bool] | None:
@@ -1873,12 +1880,6 @@ def _cm_flush_paragraph_link_defs(
             is_angle_dest=is_angle_dest,
             has_title=has_title,
         )
-        is_first_visible_candidate = (
-            (not out_visible_chunks) if out_visible_chunks is not None else (ref_def.start_line_idx == 0)
-        )
-        if is_first_visible_candidate and not _is_real_markdown_link_destination(ref_def):
-            # 首个可见正文位置无真实链接目标（如 `[P1]: 阻断说明`），按普通段落正文保留，不作 §4.7 链接定义剥离
-            break
         out_defs.append(ref_def)
         pos = next_pos
 
@@ -2169,13 +2170,6 @@ def _parse_commonmark_blocks(text: str) -> tuple[list[_CmLinkRefDef], tuple[str,
     return (out_defs, tuple(visible_chunks))
 
 
-def _is_real_markdown_link_destination(ref_def: _CmLinkRefDef) -> bool:
-    """判断首个候选位置上的定义是否带真实链接目标（排除首行 `[P1]: 阻断说明` 这类中文冒号说明）。"""
-    if ref_def.is_angle_dest or ref_def.has_title:
-        return True
-    return bool(_CM_REAL_LINK_DEST_CHAR_RE.search(ref_def.destination))
-
-
 def _extract_markdown_link_refs_and_visible_blocks(
     text: str,
 ) -> tuple[dict[str, tuple[int, ...]], tuple[str, ...]]:
@@ -2240,41 +2234,6 @@ def _cm_match_autolink_or_inline_html(buf: str, start: int) -> int | None:
         m = pattern.match(buf, start)
         if m is not None:
             return m.end()
-    return None
-
-
-def _cm_find_matching_bracket(buf: str, start: int) -> int | None:
-    """查找从 `[` 开始的配对 `]`（跳过反斜杠转义、代码跨度、自动链接/行内 HTML 与嵌套平衡方括号）。"""
-    n = len(buf)
-    if start >= n or buf[start] != "[":
-        return None
-    i = start + 1
-    depth = 1
-    while i < n:
-        ch = buf[i]
-        if ch == "\\" and i + 1 < n and buf[i + 1] in _CM_ASCII_PUNCT:
-            i += 2
-            continue
-        if ch == "`":
-            code_end = _cm_find_code_span_end(buf, i)
-            if code_end is not None:
-                i = code_end
-                continue
-            while i < n and buf[i] == "`":
-                i += 1
-            continue
-        if ch == "<":
-            html_end = _cm_match_autolink_or_inline_html(buf, i)
-            if html_end is not None:
-                i = html_end
-                continue
-        if ch == "[":
-            depth += 1
-        elif ch == "]":
-            depth -= 1
-            if depth == 0:
-                return i
-        i += 1
     return None
 
 
@@ -2347,9 +2306,18 @@ def _cm_parse_inline_link_tail(buf: str, start: int) -> int | None:
     return None
 
 
+@dataclass
+class _BracketOpener:
+    is_image: bool
+    out_start: int
+    src_pos: int
+    active: bool = True
+
+
 def _mask_inline_non_prose_in_block(block: str, defined_link_refs: AbstractSet[str]) -> str:
-    """在单个可见块内部从左到右单遍屏蔽行内非正文结构（代码跨度/自动链接/行内 HTML/图片/链接）。"""
+    """在单个可见块内按 CommonMark §6.3 括号定界符栈从左到右屏蔽行内非正文结构（代码跨度/自动链接/行内 HTML/图片/链接）。"""
     out: list[str] = []
+    openers: list[_BracketOpener] = []
     i = 0
     n = len(block)
     while i < n:
@@ -2359,7 +2327,7 @@ def _mask_inline_non_prose_in_block(block: str, defined_link_refs: AbstractSet[s
             out.append(block[i : i + 2])
             i += 2
             continue
-        # 2) CommonMark §6.1 行内代码跨度：替换为隔离占位符；未闭合反引号原样保留
+        # 2) CommonMark §6.1 行内代码跨度：替换为隔离占位符（吞掉内部方括号）；未闭合反引号原样保留
         if ch == "`":
             code_end = _cm_find_code_span_end(block, i)
             if code_end is not None:
@@ -2379,49 +2347,72 @@ def _mask_inline_non_prose_in_block(block: str, defined_link_refs: AbstractSet[s
                 out.append(_INLINE_MASK_PLACEHOLDER)
                 i = html_end
                 continue
-        # 4) Markdown 图片 `![...]` 与链接 `[...]`（仅在当前块内合法闭合）
-        bracket_start: int | None = None
+        # 4) 图片起始 `![`
         if ch == "!" and i + 1 < n and block[i + 1] == "[":
-            bracket_start = i + 1
-        elif ch == "[":
-            bracket_start = i
-        if bracket_start is not None:
-            close_idx = _cm_find_matching_bracket(block, bracket_start)
-            if close_idx is not None:
-                after = close_idx + 1
-                # 4a) 内联链接/图片 [label](dest optional-title)
-                if after < n and block[after] == "(":
-                    inline_end = _cm_parse_inline_link_tail(block, after)
-                    if inline_end is not None:
-                        out.append(_INLINE_MASK_PLACEHOLDER)
-                        i = inline_end
-                        continue
-                # 4b) 折叠引用链接/图片 [label][]
-                elif after + 1 < n and block[after : after + 2] == "[]":
-                    label_parsed = _cm_parse_ref_label_brackets(block, bracket_start)
-                    if label_parsed is not None and label_parsed[0] == after and label_parsed[1] in defined_link_refs:
-                        out.append(_INLINE_MASK_PLACEHOLDER)
-                        i = after + 2
-                        continue
-                # 4c) 完整引用链接/图片 [label][ref]
-                elif after < n and block[after] == "[":
-                    ref_parsed = _cm_parse_ref_label_brackets(block, after)
-                    if ref_parsed is not None and ref_parsed[1] in defined_link_refs:
-                        out.append(_INLINE_MASK_PLACEHOLDER)
-                        i = ref_parsed[0]
-                        continue
-                # 4d) 快捷引用链接/图片 [label]（非后接 `(`/`[`）
+            openers.append(_BracketOpener(is_image=True, out_start=len(out), src_pos=i + 1, active=True))
+            out.append("![")
+            i += 2
+            continue
+        # 5) 链接起始 `[`
+        if ch == "[":
+            openers.append(_BracketOpener(is_image=False, out_start=len(out), src_pos=i, active=True))
+            out.append("[")
+            i += 1
+            continue
+        # 6) 闭合 `]`：按 CommonMark §6.3/§6.5 依次尝试内联、折叠引用、完整引用、快捷引用
+        if ch == "]":
+            if not openers:
+                out.append("]")
+                i += 1
+                continue
+            opener = openers.pop()
+            if not opener.active:
+                out.append("]")
+                i += 1
+                continue
+            after = i + 1
+            matched_end: int | None = None
+            # 6a) 内联链接/图片 [text](dest optional-title)
+            if after < n and block[after] == "(":
+                matched_end = _cm_parse_inline_link_tail(block, after)
+            # 6b) 折叠引用链接/图片 [label][]
+            if matched_end is None and after + 1 < n and block[after : after + 2] == "[]":
+                label_parsed = _cm_parse_ref_label_brackets(block, opener.src_pos)
+                if (
+                    label_parsed is not None
+                    and label_parsed[0] == after
+                    and label_parsed[1] in defined_link_refs
+                ):
+                    matched_end = after + 2
+            elif matched_end is None:
+                # 6c) 完整引用链接/图片 [text][ref]（按 §6.3，后接合法 `[...]` 形态但未定义时不回退快捷引用）
+                ref_scanned = _cm_scan_bracket_label(block, after) if after < n and block[after] == "[" else None
+                if ref_scanned is not None:
+                    if ref_scanned[1] is not None and ref_scanned[1] in defined_link_refs:
+                        matched_end = ref_scanned[0]
                 else:
-                    label_parsed = _cm_parse_ref_label_brackets(block, bracket_start)
+                    # 6d) 快捷引用链接/图片 [label]（含 6a 内联 `(...)` 失败或后接非合法标签 `[` 的回退）
+                    label_parsed = _cm_parse_ref_label_brackets(block, opener.src_pos)
                     if (
                         label_parsed is not None
                         and label_parsed[0] == after
                         and label_parsed[1] in defined_link_refs
                     ):
-                        out.append(_INLINE_MASK_PLACEHOLDER)
-                        i = after
-                        continue
-        # 5) 其余普通正文字符原样输出
+                        matched_end = after
+            if matched_end is not None:
+                del out[opener.out_start :]
+                out.append(_INLINE_MASK_PLACEHOLDER)
+                if not opener.is_image:
+                    # CommonMark §6.3：链接不得嵌套链接；内层链接闭合后令栈中所有外层 `[` 失效（图片 `![` 保持有效）
+                    for outer in openers:
+                        if not outer.is_image:
+                            outer.active = False
+                i = matched_end
+                continue
+            out.append("]")
+            i += 1
+            continue
+        # 7) 其余普通正文字符原样输出
         out.append(ch)
         i += 1
     return "".join(out)
@@ -2443,16 +2434,9 @@ def _parse_leading_severity_tag(
         effective_blocks = visible_blocks
 
     first_visible = next((blk for blk in effective_blocks if blk.strip()), None)
-    if first_visible is not None:
-        masked_target = _mask_inline_non_prose_in_block(first_visible, effective_refs)
-    elif effective_refs:
-        first_nonblank = next((ln.content for ln in _split_commonmark_lines(text) if ln.content.strip(" \t")), "")
-        indent_cols, _, _, _ = _cm_skip_ws_cols(first_nonblank, 0, 0, 0)
-        if indent_cols >= 4:
-            return None
-        masked_target = _mask_inline_non_prose_in_block(text, frozenset())
-    else:
+    if first_visible is None:
         return None
+    masked_target = _mask_inline_non_prose_in_block(first_visible, effective_refs)
 
     cleaned = masked_target.lstrip()
     while True:
@@ -2896,9 +2880,10 @@ def analyze_review_runs(
             if receipt_blocking_findings > 0:
                 run_blocking_by_key.append((receipt_key, receipt_blocking_findings))
 
-        target_source = target_data or outcome_target
-        reg_raw = target_source.get("registered_at_ns") if isinstance(target_source, dict) else None
-        has_valid_ts = isinstance(reg_raw, int) and not isinstance(reg_raw, bool) and reg_raw > 0
+        t_reg, t_reg_bad = _parse_optional_positive_int_field(target_data, "registered_at_ns")
+        ot_reg, ot_reg_bad = _parse_optional_positive_int_field(outcome_target, "registered_at_ns")
+        reg_values = {v for v in (t_reg, ot_reg) if v is not None}
+        has_valid_ts = not t_reg_bad and not ot_reg_bad and len(reg_values) == 1
         if run_pr_number is None or not has_valid_ts:
             unorderable_runs += 1
             if run_pr_number is not None and verdict == "PASS":
@@ -2907,13 +2892,18 @@ def analyze_review_runs(
                 unorderable_block_by_receipt_key.extend(run_blocking_by_key)
             continue
 
-        assert isinstance(target_source, dict)
-        assert isinstance(reg_raw, int)
-        att_raw = target_source.get("attempt")
-        attempt = att_raw if isinstance(att_raw, int) and not isinstance(att_raw, bool) else 0
+        resolved_reg_at_ns = next(iter(reg_values))
+        t_att_raw = target_data.get("attempt") if target_data is not None else None
+        ot_att_raw = outcome_target.get("attempt") if outcome_target is not None else None
+        if isinstance(t_att_raw, int) and not isinstance(t_att_raw, bool):
+            attempt = t_att_raw
+        elif isinstance(ot_att_raw, int) and not isinstance(ot_att_raw, bool):
+            attempt = ot_att_raw
+        else:
+            attempt = 0
         pr_timeline[run_pr_number].append(
             _RunTimelineRecord(
-                registered_at_ns=reg_raw,
+                registered_at_ns=resolved_reg_at_ns,
                 attempt=attempt,
                 dir_name=run_dir.name,
                 head_sha=dir_head_sha,
