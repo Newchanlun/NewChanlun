@@ -5,7 +5,7 @@ Drives real compiled Linux binaries (`production_session`, `s_structure_session`
 `e_economic_session`, `b_chong_session`, `x_execution_session`) over Unix sockets
 in isolated temp directories:
   - Arm 1 (`ce_s07_main_lifecycle`):
-      tb03b-finance/6 + fx-valuation/2 + x-execution-profile/3 + logical-bar/1 + s-session/3.
+      tb03b-finance/6 + fx-valuation/2 + x-execution-profile/4 + logical-bar/1 + s-session/3.
       Verifies E cut 10 = 90/100 (r1), 9 pre-release tamper/drop/placeholder negative controls,
       cut 11 alpha release + real X AcceptExact (no fake S stub), cut 12 r2 = 110/100 +
       original receipt priority (same/new message_id) + beta/gamma blocked, cut 15 r3 + r2
@@ -25,6 +25,7 @@ in isolated temp directories:
   - Arm 5: single/batched commands at the same r2 overcap cut and original alpha receipt.
   - Arm 6 (with --parent-bin): first imports on a non-empty FIN/6+FX/1 parent DB,
       cold replay of the parent release, and exact parent/candidate reply comparisons.
+      Extra X/3 cases use three parent-written archives with same-name static evidence.
   - Regressions: static rule and evidence names identical to the FX/2 marker (with --parent-bin);
       two delimiter-bearing quote sources; and separate `:latest:` evidence and boundary IDs.
 """
@@ -36,12 +37,13 @@ import errno
 import hashlib
 import json
 import os
+import shutil
 import socket
 import sqlite3
 import subprocess
 import sys
 import time
-from contextlib import closing
+from contextlib import closing, contextmanager
 from pathlib import Path
 from urllib.parse import quote
 
@@ -53,6 +55,9 @@ sys.path.insert(0, str(SRC / "s_session/tests"))
 from r4_anchor_fixture import TestAnchor  # noqa: E402
 from s_socket_client import canonical, decode_frame, digest, validate_reply  # noqa: E402
 
+FX2 = "fx-valuation/2"
+STATIC_X = "x-execution-profile/3"
+FX2_X = "x-execution-profile/4"
 FX_MARKER = "fx-valuation/2:release-bound"
 FX_PROOF_PREFIX = "fx-valuation/2:"
 FIN_NS = "testonly.ce-s07.fin"
@@ -1059,15 +1064,17 @@ def build_session_artifacts(
 
     manifest_path = write_canon(run_dir / "manifest.json", manifest)
 
-    # X profile (x-execution-profile/3)
+    # Contract is selected by the manifest revision, not the contents of the conditions.
+    dynamic_x = fx_enabled and fx_schema == FX2
     x_socket = str(run_dir / "x.sock")
     x_profile_path = write_canon(
         run_dir / "x-profile.json",
         {
-            "profile_revision": "x-execution-profile/3",
+            "profile_revision": FX2_X if dynamic_x else STATIC_X,
             "mode": "simulation",
             "credential_scope": {"env": "UNUSED_SIMULATION_CREDENTIAL"},
             "history_simulation": {
+                **({"fx_valuation_revision": FX2} if dynamic_x else {}),
                 "model": x_model,
                 "session_id": sid,
                 "session_generation": gen,
@@ -1806,7 +1813,7 @@ def run_arm1_main_lifecycle(bins: Path, fixtures: Path, out: Path) -> dict:
 
         # Confirm E stayed at cut 10 after all 9 rejected attempts
         q10_check = sess.ewire("E", "q-cut10", {"op": "QueryFxValuation", "as_known_ns": None, "cut": None}, expected="EconomicFxValuation")
-        assert q10_check["cut"]["commit_seq"] == "10"
+        assert q10_check["cut"] == q10["cut"]
 
         # 4. E cut 11: real ReleaseExact(alpha)
         rel_alpha = sess.ewire("E", "release-alpha", release_req("alpha", alpha_cert), expected="ReleasedExactReceipt")
@@ -1823,7 +1830,7 @@ def run_arm1_main_lifecycle(bins: Path, fixtures: Path, out: Path) -> dict:
         write_pretty(out / "receipt_alpha_cut11.json", rel_alpha)
         write_pretty(out / "cmd_alpha_cut11.json", cmd_alpha)
 
-        # 5. Real X (x-execution-profile/3) verifies cmd-alpha against real E
+        # 5. Real X/4 verifies cmd-alpha against real E before it can be accepted
         sess.xwire("bar-0", "AdvanceBar", make_bar(0), expected="SimulationBatch")
         x_early = sess.xwire("accept-alpha-early", "AcceptExact", cmd_alpha, expected="Error")
         assert x_early["error"].startswith("InvalidDomain：X 接纳时钟早于 E 持久交付"), x_early
@@ -1853,6 +1860,42 @@ def run_arm1_main_lifecycle(bins: Path, fixtures: Path, out: Path) -> dict:
         tampered_e_mismatch["certificate_hash"] = digest(tampered_e_mismatch["certificate"])
         x_tampered_e = sess.xwire("accept-alpha-e-mismatch", "AcceptExact", tampered_e_mismatch, expected="Error")
         assert "IdentityConflict" in x_tampered_e["error"], x_tampered_e
+
+        uninstantiated = {
+            **alpha_cert, "conditions": cfg["fin_data"]["exact_release"]["conditions"],
+        }
+        x_fx_negatives = {}
+        for label, certificate, error in (
+            ("uninstantiated-template", uninstantiated, "Unsupported：FX 已绑定条件"),
+            ("floating-quote", c_latest, "Unsupported：FX market_dependencies"),
+            ("wrong-cut", c_stale, "与 E 已交付对象不同"),
+            ("forged-evidence", c_forged, "与 E 已交付对象不同"),
+        ):
+            rejected = sess.xwire(
+                f"reject-{label}", "AcceptExact",
+                {**cmd_alpha, "certificate": certificate, "certificate_hash": digest(certificate)},
+                expected="Error",
+            )
+            assert error in rejected["error"], (label, rejected)
+            x_fx_negatives[label] = rejected["error"]
+
+        # A static profile that even matches the realized conditions exactly must
+        # still fail against real FX/2 E; shape/equality alone cannot authorize it.
+        static = json.loads(cfg["x_profile_path"].read_bytes())
+        static["profile_revision"] = STATIC_X
+        x = static["history_simulation"]
+        x.pop("fx_valuation_revision")
+        x["conditions"] = alpha_cert["conditions"]
+        x["socket"] = str(run_dir / "x-static.sock")
+        static_path = write_canon(run_dir / "x-static-profile.json", static)
+        with running_x(bins, static_path, run_dir / "x-static.db", 1) as ask:
+            for i in range(2):
+                assert ask("AdvanceBar", make_bar(i))["kind"] == "SimulationBatch"
+            wrong_contract = ask("AcceptExact", cmd_alpha)
+            assert wrong_contract.get("kind") == "Error" and "冻结 FX 合同版本不符" in wrong_contract["error"], wrong_contract
+            assert ask("QueryCommand", "cmd-alpha")["state"] == "NoRecord"
+            x_fx_negatives["static-x-dynamic-e"] = wrong_contract["error"]
+        assert sess.xwire("query-alpha-before-accept", "QueryCommand", "cmd-alpha")["state"] == "NoRecord"
 
         x_acc_alpha = sess.xwire("accept-alpha", "AcceptExact", cmd_alpha, expected="ExactCommandState")
         assert x_acc_alpha["state"] == "Accepted", x_acc_alpha
@@ -2218,19 +2261,34 @@ def run_arm1_main_lifecycle(bins: Path, fixtures: Path, out: Path) -> dict:
             assert xcmd_doc["state"] == expected_state, (cmd_id, expected_state, xcmd_doc)
             assert xcmd_doc.get("execute_evidence") is None, (cmd_id, xcmd_doc)
             assert xcmd_doc.get("has_execute_evidence") is False, (cmd_id, xcmd_doc)
-            assert xcmd_doc["profile_revision"] == "x-execution-profile/3", (cmd_id, xcmd_doc)
+            assert xcmd_doc["profile_revision"] == FX2_X and xcmd_doc["archive_layout"] == "v4", (cmd_id, xcmd_doc)
             assert xcmd_doc["condition_audit_policy"] == "verified_current_condition_semantics_and_completeness", (cmd_id, xcmd_doc)
             assert xcmd_doc["condition_audit_unproven"] == [], (cmd_id, xcmd_doc)
             assert xcmd_doc["causal_refs"][0]["command_hash"] == rel_rcpt["record"]["command_hash"], (cmd_id, xcmd_doc)
             assert xcmd_doc["causal_refs"][0]["receipt_id"] == rel_rcpt["receipt_key"], (cmd_id, xcmd_doc)
             row = xc.execute(
-                "SELECT command, state, execute_evidence FROM x_exact_commands WHERE id = ?",
+                "SELECT command, state, execute_evidence, release_evidence FROM x_exact_commands WHERE id = ?",
                 (cmd_id,),
             ).fetchone()
             assert row is not None, cmd_id
             assert canonical(json.loads(row[0])) == canonical(expected_cmd), (cmd_id, "X stored command mismatch")
             assert row[1] == expected_state, (cmd_id, row[1])
             assert row[2] is None, (cmd_id, row[2])
+            assert json.loads(row[3])["fx_valuation_revision"] == FX2, (cmd_id, row[3])
+
+        # A cold audit must still require the explicit FX/2 declaration in the
+        # persisted E receipt. Only the disposable backup is altered.
+        bad_db = run_dir / "x-missing-fx-stamp.db"
+        with closing(sqlite3.connect(bad_db)) as bad:
+            xc.backup(bad)
+            raw = bad.execute("SELECT release_evidence FROM x_exact_commands WHERE id = 'cmd-beta'").fetchone()[0]
+            receipt = json.loads(raw)
+            assert receipt.pop("fx_valuation_revision") == FX2
+            bad.execute("UPDATE x_exact_commands SET release_evidence = ? WHERE id = 'cmd-beta'", (canonical(receipt).decode(),))
+            bad.commit()
+        rejected = run_cli([str(bins / "x_execution_session"), "query-command", "--db", str(bad_db), "--command-id", "cmd-beta"])
+        assert rejected.returncode != 0 and "冻结 FX 合同版本不符" in rejected.stderr, rejected
+        x_fx_negatives["archive-missing-fx-stamp"] = rejected.stderr.strip()
 
     # Restart standalone E at epoch 2 and verify historical cut 12 (110/100), current cut 17 (95/100), and QueryReleasedExact
     e_ep2_sock = str(run_dir / "e.sock")
@@ -2288,7 +2346,7 @@ def run_arm1_main_lifecycle(bins: Path, fixtures: Path, out: Path) -> dict:
         "schema_revision": "ce-s07-handoff-to-1416/1",
         "finance_schema_revision": "tb03b-finance/6",
         "fx_valuation_schema_revision": "fx-valuation/2",
-        "x_profile_revision": "x-execution-profile/3",
+        "x_profile_revision": FX2_X,
         "s_protocol_revision": "s-session/3",
         "session_id": cfg["sid"],
         "session_generation": cfg["gen"],
@@ -2342,6 +2400,7 @@ def run_arm1_main_lifecycle(bins: Path, fixtures: Path, out: Path) -> dict:
         "cut17_gamma_reserve_eval": "95/100",
         "pre_release_negative_controls": neg_results,
         "x_negative_controls": {
+            **x_fx_negatives,
             "early_bar0": x_early["error"],
             "forged_model_ref": x_forged_model["error"],
             "placeholder_cert": x_tampered_ph["error"],
@@ -3420,9 +3479,71 @@ def run_arm5_r2_overcap_model_coverage_precedes_fx_gate(
     }
 
 
+@contextmanager
+def running_x(bins: Path, profile: Path, db: Path, epoch: int):
+    sock = json.loads(profile.read_bytes())["history_simulation"]["socket"]
+    log = db.with_suffix(".stderr")
+    with log.open("wb") as stderr:
+        proc = subprocess.Popen(
+            [str(bins / "x_execution_session"), "serve", "--db", str(db),
+             "--writer-epoch", str(epoch), "--profile", str(profile)],
+            stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=stderr,
+        )
+        try:
+            wait_ready(proc, sock, f"X {db.name} epoch {epoch}", log)
+
+            def ask(op: str, payload):
+                _, _, reply = send_frame(sock, {"protocol": "x-exact-simulation/1", "op": op, "payload": payload})
+                return reply
+
+            yield ask
+        finally:
+            if proc.poll() is None:
+                proc.terminate()
+                proc.wait(timeout=8)
+
+
+def compare_parent_x_archive(parent_bins: Path, bins: Path, cfg: dict, command_id: str) -> dict:
+    """Same parent-written DB (including WAL) under both read-only readers; recovery uses a copy."""
+    db = cfg["x_db"]
+    data_files = [p for p in (db, Path(f"{db}-wal")) if p.exists()]
+    originals = {p: p.read_bytes() for p in data_files}
+    commands = {}
+    for label, reader in (("parent", parent_bins), ("candidate", bins)):
+        exe = str(reader / "x_execution_session")
+        query = run_cli([exe, "query-command", "--db", str(db), "--command-id", command_id])
+        assert query.returncode == 0, (label, query.stderr)
+        state = json.loads(query.stdout)
+        assert state["state"] == "Accepted" and state["profile_revision"] == STATIC_X, (label, state)
+        assert state["read_only"] is True and state["writer_epoch"] == "1", (label, state)
+        commands[label] = state
+        write_pretty(db.with_name(f"{label}-x-query.json"), state)
+    assert commands["parent"] == commands["candidate"], commands
+    history = run_cli([str(bins / "x_execution_session"), "query-history", "--db", str(db)])
+    assert history.returncode == 0, history.stderr
+    hist = json.loads(history.stdout)
+    assert hist["read_only"] and hist["commands"][0]["state"] == "Accepted", hist
+    write_pretty(db.with_name("candidate-x-history.json"), hist)
+    assert {p: p.read_bytes() for p in data_files} == originals
+
+    recovered = db.with_name("recovered-x.db")
+    for p in data_files:
+        shutil.copyfile(p, recovered.with_name(recovered.name + p.name[len(db.name):]))
+    sock = Path(cfg["x_socket"])
+    sock.rename(sock.with_suffix(".epoch1"))
+    with running_x(bins, cfg["x_profile_path"], recovered, 2) as ask:
+        state = ask("QueryCommand", command_id)
+        assert state["state"] == "Accepted", state
+        for key in ("x_accept", "causal_refs"):
+            assert state[key] == commands["parent"][key], state
+        write_pretty(db.with_name("recovered-x-query.json"), state)
+    return {"state": "Accepted", "candidate_read_rc": 0, "profile_revision": STATIC_X, "recovered_epoch": "2"}
+
+
 def run_arm6_parent_bd0933e97e_fin6_fx_v1_recovery(
     parent_bins: Path, candidate_bins: Path, fixtures: Path, out: Path,
     *, static_rule_revision: str | None = None, static_evidence_ref: str | None = None,
+    x_marker_slots: str | None = None,
 ) -> dict:
     """Proves BLOCK #1 with REAL parent (`bd0933e97e`) binaries:
     A parent-written r1 capture makes the pre-import DB non-empty. Parent and candidate
@@ -3488,9 +3609,21 @@ def run_arm6_parent_bd0933e97e_fin6_fx_v1_recovery(
         freeze["rule_revision"] = static_rule_revision
     if static_evidence_ref is not None:
         freeze["conditions"][0]["evidence_refs"].append(static_evidence_ref)
-    if static_rule_revision is not None or static_evidence_ref is not None:
+    if x_marker_slots == "evidence":
+        freeze["conditions"][0]["evidence_refs"].append(FX_MARKER)
+    elif x_marker_slots is not None:
+        for condition in freeze["conditions"][:{"one": 1, "all": 4}[x_marker_slots]]:
+            for slot in ("dependency_set", "invalidation_sources", "evidence_refs"):
+                condition[slot] = [FX_MARKER]
+            condition["coverage_proof"] = FX_MARKER
+    if static_rule_revision is not None or static_evidence_ref is not None or x_marker_slots is not None:
         ptr = cfg["manifest"]["finance"]
         ptr["input_sha256"] = file_digest(write_canon(Path(ptr["input_path"]), cfg["fin_data"]))
+    if x_marker_slots is not None:
+        xp = json.loads(cfg["x_profile_path"].read_bytes())
+        assert xp["profile_revision"] == STATIC_X and "fx_valuation_revision" not in xp["history_simulation"]
+        xp["history_simulation"]["conditions"] = freeze["conditions"]
+        write_canon(cfg["x_profile_path"], xp)
     # Patch clock to TestOnly plan (monotonic ns) so parent bd0933e97e accepts fx-valuation/1!
     t = 10
     tc_msgs = {}
@@ -3632,6 +3765,14 @@ def run_arm6_parent_bd0933e97e_fin6_fx_v1_recovery(
         if static_evidence_ref is not None:
             assert static_evidence_ref in parent_rel_alpha["record"]["command"]["certificate"]["conditions"][0]["evidence_refs"]
         write_pretty(out / "arm6_parent_bd0933e97e_alpha_receipt.json", parent_rel_alpha)
+        if x_marker_slots is not None:
+            with running_x(parent_bins, cfg["x_profile_path"], cfg["x_db"], 1) as ask:
+                for i in range(int(parent_rel_alpha["record"]["release_commit_ns"])):
+                    assert ask("AdvanceBar", make_bar(i))["kind"] == "SimulationBatch"
+                accepted = ask("AcceptExact", parent_rel_alpha["record"]["command"])
+                assert accepted.get("state") == "Accepted", accepted
+                write_pretty(run_dir / "parent-x-accept.json", accepted)
+
 
         ewire_direct("E", "cap-r2", {"op": "CaptureExternal", "raw_utf8": r2_utf8, "json_pointer": "", "token": "fx-r2", "source_event_time": "70"}, expected="Recorded", source=cfg["src_market"])
         q_parent_r2 = ewire_direct("E", "q-r2", {"op": "QueryFxValuation", "as_known_ns": None, "cut": None}, expected="EconomicFxValuation")
@@ -3654,6 +3795,10 @@ def run_arm6_parent_bd0933e97e_fin6_fx_v1_recovery(
         assert parent_bad_beta["error"].startswith("IdentityConflict：证书内容"), parent_bad_beta
     finally:
         stop()
+
+    x_archive = None
+    if x_marker_slots is not None:
+        x_archive = compare_parent_x_archive(parent_bins, candidate_bins, cfg, "cmd-alpha")
 
     # The DB path is in the frozen manifest. Swap the stopped store and its sidecars
     # as a unit so the pre-import fork uses the very same manifest bytes and clock.
@@ -3732,6 +3877,7 @@ def run_arm6_parent_bd0933e97e_fin6_fx_v1_recovery(
         "fx_schema": "fx-valuation/1",
         "static_rule_revision": freeze["rule_revision"],
         "static_evidence_refs": freeze["conditions"][0]["evidence_refs"],
+        **({"x_archive": x_archive} if x_archive is not None else {}),
         "parent_pre_import_cut": c3["cut"],
         "first_import_cuts": [parent_imp_base["cut"], parent_imp_fx["cut"]],
         "candidate_first_import_receipts_exact_match": True,
@@ -3749,7 +3895,7 @@ def main() -> int:
     parser.add_argument("--bin", type=Path, required=True)
     parser.add_argument("--fixtures", type=Path, required=True)
     parser.add_argument("--out", type=Path, required=True)
-    parser.add_argument("--parent-bin", type=Path, default=None)
+    parser.add_argument("--parent-bin", type=Path, default=None, help="parent E/B/X binaries at bd0933e97e")
     parser.add_argument("--arm", type=int, choices=(5, 6), help="run only one regression arm")
     args = parser.parse_args()
     if args.arm == 6 and args.parent_bin is None:
@@ -3790,6 +3936,10 @@ def main() -> int:
             regressions["b1_static_evidence_ref"] = run_arm6_parent_bd0933e97e_fin6_fx_v1_recovery(
                 args.parent_bin.resolve(), bins, fixtures, out / "b1-evidence", static_evidence_ref=FX_MARKER,
             )
+            for mode in ("evidence", "one", "all"):
+                regressions[f"b1_x_{mode}"] = run_arm6_parent_bd0933e97e_fin6_fx_v1_recovery(
+                    args.parent_bin.resolve(), bins, fixtures, out / f"x-{mode}", x_marker_slots=mode,
+                )
         regressions["b2_two_price_feeds"] = run_arm5_r2_overcap_model_coverage_precedes_fx_gate(
             bins, fixtures, out, colliding_sources=True,
         )

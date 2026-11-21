@@ -93,6 +93,58 @@ fn conditions_equal_the_approved_list_including_model_coverage() {
 }
 
 #[test]
+fn fx_contract_is_explicit_in_profile_and_authority_reply() {
+    let d = dir("fx-contract");
+    let mut conditions = approved();
+    let marker = crate::economic_session::FX_RELEASE_BOUND_MARKER;
+    for cond in conditions.as_array_mut().unwrap() {
+        for slot in ["dependency_set", "invalidation_sources", "evidence_refs"] {
+            cond[slot] = json!([marker]);
+        }
+        cond["coverage_proof"] = json!(marker);
+    }
+    let raw = profile(&d, conditions.clone());
+    let static_profile =
+        Profile::from_declared_revision(super::super::EXACT_PROFILE_REVISION, raw.clone()).unwrap();
+    let c: ExactCommand = parse(command(conditions));
+    c.validate(&static_profile, 1).unwrap();
+
+    let mut declared = raw.clone();
+    declared["fx_valuation_revision"] = json!(FxReleaseRevision::ReleaseBound);
+    let static_rev = super::super::EXACT_PROFILE_REVISION;
+    let dynamic_rev = super::super::FX_RELEASE_PROFILE_REVISION;
+    let dynamic = Profile::from_declared_revision(dynamic_rev, declared.clone()).unwrap();
+    assert!(Profile::from_declared_revision(dynamic_rev, raw).is_err());
+    assert!(Profile::from_declared_revision(static_rev, declared.clone()).is_err());
+    assert!(parse_archive_profile(static_rev, &canonical_json(&declared)).is_err());
+
+    // Static exact equality would accept this certificate; FX/2 must not.
+    let err = c.validate(&dynamic, 1).unwrap_err();
+    assert!(err.contains("FX market_dependencies"), "{err}");
+    declared["conditions"][0]["coverage_proof"] = json!("ordinary-static-content");
+    assert!(Profile::from_declared_revision(dynamic_rev, declared).is_err());
+
+    let mut receipt: AuthorityReply = parse(json!({
+        "protocol": AUTHORITY_WIRE, "session_id": "session", "session_generation": "1",
+        "authority_id": "E", "authority_epoch": "1", "command_id": "a",
+        "command_hash": hash(&c), "command": c, "state": "ReleasedExact",
+        "receipt_id": "E:a", "release_receipt_id": null, "commit_ns": "1"
+    }));
+    let check = |p: &Profile, r: &AuthorityReply| {
+        validate_authority_reply(p, p.e_identity(), "QueryReleasedExact", &c, None, r)
+    };
+    check(&static_profile, &receipt).unwrap();
+    assert!(check(&dynamic, &receipt)
+        .unwrap_err()
+        .contains("冻结 FX 合同版本不符"));
+    receipt.fx_valuation_revision = Some(FxReleaseRevision::ReleaseBound);
+    assert!(check(&static_profile, &receipt)
+        .unwrap_err()
+        .contains("冻结 FX 合同版本不符"));
+    check(&dynamic, &receipt).unwrap();
+}
+
+#[test]
 fn model_ref_must_match_loaded_model_content_not_just_name() {
     let d = dir("model-ref");
     let p: Profile = parse(profile(&d, approved()));
@@ -1549,8 +1601,8 @@ fn late_v1_archive_audits_common_12_6_invariants_without_retroactive_gates() {
 }
 
 /// #1407 C3 CE-S07：X 侧 FX release-bound profile 与真实交付证书核验回归。
-/// 1) 4 项条件统一声明 `fx-valuation/2:release-bound` 的 X profile 合法；混用半模板/半静态被拒；
-/// 2) 同一静态 X profile 同时接受 rev=1 与 rev=3 的真实 FX 绑定交付命令；
+/// 1) 显式 FX/2 的 X/4 profile 要求四项完整模板；半模板被拒；
+/// 2) 同一动态 X/4 profile 同时接受 rev=1 与 rev=3 的绑定交付命令；
 /// 3) 交付命令若残留未实例化模板 `fx-valuation/2:release-bound`、或带 `TestOnly-market/*` / `controlled-evidence` /
 ///    `latest` / `admissible` / 缺 `e-cut:E:` / 缺 `fx-quote:` 前缀，均被 X 拒绝；
 /// 4) 纯非 FX 静态 profile 仍执行 `c.conditions == p.conditions` 严格相等。
@@ -1585,15 +1637,25 @@ fn fx_release_bound_profile_accepts_verified_fx_commands_and_rejects_placeholder
         ),
         fx_cond("model_coverage", "model-coverage/1", "E.ReleaseExact"),
     ]);
-    let p_fx: Profile = parse(profile(&d, fx_profile_conditions.clone()));
-    p_fx.validate().unwrap();
+    let fx_profile = |conditions| {
+        let mut declared = profile(&d, conditions);
+        declared["fx_valuation_revision"] = json!(FxReleaseRevision::ReleaseBound);
+        declared
+    };
+    let p_fx: Profile = Profile::from_declared_revision(
+        super::super::FX_RELEASE_PROFILE_REVISION,
+        fx_profile(fx_profile_conditions.clone()),
+    )
+    .unwrap();
 
-    // 混用半模板/半静态 profile 必须拒绝。
+    // 动态 profile 的半模板必须拒绝。
     let mut mixed_conds = fx_profile_conditions.clone();
     mixed_conds[0]["coverage_proof"] = json!("c");
-    let mixed_err = parse::<Profile>(profile(&d, mixed_conds))
-        .validate()
-        .unwrap_err();
+    let mixed_err = Profile::from_declared_revision(
+        super::super::FX_RELEASE_PROFILE_REVISION,
+        fx_profile(mixed_conds),
+    )
+    .unwrap_err();
     assert!(
         mixed_err.starts_with("Unsupported"),
         "expected Unsupported for mixed FX marker profile, got {mixed_err}"
@@ -1642,7 +1704,7 @@ fn fx_release_bound_profile_accepts_verified_fx_commands_and_rejects_placeholder
         cmd
     };
 
-    // 同一静态 X profile 接受 rev=1 (cut 10) 与 rev=3 (cut 15) 的真实 FX 交付命令。
+    // 同一动态 X/4 profile 接受 rev=1 (cut 10) 与 rev=3 (cut 15) 的绑定交付命令。
     let c_r1: ExactCommand = parse(make_fx_cmd("1", "10"));
     let c_r3: ExactCommand = parse(make_fx_cmd("3", "15"));
     c_r1.validate(&p_fx, 1).unwrap();

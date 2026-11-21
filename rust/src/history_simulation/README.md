@@ -1,7 +1,11 @@
 # X 历史模拟执行接口
 
-`x_execution_session serve --db FILE --profile FILE --writer-epoch N` 用 `x-execution-profile/3`、
-`mode: simulation` 与 `history_simulation` 对象运行历史撮合。X 不续写或恢复已有 `/1`、`/2` 历史模拟库（即使还没有命令）；要继续撮合须另起空库重放。不带历史撮合的模拟骨架以及 dry-run、experiment、production 仍使用 `/1`。
+`x_execution_session serve --db FILE --profile FILE --writer-epoch N` 用
+`mode: simulation` 与 `history_simulation` 对象运行历史撮合。静态放行（非 FX 或 FX/1）用
+`x-execution-profile/3`；动态放行用 `x-execution-profile/4`，并在
+`history_simulation.fx_valuation_revision` 明写 `"fx-valuation/2"`。续跑必须使用原版本与原 profile。
+旧 `/1`、`/2` 历史模拟库只能读取；要继续撮合须另起空库重放。不带历史撮合的模拟骨架以及
+dry-run、experiment、production 仍使用 `/1`。
 
 ## 冻结输入
 
@@ -21,7 +25,7 @@ RD12 固定为 `per-leg-source-attribution/1`；未知政策拒绝。netted 返�
 每帧以 LF 结束并关闭写半边（EOF），读取回复后关闭连接；字段形状见 `runtime.rs` 与 `model.rs` 的具名类型。
 
 - AcceptExact：payload 为完整 ExactCommand。先按 X 实际装载的 `model` 规范内容摘要核对 `command.model_ref`（`model_id`、`revision`、`content_hash = sha256(canonical_json(model))`），不符即以 `IdentityConflict` 拒绝且不问 E/S；再查询冻结 E 的 ReleasedExact，
-  核全命令、计划/条件摘要、会话与 epoch 后持久 Accepted，不问 S、不产生调用权。
+  核全命令、计划/条件摘要、会话、epoch 与冻结的 FX 合同版本后持久 Accepted，不问 S、不产生调用权。
 - AdvanceBar：payload 为 Batch。每个 close_change 解码后必须等于已接纳命令的 change（批合同保留 JSON 数字）；
   真正动作前向 S 请求 ExecuteCommitted，绑定 E release 收据与命令 eligibility_ref；
   X 先持久 MayHaveCalled，再原子提交模型状态、不可变原件、批结果与 Observed。
@@ -39,7 +43,11 @@ S 回复必须同时绑定原 E release_receipt_id；命令资格引用必须等
 未知、Denied、不可达、不同内容/身份/epoch 均不取得调用权。
 
 ConditionEvidence 清单由 profile 的 `conditions` 冻结，与 E 冻结原件 `exact_release.conditions` 是同一份
-获准清单（含 ADR 0052 裁定二的 `model_coverage`）。命令证书的清单须与它逐项相等，否则 Unsupported。
+获准清单（含 ADR 0052 裁定二的 `model_coverage`）。`/3` 按原清单逐项相等核验；
+条件文本恰好等于 FX/2 模板占位符也仍是静态值，不触发版本切换。`/4` 只核 FX/2：
+profile 冻结完整模板，命令必须携带具体报价修订或空共同界、条件证据与 E 切面的绑定，
+并与 E 已放行的完整命令一致。E 只在 FX/2 的 `QueryReleasedExact` 权威回执中返回
+`fx_valuation_revision: "fx-valuation/2"`；接纳和恢复均核对该声明。缺声明的旧 E 回执只用于静态合同。
 每项须带齐九字段，能力与阶段须是 E/X 共用配对表（`economic_session::exact_command::CONDITION_PAIRS`）里的
 已知配对，阶段前缀只能是 E./S./X.，失败语义为 Denied；X 阶段只有 simulation-local-transaction/1（#1407 C2）。
 清单还须完备：配对表的四项能力（E 的 released-exact/1 与 model-coverage/1、S 的 execute-committed/1、
@@ -239,27 +247,27 @@ Q 来源需获 `QueryCommand` 权限；启用已有 `EconomicReadOpen/Page/Close
     - **必须退出正式交付的 `/5` 用法**：所有面向历史模拟目标且在同一条 `authorized_sources` 授权项内向冻结 `(x_target.x_id, x_target.x_epoch)` 授予 `QueryReleasedExact` 的配置——包括（a）`#2081` 形态（`logical-bar/1`、无归档源、`X/1` 获准）；（b）`b9d898` 祖先形态（`TestOnly` 时钟、无归档源、`X/1` 获准）；（c）即使 `source_namespace` / `source_epoch` 改为非 `"1"` 自定义值（如 `"99"`），只要同项 `producer_id`/`producer_epoch` 匹配冻结 `x_target` 且含 `QueryReleasedExact`，同样拒绝。
     - **保留的真正不可兑现离线 C1 / 错代验算**：未在单条授权项内向冻结 `(x_target.x_id, x_target.x_epoch)` 同时授予 `QueryReleasedExact` 的配置——包括（a）未授目标 X 的原始 C1 离线配置（`1f0a42bc20^`）；（b）冻结 `x_target=X/1` 但仅向错代 `X/2` 授 `QueryReleasedExact`（甚至另在独立项给 `X/1` 仅授 `ReadView`，不跨项拼权限）的 C2 正控配置。此类配置继续可离线签发 `Dispatchable` / `ReleasedExact`，但**不可能向真实历史 X 兑现**：真实 `X/1` 发起 `QueryReleasedExact` 必被 E `Config::authorized` 拒以 `来源未获准`（且 `manifest_hash` 已在 `init` 钉死不可后改）；真实 `X/2` 尝试接纳 `x_epoch=1` 命令必被 `ExactCommand::validate` 拒以 `IdentityConflict`；同时 `/3` X 亦拒绝缺 `model_ref` 的 `/5` 命令。
 - **正式装配入口（`production_session`）**：
-  - **仅当 `x.profile` 含非空 `history_simulation` 时**，`load_manifest` 才预读 `economic.manifest` 并校验 E/X 合同配对：要求 `profile_revision == "x-execution-profile/3"` 且 `economic.manifest.finance.schema_revision == "tb03b-finance/6"`；任何不匹配组合（`FIN/5 + X/3`、`FIN/5 + X/2`、`FIN/6 + X/2`、无 `finance + X/3`）均在创建 `state_dir` 或域库前以 `VersionUnsupported` 拒绝。
+  - **仅当 `x.profile` 含非空 `history_simulation` 时**，`load_manifest` 才预读 `economic.manifest`。历史模拟须用 `tb03b-finance/6`，静态 `/3` 只配 FX/1 或非 FX，动态 `/4` 只配 FX/2。不匹配的组合在创建 `state_dir` 或域库前拒绝。
   - **非历史装配完全恢复旧行为**：`x.profile` 不含 `history_simulation` 时，launcher 不预读 `economic.manifest`，不因坏非历史 X `profile_revision` 拉停整组 S/E/B，保持既有非关键 X 降级与启动条件不变。
 - **历史模拟 X `/2`（及既有已退 `/1`）写入入口**：
-  - `x_execution_session serve` 对含 `history_simulation` 的配置只接受 `x-execution-profile/3`。
+  - `x_execution_session serve` 对含 `history_simulation` 的配置只接受静态 `/3` 或显式 FX/2 的 `/4`。
   - 在获取 `<db>.writer.lock` 与调用 `open_durable_db`（读写打开）**之前**，先以 `SQLITE_OPEN_READ_ONLY`（不启用 `immutable=1`，故可见活 `-wal` 帧）预检既有库；凡已存在 `/1`（早期与后期）、`/2` 历史模拟库即当场以 `VersionUnsupported` 退出，不落锁文件、不改写业务表、不推进 `writer_epoch`、**不静默 checkpoint `-wal`**。
 
 ### 3. 操作者可用的只读查询入口、本地审计边界与撤掉 `/2` socket 的损失
 
-撤掉 `/1`/`/2` X 的在线 Unix socket 服务（`x-exact-simulation/1`）后，操作者由 `x_execution_session` 的离线只读 CLI 入口（基于 `SQLITE_OPEN_READ_ONLY`，覆盖早期 `/1`、后期 `/1` 全部历史准入世代、`/2`、`/3`，不改变既有 `SimulationBatch` 存储格式；原 `query --db FILE` 仅元数据入口保持原样）完成档案取证：
+撤掉 `/1`/`/2` X 的在线 Unix socket 服务（`x-exact-simulation/1`）后，操作者由 `x_execution_session` 的离线只读 CLI 入口（基于 `SQLITE_OPEN_READ_ONLY`，覆盖早期 `/1`、后期 `/1` 全部历史准入世代、`/2`、`/3`、`/4`，不改变既有 `SimulationBatch` 存储格式；原 `query --db FILE` 仅元数据入口保持原样）完成档案取证：
 
 | 入口 | 按实际读口返回的字段（不依赖 E/S 在线，也不要求 E 预配归档源） | 覆盖状态与实际边界 |
 |---|---|---|
-| `x_execution_session query-history --db FILE` | `profile_revision`、`archive_layout`（`v1_early` / `v1_late` / `v2` / `v3`）、`execute_evidence_claimed_ns_audit_policy`、`condition_audit_policy`、`condition_audit_unproven`、`writer_epoch`、`session_id`/`session_generation`/`x_id`、`source_namespace`/`source_epoch`、`model_content_hash`、前沿 `last_committed_batch_id`/`last_bar_index`、`pending_batch_id`/`pending_epoch`、`committed_batches[*]`（每批含 `batch_id`、`bar_index`、`batch_receipt_sha256`、`state_content_hash`、`original_count`）、`commands[*]` 摘要与 `originals` ID 列表 | 覆盖早期 `/1`、后期 `/1`（含 `1f0a42bc20` 旧能力配对与 `2ed00abd6c` 缺四项完备库）、`/2`、`/3` 通过对应布局本地一致性审计的库；`batch_receipt_sha256` 由此处的 `committed_batches[*]` 给出 |
+| `x_execution_session query-history --db FILE` | `profile_revision`、`archive_layout`（`v1_early` / `v1_late` / `v2` / `v3` / `v4`）、`execute_evidence_claimed_ns_audit_policy`、`condition_audit_policy`、`condition_audit_unproven`、`writer_epoch`、`session_id`/`session_generation`/`x_id`、`source_namespace`/`source_epoch`、`model_content_hash`、前沿 `last_committed_batch_id`/`last_bar_index`、`pending_batch_id`/`pending_epoch`、`committed_batches[*]`（每批含 `batch_id`、`bar_index`、`batch_receipt_sha256`、`state_content_hash`、`original_count`）、`commands[*]` 摘要与 `originals` ID 列表 | 覆盖早期 `/1`、后期 `/1`（含 `1f0a42bc20` 旧能力配对与 `2ed00abd6c` 缺四项完备库）、`/2`、`/3`、`/4` 通过对应布局本地一致性审计的库；`batch_receipt_sha256` 由此处的 `committed_batches[*]` 给出 |
 | `x_execution_session query-command --db FILE --command-id ID` | `ExactCommandState`：`state`、`x_accept` 三相时钟、`causal_refs`、`attempt_batch_id`、`attempt_batch_bar_index`、`pending_batch_id`、`pending_epoch`、`has_execute_evidence`、`execute_evidence`、`execute_evidence_claimed_ns_audit`、`condition_audit_policy`、`condition_audit_unproven`、`archive_layout`、`last_committed_batch_id`、`last_bar_index` | 逐态覆盖 `Accepted`、`ExecutionReady`、`ExecutionRequested`（含 pending batch/epoch）、`MayHaveCalled`、`Observed` 与 `NoRecord`；原样保留 `/1` JSON 整数与 `/2`/`/3` 十进制文本 |
 | `x_execution_session query-batch --db FILE --batch-id ID` | 原样已提交 `SimulationBatch` JSON：`kind`、`request_id`、`bar_index`、`model_content_hash`、`state_content_hash`、`intra_batch_order`、`capacity_transitions`、`capacity_evidence`、`l0_fill_count`、`unfilled_market`、`originals`（不变更原批格式，不含 `orders`/`fills`/`fees`/`scenario_busts`/`batch_receipt_sha256` 顶层键） | 仅返回已提交终态批（如 `b3` 含原 `fill`+`fee` 原件）；未提交 pending 批（如 `ExecutionRequested` 挂起的 `b2`）以 `MissingDependency` 明确拒绝 |
 | `x_execution_session query-original --db FILE --original-id ID` | 完整冻结原件 JSON（如原 `fill` 与原 `fee` 文档） | 与原 socket `QueryOriginal` 逐字节一致，原样保留原字段与原整数 |
 
 **本地一致性审计范围、存储布局与条件准入世代分离原则及责任边界（必须明示）**：
 1. **读档不是给旧命令重发执行许可；严格区分存储布局与条件准入世代，绝不靠失败降格，绝不削弱晚 `/1` 与 `/2`/`/3`**：
-   - 任何 `authority_profile` 解码前先核对外层 `x_meta.profile_revision` 与内层 `x_sim_meta.exact_profile_revision` 一致性（`/1` 必须缺省，`/2` 必须为 `x-execution-profile/2`，`/3` 必须为 `x-execution-profile/3`），不符即以 `VersionUnsupported` 拒绝。
-   - **有可信落盘记录能识别准入世代时才核其特有约束**：`/2` 与 `/3` 具外层/内层版号（均晚于 `8d23381b0c`），恒直接解码完整 12 键/6 键 `Profile` 并强制现行 `check_condition_semantics` 配对表与 `check_required_capabilities` 四项完备闸（`condition_audit_policy: "verified_current_condition_semantics_and_completeness"`、`condition_audit_unproven: []`），绝不回退或降格到早期 `/1` 或晚 `/1` 共同语义路径。
+   - 任何 `authority_profile` 解码前先核对外层 `x_meta.profile_revision` 与内层 `x_sim_meta.exact_profile_revision` 一致性（`/1` 必须缺省，`/2` 必须为 `x-execution-profile/2`，`/3` 与 `/4` 必须为各自对应的版本），不符即以 `VersionUnsupported` 拒绝。
+   - **有可信落盘记录能识别准入世代时才核其特有约束**：`/2` 与 `/3` 具外层/内层版号（均晚于 `8d23381b0c`），恒直接解码完整 12 键/6 键 `Profile` 并强制现行 `check_condition_semantics` 配对表与 `check_required_capabilities` 四项完备闸（`condition_audit_policy: "verified_current_condition_semantics_and_completeness"`、`condition_audit_unproven: []`），绝不回退或降格到早期 `/1` 或晚 `/1` 共同语义路径。 `/4` 另有一项冻结的 FX/2 声明，并核验具体证书与持久 E 回执，读回时不降档。
    - `/1` 在反序列化之前按冻结键集同时判别顶层及 `e`/`s` 端点：
      - **早期 `/1`（`archive_layout: "v1_early"`，历史正式写者 `18446a3d35`–`d1c46577b1`）**：顶层精确 11 键（无 `conditions`）且 `e`/`s` 各精确 3 键（仅 `socket`、`authority_id`、`authority_epoch`）；不补写、不伪造共同信封或新授权，按当年冻结的 3 项条件清单（`released-exact/1`、`execute-committed/1`、`simulation-local-transaction/1`）、整数时钟、批重演与原 E/S 收据闭包核档；显式输出 `condition_audit_policy: "v1_early_frozen_three_conditions"` 与 `condition_audit_unproven: ["model_coverage_condition_1f0a42bc20", "condition_semantics_pairing_table_2ed00abd6c", "required_four_capabilities_completeness_b66b61a0b0"]`。
      - **后期 `/1`（`archive_layout: "v1_late"`，历史正式写者 `1f0a42bc20`–`734847be00`，含 `#2078` 归档布局）**：顶层精确 12 键（含 `conditions`）且 `e`/`s` 各精确 6 键（含 `schema_revision`、`reply_namespace`、`producer_id`）。该布局跨越三个条件准入世代——`1f0a42bc20`（允许旧能力配对如 `released-exact-probe/1`）、`2ed00abd6c`（引入配对表但尚不要求四项必备能力齐全）、`b66b61a0b0`–`734847be00`（加入四项完备闸）——且三代在 SQLite 中不落写者修订号、共享完全相同的 12+6+6 落盘布局。因此读回按该布局**共同可证语义**核验（`validate_conditions_common_12_6`：每项九字段非空、`condition_id` 唯一、`X.*` 阶段能力必属 `X_CAPABILITIES`、必含 `E.ReleaseExact` 阶段 `model_coverage`、命令 `conditions == profile.conditions`），**不溯及重放 `2ed00abd6c` 配对表与 `b66b61a0b0` 四项完备闸**，同时在读出元数据中显式标明 `condition_audit_policy: "v1_late_common_12_6_invariants_only"` 与 `condition_audit_unproven: ["condition_semantics_pairing_table_2ed00abd6c", "required_four_capabilities_completeness_b66b61a0b0"]`；且**完整保留**晚 `/1` 的逻辑 bar 核证（`claimed_ns == attempt_batch.bar.index`）、内外层版号、严格 12+6+6 键集、端点非空与 E/S 回执原件闭包。

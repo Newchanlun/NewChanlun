@@ -219,28 +219,42 @@ fn check_history_simulation_assembly(
     if profile != "simulation" {
         return Err("InvalidDomain：history_simulation 仅允许 simulation profile".into());
     }
+    use newchan_rust::economic_session::FxReleaseRevision;
+    use newchan_rust::history_simulation::{
+        runtime::Profile, EXACT_PROFILE_REVISION, FX_RELEASE_PROFILE_REVISION,
+    };
+
     let x_rev = xp["profile_revision"].as_str().unwrap_or_default();
-    let expected_x = newchan_rust::history_simulation::EXACT_PROFILE_REVISION;
-    if x_rev != expected_x {
+    if !matches!(x_rev, EXACT_PROFILE_REVISION | FX_RELEASE_PROFILE_REVISION) {
         return Err(format!(
             "VersionUnsupported：历史模拟 X 执行 profile 版本 `{x_rev}` 已退场或不兼容，\
-             正式装配必须使用 {expected_x} 搭配 tb03b-finance/6 新开会话（旧 /1、/2 历史模拟库仅保留只读取证）"
+             正式装配须使用 {EXACT_PROFILE_REVISION} 或 {FX_RELEASE_PROFILE_REVISION}（旧 /1、/2 库仅供只读取证）"
         ));
     }
     let econ = read_json(econ_path, "经济域 manifest")?;
-    let finance_rev = econ
-        .get("finance")
-        .filter(|v| !v.is_null())
-        .and_then(|f| f.get("schema_revision"))
-        .and_then(Value::as_str);
+    let finance_rev = econ["finance"]["schema_revision"].as_str();
     if finance_rev != Some("tb03b-finance/6") {
         return Err(format!(
-            "VersionUnsupported：历史模拟装配拒绝将 E 财务子合同 `{}` 与 {expected_x} 混配\
-             （tb03b-finance/5 命令不含实装模型内容摘要，无法通过 /3 核验；\
-             请在新会话显式升级为 tb03b-finance/6 + {expected_x}，原 /5 收据、责任与查询保持原义）",
+            "VersionUnsupported：历史模拟装配拒绝将 E 财务子合同 `{}` 与 {x_rev} 混配；\
+             须使用 tb03b-finance/6 的模型绑定命令（原 /5 收据、责任与查询保持原义）",
             finance_rev.unwrap_or("<none>")
         ));
     }
+    let compatible = match &econ["fx_valuation"] {
+        Value::Null => x_rev == EXACT_PROFILE_REVISION,
+        fx => {
+            (x_rev == EXACT_PROFILE_REVISION && fx["schema_revision"] == "fx-valuation/1")
+                || (x_rev == FX_RELEASE_PROFILE_REVISION
+                    && fx["schema_revision"] == json!(FxReleaseRevision::ReleaseBound))
+        }
+    };
+    if !compatible {
+        return Err(format!(
+            "VersionUnsupported：X profile `{x_rev}` 与 E 的 FX 合同不匹配；\
+             静态 X/3 配 FX/1 或非 FX，动态 X/4 只配 FX/2"
+        ));
+    }
+    Profile::from_declared_revision(x_rev, xp["history_simulation"].clone())?;
     Ok(())
 }
 

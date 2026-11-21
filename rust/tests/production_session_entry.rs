@@ -1077,11 +1077,44 @@ fn production_launcher_does_not_forward_theta_diagnostic_switch() {
 /// （FIN/5 + X/3、FIN/5 + X/2、FIN/6 + X/2、缺 finance + X/3），不落任何域文件。
 #[test]
 fn launcher_refuses_incompatible_history_simulation_assemblies_before_writing() {
-    for (case, fin_rev, x_rev) in [
-        ("fin5_x3", Some("tb03b-finance/5"), "x-execution-profile/3"),
-        ("fin5_x2", Some("tb03b-finance/5"), "x-execution-profile/2"),
-        ("fin6_x2", Some("tb03b-finance/6"), "x-execution-profile/2"),
-        ("none_x3", None, "x-execution-profile/3"),
+    for (case, fin_rev, fx_rev, x_rev) in [
+        (
+            "fin5_x3",
+            Some("tb03b-finance/5"),
+            None,
+            "x-execution-profile/3",
+        ),
+        (
+            "fin5_x2",
+            Some("tb03b-finance/5"),
+            None,
+            "x-execution-profile/2",
+        ),
+        (
+            "fin6_x2",
+            Some("tb03b-finance/6"),
+            None,
+            "x-execution-profile/2",
+        ),
+        ("none_x3", None, None, "x-execution-profile/3"),
+        (
+            "fx2_x3",
+            Some("tb03b-finance/6"),
+            Some("fx-valuation/2"),
+            "x-execution-profile/3",
+        ),
+        (
+            "fx1_x4",
+            Some("tb03b-finance/6"),
+            Some("fx-valuation/1"),
+            "x-execution-profile/4",
+        ),
+        (
+            "no_fx_x4",
+            Some("tb03b-finance/6"),
+            None,
+            "x-execution-profile/4",
+        ),
     ] {
         let space = Space::new();
         let source = declaration("TestOnlyStructure", DECLARED_NS);
@@ -1101,6 +1134,9 @@ fn launcher_refuses_incompatible_history_simulation_assemblies_before_writing() 
         });
         if let Some(rev) = fin_rev {
             econ["finance"] = json!({"schema_revision": rev});
+        }
+        if let Some(rev) = fx_rev {
+            econ["fx_valuation"] = json!({"schema_revision": rev});
         }
         write_json(&econ_path, &econ);
         let xp = write_json(

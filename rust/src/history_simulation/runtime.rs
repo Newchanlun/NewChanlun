@@ -5,6 +5,7 @@ use super::{
     model::{Batch, Change, Model, ModelRef},
     store,
 };
+use crate::economic_session::FxReleaseRevision;
 use crate::session_protocol::{canonical_json, reply_envelope, sha256_hex, strict_json};
 use crate::session_transport::{
     read_frame, serve_unix, write_frame_observed, NoObserver, TransportBounds,
@@ -54,6 +55,12 @@ pub struct Profile {
     pub s: Authority,
     /// manifest 引用的获准条件清单；与 E 冻结的 `exact_release.conditions` 是同一份（#1407 C2）。
     pub conditions: Vec<Condition>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "FxReleaseRevision::deserialize_declared"
+    )]
+    pub fx_valuation_revision: Option<FxReleaseRevision>,
     pub timeout_ms: u64,
     pub max_frame_bytes: usize,
 }
@@ -97,10 +104,37 @@ impl Profile {
         Ok(())
     }
 
+    pub fn revision(&self) -> &'static str {
+        match self.fx_valuation_revision {
+            None => super::EXACT_PROFILE_REVISION,
+            Some(FxReleaseRevision::ReleaseBound) => super::FX_RELEASE_PROFILE_REVISION,
+        }
+    }
+
+    pub fn from_declared_revision(revision: &str, raw: Value) -> Result<Self, String> {
+        let profile: Self = serde_json::from_value(raw).map_err(error)?;
+        if revision != profile.revision() {
+            return Err(format!(
+                "VersionUnsupported：历史模拟 X profile 版本 `{revision}` 与 FX 声明不符，须使用 {}",
+                profile.revision()
+            ));
+        }
+        profile.validate()?;
+        Ok(profile)
+    }
+
     pub fn validate(&self) -> Result<(), String> {
         self.validate_base()?;
         validate_conditions(&self.conditions)?;
-        validate_fx_marker_uniformity(&self.conditions)
+        if self.fx_valuation_revision == Some(FxReleaseRevision::ReleaseBound)
+            && !self.conditions.iter().all(condition_is_fx_release_bound)
+        {
+            return Err(format!(
+                "Unsupported：FX/2 获准条件清单四项均须使用 {} 模板",
+                crate::economic_session::FX_RELEASE_BOUND_MARKER
+            ));
+        }
+        Ok(())
     }
 }
 
@@ -113,22 +147,6 @@ fn condition_is_fx_release_bound(c: &Condition) -> bool {
         && c.evidence_refs.len() == 1
         && c.evidence_refs[0] == m
         && c.coverage_proof == m
-}
-
-fn is_fx_release_bound_profile(list: &[Condition]) -> bool {
-    !list.is_empty() && list.iter().all(condition_is_fx_release_bound)
-}
-
-fn validate_fx_marker_uniformity(list: &[Condition]) -> Result<(), String> {
-    // 一项的四个槽完整声明才是模板；单独出现在静态证据里的同名字符串只是数据。
-    let any = list.iter().any(condition_is_fx_release_bound);
-    if any && !is_fx_release_bound_profile(list) {
-        return Err(format!(
-            "Unsupported：{} 须在获准条件清单四项内统一声明，不得混写",
-            crate::economic_session::FX_RELEASE_BOUND_MARKER
-        ));
-    }
-    Ok(())
 }
 
 fn validate_fx_release_bound_certificate(
@@ -348,12 +366,13 @@ impl ExactCommand {
         {
             return Err("IdentityConflict：首次提交量与 L 不同".into());
         }
-        if is_fx_release_bound_profile(&p.conditions) {
-            validate_fx_release_bound_certificate(c, &p.conditions)?;
-        } else if c.conditions != p.conditions {
-            return Err("Unsupported：条件清单与获准 manifest 清单不逐项相等".into());
+        match p.fx_valuation_revision {
+            Some(FxReleaseRevision::ReleaseBound) => {
+                validate_fx_release_bound_certificate(c, &p.conditions)
+            }
+            None if c.conditions == p.conditions => Ok(()),
+            None => Err("Unsupported：条件清单与获准 manifest 清单不逐项相等".into()),
         }
-        Ok(())
     }
 }
 
@@ -367,6 +386,9 @@ pub(super) trait AuditProfile {
     fn source_epoch(&self) -> &str;
     fn e_identity(&self) -> (&str, &str);
     fn s_identity(&self) -> (&str, &str);
+    fn fx_valuation_revision(&self) -> Option<FxReleaseRevision> {
+        None
+    }
 }
 
 impl AuditProfile for Profile {
@@ -397,6 +419,9 @@ impl AuditProfile for Profile {
     fn s_identity(&self) -> (&str, &str) {
         (&self.s.authority_id, &self.s.authority_epoch)
     }
+    fn fx_valuation_revision(&self) -> Option<FxReleaseRevision> {
+        self.fx_valuation_revision
+    }
 }
 
 /// 冷审绑定原命令、对应冻结 profile 布局及其时钟编码。活动的接纳、调用与恢复接口只接 ExactCommand。
@@ -404,6 +429,9 @@ trait CommandRecord: Serialize + serde::de::DeserializeOwned + PartialEq {
     type Profile: AuditProfile + Serialize;
     type Tick: serde::de::DeserializeOwned + Copy + Into<i64>;
     const INNER_REVISION: Option<&'static str>;
+    fn inner_revision(_p: &Self::Profile) -> Option<&'static str> {
+        Self::INNER_REVISION
+    }
     /// 后期 `/1`（`1f0a42bc20`–`b66b61a0b0`）、`/2` 与 `/3` 写者在持久化 `execute_evidence.claimed_ns`
     /// 时恒写 `batch.bar.index`；早期 `/1`（`18446a3d35`、`5f3361ca8b` 写墙钟 `now_ns()`，
     /// `d1c46577b1` 改写 `batch.bar.index`，同用 11 键/3 键早期布局）不能溯及强制等于 `bar.index`。
@@ -430,6 +458,9 @@ impl CommandRecord for ExactCommand {
     type Profile = Profile;
     type Tick = DecimalTick;
     const INNER_REVISION: Option<&'static str> = Some(super::EXACT_PROFILE_REVISION);
+    fn inner_revision(p: &Profile) -> Option<&'static str> {
+        Some(p.revision())
+    }
     const CLAIMED_MATCHES_BATCH_BAR: bool = true;
     const CLAIMED_NS_AUDIT_POLICY: &'static str = "verified_equal_to_attempt_bar";
     const ARCHIVE_LAYOUT: &'static str = "v3";
@@ -469,6 +500,12 @@ struct Receipt<C, T> {
     receipt_id: String,
     release_receipt_id: Option<String>,
     commit_ns: T,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "FxReleaseRevision::deserialize_declared"
+    )]
+    fx_valuation_revision: Option<FxReleaseRevision>,
 }
 type AuthorityReply = Receipt<ExactCommand, DecimalTick>;
 
@@ -806,11 +843,14 @@ fn validate_authority_reply<C: CommandRecord>(
     {
         return Err("IdentityConflict：权威回执未绑定原命令/内容/会话/身份".into());
     }
-    let expected = if op == "QueryReleasedExact" {
-        "ReleasedExact"
+    let (expected, fx_revision) = if op == "QueryReleasedExact" {
+        ("ReleasedExact", p.fx_valuation_revision())
     } else {
-        "ExecuteCommitted"
+        ("ExecuteCommitted", None)
     };
+    if r.fx_valuation_revision != fx_revision {
+        return Err("IdentityConflict：权威回执与 X 冻结 FX 合同版本不符".into());
+    }
     if r.commit_ns.into() < 0 {
         return Err("InvalidDomain：权威提交时刻不得为负".into());
     }
@@ -1069,7 +1109,7 @@ enum ArchiveProfileInner {
     EarlyV1(archive_v1::EarlyProfile),
     LateV1(archive_v1::LateV1Profile),
     V2(Profile),
-    V3(Profile),
+    Exact(Profile),
 }
 
 /// 按外层 `profile_revision` + 内层 `exact_profile_revision` + 冻结键集判别出的归档 profile。
@@ -1081,7 +1121,7 @@ impl ArchiveProfile {
         match &self.0 {
             ArchiveProfileInner::EarlyV1(p) => p,
             ArchiveProfileInner::LateV1(p) => p,
-            ArchiveProfileInner::V2(p) | ArchiveProfileInner::V3(p) => p,
+            ArchiveProfileInner::V2(p) | ArchiveProfileInner::Exact(p) => p,
         }
     }
 
@@ -1111,8 +1151,12 @@ impl ArchiveProfile {
                 archive_v2::ArchivedCommand::CONDITION_AUDIT_POLICY,
                 archive_v2::ArchivedCommand::CONDITION_AUDIT_UNPROVEN,
             ),
-            ArchiveProfileInner::V3(_) => (
-                ExactCommand::ARCHIVE_LAYOUT,
+            ArchiveProfileInner::Exact(p) => (
+                if p.fx_valuation_revision.is_some() {
+                    "v4"
+                } else {
+                    ExactCommand::ARCHIVE_LAYOUT
+                },
                 ExactCommand::CLAIMED_NS_AUDIT_POLICY,
                 ExactCommand::CONDITION_AUDIT_POLICY,
                 ExactCommand::CONDITION_AUDIT_UNPROVEN,
@@ -1148,7 +1192,7 @@ impl ArchiveProfile {
             ArchiveProfileInner::V2(p) => {
                 audit_existing::<archive_v2::ArchivedCommand>(tx, p, epoch)
             }
-            ArchiveProfileInner::V3(p) => audit_existing::<ExactCommand>(tx, p, epoch),
+            ArchiveProfileInner::Exact(p) => audit_existing::<ExactCommand>(tx, p, epoch),
         }
     }
 }
@@ -1158,6 +1202,7 @@ impl ArchiveProfile {
 pub(super) fn check_inner_revision(tx: &Connection, revision: &str) -> Result<(), String> {
     let expected = match revision {
         super::EXACT_PROFILE_REVISION => Some(super::EXACT_PROFILE_REVISION),
+        super::FX_RELEASE_PROFILE_REVISION => Some(super::FX_RELEASE_PROFILE_REVISION),
         "x-execution-profile/2" => Some("x-execution-profile/2"),
         "x-execution-profile/1" => None,
         other => {
@@ -1179,7 +1224,7 @@ pub(super) fn check_inner_revision(tx: &Connection, revision: &str) -> Result<()
 }
 
 /// 按版本与冻结键集严格判别归档 profile：
-/// `/2` 与 `/3` 恒直接解码完整 12 键/6 键 `Profile`；
+/// `/2` 与 `/3` 解码原静态 profile；`/4` 另须显式声明 FX/2；
 /// `/1` 先按严格键集区分早期（11 键 + 3 键）与后期（12 键 + 6 键），不回退降格。
 pub(super) fn parse_archive_profile(
     revision: &str,
@@ -1187,11 +1232,17 @@ pub(super) fn parse_archive_profile(
 ) -> Result<ArchiveProfile, String> {
     let val = strict_json(raw_profile.as_bytes())?;
     let inner = match revision {
-        super::EXACT_PROFILE_REVISION => {
-            ArchiveProfileInner::V3(serde_json::from_value(val).map_err(error)?)
-        }
-        "x-execution-profile/2" => {
-            ArchiveProfileInner::V2(serde_json::from_value(val).map_err(error)?)
+        super::EXACT_PROFILE_REVISION
+        | super::FX_RELEASE_PROFILE_REVISION
+        | "x-execution-profile/2" => {
+            let p: Profile = serde_json::from_value(val).map_err(error)?;
+            if revision == "x-execution-profile/2" && p.fx_valuation_revision.is_none() {
+                ArchiveProfileInner::V2(p)
+            } else if revision == p.revision() {
+                ArchiveProfileInner::Exact(p)
+            } else {
+                return Err("VersionUnsupported：历史模拟库版本与冻结 FX 声明不符".into());
+            }
         }
         "x-execution-profile/1" => match archive_v1::classify_v1_profile(&val)? {
             archive_v1::V1ProfileLayout::Early => {
@@ -1230,7 +1281,7 @@ fn audit_existing<C: CommandRecord>(
             )
             .optional()
             .map_err(error)?;
-        if version.as_deref() != C::INNER_REVISION {
+        if version.as_deref() != C::inner_revision(p) {
             return Err("VersionUnsupported：历史模拟库内层版本与所选格式不符".into());
         }
         validate_pending_epoch(c, epoch)?;
@@ -1296,7 +1347,7 @@ pub fn initialize_in_transaction(
         "INSERT INTO x_sim_meta VALUES('authority_profile',?1),('exact_profile_revision',?2)",
         params![
             canonical_json(&serde_json::to_value(p).map_err(error)?),
-            super::EXACT_PROFILE_REVISION
+            p.revision()
         ],
     )
     .map_err(error)?;

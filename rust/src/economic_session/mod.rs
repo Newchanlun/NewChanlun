@@ -9,6 +9,7 @@ mod content_store;
 mod domain_event;
 mod evidence;
 mod exact_command;
+pub use exact_command::FxReleaseRevision;
 pub(crate) use exact_command::{
     check_condition_semantics, check_required_capabilities, FxReleaseReferences,
     FX_RELEASE_BOUND_MARKER,

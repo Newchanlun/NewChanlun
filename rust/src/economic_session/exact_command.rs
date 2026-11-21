@@ -6,13 +6,28 @@ use super::book::hash;
 use super::fx_valuation::encode_reference;
 use super::voice::{digest, exact};
 use crate::session_protocol::{positive, required};
+use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::{json, Value};
 use std::collections::BTreeSet;
 
 pub(super) const AUTHORITY_WIRE: &str = "x-exact-authority/1";
-/// #1407 C3 CE-S07：冻结财务原件与 X profile 显式选择“由 E 在真实 ReleaseExact 切面动态绑定可核证 FX 依赖”的唯一标记
-/// （仅搭配 `tb03b-finance/6` + `fx-valuation/2`）。纯非 FX 与既有静态 `fx-valuation/1` 合同不使用该标记；
-/// 真实放行交付的 `ReleasedExact` 证书中也绝不得残留该标记。
+/// 动态 FX 合同的显式声明。缺字段是旧静态合同（FX/1 或非 FX），不是从证书内容推断。
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum FxReleaseRevision {
+    #[serde(rename = "fx-valuation/2")]
+    ReleaseBound,
+}
+
+impl FxReleaseRevision {
+    // 字段可缺省，但显式声明必须是已知版本，而不是 null 或未知版本。
+    pub(crate) fn deserialize_declared<'de, D: Deserializer<'de>>(
+        d: D,
+    ) -> Result<Option<Self>, D::Error> {
+        Self::deserialize(d).map(Some)
+    }
+}
+
+/// FX/2 冻结模板的占位文本，只在已选定动态合同后用来核验模板；静态证据允许同名。
 pub(crate) const FX_RELEASE_BOUND_MARKER: &str = "fx-valuation/2:release-bound";
 const FX_COVERAGE_PROOF_PREFIX: &str = "fx-valuation/2:";
 
@@ -925,7 +940,7 @@ pub(super) fn model_coverage(d: &Value, q: &Value) -> Option<Value> {
         json!({"reason":"ModelOrderUnspecified","model_ref":m["model_ref"],"domain_id":m["domain_id"],"command_id":q["exact"]["command_id"]}),
     )
 }
-/// #1942 `AuthorityReply` 的十二字段，键集逐项相等（X 端 `deny_unknown_fields`）。
+/// 保留静态合同的十二字段；只在 FX/2 权威回执中附上 E 冻结的合同声明。
 pub(super) fn authority_reply(
     request: &Value,
     command: &Value,
@@ -933,8 +948,9 @@ pub(super) fn authority_reply(
     state: &str,
     receipt_id: &str,
     commit_ns: i64,
+    fx_valuation_revision: Option<FxReleaseRevision>,
 ) -> Value {
-    json!({
+    let mut reply = json!({
         "protocol":AUTHORITY_WIRE,
         "session_id":request["session_id"],
         "session_generation":request["session_generation"],
@@ -947,5 +963,9 @@ pub(super) fn authority_reply(
         "receipt_id":receipt_id,
         "release_receipt_id":Value::Null,
         "commit_ns":commit_ns.to_string(),
-    })
+    });
+    if let Some(revision) = fx_valuation_revision {
+        reply["fx_valuation_revision"] = json!(revision);
+    }
+    reply
 }

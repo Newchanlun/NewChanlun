@@ -2819,7 +2819,7 @@ fn ce_s07_v6_verifiable_fx_certificate_tamper_old_receipt_priority_and_scope_con
             x == "market-supersession:testonly.ce-s07.fx|1|TEST-FX/TEST-CASH|fx-quote-007:after_rev=1"
         }));
 
-    // X 侧用统一 FX release-bound profile 核验真实交付命令通过。
+    // X 侧用显式 FX/2 的 X/4 profile 核验真实交付命令通过。
     let x_conditions: Vec<Value> = EXACT_CONDITIONS
         .iter()
         .map(|(id, capability, stage)| {
@@ -2836,36 +2836,39 @@ fn ce_s07_v6_verifiable_fx_certificate_tamper_old_receipt_priority_and_scope_con
             })
         })
         .collect();
-    let x_prof: crate::history_simulation::runtime::Profile = serde_json::from_value(json!({
-        "model": model,
-        "session_id": s.session_id,
-        "session_generation": "1",
-        "x_id": "X",
-        "source_namespace": "x-sim",
-        "source_epoch": "epoch1",
-        "socket": s.space.dir.join("x.sock"),
-        "e": {
-            "socket": s.space.dir.join("e.sock"),
-            "authority_id": "E",
-            "authority_epoch": "1",
-            "schema_revision": "tb03b-finance/6",
-            "reply_namespace": "E/replies",
-            "producer_id": "E:session"
-        },
-        "s": {
-            "socket": s.space.dir.join("s.sock"),
-            "authority_id": "S",
-            "authority_epoch": "1",
-            "schema_revision": "s-session/3",
-            "reply_namespace": "S/replies",
-            "producer_id": "S:session"
-        },
-        "conditions": x_conditions,
-        "timeout_ms": 2000,
-        "max_frame_bytes": 65536
-    }))
+    let x_prof = crate::history_simulation::runtime::Profile::from_declared_revision(
+        crate::history_simulation::FX_RELEASE_PROFILE_REVISION,
+        json!({
+            "fx_valuation_revision": super::FxReleaseRevision::ReleaseBound,
+            "model": model,
+            "session_id": s.session_id,
+            "session_generation": "1",
+            "x_id": "X",
+            "source_namespace": "x-sim",
+            "source_epoch": "epoch1",
+            "socket": s.space.dir.join("x.sock"),
+            "e": {
+                "socket": s.space.dir.join("e.sock"),
+                "authority_id": "E",
+                "authority_epoch": "1",
+                "schema_revision": "tb03b-finance/6",
+                "reply_namespace": "E/replies",
+                "producer_id": "E:session"
+            },
+            "s": {
+                "socket": s.space.dir.join("s.sock"),
+                "authority_id": "S",
+                "authority_epoch": "1",
+                "schema_revision": "s-session/3",
+                "reply_namespace": "S/replies",
+                "producer_id": "S:session"
+            },
+            "conditions": x_conditions,
+            "timeout_ms": 2000,
+            "max_frame_bytes": 65536
+        }),
+    )
     .unwrap();
-    x_prof.validate().unwrap();
     let mut x_prof_alpha = x_prof.clone();
     x_prof_alpha.model.symbol = "alpha".into();
     let mut cmd_alpha_for_x = cmd_alpha.clone();
@@ -2987,7 +2990,7 @@ fn ce_s07_v6_verifiable_fx_certificate_tamper_old_receipt_priority_and_scope_con
             x == "market-supersession:testonly.ce-s07.fx|1|TEST-FX/TEST-CASH|fx-quote-007:after_rev=3"
         }));
 
-    // 同一静态 X profile 同样接受 cut 16 的 rev=3 交付命令。
+    // 同一动态 X/4 profile 同样接受 cut 16 的 rev=3 交付命令。
     let mut cmd_beta_for_x = rel_beta["record"]["command"].clone();
     cmd_beta_for_x["symbol"] = json!(x_prof.model.symbol);
     let parsed_beta: crate::history_simulation::runtime::ExactCommand =

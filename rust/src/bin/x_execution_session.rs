@@ -14,7 +14,9 @@
 //!   x_execution_session query-batch --db FILE --batch-id ID
 //!   x_execution_session query-original --db FILE --original-id ID
 //!   x_execution_session submit|cancel --db FILE      （恒 UnsupportedCapability）
-use newchan_rust::history_simulation::EXACT_PROFILE_REVISION;
+use newchan_rust::history_simulation::{
+    runtime, EXACT_PROFILE_REVISION, FX_RELEASE_PROFILE_REVISION,
+};
 use newchan_rust::session_protocol::{canonical_json, positive};
 use newchan_rust::session_transport::process_lock;
 use rusqlite::{Connection, OpenFlags, OptionalExtension};
@@ -28,7 +30,7 @@ const MODES: [&str; 4] = ["simulation", "dry-run", "experiment", "production"];
 const SCHEMA: &str =
     "CREATE TABLE IF NOT EXISTS x_meta(key TEXT PRIMARY KEY, value TEXT NOT NULL);";
 
-/// 历史模拟采用 /3（`EXACT_PROFILE_REVISION`），其他执行 profile 保留 /1。凭据只经 `credential_scope.env` 指明的环境变量
+/// 历史模拟采用静态 /3 或显式 FX/2 的 /4，其他执行 profile 保留 /1。凭据只经 `credential_scope.env` 指明的环境变量
 /// 进入本进程；值永不落库、不打印。
 struct Profile {
     revision: String,
@@ -36,7 +38,7 @@ struct Profile {
     endpoint: Option<String>,
     credential_env: String,
     tb09_fingerprint: Option<String>,
-    history_simulation: Option<newchan_rust::history_simulation::runtime::Profile>,
+    history_simulation: Option<runtime::Profile>,
 }
 
 impl Profile {
@@ -49,14 +51,19 @@ impl Profile {
             .as_str()
             .unwrap_or_default()
             .to_string();
-        let expected = if v["history_simulation"].is_null() {
-            PROFILE_REVISION
-        } else {
-            EXACT_PROFILE_REVISION
-        };
-        if revision != expected {
+        if v["history_simulation"].is_null() && revision != PROFILE_REVISION {
             return Err(format!(
-                "VersionUnsupported：执行 profile 版本 `{revision}` 不是 {expected}"
+                "VersionUnsupported：执行 profile 版本 `{revision}` 不是 {PROFILE_REVISION}"
+            ));
+        }
+        if !v["history_simulation"].is_null()
+            && !matches!(
+                revision.as_str(),
+                EXACT_PROFILE_REVISION | FX_RELEASE_PROFILE_REVISION
+            )
+        {
+            return Err(format!(
+                "VersionUnsupported：历史模拟 X profile `{revision}` 不支持续写；须用 {EXACT_PROFILE_REVISION} 或 {FX_RELEASE_PROFILE_REVISION}"
             ));
         }
         let mode = v["mode"]
@@ -88,11 +95,10 @@ impl Profile {
                         "InvalidDomain：history_simulation 仅允许 simulation profile".into(),
                     );
                 }
-                let profile: newchan_rust::history_simulation::runtime::Profile =
-                    serde_json::from_value(value.clone())
-                        .map_err(|e| format!("InvalidDomain：模拟 profile：{e}"))?;
-                profile.validate()?;
-                Some(profile)
+                Some(runtime::Profile::from_declared_revision(
+                    &revision,
+                    value.clone(),
+                )?)
             }
         };
         Ok(Self {
@@ -146,9 +152,9 @@ fn preflight_existing_db(db: &Path, profile: &Profile, epoch: i64) -> Result<(),
         return Err("IdentityConflict：模拟原件执行域不可与其他 profile 共用 X 库".into());
     }
     if old_simulation.as_deref() == Some("true")
-        && meta_get(&conn, "profile_revision")?.as_deref() != Some(EXACT_PROFILE_REVISION)
+        && meta_get(&conn, "profile_revision")?.as_deref() != Some(profile.revision.as_str())
     {
-        return Err("VersionUnsupported：旧历史模拟库须从空库重放".into());
+        return Err("VersionUnsupported：历史模拟库版本不兼容，升级须从空库重放".into());
     }
     if let Some(stored) = meta_get(&conn, "writer_epoch")? {
         let stored: i64 = stored.parse().map_err(err)?;
@@ -173,9 +179,9 @@ fn persist(conn: &mut Connection, profile: &Profile, epoch: i64) -> Result<Value
         return Err("IdentityConflict：模拟原件执行域不可与其他 profile 共用 X 库".into());
     }
     if old_simulation.as_deref() == Some("true")
-        && meta_get(&tx, "profile_revision")?.as_deref() != Some(EXACT_PROFILE_REVISION)
+        && meta_get(&tx, "profile_revision")?.as_deref() != Some(profile.revision.as_str())
     {
-        return Err("VersionUnsupported：旧历史模拟库须从空库重放".into());
+        return Err("VersionUnsupported：历史模拟库版本不兼容，升级须从空库重放".into());
     }
     if let Some(stored) = meta_get(&tx, "writer_epoch")? {
         let stored: i64 = stored.parse().map_err(err)?;
@@ -186,9 +192,7 @@ fn persist(conn: &mut Connection, profile: &Profile, epoch: i64) -> Result<Value
         }
     }
     if let Some(simulation) = &profile.history_simulation {
-        newchan_rust::history_simulation::runtime::initialize_in_transaction(
-            &tx, simulation, epoch,
-        )?;
+        runtime::initialize_in_transaction(&tx, simulation, epoch)?;
     }
     let (send_state, reason) = if profile.mode == "production" && profile.tb09_fingerprint.is_none()
     {
@@ -284,9 +288,7 @@ fn run() -> Result<(), String> {
             eprintln!("x_execution_session storage {storage}");
             let state = persist(&mut conn, &profile, epoch)?;
             if let Some(simulation) = &profile.history_simulation {
-                return newchan_rust::history_simulation::runtime::serve(
-                    &mut conn, simulation, epoch,
-                );
+                return runtime::serve(&mut conn, simulation, epoch);
             }
             drop(conn);
             // 凭据门在任何传输构造之前：缺即 MissingDependency 非 0 退出，端点从未被连接。

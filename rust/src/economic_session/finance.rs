@@ -2560,7 +2560,7 @@ pub(super) fn query(c: &Connection, config: &Config, p: &Value) -> Result<Value,
     }
 }
 /// #1407 E 侧命令查询。QueryCommand 按原 command_id 返回 E 财务状态或 NoRecord，不释放责任也不造新动作；
-/// QueryReleasedExact 是 `x-exact-authority/1` 的应答，请求体即 #1942 X 发出的帧，回复为 AuthorityReply 十二字段。
+/// QueryReleasedExact 回复绑定原命令；动态 FX 合同同时声明 E 持久固定的 FX/2 版本。
 pub(super) fn query_command(
     c: &Connection,
     config: &Config,
@@ -2639,6 +2639,9 @@ pub(super) fn query_command(
         .iter()
         .find(|x| x["command_id"] == id && x["state"] != "Dispatchable");
     let epoch = epoch.to_string();
+    // 与 ReleaseExact 同一判据；manifest 及 FX 修订在建库时冻结，恢复也逐值核验。
+    let fx_valuation_revision =
+        fx_release_bound(config)?.then_some(super::FxReleaseRevision::ReleaseBound);
     let Some(r) = entry else {
         return Ok(super::exact_command::authority_reply(
             p,
@@ -2647,6 +2650,7 @@ pub(super) fn query_command(
             "NoRecord",
             &format!("NoRecord@{s}"),
             nonnegative(&frontier_ns, "commit_ns")?,
+            fx_valuation_revision,
         ));
     };
     if r["command"] != p["command"] {
@@ -2664,6 +2668,7 @@ pub(super) fn query_command(
         state,
         &receipt_key_for(config, "ReleaseExact", id)?,
         nonnegative(at, "release commit_ns")?,
+        fx_valuation_revision,
     ))
 }
 /// 业务方只给关闭 slot 的原身份。跨重协议排序由 E 模块持有，不由 UI 拼装。
