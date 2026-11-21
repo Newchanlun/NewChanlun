@@ -126,6 +126,7 @@ pub trait ScratchParent: Send + Sync {
         if self.origin() != expected {
             return Err(ScratchFailure::Ledger);
         }
+        self.health()?;
         let origin = self.reserve(bytes, kind)?;
         if origin != expected {
             self.release(bytes, kind, origin)?;
@@ -203,19 +204,30 @@ impl ScratchHandle {
         }
     }
     pub(crate) fn reserve_native(&self, bytes: usize) -> Result<NativeReservation, CodecError> {
-        self.check_write()?;
-        let parent = self.core().parent.clone();
-        let origin = parent
-            .reserve_in_origin(bytes, ScratchCharge::Native, self.core().origin)
-            .map_err(|failure| {
+        let c = self.core();
+        if !c.active.load(Ordering::Acquire) {
+            return Err(CodecError::scratch(ScratchFailure::Ledger));
+        }
+        if c.failure.load(Ordering::Acquire) != 0 {
+            self.check_write()?;
+        }
+        match c
+            .parent
+            .reserve_in_origin(bytes, ScratchCharge::Native, c.origin)
+        {
+            Ok(origin) => Ok(NativeReservation {
+                parent: c.parent.clone(),
+                bytes,
+                origin,
+            }),
+            Err(failure) => {
+                if failure == ScratchFailure::Ledger && c.origin != c.parent.origin() {
+                    return Err(CodecError::scratch(ScratchFailure::Ledger));
+                }
                 self.fail(failure);
-                CodecError::scratch(failure)
-            })?;
-        Ok(NativeReservation {
-            parent,
-            bytes,
-            origin,
-        })
+                Err(CodecError::scratch(failure))
+            }
+        }
     }
     fn core(&self) -> &ScratchCore {
         self.0.as_ref().expect("scratch handle")
@@ -258,36 +270,42 @@ impl ScratchHandle {
     }
     /// 写操作即使复用已有容量，也必须仍处于健康的活动域。
     fn check_write(&self) -> Result<(), CodecError> {
-        if !self.core().active.load(Ordering::Acquire)
-            || self.core().origin != self.core().parent.origin()
-        {
+        let c = self.core();
+        if !c.active.load(Ordering::Acquire) || c.origin != c.parent.origin() {
             return Err(CodecError::scratch(ScratchFailure::Ledger));
         }
-        if let Some(failure) = self.failure() {
-            return Err(CodecError::scratch(failure));
+        match c.failure.load(Ordering::Acquire) {
+            0 => {}
+            1 => return Err(CodecError::scratch(ScratchFailure::Budget)),
+            2 => return Err(CodecError::scratch(ScratchFailure::Allocation)),
+            3 => return Err(CodecError::scratch(ScratchFailure::Ledger)),
+            SEMANTIC_FAILURE => {
+                return Err(CodecError::static_detail(
+                    super::INCOMPLETE,
+                    "codec 工作域已因语义错误结束",
+                ));
+            }
+            _ => {}
         }
-        if self.core().failure.load(Ordering::Acquire) == SEMANTIC_FAILURE {
-            return Err(CodecError::static_detail(
-                super::INCOMPLETE,
-                "codec 工作域已因语义错误结束",
-            ));
-        }
-        if let Err(failure) = self.core().parent.health() {
+        if let Err(failure) = c.parent.health() {
             self.fail(failure);
             return Err(CodecError::scratch(failure));
         }
         Ok(())
     }
     pub(crate) fn reserve(&self, layout: Layout) -> Result<(), ScratchFailure> {
-        if let Some(e) = self.failure() {
-            return Err(e);
+        let c = self.core();
+        match c.failure.load(Ordering::Acquire) {
+            0 => {}
+            1 => return Err(ScratchFailure::Budget),
+            2 => return Err(ScratchFailure::Allocation),
+            3 => return Err(ScratchFailure::Ledger),
+            SEMANTIC_FAILURE => return Err(ScratchFailure::Ledger),
+            _ => {}
         }
-        if !self.core().active.load(Ordering::Acquire)
-            || self.core().failure.load(Ordering::Acquire) == SEMANTIC_FAILURE
-        {
+        if !c.active.load(Ordering::Acquire) {
             return Err(ScratchFailure::Ledger);
         }
-        let c = self.core();
         let bytes = layout.size();
         if bytes == 0 {
             return Ok(());
@@ -305,20 +323,19 @@ impl ScratchHandle {
             self.fail(ScratchFailure::Ledger);
             return Err(ScratchFailure::Ledger);
         }
-        if c.live
-            .try_update(Ordering::AcqRel, Ordering::Acquire, |n| {
-                n.checked_add(bytes).filter(|n| *n <= c.limit)
-            })
-            .is_err()
-        {
+        let Ok(previous) = c.live.try_update(Ordering::AcqRel, Ordering::Acquire, |n| {
+            n.checked_add(bytes).filter(|n| *n <= c.limit)
+        }) else {
             self.fail(ScratchFailure::Budget);
             if let Err(e) = c.parent.release(bytes, ScratchCharge::Layout, c.origin) {
                 self.fail(e);
             }
             return Err(self.failure().unwrap());
+        };
+        let next_live = previous + bytes;
+        if next_live > c.peak.load(Ordering::Relaxed) {
+            c.peak.fetch_max(next_live, Ordering::Relaxed);
         }
-        c.peak
-            .fetch_max(c.live.load(Ordering::Acquire), Ordering::Relaxed);
         if c.attempts
             .try_update(Ordering::AcqRel, Ordering::Acquire, |n| n.checked_add(1))
             .is_err()
