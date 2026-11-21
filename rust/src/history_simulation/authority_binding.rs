@@ -45,6 +45,7 @@ impl Domains {
 #[serde(deny_unknown_fields)]
 pub struct RebindInput {
     schema_revision: String,
+    domains: Vec<String>,
     e: Option<CurrentReceipt>,
     s: Option<CurrentReceipt>,
 }
@@ -60,8 +61,12 @@ struct CurrentReceipt {
 impl RebindInput {
     pub fn parse(raw: &[u8]) -> Result<Self, String> {
         let v: Self = serde_json::from_value(strict_json(raw)?).map_err(error)?;
-        if v.schema_revision != HANDOFF || (v.e.is_none() && v.s.is_none()) {
-            return Err(error("恢复交接版本未知或缺具名当前回执"));
+        let supplied: Vec<&str> = [("E", &v.e), ("S", &v.s)]
+            .into_iter()
+            .filter_map(|(id, record)| record.as_ref().map(|_| id))
+            .collect();
+        if v.schema_revision != HANDOFF || supplied.is_empty() || v.domains != supplied {
+            return Err(error("恢复交接版本未知或指定域缺具名当前回执"));
         }
         Ok(v)
     }

@@ -41,6 +41,13 @@ pub fn open_durable_db(
     store::open(db, false)
 }
 
+/// 只续接既有的 WAL 写库；禁止建库、切换日志模式或替换原介质。
+pub fn reopen_durable_writer(
+    db: &std::path::Path,
+) -> Result<(rusqlite::Connection, serde_json::Value), String> {
+    store::reopen_writer(db)
+}
+
 #[cfg(test)]
 mod domain_event_tests;
 #[cfg(test)]

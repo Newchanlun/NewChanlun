@@ -338,8 +338,15 @@ impl ConfiguredProfile {
         history.append(c, &self.profile, identities, domains, input)
     }
 
-    /// bin 已在原 writer lock 下提交初始化/重绑事务，之后才能发布 socket。
     pub fn serve(&self, c: &mut Connection, epoch: i64) -> Result<(), String> {
+        let tx = c.transaction().map_err(error)?;
+        self.initialize_in_transaction(&tx, epoch)?;
+        tx.commit().map_err(error)?;
+        self.serve_initialized(c, epoch)
+    }
+
+    /// bin 已在原 writer lock 下提交初始化/重绑事务，之后才能发布 socket。
+    pub fn serve_initialized(&self, c: &mut Connection, epoch: i64) -> Result<(), String> {
         let history = self
             .identities()
             .map(|ids| History::load(c, &self.profile, epoch, ids))
@@ -1278,7 +1285,23 @@ fn execute(
     }
     let batch_doc = serde_json::to_value(&batch).map_err(error)?;
     for (command, release, state, call, original) in commands {
-        let Some(frame) = call else { continue };
+        let Some(frame) = call else {
+            let evidence: String = c
+                .query_row(
+                    "SELECT execute_evidence FROM x_exact_commands WHERE id=?1",
+                    [&command.command_id],
+                    |r| r.get(0),
+                )
+                .map_err(error)?;
+            let evidence = crate::session_protocol::strict_json(evidence.as_bytes())?;
+            let old = match (history, original) {
+                (Some(h), Some(attempt)) => h.profile_at(genesis, attempt.binding_seq)?,
+                (None, _) => p.clone(),
+                _ => return Err("IdentityConflict：已取得资格的命令缺原请求".into()),
+            };
+            validate_execution_record(&old, &command, &release, &evidence)?;
+            continue;
+        };
         let connection = authority_connect(&p.s)?;
         let first = state == "Accepted";
         if first {
@@ -1388,6 +1411,13 @@ fn execute(
     let ids: Vec<_> = ids.into_iter().collect();
     store::commit_batch_with_commands(c, &batch, &ids, |tx| {
         if history.is_some() {
+            authority_history::record(
+                tx,
+                history,
+                &batch.request_id,
+                "publish",
+                json!({"batch":batch_doc}),
+            )?;
             for id in &ids {
                 let claim = authority_history::link(tx, id, "claim")?;
                 authority_history::record(

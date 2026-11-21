@@ -28,6 +28,7 @@ fn run_x_fixture(mode: Option<&str>) {
         .arg(env!("CARGO_BIN_EXE_x_execution_session"))
         .arg(&directory)
         .args(mode)
+        .env("X_FIXTURE_E_BIN", env!("CARGO_BIN_EXE_e_economic_session"))
         .output()
         .expect("python3 standard-library process fixture");
     assert!(

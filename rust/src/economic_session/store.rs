@@ -610,13 +610,30 @@ pub(super) fn open_metered(
     read_only: bool,
     budget: &mut ReadBudget<'_>,
 ) -> Result<(Connection, Value), String> {
-    budget.before()?;
-    let fs = filesystem(db)?;
     let flags = if read_only {
         OpenFlags::SQLITE_OPEN_READ_ONLY
     } else {
         OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_CREATE
     };
+    open_flags(db, flags, budget)
+}
+
+pub(super) fn reopen_writer(db: &Path) -> Result<(Connection, Value), String> {
+    open_flags(
+        db,
+        OpenFlags::SQLITE_OPEN_READ_WRITE,
+        &mut ReadBudget::new(None, None),
+    )
+}
+
+fn open_flags(
+    db: &Path,
+    flags: OpenFlags,
+    budget: &mut ReadBudget<'_>,
+) -> Result<(Connection, Value), String> {
+    budget.before()?;
+    let fs = filesystem(db)?;
+    let read_only = flags.contains(OpenFlags::SQLITE_OPEN_READ_ONLY);
     let c = Connection::open_with_flags(db, flags).map_err(err)?;
     c.busy_timeout(Duration::from_secs(2)).map_err(err)?;
     let version = rusqlite::version_number();
@@ -624,7 +641,11 @@ pub(super) fn open_metered(
         return Err("StorageUnavailable：运行SQLite缺WAL-reset修复".into());
     }
     if !read_only {
-        c.execute_batch("PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; PRAGMA fullfsync=ON; PRAGMA foreign_keys=ON;").map_err(err)?;
+        if flags.contains(OpenFlags::SQLITE_OPEN_CREATE) {
+            c.execute_batch("PRAGMA journal_mode=WAL;").map_err(err)?;
+        }
+        c.execute_batch("PRAGMA synchronous=FULL; PRAGMA fullfsync=ON; PRAGMA foreign_keys=ON;")
+            .map_err(err)?;
     } else {
         c.execute_batch("PRAGMA query_only=ON; PRAGMA synchronous=FULL; PRAGMA fullfsync=ON;")
             .map_err(err)?;

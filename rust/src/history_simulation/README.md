@@ -166,5 +166,36 @@ StorageUnavailable 拒启。启动时把实际读到的存储证据写到 stderr
   两者同时可成才报 ModelOrderUnspecified；bar 须连续，此时模拟不可恢复。
 - Model 尚缺 ADR 0033「版本合同字段（v1）」要求的字段（input_domain、带条款 id 的
   price_rules、capacity_source、unsupported_domains、clock/known_frontier_cut 等）。#1381 不关。
-- 启动重放两次：`x_execution_session` 的 persist 与 `runtime::serve` 各调用一次
-  initialize_in_transaction，两次都经 validate_existing 从空状态重放全部历史批。
+## 权威恢复（ADR 0073，切片 1）
+
+在新空库的 `x-simulation-authority/2` 业务档内同时声明
+`recovery_identity: {e_manifest_hash, s_config}`，在独立部署档声明
+`recovery_domains: {e_db, e_manifest, s_db}`。E 使用 `economic-manifest/2` 业务摘要；
+S 使用 `s-recovery/1` 回执里的冻结 config。未声明这组字段的既有 /2、旧混合 profile
+都按各自旧合同继续读和同址启服，不接受就地添加恢复资格。
+
+受控装配先对每个选中域执行它的正式 `current-recovery` 并确认该域按获准代启动，
+再以仅启动方可访问的普通文件通过 `serve --authority-rebind FILE` 转交：
+
+```json
+{
+  "schema_revision": "x-authority-rebind-input/1",
+  "domains": ["E"],
+  "e": {"verification": "current-recovery", "db": "/deployment/e.db", "receipt": {}}
+}
+```
+
+上例 `receipt` 位置必须放原 CLI 的完整 `NamedRecoveryReceipt`。两域同换写
+`domains: ["E","S"]` 并同时提供 `e`、`s`，顺序和缺项都检查。启动端以 E
+原库作只读复核；S 核验由域的准入和可信装配负责。该输入不对接客 socket 开放。
+X 持原锁提交单条 `x-authority-binding/1`，之后才开放交换；部署路径不落业务履历。
+重试提交过的同一尾部转换只读回；普通启动从履历尾部恢复且不追加。
+
+新交换只走当前向量。S 请求第一次发送前封存原帧。丢回应后，X 用当前 S 的
+`QueryExecuteCommitted` 携带 `original_attempt`；只有当前信封内的
+`ExecuteCommittedOriginal.original_reply` 能按原尝试（含历史代、原请求因果）
+独立核证时，才续接执行。NoRecord 或缺证明时保留原 pending，不重发。
+`QueryCommand` 在外层报告当前绑定序号和读证时间，历史事件逐项保留原绑定
+及原规范帧。批发布和占有、执行证据分别按各自发生时的绑定记录。
+
+切片 1 的 S 使用合同行为夹具；正式 launcher 与生产 S 恢复介质准入归切片 2。

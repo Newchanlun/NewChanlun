@@ -464,8 +464,26 @@ def rebind_attempts():
         conditions=CONDITIONS,timeout_ms=600,max_frame_bytes=1048576)
     s_config=dict(rule_revision='rule/1',profile_hash='1'*64,catalog_hash='2'*64,
         clock_plan_hash='3'*64,structure_source=dict(category='TestOnlyStructure',namespaces=['testonly.ohlc']))
+    e_business=dict(schema_revision='economic-manifest/2',protocol_revision='economic-session/1',
+        book_revision='tb03c-book/1',session_id='session',session_generation='1',
+        chongs=[dict(chong_id='alpha',symbol='TEST',operation_level='1',fixed_q='1')],
+        authorized_sources=[dict(source_namespace='x-sim',source_epoch='epoch1',producer_id='X',
+            producer_epoch='1',operations=['ReadView'])],
+        resources=dict(max_frame_bytes='1048576',read_timeout_ms='1000',write_timeout_ms='1000',
+            response_timeout_ms='2000',queue_capacity='2',max_connections='2'),
+        clock=dict(kind='TestOnly',plan=dict(init_ns='1',recover_ns=['10'],messages={})))
+    e_deploy=dict(schema_revision='economic-deployment/1',domains={
+        'E':dict(db=str(edb),socket=str(ep)),'B:alpha':dict(db=str(ROOT/'b.db'),socket=str(ROOT/'b'))},
+        voice={},finance=None,fault_markers=[],x_db=None)
+    manifest.write_text(canonical(dict(schema_revision='economic-session-config/2',business=e_business,deployment=e_deploy)))
+    def e_cli(op,*args):
+        result=subprocess.run([os.environ['X_FIXTURE_E_BIN'],op,'--db',str(edb),
+            '--manifest',str(manifest),*args],capture_output=True,timeout=5)
+        assert result.returncode==0,(result.stdout,result.stderr)
+        return json.loads(result.stdout)
+    original_cut=e_cli('init')['cut']
     sim.update(schema_revision='x-simulation-authority/2',
-        recovery_identity=dict(e_manifest_hash='e'*64,s_config=s_config))
+        recovery_identity=dict(e_manifest_hash=digest(e_business),s_config=s_config))
     deploy=dict(schema_revision='x-simulation-deployment/1',db=str(db),socket=str(xp),
         e_socket=str(ep),s_socket=str(sp),recovery_domains=dict(e_db=str(edb),e_manifest=str(manifest),s_db=str(sdb)))
     outer=dict(profile_revision='x-execution-profile/1',mode='simulation',
@@ -490,7 +508,7 @@ def rebind_attempts():
                 cut=dict(generation='0',structure_cut='cut-0',index_frontier=''),config=s_config,
                 clock_event_id=f'recover-{from_epoch}')))
     def handoff(from_epoch):
-        return dict(schema_revision='x-authority-rebind-input/1',s=source_s(from_epoch))
+        return dict(schema_revision='x-authority-rebind-input/1',domains=['S'],s=source_s(from_epoch))
     def dump():
         with sqlite3.connect(db) as conn: return '\n'.join(conn.iterdump())
     def binding():
@@ -616,9 +634,18 @@ def rebind_attempts():
         with sqlite3.connect(legacy) as conn: assert legacy_before==list(conn.iterdump())
         print('authority_rebind_rejects_invalid_transition: malformed/old/query/wrong S context/no X DB rejected without writes')
 
-        s.epoch='2'; s.drop=None
+        e_request=ROOT/'e-recovery.json'
+        e_request.write_text(canonical(dict(schema_revision='economic-recovery/1',domain_id='E',
+            recovery_id='recover-e',session_id='session',session_generation='1',from_epoch='1',
+            manifest_hash=digest(e_business),cut=original_cut)))
+        actual=e_cli('recover-named','--recovery-request',str(e_request))
+        assert actual==e_cli('current-recovery','--recovery-request',str(e_request))
+        combined=handoff(1)
+        combined.update(domains=['E','S'],e=dict(verification='current-recovery',db=str(edb),receipt=actual))
+        save(combined)
+        e.epoch='2'; s.epoch='2'; s.drop=None
         p=start(True)
-        assert binding()[1]['new_vector']==dict(e_authority_epoch=1,s_authority_epoch=2)
+        assert binding()[1]['new_vector']==dict(e_authority_epoch=2,s_authority_epoch=2)
         for k,v in states.items():
             result=query(k,v)
             assert result['current_binding_seq']==1 and result['authority_history']==frozen[k],result
@@ -649,12 +676,12 @@ def rebind_attempts():
         rebound=dump()
         p=start(True); assert dump()==rebound and len(binding())==2
         stop_x(p); p=None
-        diff=handoff(1); diff['s']['receipt']['recover_ns']='950'; save(diff)
+        diff=copy.deepcopy(combined); diff['s']['receipt']['recover_ns']='950'; save(diff)
         assert '同权威转换' in refused(argv(True))
         assert dump()==rebound
         save(handoff(2)); s.epoch='3'
         p=start(True)
-        assert binding()[2]['new_vector']==dict(e_authority_epoch=1,s_authority_epoch=3)
+        assert binding()[2]['new_vector']==dict(e_authority_epoch=2,s_authority_epoch=3)
         for id in old_claims: assert query(id,'MayHaveCalled')['authority_history']==old_claims[id]
         call_count=len(s.calls)
         value=verdict('AdvanceBar',mixed,'SimulationBatch')
@@ -667,8 +694,15 @@ def rebind_attempts():
         assert s.calls[-1]['op']=='RequestConditionalExecution' and s.calls[-1]['authority_epoch']=='3'
         assert len(s.records)==4 and len(s.calls)==call_count+1
         stop_x(p); p=None; audit()
+        # 新旧向量中的 E 代可能相同，仍不能把旧事件改标为另一绑定。
+        with sqlite3.connect(db) as conn:
+            conn.execute("UPDATE x_authority_events SET binding_seq=1 WHERE command_id='o' AND phase='accept'")
+        bad_audit=subprocess.run([str(BIN),'audit','--db',str(db)],capture_output=True,timeout=5)
+        assert bad_audit.returncode==2 and b'IdentityConflict' in bad_audit.stderr
+        with sqlite3.connect(db) as conn:
+            conn.execute("UPDATE x_authority_events SET binding_seq=0 WHERE command_id='o' AND phase='accept'")
         p=start(); assert len(binding())==3
-        print('authority_rebind_s_and_dual_domain_vector: controlled S 1→2→3, E unchanged')
+        print('authority_rebind_s_and_dual_domain_vector: controlled S 1→2 with genuine E recovery; S alone 2→3, E stays 2')
         print('authority_rebind_preserves_original_attempts: Accepted, ExecutionRequested/NoRecord/bad proof, ExecutionReady, MayHaveCalled, Observed; one S claim per command, exact historic wire replay and audit')
     finally:
         if p is not None and p.poll() is None: stop_x(p)

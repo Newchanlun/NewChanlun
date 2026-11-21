@@ -1,8 +1,8 @@
 //! ADR 0073：每条历史事件核当时唯一权威绑定；当前查询不能重写原执行证明。
 use super::{
     authority_binding::History, authority_frame, authority_reply, error, logical_now,
-    query_execution_frame, validate_accept_clock, validate_execution_record, AcceptClock,
-    ExactCommand, Profile,
+    query_execution_frame, store, validate_accept_clock, validate_execution_record, AcceptClock,
+    Batch, ExactCommand, Profile,
 };
 use crate::session_protocol::{canonical_json, strict_json};
 use rusqlite::{params, Connection};
@@ -31,12 +31,17 @@ pub(super) struct Event {
     pub(super) original: Value,
 }
 
-fn read_events(c: &Connection, h: &History, id: &str) -> Result<Vec<Event>, String> {
+fn read_events(
+    c: &Connection,
+    h: &History,
+    id: &str,
+    publication: bool,
+) -> Result<Vec<Event>, String> {
     let mut q = c.prepare(
-        "SELECT event_seq,phase,binding_seq,original FROM x_authority_events WHERE command_id=?1 ORDER BY event_seq",
+        "SELECT event_seq,phase,binding_seq,original FROM x_authority_events WHERE command_id=?1 AND (phase='publish')=?2 ORDER BY event_seq",
     ).map_err(error)?;
     let rows = q
-        .query_map([id], |r| {
+        .query_map(params![id, publication], |r| {
             Ok((
                 r.get::<_, i64>(0)?,
                 r.get::<_, String>(1)?,
@@ -63,7 +68,7 @@ fn read_events(c: &Connection, h: &History, id: &str) -> Result<Vec<Event>, Stri
 }
 
 pub(super) fn attempt(c: &Connection, h: &History, id: &str) -> Result<Event, String> {
-    read_events(c, h, id)?
+    read_events(c, h, id, false)?
         .into_iter()
         .find(|e| e.phase == "request")
         .ok_or_else(|| conflict("原 S 尝试不存在"))
@@ -116,7 +121,7 @@ fn verify(
     epoch: i64,
     row: &CommandRow,
 ) -> Result<Vec<Event>, String> {
-    let events = read_events(c, h, &row.id)?;
+    let events = read_events(c, h, &row.id, false)?;
     let expected: &[&str] = match row.state.as_str() {
         "Accepted" => &["accept"],
         "ExecutionRequested" => &["accept", "request"],
@@ -163,6 +168,9 @@ fn verify(
         return Err(conflict("接纳原回执或接纳时钟不符"));
     }
     let Some(attempt) = events.get(1) else {
+        if row.attempt.is_some() || row.execution.is_some() {
+            return Err(conflict("未请求的接纳记录混入原尝试或执行证据"));
+        }
         return Ok(events);
     };
     let original = &attempt.original;
@@ -184,7 +192,18 @@ fn verify(
     {
         return Err(conflict("原 S 尝试的请求/归属批/时钟不符"));
     }
+    let batch: Batch = serde_json::from_value(original["batch"].clone()).map_err(error)?;
+    if row.state == "Observed" {
+        if store::replay_batch(c, &batch)?.is_none() {
+            return Err(conflict("已观察命令缺原批收据"));
+        }
+    } else if store::pending_batch(c)? != row.attempt {
+        return Err(conflict("原请求脱离仍待办的批次"));
+    }
     let Some(evidence) = events.get(2) else {
+        if row.execution.is_some() {
+            return Err(conflict("尚未取得资格但持久记录混入证据"));
+        }
         return Ok(events);
     };
     let doc = &evidence.original;
@@ -228,12 +247,29 @@ fn verify(
             return Err(conflict("调用占有未绑定原批及资格"));
         }
         if let Some(observed) = events.get(4) {
-            if observed.original != json!({"batch":original["batch"],"claim_event_seq":claim.seq}) {
+            let publication = publication(c, h, &batch.request_id, &original["batch"])?;
+            if observed.binding_seq != publication.binding_seq
+                || publication.seq <= claim.seq
+                || publication.seq >= observed.seq
+                || observed.original
+                    != json!({"batch":original["batch"],"claim_event_seq":claim.seq})
+            {
                 return Err(conflict("批次提交未绑定唯一调用占有"));
             }
         }
     }
     Ok(events)
+}
+
+fn publication(c: &Connection, h: &History, id: &str, batch: &Value) -> Result<Event, String> {
+    let mut events = read_events(c, h, id, true)?;
+    let event = events
+        .pop()
+        .ok_or_else(|| conflict("模型批收据缺发生时的绑定"))?;
+    if !events.is_empty() || event.original != json!({"batch":batch}) {
+        return Err(conflict("模型批收据与原发布批不符"));
+    }
+    Ok(event)
 }
 
 pub(super) fn audit(
@@ -247,6 +283,17 @@ pub(super) fn audit(
     let mut expected = 0i64;
     for row in rows {
         expected += verify(c, genesis, h, epoch, &row.map_err(error)?)?.len() as i64;
+    }
+    let mut batches = c
+        .prepare("SELECT id,request FROM x_sim_batches")
+        .map_err(error)?;
+    let rows = batches
+        .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))
+        .map_err(error)?;
+    for row in rows {
+        let (id, request) = row.map_err(error)?;
+        publication(c, h, &id, &strict_json(request.as_bytes())?)?;
+        expected += 1;
     }
     let (count, min, max): (i64, i64, i64) = c.query_row(
         "SELECT COUNT(*),COALESCE(MIN(event_seq),1),COALESCE(MAX(event_seq),0) FROM x_authority_events",

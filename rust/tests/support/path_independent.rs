@@ -608,7 +608,10 @@ fn workload(
     let profile = space.path("x-profile.json");
     if recovery.is_some() {
         let mut configured = read(&profile);
-        let manifest = read(&ec_manifest);
+        let mut manifest = read(&ec_manifest);
+        // ReleaseExact=122，后续 Capture=130/132；恢复时钟按真实阶段夹在两者之间。
+        manifest["business"]["clock"]["plan"]["recover_ns"] = json!(["125", "2000"]);
+        save(&ec_manifest, &manifest);
         let sim = &mut configured["history_simulation"];
         sim["business"]["recovery_identity"] = json!({
             "e_manifest_hash":digest(&manifest["business"]),"s_config":s_recovery_config(),
@@ -859,9 +862,17 @@ fn workload(
         assert_eq!(table_bytes(&xdb, "x_sim_deployment"), before);
         stop_at(space, "x.sock", x_service);
         let p = space.path("rebind.json");
-        let mut handoff = json!({"schema_revision":"x-authority-rebind-input/1",
+        let mut handoff = json!({"schema_revision":"x-authority-rebind-input/1","domains":["E"],
             "e":{"verification":"current-recovery","db":edb,"receipt":current}});
         if arm == RecoveryArm::Both {
+            handoff["domains"] = json!(["E", "S"]);
+            private_json(&p, &handoff);
+            assert_refused(serve_x(&xdb, &profile).arg("--authority-rebind").arg(&p));
+            assert_eq!(
+                table_bytes(&xdb, "x_sim_deployment"),
+                before,
+                "dual vector missing S"
+            );
             handoff["s"] = json!({"verification":"current-recovery","db":sdb,
                 "receipt":s_recovery(1)});
             let mut invalid = handoff.clone();
@@ -921,6 +932,33 @@ fn workload(
                 binding["receipts"][1],
                 json!({"domain_id":"S","original":s_recovery(1)})
             );
+            let e2_path = space.path("e2-listener");
+            std::fs::rename(space.path("e.sock"), &e2_path).unwrap();
+            let listener = UnixListener::bind(space.path("e.sock")).unwrap();
+            let old = std::thread::spawn(move || {
+                let (mut s, _) = listener.accept().unwrap();
+                let mut raw = String::new();
+                BufReader::new(&s).read_line(&mut raw).unwrap();
+                let request: Value = serde_json::from_str(&raw).unwrap();
+                let reply = reply_envelope(
+                    &request,
+                    json!({"kind":"Error","error":"StaleWriter"}),
+                    "economic-session/1",
+                    SESSION_ID,
+                    "1",
+                    "economic-session/replies",
+                    &format!("E:{SESSION_ID}"),
+                    "1",
+                );
+                writeln!(s, "{}", canonical_json(&reply)).unwrap();
+            });
+            let before = table_bytes(&xdb, "x_sim_deployment");
+            error(x(space, "AcceptExact", command.clone()), "IdentityConflict");
+            assert_eq!(table_bytes(&xdb, "x_sim_deployment"), before);
+            old.join().unwrap();
+            std::fs::rename(space.path("e.sock"), space.path("e-stale-fixture")).unwrap();
+            std::fs::rename(e2_path, space.path("e.sock")).unwrap();
+            println!("post-rebind epoch-1 response refused; X business bytes untouched");
         }
         println!("E1 SIGKILL; E CLI original cut unchanged; binding seq 1 vector={}; E/B cuts and E manifest unchanged",
             binding["new_vector"]);
@@ -1024,6 +1062,57 @@ fn workload(
         stop_at(space, "x.sock", &mut x);
         stop_at(space, "b.sock", &mut b);
         stop_at(space, "e.sock", &mut e);
+        if recovery == Some(RecoveryArm::Both) {
+            let before = table_bytes(&xdb, "x_sim_deployment");
+            let p1 = space.path("e-recovery.json");
+            let latest = successful_json(audit_domain(&edb, &ec_manifest, false, &[]));
+            let history = successful_json(run(domain_command(
+                "query-recovery",
+                &edb,
+                &ec_manifest,
+                false,
+            )
+            .arg("--recovery-request")
+            .arg(&p1)));
+            let mut next = history["request"].clone();
+            next["from_epoch"] = json!("2");
+            next["recovery_id"] = json!("recovered-again");
+            next["cut"] = latest["cut"].clone();
+            let p2 = space.path("e-recovery-2.json");
+            save(&p2, &next);
+            let now = successful_json(run(domain_command(
+                "recover-named",
+                &edb,
+                &ec_manifest,
+                false,
+            )
+            .arg("--recovery-request")
+            .arg(&p2)));
+            assert_eq!(now["writer_epoch"], "3");
+            assert_refused(
+                domain_command("current-recovery", &edb, &ec_manifest, false)
+                    .arg("--recovery-request")
+                    .arg(&p1),
+            );
+            assert_eq!(
+                successful_json(run(domain_command(
+                    "query-recovery",
+                    &edb,
+                    &ec_manifest,
+                    false
+                )
+                .arg("--recovery-request")
+                .arg(&p1))),
+                history
+            );
+            assert_refused(
+                serve_x(&xdb, &profile)
+                    .arg("--authority-rebind")
+                    .arg(space.path("rebind.json")),
+            );
+            assert_eq!(table_bytes(&xdb, "x_sim_deployment"), before);
+            println!("real E current receipt advanced again; historical original inside old handoff rejected unchanged");
+        }
     }
 
     let all = [

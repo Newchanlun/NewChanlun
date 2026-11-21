@@ -216,10 +216,7 @@ fn rebind(
     }
     let _lock = process_lock(db, "X")?;
     // 不走普通创建路径；即使指定了不存在、未初始化或旧版库，也不执行 DDL/迁移。
-    let mut conn =
-        Connection::open_with_flags(db, OpenFlags::SQLITE_OPEN_READ_WRITE).map_err(err)?;
-    conn.execute_batch("PRAGMA synchronous=FULL; PRAGMA fullfsync=ON; PRAGMA foreign_keys=ON;")
-        .map_err(err)?;
+    let (mut conn, _) = newchan_rust::economic_session::reopen_durable_writer(db)?;
     let tx = conn
         .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
         .map_err(err)?;
@@ -232,7 +229,7 @@ fn rebind(
     }
     simulation.rebind_in_transaction(&tx, epoch, &input)?;
     tx.commit().map_err(err)?;
-    simulation.serve(&mut conn, epoch)
+    simulation.serve_initialized(&mut conn, epoch)
 }
 
 fn run() -> Result<(), String> {
@@ -262,7 +259,7 @@ fn run() -> Result<(), String> {
             eprintln!("x_execution_session storage {storage}");
             let state = persist(&mut conn, &profile, epoch)?;
             if let Some(simulation) = &profile.history_simulation {
-                return simulation.serve(&mut conn, epoch);
+                return simulation.serve_initialized(&mut conn, epoch);
             }
             drop(conn);
             // 凭据门在任何传输构造之前：缺即 MissingDependency 非 0 退出，端点从未被连接。

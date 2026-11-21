@@ -309,7 +309,7 @@ fn authority_rebind_reopens_at_commit_boundary() {
         "e_socket":root.join("e"),"s_socket":root.join("s"),
         "recovery_domains":{"e_db":root.join("e.db"),"e_manifest":root.join("e.json"),"s_db":sdb},
     }});
-    let handoff = json!({"schema_revision":"x-authority-rebind-input/1","s":{
+    let handoff = json!({"schema_revision":"x-authority-rebind-input/1","domains":["S"],"s":{
         "verification":"current-recovery","db":sdb,
         "receipt":{"kind":"NamedRecoveryReceipt","writer_epoch":"2","recover_ns":"100",
             "request":{"schema_revision":"s-recovery/1","domain_id":"S","session_id":"session",
