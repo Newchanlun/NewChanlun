@@ -146,14 +146,15 @@ _SUPPRESSED_INLINE_HTML_TAGS = frozenset(
         "script",
         "style",
         "textarea",
+        "title",
         "template",
         "noscript",
         "blockquote",
         "q",
     }
 )
-_RAW_TEXT_HTML_TAGS = frozenset({"script", "style", "textarea"})
-_SILENT_INLINE_HTML_TAGS = frozenset({"script", "style", "textarea", "template", "noscript"})
+_RAW_TEXT_HTML_TAGS = frozenset({"script", "style", "textarea", "title"})
+_SILENT_INLINE_HTML_TAGS = frozenset({"script", "style", "textarea", "title", "template", "noscript"})
 _RAW_TEXT_CLOSE_RES: dict[str, re.Pattern[str]] = {
     tag: re.compile(rf"</{tag}[ \t\n]*>", re.IGNORECASE) for tag in _RAW_TEXT_HTML_TAGS
 }
@@ -1321,10 +1322,13 @@ _HTML_CLOSE_TAG_HEAD_RE = re.compile(r"</([A-Za-z][A-Za-z0-9-]*)[ \t\n\r\f]*>")
 
 @dataclass
 class _HtmlSuppressState:
-    """跨空行/跨段落持久传递的文档级 HTML 抑制状态（抑制标签栈、未闭 HTML 注释、未闭原始文本标签、跨块开放标签与引号属性）。"""
+    """跨空行/跨段落持久传递的文档级 HTML 抑制状态（抑制标签栈、未闭 HTML 注释/处理指令/CDATA/声明、未闭原始文本标签、跨块开放标签与引号属性）。"""
 
     tag_stack: list[str] = field(default_factory=list)
     in_comment: bool = False
+    in_pi: bool = False
+    in_cdata: bool = False
+    in_decl: bool = False
     raw_text_tag: str | None = None
     in_open_tag: bool = False
     open_tag_quote: str | None = None
@@ -1476,6 +1480,27 @@ def _update_html_suppress_state(
             state.in_comment = False
             i = end_pos + 3
             continue
+        if state.in_pi:
+            end_pos = text.find("?>", i)
+            if end_pos == -1:
+                return
+            state.in_pi = False
+            i = end_pos + 2
+            continue
+        if state.in_cdata:
+            end_pos = text.find("]]>", i)
+            if end_pos == -1:
+                return
+            state.in_cdata = False
+            i = end_pos + 3
+            continue
+        if state.in_decl:
+            end_pos = text.find(">", i)
+            if end_pos == -1:
+                return
+            state.in_decl = False
+            i = end_pos + 1
+            continue
         if state.raw_text_tag is not None:
             close_m = _RAW_TEXT_CLOSE_RES[state.raw_text_tag].search(text, i)
             if close_m is None:
@@ -1513,18 +1538,21 @@ def _update_html_suppress_state(
         if text.startswith("<?", lt):
             end_pos = text.find("?>", lt + 2)
             if end_pos == -1:
+                state.in_pi = True
                 return
             i = end_pos + 2
             continue
         if text.startswith("<![CDATA[", lt):
             end_pos = text.find("]]>", lt + 9)
             if end_pos == -1:
+                state.in_cdata = True
                 return
             i = end_pos + 3
             continue
-        if _HTML_BLOCK_4_START_RE.match(text, lt) is not None:
+        if lt + 2 < n and text[lt + 1] == "!" and text[lt + 2].isalpha():
             end_pos = text.find(">", lt + 2)
             if end_pos == -1:
+                state.in_decl = True
                 return
             i = end_pos + 1
             continue
@@ -1615,7 +1643,41 @@ def _scan_inline_dual(
             i += 1
             continue
 
-        # 0b. 处于未闭原始文本 HTML 标签（<script>/<style>/<textarea>）内
+        # 0a-ext. 处于跨块未闭 HTML 处理指令/CDATA/声明内
+        if state.in_pi or state.in_cdata or state.in_decl:
+            ch = text[i]
+            if ch == "`":
+                tick_end, found_end = _find_code_span_end(text, i)
+                emit("\x01", "")
+                i = found_end if found_end != -1 else tick_end
+                continue
+            if ch == "\\" and i + 1 < n and text[i + 1] in _ASCII_PUNCTUATION:
+                emit("\x01", "")
+                i += 2
+                continue
+            if ch == "<":
+                auto_m = _AUTOLINK_URI_RE.match(text, i) or _AUTOLINK_EMAIL_RE.match(text, i)
+                if auto_m is not None:
+                    emit("\x01", "")
+                    i = auto_m.end()
+                    continue
+                html_m = _INLINE_RAW_HTML_RE.match(text, i)
+                if html_m is not None:
+                    raw_html = html_m.group(0)
+                    emit("\x01", "")
+                    if state.in_pi and "?>" in raw_html:
+                        state.in_pi = False
+                    elif state.in_cdata and "]]>" in raw_html:
+                        state.in_cdata = False
+                    elif state.in_decl and ">" in raw_html:
+                        state.in_decl = False
+                    i = html_m.end()
+                    continue
+            emit("\x01", "")
+            i += 1
+            continue
+
+        # 0b. 处于未闭原始文本 HTML 标签（<script>/<style>/<textarea>/<title>）内
         if state.raw_text_tag is not None:
             ch = text[i]
             if ch == "`":
@@ -2027,6 +2089,9 @@ def _is_gfm_table_delimiter_row(line: str, expected_cols: int) -> bool:
 def _is_html_suppressed(state: _HtmlSuppressState) -> bool:
     return (
         state.in_comment
+        or state.in_pi
+        or state.in_cdata
+        or state.in_decl
         or state.raw_text_tag is not None
         or state.in_open_tag
         or any(t in _SILENT_INLINE_HTML_TAGS for t in state.tag_stack)
@@ -3974,6 +4039,49 @@ def _wrap_markdown_code_span(text: str) -> str:
     return f"{fence}{single}{fence}"
 
 
+def _has_unclosed_inline_html_opener(text: str) -> bool:
+    """检查行内非代码片段是否遗留未闭合的 HTML 注释/处理指令/声明/CDATA 或未闭合开标签起点。"""
+    n = len(text)
+    i = 0
+    while i < n:
+        ch = text[i]
+        if ch == "\\" and i + 1 < n and text[i + 1] in _ASCII_PUNCTUATION:
+            i += 2
+            continue
+        if ch == "`":
+            tick_end, found_end = _find_code_span_end(text, i)
+            i = found_end if found_end != -1 else tick_end
+            continue
+        if ch == "<":
+            auto_m = _AUTOLINK_URI_RE.match(text, i) or _AUTOLINK_EMAIL_RE.match(text, i)
+            if auto_m is not None:
+                i = auto_m.end()
+                continue
+            html_m = _INLINE_RAW_HTML_RE.match(text, i)
+            if html_m is not None:
+                i = html_m.end()
+                continue
+            if (
+                text.startswith("<!--", i)
+                or text.startswith("<?", i)
+                or text.startswith("<![CDATA[", i)
+                or (i + 2 < n and text[i + 1] == "!" and text[i + 2].isalpha())
+            ):
+                return True
+            open_head_m = _HTML_OPEN_TAG_HEAD_RE.match(text, i)
+            if open_head_m is not None:
+                probe_state = _HtmlSuppressState(
+                    in_open_tag=True,
+                    pending_open_tag_name=open_head_m.group(1).lower(),
+                    suppressed_tags=frozenset(),
+                )
+                _advance_in_open_tag(text, open_head_m.end(), probe_state)
+                if probe_state.in_open_tag:
+                    return True
+        i += 1
+    return False
+
+
 def _has_visible_inline_gfm_text(single_line: str) -> tuple[bool, bool]:
     """判定单行文本作为行内内容渲染时：(是否含可见基字符, 扫描结束后是否泄漏未闭合 HTML 抑制态)。"""
     state = _HtmlSuppressState(suppressed_tags=_SILENT_INLINE_HTML_TAGS)
@@ -3982,7 +4090,64 @@ def _has_visible_inline_gfm_text(single_line: str) -> tuple[bool, bool]:
         display_text = "".join(d_part for _, d_part in line_tokens)
         if _clean_display_reason(display_text):
             visible = True
-    return visible, _is_html_suppressed(state)
+    return visible, _is_html_suppressed(state) or _has_unclosed_inline_html_opener(single_line)
+
+
+def _leaves_html_suppressed(text: str) -> bool:
+    """按完整块+行内双流管线判定 Markdown 片段渲染结束后是否遗留未闭合 HTML 抑制态。"""
+    doc_blocks, frozen_labels = _parse_commonmark_blocks(text, include_all_visible_blocks=True)
+    state = _HtmlSuppressState(suppressed_tags=_SILENT_INLINE_HTML_TAGS)
+    for block_kind, block_text in doc_blocks:
+        if block_kind == "html":
+            _update_html_suppress_state(block_text, state)
+            continue
+        if block_kind == "code":
+            continue
+        if block_kind == "table_cell":
+            if not _is_html_suppressed(state):
+                _scan_inline_dual(block_text, frozen_labels, state)
+                if _has_unclosed_inline_html_opener(block_text):
+                    return True
+            continue
+        _scan_inline_dual(block_text, frozen_labels, state)
+        if not _is_html_suppressed(state) and _has_unclosed_inline_html_opener(block_text):
+            return True
+    return _is_html_suppressed(state)
+
+
+def _format_nested_fenced_code(text: str, *, content_indent: str) -> str:
+    """用足够长的反引号围栏将文本原样包裹为嵌套围栏代码块，彻底隔离未闭合 HTML/注释。"""
+    max_run = max((len(m.group(0)) for m in re.finditer(r"`+", text)), default=0)
+    fence = "`" * max(3, max_run + 1)
+    body_lines = [
+        f"{content_indent}{line}" if line else ""
+        for line in _split_commonmark_lines(text)
+    ]
+    return "\n".join([f"{content_indent}{fence}", *body_lines, f"{content_indent}{fence}"])
+
+
+def _indent_markdown_line(line: str, content_indent: str) -> str:
+    """为嵌套列表块内容加缩进；当 content_indent 非 4 列对齐时先按 CommonMark §2.2 展开首 4 列内前导 Tab。"""
+    if not line:
+        return ""
+    if len(content_indent) % 4 != 0:
+        col = 0
+        idx = 0
+        expanded: list[str] = []
+        has_tab = False
+        while idx < len(line) and col < 4 and line[idx] in (" ", "\t"):
+            if line[idx] == " ":
+                expanded.append(" ")
+                col += 1
+            else:
+                has_tab = True
+                step = 4 - (col % 4)
+                expanded.append(" " * step)
+                col += step
+            idx += 1
+        if has_tab:
+            line = "".join(expanded) + line[idx:]
+    return f"{content_indent}{line}"
 
 
 def _format_bullet_markdown_field(
@@ -3992,7 +4157,10 @@ def _format_bullet_markdown_field(
     bullet_prefix: str = "  - ",
     content_indent: str = "    ",
 ) -> str:
-    """将 Markdown 字段渲染到子列表项，保全缩进代码块与块级结构并保持单行普通文本原样。"""
+    """将 Markdown 字段渲染到子列表项，保全缩进代码块与块级结构、隔离未闭合 HTML 抑制态并保持单行普通文本原样。"""
+    if _leaves_html_suppressed(text):
+        return f"{bullet_prefix}{label}\n\n{_format_nested_fenced_code(text, content_indent=content_indent)}"
+
     if "\n" not in text and "\r" not in text:
         cursor = _LineCursor(text)
         indent = cursor.indent_ahead()
@@ -4014,7 +4182,7 @@ def _format_bullet_markdown_field(
                     return f"{bullet_prefix}{label}{text}"
 
     indented_lines = [
-        f"{content_indent}{line}" if line else ""
+        _indent_markdown_line(line, content_indent)
         for line in _split_commonmark_lines(text)
     ]
     return f"{bullet_prefix}{label}\n\n" + "\n".join(indented_lines)
@@ -4029,7 +4197,7 @@ def _format_inline_markdown_field(text: str, *, collapse_whitespace: bool = Fals
         visible, suppressed = _has_visible_inline_gfm_text(candidate)
         if visible and not suppressed:
             return candidate
-        return _wrap_markdown_code_span(_single_line(text))
+        return _wrap_markdown_code_span(_single_line(text) if collapse_whitespace else text.strip())
 
     if has_code_block:
         parts: list[str] = []
@@ -4045,9 +4213,9 @@ def _format_inline_markdown_field(text: str, *, collapse_whitespace: bool = Fals
             if _is_html_suppressed(suppress_state):
                 continue
             if kind == "code":
-                code_single = _single_line(block_text)
-                if _clean_display_reason(code_single):
-                    parts.append(_wrap_markdown_code_span(code_single))
+                code_literal = re.sub(r"[\r\n]+", " ", block_text.strip("\r\n"))
+                if _clean_display_reason(code_literal):
+                    parts.append(_wrap_markdown_code_span(code_literal))
                 continue
             seg = _single_line(block_text)
             seg_visible, seg_suppressed = _has_visible_inline_gfm_text(seg)
@@ -4068,30 +4236,149 @@ def _format_inline_markdown_field(text: str, *, collapse_whitespace: bool = Fals
     return _wrap_markdown_code_span(single)
 
 
+def _tokenize_inline_clip_segments(
+    formatted: str,
+) -> list[tuple[Literal["text", "code", "html"], str]]:
+    """按 CommonMark §6 从左到右将单行格式化文本切分为普通文本、闭合行内代码与原子行内 HTML/自动链接片段。"""
+    segments: list[tuple[Literal["text", "code", "html"], str]] = []
+    text_buf: list[str] = []
+    n = len(formatted)
+    i = 0
+
+    def flush_text() -> None:
+        if text_buf:
+            segments.append(("text", "".join(text_buf)))
+            text_buf.clear()
+
+    while i < n:
+        ch = formatted[i]
+        if ch == "\\" and i + 1 < n and formatted[i + 1] in _ASCII_PUNCTUATION:
+            text_buf.append(formatted[i : i + 2])
+            i += 2
+            continue
+        if ch == "`":
+            tick_end, found_end = _find_code_span_end(formatted, i)
+            if found_end != -1:
+                flush_text()
+                segments.append(("code", formatted[i:found_end]))
+                i = found_end
+            else:
+                text_buf.append(formatted[i:tick_end])
+                i = tick_end
+            continue
+        if ch == "<":
+            auto_m = _AUTOLINK_URI_RE.match(formatted, i) or _AUTOLINK_EMAIL_RE.match(formatted, i)
+            if auto_m is not None:
+                flush_text()
+                segments.append(("html", auto_m.group(0)))
+                i = auto_m.end()
+                continue
+            html_m = _INLINE_RAW_HTML_RE.match(formatted, i)
+            if html_m is not None:
+                flush_text()
+                segments.append(("html", html_m.group(0)))
+                i = html_m.end()
+                continue
+        text_buf.append(ch)
+        i += 1
+
+    flush_text()
+    return segments
+
+
+def _is_safe_inline_clip(candidate: str) -> bool:
+    visible, suppressed = _has_visible_inline_gfm_text(candidate)
+    return visible and not suppressed and not _leaves_html_suppressed(candidate)
+
+
+def _clip_code_span_to_budget(raw_code: str, budget: int) -> str:
+    if budget < 4:
+        return ""
+    k = 0
+    while k < len(raw_code) and raw_code[k] == "`":
+        k += 1
+    inner = _extract_code_span_text(raw_code[k : len(raw_code) - k])
+    for take in range(min(len(inner), budget - 3), 0, -1):
+        candidate = inner[:take].rstrip()
+        if not candidate:
+            return ""
+        wrapped = _wrap_markdown_code_span(f"{candidate}…")
+        if len(wrapped) <= budget:
+            return wrapped
+    return ""
+
+
+def _clip_text_to_safe_inline(prefix: str, text_part: str, max_len: int) -> str:
+    rem = max_len - len(prefix)
+    if rem <= 0:
+        return ""
+    max_take = min(len(text_part), rem - 1)
+    for take in range(max_take, -1, -1):
+        combined = (prefix + text_part[:take]).rstrip()
+        if not combined:
+            continue
+        candidate = f"{combined}…"
+        if len(candidate) <= max_len and _is_safe_inline_clip(candidate):
+            return candidate
+    return ""
+
+
 def _clip_formatted_inline(formatted: str, max_len: int) -> str:
-    """在预算上限内安全截断单行 Markdown 片段，若为反引号行内代码则保持闭合反引号完整。"""
+    """按 CommonMark §6.1 解析行内片段并在预算上限内安全截断，保持反引号闭合且不泄漏 HTML 抑制态。"""
     if len(formatted) <= max_len:
         return formatted
     if max_len < 4:
         return ""
-    if formatted.startswith("`"):
-        k = 0
-        while k < len(formatted) and formatted[k] == "`":
-            k += 1
-        if len(formatted) > 2 * k and formatted.endswith("`" * k):
-            inner = formatted[k:-k]
-            if len(inner) >= 2 and inner.startswith(" ") and inner.endswith(" "):
-                inner = inner[1:-1]
-            for take in range(min(len(inner), max_len - 3), 0, -1):
-                candidate = inner[:take].rstrip()
-                if not candidate:
-                    return ""
-                wrapped = _wrap_markdown_code_span(f"{candidate}…")
-                if len(wrapped) <= max_len:
-                    return wrapped
-            return ""
-    clipped = formatted[: max_len - 1].rstrip()
-    return f"{clipped}…" if clipped else ""
+
+    segments = _tokenize_inline_clip_segments(formatted)
+    committed: list[tuple[Literal["text", "code", "html"], str]] = []
+    prefix_parts: list[str] = []
+    prefix_len = 0
+
+    for idx, (kind, raw) in enumerate(segments):
+        is_last = idx == len(segments) - 1
+        if prefix_len + len(raw) < max_len or (is_last and prefix_len + len(raw) <= max_len):
+            committed.append((kind, raw))
+            prefix_parts.append(raw)
+            prefix_len += len(raw)
+            continue
+
+        prefix = "".join(prefix_parts)
+        rem = max_len - prefix_len
+        if kind == "code":
+            clipped_code = _clip_code_span_to_budget(raw, rem)
+            if clipped_code:
+                candidate = f"{prefix}{clipped_code}"
+                if len(candidate) <= max_len and _is_safe_inline_clip(candidate):
+                    return candidate
+        elif kind == "text":
+            clipped_text = _clip_text_to_safe_inline(prefix, raw, max_len)
+            if clipped_text:
+                return clipped_text
+        break
+
+    while committed:
+        prefix = "".join(raw for _, raw in committed)
+        trimmed = prefix.rstrip()
+        if trimmed and len(trimmed) + 1 <= max_len:
+            candidate = f"{trimmed}…"
+            if _is_safe_inline_clip(candidate):
+                return candidate
+        last_kind, last_raw = committed.pop()
+        prior_prefix = "".join(raw for _, raw in committed)
+        rem = max_len - len(prior_prefix)
+        if last_kind == "code":
+            clipped_code = _clip_code_span_to_budget(last_raw, rem)
+            if clipped_code:
+                candidate = f"{prior_prefix}{clipped_code}"
+                if len(candidate) <= max_len and _is_safe_inline_clip(candidate):
+                    return candidate
+        elif last_kind == "text":
+            clipped_text = _clip_text_to_safe_inline(prior_prefix, last_raw, max_len)
+            if clipped_text:
+                return clipped_text
+
+    return ""
 
 
 def _render_new_blocking_item(vf: VerifiedFinding) -> str:
@@ -4315,14 +4602,24 @@ def render_findings_comment(
                 if vf.author_reply is not None
                 else ""
             )
-            ev_inline = _format_inline_markdown_field(vf.verifier_evidence)
+            disp_label = f"`[{vf.finding.finding_id}]` `{_format_location(vf.finding)}` — {label}{reply_note}："
             disposition_lines.append(
-                f"- `[{vf.finding.finding_id}]` `{_format_location(vf.finding)}` — {label}{reply_note}：{ev_inline}"
+                _format_bullet_markdown_field(
+                    disp_label,
+                    vf.verifier_evidence,
+                    bullet_prefix="- ",
+                    content_indent="  ",
+                )
             )
         for vf in decision.rejected_findings:
-            ev_inline = _format_inline_markdown_field(vf.verifier_evidence)
+            disp_label = f"`[{vf.finding.finding_id}]` `{_format_location(vf.finding)}` — 核实驳回："
             disposition_lines.append(
-                f"- `[{vf.finding.finding_id}]` `{_format_location(vf.finding)}` — 核实驳回：{ev_inline}"
+                _format_bullet_markdown_field(
+                    disp_label,
+                    vf.verifier_evidence,
+                    bullet_prefix="- ",
+                    content_indent="  ",
+                )
             )
     disposition_section = (
         "### 已解除与核实驳回摘要\n\n" + "\n".join(disposition_lines) if disposition_lines else ""
