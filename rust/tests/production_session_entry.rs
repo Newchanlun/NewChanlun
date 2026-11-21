@@ -15,13 +15,14 @@
 use rusqlite::{Connection, OpenFlags};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
-use std::io::{Read, Write};
+use std::fs::{File, OpenOptions};
+use std::io::{ErrorKind, Read, Write};
 use std::os::fd::{AsRawFd, FromRawFd};
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::os::unix::net::UnixStream;
-use std::os::unix::process::CommandExt;
+use std::os::unix::process::{CommandExt, ExitStatusExt};
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command, Output, Stdio};
+use std::process::{Child, Command, ExitStatus, Output, Stdio};
 use std::time::{Duration, Instant};
 
 const SESSION: &str = "s-session-testonly-001";
@@ -441,7 +442,7 @@ fn stop(launcher: &mut Child) -> std::process::ExitStatus {
 }
 
 /// 域进程出现在 launcher 名下不等于已持锁/建库/开 socket；就绪类断言一律限时轮询。
-fn eventually(what: &str, ready: impl Fn() -> bool) {
+fn eventually(what: &str, mut ready: impl FnMut() -> bool) {
     let deadline = Instant::now() + Duration::from_secs(30);
     while !ready() {
         assert!(Instant::now() < deadline, "{what} 未就绪");
@@ -517,21 +518,47 @@ fn simulation_profile_spawns_isolated_domain_processes() {
     }
 }
 
-// 独立会话里 launcher 是 PTY 前台组组长；失败时只清理这个测试组。
-struct ForegroundLauncher(Child);
+struct ForegroundLauncher {
+    child: Child,
+    master: File,
+    kids: Vec<(String, u32)>,
+    space: Space,
+}
 
 impl Drop for ForegroundLauncher {
     fn drop(&mut self) {
-        if matches!(self.0.try_wait(), Ok(None)) {
-            // SAFETY: 该进程已 setsid，组号就是尚未回收的 launcher PID。
-            unsafe { libc::kill(-(self.0.id() as libc::pid_t), libc::SIGKILL) };
-            let _ = self.0.wait();
+        if !matches!(self.child.try_wait(), Ok(None)) {
+            return;
         }
+        // 失败断言也让 launcher 回收自己的子进程：先排空 stderr，再唤醒可能暂停的 launcher。
+        let pid = self.child.id() as libc::pid_t;
+        if let Some(mut stderr) = self.child.stderr.take() {
+            std::thread::spawn(move || std::io::copy(&mut stderr, &mut std::io::sink()));
+        }
+        unsafe {
+            libc::kill(pid, libc::SIGTERM);
+            libc::kill(pid, libc::SIGCONT);
+        }
+        let deadline = Instant::now() + Duration::from_secs(12);
+        while Instant::now() < deadline {
+            if self.child.try_wait().ok().flatten().is_some() {
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        // launcher 自身失效时，直接杀其子 PID；各域已不一定与 launcher 同组。
+        for (_, pid) in domain_children(self.child.id()) {
+            unsafe { libc::kill(pid as libc::pid_t, libc::SIGKILL) };
+        }
+        let _ = self.child.kill();
+        let _ = self.child.wait();
     }
 }
 
-fn spawn_foreground_launcher(manifest: &Path) -> (std::fs::File, ForegroundLauncher) {
-    let master = std::fs::OpenOptions::new()
+fn spawn_foreground_launcher() -> ForegroundLauncher {
+    let space = Space::new();
+    let (manifest, _) = simulation(&space, "simulation", false);
+    let master = OpenOptions::new()
         .read(true)
         .write(true)
         .custom_flags(libc::O_NOCTTY)
@@ -546,7 +573,7 @@ fn spawn_foreground_launcher(manifest: &Path) -> (std::fs::File, ForegroundLaunc
             libc::O_RDWR | libc::O_NOCTTY | libc::O_CLOEXEC,
         );
         assert!(fd >= 0, "{}", std::io::Error::last_os_error());
-        std::fs::File::from_raw_fd(fd)
+        File::from_raw_fd(fd)
     };
     let mut command = Command::new(launcher_bin());
     command
@@ -566,104 +593,173 @@ fn spawn_foreground_launcher(manifest: &Path) -> (std::fs::File, ForegroundLaunc
             Ok(())
         });
     }
-    (master, ForegroundLauncher(command.spawn().unwrap()))
+    let mut launcher = ForegroundLauncher {
+        child: command.spawn().unwrap(),
+        master,
+        kids: Vec::new(),
+        space,
+    };
+    launcher.kids = wait_domains(&mut launcher.child);
+    for socket in ["s.sock", "e.sock", "b.sock"] {
+        eventually(socket, || launcher.space.path(socket).exists());
+    }
+    eventually("X writer_epoch", || {
+        meta(
+            &launcher.space.path("x.db"),
+            "SELECT value FROM x_meta WHERE key='writer_epoch'",
+        )
+        .as_deref()
+            == Some("1")
+    });
+
+    // SAFETY：验证真实 PTY 前台组与 VINTR 映射；Ctrl-C 测试不对 launcher PID 模拟 SIGINT。
+    unsafe {
+        let fd = launcher.master.as_raw_fd();
+        assert_eq!(libc::tcgetpgrp(fd), launcher.child.id() as libc::pid_t);
+        let mut attrs = std::mem::MaybeUninit::uninit();
+        assert_eq!(libc::tcgetattr(fd, attrs.as_mut_ptr()), 0);
+        let attrs = attrs.assume_init();
+        assert_ne!(attrs.c_lflag & libc::ISIG, 0);
+        assert_eq!(attrs.c_cc[libc::VINTR], 3);
+    }
+    launcher
 }
 
-#[test]
-fn foreground_ctrl_c_stops_cleanly_but_critical_child_exit_fails() {
-    fn signal(pid: u32, sig: libc::c_int) {
-        // SAFETY: 只向本测试启动的进程发送信号。
-        assert_eq!(unsafe { libc::kill(pid as libc::pid_t, sig) }, 0);
-    }
-    fn process_state(pid: u32) -> Option<char> {
-        let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
-        stat.rsplit_once(')')?.1.trim_start().chars().next()
-    }
-    enum Stop {
-        CtrlC { defer_reap: bool },
-        ParentTerm,
-        Crash(libc::c_int),
+fn signal(pid: u32, sig: libc::c_int) {
+    // SAFETY：只向本测试启动的进程发送信号。
+    assert_eq!(unsafe { libc::kill(pid as libc::pid_t, sig) }, 0);
+}
+
+fn proc_stat(pid: u32) -> Option<(char, Option<i32>)> {
+    let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+    let mut fields = stat.rsplit_once(')')?.1.split_whitespace();
+    let state = fields.next()?.chars().next()?;
+    // stat 去掉 pid 和 comm 后，从 state（字段 3）到 exit_code（字段 52）。
+    Some((state, fields.nth(48).and_then(|s| s.parse().ok())))
+}
+
+#[derive(Clone, Copy, Debug)]
+enum ParentStop {
+    CtrlC,
+    Sigterm,
+}
+
+impl ForegroundLauncher {
+    fn domain_pid(&self, domain: &str) -> u32 {
+        let exe = match domain {
+            "S" => "s_structure_session",
+            "E" => "e_economic_session",
+            "B:one" => "b_chong_session",
+            "X" => "x_execution_session",
+            _ => unreachable!("{domain}"),
+        };
+        self.kids.iter().find(|(name, _)| name == exe).unwrap().1
     }
 
-    for (label, stop) in [
-        ("PTY Ctrl-C：E 先退出", Stop::CtrlC { defer_reap: true }),
-        ("PTY Ctrl-C", Stop::CtrlC { defer_reap: false }),
-        ("launcher SIGTERM", Stop::ParentTerm),
-        ("E SIGKILL", Stop::Crash(libc::SIGKILL)),
-        ("E SIGINT", Stop::Crash(libc::SIGINT)),
-    ] {
-        let space = Space::new();
-        let (manifest, _) = simulation(&space, "simulation", false);
-        let (mut master, mut foreground) = spawn_foreground_launcher(&manifest);
-        let launcher = &mut foreground.0;
-        let kids = wait_domains(launcher);
-        for socket in ["s.sock", "e.sock", "b.sock"] {
-            eventually(socket, || space.path(socket).exists());
-        }
-        eventually("X writer_epoch", || {
-            meta(
-                &space.path("x.db"),
-                "SELECT value FROM x_meta WHERE key='writer_epoch'",
-            )
-            .as_deref()
-                == Some("1")
-        });
-
-        let pgid = launcher.id() as libc::pid_t;
-        // SAFETY: PTY fd 与进程均由此测试拥有。验证组关系与终端键映射，确保注入不是父 PID 信号。
-        unsafe {
-            assert_eq!(libc::tcgetpgrp(master.as_raw_fd()), pgid);
-            for (_, pid) in &kids {
-                assert_eq!(libc::getpgid(*pid as libc::pid_t), pgid);
-            }
-            let mut attrs = std::mem::MaybeUninit::uninit();
-            assert_eq!(libc::tcgetattr(master.as_raw_fd(), attrs.as_mut_ptr()), 0);
-            let attrs = attrs.assume_init();
-            assert_ne!(attrs.c_lflag & libc::ISIG, 0);
-            assert_eq!(attrs.c_cc[libc::VINTR], 3);
-        }
-        let e_pid = kids
-            .iter()
-            .find(|(name, _)| name == "e_economic_session")
-            .unwrap()
-            .1;
-        let failed = matches!(stop, Stop::Crash(_));
+    fn request_stop(&mut self, stop: ParentStop) {
         match stop {
-            Stop::CtrlC { defer_reap } => {
-                // 固定「launcher 首次回收前，E 已被终端 SIGINT 结束」这一竞态，不靠睡眠撞时序。
-                if defer_reap {
-                    signal(launcher.id(), libc::SIGSTOP);
-                    eventually("launcher 暂停", || {
-                        process_state(launcher.id()) == Some('T')
-                    });
-                }
-                master.write_all(&[3]).unwrap();
-                if defer_reap {
-                    eventually("E 已退出待回收", || process_state(e_pid) == Some('Z'));
-                    signal(launcher.id(), libc::SIGCONT);
+            ParentStop::CtrlC => self.master.write_all(&[3]).unwrap(),
+            ParentStop::Sigterm => signal(self.child.id(), libc::SIGTERM),
+        }
+    }
+
+    fn pause(&self) {
+        let pid = self.child.id();
+        signal(pid, libc::SIGSTOP);
+        eventually("launcher 已暂停", || {
+            proc_stat(pid).is_some_and(|(state, _)| state == 'T')
+        });
+    }
+
+    fn stop_while_paused(&mut self, stop: ParentStop) {
+        self.request_stop(stop);
+        let pid = self.child.id();
+        let sig = match stop {
+            ParentStop::CtrlC => libc::SIGINT,
+            ParentStop::Sigterm => libc::SIGTERM,
+        };
+        // PTY 写入与终端发送 SIGINT 不同步。确认进程级信号已挂起才恢复 launcher。
+        eventually("停服信号已送达暂停的 launcher", || {
+            std::fs::read_to_string(format!("/proc/{pid}/status"))
+                .ok()
+                .and_then(|status| {
+                    let field = status.lines().find_map(|l| l.strip_prefix("ShdPnd:"))?;
+                    u64::from_str_radix(field.trim(), 16).ok()
+                })
+                .is_some_and(|bits| bits & (1 << (sig - 1)) != 0)
+        });
+        signal(pid, libc::SIGCONT);
+    }
+
+    fn crash_and_wait_for_zombie(&self, domain: &str, sig: libc::c_int) {
+        let pid = self.domain_pid(domain);
+        signal(pid, sig);
+        eventually(
+            &format!("{domain} 已按信号 {sig} 退出且未回收"),
+            || proc_stat(pid) == Some(('Z', Some(sig))),
+        );
+    }
+
+    fn fill_stderr_pipe(&self) {
+        let mut startup = Vec::new();
+        let fd = self.child.stderr.as_ref().unwrap().as_raw_fd();
+        // 重新打开 pipe，而不是改 launcher 写端的文件状态标志。
+        let mut reader = OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_NONBLOCK)
+            .open(format!("/proc/self/fd/{fd}"))
+            .unwrap();
+        eventually("X spawn 日志已输出", || {
+            if let Err(e) = reader.read_to_end(&mut startup) {
+                assert_eq!(e.kind(), ErrorKind::WouldBlock);
+            }
+            launcher_events(&String::from_utf8_lossy(&startup))
+                .any(|e| e["event"] == "spawn" && e["domain"] == "X")
+        });
+        let mut writer = OpenOptions::new()
+            .write(true)
+            .custom_flags(libc::O_NONBLOCK)
+            .open(format!("/proc/{}/fd/2", self.child.id()))
+            .unwrap();
+        // 大写入耗尽空闲页；单字节写入填满最后的余量。
+        for bytes in [&[b'\n'; 4096][..], b"\n"] {
+            loop {
+                match writer.write(bytes) {
+                    Ok(n) => assert_eq!(n, bytes.len()),
+                    Err(e) if e.kind() == ErrorKind::WouldBlock => break,
+                    Err(e) => panic!("填充 stderr pipe：{e}"),
                 }
             }
-            Stop::ParentTerm => signal(launcher.id(), libc::SIGTERM),
-            Stop::Crash(sig) => signal(e_pid, sig),
         }
+    }
 
+    fn assert_exit(mut self, label: &str, expected_exits: &[(&str, bool, libc::c_int)]) {
+        let mut stderr = self.child.stderr.take().unwrap();
+        let reader = std::thread::spawn(move || {
+            let mut buf = String::new();
+            stderr.read_to_string(&mut buf).unwrap();
+            buf
+        });
         let deadline = Instant::now() + Duration::from_secs(30);
         let status = loop {
-            if let Some(status) = launcher.try_wait().unwrap() {
+            if let Some(status) = self.child.try_wait().unwrap() {
                 break status;
             }
             assert!(Instant::now() < deadline, "{label}：launcher 未退出");
             std::thread::sleep(Duration::from_millis(50));
         };
-        let code = status.code();
-        let stderr = launcher_stderr(launcher);
-        let events: Vec<Value> = stderr
-            .lines()
-            .filter_map(|line| line.strip_prefix("production_session "))
-            .map(|line| serde_json::from_str(line).unwrap())
-            .collect();
-        let expected = i32::from(failed);
-        assert_eq!(code, Some(expected), "{label}：{stderr}");
+        for (_, pid) in &self.kids {
+            assert!(
+                !Path::new(&format!("/proc/{pid}")).exists(),
+                "{label}：{pid} 未回收"
+            );
+        }
+        let stderr = reader.join().unwrap();
+        let stderr = stderr.trim_start_matches('\n'); // 去掉回归夹具注入的 pipe 填充。
+        let events: Vec<_> = launcher_events(stderr).collect();
+        let failed = expected_exits.iter().any(|&(_, critical, _)| critical);
+        let code = i32::from(failed);
+        assert_eq!(status.code(), Some(code), "{label}：{stderr}");
         assert_eq!(
             events
                 .iter()
@@ -672,23 +768,93 @@ fn foreground_ctrl_c_stops_cleanly_but_critical_child_exit_fails() {
             vec![&json!({"event": "stopped", "failed": failed})],
             "{label}：{stderr}"
         );
-        let critical_exits: Vec<_> = events
-            .iter()
-            .filter(|e| e["event"] == "exit" && e["critical"] == true)
-            .map(|e| e["domain"].as_str().unwrap())
+        let exits: Vec<_> = events
+            .into_iter()
+            .filter(|e| e["event"] == "exit")
             .collect();
-        assert_eq!(
-            critical_exits.as_slice(),
-            if failed { &["E"][..] } else { &[] },
-            "{label}：{stderr}"
-        );
-        for (_, pid) in kids {
-            assert!(
-                !Path::new(&format!("/proc/{pid}")).exists(),
-                "{label}：{pid} 未回收"
-            );
+        let expected: Vec<_> = expected_exits
+            .iter()
+            .map(|&(domain, critical, sig)| {
+                json!({
+                    "event": "exit", "domain": domain, "critical": critical,
+                    "status": ExitStatus::from_raw(sig).to_string()
+                })
+            })
+            .collect();
+        assert_eq!(exits, expected, "{label}：{stderr}");
+        println!("{label}: exit={code}, failed={failed}, exits={exits:?}, all children reaped");
+    }
+}
+
+fn launcher_events(stderr: &str) -> impl Iterator<Item = Value> + '_ {
+    stderr
+        .split_inclusive('\n')
+        .filter_map(|line| line.strip_suffix('\n')?.strip_prefix("production_session "))
+        .map(|line| serde_json::from_str(line).unwrap())
+}
+
+#[test]
+fn foreground_ctrl_c_stops_cleanly_but_critical_child_exit_fails() {
+    for stop in [ParentStop::CtrlC, ParentStop::Sigterm] {
+        let mut launcher = spawn_foreground_launcher();
+        for (_, pid) in &launcher.kids {
+            // SAFETY：各域是独立会话/进程组的组长，不接收终端的前台信号。
+            unsafe {
+                assert_eq!(libc::getsid(*pid as libc::pid_t), *pid as libc::pid_t);
+                assert_eq!(libc::getpgid(*pid as libc::pid_t), *pid as libc::pid_t);
+            }
         }
-        println!("{label}: exit={expected}, failed={failed}, all children reaped");
+        launcher.request_stop(stop);
+        launcher.assert_exit(&format!("{stop:?}"), &[]);
+    }
+    for domain in ["S", "E", "B:one"] {
+        for sig in [libc::SIGINT, libc::SIGKILL] {
+            let launcher = spawn_foreground_launcher();
+            signal(launcher.domain_pid(domain), sig);
+            launcher.assert_exit(&format!("{domain} 信号 {sig}"), &[(domain, true, sig)]);
+        }
+    }
+}
+
+#[test]
+fn later_parent_stop_does_not_hide_child_sigint() {
+    for (domain, critical, stop) in [
+        ("E", true, ParentStop::CtrlC),
+        ("E", true, ParentStop::Sigterm),
+        ("X", false, ParentStop::CtrlC),
+    ] {
+        let mut launcher = spawn_foreground_launcher();
+        launcher.pause();
+        launcher.crash_and_wait_for_zombie(domain, libc::SIGINT);
+        launcher.stop_while_paused(stop);
+        launcher.assert_exit(
+            &format!("{domain} 已因 SIGINT 退出 → {stop:?}"),
+            &[(domain, critical, libc::SIGINT)],
+        );
+    }
+}
+
+#[test]
+fn parent_stop_rechecks_domain_after_last_poll() {
+    for stop in [ParentStop::Sigterm, ParentStop::CtrlC] {
+        let mut launcher = spawn_foreground_launcher();
+        launcher.fill_stderr_pipe();
+        let x = launcher.domain_pid("X");
+        signal(x, libc::SIGKILL);
+        let pid = launcher.child.id();
+        // X 排在 E 后面。X 已回收且 launcher 卡在写 X 的退出日志，固定在同一轮监督内。
+        eventually("X 已回收，launcher 阻塞在 stderr 写入", || {
+            !Path::new(&format!("/proc/{x}")).exists()
+                && std::fs::read_to_string(format!("/proc/{pid}/wchan"))
+                    .is_ok_and(|channel| channel.trim().ends_with("pipe_write"))
+        });
+        launcher.pause();
+        launcher.crash_and_wait_for_zombie("E", libc::SIGKILL);
+        launcher.stop_while_paused(stop);
+        launcher.assert_exit(
+            &format!("已检查 E → E 因 SIGKILL 退出 → {stop:?}"),
+            &[("X", false, libc::SIGKILL), ("E", true, libc::SIGKILL)],
+        );
     }
 }
 

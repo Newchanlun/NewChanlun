@@ -16,10 +16,10 @@
 use newchan_rust::structure_source::Declaration;
 use serde_json::{json, Value};
 use std::collections::BTreeSet;
-use std::os::unix::process::ExitStatusExt;
+use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitStatus, Stdio};
-use std::sync::atomic::{AtomicU8, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 const MANIFEST_REVISION: &str = "production-session-manifest/1";
@@ -36,17 +36,10 @@ const S_PASS: [&str; 3] = [
     "S_THETA_DIAGNOSTIC_TESTONLY",
 ];
 
-const STOP_TERM: u8 = 1;
-const STOP_INT: u8 = 2;
-static STOP_SIGNALS: AtomicU8 = AtomicU8::new(0);
+static STOP_REQUESTED: AtomicBool = AtomicBool::new(false);
 
-extern "C" fn on_stop(signal: libc::c_int) {
-    let flag = if signal == libc::SIGINT {
-        STOP_INT
-    } else {
-        STOP_TERM
-    };
-    STOP_SIGNALS.fetch_or(flag, Ordering::SeqCst);
+extern "C" fn on_stop(_: libc::c_int) {
+    STOP_REQUESTED.store(true, Ordering::Relaxed);
 }
 
 /// 与 `_redact` 同口径：敏感键名的值整体遮蔽；24 位以上纯 token 字符的字符串遮蔽。
@@ -274,6 +267,15 @@ fn clean(mut command: Command, pass: &[&str]) -> Command {
         }
     }
     command.stdin(Stdio::null());
+    // SAFETY：exec 前只调用 setsid；域进程不共享前台 Ctrl-C 或后台终端作业控制。
+    unsafe {
+        command.pre_exec(|| {
+            if libc::setsid() == -1 {
+                return Err(std::io::Error::last_os_error());
+            }
+            Ok(())
+        });
+    }
     command
 }
 
@@ -298,6 +300,22 @@ struct Supervised {
     child: Child,
     status: Option<ExitStatus>,
     critical: bool,
+}
+
+/// 登记尚未被 launcher 发停服信号的子进程退出；每域只记录一次。
+fn record_exits(children: &mut [Supervised]) -> bool {
+    let mut failed = false;
+    for sup in children.iter_mut().filter(|c| c.status.is_none()) {
+        if let Ok(Some(status)) = sup.child.try_wait() {
+            sup.status = Some(status);
+            log(
+                "exit",
+                json!({"domain": sup.domain, "status": status.to_string(), "critical": sup.critical}),
+            );
+            failed |= sup.critical;
+        }
+    }
+    failed
 }
 
 fn run() -> Result<i32, String> {
@@ -378,29 +396,16 @@ fn run() -> Result<i32, String> {
 
     // ── 监督 ──
     while !failed {
-        // 停服前仍完成一轮监督，保留已退出的非关键 X 与其它异常退出的记录。
-        for sup in children.iter_mut().filter(|c| c.status.is_none()) {
-            if let Ok(Some(status)) = sup.child.try_wait() {
-                sup.status = Some(status);
-                // 前台 Ctrl-C 同时送到 launcher 与各域。取到状态后才读信号，
-                // 避免漏掉本轮轮询中到达的 SIGINT；其它退出原因照常判定。
-                if status.signal() == Some(libc::SIGINT)
-                    && STOP_SIGNALS.load(Ordering::SeqCst) & STOP_INT != 0
-                {
-                    continue;
-                }
-                log(
-                    "exit",
-                    json!({"domain": sup.domain, "status": status.to_string(), "critical": sup.critical}),
-                );
-                failed |= sup.critical;
-            }
-        }
-        if STOP_SIGNALS.load(Ordering::SeqCst) != 0 || failed {
+        failed = record_exits(&mut children);
+        if STOP_REQUESTED.load(Ordering::Relaxed) || failed {
             break;
         }
         std::thread::sleep(Duration::from_millis(100));
     }
+
+    // 停服请求可以在本轮已经检查过某个域后到达。发送第一条 SIGTERM 前重查，
+    // 保留上次检查之后、停服之前已经发生的关键故障和 X 降级。
+    failed |= record_exits(&mut children);
 
     // ── 回收：先 SIGTERM，宽限期后 SIGKILL；全部 wait ──
     for sup in children.iter().filter(|c| c.status.is_none()) {

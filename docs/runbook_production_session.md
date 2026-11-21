@@ -23,8 +23,10 @@ cd rust && cargo build --release --features production_session \
 | Bᵢ | `b_chong_session serve --chong <id>` | `economic.b[i].db` | 同上 | 同上 |
 | X | `x_execution_session serve` | `x.db` | 同上 | `x_meta.writer_epoch` |
 
-launcher 不打开任何域库；各域进程自行持锁与 epoch。S/E/B 任一退出 → 回收全部、退出码 1；
-X 退出只记日志，S/E/B 继续。SIGTERM/SIGINT → 向全部子进程发 SIGTERM，10 秒宽限后 SIGKILL，全部 wait 后退出码 0。
+launcher 不打开任何域库；各域进程自行持锁与 epoch。S/E/B 任一故障退出 → 回收全部、退出码 1；
+X 退出只记日志，S/E/B 继续。各域使用独立进程组，前台 Ctrl-C 只发给 launcher。
+launcher 收到 SIGTERM/SIGINT 后，先记录已经退出的域，再向仍在运行的子进程发 SIGTERM；
+10 秒宽限后 SIGKILL，全部 wait。主动停服退出码为 0；停服请求不会覆盖已经发生的关键域故障。
 
 ## manifest（`production-session-manifest/1`）
 
