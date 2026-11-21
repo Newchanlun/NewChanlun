@@ -406,7 +406,7 @@ def asR5Unit (s : Segment) : UnitRange :=
 
 /-- 左折叠的成员边界：遇到未证首回抽即止；返回两腿先接纳再数有波动成员。 -/
 def extendR5 (comps : List UnitRange) (roles : List RefRoles) (zd zg : Tick)
-    (seed : Nat) (zdir : Direction) :
+    (seed : Nat) :
     Nat → Nat → Nat → Option Nat → (Nat × RefBoundary × Option Nat)
   | 0, j, _, returned => (j, .openEnd, returned)
   | fuel + 1, j, waves, returned =>
@@ -415,7 +415,7 @@ def extendR5 (comps : List UnitRange) (roles : List RefRoles) (zd zg : Tick)
     | none => (j, .openEnd, returned)
     | some u =>
       if weakOverlap u.hi u.lo zd zg then
-        extendR5 comps roles zd zg seed zdir fuel (j+1)
+        extendR5 comps roles zd zg seed fuel (j+1)
           (waves + if u.lo < u.hi then 1 else 0) returned
       else match roles.find? (fun l => l.seed == seed && l.leave == j) with
       | none =>
@@ -431,8 +431,8 @@ def extendR5 (comps : List UnitRange) (roles : List RefRoles) (zd zg : Tick)
           if leg.pullback ≠ some (j+1) ∨ ¬ StrictOutside zd zg u leg.side then
             (j, .pending, returned)
           else if weakOverlap pullback.hi pullback.lo zd zg then
-            if leg.nonZn ∧ u.direction ≠ zdir then
-              extendR5 comps roles zd zg seed zdir fuel (j+2)
+            if leg.nonZn then
+              extendR5 comps roles zd zg seed fuel (j+2)
                 (waves + (if u.lo < u.hi then 1 else 0) +
                   (if pullback.lo < pullback.hi then 1 else 0)) (some (j+1))
             else (j, .pending, some (j+1))
@@ -451,9 +451,10 @@ def refStep (comps : List UnitRange) (roles : List RefRoles) (n i : Nat) :
       if zg ≤ zd then (none, i+1)
       else
         let waves := ([a,b,c].filter (fun u => decide (u.lo < u.hi))).length
-        let (exit, boundary, returned) := extendR5 comps roles zd zg i a.direction n (i+3) waves none
+        let (exit, boundary, returned) := extendR5 comps roles zd zg i n (i+3) waves none
         let (gg, dd) := ((comps.drop (i+1)).take (exit-i-1)).foldl
-          (fun (g,d) u => if u.direction = a.direction then (tmax g u.hi, tmin d u.lo) else (g,d))
+          (fun (g,d) u => if weakOverlap u.hi u.lo zd zg && u.direction == a.direction
+            then (tmax g u.hi, tmin d u.lo) else (g,d))
           (a.hi, a.lo)
         let (settled, leave, pullback, up, upgraded, next) :=
           match boundary with
@@ -704,6 +705,14 @@ theorem witness_return_nine :
     (refZhongshusFromComponents (cExample 7 33) (cRoles 7)).head?.map
       (fun z => (z.count, z.upgraded, z.settled, z.returned)) =
       some (9,true,false,some 8) := by native_decide
+
+theorem witness_attested_non_zn_ignores_placeholder :
+    ([3,7] : List Nat).map (fun j =>
+      let segs := (cExample j 33).map (fun s =>
+        if s.startIndex == j then { s with direction := .down } else s)
+      (refZhongshusFromComponents segs (cRoles j)).head?.map
+        (fun z => (z.count, z.gg, z.upgraded, z.returned))) =
+    [some (5,50,false,some 4), some (9,50,true,some 8)] := by native_decide
 
 theorem witness_outside_first_pullback :
     (refZhongshusFromComponents (cExample 3 37) (cRoles 3)).head?.map

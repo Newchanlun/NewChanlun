@@ -392,6 +392,7 @@ mod tests {
     fn seg(direction: Direction, lo: Tick, hi: Tick, start: usize, end: usize) -> LeveledMove {
         LeveledMove {
             interval_cache: None,
+            r5_settlement: None,
             rmove: RMove::Segment { direction, lo, hi },
             start_index: start,
             end_index: end,
@@ -426,6 +427,7 @@ mod tests {
         }];
         LeveledMove {
             interval_cache: None,
+            r5_settlement: None,
             rmove: RMove::Compose {
                 subs: Rc::new(subs.iter().map(|m| m.rmove.clone()).collect()),
                 centers,

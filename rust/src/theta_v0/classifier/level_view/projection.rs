@@ -5,7 +5,8 @@ use super::super::super::types::{Center, Direction, Segment, Tick};
 use super::super::center::{
     center_from_segments, center_from_window, compute_dd, compute_gg, UnitRange,
 };
-use super::super::recursive_tower::{ElementId, LeveledMove};
+use super::super::center_scan::R5Proof;
+use super::super::recursive_tower::{ElementId, LeveledMove, NativeR5Settlement};
 use super::ProviderVersion;
 
 /// seed 核来源显式打标（#90 结裁 `chanlun/escalate/silent-dual-core-c1-seam-ruling-20260715.md`，
@@ -34,6 +35,8 @@ pub struct ExactThreeSeed {
     pub end_index: usize,
     pub center: Center,
     pub core_provenance: SeedCoreProvenance,
+    /// 延伸窗口拥有的证书；exact-three 投影不从价域或占位方向新发证书。
+    pub r5_settlement: Option<NativeR5Settlement>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -186,6 +189,7 @@ fn project_extended_windows_impl(
             end_index: c.end_index,
             center,
             core_provenance,
+            r5_settlement: window.r5_settlement.as_deref().copied(),
         });
     }
     Ok(ExactThreeProjection { version, seeds })
@@ -217,6 +221,43 @@ pub fn lower_legs_from(values: &[LeveledMove]) -> Result<Vec<LowerLeg>, Projecti
             })
         })
         .collect()
+}
+
+impl ExactThreeProjection {
+    pub(super) fn native_settlements(&self, legs: &[LowerLeg]) -> Vec<Option<R5Proof>> {
+        self.seeds
+            .iter()
+            .map(|seed| {
+                let settlement = seed.r5_settlement?;
+                let [Some(seed_index), Some(leave), Some(pullback)] =
+                    settlement.source.map(|(id, unit)| {
+                        let at = legs.partition_point(|leg| leg.start_index < unit.start_index);
+                        (legs.get(at)
+                            == Some(&LowerLeg {
+                                id,
+                                direction: unit.direction,
+                                start_index: unit.start_index,
+                                end_index: unit.end_index,
+                                lo: unit.lo,
+                                hi: unit.hi,
+                            }))
+                        .then_some(at)
+                    })
+                else {
+                    return None;
+                };
+                (settlement.proof.core() == (seed.center.zd, seed.center.zg)
+                    && legs[seed_index].start_index == seed.center.start_index
+                    && seed_index < leave
+                    && leave + 1 == pullback)
+                    .then(|| {
+                        settlement
+                            .proof
+                            .with_unit_indices([seed_index, leave, pullback])
+                    })
+            })
+            .collect()
+    }
 }
 
 pub(super) fn leg_as_segment(value: &LowerLeg) -> Segment {

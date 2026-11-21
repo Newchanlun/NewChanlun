@@ -266,11 +266,11 @@
       const d = r.payload.data, done = ["CASE_ONE", "CASE_TWO"].includes(d.result), start = BigInt(d.construction.start_stroke);
       if (done) {
         const [lo, hi] = memberExtremes(d);
-        rows.push([start, d.entity_id, r.object_id, lo, hi, d.construction.direction, true]);
+        rows.push([start, d.entity_id, r.object_id, lo, hi, d.construction.direction, true, BigInt(d.construction.stroke_indices.at(-1))]);
       } else rows.push([start, d.entity_id, r.object_id, null, null, null, false]);
     }
     rows.sort((x, y) => (x[0] < y[0] ? -1 : x[0] > y[0] ? 1 : 0));
-    return [rows.filter(r => r[6]).map(r => r.slice(1, 6)), new Map(rows.filter(r => !r[6]).map(r => [r[1], r[2]]))];
+    return [rows.filter(r => r[6]).map(r => [...r.slice(1, 6), r[0], r[7]]), new Map(rows.filter(r => !r[6]).map(r => [r[1], r[2]]))];
   }
   function validateScanCursor(versions, completed, pending, pos, centers, attempts) {
     needE(versions.length === 1, "SCAN_CURSOR", "每 cut 恰一个中枢版本对象");
@@ -357,18 +357,28 @@
       if (r5 && c.r5_pending_unit !== null) {
         needE(completed[first + units.length]?.[0] === c.r5_pending_unit, "SETTLEMENT", "未决边界必须紧随已证成员");
       }
-      if (r5) needE(upgrade === (units.filter(u => u[2] < u[3]).length >= 9), "UPGRADE", "应按有波动的全部成员计升级");
+      const nxt = first + units.length;
+      const seedUnits = units.slice(0, 3);
+      const zd = seedUnits.map(u => u[2]).reduce((a, b) => (b > a ? b : a)), zg = seedUnits.map(u => u[3]).reduce((a, b) => (b < a ? b : a));
+      const touchesCore = u => u[2] <= zg && u[3] >= zd;
+      if (r5) {
+        needE(upgrade === (units.filter(u => u[2] < u[3]).length >= 9), "UPGRADE", "应按有波动的全部成员计升级");
+        // 现行 L0 原件不携独立外段角色。仅有在外位置，不能证明离开和首回抽返回。
+        needE(units.every(touchesCore), "MEMBERS", "在外成员须有独立非 Zn 离开及已完成首回抽返回证据");
+      }
       if (c.settled) {
-        const nxt = first + c.members.length;
         needE(nxt < completed.length && completed[nxt][0] === c.break_unit, "BREAK_UNIT", "突破段须是末成员后的下一个完成单元");
-        const seedUnits = c.members.slice(0, 3).map(m => seg.get(m));
-        const zd = seedUnits.map(u => u[2]).reduce((a, b) => (b > a ? b : a)), zg = seedUnits.map(u => u[3]).reduce((a, b) => (b < a ? b : a));
         const b = completed[nxt];
         if (r5) {
           const proof = c.r5, l = pos.get(proof.leave_unit), r = pos.get(proof.pullback_unit);
-          needE((l === nxt - 1 || l === nxt) && r === l + 1, "SETTLEMENT", "首回抽须紧随已证离开");
+          // 当前合同只发布同 L0 流的字面关节；两条引用不构成独立外段角色证据。
+          needE(l === nxt - 1 && r === nxt, "SETTLEMENT", "字面离开须是末成员，首回抽须是紧随其后的完成段");
           const leave = completed[l], retest = completed[r];
           needE(leave[1] === proof.leave_object_id && retest[1] === proof.pullback_object_id, "UNIT_SOURCE", "两腿须引用同 cut 已完成单元");
+          const [outward, inward, joint] = c.break_up ? ["UP", "DOWN", 3] : ["DOWN", "UP", 2];
+          needE(leave[4] === outward && retest[4] === inward, "SETTLEMENT", "原生离开与首回抽的方向须与破坏侧一致");
+          needE(leave[6] + 1n === retest[5] && leave[joint] === retest[joint],
+            "SETTLEMENT", "两腿须在同一构造关节相接（向上破同高，向下破同低）");
           needE(c.break_up ? retest[2] > zg : retest[3] < zd, "BREAK_UP", "首回抽整段须严格在离开侧");
         } else {
           const up = b[2] > zg ? true : b[3] < zd ? false : b[3] > zg;

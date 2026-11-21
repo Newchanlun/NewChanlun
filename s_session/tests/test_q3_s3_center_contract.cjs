@@ -1313,10 +1313,67 @@ test("#1496 R5：价域在外不等于构造突破，旧代仍用原合同", () 
   });
   const ucp = find(C.PAIR_KINDS[0]);
   ucp.payload.data.construction_role = "EXTENSION_MEMBER";
-  C.validateCenterFamilyCut(current, axes22(current));
-  ucp.payload.data.construction_role = "BREAK_UNIT";
-  assert.throws(() => C.validateCenterFamilyCut(current, axes22(current)), /TB02F_ROLE/);
+  assert.throws(() => C.validateCenterFamilyCut(current, axes22(current)), /TB02E_MEMBERS/);
   C.validateCenterFamilyCut(old, axes22(old));
+});
+
+function currentLiteralCut() {
+  const rows = centerCut();
+  for (const row of rows) {
+    if (C.CENTER_KINDS.includes(row.kind)) row.payload.policy_version = C.CENTER_TUPLE[2];
+    if (C.PAIR_KINDS.includes(row.kind)) row.payload.policy_version = C.PAIR_TUPLE[2];
+  }
+  const byKind = kind => rows.find(r => r.kind === kind).payload.data;
+  const center = byKind(C.CENTER_KINDS[1]);
+  Object.assign(center, {
+    r5: { leave_unit: U[2], leave_object_id: "obj3-seg2", pullback_unit: U[3], pullback_object_id: "obj3-seg3" },
+    r5_pending_unit: null,
+  });
+  byKind(C.CENTER_KINDS[5]).after = center;
+  return rows;
+}
+
+function setLiteralPullback(rows, direction, lo, hi, position) {
+  const segment = rows.find(r => r.object_id === "obj3-seg3").payload.data;
+  const assignment = rows.find(r => r.object_id === "obj3-assign3").payload.data;
+  const tested = rows.find(r => r.kind === C.PAIR_KINDS[0]).payload.data;
+  segment.construction.direction = direction;
+  Object.assign(segment.stroke_refs[0], {
+    start_price: direction === "UP" ? lo : hi, end_price: direction === "UP" ? hi : lo,
+  });
+  for (const unit of [assignment.unit, tested.unit]) Object.assign(unit, { direction, lo, hi });
+  Object.assign(tested, { position, leave_side: position === "STRICT_ABOVE" ? "UP" : "DOWN" });
+}
+
+test("#1496 R5 B4：拒绝方向颠倒且价端断开的假向下破坏", () => {
+  const fake = currentLiteralCut();
+  assert.throws(() => C.validateCenterFamilyCut(fake, axes22(fake)), /TB02E_SETTLEMENT/);
+});
+
+test("#1496 R5 B4：字面结算必须和同 cut 的方向、关节与完成状态一致", () => {
+  const rows = currentLiteralCut();
+  const center = rows.find(r => r.kind === C.CENTER_KINDS[1]).payload.data;
+  center.break_up = true;
+  setLiteralPullback(rows, "DOWN", "19", "22", "STRICT_ABOVE");
+  C.validateCenterFamilyCut(rows, axes22(rows));
+
+  const direction = copy(rows);
+  setLiteralPullback(direction, "UP", "19", "22", "STRICT_ABOVE");
+  assert.throws(() => C.validateCenterFamilyCut(direction, axes22(direction)), /TB02E_SETTLEMENT/);
+
+  const joint = copy(rows);
+  setLiteralPullback(joint, "DOWN", "19", "21", "STRICT_ABOVE");
+  assert.throws(() => C.validateCenterFamilyCut(joint, axes22(joint)), /TB02E_SETTLEMENT/);
+
+  const disconnected = copy(rows);
+  const segment = disconnected.find(r => r.object_id === "obj3-seg3").payload.data;
+  Object.assign(segment.construction, { start_stroke: "4", stroke_indices: ["4"] });
+  segment.stroke_refs[0].stroke_index = "4";
+  assert.throws(() => C.validateCenterFamilyCut(disconnected, axes22(disconnected)), /TB02E_SETTLEMENT/);
+
+  const unfinished = copy(rows);
+  unfinished.find(r => r.object_id === "obj3-seg3").payload.data.result = "IN_PROGRESS";
+  assert.throws(() => C.validateCenterFamilyCut(unfinished, axes22(unfinished)), /TB02E_MEMBER_NOT_COMPLETED/);
 });
 
 test("#1496 R5：无首回抽证明的旧结算不得进入新规则 cut", () => {

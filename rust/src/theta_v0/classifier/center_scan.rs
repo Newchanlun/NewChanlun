@@ -19,7 +19,7 @@
 
 use super::super::types::{Center, Direction, Segment, Tick};
 use super::center::{
-    center_pair_facts, is_zn, r5_joint, r5_pullback, unit_core_position, CenterPairFacts,
+    center_pair_facts, r5_joint, r5_pullback, r5_zn_members, unit_core_position, CenterPairFacts,
     CenterRoles, R5Joint, RoleVar, SeedFacts, UnitCorePosition, UnitRange,
 };
 use super::recursive_tower::{
@@ -231,7 +231,7 @@ pub(super) fn r5_step(
         return match r5_pullback(zd, zg, legs.side, pullback) {
             Some(true) => R5Step::Returned {
                 proof,
-                admit: legs.leave_is_zn == Some(false) && !is_zn(&units[j], &units[seed]),
+                admit: legs.leave_is_zn == Some(false),
             },
             Some(false) => R5Step::Destroyed(proof),
             None => R5Step::Pending(R5Gap::FirstPullbackUnproven),
@@ -289,6 +289,13 @@ impl R5Proof {
 
     pub(super) fn seed_unit(&self) -> usize {
         self.seed_unit
+    }
+
+    pub(super) fn with_unit_indices(mut self, [seed, leave, pullback]: [usize; 3]) -> Self {
+        self.seed_unit = seed;
+        self.leave_unit = leave;
+        self.pullback_unit = pullback;
+        self
     }
 
     pub fn leave_unit(&self) -> usize {
@@ -577,10 +584,7 @@ impl CenterScanFacts {
                     resume_anchor: proof.map(|_| w.exit + 1),
                     next_tested_unit,
                     upgrade_pending: w.upgraded,
-                    zn_members: members
-                        .iter()
-                        .enumerate()
-                        .filter(|(_, u)| is_zn(u, &members[0]))
+                    zn_members: r5_zn_members(members, roles.zd, roles.zg)
                         .map(|(k, _)| w.seed_at + k)
                         .collect(),
                     roles: RoleVar::ALL
@@ -762,6 +766,78 @@ impl CenterScanFacts {
 mod r5_resume_tests {
     use super::*;
     use crate::theta_v0::classifier::center::center_from_segments;
+
+    #[test]
+    fn r5_b2_attested_non_zn_beats_placeholder_without_entering_extrema() {
+        use Direction::{Down, Up};
+        for leave in [3, 7] {
+            let mut input = vec![(Down, 20, 40), (Up, 20, 35), (Down, 25, 35)];
+            input.extend((3..leave).map(|_| (Down, 25, 35)));
+            input.extend([(Up, 36, 50), (Down, 33, 50)]);
+            let mut units: Vec<_> = input
+                .into_iter()
+                .enumerate()
+                .map(|(k, (direction, lo, hi))| UnitRange {
+                    start_index: k,
+                    end_index: k + 1,
+                    lo,
+                    hi,
+                    direction,
+                })
+                .collect();
+            let attested = R5AttestedLegs {
+                seed: 0,
+                leave,
+                side: Up,
+                first_pullback: Some(leave + 1),
+                leave_is_zn: Some(false),
+            };
+            let scan = |units: &[UnitRange], attested| {
+                scan_center_facts_with_r5(
+                    units,
+                    super::super::center::center_from_window,
+                    R5DirectionSource::Unproven,
+                    &[attested],
+                )
+            };
+            for direction in [Up, Down] {
+                units[leave].direction = direction;
+                let facts = scan(&units, attested);
+                assert_eq!(facts.windows[0].exit, leave + 2);
+                assert_eq!(facts.windows[0].upgraded, leave == 7);
+                assert_eq!(
+                    facts.windows[0].last_return.unwrap().pullback_unit(),
+                    leave + 1
+                );
+                let windows = facts.window_facts(&units);
+                let window = &windows[0];
+                assert!(!window.zn_members.contains(&leave));
+                assert_eq!(
+                    window.roles.iter().map(|r| r.value).collect::<Vec<_>>(),
+                    [25, 35, 20, 50, 33, 35]
+                );
+                assert!(window
+                    .roles
+                    .iter()
+                    .all(|r| !r.contributors.contains(&leave)));
+            }
+            let unresolved = scan(
+                &units,
+                R5AttestedLegs {
+                    leave_is_zn: None,
+                    ..attested
+                },
+            );
+            assert_eq!(unresolved.windows[0].exit, leave);
+            assert_eq!(
+                unresolved.windows[0].boundary,
+                R5Boundary::Pending {
+                    gap: R5Gap::ReturnedMembershipUnresolved,
+                    tested: leave,
+                }
+            );
+        }
+    }
 
     #[test]
     fn r5_full_and_resumed_windows_share_the_pullback_dependency() {

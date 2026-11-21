@@ -55,11 +55,11 @@ use std::rc::Rc;
 
 use super::super::types::{Center, Direction, Stroke, Tick};
 use super::center::{
-    classify_relation, seed_facts, unit_core_position, zn_extrema, CenterRelation, UnitRange,
+    classify_relation, r5_zn_extrema, seed_facts, unit_core_position, CenterRelation, UnitRange,
 };
 use super::center_scan::{
-    r5_step, NoopSink, R5AttestedLegs, R5Boundary, R5DirectionSource, R5Gap, R5Step, RoleProvider,
-    ScanSink, ScanWindow,
+    r5_step, NoopSink, R5AttestedLegs, R5Boundary, R5DirectionSource, R5Gap, R5Proof, R5Step,
+    RoleProvider, ScanSink, ScanWindow,
 };
 use super::decompose::{center_own_dir_at, MoveBlock};
 use super::descend::RMove;
@@ -111,6 +111,40 @@ pub struct ElementId {
     pub ordinal: u64,
 }
 
+/// 扫描证书及其原生段身份；投影可重排中枢或截取下级流，不能借用其它流的同序号证书。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct NativeR5Settlement {
+    pub(super) proof: R5Proof,
+    pub(super) source: [(ElementId, UnitRange); 3],
+}
+
+impl NativeR5Settlement {
+    fn from_scan(
+        settlement: Option<R5Proof>,
+        units: &[UnitRange],
+        moves: &[LeveledMove],
+        directions: R5DirectionSource<'_>,
+    ) -> Option<Rc<Self>> {
+        let proof = settlement?;
+        if !matches!(directions, R5DirectionSource::Native) {
+            return None;
+        }
+        let [Some(seed), Some(leave), Some(pullback)] =
+            [proof.seed_unit(), proof.leave_unit(), proof.pullback_unit()].map(|i| {
+                let m = moves.get(i)?;
+                (m.id.level == 0 && matches!(m.rmove, RMove::Segment { .. }))
+                    .then(|| (m.id, units[i]))
+            })
+        else {
+            return None;
+        };
+        Some(Rc::new(Self {
+            proof,
+            source: [seed, leave, pullback],
+        }))
+    }
+}
+
 /// 携坐标的递归走势（坐标层包装：`RMove` 结构 + 原始 K 序坐标 + 携坐标的次级别走势侧车）。
 ///
 /// `rmove`：纯结构走势（Lean `Move` μF 镜像，descend.rs::RMove——无坐标）。
@@ -152,6 +186,8 @@ pub struct LeveledMove {
     /// 一次算出并写 `Some`，[`Self::envelope`] 据此 O(1)。`None` 只出现在测试手搓的字面量里，
     /// `envelope()` 对它回退递归 `rmove.lo()/hi()`（同值，仅慢）。
     pub(crate) interval_cache: Option<(Tick, Tick)>,
+    /// 当前窗口的原生 R5 证书；不继承块内其它中枢、重切母窗或子走势的证书。
+    pub(crate) r5_settlement: Option<Rc<NativeR5Settlement>>,
 }
 
 /// 在按 `end_index` 升序排列的走势序列中定位 `end_index == target` 的段（leftmost）。
@@ -211,6 +247,7 @@ impl LeveledMove {
             sub_moves: Rc::new(Vec::new()),
             id,
             interval_cache: Some((u.lo, u.hi)),
+            r5_settlement: None,
         }
     }
 
@@ -281,6 +318,7 @@ impl LeveledMove {
             sub_moves,
             id,
             interval_cache: Some(interval),
+            r5_settlement: None,
         }
     }
 
@@ -434,8 +472,9 @@ pub fn compose_level_with_roles(
     // ★codex Q4：确定性 ID 注入——ordinal = 窗口在该级产出序（enumerate）。全量从 0 起。
     let upper: Vec<LeveledMove> = windowed
         .iter()
+        .zip(&metas)
         .enumerate()
-        .map(|(i, (_c, win))| {
+        .map(|(i, ((_c, win), meta))| {
             // ★task#40 fix A：win 是连续闭区间 ⟹ 直接借用连续切片，无临时数组 clone。
             // ★task#142：窗口变长（seed 三段 + 延伸段），subs = 中枢吸收的全部次级别走势。
             let subs = &subs_moves[win.0..=win.1];
@@ -445,7 +484,10 @@ pub fn compose_level_with_roles(
             };
             // #897：载荷 = 本窗口所属走势类型块的中枢序列（末位 = 本窗中枢 *c）。
             let run_start = trend_run_start(&centers, i);
-            LeveledMove::compose(subs, &centers[run_start..=i], level, id)
+            let mut upper = LeveledMove::compose(subs, &centers[run_start..=i], level, id);
+            upper.r5_settlement =
+                NativeR5Settlement::from_scan(meta.settlement, units, subs_moves, roles.directions);
+            upper
         })
         .collect();
     let cp_ownership: Vec<CpScanOwnership> = windowed
@@ -624,8 +666,8 @@ pub(super) fn scan_center_facts_with_r5<S: ScanSink>(
                 };
                 let emitted = if !upgraded {
                     // Q2 有效域（≤8 段）：一个延伸中枢，不拆碎片。外缘 = 全部成员中 Zn 的极值
-                    // （★#1419 S1/S2，唯一一份聚合 `zn_extrema`；seed 三单元已含在内）。
-                    let zn = zn_extrema(&units[i..j]);
+                    // （★#1419 S1/S2，唯一一份聚合 `r5_zn_extrema`；seed 三单元已含在内）。
+                    let zn = r5_zn_extrema(&units[i..j], c.zd, c.zg);
                     c.dd = zn.dd;
                     c.gg = zn.gg;
                     out.push((c, (i, j - 1)));
@@ -835,8 +877,9 @@ pub fn compose_level_resume_with_roles(
     let tail_upper: Vec<LeveledMove> = super::stage_profile::time("05c_tail_upper_build", || {
         windowed
             .iter()
+            .zip(&metas)
             .enumerate()
-            .map(|(i, (_c, win))| {
+            .map(|(i, ((_c, win), meta))| {
                 // win 是连续闭区间（seed 三段 + 延伸段，task #142）——直接借用切片，不 clone 临时数组。
                 let subs = &subs_moves[win.0..=win.1];
                 // ★确定性 ID：tail ordinal 接续前缀（全量/增量产同 ID）。
@@ -848,7 +891,15 @@ pub fn compose_level_resume_with_roles(
                 let gi = prefix_count + i;
                 let run_start = trend_run_start(&run_view, gi);
                 super::stage_profile::time("05c2_compose_call", || {
-                    LeveledMove::compose(subs, &run_view[run_start..=gi], level, id)
+                    let mut upper =
+                        LeveledMove::compose(subs, &run_view[run_start..=gi], level, id);
+                    upper.r5_settlement = NativeR5Settlement::from_scan(
+                        meta.settlement,
+                        units,
+                        subs_moves,
+                        roles.directions,
+                    );
+                    upper
                 })
             })
             .collect()

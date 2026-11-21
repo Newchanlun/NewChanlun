@@ -364,10 +364,10 @@ pub fn assemble_level_view(
     query: LevelViewQuery,
     material: LevelViewMaterial<'_>,
 ) -> Result<LevelAsOfView, LevelViewError> {
-    assemble_level_view_with_r5(config, query, material, &[], None)
+    assemble_level_view_resident(config, query, material, None)
 }
 
-/// #69 5a resident seam。旧入口签名不动并委托 `None`；调用方只有显式给出
+/// 普通与 resident 入口都消费投影中枢附带的同流证书；只有显式给出
 /// `ConfirmResidence` 才能跨 view 复用已封 lower-leg 前缀。
 pub fn assemble_level_view_resident(
     config: C2LevelViewConfig,
@@ -375,7 +375,7 @@ pub fn assemble_level_view_resident(
     material: LevelViewMaterial<'_>,
     residence: Option<ConfirmResidence<'_>>,
 ) -> Result<LevelAsOfView, LevelViewError> {
-    assemble_level_view_with_r5(config, query, material, &[], residence)
+    assemble_level_view_impl(config, query, material, None, residence)
 }
 
 /// 接收从同一 lower-leg 构造流得出的扫描证书，按投影中枢顺序传入。
@@ -385,6 +385,16 @@ pub fn assemble_level_view_with_r5(
     query: LevelViewQuery,
     material: LevelViewMaterial<'_>,
     settlements: &[Option<R5Proof>],
+    residence: Option<ConfirmResidence<'_>>,
+) -> Result<LevelAsOfView, LevelViewError> {
+    assemble_level_view_impl(config, query, material, Some(settlements), residence)
+}
+
+fn assemble_level_view_impl(
+    config: C2LevelViewConfig,
+    query: LevelViewQuery,
+    material: LevelViewMaterial<'_>,
+    explicit_settlements: Option<&[Option<R5Proof>]>,
     mut residence: Option<ConfirmResidence<'_>>,
 ) -> Result<LevelAsOfView, LevelViewError> {
     if !config.enabled {
@@ -417,9 +427,18 @@ pub fn assemble_level_view_with_r5(
     }
 
     let cache_key = C2CacheKey::from_query(&query).map_err(LevelViewError::InvalidVersionTuple)?;
-    let pairs = if query.version.divergence_pair_provider_version
-        == Some(ProviderVersion::MOVE_BLOCK_AC_V1)
-    {
+    let pairing =
+        query.version.divergence_pair_provider_version == Some(ProviderVersion::MOVE_BLOCK_AC_V1);
+    let native;
+    let settlements = match explicit_settlements {
+        Some(settlements) => settlements,
+        None if pairing => {
+            native = projection.native_settlements(material.lower_legs);
+            &native
+        }
+        None => &[],
+    };
+    let pairs = if pairing {
         provide_divergence_pairs_with_r5(
             query.level,
             projection,

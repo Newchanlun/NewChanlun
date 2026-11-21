@@ -306,7 +306,8 @@ pub fn provide_divergence_pairs(
     legs: &[LowerLeg],
     as_of: usize,
 ) -> Vec<DivergencePair> {
-    provide_divergence_pairs_with_r5(level, projection, blocks, legs, as_of, &[])
+    let settlements = projection.native_settlements(legs);
+    provide_divergence_pairs_with_r5(level, projection, blocks, legs, as_of, &settlements)
 }
 
 pub fn provide_divergence_pairs_with_r5(
@@ -332,16 +333,27 @@ pub fn provide_divergence_pairs_with_r5(
         let source = |index: usize| T3InCSource::Scanned(settlements.get(index).copied().flatten());
         let prev_r5 = source(block.end_center - 1);
         let last_r5 = source(block.end_center);
-        let Some(seg_a) = prev_r5.a_span(&segments, &anchors, &prev, &last, direction, false)
-        else {
-            continue;
-        };
         // #104/#105 裁定修复（di-trend-c-terminal-forward-find-ruling-20260716）：
         // C 终段 = 离开最后中枢后的**第一个**同向段（正向 find）。此前 rev().find 取
         // 全域最后一个同向段，最终快照下 C 段被锚到数据末端，Trend 背驰恒 false。
         let boundary = last_r5
             .boundary(&segments, &last, direction)
             .filter(|boundary| boundary.1 .1 <= as_of);
+        // 字面分支的离开腿可能正是 B 的末成员；它完整归 C。
+        // 独立见证的外段在 B 之后，同一上界不删掉 B 的末成员。
+        let a_limit = boundary.map_or(segments.len(), |((leave_start, _), _)| {
+            segments.partition_point(|segment| segment.end_index <= leave_start)
+        });
+        let Some(seg_a) = prev_r5.a_span(
+            &segments[..a_limit],
+            &anchors[..a_limit],
+            &prev,
+            &last,
+            direction,
+            false,
+        ) else {
+            continue;
+        };
         let c_start = if let Some(boundary) = boundary {
             boundary.0 .0
         } else {
