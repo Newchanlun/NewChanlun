@@ -1639,16 +1639,17 @@ fn old_finance_contracts_refuse_cap_activation() {
     assert!(revision(&m).unwrap_err().contains("混写"));
     m["protocol_revision"] = json!(SCHEMA_V2);
     assert_eq!(revision(&m).unwrap(), REV_V4);
-    m["finance"]["schema_revision"] = json!(REV_V7);
-    assert!(revision(&m).unwrap_err().contains("混写"));
-    m["schema_revision"] = json!(deployment::BUSINESS);
-    assert_eq!(revision(&m).unwrap(), REV_V7);
-    m["protocol_revision"] = json!(SCHEMA_V1);
-    assert!(revision(&m).unwrap_err().contains("混写"));
-    m["finance"]["schema_revision"] = json!(REV_V6);
-    assert_eq!(revision(&m).unwrap(), REV_V6);
-    m["finance"]["schema_revision"] = json!(REV_V3);
-    assert!(revision(&m).unwrap_err().contains("混写"));
+    let mut split = m.clone();
+    split["finance"]["schema_revision"] = json!(REV_V7);
+    assert!(revision(&split).unwrap_err().contains("混写"));
+    split["schema_revision"] = json!(deployment::BUSINESS);
+    assert_eq!(revision(&split).unwrap(), REV_V7);
+    split["protocol_revision"] = json!(SCHEMA_V1);
+    assert!(revision(&split).unwrap_err().contains("混写"));
+    split["finance"]["schema_revision"] = json!(REV_V6);
+    assert_eq!(revision(&split).unwrap(), REV_V6);
+    split["finance"]["schema_revision"] = json!(REV_V3);
+    assert!(revision(&split).unwrap_err().contains("混写"));
     let gates: Vec<(&str, bool, bool)> = CONTRACTS
         .iter()
         .map(|c| (c.revision, c.content, c.cap_activation))
