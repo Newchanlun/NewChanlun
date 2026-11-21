@@ -226,10 +226,8 @@ def _require_visible_text(raw: Any, field_name: str) -> str:
 def _require_visible_markdown_text(raw: Any, field_name: str) -> str:
     """要求字段在 GFM 渲染后至少包含 1 个可见基字符（封堵 HTML 实体/注释/空标签/链接引用定义等不可见占位文本）。"""
     text = _require_visible_text(raw, field_name)
-    for _, line_tokens in _extract_visible_paragraph_lines(text, include_fenced_code=True):
-        display_text = "".join(d_part for _, d_part in line_tokens)
-        if _clean_display_reason(display_text):
-            return text
+    if _has_visible_gfm_text(text):
+        return text
     raise ConvergenceError(f"{field_name} 在 Markdown/GFM 渲染后不包含任何可见字符：{raw!r}")
 
 
@@ -870,7 +868,7 @@ class _FencedCode:
 
 @dataclass
 class _IndentedCode:
-    pass
+    lines: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -1318,6 +1316,7 @@ class _HtmlSuppressState:
     in_open_tag: bool = False
     open_tag_quote: str | None = None
     pending_open_tag_name: str | None = None
+    suppressed_tags: frozenset[str] = _SUPPRESSED_INLINE_HTML_TAGS
 
 
 @dataclass
@@ -1387,12 +1386,12 @@ def _apply_emphasis_delimiters(
 
 
 def _finish_open_tag(state: _HtmlSuppressState) -> None:
-    """按 HTML5 规则完成开标签闭合：12 个抑制标签均属非空元素，无论是否带 `/>` 均入栈。"""
+    """按 HTML5 规则完成开标签闭合：受抑制标签均属非空元素，无论是否带 `/>` 均入栈。"""
     tag_name = state.pending_open_tag_name
     state.in_open_tag = False
     state.open_tag_quote = None
     state.pending_open_tag_name = None
-    if tag_name is not None and tag_name in _SUPPRESSED_INLINE_HTML_TAGS:
+    if tag_name is not None and tag_name in state.suppressed_tags:
         state.tag_stack.append(tag_name)
         if tag_name in _RAW_TEXT_HTML_TAGS:
             state.raw_text_tag = tag_name
@@ -1442,10 +1441,20 @@ def _advance_in_open_tag(text: str, start: int, state: _HtmlSuppressState) -> in
     return n
 
 
-def _update_html_suppress_state(text: str, state: _HtmlSuppressState) -> None:
-    """扫描真实原始 HTML 块内容，按 HTML5 开/闭标签、跨块注释、原始文本标签与未闭引号属性状态更新持久抑制状态。"""
+def _update_html_suppress_state(
+    text: str,
+    state: _HtmlSuppressState,
+    *,
+    visible_chunks: list[str] | None = None,
+) -> None:
+    """扫描真实原始 HTML 块内容，按 HTML5 开/闭标签、跨块注释、原始文本标签与未闭引号属性状态更新持久抑制状态；可选收集非静默可见文本片段。"""
     n = len(text)
     i = 0
+
+    def emit_visible(segment: str) -> None:
+        if visible_chunks is not None and segment and not any(t in _SILENT_INLINE_HTML_TAGS for t in state.tag_stack):
+            visible_chunks.append(segment)
+
     while i < n:
         if state.in_comment:
             end_pos = text.find("-->", i)
@@ -1471,7 +1480,10 @@ def _update_html_suppress_state(text: str, state: _HtmlSuppressState) -> None:
             continue
         lt = text.find("<", i)
         if lt == -1:
+            emit_visible(text[i:])
             return
+        if lt > i:
+            emit_visible(text[i:lt])
         if text.startswith("<!--", lt):
             if text.startswith("<!-->", lt):
                 i = lt + 5
@@ -1519,6 +1531,7 @@ def _update_html_suppress_state(text: str, state: _HtmlSuppressState) -> None:
             state.pending_open_tag_name = open_head_m.group(1).lower()
             i = _advance_in_open_tag(text, open_head_m.end(), state)
             continue
+        emit_visible("<")
         i = lt + 1
 
 
@@ -1707,7 +1720,7 @@ def _scan_inline_dual(
                         open_tag_m = _INLINE_HTML_OPEN_NAME_RE.match(raw_html)
                         if open_tag_m is not None:
                             tag_name = open_tag_m.group(1).lower()
-                            if tag_name in _SUPPRESSED_INLINE_HTML_TAGS:
+                            if tag_name in state.suppressed_tags:
                                 stack.append(tag_name)
                                 if tag_name in _RAW_TEXT_HTML_TAGS:
                                     state.raw_text_tag = tag_name
@@ -1791,7 +1804,7 @@ def _scan_inline_dual(
                     open_tag_m = _INLINE_HTML_OPEN_NAME_RE.match(raw_html)
                     if open_tag_m is not None:
                         tag_name = open_tag_m.group(1).lower()
-                        if tag_name in _SUPPRESSED_INLINE_HTML_TAGS:
+                        if tag_name in state.suppressed_tags:
                             stack.append(tag_name)
                             if tag_name in _RAW_TEXT_HTML_TAGS:
                                 state.raw_text_tag = tag_name
@@ -1930,28 +1943,50 @@ def _extract_display_slice(tokens: Sequence[tuple[str, str]], start_match_pos: i
     return "".join(parts)
 
 
-def _extract_visible_paragraph_lines(
+def _extract_atx_heading_text(rest: str) -> str:
+    """按 CommonMark §4.2 剥离 ATX 标题首部 `#` 序列与可选尾部 `#` 闭合序列。"""
+    i = 0
+    n = len(rest)
+    while i < n and rest[i] == "#":
+        i += 1
+    content = rest[i:].strip(" \t")
+    if not content:
+        return ""
+    j = len(content)
+    while j > 0 and content[j - 1] == "#":
+        j -= 1
+    if j == 0:
+        return ""
+    if j < len(content) and content[j - 1] in (" ", "\t"):
+        content = content[:j].rstrip(" \t")
+    return content
+
+
+def _parse_commonmark_blocks(
     body: str,
     *,
-    include_fenced_code: bool = False,
-) -> list[tuple[str, list[tuple[str, str]]]]:
-    """按 CommonMark Phase-1 容器栈/叶子块 + §4.7 链接引用定义剥离 + 跨块持久 HTML 抑制栈 + §6 双流扫描提取非引用可见段落行。"""
+    include_all_visible_blocks: bool = False,
+) -> tuple[list[tuple[Literal["paragraph", "heading", "html", "code"], str]], frozenset[str]]:
+    """按 CommonMark Phase-1 容器栈/叶子块 + §4.7 链接引用定义剥离收集文档块与已定义链接标签。"""
     containers: list[_Container] = []
     leaf: _Leaf | None = None
     defined_labels: set[str] = set()
-    doc_blocks: list[tuple[Literal["paragraph", "html", "code"], str]] = []
+    doc_blocks: list[tuple[Literal["paragraph", "heading", "html", "code"], str]] = []
+
+    def in_blockquote() -> bool:
+        return any(isinstance(c, _BlockQuote) for c in containers)
 
     def close_leaf(*, emit: bool = True) -> None:
         nonlocal leaf
         if isinstance(leaf, _Paragraph):
             remaining = _strip_leading_link_ref_defs("\n".join(leaf.lines), defined_labels)
-            if emit and remaining and not any(isinstance(c, _BlockQuote) for c in containers):
+            if emit and remaining and (include_all_visible_blocks or not in_blockquote()):
                 doc_blocks.append(("paragraph", remaining))
         elif isinstance(leaf, _HTMLBlock):
-            if emit and leaf.lines and not any(isinstance(c, _BlockQuote) for c in containers):
+            if emit and leaf.lines and (include_all_visible_blocks or not in_blockquote()):
                 doc_blocks.append(("html", "\n".join(leaf.lines)))
-        elif isinstance(leaf, _FencedCode):
-            if include_fenced_code and emit and leaf.lines and not any(isinstance(c, _BlockQuote) for c in containers):
+        elif isinstance(leaf, (_FencedCode, _IndentedCode)):
+            if include_all_visible_blocks and emit and leaf.lines:
                 doc_blocks.append(("code", "\n".join(leaf.lines)))
         leaf = None
 
@@ -2020,9 +2055,15 @@ def _extract_visible_paragraph_lines(
                     close_leaf()
                 continue
             if isinstance(leaf, _IndentedCode):
-                if cursor.is_blank() or cursor.indent_ahead() >= 4:
+                if cursor.is_blank():
+                    cursor.advance_cols(4)
+                    leaf.lines.append(cursor.rest_text())
                     continue
-                leaf = None
+                if cursor.indent_ahead() >= 4:
+                    cursor.advance_cols(4)
+                    leaf.lines.append(cursor.rest_text())
+                    continue
+                close_leaf()
 
         if matched < len(containers) and not isinstance(leaf, _Paragraph):
             close_unmatched(matched)
@@ -2049,7 +2090,8 @@ def _extract_visible_paragraph_lines(
                     break
                 close_unmatched(matched)
                 mark_parent_has_content()
-                leaf = _IndentedCode()
+                cursor.advance_cols(4)
+                leaf = _IndentedCode(lines=[cursor.rest_text()])
                 line_consumed = True
                 break
 
@@ -2072,6 +2114,10 @@ def _extract_visible_paragraph_lines(
                 close_unmatched(matched)
                 close_leaf()
                 mark_parent_has_content()
+                if include_all_visible_blocks:
+                    heading_text = _extract_atx_heading_text(rest)
+                    if heading_text:
+                        doc_blocks.append(("heading", heading_text))
                 line_consumed = True
                 break
 
@@ -2102,6 +2148,8 @@ def _extract_visible_paragraph_lines(
                 assert isinstance(leaf, _Paragraph)
                 remaining_before_setext = _strip_leading_link_ref_defs("\n".join(leaf.lines), defined_labels)
                 if remaining_before_setext:
+                    if include_all_visible_blocks:
+                        doc_blocks.append(("heading", remaining_before_setext))
                     leaf = None
                     line_consumed = True
                     break
@@ -2163,13 +2211,37 @@ def _extract_visible_paragraph_lines(
             leaf = _Paragraph(lines=[text_line])
 
     close_leaf()
+    return doc_blocks, frozenset(defined_labels)
 
-    frozen_labels = frozenset(defined_labels)
+
+def _extract_visible_paragraph_lines(body: str) -> list[tuple[str, list[tuple[str, str]]]]:
+    """按 CommonMark Phase-1 容器栈/叶子块 + §4.7 链接引用定义剥离 + 跨块持久 HTML 抑制栈 + §6 双流扫描提取非引用可见段落行。"""
+    doc_blocks, frozen_labels = _parse_commonmark_blocks(body, include_all_visible_blocks=False)
     html_suppress_state = _HtmlSuppressState()
     visible_lines: list[tuple[str, list[tuple[str, str]]]] = []
     for block_kind, block_text in doc_blocks:
         if block_kind == "html":
             _update_html_suppress_state(block_text, html_suppress_state)
+            continue
+        for line_tokens in _scan_inline_dual(block_text, frozen_labels, html_suppress_state):
+            raw_match = "".join(m for m, _ in line_tokens)
+            stripped_match = raw_match.strip(" \t")
+            if stripped_match:
+                visible_lines.append((raw_match, line_tokens))
+    return visible_lines
+
+
+def _has_visible_gfm_text(text: str) -> bool:
+    """按 GFM 渲染语义判定文本是否包含至少 1 个可见基字符（覆盖段落/列表/引用/标题/围栏与缩进代码/非静默 HTML）。"""
+    doc_blocks, frozen_labels = _parse_commonmark_blocks(text, include_all_visible_blocks=True)
+    html_suppress_state = _HtmlSuppressState(suppressed_tags=_SILENT_INLINE_HTML_TAGS)
+    for block_kind, block_text in doc_blocks:
+        if block_kind == "html":
+            visible_chunks: list[str] = []
+            _update_html_suppress_state(block_text, html_suppress_state, visible_chunks=visible_chunks)
+            for chunk in visible_chunks:
+                if _clean_display_reason(html.unescape(chunk)):
+                    return True
             continue
         if block_kind == "code":
             if (
@@ -2180,15 +2252,14 @@ def _extract_visible_paragraph_lines(
             ):
                 continue
             for code_line in block_text.split("\n"):
-                if code_line:
-                    visible_lines.append((code_line, [("\x01", code_line)]))
+                if _clean_display_reason(code_line):
+                    return True
             continue
         for line_tokens in _scan_inline_dual(block_text, frozen_labels, html_suppress_state):
-            raw_match = "".join(m for m, _ in line_tokens)
-            stripped_match = raw_match.strip(" \t")
-            if stripped_match:
-                visible_lines.append((raw_match, line_tokens))
-    return visible_lines
+            display_text = "".join(d_part for _, d_part in line_tokens)
+            if _clean_display_reason(display_text):
+                return True
+    return False
 
 
 def _match_reply_location(
@@ -3654,6 +3725,9 @@ def evaluate_round(
             only_fid = next(iter(target_fids))
             if only_fid not in stale_fps:
                 bound_targets[rk] = only_fid
+            else:
+                # 跨 HEAD 坐标/行内回复仅命中未在前轮锁定的过期发现，立即消费以防后续轮次过期发现移位后复活误绑新发现
+                consumed_keys.add(rk)
         else:
             # 同一 loc/inline 回复在本轮同时命中多个发现属歧义回复，标记为已消费以防后续轮次改绑新发现
             consumed_keys.add(rk)

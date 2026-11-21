@@ -6855,3 +6855,379 @@ def test_r14_important3_gfm_rendered_visibility_for_verifier_evidence_and_findin
         f_ok = _finding(failure_scenario=good_md, evidence=good_md)
         assert f_ok.failure_scenario == good_md
         assert f_ok.evidence == good_md
+
+
+def test_r15_gfm_visibility_accepts_blocks_and_rejects_invisible_variants() -> None:
+    """R15 缺陷 1：合法引用块/ATX 标题/Setext 标题/缩进代码/非静默 HTML 放行，各自全不可见变体继续拒绝，且不改变作者不修指令隔离语义。"""
+    f1 = _finding(severity=Severity.IMPORTANT, file="pilot1742/demo.py", line=42)
+    fid = f1.finding_id
+    cand = _candidates([f1])
+
+    valid_block_samples = (
+        "> quoted line: demo.py:42 returns None",
+        "> > nested quote: missing null guard",
+        "> ### Root cause in quote",
+        "> Root cause in quote\n> ---",
+        ">     return None",
+        "> <div>real text in quote</div>",
+        "### Root cause: missing check",
+        "### Root cause ###",
+        "Root cause\n---",
+        "Root cause\n===",
+        "<div>real text</div>",
+        "<div>\n  <p>real text</p>\n</div>",
+        "<pre>return None</pre>",
+        "<span>\nreal text\n</span>",
+        "<blockquote>real text</blockquote>",
+        "<!-- note -->real text",
+        "\n\n    return None",
+        "    return None",
+        "---\n\n    return None",
+        "<!-- note -->\n\n    return None",
+        "[x]: /demo\n\n    return None",
+        "`&nbsp;`",
+        "&amp;",
+        "⚠️",
+    )
+    for good_md in valid_block_samples:
+        expected_text = good_md.strip()
+        vr = parse_verifier_output(
+            _verifier_payload(
+                cand,
+                [{"finding_id": fid, "verdict": "rejected", "verifier_evidence": good_md}],
+            ),
+            cand,
+            verifier_model="claude-opus-5-5",
+        )
+        assert vr.verdicts[0].verifier_evidence == expected_text
+        f_ok = _finding(failure_scenario=good_md, evidence=good_md)
+        assert f_ok.failure_scenario == good_md
+        assert f_ok.evidence == good_md
+
+    invisible_block_samples = (
+        "---",
+        "***",
+        "___",
+        "[x]: /demo",
+        "[x]: /demo\n---",
+        "&#x3164;",
+        "&#8203;",
+        "**&#x3164;**",
+        "> &#x3164;",
+        "> **&#x3164;**",
+        "> ---",
+        "> [x]: /demo",
+        ">",
+        "> ### &#x3164;",
+        "> <div>&#x3164;</div>",
+        ">     \u3164",
+        "###",
+        "### ###",
+        "### &#x3164;",
+        "### &#x3164; ###",
+        "### **&#x3164;**",
+        "### <!-- hidden -->",
+        "&#x3164;\n---",
+        "**&#x3164;**\n===",
+        "    \u3164",
+        "    &#x3164;",
+        "---\n\n    \u3164",
+        "[x]: /demo\n\n    \u3164",
+        "<!-- hidden -->",
+        "<!-- hidden -->\n\n    \u3164",
+        "<!-- unclosed\n\n    return None",
+        "<!-- unclosed\n\n### Root cause",
+        "<!-- unclosed\n\n<div>real text</div>",
+        "<script>alert(1)</script>",
+        "<style>body{display:none}</style>",
+        "<textarea>hidden</textarea>",
+        "<template>hidden</template>",
+        "<template>\n\n    return None\n\n</template>",
+        "<noscript>hidden</noscript>",
+        "<span></span>",
+        "<span>&#xFE0F;</span>",
+        "<span>\n&#xFE0F;\n</span>",
+        "<div></div>",
+        "<div>&#x3164;</div>",
+        "<div title=\"real text\"></div>",
+        "<div title=\"a>b\">&#x3164;</div>",
+        "<div><!-- hidden --></div>",
+        "<div><script>x</script><style>y</style></div>",
+        "<pre>&#x3164;</pre>",
+        "<blockquote>\n\n**&#x3164;**\n\n</blockquote>",
+        "```python\n```",
+        "```\n\u3164\n```",
+    )
+    for bad_md in invisible_block_samples:
+        with pytest.raises(ConvergenceError):
+            parse_verifier_output(
+                _verifier_payload(
+                    cand,
+                    [{"finding_id": fid, "verdict": "rejected", "verifier_evidence": bad_md}],
+                ),
+                cand,
+                verifier_model="claude-opus-5-5",
+            )
+        with pytest.raises(ConvergenceError):
+            VerifiedFinding(
+                finding=f1,
+                verdict=VerificationVerdict.REJECTED,
+                verifier_model="claude-opus-5-5",
+                verifier_evidence=bad_md,
+                round_number=1,
+                head_sha=HEAD_1,
+            )
+        with pytest.raises(ConvergenceError):
+            _finding(failure_scenario=bad_md)
+        with pytest.raises(ConvergenceError):
+            _finding(evidence=bad_md)
+
+    # 回归确认：作者不修指令解析路径仍严格忽略引用块/标题/缩进与围栏代码/HTML 块
+    non_directive_comments = [
+        {"id": 9101, "user": {"login": "alice", "type": "User"}, "body": f"> [{fid}] 不修：引用块内不算指令"},
+        {"id": 9102, "user": {"login": "alice", "type": "User"}, "body": f"### [{fid}] 不修：ATX 标题内不算指令"},
+        {"id": 9103, "user": {"login": "alice", "type": "User"}, "body": f"[{fid}] 不修：Setext 标题不算指令\n---"},
+        {"id": 9104, "user": {"login": "alice", "type": "User"}, "body": f"    [{fid}] 不修：缩进代码不算指令"},
+        {"id": 9105, "user": {"login": "alice", "type": "User"}, "body": f"<div>[{fid}] 不修：HTML 块不算指令</div>"},
+    ]
+    assert parse_wontfix_replies(non_directive_comments, allowed_authors={"alice"}) == ()
+
+
+def test_r15_stale_confirmed_consumes_unpinned_cross_head_coord_replies() -> None:
+    """R15 缺陷 2：第 2 轮过期发现 A 保持 CONFIRMED 且无碰撞时，跨 HEAD 坐标/文件/行内回复须立即消费，第 3 轮 A 移位后绝不复活误绑新发现 C。"""
+    f_a_line42 = _finding(
+        severity=Severity.IMPORTANT,
+        file="pilot1742/demo.py",
+        line=42,
+        category="空值解引用",
+        failure_scenario="缺陷 A：第 42 行未判空",
+    )
+    f_a_line50 = _finding(
+        severity=Severity.IMPORTANT,
+        file="pilot1742/demo.py",
+        line=50,
+        category="空值解引用",
+        failure_scenario="缺陷 A：第 42 行未判空",
+    )
+    assert f_a_line50.finding_id == f_a_line42.finding_id
+
+    f_c_line42 = _finding(
+        severity=Severity.IMPORTANT,
+        file="pilot1742/demo.py",
+        line=42,
+        category="并发竞争",
+        failure_scenario="第 3 轮新缺陷 C：第 42 行无锁写入",
+    )
+    assert f_c_line42.finding_id != f_a_line42.finding_id
+
+    # R1 (HEAD_1): A@42 确认，尚无作者回复
+    c1 = build_round_candidates(
+        round_number=1,
+        head_sha=HEAD_1,
+        panel=DEFAULT_PANEL,
+        finder_batches=_batches_for_panel([f_a_line42], round_number=1, head_sha=HEAD_1),
+    )
+    v1 = parse_verifier_output(
+        _verifier_payload(
+            c1,
+            [{"finding_id": f_a_line42.finding_id, "verdict": "confirmed", "verifier_evidence": "A@42 确认成立"}],
+        ),
+        c1,
+        verifier_model="claude-opus-5-5",
+    )
+    dec1 = evaluate_round(v1)
+    e1 = dec1.to_history_entry(rendered=render_findings_comment(1928, HEAD_1, dec1))
+
+    # 依次验证 3 种未在前轮锁定的跨 HEAD 坐标回复形态：行号 loc / 文件级 loc / 行内锚定 inline
+    reply_cases = (
+        parse_wontfix_replies(
+            [{"id": 4201, "user": {"login": "alice", "type": "User"}, "body": "pilot1742/demo.py:42 不修：保留 A"}],
+            allowed_authors={"alice"},
+        ),
+        parse_wontfix_replies(
+            [{"id": 4202, "user": {"login": "alice", "type": "User"}, "body": "不修(pilot1742/demo.py)：保留 A"}],
+            allowed_authors={"alice"},
+        ),
+        parse_wontfix_replies(
+            [
+                {
+                    "id": 4203,
+                    "path": "pilot1742/demo.py",
+                    "line": 42,
+                    "side": "RIGHT",
+                    "user": {"login": "alice", "type": "User"},
+                    "body": "不修：保留 A",
+                }
+            ],
+            allowed_authors={"alice"},
+        ),
+    )
+
+    for case_replies in reply_cases:
+        assert len(case_replies) == 1
+        rk = case_replies[0].reply_key
+
+        # R2 (HEAD_2): finder 未重报 A，A 进入 stale_location_fingerprints，且本轮无 B 碰撞，核实者判 A = CONFIRMED
+        plan2 = plan_next_round(BASE_SHA, HEAD_2, [e1], author_replies=case_replies)
+        c2 = build_round_candidates(
+            round_number=2,
+            head_sha=HEAD_2,
+            panel=DEFAULT_PANEL,
+            finder_batches=_batches_for_panel([], round_number=2, head_sha=HEAD_2),
+            history=plan2.history,
+        )
+        assert c2.stale_location_fingerprints == frozenset({f_a_line42.finding_id})
+        assert (
+            bind_author_replies(
+                c2.findings,
+                case_replies,
+                stale_location_fingerprints=c2.stale_location_fingerprints,
+            )
+            == {}
+        )
+        v2 = parse_verifier_output(
+            _verifier_payload(
+                c2,
+                [{"finding_id": f_a_line42.finding_id, "verdict": "confirmed", "verifier_evidence": "A 尚未修复"}],
+            ),
+            c2,
+            verifier_model="claude-opus-5-5",
+            author_replies=case_replies,
+        )
+        dec2 = evaluate_round(v2)
+        assert dec2.outcome == RoundOutcome.BLOCKED
+        assert rk in dec2.consumed_reply_keys
+        assert all(k != rk for k, _ in dec2.bound_reply_targets)
+        e2 = dec2.to_history_entry(rendered=render_findings_comment(1928, HEAD_2, dec2))
+        assert rk in e2.consumed_reply_keys
+        assert all(k != rk for k, _ in e2.bound_reply_targets)
+
+        # 直传 evaluate_round(..., author_replies=...) 路径同样立即消费
+        v2_direct = VerifiedRound(
+            candidates=c2,
+            verdicts=(
+                _verified(
+                    f_a_line42,
+                    VerificationVerdict.CONFIRMED,
+                    verifier_evidence="A 尚未修复",
+                    round_number=2,
+                    head_sha=HEAD_2,
+                ),
+            ),
+        )
+        dec2_direct = evaluate_round(v2_direct, author_replies=case_replies)
+        assert rk in dec2_direct.consumed_reply_keys
+        assert all(k != rk for k, _ in dec2_direct.bound_reply_targets)
+
+        # R3 (HEAD_3): A 移位至第 50 行（不再 stale），同时第 42 行出现新发现 C；旧回复不得复活误绑 C
+        plan3 = plan_next_round(BASE_SHA, HEAD_3, [e1, e2], author_replies=case_replies)
+        assert rk in plan3.consumed_reply_keys
+        assert plan3.author_replies == ()
+        c3 = build_round_candidates(
+            round_number=3,
+            head_sha=HEAD_3,
+            panel=DEFAULT_PANEL,
+            finder_batches=_batches_for_panel([f_a_line50, f_c_line42], round_number=3, head_sha=HEAD_3),
+            history=plan3.history,
+        )
+        assert c3.stale_location_fingerprints == frozenset()
+        assert (
+            bind_author_replies(
+                c3.findings,
+                case_replies,
+                consumed_reply_keys=plan3.consumed_reply_keys,
+                stale_location_fingerprints=c3.stale_location_fingerprints,
+                bound_reply_targets=plan3.bound_reply_targets,
+            )
+            == {}
+        )
+        with pytest.raises(ConvergenceError):
+            parse_verifier_output(
+                _verifier_payload(
+                    c3,
+                    [
+                        {"finding_id": f_a_line50.finding_id, "verdict": "confirmed", "verifier_evidence": "A@50 仍成立"},
+                        {"finding_id": f_c_line42.finding_id, "verdict": "resolved_by_wontfix", "verifier_evidence": "试图复活旧回复解除 C"},
+                    ],
+                ),
+                c3,
+                verifier_model="claude-opus-5-5",
+                author_replies=case_replies,
+            )
+
+    # 正向对照：已在 R1（同一 HEAD_1）锁定到 A 的回复，在 R2 过期期间保持锁定、永不改绑 C、并在 R3 A 清除时消费
+    pinned_replies = parse_wontfix_replies(
+        [{"id": 4204, "user": {"login": "alice", "type": "User"}, "body": "pilot1742/demo.py:42 不修：R1 锁定给 A"}],
+        allowed_authors={"alice"},
+    )
+    pinned_rk = pinned_replies[0].reply_key
+    v1_pinned = parse_verifier_output(
+        _verifier_payload(
+            c1,
+            [{"finding_id": f_a_line42.finding_id, "verdict": "confirmed", "verifier_evidence": "R1 暂不采信，保留 A"}],
+        ),
+        c1,
+        verifier_model="claude-opus-5-5",
+        author_replies=pinned_replies,
+    )
+    dec1_pinned = evaluate_round(v1_pinned)
+    assert (pinned_rk, f_a_line42.finding_id) in dec1_pinned.bound_reply_targets
+    assert pinned_rk not in dec1_pinned.consumed_reply_keys
+    e1_pinned = dec1_pinned.to_history_entry(rendered=render_findings_comment(1928, HEAD_1, dec1_pinned))
+
+    plan2_pinned = plan_next_round(BASE_SHA, HEAD_2, [e1_pinned], author_replies=pinned_replies)
+    c2_pinned = build_round_candidates(
+        round_number=2,
+        head_sha=HEAD_2,
+        panel=DEFAULT_PANEL,
+        finder_batches=_batches_for_panel([], round_number=2, head_sha=HEAD_2),
+        history=plan2_pinned.history,
+    )
+    v2_pinned = parse_verifier_output(
+        _verifier_payload(
+            c2_pinned,
+            [{"finding_id": f_a_line42.finding_id, "verdict": "confirmed", "verifier_evidence": "R2 过期 A 仍成立"}],
+        ),
+        c2_pinned,
+        verifier_model="claude-opus-5-5",
+        author_replies=pinned_replies,
+    )
+    dec2_pinned = evaluate_round(v2_pinned)
+    assert (pinned_rk, f_a_line42.finding_id) in dec2_pinned.bound_reply_targets
+    assert pinned_rk not in dec2_pinned.consumed_reply_keys
+    e2_pinned = dec2_pinned.to_history_entry(rendered=render_findings_comment(1928, HEAD_2, dec2_pinned))
+
+    plan3_pinned = plan_next_round(BASE_SHA, HEAD_3, [e1_pinned, e2_pinned], author_replies=pinned_replies)
+    c3_pinned = build_round_candidates(
+        round_number=3,
+        head_sha=HEAD_3,
+        panel=DEFAULT_PANEL,
+        finder_batches=_batches_for_panel([f_a_line50, f_c_line42], round_number=3, head_sha=HEAD_3),
+        history=plan3_pinned.history,
+    )
+    # 锁定给 A 的回复在 R3 不得改绑同坐标新发现 C
+    assert (
+        bind_author_replies(
+            c3_pinned.findings,
+            pinned_replies,
+            consumed_reply_keys=plan3_pinned.consumed_reply_keys,
+            stale_location_fingerprints=c3_pinned.stale_location_fingerprints,
+            bound_reply_targets=plan3_pinned.bound_reply_targets,
+        )
+        == {}
+    )
+    # A 在 R3 修复清除时，锁定给 A 的回复随之消费
+    v3_pinned = parse_verifier_output(
+        _verifier_payload(
+            c3_pinned,
+            [
+                {"finding_id": f_a_line50.finding_id, "verdict": "resolved_by_fix", "verifier_evidence": "A 已修复"},
+                {"finding_id": f_c_line42.finding_id, "verdict": "confirmed", "verifier_evidence": "C 阻断"},
+            ],
+        ),
+        c3_pinned,
+        verifier_model="claude-opus-5-5",
+        author_replies=pinned_replies,
+    )
+    dec3_pinned = evaluate_round(v3_pinned)
+    assert pinned_rk in dec3_pinned.consumed_reply_keys
