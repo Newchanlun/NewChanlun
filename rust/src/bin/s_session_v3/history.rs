@@ -1576,6 +1576,15 @@ fn audit_one_published_cut<'capture>(
             frontier as usize + 1,
             generation,
         )?;
+    } else if store.ordinary_bound_births_qualified() {
+        aux_index::verify_generated_members_with_changes_verified(
+            store,
+            auxiliary,
+            &roots.generated_state,
+            replaces.view(),
+            raw.prefix(frontier as usize + 1)?,
+            generation,
+        )?;
     } else {
         aux_index::verify_generated_members_with_changes(
             store,

@@ -931,6 +931,10 @@ fn write_bytes_ctx(
         return Ok(digest);
     }
     let budget = sink.work_budget();
+    if bytes.len() <= CHUNK_BYTES && budget.is_none() {
+        let chunk = put_node(sink, tag::BYTES_CHUNK, bytes)?;
+        return put_node(sink, tag::SEQ_LEAF, &chunk);
+    }
     let mut leaves =
         WorkVec::with_work_capacity(bytes.len().div_ceil(CHUNK_BYTES), budget.as_ref())?;
     for chunk in bytes.chunks(CHUNK_BYTES) {
@@ -1366,14 +1370,7 @@ fn write_string_node(
     sink: &mut CodecContext<'_, '_>,
     text: &str,
 ) -> Result<NodeDigest, CodecError> {
-    let bytes = text.as_bytes();
-    let root = write_bytes_ctx(sink, bytes)?;
-    let mut body = WorkVec::with_work_capacity(40, sink.work_budget().as_ref())?;
-    body.extend_from_slice(&checked_frame_len(
-        u64::try_from(bytes.len()).expect("字节数可表达"),
-    )?)?;
-    body.extend_from_slice(&root)?;
-    put_node(sink, tag::STRING, &body)
+    write_byte_node(sink, tag::STRING, text.as_bytes())
 }
 
 fn write_byte_node(
@@ -1382,10 +1379,15 @@ fn write_byte_node(
     bytes: &[u8],
 ) -> Result<NodeDigest, CodecError> {
     let root = write_bytes_ctx(sink, bytes)?;
+    let len = checked_frame_len(u64::try_from(bytes.len()).expect("字节数可表达"))?;
+    if sink.work_budget().is_none() {
+        let mut body = [0u8; 40];
+        body[..8].copy_from_slice(&len);
+        body[8..].copy_from_slice(&root);
+        return put_node(sink, t, &body);
+    }
     let mut body = WorkVec::with_work_capacity(40, sink.work_budget().as_ref())?;
-    body.extend_from_slice(&checked_frame_len(
-        u64::try_from(bytes.len()).expect("字节数可表达"),
-    )?)?;
+    body.extend_from_slice(&len)?;
     body.extend_from_slice(&root)?;
     put_node(sink, t, &body)
 }
@@ -1816,7 +1818,17 @@ fn num_step(state: NumState, byte: u8) -> NumState {
 }
 
 fn num_feed(state: NumState, bytes: &[u8]) -> NumState {
-    bytes.iter().fold(state, |s, &b| num_step(s, b))
+    if state == NumState::Dead {
+        return NumState::Dead;
+    }
+    let mut s = state;
+    for &b in bytes {
+        s = num_step(s, b);
+        if s == NumState::Dead {
+            return NumState::Dead;
+        }
+    }
+    s
 }
 
 fn num_accepts(state: NumState) -> bool {
@@ -6401,11 +6413,26 @@ impl Utf8Decoder {
     }
 }
 
+#[inline]
+fn is_plain_json_ascii(bytes: &[u8]) -> bool {
+    bytes
+        .iter()
+        .all(|&b| (0x20..0x80).contains(&b) && b != b'"' && b != b'\\')
+}
+
 enum RTask {
     Value(NodeDigest, Flavor),
     Emit(&'static [u8]),
-    StringBody(NodeDigest),
-    TokenBody(NodeDigest),
+    StringBody {
+        digest: NodeDigest,
+        seq_root: NodeDigest,
+        declared: u64,
+    },
+    TokenBody {
+        digest: NodeDigest,
+        seq_root: NodeDigest,
+        declared: u64,
+    },
     EnterEscape,
     ExitEscape,
     /// 数组元素：惰性迭代，按 sink 消费逐项推进。
@@ -6441,7 +6468,7 @@ impl Renderer<'_, '_> {
             esc_decoder,
             ..
         } = self;
-        if !*escaping {
+        if !*escaping || (esc_decoder.is_complete() && is_plain_json_ascii(bytes)) {
             return out.write_all(bytes).map_err(io_error);
         }
         let mut buf = WorkVec::with_work_capacity(
@@ -6477,8 +6504,16 @@ impl Renderer<'_, '_> {
                     }
                     self.escaping = false;
                 }
-                RTask::StringBody(digest) => self.write_string_body(&digest)?,
-                RTask::TokenBody(digest) => self.write_token_body(&digest)?,
+                RTask::StringBody {
+                    digest,
+                    seq_root,
+                    declared,
+                } => self.write_string_body(&digest, seq_root, declared)?,
+                RTask::TokenBody {
+                    digest,
+                    seq_root,
+                    declared,
+                } => self.write_token_body(&digest, seq_root, declared)?,
                 RTask::Elements {
                     mut iter,
                     index,
@@ -6546,14 +6581,24 @@ impl Renderer<'_, '_> {
                         tag::BOOL_FALSE => tasks.push(RTask::Emit(b"false"))?,
                         tag::BOOL_TRUE => tasks.push(RTask::Emit(b"true"))?,
                         tag::STRING => {
-                            framed_len(&body, "字符串")?;
+                            let declared = framed_len(&body, "字符串")?;
+                            let seq_root = digest_at(&body, 8);
                             tasks.push(RTask::Emit(b"\""))?;
-                            tasks.push(RTask::StringBody(digest))?;
+                            tasks.push(RTask::StringBody {
+                                digest,
+                                seq_root,
+                                declared,
+                            })?;
                             tasks.push(RTask::Emit(b"\""))?;
                         }
                         tag::NUMBER => {
-                            framed_len(&body, "数字 token")?;
-                            tasks.push(RTask::TokenBody(digest))?;
+                            let declared = framed_len(&body, "数字 token")?;
+                            let seq_root = digest_at(&body, 8);
+                            tasks.push(RTask::TokenBody {
+                                digest,
+                                seq_root,
+                                declared,
+                            })?;
                         }
                         tag::ARRAY => {
                             let declared = framed_len(&body, "数组")?;
@@ -6610,19 +6655,26 @@ impl Renderer<'_, '_> {
     }
 
     /// 字符串内容：按块惰性取出、跨块增量解码、本层转义后经当前转义层写出。
-    fn write_string_body(&mut self, digest: &NodeDigest) -> Result<(), CodecError> {
-        let (t, body) = self.source.read(digest)?;
-        if t != tag::STRING {
-            return Err(CodecError::new(
-                code::VALUE_KIND,
-                format!("字符串节点必须是 0x03，读到 tag={t:02x}"),
-            ));
+    fn write_string_body(
+        &mut self,
+        digest: &NodeDigest,
+        seq_root: NodeDigest,
+        declared: u64,
+    ) -> Result<(), CodecError> {
+        if self.source.preserve_sequence_read_trace() {
+            let (t, body) = self.source.read(digest)?;
+            if t != tag::STRING {
+                return Err(CodecError::new(
+                    code::VALUE_KIND,
+                    format!("字符串节点必须是 0x03，读到 tag={t:02x}"),
+                ));
+            }
+            let _ = framed_len(&body, "字符串")?;
         }
-        let declared = framed_len(&body, "字符串")?;
         let budget = self.source.work_budget();
-        let mut iter = LeafIter::new(digest_at(&body, 8), budget.as_ref())?;
+        let mut iter = LeafIter::new(seq_root, budget.as_ref())?;
         let mut decoder = Utf8Decoder::default();
-        let mut escaped = WorkVec::with_work_capacity(8, budget.as_ref())?;
+        let mut escaped = WorkVec::new_work(budget.as_ref());
         let mut total: u64 = 0;
         loop {
             let next = {
@@ -6652,6 +6704,13 @@ impl Renderer<'_, '_> {
                 esc_decoder,
                 ..
             } = self;
+            if decoder.is_complete()
+                && (!*escaping || esc_decoder.is_complete())
+                && is_plain_json_ascii(&lbody)
+            {
+                out.write_all(&lbody).map_err(io_error)?;
+                continue;
+            }
             decoder.feed(&lbody, &mut |ch| {
                 escaped.clear();
                 write_escaped_char_work(ch, &mut escaped)?;
@@ -6672,17 +6731,24 @@ impl Renderer<'_, '_> {
     }
 
     /// 数字 token：流式推进文法状态并原样写出，不收集整条 token。
-    fn write_token_body(&mut self, digest: &NodeDigest) -> Result<(), CodecError> {
-        let (t, body) = self.source.read(digest)?;
-        if t != tag::NUMBER {
-            return Err(CodecError::new(
-                code::VALUE_KIND,
-                format!("数字 token 必须是 0x04 节点，读到 tag={t:02x}"),
-            ));
+    fn write_token_body(
+        &mut self,
+        digest: &NodeDigest,
+        seq_root: NodeDigest,
+        declared: u64,
+    ) -> Result<(), CodecError> {
+        if self.source.preserve_sequence_read_trace() {
+            let (t, body) = self.source.read(digest)?;
+            if t != tag::NUMBER {
+                return Err(CodecError::new(
+                    code::VALUE_KIND,
+                    format!("数字 token 必须是 0x04 节点，读到 tag={t:02x}"),
+                ));
+            }
+            let _ = framed_len(&body, "数字 token")?;
         }
-        let declared = framed_len(&body, "数字 token")?;
         let budget = self.source.work_budget();
-        let mut iter = LeafIter::new(digest_at(&body, 8), budget.as_ref())?;
+        let mut iter = LeafIter::new(seq_root, budget.as_ref())?;
         let mut state = NumState::Start;
         let mut total: u64 = 0;
         loop {
@@ -6762,6 +6828,113 @@ fn render_refview_ctx(
     }
     operation_result
 }
+
+fn try_render_scalar_single_pass(
+    source: &mut CodecContext<'_, '_>,
+    reference: RefView<'_>,
+    out: &mut dyn Write,
+) -> Result<bool, CodecError> {
+    if source.preserve_sequence_read_trace() {
+        return Ok(false);
+    }
+    let kind = reference.kind();
+    if !matches!(kind, Kind::Null | Kind::Bool | Kind::String | Kind::Number) {
+        return Ok(false);
+    }
+    if matches!(kind, Kind::String | Kind::Number)
+        && !reference.extent().is_some_and(|e| e <= CHUNK_BYTES as u64)
+    {
+        return Ok(false);
+    }
+    let Ok(digest) = reference.digest() else {
+        return Ok(false);
+    };
+    let (t, body) = source.read(&digest)?;
+    if Kind::from_tag(t) != Some(kind) {
+        return Ok(false);
+    }
+    let Ok(extent) = header_extent(t, &body) else {
+        return Ok(false);
+    };
+    if extent != reference.extent() {
+        return Ok(false);
+    }
+    match t {
+        tag::NULL => {
+            if !body.is_empty() {
+                return Ok(false);
+            }
+            out.write_all(b"null").map_err(io_error)?;
+            Ok(true)
+        }
+        tag::BOOL_FALSE => {
+            if !body.is_empty() {
+                return Ok(false);
+            }
+            out.write_all(b"false").map_err(io_error)?;
+            Ok(true)
+        }
+        tag::BOOL_TRUE => {
+            if !body.is_empty() {
+                return Ok(false);
+            }
+            out.write_all(b"true").map_err(io_error)?;
+            Ok(true)
+        }
+        tag::STRING | tag::NUMBER => {
+            let declared = extent.unwrap_or(0);
+            let seq_root = digest_at(&body, 8);
+            let (st, sbody) = source.read(&seq_root)?;
+            if declared == 0 {
+                if t == tag::STRING && st == tag::SEQ_EMPTY && sbody.is_empty() {
+                    out.write_all(b"\"\"").map_err(io_error)?;
+                    return Ok(true);
+                }
+                return Ok(false);
+            }
+            if st != tag::SEQ_LEAF || sbody.len() != 32 {
+                return Ok(false);
+            }
+            let chunk_digest = digest_at(&sbody, 0);
+            let (ct, cbody) = source.read(&chunk_digest)?;
+            if ct != tag::BYTES_CHUNK || cbody.len() as u64 != declared {
+                return Ok(false);
+            }
+            if t == tag::NUMBER {
+                if !num_accepts(num_feed(NumState::Start, &cbody)) {
+                    return Ok(false);
+                }
+                out.write_all(&cbody).map_err(io_error)?;
+                return Ok(true);
+            }
+            let Ok(text) = std::str::from_utf8(&cbody) else {
+                return Ok(false);
+            };
+            if is_plain_json_ascii(&cbody) {
+                if cbody.len() <= 254 {
+                    let mut tmp = [0u8; 256];
+                    tmp[0] = b'"';
+                    tmp[1..1 + cbody.len()].copy_from_slice(&cbody);
+                    tmp[1 + cbody.len()] = b'"';
+                    out.write_all(&tmp[..cbody.len() + 2]).map_err(io_error)?;
+                } else {
+                    out.write_all(b"\"").map_err(io_error)?;
+                    out.write_all(&cbody).map_err(io_error)?;
+                    out.write_all(b"\"").map_err(io_error)?;
+                }
+                return Ok(true);
+            }
+            out.write_all(b"\"").map_err(io_error)?;
+            for ch in text.chars() {
+                write_escaped_char(ch, out)?;
+            }
+            out.write_all(b"\"").map_err(io_error)?;
+            Ok(true)
+        }
+        _ => Ok(false),
+    }
+}
+
 fn render_refview_ctx_inner(
     mut source: CodecContext<'_, '_>,
     reference: RefView<'_>,
@@ -6795,6 +6968,9 @@ fn render_refview_ctx_inner(
         limit: source.max_render_bytes(),
         written: 0,
     };
+    if try_render_scalar_single_pass(&mut source, reference, &mut bounded)? {
+        return Ok(());
+    }
     let digest = {
         let mut verifier =
             Verifier::with_context(source.reborrow(), Mode::Public, AuditMemo::default());

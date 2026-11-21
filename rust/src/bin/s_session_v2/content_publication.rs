@@ -571,7 +571,7 @@ fn resolve_indexed_templates_pending_core(
 ) -> Result<PendingRefTemplates, String> {
     #[cfg(test)]
     crate::v3::diagnostic_s4_read_trace::begin(tx, "ord_pub_births_objects");
-    let objects = object_births(tx, &metadata, store);
+    let objects = object_births(tx, &metadata, store, projection.as_deref_mut());
     #[cfg(test)]
     crate::v3::diagnostic_s4_read_trace::end(tx, "ord_pub_births_objects", &objects);
     let objects = objects?;
@@ -1081,6 +1081,7 @@ fn object_births(
     tx: &Transaction<'_>,
     m: &MetadataView<'_>,
     store: &(impl CodecStore + ?Sized),
+    mut projection: Option<&mut PublicationProjection<'_, '_>>,
 ) -> Result<NativeTree<NodeDigest, ObjectBirth>, String> {
     let mut out = NativeTree::default();
     let latest = generation_admitted(tx, store)?.max(m.generation);
@@ -1122,7 +1123,10 @@ fn object_births(
                 b.reason = None;
                 b.superseded = None;
             }
-            let digest = hash_view(store, VV::String(&id))?;
+            let digest = match projection.as_deref_mut() {
+                Some(p) => p.string_digest(store, &id)?,
+                None => hash_view(store, VV::String(&id))?,
+            };
             if out
                 .insert_admitted(digest, b, store)
                 .map_err(err)?
@@ -1451,12 +1455,21 @@ fn resolve_objects(
                 }),
             ),
         ] {
+            let expected_digest = match (projection.as_deref_mut(), v) {
+                (Some(p), VV::String(s)) => p.string_digest(store, s)?,
+                (Some(_), VV::Json(sc::capture_allocation::audit_json::JsonView::Null)) => {
+                    static NULL_DIGEST: std::sync::OnceLock<NodeDigest> =
+                        std::sync::OnceLock::new();
+                    *NULL_DIGEST.get_or_init(|| sc::frame(sc::tag::NULL, &[]))
+                }
+                _ => hash_view(store, v)?,
+            };
             if fields
                 .get_admitted(store, k)?
                 .ok_or_else(|| err(format!("缺{k}")))?
                 .digest()
                 .map_err(err)?
-                != hash_view(store, v)?
+                != expected_digest
             {
                 return Err(err(format!("{k} 与独立记录不同")));
             }
@@ -3196,17 +3209,24 @@ impl<'scope, 'tx> PublicationProjection<'scope, 'tx> {
         self.batch_current.insert(k, value.clone());
         Ok(value.into())
     }
+    fn string_digest(
+        &mut self,
+        store: &(impl CodecStore + ?Sized),
+        value: &str,
+    ) -> Result<NodeDigest, String> {
+        if let Some(&digest) = self.batch_digests.get(value) {
+            return Ok(digest);
+        }
+        let digest = hash_view(store, VV::String(value))?;
+        self.batch_digests.insert(value.to_owned(), digest);
+        Ok(digest)
+    }
     fn batch_digest(
         &mut self,
         store: &mut (impl CodecStore + ?Sized),
         stored_batch: &str,
     ) -> Result<NodeDigest, String> {
-        if let Some(&digest) = self.batch_digests.get(stored_batch) {
-            return Ok(digest);
-        }
-        let digest = hash_view(store, VV::String(stored_batch))?;
-        self.batch_digests.insert(stored_batch.to_owned(), digest);
-        Ok(digest)
+        self.string_digest(store, stored_batch)
     }
     pub(crate) fn commit_cut(&mut self) {
         self.measure();
