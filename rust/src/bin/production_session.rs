@@ -21,7 +21,7 @@ use std::os::fd::AsRawFd;
 use std::os::unix::process::{CommandExt, ExitStatusExt};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitStatus, Stdio};
-use std::sync::atomic::{AtomicPtr, AtomicU8, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 const MANIFEST_REVISION: &str = "production-session-manifest/1";
@@ -40,57 +40,23 @@ const S_PASS: [&str; 3] = [
     "S_THETA_DIAGNOSTIC_TESTONLY",
 ];
 
-const START_COMMITTED: u8 = 1;
-const STOP_REQUESTED: u8 = 2;
-// 启动器进程存续期间保留共享映射，供 fork 后、exec 前的子进程参与门控。
-struct StartGate {
-    launcher_pid: libc::pid_t,
-    state: AtomicU8,
-}
-
-static START_GATE: AtomicPtr<StartGate> = AtomicPtr::new(std::ptr::null_mut());
-
-fn start_gate() -> &'static StartGate {
-    // SAFETY：在安装处理器及首次 spawn 前初始化；映射在 launcher 退出前一直有效。
-    unsafe { &*START_GATE.load(Ordering::Acquire) }
-}
+const STOP_SIGNALS: [libc::c_int; 2] = [libc::SIGTERM, libc::SIGINT];
+static STOP_REQUESTED: AtomicBool = AtomicBool::new(false);
 
 extern "C" fn on_stop(_: libc::c_int) {
-    let gate = start_gate();
-    // SAFETY：getpid 是 async-signal-safe；未 exec 的域不能代 launcher 标记停服。
-    if unsafe { libc::getpid() } == gate.launcher_pid {
-        gate.state.fetch_or(STOP_REQUESTED, Ordering::AcqRel);
-    }
+    STOP_REQUESTED.store(true, Ordering::Release);
 }
 
 fn install_signal_policy() -> io::Result<()> {
-    // SAFETY：映射私有于 launcher 及 fork 后尚未 exec 的子进程；只通过原子访问。
+    // SAFETY：只在单线程 launcher 的首次 spawn 前设置处置。
     unsafe {
-        let gate = libc::mmap(
-            std::ptr::null_mut(),
-            std::mem::size_of::<StartGate>(),
-            libc::PROT_READ | libc::PROT_WRITE,
-            libc::MAP_SHARED | libc::MAP_ANON,
-            -1,
-            0,
-        );
-        if gate == libc::MAP_FAILED {
+        // 恢复 SIGCHLD 默认动作（也清除 SA_NOCLDWAIT），保留子进程的真实退出状态。
+        if libc::signal(libc::SIGCHLD, libc::SIG_DFL) == libc::SIG_ERR {
             return Err(io::Error::last_os_error());
         }
-        let gate = gate.cast::<StartGate>();
-        gate.write(StartGate {
-            launcher_pid: libc::getpid(),
-            state: AtomicU8::new(0),
-        });
-        START_GATE.store(gate, Ordering::Release);
         let stop = on_stop as *const () as libc::sighandler_t;
-        // 恢复 SIGCHLD 默认动作（也清除 SA_NOCLDWAIT），保留子进程的真实退出状态。
-        for (signal, handler) in [
-            (libc::SIGCHLD, libc::SIG_DFL),
-            (libc::SIGTERM, stop),
-            (libc::SIGINT, stop),
-        ] {
-            if libc::signal(signal, handler) == libc::SIG_ERR {
+        for signal in STOP_SIGNALS {
+            if libc::signal(signal, stop) == libc::SIG_ERR {
                 return Err(io::Error::last_os_error());
             }
         }
@@ -98,30 +64,59 @@ fn install_signal_policy() -> io::Result<()> {
     Ok(())
 }
 
-/// 预查节省不必要的 fork；真正的授权在子进程 exec 前，与停服共用一次原子状态转换。
+/// 父进程在 spawn 交界内只挂起停服信号，不执行处理器。进入交界前检查已处理和已挂起
+/// 的请求；通过此门后的在途启动可以 exec，父进程恢复掩码后将其纳入统一回收。
 fn spawn_before_stop(command: &mut Command) -> io::Result<Option<Child>> {
     if shutdown_requested() {
         return Ok(None);
     }
-    // SAFETY：在 setsid 后只访问无锁原子；失败时 Rust 报回 errno，不执行域程序。
+    // SAFETY：sigset 均由 POSIX API 初始化；launcher 单线程，掩码覆盖其整个 spawn 交界。
     unsafe {
-        command.pre_exec(|| {
-            start_gate()
-                .state
-                .compare_exchange(0, START_COMMITTED, Ordering::AcqRel, Ordering::Acquire)
-                .map(|_| ())
-                .map_err(|_| io::Error::from_raw_os_error(libc::ECANCELED))
-        });
-    }
-    let result = command.spawn();
-    // 若子进程先获得授权，spawn 返回前它仍属本次在途启动。保留其间收到的停服，
-    // 登记该子进程后就回收，不再授权下一次启动。
-    let state = start_gate()
-        .state
-        .fetch_and(!START_COMMITTED, Ordering::AcqRel);
-    match result {
-        Err(e) if e.raw_os_error() == Some(libc::ECANCELED) && state == STOP_REQUESTED => Ok(None),
-        result => result.map(Some),
+        let mut blocked: libc::sigset_t = std::mem::zeroed();
+        libc::sigemptyset(&mut blocked);
+        for signal in STOP_SIGNALS {
+            libc::sigaddset(&mut blocked, signal);
+        }
+        let mut previous: libc::sigset_t = std::mem::zeroed();
+        if libc::sigprocmask(libc::SIG_BLOCK, &blocked, &mut previous) == -1 {
+            return Err(io::Error::last_os_error());
+        }
+        let result = (|| {
+            let mut pending: libc::sigset_t = std::mem::zeroed();
+            if libc::sigpending(&mut pending) == -1 {
+                return Err(io::Error::last_os_error());
+            }
+            if shutdown_requested()
+                || STOP_SIGNALS
+                    .iter()
+                    .any(|&s| libc::sigismember(&pending, s) == 1)
+            {
+                return Ok(None);
+            }
+            // 此回调在 setsid 后执行；先恢复子进程默认处置，再恢复原掩码。
+            // 只调用 async-signal-safe 的 POSIX 函数。
+            command.pre_exec(move || {
+                for signal in STOP_SIGNALS {
+                    if libc::signal(signal, libc::SIG_DFL) == libc::SIG_ERR {
+                        return Err(io::Error::last_os_error());
+                    }
+                }
+                if libc::sigprocmask(libc::SIG_SETMASK, &previous, std::ptr::null_mut()) == -1 {
+                    return Err(io::Error::last_os_error());
+                }
+                Ok(())
+            });
+            command.spawn().map(Some)
+        })();
+        // SIG_SETMASK 和内核刚返回的掩码是有效参数。解除屏蔽时挂起的停服信号会交给处理器。
+        if libc::sigprocmask(libc::SIG_SETMASK, &previous, std::ptr::null_mut()) == -1 {
+            return Err(io::Error::last_os_error());
+        }
+        // 成功启动的组必须交给调用方登记，即使此时已经停服；失败且正在停服则没有组可登记。
+        if shutdown_requested() && result.is_err() {
+            return Ok(None);
+        }
+        result
     }
 }
 
@@ -363,7 +358,7 @@ fn clean(mut command: Command, pass: &[&str]) -> Command {
 }
 
 fn shutdown_requested() -> bool {
-    start_gate().state.load(Ordering::Acquire) & STOP_REQUESTED != 0
+    STOP_REQUESTED.load(Ordering::Acquire)
 }
 
 /// 接养组长退出后遗留的组内后代；Linux 上不能假设外部 PID 1 会回收它们。
@@ -569,7 +564,8 @@ fn stop_groups(
         let escalated = matches!(phase, StopSignal::Kill);
         let mut all_reaped = true;
         for child in children.iter_mut() {
-            // 发送信号前就地核验这个组长，不能用前一个组尚未收到信号时的陈旧状态推进阶段。
+            // 发送前就地核验当前组长；已观察到的退出按原阶段登记。POSIX kill/waitpid
+            // 不提供来源证明：核验至本组发送同号信号的交界内，外部同号信号不可区分。
             let wait_ok = outcome.observe(child);
             if let Some(signal) = signal {
                 let result = child.signal(signal);
@@ -671,19 +667,48 @@ fn stop_adopted_init_children(
     Ok(all_reaped)
 }
 
-/// init stdout 无消费者；stderr 在 launcher 线程非阻塞限量排空，取消不依赖写端 EOF。
-fn drain_init_output(pipe: &mut PipeReader, bytes: &mut Vec<u8>) -> io::Result<()> {
+enum InitOutput {
+    Eof,
+    Pending,
+    BatchLimit,
+}
+
+/// 非阻塞且每轮限量，让进程回收和停服请求不被持续输出饿死。
+fn drain_init_output(pipe: &mut PipeReader, bytes: &mut Vec<u8>) -> io::Result<InitOutput> {
     let mut buf = [0_u8; 8192];
     for _ in 0..16 {
         match pipe.read(&mut buf) {
-            Ok(0) => return Ok(()),
+            Ok(0) => return Ok(InitOutput::Eof),
             Ok(n) => bytes.extend_from_slice(&buf[..n]),
-            Err(e) if e.kind() == io::ErrorKind::WouldBlock => return Ok(()),
+            Err(e) if e.kind() == io::ErrorKind::WouldBlock => return Ok(InitOutput::Pending),
             Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
             Err(e) => return Err(e),
         }
     }
-    Ok(())
+    Ok(InitOutput::BatchLimit)
+}
+
+fn reap_init(
+    child: &mut DomainProcess,
+    pipe: &mut PipeReader,
+    bytes: &mut Vec<u8>,
+) -> Result<Option<io::Error>, String> {
+    #[cfg(target_os = "linux")]
+    let sid = child.pgid();
+    #[cfg(target_os = "linux")]
+    let mut signaled = std::collections::BTreeMap::new();
+    let mut output_error = None;
+    stop_groups(std::slice::from_mut(child), INIT_STOP_GRACE, |_phase| {
+        if output_error.is_none() {
+            output_error = drain_init_output(pipe, bytes).err();
+        }
+        #[cfg(target_os = "linux")]
+        if shutdown_requested() {
+            return stop_adopted_init_children(sid, _phase, &mut signaled);
+        }
+        Ok(true)
+    })?;
+    Ok(output_error)
 }
 
 /// 返回 false 表示停服已取消启动。
@@ -721,28 +746,26 @@ fn run_once(mut command: Command, what: &str) -> Result<bool, String> {
         }
         std::thread::sleep(STOP_POLL);
     };
-    #[cfg(target_os = "linux")]
-    let sid = child.pgid();
-    #[cfg(target_os = "linux")]
-    let mut signaled = std::collections::BTreeMap::new();
-    let mut output_error = None;
-    stop_groups(
-        std::slice::from_mut(&mut child),
-        INIT_STOP_GRACE,
-        |_phase| {
-            if output_error.is_none() {
-                output_error = drain_init_output(&mut pipe, &mut bytes).err();
-            }
-            #[cfg(target_os = "linux")]
-            if shutdown_requested() {
-                return stop_adopted_init_children(sid, _phase, &mut signaled);
-            }
-            Ok(true)
-        },
-    )?;
+    let output_error = reap_init(&mut child, &mut pipe, &mut bytes)?;
     let Some(status) = finished? else {
         return Ok(false);
     };
+    let mut output_error = output_error;
+    // 正常完成须保留完整诊断，即使最后一次 poll 前已有多批数据排在管道中。
+    // 保持非阻塞；若别的写者仍持有写端，新的停服请求仍能立即转入取消路径。
+    while !shutdown_requested() && output_error.is_none() {
+        match drain_init_output(&mut pipe, &mut bytes) {
+            Ok(InitOutput::Eof) => break,
+            Ok(InitOutput::Pending) => std::thread::sleep(STOP_POLL),
+            Ok(InitOutput::BatchLimit) => (),
+            Err(e) => output_error = Some(e),
+        }
+    }
+    if shutdown_requested() {
+        // 同组已回收；若停服发生在 EOF 等待中，仍需回收同会话的 Linux 养子。
+        reap_init(&mut child, &mut pipe, &mut bytes)?;
+        return Ok(false);
+    }
     if let Some(e) = output_error {
         return Err(read_error(e));
     }
@@ -751,9 +774,6 @@ fn run_once(mut command: Command, what: &str) -> Result<bool, String> {
             "{}（{what} init 失败，{status}）",
             String::from_utf8_lossy(&bytes).trim(),
         ));
-    }
-    if shutdown_requested() {
-        return Ok(false);
     }
     log("init", json!({"domain": what}));
     Ok(true)
@@ -881,17 +901,17 @@ fn spawn_domains(
     let econ = text(raw, "economic.manifest")?;
     let e_db = text(raw, "economic.e.db")?;
     let chongs = raw["economic"]["b"].as_array().cloned().unwrap_or_default();
-    let mut spawn = |domain: String, mut c: Command, critical: bool| -> Result<(), String> {
+    let mut spawn = |domain: String, mut c: Command, critical: bool| -> Result<bool, String> {
         c.stdout(Stdio::null());
         let Some(child) = spawn_before_stop(&mut c)
             .map_err(|e| format!("MissingDependency：{domain} 启动失败：{e}"))?
         else {
-            return Ok(());
+            return Ok(false);
         };
         let pid = child.id();
         children.push(DomainProcess::new(domain.clone(), child, Some(critical)));
         log("spawn", json!({"domain": domain, "pid": pid}));
-        Ok(())
+        Ok(!shutdown_requested())
     };
     let mut s = clean(Command::new(s_bin), &S_PASS);
     s.args(["serve", "--protocol-revision", "s-session/3"])
@@ -908,7 +928,9 @@ fn spawn_domains(
         .args(["--resource-config", text(raw, "s.resource_config")?])
         .arg("--structure-source")
         .arg(m.state_dir.join("structure-source.json"));
-    spawn("S".into(), s, true)?;
+    if !spawn("S".into(), s, true)? {
+        return Ok(());
+    }
     let e_epoch = text(raw, "economic.e.epoch")?;
     let mut e = clean(Command::new(e_bin), &[]);
     e.args([
@@ -920,7 +942,9 @@ fn spawn_domains(
         "--epoch",
         e_epoch,
     ]);
-    spawn("E".into(), e, true)?;
+    if !spawn("E".into(), e, true)? {
+        return Ok(());
+    }
     for b in &chongs {
         let chong = text(b, "chong")?;
         let mut c = clean(Command::new(b_bin), &[]);
@@ -933,7 +957,9 @@ fn spawn_domains(
                 "--e-epoch",
                 e_epoch,
             ]);
-        spawn(format!("B:{chong}"), c, true)?;
+        if !spawn(format!("B:{chong}"), c, true)? {
+            return Ok(());
+        }
     }
     let mut x = clean(Command::new(x_bin), &[]);
     x.args(["serve", "--db", text(raw, "x.db")?])
@@ -943,7 +969,7 @@ fn spawn_domains(
     if let Some((key, value)) = &m.credential {
         x.env(key, value);
     }
-    spawn("X".into(), x, false)
+    spawn("X".into(), x, false).map(|_| ())
 }
 
 fn main() {

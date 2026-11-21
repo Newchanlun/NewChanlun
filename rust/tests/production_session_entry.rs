@@ -660,6 +660,16 @@ fn proc_stat(pid: u32) -> Option<(char, Option<i32>)> {
     Some((state, fields.nth(48).and_then(|s| s.parse().ok())))
 }
 
+fn proc_signal_set(pid: u32, field: &str) -> Option<u64> {
+    let status = std::fs::read_to_string(format!("/proc/{pid}/status")).ok()?;
+    let value = status.lines().find_map(|line| line.strip_prefix(field))?;
+    u64::from_str_radix(value.trim(), 16).ok()
+}
+
+fn signal_bit(sig: libc::c_int) -> u64 {
+    1 << (sig - 1)
+}
+
 #[derive(Clone, Copy, Debug)]
 enum ParentStop {
     CtrlC,
@@ -702,23 +712,43 @@ impl ForegroundLauncher {
         };
         // PTY 写入与终端发送 SIGINT 不同步。确认进程级信号已挂起才恢复 launcher。
         eventually("停服信号已送达暂停的 launcher", || {
-            std::fs::read_to_string(format!("/proc/{pid}/status"))
-                .ok()
-                .and_then(|status| {
-                    let field = status.lines().find_map(|l| l.strip_prefix("ShdPnd:"))?;
-                    u64::from_str_radix(field.trim(), 16).ok()
-                })
-                .is_some_and(|bits| bits & (1 << (sig - 1)) != 0)
+            proc_signal_set(pid, "ShdPnd:").is_some_and(|bits| bits & signal_bit(sig) != 0)
         });
         signal(pid, libc::SIGCONT);
     }
 
     fn crash_and_wait_for_zombie(&self, domain: &str, sig: libc::c_int) {
         let pid = self.domain_pid(domain);
+        // E serve 有连接监听线程。leader 的 /proc 状态先变成 Z 时，waitpid 可能仍返回 0；
+        // 进程级 pidfd 可读才表示整个线程组已退出，又不抢走 launcher 的等待状态。
+        // SAFETY：pidfd_open 只观察本夹具的子域；返回的新 fd 归本测试。
+        let fd = unsafe { libc::syscall(libc::SYS_pidfd_open, pid as libc::pid_t, 0u32) };
+        assert!(
+            fd >= 0,
+            "pidfd_open({pid}): {}",
+            std::io::Error::last_os_error()
+        );
+        let pidfd = unsafe { File::from_raw_fd(fd as i32) };
         signal(pid, sig);
         eventually(
-            &format!("{domain} 已按信号 {sig} 退出且未回收"),
-            || proc_stat(pid) == Some(('Z', Some(sig))),
+            &format!("{domain} 已按信号 {sig} 退出且组长可回收"),
+            || {
+                let mut poll = libc::pollfd {
+                    fd: pidfd.as_raw_fd(),
+                    events: libc::POLLIN,
+                    revents: 0,
+                };
+                // SAFETY：poll 只读本测试持有的 pidfd，超时为 0。
+                let ready = unsafe { libc::poll(&mut poll, 1, 0) };
+                assert!(
+                    ready >= 0,
+                    "poll({pid}): {}",
+                    std::io::Error::last_os_error()
+                );
+                ready == 1
+                    && poll.revents & libc::POLLIN != 0
+                    && proc_stat(pid) == Some(('Z', Some(sig)))
+            },
         );
     }
 
@@ -1015,8 +1045,8 @@ impl SyscallTrace {
         }
     }
 
-    /// 从处理器返回追到 launcher 退出，直接观测子进程 exec，而非推断自入库或日志。
-    fn domain_execs_before_launcher_exit(&self, stop_after_fork: bool) -> usize {
+    /// 追到 launcher 退出，直接观测子进程 exec；fork 臂在子进程未运行时给父进程发停服。
+    fn domain_execs_before_launcher_exit(&self, stop_after_fork: bool) -> Vec<u32> {
         self.command(
             libc::PTRACE_SETOPTIONS,
             0,
@@ -1026,9 +1056,10 @@ impl SyscallTrace {
                 | libc::PTRACE_O_TRACECLONE
                 | libc::PTRACE_O_TRACEEXEC) as usize,
         );
-        let mut count = 0;
+        let mut executed = Vec::new();
         let mut injected = false;
         let mut deliver = 0;
+        let stop_bits = signal_bit(libc::SIGTERM) | signal_bit(libc::SIGINT);
         loop {
             self.command(libc::PTRACE_SYSCALL, 0, deliver);
             let status = self.wait_status();
@@ -1046,10 +1077,14 @@ impl SyscallTrace {
                 self.command(libc::PTRACE_GETEVENTMSG, 0, &mut pid as *mut _ as usize);
                 let child = Self(pid as libc::pid_t);
                 child.wait_stop(); // 自动接管的新进程尚未运行。
-                if stop_after_fork && !injected {
+                let inject_here = stop_after_fork && !injected;
+                if inject_here {
                     injected = true;
                     signal(self.0 as u32, libc::SIGTERM);
-                    self.at_entry(|nr, _| nr == libc::SYS_rt_sigreturn);
+                    assert_eq!(
+                        proc_signal_set(self.0 as u32, "SigBlk:").unwrap() & stop_bits,
+                        stop_bits
+                    );
                 }
                 child.command(libc::PTRACE_CONT, 0, 0);
                 let status = child.wait_status();
@@ -1059,21 +1094,34 @@ impl SyscallTrace {
                         libc::PTRACE_EVENT_EXEC,
                         "意外子进程事件 {status}"
                     );
-                    count += 1;
+                    executed.push(pid as u32);
+                    if inject_here {
+                        assert_ne!(
+                            proc_signal_set(self.0 as u32, "ShdPnd:").unwrap()
+                                & signal_bit(libc::SIGTERM),
+                            0,
+                            "父进程在子进程 exec 前已处理停服"
+                        );
+                        assert_eq!(
+                            proc_signal_set(pid as u32, "SigBlk:").unwrap() & stop_bits,
+                            0,
+                            "子进程 exec 时应恢复原掩码"
+                        );
+                    }
                 } else {
                     assert!(
                         libc::WIFEXITED(status),
                         "被拒绝的 spawn 未正常向父进程报告 {status}"
                     );
                 }
-                // Drop 恢复意外执行的子进程，正式 launcher 随后负责清理。
+                // Drop 恢复子进程，正式 launcher 随后负责清理。
             } else if libc::WSTOPSIG(status) == (libc::SIGTRAP | 0x80) {
                 if self
                     .syscall_entry()
                     .is_some_and(|(nr, _)| nr == libc::SYS_exit_group)
                 {
                     assert!(!stop_after_fork || injected, "未到达 fork 后的停服点");
-                    return count;
+                    return executed;
                 }
             } else {
                 deliver = libc::WSTOPSIG(status) as usize;
@@ -1178,8 +1226,14 @@ fn first_escalation_syscall_cannot_hide_independent_domain_death() {
     for domain in ["S", "E"] {
         let pid = launcher.domain_pid(domain);
         signal(pid, libc::SIGSTOP);
-        eventually("组长已暂停", || {
+        eventually(&format!("{domain} 全部线程已暂停"), || {
             proc_stat(pid).is_some_and(|(state, _)| state == 'T')
+                && std::fs::read_dir(format!("/proc/{pid}/task"))
+                    .unwrap()
+                    .all(|task| {
+                        let tid = task.unwrap().file_name().to_str().unwrap().parse().unwrap();
+                        proc_stat(tid).is_some_and(|(state, _)| state == 'T')
+                    })
         });
     }
     let trace = SyscallTrace::start(launcher.child.id());
@@ -1194,6 +1248,7 @@ fn first_escalation_syscall_cannot_hide_independent_domain_death() {
         nr == libc::SYS_kill && args[0] as i32 == -(s as i32) && args[1] == libc::SIGKILL as u64
     });
     assert!(started.elapsed() >= Duration::from_secs(10));
+    assert_eq!(proc_stat(launcher.domain_pid("E")).unwrap().0, 'T');
     launcher.crash_and_wait_for_zombie("E", libc::SIGKILL);
     drop(trace);
     launcher.assert_exit(
@@ -1407,6 +1462,91 @@ fn isolated_launcher_with_e_wrapper(space: &Space, wrapper: &str) -> PathBuf {
     launcher
 }
 
+/// 大管道加父进程暂停：E 退出时整段 stderr 都仍在管道中，不能靠边写边读让旧实现碰巧通过。
+#[test]
+fn failed_init_retains_all_buffered_stderr_and_can_cancel_while_waiting_for_eof() {
+    for retain_writer in [false, true] {
+        let space = Space::new();
+        let (manifest, _) = simulation(&space, "simulation", false);
+        fifo(&space.path("write-diagnostic"));
+        let bin = isolated_launcher_with_e_wrapper(
+            &space,
+            r#"#!/usr/bin/python3
+import fcntl, os, sys
+from pathlib import Path
+assert sys.argv[1] == 'init'
+home = Path(__file__).parent.parent
+data = b'START-DIAG ' + b'x' * 524288 + b' END-DIAG-TAG\n'
+assert fcntl.fcntl(2, fcntl.F_SETPIPE_SZ, 1048576) >= len(data)
+(home / 'e-init-pid').write_text(f'{os.getpid()}\n')
+with open(home / 'write-diagnostic', 'rb', buffering=0) as barrier:
+    assert barrier.read(1) == b'1'
+os.write(1, b'OUT-CONTROL-ONLY\n')
+assert os.write(2, data) == len(data)
+sys.exit(7)
+"#,
+        );
+        let mut launcher = start_foreground_launcher_at(space, &manifest, &bin, |_| {});
+        let mut e = None;
+        eventually("E init 已扩大 stderr 管道并等待写入", || {
+            e = std::fs::read_to_string(launcher.space.path("e-init-pid"))
+                .ok()
+                .and_then(|s| s.trim().parse::<u32>().ok())
+                .filter(|&pid| waiting_on_fifo(pid));
+            e.is_some()
+        });
+        let e = e.unwrap();
+        launcher.kids.push(("E init".into(), e));
+        let extra_writer = retain_writer.then(|| {
+            OpenOptions::new()
+                .write(true)
+                .open(format!("/proc/{e}/fd/2"))
+                .unwrap()
+        });
+        launcher.pause();
+        OpenOptions::new()
+            .write(true)
+            .custom_flags(libc::O_NONBLOCK)
+            .open(launcher.space.path("write-diagnostic"))
+            .unwrap()
+            .write_all(b"1")
+            .unwrap();
+        eventually("524,313 字节已入管道，E init 以 7 退出", || {
+            proc_stat(e) == Some(('Z', Some(7 << 8)))
+        });
+        signal(launcher.child.id(), libc::SIGCONT);
+
+        if retain_writer {
+            eventually("E 已回收，外部写端仍打开", || {
+                proc_stat(e).is_none()
+            });
+            launcher.request_stop(ParentStop::Sigterm);
+            launcher.assert_exit_within(
+                "正常排空遇停服，不等外部写端 EOF",
+                &[],
+                Duration::from_secs(4),
+            );
+            drop(extra_writer);
+        } else {
+            let (status, stderr) = launcher.finish("正常 init 失败", Duration::from_secs(4));
+            assert_eq!(status.code(), Some(2));
+            let summary = stderr
+                .lines()
+                .find(|line| line.starts_with("START-DIAG "))
+                .unwrap();
+            let body = summary
+                .strip_prefix("START-DIAG ")
+                .unwrap()
+                .strip_suffix(" END-DIAG-TAG（E init 失败，exit status: 7）")
+                .expect("长 stderr 的尾标记或退出状态丢失");
+            assert_eq!(body.len(), 524288);
+            assert!(body.bytes().all(|b| b == b'x'));
+            assert!(!stderr.contains("OUT-CONTROL-ONLY"));
+        }
+        assert!(!launcher.space.path("b.db").exists() && !launcher.space.path("x.db").exists());
+    }
+}
+
 #[test]
 fn graceful_domain_exit_zero_after_launcher_term_is_clean() {
     let space = Space::new();
@@ -1525,84 +1665,108 @@ os.execv(real, [str(real), *sys.argv[1:]])
 
 #[cfg(target_env = "gnu")]
 #[test]
-fn handled_stop_at_exec_channel_does_not_launch_b_init_or_s_serve() {
-    for (next, after_fork) in [("B init", false), ("S serve", false), ("S serve", true)] {
-        let space = Space::new();
-        let (manifest, _) = simulation(&space, "simulation", false);
-        let mut value: Value = serde_json::from_slice(&std::fs::read(&manifest).unwrap()).unwrap();
-        let econ = value["economic"]["manifest"].as_str().unwrap().to_owned();
-        let barrier = space.path("launch-barrier");
-        fifo(&barrier);
-        let (input, manifest) = if next == "B init" {
-            value["economic"]["manifest"] = json!(barrier);
-            write_json(&manifest, &value);
-            (std::fs::read(&econ).unwrap(), manifest)
-        } else {
-            run(
-                Command::new(env!("CARGO_BIN_EXE_e_economic_session")).args([
+fn stop_at_spawn_boundary_skips_or_reaps_b_init_and_s_serve() {
+    for next in ["B init", "S serve"] {
+        for point in ["before-mask", "pending-at-gate", "after-fork"] {
+            let after_fork = point == "after-fork";
+            let space = Space::new();
+            let (manifest, _) = simulation(&space, "simulation", false);
+            let mut value: Value =
+                serde_json::from_slice(&std::fs::read(&manifest).unwrap()).unwrap();
+            let econ = value["economic"]["manifest"].as_str().unwrap().to_owned();
+            let barrier = space.path("launch-barrier");
+            fifo(&barrier);
+            let (input, manifest) = if next == "B init" {
+                value["economic"]["manifest"] = json!(barrier);
+                write_json(&manifest, &value);
+                (std::fs::read(&econ).unwrap(), manifest)
+            } else {
+                run(
+                    Command::new(env!("CARGO_BIN_EXE_e_economic_session")).args([
+                        "init",
+                        "--manifest",
+                        &econ,
+                        "--db",
+                        value["economic"]["e"]["db"].as_str().unwrap(),
+                    ]),
+                );
+                let b = &value["economic"]["b"][0];
+                run(Command::new(env!("CARGO_BIN_EXE_b_chong_session")).args([
                     "init",
                     "--manifest",
                     &econ,
                     "--db",
-                    value["economic"]["e"]["db"].as_str().unwrap(),
-                ]),
-            );
-            let b = &value["economic"]["b"][0];
-            run(Command::new(env!("CARGO_BIN_EXE_b_chong_session")).args([
-                "init",
-                "--manifest",
-                &econ,
-                "--db",
-                b["db"].as_str().unwrap(),
-                "--chong",
-                b["chong"].as_str().unwrap(),
-            ]));
-            (serde_json::to_vec(&value).unwrap(), barrier.clone())
-        };
-        let mut launcher = start_foreground_launcher(space, &manifest, |_| {});
-        let pid = launcher.child.id();
-        let mut waiting = None;
-        eventually("下一启动前的 FIFO 屏障", || {
-            waiting = if next == "B init" {
-                domain_children(pid).iter().find_map(|(exe, child)| {
-                    (exe == "e_economic_session" && waiting_on_fifo(*child)).then_some(*child)
-                })
-            } else {
-                waiting_on_fifo(pid).then_some(pid)
+                    b["db"].as_str().unwrap(),
+                    "--chong",
+                    b["chong"].as_str().unwrap(),
+                ]));
+                (serde_json::to_vec(&value).unwrap(), barrier.clone())
             };
-            waiting.is_some()
-        });
-        let trace = SyscallTrace::start(pid);
-        // ptrace 可以让 launcher 的 FIFO open 重启；写者与跟踪并行，且等待有上限。
-        std::thread::scope(|scope| {
-            scope.spawn(move || {
-                eventually("FIFO 已有读者", || {
-                    match OpenOptions::new()
-                        .write(true)
-                        .custom_flags(libc::O_NONBLOCK)
-                        .open(&barrier)
-                    {
-                        Ok(mut pipe) => {
-                            pipe.write_all(&input).unwrap();
-                            true
+            let mut launcher = start_foreground_launcher(space, &manifest, |_| {});
+            let pid = launcher.child.id();
+            let mut waiting = None;
+            eventually("下一启动前的 FIFO 屏障", || {
+                waiting = if next == "B init" {
+                    domain_children(pid).iter().find_map(|(exe, child)| {
+                        (exe == "e_economic_session" && waiting_on_fifo(*child)).then_some(*child)
+                    })
+                } else {
+                    waiting_on_fifo(pid).then_some(pid)
+                };
+                waiting.is_some()
+            });
+            let trace = SyscallTrace::start(pid);
+            // ptrace 可以让 launcher 的 FIFO open 重启；写者与跟踪并行，且等待有上限。
+            std::thread::scope(|scope| {
+                scope.spawn(move || {
+                    eventually("FIFO 已有读者", || {
+                        match OpenOptions::new()
+                            .write(true)
+                            .custom_flags(libc::O_NONBLOCK)
+                            .open(&barrier)
+                        {
+                            Ok(mut pipe) => {
+                                pipe.write_all(&input).unwrap();
+                                true
+                            }
+                            Err(e) if e.raw_os_error() == Some(libc::ENXIO) => false,
+                            Err(e) => panic!("打开启动屏障：{e}"),
                         }
-                        Err(e) if e.raw_os_error() == Some(libc::ENXIO) => false,
-                        Err(e) => panic!("打开启动屏障：{e}"),
+                    });
+                });
+                trace.at_entry(|nr, args| {
+                    if point == "before-mask" {
+                        nr == libc::SYS_rt_sigprocmask && args[0] as i32 == libc::SIG_BLOCK
+                    } else {
+                        nr == libc::SYS_rt_sigpending
                     }
                 });
             });
-            trace.at_entry(|nr, _| nr == libc::SYS_socketpair);
-        });
-        if !after_fork {
-            launcher.request_stop(ParentStop::Sigterm);
-            trace.at_entry(|nr, _| nr == libc::SYS_rt_sigreturn);
+            if !after_fork {
+                launcher.request_stop(ParentStop::Sigterm);
+            }
+            let executed = trace.domain_execs_before_launcher_exit(after_fork);
+            drop(trace);
+            let label = format!("{next}（{point}）");
+            assert_eq!(
+                executed.len(),
+                usize::from(after_fork),
+                "{label}: {executed:?}"
+            );
+            launcher
+                .kids
+                .extend(executed.into_iter().map(|pid| (next.into(), pid)));
+            let events = launcher.assert_exit_within(&label, &[], Duration::from_secs(5));
+            let spawns: Vec<_> = events.iter().filter(|e| e["event"] == "spawn").collect();
+            assert_eq!(
+                spawns.len(),
+                usize::from(after_fork && next == "S serve"),
+                "{label}"
+            );
+            if let Some(spawn) = spawns.first() {
+                assert_eq!(spawn["domain"], "S");
+            }
         }
-        let executed = trace.domain_execs_before_launcher_exit(after_fork);
-        drop(trace);
-        let label = format!("{next}（fork 后停服={after_fork}）");
-        let events = launcher.assert_exit_within(&label, &[], Duration::from_secs(5));
-        assert_eq!(executed, 0, "已处理停服后仍实际 exec {next}");
-        assert!(events.iter().all(|e| e["event"] != "spawn"));
     }
 }
 
