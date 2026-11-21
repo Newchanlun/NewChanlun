@@ -215,6 +215,14 @@ def _require_non_empty_str(raw: Any, field_name: str) -> str:
     return text
 
 
+def _require_visible_text(raw: Any, field_name: str) -> str:
+    """要求字段为非空字符串且至少包含 1 个可见基字符（封堵 U+3164/零宽/控制/变体选择符等不可见占位文本）。"""
+    text = _require_non_empty_str(raw, field_name)
+    if not any(not _is_invisible_or_ignorable_char(ch) for ch in text):
+        raise ConvergenceError(f"{field_name} 不能仅包含空白或不可见/可忽略字符：{raw!r}")
+    return text
+
+
 def _normalize_commit_sha(raw: Any, field_name: str) -> str:
     value = _require_non_empty_str(raw, field_name)
     if not _COMMIT_SHA_HEX_RE.fullmatch(value):
@@ -225,7 +233,7 @@ def _normalize_commit_sha(raw: Any, field_name: str) -> str:
 
 
 def _normalize_file(raw: Any) -> str:
-    text = _require_non_empty_str(raw, "file").replace("\\", "/")
+    text = _require_visible_text(raw, "file").replace("\\", "/")
     text = re.sub(r"/{2,}", "/", text)
     while text.startswith("./"):
         text = text[2:]
@@ -266,49 +274,57 @@ def _normalize_str_collection(
     return frozenset(normalized)
 
 
-def _validate_consumed_reply_key(raw: Any, field_name: str) -> str:
-    """严格校验已消费回复键规范格式，禁止首尾空白、评论 ID 含空白或冒号、以及非规范指纹/坐标写法。"""
+def _parse_consumed_reply_key(raw: Any, field_name: str) -> tuple[str, str, str]:
+    """严格解析并校验规范回复键，返回 (comment_id, kind, payload)；拒绝任何非 4 种规范格式的键。"""
     if not isinstance(raw, str):
         raise ConvergenceError(f"{field_name} 必须是非空字符串：{raw!r}")
     if not raw or raw != raw.strip():
         raise ConvergenceError(f"{field_name} 不得为空或含首尾空白：{raw!r}")
-    if raw.lower().startswith("comment:"):
-        if not raw.startswith("comment:"):
-            raise ConvergenceError(f"{field_name} 的 comment: 前缀必须为小写规范格式：{raw!r}")
-        rest = raw[len("comment:") :]
-        parts = rest.split(":", 2)
-        if len(parts) != 3:
-            raise ConvergenceError(f"{field_name} 格式非法：{raw!r}")
-        cid, kind, payload = parts
-        if not cid or cid != cid.strip() or any(_is_invisible_or_ignorable_char(ch) for ch in cid):
-            raise ConvergenceError(f"{field_name} 中的评论 ID 非法（不得为空或含空白/不可见字符）：{raw!r}")
-        if kind == "finding":
-            if not _CONSUMED_FINDING_HEX_RE.fullmatch(payload):
-                raise ConvergenceError(f"{field_name} 的 finding 指纹必须是 6–16 位小写十六进制：{raw!r}")
-        elif kind in ("inline", "resolved"):
-            if not _CONSUMED_DIGEST_HEX_RE.fullmatch(payload):
-                raise ConvergenceError(f"{field_name} 的 {kind} 指纹/摘要必须是 16 位小写十六进制：{raw!r}")
-        elif kind == "loc":
-            if not payload or payload != payload.strip():
-                raise ConvergenceError(f"{field_name} 的 loc 坐标非法：{raw!r}")
-            if ":" in payload:
-                file_part, line_part = payload.rsplit(":", 1)
-                if ":" in file_part or not _CONSUMED_POS_INT_RE.fullmatch(line_part):
-                    raise ConvergenceError(f"{field_name} 的 loc 行号或路径格式非法：{raw!r}")
-            else:
-                file_part = payload
-            if not file_part or file_part != file_part.strip():
-                raise ConvergenceError(f"{field_name} 的 loc 路径含空白或为空：{raw!r}")
-            try:
-                norm_file = _normalize_file(file_part)
-            except ConvergenceError as exc:
-                raise ConvergenceError(f"{field_name} 的 loc 路径非法：{raw!r}") from exc
-            if norm_file != file_part:
-                raise ConvergenceError(
-                    f"{field_name} 的 loc 路径必须为规范形式（期望 {norm_file!r}）：{raw!r}"
-                )
+    if not raw.startswith("comment:"):
+        raise ConvergenceError(
+            f"{field_name} 必须以小写 'comment:' 开头并符合 4 种规范回复键格式之一：{raw!r}"
+        )
+    rest = raw[len("comment:") :]
+    parts = rest.split(":", 2)
+    if len(parts) != 3:
+        raise ConvergenceError(f"{field_name} 格式非法：{raw!r}")
+    cid, kind, payload = parts
+    if not cid or cid != cid.strip() or any(_is_invisible_or_ignorable_char(ch) for ch in cid):
+        raise ConvergenceError(f"{field_name} 中的评论 ID 非法（不得为空或含空白/不可见字符）：{raw!r}")
+    if kind == "finding":
+        if not _CONSUMED_FINDING_HEX_RE.fullmatch(payload):
+            raise ConvergenceError(f"{field_name} 的 finding 指纹必须是 6–16 位小写十六进制：{raw!r}")
+    elif kind in ("inline", "resolved"):
+        if not _CONSUMED_DIGEST_HEX_RE.fullmatch(payload):
+            raise ConvergenceError(f"{field_name} 的 {kind} 指纹/摘要必须是 16 位小写十六进制：{raw!r}")
+    elif kind == "loc":
+        if not payload or payload != payload.strip():
+            raise ConvergenceError(f"{field_name} 的 loc 坐标非法：{raw!r}")
+        if ":" in payload:
+            file_part, line_part = payload.rsplit(":", 1)
+            if ":" in file_part or not _CONSUMED_POS_INT_RE.fullmatch(line_part):
+                raise ConvergenceError(f"{field_name} 的 loc 行号或路径格式非法：{raw!r}")
         else:
-            raise ConvergenceError(f"{field_name} 包含未知回复键类型 {kind!r}：{raw!r}")
+            file_part = payload
+        if not file_part or file_part != file_part.strip():
+            raise ConvergenceError(f"{field_name} 的 loc 路径含空白或为空：{raw!r}")
+        try:
+            norm_file = _normalize_file(file_part)
+        except ConvergenceError as exc:
+            raise ConvergenceError(f"{field_name} 的 loc 路径非法：{raw!r}") from exc
+        if norm_file != file_part:
+            raise ConvergenceError(
+                f"{field_name} 的 loc 路径必须为规范形式（期望 {norm_file!r}）：{raw!r}"
+            )
+    else:
+        raise ConvergenceError(f"{field_name} 包含未知回复键类型 {kind!r}：{raw!r}")
+    return cid, kind, payload
+
+
+def _validate_consumed_reply_key(raw: Any, field_name: str) -> str:
+    """严格校验已消费回复键必须匹配 4 种规范格式之一。"""
+    _parse_consumed_reply_key(raw, field_name)
+    assert isinstance(raw, str)
     return raw
 
 
@@ -316,6 +332,65 @@ def _validate_consumed_reply_keys(values: Collection[str], field_name: str) -> f
     if not isinstance(values, Collection) or isinstance(values, (str, bytes)):
         raise ConvergenceError(f"{field_name} 必须是字符串集合：{values!r}")
     return frozenset(_validate_consumed_reply_key(item, f"{field_name}[]") for item in values)
+
+
+def _normalize_bound_reply_targets(
+    values: Mapping[str, str] | Collection[tuple[str, str]],
+    field_name: str,
+) -> dict[str, str]:
+    """严格校验坐标/行内回复目标锁定集合，禁止非 loc/inline 键、非法指纹或同一键绑定到不同目标。"""
+    if isinstance(values, Mapping):
+        items: Collection[Any] = tuple(values.items())
+    elif isinstance(values, Collection) and not isinstance(values, (str, bytes)):
+        items = values
+    else:
+        raise ConvergenceError(f"{field_name} 必须是 (reply_key, target_finding_id) 集合或映射：{values!r}")
+
+    mapping: dict[str, str] = {}
+    for item in items:
+        if not isinstance(item, tuple) or len(item) != 2:
+            raise ConvergenceError(f"{field_name}[] 必须是长度为 2 的 (reply_key, target_finding_id) 元组：{item!r}")
+        raw_key, raw_target = item
+        _, kind, _ = _parse_consumed_reply_key(raw_key, f"{field_name}[][0]")
+        assert isinstance(raw_key, str)
+        if kind not in ("loc", "inline"):
+            raise ConvergenceError(f"{field_name} 仅允许锁定 loc 或 inline 回复键，收到 {kind!r}：{raw_key!r}")
+        if not isinstance(raw_target, str) or not _CONSUMED_DIGEST_HEX_RE.fullmatch(raw_target):
+            raise ConvergenceError(f"{field_name} 的 target_finding_id 必须是 16 位小写十六进制指纹：{raw_target!r}")
+        existing = mapping.get(raw_key)
+        if existing is not None and existing != raw_target:
+            raise ConvergenceError(
+                f"{field_name} 中回复键 {raw_key!r} 冲突绑定到多个目标指纹：{existing!r} vs {raw_target!r}"
+            )
+        mapping[raw_key] = raw_target
+    return mapping
+
+
+def _validate_bound_reply_targets_frozenset(values: Any, field_name: str) -> dict[str, str]:
+    if not isinstance(values, frozenset):
+        raise ConvergenceError(f"{field_name} 必须是 frozenset[tuple[str, str]]")
+    return _normalize_bound_reply_targets(values, field_name)
+
+
+def _merge_bound_reply_targets(base: dict[str, str], incoming: Mapping[str, str], context: str) -> None:
+    for rk, target_fid in incoming.items():
+        existing = base.get(rk)
+        if existing is not None and existing != target_fid:
+            raise ConvergenceError(
+                f"{context}：回复键 {rk!r} 已锁定到发现 {existing!r}，禁止改绑到不同指纹 {target_fid!r}"
+            )
+        base[rk] = target_fid
+
+
+def _collect_history_bound_targets(history: Sequence[RoundHistoryEntry]) -> dict[str, str]:
+    merged: dict[str, str] = {}
+    for idx, entry in enumerate(history):
+        entry_targets = _validate_bound_reply_targets_frozenset(
+            entry.bound_reply_targets,
+            f"history[{idx}].bound_reply_targets",
+        )
+        _merge_bound_reply_targets(merged, entry_targets, f"history[{idx}].bound_reply_targets")
+    return merged
 
 
 def _real_source_models(models: Sequence[str]) -> tuple[str, ...]:
@@ -374,11 +449,11 @@ class Finding:
             raise ConvergenceError(f"Finding.severity 必须是 Severity：{self.severity!r}")
         _normalize_file(self.file)
         _normalize_line(self.line)
-        _require_non_empty_str(self.category, "category")
-        _require_non_empty_str(self.failure_scenario, "failure_scenario")
-        _require_non_empty_str(self.evidence, "evidence")
+        _require_visible_text(self.category, "category")
+        _require_visible_text(self.failure_scenario, "failure_scenario")
+        _require_visible_text(self.evidence, "evidence")
         if self.class_scope is not None:
-            _require_non_empty_str(self.class_scope, "class_scope")
+            _require_visible_text(self.class_scope, "class_scope")
         if not isinstance(self.source_models, tuple):
             raise ConvergenceError("Finding.source_models 必须是字符串元组")
         for model in self.source_models:
@@ -404,9 +479,9 @@ def parse_finder_output(payload: Mapping[str, Any], *, source_model: str) -> tup
         severity = parse_severity(item.get("severity"))
         file_path = _normalize_file(item.get("file"))
         line = _normalize_line(item.get("line"))
-        category = _require_non_empty_str(item.get("category"), f"findings[{idx}].category")
-        failure_scenario = _require_non_empty_str(item.get("failure_scenario"), f"findings[{idx}].failure_scenario")
-        evidence = _require_non_empty_str(item.get("evidence"), f"findings[{idx}].evidence")
+        category = _require_visible_text(item.get("category"), f"findings[{idx}].category")
+        failure_scenario = _require_visible_text(item.get("failure_scenario"), f"findings[{idx}].failure_scenario")
+        evidence = _require_visible_text(item.get("evidence"), f"findings[{idx}].evidence")
         raw_scope = item.get("class_scope")
         if raw_scope is None:
             class_scope: str | None = None
@@ -2088,11 +2163,13 @@ def _match_reply_targets(
     findings: Sequence[Finding],
     *,
     stale_location_fingerprints: Collection[str] = (),
+    bound_reply_targets: Mapping[str, str] | None = None,
 ) -> tuple[list[Finding], int]:
     """唯一作者回复目标匹配规则（由 bind_author_replies、VerifiedFinding 与 VerifiedRound 共同复用）。
 
-    对属于 stale_location_fingerprints 的跨 HEAD 结转且未在新 HEAD 重新定位的发现，
-    仅允许显式 reply.finding_id 匹配，严禁按 (file, line) / 行内锚定或文件坐标绑定。
+    - 对属于 stale_location_fingerprints 的跨 HEAD 结转且未在新 HEAD 重新定位的发现，
+      仅允许显式 reply.finding_id 匹配，严禁按 (file, line) / 行内锚定或文件坐标绑定。
+    - 对已在 bound_reply_targets 中锁定目标指纹的 loc / inline 回复，仅允许匹配该锁定指纹，禁止改绑其他发现。
     """
     if reply.finding_id is not None:
         prefix = reply.finding_id.strip().lower()
@@ -2102,25 +2179,34 @@ def _match_reply_targets(
         if stale_location_fingerprints
         else frozenset()
     )
+    pinned_fid = bound_reply_targets.get(reply.reply_key) if bound_reply_targets else None
     if reply.is_inline_anchor:
         if reply.file is None or reply.line is None:
             return [], 0
         norm_file = _normalize_file(reply.file)
-        return [
+        matched = [
             f
             for f in findings
             if f.finding_id not in stale and _normalize_file(f.file) == norm_file and f.line == reply.line
-        ], 2
-    if reply.file is not None:
+        ]
+        specificity = 2
+    elif reply.file is not None:
         norm_file = _normalize_file(reply.file)
         if reply.line is not None:
-            return [
+            matched = [
                 f
                 for f in findings
                 if f.finding_id not in stale and _normalize_file(f.file) == norm_file and f.line == reply.line
-            ], 2
-        return [f for f in findings if f.finding_id not in stale and _normalize_file(f.file) == norm_file], 1
-    return [], 0
+            ]
+            specificity = 2
+        else:
+            matched = [f for f in findings if f.finding_id not in stale and _normalize_file(f.file) == norm_file]
+            specificity = 1
+    else:
+        return [], 0
+    if pinned_fid is not None:
+        matched = [f for f in matched if f.finding_id == pinned_fid]
+    return matched, specificity
 
 
 def parse_wontfix_replies(
@@ -2216,6 +2302,7 @@ def _analyze_author_replies(
     consumed_reply_keys: Collection[str] = (),
     consumed_comment_ids: Collection[str] = (),
     stale_location_fingerprints: Collection[str] = (),
+    bound_reply_targets: Mapping[str, str] | Collection[tuple[str, str]] = (),
 ) -> tuple[dict[str, AuthorReply], dict[str, frozenset[str]]]:
     """同时计算唯一绑定回复与每个发现关联的全部未消费回复键（含 reply_key 与 comment:resolved:fp）。"""
     finding_list: list[Finding] = []
@@ -2236,6 +2323,7 @@ def _analyze_author_replies(
         "stale_location_fingerprints",
         lowercase=True,
     )
+    pinned_targets = _normalize_bound_reply_targets(bound_reply_targets, "bound_reply_targets")
 
     validated_replies: list[AuthorReply] = []
     for reply in replies:
@@ -2258,6 +2346,7 @@ def _analyze_author_replies(
             reply,
             finding_list,
             stale_location_fingerprints=stale_fps,
+            bound_reply_targets=pinned_targets,
         )
         if not matches:
             continue
@@ -2304,11 +2393,13 @@ def bind_author_replies(
     consumed_reply_keys: Collection[str] = (),
     consumed_comment_ids: Collection[str] = (),
     stale_location_fingerprints: Collection[str] = (),
+    bound_reply_targets: Mapping[str, str] | Collection[tuple[str, str]] = (),
 ) -> dict[str, AuthorReply]:
     """面向整个候选集合做作者回复唯一绑定。
 
     规则：
     - 忽略已消费（consumed_reply_keys / consumed_comment_ids）的历史回复；
+    - 对已在 bound_reply_targets 中锁定目标的 loc / inline 回复，仅允许匹配其锁定指纹；
     - 对属于 stale_location_fingerprints 的发现，仅允许显式 finding_id 绑定，禁止按坐标锚定；
     - 任一条回复若命中超过 1 个活跃候选，视为歧义，拒绝绑定到任何发现；
     - 同一评论中的多条回复若各自唯一指向不同发现，可分别绑定；
@@ -2320,6 +2411,7 @@ def bind_author_replies(
         consumed_reply_keys=consumed_reply_keys,
         consumed_comment_ids=consumed_comment_ids,
         stale_location_fingerprints=stale_location_fingerprints,
+        bound_reply_targets=bound_reply_targets,
     )
     return bound
 
@@ -2341,7 +2433,7 @@ class VerifiedFinding:
         if not isinstance(self.verdict, VerificationVerdict):
             raise ConvergenceError("VerifiedFinding.verdict 必须是 VerificationVerdict")
         _require_non_empty_str(self.verifier_model, "verifier_model")
-        _require_non_empty_str(self.verifier_evidence, "verifier_evidence")
+        _require_visible_text(self.verifier_evidence, "verifier_evidence")
         if type(self.round_number) is not int or self.round_number < 1:
             raise ConvergenceError(f"VerifiedFinding.round_number 必须是 >= 1 的整数：{self.round_number!r}")
         norm_head = _normalize_commit_sha(self.head_sha, "VerifiedFinding.head_sha")
@@ -2388,6 +2480,7 @@ class RoundHistoryEntry:
     pending_non_blocking: tuple[VerifiedFinding, ...] = ()
     outcome: RoundOutcome | None = None
     relocated_fingerprints: frozenset[str] = frozenset()
+    bound_reply_targets: frozenset[tuple[str, str]] = frozenset()
 
     def __post_init__(self) -> None:
         if type(self.round_number) is not int or self.round_number <= 0:
@@ -2508,15 +2601,17 @@ class RoundHistoryEntry:
                 f"relocated_fingerprints 必须是 unresolved_important 指纹的子集，发现多余指纹：{extra_relocated!r}"
             )
         object.__setattr__(self, "relocated_fingerprints", norm_relocated)
+        _validate_bound_reply_targets_frozenset(self.bound_reply_targets, "RoundHistoryEntry.bound_reply_targets")
 
 
 def _validate_history_chain(
     history: Sequence[RoundHistoryEntry],
-) -> tuple[frozenset[str], dict[str, tuple[str, str, int | None] | None]]:
-    """校验连续轮次历史链的完整性、会话唯一性、跨轮异家族核实、解除依据与未解除 Important 守恒，返回 (全部历史 session_id, 每条未解除项成对定位锚点)。"""
+) -> tuple[frozenset[str], dict[str, tuple[str, str, int | None] | None], dict[str, str]]:
+    """校验连续轮次历史链的完整性、会话唯一性、跨轮异家族核实、解除依据、回复目标锁定与未解除 Important 守恒。"""
     allowed_historical_finders: set[str] = set()
     historical_session_ids: set[str] = set()
     historical_consumed_reply_keys: set[str] = set()
+    historical_bound_targets: dict[str, str] = {}
     prev_entry: RoundHistoryEntry | None = None
     prev_unresolved_sources: dict[str, frozenset[str]] = {}
     prev_unresolved_ids: set[str] = set()
@@ -2527,6 +2622,16 @@ def _validate_history_chain(
         if entry.round_number != idx:
             raise ConvergenceError(f"history 轮次必须从 1 连续递增：期望 {idx}，实际 {entry.round_number}")
         _normalize_commit_sha(entry.head_sha, f"history[{idx - 1}].head_sha")
+
+        entry_bound_targets = _validate_bound_reply_targets_frozenset(
+            entry.bound_reply_targets,
+            f"history[{idx - 1}].bound_reply_targets",
+        )
+        _merge_bound_reply_targets(
+            historical_bound_targets,
+            entry_bound_targets,
+            f"history[{idx - 1}].bound_reply_targets",
+        )
 
         reused_hist_sessions = entry.finder_session_ids & historical_session_ids
         if reused_hist_sessions:
@@ -2604,10 +2709,11 @@ def _validate_history_chain(
             else:
                 next_located_anchor[fid] = (entry.head_sha, item_loc[0], item_loc[1])
 
-        validated_entry_consumed = frozenset(
-            _validate_consumed_reply_key(rk, f"history[{idx - 1}].consumed_reply_keys[]")
-            for rk in entry.consumed_reply_keys
-        )
+        parsed_entry_consumed: list[tuple[str, str, str, str]] = []
+        for rk in entry.consumed_reply_keys:
+            cid, kind, payload = _parse_consumed_reply_key(rk, f"history[{idx - 1}].consumed_reply_keys[]")
+            parsed_entry_consumed.append((rk, cid, kind, payload))
+        validated_entry_consumed = frozenset(rk for rk, _, _, _ in parsed_entry_consumed)
 
         for raw_fp in entry.resolved_fingerprints:
             norm_fp = raw_fp.strip().lower()
@@ -2617,13 +2723,9 @@ def _validate_history_chain(
                 and entry.head_sha != prev_entry.head_sha
             )
             if not can_resolve_by_fix:
-                suffix = f":resolved:{norm_fp}"
                 has_wontfix_proof = any(
-                    rk not in historical_consumed_reply_keys
-                    and rk.startswith("comment:")
-                    and rk.endswith(suffix)
-                    and len(rk) > len("comment:") + len(suffix)
-                    for rk in validated_entry_consumed
+                    rk not in historical_consumed_reply_keys and kind == "resolved" and payload == norm_fp
+                    for rk, _, kind, payload in parsed_entry_consumed
                 )
                 if not has_wontfix_proof:
                     raise ConvergenceError(
@@ -2651,7 +2753,7 @@ def _validate_history_chain(
             }
             prev_unresolved_ids = seen_hist_ids
             located_anchor_by_fp = next_located_anchor
-    return frozenset(historical_session_ids), located_anchor_by_fp
+    return frozenset(historical_session_ids), located_anchor_by_fp, historical_bound_targets
 
 
 @dataclass(frozen=True)
@@ -2724,7 +2826,7 @@ class RoundCandidates:
             )
 
         verifier_family = self.panel.verifier_family
-        historical_session_ids, located_anchor_by_fp = _validate_history_chain(self.history)
+        historical_session_ids, located_anchor_by_fp, _ = _validate_history_chain(self.history)
 
         if not self.history or self.history[-1].outcome == RoundOutcome.PASS:
             prior_important: tuple[Finding, ...] = ()
@@ -2850,6 +2952,7 @@ class VerifiedRound:
         history_consumed: frozenset[str] = frozenset().union(
             *(entry.consumed_reply_keys for entry in self.candidates.history)
         )
+        history_bound_targets = _collect_history_bound_targets(self.candidates.history)
         panel = self.candidates.panel
 
         expected_verifier: str
@@ -2899,14 +3002,27 @@ class VerifiedRound:
                         f"发现 {fid} 所在轮次 head_sha={self.candidates.head_sha!r} 与上一轮相同（无新提交），"
                         "禁止标记为 resolved_by_fix"
                     )
+            for rk in vf.related_reply_keys:
+                pinned_for_rk = history_bound_targets.get(rk)
+                if pinned_for_rk is not None and pinned_for_rk != fid:
+                    raise ConvergenceError(
+                        f"发现 {fid} 的 related_reply_keys 包含已在历史轮次锁定到发现 {pinned_for_rk} 的回复键 {rk!r}"
+                    )
             if vf.verdict == VerificationVerdict.RESOLVED_BY_WONTFIX:
                 if vf.author_reply is None:
                     raise ConvergenceError(f"发现 {fid} 裁决为 resolved_by_wontfix 但缺少 author_reply")
                 _require_non_empty_str(vf.author_reply.author, "author_reply.author")
+                pinned_fid = history_bound_targets.get(vf.author_reply.reply_key)
+                if pinned_fid is not None and pinned_fid != fid:
+                    raise ConvergenceError(
+                        f"发现 {fid} 绑定的作者不修回复（{vf.author_reply.reply_key}）"
+                        f"已在历史轮次锁定到发现 {pinned_fid}，禁止改绑到其他指纹"
+                    )
                 matched_targets, _ = _match_reply_targets(
                     vf.author_reply,
                     self.candidates.findings,
                     stale_location_fingerprints=self.candidates.stale_location_fingerprints,
+                    bound_reply_targets=history_bound_targets,
                 )
                 if len(matched_targets) != 1 or matched_targets[0].finding_id != fid:
                     raise ConvergenceError(
@@ -2979,6 +3095,7 @@ def parse_verifier_output(
     author_replies: Sequence[AuthorReply] = (),
     consumed_reply_keys: Collection[str] = (),
     consumed_comment_ids: Collection[str] = (),
+    bound_reply_targets: Mapping[str, str] | Collection[tuple[str, str]] = (),
 ) -> VerifiedRound:
     """解析核实者裁决并强制绑定 round_number、head_sha、审查面板与候选集（fail-closed）。"""
     if not isinstance(candidates, RoundCandidates):
@@ -3032,6 +3149,10 @@ def parse_verifier_output(
     history_consumed: frozenset[str] = frozenset().union(*(entry.consumed_reply_keys for entry in candidates.history))
     extra_consumed = _validate_consumed_reply_keys(consumed_reply_keys, "consumed_reply_keys")
     effective_consumed = history_consumed | extra_consumed
+    history_bound_targets = _collect_history_bound_targets(candidates.history)
+    extra_bound_targets = _normalize_bound_reply_targets(bound_reply_targets, "bound_reply_targets")
+    effective_bound_targets = dict(history_bound_targets)
+    _merge_bound_reply_targets(effective_bound_targets, extra_bound_targets, "bound_reply_targets")
 
     bound_replies, matched_keys_by_id = _analyze_author_replies(
         candidate_list,
@@ -3039,6 +3160,7 @@ def parse_verifier_output(
         consumed_reply_keys=effective_consumed,
         consumed_comment_ids=consumed_comment_ids,
         stale_location_fingerprints=candidates.stale_location_fingerprints,
+        bound_reply_targets=effective_bound_targets,
     )
 
     prior_important_ids = frozenset(f.finding_id for f in candidates.prior_important)
@@ -3053,7 +3175,7 @@ def parse_verifier_output(
             raise ConvergenceError(f"核实者对同一发现重复裁决：{fid}")
         verdict = parse_verification_verdict(item.get("verdict"))
         raw_evidence = item["verifier_evidence"] if "verifier_evidence" in item else item.get("evidence")
-        verifier_evidence = _require_non_empty_str(raw_evidence, f"verdicts[{idx}].verifier_evidence")
+        verifier_evidence = _require_visible_text(raw_evidence, f"verdicts[{idx}].verifier_evidence")
         if verdict == VerificationVerdict.RESOLVED_BY_FIX:
             if fid not in prior_important_ids:
                 raise ConvergenceError(
@@ -3107,6 +3229,7 @@ class RoundPlan:
     exceeds_auto_rounds: bool = False
     pending_non_blocking: tuple[VerifiedFinding, ...] = ()
     history: tuple[RoundHistoryEntry, ...] = ()
+    bound_reply_targets: frozenset[tuple[str, str]] = frozenset()
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "diff_base_sha", _normalize_commit_sha(self.diff_base_sha, "RoundPlan.diff_base_sha"))
@@ -3115,6 +3238,7 @@ class RoundPlan:
             raise ConvergenceError("RoundPlan.consumed_reply_keys 必须是 frozenset[str]")
         for rk in self.consumed_reply_keys:
             _validate_consumed_reply_key(rk, "RoundPlan.consumed_reply_keys[]")
+        _validate_bound_reply_targets_frozenset(self.bound_reply_targets, "RoundPlan.bound_reply_targets")
 
     @property
     def prior_important_ids(self) -> frozenset[str]:
@@ -3171,7 +3295,7 @@ def plan_next_round(
         if not isinstance(reply, AuthorReply):
             raise ConvergenceError(f"author_replies 元素必须是 AuthorReply：{reply!r}")
     history_tuple = tuple(history)
-    _validate_history_chain(history_tuple)
+    _, _, history_bound_targets = _validate_history_chain(history_tuple)
 
     if not history_tuple:
         return RoundPlan(
@@ -3186,6 +3310,7 @@ def plan_next_round(
             exceeds_auto_rounds=False,
             pending_non_blocking=(),
             history=(),
+            bound_reply_targets=frozenset(),
         )
 
     prev = history_tuple[-1]
@@ -3211,6 +3336,7 @@ def plan_next_round(
         exceeds_auto_rounds=round_number > MAX_AUTO_ROUNDS,
         pending_non_blocking=pending_non_blocking,
         history=history_tuple,
+        bound_reply_targets=frozenset(history_bound_targets.items()),
     )
 
 
@@ -3252,6 +3378,7 @@ class RoundDecision:
     finder_session_ids: frozenset[str] = frozenset()
     stale_location_fingerprints: frozenset[str] = frozenset()
     relocated_fingerprints: frozenset[str] = frozenset()
+    bound_reply_targets: frozenset[tuple[str, str]] = frozenset()
 
     def __post_init__(self) -> None:
         norm_head = _normalize_commit_sha(self.head_sha, "RoundDecision.head_sha")
@@ -3274,6 +3401,7 @@ class RoundDecision:
             for fp in self.relocated_fingerprints
         )
         object.__setattr__(self, "relocated_fingerprints", norm_relocated)
+        _validate_bound_reply_targets_frozenset(self.bound_reply_targets, "RoundDecision.bound_reply_targets")
 
     @property
     def cleared_fingerprints(self) -> frozenset[str]:
@@ -3350,6 +3478,7 @@ class RoundDecision:
             outcome=self.outcome,
             relocated_fingerprints=self.relocated_fingerprints
             & frozenset(f.finding_id for f in self.unresolved_important),
+            bound_reply_targets=self.bound_reply_targets,
         )
 
 
@@ -3411,6 +3540,9 @@ def evaluate_round(
     postable = select_postable_findings(effective_verified, already_posted, resolved_fingerprints=cleared_ids)
     unresolved_important = tuple(vf.finding for vf in blocking)
 
+    history_consumed: frozenset[str] = frozenset().union(*(entry.consumed_reply_keys for entry in history))
+    history_bound_targets = _collect_history_bound_targets(history)
+
     consumed_keys: set[str] = set()
     for vf in (*resolved, *rejected):
         fid = vf.finding.finding_id
@@ -3418,15 +3550,49 @@ def evaluate_round(
             consumed_keys.add(vf.author_reply.reply_key)
             consumed_keys.add(_resolved_reply_key(vf.author_reply.comment_id, fid))
         consumed_keys.update(vf.related_reply_keys)
+    for rk, pinned_fid in history_bound_targets.items():
+        if pinned_fid in cleared_ids:
+            consumed_keys.add(rk)
+    matched_keys_by_id: dict[str, frozenset[str]] = {}
     if author_replies:
         _, matched_keys_by_id = _analyze_author_replies(
             [vf.finding for vf in effective_verified],
             author_replies,
+            consumed_reply_keys=history_consumed,
             stale_location_fingerprints=verified.candidates.stale_location_fingerprints,
+            bound_reply_targets=history_bound_targets,
         )
         for fid in cleared_ids:
             consumed_keys.update(matched_keys_by_id.get(fid, ()))
+
+    bound_targets: dict[str, str] = dict(history_bound_targets)
+    round_loc_inline_targets: dict[str, set[str]] = {}
+    for vf in effective_verified:
+        fid = vf.finding.finding_id
+        candidate_rks: set[str] = set(vf.related_reply_keys)
+        if vf.author_reply is not None:
+            candidate_rks.add(vf.author_reply.reply_key)
+        if matched_keys_by_id:
+            candidate_rks.update(matched_keys_by_id.get(fid, ()))
+        for rk in candidate_rks:
+            _, kind, _ = _parse_consumed_reply_key(rk, "related_reply_keys[]")
+            if kind in ("loc", "inline"):
+                round_loc_inline_targets.setdefault(rk, set()).add(fid)
+    for rk, target_fids in round_loc_inline_targets.items():
+        if rk in bound_targets:
+            pinned = bound_targets[rk]
+            if any(fid != pinned for fid in target_fids):
+                raise ConvergenceError(
+                    f"回复键 {rk!r} 已在历史轮次锁定到发现 {pinned!r}，不得改绑到 {sorted(target_fids)!r}"
+                )
+        elif len(target_fids) == 1:
+            bound_targets[rk] = next(iter(target_fids))
+        else:
+            # 同一 loc/inline 回复在本轮同时命中多个发现属歧义回复，标记为已消费以防后续轮次改绑新发现
+            consumed_keys.add(rk)
+
     consumed_reply_keys = frozenset(consumed_keys)
+    bound_reply_targets = frozenset(bound_targets.items())
     unresolved_ids = frozenset(f.finding_id for f in unresolved_important)
     stale_unresolved = verified.candidates.stale_location_fingerprints & unresolved_ids
     relocated_unresolved = (
@@ -3477,6 +3643,7 @@ def evaluate_round(
         finder_session_ids=frozenset(b.session_id for b in verified.candidates.finder_batches),
         stale_location_fingerprints=stale_unresolved,
         relocated_fingerprints=relocated_unresolved,
+        bound_reply_targets=bound_reply_targets,
     )
 
 
