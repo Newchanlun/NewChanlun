@@ -16,9 +16,10 @@
 use newchan_rust::structure_source::Declaration;
 use serde_json::{json, Value};
 use std::collections::BTreeSet;
+use std::os::unix::process::ExitStatusExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitStatus, Stdio};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicU8, Ordering};
 use std::time::{Duration, Instant};
 
 const MANIFEST_REVISION: &str = "production-session-manifest/1";
@@ -35,10 +36,17 @@ const S_PASS: [&str; 3] = [
     "S_THETA_DIAGNOSTIC_TESTONLY",
 ];
 
-static STOP: AtomicBool = AtomicBool::new(false);
+const STOP_TERM: u8 = 1;
+const STOP_INT: u8 = 2;
+static STOP_SIGNALS: AtomicU8 = AtomicU8::new(0);
 
-extern "C" fn on_stop(_: libc::c_int) {
-    STOP.store(true, Ordering::SeqCst);
+extern "C" fn on_stop(signal: libc::c_int) {
+    let flag = if signal == libc::SIGINT {
+        STOP_INT
+    } else {
+        STOP_TERM
+    };
+    STOP_SIGNALS.fetch_or(flag, Ordering::SeqCst);
 }
 
 /// 与 `_redact` 同口径：敏感键名的值整体遮蔽；24 位以上纯 token 字符的字符串遮蔽。
@@ -370,11 +378,17 @@ fn run() -> Result<i32, String> {
 
     // ── 监督 ──
     while !failed {
-        // 收到停止请求后先完成最后一轮监督，不能把已退出的域当作正常停服回收。
-        let stopping = STOP.load(Ordering::SeqCst);
+        // 停服前仍完成一轮监督，保留已退出的非关键 X 与其它异常退出的记录。
         for sup in children.iter_mut().filter(|c| c.status.is_none()) {
             if let Ok(Some(status)) = sup.child.try_wait() {
                 sup.status = Some(status);
+                // 前台 Ctrl-C 同时送到 launcher 与各域。取到状态后才读信号，
+                // 避免漏掉本轮轮询中到达的 SIGINT；其它退出原因照常判定。
+                if status.signal() == Some(libc::SIGINT)
+                    && STOP_SIGNALS.load(Ordering::SeqCst) & STOP_INT != 0
+                {
+                    continue;
+                }
                 log(
                     "exit",
                     json!({"domain": sup.domain, "status": status.to_string(), "critical": sup.critical}),
@@ -382,7 +396,7 @@ fn run() -> Result<i32, String> {
                 failed |= sup.critical;
             }
         }
-        if stopping || failed {
+        if STOP_SIGNALS.load(Ordering::SeqCst) != 0 || failed {
             break;
         }
         std::thread::sleep(Duration::from_millis(100));
