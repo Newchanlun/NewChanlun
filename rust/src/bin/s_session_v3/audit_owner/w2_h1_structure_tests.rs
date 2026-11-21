@@ -1135,11 +1135,15 @@ fn issue1642_parent_refusal_predicate_rejects_real_driver_source_index_refusal()
         writer.handle(w2_h1_envelope(1, &rows[..1])).unwrap()["kind"],
         "Committed"
     );
-    super::SOURCE_APPEND_PARENT_SHORT.with(|flag| flag.set(true));
+    let target_growth_bytes = 16_200;
+    super::SOURCE_APPEND_PARENT_SHORT.with(|target| target.set(Some(target_growth_bytes)));
     let before = state::full_audit_calls_for_test();
     let (result, allocations, refusal) =
         issue1642_observe(&mut writer, &w2_h1_envelope(2, &rows[1..2]), "early-ef", 2);
-    assert!(!super::SOURCE_APPEND_PARENT_SHORT.with(|flag| flag.replace(false)));
+    assert_eq!(
+        super::SOURCE_APPEND_PARENT_SHORT.with(|target| target.take()),
+        None
+    );
     assert_eq!(state::full_audit_calls_for_test(), before);
     let error = result.unwrap_err();
     assert_eq!(error, M8D_P3_RESOURCE_REFUSAL);
@@ -1147,10 +1151,11 @@ fn issue1642_parent_refusal_predicate_rejects_real_driver_source_index_refusal()
     assert_eq!(parent.stage, Some("prepare_source_audit"));
     assert_eq!(parent.generation, Some(2));
     assert_eq!(parent.kind, "native");
-    assert_eq!(parent.bytes, 16_200);
+    assert_eq!(parent.bytes, target_growth_bytes);
     assert_eq!(parent.remaining, parent.bytes - 1);
     let rejected = allocations.last().unwrap();
     assert_eq!(rejected["growth"], parent.bytes);
+    assert_eq!(rejected["parent_remaining"], parent.remaining);
     assert_eq!(rejected["cap"], rejected["j_cap"]);
     assert_eq!(rejected["appended"], false);
     assert_eq!(rejected["allocated"], 0);

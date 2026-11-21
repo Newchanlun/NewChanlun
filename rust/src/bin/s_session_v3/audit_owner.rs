@@ -8145,8 +8145,8 @@ thread_local! {
     /// (G, 本次实际 cap, 原 j.cap, 工作域 live)；只读记录，不改变门判。
     pub(super) static SOURCE_APPEND_BOUNDARY_TRACE: std::cell::RefCell<Vec<[usize; 4]>> =
         const { std::cell::RefCell::new(Vec::new()) };
-    /// #1642 负控：在下一次真实扩容预约前暂占父分域（仅此次追加）。
-    static SOURCE_APPEND_PARENT_SHORT: Cell<bool> = const { Cell::new(false) };
+    /// #1642 负控：仅在首笔申请量匹配的真实扩容前暂占父分域（只消耗一次）。
+    static SOURCE_APPEND_PARENT_SHORT: Cell<Option<usize>> = const { Cell::new(None) };
     /// #1642：只在选定长夹具记录真正的分配窗口，不参与资源准入。
     static SOURCE_APPEND_ALLOCATIONS: std::cell::RefCell<Option<Vec<Value>>> =
         const { std::cell::RefCell::new(None) };
