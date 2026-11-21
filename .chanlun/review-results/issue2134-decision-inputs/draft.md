@@ -30,13 +30,13 @@ X 执行 profile 可指定一个名字，让 launcher 把文件里的凭据写�
 
 采用 B。合法键是字节长度不超过 64 的全串 `NC_X_VENUE_CREDENTIAL(?:_[A-Za-z0-9][A-Za-z0-9_]*)?`，大小写精确，无修剪、规范化、别名、备用值或旧配置豁免。基名是推荐示例，不是缺项默认值。专用命名空间不承载其他控制含义；不用逐项保留名单。`PATH` 只保留作进程查找语义，`LD_PRELOAD`、`LD_LIBRARY_PATH` 等不属于此空间。更改键名只改部署管道，不改场所作用域与签署实例。
 
-launcher 在读取文件、创建状态或任何域 init/spawn 前与 X 在锁、开库和环境取值前调用同一谓词；两个支持的 profile 版本各取各字段，不读另一字段作兼容；任一模式，不合规、缺失或类型错误统一 `InvalidDomain`，不回显非法内容。runbook 与 ADR 0062 只指回本落点；固定主线当前只实现 /1，/2 实施者直接复用谓词。
+launcher 在读取文件、创建状态或任何域 init/spawn 前与 X 在锁、开库和环境取值前调用同一谓词；两个支持的 profile 版本各取各字段，不读另一字段作兼容；任一模式，不合规、缺失或类型错误统一 `InvalidDomain`，不回显非法内容。runbook 与 ADR 0062 只指回本落点；ADR 0062 在第 290 行之后追加指针，不改正文。固定主线当前只实现 /1，/2 实施者直接复用谓词。
 
 #2113 两部分同一交付。HIGH 从合法 profile 注入不可达；合法名与 `PATH` 不相等且不会失真。MED 仍能来自绕过 launcher 的原始环境，尤其零个可枚举键会被删除时；不把 profile 校验当环境过滤，归 #2113。过滤经内核边界验收后，#2113 可声明：「Linux 上，采用合法 X 凭据键名时，打开持久库启动的 stat 的初始执行环境除原有 PATH（如有）外没有任何继承项；由 X 执行 profile 注入的凭据不可能编码成内核键 PATH，不会到达 stat。」具体声明边界与实现锁见 [#2113 收口要求](2113-closeout.md)。
 
 ## 验收清单
 
-1. 文书：`git diff --check origin/main decision/2134` 退出 0；`git diff --name-only origin/main decision/2134` 只列 ADR 0039、ADR 0062、生产 runbook 三文件。对 ADR 0039 基线应用唯一 `canonical_edit`，必须逐字等于候选 blob，且仅新增 #2134 修订；另两份文档仅为指针/操作同步，随同一 diff 审。
+1. 文书：`git diff --check b9d898dc decision/2134` 退出 0；`git diff --name-only b9d898dc decision/2134` 只列 ADR 0039、ADR 0062、生产 runbook 三文件。对 ADR 0039 基线应用唯一 `canonical_edit`，结果须与候选逐字节相同，且仅新增 #2134 修订。ADR 0062 前 290 行须与 `b9d898dc` 逐字节相同，文末仅追加下方 `adr_0062_append` 的字节；生产 runbook 保持原候选的运维指针不变。
 2. 输入：[主线矩阵](baseline.md) 可定位 24 次观测，原始 `boat-mainline.log:99–101` 为 1 passed、沙盒已回收；[考古](archaeology.md) 与完整搜索命中可复核。部署未证事实单列，不声称核完私有实例。
 3. **#2113 下游验收**：`invalid_x_credential_key_refuses_before_side_effects` 双入口负控、正控及合成文件读检测；`durable_db_stat_preserves_only_path` 覆盖零删除的原始项；两档 `credential_key_only_in_x_child` 使用 #1383 内核级测试；`rust/tests/history_simulation_entry.py` 现有入口通过（迁移占位名）。测试以 [#2113 收口要求](2113-closeout.md) 的行为为判据，名字为建议。此项以实施候选为对象，不作本稿代码验收。
 4. 票状态：`gh api repos/Newchanlun/NewChanlun/issues/2113/dependencies/blocked_by --jq 'map(.number)|index(2134)!=null'` 为 `true`；对 #1383 同一查询以 2113 为前置。无新建/删除边。
@@ -85,4 +85,15 @@ launcher 在读取文件、创建状态或任何域 init/spawn 前与 X 在锁�
 
 ```canonical_edit
 {"version":1,"operation":"edit","path":"docs/adr/0039-production-entry-inventory-and-unique-launcher.md","replacements":[{"before":"2. **启动门。** :287-288 对 `experiment` profile 同样生效（ADR 0062 裁定五），作为独立的发送前置件，不是 ADR 0045 SR-3 的失效触发，拒发不产生 SR-3 记录。X 按 ADR 0062「发送门（8 步）」核验，拒发词汇按 ADR 0062 裁定六。拒发在当前 `writer_epoch` 内为终态并拦截一切写请求（ADR 0062 裁定七），**仅对 `P1-hl-testnet`（`experiment`）签署**；production（P2）下拒发期间撤单、reduce-only 平仓与急停是否放行是真金取舍，属 P 类，在 P2 激活时另裁（#1561 后继），本条不预裁。\n","after":"2. **启动门。** :287-288 对 `experiment` profile 同样生效（ADR 0062 裁定五），作为独立的发送前置件，不是 ADR 0045 SR-3 的失效触发，拒发不产生 SR-3 记录。X 按 ADR 0062「发送门（8 步）」核验，拒发词汇按 ADR 0062 裁定六。拒发在当前 `writer_epoch` 内为终态并拦截一切写请求（ADR 0062 裁定七），**仅对 `P1-hl-testnet`（`experiment`）签署**；production（P2）下拒发期间撤单、reduce-only 平仓与急停是否放行是真金取舍，属 P 类，在 P2 激活时另裁（#1561 后继），本条不预裁。\n\n## 修订（#2134，X 凭据注入键名，2026-11-20）\n\n1. **键名。** X 执行 profile 必须显式指定一个凭据注入键。推荐 `NC_X_VENUE_CREDENTIAL`；也可在该名字后加一个下划线和一个非空后缀。后缀首字节须为 ASCII 字母或数字，其余字节只许 ASCII 字母、数字或下划线；全名最多 64 字节，区分大小写，按原字节使用。空名、等号、NUL、空白、非 ASCII 和专用命名空间外的名字一律不合法。该命名空间只用于 X 凭据注入，不作查找路径、动态加载或其他进程控制变量；不维护逐项禁止名单。在 Linux/macOS 的 `name=value` 启动环境中，首个等号就是键值分隔符；合规名字只编码为同名键，不可能编码成 `PATH`。\n2. **入口与拒绝。** launcher 装读 X profile 与 X 自己读 profile 的 `serve`（含单独启动）用同一个键名谓词。旧 `x-execution-profile/1` 的 `credential_scope.env` 与 [ADR 0062](0062-fu18-venue-account-permission-binding.md) 的 `x-execution-profile/2` 的 `credential_source.env` 同口径。各版本只取自己定义的字段，任何模式均不得用旧字段、默认值、别名、去空白或大小写转换挽救不合法值。缺字段、非字符串或不合规均报 `InvalidDomain`；launcher 在读凭据文件、创建状态及启动任何域（含 init）前拒绝，X 在持写者锁、开库或取环境凭据前拒绝。拒绝信息指出字段及合法形状，不回显原输入或凭据。\n3. **隔离与生效。** 本修订只限名字，不改凭据来源、作用域、发送门、交易与账本判据。读用真实凭据和授予权限仍按 [ADR 0041](0041-degrees-of-freedom-configurable-not-excluded.md) 的独立用户授权；文书裁定不代签。现有配置若取命名空间外的名字，部署方须在启用新版本前改成合规名字并同步已有获授权的注入配置，不设旧配置豁免。键名校验和 Linux `stat` 子进程环境收口由 #2113 一并实现；本节不把校验等同于清理单启 X 时外部传入的原始环境，也不把文书合入当作验收 13 已通过。\n"}]}
+```
+
+ADR 0062 的文末追加合同（含首个空行）：
+
+```adr_0062_append
+
+## 修订（#2134，凭据注入键名指针，2026-11-20）
+
+（append-only：以上原文不改；本节仅同步 #2134 指针，已裁 P 类正文与授权硬门照旧。）
+
+本 ADR 第 40、147 行的 `credential_source.env` 指定注入键名，沿用 [ADR 0039「修订（#2134）」](0039-production-entry-inventory-and-unique-launcher.md#修订2134x-凭据注入键名2026-11-20) 的同一准入规则与前置 `InvalidDomain`。字段改名不另立键名判据，也不授予凭据接触权限。
 ```

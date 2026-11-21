@@ -23,6 +23,6 @@
 
 ## 正本落点和在途号
 
-追加 0039 现有「唯一正式 launcher 的 seam」的修订节最直接：它已经管谁注入、注入到哪，不把字段语法塞进账户/授权 ADR，也不把推论稿当前的结论当正本回引。0062 只在 /2 字段处同步链接，runbook 只给运维口径；0048 已从属指向 0039 与 0062，CONTEXT 已分开名分，不需改。
+追加 0039 现有「唯一正式 launcher 的 seam」的修订节最直接：它已经管谁注入、注入到哪，不把字段语法塞进账户/授权 ADR，也不把推论稿当前的结论当正本回引。0062 只在第 290 行原文之后追加 #2134 修订节，为 /2 字段指回 0039，不改原正文；runbook 只给运维口径；0048 已从属指向 0039 与 0062，CONTEXT 已分开名分，不需改。
 
 `ls docs/adr` 在 main 至 0063；`git ls-tree -r --name-only origin/decision/1551 docs/adr` 已占 0064（`6ba72e84c55aa6d65b11cc46b7288142f4fce62b`）；`git diff --name-only origin/main...origin/decision/2079-r5 -- docs/adr` 命中 0065（`4812b992057ff5c6bf39da50e8b40bd1816382d3`）；同查 `origin/decision/2127` 只修 0038（`2a82e458b8d868590f2bd7cf023744f97099f063`）。远端用 `git ls-remote origin` 对这些指定 refs 核过。已有落点更近，不分配新 ADR 编号。
