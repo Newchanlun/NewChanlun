@@ -8,7 +8,7 @@ import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
-from adapter import experiment_authority, profile_token, require_query_only, timestamp
+from adapter import experiment_authority, profile_token, record_r03_bindings, require_query_only, timestamp
 from check_selector import selector_matches
 from common import Invalid, SHA, git, json_bytes, read_regular, require, sha, strict_json, unique
 from registry import load
@@ -207,7 +207,8 @@ def _manifest(loaded, evidence, group, identity, bundle, expected_sha):
                 "RECORD_UNSEALED", "inventory owner")
         raw = read_regular(bundle, row["path"])
         require(sha(raw) == row["sha256"], "RECORD_UNSEALED", "record sha256")
-        validate_record(contract, strict_json(raw, "record"), check, identity)
+        allowed_r03 = record_r03_bindings(reg, check["record"], check["profile_id"])
+        validate_record(contract, strict_json(raw, "record"), check, identity, allowed_r03=allowed_r03)
         paths.add(row["path"])
         producer_ids.add(row["check_id"])
         seals.append(dict(group=group, record=row["record"], profile=profile_token(row["profile_id"]),

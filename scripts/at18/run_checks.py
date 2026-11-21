@@ -7,7 +7,7 @@ import subprocess
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
-from adapter import decode_fields, public_payload
+from adapter import decode_fields, public_payload, record_r03_bindings
 from check_selector import annotation, command, selector_matches
 from common import (COMMIT, Invalid, RECORD, SPECIAL, git_blob, json_bytes, path_name, read_regular, require,
                     sha, strict_json, unique)
@@ -74,14 +74,14 @@ def witness(work, expected):
             "CHECK_WITNESS", "identities")
 
 
-def validate_record(contract, document, check, identity):
+def validate_record(contract, document, check, identity, *, allowed_r03):
     require(document.keys() == set(RECORD_FIELDS), "RECORD_UNSEALED", "run-record fields")
     fields = decode_fields(contract, contract["run_record_envelope"], document)
     require(check["record"] is not None and all(fields[field] == value for field, value in {
         "schema_version": "at18-run-record/1", "record": check["record"], "check_id": check["check_id"],
         "profile_id": check["profile_id"], **identity,
     }.items()), "RECORD_UNSEALED", "run-record identity")
-    payload = public_payload(contract, check["record"], fields["payload"])
+    payload = public_payload(contract, check["record"], fields["payload"], allowed_r03=allowed_r03)
     if (tb := RECORD.fullmatch(check["record"])):
         require((payload["evidence_class"], payload["tb_id"], payload["profile_id"]) ==
                 (tb[1], tb[2], check["profile_id"]), "RECORD_UNSEALED", "TB payload identity")
@@ -94,7 +94,7 @@ def validate_record(contract, document, check, identity):
     return fields
 
 
-def _records(contract, work, check, identity):
+def _records(contract, work, check, identity, allowed_r03):
     directory = work / "records"
     require(not directory.is_symlink() and directory.is_dir(), "RECORD_UNSEALED", "records")
     files = sorted(directory.iterdir())
@@ -104,14 +104,14 @@ def _records(contract, work, check, identity):
         require(path.suffix == ".json", "RECORD_UNSEALED", "record suffix")
         raw = read_regular(work, f"records/{path.name}")
         doc = strict_json(raw, "run record")
-        validate_record(contract, doc, check, identity)
+        validate_record(contract, doc, check, identity, allowed_r03=allowed_r03)
         digest = sha(raw)
         require(digest not in records, "RECORD_UNSEALED", "duplicate record bytes")
         records[digest] = raw
     return records
 
 
-def execute(root, check, contract, identity, keys, line, *, head=None):
+def execute(root, check, contract, identity, keys, line, *, allowed_r03=(), head=None):
     argv = command(check, root)
     metadata = {"check_id": check["check_id"], "argv": argv, "expected": check["expected_count"],
                 "executed": None, "ignored": None, "skipped": None, "exit_code": None, "tests": [],
@@ -187,7 +187,7 @@ def execute(root, check, contract, identity, keys, line, *, head=None):
                     and all(row["status"] == "passed" for row in rows), "CHECK_EXECUTION", "exit/counts")
             if check["key_aware"]:
                 witness(work, expected_keys)
-            records = _records(contract, work, check, identity)
+            records = _records(contract, work, check, identity, allowed_r03)
             metadata["status"] = "PASS"
             return metadata, records
         except (ValueError, TypeError, KeyError, OSError, SyntaxError) as error:
@@ -210,7 +210,9 @@ def run_group(root, loaded, evidence, group, identity, out, *, before_check=None
         if before_check is not None:
             before_check()
         cid = check["check_id"]
-        actual, records = execute(root, check, contract, identity, keys.get(cid, set()), lines[cid], head=head)
+        allowed_r03 = record_r03_bindings(reg, check["record"], check["profile_id"])
+        actual, records = execute(root, check, contract, identity, keys.get(cid, set()), lines[cid],
+                                  allowed_r03=allowed_r03, head=head)
         results.append(actual)
         for content_sha, raw in sorted(records.items()):
             name = "record-" + content_sha + ".json"

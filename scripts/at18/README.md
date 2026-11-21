@@ -25,6 +25,8 @@ PR 上的同一入口额外计算真正的 merge-base，禁止原有键、basis 
 
 登记了 `record` 的检查在 `AT18_RECORD_DIR` 写业务原件。外层身份读 `AT18_RECORD`、`AT18_PROFILE_ID`（空表示 null）、`AT18_CHECK_ID`、`AT18_F`、`AT18_RUN_ID`、`AT18_RUN_ATTEMPT`；payload 的版本、来源字段及引用角色见 F 上的适配器合同。上传前递归拒绝未知字段、诊断上下文和自由文本；TB 的 `conditions` 只收正整数 `processes`，`output` 只收数值数组 `samples`（均可省略其中字段）。后续 TB 如需新增业务度量，随生产者同审新增固定字段及类型。experiment 失败时只上传当前运行新建的封闭诊断 JSON，不上传原件、执行清单或进程日志。
 
+TB 原件的每条 `keys` 须逐值匹配 F 登记册中本 TB、本证据类和本 profile 的运行域绑定，包括 `basis_path` 和 `basis_pointer`；指针不能含控制字符。生产组归档前与末级封印各核一遍。单个分件可以只带部分登记键，整套覆盖仍由下游验收。
+
 ## 调用与消费
 
 从 `main` 无输入触发对应 workflow。组作业为 `at18 <group> <registry_sha256>`，上传同 run attempt 的 `execution.json`（实际命令、测试身份、执行/跳过/忽略数、退出码和原件摘要清单）。生产组把清单的 SHA-256 写入本次成功上传步骤的服务端名称 `at18-anchor <execution_sha256>`，避开 GitHub 矩阵同名 job output 互相覆盖。独立托管作业从本 attempt 的分页 Jobs API 按成功组取锚；只有下载的清单字节与锚一致、每个原件实算摘要与清单一致才以 `at18-seal <record> <profile-token> <registry_sha256> <record_sha256>` 封印实际字节。只取最新 attempt；缺件需全量重跑，不跨组、跨 attempt 补原件。
