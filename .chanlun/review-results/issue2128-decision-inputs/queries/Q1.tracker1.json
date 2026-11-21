@@ -1,0 +1,32 @@
+[
+  {
+    "number": 2128,
+    "state": "OPEN",
+    "title": "[grilling] S 被强杀后带 SHM 的介质怎样再准入，恢复后的有效代怎样交接（#2079 设计发现，#1411 前置）",
+    "url": "https://github.com/Newchanlun/NewChanlun/issues/2128"
+  },
+  {
+    "number": 1675,
+    "state": "OPEN",
+    "title": "[impl] 正式 producer→R4→CLI 成功收据（≥2，拆自 #1527）",
+    "url": "https://github.com/Newchanlun/NewChanlun/issues/1675"
+  },
+  {
+    "number": 1411,
+    "state": "OPEN",
+    "title": "[impl] TB-07-C 完整会话双进程与崩溃恢复保持全状态一致（SPEC #1340）",
+    "url": "https://github.com/Newchanlun/NewChanlun/issues/1411"
+  },
+  {
+    "number": 1768,
+    "state": "OPEN",
+    "title": "[impl] TB-07-E B/E 域事件外壳 domain-event/1 映射与 delta/Gap 读口（ADR 0051，#1534）",
+    "url": "https://github.com/Newchanlun/NewChanlun/issues/1768"
+  },
+  {
+    "number": 1375,
+    "state": "OPEN",
+    "title": "[impl] TB-04-A 外部先接纳封闸与精确 Resolve（SPEC #1340）",
+    "url": "https://github.com/Newchanlun/NewChanlun/issues/1375"
+  }
+]

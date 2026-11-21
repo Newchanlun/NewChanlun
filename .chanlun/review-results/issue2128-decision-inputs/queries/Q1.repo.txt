@@ -1,0 +1,3 @@
+b9d898dccf46c2a716115eaa1215bc39c458a959:rust/src/bin/s_session_v3/admission_provider.rs:232:            return Err(consumed.failure("UnsupportedWalShmJournalCombination"));
+b9d898dccf46c2a716115eaa1215bc39c458a959:rust/src/bin/s_session_v3/audit_owner.rs:853:        // 正常关闭完成介质恢复；不得删除旁挂或绕过 UnsupportedWalShmJournalCombination。
+b9d898dccf46c2a716115eaa1215bc39c458a959:s_session/tests/issue1527_recovery/native_n1_tests.rs:2181:        refusal.contains("UnsupportedWalShmJournalCombination"),

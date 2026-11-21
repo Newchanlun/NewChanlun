@@ -1,0 +1,14 @@
+[
+  {
+    "number": 1675,
+    "state": "OPEN",
+    "title": "[impl] 正式 producer→R4→CLI 成功收据（≥2，拆自 #1527）",
+    "url": "https://github.com/Newchanlun/NewChanlun/issues/1675"
+  },
+  {
+    "number": 1657,
+    "state": "CLOSED",
+    "title": "[impl] s-admission 首签与撤销操作员命令 + 合同版本校验 + 三组负控（#1567 裁定，#1527 成功收据前置）",
+    "url": "https://github.com/Newchanlun/NewChanlun/issues/1657"
+  }
+]

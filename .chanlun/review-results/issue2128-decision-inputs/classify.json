@@ -1,0 +1,10 @@
+{
+  "ticket": 2128,
+  "role": "triage",
+  "model": "gpt-6.2-sol",
+  "klass": "P",
+  "reason": "原域持锁、R4 判据和换代事务均有先例；在完整 R4 前给原库加入受限的 SQLite 物理写入并发布跨域可消费的 S 原回执，仓内无同合同。本裁研发路径，不新增资金、账户、凭据、服务 uid 或宿主权限。",
+  "parsed": true,
+  "userGate": [],
+  "user_gate": []
+}

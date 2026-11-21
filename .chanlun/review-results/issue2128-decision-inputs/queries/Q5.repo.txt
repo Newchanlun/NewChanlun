@@ -1,0 +1,11 @@
+b9d898dccf46c2a716115eaa1215bc39c458a959:docs/adr/0060-fill-position-single-authority-and-crosswalk.md:146:  - 推理链 `[新缠论:推论]`：ADR 0038:60 后句的前提「外效未发生」只在受控撮合下成立；真实外效已发生时回退 E/B 会丢 Recorded 回报并重铸责任，同时违 ADR 0051:275、C09.9、AT-13 与 ADR 0030:48。ADR 0039 把该条写进 production launcher，单在新 ADR 里收窄会让三份正本对同一条恢复语义各说各的，故修订落在 ADR 0038/0039。两条分支由会话开始时固定的 `evidence_class` 选定（ADR 0056:59 一个会话一个 `evidence_class`），源于载体事实不同，不接在任何失败后改走另一支的 if-else 上（AGENTS.md:46 #799；ADR 0041:13）。分的是恢复方法，不是验收射程：ADR 0056:63/:128 已把同模式 H1/H2 交给三种模式与 #1411，#1411:11/:13 同时要求「与相同轨迹的未中断运行一致」和「恢复不重复调用、不丢最大责任」，可见固定轨迹下不重发与六面等价是并存约束。
+b9d898dccf46c2a716115eaa1215bc39c458a959:rust/src/history_simulation/runtime.rs:33:    pub authority_epoch: String,
+b9d898dccf46c2a716115eaa1215bc39c458a959:rust/src/history_simulation/runtime.rs:67:            &self.e.authority_epoch,
+b9d898dccf46c2a716115eaa1215bc39c458a959:rust/src/history_simulation/runtime.rs:69:            &self.s.authority_epoch,
+b9d898dccf46c2a716115eaa1215bc39c458a959:rust/src/history_simulation/runtime.rs:257:    authority_epoch: String,
+b9d898dccf46c2a716115eaa1215bc39c458a959:rust/src/history_simulation/runtime.rs:476:    let payload = json!({"op":op,"protocol":AUTHORITY_WIRE,"session_id":p.session_id,"session_generation":p.session_generation,"authority_id":a.authority_id,"authority_epoch":a.authority_epoch,"command_id":command.command_id,"command_hash":hash(command),"command":command,"release_receipt_id":release});
+b9d898dccf46c2a716115eaa1215bc39c458a959:rust/src/history_simulation/runtime.rs:514:        &a.authority_epoch,
+b9d898dccf46c2a716115eaa1215bc39c458a959:rust/src/history_simulation/runtime.rs:555:        || r.authority_epoch != a.authority_epoch
+b9d898dccf46c2a716115eaa1215bc39c458a959:rust/src/history_simulation/runtime.rs:609:                json!({"kind":"ExactCommandState","command_id":id,"state":state,"x_accept":clock,"causal_refs":[{"authority_id":p.e.authority_id,"authority_epoch":p.e.authority_epoch,"receipt_id":release,"command_hash":evidence.command_hash,"release_commit_ns":evidence.commit_ns}]}),
+b9d898dccf46c2a716115eaa1215bc39c458a959:rust/src/history_simulation/runtime.rs:817:                "SELECT v FROM x_sim_meta WHERE k='authority_profile'",
+b9d898dccf46c2a716115eaa1215bc39c458a959:rust/src/history_simulation/runtime.rs:859:        "INSERT INTO x_sim_meta VALUES('authority_profile',?1)",

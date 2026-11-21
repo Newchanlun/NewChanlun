@@ -1,0 +1,1 @@
+PASS: archaeologyProblems, archaeologyCoverageProblems, missingDraftSections, hasCitationTable, landingProblem, draftClassProblems, prepareCanonicalPlan, validateCanonicalPlan, append-only

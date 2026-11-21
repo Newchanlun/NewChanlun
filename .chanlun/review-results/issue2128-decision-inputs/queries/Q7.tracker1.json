@@ -1,0 +1,62 @@
+[
+  {
+    "number": 1366,
+    "state": "OPEN",
+    "title": "TB-07 验收汇总：完整历史及恢复（SPEC #1340）",
+    "url": "https://github.com/Newchanlun/NewChanlun/issues/1366"
+  },
+  {
+    "number": 1411,
+    "state": "OPEN",
+    "title": "[impl] TB-07-C 完整会话双进程与崩溃恢复保持全状态一致（SPEC #1340）",
+    "url": "https://github.com/Newchanlun/NewChanlun/issues/1411"
+  },
+  {
+    "number": 1481,
+    "state": "OPEN",
+    "title": "[impl] S 写者审计核心降阶：Δ 单代判据、写者生涯前缀夹持与线性冷启动（承接 §5.9.2 全 9011 双跑）",
+    "url": "https://github.com/Newchanlun/NewChanlun/issues/1481"
+  },
+  {
+    "number": 1551,
+    "state": "OPEN",
+    "title": "[grilling] FU-20 #1279 关票门与整图报告（#1323，新增）",
+    "url": "https://github.com/Newchanlun/NewChanlun/issues/1551"
+  },
+  {
+    "number": 1340,
+    "state": "OPEN",
+    "title": "📋 SPEC：完整生产程序、结构全分类与逐重经营（#1323，R2）",
+    "url": "https://github.com/Newchanlun/NewChanlun/issues/1340"
+  },
+  {
+    "number": 1418,
+    "state": "OPEN",
+    "title": "[impl] TB-07-D 回放验收报告器与生产改动回归锁上线（SPEC #1340）",
+    "url": "https://github.com/Newchanlun/NewChanlun/issues/1418"
+  },
+  {
+    "number": 1528,
+    "state": "CLOSED",
+    "title": "[task] 不实施：与 ADR 0039 冻结影子终态冲突（原：replay_compare 接入 run_theta_v0_pi 生产链）",
+    "url": "https://github.com/Newchanlun/NewChanlun/issues/1528"
+  },
+  {
+    "number": 1536,
+    "state": "CLOSED",
+    "title": "[grilling] FU-14 完整历史数据与模型 profile（#1323，新增）",
+    "url": "https://github.com/Newchanlun/NewChanlun/issues/1536"
+  },
+  {
+    "number": 1538,
+    "state": "CLOSED",
+    "title": "[grilling] FU-16 paper/live 与回放同核边界（#1323，新增）",
+    "url": "https://github.com/Newchanlun/NewChanlun/issues/1538"
+  },
+  {
+    "number": 1598,
+    "state": "CLOSED",
+    "title": "[grilling] 量档、成本与历史模拟正本的选择项改写为可选值字段（#1586 A-01/A-09/A-10/B-05；A-02 拆至 #1677）",
+    "url": "https://github.com/Newchanlun/NewChanlun/issues/1598"
+  }
+]

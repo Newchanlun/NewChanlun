@@ -1,0 +1,348 @@
+{
+  "points": [
+    {
+      "id": "Q1",
+      "klass": "A",
+      "question": "正常启动的介质判断是否因上代死亡放宽？",
+      "queries": [
+        {
+          "channel": "tracker",
+          "query": "\"UnsupportedWalShmJournalCombination\" in:body,comments",
+          "command": "gh issue list --repo Newchanlun/NewChanlun --state all --search '\"UnsupportedWalShmJournalCombination\" in:body,comments' --limit 100 --json number,state,title,url",
+          "hits": 5
+        },
+        {
+          "channel": "tracker",
+          "query": "SHM R4 in:body,comments",
+          "command": "gh issue list --repo Newchanlun/NewChanlun --state all --search 'SHM R4 in:body,comments' --limit 100 --json number,state,title,url",
+          "hits": 9
+        },
+        {
+          "channel": "repo",
+          "query": "UnsupportedWalShmJournalCombination|介质再准入|R4.{0,15}SHM|SHM.{0,15}R4",
+          "command": "git grep -nE 'UnsupportedWalShmJournalCombination|介质再准入|R4.{0,15}SHM|SHM.{0,15}R4' b9d898dccf46c2a716115eaa1215bc39c458a959 -- docs/adr .chanlun/definitions analysis rust/src/bin/s_session_v3 s_session",
+          "hits": 3
+        }
+      ],
+      "hits": [
+        {
+          "source": "rust/src/bin/s_session_v3/admission_provider.rs:225–233",
+          "excerpt": "未证明私有残留先拒；E6 对 SHM 存在或 WAL/journal 并存具名拒绝。"
+        },
+        {
+          "source": "https://github.com/Newchanlun/NewChanlun/blob/d18e70fad7aae91156ac28860acab1132a076bea/docs/adr/0065-production-session-endpoint-ownership.md#L49-L65",
+          "excerpt": "第 10 条明确保留 S 的 R4、Begin、epoch；第 77 行记可认领端点下首错是 R4。"
+        },
+        {
+          "source": "https://github.com/Newchanlun/NewChanlun/issues/1411#issuecomment-6991449080",
+          "excerpt": "Linux 非空 S 的 SIGTERM 回收留下 WAL 354,352 B、SHM 32,768 B 且无 FD 持有者；只隔离端点复跑时 R4 拒绝。该次退出信号不是 SIGKILL。"
+        },
+        {
+          "source": "https://github.com/Newchanlun/NewChanlun/issues/1823#issuecomment-6687775294",
+          "excerpt": "三种布局的原样 SIGKILL 复跑先触发 socket 预筛，尚未到 E6。"
+        }
+      ],
+      "citation": "rust/src/bin/s_session_v3/admission_provider.rs:225–233",
+      "reasoning": "",
+      "recommended": "",
+      "searchedKeywords": [],
+      "gap": "",
+      "conflict": ""
+    },
+    {
+      "id": "Q2",
+      "klass": "A",
+      "question": "哪个域持何锁，端点与库有无先代资格互认？",
+      "queries": [
+        {
+          "channel": "tracker",
+          "query": "\"原会话端点\" in:body,comments",
+          "command": "gh issue list --repo Newchanlun/NewChanlun --state all --search '\"原会话端点\" in:body,comments' --limit 100 --json number,state,title,url",
+          "hits": 4
+        },
+        {
+          "channel": "tracker",
+          "query": "\"残留 socket\" in:body,comments",
+          "command": "gh issue list --repo Newchanlun/NewChanlun --state all --search '\"残留 socket\" in:body,comments' --limit 100 --json number,state,title,url",
+          "hits": 6
+        },
+        {
+          "channel": "repo",
+          "query": "残留.*socket|socket.*残留|维护锁|maintenance\\.lock|prepare_socket",
+          "command": "git grep -nE '残留.*socket|socket.*残留|维护锁|maintenance\\.lock|prepare_socket' b9d898dccf46c2a716115eaa1215bc39c458a959 -- docs/adr .chanlun/definitions analysis rust/src/bin/s_session_v3/admission.rs s_session/s_service_control.py",
+          "hits": 12
+        }
+      ],
+      "hits": [
+        {
+          "source": "docs/adr/0039-production-entry-inventory-and-unique-launcher.md:273–298",
+          "excerpt": "本域拥有锁/写权，launcher 只装配。"
+        },
+        {
+          "source": "rust/src/bin/s_session_v3/admission.rs:19–65,324–343",
+          "excerpt": "原 E5 顺序 writer → maintenance，路径与 FD 身份复核，显式解锁。"
+        },
+        {
+          "source": "https://github.com/Newchanlun/NewChanlun/blob/d18e70fad7aae91156ac28860acab1132a076bea/docs/adr/0065-production-session-endpoint-ownership.md#L49-L65",
+          "excerpt": "持锁端点认领不证明数据库可恢复；S 只读预筛，持锁并过本域门后才实际认领。"
+        },
+        {
+          "source": "s_session/s_service_control.py:711–748,882–915",
+          "excerpt": "Python 继承旧独立控制器行为，与 Rust 唯一正式 launcher 并非同一入口。"
+        }
+      ],
+      "citation": "docs/adr/0039-production-entry-inventory-and-unique-launcher.md:273–298",
+      "reasoning": "",
+      "recommended": "",
+      "searchedKeywords": [],
+      "gap": "",
+      "conflict": ""
+    },
+    {
+      "id": "Q3",
+      "klass": "A",
+      "question": "恢复能否自建锚或切换资源预算？",
+      "queries": [
+        {
+          "channel": "tracker",
+          "query": "\"准入合同\" in:body,comments",
+          "command": "gh issue list --repo Newchanlun/NewChanlun --state all --search '\"准入合同\" in:body,comments' --limit 100 --json number,state,title,url",
+          "hits": 10
+        },
+        {
+          "channel": "tracker",
+          "query": "\"AwaitingMeasurement\" in:body,comments",
+          "command": "gh issue list --repo Newchanlun/NewChanlun --state all --search '\"AwaitingMeasurement\" in:body,comments' --limit 100 --json number,state,title,url",
+          "hits": 2
+        },
+        {
+          "channel": "repo",
+          "query": "AwaitingMeasurement|无锚自动接管|八项.*(上限|峰值)|原启动绝对期限",
+          "command": "git grep -nE 'AwaitingMeasurement|无锚自动接管|八项.*(上限|峰值)|原启动绝对期限' b9d898dccf46c2a716115eaa1215bc39c458a959 -- docs/adr .chanlun/definitions analysis rust/src/bin/s_session_v3/admission_anchor.rs rust/src/bin/s_session_v3/admission_issuance.rs",
+          "hits": 15
+        }
+      ],
+      "hits": [
+        {
+          "source": "docs/adr/0046-s-admission-anchor-issuance-and-takeover.md:17–55",
+          "excerpt": "锚绑定库及八项资源限额；不得无锚接管、追认或让实施自填数。"
+        },
+        {
+          "source": "docs/adr/0050-s-resource-admission-contract-v1.md:8–35",
+          "excerpt": "登记值七项 AwaitingMeasurement，现版本全局拒签；内嵌登记唯一，本票不提供待测数值。"
+        },
+        {
+          "source": "https://github.com/Newchanlun/NewChanlun/issues/1675",
+          "excerpt": "承接主线正式成功回执、已有签锚程序和资源测量；不能拿 D2 试验值替代。"
+        }
+      ],
+      "citation": "docs/adr/0046-s-admission-anchor-issuance-and-takeover.md:17–55",
+      "reasoning": "",
+      "recommended": "",
+      "searchedKeywords": [],
+      "gap": "",
+      "conflict": ""
+    },
+    {
+      "id": "Q4",
+      "klass": "B",
+      "question": "S 本域怎样保留原 cut、结 Begin 并使具名恢复幂等？",
+      "queries": [
+        {
+          "channel": "tracker",
+          "query": "\"具名恢复\" in:body,comments",
+          "command": "gh issue list --repo Newchanlun/NewChanlun --state all --search '\"具名恢复\" in:body,comments' --limit 100 --json number,state,title,url",
+          "hits": 3
+        },
+        {
+          "channel": "tracker",
+          "query": "\"未完成Begin\" in:body,comments",
+          "command": "gh issue list --repo Newchanlun/NewChanlun --state all --search '\"未完成Begin\" in:body,comments' --limit 100 --json number,state,title,url",
+          "hits": 5
+        },
+        {
+          "channel": "repo",
+          "query": "RecoverHandoff|recovered_begin|last_recovered_begin|未完成.{0,6}Begin|恢复幂等|resume_pending",
+          "command": "git grep -nE 'RecoverHandoff|recovered_begin|last_recovered_begin|未完成.{0,6}Begin|恢复幂等|resume_pending' b9d898dccf46c2a716115eaa1215bc39c458a959 -- docs/adr .chanlun/definitions analysis rust/src/bin/s_session_v3 s_session/s_service_control.py",
+          "hits": 34
+        }
+      ],
+      "hits": [
+        {
+          "source": "rust/src/bin/s_session_v3/audit_owner.rs:1802–1875",
+          "excerpt": "当前 Recover 在 IMMEDIATE 内核规则、旧代及恢复时钟，结 Begin，同事务记跃迁；现输出未持久具名。"
+        },
+        {
+          "source": "https://github.com/Newchanlun/NewChanlun/blob/329be34f5a9ca9c2bcc38ae75783304cc654904c/rust/src/economic_session/recovery.rs#L27-L154",
+          "excerpt": "E/B 以具名身份保存请求及规范回执，按 from+1，历史查询与当前授权分离。"
+        },
+        {
+          "source": "rust/src/bin/s_session_v3/driver.rs:800–829,7659–7742",
+          "excerpt": "新 Driver 按数据库中的原字节续 pending；原先例验证早期 cut 和已接纳身份。"
+        },
+        {
+          "source": "https://github.com/Newchanlun/NewChanlun/issues/1411#issuecomment-7002229803",
+          "excerpt": "具名 E/B 原件丢回包重取已独审运行；S 不在该增量范围。"
+        }
+      ],
+      "citation": "rust/src/bin/s_session_v3/audit_owner.rs:1802–1875",
+      "reasoning": "旧 S recover 负责业务事务，E/B 已有精确防二次升代的命名规则；合起来可避免丢回包重试抹掉原身份。",
+      "recommended": "沿用 S 唯一 Recover 事务；具名请求固定 N 与切面，N+1 与原回执一次持久，query/current 分开。",
+      "searchedKeywords": [],
+      "gap": "",
+      "conflict": "旧 S recover 允许显式更大代；不收窄其原调用者。新具名操作只接受 N+1。"
+    },
+    {
+      "id": "Q5",
+      "klass": "B",
+      "question": "已核本域写者代如何交给 launcher 与其他域？",
+      "queries": [
+        {
+          "channel": "tracker",
+          "query": "\"authority_epoch\" in:body,comments",
+          "command": "gh issue list --repo Newchanlun/NewChanlun --state all --search '\"authority_epoch\" in:body,comments' --limit 100 --json number,state,title,url",
+          "hits": 3
+        },
+        {
+          "channel": "tracker",
+          "query": "\"authorized_sources\" in:body,comments",
+          "command": "gh issue list --repo Newchanlun/NewChanlun --state all --search '\"authorized_sources\" in:body,comments' --limit 100 --json number,state,title,url",
+          "hits": 1
+        },
+        {
+          "channel": "repo",
+          "query": "authority_epoch|authorized_sources|authority_profile|同轨迹|连续参照",
+          "command": "git grep -nE 'authority_epoch|authorized_sources|authority_profile|同轨迹|连续参照' b9d898dccf46c2a716115eaa1215bc39c458a959 -- docs/adr .chanlun/definitions analysis rust/src/history_simulation/runtime.rs rust/src/bin/production_session.rs",
+          "hits": 11
+        }
+      ],
+      "hits": [
+        {
+          "source": "https://github.com/Newchanlun/NewChanlun/blob/329be34f5a9ca9c2bcc38ae75783304cc654904c/rust/src/bin/production_session.rs#L249-L342",
+          "excerpt": "E/B 先调本域 current-recovery，launcher 取有效代而不写库。"
+        },
+        {
+          "source": "https://github.com/Newchanlun/NewChanlun/issues/2129",
+          "excerpt": "E 授权来源及 X 冻结权威代有独立决策；S 回执必须保留旧→新证据。"
+        },
+        {
+          "source": "rust/src/history_simulation/runtime.rs:506–517,815–831",
+          "excerpt": "回复与冻结身份/代硬判；不能靠改整数绕开。"
+        },
+        {
+          "source": "docs/adr/0059-production-session-layout-contract.md:89–124",
+          "excerpt": "布局静态判定不等于实际原件或 writer 资格。"
+        }
+      ],
+      "citation": "https://github.com/Newchanlun/NewChanlun/blob/329be34f5a9ca9c2bcc38ae75783304cc654904c/rust/src/bin/production_session.rs#L249-L342",
+      "reasoning": "把当前性验证留给域内同锁事实，launcher 才能在不读库或编辑 manifest 的条件下提供代。",
+      "recommended": "S current-recovery 严格核当前持久回执；launcher 消费，S 在 serve 锁下复核，跨域投影由 #2129 独立实现。",
+      "searchedKeywords": [],
+      "gap": "",
+      "conflict": "原 launcher 传静态 s.writer_epoch；新增显式具名选项，不改变未选项入口。"
+    },
+    {
+      "id": "Q6",
+      "klass": "C",
+      "question": "怎样受控收尾原 WAL/SHM，不以原 R4 失败触发兜底？",
+      "queries": [
+        {
+          "channel": "tracker",
+          "query": "\"wal_checkpoint\" in:body,comments",
+          "command": "gh issue list --repo Newchanlun/NewChanlun --state all --search '\"wal_checkpoint\" in:body,comments' --limit 100 --json number,state,title,url",
+          "hits": 2
+        },
+        {
+          "channel": "tracker",
+          "query": "\"删除 WAL\" in:body,comments",
+          "command": "gh issue list --repo Newchanlun/NewChanlun --state all --search '\"删除 WAL\" in:body,comments' --limit 100 --json number,state,title,url",
+          "hits": 2
+        },
+        {
+          "channel": "repo",
+          "query": "NO_CKPT_ON_CLOSE|wal_checkpoint|ColdConvertedContent|WAL.{0,12}收尾|从.{0,5}签锚.{0,6}重建",
+          "command": "git grep -nE 'NO_CKPT_ON_CLOSE|wal_checkpoint|ColdConvertedContent|WAL.{0,12}收尾|从.{0,5}签锚.{0,6}重建' b9d898dccf46c2a716115eaa1215bc39c458a959 -- docs/adr .chanlun/definitions analysis rust/src/bin/s_structure_session.rs rust/src/bin/s_session_v3 s_session",
+          "hits": 22
+        }
+      ],
+      "hits": [
+        {
+          "source": "rust/src/bin/s_session_v3/admission_private/mod.rs:624–740",
+          "excerpt": "已有只读 fd/WAL 视图、计量及 quick_check；不创建 SHM 或写源。"
+        },
+        {
+          "source": "rust/src/bin/s_structure_session.rs:440–495",
+          "excerpt": "H1 冷认证后独占 WAL 转换与物理交接，但并不处理已有残留 SHM。"
+        },
+        {
+          "source": "probe/wal.py 与 probe/boat.txt",
+          "excerpt": "Linux 小探针：NORMAL checkpoint 与最后关闭清掉已有 SHM；EXCLUSIVE checkpoint 成功也留旧 SHM。无 SHM 的 EXCLUSIVE 在提交后真杀只留可读 WAL。"
+        },
+        {
+          "source": "https://github.com/Newchanlun/NewChanlun/issues/1568",
+          "excerpt": "资源/旧介质调查先例不是原址强杀后受准跨域回执合同。"
+        }
+      ],
+      "citation": "",
+      "reasoning": "同原库 SQLite 写权限已有，但 R4 前的受限托管、商业恢复事务、丢回包闭合与交接组合未裁。锚只签资源，无可载入的历史快照。",
+      "recommended": "选显式动作：先计量固定切面，只允许受控 SQLite NORMAL WAL 收尾，然后原 R4 与同一个 S Recover，具名写连接不产生新的 SHM。",
+      "searchedKeywords": [
+        "wal_checkpoint",
+        "删除 WAL",
+        "NO_CKPT_ON_CLOSE",
+        "ColdConvertedContent"
+      ],
+      "gap": "decision",
+      "conflict": "读到成功的 TRUNCATE 不等于没有 SHM；Linux 正负探针已区分。孤立 SHM 保全而不自动清理。"
+    },
+    {
+      "id": "Q7",
+      "klass": "A",
+      "question": "正式验收消费哪些原件与阻塞边？",
+      "queries": [
+        {
+          "channel": "tracker",
+          "query": "\"TB-07-C\" in:body,comments",
+          "command": "gh issue list --repo Newchanlun/NewChanlun --state all --search '\"TB-07-C\" in:body,comments' --limit 100 --json number,state,title,url",
+          "hits": 10
+        },
+        {
+          "channel": "tracker",
+          "query": "\"cut-1\" \"SHM\" in:body,comments",
+          "command": "gh issue list --repo Newchanlun/NewChanlun --state all --search '\"cut-1\" \"SHM\" in:body,comments' --limit 100 --json number,state,title,url",
+          "hits": 4
+        },
+        {
+          "channel": "repo",
+          "query": "checkpoint 恢复|同一故障|段.*恢复|不重发|H2.*恢复|完整历史双跑",
+          "command": "git grep -nE 'checkpoint 恢复|同一故障|段.*恢复|不重发|H2.*恢复|完整历史双跑' b9d898dccf46c2a716115eaa1215bc39c458a959 -- docs/adr .chanlun/definitions analysis rust/tests/production_session_entry.rs",
+          "hits": 33
+        }
+      ],
+      "hits": [
+        {
+          "source": "https://github.com/Newchanlun/NewChanlun/blob/efc1ddc4d6c015f4f8c6d44f904d704a88308b46/.chanlun/review-results/issue1339-r2-spec-20260909/view/spec/SPEC.md#L324-L334",
+          "excerpt": "C09.3 按域隔离、4–6 S 发布/队列/事实、7 epoch、8 X 边界、9 S 独立恢复、10–11 历史/迁移。"
+        },
+        {
+          "source": "https://github.com/Newchanlun/NewChanlun/issues/1411",
+          "excerpt": "正式入口，真杀前后，业务六面/AsKnown、旧责任与不重发，独立 oracle。"
+        },
+        {
+          "source": "https://github.com/Newchanlun/NewChanlun/blob/15ffe5083724a858e1f0fc669f457f8e6451d84d/docs/adr/0038-dual-run-determinism-recovery-seek-asknown.md#L159-L185",
+          "excerpt": "#2127 候选将同轨迹全量比较与对连续参照分开；实施取获审版本。"
+        },
+        {
+          "source": "source/edges-2128-blocking.json、source/parent-2128.json",
+          "excerpt": "原生边 #2128 → #1411；父票 #1366。#2129 也独立阻挡 #1411。"
+        }
+      ],
+      "citation": "https://github.com/Newchanlun/NewChanlun/blob/efc1ddc4d6c015f4f8c6d44f904d704a88308b46/.chanlun/review-results/issue1339-r2-spec-20260909/view/spec/SPEC.md#L324-L334",
+      "reasoning": "",
+      "recommended": "",
+      "searchedKeywords": [],
+      "gap": "",
+      "conflict": ""
+    }
+  ]
+}

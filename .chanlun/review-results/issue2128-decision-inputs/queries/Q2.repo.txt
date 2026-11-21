@@ -1,0 +1,12 @@
+b9d898dccf46c2a716115eaa1215bc39c458a959:docs/adr/0059-production-session-layout-contract.md:26:4. 候选稿说「残留 socket 由 walk 报 `SourceTypeUnsupported`」，#1823 正文也这么写。实际代码顺序是：`ServeOptions::parse` 在 `writer_cli.rs:393` 调用 `socket_path`，路径已存在就报 `TransportUnavailable：socket路径已占用`（`:357-359`）。这一步早于 driver open（`:725`）。所以残留 socket 会先被这条确定性拒绝挡下，轮不到 admission walk。
+b9d898dccf46c2a716115eaa1215bc39c458a959:docs/adr/0059-production-session-layout-contract.md:71:**Q4 s.socket**：默认值为不立规则（出处：`writer_cli.rs:357-359`、`:393`、`:725`、`:802`，`session_transport.rs:634-635`），确认或否决。推理链：参数期已要求 socket 路径不存在；bind 在 driver open 之后；运行期目录只核身份。残留 socket 在参数期就以 `TransportUnavailable` 确定性拒绝，不是竞态。这一例外只因 S 自己在 driver open 之后才 bind，不涵盖 E/B 的 socket：后者由其他进程 bind，不等 S，见 Q2 第四类。
+b9d898dccf46c2a716115eaa1215bc39c458a959:docs/adr/0059-production-session-layout-contract.md:117:6. **不比较 `s.socket`**。残留 socket 在 S 参数期就以 `TransportUnavailable` 确定性拒绝（`writer_cli.rs:357-359`），S 自己在 driver open 之后才 bind（`writer_cli.rs:725`、`:802`）。本条只管 `s.socket`；E/B 的 socket 按第 3、4 条判定。重启时谁来清理，归 #1823 调查，不在本裁定范围内。
+b9d898dccf46c2a716115eaa1215bc39c458a959:docs/adr/0059-production-session-layout-contract.md:188:- **#1823**：不加边，与该票自述「不接 blocked_by #1818」一致。附注：该票正文所写「残留 socket 在测量域内报 `SourceTypeUnsupported`」与代码顺序不符，见问题第 4 条。残留 socket 先以 `TransportUnavailable：socket路径已占用` 拒绝（`writer_cli.rs:357-359`、`:393`）。该票复现时可以据此核对。
+b9d898dccf46c2a716115eaa1215bc39c458a959:rust/src/bin/s_session_v3/admission.rs:340:        let maintenance_result = Lock::acquire(consumed.lease().db_path(), ".maintenance.lock");
+b9d898dccf46c2a716115eaa1215bc39c458a959:s_session/s_service_control.py:134:    with socket.create_connection(("127.0.0.1", int(port)), timeout=remaining(deadline)) as connection:  # DevSkim: ignore DS162092 有意使用本机回环（本地服务/测试），非调试残留
+b9d898dccf46c2a716115eaa1215bc39c458a959:s_session/s_service_control.py:505:    def prepare_socket(self, deadline):
+b9d898dccf46c2a716115eaa1215bc39c458a959:s_session/s_service_control.py:521:                    raise ValueError("无法确认残留 socket 无监听者：" + str(exc)) from exc
+b9d898dccf46c2a716115eaa1215bc39c458a959:s_session/s_service_control.py:701:            # prepare_socket 已在本次启动前清空原路径，现存 socket 只能由本次子进程所建；
+b9d898dccf46c2a716115eaa1215bc39c458a959:s_session/s_service_control.py:702:            # 先登记其身份，退出后再由 prepare_socket 核身份、核无监听者后删除。
+b9d898dccf46c2a716115eaa1215bc39c458a959:s_session/s_service_control.py:708:            self.prepare_socket(deadline)
+b9d898dccf46c2a716115eaa1215bc39c458a959:s_session/s_service_control.py:727:        cleanup = self.prepare_socket(deadline)

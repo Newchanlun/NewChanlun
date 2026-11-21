@@ -1,0 +1,23 @@
+creating a default sandbox...
+bx_hdb9gasc ready in 3.4s
+pushed 1 files (4.5 KB) to ~/probe
+kernel=Linux sqlite=3.45.1
+ext2/ext3
+exclusive=True reader=False residue={'': 12288, '-wal': 8272, '-shm': 32768}
+checkpoint=(0, 0, 0) before_close={'': 12288, '-wal': 0, '-shm': 32768}
+after_close={'': 12288, '-shm': 32768}
+exact committed rows retained; uncommitted row absent
+ext2/ext3
+exclusive=True reader=True residue={'': 12288, '-wal': 8272, '-shm': 32768}
+live reader: SQLITE_BUSY before checkpoint
+checkpoint=(0, 0, 0) before_close={'': 12288, '-wal': 0, '-shm': 32768}
+after_close={'': 12288, '-shm': 32768}
+exact committed rows retained; uncommitted row absent
+ext2/ext3
+exclusive=False reader=False residue={'': 12288, '-wal': 8272, '-shm': 32768}
+checkpoint=(0, 0, 0) before_close={'': 12288, '-wal': 0, '-shm': 32768}
+after_close={'': 12288}
+exact committed rows retained; uncommitted row absent
+named txn loss after commit: {'': 12288, '-wal': 8272}
+using exclusive before first WAL access on no-SHM source did not create SHM
+exit 0 · 11s · default · $0.0001 · bx_hdb9gasc deleted

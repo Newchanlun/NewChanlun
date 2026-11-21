@@ -1,0 +1,32 @@
+[
+  {
+    "number": 1576,
+    "state": "CLOSED",
+    "title": "[impl] 旧规则库遗留未完成 Begin 时 serve→recover 死路（#1405 补评 WARN-3）",
+    "url": "https://github.com/Newchanlun/NewChanlun/issues/1576"
+  },
+  {
+    "number": 1368,
+    "state": "OPEN",
+    "title": "TB-10 验收汇总：带仓迁移、旧入口终态及默认启用（SPEC #1340）",
+    "url": "https://github.com/Newchanlun/NewChanlun/issues/1368"
+  },
+  {
+    "number": 1323,
+    "state": "OPEN",
+    "title": "🗺️ 完整生产程序接线总单：#787 严格多重赋格落地 → 旧实现收敛 → 历史回放与 paper 同核",
+    "url": "https://github.com/Newchanlun/NewChanlun/issues/1323"
+  },
+  {
+    "number": 1612,
+    "state": "CLOSED",
+    "title": "[grilling] S 写者增量路径是否升格为生产路径，及 #1488 范围拆分（承接 #1488 S4）",
+    "url": "https://github.com/Newchanlun/NewChanlun/issues/1612"
+  },
+  {
+    "number": 1488,
+    "state": "CLOSED",
+    "title": "[impl] S 写者构造降阶：增量构造与去除作废中间根（承接 #1481 M7、#1419 S0b）",
+    "url": "https://github.com/Newchanlun/NewChanlun/issues/1488"
+  }
+]

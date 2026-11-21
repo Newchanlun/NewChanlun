@@ -1,0 +1,34 @@
+b9d898dccf46c2a716115eaa1215bc39c458a959:docs/adr/0038-dual-run-determinism-recovery-seek-asknown.md:134:**原因**：裁定二「恢复」条（:60）含两句。前句「检测上次 checkpoint、加载六面快照并重放至当前 bar」对三种证据类都成立，ADR 0051 裁定三（:274）即据此定恢复幂等。后句「杀停等同未完成 bar 的全部外效未发生，S/B/E 回退到上一 checkpoint」的前提只在 simulation 成立。experiment/production 下 checkpoint 之后可能已有真实回报和可能已发出的调用，按后句回退与 #1340 C07.6、C09.8、C09.9、AT-13 及 ADR 0030 裁定五相反。ADR 0039 把本条写进正式 launcher 启动序列（:27、:147、:289），故在本文件修订。
+b9d898dccf46c2a716115eaa1215bc39c458a959:docs/adr/0038-dual-run-determinism-recovery-seek-asknown.md:139:4. **验收。** H1/H2（:80、:81、:89）判据与射程不变：照 ADR 0056:63 裁定七 (a)，三种证据类的同模式会话都在固定完整输入（输入及修订、政策/模型、时钟、种子、数值语义、故障与调度轨迹，#1340 C10.4；experiment/production 的场所侧用受控场所夹具）下验 H2，各证据类以本节第 2、3 条各自的恢复方法满足它。#1340 AT-13「回退保留所有已经发生的外效」与 C07.6 不重发是附加约束，不替代六面 H2。恢复幂等另按 ADR 0051 裁定三 (a)(b)。本修订不增删验收项。
+b9d898dccf46c2a716115eaa1215bc39c458a959:docs/adr/0051-per-bar-domain-event-identity-lifecycle-contract.md:3:> 正本：本文件是逐 bar 域事件外壳、身份、epoch 分词、去重与因果、撤回与恢复幂等、snapshot/delta 续接与持久边界的教义正本。
+b9d898dccf46c2a716115eaa1215bc39c458a959:docs/adr/0051-per-bar-domain-event-identity-lifecycle-contract.md:191:**Q8 撤回与恢复幂等**
+b9d898dccf46c2a716115eaa1215bc39c458a959:docs/adr/0051-per-bar-domain-event-identity-lifecycle-contract.md:271:### 三、撤回与恢复幂等 `[新缠论:推论]`
+b9d898dccf46c2a716115eaa1215bc39c458a959:docs/adr/0051-per-bar-domain-event-identity-lifecycle-contract.md:459:| Q8 撤回与恢复幂等 | B | ADR 0008:12；ADR 0007:9；ADR 0038 **:60**（考古误记 :66）；s_structure_session.rs:258-263；store.rs:1095-1097；#1371/#1516 | 裁定三；删行式撤回排除 |
+b9d898dccf46c2a716115eaa1215bc39c458a959:docs/adr/0060-fill-position-single-authority-and-crosswalk.md:145:  - **验收。** H1/H2（ADR 0038:80/:81、:89）的射程不变：按 ADR 0056:63 裁定七 (a)，三种模式的同模式会话都在固定完整输入（输入及修订、政策/模型、时钟、种子、数值语义、故障与调度轨迹，C10.4 :347；experiment/production 的场所侧用受控场所夹具，如 ADR 0056:66 的本地夹具端点）下验 H2：杀停恢复后六面与未杀停的连续运行相同。各证据类用各自的恢复方法满足同一 H2。真实外效不回退、不重发（AT-13 :425、C07.6）是附加的恢复约束，不替代六面 H2。恢复幂等另按 ADR 0051 裁定三 (a)(b)。本修订不增删验收项，ADR 0056 无需同步修订。
+b9d898dccf46c2a716115eaa1215bc39c458a959:docs/adr/0060-fill-position-single-authority-and-crosswalk.md:207:- **#1366**（TB-07 汇总，已被本票阻塞）：「断点恢复」按 ADR 0038 修订节验收——三种模式的同模式会话都走固定完整输入下的 H2；experiment/production 另须满足 AT-13 与 C07.6（不回退、不重发）；恢复幂等按 ADR 0051 裁定三。不新增边。
+b9d898dccf46c2a716115eaa1215bc39c458a959:rust/src/bin/s_session_v3/audit_owner.rs:1198:            return Err("StaleWriter：未完成Begin须先由监督器recover".into());
+b9d898dccf46c2a716115eaa1215bc39c458a959:rust/src/bin/s_session_v3/audit_owner.rs:1322:                        return Err("StaleWriter：已有未完成Begin，禁止新接纳或再次Begin".into());
+b9d898dccf46c2a716115eaa1215bc39c458a959:rust/src/bin/s_session_v3/audit_owner.rs:1405:            return Err("StaleWriter：已有未完成Begin".into());
+b9d898dccf46c2a716115eaa1215bc39c458a959:rust/src/bin/s_session_v3/audit_owner.rs:1502:    ///    作废施工租约并丢弃 complete/source_keeper，不留下“已有未完成Begin”；
+b9d898dccf46c2a716115eaa1215bc39c458a959:rust/src/bin/s_session_v3/audit_owner.rs:1825:        let handoff = construction_state::RecoverHandoff::new(from, next)?;
+b9d898dccf46c2a716115eaa1215bc39c458a959:rust/src/bin/s_session_v3/audit_owner.rs:1856:                "last_recovered_begin",
+b9d898dccf46c2a716115eaa1215bc39c458a959:rust/src/bin/s_session_v3/audit_owner.rs:1865:        let result = json!({"ok":true,"previous_epoch":current,"new_epoch":new_epoch,"epoch_transitioned":true,"recovered_begin":recovered,
+b9d898dccf46c2a716115eaa1215bc39c458a959:rust/src/bin/s_session_v3/audit_owner.rs:2454:        construction_state::RecoverHandoff::new(from, to).is_ok()
+b9d898dccf46c2a716115eaa1215bc39c458a959:rust/src/bin/s_session_v3/audit_owner.rs:4167:    // 非 Native 构建无构造资格、不迁移，证明只经构造门（RecoverHandoff::new）生效、不被读出。
+b9d898dccf46c2a716115eaa1215bc39c458a959:rust/src/bin/s_session_v3/audit_owner.rs:4169:    Recover(construction_state::RecoverHandoff),
+b9d898dccf46c2a716115eaa1215bc39c458a959:rust/src/bin/s_session_v3/audit_owner/q.rs:761:                        "last_recovered_begin",
+b9d898dccf46c2a716115eaa1215bc39c458a959:rust/src/bin/s_session_v3/construction_state.rs:83:pub(super) struct RecoverHandoff {
+b9d898dccf46c2a716115eaa1215bc39c458a959:rust/src/bin/s_session_v3/construction_state.rs:89:impl RecoverHandoff {
+b9d898dccf46c2a716115eaa1215bc39c458a959:rust/src/bin/s_session_v3/construction_state.rs:477:    recover: Option<(RecoverHandoff, bool)>,
+b9d898dccf46c2a716115eaa1215bc39c458a959:rust/src/bin/s_session_v3/construction_state.rs:714:        handoff: RecoverHandoff,
+b9d898dccf46c2a716115eaa1215bc39c458a959:rust/src/bin/s_session_v3/driver.rs:647:        driver.resume_pending(startup_context)?;
+b9d898dccf46c2a716115eaa1215bc39c458a959:rust/src/bin/s_session_v3/driver.rs:800:    fn resume_pending(
+b9d898dccf46c2a716115eaa1215bc39c458a959:rust/src/bin/s_session_v3/driver.rs:3578:        assert!(!reply["recovered_begin"].is_null());
+b9d898dccf46c2a716115eaa1215bc39c458a959:rust/src/bin/s_session_v3/driver.rs:3634:        // 0034 P3-3：生产 owner.recover 门即 RecoverHandoff 构造门，具体原因逐字锁定。
+b9d898dccf46c2a716115eaa1215bc39c458a959:rust/src/bin/s_session_v3/driver.rs:5168:        // startup、resume_pending 的 pending_originals、bootstrap identity 各绑定一次。
+b9d898dccf46c2a716115eaa1215bc39c458a959:rust/src/bin/s_session_v3/driver.rs:6748:    fn allocation_testonly_is_bound_before_resume_pending_advances() {
+b9d898dccf46c2a716115eaa1215bc39c458a959:rust/src/bin/s_session_v3/driver.rs:7686:        assert!(f.open("1").err().unwrap().contains("未完成Begin"));
+b9d898dccf46c2a716115eaa1215bc39c458a959:rust/src/bin/s_session_v3/driver.rs:7703:        assert_eq!(recovered["recovered_begin"]["resolved_to"], "idle");
+b9d898dccf46c2a716115eaa1215bc39c458a959:rust/src/bin/s_session_v3/driver.rs:8146:    /// 一致（不得卡在“已有未完成Begin”或“Carry租约已撤销”）。负控：同位置注入 Ledger（真正尾检失败）仍拒绝且不降级。
+b9d898dccf46c2a716115eaa1215bc39c458a959:rust/src/bin/s_session_v3/writer_cli.rs:897:/// 一次性推进：打开唯一 Driver（`open` 内部按库中原件 `resume_pending`，不重写原身份），
+b9d898dccf46c2a716115eaa1215bc39c458a959:rust/src/bin/s_session_v3/writer_cli.rs:978:/// 监督器换代：清未完成 Begin 只经 `driver::recover`（完整状态有效 + epoch 严格上升）；

@@ -1,0 +1,20 @@
+[
+  {
+    "number": 2129,
+    "state": "OPEN",
+    "title": "[grilling] E/S 恢复升代后，X 冻结的权威代与 E 的授权来源怎样跟随（#2079 设计发现，#1411 前置）",
+    "url": "https://github.com/Newchanlun/NewChanlun/issues/2129"
+  },
+  {
+    "number": 2079,
+    "state": "OPEN",
+    "title": "[grilling] 正常关停或崩溃后，谁有权重新提供原会话端点（#1411 / #1823）",
+    "url": "https://github.com/Newchanlun/NewChanlun/issues/2079"
+  },
+  {
+    "number": 1407,
+    "state": "OPEN",
+    "title": "[impl] TB-04-C 不可改精确交付与阶段条件清单（SPEC #1340）",
+    "url": "https://github.com/Newchanlun/NewChanlun/issues/1407"
+  }
+]

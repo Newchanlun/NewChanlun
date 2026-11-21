@@ -1,0 +1,22 @@
+============================= test session starts ==============================
+platform darwin -- Python 3.12.13, pytest-9.0.3, pluggy-1.6.0 -- /opt/homebrew/opt/python@3.12/bin/python3.12
+rootdir: /private/tmp/wt-2128-r1
+configfile: pyproject.toml
+plugins: timeout-2.4.0
+collecting ... collected 6 items
+
+tests/test_retired_references.py::test_code_cites_only_present_genealogy PASSED [ 16%]
+tests/test_retired_references.py::test_docs_do_not_point_at_missing_or_retired_entries PASSED [ 33%]
+tests/test_retired_references.py::test_historical_allowlist_has_no_stale_entries PASSED [ 50%]
+tests/test_retired_references.py::test_checker_catches_known_bad_cases PASSED [ 66%]
+tests/test_retired_references.py::test_whole_archived_directories_remain_checked[.rtas] PASSED [ 83%]
+tests/test_retired_references.py::test_whole_archived_directories_remain_checked[.auto-memory-snapshot] PASSED [100%]
+
+=============================== warnings summary ===============================
+../../../opt/homebrew/lib/python3.12/site-packages/_pytest/config/__init__.py:1434
+  /opt/homebrew/lib/python3.12/site-packages/_pytest/config/__init__.py:1434: PytestConfigWarning: Unknown config option: asyncio_mode
+  
+    self._warn_or_fail_if_strict(f"Unknown config option: {key}\n")
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+========================= 6 passed, 1 warning in 3.79s =========================

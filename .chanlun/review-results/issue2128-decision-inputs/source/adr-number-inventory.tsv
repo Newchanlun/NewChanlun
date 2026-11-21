@@ -1,0 +1,16 @@
+ref	max_adr_path
+origin/main	docs/adr/0063-position-bearing-migration-rollback.md
+origin/decision/1551	docs/adr/0064-at18-whole-graph-acceptance-and-closeout.md
+origin/decision/1551-adr0064-amend	docs/adr/0064-at18-whole-graph-acceptance-and-closeout.md
+origin/decision/1551-adr0064-r3	docs/adr/0064-at18-whole-graph-acceptance-and-closeout.md
+origin/decision/1619	docs/adr/0041-degrees-of-freedom-configurable-not-excluded.md
+origin/decision/2079	docs/adr/0065-production-session-endpoint-rotation.md
+origin/decision/2079-r3	docs/adr/0065-production-session-endpoint-rotation.md
+origin/decision/2079-r5	docs/adr/0065-production-session-endpoint-ownership.md
+origin/decision/2111	docs/adr/0063-position-bearing-migration-rollback.md
+origin/decision/2114	docs/adr/0063-position-bearing-migration-rollback.md
+origin/decision/2114-r3	docs/adr/0063-position-bearing-migration-rollback.md
+origin/decision/2121	docs/adr/0063-position-bearing-migration-rollback.md
+origin/decision/2127	docs/adr/0063-position-bearing-migration-rollback.md
+origin/decision/2134	docs/adr/0063-position-bearing-migration-rollback.md
+origin/decision/2141	docs/adr/0063-position-bearing-migration-rollback.md

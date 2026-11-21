@@ -1,0 +1,14 @@
+[
+  {
+    "number": 1768,
+    "state": "OPEN",
+    "title": "[impl] TB-07-E B/E 域事件外壳 domain-event/1 映射与 delta/Gap 读口（ADR 0051，#1534）",
+    "url": "https://github.com/Newchanlun/NewChanlun/issues/1768"
+  },
+  {
+    "number": 1568,
+    "state": "CLOSED",
+    "title": "[task] S init 在磁盘满时留下 4096 字节残留库，重试需人工清理",
+    "url": "https://github.com/Newchanlun/NewChanlun/issues/1568"
+  }
+]

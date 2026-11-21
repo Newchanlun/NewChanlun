@@ -1,0 +1,77 @@
+[
+  {
+    "id": "IC_kwDORJC4uM8AAAABoJ8lhg",
+    "author": {
+      "login": "xy7365527-lang"
+    },
+    "authorAssociation": "MEMBER",
+    "body": "### TB-07-C：正常停机已回收全部进程，但 S 原库不能再次准入\n\n固定 `b9d898dccf46c2a716115eaa1215bc39c458a959`，Linux x86_64 release、`production_session` 非增量构建、simulation。与 [#1375 的 E/B 恢复读](https://github.com/Newchanlun/NewChanlun/issues/1375#issuecomment-6989555597) 用同一配置，另起隔离样本定位 S：\n\n| 时点 | S 的侧件 | 持有者 |\n|---|---|---|\n| 首次启动前 | 无 WAL、SHM 或 journal | 无 |\n| 会话就绪 | WAL 0 B、SHM 32,768 B、无 journal | S |\n| launcher 收 SIGTERM 并退出 0 后 | 同一个 SHM inode、WAL 仍为 0 B、无 journal | 四个子进程全退；隔离 PID 空间找不到持有主库或侧件的 FD |\n\n再次从既有库启动，S 在 E6 返回 `UnsupportedWalShmJournalCombination / R4 准入拒绝：ReadFailed`，launcher 退出 1。[准入判据](https://github.com/Newchanlun/NewChanlun/blob/b9d898dccf46c2a716115eaa1215bc39c458a959/rust/src/bin/s_session_v3/admission_provider.rs#L231) 中，仅 SHM 存在即满足拒绝条件；已排除“必须还有活读者”。两次启动间仅清了本夹具的 socket、换代 E/B、写 manifest，未打开 S 介质。第二次 Popen 紧前未另存一份 stat，具体 SQLite 关停路径尚未定位。\n\n**S writer／launcher 生命周期的修复验收**：用正式 simulation 入口发布非空 cut，停机后保留原库，经同一合同完成再准入；公开读回原 cut 后继续接纳下一条。未知占用或不明来源 SHM 继续拒绝，不由 launcher 自动删除侧件。该 profile 尚无证据表明通用 S recover 能通过此介质准入。正常停机只是一条前置；真正中断 S/E/B/X 的双跑仍按本票原 AC。\n\n复跑驱动、精确配置、三份 stat/FD 快照和完整首拒：`/Volumes/AgentStorage/issue1411-r4-restart-20261118/RESULT.md`。\n",
+    "createdAt": "2026-11-18T19:51:12Z",
+    "includesCreatedEdit": false,
+    "isMinimized": false,
+    "minimizedReason": "",
+    "reactionGroups": [],
+    "url": "https://github.com/Newchanlun/NewChanlun/issues/1411#issuecomment-6989751686",
+    "viewerDidAuthor": true
+  },
+  {
+    "id": "IC_kwDORJC4uM8AAAABoLkL-A",
+    "author": {
+      "login": "xy7365527-lang"
+    },
+    "authorAssociation": "MEMBER",
+    "body": "**已查到非空 S 无法重启的停机路径：launcher 把写者以 SIGTERM 终止，并把回收进程报告为正常停机。** 在固定 main `b9d898dccf46` 的正式 Linux simulation 入口，一根 OHLC 获得 `Committed / cut-1`（`rcpt-fe23c8da81cb29d5`）。仅向 launcher 发 SIGTERM，内核记录 S 子进程的 wait status 为信号 15；launcher 却返回 `stopped.failed=false` 并退出 0。[launcher 的终止与回收](https://github.com/Newchanlun/NewChanlun/blob/b9d898dccf46c2a716115eaa1215bc39c458a959/rust/src/bin/production_session.rs#L342-L367)和[S 的监听循环](https://github.com/Newchanlun/NewChanlun/blob/b9d898dccf46c2a716115eaa1215bc39c458a959/rust/src/session_transport.rs#L641-L681)之间没有让结构 writer 正常结束并确认关库的步骤。\n\n停后和再次启动紧前，原库同 inode、WAL 354,352 B、SHM 32,768 B，都无 FD 持有者。为单独核实数据库能否再准入，夹具先清了已退出的 S/E/B 的本次 Unix socket，并按既定合同为 E/B 换代；没有打开或改动 S 主库及侧件。在这个条件下，第二次正式启动到达 R4/E6 后被拒，未接纳 input-2。未清理的 socket 是另一道门：[#1823 的 SIGKILL 原样重启 CI](https://github.com/Newchanlun/NewChanlun/issues/1823#issuecomment-6687775294) 三种布局下，S 都先报 `TransportUnavailable：socket路径已占用`，尚未进入 R4。三文件封存副本仍读得到 cut-1；这证明已提交状态还在，不是正式恢复成功。\n\n**修复位置是 S writer 与 launcher 的停机交接，不是 R4 的侧件拒绝条件。** 用同一输入验收：正常停机后无需夹具代删 socket 或 SQLite 侧件，即可按正式恢复步骤从同库重新准入，经正式读口读回 cut-1，再让 input-2 获得 Committed。异常终止不得冒充交接成功。已遗留的介质须保留并按另外的恢复合同处理，不能由 launcher 删除侧件。此项不替代 TB-07-C 的真实中断和全状态双跑。\n\n原始收据、wait status、紧前快照与复跑驱动：`/Volumes/AgentStorage/issue1411-r4-restart-20261118/nonempty-stop/RESULT.md`。\n",
+    "createdAt": "2026-11-18T20:58:26Z",
+    "includesCreatedEdit": true,
+    "isMinimized": false,
+    "minimizedReason": "",
+    "reactionGroups": [],
+    "url": "https://github.com/Newchanlun/NewChanlun/issues/1411#issuecomment-6991449080",
+    "viewerDidAuthor": true
+  },
+  {
+    "id": "IC_kwDORJC4uM8AAAABoV2MKw",
+    "author": {
+      "login": "xy7365527-lang"
+    },
+    "authorAssociation": "MEMBER",
+    "body": "[#2082](https://github.com/Newchanlun/NewChanlun/pull/2082) 的 `329be34f5a` 已通过 E/B 具名恢复子合同的 GPT‑6.2 Sol 非作者独审。在 Belay，从非空库执行恢复并丢弃应答后，新进程重送同一请求逐字节取回原回执，不再升代；历史回执可查，但不能授权当前写者。正式 launcher 以 E=3、B=2、B 所认 E 来源代=3 启动并读回原 cut，旧代或缺域计划在 spawn 前被拒。\n\n同头 GitHub [ci-ok](https://github.com/Newchanlun/NewChanlun/actions/runs/44473412861/job/135397071505) 和 [DevSkim](https://github.com/Newchanlun/NewChanlun/actions/runs/44473412866/job/135388088312) 均已通过。#2082 叠在尚未合入的 #2077 上，仍缺分支保护指定 App 的 `deepagents/review`。#1411 保持开放：#2079 的原 socket 交接后，还要在原 manifest、原库和原路径上经正式读口查回 cut-1 原收据，并让 input-2 得到 Committed。\n",
+    "createdAt": "2026-11-19T07:02:39Z",
+    "includesCreatedEdit": false,
+    "isMinimized": false,
+    "minimizedReason": "",
+    "reactionGroups": [],
+    "url": "https://github.com/Newchanlun/NewChanlun/issues/1411#issuecomment-7002229803",
+    "viewerDidAuthor": true
+  },
+  {
+    "id": "IC_kwDORJC4uM8AAAABpE_XwA",
+    "author": {
+      "login": "xy7365527-lang"
+    },
+    "authorAssociation": "MEMBER",
+    "body": "本条依 #1909 代理独审裁定\n\n**Resolution（P 类，非 UserSigned）**：生产会话端点的归属、退役与再服务前提，落新建的 ADR 0065（`docs/adr/0065-production-session-endpoint-ownership.md`）。\n\n1. 端点名只由持有本域写者锁的进程 bind 或退役；锁覆盖整个服务期直到监听关闭、关库标记提交和域库关闭。\n2. 只认两项内核证据：取得同一锁文件对象的锁；对钉住的残留对象试连只得 `ECONNREFUSED`。成功、`EAGAIN`、超时或其他错误一律拒绝。\n3. 退役只改名不删除；改错对象时原样放回。一个 owner 文件记名字归哪把锁；认领表七种组合各有唯一动作，拒绝时原对象保留。\n4. E、B 在自己的库里记本代正常关库标记；**无论经认领表还是旧合同直绑**，bind 成功后、首个 accept 前必须在一个事务里消费它，失败即关监听、非 0 退出。缺标记须先正式恢复。干净停机不升代。\n5. 适用前提（Linux、目录属主与权限、本地文件系统等）在认领开始前判定；不适用走旧端点合同，其放行集合是认领表的子集；认领开始后任何失败都拒绝，不回到直绑。\n6. 任一门拒绝后不换路径；launcher 只装配，另加「E/B 库部分缺失即拒」与恢复计划键集两处约束；不设任何模式、可调字段或放行开关。\n7. 作用域只到本域：不读其他域的退出记录。launcher 存活时只重拉一域归 #2120；S 真实恢复后的介质再准入归 #2128；E/S 恢复后 X 冻结的 authority_epoch 归 #2129；拒绝态清场与孤儿处置归 #2130。\n\n不授予终止进程、unlink、改属主或权限、账户、凭据或部署启用；这些须另行取得运维权限。\n\n| 项 | 值 |\n|---|---|\n| 获审 head | `d18e70fad7aae91156ac28860acab1132a076bea`（分支 `decision/2079-r5`） |\n| 目标文件 | `docs/adr/0065-production-session-endpoint-ownership.md`，blob `e6c198ab5b120943aec223d8e933d21381db038b` |\n| 起草 | GPT-6.2 Sol（Mac 工位，新会话整链重跑），考古与草稿原件：分支 `evidence/2079-decision-inputs-r5`（`15411f20`） |\n| 独审 | Claude 家族，非作者、独立进程、只读（#1323 主控本机工作流）。第 1 轮 BLOCK（R5、R8）@ `4812b992`，原件 `evidence/2079-review-4812b992`；第 2 轮（重做轮）**R1–R8 全 PASS** @ `d18e70fa`，原件 `evidence/2079-review-d18e70fa`（`a61820d5`） |\n| 落地 PR | #2139（draft；合入 main 仍须正式 `deepagents/review` 与 `ci-ok`） |\n\n本票在 #2139 合入 main 后关闭；届时在 #1323 的 Decisions so far 记一行。在那之前 #2120 对本票的原生阻塞边保留。此前四稿的记录见上方各轮评论。\n\n**第 2 轮不阻塞项的去向**（不改本获审 head；原文在独审原件）：\n\n- 转 #2130（已在该票评论列出）：备份恢复或旧二进制开服后前滚须先正式恢复；测量域内的 X 目录核对与整改；半写 owner 与放回失败的现场；`docs/runbook_production_session.md:114,116` 以 Python 控制器作为 S 既有链的写法须标注不适用于本合同管辖的端点目录。\n- 归 ADR 0065 下次实质修订：第七节补点名 ADR 0039 与 0038 的「修订（#1539）」第 1 条的取代范围；「不是正式入口」改为「不是 0039:278 的正式 launcher」，并补 `prepare_socket` 第三个调用点 `s_service_control.py:708`；「不 unlink 任何 socket」限定到本合同管辖的端点、owner 与退役名（`financial-serve` 子命令删自己的 socket 不在本合同内）；与 ADR 0063 迁移升代的关系；#1823 可关的具名测试清单。\n- 归实施时的验收（#1411）：非白名单文件系统走旧合同的一臂；锁释放顺序（监听已关、标记未提交时第二个同库 serve 须报锁冲突）；适用判定中系统调用出错与 owner 读错误的首错字样写定。\n- 证据分支 `MANIFEST.txt` 未记三份探针日志的 sha256；独审实算值记在原件里，日志已由提交 `15411f20` 按内容固定。\n",
+    "createdAt": "2026-11-20T22:01:27Z",
+    "includesCreatedEdit": false,
+    "isMinimized": false,
+    "minimizedReason": "",
+    "reactionGroups": [],
+    "url": "https://github.com/Newchanlun/NewChanlun/issues/2079#issuecomment-7051663296",
+    "viewerDidAuthor": true
+  },
+  {
+    "id": "IC_kwDORJC4uM8AAAABjp9aPg",
+    "author": {
+      "login": "xy7365527-lang"
+    },
+    "authorAssociation": "MEMBER",
+    "body": "## PR1901 的 Linux 观察已完成，现状是假死 socket 阻止重启\n\n候选 `3fb4e94e69f18bea744a4c399bffc301eb204151` 的实际 CI 合并测试提交是 `655f699b8b0e1041d73e8478106aa202a8de6ead`，父提交为 main `9ae28877b3e697dfebaa367d42cd9c3e19ee1b2f` 和该候选。\n\n原始作业：https://github.com/xy7365527-lang/NewChanlun/actions/runs/42232940985/job/127943146805\n\n两步真实执行均完成：\n- `production_session_testonly`：26 passed，0 failed，1 ignored。\n- `production_session`：28 passed，0 failed，1 ignored。\n- Ready matcher 正负控在两步都通过。\n\n两种构建各产生 OBS-IN-A、OBS-IN-BASENAME、OBS-OUT 三份完整收据，共六份。全部 first_start.ready=true，SIGKILL 后 L2 的 restarted_ready=false、退出码1；observation_complete.value/captures_complete 均为true，harness_failures、lingering、helper_descendants_at_end 均为空。\n\n**订正票正文的症状推断：三个布局中的 S 都先在参数解析 socket 门拒绝，错误原文为 `TransportUnavailable：socket路径已占用`。S 未到达 admission、epoch、DB 或 bind，不能说域内实测到了 SourceTypeUnsupported、域外实测到了 S 的 EADDRINUSE。** 同管道还有无域归属的 `TransportUnavailable：socket绑定失败 Address already in use (os error 98)`，不能将它冒认为 S，也不能从到达顺序推出跨进程因果顺序。\n\n六份收据里记录的 S generation/index_frontier/raw_events/structure_cut 和 S/E/B/X writer_epoch 前后都相等。这是列明字段的投影，不扩大为全库逐字节不变。\n\n本次验收的是观察能力与现状读数，不是自动清理或重启恢复成功。归属取舍与后续测试规格仍按 #1823 原范围承接；未授予或实施 unlink。\n\n本地原始日志 `/private/tmp/goal1323-1901-3fb-ci.log`，六收据摘要 `/private/tmp/goal1323-1901-3fb-observations.json`。PR 当前24项SUCCESS、macos-session SKIPPED；main仍要求App5486877的 `deepagents/review`，该context缺席，mergeStateStatus=BLOCKED。保持正式审查单owner队列，不绕过门或关票。\n",
+    "createdAt": "2026-11-06T14:55:23Z",
+    "includesCreatedEdit": false,
+    "isMinimized": false,
+    "minimizedReason": "",
+    "reactionGroups": [],
+    "url": "https://github.com/Newchanlun/NewChanlun/issues/1823#issuecomment-6687775294",
+    "viewerDidAuthor": true
+  }
+]

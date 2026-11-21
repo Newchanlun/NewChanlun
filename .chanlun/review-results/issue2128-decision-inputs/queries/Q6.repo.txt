@@ -1,0 +1,22 @@
+b9d898dccf46c2a716115eaa1215bc39c458a959:rust/src/bin/s_session_v3/admission.rs:193:    pub(super) fn capture_cold_conversion(&self) -> Result<provider::ColdConvertedContent, String> {
+b9d898dccf46c2a716115eaa1215bc39c458a959:rust/src/bin/s_session_v3/admission_anchor/native_n1.rs:817:            // PRAGMA 名大小写不敏感；wal_checkpoint 无参数也会执行 PASSIVE checkpoint。
+b9d898dccf46c2a716115eaa1215bc39c458a959:rust/src/bin/s_session_v3/admission_anchor/native_n1.rs:818:            name.eq_ignore_ascii_case(b"wal_checkpoint")
+b9d898dccf46c2a716115eaa1215bc39c458a959:rust/src/bin/s_session_v3/admission_anchor/native_n1.rs:1667:                        rusqlite::ffi::SQLITE_DBCONFIG_NO_CKPT_ON_CLOSE,
+b9d898dccf46c2a716115eaa1215bc39c458a959:rust/src/bin/s_session_v3/admission_private/fd_wal.rs:1149:            (DbConfig::SQLITE_DBCONFIG_NO_CKPT_ON_CLOSE, true),
+b9d898dccf46c2a716115eaa1215bc39c458a959:rust/src/bin/s_session_v3/admission_provider.rs:127:pub(super) struct ColdConvertedContent {
+b9d898dccf46c2a716115eaa1215bc39c458a959:rust/src/bin/s_session_v3/admission_provider.rs:132:impl ColdConvertedContent {
+b9d898dccf46c2a716115eaa1215bc39c458a959:rust/src/bin/s_session_v3/admission_provider.rs:388:    pub(super) fn capture_cold_conversion(&self) -> Result<ColdConvertedContent, String> {
+b9d898dccf46c2a716115eaa1215bc39c458a959:rust/src/bin/s_session_v3/admission_provider.rs:399:        // NO_CKPT_ON_CLOSE 保留该空 WAL；普通 owner 首次 IMMEDIATE 不得换 inode 或改 stamp。
+b9d898dccf46c2a716115eaa1215bc39c458a959:rust/src/bin/s_session_v3/admission_provider.rs:404:        Ok(ColdConvertedContent { main, wal })
+b9d898dccf46c2a716115eaa1215bc39c458a959:rust/src/bin/s_session_v3/audit_owner.rs:889:            // physical::initial_progress 的 wal_checkpoint(NOOP)必须在事务外；尚未签发baseline。
+b9d898dccf46c2a716115eaa1215bc39c458a959:rust/src/bin/s_session_v3/audit_owner/admission_tests.rs:394:                rusqlite::config::DbConfig::SQLITE_DBCONFIG_NO_CKPT_ON_CLOSE,
+b9d898dccf46c2a716115eaa1215bc39c458a959:rust/src/bin/s_session_v3/audit_owner/admission_tests.rs:1342:                rusqlite::config::DbConfig::SQLITE_DBCONFIG_NO_CKPT_ON_CLOSE,
+b9d898dccf46c2a716115eaa1215bc39c458a959:rust/src/bin/s_session_v3/audit_owner/history_clamp_tests.rs:268:        .query_row("PRAGMA wal_checkpoint(NOOP)", [], |r| {
+b9d898dccf46c2a716115eaa1215bc39c458a959:rust/src/bin/s_session_v3/audit_owner/history_clamp_tests.rs:299:        .query_row("PRAGMA wal_checkpoint(PASSIVE)", [], |r| {
+b9d898dccf46c2a716115eaa1215bc39c458a959:rust/src/bin/s_session_v3/audit_owner/history_physical.rs:91:        .query_row("PRAGMA main.wal_checkpoint(NOOP)", [], |r| {
+b9d898dccf46c2a716115eaa1215bc39c458a959:rust/src/bin/s_session_v3/state.rs:2563:            .query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |r| {
+b9d898dccf46c2a716115eaa1215bc39c458a959:rust/src/bin/s_structure_session.rs:375:            rusqlite::config::DbConfig::SQLITE_DBCONFIG_NO_CKPT_ON_CLOSE,
+b9d898dccf46c2a716115eaa1215bc39c458a959:rust/src/bin/s_structure_session.rs:395:            rusqlite::config::DbConfig::SQLITE_DBCONFIG_NO_CKPT_ON_CLOSE,
+b9d898dccf46c2a716115eaa1215bc39c458a959:s_session/tests/issue1527_recovery/native_n1_tests.rs:1486:                rusqlite::ffi::SQLITE_DBCONFIG_NO_CKPT_ON_CLOSE,
+b9d898dccf46c2a716115eaa1215bc39c458a959:s_session/tests/issue1527_recovery/native_n1_tests.rs:2146:                rusqlite::ffi::SQLITE_DBCONFIG_NO_CKPT_ON_CLOSE,
+b9d898dccf46c2a716115eaa1215bc39c458a959:s_session/tests/issue1527_recovery/provider_tests.rs:43:            .execute_batch("PRAGMA wal_checkpoint(TRUNCATE); PRAGMA journal_mode=DELETE;")

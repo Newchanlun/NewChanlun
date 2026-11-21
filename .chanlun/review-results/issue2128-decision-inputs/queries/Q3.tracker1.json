@@ -1,0 +1,62 @@
+[
+  {
+    "number": 1675,
+    "state": "OPEN",
+    "title": "[impl] 正式 producer→R4→CLI 成功收据（≥2，拆自 #1527）",
+    "url": "https://github.com/Newchanlun/NewChanlun/issues/1675"
+  },
+  {
+    "number": 1673,
+    "state": "OPEN",
+    "title": "[impl] TB-03-C/S5 正式会话入口的财务链+TB03C 合链运行与公共查询核对（#1406 AC1/AC4 后端）",
+    "url": "https://github.com/Newchanlun/NewChanlun/issues/1673"
+  },
+  {
+    "number": 1657,
+    "state": "CLOSED",
+    "title": "[impl] s-admission 首签与撤销操作员命令 + 合同版本校验 + 三组负控（#1567 裁定，#1527 成功收据前置）",
+    "url": "https://github.com/Newchanlun/NewChanlun/issues/1657"
+  },
+  {
+    "number": 1742,
+    "state": "OPEN",
+    "title": "[task] Deep Agents / LangGraph 与 pstack、Wayfinder、Sandcastle 独立集成试点",
+    "url": "https://github.com/Newchanlun/NewChanlun/issues/1742"
+  },
+  {
+    "number": 1567,
+    "state": "CLOSED",
+    "title": "[grilling] s-admission 首份锚的签发与无锚库接管（#1527）",
+    "url": "https://github.com/Newchanlun/NewChanlun/issues/1567"
+  },
+  {
+    "number": 1818,
+    "state": "OPEN",
+    "title": "[grilling] production_session 并发写域与 S admission 测量域布局合同（#1781 前置）",
+    "url": "https://github.com/Newchanlun/NewChanlun/issues/1818"
+  },
+  {
+    "number": 1786,
+    "state": "CLOSED",
+    "title": "[grilling] #1572 逐项结算：生产读法、v3 legacy 空集验收、运行时缓存清单归类",
+    "url": "https://github.com/Newchanlun/NewChanlun/issues/1786"
+  },
+  {
+    "number": 1527,
+    "state": "OPEN",
+    "title": "[task] 建立正式 producer/R4/CLI 恢复路径：R4 消费端与失败收据进 main（成功收据拆至 #1675）",
+    "url": "https://github.com/Newchanlun/NewChanlun/issues/1527"
+  },
+  {
+    "number": 1323,
+    "state": "OPEN",
+    "title": "🗺️ 完整生产程序接线总单：#787 严格多重赋格落地 → 旧实现收敛 → 历史回放与 paper 同核",
+    "url": "https://github.com/Newchanlun/NewChanlun/issues/1323"
+  },
+  {
+    "number": 1394,
+    "state": "CLOSED",
+    "title": "[impl] TB-03-B 财务准备、责任先增与本地提交史（SPEC #1340）",
+    "url": "https://github.com/Newchanlun/NewChanlun/issues/1394"
+  }
+]

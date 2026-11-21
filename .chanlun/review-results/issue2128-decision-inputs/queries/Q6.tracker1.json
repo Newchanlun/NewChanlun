@@ -1,0 +1,14 @@
+[
+  {
+    "number": 1675,
+    "state": "OPEN",
+    "title": "[impl] 正式 producer→R4→CLI 成功收据（≥2，拆自 #1527）",
+    "url": "https://github.com/Newchanlun/NewChanlun/issues/1675"
+  },
+  {
+    "number": 1609,
+    "state": "CLOSED",
+    "title": "[诊断] Linux 上 launcher stop-s/stop-q 报「尚未退出」，进程实已退出、RESULT 误判 FAIL（#1405 两次复现）",
+    "url": "https://github.com/Newchanlun/NewChanlun/issues/1609"
+  }
+]

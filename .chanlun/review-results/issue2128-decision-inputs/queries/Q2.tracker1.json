@@ -1,0 +1,26 @@
+[
+  {
+    "number": 2130,
+    "state": "OPEN",
+    "title": "[task] 生产会话运维 runbook：结束孤儿、拒绝态清场、目录整改、退役对象清理（承接 #2079）",
+    "url": "https://github.com/Newchanlun/NewChanlun/issues/2130"
+  },
+  {
+    "number": 2079,
+    "state": "OPEN",
+    "title": "[grilling] 正常关停或崩溃后，谁有权重新提供原会话端点（#1411 / #1823）",
+    "url": "https://github.com/Newchanlun/NewChanlun/issues/2079"
+  },
+  {
+    "number": 2128,
+    "state": "OPEN",
+    "title": "[grilling] S 被强杀后带 SHM 的介质怎样再准入，恢复后的有效代怎样交接（#2079 设计发现，#1411 前置）",
+    "url": "https://github.com/Newchanlun/NewChanlun/issues/2128"
+  },
+  {
+    "number": 2127,
+    "state": "OPEN",
+    "title": "[grilling] 运行目录与 socket 的绝对路径进入 E/B 提交根：算账本事实还是非语义运行身份（#1425 复跑发现，#1411 双跑前置）",
+    "url": "https://github.com/Newchanlun/NewChanlun/issues/2127"
+  }
+]
