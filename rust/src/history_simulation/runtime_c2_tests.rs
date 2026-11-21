@@ -255,3 +255,144 @@ fn authority_request_is_a_common_envelope_and_reply_must_bind_it() {
         }
     }
 }
+
+#[cfg(target_os = "linux")]
+#[test]
+fn authority_rebind_commit_boundary_child() {
+    let Some(root) = std::env::var_os("X_REBIND_BOUNDARY_FIXTURE") else {
+        return;
+    };
+    let root = PathBuf::from(root);
+    let db = root.join("x.db");
+    let _lock = crate::session_transport::process_lock(&db, "X").unwrap();
+    let cfg = ConfiguredProfile::parse(
+        serde_json::from_slice(&std::fs::read(root.join("profile.json")).unwrap()).unwrap(),
+    )
+    .unwrap();
+    let input = RebindInput::parse(&std::fs::read(root.join("input.json")).unwrap()).unwrap();
+    let (mut c, _) = crate::economic_session::open_durable_db(&db).unwrap();
+    let tx = c
+        .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+        .unwrap();
+    cfg.rebind_in_transaction(&tx, 1, &input).unwrap();
+    if std::env::var_os("X_REBIND_BOUNDARY_COMMIT").is_some() {
+        tx.commit().unwrap();
+    }
+    // 让主测试真杀本进程；未提交臂的事务仍持锁，已提交臂尚未发布 socket 或应答。
+    println!("X_REBIND_BOUNDARY_REACHED");
+    std::thread::park();
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn authority_rebind_reopens_at_commit_boundary() {
+    use std::os::unix::process::ExitStatusExt;
+    use std::process::{Command, Stdio};
+    let space = tempfile::tempdir().unwrap();
+    let root = space.path();
+    let db = root.join("x.db");
+    let sdb = root.join("s.db");
+    let mut business = profile(root, approved());
+    business["e"]["producer_id"] = json!("E:session");
+    business["s"]["producer_id"] = json!("S:session");
+    for key in ["e", "s"] {
+        business[key].as_object_mut().unwrap().remove("socket");
+    }
+    business.as_object_mut().unwrap().remove("socket");
+    let s_config = json!({"rule_revision":"rule/1","profile_hash":"1".repeat(64),
+        "catalog_hash":"2".repeat(64),"clock_plan_hash":"3".repeat(64),
+        "structure_source":{"category":"TestOnlyStructure","namespaces":["testonly.ohlc"]}});
+    business["schema_revision"] = json!(X_BUSINESS);
+    business["recovery_identity"] = json!({"e_manifest_hash":"a".repeat(64),"s_config":s_config});
+    let profile = json!({"business":business,"deployment":{
+        "schema_revision":X_DEPLOYMENT,"db":db,"socket":root.join("x"),
+        "e_socket":root.join("e"),"s_socket":root.join("s"),
+        "recovery_domains":{"e_db":root.join("e.db"),"e_manifest":root.join("e.json"),"s_db":sdb},
+    }});
+    let handoff = json!({"schema_revision":"x-authority-rebind-input/1","s":{
+        "verification":"current-recovery","db":sdb,
+        "receipt":{"kind":"NamedRecoveryReceipt","writer_epoch":"2","recover_ns":"100",
+            "request":{"schema_revision":"s-recovery/1","domain_id":"S","session_id":"session",
+                "session_generation":"1","recovery_id":"r1","clock_event_id":"recover-one",
+                "from_epoch":"1","config":s_config,
+                "cut":{"generation":"0","structure_cut":"cut-0","index_frontier":""}}}
+    }});
+    std::fs::write(root.join("profile.json"), canonical_json(&profile)).unwrap();
+    std::fs::write(root.join("input.json"), canonical_json(&handoff)).unwrap();
+    let cfg = ConfiguredProfile::parse(profile).unwrap();
+    {
+        let (mut c, _) = crate::economic_session::open_durable_db(&db).unwrap();
+        let tx = c.transaction().unwrap();
+        cfg.initialize_in_transaction(&tx, 1).unwrap();
+        tx.commit().unwrap();
+    }
+    let kill_at = |after: bool| {
+        let mut cmd = Command::new(std::env::current_exe().unwrap());
+        cmd.args([
+            "--exact",
+            "history_simulation::runtime::c2_tests::authority_rebind_commit_boundary_child",
+            "--nocapture",
+        ])
+        .env("X_REBIND_BOUNDARY_FIXTURE", root)
+        .stdout(Stdio::piped());
+        if after {
+            cmd.env("X_REBIND_BOUNDARY_COMMIT", "1");
+        }
+        let mut child = cmd.spawn().unwrap();
+        let out = child.stdout.take().unwrap();
+        let reached = BufReader::new(out)
+            .lines()
+            .any(|line| line.unwrap() == "X_REBIND_BOUNDARY_REACHED");
+        assert!(reached);
+        child.kill().unwrap();
+        assert_eq!(child.wait().unwrap().signal(), Some(libc::SIGKILL));
+    };
+    let records = || {
+        let c =
+            Connection::open_with_flags(&db, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap();
+        let mut q = c
+            .prepare("SELECT record FROM x_authority_bindings ORDER BY binding_seq")
+            .unwrap();
+        q.query_map([], |r| r.get::<_, String>(0))
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap()
+    };
+    let genesis = records();
+    assert_eq!(genesis.len(), 1);
+    kill_at(false);
+    assert_eq!(genesis, records());
+    println!("binding insert before commit, SIGKILL: zero new rows");
+    kill_at(true);
+    let sealed = records();
+    assert_eq!(sealed.len(), 2);
+    assert_eq!(genesis, sealed[..1]);
+    println!("after commit before first acknowledgment, SIGKILL: one new row");
+
+    let (mut c, _) = crate::economic_session::open_durable_db(&db).unwrap();
+    let tx = c.transaction().unwrap();
+    cfg.rebind_in_transaction(
+        &tx,
+        1,
+        &RebindInput::parse(canonical_json(&handoff).as_bytes()).unwrap(),
+    )
+    .unwrap();
+    tx.commit().unwrap();
+    let mut changed = handoff;
+    changed["s"]["receipt"]["recover_ns"] = json!("101");
+    let tx = c.transaction().unwrap();
+    assert!(cfg
+        .rebind_in_transaction(
+            &tx,
+            1,
+            &RebindInput::parse(canonical_json(&changed).as_bytes()).unwrap()
+        )
+        .unwrap_err()
+        .starts_with("IdentityConflict"));
+    drop(tx);
+    let tx = c.transaction().unwrap();
+    cfg.initialize_in_transaction(&tx, 1).unwrap();
+    tx.commit().unwrap();
+    assert_eq!(sealed, records());
+    println!("same receipt retry and regular restart do not append; changed receipt conflicts");
+}

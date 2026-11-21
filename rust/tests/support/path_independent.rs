@@ -436,7 +436,7 @@ impl Drop for Service {
         }
     }
 }
-fn controlled_s(path: &Path) -> std::thread::JoinHandle<()> {
+fn controlled_s(path: &Path, epoch: &'static str) -> std::thread::JoinHandle<()> {
     let listener = UnixListener::bind(path).unwrap();
     std::thread::spawn(move || {
         let (mut stream, _) = listener.accept().unwrap();
@@ -445,13 +445,14 @@ fn controlled_s(path: &Path) -> std::thread::JoinHandle<()> {
         let env = validate_envelope(serde_json::from_str(&line).unwrap(), S_SCHEMA).unwrap();
         let request = &env["payload"];
         assert_eq!(request["op"], "RequestConditionalExecution");
+        assert_eq!(request["authority_epoch"], epoch);
         let mut response = request.clone();
         response.as_object_mut().unwrap().remove("op");
         response["state"] = json!("ExecuteCommitted");
         response["receipt_id"] = json!("S:cmd-alpha");
         response["commit_ns"] = json!(RELEASE_NS);
         let reply = reply_envelope(
-            &env, response, S_SCHEMA, SESSION_ID, "1", S_RESP, S_PRODUCER, "1",
+            &env, response, S_SCHEMA, SESSION_ID, "1", S_RESP, S_PRODUCER, epoch,
         );
         writeln!(stream, "{}", canonical_json(&reply)).unwrap();
     })
@@ -548,7 +549,12 @@ fn successful_json(out: Output) -> Value {
     serde_json::from_slice(&out.stdout).unwrap()
 }
 
-fn workload(space: &Space, split: bool, neg: bool) -> [(String, Option<String>); 3] {
+fn workload(
+    space: &Space,
+    split: bool,
+    neg: bool,
+    recovery: Option<RecoveryArm>,
+) -> [(String, Option<String>); 3] {
     let declared = declaration("TestOnlyStructure", DECLARED_NS);
     let sdb = s_init_v3(space, Some(&declared));
     let limits = anchor(&sdb);
@@ -599,9 +605,40 @@ fn workload(space: &Space, split: bool, neg: bool) -> [(String, Option<String>);
             assert!(!edb.exists());
         }
     }
-    let source = controlled_s(&space.path("condition.sock"));
-    let mut service = Service(spawn_launcher(&launcher));
-    wait_domains(&mut service.0);
+    let profile = space.path("x-profile.json");
+    if recovery.is_some() {
+        let mut configured = read(&profile);
+        let manifest = read(&ec_manifest);
+        let sim = &mut configured["history_simulation"];
+        sim["business"]["recovery_identity"] = json!({
+            "e_manifest_hash":digest(&manifest["business"]),"s_config":s_recovery_config(),
+        });
+        sim["deployment"]["recovery_domains"] = json!({
+            "e_db":edb,"e_manifest":ec_manifest,"s_db":sdb,
+        });
+        save(&profile, &configured);
+    }
+    let s_epoch = if recovery == Some(RecoveryArm::Both) {
+        "2"
+    } else {
+        "1"
+    };
+    let source = controlled_s(&space.path("condition.sock"), s_epoch);
+    let mut launcher_service = None;
+    let mut standalone = None;
+    if recovery.is_some() {
+        successful_json(run(&mut domain_command("init", &edb, &ec_manifest, false)));
+        successful_json(run(&mut domain_command("init", &bdb, &ec_manifest, true)));
+        standalone = Some((
+            spawn_domain(&edb, &ec_manifest, false, "1", "1"),
+            spawn_domain(&bdb, &ec_manifest, true, "1", "1"),
+            start_owner(&mut serve_x(&xdb, &profile)),
+        ));
+    } else {
+        let mut service = Service(spawn_launcher(&launcher));
+        wait_domains(&mut service.0);
+        launcher_service = Some(service);
+    }
     for name in ["e.sock", "b.sock", "x.sock"] {
         eventually(name, || UnixStream::connect(space.path(name)).is_ok());
     }
@@ -778,8 +815,134 @@ fn workload(space: &Space, split: bool, neg: bool) -> [(String, Option<String>);
             "SimulationBatch",
         );
     }
+    if let Some(arm) = recovery {
+        let (e_service, b_service, x_service) = standalone.as_mut().unwrap();
+        let ebefore = business(&edb, "deployment");
+        let bbefore = table_bytes(&bdb, "deployment");
+        let original_profile = business(&xdb, "x_sim_deployment")["x_sim_meta"].clone();
+        let manifest_bytes = std::fs::read(&ec_manifest).unwrap();
+        stop_at(space, "e.sock", e_service);
+        stop_at(space, "b.sock", b_service);
+        let e_request = space.path("e-recovery.json");
+        let manifest = read(&ec_manifest);
+        save(
+            &e_request,
+            &json!({
+                "schema_revision":"economic-recovery/1","domain_id":"E","recovery_id":"recovered-e",
+                "session_id":SESSION_ID,"session_generation":"1","from_epoch":"1",
+                "manifest_hash":digest(&manifest["business"]),"cut":release["cut"],
+            }),
+        );
+        let recovery_call = |op| {
+            successful_json(run(domain_command(op, &edb, &ec_manifest, false)
+                .arg("--recovery-request")
+                .arg(&e_request)))
+        };
+        let received = recovery_call("recover-named");
+        let current = recovery_call("current-recovery");
+        assert_eq!(current, received);
+        assert_eq!(current["writer_epoch"], "2");
+        let after = business(&edb, "deployment");
+        for t in ["commits", "receipts", "facts", "tokens"] {
+            assert_eq!(after[t], ebefore[t], "{t} changed during E recovery");
+        }
+        assert_eq!(std::fs::read(&ec_manifest).unwrap(), manifest_bytes);
+        *e_service = spawn_domain(&edb, &ec_manifest, false, "2", "2");
+        *b_service = spawn_domain(&bdb, &ec_manifest, true, "1", "2");
+        eventually("E2", || UnixStream::connect(space.path("e.sock")).is_ok());
+        eventually("B1→E2", || {
+            UnixStream::connect(space.path("b.sock")).is_ok()
+        });
+        assert_eq!(bbefore, table_bytes(&bdb, "deployment"));
+        let before = table_bytes(&xdb, "x_sim_deployment");
+        error(x(space, "AcceptExact", command.clone()), "IdentityConflict");
+        assert_eq!(table_bytes(&xdb, "x_sim_deployment"), before);
+        stop_at(space, "x.sock", x_service);
+        let p = space.path("rebind.json");
+        let mut handoff = json!({"schema_revision":"x-authority-rebind-input/1",
+            "e":{"verification":"current-recovery","db":edb,"receipt":current}});
+        if arm == RecoveryArm::Both {
+            handoff["s"] = json!({"verification":"current-recovery","db":sdb,
+                "receipt":s_recovery(1)});
+            let mut invalid = handoff.clone();
+            invalid["s"]["receipt"]["request"]["from_epoch"] = json!("2");
+            private_json(&p, &invalid);
+            assert_refused(serve_x(&xdb, &profile).arg("--authority-rebind").arg(&p));
+            assert_eq!(
+                table_bytes(&xdb, "x_sim_deployment"),
+                before,
+                "dual vector split commit"
+            );
+        } else {
+            for (field, replacement) in [
+                ("/e/verification", json!("query-recovery")),
+                ("/e/db", json!(bdb)),
+                ("/e/receipt/writer_epoch", json!("3")),
+                ("/e/receipt/request/domain_id", json!("S")),
+                ("/e/receipt/request/session_id", json!("other")),
+                ("/e/receipt/request/manifest_hash", json!("8".repeat(64))),
+                ("/e/receipt/request/cut/root_hash", json!("7".repeat(64))),
+                ("/e/receipt/recover_ns", json!("1001")),
+            ] {
+                let mut invalid = handoff.clone();
+                *invalid.pointer_mut(field).unwrap() = replacement;
+                private_json(&p, &invalid);
+                assert_refused(serve_x(&xdb, &profile).arg("--authority-rebind").arg(&p));
+                assert_eq!(table_bytes(&xdb, "x_sim_deployment"), before, "{field}");
+            }
+            private_json(&p, &current);
+            assert_refused(serve_x(&xdb, &profile).arg("--authority-rebind").arg(&p));
+            assert_eq!(table_bytes(&xdb, "x_sim_deployment"), before);
+        }
+        private_json(&p, &handoff);
+        *x_service = start_owner(serve_x(&xdb, &profile).arg("--authority-rebind").arg(&p));
+        eventually("X rebound", || {
+            UnixStream::connect(space.path("x.sock")).is_ok()
+        });
+        let xnow = business(&xdb, "x_sim_deployment");
+        assert_eq!(original_profile, xnow["x_sim_meta"]);
+        let rows = xnow["x_authority_bindings"]["rows"].as_array().unwrap();
+        assert_eq!(rows.len(), 2);
+        let binding: Value = serde_json::from_str(rows[1][1][1].as_str().unwrap()).unwrap();
+        assert_eq!(
+            binding["old_vector"],
+            json!({"e_authority_epoch":1,"s_authority_epoch":1})
+        );
+        assert_eq!(
+            binding["new_vector"],
+            json!({"e_authority_epoch":2,"s_authority_epoch":s_epoch.parse::<i64>().unwrap()})
+        );
+        assert_eq!(
+            binding["receipts"][0],
+            json!({"domain_id":"E","original":current})
+        );
+        if arm == RecoveryArm::Both {
+            assert_eq!(
+                binding["receipts"][1],
+                json!({"domain_id":"S","original":s_recovery(1)})
+            );
+        }
+        println!("E1 SIGKILL; E CLI original cut unchanged; binding seq 1 vector={}; E/B cuts and E manifest unchanged",
+            binding["new_vector"]);
+    }
     let accepted = x(space, "AcceptExact", command.clone());
     assert_eq!(accepted["state"], "Accepted", "{accepted}");
+    if recovery.is_some() {
+        let q = &accepted["authority_history"][0];
+        assert_eq!(q["binding_seq"], 1);
+        assert_eq!(q["original"]["reply"]["producer_epoch"], "2");
+        assert_eq!(q["original"]["request"]["producer_epoch"], "1");
+        assert_eq!(q["original"]["request"]["source_epoch"], "one");
+        assert_eq!(q["original"]["reply"]["payload"]["command"], *command);
+        assert_eq!(
+            q["original"]["reply"]["payload"]["receipt_id"],
+            release["receipt_key"]
+        );
+        assert_eq!(q["original"]["reply"]["payload"]["commit_ns"], RELEASE_NS);
+        println!(
+            "X first E2 exchange binds current E envelope, original ReleaseExact receipt and clock"
+        );
+    }
     expect(
         x(
             space,
@@ -849,11 +1012,19 @@ fn workload(space: &Space, split: bool, neg: bool) -> [(String, Option<String>);
     let book = image(&bdb)["book"].clone();
     assert_eq!(book["actual_quantity"], "6", "{book}");
     assert_eq!(book["cost_totals"]["commission"], "1", "{book}");
-    assert!(
-        stop(&mut service.0).success(),
-        "{}",
-        launcher_stderr(&mut service.0)
-    );
+    if let Some(mut service) = launcher_service {
+        assert!(
+            stop(&mut service.0).success(),
+            "{}",
+            launcher_stderr(&mut service.0)
+        );
+    } else if let Some((mut e, mut b, mut x)) = standalone {
+        // ApplyAllocation above has fetched new authoritative facts at B's configured E2.
+        println!("true B ApplyAllocation used E2; resulting quantity=6, commission=1");
+        stop_at(space, "x.sock", &mut x);
+        stop_at(space, "b.sock", &mut b);
+        stop_at(space, "e.sock", &mut e);
+    }
 
     let all = [
         table_bytes(&edb, "deployment"),
@@ -882,6 +1053,25 @@ fn workload(space: &Space, split: bool, neg: bool) -> [(String, Option<String>);
         .arg("--db")
         .arg(&xdb)));
     assert_eq!(bx["profile_mode"], "simulation");
+    if recovery.is_some() {
+        let archive = tempfile::tempdir().unwrap();
+        for suffix in ["", "-wal", "-shm"] {
+            let path = space.path(&format!("x.db{suffix}"));
+            if path.exists() {
+                std::fs::rename(path, archive.path().join(format!("x.db{suffix}"))).unwrap();
+            }
+        }
+        let relocated = archive.path().join("x.db");
+        assert_eq!(
+            successful_json(run(Command::new(x_bin())
+                .arg("audit")
+                .arg("--db")
+                .arg(&relocated))),
+            bx
+        );
+        assert_eq!(table_bytes(&relocated, "x_sim_deployment"), all[2]);
+        println!("relocated X audit passed against original bytes");
+    }
     if neg {
         let unchanged = read(&space.path("x-profile.json"));
         let mut moved = unchanged.clone();
@@ -1205,8 +1395,8 @@ fn local_economic_identities_are_rejected_before_any_db_or_lock() {
 
 #[test]
 fn path_independent_e_b_x_full_business_tables_and_offline_archives() {
-    let a = workload(&Space::new(), true, true);
-    let b = workload(&Space::new(), true, false);
+    let a = workload(&Space::new(), true, true, None);
+    let b = workload(&Space::new(), true, false, None);
     for (left, right) in a.iter().zip(&b) {
         assert_eq!(
             left.0.as_bytes(),
@@ -1224,7 +1414,7 @@ fn path_independent_e_b_x_full_business_tables_and_offline_archives() {
 #[test]
 fn legacy_same_path_repeats_but_different_paths_keep_different_roots() {
     let first = Space::new();
-    let a = workload(&first, false, false);
+    let a = workload(&first, false, false, None);
     let original = first.0.path().to_owned();
     let archive = tempfile::tempdir().unwrap();
     let relocated = archive.path().join("original-deployment");
@@ -1263,9 +1453,9 @@ fn legacy_same_path_repeats_but_different_paths_keep_different_roots() {
         .arg("--db")
         .arg(relocated.join("x.db"))));
     std::fs::create_dir(&original).unwrap();
-    let same = workload(&first, false, false);
+    let same = workload(&first, false, false, None);
     assert_eq!(a, same);
-    let moved = workload(&Space::new(), false, false);
+    let moved = workload(&Space::new(), false, false, None);
     let tip = |bytes: &str| {
         serde_json::from_str::<Value>(bytes).unwrap()["commits"]["rows"]
             .as_array()
@@ -1343,6 +1533,90 @@ fn serve_x(db: &Path, profile: &Path) -> Command {
     cmd
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum RecoveryArm {
+    E,
+    Both,
+}
+
+fn s_recovery_config() -> Value {
+    json!({"rule_revision":"rule/1","profile_hash":"1".repeat(64),"catalog_hash":"2".repeat(64),
+        "clock_plan_hash":"3".repeat(64),"structure_source":{"category":"TestOnlyStructure","namespaces":[DECLARED_NS]}})
+}
+fn s_recovery(from: i64) -> Value {
+    json!({"kind":"NamedRecoveryReceipt","recover_ns":"1000","writer_epoch":(from+1).to_string(),
+        "request":{"schema_revision":"s-recovery/1","domain_id":"S","session_id":SESSION_ID,
+            "session_generation":"1","recovery_id":"recovered-s","from_epoch":from.to_string(),
+            "cut":{"generation":"0","structure_cut":"cut-0","index_frontier":""},
+            "config":s_recovery_config(),"clock_event_id":"recover-one"}})
+}
+fn private_json(path: &Path, value: &Value) {
+    save(path, value);
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)).unwrap();
+}
+fn assert_refused(cmd: &mut Command) {
+    let result = run_refusal(cmd);
+    assert_eq!(
+        result.status.code(),
+        Some(2),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+}
+fn business(db: &Path, local: &str) -> Value {
+    serde_json::from_str(&table_bytes(db, local).0).unwrap()
+}
+fn start_owner(command: &mut Command) -> Service {
+    Service(
+        command
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .spawn()
+            .unwrap(),
+    )
+}
+fn spawn_domain(db: &Path, manifest: &Path, b: bool, epoch: &str, e_epoch: &str) -> Service {
+    let mut cmd = domain_command("serve", db, manifest, b);
+    cmd.args(["--epoch", epoch]);
+    if b {
+        cmd.args(["--e-epoch", e_epoch]);
+    }
+    start_owner(&mut cmd)
+}
+fn stop_at(space: &Space, socket: &str, child: &mut Service) -> std::process::ExitStatus {
+    use std::os::unix::process::ExitStatusExt;
+    child.0.kill().unwrap();
+    let status = child.0.wait().unwrap();
+    assert_eq!(status.signal(), Some(libc::SIGKILL));
+    // 仅隔离本夹具刚杀进程的 socket；产品端点再服务仍由 owner 合同负责。
+    let old = space.path(socket);
+    if old.exists() {
+        std::fs::rename(
+            old,
+            space.path(&format!("{socket}.stopped-{}", child.0.id())),
+        )
+        .unwrap();
+    }
+    status
+}
+
+#[test]
+fn authority_rebind_e_named_recovery() {
+    let a = workload(&Space::new(), true, false, Some(RecoveryArm::E));
+    let b = workload(&Space::new(), true, false, Some(RecoveryArm::E));
+    for (left, right) in a.iter().zip(&b) {
+        assert_eq!(left.0.as_bytes(), right.0.as_bytes());
+        assert_ne!(left.1, right.1);
+    }
+    println!(
+        "two independent E/B/X deployments: full business bytes (including binding records) equal"
+    );
+}
+
+#[test]
+fn authority_rebind_dual_domain_vector_real_e() {
+    workload(&Space::new(), true, false, Some(RecoveryArm::Both));
+}
 #[test]
 fn local_x_authority_model_and_condition_identity_are_rejected_before_serve() {
     let space = Space::new();

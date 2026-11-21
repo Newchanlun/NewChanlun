@@ -451,6 +451,233 @@ def run(name):
         log.close(); e.sock.close(); s.sock.close()
         for file in sockets.iterdir(): file.unlink()
         sockets.rmdir()
-check_listening_predicate()
-a=run('run-a'); b=run('run-b'); assert a==b, 'fresh process X tables differ'
-print('PASS two fresh processes: byte-identical X tables')
+def rebind_attempts():
+    """Real X + controlled S seam; the E live E/B arm is in production_session_entry."""
+    profile_path=ROOT/'x.json'; db=ROOT/'x.db'; xp=ROOT/'x'; sp=ROOT/'s'; ep=ROOT/'e'
+    sdb=ROOT/'s.db'; edb=ROOT/'e.db'; manifest=ROOT/'e.json'; handoff_path=ROOT/'rebind.json'
+    sim=dict(model=model(),session_id='session',session_generation='1',x_id='X',
+        source_namespace='x-sim',source_epoch='epoch1',
+        e=dict(authority_id='E',authority_epoch='1',schema_revision='economic-session/1',
+            reply_namespace='economic-session/replies',producer_id='E:session'),
+        s=dict(authority_id='S',authority_epoch='1',schema_revision='s-authority-fixture/1',
+            reply_namespace='s/replies',producer_id='S:session'),
+        conditions=CONDITIONS,timeout_ms=600,max_frame_bytes=1048576)
+    s_config=dict(rule_revision='rule/1',profile_hash='1'*64,catalog_hash='2'*64,
+        clock_plan_hash='3'*64,structure_source=dict(category='TestOnlyStructure',namespaces=['testonly.ohlc']))
+    sim.update(schema_revision='x-simulation-authority/2',
+        recovery_identity=dict(e_manifest_hash='e'*64,s_config=s_config))
+    deploy=dict(schema_revision='x-simulation-deployment/1',db=str(db),socket=str(xp),
+        e_socket=str(ep),s_socket=str(sp),recovery_domains=dict(e_db=str(edb),e_manifest=str(manifest),s_db=str(sdb)))
+    outer=dict(profile_revision='x-execution-profile/1',mode='simulation',
+        credential_scope=dict(env='UNUSED_SIMULATION_CREDENTIAL'),history_simulation=dict(business=sim,deployment=deploy))
+    profile_path.write_text(canonical(outer))
+
+    def argv(rebind=False,other=db,profile=profile_path):
+        out=[str(BIN),'serve','--db',str(other),'--profile',str(profile),'--writer-epoch','1']
+        return out+(['--authority-rebind',str(handoff_path)] if rebind else [])
+    def save(v):
+        with os.fdopen(os.open(handoff_path,os.O_WRONLY|os.O_CREAT|os.O_TRUNC,0o600),'w') as f:
+            f.write(canonical(v))
+    def refused(args):
+        result=subprocess.run(args,capture_output=True,timeout=5)
+        assert result.returncode==2,(result.stdout,result.stderr)
+        return result.stderr.decode()
+    def source_s(from_epoch):
+        return dict(verification='current-recovery',db=str(sdb),receipt=dict(kind='NamedRecoveryReceipt',
+            writer_epoch=str(from_epoch+1),recover_ns=str(300+from_epoch),
+            request=dict(schema_revision='s-recovery/1',domain_id='S',session_id='session',
+                session_generation='1',recovery_id=f's-{from_epoch}',from_epoch=str(from_epoch),
+                cut=dict(generation='0',structure_cut='cut-0',index_frontier=''),config=s_config,
+                clock_event_id=f'recover-{from_epoch}')))
+    def handoff(from_epoch):
+        return dict(schema_revision='x-authority-rebind-input/1',s=source_s(from_epoch))
+    def dump():
+        with sqlite3.connect(db) as conn: return '\n'.join(conn.iterdump())
+    def binding():
+        with sqlite3.connect(db) as conn:
+            return [json.loads(v) for v, in conn.execute('SELECT record FROM x_authority_bindings ORDER BY binding_seq')]
+    def cmd(name):
+        val=command(dict(kind='submit',order=order(name,quantity=1)))
+        val['session_generation']='1'
+        return val
+    def ask(op,val): return request(xp,op,val)
+    def query(id,state):
+        val=ask('QueryCommand',id)
+        assert val['state']==state,val
+        return val
+    def verdict(op,val,kind):
+        result=ask(op,val)
+        assert result['kind']==kind,result
+        return result
+    def start(rebind=False,other=db,profile=profile_path):
+        p=subprocess.Popen(argv(rebind,other,profile),stdout=subprocess.DEVNULL,stderr=log)
+        for _ in range(500):
+            if listening(xp): return p
+            assert p.poll() is None,(p.returncode,(ROOT/'x.log').read_text())
+            time.sleep(.01)
+        p.kill(); p.wait(5)
+        raise AssertionError('X not listening')
+    def stop_x(p):
+        p.kill(); assert p.wait(5)==-9
+        if xp.exists(): xp.rename(ROOT/f'x-stopped-{p.pid}')
+    def audit():
+        out=subprocess.run([str(BIN),'audit','--db',str(db)],capture_output=True,timeout=5)
+        assert out.returncode==0,(out.stdout,out.stderr)
+
+    class Source:
+        def __init__(self,path,role):
+            self.role=role; self.epoch='1'; self.drop=None; self.hide=None; self.wrong_original=False
+            self.records={}; self.calls=[]
+            self.sock=socket.socket(socket.AF_UNIX); self.sock.bind(str(path)); self.sock.listen(16)
+            self.thread=threading.Thread(target=self.run,daemon=True); self.thread.start()
+        def run(self):
+            while True:
+                try: c,_=self.sock.accept()
+                except OSError: break
+                with c:
+                    req=json.loads(c.makefile('rb').readline())
+                    q=req['payload']; self.calls.append(copy.deepcopy(q))
+                    role=sim[self.role.lower()]
+                    authority=dict(role,authority_epoch=self.epoch)
+                    assert req['producer_id']=='X' and req['producer_epoch']=='1' and req['source_epoch']=='epoch1'
+                    assert q['authority_id']==self.role and q['authority_epoch']==self.epoch
+                    id=q['command_id']; op=q['op']
+                    if op=='QueryExecuteCommitted':
+                        if self.hide==id or id not in self.records:
+                            wire=reply_envelope(req,dict(kind='NoRecord'),authority)
+                        else:
+                            attempt,original=self.records[id]
+                            assert q['original_attempt']==attempt
+                            proof=copy.deepcopy(original)
+                            if self.wrong_original:
+                                proof['producer_epoch']=self.epoch
+                            wire=reply_envelope(req,dict(kind='ExecuteCommittedOriginal',original_reply=proof),authority)
+                    else:
+                        result={k:v for k,v in q.items() if k!='op'}
+                        state='ReleasedExact' if self.role=='E' else 'ExecuteCommitted'
+                        result.update(state=state,receipt_id=f'{self.role}:{id}',commit_ns=0)
+                        wire=reply_envelope(req,result,authority)
+                        if self.role=='S':
+                            assert op=='RequestConditionalExecution'
+                            assert id not in self.records, 'duplicate S qualification'
+                            self.records[id]=(req,wire)
+                            if self.drop==id: continue
+                    c.sendall((canonical(wire)+'\n').encode())
+
+    log=open(ROOT/'x.log','wb',buffering=0)
+    e=Source(ep,'E'); s=Source(sp,'S')
+    p=None
+    try:
+        save(handoff(1))
+        assert '原 X 库' in refused(argv(True))
+        assert not db.exists() and not Path(str(db)+'.writer.lock').exists()
+        p=start()
+        observed,ready,lost,pending=map(cmd,['o','a','b','next'])
+        for val in (observed,ready,lost,pending):
+            assert verdict('AcceptExact',val,'ExactCommandState')['state']=='Accepted'
+        verdict('AdvanceBar',batch(0,[observed['change']]),'SimulationBatch')
+        mixed=batch(1,[ready['change'],lost['change']])
+        s.drop='b'
+        verdict('AdvanceBar',mixed,'Error')
+        states={'o':'Observed','a':'ExecutionReady','b':'ExecutionRequested','next':'Accepted'}
+        frozen={k:query(k,v)['authority_history'] for k,v in states.items()}
+        assert all(item['binding_seq']==0 for rows in frozen.values() for item in rows)
+        assert all(item['original']['request']['payload']['authority_epoch']=='1'
+            for rows in frozen.values() for item in rows if item['phase'] in ('accept','request'))
+        stop_x(p); p=None; audit()
+        before=dump()
+        mutations=[
+            {},
+            dict(writer_epoch='2'),
+            source_s(0)['receipt'],
+            dict(schema_revision='x-authority-rebind-input/1'),
+        ]
+        for key,value in [('verification','query-recovery'),('db',str(edb))]:
+            with_change=handoff(1); with_change['s'][key]=value; mutations.append(with_change)
+        for key,value in [('schema_revision','economic-recovery/1'),('session_id','other'),
+                          ('session_generation','2'),('config',dict(bogus='path')),
+                          ('cut',dict(generation='0',structure_cut='/tmp/path',index_frontier=''))]:
+            with_change=handoff(1); with_change['s']['receipt']['request'][key]=value; mutations.append(with_change)
+        jump=handoff(1); jump['s']['receipt']['writer_epoch']='3'; mutations.append(jump)
+        for attempt in mutations:
+            save(attempt); refused(argv(True)); assert dump()==before
+        flat=copy.deepcopy(outer)
+        flat['history_simulation']=copy.deepcopy(sim)
+        for key in ('schema_revision','recovery_identity'): flat['history_simulation'].pop(key)
+        flat['history_simulation'].update(socket=str(xp))
+        flat['history_simulation']['e']['socket']=str(ep)
+        flat['history_simulation']['s']['socket']=str(sp)
+        legacy_profile=ROOT/'legacy.json'; legacy_profile.write_text(canonical(flat))
+        legacy=ROOT/'legacy.db'
+        p=start(other=legacy,profile=legacy_profile); stop_x(p); p=None
+        with sqlite3.connect(legacy) as conn: legacy_before=list(conn.iterdump())
+        save(handoff(1))
+        assert '就地升级' in refused(argv(True,legacy,legacy_profile))
+        with sqlite3.connect(legacy) as conn: assert legacy_before==list(conn.iterdump())
+        print('authority_rebind_rejects_invalid_transition: malformed/old/query/wrong S context/no X DB rejected without writes')
+
+        s.epoch='2'; s.drop=None
+        p=start(True)
+        assert binding()[1]['new_vector']==dict(e_authority_epoch=1,s_authority_epoch=2)
+        for k,v in states.items():
+            result=query(k,v)
+            assert result['current_binding_seq']==1 and result['authority_history']==frozen[k],result
+        drift=copy.deepcopy(lost); drift['symbol']='OTHER'
+        assert 'IdentityConflict' in verdict('AcceptExact',drift,'Error')['error']
+        assert ask('AcceptExact',observed)['authority_history']==frozen['o']
+        s.hide='b'
+        verdict('AdvanceBar',mixed,'Error')
+        s.hide=None; s.wrong_original=True
+        verdict('AdvanceBar',mixed,'Error')
+        s.wrong_original=False
+        assert query('b','ExecutionRequested')['authority_history']==frozen['b']
+        # 确定性故障注入：只让真实 X 的批发布事务失败，不伪造任何命令状态或占有。
+        with sqlite3.connect(db) as conn:
+            conn.execute("CREATE TRIGGER block_test_batch BEFORE INSERT ON x_sim_batches WHEN NEW.id='b1' BEGIN SELECT RAISE(ABORT,'fixture interruption'); END")
+        verdict('AdvanceBar',mixed,'Error')
+        old_claims={id:query(id,'MayHaveCalled')['authority_history'] for id in ('a','b')}
+        evidence=old_claims['b'][2]
+        assert evidence['binding_seq']==1
+        assert evidence['original']['observed_query']['reply']['producer_epoch']=='2'
+        assert evidence['original']['original_reply']['producer_epoch']=='1'
+        assert evidence['original']['original_reply']['payload']['commit_ns']==0
+        assert old_claims['a'][2]['binding_seq']==0
+        assert [m['op'] for m in s.calls if m['command_id']=='b']==[
+            'RequestConditionalExecution','QueryExecuteCommitted','QueryExecuteCommitted','QueryExecuteCommitted']
+        stop_x(p); p=None; audit()
+        with sqlite3.connect(db) as conn: conn.execute('DROP TRIGGER block_test_batch')
+        rebound=dump()
+        p=start(True); assert dump()==rebound and len(binding())==2
+        stop_x(p); p=None
+        diff=handoff(1); diff['s']['receipt']['recover_ns']='950'; save(diff)
+        assert '同权威转换' in refused(argv(True))
+        assert dump()==rebound
+        save(handoff(2)); s.epoch='3'
+        p=start(True)
+        assert binding()[2]['new_vector']==dict(e_authority_epoch=1,s_authority_epoch=3)
+        for id in old_claims: assert query(id,'MayHaveCalled')['authority_history']==old_claims[id]
+        call_count=len(s.calls)
+        value=verdict('AdvanceBar',mixed,'SimulationBatch')
+        assert verdict('AdvanceBar',mixed,'SimulationBatch')==value and len(s.calls)==call_count
+        for id in old_claims:
+            items=query(id,'Observed')['authority_history']
+            assert items[:-1]==old_claims[id] and items[-1]['binding_seq']==2
+        assert query('o','Observed')['authority_history']==frozen['o']
+        verdict('AdvanceBar',batch(2,[pending['change']]),'SimulationBatch')
+        assert s.calls[-1]['op']=='RequestConditionalExecution' and s.calls[-1]['authority_epoch']=='3'
+        assert len(s.records)==4 and len(s.calls)==call_count+1
+        stop_x(p); p=None; audit()
+        p=start(); assert len(binding())==3
+        print('authority_rebind_s_and_dual_domain_vector: controlled S 1→2→3, E unchanged')
+        print('authority_rebind_preserves_original_attempts: Accepted, ExecutionRequested/NoRecord/bad proof, ExecutionReady, MayHaveCalled, Observed; one S claim per command, exact historic wire replay and audit')
+    finally:
+        if p is not None and p.poll() is None: stop_x(p)
+        log.close(); e.sock.close(); s.sock.close()
+
+if __name__=='__main__':
+    if len(sys.argv)>3 and sys.argv[3]=='authority-rebind':
+        rebind_attempts()
+    else:
+        check_listening_predicate()
+        a=run('run-a'); b=run('run-b'); assert a==b, 'fresh process X tables differ'
+        print('PASS two fresh processes: byte-identical X tables')
