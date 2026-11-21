@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import re
 import statistics
@@ -19,11 +20,14 @@ SCHEMA_VERSION = "review-eval/1"
 CaseKind = Literal["bug", "clean"]
 FindingSeverity = Literal["blocking", "important", "nit", "pre_existing", "info"]
 ReviewVerdict = Literal["PASS", "BLOCK", "FAILED"]
+CaseScoreVerdict = Literal["PASS", "BLOCK", "FAILED", "MISSING"]
 
 _BLOCKING_SEVERITIES: frozenset[str] = frozenset({"blocking", "important"})
 _VALID_SEVERITIES: frozenset[str] = frozenset({"blocking", "important", "nit", "pre_existing", "info"})
 _VALID_VERDICTS: frozenset[str] = frozenset({"PASS", "BLOCK", "FAILED"})
-_SHA_RE = re.compile(r"^[0-9a-f]{7,40}$")
+_VALID_SCORE_VERDICTS: frozenset[str] = frozenset({"PASS", "BLOCK", "FAILED", "MISSING"})
+_SHA_RE = re.compile(r"^[0-9a-f]{40}$")
+_DIFF_HUNK_RE = re.compile(r"^@@ -\d+(?:,\d+)? \+(\d+)(?:,(\d+))? @@")
 
 # 启发式正则：仅用于对历史纯文本 findings 做粗粒度归类，非人工标注真值。
 _STYLE_FORMAT_RE = re.compile(
@@ -115,7 +119,7 @@ class CaseScoreDetail:
 
     case_id: str
     kind: CaseKind
-    verdict: ReviewVerdict
+    verdict: CaseScoreVerdict
     expected_locations: int
     matched_locations: int
     matched_location_indices: tuple[int, ...]
@@ -130,6 +134,9 @@ class EvalScore:
     """评测集整体打分结果。"""
 
     total_cases: int
+    evaluated_cases: int
+    missing_cases: int
+    coverage_rate: float
     bug_cases: int
     clean_cases: int
     recalled_bug_cases: int
@@ -144,6 +151,8 @@ class EvalScore:
     blocking_precision: float
     f1: float
     line_tolerance: int
+    max_finding_span: int
+    cases_fingerprint: str
     case_details: tuple[CaseScoreDetail, ...]
 
     def to_dict(self) -> dict[str, Any]:
@@ -161,6 +170,7 @@ class ScoreComparison:
     f1_delta: float
     improved_cases: tuple[str, ...]
     regressed_cases: tuple[str, ...]
+    mixed_cases: tuple[str, ...]
     unchanged_cases: tuple[str, ...]
 
     def to_dict(self) -> dict[str, Any]:
@@ -201,13 +211,17 @@ class BaselineMetrics:
     total_runs: int
     missing_outcome_runs: int
     reused_runs: int
+    fresh_pass_runs: int
+    unorderable_runs: int
     corrupted_files: tuple[str, ...]
     verdict_counts: dict[str, int]
     block_rate_all: float
-    block_rate_decided: float
+    block_rate_decided_including_reuse: float
+    block_rate_fresh_decided: float
     unique_prs: int
     prs_with_pass: int
     prs_without_pass: int
+    prs_first_pass_reused: int
     rounds_to_first_pass_all: RoundDistribution
     rounds_to_first_pass_effective: RoundDistribution
     model_verdict_counts: dict[str, dict[str, int]]
@@ -221,10 +235,16 @@ class BaselineMetrics:
     finding_heuristic_categories: dict[str, int]
     subsequent_head_pass_inferred_fixed: int
     subsequent_head_pass_total_block_findings: int
+    subsequent_head_pass_undeterminable_findings: int
     subsequent_head_pass_inferred_rate: float
     disposition_total: int
+    disposition_coverage_rate: float
     disposition_counts: dict[str, int]
     disposition_resolved_rates: dict[str, float]
+
+    @property
+    def block_rate_decided(self) -> float:
+        return self.block_rate_decided_including_reuse
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -258,9 +278,9 @@ def _require_int(raw: Any, field: str) -> int:
 
 
 def _require_sha(raw: Any, field: str) -> str:
-    value = _require_nonempty_str(raw, field).lower()
+    value = _require_nonempty_str(raw, field)
     if not _SHA_RE.fullmatch(value):
-        raise EvalValidationError(f"字段 {field} 不是合法的 Git SHA：{raw!r}")
+        raise EvalValidationError(f"字段 {field} 必须是 40 位小写 Git SHA：{raw!r}")
     return value
 
 
@@ -287,7 +307,7 @@ def load_cases(path: Path) -> tuple[EvalCase, ...]:
     """读取并做 schema 级校验，返回评测案例元组。"""
     try:
         payload = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as exc:
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
         raise EvalValidationError(f"无法解析评测集文件 {path}: {exc}") from exc
 
     if not isinstance(payload, dict):
@@ -369,13 +389,65 @@ def _git_blob_line_count(repo_root: Path, obj_spec: str) -> int:
     return len(proc.stdout.splitlines())
 
 
+def _git_diff_added_ranges(
+    repo_root: Path,
+    base_sha: str,
+    head_sha: str,
+    file_path: str,
+) -> tuple[tuple[int, int], ...]:
+    proc = subprocess.run(
+        ["git", "-C", str(repo_root), "diff", "-U0", base_sha, head_sha, "--", file_path],
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        check=False,
+    )
+    if proc.returncode != 0:
+        raise EvalValidationError(f"无法读取 Git diff（{base_sha}..{head_sha} -- {file_path}）：{proc.stderr.strip()}")
+    ranges: list[tuple[int, int]] = []
+    for line in proc.stdout.splitlines():
+        match = _DIFF_HUNK_RE.match(line)
+        if not match:
+            continue
+        start = int(match.group(1))
+        count = int(match.group(2)) if match.group(2) is not None else 1
+        if count > 0:
+            ranges.append((start, start + count - 1))
+    return tuple(ranges)
+
+
+def compute_cases_fingerprint(cases: Sequence[EvalCase]) -> str:
+    """按规范排序后的案例元数据与缺陷位置计算评测集 sha256 指纹。"""
+    canonical = [
+        {
+            "case_id": c.case_id,
+            "kind": c.kind,
+            "base_sha": c.base_sha,
+            "head_sha": c.head_sha,
+            "bug_locations": [
+                {
+                    "file": _norm_path(loc.file),
+                    "line_start": loc.line_start,
+                    "line_end": loc.line_end,
+                }
+                for loc in c.bug_locations
+            ],
+        }
+        for c in sorted(cases, key=lambda item: item.case_id)
+    ]
+    encoded = json.dumps(canonical, ensure_ascii=False, separators=(",", ":"), sort_keys=True).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
 def validate_cases(cases: Sequence[EvalCase], repo_root: Path | None = None) -> None:
-    """校验评测集不变式；提供 repo_root 时同时核验 Git 提交、文件与行号界限。"""
+    """校验评测集不变式；提供 repo_root 时同时核验 Git 提交、文件行号界限与 diff hunk 归属。"""
     if not cases:
         raise EvalValidationError("评测集不能为空")
 
     seen_ids: set[str] = set()
     line_count_cache: dict[tuple[str, str], int] = {}
+    diff_hunk_cache: dict[tuple[str, str, str], tuple[tuple[int, int], ...]] = {}
 
     for case in cases:
         if not case.case_id.strip():
@@ -385,9 +457,9 @@ def validate_cases(cases: Sequence[EvalCase], repo_root: Path | None = None) -> 
         seen_ids.add(case.case_id)
 
         if not _SHA_RE.fullmatch(case.base_sha) or not _SHA_RE.fullmatch(case.head_sha):
-            raise EvalValidationError(f"{case.case_id} 包含非法 SHA")
+            raise EvalValidationError(f"{case.case_id} 包含非法 40 位小写 SHA")
         if case.fix_sha is not None and not _SHA_RE.fullmatch(case.fix_sha):
-            raise EvalValidationError(f"{case.case_id} 包含非法 fix_sha：{case.fix_sha!r}")
+            raise EvalValidationError(f"{case.case_id} 包含非法 40 位小写 fix_sha：{case.fix_sha!r}")
         if case.base_sha == case.head_sha:
             raise EvalValidationError(f"{case.case_id} 的 base_sha 与 head_sha 相同")
 
@@ -428,13 +500,24 @@ def validate_cases(cases: Sequence[EvalCase], repo_root: Path | None = None) -> 
                     raise EvalValidationError(
                         f"{case.case_id} 的 {norm_file} 行号越界：{loc.line_end} > {total_lines}"
                     )
+                diff_key = (case.base_sha, case.head_sha, norm_file)
+                if diff_key not in diff_hunk_cache:
+                    diff_hunk_cache[diff_key] = _git_diff_added_ranges(
+                        repo_root, case.base_sha, case.head_sha, norm_file
+                    )
+                added_ranges = diff_hunk_cache[diff_key]
+                if not any(loc.line_start <= h_end and loc.line_end >= h_start for h_start, h_end in added_ranges):
+                    raise EvalValidationError(
+                        f"{case.case_id} 的 {norm_file}:{loc.line_start}..{loc.line_end} "
+                        f"未与 {case.base_sha[:10]}..{case.head_sha[:10]} 的新增/修改 diff hunk 相交"
+                    )
 
 
 def load_predictions(path: Path) -> tuple[CasePrediction, ...]:
     """读取待评测审查器的预测 JSON（支持数组或 {"predictions": [...]}）。"""
     try:
         payload = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as exc:
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
         raise EvalValidationError(f"无法解析预测文件 {path}: {exc}") from exc
 
     raw_items = payload.get("predictions") if isinstance(payload, dict) else payload
@@ -498,14 +581,61 @@ def load_predictions(path: Path) -> tuple[CasePrediction, ...]:
     return tuple(predictions)
 
 
-def _finding_matches_location(loc: BugLocation, finding: PredictedFinding, line_tolerance: int) -> bool:
+def _finding_matches_location(
+    loc: BugLocation,
+    finding: PredictedFinding,
+    *,
+    line_tolerance: int,
+    max_finding_span: int,
+) -> bool:
     if not finding.is_blocking or finding.line_start is None:
-        return False
-    if _norm_path(loc.file) != _norm_path(finding.file):
         return False
     f_start = finding.line_start
     f_end = finding.line_end if finding.line_end is not None else finding.line_start
+    if f_end - f_start > max_finding_span:
+        return False
+    if _norm_path(loc.file) != _norm_path(finding.file):
+        return False
     return f_start <= loc.line_end + line_tolerance and f_end >= max(1, loc.line_start - line_tolerance)
+
+
+def _match_findings_to_locations(
+    locations: Sequence[BugLocation],
+    blocking_findings: Sequence[PredictedFinding],
+    *,
+    line_tolerance: int,
+    max_finding_span: int,
+) -> tuple[int, ...]:
+    """在阻断发现与真实缺陷位置之间求一对一最大二分图匹配，返回命中的 location 索引元组。"""
+    adj: list[list[int]] = [
+        [
+            loc_idx
+            for loc_idx, loc in enumerate(locations)
+            if _finding_matches_location(
+                loc,
+                finding,
+                line_tolerance=line_tolerance,
+                max_finding_span=max_finding_span,
+            )
+        ]
+        for finding in blocking_findings
+    ]
+    loc_match: dict[int, int] = {}
+
+    def _try_augment(f_idx: int, visited: set[int]) -> bool:
+        for loc_idx in adj[f_idx]:
+            if loc_idx in visited:
+                continue
+            visited.add(loc_idx)
+            if loc_idx not in loc_match or _try_augment(loc_match[loc_idx], visited):
+                loc_match[loc_idx] = f_idx
+                return True
+        return False
+
+    for f_idx in range(len(blocking_findings)):
+        _try_augment(f_idx, set())
+
+    return tuple(sorted(loc_match.keys()))
 
 
 def score_predictions(
@@ -513,18 +643,23 @@ def score_predictions(
     predictions: Sequence[CasePrediction],
     *,
     line_tolerance: int = 15,
+    max_finding_span: int = 120,
+    allow_partial: bool = False,
 ) -> EvalScore:
-    """按位置容差对审查预测结果打分。
+    """按位置容差与一对一最大匹配对审查预测结果打分。
 
     口径：
+    - 默认严格要求 predictions 覆盖 cases 的全部 case_id；仅在显式 allow_partial=True 时记为 MISSING 并暴露 coverage_rate。
     - bug_case_recall：真实 bug 案被判 BLOCK 且至少一条阻断/Important 发现命中真实 bug_location 的比例。
-    - bug_location_recall：所有真实 bug_location 中被 BLOCK 案例的阻断/Important 发现命中的比例。
-    - clean_false_positive_rate：真实 clean 案中因阻断/Important 误报（或无发现空 BLOCK）被判 BLOCK 的比例；仅含 nit/info 建议且未阻断不计误报。
-    - blocking_precision：所有阻断/Important 发现中命中真实 bug_location 的比例。
+    - bug_location_recall：所有真实 bug_location 中经一对一最大匹配命中的比例（跨度超过 max_finding_span 的宽区间发现不计命中）。
+    - clean_false_positive_rate：已评真实 clean 案中只要 verdict == BLOCK 一律计为误报（无论 findings 为空、仅含 nit 或含 blocking）。
+    - blocking_precision：所有阻断/Important 发现中经一对一匹配计为真阳性的比例（重复发现不重复领取真阳性）。
     - f1：blocking_precision 与 bug_location_recall 的调和平均。
     """
     if line_tolerance < 0:
         raise EvalValidationError(f"line_tolerance 不能为负：{line_tolerance}")
+    if max_finding_span < 0:
+        raise EvalValidationError(f"max_finding_span 不能为负：{max_finding_span}")
     validate_cases(cases)
 
     case_ids = {c.case_id for c in cases}
@@ -536,8 +671,16 @@ def score_predictions(
             raise EvalValidationError(f"预测中存在未知 case_id：{pred.case_id}")
         pred_map[pred.case_id] = pred
 
+    missing_ids = [c.case_id for c in cases if c.case_id not in pred_map]
+    if missing_ids and not allow_partial:
+        raise EvalValidationError(
+            f"预测缺少案例（默认拒绝缺漏，如需部分评测请显式传 allow_partial=True）：{', '.join(missing_ids)}"
+        )
+
     bug_cases = 0
     clean_cases = 0
+    evaluated_clean_cases = 0
+    missing_cases = 0
     recalled_bug_cases = 0
     total_bug_locations = 0
     matched_bug_locations = 0
@@ -547,27 +690,49 @@ def score_predictions(
     details: list[CaseScoreDetail] = []
 
     for case in cases:
-        pred = pred_map.get(case.case_id, CasePrediction(case_id=case.case_id, verdict="PASS", findings=()))
-        blocking_findings = [f for f in pred.findings if f.is_blocking]
+        case_pred = pred_map.get(case.case_id)
+        if case_pred is None:
+            missing_cases += 1
+            if case.kind == "bug":
+                bug_cases += 1
+                total_bug_locations += len(case.bug_locations)
+            else:
+                clean_cases += 1
+            details.append(
+                CaseScoreDetail(
+                    case_id=case.case_id,
+                    kind=case.kind,
+                    verdict="MISSING",
+                    expected_locations=len(case.bug_locations),
+                    matched_locations=0,
+                    matched_location_indices=(),
+                    blocking_findings=0,
+                    matched_blocking_findings=0,
+                    bug_recalled=False,
+                    clean_false_positive=False,
+                )
+            )
+            continue
+
+        blocking_findings = [f for f in case_pred.findings if f.is_blocking]
         total_blocking_findings += len(blocking_findings)
 
         if case.kind == "bug":
             bug_cases += 1
             total_bug_locations += len(case.bug_locations)
-            matched_indices: list[int] = []
-            case_matched_blocking = 0
+            matched_indices: tuple[int, ...] = ()
+            if case_pred.verdict == "BLOCK":
+                matched_indices = _match_findings_to_locations(
+                    case.bug_locations,
+                    blocking_findings,
+                    line_tolerance=line_tolerance,
+                    max_finding_span=max_finding_span,
+                )
 
-            if pred.verdict == "BLOCK":
-                for idx, loc in enumerate(case.bug_locations):
-                    if any(_finding_matches_location(loc, f, line_tolerance) for f in blocking_findings):
-                        matched_indices.append(idx)
-                for f in blocking_findings:
-                    if any(_finding_matches_location(loc, f, line_tolerance) for loc in case.bug_locations):
-                        case_matched_blocking += 1
-
+            case_matched_blocking = len(matched_indices)
             matched_bug_locations += len(matched_indices)
             matched_blocking_findings += case_matched_blocking
-            recalled = pred.verdict == "BLOCK" and len(matched_indices) > 0
+            recalled = case_pred.verdict == "BLOCK" and len(matched_indices) > 0
             if recalled:
                 recalled_bug_cases += 1
 
@@ -575,10 +740,10 @@ def score_predictions(
                 CaseScoreDetail(
                     case_id=case.case_id,
                     kind=case.kind,
-                    verdict=pred.verdict,
+                    verdict=case_pred.verdict,
                     expected_locations=len(case.bug_locations),
                     matched_locations=len(matched_indices),
-                    matched_location_indices=tuple(matched_indices),
+                    matched_location_indices=matched_indices,
                     blocking_findings=len(blocking_findings),
                     matched_blocking_findings=case_matched_blocking,
                     bug_recalled=recalled,
@@ -587,15 +752,16 @@ def score_predictions(
             )
         else:
             clean_cases += 1
-            # 仅统计阻断/Important 误报导致的 BLOCK（以及无发现明细却强行 BLOCK 的异常情形）。
-            is_fp = pred.verdict == "BLOCK" and (len(blocking_findings) > 0 or len(pred.findings) == 0)
+            evaluated_clean_cases += 1
+            # 干净 PR 只要终态为 BLOCK 一律计为误报（无论 findings 为空、仅含 nit 或含 important/blocking）。
+            is_fp = case_pred.verdict == "BLOCK"
             if is_fp:
                 clean_false_positive_cases += 1
             details.append(
                 CaseScoreDetail(
                     case_id=case.case_id,
                     kind=case.kind,
-                    verdict=pred.verdict,
+                    verdict=case_pred.verdict,
                     expected_locations=0,
                     matched_locations=0,
                     matched_location_indices=(),
@@ -606,9 +772,11 @@ def score_predictions(
                 )
             )
 
+    evaluated_cases = len(cases) - missing_cases
+    coverage_rate = evaluated_cases / len(cases) if cases else 0.0
     bug_case_recall = recalled_bug_cases / bug_cases if bug_cases else 0.0
     bug_location_recall = matched_bug_locations / total_bug_locations if total_bug_locations else 0.0
-    clean_false_positive_rate = clean_false_positive_cases / clean_cases if clean_cases else 0.0
+    clean_false_positive_rate = clean_false_positive_cases / evaluated_clean_cases if evaluated_clean_cases else 0.0
     blocking_precision = matched_blocking_findings / total_blocking_findings if total_blocking_findings else 0.0
     f1 = (
         2.0 * blocking_precision * bug_location_recall / (blocking_precision + bug_location_recall)
@@ -618,6 +786,9 @@ def score_predictions(
 
     return EvalScore(
         total_cases=len(cases),
+        evaluated_cases=evaluated_cases,
+        missing_cases=missing_cases,
+        coverage_rate=round(coverage_rate, 6),
         bug_cases=bug_cases,
         clean_cases=clean_cases,
         recalled_bug_cases=recalled_bug_cases,
@@ -632,6 +803,8 @@ def score_predictions(
         blocking_precision=round(blocking_precision, 6),
         f1=round(f1, 6),
         line_tolerance=line_tolerance,
+        max_finding_span=max_finding_span,
+        cases_fingerprint=compute_cases_fingerprint(cases),
         case_details=tuple(details),
     )
 
@@ -639,23 +812,48 @@ def score_predictions(
 def _score_from_dict(raw: dict[str, Any]) -> EvalScore:
     try:
         raw_details = raw["case_details"]
-        details = tuple(
-            CaseScoreDetail(
-                case_id=str(d["case_id"]),
-                kind="bug" if d["kind"] == "bug" else "clean",
-                verdict="PASS" if d["verdict"] == "PASS" else ("BLOCK" if d["verdict"] == "BLOCK" else "FAILED"),
-                expected_locations=int(d["expected_locations"]),
-                matched_locations=int(d["matched_locations"]),
-                matched_location_indices=tuple(int(i) for i in d["matched_location_indices"]),
-                blocking_findings=int(d["blocking_findings"]),
-                matched_blocking_findings=int(d["matched_blocking_findings"]),
-                bug_recalled=bool(d["bug_recalled"]),
-                clean_false_positive=bool(d["clean_false_positive"]),
+        if not isinstance(raw_details, list):
+            raise EvalValidationError("case_details 必须是数组")
+        parsed_details: list[CaseScoreDetail] = []
+        for d in raw_details:
+            if not isinstance(d, dict):
+                raise EvalValidationError("case_details 元素必须是对象")
+            kind_raw = d["kind"]
+            if kind_raw not in ("bug", "clean"):
+                raise EvalValidationError(f"无效的 case kind：{kind_raw!r}")
+            kind: CaseKind = "bug" if kind_raw == "bug" else "clean"
+            verdict_raw = d["verdict"]
+            if verdict_raw not in _VALID_SCORE_VERDICTS:
+                raise EvalValidationError(f"无效的 case verdict：{verdict_raw!r}")
+            verdict: CaseScoreVerdict = (
+                "PASS"
+                if verdict_raw == "PASS"
+                else "BLOCK"
+                if verdict_raw == "BLOCK"
+                else "FAILED"
+                if verdict_raw == "FAILED"
+                else "MISSING"
             )
-            for d in raw_details
-        )
+            parsed_details.append(
+                CaseScoreDetail(
+                    case_id=str(d["case_id"]),
+                    kind=kind,
+                    verdict=verdict,
+                    expected_locations=int(d["expected_locations"]),
+                    matched_locations=int(d["matched_locations"]),
+                    matched_location_indices=tuple(int(i) for i in d["matched_location_indices"]),
+                    blocking_findings=int(d["blocking_findings"]),
+                    matched_blocking_findings=int(d["matched_blocking_findings"]),
+                    bug_recalled=bool(d["bug_recalled"]),
+                    clean_false_positive=bool(d["clean_false_positive"]),
+                )
+            )
+        cases_fp = _require_nonempty_str(raw["cases_fingerprint"], "cases_fingerprint")
         return EvalScore(
             total_cases=int(raw["total_cases"]),
+            evaluated_cases=int(raw["evaluated_cases"]),
+            missing_cases=int(raw["missing_cases"]),
+            coverage_rate=float(raw["coverage_rate"]),
             bug_cases=int(raw["bug_cases"]),
             clean_cases=int(raw["clean_cases"]),
             recalled_bug_cases=int(raw["recalled_bug_cases"]),
@@ -670,42 +868,93 @@ def _score_from_dict(raw: dict[str, Any]) -> EvalScore:
             blocking_precision=float(raw["blocking_precision"]),
             f1=float(raw["f1"]),
             line_tolerance=int(raw["line_tolerance"]),
-            case_details=details,
+            max_finding_span=int(raw["max_finding_span"]),
+            cases_fingerprint=cases_fp,
+            case_details=tuple(parsed_details),
         )
+    except EvalValidationError:
+        raise
     except (KeyError, TypeError, ValueError) as exc:
         raise EvalValidationError(f"无效的 EvalScore JSON：{exc}") from exc
 
 
 def compare_scores(before: EvalScore, after: EvalScore) -> ScoreComparison:
-    """对比两次打分，产出指标增量与逐案回归/改进列表。"""
-    before_map = {d.case_id: d for d in before.case_details}
-    after_map = {d.case_id: d for d in after.case_details}
+    """对比两次打分，先核验评测集与配置一致性，再产出指标增量与逐案改进/回归/混合列表。"""
+    if not before.cases_fingerprint or not after.cases_fingerprint:
+        raise EvalValidationError("对比打分缺少 cases_fingerprint，无法确认评测集一致")
+    if before.cases_fingerprint != after.cases_fingerprint:
+        raise EvalValidationError(
+            f"评测集指纹不一致，拒绝跨评测集对比：{before.cases_fingerprint} != {after.cases_fingerprint}"
+        )
+    if before.line_tolerance != after.line_tolerance:
+        raise EvalValidationError(
+            f"line_tolerance 不一致，拒绝对比：{before.line_tolerance} != {after.line_tolerance}"
+        )
+    if before.max_finding_span != after.max_finding_span:
+        raise EvalValidationError(
+            f"max_finding_span 不一致，拒绝对比：{before.max_finding_span} != {after.max_finding_span}"
+        )
+
+    before_map: dict[str, CaseScoreDetail] = {}
+    for d in before.case_details:
+        if d.case_id in before_map:
+            raise EvalValidationError(f"before 打分存在重复 case_id：{d.case_id}")
+        before_map[d.case_id] = d
+
+    after_map: dict[str, CaseScoreDetail] = {}
+    for d in after.case_details:
+        if d.case_id in after_map:
+            raise EvalValidationError(f"after 打分存在重复 case_id：{d.case_id}")
+        after_map[d.case_id] = d
+
+    if set(before_map) != set(after_map):
+        raise EvalValidationError(
+            f"before 与 after 的 case_id 集合不一致：{sorted(before_map)} != {sorted(after_map)}"
+        )
+
+    for case_id in sorted(before_map):
+        if before_map[case_id].kind != after_map[case_id].kind:
+            raise EvalValidationError(
+                f"案例 {case_id} 在 before 与 after 中的 kind 不一致："
+                f"{before_map[case_id].kind} != {after_map[case_id].kind}"
+            )
 
     improved: list[str] = []
     regressed: list[str] = []
+    mixed: list[str] = []
     unchanged: list[str] = []
 
-    for case_id in sorted(set(before_map) & set(after_map)):
+    for case_id in sorted(before_map):
         b = before_map[case_id]
         a = after_map[case_id]
-        if b.kind == "bug" and a.kind == "bug":
-            b_rank = (int(b.bug_recalled), b.matched_locations)
-            a_rank = (int(a.bug_recalled), a.matched_locations)
-            if a_rank > b_rank:
+        if b.kind == "bug":
+            b_recall = (int(b.bug_recalled), b.matched_locations)
+            a_recall = (int(a.bug_recalled), a.matched_locations)
+            b_false_blocking = b.blocking_findings - b.matched_blocking_findings
+            a_false_blocking = a.blocking_findings - a.matched_blocking_findings
+
+            recall_up = a_recall > b_recall
+            recall_down = a_recall < b_recall
+            fp_better = a_false_blocking < b_false_blocking
+            fp_worse = a_false_blocking > b_false_blocking
+
+            if (recall_up and fp_worse) or (recall_down and fp_better):
+                mixed.append(case_id)
+            elif (recall_up and not fp_worse) or (not recall_down and fp_better):
                 improved.append(case_id)
-            elif a_rank < b_rank:
-                regressed.append(case_id)
-            else:
-                unchanged.append(case_id)
-        elif b.kind == "clean" and a.kind == "clean":
-            if b.clean_false_positive and not a.clean_false_positive:
-                improved.append(case_id)
-            elif not b.clean_false_positive and a.clean_false_positive:
+            elif (recall_down and not fp_better) or (not recall_up and fp_worse):
                 regressed.append(case_id)
             else:
                 unchanged.append(case_id)
         else:
-            unchanged.append(case_id)
+            b_clean_bad = (int(b.clean_false_positive), b.blocking_findings)
+            a_clean_bad = (int(a.clean_false_positive), a.blocking_findings)
+            if a_clean_bad < b_clean_bad:
+                improved.append(case_id)
+            elif a_clean_bad > b_clean_bad:
+                regressed.append(case_id)
+            else:
+                unchanged.append(case_id)
 
     return ScoreComparison(
         bug_case_recall_delta=round(after.bug_case_recall - before.bug_case_recall, 6),
@@ -715,16 +964,18 @@ def compare_scores(before: EvalScore, after: EvalScore) -> ScoreComparison:
         f1_delta=round(after.f1 - before.f1, 6),
         improved_cases=tuple(improved),
         regressed_cases=tuple(regressed),
+        mixed_cases=tuple(mixed),
         unchanged_cases=tuple(unchanged),
     )
 
 
 def load_dispositions(jsonl_path: Path) -> tuple[DispositionEntry, ...]:
-    """读取 JSONL 格式的审查发现显式去向台账。"""
+    """读取 JSONL 格式的审查发现显式去向台账，并拒绝重复键 (run_id, model, finding_index)。"""
     entries: list[DispositionEntry] = []
+    seen_keys: set[tuple[str, str, int]] = set()
     try:
         lines = jsonl_path.read_text(encoding="utf-8").splitlines()
-    except OSError as exc:
+    except (OSError, UnicodeDecodeError) as exc:
         raise EvalValidationError(f"无法读取去向台账 {jsonl_path}: {exc}") from exc
 
     for line_no, raw_line in enumerate(lines, 1):
@@ -743,6 +994,12 @@ def load_dispositions(jsonl_path: Path) -> tuple[DispositionEntry, ...]:
         finding_index = _require_int(obj.get("finding_index"), f"line {line_no}.finding_index")
         if finding_index < 0:
             raise EvalValidationError(f"line {line_no}.finding_index 不能为负")
+        key = (run_id, model, finding_index)
+        if key in seen_keys:
+            raise EvalValidationError(
+                f"{jsonl_path}:{line_no} 存在重复去向键：(run_id={run_id!r}, model={model!r}, finding_index={finding_index})"
+            )
+        seen_keys.add(key)
         disp_raw = _require_nonempty_str(obj.get("disposition"), f"line {line_no}.disposition").lower()
         try:
             disposition = DispositionLabel(disp_raw)
@@ -806,7 +1063,7 @@ def _compute_round_distribution(rounds_list: Sequence[int]) -> RoundDistribution
 def _read_json_dict(path: Path, runs_dir: Path, corrupted: list[str]) -> dict[str, Any] | None:
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError):
         corrupted.append(str(path.relative_to(runs_dir)))
         return None
     if not isinstance(data, dict):
@@ -822,6 +1079,7 @@ class _RunTimelineRecord:
     dir_name: str
     head_sha: str
     verdict: str
+    is_reused: bool
     blocking_finding_count: int
 
 
@@ -829,16 +1087,21 @@ def analyze_review_runs(
     runs_dir: Path,
     *,
     dispositions_path: Path | None = None,
+    dispositions: Sequence[DispositionEntry] | None = None,
 ) -> BaselineMetrics:
-    """扫描外部正式审查 runs 目录，产出轮次分布、BLOCK 率、模型一致性与发现去向基线。"""
+    """扫描外部正式审查 runs 目录，产出轮次分布、BLOCK 率（含/去复用双分母）、模型一致性与发现去向基线。"""
     if not runs_dir.is_dir():
         raise EvalValidationError(f"runs 目录不存在或不是目录：{runs_dir}")
+    if dispositions_path is not None and dispositions is not None:
+        raise EvalValidationError("不能同时传入 dispositions_path 与 dispositions")
 
     run_dirs = sorted(p for p in runs_dir.iterdir() if p.is_dir())
     corrupted_files: list[str] = []
     verdict_counts: Counter[str] = Counter()
     missing_outcome_runs = 0
     reused_runs = 0
+    reused_pass_runs = 0
+    unorderable_runs = 0
 
     model_verdicts: dict[str, Counter[str]] = defaultdict(Counter)
     pair_agreement: dict[str, Counter[str]] = defaultdict(Counter)
@@ -851,7 +1114,13 @@ def analyze_review_runs(
     findings_by_model: Counter[str] = Counter()
     finding_heuristic_categories: Counter[str] = Counter()
 
+    all_prs: set[int] = set()
+    prs_with_any_pass: set[int] = set()
     pr_timeline: dict[int, list[_RunTimelineRecord]] = defaultdict(list)
+    undeterminable_block_findings = 0
+
+    # (run_id, model) -> (pr_number, finding_count)
+    scanned_receipts: dict[tuple[str, str], tuple[int | None, int]] = {}
 
     for run_dir in run_dirs:
         target_path = run_dir / "target.json"
@@ -868,12 +1137,20 @@ def analyze_review_runs(
             missing_outcome_runs += 1
 
         verdict = "MISSING_OUTCOME"
+        is_reused = False
+        outcome_run_id: str | None = None
         if outcome_data is not None:
+            raw_run_id = outcome_data.get("run_id")
+            if isinstance(raw_run_id, str) and raw_run_id.strip():
+                outcome_run_id = raw_run_id.strip()
             raw_verdict = outcome_data.get("verdict")
             verdict = str(raw_verdict).upper() if isinstance(raw_verdict, str) and raw_verdict.strip() else "UNKNOWN"
             verdict_counts[verdict] += 1
             if outcome_data.get("reused_from"):
+                is_reused = True
                 reused_runs += 1
+                if verdict == "PASS":
+                    reused_pass_runs += 1
 
             raw_reviews = outcome_data.get("reviews")
             if isinstance(raw_reviews, list):
@@ -893,6 +1170,18 @@ def analyze_review_runs(
         else:
             verdict_counts["MISSING_OUTCOME"] += 1
 
+        target_source = target_data or (
+            outcome_data.get("target") if outcome_data and isinstance(outcome_data.get("target"), dict) else None
+        )
+        run_pr_number: int | None = None
+        if isinstance(target_source, dict):
+            pr_raw = target_source.get("pr_number")
+            if isinstance(pr_raw, int) and not isinstance(pr_raw, bool):
+                run_pr_number = pr_raw
+                all_prs.add(run_pr_number)
+                if verdict == "PASS":
+                    prs_with_any_pass.add(run_pr_number)
+
         run_blocking_findings = 0
         for receipt_path in sorted(run_dir.glob("*/receipt.json")):
             receipt = _read_json_dict(receipt_path, runs_dir, corrupted_files)
@@ -906,14 +1195,25 @@ def analyze_review_runs(
                 failed_receipts += 1
 
             model = str(receipt.get("model") or receipt_path.parent.name)
+            receipt_run_id_raw = receipt.get("run_id")
+            receipt_run_id = (
+                receipt_run_id_raw.strip()
+                if isinstance(receipt_run_id_raw, str) and receipt_run_id_raw.strip()
+                else None
+            )
+            effective_run_id = outcome_run_id or receipt_run_id or run_dir.name
+
             result = receipt.get("result")
             if not isinstance(result, dict):
+                scanned_receipts[(effective_run_id, model)] = (run_pr_number, 0)
                 continue
             result_status = str(result.get("status") or "unknown").lower()
             raw_findings = result.get("findings")
             if not isinstance(raw_findings, list):
+                scanned_receipts[(effective_run_id, model)] = (run_pr_number, 0)
                 continue
 
+            scanned_receipts[(effective_run_id, model)] = (run_pr_number, len(raw_findings))
             for finding in raw_findings:
                 text = finding if isinstance(finding, str) else json.dumps(finding, ensure_ascii=False)
                 total_findings += 1
@@ -924,70 +1224,120 @@ def analyze_review_runs(
                 if verdict == "BLOCK" and result_status == "blocked" and category != "non_blocking_or_nit":
                     run_blocking_findings += 1
 
-        target_source = target_data or (
-            outcome_data.get("target") if outcome_data and isinstance(outcome_data.get("target"), dict) else None
+        reg_raw = target_source.get("registered_at_ns") if isinstance(target_source, dict) else None
+        has_valid_ts = isinstance(reg_raw, int) and not isinstance(reg_raw, bool) and reg_raw > 0
+        if run_pr_number is None or not has_valid_ts:
+            unorderable_runs += 1
+            if verdict == "BLOCK" and run_blocking_findings > 0:
+                undeterminable_block_findings += run_blocking_findings
+            continue
+
+        assert isinstance(target_source, dict)
+        assert isinstance(reg_raw, int)
+        att_raw = target_source.get("attempt")
+        attempt = att_raw if isinstance(att_raw, int) and not isinstance(att_raw, bool) else 0
+        raw_head = target_source.get("head_sha")
+        head_sha = raw_head.strip() if isinstance(raw_head, str) else ""
+        pr_timeline[run_pr_number].append(
+            _RunTimelineRecord(
+                registered_at_ns=reg_raw,
+                attempt=attempt,
+                dir_name=run_dir.name,
+                head_sha=head_sha,
+                verdict=verdict,
+                is_reused=is_reused,
+                blocking_finding_count=run_blocking_findings,
+            )
         )
-        if isinstance(target_source, dict):
-            pr_raw = target_source.get("pr_number")
-            if isinstance(pr_raw, int) and not isinstance(pr_raw, bool):
-                reg_raw = target_source.get("registered_at_ns")
-                reg_ns = reg_raw if isinstance(reg_raw, int) and not isinstance(reg_raw, bool) else 0
-                att_raw = target_source.get("attempt")
-                attempt = att_raw if isinstance(att_raw, int) and not isinstance(att_raw, bool) else 0
-                head_sha = str(target_source.get("head_sha") or "")
-                pr_timeline[pr_raw].append(
-                    _RunTimelineRecord(
-                        registered_at_ns=reg_ns,
-                        attempt=attempt,
-                        dir_name=run_dir.name,
-                        head_sha=head_sha,
-                        verdict=verdict,
-                        blocking_finding_count=run_blocking_findings,
-                    )
-                )
 
     rounds_all: list[int] = []
     rounds_effective: list[int] = []
-    prs_with_pass = 0
+    prs_first_pass_reused = 0
     inferred_fixed = 0
     total_block_findings = 0
 
     for _pr_number, records in sorted(pr_timeline.items()):
         ordered_runs = sorted(records, key=lambda r: (r.registered_at_ns, r.attempt, r.dir_name))
 
-        first_pass_all: int | None = None
-        for idx, rec in enumerate(ordered_runs, 1):
-            if rec.verdict == "PASS":
-                first_pass_all = idx
-                break
-        if first_pass_all is not None:
-            prs_with_pass += 1
-            rounds_all.append(first_pass_all)
-
-        # 有效评审轮次：仅计产生正式评审结论（PASS / BLOCK）的运行，排除 infra FAILED、STALE 与未完结运行。
-        effective_runs = [r for r in ordered_runs if r.verdict in ("PASS", "BLOCK")]
-        for idx, rec in enumerate(effective_runs, 1):
-            if rec.verdict == "PASS":
-                rounds_effective.append(idx)
-                break
-
+        first_pass_idx: int | None = None
         for idx, rec in enumerate(ordered_runs):
-            if rec.verdict == "BLOCK" and rec.blocking_finding_count > 0:
-                total_block_findings += rec.blocking_finding_count
-                later_diff_head_pass = any(
-                    later.verdict == "PASS" and later.head_sha and later.head_sha != rec.head_sha
-                    for later in ordered_runs[idx + 1 :]
+            if rec.verdict == "PASS":
+                first_pass_idx = idx
+                break
+        if first_pass_idx is not None:
+            rounds_all.append(first_pass_idx + 1)
+            first_pass_rec = ordered_runs[first_pass_idx]
+            if first_pass_rec.is_reused:
+                prs_first_pass_reused += 1
+            else:
+                # 有效评审轮次：仅计真实新产生正式裁定（PASS / BLOCK 且非 reused_from）的轮次。
+                fresh_effective_until_pass = sum(
+                    1
+                    for rec in ordered_runs[: first_pass_idx + 1]
+                    if rec.verdict in ("PASS", "BLOCK") and not rec.is_reused
                 )
-                if later_diff_head_pass:
-                    inferred_fixed += rec.blocking_finding_count
+                rounds_effective.append(fresh_effective_until_pass)
+
+        for rec in ordered_runs:
+            if rec.verdict != "BLOCK" or rec.blocking_finding_count <= 0:
+                continue
+            if not rec.head_sha:
+                undeterminable_block_findings += rec.blocking_finding_count
+                continue
+            strictly_later_passes = [
+                later
+                for later in ordered_runs
+                if later.verdict == "PASS" and later.registered_at_ns > rec.registered_at_ns
+            ]
+            has_diff_head_pass = any(
+                later.head_sha and later.head_sha != rec.head_sha for later in strictly_later_passes
+            )
+            if has_diff_head_pass:
+                total_block_findings += rec.blocking_finding_count
+                inferred_fixed += rec.blocking_finding_count
+            elif any(not later.head_sha for later in strictly_later_passes):
+                undeterminable_block_findings += rec.blocking_finding_count
+            else:
+                total_block_findings += rec.blocking_finding_count
 
     disposition_counts_counter: Counter[str] = Counter({label.value: 0 for label in DispositionLabel})
-    disposition_total = 0
+    entries: tuple[DispositionEntry, ...] = ()
     if dispositions_path is not None:
         entries = load_dispositions(dispositions_path)
-        disposition_total = len(entries)
-        for entry in entries:
-            disposition_counts_counter[entry.disposition.value] += 1
+    elif dispositions is not None:
+        seen_disp_keys: set[tuple[str, str, int]] = set()
+        for idx_d, entry in enumerate(dispositions):
+            if entry.finding_index < 0:
+                raise EvalValidationError(f"dispositions[{idx_d}].finding_index 不能为负")
+            d_key = (entry.run_id, entry.model, entry.finding_index)
+            if d_key in seen_disp_keys:
+                raise EvalValidationError(
+                    f"dispositions 存在重复去向键：(run_id={entry.run_id!r}, model={entry.model!r}, finding_index={entry.finding_index})"
+                )
+            seen_disp_keys.add(d_key)
+        entries = tuple(dispositions)
+
+    for entry in entries:
+        receipt_key = (entry.run_id, entry.model)
+        if receipt_key not in scanned_receipts:
+            raise EvalValidationError(
+                f"去向台账引用了不存在的回执：(run_id={entry.run_id!r}, model={entry.model!r})"
+            )
+        receipt_pr, finding_count = scanned_receipts[receipt_key]
+        if receipt_pr != entry.pr_number:
+            raise EvalValidationError(
+                f"去向台账 pr_number 与回执不一致：(run_id={entry.run_id!r}, model={entry.model!r}) "
+                f"回执为 {receipt_pr}，台账为 {entry.pr_number}"
+            )
+        if not (0 <= entry.finding_index < finding_count):
+            raise EvalValidationError(
+                f"去向台账 finding_index 越界：(run_id={entry.run_id!r}, model={entry.model!r}) "
+                f"finding_index={entry.finding_index}，回执发现条数为 {finding_count}"
+            )
+        disposition_counts_counter[entry.disposition.value] += 1
+
+    disposition_total = len(entries)
+    disposition_coverage_rate = round(disposition_total / total_findings, 6) if total_findings else 0.0
 
     resolved_labels = (
         DispositionLabel.FIXED.value,
@@ -1004,20 +1354,28 @@ def analyze_review_runs(
     total_runs = len(run_dirs)
     block_count = verdict_counts.get("BLOCK", 0)
     pass_count = verdict_counts.get("PASS", 0)
-    decided_runs = block_count + pass_count
+    fresh_pass_runs = max(0, pass_count - reused_pass_runs)
+    decided_runs_including_reuse = block_count + pass_count
+    fresh_decided_runs = block_count + fresh_pass_runs
 
     return BaselineMetrics(
         runs_dir=str(runs_dir),
         total_runs=total_runs,
         missing_outcome_runs=missing_outcome_runs,
         reused_runs=reused_runs,
+        fresh_pass_runs=fresh_pass_runs,
+        unorderable_runs=unorderable_runs,
         corrupted_files=tuple(corrupted_files),
         verdict_counts=dict(sorted(verdict_counts.items())),
         block_rate_all=round(block_count / total_runs, 6) if total_runs else 0.0,
-        block_rate_decided=round(block_count / decided_runs, 6) if decided_runs else 0.0,
-        unique_prs=len(pr_timeline),
-        prs_with_pass=prs_with_pass,
-        prs_without_pass=len(pr_timeline) - prs_with_pass,
+        block_rate_decided_including_reuse=(
+            round(block_count / decided_runs_including_reuse, 6) if decided_runs_including_reuse else 0.0
+        ),
+        block_rate_fresh_decided=round(block_count / fresh_decided_runs, 6) if fresh_decided_runs else 0.0,
+        unique_prs=len(all_prs),
+        prs_with_pass=len(prs_with_any_pass),
+        prs_without_pass=len(all_prs) - len(prs_with_any_pass),
+        prs_first_pass_reused=prs_first_pass_reused,
         rounds_to_first_pass_all=_compute_round_distribution(rounds_all),
         rounds_to_first_pass_effective=_compute_round_distribution(rounds_effective),
         model_verdict_counts={m: dict(sorted(c.items())) for m, c in sorted(model_verdicts.items())},
@@ -1031,10 +1389,12 @@ def analyze_review_runs(
         finding_heuristic_categories=dict(sorted(finding_heuristic_categories.items())),
         subsequent_head_pass_inferred_fixed=inferred_fixed,
         subsequent_head_pass_total_block_findings=total_block_findings,
+        subsequent_head_pass_undeterminable_findings=undeterminable_block_findings,
         subsequent_head_pass_inferred_rate=(
             round(inferred_fixed / total_block_findings, 6) if total_block_findings else 0.0
         ),
         disposition_total=disposition_total,
+        disposition_coverage_rate=disposition_coverage_rate,
         disposition_counts=dict(disposition_counts_counter),
         disposition_resolved_rates=disposition_resolved_rates,
     )
@@ -1069,13 +1429,19 @@ def _render_round_table(title: str, dist: RoundDistribution) -> list[str]:
 
 def render_baseline_markdown(metrics: BaselineMetrics) -> str:
     """将 BaselineMetrics 渲染为简体中文基线报告。"""
+    pass_count = metrics.verdict_counts.get("PASS", 0)
+    block_count = metrics.verdict_counts.get("BLOCK", 0)
+    decided_including_reuse = pass_count + block_count
+    fresh_decided = metrics.fresh_pass_runs + block_count
     lines: list[str] = [
         "# 外部正式审查基线统计报告（#1931）",
         "",
         f"- 扫描目录：`{metrics.runs_dir}`",
-        f"- 总运行数：`{metrics.total_runs}`（其中缺 `outcome.json` 未完结：`{metrics.missing_outcome_runs}`；沿用历史 PASS：`{metrics.reused_runs}`；损坏跳过文件：`{len(metrics.corrupted_files)}`）",
-        f"- 唯一 PR 数：`{metrics.unique_prs}`（已获 PASS：`{metrics.prs_with_pass}`；尚未 PASS：`{metrics.prs_without_pass}`）",
-        f"- BLOCK 率（占全量运行）：`{_fmt_pct(metrics.block_rate_all)}`；BLOCK 率（占 PASS+BLOCK 有效裁定）：`{_fmt_pct(metrics.block_rate_decided)}`",
+        f"- 总运行数：`{metrics.total_runs}`（其中缺 `outcome.json` 未完结：`{metrics.missing_outcome_runs}`；沿用历史 PASS：`{metrics.reused_runs}`；新产生 PASS：`{metrics.fresh_pass_runs}`；缺合法时间戳不可排序运行：`{metrics.unorderable_runs}`；损坏跳过文件：`{len(metrics.corrupted_files)}`）",
+        f"- 唯一 PR 数：`{metrics.unique_prs}`（已获 PASS：`{metrics.prs_with_pass}`；尚未 PASS：`{metrics.prs_without_pass}`；其中首次 PASS 为历史复用的 PR：`{metrics.prs_first_pass_reused}`）",
+        f"- BLOCK 率（占全量运行 `{metrics.total_runs}`）：`{_fmt_pct(metrics.block_rate_all)}`",
+        f"- BLOCK 率（含历史复用 PASS 分母 `PASS+BLOCK = {decided_including_reuse}`）：`{_fmt_pct(metrics.block_rate_decided_including_reuse)}`",
+        f"- BLOCK 率（仅新产生裁定分母 `fresh_PASS+BLOCK = {fresh_decided}`，排除 `reused_from`）：`{_fmt_pct(metrics.block_rate_fresh_decided)}`",
         "",
         "## 一、终态分布（收据/outcome 实测）",
         "",
@@ -1089,9 +1455,12 @@ def render_baseline_markdown(metrics: BaselineMetrics) -> str:
 
     lines.append("## 二、每 PR 达到首次 PASS 的轮次分布（收据/outcome 实测）")
     lines.append("")
-    lines.extend(_render_round_table("2.1 全量运行口径（含 FAILED / STALE / 未完结）", metrics.rounds_to_first_pass_all))
+    lines.extend(_render_round_table("2.1 全量运行口径（含 FAILED / STALE / 复用 / 未完结，仅计具备合法时间戳的运行）", metrics.rounds_to_first_pass_all))
     lines.extend(
-        _render_round_table("2.2 有效评审口径（仅计 PASS / BLOCK，排除 infra FAILED / STALE）", metrics.rounds_to_first_pass_effective)
+        _render_round_table(
+            f"2.2 有效评审口径（仅计新产生 PASS / BLOCK，排除 infra FAILED / STALE 与 reused_from；另有 {metrics.prs_first_pass_reused} 个 PR 首次 PASS 本身为历史复用已单列）",
+            metrics.rounds_to_first_pass_effective,
+        )
     )
 
     lines.extend(
@@ -1160,10 +1529,13 @@ def render_baseline_markdown(metrics: BaselineMetrics) -> str:
             "",
             "### 4.3 后续 head 转 PASS 推定（启发式）",
             "",
-            f"- BLOCK 运行中的非 Nit 阻断发现总数：`{metrics.subsequent_head_pass_total_block_findings}`",
-            f"- 同 PR 后续出现不同 `head_sha` 且终态转 PASS 的推定已修条数：`{metrics.subsequent_head_pass_inferred_fixed}`（`{_fmt_pct(metrics.subsequent_head_pass_inferred_rate)}`）",
+            f"- 可判定 BLOCK 运行中的非 Nit 阻断发现总数：`{metrics.subsequent_head_pass_total_block_findings}`",
+            f"- 缺合法时间戳或 `head_sha` 不可判定的 BLOCK 发现条数：`{metrics.subsequent_head_pass_undeterminable_findings}`",
+            f"- 同 PR 后续更晚时间戳出现不同非空 `head_sha` 且终态转 PASS 的推定已修条数：`{metrics.subsequent_head_pass_inferred_fixed}`（`{_fmt_pct(metrics.subsequent_head_pass_inferred_rate)}`）",
             "",
             "## 五、显式去向台账统计（`load_dispositions`）",
+            "",
+            f"- 当前显式去向覆盖率：`{_fmt_pct(metrics.disposition_coverage_rate)}`（`{metrics.disposition_total} / {metrics.total_findings}`）",
             "",
         ]
     )
@@ -1199,14 +1571,16 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     sub = parser.add_subparsers(dest="command", required=True)
 
-    p_val = sub.add_parser("validate-cases", help="校验评测集 schema 与 Git 提交/文件/行号真实性")
+    p_val = sub.add_parser("validate-cases", help="校验评测集 schema 与 Git 提交/文件/行号/diff hunk 真实性")
     p_val.add_argument("--cases", type=Path, required=True, help="cases.json 路径")
-    p_val.add_argument("--repo-root", type=Path, default=None, help="可选：Git 仓库根目录，用于核验 SHA 与文件行号")
+    p_val.add_argument("--repo-root", type=Path, default=None, help="可选：Git 仓库根目录，用于核验 SHA、文件行号与 diff hunk")
 
     p_score = sub.add_parser("score", help="对审查预测 JSON 打分")
     p_score.add_argument("--cases", type=Path, required=True, help="cases.json 路径")
     p_score.add_argument("--predictions", type=Path, required=True, help="预测结果 JSON 路径")
     p_score.add_argument("--line-tolerance", type=int, default=15, help="行号匹配容差（默认 15）")
+    p_score.add_argument("--max-finding-span", type=int, default=120, help="单条发现最大行跨度上限（默认 120）")
+    p_score.add_argument("--allow-partial", action="store_true", help="允许预测缺漏案例（缺漏记为 MISSING 并暴露 coverage_rate）")
     p_score.add_argument("--out-json", type=Path, default=None, help="可选：输出 EvalScore JSON 文件路径")
 
     p_cmp = sub.add_parser("compare", help="对比两次 EvalScore JSON 产出增量与逐案变化")
@@ -1242,6 +1616,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 "bug_cases": bug_count,
                 "clean_cases": clean_count,
                 "total_bug_locations": loc_count,
+                "cases_fingerprint": compute_cases_fingerprint(cases),
                 "git_verified": args.repo_root is not None,
             }
             print(json.dumps(summary, ensure_ascii=False, indent=2))
@@ -1250,7 +1625,13 @@ def main(argv: Sequence[str] | None = None) -> int:
         if args.command == "score":
             cases = load_cases(args.cases)
             predictions = load_predictions(args.predictions)
-            result = score_predictions(cases, predictions, line_tolerance=args.line_tolerance)
+            result = score_predictions(
+                cases,
+                predictions,
+                line_tolerance=args.line_tolerance,
+                max_finding_span=args.max_finding_span,
+                allow_partial=args.allow_partial,
+            )
             rendered = json.dumps(result.to_dict(), ensure_ascii=False, indent=2)
             if args.out_json is not None:
                 _write_text_file(args.out_json, rendered + "\n")
@@ -1261,7 +1642,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             try:
                 before_raw = json.loads(args.before.read_text(encoding="utf-8"))
                 after_raw = json.loads(args.after.read_text(encoding="utf-8"))
-            except (OSError, json.JSONDecodeError) as exc:
+            except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
                 raise EvalValidationError(f"无法读取打分文件：{exc}") from exc
             if not isinstance(before_raw, dict) or not isinstance(after_raw, dict):
                 raise EvalValidationError("before/after 打分文件必须是 JSON 对象")

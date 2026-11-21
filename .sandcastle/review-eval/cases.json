@@ -52,13 +52,13 @@
     {
       "case_id": "bug-1915-prefix-ruling-bypass",
       "kind": "bug",
-      "title": "#1915 硬门签署与 SPEC 裁定首行仅做前缀匹配可被否定后缀绕过",
+      "title": "#1915 硬门签署首行仅做前缀匹配可被否定后缀绕过",
       "base_sha": "08d0f0e88bada7339b0443b5e52c8cf5957b146e",
       "head_sha": "7c0e5f35f683a9da2e38287f5962dd4d92836003",
       "fix_sha": "f5427467f72a0350bc34a1fefce14c80f9db2b41",
       "pr_number": null,
       "issue_number": 1915,
-      "source_note": "sweep 审查发现 7c0e5f35f6 引入的首行前缀正则允许「退回：签署但不批准」与 PASS 后缀绕过，由 f5427467f7 修复。",
+      "source_note": "sweep 审查发现 7c0e5f35f6 在 decision-claimer.mts 引入的首行前缀正则允许「退回：签署但不批准」等否定后缀绕过，由 f5427467f7 修复。",
       "bug_locations": [
         {
           "file": ".sandcastle/decision-claimer.mts",
@@ -66,11 +66,24 @@
           "line_end": 764,
           "summary": "SIGN_HEAD_RE 仅匹配首行前缀，带否定后缀的评论首行仍被认定为合法签署。",
           "category": "authz_bypass"
-        },
+        }
+      ]
+    },
+    {
+      "case_id": "bug-1909-spec-ruling-prefix-bypass",
+      "kind": "bug",
+      "title": "#1909 SPEC 独审裁定首行仅做词边界前缀匹配可被否定后缀绕过",
+      "base_sha": "9b436af2d2c1ef21c7c3c4378637ea14765d2e6d",
+      "head_sha": "d7942d4a4301ce5a7dfa5390f814e8229d9e5971",
+      "fix_sha": "f5427467f72a0350bc34a1fefce14c80f9db2b41",
+      "pr_number": null,
+      "issue_number": 1909,
+      "source_note": "d7942d4a43 引入结构化 SPEC 裁定解析 parseSpecRuling 时仅用词边界前缀匹配 PASS/BLOCK，首行带否定后缀仍被解析为 PASS，由 f5427467f7 收紧为整行严格匹配。",
+      "bug_locations": [
         {
           "file": "scripts/wayfinder_engine.mts",
-          "line_start": 214,
-          "line_end": 217,
+          "line_start": 220,
+          "line_end": 223,
           "summary": "parseSpecRuling 仅用词边界前缀匹配 PASS/BLOCK，首行带否定或附加后缀仍被解析为 PASS。",
           "category": "authz_bypass"
         }
@@ -100,18 +113,18 @@
       "case_id": "bug-2022-patch-read-trailing-metadata",
       "kind": "bug",
       "title": "#2022 patch_read 拒绝 diff 后接只印元数据的 git show/log 引发真实审查误判",
-      "base_sha": "839a00574e677b7ef573f655e2a9ebf583b5a0e5",
-      "head_sha": "96d60bdba7b3ea25c5f6f4cc723822e646d7b138",
+      "base_sha": "2301d0bea1a47a3cb1630c9292d9eb7d306b3599",
+      "head_sha": "01a6038a3c9e2c5b743ae86b56c87193948612f4",
       "fix_sha": "18c8569c9d02bcf61cb2fa8994bb8b5ee22c32e7",
       "pr_number": 2022,
       "issue_number": 1968,
-      "source_note": "PR #2018 run 45a4c22b 触发补丁读取门禁误判，由 PR #2022（18c8569c9d）放行尾随只读元数据段并仅在开头 diff 段取证。",
+      "source_note": "01a6038a3c 收紧 _would_print_patch 仅允许 git diff 后接纯管道过滤器，导致 PR #2018 run 45a4c22b 串接只印提交元数据的 git show/log 触发补丁读取门禁误判，由 PR #2022（18c8569c9d）放行尾随只读元数据段并仅在开头 diff 段取证。",
       "bug_locations": [
         {
           "file": ".sandcastle/deepagents-pilot/pilot1742/patch_read.py",
-          "line_start": 637,
-          "line_end": 641,
-          "summary": "_patch_read 强制要求 git diff 之后只能接管道过滤器，导致完整 diff 后串接只印提交元数据的 git show/log 被误判为未读取冻结补丁。",
+          "line_start": 486,
+          "line_end": 489,
+          "summary": "_would_print_patch 强制要求 git diff 之后只能接管道过滤器，导致完整 diff 后串接只印提交元数据的 git show/log 被误判为未读取冻结补丁。",
           "category": "false_rejection"
         }
       ]
@@ -167,13 +180,6 @@
           "line_end": 185,
           "summary": "refresh_host_main 同理未检查 origin/main..HEAD 计数，HOST 领先时 ff-only 返回 0 未 fail-closed。",
           "category": "fail_open_regression"
-        },
-        {
-          "file": "scripts/arch_hotzone_monitor.sh",
-          "line_start": 286,
-          "line_end": 286,
-          "summary": "set -u 下 $desc（ 被 shell 解析为未定义变量名，导致 selftest 任一 FAIL 分支直接崩溃。",
-          "category": "shell_bug"
         }
       ]
     },
