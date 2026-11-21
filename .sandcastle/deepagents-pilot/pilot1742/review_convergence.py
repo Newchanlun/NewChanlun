@@ -143,6 +143,7 @@ _SUPPRESSED_INLINE_HTML_TAGS = frozenset(
         "kbd",
         "samp",
         "var",
+        "head",
         "script",
         "style",
         "textarea",
@@ -154,7 +155,8 @@ _SUPPRESSED_INLINE_HTML_TAGS = frozenset(
     }
 )
 _RAW_TEXT_HTML_TAGS = frozenset({"script", "style", "textarea", "title"})
-_SILENT_INLINE_HTML_TAGS = frozenset({"script", "style", "textarea", "title", "template", "noscript"})
+_SILENT_INLINE_HTML_TAGS = frozenset({"head", "script", "style", "textarea", "title", "template", "noscript"})
+_RAW_HTML_START_RE = re.compile(r"<(?:!--|\?|!|/?[A-Za-z])")
 _RAW_TEXT_CLOSE_RES: dict[str, re.Pattern[str]] = {
     tag: re.compile(rf"</{tag}[ \t\n]*>", re.IGNORECASE) for tag in _RAW_TEXT_HTML_TAGS
 }
@@ -4115,6 +4117,81 @@ def _leaves_html_suppressed(text: str) -> bool:
     return _is_html_suppressed(state)
 
 
+def _inline_contains_raw_html(text: str) -> bool:
+    """按 CommonMark §6 跳过反斜杠转义、闭合行内代码跨度与合法自动链接后，检测是否含任意原始 HTML 起始结构。"""
+    n = len(text)
+    i = 0
+    while i < n:
+        ch = text[i]
+        if ch == "\\" and i + 1 < n and text[i + 1] in _ASCII_PUNCTUATION:
+            i += 2
+            continue
+        if ch == "`":
+            tick_end, found_end = _find_code_span_end(text, i)
+            i = found_end if found_end != -1 else tick_end
+            continue
+        if ch == "<":
+            auto_m = _AUTOLINK_URI_RE.match(text, i) or _AUTOLINK_EMAIL_RE.match(text, i)
+            if auto_m is not None:
+                i = auto_m.end()
+                continue
+            if _RAW_HTML_START_RE.match(text, i) is not None:
+                return True
+        i += 1
+    return False
+
+
+def _contains_raw_html_outside_code(text: str) -> bool:
+    """检测 Markdown 文本在代码块与行内代码跨度之外是否含任何块级或行内原始 HTML。"""
+    doc_blocks, _ = _parse_commonmark_blocks(text, include_all_visible_blocks=True)
+    for block_kind, block_text in doc_blocks:
+        if block_kind == "html":
+            return True
+        if block_kind == "code":
+            continue
+        if _inline_contains_raw_html(block_text):
+            return True
+    return False
+
+
+def _escape_unmatched_backticks(seg: str) -> str:
+    """扫描单行普通片段，跳过已闭合 CommonMark §6.1 代码段、反斜杠转义与自动链接，将所有未配对裸反引号转义为 \\`。"""
+    if "`" not in seg:
+        return seg
+    out: list[str] = []
+    n = len(seg)
+    i = 0
+    while i < n:
+        ch = seg[i]
+        if ch == "\\" and i + 1 < n and seg[i + 1] in _ASCII_PUNCTUATION:
+            out.append(seg[i : i + 2])
+            i += 2
+            continue
+        if ch == "`":
+            tick_end, found_end = _find_code_span_end(seg, i)
+            if found_end != -1:
+                out.append(seg[i:found_end])
+                i = found_end
+            else:
+                out.append(r"\`" * (tick_end - i))
+                i = tick_end
+            continue
+        if ch == "<":
+            auto_m = _AUTOLINK_URI_RE.match(seg, i) or _AUTOLINK_EMAIL_RE.match(seg, i)
+            if auto_m is not None:
+                out.append(auto_m.group(0))
+                i = auto_m.end()
+                continue
+            html_m = _INLINE_RAW_HTML_RE.match(seg, i)
+            if html_m is not None:
+                out.append(html_m.group(0))
+                i = html_m.end()
+                continue
+        out.append(ch)
+        i += 1
+    return "".join(out)
+
+
 def _format_nested_fenced_code(text: str, *, content_indent: str) -> str:
     """用足够长的反引号围栏将文本原样包裹为嵌套围栏代码块，彻底隔离未闭合 HTML/注释。"""
     max_run = max((len(m.group(0)) for m in re.finditer(r"`+", text)), default=0)
@@ -4157,8 +4234,8 @@ def _format_bullet_markdown_field(
     bullet_prefix: str = "  - ",
     content_indent: str = "    ",
 ) -> str:
-    """将 Markdown 字段渲染到子列表项，保全缩进代码块与块级结构、隔离未闭合 HTML 抑制态并保持单行普通文本原样。"""
-    if _leaves_html_suppressed(text):
+    """将 Markdown 字段渲染到子列表项，保全缩进代码块与块级结构、隔离代码外原始 HTML 与未闭合抑制态并保持单行普通文本原样。"""
+    if _leaves_html_suppressed(text) or _contains_raw_html_outside_code(text):
         return f"{bullet_prefix}{label}\n\n{_format_nested_fenced_code(text, content_indent=content_indent)}"
 
     if "\n" not in text and "\r" not in text:
@@ -4189,26 +4266,31 @@ def _format_bullet_markdown_field(
 
 
 def _format_inline_markdown_field(text: str, *, collapse_whitespace: bool = False) -> str:
-    """将 Markdown 字段安全格式化为单行行内文本，防止缩进代码或块级文本在单行位置丧失可见性。"""
+    """将 Markdown 字段安全格式化为单行行内文本，防止缩进代码或块级文本在单行位置丧失可见性，并隔离代码外原始 HTML 与未配对反引号。"""
     doc_blocks, _ = _parse_commonmark_blocks(text, include_all_visible_blocks=True)
     has_code_block = any(kind == "code" for kind, _ in doc_blocks)
     if not has_code_block and "\n" not in text and "\r" not in text:
         candidate = _single_line(text) if collapse_whitespace else text
         visible, suppressed = _has_visible_inline_gfm_text(candidate)
-        if visible and not suppressed:
-            return candidate
+        if visible and not suppressed and not _contains_raw_html_outside_code(candidate):
+            return _escape_unmatched_backticks(candidate)
         return _wrap_markdown_code_span(_single_line(text) if collapse_whitespace else text.strip())
 
-    if has_code_block:
+    if has_code_block or len(doc_blocks) > 1:
         parts: list[str] = []
         suppress_state = _HtmlSuppressState(suppressed_tags=_SILENT_INLINE_HTML_TAGS)
+        has_raw_html_block = False
         for kind, block_text in doc_blocks:
             if kind == "html":
+                has_raw_html_block = True
                 visible_chunks: list[str] = []
                 _update_html_suppress_state(block_text, suppress_state, visible_chunks=visible_chunks)
                 html_text = _single_line(" ".join(visible_chunks))
                 if _clean_display_reason(html_text):
-                    parts.append(html_text)
+                    if _contains_raw_html_outside_code(html_text) or _has_visible_inline_gfm_text(html_text)[1]:
+                        parts.append(_wrap_markdown_code_span(html_text))
+                    else:
+                        parts.append(_escape_unmatched_backticks(html_text))
                 continue
             if _is_html_suppressed(suppress_state):
                 continue
@@ -4219,20 +4301,20 @@ def _format_inline_markdown_field(text: str, *, collapse_whitespace: bool = Fals
                 continue
             seg = _single_line(block_text)
             seg_visible, seg_suppressed = _has_visible_inline_gfm_text(seg)
-            if seg_visible and not seg_suppressed:
-                parts.append(seg)
+            if seg_visible and not seg_suppressed and not _contains_raw_html_outside_code(seg):
+                parts.append(_escape_unmatched_backticks(seg))
             elif seg_visible:
                 parts.append(_wrap_markdown_code_span(seg))
-        if parts:
+        if parts and not _is_html_suppressed(suppress_state) and (has_code_block or not has_raw_html_block):
             joined = " ".join(parts)
             joined_visible, joined_suppressed = _has_visible_inline_gfm_text(joined)
-            if joined_visible and not joined_suppressed:
+            if joined_visible and not joined_suppressed and not _contains_raw_html_outside_code(joined):
                 return joined
 
     single = _single_line(text)
     visible, suppressed = _has_visible_inline_gfm_text(single)
-    if visible and not suppressed:
-        return single
+    if visible and not suppressed and not _contains_raw_html_outside_code(single):
+        return _escape_unmatched_backticks(single)
     return _wrap_markdown_code_span(single)
 
 
@@ -4288,7 +4370,24 @@ def _tokenize_inline_clip_segments(
 
 def _is_safe_inline_clip(candidate: str) -> bool:
     visible, suppressed = _has_visible_inline_gfm_text(candidate)
-    return visible and not suppressed and not _leaves_html_suppressed(candidate)
+    return (
+        visible
+        and not suppressed
+        and not _leaves_html_suppressed(candidate)
+        and not _contains_raw_html_outside_code(candidate)
+    )
+
+
+def _ends_in_split_escape(text_part: str, take: int) -> bool:
+    """判断截断点是否将 `\\` + ASCII 标点转义序列切成半个孤立反斜杠。"""
+    if take <= 0 or take >= len(text_part) or text_part[take] not in _ASCII_PUNCTUATION:
+        return False
+    bs = 0
+    idx = take - 1
+    while idx >= 0 and text_part[idx] == "\\":
+        bs += 1
+        idx -= 1
+    return bs % 2 == 1
 
 
 def _clip_code_span_to_budget(raw_code: str, budget: int) -> str:
@@ -4314,6 +4413,8 @@ def _clip_text_to_safe_inline(prefix: str, text_part: str, max_len: int) -> str:
         return ""
     max_take = min(len(text_part), rem - 1)
     for take in range(max_take, -1, -1):
+        if _ends_in_split_escape(text_part, take):
+            continue
         combined = (prefix + text_part[:take]).rstrip()
         if not combined:
             continue
@@ -4419,8 +4520,37 @@ _COMPACT_DESC_MAX_CHARS = 400
 _COMPACT_EVIDENCE_MAX_CHARS = 200
 
 
+def _collapse_prose_whitespace(chunk: str) -> str:
+    """在单个段落/块内折叠非代码文本连续空白，完整保留 CommonMark §6.1 闭合行内代码内部水平空格（仅将换行转单空格）。"""
+    out: list[str] = []
+    for kind, raw in _tokenize_inline_clip_segments(chunk):
+        if kind == "code":
+            out.append(_COMMONMARK_LINE_ENDING_RE.sub(" ", raw))
+        else:
+            out.append(re.sub(r"\s+", " ", raw))
+    return "".join(out).strip()
+
+
 def _single_line(text: str) -> str:
-    return re.sub(r"\s+", " ", text.strip())
+    """将文本规整为单行：按空行分段避免跨段伪配对反引号，段落内仅折叠行内代码跨度外的连续空白。"""
+    if "\n" not in text and "\r" not in text:
+        return _collapse_prose_whitespace(text)
+    paragraphs: list[str] = []
+    current_lines: list[str] = []
+    for line in _split_commonmark_lines(text):
+        if not line.strip(" \t"):
+            if current_lines:
+                collapsed = _collapse_prose_whitespace("\n".join(current_lines))
+                if collapsed:
+                    paragraphs.append(collapsed)
+                current_lines.clear()
+        else:
+            current_lines.append(line)
+    if current_lines:
+        collapsed = _collapse_prose_whitespace("\n".join(current_lines))
+        if collapsed:
+            paragraphs.append(collapsed)
+    return " ".join(paragraphs)
 
 
 def _render_non_blocking_item(vf: VerifiedFinding) -> str:

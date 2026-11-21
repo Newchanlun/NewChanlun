@@ -26,11 +26,14 @@ from pilot1742.review_convergence import (
     VerifiedFinding,
     VerifiedRound,
     _clip_formatted_inline,
+    _contains_raw_html_outside_code,
+    _escape_unmatched_backticks,
     _format_inline_markdown_field,
     _format_nested_fenced_code,
     _has_visible_gfm_text,
     _leaves_html_suppressed,
     _parse_commonmark_blocks,
+    _single_line,
     accept_quick_pass_findings,
     bind_author_replies,
     build_round_candidates,
@@ -8130,3 +8133,274 @@ def test_r18_preserves_code_literal_double_spaces_and_disposition_nested_blocks(
     compact_ds = render_findings_comment(1928, HEAD_1, dec_ds, max_chars=full_ds_len - 80)
     assert compact_ds.truncated
     assert f"`{expected_code}`" in compact_ds.body
+
+
+def test_r19_unmatched_backticks_escaped_before_code_span_join_and_clip() -> None:
+    """R19 Important 1：混合文本转单行拼接与截断时转义普通段裸未配对反引号，防止吞掉相邻代码段并严禁切裂转义反斜杠。"""
+    assert _escape_unmatched_backticks("found `") == r"found \`"
+    assert _escape_unmatched_backticks("found ``") == r"found \`\`"
+    assert _escape_unmatched_backticks(r"found \`") == r"found \`"
+    assert _escape_unmatched_backticks("found \\\\`") == r"found \\\`"
+    assert _escape_unmatched_backticks("ok `a` and `") == r"ok `a` and \`"
+    assert _escape_unmatched_backticks("see <https://example.com> and `x`") == "see <https://example.com> and `x`"
+
+    # 1. Codex R17 最小复现：found `\n\n    <!-- hidden --> + 'x'*80 在 max_chars=259 下渲染
+    s_repro = "found `\n\n    <!-- hidden -->" + ("x" * 80)
+    formatted = _format_inline_markdown_field(s_repro)
+    assert formatted.startswith(r"found \` `<!-- hidden -->")
+    assert not _contains_raw_html_outside_code(formatted)
+
+    f_repro = _finding(
+        severity=Severity.IMPORTANT,
+        file="pilot1742/demo.py",
+        line=42,
+        category="bug",
+        failure_scenario=s_repro,
+        evidence=s_repro,
+    )
+    cand = _candidates([f_repro])
+    vr = parse_verifier_output(
+        _verifier_payload(cand, [{"finding_id": f_repro.finding_id, "verdict": "confirmed", "verifier_evidence": s_repro}]),
+        cand,
+        verifier_model="claude-opus-5-5",
+    )
+    dec = evaluate_round(vr)
+    rendered_259 = render_findings_comment(1928, HEAD_1, dec, max_chars=259)
+    assert rendered_259.truncated
+    assert len(rendered_259.body) <= 259
+    assert r"found \` `<!-- hidden -->" in rendered_259.body
+    assert not _leaves_html_suppressed(rendered_259.body)
+    finding_lines = [ln for ln in rendered_259.body.split("\n") if f"[{f_repro.finding_id}]" in ln]
+    assert len(finding_lines) == 1
+    assert not _contains_raw_html_outside_code(finding_lines[0])
+    assert finding_lines[0].endswith("…`")
+
+    # 2. 遍历极紧预算：任意截断点既不暴露代码外原始 HTML，也不把 \` 切剩孤立反斜杠 \…
+    for budget in range(215, 310, 2):
+        rendered_b = render_findings_comment(1928, HEAD_1, dec, max_chars=budget)
+        assert len(rendered_b.body) <= budget
+        assert not _leaves_html_suppressed(rendered_b.body)
+        for ln in rendered_b.body.split("\n"):
+            if f"[{f_repro.finding_id}]" in ln:
+                assert not _contains_raw_html_outside_code(ln)
+                assert not ln.endswith("\\…")
+
+    # 3. _clip_formatted_inline 在转义反引号 \` 正中间截断时必须退回完整词边界，不遗留半个反斜杠
+    assert _clip_formatted_inline(formatted, 8) == "found…"
+    assert _clip_formatted_inline(formatted, 9) == r"found \`…"
+    for limit in range(4, 36):
+        clipped = _clip_formatted_inline(formatted, limit)
+        assert len(clipped) <= limit
+        assert not clipped.endswith("\\…")
+        if clipped:
+            assert not _contains_raw_html_outside_code(clipped)
+
+    # 4. 多段含未配对反引号 + 行内代码段，以及 category 含未配对反引号时均不吞噬后续代码段
+    multi_para = "found `\n\nsee `<!-- hidden -->`"
+    assert _format_inline_markdown_field(multi_para) == r"found \` see `<!-- hidden -->`"
+    assert not _contains_raw_html_outside_code(_format_inline_markdown_field(multi_para))
+
+    f_cat_bt = _finding(
+        severity=Severity.IMPORTANT,
+        file="pilot1742/demo.py",
+        line=43,
+        category="bug `",
+        failure_scenario="    <!-- hidden -->",
+        evidence="    <!-- hidden -->",
+    )
+    cand_cb = _candidates([f_cat_bt])
+    vr_cb = parse_verifier_output(
+        _verifier_payload(cand_cb, [{"finding_id": f_cat_bt.finding_id, "verdict": "confirmed", "verifier_evidence": "    <!-- hidden -->"}]),
+        cand_cb,
+        verifier_model="claude-opus-5-5",
+    )
+    dec_cb = evaluate_round(vr_cb)
+    full_cb = len(render_findings_comment(1928, HEAD_1, dec_cb).body)
+    compact_cb = render_findings_comment(1928, HEAD_1, dec_cb, max_chars=full_cb - 10)
+    assert r"bug \`：`<!-- hidden -->`" in compact_cb.body
+    for ln in compact_cb.body.split("\n"):
+        if f"[{f_cat_bt.finding_id}]" in ln:
+            assert not _contains_raw_html_outside_code(ln)
+
+
+def test_r19_raw_html_outside_code_isolated_in_findings_and_wontfix_replies() -> None:
+    """R19 Important 2：对字段中任何代码外原始 HTML（含 <head>/<iframe>/<div hidden> 等）一律安全隔离，且不误伤正常行内代码与自动链接。"""
+    # 1. <head> 纳入 HTML5 静默容器识别，同时合法 <div>real text</div> 仍通过可见性校验
+    assert not _has_visible_gfm_text("<head>hidden</head>")
+    assert _has_visible_gfm_text("okay <head>")
+    assert _leaves_html_suppressed("okay <head>")
+    assert _has_visible_gfm_text("<div>real text</div>")
+
+    # 2. _contains_raw_html_outside_code 精准区分代码外原始 HTML 与正常 Markdown 对照样本
+    raw_html_samples = (
+        "okay <head>",
+        "okay <iframe>",
+        "okay <details>",
+        "okay <div hidden>",
+        'okay <span style="display:none">hidden</span>',
+        "okay <!-- note -->",
+        "okay <?xml",
+        "okay <!DOCTYPE html>",
+        "okay </p>",
+        "<div>real text</div>",
+        "# <head>",
+    )
+    for sample in raw_html_samples:
+        assert _contains_raw_html_outside_code(sample), f"应识别代码外原始 HTML：{sample!r}"
+
+    safe_controls = (
+        "Run `<span>` and `<!-- hidden -->`",
+        "See <https://example.com> and <user@example.com>",
+        "Check a < b and x < 1 and <理由>",
+        "    <!-- hidden -->",
+        r"escaped \<head>",
+    )
+    for control in safe_controls:
+        assert not _contains_raw_html_outside_code(control), f"不应误伤正常文本：{control!r}"
+
+    # 3. Codex R17 最小复现 + 扩展 HTML5 容器标签：第一条发现含 <head>/<iframe>/<div hidden> 时一律围栏隔离，绝不吞噬后续证据与第二条发现
+    for payload in (
+        "okay <head>",
+        "okay <iframe>",
+        "okay <div hidden>",
+        "okay <details>",
+        'okay <span style="display:none">',
+    ):
+        f1 = _finding(
+            severity=Severity.IMPORTANT,
+            file="pilot1742/demo.py",
+            line=10,
+            category="bug1",
+            failure_scenario=payload,
+            evidence="FIRST_EVIDENCE_VISIBLE",
+        )
+        f2 = _finding(
+            severity=Severity.IMPORTANT,
+            file="pilot1742/demo.py",
+            line=20,
+            category="bug2",
+            failure_scenario="SECOND_VISIBLE",
+            evidence="SECOND_EVIDENCE_VISIBLE",
+        )
+        cand = _candidates([f1, f2])
+        vr = parse_verifier_output(
+            _verifier_payload(
+                cand,
+                [
+                    {"finding_id": f1.finding_id, "verdict": "confirmed", "verifier_evidence": "FIRST_EVIDENCE_VISIBLE"},
+                    {"finding_id": f2.finding_id, "verdict": "confirmed", "verifier_evidence": "SECOND_EVIDENCE_VISIBLE"},
+                ],
+            ),
+            cand,
+            verifier_model="claude-opus-5-5",
+        )
+        rendered = render_findings_comment(1928, HEAD_1, evaluate_round(vr))
+        assert not _leaves_html_suppressed(rendered.body)
+        assert f"  - 失败场景：\n\n    ```\n    {payload}\n    ```" in rendered.body
+        assert "  - 核实证据：FIRST_EVIDENCE_VISIBLE" in rendered.body
+        assert "  - 失败场景：SECOND_VISIBLE" in rendered.body
+        # 跳过首行去重 HTML 注释 marker 后，整条评论代码外不得残余原始 HTML
+        body_after_marker = "\n".join(rendered.body.split("\n")[1:])
+        assert not _contains_raw_html_outside_code(body_after_marker)
+
+    # 4. 作者不修理由含 okay <head> 时经 _format_inline_markdown_field 用代码段包裹，不吞噬后续核实证据
+    f_wf = _finding(severity=Severity.IMPORTANT, file="pilot1742/demo.py", line=30, category="wf-head")
+    cand_wf = _candidates([f_wf])
+    reply_head = AuthorReply(
+        comment_id="c-r19-head",
+        author="alice",
+        finding_id=f_wf.finding_id,
+        file=None,
+        line=None,
+        reason="okay <head>",
+    )
+    vr_wf = parse_verifier_output(
+        _verifier_payload(
+            cand_wf,
+            [{"finding_id": f_wf.finding_id, "verdict": "resolved_by_wontfix", "verifier_evidence": "WONTFIX_EVIDENCE_VISIBLE"}],
+        ),
+        cand_wf,
+        verifier_model="claude-opus-5-5",
+        author_replies=[reply_head],
+    )
+    rendered_wf = render_findings_comment(1928, HEAD_1, evaluate_round(vr_wf))
+    assert "（理由：`okay <head>`）：WONTFIX_EVIDENCE_VISIBLE" in rendered_wf.body
+    assert not _leaves_html_suppressed(rendered_wf.body)
+    assert not _contains_raw_html_outside_code("\n".join(rendered_wf.body.split("\n")[1:]))
+
+    # 5. 对照组：普通行内代码 `<span>`、自动链接 <https://example.com> 与数学比较 a < b 保持行内渲染，不误加围栏
+    normal_text = "Run `<span>` with <https://example.com> when a < b"
+    f_norm = _finding(
+        severity=Severity.IMPORTANT,
+        file="pilot1742/demo.py",
+        line=35,
+        category="normal-md",
+        failure_scenario=normal_text,
+        evidence=normal_text,
+    )
+    cand_norm = _candidates([f_norm])
+    vr_norm = parse_verifier_output(
+        _verifier_payload(cand_norm, [{"finding_id": f_norm.finding_id, "verdict": "confirmed", "verifier_evidence": normal_text}]),
+        cand_norm,
+        verifier_model="claude-opus-5-5",
+    )
+    rendered_norm = render_findings_comment(1928, HEAD_1, evaluate_round(vr_norm))
+    assert f"  - 失败场景：{normal_text}" in rendered_norm.body
+    assert "    ```" not in rendered_norm.body
+
+
+def test_r19_single_line_preserves_inline_code_span_whitespace_in_compact_mode() -> None:
+    """R19 Important 3：_single_line 行内代码感知空白规整，紧凑模式下完整保留反引号代码内部连续空格。"""
+    code = 'assert "a  b" != "a b"'
+    assert _single_line(f"Run `{code}`") == f"Run `{code}`"
+    assert _single_line(f"  Run   `{code}`   now  ") == f"Run `{code}` now"
+    assert _single_line('Run `assert "a  b" !=\n"a b"`') == f"Run `{code}`"
+    assert _single_line("  `a  b`   `c  d`  ") == "`a  b` `c  d`"
+
+    # 1. Codex R17 最小复现：Severity.NIT + class_scope='X'*300 在 max_chars=65536 与 max_chars=400 均保留双空格断言
+    f_nit = _finding(
+        severity=Severity.NIT,
+        file="pilot1742/demo.py",
+        line=55,
+        category="nit",
+        failure_scenario=f"Run `{code}`",
+        evidence=f"Check `{code}`",
+        class_scope="X" * 300,
+    )
+    cand = _candidates([f_nit])
+    vr = parse_verifier_output(
+        _verifier_payload(cand, [{"finding_id": f_nit.finding_id, "verdict": "confirmed", "verifier_evidence": f"Check `{code}`"}]),
+        cand,
+        verifier_model="claude-opus-5-5",
+    )
+    dec = evaluate_round(vr)
+    rendered_full = render_findings_comment(1928, HEAD_1, dec, max_chars=65536)
+    rendered_compact = render_findings_comment(1928, HEAD_1, dec, max_chars=400)
+    assert not rendered_full.truncated
+    assert rendered_compact.truncated
+    assert f_nit.finding_id in rendered_compact.posted_fingerprints
+    assert code in rendered_full.body
+    assert code in rendered_compact.body
+    assert f"Run `{code}`" in rendered_compact.body
+    assert f"（核实证据：Check `{code}`）" in rendered_compact.body
+
+    # 2. 阻断项紧凑降级路径同样保留行内代码内部双空格
+    f_imp = _finding(
+        severity=Severity.IMPORTANT,
+        file="pilot1742/demo.py",
+        line=60,
+        category="imp-ws",
+        failure_scenario=f"Run `{code}`",
+        evidence="E" * 300,
+    )
+    cand_imp = _candidates([f_imp])
+    vr_imp = parse_verifier_output(
+        _verifier_payload(cand_imp, [{"finding_id": f_imp.finding_id, "verdict": "confirmed", "verifier_evidence": "E" * 300}]),
+        cand_imp,
+        verifier_model="claude-opus-5-5",
+    )
+    dec_imp = evaluate_round(vr_imp)
+    full_imp_len = len(render_findings_comment(1928, HEAD_1, dec_imp).body)
+    compact_imp = render_findings_comment(1928, HEAD_1, dec_imp, max_chars=full_imp_len - 80)
+    assert compact_imp.truncated
+    assert f"Run `{code}`" in compact_imp.body
