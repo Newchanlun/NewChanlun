@@ -39,7 +39,22 @@ _STYLE_FORMAT_RE = re.compile(
     re.IGNORECASE,
 )
 _LEADING_LIST_PREFIX_RE = re.compile(r"^(?:[-*•]\s+|\d+[.)]\s+)")
-_LEADING_BRACKET_TAG_RE = re.compile(r"^(?:(?:\*\*|__)\s*)?[\[\【]([^\]\】]{1,64})[\]\】](?:\s*(?:\*\*|__))?\s*")
+_LEADING_BRACKET_TAG_RE = re.compile(
+    r"^(?:(?:\*\*|__)\s*)?[\[\【]([^\]\】]{1,64})[\]\】](?!\()(?:\s*(?:\*\*|__))?\s*"
+)
+_BRACKET_LINE_COORD_RE = re.compile(r":\d")
+_BRACKET_FILE_EXT_RE = re.compile(r"\.[A-Za-z0-9]{1,8}(?![A-Za-z0-9])")
+_KNOWN_ASCII_SEVERITY_WORD_RE = re.compile(
+    r"^(?:p[0-3]|block(?:er|ing)?|important|critical|must[- ]?fix|high|medium|med|low|"
+    r"minor|major|nit|info|non[- ]?blocking|optional|suggestion|style|warning|warn|error|bug|security)$",
+    re.IGNORECASE,
+)
+_EXPLICIT_NON_BLOCKING_OVERRIDE_RE = re.compile(
+    r"(?:(?<!不是)(?<!并非)(?<!不属于)(?:非阻断|不阻断)|"
+    r"(?<!not\s)(?<!not\sa\s)(?<![A-Za-z0-9])non[- ]?blocking(?![A-Za-z0-9])|"
+    r"(?<![A-Za-z0-9])nit(?![A-Za-z0-9]))",
+    re.IGNORECASE,
+)
 _LEADING_COLON_TAG_RE = re.compile(r"^(?:(?:\*\*|__)\s*)?([^:\n：\[\【\]\】`*]{1,24}?)(?:\s*(?:\*\*|__))?\s*[:：](?!\d)")
 _TAG_SPLIT_RE = re.compile(r"[\s/·,，、\-—:：|]+")
 _STRICT_NON_BLOCKING_COLON_TOKEN = (
@@ -545,36 +560,110 @@ def _parse_unified_diff_added_ranges(diff_text: str) -> tuple[tuple[int, int], .
     return _merge_line_ranges([(ln, ln) for ln in added_lines])
 
 
-def _git_diff_added_ranges(
+def _git_diff_tree_status_map(
     repo_root: Path,
     base_sha: str,
     head_sha: str,
-    file_path: str,
-) -> tuple[tuple[int, int], ...]:
+) -> dict[str, tuple[str, str | None]]:
+    """读取 base_sha..head_sha 含重命名检测（-M）的文件状态映射：new_path -> (status, old_path | None)。"""
     proc = subprocess.run(
         [
             "git",
             "-C",
             str(repo_root),
-            "-c",
-            "diff.interHunkContext=0",
-            "diff",
-            "-U0",
-            "--inter-hunk-context=0",
-            "--no-ext-diff",
-            "--no-textconv",
-            "--no-color",
+            "diff-tree",
+            "-r",
+            "-M",
+            "--no-commit-id",
+            "--name-status",
+            "-z",
             base_sha,
             head_sha,
-            "--",
-            file_path,
         ],
         capture_output=True,
         check=False,
     )
     if proc.returncode != 0:
         stderr_text = proc.stderr.decode("utf-8", errors="replace").strip()
-        raise EvalValidationError(f"无法读取 Git diff（{base_sha}..{head_sha} -- {file_path}）：{stderr_text}")
+        raise EvalValidationError(f"无法读取 Git diff-tree（{base_sha}..{head_sha}）：{stderr_text}")
+
+    status_map: dict[str, tuple[str, str | None]] = {}
+    if not proc.stdout:
+        return status_map
+    parts = proc.stdout.split(b"\x00")
+    idx = 0
+    total = len(parts)
+    while idx < total:
+        raw_status = parts[idx]
+        if not raw_status:
+            idx += 1
+            continue
+        status = raw_status.decode("utf-8", errors="replace")
+        if status.startswith(("R", "C")):
+            if idx + 2 >= total:
+                raise EvalValidationError(
+                    f"解析 Git diff-tree -z 输出失败（{base_sha}..{head_sha}）：重命名/复制条目缺少路径"
+                )
+            old_path = _norm_path(parts[idx + 1].decode("utf-8", errors="replace"))
+            new_path = _norm_path(parts[idx + 2].decode("utf-8", errors="replace"))
+            status_map[new_path] = (status, old_path)
+            idx += 3
+        else:
+            if idx + 1 >= total:
+                raise EvalValidationError(
+                    f"解析 Git diff-tree -z 输出失败（{base_sha}..{head_sha}）：状态条目缺少路径"
+                )
+            path = _norm_path(parts[idx + 1].decode("utf-8", errors="replace"))
+            status_map[path] = (status, None)
+            idx += 2
+    return status_map
+
+
+def _git_diff_added_ranges(
+    repo_root: Path,
+    base_sha: str,
+    head_sha: str,
+    file_path: str,
+    *,
+    status_map: dict[str, tuple[str, str | None]] | None = None,
+) -> tuple[tuple[int, int], ...]:
+    norm_file = _norm_path(file_path)
+    resolved_status_map = (
+        status_map if status_map is not None else _git_diff_tree_status_map(repo_root, base_sha, head_sha)
+    )
+    entry = resolved_status_map.get(norm_file)
+    if entry is None:
+        return ()
+    status, old_path = entry
+    if status == "D" or status == "R100":
+        return ()
+
+    diff_cmd = [
+        "git",
+        "-C",
+        str(repo_root),
+        "-c",
+        "diff.interHunkContext=0",
+        "diff",
+        "-U0",
+        "--inter-hunk-context=0",
+        "--no-ext-diff",
+        "--no-textconv",
+        "--no-color",
+    ]
+    if status.startswith("R") and old_path:
+        diff_cmd.extend([f"{base_sha}:{old_path}", f"{head_sha}:{norm_file}"])
+    else:
+        diff_cmd.extend([base_sha, head_sha, "--", norm_file])
+
+    proc = subprocess.run(
+        diff_cmd,
+        capture_output=True,
+        check=False,
+    )
+    if proc.returncode != 0:
+        stderr_text = proc.stderr.decode("utf-8", errors="replace").strip()
+        raise EvalValidationError(f"无法读取 Git diff（{base_sha}..{head_sha} -- {norm_file}）：{stderr_text}")
     return _parse_unified_diff_added_ranges(proc.stdout.decode("utf-8", errors="replace"))
 
 
@@ -613,6 +702,7 @@ def validate_cases(cases: Sequence[EvalCase], repo_root: Path | None = None) -> 
 
     seen_ids: set[str] = set()
     line_count_cache: dict[tuple[str, str], int] = {}
+    diff_status_cache: dict[tuple[str, str], dict[str, tuple[str, str | None]]] = {}
     diff_hunk_cache: dict[tuple[str, str, str], tuple[tuple[int, int], ...]] = {}
 
     for case in cases:
@@ -666,8 +756,19 @@ def validate_cases(cases: Sequence[EvalCase], repo_root: Path | None = None) -> 
                 total_lines = line_count_cache[cache_key]
                 diff_key = (case.base_sha, case.head_sha, norm_file)
                 if diff_key not in diff_hunk_cache:
+                    status_key = (case.base_sha, case.head_sha)
+                    if status_key not in diff_status_cache:
+                        diff_status_cache[status_key] = _git_diff_tree_status_map(
+                            repo_root, case.base_sha, case.head_sha
+                        )
                     diff_hunk_cache[diff_key] = _merge_line_ranges(
-                        _git_diff_added_ranges(repo_root, case.base_sha, case.head_sha, norm_file)
+                        _git_diff_added_ranges(
+                            repo_root,
+                            case.base_sha,
+                            case.head_sha,
+                            norm_file,
+                            status_map=diff_status_cache[status_key],
+                        )
                     )
                 merged_added_ranges = diff_hunk_cache[diff_key]
                 for r_start, r_end in loc.all_ranges:
@@ -1227,12 +1328,18 @@ def load_dispositions(jsonl_path: Path) -> tuple[DispositionEntry, ...]:
     entries: list[DispositionEntry] = []
     seen_keys: set[tuple[str, str, int]] = set()
     try:
-        lines = jsonl_path.read_text(encoding="utf-8").splitlines()
+        raw_text = jsonl_path.read_bytes().decode("utf-8")
     except (OSError, UnicodeDecodeError) as exc:
         raise EvalValidationError(f"无法读取去向台账 {jsonl_path}: {exc}") from exc
 
-    for line_no, raw_line in enumerate(lines, 1):
-        stripped = raw_line.strip()
+    raw_lines = raw_text.split("\n")
+    if raw_text.endswith("\n"):
+        raw_lines.pop()
+
+    for line_no, raw_line in enumerate(raw_lines, 1):
+        if raw_line.endswith("\r"):
+            raw_line = raw_line[:-1]
+        stripped = raw_line.strip(" \t")
         if not stripped:
             continue
         try:
@@ -1287,6 +1394,28 @@ def _classify_severity_tag_text(tag_text: str) -> Literal["blocking", "non_block
     return None
 
 
+def _is_path_or_coord_bracket(tag_text: str) -> bool:
+    """判断方括号内容是否像文件路径或 file:line 坐标，避免误当作严重度标签。"""
+    inner = tag_text.strip()
+    if not inner:
+        return True
+    if _BRACKET_LINE_COORD_RE.search(inner):
+        return True
+    if "\\" in inner:
+        return True
+    if _BRACKET_FILE_EXT_RE.search(inner):
+        return True
+    if "/" in inner:
+        if inner.startswith("/"):
+            return True
+        segments = inner.split("/")
+        for raw_seg in segments[:-1]:
+            seg = raw_seg.strip()
+            if seg and re.fullmatch(r"[A-Za-z0-9._-]+", seg) and not _KNOWN_ASCII_SEVERITY_WORD_RE.fullmatch(seg):
+                return True
+    return False
+
+
 def _parse_leading_severity_tag(text: str) -> Literal["blocking", "non_blocking"] | None:
     """解析行首显式严重度标签（支持列表符号、Markdown 粗体、连续中英文方括号标签与冒号前导）。"""
     cleaned = text.lstrip()
@@ -1303,12 +1432,24 @@ def _parse_leading_severity_tag(text: str) -> Literal["blocking", "non_blocking"
         bracket_match = _LEADING_BRACKET_TAG_RE.match(unbold[pos:])
         if not bracket_match:
             break
-        bracket_tags.append(bracket_match.group(1))
+        tag_content = bracket_match.group(1)
+        if _is_path_or_coord_bracket(tag_content):
+            break
+        bracket_tags.append(tag_content)
         pos += bracket_match.end()
     if bracket_tags:
-        classified = _classify_severity_tag_text(" / ".join(bracket_tags))
-        if classified is not None:
-            return classified
+        first_classified: Literal["blocking", "non_blocking"] | None = None
+        for tag in bracket_tags:
+            tag_cls = _classify_severity_tag_text(tag)
+            if first_classified is None:
+                if tag_cls == "non_blocking":
+                    return "non_blocking"
+                if tag_cls == "blocking":
+                    first_classified = "blocking"
+            elif _EXPLICIT_NON_BLOCKING_OVERRIDE_RE.search(tag):
+                return "non_blocking"
+        if first_classified is not None:
+            return first_classified
 
     colon_match = _LEADING_COLON_TAG_RE.match(cleaned)
     if colon_match:

@@ -19,6 +19,7 @@ from pilot1742.review_eval import (
     PredictedFinding,
     _git_blob_line_count,
     _git_diff_added_ranges,
+    _git_diff_tree_status_map,
     _parse_leading_severity_tag,
     _parse_unified_diff_added_ranges,
     analyze_review_runs,
@@ -3075,3 +3076,204 @@ def test_duplicate_receipt_key_excluded_from_subsequent_head_pass_metrics(tmp_pa
                 ),
             ),
         )
+
+
+def test_r7_pure_rename_and_modified_rename_diff_validation(tmp_path: Path) -> None:
+    repo = tmp_path / "rename-repo"
+    repo.mkdir()
+    _git(repo, "init", "-q", "-b", "main")
+    _git(repo, "config", "user.name", "Test")
+    _git(repo, "config", "user.email", "test@example.invalid")
+
+    # 1) R100 纯重命名：零内容改动，绝不能被当成整文件新增
+    (repo / "old_pure.py").write_text("alpha\nbeta\ngamma\n", encoding="utf-8")
+    # 2) R<100 重命名伴修改：10 行中仅改第 6 行，相似度 ~90%
+    base_lines = [f"line_{i:02d}_payload_content" for i in range(1, 11)]
+    (repo / "old_mod.py").write_text("\n".join(base_lines) + "\n", encoding="utf-8")
+    _git(repo, "add", "old_pure.py", "old_mod.py")
+    _git(repo, "commit", "-qm", "base")
+    base_sha = _git(repo, "rev-parse", "HEAD")
+
+    _git(repo, "mv", "old_pure.py", "new_pure.py")
+    _git(repo, "mv", "old_mod.py", "new_mod.py")
+    mod_lines = list(base_lines)
+    mod_lines[5] = "line_06_modified_bug_here"
+    (repo / "new_mod.py").write_text("\n".join(mod_lines) + "\n", encoding="utf-8")
+    _git(repo, "add", "new_mod.py")
+    _git(repo, "commit", "-qm", "rename-pure-and-modified")
+    head_sha = _git(repo, "rev-parse", "HEAD")
+
+    status_map = _git_diff_tree_status_map(repo, base_sha, head_sha)
+    assert status_map["new_pure.py"] == ("R100", "old_pure.py")
+    mod_status, mod_old = status_map["new_mod.py"]
+    assert mod_status.startswith("R") and mod_status != "R100"
+    assert mod_old == "old_mod.py"
+
+    assert _git_diff_added_ranges(repo, base_sha, head_sha, "new_pure.py") == ()
+    assert _git_diff_added_ranges(repo, base_sha, head_sha, "new_mod.py") == ((6, 6),)
+
+    pure_rename_case = EvalCase(
+        case_id="pure-rename-line1",
+        kind="bug",
+        title="R100 纯重命名文件第 1 行必须被拒",
+        base_sha=base_sha,
+        head_sha=head_sha,
+        bug_locations=(BugLocation(file="new_pure.py", line_start=1, line_end=1, summary="s", category="c"),),
+    )
+    with pytest.raises(EvalValidationError, match="diff hunk"):
+        validate_cases((pure_rename_case,), repo_root=repo)
+
+    mod_rename_valid = EvalCase(
+        case_id="mod-rename-changed-line",
+        kind="bug",
+        title="R<100 仅真实修改行通过",
+        base_sha=base_sha,
+        head_sha=head_sha,
+        bug_locations=(BugLocation(file="new_mod.py", line_start=6, line_end=6, summary="s", category="c"),),
+    )
+    validate_cases((mod_rename_valid,), repo_root=repo)
+
+    mod_rename_untouched = EvalCase(
+        case_id="mod-rename-untouched-line",
+        kind="bug",
+        title="R<100 未改动行必须被拒",
+        base_sha=base_sha,
+        head_sha=head_sha,
+        bug_locations=(BugLocation(file="new_mod.py", line_start=1, line_end=1, summary="s", category="c"),),
+    )
+    with pytest.raises(EvalValidationError, match="diff hunk"):
+        validate_cases((mod_rename_untouched,), repo_root=repo)
+
+    # 3) 真实主仓回归：提交 289fd82f6e9efc684704c79716e31483dbf3fa5e 纯重命名 .sandcastle/claude-route.mts
+    real_head = "289fd82f6e9efc684704c79716e31483dbf3fa5e"
+    if _is_full_git_checkout(REPO_ROOT):
+        has_head = subprocess.run(
+            ["git", "-C", str(REPO_ROOT), "cat-file", "-e", f"{real_head}^{{commit}}"],
+            capture_output=True,
+            check=False,
+        )
+        parent_proc = subprocess.run(
+            ["git", "-C", str(REPO_ROOT), "rev-parse", f"{real_head}^"],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if has_head.returncode == 0 and parent_proc.returncode == 0:
+            real_base = parent_proc.stdout.strip()
+            assert _git_diff_added_ranges(REPO_ROOT, real_base, real_head, ".sandcastle/claude-route.mts") == ()
+            real_pure_rename = EvalCase(
+                case_id="real-289fd82f-pure-rename",
+                kind="bug",
+                title="真实 R100 纯重命名文件第 1 行必须被拒",
+                base_sha=real_base,
+                head_sha=real_head,
+                bug_locations=(
+                    BugLocation(
+                        file=".sandcastle/claude-route.mts",
+                        line_start=1,
+                        line_end=1,
+                        summary="s",
+                        category="c",
+                    ),
+                ),
+            )
+            with pytest.raises(EvalValidationError, match="diff hunk"):
+                validate_cases((real_pure_rename,), repo_root=REPO_ROOT)
+
+
+def test_r7_markdown_link_and_path_brackets_not_misclassified_as_nit(tmp_path: Path) -> None:
+    assert classify_finding_heuristic("[P1] [src/low:1](src/low#L1) 数据丢失", "blocked") == "blocking_substantive"
+    assert classify_finding_heuristic("[src/low:1](src/low#L1) 数据丢失", "blocked") == "blocking_substantive"
+    assert classify_finding_heuristic("[P1] [src/low] 数据丢失", "blocked") == "blocking_substantive"
+    assert classify_finding_heuristic("[P2/非阻断] 说明", "blocked") == "non_blocking_or_nit"
+    assert classify_finding_heuristic("[P2] [非阻断] 说明", "blocked") == "non_blocking_or_nit"
+
+    # 额外边界：路径/文件坐标方括号与后续非显式降级方括号绝不将阻断降为 Nit
+    assert _parse_leading_severity_tag("[P1] [src/low:1](src/low#L1) 数据丢失") == "blocking"
+    assert _parse_leading_severity_tag("[src/low:1](src/low#L1) 数据丢失") is None
+    assert _parse_leading_severity_tag("[P1] [src/low] 数据丢失") == "blocking"
+    assert _parse_leading_severity_tag("[pilot1742/a.py] 路径越权") is None
+    assert _parse_leading_severity_tag("[P1] [low] 指标错误") == "blocking"
+    assert _parse_leading_severity_tag("[P1] [info] 权限泄露") == "blocking"
+    assert _parse_leading_severity_tag("[P2] [nit] 命名建议") == "non_blocking"
+    assert _parse_leading_severity_tag("[P2] [non-blocking] 可后续优化") == "non_blocking"
+    assert _parse_leading_severity_tag("[低，非阻断] 可忽略") == "non_blocking"
+    assert _parse_leading_severity_tag("[非阻断/低] 可忽略") == "non_blocking"
+
+    # 端到端验证：[P1] [src/low:1](src/low#L1) 数据丢失在 BLOCK 运行中正确计入 subsequent_head_pass_total_block_findings
+    runs_dir = tmp_path / "runs"
+    runs_dir.mkdir()
+    _write_run(
+        runs_dir,
+        "p971-r1-block",
+        pr_number=971,
+        head_sha="a" * 40,
+        registered_at_ns=100,
+        attempt=1,
+        verdict="BLOCK",
+        receipts={
+            "claude-opus-5-5": {
+                "run_id": "run-p971-r1-block",
+                "status": "completed",
+                "model": "claude-opus-5-5",
+                "result": {
+                    "status": "blocked",
+                    "findings": [
+                        "[P1] [src/low:1](src/low#L1) 数据丢失",
+                        "[P2] [非阻断] 说明",
+                    ],
+                },
+            }
+        },
+    )
+    _write_run(
+        runs_dir,
+        "p971-r2-pass",
+        pr_number=971,
+        head_sha="b" * 40,
+        registered_at_ns=200,
+        attempt=2,
+        verdict="PASS",
+    )
+    metrics = analyze_review_runs(runs_dir)
+    assert metrics.finding_heuristic_categories == {
+        "blocking_substantive": 1,
+        "non_blocking_or_nit": 1,
+    }
+    assert metrics.subsequent_head_pass_total_block_findings == 1
+    assert metrics.subsequent_head_pass_inferred_fixed == 1
+    assert metrics.subsequent_head_pass_undeterminable_findings == 0
+
+
+def test_r7_load_dispositions_preserves_u2028_u2029_and_crlf(tmp_path: Path) -> None:
+    disp_path = tmp_path / "dispositions_u2028.jsonl"
+    row_u2028 = {
+        "run_id": "r",
+        "model": "m",
+        "finding_index": 0,
+        "pr_number": 1,
+        "disposition": "fixed",
+        "note": "a\u2028b",
+    }
+    row_u2029_crlf = {
+        "run_id": "r",
+        "model": "m",
+        "finding_index": 1,
+        "pr_number": 1,
+        "disposition": "not_important",
+        "note": "c\u2029d\x85e",
+    }
+    content = (
+        json.dumps(row_u2028, ensure_ascii=False)
+        + "\n"
+        + json.dumps(row_u2029_crlf, ensure_ascii=False)
+        + "\r\n"
+    )
+    disp_path.write_bytes(content.encode("utf-8"))
+
+    entries = load_dispositions(disp_path)
+    assert len(entries) == 2
+    assert entries[0].disposition is DispositionLabel.FIXED
+    assert entries[0].note == "a\u2028b"
+    assert entries[1].disposition is DispositionLabel.NOT_IMPORTANT
+    assert entries[1].note == "c\u2029d\x85e"
