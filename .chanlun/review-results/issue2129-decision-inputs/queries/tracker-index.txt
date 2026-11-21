@@ -1,0 +1,123 @@
+
+TRACKER authority_epoch 冻结 OR authority_profile 升代 X
+2129	OPEN	[grilling] E/S 恢复升代后，X 冻结的权威代与 E 的授权来源怎样跟随（#2079 设计发现，#1411 前置）
+2079	OPEN	[grilling] 正常关停或崩溃后，谁有权重新提供原会话端点（#1411 / #1823）
+1407	OPEN	[impl] TB-04-C 不可改精确交付与阶段条件清单（SPEC #1340）
+
+TRACKER authorized_sources OR current-recovery
+2129	OPEN	[grilling] E/S 恢复升代后，X 冻结的权威代与 E 的授权来源怎样跟随（#2079 设计发现，#1411 前置）
+2120	OPEN	[grilling] launcher 存活时，受管会话如何只换代失效域并原址续服（#1323 / TB-05，承接 #2079）
+2070	OPEN	[#1742] OrbStack 新镜像 47cbe347 / bec4d55 受控 Docker 准入
+1481	OPEN	[impl] S 写者审计核心降阶：Δ 单代判据、写者生涯前缀夹持与线性冷启动（承接 §5.9.2 全 9011 双跑）
+1419	OPEN	[impl] TB-02-E 中枢 seed、核心、外缘与成员（SPEC #1340）
+1505	CLOSED	[prototype] S恢复 D2：固定只读 FD 上的普通 hot-journal 私有字节回滚
+1642	OPEN	[impl] S 写者六阶段 Δ_R 化：段 B 前按 object_id 键的构造增量（#1612 切片 3a）
+1323	OPEN	🗺️ 完整生产程序接线总单：#787 严格多重赋格落地 → 旧实现收敛 → 历史回放与 paper 同核
+1394	CLOSED	[impl] TB-03-B 财务准备、责任先增与本地提交史（SPEC #1340）
+
+TRACKER MayHaveCalled OR QueryExecuteCommitted
+1422	OPEN	[impl] TB-04-E X 一次占有与实际受控调用（SPEC #1340）
+1768	OPEN	[impl] TB-07-E B/E 域事件外壳 domain-event/1 映射与 delta/Gap 读口（ADR 0051，#1534）
+1535	CLOSED	[grilling] FU-13 带仓迁移、回退、责任退休（#1323，新增）
+1401	OPEN	[impl] TB-09-B X换代必须隔离旧发送者并保留在途责任（SPEC #1340）
+1407	OPEN	[impl] TB-04-C 不可改精确交付与阶段条件清单（SPEC #1340）
+1539	CLOSED	[grilling] FU-17 成交/持仓唯一真账与 crosswalk（#1323，新增）
+1540	CLOSED	[grilling] FU-18 受控场所、账户、权限（#1323，新增）
+1770	OPEN	[impl] #1523-API X 内 HL 场所 adapter 离线合同（环境、凭据、请求与回报原件映射）
+1340	OPEN	📋 SPEC：完整生产程序、结构全分类与逐重经营（#1323，R2）
+1534	CLOSED	[grilling] FU-11 逐 bar 事件、身份、生命周期合同（#1323，新增）
+1323	OPEN	🗺️ 完整生产程序接线总单：#787 严格多重赋格落地 → 旧实现收敛 → 历史回放与 paper 同核
+1621	CLOSED	[impl] #1406 遗留：known_at 绑定可审计时间与跨域时刻先后不变式
+1538	CLOSED	[grilling] FU-16 paper/live 与回放同核边界（#1323，新增）
+
+TRACKER in:title TB-07
+1524	OPEN	[impl] TB-04/07 纵片 B：HL trade tick/1m feed 与断线恢复
+1366	OPEN	TB-07 验收汇总：完整历史及恢复（SPEC #1340）
+1768	OPEN	[impl] TB-07-E B/E 域事件外壳 domain-event/1 映射与 delta/Gap 读口（ADR 0051，#1534）
+1418	OPEN	[impl] TB-07-D 回放验收报告器与生产改动回归锁上线（SPEC #1340）
+1399	OPEN	[impl] TB-07-B 历史seek与修订重算各自保留真实获知时间（SPEC #1340）
+1411	OPEN	[impl] TB-07-C 完整会话双进程与崩溃恢复保持全状态一致（SPEC #1340）
+1381	OPEN	[impl] TB-07-A 完整历史输入推动全部权威域并生成可追溯回放（SPEC #1340）
+
+TRACKER in:title 0073
+
+TRACKER in:title 恢复升代
+2129	OPEN	[grilling] E/S 恢复升代后，X 冻结的权威代与 E 的授权来源怎样跟随（#2079 设计发现，#1411 前置）
+
+
+
+
+
+
+
+
+EDGE 2129 blocked_by
+
+EDGE 2129 blocking
+1411	open	[impl] TB-07-C 完整会话双进程与崩溃恢复保持全状态一致（SPEC #1340）
+
+EDGE 1411 blocked_by
+1381	open	[impl] TB-07-A 完整历史输入推动全部权威域并生成可追溯回放（SPEC #1340）
+1399	open	[impl] TB-07-B 历史seek与修订重算各自保留真实获知时间（SPEC #1340）
+1481	open	[impl] S 写者审计核心降阶：Δ 单代判据、写者生涯前缀夹持与线性冷启动（承接 §5.9.2 全 9011 双跑）
+1423	open	[impl] TB-05-E 既有持仓、订单与事实责任的非空恢复（SPEC #1340）
+1570	open	[task] S v1/v2 init 与 reset 仍在目标路径直接建库，失败留半成品（#1568 后续）
+2127	open	[grilling] 运行目录与 socket 的绝对路径进入 E/B 提交根：算账本事实还是非语义运行身份（#1425 复跑发现，#1411 双跑前置）
+2128	open	[grilling] S 被强杀后带 SHM 的介质怎样再准入，恢复后的有效代怎样交接（#2079 设计发现，#1411 前置）
+2129	open	[grilling] E/S 恢复升代后，X 冻结的权威代与 E 的授权来源怎样跟随（#2079 设计发现，#1411 前置）
+
+EDGE 1411 blocking
+1418	open	[impl] TB-07-D 回放验收报告器与生产改动回归锁上线（SPEC #1340）
+
+EDGE 1366 blocked_by
+1360	open	TB-02 验收汇总：全部结构分类及构造子义务（SPEC #1340）
+1363	open	TB-05 验收汇总：故障隔离及持续服务（SPEC #1340）
+1364	open	TB-06 验收汇总：完整阶段、换档与尾账（SPEC #1340）
+1534	closed	[grilling] FU-11 逐 bar 事件、身份、生命周期合同（#1323，新增）
+1536	closed	[grilling] FU-14 完整历史数据与模型 profile（#1323，新增）
+1537	closed	[grilling] FU-15 双跑确定性、恢复、seek、AsKnown（#1323，新增）
+1538	closed	[grilling] FU-16 paper/live 与回放同核边界（#1323，新增）
+1539	closed	[grilling] FU-17 成交/持仓唯一真账与 crosswalk（#1323，新增）
+1550	closed	[grilling] FU-19 #1304 接入映射（#1323，新增）
+1557	closed	[grilling] FU-01/03 余项：共同 cap、固定 Q 与本金批次的数值签署（#1323，P 类）
+1558	closed	[grilling] FU-02 余项：量档与逐级容量 C(ℓ) 的数值签署（#1323，P 类）
+1559	closed	[grilling] FU-01/05 余项：成本停止 θ 与四项成本输入的签署（#1323，P 类）
+1572	open	[impl] 统一所有权：聚合残差 U 逐项拆到 v4:38 清单与 E 侧 L0 逐项映射（承接 #1488）
+
+EDGE 1366 blocking
+1367	open	TB-08 验收汇总：场所共核与能力验收（SPEC #1340）
+1368	open	TB-10 验收汇总：带仓迁移、旧入口终态及默认启用（SPEC #1340）
+1369	open	TB-11 验收汇总：整图实装和独立总验（SPEC #1340）
+1385	open	[impl] TB-10-B 旧策略和多重装配入口完成R2迁移准备（SPEC #1340）
+1386	open	[impl] TB-10-C Organic与positional核心旧经济臂隔离准备（SPEC #1340）
+1387	open	[impl] TB-10-D positional延续与fusion变体旧写权隔离准备（SPEC #1340）
+1388	open	[impl] TB-10-E 混合经济臂及旧π组织完成逐族迁移准备（SPEC #1340）
+1389	open	[impl] TB-10-F 严格构造费用统计与形式锁收编（SPEC #1340）
+1390	open	[impl] TB-10-G 探针研究及封存支持的退出准备（SPEC #1340）
+1391	open	[impl] TB-11-A 完整程序验收与旧关联票义务逐项对账（SPEC #1340）
+1402	open	[impl] TB-10-H 非空持仓与尾责迁移及回退不丢权利（SPEC #1340）
+1523	open	[impl] TB-04/08/09 纵片 A：nautilus 0.62 HL 适配器与正式 paper launcher
+1524	open	[impl] TB-04/07 纵片 B：HL trade tick/1m feed 与断线恢复
+
+EDGE 2127 blocked_by
+
+EDGE 2127 blocking
+1411	open	[impl] TB-07-C 完整会话双进程与崩溃恢复保持全状态一致（SPEC #1340）
+
+EDGE 2128 blocked_by
+
+EDGE 2128 blocking
+1411	open	[impl] TB-07-C 完整会话双进程与崩溃恢复保持全状态一致（SPEC #1340）
+
+EDGE 2079 blocked_by
+
+EDGE 2079 blocking
+2120	open	[grilling] launcher 存活时，受管会话如何只换代失效域并原址续服（#1323 / TB-05，承接 #2079）
+
+EDGE 2120 blocked_by
+2079	open	[grilling] 正常关停或崩溃后，谁有权重新提供原会话端点（#1411 / #1823）
+
+EDGE 2120 blocking
+
+PARENT 2129
+1366

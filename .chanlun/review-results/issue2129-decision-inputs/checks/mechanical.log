@@ -1,0 +1,15 @@
+[配置 #1606] main-model sandcastle-scheduler/1 revision=1 ticket=#1606
+[配置 #1606] main-model.mainModel="gpt-6.1-sol" source=record:1 #1606 集成 main@3a01bed557 #1617 main-model.mts（eaa10fcf7 切 gpt-6.1-sol）/codex-route.mts/codex-child.ts
+[配置 #1606] decision-claimer sandcastle-scheduler/1 revision=1 ticket=#1606
+[配置 #1606] decision-claimer.opusModel="claude-opus-5-5" source=record:1 #1606 集成 main@3a01bed557 #1785 decision-claimer.mts MODEL_OPUS/#1742 codex-child.ts ALLOWED_MODELS
+[配置 #1606] decision-claimer.decisionMaps=[1323,1340] source=record:1 #1606 基线 PR1701@2bd876be44 #1547 decision-claimer.mts
+[配置 #1606] decision-claimer.decisionMaxConcurrent=3 source=record:1 #1606 基线 PR1701@2bd876be44 #1547 decision-claimer.mts
+[配置 #1606] decision-claimer.decisionLoopMs=600000 source=record:1 #1606 基线 PR1701@2bd876be44 #1547 decision-claimer.mts
+[配置 #1606] decision-claimer.decisionMaxRounds=3 source=record:1 #1606 基线 PR1701@2bd876be44 #1547 decision-claimer.mts
+[配置 #1606] decision-claimer.decisionMaxAttempts=6 source=record:1 #1606 基线 PR1701@2bd876be44 #1547 decision-claimer.mts
+[配置 #1606] decision-claimer.decisionTimeoutMs=1800000 source=record:1 #1606 基线 PR1701@2bd876be44 #1547 decision-claimer.mts
+[配置 #1606] decision-claimer.decisionBackoffBaseMs=20000 source=record:1 #1606 基线 PR1701@2bd876be44 #1547 decision-claimer.mts
+[配置 #1606] decision-claimer.decisionBackoffCapMs=300000 source=record:1 #1606 基线 PR1701@2bd876be44 #1547 decision-claimer.mts
+[配置 #1606] decision-claimer.adrLockMaxWaits=600 source=record:1 #1606 基线 PR1701@2bd876be44 decision-claimer.mts
+[配置 #1606] decision-claimer.adrLockPollMs=100 source=record:1 #1606 基线 PR1701@2bd876be44 decision-claimer.mts
+T + archaeology + draft coverage: PASS

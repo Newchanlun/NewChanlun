@@ -1,0 +1,4 @@
+1407	OPEN	[impl] TB-04-C 不可改精确交付与阶段条件清单（SPEC #1340）
+1375	OPEN	[impl] TB-04-A 外部先接纳封闸与精确 Resolve（SPEC #1340）
+1340	OPEN	📋 SPEC：完整生产程序、结构全分类与逐重经营（#1323，R2）
+1534	CLOSED	[grilling] FU-11 逐 bar 事件、身份、生命周期合同（#1323，新增）

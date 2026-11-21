@@ -1,0 +1,8 @@
+2127	OPEN	[grilling] 运行目录与 socket 的绝对路径进入 E/B 提交根：算账本事实还是非语义运行身份（#1425 复跑发现，#1411 双跑前置）
+1524	OPEN	[impl] TB-04/07 纵片 B：HL trade tick/1m feed 与断线恢复
+1366	OPEN	TB-07 验收汇总：完整历史及恢复（SPEC #1340）
+1768	OPEN	[impl] TB-07-E B/E 域事件外壳 domain-event/1 映射与 delta/Gap 读口（ADR 0051，#1534）
+1418	OPEN	[impl] TB-07-D 回放验收报告器与生产改动回归锁上线（SPEC #1340）
+1399	OPEN	[impl] TB-07-B 历史seek与修订重算各自保留真实获知时间（SPEC #1340）
+1411	OPEN	[impl] TB-07-C 完整会话双进程与崩溃恢复保持全状态一致（SPEC #1340）
+1381	OPEN	[impl] TB-07-A 完整历史输入推动全部权威域并生成可追溯回放（SPEC #1340）
