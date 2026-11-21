@@ -1179,6 +1179,39 @@ fn p46_b_l2_1508_closes_without_later_event_and_snapshot_stays_none() {
         Some(&[Some(Direction::Up), Some(Direction::Down)]),
         1,
     );
+    assert_eq!(
+        objects[0].lifecycle,
+        CpLifecycleStatus::Pending,
+        "原始腿坐标断接，无同源角色证据"
+    );
+    assert!(cp_terminal_certificate(&snapshot_event, &objects).is_none());
+    assert!(cp_certificate_at_divergence(&snapshot_event).is_none());
+
+    // 独立合成字面见证：同一股价高位接回，中心末成员为真实离开腿。
+    let center = Center {
+        end_index: 3_306_324,
+        ..center
+    };
+    let mut units = units;
+    units[1].start_index = 3_306_324;
+    let moves = vec![
+        LeveledMove::from_unit(&units[0], eid(1, 6703)),
+        LeveledMove::from_unit(&units[1], eid(1, 6704)),
+    ];
+    let mut objects = vec![pending_cp_object(
+        center,
+        eid(2, 1508),
+        eid(1, 6703),
+        (3_305_536, 3_306_324),
+    )];
+    advance_cp_lifecycles(
+        &mut objects,
+        &[center],
+        &units,
+        &moves,
+        Some(&[Some(Direction::Up), Some(Direction::Down)]),
+        1,
+    );
     assert_eq!(objects[0].lifecycle, CpLifecycleStatus::Closed);
     assert_eq!(objects[0].cp_certificate_confirm_src, Some(3_306_426));
     assert_eq!(

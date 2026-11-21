@@ -182,6 +182,14 @@ pub enum R5DirectionSource<'a> {
     Unproven,
 }
 
+/// 由同一构造流的拥有者提供。attested 按 (seed, leave) 升序；
+/// 不得从占位方向、相邻序号或区间重叠构造角色（#2141 §5.2）。
+#[derive(Debug, Clone, Copy)]
+pub struct RoleProvider<'a> {
+    pub directions: R5DirectionSource<'a>,
+    pub attested: &'a [R5AttestedLegs],
+}
+
 impl R5DirectionSource<'_> {
     fn matches(self, at: usize, direction: Direction) -> bool {
         match self {
@@ -219,7 +227,7 @@ pub(super) fn r5_step(
         if legs.first_pullback != Some(j + 1) {
             return R5Step::Pending(R5Gap::FirstPullbackUnproven);
         }
-        let proof = R5Proof::new(j, j + 1, legs.side, core, pullback);
+        let proof = R5Proof::new(seed, j, j + 1, legs.side, core, pullback);
         return match r5_pullback(zd, zg, legs.side, pullback) {
             Some(true) => R5Step::Returned {
                 proof,
@@ -234,7 +242,9 @@ pub(super) fn r5_step(
         return R5Step::Pending(R5Gap::DirectionUnproven);
     }
     match r5_joint(zd, zg, prev, cur) {
-        R5Joint::Proven { side } => R5Step::Destroyed(R5Proof::new(j - 1, j, side, core, cur)),
+        R5Joint::Proven { side } => {
+            R5Step::Destroyed(R5Proof::new(seed, j - 1, j, side, core, cur))
+        }
         R5Joint::BreakUnitOutward => R5Step::Pending(R5Gap::BreakUnitOutward),
         R5Joint::DirectionNotAlternating => R5Step::Pending(R5Gap::DirectionNotAlternating),
         R5Joint::JointNotConnected => R5Step::Pending(R5Gap::JointNotConnected),
@@ -247,6 +257,7 @@ pub(super) fn r5_step(
 /// 共用扫描证实的离开和首次回抽；下标均相对于本次输入。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct R5Proof {
+    seed_unit: usize,
     leave_unit: usize,
     pullback_unit: usize,
     side: Direction,
@@ -256,6 +267,7 @@ pub struct R5Proof {
 
 impl R5Proof {
     fn new(
+        seed_unit: usize,
         leave_unit: usize,
         pullback_unit: usize,
         side: Direction,
@@ -263,6 +275,7 @@ impl R5Proof {
         u: &UnitRange,
     ) -> Self {
         Self {
+            seed_unit,
             leave_unit,
             pullback_unit,
             side,
@@ -272,6 +285,10 @@ impl R5Proof {
                 Direction::Down => u.hi,
             },
         }
+    }
+
+    pub(super) fn seed_unit(&self) -> usize {
+        self.seed_unit
     }
 
     pub fn leave_unit(&self) -> usize {

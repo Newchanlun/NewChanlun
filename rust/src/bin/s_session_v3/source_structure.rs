@@ -172,6 +172,50 @@ impl Lookup for FullLookup<'_> {
     }
 }
 
+/// 旧活动槽继续保有原件，但不是新切面中可用于判定的对象或实体端点。
+pub(super) struct CurrentR5<'a, L> {
+    pub lookup: &'a L,
+    pub deferred: &'a [bj::TextValue],
+}
+impl<L: Lookup> CurrentR5<'_, L> {
+    pub fn is_deferred(&self, id: &str) -> bool {
+        self.deferred
+            .binary_search_by(|v| v.as_str().cmp(id))
+            .is_ok()
+    }
+
+    pub fn validate(&self) -> Result<(), PublishError> {
+        for id in self.deferred {
+            let object = self
+                .lookup
+                .object(id.as_str())
+                .ok_or_else(|| err("R5 待重算原件不在活动集"))?;
+            if !super::super::content_structure::r5_deferable_kind(object.kind.as_str()) {
+                return Err(err("R5 待重算原件不在 E/F 领域"));
+            }
+        }
+        Ok(())
+    }
+}
+impl<L: Lookup> Lookup for CurrentR5<'_, L> {
+    fn entity(&self, id: &str) -> Option<&Object> {
+        self.lookup
+            .entity(id)
+            .filter(|object| !self.is_deferred(object.id.as_str()))
+    }
+
+    fn object(&self, id: &str) -> Option<&Object> {
+        self.lookup.object(id).filter(|_| !self.is_deferred(id))
+    }
+}
+pub(super) fn deferred_objects(
+    s: &mut (impl SourceFieldStore + ?Sized),
+    center_version: &Object,
+) -> Result<sc::CodecVec<bj::TextValue>, PublishError> {
+    let payload = payload(s, center_version)?;
+    super::super::object_index::r5_deferred_from_payload(s, payload.view())
+}
+
 /// 仅当前对象边；before/previous 是历史值快照，不冒充当前对象边。
 /// 收集与校验共用路径，以便 Native 删除/修改边时撤销同一组逆依赖。
 pub(super) fn references(
@@ -400,9 +444,19 @@ pub(super) fn audit_full(
             return Err(err("结构域版本根缺失或重复"));
         }
     }
+    let center_version = objects
+        .iter()
+        .find(|o| o.kind == "CC-056.center_version")
+        .expect("上方已要求唯一中心版本");
+    let deferred = deferred_objects(s, center_version)?;
+    let current = CurrentR5 {
+        lookup: &lookup,
+        deferred: &deferred,
+    };
+    current.validate()?;
     for o in objects {
-        if is_kind(rule, o.kind.as_str()) {
-            audit_links(s, o, &lookup)?;
+        if is_kind(rule, o.kind.as_str()) && !current.is_deferred(o.id.as_str()) {
+            audit_links(s, o, &current)?;
         }
     }
     Ok(())
@@ -2115,7 +2169,7 @@ mod ef_entity_tests {
                 o.source_coords.content_ref(),
             ));
             let kind = key[0].as_str().unwrap().to_string();
-            if !kind.starts_with("CC-055.") {
+            if !kind.ends_with("_change") {
                 records.push(o.record.clone());
             }
             rows.push(Row {
@@ -2235,17 +2289,57 @@ mod ef_entity_tests {
         assert_eq!(centers[0]["r5_pending_unit"], "segment:5");
         assert_eq!(centers[0]["settled"], false);
 
-        let refused = cut_ranges(
+        let mixed = cut_ranges(
             &mut nodes,
             &mut producer,
             &broken_joint,
             29,
             &before.records,
+        )
+        .unwrap();
+        let version = data_of(&mixed.rows, "CC-056.center_version")[0];
+        let deferred = version["r5_deferred_object_ids"].as_array().unwrap();
+        for kind in ["CC-016.center", "CC-020.center_pair"] {
+            let dormant: std::vec::Vec<_> = before
+                .rows
+                .iter()
+                .filter(|row| row.kind == kind)
+                .filter(|row| deferred.iter().any(|id| id.as_str() == Some(&row.id)))
+                .collect();
+            assert_eq!(dormant.len(), 2, "{kind} 的两条旧下游活动实体仍待重算");
+        }
+        assert!(data_of(&mixed.rows, "CC-055.center_change")
+            .iter()
+            .all(|d| d["change"] != "withdrawn"));
+        assert!(data_of(&mixed.rows, "CC-055.pair_change").is_empty());
+        assert_eq!(data_of(&mixed.rows, "CC-016.center").len(), 1);
+        assert_eq!(
+            data_of(&mixed.rows, "CC-016.center")[0]["r5_pending_unit"],
+            "segment:5"
         );
-        assert!(matches!(refused, Err(e) if e.to_string().contains("R5_RECOMPUTE_DEFERRED")));
+
+        let mut active_cut = mixed.rows.clone();
+        active_cut.extend(
+            before
+                .rows
+                .iter()
+                .filter(|r| deferred.iter().any(|id| id.as_str() == Some(r.id.as_str())))
+                .cloned(),
+        );
+        full(&mut nodes, &active_cut).expect("本代复核不能用可证前缀的新版本重验旧待重算端点");
 
         // 关节可证后正常生成同身份的修订，不把最后一窗的成员增长冒充身份消失。
-        let proved = cut(&mut nodes, &mut producer, RANGES.len(), 30, &before.records);
+        let mut mixed_prior = mixed.records.clone();
+        for record in &before.records {
+            let root = RefValue::Plain(NativeValue::<sc::ContentRef>::from_unscoped(
+                record.content_ref(),
+            ));
+            let id = text(&mut nodes, &root, "object_id").unwrap();
+            if deferred.iter().any(|v| v.as_str() == Some(id.as_str())) {
+                mixed_prior.push(record.clone());
+            }
+        }
+        let proved = cut(&mut nodes, &mut producer, RANGES.len(), 30, &mixed_prior);
         let old_tail = data_of(&before.rows, "CC-016.center")[2];
         let tail = data_of(&proved.rows, "CC-016.center")[2];
         assert_eq!(tail["entity_id"], old_tail["entity_id"]);

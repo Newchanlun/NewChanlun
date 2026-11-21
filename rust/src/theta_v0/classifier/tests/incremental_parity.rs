@@ -343,7 +343,9 @@ fn candidate_event_stream_classify_fnv1a_golden() {
     // #1419 S1 诚实更新（旧值 3475352420846762134）：R8 续扫自 last_member+2，突破段不再兼任
     // 下一中枢 seed 首段 ⟹ 本合成流的中枢窗口与上级单元改划，事件流字节随之漂移（口径回归）。
     assert_eq!(
-        digest, 6295814683694334450,
+        // #2141 §4.5/§5.2：原始 120 段完全相同，重新划窗与可读域导致 39→35 条盘背候选。
+        digest,
+        10411020383917041129,
         "真实事件流漂移须诚实更新 golden"
     );
 }
@@ -376,7 +378,7 @@ fn chain_certificate_book_incremental_equals_full_replay() {
     let cfg = ThetaConfig::default();
     // ★#1419 根裁定 r2 第 4 条：120 段在 R8 下塔只剩 3 层、skip 边为 0，本锁不再经过 skip 边；
     // 升到 160 段（4 层）并在末尾断言 skip_edges > 0，防止再次静默失效。
-    let (segments, closes) = chain_fixture(160);
+    let (segments, closes) = chain_fixture(192);
 
     // 原始前缀几何只构造一次（两侧共享的是输入，不是计算）。
     let mut prefixes = Vec::with_capacity(segments.len());
@@ -478,8 +480,9 @@ fn chain_certificate_book_incremental_equals_full_replay() {
 #[test]
 fn causal_and_terminal_projection_drives_agree_on_common_chain_keys() {
     let cfg = ThetaConfig::default();
-    // ★#1419 根裁定 r2 第 4 条：升到 160 段并断言两驱动 skip_edges > 0（120 段在 R8 下为 0）。
-    let (segments, closes) = chain_fixture(160);
+    // #2141：种子 557 的前 186 段，双驱动 skip 非空且共有证书仍逐字段相等。
+    // 其后两个共有证书的不同输入生命史由相邻反例单独锁定。
+    let (segments, closes) = chain_fixture(186);
     let causal_book = chain_book_over_prefixes(
         &segments,
         &closes,
@@ -552,17 +555,57 @@ fn causal_and_terminal_projection_drives_agree_on_common_chain_keys() {
             terminal_projection_heads.len(),
             common_count
         ),
-        (52, 42, 34),
+        (23, 27, 15),
         "驱动身份总数 golden 漂移（causal, terminal_projection, common）"
     );
     assert_eq!(
-        causal_only_count, 18,
+        causal_only_count, 8,
         "causal_only 计数 golden 漂移（#551 甲管方向）"
     );
     assert_eq!(
-        terminal_only_count, 8,
+        terminal_only_count, 12,
         "terminal_only 计数 golden 漂移（子集关系破裂方向，根因在查 #681）"
     );
+}
+
+/// 仍用同一来源的完整 192 段，因果输入保留历史而终态输入会丢弃当步缺席的候选。
+/// 它们不是同一个前缀重放，不能因此放宽任何冷热对拍。
+#[test]
+fn r5_dual_chain_drives_keep_distinct_observation_clocks_on_late_missing_nodes() {
+    let cfg = ThetaConfig::default();
+    let (segments, closes) = chain_fixture(192);
+    let causal = chain_book_over_prefixes(
+        &segments,
+        &closes,
+        &cfg,
+        PrefixCacheReuse::SharedAcrossPrefixes,
+    );
+    let terminal =
+        chain_book_over_prefixes(&segments, &closes, &cfg, PrefixCacheReuse::FreshPerPrefix);
+    let a = causal.heads();
+    let b = terminal.heads();
+    let forks: Vec<_> = b
+        .iter()
+        .filter_map(|right| {
+            let left = a.iter().find(|left| left.key == right.key)?;
+            (!certificates_agree_ignoring_alive_candidate_universe_counts(left, right))
+                .then_some((*left, *right))
+        })
+        .collect();
+    assert_eq!(forks.len(), 2);
+    for (causal, terminal) in forks {
+        assert_eq!((causal.observed_at, terminal.observed_at), (748, 736));
+        assert_eq!((causal.revision, terminal.revision), (0, 1));
+        assert_eq!((causal.revision_at, terminal.revision_at), (748, 748));
+        assert_eq!(
+            causal.nodes.last().unwrap().status,
+            chain_cert::ChainNodeStatus::Alive
+        );
+        assert_eq!(
+            terminal.nodes.last().unwrap().status,
+            chain_cert::ChainNodeStatus::Absent
+        );
+    }
 }
 
 /// ★#641 FNV golden + 非真空锁：链簿产出漂移当场变红，且覆盖探针证明真走过链路径。
@@ -573,7 +616,7 @@ fn chain_certificate_book_classify_fnv1a_golden() {
     // ★#1419 S1：R8 续扫自 last_member+2 后，120 段合成流的塔只剩 3 层（[120, 30, 7]），
     // skip 边（跨级边）无处可生 ⟹ 下方 `skip_edges > 0` 非真空锁失效。升到 160 段恢复 4 层
     // （[160, 42, 10, 3]），实测 skip_edges=148、extends_not_materialized=15。
-    let (segments, closes) = chain_fixture(160);
+    let (segments, closes) = chain_fixture(192);
     let book = chain_book_over_prefixes(
         &segments,
         &closes,
@@ -635,7 +678,8 @@ fn chain_certificate_book_classify_fnv1a_golden() {
     // 第 1 条把走势区间与中枢外缘分开（上级单元取全部子走势极值）后回到 S1 的值——本夹具上链簿的漂移
     // 全部来自上级单元区间，L0 中枢外缘改 Zn 本身不改链簿（探针 birth_closed 46→52、skip_edges 174→148）。
     assert_eq!(
-            digest, 7694977913360723439,
+            // #2141 §5.2：192 段种子 557 重建真实跨级 skip；证书 52→29，探针 skip=774。
+            digest, 5491322907148865231,
             "链簿产出漂移须诚实更新 golden（probe={probe:?} certs={} heads={} pan_rooted={pan_rooted}）",
             book.certificates().len(),
             heads.len()
@@ -668,7 +712,16 @@ fn classify_chain_walks_unresolved_to_provisional_with_growth_and_clock() {
         .flat_map(|stream| stream.iter())
         .filter(|event| event.kind == cand_event::CandidateKind::Trend)
         .collect();
-    assert_eq!(history.len(), 2, "Trend 候选须走满两段生命史，禁真空绿");
+    assert_eq!(history.len(), 3, "末成员几何候选与后续 episode 分属两身份");
+    let pending = history.iter().find(|e| e.key.c_start == 64).unwrap();
+    assert_eq!(pending.state, cand_event::CandidateState::Unresolved);
+    assert_eq!(pending.interval, (64, 68));
+    assert_eq!(pending.first_provable_at, None, "无同源首回抽不落证钟");
+    let history: Vec<_> = history
+        .into_iter()
+        .filter(|e| e.key.c_start == 68)
+        .collect();
+    assert_eq!(history.len(), 2, "后续 Trend 候选须走满两段生命史");
     assert_eq!(history[0].key, history[1].key, "右端不入键 ⟹ 同一身份");
 
     assert_eq!(history[0].state, cand_event::CandidateState::Unresolved);
@@ -973,19 +1026,17 @@ fn escalated_upstream_regrowth_after_collapse_revival_fork_metered() {
         .collect();
     assert_eq!(
         revived.len(),
-        1,
-        "锁定当前语义：塌空—回长恰产生 1 个禁止方向的分叉（矛盾已上浮，见函数头）"
+        2,
+        "末成员和后续 episode 两身份各保留其因果终态"
     );
-    assert_eq!(
-        terminal[revived[0]].state,
-        cand_event::CandidateState::Invalidated,
-        "因果簿侧：终态不复活（E2E-O 成立）"
-    );
-    assert_eq!(
-        fresh[revived[0]].state,
-        cand_event::CandidateState::Provisional,
-        "fresh 侧：历史无关，重新产出同一 key（裁定(i) 的禁止方向）"
-    );
+    for (start, state) in [
+        (64, cand_event::CandidateState::Unresolved),
+        (68, cand_event::CandidateState::Provisional),
+    ] {
+        let key = *revived.iter().find(|key| key.c_start == start).unwrap();
+        assert_eq!(terminal[key].state, cand_event::CandidateState::Invalidated);
+        assert_eq!(fresh[key].state, state);
+    }
 }
 
 /// ★#551：L0 塌空的 bar 必须**当场**把在案活候选判 `Invalidated`，不推迟到下一非空 bar。
@@ -1112,11 +1163,6 @@ fn incremental_tower_shrink_falls_back_to_full() {
 #[test]
 fn incremental_tower_preserves_b2_second_buy() {
     let cfg = ThetaConfig::default();
-    // ★task #142 延伸语义诚实重算（同 end_to_end_second_buy_via_l1_l2_geometric 推导）：三组
-    // 核心分离（组B 首段 hi=115<ZD_A=120、组C 首段 lo=115>ZG_B=114 ⟹ non-extension，PDF §5
-    // Step3），三个 L1 走势区间 O_A=[110,150]/O_B=[80,125]/O_C=[112,148] 共同相交 ⟹ L2 核心 [112,125]
-    // 非空（组B 中枢 Zn 外缘为 [80,115]，走势区间含非 Zn 高点 125，见 [`three_group_segments`]）。
-    // ★#1419 R8：组间各插一个连接段，见 [`three_group_segments`]（组B 坐标 +4）。
     let segments = three_group_segments();
     let closes = three_group_closes();
     // ★#1228（#814 D-2 落地）：B2 背驰判据改走 div_cand 四条件，默认 ForceL 档消费 L0 笔序列
@@ -1611,7 +1657,7 @@ fn incremental_operation_bypass_matches_full_after_cascade_reset() {
 fn e2eo_assembly_incremental_equals_full_replay() {
     let cfg = ThetaConfig::default();
     // ★#1419 根裁定 r2 第 4 条：升到 160 段并断言 skip_edges > 0（120 段在 R8 下为 0）。
-    let (segments, closes) = chain_fixture(160);
+    let (segments, closes) = chain_fixture(192);
 
     let mut prefixes = Vec::with_capacity(segments.len());
     for n in 1..=segments.len() {

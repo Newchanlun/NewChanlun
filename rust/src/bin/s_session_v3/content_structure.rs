@@ -1743,6 +1743,23 @@ fn segment_units(
     Ok(out)
 }
 
+pub(super) const R5_RECOMPUTE_DEFERRED: &str = "R5_RECOMPUTE_DEFERRED";
+pub(super) const R5_DEFERRED_FIELD: &str = "r5_deferred_object_ids";
+
+pub(super) fn r5_deferable_kind(kind: &str) -> bool {
+    matches!(
+        kind,
+        "CC-016.center_seed_attempt"
+            | "CC-016.center"
+            | "CC-017.center_roles"
+            | "CC-022.unit_assignment"
+            | "CC-018.unit_core_position"
+            | "CC-020.center_pair"
+            | "CC-055.center_relation"
+            | "CC-055.pair_relation"
+    )
+}
+
 /// E/F 同一中心扫描的直接内容投影；所有判据来自 center_scan/center 共享核。
 pub(super) fn build_ef(
     producer: &mut Cc004Producer,
@@ -1795,26 +1812,32 @@ pub(super) fn build_ef_units(
             .map(|w| Text::format(format_args!("center:{}", anchor(ids[w.first])), nodes)),
         nodes,
     )?;
-    let mut previous = BTreeMap::<(Text, Text), Built>::new();
+    let mut previous = BTreeMap::<(Text, Text), (Built, Text)>::new();
+    let mut prior_relations = Vec::new();
     let mut prior_versions = BTreeSet::new();
     for record in prior.records {
         let kind = field_text(nodes, record, "kind")?;
-        if !crate::tb02e::KINDS[..4].contains(&kind.as_str())
-            && !crate::tb02f::KINDS[..2].contains(&kind.as_str())
-            && kind != crate::tb02e::KINDS[6]
-            && kind != crate::tb02f::KINDS[4]
-        {
+        let version = kind == crate::tb02e::KINDS[6] || kind == crate::tb02f::KINDS[4];
+        if !version && !r5_deferable_kind(&kind) {
             return Err(format!("EF prior kind 不允许: {kind}").into());
         }
         let data = verify_prior(nodes, producer, record, &kind)?;
-        if kind == crate::tb02e::KINDS[6] || kind == crate::tb02f::KINDS[4] {
+        if version {
             if !prior_versions.insert(kind, nodes)? {
                 return Err("EF prior 重复版本根".into());
             }
             continue;
         }
+        let oid = field_text(nodes, record, "object_id")?;
+        if kind.ends_with("_relation") {
+            prior_relations.push((data, oid), nodes)?;
+            continue;
+        }
         let entity = field_text(nodes, &data, "entity_id")?;
-        if previous.insert((kind, entity), data, nodes)?.is_some() {
+        if previous
+            .insert((kind, entity), (data, oid), nodes)?
+            .is_some()
+        {
             return Err("EF prior 重复实体".into());
         }
     }
@@ -1824,27 +1847,71 @@ pub(super) fn build_ef_units(
     {
         return Err("EF prior 缺中心或中枢对版本根".into());
     }
-    // 对没有结算证据的前边界，后缀未被扫描，不是经过扫描后证实缺席。
-    // 仅省略 CC-055「withdrawn」仍会触发 object_diff 的按槽撤回，故在生成
-    // 当前候选前拒绝本批，让上一发布切面原样留存。混合发布需独立的待重算槽位。
+
+    // 未决边界后未扫描到的旧中枢及其依赖保留原件，不把缺证写成撤回。
+    // 位置比较使用同一完成构造流中的实体锚，不用整个批次的缺席保护所有旧对象。
+    let mut deferred_centers = BTreeSet::new();
+    let mut deferred_entities = BTreeSet::new();
+    let mut deferred_ids = Vec::new();
     if let Some(R5Boundary::Pending { tested, .. }) = facts.windows.last().map(|w| w.boundary) {
+        let raw_anchor = |id: &str| id.rsplit(':').next().and_then(|n| n.parse::<usize>().ok());
+        let unresolved_at = raw_anchor(ids[tested]).ok_or("未决段缺原始锚")?;
+        let beyond = |id: &str| raw_anchor(id).is_none_or(|coord| coord >= unresolved_at);
         for ((kind, entity), _) in &previous {
-            if kind.as_str() != crate::tb02e::KINDS[1] || center_ids.contains(entity) {
-                continue;
-            }
-            let before_unresolved = ids[..tested]
-                .iter()
-                .any(|id| anchor(id) == center_anchor(entity));
-            if !before_unresolved {
-                return Err("R5_RECOMPUTE_DEFERRED：未决窗口下游的既有中枢缺重算证据".into());
+            if kind == crate::tb02e::KINDS[1]
+                && !center_ids.contains(entity)
+                && beyond(center_anchor(entity))
+            {
+                deferred_centers.insert(entity.clone_in(nodes)?, nodes)?;
             }
         }
+        for ((kind, entity), (data, oid)) in &previous {
+            let defer = match kind.as_str() {
+                "CC-016.center" => deferred_centers.contains(entity),
+                "CC-016.center_seed_attempt" => beyond(
+                    entity
+                        .strip_prefix("seed_attempt:")
+                        .ok_or("seed attempt 身份不符")?,
+                ),
+                "CC-017.center_roles" | "CC-018.unit_core_position" => {
+                    let center = field_text(nodes, data, "center_id")?;
+                    deferred_centers.contains(&center)
+                }
+                "CC-022.unit_assignment" => {
+                    let unit = field(nodes, data, "unit")?;
+                    let unit = field_text(nodes, &unit, "unit_id")?;
+                    field_text(nodes, data, "status")? != "NOT_YET_ASSIGNED" && beyond(&unit)
+                }
+                "CC-020.center_pair" => {
+                    let a = field_text(nodes, data, "a_center_id")?;
+                    let b = field_text(nodes, data, "b_center_id")?;
+                    deferred_centers.contains(&a) || deferred_centers.contains(&b)
+                }
+                _ => unreachable!("上方限定 EF prior kind"),
+            };
+            if defer {
+                deferred_entities.insert(entity.clone_in(nodes)?, nodes)?;
+                deferred_ids.push(oid.clone_in(nodes)?, nodes)?;
+            }
+        }
+        for (data, oid) in &prior_relations {
+            let source = field_text(nodes, data, "source_id")?;
+            let target = field_text(nodes, data, "target_id")?;
+            let witness = field_text(nodes, data, "witness_object_id")?;
+            if deferred_entities.contains(&source)
+                || deferred_entities.contains(&target)
+                || deferred_ids.contains(&witness)
+            {
+                deferred_ids.push(oid.clone_in(nodes)?, nodes)?;
+            }
+        }
+        deferred_ids.sort_unstable();
     }
     let old = |kind: &str, entity: &str| {
         previous
             .iter()
             .find(|((k, e), _)| k.as_str() == kind && e.as_str() == entity)
-            .map(|(_, v)| v)
+            .map(|(_, (value, _))| value)
     };
     let mut out = StructureOutput {
         requests: Vec::new(),
@@ -1853,6 +1920,9 @@ pub(super) fn build_ef_units(
         segments: Vec::new(),
         waiting_reasons: Vec::new(),
     };
+    if !deferred_ids.is_empty() {
+        out.waiting_reasons.push(R5_RECOMPUTE_DEFERRED, nodes)?;
+    }
     let mut edges: Vec<StructureEdge> = Vec::new();
     let mut attempt_ids = BTreeMap::new();
     for a in &facts.attempts {
@@ -2331,8 +2401,11 @@ pub(super) fn build_ef_units(
         revisions.push(revision, nodes)?;
     }
     let all_sources = sorted_sources(Vec::from_iter(ctx.all_sources.iter().copied(), nodes)?);
-    for ((kind, entity), p) in &previous {
-        if kind == crate::tb02e::KINDS[1] && !center_ids.contains(entity) {
+    for ((kind, entity), (p, _)) in &previous {
+        if kind == crate::tb02e::KINDS[1]
+            && !center_ids.contains(entity)
+            && !deferred_entities.contains(entity)
+        {
             out.objects.push(
                 change_object(
                     producer,
@@ -2358,6 +2431,9 @@ pub(super) fn build_ef_units(
         .chain(inputs.in_progress.iter().map(|u| (u, None)))
     {
         let entity = Text::format(format_args!("assign:{}", unit.unit_id), nodes)?;
+        if deferred_entities.contains(&entity) {
+            continue;
+        }
         let (status, center, left, right, pending, reason, seed) = match f {
             None => (
                 "NOT_YET_ASSIGNED",
@@ -2551,23 +2627,28 @@ pub(super) fn build_ef_units(
     };
     let waiting = fact(nodes, &out.waiting_reasons)?;
     let deferred = fact(nodes, &crate::tb02e::DEFERRED_SCOPE)?;
-    let data = put(
-        &(obj(
-            [
-                ("input_frontier", s(ctx.frontier, nodes)?),
-                ("known_at", edge(ctx.known_at)),
-                ("scan_cursor", cursor),
-                ("waiting_reasons", edge(&waiting)),
-                (
-                    "delivered_scope",
-                    s("l0_strict_seed_zn_roles_c_resume_assignment", nodes)?,
-                ),
-                ("deferred_scope", edge(&deferred)),
-            ],
-            nodes,
-        )?),
+    let mut fields = vec_fields(obj(
+        [
+            ("input_frontier", s(ctx.frontier, nodes)?),
+            ("known_at", edge(ctx.known_at)),
+            ("scan_cursor", cursor),
+            ("waiting_reasons", edge(&waiting)),
+            (
+                "delivered_scope",
+                s("l0_strict_seed_zn_roles_c_resume_assignment", nodes)?,
+            ),
+            ("deferred_scope", edge(&deferred)),
+        ],
         nodes,
-    )?;
+    )?)?;
+    if !deferred_ids.is_empty() {
+        let values = Vec::try_from_iter(deferred_ids.iter().map(|id| s(id, nodes)), nodes)?;
+        fields.push(
+            (Text::new(R5_DEFERRED_FIELD, nodes)?, CV::Array(values)),
+            nodes,
+        )?;
+    }
+    let data = put(&CV::Object(fields), nodes)?;
     out.objects.push(
         emit(
             producer,
@@ -2955,8 +3036,11 @@ pub(super) fn build_ef_units(
         }
         pair_ids.push(entity, nodes)?;
     }
-    for ((kind, entity), p) in &previous {
-        if kind == crate::tb02f::KINDS[1] && !pair_ids.contains(entity) {
+    for ((kind, entity), (p, _)) in &previous {
+        if kind == crate::tb02f::KINDS[1]
+            && !pair_ids.contains(entity)
+            && !deferred_entities.contains(entity)
+        {
             out.objects.push(
                 change_object(
                     producer,

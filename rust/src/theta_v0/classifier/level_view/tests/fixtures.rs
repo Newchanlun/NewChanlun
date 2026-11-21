@@ -27,12 +27,24 @@ pub(super) fn extended_windows() -> (Vec<LeveledMove>, Vec<LeveledMove>) {
         unit(80, Up, 155, 170, 8),
         unit(90, Down, 150, 165, 9),
         unit(100, Up, 160, 175, 10),
-        unit(110, Down, 140, 155, 11),
+        unit(110, Down, 140, 160, 11),
         unit(120, Up, 180, 190, 12),
         // ★R1 夹具补腿：回试段（Down，低点 170 > w2.zg=165 不重回核心）——与腿12（Up，
         // 端点 190 > 165 破核心）构成对 w2 的第三类买点（037:18），供全合取确认测试；
         // 旧 as_of=129 的既有测试按 end ≤ as_of 过滤本腿，行为不变。
-        unit(130, Down, 170, 195, 13),
+        LeveledMove::from_unit(
+            &UnitRange {
+                start_index: 129,
+                end_index: 139,
+                direction: Down,
+                lo: 170,
+                hi: 190,
+            },
+            ElementId {
+                level: 0,
+                ordinal: 13,
+            },
+        ),
     ];
     let w0 = LeveledMove::compose(
         &lower[0..4],
@@ -83,6 +95,51 @@ pub(super) fn extended_windows() -> (Vec<LeveledMove>, Vec<LeveledMove>) {
         },
     );
     (vec![w0, w1, w2], lower)
+}
+
+/// 合成 CC-019 供给：明确给出 B 后第 12 腿是已完成离开，13 是同流首回抽。
+/// 这不是对相邻腿投影方向的推导。
+pub(super) fn attested_settlements(legs: &[LowerLeg]) -> [Option<R5Proof>; 3] {
+    use super::super::super::center_scan::{NoopSink, R5AttestedLegs, R5DirectionSource};
+    use super::super::super::recursive_tower::scan_center_facts_with_r5;
+    let units: Vec<_> = legs
+        .iter()
+        .map(|l| UnitRange {
+            start_index: l.start_index,
+            end_index: l.end_index,
+            lo: l.lo,
+            hi: l.hi,
+            direction: l.direction,
+        })
+        .collect();
+    let evidence = R5AttestedLegs {
+        seed: 8,
+        leave: 12,
+        side: Direction::Up,
+        first_pullback: Some(13),
+        leave_is_zn: Some(true),
+    };
+    let (windows, meta, _) = scan_center_facts_with_r5(
+        &units,
+        super::super::super::center::center_from_window,
+        evidence.seed,
+        R5DirectionSource::Unproven,
+        &[evidence],
+        &mut NoopSink,
+    );
+    assert_eq!((windows[0].0.zd, windows[0].0.zg), (160, 165));
+    let proof = meta[0].settlement.expect("夹具须证明已完成离开与首回抽");
+    [None, None, Some(proof)]
+}
+
+pub(super) fn assemble_with_fixture_r5(
+    config: C2LevelViewConfig,
+    query: LevelViewQuery,
+    material: LevelViewMaterial<'_>,
+    resident: Option<ConfirmResidence<'_>>,
+) -> Result<LevelAsOfView, LevelViewError> {
+    let proofs = attested_settlements(material.lower_legs);
+    assemble_level_view_with_r5(config, query, material, &proofs, resident)
 }
 
 pub(super) fn mbar(source_index: usize) -> Bar {

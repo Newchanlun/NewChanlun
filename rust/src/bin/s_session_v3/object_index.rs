@@ -1907,6 +1907,79 @@ fn push_withdrawal_target(
     targets.try_push(target).map_err(publish_err)
 }
 
+/// 读取本代 E 版本发布的待重算原件清单。旧版本没有字段，沿用原对象差分。
+fn load_r5_deferred(
+    s: &mut (impl CodecRead + ?Sized),
+    record: sc::RefView<'_>,
+) -> Result<sc::CodecVec<TextValue>, PublishError> {
+    let payload = field_ref(s, record, "payload")?;
+    r5_deferred_from_payload(s, payload.view())
+}
+
+pub(super) fn r5_deferred_from_payload(
+    s: &mut (impl CodecRead + ?Sized),
+    payload: sc::RefView<'_>,
+) -> Result<sc::CodecVec<TextValue>, PublishError> {
+    use super::content_structure::{R5_DEFERRED_FIELD, R5_RECOMPUTE_DEFERRED};
+    let data = field_ref(s, payload, "data")?;
+    let mut out = sc::CodecVec::<TextValue>::default();
+    let reasons = field_ref(s, data.view(), "waiting_reasons")?;
+    let mut pending = false;
+    for i in 0..reasons
+        .extent()
+        .ok_or_else(|| err("R5 版本缺等待原因数组"))?
+    {
+        let item = s
+            .lookup_ref(reasons.view(), &[PathStep::Index(i)])
+            .map_err(publish_err)?;
+        pending |= bj::read_text(s, item.view()).map_err(publish_err)? == R5_RECOMPUTE_DEFERRED;
+    }
+    let marker = s
+        .lookup_optional_field_ref(data.view(), R5_DEFERRED_FIELD)
+        .map_err(publish_err)?;
+    match (pending, marker) {
+        (false, None) => return Ok(out),
+        (true, Some(values))
+            if values.kind() == Kind::Array
+                && values.extent().is_some_and(|n| n > 0)
+                && text_ref(s, payload, "policy_version")? == crate::tb02e::POLICY_VERSION =>
+        {
+            let scan = field_ref(s, data.view(), "scan_cursor")?;
+            if text_ref(s, scan.view(), "state")? != "EXTENDING" {
+                return Err(publish_err("R5 待重算须绑定未决窗"));
+            }
+            for i in 0..values.extent().unwrap_or_default() {
+                let item = s
+                    .lookup_ref(values.view(), &[PathStep::Index(i)])
+                    .map_err(publish_err)?;
+                let id = bj::read_text(s, item.view()).map_err(publish_err)?;
+                if !id.starts_with("obj3-")
+                    || out
+                        .last()
+                        .is_some_and(|prior| prior.as_str() >= id.as_str())
+                {
+                    return Err(publish_err("R5 待重算原件身份须有序且唯一"));
+                }
+                s.native_codec_room(&mut out, 1).map_err(publish_err)?;
+                out.try_push(id).map_err(publish_err)?;
+            }
+        }
+        _ => return Err(publish_err("R5 待重算原因与原件清单不符")),
+    }
+    Ok(out)
+}
+
+fn check_r5_deferred_kind(deferred: &[TextValue], entry: &Entry) -> Result<(), PublishError> {
+    if deferred
+        .binary_search_by(|id| id.as_str().cmp(entry.id.as_str()))
+        .is_ok()
+        && !super::content_structure::r5_deferable_kind(&entry.kind)
+    {
+        return Err(publish_err("R5 待重算原件不在 E/F 领域"));
+    }
+    Ok(())
+}
+
 fn plan_from_candidates(
     s: &mut (impl CodecStore + ?Sized),
     layout: Layout,
@@ -1962,8 +2035,25 @@ fn plan_from_candidates(
         })
         .map_err(publish_err)?;
     }
-    let changes =
-        object_diff::plan_admitted(&keys, &old_keys, allocation.as_ref(), s.codec_work())?;
+    let deferred = match new.iter().find(|e| e.kind == "CC-056.center_version") {
+        Some(version) => {
+            let record = built_ref(s, &version.generated)?;
+            load_r5_deferred(s, record.view())?
+        }
+        None => sc::CodecVec::default(),
+    };
+    if !deferred.is_empty() {
+        for entry in old {
+            check_r5_deferred_kind(&deferred, entry)?;
+        }
+    }
+    let changes = object_diff::plan_admitted_with_deferred(
+        &keys,
+        &old_keys,
+        allocation.as_ref(),
+        s.codec_work(),
+        &deferred,
+    )?;
     let mut index = bj::new_work(allocation.as_ref());
     s.native_codec_room(&mut index, old.len())
         .map_err(publish_err)?;
@@ -2897,7 +2987,9 @@ pub(super) fn structure_prior_records(
             | "CC-017.center_roles"
             | "CC-022.unit_assignment"
             | "CC-018.unit_core_position"
-            | "CC-020.center_pair" => {
+            | "CC-020.center_pair"
+            | "CC-055.center_relation"
+            | "CC-055.pair_relation" => {
                 s.native_codec_room(&mut prior.ef, 1).map_err(publish_err)?;
                 prior
                     .ef
@@ -3741,6 +3833,7 @@ pub(super) fn verify_generated_members_swept_with_records<'a>(
     }
     let mut seen = bj::new_map(allocation.as_ref());
     let mut new = bj::new_work(allocation.as_ref());
+    let mut deferred = sc::CodecVec::default();
     let mut cursor = s.array_cursor(objects.view()).map_err(publish_err)?;
     let items = if cursor.is_none() && s.audit_full_array_scan() {
         Some(s.lookup_array_ref(objects.view()).map_err(publish_err)?)
@@ -3779,6 +3872,12 @@ pub(super) fn verify_generated_members_swept_with_records<'a>(
             None => by_id.get(id.as_str()).copied(),
         }
         .ok_or_else(|| publish_err("生成对象不在独立身份史内"))?;
+        if e.kind == "CC-056.center_version" {
+            if !deferred.is_empty() {
+                return Err(publish_err("R5 当前中枢版本不能重复"));
+            }
+            deferred = load_r5_deferred(s, object.view())?;
+        }
         let names: &[&str] = if e.slot.is_shape() {
             &object_records::SHAPE_SEALED_FIELDS
         } else {
@@ -3837,8 +3936,13 @@ pub(super) fn verify_generated_members_swept_with_records<'a>(
         })
         .map_err(publish_err)?;
     }
+    if !deferred.is_empty() {
+        for entry in index {
+            check_r5_deferred_kind(&deferred, entry)?;
+        }
+    }
     let changes = if let Some(sweep) = sweep {
-        object_diff::plan_indexed_admitted(
+        object_diff::plan_indexed_admitted_with_deferred(
             &new,
             |i| object_diff::Existing {
                 key: object_diff::Key {
@@ -3865,9 +3969,16 @@ pub(super) fn verify_generated_members_swept_with_records<'a>(
             },
             None,
             s.codec_work(),
+            &deferred,
         )?
     } else {
-        object_diff::plan_admitted(&new, &old, allocation.as_ref(), s.codec_work())?
+        object_diff::plan_admitted_with_deferred(
+            &new,
+            &old,
+            allocation.as_ref(),
+            s.codec_work(),
+            &deferred,
+        )?
     };
     let births_match = match sweep {
         Some(sweep) => changes

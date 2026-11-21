@@ -58,8 +58,8 @@ use super::center::{
     classify_relation, seed_facts, unit_core_position, zn_extrema, CenterRelation, UnitRange,
 };
 use super::center_scan::{
-    r5_step, NoopSink, R5AttestedLegs, R5Boundary, R5DirectionSource, R5Gap, R5Step, ScanSink,
-    ScanWindow,
+    r5_step, NoopSink, R5AttestedLegs, R5Boundary, R5DirectionSource, R5Gap, R5Step, RoleProvider,
+    ScanSink, ScanWindow,
 };
 use super::decompose::{center_own_dir_at, MoveBlock};
 use super::descend::RMove;
@@ -391,6 +391,28 @@ pub fn compose_level(
     level: u32,
     tower_base: crate::theta_v0::config::TowerBase,
 ) -> (Vec<Center>, Vec<LeveledMove>, Vec<CpScanOwnership>) {
+    compose_level_with_roles(
+        units,
+        subs_moves,
+        is_l0,
+        level,
+        tower_base,
+        RoleProvider {
+            directions: tower_r5_directions(subs_moves),
+            attested: &[],
+        },
+    )
+}
+
+/// 下游已完成单元所有者在这里交接同源见证；普通入口的上级投影不具备这些证据。
+pub fn compose_level_with_roles(
+    units: &[UnitRange],
+    subs_moves: &[LeveledMove],
+    is_l0: bool,
+    level: u32,
+    tower_base: crate::theta_v0::config::TowerBase,
+    roles: RoleProvider<'_>,
+) -> (Vec<Center>, Vec<LeveledMove>, Vec<CpScanOwnership>) {
     let build = if is_l0 {
         match tower_base {
             crate::theta_v0::config::TowerBase::Segment => super::center::center_from_segments,
@@ -403,8 +425,8 @@ pub fn compose_level(
         units,
         build,
         0,
-        tower_r5_directions(subs_moves),
-        &[],
+        roles.directions,
+        roles.attested,
         &mut NoopSink,
     );
     let centers: Vec<Center> = windowed.iter().map(|(c, _)| *c).collect();
@@ -731,6 +753,43 @@ pub fn compose_level_resume(
     Vec<WinMeta>,
     WindowScanCursor,
 ) {
+    compose_level_resume_with_roles(
+        units,
+        subs_moves,
+        is_l0,
+        level,
+        start_i,
+        prefix_count,
+        prefix_centers,
+        tower_base,
+        RoleProvider {
+            directions: tower_r5_directions(subs_moves),
+            attested: &[],
+        },
+    )
+}
+
+/// 增量见证入口。缓存方只能保留构造流与见证读域均未变化的前缀。
+pub fn compose_level_resume_with_roles(
+    units: &[UnitRange],
+    subs_moves: &[LeveledMove],
+    is_l0: bool,
+    level: u32,
+    start_i: usize,
+    prefix_count: usize,
+    // ★#897：已缓存的前缀中枢序列（长度恒 == `prefix_count`，与前缀 upper_moves 1:1）——
+    // tail 窗口的走势类型块可能延伸进前缀（趋势跨续扫边界），run 计算须在前缀+tail 拼
+    // 接视图上做，保证与全量 `compose_level` 逐位一致。
+    prefix_centers: &[Center],
+    tower_base: crate::theta_v0::config::TowerBase,
+    roles: RoleProvider<'_>,
+) -> (
+    Vec<Center>,
+    Vec<LeveledMove>,
+    Vec<CpScanOwnership>,
+    Vec<WinMeta>,
+    WindowScanCursor,
+) {
     let build = if is_l0 {
         match tower_base {
             crate::theta_v0::config::TowerBase::Segment => super::center::center_from_segments,
@@ -749,8 +808,8 @@ pub fn compose_level_resume(
             units,
             build,
             start_i,
-            tower_r5_directions(subs_moves),
-            &[],
+            roles.directions,
+            roles.attested,
             &mut NoopSink,
         )
     });
@@ -2557,7 +2616,7 @@ mod tests {
             dd: 90,
             gg: 210,
             start_index: 5,
-            end_index: 8,
+            end_index: 11,
         };
         let cp = vec![
             CpScanOwnership {
@@ -2674,7 +2733,7 @@ mod tests {
         let b = b.expect("B_p 身份应由 center-aligned 扫描侧车定位");
         assert_eq!(b.center_index, 1);
         assert_eq!(b.center_id, eid(1, 1));
-        assert_eq!(b.source_interval, (5, 8));
+        assert_eq!(b.source_interval, (5, 11));
         assert_eq!((b.zd, b.zg), (100, 200));
     }
 
@@ -2790,7 +2849,26 @@ mod tests {
             .enumerate()
             .map(|(i, u)| LeveledMove::from_unit(u, eid(0, 327 + i as u64)))
             .collect();
-        let initial = pending_cp_object(center, eid(1, 73), eid(0, 327), (42_503, 42_704));
+        let mut original = vec![pending_cp_object(
+            center,
+            eid(1, 73),
+            eid(0, 327),
+            (42_503, 42_704),
+        )];
+        advance_cp_lifecycles(&mut original, &[center], &units, &moves, None, 1);
+        assert_eq!(
+            original[0].lifecycle,
+            CpLifecycleStatus::Pending,
+            "#2141 §5.2：只有后续两腿，不知第一腿是末成员"
+        );
+        assert!(original[0].cp_certificate_confirm_src.is_none());
+
+        // 合成正控指定最后成员恰为离开腿；首证仍必须落在同一次回抽，而非后来的事件。
+        let center = Center {
+            end_index: 42_704,
+            ..center
+        };
+        let initial = pending_cp_object(center, eid(1, 173), eid(0, 327), (42_503, 42_704));
 
         let mut without_later_event = vec![initial.clone()];
         advance_cp_lifecycles(
@@ -2883,6 +2961,87 @@ mod tests {
 
     /// ★compose_level：三段 L0 线段 → 一个上级走势（RMove::Compose 携 subs）。
     #[test]
+    fn r5_role_provider_reopens_recursive_scan_only_with_same_flow_evidence() {
+        let units = [
+            unit(0, 4, down(), 20, 40),
+            unit(4, 8, up(), 20, 35),
+            unit(8, 12, down(), 25, 35),
+            unit(12, 16, up(), 36, 50),
+            unit(16, 20, down(), 37, 50),
+            unit(20, 24, up(), 38, 50),
+            unit(24, 28, down(), 39, 49),
+        ];
+        let moves: Vec<_> = units
+            .iter()
+            .enumerate()
+            .map(|(i, u)| {
+                // 真实三段闭合窗口；上级包络不携语义方向，另以显式已完成腿供证。
+                let index = u.start_index;
+                let kids = [
+                    unit(index, index + 1, down(), u.lo, u.hi),
+                    unit(index + 1, index + 2, up(), u.lo, u.hi),
+                    unit(index + 2, u.end_index, down(), u.lo, u.hi),
+                ];
+                let center =
+                    super::super::center::center_from_segments(&kids[0], &kids[1], &kids[2])
+                        .unwrap();
+                let subs = kids
+                    .each_ref()
+                    .map(|kid| from_unit(kid, (i * 3 + kid.start_index - index) as u64));
+                LeveledMove::compose(&subs, &[center], 1, eid(1, i as u64))
+            })
+            .collect();
+        let spec = crate::theta_v0::config::TowerBase::Segment;
+        let (centers, _, pending) = compose_level(&units, &moves, false, 2, spec);
+        assert_eq!(centers.len(), 1);
+        assert_eq!(pending[0].departure_move_id, None);
+
+        let checked = [R5AttestedLegs {
+            seed: 0,
+            leave: 3,
+            side: Direction::Up,
+            first_pullback: Some(4),
+            leave_is_zn: Some(false),
+        }];
+        let roles = RoleProvider {
+            directions: R5DirectionSource::Unproven,
+            attested: &checked,
+        };
+        let (full, out, cp) = compose_level_with_roles(&units, &moves, false, 2, spec, roles);
+        assert_eq!(full.len(), 2);
+        assert_eq!(full[0].end_index, 12);
+        assert_eq!(out[1].start_index, 16);
+        assert_eq!(cp[0].departure_move_id, Some(eid(1, 3)));
+        let (prefix, _, pending, metas, cursor) = compose_level_resume_with_roles(
+            &units[..4],
+            &moves[..4],
+            false,
+            2,
+            0,
+            0,
+            &[],
+            spec,
+            roles,
+        );
+        assert_eq!(prefix.len(), 1);
+        assert_eq!(pending[0].departure_move_id, None);
+        assert_eq!(metas[0].settlement, None);
+        let (actual, moves_out, ownership, meta, _) = compose_level_resume_with_roles(
+            &units,
+            &moves,
+            false,
+            2,
+            cursor.resume_from,
+            0,
+            &[],
+            spec,
+            roles,
+        );
+        assert_eq!((actual, moves_out, ownership), (full, out, cp));
+        assert_eq!(meta[0].read_end_src, 20, "即首回抽读域，不只读离开段");
+    }
+
+    #[test]
     fn compose_level_l0_yields_compose_with_subs() {
         // 完整判据 L0：上-下-上 + 全三段核心非空（lo<=hi 不变量，segment_to_unit 已规约）。
         let units = vec![
@@ -2922,16 +3081,14 @@ mod tests {
     }
 
     #[test]
-    fn cp_scan_sidecar_records_departure_unit_that_no_center_absorbs() {
-        // 第一个中枢 [0..2]（核心 [40,50]）的 non-extension 单元 3 是突破段（连接段）。★#1419 R8：
-        // 下一 seed 自 last_member+2 = 4 起，第二个中枢 = [4..6]，单元 3 不进任何中枢窗口（旧 B 口径下
-        // 它被后窗当 seed 首单元吸收，本测试原名 `..._absorbed_by_next_center` 锁的正是那种吸收）。
-        // 扫描侧车仍须保存单元 3 对前中枢的离开归属。
+    fn cp_scan_sidecar_distinguishes_departure_member_from_unabsorbed_connector() {
+        // 第一窗 [0..2]，u2 触核心并到 60，u3 同高回抽低 51 > ZG=50。
+        // u2 是离开腿且仍为成员；u3 才是连接，下一窗自 u4 开始。
         let ranges = [
             (0, 50),
             (40, 200),
-            (40, 50),
-            (55, 150),
+            (40, 60),
+            (51, 60),
             (52, 180),
             (55, 160),
             (60, 150),
@@ -2962,8 +3119,8 @@ mod tests {
             crate::theta_v0::config::TowerBase::Segment,
         );
         assert_eq!(upper.len(), 2);
-        assert_eq!(cp[0].departure_move_id, Some(eid(0, 3)));
-        assert_eq!(cp[0].departure_interval, Some((12, 16)));
+        assert_eq!(cp[0].departure_move_id, Some(eid(0, 2)));
+        assert_eq!(cp[0].departure_interval, Some((8, 12)));
         assert!(
             upper
                 .iter()

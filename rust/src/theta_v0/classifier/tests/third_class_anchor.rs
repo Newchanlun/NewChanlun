@@ -26,7 +26,7 @@ fn q7_ruling_c_first_and_third_class_structural_direction_authorized() {
         dd: 90,
         gg: 210,
         start_index: 0,
-        end_index: 8,
+        end_index: 11,
     };
     let units = vec![
         UnitRange {
@@ -99,7 +99,7 @@ fn q7_ruling_c_first_and_third_class_structural_direction_authorized() {
         dd: 90,
         gg: 210,
         start_index: 0,
-        end_index: 12,
+        end_index: 16,
     };
     let u3 = vec![
         UnitRange {

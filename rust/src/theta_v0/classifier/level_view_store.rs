@@ -63,6 +63,7 @@ pub struct ConfirmCursor {
     pub(super) hist_max: f64,
     pub(super) hist_min: f64,
     pub(super) state: ConfirmState,
+    pub(super) settled_at: Option<usize>,
 }
 
 impl Default for ConfirmCursor {
@@ -77,6 +78,7 @@ impl Default for ConfirmCursor {
             hist_max: f64::NEG_INFINITY,
             hist_min: f64::INFINITY,
             state: ConfirmState::Scanning,
+            settled_at: None,
         }
     }
 }

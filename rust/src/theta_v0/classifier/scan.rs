@@ -33,9 +33,9 @@ use super::decompose::{
     center_block_kind, center_block_kind_at, center_block_lift_at, center_own_dir_at, decompose,
     MoveBlock,
 };
-use super::divergence::{
-    departure_move_c_start, locate_departure_move_a, move_range_envelope, DivergenceGauge,
-};
+#[cfg(feature = "issue1087_parity")]
+use super::divergence::{departure_move_c_start, locate_departure_move_a};
+use super::divergence::{move_range_envelope, DivergenceGauge};
 use super::recursive_tower::{
     full_trend_c_qualification, full_trend_qualification_evidence, CandDeltaCpEdge, CandDeltaEvent,
     CpScanOwnership, CpStructureIdentity, FullTrendCQualified, FullTrendQualificationEvidence,
@@ -645,7 +645,7 @@ pub(crate) fn merged_scan_resume(
                       a_cache: &mut ASegCache| {
         for i in from..to {
             let seg = &segments[i];
-            let Some(c_idx) = signal::nearest_confirmed_center_idx(centers, seg.start_index) else {
+            let Some(c_idx) = signal::departure_center_idx(centers, seg) else {
                 continue;
             };
             // pos==c_idx（end_index 严格递增 ⟹ 三元组唯一）；门 = pointwise ownership 方向。
@@ -833,6 +833,7 @@ pub(crate) fn merged_scan_resume(
                 anchors,
                 close_src,
                 &full_pans,
+                r5_meta,
             );
             points == full_pts
                 && pan_divs == full_pans
@@ -947,11 +948,13 @@ fn merged_judge_segment(
         // centers[c_idx-1]）。首次 miss 才调 `locate_departure_move_a` O(窗口)，后续 hit O(1)。
         // ★p117 037:20（裁定 T3）：b 包络（`move_range_envelope`，单一来源）随 I(A) 同槽缓存。
         let a_seg_entry = *a_seg_cache.entry(c_idx).or_insert_with(|| {
-            locate_departure_move_a(sorted, anchors_self, prev_center, c, dir)
+            signal::T3InCSource::for_center(r5_meta, pos - 1)
+                .a_span(sorted, anchors_self, prev_center, c, dir, true)
                 .and_then(|span| move_range_envelope(sorted, span).map(|env| (span, env)))
         });
         // Q5 λ_C（codex ac4 #2）：当前 episode 首同向段起点（共享 helper，逐段计算）。
-        let c_start_entry = departure_move_c_start(sorted, anchors_self, c, dir, seg.start_index);
+        let r5 = signal::T3InCSource::for_center(r5_meta, c_idx);
+        let c_start_entry = r5.c_start(sorted, anchors_self, c, dir, seg);
         // ★共享结构门（BSP 第一类与候选结构腿同读一次；#1057 Q1）。
         let gates = signal::first_structural_gates(
             c,
@@ -976,9 +979,7 @@ fn merged_judge_segment(
                 gauge,
                 strokes,
                 sorted,
-                r5_meta.map_or(signal::T3InCSource::NativeSegments, |m| {
-                    signal::T3InCSource::Scanned(m[c_idx].settlement)
-                }),
+                r5,
                 Some(level),
                 grade_sink,
             ) {
@@ -1169,8 +1170,7 @@ pub(crate) fn project_cand_delta_events(
     let mut a_seg_cache: ASegCache = HashMap::new();
     let mut materials: Vec<Option<SegmentScanMaterial>> = Vec::with_capacity(sorted.len());
     for (i, seg) in sorted.iter().enumerate() {
-        let Some(c_idx) = signal::nearest_confirmed_center_idx(centers_sorted, seg.start_index)
-        else {
+        let Some(c_idx) = signal::departure_center_idx(centers_sorted, seg) else {
             materials.push(None);
             continue;
         };
@@ -1525,7 +1525,7 @@ mod projection_tests {
     #[test]
     fn projection_bit_exact_with_extract_signals_buy1() {
         let c0 = dc(300, 400, 290, 410, 2);
-        let c1 = dc(100, 200, 90, 210, 8);
+        let c1 = dc(100, 200, 90, 210, 11);
         let segs = vec![
             seg(Direction::Down, 3, 5, 350, 250),
             seg(Direction::Up, 5, 7, 250, 280),

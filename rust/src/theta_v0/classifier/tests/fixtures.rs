@@ -29,20 +29,35 @@ pub(super) fn seg(dir: Direction, si: usize, ei: usize, sp: i64, ep: i64) -> Seg
 /// 核心 [112,125]。
 ///
 /// 坐标较旧夹具：组B 整体 +4、组C 整体 +8。
+/// B2/类二正控：A、B 均由末成员向下离开、同低反向首回抽结算。
+/// A 核心 [120,148]，离开低 105、回抽最高 115；B 核心 [92,114]，离开低 85、回抽最高 91。
+/// 三组次级走势的包络相交于 [112,125]；B 的低点 80 仍低于 A 的 105 和 C 的 112。
 pub(super) fn three_group_segments() -> Vec<Segment> {
-    vec![
-        seg(Direction::Up, 0, 4, 110, 150),
-        seg(Direction::Down, 4, 8, 150, 120),
-        seg(Direction::Up, 8, 12, 120, 148),
-        seg(Direction::Down, 12, 16, 118, 116),
-        seg(Direction::Down, 16, 20, 115, 80),
-        seg(Direction::Up, 20, 24, 80, 125),
-        seg(Direction::Down, 24, 28, 114, 85),
-        seg(Direction::Up, 28, 32, 115, 116),
-        seg(Direction::Up, 32, 36, 115, 148),
-        seg(Direction::Down, 36, 40, 148, 112),
-        seg(Direction::Up, 40, 44, 112, 147),
+    use Direction::{Down, Up};
+    [
+        (110, 150),
+        (120, 150),
+        (105, 148),
+        (105, 115),
+        (80, 115),
+        (92, 125),
+        (85, 114),
+        (85, 91),
+        (112, 148),
+        (112, 148),
+        (112, 147),
     ]
+    .into_iter()
+    .enumerate()
+    .map(|(i, (lo, hi))| {
+        let start = i * 4;
+        if i % 2 == 0 {
+            seg(Down, start, start + 4, hi, lo)
+        } else {
+            seg(Up, start, start + 4, lo, hi)
+        }
+    })
+    .collect()
 }
 
 /// 与 [`three_group_segments`] 对齐的 closes：组A `[0,12)` 大幅 ±40；c1+组B `[12,28)` 小幅 ±5
@@ -197,8 +212,11 @@ pub(super) fn synthetic_segments(count: usize) -> Vec<Segment> {
 }
 
 pub(super) fn candidate_rich_segments(count: usize) -> Vec<Segment> {
+    candidate_rich_segments_at_seed(count, 0x9e3779b97f4a7c15)
+}
+
+fn candidate_rich_segments_at_seed(count: usize, mut state: u64) -> Vec<Segment> {
     let mut price = 100_i64;
-    let mut state = 0x9e3779b97f4a7c15_u64;
     (0..count)
         .map(|i| {
             state = state
@@ -298,7 +316,8 @@ pub(super) fn chain_book_over_prefixes(
 }
 
 pub(super) fn chain_fixture(count: usize) -> (Vec<Segment>, Vec<i64>) {
-    let segments = candidate_rich_segments(count);
+    // #2141：合法原生价端连续，种子 557 在严格 R5 下仍形成真实跨级 skip 证据。
+    let segments = candidate_rich_segments_at_seed(count, 0x9e3779b97f4a7c15 ^ 557);
     let closes: Vec<i64> = (0..=segments.last().expect("非空").end_index)
         .map(|i| 100 + if i % 8 < 4 { 35 } else { -35 } + (i as i64 / 16))
         .collect();

@@ -213,7 +213,7 @@ fn auto_pairing_completes_only_after_real_macd_divergence() {
         as_of: 139, // 覆盖回试腿终点（t3=139；旧 129 口径下回试腿被 as_of 截断）
         version: C2VersionTuple::auto_pairing(),
     };
-    let view = assemble_level_view(
+    let view = super::fixtures::assemble_with_fixture_r5(
         C2LevelViewConfig { enabled: true },
         query,
         LevelViewMaterial {
@@ -224,6 +224,7 @@ fn auto_pairing_completes_only_after_real_macd_divergence() {
             dif: &dif,
             close_src: &close_src,
         },
+        None,
     )
     .unwrap();
     assert_eq!(view.pairs.len(), 1);

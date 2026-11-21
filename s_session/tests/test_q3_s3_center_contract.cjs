@@ -1353,4 +1353,21 @@ test("#1496 R5：未决外段保留五叶位置，不发布为连接", () => {
   C.validateCenterFamilyCut(rows, axes22(rows));
   data(C.PAIR_KINDS[0]).construction_role = "BREAK_UNIT";
   assert.throws(() => C.validateCenterFamilyCut(rows, axes22(rows)), /TB02F_ROLE/);
+  data(C.PAIR_KINDS[0]).construction_role = "UNRESOLVED_BOUNDARY";
+
+  // 旧活动归属在 Q 的对象集合中原样保留，不拿旧版角色当本代计算。
+  const retained = centerCut().find(r => r.object_id === "obj3-assign3");
+  retained.first_known_generation = "1";
+  const current = rows.filter(r => r.object_id !== retained.object_id);
+  const version = current.find(r => r.kind === C.CENTER_KINDS[6]);
+  version.payload.data.known_at.generation = "2";
+  version.payload.data.waiting_reasons.push("R5_RECOMPUTE_DEFERRED");
+  version.payload.data.r5_deferred_object_ids = [retained.object_id];
+  C.validateCenterPayload(version.kind, version.payload);
+  const axes = axes22(current);
+  C.validateCenterFamilyCut([...current, retained], axes);
+  assert.equal(retained.payload.data.status, "CONNECTOR");
+  assert.throws(() => C.validateCenterFamilyCut(current, axes), /TB02E_DEFERRED/);
+  assert.throws(() => C.validateCenterFamilyCut([...current, {...retained, first_known_generation: "2"}], axes),
+    /TB02E_DEFERRED/);
 });

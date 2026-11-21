@@ -27,6 +27,7 @@
   const TB02E_DEFERRED = ["global_G009_upper_levels_1429", "ge9_upgrade_1429", "third_class_and_break_1434", "expansion_newborn_1424", "connector_upper_construction_1429"];
   const ROLE_LAYOUT = [["CORE", ["ZD", "ZG"]], ["OUTER", ["DD", "GG"]], ["INNER_EXTREMA", ["D", "G"]]];
   const ROLE_RULE = {ZD: [2, "max"], ZG: [3, "min"], DD: [2, "min"], GG: [3, "max"], D: [2, "max"], G: [3, "min"]};
+  const R5_DEFERRED = "R5_RECOMPUTE_DEFERRED";
   const WAIT_REASONS = ["NO_LEFT_CENTER_IN_WINDOW", "SEED_NOT_YET_EVALUABLE", "UPGRADE_PENDING_TB02H", "UNIT_NOT_COMPLETED"];
   const isCenterFamily = kind => ["CC-016.", "CC-017.", "CC-022."].some(p => kind.startsWith(p));
   function needE(ok, code, message) { if (!ok) throw new Error("TB02E_" + code + ": " + message); }
@@ -219,9 +220,18 @@
       if (d.object_id !== null) textE(d.object_id, "object_id");
       knownE(d.known_at);
     } else if (kind === CENTER_KINDS[6]) {
-      keysE(d, ["input_frontier", "known_at", "scan_cursor", "waiting_reasons", "delivered_scope", "deferred_scope"], kind);
+      const hasDeferred = Object.hasOwn(d, "r5_deferred_object_ids");
+      keysE(d, ["input_frontier", "known_at", "scan_cursor", "waiting_reasons", "delivered_scope", "deferred_scope",
+        ...(hasDeferred ? ["r5_deferred_object_ids"] : [])], kind);
       intE(d.input_frontier, "input_frontier", -1); knownE(d.known_at);
-      needE(Array.isArray(d.waiting_reasons) && d.waiting_reasons.every(r => WAIT_REASONS.includes(r)), "SHAPE", "等待原因未声明");
+      needE(Array.isArray(d.waiting_reasons) && d.waiting_reasons.every(r => WAIT_REASONS.includes(r) || (r5 && r === R5_DEFERRED)),
+        "SHAPE", "等待原因未声明");
+      needE(hasDeferred === d.waiting_reasons.includes(R5_DEFERRED), "DEFERRED", "R5 待重算原因未绑定原件清单");
+      if (hasDeferred) {
+        const ids = idList(d.r5_deferred_object_ids, "r5_deferred_object_ids");
+        needE(ids.length > 0 && ids.every((id, j) => id.startsWith("obj3-") && (j === 0 || ids[j - 1] < id)),
+          "DEFERRED", "R5 待重算原件须唯一且升序");
+      }
       needE(d.delivered_scope === "l0_strict_seed_zn_roles_c_resume_assignment" && equal(d.deferred_scope, TB02E_DEFERRED), "SCOPE", "中枢交付范围不符");
       const c = d.scan_cursor;
       keysE(c, ["state", "center_id", "seed_start_unit_id", "awaiting_unit_id", "awaiting_after_unit_id", "awaiting_offset"], "scan_cursor");
@@ -295,7 +305,7 @@
     needE(cur.awaiting_unit_id === want[0] && cur.awaiting_after_unit_id === want[1] && cur.awaiting_offset === want[2], "SCAN_CURSOR", "等待位置的实体锚不符");
     if (extending) needE(last.next_tested_unit === want[0], "SCAN_CURSOR", "游标与中枢 next_tested_unit 不一致");
   }
-  function validateCenterLinks(records, axes = null) {
+  function validateCenterLinks(records, axes, deferredAssignments) {
     const byKind = Object.fromEntries(CENTER_KINDS.map(k => [k, records.filter(r => r.kind === k)]));
     if (!Object.values(byKind).some(xs => xs.length)) return;
     for (const r of records) needE(!isCenterFamily(r.kind) || CENTER_KINDS.includes(r.kind), "CANDIDATE_KIND", "未声明的中枢 kind（不发 candidate）");
@@ -322,7 +332,9 @@
       assignments.set(d.unit.unit_id, d);
     }
     const universe = new Set([...seg.keys(), ...pending.keys()]);
-    needE(assignments.size === universe.size && [...universe].every(u => assignments.has(u)), "ASSIGNMENT_CONSISTENCY", "每个单元须恰一归属");
+    needE([...assignments.keys()].every(u => universe.has(u) && !deferredAssignments.has(u))
+      && [...universe].every(u => assignments.has(u) || deferredAssignments.has(u)),
+      "ASSIGNMENT_CONSISTENCY", "每个单元须恰一归属或明确保留旧归属待重算");
     const memberOf = new Map();
     const r5 = byKind[CENTER_KINDS[6]][0]?.payload.policy_version === CENTER_TUPLE[2];
     for (const c of centers) {
@@ -771,7 +783,24 @@
   function validateCenterFamilyCut(records, axes = null) {
     for (const r of records) needE(!isCenterFamily(r.kind) || CENTER_KINDS.includes(r.kind), "CANDIDATE_KIND", "未声明的中枢 kind（不发 candidate）");
     for (const r of records) needF(!isPairFamily(r.kind) || PAIR_KINDS.includes(r.kind), "CANDIDATE_KIND", "未声明的中枢对 kind");
-    validateCenterLinks(records, axes);
+    const version = records.find(r => r.kind === CENTER_KINDS[6]);
+    const ids = new Set(version?.payload.data.r5_deferred_object_ids ?? []);
+    const deferredAssignments = new Set();
+    if (ids.size) {
+      const retainable = new Set([...CENTER_KINDS.slice(0, 5), ...PAIR_KINDS.slice(0, 3)]);
+      const pending = records.find(r => r.kind === CENTER_KINDS[1] &&
+        !ids.has(r.object_id) && r.payload.data.r5_pending_unit != null);
+      needE(pending !== undefined, "DEFERRED", "R5 待重算必须由本代未决中枢边界触发");
+      for (const objectId of ids) {
+        const record = records.find(r => r.object_id === objectId);
+        needE(record !== undefined && retainable.has(record.kind)
+          && BigInt(record.first_known_generation) < BigInt(version.payload.data.known_at.generation),
+          "DEFERRED", "R5 待重算对象必须是先前已发布且本代仍活动的结构原件");
+        if (record.kind === CENTER_KINDS[3]) deferredAssignments.add(record.payload.data.unit.unit_id);
+      }
+      records = records.filter(r => !ids.has(r.object_id));
+    }
+    validateCenterLinks(records, axes, deferredAssignments);
     validatePairVersionCount(records);
     validatePairLinks(records, axes);
     // 旧逐片链接只在有中枢族对象时才绑目录轴；22 轴 cut 无中枢对象时 CC-016…022 也须恰为空，不得挂他族对象。

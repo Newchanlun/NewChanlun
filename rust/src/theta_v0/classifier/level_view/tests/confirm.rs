@@ -1,4 +1,6 @@
-use super::fixtures::{extended_windows, trend_block};
+use super::fixtures::{
+    assemble_with_fixture_r5, attested_settlements, extended_windows, trend_block,
+};
 use super::*;
 
 /// #69 5a / T0：先锁住冷核的首证钟与未决投影；resident 化不得改写现行
@@ -9,6 +11,7 @@ fn confirm_state_cold_projection_preserves_first_proof_and_scanning() {
     let projection = project_extended_windows_carried_only(&windows).unwrap();
     let legs = lower_legs_from(&lower).unwrap();
     let segments: Vec<_> = legs.iter().map(leg_as_segment).collect();
+    let r5 = T3InCSource::Scanned(attested_settlements(&legs)[2]);
     let last = &projection.seeds[2].center;
     let mut hist = vec![0.0; 140];
     hist[80..110].fill(2.0);
@@ -18,7 +21,7 @@ fn confirm_state_cold_projection_preserves_first_proof_and_scanning() {
     dif[101..140].fill(1.0);
     let close_src: Vec<_> = (0..140).collect();
 
-    let confirmed = trend_confirm_state(
+    let confirmed = confirm_with_r5(
         &segments,
         last,
         Direction::Up,
@@ -29,25 +32,13 @@ fn confirm_state_cold_projection_preserves_first_proof_and_scanning() {
         &hist,
         &dif,
         &close_src,
+        r5,
+        None,
     );
     assert_eq!(confirmed, ConfirmState::Confirmed(139));
-    assert_eq!(
-        confirmed.as_option(),
-        trend_confirm_time(
-            &segments,
-            last,
-            Direction::Up,
-            Side::Short,
-            (80, 109),
-            120,
-            139,
-            &hist,
-            &dif,
-            &close_src,
-        )
-    );
+    assert_eq!(confirmed.as_option(), Some(139));
 
-    let scanning = trend_confirm_state(
+    let scanning = confirm_with_r5(
         &segments,
         last,
         Direction::Up,
@@ -58,6 +49,8 @@ fn confirm_state_cold_projection_preserves_first_proof_and_scanning() {
         &hist,
         &dif,
         &close_src,
+        r5,
+        None,
     );
     assert_eq!(scanning, ConfirmState::Scanning);
     assert_eq!(scanning.as_option(), None);
@@ -71,6 +64,7 @@ fn confirm_state_distinguishes_terminal_false_from_unresolved_none() {
     let projection = project_extended_windows_carried_only(&windows).unwrap();
     let legs = lower_legs_from(&lower).unwrap();
     let segments: Vec<_> = legs.iter().map(leg_as_segment).collect();
+    let r5 = T3InCSource::Scanned(attested_settlements(&legs)[2]);
     let last = &projection.seeds[2].center;
     let mut hist = vec![0.0; 140];
     hist[80..110].fill(2.0);
@@ -80,7 +74,7 @@ fn confirm_state_distinguishes_terminal_false_from_unresolved_none() {
     dif[101..140].fill(1.0);
     let close_src: Vec<_> = (0..140).collect();
 
-    let terminal = trend_confirm_state(
+    let terminal = confirm_with_r5(
         &segments,
         last,
         Direction::Up,
@@ -91,11 +85,13 @@ fn confirm_state_distinguishes_terminal_false_from_unresolved_none() {
         &hist,
         &dif,
         &close_src,
+        r5,
+        None,
     );
     assert_eq!(terminal, ConfirmState::TerminalFalse);
     assert_eq!(terminal.as_option(), None);
 
-    let missing_coordinates = trend_confirm_state(
+    let missing_coordinates = confirm_with_r5(
         &segments,
         last,
         Direction::Up,
@@ -106,6 +102,8 @@ fn confirm_state_distinguishes_terminal_false_from_unresolved_none() {
         &hist,
         &dif,
         &[],
+        r5,
+        None,
     );
     assert_eq!(missing_coordinates, ConfirmState::Scanning);
 }
@@ -118,6 +116,7 @@ fn confirm_cursor_incremental_matches_cold_at_every_boundary() {
     let projection = project_extended_windows_carried_only(&windows).unwrap();
     let legs = lower_legs_from(&lower).unwrap();
     let segments: Vec<_> = legs.iter().map(leg_as_segment).collect();
+    let r5 = T3InCSource::Scanned(attested_settlements(&legs)[2]);
     let last = &projection.seeds[2].center;
     let mut hist = vec![0.0; 140];
     hist[80..110].fill(2.0);
@@ -131,7 +130,7 @@ fn confirm_cursor_incremental_matches_cold_at_every_boundary() {
 
     for as_of in [119, 129, 139] {
         let confirmed_len = segments.partition_point(|segment| segment.end_index <= as_of);
-        let resident = trend_confirm_state_core(
+        let resident = confirm_with_r5(
             &segments,
             last,
             Direction::Up,
@@ -142,9 +141,10 @@ fn confirm_cursor_incremental_matches_cold_at_every_boundary() {
             &hist,
             &dif,
             &close_src,
+            r5,
             Some((&mut cursor, confirmed_len)),
         );
-        let cold = trend_confirm_state(
+        let cold = confirm_with_r5(
             &segments,
             last,
             Direction::Up,
@@ -155,6 +155,8 @@ fn confirm_cursor_incremental_matches_cold_at_every_boundary() {
             &hist,
             &dif,
             &close_src,
+            r5,
+            None,
         );
         assert_eq!(resident, cold, "as_of={as_of} 热路必须等于空 cursor 冷路");
         assert!(cursor.k0 >= previous_k0, "已封 lower-leg 游标不得倒退");
@@ -163,7 +165,7 @@ fn confirm_cursor_incremental_matches_cold_at_every_boundary() {
     }
     assert_eq!(cursor.state, ConfirmState::Confirmed(139));
     let sealed_k0 = cursor.k0;
-    let repeated = trend_confirm_state_core(
+    let repeated = confirm_with_r5(
         &segments,
         last,
         Direction::Up,
@@ -174,6 +176,7 @@ fn confirm_cursor_incremental_matches_cold_at_every_boundary() {
         &hist,
         &dif,
         &close_src,
+        r5,
         Some((&mut cursor, segments.len())),
     );
     assert_eq!(repeated, ConfirmState::Confirmed(139));
@@ -211,7 +214,7 @@ fn confirm_store_resets_on_watermark_rollback_and_structure_change() {
     };
     let mut store = ConfirmCursorStore::default();
 
-    let sealed = assemble_level_view_resident(
+    let sealed = assemble_with_fixture_r5(
         C2LevelViewConfig { enabled: true },
         resident_query,
         material(),
@@ -232,7 +235,7 @@ fn confirm_store_resets_on_watermark_rollback_and_structure_change() {
         ConfirmState::Confirmed(139)
     );
 
-    let rolled = assemble_level_view_resident(
+    let rolled = assemble_with_fixture_r5(
         C2LevelViewConfig { enabled: true },
         resident_query,
         material(),
@@ -245,10 +248,11 @@ fn confirm_store_resets_on_watermark_rollback_and_structure_change() {
     .unwrap();
     assert_eq!(
         rolled,
-        assemble_level_view(
+        assemble_with_fixture_r5(
             C2LevelViewConfig { enabled: true },
             resident_query,
-            material()
+            material(),
+            None
         )
         .unwrap()
     );
@@ -256,7 +260,7 @@ fn confirm_store_resets_on_watermark_rollback_and_structure_change() {
     assert_eq!(cursor.k0, 12, "水线回退后只可重建到新已封边界");
     assert_eq!(cursor.state, ConfirmState::Scanning, "可变尾结果不得回写");
 
-    let regenerated = assemble_level_view_resident(
+    let regenerated = assemble_with_fixture_r5(
         C2LevelViewConfig { enabled: true },
         resident_query,
         material(),
@@ -307,7 +311,7 @@ fn assemble_and_provider_share_one_pair_confirmation() {
         version: C2VersionTuple::auto_pairing(),
     };
     reset_confirm_core_calls();
-    let view = assemble_level_view(
+    let view = assemble_with_fixture_r5(
         C2LevelViewConfig { enabled: true },
         query,
         LevelViewMaterial {
@@ -318,6 +322,7 @@ fn assemble_and_provider_share_one_pair_confirmation() {
             dif: &dif,
             close_src: &close_src,
         },
+        None,
     )
     .unwrap();
     assert_eq!(view.pair_confirmations.len(), 1);
@@ -398,7 +403,7 @@ fn cold_none_oracle_is_isolated_from_poisoned_resident_store() {
         close_src: &close_src,
     };
     let mut store = ConfirmCursorStore::default();
-    assemble_level_view_resident(
+    assemble_with_fixture_r5(
         C2LevelViewConfig { enabled: true },
         query,
         material(),
@@ -412,7 +417,7 @@ fn cold_none_oracle_is_isolated_from_poisoned_resident_store() {
     store.poison_for_test(ConfirmState::TerminalFalse);
 
     let forced_cold =
-        assemble_level_view_resident(C2LevelViewConfig { enabled: true }, query, material(), None)
+        assemble_with_fixture_r5(C2LevelViewConfig { enabled: true }, query, material(), None)
             .unwrap();
     assert_eq!(
         forced_cold.pair_confirmations[0].state,
@@ -472,7 +477,7 @@ fn trend_confirm_truncation_keeps_seg_c_left_anchor() {
         as_of: 139,
         version: C2VersionTuple::auto_pairing(),
     };
-    let view = assemble_level_view(
+    let view = assemble_with_fixture_r5(
         C2LevelViewConfig { enabled: true },
         query,
         LevelViewMaterial {
@@ -483,9 +488,17 @@ fn trend_confirm_truncation_keeps_seg_c_left_anchor() {
             dif: &dif,
             close_src: &close_src,
         },
+        None,
     )
     .unwrap();
-    let pairs = provide_divergence_pairs(1, &projection, &blocks, &legs, 139);
+    let pairs = provide_divergence_pairs_with_r5(
+        1,
+        &projection,
+        &blocks,
+        &legs,
+        139,
+        &attested_settlements(&legs),
+    );
     let events = provide_nest_candidate_events(
         1,
         &projection,
@@ -524,7 +537,7 @@ fn trend_confirm_truncation_keeps_seg_c_left_anchor() {
         as_of: 129,
         version: C2VersionTuple::auto_pairing(),
     };
-    let view_pending = assemble_level_view(
+    let view_pending = assemble_with_fixture_r5(
         C2LevelViewConfig { enabled: true },
         query_pending,
         LevelViewMaterial {
@@ -535,9 +548,17 @@ fn trend_confirm_truncation_keeps_seg_c_left_anchor() {
             dif: &dif,
             close_src: &close_src,
         },
+        None,
     )
     .unwrap();
-    let pairs_pending = provide_divergence_pairs(1, &projection, &blocks, &legs, 129);
+    let pairs_pending = provide_divergence_pairs_with_r5(
+        1,
+        &projection,
+        &blocks,
+        &legs,
+        129,
+        &attested_settlements(&legs),
+    );
     let events_pending = provide_nest_candidate_events(
         1,
         &projection,

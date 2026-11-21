@@ -6,7 +6,7 @@
 //! W3/W4 是 R26 判别例（Zn 外缘判新生、全单元外缘判扩展）；W5 外缘恰等；W6/W11 核心相切/重叠；W7 外缘包含与
 //! #1478 端点条款下的连接段；W8 两单元连接段；W9 ≥9 窗口一端待定；W10 相切位置；W12 B 开放期的关系修订。
 
-use serde_json::Value;
+use serde_json::{json, Value};
 
 use super::super::super::types::{Center, Direction, Tick};
 use super::super::center::{
@@ -21,7 +21,47 @@ const FIXTURE: &str = include_str!(concat!(
 ));
 
 fn doc() -> Value {
-    serde_json::from_str(FIXTURE).expect("夹具是 JSON")
+    let mut fixture: Value = serde_json::from_str(FIXTURE).expect("夹具是 JSON");
+    // 保留换版前原始字节。W9 按 #2141 §4.5/§5.2 手算：u0..8 满九即升级；
+    // u9..11 自己成枢（区间 [21,33]、[21,26]、[5,26]，冻结核心 [21,26]）。
+    // u11 向下从 26 到 5，u12 同低 5 回抽至 9，全段低于 21，连接到从 u13 起的新窗。
+    let streams = fixture["streams"].as_array_mut().unwrap();
+    let expansion = streams
+        .iter()
+        .find(|s| s["name"] == "W1_DOWN_EXPANSION")
+        .unwrap()["pairs"][0]
+        .clone(); // 同一 16 格比较矩阵：A=(5,21,26,33)，B=(2,3,8,9)。
+    let w9 = streams
+        .iter_mut()
+        .find(|s| s["name"] == "W9_UPGRADE_THEN_B")
+        .unwrap();
+    let a = &mut w9["centers"][0];
+    a["last"] = json!(8);
+    a["settled"] = json!(false);
+    a["break_unit"] = Value::Null;
+    a["zn_members"] = json!([0, 2, 4, 6, 8]);
+    a["tested"].as_array_mut().unwrap().truncate(6);
+    w9["centers"].as_array_mut().unwrap().insert(
+        1,
+        json!({
+            "first": 9, "last": 11, "settled": true, "break_unit": 12,
+            "status": "SETTLED", "ZD": 21, "ZG": 26, "DD": 5, "GG": 33,
+            "zn_members": [9, 11],
+            "tested": [{"unit": 12, "position": "STRICT_BELOW", "role": "BREAK_UNIT"}],
+        }),
+    );
+    let mut pair = expansion;
+    for (field, value) in [
+        ("left", json!(1)),
+        ("right", json!(2)),
+        ("a_first", json!(9)),
+        ("b_first", json!(13)),
+        ("connectors", json!([12])),
+    ] {
+        pair[field] = value;
+    }
+    w9["pairs"] = json!([pair]);
+    fixture
 }
 
 /// 端点相连、方向由相邻端点决定的 L0 单元序列（同 `center_scan_1419.rs`）。
@@ -278,7 +318,7 @@ fn s1424_r26_zn_outer_discriminates_newbirth_from_expansion() {
 }
 
 /// #804 L2：塔（`detect_centers_windowed_resume`，NoopSink）相邻中枢的四态 = 夹具；两端都不是 ≥9 子中枢的对，
-/// 塔的四态 = S 对的叶投影。W9：S 待定，塔在该处给出过渡态子中枢关系（§9.5），S 不照抄。
+/// 塔的四态 = S 对的叶投影。W9：升级母窗未被 R5 破坏，不出母窗→右枢对；余段独立成枢后单独出对。
 #[test]
 fn s1424_tower_pairs_same_judgment_and_ge9_not_copied() {
     let d = doc();
@@ -330,16 +370,16 @@ fn s1424_tower_pairs_same_judgment_and_ge9_not_copied() {
             }
         }
     }
-    assert_eq!(compared, 11, "W0–W11 中可判对数");
-    // W9：塔末子中枢 (u9..u11) → B 给出 DOWN_EXPANSION（子窗全单元外缘 DD=5），而整窗按 Zn 取外缘（DD=10）会是
-    // DOWN_NEWBIRTH——三种读数不同，S 记待定。
+    assert_eq!(compared, 12, "W0–W11 各有一对已证关系（含 W9 的余段新窗）");
+    // 全体升级母窗不得用 DD=10 对 B 判新生；真实关系来自独立 u9..11 的 DD=5。
     let w9 = d["streams"]
         .as_array()
         .unwrap()
         .iter()
         .find(|s| s["name"] == "W9_UPGRADE_THEN_B")
         .unwrap();
-    assert_eq!(w9["pairs"][0]["status"], "PENDING_UPGRADE_TB02H");
+    assert_eq!(w9["pairs"][0]["a_first"], 9);
+    assert_eq!(w9["pairs"][0]["leaf"], "DOWN_EXPANSION");
     assert_eq!(w9["tower_pairs"][3]["leaf"], "DOWN_EXPANSION");
     let whole_zn_a = Center {
         zd: 20,

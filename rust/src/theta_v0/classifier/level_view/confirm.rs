@@ -8,7 +8,7 @@ use super::super::divergence::{
 };
 use super::super::level_view_store::{ConfirmCursor, ConfirmCursorStore, ConfirmState};
 use super::super::recursive_tower::map_src_to_close_idx;
-use super::super::signal::trend_third_class_in_c;
+use super::super::signal::{T3InCScan, T3InCSource};
 use super::{C2VersionTuple, CoordinateWindow, LevelViewQuery};
 
 #[cfg(test)]
@@ -162,7 +162,7 @@ pub struct NestCandidateEvent {
 /// T5-OR 转假即终假（扫描终止，返回 None）。b 段/c_start 的 close 映射失败、或 t3 时点力度
 /// 窗口仍无 bar ⟹ None（力度不可验，诚实判负——与旧 `_ => false` 口径一致）。
 #[allow(clippy::too_many_arguments)]
-pub(super) fn trend_confirm_state(
+pub(super) fn confirm_with_r5(
     segments: &[Segment],
     last: &Center,
     direction: Direction,
@@ -173,24 +173,7 @@ pub(super) fn trend_confirm_state(
     hist: &[f64],
     dif: &[f64],
     close_src: &[usize],
-) -> ConfirmState {
-    trend_confirm_state_core(
-        segments, last, direction, side, seg_a, c_start, as_of, hist, dif, close_src, None,
-    )
-}
-
-#[allow(clippy::too_many_arguments)]
-pub(super) fn trend_confirm_state_core(
-    segments: &[Segment],
-    last: &Center,
-    direction: Direction,
-    side: Side,
-    seg_a: (usize, usize),
-    c_start: usize,
-    as_of: usize,
-    hist: &[f64],
-    dif: &[f64],
-    close_src: &[usize],
+    r5: T3InCSource,
     resident: Option<(&mut ConfirmCursor, usize)>,
 ) -> ConfirmState {
     #[cfg(test)]
@@ -215,10 +198,14 @@ pub(super) fn trend_confirm_state_core(
     let dif_peak_a = segment_dif_peak(dif, a_idx.0, a_idx.1, direction);
     let hist_peak_a = same_dir_hist_peak(hist, a_idx.0, a_idx.1, side);
     // T3（037:18）：c 全离开段内含对 B 的三买；t3 = 首个命中回试段终点（c 确立时点）。
-    let t3 = trend_third_class_in_c(segments, last, direction, c_start, as_of)
-        .map(|(_leave_end, t3)| t3);
+    let t3 = match r5.grade(segments, last, direction, c_start, as_of) {
+        T3InCScan::Present {
+            retest_interval, ..
+        } => Some(retest_interval.1),
+        T3InCScan::Missing => None,
+    };
     // 渐进扫描 t ≥ t3：T2/T5 窗口 [c_start, t] 随段端点增量扩展。
-    let lo = segments.partition_point(|s| s.start_index < c_start.max(last.end_index));
+    let lo = segments.partition_point(|s| s.start_index < c_start);
     let hi = segments.partition_point(|s| s.end_index <= as_of);
 
     let scan = |cursor: &mut ConfirmCursor, range: std::ops::Range<usize>| {
@@ -249,8 +236,12 @@ pub(super) fn trend_confirm_state_core(
     };
 
     let confirmed_len = confirmed_len.min(segments.len());
-    if confirmed_len < cursor.k0 || hi < cursor.k0 {
-        *cursor = ConfirmCursor::default();
+    if confirmed_len < cursor.k0 || hi < cursor.k0 || cursor.settled_at != t3 {
+        // 见证新到或被修订时，原游标可能已越过首证时点，不能沿用旧累计。
+        *cursor = ConfirmCursor {
+            settled_at: t3,
+            ..ConfirmCursor::default()
+        };
     }
     if matches!(
         cursor.state,
@@ -373,24 +364,4 @@ fn scan_confirm_cursor(
     }
     cursor.state = ConfirmState::Scanning;
     cursor.state
-}
-
-#[allow(clippy::too_many_arguments)]
-#[cfg(test)]
-pub(super) fn trend_confirm_time(
-    segments: &[Segment],
-    last: &Center,
-    direction: Direction,
-    side: Side,
-    seg_a: (usize, usize),
-    c_start: usize,
-    as_of: usize,
-    hist: &[f64],
-    dif: &[f64],
-    close_src: &[usize],
-) -> Option<usize> {
-    trend_confirm_state(
-        segments, last, direction, side, seg_a, c_start, as_of, hist, dif, close_src,
-    )
-    .as_option()
 }

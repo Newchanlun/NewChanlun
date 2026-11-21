@@ -245,8 +245,7 @@ pub fn audit_cp_recall_upper_bound(
     for retest_idx in 1..units.len() {
         let leave_idx = retest_idx - 1;
         let leave_unit = &units[leave_idx];
-        let Some(center_idx) =
-            signal::nearest_confirmed_center_idx(centers, leave_unit.start_index)
+        let Some(center_idx) = signal::nearest_confirmed_center_idx(centers, leave_unit.end_index)
         else {
             continue;
         };
@@ -447,7 +446,7 @@ mod tests {
             dd: 90,
             gg: 210,
             start_index: 0,
-            end_index: 8,
+            end_index: 11,
         };
         let units = vec![unit(9, 11, down(), 80, 150), unit(11, 13, up(), 80, 90)];
         let moves = vec![

@@ -875,22 +875,48 @@ pub fn episode_start_in(
     c: &Center,
     dir: Direction,
 ) -> Option<usize> {
-    let reenters = |s: &Segment| {
-        s.direction != dir
-            && match dir {
-                Direction::Down => s.end_price >= c.zd,
-                Direction::Up => s.end_price <= c.zg,
-            }
-    };
     let boundary = win
         .iter()
         .rev()
-        .find(|s| reenters(s))
+        .find(|s| departure_reenters(s, c, dir))
         .map_or(0, |r| r.end_index);
     win.iter()
         .zip(anchors)
         .find(|(s, a)| **a == Some(dir) && s.start_index >= boundary)
         .map(|(s, _)| s.start_index)
+}
+
+/// 走势离开区间的重新定界；这不是 R5 首回抽的角色判定。
+fn departure_reenters(segment: &Segment, center: &Center, direction: Direction) -> bool {
+    segment.direction != direction
+        && match direction {
+            Direction::Down => segment.end_price >= center.zd,
+            Direction::Up => segment.end_price <= center.zg,
+        }
+}
+
+/// R5 离开、首回抽的同源坐标。两腿的角色已经由中枢共享核确认。
+pub(super) type SettledDeparture = ((usize, usize), (usize, usize));
+
+/// 证实的离开腿可能是最后一个成员，而不是中枢之后的同向段。
+/// 首次回抽以外的新回中枢不能沿用这次离开的证明。
+pub(super) fn settled_departure_start(
+    segments: &[Segment],
+    center: &Center,
+    direction: Direction,
+    boundary: SettledDeparture,
+    as_of: usize,
+) -> Option<usize> {
+    let (leave, pullback) = boundary;
+    if pullback.1 > as_of {
+        return None;
+    }
+    let lo = segments.partition_point(|s| s.end_index <= pullback.1);
+    let hi = segments.partition_point(|s| s.end_index <= as_of);
+    (!segments[lo..hi]
+        .iter()
+        .any(|s| departure_reenters(s, center, direction)))
+    .then_some(leave.0)
 }
 
 /// λ_C（Q5 + codex ac4 审查 #2 修复）：离开中枢 `c` 的**当前** episode 首同向段起点，窗口截至
@@ -909,7 +935,7 @@ pub fn departure_move_c_start(
 ) -> Option<usize> {
     let lo = segments.partition_point(|s| s.start_index < c.end_index);
     let hi = segments.partition_point(|s| s.start_index <= until_start);
-    episode_start_in(&segments[lo..hi], &anchors[lo..hi], c, dir)
+    episode_start_in(segments.get(lo..hi)?, anchors.get(lo..hi)?, c, dir)
 }
 
 /// 走势区间包络（037:20/061:28 破极值判据的参照极值；b 包络/c 包络共用原语，单一来源）。
