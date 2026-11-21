@@ -1,0 +1,41 @@
+{
+  "schema_version": "review-risk-tiers/1",
+  "high_risk_categories": {
+    "live_trading_and_funds": [
+      "rust/src/bin/x_execution_session.rs",
+      "rust/src/economic_session/**",
+      "rust/src/theta_v0/nautilus/**",
+      "rust/src/theta_v0/venue_fee/**",
+      "trading_system/execution/**",
+      "trading_system/live/**",
+      "trading_system/config/broker_config.py"
+    ],
+    "secrets_and_credentials": [
+      ".sandcastle/approval-signing/**",
+      ".sandcastle/cliproxy-env*.mts",
+      ".sandcastle/deepagents-pilot/pilot1742/approval.py",
+      ".sandcastle/deepagents-pilot/pilot1742/review_risk.py",
+      ".sandcastle/review-risk-tiers.json",
+      "**/*.env",
+      "**/*.env.*",
+      "**/.env",
+      "**/.env.*",
+      "**/*.pem"
+    ]
+  },
+  "deep_ai_only_patterns": [
+    ".github/**",
+    ".sandcastle/deepagents-pilot/pilot1742/external_review.py",
+    ".sandcastle/external-review-worker*.mts",
+    "REVIEW.md"
+  ],
+  "low_risk_patterns": [
+    "**/*.md",
+    "docs/**",
+    ".chanlun/**"
+  ],
+  "low_risk_excludes": [
+    "REVIEW.md",
+    "**/REVIEW.md"
+  ]
+}
