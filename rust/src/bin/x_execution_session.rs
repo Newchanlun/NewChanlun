@@ -10,7 +10,9 @@
 //!   x_execution_session serve --db FILE --profile FILE --writer-epoch N
 //!   x_execution_session query --db FILE
 //!   x_execution_session submit|cancel --db FILE      （恒 UnsupportedCapability）
-use newchan_rust::history_simulation::runtime::{audit_persisted, ConfiguredProfile};
+use newchan_rust::history_simulation::runtime::{
+    audit_persisted, validate_execution_profile_header, ConfiguredProfile,
+};
 use newchan_rust::session_protocol::{positive, strict_json};
 use newchan_rust::session_transport::process_lock;
 use rusqlite::{Connection, OpenFlags, OptionalExtension};
@@ -19,8 +21,6 @@ use std::collections::BTreeMap;
 use std::path::Path;
 use std::time::Duration;
 
-const PROFILE_REVISION: &str = "x-execution-profile/1";
-const MODES: [&str; 4] = ["simulation", "dry-run", "experiment", "production"];
 const SCHEMA: &str =
     "CREATE TABLE IF NOT EXISTS x_meta(key TEXT PRIMARY KEY, value TEXT NOT NULL);";
 
@@ -45,18 +45,8 @@ impl Profile {
             .as_str()
             .unwrap_or_default()
             .to_string();
-        if revision != PROFILE_REVISION {
-            return Err(format!(
-                "VersionUnsupported：执行 profile 版本 `{revision}` 不是 {PROFILE_REVISION}"
-            ));
-        }
-        let mode = v["mode"]
-            .as_str()
-            .filter(|m| MODES.contains(m))
-            .ok_or(
-                "InvalidDomain：执行 profile mode 必须是 simulation|dry-run|experiment|production",
-            )?
-            .to_string();
+        let mode = v["mode"].as_str().unwrap_or_default().to_string();
+        validate_execution_profile_header(&revision, &mode, !v["history_simulation"].is_null())?;
         let credential_env = v["credential_scope"]["env"]
             .as_str()
             .filter(|s| !s.is_empty())
@@ -74,11 +64,6 @@ impl Profile {
         let history_simulation = match v.get("history_simulation") {
             None | Some(Value::Null) => None,
             Some(value) => {
-                if mode != "simulation" {
-                    return Err(
-                        "InvalidDomain：history_simulation 仅允许 simulation profile".into(),
-                    );
-                }
                 let supplied =
                     if value.get("business").is_some() || value.get("deployment").is_some() {
                         strict_json(text.as_bytes())?["history_simulation"].clone()
@@ -204,7 +189,7 @@ fn run() -> Result<(), String> {
             let profile = Profile::load(Path::new(get("--profile")?))?;
             let epoch = positive(get("--writer-epoch")?, "writer_epoch")?;
             if let Some(simulation) = &profile.history_simulation {
-                simulation.check_db(db)?;
+                simulation.check_serve_deployment(db)?;
             }
             let _lock = process_lock(db, "X")?;
             let (mut conn, storage) = newchan_rust::economic_session::open_durable_db(db)?;
@@ -238,17 +223,10 @@ fn run() -> Result<(), String> {
             let mut conn =
                 Connection::open_with_flags(db, OpenFlags::SQLITE_OPEN_READ_ONLY).map_err(err)?;
             let tx = conn.transaction().map_err(err)?;
-            let state = query_conn(&tx)?;
             if command == "audit" {
-                if state["history_simulation"] != "true" {
-                    return Err("SchemaUnsupported：离线 audit 仅用于 simulation X".into());
-                }
-                let epoch = positive(
-                    state["writer_epoch"].as_str().unwrap_or_default(),
-                    "writer_epoch",
-                )?;
-                audit_persisted(&tx, epoch)?;
+                audit_persisted(&tx)?;
             }
+            let state = query_conn(&tx)?;
             tx.commit().map_err(err)?;
             println!("{state}");
             Ok(())

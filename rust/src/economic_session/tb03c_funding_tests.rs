@@ -675,6 +675,84 @@ fn envelope(message: &str, payload: Value) -> Value {
 }
 
 #[test]
+fn r2_b2_deployed_business_funding_initializes_book_2_and_3() {
+    let space = Space::new("split-funding");
+    let book2 = profile_manifest(&space, P0);
+    let mut book3 = super::quantity_calibration_tests::three_chongs();
+    for field in [
+        "session_id",
+        "session_generation",
+        "e",
+        "authorized_sources",
+        "resources",
+        "clock",
+    ] {
+        book3[field] = book2[field].clone();
+    }
+    for (case, mut business) in [("book2", book2), ("book3", book3)] {
+        let folder = space.0.join(case);
+        std::fs::create_dir(&folder).unwrap();
+        let db = folder.join("e.db");
+        let mut domains = serde_json::Map::new();
+        domains.insert("E".into(), json!({"db":db,"socket":folder.join("e.sock")}));
+        business.as_object_mut().unwrap().remove("e");
+        for (i, chong) in business["chongs"]
+            .as_array_mut()
+            .unwrap()
+            .iter_mut()
+            .enumerate()
+        {
+            domains.insert(
+                format!("B:{}", chong["chong_id"].as_str().unwrap()),
+                json!({"db":folder.join(format!("b{i}.db")),"socket":folder.join(format!("b{i}.sock"))}),
+            );
+            let chong = chong.as_object_mut().unwrap();
+            chong.remove("db");
+            chong.remove("socket");
+        }
+        business["schema_revision"] = json!("economic-manifest/2");
+        business["protocol_revision"] = json!("economic-session/1");
+        let path = folder.join("manifest.json");
+        let package = json!({"schema_revision":"economic-session-config/2","business":business,
+            "deployment":{"schema_revision":"economic-deployment/1","domains":domains,"voice":{},
+                "finance":null,"fault_markers":[],"x_db":null}});
+        let load = |p: &Value| {
+            std::fs::write(&path, canonical_json(p)).unwrap();
+            store::Config::load(&path, &db, None)
+        };
+        let mut missing = package.clone();
+        missing["business"]["chongs"][0]
+            .as_object_mut()
+            .unwrap()
+            .remove("funding");
+        assert!(load(&missing).is_err(), "{case}: funding 必填");
+        for field in ["db", "socket"] {
+            let mut mixed = package.clone();
+            mixed["business"]["chongs"][0][field] = json!(folder.join("misplaced"));
+            assert!(load(&mixed).is_err(), "{case}: 禁止路由部署字段 {field}");
+            let mut nested = package.clone();
+            nested["business"]["chongs"][0]["funding"][field] = json!(folder.join("misplaced"));
+            assert!(load(&nested).is_err(), "{case}: 禁止重资金部署字段 {field}");
+        }
+        let mut book1 = package.clone();
+        book1["business"]["book_revision"] = json!("tb03c-book/1");
+        book1["business"].as_object_mut().unwrap().remove("funding");
+        assert!(load(&book1).is_err(), "{case}: book/1 拒绝每重 funding");
+        assert!(!db.exists());
+        let config = load(&package).unwrap_or_else(|e| panic!("{case}: {e}"));
+        assert_eq!(config.manifest, package["business"]);
+        store::init(&config).unwrap();
+        let (conn, _) = store::open(&db, false).unwrap();
+        assert_eq!(store::latest(&conn).unwrap().0, 0);
+        assert_eq!(
+            store::meta(&conn, "business_manifest").unwrap(),
+            canonical_json(&package["business"])
+        );
+        store::audit(&conn, &config).unwrap();
+    }
+}
+
+#[test]
 fn v2_domain_binds_revision_waits_in_e_and_replays() {
     let space = Space::new("c8-domain");
     let m = profile_manifest(&space, P0);

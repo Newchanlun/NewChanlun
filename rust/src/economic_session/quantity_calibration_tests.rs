@@ -492,7 +492,7 @@ fn cal_v1(level: &str) -> Value {
         frozen("activation_request_asof", "20"),
     )
 }
-fn three_chongs() -> Value {
+pub(super) fn three_chongs() -> Value {
     // 价 100 USDC/BTC-UNIT：1110000→11100、3200000→32000、690000→6900。
     manifest_v3(
         vec![

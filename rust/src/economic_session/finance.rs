@@ -28,9 +28,11 @@ const REV_V4: &str = "tb03b-finance/4";
 /// #1407 C1：`economic-session/1` 域上显式选择的 E 侧精确命令生产者 = `/1` 全部语义 + MakeDispatchable、
 /// ReleaseExact、QueryCommand 与 `x-exact-authority/1` 的 QueryReleasedExact 应答。只跑 TestOnly 已定域 slot。
 const REV_V5: &str = "tb03b-finance/5";
-/// #2127：全新路径无关域的写合同。/6 同时提供精确命令，/7 延续内容域的读法。
-const REV_V6: &str = "tb03b-finance/6";
+// #1407 CE-S07（PR #2163）占用 tb03b-finance/6：model_binding=true、cap_activation=false。
+// 本分支不实现该合同，保留槽不登记，由未知版本门拒绝。
+/// #2127：路径无关域的 FIN 写合同。/7 同时提供精确命令，/8 延续内容域的读法。
 const REV_V7: &str = "tb03b-finance/7";
+const REV_V8: &str = "tb03b-finance/8";
 /// §5.7 `s_ref/2` 的 exact 四字段版本值。
 const S_REF_V2: &str = "s-object-ref/2";
 /// 财务子合同：一个版本串只有一种含义。
@@ -85,14 +87,14 @@ const CONTRACTS: [Contract; 7] = [
         exact_release: true,
     },
     Contract {
-        revision: REV_V6,
+        revision: REV_V7,
         domain: SCHEMA_V1,
         content: false,
         cap_activation: true,
         exact_release: true,
     },
     Contract {
-        revision: REV_V7,
+        revision: REV_V8,
         domain: SCHEMA_V2,
         content: true,
         cap_activation: true,
@@ -116,7 +118,7 @@ fn contract(m: &Value) -> Result<Contract, String> {
         Some(c)
             if c.domain == domain
                 && (declared.is_none()
-                    || deployment::is_business(m) == matches!(c.revision, REV_V6 | REV_V7)) =>
+                    || deployment::is_business(m) == matches!(c.revision, REV_V7 | REV_V8)) =>
         {
             Ok(*c)
         }
@@ -222,13 +224,15 @@ fn verify_cap_original(
     }
     let signed = signed_cap_record(d, p, raw, ns)?;
     if split {
-        let sig = required(&signed, "signature_ref")?;
-        if Path::new(sig).is_absolute()
-            || sig.starts_with("file:")
-            || sig.starts_with("./")
-            || sig.starts_with("../")
+        // 当前只接受受控 TestOnly 签署证据：固定命名空间 + 正整数票号。
+        let reference = required(&signed, "signature_ref")?;
+        if !reference
+            .strip_prefix("TestOnly-synthetic-signature/#")
+            .is_some_and(|ticket| positive(ticket, "signature ticket").is_ok())
         {
-            return Err("InvalidDomain：signature_ref 须为业务引用，不是部署位置".into());
+            return Err(
+                "InvalidDomain：signature_ref 须为 TestOnly-synthetic-signature/#<票号>".into(),
+            );
         }
     }
     Ok(signed)

@@ -1640,14 +1640,14 @@ fn old_finance_contracts_refuse_cap_activation() {
     m["protocol_revision"] = json!(SCHEMA_V2);
     assert_eq!(revision(&m).unwrap(), REV_V4);
     let mut split = m.clone();
-    split["finance"]["schema_revision"] = json!(REV_V7);
+    split["finance"]["schema_revision"] = json!(REV_V8);
     assert!(revision(&split).unwrap_err().contains("混写"));
     split["schema_revision"] = json!(deployment::BUSINESS);
-    assert_eq!(revision(&split).unwrap(), REV_V7);
+    assert_eq!(revision(&split).unwrap(), REV_V8);
     split["protocol_revision"] = json!(SCHEMA_V1);
     assert!(revision(&split).unwrap_err().contains("混写"));
-    split["finance"]["schema_revision"] = json!(REV_V6);
-    assert_eq!(revision(&split).unwrap(), REV_V6);
+    split["finance"]["schema_revision"] = json!(REV_V7);
+    assert_eq!(revision(&split).unwrap(), REV_V7);
     split["finance"]["schema_revision"] = json!(REV_V3);
     assert!(revision(&split).unwrap_err().contains("混写"));
     let gates: Vec<(&str, bool, bool)> = CONTRACTS
@@ -1662,8 +1662,8 @@ fn old_finance_contracts_refuse_cap_activation() {
             (REV_V3, false, true),
             (REV_V4, true, true),
             (REV_V5, false, false),
-            (REV_V6, false, true),
-            (REV_V7, true, true),
+            (REV_V7, false, true),
+            (REV_V8, true, true),
         ]
     );
     m["finance"] = Value::Null;
@@ -1671,6 +1671,159 @@ fn old_finance_contracts_refuse_cap_activation() {
     m["protocol_revision"] = json!(SCHEMA_V1);
     assert_eq!(revision(&m).unwrap(), REV);
 }
+#[test]
+fn r2_b1_cap_contracts_keep_ce_s07_reserved_and_match_reference_shape() {
+    let f = Fixture::v3("100", "20", true, None);
+    let with_path = cap_payload(&f, "1", "2", "150", "100000");
+    let mut digest_only = with_path.clone();
+    digest_only["policy_record"] = json!({"sha256":with_path["policy_record"]["sha256"]});
+    let mut config = f.configs[0].clone();
+    for schema in ["economic-manifest/1", "economic-manifest/2"] {
+        config.manifest["schema_revision"] = json!(schema);
+        config.manifest["finance"]["schema_revision"] = json!("tb03b-finance/6");
+        for protocol in [SCHEMA_V1, SCHEMA_V2] {
+            config.manifest["protocol_revision"] = json!(protocol);
+            assert_eq!(
+                revision(&config.manifest).unwrap_err(),
+                unsupported_contract()
+            );
+            assert_eq!(
+                cap_activation_contract(&config).unwrap_err(),
+                unsupported_contract()
+            );
+        }
+    }
+    for (schema, protocol, finance, content, exact_release) in [
+        (
+            "economic-manifest/1",
+            SCHEMA_V1,
+            "tb03b-finance/3",
+            false,
+            false,
+        ),
+        (
+            "economic-manifest/1",
+            SCHEMA_V2,
+            "tb03b-finance/4",
+            true,
+            false,
+        ),
+        (
+            "economic-manifest/2",
+            SCHEMA_V1,
+            "tb03b-finance/7",
+            false,
+            true,
+        ),
+        (
+            "economic-manifest/2",
+            SCHEMA_V2,
+            "tb03b-finance/8",
+            true,
+            false,
+        ),
+    ] {
+        config.manifest["schema_revision"] = json!(schema);
+        config.manifest["protocol_revision"] = json!(protocol);
+        config.manifest["finance"]["schema_revision"] = json!(finance);
+        let selected = contract(&config.manifest).unwrap();
+        assert_eq!(
+            (selected.revision, selected.content, selected.exact_release),
+            (finance, content, exact_release)
+        );
+        cap_activation_contract(&config).unwrap();
+        let (allowed, refused) = if schema == "economic-manifest/2" {
+            (&digest_only, &with_path)
+        } else {
+            (&with_path, &digest_only)
+        };
+        validate_request(&config, allowed).unwrap();
+        assert!(validate_request(&config, refused)
+            .unwrap_err()
+            .starts_with("SchemaUnsupported"));
+    }
+}
+
+// Linux 可核内容域激活的业务转换；物理载体仍由既有 HFS+ 门控制。
+#[test]
+fn r2_b1_content_cap_reducer_activates_digest_only() {
+    let f = Fixture::v3("100", "20", true, None);
+    let mut config = f.configs[0].clone();
+    config.manifest["schema_revision"] = json!(deployment::BUSINESS);
+    config.manifest["protocol_revision"] = json!(SCHEMA_V2);
+    config.manifest["finance"]["schema_revision"] = json!("tb03b-finance/8");
+    let mut input = f.data.clone();
+    input["schema_revision"] = json!("tb03b-finance/8");
+    for plan in input["plans"].as_array_mut().unwrap() {
+        plan["s_ref"]["schema_revision"] = json!(S_REF_V2);
+    }
+    let raw = canonical_json(&input);
+    config.manifest["finance"]["input_sha256"] = json!(sha256_hex(raw.as_bytes()));
+
+    let initial = empty(&config).unwrap();
+    let import = json!({"payload":{"op":"ImportResponsibility",
+        "responsibility_id":input["baseline"]["responsibility_id"],"writer_epoch":"1"}});
+    let (before, _) = reduce(
+        &f.dbs[0],
+        &config,
+        &initial,
+        &import,
+        &json!({"input_raw":raw}),
+        1,
+        "2",
+        None,
+    )
+    .unwrap();
+    let mut record = cap_record(&f, "1", "2", "120", "100000");
+    record["signature_ref"] = json!("TestOnly-synthetic-signature/#2127");
+    let mut payload = activation(&f, &record, "1", "2", "120", "100000");
+    let witness = json!({"input_raw":raw,"cap_policy_raw":canonical_json(&record)});
+    let with_path = json!({"payload":payload});
+    assert!(
+        reduce(&f.dbs[0], &config, &before, &with_path, &witness, 2, "3", None)
+            .unwrap_err()
+            .starts_with("SchemaUnsupported")
+    );
+    payload["policy_record"]
+        .as_object_mut()
+        .unwrap()
+        .remove("path");
+    let request = json!({"payload":payload});
+    let (after, activation) = reduce(
+        &f.dbs[0], &config, &before, &request, &witness, 2, "3", None,
+    )
+    .unwrap();
+    assert_eq!(activation["state"], "CapPolicyActivated");
+    assert_eq!(after["finance"]["cap_policy"], activation["to"]);
+    assert_eq!(after["finance"]["cap_policy"]["cap"], "120");
+    assert_eq!(
+        after["finance"]["cap_policy"]["liability_at_activation"],
+        "20"
+    );
+}
+
+#[test]
+fn r2_b1_legacy_fin3_audits_original_cut_after_deployment_is_moved() {
+    let mut f = Fixture::v3("100", "20", true, None);
+    let request = cap_payload(&f, "1", "2", "120", "100000");
+    let receipt = f.handle(0, "ActivateCapPolicy-equal", request.clone());
+    assert_eq!(receipt["kind"], "CapPolicyActivatedReceipt", "{receipt}");
+    let original = Path::new(request["policy_record"]["path"].as_str().unwrap());
+    assert!(original.is_file());
+    let copy = f.dir.with_extension("offline-fin3");
+    let db = copy.join(f.configs[0].db.file_name().unwrap());
+    f.dbs.clear();
+    std::fs::rename(&f.dir, &copy).unwrap();
+    assert!(!f.dir.exists());
+    assert!(!original.exists());
+    let config = Config::load_inner(&copy.join("manifest.json"), &db, None, true).unwrap();
+    let (conn, _) = open(&db, true).unwrap();
+    audit(&conn, &config).unwrap();
+    let (seq, root, _, _) = latest(&conn).unwrap();
+    assert_eq!(receipt["cut"]["root_hash"], root);
+    assert_eq!(receipt["cut"]["commit_seq"], seq.to_string());
+}
+
 /// #1716：`tb03b-finance/4` 的 cap 激活经 E 正式入口走内容域 write_v2、统一 job 与最终物理预留；
 /// 旧 `tb03b-finance/2` 在读任何原件前拒绝激活。三个库各占一个临时固定容量 HFS+ 卷。
 #[test]

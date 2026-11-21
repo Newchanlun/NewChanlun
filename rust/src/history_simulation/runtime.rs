@@ -2,7 +2,7 @@ use super::{
     model::{Batch, Change, Model},
     store,
 };
-use crate::session_protocol::{canonical_json, reply_envelope, sha256_hex};
+use crate::session_protocol::{canonical_json, positive, reply_envelope, sha256_hex};
 use crate::session_transport::{
     read_frame, serve_unix, write_frame_observed, NoObserver, TransportBounds,
 };
@@ -10,11 +10,35 @@ use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::os::unix::net::UnixStream;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 pub const WIRE: &str = "x-exact-simulation/1";
 pub const AUTHORITY_WIRE: &str = "x-exact-authority/1";
+const EXECUTION_PROFILE_V1: &str = "x-execution-profile/1";
+
+/// 外层执行合同同时约束在线配置与持久归档；只有 simulation 可以选内层合同。
+pub fn validate_execution_profile_header(
+    revision: &str,
+    mode: &str,
+    history_simulation: bool,
+) -> Result<(), String> {
+    if revision != EXECUTION_PROFILE_V1 {
+        return Err(format!(
+            "VersionUnsupported：执行 profile 版本 `{revision}` 不是 {EXECUTION_PROFILE_V1}"
+        ));
+    }
+    if !matches!(mode, "simulation" | "dry-run" | "experiment" | "production") {
+        return Err(
+            "InvalidDomain：执行 profile mode 必须是 simulation|dry-run|experiment|production"
+                .into(),
+        );
+    }
+    if history_simulation && mode != "simulation" {
+        return Err("InvalidDomain：history_simulation 仅允许 simulation profile".into());
+    }
+    Ok(())
+}
 fn hash<T: Serialize>(v: &T) -> String {
     sha256_hex(canonical_json(&serde_json::to_value(v).expect("integer domain")).as_bytes())
 }
@@ -125,6 +149,9 @@ impl ConfiguredProfile {
             let split: SplitProfile = serde_json::from_value(value).map_err(error)?;
             return Self::split(split.business, split.deployment);
         }
+        Self::legacy(value)
+    }
+    fn legacy(value: Value) -> Result<Self, String> {
         let profile: Profile = serde_json::from_value(value).map_err(error)?;
         profile.validate()?;
         Ok(Self {
@@ -165,11 +192,25 @@ impl ConfiguredProfile {
             binding: Some((business, deployment)),
         })
     }
-    pub fn check_db(&self, db: &Path) -> Result<(), String> {
+    fn check_db(&self, db: &Path) -> Result<(), String> {
         if let Some((_, d)) = &self.binding {
             let expected = d["db"].as_str().unwrap();
             if Path::new(expected) != db {
                 return Err("IdentityConflict：X DB 不等于固定部署".into());
+            }
+        }
+        Ok(())
+    }
+    /// 只在启服前访问真实目录；离线核证只读冻结的部署原字节。
+    pub fn check_serve_deployment(&self, db: &Path) -> Result<(), String> {
+        self.check_db(db)?;
+        if self.binding.is_some() {
+            let p = &self.profile;
+            let mut targets = std::collections::BTreeSet::new();
+            for socket in [&p.socket, &p.e.socket, &p.s.socket] {
+                if !targets.insert(socket_target(socket)?) {
+                    return Err("IdentityConflict：X/E/S socket 实际目标重复".into());
+                }
             }
         }
         Ok(())
@@ -183,6 +224,21 @@ impl ConfiguredProfile {
     }
     pub fn serve(&self, c: &mut Connection, epoch: i64) -> Result<(), String> {
         serve_bound(c, &self.profile, self.binding.as_ref(), epoch)
+    }
+}
+
+fn socket_target(raw: &str) -> Result<PathBuf, String> {
+    let path = Path::new(raw);
+    let parent = path.parent().ok_or("InvalidDomain：模拟 socket 缺父目录")?;
+    let name = path
+        .file_name()
+        .ok_or("InvalidDomain：模拟 socket 缺文件名")?;
+    let target = parent.canonicalize().map_err(io)?.join(name);
+    match target.symlink_metadata() {
+        Ok(meta) if meta.is_symlink() => target.canonicalize().map_err(io),
+        Ok(_) => Ok(target),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(target),
+        Err(e) => Err(io(e)),
     }
 }
 
@@ -245,8 +301,22 @@ pub(crate) fn verify_intake_binding(
     Ok(())
 }
 
-/// 离线审计读被冻结的 profile、因果记录与模型原件；不连接 E/S。
-pub fn audit_persisted(c: &Connection, epoch: i64) -> Result<(), String> {
+/// 先分派持久的外层与内层合同，再核证因果记录和模型原件；不访问原部署。
+pub fn audit_persisted(c: &Connection) -> Result<(), String> {
+    let meta = |key| -> Result<String, String> {
+        c.query_row("SELECT value FROM x_meta WHERE key=?1", [key], |r| r.get(0))
+            .optional()
+            .map_err(error)?
+            .ok_or_else(|| format!("SchemaUnsupported：X 持久元数据缺 {key}"))
+    };
+    let revision = meta("profile_revision")?;
+    let mode = meta("profile_mode")?;
+    let history = meta("history_simulation")? == "true";
+    validate_execution_profile_header(&revision, &mode, history)?;
+    if !history {
+        return Err("SchemaUnsupported：离线 audit 仅用于 simulation X".into());
+    }
+    let epoch = positive(&meta("writer_epoch")?, "writer_epoch")?;
     let raw: String = c
         .query_row(
             "SELECT v FROM x_sim_meta WHERE k='authority_profile'",
@@ -262,7 +332,7 @@ pub fn audit_persisted(c: &Connection, epoch: i64) -> Result<(), String> {
             crate::session_protocol::strict_json(raw.as_bytes())?,
         )?
     } else {
-        ConfiguredProfile::parse(business)?
+        ConfiguredProfile::legacy(business)?
     };
     validate_bound(c, &config.profile, config.binding.as_ref(), epoch)
 }
@@ -1029,8 +1099,6 @@ fn validate_bound(
                 return Err("IdentityConflict：X 部署位置已冻结".into());
             }
         }
-        validate_pending_epoch(c, epoch)?;
-        store::audit_history(c)?;
         let frozen: Option<String> = c
             .query_row("SELECT v FROM x_sim_meta WHERE k='contract'", [], |r| {
                 r.get(0)
@@ -1056,6 +1124,8 @@ fn validate_bound(
         if prior.as_ref() != Some(&business_binding(p, binding)?) {
             return Err("IdentityConflict：X 权威端点合同已冻结".into());
         }
+        validate_pending_epoch(c, epoch)?;
+        store::audit_history(c)?;
     }
     let commands:bool=c.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='x_exact_commands')",[],|r|r.get(0)).map_err(error)?;
     if commands {

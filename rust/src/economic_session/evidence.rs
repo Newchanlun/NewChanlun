@@ -459,7 +459,8 @@ fn verify_binding(config: &Config, witness: &Value) -> Result<VerifiedGammaEvide
         &["schema", "authority_id", "source", "artifacts", "bindings"],
     )?;
     let (bundle_schema, review_schema) = if split {
-        deployment::closed(
+        // 新独评只含固定判决和被核证的业务引用，不持久化自由文本说明。
+        exact(
             &review,
             &[
                 "schema",
@@ -469,13 +470,7 @@ fn verify_binding(config: &Config, witness: &Value) -> Result<VerifiedGammaEvide
                 "artifacts",
                 "verified_evidence_ids",
             ],
-            &["scope"],
         )?;
-        if let Some(scope) = review.get("scope") {
-            if !scope.is_string() {
-                return Err("SchemaUnsupported：独评 scope 须文本".into());
-            }
-        }
         exact(
             &bundle["source"],
             &[

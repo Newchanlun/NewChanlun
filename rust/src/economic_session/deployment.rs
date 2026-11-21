@@ -120,8 +120,20 @@ pub(super) fn validate_business(m: &Value) -> Result<(), String> {
     )?;
     required(m, "protocol_revision")?;
     exact(&m["resources"], RESOURCES)?;
+    let book = super::book::rules(m)?;
+    let route_fields: &[&str] = match book {
+        super::book::Rules::Tb03cV2 | super::book::Rules::Tb03cV3 => &[
+            "chong_id",
+            "symbol",
+            "operation_level",
+            "fixed_q",
+            "funding",
+        ],
+        _ => &["chong_id", "symbol", "operation_level", "fixed_q"],
+    };
+    // 重资金的内部形状与政策交叉约束由 tb03c_funding 按同一书账版本验证。
     for c in m["chongs"].as_array().ok_or("InvalidDomain：重须数组")? {
-        exact(c, &["chong_id", "symbol", "operation_level", "fixed_q"])?;
+        exact(c, route_fields)?;
     }
     for a in m["authorized_sources"]
         .as_array()
@@ -172,7 +184,7 @@ pub(super) fn validate_business(m: &Value) -> Result<(), String> {
         }) {
             return Err("IdentityConflict：X 事实来源未获正式 CaptureExternal 权限".into());
         }
-        if !super::book::rules(m)?.is_tb03c() {
+        if !book.is_tb03c() {
             return Err("SchemaUnsupported：模拟事实来源须选择 TB03C 书账合同".into());
         }
     }

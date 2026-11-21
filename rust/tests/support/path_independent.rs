@@ -177,12 +177,13 @@ fn inputs(space: &Space, s_db: &Path, split: bool) -> Input {
     let bundle_path = voice_dir.join("bundle.json");
     let bundle_sha = save(&bundle_path, &bundle);
     let review_path = voice_dir.join("review.json");
-    let review_sha = save(
-        &review_path,
-        &json!({"schema":format!("voice-binding-independent-verification/{ver}"),
+    let mut review = json!({"schema":format!("voice-binding-independent-verification/{ver}"),
         "authority_id":"fixture","bundle_sha256":bundle_sha,"artifacts":artifacts,"verified_evidence_ids":["opening"],
-        "verdict":"APPROVE_CONTROLLED_VOICE_BINDING","scope":"TestOnly controlled evidence closure"}),
-    );
+        "verdict":"APPROVE_CONTROLLED_VOICE_BINDING"});
+    if !split {
+        review["scope"] = json!("TestOnly controlled evidence closure");
+    }
+    let review_sha = save(&review_path, &review);
     let mut authority = json!({"authority_id":"fixture","bundle_sha256":bundle_sha,"verification_sha256":review_sha,"max_bytes":"1048576"});
     if !split {
         authority["bundle_path"] = json!(bundle_path);
@@ -211,7 +212,7 @@ fn inputs(space: &Space, s_db: &Path, split: bool) -> Input {
             "eligibility_ref":"S:cmd-alpha","concurrency":"single"}});
     let domain = |concurrency| json!({"order_kind":"limit","concurrency":concurrency,"allocation_model":"#1349/atomic-slot-wait/v1"});
     let fin_rev = if split {
-        "tb03b-finance/6"
+        "tb03b-finance/7"
     } else {
         "tb03b-finance/5"
     };
@@ -255,6 +256,28 @@ fn inputs(space: &Space, s_db: &Path, split: bool) -> Input {
         unsigned["authorizer"] = json!("");
         let mut early = signed("120");
         early["authorized_at_ns"] = json!("99999");
+        let local_references = [
+            (
+                "cap-file-upper",
+                format!("FILE://{}", caps_dir.join("cap.json").display()),
+            ),
+            (
+                "cap-file-lower",
+                format!("file://{}", caps_dir.join("cap.json").display()),
+            ),
+            (
+                "cap-file-mixed",
+                format!("FiLe://{}", caps_dir.join("cap.json").display()),
+            ),
+            ("cap-relative", "caps/cap.json".to_owned()),
+            ("cap-parent", "../caps/cap.json".to_owned()),
+            ("cap-windows", r"C:\caps\cap.json".to_owned()),
+            ("cap-unc", r"\\host\caps\cap.json".to_owned()),
+            (
+                "cap-namespace-path",
+                "TestOnly-synthetic-signature/#2127/cap.json".to_owned(),
+            ),
+        ];
         for (id, record) in [
             ("cap-low", signed("19")),
             ("cap-cross", cross),
@@ -264,8 +287,15 @@ fn inputs(space: &Space, s_db: &Path, split: bool) -> Input {
             ("cap-late-signature", early),
             ("cap-missing", signed("121")),
             ("cap-replaced", signed("122")),
-            ("cap", signed("120")),
-        ] {
+        ]
+        .into_iter()
+        .chain(local_references.map(|(id, reference)| {
+            let mut record = signed("120");
+            record["signature_ref"] = json!(reference);
+            (id, record)
+        }))
+        .chain([("cap", signed("120"))])
+        {
             let path = caps_dir.join(format!("{id}.json"));
             let hash = digest(&record);
             if id != "cap-missing" {
@@ -637,17 +667,25 @@ fn workload(space: &Space, split: bool, neg: bool) -> [(String, Option<String>);
         for (id, record, sha) in &f.caps[..f.caps.len() - 1] {
             let expected = match *id {
                 "cap-cross" | "cap-unit" | "cap-replaced" => "IdentityConflict",
-                "cap-low" | "cap-local-signature" => "InvalidDomain",
+                "cap-low"
+                | "cap-local-signature"
+                | "cap-file-upper"
+                | "cap-file-lower"
+                | "cap-file-mixed"
+                | "cap-relative"
+                | "cap-parent"
+                | "cap-windows"
+                | "cap-unc"
+                | "cap-namespace-path" => "InvalidDomain",
                 "cap-no-signer" => "SchemaUnsupported",
                 "cap-missing" | "cap-late-signature" => "MissingDependency",
                 _ => unreachable!(),
             };
-            error(
-                econ(space, "e.sock", id, cap_payload(record, sha)),
-                expected,
-            );
+            let result = econ(space, "e.sock", id, cap_payload(record, sha));
+            assert_eq!(result["kind"], "Error", "{id}: {result}");
+            error(result, expected);
+            assert_eq!(table_bytes(&edb, "deployment"), before, "{id}");
         }
-        assert_eq!(table_bytes(&edb, "deployment"), before);
     }
     if split {
         let (_, record, sha) = f.caps.last().unwrap();
@@ -987,4 +1025,210 @@ fn legacy_same_path_repeats_but_different_paths_keep_different_roots() {
     };
     assert_ne!(tip(&a[0].0), tip(&moved[0].0), "旧 E 根引用了旧 B 证明");
     assert_ne!(tip(&a[1].0), tip(&moved[1].0), "旧 B 根仍承诺 Voice 原路径");
+}
+
+#[test]
+fn r2_b3_voice_rejects_pinned_review_with_deployment_scope_without_b_write() {
+    let space = Space::new();
+    let declared = declaration("TestOnlyStructure", DECLARED_NS);
+    let sdb = s_init_v3(&space, Some(&declared));
+    let launcher = launcher_manifest(
+        &space,
+        "simulation",
+        &declared,
+        &sdb,
+        &anchor(&sdb),
+        &space.path("x-profile.json"),
+    );
+    let mut control = read(&launcher);
+    control["economic"]["b"][0]["chong"] = json!("alpha");
+    save(&launcher, &control);
+    let f = inputs(&space, &sdb, true);
+
+    let path = space.path("voice/review.json");
+    let mut review = read(&path);
+    review["scope"] = json!(format!(
+        "verification inputs at {}",
+        space.path("voice/bundle.json").display()
+    ));
+    let sha = save(&path, &review);
+    let manifest = space.path("economic.json");
+    let mut pinned = read(&manifest);
+    pinned["business"]["voice_binding"]["authorities"][0]["verification_sha256"] = json!(sha);
+    save(&manifest, &pinned);
+
+    let mut service = Launcher(spawn_launcher(&launcher));
+    wait_domains(&mut service.0);
+    for name in ["e.sock", "b.sock"] {
+        eventually(name, || UnixStream::connect(space.path(name)).is_ok());
+    }
+    let captured = expect(
+        econ(
+            &space,
+            "e.sock",
+            "open",
+            captures(&f.opening, "/events/0", "opening-token"),
+        ),
+        "Recorded",
+    );
+    apply(&space, "apply-open", &captured, &json!("opening-alpha"));
+    let bdb = space.path("b.db");
+    let before = table_bytes(&bdb, "deployment");
+    error(
+        econ(&space, "b.sock", "bind", f.binding),
+        "SchemaUnsupported",
+    );
+    assert_eq!(table_bytes(&bdb, "deployment"), before);
+}
+
+fn serve_x(db: &Path, profile: &Path) -> Command {
+    let mut cmd = Command::new(x_bin());
+    cmd.arg("serve")
+        .arg("--db")
+        .arg(db)
+        .arg("--profile")
+        .arg(profile)
+        .args(["--writer-epoch", "1"]);
+    cmd
+}
+
+#[test]
+fn r2_b5_x_rejects_socket_aliases_before_any_db_or_bind() {
+    let space = Space::new();
+    inputs(&space, &space.path("s.db"), true);
+    let profile_path = space.path("x-profile.json");
+    let profile = read(&profile_path);
+    std::os::unix::fs::symlink(space.path("voice"), space.path("aliased-parent")).unwrap();
+    let db = space.path("x.db");
+    let socket = space.path("x.sock");
+    let _peer = UnixListener::bind(space.path("voice/live.sock")).unwrap();
+    std::os::unix::fs::symlink(space.path("voice/live.sock"), space.path("alias.sock")).unwrap();
+    for (e, s) in [
+        ("voice/../x.sock", "condition.sock"),
+        ("aliased-parent//./../x.sock", "condition.sock"),
+        ("voice/e.sock", "aliased-parent//./e.sock"),
+        ("e.sock", "voice/../x.sock"),
+        ("voice/live.sock", "alias.sock"),
+    ] {
+        let mut p = profile.clone();
+        p["history_simulation"]["deployment"]["e_socket"] = json!(space.path(e));
+        p["history_simulation"]["deployment"]["s_socket"] = json!(space.path(s));
+        save(&profile_path, &p);
+        let mut child = serve_x(&db, &profile_path)
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        eventually("X 应拒绝启动", || {
+            child.try_wait().unwrap().is_some() || (db.exists() && socket.exists())
+        });
+        let running = child.try_wait().unwrap().is_none();
+        if running {
+            child.kill().unwrap();
+        }
+        let out = child.wait_with_output().unwrap();
+        assert!(!running, "X 服务已接受别名：{e} / {s}");
+        assert!(!out.status.success());
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(
+            stderr.contains("socket 实际目标重复"),
+            "{e} / {s}: {stderr}"
+        );
+        assert!(!db.exists());
+        assert!(!space.path("x.db.writer.lock").exists());
+        assert!(!socket.exists());
+    }
+}
+
+#[test]
+fn r2_b6_x_offline_audit_requires_registered_outer_and_inner_contracts() {
+    let space = Space::new();
+    inputs(&space, &space.path("s.db"), true);
+    let src = space.path("x.db");
+    let profile = space.path("x-profile.json");
+    let mut p = read(&profile);
+    p["history_simulation"]["deployment"]["e_socket"] = json!(space.path("voice/e.sock"));
+    save(&profile, &p);
+    let mut child = serve_x(&src, &profile).spawn().unwrap();
+    eventually("X live", || {
+        UnixStream::connect(space.path("x.sock")).is_ok()
+    });
+    let batch = bar(0, vec![], json!({"kind":"none"}));
+    let original = expect(x(&space, "AdvanceBar", batch.clone()), "SimulationBatch");
+    child.kill().unwrap();
+    child.wait().unwrap();
+    let socket = space.path("x.sock");
+    // 独立进程被杀后保留 stale socket；按原合同先腾出同一端点，再原址重开。
+    std::fs::rename(&socket, space.path("stale-x.sock")).unwrap();
+    let mut child = serve_x(&src, &profile).spawn().unwrap();
+    eventually("X 原址续服", || UnixStream::connect(&socket).is_ok());
+    assert_eq!(x(&space, "AdvanceBar", batch), original);
+    child.kill().unwrap();
+    child.wait().unwrap();
+    // 归档核证不能要求原部署的父目录仍然存在。
+    std::fs::rename(space.path("voice"), space.path("old-deployment-absent")).unwrap();
+    let source = Connection::open_with_flags(&src, OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap();
+    let audit = |db: &Path| run(Command::new(x_bin()).arg("audit").arg("--db").arg(db));
+    let good = successful_json(audit(&src));
+    assert_eq!(good["profile_revision"], "x-execution-profile/1");
+    let backup = |name: &str| {
+        let db = space.path(name);
+        source
+            .execute("VACUUM INTO ?1", [db.to_str().unwrap()])
+            .unwrap();
+        db
+    };
+    for (key, value, reason) in [
+        (
+            "profile_revision",
+            "x-execution-profile/999",
+            "VersionUnsupported",
+        ),
+        (
+            "profile_mode",
+            "production",
+            "history_simulation 仅允许 simulation",
+        ),
+        ("profile_mode", "unknown", "profile mode 必须是"),
+        (
+            "history_simulation",
+            "false",
+            "离线 audit 仅用于 simulation X",
+        ),
+    ] {
+        let db = backup(&format!("archive-{key}-{value}.db").replace('/', "-"));
+        let c = Connection::open(&db).unwrap();
+        assert_eq!(
+            c.execute("UPDATE x_meta SET value=?1 WHERE key=?2", [value, key])
+                .unwrap(),
+            1
+        );
+        drop(c);
+        let out = audit(&db);
+        assert!(!out.status.success(), "{key}={value} 被离线 audit 接纳");
+        assert!(out.stdout.is_empty());
+        assert!(
+            String::from_utf8_lossy(&out.stderr).contains(reason),
+            "{out:?}"
+        );
+    }
+
+    let db = backup("archive-invalid-inner.db");
+    let c = Connection::open(&db).unwrap();
+    let mut wrong = p["history_simulation"]["business"].clone();
+    wrong["schema_revision"] = json!("x-simulation-authority/999");
+    assert_eq!(
+        c.execute(
+            "UPDATE x_sim_meta SET v=?1 WHERE k='authority_profile'",
+            [canonical_json(&wrong)]
+        )
+        .unwrap(),
+        1
+    );
+    drop(c);
+    let out = audit(&db);
+    assert!(!out.status.success());
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("未知模拟 X 业务或部署版本"),
+        "{out:?}"
+    );
 }
