@@ -43,7 +43,29 @@ _LEADING_BOLD_PREFIX_RE = re.compile(r"^(?:\*\*|__)\s*")
 _LEADING_BRACKET_TAG_RE = re.compile(
     r"^(?:(?:\*\*|__)\s*)?(?P<open>[\[\【])(?P<tag>[^\]\】\n]{1,64})(?P<close>[\]\】])(?:\s*(?:\*\*|__))?\s*"
 )
-_MD_LINK_REF_DEF_RE = re.compile(r"^[ ]{0,3}\[([^\[\]\n]{1,999})\]:", re.MULTILINE)
+_CM_LINE_END_RE = re.compile(r"\r\n|\n|\r")
+_CM_THEMATIC_BREAK_RE = re.compile(r"^(?:(?:\*[ \t]*){3,}|(?:-[ \t]*){3,}|(?:_[ \t]*){3,})$")
+_CM_SETEXT_UNDERLINE_RE = re.compile(r"^(?:=+|-+)[ \t]*$")
+_CM_ATX_HEADING_RE = re.compile(r"^#{1,6}(?:[ \t]|$)")
+_CM_OPEN_FENCE_RE = re.compile(r"^(?P<fence>`{3,}|~{3,})(?P<info>.*)$")
+_CM_LIST_MARKER_RE = re.compile(r"^(?P<marker>[-*+]|\d{1,9}[.)])(?=$|[ \t])")
+_CM_HTML_TYPE1_START_RE = re.compile(r"^<(?:pre|script|style|textarea)(?:[ \t>]|$)", re.IGNORECASE)
+_CM_HTML_TYPE1_END_RE = re.compile(r"</(?:pre|script|style|textarea)>", re.IGNORECASE)
+_CM_HTML_TYPE6_START_RE = re.compile(
+    r"^</?(?:address|article|aside|base|basefont|blockquote|body|caption|center|col|colgroup|"
+    r"dd|details|dialog|dir|div|dl|dt|fieldset|figcaption|figure|footer|form|frame|frameset|"
+    r"h[1-6]|head|header|hr|html|iframe|legend|li|link|main|menu|menuitem|nav|noframes|"
+    r"ol|optgroup|option|p|param|search|section|summary|table|tbody|td|tfoot|th|thead|title|tr|track|ul)"
+    r"(?:[ \t>]|/>|$)",
+    re.IGNORECASE,
+)
+_CM_HTML_TYPE7_START_RE = re.compile(
+    r"^(?:<[A-Za-z][A-Za-z0-9-]*"
+    r"(?:[ \t]+[A-Za-z_:][A-Za-z0-9_.:-]*(?:[ \t]*=[ \t]*(?:[^\s\"'=<>`]+|'[^']*'|\"[^\"]*\"))?)*"
+    r"[ \t]*/?>|</[A-Za-z][A-Za-z0-9-]*[ \t]*>)[ \t]*$"
+)
+_CM_ASCII_PUNCT: frozenset[str] = frozenset("!\"#$%&'()*+,-./:;<=>?@[\\]^_`{|}~")
+_CM_REAL_LINK_DEST_CHAR_RE = re.compile(r"[/\\#?:.@]")
 _IMMEDIATE_REF_BRACKET_RE = re.compile(r"^\[([^\[\]\n]{1,999})\]")
 _BRACKET_LINE_COORD_RE = re.compile(r":\d")
 _BRACKET_FILE_EXT_RE = re.compile(r"\.[A-Za-z0-9]{1,8}(?![A-Za-z0-9])")
@@ -1140,15 +1162,45 @@ def score_predictions(
     )
 
 
+def _validate_matched_location_indices(
+    raw_indices: Sequence[Any],
+    *,
+    matched_locations: int,
+    expected_locations: int,
+    prefix: str,
+) -> tuple[int, ...]:
+    """校验 matched_location_indices 为无重复非负整数元组，且长度与 matched_locations 一致。"""
+    parsed_indices: list[int] = []
+    seen_indices: set[int] = set()
+    for j, item in enumerate(raw_indices):
+        loc_idx = _require_int(item, f"{prefix}.matched_location_indices[{j}]")
+        if loc_idx < 0:
+            raise EvalValidationError(f"{prefix}.matched_location_indices[{j}] 不能为负：{loc_idx}")
+        if loc_idx >= expected_locations:
+            raise EvalValidationError(
+                f"{prefix}.matched_location_indices[{j}] 超出 expected_locations（{expected_locations}）：{loc_idx}"
+            )
+        if loc_idx in seen_indices:
+            raise EvalValidationError(f"{prefix}.matched_location_indices 包含重复索引：{loc_idx}")
+        seen_indices.add(loc_idx)
+        parsed_indices.append(loc_idx)
+    if len(parsed_indices) != matched_locations:
+        raise EvalValidationError(
+            f"{prefix}.matched_location_indices 长度（{len(parsed_indices)}）与 matched_locations（{matched_locations}）不一致"
+        )
+    return tuple(parsed_indices)
+
+
 def _score_from_dict(raw: dict[str, Any]) -> EvalScore:
     try:
         raw_details = raw["case_details"]
         if not isinstance(raw_details, list):
             raise EvalValidationError("case_details 必须是数组")
         parsed_details: list[CaseScoreDetail] = []
-        for d in raw_details:
+        for idx, d in enumerate(raw_details):
             if not isinstance(d, dict):
                 raise EvalValidationError("case_details 元素必须是对象")
+            prefix = f"case_details[{idx}]"
             kind_raw = d["kind"]
             if kind_raw not in ("bug", "clean"):
                 raise EvalValidationError(f"无效的 case kind：{kind_raw!r}")
@@ -1165,16 +1217,40 @@ def _score_from_dict(raw: dict[str, Any]) -> EvalScore:
                 if verdict_raw == "FAILED"
                 else "MISSING"
             )
+            expected_locations = _require_int(d["expected_locations"], f"{prefix}.expected_locations")
+            if expected_locations < 0:
+                raise EvalValidationError(f"{prefix}.expected_locations 不能为负：{expected_locations}")
+            matched_locations = _require_int(d["matched_locations"], f"{prefix}.matched_locations")
+            if matched_locations < 0:
+                raise EvalValidationError(f"{prefix}.matched_locations 不能为负：{matched_locations}")
+            raw_indices = d["matched_location_indices"]
+            if not isinstance(raw_indices, list):
+                raise EvalValidationError(f"{prefix}.matched_location_indices 必须是数组")
+            matched_location_indices = _validate_matched_location_indices(
+                raw_indices,
+                matched_locations=matched_locations,
+                expected_locations=expected_locations,
+                prefix=prefix,
+            )
+            blocking_findings = _require_int(d["blocking_findings"], f"{prefix}.blocking_findings")
+            if blocking_findings < 0:
+                raise EvalValidationError(f"{prefix}.blocking_findings 不能为负：{blocking_findings}")
+            matched_blocking_findings = _require_int(
+                d["matched_blocking_findings"],
+                f"{prefix}.matched_blocking_findings",
+            )
+            if matched_blocking_findings < 0:
+                raise EvalValidationError(f"{prefix}.matched_blocking_findings 不能为负：{matched_blocking_findings}")
             parsed_details.append(
                 CaseScoreDetail(
                     case_id=str(d["case_id"]),
                     kind=kind,
                     verdict=verdict,
-                    expected_locations=int(d["expected_locations"]),
-                    matched_locations=int(d["matched_locations"]),
-                    matched_location_indices=tuple(int(i) for i in d["matched_location_indices"]),
-                    blocking_findings=int(d["blocking_findings"]),
-                    matched_blocking_findings=int(d["matched_blocking_findings"]),
+                    expected_locations=expected_locations,
+                    matched_locations=matched_locations,
+                    matched_location_indices=matched_location_indices,
+                    blocking_findings=blocking_findings,
+                    matched_blocking_findings=matched_blocking_findings,
                     bug_recalled=bool(d["bug_recalled"]),
                     clean_false_positive=bool(d["clean_false_positive"]),
                 )
@@ -1246,12 +1322,24 @@ def compare_scores(before: EvalScore, after: EvalScore) -> ScoreComparison:
     for d in before.case_details:
         if d.case_id in before_map:
             raise EvalValidationError(f"before 打分存在重复 case_id：{d.case_id}")
+        _validate_matched_location_indices(
+            d.matched_location_indices,
+            matched_locations=d.matched_locations,
+            expected_locations=d.expected_locations,
+            prefix=f"before.case_details[{d.case_id}]",
+        )
         before_map[d.case_id] = d
 
     after_map: dict[str, CaseScoreDetail] = {}
     for d in after.case_details:
         if d.case_id in after_map:
             raise EvalValidationError(f"after 打分存在重复 case_id：{d.case_id}")
+        _validate_matched_location_indices(
+            d.matched_location_indices,
+            matched_locations=d.matched_locations,
+            expected_locations=d.expected_locations,
+            prefix=f"after.case_details[{d.case_id}]",
+        )
         after_map[d.case_id] = d
 
     if set(before_map) != set(after_map):
@@ -1291,21 +1379,25 @@ def compare_scores(before: EvalScore, after: EvalScore) -> ScoreComparison:
             continue
 
         if b.kind == "bug":
-            b_recall = (int(b.bug_recalled), b.matched_locations)
-            a_recall = (int(a.bug_recalled), a.matched_locations)
+            b_locs = set(b.matched_location_indices)
+            a_locs = set(a.matched_location_indices)
+            gained_locs = bool(a_locs - b_locs)
+            lost_locs = bool(b_locs - a_locs)
+            recalled_up = int(a.bug_recalled) > int(b.bug_recalled)
+            recalled_down = int(a.bug_recalled) < int(b.bug_recalled)
             b_false_blocking = b.blocking_findings - b.matched_blocking_findings
             a_false_blocking = a.blocking_findings - a.matched_blocking_findings
-
-            recall_up = a_recall > b_recall
-            recall_down = a_recall < b_recall
             fp_better = a_false_blocking < b_false_blocking
             fp_worse = a_false_blocking > b_false_blocking
 
-            if (recall_up and fp_worse) or (recall_down and fp_better):
+            any_better = recalled_up or gained_locs or fp_better
+            any_worse = recalled_down or lost_locs or fp_worse
+
+            if any_better and any_worse:
                 mixed.append(case_id)
-            elif (recall_up and not fp_worse) or (not recall_down and fp_better):
+            elif any_better:
                 improved.append(case_id)
-            elif (recall_down and not fp_better) or (not recall_up and fp_worse):
+            elif any_worse:
                 regressed.append(case_id)
             else:
                 unchanged.append(case_id)
@@ -1443,13 +1535,596 @@ def _normalize_markdown_link_label(label: str) -> str:
     return " ".join(label.split()).casefold()
 
 
+@dataclass(frozen=True)
+class _CmSourceLine:
+    line_idx: int
+    start_offset: int
+    content: str
+
+
+@dataclass(frozen=True)
+class _CmParaLine:
+    line_idx: int
+    start_offset: int
+    text: str
+
+
+@dataclass
+class _CmContainer:
+    kind: Literal["blockquote", "list_item"]
+    required_indent: int = 0
+    has_content: bool = True
+
+
+@dataclass(frozen=True)
+class _CmLinkRefDef:
+    norm_label: str
+    bracket_open_pos: int
+    start_line_idx: int
+    destination: str
+    is_angle_dest: bool
+    has_title: bool
+
+
+def _split_commonmark_lines(text: str) -> list[_CmSourceLine]:
+    """严格按 CommonMark §2.1 行尾（\\r\\n | \\n | \\r）切分文本，保留原始字符偏移。"""
+    lines: list[_CmSourceLine] = []
+    pos = 0
+    line_idx = 0
+    n = len(text)
+    while pos < n:
+        match = _CM_LINE_END_RE.search(text, pos)
+        if match is None:
+            lines.append(_CmSourceLine(line_idx=line_idx, start_offset=pos, content=text[pos:]))
+            break
+        lines.append(_CmSourceLine(line_idx=line_idx, start_offset=pos, content=text[pos : match.start()]))
+        pos = match.end()
+        line_idx += 1
+    return lines
+
+
+def _cm_skip_ws_cols(content: str, idx: int, col: int, pending: int) -> tuple[int, int, int, int]:
+    """跳过空格与 4 列制表位，返回 (跳过列数, 新字符下标, 新列号, 剩余虚拟空格=0)。"""
+    skipped = pending
+    cur_col = col + pending
+    cur_idx = idx
+    n = len(content)
+    while cur_idx < n:
+        ch = content[cur_idx]
+        if ch == " ":
+            skipped += 1
+            cur_col += 1
+            cur_idx += 1
+        elif ch == "\t":
+            tab_width = 4 - (cur_col % 4)
+            skipped += tab_width
+            cur_col += tab_width
+            cur_idx += 1
+        else:
+            break
+    return (skipped, cur_idx, cur_col, 0)
+
+
+def _cm_advance_cols(content: str, idx: int, col: int, pending: int, max_cols: int) -> tuple[int, int, int, int]:
+    """最多消费 max_cols 列空白（含半消费制表符），返回 (实际消费列数, 新下标, 新列号, 剩余虚拟空格)。"""
+    consumed = 0
+    cur_idx = idx
+    cur_col = col
+    cur_pending = pending
+    if cur_pending > 0 and max_cols > 0:
+        take = min(cur_pending, max_cols)
+        consumed += take
+        cur_col += take
+        cur_pending -= take
+    n = len(content)
+    while consumed < max_cols and cur_idx < n:
+        ch = content[cur_idx]
+        if ch == " ":
+            consumed += 1
+            cur_col += 1
+            cur_idx += 1
+        elif ch == "\t":
+            tab_width = 4 - (cur_col % 4)
+            need = max_cols - consumed
+            if tab_width <= need:
+                consumed += tab_width
+                cur_col += tab_width
+                cur_idx += 1
+            else:
+                consumed += need
+                cur_col += need
+                cur_idx += 1
+                cur_pending = tab_width - need
+                break
+        else:
+            break
+    return (consumed, cur_idx, cur_col, cur_pending)
+
+
+def _cm_parse_link_title(buf: str, start: int) -> int | None:
+    """按 CommonMark §6.3 解析链接标题，返回闭合界符之后的下标；失败返回 None。"""
+    opener = buf[start]
+    closer = ")" if opener == "(" else opener
+    i = start + 1
+    n = len(buf)
+    while i < n:
+        ch = buf[i]
+        if ch == "\\" and i + 1 < n and buf[i + 1] in _CM_ASCII_PUNCT:
+            i += 2
+            continue
+        if ch == closer:
+            return i + 1
+        if opener == "(" and ch == "(":
+            return None
+        i += 1
+    return None
+
+
+def _cm_parse_link_ref_def_at(buf: str, pos: int) -> tuple[int, str, str, bool, bool] | None:
+    """按 CommonMark §4.7 从段落行首位置解析单条链接引用定义。"""
+    n = len(buf)
+    if pos >= n or buf[pos] != "[":
+        return None
+
+    # 1) 链接标签（1..999 字符，含至少一个非空白字符，不允许未转义 `[` / `]`）
+    i = pos + 1
+    label_chars = 0
+    has_non_ws = False
+    while i < n:
+        ch = buf[i]
+        if ch == "\\":
+            if i + 1 < n and buf[i + 1] in ("\\", "[", "]"):
+                i += 2
+                label_chars += 2
+                has_non_ws = True
+            else:
+                i += 1
+                label_chars += 1
+                has_non_ws = True
+        elif ch == "[":
+            return None
+        elif ch == "]":
+            break
+        else:
+            if ch not in (" ", "\t", "\n"):
+                has_non_ws = True
+            i += 1
+            label_chars += 1
+        if label_chars > 999:
+            return None
+
+    if i >= n or buf[i] != "]" or label_chars == 0 or not has_non_ws:
+        return None
+    norm_label = _normalize_markdown_link_label(buf[pos + 1 : i])
+    if not norm_label:
+        return None
+    i += 1
+
+    # 2) 冒号 + 可选空白（至多一个换行）
+    if i >= n or buf[i] != ":":
+        return None
+    i += 1
+    while i < n and buf[i] in (" ", "\t"):
+        i += 1
+    if i < n and buf[i] == "\n":
+        i += 1
+        while i < n and buf[i] in (" ", "\t"):
+            i += 1
+
+    # 3) 链接目标（`<...>` 或非空白括号平衡目标）
+    if i >= n or buf[i] == "\n":
+        return None
+    if buf[i] == "<":
+        is_angle_dest = True
+        dest_start = i + 1
+        i += 1
+        while i < n:
+            ch = buf[i]
+            if ch == "\n" or ch == "<":
+                return None
+            if ch == "\\" and i + 1 < n and buf[i + 1] in _CM_ASCII_PUNCT:
+                i += 2
+                continue
+            if ch == ">":
+                break
+            i += 1
+        if i >= n or buf[i] != ">":
+            return None
+        destination = buf[dest_start:i]
+        i += 1
+    else:
+        is_angle_dest = False
+        dest_start = i
+        paren_depth = 0
+        while i < n:
+            ch = buf[i]
+            code = ord(ch)
+            if code <= 0x20 or code == 0x7F:
+                break
+            if ch == "\\" and i + 1 < n and buf[i + 1] in _CM_ASCII_PUNCT:
+                i += 2
+                continue
+            if ch == "(":
+                paren_depth += 1
+                if paren_depth > 32:
+                    return None
+                i += 1
+            elif ch == ")":
+                if paren_depth == 0:
+                    return None
+                paren_depth -= 1
+                i += 1
+            else:
+                i += 1
+        if i == dest_start or paren_depth != 0:
+            return None
+        destination = buf[dest_start:i]
+
+    # 4) 可选标题 + 行尾匹配（跨行标题失败或尾随非空字符时按 §4.7 回退无标题）
+    after_dest = i
+    j = after_dest
+    while j < n and buf[j] in (" ", "\t"):
+        j += 1
+    if j == n:
+        return (j, norm_label, destination, is_angle_dest, False)
+    if buf[j] == "\n":
+        fallback_next = j + 1
+        k = fallback_next
+        while k < n and buf[k] in (" ", "\t"):
+            k += 1
+        if k < n and buf[k] in ('"', "'", "("):
+            title_end = _cm_parse_link_title(buf, k)
+            if title_end is not None:
+                m = title_end
+                while m < n and buf[m] in (" ", "\t"):
+                    m += 1
+                if m == n:
+                    return (m, norm_label, destination, is_angle_dest, True)
+                if buf[m] == "\n":
+                    return (m + 1, norm_label, destination, is_angle_dest, True)
+        return (fallback_next, norm_label, destination, is_angle_dest, False)
+
+    # 与目标同行的后续非空白：必须先有至少一个空白再接合法标题，且标题后直至行尾无非空白字符
+    if j == after_dest or buf[j] not in ('"', "'", "("):
+        return None
+    title_end = _cm_parse_link_title(buf, j)
+    if title_end is None:
+        return None
+    m = title_end
+    while m < n and buf[m] in (" ", "\t"):
+        m += 1
+    if m == n:
+        return (m, norm_label, destination, is_angle_dest, True)
+    if buf[m] == "\n":
+        return (m + 1, norm_label, destination, is_angle_dest, True)
+    return None
+
+
+def _cm_flush_paragraph_link_defs(para_lines: list[_CmParaLine], out_defs: list[_CmLinkRefDef]) -> bool:
+    """从段落起点剥离全部连续 CommonMark §4.7 链接引用定义，返回是否仍剩余普通段落文本。"""
+    if not para_lines:
+        return False
+    buf_parts: list[str] = []
+    buf_start_to_line: dict[int, _CmParaLine] = {}
+    offset = 0
+    for idx, pline in enumerate(para_lines):
+        if idx > 0:
+            buf_parts.append("\n")
+            offset += 1
+        buf_start_to_line[offset] = pline
+        buf_parts.append(pline.text)
+        offset += len(pline.text)
+    buf = "".join(buf_parts)
+
+    pos = 0
+    buf_len = len(buf)
+    while pos < buf_len:
+        parsed = _cm_parse_link_ref_def_at(buf, pos)
+        if parsed is None:
+            break
+        next_pos, norm_label, destination, is_angle_dest, has_title = parsed
+        src_line = buf_start_to_line[pos]
+        out_defs.append(
+            _CmLinkRefDef(
+                norm_label=norm_label,
+                bracket_open_pos=src_line.start_offset,
+                start_line_idx=src_line.line_idx,
+                destination=destination,
+                is_angle_dest=is_angle_dest,
+                has_title=has_title,
+            )
+        )
+        pos = next_pos
+
+    para_lines.clear()
+    return pos < buf_len
+
+
+def _cm_detect_html_block_type(rest: str, *, can_interrupt_paragraph: bool) -> int | None:
+    """按 CommonMark §4.6 识别 HTML 块类型（1–7）；类型 7 不能打断段落。"""
+    if not rest.startswith("<"):
+        return None
+    if _CM_HTML_TYPE1_START_RE.match(rest):
+        return 1
+    if rest.startswith("<!--"):
+        return 2
+    if rest.startswith("<?"):
+        return 3
+    if len(rest) >= 3 and rest[1] == "!" and rest[2].isascii() and rest[2].isalpha():
+        return 4
+    if rest.startswith("<![CDATA["):
+        return 5
+    if _CM_HTML_TYPE6_START_RE.match(rest):
+        return 6
+    if not can_interrupt_paragraph and _CM_HTML_TYPE7_START_RE.match(rest):
+        return 7
+    return None
+
+
+def _cm_html_block_ends_on_line(html_type: int, rest: str) -> bool:
+    if html_type == 1:
+        return bool(_CM_HTML_TYPE1_END_RE.search(rest))
+    if html_type == 2:
+        return "-->" in rest
+    if html_type == 3:
+        return "?>" in rest
+    if html_type == 4:
+        return ">" in rest
+    if html_type == 5:
+        return "]]>" in rest
+    return False
+
+
+def _extract_commonmark_link_ref_defs(text: str) -> list[_CmLinkRefDef]:
+    """按 CommonMark 块级结构与 §4.7 提取全部有效链接引用定义（忽略围栏/缩进代码块与 HTML 块）。"""
+    out_defs: list[_CmLinkRefDef] = []
+    containers: list[_CmContainer] = []
+    leaf_kind: Literal["none", "paragraph", "fenced_code", "indented_code", "html_block"] = "none"
+    para_lines: list[_CmParaLine] = []
+    fence_char = ""
+    fence_len = 0
+    html_type = 0
+
+    def _close_leaf() -> None:
+        nonlocal leaf_kind, fence_char, fence_len, html_type
+        if leaf_kind == "paragraph":
+            _cm_flush_paragraph_link_defs(para_lines, out_defs)
+        leaf_kind = "none"
+        fence_char = ""
+        fence_len = 0
+        html_type = 0
+
+    for line in _split_commonmark_lines(text):
+        content = line.content
+        idx = 0
+        col = 0
+        pending = 0
+
+        # 1) 匹配既有容器栈（引用块 / 列表项）
+        matched_count = 0
+        for cont in containers:
+            indent_cols, nonws_idx, nonws_col, _ = _cm_skip_ws_cols(content, idx, col, pending)
+            is_blank = nonws_idx >= len(content)
+            if cont.kind == "blockquote":
+                if not is_blank and indent_cols <= 3 and content[nonws_idx] == ">":
+                    after_idx = nonws_idx + 1
+                    after_col = nonws_col + 1
+                    if after_idx < len(content) and content[after_idx] in (" ", "\t"):
+                        _, idx, col, pending = _cm_advance_cols(content, after_idx, after_col, 0, 1)
+                    else:
+                        idx, col, pending = after_idx, after_col, 0
+                    matched_count += 1
+                else:
+                    break
+            else:
+                if is_blank:
+                    if not cont.has_content:
+                        break
+                    _, idx, col, pending = _cm_advance_cols(content, idx, col, pending, cont.required_indent)
+                    matched_count += 1
+                elif indent_cols >= cont.required_indent:
+                    _, idx, col, pending = _cm_advance_cols(content, idx, col, pending, cont.required_indent)
+                    cont.has_content = True
+                    matched_count += 1
+                else:
+                    break
+
+        all_matched = matched_count == len(containers)
+
+        # 2) 非段落叶子块在容器全部匹配时按各自续行/闭合规则处理；容器未全匹配则直接关闭
+        if leaf_kind in ("fenced_code", "html_block", "indented_code") and not all_matched:
+            _close_leaf()
+            del containers[matched_count:]
+            all_matched = True
+
+        indent_cols, nonws_idx, nonws_col, _ = _cm_skip_ws_cols(content, idx, col, pending)
+        is_blank = nonws_idx >= len(content)
+        rest = "" if is_blank else content[nonws_idx:]
+
+        if leaf_kind == "fenced_code":
+            if (
+                not is_blank
+                and indent_cols <= 3
+                and rest.startswith(fence_char * fence_len)
+                and rest.lstrip(fence_char).strip(" \t") == ""
+            ):
+                _close_leaf()
+            continue
+
+        if leaf_kind == "html_block":
+            if html_type in (6, 7):
+                if is_blank:
+                    _close_leaf()
+                    continue
+                continue
+            if _cm_html_block_ends_on_line(html_type, content[idx:]):
+                _close_leaf()
+            continue
+
+        if leaf_kind == "indented_code":
+            if is_blank or indent_cols >= 4:
+                continue
+            _close_leaf()
+
+        # 3) 空行关闭段落及未匹配容器
+        if is_blank:
+            _close_leaf()
+            del containers[matched_count:]
+            continue
+
+        # 4) 剥离新开的容器前缀（`>` 引用块 / 列表项），支持任意多层嵌套
+        opened_new_container = False
+        while not is_blank and indent_cols <= 3:
+            # 4a) 引用块 `>`（始终可打断段落）
+            if rest.startswith(">"):
+                if not opened_new_container:
+                    _close_leaf()
+                    del containers[matched_count:]
+                    opened_new_container = True
+                containers.append(_CmContainer(kind="blockquote"))
+                after_idx = nonws_idx + 1
+                after_col = nonws_col + 1
+                if after_idx < len(content) and content[after_idx] in (" ", "\t"):
+                    _, idx, col, pending = _cm_advance_cols(content, after_idx, after_col, 0, 1)
+                else:
+                    idx, col, pending = after_idx, after_col, 0
+                indent_cols, nonws_idx, nonws_col, _ = _cm_skip_ws_cols(content, idx, col, pending)
+                is_blank = nonws_idx >= len(content)
+                rest = "" if is_blank else content[nonws_idx:]
+                continue
+
+            # 4b) setext 下划线与分隔线优先于列表项（如 `- - -` / `---`）
+            if leaf_kind == "paragraph" and all_matched and not opened_new_container and _CM_SETEXT_UNDERLINE_RE.match(rest):
+                break
+            if _CM_THEMATIC_BREAK_RE.match(rest):
+                break
+
+            # 4c) 列表项（`-`/`*`/`+` 或 `\d{1,9}[.)]`）
+            list_match = _CM_LIST_MARKER_RE.match(rest)
+            if list_match is None:
+                break
+            marker = list_match.group("marker")
+            after_marker_idx = nonws_idx + len(marker)
+            after_marker_col = nonws_col + len(marker)
+            spaces_after, content_idx, content_col, _ = _cm_skip_ws_cols(content, after_marker_idx, after_marker_col, 0)
+            item_is_blank = content_idx >= len(content)
+            if leaf_kind == "paragraph" and not opened_new_container:
+                if item_is_blank:
+                    break
+                if marker[-1] in (".", ")") and int(marker[:-1]) != 1:
+                    break
+            if not opened_new_container:
+                _close_leaf()
+                del containers[matched_count:]
+                opened_new_container = True
+            if item_is_blank:
+                req_indent = indent_cols + len(marker) + 1
+                containers.append(_CmContainer(kind="list_item", required_indent=req_indent, has_content=False))
+                idx, col, pending = content_idx, content_col, 0
+                is_blank = True
+                rest = ""
+                break
+            if spaces_after >= 5:
+                req_indent = indent_cols + len(marker) + 1
+                containers.append(_CmContainer(kind="list_item", required_indent=req_indent, has_content=True))
+                _, idx, col, pending = _cm_advance_cols(content, after_marker_idx, after_marker_col, 0, 1)
+            else:
+                req_indent = indent_cols + len(marker) + spaces_after
+                containers.append(_CmContainer(kind="list_item", required_indent=req_indent, has_content=True))
+                idx, col, pending = content_idx, content_col, 0
+            indent_cols, nonws_idx, nonws_col, _ = _cm_skip_ws_cols(content, idx, col, pending)
+            is_blank = nonws_idx >= len(content)
+            rest = "" if is_blank else content[nonws_idx:]
+
+        if is_blank:
+            continue
+
+        # 5) 叶子块判定
+        # 5a) 缩进代码块（非段落续行时缩进 >= 4 列）
+        if indent_cols >= 4 and leaf_kind != "paragraph":
+            if not opened_new_container:
+                del containers[matched_count:]
+            leaf_kind = "indented_code"
+            continue
+
+        # 5b) Setext 标题下划线（段落所有前导均是链接引用定义时，按 §4.7 不构成 setext 标题）
+        if leaf_kind == "paragraph" and all_matched and not opened_new_container and indent_cols <= 3 and _CM_SETEXT_UNDERLINE_RE.match(rest):
+            has_remaining_para = _cm_flush_paragraph_link_defs(para_lines, out_defs)
+            leaf_kind = "none"
+            if has_remaining_para:
+                continue
+            if _CM_THEMATIC_BREAK_RE.match(rest):
+                continue
+            # 否则（如 `===`）作为新段落首行
+            leaf_kind = "paragraph"
+            para_lines.append(_CmParaLine(line_idx=line.line_idx, start_offset=line.start_offset + nonws_idx, text=rest))
+            continue
+
+        # 5c) 分隔线（Thematic break）
+        if indent_cols <= 3 and _CM_THEMATIC_BREAK_RE.match(rest):
+            _close_leaf()
+            if not opened_new_container:
+                del containers[matched_count:]
+            continue
+
+        # 5d) ATX 标题
+        if indent_cols <= 3 and _CM_ATX_HEADING_RE.match(rest):
+            _close_leaf()
+            if not opened_new_container:
+                del containers[matched_count:]
+            continue
+
+        # 5e) 围栏代码块（``` 或 ~~~）
+        if indent_cols <= 3:
+            fence_match = _CM_OPEN_FENCE_RE.match(rest)
+            if fence_match is not None:
+                f_str = fence_match.group("fence")
+                info_str = fence_match.group("info")
+                if f_str[0] == "~" or "`" not in info_str:
+                    _close_leaf()
+                    if not opened_new_container:
+                        del containers[matched_count:]
+                    leaf_kind = "fenced_code"
+                    fence_char = f_str[0]
+                    fence_len = len(f_str)
+                    continue
+
+        # 5f) HTML 块（类型 1–7）
+        if indent_cols <= 3:
+            detected_html = _cm_detect_html_block_type(rest, can_interrupt_paragraph=(leaf_kind == "paragraph"))
+            if detected_html is not None:
+                _close_leaf()
+                if not opened_new_container:
+                    del containers[matched_count:]
+                if not _cm_html_block_ends_on_line(detected_html, rest):
+                    leaf_kind = "html_block"
+                    html_type = detected_html
+                continue
+
+        # 5g) 普通段落（含容器懒续行）
+        if leaf_kind != "paragraph":
+            if not opened_new_container:
+                del containers[matched_count:]
+            leaf_kind = "paragraph"
+        para_lines.append(_CmParaLine(line_idx=line.line_idx, start_offset=line.start_offset + nonws_idx, text=rest))
+
+    _close_leaf()
+    return out_defs
+
+
+def _is_real_markdown_link_destination(ref_def: _CmLinkRefDef) -> bool:
+    """判断第 0 行上的定义是否带真实链接目标（排除首行 `[P1]: 阻断说明` 这类中文冒号说明）。"""
+    if ref_def.is_angle_dest or ref_def.has_title:
+        return True
+    return bool(_CM_REAL_LINK_DEST_CHAR_RE.search(ref_def.destination))
+
+
 def _extract_markdown_link_ref_defs(text: str) -> dict[str, tuple[int, ...]]:
-    """按 CommonMark §4.7 提取所有 Markdown 链接引用定义的规范化标签及其 `[` 起始偏移。"""
+    """按 CommonMark 块结构与 §4.7 提取有效 Markdown 链接引用定义的规范化标签及其 `[` 起始偏移。"""
     refs: dict[str, list[int]] = defaultdict(list)
-    for match in _MD_LINK_REF_DEF_RE.finditer(text):
-        norm = _normalize_markdown_link_label(match.group(1))
-        if norm:
-            refs[norm].append(match.start(1) - 1)
+    for ref_def in _extract_commonmark_link_ref_defs(text):
+        if ref_def.start_line_idx > 0 or _is_real_markdown_link_destination(ref_def):
+            refs[ref_def.norm_label].append(ref_def.bracket_open_pos)
     return {label: tuple(offsets) for label, offsets in refs.items()}
 
 

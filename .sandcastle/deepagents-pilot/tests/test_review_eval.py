@@ -15,13 +15,16 @@ from pilot1742.review_eval import (
     DispositionEntry,
     DispositionLabel,
     EvalCase,
+    EvalScore,
     EvalValidationError,
     PredictedFinding,
+    _extract_markdown_link_ref_defs,
     _git_blob_line_count,
     _git_diff_added_ranges,
     _git_diff_tree_status_map,
     _parse_leading_severity_tag,
     _parse_unified_diff_added_ranges,
+    _score_from_dict,
     analyze_review_runs,
     classify_finding_heuristic,
     compare_scores,
@@ -3478,3 +3481,258 @@ def test_r9_markdown_reference_links_not_misclassified_as_nit(tmp_path: Path) ->
     assert metrics.subsequent_head_pass_total_block_findings == 1
     assert metrics.subsequent_head_pass_inferred_fixed == 1
     assert metrics.subsequent_head_pass_undeterminable_findings == 0
+
+
+def test_r10_commonmark_block_aware_link_ref_defs(tmp_path: Path) -> None:
+    # 1) 双向核心反例：引用块/列表内有效定义被准确提取，围栏/缩进/HTML 块内假定义被忽略
+    bq_def = "[P1] [nit] 数据丢失\n\n> [nit]: src/nit#L1"
+    list_def = "[P1] [nit] 数据丢失\n\n- [nit]: src/nit#L1"
+    nested_bq_def = "[P1] [nit] 数据丢失\n\n> > [nit]: /x"
+    ordered_list_def = "[P1] [nit] 数据丢失\n\n1. [nit]: src/nit#L1"
+    bq_list_def = "[P1] [nit] 数据丢失\n\n> - [nit]: src/nit#L1"
+    tilde_fence_fake = "[P2] [非阻断] 说明\n\n~~~markdown\n[非阻断]: 示例\n~~~"
+    backtick_fence_fake = "[P2] [非阻断] 说明\n\n```markdown\n[非阻断]: 示例\n```"
+    indented_code_fake = "[P2] [非阻断] 说明\n\n    [非阻断]: /demo"
+    tab_indented_fake = "[P2] [非阻断] 说明\n\n\t[非阻断]: /demo"
+    html_comment_fake = "[P2] [非阻断] 说明\n\n<!--\n[非阻断]: /demo\n-->"
+    bq_fence_fake = "[P2] [非阻断] 说明\n\n> ```markdown\n> [非阻断]: 示例\n> ```"
+
+    assert classify_finding_heuristic(bq_def, "blocked") == "blocking_substantive"
+    assert classify_finding_heuristic(list_def, "blocked") == "blocking_substantive"
+    assert classify_finding_heuristic(nested_bq_def, "blocked") == "blocking_substantive"
+    assert classify_finding_heuristic(ordered_list_def, "blocked") == "blocking_substantive"
+    assert classify_finding_heuristic(bq_list_def, "blocked") == "blocking_substantive"
+    assert classify_finding_heuristic(tilde_fence_fake, "blocked") == "non_blocking_or_nit"
+    assert classify_finding_heuristic(backtick_fence_fake, "blocked") == "non_blocking_or_nit"
+    assert classify_finding_heuristic(indented_code_fake, "blocked") == "non_blocking_or_nit"
+    assert classify_finding_heuristic(tab_indented_fake, "blocked") == "non_blocking_or_nit"
+    assert classify_finding_heuristic(html_comment_fake, "blocked") == "non_blocking_or_nit"
+    assert classify_finding_heuristic(bq_fence_fake, "blocked") == "non_blocking_or_nit"
+
+    # 2) CommonMark §4.7 段落边界、连续定义、标题回退与首行中文冒号说明豁免
+    # 段落中间行不能打断段落，不构成链接引用定义
+    assert classify_finding_heuristic("[P2] [非阻断] 说明\n[非阻断]: /demo", "blocked") == "non_blocking_or_nit"
+    # 与目标同行的标题后有尾随非空白 -> 非法定义
+    assert (
+        classify_finding_heuristic('[P2] [非阻断] 说明\n\n[非阻断]: /demo "title" trailing', "blocked")
+        == "non_blocking_or_nit"
+    )
+    # 跨行标题后有尾随非空白 -> 回退无标题仍为有效定义
+    assert (
+        classify_finding_heuristic('[P1] [nit] 数据丢失\n\n[nit]: /demo\n"title" trailing', "blocked")
+        == "blocking_substantive"
+    )
+    # 同段落连续多条定义 + 尖括号目标 + 括号平衡目标
+    assert (
+        classify_finding_heuristic(
+            "[P1] [nit] 数据丢失\n\n[a]: /foo(bar)/baz\n[nit]: <src/nit with space#L1>",
+            "blocked",
+        )
+        == "blocking_substantive"
+    )
+    # 首行 `[P1]: 阻断说明` 中文冒号说明不被误判为链接定义，而第 0 行带真实路径目标可正常提取
+    assert _extract_markdown_link_ref_defs("[P1]: 阻断说明") == {}
+    assert classify_finding_heuristic("[P1]: 阻断说明", "blocked") == "blocking_substantive"
+    assert _extract_markdown_link_ref_defs("[nit]: src/nit#L1\n\n[P1] [nit] 数据丢失") == {"nit": (0,)}
+    # 制表位与行尾 CRLF/CR 兼容（不把 U+2028 当换行）
+    assert classify_finding_heuristic("[P1] [nit] 数据丢失\r\n\r\n>\t[nit]: /x\r\n", "blocked") == "blocking_substantive"
+    assert (
+        classify_finding_heuristic("[P2] [非阻断] 说明\r\n\r\n>\t\t[非阻断]: /x\r\n", "blocked")
+        == "non_blocking_or_nit"
+    )
+    assert (
+        classify_finding_heuristic("[P2] [非阻断] 说明\u2028[非阻断]: /demo", "blocked")
+        == "non_blocking_or_nit"
+    )
+
+    # 3) 端到端验证两个方向在 subsequent_head_pass_total_block_findings 分母中均正确计入/排除
+    runs_dir = tmp_path / "runs"
+    runs_dir.mkdir()
+    _write_run(
+        runs_dir,
+        "p1010-r1-block",
+        pr_number=1010,
+        head_sha="a" * 40,
+        registered_at_ns=100,
+        attempt=1,
+        verdict="BLOCK",
+        receipts={
+            "claude-opus-5-5": {
+                "run_id": "run-p1010-r1-block",
+                "status": "completed",
+                "model": "claude-opus-5-5",
+                "result": {
+                    "status": "blocked",
+                    "findings": [
+                        bq_def,
+                        list_def,
+                        tilde_fence_fake,
+                        backtick_fence_fake,
+                        indented_code_fake,
+                    ],
+                },
+            }
+        },
+    )
+    _write_run(
+        runs_dir,
+        "p1010-r2-pass",
+        pr_number=1010,
+        head_sha="b" * 40,
+        registered_at_ns=200,
+        attempt=2,
+        verdict="PASS",
+    )
+    metrics = analyze_review_runs(runs_dir)
+    assert metrics.corrupted_files == ()
+    assert metrics.finding_heuristic_categories == {
+        "blocking_substantive": 2,
+        "non_blocking_or_nit": 3,
+    }
+    assert metrics.subsequent_head_pass_total_block_findings == 2
+    assert metrics.subsequent_head_pass_inferred_fixed == 2
+    assert metrics.subsequent_head_pass_undeterminable_findings == 0
+
+
+def test_r10_compare_scores_tracks_matched_location_index_sets_and_validates_json(tmp_path: Path) -> None:
+    # 1) 复现 Codex R9 最小反例：直接取仓内 bug-1978-segment-seed-scan-revert
+    canonical = load_cases(CANONICAL_CASES)
+    case_1978 = next(c for c in canonical if c.case_id == "bug-1978-segment-seed-scan-revert")
+    assert len(case_1978.bug_locations) == 2
+
+    before_1978 = score_predictions(
+        (case_1978,),
+        (
+            CasePrediction(
+                case_id=case_1978.case_id,
+                verdict="BLOCK",
+                findings=(
+                    PredictedFinding(
+                        file="rust/src/theta_v0/parser/segment.rs",
+                        line_start=538,
+                        line_end=538,
+                        severity="blocking",
+                    ),
+                ),
+            ),
+        ),
+    )
+    after_1978 = score_predictions(
+        (case_1978,),
+        (
+            CasePrediction(
+                case_id=case_1978.case_id,
+                verdict="BLOCK",
+                findings=(
+                    PredictedFinding(
+                        file="rust/src/theta_v0/parser/segment.rs",
+                        line_start=1176,
+                        line_end=1176,
+                        severity="blocking",
+                    ),
+                ),
+            ),
+        ),
+    )
+    assert before_1978.case_details[0].matched_location_indices == (0,)
+    assert after_1978.case_details[0].matched_location_indices == (1,)
+
+    cmp_1978 = compare_scores(before_1978, after_1978)
+    assert cmp_1978.bug_case_recall_delta == 0.0
+    assert cmp_1978.bug_location_recall_delta == 0.0
+    assert cmp_1978.mixed_cases == ("bug-1978-segment-seed-scan-revert",)
+    assert cmp_1978.unchanged_cases == ()
+    assert cmp_1978.improved_cases == ()
+    assert cmp_1978.regressed_cases == ()
+
+    # 2) JSON 往返 compare CLI 保持一致
+    before_json = tmp_path / "before_1978.json"
+    after_json = tmp_path / "after_1978.json"
+    out_json = tmp_path / "cmp_1978.json"
+    before_json.write_text(json.dumps(before_1978.to_dict()), encoding="utf-8")
+    after_json.write_text(json.dumps(after_1978.to_dict()), encoding="utf-8")
+    assert main(["compare", "--before", str(before_json), "--after", str(after_json), "--out-json", str(out_json)]) == 0
+    cli_cmp = json.loads(out_json.read_text(encoding="utf-8"))
+    assert cli_cmp["bug_case_recall_delta"] == 0.0
+    assert cli_cmp["bug_location_recall_delta"] == 0.0
+    assert cli_cmp["mixed_cases"] == ["bug-1978-segment-seed-scan-revert"]
+    assert cli_cmp["unchanged_cases"] == []
+
+    # 3) 集合演变边界：{0}->{0,1} improved，{0,1}->{1} regressed，{0}->{1,2} mixed，{0,1}->{0,1} unchanged
+    three_loc_case = (
+        EvalCase(
+            case_id="bug-three-locs",
+            kind="bug",
+            title="三缺陷位置集合演变",
+            base_sha=SHA_1,
+            head_sha=SHA_2,
+            bug_locations=(
+                BugLocation(file="a.py", line_start=10, line_end=10, summary="l0", category="bug"),
+                BugLocation(file="b.py", line_start=20, line_end=20, summary="l1", category="bug"),
+                BugLocation(file="c.py", line_start=30, line_end=30, summary="l2", category="bug"),
+            ),
+        ),
+    )
+
+    def _score_locs(*loc_coords: tuple[str, int]) -> tuple[EvalScore, tuple[int, ...]]:
+        score = score_predictions(
+            three_loc_case,
+            (
+                CasePrediction(
+                    case_id="bug-three-locs",
+                    verdict="BLOCK",
+                    findings=tuple(
+                        PredictedFinding(file=f, line_start=ln, line_end=ln, severity="blocking")
+                        for f, ln in loc_coords
+                    ),
+                ),
+            ),
+        )
+        return (score, score.case_details[0].matched_location_indices)
+
+    s_0, idx_0 = _score_locs(("a.py", 10))
+    s_01, idx_01 = _score_locs(("a.py", 10), ("b.py", 20))
+    s_1, idx_1 = _score_locs(("b.py", 20))
+    s_12, idx_12 = _score_locs(("b.py", 20), ("c.py", 30))
+    assert idx_0 == (0,)
+    assert idx_01 == (0, 1)
+    assert idx_1 == (1,)
+    assert idx_12 == (1, 2)
+
+    assert compare_scores(s_0, s_01).improved_cases == ("bug-three-locs",)
+    assert compare_scores(s_01, s_1).regressed_cases == ("bug-three-locs",)
+    assert compare_scores(s_0, s_12).mixed_cases == ("bug-three-locs",)
+    assert compare_scores(s_01, s_01).unchanged_cases == ("bug-three-locs",)
+
+    # 4) _score_from_dict 反序列化严格校验 matched_location_indices（重复/长度不符/负数/布尔/越界一律拒绝）
+    base_dict = before_1978.to_dict()
+
+    bad_dup = json.loads(json.dumps(base_dict))
+    bad_dup["case_details"][0]["matched_locations"] = 2
+    bad_dup["case_details"][0]["matched_location_indices"] = [0, 0]
+    with pytest.raises(EvalValidationError, match="重复索引"):
+        _score_from_dict(bad_dup)
+
+    bad_len = json.loads(json.dumps(base_dict))
+    bad_len["case_details"][0]["matched_locations"] = 1
+    bad_len["case_details"][0]["matched_location_indices"] = [0, 1]
+    with pytest.raises(EvalValidationError, match="长度.*不一致"):
+        _score_from_dict(bad_len)
+
+    bad_neg = json.loads(json.dumps(base_dict))
+    bad_neg["case_details"][0]["matched_locations"] = 1
+    bad_neg["case_details"][0]["matched_location_indices"] = [-1]
+    with pytest.raises(EvalValidationError, match="不能为负"):
+        _score_from_dict(bad_neg)
+
+    bad_bool = json.loads(json.dumps(base_dict))
+    bad_bool["case_details"][0]["matched_locations"] = 1
+    bad_bool["case_details"][0]["matched_location_indices"] = [True]
+    with pytest.raises(EvalValidationError, match="必须是整数"):
+        _score_from_dict(bad_bool)
+
+    bad_oob = json.loads(json.dumps(base_dict))
+    bad_oob["case_details"][0]["matched_locations"] = 1
+    bad_oob["case_details"][0]["matched_location_indices"] = [2]
+    with pytest.raises(EvalValidationError, match="超出 expected_locations"):
+        _score_from_dict(bad_oob)
