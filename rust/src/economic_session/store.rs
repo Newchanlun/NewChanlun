@@ -504,11 +504,16 @@ fn filesystem(path: &Path) -> Result<String, String> {
     {
         let mut stat = Command::new("stat");
         #[cfg(target_os = "linux")]
-        // #2113：不改 PATH，保留标准库原有的查找和启动路径。
-        // 只移除枚举时已有的键；之后新设的键仍会继承。生产会话启动后不修改环境。
-        for (key, _) in std::env::vars_os() {
-            if key != "PATH" {
-                stat.env_remove(key);
+        {
+            // #2113：空名不会出现在 vars_os 中。即使没有普通键可删，也要让
+            // Command 重建 envp，不能直接继承可能含畸形记录的原始 environ。
+            // 不改 PATH，也不 env_clear，保留标准库原有的查找和启动分派。
+            // 生产会话不在枚举与启动之间修改进程环境。
+            stat.env_remove("");
+            for (key, _) in std::env::vars_os() {
+                if key != "PATH" {
+                    stat.env_remove(key);
+                }
             }
         }
         let o = stat
@@ -527,45 +532,71 @@ fn filesystem(path: &Path) -> Result<String, String> {
 }
 #[cfg(all(test, target_os = "linux"))]
 #[test]
-fn durable_db_stat_preserves_only_path() {
-    const SENTINEL: &str = "NEWCHAN_2113_STAT_ENV_SENTINEL";
-    // 只改自启测试进程的环境，不影响并行测试宿主。
-    if std::env::var_os(SENTINEL).is_some() {
-        let db = std::env::current_dir().unwrap().join("probe.db");
-        let (_, evidence) = crate::economic_session::open_durable_db(&db).unwrap();
-        assert_eq!(evidence["filesystem"], "tmpfs");
-        assert_eq!(std::env::var(SENTINEL).unwrap(), "synthetic");
-        // 记录 exec 初始环境的键，不记录值或 shell 后补的变量。
-        let keys = std::fs::read("stat-env-keys").unwrap();
-        assert!(keys == b"PATH\0", "stat 应只继承 PATH");
+#[ignore = "仅由 durable_db_stat_preserves_only_path 在私有夹具目录内调用"]
+fn stat_environment_fixture_child() {
+    let dir = std::env::current_dir().unwrap();
+    let Ok(expected) = std::fs::read_to_string(dir.join("stat-operation")) else {
         return;
-    }
+    };
+    assert_eq!(expected, "open durable database");
+    let raw = std::fs::read("/proc/self/environ").unwrap();
+    let has_empty_name = raw.split(|&b| b == 0).any(|item| item == b"=fixture");
+    let has_normal_key = std::env::var_os("NC_X_VENUE_CREDENTIAL_FIXTURE").is_some();
+    assert_ne!(has_empty_name, has_normal_key);
+    let (_, evidence) = crate::economic_session::open_durable_db(&dir.join("probe.db")).unwrap();
+    assert_eq!(evidence["filesystem"], "tmpfs");
+}
 
+#[cfg(all(test, target_os = "linux"))]
+#[test]
+fn durable_db_stat_preserves_only_path() {
+    use std::os::unix::ffi::OsStrExt;
     let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("stat-operation"), "open durable database").unwrap();
     crate::economic_session::write_test_executable(
         &dir.path().join("stat"),
-        "#!/bin/sh\n/usr/bin/cut -z -d= -f1 </proc/$$/environ >stat-env-keys || exit 1\nprintf 'tmpfs\\n'\n",
+        "#!/bin/sh\n/bin/cat /proc/$$/environ >stat-env || exit 1\nprintf 'tmpfs\n'\n",
         0o700,
     );
-    let output = Command::new(std::env::current_exe().unwrap())
-        .args([
+    let exe = std::env::current_exe().unwrap();
+    for (path, inject_empty_name, inject_normal_keys) in [
+        (dir.path().as_os_str(), true, false),
+        (std::ffi::OsStr::new(""), true, false),
+        (dir.path().as_os_str(), false, true),
+    ] {
+        let trace = dir.path().join("stat-env");
+        let mut cmd = Command::new(&exe);
+        cmd.args([
             "--exact",
-            "economic_session::store::durable_db_stat_preserves_only_path",
+            "economic_session::store::stat_environment_fixture_child",
+            "--ignored",
         ])
         .current_dir(dir.path())
         .env_clear()
-        .env("PATH", dir.path())
-        .env(SENTINEL, "synthetic")
-        .env("NEWCHAN_2113_VENUE_CREDENTIAL", "synthetic-not-a-secret")
-        .output()
-        .unwrap();
-    assert!(
-        output.status.success(),
-        "{}\n{}",
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr),
-    );
-    assert!(dir.path().join("stat-env-keys").is_file());
+        .env("PATH", path);
+        if inject_empty_name {
+            cmd.env("", "fixture");
+        }
+        if inject_normal_keys {
+            cmd.env("NC_X_VENUE_CREDENTIAL_FIXTURE", "synthetic");
+            cmd.env(
+                std::ffi::OsStr::from_bytes(b"NEWCHAN_2113_NON_UTF8_\xff"),
+                std::ffi::OsStr::from_bytes(b"fixture\xfe"),
+            );
+        }
+        let output = cmd.output().unwrap();
+        assert!(
+            output.status.success(),
+            "{}\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr),
+        );
+        let mut expected = b"PATH=".to_vec();
+        expected.extend_from_slice(path.as_bytes());
+        expected.push(0);
+        assert_eq!(std::fs::read(&trace).unwrap(), expected);
+        std::fs::remove_file(trace).unwrap();
+    }
 }
 
 pub(crate) fn open(db: &Path, read_only: bool) -> Result<(Connection, Value), String> {
