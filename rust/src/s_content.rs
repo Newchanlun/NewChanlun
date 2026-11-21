@@ -3470,6 +3470,8 @@ pub struct NativeCaptureRetention {
     pub body_capacity: usize,
     pub index_capacity: usize,
     pub index_control_bytes: usize,
+    /// 固定表头与许可槽的实际堆块；不包括各表桶控制区。
+    pub index_shard_header_bytes: usize,
     pub index_payload: usize,
     pub public_roots: usize,
     pub template_roots: usize,
@@ -4318,6 +4320,7 @@ impl AuditCapture {
             body_capacity: native.body_capacity,
             index_capacity: native.nodes.capacity(),
             index_control_bytes: native.nodes.control_bytes(),
+            index_shard_header_bytes: native.nodes.storage_bytes(),
             index_payload: native
                 .nodes
                 .capacity()

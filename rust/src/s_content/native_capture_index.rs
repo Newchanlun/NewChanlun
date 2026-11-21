@@ -81,15 +81,12 @@ impl NativeCaptureIndex {
         self.shards.iter().map(|shard| shard.table.capacity()).sum()
     }
     pub(super) fn control_bytes(&self) -> usize {
-        // 固定堆块另计实际布局；桶控制区继续沿用单片上界。
-        self.storage_bytes().saturating_add(
-            self.shards
-                .iter()
-                .map(|shard| shard.table.capacity())
-                .filter(|&capacity| capacity != 0)
-                .map(|capacity| capacity.saturating_mul(2).saturating_add(16))
-                .sum(),
-        )
+        self.shards
+            .iter()
+            .map(|shard| shard.table.capacity())
+            .filter(|&capacity| capacity != 0)
+            .map(|capacity| capacity.saturating_mul(2).saturating_add(16))
+            .sum()
     }
     pub(super) fn iter(&self) -> impl Iterator<Item = (&NodeDigest, &NativeNode)> {
         self.shards.iter().flat_map(|shard| shard.table.iter())

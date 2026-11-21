@@ -63,7 +63,8 @@ jobs:
           name="${LOCK_PREFIX}w2_h1_cold_ef_seed_pair_qualification_and_canonical_matches_online"
           log="$RUNNER_TEMP/ef.log"
           start=$(date +%s)
-          cargo test $CARGO_ARGS -- --exact "$name" --test-threads 1 --nocapture > "$log" 2>&1
+          read -r -a cargo_args <<<"$CARGO_ARGS"
+          cargo test "${cargo_args[@]}" -- --exact "$name" --test-threads 1 --nocapture > "$log" 2>&1
           rc=$?
           grep -E 'M8D_P3_RECEIPT|ISSUE1642_EF_CANONICAL|panicked|^test |test result' "$log" | tail -20
           echo "lock=ef rc=$rc secs=$(( $(date +%s) - start ))"

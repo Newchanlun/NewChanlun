@@ -3509,6 +3509,7 @@ impl CompleteCandidate {
             r.body_capacity,
             r.index_payload.saturating_mul(2),
             r.index_control_bytes,
+            r.index_shard_header_bytes,
             sum([r.public_capacity, r.template_capacity])
                 .saturating_mul(66)
                 .saturating_add(32),
@@ -3557,6 +3558,7 @@ impl CompleteCandidate {
                 retained.body_capacity,
                 retained.index_payload.saturating_mul(2),
                 retained.index_control_bytes,
+                retained.index_shard_header_bytes,
                 // 包含散列表控制区保守余量，不从原97字节证书扣费。
                 sum([retained.public_capacity, retained.template_capacity])
                     .saturating_mul(2 * 33)
@@ -4204,6 +4206,7 @@ impl CompleteCandidate {
             retained.body_capacity,
             retained.index_payload.saturating_mul(2),
             retained.index_control_bytes,
+            retained.index_shard_header_bytes,
             sum([retained.public_capacity, retained.template_capacity])
                 .saturating_mul(66)
                 .saturating_add(32),
