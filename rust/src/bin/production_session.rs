@@ -16,6 +16,7 @@
 use newchan_rust::structure_source::Declaration;
 use serde_json::{json, Value};
 use std::collections::BTreeSet;
+use std::io;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitStatus, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -111,6 +112,169 @@ fn read_json(path: &Path, what: &str) -> Result<Value, String> {
     serde_json::from_str(&raw).map_err(|e| format!("InvalidDomain：{what} JSON 解析失败：{e}"))
 }
 
+/// ADR 0059：不存在的路径从最近存在祖先继续解析；悬空链接也是链接，不是缺失段。
+fn canon_layout_path(path: &Path) -> io::Result<PathBuf> {
+    let path = if path.as_os_str().is_empty() {
+        Path::new(".")
+    } else {
+        path
+    };
+    match path.canonicalize() {
+        Ok(path) => return Ok(path),
+        Err(err) if err.kind() == io::ErrorKind::NotFound => (),
+        Err(err) => return Err(err),
+    }
+
+    let absolute = std::path::absolute(path)?;
+    let mut todo: Vec<_> = absolute
+        .components()
+        .rev()
+        .map(|c| c.as_os_str().to_owned())
+        .collect();
+    let mut resolved = PathBuf::new();
+    let mut links = 0;
+    while let Some(part) = todo.pop() {
+        if part == ".." {
+            resolved.pop();
+            continue;
+        }
+        resolved.push(part);
+        match std::fs::symlink_metadata(&resolved) {
+            Ok(meta) if meta.is_symlink() => {
+                links += 1;
+                if links > 40 {
+                    return Err(io::Error::other("符号链接循环或跳数超限"));
+                }
+                let target = std::fs::read_link(&resolved)?;
+                resolved.pop();
+                todo.extend(target.components().rev().map(|c| c.as_os_str().to_owned()));
+            }
+            Ok(_) => (),
+            Err(err) if err.kind() == io::ErrorKind::NotFound => (),
+            Err(err) => return Err(err),
+        }
+    }
+    Ok(resolved)
+}
+
+fn layout_canon(field: &str, path: &Path) -> Result<PathBuf, String> {
+    canon_layout_path(path)
+        .map_err(|err| format!("InvalidDomain：{field} 路径 {path:?} 无法解析：{err}"))
+}
+
+fn layout_parent<'a>(field: &str, path: &'a Path) -> Result<&'a Path, String> {
+    path.parent()
+        .ok_or_else(|| format!("InvalidDomain：{field} 路径 {path:?} 缺父目录"))
+}
+
+/// S admission 比对目录本身的 stamp：非族、非 A 的 P 子目录不属于测量域。
+struct AdmissionLayout<'a> {
+    parent: &'a Path,
+    basename: &'a [u8],
+    state: &'a Path,
+}
+
+impl AdmissionLayout<'_> {
+    fn check_dir(&self, field: &str, dir: &Path) -> Result<(), String> {
+        let (s_field, member) = if dir == self.parent {
+            ("s.db", self.parent.to_owned())
+        } else if dir.starts_with(self.state) {
+            ("s.admission_job_limits", self.state.to_owned())
+        } else if let Some(entry) = dir
+            .strip_prefix(self.parent)
+            .ok()
+            .and_then(|p| p.components().next())
+            .map(|c| c.as_os_str())
+            .filter(|name| {
+                name.as_encoded_bytes()
+                    .strip_prefix(self.basename)
+                    .is_some_and(|suffix| suffix.is_empty() || matches!(suffix[0], b'.' | b'-'))
+            })
+        {
+            ("s.db", self.parent.join(entry))
+        } else {
+            return Ok(());
+        };
+        Err(format!(
+            "InvalidDomain：{field} 的判定目录 {dir:?} 命中 {s_field} 的测量域 {member:?}"
+        ))
+    }
+
+    fn check_db(&self, field: &str, db: &Path) -> Result<(), String> {
+        let entry_dir = layout_canon(field, layout_parent(field, db)?)?;
+        self.check_dir(field, &entry_dir)?; // Q1
+        let target = layout_canon(field, db)?;
+        self.check_dir(field, layout_parent(field, &target)?)?; // Q2
+
+        // Q3：建库后总是走 L2；首启时 process_lock 还会按词法文件名走 L1。
+        let check_lock = |db: &Path| {
+            let lock = PathBuf::from(format!("{}.writer.lock", db.display()));
+            let target = layout_canon(field, &lock)?;
+            self.check_dir(field, layout_parent(field, &target)?)
+        };
+        check_lock(&target)?;
+        if !db.exists() {
+            let name = db
+                .file_name()
+                .ok_or_else(|| format!("InvalidDomain：{field} 缺数据库文件名"))?;
+            check_lock(&entry_dir.join(name))?;
+        }
+        Ok(())
+    }
+
+    fn check_socket(&self, field: &str, value: &Value) -> Result<(), String> {
+        let socket = value
+            .as_str()
+            .filter(|s| !s.is_empty())
+            .map(Path::new)
+            .ok_or_else(|| format!("InvalidDomain：经济 manifest 缺 {field}"))?;
+        self.check_dir(field, &layout_canon(field, layout_parent(field, socket)?)?)?; // Q4
+        let target = layout_canon(field, socket)?;
+        self.check_dir(field, layout_parent(field, &target)?) // Q5
+    }
+}
+
+fn check_admission_layout(raw: &Value, chongs: &[Value]) -> Result<(), String> {
+    let s_db = layout_canon("s.db", Path::new(text(raw, "s.db")?))?;
+    let limits_field = "s.admission_job_limits";
+    let limits = Path::new(text(raw, limits_field)?);
+    let state = layout_canon(
+        limits_field,
+        layout_parent(limits_field, layout_parent(limits_field, limits)?)?,
+    )?;
+    let layout = AdmissionLayout {
+        parent: layout_parent("s.db", &s_db)?,
+        basename: s_db
+            .file_name()
+            .ok_or("InvalidDomain：s.db 缺数据库文件名")?
+            .as_encoded_bytes(),
+        state: &state,
+    };
+    layout.check_db("economic.e.db", Path::new(text(raw, "economic.e.db")?))?;
+    for (i, b) in chongs.iter().enumerate() {
+        layout.check_db(&format!("economic.b[{i}].db"), Path::new(text(b, "db")?))?;
+    }
+    layout.check_db("x.db", Path::new(text(raw, "x.db")?))?;
+
+    let economic = read_json(Path::new(text(raw, "economic.manifest")?), "经济 manifest")?;
+    layout.check_socket("e.socket", &economic["e"]["socket"])?;
+    let routes = economic["chongs"]
+        .as_array()
+        .ok_or("InvalidDomain：经济 manifest 缺 chongs")?;
+    for (i, b) in chongs.iter().enumerate() {
+        let id = text(b, "chong")?;
+        let (j, route) = routes
+            .iter()
+            .enumerate()
+            .find(|(_, r)| r["chong_id"].as_str() == Some(id))
+            .ok_or_else(|| {
+                format!("InvalidDomain：economic.b[{i}].chong 无对应的 chongs[].chong_id")
+            })?;
+        layout.check_socket(&format!("chongs[{j}].socket"), &route["socket"])?;
+    }
+    Ok(())
+}
+
 struct Manifest {
     raw: Value,
     profile: String,
@@ -183,6 +347,7 @@ fn load_manifest(path: &Path) -> Result<Manifest, String> {
         ));
     }
     let credential_env = text(&xp, "credential_scope.env")?.to_string();
+    check_admission_layout(&raw, chongs)?;
     // 凭据文件缺失不在此判错：是否必需由 X 按 profile 裁决（MissingDependency）。
     let credential = xp["credential_scope"]["file"]
         .as_str()
