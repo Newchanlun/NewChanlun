@@ -2901,7 +2901,11 @@ fn append_scan_checks(
             .raw_series
             .as_ref()
             .unwrap_or_else(|| panic!("bar {checkpoint} frontier 缺 batch shared raw series"));
-        for frontier in batch.frontiers.iter().filter(|frontier| frontier.level == 0) {
+        for frontier in batch
+            .frontiers
+            .iter()
+            .filter(|frontier| frontier.level == 0)
+        {
             for segment in &frontier.segments {
                 assert_l0_segment_endpoint_prices(segment, &series.strokes);
             }
