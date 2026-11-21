@@ -20,6 +20,7 @@ use crate::session_protocol::{nonnegative, positive, required, sha256_hex, stric
 use rusqlite::Connection;
 use serde_json::{json, Value};
 use std::collections::{BTreeMap, BTreeSet};
+use std::fmt::Write as _;
 use std::io::Read;
 use std::path::Path;
 
@@ -37,6 +38,25 @@ pub(super) const IMPORT_OP: &str = "ImportFxResponsibility";
 const CAP_GATE_SLOT: &str = "fx_cap_gate";
 const VALUATION_GATE_SLOT: &str = "fx_valuation_gate";
 const LIMIT: usize = 16 * 1024 * 1024;
+
+/// 正式 FX/2 引用：按分量对 UTF-8 字节做百分号编码，再用 `|` 分隔。
+/// `%`、分隔符与证书语法保留字符都不直出；原始来源名不受限制。
+pub(super) fn encode_reference(parts: &[&str]) -> String {
+    let mut encoded = String::new();
+    for (index, part) in parts.iter().enumerate() {
+        if index != 0 {
+            encoded.push('|');
+        }
+        for b in part.bytes() {
+            if b.is_ascii_alphanumeric() || matches!(b, b'-' | b'.' | b'_' | b'~' | b'/') {
+                encoded.push(char::from(b));
+            } else {
+                write!(encoded, "%{b:02X}").expect("writing into String cannot fail");
+            }
+        }
+    }
+    encoded
+}
 
 pub(super) fn enabled(config: &Config) -> bool {
     config
@@ -828,6 +848,16 @@ fn derive_state(
     pending: &[Value],
     coverages: &BTreeMap<String, Value>,
 ) -> Result<DerivedFxState, String> {
+    let schema_revision = match config {
+        Some(cfg) if release_bound_enabled(cfg) => SCHEMA_RELEASE_BOUND,
+        Some(_) => SCHEMA,
+        None => image
+            .get(CONTRACT_FIELD)
+            .and_then(|v| v.get("schema_revision"))
+            .and_then(Value::as_str)
+            .filter(|s| *s == SCHEMA || *s == SCHEMA_RELEASE_BOUND)
+            .unwrap_or(SCHEMA),
+    };
     let live_cap = extract_live_cap_policy(config, image)?;
     let baseline_imported = live_cap.is_some();
     let cap_currency = live_cap
@@ -986,8 +1016,14 @@ fn derive_state(
             .entry((ns.clone(), ep.clone(), inst.clone()))
             .or_default()
             .push((active.clone(), complete));
+        // /1 的持久投影参与历史根哈希，只有 /2 使用新的线上引用编码。
+        let chain_id = if schema_revision == SCHEMA_RELEASE_BOUND {
+            encode_reference(&[&ns, &ep, &inst, &eid])
+        } else {
+            format!("{ns}|{ep}|{inst}|{eid}")
+        };
         chain_summaries.push(json!({
-            "chain_id": format!("{ns}|{ep}|{inst}|{eid}"),
+            "chain_id": chain_id,
             "source_namespace": ns,
             "source_epoch": ep,
             "instrument": inst,
@@ -1292,17 +1328,6 @@ fn derive_state(
         "missing_foreign_responsibility_ids": missing_foreign_ids,
         "initial_foreign_responsibilities_complete": initial_foreign_responsibilities_complete
     });
-
-    let schema_revision = match config {
-        Some(cfg) if release_bound_enabled(cfg) => SCHEMA_RELEASE_BOUND,
-        Some(_) => SCHEMA,
-        None => image
-            .get(CONTRACT_FIELD)
-            .and_then(|v| v.get("schema_revision"))
-            .and_then(Value::as_str)
-            .filter(|s| *s == SCHEMA || *s == SCHEMA_RELEASE_BOUND)
-            .unwrap_or(SCHEMA),
-    };
 
     let json = json!({
         "schema_revision": schema_revision,
@@ -2089,6 +2114,15 @@ pub(super) fn release_binding_from_query(
     )
 }
 
+fn quote_chain(revision: &Value) -> Result<[&str; 4], String> {
+    Ok([
+        required(revision, "source_namespace")?,
+        required(revision, "source_epoch")?,
+        required(revision, "instrument")?,
+        required(revision, "event_id")?,
+    ])
+}
+
 fn release_binding_from_fx_json(
     fx: &Value,
     prev_seq: i64,
@@ -2156,7 +2190,7 @@ fn release_binding_from_fx_json(
     responsibility_refs.push(grant_id.to_owned());
     responsibility_refs.extend(other_resps);
 
-    let mut active_quotes_by_chain: BTreeMap<String, FxBoundQuote> = BTreeMap::new();
+    let mut active_quotes_by_chain = BTreeMap::new();
     for fk in &applied_fact_keys {
         let rev = revision_rows
             .iter()
@@ -2165,15 +2199,9 @@ fn release_binding_from_fx_json(
         if rev["status"] != "Active" || rev["coverage_status"] != "Covered" {
             return Err("MissingDependency：已适用 FX 报价修订未处于 Active+Covered 状态".into());
         }
-        let chain_id = format!(
-            "{}|{}|{}|{}",
-            required(rev, "source_namespace")?,
-            required(rev, "source_epoch")?,
-            required(rev, "instrument")?,
-            required(rev, "event_id")?
-        );
+        let chain = quote_chain(rev)?;
         let bound = FxBoundQuote {
-            chain_id: chain_id.clone(),
+            chain_id: encode_reference(&chain),
             revision: required(rev, "revision")?.to_owned(),
             source_coord: required(rev, "source_coord")?.to_owned(),
             supersedes_revision: rev
@@ -2187,32 +2215,25 @@ fn release_binding_from_fx_json(
             evidence_id: required(rev, "evidence_id")?.to_owned(),
             evidence_hash: required(rev, "evidence_hash")?.to_owned(),
         };
-        active_quotes_by_chain.insert(chain_id, bound);
+        active_quotes_by_chain.insert(chain, bound);
     }
 
-    let participating_chains: BTreeSet<String> = active_quotes_by_chain.keys().cloned().collect();
-    let mut retired_quotes: Vec<(String, i64, FxRetiredQuote)> = Vec::new();
+    let mut retired_quotes = Vec::new();
     for rev in revision_rows {
         if rev["coverage_status"] != "RetiredBySupersession" {
             continue;
         }
-        let chain_id = format!(
-            "{}|{}|{}|{}",
-            required(rev, "source_namespace")?,
-            required(rev, "source_epoch")?,
-            required(rev, "instrument")?,
-            required(rev, "event_id")?
-        );
-        if !participating_chains.contains(&chain_id) {
+        let chain = quote_chain(rev)?;
+        if !active_quotes_by_chain.contains_key(&chain) {
             continue;
         }
         let revision = required(rev, "revision")?.to_owned();
         let rev_num = positive(&revision, "retired revision")?;
         retired_quotes.push((
-            chain_id.clone(),
+            chain,
             rev_num,
             FxRetiredQuote {
-                chain_id,
+                chain_id: encode_reference(&chain),
                 revision,
                 retired_by_revision: required(rev, "retired_by_revision")?.to_owned(),
                 evidence_id: required(rev, "evidence_id")?.to_owned(),

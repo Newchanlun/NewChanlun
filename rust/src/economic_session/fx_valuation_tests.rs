@@ -10,6 +10,25 @@ use super::service;
 use super::store::{audit, init, latest, open, recover, Config, SCHEMA};
 use crate::session_protocol::{canonical_json, sha256_hex};
 
+#[test]
+fn fx_quote_reference_escapes_field_and_chain_delimiters() {
+    use super::fx_valuation::encode_reference;
+
+    assert_eq!(encode_reference(&["feed", "daily|1"]), "feed|daily%7C1");
+    assert_eq!(encode_reference(&["feed|daily", "1"]), "feed%7Cdaily|1");
+    assert_eq!(encode_reference(&["feed", "daily%7C1"]), "feed|daily%257C1");
+    assert_eq!(
+        encode_reference(&["TEST-FX/TEST-CASH", "q@x:y;z,w=1"]),
+        "TEST-FX/TEST-CASH|q%40x%3Ay%3Bz%2Cw%3D1"
+    );
+    assert!(!super::exact_command::is_fx_placeholder_text(
+        "fx-quote:latest|1|A/B|q@rev=1"
+    ));
+    assert!(super::exact_command::is_fx_placeholder_text(
+        "fx-quote:latest"
+    ));
+}
+
 const EXACT_CONDITIONS: [(&str, &str, &str); 4] = [
     ("released-exact/1", "released-exact/1", "E.ReleaseExact"),
     (

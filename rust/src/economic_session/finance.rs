@@ -695,7 +695,7 @@ fn input(config: &Config, raw: &str) -> Result<Value, String> {
         if config.domain == "E" {
             if fx_release_bound(config)? {
                 super::exact_command::validate_fx_section(&d)?;
-            } else if super::exact_command::uses_fx_release_bound_marker(&d) {
+            } else if super::exact_command::declares_fx_binding(&d["exact_release"]) {
                 return Err(format!(
                     "Unsupported：仅 tb03b-finance/6 且显式选择 fx-valuation/2 时允许声明 {}",
                     super::exact_command::FX_RELEASE_BOUND_MARKER
@@ -1791,7 +1791,7 @@ fn make_dispatchable(
 }
 /// IC E.ReleaseExact / SPEC C07.1–2：同一 E 事务核命令全部固定字段、获准条件清单、`model_coverage`、
 /// Pending 与该 grant 的完整责任；成立才写 ReleasedExact 与不可改交付对象。域外命令持久终态 Unsupported。
-/// 启用 `fx-valuation/1` 时，由同一事务前序切面重算推导真实市场来源/事件/修订、责任与生效政策，
+/// 启用 `fx-valuation/2` 时，由同一事务前序切面重算推导真实市场来源/事件/修订、责任与生效政策，
 /// 组装并逐字核验证书，不允许调用方删除、替换依赖或使用占位名。
 #[allow(clippy::too_many_arguments)]
 fn release_exact(

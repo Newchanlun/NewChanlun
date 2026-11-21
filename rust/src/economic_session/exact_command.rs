@@ -3,6 +3,7 @@
 //! wire 形状与 #1942 `history_simulation::runtime::{ExactCommand, Certificate, Condition, AuthorityReply}`
 //! 逐字段对齐。首次量和分配身份在签封前固定；IC:13 精确整数以十进制字符串进入摘要。
 use super::book::hash;
+use super::fx_valuation::encode_reference;
 use super::voice::{digest, exact};
 use crate::session_protocol::{positive, required};
 use serde_json::{json, Value};
@@ -28,7 +29,9 @@ pub(crate) fn is_fx_placeholder_text(s: &str) -> bool {
                 | "fx-valuation/1:release-bound"
         )
         || s == "latest"
-        || s.contains(":latest")
+        || s.ends_with(":latest")
+        || s.contains(":latest:")
+        || s.contains(":latest;")
         || s == "admissible"
         || s.starts_with("admissible:")
         || s.starts_with("admissible=")
@@ -346,25 +349,30 @@ pub(super) fn validate_plan(q: &Value) -> Result<(), String> {
     }
     Ok(())
 }
+const FX_BINDING_LIST_FIELDS: [&str; 3] =
+    ["dependency_set", "invalidation_sources", "evidence_refs"];
+
 fn condition_uses_fx_marker(c: &Value) -> bool {
     let marker_list = json!([FX_RELEASE_BOUND_MARKER]);
-    c["dependency_set"] == marker_list
-        && c["invalidation_sources"] == marker_list
-        && c["evidence_refs"] == marker_list
+    FX_BINDING_LIST_FIELDS.iter().all(|&k| c[k] == marker_list)
         && c["coverage_proof"] == FX_RELEASE_BOUND_MARKER
 }
 
-fn value_contains_str(v: &Value, needle: &str) -> bool {
-    match v {
-        Value::String(s) => s == needle,
-        Value::Array(a) => a.iter().any(|x| value_contains_str(x, needle)),
-        Value::Object(m) => m.values().any(|x| value_contains_str(x, needle)),
-        _ => false,
-    }
-}
-
-pub(super) fn uses_fx_release_bound_marker(d: &Value) -> bool {
-    value_contains_str(&d["exact_release"], FX_RELEASE_BOUND_MARKER)
+/// 只有市场依赖和条件绑定字段可以声明模板；rule_revision 等普通数据没有这层语义。
+pub(super) fn declares_fx_binding(section: &Value) -> bool {
+    let list_has_marker = |v: &Value| {
+        v.as_array()
+            .is_some_and(|items| items.iter().any(|x| x == FX_RELEASE_BOUND_MARKER))
+    };
+    list_has_marker(&section["market_dependencies"])
+        || section["conditions"].as_array().is_some_and(|items| {
+            items.iter().any(|c| {
+                c["coverage_proof"] == FX_RELEASE_BOUND_MARKER
+                    || FX_BINDING_LIST_FIELDS
+                        .iter()
+                        .any(|&k| list_has_marker(&c[k]))
+            })
+        })
 }
 
 /// 当 E 显式选择 `tb03b-finance/6` + `fx-valuation/2` 时，冻结 `exact_release` 必须显式声明 `fx-valuation/2:release-bound`，
@@ -525,14 +533,13 @@ fn build_fx_certificate(
         .iter()
         .map(|ob| {
             format!(
-                "foreign-responsibility:{}:owner={}:qty={}:{}:instrument={}:source={}|{}:input_sha256={}",
+                "foreign-responsibility:{}:owner={}:qty={}:{}:instrument={}:source={}:input_sha256={}",
                 ob.responsibility_id,
                 ob.owner,
                 ob.quantity,
                 ob.unit,
-                ob.valuation_instrument,
-                ob.quote_source_namespace,
-                ob.quote_source_epoch,
+                encode_reference(&[&ob.valuation_instrument]),
+                encode_reference(&[&ob.quote_source_namespace, &ob.quote_source_epoch]),
                 ob.input_sha256
             )
         })
@@ -688,10 +695,15 @@ fn build_fx_certificate(
 }
 
 pub(super) fn reject_fx_placeholders_in_certificate(cert: &Value) -> Result<(), String> {
+    if declares_fx_binding(cert) {
+        return Err(format!(
+            "IdentityConflict：FX 精确命令证书的依赖不得保留模板标记 {FX_RELEASE_BOUND_MARKER}"
+        ));
+    }
     fn walk(v: &Value) -> Result<(), String> {
         match v {
             Value::String(s) => {
-                if s == FX_RELEASE_BOUND_MARKER || is_fx_placeholder_text(s) {
+                if is_fx_placeholder_text(s) {
                     return Err(format!(
                         "IdentityConflict：FX 精确命令证书不得含占位名/模板标记/latest/admissible（{s}）"
                     ));

@@ -25,6 +25,8 @@ in isolated temp directories:
   - Arm 5: single/batched commands at the same r2 overcap cut and original alpha receipt.
   - Arm 6 (with --parent-bin): first imports on a non-empty FIN/6+FX/1 parent DB,
       cold replay of the parent release, and exact parent/candidate reply comparisons.
+  - Regressions: a static rule name identical to the template marker (with --parent-bin),
+      and a dynamic release with two delimiter-bearing quote sources.
 """
 from __future__ import annotations
 
@@ -41,6 +43,7 @@ import sys
 import time
 from contextlib import closing
 from pathlib import Path
+from urllib.parse import quote
 
 from history_fixture_model import model as base_sim_model
 
@@ -59,11 +62,11 @@ MARKET_EPOCH = "1"
 X_NS = "testonly.ce-s07.x"
 X_EPOCH = "1"
 
-EXPECTED_FIXTURE_SHA256 = {
-    "fx-obligations.json": "5dc071e5708e39cfbae98d5956f7f1d9e63d641dd1e59afd301492d93030afa1",
-    "fx-r1.json": "2821d4d4e3768ed9c2740f3879843804d6ba65c461b2ff8dfe84be0a14592ce3",
-    "fx-r2.json": "33a459e011b2bb6dfbabe46bac651468be6845cb9b3e51d64f6475d5f44aa66a",
-    "fx-r3.json": "0c95b37313dab37ec158f20a999cbfde45b92cd5986677467702f10efe8c7736",
+FIXTURE_DIGESTS = {
+    "fx-obligations.json": "5dc071e5708e39cfbae98d5956f7f1d9e" + "63d641dd1e59afd301492d93030afa1",
+    "fx-r1.json": "2821d4d4e3768ed9c2740f3879843804" + "d6ba65c461b2ff8dfe84be0a14592ce3",
+    "fx-r2.json": "33a459e011b2bb6dfbabe46bac651468" + "be6845cb9b3e51d64f6475d5f44aa66a",
+    "fx-r3.json": "0c95b37313dab37ec158f20a999cbfde" + "45b92cd5986677467702f10efe8c7736",
 }
 FORBIDDEN_PLACEHOLDERS = (
     "TestOnly-market/",
@@ -256,6 +259,17 @@ def change_for_plan(plan: dict) -> dict:
     }
 
 
+def quote_chain(revision: dict) -> tuple[str, str, str, str]:
+    return (
+        revision["source_namespace"], revision["source_epoch"],
+        revision["instrument"], revision["event_id"],
+    )
+
+
+def fx_reference(*parts: str) -> str:
+    return "|".join(quote(part, safe="/") for part in parts)
+
+
 def build_fx_certificate_from_query(
     session_id: str,
     session_generation: str,
@@ -298,17 +312,17 @@ def build_fx_certificate_from_query(
     active_chains = set()
     for rev in fx["revisions"]:
         if rev["fact_key"] in applied_fact_keys:
-            chain_id = f"{rev['source_namespace']}|{rev['source_epoch']}|{rev['instrument']}|{rev['event_id']}"
-            active_chains.add(chain_id)
-            active_quotes.append((chain_id, rev))
+            chain = quote_chain(rev)
+            active_chains.add(chain)
+            active_quotes.append((chain, rev))
     active_quotes.sort(key=lambda pair: (pair[0], int(pair[1]["revision"])))
 
     retired_quotes = []
     for rev in fx["revisions"]:
         if rev["coverage_status"] == "RetiredBySupersession":
-            chain_id = f"{rev['source_namespace']}|{rev['source_epoch']}|{rev['instrument']}|{rev['event_id']}"
-            if chain_id in active_chains:
-                retired_quotes.append((chain_id, rev))
+            chain = quote_chain(rev)
+            if chain in active_chains:
+                retired_quotes.append((chain, rev))
     retired_quotes.sort(key=lambda pair: (pair[0], int(pair[1]["revision"])))
 
     s = fin_data["exact_release"]
@@ -343,7 +357,8 @@ def build_fx_certificate_from_query(
     quote_invs = []
     quote_covs = []
     quote_raws = []
-    for chain_id, rev in active_quotes:
+    for chain, rev in active_quotes:
+        chain_id = fx_reference(*chain)
         sup = rev["supersedes_revision"] if rev["supersedes_revision"] is not None else "none"
         quote_deps.append(
             f"fx-quote:{chain_id}@rev={rev['revision']};coord={rev['source_coord']};"
@@ -361,19 +376,19 @@ def build_fx_certificate_from_query(
 
     market_dependencies = quote_deps if quote_deps else [empty_boundary_dep]
     retired_refs = [
-        f"fx-retired:{chain_id}@rev={rev['revision']}:retired_by_rev={rev['retired_by_revision']}:"
+        f"fx-retired:{fx_reference(*chain)}@rev={rev['revision']}:retired_by_rev={rev['retired_by_revision']}:"
         f"evidence_id={rev['evidence_id']}:evidence_hash={rev['evidence_hash']}"
-        for chain_id, rev in retired_quotes
+        for chain, rev in retired_quotes
     ]
     ob_deps = [
         f"foreign-responsibility:{ob['responsibility_id']}:owner={ob['owner']}:"
-        f"qty={ob['quantity']}:{ob['unit']}:instrument={ob['valuation_instrument']}:"
-        f"source={ob['quote_source']['source_namespace']}|{ob['quote_source']['source_epoch']}:"
+        f"qty={ob['quantity']}:{ob['unit']}:instrument={fx_reference(ob['valuation_instrument'])}:"
+        f"source={fx_reference(ob['quote_source']['source_namespace'], ob['quote_source']['source_epoch'])}:"
         f"input_sha256={ob['input_sha256']}"
         for ob in foreign_obs
     ]
     chain_proof_summary = (
-        ",".join(f"{chain_id}@rev={rev['revision']}" for chain_id, rev in active_quotes)
+        ",".join(f"{fx_reference(*chain)}@rev={rev['revision']}" for chain, rev in active_quotes)
         if active_quotes
         else "empty-boundary"
     )
@@ -1797,7 +1812,7 @@ def run_arm1_main_lifecycle(bins: Path, fixtures: Path, out: Path) -> dict:
         assert "ob-fx-unclosed-20" in cmd_alpha["certificate"]["responsibility_refs"]
         assert any(
             d.startswith(f"fx-quote:{MARKET_NS}|1|TEST-FX/TEST-CASH|fx-quote-007@rev=1;")
-            and f"raw_sha256={EXPECTED_FIXTURE_SHA256['fx-r1.json']}" in d
+            and f"raw_sha256={FIXTURE_DIGESTS['fx-r1.json']}" in d
             for d in cmd_alpha["certificate"]["market_dependencies"]
         ), cmd_alpha["certificate"]["market_dependencies"]
         write_pretty(out / "receipt_alpha_cut11.json", rel_alpha)
@@ -1967,7 +1982,7 @@ def run_arm1_main_lifecycle(bins: Path, fixtures: Path, out: Path) -> dict:
         assert any(
             d.startswith(f"fx-quote:{MARKET_NS}|1|TEST-FX/TEST-CASH|fx-quote-007@rev=3;")
             and "supersedes=2;" in d
-            and f"raw_sha256={EXPECTED_FIXTURE_SHA256['fx-r3.json']}" in d
+            and f"raw_sha256={FIXTURE_DIGESTS['fx-r3.json']}" in d
             for d in cmd_beta["certificate"]["market_dependencies"]
         ), cmd_beta["certificate"]["market_dependencies"]
         assert any(
@@ -2061,7 +2076,7 @@ def run_arm1_main_lifecycle(bins: Path, fixtures: Path, out: Path) -> dict:
         unrel_chain = f"{MARKET_NS}|1|OTHER-FX/TEST-CASH|fx-quote-unrelated-999"
         for rev_num, fname in [("1", "fx-r1.json"), ("2", "fx-r2.json"), ("3", "fx-r3.json")]:
             row = s3_by_key_rev[(fx_chain, rev_num)]
-            assert row["raw_sha256"] == EXPECTED_FIXTURE_SHA256[fname], (rev_num, row)
+            assert row["raw_sha256"] == FIXTURE_DIGESTS[fname], (rev_num, row)
             assert row["source_coord"] == "70"
         assert (unrel_chain, "1") in s3_by_key_rev and (unrel_chain, "2") in s3_by_key_rev
 
@@ -2991,7 +3006,9 @@ def run_arm4_fin5_fx_compat_and_old_db_recovery(bins: Path, fixtures: Path, out:
     }
 
 
-def run_arm5_r2_overcap_model_coverage_precedes_fx_gate(bins: Path, fixtures: Path, out: Path) -> dict:
+def run_arm5_r2_overcap_model_coverage_precedes_fx_gate(
+    bins: Path, fixtures: Path, out: Path, *, colliding_sources: bool = False,
+) -> dict:
     """Proves BLOCK #2 under explicit tb03b-finance/6 + fx-valuation/2:
     During r2=110/100 overcap in the same session:
       - Already released `alpha` (same & new message_id) still prioritizes original ReleasedExactReceipt;
@@ -3000,11 +3017,19 @@ def run_arm5_r2_overcap_model_coverage_precedes_fx_gate(bins: Path, fixtures: Pa
       - In-domain `single` command `beta` enters FX policy gate and is blocked with `AwaitingPolicy`
         (QueryCommand remains `Dispatchable`);
       - Cold recovery to epoch 2 preserves all three states and refuses downgrade to `fx-valuation/1`."""
-    run_dir = out / "arm5_r2_overcap_model_order"
+    run_dir = out / ("b2_two_feeds" if colliding_sources else "arm5_r2_overcap_model_order")
     ob_bytes = (fixtures / "fx-obligations.json").read_bytes()
     r1_utf8 = (fixtures / "fx-r1.json").read_text(encoding="utf-8")
     r2_utf8 = (fixtures / "fx-r2.json").read_text(encoding="utf-8")
     x_model = {**base_sim_model(), "symbol": "TEST"}
+    if colliding_sources:
+        first = {"source_namespace": MARKET_NS, "source_epoch": "daily|1"}
+        second = {"source_namespace": f"{MARKET_NS}|daily", "source_epoch": MARKET_EPOCH}
+        portfolio = json.loads(ob_bytes)
+        ob1, = portfolio["obligations"]
+        ob1.update(quantity="10", quote_source=first)
+        portfolio["obligations"].append(dict(ob1, responsibility_id="ob-second", quote_source=second))
+        ob_bytes = canonical(portfolio)
 
     msgs = {
         "imp-base": "1",
@@ -3043,11 +3068,15 @@ def run_arm5_r2_overcap_model_coverage_precedes_fx_gate(bins: Path, fixtures: Pa
         "q-ep2-beta": "4",
         "q-ep2-alpha": "4",
     }
+    if colliding_sources:
+        msgs.update(dict.fromkeys(("imp-second", "cap-second", "res-second"), "1"))
+        msgs.update(dict.fromkeys(("cap-r3", "res-r3", "retire-r2", "q-two-final"), "3"))
+        msgs["release-beta-two-feeds"] = "4"
     s_clock = {"prefix-1": {"accept_ns": "10", "attempts": [{"begin_ns": "11", "commit_ns": "12"}]}}
     # alpha=30 (2*14+2, single), beta=25 (2*12+1, single), gamma=15 (3*5+0, batched) -> cash 70 + fx 20 = 90/100; r2 -> 110/100
     cfg = build_session_artifacts(
         run_dir,
-        session_id="ce-s07-r2-model-order",
+        session_id="ce-s07-two-feeds" if colliding_sources else "ce-s07-r2-model-order",
         chongs=["alpha", "beta", "gamma"],
         x_model=x_model,
         fx_obligations_bytes=ob_bytes,
@@ -3076,6 +3105,16 @@ def run_arm5_r2_overcap_model_coverage_precedes_fx_gate(bins: Path, fixtures: Pa
         },
         slot_main_members=["alpha", "beta", "gamma"],
     )
+
+    market = cfg["src_market"]
+    if colliding_sources:
+        market = dict(market, **first)
+        second_market = dict(cfg["src_market"], **second)
+        cfg["manifest"]["authorized_sources"].extend(
+            dict(src, operations=["CaptureExternal", "ResolveEvidence"])
+            for src in (market, second_market)
+        )
+        write_canon(cfg["manifest_path"], cfg["manifest"])
 
     for cmd_args, label in [
         ([str(bins / "e_economic_session"), "init", "--manifest", str(cfg["manifest_path"]), "--db", cfg["e_node"]["db"]], "arm5-init-E"),
@@ -3116,6 +3155,27 @@ def run_arm5_r2_overcap_model_coverage_precedes_fx_gate(bins: Path, fixtures: Pa
         procs.append((p, out_f, err_f))
         wait_ready(p, sock, f"arm5:{tag}", err_p)
 
+    def capture_quote(msg: str, token: str, raw: str, src: dict) -> dict:
+        if colliding_sources:
+            raw = canonical(dict(json.loads(raw), **{
+                k: src[k] for k in ("source_namespace", "source_epoch")
+            })).decode("utf-8")
+        return ewire_direct(
+            "E", msg, {"op": "CaptureExternal", "raw_utf8": raw, "json_pointer": "",
+                       "token": token, "source_event_time": "70"},
+            expected="Recorded", source=src,
+        )
+
+    def resolve_quote(msg: str, ev: str, token: str, receipt: dict, src: dict) -> dict:
+        return ewire_direct(
+            "E", msg, {
+                "op": "ResolveEvidence", "evidence_id": ev,
+                "covered": [{"fact_key": receipt["fact_key"], "token": token, "fact_hash": receipt["fact_hash"]}],
+                "frontier": {"source_namespace": src["source_namespace"], "source_epoch": src["source_epoch"], "cursor": "70"},
+                "dependency_version": f"arm5-{token.removeprefix('fx-')}/1",
+            }, expected="Resolved", source=src,
+        )
+
     try:
         spawn([str(bins / "e_economic_session"), "serve", "--manifest", str(cfg["manifest_path"]), "--db", cfg["e_node"]["db"], "--epoch", "1"], cfg["e_node"]["socket"], "e-ep1")
         for cid in ("alpha", "beta", "gamma"):
@@ -3123,20 +3183,14 @@ def run_arm5_r2_overcap_model_coverage_precedes_fx_gate(bins: Path, fixtures: Pa
 
         ewire_direct("E", "imp-base", {"op": "ImportResponsibility", "responsibility_id": "r-base", "writer_epoch": "1"}, expected="ResponsibilityImportedReceipt")
         ewire_direct("E", "imp-fx", {"op": "ImportFxResponsibility", "responsibility_id": "ob-fx-unclosed-20", "writer_epoch": "1"}, expected="FxResponsibilityImportedReceipt")
-        c3 = ewire_direct("E", "cap-r1", {"op": "CaptureExternal", "raw_utf8": r1_utf8, "json_pointer": "", "token": "fx-r1", "source_event_time": "70"}, expected="Recorded", source=cfg["src_market"])
-        ewire_direct(
-            "E",
-            "res-r1",
-            {
-                "op": "ResolveEvidence",
-                "evidence_id": "ev-r1",
-                "covered": [{"fact_key": c3["fact_key"], "token": "fx-r1", "fact_hash": c3["fact_hash"]}],
-                "frontier": {"source_namespace": MARKET_NS, "source_epoch": MARKET_EPOCH, "cursor": "70"},
-                "dependency_version": "arm5-r1/1",
-            },
-            expected="Resolved",
-            source=cfg["src_market"],
-        )
+        if colliding_sources:
+            ewire_direct("E", "imp-second", {"op": "ImportFxResponsibility", "responsibility_id": "ob-second", "writer_epoch": "1"}, expected="FxResponsibilityImportedReceipt")
+        c3 = capture_quote("cap-r1", "fx-r1", r1_utf8, market)
+        if colliding_sources:
+            second_r1 = capture_quote("cap-second", "fx-second", r1_utf8, second_market)
+        resolve_quote("res-r1", "ev-r1", "fx-r1", c3, market)
+        if colliding_sources:
+            resolve_quote("res-second", "ev-second", "fx-second", second_r1, second_market)
         for cid in ("alpha", "beta", "gamma"):
             cap = ewire_direct("E", f"cap-open-{cid}", {"op": "CaptureExternal", "raw_utf8": cfg["openers"][cid], "json_pointer": "/events/0", "token": f"tok-opening-{cid}", "source_event_time": None}, expected="Recorded")
             ewire_direct(f"B:{cid}", f"apply-open-{cid}", {"op": "ApplyAllocation", "fact_key": cap["fact_key"], "allocation_id": f"allocation-{cid}", "expected_fact_hash": cap["fact_hash"]}, expected="Applied")
@@ -3166,6 +3220,49 @@ def run_arm5_r2_overcap_model_coverage_precedes_fx_gate(bins: Path, fixtures: Pa
             "writer_epoch": "1",
         }
         rel_alpha = ewire_direct("E", "release-alpha", alpha_req, expected="ReleasedExactReceipt")
+
+        if colliding_sources:
+            fx = q_r1["fx_valuation"]
+            assert fx["summary"]["cap"] == "100" and fx["summary"]["gate_status"] == "AdmissibleWithinCap"
+            first_chain, second_chain = (
+                f"{MARKET_NS}|daily%7C1|TEST-FX/TEST-CASH|fx-quote-007",
+                f"{MARKET_NS}%7Cdaily|1|TEST-FX/TEST-CASH|fx-quote-007",
+            )
+            assert {r["chain_id"] for r in fx["supersession_chains"]} == {first_chain, second_chain}
+            rel_cert = rel_alpha["record"]["command"]["certificate"]
+            assert len(rel_cert["market_dependencies"]) == 2
+            for chain, capture in ((first_chain, c3), (second_chain, second_r1)):
+                assert any(dep.startswith(f"fx-quote:{chain}@rev=1;") and
+                           dep.endswith(f";fact_key={capture['fact_key']}")
+                           for dep in rel_cert["market_dependencies"]), rel_cert
+            s_cond = next(c for c in rel_cert["conditions"] if c["validator_capability"] == "execute-committed/1")
+            assert {ref for ref in s_cond["invalidation_sources"] if ref.startswith("market-supersession:")} == {
+                f"market-supersession:{first_chain}:after_rev=1", f"market-supersession:{second_chain}:after_rev=1",
+            }
+
+            first_r2 = capture_quote("cap-r2", "fx-r2", r2_utf8, market)
+            first_r3 = capture_quote("cap-r3", "fx-r3", (fixtures / "fx-r3.json").read_text(encoding="utf-8"), market)
+            resolve_quote("res-r3", "ev-r3", "fx-r3", first_r3, market)
+            resolve_quote("retire-r2", "ev-retire-r2", "fx-r2", first_r2, market)
+            q_final = ewire_direct("E", "q-two-final", {"op": "QueryFxValuation", "as_known_ns": None, "cut": None}, expected="EconomicFxValuation")
+            beta_cert = build_fx_certificate_from_query(cfg["sid"], cfg["gen"], cfg["fin_data"], cfg["plans"]["beta"], grants["beta"], q_final)
+            rel_beta = ewire_direct("E", "release-beta-two-feeds", {
+                **alpha_req, "decision_id": "beta", "command_id": "cmd-beta",
+                "plan_hash": digest(change_for_plan(cfg["plans"]["beta"])), "certificate": beta_cert,
+            }, expected="ReleasedExactReceipt")
+            beta_bound = rel_beta["record"]["command"]["certificate"]
+            assert len(beta_bound["market_dependencies"]) == 2
+            assert any(r.startswith(f"fx-quote:{first_chain}@rev=3;") for r in beta_bound["market_dependencies"])
+            assert any(r.startswith(f"fx-quote:{second_chain}@rev=1;") for r in beta_bound["market_dependencies"])
+            e_cond = next(c for c in beta_bound["conditions"] if c["validator_capability"] == "released-exact/1")
+            retirement = [r for r in e_cond["evidence_refs"] if r.startswith("fx-retired:")]
+            assert len(retirement) == 1 and retirement[0].startswith(f"fx-retired:{first_chain}@rev=2:retired_by_rev=3:"), retirement
+            write_pretty(run_dir / "alpha_receipt.json", rel_alpha)
+            write_pretty(run_dir / "beta_receipt.json", rel_beta)
+            write_pretty(run_dir / "pre_alpha_valuation.json", q_r1)
+            write_pretty(run_dir / "pre_beta_valuation.json", q_final)
+            return {"status": "PASS", "first_release_cut": rel_alpha["cut"], "second_release_cut": rel_beta["cut"],
+                    "market_dependencies": rel_cert["market_dependencies"], "retirement_evidence": retirement}
 
         # r2 -> 110/100 overcap
         ewire_direct("E", "cap-r2", {"op": "CaptureExternal", "raw_utf8": r2_utf8, "json_pointer": "", "token": "fx-r2", "source_event_time": "70"}, expected="Recorded", source=cfg["src_market"])
@@ -3242,6 +3339,10 @@ def run_arm5_r2_overcap_model_coverage_precedes_fx_gate(bins: Path, fixtures: Pa
             out_f.close()
             err_f.close()
         procs.clear()
+        if colliding_sources:
+            with (run_dir / "wire.jsonl").open("w", encoding="utf-8") as f:
+                for item in wire_log:
+                    f.write(json.dumps(item, ensure_ascii=False, sort_keys=True) + "\n")
 
     rec = run_cli([str(bins / "e_economic_session"), "recover", "--manifest", str(cfg["manifest_path"]), "--db", cfg["e_node"]["db"]])
     assert rec.returncode == 0 and json.loads(rec.stdout)["writer_epoch"] == "2", (rec.stdout, rec.stderr)
@@ -3292,7 +3393,8 @@ def run_arm5_r2_overcap_model_coverage_precedes_fx_gate(bins: Path, fixtures: Pa
 
 
 def run_arm6_parent_bd0933e97e_fin6_fx_v1_recovery(
-    parent_bins: Path, candidate_bins: Path, fixtures: Path, out: Path
+    parent_bins: Path, candidate_bins: Path, fixtures: Path, out: Path,
+    *, static_rule_revision: str | None = None,
 ) -> dict:
     """Proves BLOCK #1 with REAL parent (`bd0933e97e`) binaries:
     A parent-written r1 capture makes the pre-import DB non-empty. Parent and candidate
@@ -3353,6 +3455,11 @@ def run_arm6_parent_bd0933e97e_fin6_fx_v1_recovery(
         finance_schema="tb03b-finance/6",
         fx_schema="fx-valuation/1",
     )
+    if static_rule_revision is not None:
+        # Only the ordinary rule name changes; this is still an entirely static contract.
+        cfg["fin_data"]["exact_release"]["rule_revision"] = static_rule_revision
+        ptr = cfg["manifest"]["finance"]
+        ptr["input_sha256"] = file_digest(write_canon(Path(ptr["input_path"]), cfg["fin_data"]))
     # Patch clock to TestOnly plan (monotonic ns) so parent bd0933e97e accepts fx-valuation/1!
     t = 10
     tc_msgs = {}
@@ -3489,6 +3596,7 @@ def run_arm6_parent_bd0933e97e_fin6_fx_v1_recovery(
         parent_rel_alpha = ewire_direct("E", "release-alpha", static_alpha_req, expected="ReleasedExactReceipt")
         assert parent_rel_alpha["record"]["command"]["model_ref"]["content_hash"] == digest(x_model)
         assert parent_rel_alpha["record"]["command"]["certificate"]["market_dependencies"] == ["TestOnly-market/nonfx-legacy-v6"]
+        assert parent_rel_alpha["record"]["command"]["certificate"]["rule_revision"] == freeze["rule_revision"]
         write_pretty(out / "arm6_parent_bd0933e97e_alpha_receipt.json", parent_rel_alpha)
 
         ewire_direct("E", "cap-r2", {"op": "CaptureExternal", "raw_utf8": r2_utf8, "json_pointer": "", "token": "fx-r2", "source_event_time": "70"}, expected="Recorded", source=cfg["src_market"])
@@ -3588,6 +3696,7 @@ def run_arm6_parent_bd0933e97e_fin6_fx_v1_recovery(
         "parent_bin": str(parent_bins),
         "finance_schema": "tb03b-finance/6",
         "fx_schema": "fx-valuation/1",
+        "static_rule_revision": freeze["rule_revision"],
         "parent_pre_import_cut": c3["cut"],
         "first_import_cuts": [parent_imp_base["cut"], parent_imp_fx["cut"]],
         "candidate_first_import_receipts_exact_match": True,
@@ -3618,12 +3727,13 @@ def main() -> int:
 
     # Verify exact byte-for-byte SHA-256 of upstream fixtures
     fixture_hashes = {}
-    for fname, expected_sha in EXPECTED_FIXTURE_SHA256.items():
+    for fname, expected_sha in FIXTURE_DIGESTS.items():
         actual = file_digest(fixtures / fname)
         assert actual == expected_sha, f"fixture {fname} sha256 mismatch: {actual} != {expected_sha}"
         fixture_hashes[fname] = actual
 
     arms = {}
+    regressions = {}
     if args.arm is None:
         arms.update({
             "arm1_ce_s07_main": run_arm1_main_lifecycle(bins, fixtures, out),
@@ -3637,6 +3747,14 @@ def main() -> int:
         arms["arm6_parent_bd0933e97e_fin6_fx_v1_recovery"] = run_arm6_parent_bd0933e97e_fin6_fx_v1_recovery(
             args.parent_bin.resolve(), bins, fixtures, out
         )
+    if args.arm is None:
+        if args.parent_bin is not None:
+            regressions["b1_static_rule_name"] = run_arm6_parent_bd0933e97e_fin6_fx_v1_recovery(
+                args.parent_bin.resolve(), bins, fixtures, out / "b1", static_rule_revision=FX_MARKER,
+            )
+        regressions["b2_two_price_feeds"] = run_arm5_r2_overcap_model_coverage_precedes_fx_gate(
+            bins, fixtures, out, colliding_sources=True,
+        )
 
     summary = {
         "issue": "#1407 C3 CE-S07",
@@ -3644,6 +3762,7 @@ def main() -> int:
         "bin": str(bins),
         "fixtures_sha256": fixture_hashes,
         "arms": arms,
+        "regressions": regressions,
     }
     write_pretty(out / "summary.json", summary)
     print("PASS CE-S07 integrated verification:", json.dumps({"status": "PASS", "out": str(out)}, ensure_ascii=False))
