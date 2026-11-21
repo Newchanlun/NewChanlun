@@ -15,13 +15,13 @@ from pathlib import Path
 import pytest
 import yaml
 
-ROOT = Path(__file__).resolve().parents[1]
-PROGRAMS = ROOT / "scripts/at18"
+PROGRAMS = Path(__file__).resolve().parents[1]
+ROOT = PROGRAMS.parents[1]
 sys.path.insert(0, str(PROGRAMS))
 adapter = importlib.import_module("adapter")
 from common import ADAPTER, CROSSWALK, LEDGERS, REGISTRY, Invalid, json_bytes, sha, strict_json  # noqa: E402
 from registry import OPENING_CENSUS, canonical_bases, load  # noqa: E402
-from run_checks import execute, run_group, run_identity  # noqa: E402
+from run_checks import execute, run_group, run_identity, validate_record  # noqa: E402
 from workflow import (_manifest, authority_comment, bundle_name, plan, producer_anchors,
                       producer_job_name, seal_matrix, seal_scaffold)  # noqa: E402
 
@@ -137,10 +137,13 @@ witness = {"schema_version": "at18-key-witness/1", "entries": [dict(key, ok=True
 Path(os.environ["AT18_WITNESS_FILE"]).write_text(json.dumps(witness))
 """
 RECORD_CASE = COMMAND_CASE + """
+source = Path(__file__).relative_to(Path.cwd()).as_posix()
 payload = {
     "schema_version": "at18-tb-entity/1",
-    "tb_id": "TB-01", "evidence_class": "simulation", "profile_id": None,
-    "tests": [], "keys": [], "conditions": {"processes": 2}, "output": {"samples": [1, 2]}
+    "tb_id": os.environ["AT18_RECORD"].rsplit(".", 1)[1],
+    "evidence_class": "simulation", "profile_id": None,
+    "tests": [{"check_id": os.environ["AT18_CHECK_ID"], "name": source, "source_path": source}],
+    "keys": keys, "conditions": {"processes": 2}, "output": {"samples": [1, 2]}
 }
 doc = {"schema_version": "at18-run-record/1", "record": os.environ["AT18_RECORD"],
        "head": os.environ["AT18_F"], "run_id": int(os.environ["AT18_RUN_ID"]),
@@ -333,6 +336,97 @@ def test_nonempty_group_seal_binds_every_record_and_exact_attempt(repo):
     entity.write_bytes(entity.read_bytes() + b" ")
     with pytest.raises(Invalid, match="RECORD_UNSEALED"):
         seal_matrix(loaded, "simulation", IDENTITY, artifacts, anchors)
+
+
+R03_CASES = [
+    (CROSSWALK, "TB-01", "story", "US-ST-001", "/rows/0"),
+    (LEDGERS[0], "TB-01", "detail", "A-CC-006-01", "/units/0"),
+    (LEDGERS[1], "TB-02", "detail", "A-CC-008-01", "/units/1"),
+    (LEDGERS[2], "TB-10", "family", "OE42", "/units/17"),
+    (LEDGERS[3], "TB-01", "detail", "A-CC-001-01", "/rows/48"),
+]
+
+
+@pytest.mark.parametrize(("path", "tb", "kind", "key_id", "ptr"), R03_CASES,
+                         ids=["crosswalk-US-ST-001", "TB01-slices", "TB02-06-slices",
+                              "TB07-11-slices", "TB01-contribution"])
+def test_real_r03_basis_archives_one_original(repo, path, tb, kind, key_id, ptr):
+    bases, _ = canonical_bases(repo, read(repo, CROSSWALK))
+    assert {p for k, values in bases.items() if k[0] != "TB-11" for p, _ in values} == {
+        case[0] for case in R03_CASES}
+    assert bases[tb, kind, key_id] == {(path, ptr)}
+    record = f"tb.simulation.{tb}"
+    source = "trial/record"
+    check = bind(repo, RECORD_CASE, runner="command", source=source, selector=source,
+                 key_aware=True, record=record)
+    reg = read(repo, REGISTRY)
+    reg["bindings"] = [{
+        "binding_id": "real-r03", "slice_id": tb, "keys": [{"kind": kind, "id": key_id}],
+        "basis": {"path": path, "pointer": ptr, "sha256": sha((repo / path).read_bytes())},
+        "domains": [{"evidence_class": "simulation", "profile_id": None, "result": "VERIFIED",
+                     "deferred_gate": None, "checks": [check["check_id"]]}],
+    }]
+    write(repo, REGISTRY, reg)
+    head = commit(repo, "actual R03 registration and producer")
+    checked = lint(repo)
+    assert checked.returncode == 0, checked.stderr
+    loaded = load(repo)
+    identity = run_identity(head, 104, 2)
+    artifacts = repo / "artifacts"
+    group = check["group"]
+    bundle = artifacts / bundle_name("simulation", identity["run_attempt"], group)
+    assert run_group(repo, loaded, "simulation", group, identity, bundle, head=head), read(bundle, "execution.json")
+    manifest = read(bundle, "execution.json")
+    assert [(r["executed"], r["exit_code"]) for r in manifest["checks"]] == [(1, 0)]
+    item, = manifest["records"]
+    assert {p.name for p in bundle.iterdir()} == {"execution.json", item["path"]}
+    original = read(bundle, item["path"])
+    assert validate_record(loaded[1], original, check, identity)["payload"]["keys"] == [
+        {"slice_id": tb, "kind": kind, "id": key_id, "basis_path": path, "basis_pointer": ptr}]
+    execution_sha = sha((bundle / "execution.json").read_bytes())
+    job = producer_job(loaded, "simulation", group, identity, execution_sha)
+    anchors = producer_anchors(loaded, "simulation", identity, [{"jobs": [job], "total_count": 1}])
+    sealed = seal_matrix(loaded, "simulation", identity, artifacts, anchors)
+    assert sealed["has_seals"] == "true"
+    assert json.loads(sealed["seals"]) == {"include": [{
+        "group": group, "record": record, "profile": "none",
+        "sha256": item["sha256"], "execution_sha": execution_sha,
+    }]}
+    sh(repo, sys.executable, str(PROGRAMS / "workflow.py"), "seal", "simulation", "--root", str(repo),
+       "--group", group, "--artifacts", str(bundle), "--record", record, "--profile", "none",
+       "--sha256", item["sha256"], "--execution-sha", execution_sha,
+       env=os.environ | {"GITHUB_SHA": head, "GITHUB_RUN_ID": str(identity["run_id"]),
+                         "GITHUB_RUN_ATTEMPT": str(identity["run_attempt"]),
+                         "GITHUB_REF": "refs/heads/main", "GITHUB_EVENT_NAME": "workflow_dispatch"})
+
+
+@pytest.mark.parametrize(("field", "value", "error"), [
+    ("basis_path", "../escape", "basis path"),
+    ("basis_path", ".chanlun/../escape", "basis path"),
+    ("basis_path", "/etc/absolute", "basis path"),
+    ("basis_path", "C:/absolute", "basis path"),
+    ("basis_path", ".chanlun\\escape", "basis path"),
+    ("basis_path", ".chanlun/has\ncontrol", "basis path"),
+    ("basis_path", ".chanlun/has\x7fcontrol", "basis path"),
+    ("basis_path", ".chanlun/has\x85control", "basis path"),
+    ("basis_pointer", "rows/0", "SCHEMA"),
+    ("basis_pointer", "/rows/~2", "SCHEMA"),
+    ("id", ".not-a-business-token", "business token"),
+    ("unregistered_fixture_note", "CANARY", "unknown or missing fields"),
+])
+def test_tb_key_public_schema_stays_closed(field, value, error):
+    path, tb, kind, key_id, ptr = R03_CASES[0]
+    key = {"slice_id": tb, "kind": kind, "id": key_id, "basis_path": path, "basis_pointer": ptr}
+    payload = {"schema_version": "at18-tb-entity/1", "tb_id": tb, "evidence_class": "simulation",
+               "profile_id": None, "tests": [], "keys": [key], "conditions": {}, "output": {}}
+    contract = read(ROOT, ADAPTER)
+    record = f"tb.simulation.{tb}"
+    # RFC 6901 的空根、标点和转义不能按业务 token 审。
+    for pointer in ("", "/.rows/a~1b/~0"):
+        assert adapter.public_payload(contract, record, payload | {
+            "keys": [key | {"basis_pointer": pointer}]})["keys"][0]["basis_pointer"] == pointer
+    with pytest.raises(Invalid, match=error):
+        adapter.public_payload(contract, record, payload | {"keys": [key | {field: value}]})
 
 
 def test_f_adapter_requires_f_bytes_and_recent_accepted_anchor(repo):
@@ -575,6 +669,8 @@ def test_yamls_dispatch_shapes_and_unchanged_gates():
         "rust-test-default", "rust-test-s-session", "rust-test-s-session-coverage", "rust-test-s-session-extra-groups",
         "rust-test-production-session", "s-sequence-1488", "s-fields-native-1488", "s-observer", "fixture-drift",
         "sandcastle-ts", "deepagents-pilot"}
+    assert any(step.get("run") == "pytest -p no:cacheprovider scripts/at18/tests/test_at18_harness.py -v"
+               and "if" not in step for step in ci["jobs"]["at18-registry-lint"]["steps"])
     assert workflow("devskim")["on"]["workflow_dispatch"] is None
     for name, evidence in (("at18-acceptance", "simulation"), ("at18-experiment", "experiment")):
         doc = workflow(name)
@@ -715,6 +811,43 @@ def test_rust_explicit_cargo_target_and_inline_path(repo, selector, target):
     assert command(check, repo)[5:8] == [target, "probe", "outer::count"]
 
 
+@pytest.mark.parametrize(("where", "attribute", "child_dir", "diagnostic"), [
+    ("inline", '#![path = "redirected"]', "redirected", "unsupported inner attribute: path"),
+    ("inline", '#![path = "api"]', "api", "unsupported inner attribute: path"),
+    ("inline", '#![r#path = "api"]', "api", "unsupported inner attribute: path"),
+    ("inline", '#![/* marker */ path = "api"]', "api", "unsupported inner attribute: path"),
+    ("nested", '#![cfg_attr(test, cfg_attr(all(), path = "redirected"))]', "redirected",
+     "unsupported inner attribute: cfg_attr"),
+    ("inline", "#![test_runner(custom)]", "api", "unsupported inner attribute: test_runner"),
+    ("root", "#![test_runner(custom)]", "api", "unsupported inner attribute: test_runner"),
+    ("child", '#![path = "api"]', "api", "unsupported inner attribute: path"),
+    ("outer", '#[path = "api/child.rs"]', "api", "definition-changing attribute"),
+    ("root", "macro_rules! item { () => { const C: u8 = 1; } }\nitem!();", "api", "item expansion"),
+])
+def test_rust_rejects_unmodelled_scope_before_trusting_definition(repo, where, attribute, child_dir, diagnostic):
+    parent = "mod api { mod child; }\n"
+    selector = "lib/api::child::count"
+    marked = "// @at18 TB-01 story US-ST-001\n#[test]\nfn count() {}\n"
+    if where == "root":
+        parent = attribute + "\n" + parent
+    elif where == "inline":
+        parent = f"mod api {{\n{attribute}\nmod child;\n}}\n"
+    elif where == "nested":
+        parent = f"mod outer {{ mod api {{\n{attribute}\nmod child;\n}} }}\n"
+        selector = "lib/outer::api::child::count"
+    elif where == "child":
+        marked = attribute + "\n" + marked
+    else:
+        parent = f"mod api {{\n{attribute}\nmod child;\n}}\n"
+    source = f"rust/src/{child_dir}/child.rs"
+    bind(repo, marked, runner="cargo-test", selector=selector, source=source)
+    (repo / "rust/src/lib.rs").write_text(parent)
+    (repo / "rust/Cargo.toml").write_text(RUST_PACKAGE)
+    result = lint(repo)
+    assert result.returncode == 1
+    assert f"CHECK_SELECTOR: Rust {diagnostic}" in result.stderr
+
+
 @pytest.mark.parametrize("drift", ["changed-bytes", "symlink", "repinned-outside-f"])
 def test_check_revalidates_loaded_source_at_execution(repo, drift):
     check = bind(repo, PY_CASE)
@@ -768,32 +901,78 @@ def test_started_key_requires_all_bases_even_when_other_keys_are_unbound(repo):
     assert lint(repo).returncode == 0
 
 
-@pytest.mark.parametrize("change", ["unaltered", "edited-before", "edited-after", "edited-at-signature",
-                                    "missing-updated", "signed-comment-edited", "new-comment"])
+@pytest.mark.parametrize("change", [
+    "unaltered", "edited-before", "edited-after", "edited-at-signature", "edit-before-creation",
+    "missing-edit-field", "missing-pin-edit-field", "signed-comment-edited", "signed-comment-edited-same-second",
+    "new-comment", "same-second-created", "same-second-created-and-edited", "same-second-fraction",
+    "truncated", "wrong-count", "graphql-errors", "duplicate-id", "wrong-ticket",
+])
 def test_authority_observes_edits_to_earlier_comments(monkeypatch, change):
     before, signed, after = ("2026-11-21T00:00:00Z", "2026-11-21T00:00:02Z", "2026-11-21T00:00:03Z")
-    past = {"id": 5, "created_at": before, "updated_at": before}
-    pin = {"id": 6, "created_at": signed, "updated_at": signed}
+    pin_id = 5_000_000_006  # GraphQL Int/databaseId 无法表达这样的评论 ID。
+    past = {"fullDatabaseId": pin_id - 1, "createdAt": before, "lastEditedAt": None}
+    pin = {"fullDatabaseId": str(pin_id), "createdAt": signed, "lastEditedAt": None, "body": "signed body"}
     if change == "edited-before":
-        past["updated_at"] = "2026-11-21T00:00:01Z"
+        past["lastEditedAt"] = "2026-11-21T00:00:01Z"
     if change == "edited-after":
-        past["updated_at"] = after
+        past["lastEditedAt"] = after
     if change == "edited-at-signature":
-        past["updated_at"] = signed
-    if change == "missing-updated":
-        del past["updated_at"]
+        past["lastEditedAt"] = signed
+    if change == "edit-before-creation":
+        past["lastEditedAt"] = "2026-11-20T23:59:59Z"
+    if change == "missing-edit-field":
+        del past["lastEditedAt"]
+    if change == "missing-pin-edit-field":
+        del pin["lastEditedAt"]
     if change == "signed-comment-edited":
-        pin["updated_at"] = after
+        pin["lastEditedAt"] = after
+    if change == "signed-comment-edited-same-second":
+        pin["lastEditedAt"] = pin["createdAt"]
     if change == "new-comment":
-        past.update(id=7, created_at=after, updated_at=after)
+        past.update(fullDatabaseId=pin_id + 1, createdAt=after)
+    if change in {"same-second-created", "same-second-created-and-edited"}:
+        past["createdAt"] = signed
+    if change == "same-second-created-and-edited":
+        past["lastEditedAt"] = signed
+    if change == "same-second-fraction":
+        past["createdAt"] = "2026-11-21T00:00:02.100Z"
+        pin["createdAt"] = "2026-11-21T00:00:02.200Z"
+    if change == "duplicate-id":
+        past["fullDatabaseId"] = pin_id
+
+    def page(row, more):
+        return {"data": {"repository": {"nameWithOwner": "Test/Repo", "issue": {
+            "number": 2132 if change == "wrong-ticket" else 2133,
+            "comments": {"nodes": [row], "totalCount": 3 if change == "wrong-count" else 2,
+                         "pageInfo": {"hasNextPage": more, "endCursor": "fixture-cursor"}},
+        }}}}
+
+    pages = [page(past, True), page(pin, False)]
+    if change == "truncated":
+        pages = pages[:1]
+    if change == "graphql-errors":
+        pages[1]["errors"] = [{"message": "lastEditedAt unavailable"}]
+
     def gh(argv, **kwargs):
-        return subprocess.CompletedProcess(argv, 0, json_bytes([[pin], [past]] if "--paginate" in argv else {}), b"")
+        if argv[2] == "graphql":
+            assert argv[:5] == ["gh", "api", "graphql", "--paginate", "--slurp"]
+            query = next(arg.removeprefix("query=") for arg in argv if arg.startswith("query="))
+            assert query.lstrip().startswith("query(") and "nodes { fullDatabaseId body createdAt lastEditedAt }" in query
+            assert "after: $endCursor" in query and argv[-6:] == ["-f", "owner=test", "-f", "name=repo", "-F", "number=2133"]
+            body = pages
+        else:
+            assert argv == ["gh", "api", "repos/test/repo/issues/2133"]
+            body = {}
+        return subprocess.CompletedProcess(argv, 0, json_bytes(body), b"")
+
     monkeypatch.setattr("workflow.subprocess.run", gh)
+    rule = {"ticket": 2133, "comment_id": pin_id}
     if change in {"unaltered", "edited-before"}:
-        assert authority_comment("test/repo", {"ticket": 2133, "comment_id": 6}, "fixture") == pin
+        assert authority_comment("test/repo", rule, "fixture") == {
+            "id": pin_id, "issue_url": "https://api.github.com/repos/test/repo/issues/2133", "body": pin["body"]}
     else:
         with pytest.raises(Invalid, match="AUTH_REQUIRED"):
-            authority_comment("test/repo", {"ticket": 2133, "comment_id": 6}, "fixture")
+            authority_comment("test/repo", rule, "fixture")
 
 
 @pytest.mark.parametrize("action", ["place", "cancel", "modify", "reduce_only_close"])

@@ -220,7 +220,7 @@ jobs:
         #   pip install ./rust（maturin 冷编）   11.7s
         run: |
           python -m pip install --upgrade pip
-          pip install -e ".[test]" pytest-xdist -r scripts/at18/requirements.txt
+          pip install -e ".[test]" pytest-xdist
           pip install "nautilus_trader==1.229.0"
           CARGO_TARGET_DIR="$HOME/.cache/newchan-rust-target" pip install ./rust
 
@@ -1476,7 +1476,7 @@ jobs:
       - name: 核 F 登记册
         if: github.event_name != 'pull_request'
         run: scripts/at18/at18-registry-lint
-      - run: python -m pytest -p no:cacheprovider -q tests/test_at18_harness.py
+      - run: pytest -p no:cacheprovider scripts/at18/tests/test_at18_harness.py -v
 
   # #1875 p2m：唯一汇总门。依赖本 workflow 全部作业（macos-session 只在手动触发时跑，不计入）；
   #   任一作业 failure 或 cancelled 即失败，被 changes 正确跳过的 Rust 作业（skipped）不算失败。

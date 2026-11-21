@@ -5,6 +5,7 @@
 ```sh
 python -m pip install -r scripts/at18/requirements.txt
 scripts/at18/at18-registry-lint
+pytest -p no:cacheprovider scripts/at18/tests/test_at18_harness.py -v
 ```
 
 PR 上的同一入口额外计算真正的 merge-base，禁止原有键、basis 或域消失，也不允许把已有运行域改成延期。当前登记册只钉住 r5 入口摘要；正式清册、历史 cure 和 PRE 由 #2132 登记，骨架允许键尚未登记；一个键一旦加入，必须同时交齐 R03 的全部 basis，缺任何一项报 `BASIS_INCOMPLETE`。正式验收还要核所有必需键和域，不把骨架通过当成覆盖。
@@ -30,6 +31,6 @@ PR 上的同一入口额外计算真正的 merge-base，禁止原有键、basis 
 
 空登记册走 `at18-scaffold <class> <registry_sha256>`。它封存空清单；`at18-seal-scaffold <class> <registry_sha256> <execution_sha256>` 核字节并出具 `scaffold-seal.json`。这两个名字供 #1391 辨认骨架；它们不是 R06 业务组，也不是 R07 运行记录。
 
-experiment 的真实作业在托管预检完成后才进入 #2133 指定的专用 runner。用户签署原件须与受审适配器中已登记的评论 ID、原始正文 SHA-256、版本、profile、runner group/label、时限与动作全部一致。签署删除、编辑、签署后新增评论或编辑早期评论均停止。当前仅接收 `query`；即使两个授权 pin 都已填写，发送、取消、改单或平仓退出等外效也保持硬关闭，直至接入 #1412 的实际逐动作授权门。专用 runner 只接受本仓 `main` 上的对应 workflow，预装 `gh`、AT-18 requirements 和所需框架，并只配场所读权限；不向 GitHub 上传场所凭据。当前两张授权 pin 均为空，业务实验不可启动。
+experiment 的真实作业在托管预检完成后才进入 #2133 指定的专用 runner。用户签署原件须与受审适配器中已登记的评论 ID、原始正文 SHA-256、版本、profile、runner group/label、时限与动作全部一致。取 GitHub GraphQL 完整评论页；签署评论必须存在且 `lastEditedAt` 为 null。其他评论必须在签署秒之前创建，若编辑过，最后编辑也必须早于签署秒；时间缺失或同秒无法确认先后时停止。当前仅接收 `query`；即使两个授权 pin 都已填写，发送、取消、改单或平仓退出等外效也保持硬关闭，直至接入 #1412 的实际逐动作授权门。专用 runner 只接受本仓 `main` 上的对应 workflow，预装 `gh`、AT-18 requirements 和所需框架，并只配场所读权限；不向 GitHub 上传场所凭据。当前两张授权 pin 均为空，业务实验不可启动。
 
 `adapter-contract.json` 给 #1391、#1403 各自实现的单一字段定位和专用槽投影；两端应独立核 F 上的摘要、R09 锚与服务端原件，再消费相同的合约和夹具。#1279 完整评论中如出现未识别原件，先重新核准来源与归属，不猜有没有提前放行。

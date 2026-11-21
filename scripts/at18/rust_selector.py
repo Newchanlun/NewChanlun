@@ -71,12 +71,24 @@ def declaration(root, read, check):
     path = target_path(root, read, kind, target)
     parser = Parser(LANGUAGE)
 
+    def check_scope(scope):
+        for node in scope.named_children:
+            if node.type == "inner_attribute_item":
+                # 属性括号内的注释也是 named child，不可把首个 child 当作属性。
+                attribute = next(child for child in node.named_children if child.type == "attribute")
+                identifier = attribute.named_children[0]
+                if identifier.type == "scoped_identifier":
+                    identifier = identifier.child_by_field_name("name")
+                attr = identifier.text.removeprefix(b"r#")
+                # 不能按默认目录继续寻找；cfg_attr 还可条件注入路径或自定义 harness。
+                require(attr not in {b"path", b"cfg_attr", b"test_runner"}, "CHECK_SELECTOR",
+                        "Rust unsupported inner attribute: " + attr.decode("ascii"))
+
     def parse(path):
         source = read(str(path))
         ast = parser.parse(source).root_node
-        require(not ast.has_error and not any(
-            node.type == "inner_attribute_item" and b"test_runner" in node.text for node in ast.named_children),
-            "CHECK_SELECTOR", "Rust parse/harness: " + str(path))
+        require(not ast.has_error, "CHECK_SELECTOR", "Rust parse: " + str(path))
+        check_scope(ast)
         return ast, source.splitlines()
 
     def find(scope, item_type, ident):
@@ -111,6 +123,7 @@ def declaration(root, read, check):
         node, _ = find(scope, "mod_item", module)
         directory /= module
         if (body := node.child_by_field_name("body")) is not None:
+            check_scope(body)
             scope = body
         else:
             candidates = [directory.with_suffix(".rs"), directory / "mod.rs"]

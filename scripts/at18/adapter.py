@@ -6,7 +6,7 @@ from datetime import datetime, timezone
 from urllib.parse import urlsplit
 
 from common import (ADAPTER, COMMIT, NAME, REGISTRY, SHA, SPECIAL, Invalid, git, git_blob, json_bytes, key_token,
-                    pointer, require, sha, strict_json, tree_entry, validate_schema)
+                    path_name, pointer, require, sha, strict_json, tree_entry, validate_schema)
 
 def timestamp(value):
     # 比较以原始精度进行；不把纳秒或更细时间截到 Python datetime 的微秒。
@@ -84,7 +84,7 @@ def decode_payload(contract, record, obj):
 PUBLIC_TOKEN = re.compile(r"[A-Za-z0-9_][A-Za-z0-9._:/+@~=%#\[\]-]{0,191}")
 
 
-def _public_fields(contract, fields, obj, *, version_pointer=None):
+def _public_fields(contract, fields, obj, *, version_pointer=None, item_source=None):
     rules = {}
     if version_pointer is not None:
         rules[version_pointer] = {}
@@ -107,9 +107,9 @@ def _public_fields(contract, fields, obj, *, version_pointer=None):
         elif child := rule.get("decode_as"):
             if rule["type"] == "object-array":
                 for item in value:
-                    _public_fields(contract, contract["item_sources"][child], item)
+                    _public_fields(contract, contract["item_sources"][child], item, item_source=child)
             else:
-                _public_fields(contract, contract["item_sources"][child], value)
+                _public_fields(contract, contract["item_sources"][child], value, item_source=child)
         elif rule.get("type") == "object":
             validators = {
                 "conditions": lambda v: v.keys() <= {"processes"} and
@@ -122,6 +122,16 @@ def _public_fields(contract, fields, obj, *, version_pointer=None):
         elif field == "send_refusal_detail":
             # 仅收枚举式 refusal class；详细错误可能含请求或凭据。
             require(value is None, "RECORD_PUBLIC_SCHEMA", "refusal detail")
+        elif item_source == "tb.key" and field == "basis_path":
+            # R03 出处是仓内路径（可从 .chanlun 开始），不是业务 token。
+            try:
+                path_name(value)
+            except Invalid as error:
+                raise Invalid("RECORD_PUBLIC_SCHEMA: basis path") from error
+            require(not re.match(r"[A-Za-z]:", value) and not re.search(r"[\x7f-\x9f]", value),
+                    "RECORD_PUBLIC_SCHEMA", "basis path")
+        elif item_source == "tb.key" and field == "basis_pointer":
+            require(typed(value, "pointer"), "RECORD_PUBLIC_SCHEMA", "basis pointer")
         elif rule.get("type") in ("string", "nullable-string", "profile-id", "nullable-profile-id", "pointer"):
             require(value is None or (value == "" and rule["type"] == "pointer") or
                     (isinstance(value, str) and PUBLIC_TOKEN.fullmatch(value.lstrip("/") if rule["type"] == "pointer" else value)),

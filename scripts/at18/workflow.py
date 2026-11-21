@@ -17,6 +17,21 @@ from run_checks import run_group, run_identity, validate_record
 FIRST_LIMIT = 256
 EXECUTION_FIELDS = {"check_id", "argv", "expected", "executed", "ignored", "skipped",
                     "exit_code", "tests", "status", "diagnostic"}
+AUTH_COMMENTS_QUERY = """
+query($owner: String!, $name: String!, $number: Int!, $endCursor: String) {
+  repository(owner: $owner, name: $name) {
+    nameWithOwner
+    issue(number: $number) {
+      number
+      comments(first: 100, after: $endCursor) {
+        totalCount
+        pageInfo { hasNextPage endCursor }
+        nodes { fullDatabaseId body createdAt lastEditedAt }
+      }
+    }
+  }
+}
+"""
 
 
 def action_outputs(values):
@@ -37,34 +52,58 @@ def authority_comment(repo, rule, token):
     if rule["comment_id"] is None:
         return None
     # 完整分页取原件；签署后新增无法核实的评论（可能撤回）保持阻断。
+    ticket = rule["ticket"]
+    scope = f"ticket:{ticket}"
     try:
-        require(token, "AUTH_REQUIRED", f"ticket:{rule['ticket']}")
+        require(token, "AUTH_REQUIRED", scope)
 
         def gh(*args):
             result = subprocess.run(["gh", "api", *args], capture_output=True,
                                     env=os.environ | {"GH_TOKEN": token})
-            require(result.returncode == 0, "AUTH_REQUIRED", f"ticket:{rule['ticket']}")
+            require(result.returncode == 0, "AUTH_REQUIRED", scope)
             return result.stdout
-        resource = f"repos/{repo}/issues/{rule['ticket']}"
+        resource = f"repos/{repo}/issues/{ticket}"
         issue = strict_json(gh(resource), "authorization issue")
         require(issue.get("state_reason") not in ("not_planned", "duplicate"),
-                "AUTH_REQUIRED", f"ticket:{rule['ticket']}")
-        pages = strict_json(gh("--paginate", "--slurp", resource + "/comments?per_page=100"),
+                "AUTH_REQUIRED", scope)
+        owner, name = repo.split("/")
+        pages = strict_json(gh("graphql", "--paginate", "--slurp", "-f", "query=" + AUTH_COMMENTS_QUERY,
+                               "-f", "owner=" + owner, "-f", "name=" + name, "-F", f"number={ticket}"),
                             "authorization comments", object_root=False)
-        comments = [row for page in pages for row in page]
-        unique((r["id"] for r in comments), "AUTH_REQUIRED", "duplicate authorization comments")
-        pin = next((row for row in comments if row["id"] == rule["comment_id"]), None)
-        require(pin is not None, "AUTH_REQUIRED", f"ticket:{rule['ticket']}")
-        signed = timestamp(pin["created_at"])
-        for row in comments:
-            created, updated = timestamp(row["created_at"]), timestamp(row["updated_at"])
-            require((created, row["id"]) <= (signed, pin["id"])
-                    and created <= updated
-                    and (updated == created or updated < signed),
-                    "AUTH_REQUIRED", f"ticket:{rule['ticket']}")
-        return pin
+        require(isinstance(pages, list) and pages, "AUTH_REQUIRED", scope)
+        comments, totals = {}, []
+        for index, page in enumerate(pages):
+            require(isinstance(page, dict) and not page.get("errors"), "AUTH_REQUIRED", scope)
+            repository = page["data"]["repository"]
+            actual_repo = repository["nameWithOwner"]
+            issue = repository["issue"]
+            require(isinstance(actual_repo, str) and actual_repo.casefold() == repo.casefold()
+                    and issue["number"] == ticket, "AUTH_REQUIRED", scope)
+            connection = issue["comments"]
+            require(connection["pageInfo"]["hasNextPage"] is (index < len(pages) - 1)
+                    and isinstance(connection["nodes"], list), "AUTH_REQUIRED", scope)
+            totals.append(connection["totalCount"])
+            for row in connection["nodes"]:
+                cid = row["fullDatabaseId"]
+                if isinstance(cid, str) and cid.isascii() and cid.isdecimal():
+                    cid = int(cid)
+                require(type(cid) is int and cid > 0 and cid not in comments, "AUTH_REQUIRED", scope)
+                comments[cid] = row
+        require(all(type(n) is int and n == len(comments) for n in totals), "AUTH_REQUIRED", scope)
+        pin = comments[rule["comment_id"]]
+        signed = timestamp(pin["createdAt"])
+        require(pin["lastEditedAt"] is None, "AUTH_REQUIRED", scope)
+        for cid, row in comments.items():
+            if cid == rule["comment_id"]:
+                continue
+            created = timestamp(row["createdAt"])
+            edited = None if row["lastEditedAt"] is None else timestamp(row["lastEditedAt"])
+            # GitHub 的时间戳不能用评论 ID 补出编辑顺序；同一秒一律不推断先后。
+            require(created[0] < signed[0] and (edited is None or created <= edited and edited[0] < signed[0]),
+                    "AUTH_REQUIRED", scope)
+        return {"id": rule["comment_id"], "issue_url": f"https://api.github.com/{resource}", "body": pin["body"]}
     except (ValueError, TypeError, KeyError, OSError) as error:
-        raise Invalid(f"AUTH_REQUIRED: ticket:{rule['ticket']}") from error
+        raise Invalid(f"AUTH_REQUIRED: {scope}") from error
 
 
 def authorize(loaded, groups, token=None):
