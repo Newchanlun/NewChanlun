@@ -5,6 +5,10 @@
 //! 第七资源门按 state 的跨请求审计源零保留不变式核显式正 cap，不计生成缓存或临时 heap。
 //! 本模块不提供默认数值；实际服务验收由调用方冻结具名资源输入并绑定当前二进制。
 
+use super::admission_anchor::{
+    issuance::{Contract, CURRENT},
+    NamedContract,
+};
 use super::driver::Driver;
 use super::*;
 use newchan_rust::session_protocol::{positive, validate_envelope};
@@ -57,18 +61,22 @@ const GATE_FIELDS_TEXT: &str =
 /// 旧启动器对 Unix socket 路径的 100 字节上限（`s_service_control.py`），本入口沿用。
 const SOCKET_PATH_BYTES: usize = 100;
 
-const NAMED_RECOVERY_FLAGS: [&str; 7] = [
+const NAMED_RECOVERY_FLAGS: [&str; 9] = [
     "--protocol-revision",
     "--admission-job-limits",
     "--db",
     "--profile",
     "--clock-plan",
     "--structure-source",
+    "--catalog",
+    "--contract-version",
     "--s-recovery-request",
 ];
-const SERVE_FLAGS: [&str; 10] = [
+const SERVE_FLAGS: [&str; 12] = [
     "--s-recovery-request",
     "--structure-source",
+    "--catalog",
+    "--contract-version",
     "--admission-job-limits",
     "--protocol-revision",
     "--db",
@@ -237,7 +245,12 @@ struct ServeOptions {
     socket: PathBuf,
     resources: PathBuf,
     structure_source: Option<PathBuf>,
-    named_recovery: Option<PathBuf>,
+    named_recovery: Option<NamedServeOptions>,
+}
+struct NamedServeOptions {
+    request: PathBuf,
+    catalog: PathBuf,
+    version: String,
 }
 struct AdvanceOptions {
     db: PathBuf,
@@ -260,19 +273,28 @@ struct RecoverOptions {
 
 /// 命令分派：`Ok(Some(value))` 为要打印的命令结果，`Ok(None)` 为无结果（服务正常退出）。
 pub(super) fn run(args: &[String]) -> Result<Option<super::admission::CommandOutput>, String> {
-    run_with_policy(args, true)
+    run_with_policy(args, true, &CURRENT)
 }
 
 #[cfg(test)]
 pub(super) fn run_fixture(
     args: &[String],
 ) -> Result<Option<super::admission::CommandOutput>, String> {
-    run_with_policy(args, false)
+    run_with_policy(args, false, &CURRENT)
 }
 
-pub(super) fn run_with_policy(
+#[cfg(test)]
+pub(super) fn test_run_named_cli(
+    args: &[String],
+    registry: &Contract<'_>,
+) -> Result<Option<super::admission::CommandOutput>, String> {
+    run_with_policy(args, false, registry)
+}
+
+fn run_with_policy(
     args: &[String],
     production: bool,
+    registry: &Contract<'_>,
 ) -> Result<Option<super::admission::CommandOutput>, String> {
     match args.get(1).map(String::as_str).unwrap_or("") {
         "serve" => {
@@ -283,7 +305,7 @@ pub(super) fn run_with_policy(
                 super::admission_anchor::ControlEnv::capture(),
             )
             .map_err(|error| error.to_string())?;
-            serve_with_policy(options, admission, production)
+            serve_with_policy(options, admission, production, registry)
         }
         "advance" => {
             let options = AdvanceOptions::parse(args)?;
@@ -307,7 +329,7 @@ pub(super) fn run_with_policy(
         }
         other => match named_recovery::Action::from_command(other) {
             Some(action) => {
-                run_named_recovery(args, other, action)?;
+                run_named_recovery(args, other, action, registry)?;
                 Ok(None)
             }
             None => Err(format!(
@@ -430,9 +452,21 @@ impl ServeOptions {
     fn parse(args: &[String]) -> Result<Self, String> {
         let values = parse_flags("serve", args, &SERVE_FLAGS)?;
         selector(&values, "serve")?;
+        let named_recovery = if let Some(request) = values.get("--s-recovery-request") {
+            Some(NamedServeOptions {
+                request: PathBuf::from(request),
+                catalog: PathBuf::from(required(&values, "serve", "--catalog")?),
+                version: required(&values, "serve", "--contract-version")?.to_owned(),
+            })
+        } else {
+            if values.contains_key("--catalog") || values.contains_key("--contract-version") {
+                return Err("S3WriterArgsUnsupported：serve 的 --catalog / --contract-version 只用于 --s-recovery-request".into());
+            }
+            None
+        };
         Ok(Self {
             structure_source: values.get("--structure-source").map(PathBuf::from),
-            named_recovery: values.get("--s-recovery-request").map(PathBuf::from),
+            named_recovery,
             db: existing_file(required(&values, "serve", "--db")?, "--db")?,
             profile: existing_file(required(&values, "serve", "--profile")?, "--profile")?,
             epoch: epoch(
@@ -566,11 +600,14 @@ fn read_named_config(
     clock: v2::ClockPlan,
     profile_hash: String,
     structure_source: &Path,
+    catalog: &Path,
 ) -> Result<named_recovery::FrozenConfig, String> {
     let source = strict_json(&admission.read_file(structure_source, None)?)?;
+    let (definition, _, _) = parse_catalog_strict(&admission.read_file(catalog, None)?)?;
     Ok(named_recovery::FrozenConfig {
         clock,
         profile_hash,
+        catalog_hash: catalog_definition_hash(&definition),
         source: newchan_rust::structure_source::Declaration::parse(&source)?,
     })
 }
@@ -579,6 +616,7 @@ fn run_named_recovery(
     args: &[String],
     command: &str,
     action: named_recovery::Action,
+    registry: &Contract<'_>,
 ) -> Result<(), String> {
     let flags = if action == named_recovery::Action::Inspect {
         &NAMED_RECOVERY_FLAGS[..NAMED_RECOVERY_FLAGS.len() - 1]
@@ -592,6 +630,15 @@ fn run_named_recovery(
     let profile = path("--profile")?;
     let clock = path("--clock-plan")?;
     let source = path("--structure-source")?;
+    let catalog = path("--catalog")?;
+    let contract = if action == named_recovery::Action::Query {
+        None
+    } else {
+        Some(NamedContract {
+            version: required(&values, command, "--contract-version")?,
+            registry,
+        })
+    };
     let request = if action == named_recovery::Action::Inspect {
         None
     } else {
@@ -608,8 +655,8 @@ fn run_named_recovery(
         .transpose()?;
     let clock = v2::ClockPlan::parse(strict_json(&admission.read_file(clock, None)?)?)?;
     let (_, profile_hash) = checked_profile_bytes(&admission.read_file(profile, None)?)?;
-    let config = read_named_config(&mut admission, clock, profile_hash, source)?;
-    named_recovery::emit(db, admission, action, config, request)
+    let config = read_named_config(&mut admission, clock, profile_hash, source, catalog)?;
+    named_recovery::emit(db, admission, action, config, request, contract)
 }
 
 /// 原第七门：当前审计路径不跨请求保留源，以结构 0 <= 显式正 cap 核验。
@@ -811,6 +858,7 @@ fn serve_with_policy(
     options: ServeOptions,
     mut admission: super::admission_anchor::PreparedAdmission,
     production: bool,
+    registry: &Contract<'_>,
 ) -> Result<Option<super::admission::CommandOutput>, String> {
     let mode = s_allocation::load_environment_mode()?;
     let theta_diagnostic = theta_diagnostic_testonly()?;
@@ -842,14 +890,25 @@ fn serve_with_policy(
         }
         return serve_diagnostic_fixture(&options, clock, &resources, mode, admission);
     }
-    let admission: super::admission::WriterAdmission = if let Some(path) = &options.named_recovery {
+    let admission: super::admission::WriterAdmission = if let Some(named) = &options.named_recovery
+    {
         let source = options
             .structure_source
             .as_deref()
             .ok_or("S3WriterArgsUnsupported：具名恢复后启动必须绑定 --structure-source")?;
-        let request = read_named_request(&mut admission, path)?;
-        let config = read_named_config(&mut admission, clock.clone(), profile_hash, source)?;
-        let scope = super::admission::WriterScope::admit_named(&options.db, admission)?;
+        let request = read_named_request(&mut admission, &named.request)?;
+        let config = read_named_config(
+            &mut admission,
+            clock.clone(),
+            profile_hash,
+            source,
+            &named.catalog,
+        )?;
+        let contract = NamedContract {
+            version: &named.version,
+            registry,
+        };
+        let scope = super::admission::WriterScope::admit_named(&options.db, admission, contract)?;
         scope.verify_named_startup(&config, &request, &options.epoch)?;
         scope.into()
     } else {

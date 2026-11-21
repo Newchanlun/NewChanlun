@@ -1,6 +1,8 @@
 //! #1527：一次性准备态 → 真实双锁 → 实测基线 → 私有 SQLite → 原账收尾 → 原件资格。
 //! 后续 source pathname 连续性、完整 RAM/extent 与同步硬截止分别仍属 I-2/I-3/I-4/I-5。
-use super::admission_anchor::{BudgetLease, FinishedAdmission, PreparedAdmission, Stage};
+use super::admission_anchor::{
+    BudgetLease, CommandAccounting, FinishedAdmission, NamedContract, PreparedAdmission, Stage,
+};
 use super::admission_provider::{self as provider, MeasuredDomain};
 use std::cell::RefCell;
 use std::fs::{File, OpenOptions};
@@ -70,6 +72,41 @@ impl Drop for Lock {
         let _ = self.file.unlock();
     }
 }
+pub(super) struct DomainLockPair {
+    writer: Lock,
+    maintenance: Lock,
+}
+
+pub(super) enum DomainLocks {
+    Ordinary(DomainLockPair),
+    Named(Rc<DomainLockPair>),
+}
+
+impl DomainLocks {
+    pub(super) fn new(writer: Lock, maintenance: Lock, named: bool) -> Self {
+        let pair = DomainLockPair {
+            writer,
+            maintenance,
+        };
+        if named {
+            let pair = Rc::new(pair);
+            CommandAccounting::retain_named_locks(&pair);
+            Self::Named(pair)
+        } else {
+            Self::Ordinary(pair)
+        }
+    }
+
+    pub(super) fn check(&self) -> Result<(), String> {
+        let pair = match self {
+            Self::Ordinary(pair) => pair,
+            Self::Named(pair) => pair.as_ref(),
+        };
+        pair.writer.check()?;
+        pair.maintenance.check()
+    }
+}
+
 struct Inner {
     lease: Arc<BudgetLease>,
     source: MeasuredDomain,
@@ -80,8 +117,7 @@ struct Inner {
     // #1527 M-02：原 Job 的未结预留错误不设 stopped；scope 必须保留首次收尾失败。
     startup_failure: RefCell<Option<String>>,
     // 资格必须与文件锁同寿命，控制 lease 的 Arc 不能单独授权开库。
-    writer: Lock,
-    maintenance: Lock,
+    locks: DomainLocks,
     // 准入所见源形状；只有 PrePolicyRecords 授权开库时那次 #1602 迁移写。
     delta: std::cell::Cell<crate::DeltaShape>,
 }
@@ -108,8 +144,7 @@ impl Inner {
             return Err("AdmissionDatabaseMismatch".into());
         }
         self.lease.revalidate_paths().map_err(|e| e.to_string())?;
-        self.writer.check()?;
-        self.maintenance.check()?;
+        self.locks.check()?;
         let source = self.source.verify_runtime();
         self.startup_gate()?;
         source
@@ -335,7 +370,11 @@ impl WriterScope {
             super::admission_private::RejectionPrefix::LegacyWrite,
         )
     }
-    pub(super) fn admit_named(db: &Path, prepared: PreparedAdmission) -> Result<Self, String> {
+    pub(super) fn admit_named(
+        db: &Path,
+        prepared: PreparedAdmission,
+        contract: NamedContract<'_>,
+    ) -> Result<Self, String> {
         if db != std::fs::canonicalize(db).map_err(|_| "SRecoveryMediumUnproven")? {
             return Err("SRecoveryMediumUnproven".into());
         }
@@ -343,7 +382,7 @@ impl WriterScope {
             db,
             prepared,
             super::admission_private::RejectionPrefix::None,
-            Lock::acquire_existing,
+            Some(contract),
         )
     }
 
@@ -352,14 +391,19 @@ impl WriterScope {
         prepared: PreparedAdmission,
         prefix: super::admission_private::RejectionPrefix<'_>,
     ) -> Result<Self, String> {
-        Self::admit_prefix_locked(db, prepared, prefix, Lock::acquire)
+        Self::admit_prefix_locked(db, prepared, prefix, None)
     }
     fn admit_prefix_locked(
         db: &Path,
         prepared: PreparedAdmission,
         prefix: super::admission_private::RejectionPrefix<'_>,
-        lock: fn(&Path, &str) -> Result<Lock, String>,
+        named_contract: Option<NamedContract<'_>>,
     ) -> Result<Self, String> {
+        let lock = if named_contract.is_some() {
+            Lock::acquire_existing
+        } else {
+            Lock::acquire
+        };
         let mixed_resources = prepared.is_mixed();
         let consumed = prepared.consume().map_err(|e| e.to_string())?;
         if std::fs::canonicalize(db).map_err(|_| consumed.failure("SourcePathLost"))?
@@ -372,8 +416,15 @@ impl WriterScope {
         consumed.check(Stage::E5).map_err(|e| e.to_string())?;
         let writer = writer_result.map_err(|e| consumed.failure(&e))?;
         let maintenance_result = lock(consumed.lease().db_path(), ".maintenance.lock");
-        consumed.check(Stage::E5).map_err(|e| e.to_string())?;
-        let maintenance = maintenance_result.map_err(|e| consumed.failure(&e))?;
+        let post_lock = consumed.check(Stage::E5).map_err(|e| e.to_string());
+        // 先托住已取得的锁，再传播原 E5 首错；普通入口的检查顺序不变。
+        let locks = maintenance_result
+            .map(|maintenance| DomainLocks::new(writer, maintenance, named_contract.is_some()));
+        post_lock?;
+        let locks = locks.map_err(|e| consumed.failure(&e))?;
+        if let Some(contract) = named_contract {
+            consumed.authorize_named(contract)?;
+        }
         let source = MeasuredDomain::measure(&consumed)?;
         #[cfg(feature = "s_incremental")]
         let max_store_bytes = consumed.limits().max_store_bytes;
@@ -440,8 +491,7 @@ impl WriterScope {
                 format!("{e}；原准入账={:?}", finished.accounting().snapshot())
             }
         })?;
-        writer.check()?;
-        maintenance.check()?;
+        locks.check()?;
         finished.accounting().check_deadline().map_err(|e| {
             if mixed {
                 mixed_failure(e.code(), "seal", e.detail())
@@ -457,8 +507,7 @@ impl WriterScope {
                 #[cfg(feature = "s_incremental")]
                 max_store_bytes,
                 startup_failure: RefCell::new(None),
-                writer,
-                maintenance,
+                locks,
                 delta: std::cell::Cell::new(delta),
             }),
         })

@@ -6335,7 +6335,7 @@ fn main() {
     let accounting = v3::admission_anchor::CommandAccounting::begin();
     if let Err(e) = run() {
         let receipt = accounting.report(&e, &mut std::io::stderr().lock());
-        // report 已等每次 write 返回并核原账；显式析构发生在 process::exit 之前。
+        // report 持具名动作交付的双锁只写出一条首错，并核完原账才解锁。
         drop(receipt);
         drop(accounting);
         std::process::exit(1);

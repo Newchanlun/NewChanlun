@@ -543,7 +543,22 @@ impl PreparedAdmission {
     }
 }
 
+/// 版本来自调用方冻结配置，摘要只能来自本次钉住的原锚，不能从 CLI 或恢复请求代填。
+pub(super) struct NamedContract<'a> {
+    pub(super) version: &'a str,
+    pub(super) registry: &'a issuance::Contract<'a>,
+}
+
 impl ConsumedAdmission {
+    pub(super) fn authorize_named(&self, contract: NamedContract<'_>) -> Result<(), String> {
+        // 六字段锚没有独立版本字段：生效版本由注册的规范 limits 摘要绑定。
+        // 不得给不同生效版本复用同一 limits 摘要；否则原锚不能区分两个版本。
+        contract
+            .registry
+            .authorize_limits(contract.version, &self.lease.anchor.sha256)?;
+        self.check(Stage::E5).map_err(|e| e.to_string())
+    }
+
     pub(crate) fn limits(&self) -> JobLimits {
         self.limits
     }
@@ -635,6 +650,8 @@ struct TerminalState {
 }
 thread_local! {
     static TERMINAL: RefCell<Option<TerminalState>> = const { RefCell::new(None) };
+    // 独立于普通/mixed Job 元数据；具名 serve 完成启动账后仍保有这个命令守卫。
+    static NAMED_LOCKS: RefCell<Option<Rc<super::admission::DomainLockPair>>> = const { RefCell::new(None) };
 }
 pub(crate) struct CommandAccounting;
 #[derive(Debug)]
@@ -679,10 +696,24 @@ impl CommandAccounting {
         });
         Self
     }
+    pub(super) fn retain_named_locks(locks: &Rc<super::admission::DomainLockPair>) {
+        TERMINAL.with(|slot| {
+            if slot.borrow().is_some() {
+                NAMED_LOCKS.with(|held| {
+                    let mut held = held.borrow_mut();
+                    assert!(held.is_none(), "nested named recovery locks");
+                    *held = Some(Rc::clone(locks));
+                });
+            }
+        });
+    }
+
     /// 最后错误 sink 是已停止 Job 的清理输出，不能用 pre_io_check 丢掉诊断。
     /// 每次实际 write 返回 n 后调用原 charge；原 stopped 拒收量另记，不改首错/续期。
     /// 返回收据不再次输出，避免按日志长度虚造自引用计数。
     pub(crate) fn report(&self, error: &str, sink: &mut impl io::Write) -> TerminalReceipt {
+        // 即使 SQLite 已关闭、准入作用域已返回，守卫也要跨过最后一次 stderr write 和 Job 收尾。
+        let _named_locks = NAMED_LOCKS.with(|slot| slot.borrow_mut().take());
         let state = TERMINAL
             .with(|slot| slot.borrow_mut().take())
             .unwrap_or_default();
@@ -765,6 +796,9 @@ impl CommandAccounting {
 impl Drop for CommandAccounting {
     fn drop(&mut self) {
         TERMINAL.with(|slot| {
+            slot.borrow_mut().take();
+        });
+        NAMED_LOCKS.with(|slot| {
             slot.borrow_mut().take();
         });
     }

@@ -1,7 +1,7 @@
 //! ADR 0050：S 域具名恢复请求、只读切面与回执验真，不授予开库写权。
 use super::{
-    admission::{emit_accounted_payload, Lock},
-    admission_anchor::{AdmissionAccounting, PreparedAdmission, Stage},
+    admission::{emit_accounted_payload, DomainLocks, Lock},
+    admission_anchor::{AdmissionAccounting, NamedContract, PreparedAdmission, Stage},
     admission_provider::RecoveryObservation,
 };
 use crate::{meta_get_opt, v2::ClockPlan};
@@ -40,6 +40,7 @@ impl Action {
 
 pub(super) struct FrozenConfig {
     pub(super) profile_hash: String,
+    pub(super) catalog_hash: String,
     pub(super) source: Declaration,
     pub(super) clock: ClockPlan,
 }
@@ -271,6 +272,10 @@ impl Snapshot {
         super::require_current_writer_rule(&rule)?;
         let source = meta(conn, newchan_rust::structure_source::META_KEY)?;
         let profile = meta(conn, "profile_hash")?;
+        let catalog_hash = meta(conn, "catalog_hash")?;
+        if catalog_hash != config.catalog_hash {
+            return Err("IdentityConflict：S恢复冻结 catalog_hash 与库不一致".into());
+        }
         let (incarnation, clock_hash, clock_json, phase_frontier): (String, String, String, String) =
             conn.query_row(
                 "SELECT session_generation,clock_plan_hash,clock_plan_json,logical_phase_frontier FROM s_protocol_meta WHERE singleton=1",
@@ -294,7 +299,7 @@ impl Snapshot {
             incarnation,
             epoch: positive(&meta(conn, "writer_epoch")?, "writer_epoch")?,
             cut,
-            config: json!({"rule_revision":rule, "profile_hash":profile, "catalog_hash":meta(conn, "catalog_hash")?,
+            config: json!({"rule_revision":rule, "profile_hash":profile, "catalog_hash":catalog_hash,
                            "clock_plan_hash":clock_hash, "structure_source":strict_json(source.as_bytes())?}),
             idle: meta(conn, "advance_state")? == "idle",
             phase_frontier,
@@ -322,6 +327,7 @@ pub(super) fn run(
     action: Action,
     config: FrozenConfig,
     request: Option<&Request>,
+    contract: Option<NamedContract<'_>>,
     output: impl FnOnce(&Value, &mut super::admission_anchor::FinishedAdmission) -> Result<(), String>,
 ) -> Result<(), String> {
     let admission = admission.consume().map_err(|e| e.to_string())?;
@@ -333,7 +339,11 @@ pub(super) fn run(
     let writer = Lock::acquire_existing(original, ".writer.lock")?;
     admission.check(Stage::E5).map_err(|e| e.to_string())?;
     let maintenance = Lock::acquire_existing(original, ".maintenance.lock")?;
+    let locks = DomainLocks::new(writer, maintenance, true);
     admission.check(Stage::E5).map_err(|e| e.to_string())?;
+    if action != Action::Query {
+        admission.authorize_named(contract.ok_or("AdmissionContractVersionMissing")?)?;
+    }
     let source = if action == Action::Current {
         RecoveryObservation::through_r4(&admission)?
     } else {
@@ -355,8 +365,7 @@ pub(super) fn run(
         .lease()
         .revalidate_paths()
         .map_err(|e| e.to_string())?;
-    writer.check()?;
-    maintenance.check()?;
+    locks.check()?;
     output(&value, &mut finished)
 }
 
@@ -366,6 +375,7 @@ pub(super) fn emit(
     action: Action,
     config: FrozenConfig,
     request: Option<Request>,
+    contract: Option<NamedContract<'_>>,
 ) -> Result<(), String> {
     run(
         db,
@@ -373,6 +383,7 @@ pub(super) fn emit(
         action,
         config,
         request.as_ref(),
+        contract,
         |value, account| {
             let mut payload = canonical_json(value).into_bytes();
             payload.push(b'\n');
