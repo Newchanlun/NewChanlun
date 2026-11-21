@@ -192,6 +192,53 @@ pub(crate) fn judge_first_cached(
     // sidecar，不进 Classification、按坐标查不到）。只建可查性，判据（`t3_grade`/`diverged`）逐字未动。
     grade_sink: &mut Vec<FirstClassGradeRecord>,
 ) -> Option<BspPoint> {
+    judge_first_cached_with_r5(
+        last_center,
+        trend_dir,
+        seg,
+        anchor_dir,
+        hist,
+        dif,
+        closes_tick,
+        src_to_idx,
+        a_seg,
+        c_move_start,
+        departure_end,
+        gauge,
+        strokes,
+        sorted,
+        T3InCSource::NativeSegments,
+        level,
+        grade_sink,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn judge_first_cached_with_r5(
+    last_center: &Center,
+    trend_dir: Direction,
+    seg: &Segment,
+    anchor_dir: Option<Direction>,
+    hist: &[f64],
+    dif: &[f64],
+    closes_tick: &[Tick],
+    src_to_idx: &[usize],
+    a_seg: Option<((usize, usize), (Tick, Tick))>,
+    c_move_start: Option<usize>,
+    // ★#1028 裁定 A：一类点点锚 = departure 单元终点（趋势真终点）。`Some(x)` = L≥1 调用方已按
+    // `cand_predicate::departure_unit_end` 预算（末子段常是回抽反趋势段，#1035 §1.4）；`None` =
+    // L0 / 直调（segment 自身即 departure 单元，点锚回退 `seg.end_index`）。只动锚，不动判定链。
+    departure_end: Option<usize>,
+    gauge: DivergenceGauge,
+    strokes: &[Stroke],
+    sorted: &[Segment],
+    r5: T3InCSource,
+    level: Option<u32>,
+    // ★#885 S4-d：分级记录生产 sink——按 `diverged` 无条件捕获（Present 与 Missing 两域），
+    // 由提取入口一路上穿进 `LevelState.first_class_grades`（否则域此前只落 thread_local 诊断
+    // sidecar，不进 Classification、按坐标查不到）。只建可查性，判据（`t3_grade`/`diverged`）逐字未动。
+    grade_sink: &mut Vec<FirstClassGradeRecord>,
+) -> Option<BspPoint> {
     // ★#551：三道结构门由 [`first_structural_gates`] 单一来源判定（本函数与 #550 候选事件产出
     // 同读；禁第二套判据，audit §6）。本函数保持「三门全成立才产点」的收缩语义不变。
     let gates = first_structural_gates(
@@ -217,6 +264,7 @@ pub(crate) fn judge_first_cached(
         gauge,
         strokes,
         sorted,
+        r5,
         level,
         grade_sink,
     )
@@ -243,6 +291,7 @@ pub(crate) fn judge_first_from_gates(
     gauge: DivergenceGauge,
     strokes: &[Stroke],
     sorted: &[Segment],
+    r5: T3InCSource,
     level: Option<u32>,
     // ★#885 S4-d：分级记录生产 sink——按 `diverged` 无条件捕获（Present 与 Missing 两域）。
     grade_sink: &mut Vec<FirstClassGradeRecord>,
@@ -347,14 +396,15 @@ pub(crate) fn judge_first_from_gates(
     // 为零 bit 结构候选，继续走既有候选流（P2-R2 先例，`struct_break_dir` 无条件置，见下）。
     // `THETA_T3INC_SKIP=1`（D5 counterfactual）⟹ 强制跳过本合取，恢复 #606 前旧行为
     // （T3-in-c 恒 Present，仅 `diverged` 门控一类 bit）；该臂为 counterfactual，不参生产对拍。
-    let t3_grade = t3_in_c_scan_grade(
+    let t3_grade = r5.grade(
         sorted,
         last_center,
         trend_dir,
         gates.lambda_c,
         seg.end_index,
     );
-    let t3_in_c_present = t3_in_c_skip_enabled() || matches!(t3_grade, T3InCScan::Present { .. });
+    let diagnostic_skip = matches!(r5, T3InCSource::NativeSegments) && t3_in_c_skip_enabled();
+    let t3_in_c_present = diagnostic_skip || matches!(t3_grade, T3InCScan::Present { .. });
     // ★#607 S2 D4：观测面 sidecar 挂点移入判据本体（D2 后 bits 已被 T3-in-c 二次门控，仅凭
     // `pf.bits` 观测会漏记否则域点——须在门控**之前**按 `diverged` 捕获，见 #606 S1 报告
     // §8.3 教训同源）。生产 `judge_segment`（level=Some，incremental resume 传参穿透）与

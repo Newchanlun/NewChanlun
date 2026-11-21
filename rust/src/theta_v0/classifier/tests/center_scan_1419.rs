@@ -643,8 +643,8 @@ fn s4_up_k10_k12_assignment_and_anchor_match_oracle() {
     assert_eq!(a12[9].seed_from_self, SeedFromSelf::Formed);
 }
 
-/// oracle E4 K7/K8：续扫锚 u5 的 seed 相切（ZD=ZG=15，TANGENT_ZD_EQ_ZG）⟹ +1；K7 时 u4、u5 CONNECTOR(A→pending)
-/// （u5 seed_from_self=FAILED），u6、u7 待评估；K8 B 自 u6 成立，u4、u5 改为 CONNECTOR(A→B)。
+/// E4 K7/K8：u5 的 seed 相切（ZD=ZG=15）失败；#2141 §5.2 下 K7 只有已证突破回抽 u4
+/// 可作 CONNECTOR(A→pending)。K8 B 自 u6 成立，此时 u4 与 u5 同为两枢间连接。
 #[test]
 fn s4_e4_tangent_seed_failure_and_two_unit_connector_match_oracle() {
     const E4: [Tick; 13] = [10, 40, 20, 35, 5, 15, 2, 18, 15, 17, 1, 8, 6];
@@ -662,16 +662,19 @@ fn s4_e4_tangent_seed_failure_and_two_unit_connector_match_oracle() {
         Some(SeedExclusion::TangentZdEqZg)
     );
     let a7 = f7.unit_facts();
-    for k in [4, 5] {
-        assert_eq!(
-            a7[k].assignment,
-            UnitAssignment::Connector {
-                left: 0,
-                right: None
-            },
-            "u{k}"
-        );
-    }
+    assert_eq!(
+        a7[4].assignment,
+        UnitAssignment::Connector {
+            left: 0,
+            right: None
+        },
+        "只有 R5 破坏回抽 u4 获得待右枢连接名分"
+    );
+    assert_eq!(
+        a7[5].assignment,
+        UnitAssignment::NotYetAssigned(WaitReason::SeedNotYetEvaluable),
+        "u5 试种失败不等于已证与右枢相连"
+    );
     assert_eq!(
         (a7[4].seed_from_self, a7[5].seed_from_self),
         (SeedFromSelf::NotEvaluated, SeedFromSelf::Failed)

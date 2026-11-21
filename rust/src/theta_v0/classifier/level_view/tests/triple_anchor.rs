@@ -101,7 +101,7 @@ fn provider_ext_carries_triple_anchor_sidecar() {
         as_of: 139,
         version: C2VersionTuple::auto_pairing(),
     };
-    let view = assemble_level_view(
+    let view = super::fixtures::assemble_with_fixture_r5(
         C2LevelViewConfig { enabled: true },
         query,
         LevelViewMaterial {
@@ -112,6 +112,7 @@ fn provider_ext_carries_triple_anchor_sidecar() {
             dif: &dif,
             close_src: &close_src,
         },
+        None,
     )
     .unwrap();
     // 供给：x=129 处顶分型（极值 190 = 腿12 hi）；包含层逐根成组（锚 = 序号自身）。

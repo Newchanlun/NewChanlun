@@ -4,7 +4,8 @@
 
 use super::super::super::types::{Center, Direction, MoveKind, Segment, Tick};
 use super::super::decompose::{MoveBlock, MoveStatus};
-use super::super::divergence::{departure_move_c_start, locate_departure_move_a, self_anchors};
+use super::super::divergence::{departure_move_c_start, self_anchors};
+use super::super::{center_scan::R5Proof, signal::T3InCSource};
 use super::confirm::{DivergencePair, DivergencePairId};
 use super::projection::{leg_as_segment, ExactThreeProjection, LowerLeg};
 use super::ProviderVersion;
@@ -305,6 +306,18 @@ pub fn provide_divergence_pairs(
     legs: &[LowerLeg],
     as_of: usize,
 ) -> Vec<DivergencePair> {
+    let settlements = projection.native_settlements(legs);
+    provide_divergence_pairs_with_r5(level, projection, blocks, legs, as_of, &settlements)
+}
+
+pub fn provide_divergence_pairs_with_r5(
+    level: u32,
+    projection: &ExactThreeProjection,
+    blocks: &[MoveBlock],
+    legs: &[LowerLeg],
+    as_of: usize,
+    settlements: &[Option<R5Proof>],
+) -> Vec<DivergencePair> {
     let segments: Vec<_> = legs.iter().map(leg_as_segment).collect();
     let anchors = self_anchors(&segments);
     let mut pairs = Vec::new();
@@ -317,28 +330,50 @@ pub fn provide_divergence_pairs(
         }
         let prev = projection.seeds[block.end_center - 1].center;
         let last = projection.seeds[block.end_center].center;
-        let Some(seg_a) = locate_departure_move_a(&segments, &anchors, &prev, &last, direction)
-        else {
-            continue;
-        };
+        let source = |index: usize| T3InCSource::Scanned(settlements.get(index).copied().flatten());
+        let prev_r5 = source(block.end_center - 1);
+        let last_r5 = source(block.end_center);
         // #104/#105 裁定修复（di-trend-c-terminal-forward-find-ruling-20260716）：
         // C 终段 = 离开最后中枢后的**第一个**同向段（正向 find）。此前 rev().find 取
         // 全域最后一个同向段，最终快照下 C 段被锚到数据末端，Trend 背驰恒 false。
-        let Some(c_terminal) = segments.iter().find(|segment| {
-            segment.direction == direction
-                && segment.start_index >= last.end_index
-                && segment.end_index <= as_of
-        }) else {
-            continue;
-        };
-        let Some(c_start) = departure_move_c_start(
-            &segments,
-            &anchors,
+        let boundary = last_r5
+            .boundary(&segments, &last, direction)
+            .filter(|boundary| boundary.1 .1 <= as_of);
+        // 字面分支的离开腿可能正是 B 的末成员；它完整归 C。
+        // 独立见证的外段在 B 之后，同一上界不删掉 B 的末成员。
+        let a_limit = boundary.map_or(segments.len(), |((leave_start, _), _)| {
+            segments.partition_point(|segment| segment.end_index <= leave_start)
+        });
+        let Some(seg_a) = prev_r5.a_span(
+            &segments[..a_limit],
+            &anchors[..a_limit],
+            &prev,
             &last,
             direction,
-            c_terminal.start_index,
+            false,
         ) else {
             continue;
+        };
+        let c_start = if let Some(boundary) = boundary {
+            boundary.0 .0
+        } else {
+            let Some(c_terminal) = segments.iter().find(|segment| {
+                segment.direction == direction
+                    && segment.start_index >= last.end_index
+                    && segment.end_index <= as_of
+            }) else {
+                continue;
+            };
+            let Some(start) = departure_move_c_start(
+                &segments,
+                &anchors,
+                &last,
+                direction,
+                c_terminal.start_index,
+            ) else {
+                continue;
+            };
+            start
         };
         // ★R1（2026-07-17 代理裁定，p112 实证）：seg_c 取段 = **全离开段**——c_end 从首个
         // 同向段终点扩展为 c_start 起、end ≤ as_of 的**末个同向段**终点（037:22 全离开走势
@@ -354,6 +389,7 @@ pub fn provide_divergence_pairs(
                     && segment.end_index <= as_of
             })
             .map(|segment| segment.end_index)
+            .or_else(|| boundary.map(|b| b.0 .1))
         else {
             continue;
         };

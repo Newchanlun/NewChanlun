@@ -10,9 +10,7 @@ use std::collections::BTreeMap;
 
 use super::super::super::types::{Center, Direction, Segment};
 use super::super::decompose::center_trend_gate;
-use super::super::divergence::{
-    departure_move_c_start, locate_departure_move_a, move_range_envelope,
-};
+use super::super::divergence::move_range_envelope;
 use super::super::signal;
 use super::key::{
     CandidateKey, CandidateKind, ObservedState, ParentFingerprint, StructuralPredicates,
@@ -53,6 +51,7 @@ pub struct CandidateObservation {
 /// （λ_C 与 seg_a 相同、只右端不同）。它们是同一候选在**同一时刻**的多份证据，不是时间序列——
 /// 必须先归约成每 key 一条观察再入事件簿，否则同 as_of 重跑时靠前的短区间会被误判为区间回缩，
 /// 破坏幂等（US8）。归约口径见 [`merged`]。
+#[cfg(test)]
 pub(crate) fn structural_observations_for_level(
     level: u32,
     centers: &[Center],
@@ -61,6 +60,27 @@ pub(crate) fn structural_observations_for_level(
     anchor_dirs: &[Option<Direction>],
     close_src: &[usize],
 ) -> Vec<CandidateObservation> {
+    observe_structure(
+        level,
+        centers,
+        blocks,
+        segments,
+        anchor_dirs,
+        close_src,
+        None,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn observe_structure(
+    level: u32,
+    centers: &[Center],
+    blocks: &[super::super::decompose::MoveBlock],
+    segments: &[Segment],
+    anchor_dirs: &[Option<Direction>],
+    close_src: &[usize],
+    r5_meta: Option<&[super::super::recursive_tower::WinMeta]>,
+) -> Vec<CandidateObservation> {
     let center_gate = center_trend_gate(centers.len(), blocks);
     let context = StructuralScan {
         level,
@@ -68,6 +88,7 @@ pub(crate) fn structural_observations_for_level(
         segments,
         anchor_dirs,
         close_src,
+        r5_meta,
     };
     // ★SPEC #1077 3a：腿收集与归约拆开——扫描只产腿（per-segment 素材），归约层（merged/
     // 首证钟/state）留到 [`reduce_structural_legs`]（合并扫描在 frontier 之后对 prefix+tail
@@ -151,6 +172,7 @@ struct StructuralScan<'a> {
     segments: &'a [Segment],
     anchor_dirs: &'a [Option<Direction>],
     close_src: &'a [usize],
+    r5_meta: Option<&'a [super::super::recursive_tower::WinMeta]>,
 }
 
 fn structural_observation(
@@ -159,18 +181,26 @@ fn structural_observation(
     i: usize,
     segment: &Segment,
 ) -> Option<CandidateObservation> {
-    let c_idx = signal::nearest_confirmed_center_idx(scan.centers, segment.start_index)?;
+    let c_idx = signal::departure_center_idx(scan.centers, segment)?;
     let direction = center_gate.get(c_idx).copied().flatten()?;
     let previous = scan.centers.get(c_idx.checked_sub(1)?)?;
     let parent = &scan.centers[c_idx];
-    let a = locate_departure_move_a(scan.segments, scan.anchor_dirs, previous, parent, direction)
+    let a = signal::T3InCSource::for_center(scan.r5_meta, c_idx - 1)
+        .a_span(
+            scan.segments,
+            scan.anchor_dirs,
+            previous,
+            parent,
+            direction,
+            true,
+        )
         .and_then(|span| move_range_envelope(scan.segments, span).map(|range| (span, range)));
-    let c_start = departure_move_c_start(
+    let c_start = signal::T3InCSource::for_center(scan.r5_meta, c_idx).c_start(
         scan.segments,
         scan.anchor_dirs,
         parent,
         direction,
-        segment.start_index,
+        segment,
     );
     let gates = signal::first_structural_gates(
         parent,
@@ -290,6 +320,7 @@ pub(crate) fn pan_observations_for_level(
 /// ★#551：入参不含 `hist`/`dif`/`closes_tick`/`gauge`——候选产出在**类型层**够不到 MACD 力度
 /// 序列（力度只经既有 BSP 路径影响 `BspPoint.bits`，不进候选身份、状态与任一事件字段）。
 /// `close_src` 仍需要，仅用于 `comparable` 谓词的坐标可映射性判定（不读价格/面积）。
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn observations_for_level(
     level: u32,
     centers: &[Center],
@@ -298,9 +329,17 @@ pub(crate) fn observations_for_level(
     anchor_dirs: &[Option<Direction>],
     close_src: &[usize],
     pan_div: &[signal::PanDivCert],
+    r5_meta: Option<&[super::super::recursive_tower::WinMeta]>,
 ) -> Vec<CandidateObservation> {
-    let mut observations =
-        structural_observations_for_level(level, centers, blocks, segments, anchor_dirs, close_src);
+    let mut observations = observe_structure(
+        level,
+        centers,
+        blocks,
+        segments,
+        anchor_dirs,
+        close_src,
+        r5_meta,
+    );
     observations.extend(pan_observations_for_level(level, pan_div));
     observations.sort_by_key(|observation| (observation.interval, observation.key));
     observations

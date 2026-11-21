@@ -39,21 +39,6 @@ fn p52_frontier_diagnostics_are_level_scoped_and_resettable() {
 #[test]
 fn end_to_end_second_buy_via_l1_l2_geometric() {
     let cfg = ThetaConfig::default();
-    // 11 段 L0：三组（每组 → 一个 L1 走势）+ 组间两个连接段（#1419 R8）。★中枢延伸语义下的诚实重算（PDF §5，task #142）：
-    // 组间首段必须与前组**冻结核心 [ZD,ZG]** 不相交（Step3 non-extension），否则整串被 Step2
-    // 吸收为 1 个延伸中枢 ⟹ 塔不生长（旧全触及 fixture 的坍缩后果）。推导：
-    // - 组A up-down-up：核心 K_A=[max(110,120,120),min(150,150,148)]=[120,148]，外缘 O_A=[110,150]。
-    // - 组B down-up-down：首段 [80,115] hi=115 < ZD_A=120 ⟹ non-extension（组间分离）；
-    //   核心 K_B=[max(80,80,85),min(115,125,114)]=[85,114]，中枢 Zn 外缘 [80,115]（#1419 S2），
-    //   走势区间 O_B=[80,125]（含非 Zn 的 ↑ 段高点，#1419 r2 第 1 条）。
-    // - 组C up-down-up：首段 [115,148] lo=115 > ZG_B=114 ⟹ non-extension；
-    //   核心 K_C=[max(115,112,112),min(148,148,147)]=[115,147]，外缘 O_C=[112,148]。
-    // L2 核心（几何路径，三 L1 走势区间交）= [max(110,80,112), min(150,125,148)] = [112,125] 非空。
-    // B2 结构：L1[1].lo=80 < ZD2=112 深破 L2 核心下沿（第一类离开候选，Side::Long）；
-    // L1[2] 回拉不创新低（lo=112 >= L1[1].lo=80）；L1[0]/L1[1] 外缘占位方向同 Down
-    // （末子 hi < 首子 hi：148<150 / 114<115）⟹ 背驰可配对（closes 前大后小）。
-    // ★#1419 R8（#812 Z-5）：组间各插一个连接段（c1 [12,16]、c2 [28,32]），结算后被跳过、不进任何
-    // 中枢窗口；组内三段同上推导，组B 坐标 +4、组C +8。见 [`three_group_segments`]。
     let segments = three_group_segments();
     // closes 让 L1[1] 区间（source_index [16,28]）MACD 面积 < L1[0] 区间（[0,12]）= 背驰（真算）。
     // 前段大幅波动（面积大），后段小幅（面积小）。
@@ -192,7 +177,6 @@ fn l0_level_emits_no_second_class_window_bound() {
 #[test]
 fn quasi_second_probe_runs_on_production_tower() {
     let cfg = ThetaConfig::default();
-    // ★#1419 R8：组间各插一个连接段，见 [`three_group_segments`]（组B 坐标 +4）。
     let segments = three_group_segments();
     // 笔只覆盖离开/回抽两段（其余段不参与 ForceL 比较）；速度如上注释。
     let strokes = vec![
@@ -353,7 +337,7 @@ fn level_ge1_extract_first_third_produces_type1_via_units() {
         dd: 90,
         gg: 210,
         start_index: 0,
-        end_index: 8,
+        end_index: 11,
     };
     // Down 单元：lo=终点价、hi=起点价（unit_to_segment 还原 start=hi/end=lo）。
     let units = vec![
@@ -461,7 +445,7 @@ fn level_ge1_extract_first_third_produces_type3_via_units() {
         dd: 90,
         gg: 210,
         start_index: 0,
-        end_index: 12,
+        end_index: 16,
     };
     let units = vec![
         // 离开单元：向上，终点=hi=250 > zg=200（离开中枢上方）。
@@ -1591,17 +1575,17 @@ fn no_center_terminates_recursion() {
 #[test]
 fn end_to_end_third_buy_signal() {
     let cfg = ThetaConfig::default();
-    // 段0-2：三段在 [100,200] 重叠 ⟹ seed 中枢，核心 [ZD,ZG]=[100,200] 冻结，end_index=12。
-    // 段3：向上离开——延伸语义下（PDF §5 Step3，task #142）离开段必须与冻结核心不相交：
-    //   lo=205 > ZG=200 ⟹ non-extension（旧 fixture lo=150 ≤ 200 会被 Step2 吸收进中枢 ⟹ 无离开段）。
-    // 段4：向下回试低点 210 > zg=200（严格不触闭区间）⟹ 3 买 @ source_index=20。
+    // #2114 字面见证：前三段成核心 [100,200]；末成员向上到 250，
+    // u3 从同一坐标、同一高点反向回试，全段 [210,250] 在核心上方。
+    // 回试右端 source_index=20。
+    // 不再插入只能靠旧单哨兵通过的同向外段。
     let layer = ParseLayer {
         segments: Rc::new(vec![
             seg(Direction::Up, 0, 4, 100, 200),
             seg(Direction::Down, 4, 8, 200, 100),
-            seg(Direction::Up, 8, 12, 100, 200),
-            seg(Direction::Up, 12, 16, 205, 250), // 离开中枢上方（lo=205>ZG ⟹ non-extension）
-            seg(Direction::Down, 16, 20, 250, 210), // 回试低点 > zg → 3 买
+            // 末成员同时担当已证离开。
+            seg(Direction::Up, 8, 12, 100, 250),
+            seg(Direction::Down, 12, 20, 250, 210), // 回试低点 > ZG → 3 买
         ]),
         ..Default::default()
     };
@@ -1668,19 +1652,16 @@ fn otherwise_domain_records_queryable_by_coordinate_in_classification() {
     // 非教义判据本身 ⟹ 显式 MacdArea 对照档（fixture 无 strokes，语义锁定旧面积口径）。
     let mut cfg = ThetaConfig::default();
     cfg.divergence_gauge = divergence::DivergenceGauge::MacdArea;
-    // ★#1419 R8（#812 Z-5，续扫自 last_member+2）：C0 与 C1 之间插连接段 c `[12,16]` Down [285,295]
-    // （hi=295 < C0 核心下沿 300 ⟹ non-extension，C0 的突破段），结算后被跳过；其后各段与 closes 整体 +4。
-    // 旧夹具让 C1 首段兼任 C0 突破段，只在旧 B 口径下成立。
     let segments = vec![
-        seg(Direction::Up, 0, 4, 300, 400),
-        seg(Direction::Down, 4, 8, 400, 290),
-        seg(Direction::Up, 8, 12, 290, 410), // → C0 [300,400]（[0,12]，dd=290/gg=410）
-        seg(Direction::Down, 12, 16, 295, 285), // 连接段 c：不触 C0 核心 ⟹ non-extension
-        seg(Direction::Down, 16, 20, 280, 180), // [180,280]
+        seg(Direction::Down, 0, 4, 400, 300),
+        seg(Direction::Up, 4, 8, 300, 400),
+        seg(Direction::Down, 8, 12, 400, 285), // 触 [300,400] 并向下离开
+        seg(Direction::Up, 12, 16, 285, 294),  // 同低 285，整段低于首枢核心
+        seg(Direction::Down, 16, 20, 280, 180),
         seg(Direction::Up, 20, 24, 180, 210),
-        seg(Direction::Down, 24, 28, 210, 150), // → C1 [180,210]（[16,28]，dd=150/gg=280）
-        seg(Direction::Down, 28, 32, 170, 80),  // s7 C 段：破 C1 核心（80 < zd=180）
-        seg(Direction::Down, 32, 36, 80, 70),   // s8 与 s7 同向 ⟹ 后扫 Missing（无回试对）
+        seg(Direction::Down, 24, 28, 210, 150), // 第二枢核心 [180,210]
+        seg(Direction::Down, 28, 32, 170, 80),  // 首次外段同向，未证明 R5
+        seg(Direction::Down, 32, 36, 80, 70),   // 后腿也不能补证
     ];
     let closes: Vec<i64> = vec![
         350, 350, 350, 350, 350, 350, 350, 350, 350, 350, 350, 350, 350, 350, 350,

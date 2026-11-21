@@ -41,9 +41,10 @@ pub use projection::{
 /// provider 侧重落地，四类 fail-closed 码对齐账本适配器 missing/不紧邻桶——详见 `seed_mapping`）。
 pub use seed_mapping::{strict_completed_pair, unique_completed_move, StrictPairError};
 
+use super::{center_scan::R5Proof, signal::T3InCSource};
+use confirm::confirm_with_r5;
 #[cfg(test)]
-use confirm::{confirm_core_calls, reset_confirm_core_calls, trend_confirm_time};
-use confirm::{trend_confirm_state, trend_confirm_state_core};
+use confirm::{confirm_core_calls, reset_confirm_core_calls};
 /// #630：`confirm` 子模块的 pub 项原样再导出（趋势背驰确认核心）。
 pub use confirm::{
     ConfirmKey, ConfirmResidence, DivergencePair, DivergencePairId, NestCandidateEvent,
@@ -54,7 +55,9 @@ pub use confirm::{
 /// `PanMemo`/`PanResidence` 由 `p123_fast_replay.rs` 直接消费，必须保 `pub`）。
 /// `PanMemoStats`（#630 修复轮 MEDIUM-1）：原拆分遗漏再导出，`classifier::level_view::
 /// PanMemoStats` 路径曾静默断裂（无消费者未破编译，仍是四件套自设口径的反例）。
-pub use pan::{provide_divergence_pairs, PanMemo, PanMemoStats, PanResidence};
+pub use pan::{
+    provide_divergence_pairs, provide_divergence_pairs_with_r5, PanMemo, PanMemoStats, PanResidence,
+};
 
 /// #630：`pan_provider` 子模块的 pub 项原样再导出（typed 候选事件 provider 入口）。
 pub use pan_provider::{
@@ -361,10 +364,10 @@ pub fn assemble_level_view(
     query: LevelViewQuery,
     material: LevelViewMaterial<'_>,
 ) -> Result<LevelAsOfView, LevelViewError> {
-    assemble_level_view_impl(config, query, material, None)
+    assemble_level_view_resident(config, query, material, None)
 }
 
-/// #69 5a resident seam。旧入口签名不动并委托 `None`；调用方只有显式给出
+/// 普通与 resident 入口都消费投影中枢附带的同流证书；只有显式给出
 /// `ConfirmResidence` 才能跨 view 复用已封 lower-leg 前缀。
 pub fn assemble_level_view_resident(
     config: C2LevelViewConfig,
@@ -372,13 +375,26 @@ pub fn assemble_level_view_resident(
     material: LevelViewMaterial<'_>,
     residence: Option<ConfirmResidence<'_>>,
 ) -> Result<LevelAsOfView, LevelViewError> {
-    assemble_level_view_impl(config, query, material, residence)
+    assemble_level_view_impl(config, query, material, None, residence)
+}
+
+/// 接收从同一 lower-leg 构造流得出的扫描证书，按投影中枢顺序传入。
+/// 缺席不授予角色；投影腿的结构方向不得作为字面 R5 证据。
+pub fn assemble_level_view_with_r5(
+    config: C2LevelViewConfig,
+    query: LevelViewQuery,
+    material: LevelViewMaterial<'_>,
+    settlements: &[Option<R5Proof>],
+    residence: Option<ConfirmResidence<'_>>,
+) -> Result<LevelAsOfView, LevelViewError> {
+    assemble_level_view_impl(config, query, material, Some(settlements), residence)
 }
 
 fn assemble_level_view_impl(
     config: C2LevelViewConfig,
     query: LevelViewQuery,
     material: LevelViewMaterial<'_>,
+    explicit_settlements: Option<&[Option<R5Proof>]>,
     mut residence: Option<ConfirmResidence<'_>>,
 ) -> Result<LevelAsOfView, LevelViewError> {
     if !config.enabled {
@@ -411,15 +427,25 @@ fn assemble_level_view_impl(
     }
 
     let cache_key = C2CacheKey::from_query(&query).map_err(LevelViewError::InvalidVersionTuple)?;
-    let pairs = if query.version.divergence_pair_provider_version
-        == Some(ProviderVersion::MOVE_BLOCK_AC_V1)
-    {
-        provide_divergence_pairs(
+    let pairing =
+        query.version.divergence_pair_provider_version == Some(ProviderVersion::MOVE_BLOCK_AC_V1);
+    let native;
+    let settlements = match explicit_settlements {
+        Some(settlements) => settlements,
+        None if pairing => {
+            native = projection.native_settlements(material.lower_legs);
+            &native
+        }
+        None => &[],
+    };
+    let pairs = if pairing {
+        provide_divergence_pairs_with_r5(
             query.level,
             projection,
             material.move_blocks,
             material.lower_legs,
             query.as_of,
+            settlements,
         )
     } else {
         Vec::new()
@@ -450,37 +476,26 @@ fn assemble_level_view_impl(
                 Direction::Down => Side::Long,
                 Direction::Up => Side::Short,
             };
-            let state = if let Some(residence) = residence.as_mut() {
+            let r5 =
+                T3InCSource::Scanned(settlements.get(pair.id.block_end_center).copied().flatten());
+            let cursor = residence.as_mut().map(|residence| {
                 let key = ConfirmKey::for_pair(query, pair, last, residence.structure_generation);
-                let stable_lower_len = residence.stable_lower_len;
-                let cursor = residence.store.cursor_mut(key);
-                trend_confirm_state_core(
-                    &segments,
-                    last,
-                    direction,
-                    side,
-                    pair.seg_a,
-                    pair.seg_c.0,
-                    query.as_of,
-                    material.hist,
-                    material.dif,
-                    material.close_src,
-                    Some((cursor, stable_lower_len)),
-                )
-            } else {
-                trend_confirm_state(
-                    &segments,
-                    last,
-                    direction,
-                    side,
-                    pair.seg_a,
-                    pair.seg_c.0,
-                    query.as_of,
-                    material.hist,
-                    material.dif,
-                    material.close_src,
-                )
-            };
+                (residence.store.cursor_mut(key), residence.stable_lower_len)
+            });
+            let state = confirm_with_r5(
+                &segments,
+                last,
+                direction,
+                side,
+                pair.seg_a,
+                pair.seg_c.0,
+                query.as_of,
+                material.hist,
+                material.dif,
+                material.close_src,
+                r5,
+                cursor,
+            );
             PairConfirmState {
                 pair_id: pair.id,
                 state,

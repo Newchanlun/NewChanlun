@@ -631,6 +631,7 @@ fn project(
             // 审计工具按 offset 自核构造；start==0 时与生产 seed 比对——若生产侧因
             // 继承核改写（InheritedRecut）而不等，按原逻辑记 InvalidSeed 显式暴露。
             core_provenance: SeedCoreProvenance::SelfConsistent,
+            r5_settlement: None,
         };
         if start == 0 {
             let production = project_extended_windows(std::slice::from_ref(window))?;

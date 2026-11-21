@@ -11,7 +11,7 @@
 //!   `component.high >= zd && component.low <= zg`（边界相切算延伸，frozen 测试口径）。
 //! - **生命周期字段（gg/dd/settled/break）** ↔ `Origin.CenterConstruct.RefZhongshu` /
 //!   `reference:40-52`：外缘 gg/dd 只聚合 seed 与延伸成员中的 **Zn**（与 seed 首段同向，★#1419 S3，
-//!   经 [`super::center::is_zn`] 唯一判据）；`settled = j < n`（末中枢强制 unsettled）；
+//!   经 [`super::center::is_zn`] 唯一判据）；结算需首回抽不回的 R5 见证；
 //!   break_index/break_direction。
 //! - **结算后续扫锚** ↔ Lean `refStep` 的 `endE + 2`（★#1419 S3，#812 Z-5 C 口径：跳过突破段，
 //!   突破段不属于任何中枢）。reference:150-151 的 A 口径重叠回退 `i = max(j-2, end)` 已被 Z-5 推翻，
@@ -45,7 +45,8 @@
 //!   [`super::center`] 与共用扫描里改。
 
 use super::super::types::{Segment, Tick};
-use super::center::{compute_dd, compute_gg, is_zn, UnitRange};
+use super::center::{center_from_window, RoleVar};
+use super::center_scan::{l0_units, scan_center_facts_full};
 
 /// reference `RefZhongshu`（`reference_chanlun.py:40-52` 逐字镜像）—— v1 中枢生命周期。
 ///
@@ -62,7 +63,7 @@ pub struct RefZhongshu {
     pub end: usize,
     /// 构成段数 `end - start + 1`。
     pub count: usize,
-    /// 是否已结算（`j < n`——延伸后仍有段离开核心则结算）。
+    /// 是否有已证 R5 破坏。
     pub settled: bool,
     /// 结算时离开核心的段下标（未结算 = -1）。
     pub break_index: i64,
@@ -85,130 +86,25 @@ fn min3(a: Tick, b: Tick, c: Tick) -> Tick {
     a.min(b).min(c)
 }
 
-/// reference 弱接触延伸判据（`reference_chanlun.py:78-85` 逐字）。
-///
-/// `component.high >= zd && component.low <= zg`（弱相交，边界相切算延伸）。
-/// 契约锚 `Origin.CenterConstruct.weakOverlap`。
-fn weak_overlap(comp_high: Tick, comp_low: Tick, zd: Tick, zg: Tick) -> bool {
-    comp_high >= zd && comp_low <= zg
-}
-
-/// reference 离开方向（`reference_chanlun.py:88-93` 逐字）—— true=up。
-///
-/// `low > zg → up`；`high < zd → down`；否则 `high > zg ? up : down`（防御分支）。
-/// 契约锚 `Origin.CenterConstruct.breakDirectionUp`。
-fn break_direction_up(comp_high: Tick, comp_low: Tick, zd: Tick, zg: Tick) -> bool {
-    if comp_low > zg {
-        true
-    } else if comp_high < zd {
-        false
-    } else {
-        comp_high > zg
-    }
-}
-
-/// 段 → (high, low) 投影（reference ComponentLike）。
-///
-/// 向上段 high=end_price/low=start_price；向下段 high=start_price/low=end_price
-/// （对齐 `center.rs` segment_to_unit / `CenterConstruction.segHigh/segLow`）。
-fn seg_hl(s: &Segment) -> (Tick, Tick) {
-    if s.start_price >= s.end_price {
-        (s.start_price, s.end_price)
-    } else {
-        (s.end_price, s.start_price)
-    }
-}
-
-/// 段 → 带方向的走势单元（Lean `segHL` 的 `(high, low, direction)`，★#1419 S3：Zn 判据要方向）。
-fn seg_unit(s: &Segment) -> UnitRange {
-    let (hi, lo) = seg_hl(s);
-    UnitRange {
-        start_index: s.start_index,
-        end_index: s.end_index,
-        direction: s.direction,
-        lo,
-        hi,
-    }
-}
-
-/// **★reference v1 中枢构造（`zhongshus_from_components_ref`，`reference_chanlun.py:96-155` 逐字）**
-/// —— 完成态段序列 → v1 中枢序列。
-///
-/// 契约锚 `Origin.CenterConstruct.refZhongshusFromComponents`（CenterConstruct.lean § 5.5，bit-exact）。
-///
-/// 输入 `segments` 已是完成态段（`completed_mask` 过滤在调用点，reference:158-160）。
-/// `n < 3 ⟹ []`。否则滑窗：前三段定全三段核心；核心空（`zg<=zd`）滑窗前进1；否则弱接触延伸 +
-/// 生命周期字段（外缘只聚合 Zn），结算后自 `end + 2` 续扫（跳过突破段），末中枢强制 unsettled 后停止。
-///
-/// 边界条件（结论翻转）：核心口径用全三段 max3/min3（非前两段——见模块级口径分离说明）；
-/// 延伸用弱相交（边界相切算延伸）；`settled` 由 `j<n` 决定（末中枢必 unsettled）。
+/// Lean 参考字段从生产共用扫描投影；独立神谕在 CenterConstruct.lean。
 pub fn ref_zhongshus_from_components(segments: &[Segment]) -> Vec<RefZhongshu> {
-    let comps: Vec<UnitRange> = segments.iter().map(seg_unit).collect();
-    let n = comps.len();
-    if n < 3 {
-        return Vec::new();
-    }
-
-    let mut result: Vec<RefZhongshu> = Vec::new();
-    let mut i = 0usize;
-    while i + 2 < n {
-        let (a, b, c) = (&comps[i], &comps[i + 1], &comps[i + 2]);
-        let zd = max3(a.lo, b.lo, c.lo);
-        let zg = min3(a.hi, b.hi, c.hi);
-
-        if zg <= zd {
-            // 核心空：滑窗前进 1（reference:122-124）。
-            i += 1;
-            continue;
-        }
-
-        // ★#1419 S3：seed 外缘只取 Zn（与 Lean `refStep` 的 `znAgg` 同拍，公式取 center 唯一一份）。
-        let mut gg = compute_gg(a, b, c);
-        let mut dd = compute_dd(a, b, c);
-        let mut end = i + 2;
-        // 弱接触延伸（reference:129-134）：从 j=i+3 起逐段吸收；外缘只并入 Zn 成员。
-        let mut j = i + 3;
-        while j < n && weak_overlap(comps[j].hi, comps[j].lo, zd, zg) {
-            end = j;
-            if is_zn(&comps[j], a) {
-                gg = gg.max(comps[j].hi);
-                dd = dd.min(comps[j].lo);
-            }
-            j += 1;
-        }
-
-        let settled = j < n;
-        let (break_index, break_up) = if settled {
-            (
-                j as i64,
-                break_direction_up(comps[j].hi, comps[j].lo, zd, zg),
-            )
-        } else {
-            (-1, true)
-        };
-        result.push(RefZhongshu {
-            zd,
-            zg,
-            start: i,
-            end,
-            count: end - i + 1,
-            settled,
-            break_index,
-            break_up,
-            gg,
-            dd,
-        });
-
-        if settled {
-            // ★#1419 S3（#812 Z-5 C 口径，Lean `refStep` 的 `endE + 2`）：跳过突破段 j = end + 1。
-            i = end + 2;
-        } else {
-            // 末中枢未结算：停止（reference:152-153 break）。
-            break;
-        }
-    }
-
-    result
+    let units = l0_units(segments);
+    scan_center_facts_full(&units, center_from_window)
+        .window_facts(&units)
+        .into_iter()
+        .map(|w| RefZhongshu {
+            zd: w.role(RoleVar::Zd).value,
+            zg: w.role(RoleVar::Zg).value,
+            start: w.first,
+            end: w.last,
+            count: w.count(),
+            settled: w.settled,
+            break_index: w.break_unit.map_or(-1, |k| k as i64),
+            break_up: w.break_up.unwrap_or(true),
+            gg: w.role(RoleVar::Gg).value,
+            dd: w.role(RoleVar::Dd).value,
+        })
+        .collect()
 }
 
 /// reference v1 核心区间（全三段，`reference:119-120`）—— 契约锚 `Origin.CenterConstruct.refV1Interval`。
@@ -317,15 +213,15 @@ mod tests {
     }
 
     #[test]
-    fn ref_settled_break_up() {
+    fn ref_outward_unit_without_pullback_is_unsettled() {
         // 第四段延伸（count→4），第五段 [22,25] low=22>zg=15 离开 ⟹ jOut=4<n=5 settled，break up。
         let seg3 = seg(3, 4, Direction::Down, 16, 13);
         let seg4 = seg(4, 5, Direction::Up, 22, 25); // [low=22, high=25]
         let zs = ref_zhongshus_from_components(&[ref_seg0(), ref_seg1(), ref_seg2(), seg3, seg4]);
         assert!(!zs.is_empty());
-        assert!(zs[0].settled);
+        assert!(!zs[0].settled);
         assert!(zs[0].break_up);
-        assert_eq!(zs[0].break_index, 4);
+        assert_eq!(zs[0].break_index, -1);
     }
 
     #[test]

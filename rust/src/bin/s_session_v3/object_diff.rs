@@ -184,6 +184,25 @@ where
     NewId: Borrow<str>,
     Slot: Eq + Hash,
 {
+    plan_admitted_with_deferred(new, old, allocation, work, &[] as &[&str])
+}
+
+/// S3 可显式保留活动旧对象；证据未覆盖该槽位不能等同于缺席。
+/// deferred 为按对象 ID 升序排列的无重复活动对象列表。
+pub(crate) fn plan_admitted_with_deferred<Old, New, OldId, NewId, Slot>(
+    new: &[Key<New, NewId, Slot>],
+    old: &[Existing<Old, OldId, Slot>],
+    allocation: Option<&OwnedBudget>,
+    work: Option<&WorkScope>,
+    deferred: &[impl Borrow<str>],
+) -> Result<BudgetedChangeSet, String>
+where
+    Old: Content,
+    New: Content<Value = Old::Value>,
+    OldId: Borrow<str>,
+    NewId: Borrow<str>,
+    Slot: Eq + Hash,
+{
     check_admission_domains(allocation, work)?;
     #[cfg(not(feature = "s_allocation_json_testonly"))]
     if allocation.is_some() {
@@ -212,7 +231,7 @@ where
                 .map_err(|e| e.to_string())?;
         }
     }
-    plan_indexed_admitted(
+    plan_indexed_admitted_with_deferred(
         new,
         |i| &old[i],
         old.iter()
@@ -223,6 +242,7 @@ where
         |id| active_by_id.get(id).copied(),
         allocation,
         work,
+        deferred,
     )
 }
 
@@ -265,6 +285,37 @@ where
     Slot: Eq + Hash,
     E: Borrow<Existing<Old, OldId, Slot>>,
 {
+    plan_indexed_admitted_with_deferred(
+        new,
+        old,
+        active,
+        known,
+        active_known,
+        allocation,
+        work,
+        &[] as &[&str],
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn plan_indexed_admitted_with_deferred<Old, New, OldId, NewId, Slot, E>(
+    new: &[Key<New, NewId, Slot>],
+    old: impl Fn(usize) -> E,
+    active: impl IntoIterator<Item = usize>,
+    known: impl Fn(&str) -> Option<usize>,
+    active_known: impl Fn(&str) -> Option<usize>,
+    allocation: Option<&OwnedBudget>,
+    work: Option<&WorkScope>,
+    deferred: &[impl Borrow<str>],
+) -> Result<BudgetedChangeSet, String>
+where
+    Old: Content,
+    New: Content<Value = Old::Value>,
+    OldId: Borrow<str>,
+    NewId: Borrow<str>,
+    Slot: Eq + Hash,
+    E: Borrow<Existing<Old, OldId, Slot>>,
+{
     check_admission_domains(allocation, work)?;
     let admission = NativeAdmission(work);
     // 同槽位候选取**末位**：与旧实现 `new_objects.iter().collect::<BTreeMap<_,_>>()` 同语义。
@@ -286,11 +337,23 @@ where
         replaces: bj::new_work(allocation),
     };
 
-    // 1) 活动旧身份按给定主序：槽位消失 = 撤；槽位被异身份顶替 = 撤 + 替换对。
+    // 1) 活动旧身份按给定主序：本次未决槽位不撤；其余槽位消失或被替代才撤。
+    let mut retained = 0;
     for old_index in active {
         let owner = old(old_index);
         let entry = owner.borrow();
-        match new_by_slot.get(&entry.key.slot).copied() {
+        let replacement = new_by_slot.get(&entry.key.slot).copied();
+        if deferred
+            .binary_search_by(|id| identity(id).cmp(identity(&entry.key.object_id)))
+            .is_ok()
+        {
+            if replacement.is_some() {
+                return Err("R5 待重算槽位与本代生成候选冲突".into());
+            }
+            retained += 1;
+            continue;
+        }
+        match replacement {
             None => {
                 admission
                     .native_codec_room(&mut changes.withdrawals, 1)
@@ -331,6 +394,10 @@ where
             }
             Some(_) => {}
         }
+    }
+
+    if retained != deferred.len() {
+        return Err("R5 待重算必须是不同的既有活动对象".into());
     }
 
     // 2) 本次候选按给定序：同 ID 先核不可变内容，再定「未变化 / 拒绝复活 / 真实出生」。
@@ -502,6 +569,56 @@ mod tests {
         old[1] = stored("same", "dead", "different", false);
         let error = plan(&[ready_key("same", "active", "v")], &old).unwrap_err();
         assert!(error.contains("不可变内容不同"));
+    }
+
+    #[test]
+    fn r5_mixed_publication_revises_prefix_and_retains_exact_deferred_slots() {
+        let prior = [
+            stored("prefix-v1", "prefix", "v1", true),
+            stored("tail-v1", "tail", "original", true),
+            stored("unrelated", "other", "removed", true),
+        ];
+        let prefix = [ready_key("prefix-v2", "prefix", "v2")];
+        let mixed = plan_admitted_with_deferred(&prefix, &prior, None, None, &["tail-v1"]).unwrap();
+        assert_eq!(&*mixed.births, &[0]);
+        assert_eq!(
+            &*mixed.withdrawals,
+            &[
+                Withdrawal {
+                    old_index: 0,
+                    removal: Removal::Superseded,
+                    new_index: Some(0)
+                },
+                Withdrawal {
+                    old_index: 2,
+                    removal: Removal::Removed,
+                    new_index: None
+                },
+            ]
+        );
+        assert_eq!(
+            &*mixed.replaces,
+            &[Replace {
+                old_index: 0,
+                new_index: 0
+            }]
+        );
+
+        let retained = [stored("tail-v1", "tail", "original", true)];
+        let new_proof = [ready_key("tail-v2", "tail", "recomputed")];
+        let resumed = plan(&new_proof, &retained).unwrap();
+        assert_eq!(resumed.births, vec![0]);
+        assert_eq!(
+            resumed.replaces,
+            vec![Replace {
+                old_index: 0,
+                new_index: 0
+            }]
+        );
+        assert!(
+            plan_admitted_with_deferred(&new_proof, &retained, None, None, &["tail-v1"]).is_err()
+        );
+        assert!(plan_admitted_with_deferred(&prefix, &prior, None, None, &["absent"]).is_err());
     }
 
     fn key<C: Content>(object_id: &str, slot: &str, immutable: C) -> Key<C> {

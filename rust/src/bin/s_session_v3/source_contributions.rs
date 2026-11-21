@@ -1167,6 +1167,17 @@ impl NativeSourceState {
         pending_changed: &mut Tree<Handle>,
         dirty_requests: &mut Tree<Handle>,
     ) -> Result<(), PublishError> {
+        let center_version = |state: &Self| {
+            state
+                .structure_versions
+                .get("CC-056.center_version")
+                .and_then(|h| state.objects.get(h))
+                .map(|entry| entry.value.clone())
+        };
+        let old_deferred = center_version(self)
+            .map(|version| source_structure::deferred_objects(s, &version))
+            .transpose()?
+            .unwrap_or_default();
         let mut dirty_structures = Tree::default();
         let changes = apply_order(
             s,
@@ -1385,9 +1396,29 @@ impl NativeSourceState {
                 current_generation,
             )?;
         }
+        let deferred = center_version(self)
+            .map(|version| source_structure::deferred_objects(s, &version))
+            .transpose()?
+            .unwrap_or_default();
+        let current = source_structure::CurrentR5 {
+            lookup: &lookup,
+            deferred: &deferred,
+        };
+        current.validate_present()?;
+        // 原件可能内容未变而在本代恢复为可用，须按新切面的端点重新核查。
+        for id in old_deferred
+            .iter()
+            .filter(|id| !current.is_deferred(id.as_str()))
+        {
+            if let Some(handle) = self.ids.get(id.as_str()) {
+                dirty_structures.insert(s, *handle)?;
+            }
+        }
         for handle in dirty_structures.iter() {
             if let Some(entry) = self.objects.get(handle) {
-                source_structure::audit_links(s, &entry.value, &lookup)?;
+                if !current.is_deferred(entry.value.id.as_str()) {
+                    source_structure::audit_links(s, &entry.value, &current)?;
+                }
             }
         }
         for (handle, _) in changes.removed {

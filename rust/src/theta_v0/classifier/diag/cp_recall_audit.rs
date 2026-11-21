@@ -58,10 +58,8 @@ pub struct WindowScanCursor {
 /// 供 cascade 增量失效（按 `read_end_src < e` 取保留前缀 P）。与 `LevelCache.centers`/`upper_moves`
 /// 1:1 对齐（同序同长，同前缀不可变 + 尾部续扫追加）。
 ///
-/// **读域上界 `read_end_src`**（设计 §1.2.1，codex 二审终版）：detect 延伸循环停止时读了首个
-/// non-extension 哨兵 `units[win.1+1]`，其源坐标才是 center 的完整读域上界（读域 `[win.0..win.1+1]`
-/// ⊋ 输出区间 `[start,end]`）。`units[win.1+1]` 越界（`win.1+1 == units.len()`，窗口开放无哨兵）⟹
-/// `read_end_src = usize::MAX`（+∞，永不进保留前缀，归 frontier pop 常态处理）。
+/// **读域上界 `read_end_src`**：R5 破坏含首回抽的完整源坐标；升级含末个成员；
+/// 开放与挂起窗口为 `usize::MAX`，不可进入保留前缀。
 ///
 /// **升级窗口共享**（设计 §3.5）：#148 升级重切窗口产 k 个子中枢，它们**共享同一父窗口**
 /// `(win.0, win.1+1)` ⟹ `win_start`/`read_end_src` 对该窗口全部 k 个子中枢**逐值相等**。故按
@@ -74,17 +72,18 @@ pub struct WinMeta {
     /// 窗口退出点（`win.1+1` = detect 的 `j`，unit 下标）。cascade cursor 重建的 `consumed`
     /// （had_emitted_window = win_start < win_exit 判据；仅瞬态用，compose 后被 new_cursor 覆盖）。
     pub win_exit: usize,
-    /// 读域上界源坐标 = `units[win.1+1].start_index`（停止哨兵）；窗口开放（无哨兵）⟹ `usize::MAX`。
+    /// 窗口所依赖的最后源坐标。
     pub read_end_src: usize,
+    /// 共用 R5 已证离开段；未证或升级无离开事实。
+    pub settlement: Option<super::super::center_scan::R5Proof>,
     /// 该窗口产出的 center 数（#148 升级 = k，普通 = 1）——cursor 重建时的 `last_window_emitted`。
     pub emitted: usize,
 }
 
 /// 完整父级 `c` 的扫描期归属与生命周期对象（与产出的中枢/上级走势 1:1 对齐）。
 ///
-/// `departure_move` 取自中枢窗口停止时读到的首个 non-extension 单元 `units[win_exit]`。
-/// 该单元随后可以成为下一中枢 seed/延伸窗口的一部分；本侧车仍保存它最初作为 `B_p`
-/// 离开单元的结构归属，因此事件端不需要、也禁止从最终 [`MoveBlock`] 反猜 `c_start_full`。
+/// `departure_move` 取共用 R5 证明的离开，不把首个不重叠单元自动当作离开。
+/// 事件端不从最终 [`MoveBlock`] 反猜 `c_start_full`。
 /// 之后每个新同级相邻单元对经 [`advance_cp_lifecycles`] 推进 Pending/Closed 状态；闭合不依赖
 /// 新的 [`CandDeltaEvent`]。
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -95,7 +94,7 @@ pub struct CpScanOwnership {
     pub b_center_id: ElementId,
     /// `B_p` 的核心、外缘与 source-index 首尾。
     pub b_center: Center,
-    /// `B_p` 后首个 non-extension 单元的确定性递归元素 ID；开放窗口尚无离开时为 `None`。
+    /// R5 已证离开单元的递归元素 ID。
     pub departure_move_id: Option<ElementId>,
     /// 上述离开单元的 source-index 闭区间；其左端是结构分解产出的 `c_start_full` 候选。
     pub departure_interval: Option<(usize, usize)>,
@@ -246,8 +245,7 @@ pub fn audit_cp_recall_upper_bound(
     for retest_idx in 1..units.len() {
         let leave_idx = retest_idx - 1;
         let leave_unit = &units[leave_idx];
-        let Some(center_idx) =
-            signal::nearest_confirmed_center_idx(centers, leave_unit.start_index)
+        let Some(center_idx) = signal::nearest_confirmed_center_idx(centers, leave_unit.end_index)
         else {
             continue;
         };
@@ -313,7 +311,10 @@ pub(crate) fn cp_scan_ownership(
     subs_moves: &[LeveledMove],
     b_center_id: ElementId,
 ) -> CpScanOwnership {
-    let departure = units.get(meta.win_exit).zip(subs_moves.get(meta.win_exit));
+    let departure = meta.settlement.and_then(|p| {
+        let at = p.leave_unit();
+        units.get(at).zip(subs_moves.get(at))
+    });
     let departure_move_id = departure.map(|(_, m)| m.id);
     let departure_interval = departure.map(|(u, _)| (u.start_index, u.end_index));
     CpScanOwnership {
@@ -445,7 +446,7 @@ mod tests {
             dd: 90,
             gg: 210,
             start_index: 0,
-            end_index: 8,
+            end_index: 11,
         };
         let units = vec![unit(9, 11, down(), 80, 150), unit(11, 13, up(), 80, 90)];
         let moves = vec![

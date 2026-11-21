@@ -1658,7 +1658,7 @@
     // 以及全史中枢对出生/修订/撤回与变化事件的逐发生边界闭合。payload 已由 typed 逐对象校验；此处只取所需普通原件。
     // #1855 B5：S3 结构规则（Rust is_structure_rule）的非零代 cut，活动集须各恰一个三类结构版本根
     // （Rust source_structure::audit_full）；零代与非结构规则不要求。
-    async function bindCenterFamily(snapshot, generation, structureRule) {
+    async function bindCenterFamily(snapshot, cutGeneration, structureRule) {
       const family = new Set([...typed.CENTER_KINDS, ...typed.PAIR_KINDS]),
         history = new Set([typed.PAIR_KINDS[1], typed.PAIR_KINDS[3]]),
         roots = new Map(["CC-056.segment_version", "CC-056.center_version", "CC-056.pair_version"].map((k) => [k, 0])),
@@ -1675,12 +1675,12 @@
           if (name === "objects") active.push(r);
           if (history.has(kind)) pairs.push(r);
         }
-      const axesValue = generation === "0" ? null : await f(await f(snapshot, "catalog_evidence"), "axes"),
+      const axesValue = cutGeneration === "0" ? null : await f(await f(snapshot, "catalog_evidence"), "axes"),
         axes = axesValue === null || !(await axesValue.has("CC-016")) ? null : await typed.plain(axesValue);
-      if (structureRule && generation !== "0")
+      if (structureRule && cutGeneration !== "0")
         need([...roots.values()].every((n) => n === 1), "结构域版本根缺失或重复");
       if (!any && axes === null) return;
-      typed.Center.validateCenterFamilyCut(active, axes);
+      typed.Center.validateCenterFamilyCut(active, axes, cutGeneration);
       typed.Center.validatePairHistory(pairs);
     }
     // #1394 整合（根裁定 (1)，(4) 扩到 v3；与 #1414 validate_once 同一原则）：同一 State 只完整验证一次。

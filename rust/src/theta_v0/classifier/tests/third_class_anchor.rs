@@ -26,7 +26,7 @@ fn q7_ruling_c_first_and_third_class_structural_direction_authorized() {
         dd: 90,
         gg: 210,
         start_index: 0,
-        end_index: 8,
+        end_index: 11,
     };
     let units = vec![
         UnitRange {
@@ -99,7 +99,7 @@ fn q7_ruling_c_first_and_third_class_structural_direction_authorized() {
         dd: 90,
         gg: 210,
         start_index: 0,
-        end_index: 12,
+        end_index: 16,
     };
     let u3 = vec![
         UnitRange {
@@ -280,7 +280,7 @@ fn issue486_l0_third_output_fields_unchanged() {
         dd: 90,
         gg: 210,
         start_index: 0,
-        end_index: 12,
+        end_index: 16,
     };
     let segs = vec![
         Segment {
@@ -338,7 +338,7 @@ fn third_class_first_retrace_only_lock() {
         dd: 90,
         gg: 210,
         start_index: 0,
-        end_index: 4,
+        end_index: 6,
     };
     let seg = |dir, si, ei, sp, ep| crate::theta_v0::types::Segment {
         direction: dir,

@@ -26,6 +26,7 @@ fn seed(source_id: ElementId) -> ExactThreeSeed {
             end_index: 9,
         },
         core_provenance: SeedCoreProvenance::SelfConsistent,
+        r5_settlement: None,
     }
 }
 

@@ -412,7 +412,14 @@ pub struct ZnExtrema {
 /// 判。`members` 为空时 panic（中枢至少有 seed 三单元）。
 pub fn zn_extrema(members: &[UnitRange]) -> ZnExtrema {
     let first = members.first().expect("中枢成员非空（至少 seed 三单元）");
-    members.iter().filter(|u| is_zn(u, first)).fold(
+    aggregate_zn_extrema(first, members.iter().filter(|u| is_zn(u, first)))
+}
+
+fn aggregate_zn_extrema<'a>(
+    first: &UnitRange,
+    zn: impl Iterator<Item = &'a UnitRange>,
+) -> ZnExtrema {
+    zn.fold(
         ZnExtrema {
             dd: first.lo,
             gg: first.hi,
@@ -426,6 +433,22 @@ pub fn zn_extrema(members: &[UnitRange]) -> ZnExtrema {
             g: acc.g.min(u.hi),
         },
     )
+}
+
+/// 扫描成员中，严格在外的腿只有已证非 Zn 且首回抽已返回时才获准接纳。
+/// 它仍计入连续成员，但不读它的占位方向来聚合 Zn。
+pub(super) fn r5_zn_members(
+    members: &[UnitRange],
+    zd: Tick,
+    zg: Tick,
+) -> impl Iterator<Item = (usize, &UnitRange)> {
+    members.iter().enumerate().filter(move |&(k, u)| {
+        is_zn(u, &members[0]) && (k < 3 || unit_core_position(u, zd, zg).closed_overlap())
+    })
+}
+
+pub(super) fn r5_zn_extrema(members: &[UnitRange], zd: Tick, zg: Tick) -> ZnExtrema {
+    aggregate_zn_extrema(&members[0], r5_zn_members(members, zd, zg).map(|(_, u)| u))
 }
 
 /// 外缘上沿 `computeGG s1 s2 s3`（契约锚 `Origin.CenterConstruction.computeGG`）：seed 三段中 **Zn** 的
@@ -732,10 +755,12 @@ impl CenterRoles {
     /// `members` = seed 三单元 + 延伸成员（`len >= 3`，否则 panic）。
     pub fn of_members(members: &[UnitRange]) -> Self {
         assert!(members.len() >= 3, "中枢成员至少 seed 三单元");
+        let zd = compute_zd(&members[0], &members[1], &members[2]);
+        let zg = compute_zg(&members[0], &members[1], &members[2]);
         CenterRoles {
-            zd: compute_zd(&members[0], &members[1], &members[2]),
-            zg: compute_zg(&members[0], &members[1], &members[2]),
-            zn: zn_extrema(members),
+            zd,
+            zg,
+            zn: r5_zn_extrema(members, zd, zg),
         }
     }
 
@@ -755,18 +780,21 @@ impl CenterRoles {
     /// 内找；两个及以上即同价见证。
     pub fn contributors(&self, members: &[UnitRange], v: RoleVar) -> Vec<usize> {
         let target = self.value(v);
-        let first = &members[0];
-        members
-            .iter()
-            .enumerate()
-            .filter(|(k, u)| match v {
-                RoleVar::Zd => *k < 3 && u.lo == target,
-                RoleVar::Zg => *k < 3 && u.hi == target,
-                RoleVar::Dd | RoleVar::D => is_zn(u, first) && u.lo == target,
-                RoleVar::Gg | RoleVar::G => is_zn(u, first) && u.hi == target,
-            })
-            .map(|(k, _)| k)
-            .collect()
+        let value = |u: &UnitRange| match v {
+            RoleVar::Zd | RoleVar::Dd | RoleVar::D => u.lo,
+            RoleVar::Zg | RoleVar::Gg | RoleVar::G => u.hi,
+        };
+        if v.frozen() {
+            members[..3]
+                .iter()
+                .enumerate()
+                .filter_map(|(k, u)| (value(u) == target).then_some(k))
+                .collect()
+        } else {
+            r5_zn_members(members, self.zd, self.zg)
+                .filter_map(|(k, u)| (value(u) == target).then_some(k))
+                .collect()
+        }
     }
 }
 
@@ -955,14 +983,35 @@ pub fn r5_joint(zd: Tick, zg: Tick, prev: &UnitRange, cur: &UnitRange) -> R5Join
     if !unit_core_position(prev, zd, zg).closed_overlap() {
         return R5Joint::PrevOutsideCore;
     }
-    let same_extreme = match side {
-        Direction::Up => prev.hi == cur.hi,
-        Direction::Down => prev.lo == cur.lo,
-    };
-    if prev.end_index == cur.start_index && same_extreme {
-        R5Joint::Proven { side }
+    if !r5_connected(side, prev, cur) {
+        return R5Joint::JointNotConnected;
+    }
+    R5Joint::Proven { side }
+}
+
+fn r5_connected(side: Direction, leave: &UnitRange, pullback: &UnitRange) -> bool {
+    leave.end_index == pullback.start_index
+        && match side {
+            Direction::Up => leave.hi == pullback.hi,
+            Direction::Down => leave.lo == pullback.lo,
+        }
+}
+
+/// 在已证离开的范围内分类首个已证回抽；缺证与返回不同。
+/// 外段自身为离开的分支只能由同源角色输入进入，不能由区间位置猜角色（#2141）。
+pub(super) fn r5_pullback(
+    zd: Tick,
+    zg: Tick,
+    side: Direction,
+    pullback: &UnitRange,
+) -> Option<bool> {
+    let pos = unit_core_position(pullback, zd, zg);
+    if pos.closed_overlap() {
+        Some(true)
+    } else if pos.leave_side() == Some(side) {
+        Some(false)
     } else {
-        R5Joint::JointNotConnected
+        None
     }
 }
 
@@ -1009,7 +1058,7 @@ mod tests {
     }
 
     #[test]
-    fn r5_joint_proven_implies_third_cert() {
+    fn r5_joint_and_third_cert_share_the_same_gate() {
         use super::super::super::types::Segment;
         use super::super::signal::judge_third_cert;
 
@@ -1045,7 +1094,7 @@ mod tests {
                 unit(20, 24, up(), 5, 15),
                 R5Joint::Proven { side: down() },
             ),
-            // #2141：关节极值不等时，既有三类点端价门通过，R5 字面见证缺席。
+            // #2141：关节极值不等时，不发 R5 字面见证或三类证书。
             (
                 unit(16, 20, up(), 22, 45),
                 unit(20, 24, down(), 38, 50),
@@ -1054,7 +1103,7 @@ mod tests {
         ] {
             assert_eq!(r5_joint(core.zd, core.zg, &prev, &cur), expected);
             let cert = judge_third_cert(&core, &segment(prev), Some(prev.direction), &segment(cur));
-            assert!(cert.is_some());
+            assert_eq!(cert.is_some(), matches!(expected, R5Joint::Proven { .. }));
         }
     }
 

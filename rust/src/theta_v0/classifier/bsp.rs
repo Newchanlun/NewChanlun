@@ -736,19 +736,19 @@ mod tests {
             // 2026-08-29 #1291 G5 F-2：signal.rs 二类提取入口补 m2_broke_center 方向敏感
             // 真检查与文档（+9 行）⟹ 七处夹具点统一 +9，逐条重核内容不变（同为测试夹具
             // source_index 过滤），同条目重登记。
-            "theta_v0/classifier/signal.rs:1954",
-            "theta_v0/classifier/signal.rs:2108",
-            "theta_v0/classifier/signal.rs:2339",
-            "theta_v0/classifier/signal.rs:2681",
-            "theta_v0/classifier/signal.rs:2693",
-            "theta_v0/classifier/signal.rs:2715",
-            "theta_v0/classifier/signal.rs:2737",
-            "theta_v0/classifier/signal.rs:2742",
-            "theta_v0/classifier/signal.rs:2743",
-            "theta_v0/classifier/signal.rs:2881",
-            "theta_v0/classifier/signal.rs:2914",
-            "theta_v0/classifier/signal.rs:3181",
-            "theta_v0/classifier/signal.rs:3249",
+            "theta_v0/classifier/signal.rs:2132",
+            "theta_v0/classifier/signal.rs:2286",
+            "theta_v0/classifier/signal.rs:2517",
+            "theta_v0/classifier/signal.rs:2859",
+            "theta_v0/classifier/signal.rs:2871",
+            "theta_v0/classifier/signal.rs:2893",
+            "theta_v0/classifier/signal.rs:2915",
+            "theta_v0/classifier/signal.rs:2920",
+            "theta_v0/classifier/signal.rs:2921",
+            "theta_v0/classifier/signal.rs:3059",
+            "theta_v0/classifier/signal.rs:3092",
+            "theta_v0/classifier/signal.rs:3359",
+            "theta_v0/classifier/signal.rs:3427",
             // 2026-08-21 #1080 S2 Phase2：`judge_first_from_gates` 加默认关闭只读捕获
             // seam（+14 行）——本块锚点待全量合并后按 whitelist 测试实报行号统一订正。            // （2026-08-16 #648 T1：classifier/mod.rs 内联测试 4273 行抽离至 classifier/tests/            // 主题件 ⟹ 该夹具点同内容随迁 mod.rs:4574 → tests/pipeline_geometry.rs:1565，
             // 重核内容不变（同为测试夹具 source_index 过滤），同条目重登记。
@@ -772,7 +772,7 @@ mod tests {
             // 1697 → 1698，重核内容不变，同条目重登记。
             // #1419 recompose：main #1626（+15 行）与 #1419 R8 夹具（−23+1 行）合成 ⟹ 1713；
             // 夹具坐标随 R8 连接段为 32，重核仍为 source_index 过滤，同条目重登记。
-            "theta_v0/classifier/tests/pipeline_geometry.rs:1713",
+            "theta_v0/classifier/tests/pipeline_geometry.rs:1694",
             // 「时刻分组键」过滤（spec §12 语义，合法契约非泄漏，非身份 join，不入本族）。
             // （2026-08-16 #903/#919 注释与 fmt ⟹ +2 漂移，七处再重锚，内容不变。）
             // （2026-08-16 #993 fixture 修复 ⟹ signal.rs 测试区再位移，七处夹具点重锚，内容不变。

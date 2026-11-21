@@ -13,8 +13,8 @@ use crate::theta_v0::classifier::decompose::MoveBlock;
 use crate::theta_v0::classifier::descend::RMove;
 use crate::theta_v0::classifier::divergence::DivergenceGauge;
 use crate::theta_v0::classifier::recursive_tower::{
-    advance_cp_lifecycles, CpLifecycleStatus, CpScanOwnership, CpStructureIdentity, ElementId,
-    FullTrendCQualified, FullTrendQualificationEvidence, LeveledMove, ThirdClassInCp,
+    CpLifecycleStatus, CpScanOwnership, CpStructureIdentity, ElementId, FullTrendCQualified,
+    FullTrendQualificationEvidence, LeveledMove, ThirdClassInCp,
 };
 use crate::theta_v0::classifier::signal::{
     extract_second_signals, judge_first_from_gates, FirstClassGradeRecord, FirstStructuralGates,
@@ -246,12 +246,12 @@ pub fn run_cp_full_qualified_review_diagnostic() -> CpReviewCapture {
         end_index: 5,
     };
     let b = Center {
-        zd: 100,
+        zd: 160,
         zg: 200,
         dd: 90,
         gg: 210,
         start_index: 6,
-        end_index: 8,
+        end_index: 9,
     };
     let first = Center {
         zd: 100,
@@ -278,16 +278,39 @@ pub fn run_cp_full_qualified_review_diagnostic() -> CpReviewCapture {
         end_index: 15,
     };
     let centers = vec![a, b];
-    let movements = vec![
-        composed(first, 0, 9, 11),
-        composed(second, 1, 11, 13),
-        composed(successor, 2, 13, 15),
+    let mut movements = vec![
+        composed(first, 3, 9, 11),
+        composed(second, 4, 11, 13),
+        composed(successor, 5, 13, 15),
     ];
     let units = vec![
+        unit(6, 7, Direction::Down, 155, 201),
+        unit(7, 8, Direction::Up, 160, 200),
+        unit(8, 9, Direction::Down, 145, 205),
         unit(9, 11, Direction::Down, first.dd, first.gg),
         unit(11, 13, Direction::Up, second.dd, second.gg),
         unit(13, 15, Direction::Down, successor.dd, successor.gg),
     ];
+    movements.splice(
+        0..0,
+        units[..3].iter().enumerate().map(|(index, unit)| {
+            // 上级完成单元须有其内部中枢；第三个种子单元与首离开走势包络
+            // 仍相交，故后者是新的下跌块起点，而非前块的延续。
+            composed(
+                Center {
+                    zd: 160,
+                    zg: 200,
+                    dd: unit.lo,
+                    gg: unit.hi,
+                    start_index: unit.start_index,
+                    end_index: unit.end_index,
+                },
+                index as u64,
+                unit.start_index,
+                unit.end_index,
+            )
+        }),
+    );
     let pending = |b_center_index, b_center_id, b_center, departure_move_id, departure_interval| {
         CpScanOwnership {
             b_center_index,
@@ -306,22 +329,61 @@ pub fn run_cp_full_qualified_review_diagnostic() -> CpReviewCapture {
     // `advance_cp_lifecycles` 按 nearest-center index 路由，ownership 列必须与 centers 1:1。
     let mut objects = vec![
         pending(0, id(2, 0), a, None, None),
-        pending(1, id(2, 1), b, Some(id(1, 0)), Some((9, 11))),
+        pending(1, id(2, 1), b, Some(id(1, 3)), Some((9, 11))),
+    ];
+
+    // 合成 CC-019 见证来自下级已完成腿，故不要求上下级投影极值等同。
+    use super::super::center_scan::{NoopSink, R5AttestedLegs, R5DirectionSource};
+    use super::super::recursive_tower::{
+        advance_cp_lifecycles_with_r5, scan_center_facts_with_r5, WinMeta,
+    };
+    let roles = R5AttestedLegs {
+        seed: 0,
+        leave: 3,
+        side: Direction::Down,
+        first_pullback: Some(4),
+        leave_is_zn: None,
+    };
+    let (built, metas, _) = scan_center_facts_with_r5(
+        &units[..5],
+        super::super::center::center_from_window,
+        0,
+        R5DirectionSource::Unproven,
+        &[roles],
+        &mut NoopSink,
+    );
+    assert_eq!((built[0].0.zd, built[0].0.zg), (b.zd, b.zg));
+    assert!(metas[0].settlement.is_some());
+    let metas = [
+        WinMeta {
+            settlement: None,
+            ..metas[0]
+        },
+        metas[0],
     ];
 
     begin_cp_probe();
-    advance_cp_lifecycles(
+    advance_cp_lifecycles_with_r5(
         &mut objects,
         &centers,
-        &units[..2],
-        &movements[..2],
+        &units[..5],
+        &movements[..5],
         None,
-        1,
+        Some(&metas),
+        4,
     );
     assert_eq!(objects[1].lifecycle, CpLifecycleStatus::Closed);
     assert!(objects[1].full_trend_evidence.is_some());
     assert!(objects[1].full_trend_c_qualified.is_none());
-    advance_cp_lifecycles(&mut objects, &centers, &units, &movements, None, 2);
+    advance_cp_lifecycles_with_r5(
+        &mut objects,
+        &centers,
+        &units,
+        &movements,
+        None,
+        Some(&metas),
+        5,
+    );
     assert!(objects[1].full_trend_c_qualified.is_some());
     let mut batch = take_capture();
     assert_eq!(batch.cp_reviews.len(), 1, "fixture 必须恰好产一次 review");
@@ -375,7 +437,7 @@ pub fn run_first_production_diagnostics() -> Vec<FirstAssemblyCapture> {
     assert!(!capture_enabled(), "fixture capture 不得嵌套现有捕获会话");
     let center = Center {
         start_index: 1,
-        end_index: 3,
+        end_index: 6,
         zd: 100,
         zg: 120,
         dd: 90,
@@ -478,6 +540,7 @@ pub fn run_first_production_diagnostics() -> Vec<FirstAssemblyCapture> {
             DivergenceGauge::ForceL,
             &strokes,
             sorted,
+            super::super::signal::T3InCSource::NativeSegments,
             Some(0),
             &mut grades,
         );
@@ -708,6 +771,7 @@ pub fn capture_fixture_frontier(
         level,
         centers,
         segments,
+        None,
         anchor_dirs,
         departure_ends,
         blocks,

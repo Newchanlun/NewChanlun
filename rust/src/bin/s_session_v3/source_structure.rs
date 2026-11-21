@@ -72,7 +72,13 @@ pub(super) fn audit_payload(
         ("policy_version", policy),
         ("view_role", "main"),
     ] {
-        if text(s, p, k)? != v {
+        let observed = text(s, p, k)?;
+        let legacy_policy = k == "policy_version"
+            && ((crate::tb02e::KINDS.contains(&kind)
+                && observed == crate::tb02e::LEGACY_POLICY_VERSION)
+                || (crate::tb02f::KINDS.contains(&kind)
+                    && observed == crate::tb02f::LEGACY_POLICY_VERSION));
+        if !legacy_policy && observed != v {
             return Err(err("结构语义头不符"));
         }
     }
@@ -166,6 +172,49 @@ impl Lookup for FullLookup<'_> {
     }
 }
 
+/// 旧活动槽继续保有原件，但不是新切面中可用于判定的对象或实体端点。
+pub(super) struct CurrentR5<'a, L> {
+    pub lookup: &'a L,
+    pub deferred: &'a [bj::TextValue],
+}
+impl<L: Lookup> CurrentR5<'_, L> {
+    pub fn is_deferred(&self, id: &str) -> bool {
+        self.deferred
+            .binary_search_by(|v| v.as_str().cmp(id))
+            .is_ok()
+    }
+
+    /// 来源审计也可只收到本代生成集。原件的活动性由持久对象差分与历史复算核验。
+    pub fn validate_present(&self) -> Result<(), PublishError> {
+        for id in self.deferred {
+            if self.lookup.object(id.as_str()).is_some_and(|object| {
+                !super::super::content_structure::r5_deferable_kind(object.kind.as_str())
+            }) {
+                return Err(err("R5 待重算原件不在 E/F 领域"));
+            }
+        }
+        Ok(())
+    }
+}
+impl<L: Lookup> Lookup for CurrentR5<'_, L> {
+    fn entity(&self, id: &str) -> Option<&Object> {
+        self.lookup
+            .entity(id)
+            .filter(|object| !self.is_deferred(object.id.as_str()))
+    }
+
+    fn object(&self, id: &str) -> Option<&Object> {
+        self.lookup.object(id).filter(|_| !self.is_deferred(id))
+    }
+}
+pub(super) fn deferred_objects(
+    s: &mut (impl SourceFieldStore + ?Sized),
+    center_version: &Object,
+) -> Result<sc::CodecVec<bj::TextValue>, PublishError> {
+    let payload = payload(s, center_version)?;
+    super::super::object_index::r5_deferred_from_payload(s, payload.view())
+}
+
 /// 仅当前对象边；before/previous 是历史值快照，不冒充当前对象边。
 /// 收集与校验共用路径，以便 Native 删除/修改边时撤销同一组逆依赖。
 pub(super) fn references(
@@ -192,6 +241,8 @@ pub(super) fn references(
                     "second_sequence_object_id",
                     "unit_object_id",
                     "witness_object_id",
+                    "leave_object_id",
+                    "pullback_object_id",
                     "object_id",
                 ] {
                     if let Some(value) = s.lookup_optional_field_ref(r.view(), key).map_err(err)? {
@@ -209,7 +260,7 @@ pub(super) fn references(
                         }
                     }
                 }
-                for key in ["unit", "units", "after"] {
+                for key in ["unit", "units", "r5", "after"] {
                     if let Some(value) = s.lookup_optional_field_ref(r.view(), key).map_err(err)? {
                         walk(s, &value, out)?;
                     }
@@ -392,9 +443,19 @@ pub(super) fn audit_full(
             return Err(err("结构域版本根缺失或重复"));
         }
     }
+    let center_version = objects
+        .iter()
+        .find(|o| o.kind == "CC-056.center_version")
+        .expect("上方已要求唯一中心版本");
+    let deferred = deferred_objects(s, center_version)?;
+    let current = CurrentR5 {
+        lookup: &lookup,
+        deferred: &deferred,
+    };
+    current.validate_present()?;
     for o in objects {
-        if is_kind(rule, o.kind.as_str()) {
-            audit_links(s, o, &lookup)?;
+        if is_kind(rule, o.kind.as_str()) && !current.is_deferred(o.id.as_str()) {
+            audit_links(s, o, &current)?;
         }
     }
     Ok(())
@@ -1138,6 +1199,25 @@ fn audit_entity_fields(
             }
         }
         "CC-016.center" => {
+            if let Some(proof) = s.lookup_optional_field_ref(d.view(), "r5").map_err(err)? {
+                if proof.kind() != Kind::Null {
+                    for (unit_key, id_key) in [
+                        ("leave_unit", "leave_object_id"),
+                        ("pullback_unit", "pullback_object_id"),
+                    ] {
+                        let id = text(s, &proof, id_key)?;
+                        let unit = lookup
+                            .object(id.as_str())
+                            .ok_or_else(|| err("R5 腿对象悬空"))?;
+                        let entity_id = text(s, &proof, unit_key)?;
+                        if unit.kind != "CC-013.segment"
+                            || !points_back(s, unit, "entity_id", &entity_id)?
+                        {
+                            return Err(err("R5 腿对象与实体错绑"));
+                        }
+                    }
+                }
+            }
             let attempt = field_entity(s, d, "seed_attempt_id", lookup)?
                 .ok_or_else(|| err("结构实体字段端点悬空"))?;
             if !points_back(s, attempt, "center_id", &me)? {
@@ -1988,11 +2068,11 @@ mod ef_entity_tests {
         o.sources = SourceCoords::Original(sc::CodecVec::from_plain(r.sources.clone()));
         o
     }
-    fn unit(n: &sc::MemoryNodes, k: usize, completed: bool) -> SegUnit {
+    fn unit(n: &sc::MemoryNodes, k: usize, range: Option<(i64, i64)>) -> SegUnit {
         SegUnit {
             unit_id: SText::new(&format!("segment:{k}"), n).unwrap(),
             object_id: SText::new(&format!("obj3-seg{k}"), n).unwrap(),
-            range: completed.then(|| UnitRange {
+            range: range.map(|(lo, hi)| UnitRange {
                 start_index: k * 10,
                 end_index: k * 10 + 10,
                 direction: if k % 2 == 0 {
@@ -2000,8 +2080,8 @@ mod ef_entity_tests {
                 } else {
                     Direction::Down
                 },
-                lo: RANGES[k].0,
-                hi: RANGES[k].1,
+                lo,
+                hi,
             }),
             sources: SVec::from_iter([k], n).unwrap(),
         }
@@ -2026,9 +2106,26 @@ mod ef_entity_tests {
         generation: i64,
         prior: &[Built],
     ) -> Cut {
+        cut_ranges(n, producer, &RANGES[..completed], generation, prior).unwrap()
+    }
+
+    fn cut_ranges(
+        n: &mut sc::MemoryNodes,
+        producer: &mut Cc004Producer,
+        ranges: &[(i64, i64)],
+        generation: i64,
+        prior: &[Built],
+    ) -> Result<Cut, sc::ContextError> {
+        let completed = ranges.len();
         let inputs = UnitInputs {
-            completed: SVec::from_iter((0..completed).map(|k| unit(n, k, true)), n).unwrap(),
-            in_progress: Some(unit(n, completed, false)),
+            completed: SVec::from_iter(
+                ranges
+                    .iter()
+                    .enumerate()
+                    .map(|(k, &range)| unit(n, k, Some(range))),
+                n,
+            )?,
+            in_progress: Some(unit(n, completed, None)),
         };
         let known = sc::write_value(
             n,
@@ -2051,8 +2148,7 @@ mod ef_entity_tests {
                 known_at: &known,
                 all_sources: &sources,
             },
-        )
-        .unwrap();
+        )?;
         let mut rows: std::vec::Vec<Row> = (0..=completed).map(segment_row).collect();
         rows.push(Row {
             kind: "CC-056.segment_version".into(),
@@ -2072,7 +2168,7 @@ mod ef_entity_tests {
                 o.source_coords.content_ref(),
             ));
             let kind = key[0].as_str().unwrap().to_string();
-            if !kind.starts_with("CC-055.") {
+            if !kind.ends_with("_change") {
                 records.push(o.record.clone());
             }
             rows.push(Row {
@@ -2082,9 +2178,9 @@ mod ef_entity_tests {
                 sources: coords(n, &source).unwrap().iter().copied().collect(),
             });
         }
-        Cut { rows, records }
+        Ok(Cut { rows, records })
     }
-    fn cuts() -> (sc::MemoryNodes, Cut, Cut) {
+    fn factory() -> (sc::MemoryNodes, Cc004Producer) {
         let mut n = sc::MemoryNodes::default();
         let mut producer = Cc004Producer::new(tb02a::PROFILE, crate::V3_STRUCTURE_RULE_REVISION);
         for i in 0..RANGES.len() + 1 {
@@ -2105,6 +2201,11 @@ mod ef_entity_tests {
                 )
                 .unwrap();
         }
+        (n, producer)
+    }
+
+    fn cuts() -> (sc::MemoryNodes, Cut, Cut) {
+        let (mut n, mut producer) = factory();
         let first = cut(&mut n, &mut producer, RANGES.len() - 1, 28, &[]);
         let records = first.records.clone();
         let second = cut(&mut n, &mut producer, RANGES.len(), 29, &records);
@@ -2130,6 +2231,133 @@ mod ef_entity_tests {
             *counts.entry(r.kind.as_str()).or_default() += 1;
         }
         format!("{counts:?}")
+    }
+
+    #[test]
+    fn r5_settlement_clock_waits_for_completed_retest_and_keeps_first_cut() {
+        let mut nodes = sc::MemoryNodes::default();
+        let mut producer = Cc004Producer::new(tb02a::PROFILE, crate::V3_STRUCTURE_RULE_REVISION);
+        for i in 0..8 {
+            producer
+                .bind_source(
+                    &mut nodes,
+                    i,
+                    content_producer::RawRefSpec {
+                        identity_key: format!("raw-{i}"),
+                        payload_hash: "h".into(),
+                        receipt_id: format!("receipt-{i}"),
+                        event_id: format!("bar-{i}"),
+                        input_revision: "1".into(),
+                        revision: 1,
+                        seq: i,
+                        source_coord: i.to_string(),
+                    },
+                )
+                .unwrap();
+        }
+        let before = cut(&mut nodes, &mut producer, 5, 28, &[]);
+        let proved = cut(&mut nodes, &mut producer, 6, 29, &before.records);
+        let later = cut(&mut nodes, &mut producer, 7, 30, &proved.records);
+        let a = data_of(&before.rows, "CC-016.center")[0];
+        let b = data_of(&proved.rows, "CC-016.center")[0];
+        let c = data_of(&later.rows, "CC-016.center")[0];
+        assert_eq!(a["settled"], false);
+        assert_eq!(a["settled_known_at"], Value::Null);
+        assert_eq!(b["settled"], true);
+        assert_eq!(b["r5"]["leave_unit"], "segment:4");
+        assert_eq!(b["r5"]["pullback_unit"], "segment:5");
+        assert_eq!(b["settled_known_at"]["generation"], "29");
+        assert_eq!(c["settled_known_at"], b["settled_known_at"]);
+        assert_eq!(a["entity_id"], c["entity_id"]);
+    }
+
+    #[test]
+    fn r5_pending_predecessor_cannot_publish_withdrawals_for_unscanned_centers() {
+        let (mut nodes, mut producer) = factory();
+        let before = cut(&mut nodes, &mut producer, 15, 28, &[]);
+        assert_eq!(data_of(&before.rows, "CC-016.center").len(), 3);
+        assert_eq!(data_of(&before.rows, "CC-020.center_pair").len(), 2);
+
+        let mut broken_joint = RANGES[..15].to_vec();
+        // 原右窗种子及其身份不变。仅把 u5 的高点由 260 改为 259，
+        // 使 u4→u5 无法证明价端相接；u5 仍完整处在核心 [140,180] 上方。
+        broken_joint[5].1 = 259;
+        let from_empty = cut_ranges(&mut nodes, &mut producer, &broken_joint, 29, &[]).unwrap();
+        let centers = data_of(&from_empty.rows, "CC-016.center");
+        assert_eq!(centers.len(), 1);
+        assert_eq!(centers[0]["r5_pending_unit"], "segment:5");
+        assert_eq!(centers[0]["settled"], false);
+
+        let mixed = cut_ranges(
+            &mut nodes,
+            &mut producer,
+            &broken_joint,
+            29,
+            &before.records,
+        )
+        .unwrap();
+        let version = data_of(&mixed.rows, "CC-056.center_version")[0];
+        let deferred = version["r5_deferred_object_ids"].as_array().unwrap();
+        for kind in ["CC-016.center", "CC-020.center_pair"] {
+            let dormant: std::vec::Vec<_> = before
+                .rows
+                .iter()
+                .filter(|row| row.kind == kind)
+                .filter(|row| deferred.iter().any(|id| id.as_str() == Some(&row.id)))
+                .collect();
+            assert_eq!(dormant.len(), 2, "{kind} 的两条旧下游活动实体仍待重算");
+        }
+        assert!(data_of(&mixed.rows, "CC-055.center_change")
+            .iter()
+            .all(|d| d["change"] != "withdrawn"));
+        assert!(data_of(&mixed.rows, "CC-055.pair_change").is_empty());
+        assert_eq!(data_of(&mixed.rows, "CC-016.center").len(), 1);
+        assert_eq!(
+            data_of(&mixed.rows, "CC-016.center")[0]["r5_pending_unit"],
+            "segment:5"
+        );
+
+        // 生成集不含旧原件：它们的活动性由独立索引的差分验证。
+        full(&mut nodes, &mixed.rows).unwrap();
+        let mut active_cut = mixed.rows.clone();
+        active_cut.extend(
+            before
+                .rows
+                .iter()
+                .filter(|r| deferred.iter().any(|id| id.as_str() == Some(r.id.as_str())))
+                .cloned(),
+        );
+        full(&mut nodes, &active_cut).expect("本代复核不能用可证前缀的新版本重验旧待重算端点");
+
+        // 关节可证后正常生成同身份的修订，不把最后一窗的成员增长冒充身份消失。
+        let mut mixed_prior = mixed.records.clone();
+        for record in &before.records {
+            let root = RefValue::Plain(NativeValue::<sc::ContentRef>::from_unscoped(
+                record.content_ref(),
+            ));
+            let id = text(&mut nodes, &root, "object_id").unwrap();
+            if deferred.iter().any(|v| v.as_str() == Some(id.as_str())) {
+                mixed_prior.push(record.clone());
+            }
+        }
+        let proved = cut(&mut nodes, &mut producer, RANGES.len(), 30, &mixed_prior);
+        let old_tail = data_of(&before.rows, "CC-016.center")[2];
+        let tail = data_of(&proved.rows, "CC-016.center")[2];
+        assert_eq!(tail["entity_id"], old_tail["entity_id"]);
+        assert_eq!(
+            tail["members"].as_array().unwrap().len(),
+            old_tail["members"].as_array().unwrap().len() + 1
+        );
+        assert_eq!(tail["formed_known_at"], old_tail["formed_known_at"]);
+        let changes = data_of(&proved.rows, "CC-055.center_change");
+        assert!(changes.iter().all(|v| v["change"] != "withdrawn"));
+        let added = changes
+            .iter()
+            .find(|v| v["entity_id"] == tail["entity_id"] && v["change"] == "member_added")
+            .unwrap();
+        assert_eq!(added["known_at"]["generation"], "30");
+        assert_eq!(added["before"], *old_tail);
+        assert_eq!(added["after"], *tail);
     }
 
     #[test]

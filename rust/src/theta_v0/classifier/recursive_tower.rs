@@ -55,9 +55,12 @@ use std::rc::Rc;
 
 use super::super::types::{Center, Direction, Stroke, Tick};
 use super::center::{
-    classify_relation, seed_facts, unit_core_position, zn_extrema, CenterRelation, UnitRange,
+    classify_relation, r5_zn_extrema, seed_facts, unit_core_position, CenterRelation, UnitRange,
 };
-use super::center_scan::{NoopSink, ScanSink, ScanWindow};
+use super::center_scan::{
+    r5_step, NoopSink, R5AttestedLegs, R5Boundary, R5DirectionSource, R5Gap, R5Proof, R5Step,
+    RoleProvider, ScanSink, ScanWindow,
+};
 use super::decompose::{center_own_dir_at, MoveBlock};
 use super::descend::RMove;
 
@@ -108,6 +111,39 @@ pub struct ElementId {
     pub ordinal: u64,
 }
 
+/// 扫描证书及其原生段身份；投影可重排中枢或截取下级流，不能借用其它流的同序号证书。
+#[derive(Debug, PartialEq, Eq)]
+pub struct NativeR5Settlement {
+    pub(super) proof: R5Proof,
+    /// 从 seed 首段到首回抽（含）的连续原生段，绑定冻结核心与成员域。
+    pub(super) source: Box<[(ElementId, UnitRange)]>,
+}
+
+impl NativeR5Settlement {
+    fn from_scan(
+        settlement: Option<R5Proof>,
+        units: &[UnitRange],
+        moves: &[LeveledMove],
+        directions: R5DirectionSource<'_>,
+    ) -> Option<Rc<Self>> {
+        let proof = settlement?;
+        if !matches!(directions, R5DirectionSource::Native) {
+            return None;
+        }
+        let span = proof.seed_unit()..=proof.pullback_unit();
+        let source = moves
+            .get(span.clone())?
+            .iter()
+            .zip(units.get(span)?)
+            .map(|(m, &unit)| {
+                (m.id.level == 0 && matches!(m.rmove, RMove::Segment { .. }))
+                    .then_some((m.id, unit))
+            })
+            .collect::<Option<Box<[_]>>>()?;
+        Some(Rc::new(Self { proof, source }))
+    }
+}
+
 /// 携坐标的递归走势（坐标层包装：`RMove` 结构 + 原始 K 序坐标 + 携坐标的次级别走势侧车）。
 ///
 /// `rmove`：纯结构走势（Lean `Move` μF 镜像，descend.rs::RMove——无坐标）。
@@ -149,6 +185,8 @@ pub struct LeveledMove {
     /// 一次算出并写 `Some`，[`Self::envelope`] 据此 O(1)。`None` 只出现在测试手搓的字面量里，
     /// `envelope()` 对它回退递归 `rmove.lo()/hi()`（同值，仅慢）。
     pub(crate) interval_cache: Option<(Tick, Tick)>,
+    /// 当前窗口的原生 R5 证书；不继承块内其它中枢、重切母窗或子走势的证书。
+    pub(crate) r5_settlement: Option<Rc<NativeR5Settlement>>,
 }
 
 /// 在按 `end_index` 升序排列的走势序列中定位 `end_index == target` 的段（leftmost）。
@@ -208,6 +246,7 @@ impl LeveledMove {
             sub_moves: Rc::new(Vec::new()),
             id,
             interval_cache: Some((u.lo, u.hi)),
+            r5_settlement: None,
         }
     }
 
@@ -278,6 +317,7 @@ impl LeveledMove {
             sub_moves,
             id,
             interval_cache: Some(interval),
+            r5_settlement: None,
         }
     }
 
@@ -328,26 +368,8 @@ impl LeveledMove {
 
 /// 从携坐标的次级别走势序列识别**canonical 中枢序列**（seed + 延伸吸收）+ 每个中枢的构成窗口。
 ///
-/// canonical 中枢链三步构造（一类买卖点.pdf §5，第20课中心定理一，task #142）：
-/// - **Step1 seed**：首个三元组经 `build` 成真中枢（L0=完整判据方向交替+核心非空；上级=几何核心非空）。
-/// - **Step2 extension**：后续单元 `u_j` 区间 `[d_j,g_j] ∩ [ZD,ZG] ≠ ∅` ⟹ **同一中枢延伸**——
-///   `end_index := u_j.end_index`、`DD := min(DD,d_j)`、`GG := max(GG,g_j)`；**ZD/ZG 核心冻结**
-///   （现行中枢约定：核心由 seed 三段全交定，口径 B，延伸只扩外缘不改核心）。u_j 留在同一中枢，
-///   不开新同级别中枢（Q2 裁决：连续围绕同一区间震荡 = 一个延伸中枢，不拆成多个重叠碎片）。
-/// - **Step3 non-extension**：仅当 `d_j > ZG ∨ g_j < ZD` 停止延伸，中枢结算；u_j 是突破段（连接段），
-///   不属于任何中枢，下一个同级别 seed 自 u_{j+1}（= last_member+2）起找（★#1419 R8，#812 Z-5，
-///   `zhongshu.md` §6.1；`028-第28课.md:770`【答疑·作者回复】「不构成任何中枢中的一段」）。
-///
-/// 与旧「非重叠三段窗口、成立支 +3」的差异：旧版把围绕同一核心的持续震荡拆成多个外缘互相重叠的
-/// 同级别中枢（L0 全历史 94.4% 相邻重叠，#141 问题包 §3-b 坐实）；canonical 版把它们吸收进一个
-/// 延伸中枢——但延伸有上限（★#148 升级语义，第33课）：窗口总段数达 [`UPGRADE_TOTAL_SEGMENTS`]
-/// ⟹ 整窗按每 3 段重切为本级别子中枢（核心继承 seed 三段交，外缘由子窗聚合），升级为高一级中枢
-/// 经上一级 detect 自然涌现（子中枢 compose 的上级单元区间围绕同核心 ⟹ 上级 seed 高概率成立）。
-/// Q2 裁决（不拆碎片）的有效域自此收窄为总段数 <9 的窗口。
-///
-/// `build`：中枢构造函数（L0=完整判据 `center_from_segments`；上级=几何 `center_from_window`）。
-/// 返回 `Vec<(Center, (usize, usize))>`：每个中枢 + 构成它的单元闭区间 `[start, end]`（seed 三段 +
-/// 延伸段，`end - start + 1 >= 3`）。
+/// seed 定冻结核心；成员延伸、R5 两段结算和 S-4 的唯一执行面是共用扫描（#1496）。
+/// `build` 只管 seed 成立（方向交替和核心）；退出不等于结算。
 #[cfg(test)]
 fn detect_centers_windowed(
     units: &[UnitRange],
@@ -406,6 +428,28 @@ pub fn compose_level(
     level: u32,
     tower_base: crate::theta_v0::config::TowerBase,
 ) -> (Vec<Center>, Vec<LeveledMove>, Vec<CpScanOwnership>) {
+    compose_level_with_roles(
+        units,
+        subs_moves,
+        is_l0,
+        level,
+        tower_base,
+        RoleProvider {
+            directions: tower_r5_directions(subs_moves),
+            attested: &[],
+        },
+    )
+}
+
+/// 下游已完成单元所有者在这里交接同源见证；普通入口的上级投影不具备这些证据。
+pub fn compose_level_with_roles(
+    units: &[UnitRange],
+    subs_moves: &[LeveledMove],
+    is_l0: bool,
+    level: u32,
+    tower_base: crate::theta_v0::config::TowerBase,
+    roles: RoleProvider<'_>,
+) -> (Vec<Center>, Vec<LeveledMove>, Vec<CpScanOwnership>) {
     let build = if is_l0 {
         match tower_base {
             crate::theta_v0::config::TowerBase::Segment => super::center::center_from_segments,
@@ -414,14 +458,22 @@ pub fn compose_level(
     } else {
         super::center::center_from_window
     };
-    let (windowed, metas, _) = detect_centers_windowed_resume(units, build, 0);
+    let (windowed, metas, _) = scan_center_facts_with_r5(
+        units,
+        build,
+        0,
+        roles.directions,
+        roles.attested,
+        &mut NoopSink,
+    );
     let centers: Vec<Center> = windowed.iter().map(|(c, _)| *c).collect();
     // 每个中枢的构成窗口（seed 三段 + 延伸段，连续切片）→ compose 为一个上级走势。
     // ★codex Q4：确定性 ID 注入——ordinal = 窗口在该级产出序（enumerate）。全量从 0 起。
     let upper: Vec<LeveledMove> = windowed
         .iter()
+        .zip(&metas)
         .enumerate()
-        .map(|(i, (_c, win))| {
+        .map(|(i, ((_c, win), meta))| {
             // ★task#40 fix A：win 是连续闭区间 ⟹ 直接借用连续切片，无临时数组 clone。
             // ★task#142：窗口变长（seed 三段 + 延伸段），subs = 中枢吸收的全部次级别走势。
             let subs = &subs_moves[win.0..=win.1];
@@ -431,7 +483,10 @@ pub fn compose_level(
             };
             // #897：载荷 = 本窗口所属走势类型块的中枢序列（末位 = 本窗中枢 *c）。
             let run_start = trend_run_start(&centers, i);
-            LeveledMove::compose(subs, &centers[run_start..=i], level, id)
+            let mut upper = LeveledMove::compose(subs, &centers[run_start..=i], level, id);
+            upper.r5_settlement =
+                NativeR5Settlement::from_scan(meta.settlement, units, subs_moves, roles.directions);
+            upper
         })
         .collect();
     let cp_ownership: Vec<CpScanOwnership> = windowed
@@ -494,24 +549,9 @@ pub fn compose_level(
 /// - 全量等价：`detect_centers_windowed(units, build)` == `detect_centers_windowed_resume(units, build, 0).0`
 ///   （`start_i=0` 续扫 == 全量扫描）。
 ///
-/// **bit-exact 充要条件**（调用方必须保证，否则增量破裂）：
-/// 1. `start_i` 必须是一个**确定性扫描断点**，且**唯一合法取值 = 上次扫描的 `resume_from`**（最后一个
-///    成立窗口的起点；无窗口时 == 退出点 `consumed`），调用方须对应 pop 最后一个已产出中枢（frontier
-///    协议，见 `WindowScanCursor` 文档与 mod.rs::classify_incremental 回退逻辑）。
-///    ★延伸语义（task #142）使旧合法取值 (a)「退出点 `consumed` 直接续进」**失效**：最后一个中枢在
-///    未出现 non-extension 单元前是**开放**的（尾部追加单元可延伸它），从 `consumed` 续进会把开放
-///    中枢误当 sealed、对本应延伸进它的新单元开新中枢（与全量分叉）。frontier 协议天然正确：pop 开放
-///    中枢 + 从其 seed 起点重扫 ⟹ 延伸在重扫中吸收新单元，bit-exact。
-/// 2. `units[..start_i]` 在两次扫描间**不可变**（只允许尾部追加或 frontier 段原地改写后重扫；
-///    改写落在 `start_i` 之后时无害，落在之前须调用方 cascade 全量重置）。
-/// 3. 保留的前缀 centers（seed 与延伸全部结束于 `start_i` 前者）不可变——每个前缀中枢的延伸由一个
-///    显式 non-extension 单元终止（该单元的判定只读该单元 vs 冻结核心，units 前缀不可变 ⟹ 判定冻结），
-///    扫描永不回访其窗口。
-///
-/// 条件满足时，从 `start_i` 续扫产出的 tail 与全量重扫到达 `start_i` 后继续的产出逐位相同
-/// （确定性左折叠：seed 判定读 `units[i..=i+2]`、延伸判定读单个 `units[j]` vs 冻结核心，均为纯函数）。
-///
-/// ★#1419 S4：本函数是 [`scan_center_facts`] 配 [`NoopSink`] 的投影（塔路径不算事实、不分配）。
+/// 从上次 `resume_from` 重扫最后一个外窗，调用方先弹掉该窗的全部产出。
+/// 保留前缀须连同它的读域不变：破坏读到首回抽的结束，升级读到最后已接纳成员。
+/// 未决窗不能构成保留前缀；它会在同一 seed 处重算，而非从不可靠的外段之后重起。
 pub fn detect_centers_windowed_resume(
     units: &[UnitRange],
     build: fn(&UnitRange, &UnitRange, &UnitRange) -> Option<Center>,
@@ -524,17 +564,36 @@ pub fn detect_centers_windowed_resume(
     scan_center_facts(units, build, start_i, &mut NoopSink)
 }
 
-/// 共用中枢扫描内核（★#1419 S4，PLAN §2.1）：塔与 S 事实层取数的唯一一份扫描。
-///
-/// 行为与 [`detect_centers_windowed_resume`] 的文档完全相同；额外把每次 seed 评估（成立与否、
-/// [`super::center::SeedFacts`]）与每个成立窗口（seed 起点、退出点、是否 ≥9 升级）报给 `sink`。
-/// `S::WANTS_FACTS == false` 时不算 seed 事实（[`NoopSink`]，生产塔路径）。成立与否只由 `build` 判，
-/// `build` 本身是 `seed_facts` 的投影（`center_from_segments`/`center_from_window`），故报出的事实与判定
-/// 同源。
+/// 已有上级包络流尚无 #1429 的已完成走势角色来源，不能把 fold_direction 当证据。
+fn tower_r5_directions(moves: &[LeveledMove]) -> R5DirectionSource<'_> {
+    if matches!(moves.first().map(|m| &m.rmove), Some(RMove::Segment { .. })) {
+        R5DirectionSource::Native
+    } else {
+        R5DirectionSource::Unproven
+    }
+}
+
+/// 已完成、带原生方向的输入。
 pub fn scan_center_facts<S: ScanSink>(
     units: &[UnitRange],
     build: fn(&UnitRange, &UnitRange, &UnitRange) -> Option<Center>,
     start_i: usize,
+    sink: &mut S,
+) -> (
+    Vec<(Center, (usize, usize))>,
+    Vec<WinMeta>,
+    WindowScanCursor,
+) {
+    scan_center_facts_with_r5(units, build, start_i, R5DirectionSource::Native, &[], sink)
+}
+
+/// 塔与 S 共用的扫描：只有已证破坏授予连接及跳过该连接的续扫锚。
+pub(super) fn scan_center_facts_with_r5<S: ScanSink>(
+    units: &[UnitRange],
+    build: fn(&UnitRange, &UnitRange, &UnitRange) -> Option<Center>,
+    start_i: usize,
+    direction_source: R5DirectionSource<'_>,
+    attested: &[R5AttestedLegs],
     sink: &mut S,
 ) -> (
     Vec<(Center, (usize, usize))>,
@@ -559,28 +618,55 @@ pub fn scan_center_facts<S: ScanSink>(
         }
         match formed {
             Some(seed) => {
-                // Step2 extension（中心定理一，PDF §5）：u_j 区间触及冻结核心 [ZD,ZG]（闭区间相交
-                // `d_j <= ZG ∧ g_j >= ZD`）⟹ 同一中枢延伸——end 吸收，核心不动；DD/GG 只吸收 Zn
-                // 成员（★#1419 S2，`is_zn` 判与 seed 首单元同向，`020-第20课.md:52`「n遍历中枢中所有Zn」），
-                // 非 Zn 成员进中枢但不改外缘。延伸判据本身只读核心，与 Zn 无关。
-                // Step3 non-extension：`d_j > ZG ∨ g_j < ZD` ⟹ 停止延伸、中枢结算；u_j 为突破段，
-                // 下一 seed 自 u_{j+1} 起（★#1419 R8，见本循环末 `i` 的赋值）。
                 let mut c = seed;
                 let mut j = i + 3;
-                // ★#1424：闭区间相交 ⟺ CC-018 位置中间三叶，判定只读唯一一份 `unit_core_position`。
-                while j < units.len() && unit_core_position(&units[j], c.zd, c.zg).closed_overlap()
-                {
-                    c.end_index = units[j].end_index;
-                    j += 1;
-                }
+                let mut last_return = None;
+                let fluctuates = |u: &UnitRange| u.lo < u.hi;
+                let mut wave_count = units[i..j].iter().filter(|u| fluctuates(u)).count();
+                let boundary = loop {
+                    if wave_count >= UPGRADE_TOTAL_SEGMENTS {
+                        break R5Boundary::Upgrade;
+                    }
+                    let Some(unit) = units.get(j) else {
+                        break R5Boundary::Open;
+                    };
+                    if unit_core_position(unit, c.zd, c.zg).closed_overlap() {
+                        wave_count += usize::from(fluctuates(unit));
+                        j += 1;
+                        continue;
+                    }
+                    let roles = attested
+                        .binary_search_by_key(&(i, j), |e| (e.seed, e.leave))
+                        .ok()
+                        .map(|idx| &attested[idx]);
+                    match r5_step((c.zd, c.zg), units, i, j, direction_source, roles) {
+                        R5Step::Pending(gap) => break R5Boundary::Pending { gap, tested: j },
+                        R5Step::Destroyed(proof) => break R5Boundary::Destroyed(proof),
+                        R5Step::Returned { proof, admit } => {
+                            last_return = Some(proof);
+                            if !admit {
+                                break R5Boundary::Pending {
+                                    gap: R5Gap::ReturnedMembershipUnresolved,
+                                    tested: j,
+                                };
+                            }
+                            wave_count += units[j..j + 2].iter().filter(|u| fluctuates(u)).count();
+                            j += 2;
+                        }
+                    }
+                };
+                c.end_index = units[j - 1].end_index;
                 let n = j - i;
-                // ★on2w2-cascade 读域上界：停止哨兵 units[j]（首个 non-extension）的源坐标 = 完整读域
-                // 上界。j==len ⟹ 窗口开放无哨兵 ⟹ +∞（usize::MAX，永不进保留前缀，设计 §1.2.1）。
-                let read_end_src = units.get(j).map_or(usize::MAX, |u| u.start_index);
-                let emitted = if n < UPGRADE_TOTAL_SEGMENTS {
+                let upgraded = boundary == R5Boundary::Upgrade;
+                let read_end_src = boundary.read_end_src(units, j);
+                let settlement = match boundary {
+                    R5Boundary::Destroyed(proof) => Some(proof),
+                    _ => None,
+                };
+                let emitted = if !upgraded {
                     // Q2 有效域（≤8 段）：一个延伸中枢，不拆碎片。外缘 = 全部成员中 Zn 的极值
-                    // （★#1419 S1/S2，唯一一份聚合 `zn_extrema`；seed 三单元已含在内）。
-                    let zn = zn_extrema(&units[i..j]);
+                    // （★#1419 S1/S2，唯一一份聚合 `r5_zn_extrema`；seed 三单元已含在内）。
+                    let zn = r5_zn_extrema(&units[i..j], c.zd, c.zg);
                     c.dd = zn.dd;
                     c.gg = zn.gg;
                     out.push((c, (i, j - 1)));
@@ -588,6 +674,7 @@ pub fn scan_center_facts<S: ScanSink>(
                         win_start: i,
                         win_exit: j,
                         read_end_src,
+                        settlement,
                         emitted: 1,
                     });
                     1
@@ -625,6 +712,7 @@ pub fn scan_center_facts<S: ScanSink>(
                             win_start: i,
                             win_exit: j,
                             read_end_src,
+                            settlement,
                             emitted: k,
                         });
                     }
@@ -634,16 +722,19 @@ pub fn scan_center_facts<S: ScanSink>(
                 sink.window(ScanWindow {
                     seed_at: i,
                     exit: j,
-                    upgraded: n >= UPGRADE_TOTAL_SEGMENTS,
+                    upgraded,
                     emitted,
+                    boundary,
+                    last_return,
                 });
-                // ★#1419 R8（#812 Z-5，`zhongshu.md` §6.1 C 口径）：结算（`j < len`，u_j 为突破段）后从
-                // last_member+2 = j+1 续扫——突破段是连接段，不属于任何中枢（`028-第28课.md:770`），
-                // 不得被下一中枢的 seed 复用（A-ST-016-01）。窗口开放（`j == len`：延伸吃到末尾、尚无
-                // 突破段、未结算）时停在 j：没有可跳过的段，尾部追加单元按 frontier 协议 pop 本窗重扫；
-                // 写 `j + 1` 会让 `consumed` 越界到 `len + 1`。Lean 对应 `refStep` 的 `endE + 2`
-                // （`formal/Origin/CenterConstruct.lean`）。
-                i = if j < units.len() { j + 1 } else { j };
+                match boundary {
+                    R5Boundary::Destroyed(_) => i = j + 1,
+                    R5Boundary::Upgrade => i = j,
+                    R5Boundary::Open | R5Boundary::Pending { .. } => {
+                        i = j;
+                        break;
+                    }
+                }
             }
             None => {
                 i += 1;
@@ -703,6 +794,43 @@ pub fn compose_level_resume(
     Vec<WinMeta>,
     WindowScanCursor,
 ) {
+    compose_level_resume_with_roles(
+        units,
+        subs_moves,
+        is_l0,
+        level,
+        start_i,
+        prefix_count,
+        prefix_centers,
+        tower_base,
+        RoleProvider {
+            directions: tower_r5_directions(subs_moves),
+            attested: &[],
+        },
+    )
+}
+
+/// 增量见证入口。缓存方只能保留构造流与见证读域均未变化的前缀。
+pub fn compose_level_resume_with_roles(
+    units: &[UnitRange],
+    subs_moves: &[LeveledMove],
+    is_l0: bool,
+    level: u32,
+    start_i: usize,
+    prefix_count: usize,
+    // ★#897：已缓存的前缀中枢序列（长度恒 == `prefix_count`，与前缀 upper_moves 1:1）——
+    // tail 窗口的走势类型块可能延伸进前缀（趋势跨续扫边界），run 计算须在前缀+tail 拼
+    // 接视图上做，保证与全量 `compose_level` 逐位一致。
+    prefix_centers: &[Center],
+    tower_base: crate::theta_v0::config::TowerBase,
+    roles: RoleProvider<'_>,
+) -> (
+    Vec<Center>,
+    Vec<LeveledMove>,
+    Vec<CpScanOwnership>,
+    Vec<WinMeta>,
+    WindowScanCursor,
+) {
     let build = if is_l0 {
         match tower_base {
             crate::theta_v0::config::TowerBase::Segment => super::center::center_from_segments,
@@ -717,7 +845,14 @@ pub fn compose_level_resume(
     // O(1) ⟹ H-detect-bounded / H-clone。bit-exact：`time`/`record_span` 仅计时，不改逻辑。
     super::stage_profile::record_span("05_span", (units.len().saturating_sub(start_i)) as u64);
     let (windowed, metas, cursor) = super::stage_profile::time("05a_detect_windowed", || {
-        detect_centers_windowed_resume(units, build, start_i)
+        scan_center_facts_with_r5(
+            units,
+            build,
+            start_i,
+            roles.directions,
+            roles.attested,
+            &mut NoopSink,
+        )
     });
     let tail_centers: Vec<Center> = super::stage_profile::time("05b_tail_centers", || {
         windowed.iter().map(|(c, _)| *c).collect()
@@ -741,8 +876,9 @@ pub fn compose_level_resume(
     let tail_upper: Vec<LeveledMove> = super::stage_profile::time("05c_tail_upper_build", || {
         windowed
             .iter()
+            .zip(&metas)
             .enumerate()
-            .map(|(i, (_c, win))| {
+            .map(|(i, ((_c, win), meta))| {
                 // win 是连续闭区间（seed 三段 + 延伸段，task #142）——直接借用切片，不 clone 临时数组。
                 let subs = &subs_moves[win.0..=win.1];
                 // ★确定性 ID：tail ordinal 接续前缀（全量/增量产同 ID）。
@@ -754,7 +890,15 @@ pub fn compose_level_resume(
                 let gi = prefix_count + i;
                 let run_start = trend_run_start(&run_view, gi);
                 super::stage_profile::time("05c2_compose_call", || {
-                    LeveledMove::compose(subs, &run_view[run_start..=gi], level, id)
+                    let mut upper =
+                        LeveledMove::compose(subs, &run_view[run_start..=gi], level, id);
+                    upper.r5_settlement = NativeR5Settlement::from_scan(
+                        meta.settlement,
+                        units,
+                        subs_moves,
+                        roles.directions,
+                    );
+                    upper
                 })
             })
             .collect()
@@ -1368,6 +1512,26 @@ pub fn advance_cp_lifecycles(
     anchor_dirs: Option<&[Option<Direction>]>,
     scan_from_retest_idx: usize,
 ) {
+    advance_cp_lifecycles_with_r5(
+        objects,
+        centers,
+        units,
+        unit_moves,
+        anchor_dirs,
+        None,
+        scan_from_retest_idx,
+    )
+}
+
+pub(super) fn advance_cp_lifecycles_with_r5(
+    objects: &mut [CpScanOwnership],
+    centers: &[Center],
+    units: &[UnitRange],
+    unit_moves: &[LeveledMove],
+    anchor_dirs: Option<&[Option<Direction>]>,
+    meta: Option<&[WinMeta]>,
+    scan_from_retest_idx: usize,
+) {
     debug_assert_eq!(units.len(), unit_moves.len());
     if let Some(anchors) = anchor_dirs {
         debug_assert_eq!(anchors.len(), units.len());
@@ -1431,8 +1595,7 @@ pub fn advance_cp_lifecycles(
 
         let leave_idx = retest_idx - 1;
         let leave_unit = &units[leave_idx];
-        let Some(center_idx) =
-            signal::nearest_confirmed_center_idx(centers, leave_unit.start_index)
+        let Some(center_idx) = signal::nearest_confirmed_center_idx(centers, leave_unit.end_index)
         else {
             continue;
         };
@@ -1460,7 +1623,7 @@ pub fn advance_cp_lifecycles(
         };
         if leave_move.id.level != cp_departure_move_id.level
             || retest_move.id.level != cp_departure_move_id.level
-            || leave_move.id.ordinal < cp_departure_move_id.ordinal
+            || leave_move.id.ordinal != cp_departure_move_id.ordinal
             || retest_move.id.ordinal < leave_move.id.ordinal
         {
             continue;
@@ -1471,9 +1634,30 @@ pub fn advance_cp_lifecycles(
             Some(anchors) => anchors.get(leave_idx).copied().unwrap_or(None),
             None => Some(leave.direction),
         };
-        let Some(cert) = signal::judge_third_cert(&object.b_center, &leave, leave_anchor, &retest)
-        else {
-            continue;
+        let cert = match meta {
+            Some(meta) => {
+                let Some(proof) = meta.get(center_idx).and_then(|m| m.settlement) else {
+                    continue;
+                };
+                if (proof.leave_unit(), proof.pullback_unit()) != (leave_idx, retest_idx) {
+                    continue;
+                }
+                signal::third_from_roles(
+                    &object.b_center,
+                    &leave,
+                    &retest,
+                    proof.side(),
+                    proof.pullback_extreme(),
+                )
+            }
+            None => {
+                let Some(cert) =
+                    signal::judge_third_cert(&object.b_center, &leave, leave_anchor, &retest)
+                else {
+                    continue;
+                };
+                cert
+            }
         };
         let capture_before =
             super::diag::s2_mirror_capture::lifecycle_capture_enabled().then(|| object.clone());
@@ -1605,7 +1789,7 @@ fn cp_event_objects(
         if leave.start_index < c_start_full || retest.end_index > event_end {
             return None;
         }
-        if signal::nearest_confirmed_center_idx(centers, leave.start_index) != Some(c_idx) {
+        if signal::nearest_confirmed_center_idx(centers, leave.end_index) != Some(c_idx) {
             return None;
         }
         let cert = signal::judge_third_cert(c, leave, anchors[i - 1], retest)?;
@@ -2482,7 +2666,7 @@ mod tests {
             dd: 90,
             gg: 210,
             start_index: 5,
-            end_index: 8,
+            end_index: 11,
         };
         let cp = vec![
             CpScanOwnership {
@@ -2599,7 +2783,7 @@ mod tests {
         let b = b.expect("B_p 身份应由 center-aligned 扫描侧车定位");
         assert_eq!(b.center_index, 1);
         assert_eq!(b.center_id, eid(1, 1));
-        assert_eq!(b.source_interval, (5, 8));
+        assert_eq!(b.source_interval, (5, 11));
         assert_eq!((b.zd, b.zg), (100, 200));
     }
 
@@ -2715,7 +2899,26 @@ mod tests {
             .enumerate()
             .map(|(i, u)| LeveledMove::from_unit(u, eid(0, 327 + i as u64)))
             .collect();
-        let initial = pending_cp_object(center, eid(1, 73), eid(0, 327), (42_503, 42_704));
+        let mut original = vec![pending_cp_object(
+            center,
+            eid(1, 73),
+            eid(0, 327),
+            (42_503, 42_704),
+        )];
+        advance_cp_lifecycles(&mut original, &[center], &units, &moves, None, 1);
+        assert_eq!(
+            original[0].lifecycle,
+            CpLifecycleStatus::Pending,
+            "#2141 §5.2：只有后续两腿，不知第一腿是末成员"
+        );
+        assert!(original[0].cp_certificate_confirm_src.is_none());
+
+        // 合成正控指定最后成员恰为离开腿；首证仍必须落在同一次回抽，而非后来的事件。
+        let center = Center {
+            end_index: 42_704,
+            ..center
+        };
+        let initial = pending_cp_object(center, eid(1, 173), eid(0, 327), (42_503, 42_704));
 
         let mut without_later_event = vec![initial.clone()];
         advance_cp_lifecycles(
@@ -2808,6 +3011,87 @@ mod tests {
 
     /// ★compose_level：三段 L0 线段 → 一个上级走势（RMove::Compose 携 subs）。
     #[test]
+    fn r5_role_provider_reopens_recursive_scan_only_with_same_flow_evidence() {
+        let units = [
+            unit(0, 4, down(), 20, 40),
+            unit(4, 8, up(), 20, 35),
+            unit(8, 12, down(), 25, 35),
+            unit(12, 16, up(), 36, 50),
+            unit(16, 20, down(), 37, 50),
+            unit(20, 24, up(), 38, 50),
+            unit(24, 28, down(), 39, 49),
+        ];
+        let moves: Vec<_> = units
+            .iter()
+            .enumerate()
+            .map(|(i, u)| {
+                // 真实三段闭合窗口；上级包络不携语义方向，另以显式已完成腿供证。
+                let index = u.start_index;
+                let kids = [
+                    unit(index, index + 1, down(), u.lo, u.hi),
+                    unit(index + 1, index + 2, up(), u.lo, u.hi),
+                    unit(index + 2, u.end_index, down(), u.lo, u.hi),
+                ];
+                let center =
+                    super::super::center::center_from_segments(&kids[0], &kids[1], &kids[2])
+                        .unwrap();
+                let subs = kids
+                    .each_ref()
+                    .map(|kid| from_unit(kid, (i * 3 + kid.start_index - index) as u64));
+                LeveledMove::compose(&subs, &[center], 1, eid(1, i as u64))
+            })
+            .collect();
+        let spec = crate::theta_v0::config::TowerBase::Segment;
+        let (centers, _, pending) = compose_level(&units, &moves, false, 2, spec);
+        assert_eq!(centers.len(), 1);
+        assert_eq!(pending[0].departure_move_id, None);
+
+        let checked = [R5AttestedLegs {
+            seed: 0,
+            leave: 3,
+            side: Direction::Up,
+            first_pullback: Some(4),
+            leave_is_zn: Some(false),
+        }];
+        let roles = RoleProvider {
+            directions: R5DirectionSource::Unproven,
+            attested: &checked,
+        };
+        let (full, out, cp) = compose_level_with_roles(&units, &moves, false, 2, spec, roles);
+        assert_eq!(full.len(), 2);
+        assert_eq!(full[0].end_index, 12);
+        assert_eq!(out[1].start_index, 16);
+        assert_eq!(cp[0].departure_move_id, Some(eid(1, 3)));
+        let (prefix, _, pending, metas, cursor) = compose_level_resume_with_roles(
+            &units[..4],
+            &moves[..4],
+            false,
+            2,
+            0,
+            0,
+            &[],
+            spec,
+            roles,
+        );
+        assert_eq!(prefix.len(), 1);
+        assert_eq!(pending[0].departure_move_id, None);
+        assert_eq!(metas[0].settlement, None);
+        let (actual, moves_out, ownership, meta, _) = compose_level_resume_with_roles(
+            &units,
+            &moves,
+            false,
+            2,
+            cursor.resume_from,
+            0,
+            &[],
+            spec,
+            roles,
+        );
+        assert_eq!((actual, moves_out, ownership), (full, out, cp));
+        assert_eq!(meta[0].read_end_src, 20, "即首回抽读域，不只读离开段");
+    }
+
+    #[test]
     fn compose_level_l0_yields_compose_with_subs() {
         // 完整判据 L0：上-下-上 + 全三段核心非空（lo<=hi 不变量，segment_to_unit 已规约）。
         let units = vec![
@@ -2847,16 +3131,14 @@ mod tests {
     }
 
     #[test]
-    fn cp_scan_sidecar_records_departure_unit_that_no_center_absorbs() {
-        // 第一个中枢 [0..2]（核心 [40,50]）的 non-extension 单元 3 是突破段（连接段）。★#1419 R8：
-        // 下一 seed 自 last_member+2 = 4 起，第二个中枢 = [4..6]，单元 3 不进任何中枢窗口（旧 B 口径下
-        // 它被后窗当 seed 首单元吸收，本测试原名 `..._absorbed_by_next_center` 锁的正是那种吸收）。
-        // 扫描侧车仍须保存单元 3 对前中枢的离开归属。
+    fn cp_scan_sidecar_distinguishes_departure_member_from_unabsorbed_connector() {
+        // 第一窗 [0..2]，u2 触核心并到 60，u3 同高回抽低 51 > ZG=50。
+        // u2 是离开腿且仍为成员；u3 才是连接，下一窗自 u4 开始。
         let ranges = [
             (0, 50),
             (40, 200),
-            (40, 50),
-            (55, 150),
+            (40, 60),
+            (51, 60),
             (52, 180),
             (55, 160),
             (60, 150),
@@ -2887,8 +3169,8 @@ mod tests {
             crate::theta_v0::config::TowerBase::Segment,
         );
         assert_eq!(upper.len(), 2);
-        assert_eq!(cp[0].departure_move_id, Some(eid(0, 3)));
-        assert_eq!(cp[0].departure_interval, Some((12, 16)));
+        assert_eq!(cp[0].departure_move_id, Some(eid(0, 2)));
+        assert_eq!(cp[0].departure_interval, Some((8, 12)));
         assert!(
             upper
                 .iter()
@@ -3077,19 +3359,33 @@ mod tests {
         }
     }
 
-    /// 余数并入末子中枢：10/11 段 ⟹ 仍 3 个子中枢（末子窗 4/5 段）；12 段 ⟹ 4 个。
+    /// #2141 §4.5：九段即交重切，余数是后续候选，不回填已升级窗。
     #[test]
-    fn remainder_segments_merge_into_last_subcenter() {
+    fn upgrade_stops_at_nine_and_leaves_remainder_to_next_seed() {
+        use super::super::center_scan::scan_center_facts_full;
         let build = super::super::center::center_from_segments;
-        for (n, expect_k, last_win) in [(10, 3, (6, 9)), (11, 3, (6, 10)), (12, 4, (9, 11))] {
+        for n in 9..=12 {
             let units = upgrade_units(n);
-            let windowed = detect_centers_windowed(&units, build);
+            let scan = scan_center_facts_full(&units, build);
+            assert_eq!(scan.windows[0].boundary, R5Boundary::Upgrade);
+            assert_eq!(scan.windows[0].exit, 9);
+            assert_eq!(scan.windows[0].emitted, 3);
             assert_eq!(
-                windowed.len(),
-                expect_k,
-                "{n} 段 ⟹ ⌊n/3⌋={expect_k} 个子中枢"
+                scan.centers[..3]
+                    .iter()
+                    .map(|(_, win)| *win)
+                    .collect::<Vec<_>>(),
+                [(0, 2), (3, 5), (6, 8)]
             );
-            assert_eq!(windowed[expect_k - 1].1, last_win, "{n} 段末子窗吸收余数");
+            assert!(scan.metas[..3].iter().all(|m| m.settlement.is_none()));
+            if n == 12 {
+                assert_eq!(scan.centers.len(), 4);
+                assert_eq!(scan.centers[3].1, (9, 11));
+                assert_eq!(scan.windows[1].boundary, R5Boundary::Open);
+            } else {
+                assert_eq!(scan.centers.len(), 3);
+                assert_eq!(scan.cursor.consumed, 9);
+            }
         }
     }
 
@@ -3141,21 +3437,19 @@ mod tests {
     #[test]
     fn compose_trend_run_payload_collects_continuation_centers() {
         use super::super::cand_predicate::rmove_dir;
-        // wA=[8,16] core[12,15]；wB=[18,26] core[22,25]（B.dd=18>A.gg=16 ⟹ 上延续）；
-        // wC=[26,30] core[28,29]（C.dd=26 不严格大于 B.gg=26、C.gg=30>B.dd ⟹ LevelExpansion 断链）。
-        // ★#1419 R8：组间各插一个连接段（c1=[16,18] 在 core_A 之上、c2=[26,27] 在 core_B 之上），
-        // 结算后被跳过、不进任何窗口；旧夹具让 wB/wC 首段兼任前组突破段，只在旧 B 口径下成立。
+        // A [8,17]、B [18,27] 外缘分离，C [27,32] 触及 B 外缘。
+        // u2→u3 同高 17、u6→u7 同高 27；两回抽最低点分别严格高于 ZG=15/25。
         let units = vec![
-            unit(0, 4, up(), 8, 16),
-            unit(4, 8, down(), 12, 16),
-            unit(8, 12, up(), 12, 15),
-            unit(12, 16, up(), 16, 18),
-            unit(16, 20, up(), 18, 26),
-            unit(20, 24, down(), 22, 26),
-            unit(24, 28, up(), 22, 25),
-            unit(28, 32, up(), 26, 27),
-            unit(32, 36, up(), 26, 30),
-            unit(36, 40, down(), 28, 30),
+            unit(0, 4, up(), 8, 15),
+            unit(4, 8, down(), 12, 15),
+            unit(8, 12, up(), 12, 17),
+            unit(12, 16, down(), 16, 17),
+            unit(16, 20, up(), 18, 25),
+            unit(20, 24, down(), 22, 25),
+            unit(24, 28, up(), 22, 27),
+            unit(28, 32, down(), 26, 27),
+            unit(32, 36, up(), 27, 32),
+            unit(36, 40, down(), 28, 32),
             unit(40, 44, up(), 28, 29),
         ];
         let moves: Vec<LeveledMove> = units
@@ -3314,24 +3608,20 @@ mod tests {
     /// 多级递归塔：L0 → L1 → L2，每级 descend 取回下级走势（级别严格递减）。
     #[test]
     fn multi_level_tower_descend_decreases_level() {
-        // 11 段 L0（三组 + 两连接段）「核心分离、外缘重叠」（task #142 延伸语义：全重叠 fixture 会被吸收为
-        // 1 个延伸中枢，多级塔须组间 non-extension 分离——首段 d>ZG 终止前组延伸；
-        // 三组外缘共同重叠 [152,180] 非空 ⟹ L2 几何中枢成立）。★#1419 R8：组间各插一个连接段
-        // （c1=[51,54] 在核心_1 之上、c2=[151,154] 在核心_2 之上），结算后被跳过、不进任何窗口。
-        // ★#1419 S2（Zn 外缘）：外缘只聚合与组首段同向（↑）的第 1、3 段，组宽极值放在 ↑ 段上；
-        // 旧夹具把宽极值放在中间 ↓ 段（非 Zn），Zn 口径下三组外缘 [0,50]/[55,160]/[155,300] 不再共同重叠。
+        // 三窗核心 [40,50] / [55,150] / [155,280] 分离，三个完整走势区间交在 [151,180]。
+        // 两个下行回抽与前一上行离开同高，且低点严格高于前枢 ZG（#2114、#2141 §5.2）。
         let ranges = [
             (0, 200),
             (40, 50),
-            (40, 60), // 组1 核心 [40,50]，Zn 外缘 [0,200]
-            (51, 54), // c1：lo=51>50 non-ext，突破段（连接段）
-            (52, 180),
+            (40, 60),
+            (51, 60),
+            (51, 180),
             (55, 150),
-            (55, 160),  // 组2 核心 [55,150]，Zn 外缘 [52,180]
-            (151, 154), // c2：lo=151>150 non-ext
-            (152, 300),
+            (55, 154),
+            (151, 154),
+            (151, 300),
+            (155, 300),
             (155, 280),
-            (155, 290), // 组3 核心 [155,280]，Zn 外缘 [152,300]
         ];
         let units: Vec<UnitRange> = ranges
             .iter()
@@ -3477,28 +3767,29 @@ mod tests {
     #[test]
     #[should_panic(expected = "跨层错配")]
     fn project_to_units_rejects_cross_level_blocks() {
-        // 三组各 3 段，组间抬升 100（组内交叠成中枢、组间不交叠 ⟹ 依次上移的 3 个中枢
-        // ⟹ decompose 给 Trend(Up) 块，方向非 None，错位读方向才可见）。★#1419 R8：组间各插一个
-        // 连接段 [base+65, base+70]（在前组核心 [base+40, base+60] 之上），结算后被跳过。
-        let mut units: Vec<UnitRange> = Vec::new();
-        let dir_at = |i: usize| if i % 2 == 0 { up() } else { down() };
-        for g in 0..3 {
-            let base = g as Tick * 100;
-            if g > 0 {
-                let i = units.len();
-                units.push(unit(i * 4, i * 4 + 4, dir_at(i), base - 35, base - 30));
-            }
-            for off in 0..3 {
-                let i = units.len();
-                units.push(unit(
-                    i * 4,
-                    i * 4 + 4,
-                    dir_at(i),
-                    base + 40 - off,
-                    base + 60 + off,
-                ));
-            }
-        }
+        // 真实 #2114 字面关节：两回抽与相邻离开共享坐标和高点，
+        // 低点 65 > 60、168 > 165。三窗外缘严格分离，故能产生 Trend blocks。
+        let ranges = [
+            (20, 60),
+            (40, 60),
+            (40, 70),
+            (65, 70),
+            (100, 165),
+            (140, 165),
+            (140, 170),
+            (168, 170),
+            (200, 265),
+            (240, 265),
+            (240, 270),
+        ];
+        let units: Vec<UnitRange> = ranges
+            .iter()
+            .enumerate()
+            .map(|(i, &(lo, hi))| {
+                let dir = if i % 2 == 0 { up() } else { down() };
+                unit(i * 4, i * 4 + 4, dir, lo, hi)
+            })
+            .collect();
         let moves: Vec<LeveledMove> = units
             .iter()
             .enumerate()

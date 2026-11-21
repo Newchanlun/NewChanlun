@@ -4,7 +4,8 @@ use newchan_rust::theta_v0::classifier::center::{
     center_from_segments, center_from_window, r5_joint, R5Joint, UnitRange,
 };
 use newchan_rust::theta_v0::classifier::center_scan::{
-    scan_center_facts_full, CenterScanFacts, R5Gap, R5Proof, R5Witness,
+    scan_center_facts_full, scan_center_facts_with_r5, CenterScanFacts, R5AttestedLegs, R5Boundary,
+    R5DirectionSource, R5Gap, R5Proof, R5Witness, UnitAssignment,
 };
 use newchan_rust::theta_v0::types::{Direction, Tick};
 use serde::Deserialize;
@@ -161,13 +162,10 @@ fn upstream_unproven_blocks_later_windows() {
     let mut units = outward();
     add_later_window(&mut units);
     let facts = scan_center_facts_full(&units, center_from_segments);
-    assert_windows(&facts, &[(0, 4), (5, 13)]);
+    assert_windows(&facts, &[(0, 4)]);
     assert_eq!(
         facts.r5_witnesses(&units),
-        [
-            R5Witness::Absent(R5Gap::BreakUnitOutward),
-            R5Witness::Absent(R5Gap::UpstreamUnproven { window: 0 }),
-        ]
+        [R5Witness::Absent(R5Gap::BreakUnitOutward)]
     );
 
     let mut control = from_endpoints(&CONNECTED);
@@ -231,7 +229,7 @@ fn connected_alternating_streams_prove_every_settled_window() {
         let witnesses = facts.r5_witnesses(&units);
         assert_eq!(witnesses.len(), facts.windows.len());
         for (w, witness) in facts.windows.iter().zip(witnesses) {
-            if w.exit == units.len() {
+            if w.boundary == R5Boundary::Open {
                 assert_eq!(
                     witness,
                     R5Witness::Absent(R5Gap::Open),
@@ -272,7 +270,9 @@ fn settled_witness_is_stable_under_append() {
                 .iter()
                 .copied()
                 .zip(facts.r5_witnesses(prefix))
-                .filter(|(w, _)| w.exit < len)
+                .filter(|(w, _)| {
+                    matches!(w.boundary, R5Boundary::Destroyed(_) | R5Boundary::Upgrade)
+                })
                 .collect();
             assert!(
                 now.starts_with(&settled),
@@ -280,7 +280,11 @@ fn settled_witness_is_stable_under_append() {
             );
             settled = now;
         }
-        assert!(settled.len() >= 2, "{name}流须覆盖多个已结算窗口");
+        if name == "相连" {
+            assert!(settled.len() >= 2, "相连流须覆盖多个已结算或已升级窗口");
+        } else {
+            assert!(settled.is_empty(), "首关节缺证不允许产生权威后窗");
+        }
     }
 }
 
@@ -380,5 +384,214 @@ fn r5_joint_matches_lean_fixture() {
             R5Joint::Proven { side: Down } => json!({"Proven":"Down"}),
         };
         assert_eq!(actual, c.expected, "Lean 例 {}", c.name);
+    }
+}
+
+fn c_example(j: usize, return_lo: Tick) -> Vec<UnitRange> {
+    let mut legs = vec![(Down, 20, 40), (Up, 20, 35), (Down, 25, 35)];
+    legs.extend((3..j).map(|k| (if k % 2 == 1 { Up } else { Down }, 25, 35)));
+    legs.extend([(Up, 36, 50), (Down, return_lo, 50)]);
+    from_ranges(&legs)
+}
+
+fn roles(j: usize) -> R5AttestedLegs {
+    R5AttestedLegs {
+        seed: 0,
+        leave: j,
+        side: Up,
+        first_pullback: Some(j + 1),
+        leave_is_zn: Some(false),
+    }
+}
+
+#[test]
+fn return_forms_five_or_upgrades_at_nine_without_connector() {
+    use newchan_rust::theta_v0::classifier::center::RoleVar;
+    for j in [3, 7] {
+        let units = c_example(j, 33);
+        for build in [center_from_window, center_from_segments] {
+            let facts =
+                scan_center_facts_with_r5(&units, build, R5DirectionSource::Native, &[roles(j)]);
+            let ws = facts.window_facts(&units);
+            assert_eq!(ws[0].count(), j + 2);
+            assert_eq!(ws[0].upgrade_pending, j == 7);
+            assert!(!ws[0].settled);
+            assert_eq!(ws[0].resume_anchor, None);
+            assert_eq!(facts.windows[0].last_return.unwrap().pullback_unit(), j + 1);
+            assert_eq!(ws[0].role(RoleVar::Gg).value, 50);
+            assert_eq!(ws[0].role(RoleVar::D).value, 33);
+            assert!(!ws[0].zn_members.contains(&j));
+            assert!(ws[0].zn_members.contains(&(j + 1)));
+            assert!(!facts
+                .unit_facts()
+                .iter()
+                .any(|u| matches!(u.assignment, UnitAssignment::Connector { .. })));
+        }
+    }
+}
+
+#[test]
+fn late_return_does_not_replace_first_and_proof_read_horizon_contains_retest() {
+    let mut units = c_example(3, 37);
+    units.push(unit(5, (Up, 29, 38)));
+    let pending = scan_center_facts_with_r5(
+        &units[..4],
+        center_from_segments,
+        R5DirectionSource::Native,
+        &[roles(3)],
+    );
+    assert_eq!(
+        pending.r5_witnesses(&units[..4]),
+        [R5Witness::Absent(R5Gap::AwaitingFirstPullback)]
+    );
+    let facts = scan_center_facts_with_r5(
+        &units,
+        center_from_segments,
+        R5DirectionSource::Native,
+        &[roles(3)],
+    );
+    let w = &facts.window_facts(&units)[0];
+    let proof = w.settlement.unwrap();
+    assert_eq!(
+        (w.last, w.break_unit, w.resume_anchor),
+        (2, Some(3), Some(4))
+    );
+    assert_eq!((proof.leave_unit(), proof.pullback_unit()), (3, 4));
+    assert_eq!(facts.metas[0].read_end_src, units[4].end_index);
+    assert_eq!(facts.metas[0].settlement, Some(proof));
+    assert_eq!(
+        facts.unit_facts()[3].assignment,
+        UnitAssignment::Connector {
+            left: 0,
+            right: None
+        }
+    );
+    assert!(facts.pair_facts(&units).is_empty());
+}
+
+#[test]
+fn unknown_roles_never_grant_member_or_destruction_even_with_strict_geometry() {
+    let units = c_example(3, 33);
+    let no_roles =
+        scan_center_facts_with_r5(&units, center_from_segments, R5DirectionSource::Native, &[]);
+    assert_eq!(no_roles.window_facts(&units)[0].count(), 3);
+    let mut evidence = roles(3);
+    evidence.leave_is_zn = None;
+    let unknown = scan_center_facts_with_r5(
+        &units,
+        center_from_segments,
+        R5DirectionSource::Native,
+        &[evidence],
+    );
+    assert_eq!(
+        unknown.r5_witnesses(&units),
+        [R5Witness::Absent(R5Gap::ReturnedMembershipUnresolved)]
+    );
+    assert!(unknown.windows[0].last_return.is_some());
+    let connected = from_endpoints(&CONNECTED);
+    let placeholder = scan_center_facts_with_r5(
+        &connected,
+        center_from_segments,
+        R5DirectionSource::Unproven,
+        &[],
+    );
+    assert_eq!(
+        placeholder.r5_witnesses(&connected),
+        [R5Witness::Absent(R5Gap::DirectionUnproven)]
+    );
+}
+
+#[test]
+fn nine_counts_waves_and_return_at_touch_reopens_same_seed_only() {
+    let mut units = c_example(7, 35);
+    units[4].lo = 30;
+    units[4].hi = 30;
+    units.push(unit(9, (Up, 30, 40)));
+    let a = scan_center_facts_with_r5(
+        &units[..9],
+        center_from_segments,
+        R5DirectionSource::Native,
+        &[roles(7)],
+    );
+    assert_eq!(a.windows[0].boundary, R5Boundary::Open);
+    assert_eq!(a.windows[0].exit, 9);
+    let b = scan_center_facts_with_r5(
+        &units,
+        center_from_segments,
+        R5DirectionSource::Native,
+        &[roles(7)],
+    );
+    assert_eq!(b.windows[0].boundary, R5Boundary::Upgrade);
+    assert_eq!(b.windows[0].exit, 10);
+    assert_eq!(b.windows[0].last_return.unwrap().pullback_extreme(), 35);
+}
+
+#[test]
+fn lean_r5_worked_examples_match_production_scan() {
+    use newchan_rust::theta_v0::classifier::center::RoleVar;
+    let oracle: Value =
+        serde_json::from_str(include_str!("fixtures/theta_v0_center_parity.json")).unwrap();
+    for (name, j, lo) in [
+        ("r5_return_five", 3, 33),
+        ("r5_return_nine", 7, 33),
+        ("r5_strict_first_pullback", 3, 37),
+    ] {
+        let units = c_example(j, lo);
+        let facts = scan_center_facts_with_r5(
+            &units,
+            center_from_segments,
+            R5DirectionSource::Native,
+            &[roles(j)],
+        );
+        let w = &facts.window_facts(&units)[0];
+        let expected = &oracle[name][0];
+        assert_eq!(
+            w.count(),
+            expected["count"].as_u64().unwrap() as usize,
+            "{name}"
+        );
+        assert_eq!(w.settled, expected["settled"].as_bool().unwrap(), "{name}");
+        assert_eq!(
+            w.upgrade_pending,
+            expected["upgraded"].as_bool().unwrap(),
+            "{name}"
+        );
+        assert_eq!(
+            json!(w.settlement.map(|p| p.leave_unit())),
+            expected["leave"],
+            "{name}"
+        );
+        assert_eq!(
+            json!(w.settlement.map(|p| p.pullback_unit())),
+            expected["pullback"],
+            "{name}"
+        );
+        assert_eq!(
+            json!(facts.windows[0].last_return.map(|p| p.pullback_unit())),
+            expected["returned"],
+            "{name}"
+        );
+        assert_eq!(json!(w.role(RoleVar::Gg).value), expected["gg"], "{name}");
+        assert_eq!(json!(w.role(RoleVar::Dd).value), expected["dd"], "{name}");
+    }
+}
+
+#[test]
+fn five_non_alternating_members_use_seed_direction_for_zn() {
+    use newchan_rust::theta_v0::classifier::center::RoleVar;
+    let units = from_ranges(&[
+        (Down, 20, 40),
+        (Up, 20, 35),
+        (Down, 25, 35),
+        (Down, 24, 60),
+        (Up, 30, 55),
+    ]);
+    for build in [center_from_segments, center_from_window] {
+        let facts = scan_center_facts_full(&units, build);
+        let window = &facts.window_facts(&units)[0];
+        assert_eq!((window.first, window.last), (0, 4));
+        assert_eq!(window.zn_members, [0, 2, 3]);
+        assert_eq!(window.role(RoleVar::Gg).value, 60);
+        assert_eq!(window.role(RoleVar::Gg).contributors, [3]);
     }
 }

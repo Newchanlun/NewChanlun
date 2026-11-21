@@ -48,7 +48,9 @@ pub use observe::CandidateObservation;
 // `cand_event/` 外零引用）。拆分后这两个 tests 迁到 `book`/`observe` 的域内 `mod tests`，
 // 走域内路径消费 ⟹ 本层 re-export 无消费者。**仍保留**是为守住「pub 项原样导出、可见面
 // 逐字不变」这条验收条款（#359 四件套②）——缩面属行为变化，不在本票范围内。
+pub(crate) use observe::pan_observations_for_level;
+#[cfg(test)]
 #[allow(unused_imports)]
-pub(crate) use observe::{pan_observations_for_level, structural_observations_for_level};
+pub(crate) use observe::structural_observations_for_level;
 // ★SPEC #1077 3a：合并扫描（scan.rs）共享的候选域投影与归约入口。
 pub(crate) use observe::{make_trend_observation, reduce_structural_legs};

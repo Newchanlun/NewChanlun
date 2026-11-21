@@ -19,8 +19,8 @@ const U = ["segment:1:0", "segment:1:3", "segment:1:6", "segment:1:9"],
   CID = "center:1:0";
 const unit = (k) => ({ unit_id: U[k], unit_object_id: "obj3-seg" + k, direction: RANGE[k][0], lo: RANGE[k][1], hi: RANGE[k][2] });
 const wrap = (tuple, slot, data) => ({ schema_revision: tuple[0], semantic_version: tuple[1], policy_version: tuple[2], view_role: tuple[3], object_generation: "1", slot, data });
-const e = (slot, data) => wrap(C.CENTER_TUPLE, slot, data),
-  f = (slot, data) => wrap(C.PAIR_TUPLE, slot, data);
+const e = (slot, data) => wrap(C.LEGACY_CENTER_TUPLE, slot, data),
+  f = (slot, data) => wrap(C.LEGACY_PAIR_TUPLE, slot, data);
 const role = (value, contributors, frozen) => ({ value, contributors, same_price_witness: contributors.length >= 2 ? contributors : [], frozen, null_reason: null });
 function centerCut() {
   // 四个完成段：seed U0..U2 成立（ZD=12/ZG=18），U3 严格在下 ⟹ 结算、break_up=false，U3 为右侧待定连接段。
@@ -1277,5 +1277,337 @@ test("B6 完整 validateState：未定原件撤回代含其坐标的在世定向
   for (const direction of ["DOWN", "UP"]) {
     await rejected(secondGroup(asW2(await g5()), direction), /W2未定原件有多个定向替代候选/);
     t.diagnostic("第二组 " + direction + " 即拒");
+  }
+});
+
+test("#1496 R5：价域在外不等于构造突破，旧代仍用原合同", () => {
+  const old = centerCut();
+  const oldUcp = old.find(r => r.kind === C.PAIR_KINDS[0]);
+  const roleMismatch = copy(oldUcp.payload);
+  roleMismatch.data.construction_role = "EXTENSION_MEMBER";
+  assert.throws(() => C.validatePairPayload(oldUcp.kind, roleMismatch), /TB02F_ROLE/);
+
+  const current = copy(old).filter(r => r.payload.data.relation_kind !== "connects_left");
+  for (const r of current) {
+    if (C.CENTER_KINDS.includes(r.kind)) r.payload.policy_version = C.CENTER_TUPLE[2];
+    if (C.PAIR_KINDS.includes(r.kind)) r.payload.policy_version = C.PAIR_TUPLE[2];
+  }
+  const find = kind => current.find(r => r.kind === kind);
+  const center = find(C.CENTER_KINDS[1]);
+  Object.assign(center.payload.data, {
+    status: "EXTENDING", members: U.slice(0, 4), settled: false, break_unit: null,
+    break_up_defined: false, resume_anchor: null, settled_known_at: null, r5: null, r5_pending_unit: null,
+  });
+  const assignment = current.find(r => r.object_id === "obj3-assign3");
+  Object.assign(assignment.payload.data, {
+    status: "CENTER_MEMBER", center_id: CID, left_center_id: null, right_pending: false,
+  });
+  const memberEdge = copy(current.find(r => r.payload.data.relation_kind === "member_of"));
+  memberEdge.object_id = "obj3-member3";
+  memberEdge.payload.slot[0] = U[3];
+  memberEdge.payload.data.source_id = U[3];
+  current.push(memberEdge);
+  find(C.CENTER_KINDS[5]).payload.data.after = center.payload.data;
+  Object.assign(find(C.CENTER_KINDS[6]).payload.data.scan_cursor, {
+    state: "EXTENDING", center_id: CID, awaiting_offset: "1",
+  });
+  const ucp = find(C.PAIR_KINDS[0]);
+  ucp.payload.data.construction_role = "EXTENSION_MEMBER";
+  assert.throws(() => C.validateCenterFamilyCut(current, axes22(current)), /TB02E_MEMBERS/);
+  C.validateCenterFamilyCut(old, axes22(old));
+});
+
+function currentLiteralCut() {
+  const rows = centerCut();
+  for (const row of rows) {
+    if (C.CENTER_KINDS.includes(row.kind)) row.payload.policy_version = C.CENTER_TUPLE[2];
+    if (C.PAIR_KINDS.includes(row.kind)) row.payload.policy_version = C.PAIR_TUPLE[2];
+  }
+  const byKind = kind => rows.find(r => r.kind === kind).payload.data;
+  const center = byKind(C.CENTER_KINDS[1]);
+  Object.assign(center, {
+    r5: { leave_unit: U[2], leave_object_id: "obj3-seg2", pullback_unit: U[3], pullback_object_id: "obj3-seg3" },
+    r5_pending_unit: null,
+  });
+  byKind(C.CENTER_KINDS[5]).after = center;
+  return rows;
+}
+
+function setLiteralPullback(rows, direction, lo, hi, position) {
+  const segment = rows.find(r => r.object_id === "obj3-seg3").payload.data;
+  const assignment = rows.find(r => r.object_id === "obj3-assign3").payload.data;
+  const tested = rows.find(r => r.kind === C.PAIR_KINDS[0]).payload.data;
+  segment.construction.direction = direction;
+  Object.assign(segment.stroke_refs[0], {
+    start_price: direction === "UP" ? lo : hi, end_price: direction === "UP" ? hi : lo,
+  });
+  for (const unit of [assignment.unit, tested.unit]) Object.assign(unit, { direction, lo, hi });
+  Object.assign(tested, { position, leave_side: position === "STRICT_ABOVE" ? "UP" : "DOWN" });
+}
+
+test("#1496 R5 B4：拒绝方向颠倒且价端断开的假向下破坏", () => {
+  const fake = currentLiteralCut();
+  assert.throws(() => C.validateCenterFamilyCut(fake, axes22(fake)), /TB02E_SETTLEMENT/);
+});
+
+test("#1496 R5 B4：只改旧中枢版本根不能放行现行的假向下破坏", () => {
+  const mixed = currentLiteralCut();
+  mixed.find(r => r.kind === C.CENTER_KINDS[6]).payload.policy_version = C.LEGACY_CENTER_TUPLE[2];
+  for (const {kind, payload} of mixed) {
+    if (C.CENTER_KINDS.includes(kind)) C.validateCenterPayload(kind, payload);
+    if (C.PAIR_KINDS.includes(kind)) C.validatePairPayload(kind, payload);
+  }
+  assert.throws(() => C.validateCenterFamilyCut(mixed, axes22(mixed)), /TB02E_POLICY_MIX/);
+});
+
+test("#1496 R5 B4：未列入保留清单的旧族对象和杂拼版本根均拒收", () => {
+  const current = currentLiteralCut();
+  current.find(r => r.kind === C.CENTER_KINDS[1]).payload.data.break_up = true;
+  setLiteralPullback(current, "DOWN", "19", "22", "STRICT_ABOVE");
+  C.validateCenterFamilyCut(current, axes22(current));
+
+  for (const [kind, policy, validate, reason] of [
+    [C.CENTER_KINDS[2], C.LEGACY_CENTER_TUPLE[2], C.validateCenterPayload, /TB02E_POLICY_MIX/],
+    [C.PAIR_KINDS[2], C.LEGACY_PAIR_TUPLE[2], C.validatePairPayload, /TB02F_POLICY_MIX/],
+  ]) {
+    const mixed = copy(current);
+    const row = mixed.find(r => r.kind === kind);
+    row.payload.policy_version = policy;
+    validate(kind, row.payload);
+    assert.throws(() => C.validateCenterFamilyCut(mixed, axes22(mixed)), reason);
+  }
+
+  const mixed = copy(current);
+  for (const row of mixed.filter(r => C.PAIR_KINDS.includes(r.kind))) {
+    row.payload.policy_version = C.LEGACY_PAIR_TUPLE[2];
+    C.validatePairPayload(row.kind, row.payload);
+  }
+  assert.throws(() => C.validateCenterFamilyCut(mixed, axes22(mixed)), /TB02F_POLICY_MIX/);
+});
+
+test("#1496 R5 B4：字面结算必须和同 cut 的方向、关节与完成状态一致", () => {
+  const rows = currentLiteralCut();
+  const center = rows.find(r => r.kind === C.CENTER_KINDS[1]).payload.data;
+  center.break_up = true;
+  setLiteralPullback(rows, "DOWN", "19", "22", "STRICT_ABOVE");
+  C.validateCenterFamilyCut(rows, axes22(rows));
+
+  const direction = copy(rows);
+  setLiteralPullback(direction, "UP", "19", "22", "STRICT_ABOVE");
+  assert.throws(() => C.validateCenterFamilyCut(direction, axes22(direction)), /TB02E_SETTLEMENT/);
+
+  const joint = copy(rows);
+  setLiteralPullback(joint, "DOWN", "19", "21", "STRICT_ABOVE");
+  assert.throws(() => C.validateCenterFamilyCut(joint, axes22(joint)), /TB02E_SETTLEMENT/);
+
+  const disconnected = copy(rows);
+  const segment = disconnected.find(r => r.object_id === "obj3-seg3").payload.data;
+  Object.assign(segment.construction, { start_stroke: "4", stroke_indices: ["4"] });
+  segment.stroke_refs[0].stroke_index = "4";
+  assert.throws(() => C.validateCenterFamilyCut(disconnected, axes22(disconnected)), /TB02E_SETTLEMENT/);
+
+  const unfinished = copy(rows);
+  unfinished.find(r => r.object_id === "obj3-seg3").payload.data.result = "IN_PROGRESS";
+  assert.throws(() => C.validateCenterFamilyCut(unfinished, axes22(unfinished)), /TB02E_MEMBER_NOT_COMPLETED/);
+});
+
+test("#1496 R5：无首回抽证明的旧结算不得进入新规则 cut", () => {
+  const old = centerCut().find(r => r.kind === C.CENTER_KINDS[1]);
+  const payload = copy(old.payload);
+  payload.policy_version = C.CENTER_TUPLE[2];
+  payload.data.r5 = null;
+  payload.data.r5_pending_unit = null;
+  assert.throws(() => C.validateCenterPayload(old.kind, payload), /TB02E_SETTLEMENT/);
+  C.validateCenterPayload(old.kind, old.payload);
+});
+
+function pendingLiteralCut() {
+  const rows = centerCut().filter(r => r.payload.data.relation_kind !== "connects_left");
+  for (const r of rows) {
+    if (C.CENTER_KINDS.includes(r.kind)) r.payload.policy_version = C.CENTER_TUPLE[2];
+    if (C.PAIR_KINDS.includes(r.kind)) r.payload.policy_version = C.PAIR_TUPLE[2];
+  }
+  const data = kind => rows.find(r => r.kind === kind).payload.data;
+  const c = data(C.CENTER_KINDS[1]);
+  Object.assign(c, {
+    settled: false, status: "EXTENDING", break_unit: null, break_up_defined: false, resume_anchor: null,
+    settled_known_at: null, next_tested_unit: U[3], r5: null, r5_pending_unit: U[3],
+  });
+  Object.assign(data(C.CENTER_KINDS[5]), {after: c});
+  Object.assign(data(C.CENTER_KINDS[6]).scan_cursor, {
+    state: "EXTENDING", center_id: CID, awaiting_unit_id: U[3],
+    awaiting_after_unit_id: null, awaiting_offset: null,
+  });
+  Object.assign(rows.find(r => r.object_id === "obj3-assign3").payload.data, {
+    status: "NOT_YET_ASSIGNED", left_center_id: null, right_pending: false, reason: "SEED_NOT_YET_EVALUABLE",
+  });
+  data(C.PAIR_KINDS[0]).construction_role = "UNRESOLVED_BOUNDARY";
+  return rows;
+}
+
+test("#1496 R5：未决外段保留五叶位置，不发布为连接", () => {
+  const rows = pendingLiteralCut();
+  const position = rows.find(r => r.kind === C.PAIR_KINDS[0]).payload.data;
+  C.validateCenterFamilyCut(rows, axes22(rows));
+  position.construction_role = "BREAK_UNIT";
+  assert.throws(() => C.validateCenterFamilyCut(rows, axes22(rows)), /TB02F_ROLE/);
+  position.construction_role = "UNRESOLVED_BOUNDARY";
+
+  // 旧活动归属在 Q 的对象集合中原样保留，不拿旧版角色当本代计算。
+  const retained = centerCut().find(r => r.object_id === "obj3-assign3");
+  retained.first_known_generation = "1";
+  const current = rows.filter(r => r.object_id !== retained.object_id);
+  const version = current.find(r => r.kind === C.CENTER_KINDS[6]);
+  const pair = current.find(r => r.kind === C.PAIR_KINDS[4]);
+  for (const root of [version, pair]) {
+    root.first_known_generation = root.published_generation = "2";
+    root.payload.data.known_at = { ...K, generation: "2" };
+  }
+  version.payload.data.waiting_reasons.push("R5_RECOMPUTE_DEFERRED");
+  version.payload.data.r5_deferred_object_ids = [retained.object_id];
+  C.validateCenterPayload(version.kind, version.payload);
+  const axes = axes22(current);
+  C.validateCenterFamilyCut([...current, retained], axes);
+  C.validateCenterFamilyCut([...current, retained], axes, "2");
+  assert.equal(retained.payload.data.status, "CONNECTOR");
+  assert.throws(() => C.validateCenterFamilyCut(current, axes), /TB02E_DEFERRED/);
+  assert.throws(() => C.validateCenterFamilyCut([...current, {...retained, first_known_generation: "2"}], axes),
+    /TB02E_DEFERRED/);
+});
+
+for (const fKnown of ["2", "3"]) {
+  test(`#1496 R6 B4：F/E 根自报 ${fKnown}/3 不能把 cut-2 新发布关系作历史原件`, () => {
+    const rows = pendingLiteralCut();
+    const [eRoot, fRoot] = [C.CENTER_KINDS[6], C.PAIR_KINDS[4]].map(kind => rows.find(r => r.kind === kind));
+    const relation = copy(rows.find(r => r.payload.data.relation_kind === "attempted_from"));
+    Object.assign(relation, { object_id: "obj3-r6-legacy", first_known_generation: "2", published_generation: "2" });
+    relation.payload.policy_version = C.LEGACY_CENTER_TUPLE[2];
+    for (const [root, generation] of [[eRoot, "3"], [fRoot, fKnown]]) {
+      root.first_known_generation = root.published_generation = "2";
+      root.payload.data.known_at = { ...K, generation };
+    }
+    eRoot.payload.data.waiting_reasons.push("R5_RECOMPUTE_DEFERRED");
+    eRoot.payload.data.r5_deferred_object_ids = [relation.object_id];
+    C.validateCenterPayload(eRoot.kind, eRoot.payload);
+    C.validatePairPayload(fRoot.kind, fRoot.payload);
+    C.validateCenterPayload(relation.kind, relation.payload);
+    const cut = [...rows, relation], axes = axes22(rows);
+    assert.throws(() => C.validateCenterFamilyCut(cut, axes), /TB02E_GENERATION/);
+    assert.throws(() => C.validateCenterFamilyCut(cut, axes, "2"), /TB02E_GENERATION/);
+
+    // 即使根的发布元数据也同步前移，显式入口仍受实际 cut 限制。
+    eRoot.first_known_generation = eRoot.published_generation = "3";
+    assert.throws(() => C.validateCenterFamilyCut(cut, axes, "2"), /TB02E_GENERATION/);
+  });
+}
+
+test("#1496 R6 B4：未保留的活动原件也不得来自未来 cut", () => {
+  const rows = pendingLiteralCut(), axes = axes22(rows);
+  C.validateCenterFamilyCut(rows, axes, "2");
+  const attempt = rows.findIndex(r => r.kind === C.CENTER_KINDS[0]);
+  for (const mutate of [
+    r => { r.published_generation = "3"; },
+    r => { r.payload.data.known_at.generation = "3"; },
+  ]) {
+    const future = copy(rows);
+    mutate(future[attempt]);
+    assert.throws(() => C.validateCenterFamilyCut(future, axes, "2"), /TB02E_GENERATION/);
+  }
+});
+
+test("#1496 R6 B4：完整 validateState 用实际 cut 约束 E/F 根", async () => {
+  for (const kind of [C.CENTER_KINDS[6], C.PAIR_KINDS[4]]) {
+    const st = await g5(), future = String(BigInt(st.cut.generation) + 1n);
+    const root = st.snapshot.objects.find(r => r.kind === kind);
+    root.first_known_generation = root.published_generation = future;
+    root.first_known_cut = "cut-" + future;
+    root.payload.data.known_at.generation = future;
+    await rejected(st, kind === C.CENTER_KINDS[6] ? /TB02E_GENERATION/ : /TB02F_GENERATION/);
+  }
+});
+
+async function retimeRetainedRoles(rows, known, fixed) {
+  const version = rows.find(r => r.kind === C.CENTER_KINDS[6]);
+  const ids = version.payload.data.r5_deferred_object_ids;
+  const retained = rows.find(r => r.kind === C.CENTER_KINDS[2] && ids.includes(r.object_id));
+  assert.equal(retained.first_known_generation, "1");
+  assert.equal(retained.published_generation, "1");
+  assert.equal(retained.payload.data.known_at.generation, "1");
+  const changes = new Map();
+  async function reidentify(r) {
+    const before = r.object_id;
+    const { kind, fact_key, payload, input_refs } = r;
+    r.object_id = await Q3.V.identity(0x20, {
+      kind, fact_key, payload, input_refs, profile_id: fixed.profile_id, rule_revision: fixed.rule_revision,
+    }, "obj3-");
+    assert.notEqual(r.object_id, before);
+    changes.set(before, r.object_id);
+    C.validateCenterPayload(kind, payload);
+    await Q3.validateTB02Identity(r, fixed);
+  }
+  retained.payload.data.known_at.generation = known;
+  const index = ids.indexOf(retained.object_id);
+  await reidentify(retained);
+  ids[index] = retained.object_id;
+  ids.sort();
+  await reidentify(version);
+  return changes;
+}
+
+test("#1496 R7 B4：保留角色获知代不得晚于首次发布代，即使不超过实际 cut", async () => {
+  const rows = pendingLiteralCut(), axes = axes22(rows);
+  const retained = copy(centerCut().find(r => r.kind === C.CENTER_KINDS[2]));
+  Object.assign(retained, { object_id: "obj3-retained-roles", published_generation: "1" });
+  const version = rows.find(r => r.kind === C.CENTER_KINDS[6]);
+  const pair = rows.find(r => r.kind === C.PAIR_KINDS[4]);
+  for (const root of [version, pair]) {
+    root.first_known_generation = root.published_generation = "2";
+    root.payload.data.known_at = { ...K, generation: "2" };
+  }
+  version.payload.data.waiting_reasons.push("R5_RECOMPUTE_DEFERRED");
+  version.payload.data.r5_deferred_object_ids = [retained.object_id];
+  rows.push(retained);
+  for (const r of [version, retained]) {
+    r.fact_key = r.kind + ":" + r.payload.slot;
+    r.input_refs = [];
+  }
+  C.validateCenterFamilyCut(rows, axes);
+  C.validateCenterFamilyCut(rows, axes, "2");
+  const fixed = { profile_id: "ohlc_integer_tb02a_v1", rule_revision: typed.W2_PUBLICATION_RULE, protocol: "s-session/3" };
+  for (const known of ["3", "2"]) {
+    const candidate = copy(rows);
+    await retimeRetainedRoles(candidate, known, fixed);
+    assert.throws(() => C.validateCenterFamilyCut(candidate, axes), /TB02E_GENERATION/);
+    assert.throws(() => C.validateCenterFamilyCut(candidate, axes, "2"), /TB02E_GENERATION/);
+  }
+});
+
+// 外供真实同库 g2 状态（Astra full-state.cjs 解码产物），避免把 128 MB 导出重复入仓。
+const realG2State = process.env.Q3_R5_REAL_G2_STATE;
+test("#1496 R7 B4：真实 g2 的保留角色经完整 validateState 拒绝晚获知代", {
+  skip: realG2State ? false : "通过 Q3_R5_REAL_G2_STATE 提供真实 g2 完整状态",
+}, async () => {
+  const state = JSON.parse(require("node:fs").readFileSync(realG2State, "utf8"));
+  const { snapshot, cut } = state;
+  const family = new Set([...C.CENTER_KINDS, ...C.PAIR_KINDS, "CC-013.segment"]);
+  const rows = snapshot.objects.filter(r => family.has(r.kind));
+  const eRoot = rows.find(r => r.kind === C.CENTER_KINDS[6]);
+  assert.equal(cut.generation, "2");
+  assert.equal(eRoot.payload.data.r5_deferred_object_ids.length, 16);
+  assert.equal(API.FAMILIES.reduce((n, k) => n + snapshot[k].length, 0), 1984);
+  await Q3.validateState(state, "s-session/3");
+  const fixed = { profile_id: snapshot.profile_id, rule_revision: snapshot.rule_revision, protocol: "s-session/3" };
+  for (const known of ["3", "2"]) {
+    const mutated = copy(rows);
+    const changes = await retimeRetainedRoles(mutated, known, fixed);
+    const changed = new Map(mutated.filter(r => [...changes.values()].includes(r.object_id)).map(r => [r.object_id, r]));
+    const before = { ...state, snapshot: {
+      ...snapshot, objects: snapshot.objects.map(r => changed.get(changes.get(r.object_id)) ?? r),
+    } };
+    const candidate = JSON.parse(JSON.stringify(before).replace(/obj3-[0-9a-f]{64}/g, id => changes.get(id) ?? id));
+    const axes = candidate.snapshot.catalog_evidence.axes;
+    assert.throws(() => C.validateCenterFamilyCut(mutated, axes), /TB02E_GENERATION/);
+    assert.throws(() => C.validateCenterFamilyCut(mutated, axes, "2"), /TB02E_GENERATION/);
+    await assert.rejects(() => Q3.validateState(candidate, "s-session/3"), /TB02E_GENERATION/);
   }
 });

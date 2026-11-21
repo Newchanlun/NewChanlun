@@ -3568,35 +3568,34 @@ mod tests {
     #[test]
     fn r5_scan_active_window_records_batch_dropped_windows() {
         let mut units = l0_units_seed();
-        // u3 [121,128] 整体高于窗1 核心上沿 120 ⟹ 对窗1 是 non-extension 哨兵，窗1 关闭；★#1419 R8
-        // （#812 Z-5）：u3 是突破段（连接段），下一 seed 自 last_member+2 = u4 起（旧夹具让 u3 兼任窗2
-        // 首单元，只在旧 B 口径下成立）。窗2 seed：方向交替（Down/Up/Down）+ 核心 [135,145] 非空。
+        // u2 从核心到 125；u3 同高 125，回抽低点 121 > 120。
+        // u3 仅作连接，下一个合法 seed 从 u4 开始。
         units.extend_from_slice(&[
             UnitRange {
                 start_index: 30,
                 end_index: 40,
                 direction: Direction::Down,
                 lo: 121,
-                hi: 128,
+                hi: 125,
             },
             UnitRange {
                 start_index: 40,
                 end_index: 50,
-                direction: Direction::Down,
+                direction: Direction::Up,
                 lo: 130,
                 hi: 150,
             },
             UnitRange {
                 start_index: 50,
                 end_index: 60,
-                direction: Direction::Up,
+                direction: Direction::Down,
                 lo: 135,
                 hi: 150,
             },
             UnitRange {
                 start_index: 60,
                 end_index: 70,
-                direction: Direction::Down,
+                direction: Direction::Up,
                 lo: 130,
                 hi: 145,
             },

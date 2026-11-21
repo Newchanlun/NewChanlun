@@ -11,3 +11,5 @@ mod pan_memo_fixtures;
 mod projection_pairing;
 mod seed_mapping;
 mod triple_anchor;
+
+mod r5_regressions;

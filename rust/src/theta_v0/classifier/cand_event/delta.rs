@@ -343,8 +343,38 @@ mod tests {
             Some(&[Some(Direction::Up), Some(Direction::Down)]),
             1,
         );
-        assert_eq!(objects[0].lifecycle, CpLifecycleStatus::Closed);
         objects.remove(0)
+    }
+
+    // 独立合成正控；原 P53 坐标仅作换版后的缺证反例，不合成所谓「历史同源角色」。
+    fn proved_literal_fixture() -> CpScanOwnership {
+        let c = Center {
+            zd: 100,
+            zg: 200,
+            dd: 80,
+            gg: 260,
+            start_index: 0,
+            end_index: 12,
+        };
+        let object = close_fixture_object(
+            c,
+            eid(2, 900),
+            eid(1, 901),
+            eid(1, 902),
+            unit(8, 12, up(), 150, 260),
+            unit(12, 16, down(), 210, 260),
+        );
+        assert_eq!(object.lifecycle, CpLifecycleStatus::Closed);
+        assert_eq!(object.cp_certificate_confirm_src, Some(16));
+        object
+    }
+
+    fn proved_literal_edge() -> CandDeltaCpEdge {
+        CandDeltaCpEdge {
+            b_center_id: eid(2, 900),
+            cp_departure_move_id: eid(1, 901),
+            cp_source_start: 8,
+        }
     }
 
     /// P53 回归：P52 原 `NO_EVENT_FOR_CP_ID` 第 1 例（L2#31/L1#140）必须由稳定
@@ -368,12 +398,13 @@ mod tests {
             unit(77_222, 77_473, down(), 470_000_000_000, 480_000_000_000),
         );
 
-        let entries = relaxed_cand_delta_entries(1, &[object], &[]);
+        assert_eq!(object.lifecycle, CpLifecycleStatus::Pending);
+        assert!(relaxed_cand_delta_entries(1, &[object], &[]).is_empty());
+        let entries = relaxed_cand_delta_entries(1, &[proved_literal_fixture()], &[]);
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].origin, CandDeltaEntryOrigin::StableCpGeometry);
-        assert_eq!(entries[0].cp_ownership.b_center_id, eid(2, 31));
-        assert_eq!(entries[0].cp_ownership.cp_departure_move_id, eid(1, 140));
-        assert_eq!(entries[0].third_class_in_c.retest_move_id, eid(1, 141));
+        assert_eq!(entries[0].cp_ownership, proved_literal_edge());
+        assert_eq!(entries[0].third_class_in_c.retest_move_id, eid(1, 902));
     }
 
     /// P53 回归：P52 原 `CAND_DELTA_FALSE` 的 L2#764/L1#3401 保留算法背驰 false，
@@ -424,13 +455,22 @@ mod tests {
             source_end: None,
         });
 
-        let entries = relaxed_cand_delta_entries(1, &[object], std::slice::from_ref(&legacy));
+        let before = legacy.clone();
+        assert_eq!(object.lifecycle, CpLifecycleStatus::Pending);
+        assert!(relaxed_cand_delta_entries(1, &[object], std::slice::from_ref(&legacy)).is_empty());
+        assert_eq!(before, legacy, "原算法 false 事件不因规则换版改写");
+        let known = legacy_event_for_edge(1, proved_literal_edge(), false);
+        let entries = relaxed_cand_delta_entries(
+            1,
+            &[proved_literal_fixture()],
+            std::slice::from_ref(&known),
+        );
         assert_eq!(entries.len(), 1);
         assert_eq!(
             entries[0].origin,
             CandDeltaEntryOrigin::ExistingCandDeltaFalse
         );
-        assert!(!legacy.cand_delta, "P53 不改写算法背驰历史真值");
+        assert!(!known.cand_delta);
     }
 
     /// P53 回归：放宽函数只读既有事件；原 E 中成功对象继续纳入，几何失败对象仍留在
@@ -488,13 +528,21 @@ mod tests {
         ];
         let before = legacy.clone();
 
-        let entries = relaxed_cand_delta_entries(1, &[closed, pending], &legacy);
+        assert_eq!(closed.lifecycle, CpLifecycleStatus::Pending);
+        let old_entries = relaxed_cand_delta_entries(1, &[closed, pending.clone()], &legacy);
+        assert!(
+            old_entries.is_empty(),
+            "历史 true 不能替代新规则的首回抽证据"
+        );
         assert_eq!(legacy, before, "原 CandDeltaEvent 记录必须 bit-exact 保留");
-        assert_eq!(entries.len(), 1, "只有几何闭合对象进入放宽后的 E");
+        let mut known = legacy.clone();
+        known.push(legacy_event_for_edge(1, proved_literal_edge(), true));
+        let entries = relaxed_cand_delta_entries(1, &[proved_literal_fixture(), pending], &known);
+        assert_eq!(entries.len(), 1, "只有合法闭合对象进入 E");
         assert_eq!(
             entries[0].origin,
             CandDeltaEntryOrigin::ExistingCandDeltaTrue
         );
-        assert_eq!(entries[0].cp_ownership.b_center_id, eid(2, 1508));
+        assert_eq!(entries[0].cp_ownership, proved_literal_edge());
     }
 }

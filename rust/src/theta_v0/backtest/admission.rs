@@ -798,7 +798,8 @@ impl NestChainGate {
             }
         };
         // 塔顶级别（level == tower.len()）：无上级塔层 ⟹ windows 退化为塔顶层自身
-        //（与 legs 同层；拐点落在账本级 tower.len()-1 = 塔顶）。常规级别 windows=tower[level]。
+        //（与 legs 同层；拐点落在账本级 tower.len()-1 = 塔顶）。常规级别 windows=tower[level]；
+        // 投影保留窗口自带的 R5 证书，Level View 用这里同一塔的 lower 核对原生段身份。
         let windows = &tower[level.min(tower.len() - 1)];
         let mut out = Vec::new();
         let mut run_start = None;

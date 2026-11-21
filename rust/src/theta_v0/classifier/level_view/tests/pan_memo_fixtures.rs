@@ -21,6 +21,7 @@ fn pan_seed(index: usize, center: Center) -> ExactThreeSeed {
         end_index: center.end_index,
         center,
         core_provenance: SeedCoreProvenance::SelfConsistent,
+        r5_settlement: None,
     }
 }
 

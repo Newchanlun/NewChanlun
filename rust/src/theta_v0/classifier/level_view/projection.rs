@@ -1,11 +1,14 @@
 //! C2 D1 投影域：`ExactThreeProjection` seed 构造 + `LowerLeg` 下级走势腿投影（#630 从
 //! `level_view.rs` 拆出，纯移动零语义；来源票 #497 影子评审 MEDIUM-1）。
 
+use std::rc::Rc;
+
 use super::super::super::types::{Center, Direction, Segment, Tick};
 use super::super::center::{
     center_from_segments, center_from_window, compute_dd, compute_gg, UnitRange,
 };
-use super::super::recursive_tower::{ElementId, LeveledMove};
+use super::super::center_scan::R5Proof;
+use super::super::recursive_tower::{ElementId, LeveledMove, NativeR5Settlement};
 use super::ProviderVersion;
 
 /// seed 核来源显式打标（#90 结裁 `chanlun/escalate/silent-dual-core-c1-seam-ruling-20260715.md`，
@@ -26,7 +29,7 @@ pub enum SeedCoreProvenance {
 /// 扩展窗口投影后的不可变 seed；只复制前三个次级别走势的确定值，不保留可变尾引用。
 /// #90 结裁：`center` 的 [ZD,ZG] 为塔 compose 携带核（继承核准绳）；dd/gg 与坐标仍取
 /// 首三段窗（#142 设计内外缘语义不动）；来源见 `core_provenance`。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ExactThreeSeed {
     pub source_id: ElementId,
     pub source_sub_count: usize,
@@ -34,6 +37,8 @@ pub struct ExactThreeSeed {
     pub end_index: usize,
     pub center: Center,
     pub core_provenance: SeedCoreProvenance,
+    /// 延伸窗口拥有的证书；exact-three 投影不从价域或占位方向新发证书。
+    pub r5_settlement: Option<Rc<NativeR5Settlement>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -186,6 +191,7 @@ fn project_extended_windows_impl(
             end_index: c.end_index,
             center,
             core_provenance,
+            r5_settlement: window.r5_settlement.clone(),
         });
     }
     Ok(ExactThreeProjection { version, seeds })
@@ -217,6 +223,47 @@ pub fn lower_legs_from(values: &[LeveledMove]) -> Result<Vec<LowerLeg>, Projecti
             })
         })
         .collect()
+}
+
+impl ExactThreeProjection {
+    pub(super) fn native_settlements(&self, legs: &[LowerLeg]) -> Vec<Option<R5Proof>> {
+        self.seeds
+            .iter()
+            .map(|seed| {
+                let settlement = seed.r5_settlement.as_ref()?;
+                let proof = settlement.proof;
+                let start = settlement.source.first()?.1.start_index;
+                if start != seed.center.start_index
+                    || proof.core() != (seed.center.zd, seed.center.zg)
+                {
+                    return None;
+                }
+                // 下级流可裁去前缀：先定位首段，再逐段核对整窗，最后重映射证书下标。
+                let at = legs.partition_point(|leg| leg.start_index < start);
+                let window = legs.get(at..at + settlement.source.len())?;
+                window
+                    .iter()
+                    .zip(settlement.source.iter())
+                    .all(|(leg, &(id, unit))| {
+                        *leg == LowerLeg {
+                            id,
+                            direction: unit.direction,
+                            start_index: unit.start_index,
+                            end_index: unit.end_index,
+                            lo: unit.lo,
+                            hi: unit.hi,
+                        }
+                    })
+                    .then(|| {
+                        proof.with_unit_indices([
+                            at,
+                            at + (proof.leave_unit() - proof.seed_unit()),
+                            at + window.len() - 1,
+                        ])
+                    })
+            })
+            .collect()
+    }
 }
 
 pub(super) fn leg_as_segment(value: &LowerLeg) -> Segment {
