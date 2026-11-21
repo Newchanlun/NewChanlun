@@ -74,8 +74,12 @@ _COMMENT_MARKER_RE = re.compile(
     r"^<!--\s*deepagents:review-findings\s+pr=(?P<pr>[1-9]\d*)\s+round=(?P<round>[1-9]\d*)\s+head=(?P<head>\S+)\s*-->$"
 )
 
-_FENCE_OPEN_BACKTICK_RE = re.compile(r"^ {0,3}(`{3,})[^`]*$")
-_FENCE_OPEN_TILDE_RE = re.compile(r"^ {0,3}(~{3,}).*$")
+_LIST_PREFIX_PATTERN = r"(?:(?:[-*+]|\d+[.)])[ \t]+)*"
+_FENCE_OPEN_BACKTICK_RE = re.compile(rf"^[ \t]*{_LIST_PREFIX_PATTERN}(`{{3,}})[^`]*$")
+_FENCE_OPEN_TILDE_RE = re.compile(rf"^[ \t]*{_LIST_PREFIX_PATTERN}(~{{3,}}).*$")
+_BLOCKQUOTE_START_RE = re.compile(rf"^{_LIST_PREFIX_PATTERN}>")
+_ATX_HEADING_RE = re.compile(r"^ {0,3}#{1,6}(?:[ \t]|$)")
+_THEMATIC_BREAK_RE = re.compile(r"^ {0,3}(?:(?:-[ \t]*){3,}|(?:\*[ \t]*){3,}|(?:_[ \t]*){3,})$")
 
 _WONTFIX_HEAD_RE = re.compile(
     r"^(?:(?:[-*+]|\d+[.)])\s+)?"
@@ -374,7 +378,7 @@ class AuthorReply:
     file: str | None
     line: int | None
     reason: str
-    comment_id: str | None = None
+    comment_id: str
     author: str | None = None
 
     def __post_init__(self) -> None:
@@ -386,28 +390,26 @@ class AuthorReply:
             _normalize_file(self.file)
         _normalize_line(self.line)
         _require_non_empty_str(self.reason, "reason")
-        if self.comment_id is not None:
-            _require_non_empty_str(self.comment_id, "comment_id")
+        _require_non_empty_str(self.comment_id, "comment_id")
         if self.author is not None:
             _require_non_empty_str(self.author, "author")
 
     @property
     def reply_key(self) -> str:
-        """稳定唯一消费键：同一评论内多条不同锚点回复互不冲突，且跨轮次重放保持一致。"""
-        cid = self.comment_id.strip() if self.comment_id is not None else ""
+        """稳定唯一消费键：同一评论内多条不同锚点回复互不冲突，且跨轮次重放（含原评论编辑）保持一致。"""
+        cid = self.comment_id.strip()
         author = self.author.strip().lower() if self.author is not None else ""
         norm_id = self.finding_id.strip().lower() if self.finding_id is not None else ""
         norm_file = _normalize_file(self.file) if self.file is not None else ""
         norm_line = "" if self.line is None else str(self.line)
-        norm_reason = re.sub(r"\s+", " ", self.reason.strip())
         canonical = json.dumps(
-            [cid, author, norm_id, norm_file, norm_line, norm_reason],
+            [cid, author, norm_id, norm_file, norm_line],
             ensure_ascii=False,
             separators=(",", ":"),
         )
         digest = hashlib.sha256(canonical.encode("utf-8")).hexdigest()[:16]
         anchor = f"id:{norm_id}" if norm_id else f"loc:{norm_file}:{norm_line or '*'}"
-        return f"{cid or 'no-comment'}|{anchor}|{digest}"
+        return f"{cid}|{anchor}|{digest}"
 
 
 def _extract_comment_id(comment: Mapping[str, Any]) -> str | None:
@@ -415,7 +417,7 @@ def _extract_comment_id(comment: Mapping[str, Any]) -> str | None:
     if raw is None:
         return None
     if type(raw) is int:
-        return str(raw)
+        return str(raw) if raw > 0 else None
     if isinstance(raw, str) and raw.strip():
         return raw.strip()
     return None
@@ -487,7 +489,11 @@ def _match_opening_fence(line: str) -> tuple[str, int] | None:
 
 
 def _is_closing_fence(line: str, fence_char: str, fence_len: int) -> bool:
-    return bool(re.fullmatch(rf" {{0,3}}{re.escape(fence_char)}{{{fence_len},}}[ \t]*", line))
+    return bool(re.fullmatch(rf"[ \t]*{re.escape(fence_char)}{{{fence_len},}}[ \t]*", line))
+
+
+def _is_block_interrupt(line: str) -> bool:
+    return bool(_ATX_HEADING_RE.match(line) or _THEMATIC_BREAK_RE.match(line))
 
 
 def parse_wontfix_replies(
@@ -495,7 +501,7 @@ def parse_wontfix_replies(
     *,
     allowed_authors: Collection[str],
 ) -> tuple[AuthorReply, ...]:
-    """解析白名单作者的 `不修：<理由>` 回复；拒绝机器人、缺失或非白名单作者，并跳过代码块与引用行。"""
+    """解析白名单作者的 `不修：<理由>` 回复；拒绝机器人、缺失 comment_id 或非白名单作者，并隔离代码块与引用续行。"""
     allowed = _normalize_str_collection(
         allowed_authors,
         "allowed_authors",
@@ -519,10 +525,13 @@ def parse_wontfix_replies(
             continue
 
         comment_id = _extract_comment_id(comment)
+        if comment_id is None:
+            continue
         fallback_file, fallback_line = _extract_comment_file_and_line(comment)
 
         fence_char: str | None = None
         fence_len = 0
+        in_blockquote = False
         for raw_line in body.splitlines():
             if fence_char is not None:
                 if _is_closing_fence(raw_line, fence_char, fence_len):
@@ -530,17 +539,30 @@ def parse_wontfix_replies(
                     fence_len = 0
                 continue
 
-            # 必须在 .strip() 之前识别缩进代码块（4 空格或制表符）
-            if _leading_indent_columns(raw_line) >= 4:
+            stripped = raw_line.strip()
+            if not stripped:
+                in_blockquote = False
                 continue
 
             opened = _match_opening_fence(raw_line)
             if opened is not None:
+                in_blockquote = False
                 fence_char, fence_len = opened
                 continue
 
-            stripped = raw_line.strip()
-            if not stripped or stripped.startswith(">"):
+            # 必须在 .strip() 之前识别缩进代码块（4 空格或制表符）
+            if _leading_indent_columns(raw_line) >= 4:
+                continue
+
+            if _BLOCKQUOTE_START_RE.match(stripped):
+                in_blockquote = True
+                continue
+
+            if _is_block_interrupt(raw_line):
+                in_blockquote = False
+                continue
+
+            if in_blockquote:
                 continue
 
             match = _WONTFIX_HEAD_RE.match(stripped)
@@ -581,21 +603,14 @@ def parse_wontfix_replies(
     return tuple(replies)
 
 
-def bind_author_replies(
+def _analyze_author_replies(
     findings: Sequence[Finding],
     replies: Sequence[AuthorReply],
     *,
     consumed_reply_keys: Collection[str] = (),
     consumed_comment_ids: Collection[str] = (),
-) -> dict[str, AuthorReply]:
-    """面向整个候选集合做作者回复唯一绑定。
-
-    规则：
-    - 忽略已消费（consumed_reply_keys / consumed_comment_ids）的历史回复；
-    - 任一条回复若命中超过 1 个活跃候选，视为歧义，拒绝绑定到任何发现；
-    - 同一评论中的多条回复若各自唯一指向不同发现，可分别绑定；
-    - 同一发现被多条有效回复命中时，按锚点精度（ID > 文件+行号 > 仅文件）择优，同精度取最新回复。
-    """
+) -> tuple[dict[str, AuthorReply], dict[str, frozenset[str]]]:
+    """同时计算唯一绑定回复与每个发现关联的全部未消费回复键（供处置时一并消费，防重开复用旧评论）。"""
     finding_list: list[Finding] = []
     seen_ids: set[str] = set()
     for item in findings:
@@ -611,12 +626,14 @@ def bind_author_replies(
     consumed_cids = _normalize_str_collection(consumed_comment_ids, "consumed_comment_ids")
 
     best_by_id: dict[str, tuple[int, AuthorReply]] = {}
+    matched_keys_by_id: dict[str, set[str]] = {}
     for reply in replies:
         if not isinstance(reply, AuthorReply):
             raise ConvergenceError(f"replies 元素必须是 AuthorReply：{reply!r}")
+        cid = _require_non_empty_str(reply.comment_id, "reply.comment_id")
         if reply.reply_key in consumed_keys:
             continue
-        if reply.comment_id is not None and reply.comment_id.strip() in consumed_cids:
+        if cid in consumed_cids:
             continue
 
         matches: list[Finding]
@@ -636,6 +653,9 @@ def bind_author_replies(
         else:
             continue
 
+        for matched_finding in matches:
+            matched_keys_by_id.setdefault(matched_finding.finding_id, set()).add(reply.reply_key)
+
         # 命中 0 个或超过 1 个活跃候选均拒绝绑定（绝不让一条歧义回复解除多个发现）
         if len(matches) != 1:
             continue
@@ -645,7 +665,34 @@ def bind_author_replies(
         if current is None or specificity >= current[0]:
             best_by_id[target_id] = (specificity, reply)
 
-    return {fid: pair[1] for fid, pair in best_by_id.items()}
+    return (
+        {fid: pair[1] for fid, pair in best_by_id.items()},
+        {fid: frozenset(keys) for fid, keys in matched_keys_by_id.items()},
+    )
+
+
+def bind_author_replies(
+    findings: Sequence[Finding],
+    replies: Sequence[AuthorReply],
+    *,
+    consumed_reply_keys: Collection[str] = (),
+    consumed_comment_ids: Collection[str] = (),
+) -> dict[str, AuthorReply]:
+    """面向整个候选集合做作者回复唯一绑定。
+
+    规则：
+    - 忽略已消费（consumed_reply_keys / consumed_comment_ids）的历史回复；
+    - 任一条回复若命中超过 1 个活跃候选，视为歧义，拒绝绑定到任何发现；
+    - 同一评论中的多条回复若各自唯一指向不同发现，可分别绑定；
+    - 同一发现被多条有效回复命中时，按锚点精度（ID > 文件+行号 > 仅文件）择优，同精度取最新回复。
+    """
+    bound, _ = _analyze_author_replies(
+        findings,
+        replies,
+        consumed_reply_keys=consumed_reply_keys,
+        consumed_comment_ids=consumed_comment_ids,
+    )
+    return bound
 
 
 @dataclass(frozen=True)
@@ -655,6 +702,7 @@ class VerifiedFinding:
     verifier_model: str
     verifier_evidence: str
     author_reply: AuthorReply | None = None
+    related_reply_keys: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         if not isinstance(self.finding, Finding):
@@ -665,8 +713,14 @@ class VerifiedFinding:
         _require_non_empty_str(self.verifier_evidence, "verifier_evidence")
         if self.author_reply is not None and not isinstance(self.author_reply, AuthorReply):
             raise ConvergenceError("VerifiedFinding.author_reply 必须是 AuthorReply 或 None")
-        if self.verdict == VerificationVerdict.RESOLVED_BY_WONTFIX and self.author_reply is None:
-            raise ConvergenceError("verdict=resolved_by_wontfix 时必须绑定非空 author_reply")
+        if self.verdict == VerificationVerdict.RESOLVED_BY_WONTFIX:
+            if self.author_reply is None:
+                raise ConvergenceError("verdict=resolved_by_wontfix 时必须绑定非空 author_reply")
+            _require_non_empty_str(self.author_reply.comment_id, "author_reply.comment_id")
+        if not isinstance(self.related_reply_keys, tuple):
+            raise ConvergenceError("VerifiedFinding.related_reply_keys 必须是字符串元组")
+        for rk in self.related_reply_keys:
+            _require_non_empty_str(rk, "related_reply_keys[]")
 
     @property
     def is_blocking(self) -> bool:
@@ -729,6 +783,7 @@ def parse_verifier_output(
     author_replies: Sequence[AuthorReply] = (),
     consumed_reply_keys: Collection[str] = (),
     consumed_comment_ids: Collection[str] = (),
+    prior_important_ids: Collection[str] = frozenset(),
 ) -> tuple[VerifiedFinding, ...]:
     """解析核实者裁决并强制与审查面板及候选清单 1:1 绑定（fail-closed）。"""
     if not isinstance(panel, ReviewPanel):
@@ -740,6 +795,12 @@ def parse_verifier_output(
     if model != expected_verifier:
         raise ConvergenceError(f"verifier_model={model!r} 与 panel.verifier_model={expected_verifier!r} 不一致")
     verifier_family = infer_model_family(model)
+    allowed_finders = {m.strip() for m in panel.finder_models}
+    allowed_prior_ids = _normalize_str_collection(
+        prior_important_ids,
+        "prior_important_ids",
+        lowercase=True,
+    )
 
     if not isinstance(payload, Mapping):
         raise ConvergenceError("verifier 输出必须是对象")
@@ -766,12 +827,19 @@ def parse_verifier_output(
                 raise ConvergenceError(
                     f"核实者模型 {model!r}（家族 {verifier_family}）不得与候选发现 {cid} 来源模型 {src_model!r} 同家族"
                 )
+        is_carried_prior_important = cid in allowed_prior_ids and candidate.severity == Severity.IMPORTANT
+        if not is_carried_prior_important:
+            unknown_sources = [m for m in real_models if m not in allowed_finders]
+            if unknown_sources:
+                raise ConvergenceError(
+                    f"候选发现 {cid} 的来源模型 {unknown_sources!r} 不在 panel.finder_models 中"
+                )
 
         candidates_by_id[cid] = candidate
         ordered_ids.append(cid)
         candidate_list.append(candidate)
 
-    bound_replies = bind_author_replies(
+    bound_replies, matched_keys_by_id = _analyze_author_replies(
         candidate_list,
         author_replies,
         consumed_reply_keys=consumed_reply_keys,
@@ -804,6 +872,7 @@ def parse_verifier_output(
             verifier_model=model,
             verifier_evidence=verifier_evidence,
             author_reply=matched_reply,
+            related_reply_keys=tuple(sorted(matched_keys_by_id.get(fid, ()))),
         )
 
     missing = [cid for cid in ordered_ids if cid not in verdicts_by_id]
@@ -821,6 +890,8 @@ class RoundHistoryEntry:
     unresolved_important: tuple[Finding, ...]
     resolved_fingerprints: frozenset[str] = frozenset()
     consumed_reply_keys: frozenset[str] = frozenset()
+    rejected_fingerprints: frozenset[str] = frozenset()
+    pending_non_blocking: tuple[VerifiedFinding, ...] = ()
 
     def __post_init__(self) -> None:
         if type(self.round_number) is not int or self.round_number <= 0:
@@ -843,14 +914,35 @@ class RoundHistoryEntry:
             raise ConvergenceError("resolved_fingerprints 必须是 frozenset[str]")
         for fp in self.resolved_fingerprints:
             _require_non_empty_str(fp, "resolved_fingerprints[]")
-        if unresolved_ids & self.resolved_fingerprints:
-            raise ConvergenceError("同一轮次内 unresolved_important 与 resolved_fingerprints 不得重叠")
-        if self.posted_fingerprints & self.resolved_fingerprints:
-            raise ConvergenceError("同一轮次内 posted_fingerprints 与 resolved_fingerprints 不得重叠")
+        if not isinstance(self.rejected_fingerprints, frozenset):
+            raise ConvergenceError("rejected_fingerprints 必须是 frozenset[str]")
+        for fp in self.rejected_fingerprints:
+            _require_non_empty_str(fp, "rejected_fingerprints[]")
+        if self.resolved_fingerprints & self.rejected_fingerprints:
+            raise ConvergenceError("同一轮次内 resolved_fingerprints 与 rejected_fingerprints 不得重叠")
+        cleared_ids = self.resolved_fingerprints | self.rejected_fingerprints
+        if unresolved_ids & cleared_ids:
+            raise ConvergenceError("同一轮次内 unresolved_important 与已解除/驳回指纹不得重叠")
+        if self.posted_fingerprints & cleared_ids:
+            raise ConvergenceError("同一轮次内 posted_fingerprints 与已解除/驳回指纹不得重叠")
         if not isinstance(self.consumed_reply_keys, frozenset):
             raise ConvergenceError("consumed_reply_keys 必须是 frozenset[str]")
         for rk in self.consumed_reply_keys:
             _require_non_empty_str(rk, "consumed_reply_keys[]")
+        if not isinstance(self.pending_non_blocking, tuple):
+            raise ConvergenceError("pending_non_blocking 必须是 VerifiedFinding 元组")
+        pending_ids: set[str] = set()
+        for vf in self.pending_non_blocking:
+            if not isinstance(vf, VerifiedFinding):
+                raise ConvergenceError("pending_non_blocking 元素必须是 VerifiedFinding")
+            if vf.verdict != VerificationVerdict.CONFIRMED or vf.is_blocking:
+                raise ConvergenceError("pending_non_blocking 仅允许核实成立的非阻断发现")
+            fid = vf.finding.finding_id
+            if fid in pending_ids:
+                raise ConvergenceError(f"pending_non_blocking 含重复指纹：{fid}")
+            pending_ids.add(fid)
+        if pending_ids & (self.posted_fingerprints | cleared_ids):
+            raise ConvergenceError("pending_non_blocking 不得与已贴出或已解除/驳回指纹重叠")
 
 
 @dataclass(frozen=True)
@@ -864,16 +956,25 @@ class RoundPlan:
     already_posted_fingerprints: frozenset[str]
     consumed_reply_keys: frozenset[str] = frozenset()
     exceeds_auto_rounds: bool = False
+    pending_non_blocking: tuple[VerifiedFinding, ...] = ()
+
+    @property
+    def prior_important_ids(self) -> frozenset[str]:
+        return frozenset(f.finding_id for f in self.unresolved_prior_important)
 
 
 def _active_posted_fingerprints(history: Sequence[RoundHistoryEntry]) -> frozenset[str]:
-    """回放历史轮次中仍处于活跃态的已贴指纹；已被解除的发现会移出，允许重新引入后再次贴出。"""
+    """回放历史轮次中仍处于活跃态的已贴指纹；已解除或被核实驳回的发现会移出，允许重新确认后完整贴出。"""
     active: set[str] = set()
     prev_unresolved: set[str] = set()
     for entry in history:
         current_unresolved = {f.finding_id for f in entry.unresolved_important}
-        resolved_in_round = (prev_unresolved - current_unresolved) | set(entry.resolved_fingerprints)
-        active.difference_update(resolved_in_round)
+        cleared_in_round = (
+            (prev_unresolved - current_unresolved)
+            | set(entry.resolved_fingerprints)
+            | set(entry.rejected_fingerprints)
+        )
+        active.difference_update(cleared_in_round)
         active.update(entry.posted_fingerprints)
         prev_unresolved = current_unresolved
     return frozenset(active)
@@ -907,12 +1008,17 @@ def plan_next_round(
             already_posted_fingerprints=frozenset(),
             consumed_reply_keys=frozenset(),
             exceeds_auto_rounds=False,
+            pending_non_blocking=(),
         )
 
     prev = history[-1]
     round_number = prev.round_number + 1
+    already_posted = _active_posted_fingerprints(history)
     consumed_reply_keys: frozenset[str] = frozenset().union(*(entry.consumed_reply_keys for entry in history))
     active_replies = tuple(reply for reply in author_replies if reply.reply_key not in consumed_reply_keys)
+    pending_non_blocking = tuple(
+        vf for vf in prev.pending_non_blocking if vf.finding.finding_id not in already_posted
+    )
     return RoundPlan(
         round_number=round_number,
         review_scope="incremental_diff",
@@ -920,9 +1026,10 @@ def plan_next_round(
         diff_head_sha=head,
         unresolved_prior_important=prev.unresolved_important,
         author_replies=active_replies,
-        already_posted_fingerprints=_active_posted_fingerprints(history),
+        already_posted_fingerprints=already_posted,
         consumed_reply_keys=consumed_reply_keys,
         exceeds_auto_rounds=round_number > MAX_AUTO_ROUNDS,
+        pending_non_blocking=pending_non_blocking,
     )
 
 
@@ -971,32 +1078,50 @@ class RoundDecision:
     resolved_findings: tuple[VerifiedFinding, ...]
     rejected_findings: tuple[VerifiedFinding, ...]
     postable_findings: tuple[VerifiedFinding, ...]
-    next_posted_fingerprints: frozenset[str]
     unresolved_important: tuple[Finding, ...]
     retained_posted_fingerprints: frozenset[str] = frozenset()
     resolved_fingerprints: frozenset[str] = frozenset()
+    rejected_fingerprints: frozenset[str] = frozenset()
     consumed_reply_keys: frozenset[str] = frozenset()
+
+    @property
+    def cleared_fingerprints(self) -> frozenset[str]:
+        return self.resolved_fingerprints | self.rejected_fingerprints
 
     def to_history_entry(
         self,
         head_sha: str,
         *,
-        posted_in_comment: frozenset[str],
+        rendered: RenderedComment,
     ) -> RoundHistoryEntry:
-        """基于实际出现在渲染评论中的指纹生成轮次历史，避免被截断的非阻断项永久漏贴。"""
-        if not isinstance(posted_in_comment, frozenset):
-            raise ConvergenceError("posted_in_comment 必须是 frozenset[str]")
-        for fp in posted_in_comment:
-            _require_non_empty_str(fp, "posted_in_comment[]")
-        if posted_in_comment & self.resolved_fingerprints:
-            raise ConvergenceError("posted_in_comment 不得包含本轮已解除的发现指纹")
+        """基于实际渲染结果生成轮次历史，作为已贴指纹与待补发非阻断项的唯一权威更新入口。"""
+        if not isinstance(rendered, RenderedComment):
+            raise ConvergenceError("rendered 必须是 RenderedComment")
+        omitted_ids = frozenset(vf.finding.finding_id for vf in rendered.omitted_non_blocking)
+        if omitted_ids != rendered.omitted_non_blocking_fingerprints:
+            raise ConvergenceError("rendered.omitted_non_blocking 与 omitted_non_blocking_fingerprints 不一致")
+        valid_active_ids = frozenset(vf.finding.finding_id for vf in self.blocking_findings) | frozenset(
+            vf.finding.finding_id for vf in self.non_blocking_findings
+        )
+        if not (rendered.posted_fingerprints <= valid_active_ids):
+            raise ConvergenceError("rendered.posted_fingerprints 包含非本轮活跃发现指纹")
+        if not (omitted_ids <= valid_active_ids):
+            raise ConvergenceError("rendered.omitted_non_blocking 包含非本轮活跃发现指纹")
+        if rendered.posted_fingerprints & omitted_ids:
+            raise ConvergenceError("同一发现不得同时出现在 posted_fingerprints 与 omitted_non_blocking 中")
+        if rendered.posted_fingerprints & self.cleared_fingerprints:
+            raise ConvergenceError("rendered.posted_fingerprints 不得包含本轮已解除或已驳回的发现指纹")
+        if omitted_ids & (self.retained_posted_fingerprints | self.cleared_fingerprints):
+            raise ConvergenceError("rendered.omitted_non_blocking 不得包含已贴出或已解除/驳回的发现指纹")
         return RoundHistoryEntry(
             round_number=self.round_number,
             head_sha=_require_non_empty_str(head_sha, "head_sha"),
-            posted_fingerprints=self.retained_posted_fingerprints | posted_in_comment,
+            posted_fingerprints=self.retained_posted_fingerprints | rendered.posted_fingerprints,
             unresolved_important=self.unresolved_important,
             resolved_fingerprints=self.resolved_fingerprints,
+            rejected_fingerprints=self.rejected_fingerprints,
             consumed_reply_keys=self.consumed_reply_keys,
+            pending_non_blocking=rendered.omitted_non_blocking,
         )
 
 
@@ -1005,6 +1130,8 @@ def evaluate_round(
     verified: Sequence[VerifiedFinding],
     *,
     already_posted: frozenset[str] = frozenset(),
+    pending_non_blocking: Sequence[VerifiedFinding] = (),
+    author_replies: Sequence[AuthorReply] = (),
     max_auto_rounds: int = MAX_AUTO_ROUNDS,
 ) -> RoundDecision:
     if type(round_number) is not int or round_number <= 0:
@@ -1023,28 +1150,53 @@ def evaluate_round(
         seen.add(fid)
         ordered.append(vf)
 
-    verified_tuple = tuple(ordered)
-    blocking = tuple(vf for vf in verified_tuple if vf.is_blocking)
+    pending_seen: set[str] = set()
+    carried_non_blocking: list[VerifiedFinding] = []
+    for vf in pending_non_blocking:
+        if not isinstance(vf, VerifiedFinding):
+            raise ConvergenceError(f"pending_non_blocking 元素必须是 VerifiedFinding：{vf!r}")
+        if vf.verdict != VerificationVerdict.CONFIRMED or vf.is_blocking:
+            raise ConvergenceError("pending_non_blocking 仅允许核实成立的非阻断发现")
+        fid = vf.finding.finding_id
+        if fid in pending_seen:
+            raise ConvergenceError(f"pending_non_blocking 含重复指纹：{fid}")
+        pending_seen.add(fid)
+        if fid in seen or fid in already_posted:
+            continue
+        carried_non_blocking.append(vf)
+
+    effective_verified = tuple(ordered) + tuple(carried_non_blocking)
+    blocking = tuple(vf for vf in effective_verified if vf.is_blocking)
     non_blocking = tuple(
-        vf for vf in verified_tuple if vf.verdict == VerificationVerdict.CONFIRMED and not vf.is_blocking
+        vf for vf in effective_verified if vf.verdict == VerificationVerdict.CONFIRMED and not vf.is_blocking
     )
     resolved = tuple(
         vf
-        for vf in verified_tuple
+        for vf in effective_verified
         if vf.verdict in (VerificationVerdict.RESOLVED_BY_FIX, VerificationVerdict.RESOLVED_BY_WONTFIX)
     )
-    rejected = tuple(vf for vf in verified_tuple if vf.verdict == VerificationVerdict.REJECTED)
+    rejected = tuple(vf for vf in effective_verified if vf.verdict == VerificationVerdict.REJECTED)
 
     resolved_ids = frozenset(vf.finding.finding_id for vf in resolved)
-    retained_posted = already_posted - resolved_ids
-    postable = select_postable_findings(verified_tuple, already_posted, resolved_fingerprints=resolved_ids)
-    next_posted = retained_posted | frozenset(vf.finding.finding_id for vf in postable)
+    rejected_ids = frozenset(vf.finding.finding_id for vf in rejected)
+    cleared_ids = resolved_ids | rejected_ids
+    retained_posted = already_posted - cleared_ids
+    postable = select_postable_findings(effective_verified, already_posted, resolved_fingerprints=cleared_ids)
     unresolved_important = tuple(vf.finding for vf in blocking)
-    consumed_reply_keys = frozenset(
-        vf.author_reply.reply_key
-        for vf in resolved
-        if vf.verdict == VerificationVerdict.RESOLVED_BY_WONTFIX and vf.author_reply is not None
-    )
+
+    consumed_keys: set[str] = set()
+    for vf in (*resolved, *rejected):
+        if vf.author_reply is not None:
+            consumed_keys.add(vf.author_reply.reply_key)
+        consumed_keys.update(vf.related_reply_keys)
+    if author_replies:
+        _, matched_keys_by_id = _analyze_author_replies(
+            [vf.finding for vf in effective_verified],
+            author_replies,
+        )
+        for fid in cleared_ids:
+            consumed_keys.update(matched_keys_by_id.get(fid, ()))
+    consumed_reply_keys = frozenset(consumed_keys)
 
     if not blocking:
         n_nit = sum(1 for vf in non_blocking if vf.finding.severity == Severity.NIT)
@@ -1074,16 +1226,16 @@ def evaluate_round(
         github_state=github_state,
         description=description,
         stop_auto_rereview=stop_auto_rereview,
-        verified_findings=verified_tuple,
+        verified_findings=effective_verified,
         blocking_findings=blocking,
         non_blocking_findings=non_blocking,
         resolved_findings=resolved,
         rejected_findings=rejected,
         postable_findings=postable,
-        next_posted_fingerprints=next_posted,
         unresolved_important=unresolved_important,
         retained_posted_fingerprints=retained_posted,
         resolved_fingerprints=resolved_ids,
+        rejected_fingerprints=rejected_ids,
         consumed_reply_keys=consumed_reply_keys,
     )
 
@@ -1094,6 +1246,23 @@ class RenderedComment:
     posted_fingerprints: frozenset[str]
     omitted_non_blocking_fingerprints: frozenset[str]
     truncated: bool
+    omitted_non_blocking: tuple[VerifiedFinding, ...] = ()
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.omitted_non_blocking, tuple):
+            raise ConvergenceError("omitted_non_blocking 必须是 VerifiedFinding 元组")
+        omitted_ids: set[str] = set()
+        for vf in self.omitted_non_blocking:
+            if not isinstance(vf, VerifiedFinding):
+                raise ConvergenceError("omitted_non_blocking 元素必须是 VerifiedFinding")
+            if vf.verdict != VerificationVerdict.CONFIRMED or vf.is_blocking:
+                raise ConvergenceError("omitted_non_blocking 仅允许核实成立的非阻断发现")
+            fid = vf.finding.finding_id
+            if fid in omitted_ids:
+                raise ConvergenceError(f"omitted_non_blocking 含重复指纹：{fid}")
+            omitted_ids.add(fid)
+        if omitted_ids != self.omitted_non_blocking_fingerprints:
+            raise ConvergenceError("omitted_non_blocking 与 omitted_non_blocking_fingerprints 不一致")
 
 
 def parse_comment_marker(body: str) -> tuple[int, int, str] | None:
@@ -1141,6 +1310,14 @@ def _render_compact_new_blocking_item(vf: VerifiedFinding) -> str:
     return f"- `[{fid}]` `{loc}` — {f.category}：{f.failure_scenario}（回复 `[{fid}] 不修：<理由>`）"
 
 
+_COMPACT_DESC_MAX_CHARS = 400
+_COMPACT_EVIDENCE_MAX_CHARS = 200
+
+
+def _single_line(text: str) -> str:
+    return re.sub(r"\s+", " ", text.strip())
+
+
 def _render_non_blocking_item(vf: VerifiedFinding) -> str:
     f = vf.finding
     fid = f.finding_id
@@ -1153,6 +1330,46 @@ def _render_non_blocking_item(vf: VerifiedFinding) -> str:
     if f.class_scope:
         lines.append(f"  - 同类范围：{f.class_scope}")
     return "\n".join(lines)
+
+
+def _render_compact_non_blocking_item(vf: VerifiedFinding, max_item_chars: int) -> str | None:
+    """在预算受限时将超长非阻断项降级为紧凑单行版，避免单条超长证据导致整条蒸发。"""
+    f = vf.finding
+    fid = f.finding_id
+    loc = _format_location(f)
+    base = f"- `[{fid}]` [{f.severity.value}] `{loc}`"
+    if len(base) > max_item_chars:
+        return None
+
+    desc = f"{_single_line(f.category)}：{_single_line(f.failure_scenario)}"
+    desc_budget = max_item_chars - len(base) - len(" — ")
+    if len(desc) > desc_budget or len(desc) > _COMPACT_DESC_MAX_CHARS:
+        cap_desc = min(desc_budget, _COMPACT_DESC_MAX_CHARS)
+        if cap_desc >= 4:
+            clipped_desc = desc[: cap_desc - 1].rstrip()
+            if clipped_desc:
+                head = f"{base} — {clipped_desc}…"
+            else:
+                return base
+        else:
+            return base
+    else:
+        head = f"{base} — {desc}"
+
+    ev = _single_line(vf.verifier_evidence)
+    ev_prefix = "（核实证据："
+    ev_suffix = "）"
+    ev_budget = max_item_chars - len(head) - len(ev_prefix) - len(ev_suffix)
+    if ev_budget <= 0:
+        return head
+    if len(ev) <= ev_budget and len(ev) <= _COMPACT_EVIDENCE_MAX_CHARS:
+        return f"{head}{ev_prefix}{ev}{ev_suffix}"
+    cap = min(ev_budget, _COMPACT_EVIDENCE_MAX_CHARS)
+    if cap >= 4:
+        clipped_ev = ev[: cap - 1].rstrip()
+        if clipped_ev:
+            return f"{head}{ev_prefix}{clipped_ev}…{ev_suffix}"
+    return head
 
 
 def _render_blocking_section_with_budget(
@@ -1244,8 +1461,8 @@ def render_findings_comment(
 
     new_non_blocking = [vf for vf in decision.non_blocking_findings if vf.finding.finding_id in postable_ids]
     suppressed_nb_count = len(decision.non_blocking_findings) - len(new_non_blocking)
-    rendered_nb_items = [(vf.finding.finding_id, _render_non_blocking_item(vf)) for vf in new_non_blocking]
-    all_new_nb_ids = frozenset(fid for fid, _ in rendered_nb_items)
+    rendered_nb_items = [(vf, _render_non_blocking_item(vf)) for vf in new_non_blocking]
+    all_new_nb_ids = frozenset(vf.finding.finding_id for vf in new_non_blocking)
 
     non_blocking_section = ""
     if decision.non_blocking_findings:
@@ -1285,6 +1502,7 @@ def render_findings_comment(
             posted_fingerprints=blocking_ids | all_new_nb_ids,
             omitted_non_blocking_fingerprints=frozenset(),
             truncated=False,
+            omitted_non_blocking=(),
         )
 
     truncation_note = "\n\n…（评论超长已截断，阻断项已优先保留）"
@@ -1300,13 +1518,26 @@ def render_findings_comment(
         if decision.non_blocking_findings:
             nb_header = "### 非阻断项（Nit / Pre-existing）\n\n"
             chosen_nb_texts: list[str] = []
-            for fid, item_text in rendered_nb_items:
+            for vf, item_text in rendered_nb_items:
+                fid = vf.finding.finding_id
                 candidate_nb = nb_header + "\n".join([*chosen_nb_texts, item_text])
                 if current_len + 2 + len(candidate_nb) <= limit_without_note:
                     chosen_nb_texts.append(item_text)
                     included_nb_ids.add(fid)
+                    continue
+                if chosen_nb_texts:
+                    existing_nb_len = len(nb_header) + len("\n".join(chosen_nb_texts))
+                    item_budget = limit_without_note - current_len - 2 - existing_nb_len - 1
                 else:
-                    break
+                    item_budget = limit_without_note - current_len - 2 - len(nb_header)
+                compact_text = _render_compact_non_blocking_item(vf, item_budget)
+                if compact_text is not None:
+                    candidate_compact = nb_header + "\n".join([*chosen_nb_texts, compact_text])
+                    if current_len + 2 + len(candidate_compact) <= limit_without_note:
+                        chosen_nb_texts.append(compact_text)
+                        included_nb_ids.add(fid)
+                        continue
+                break
             if suppressed_nb_count > 0:
                 suppressed_line = f"- 另有 {suppressed_nb_count} 项前轮已贴出的非阻断发现未重复列出。"
                 candidate_nb = nb_header + "\n".join([*chosen_nb_texts, suppressed_line])
@@ -1331,12 +1562,14 @@ def render_findings_comment(
                 parts.append(disp_block)
 
         body = "\n\n".join(parts) + truncation_note
-        omitted_nb = all_new_nb_ids - included_nb_ids
+        omitted_nb_items = tuple(vf for vf in new_non_blocking if vf.finding.finding_id not in included_nb_ids)
+        omitted_nb_ids = frozenset(vf.finding.finding_id for vf in omitted_nb_items)
         return RenderedComment(
             body=body,
             posted_fingerprints=blocking_ids | frozenset(included_nb_ids),
-            omitted_non_blocking_fingerprints=omitted_nb,
+            omitted_non_blocking_fingerprints=omitted_nb_ids,
             truncated=True,
+            omitted_non_blocking=omitted_nb_items,
         )
 
     # 阻断项展开版本身超长时，强制保证 header + 全部阻断项最小清单完整落盘，绝不静默丢弃任一阻断项
@@ -1377,4 +1610,5 @@ def render_findings_comment(
         posted_fingerprints=blocking_ids,
         omitted_non_blocking_fingerprints=all_new_nb_ids,
         truncated=True,
+        omitted_non_blocking=tuple(new_non_blocking),
     )
