@@ -13,7 +13,7 @@ use newchan_rust::theta_v0::classifier::center_scan::{
 };
 use newchan_rust::theta_v0::classifier::trend_formation::{
     judge_trend_formation, judge_trend_formation_with_roles, CenterNode, FormedTrend, PairJudgment,
-    PairState, TrendFormation, WindowOrigin,
+    PairState, RoleTableError, TrendFormation, WindowOrigin,
 };
 use newchan_rust::theta_v0::config::ThetaConfig;
 use newchan_rust::theta_v0::parser::parse_layer;
@@ -1535,7 +1535,7 @@ fn astra_b1_attested_first_pullback() {
         };
         let scan =
             scan_center_facts_with_r5(&units, center_from_window, roles.directions, roles.attested);
-        let tf = judge_trend_formation_with_roles(1, &units, roles, origin);
+        let tf = judge_trend_formation_with_roles(1, &units, roles, origin).unwrap();
         assert_matches_scan(&units, 1, &tf, &scan);
         let [pair] = tf.pairs() else {
             panic!("预期恰有首对");
@@ -1607,7 +1607,8 @@ fn astra_b1_attested_return_upgrades_nine_member_window() {
     };
     let scan =
         scan_center_facts_with_r5(&units, center_from_window, roles.directions, roles.attested);
-    let tf = judge_trend_formation_with_roles(1, &units, roles, WindowOrigin::MoveStartGuaranteed);
+    let tf = judge_trend_formation_with_roles(1, &units, roles, WindowOrigin::MoveStartGuaranteed)
+        .unwrap();
     assert_matches_scan(&units, 1, &tf, &scan);
     let [pair] = tf.pairs() else {
         panic!("升级仍应保留首对");
@@ -1655,6 +1656,123 @@ fn astra_b1_unattested_disconnected_joint_stays_pending() {
 }
 
 #[test]
+fn role_input_rejects_both_conflict_orders_and_identical_rows() {
+    let units = astra_b1_units(&UP_FORMATION[..10], Some(80));
+    let directions: Vec<_> = units.iter().map(|u| Some(u.direction)).collect();
+    let up = astra_b1_role(9, Some(10));
+    let down = R5AttestedLegs {
+        side: Direction::Down,
+        ..up
+    };
+    let judge = |directions: R5DirectionSource<'_>, attested: &[R5AttestedLegs]| {
+        judge_trend_formation_with_roles(
+            1,
+            &units,
+            RoleProvider {
+                directions,
+                attested,
+            },
+            WindowOrigin::MoveStartGuaranteed,
+        )
+    };
+    let verified = R5DirectionSource::Verified(&directions);
+    for (label, rows) in [
+        ("Down/Up", [down, up]),
+        ("Up/Down", [up, down]),
+        ("Up/Up", [up, up]),
+    ] {
+        let error = judge(verified, &rows).unwrap_err();
+        assert_eq!(error, RoleTableError::DuplicateKey { key: (6, 9) });
+        println!("B1 角色表 {label}: {error:?}");
+    }
+
+    let up_rows = [up];
+    for (label, source) in [
+        ("完整方向表", verified),
+        (
+            "方向表只覆盖 A",
+            R5DirectionSource::Verified(&directions[..5]),
+        ),
+    ] {
+        let tf = judge(source, &up_rows).unwrap();
+        let pair = &tf.pairs()[0];
+        assert_eq!(
+            pair.state(),
+            Some(PairState::TrendFormed {
+                direction: Direction::Up,
+            })
+        );
+        let formed = pair.formed().map(|f| f.direction());
+        assert_eq!(formed, Some(Direction::Up));
+        println!("B1 角色表单条 Up（{label}）: formed={formed:?}");
+    }
+    let down_rows = [down];
+    let tf = judge(verified, &down_rows).unwrap();
+    let pair = &tf.pairs()[0];
+    assert_eq!(
+        pair.right().r5_witness(),
+        R5Witness::Absent(R5Gap::FirstPullbackUnproven)
+    );
+    assert_eq!(
+        pair.state(),
+        Some(PairState::ProvisionalSeparation {
+            observed_direction: Direction::Up,
+        })
+    );
+    assert!(pair.formed().is_none());
+    println!("B1 角色表单条 Down: {:?}, formed=None", pair.state());
+}
+
+#[test]
+fn role_input_requires_ascending_keys_for_two_distinct_leaves() {
+    // B 的第一次回抽回到核心，第二次回抽才确认结算；两个角色键都被同一次扫描使用。
+    let mut units = astra_b1_units(&UP_FORMATION[..10], Some(48));
+    units.extend([
+        UnitRange {
+            start_index: 44,
+            end_index: 48,
+            ..units[9]
+        },
+        UnitRange {
+            start_index: 48,
+            end_index: 52,
+            lo: 80,
+            ..units[10]
+        },
+    ]);
+    let first = astra_b1_role(9, Some(10));
+    let second = astra_b1_role(11, Some(12));
+    let judge = |attested: &[R5AttestedLegs]| {
+        judge_trend_formation_with_roles(
+            1,
+            &units,
+            RoleProvider {
+                directions: R5DirectionSource::Native,
+                attested,
+            },
+            WindowOrigin::MoveStartGuaranteed,
+        )
+    };
+    let sorted = [first, second];
+    let reversed = [second, first];
+
+    let tf = judge(&sorted).unwrap();
+    let pair = &tf.pairs()[0];
+    let r5 = proof(pair.right());
+    assert_eq!((r5.leave_unit(), r5.pullback_unit()), (11, 12));
+    assert_eq!(pair.formed().unwrap().direction(), Direction::Up);
+    let error = judge(&reversed).unwrap_err();
+    assert_eq!(
+        error,
+        RoleTableError::OutOfOrder {
+            previous: (6, 11),
+            next: (6, 9),
+        }
+    );
+    println!("B1 两条有效角色倒序: {error:?}");
+}
+
+#[test]
 fn role_input_does_not_promote_unproven_directions_to_native() {
     let units = astra_b1_units(&UP_FORMATION[..10], Some(80));
     let mut directions: Vec<_> = units.iter().map(|u| Some(u.direction)).collect();
@@ -1667,7 +1785,8 @@ fn role_input_does_not_promote_unproven_directions_to_native() {
             attested: &[astra_b1_role(9, Some(10))],
         },
         WindowOrigin::MoveStartGuaranteed,
-    );
+    )
+    .unwrap();
     let [a] = tf.centers()[..] else {
         panic!("方向未证的 A 不应续扫到 B");
     };
@@ -1881,6 +2000,7 @@ fn check_public_surface(src: &str) -> Result<(), String> {
         ("", "fn", "judge_trend_formation"),
         ("", "fn", "judge_trend_formation_with_roles"),
         ("", "enum", "PairState"),
+        ("", "enum", "RoleTableError"),
         ("", "enum", "WindowOrigin"),
         ("PairState", "fn", "label"),
     ];
@@ -1911,7 +2031,7 @@ fn check_public_surface(src: &str) -> Result<(), String> {
         ));
     }
     private.sort_unstable();
-    if private != ["confirmed", "seed_build", "span"] {
+    if private != ["confirmed", "scan_trend_formation", "seed_build", "span"] {
         return Err(format!("私有自由函数与 DESIGN §4 不符：{private:?}"));
     }
     Ok(())
@@ -1932,7 +2052,7 @@ fn fabricated_evidence_literals_must_fail(u1: UnitSpan, u2: UnitSpan, c: CenterN
     let _ = TrendFormation { unit_level: 0, unit_count: 0, origin: WindowOrigin::MoveStartGuaranteed, chain: todo!() };
 }
 
-// 标签不能代证；两个入口都必须显式传归属，带角色入口也不接受预造扫描或裸 R5。
+// 标签不能代证；两个入口都必须显式传归属；带角色入口拒绝预造扫描、裸 R5，必须处理校验结果。
 // cargo rustc --locked --test trend_formation_1426 -- --cfg issue1426_formation_type_refusal
 #[cfg(issue1426_formation_type_refusal)]
 fn formation_types_must_not_bypass_credentials(
@@ -1947,7 +2067,8 @@ fn formation_types_must_not_bypass_credentials(
     let _: FormedTrend<'_> = pair.right().r5_witness();
     let _ = judge_trend_formation(0, units);
     let _ = judge_trend_formation_with_roles(0, units, roles);
-    let _ = judge_trend_formation_with_roles(0, units, scan, WindowOrigin::MoveStartGuaranteed);
-    let _ =
-        judge_trend_formation_with_roles(0, units, bare_proof, WindowOrigin::MoveStartGuaranteed);
+    let origin = WindowOrigin::MoveStartGuaranteed;
+    let _ = judge_trend_formation_with_roles(0, units, scan, origin);
+    let _ = judge_trend_formation_with_roles(0, units, bare_proof, origin);
+    let _: TrendFormation = judge_trend_formation_with_roles(0, units, roles, origin);
 }

@@ -44,7 +44,7 @@
 //! - **范围**：本模块只判形成侧，结果是全部节点加全部相邻对的台账，不做同向延续分组，不断言走势完成、
 //!   不设中阴态、不改 `s_session` 发布面。
 
-use std::ops::Range;
+use std::{cmp::Ordering, ops::Range};
 
 use super::super::types::{Center, Direction};
 use super::center::{center_from_segments, center_from_window, PairLeaf, UnitRange};
@@ -60,6 +60,18 @@ pub enum WindowOrigin {
     MoveStartGuaranteed,
     /// 首枢归属未核定，或输入可能从前一走势的末枢起算。
     UnverifiedOrPriorTail,
+}
+
+/// 带角色入口遇到的首处非递增键；键为 `(seed, leave)`。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RoleTableError {
+    /// 相邻键相同，无论两条记录的角色是否一致。
+    DuplicateKey { key: (usize, usize) },
+    /// 后一键小于前一键。
+    OutOfOrder {
+        previous: (usize, usize),
+        next: (usize, usize),
+    },
 }
 
 /// 起始首对的形成侧只读投影标签，不能作为凭据。
@@ -322,7 +334,7 @@ pub fn judge_trend_formation(
     units: &[UnitRange],
     origin: WindowOrigin,
 ) -> TrendFormation {
-    judge_trend_formation_with_roles(
+    scan_trend_formation(
         unit_level,
         units,
         RoleProvider {
@@ -335,7 +347,29 @@ pub fn judge_trend_formation(
 
 /// 已完成单元的构造方通过 [`RoleProvider`] 提供同一构造流的方向出处与外段角色。
 /// 输入窗归属仍须单独传入。窗口、见证、连接与 CC-020 关系均从本次共用扫描生成。
+///
+/// # 错误
+/// 角色表的 `(seed, leave)` 键必须严格递增。遇到第一对相等或倒序的相邻键时，
+/// 直接返回 [`RoleTableError`]，不运行扫描。
 pub fn judge_trend_formation_with_roles(
+    unit_level: u32,
+    units: &[UnitRange],
+    roles: RoleProvider<'_>,
+    origin: WindowOrigin,
+) -> Result<TrendFormation, RoleTableError> {
+    for pair in roles.attested.windows(2) {
+        let previous = (pair[0].seed, pair[0].leave);
+        let next = (pair[1].seed, pair[1].leave);
+        match previous.cmp(&next) {
+            Ordering::Less => {}
+            Ordering::Equal => return Err(RoleTableError::DuplicateKey { key: next }),
+            Ordering::Greater => return Err(RoleTableError::OutOfOrder { previous, next }),
+        }
+    }
+    Ok(scan_trend_formation(unit_level, units, roles, origin))
+}
+
+fn scan_trend_formation(
     unit_level: u32,
     units: &[UnitRange],
     roles: RoleProvider<'_>,
