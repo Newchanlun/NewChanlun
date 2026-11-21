@@ -287,8 +287,8 @@ fn w2_h1_roundtrip(
     });
 }
 
-/// #1419 M8D P3：原 C/D、E/F 完整锁的登记首拒代。方案 ii 第 3+4 片完成后改登记为 None
-/// （无该拒绝），helper 随即要求整条在线序列不再出现局部门拒绝。
+/// #1419 M8D P3 / #1642：在原 V 下登记真实首拒代。
+/// 有首拒时在线/冷分支仍须对拍每一代已发布前缀，不能用资源拒绝掩盖业务差异。
 #[derive(Clone, Copy)]
 struct M8dP3Lock {
     name: &'static str,
@@ -300,74 +300,58 @@ thread_local! {
 const M8D_P3_RESOURCE_REFUSAL: &str =
     "HistoricalAuditStale：认证发布资源不足；禁止无候选重试或完整审计兜底";
 
-/// #1419 M8D P3 诊断断言：读出本代真实 `audit_native_source` 到达的每个索引扩容边界
-/// (G, 实际 cap, 原 j.cap, 工作域 live)。未登记的锁只清记录。登记锁出错时，错误必须恰是
-/// 登记代、原资源首拒文本，且最后一个边界满足 G > 原 j.cap。边界记录先于父 reserve，
-/// 仅凭这份记录不能排除父账更早拒绝；首拒归属须另核父 reserve 收据。
-/// 不消费、不改写原错误，原 unwrap 照旧失败。成功代不改变原成功断言。
-fn h1_m8d_jcap_cd_g23_ef_g26_first_refusal(n: usize, handled: &Result<Value, String>) {
-    let trace = super::SOURCE_APPEND_BOUNDARY_TRACE.with(|t| std::mem::take(&mut *t.borrow_mut()));
-    let Some(lock) = M8D_P3_LOCK.with(std::cell::Cell::get) else {
-        return;
-    };
-    for [growth, cap, j_cap, live] in &trace {
-        println!(
-            "M8D_P3_BOUNDARY lock={} g={n} growth={growth} cap={cap} j_cap={j_cap} work_live={live} local_refusal={}",
-            lock.name,
-            growth > cap
-        );
-    }
-    let Err(error) = handled else {
-        if lock.first_refusal == Some(n) {
-            println!(
-                "M8D_P3_RECEIPT lock={} g={n} outcome=passed_registered_refusal_generation",
-                lock.name
-            );
-        }
-        return;
-    };
-    let last = trace.last().copied();
-    println!(
-        "M8D_P3_RECEIPT lock={} g={n} outcome=refused boundary={last:?} error={error}",
-        lock.name
-    );
-    assert_eq!(
-        lock.first_refusal,
-        Some(n),
-        "M8D P3 {}：首拒代与登记不符；原错误：{error}",
-        lock.name
-    );
-    assert_eq!(
-        error, M8D_P3_RESOURCE_REFUSAL,
-        "M8D P3 {}：首拒不是原资源首拒",
-        lock.name
-    );
-    let [growth, cap, j_cap, _] = last.unwrap_or_else(|| {
-        panic!(
-            "M8D P3 {}：第 {n} 代资源首拒前没有到达来源索引扩容边界；原错误：{error}",
-            lock.name
-        )
-    });
-    assert_eq!(cap, j_cap, "M8D P3 {}：诊断不得替换 cap", lock.name);
-    assert!(
-        growth > j_cap,
-        "M8D P3 {}：最后一个扩容边界 G={growth} 未超原 j.cap={j_cap}，首拒不在局部门；原错误：{error}",
-        lock.name
-    );
-}
-
-fn w2_h1_roundtrip_selected(envelopes: &[Value], mut check: impl FnMut(usize, &Value) -> bool) {
+fn w2_h1_roundtrip_selected(
+    envelopes: &[Value],
+    mut check: impl FnMut(usize, &Value) -> bool,
+) -> usize {
+    let lock = M8D_P3_LOCK.with(|slot| slot.take());
+    let first_refusal = lock.and_then(|lock| lock.first_refusal);
     let f = W2H1Fixture::new(envelopes.len());
     let mut online = f.open(&f.db);
     let dir = f.db.parent().unwrap();
     let mut prefixes = Vec::new();
+    let mut published = 0;
     for (offset, envelope) in envelopes.iter().enumerate() {
         let n = offset + 1;
         let before = state::full_audit_calls_for_test();
-        let handled = online.handle(envelope.clone());
-        h1_m8d_jcap_cd_g23_ef_g26_first_refusal(n, &handled);
-        assert_eq!(handled.unwrap()["kind"], "Committed", "在线第 {n} 代");
+        let (handled, allocations, refusal) = if lock.is_some_and(|lock| lock.name == "ef") {
+            issue1642_observe(&mut online, envelope, "ef", n)
+        } else {
+            (online.handle(envelope.clone()), Vec::new(), None)
+        };
+        let trace =
+            super::SOURCE_APPEND_BOUNDARY_TRACE.with(|t| std::mem::take(&mut *t.borrow_mut()));
+        if let Some(lock) = lock {
+            for [growth, cap, j_cap, live] in trace {
+                println!(
+                    "M8D_P3_BOUNDARY lock={} g={n} growth={growth} cap={cap} j_cap={j_cap} work_live={live} local_refusal={}",
+                    lock.name,
+                    growth > cap
+                );
+            }
+        }
         assert_eq!(state::full_audit_calls_for_test(), before);
+        let reply = match handled {
+            Ok(reply) => reply,
+            Err(error) => {
+                assert_eq!(first_refusal, Some(n), "在线第 {n} 代意外拒绝：{error}");
+                issue1642_check_parent_refusal(n, &error, &allocations, refusal).unwrap();
+                let previous = issue1642_persisted_receipt(&f.db, n as i64 - 1);
+                assert_eq!(previous["status"], "Committed");
+                let pending = issue1642_persisted_receipt(&f.db, n as i64);
+                assert_eq!(pending["status"], "AcceptedPending");
+                assert!(pending["batch_id"].is_null());
+                issue1642_assert_no_publication(&f.db, n as i64);
+                println!(
+                    "M8D_P3_RECEIPT lock={} g={n} outcome=parent_refused previous={previous} pending={pending}",
+                    lock.unwrap().name,
+                );
+                break;
+            }
+        };
+        assert_eq!(reply["kind"], "Committed", "在线第 {n} 代");
+        assert_ne!(first_refusal, Some(n), "登记的首拒代已成功，请更新锁");
+        published = n;
         let snapshot = w2_h1_snapshot(&online);
         let cold_point = check(n, &snapshot);
         std::fs::write(
@@ -388,6 +372,7 @@ fn w2_h1_roundtrip_selected(envelopes: &[Value], mut check: impl FnMut(usize, &V
             prefixes.push((n, db));
         }
     }
+    assert_eq!(published, first_refusal.map_or(envelopes.len(), |n| n - 1));
     assert!(!prefixes.is_empty(), "至少一个真实冷点");
     drop(online);
     for (k, db) in prefixes {
@@ -404,7 +389,7 @@ fn w2_h1_roundtrip_selected(envelopes: &[Value], mut check: impl FnMut(usize, &V
             (1..=k as i64).collect::<Vec<_>>(),
             "冷点 {k} 必须逐cut取得H1资格"
         );
-        for n in k..=envelopes.len() {
+        for n in k..=published {
             if n > k {
                 let before = state::full_audit_calls_for_test();
                 assert_eq!(
@@ -429,6 +414,7 @@ fn w2_h1_roundtrip_selected(envelopes: &[Value], mut check: impl FnMut(usize, &V
         drop(cold);
         h1_admission_assert_clean_close(&db);
     }
+    published
 }
 
 fn w2_h1_payload(object: &Value) -> Value {
@@ -786,8 +772,9 @@ fn w2_h1_cold_ef_seed_pair_qualification_and_canonical_matches_online() {
     M8D_P3_LOCK.with(|l| {
         l.set(Some(M8dP3Lock {
             name: "ef",
-            // 签署值 V 下 EF 在本代首拒（签署记录第 3、4 条），归轨道二 #1642；轨道二交付后再改 None。
-            first_refusal: Some(76),
+            // #1642：原 V 下 g76、g77 已提交，g78 来源扩容全通过后在父分域首拒。
+            // 父预算问题解决并实跑 107 代后改 None；当前锁逐位比对可发布前缀。
+            first_refusal: Some(78),
         }))
     });
     let envelopes: Vec<_> = w2_h1_ef_rows()
@@ -796,6 +783,392 @@ fn w2_h1_cold_ef_seed_pair_qualification_and_canonical_matches_online() {
         .map(|(i, r)| w2_h1_envelope(i as i64 + 1, &[*r]))
         .collect();
     let mut checks = W2H1EfChecks::default();
-    w2_h1_roundtrip_selected(&envelopes, |n, snapshot| checks.check(n, snapshot));
-    assert!(checks.center_progress && checks.pair_reborn);
+    let published = w2_h1_roundtrip_selected(&envelopes, |n, snapshot| checks.check(n, snapshot));
+    if published >= 104 {
+        assert!(checks.center_progress);
+    }
+    if published >= 105 {
+        assert!(checks.pair_reborn);
+    }
+    println!(
+        "ISSUE1642_EF_CANONICAL published={published}/{}",
+        envelopes.len()
+    );
+}
+
+/// 只观察原工作域和父账，观测不进入发布门。父拒与局部超帽必须分开判。
+fn issue1642_observe(
+    driver: &mut driver::Driver,
+    envelope: &Value,
+    label: &str,
+    n: usize,
+) -> (
+    Result<Value, String>,
+    Vec<Value>,
+    Option<super::native::ParentRefusal>,
+) {
+    super::SOURCE_APPEND_ALLOCATIONS.with(|p| *p.borrow_mut() = Some(Vec::new()));
+    super::native::PARENT_REFUSAL.with(|p| p.set(Some(None)));
+    let (result, stages, _) = state::traced(false, || driver.handle(envelope.clone()));
+    let allocations = super::SOURCE_APPEND_ALLOCATIONS.with(|p| p.borrow_mut().take().unwrap());
+    let refusal = super::native::PARENT_REFUSAL.with(|p| p.take().unwrap());
+    if !allocations.is_empty() {
+        println!(
+            "SOURCE_INDEX_GROWTH lock={label} g={n} {}",
+            json!(allocations)
+        );
+    }
+    if let Err(error) = &result {
+        println!(
+            "SOURCE_INDEX_REFUSAL lock={label} g={n} error={error} parent={} stages={}",
+            json!(refusal.into_iter().collect::<Vec<_>>()),
+            state::stage_rows(&stages),
+        );
+    }
+    (result, allocations, refusal)
+}
+
+fn issue1642_check_parent_refusal(
+    n: usize,
+    error: &str,
+    allocations: &[Value],
+    refusal: Option<super::native::ParentRefusal>,
+) -> Result<(), &'static str> {
+    if error != M8D_P3_RESOURCE_REFUSAL {
+        return Err("首拒须保留原资源错误");
+    }
+    if allocations.is_empty() {
+        return Err("首拒代必须实际越过来源索引扩容");
+    }
+    for growth in allocations {
+        if growth["appended"] != true {
+            return Err("来源索引扩容未完成");
+        }
+        if growth["cap"] != growth["j_cap"]
+            || !growth["growth"]
+                .as_u64()
+                .zip(growth["j_cap"].as_u64())
+                .is_some_and(|(growth, cap)| growth > 0 && growth <= cap)
+        {
+            return Err("来源索引扩容未通过原 j.cap");
+        }
+    }
+    let parent = refusal.ok_or("必须读到真实父账拒绝")?;
+    if parent.stage != Some("publish_borrowed")
+        || parent.generation != Some(n as i64)
+        || parent.kind != "native"
+    {
+        return Err("首拒不是本代发布阶段的 Native 申请");
+    }
+    if parent.bytes <= parent.remaining
+        || !parent
+            .live
+            .checked_add(parent.bytes)
+            .is_some_and(|next| next <= parent.total_limit)
+    {
+        return Err("首拒必须只耗尽父分域而非父总账");
+    }
+    Ok(())
+}
+
+fn issue1642_assert_no_publication(db: &Path, refused: i64) {
+    let conn = Connection::open_with_flags(db, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap();
+    let (count, max, forbidden): (i64, Option<i64>, i64) = conn
+        .query_row(
+            "SELECT count(*),max(generation),count(*) FILTER (WHERE generation >= ?1)
+             FROM s_content_publications",
+            [refused],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .unwrap();
+    assert_eq!((count, max, forbidden), (refused - 1, Some(refused - 1), 0));
+    println!("ISSUE1642_PUBLICATIONS g={refused} count={count} max={max:?} at_or_after_refusal={forbidden}");
+}
+
+fn issue1642_persisted_receipt(db: &Path, g: i64) -> Value {
+    let conn = Connection::open_with_flags(db, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap();
+    conn.query_row(
+        "SELECT m.status,m.receipt_id,p.batch_id,lower(hex(p.manifest_root)),
+                lower(hex(p.snapshot_root)),lower(hex(p.delta_root))
+         FROM s_input_messages m
+         LEFT JOIN s_content_publications p ON p.generation=m.first_published_generation
+         WHERE m.accepted_seq=?1",
+        [g - 1],
+        |row| {
+            Ok(json!({
+                "status": row.get::<_, String>(0)?,
+                "receipt_id": row.get::<_, String>(1)?,
+                "batch_id": row.get::<_, Option<String>>(2)?,
+                "manifest_root": row.get::<_, String>(3)?,
+                "snapshot_root": row.get::<_, String>(4)?,
+                "delta_root": row.get::<_, String>(5)?,
+            }))
+        },
+    )
+    .unwrap()
+}
+
+fn issue1424_assert_persisted_pair(db: &Path, g: i64) {
+    use newchan_rust::s_content as sc;
+    let mut conn =
+        Connection::open_with_flags(db, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap();
+    let tx = conn.transaction().unwrap();
+    let mut rows = tx
+        .prepare(
+            "SELECT kind,lower(hex(birth_wire_root)) FROM s_content_objects
+         WHERE kind IN ('CC-016.center','CC-020.center_pair') AND first_known_generation<=?1
+           AND (withdrawn_generation IS NULL OR withdrawn_generation>?1)",
+        )
+        .unwrap();
+    let mut source = content_store::ReadStore::new(&tx).unwrap();
+    let mut centers = std::collections::BTreeMap::new();
+    let mut pair = None;
+    for row in rows
+        .query_map([g], |r| {
+            Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
+        })
+        .unwrap()
+    {
+        let (kind, root) = row.unwrap();
+        let mut wire = Vec::new();
+        let reference =
+            sc::content_ref_of(&mut source, &format!("{}{root}", sc::ROOT_PREFIX)).unwrap();
+        sc::verify_refview(&mut source, (&reference).into(), sc::Mode::Public).unwrap();
+        sc::render_refview(&mut source, (&reference).into(), &mut wire).unwrap();
+        let wire: Value = serde_json::from_slice(&wire).unwrap();
+        assert_eq!(wire["kind"], kind);
+        let data = &wire["payload"]["data"];
+        if kind == "CC-016.center" {
+            centers.insert(data["entity_id"].as_str().unwrap().to_owned(), wire);
+        } else if data["leaf"] == "DOWN_NEWBIRTH" {
+            assert!(pair.replace(wire).is_none(), "见证恰有一对下行新生");
+        }
+    }
+    let pair = pair.expect("已发布切面必须有 DOWN_NEWBIRTH");
+    let p = &pair["payload"]["data"];
+    assert_eq!(p["status"], "EVALUATED");
+    let a = &centers[p["a_center_id"].as_str().unwrap()];
+    let b = &centers[p["b_center_id"].as_str().unwrap()];
+    assert_eq!(a["payload"]["data"]["entity_revision"], p["a_revision"]);
+    assert_eq!(b["payload"]["data"]["entity_revision"], p["b_revision"]);
+    assert_eq!(a["payload"]["data"]["settled"], true);
+    assert_eq!(b["payload"]["data"]["settled"], g == 123);
+    assert_eq!(a["payload"]["data"]["status"], "SETTLED");
+    assert_eq!(
+        b["payload"]["data"]["status"],
+        if g == 123 { "SETTLED" } else { "EXTENDING" }
+    );
+    assert_eq!(p["provisional"], g == 111);
+    println!(
+        "ISSUE1424_PUBLIC g={g} {}",
+        json!({"A":a,"B":b,"pair":pair})
+    );
+}
+
+fn issue1424_down_123() -> Vec<Value> {
+    // #1426 issuecomment-7023365989 的 #1424 下行原始见证，逐根原坐标追加。
+    let rows: Vec<W2H1Row> = serde_json::from_str(include_str!(
+        "../../../../tests/fixtures/w2_h1_1424_down_newbirth_123.json"
+    ))
+    .unwrap();
+    assert_eq!(rows.len(), 123);
+    rows.iter()
+        .enumerate()
+        .map(|(i, row)| {
+            assert_eq!(row.1, i as i64);
+            assert_eq!(row.6, 1);
+            w2_h1_envelope(i as i64 + 1, &[*row])
+        })
+        .collect()
+}
+
+#[test]
+fn issue1642_issue1424_down_newbirth_signed_budget() {
+    // #1642：原 g72 局部索引首拒消失；g75 写入越过来源扩容后在父分域首拒。
+    // 解开此处时仍须验证真实 cut-111/cut-123，不以几何内核成功代替发布。
+    const FIRST_REFUSAL: Option<usize> = Some(75);
+    let envelopes = issue1424_down_123();
+    let fixture = W2H1Fixture::new(envelopes.len());
+    let mut writer = fixture.open(&fixture.db);
+    let mut published = 0;
+    for (i, envelope) in envelopes.iter().enumerate() {
+        let n = i + 1;
+        let before = state::full_audit_calls_for_test();
+        let (result, allocations, refusal) =
+            issue1642_observe(&mut writer, envelope, "down-newbirth", n);
+        assert_eq!(state::full_audit_calls_for_test(), before);
+        let persisted = issue1642_persisted_receipt(&fixture.db, n as i64);
+        println!("ISSUE1424_RECEIPT g={n} {persisted}");
+        let reply = match result {
+            Ok(reply) => reply,
+            Err(error) => {
+                assert_eq!(FIRST_REFUSAL, Some(n), "下行第 {n} 代意外拒绝：{error}");
+                issue1642_check_parent_refusal(n, &error, &allocations, refusal).unwrap();
+                assert_eq!(persisted["status"], "AcceptedPending");
+                assert!(persisted["batch_id"].is_null());
+                issue1642_assert_no_publication(&fixture.db, n as i64);
+                break;
+            }
+        };
+        assert_ne!(FIRST_REFUSAL, Some(n), "登记的下行首拒代已成功，请更新锁");
+        assert_eq!(reply["kind"], "Committed");
+        assert_eq!(reply["publication"]["structure_cut"], format!("cut-{n}"));
+        assert_eq!(reply["publication"]["input_frontier"], i.to_string());
+        assert_eq!(persisted["status"], "Committed");
+        assert_eq!(persisted["receipt_id"], reply["receipt_id"]);
+        assert_eq!(
+            persisted["batch_id"],
+            reply["publication"]["index_frontier"]
+        );
+        published = n;
+        if matches!(n, 111 | 123) {
+            issue1424_assert_persisted_pair(&fixture.db, n as i64);
+        }
+    }
+    assert_eq!(published, FIRST_REFUSAL.map_or(123, |n| n - 1));
+}
+
+#[test]
+fn issue1642_signed_writer_still_refuses_source_growth_one_byte_over_local_cap() {
+    use super::{SOURCE_APPEND_CAP_AT_GROWTH, SOURCE_APPEND_CAP_RECEIPT};
+
+    let envelopes = issue1424_down_123();
+    let fixture = W2H1Fixture::new(8);
+    let mut writer = fixture.open(&fixture.db);
+    assert_eq!(
+        writer.handle(envelopes[0].clone()).unwrap()["kind"],
+        "Committed"
+    );
+    for (i, envelope) in envelopes[..8].iter().enumerate().skip(1) {
+        SOURCE_APPEND_CAP_AT_GROWTH.with(|p| p.set(Some(1)));
+        let before = state::full_audit_calls_for_test();
+        let (result, allocations, refusal) =
+            issue1642_observe(&mut writer, envelope, "small-cap", i + 1);
+        SOURCE_APPEND_CAP_AT_GROWTH.with(|p| p.set(None));
+        assert_eq!(state::full_audit_calls_for_test(), before);
+        if let Some((growth, original_cap)) = SOURCE_APPEND_CAP_RECEIPT.with(|p| p.take()) {
+            assert!(original_cap >= growth);
+            assert!(refusal.is_none(), "必须是局部拒绝，不是父账拒绝");
+            assert_eq!(result.unwrap_err(), M8D_P3_RESOURCE_REFUSAL);
+            let rejected = allocations.last().unwrap();
+            assert_eq!(rejected["growth"], growth);
+            assert_eq!(rejected["cap"], growth - 1);
+            assert!(rejected["parent_remaining"].as_u64().unwrap() >= growth as u64);
+            assert_eq!(rejected["appended"], false);
+            assert_eq!(rejected["allocated"], 0);
+            let pending = issue1642_persisted_receipt(&fixture.db, i as i64 + 1);
+            assert_eq!(pending["status"], "AcceptedPending");
+            assert!(pending["batch_id"].is_null());
+            let prior = issue1642_persisted_receipt(&fixture.db, i as i64);
+            assert_eq!(prior["status"], "Committed");
+            println!(
+                "ISSUE1642_SMALL_CAP g={} pending={pending} prior={prior}",
+                i + 1
+            );
+            return;
+        }
+        assert_eq!(result.unwrap()["kind"], "Committed");
+    }
+    panic!("小帽负控必须触及真实来源索引扩容");
+}
+
+#[test]
+fn issue1642_parent_refusal_predicate_replays_ef_g78_and_rejects_false_attribution() {
+    // R1 EF g78 的真实扩容和父账日志。阶段为登记预期；R1 未在拒绝瞬间采集阶段。
+    let mut allocations = [
+        284_293_110,
+        281_040_649,
+        277_712_422,
+        274_346_244,
+        270_845_421,
+        267_364_153,
+        264_011_384,
+    ]
+    .map(|remaining| {
+        json!({
+            "allocated": 1_843_216, "appended": true, "cap": 39_110_026, "growth": 3_229_200,
+            "j_cap": 39_110_026, "parent_remaining": remaining, "released": 921_616,
+        })
+    });
+    let mut refusal = super::native::ParentRefusal {
+        bytes: 5280,
+        remaining: 3143,
+        live: 1_121_361_722,
+        peak: 1_123_465_803,
+        total_limit: 1_227_418_628,
+        kind: "native",
+        stage: Some("publish_borrowed"),
+        generation: Some(78),
+    };
+    let check = |growth: &[Value], parent| {
+        issue1642_check_parent_refusal(78, M8D_P3_RESOURCE_REFUSAL, growth, Some(parent))
+    };
+    assert_eq!(check(&allocations, refusal), Ok(()));
+    assert_eq!(check(&[], refusal), Err("首拒代必须实际越过来源索引扩容"));
+    assert_eq!(
+        check(
+            &allocations,
+            super::native::ParentRefusal {
+                total_limit: refusal.live,
+                ..refusal
+            }
+        ),
+        Err("首拒必须只耗尽父分域而非父总账")
+    );
+    refusal.stage = Some("prepare_source_audit");
+    assert_eq!(
+        check(&allocations, refusal),
+        Err("首拒不是本代发布阶段的 Native 申请")
+    );
+    let last = allocations.last_mut().unwrap();
+    last["allocated"] = json!(0);
+    last["appended"] = json!(false);
+    assert_eq!(check(&allocations, refusal), Err("来源索引扩容未完成"));
+}
+
+#[test]
+fn issue1642_parent_refusal_predicate_rejects_real_driver_source_index_refusal() {
+    let rows = w2_h1_ef_rows();
+    let fixture = W2H1Fixture::new(rows.len());
+    let mut writer = fixture.open(&fixture.db);
+    assert_eq!(
+        writer.handle(w2_h1_envelope(1, &rows[..1])).unwrap()["kind"],
+        "Committed"
+    );
+    let target_growth_bytes = 16_200;
+    super::SOURCE_APPEND_PARENT_SHORT.with(|target| target.set(Some(target_growth_bytes)));
+    let before = state::full_audit_calls_for_test();
+    let (result, allocations, refusal) =
+        issue1642_observe(&mut writer, &w2_h1_envelope(2, &rows[1..2]), "early-ef", 2);
+    assert_eq!(
+        super::SOURCE_APPEND_PARENT_SHORT.with(|target| target.take()),
+        None
+    );
+    assert_eq!(state::full_audit_calls_for_test(), before);
+    let error = result.unwrap_err();
+    assert_eq!(error, M8D_P3_RESOURCE_REFUSAL);
+    let parent = refusal.unwrap();
+    assert_eq!(parent.stage, Some("prepare_source_audit"));
+    assert_eq!(parent.generation, Some(2));
+    assert_eq!(parent.kind, "native");
+    assert_eq!(parent.bytes, target_growth_bytes);
+    assert_eq!(parent.remaining, parent.bytes - 1);
+    let rejected = allocations.last().unwrap();
+    assert_eq!(rejected["growth"], parent.bytes);
+    assert_eq!(rejected["parent_remaining"], parent.remaining);
+    assert_eq!(rejected["cap"], rejected["j_cap"]);
+    assert_eq!(rejected["appended"], false);
+    assert_eq!(rejected["allocated"], 0);
+    assert_eq!(
+        issue1642_check_parent_refusal(2, &error, &allocations, refusal),
+        Err("来源索引扩容未完成")
+    );
+    assert_eq!(
+        issue1642_persisted_receipt(&fixture.db, 1)["status"],
+        "Committed"
+    );
+    let pending = issue1642_persisted_receipt(&fixture.db, 2);
+    assert_eq!(pending["status"], "AcceptedPending");
+    assert!(pending["batch_id"].is_null());
+    issue1642_assert_no_publication(&fixture.db, 2);
 }

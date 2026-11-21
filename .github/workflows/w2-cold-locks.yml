@@ -54,27 +54,24 @@ jobs:
           done
           exit $fail
 
-      # 签署记录第 3、4 条：EF 在 V 下于第 76 代资源首拒，归轨道二 #1642，锁登记 first_refusal = Some(76)。
-      #   本步要求 EF 恰在登记代、以原资源首拒文本失败；前 75 代任一断言失败、首拒代变化或首拒原因变化都让本步变红。
-      #   轨道二交付、EF 改登记 None 后，本步并回上一步。
-      - name: EF registered budget refusal at g76 (#1642)
+      # #1642：EF 的签署预算与业务断言不变。Rust 锁登记首拒并核实拒绝归属、核对全部已发布前缀；
+      # 若首拒消失，必须更新登记并把完整 107 代对拍跑绿。
+      - name: EF signed-budget canonical lock (#1642)
         if: ${{ !cancelled() }}
         run: |
           set +e
           name="${LOCK_PREFIX}w2_h1_cold_ef_seed_pair_qualification_and_canonical_matches_online"
           log="$RUNNER_TEMP/ef.log"
           start=$(date +%s)
-          cargo test $CARGO_ARGS -- --exact "$name" --test-threads 1 --nocapture > "$log" 2>&1
+          read -r -a cargo_args <<<"$CARGO_ARGS"
+          cargo test "${cargo_args[@]}" -- --exact "$name" --test-threads 1 --nocapture > "$log" 2>&1
           rc=$?
-          grep -E 'M8D_P3_RECEIPT|panicked|^test |test result' "$log" | tail -20
+          grep -E 'M8D_P3_RECEIPT|ISSUE1642_EF_CANONICAL|panicked|^test |test result' "$log" | tail -20
           echo "lock=ef rc=$rc secs=$(( $(date +%s) - start ))"
-          refused=$(grep -c 'M8D_P3_RECEIPT lock=ef .*outcome=refused' "$log")
-          panics=$(grep -c "panicked at" "$log")
-          if [ "$rc" -ne 0 ] && [ "$refused" -eq 1 ] && [ "$panics" -eq 1 ] \
-            && grep -q 'M8D_P3_RECEIPT lock=ef g=76 outcome=refused' "$log" \
-            && grep -q 'called `Result::unwrap()` on an `Err` value: "HistoricalAuditStale：认证发布资源不足；禁止无候选重试或完整审计兜底"' "$log"; then
-            echo "::warning title=EF known budget refusal (#1642)::EF refused at g76 under V exactly as registered"
-          else
-            echo "::error title=EF differs from its registration::rc=$rc refused=$refused panics=$panics"
+          if [ "$rc" -ne 0 ] || ! grep -q "test result: ok. 1 passed" "$log"; then
+            echo "::error title=EF signed-budget lock failed::rc=$rc"
             exit 1
+          fi
+          if grep -q 'M8D_P3_RECEIPT lock=ef .*outcome=parent_refused' "$log"; then
+            echo "::warning title=EF parent-budget refusal (#1642)::Canonical equality covers the committed prefix; full 107-generation publication remains open"
           fi

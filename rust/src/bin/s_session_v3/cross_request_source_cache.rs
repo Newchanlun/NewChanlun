@@ -185,9 +185,9 @@ pub(super) struct SourceCost {
 }
 #[derive(Default, Clone, Debug, Serialize)]
 pub(super) struct RetainedCapacity {
-    capture_owner_bytes: usize,
     node_body_vec_capacity_bytes: usize,
     native_index_capacity_payload_bytes: usize,
+    index_shard_header_bytes: usize,
     exact_rows_capacity_payload_bytes: usize,
     proof_vec_capacity_payload_bytes: usize,
     key_string_capacity_bytes: usize,
@@ -399,9 +399,9 @@ impl Pool {
             ..Default::default()
         };
         let mut capacity = RetainedCapacity {
-            capture_owner_bytes: std::mem::size_of::<sc::AuditCapture>(),
             node_body_vec_capacity_bytes: retained.body_capacity,
             native_index_capacity_payload_bytes: retained.index_payload,
+            index_shard_header_bytes: retained.index_shard_header_bytes,
             exact_rows_capacity_payload_bytes: mul(
                 binding.rows.capacity(),
                 std::mem::size_of::<ExactRows>(),
@@ -506,6 +506,7 @@ impl Pool {
         capacity.total_payload_bytes = [
             capacity.node_body_vec_capacity_bytes,
             capacity.native_index_capacity_payload_bytes,
+            capacity.index_shard_header_bytes,
             capacity.exact_rows_capacity_payload_bytes,
             capacity.proof_vec_capacity_payload_bytes,
             capacity.key_string_capacity_bytes,
@@ -768,10 +769,16 @@ impl Keeper {
         allow(dead_code, reason = "#1608：s_incremental 的非测试构建不触达此项")
     )]
     pub(super) fn report(&self) -> serde_json::Value {
+        let capacity = self.pool.as_ref().map(|p| {
+            let mut breakdown = serde_json::json!(&p.capacity);
+            breakdown["capture_owner_bytes"] =
+                serde_json::json!(std::mem::size_of::<sc::AuditCapture>());
+            breakdown
+        });
         serde_json::json!({"cap":self.cap,"hits":self.hits,"cold":self.cold,"rejected":self.rejected,"last_required":self.last_required,
             "retained_source_cost":self.pool.as_ref().map_or(0,|p|p.source_cost.total),
             "source_cost_breakdown":self.pool.as_ref().map(|p|&p.source_cost),
-            "retained_capacity_breakdown":self.pool.as_ref().map(|p|&p.capacity),
+            "retained_capacity_breakdown":capacity,
             "retained_capture":self.pool.as_ref().map(|p|p.originals.retention()),
             "counts_subset_selection":self.pool.as_ref().and_then(|p|p.subset_selection.as_ref()),
             "retained_counts_proofs":self.pool.as_ref().map_or(0,|p|p.proofs.len()),
@@ -1837,6 +1844,39 @@ mod tests {
             cold["native_codec_root_certificates"]["template_roots"]
         );
         eprintln!("codec_root_success handler_growth warm={warm} cold={cold}");
+    }
+
+    #[test]
+    fn cross_request_source_cache_two_pool_capacity_includes_both_index_headers() {
+        let (mut f, mut keeper) = seeded();
+        let measure = |pool: &Pool| {
+            let c = &pool.capacity;
+            let headers = pool
+                .originals
+                .native_retention_numbers()
+                .unwrap()
+                .index_shard_header_bytes;
+            assert_eq!(c.index_shard_header_bytes, headers);
+            let without_headers = std::mem::size_of::<Pool>()
+                + c.node_body_vec_capacity_bytes
+                + c.native_index_capacity_payload_bytes
+                + c.exact_rows_capacity_payload_bytes
+                + c.proof_vec_capacity_payload_bytes
+                + c.key_string_capacity_bytes
+                + c.codec_root_set_capacity_payload_bytes
+                + c.counts_dependency_string_capacity_bytes;
+            (without_headers, headers)
+        };
+        let (prior_payload, prior_headers) = measure(keeper.pool.as_ref().unwrap());
+        audit(&mut f, &mut keeper).unwrap();
+        let (next_payload, next_headers) = measure(keeper.pool.as_ref().unwrap());
+        let peak = keeper.peak_two_pool_capacity_payload;
+        let without_headers = prior_payload + next_payload;
+        assert_eq!(peak, without_headers + prior_headers + next_headers);
+        if cfg!(all(target_os = "linux", target_pointer_width = "64")) {
+            assert_eq!(peak - without_headers, 40_960);
+        }
+        eprintln!("ISSUE1642_TWO_POOL peak={peak} without_headers={without_headers} prior_header={prior_headers} next_header={next_headers}");
     }
 
     #[test]

@@ -393,6 +393,25 @@ fn census_kind(kind: Option<ScratchCharge>) -> &'static str {
         Some(ScratchCharge::Native) => "native",
     }
 }
+#[cfg(test)]
+thread_local! {
+    /// #1642：只记录启用观测的测试中的真实父账拒绝，包含当时的活动分域和总账边界。
+    pub(in super::super) static PARENT_REFUSAL: std::cell::Cell<Option<Option<ParentRefusal>>> =
+        const { std::cell::Cell::new(None) };
+}
+#[cfg(test)]
+#[derive(Clone, Copy, serde::Serialize)]
+pub(in super::super) struct ParentRefusal {
+    pub(crate) bytes: usize,
+    pub(crate) remaining: usize,
+    pub(crate) live: usize,
+    pub(crate) peak: usize,
+    pub(crate) total_limit: usize,
+    pub(crate) kind: &'static str,
+    pub(crate) stage: Option<&'static str>,
+    pub(crate) generation: Option<i64>,
+}
+
 pub(crate) struct Permit {
     budget: Budget,
     bytes: usize,
@@ -1597,6 +1616,25 @@ impl Ledger {
         if d.state & BROKEN != 0 || expected.is_some_and(|e| e != u64::from(d.serial)) {
             return Err(ScratchFailure::Ledger);
         }
+        #[cfg(test)]
+        PARENT_REFUSAL.with(|trace| {
+            if matches!(trace.get(), Some(None)) {
+                let live = self.live.load(Ordering::Acquire);
+                if bytes > d.remaining || live.saturating_add(bytes) > d.total_limit {
+                    let stage = super::super::state::active_stage();
+                    trace.set(Some(Some(ParentRefusal {
+                        bytes,
+                        remaining: d.remaining,
+                        live,
+                        peak: self.peak.load(Ordering::Acquire),
+                        total_limit: d.total_limit,
+                        kind: census_kind(kind),
+                        stage: stage.map(|(name, _)| name),
+                        generation: stage.map(|(_, generation)| generation),
+                    })));
+                }
+            }
+        });
         let next = d
             .remaining
             .checked_sub(bytes)

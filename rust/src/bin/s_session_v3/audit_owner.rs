@@ -3509,6 +3509,7 @@ impl CompleteCandidate {
             r.body_capacity,
             r.index_payload.saturating_mul(2),
             r.index_control_bytes,
+            r.index_shard_header_bytes,
             sum([r.public_capacity, r.template_capacity])
                 .saturating_mul(66)
                 .saturating_add(32),
@@ -3557,6 +3558,7 @@ impl CompleteCandidate {
                 retained.body_capacity,
                 retained.index_payload.saturating_mul(2),
                 retained.index_control_bytes,
+                retained.index_shard_header_bytes,
                 // 包含散列表控制区保守余量，不从原97字节证书扣费。
                 sum([retained.public_capacity, retained.template_capacity])
                     .saturating_mul(2 * 33)
@@ -4204,6 +4206,7 @@ impl CompleteCandidate {
             retained.body_capacity,
             retained.index_payload.saturating_mul(2),
             retained.index_control_bytes,
+            retained.index_shard_header_bytes,
             sum([retained.public_capacity, retained.template_capacity])
                 .saturating_mul(66)
                 .saturating_add(32),
@@ -5470,6 +5473,27 @@ fn p1_alpha_stray_on_keeper_ledger_survives_discard_retry_and_is_rejected() {
     );
 }
 
+/// 用夹具的各片条目数而不是实际容量/许可复算冷表，包含小片 4/8 桶档及非空表的控制组。
+#[cfg(all(test, feature = "s_capture_native_testonly"))]
+pub(super) fn cold_index_slots_for_test(
+    digest_shards: &[(newchan_rust::s_content::NodeDigest, usize)],
+    shard_of: impl Fn(&(newchan_rust::s_content::NodeDigest, usize)) -> usize,
+) -> usize {
+    let mut counts = [0usize; newchan_rust::s_content::AuditCapture::NATIVE_INDEX_SHARDS];
+    for entry in digest_shards {
+        counts[shard_of(entry)] += 1;
+    }
+    counts
+        .into_iter()
+        .map(|n| match n {
+            0 => 0,
+            1..=3 => 4 + 16,
+            4..=7 => 8 + 16,
+            _ => (n * 8 / 7).next_power_of_two() + 16,
+        })
+        .sum()
+}
+
 #[cfg(all(test, feature = "s_capture_native_testonly"))]
 #[test]
 fn r14_source_keeper_seal_and_next_request_share_explicit_parent() {
@@ -5639,6 +5663,9 @@ fn r14_source_keeper_seal_and_next_request_share_explicit_parent() {
                 );
                 let residual = residual.unwrap();
                 let after_seal = parent.live();
+                if cfg!(all(target_os = "linux", target_pointer_width = "64")) {
+                    assert_eq!(after_seal - residual, 1_595_269, "R1 封存父账扣款不得改变");
+                }
                 let seal_census = parent.census_take();
                 assert!(
                     after_seal <= after_drop.unwrap(),
@@ -5654,7 +5681,7 @@ fn r14_source_keeper_seal_and_next_request_share_explicit_parent() {
                 let claims = pool.originals.native_source_claim_totals().unwrap();
                 let claim_amounts = pool.originals.native_source_claim_amounts();
                 assert_eq!(claim_amounts.len(), nodes);
-                let (index_bytes, slot_now, slot_before_p2a) =
+                let (index_bytes, slot_now, slot_before_p2a, shard_headers) =
                     pool.originals.native_index_layout_for_testonly().unwrap();
                 let digest_shards = pool
                     .originals
@@ -5763,45 +5790,41 @@ fn r14_source_keeper_seal_and_next_request_share_explicit_parent() {
                     "规则串持有者恰为 Binding meta 与 Proof Key.rule 各一份，各按串长计许可"
                 );
                 let rule_growth = rule_holders.len() * (w_rule.len() - R14_FROZEN_W_RULE.len());
-                // #1855：native capture 索引拆成 16 个分片（9d6d81319ca）并错开扩容（171e174d3ca）后，同一夹具
-                // 1328 节点的索引槽从单表的 2064 变为 2496。B_W 按 2064 槽冻结；照 rule_growth 的增量写法，
-                // 多出的 432 槽按 P2-A 前槽宽计入 P2-A 前封存，B_W 不改。
-                const R14_SHARDED_INDEX_SLOTS: usize = 2496;
-                let index_growth = (R14_SHARDED_INDEX_SLOTS - R14_INDEX_SLOTS) * slot_before_p2a;
-                let sealed_before_p2a =
-                    sealed_before_p2a_for(current_len) + schema_growth + rule_growth + index_growth;
+                // #1642：表头与许可槽固定在同一堆块；此项不随 P2-A 表项宽变化。
+                let expected_headers = newchan_rust::s_content::AuditCapture::NATIVE_INDEX_SHARDS
+                    * (std::mem::size_of::<std::collections::HashMap<(), ()>>()
+                        + std::mem::size_of::<Option<newchan_rust::s_content::capture_allocation::scratch::NativeReservation>>());
+                assert_eq!(shard_headers, expected_headers, "固定表头堆块");
+                let capacity = &report["retained_capacity_breakdown"];
+                assert_eq!(capacity["index_shard_header_bytes"], shard_headers);
+                if cfg!(all(target_os = "linux", target_pointer_width = "64")) {
+                    assert_eq!(shard_headers, 20_480);
+                    assert_eq!(capacity["total_payload_bytes"], 587_493 + 20_480);
+                }
+                eprintln!("R14_KEEPER_CAPACITY {capacity}");
                 assert_eq!(nodes, R14_NODES, "独立交叉核：来源节点数");
                 // #1855（主控 6738968739 Q1，沿 6283672661 的独立交叉核）：不读索引容量与许可，只用各片条目数
                 // 和 hashbrown `capacity_to_buckets`（<4 条 4 桶，<8 条 8 桶，否则 ⌊n·8/7⌋ 取 2 的幂）加每表
                 // 16 字节控制组推出槽数；空片不建表。负控：旧选择器 `digest[0] % 16` 得 2304，单表得 2064。
                 assert_eq!(digest_shards.len(), R14_NODES, "索引条目数等于来源节点数");
-                let table_slots = |n: usize| match n {
-                    0 => 0,
-                    1..=3 => 4 + 16,
-                    4..=7 => 8 + 16,
-                    _ => (n * 8 / 7).next_power_of_two() + 16,
-                };
                 let derived_slots =
                     |shard_of: &dyn Fn(&(newchan_rust::s_content::NodeDigest, usize)) -> usize| {
-                        let mut counts =
-                            [0usize; newchan_rust::s_content::AuditCapture::NATIVE_INDEX_SHARDS];
-                        for entry in &digest_shards {
-                            counts[shard_of(entry)] += 1;
-                        }
-                        counts.into_iter().map(table_slots).sum::<usize>()
+                        cold_index_slots_for_test(&digest_shards, shard_of)
                     };
+                // Boat Linux：1328 个实际摘要、256 片；旧 16 片为 2496 槽。
+                const R14_SHARDED_INDEX_SLOTS: usize = 6156;
+                let sharded_slots = derived_slots(&|(_, shard)| *shard);
+                assert_eq!(sharded_slots, R14_SHARDED_INDEX_SLOTS, "W 夹具独立分片槽数");
+                let index_growth = (sharded_slots - R14_INDEX_SLOTS) * slot_before_p2a;
+                let sealed_before_p2a = sealed_before_p2a_for(current_len)
+                    + schema_growth
+                    + rule_growth
+                    + index_growth
+                    + expected_headers;
                 assert_eq!(
-                    derived_slots(&|(_, shard)| *shard),
-                    R14_SHARDED_INDEX_SLOTS,
-                    "由分片条目数推出的槽数"
-                );
-                assert_eq!(
-                    derived_slots(&|(digest, _)| {
-                        usize::from(digest[0])
-                            % newchan_rust::s_content::AuditCapture::NATIVE_INDEX_SHARDS
-                    }),
+                    derived_slots(&|(digest, _)| usize::from(digest[0]) % 16),
                     2304,
-                    "负控：旧选择器"
+                    "负控：原 16 片非几何选择器"
                 );
                 assert_eq!(derived_slots(&|_| 0), R14_INDEX_SLOTS, "负控：单表");
                 assert_eq!(index_bytes % slot_now, 0, "索引许可=槽数×现槽宽");
@@ -5810,17 +5833,17 @@ fn r14_source_keeper_seal_and_next_request_share_explicit_parent() {
                 eprintln!(
                     "R14_P2B_DROP {}",
                     json!({"sealed_before_p2a":sealed_before_p2a,"sealed":sealed,
-                        "contract_len":current_len,"schema_growth":schema_growth,"rule_growth":rule_growth,"index_growth":index_growth,"claims_bytes":claims.1,"index_bytes":index_bytes,"index_slots":index_slots,
+                        "contract_len":current_len,"schema_growth":schema_growth,"rule_growth":rule_growth,"index_growth":index_growth,"shard_headers":shard_headers,"claims_bytes":claims.1,"index_bytes":index_bytes,"index_slots":index_slots,
                         "slot_now":slot_now,"slot_before_p2a":slot_before_p2a,"layout_drop":layout_drop})
                 );
                 assert_eq!(claims.1, expected_claims(current_len), "①来源合同额之和");
                 assert_eq!(
-                    index_slots, R14_SHARDED_INDEX_SLOTS,
-                    "W 夹具索引槽数（16 分片）"
+                    index_slots, sharded_slots,
+                    "W 夹具索引槽数（由各片条目数独立推出）"
                 );
                 assert_eq!(
                     layout_drop,
-                    R14_SHARDED_INDEX_SLOTS * 16,
+                    sharded_slots * 16,
                     "②索引槽宽连带降幅（每槽窄16B）"
                 );
                 assert_eq!(
@@ -8122,6 +8145,11 @@ thread_local! {
     /// (G, 本次实际 cap, 原 j.cap, 工作域 live)；只读记录，不改变门判。
     pub(super) static SOURCE_APPEND_BOUNDARY_TRACE: std::cell::RefCell<Vec<[usize; 4]>> =
         const { std::cell::RefCell::new(Vec::new()) };
+    /// #1642 负控：仅在首笔申请量匹配的真实扩容前暂占父分域（只消耗一次）。
+    static SOURCE_APPEND_PARENT_SHORT: Cell<Option<usize>> = const { Cell::new(None) };
+    /// #1642：只在选定长夹具记录真正的分配窗口，不参与资源准入。
+    static SOURCE_APPEND_ALLOCATIONS: std::cell::RefCell<Option<Vec<Value>>> =
+        const { std::cell::RefCell::new(None) };
 }
 
 /// #1419 M8D P2：真实来源追加的局部 cap；未布置、未到扩容边界或本节点已驻留（同摘要

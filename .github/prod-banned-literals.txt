@@ -163,6 +163,7 @@ QWatchInvalid：QContentInvalid：QSnapshotInvalid：
 Q增量账与全量oracle
 Q缓存分项与全量oracle
 R material已退款，未迁移capture/scan费用仍随父Budget存活
+R1 封存父账扣款不得改变
 R14仅增加已批准的记录溯源列
 R2：Ledger 类 scratch 错误与桥同字也须拒绝
 R2：闭包 Ok 但期间有 Ledger → 工作账损坏
@@ -285,7 +286,8 @@ V5要求新的Q3_REAL_EXPORT路径
 Value证书不得复用JsonInner判定
 VersionMismatch：s-session/3 写入口必须显式使用 --protocol-revision s-session/3
 W cut 不得发旧串域
-W 夹具索引槽数（16 分片）
+W 夹具独立分片槽数
+W 夹具索引槽数（由各片条目数独立推出）
 W 对象带请求
 W 未定原件必须是 typed internal record
 W 规则不启用旧业务配方
@@ -722,7 +724,6 @@ writer/recover闭合后无SHM
 冷核得到的新证明须进入最终审计前缀
 冷根审计失败清除保留后根上仍残留4096B许可
 冷清理不得把失败 owner 洗回有效
-冷索引许可须按各片真实桶数取 hash_room 档
 冷臂须走完整路径
 冷读不得命中句柄
 冷读必须真的展开
@@ -873,7 +874,6 @@ writer/recover闭合后无SHM
 同输入暖续跑不复制旧change
 后来wire补子不得变成前置核验依据
 后来的Ended不得签早先context
-后片拒绝前不开始分配任何片
 后续代重建并保留候选
 后续根摘要损坏必须拒绝
 后续根缺子节点必须拒绝
@@ -893,6 +893,8 @@ writer/recover闭合后无SHM
 回退重走仍复用同一原件
 固定写父账重复附接
 固定槽每入口只列一次
+固定表头堆块
+固定表头堆块及各个非空表的桶各计一次
 固定输出复用相同exact判据
 在途 attempt 的冷审计通过
 坏 JSON 必须在建库前拒绝
@@ -1512,7 +1514,6 @@ writer/recover闭合后无SHM
 生成态 merged_index 仍是数值（禁粗暴复用为 wire）
 生成态数值叶数组必须随源修订改根
 生成态是规范 JSON
-由分片条目数推出的槽数
 登记新源版本
 登记真实当前 source
 监督器仍拥有锁
@@ -1687,6 +1688,7 @@ writer/recover闭合后无SHM
 见证重审位置不匹配
 见证重审未完整消费
 观察渲染是合法 JSON
+观察窗口超过一个倍程，每片至少扩容一次
 观察闭包可核
 规则串持有者恰为 Binding meta 与 Proof Key.rule 各一份，各按串长计许可
 规范 JSON 是 UTF-8
@@ -1737,7 +1739,7 @@ writer/recover闭合后无SHM
 负控缺待删端点
 负控缺端点原件
 负控许可析构后父账回到残余
-负控：旧选择器
+负控：原 16 片非几何选择器
 资格所记冻结域须随合法重绑前进
 资源拒绝到跨层返回之间不得分配错误String或JSON
 资源档须为普通文件
