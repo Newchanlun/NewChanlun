@@ -39,9 +39,12 @@ _STYLE_FORMAT_RE = re.compile(
     re.IGNORECASE,
 )
 _LEADING_LIST_PREFIX_RE = re.compile(r"^(?:[-*•]\s+|\d+[.)]\s+)")
+_LEADING_BOLD_PREFIX_RE = re.compile(r"^(?:\*\*|__)\s*")
 _LEADING_BRACKET_TAG_RE = re.compile(
-    r"^(?:(?:\*\*|__)\s*)?[\[\【]([^\]\】]{1,64})[\]\】](?!\()(?:\s*(?:\*\*|__))?\s*"
+    r"^(?:(?:\*\*|__)\s*)?(?P<open>[\[\【])(?P<tag>[^\]\】\n]{1,64})(?P<close>[\]\】])(?:\s*(?:\*\*|__))?\s*"
 )
+_MD_LINK_REF_DEF_RE = re.compile(r"^[ ]{0,3}\[([^\[\]\n]{1,999})\]:", re.MULTILINE)
+_IMMEDIATE_REF_BRACKET_RE = re.compile(r"^\[([^\[\]\n]{1,999})\]")
 _BRACKET_LINE_COORD_RE = re.compile(r":\d")
 _BRACKET_FILE_EXT_RE = re.compile(r"\.[A-Za-z0-9]{1,8}(?![A-Za-z0-9])")
 _KNOWN_ASCII_SEVERITY_WORD_RE = re.compile(
@@ -635,26 +638,45 @@ def _git_diff_added_ranges(
     if entry is None:
         return ()
     status, old_path = entry
-    if status == "D" or status == "R100":
+    if status == "D":
         return ()
 
-    diff_cmd = [
-        "git",
-        "-C",
-        str(repo_root),
-        "-c",
-        "diff.interHunkContext=0",
-        "diff",
-        "-U0",
-        "--inter-hunk-context=0",
-        "--no-ext-diff",
-        "--no-textconv",
-        "--no-color",
-    ]
-    if status.startswith("R") and old_path:
-        diff_cmd.extend([f"{base_sha}:{old_path}", f"{head_sha}:{norm_file}"])
+    if status.startswith("R") and old_path is not None:
+        diff_cmd = [
+            "git",
+            "-C",
+            str(repo_root),
+            "-c",
+            "diff.interHunkContext=0",
+            "diff",
+            "-U0",
+            "--inter-hunk-context=0",
+            "--no-ext-diff",
+            "--no-textconv",
+            "--no-color",
+            f"{base_sha}:{old_path}",
+            f"{head_sha}:{norm_file}",
+        ]
     else:
-        diff_cmd.extend([base_sha, head_sha, "--", norm_file])
+        diff_cmd = [
+            "git",
+            "-C",
+            str(repo_root),
+            "--literal-pathspecs",
+            "-c",
+            "diff.interHunkContext=0",
+            "diff",
+            "-U0",
+            "--inter-hunk-context=0",
+            "--no-ext-diff",
+            "--no-textconv",
+            "--no-color",
+            "--no-renames",
+            base_sha,
+            head_sha,
+            "--",
+            norm_file,
+        ]
 
     proc = subprocess.run(
         diff_cmd,
@@ -1416,23 +1438,83 @@ def _is_path_or_coord_bracket(tag_text: str) -> bool:
     return False
 
 
+def _normalize_markdown_link_label(label: str) -> str:
+    """按 CommonMark §4.7 规范化链接引用标签：折叠连续空白并做 Unicode casefold。"""
+    return " ".join(label.split()).casefold()
+
+
+def _extract_markdown_link_ref_defs(text: str) -> dict[str, tuple[int, ...]]:
+    """按 CommonMark §4.7 提取所有 Markdown 链接引用定义的规范化标签及其 `[` 起始偏移。"""
+    refs: dict[str, list[int]] = defaultdict(list)
+    for match in _MD_LINK_REF_DEF_RE.finditer(text):
+        norm = _normalize_markdown_link_label(match.group(1))
+        if norm:
+            refs[norm].append(match.start(1) - 1)
+    return {label: tuple(offsets) for label, offsets in refs.items()}
+
+
+def _has_external_markdown_link_ref_def(
+    defined_link_refs: dict[str, tuple[int, ...]],
+    norm_label: str,
+    bracket_open_pos: int,
+) -> bool:
+    """判断给定标签是否在当前方括号之外存在 Markdown 链接引用定义。"""
+    offsets = defined_link_refs.get(norm_label)
+    if not offsets:
+        return False
+    return any(def_pos != bracket_open_pos for def_pos in offsets)
+
+
 def _parse_leading_severity_tag(text: str) -> Literal["blocking", "non_blocking"] | None:
     """解析行首显式严重度标签（支持列表符号、Markdown 粗体、连续中英文方括号标签与冒号前导）。"""
+    defined_link_refs = _extract_markdown_link_ref_defs(text)
+
     cleaned = text.lstrip()
+    cleaned_offset = len(text) - len(cleaned)
     while True:
         list_match = _LEADING_LIST_PREFIX_RE.match(cleaned)
         if not list_match:
             break
-        cleaned = cleaned[list_match.end() :].lstrip()
+        rest = cleaned[list_match.end() :]
+        stripped = rest.lstrip()
+        cleaned_offset += list_match.end() + (len(rest) - len(stripped))
+        cleaned = stripped
 
-    unbold = re.sub(r"^(?:\*\*|__)\s*", "", cleaned)
+    bold_match = _LEADING_BOLD_PREFIX_RE.match(cleaned)
+    if bold_match:
+        unbold_offset = cleaned_offset + bold_match.end()
+        unbold = cleaned[bold_match.end() :]
+    else:
+        unbold_offset = cleaned_offset
+        unbold = cleaned
+
     bracket_tags: list[str] = []
     pos = 0
     while True:
         bracket_match = _LEADING_BRACKET_TAG_RE.match(unbold[pos:])
         if not bracket_match:
             break
-        tag_content = bracket_match.group(1)
+        open_br = bracket_match.group("open")
+        close_br = bracket_match.group("close")
+        tag_content = bracket_match.group("tag")
+        if open_br == "[" and close_br == "]":
+            abs_open_pos = unbold_offset + pos + bracket_match.start("open")
+            after_close = unbold[pos + bracket_match.end("close") :]
+            if after_close.startswith("(") or after_close.startswith("[]"):
+                break
+            ref_match = _IMMEDIATE_REF_BRACKET_RE.match(after_close)
+            if ref_match:
+                ref_raw = ref_match.group(1)
+                ref_norm = _normalize_markdown_link_label(ref_raw)
+                ref_is_non_severity = _is_path_or_coord_bracket(ref_raw) or _classify_severity_tag_text(ref_raw) is None
+                if ref_norm in defined_link_refs or (
+                    ref_is_non_severity
+                    and (bool(bracket_tags) or _classify_severity_tag_text(tag_content) is None)
+                ):
+                    break
+            tag_norm = _normalize_markdown_link_label(tag_content)
+            if tag_norm and _has_external_markdown_link_ref_def(defined_link_refs, tag_norm, abs_open_pos):
+                break
         if _is_path_or_coord_bracket(tag_content):
             break
         bracket_tags.append(tag_content)

@@ -3277,3 +3277,204 @@ def test_r7_load_dispositions_preserves_u2028_u2029_and_crlf(tmp_path: Path) -> 
     assert entries[0].note == "a\u2028b"
     assert entries[1].disposition is DispositionLabel.NOT_IMPORTANT
     assert entries[1].note == "c\u2029d\x85e"
+
+
+def test_r9_r100_reordered_rename_and_identical_rename_diff(tmp_path: Path) -> None:
+    repo = tmp_path / "r100-reorder-repo"
+    repo.mkdir()
+    _git(repo, "init", "-q", "-b", "main")
+    _git(repo, "config", "user.name", "Test")
+    _git(repo, "config", "user.email", "test@example.invalid")
+
+    (repo / "old_reordered.txt").write_text("alpha\nbeta\ngamma\n", encoding="utf-8")
+    (repo / "old_identical.txt").write_text("alpha\nbeta\ngamma\n", encoding="utf-8")
+    _git(repo, "add", "old_reordered.txt", "old_identical.txt")
+    _git(repo, "commit", "-qm", "base")
+    base_sha = _git(repo, "rev-parse", "HEAD")
+
+    _git(repo, "mv", "old_reordered.txt", "new_reordered.txt")
+    (repo / "new_reordered.txt").write_text("gamma\nbeta\nalpha\n", encoding="utf-8")
+    _git(repo, "mv", "old_identical.txt", "new_identical.txt")
+    _git(repo, "add", "new_reordered.txt", "new_identical.txt")
+    _git(repo, "commit", "-qm", "rename-r100-reordered-and-identical")
+    head_sha = _git(repo, "rev-parse", "HEAD")
+
+    status_map = _git_diff_tree_status_map(repo, base_sha, head_sha)
+    assert status_map["new_reordered.txt"] == ("R100", "old_reordered.txt")
+    assert status_map["new_identical.txt"] == ("R100", "old_identical.txt")
+
+    # R100 重排行顺序：blob diff 必须返回真实新增/重排的 + 行（第 2..3 行），而非 ()
+    assert _git_diff_added_ranges(repo, base_sha, head_sha, "new_reordered.txt") == ((2, 3),)
+    # R100 内容字节完全相同：blob diff 自然为空，返回 ()
+    assert _git_diff_added_ranges(repo, base_sha, head_sha, "new_identical.txt") == ()
+
+    valid_reordered = EvalCase(
+        case_id="r100-reordered-valid",
+        kind="bug",
+        title="R100 重排行真实改动行通过",
+        base_sha=base_sha,
+        head_sha=head_sha,
+        bug_locations=(BugLocation(file="new_reordered.txt", line_start=2, line_end=3, summary="s", category="c"),),
+    )
+    validate_cases((valid_reordered,), repo_root=repo)
+
+    unchanged_reordered = EvalCase(
+        case_id="r100-reordered-line1",
+        kind="bug",
+        title="R100 重排行未改动行被拒",
+        base_sha=base_sha,
+        head_sha=head_sha,
+        bug_locations=(BugLocation(file="new_reordered.txt", line_start=1, line_end=1, summary="s", category="c"),),
+    )
+    with pytest.raises(EvalValidationError, match="diff hunk"):
+        validate_cases((unchanged_reordered,), repo_root=repo)
+
+    identical_case = EvalCase(
+        case_id="r100-identical-line1",
+        kind="bug",
+        title="R100 纯内容相同重命名被拒",
+        base_sha=base_sha,
+        head_sha=head_sha,
+        bug_locations=(BugLocation(file="new_identical.txt", line_start=1, line_end=1, summary="s", category="c"),),
+    )
+    with pytest.raises(EvalValidationError, match="diff hunk"):
+        validate_cases((identical_case,), repo_root=repo)
+
+    # 真实主仓 289fd82f6e9efc684704c79716e31483dbf3fa5e 纯内容相同的 R100 仍返回 ()
+    real_head = "289fd82f6e9efc684704c79716e31483dbf3fa5e"
+    if _is_full_git_checkout(REPO_ROOT):
+        has_head = subprocess.run(
+            ["git", "-C", str(REPO_ROOT), "cat-file", "-e", f"{real_head}^{{commit}}"],
+            capture_output=True,
+            check=False,
+        )
+        parent_proc = subprocess.run(
+            ["git", "-C", str(REPO_ROOT), "rev-parse", f"{real_head}^"],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if has_head.returncode == 0 and parent_proc.returncode == 0:
+            real_base = parent_proc.stdout.strip()
+            assert _git_diff_added_ranges(REPO_ROOT, real_base, real_head, ".sandcastle/claude-route.mts") == ()
+
+
+def test_r9_literal_pathspec_glob_filename_isolation(tmp_path: Path) -> None:
+    repo = tmp_path / "glob-pathspec-repo"
+    repo.mkdir()
+    _git(repo, "init", "-q", "-b", "main")
+    _git(repo, "config", "user.name", "Test")
+    _git(repo, "config", "user.email", "test@example.invalid")
+
+    (repo / "[id].ts").write_text("l1\nl2\n", encoding="utf-8")
+    (repo / "i.ts").write_text("a1\na2\n", encoding="utf-8")
+    (repo / "a*b.ts").write_text("x1\nx2\n", encoding="utf-8")
+    (repo / "axb.ts").write_text("y1\ny2\n", encoding="utf-8")
+    _git(repo, "add", "--", "[id].ts", "i.ts", "a*b.ts", "axb.ts")
+    _git(repo, "commit", "-qm", "base")
+    base_sha = _git(repo, "rev-parse", "HEAD")
+
+    # [id].ts 只改第 2 行，i.ts 只改第 1 行；a*b.ts 只改第 2 行，axb.ts 只改第 1 行
+    (repo / "[id].ts").write_text("l1\nl2_changed\n", encoding="utf-8")
+    (repo / "i.ts").write_text("a1_changed\na2\n", encoding="utf-8")
+    (repo / "a*b.ts").write_text("x1\nx2_changed\n", encoding="utf-8")
+    (repo / "axb.ts").write_text("y1_changed\ny2\n", encoding="utf-8")
+    _git(repo, "add", "--", "[id].ts", "i.ts", "a*b.ts", "axb.ts")
+    _git(repo, "commit", "-qm", "modify-glob-named-files")
+    head_sha = _git(repo, "rev-parse", "HEAD")
+
+    assert _git_diff_added_ranges(repo, base_sha, head_sha, "[id].ts") == ((2, 2),)
+    assert _git_diff_added_ranges(repo, base_sha, head_sha, "i.ts") == ((1, 1),)
+    assert _git_diff_added_ranges(repo, base_sha, head_sha, "a*b.ts") == ((2, 2),)
+    assert _git_diff_added_ranges(repo, base_sha, head_sha, "axb.ts") == ((1, 1),)
+
+    bad_case = EvalCase(
+        case_id="glob-bracket-line1-rejected",
+        kind="bug",
+        title="[id].ts:1..1 不得借用 i.ts 的第 1 行改动",
+        base_sha=base_sha,
+        head_sha=head_sha,
+        bug_locations=(BugLocation(file="[id].ts", line_start=1, line_end=1, summary="s", category="c"),),
+    )
+    with pytest.raises(EvalValidationError, match="未完全落在.*可用 hunk：2\\.\\.2"):
+        validate_cases((bad_case,), repo_root=repo)
+
+    good_case = EvalCase(
+        case_id="glob-bracket-line2-accepted",
+        kind="bug",
+        title="[id].ts:2..2 精确命中自身改动",
+        base_sha=base_sha,
+        head_sha=head_sha,
+        bug_locations=(BugLocation(file="[id].ts", line_start=2, line_end=2, summary="s", category="c"),),
+    )
+    validate_cases((good_case,), repo_root=repo)
+
+
+def test_r9_markdown_reference_links_not_misclassified_as_nit(tmp_path: Path) -> None:
+    full_ref_finding = "[P1] [nit][location] 数据丢失\n\n[location]: src/nit#L1"
+    collapsed_ref_finding = "[P1] [nit][] 数据丢失\n\n[nit]: src/nit#L1"
+    shortcut_ref_finding = "[P1] [nit] 数据丢失\n\n[nit]: src/nit#L1"
+
+    assert classify_finding_heuristic(full_ref_finding, "blocked") == "blocking_substantive"
+    assert classify_finding_heuristic(collapsed_ref_finding, "blocked") == "blocking_substantive"
+    assert classify_finding_heuristic(shortcut_ref_finding, "blocked") == "blocking_substantive"
+    assert classify_finding_heuristic("[P2] [非阻断] 说明", "blocked") == "non_blocking_or_nit"
+    assert classify_finding_heuristic("[P2][非阻断] 说明", "blocked") == "non_blocking_or_nit"
+    assert classify_finding_heuristic("[P2/非阻断] 说明", "blocked") == "non_blocking_or_nit"
+
+    # 额外边界：标签归一化（大小写/空白折叠）、无定义引用链接、定义覆盖合法严重度词、首行 [P1]: 与真实语料 [P2][Spec]/[非阻断][规范]
+    assert _parse_leading_severity_tag(full_ref_finding) == "blocking"
+    assert _parse_leading_severity_tag(collapsed_ref_finding) == "blocking"
+    assert _parse_leading_severity_tag(shortcut_ref_finding) == "blocking"
+    assert _parse_leading_severity_tag("[P1] [nit][location] 数据丢失") == "blocking"
+    assert _parse_leading_severity_tag("[P1] [nit][src/low:1] 数据丢失") == "blocking"
+    assert _parse_leading_severity_tag("[P1] [nit][P2] 数据丢失\n\n[P2]: src/nit#L1") == "blocking"
+    assert _parse_leading_severity_tag("[P1] [nit] 数据丢失\n\n  [  NIT  ]: src/nit#L1") == "blocking"
+    assert _parse_leading_severity_tag("[P1]: 越权漏洞") == "blocking"
+    assert _parse_leading_severity_tag("[P2][Spec] 存在空指针，可顺手清理注释") == "blocking"
+    assert _parse_leading_severity_tag("[非阻断][规范] 本 PR 的提交标题未遵循格式") == "non_blocking"
+    assert _parse_leading_severity_tag("[P2][非阻断] 说明") == "non_blocking"
+
+    # 端到端验证：[P1] [nit][location] 数据丢失\n\n[location]: src/nit#L1 在 BLOCK 运行中正确计入 subsequent_head_pass_total_block_findings
+    runs_dir = tmp_path / "runs"
+    runs_dir.mkdir()
+    _write_run(
+        runs_dir,
+        "p991-r1-block",
+        pr_number=991,
+        head_sha="a" * 40,
+        registered_at_ns=100,
+        attempt=1,
+        verdict="BLOCK",
+        receipts={
+            "claude-opus-5-5": {
+                "run_id": "run-p991-r1-block",
+                "status": "completed",
+                "model": "claude-opus-5-5",
+                "result": {
+                    "status": "blocked",
+                    "findings": [
+                        full_ref_finding,
+                        "[P2][非阻断] 说明",
+                    ],
+                },
+            }
+        },
+    )
+    _write_run(
+        runs_dir,
+        "p991-r2-pass",
+        pr_number=991,
+        head_sha="b" * 40,
+        registered_at_ns=200,
+        attempt=2,
+        verdict="PASS",
+    )
+    metrics = analyze_review_runs(runs_dir)
+    assert metrics.finding_heuristic_categories == {
+        "blocking_substantive": 1,
+        "non_blocking_or_nit": 1,
+    }
+    assert metrics.subsequent_head_pass_total_block_findings == 1
+    assert metrics.subsequent_head_pass_inferred_fixed == 1
+    assert metrics.subsequent_head_pass_undeterminable_findings == 0
