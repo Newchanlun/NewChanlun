@@ -6,8 +6,9 @@
 //! 本模块不提供默认数值；实际服务验收由调用方冻结具名资源输入并绑定当前二进制。
 
 use super::admission_anchor::{
+    from_args_for_db, from_args_for_named_db,
     issuance::{Contract, CURRENT},
-    NamedContract,
+    ControlEnv, NamedContract,
 };
 use super::driver::Driver;
 use super::*;
@@ -299,13 +300,7 @@ fn run_with_policy(
     match args.get(1).map(String::as_str).unwrap_or("") {
         "serve" => {
             let options = ServeOptions::parse(args)?;
-            let admission = super::admission_anchor::from_args_for_db(
-                &options.db,
-                args,
-                super::admission_anchor::ControlEnv::capture(),
-            )
-            .map_err(|error| error.to_string())?;
-            serve_with_policy(options, admission, production, registry)
+            serve_with_policy(options, args, production, registry)
         }
         "advance" => {
             let options = AdvanceOptions::parse(args)?;
@@ -644,19 +639,23 @@ fn run_named_recovery(
     } else {
         Some(path("--s-recovery-request")?)
     };
-    let mut admission = super::admission_anchor::from_args_for_db(
-        db,
-        args,
-        super::admission_anchor::ControlEnv::capture(),
-    )
-    .map_err(|e| e.to_string())?;
+    let env = ControlEnv::capture();
+    let (mut admission, locks) = if let Some(contract) = contract {
+        let (prepared, locks) = from_args_for_named_db(db, args, env, contract)?;
+        (prepared, Some(locks))
+    } else {
+        (
+            from_args_for_db(db, args, env).map_err(|e| e.to_string())?,
+            None,
+        )
+    };
     let request = request
         .map(|file| read_named_request(&mut admission, file))
         .transpose()?;
     let clock = v2::ClockPlan::parse(strict_json(&admission.read_file(clock, None)?)?)?;
     let (_, profile_hash) = checked_profile_bytes(&admission.read_file(profile, None)?)?;
     let config = read_named_config(&mut admission, clock, profile_hash, source, catalog)?;
-    named_recovery::emit(db, admission, action, config, request, contract)
+    named_recovery::emit(db, admission, action, config, request, locks)
 }
 
 /// 原第七门：当前审计路径不跨请求保留源，以结构 0 <= 显式正 cap 核验。
@@ -853,13 +852,27 @@ fn serve_diagnostic_fixture(
     Ok(None)
 }
 
-/// 全部参数/资源核验后，先持唯一写锁、完整审计/profile/clock/pending，再监听。
+/// 具名启动先裁定合同再读配置；所有启动均持写锁完整审计后才监听。
 fn serve_with_policy(
     options: ServeOptions,
-    mut admission: super::admission_anchor::PreparedAdmission,
+    args: &[String],
     production: bool,
     registry: &Contract<'_>,
 ) -> Result<Option<super::admission::CommandOutput>, String> {
+    let env = ControlEnv::capture();
+    let (mut admission, named) = if let Some(named) = &options.named_recovery {
+        let contract = NamedContract {
+            version: &named.version,
+            registry,
+        };
+        let (prepared, locks) = from_args_for_named_db(&options.db, args, env, contract)?;
+        (prepared, Some((named, locks)))
+    } else {
+        (
+            from_args_for_db(&options.db, args, env).map_err(|e| e.to_string())?,
+            None,
+        )
+    };
     let mode = s_allocation::load_environment_mode()?;
     let theta_diagnostic = theta_diagnostic_testonly()?;
     #[cfg(feature = "s_capture_native_testonly")]
@@ -885,13 +898,12 @@ fn serve_with_policy(
     serve_authorization(&resources)?;
     #[cfg(feature = "s_capture_native_testonly")]
     if diagnostic_fixture {
-        if options.named_recovery.is_some() {
+        if named.is_some() {
             return Err("InvalidDomain：具名恢复回执不能授权诊断服务".into());
         }
         return serve_diagnostic_fixture(&options, clock, &resources, mode, admission);
     }
-    let admission: super::admission::WriterAdmission = if let Some(named) = &options.named_recovery
-    {
+    let admission: super::admission::WriterAdmission = if let Some((named, locks)) = named {
         let source = options
             .structure_source
             .as_deref()
@@ -904,11 +916,7 @@ fn serve_with_policy(
             source,
             &named.catalog,
         )?;
-        let contract = NamedContract {
-            version: &named.version,
-            registry,
-        };
-        let scope = super::admission::WriterScope::admit_named(&options.db, admission, contract)?;
+        let scope = super::admission::WriterScope::admit_named(&options.db, admission, locks)?;
         scope.verify_named_startup(&config, &request, &options.epoch)?;
         scope.into()
     } else {

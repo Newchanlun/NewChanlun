@@ -1,7 +1,7 @@
 //! #1527：一次性准备态 → 真实双锁 → 实测基线 → 私有 SQLite → 原账收尾 → 原件资格。
 //! 后续 source pathname 连续性、完整 RAM/extent 与同步硬截止分别仍属 I-2/I-3/I-4/I-5。
 use super::admission_anchor::{
-    BudgetLease, CommandAccounting, FinishedAdmission, NamedContract, PreparedAdmission, Stage,
+    BudgetLease, CommandAccounting, FinishedAdmission, PreparedAdmission, Stage,
 };
 use super::admission_provider::{self as provider, MeasuredDomain};
 use std::cell::RefCell;
@@ -83,7 +83,7 @@ pub(super) enum DomainLocks {
 }
 
 impl DomainLocks {
-    pub(super) fn new(writer: Lock, maintenance: Lock, named: bool) -> Self {
+    fn new(writer: Lock, maintenance: Lock, named: bool) -> Self {
         let pair = DomainLockPair {
             writer,
             maintenance,
@@ -95,6 +95,18 @@ impl DomainLocks {
         } else {
             Self::Ordinary(pair)
         }
+    }
+
+    pub(super) fn acquire_named(
+        db: &Path,
+        revalidate: impl Fn() -> Result<(), String>,
+    ) -> Result<Self, String> {
+        let writer = Lock::acquire_existing(db, ".writer.lock")?;
+        revalidate()?;
+        let maintenance = Lock::acquire_existing(db, ".maintenance.lock")?;
+        let locks = Self::new(writer, maintenance, true);
+        revalidate()?;
+        Ok(locks)
     }
 
     pub(super) fn check(&self) -> Result<(), String> {
@@ -373,16 +385,13 @@ impl WriterScope {
     pub(super) fn admit_named(
         db: &Path,
         prepared: PreparedAdmission,
-        contract: NamedContract<'_>,
+        locks: DomainLocks,
     ) -> Result<Self, String> {
-        if db != std::fs::canonicalize(db).map_err(|_| "SRecoveryMediumUnproven")? {
-            return Err("SRecoveryMediumUnproven".into());
-        }
         Self::admit_prefix_locked(
             db,
             prepared,
             super::admission_private::RejectionPrefix::None,
-            Some(contract),
+            Some(locks),
         )
     }
 
@@ -397,13 +406,8 @@ impl WriterScope {
         db: &Path,
         prepared: PreparedAdmission,
         prefix: super::admission_private::RejectionPrefix<'_>,
-        named_contract: Option<NamedContract<'_>>,
+        named_locks: Option<DomainLocks>,
     ) -> Result<Self, String> {
-        let lock = if named_contract.is_some() {
-            Lock::acquire_existing
-        } else {
-            Lock::acquire
-        };
         let mixed_resources = prepared.is_mixed();
         let consumed = prepared.consume().map_err(|e| e.to_string())?;
         if std::fs::canonicalize(db).map_err(|_| consumed.failure("SourcePathLost"))?
@@ -412,19 +416,19 @@ impl WriterScope {
             return Err(consumed.failure("AdmissionDatabaseMismatch"));
         }
         consumed.check(Stage::E5).map_err(|e| e.to_string())?;
-        let writer_result = lock(consumed.lease().db_path(), ".writer.lock");
-        consumed.check(Stage::E5).map_err(|e| e.to_string())?;
-        let writer = writer_result.map_err(|e| consumed.failure(&e))?;
-        let maintenance_result = lock(consumed.lease().db_path(), ".maintenance.lock");
-        let post_lock = consumed.check(Stage::E5).map_err(|e| e.to_string());
-        // 先托住已取得的锁，再传播原 E5 首错；普通入口的检查顺序不变。
-        let locks = maintenance_result
-            .map(|maintenance| DomainLocks::new(writer, maintenance, named_contract.is_some()));
-        post_lock?;
-        let locks = locks.map_err(|e| consumed.failure(&e))?;
-        if let Some(contract) = named_contract {
-            consumed.authorize_named(contract)?;
-        }
+        let locks = if let Some(locks) = named_locks {
+            locks.check()?;
+            consumed.check(Stage::E5).map_err(|e| e.to_string())?;
+            locks
+        } else {
+            let writer_result = Lock::acquire(consumed.lease().db_path(), ".writer.lock");
+            consumed.check(Stage::E5).map_err(|e| e.to_string())?;
+            let writer = writer_result.map_err(|e| consumed.failure(&e))?;
+            let maintenance_result = Lock::acquire(consumed.lease().db_path(), ".maintenance.lock");
+            consumed.check(Stage::E5).map_err(|e| e.to_string())?;
+            let maintenance = maintenance_result.map_err(|e| consumed.failure(&e))?;
+            DomainLocks::new(writer, maintenance, false)
+        };
         let source = MeasuredDomain::measure(&consumed)?;
         #[cfg(feature = "s_incremental")]
         let max_store_bytes = consumed.limits().max_store_bytes;

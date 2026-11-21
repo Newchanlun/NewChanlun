@@ -1,7 +1,7 @@
 //! ADR 0050：S 域具名恢复请求、只读切面与回执验真，不授予开库写权。
 use super::{
-    admission::{emit_accounted_payload, DomainLocks, Lock},
-    admission_anchor::{AdmissionAccounting, NamedContract, PreparedAdmission, Stage},
+    admission::{emit_accounted_payload, DomainLocks},
+    admission_anchor::{AdmissionAccounting, PreparedAdmission, Stage},
     admission_provider::RecoveryObservation,
 };
 use crate::{meta_get_opt, v2::ClockPlan};
@@ -327,7 +327,7 @@ pub(super) fn run(
     action: Action,
     config: FrozenConfig,
     request: Option<&Request>,
-    contract: Option<NamedContract<'_>>,
+    named_locks: Option<DomainLocks>,
     output: impl FnOnce(&Value, &mut super::admission_anchor::FinishedAdmission) -> Result<(), String>,
 ) -> Result<(), String> {
     let admission = admission.consume().map_err(|e| e.to_string())?;
@@ -335,15 +335,16 @@ pub(super) fn run(
     if db != original {
         return Err(UNPROVEN.into());
     }
-    // 沿原 R4 锁序；具名动作只使用既存锁，不补造缺失的锁条目。
-    let writer = Lock::acquire_existing(original, ".writer.lock")?;
-    admission.check(Stage::E5).map_err(|e| e.to_string())?;
-    let maintenance = Lock::acquire_existing(original, ".maintenance.lock")?;
-    let locks = DomainLocks::new(writer, maintenance, true);
-    admission.check(Stage::E5).map_err(|e| e.to_string())?;
-    if action != Action::Query {
-        admission.authorize_named(contract.ok_or("AdmissionContractVersionMissing")?)?;
-    }
+    let check = || admission.check(Stage::E5).map_err(|e| e.to_string());
+    let locks = if action == Action::Query {
+        // 历史查询不加写合同条件，沿用原来的取锁时点。
+        DomainLocks::acquire_named(original, check)?
+    } else {
+        let locks = named_locks.ok_or("AdmissionContractVersionMissing")?;
+        locks.check()?;
+        check()?;
+        locks
+    };
     let source = if action == Action::Current {
         RecoveryObservation::through_r4(&admission)?
     } else {
@@ -375,7 +376,7 @@ pub(super) fn emit(
     action: Action,
     config: FrozenConfig,
     request: Option<Request>,
-    contract: Option<NamedContract<'_>>,
+    named_locks: Option<DomainLocks>,
 ) -> Result<(), String> {
     run(
         db,
@@ -383,7 +384,7 @@ pub(super) fn emit(
         action,
         config,
         request.as_ref(),
-        contract,
+        named_locks,
         |value, account| {
             let mut payload = canonical_json(value).into_bytes();
             payload.push(b'\n');

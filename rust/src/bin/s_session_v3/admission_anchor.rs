@@ -5,6 +5,7 @@
 //! 原时刻与实际前导读取在实测 Existing 后一次性回灌，provider 只能借记账门面。
 //! 同步系统调用只有前后期限门，不承诺可中断 I/O，也不证明 SQLite pathname 连续性。
 
+use super::admission::DomainLocks;
 use newchan_rust::s_content::job::JobLimits;
 use newchan_rust::session_protocol::{sha256_hex, strict_json};
 use serde_json::{Map, Value};
@@ -550,15 +551,6 @@ pub(super) struct NamedContract<'a> {
 }
 
 impl ConsumedAdmission {
-    pub(super) fn authorize_named(&self, contract: NamedContract<'_>) -> Result<(), String> {
-        // 六字段锚没有独立版本字段：生效版本由注册的规范 limits 摘要绑定。
-        // 不得给不同生效版本复用同一 limits 摘要；否则原锚不能区分两个版本。
-        contract
-            .registry
-            .authorize_limits(contract.version, &self.lease.anchor.sha256)?;
-        self.check(Stage::E5).map_err(|e| e.to_string())
-    }
-
     pub(crate) fn limits(&self) -> JobLimits {
         self.limits
     }
@@ -1275,6 +1267,24 @@ pub(crate) fn from_args_for_db(
     args: &[String],
     env: ControlEnv,
 ) -> Result<PreparedAdmission, AdmissionError> {
+    let mut prepared = load_for_db(db, &limits_arg(args)?, env)?;
+    wait_serve_gate(args, &mut prepared)?;
+    Ok(prepared)
+}
+
+pub(super) fn from_args_for_named_db(
+    db: &Path,
+    args: &[String],
+    env: ControlEnv,
+    contract: NamedContract<'_>,
+) -> Result<(PreparedAdmission, DomainLocks), String> {
+    let path = limits_arg(args).map_err(|e| e.to_string())?;
+    let (mut prepared, locks) = load_named_for_db(db, &path, env, contract)?;
+    wait_serve_gate(args, &mut prepared).map_err(|e| e.to_string())?;
+    Ok((prepared, locks))
+}
+
+fn limits_arg(args: &[String]) -> Result<PathBuf, AdmissionError> {
     let prelude = ControlPrelude::new();
     let mut path = None;
     for (index, arg) in args.iter().enumerate() {
@@ -1292,8 +1302,13 @@ pub(crate) fn from_args_for_db(
             return Err(prelude.error(ErrorKind::ResourcesInvalid, Stage::E0));
         }
     }
-    let path = path.ok_or_else(|| prelude.error(ErrorKind::ResourcesMissing, Stage::E0))?;
-    let mut prepared = load_for_db(db, &path, env)?;
+    path.ok_or_else(|| prelude.error(ErrorKind::ResourcesMissing, Stage::E0))
+}
+
+fn wait_serve_gate(
+    args: &[String],
+    prepared: &mut PreparedAdmission,
+) -> Result<(), AdmissionError> {
     // #1527：独立 CLI 不要求 launcher 握手；托管 serve 等父进程登记完成。
     if args.get(1).is_some_and(|arg| arg == "serve") {
         if let Some(marker) = std::env::var_os("S_CONTROL_START_GATE") {
@@ -1305,15 +1320,90 @@ pub(crate) fn from_args_for_db(
             prepared.wait_start_gate(libc::STDIN_FILENO)?;
         }
     }
-    Ok(prepared)
+    Ok(())
 }
 
-/// 消费既有 R4：DB → 外置 owner → 已发布 binding → 原 limits 字节 → 最终原 FD 复核。
 pub(crate) fn load_for_db(
     db: &Path,
     limits_path: &Path,
     env: ControlEnv,
 ) -> Result<PreparedAdmission, AdmissionError> {
+    let pinned = pin_for_db(db, limits_path, env)?;
+    let invalid = || pinned.prelude.error(ErrorKind::ResourcesInvalid, Stage::E3);
+    let node = strict_json(&pinned.lease.limits._raw).map_err(|_| invalid())?;
+    let resources = AdmissionResources::parse(&node).map_err(|_| invalid())?;
+    pinned.prepare(resources)
+}
+
+pub(super) fn load_named_for_db(
+    db: &Path,
+    limits_path: &Path,
+    env: ControlEnv,
+    contract: NamedContract<'_>,
+) -> Result<(PreparedAdmission, DomainLocks), String> {
+    let pinned = pin_for_db(db, limits_path, env).map_err(|e| e.to_string())?;
+    if db != pinned.lease.db_path() {
+        return Err("SRecoveryMediumUnproven".into());
+    }
+    pinned.check_environment().map_err(|e| e.to_string())?;
+    let check =
+        || check_lease(&pinned.lease, &pinned.prelude, Stage::E5).map_err(|e| e.to_string());
+    check()?;
+    // 先托住双锁，合同拒绝也以同一锁对写完失败回执。
+    let locks = DomainLocks::acquire_named(db, check)?;
+    // 六字段锚不带版本；注册表以已钉住的规范原字节摘要绑定版本。
+    // 只采用注册表核准的额度，未核准的原件不进入数值解析。
+    let values = contract
+        .registry
+        .authorize_limits(contract.version, &pinned.lease.anchor.sha256)?;
+    let prepared = pinned
+        .prepare(AdmissionResources::Ordinary(values))
+        .map_err(|e| e.to_string())?;
+    Ok((prepared, locks))
+}
+
+struct PinnedAdmission {
+    lease: BudgetLease,
+    prelude: ControlPrelude,
+    environment: Option<Binding>,
+}
+
+impl PinnedAdmission {
+    fn check_environment(&self) -> Result<(), AdmissionError> {
+        if self
+            .environment
+            .as_ref()
+            .is_some_and(|binding| binding != &self.lease.anchor)
+        {
+            return Err(self.prelude.error(ErrorKind::ControlMismatch, Stage::E4));
+        }
+        Ok(())
+    }
+
+    fn prepare(
+        mut self,
+        resources: AdmissionResources,
+    ) -> Result<PreparedAdmission, AdmissionError> {
+        let limits = resources.job_limits();
+        self.prelude.trusted = Some(limits);
+        self.prelude.gate(Stage::E4)?;
+        self.check_environment()?;
+        check_lease(&self.lease, &self.prelude, Stage::E4)?;
+        Ok(PreparedAdmission {
+            limits,
+            resources,
+            lease: Arc::new(self.lease),
+            prelude: self.prelude,
+        })
+    }
+}
+
+/// 消费既有 R4：DB → 外置 owner → 已发布 binding → 原 limits 字节；不解释额度。
+fn pin_for_db(
+    db: &Path,
+    limits_path: &Path,
+    env: ControlEnv,
+) -> Result<PinnedAdmission, AdmissionError> {
     let mut prelude = ControlPrelude::new();
     // SAFETY：geteuid 无指针入参、无资源所有权转移。
     let uid = unsafe { libc::geteuid() };
@@ -1418,20 +1508,7 @@ pub(crate) fn load_for_db(
     if limits.stamp.identity != anchor.file_identity || sha256_hex(&limits._raw) != anchor.sha256 {
         return Err(prelude.error(ErrorKind::Changed, Stage::E3));
     }
-    let node = strict_json(&limits._raw)
-        .map_err(|_| prelude.error(ErrorKind::ResourcesInvalid, Stage::E3))?;
-    let resources = AdmissionResources::parse(&node)
-        .map_err(|_| prelude.error(ErrorKind::ResourcesInvalid, Stage::E3))?;
-    let values = resources.job_limits();
-    prelude.trusted = Some(values);
-    prelude.gate(Stage::E4)?;
-    if environment
-        .as_ref()
-        .is_some_and(|binding| binding != &anchor)
-    {
-        return Err(prelude.error(ErrorKind::ControlMismatch, Stage::E4));
-    }
-    let lease = Arc::new(BudgetLease {
+    let lease = BudgetLease {
         db,
         db_file,
         db_identity: Identity::of(&db_meta),
@@ -1444,13 +1521,11 @@ pub(crate) fn load_for_db(
         binding,
         limits,
         anchor,
-    });
-    check_lease(&lease, &prelude, Stage::E4)?;
-    Ok(PreparedAdmission {
-        limits: values,
-        resources,
+    };
+    Ok(PinnedAdmission {
         lease,
         prelude,
+        environment,
     })
 }
 

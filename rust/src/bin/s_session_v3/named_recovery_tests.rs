@@ -2,7 +2,10 @@
 use super::{tests::Fixture, *};
 use crate::v3::{
     admission::{Lock, WriterScope},
-    admission_anchor::{issuance::Contract, test_prepare, CommandAccounting, NamedContract},
+    admission_anchor::{
+        issuance::Contract, load_named_for_db, test_prepare, CommandAccounting, ControlEnv,
+        NamedContract, PreparedAdmission,
+    },
     admission_provider::sidecar,
     named_recovery::{self, Action, FrozenConfig, Request, TestTransition},
 };
@@ -78,6 +81,23 @@ fn binding<'a>(registry: &'a Contract<'a>) -> NamedContract<'a> {
     }
 }
 
+fn prepare_named(
+    f: &Fixture,
+    registry: &Contract<'_>,
+) -> Result<(PreparedAdmission, crate::v3::admission::DomainLocks), String> {
+    load_named_for_db(
+        &f.db,
+        &limits_path(f),
+        ControlEnv::capture(),
+        binding(registry),
+    )
+}
+
+fn named_scope(f: &Fixture, registry: &Contract<'_>) -> Result<WriterScope, String> {
+    let (prepared, locks) = prepare_named(f, registry)?;
+    WriterScope::admit_named(&f.db, prepared, locks)
+}
+
 fn config(f: &Fixture) -> FrozenConfig {
     let (catalog, _, _) = crate::v3::load_catalog_strict(&fixture_catalog(f)).unwrap();
     let value: Value = strict_json(&std::fs::read(&f.profile).unwrap()).unwrap();
@@ -90,9 +110,14 @@ fn config(f: &Fixture) -> FrozenConfig {
 }
 
 fn run(f: &Fixture, action: Action, request: Option<&Request>) -> Result<Value, String> {
-    let admission = test_prepare(&f.db);
     let limits = std::fs::read_to_string(limits_path(f)).unwrap();
     let registry = test_registry(&limits);
+    let (admission, locks) = if action == Action::Query {
+        (test_prepare(&f.db), None)
+    } else {
+        let (prepared, locks) = prepare_named(f, &registry)?;
+        (prepared, Some(locks))
+    };
     let mut result = None;
     // 命令本体会消费真实 Job、固定源并显式关闭；只拦截最终 stdout。
     named_recovery::run(
@@ -101,7 +126,7 @@ fn run(f: &Fixture, action: Action, request: Option<&Request>) -> Result<Value, 
         action,
         config(f),
         request,
-        (action != Action::Query).then(|| binding(&registry)),
+        locks,
         |body, _| {
             result = Some(body.clone());
             Ok(())
@@ -272,7 +297,7 @@ fn commit_receipt_fixture(f: &Fixture, request: &Request) -> Result<Value, Strin
     // 此夹具只认证事务，不把它当成 EXCLUSIVE 写者或受控 checkpoint 证据。
     let limits = std::fs::read_to_string(limits_path(f)).unwrap();
     let registry = test_registry(&limits);
-    let scope = WriterScope::admit_named(&f.db, test_prepare(&f.db), binding(&registry))?;
+    let scope = named_scope(f, &registry)?;
     let _guard = scope.enter()?;
     let conn = crate::v3::audit_owner::AuditConnection::open(&f.db)?;
     conn.recover_named_transaction_for_test(TestTransition {
@@ -438,8 +463,7 @@ fn tb07_s_named_recovery_transaction_failure_rolls_back_receipt_and_epoch() {
     {
         let limits = std::fs::read_to_string(limits_path(&f)).unwrap();
         let registry = test_registry(&limits);
-        let scope =
-            WriterScope::admit_named(&f.db, test_prepare(&f.db), binding(&registry)).unwrap();
+        let scope = named_scope(&f, &registry).unwrap();
         let _guard = scope.enter().unwrap();
         let owner = crate::v3::audit_owner::AuditConnection::open(&f.db).unwrap();
         owner.set_recover_after_write_for_test(|tx| {
@@ -562,6 +586,82 @@ impl<'a> RecoveryCli<'a> {
     }
 }
 
+// 仅隔离夹具：原 inode 不变，重新绑定实际原件摘要（待实测原件不能由正式签发器发布）。
+fn set_anchor_bytes(f: &Fixture, raw: &[u8]) -> u64 {
+    let limits = limits_path(f);
+    let binding = limits.with_file_name("binding.json");
+    let owner = sidecar(&f.db, ".control-owner.json");
+    let mut document = strict_json(&std::fs::read(&owner).unwrap()).unwrap();
+    document["admission"]["sha256"] = json!(sha256_hex(raw));
+    let binding_raw = canonical_json(&document["admission"]);
+    let owner_raw = canonical_json(&document);
+    std::fs::write(limits, raw).unwrap();
+    std::fs::write(binding, &binding_raw).unwrap();
+    std::fs::write(owner, &owner_raw).unwrap();
+    (raw.len() + binding_raw.len() + owner_raw.len()) as u64
+}
+
+#[test]
+fn tb07_s_named_recovery_authorizes_pinned_contract_before_payload() {
+    let f = fixture();
+    publish_initial(&f);
+    let cut = run(&f, Action::Inspect, None).unwrap();
+    let raw = request_document(&cut, "first", "recover-1");
+    let cli = RecoveryCli::new(&f, &raw);
+    let mut numeric = strict_json(&std::fs::read(limits_path(&f)).unwrap()).unwrap();
+    numeric["max_total_wire_bytes"] = json!("122000");
+    let numeric = canonical_json(&numeric);
+    let pending = strict_json(include_bytes!(
+        "../../../../s_session/contracts/admission-small-v1.json"
+    ))
+    .unwrap();
+    let pending = canonical_json(&pending);
+    let catalog = std::fs::read(&cli.catalog).unwrap();
+    let mut padded = catalog.clone();
+    padded.extend([b' '; 8192]);
+    for (anchor, catalog, version, expected) in [
+        (
+            &numeric,
+            &catalog,
+            "retired",
+            "AdmissionContractSupersededOrUnknown",
+        ),
+        (
+            &numeric,
+            &padded,
+            "retired",
+            "AdmissionContractSupersededOrUnknown",
+        ),
+        (
+            &pending,
+            &catalog,
+            AWAITING_CONTRACT,
+            "AdmissionContractAwaitingMeasurement",
+        ),
+    ] {
+        let wire = set_anchor_bytes(&f, anchor.as_bytes());
+        std::fs::write(&cli.catalog, catalog).unwrap();
+        let before = media_bytes(&f);
+        for args in [
+            cli.command("inspect-recovery", Some(version)),
+            cli.command("current-recovery", Some(version)),
+            cli.command("recover-named", Some(version)),
+            cli.serve("1", Some(version)),
+        ] {
+            let accounting = CommandAccounting::begin();
+            let error = crate::run_with(&args).unwrap_err();
+            assert_eq!(error, expected, "{}", args[1]);
+            let receipt = accounting.report(&error, &mut std::io::sink());
+            assert!(receipt.job.is_none());
+            let prelude = receipt.prelude.unwrap();
+            assert!(!prelude.budget_trusted);
+            assert_eq!(prelude.wire_bytes, wire, "{}", args[1]);
+        }
+        assert!(!cli.socket.exists());
+        assert_eq!(before, media_bytes(&f));
+    }
+}
+
 #[test]
 fn tb07_s_named_recovery_production_requires_original_anchor_contract() {
     let f = fixture();
@@ -591,19 +691,6 @@ fn tb07_s_named_recovery_production_requires_original_anchor_contract() {
         assert!(!cli.socket.exists());
     }
 
-    let current = crate::v3::admission_anchor::issuance::CURRENT;
-    let pending = strict_json(include_bytes!(
-        "../../../../s_session/contracts/admission-small-v1.json"
-    ))
-    .unwrap();
-    let pending_digest = sha256_hex(canonical_json(&pending).as_bytes());
-    assert_eq!(
-        current
-            .authorize_limits(AWAITING_CONTRACT, &pending_digest)
-            .unwrap_err(),
-        "AdmissionContractAwaitingMeasurement"
-    );
-
     // 同版本、不同有效额度：即便测试注册表可生效，也只能核准该锚原摘要。
     let mut changed = strict_json(limits.as_bytes()).unwrap();
     changed["max_total_requests"] = json!("999999");
@@ -624,7 +711,7 @@ fn tb07_s_named_recovery_production_requires_original_anchor_contract() {
         )
         .unwrap();
     }
-    let scope = WriterScope::admit_named(&f.db, test_prepare(&f.db), binding(&registry)).unwrap();
+    let scope = named_scope(&f, &registry).unwrap();
     scope
         .verify_named_startup(&config(&f), &first, "2")
         .unwrap();
@@ -658,24 +745,29 @@ fn tb07_s_named_recovery_compares_callers_frozen_catalog() {
     // 同一规范目录换空白仍成功，证明不是直接哈希文件原字节。
     let mut catalog = strict_json(&std::fs::read(&cli.catalog).unwrap()).unwrap();
     let pretty = serde_json::to_vec_pretty(&catalog).unwrap();
-    let wire_at_contract_refusal = || {
+    let measured_wire = || {
         let accounting = CommandAccounting::begin();
-        let error =
-            crate::run_with(&cli.command("inspect-recovery", Some(TEST_CONTRACT))).unwrap_err();
-        assert_eq!(error, "AdmissionContractSupersededOrUnknown");
-        accounting
-            .report(&error, &mut std::io::sink())
-            .prelude
-            .unwrap()
-            .wire_bytes
+        // 合同和目录有效；故意不给当前写者代，以便在 Job 内拒绝而不创建服务。
+        let error = crate::v3::writer_cli::test_run_named_cli(
+            &cli.serve("1", Some(TEST_CONTRACT)),
+            &registry,
+        )
+        .err()
+        .unwrap();
+        assert_eq!(error, "StaleWriter：具名恢复当前回执与配置写者代不一致");
+        let receipt = accounting.report(&error, &mut std::io::sink());
+        assert!(receipt.job.is_some());
+        let prelude = receipt.prelude.unwrap();
+        assert!(prelude.budget_trusted);
+        prelude.wire_bytes
     };
     std::fs::write(&cli.catalog, &pretty).unwrap();
-    let wire = wire_at_contract_refusal();
+    let wire = measured_wire();
     let mut padded = pretty;
     padded.extend([b' '; 513]);
     std::fs::write(&cli.catalog, padded).unwrap();
     // 同一原锚、同一规范目录，仅增加的非语义输入字节也进原前导账。
-    assert_eq!(wire_at_contract_refusal(), wire + 513);
+    assert_eq!(measured_wire(), wire + 513);
     for action in ["inspect-recovery", "current-recovery", "recover-named"] {
         crate::v3::writer_cli::test_run_named_cli(
             &cli.command(action, Some(TEST_CONTRACT)),
