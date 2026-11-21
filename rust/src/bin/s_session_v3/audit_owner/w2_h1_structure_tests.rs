@@ -314,10 +314,10 @@ fn w2_h1_roundtrip_selected(
     for (offset, envelope) in envelopes.iter().enumerate() {
         let n = offset + 1;
         let before = state::full_audit_calls_for_test();
-        let (handled, allocations, refusals) = if lock.is_some_and(|lock| lock.name == "ef") {
+        let (handled, allocations, refusal) = if lock.is_some_and(|lock| lock.name == "ef") {
             issue1642_observe(&mut online, envelope, "ef", n)
         } else {
-            (online.handle(envelope.clone()), Vec::new(), Vec::new())
+            (online.handle(envelope.clone()), Vec::new(), None)
         };
         let trace =
             super::SOURCE_APPEND_BOUNDARY_TRACE.with(|t| std::mem::take(&mut *t.borrow_mut()));
@@ -335,12 +335,13 @@ fn w2_h1_roundtrip_selected(
             Ok(reply) => reply,
             Err(error) => {
                 assert_eq!(first_refusal, Some(n), "在线第 {n} 代意外拒绝：{error}");
-                issue1642_assert_parent_refusal(&error, &allocations, &refusals);
+                issue1642_check_parent_refusal(n, &error, &allocations, refusal).unwrap();
                 let previous = issue1642_persisted_receipt(&f.db, n as i64 - 1);
                 assert_eq!(previous["status"], "Committed");
                 let pending = issue1642_persisted_receipt(&f.db, n as i64);
                 assert_eq!(pending["status"], "AcceptedPending");
                 assert!(pending["batch_id"].is_null());
+                issue1642_assert_no_publication(&f.db, n as i64);
                 println!(
                     "M8D_P3_RECEIPT lock={} g={n} outcome=parent_refused previous={previous} pending={pending}",
                     lock.unwrap().name,
@@ -801,16 +802,16 @@ fn issue1642_observe(
     envelope: &Value,
     label: &str,
     n: usize,
-) -> (Result<Value, String>, Vec<Value>, Vec<Value>) {
+) -> (
+    Result<Value, String>,
+    Vec<Value>,
+    Option<super::native::ParentRefusal>,
+) {
     super::SOURCE_APPEND_ALLOCATIONS.with(|p| *p.borrow_mut() = Some(Vec::new()));
     super::native::PARENT_REFUSAL.with(|p| p.set(Some(None)));
     let (result, stages, _) = state::traced(false, || driver.handle(envelope.clone()));
     let allocations = super::SOURCE_APPEND_ALLOCATIONS.with(|p| p.borrow_mut().take().unwrap());
     let refusal = super::native::PARENT_REFUSAL.with(|p| p.take().unwrap());
-    let refusals = refusal
-        .into_iter()
-        .map(|r| serde_json::to_value(r).unwrap())
-        .collect::<Vec<_>>();
     if !allocations.is_empty() {
         println!(
             "SOURCE_INDEX_GROWTH lock={label} g={n} {}",
@@ -820,26 +821,68 @@ fn issue1642_observe(
     if let Err(error) = &result {
         println!(
             "SOURCE_INDEX_REFUSAL lock={label} g={n} error={error} parent={} stages={}",
-            json!(refusals),
+            json!(refusal.into_iter().collect::<Vec<_>>()),
             state::stage_rows(&stages),
         );
     }
-    (result, allocations, refusals)
+    (result, allocations, refusal)
 }
 
-fn issue1642_assert_parent_refusal(error: &str, allocations: &[Value], refusals: &[Value]) {
-    assert_eq!(error, M8D_P3_RESOURCE_REFUSAL);
-    for growth in allocations {
-        assert_eq!(growth["cap"], growth["j_cap"], "原 j.cap 不得替换");
-        assert!(growth["growth"].as_u64().unwrap() <= growth["cap"].as_u64().unwrap());
+fn issue1642_check_parent_refusal(
+    n: usize,
+    error: &str,
+    allocations: &[Value],
+    refusal: Option<super::native::ParentRefusal>,
+) -> Result<(), &'static str> {
+    if error != M8D_P3_RESOURCE_REFUSAL {
+        return Err("首拒须保留原资源错误");
     }
-    let parent = refusals.first().expect("必须读到真实父账拒绝");
-    let bytes = |name: &str| parent[name].as_u64().unwrap();
-    assert!(
-        bytes("bytes") > bytes("remaining")
-            || bytes("live") + bytes("bytes") > bytes("total_limit"),
-        "原拒绝必须超过父账的真实余额：{parent}"
-    );
+    if allocations.is_empty() {
+        return Err("首拒代必须实际越过来源索引扩容");
+    }
+    for growth in allocations {
+        if growth["appended"] != true {
+            return Err("来源索引扩容未完成");
+        }
+        if growth["cap"] != growth["j_cap"]
+            || !growth["growth"]
+                .as_u64()
+                .zip(growth["j_cap"].as_u64())
+                .is_some_and(|(growth, cap)| growth > 0 && growth <= cap)
+        {
+            return Err("来源索引扩容未通过原 j.cap");
+        }
+    }
+    let parent = refusal.ok_or("必须读到真实父账拒绝")?;
+    if parent.stage != Some("publish_borrowed")
+        || parent.generation != Some(n as i64)
+        || parent.kind != "native"
+    {
+        return Err("首拒不是本代发布阶段的 Native 申请");
+    }
+    if parent.bytes <= parent.remaining
+        || !parent
+            .live
+            .checked_add(parent.bytes)
+            .is_some_and(|next| next <= parent.total_limit)
+    {
+        return Err("首拒必须只耗尽父分域而非父总账");
+    }
+    Ok(())
+}
+
+fn issue1642_assert_no_publication(db: &Path, refused: i64) {
+    let conn = Connection::open_with_flags(db, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap();
+    let (count, max, forbidden): (i64, Option<i64>, i64) = conn
+        .query_row(
+            "SELECT count(*),max(generation),count(*) FILTER (WHERE generation >= ?1)
+             FROM s_content_publications",
+            [refused],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .unwrap();
+    assert_eq!((count, max, forbidden), (refused - 1, Some(refused - 1), 0));
+    println!("ISSUE1642_PUBLICATIONS g={refused} count={count} max={max:?} at_or_after_refusal={forbidden}");
 }
 
 fn issue1642_persisted_receipt(db: &Path, g: i64) -> Value {
@@ -951,7 +994,7 @@ fn issue1642_issue1424_down_newbirth_signed_budget() {
     for (i, envelope) in envelopes.iter().enumerate() {
         let n = i + 1;
         let before = state::full_audit_calls_for_test();
-        let (result, allocations, refusals) =
+        let (result, allocations, refusal) =
             issue1642_observe(&mut writer, envelope, "down-newbirth", n);
         assert_eq!(state::full_audit_calls_for_test(), before);
         let persisted = issue1642_persisted_receipt(&fixture.db, n as i64);
@@ -960,11 +1003,10 @@ fn issue1642_issue1424_down_newbirth_signed_budget() {
             Ok(reply) => reply,
             Err(error) => {
                 assert_eq!(FIRST_REFUSAL, Some(n), "下行第 {n} 代意外拒绝：{error}");
-                issue1642_assert_parent_refusal(&error, &allocations, &refusals);
-                assert!(!allocations.is_empty(), "首拒代必须实际越过来源索引扩容");
-                assert!(allocations.iter().all(|growth| growth["appended"] == true));
+                issue1642_check_parent_refusal(n, &error, &allocations, refusal).unwrap();
                 assert_eq!(persisted["status"], "AcceptedPending");
                 assert!(persisted["batch_id"].is_null());
+                issue1642_assert_no_publication(&fixture.db, n as i64);
                 break;
             }
         };
@@ -1000,13 +1042,13 @@ fn issue1642_signed_writer_still_refuses_source_growth_one_byte_over_local_cap()
     for (i, envelope) in envelopes[..8].iter().enumerate().skip(1) {
         SOURCE_APPEND_CAP_AT_GROWTH.with(|p| p.set(Some(1)));
         let before = state::full_audit_calls_for_test();
-        let (result, allocations, refusals) =
+        let (result, allocations, refusal) =
             issue1642_observe(&mut writer, envelope, "small-cap", i + 1);
         SOURCE_APPEND_CAP_AT_GROWTH.with(|p| p.set(None));
         assert_eq!(state::full_audit_calls_for_test(), before);
         if let Some((growth, original_cap)) = SOURCE_APPEND_CAP_RECEIPT.with(|p| p.take()) {
             assert!(original_cap >= growth);
-            assert!(refusals.is_empty(), "必须是局部拒绝，不是父账拒绝");
+            assert!(refusal.is_none(), "必须是局部拒绝，不是父账拒绝");
             assert_eq!(result.unwrap_err(), M8D_P3_RESOURCE_REFUSAL);
             let rejected = allocations.last().unwrap();
             assert_eq!(rejected["growth"], growth);
@@ -1028,4 +1070,100 @@ fn issue1642_signed_writer_still_refuses_source_growth_one_byte_over_local_cap()
         assert_eq!(result.unwrap()["kind"], "Committed");
     }
     panic!("小帽负控必须触及真实来源索引扩容");
+}
+
+#[test]
+fn issue1642_parent_refusal_predicate_replays_ef_g78_and_rejects_false_attribution() {
+    // R1 EF g78 的真实扩容和父账日志。阶段为登记预期；R1 未在拒绝瞬间采集阶段。
+    let mut allocations = [
+        284_293_110,
+        281_040_649,
+        277_712_422,
+        274_346_244,
+        270_845_421,
+        267_364_153,
+        264_011_384,
+    ]
+    .map(|remaining| {
+        json!({
+            "allocated": 1_843_216, "appended": true, "cap": 39_110_026, "growth": 3_229_200,
+            "j_cap": 39_110_026, "parent_remaining": remaining, "released": 921_616,
+        })
+    });
+    let mut refusal = super::native::ParentRefusal {
+        bytes: 5280,
+        remaining: 3143,
+        live: 1_121_361_722,
+        peak: 1_123_465_803,
+        total_limit: 1_227_418_628,
+        kind: "native",
+        stage: Some("publish_borrowed"),
+        generation: Some(78),
+    };
+    let check = |growth: &[Value], parent| {
+        issue1642_check_parent_refusal(78, M8D_P3_RESOURCE_REFUSAL, growth, Some(parent))
+    };
+    assert_eq!(check(&allocations, refusal), Ok(()));
+    assert_eq!(check(&[], refusal), Err("首拒代必须实际越过来源索引扩容"));
+    assert_eq!(
+        check(
+            &allocations,
+            super::native::ParentRefusal {
+                total_limit: refusal.live,
+                ..refusal
+            }
+        ),
+        Err("首拒必须只耗尽父分域而非父总账")
+    );
+    refusal.stage = Some("prepare_source_audit");
+    assert_eq!(
+        check(&allocations, refusal),
+        Err("首拒不是本代发布阶段的 Native 申请")
+    );
+    let last = allocations.last_mut().unwrap();
+    last["allocated"] = json!(0);
+    last["appended"] = json!(false);
+    assert_eq!(check(&allocations, refusal), Err("来源索引扩容未完成"));
+}
+
+#[test]
+fn issue1642_parent_refusal_predicate_rejects_real_driver_source_index_refusal() {
+    let rows = w2_h1_ef_rows();
+    let fixture = W2H1Fixture::new(rows.len());
+    let mut writer = fixture.open(&fixture.db);
+    assert_eq!(
+        writer.handle(w2_h1_envelope(1, &rows[..1])).unwrap()["kind"],
+        "Committed"
+    );
+    super::SOURCE_APPEND_PARENT_SHORT.with(|flag| flag.set(true));
+    let before = state::full_audit_calls_for_test();
+    let (result, allocations, refusal) =
+        issue1642_observe(&mut writer, &w2_h1_envelope(2, &rows[1..2]), "early-ef", 2);
+    assert!(!super::SOURCE_APPEND_PARENT_SHORT.with(|flag| flag.replace(false)));
+    assert_eq!(state::full_audit_calls_for_test(), before);
+    let error = result.unwrap_err();
+    assert_eq!(error, M8D_P3_RESOURCE_REFUSAL);
+    let parent = refusal.unwrap();
+    assert_eq!(parent.stage, Some("prepare_source_audit"));
+    assert_eq!(parent.generation, Some(2));
+    assert_eq!(parent.kind, "native");
+    assert_eq!(parent.bytes, 16_200);
+    assert_eq!(parent.remaining, parent.bytes - 1);
+    let rejected = allocations.last().unwrap();
+    assert_eq!(rejected["growth"], parent.bytes);
+    assert_eq!(rejected["cap"], rejected["j_cap"]);
+    assert_eq!(rejected["appended"], false);
+    assert_eq!(rejected["allocated"], 0);
+    assert_eq!(
+        issue1642_check_parent_refusal(2, &error, &allocations, refusal),
+        Err("来源索引扩容未完成")
+    );
+    assert_eq!(
+        issue1642_persisted_receipt(&fixture.db, 1)["status"],
+        "Committed"
+    );
+    let pending = issue1642_persisted_receipt(&fixture.db, 2);
+    assert_eq!(pending["status"], "AcceptedPending");
+    assert!(pending["batch_id"].is_null());
+    issue1642_assert_no_publication(&fixture.db, 2);
 }

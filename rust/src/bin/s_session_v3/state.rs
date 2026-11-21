@@ -2154,6 +2154,7 @@ struct WorkCounts {
 struct AuditTrace {
     start: std::time::Instant,
     events: Vec<Value>,
+    stage: Option<(&'static str, i64)>,
     work: WorkCounts,
     count_nodes: bool,
 }
@@ -2191,6 +2192,7 @@ pub(super) fn trace_birth(entry: &'static str, generation: i64) {
 pub(super) fn trace_stage(stage: &'static str, path: &'static str, generation: i64) {
     AUDIT_TRACE.with(|trace| {
         if let Some(trace) = trace.borrow_mut().as_mut() {
+            trace.stage = (stage != "publish_end").then_some((stage, generation));
             trace
                 .events
                 .push(json!({"phase":"s4_stage","stage":stage,"path":path,
@@ -2199,6 +2201,10 @@ pub(super) fn trace_stage(stage: &'static str, path: &'static str, generation: i
                 "frame_calls":sc::frame_calls_on_thread()}));
         }
     });
+}
+#[cfg(test)]
+pub(super) fn active_stage() -> Option<(&'static str, i64)> {
+    AUDIT_TRACE.with(|trace| trace.borrow().as_ref().and_then(|trace| trace.stage))
 }
 /// S4 六阶段名；`stage_rows` 只汇总这些段，其余标记（publish_end）只作终点。
 #[cfg(test)]
@@ -2319,6 +2325,7 @@ pub(super) fn traced<T>(count_nodes: bool, action: impl FnOnce() -> T) -> (T, Ve
         *trace.borrow_mut() = Some(AuditTrace {
             start: std::time::Instant::now(),
             events: Vec::new(),
+            stage: None,
             work: WorkCounts::default(),
             count_nodes,
         });

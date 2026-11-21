@@ -1817,6 +1817,16 @@ pub(super) fn audit_native_source(
                     return Err((construction_state::stale("实际effects新增原件缺失")).into());
                 };
                 #[cfg(test)]
+                let _parent_hold = if super::SOURCE_APPEND_PARENT_SHORT.with(std::cell::Cell::get) {
+                    capture.owner_index_next_growth(digest).map(|growth| {
+                        super::SOURCE_APPEND_PARENT_SHORT.with(|flag| flag.set(false));
+                        let hold = access.budget.remaining().checked_sub(growth - 1).unwrap();
+                        access.budget.reserve(hold).unwrap()
+                    })
+                } else {
+                    None
+                };
+                #[cfg(test)]
                 let observed = super::SOURCE_APPEND_ALLOCATIONS.with(|rows| {
                     if rows.borrow().is_none() {
                         return None;

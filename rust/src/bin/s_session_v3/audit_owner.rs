@@ -5663,6 +5663,9 @@ fn r14_source_keeper_seal_and_next_request_share_explicit_parent() {
                 );
                 let residual = residual.unwrap();
                 let after_seal = parent.live();
+                if cfg!(all(target_os = "linux", target_pointer_width = "64")) {
+                    assert_eq!(after_seal - residual, 1_595_269, "R1 封存父账扣款不得改变");
+                }
                 let seal_census = parent.census_take();
                 assert!(
                     after_seal <= after_drop.unwrap(),
@@ -5792,6 +5795,13 @@ fn r14_source_keeper_seal_and_next_request_share_explicit_parent() {
                     * (std::mem::size_of::<std::collections::HashMap<(), ()>>()
                         + std::mem::size_of::<Option<newchan_rust::s_content::capture_allocation::scratch::NativeReservation>>());
                 assert_eq!(shard_headers, expected_headers, "固定表头堆块");
+                let capacity = &report["retained_capacity_breakdown"];
+                assert_eq!(capacity["index_shard_header_bytes"], shard_headers);
+                if cfg!(all(target_os = "linux", target_pointer_width = "64")) {
+                    assert_eq!(shard_headers, 20_480);
+                    assert_eq!(capacity["total_payload_bytes"], 587_493 + 20_480);
+                }
+                eprintln!("R14_KEEPER_CAPACITY {capacity}");
                 assert_eq!(nodes, R14_NODES, "独立交叉核：来源节点数");
                 // #1855（主控 6738968739 Q1，沿 6283672661 的独立交叉核）：不读索引容量与许可，只用各片条目数
                 // 和 hashbrown `capacity_to_buckets`（<4 条 4 桶，<8 条 8 桶，否则 ⌊n·8/7⌋ 取 2 的幂）加每表
@@ -8135,6 +8145,8 @@ thread_local! {
     /// (G, 本次实际 cap, 原 j.cap, 工作域 live)；只读记录，不改变门判。
     pub(super) static SOURCE_APPEND_BOUNDARY_TRACE: std::cell::RefCell<Vec<[usize; 4]>> =
         const { std::cell::RefCell::new(Vec::new()) };
+    /// #1642 负控：在下一次真实扩容预约前暂占父分域（仅此次追加）。
+    static SOURCE_APPEND_PARENT_SHORT: Cell<bool> = const { Cell::new(false) };
     /// #1642：只在选定长夹具记录真正的分配窗口，不参与资源准入。
     static SOURCE_APPEND_ALLOCATIONS: std::cell::RefCell<Option<Vec<Value>>> =
         const { std::cell::RefCell::new(None) };

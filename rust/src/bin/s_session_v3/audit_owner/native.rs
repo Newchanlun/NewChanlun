@@ -402,12 +402,14 @@ thread_local! {
 #[cfg(test)]
 #[derive(Clone, Copy, serde::Serialize)]
 pub(in super::super) struct ParentRefusal {
-    bytes: usize,
-    remaining: usize,
-    live: usize,
-    peak: usize,
-    total_limit: usize,
-    kind: &'static str,
+    pub(crate) bytes: usize,
+    pub(crate) remaining: usize,
+    pub(crate) live: usize,
+    pub(crate) peak: usize,
+    pub(crate) total_limit: usize,
+    pub(crate) kind: &'static str,
+    pub(crate) stage: Option<&'static str>,
+    pub(crate) generation: Option<i64>,
 }
 
 pub(crate) struct Permit {
@@ -1619,6 +1621,7 @@ impl Ledger {
             if matches!(trace.get(), Some(None)) {
                 let live = self.live.load(Ordering::Acquire);
                 if bytes > d.remaining || live.saturating_add(bytes) > d.total_limit {
+                    let stage = super::super::state::active_stage();
                     trace.set(Some(Some(ParentRefusal {
                         bytes,
                         remaining: d.remaining,
@@ -1626,6 +1629,8 @@ impl Ledger {
                         peak: self.peak.load(Ordering::Acquire),
                         total_limit: d.total_limit,
                         kind: census_kind(kind),
+                        stage: stage.map(|(name, _)| name),
+                        generation: stage.map(|(_, generation)| generation),
                     })));
                 }
             }

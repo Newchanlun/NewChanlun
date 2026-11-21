@@ -163,6 +163,7 @@ QWatchInvalid：QContentInvalid：QSnapshotInvalid：
 Q增量账与全量oracle
 Q缓存分项与全量oracle
 R material已退款，未迁移capture/scan费用仍随父Budget存活
+R1 封存父账扣款不得改变
 R14仅增加已批准的记录溯源列
 R2：Ledger 类 scratch 错误与桥同字也须拒绝
 R2：闭包 Ok 但期间有 Ledger → 工作账损坏
