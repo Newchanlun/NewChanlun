@@ -20,8 +20,9 @@
 //!
 //! ## 边界与裁定
 //!
-//! - **信任根**：传入的 `units` 切片与 `unit_level` 即信任根。内核无法判断切片是否为该级完整的已确认单元
-//!   序列，或窗首中枢是否属于该走势。#1429 接入前，由构造调用方以 [`WindowOrigin`] 显式担保归属；
+//! - **信任根**：构造调用方提供同级已完成单元及其同源角色（如有）。扫描事实不作为入参。
+//!   内核无法判断切片是否为该级完整的已确认单元序列，或窗首中枢是否属于该走势。
+//!   #1429 接入前，由构造调用方以 [`WindowOrigin`] 显式担保归属；
 //!   无担保不签发首证。接入 #1429 后改读构造归属，不沿用临时担保。
 //! - **0 级与其余级的种子分派（E1）**：私有 `seed_build` 是本模块唯一读取 `unit_level` 的位置，0 级返回
 //!   [`center_from_segments`]，其余返回 [`center_from_window`]，照抄塔的分派
@@ -47,7 +48,10 @@ use std::ops::Range;
 
 use super::super::types::{Center, Direction};
 use super::center::{center_from_segments, center_from_window, PairLeaf, UnitRange};
-use super::center_scan::{scan_center_facts_full, PairOutcome, R5Boundary, R5Gap, R5Witness};
+use super::center_scan::{
+    scan_center_facts_with_r5, PairOutcome, R5Boundary, R5DirectionSource, R5Gap, R5Witness,
+    RoleProvider,
+};
 
 /// #2114 过渡期：由构造调用方担保输入窗首枢是本走势的首枢（#1429 接入前）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -106,7 +110,7 @@ impl UnitSpan {
     }
 }
 
-/// 共用扫描产出的单个中枢窗口节点（字段私有，只能由 [`judge_trend_formation`] 产出）。
+/// 共用扫描产出的单个中枢窗口节点（字段私有，由形成入口产出）。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CenterNode {
     ordinal: usize,
@@ -148,7 +152,7 @@ impl CenterNode {
     }
 }
 
-/// 一对相邻中枢窗口及其连接段、同源关系结果（字段私有，只能由 [`judge_trend_formation`] 产出）。
+/// 一对相邻中枢窗口及其连接段、同源关系结果（字段私有，由形成入口产出）。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PairJudgment {
     left: CenterNode,
@@ -311,14 +315,38 @@ impl TrendFormation {
     }
 }
 
-/// 从方向真实的同级已完成单元运行共用扫描。调用方显式提供输入窗归属担保。
+/// 从方向真实且没有额外角色证据的同级已完成单元运行共用扫描。输入窗归属必须显式传入。
 /// `unit_level` 为单元序列的塔级下标，`0` 表示 L0 已确认线段（`pipeline.rs:959`）。
 pub fn judge_trend_formation(
     unit_level: u32,
     units: &[UnitRange],
     origin: WindowOrigin,
 ) -> TrendFormation {
-    let scan = scan_center_facts_full(units, seed_build(unit_level));
+    judge_trend_formation_with_roles(
+        unit_level,
+        units,
+        RoleProvider {
+            directions: R5DirectionSource::Native,
+            attested: &[],
+        },
+        origin,
+    )
+}
+
+/// 已完成单元的构造方通过 [`RoleProvider`] 提供同一构造流的方向出处与外段角色。
+/// 输入窗归属仍须单独传入。窗口、见证、连接与 CC-020 关系均从本次共用扫描生成。
+pub fn judge_trend_formation_with_roles(
+    unit_level: u32,
+    units: &[UnitRange],
+    roles: RoleProvider<'_>,
+    origin: WindowOrigin,
+) -> TrendFormation {
+    let scan = scan_center_facts_with_r5(
+        units,
+        seed_build(unit_level),
+        roles.directions,
+        roles.attested,
+    );
     let centers: Vec<CenterNode> = scan
         .windows
         .iter()

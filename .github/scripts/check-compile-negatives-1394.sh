@@ -88,7 +88,7 @@ esac
 
 case "$suite" in
   all|default)
-    check issue1426_formation_type_refusal tests/trend_formation_1426.rs "" "E0308|E0061" 4 "--test trend_formation_1426" || status=1
+    check issue1426_formation_type_refusal tests/trend_formation_1426.rs "" "E0308|E0061" 7 "--test trend_formation_1426" || status=1
     check issue1426_fabricated_evidence_refusal tests/trend_formation_1426.rs "" "E0451" 6 "--test trend_formation_1426" 'type `trend_formation::Chain` is private$' || status=1
     ;;
 esac

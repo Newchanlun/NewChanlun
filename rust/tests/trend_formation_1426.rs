@@ -1,7 +1,6 @@
 //! #1426 TB-02-G 形成侧内核：外部集成测试及 #2114 / #804 行为锁。
 //!
-//! 本文件是外部 crate，只能访问 `newchan_rust::theta_v0::classifier::trend_formation` 的公开面；
-//! 不存在任何收证据或构造证据的入口。
+//! 本文件是外部 crate，经公开入口提供单元与构造角色，由内核生成扫描事实与形成凭据。
 
 use serde_json::Value;
 
@@ -9,11 +8,12 @@ use newchan_rust::theta_v0::classifier::center::{
     center_from_segments, center_from_window, center_pair_facts, PairLeaf, UnitRange,
 };
 use newchan_rust::theta_v0::classifier::center_scan::{
-    l0_units, scan_center_facts_full, PairOutcome, R5Gap, R5Proof, R5Witness,
+    l0_units, scan_center_facts_full, scan_center_facts_with_r5, CenterScanFacts, PairOutcome,
+    R5AttestedLegs, R5Boundary, R5DirectionSource, R5Gap, R5Proof, R5Witness, RoleProvider,
 };
 use newchan_rust::theta_v0::classifier::trend_formation::{
-    judge_trend_formation, CenterNode, FormedTrend, PairJudgment, PairState, TrendFormation,
-    WindowOrigin,
+    judge_trend_formation, judge_trend_formation_with_roles, CenterNode, FormedTrend, PairJudgment,
+    PairState, TrendFormation, WindowOrigin,
 };
 use newchan_rust::theta_v0::config::ThetaConfig;
 use newchan_rust::theta_v0::parser::parse_layer;
@@ -1408,47 +1408,271 @@ fn parity_with_shared_scan() {
                 center_from_window
             };
             let scan = scan_center_facts_full(units, build);
-            let wfs = scan.window_facts(units);
-            let witnesses = scan.r5_witnesses(units);
-            let pfs = scan.pair_facts(units);
             let tf = judge_from_move_start(level, units);
-
-            assert_eq!(tf.unit_level(), level);
-            assert_eq!(tf.unit_count(), units.len());
-            let centers = tf.centers();
-            assert_eq!(centers.len(), wfs.len());
-            for (k, (node, wf)) in centers.iter().zip(&wfs).enumerate() {
-                assert_eq!(node.ordinal(), k);
-                assert_eq!(node.members().range(), wf.first..wf.last + 1);
-                assert_eq!(node.members().units(), &units[wf.first..wf.last + 1]);
-                assert_eq!(node.r5_witness(), witnesses[k]);
-                assert_eq!(
-                    wf.settled,
-                    matches!(node.r5_witness(), R5Witness::Proven(_))
-                );
-                assert_eq!(
-                    node.break_unit().map(|(i, _)| i),
-                    wf.break_unit.or(wf.pending_boundary)
-                );
-                if let Some((i, u)) = node.break_unit() {
-                    assert_eq!(*u, units[i]);
-                }
-                let expected_center = (!wf.upgrade_pending).then(|| scan.window_center(units, k));
-                assert_eq!(node.center(), expected_center);
-            }
-
-            let pairs = tf.pairs();
-            assert_eq!(pairs.len(), pfs.len());
-            for (p, pf) in pairs.iter().zip(&pfs) {
-                assert_eq!(p.left().ordinal(), pf.left);
-                assert_eq!(p.right().ordinal(), pf.right);
-                assert_eq!(p.connectors().range(), pf.connectors);
-                assert_eq!(p.connectors().units(), &units[pf.connectors.clone()]);
-                assert_eq!(p.outcome(), pf.outcome);
-                assert_eq!(p.state().is_some(), pf.left == 0);
-            }
+            assert_matches_scan(units, level, &tf, &scan);
         }
     }
+}
+
+fn assert_matches_scan(
+    units: &[UnitRange],
+    level: u32,
+    tf: &TrendFormation,
+    scan: &CenterScanFacts,
+) {
+    let wfs = scan.window_facts(units);
+    let witnesses = scan.r5_witnesses(units);
+    let pfs = scan.pair_facts(units);
+    assert_eq!(tf.unit_level(), level);
+    assert_eq!(tf.unit_count(), units.len());
+    let centers = tf.centers();
+    assert_eq!(centers.len(), wfs.len());
+    for (k, (node, wf)) in centers.iter().zip(&wfs).enumerate() {
+        assert_eq!(node.ordinal(), k);
+        assert_eq!(node.members().range(), wf.first..wf.last + 1);
+        assert_eq!(node.members().units(), &units[wf.first..wf.last + 1]);
+        assert_eq!(node.r5_witness(), witnesses[k]);
+        assert_eq!(
+            wf.settled,
+            matches!(node.r5_witness(), R5Witness::Proven(_))
+        );
+        assert_eq!(
+            node.break_unit().map(|(i, _)| i),
+            wf.break_unit.or(wf.pending_boundary)
+        );
+        if let Some((i, u)) = node.break_unit() {
+            assert_eq!(*u, units[i]);
+        }
+        let expected_center = (!wf.upgrade_pending).then(|| scan.window_center(units, k));
+        assert_eq!(node.center(), expected_center);
+    }
+
+    let pairs = tf.pairs();
+    assert_eq!(pairs.len(), pfs.len());
+    for (p, pf) in pairs.iter().zip(&pfs) {
+        assert_eq!(p.left(), centers[pf.left]);
+        assert_eq!(p.right(), centers[pf.right]);
+        assert_eq!(p.connectors().range(), pf.connectors);
+        assert_eq!(p.connectors().units(), &units[pf.connectors.clone()]);
+        assert_eq!(p.outcome(), pf.outcome);
+        assert_eq!(p.state().is_some(), pf.left == 0);
+    }
+}
+
+// Astra B1：第一个完全在 B 核心之外的单元是离开，而非回抽。
+fn astra_b1_units(prefix: &[Tick], pullback_low: Option<Tick>) -> Vec<UnitRange> {
+    let mut units = units_from_endpoints(prefix);
+    let mut start_index = units.last().unwrap().end_index;
+    for (direction, lo) in [(Direction::Up, Some(56)), (Direction::Down, pullback_low)] {
+        if let Some(lo) = lo {
+            units.push(UnitRange {
+                start_index,
+                end_index: start_index + 4,
+                direction,
+                lo,
+                hi: 90,
+            });
+            start_index += 4;
+        }
+    }
+    units
+}
+
+fn astra_b1_role(leave: usize, first_pullback: Option<usize>) -> R5AttestedLegs {
+    R5AttestedLegs {
+        seed: 6,
+        leave,
+        side: Direction::Up,
+        first_pullback,
+        leave_is_zn: Some(false),
+    }
+}
+
+#[test]
+fn astra_b1_attested_first_pullback() {
+    let prefix = &UP_FORMATION[..10];
+    let provisional = PairState::ProvisionalSeparation {
+        observed_direction: Direction::Up,
+    };
+    for (pullback_low, origin, expected_leaf, expected_state, expected_final) in [
+        (
+            None,
+            WindowOrigin::MoveStartGuaranteed,
+            PairLeaf::UpNewbirth,
+            provisional,
+            false,
+        ),
+        (
+            Some(80),
+            WindowOrigin::MoveStartGuaranteed,
+            PairLeaf::UpNewbirth,
+            PairState::TrendFormed {
+                direction: Direction::Up,
+            },
+            true,
+        ),
+        (
+            Some(39),
+            WindowOrigin::MoveStartGuaranteed,
+            PairLeaf::UpExpansion,
+            PairState::ExpansionHandoff,
+            false,
+        ),
+        (
+            Some(80),
+            WindowOrigin::UnverifiedOrPriorTail,
+            PairLeaf::UpNewbirth,
+            provisional,
+            true,
+        ),
+    ] {
+        let units = astra_b1_units(prefix, pullback_low);
+        let directions: Vec<_> = units.iter().map(|u| Some(u.direction)).collect();
+        let attested = [astra_b1_role(9, pullback_low.map(|_| 10))];
+        let roles = RoleProvider {
+            directions: R5DirectionSource::Verified(&directions),
+            attested: &attested,
+        };
+        let scan =
+            scan_center_facts_with_r5(&units, center_from_window, roles.directions, roles.attested);
+        let tf = judge_trend_formation_with_roles(1, &units, roles, origin);
+        assert_matches_scan(&units, 1, &tf, &scan);
+        let [pair] = tf.pairs() else {
+            panic!("预期恰有首对");
+        };
+        assert_eq!((pair.left().ordinal(), pair.right().ordinal()), (0, 1));
+        assert_eq!(pair.connectors().range(), 4..6);
+        assert_eq!(pair.left().center().unwrap().gg, 40);
+        proof(pair.left());
+        let b = pair.right();
+        let center = b.center().unwrap();
+        assert_eq!((center.zd, center.zg), (48, 55));
+
+        match pullback_low {
+            None => {
+                assert_eq!(
+                    b.r5_witness(),
+                    R5Witness::Absent(R5Gap::AwaitingFirstPullback)
+                );
+                assert_eq!(b.members().range(), 6..9);
+            }
+            Some(80) => {
+                let r5 = proof(b);
+                assert_eq!(
+                    (r5.leave_unit(), r5.pullback_unit(), r5.side()),
+                    (9, 10, Direction::Up)
+                );
+                assert_eq!(r5.pullback_extreme(), 80);
+                assert_eq!(b.members().range(), 6..9);
+                assert_eq!(center.dd, 45);
+            }
+            Some(39) => {
+                let returned = scan.windows[1].last_return.unwrap();
+                assert_eq!((returned.leave_unit(), returned.pullback_unit()), (9, 10));
+                assert_eq!(b.members().range(), 6..11);
+                assert_eq!(center.dd, 39);
+                assert_eq!(b.r5_witness(), R5Witness::Absent(R5Gap::Open));
+            }
+            _ => unreachable!(),
+        }
+        assert_eq!(leaf(pair), expected_leaf);
+        assert_eq!(pair.state(), Some(expected_state));
+        assert_eq!(pair.is_final(), expected_final);
+        let formed = pair.formed().map(|f| f.direction());
+        assert_eq!(
+            formed,
+            (expected_state
+                == PairState::TrendFormed {
+                    direction: Direction::Up
+                })
+            .then_some(Direction::Up)
+        );
+        println!(
+            "B1 pullback={pullback_low:?} origin={origin:?}: B={:?}, members={:?}, DD={}, leaf={:?}, state={:?}, final={}, formed={formed:?}",
+            b.r5_witness(), b.members().range(), center.dd, leaf(pair), pair.state(), pair.is_final()
+        );
+    }
+}
+
+#[test]
+fn astra_b1_attested_return_upgrades_nine_member_window() {
+    let units = astra_b1_units(
+        &[40, 10, 35, 20, 60, 55, 65, 45, 55, 48, 56, 49, 55, 48],
+        Some(39),
+    );
+    let attested = [astra_b1_role(13, Some(14))];
+    let roles = RoleProvider {
+        directions: R5DirectionSource::Native,
+        attested: &attested,
+    };
+    let scan =
+        scan_center_facts_with_r5(&units, center_from_window, roles.directions, roles.attested);
+    let tf = judge_trend_formation_with_roles(1, &units, roles, WindowOrigin::MoveStartGuaranteed);
+    assert_matches_scan(&units, 1, &tf, &scan);
+    let [pair] = tf.pairs() else {
+        panic!("升级仍应保留首对");
+    };
+    let w = scan.windows[1];
+    let returned = w.last_return.unwrap();
+    assert_eq!((returned.leave_unit(), returned.pullback_unit()), (13, 14));
+    assert_eq!((w.boundary, w.emitted), (R5Boundary::Upgrade, 3));
+    assert_eq!(pair.right().members().range(), 6..15);
+    assert_eq!(pair.right().center(), None);
+    assert_eq!(pair.outcome(), PairOutcome::PendingUpgrade);
+    assert_eq!(pair.state(), Some(PairState::UpgradeDeferred));
+    assert!(pair.is_final());
+    assert_eq!(tf.final_pairs(), tf.pairs());
+    assert!(pair.formed().is_none());
+    println!(
+        "B1 7+2: return=13->14, boundary={:?}, emitted={}, members={:?}, outcome={:?}, state={:?}, final={}, formed=None",
+        w.boundary, w.emitted, pair.right().members().range(), pair.outcome(), pair.state(), pair.is_final()
+    );
+}
+
+#[test]
+fn astra_b1_unattested_disconnected_joint_stays_pending() {
+    let mut units = units_from_endpoints(UP_FORMATION);
+    units[10].hi -= 1;
+    let tf = judge_from_move_start(1, &units);
+    let pair = &tf.pairs()[0];
+    assert_eq!(
+        pair.right().r5_witness(),
+        R5Witness::Absent(R5Gap::JointNotConnected)
+    );
+    assert!(pair.formed().is_none());
+    assert!(!pair.is_final());
+    assert_eq!(
+        pair.state(),
+        Some(PairState::ProvisionalSeparation {
+            observed_direction: Direction::Up,
+        })
+    );
+    println!(
+        "B1 无角色断关节: {:?}, state={:?}, formed=None",
+        pair.right().r5_witness(),
+        pair.state()
+    );
+}
+
+#[test]
+fn role_input_does_not_promote_unproven_directions_to_native() {
+    let units = astra_b1_units(&UP_FORMATION[..10], Some(80));
+    let mut directions: Vec<_> = units.iter().map(|u| Some(u.direction)).collect();
+    directions[4] = None;
+    let tf = judge_trend_formation_with_roles(
+        1,
+        &units,
+        RoleProvider {
+            directions: R5DirectionSource::Verified(&directions),
+            attested: &[astra_b1_role(9, Some(10))],
+        },
+        WindowOrigin::MoveStartGuaranteed,
+    );
+    let [a] = tf.centers()[..] else {
+        panic!("方向未证的 A 不应续扫到 B");
+    };
+    assert_eq!(a.r5_witness(), R5Witness::Absent(R5Gap::DirectionUnproven));
+    assert!(tf.pairs().is_empty());
 }
 
 /// 17. 源码文本锁只提示 DESIGN §3、§4 的回归；外部不能用字面量构造证据由第 18 项编译负例验证。
@@ -1655,6 +1879,7 @@ fn check_public_surface(src: &str) -> Result<(), String> {
 
     let mut expected = vec![
         ("", "fn", "judge_trend_formation"),
+        ("", "fn", "judge_trend_formation_with_roles"),
         ("", "enum", "PairState"),
         ("", "enum", "WindowOrigin"),
         ("PairState", "fn", "label"),
@@ -1707,12 +1932,22 @@ fn fabricated_evidence_literals_must_fail(u1: UnitSpan, u2: UnitSpan, c: CenterN
     let _ = TrendFormation { unit_level: 0, unit_count: 0, origin: WindowOrigin::MoveStartGuaranteed, chain: todo!() };
 }
 
-// 形成侧标签、已声明的归属和 R5 视图不是 FormedTrend，入口也没有隐式归属。
+// 标签不能代证；两个入口都必须显式传归属，带角色入口也不接受预造扫描或裸 R5。
 // cargo rustc --locked --test trend_formation_1426 -- --cfg issue1426_formation_type_refusal
 #[cfg(issue1426_formation_type_refusal)]
-fn formation_types_must_not_bypass_credentials(pair: &PairJudgment, units: &[UnitRange]) {
+fn formation_types_must_not_bypass_credentials(
+    pair: &PairJudgment,
+    units: &[UnitRange],
+    roles: RoleProvider<'_>,
+    scan: CenterScanFacts,
+    bare_proof: R5Proof,
+) {
     let _: FormedTrend<'_> = pair.state().unwrap();
     let _: FormedTrend<'_> = WindowOrigin::MoveStartGuaranteed;
     let _: FormedTrend<'_> = pair.right().r5_witness();
     let _ = judge_trend_formation(0, units);
+    let _ = judge_trend_formation_with_roles(0, units, roles);
+    let _ = judge_trend_formation_with_roles(0, units, scan, WindowOrigin::MoveStartGuaranteed);
+    let _ =
+        judge_trend_formation_with_roles(0, units, bare_proof, WindowOrigin::MoveStartGuaranteed);
 }
