@@ -504,14 +504,20 @@ def assert_r03_rejected(repo, check, payload_change, diagnostic, *, peer=None):
     ("test-check-id", "RECORD_UNSEALED"),
     ("test-name", "RECORD_UNSEALED"),
     ("test-source-path", "RECORD_UNSEALED"),
+    ("test-empty", "RECORD_PUBLIC_SCHEMA"),
+    ("test-duplicate", "RECORD_PUBLIC_SCHEMA"),
 ])
 def test_r03_rejects_bad_partition_in_group_and_final_seal(repo, fault, diagnostic):
     own_key = r03_record_key(R03_CASES[0])
     if fault.startswith("test-"):
         test = {"check_id": "check-0", "name": "trial/g-1", "source_path": "trial/g-1"}
-        test.update({"test-check-id": {"check_id": "check-1"}, "test-name": {"name": "not-executed"},
-                     "test-source-path": {"source_path": "trial/other"}}[fault])
-        payload_change = {"tests": [test]}
+        payload_change = {"tests": {
+            "test-check-id": [test | {"check_id": "check-1"}],
+            "test-name": [test | {"name": "not-executed"}],
+            "test-source-path": [test | {"source_path": "trial/other"}],
+            "test-empty": [],
+            "test-duplicate": [test, test],
+        }[fault]}
     else:
         keys = {"empty-keys": [], "duplicate-key": [own_key, own_key]}.get(fault, [r03_record_key(R03_CASES[1])])
         payload_change = {"keys": keys}
@@ -546,7 +552,8 @@ def test_tb_key_public_schema_stays_closed(field, value, error):
     path, tb, kind, key_id, ptr = R03_CASES[0]
     key = {"slice_id": tb, "kind": kind, "id": key_id, "basis_path": path, "basis_pointer": ptr}
     payload = {"schema_version": "at18-tb-entity/1", "tb_id": tb, "evidence_class": "simulation",
-               "profile_id": None, "tests": [], "keys": [key], "conditions": {}, "output": {}}
+               "profile_id": None, "keys": [key], "conditions": {}, "output": {},
+               "tests": [{"check_id": "check-0", "name": "trial/g-1", "source_path": "trial/g-1"}]}
     contract = read(ROOT, ADAPTER)
     record = f"tb.simulation.{tb}"
     # RFC 6901 的空根、标点和转义不能按业务 token 审。

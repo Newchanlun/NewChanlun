@@ -7,7 +7,7 @@ import subprocess
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
-from adapter import decode_fields, public_payload
+from adapter import decode_fields, public_payload, tb_test_identity
 from check_selector import annotation, command, selector_matches
 from common import (COMMIT, Invalid, RECORD, SPECIAL, git_blob, json_bytes, path_name, read_regular, require,
                     sha, strict_json, unique)
@@ -86,8 +86,8 @@ def validate_record(contract, document, check, identity, *, allowed_r03, execute
     if (tb := RECORD.fullmatch(check["record"])):
         require((payload["evidence_class"], payload["tb_id"], payload["profile_id"]) ==
                 (tb[1], tb[2], check["profile_id"]), "RECORD_UNSEALED", "TB payload identity")
-        require(all(test["check_id"] == check["check_id"] and test["name"] in executed_names
-                    and test["source_path"] == check["source"]["path"] for test in payload["tests"]),
+        require(all(cid == check["check_id"] and name in executed_names and source == check["source"]["path"]
+                    for cid, name, source in map(tb_test_identity, payload["tests"])),
                 "RECORD_UNSEALED", "TB payload test identity")
     elif check["record"] in SPECIAL:
         binding = check["record"] == "permission.experiment"

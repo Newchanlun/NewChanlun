@@ -141,6 +141,10 @@ def _public_fields(contract, fields, obj, *, version_pointer=None, item_source=N
     walk(tree, obj)
 
 
+def tb_test_identity(test):
+    return test["check_id"], test["name"], test["source_path"]
+
+
 def public_payload(contract, record, obj, *, allowed_r03=()):
     payload = decode_payload(contract, record, obj)
     rule = contract["run_records"][record if record in SPECIAL else "tb"]
@@ -151,6 +155,8 @@ def public_payload(contract, record, obj, *, allowed_r03=()):
         require(bool(identities), "RECORD_PUBLIC_SCHEMA", "empty TB record keys")
         require(all(key[0] == tb[2] and key in allowed_r03 for key in identities),
                 "BASIS_MISMATCH", "TB record key provenance")
+        tests = unique(map(tb_test_identity, payload["tests"]), "RECORD_PUBLIC_SCHEMA", "duplicate TB record test")
+        require(bool(tests), "RECORD_PUBLIC_SCHEMA", "empty TB record tests")
     return payload
 
 def decode_legacy(root, contract, identity, issues, comments):
