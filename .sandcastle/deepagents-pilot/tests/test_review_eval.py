@@ -5247,3 +5247,56 @@ def test_r17_colon_tag_reuses_three_tier_classifier_and_body_non_blocking_unders
     assert classify_finding_heuristic("This is non blocking.", "blocked") == "non_blocking_or_nit"
     assert classify_finding_heuristic("This is not non_blocking.", "blocked") == "blocking_substantive"
     assert classify_finding_heuristic("This is not a non_blocking issue.", "blocked") == "blocking_substantive"
+
+
+def test_r18_identifier_word_boundaries_tier3_pass_tags_and_narrow_style_format() -> None:
+    # Important 1：正文启发式含下划线词边界，避免标识符/函数名误命中非阻断或阻断标记
+    assert classify_finding_heuristic("The non_blocking_io branch drops writes.", "blocked") == "blocking_substantive"
+    assert classify_finding_heuristic("my_non_blocking_fn drops packets.", "blocked") == "blocking_substantive"
+    assert classify_finding_heuristic("minor_version mismatch breaks protocol.", "blocked") == "blocking_substantive"
+    assert classify_finding_heuristic("my_nit: handler drops events.", "blocked") == "blocking_substantive"
+    assert classify_finding_heuristic("This is non_blocking.", "blocked") == "non_blocking_or_nit"
+    assert classify_finding_heuristic("This is nonblocking.", "blocked") == "non_blocking_or_nit"
+    assert classify_finding_heuristic("This is not non_blocking.", "blocked") == "blocking_substantive"
+    assert classify_finding_heuristic("is_blocking_io wait state", "failed") == "other"
+    assert classify_finding_heuristic("is_critical_section lock", "failed") == "other"
+    assert classify_finding_heuristic("step_p1: note", "failed") == "other"
+    assert classify_finding_heuristic("high severity_code mismatch", "failed") == "other"
+    assert classify_finding_heuristic("critical crash on shutdown", "failed") == "blocking_substantive"
+    assert _parse_leading_severity_tag("[P1][non_blocking_io] drops writes") == "blocking"
+
+    # Important 2：Tier 3 补齐独立 [无问题] / [未发现问题] / [无误] / [通过项]，Tier 1 补齐 未阻断
+    assert classify_finding_heuristic("[无问题] 检查通过", "blocked") == "non_blocking_or_nit"
+    assert classify_finding_heuristic("[未发现问题] 检查完成", "blocked") == "non_blocking_or_nit"
+    assert classify_finding_heuristic("[无误] 校验通过", "blocked") == "non_blocking_or_nit"
+    assert classify_finding_heuristic("[通过项] 已确认无回归", "blocked") == "non_blocking_or_nit"
+    assert classify_finding_heuristic("[未阻断] 仅建议后续整理", "blocked") == "non_blocking_or_nit"
+    assert classify_finding_heuristic("[P2/未阻断] 可后续清理", "blocked") == "non_blocking_or_nit"
+    assert classify_finding_heuristic("[P2][未阻断] 可后续清理", "blocked") == "non_blocking_or_nit"
+    assert classify_finding_heuristic("未阻断: 仅记录", "blocked") == "non_blocking_or_nit"
+    assert classify_finding_heuristic("无问题: 检查通过", "blocked") == "non_blocking_or_nit"
+    # Tier 2 阻断词优先于 Tier 3；正文“未阻断”不作非阻断启发式；否定短语不误命中精确全词元
+    assert classify_finding_heuristic("[P1/无问题] 存在越权", "blocked") == "blocking_substantive"
+    assert classify_finding_heuristic("[阻断/未发现问题] 存在越权", "blocked") == "blocking_substantive"
+    assert classify_finding_heuristic("[并非无问题] 存在越权", "blocked") == "blocking_substantive"
+    assert classify_finding_heuristic("未阻断非法请求导致越权", "blocked") == "blocking_substantive"
+    assert classify_finding_heuristic("[P1][未阻断越权] 缺少校验", "blocked") == "blocking_substantive"
+
+    # Important 3：_STYLE_FORMAT_RE 剔除裸词“格式”，仅匹配真正的代码风格/格式化/空白/排版噪声
+    assert is_style_or_format_finding("非法输入格式会被接受") is False
+    assert classify_finding_heuristic("非法输入格式会被接受", "blocked") == "blocking_substantive"
+    assert is_style_or_format_finding("格式略有偏差的 BLOCK 不再撤销放行") is False
+    assert classify_finding_heuristic("格式略有偏差的 BLOCK 不再撤销放行", "blocked") == "blocking_substantive"
+    assert is_style_or_format_finding("JSON 格式校验绕过") is False
+    assert is_style_or_format_finding("日志格式缺少关键字段") is False
+    assert is_style_or_format_finding("[Nit] formatting") is True
+    assert classify_finding_heuristic("[Nit] formatting", "blocked") == "non_blocking_or_nit"
+    assert is_style_or_format_finding("[Important] rustfmt check failed") is True
+    assert classify_finding_heuristic("[Important] rustfmt check failed", "blocked") == "blocking_style_or_format"
+    assert is_style_or_format_finding("[Nit] 代码格式对齐建议") is True
+    assert classify_finding_heuristic("[Nit] 代码格式对齐建议", "blocked") == "non_blocking_or_nit"
+    assert is_style_or_format_finding("gofmt check failed") is True
+    assert is_style_or_format_finding("clang-format mismatch") is True
+    assert is_style_or_format_finding("排版问题需要调整") is True
+    assert is_style_or_format_finding("格式对齐建议") is True
+    assert is_style_or_format_finding("import order_id mismatch") is False

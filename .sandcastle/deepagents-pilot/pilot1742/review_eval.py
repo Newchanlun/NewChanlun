@@ -33,10 +33,10 @@ _DIFF_HUNK_RE = re.compile(r"^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@")
 
 # 启发式正则：仅用于对历史纯文本 findings 做粗粒度归类，非人工标注真值。
 _STYLE_FORMAT_RE = re.compile(
-    r"(?:(?<![A-Za-z0-9_])(?:rustfmt|cargo\s+fmt|prettier|eslint|ruff|flake8|black|"
+    r"(?:(?<![A-Za-z0-9_])(?:rustfmt|cargo\s+fmt|prettier|eslint|ruff|flake8|black|gofmt|clang-format|"
     r"typo|style\s*(?:only|issue|nit)|formatting|whitespace|import\s*order)(?![A-Za-z0-9_])|"
-    r"(?<![A-Za-z0-9_])import\s*(?:排序|顺序|分组)|"
-    r"格式(?:化|问题|对齐)?|缩进|尾随空格|多余空行|拼写错误)",
+    r"(?<![A-Za-z0-9_])import\s*(?:排序|顺序|分组)(?![A-Za-z0-9_])|"
+    r"代码格式(?:化|问题|对齐)?|格式对齐|排版(?:格式|问题|对齐)?|缩进|尾随空格|多余空行|拼写错误)",
     re.IGNORECASE,
 )
 _LEADING_LIST_PREFIX_RE = re.compile(r"^(?:[-*•]\s+|\d+[.)]\s+)")
@@ -92,8 +92,8 @@ _KNOWN_ASCII_SEVERITY_WORD_RE = re.compile(
 )
 _EXPLICIT_NON_BLOCKING_OVERRIDE_RE = re.compile(
     r"(?:(?<!不是)(?<!并非)(?<!不属于)(?:非阻断|不阻断)|"
-    r"(?<!not\s)(?<!not\sa\s)(?<![A-Za-z0-9])non[-_ ]?blocking(?![A-Za-z0-9])|"
-    r"(?<![A-Za-z0-9])nit(?![A-Za-z0-9]))",
+    r"(?<!not\s)(?<!not\sa\s)(?<![A-Za-z0-9_])non[-_ ]?blocking(?![A-Za-z0-9_])|"
+    r"(?<![A-Za-z0-9_])nit(?![A-Za-z0-9_]))",
     re.IGNORECASE,
 )
 _LEADING_COLON_TAG_RE = re.compile(r"^(?:(?:\*\*|__)\s*)?([^:\n：\[\【\]\】`*]{1,24}?)(?:\s*(?:\*\*|__))?\s*[:：](?!\d)")
@@ -102,6 +102,7 @@ _TIER1_NON_BLOCKING_TAG_TOKENS: frozenset[str] = frozenset(
     {
         "非阻断",
         "不阻断",
+        "未阻断",
         "non-blocking",
         "nonblocking",
         "non_blocking",
@@ -143,6 +144,9 @@ _TIER3_NON_BLOCKING_TAG_TOKENS: frozenset[str] = frozenset(
         "核实通过",
         "核验通过",
         "通过项",
+        "无问题",
+        "未发现问题",
+        "无误",
         "确认无问题",
         "确认无误",
     }
@@ -152,19 +156,19 @@ _ALL_KNOWN_SEVERITY_TAG_TOKENS: frozenset[str] = (
 )
 _TIER3_VERIFIED_OK_TAG_RE = re.compile(r"^已核.*(?:无问题|未发现问题)$")
 _NON_BLOCKING_NIT_RE = re.compile(
-    r"(?:[\[\【]\s*nit\s*[\]\】]|(?<![A-Za-z0-9])nit\s*[:：]|"
+    r"(?:[\[\【]\s*nit\s*[\]\】]|(?<![A-Za-z0-9_])nit\s*[:：]|"
     r"(?<!不是)(?<!并非)(?<!不属于)(?<!不是一个)(?<!并非是)(?:非阻断|不阻断)|"
-    r"(?<!not\s)(?<!not\sa\s)(?<![A-Za-z0-9])non[-_ ]?blocking(?![A-Za-z0-9])|"
+    r"(?<!not\s)(?<!not\sa\s)(?<![A-Za-z0-9_])non[-_ ]?blocking(?![A-Za-z0-9_])|"
     r"(?<!不是)(?<!并非)(?<!非)建议后续|"
     r"(?<!不是)(?<!并非)(?<!非)(?<!不是建议)(?<!并非建议)(?<!非建议)(?<!不是可选)(?<!并非可选)(?<!非可选)后续跟进|"
     r"(?<!不是)(?<!并非)(?<!非)可选(?:后续)?(?:建议|优化|改进|项)|"
-    r"顺手|(?<![A-Za-z0-9])minor(?![A-Za-z0-9])|仅作记录|低优先级)",
+    r"顺手|(?<![A-Za-z0-9_])minor(?![A-Za-z0-9_])|仅作记录|低优先级)",
     re.IGNORECASE,
 )
 _BLOCKING_MARKER_RE = re.compile(
-    r"(?:[\[\【]\s*p[012]\s*[\]\】]|(?<![A-Za-z0-9])p[012]\s*[:：]|阻断|必须修复|"
-    r"(?<![A-Za-z0-9])blocking(?![A-Za-z0-9])|(?<![A-Za-z0-9])critical(?![A-Za-z0-9])|"
-    r"high\s+severity)",
+    r"(?:[\[\【]\s*p[012]\s*[\]\】]|(?<![A-Za-z0-9_])p[012]\s*[:：]|阻断|必须修复|"
+    r"(?<![A-Za-z0-9_])blocking(?![A-Za-z0-9_])|(?<![A-Za-z0-9_])critical(?![A-Za-z0-9_])|"
+    r"(?<![A-Za-z0-9_])high\s+severity(?![A-Za-z0-9_]))",
     re.IGNORECASE,
 )
 
@@ -2527,7 +2531,7 @@ def _parse_leading_severity_tag(
                     return "non_blocking"
                 if tag_cls == "blocking":
                     first_classified = "blocking"
-            elif _EXPLICIT_NON_BLOCKING_OVERRIDE_RE.search(tag):
+            elif _EXPLICIT_NON_BLOCKING_OVERRIDE_RE.search(tag) or "未阻断" in _tokenize_severity_tag(tag):
                 return "non_blocking"
         if first_classified is not None:
             return first_classified
