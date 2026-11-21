@@ -78,9 +78,8 @@ impl<'step, 'tx, 'conn> StepReader<'step, 'tx, 'conn> {
                 return Err(work.reject(capture_allocation::scratch::ScratchFailure::Ledger));
             };
             if native
-                .index_permits
-                .iter()
-                .flatten()
+                .nodes
+                .permits()
                 .any(|p| !p.belongs_to_parent(work))
             {
                 return Err(work.reject(capture_allocation::scratch::ScratchFailure::Ledger));

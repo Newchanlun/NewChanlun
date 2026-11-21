@@ -2506,8 +2506,6 @@ impl SourceClaim {
 struct NativeCaptureNodes {
     // 标准 RandomState；未核摘要不使用弱哈希。
     nodes: NativeCaptureIndex,
-    index_permits:
-        [Option<capture_allocation::scratch::NativeReservation>; native_capture_index::SHARDS],
     body_len: usize,
     body_capacity: usize,
     owner_dirty_head: std::cell::Cell<Option<NodeDigest>>,
@@ -3439,8 +3437,7 @@ impl AuditCapture {
             }
         }
         let material = ledger.into_inner();
-        let mut kept = NativeCaptureIndex::new();
-        let permits = kept.reserve_keys(material.digests.iter(), admission.0)?;
+        let mut kept = NativeCaptureIndex::from_keys(material.digests.iter(), admission.0)?;
         let CaptureNodes::Native(native) = &mut self.nodes else {
             unreachable!()
         };
@@ -3455,7 +3452,6 @@ impl AuditCapture {
             // 不保留的NativeNode在本轮drop；正文与其许可不复制、不留在旧HashMap或proof中。
         }
         native.nodes = kept;
-        native.index_permits = permits;
         // collector产生的F proof及全请求memo都不得跟随稀疏owner保留。
         self = self.into_originals_only()?;
         // generated_state仅导航，不授予完整根资格；Template保持Default空集合。
@@ -3720,7 +3716,8 @@ impl AuditCapture {
         // body 按值从 effects 移入，其分配已收费；S7 正文/证书归属只登记合同项（#1488 P2-A），
         // 须指到这块已物理计费的正文，不再在父账同额物理reserve。
         let source_claim = work.map(|_| SourceClaim::on_body(&body)).transpose()?;
-        let index = native.nodes.target_mut(&digest);
+        let shard = native.nodes.target_mut(&digest);
+        let index = &mut shard.table;
         if index.len() == index.capacity() {
             let growth = owner_index_growth(index.capacity());
             let permit = work.map(|w| w.reserve_native(growth)).transpose()?;
@@ -3732,7 +3729,7 @@ impl AuditCapture {
                 }
                 return Ok(false);
             }
-            native.index_permits[NativeCaptureIndex::shard(&digest)] = permit;
+            shard.permit = permit;
         }
         let bytes = body.capacity();
         native.body_len = native
@@ -3959,10 +3956,7 @@ impl AuditCapture {
                 .ok_or_else(|| CodecError::new(code::SOURCE, "Native捕获body总长度溢出"))
         })?;
         let entry_limit = nodes.len();
-        let mut native_nodes = NativeCaptureIndex::new();
-        let permits = native_nodes.reserve_keys(nodes.keys(), work)?;
-        // 后声明原件表，失败退出先析构表，再释放其许可。
-        let mut native_nodes = native_nodes;
+        let mut native_nodes = NativeCaptureIndex::from_keys(nodes.keys(), work)?;
         let CaptureNodes::Legacy(nodes) =
             std::mem::replace(&mut self.nodes, CaptureNodes::Legacy(BTreeMap::new()))
         else {
@@ -4000,7 +3994,6 @@ impl AuditCapture {
         drop(self.original_fees.take());
         self.nodes = CaptureNodes::Native(NativeCaptureNodes {
             nodes: native_nodes,
-            index_permits: permits,
             body_len: body_capacity_limit,
             body_capacity,
             owner_dirty_head: Default::default(),
@@ -4183,7 +4176,7 @@ impl AuditCapture {
             out.extend(held(&memo.borrow().native_seen_permit));
         }
         if let CaptureNodes::Native(native) = &self.nodes {
-            out.extend(native.index_permits.iter().filter_map(held));
+            out.extend(native.nodes.permits().map(|permit| permit.bytes()));
             for node in native.nodes.values() {
                 if node.proof.borrow().is_some() {
                     return Err(CodecError::new(code::SOURCE, "许可清单：节点证明未清空"));
@@ -4280,13 +4273,13 @@ impl AuditCapture {
     }
     /// #1488 P2-β：索引许可布局实测——（索引许可字节，现槽宽=size_of<(NodeDigest,NativeNode)>+1，
     /// P2-A前槽宽：同布局镜像但`source_permit: Option<NativeReservation>`）。索引许可=槽数×槽宽，
-    /// 故P2-A的布局连带降幅=槽数×(旧槽宽−现槽宽)。
+    /// 故P2-A的布局连带降幅=槽数×(旧槽宽−现槽宽)。另报与槽宽无关的固定表头堆块。
     #[cfg(all(
         feature = "s_incremental",
         any(test, feature = "s_capture_native_testonly")
     ))]
     #[doc(hidden)]
-    pub fn native_index_layout_for_testonly(&self) -> Option<(usize, usize, usize)> {
+    pub fn native_index_layout_for_testonly(&self) -> Option<(usize, usize, usize, usize)> {
         #[allow(dead_code)]
         struct NativeNodeBeforeP2a {
             tag: u8,
@@ -4303,13 +4296,13 @@ impl AuditCapture {
         };
         Some((
             native
-                .index_permits
-                .iter()
-                .flatten()
+                .nodes
+                .table_permits()
                 .map(capture_allocation::scratch::NativeReservation::bytes)
                 .sum(),
             std::mem::size_of::<(NodeDigest, NativeNode)>() + 1,
             std::mem::size_of::<(NodeDigest, NativeNodeBeforeP2a)>() + 1,
+            native.nodes.storage_bytes(),
         ))
     }
     #[cfg(feature = "s_incremental")]
@@ -9844,16 +9837,17 @@ mod native_owner_codec_bridge_tests {
         );
         let one_shard = 20 * (std::mem::size_of::<(NodeDigest, NativeNode)>() + 1);
         let parent = Parent::new(32 << 20, 0);
-        parent.native_limit.store(one_shard, Ordering::SeqCst);
-        let mut index = NativeCaptureIndex::new();
-        let failed = run(&parent, |work| index.reserve_keys(keys.iter(), Some(work)));
+        let fixed = NativeCaptureIndex::STORAGE_BYTES;
+        parent
+            .native_limit
+            .store(fixed + one_shard, Ordering::SeqCst);
+        let failed = run(&parent, |work| NativeCaptureIndex::from_keys(keys.iter(), Some(work)));
         assert!(matches!(
             failed,
             Err(WorkError::Resource(ScratchFailure::Budget))
         ));
-        assert_eq!(index.capacity(), 0, "后片拒绝前不开始分配任何片");
         assert_eq!(parent.live.load(Ordering::SeqCst), 0);
-        assert!(parent.peak.load(Ordering::SeqCst) >= one_shard);
+        assert!(parent.peak.load(Ordering::SeqCst) >= fixed + one_shard);
     }
 
     #[test]
@@ -9870,14 +9864,27 @@ mod native_owner_codec_bridge_tests {
         let CaptureNodes::Native(native) = &capture.nodes else {
             unreachable!()
         };
-        assert!(native.index_permits.iter().all(Option::is_some));
-        // ≥8 桶时容量恰为桶数的 7/8；hash_room 按 (桶数+16)×(size_of+1) 收费。
-        let buckets = native.nodes.capacity() * 8 / 7;
+        let mut counts = [0usize; native_capture_index::SHARDS];
+        for (digest, _) in native.nodes.iter() {
+            counts[NativeCaptureIndex::shard(digest)] += 1;
+        }
+        let mut buckets = 0;
+        let mut tables = 0;
         let slot = std::mem::size_of::<(NodeDigest, NativeNode)>() + 1;
+        for count in counts.into_iter().filter(|&n| n > 0) {
+            // 冷建表的 4/8 桶各留一个空槽，后续按 7/8 装载率。
+            buckets += match count {
+                1..=3 => 4,
+                4..=7 => 8,
+                _ => (count * 8 / 7).next_power_of_two(),
+            };
+            tables += 1;
+        }
+        assert_eq!(native.nodes.table_permits().count(), tables);
         assert_eq!(
             parent.native.load(Ordering::SeqCst),
-            (buckets + 16 * native_capture_index::SHARDS) * slot,
-            "冷索引许可须按各片真实桶数取 hash_room 档"
+            NativeCaptureIndex::STORAGE_BYTES + (buckets + 16 * tables) * slot,
+            "固定表头堆块及各个非空表的桶各计一次"
         );
         drop(capture);
         assert_eq!(parent.live.load(Ordering::SeqCst), 0);
@@ -9905,7 +9912,11 @@ mod native_owner_codec_bridge_tests {
         let CaptureNodes::Native(native) = &capture.nodes else {
             unreachable!()
         };
-        assert!(native.index_permits.iter().all(Option::is_some));
+        let used = bodies
+            .iter()
+            .map(|body| NativeCaptureIndex::shard(&frame(tag::BYTES_CHUNK, body.as_bytes())))
+            .collect::<std::collections::BTreeSet<_>>();
+        assert_eq!(native.nodes.table_permits().count(), used.len());
         assert_eq!(native.nodes.len(), bodies.len());
         for bytes in &bodies {
             let digest = frame(tag::BYTES_CHUNK, bytes.as_bytes());
