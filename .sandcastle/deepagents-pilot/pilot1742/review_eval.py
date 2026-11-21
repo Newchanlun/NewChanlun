@@ -82,7 +82,6 @@ _CM_HTML_OPEN_TAG_RE = re.compile(
     r"[ \t\n]*/?>"
 )
 _CM_HTML_CLOSE_TAG_RE = re.compile(r"</[A-Za-z][A-Za-z0-9-]*[ \t\n]*>")
-_IMMEDIATE_REF_BRACKET_RE = re.compile(r"^\[([^\[\]\n]{1,999})\]")
 _BRACKET_LINE_COORD_RE = re.compile(r":\d")
 _BRACKET_FILE_EXT_RE = re.compile(r"\.[A-Za-z0-9]{1,8}(?![A-Za-z0-9])")
 _KNOWN_ASCII_SEVERITY_WORD_RE = re.compile(
@@ -231,7 +230,7 @@ _NON_BLOCKING_BODY_HIT_RE = re.compile(
     r"(?<![A-Za-z0-9_])nit\s*[:：]|"
     r"非阻断|"
     r"(?:不阻断|不构成阻断|不作为阻断(?:理由|项|依据)?|不单独(?:判|作为|构成)?阻断)"
-    r"(?=$|[\s，,。；;！!？?、)）\]】\"”'’」』]|(?:合入|合并|发布|本\s*PR|该\s*PR|PR|CI|项|性|理由|依据))|"
+    r"(?=\s*(?:$|[，,。；;！!？?、)）\]】\"”'’」』]|(?:合入|合并|发布|本\s*PR(?![A-Za-z0-9_])|该\s*PR(?![A-Za-z0-9_])|PR(?![A-Za-z0-9_])|CI(?![A-Za-z0-9_])|项|性|理由|依据)))|"
     r"(?<![A-Za-z0-9_])non[-_ ]?blocking(?![A-Za-z0-9_])|"
     r"(?:可选\s*)?建议后续(?:跟进)?|"
     r"(?:可选\s*)?后续跟进|"
@@ -2675,14 +2674,6 @@ def _parse_leading_severity_tag_with_body(
             after_close = unbold[pos + bracket_match.end("close") :]
             if after_close.startswith("[]"):
                 break
-            ref_match = _IMMEDIATE_REF_BRACKET_RE.match(after_close)
-            if ref_match:
-                ref_raw = ref_match.group(1)
-                ref_is_non_severity = _is_path_or_coord_bracket(ref_raw) or _classify_severity_tag_text(ref_raw) is None
-                if ref_is_non_severity and (
-                    bool(bracket_tags) or _classify_severity_tag_text(tag_content) is None
-                ):
-                    break
         if _is_path_or_coord_bracket(tag_content):
             break
         bracket_tags.append(tag_content)

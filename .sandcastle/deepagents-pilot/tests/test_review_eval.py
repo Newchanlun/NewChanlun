@@ -3431,12 +3431,12 @@ def test_r9_markdown_reference_links_not_misclassified_as_nit(tmp_path: Path) ->
     assert classify_finding_heuristic("[P2][非阻断] 说明", "blocked") == "non_blocking_or_nit"
     assert classify_finding_heuristic("[P2/非阻断] 说明", "blocked") == "non_blocking_or_nit"
 
-    # 额外边界：标签归一化（大小写/空白折叠）、无定义引用链接、定义覆盖合法严重度词、首行 [P1]: 与真实语料 [P2][Spec]/[非阻断][规范]
+    # 额外边界：标签归一化（大小写/空白折叠）、未定义方括号按 CommonMark §6.3 视为普通标签、定义覆盖合法严重度词、首行 [P1]: 与真实语料 [P2][Spec]/[非阻断][规范]
     assert _parse_leading_severity_tag(full_ref_finding) == "blocking"
     assert _parse_leading_severity_tag(collapsed_ref_finding) == "blocking"
     assert _parse_leading_severity_tag(shortcut_ref_finding) == "blocking"
-    assert _parse_leading_severity_tag("[P1] [nit][location] 数据丢失") == "blocking"
-    assert _parse_leading_severity_tag("[P1] [nit][src/low:1] 数据丢失") == "blocking"
+    assert _parse_leading_severity_tag("[P1] [nit][location] 数据丢失") == "non_blocking"
+    assert _parse_leading_severity_tag("[P1] [nit][src/low:1] 数据丢失") == "non_blocking"
     assert _parse_leading_severity_tag("[P1] [nit][P2] 数据丢失\n\n[P2]: src/nit#L1") == "blocking"
     assert _parse_leading_severity_tag("[P1] [nit] 数据丢失\n\n  [  NIT  ]: src/nit#L1") == "blocking"
     assert _parse_leading_severity_tag("[P1]: 越权漏洞 需要修复") == "blocking"
@@ -5630,3 +5630,54 @@ def test_r21_unrecognized_bracket_prefix_body_boundary_soft_wrap_and_tag_parens(
     assert classify_finding_heuristic("[P2][说明（非阻断）] 可延后", "blocked") == "non_blocking_or_nit"
     assert _parse_leading_severity_tag("[说明（非阻断）] 可延后") == "non_blocking"
     assert classify_finding_heuristic("[说明（非阻断）] 可延后", "blocked") == "non_blocking_or_nit"
+
+
+def test_r22_consecutive_unrecognized_brackets_and_whitespace_guarded_non_blocking_boundary() -> None:
+    # Important 1：连续未识别业务方括号标签不得提前 break 回落正文子串扫描
+    for consecutive_tag_case in (
+        "[低优先级任务] 写入永久丢失",
+        "[低优先级任务][队列] 写入永久丢失",
+        "[低优先级任务][队列][子模块] 写入永久丢失",
+        "[低优先级任务][demo.py:42] 写入永久丢失",
+        "- **[低优先级任务][队列]** 写入永久丢失",
+    ):
+        assert is_non_blocking_or_nit_finding(consecutive_tag_case, "blocked") is False, consecutive_tag_case
+        assert classify_finding_heuristic(consecutive_tag_case, "blocked") == "blocking_substantive", consecutive_tag_case
+
+    # 对照：真正的已定义完整引用链接已被行内屏蔽为占位符，不受影响；未定义方括号按 CommonMark §6.3 视为普通标签
+    assert classify_finding_heuristic("[nit][ref]\n\n[ref]: https://example.com", "blocked") == "blocking_substantive"
+    assert (
+        classify_finding_heuristic("[nit][ref] 写入永久丢失\n\n[ref]: https://example.com", "blocked")
+        == "blocking_substantive"
+    )
+    assert _parse_leading_severity_tag("[P1] [nit][undef] 数据丢失") == "non_blocking"
+    assert classify_finding_heuristic("[P1] [nit][undef] 数据丢失", "blocked") == "non_blocking_or_nit"
+
+    # Important 2：“不阻断”后界须先越过可选空白再核对标点/句末/审查门禁词，禁止把空白本身当后界
+    for business_object_case in (
+        "鉴权模块不阻断非法请求，鉴权失败仍放行。",
+        "鉴权模块不阻断\n非法请求，鉴权失败仍放行。",
+        "鉴权模块不阻断 API 请求，鉴权失败仍放行。",
+        "鉴权模块不阻断 CI_TOKEN 校验，鉴权失败仍放行。",
+        "鉴权模块不阻断 PR_NUMBER 解析，鉴权失败仍放行。",
+        "鉴权模块不阻断本 PR_ID 校验，鉴权失败仍放行。",
+    ):
+        assert is_non_blocking_or_nit_finding(business_object_case, "blocked") is False, business_object_case
+        assert classify_finding_heuristic(business_object_case, "blocked") == "blocking_substantive", business_object_case
+
+    # 正向对照：越过可选空白后紧跟句末/标点/显式审查门禁词（且英文门禁词带词尾界）仍归为 non_blocking_or_nit
+    for legitimate_boundary_case in (
+        "不阻断 CI，建议后续跟进",
+        "不阻断 PR 合入",
+        "不阻断 合入。",
+        "不阻断。",
+        "不阻断 ，",
+        "不阻断\n",
+        "该告警不阻断 本 PR，记录即可。",
+        "该告警不阻断 该 PR，记录即可。",
+    ):
+        assert is_non_blocking_or_nit_finding(legitimate_boundary_case, "blocked") is True, legitimate_boundary_case
+        assert (
+            classify_finding_heuristic(legitimate_boundary_case, "blocked") == "non_blocking_or_nit"
+        ), legitimate_boundary_case
+
