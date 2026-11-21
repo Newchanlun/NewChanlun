@@ -42,7 +42,7 @@ _STYLE_FORMAT_RE = re.compile(
 _LEADING_LIST_PREFIX_RE = re.compile(r"^(?:[-*•]\s+|\d+[.)]\s+)")
 _LEADING_BOLD_PREFIX_RE = re.compile(r"^(?:\*\*|__)\s*")
 _LEADING_BRACKET_TAG_RE = re.compile(
-    r"^(?:(?:\*\*|__)\s*)?(?P<open>[\[\【])(?P<tag>[^\[\【\]\】\n\x01]{1,64})(?P<close>[\]\】])(?:\s*(?:\*\*|__))?\s*"
+    r"^(?:(?:\*\*|__)\s*)?[\[\【](?P<tag>[^\[\【\]\】\n\x01]{1,64})[\]\】](?:\s*(?:\*\*|__))?\s*"
 )
 _CM_LINE_END_RE = re.compile(r"\r\n|\n|\r")
 _CM_THEMATIC_BREAK_RE = re.compile(r"^(?:(?:\*[ \t]*){3,}|(?:-[ \t]*){3,}|(?:_[ \t]*){3,})$")
@@ -230,7 +230,8 @@ _NON_BLOCKING_BODY_HIT_RE = re.compile(
     r"(?<![A-Za-z0-9_])nit\s*[:：]|"
     r"非阻断|"
     r"(?:不阻断|不构成阻断|不作为阻断(?:理由|项|依据)?|不单独(?:判|作为|构成)?阻断)"
-    r"(?=\s*(?:$|[，,。；;！!？?、)）\]】\"”'’」』]|(?:合入|合并|发布|本\s*PR(?![A-Za-z0-9_])|该\s*PR(?![A-Za-z0-9_])|PR(?![A-Za-z0-9_])|CI(?![A-Za-z0-9_])|项|性|理由|依据)))|"
+    r"(?=\s*(?:(?:(?:本|该)\s*)?(?:PR|CI)(?:\s*(?:合入|合并|发布|检查|门禁))?|合入|合并|发布)?"
+    r"\s*(?:$|[，,。；;！!？?、)）\]】\"”'’」』]))|"
     r"(?<![A-Za-z0-9_])non[-_ ]?blocking(?![A-Za-z0-9_])|"
     r"(?:可选\s*)?建议后续(?:跟进)?|"
     r"(?:可选\s*)?后续跟进|"
@@ -2667,13 +2668,7 @@ def _parse_leading_severity_tag_with_body(
         bracket_match = _LEADING_BRACKET_TAG_RE.match(unbold[pos:])
         if not bracket_match:
             break
-        open_br = bracket_match.group("open")
-        close_br = bracket_match.group("close")
         tag_content = bracket_match.group("tag")
-        if open_br == "[" and close_br == "]":
-            after_close = unbold[pos + bracket_match.end("close") :]
-            if after_close.startswith("[]"):
-                break
         if _is_path_or_coord_bracket(tag_content):
             break
         bracket_tags.append(tag_content)

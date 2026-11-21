@@ -5681,3 +5681,68 @@ def test_r22_consecutive_unrecognized_brackets_and_whitespace_guarded_non_blocki
             classify_finding_heuristic(legitimate_boundary_case, "blocked") == "non_blocking_or_nit"
         ), legitimate_boundary_case
 
+
+def test_r23_collapsed_bracket_residual_and_strict_non_blocking_gate_phrase() -> None:
+    # Important 1：删除残余 `after_close.startswith("[]")` 提前 break 后，未定义 `[label][]` 正常消费行首方括号，不回落正文子串扫描
+    for collapsed_unrecognized_case in (
+        "[低优先级任务][] 写入永久丢失",
+        "- **[低优先级任务][]** 写入永久丢失",
+        "[低优先级任务][]\n\n[低优先级任务]: https://example.com",
+        "[低优先级任务][] 写入永久丢失\n\n[低优先级任务]: https://example.com",
+        "[nit][] 写入永久丢失\n\n[nit]: https://example.com",
+    ):
+        assert is_non_blocking_or_nit_finding(collapsed_unrecognized_case, "blocked") is False, (
+            collapsed_unrecognized_case
+        )
+        assert classify_finding_heuristic(collapsed_unrecognized_case, "blocked") == "blocking_substantive", (
+            collapsed_unrecognized_case
+        )
+
+    # CommonMark §6.3 对照：无链接定义时 `[nit][]` 不是链接，`[nit]` 作为合法行首标签生效
+    for undefined_nit_collapsed in (
+        "[nit][] 命名微调",
+        "[P1] [nit][] 写入永久丢失",
+    ):
+        assert _parse_leading_severity_tag(undefined_nit_collapsed) == "non_blocking", undefined_nit_collapsed
+        assert classify_finding_heuristic(undefined_nit_collapsed, "blocked") == "non_blocking_or_nit", (
+            undefined_nit_collapsed
+        )
+
+    # Important 2：收紧“不阻断”后的评审门禁短语为完整短语 + 句末/标点终止，删除裸单字 项|性|理由|依据
+    for business_object_case in (
+        "鉴权模块不阻断项目外的写入，权限检查失效。",
+        "鉴权模块不阻断发布者越权操作，权限检查失效。",
+        "鉴权模块不阻断 PR 创建接口的越权请求。",
+        "鉴权模块不阻断性能退化，延迟翻倍。",
+        "鉴权模块不阻断 CI_TOKEN 校验，权限检查失效。",
+        "不阻断发布者越权",
+        "不阻断 PR 创建接口",
+        "网关不阻断合并请求中的越权字段，权限绕过。",
+        "权限校验不阻断理由为空的审批通过。",
+        "审计器不阻断依据缺失的变更提交。",
+    ):
+        assert is_non_blocking_or_nit_finding(business_object_case, "blocked") is False, business_object_case
+        assert classify_finding_heuristic(business_object_case, "blocked") == "blocking_substantive", (
+            business_object_case
+        )
+
+    # 正向对照：完整门禁短语 + 句末/标点终止仍归为 non_blocking_or_nit
+    for legitimate_gate_case in (
+        "不作为阻断项。",
+        "不作为阻断理由。",
+        "不作为阻断依据。",
+        "不构成阻断，",
+        "不阻断 CI，建议后续跟进",
+        "不阻断 PR 合入。",
+        "不阻断合入。",
+        "不阻断。",
+        "不阻断本 PR 合并，可后续优化。",
+        "不阻断该 CI 检查。",
+        "不阻断 CI 门禁，记录即可。",
+        "不阻断发布。",
+    ):
+        assert is_non_blocking_or_nit_finding(legitimate_gate_case, "blocked") is True, legitimate_gate_case
+        assert classify_finding_heuristic(legitimate_gate_case, "blocked") == "non_blocking_or_nit", (
+            legitimate_gate_case
+        )
+
