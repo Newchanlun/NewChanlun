@@ -17,6 +17,8 @@ from pilot1742.review_eval import (
     EvalCase,
     EvalValidationError,
     PredictedFinding,
+    _parse_leading_severity_tag,
+    _parse_unified_diff_added_ranges,
     analyze_review_runs,
     classify_finding_heuristic,
     compare_scores,
@@ -2315,3 +2317,399 @@ def test_cli_unwritable_out_json_returns_friendly_error_without_traceback(
     assert "/dev/null/out.json" in captured.err
     assert "无法写入输出文件" in captured.err
     assert "Traceback" not in captured.err
+
+
+def test_git_diff_inter_hunk_context_and_unified_diff_plus_line_parsing(tmp_path: Path) -> None:
+    # 1) 直接测试 unified diff 逐行 `+` 解析：含上下文空档、删除行、内容以 `++ ` 开头的新增行与无换行标记
+    synthetic_diff = "\n".join(
+        [
+            "diff --git a/demo.py b/demo.py",
+            "index 1111111..2222222 100644",
+            "--- a/demo.py",
+            "+++ b/demo.py",
+            "@@ -1,6 +1,6 @@",
+            "-old1",
+            "+new1",
+            "-old2",
+            "+++ literal_plus_plus_line",
+            " untouched3",
+            " untouched4",
+            "-old5",
+            "+new5",
+            "-old6",
+            "+new6",
+            "\\ No newline at end of file",
+        ]
+    )
+    assert _parse_unified_diff_added_ranges(synthetic_diff) == ((1, 2), (5, 6))
+
+    # 2) 真实临时 Git 仓显式开启 diff.interHunkContext=100：两处改动之间的未改动空档仍必须被 validate_cases 拒绝
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _git(repo, "init", "-q", "-b", "main")
+    _git(repo, "config", "user.name", "Test")
+    _git(repo, "config", "user.email", "test@example.invalid")
+    _git(repo, "config", "diff.interHunkContext", "100")
+
+    (repo / "gap.py").write_text("l1\nl2\nl3\nl4\nl5\nl6\n", encoding="utf-8")
+    _git(repo, "add", "gap.py")
+    _git(repo, "commit", "-qm", "base")
+    base_sha = _git(repo, "rev-parse", "HEAD")
+
+    (repo / "gap.py").write_text("l1_new\nl2_new\nl3\nl4\nl5_new\nl6_new\n", encoding="utf-8")
+    _git(repo, "add", "gap.py")
+    _git(repo, "commit", "-qm", "head")
+    head_sha = _git(repo, "rev-parse", "HEAD")
+
+    # 确认裸 git diff -U0 在该配置下确实会把两处 hunk 合并成 @@ -1,6 +1,6 @@
+    raw_diff = _git(repo, "diff", "-U0", base_sha, head_sha, "--", "gap.py")
+    assert "@@ -1,6 +1,6 @@" in raw_diff
+
+    spanning_gap = EvalCase(
+        case_id="inter-hunk-gap",
+        kind="bug",
+        title="开启 interHunkContext=100 时仍拒绝未改动空档",
+        base_sha=base_sha,
+        head_sha=head_sha,
+        bug_locations=(BugLocation(file="gap.py", line_start=1, line_end=6, summary="s", category="c"),),
+    )
+    with pytest.raises(EvalValidationError, match="未完全落在.*可用 hunk：1\\.\\.2, 5\\.\\.6"):
+        validate_cases((spanning_gap,), repo_root=repo)
+
+    untouched_only = EvalCase(
+        case_id="inter-hunk-untouched",
+        kind="bug",
+        title="仅指向未改动空档行",
+        base_sha=base_sha,
+        head_sha=head_sha,
+        bug_locations=(BugLocation(file="gap.py", line_start=3, line_end=4, summary="s", category="c"),),
+    )
+    with pytest.raises(EvalValidationError, match="未完全落在"):
+        validate_cases((untouched_only,), repo_root=repo)
+
+    split_valid = EvalCase(
+        case_id="inter-hunk-split-ok",
+        kind="bug",
+        title="精确拆段通过",
+        base_sha=base_sha,
+        head_sha=head_sha,
+        bug_locations=(
+            BugLocation(
+                file="gap.py",
+                line_start=1,
+                line_end=2,
+                extra_ranges=((5, 6),),
+                summary="s",
+                category="c",
+            ),
+        ),
+    )
+    validate_cases((split_valid,), repo_root=repo)
+
+
+def test_leading_severity_tag_precedence_and_negation_safe_heuristic(tmp_path: Path) -> None:
+    # 1) PR #2063 真实反例：显式 [阻断] 标签绝不被正文“不是可选后续优化”覆盖
+    pr2063_blocking = (
+        "[阻断] `.sandcastle/docs/maintenance-1742.md:193` 明确记录 macOS 现役可用性未验收，"
+        "目标部署路径为 macOS `/Volumes`，因此这是当前 PR 自身确认尚未满足的发布条件，不是可选后续优化。"
+    )
+    assert _parse_leading_severity_tag(pr2063_blocking) == "blocking"
+    assert is_non_blocking_or_nit_finding(pr2063_blocking, "blocked") is False
+    assert classify_finding_heuristic(pr2063_blocking, "blocked") == "blocking_substantive"
+
+    # 2) PR #2063 真实反例：全角 【nit】 归为 non_blocking_or_nit
+    pr2063_nit = "【nit】`.sandcastle/decision-claimer.mts:622` 的 close 回调新增了 `signal` 参数，但没有使用。"
+    assert _parse_leading_severity_tag(pr2063_nit) == "non_blocking"
+    assert is_non_blocking_or_nit_finding(pr2063_nit, "blocked") is True
+    assert classify_finding_heuristic(pr2063_nit, "blocked") == "non_blocking_or_nit"
+
+    # 3) 各类显式行首标签（列表符号、粗体、方括号、全角方括号、冒号前导）
+    for nb_text in (
+        "[非阻断] 可稍后整理",
+        "【非阻断/低】建议补充注释",
+        "- **[P3 非阻断]** 小优化",
+        "1. **Nit:** 变量命名可更清晰",
+        "非阻断：可顺手抽取辅助函数",
+        "不阻断：仅作记录",
+        "[低] 影响轻微",
+        "【低】可后续优化",
+        "[信息] 仅提示",
+        "【信息】行为符合预期",
+        "[建议] 考虑抽取常量",
+        "[提示] 注意缓存失效",
+        "[已核对/无问题] 已核实无回归",
+        "【核实通过】校验逻辑正确",
+    ):
+        assert _parse_leading_severity_tag(nb_text) == "non_blocking", nb_text
+        assert is_non_blocking_or_nit_finding(nb_text, "blocked") is True, nb_text
+
+    for blk_text in (
+        "【阻断】核心路径存在空指针，这不是可选建议",
+        "- **[BLOCK]** 越权绕过，非可选修复",
+        "1. **[Important]** 数据丢失风险（建议后续也补监控）",
+        "[P0] 崩溃缺陷，可顺手加单测",
+        "[P1] 权限校验缺失",
+        "[高] 严重回归",
+        "【高】必须修复",
+        "阻断：不可合入，不是可选后续优化",
+        "Important: missing authz check (not optional)",
+        "Blocker: breaks prod migration",
+    ):
+        assert _parse_leading_severity_tag(blk_text) == "blocking", blk_text
+        assert is_non_blocking_or_nit_finding(blk_text, "blocked") is False, blk_text
+
+    # 4) 文件路径前缀绝不误判为冒号严重度标签
+    for path_prefixed in (
+        "pilot1742/blocker.py:12: 路径解析错误",
+        "src/low_level.rs:42: 边界越界",
+        "docs/info.md:5: 缺少说明",
+    ):
+        assert _parse_leading_severity_tag(path_prefixed) is None, path_prefixed
+
+    # 5) 无显式行首标签时，正文否定语境不误触发非阻断
+    for negated in (
+        "这是发布硬门条件，不是可选后续优化",
+        "该安全修复非可选优化",
+        "此处状态同步并非可选",
+        "该项为必需修复，不是建议后续处理",
+        "此逻辑非建议后续再改",
+        "此缺陷并非建议后续跟进",
+        "这不是可选：必须修复",
+    ):
+        assert _parse_leading_severity_tag(negated) is None, negated
+        assert is_non_blocking_or_nit_finding(negated, "blocked") is False, negated
+
+    # 6) 端到端统计：PR #2063 两类发现在 subsequent_head_pass_total_block_findings 中精确分流
+    runs_dir = tmp_path / "runs"
+    runs_dir.mkdir()
+    _write_run(
+        runs_dir,
+        "p2063-r1",
+        pr_number=2063,
+        head_sha="a" * 40,
+        registered_at_ns=100,
+        attempt=1,
+        verdict="BLOCK",
+        receipts={
+            "kimi-k3.1-pro": {
+                "run_id": "run-p2063-r1",
+                "status": "completed",
+                "model": "kimi-k3.1-pro",
+                "result": {"status": "blocked", "findings": [pr2063_blocking]},
+            },
+            "claude-opus-5-5": {
+                "run_id": "run-p2063-r1",
+                "status": "completed",
+                "model": "claude-opus-5-5",
+                "result": {"status": "blocked", "findings": [pr2063_nit]},
+            },
+        },
+    )
+    metrics = analyze_review_runs(runs_dir)
+    assert metrics.finding_heuristic_categories == {
+        "blocking_substantive": 1,
+        "non_blocking_or_nit": 1,
+    }
+    assert metrics.subsequent_head_pass_total_block_findings == 1
+    assert metrics.subsequent_head_pass_inferred_fixed == 0
+
+
+def test_outcome_non_dict_target_triggers_corrupted_identity_isolation(tmp_path: Path) -> None:
+    runs_dir = tmp_path / "runs"
+    runs_dir.mkdir()
+
+    # PR 1 在 t=1, head=a 有有效 BLOCK（1 条阻断发现）
+    _write_run(
+        runs_dir,
+        "p1-r1-block",
+        pr_number=1,
+        head_sha="a" * 40,
+        registered_at_ns=1,
+        attempt=1,
+        verdict="BLOCK",
+        receipts={
+            "claude-opus-5-5": {
+                "run_id": "run-p1-r1-block",
+                "status": "completed",
+                "model": "claude-opus-5-5",
+                "result": {"status": "blocked", "findings": ["[阻断] 真实缺陷"]},
+            }
+        },
+    )
+
+    # 第二目录：target.json 为 PR 1, t=2, head=b，但 outcome.json 的 target 为非 dict（7）
+    bad_int_dir = runs_dir / "p1-r2-bad-target-int"
+    bad_int_dir.mkdir()
+    (bad_int_dir / "target.json").write_text(
+        json.dumps({"pr_number": 1, "head_sha": "b" * 40, "registered_at_ns": 2, "attempt": 2}),
+        encoding="utf-8",
+    )
+    (bad_int_dir / "outcome.json").write_text(
+        json.dumps({"verdict": "PASS", "target": 7}),
+        encoding="utf-8",
+    )
+
+    metrics = analyze_review_runs(runs_dir)
+    assert metrics.corrupted_files == (
+        "p1-r2-bad-target-int/target.json",
+        "p1-r2-bad-target-int/outcome.json",
+    )
+    assert metrics.prs_with_pass == 0
+    assert metrics.subsequent_head_pass_inferred_fixed == 0
+    assert metrics.subsequent_head_pass_total_block_findings == 1
+    assert metrics.verdict_counts == {"BLOCK": 1, "CORRUPTED_IDENTITY": 1}
+
+    # 显式 target=null 同样按损坏隔离，绝不借用 target.json 纳入 PASS
+    bad_null_dir = runs_dir / "p1-r3-bad-target-null"
+    bad_null_dir.mkdir()
+    (bad_null_dir / "target.json").write_text(
+        json.dumps({"pr_number": 1, "head_sha": "c" * 40, "registered_at_ns": 3, "attempt": 3}),
+        encoding="utf-8",
+    )
+    (bad_null_dir / "outcome.json").write_text(
+        json.dumps({"verdict": "PASS", "target": None}),
+        encoding="utf-8",
+    )
+    metrics_with_null = analyze_review_runs(runs_dir)
+    assert "p1-r3-bad-target-null/outcome.json" in metrics_with_null.corrupted_files
+    assert metrics_with_null.prs_with_pass == 0
+    assert metrics_with_null.subsequent_head_pass_inferred_fixed == 0
+    assert metrics_with_null.verdict_counts["CORRUPTED_IDENTITY"] == 2
+
+
+def test_receipt_only_pr_number_preserved_for_disposition_binding(tmp_path: Path) -> None:
+    runs_dir = tmp_path / "runs"
+    runs_dir.mkdir()
+
+    # 无 target.json / outcome.json，仅回执给出合法 run_id="R", pr_number=1, model="M"
+    run_only = runs_dir / "orphan-run"
+    model_dir = run_only / "M"
+    model_dir.mkdir(parents=True)
+    (model_dir / "receipt.json").write_text(
+        json.dumps(
+            {
+                "run_id": "R",
+                "pr_number": 1,
+                "status": "completed",
+                "model": "M",
+                "result": {"status": "blocked", "findings": ["[阻断] 孤立目录有效发现"]},
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    metrics = analyze_review_runs(
+        runs_dir,
+        dispositions=(
+            DispositionEntry(
+                run_id="R",
+                pr_number=1,
+                model="M",
+                finding_index=0,
+                disposition=DispositionLabel.FIXED,
+            ),
+        ),
+    )
+    assert metrics.corrupted_files == ()
+    assert metrics.verdict_counts == {"MISSING_OUTCOME": 1}
+    assert metrics.missing_outcome_runs == 1
+    assert metrics.unorderable_runs == 1
+    assert metrics.disposition_total == 1
+    assert metrics.disposition_counts["fixed"] == 1
+    assert metrics.disposition_coverage_rate == pytest.approx(1.0)
+
+
+def test_duplicate_receipt_key_detected_and_rejected_by_dispositions(tmp_path: Path) -> None:
+    # 1) 同目录下 X/receipt.json 与 Y/receipt.json 均声明 model="M"
+    runs_dir = tmp_path / "same-dir-dup"
+    run_dir = runs_dir / "run-dup"
+    run_dir.mkdir(parents=True)
+    (run_dir / "target.json").write_text(
+        json.dumps({"run_id": "R", "pr_number": 1, "head_sha": "a" * 40, "registered_at_ns": 10, "attempt": 1}),
+        encoding="utf-8",
+    )
+    for sub_name, finding_text in (("X", "[阻断] 发现 X"), ("Y", "[阻断] 发现 Y")):
+        sub = run_dir / sub_name
+        sub.mkdir()
+        (sub / "receipt.json").write_text(
+            json.dumps(
+                {
+                    "status": "completed",
+                    "model": "M",
+                    "result": {"status": "blocked", "findings": [finding_text]},
+                }
+            ),
+            encoding="utf-8",
+        )
+
+    metrics = analyze_review_runs(runs_dir)
+    assert metrics.corrupted_files == (
+        "run-dup/X/receipt.json",
+        "run-dup/Y/receipt.json",
+    )
+
+    with pytest.raises(EvalValidationError, match="重复回执键"):
+        analyze_review_runs(
+            runs_dir,
+            dispositions=(
+                DispositionEntry(
+                    run_id="R",
+                    pr_number=1,
+                    model="M",
+                    finding_index=0,
+                    disposition=DispositionLabel.FIXED,
+                ),
+            ),
+        )
+
+    # 2) 跨目录产生相同 (run_id="R2", model="M") 同样记入 corrupted_files 并拒绝歧义台账绑定
+    cross_dir = tmp_path / "cross-dir-dup"
+    for dname in ("dir-1", "dir-2"):
+        d = cross_dir / dname
+        (d / "M").mkdir(parents=True)
+        (d / "target.json").write_text(
+            json.dumps({"run_id": "R2", "pr_number": 2, "head_sha": "b" * 40, "registered_at_ns": 20, "attempt": 1}),
+            encoding="utf-8",
+        )
+        (d / "M" / "receipt.json").write_text(
+            json.dumps(
+                {
+                    "status": "completed",
+                    "model": "M",
+                    "result": {"status": "blocked", "findings": [f"[阻断] {dname}"]},
+                }
+            ),
+            encoding="utf-8",
+        )
+
+    cross_metrics = analyze_review_runs(cross_dir)
+    assert cross_metrics.corrupted_files == (
+        "dir-1/M/receipt.json",
+        "dir-2/M/receipt.json",
+    )
+    with pytest.raises(EvalValidationError, match="重复回执键"):
+        analyze_review_runs(
+            cross_dir,
+            dispositions=(
+                DispositionEntry(
+                    run_id="R2",
+                    pr_number=2,
+                    model="M",
+                    finding_index=0,
+                    disposition=DispositionLabel.FIXED,
+                ),
+            ),
+        )
+
+
+def test_corrupted_identity_without_outcome_counts_missing_outcome_runs(tmp_path: Path) -> None:
+    runs_dir = tmp_path / "runs"
+    bad_dir = runs_dir / "bad-pr-no-outcome"
+    bad_dir.mkdir(parents=True)
+    (bad_dir / "target.json").write_text(json.dumps({"pr_number": -1}), encoding="utf-8")
+
+    metrics = analyze_review_runs(runs_dir)
+    assert metrics.total_runs == 1
+    assert metrics.verdict_counts == {"CORRUPTED_IDENTITY": 1}
+    assert metrics.missing_outcome_runs == 1
+    assert metrics.corrupted_files == ("bad-pr-no-outcome/target.json",)

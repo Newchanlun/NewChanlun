@@ -28,7 +28,7 @@ _VALID_VERDICTS: frozenset[str] = frozenset({"PASS", "BLOCK", "FAILED"})
 _VALID_SCORE_VERDICTS: frozenset[str] = frozenset({"PASS", "BLOCK", "FAILED", "MISSING"})
 _UNDECIDED_SCORE_VERDICTS: frozenset[str] = frozenset({"FAILED", "MISSING"})
 _SHA_RE = re.compile(r"^[0-9a-f]{40}$")
-_DIFF_HUNK_RE = re.compile(r"^@@ -\d+(?:,\d+)? \+(\d+)(?:,(\d+))? @@")
+_DIFF_HUNK_RE = re.compile(r"^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@")
 
 # 启发式正则：仅用于对历史纯文本 findings 做粗粒度归类，非人工标注真值。
 _STYLE_FORMAT_RE = re.compile(
@@ -38,13 +38,39 @@ _STYLE_FORMAT_RE = re.compile(
     r"style\s*(?:only|issue|nit)|formatting|whitespace)",
     re.IGNORECASE,
 )
+_LEADING_LIST_PREFIX_RE = re.compile(r"^(?:[-*•]\s+|\d+[.)]\s+)")
+_LEADING_BRACKET_TAG_RE = re.compile(r"^(?:(?:\*\*|__)\s*)?[\[\【]([^\]\】]{1,64})[\]\】](?:\s*(?:\*\*|__))?\s*")
+_LEADING_COLON_TAG_RE = re.compile(r"^(?:(?:\*\*|__)\s*)?([^:\n：\[\【\]\】`*]{1,24}?)(?:\s*(?:\*\*|__))?\s*[:：]")
+_TAG_SPLIT_RE = re.compile(r"[\s/·,，、\-—:：|]+")
+_TAG_NON_BLOCKING_RE = re.compile(
+    r"(?:非阻断|不阻断|(?<![A-Za-z0-9])non[- ]?blocking(?![A-Za-z0-9])|"
+    r"(?<![A-Za-z0-9])nit(?![A-Za-z0-9])|(?<![A-Za-z0-9])minor(?![A-Za-z0-9])|"
+    r"(?<![A-Za-z0-9])low(?![A-Za-z0-9])|(?<![A-Za-z0-9])info(?![A-Za-z0-9])|"
+    r"信息|提示|(?<!不是)(?<!并非)(?<!非)建议|(?<!不是)(?<!并非)(?<!非)可选|"
+    r"(?<![A-Za-z0-9])p3(?![A-Za-z0-9])|"
+    r"已核.*(?:无问题|未发现问题)|核实通过|确认无(?:问题|误)|通过)",
+    re.IGNORECASE,
+)
+_TAG_BLOCKING_RE = re.compile(
+    r"(?:阻断|(?<![A-Za-z0-9])block(?:er|ing)?(?![A-Za-z0-9])|"
+    r"(?<![A-Za-z0-9])important(?![A-Za-z0-9])|(?<![A-Za-z0-9])critical(?![A-Za-z0-9])|"
+    r"(?<![A-Za-z0-9])must[- ]?fix(?![A-Za-z0-9])|严重|重要|"
+    r"(?<![A-Za-z0-9])p[01](?![A-Za-z0-9]))",
+    re.IGNORECASE,
+)
 _NON_BLOCKING_NIT_RE = re.compile(
-    r"(?:\[\s*nit\s*\]|\bnit\s*[:：]|非阻断|不阻断|non[- ]?blocking|"
-    r"建议后续|后续跟进|可选(?:建议|优化)?|顺手|minor\b|仅作记录|低优先级)",
+    r"(?:[\[\【]\s*nit\s*[\]\】]|(?<![A-Za-z0-9])nit\s*[:：]|非阻断|不阻断|"
+    r"(?<![A-Za-z0-9])non[- ]?blocking(?![A-Za-z0-9])|"
+    r"(?<!不是)(?<!并非)(?<!非)建议后续|"
+    r"(?<!不是)(?<!并非)(?<!非)(?<!不是建议)(?<!并非建议)(?<!非建议)(?<!不是可选)(?<!并非可选)(?<!非可选)后续跟进|"
+    r"(?<!不是)(?<!并非)(?<!非)可选(?:建议|优化)?|"
+    r"顺手|(?<![A-Za-z0-9])minor(?![A-Za-z0-9])|仅作记录|低优先级)",
     re.IGNORECASE,
 )
 _BLOCKING_MARKER_RE = re.compile(
-    r"(?:\[\s*p[012]\s*\]|\bp[012]\s*[:：]|阻断|必须修复|blocking|critical|high\s+severity)",
+    r"(?:[\[\【]\s*p[012]\s*[\]\】]|(?<![A-Za-z0-9])p[012]\s*[:：]|阻断|必须修复|"
+    r"(?<![A-Za-z0-9])blocking(?![A-Za-z0-9])|(?<![A-Za-z0-9])critical(?![A-Za-z0-9])|"
+    r"high\s+severity)",
     re.IGNORECASE,
 )
 
@@ -448,6 +474,40 @@ def _git_blob_line_count(repo_root: Path, obj_spec: str) -> int:
     return len(proc.stdout.splitlines())
 
 
+def _parse_unified_diff_added_ranges(diff_text: str) -> tuple[tuple[int, int], ...]:
+    """逐行扫描 unified diff 正文，仅收集真实 `+` 新增/修改行号并合并为连续闭区间。"""
+    added_lines: list[int] = []
+    curr_line: int | None = None
+    remaining_old = 0
+    remaining_new = 0
+    for line in diff_text.splitlines():
+        match = _DIFF_HUNK_RE.match(line)
+        if match:
+            remaining_old = int(match.group(2)) if match.group(2) is not None else 1
+            curr_line = int(match.group(3))
+            remaining_new = int(match.group(4)) if match.group(4) is not None else 1
+            continue
+        if curr_line is None or (remaining_old == 0 and remaining_new == 0):
+            continue
+        if line.startswith("\\"):
+            continue
+        if line.startswith("+") and remaining_new > 0:
+            added_lines.append(curr_line)
+            curr_line += 1
+            remaining_new -= 1
+        elif line.startswith(" ") and remaining_old > 0 and remaining_new > 0:
+            curr_line += 1
+            remaining_old -= 1
+            remaining_new -= 1
+        elif line.startswith("-") and remaining_old > 0:
+            remaining_old -= 1
+        else:
+            curr_line = None
+            remaining_old = 0
+            remaining_new = 0
+    return _merge_line_ranges([(ln, ln) for ln in added_lines])
+
+
 def _git_diff_added_ranges(
     repo_root: Path,
     base_sha: str,
@@ -455,7 +515,23 @@ def _git_diff_added_ranges(
     file_path: str,
 ) -> tuple[tuple[int, int], ...]:
     proc = subprocess.run(
-        ["git", "-C", str(repo_root), "diff", "-U0", base_sha, head_sha, "--", file_path],
+        [
+            "git",
+            "-C",
+            str(repo_root),
+            "-c",
+            "diff.interHunkContext=0",
+            "diff",
+            "-U0",
+            "--inter-hunk-context=0",
+            "--no-ext-diff",
+            "--no-textconv",
+            "--no-color",
+            base_sha,
+            head_sha,
+            "--",
+            file_path,
+        ],
         capture_output=True,
         text=True,
         encoding="utf-8",
@@ -464,16 +540,7 @@ def _git_diff_added_ranges(
     )
     if proc.returncode != 0:
         raise EvalValidationError(f"无法读取 Git diff（{base_sha}..{head_sha} -- {file_path}）：{proc.stderr.strip()}")
-    ranges: list[tuple[int, int]] = []
-    for line in proc.stdout.splitlines():
-        match = _DIFF_HUNK_RE.match(line)
-        if not match:
-            continue
-        start = int(match.group(1))
-        count = int(match.group(2)) if match.group(2) is not None else 1
-        if count > 0:
-            ranges.append((start, start + count - 1))
-    return tuple(ranges)
+    return _parse_unified_diff_added_ranges(proc.stdout)
 
 
 def compute_cases_fingerprint(cases: Sequence[EvalCase]) -> str:
@@ -1167,9 +1234,60 @@ def load_dispositions(jsonl_path: Path) -> tuple[DispositionEntry, ...]:
     return tuple(entries)
 
 
+def _classify_severity_tag_text(tag_text: str) -> Literal["blocking", "non_blocking"] | None:
+    if _TAG_NON_BLOCKING_RE.search(tag_text):
+        return "non_blocking"
+    tokens = [tok for tok in _TAG_SPLIT_RE.split(tag_text.strip()) if tok]
+    if "低" in tokens:
+        return "non_blocking"
+    if _TAG_BLOCKING_RE.search(tag_text):
+        return "blocking"
+    if "高" in tokens:
+        return "blocking"
+    return None
+
+
+def _parse_leading_severity_tag(text: str) -> Literal["blocking", "non_blocking"] | None:
+    """解析行首显式严重度标签（支持列表符号、Markdown 粗体、连续中英文方括号标签与冒号前导）。"""
+    cleaned = text.lstrip()
+    while True:
+        list_match = _LEADING_LIST_PREFIX_RE.match(cleaned)
+        if not list_match:
+            break
+        cleaned = cleaned[list_match.end() :].lstrip()
+
+    unbold = re.sub(r"^(?:\*\*|__)\s*", "", cleaned)
+    bracket_tags: list[str] = []
+    pos = 0
+    while True:
+        bracket_match = _LEADING_BRACKET_TAG_RE.match(unbold[pos:])
+        if not bracket_match:
+            break
+        bracket_tags.append(bracket_match.group(1))
+        pos += bracket_match.end()
+    if bracket_tags:
+        classified = _classify_severity_tag_text(" / ".join(bracket_tags))
+        if classified is not None:
+            return classified
+
+    colon_match = _LEADING_COLON_TAG_RE.match(cleaned)
+    if colon_match:
+        prefix = colon_match.group(1).strip(" *_")
+        if prefix and "." not in prefix and "\\" not in prefix:
+            return _classify_severity_tag_text(prefix)
+    return None
+
+
 def is_non_blocking_or_nit_finding(text: str, receipt_result_status: str) -> bool:
-    """启发式判断单条发现是否属于 Nit / 非阻断级别（与格式主题正交）。"""
-    return bool(_NON_BLOCKING_NIT_RE.search(text)) or receipt_result_status == "completed"
+    """启发式判断单条发现是否属于 Nit / 非阻断级别（行首显式标签优先，正文启发式仅兜底无标签发现）。"""
+    if receipt_result_status == "completed":
+        return True
+    leading = _parse_leading_severity_tag(text)
+    if leading == "non_blocking":
+        return True
+    if leading == "blocking":
+        return False
+    return bool(_NON_BLOCKING_NIT_RE.search(text))
 
 
 def is_style_or_format_finding(text: str) -> bool:
@@ -1187,7 +1305,11 @@ def classify_finding_heuristic(text: str, receipt_result_status: str) -> str:
         return "non_blocking_or_nit"
     if is_style_or_format_finding(text):
         return "blocking_style_or_format"
-    if receipt_result_status == "blocked" or _BLOCKING_MARKER_RE.search(text):
+    if (
+        receipt_result_status == "blocked"
+        or _parse_leading_severity_tag(text) == "blocking"
+        or _BLOCKING_MARKER_RE.search(text)
+    ):
         return "blocking_substantive"
     return "other"
 
@@ -1317,6 +1439,26 @@ def analyze_review_runs(
 
     # (run_id, model) -> (pr_number, finding_count)
     scanned_receipts: dict[tuple[str, str], tuple[int | None, int]] = {}
+    scanned_receipt_paths: dict[tuple[str, str], Path] = {}
+    ambiguous_receipt_keys: set[tuple[str, str]] = set()
+
+    def _register_receipt_key(
+        receipt_key: tuple[str, str],
+        receipt_path: Path,
+        effective_pr: int | None,
+        finding_count: int,
+    ) -> None:
+        if receipt_key in ambiguous_receipt_keys:
+            _append_corrupted(receipt_path, runs_dir, corrupted_files, corrupted_seen)
+            return
+        if receipt_key in scanned_receipt_paths:
+            _append_corrupted(scanned_receipt_paths[receipt_key], runs_dir, corrupted_files, corrupted_seen)
+            _append_corrupted(receipt_path, runs_dir, corrupted_files, corrupted_seen)
+            ambiguous_receipt_keys.add(receipt_key)
+            scanned_receipts.pop(receipt_key, None)
+            return
+        scanned_receipt_paths[receipt_key] = receipt_path
+        scanned_receipts[receipt_key] = (effective_pr, finding_count)
 
     for run_dir in run_dirs:
         target_path = run_dir / "target.json"
@@ -1332,8 +1474,13 @@ def analyze_review_runs(
         if outcome_path.exists():
             outcome_data = _read_json_dict(outcome_path, runs_dir, corrupted_files, corrupted_seen)
 
+        outcome_target_invalid = (
+            outcome_data is not None
+            and "target" in outcome_data
+            and not isinstance(outcome_data["target"], dict)
+        )
         outcome_target = (
-            outcome_data.get("target")
+            outcome_data["target"]
             if outcome_data is not None and isinstance(outcome_data.get("target"), dict)
             else None
         )
@@ -1363,8 +1510,12 @@ def analyze_review_runs(
         )
         dir_head_conflict = len(dir_heads) > 1 or (bool(dir_heads) and dir_head_invalid) or dir_head_non_str
 
+        if not outcome_path.exists():
+            missing_outcome_runs += 1
+
         dir_identity_corrupted = (
-            len(dir_run_ids) > 1
+            outcome_target_invalid
+            or len(dir_run_ids) > 1
             or len(dir_prs) > 1
             or dir_head_conflict
             or dir_run_id_invalid
@@ -1379,9 +1530,6 @@ def analyze_review_runs(
                 _append_corrupted(rp, runs_dir, corrupted_files, corrupted_seen)
             verdict_counts["CORRUPTED_IDENTITY"] += 1
             continue
-
-        if not outcome_path.exists():
-            missing_outcome_runs += 1
 
         dir_run_id: str | None = next(iter(dir_run_ids), None)
         run_pr_number: int | None = next(iter(dir_prs), None)
@@ -1461,7 +1609,7 @@ def analyze_review_runs(
 
         resolved_receipt_run_id = dir_run_id or next(iter(cand_run_ids), None) or run_dir.name
         run_blocking_findings = 0
-        for receipt_path, receipt, r_run_id, _r_pr, _r_head in candidate_receipts:
+        for receipt_path, receipt, r_run_id, r_pr, _r_head in candidate_receipts:
             total_receipts += 1
             r_status = str(receipt.get("status") or "unknown").lower()
             if r_status == "completed":
@@ -1471,18 +1619,20 @@ def analyze_review_runs(
 
             model = str(receipt.get("model") or receipt_path.parent.name)
             effective_run_id = r_run_id or resolved_receipt_run_id
+            effective_pr = run_pr_number if run_pr_number is not None else r_pr
+            receipt_key = (effective_run_id, model)
 
             result = receipt.get("result")
             if not isinstance(result, dict):
-                scanned_receipts[(effective_run_id, model)] = (run_pr_number, 0)
+                _register_receipt_key(receipt_key, receipt_path, effective_pr, 0)
                 continue
             result_status = str(result.get("status") or "unknown").lower()
             raw_findings = result.get("findings")
             if not isinstance(raw_findings, list):
-                scanned_receipts[(effective_run_id, model)] = (run_pr_number, 0)
+                _register_receipt_key(receipt_key, receipt_path, effective_pr, 0)
                 continue
 
-            scanned_receipts[(effective_run_id, model)] = (run_pr_number, len(raw_findings))
+            _register_receipt_key(receipt_key, receipt_path, effective_pr, len(raw_findings))
             for finding in raw_findings:
                 text = finding if isinstance(finding, str) else json.dumps(finding, ensure_ascii=False)
                 total_findings += 1
@@ -1600,6 +1750,11 @@ def analyze_review_runs(
 
     for entry in entries:
         receipt_key = (entry.run_id, entry.model)
+        if receipt_key in ambiguous_receipt_keys:
+            raise EvalValidationError(
+                f"去向台账引用了存在重复回执键的歧义回执，无法唯一指向发现："
+                f"(run_id={entry.run_id!r}, model={entry.model!r})"
+            )
         if receipt_key not in scanned_receipts:
             raise EvalValidationError(
                 f"去向台账引用了不存在的回执：(run_id={entry.run_id!r}, model={entry.model!r})"
