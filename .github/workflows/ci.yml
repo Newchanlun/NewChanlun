@@ -472,6 +472,10 @@ jobs:
       - name: cargo test — default targets
         run: ../.github/scripts/run-cargo-with-telemetry.sh cargo test --all-targets --no-fail-fast --jobs "${CI_CARGO_JOBS:-1}"
 
+      # #1426：验证形成侧五个证据结构体拒绝外部字面量构造（只许 E0451，复用 default 作业已编好的 lib）。
+      - name: 编译负例 — #1426 证据类型拒绝外部字面量构造（#1426）
+        run: ../.github/scripts/run-cargo-with-telemetry.sh ../.github/scripts/check-compile-negatives-1394.sh default
+
   # #1370：s_session 的 required-features 不在 default/backtest_bin 中启用。
   # 运行正式 S bin 的回归测试，不能只编译或以默认目标的通过代替。
   # #1394 根裁定 A：v3::financial_session 依赖只在 macOS 实现的会话保留量读数（heap_probe）与
@@ -621,7 +625,7 @@ jobs:
       #   放在 TB-02-C 单测之后复用已编好的 s_session 依赖；负例在类型检查阶段即失败，不做代码生成。
       - name: 编译负例 — #1394 类型边界仍拒绝旧写法（#1608）
         if: ${{ !cancelled() && matrix.group == 'owned-h1' }}
-        run: ../.github/scripts/check-compile-negatives-1394.sh
+        run: ../.github/scripts/check-compile-negatives-1394.sh s_session
 
       # #1419 裁定（issuecomment-6265726014）：v2 写者机械锁，发布构建（只开 s_session）。
       #   ① 可达性：v2 核心写函数（init/accept/advance/recover_core）在源码以 cfg 条件 expect(dead_code) 标注；
