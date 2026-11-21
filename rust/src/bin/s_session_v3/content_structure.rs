@@ -329,6 +329,7 @@ fn verify_prior(
     if field_text(nodes, record, "object_id")? != derived {
         return Err("prior obj3 身份不符".into());
     }
+    let mut legacy = false;
     for (key, want) in [
         ("schema_revision", header(kind).0),
         ("semantic_version", header(kind).1),
@@ -341,6 +342,7 @@ fn verify_prior(
                 && observed == crate::tb02e::LEGACY_POLICY_VERSION)
                 || (crate::tb02f::KINDS.contains(&kind)
                     && observed == crate::tb02f::LEGACY_POLICY_VERSION));
+        legacy |= legacy_policy;
         if !legacy_policy && observed != want {
             return Err(format!("prior {key} 不符").into());
         }
@@ -354,6 +356,20 @@ fn verify_prior(
         return Err("prior fact_key 与 slot 不符".into());
     }
     let data = field(nodes, &payload, "data")?;
+    if kind == crate::tb02e::KINDS[1] {
+        let r = nodes
+            .native_built_ref(&data)
+            .map_err(sc::ContextError::from)?;
+        for name in CENTER_R5_FIELDS {
+            let present = nodes
+                .lookup_optional_field_ref(r.view(), name)
+                .map_err(sc::ContextError::from)?
+                .is_some();
+            if present == legacy {
+                return Err("prior 中枢版本与 R5 字段不符".into());
+            }
+        }
+    }
     if kind == crate::tb02c::KINDS[2]
         || crate::tb02e::KINDS[..4].contains(&kind)
         || crate::tb02f::KINDS[..2].contains(&kind)
@@ -1429,14 +1445,40 @@ fn keep_known_node(
     }
     put(&(CV::Object(fields)), nodes)
 }
-fn revise_node(
+const CENTER_R5_FIELDS: [&str; 2] = ["r5", "r5_pending_unit"];
+
+fn revise_center_node(
     old: Option<&Built>,
     value: CV,
     nodes: &mut dyn NodeStore,
 ) -> Result<(Built, i64, bool), sc::ContextError> {
     let mut fields = vec_fields(value)?;
     let changed = match old {
-        Some(old) => !same_fields(nodes, old, &fields, &["entity_revision"])?,
+        Some(old) => {
+            let r = nodes
+                .native_built_ref(old)
+                .map_err(sc::ContextError::from)?;
+            if nodes
+                .lookup_optional_field_ref(r.view(), "r5")
+                .map_err(sc::ContextError::from)?
+                .is_none()
+            {
+                // 已验证的旧策略只有两项 R5 字段缺席；按旧字段集合精确核形，
+                // 保存旧 before 原件，不用合成 null 扩展历史快照。
+                let names = Vec::from_iter(
+                    fields.iter().filter_map(|(name, _)| {
+                        (!CENTER_R5_FIELDS.contains(&name.as_str())).then_some(name.as_str())
+                    }),
+                    nodes,
+                )?;
+                nodes
+                    .lookup_fields_ref(r.view(), &names)
+                    .map_err(sc::ContextError::from)?;
+                true
+            } else {
+                !same_fields(nodes, old, &fields, &["entity_revision"])?
+            }
+        }
         None => true,
     };
     let revision = revision_of(nodes, old)?
@@ -2193,7 +2235,7 @@ pub(super) fn build_ef_units(
             ],
             nodes,
         )?;
-        let (data, revision, changed) = revise_node(prior, value, nodes)?;
+        let (data, revision, changed) = revise_center_node(prior, value, nodes)?;
         let mut sources = unit_sources(members, nodes)?;
         if let Some(proof) = wf.settlement {
             for k in [proof.leave_unit(), proof.pullback_unit()] {
