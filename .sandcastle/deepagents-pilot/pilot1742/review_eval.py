@@ -97,7 +97,7 @@ _EXPLICIT_NON_BLOCKING_OVERRIDE_RE = re.compile(
     re.IGNORECASE,
 )
 _LEADING_COLON_TAG_RE = re.compile(r"^(?:(?:\*\*|__)\s*)?([^:\n：\[\【\]\】`*]{1,24}?)(?:\s*(?:\*\*|__))?\s*[:：](?!\d)")
-_TAG_SPLIT_RE = re.compile(r"[\s/·,，、\-—:：|]+")
+_TAG_SPLIT_RE = re.compile(r"[\s/／·・,，、\-—:：|｜()（）]+")
 _STRICT_NON_BLOCKING_COLON_TOKEN = (
     r"(?:非阻断|不阻断|non[- ]?blocking|nit|minor|low|info|p3|低|信息|提示|建议|可选|"
     r"核实通过|确认无(?:问题|误)|通过)"
@@ -116,22 +116,43 @@ _STRICT_COLON_BLOCKING_RE = re.compile(
     rf"^(?:{_STRICT_BLOCKING_COLON_TOKEN})(?:\s+{_STRICT_BLOCKING_COLON_TOKEN})*$",
     re.IGNORECASE,
 )
-_TAG_NON_BLOCKING_RE = re.compile(
-    r"(?:非阻断|不阻断|(?<![A-Za-z0-9])non[- ]?blocking(?![A-Za-z0-9])|"
-    r"(?<![A-Za-z0-9])nit(?![A-Za-z0-9])|(?<![A-Za-z0-9])minor(?![A-Za-z0-9])|"
-    r"(?<![A-Za-z0-9])low(?![A-Za-z0-9])|(?<![A-Za-z0-9])info(?![A-Za-z0-9])|"
-    r"信息|提示|(?<!不是)(?<!并非)(?<!非)建议|(?<!不是)(?<!并非)(?<!非)可选|"
-    r"(?<![A-Za-z0-9])p3(?![A-Za-z0-9])|"
-    r"已核.*(?:无问题|未发现问题)|核实通过|确认无(?:问题|误)|(?<!未)(?<!不)(?<!没)(?<!没有)(?<!非)(?<!未获)通过)",
-    re.IGNORECASE,
+_TIER1_NON_BLOCKING_TAG_TOKENS: frozenset[str] = frozenset(
+    {"非阻断", "不阻断", "non-blocking", "nit", "minor", "low", "低", "p3"}
 )
-_TAG_BLOCKING_RE = re.compile(
-    r"(?:阻断|(?<![A-Za-z0-9])block(?:er|ing)?(?![A-Za-z0-9])|"
-    r"(?<![A-Za-z0-9])important(?![A-Za-z0-9])|(?<![A-Za-z0-9])critical(?![A-Za-z0-9])|"
-    r"(?<![A-Za-z0-9])must[- ]?fix(?![A-Za-z0-9])|严重|重要|"
-    r"(?<![A-Za-z0-9])p[012](?![A-Za-z0-9]))",
-    re.IGNORECASE,
+_TIER2_BLOCKING_TAG_TOKENS: frozenset[str] = frozenset(
+    {
+        "阻断",
+        "block",
+        "blocker",
+        "blocking",
+        "important",
+        "critical",
+        "must-fix",
+        "严重",
+        "重要",
+        "高",
+        "p0",
+        "p1",
+        "p2",
+    }
 )
+_TIER3_NON_BLOCKING_TAG_TOKENS: frozenset[str] = frozenset(
+    {
+        "info",
+        "信息",
+        "信息级",
+        "提示",
+        "建议",
+        "可选",
+        "通过",
+        "核实通过",
+        "核验通过",
+        "通过项",
+        "确认无问题",
+        "确认无误",
+    }
+)
+_TIER3_VERIFIED_OK_TAG_RE = re.compile(r"^已核.*(?:无问题|未发现问题)$")
 _NON_BLOCKING_NIT_RE = re.compile(
     r"(?:[\[\【]\s*nit\s*[\]\】]|(?<![A-Za-z0-9])nit\s*[:：]|"
     r"(?<!不是)(?<!并非)(?<!不属于)(?<!不是一个)(?<!并非是)(?:非阻断|不阻断)|"
@@ -322,6 +343,7 @@ class BaselineMetrics:
     total_runs: int
     missing_outcome_runs: int
     reused_runs: int
+    reused_pass_runs: int
     fresh_pass_runs: int
     unorderable_runs: int
     corrupted_files: tuple[str, ...]
@@ -1525,16 +1547,41 @@ def load_dispositions(jsonl_path: Path) -> tuple[DispositionEntry, ...]:
     return tuple(entries)
 
 
+def _tokenize_severity_tag(tag_text: str) -> list[str]:
+    raw_tokens = [tok.lower() for tok in _TAG_SPLIT_RE.split(tag_text.strip()) if tok]
+    tokens: list[str] = []
+    i = 0
+    while i < len(raw_tokens):
+        if i + 1 < len(raw_tokens):
+            pair = (raw_tokens[i], raw_tokens[i + 1])
+            if pair == ("non", "blocking"):
+                tokens.append("non-blocking")
+                i += 2
+                continue
+            if pair == ("must", "fix"):
+                tokens.append("must-fix")
+                i += 2
+                continue
+        tokens.append(raw_tokens[i])
+        i += 1
+    return tokens
+
+
 def _classify_severity_tag_text(tag_text: str) -> Literal["blocking", "non_blocking"] | None:
-    if _TAG_NON_BLOCKING_RE.search(tag_text):
+    tokens = _tokenize_severity_tag(tag_text)
+    if not tokens:
+        return None
+    if any(tok in _TIER1_NON_BLOCKING_TAG_TOKENS for tok in tokens):
         return "non_blocking"
-    tokens = [tok for tok in _TAG_SPLIT_RE.split(tag_text.strip()) if tok]
-    if "低" in tokens:
+    if any(tok in _TIER2_BLOCKING_TAG_TOKENS for tok in tokens):
+        return "blocking"
+    compact = "".join(tokens)
+    if (
+        any(tok in _TIER3_NON_BLOCKING_TAG_TOKENS or _TIER3_VERIFIED_OK_TAG_RE.fullmatch(tok) for tok in tokens)
+        or compact in _TIER3_NON_BLOCKING_TAG_TOKENS
+        or _TIER3_VERIFIED_OK_TAG_RE.fullmatch(compact)
+    ):
         return "non_blocking"
-    if _TAG_BLOCKING_RE.search(tag_text):
-        return "blocking"
-    if "高" in tokens:
-        return "blocking"
     return None
 
 
@@ -2901,7 +2948,7 @@ def analyze_review_runs(
         att_values = {v for v in (t_att, ot_att) if v is not None}
         has_valid_attempt = not t_att_bad and not ot_att_bad and len(att_values) <= 1
 
-        if run_pr_number is None or not has_valid_ts or not has_valid_attempt:
+        if run_pr_number is None or not has_valid_ts:
             unorderable_runs += 1
             if run_pr_number is not None:
                 prs_with_unorderable_run.add(run_pr_number)
@@ -2911,8 +2958,12 @@ def analyze_review_runs(
                 unorderable_block_by_receipt_key.extend(run_blocking_by_key)
             continue
 
+        if not has_valid_attempt:
+            unorderable_runs += 1
+            prs_with_unorderable_run.add(run_pr_number)
+
         resolved_reg_at_ns = next(iter(reg_values))
-        attempt = next(iter(att_values), 0)
+        attempt = next(iter(att_values), 0) if has_valid_attempt else 0
         pr_timeline[run_pr_number].append(
             _RunTimelineRecord(
                 registered_at_ns=resolved_reg_at_ns,
@@ -2938,24 +2989,34 @@ def analyze_review_runs(
         ordered_runs = sorted(records, key=lambda r: (r.registered_at_ns, r.attempt, r.dir_name))
 
         if pr_number not in prs_with_unorderable_run:
-            first_pass_idx: int | None = None
-            for idx, rec in enumerate(ordered_runs):
-                if rec.verdict == "PASS":
-                    first_pass_idx = idx
+            grouped_by_causal_key: dict[tuple[int, int], list[_RunTimelineRecord]] = defaultdict(list)
+            for rec in records:
+                grouped_by_causal_key[(rec.registered_at_ns, rec.attempt)].append(rec)
+
+            earlier_runs: list[_RunTimelineRecord] = []
+            first_pass_group: list[_RunTimelineRecord] | None = None
+            for causal_key in sorted(grouped_by_causal_key):
+                group = grouped_by_causal_key[causal_key]
+                if any(r.verdict == "PASS" for r in group):
+                    first_pass_group = group
                     break
-            if first_pass_idx is not None:
-                rounds_all.append(first_pass_idx + 1)
-                first_pass_rec = ordered_runs[first_pass_idx]
-                if first_pass_rec.is_reused:
-                    prs_first_pass_reused += 1
-                else:
-                    # 有效评审轮次：仅计真实新产生正式裁定（PASS / BLOCK 且非 reused_from）的轮次。
-                    fresh_effective_until_pass = sum(
-                        1
-                        for rec in ordered_runs[: first_pass_idx + 1]
-                        if rec.verdict in ("PASS", "BLOCK") and not rec.is_reused
-                    )
-                    rounds_effective.append(fresh_effective_until_pass)
+                earlier_runs.extend(group)
+
+            if first_pass_group is not None:
+                has_non_pass = any(r.verdict != "PASS" for r in first_pass_group)
+                has_mixed_reuse = len({r.is_reused for r in first_pass_group}) > 1
+                if not has_non_pass and not has_mixed_reuse:
+                    rounds_all.append(len(earlier_runs) + 1)
+                    if first_pass_group[0].is_reused:
+                        prs_first_pass_reused += 1
+                    else:
+                        # 有效评审轮次：仅计真实新产生正式裁定（PASS / BLOCK 且非 reused_from）的轮次。
+                        fresh_effective_before_pass = sum(
+                            1
+                            for rec in earlier_runs
+                            if rec.verdict in ("PASS", "BLOCK") and not rec.is_reused
+                        )
+                        rounds_effective.append(fresh_effective_before_pass + 1)
 
         unorderable_pass_heads = unorderable_pass_heads_by_pr.get(pr_number, set())
         for rec in ordered_runs:
@@ -3056,6 +3117,7 @@ def analyze_review_runs(
         total_runs=total_runs,
         missing_outcome_runs=missing_outcome_runs,
         reused_runs=reused_runs,
+        reused_pass_runs=reused_pass_runs,
         fresh_pass_runs=fresh_pass_runs,
         unorderable_runs=unorderable_runs,
         corrupted_files=tuple(corrupted_files),
@@ -3132,7 +3194,7 @@ def render_baseline_markdown(metrics: BaselineMetrics) -> str:
         "# 外部正式审查基线统计报告（#1931）",
         "",
         f"- 扫描目录：`{metrics.runs_dir}`",
-        f"- 总运行数：`{metrics.total_runs}`（其中缺 `outcome.json` 未完结：`{metrics.missing_outcome_runs}`；沿用历史 PASS：`{metrics.reused_runs}`；新产生 PASS：`{metrics.fresh_pass_runs}`；不可排序运行：`{metrics.unorderable_runs}`；损坏跳过文件：`{len(metrics.corrupted_files)}`）",
+        f"- 总运行数：`{metrics.total_runs}`（其中缺 `outcome.json` 未完结：`{metrics.missing_outcome_runs}`；沿用历史 PASS（`reused_from` 且终态为 `PASS`）：`{metrics.reused_pass_runs}`（含非 `PASS` 复用总计 `{metrics.reused_runs}`）；新产生 PASS：`{metrics.fresh_pass_runs}`；不可排序运行：`{metrics.unorderable_runs}`；损坏跳过文件：`{len(metrics.corrupted_files)}`）",
         f"- 唯一 PR 数：`{metrics.unique_prs}`（已获 PASS：`{metrics.prs_with_pass}`；尚未 PASS：`{metrics.prs_without_pass}`；其中首次 PASS 为历史复用的 PR：`{metrics.prs_first_pass_reused}`）",
         f"- BLOCK 率（占全量运行 `{metrics.total_runs}`）：`{_fmt_pct(metrics.block_rate_all)}`",
         f"- BLOCK 率（含历史复用 PASS 分母 `PASS+BLOCK = {decided_including_reuse}`）：`{_fmt_pct(metrics.block_rate_decided_including_reuse)}`",

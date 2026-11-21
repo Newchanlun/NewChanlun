@@ -4334,10 +4334,13 @@ def test_r14_attempt_conflict_and_invalid_unorderable(tmp_path: Path) -> None:
         assert m.unorderable_runs == 1, direction_name
         assert m.rounds_to_first_pass_all.prs_counted == 0, direction_name
         assert m.rounds_to_first_pass_effective.prs_counted == 0, direction_name
-        assert m.subsequent_head_pass_undeterminable_findings == 1, direction_name
-        assert m.subsequent_head_pass_total_block_findings == 0, direction_name
+        # R15 起 subsequent_head_pass_* 仅依赖严格时间戳，不因 attempt 冲突丢弃合法时间戳样本；
+        # 本用例两轮均为 ts=100（非严格更晚），故归入可判定未修（total=1, fixed=0, undeterminable=0）。
+        assert m.subsequent_head_pass_undeterminable_findings == 0, direction_name
+        assert m.subsequent_head_pass_total_block_findings == 1, direction_name
+        assert m.subsequent_head_pass_inferred_fixed == 0, direction_name
 
-    # PASS 轮 attempt 冲突时同样标为不可排序并记录 unorderable_pass_heads_by_pr，使同 PR BLOCK 发现不可判定
+    # PASS 轮 attempt 冲突但时间戳合法（同 ts=100）：排除首 PASS 轮次，同时不污染 subsequent_head_pass_undeterminable_findings
     runs_pass_bad = tmp_path / "pass_attempt_conflict"
     r_b = runs_pass_bad / "r1-block"
     r_p = runs_pass_bad / "r2-pass"
@@ -4376,8 +4379,9 @@ def test_r14_attempt_conflict_and_invalid_unorderable(tmp_path: Path) -> None:
     assert m_pb.corrupted_files == ()
     assert m_pb.unorderable_runs == 1
     assert m_pb.rounds_to_first_pass_all.prs_counted == 0
-    assert m_pb.subsequent_head_pass_undeterminable_findings == 1
-    assert m_pb.subsequent_head_pass_total_block_findings == 0
+    assert m_pb.subsequent_head_pass_undeterminable_findings == 0
+    assert m_pb.subsequent_head_pass_total_block_findings == 1
+    assert m_pb.subsequent_head_pass_inferred_fixed == 0
 
     # 显式非法 attempt（bool / 负数 / 字符串 / None / float）无论出现在哪一侧均判不可排序
     for bad_name, target_obj, outcome_target_obj in [
@@ -4471,3 +4475,365 @@ def test_r14_leading_tag_parenthetical_negated_pass_and_style_word_boundary() ->
     assert is_style_or_format_finding("reimport order mismatch") is False
     assert is_style_or_format_finding("fix import order") is True
     assert is_style_or_format_finding("import 排序混乱") is True
+
+
+def test_r15_separated_orderability_gate_for_subsequent_head_pass(tmp_path: Path) -> None:
+    # Important 1：BLOCK 轮 attempt 冲突（1 vs 2）但时间戳严格合法（ts=100），后续 head B（ts=200）PASS
+    runs_block_att = tmp_path / "block_attempt_conflict_strict_later"
+    r1 = runs_block_att / "r1-block"
+    r2 = runs_block_att / "r2-pass"
+    (r1 / "claude-opus-5-5").mkdir(parents=True)
+    r2.mkdir(parents=True)
+    (r1 / "target.json").write_text(
+        json.dumps({"pr_number": 1501, "head_sha": "a" * 40, "registered_at_ns": 100, "attempt": 1}),
+        encoding="utf-8",
+    )
+    (r1 / "outcome.json").write_text(
+        json.dumps(
+            {
+                "verdict": "BLOCK",
+                "target": {"pr_number": 1501, "head_sha": "a" * 40, "registered_at_ns": 100, "attempt": 2},
+            }
+        ),
+        encoding="utf-8",
+    )
+    (r1 / "claude-opus-5-5" / "receipt.json").write_text(
+        json.dumps(
+            {
+                "run_id": "run-p1501-r1",
+                "pr_number": 1501,
+                "head_sha": "a" * 40,
+                "status": "completed",
+                "model": "claude-opus-5-5",
+                "result": {"status": "blocked", "findings": ["[P1] 缺陷"]},
+            }
+        ),
+        encoding="utf-8",
+    )
+    (r2 / "target.json").write_text(
+        json.dumps({"pr_number": 1501, "head_sha": "b" * 40, "registered_at_ns": 200, "attempt": 2}),
+        encoding="utf-8",
+    )
+    (r2 / "outcome.json").write_text(
+        json.dumps(
+            {
+                "verdict": "PASS",
+                "target": {"pr_number": 1501, "head_sha": "b" * 40, "registered_at_ns": 200, "attempt": 2},
+            }
+        ),
+        encoding="utf-8",
+    )
+    m1 = analyze_review_runs(runs_block_att)
+    assert m1.corrupted_files == ()
+    assert m1.unorderable_runs == 1
+    assert m1.rounds_to_first_pass_all.prs_counted == 0
+    assert m1.rounds_to_first_pass_effective.prs_counted == 0
+    assert m1.subsequent_head_pass_inferred_fixed == 1
+    assert m1.subsequent_head_pass_total_block_findings == 1
+    assert m1.subsequent_head_pass_undeterminable_findings == 0
+
+    # 反向场景：PASS 轮 attempt 冲突但时间戳严格更晚（ts=200 > ts=100），同样应计入推定已修
+    runs_pass_att = tmp_path / "pass_attempt_conflict_strict_later"
+    _write_run(
+        runs_pass_att,
+        "p1502-r1-block",
+        pr_number=1502,
+        head_sha="a" * 40,
+        registered_at_ns=100,
+        attempt=1,
+        verdict="BLOCK",
+        receipts={
+            "claude-opus-5-5": {
+                "run_id": "run-p1502-r1-block",
+                "pr_number": 1502,
+                "head_sha": "a" * 40,
+                "status": "completed",
+                "model": "claude-opus-5-5",
+                "result": {"status": "blocked", "findings": ["[P1] 缺陷"]},
+            }
+        },
+    )
+    rp = runs_pass_att / "r2-pass"
+    rp.mkdir(parents=True)
+    (rp / "target.json").write_text(
+        json.dumps({"pr_number": 1502, "head_sha": "b" * 40, "registered_at_ns": 200, "attempt": 1}),
+        encoding="utf-8",
+    )
+    (rp / "outcome.json").write_text(
+        json.dumps(
+            {
+                "verdict": "PASS",
+                "target": {"pr_number": 1502, "head_sha": "b" * 40, "registered_at_ns": 200, "attempt": 2},
+            }
+        ),
+        encoding="utf-8",
+    )
+    m2 = analyze_review_runs(runs_pass_att)
+    assert m2.corrupted_files == ()
+    assert m2.unorderable_runs == 1
+    assert m2.rounds_to_first_pass_all.prs_counted == 0
+    assert m2.rounds_to_first_pass_effective.prs_counted == 0
+    assert m2.subsequent_head_pass_inferred_fixed == 1
+    assert m2.subsequent_head_pass_total_block_findings == 1
+    assert m2.subsequent_head_pass_undeterminable_findings == 0
+
+
+def test_r15_causal_key_tie_ambiguity_independent_of_dir_name(tmp_path: Path) -> None:
+    # Important 2：同 (registered_at_ns=100, attempt=1) 并列 BLOCK 与 PASS，对调目录名结果必须完全一致且跳过该 PR
+    results: list[tuple[int, int, int, int]] = []
+    for order_name, block_dir, pass_dir in [
+        ("block_before_pass", "a-run", "b-run"),
+        ("pass_before_block", "b-run", "a-run"),
+    ]:
+        runs_dir = tmp_path / f"tie_{order_name}"
+        runs_dir.mkdir()
+        _write_run(
+            runs_dir,
+            block_dir,
+            pr_number=1510,
+            head_sha="a" * 40,
+            registered_at_ns=100,
+            attempt=1,
+            verdict="BLOCK",
+            receipts={
+                "claude-opus-5-5": {
+                    "run_id": f"run-{block_dir}",
+                    "status": "completed",
+                    "model": "claude-opus-5-5",
+                    "result": {"status": "blocked", "findings": ["[P1] 缺陷"]},
+                }
+            },
+        )
+        _write_run(
+            runs_dir,
+            pass_dir,
+            pr_number=1510,
+            head_sha="b" * 40,
+            registered_at_ns=100,
+            attempt=1,
+            verdict="PASS",
+        )
+        m = analyze_review_runs(runs_dir)
+        assert m.corrupted_files == (), order_name
+        assert m.unorderable_runs == 0, order_name
+        assert m.rounds_to_first_pass_all.prs_counted == 0, order_name
+        assert m.rounds_to_first_pass_effective.prs_counted == 0, order_name
+        assert m.prs_first_pass_reused == 0, order_name
+        assert m.subsequent_head_pass_total_block_findings == 1, order_name
+        assert m.subsequent_head_pass_inferred_fixed == 0, order_name
+        results.append(
+            (
+                m.unorderable_runs,
+                m.rounds_to_first_pass_all.prs_counted,
+                m.rounds_to_first_pass_effective.prs_counted,
+                m.prs_first_pass_reused,
+            )
+        )
+    assert results[0] == results[1]
+
+    # 同组混合复用 PASS 与新产生 PASS 也存在歧义（影响 rounds_effective 与 prs_first_pass_reused），对调目录名均跳过
+    for order_name, reused_dir, fresh_dir in [
+        ("reused_first", "a-run", "b-run"),
+        ("fresh_first", "b-run", "a-run"),
+    ]:
+        runs_mix = tmp_path / f"tie_mixed_reuse_{order_name}"
+        runs_mix.mkdir()
+        _write_run(
+            runs_mix,
+            reused_dir,
+            pr_number=1511,
+            head_sha="a" * 40,
+            registered_at_ns=100,
+            attempt=1,
+            verdict="PASS",
+            reused_from="prev-pass",
+        )
+        _write_run(
+            runs_mix,
+            fresh_dir,
+            pr_number=1511,
+            head_sha="a" * 40,
+            registered_at_ns=100,
+            attempt=1,
+            verdict="PASS",
+        )
+        m_mix = analyze_review_runs(runs_mix)
+        assert m_mix.unorderable_runs == 0, order_name
+        assert m_mix.rounds_to_first_pass_all.prs_counted == 0, order_name
+        assert m_mix.rounds_to_first_pass_effective.prs_counted == 0, order_name
+        assert m_mix.prs_first_pass_reused == 0, order_name
+
+    # 无歧义并列正对照：早期双 BLOCK 并列 + 后续单 PASS -> 确定 3 轮；早期单 BLOCK + 后续双同型 fresh PASS -> 确定 2 轮；
+    # 歧义并列 PR 若后续在更晚时间戳出现不同 head PASS，subsequent_head_pass_* 仍按严格 > 正常统计。
+    runs_ok = tmp_path / "tie_non_ambiguous_and_subsequent"
+    runs_ok.mkdir()
+    _write_run(runs_ok, "p1512-b1", pr_number=1512, head_sha="a" * 40, registered_at_ns=100, attempt=1, verdict="BLOCK")
+    _write_run(runs_ok, "p1512-b2", pr_number=1512, head_sha="a" * 40, registered_at_ns=100, attempt=1, verdict="BLOCK")
+    _write_run(runs_ok, "p1512-p3", pr_number=1512, head_sha="b" * 40, registered_at_ns=200, attempt=1, verdict="PASS")
+
+    _write_run(runs_ok, "p1513-b1", pr_number=1513, head_sha="a" * 40, registered_at_ns=100, attempt=1, verdict="BLOCK")
+    _write_run(runs_ok, "p1513-p2a", pr_number=1513, head_sha="b" * 40, registered_at_ns=200, attempt=1, verdict="PASS")
+    _write_run(runs_ok, "p1513-p2b", pr_number=1513, head_sha="b" * 40, registered_at_ns=200, attempt=1, verdict="PASS")
+
+    _write_run(runs_ok, "p1514-b1", pr_number=1514, head_sha="a" * 40, registered_at_ns=100, attempt=1, verdict="BLOCK")
+    _write_run(
+        runs_ok,
+        "p1514-p2a",
+        pr_number=1514,
+        head_sha="b" * 40,
+        registered_at_ns=200,
+        attempt=1,
+        verdict="PASS",
+        reused_from="old-1",
+    )
+    _write_run(
+        runs_ok,
+        "p1514-p2b",
+        pr_number=1514,
+        head_sha="b" * 40,
+        registered_at_ns=200,
+        attempt=1,
+        verdict="PASS",
+        reused_from="old-2",
+    )
+
+    _write_run(
+        runs_ok,
+        "p1515-b1",
+        pr_number=1515,
+        head_sha="a" * 40,
+        registered_at_ns=100,
+        attempt=1,
+        verdict="BLOCK",
+        receipts={
+            "claude-opus-5-5": {
+                "run_id": "run-p1515-b1",
+                "status": "completed",
+                "model": "claude-opus-5-5",
+                "result": {"status": "blocked", "findings": ["[P1] 真实缺陷"]},
+            }
+        },
+    )
+    _write_run(runs_ok, "p1515-p1", pr_number=1515, head_sha="a" * 40, registered_at_ns=100, attempt=1, verdict="PASS")
+    _write_run(runs_ok, "p1515-p2", pr_number=1515, head_sha="b" * 40, registered_at_ns=200, attempt=2, verdict="PASS")
+
+    m_ok = analyze_review_runs(runs_ok)
+    assert m_ok.unorderable_runs == 0
+    assert m_ok.rounds_to_first_pass_all.prs_counted == 3
+    assert m_ok.rounds_to_first_pass_all.bucket_2 == 2
+    assert m_ok.rounds_to_first_pass_all.bucket_3 == 1
+    assert m_ok.rounds_to_first_pass_effective.prs_counted == 2
+    assert m_ok.rounds_to_first_pass_effective.bucket_2 == 1
+    assert m_ok.rounds_to_first_pass_effective.bucket_3 == 1
+    assert m_ok.prs_first_pass_reused == 1
+    assert m_ok.subsequent_head_pass_total_block_findings == 1
+    assert m_ok.subsequent_head_pass_inferred_fixed == 1
+    assert m_ok.subsequent_head_pass_undeterminable_findings == 0
+
+
+def test_r15_three_tier_full_token_severity_tags() -> None:
+    # Important 3：三层全词元分级，杜绝“无法通过”/“信息泄露”/“流程提示”子串覆盖显式阻断或无标签阻断
+    assert classify_finding_heuristic("[阻断/验收无法通过] 数据丢失", "blocked") == "blocking_substantive"
+    assert _parse_leading_severity_tag("[阻断/验收无法通过] 数据丢失") == "blocking"
+    assert classify_finding_heuristic("[P1/信息泄露] 泄露密钥", "blocked") == "blocking_substantive"
+    assert _parse_leading_severity_tag("[P1/信息泄露] 泄露密钥") == "blocking"
+    assert classify_finding_heuristic("[验收无法通过] 数据丢失", "blocked") == "blocking_substantive"
+    assert _parse_leading_severity_tag("[验收无法通过] 数据丢失") is None
+    assert classify_finding_heuristic("[信息泄露] 泄露密钥", "blocked") == "blocking_substantive"
+    assert _parse_leading_severity_tag("[信息泄露] 泄露密钥") is None
+    assert classify_finding_heuristic("【流程提示】不能沿用改动前的旧 PASS", "blocked") == "blocking_substantive"
+    assert _parse_leading_severity_tag("【流程提示】不能沿用改动前的旧 PASS") is None
+    assert classify_finding_heuristic("[P1/信息] 必须修复", "blocked") == "blocking_substantive"
+    assert classify_finding_heuristic("[阻断/建议] 必须修复", "blocked") == "blocking_substantive"
+    assert classify_finding_heuristic("[must-fix/信息] 必须修复", "blocked") == "blocking_substantive"
+    assert classify_finding_heuristic("[must fix/通过] 必须修复", "blocked") == "blocking_substantive"
+
+    # Tier 1 显式非阻断覆盖与 Tier 3 纯信息/通过/建议全词元保留
+    for nb_text in (
+        "[P2/非阻断] 说明",
+        "[P2/non-blocking] 说明",
+        "[P2 non blocking] 说明",
+        "[P3 非阻断] 说明",
+        "[低，非阻断] 说明",
+        "[非阻断/Nit] 说明",
+        "【低｜待核】行号漂移",
+        "[信息] 补充说明",
+        "【信息】补充说明",
+        "【信息级，不阻断】补充说明",
+        "[信息级] 补充说明",
+        "[通过] 校验一致",
+        "【核实通过】无问题",
+        "[核验通过] 逻辑无误",
+        "[通过项] 与脚本一致",
+        "[已核对/无问题] 已核实",
+        "[已核，未发现问题] 已核实",
+        "[建议] 可抽常量",
+        "[提示] 补充注释",
+        "[可选] 顺手清理",
+        "[确认无问题] 符合预期",
+        "[确认无误] 符合预期",
+    ):
+        assert classify_finding_heuristic(nb_text, "blocked") == "non_blocking_or_nit", nb_text
+
+
+def test_r15_reused_pass_runs_vs_stale_reuse_markdown(tmp_path: Path) -> None:
+    # Nit：STALE + reused_from 不得在 Markdown 中显示为“沿用历史 PASS：1”
+    runs_stale = tmp_path / "stale_reuse"
+    r_stale = runs_stale / "r1-stale"
+    r_stale.mkdir(parents=True)
+    (r_stale / "target.json").write_text(
+        json.dumps({"pr_number": 1520, "head_sha": "a" * 40, "registered_at_ns": 100, "attempt": 1}),
+        encoding="utf-8",
+    )
+    (r_stale / "outcome.json").write_text(
+        json.dumps({"verdict": "STALE", "reused_from": "prev"}),
+        encoding="utf-8",
+    )
+    m_stale = analyze_review_runs(runs_stale)
+    assert m_stale.verdict_counts == {"STALE": 1}
+    assert m_stale.reused_runs == 1
+    assert m_stale.reused_pass_runs == 0
+    assert m_stale.fresh_pass_runs == 0
+    md_stale = render_baseline_markdown(m_stale)
+    assert "沿用历史 PASS（`reused_from` 且终态为 `PASS`）：`0`（含非 `PASS` 复用总计 `1`）" in md_stale
+    assert "沿用历史 PASS：`1`" not in md_stale
+    assert "沿用历史 PASS：1" not in md_stale
+
+    # 混合正对照：1 条复用 PASS + 1 条复用 STALE + 1 条新产生 PASS
+    runs_mix = tmp_path / "mix_reuse"
+    runs_mix.mkdir()
+    _write_run(
+        runs_mix,
+        "r1-reused-pass",
+        pr_number=1521,
+        head_sha="a" * 40,
+        registered_at_ns=100,
+        attempt=1,
+        verdict="PASS",
+        reused_from="prev-pass",
+    )
+    _write_run(
+        runs_mix,
+        "r2-reused-stale",
+        pr_number=1521,
+        head_sha="a" * 40,
+        registered_at_ns=200,
+        attempt=2,
+        verdict="STALE",
+        reused_from="prev-stale",
+    )
+    _write_run(
+        runs_mix,
+        "r3-fresh-pass",
+        pr_number=1521,
+        head_sha="b" * 40,
+        registered_at_ns=300,
+        attempt=3,
+        verdict="PASS",
+    )
+    m_mix = analyze_review_runs(runs_mix)
+    assert m_mix.reused_runs == 2
+    assert m_mix.reused_pass_runs == 1
+    assert m_mix.fresh_pass_runs == 1
+    md_mix = render_baseline_markdown(m_mix)
+    assert "沿用历史 PASS（`reused_from` 且终态为 `PASS`）：`1`（含非 `PASS` 复用总计 `2`）" in md_mix
