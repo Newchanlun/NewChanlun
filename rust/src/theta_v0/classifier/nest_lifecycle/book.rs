@@ -4,10 +4,19 @@
 //! [`NestLifecycleBook::assert_invariants`] 迁至本文件——该方法是断言集的唯一公开入口，
 //! 账本级骨架 `assert_core_invariants` 仍留在 `ledger_kernel`。
 
-use super::center_break::{BreakApplicationKey, BreakIdentity};
+use super::center_break::{
+    ArchivedCenterBreakFact, BreakApplicationKey, BreakApplicationMode, BreakIdentity,
+    CompletionPolicyVersion,
+};
 use super::entry::MigrationKind;
 use super::key::same_anchor;
 use super::*;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct BridgeRegistrationMeta {
+    policy_version: CompletionPolicyVersion,
+    registered_seq: u64,
+}
 
 // ═══════════════════════════════════════════════════════════════════════════
 // NestLifecycleBook（sidecar 注册表）
@@ -36,11 +45,17 @@ pub struct NestLifecycleBook {
     /// 中枢绑定桥（#1719 I4）：对象注册时保留精确 CenterId + 原 LifecycleKey + 政策版本。
     /// 支持 center_break 事实到对象的精确匹配与恢复。按 LifecycleKey 索引（一对象一桥）。
     bridges: BTreeMap<LifecycleKey, HypothesisBridge>,
+    /// 已登记桥的边界解析结果与首次登记因果序号，随 `bridges` 同步迁移。
+    bridge_meta: BTreeMap<LifecycleKey, BridgeRegistrationMeta>,
+    /// 覆盖事实首次留档与桥首次登记的单调因果序号，用于核验「出生前已留档」。
+    center_break_seq: u64,
     /// 按事实、级别、原对象和原政策版本去重；迁移不改变应用身份。
     applied_breaks: BTreeSet<BreakApplicationKey>,
-    /// 首次收到的合法原事实留档，包含无绑定、迟到待恢复和终态保留的事实。
-    /// 相同身份不准改写物理钟、known-at 或证据后重试放行。
-    center_break_facts: BTreeMap<BreakIdentity, CenterBreakFact>,
+    /// 首次收到的合法原事实及留档先后证据，包含无绑定、迟到待恢复和终态保留的事实。
+    /// 相同身份不准改写物理钟、known-at、留档时点或证据后重试放行。
+    center_break_facts: BTreeMap<BreakIdentity, ArchivedCenterBreakFact>,
+    /// 只跟踪已撤回原件的最近一次明确来源判定（证据时钟、状态）；不改动首次留档。
+    center_break_withdrawal_reviews: BTreeMap<BreakIdentity, (usize, CenterBreakSourceStatus)>,
     /// 第二层清账独立审计；只追加实际生效的清账。
     center_break_audits: Vec<CenterBreakAudit>,
     /// #1719 每次消费的显式结果，迟到原件、目标和拒绝原因在此留档。
@@ -253,6 +268,12 @@ impl NestLifecycleBook {
     }
 
     pub fn center_break_facts(&self) -> impl Iterator<Item = &CenterBreakFact> {
+        self.center_break_facts
+            .values()
+            .map(|archived| &archived.fact)
+    }
+
+    pub fn archived_center_break_facts(&self) -> impl Iterator<Item = &ArchivedCenterBreakFact> {
         self.center_break_facts.values()
     }
 
@@ -264,39 +285,94 @@ impl NestLifecycleBook {
         &self.center_break_attempts
     }
 
+    fn next_center_break_seq(&mut self) -> u64 {
+        self.center_break_seq += 1;
+        self.center_break_seq
+    }
+
+    /// 校验本步精确修订。冲突批内的 Withdrawn 拦下 Active；缺席不抹掉此前的撤回。
+    pub(super) fn review_center_break_sources(
+        &mut self,
+        evidence: &CenterBreakBirthEvidence<'_>,
+        as_of: usize,
+    ) -> BTreeMap<BreakIdentity, CenterBreakSourceStatus> {
+        let mut current = BTreeMap::new();
+        if evidence.as_of != as_of {
+            return current;
+        }
+        for (revision, status) in evidence.revisions {
+            let identity = revision.fact.identity();
+            if revision.archived_at <= as_of
+                && self.center_break_facts.get(&identity) == Some(revision)
+            {
+                let observed = current.entry(identity).or_insert(*status);
+                if *status == CenterBreakSourceStatus::Withdrawn {
+                    *observed = *status;
+                }
+            }
+        }
+        current.retain(|identity, status| {
+            if let Some(previous) = self.center_break_withdrawal_reviews.get_mut(identity) {
+                if previous.0 > as_of {
+                    return false;
+                }
+                *previous = (as_of, *status);
+            } else if *status == CenterBreakSourceStatus::Withdrawn {
+                self.center_break_withdrawal_reviews
+                    .insert(*identity, (as_of, *status));
+            }
+            true
+        });
+        current
+    }
+
     /// #1719 首次绑定只可在原建仓 bar 登记；重发不覆盖原对象/政策/注册钟。
     /// 升级只接收已经由原迁移规则认可、且 provider 精确选中的新 B。
-    /// 缺账、冲突、迟绑均返回 Rejected，不为旧对象猜配身份。
+    /// 缺账、冲突、空版本返回 Rejected，不为旧对象猜配身份。
+    /// 单独登记只绑定；v2 出生当步清账须由同批出生的伴随绑定喂入触发。
     pub fn register_center_bridge(&mut self, binding: HypothesisBridge) -> BridgeRegistration {
-        if binding.policy.version.trim().is_empty()
-            || binding.lifecycle_key != binding.binding_key
+        self.register_center_bridge_with_revisions(binding, None).0
+    }
+
+    pub(super) fn register_center_bridge_with_revisions(
+        &mut self,
+        binding: HypothesisBridge,
+        birth_evidence: Option<&BTreeMap<BreakIdentity, CenterBreakSourceStatus>>,
+    ) -> (BridgeRegistration, Vec<LifecycleRevision>) {
+        let Some(policy_version) =
+            CompletionPolicyVersion::for_component_binding(&binding.policy.version)
+        else {
+            return (BridgeRegistration::Rejected, Vec::new());
+        };
+        if binding.lifecycle_key != binding.binding_key
             || binding.original_center_id != binding.center_id
             || binding.binding_key.b_center_start != binding.center_id.start_index
         {
-            return BridgeRegistration::Rejected;
+            return (BridgeRegistration::Rejected, Vec::new());
         }
         let Some(key) = self
             .bridge_entry(&binding.binding_key)
             .map(|entry| entry.key)
         else {
-            return BridgeRegistration::Rejected;
+            return (BridgeRegistration::Rejected, Vec::new());
         };
         let Some(entry) = self.ledger.get(&key) else {
-            return BridgeRegistration::Rejected;
+            return (BridgeRegistration::Rejected, Vec::new());
         };
         if binding.registered_at > entry.last_as_of {
-            return BridgeRegistration::Rejected;
+            return (BridgeRegistration::Rejected, Vec::new());
         }
         if let Some(original) = self.bridges.get_mut(&key) {
             if bridge_identity(&original.binding_key, &binding.binding_key) {
                 // 同 start 异核心是冲突，不接受为另一种 B。
-                return if original.center_id != binding.center_id {
+                let status = if original.center_id != binding.center_id {
                     BridgeRegistration::Rejected
                 } else if original.policy != binding.policy {
                     BridgeRegistration::PolicyFrozen
                 } else {
                     BridgeRegistration::Accepted
                 };
+                return (status, Vec::new());
             }
             // 只有原账本实际发生的 CenterUpgrade 才能改变 B。原政策即使
             // 调用方已换版本也不动，新的精确核心来自此次伴随输出。
@@ -308,22 +384,204 @@ impl NestLifecycleBook {
             {
                 original.center_id = binding.center_id;
                 original.binding_key = binding.binding_key;
-                return BridgeRegistration::Accepted;
+                return (BridgeRegistration::Accepted, Vec::new());
             }
-            return BridgeRegistration::Rejected;
+            return (BridgeRegistration::Rejected, Vec::new());
         }
         if binding.registered_at != entry.observed_at
             || entry.revisions.first().map(|revision| revision.key) != Some(binding.lifecycle_key)
         {
-            return BridgeRegistration::Rejected;
+            return (BridgeRegistration::Rejected, Vec::new());
         }
-        self.bridges.insert(key, binding);
-        BridgeRegistration::Accepted
+        let entry_last_as_of = entry.last_as_of;
+        let registered_seq = self.next_center_break_seq();
+        let meta = BridgeRegistrationMeta {
+            policy_version,
+            registered_seq,
+        };
+        self.bridges.insert(key, binding.clone());
+        self.bridge_meta.insert(key, meta);
+        let revisions = match birth_evidence {
+            Some(evidence)
+                if policy_version == CompletionPolicyVersion::V2
+                    && binding.policy.anchor == CompletionAnchor::CenterBreak
+                    && entry_last_as_of == binding.registered_at =>
+            {
+                self.apply_pre_archived_breaks_at_birth(key, binding, meta, evidence)
+            }
+            _ => Vec::new(),
+        };
+        (BridgeRegistration::Accepted, revisions)
+    }
+
+    /// v2 U1 出生当步规则（ADR 0003 §2）：对象首次出生并登记的同一步，消费出生前已留档且
+    /// 精确匹配、且来源 owner 确认在本步仍有效的 Broken 修订。
+    /// application_at = invalidated_at = registered_at，保留原 K。
+    fn apply_pre_archived_breaks_at_birth(
+        &mut self,
+        key: LifecycleKey,
+        bridge: HypothesisBridge,
+        meta: BridgeRegistrationMeta,
+        evidence: &BTreeMap<BreakIdentity, CenterBreakSourceStatus>,
+    ) -> Vec<LifecycleRevision> {
+        let mut archived_matches: Vec<(BreakIdentity, ArchivedCenterBreakFact)> = self
+            .center_break_facts
+            .iter()
+            .filter(|(identity, archived)| {
+                identity.level == key.level
+                    && identity.center_id == bridge.center_id
+                    && archived.archived_at <= bridge.registered_at
+                    && archived.archived_seq < meta.registered_seq
+                    && evidence.get(identity) == Some(&CenterBreakSourceStatus::Active)
+            })
+            .map(|(identity, archived)| (*identity, *archived))
+            .collect();
+        if archived_matches.is_empty() {
+            return Vec::new();
+        }
+        archived_matches.sort_by_key(|(identity, archived)| {
+            (archived.archived_at, archived.archived_seq, *identity)
+        });
+        let mut revisions = Vec::new();
+        for (identity, archived) in archived_matches {
+            let (revision, attempt) = self.apply_archived_fact_to_target(
+                identity,
+                archived,
+                key,
+                bridge.clone(),
+                Some(meta),
+                bridge.registered_at,
+                BreakApplicationMode::BirthStep,
+            );
+            if let Some(revision) = revision {
+                revisions.push(revision);
+            }
+            self.center_break_attempts.push(attempt);
+        }
+        #[cfg(debug_assertions)]
+        self.assert_invariants();
+        revisions
+    }
+
+    fn apply_archived_fact_to_target(
+        &mut self,
+        identity: BreakIdentity,
+        archived: ArchivedCenterBreakFact,
+        key: LifecycleKey,
+        bridge: HypothesisBridge,
+        meta: Option<BridgeRegistrationMeta>,
+        as_of: usize,
+        mode: BreakApplicationMode,
+    ) -> (Option<LifecycleRevision>, CenterBreakAttempt) {
+        let fact = archived.fact;
+        let entry = self.ledger.get(&key);
+        let target = CenterBreakTarget {
+            key,
+            last_as_of: entry.map(|entry| entry.last_as_of),
+            physical_before_registration: fact.physical_bar() < bridge.registered_at,
+            bridge: bridge.clone(),
+        };
+        let application = meta.map(|meta| BreakApplicationKey {
+            fact: identity,
+            original_key: bridge.lifecycle_key,
+            policy_version: meta.policy_version,
+        });
+        let (outcome, application_at) = if application
+            .as_ref()
+            .is_some_and(|key| self.applied_breaks.contains(key))
+        {
+            (CenterBreakOutcome::AlreadyApplied, None)
+        } else if let Some(entry) = entry {
+            if entry.state != NestEventState::Provisional || entry.first_provable_at.is_some() {
+                (CenterBreakOutcome::Preserved, None)
+            } else if bridge.policy.anchor != CompletionAnchor::CenterBreak {
+                (CenterBreakOutcome::PolicyDisallowed, None)
+            } else if key.b_center_start != bridge.center_id.start_index {
+                (CenterBreakOutcome::NotReady, None)
+            } else {
+                match mode {
+                    BreakApplicationMode::KnownAt => {
+                        let known_at = fact.known_at();
+                        let review = meta
+                            .filter(|meta| meta.policy_version == CompletionPolicyVersion::V2)
+                            .and_then(|_| self.center_break_withdrawal_reviews.get(&identity));
+                        if entry.last_as_of > known_at {
+                            // ledger_kernel::admit 拒绝倒退；修订链要求 as_of 非降。
+                            // 不改终态、不改门卫钟、不用消费钟，不抢占已应用集合（#1719 B4）。
+                            (CenterBreakOutcome::LatePendingRecovery, None)
+                        } else {
+                            match review {
+                                Some((_, CenterBreakSourceStatus::Withdrawn)) => {
+                                    (CenterBreakOutcome::SourceWithdrawn, None)
+                                }
+                                // 新证据不能让已撤回原件倒填原 K；交给恢复路径。
+                                Some((confirmed_at, CenterBreakSourceStatus::Active))
+                                    if *confirmed_at > known_at =>
+                                {
+                                    (CenterBreakOutcome::LatePendingRecovery, None)
+                                }
+                                _ => (CenterBreakOutcome::Applied, Some(known_at)),
+                            }
+                        }
+                    }
+                    BreakApplicationMode::BirthStep => {
+                        let meta = meta.expect("出生当步目标必有已登记桥元数据");
+                        debug_assert_eq!(meta.policy_version, CompletionPolicyVersion::V2);
+                        if entry.observed_at == bridge.registered_at
+                            && entry.last_as_of == bridge.registered_at
+                            && archived.archived_at <= bridge.registered_at
+                            && archived.archived_seq < meta.registered_seq
+                        {
+                            (CenterBreakOutcome::Applied, Some(bridge.registered_at))
+                        } else {
+                            (CenterBreakOutcome::LatePendingRecovery, None)
+                        }
+                    }
+                }
+            }
+        } else {
+            (CenterBreakOutcome::NoTarget, None)
+        };
+        let mut revision = None;
+        if outcome == CenterBreakOutcome::Applied {
+            let application_at = application_at.expect("Applied 必有应用钟");
+            let meta = meta.expect("Applied 必有已登记桥元数据");
+            let application = application.expect("Applied 必有去重键");
+            // 前置检查与 admit 同钟同规则；终态和曾可证对象未进入此处。
+            assert_eq!(
+                self.ledger.admit(&key, application_at),
+                LedgerAdmission::Accepted
+            );
+            let entry = self.ledger.get_mut(&key).expect("已核目标存在");
+            revision = Some(entry.invalidate(InvalidatedReason::CenterBreak, application_at, None));
+            self.center_break_audits.push(CenterBreakAudit {
+                fact,
+                bridge,
+                settled_key: key,
+                policy_version: meta.policy_version,
+                application_at,
+                fact_archived_at: archived.archived_at,
+                fact_archived_seq: archived.archived_seq,
+                target_registered_seq: meta.registered_seq,
+                mode,
+                consumed_at: as_of,
+                physical_before_registration: target.physical_before_registration,
+            });
+            self.applied_breaks.insert(application);
+        }
+        let attempt = CenterBreakAttempt {
+            fact,
+            consumed_at: as_of,
+            target: Some(target),
+            outcome,
+        };
+        (revision, attempt)
     }
 
     /// #1719 只清原政策允许、精确 B 对应、从未可证且仍 Provisional 的对象。
     /// 迟到事实不改账，完整留档并返回 LatePendingRecovery；恢复接线须按原钟重放。
-    /// 事实先于绑定到达也留档，调用方在绑定就绪后重送原件，不限定 S/B 消费顺序。
+    /// 事实先于绑定到达也留档并记录 archived_at 证据；v1 须由调用方重送原件，
+    /// v2 只在首次出生登记的同一步自动消费经来源 owner 确认仍有效的留档。
     pub fn apply_center_break(
         &mut self,
         fact: &CenterBreakFact,
@@ -335,7 +593,7 @@ impl NestLifecycleBook {
         } else if self
             .center_break_facts
             .get(&identity)
-            .is_some_and(|original| original != fact)
+            .is_some_and(|original| original.fact != *fact)
         {
             Some(CenterBreakOutcome::FactConflict)
         } else {
@@ -353,8 +611,19 @@ impl NestLifecycleBook {
                 outcome,
             });
         } else {
-            // 无目标也先保存原件；物理破坏早于注册不是拒绝理由（#1719 B5）。
-            self.center_break_facts.entry(identity).or_insert(*fact);
+            // 无目标也先保存原件与首次留档证据；物理破坏早于注册不是拒绝理由（#1719 B5）。
+            let archived = match self.center_break_facts.get(&identity).copied() {
+                Some(existing) => existing,
+                None => {
+                    let archived = ArchivedCenterBreakFact {
+                        fact: *fact,
+                        archived_at: as_of,
+                        archived_seq: self.next_center_break_seq(),
+                    };
+                    self.center_break_facts.insert(identity, archived);
+                    archived
+                }
+            };
             let targets: Vec<_> = self
                 .bridges
                 .iter()
@@ -364,66 +633,20 @@ impl NestLifecycleBook {
                 .map(|(key, bridge)| (*key, bridge.clone()))
                 .collect();
             for (key, bridge) in targets {
-                let application = BreakApplicationKey {
-                    fact: identity,
-                    original_key: bridge.lifecycle_key,
-                    policy_version: bridge.policy.version.clone(),
-                };
-                let entry = self.ledger.get(&key);
-                let target = CenterBreakTarget {
+                let meta = self.bridge_meta.get(&key).copied();
+                let (revision, attempt) = self.apply_archived_fact_to_target(
+                    identity,
+                    archived,
                     key,
-                    last_as_of: entry.map(|entry| entry.last_as_of),
-                    physical_before_registration: fact.physical_bar() < bridge.registered_at,
-                    bridge: bridge.clone(),
-                };
-                let outcome = if self.applied_breaks.contains(&application) {
-                    CenterBreakOutcome::AlreadyApplied
-                } else if let Some(entry) = entry {
-                    if entry.state != NestEventState::Provisional
-                        || entry.first_provable_at.is_some()
-                    {
-                        CenterBreakOutcome::Preserved
-                    } else if bridge.policy.anchor != CompletionAnchor::CenterBreak {
-                        CenterBreakOutcome::PolicyDisallowed
-                    } else if key.b_center_start != bridge.center_id.start_index {
-                        CenterBreakOutcome::NotReady
-                    } else if entry.last_as_of > fact.known_at() {
-                        // ledger_kernel::admit 拒绝倒退；修订链要求 as_of 非降。
-                        // 不改终态、不改门卫钟、不用消费钟，不抢占已应用集合（#1719 B4）。
-                        CenterBreakOutcome::LatePendingRecovery
-                    } else {
-                        CenterBreakOutcome::Applied
-                    }
-                } else {
-                    CenterBreakOutcome::NoTarget
-                };
-                if outcome == CenterBreakOutcome::Applied {
-                    // 前置检查与 admit 同钟同规则；终态和曾可证对象未进入此处。
-                    assert_eq!(
-                        self.ledger.admit(&key, fact.known_at()),
-                        LedgerAdmission::Accepted
-                    );
-                    let entry = self.ledger.get_mut(&key).expect("已核目标存在");
-                    result.revisions.push(entry.invalidate(
-                        InvalidatedReason::CenterBreak,
-                        fact.known_at(),
-                        None,
-                    ));
-                    self.center_break_audits.push(CenterBreakAudit {
-                        fact: *fact,
-                        bridge,
-                        settled_key: key,
-                        consumed_at: as_of,
-                        physical_before_registration: target.physical_before_registration,
-                    });
-                    self.applied_breaks.insert(application);
+                    bridge,
+                    meta,
+                    as_of,
+                    BreakApplicationMode::KnownAt,
+                );
+                if let Some(revision) = revision {
+                    result.revisions.push(revision);
                 }
-                result.attempts.push(CenterBreakAttempt {
-                    fact: *fact,
-                    consumed_at: as_of,
-                    target: Some(target),
-                    outcome,
-                });
+                result.attempts.push(attempt);
             }
             if result.attempts.is_empty() {
                 result.attempts.push(CenterBreakAttempt {
@@ -763,11 +986,67 @@ impl NestLifecycleBook {
                             );
                         }
                         InvalidatedReason::CenterBreak => {
-                            // #1719 第二层只清从未可证者，不伪造结构完成。
+                            // #1719 第二层只清从未可证者，不伪造结构完成；时钟按政策版本与模式分派核验。
                             assert!(entry.first_provable_at.is_none());
-                            assert!(self.center_break_audits.iter().any(|audit| {
-                                audit.settled_key == key && audit.fact.known_at() == invalidated
-                            }));
+                            assert!(entry.structure_end_at.is_none());
+                            let matching_audits: Vec<&CenterBreakAudit> = self
+                                .center_break_audits
+                                .iter()
+                                .filter(|audit| audit.settled_key == key)
+                                .collect();
+                            assert_eq!(
+                                matching_audits.len(),
+                                1,
+                                "CenterBreak 终态必对应唯一清账审计：{key:?}"
+                            );
+                            let audit = matching_audits[0];
+                            assert_eq!(
+                                audit.application_at, invalidated,
+                                "CenterBreak application_at == invalidated_at：{key:?}"
+                            );
+                            assert!(
+                                audit.fact.physical_bar() <= audit.fact.known_at()
+                                    && audit.fact.known_at() <= audit.fact_archived_at
+                                    && audit.fact.known_at() <= audit.consumed_at,
+                                "CenterBreak 事实钟单调：{key:?}"
+                            );
+                            match (audit.policy_version, audit.mode) {
+                                (CompletionPolicyVersion::V1, BreakApplicationMode::KnownAt)
+                                | (CompletionPolicyVersion::V2, BreakApplicationMode::KnownAt) => {
+                                    assert_eq!(
+                                        audit.application_at,
+                                        audit.fact.known_at(),
+                                        "常规 CenterBreak 清账应用钟 == fact.known_at()：{key:?}"
+                                    );
+                                }
+                                (CompletionPolicyVersion::V1, BreakApplicationMode::BirthStep) => {
+                                    panic!("v1 禁止出生当步应用：{key:?}");
+                                }
+                                (CompletionPolicyVersion::V2, BreakApplicationMode::BirthStep) => {
+                                    assert_eq!(
+                                        audit.application_at, audit.bridge.registered_at,
+                                        "v2 出生当步 application_at == registered_at：{key:?}"
+                                    );
+                                    assert_eq!(
+                                        audit.application_at, entry.observed_at,
+                                        "v2 出生当步 application_at == observed_at：{key:?}"
+                                    );
+                                    assert_eq!(
+                                        audit.consumed_at, audit.bridge.registered_at,
+                                        "v2 出生当步 consumed_at == registered_at：{key:?}"
+                                    );
+                                    assert!(
+                                        audit.fact.known_at() <= audit.application_at,
+                                        "v2 出生当步保留不晚于出生钟的原 fact_known_at：{key:?}"
+                                    );
+                                    assert!(
+                                        audit.fact_archived_at <= audit.bridge.registered_at
+                                            && audit.fact_archived_seq
+                                                < audit.target_registered_seq,
+                                        "v2 出生当步须满足出生前已留档的因果先后：{key:?}"
+                                    );
+                                }
+                            }
                             assert!(
                                 invalidated <= entry.last_as_of,
                                 "CenterBreak invalidated ≤ last_as_of：{key:?}"
@@ -833,6 +1112,32 @@ impl NestLifecycleBook {
                 signal.completed_at <= signal.as_of,
                 "完成钟两分单调 completed ≤ 账本：{:?}",
                 signal.key
+            );
+        }
+        for archived in self.center_break_facts.values() {
+            assert!(
+                archived.fact.physical_bar() <= archived.fact.known_at()
+                    && archived.fact.known_at() <= archived.archived_at
+                    && archived.archived_seq > 0,
+                "留档 Broken 事实钟序与因果序号合法：{archived:?}"
+            );
+        }
+        for (key, meta) in &self.bridge_meta {
+            assert!(
+                self.bridges.contains_key(key) && meta.registered_seq > 0,
+                "桥元数据须与已登记桥同步：{key:?}"
+            );
+        }
+        for audit in &self.center_break_audits {
+            let entry = self
+                .ledger
+                .get(&audit.settled_key)
+                .expect("CenterBreak 审计必对应在册条目");
+            assert_eq!(
+                entry.invalidated_reason,
+                Some(InvalidatedReason::CenterBreak),
+                "CenterBreak 审计必对应 CenterBreak 终态：{:?}",
+                audit.settled_key
             );
         }
     }
@@ -918,6 +1223,9 @@ impl NestLifecycleBook {
             // Bridge 原 B 不变；CenterUpgrade 在新精确 B 到达前因 start 不同
             // 暂停清账。终态前身的独立认领不走此处，不继承前身绑定。
             self.bridges.insert(new_key, binding);
+        }
+        if let Some(meta) = self.bridge_meta.remove(&old_key) {
+            self.bridge_meta.insert(new_key, meta);
         }
         revision
     }

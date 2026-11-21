@@ -252,9 +252,8 @@ pub fn feed_replay_bar(
     (delta, stats)
 }
 
-/// #1719 伴随绑定喂入。旧 channel_switch 函数及其两相执行顺序保持不变。
-/// bindings 必须来自本 bar 的 active provider；迁移由原 book 执行。
-/// 返回每份绑定的接纳/政策冻结/拒绝结果，调用方不能把新政策误报为已接纳。
+/// #1719 旧组件伴随绑定入口，保留原政策字符串合同。没有来源有效性证据，不自动清账。
+/// 新独立运行与历史运行恢复使用 [`I4CompletionRun`] 冻结政策后喂入。
 pub fn feed_replay_bar_with_bridges(
     book: &mut NestLifecycleBook,
     feed: &ReplayBarFeed<'_>,
@@ -265,7 +264,31 @@ pub fn feed_replay_bar_with_bridges(
     ReplayFeedStats,
     Vec<BridgeRegistration>,
 ) {
-    let (delta, stats) = feed_replay_bar(book, feed, material);
+    feed_replay_bar_with_birth_evidence(book, feed, material, bindings, None)
+}
+
+/// bindings 必须来自本 bar 的 active provider；迁移由原 book 执行。
+/// 返回每份绑定结果，v2 出生当步实际发生的清账修订并入本批增量。
+pub(super) fn feed_replay_bar_with_birth_evidence(
+    book: &mut NestLifecycleBook,
+    feed: &ReplayBarFeed<'_>,
+    material: &ForceMaterial,
+    bindings: &[HypothesisBridge],
+    birth_evidence: Option<&CenterBreakBirthEvidence<'_>>,
+) -> (
+    Vec<LifecycleRevision>,
+    ReplayFeedStats,
+    Vec<BridgeRegistration>,
+) {
+    let source_statuses =
+        birth_evidence.map(|evidence| book.review_center_break_sources(evidence, feed.as_of));
+    let (mut delta, stats) = feed_replay_bar(book, feed, material);
+    // 同一个 bar 可以喂多次；只有这批实际建仓的对象才在出生当步。
+    let newborns: BTreeSet<_> = delta
+        .iter()
+        .filter(|revision| revision.kind == LifecycleRevisionKind::Observed)
+        .map(|revision| revision.key)
+        .collect();
     let registrations = bindings
         .iter()
         .map(|binding| {
@@ -276,7 +299,14 @@ pub fn feed_replay_bar_with_bridges(
                         if LifecycleKey::from(window) == binding.binding_key)
                 });
             if supplied {
-                book.register_center_bridge(binding.clone())
+                let (registration, break_revisions) = book.register_center_bridge_with_revisions(
+                    binding.clone(),
+                    source_statuses
+                        .as_ref()
+                        .filter(|_| newborns.contains(&binding.lifecycle_key)),
+                );
+                delta.extend(break_revisions);
+                registration
             } else {
                 BridgeRegistration::Rejected
             }

@@ -66,20 +66,49 @@ fn open_bindings(
     book: &mut NestLifecycleBook,
     fixtures: &[(PanLiveWindow, HypothesisBridge, Center)],
 ) {
+    open_bindings_step(book, fixtures, None);
+}
+
+fn open_bindings_with_active_archive(
+    book: &mut NestLifecycleBook,
+    fixtures: &[(PanLiveWindow, HypothesisBridge, Center)],
+) {
+    // 这些旧夹具的合成来源从未撤回；显式确认留档在本步骤仍有效。
+    let active: Vec<_> = book
+        .archived_center_break_facts()
+        .map(|revision| (*revision, CenterBreakSourceStatus::Active))
+        .collect();
+    open_bindings_step(
+        book,
+        fixtures,
+        Some(&CenterBreakBirthEvidence {
+            as_of: 95,
+            revisions: &active,
+        }),
+    );
+}
+
+fn open_bindings_step(
+    book: &mut NestLifecycleBook,
+    fixtures: &[(PanLiveWindow, HypothesisBridge, Center)],
+    birth_evidence: Option<&CenterBreakBirthEvidence<'_>>,
+) {
     let phases: Vec<_> = fixtures
         .iter()
         .map(|f| PanProviderPhase::Live(f.0))
         .collect();
     let bindings: Vec<_> = fixtures.iter().map(|f| f.1.clone()).collect();
-    let (_, _, accepted) = feed_replay_bar_with_bridges(
-        book,
-        &ReplayBarFeed {
-            as_of: 95,
-            phases: &phases,
-        },
-        &ForceMaterial::unavailable(&[]),
-        &bindings,
-    );
+    let feed = ReplayBarFeed {
+        as_of: 95,
+        phases: &phases,
+    };
+    let material = ForceMaterial::unavailable(&[]);
+    let (_, _, accepted) = match birth_evidence {
+        Some(evidence) => feed::feed_replay_bar_with_birth_evidence(
+            book, &feed, &material, &bindings, Some(evidence),
+        ),
+        None => feed_replay_bar_with_bridges(book, &feed, &material, &bindings),
+    };
     assert_eq!(accepted, vec![BridgeRegistration::Accepted; fixtures.len()]);
 }
 
@@ -882,4 +911,806 @@ fn i4_bridge_same_b_new_policy_version_returns_frozen() {
         book.bridges().get(&initial.1.lifecycle_key).unwrap(),
         &initial.1
     );
+}
+
+#[test]
+fn i4_bridge_v2_birth_step_applies_pre_archived_fact_at_birth_and_preserves_known_at() {
+    let v2 = CompletionPolicy::v2(CompletionAnchor::CenterBreak);
+    assert_eq!(v2.version, "#1719/center-break-completion/v2");
+    let f = selected_fixture(1, 0, 0, 20, 95, &v2);
+    let fact = broken_fixture(f.2, 1, 90, 94);
+
+    // bar 94：事实已知并留档，此时对象尚未出生（seek(94) 无对象）。
+    let mut book = NestLifecycleBook::new();
+    let at_94 = book.apply_center_break(&fact, 94);
+    assert!(at_94.revisions.is_empty());
+    assert_eq!(at_94.attempts[0].outcome, CenterBreakOutcome::NoTarget);
+    assert!(book.get(&f.1.lifecycle_key).is_none());
+    assert!(book.is_empty());
+    let archived: Vec<_> = book.archived_center_break_facts().copied().collect();
+    assert_eq!(archived.len(), 1);
+    assert_eq!(archived[0].fact, fact);
+    assert_eq!(archived[0].archived_at, 94);
+    assert_eq!(archived[0].archived_seq, 1);
+
+    // bar 95：对象首次出生并登记，v2 同一步消费出生前已留档事实（seek(95) 为 Invalidated）。
+    let (delta, _, accepted) = feed::feed_replay_bar_with_birth_evidence(
+        &mut book,
+        &ReplayBarFeed {
+            as_of: 95,
+            phases: &[PanProviderPhase::Live(f.0)],
+        },
+        &ForceMaterial::unavailable(&[]),
+        &[f.1.clone()],
+        Some(&CenterBreakBirthEvidence {
+            as_of: 95,
+            revisions: &[(archived[0], CenterBreakSourceStatus::Active)],
+        }),
+    );
+    assert_eq!(accepted, vec![BridgeRegistration::Accepted]);
+    let entry = book.get(&f.1.lifecycle_key).unwrap();
+    assert_eq!(entry.state, NestEventState::Invalidated);
+    assert_eq!(delta.len(), 3);
+    assert_eq!(delta[0].kind, LifecycleRevisionKind::Observed);
+    assert_eq!(delta[0].as_of, 95);
+    assert_eq!(
+        delta[1].kind,
+        LifecycleRevisionKind::ForceUnavailable {
+            reason: UnavailReason::MissingForceSeries
+        }
+    );
+    assert_eq!(delta[1].as_of, 95);
+    assert_eq!(
+        delta[2].kind,
+        LifecycleRevisionKind::Invalidated {
+            reason: InvalidatedReason::CenterBreak
+        }
+    );
+    assert_eq!(delta[2].as_of, 95);
+
+    assert_eq!(
+        entry.invalidated_reason,
+        Some(InvalidatedReason::CenterBreak)
+    );
+    assert_eq!(entry.observed_at, 95);
+    assert_eq!(entry.last_as_of, 95);
+    assert_eq!(entry.invalidated_at, Some(95));
+    assert_eq!(entry.first_provable_at, None);
+    assert_eq!(entry.structure_end_at, None);
+    assert_eq!(entry.confirmed_at, None);
+    assert!(book.consumable_closed().is_empty());
+    // 从完整组件修订链读取两个 cut，确认后来的出生清账未回填 94。
+    let last_revision_at = |cut| {
+        entry
+            .revisions
+            .iter()
+            .rfind(|revision| revision.as_of <= cut)
+    };
+    assert!(last_revision_at(94).is_none());
+    assert_eq!(last_revision_at(95), delta.last());
+
+    assert_eq!(book.center_break_audits().len(), 1);
+    let audit = &book.center_break_audits()[0];
+    assert_eq!(audit.fact, fact);
+    assert_eq!(audit.fact.physical_bar(), 90);
+    assert_eq!(audit.fact.known_at(), 94);
+    assert_eq!(audit.bridge.registered_at, 95);
+    assert_eq!(audit.bridge.policy, v2);
+    assert_eq!(
+        audit.policy_version,
+        center_break::CompletionPolicyVersion::V2
+    );
+    assert_eq!(audit.mode, center_break::BreakApplicationMode::BirthStep);
+    assert_eq!(audit.application_at, 95);
+    assert_eq!(audit.consumed_at, 95);
+    assert_eq!(audit.fact_archived_at, 94);
+    assert!(audit.fact_archived_seq < audit.target_registered_seq);
+    assert!(audit.physical_before_registration);
+    assert_eq!(
+        book.center_break_attempts().last().unwrap().outcome,
+        CenterBreakOutcome::Applied
+    );
+    book.assert_invariants();
+
+    // 同输入在具名 v1 下对照：seek(95) 保持 Provisional，重送仍返回 LatePendingRecovery。
+    let v1 = CompletionPolicy::v1(CompletionAnchor::CenterBreak);
+    assert_eq!(v1.version, "#1719/center-break-completion/v1");
+    let f_v1 = selected_fixture(1, 0, 0, 20, 95, &v1);
+    let mut v1_book = NestLifecycleBook::new();
+    v1_book.apply_center_break(&fact, 94);
+    let (v1_delta, _, v1_accepted) = feed_replay_bar_with_bridges(
+        &mut v1_book,
+        &ReplayBarFeed {
+            as_of: 95,
+            phases: &[PanProviderPhase::Live(f_v1.0)],
+        },
+        &ForceMaterial::unavailable(&[]),
+        &[f_v1.1.clone()],
+    );
+    assert_eq!(v1_accepted, vec![BridgeRegistration::Accepted]);
+    assert_eq!(v1_delta.len(), 2);
+    assert_eq!(v1_delta[0].kind, LifecycleRevisionKind::Observed);
+    assert_eq!(
+        v1_delta[1].kind,
+        LifecycleRevisionKind::ForceUnavailable {
+            reason: UnavailReason::MissingForceSeries
+        }
+    );
+    assert_eq!(
+        v1_book.get(&f_v1.1.lifecycle_key).unwrap().state,
+        NestEventState::Provisional
+    );
+    assert!(v1_book.center_break_audits().is_empty());
+    assert_eq!(
+        v1_book.apply_center_break(&fact, 95).attempts[0].outcome,
+        CenterBreakOutcome::LatePendingRecovery
+    );
+    v1_book.assert_invariants();
+}
+
+#[test]
+fn i4_bridge_v2_resend_same_fact_returns_already_applied_without_new_revision() {
+    let v2 = CompletionPolicy::v2(CompletionAnchor::CenterBreak);
+    let f = selected_fixture(1, 0, 0, 20, 95, &v2);
+    let fact = broken_fixture(f.2, 1, 90, 94);
+    let mut book = NestLifecycleBook::new();
+    book.apply_center_break(&fact, 94);
+    open_bindings_with_active_archive(&mut book, &[f.clone()]);
+    assert_eq!(book.get(&f.1.lifecycle_key).unwrap().revisions.len(), 3);
+    assert_eq!(book.center_break_audits().len(), 1);
+
+    let entry_snapshot = book.get(&f.1.lifecycle_key).unwrap().clone();
+    let audits_snapshot = book.center_break_audits().to_vec();
+    for replay_as_of in [95, 96, 110] {
+        let replay = book.apply_center_break(&fact, replay_as_of);
+        assert!(replay.revisions.is_empty());
+        assert_eq!(replay.attempts.len(), 1);
+        assert_eq!(
+            replay.attempts[0].outcome,
+            CenterBreakOutcome::AlreadyApplied
+        );
+        assert_eq!(book.get(&f.1.lifecycle_key).unwrap(), &entry_snapshot);
+        assert_eq!(book.center_break_audits(), audits_snapshot.as_slice());
+    }
+    let conflicting = CenterBreakFact::from_event(fact.event(), 90, 95).unwrap();
+    let conflict = book.apply_center_break(&conflicting, 96);
+    assert!(conflict.revisions.is_empty());
+    assert_eq!(
+        conflict.attempts[0].outcome,
+        CenterBreakOutcome::FactConflict
+    );
+    assert_eq!(
+        book.archived_center_break_facts().next().unwrap().archived_at,
+        94
+    );
+    book.assert_invariants();
+}
+
+#[test]
+fn i4_bridge_v2_advanced_to_96_before_reeval_remains_late_pending_recovery() {
+    let v2 = CompletionPolicy::v2(CompletionAnchor::CenterBreak);
+    let f_95 = selected_fixture(1, 0, 0, 20, 95, &v2);
+    let f_96 = selected_fixture(1, 0, 0, 20, 96, &v2);
+    let fact_k94 = broken_fixture(f_95.2, 1, 90, 94);
+
+    // 路径 1：95 出生时无已留档事实，对象推进到 96 后才收到 K=94 事实，仍为 LatePendingRecovery。
+    let mut book = NestLifecycleBook::new();
+    open_bindings(&mut book, &[f_95.clone()]);
+    feed_replay_bar(
+        &mut book,
+        &ReplayBarFeed {
+            as_of: 96,
+            phases: &[PanProviderPhase::Live(f_96.0)],
+        },
+        &ForceMaterial::unavailable(&[]),
+    );
+    let at_96 = book.apply_center_break(&fact_k94, 96);
+    assert!(at_96.revisions.is_empty());
+    assert_eq!(
+        at_96.attempts[0].outcome,
+        CenterBreakOutcome::LatePendingRecovery
+    );
+    assert_eq!(
+        at_96.attempts[0].target.as_ref().unwrap().last_as_of,
+        Some(96)
+    );
+    assert_eq!(
+        book.get(&f_96.1.lifecycle_key).unwrap().state,
+        NestEventState::Provisional
+    );
+    assert!(book.center_break_audits().is_empty());
+    book.assert_invariants();
+
+    // 路径 2：94 已留档，但对象在 95 建仓未登记桥并已推进到 96，此后补绑与重评不得套用出生当步。
+    let mut delayed_book = NestLifecycleBook::new();
+    delayed_book.apply_center_break(&fact_k94, 94);
+    feed_replay_bar(
+        &mut delayed_book,
+        &ReplayBarFeed {
+            as_of: 95,
+            phases: &[PanProviderPhase::Live(f_95.0)],
+        },
+        &ForceMaterial::unavailable(&[]),
+    );
+    feed_replay_bar(
+        &mut delayed_book,
+        &ReplayBarFeed {
+            as_of: 96,
+            phases: &[PanProviderPhase::Live(f_96.0)],
+        },
+        &ForceMaterial::unavailable(&[]),
+    );
+    assert_eq!(
+        delayed_book.register_center_bridge(f_95.1.clone()),
+        BridgeRegistration::Accepted
+    );
+    assert_eq!(
+        delayed_book.get(&f_96.1.lifecycle_key).unwrap().state,
+        NestEventState::Provisional
+    );
+    assert!(delayed_book.center_break_audits().is_empty());
+    let reeval = delayed_book.apply_center_break(&fact_k94, 96);
+    assert!(reeval.revisions.is_empty());
+    assert_eq!(
+        reeval.attempts[0].outcome,
+        CenterBreakOutcome::LatePendingRecovery
+    );
+    delayed_book.assert_invariants();
+
+    // 路径 3：调用顺序虽更早，留档钟为 110，不能给 bar 95 出生清账。
+    let mut late_archive_book = NestLifecycleBook::new();
+    late_archive_book.apply_center_break(&fact_k94, 110);
+    open_bindings_with_active_archive(&mut late_archive_book, &[f_95.clone()]);
+    assert_eq!(
+        late_archive_book.get(&f_95.1.lifecycle_key).unwrap().state,
+        NestEventState::Provisional
+    );
+    assert!(late_archive_book.center_break_audits().is_empty());
+    assert_eq!(
+        late_archive_book
+            .apply_center_break(&fact_k94, 111)
+            .attempts[0]
+            .outcome,
+        CenterBreakOutcome::LatePendingRecovery
+    );
+    late_archive_book.assert_invariants();
+}
+
+#[test]
+fn i4_bridge_v2_same_bar_requires_archive_before_birth_and_binding_in_birth_step() {
+    let v2 = CompletionPolicy::v2(CompletionAnchor::CenterBreak);
+    let f = selected_fixture(1, 0, 0, 20, 95, &v2);
+    let fact = broken_fixture(f.2, 1, 90, 94);
+    let feed = ReplayBarFeed {
+        as_of: 95,
+        phases: &[PanProviderPhase::Live(f.0)],
+    };
+    let material = ForceMaterial::unavailable(&[]);
+
+    // 同为 95，先留档，后在出生步骤伴随登记：序号证明留档在先。
+    let mut before_birth = NestLifecycleBook::new();
+    before_birth.apply_center_break(&fact, 95);
+    open_bindings_with_active_archive(&mut before_birth, &[f.clone()]);
+    let audit = &before_birth.center_break_audits()[0];
+    assert_eq!(audit.fact.known_at(), 94);
+    assert_eq!(audit.fact_archived_at, audit.application_at);
+    assert!(audit.fact_archived_seq < audit.target_registered_seq);
+    before_birth.assert_invariants();
+
+    // 同样的钟值与留档/登记序号，先出生后补绑：第二次喂入不得冒充出生步骤。
+    let mut after_birth = NestLifecycleBook::new();
+    feed_replay_bar(&mut after_birth, &feed, &material);
+    after_birth.apply_center_break(&fact, 95);
+    open_bindings_with_active_archive(&mut after_birth, &[f.clone()]);
+    assert_eq!(
+        after_birth.get(&f.1.lifecycle_key).unwrap().state,
+        NestEventState::Provisional
+    );
+    assert!(after_birth.center_break_audits().is_empty());
+    assert_eq!(
+        after_birth.apply_center_break(&fact, 95).attempts[0].outcome,
+        CenterBreakOutcome::LatePendingRecovery
+    );
+    after_birth.assert_invariants();
+}
+
+#[test]
+fn i4_bridge_unknown_policy_version_is_rejected_without_falling_back_to_v1() {
+    use center_break::CompletionPolicyVersion;
+
+    assert_eq!(
+        CompletionPolicyVersion::parse("#1719/center-break-completion/v1"),
+        Ok(CompletionPolicyVersion::V1)
+    );
+    assert_eq!(
+        CompletionPolicyVersion::parse("#1719/center-break-completion/v2"),
+        Ok(CompletionPolicyVersion::V2)
+    );
+    assert_eq!(
+        CompletionPolicy::v1(CompletionAnchor::CenterBreak).parse_version(),
+        Ok(CompletionPolicyVersion::V1)
+    );
+    assert_eq!(
+        CompletionPolicy::v2(CompletionAnchor::CenterBreak).parse_version(),
+        Ok(CompletionPolicyVersion::V2)
+    );
+
+    // 生产解析器拒绝所有未登记字符串（含 opaque 与 synthetic-*），不得默认为 v1。
+    for rejected in [
+        "",
+        " ",
+        "v1",
+        "v2",
+        "#1719/center-break-completion/v3",
+        "#1719/center-break-completion/v2 ",
+        " #1719/center-break-completion/v2",
+        "unknown-policy/1",
+        "synthetic-i4/1",
+        "historical/provider-revision-17",
+    ] {
+        assert!(
+            CompletionPolicyVersion::parse(rejected).is_err(),
+            "生产解析器必须拒绝未知/未签版本：{rejected:?}"
+        );
+        assert!(
+            policy(rejected, CompletionAnchor::CenterBreak)
+                .parse_version()
+                .is_err()
+        );
+    }
+}
+
+#[test]
+fn i4_bridge_legacy_opaque_versions_keep_v1_semantics_and_original_strings() {
+    for legacy in [
+        "synthetic-i4/1",
+        "historical/provider-revision-17",
+        "#1719/center-break-completion/v2 ",
+    ] {
+        let p = policy(legacy, CompletionAnchor::CenterBreak);
+        let f = selected_fixture(1, 0, 0, 20, 95, &p);
+        let mut book = NestLifecycleBook::new();
+        let fact = broken_fixture(f.2, 1, 90, 94);
+        book.apply_center_break(&fact, 94);
+        open_bindings(&mut book, &[f.clone()]);
+        assert_eq!(book.bridges().get(&f.1.lifecycle_key).unwrap().policy, p);
+        assert_eq!(
+            book.get(&f.1.lifecycle_key).unwrap().state,
+            NestEventState::Provisional
+        );
+        let attempt = book.apply_center_break(&fact, 96);
+        assert!(attempt.revisions.is_empty());
+        assert_eq!(
+            attempt.attempts[0].outcome,
+            CenterBreakOutcome::LatePendingRecovery
+        );
+        book.assert_invariants();
+    }
+}
+
+#[test]
+fn i4_bridge_v2_preserves_provable_channel_switch_frozen_v1_and_level_invariance() {
+    let v2_break = CompletionPolicy::v2(CompletionAnchor::CenterBreak);
+
+    // 出生当步已可证（first_provable_at = Some(95)）的对象必须保留，不得被出生前事实清账。
+    let (_, _, _, _, hist, dif, close_src) = pan_real_fixture(-0.1, -0.5);
+    let provable_material = material(&hist, &dif, &close_src);
+    let f = selected_fixture(1, 0, 0, 20, 95, &v2_break);
+    let fact_k94 = broken_fixture(f.2, 1, 90, 94);
+    let mut provable_book = NestLifecycleBook::new();
+    provable_book.apply_center_break(&fact_k94, 94);
+    let revision = *provable_book.archived_center_break_facts().next().unwrap();
+    let (_, _, accepted) = feed::feed_replay_bar_with_birth_evidence(
+        &mut provable_book,
+        &ReplayBarFeed {
+            as_of: 95,
+            phases: &[PanProviderPhase::Live(f.0)],
+        },
+        &provable_material,
+        &[f.1.clone()],
+        Some(&CenterBreakBirthEvidence {
+            as_of: 95,
+            revisions: &[(revision, CenterBreakSourceStatus::Active)],
+        }),
+    );
+    assert_eq!(accepted, vec![BridgeRegistration::Accepted]);
+    let provable_entry = provable_book.get(&f.1.lifecycle_key).unwrap();
+    assert_eq!(provable_entry.state, NestEventState::Provisional);
+    assert_eq!(provable_entry.first_provable_at, Some(95));
+    assert!(provable_book.center_break_audits().is_empty());
+    assert_eq!(
+        provable_book.center_break_attempts().last().unwrap().outcome,
+        CenterBreakOutcome::Preserved
+    );
+    provable_book.assert_invariants();
+
+    // v2 搭配 ChannelSwitch 锚不触发出生当步清账。
+    let v2_channel = CompletionPolicy::v2(CompletionAnchor::ChannelSwitch);
+    let f_ch = selected_fixture(1, 0, 0, 20, 95, &v2_channel);
+    let mut ch_book = NestLifecycleBook::new();
+    ch_book.apply_center_break(&fact_k94, 94);
+    open_bindings_with_active_archive(&mut ch_book, &[f_ch.clone()]);
+    assert_eq!(
+        ch_book.get(&f_ch.1.lifecycle_key).unwrap().state,
+        NestEventState::Provisional
+    );
+    assert!(ch_book.center_break_audits().is_empty());
+    ch_book.assert_invariants();
+
+    // 已绑定 v1 的对象拒绝换绑为 v2（PolicyFrozen），且不借换绑触发出生当步。
+    let v1_break = CompletionPolicy::v1(CompletionAnchor::CenterBreak);
+    let f_v1 = selected_fixture(1, 0, 0, 20, 95, &v1_break);
+    let mut frozen_book = NestLifecycleBook::new();
+    frozen_book.apply_center_break(&fact_k94, 94);
+    open_bindings_with_active_archive(&mut frozen_book, &[f_v1.clone()]);
+    assert_eq!(
+        frozen_book.register_center_bridge(f.1.clone()),
+        BridgeRegistration::PolicyFrozen
+    );
+    assert_eq!(
+        frozen_book.get(&f_v1.1.lifecycle_key).unwrap().state,
+        NestEventState::Provisional
+    );
+    assert!(frozen_book.center_break_audits().is_empty());
+    frozen_book.assert_invariants();
+
+    // v2 常规后到事实（known_at >= last_as_of）沿 KnownAt 模式，application_at == known_at。
+    let mut forward_book = NestLifecycleBook::new();
+    open_bindings(&mut forward_book, &[f.clone()]);
+    let forward_fact = broken_fixture(f.2, 1, 98, 100);
+    let forward_res = forward_book.apply_center_break(&forward_fact, 105);
+    assert_eq!(forward_res.revisions.len(), 1);
+    let forward_audit = &forward_book.center_break_audits()[0];
+    assert_eq!(
+        forward_audit.policy_version,
+        center_break::CompletionPolicyVersion::V2
+    );
+    assert_eq!(forward_audit.mode, center_break::BreakApplicationMode::KnownAt);
+    assert_eq!(forward_audit.application_at, 100);
+    assert_eq!(forward_audit.consumed_at, 105);
+    assert_eq!(
+        forward_book.get(&f.1.lifecycle_key).unwrap().invalidated_at,
+        Some(100)
+    );
+    forward_book.assert_invariants();
+
+    // #804 总缝规则同输入级别不变：level=2 跑完全相同的 v2 出生当步语义。
+    let f_l2 = selected_fixture(2, 0, 0, 20, 95, &v2_break);
+    let fact_l2 = broken_fixture(f_l2.2, 2, 90, 94);
+    let mut l2_book = NestLifecycleBook::new();
+    l2_book.apply_center_break(&fact_l2, 94);
+    open_bindings_with_active_archive(&mut l2_book, &[f_l2.clone()]);
+    let l2_entry = l2_book.get(&f_l2.1.lifecycle_key).unwrap();
+    assert_eq!(l2_entry.state, NestEventState::Invalidated);
+    assert_eq!(l2_entry.invalidated_at, Some(95));
+    assert_eq!(l2_book.center_break_audits()[0].fact.known_at(), 94);
+    assert_eq!(l2_book.center_break_audits()[0].application_at, 95);
+    l2_book.assert_invariants();
+}
+
+#[test]
+fn i4_run_new_center_break_rejects_v1() {
+    let v1 = CompletionPolicy::v1(CompletionAnchor::CenterBreak);
+    assert_eq!(
+        I4CompletionRun::start_new(v1).unwrap_err(),
+        I4RunAdmissionError::NewCenterBreakRequiresV2
+    );
+    let opaque = policy("synthetic-i4/1", CompletionAnchor::CenterBreak);
+    assert!(matches!(
+        I4CompletionRun::start_new(opaque),
+        Err(I4RunAdmissionError::UnknownVersion(_))
+    ));
+}
+
+#[test]
+fn i4_run_new_center_break_accepts_v2_and_rejects_mixed_batch_before_writing() {
+    let mut run = I4CompletionRun::start_new(CompletionPolicy::v2(CompletionAnchor::CenterBreak))
+        .unwrap();
+    let first = selected_fixture(1, 0, 0, 20, 95, run.policy());
+    let second = selected_fixture(1, 0, 1, 20, 95, run.policy());
+    let other_v1 = selected_fixture(1, 0, 1, 20, 95, &CompletionPolicy::v1(CompletionAnchor::CenterBreak));
+    assert_ne!(first.1.lifecycle_key, second.1.lifecycle_key);
+    assert_eq!(second.1.lifecycle_key, other_v1.1.lifecycle_key);
+    let fact = broken_fixture(first.2, 1, 90, 94);
+    run.apply_center_break(&fact, 94);
+    let before = run.book().clone();
+    let revision = *before.archived_center_break_facts().next().unwrap();
+    let evidence = CenterBreakBirthEvidence {
+        as_of: 95,
+        revisions: &[(revision, CenterBreakSourceStatus::Active)],
+    };
+    let bar = ReplayBarFeed {
+        as_of: 95,
+        phases: &[PanProviderPhase::Live(first.0), PanProviderPhase::Live(second.0)],
+    };
+    let material = ForceMaterial::unavailable(&[]);
+
+    assert_eq!(
+        run.feed_bar(&bar, &material, &[first.1.clone(), other_v1.1.clone()], Some(&evidence)),
+        Err(I4RunPolicyMismatch {
+            key: other_v1.1.lifecycle_key,
+            expected: run.policy().clone(),
+            supplied: other_v1.1.policy,
+        })
+    );
+    assert_eq!(run.book(), &before);
+
+    let (_, _, registrations) = run
+        .feed_bar(&bar, &material, &[first.1.clone(), second.1.clone()], Some(&evidence))
+        .unwrap();
+    assert_eq!(registrations, [BridgeRegistration::Accepted; 2]);
+    assert_eq!(run.book().bridges().len(), 2);
+    assert_eq!(run.book().center_break_audits().len(), 2);
+    for binding in run.book().bridges().values() {
+        assert_eq!(&binding.policy, run.policy());
+        let entry = run.book().get(&binding.lifecycle_key).unwrap();
+        assert_eq!(entry.state, NestEventState::Invalidated);
+        assert_eq!(entry.invalidated_at, Some(95));
+    }
+}
+
+#[test]
+fn i4_run_history_replays_original_v1_in_current_and_fresh_process() {
+    // 仅夹具政策记录跨进程；S 的正式持久化布局不由 I4 决定。
+    fn replay(path: &std::path::Path) {
+        let persisted = std::fs::read_to_string(path).unwrap();
+        let (version, anchor) = persisted.split_once('\n').unwrap();
+        assert_eq!(anchor, "center_break");
+        let policy = policy(version, CompletionAnchor::CenterBreak);
+        let mut run = I4CompletionRun::replay_history(policy.clone()).unwrap();
+        assert_eq!(run.policy(), &policy);
+        let f = selected_fixture(1, 0, 0, 20, 95, run.policy());
+        let fact = broken_fixture(f.2, 1, 90, 94);
+        let (_, _, accepted) = {
+            run.apply_center_break(&fact, 94);
+            let revision = *run.book().archived_center_break_facts().next().unwrap();
+            run.feed_bar(
+                &ReplayBarFeed {
+                    as_of: 95,
+                    phases: &[PanProviderPhase::Live(f.0)],
+                },
+                &ForceMaterial::unavailable(&[]),
+                &[f.1.clone()],
+                Some(&CenterBreakBirthEvidence {
+                    as_of: 95,
+                    revisions: &[(revision, CenterBreakSourceStatus::Active)],
+                }),
+            )
+            .unwrap()
+        };
+        assert_eq!(accepted, [BridgeRegistration::Accepted]);
+        assert_eq!(run.book().bridges()[&f.1.lifecycle_key].policy, policy);
+        assert_eq!(run.book().get(&f.1.lifecycle_key).unwrap().state, NestEventState::Provisional);
+        assert_eq!(run.apply_center_break(&fact, 95).attempts[0].outcome, CenterBreakOutcome::LatePendingRecovery);
+        assert!(run.book().center_break_audits().is_empty());
+    }
+
+    const POLICY_FILE_ENV: &str = "NEWCHANLUN_I4_HISTORY_POLICY_FILE";
+    if let Some(file) = std::env::var_os(POLICY_FILE_ENV) {
+        replay(std::path::Path::new(&file));
+        return;
+    }
+
+    let policy_file = tempfile::NamedTempFile::new().unwrap();
+    let v1 = CompletionPolicy::v1(CompletionAnchor::CenterBreak);
+    std::fs::write(policy_file.path(), format!("{}\ncenter_break", v1.version)).unwrap();
+    replay(policy_file.path());
+    // libtest 的精确名字不含 crate 前缀；子进程只执行本用例。
+    let test_name = concat!(module_path!(), "::i4_run_history_replays_original_v1_in_current_and_fresh_process");
+    let output = std::process::Command::new(std::env::current_exe().unwrap())
+        .args(["--exact", test_name.split_once("::").unwrap().1])
+        .env(POLICY_FILE_ENV, policy_file.path())
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{output:?}");
+    assert!(String::from_utf8_lossy(&output.stdout).contains("1 passed"), "{output:?}");
+}
+
+#[test]
+fn i4_run_birth_and_redelivery_respect_exact_source_withdrawal() {
+    use CenterBreakOutcome::*;
+    use CenterBreakSourceStatus::{Active, Withdrawn};
+
+    for (known, status, expected_redelivery) in [
+        (94, Active, Some(AlreadyApplied)),
+        (94, Withdrawn, Some(LatePendingRecovery)),
+        (95, Active, Some(AlreadyApplied)),
+        (95, Withdrawn, None),
+        (95, Withdrawn, Some(SourceWithdrawn)),
+    ] {
+        let mut run =
+            I4CompletionRun::start_new(CompletionPolicy::v2(CompletionAnchor::CenterBreak)).unwrap();
+        let (window, binding, center) = selected_fixture(1, 0, 0, 20, 95, run.policy());
+        let key = binding.lifecycle_key;
+        let fact = broken_fixture(center, 1, 90, known);
+        assert_eq!(
+            run.apply_center_break(&fact, known).attempts[0].outcome,
+            NoTarget
+        );
+        let original = *run.book().archived_center_break_facts().next().unwrap();
+        let (delta, _, accepted) = run
+            .feed_bar(
+                &ReplayBarFeed {
+                    as_of: 95,
+                    phases: &[PanProviderPhase::Live(window)],
+                },
+                &ForceMaterial::unavailable(&[]),
+                &[binding],
+                Some(&CenterBreakBirthEvidence {
+                    as_of: 95,
+                    revisions: &[(original, status)],
+                }),
+            )
+            .unwrap();
+        assert_eq!(accepted, [BridgeRegistration::Accepted]);
+        let (expected_state, invalidated_at) = if status == Active {
+            (NestEventState::Invalidated, Some(95))
+        } else {
+            (NestEventState::Provisional, None)
+        };
+        let expected_count = usize::from(status == Active);
+        let entry = run.book().get(&key).unwrap();
+        assert_eq!(
+            entry.state, expected_state,
+            "K{known}/O95 {status:?} at birth"
+        );
+        assert_eq!(
+            delta
+                .iter()
+                .filter(|revision| revision.kind == LifecycleRevisionKind::Invalidated {
+                    reason: InvalidatedReason::CenterBreak,
+                })
+                .count(),
+            expected_count
+        );
+
+        let before_redelivery = entry.revisions.clone();
+        if let Some(expected) = expected_redelivery {
+            let repeated = run.apply_center_break(&fact, 95);
+            assert_eq!(
+                repeated.attempts[0].outcome,
+                expected,
+                "K{known}/O95 {status:?} exact redelivery",
+            );
+            assert!(repeated.revisions.is_empty());
+        }
+        let entry = run.book().get(&key).unwrap();
+        assert_eq!(entry.state, expected_state);
+        assert_eq!(entry.invalidated_at, invalidated_at);
+        assert_eq!(entry.revisions, before_redelivery);
+        let audits = run.book().center_break_audits();
+        assert_eq!(audits.len(), expected_count);
+        if let Some(audit) = audits.first() {
+            assert_eq!(audit.mode, center_break::BreakApplicationMode::BirthStep);
+            assert_eq!(audit.application_at, 95);
+            assert_eq!(audit.fact, fact);
+        }
+        assert_eq!(
+            run.book()
+                .archived_center_break_facts()
+                .copied()
+                .collect::<Vec<_>>(),
+            [original],
+        );
+    }
+}
+
+#[test]
+fn i4_run_known_at_preserves_fresh_facts_and_accepts_exact_same_bar_reconfirmation() {
+    use CenterBreakSourceStatus::{Active, Withdrawn};
+
+    let policy = CompletionPolicy::v2(CompletionAnchor::CenterBreak);
+    let (window, binding, center) = selected_fixture(1, 0, 0, 20, 95, &policy);
+    let fact = broken_fixture(center, 1, 90, 95);
+    let feed = ReplayBarFeed {
+        as_of: 95,
+        phases: &[PanProviderPhase::Live(window)],
+    };
+    let material = ForceMaterial::unavailable(&[]);
+    let bindings = std::slice::from_ref(&binding);
+    for pre_archived in [false, true] {
+        let mut run = I4CompletionRun::start_new(policy.clone()).unwrap();
+        let withdrawn = pre_archived.then(|| {
+            run.apply_center_break(&fact, 95);
+            (*run.book().archived_center_break_facts().next().unwrap(), Withdrawn)
+        });
+        let input = withdrawn.as_ref().map(|revision| CenterBreakBirthEvidence {
+            as_of: 95,
+            revisions: std::slice::from_ref(revision),
+        });
+        run.feed_bar(&feed, &material, bindings, input.as_ref())
+            .unwrap();
+
+        if let Some((original, _)) = withdrawn {
+            let wrong_revision = ArchivedCenterBreakFact {
+                archived_seq: original.archived_seq + 1,
+                ..original
+            };
+            for evidence in [
+                None,
+                Some(CenterBreakBirthEvidence {
+                    as_of: 95,
+                    revisions: &[(wrong_revision, Active)],
+                }),
+                Some(CenterBreakBirthEvidence {
+                    as_of: 94,
+                    revisions: &[(original, Active)],
+                }),
+                Some(CenterBreakBirthEvidence {
+                    as_of: 95,
+                    revisions: &[(original, Withdrawn), (original, Active)],
+                }),
+            ] {
+                run.feed_bar(&feed, &material, bindings, evidence.as_ref())
+                    .unwrap();
+                let repeated = run.apply_center_break(&fact, 95);
+                assert_eq!(
+                    repeated.attempts[0].outcome,
+                    CenterBreakOutcome::SourceWithdrawn
+                );
+                assert!(repeated.revisions.is_empty());
+            }
+            let (delta, _, _) = run
+                .feed_bar(
+                    &feed,
+                    &material,
+                    bindings,
+                    Some(&CenterBreakBirthEvidence {
+                        as_of: 95,
+                        revisions: &[(original, Active)],
+                    }),
+                )
+                .unwrap();
+            // 重新确认不是又一次出生；原件仍走普通 KnownAt 门卫。
+            assert!(delta.is_empty());
+            assert!(run.book().center_break_audits().is_empty());
+        }
+
+        let applied = run.apply_center_break(&fact, 95);
+        assert_eq!(applied.attempts[0].outcome, CenterBreakOutcome::Applied);
+        assert_eq!(applied.revisions.len(), 1);
+        let [audit] = run.book().center_break_audits() else {
+            panic!();
+        };
+        assert_eq!(audit.mode, center_break::BreakApplicationMode::KnownAt);
+        assert_eq!(audit.application_at, 95);
+        assert_eq!(audit.fact, fact);
+    }
+}
+
+#[test]
+fn i4_run_birth_step_requires_current_evidence_for_exact_archived_revision() {
+    let mut input = I4CompletionRun::start_new(CompletionPolicy::v2(CompletionAnchor::CenterBreak))
+        .unwrap();
+    let f = selected_fixture(1, 0, 0, 20, 95, input.policy());
+    let fact = broken_fixture(f.2, 1, 90, 94);
+    input.apply_center_break(&fact, 94);
+    let revision = *input.book().archived_center_break_facts().next().unwrap();
+    let active = (revision, CenterBreakSourceStatus::Active);
+    let other_revision = ArchivedCenterBreakFact { archived_seq: revision.archived_seq + 1, ..revision };
+    let withdrawn = (revision, CenterBreakSourceStatus::Withdrawn);
+    let bar = ReplayBarFeed { as_of: 95, phases: &[PanProviderPhase::Live(f.0)] };
+    let bindings = std::slice::from_ref(&f.1);
+    let material = ForceMaterial::unavailable(&[]);
+
+    for evidence in [
+        None,
+        Some(CenterBreakBirthEvidence { as_of: 95, revisions: &[] }),
+        Some(CenterBreakBirthEvidence { as_of: 94, revisions: &[active] }),
+        Some(CenterBreakBirthEvidence { as_of: 95, revisions: &[(other_revision, CenterBreakSourceStatus::Active)] }),
+        Some(CenterBreakBirthEvidence { as_of: 95, revisions: &[active, withdrawn] }),
+    ] {
+        let mut run = I4CompletionRun::start_new(input.policy().clone()).unwrap();
+        run.apply_center_break(&fact, 94);
+        let (_, _, accepted) = run.feed_bar(&bar, &material, bindings, evidence.as_ref()).unwrap();
+        assert_eq!(accepted, [BridgeRegistration::Accepted]);
+        assert_eq!(run.book().get(&f.1.lifecycle_key).unwrap().state, NestEventState::Provisional);
+        assert!(run.book().center_break_audits().is_empty());
+    }
+
+    let mut legacy = input.book().clone();
+    let (_, _, accepted) = feed_replay_bar_with_bridges(&mut legacy, &bar, &material, bindings);
+    assert_eq!(accepted, [BridgeRegistration::Accepted]);
+    assert_eq!(legacy.get(&f.1.lifecycle_key).unwrap().state, NestEventState::Provisional);
+    assert!(legacy.center_break_audits().is_empty());
 }
