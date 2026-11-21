@@ -516,8 +516,10 @@ def rebind_attempts():
         return dict(schema_revision='x-authority-rebind-input/1',domains=['E'],
             e=dict(verification='current-recovery',db=str(edb),receipt=receipt))
     def inventory():
-        return {p.name:(p.stat().st_size,p.stat().st_mtime_ns,p.stat().st_ctime_ns,p.read_bytes())
-                for p in e_directory.iterdir()}
+        def stamp(path):
+            st=path.stat()
+            return st.st_size,st.st_mtime_ns,st.st_ctime_ns
+        return stamp(e_directory),{p.name:(stamp(p),p.read_bytes()) for p in e_directory.iterdir()}
     def dump():
         with sqlite3.connect(db) as conn: return '\n'.join(conn.iterdump())
     def binding():
@@ -811,13 +813,34 @@ def rebind_attempts():
         assert checkpoint.execute('PRAGMA wal_checkpoint(TRUNCATE)').fetchone()[0]==0
         checkpoint.close()
         media=inventory()
-        assert not wal.exists() and not shm.exists(), list(media)
+        assert not wal.exists() and not shm.exists(), media[1].keys()
+        assert edb.read_bytes()[18:20]==b'\x02\x02'
         save(e_handoff(actual))
         assert 'StaleWriter' in refused(argv(True,branch,branch_profile))
         with sqlite3.connect(branch) as conn:
             assert conn.execute('SELECT binding_seq FROM x_authority_bindings').fetchall()==[(0,)]
         assert inventory()==media
+
+        # 只改变介质，把同一份已签发的 E3 原件交给正式 E 和 X。
+        checkpoint=sqlite3.connect(edb)
+        assert checkpoint.execute('PRAGMA journal_mode=DELETE').fetchone()==('delete',)
+        checkpoint.close()
+        assert not wal.exists() and not shm.exists()
+        assert edb.read_bytes()[18:20]==b'\x01\x01'
+        e_refusal=run_e('current-recovery','--recovery-request',str(e_request))
+        assert e_refusal.returncode==1 and b'WAL/FULL/fullfsync' in e_refusal.stderr,e_refusal.stderr
         save(e_handoff(latest))
+        media=inventory()
+        assert 'WAL/FULL/fullfsync' in refused(argv(True))
+        assert inventory()==media and dump()==before
+        print('sidecar-free DELETE 1/1: E current-recovery and X rejected the same E3 original at the WAL gate')
+
+        checkpoint=sqlite3.connect(edb)
+        assert checkpoint.execute('PRAGMA journal_mode=WAL').fetchone()==('wal',)
+        checkpoint.close()
+        assert not wal.exists() and not shm.exists()
+        assert edb.read_bytes()[18:20]==b'\x02\x02'
+        media=inventory()
         p=start(True)
         assert binding()[3]['new_vector']==dict(e_authority_epoch=3,s_authority_epoch=3)
         assert binding()[3]['receipts'][0]['original']==latest
