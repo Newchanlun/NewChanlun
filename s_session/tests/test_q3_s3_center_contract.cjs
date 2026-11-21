@@ -1421,7 +1421,7 @@ test("#1496 R5：无首回抽证明的旧结算不得进入新规则 cut", () =>
   C.validateCenterPayload(old.kind, old.payload);
 });
 
-test("#1496 R5：未决外段保留五叶位置，不发布为连接", () => {
+function pendingLiteralCut() {
   const rows = centerCut().filter(r => r.payload.data.relation_kind !== "connects_left");
   for (const r of rows) {
     if (C.CENTER_KINDS.includes(r.kind)) r.payload.policy_version = C.CENTER_TUPLE[2];
@@ -1442,24 +1442,86 @@ test("#1496 R5：未决外段保留五叶位置，不发布为连接", () => {
     status: "NOT_YET_ASSIGNED", left_center_id: null, right_pending: false, reason: "SEED_NOT_YET_EVALUABLE",
   });
   data(C.PAIR_KINDS[0]).construction_role = "UNRESOLVED_BOUNDARY";
+  return rows;
+}
+
+test("#1496 R5：未决外段保留五叶位置，不发布为连接", () => {
+  const rows = pendingLiteralCut();
+  const position = rows.find(r => r.kind === C.PAIR_KINDS[0]).payload.data;
   C.validateCenterFamilyCut(rows, axes22(rows));
-  data(C.PAIR_KINDS[0]).construction_role = "BREAK_UNIT";
+  position.construction_role = "BREAK_UNIT";
   assert.throws(() => C.validateCenterFamilyCut(rows, axes22(rows)), /TB02F_ROLE/);
-  data(C.PAIR_KINDS[0]).construction_role = "UNRESOLVED_BOUNDARY";
+  position.construction_role = "UNRESOLVED_BOUNDARY";
 
   // 旧活动归属在 Q 的对象集合中原样保留，不拿旧版角色当本代计算。
   const retained = centerCut().find(r => r.object_id === "obj3-assign3");
   retained.first_known_generation = "1";
   const current = rows.filter(r => r.object_id !== retained.object_id);
   const version = current.find(r => r.kind === C.CENTER_KINDS[6]);
-  version.payload.data.known_at.generation = "2";
+  const pair = current.find(r => r.kind === C.PAIR_KINDS[4]);
+  for (const root of [version, pair]) {
+    root.first_known_generation = root.published_generation = "2";
+    root.payload.data.known_at = { ...K, generation: "2" };
+  }
   version.payload.data.waiting_reasons.push("R5_RECOMPUTE_DEFERRED");
   version.payload.data.r5_deferred_object_ids = [retained.object_id];
   C.validateCenterPayload(version.kind, version.payload);
   const axes = axes22(current);
   C.validateCenterFamilyCut([...current, retained], axes);
+  C.validateCenterFamilyCut([...current, retained], axes, "2");
   assert.equal(retained.payload.data.status, "CONNECTOR");
   assert.throws(() => C.validateCenterFamilyCut(current, axes), /TB02E_DEFERRED/);
   assert.throws(() => C.validateCenterFamilyCut([...current, {...retained, first_known_generation: "2"}], axes),
     /TB02E_DEFERRED/);
+});
+
+for (const fKnown of ["2", "3"]) {
+  test(`#1496 R6 B4：F/E 根自报 ${fKnown}/3 不能把 cut-2 新发布关系作历史原件`, () => {
+    const rows = pendingLiteralCut();
+    const [eRoot, fRoot] = [C.CENTER_KINDS[6], C.PAIR_KINDS[4]].map(kind => rows.find(r => r.kind === kind));
+    const relation = copy(rows.find(r => r.payload.data.relation_kind === "attempted_from"));
+    Object.assign(relation, { object_id: "obj3-r6-legacy", first_known_generation: "2", published_generation: "2" });
+    relation.payload.policy_version = C.LEGACY_CENTER_TUPLE[2];
+    for (const [root, generation] of [[eRoot, "3"], [fRoot, fKnown]]) {
+      root.first_known_generation = root.published_generation = "2";
+      root.payload.data.known_at = { ...K, generation };
+    }
+    eRoot.payload.data.waiting_reasons.push("R5_RECOMPUTE_DEFERRED");
+    eRoot.payload.data.r5_deferred_object_ids = [relation.object_id];
+    C.validateCenterPayload(eRoot.kind, eRoot.payload);
+    C.validatePairPayload(fRoot.kind, fRoot.payload);
+    C.validateCenterPayload(relation.kind, relation.payload);
+    const cut = [...rows, relation], axes = axes22(rows);
+    assert.throws(() => C.validateCenterFamilyCut(cut, axes), /TB02E_GENERATION/);
+    assert.throws(() => C.validateCenterFamilyCut(cut, axes, "2"), /TB02E_GENERATION/);
+
+    // 即使根的发布元数据也同步前移，显式入口仍受实际 cut 限制。
+    eRoot.first_known_generation = eRoot.published_generation = "3";
+    assert.throws(() => C.validateCenterFamilyCut(cut, axes, "2"), /TB02E_GENERATION/);
+  });
+}
+
+test("#1496 R6 B4：未保留的活动原件也不得来自未来 cut", () => {
+  const rows = pendingLiteralCut(), axes = axes22(rows);
+  C.validateCenterFamilyCut(rows, axes, "2");
+  const attempt = rows.findIndex(r => r.kind === C.CENTER_KINDS[0]);
+  for (const mutate of [
+    r => { r.published_generation = "3"; },
+    r => { r.payload.data.known_at.generation = "3"; },
+  ]) {
+    const future = copy(rows);
+    mutate(future[attempt]);
+    assert.throws(() => C.validateCenterFamilyCut(future, axes, "2"), /TB02E_GENERATION/);
+  }
+});
+
+test("#1496 R6 B4：完整 validateState 用实际 cut 约束 E/F 根", async () => {
+  for (const kind of [C.CENTER_KINDS[6], C.PAIR_KINDS[4]]) {
+    const st = await g5(), future = String(BigInt(st.cut.generation) + 1n);
+    const root = st.snapshot.objects.find(r => r.kind === kind);
+    root.first_known_generation = root.published_generation = future;
+    root.first_known_cut = "cut-" + future;
+    root.payload.data.known_at.generation = future;
+    await rejected(st, kind === C.CENTER_KINDS[6] ? /TB02E_GENERATION/ : /TB02F_GENERATION/);
+  }
 });

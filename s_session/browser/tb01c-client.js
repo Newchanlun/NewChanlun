@@ -2600,7 +2600,7 @@ if (typeof module !== 'object' || !module.exports) {
   });
 });
 
-/* exact source q3-center.js SHA256 3acf6e6d7fc2a0008c91b2821c42142bc6aeb46f16c7a8e3b9c81d22fbe05f5c */
+/* exact source q3-center.js SHA256 1cc7739c2725cd42dd6018e8bab832a7beaa906ff19298efa2521c379f131ade */
 /* #1419/#1424：TB-02-E 中枢（s-center/1）与 TB-02-F 相邻中枢对（s-center-pair/1）的 typed 判据。
  * 判据与原因码逐字移植自旧非拆分客户端（c74a0efa28:s_session/browser/tb01c-client.js，分支 codex/1424-center-pair-20261014），
  * 与当时 s_tb02_contract.py 同序同原因码；按 #1394 拆分风格独立成模块，只在完整普通原件（q3-typed.plain）上执行，
@@ -3392,26 +3392,39 @@ if (typeof module !== 'object' || !module.exports) {
   }
   const AXIS_KINDS = [["CC-016", CENTER_KINDS.slice(0, 2), needE], ["CC-017", CENTER_KINDS.slice(2, 3), needE], ["CC-022", CENTER_KINDS.slice(3, 4), needE],
     ["CC-018", PAIR_KINDS.slice(0, 1), needF], ["CC-020", PAIR_KINDS.slice(1, 2), needF]];
+  const publicationGenerations = r => [r.first_known_generation, r.published_generation, r.generation]
+    .filter(g => g !== undefined).map(g => BigInt(g));
+
   // 同 cut 活动集（含 CC-013.segment 普通原件）的完整中枢族链接：旧 validatePairCut 去掉规则分支后的同序组合。
-  function validateCenterFamilyCut(records, axes = null) {
+  function validateCenterFamilyCut(records, axes = null, cutGeneration = null) {
     for (const r of records) needE(!isCenterFamily(r.kind) || CENTER_KINDS.includes(r.kind), "CANDIDATE_KIND", "未声明的中枢 kind（不发 candidate）");
     for (const r of records) needF(!isPairFamily(r.kind) || PAIR_KINDS.includes(r.kind), "CANDIDATE_KIND", "未声明的中枢对 kind");
     const version = records.find(r => r.kind === CENTER_KINDS[6]);
     const pairVersion = records.find(r => r.kind === PAIR_KINDS[4]);
+    const cut = cutGeneration === null ? null : BigInt(cutGeneration);
+    // 版本根载荷不是切面时钟；即使直调时没有 cut，也要与根原件的发布元数据核对。
+    for (const [root, needX] of [[version, needE], [pairVersion, needF]]) {
+      if (root === undefined) continue;
+      const known = BigInt(root.payload.data.known_at.generation);
+      needX(publicationGenerations(root).every(g => known <= g) && (cut === null || known <= cut),
+        "GENERATION", "版本根获知代不得晚于原件发布代或实际 cut");
+    }
     const centerPolicy = version?.payload.policy_version, pairPolicy = pairVersion?.payload.policy_version;
     const ids = new Set(version?.payload.data.r5_deferred_object_ids ?? []);
     const deferredAssignments = new Set();
     if (ids.size) {
       needE(centerPolicy === CENTER_TUPLE[2] && version.payload.data.waiting_reasons.includes(R5_DEFERRED),
         "DEFERRED", "仅现行中枢版本可声明 R5 待重算原件");
+      needE(cut !== null || version.first_known_generation !== undefined, "DEFERRED", "R5 待重算缺少切面或版本根发布代");
+      const rootKnown = BigInt(version.payload.data.known_at.generation);
       const retainable = new Set([...CENTER_KINDS.slice(0, 5), ...PAIR_KINDS.slice(0, 3)]);
       const pending = records.find(r => r.kind === CENTER_KINDS[1] &&
         !ids.has(r.object_id) && r.payload.data.r5_pending_unit != null);
       needE(pending !== undefined, "DEFERRED", "R5 待重算必须由本代未决中枢边界触发");
       for (const objectId of ids) {
         const record = records.find(r => r.object_id === objectId);
-        needE(record !== undefined && retainable.has(record.kind)
-          && BigInt(record.first_known_generation) < BigInt(version.payload.data.known_at.generation),
+        needE(record !== undefined && retainable.has(record.kind) && record.first_known_generation !== undefined
+          && publicationGenerations(record).every(g => g < rootKnown && (cut === null || g < cut)),
           "DEFERRED", "R5 待重算对象必须是先前已发布且本代仍活动的结构原件");
         if (record.kind === CENTER_KINDS[3]) deferredAssignments.add(record.payload.data.unit.unit_id);
       }
@@ -3420,6 +3433,13 @@ if (typeof module !== 'object' || !module.exports) {
     // 明确保留的历史原件已经分离，其余对象必须按自身所属的本代策略解释。
     validatePairVersionCount(records);
     for (const r of records) {
+      if (cut !== null) {
+        const {known_at, formed_known_at, settled_known_at} = r.payload.data;
+        const known = [known_at, formed_known_at, settled_known_at].filter(k => k != null);
+        const needX = PAIR_KINDS.includes(r.kind) ? needF : needE;
+        needX(publicationGenerations(r).every(g => g <= cut) && known.every(k => BigInt(k.generation) <= cut),
+          "GENERATION", "活动原件获知代或发布代不得晚于实际 cut");
+      }
       if (CENTER_KINDS.includes(r.kind))
         needE((centerPolicy === CENTER_TUPLE[2] || centerPolicy === LEGACY_CENTER_TUPLE[2]) &&
           r.payload.policy_version === centerPolicy, "POLICY_MIX", "活动中枢族对象策略须与中枢版本根一致");
@@ -4446,7 +4466,7 @@ if (typeof module !== 'object' || !module.exports) {
     TB02_KINDS: Object.freeze(TB02_KINDS), BI_KINDS, SEGMENT_KINDS: Object.freeze(SEGMENT_KINDS)});
 });
 
-/* exact source q3-consumer.js SHA256 6c6aa81d618396357bab2477ffc2c84af014955939dd25d30f5abff1f41753d4 */
+/* exact source q3-consumer.js SHA256 679dc6a399982d9ed242ad4bb89de38145d5f67ddb9b2aae159735d933b9a9c9 */
 /* #1394：Q3完整消费者；只供既有tb01c页面调用，没有产品路由或默认资源。 */
 (function (root, factory) {
   const common = typeof module === "object" && module.exports;
@@ -6107,7 +6127,7 @@ if (typeof module !== 'object' || !module.exports) {
     // 以及全史中枢对出生/修订/撤回与变化事件的逐发生边界闭合。payload 已由 typed 逐对象校验；此处只取所需普通原件。
     // #1855 B5：S3 结构规则（Rust is_structure_rule）的非零代 cut，活动集须各恰一个三类结构版本根
     // （Rust source_structure::audit_full）；零代与非结构规则不要求。
-    async function bindCenterFamily(snapshot, generation, structureRule) {
+    async function bindCenterFamily(snapshot, cutGeneration, structureRule) {
       const family = new Set([...typed.CENTER_KINDS, ...typed.PAIR_KINDS]),
         history = new Set([typed.PAIR_KINDS[1], typed.PAIR_KINDS[3]]),
         roots = new Map(["CC-056.segment_version", "CC-056.center_version", "CC-056.pair_version"].map((k) => [k, 0])),
@@ -6124,12 +6144,12 @@ if (typeof module !== 'object' || !module.exports) {
           if (name === "objects") active.push(r);
           if (history.has(kind)) pairs.push(r);
         }
-      const axesValue = generation === "0" ? null : await f(await f(snapshot, "catalog_evidence"), "axes"),
+      const axesValue = cutGeneration === "0" ? null : await f(await f(snapshot, "catalog_evidence"), "axes"),
         axes = axesValue === null || !(await axesValue.has("CC-016")) ? null : await typed.plain(axesValue);
-      if (structureRule && generation !== "0")
+      if (structureRule && cutGeneration !== "0")
         need([...roots.values()].every((n) => n === 1), "结构域版本根缺失或重复");
       if (!any && axes === null) return;
-      typed.Center.validateCenterFamilyCut(active, axes);
+      typed.Center.validateCenterFamilyCut(active, axes, cutGeneration);
       typed.Center.validatePairHistory(pairs);
     }
     // #1394 整合（根裁定 (1)，(4) 扩到 v3；与 #1414 validate_once 同一原则）：同一 State 只完整验证一次。
