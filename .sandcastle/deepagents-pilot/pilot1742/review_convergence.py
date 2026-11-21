@@ -8,6 +8,7 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+import unicodedata
 from collections import Counter
 from collections.abc import Collection, Mapping, Sequence
 from dataclasses import dataclass, field
@@ -81,7 +82,7 @@ _MODEL_FAMILY_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
 )
 
 _COMMENT_MARKER_RE = re.compile(
-    r"^<!--\s*deepagents:review-findings\s+pr=(?P<pr>[1-9]\d*)\s+round=(?P<round>[1-9]\d*)\s+head=(?P<head>\S+)\s*-->$"
+    r"^<!--\s*deepagents:review-findings\s+pr=(?P<pr>[1-9][0-9]*)\s+round=(?P<round>[1-9][0-9]*)\s+head=(?P<head>\S+)\s*-->$"
 )
 
 _FENCE_OPEN_BACKTICK_BODY_RE = re.compile(r"^(`{3,})[^`]*$")
@@ -89,7 +90,7 @@ _FENCE_OPEN_TILDE_BODY_RE = re.compile(r"^(~{3,}).*$")
 _ATX_HEADING_BODY_RE = re.compile(r"^#{1,6}(?:[ \t]|$)")
 _SETEXT_UNDERLINE_BODY_RE = re.compile(r"^(?:=+|-+)[ \t]*$")
 _THEMATIC_BREAK_BODY_RE = re.compile(r"^(?:(?:-[ \t]*){3,}|(?:\*[ \t]*){3,}|(?:_[ \t]*){3,})$")
-_LIST_ITEM_MARKER_BODY_RE = re.compile(r"^(?:(?P<bullet>[-*+])|(?P<num>\d{1,9})[.)])(?=[ \t]|$)")
+_LIST_ITEM_MARKER_BODY_RE = re.compile(r"^(?:(?P<bullet>[-*+])|(?P<num>[0-9]{1,9})[.)])(?=[ \t]|$)")
 _HTML_BLOCK_1_START_RE = re.compile(r"^<(?:pre|script|style|textarea)(?:[ \t>]|$)", re.IGNORECASE)
 _HTML_BLOCK_1_END_RE = re.compile(r"</(?:pre|script|style|textarea)>", re.IGNORECASE)
 _HTML_BLOCK_4_START_RE = re.compile(r"^<![A-Za-z]")
@@ -131,15 +132,25 @@ _INLINE_RAW_HTML_RE = re.compile(
     rf"{_INLINE_HTML_CLOSE_TAG_PATTERN}|{_INLINE_HTML_OPEN_TAG_PATTERN})",
     re.DOTALL,
 )
+_INLINE_HTML_OPEN_NAME_RE = re.compile(r"^<([A-Za-z][A-Za-z0-9-]*)")
+_INLINE_HTML_CLOSE_NAME_RE = re.compile(r"^</([A-Za-z][A-Za-z0-9-]*)[ \t\n]*>$")
+_SUPPRESSED_INLINE_HTML_TAGS = frozenset(
+    {"code", "pre", "kbd", "samp", "var", "script", "style", "textarea", "template", "noscript"}
+)
+_RAW_TEXT_HTML_TAGS = frozenset({"script", "style", "textarea"})
+_SILENT_INLINE_HTML_TAGS = frozenset({"script", "style", "textarea", "template", "noscript"})
+_RAW_TEXT_CLOSE_RES: dict[str, re.Pattern[str]] = {
+    tag: re.compile(rf"</{tag}[ \t\n]*>", re.IGNORECASE) for tag in _RAW_TEXT_HTML_TAGS
+}
 
 _WONTFIX_HEAD_RE = re.compile(
-    r"^(?:(?:[-*+]|\d+[.)])[ \t]+)?"
+    r"^(?:(?:[-*+]|[0-9]+[.)])[ \t]+)?"
     r"(?:"
     r"`?\[(?P<id_bracket>[0-9a-fA-F]{6,16})\]`?[ \t]*不修"
     r"|`?(?P<id_bare>[0-9a-fA-F]{8,16})`?[ \t]+不修"
     r"|不修[ \t]*[（(\[][ \t]*(?P<id_paren>[0-9a-fA-F]{6,16})[ \t]*[）)\]]"
-    r"|不修[ \t]*[（(][ \t]*(?P<path_paren>[^\s:：()（）]+?)(?::(?P<line_paren>[1-9]\d*))?[ \t]*[）)]"
-    r"|`?(?P<path_prefix>(?:\./)?[A-Za-z0-9_.+-]+(?:/[A-Za-z0-9_.+-]+)*\.[A-Za-z0-9_+-]+)(?::(?P<line_prefix>[1-9]\d*))?`?[ \t]+不修"
+    r"|不修[ \t]*[（(][ \t]*(?P<path_paren>[^\s:：()（）]+?)(?::(?P<line_paren>[1-9][0-9]*))?[ \t]*[）)]"
+    r"|`?(?P<path_prefix>(?:\./)?[A-Za-z0-9_.+-]+(?:/[A-Za-z0-9_.+-]+)*\.[A-Za-z0-9_+-]+)(?::(?P<line_prefix>[1-9][0-9]*))?`?[ \t]+不修"
     r"|不修"
     r")[ \t]*[:：][ \t]*(?P<reason>.*)$"
 )
@@ -437,9 +448,14 @@ class AuthorReply:
     reason: str
     comment_id: str
     author: str | None = None
+    is_inline_anchor: bool = False
 
     def __post_init__(self) -> None:
+        if type(self.is_inline_anchor) is not bool:
+            raise ConvergenceError(f"AuthorReply.is_inline_anchor 必须是 bool：{self.is_inline_anchor!r}")
         if self.finding_id is not None:
+            if self.is_inline_anchor:
+                raise ConvergenceError("AuthorReply 含显式 finding_id 时不得标记为 is_inline_anchor=True")
             fid = _require_non_empty_str(self.finding_id, "finding_id").lower()
             if not re.fullmatch(r"[0-9a-f]{6,16}", fid):
                 raise ConvergenceError(f"AuthorReply.finding_id 格式非法：{self.finding_id!r}")
@@ -447,6 +463,8 @@ class AuthorReply:
             _normalize_file(self.file)
         _normalize_line(self.line)
         _require_non_empty_str(self.reason, "reason")
+        if not _clean_display_reason(self.reason):
+            raise ConvergenceError("AuthorReply.reason 不能为空或仅含零宽格式字符")
         _require_non_empty_str(self.comment_id, "comment_id")
         if self.author is not None:
             _require_non_empty_str(self.author, "author")
@@ -457,11 +475,16 @@ class AuthorReply:
 
     @property
     def reply_key(self) -> str:
-        """顺序无关的稳定消费键：解耦同评论内指令顺序与 diff 行号漂移。"""
+        """按三类锚定形态构造顺序无关的稳定消费键：显式 ID / 显式坐标 / 纯行内回复。"""
         cid = self.comment_id.strip()
         if self.finding_id is not None:
             norm_id = self.finding_id.strip().lower()
             return f"comment:{cid}:finding:{norm_id}"
+        if not self.is_inline_anchor and self.file is not None:
+            norm_file = _normalize_file(self.file)
+            if self.line is not None:
+                return f"comment:{cid}:loc:{norm_file}:{self.line}"
+            return f"comment:{cid}:loc:{norm_file}"
         norm_reason = _normalize_fingerprint_text(self.reason, "reason")
         digest = hashlib.sha256(norm_reason.encode("utf-8")).hexdigest()[:16]
         return f"comment:{cid}:inline:{digest}"
@@ -514,7 +537,8 @@ def _extract_comment_file_and_line(comment: Mapping[str, Any]) -> tuple[str | No
             file_path = _normalize_file(raw_path)
         except ConvergenceError:
             file_path = None
-    raw_line = comment.get("line") if comment.get("line") is not None else comment.get("original_line")
+    # 仅使用当前 HEAD 上的现行 line；当 line is None（过期评论）时严禁回退 original_line
+    raw_line = comment.get("line")
     line: int | None = raw_line if type(raw_line) is int and raw_line > 0 else None
     return file_path, line
 
@@ -1037,55 +1061,181 @@ def _find_matching_bracket(
     return -1
 
 
-def _scan_inline_visible(text: str, defined_labels: frozenset[str] = frozenset()) -> str:
-    """CommonMark §6 段落行内单遍扫描器：屏蔽代码跨度、自动链接、原始 HTML 与链接/图片隐藏部分。"""
-    out: list[str] = []
+def _clean_display_reason(raw: str) -> str:
+    """剥离行内匹配哨兵与 Unicode 零宽格式字符（category='Cf'），再做首尾去空白。"""
+    return "".join(ch for ch in raw if ch != "\x01" and unicodedata.category(ch) != "Cf").strip()
+
+
+def _extract_code_span_text(inner: str) -> str:
+    """按 CommonMark §6.1 提取行内代码跨度纯文本：换行转空格，非全空格且首尾均为空格时各剥离 1 个。"""
+    text = inner.replace("\n", " ")
+    if len(text) >= 2 and text[0] == " " and text[-1] == " " and any(ch != " " for ch in text):
+        return text[1:-1]
+    return text
+
+
+def _scan_inline_dual(
+    text: str,
+    defined_labels: frozenset[str] = frozenset(),
+    suppress_stack: list[str] | None = None,
+) -> list[list[tuple[str, str]]]:
+    """CommonMark §6 段落行内双流扫描器：同步维护按行对齐的 (match_stream, display_stream)。
+
+    - match_stream：用于指令头匹配；代码跨度、自动链接、抑制标签（<code>/<pre>/<script> 等）、
+      图片与链接目标/标题均写入非匹配哨兵 `\\x01` 且不产生新行，彻底阻断伪指令注入。
+    - display_stream：用于确认合法指令后提取人类可读理由；保留行内代码跨度纯文本，剥离原始 HTML。
+    """
+    stack = suppress_stack if suppress_stack is not None else []
+    lines: list[list[tuple[str, str]]] = [[]]
     n = len(text)
     i = 0
+
+    def emit(m_part: str, d_part: str) -> None:
+        if m_part or d_part:
+            lines[-1].append((m_part, d_part))
+
+    def emit_newline() -> None:
+        lines.append([])
+
     while i < n:
-        ch = text[i]
-        # 1. 反斜杠转义（§2.4）与反斜杠硬换行（§6.7）
-        if ch == "\\" and i + 1 < n:
-            nxt = text[i + 1]
-            if nxt in _ASCII_PUNCTUATION:
-                out.append(nxt)
-                i += 2
+        # 0. 处于行内抑制 HTML 标签栈内（如 <code>、<pre>、<kbd>、<script> 等）
+        if stack:
+            top_tag = stack[-1]
+            if top_tag in _RAW_TEXT_HTML_TAGS:
+                close_m = _RAW_TEXT_CLOSE_RES[top_tag].search(text, i)
+                if close_m is None:
+                    i = n
+                    break
+                stack.pop()
+                i = close_m.end()
                 continue
-            if nxt == "\n":
-                out.append("\n")
-                i += 2
+
+            silent = any(t in _SILENT_INLINE_HTML_TAGS for t in stack)
+            ch = text[i]
+            if ch == "`":
+                tick_end, found_end = _find_code_span_end(text, i)
+                if found_end != -1:
+                    if not silent:
+                        code_val = _extract_code_span_text(text[tick_end : found_end - (tick_end - i)])
+                        emit("", code_val)
+                    i = found_end
+                else:
+                    if not silent:
+                        emit("", text[i:tick_end])
+                    i = tick_end
                 continue
-            out.append(ch)
+            if ch == "<":
+                auto_m = _AUTOLINK_URI_RE.match(text, i) or _AUTOLINK_EMAIL_RE.match(text, i)
+                if auto_m is not None:
+                    if not silent:
+                        emit("", auto_m.group(0)[1:-1])
+                    i = auto_m.end()
+                    continue
+                html_m = _INLINE_RAW_HTML_RE.match(text, i)
+                if html_m is not None:
+                    raw_html = html_m.group(0)
+                    close_tag_m = _INLINE_HTML_CLOSE_NAME_RE.fullmatch(raw_html)
+                    if close_tag_m is not None:
+                        tag_name = close_tag_m.group(1).lower()
+                        if tag_name in stack:
+                            while stack:
+                                popped = stack.pop()
+                                if popped == tag_name:
+                                    break
+                    elif not raw_html.startswith(("<!--", "<?", "<!")):
+                        open_tag_m = _INLINE_HTML_OPEN_NAME_RE.match(raw_html)
+                        if open_tag_m is not None and not raw_html.rstrip().endswith("/>"):
+                            tag_name = open_tag_m.group(1).lower()
+                            if tag_name in _SUPPRESSED_INLINE_HTML_TAGS:
+                                stack.append(tag_name)
+                    i = html_m.end()
+                    continue
+                if not silent:
+                    emit("", ch)
+                i += 1
+                continue
+            if ch == "\\" and i + 1 < n:
+                nxt = text[i + 1]
+                if nxt in _ASCII_PUNCTUATION:
+                    if not silent:
+                        emit("", nxt)
+                    i += 2
+                    continue
+                if nxt == "\n":
+                    if not silent:
+                        emit("", " ")
+                    i += 2
+                    continue
+            if ch == "\n":
+                if not silent:
+                    emit("", " ")
+                i += 1
+                continue
+            if not silent:
+                emit("", ch)
             i += 1
             continue
 
-        # 2. 行内代码跨度（§6.1）
+        ch = text[i]
+        # 1. 普通换行
+        if ch == "\n":
+            emit_newline()
+            i += 1
+            continue
+
+        # 2. 反斜杠转义（§2.4）与反斜杠硬换行（§6.7）
+        if ch == "\\" and i + 1 < n:
+            nxt = text[i + 1]
+            if nxt in _ASCII_PUNCTUATION:
+                emit(nxt, nxt)
+                i += 2
+                continue
+            if nxt == "\n":
+                emit_newline()
+                i += 2
+                continue
+            emit(ch, ch)
+            i += 1
+            continue
+
+        # 3. 行内代码跨度（§6.1）：match_stream 写入哨兵，display_stream 保留纯文本内容
         if ch == "`":
             tick_end, found_end = _find_code_span_end(text, i)
             if found_end != -1:
-                out.append("\u200b")
+                tick_len = tick_end - i
+                code_val = _extract_code_span_text(text[tick_end : found_end - tick_len])
+                emit("\x01", code_val)
                 i = found_end
             else:
-                out.append(text[i:tick_end])
+                raw_ticks = text[i:tick_end]
+                emit(raw_ticks, raw_ticks)
                 i = tick_end
             continue
 
-        # 3. 自动链接（§6.5）与行内原始 HTML（§6.6）
+        # 4. 自动链接（§6.5）与行内原始 HTML（§6.6）
         if ch == "<":
             auto_m = _AUTOLINK_URI_RE.match(text, i) or _AUTOLINK_EMAIL_RE.match(text, i)
             if auto_m is not None:
-                out.append("\u200b")
+                emit("\x01", auto_m.group(0)[1:-1])
                 i = auto_m.end()
                 continue
             html_m = _INLINE_RAW_HTML_RE.match(text, i)
             if html_m is not None:
+                raw_html = html_m.group(0)
+                if not raw_html.startswith(("<!--", "<?", "<!", "</")):
+                    open_tag_m = _INLINE_HTML_OPEN_NAME_RE.match(raw_html)
+                    if open_tag_m is not None and not raw_html.rstrip().endswith("/>"):
+                        tag_name = open_tag_m.group(1).lower()
+                        if tag_name in _SUPPRESSED_INLINE_HTML_TAGS:
+                            stack.append(tag_name)
+                            emit("\x01", "")
                 i = html_m.end()
                 continue
-            out.append(ch)
+            emit(ch, ch)
             i += 1
             continue
 
-        # 4. 行内/引用图片（§6.4）
+        # 5. 行内/引用图片（§6.4）
         if ch == "!" and i + 1 < n and text[i + 1] == "[":
             close_bracket = _find_matching_bracket(
                 text,
@@ -1096,14 +1246,14 @@ def _scan_inline_visible(text: str, defined_labels: frozenset[str] = frozenset()
             if close_bracket != -1:
                 img_end = _match_link_tail(text, i + 1, close_bracket, defined_labels)
                 if img_end is not None:
-                    out.append("\u200b")
+                    emit("\x01", "")
                     i = img_end
                     continue
-            out.append(ch)
+            emit(ch, ch)
             i += 1
             continue
 
-        # 5. 行内/引用链接（§6.3）
+        # 6. 行内/引用链接（§6.3）
         if ch == "[":
             close_bracket = _find_matching_bracket(
                 text,
@@ -1114,24 +1264,41 @@ def _scan_inline_visible(text: str, defined_labels: frozenset[str] = frozenset()
             if close_bracket != -1:
                 link_end = _match_link_tail(text, i, close_bracket, defined_labels)
                 if link_end is not None:
-                    inner_visible = _scan_inline_visible(text[i + 1 : close_bracket], defined_labels)
-                    out.append(inner_visible)
+                    inner_lines = _scan_inline_dual(text[i + 1 : close_bracket], defined_labels, stack)
+                    lines[-1].extend(inner_lines[0])
+                    lines.extend(inner_lines[1:])
                     if link_end > close_bracket + 1:
-                        out.append("\u200b")
+                        emit("\x01", "")
                     i = link_end
                     continue
-            out.append(ch)
+            emit(ch, ch)
             i += 1
             continue
 
-        # 6. 普通字符原样输出
-        out.append(ch)
+        # 7. 普通字符原样输出
+        emit(ch, ch)
         i += 1
-    return "".join(out)
+
+    return lines
 
 
-def _extract_visible_paragraph_lines(body: str) -> list[str]:
-    """按 CommonMark Phase-1 容器栈/叶子块 + §4.7 链接引用定义剥离 + §6 行内扫描提取非引用可见段落行。"""
+def _extract_display_slice(tokens: Sequence[tuple[str, str]], start_match_pos: int) -> str:
+    """按 match_stream 中的起始偏移精确截取对应 display_stream 尾部文本。"""
+    parts: list[str] = []
+    pos = 0
+    for m_part, d_part in tokens:
+        end = pos + len(m_part)
+        if pos >= start_match_pos:
+            parts.append(d_part)
+        elif end > start_match_pos:
+            offset = start_match_pos - pos
+            parts.append(d_part[offset:])
+        pos = end
+    return "".join(parts)
+
+
+def _extract_visible_paragraph_lines(body: str) -> list[tuple[str, list[tuple[str, str]]]]:
+    """按 CommonMark Phase-1 容器栈/叶子块 + §4.7 链接引用定义剥离 + §6 双流扫描提取非引用可见段落行。"""
     containers: list[_Container] = []
     leaf: _Leaf | None = None
     defined_labels: set[str] = set()
@@ -1352,14 +1519,32 @@ def _extract_visible_paragraph_lines(body: str) -> list[str]:
     close_leaf()
 
     frozen_labels = frozenset(defined_labels)
-    visible_lines: list[str] = []
+    visible_lines: list[tuple[str, list[tuple[str, str]]]] = []
     for para_text in visible_paragraphs:
-        scanned = _scan_inline_visible(para_text, frozen_labels)
-        for para_line in _split_commonmark_lines(scanned):
-            stripped = para_line.strip(" \t")
-            if stripped:
-                visible_lines.append(stripped)
+        for line_tokens in _scan_inline_dual(para_text, frozen_labels):
+            raw_match = "".join(m for m, _ in line_tokens)
+            stripped_match = raw_match.strip(" \t")
+            if stripped_match:
+                visible_lines.append((raw_match, line_tokens))
     return visible_lines
+
+
+def _match_reply_targets(reply: AuthorReply, findings: Sequence[Finding]) -> tuple[list[Finding], int]:
+    """唯一作者回复目标匹配规则（由 bind_author_replies、VerifiedFinding 与 VerifiedRound 共同复用）。"""
+    if reply.finding_id is not None:
+        prefix = reply.finding_id.strip().lower()
+        return [f for f in findings if f.finding_id.startswith(prefix)], 3
+    if reply.is_inline_anchor:
+        if reply.file is None or reply.line is None:
+            return [], 0
+        norm_file = _normalize_file(reply.file)
+        return [f for f in findings if _normalize_file(f.file) == norm_file and f.line == reply.line], 2
+    if reply.file is not None:
+        norm_file = _normalize_file(reply.file)
+        if reply.line is not None:
+            return [f for f in findings if _normalize_file(f.file) == norm_file and f.line == reply.line], 2
+        return [f for f in findings if _normalize_file(f.file) == norm_file], 1
+    return [], 0
 
 
 def parse_wontfix_replies(
@@ -1397,12 +1582,16 @@ def parse_wontfix_replies(
 
         comment_replies: list[AuthorReply] = []
         id_reasons: dict[str, set[str]] = {}
-        seen_exact: set[tuple[str | None, str | None, int | None, str]] = set()
-        for visible_line in _extract_visible_paragraph_lines(body):
-            match = _WONTFIX_HEAD_RE.match(visible_line)
+        loc_reasons: dict[tuple[str, int | None], set[str]] = {}
+        seen_exact: set[tuple[str | None, str | None, int | None, bool, str]] = set()
+        for raw_match, line_tokens in _extract_visible_paragraph_lines(body):
+            leading_ws = len(raw_match) - len(raw_match.lstrip(" \t"))
+            stripped_match = raw_match.strip(" \t")
+            match = _WONTFIX_HEAD_RE.match(stripped_match)
             if not match:
                 continue
-            reason = match.group("reason").strip()
+            raw_display_reason = _extract_display_slice(line_tokens, leading_ws + match.start("reason"))
+            reason = _clean_display_reason(raw_display_reason)
             if not reason:
                 continue
 
@@ -1411,6 +1600,7 @@ def parse_wontfix_replies(
 
             raw_path = match.group("path_prefix") or match.group("path_paren")
             raw_line_num = match.group("line_prefix") or match.group("line_paren")
+            is_inline_anchor = False
             if raw_path:
                 try:
                     file_path: str | None = _normalize_file(raw_path)
@@ -1420,18 +1610,21 @@ def parse_wontfix_replies(
             elif finding_id is None:
                 file_path = fallback_file
                 line_num = fallback_line
+                is_inline_anchor = True
             else:
                 file_path = None
                 line_num = None
 
             norm_reason = _normalize_fingerprint_text(reason, "reason")
-            exact_sig = (finding_id, file_path, line_num, norm_reason)
+            exact_sig = (finding_id, file_path, line_num, is_inline_anchor, norm_reason)
             if exact_sig in seen_exact:
                 continue
             seen_exact.add(exact_sig)
 
             if finding_id is not None:
                 id_reasons.setdefault(finding_id, set()).add(norm_reason)
+            elif not is_inline_anchor and file_path is not None:
+                loc_reasons.setdefault((file_path, line_num), set()).add(norm_reason)
 
             comment_replies.append(
                 AuthorReply(
@@ -1441,13 +1634,22 @@ def parse_wontfix_replies(
                     reason=reason,
                     comment_id=comment_id,
                     author=author,
+                    is_inline_anchor=is_inline_anchor,
                 )
             )
 
-        # 同评论内针对同一 target_finding_id 出现不同理由的冲突指令时拒收歧义，绝不靠下标编号
+        # 同评论内针对同一 target_finding_id 或同一显式 (file, line) 出现不同理由的冲突指令时拒收歧义
         conflicting_ids = {fid for fid, reasons in id_reasons.items() if len(reasons) > 1}
+        conflicting_locs = {loc for loc, reasons in loc_reasons.items() if len(reasons) > 1}
         for item in comment_replies:
             if item.finding_id is not None and item.finding_id in conflicting_ids:
+                continue
+            if (
+                item.finding_id is None
+                and not item.is_inline_anchor
+                and item.file is not None
+                and (_normalize_file(item.file), item.line) in conflicting_locs
+            ):
                 continue
             replies.append(item)
     return tuple(replies)
@@ -1475,18 +1677,25 @@ def _analyze_author_replies(
     consumed_keys = _normalize_str_collection(consumed_reply_keys, "consumed_reply_keys")
     consumed_cids = _normalize_str_collection(consumed_comment_ids, "consumed_comment_ids")
 
-    # 校验并识别同评论内针对同一 target_finding_id 的冲突指令（即使直接构造 AuthorReply 绕过解析器也拒收）
+    # 校验并识别同评论内针对同一 target_finding_id 或同一显式 (file, line) 的冲突指令（即使直接构造 AuthorReply 也拒收）
     validated_replies: list[AuthorReply] = []
     comment_id_reasons: dict[tuple[str, str], set[str]] = {}
+    comment_loc_reasons: dict[tuple[str, str, int | None], set[str]] = {}
     for reply in replies:
         if not isinstance(reply, AuthorReply):
             raise ConvergenceError(f"replies 元素必须是 AuthorReply：{reply!r}")
         cid = _require_non_empty_str(reply.comment_id, "reply.comment_id")
         validated_replies.append(reply)
-        if reply.finding_id is not None and reply.reply_key not in consumed_keys and cid not in consumed_cids:
-            key_pair = (cid, reply.finding_id.strip().lower())
-            comment_id_reasons.setdefault(key_pair, set()).add(_normalize_fingerprint_text(reply.reason, "reason"))
+        if reply.reply_key not in consumed_keys and cid not in consumed_cids:
+            norm_reason = _normalize_fingerprint_text(reply.reason, "reason")
+            if reply.finding_id is not None:
+                key_pair = (cid, reply.finding_id.strip().lower())
+                comment_id_reasons.setdefault(key_pair, set()).add(norm_reason)
+            elif not reply.is_inline_anchor and reply.file is not None:
+                loc_triple = (cid, _normalize_file(reply.file), reply.line)
+                comment_loc_reasons.setdefault(loc_triple, set()).add(norm_reason)
     conflicting_comment_ids = {pair for pair, reasons in comment_id_reasons.items() if len(reasons) > 1}
+    conflicting_comment_locs = {triple for triple, reasons in comment_loc_reasons.items() if len(reasons) > 1}
 
     best_by_id: dict[str, tuple[int, AuthorReply]] = {}
     matched_keys_by_id: dict[str, set[str]] = {}
@@ -1498,22 +1707,16 @@ def _analyze_author_replies(
             continue
         if reply.finding_id is not None and (cid, reply.finding_id.strip().lower()) in conflicting_comment_ids:
             continue
+        if (
+            reply.finding_id is None
+            and not reply.is_inline_anchor
+            and reply.file is not None
+            and (cid, _normalize_file(reply.file), reply.line) in conflicting_comment_locs
+        ):
+            continue
 
-        matches: list[Finding]
-        specificity: int
-        if reply.finding_id is not None:
-            prefix = reply.finding_id.strip().lower()
-            matches = [f for f in finding_list if f.finding_id.startswith(prefix)]
-            specificity = 3
-        elif reply.file is not None:
-            norm_file = _normalize_file(reply.file)
-            if reply.line is not None:
-                matches = [f for f in finding_list if _normalize_file(f.file) == norm_file and f.line == reply.line]
-                specificity = 2
-            else:
-                matches = [f for f in finding_list if _normalize_file(f.file) == norm_file]
-                specificity = 1
-        else:
+        matches, specificity = _match_reply_targets(reply, finding_list)
+        if not matches:
             continue
 
         for matched_finding in matches:
@@ -1569,6 +1772,8 @@ class VerifiedFinding:
     verdict: VerificationVerdict
     verifier_model: str
     verifier_evidence: str
+    round_number: int
+    head_sha: str
     author_reply: AuthorReply | None = None
     related_reply_keys: tuple[str, ...] = ()
 
@@ -1579,12 +1784,22 @@ class VerifiedFinding:
             raise ConvergenceError("VerifiedFinding.verdict 必须是 VerificationVerdict")
         _require_non_empty_str(self.verifier_model, "verifier_model")
         _require_non_empty_str(self.verifier_evidence, "verifier_evidence")
+        if type(self.round_number) is not int or self.round_number < 1:
+            raise ConvergenceError(f"VerifiedFinding.round_number 必须是 >= 1 的整数：{self.round_number!r}")
+        norm_head = _require_non_empty_str(self.head_sha, "VerifiedFinding.head_sha")
+        object.__setattr__(self, "head_sha", norm_head)
         if self.author_reply is not None and not isinstance(self.author_reply, AuthorReply):
             raise ConvergenceError("VerifiedFinding.author_reply 必须是 AuthorReply 或 None")
         if self.verdict == VerificationVerdict.RESOLVED_BY_WONTFIX:
             if self.author_reply is None:
                 raise ConvergenceError("verdict=resolved_by_wontfix 时必须绑定非空 author_reply")
             _require_non_empty_str(self.author_reply.comment_id, "author_reply.comment_id")
+            matched, _ = _match_reply_targets(self.author_reply, (self.finding,))
+            if len(matched) != 1 or matched[0].finding_id != self.finding.finding_id:
+                raise ConvergenceError(
+                    f"verdict=resolved_by_wontfix 绑定的 author_reply（comment_id={self.author_reply.comment_id}）"
+                    f"与发现 {self.finding.finding_id} 不匹配"
+                )
         if not isinstance(self.related_reply_keys, tuple):
             raise ConvergenceError("VerifiedFinding.related_reply_keys 必须是字符串元组")
         for rk in self.related_reply_keys:
@@ -1606,11 +1821,12 @@ class RoundHistoryEntry:
     head_sha: str
     posted_fingerprints: frozenset[str]
     unresolved_important: tuple[Finding, ...]
+    panel: ReviewPanel
     resolved_fingerprints: frozenset[str] = frozenset()
     consumed_reply_keys: frozenset[str] = frozenset()
     rejected_fingerprints: frozenset[str] = frozenset()
     pending_non_blocking: tuple[VerifiedFinding, ...] = ()
-    panel: ReviewPanel | None = None
+    finder_session_ids: frozenset[str] = frozenset()
     outcome: RoundOutcome | None = None
 
     def __post_init__(self) -> None:
@@ -1624,13 +1840,11 @@ class RoundHistoryEntry:
             _require_non_empty_str(fp, "posted_fingerprints[]")
         if not isinstance(self.unresolved_important, tuple):
             raise ConvergenceError("unresolved_important 必须是 Finding 元组")
-        if self.panel is not None and not isinstance(self.panel, ReviewPanel):
-            raise ConvergenceError("RoundHistoryEntry.panel 必须是 ReviewPanel 或 None")
+        if not isinstance(self.panel, ReviewPanel):
+            raise ConvergenceError("RoundHistoryEntry.panel 必须是 ReviewPanel")
 
-        panel_verifier_family = self.panel.verifier_family if self.panel is not None else None
-        panel_finders = (
-            frozenset(m.strip() for m in self.panel.finder_models) if self.panel is not None else frozenset()
-        )
+        panel_verifier_family = self.panel.verifier_family
+        panel_finders = frozenset(m.strip() for m in self.panel.finder_models)
         unresolved_ids: set[str] = set()
         for item in self.unresolved_important:
             if not isinstance(item, Finding):
@@ -1650,7 +1864,7 @@ class RoundHistoryEntry:
                     raise ConvergenceError(
                         f"历史轮次 {self.round_number} 核实者与未解除发现 {fid} 来源模型 {src_model!r} 同家族"
                     )
-            if self.panel is not None and self.round_number == 1:
+            if self.round_number == 1:
                 unknown = [m for m in real_models if m not in panel_finders]
                 if unknown:
                     raise ConvergenceError(
@@ -1692,6 +1906,10 @@ class RoundHistoryEntry:
             raise ConvergenceError("consumed_reply_keys 必须是 frozenset[str]")
         for rk in self.consumed_reply_keys:
             _require_non_empty_str(rk, "consumed_reply_keys[]")
+        if not isinstance(self.finder_session_ids, frozenset):
+            raise ConvergenceError("finder_session_ids 必须是 frozenset[str]")
+        norm_sessions = frozenset(_require_non_empty_str(sid, "finder_session_ids[]") for sid in self.finder_session_ids)
+        object.__setattr__(self, "finder_session_ids", norm_sessions)
         if not isinstance(self.pending_non_blocking, tuple):
             raise ConvergenceError("pending_non_blocking 必须是 VerifiedFinding 元组")
         pending_ids: set[str] = set()
@@ -1700,6 +1918,11 @@ class RoundHistoryEntry:
                 raise ConvergenceError("pending_non_blocking 元素必须是 VerifiedFinding")
             if vf.verdict != VerificationVerdict.CONFIRMED or vf.is_blocking:
                 raise ConvergenceError("pending_non_blocking 仅允许核实成立的非阻断发现")
+            if vf.round_number > self.round_number:
+                raise ConvergenceError(
+                    f"pending_non_blocking 发现 {vf.finding.finding_id} 的 round_number={vf.round_number} "
+                    f"不得大于历史轮次 {self.round_number}"
+                )
             fid = vf.finding.finding_id
             if fid in pending_ids:
                 raise ConvergenceError(f"pending_non_blocking 含重复指纹：{fid}")
@@ -1710,17 +1933,20 @@ class RoundHistoryEntry:
 
 @dataclass(frozen=True)
 class FinderBatch:
-    """单个独立 finder 会话的产出批次：强绑定模型名、会话 ID 与每条发现的来源归属。"""
+    """单个独立 finder 会话的产出批次：强绑定模型名、会话 ID、HEAD SHA 与每条发现的来源归属。"""
 
     model: str
     session_id: str
+    head_sha: str
     findings: tuple[Finding, ...] = ()
 
     def __post_init__(self) -> None:
         norm_model = _require_non_empty_str(self.model, "FinderBatch.model")
         norm_session = _require_non_empty_str(self.session_id, "FinderBatch.session_id")
+        norm_head = _require_non_empty_str(self.head_sha, "FinderBatch.head_sha")
         object.__setattr__(self, "model", norm_model)
         object.__setattr__(self, "session_id", norm_session)
+        object.__setattr__(self, "head_sha", norm_head)
         if not isinstance(self.findings, tuple):
             raise ConvergenceError("FinderBatch.findings 必须是 Finding 元组")
         for item in self.findings:
@@ -1761,6 +1987,11 @@ class RoundCandidates:
         for batch in self.finder_batches:
             if not isinstance(batch, FinderBatch):
                 raise ConvergenceError(f"RoundCandidates.finder_batches 元素必须是 FinderBatch：{batch!r}")
+            if batch.head_sha != norm_head:
+                raise ConvergenceError(
+                    f"FinderBatch(session_id={batch.session_id!r}) 的 head_sha={batch.head_sha!r} "
+                    f"与当前轮 head_sha={norm_head!r} 不匹配"
+                )
         if not isinstance(self.history, tuple):
             raise ConvergenceError("RoundCandidates.history 必须是 RoundHistoryEntry 元组")
         if len(self.history) != self.round_number - 1:
@@ -1769,6 +2000,8 @@ class RoundCandidates:
             )
 
         verifier_family = self.panel.verifier_family
+        allowed_historical_finders: set[str] = set()
+        historical_session_ids: set[str] = set()
         prev_unresolved_sources: dict[str, frozenset[str]] = {}
         for idx, entry in enumerate(self.history, start=1):
             if not isinstance(entry, RoundHistoryEntry):
@@ -1776,6 +2009,16 @@ class RoundCandidates:
             if entry.round_number != idx:
                 raise ConvergenceError(f"history 轮次必须从 1 连续递增：期望 {idx}，实际 {entry.round_number}")
             _require_non_empty_str(entry.head_sha, f"history[{idx - 1}].head_sha")
+
+            reused_hist_sessions = entry.finder_session_ids & historical_session_ids
+            if reused_hist_sessions:
+                raise ConvergenceError(
+                    f"history[{idx - 1}] 存在跨轮复用的 finder session_id：{sorted(reused_hist_sessions)!r}"
+                )
+            historical_session_ids.update(entry.finder_session_ids)
+
+            entry_finders = frozenset(m.strip() for m in entry.panel.finder_models)
+            allowed_historical_finders.update(entry_finders)
 
             seen_hist_ids: set[str] = set()
             for item in entry.unresolved_important:
@@ -1790,27 +2033,20 @@ class RoundCandidates:
                     raise ConvergenceError(f"历史发现 {fid} 缺少真实 finder source_models，禁止绕过异家族核实校验")
                 for src_model in real_models:
                     src_family = infer_model_family(src_model)
-                    if verifier_family is not None and src_family == verifier_family:
+                    if entry.panel.verifier_family is not None and src_family == entry.panel.verifier_family:
                         raise ConvergenceError(
-                            f"核实者模型 {self.panel.verifier_model!r}（家族 {verifier_family}）"
-                            f"不得与历史发现 {fid} 来源模型 {src_model!r} 同家族"
+                            f"历史第 {idx} 轮核实者模型 {entry.panel.verifier_model!r} "
+                            f"不得与发现 {fid} 来源模型 {src_model!r} 同家族"
                         )
-                    if entry.panel is not None and entry.panel.verifier_family is not None:
-                        if src_family == entry.panel.verifier_family:
-                            raise ConvergenceError(
-                                f"历史第 {idx} 轮核实者模型 {entry.panel.verifier_model!r} "
-                                f"不得与发现 {fid} 来源模型 {src_model!r} 同家族"
-                            )
-                if entry.panel is not None:
-                    allowed_in_entry = frozenset(m.strip() for m in entry.panel.finder_models) | (
-                        prev_unresolved_sources.get(fid, frozenset())
+                allowed_in_entry = entry_finders | prev_unresolved_sources.get(fid, frozenset())
+                unknown_models = [
+                    m for m in real_models if m not in allowed_in_entry or m not in allowed_historical_finders
+                ]
+                if unknown_models:
+                    raise ConvergenceError(
+                        f"历史第 {idx} 轮未解除发现 {fid} 的来源模型 {unknown_models!r} "
+                        f"既不在当轮 panel.finder_models 中，也非合法累计历史结转来源"
                     )
-                    unknown_models = [m for m in real_models if m not in allowed_in_entry]
-                    if unknown_models:
-                        raise ConvergenceError(
-                            f"历史第 {idx} 轮未解除发现 {fid} 的来源模型 {unknown_models!r} "
-                            f"既不在当轮 panel.finder_models 中，也非前轮结转来源"
-                        )
 
             if entry.outcome == RoundOutcome.PASS:
                 prev_unresolved_sources = {}
@@ -1825,7 +2061,19 @@ class RoundCandidates:
         else:
             prior_important = self.history[-1].unresolved_important
 
-        # 校验 finder 批次完备性：逐槽位多重集精确匹配 panel.finder_models 且会话 ID 互不重复
+        # 仅对当前轮实际结转的 prior_important 校验与当前轮核实者的异家族约束，不阻拦已结清历史发现
+        if verifier_family is not None:
+            for prior in prior_important:
+                fid = prior.finding_id
+                for src_model in _real_source_models(prior.source_models):
+                    src_family = infer_model_family(src_model)
+                    if src_family == verifier_family:
+                        raise ConvergenceError(
+                            f"核实者模型 {self.panel.verifier_model!r}（家族 {verifier_family}）"
+                            f"不得与本轮结转发现 {fid} 来源模型 {src_model!r} 同家族"
+                        )
+
+        # 校验 finder 批次完备性：逐槽位多重集精确匹配 panel.finder_models，且会话 ID 轮内与跨轮均不重复
         if len(self.finder_batches) != len(self.panel.finder_models):
             raise ConvergenceError(
                 f"finder_batches 数量必须与 panel.finder_models 一致："
@@ -1840,6 +2088,11 @@ class RoundCandidates:
         session_ids = [b.session_id for b in self.finder_batches]
         if len(set(session_ids)) != len(session_ids):
             raise ConvergenceError(f"本轮 finder_batches 存在重复 session_id：{session_ids!r}")
+        reused_from_history = [sid for sid in session_ids if sid in historical_session_ids]
+        if reused_from_history:
+            raise ConvergenceError(
+                f"本轮 finder_batches 复用了历史轮次已使用过的 session_id：{reused_from_history!r}"
+            )
 
         # 1. 轮内合并（保留当前轮最新定位）
         current_round_findings = merge_and_dedupe_findings([(b.model, b.findings) for b in self.finder_batches])
@@ -1936,6 +2189,11 @@ class VerifiedRound:
             if not isinstance(vf, VerifiedFinding):
                 raise ConvergenceError(f"VerifiedRound.verdicts 元素必须是 VerifiedFinding：{vf!r}")
             fid = vf.finding.finding_id
+            if vf.round_number != self.candidates.round_number or vf.head_sha != self.candidates.head_sha:
+                raise ConvergenceError(
+                    f"VerifiedRound 发现 {fid} 绑定坐标 (round={vf.round_number}, head={vf.head_sha!r}) "
+                    f"与当前轮 candidates (round={self.candidates.round_number}, head={self.candidates.head_sha!r}) 不匹配"
+                )
             if fid not in candidates_by_id:
                 raise ConvergenceError(f"VerifiedRound 包含候选清单外的发现：{fid}")
             if fid in seen_ids:
@@ -1958,7 +2216,14 @@ class VerifiedRound:
                     f"发现 {fid} 不在本轮 prior_important 中，禁止标记为 resolved_by_fix（误报请标为 rejected/false_positive）"
                 )
             if vf.verdict == VerificationVerdict.RESOLVED_BY_WONTFIX:
-                assert vf.author_reply is not None
+                if vf.author_reply is None:
+                    raise ConvergenceError(f"发现 {fid} 裁决为 resolved_by_wontfix 但缺少 author_reply")
+                matched_targets, _ = _match_reply_targets(vf.author_reply, self.candidates.findings)
+                if len(matched_targets) != 1 or matched_targets[0].finding_id != fid:
+                    raise ConvergenceError(
+                        f"发现 {fid} 绑定的作者不修回复（comment_id={vf.author_reply.comment_id}）"
+                        f"未唯一匹配本轮候选发现 {fid}"
+                    )
                 if (
                     vf.author_reply.reply_key in history_consumed
                     or _resolved_reply_key(vf.author_reply.comment_id, fid) in history_consumed
@@ -2009,6 +2274,8 @@ def accept_quick_pass_findings(candidates: RoundCandidates) -> VerifiedRound:
                 verdict=VerificationVerdict.CONFIRMED,
                 verifier_model=quick_model,
                 verifier_evidence=f"低风险快审直通（免独立核实，来源：{', '.join(real_models)}）：{item.evidence}",
+                round_number=candidates.round_number,
+                head_sha=candidates.head_sha,
                 author_reply=None,
             )
         )
@@ -2114,6 +2381,8 @@ def parse_verifier_output(
             verdict=verdict,
             verifier_model=model,
             verifier_evidence=verifier_evidence,
+            round_number=candidates.round_number,
+            head_sha=candidates.head_sha,
             author_reply=matched_reply,
             related_reply_keys=tuple(sorted(matched_keys_by_id.get(fid, ()))),
         )
@@ -2279,6 +2548,7 @@ class RoundDecision:
     resolved_fingerprints: frozenset[str] = frozenset()
     rejected_fingerprints: frozenset[str] = frozenset()
     consumed_reply_keys: frozenset[str] = frozenset()
+    finder_session_ids: frozenset[str] = frozenset()
 
     @property
     def cleared_fingerprints(self) -> frozenset[str]:
@@ -2297,14 +2567,25 @@ class RoundDecision:
             norm_sha = _require_non_empty_str(head_sha, "head_sha")
             if norm_sha != self.head_sha:
                 raise ConvergenceError(f"head_sha={norm_sha!r} 与 RoundDecision.head_sha={self.head_sha!r} 不一致")
+        if rendered.round_number != self.round_number or rendered.head_sha != self.head_sha:
+            raise ConvergenceError(
+                f"rendered 绑定坐标 (round={rendered.round_number}, head={rendered.head_sha!r}) "
+                f"与 RoundDecision (round={self.round_number}, head={self.head_sha!r}) 不匹配"
+            )
+        if not rendered.posted_fingerprints.isdisjoint(rendered.deferred_fingerprints):
+            raise ConvergenceError("rendered.posted_fingerprints 与 rendered.deferred_fingerprints 不得重叠")
         omitted_ids = frozenset(vf.finding.finding_id for vf in rendered.omitted_non_blocking)
-        if omitted_ids != rendered.omitted_non_blocking_fingerprints:
-            raise ConvergenceError("rendered.omitted_non_blocking 与 omitted_non_blocking_fingerprints 不一致")
-        valid_active_ids = frozenset(vf.finding.finding_id for vf in self.blocking_findings) | frozenset(
-            vf.finding.finding_id for vf in self.non_blocking_findings
+        if omitted_ids != rendered.omitted_non_blocking_fingerprints or omitted_ids != rendered.deferred_fingerprints:
+            raise ConvergenceError("rendered.omitted_non_blocking 与 deferred_fingerprints 不一致")
+        blocking_ids = frozenset(vf.finding.finding_id for vf in self.blocking_findings)
+        expected_non_blocking = (
+            frozenset(vf.finding.finding_id for vf in self.non_blocking_findings) - self.retained_posted_fingerprints
         )
+        valid_active_ids = blocking_ids | frozenset(vf.finding.finding_id for vf in self.non_blocking_findings)
         if not (rendered.posted_fingerprints <= valid_active_ids):
             raise ConvergenceError("rendered.posted_fingerprints 包含非本轮活跃发现指纹")
+        if not (blocking_ids <= rendered.posted_fingerprints):
+            raise ConvergenceError("rendered.posted_fingerprints 遗漏了本轮阻断发现指纹")
         if not (omitted_ids <= valid_active_ids):
             raise ConvergenceError("rendered.omitted_non_blocking 包含非本轮活跃发现指纹")
         if rendered.posted_fingerprints & omitted_ids:
@@ -2313,16 +2594,24 @@ class RoundDecision:
             raise ConvergenceError("rendered.posted_fingerprints 不得包含本轮已解除或已驳回的发现指纹")
         if omitted_ids & (self.retained_posted_fingerprints | self.cleared_fingerprints):
             raise ConvergenceError("rendered.omitted_non_blocking 不得包含已贴出或已解除/驳回的发现指纹")
+        posted_non_blocking = rendered.posted_fingerprints - blocking_ids
+        if (posted_non_blocking | rendered.deferred_fingerprints) != expected_non_blocking:
+            raise ConvergenceError(
+                "rendered 未守恒覆盖本轮全部应发/待补发非阻断发现："
+                f"期望 {sorted(expected_non_blocking)!r}，"
+                f"实际 {sorted(posted_non_blocking | rendered.deferred_fingerprints)!r}"
+            )
         return RoundHistoryEntry(
             round_number=self.round_number,
             head_sha=self.head_sha,
             posted_fingerprints=self.retained_posted_fingerprints | rendered.posted_fingerprints,
             unresolved_important=self.unresolved_important,
+            panel=self.panel,
             resolved_fingerprints=self.resolved_fingerprints,
             rejected_fingerprints=self.rejected_fingerprints,
             consumed_reply_keys=self.consumed_reply_keys,
             pending_non_blocking=rendered.omitted_non_blocking,
-            panel=self.panel,
+            finder_session_ids=self.finder_session_ids,
             outcome=self.outcome,
         )
 
@@ -2442,18 +2731,42 @@ def evaluate_round(
         resolved_fingerprints=resolved_ids,
         rejected_fingerprints=rejected_ids,
         consumed_reply_keys=consumed_reply_keys,
+        finder_session_ids=frozenset(b.session_id for b in verified.candidates.finder_batches),
     )
 
 
 @dataclass(frozen=True)
 class RenderedComment:
+    round_number: int
+    head_sha: str
     body: str
     posted_fingerprints: frozenset[str]
+    deferred_fingerprints: frozenset[str]
     omitted_non_blocking_fingerprints: frozenset[str]
     truncated: bool
     omitted_non_blocking: tuple[VerifiedFinding, ...] = ()
 
     def __post_init__(self) -> None:
+        if type(self.round_number) is not int or self.round_number < 1:
+            raise ConvergenceError(f"RenderedComment.round_number 必须是 >= 1 的整数：{self.round_number!r}")
+        norm_head = _require_non_empty_str(self.head_sha, "RenderedComment.head_sha")
+        object.__setattr__(self, "head_sha", norm_head)
+        if not isinstance(self.body, str):
+            raise ConvergenceError("RenderedComment.body 必须是字符串")
+        if not isinstance(self.posted_fingerprints, frozenset):
+            raise ConvergenceError("RenderedComment.posted_fingerprints 必须是 frozenset[str]")
+        for fp in self.posted_fingerprints:
+            _require_non_empty_str(fp, "posted_fingerprints[]")
+        if not isinstance(self.deferred_fingerprints, frozenset):
+            raise ConvergenceError("RenderedComment.deferred_fingerprints 必须是 frozenset[str]")
+        for fp in self.deferred_fingerprints:
+            _require_non_empty_str(fp, "deferred_fingerprints[]")
+        if not isinstance(self.omitted_non_blocking_fingerprints, frozenset):
+            raise ConvergenceError("RenderedComment.omitted_non_blocking_fingerprints 必须是 frozenset[str]")
+        if type(self.truncated) is not bool:
+            raise ConvergenceError("RenderedComment.truncated 必须是 bool")
+        if not self.posted_fingerprints.isdisjoint(self.deferred_fingerprints):
+            raise ConvergenceError("RenderedComment.posted_fingerprints 与 deferred_fingerprints 不得重叠")
         if not isinstance(self.omitted_non_blocking, tuple):
             raise ConvergenceError("omitted_non_blocking 必须是 VerifiedFinding 元组")
         omitted_ids: set[str] = set()
@@ -2466,8 +2779,8 @@ class RenderedComment:
             if fid in omitted_ids:
                 raise ConvergenceError(f"omitted_non_blocking 含重复指纹：{fid}")
             omitted_ids.add(fid)
-        if omitted_ids != self.omitted_non_blocking_fingerprints:
-            raise ConvergenceError("omitted_non_blocking 与 omitted_non_blocking_fingerprints 不一致")
+        if omitted_ids != self.omitted_non_blocking_fingerprints or omitted_ids != self.deferred_fingerprints:
+            raise ConvergenceError("omitted_non_blocking、omitted_non_blocking_fingerprints 与 deferred_fingerprints 不一致")
 
 
 def parse_comment_marker(body: str) -> tuple[int, int, str] | None:
@@ -2706,8 +3019,11 @@ def render_findings_comment(
     full_text = "\n\n".join(full_parts)
     if len(full_text) <= max_chars:
         return RenderedComment(
+            round_number=decision.round_number,
+            head_sha=sha,
             body=full_text,
             posted_fingerprints=blocking_ids | all_new_nb_ids,
+            deferred_fingerprints=frozenset(),
             omitted_non_blocking_fingerprints=frozenset(),
             truncated=False,
             omitted_non_blocking=(),
@@ -2773,8 +3089,11 @@ def render_findings_comment(
         omitted_nb_items = tuple(vf for vf in new_non_blocking if vf.finding.finding_id not in included_nb_ids)
         omitted_nb_ids = frozenset(vf.finding.finding_id for vf in omitted_nb_items)
         return RenderedComment(
+            round_number=decision.round_number,
+            head_sha=sha,
             body=body,
             posted_fingerprints=blocking_ids | frozenset(included_nb_ids),
+            deferred_fingerprints=omitted_nb_ids,
             omitted_non_blocking_fingerprints=omitted_nb_ids,
             truncated=True,
             omitted_non_blocking=omitted_nb_items,
@@ -2814,8 +3133,11 @@ def render_findings_comment(
         body = f"{header}{note}"
 
     return RenderedComment(
+        round_number=decision.round_number,
+        head_sha=sha,
         body=body,
         posted_fingerprints=blocking_ids,
+        deferred_fingerprints=all_new_nb_ids,
         omitted_non_blocking_fingerprints=all_new_nb_ids,
         truncated=True,
         omitted_non_blocking=tuple(new_non_blocking),

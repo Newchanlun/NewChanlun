@@ -81,7 +81,9 @@ def _batches_for_panel(
     *,
     panel: ReviewPanel = DEFAULT_PANEL,
     round_number: int = 1,
+    head_sha: str | None = None,
 ) -> tuple[FinderBatch, ...]:
+    sha = head_sha or (HEAD_1 if round_number == 1 else f"{round_number}" * 40)
     by_model: dict[str, list[Finding]] = {}
     for item in findings:
         if len(item.source_models) != 1:
@@ -97,6 +99,7 @@ def _batches_for_panel(
             FinderBatch(
                 model=model,
                 session_id=f"r{round_number}-slot-{idx}",
+                head_sha=sha,
                 findings=batch_findings,
             )
         )
@@ -118,7 +121,7 @@ def _candidates(
     batches = (
         tuple(finder_batches)
         if finder_batches is not None
-        else _batches_for_panel(findings, panel=panel, round_number=round_number)
+        else _batches_for_panel(findings, panel=panel, round_number=round_number, head_sha=sha)
     )
     return RoundCandidates(
         round_number=round_number,
@@ -146,13 +149,18 @@ def _verified(
     *,
     verifier_model: str = "claude-opus-5-5",
     verifier_evidence: str = "核实第 42 行确实未校验 None",
+    round_number: int = 1,
+    head_sha: str | None = None,
     author_reply: AuthorReply | None = None,
 ) -> VerifiedFinding:
+    sha = head_sha or (HEAD_1 if round_number == 1 else f"{round_number}" * 40)
     return VerifiedFinding(
         finding=finding,
         verdict=verdict,
         verifier_model=verifier_model,
         verifier_evidence=verifier_evidence,
+        round_number=round_number,
+        head_sha=sha,
         author_reply=author_reply,
     )
 
@@ -165,6 +173,7 @@ def _verified_round(
     panel: ReviewPanel = DEFAULT_PANEL,
     history: Sequence[RoundHistoryEntry] = (),
 ) -> VerifiedRound:
+    sha = head_sha or (HEAD_1 if round_number == 1 else f"{round_number}" * 40)
     prior_ids = (
         frozenset(f.finding_id for f in history[-1].unresolved_important)
         if history and history[-1].outcome != RoundOutcome.PASS
@@ -174,11 +183,24 @@ def _verified_round(
     candidates = _candidates(
         current_findings,
         round_number=round_number,
-        head_sha=head_sha,
+        head_sha=sha,
         panel=panel,
         history=history,
     )
-    return VerifiedRound(candidates=candidates, verdicts=tuple(verdicts))
+    aligned_verdicts = tuple(
+        VerifiedFinding(
+            finding=vf.finding,
+            verdict=vf.verdict,
+            verifier_model=vf.verifier_model,
+            verifier_evidence=vf.verifier_evidence,
+            round_number=round_number,
+            head_sha=sha,
+            author_reply=vf.author_reply,
+            related_reply_keys=vf.related_reply_keys,
+        )
+        for vf in verdicts
+    )
+    return VerifiedRound(candidates=candidates, verdicts=aligned_verdicts)
 
 
 # ── 1. 分级、指纹与发现合并（含全排列顺序无关性） ────────────────────────────
@@ -485,13 +507,15 @@ def test_quick_pass_explicit_entry_and_panel_isolation() -> None:
     # 快审发现来源不在 panel.finder_models 中 -> 在 FinderBatch / RoundCandidates 构造期即拒绝
     foreign_finding = _finding(source_models=("claude-opus-5-5",))
     with pytest.raises(ConvergenceError):
-        FinderBatch(model="gpt-6-astra", session_id="s1", findings=(foreign_finding,))
+        FinderBatch(model="gpt-6-astra", session_id="s1", head_sha=HEAD_1, findings=(foreign_finding,))
     with pytest.raises(ConvergenceError):
         RoundCandidates(
             round_number=1,
             head_sha=HEAD_1,
             panel=fast_panel,
-            finder_batches=(FinderBatch(model="claude-opus-5-5", session_id="s1", findings=(foreign_finding,)),),
+            finder_batches=(
+                FinderBatch(model="claude-opus-5-5", session_id="s1", head_sha=HEAD_1, findings=(foreign_finding,)),
+            ),
         )
 
     # require_verifier=False 的面板禁止混入 parse_verifier_output
@@ -557,30 +581,30 @@ def test_parse_verifier_output_rejects_same_family_candidate_and_mismatched_pane
         source_models=("claude-sonnet-4-6",),
     )
     with pytest.raises(ConvergenceError):
-        FinderBatch(model="gpt-6-astra", session_id="s1", findings=(f_same_family,))
+        FinderBatch(model="gpt-6-astra", session_id="s1", head_sha=HEAD_1, findings=(f_same_family,))
     with pytest.raises(ConvergenceError):
         RoundCandidates(
             round_number=1,
             head_sha=HEAD_1,
             panel=DEFAULT_PANEL,
             finder_batches=(
-                FinderBatch(model="claude-sonnet-4-6", session_id="s1", findings=(f_same_family,)),
-                FinderBatch(model="gpt-6.1-sol", session_id="s2", findings=()),
+                FinderBatch(model="claude-sonnet-4-6", session_id="s1", head_sha=HEAD_1, findings=(f_same_family,)),
+                FinderBatch(model="gpt-6.1-sol", session_id="s2", head_sha=HEAD_1, findings=()),
             ),
         )
 
     # 候选发现仅含占位符或空 source_models 也不允许绕过异家族与面板归属检查
     f_no_source = _finding(file="a.py", category="c1", failure_scenario="s1", source_models=())
     with pytest.raises(ConvergenceError):
-        FinderBatch(model="gpt-6-astra", session_id="s1", findings=(f_no_source,))
+        FinderBatch(model="gpt-6-astra", session_id="s1", head_sha=HEAD_1, findings=(f_no_source,))
     with pytest.raises(ConvergenceError):
-        RoundHistoryEntry(1, HEAD_1, frozenset({f_no_source.finding_id}), (f_no_source,))
+        RoundHistoryEntry(1, HEAD_1, frozenset({f_no_source.finding_id}), (f_no_source,), panel=DEFAULT_PANEL)
 
     f_only_placeholder = _finding(file="a.py", category="c1", failure_scenario="s1", source_models=("prior-round",))
     with pytest.raises(ConvergenceError):
-        FinderBatch(model="gpt-6-astra", session_id="s1", findings=(f_only_placeholder,))
+        FinderBatch(model="gpt-6-astra", session_id="s1", head_sha=HEAD_1, findings=(f_only_placeholder,))
     with pytest.raises(ConvergenceError):
-        RoundHistoryEntry(1, HEAD_1, frozenset({f_only_placeholder.finding_id}), (f_only_placeholder,))
+        RoundHistoryEntry(1, HEAD_1, frozenset({f_only_placeholder.finding_id}), (f_only_placeholder,), panel=DEFAULT_PANEL)
 
     # 跨轮 carry-over 时 build_round_candidates 必须完整保留原有真实 source_models，防新轮换用同家族核实者
     f_prior_from_claude = _finding(
@@ -589,9 +613,22 @@ def test_parse_verifier_output_rejects_same_family_candidate_and_mismatched_pane
         failure_scenario="old bug",
         source_models=("claude-opus-5-5", "kimi-k3.1-pro"),
     )
-    history1 = (RoundHistoryEntry(1, HEAD_1, frozenset({f_prior_from_claude.finding_id}), (f_prior_from_claude,)),)
+    r1_claude_kimi_panel = ReviewPanel(
+        finder_models=("claude-opus-5-5", "kimi-k3.1-pro"),
+        verifier_model="gemini-4-neon",
+        require_verifier=True,
+    )
+    history1 = (
+        RoundHistoryEntry(
+            1,
+            HEAD_1,
+            frozenset({f_prior_from_claude.finding_id}),
+            (f_prior_from_claude,),
+            panel=r1_claude_kimi_panel,
+        ),
+    )
     plan2 = plan_next_round(BASE_SHA, HEAD_2, history1)
-    empty_r2_batches = _batches_for_panel([], panel=DEFAULT_PANEL, round_number=2)
+    empty_r2_batches = _batches_for_panel([], panel=DEFAULT_PANEL, round_number=2, head_sha=HEAD_2)
     # 若新轮面板核实者为 claude（与历史来源同家族），build_round_candidates 即立刻拒绝
     with pytest.raises(ConvergenceError):
         build_round_candidates(
@@ -611,7 +648,7 @@ def test_parse_verifier_output_rejects_same_family_candidate_and_mismatched_pane
         round_number=plan2.round_number,
         head_sha=plan2.diff_head_sha,
         panel=gemini_verifier_panel,
-        finder_batches=_batches_for_panel([], panel=gemini_verifier_panel, round_number=2),
+        finder_batches=_batches_for_panel([], panel=gemini_verifier_panel, round_number=2, head_sha=HEAD_2),
         history=plan2.history,
     )
     assert candidates2.findings[0].source_models == ("claude-opus-5-5", "kimi-k3.1-pro")
@@ -651,8 +688,8 @@ def test_parse_verifier_output_binds_candidate_sources_to_panel_and_allows_prior
             head_sha=HEAD_1,
             panel=panel,
             finder_batches=(
-                FinderBatch(model="gemini-2.5-pro", session_id="s1", findings=(f_foreign,)),
-                FinderBatch(model="gpt-6.1-sol", session_id="s2", findings=()),
+                FinderBatch(model="gemini-2.5-pro", session_id="s1", head_sha=HEAD_1, findings=(f_foreign,)),
+                FinderBatch(model="gpt-6.1-sol", session_id="s2", head_sha=HEAD_1, findings=()),
             ),
         )
 
@@ -665,7 +702,7 @@ def test_parse_verifier_output_binds_candidate_sources_to_panel_and_allows_prior
         source_models=("gpt-6.1-sol", "gemini-2.5-pro"),
     )
     with pytest.raises(ConvergenceError):
-        FinderBatch(model="gpt-6.1-sol", session_id="s1", findings=(f_mixed_foreign,))
+        FinderBatch(model="gpt-6.1-sol", session_id="s1", head_sha=HEAD_1, findings=(f_mixed_foreign,))
 
     # 跨轮继承的 unresolved_prior_important 通过 history 进入 RoundCandidates.prior_important，仍强制异家族
     f_prior_kimi = _finding(
@@ -676,13 +713,20 @@ def test_parse_verifier_output_binds_candidate_sources_to_panel_and_allows_prior
         failure_scenario="前轮由 kimi 发现的阻断缺陷",
         source_models=("kimi-k3.1-pro",),
     )
-    history1 = (RoundHistoryEntry(1, HEAD_1, frozenset({f_prior_kimi.finding_id}), (f_prior_kimi,)),)
+    r1_kimi_panel = ReviewPanel(
+        finder_models=("kimi-k3.1-pro", "kimi-k3.1-pro"),
+        verifier_model="claude-opus-5-5",
+        require_verifier=True,
+    )
+    history1 = (
+        RoundHistoryEntry(1, HEAD_1, frozenset({f_prior_kimi.finding_id}), (f_prior_kimi,), panel=r1_kimi_panel),
+    )
     plan2 = plan_next_round(BASE_SHA, HEAD_2, history1)
     assert plan2.prior_important_sources == {f_prior_kimi.finding_id: frozenset({"kimi-k3.1-pro"})}
     with pytest.raises(TypeError):
         plan2.prior_important_sources["tamper"] = frozenset({"gemini-2.5-pro"})  # type: ignore[index]
 
-    r2_empty = _batches_for_panel([], panel=panel, round_number=2)
+    r2_empty = _batches_for_panel([], panel=panel, round_number=2, head_sha=HEAD_2)
     candidates2 = build_round_candidates(
         round_number=plan2.round_number,
         head_sha=plan2.diff_head_sha,
@@ -735,11 +779,16 @@ def test_parse_verifier_output_binds_candidate_sources_to_panel_and_allows_prior
         source_models=("gemini-2.5-pro",),
     )
     with pytest.raises(ConvergenceError):
-        RoundHistoryEntry(1, HEAD_1, frozenset({f_foreign_nit.finding_id}), (f_foreign_nit,))
+        RoundHistoryEntry(1, HEAD_1, frozenset({f_foreign_nit.finding_id}), (f_foreign_nit,), panel=panel)
 
 
 def test_round_candidates_blocks_retired_model_tampering_in_new_round() -> None:
     """R5 复审反例 4：第 1 轮 gemini-2.5-pro 报 p.py:12；第 2 轮面板已无 Gemini，退役模型绝不能提交 p.py:3 篡改行号与证据。"""
+    panel_r1 = ReviewPanel(
+        finder_models=("gemini-2.5-pro", "gemini-2.5-pro"),
+        verifier_model="claude-opus-5-5",
+        require_verifier=True,
+    )
     panel_r2 = ReviewPanel(
         finder_models=("gpt-6.1-sol", "gpt-6.1-sol"),
         verifier_model="claude-opus-5-5",
@@ -756,7 +805,7 @@ def test_round_candidates_blocks_retired_model_tampering_in_new_round() -> None:
         evidence="第 1 轮 p.py:12 无锁写入",
         source_models=("gemini-2.5-pro",),
     )
-    history1 = (RoundHistoryEntry(1, HEAD_1, frozenset({f_r1_gemini.finding_id}), (f_r1_gemini,)),)
+    history1 = (RoundHistoryEntry(1, HEAD_1, frozenset({f_r1_gemini.finding_id}), (f_r1_gemini,), panel=panel_r1),)
     plan2 = plan_next_round(BASE_SHA, HEAD_2, history1)
     assert plan2.prior_important_sources == {f_r1_gemini.finding_id: frozenset({"gemini-2.5-pro"})}
 
@@ -779,13 +828,13 @@ def test_round_candidates_blocks_retired_model_tampering_in_new_round() -> None:
             head_sha=HEAD_2,
             panel=panel_r2,
             finder_batches=(
-                FinderBatch(model="gemini-2.5-pro", session_id="s1", findings=(f_r2_gemini_tamper,)),
-                FinderBatch(model="gpt-6.1-sol", session_id="s2", findings=()),
+                FinderBatch(model="gemini-2.5-pro", session_id="s1", head_sha=HEAD_2, findings=(f_r2_gemini_tamper,)),
+                FinderBatch(model="gpt-6.1-sol", session_id="s2", head_sha=HEAD_2, findings=()),
             ),
             history=history1,
         )
     with pytest.raises(ConvergenceError):
-        FinderBatch(model="gpt-6.1-sol", session_id="s1", findings=(f_r2_gemini_tamper,))
+        FinderBatch(model="gpt-6.1-sol", session_id="s1", head_sha=HEAD_2, findings=(f_r2_gemini_tamper,))
 
     # 2) RoundCandidates 不再接受外部直接传入 prior_important 或 current_round_findings
     with pytest.raises(TypeError):
@@ -793,7 +842,7 @@ def test_round_candidates_blocks_retired_model_tampering_in_new_round() -> None:
             round_number=2,
             head_sha=HEAD_2,
             panel=panel_r2,
-            finder_batches=_batches_for_panel([], panel=panel_r2, round_number=2),
+            finder_batches=_batches_for_panel([], panel=panel_r2, round_number=2, head_sha=HEAD_2),
             prior_important=(f_r1_gemini, f_r2_gemini_tamper),
         )
 
@@ -802,7 +851,7 @@ def test_round_candidates_blocks_retired_model_tampering_in_new_round() -> None:
         round_number=2,
         head_sha=HEAD_2,
         panel=panel_r2,
-        finder_batches=_batches_for_panel([], panel=panel_r2, round_number=2),
+        finder_batches=_batches_for_panel([], panel=panel_r2, round_number=2, head_sha=HEAD_2),
         history=history1,
     )
     assert len(candidates_carry.findings) == 1
@@ -835,8 +884,8 @@ def test_round_candidates_blocks_retired_model_tampering_in_new_round() -> None:
         head_sha=HEAD_2,
         panel=panel_r2,
         finder_batches=(
-            FinderBatch(model="gpt-6.1-sol", session_id="r2-s1", findings=(f_r2_current_finder,)),
-            FinderBatch(model="gpt-6.1-sol", session_id="r2-s2", findings=()),
+            FinderBatch(model="gpt-6.1-sol", session_id="r2-s1", head_sha=HEAD_2, findings=(f_r2_current_finder,)),
+            FinderBatch(model="gpt-6.1-sol", session_id="r2-s2", head_sha=HEAD_2, findings=()),
         ),
         history=history1,
     )
@@ -921,6 +970,8 @@ def test_resolved_by_wontfix_without_author_reply_fails_closed() -> None:
             verdict=VerificationVerdict.RESOLVED_BY_WONTFIX,
             verifier_model="claude-opus-5-5",
             verifier_evidence="声称作者不修但实际无回复",
+            round_number=1,
+            head_sha=HEAD_1,
             author_reply=None,
         )
 
@@ -1031,7 +1082,9 @@ def test_parse_wontfix_replies_enforces_author_whitelist_and_markdown_isolation(
     assert replies[1] == AuthorReply("def67890", None, None, "兼容性要求保留旧行为", "104", "ALICE")
     assert replies[2] == AuthorReply(None, "pilot1742/foo.py", 42, "此处仅用于离线诊断", "104", "ALICE")
     assert replies[3] == AuthorReply(None, "pilot1742/bar.py", None, "整文件为只读测试夹具", "104", "ALICE")
-    assert replies[4] == AuthorReply(None, "pilot1742/inline.py", 77, "热路径刻意避免额外拷贝", "105", "Bob")
+    assert replies[4] == AuthorReply(
+        None, "pilot1742/inline.py", 77, "热路径刻意避免额外拷贝", "105", "Bob", is_inline_anchor=True
+    )
 
     # 空或非集合 allowed_authors 必须 fail-closed
     with pytest.raises(ConvergenceError):
@@ -2035,7 +2088,7 @@ def test_plan_next_round_rejects_non_consecutive_history() -> None:
         plan_next_round(
             BASE_SHA,
             HEAD_2,
-            [RoundHistoryEntry(2, HEAD_1, frozenset(), ())],
+            [RoundHistoryEntry(2, HEAD_1, frozenset(), (), panel=DEFAULT_PANEL)],
         )
 
 
@@ -2326,13 +2379,15 @@ def test_r6_finding1_and_finding2_finder_batch_and_round_candidates_unbypassable
     f_ok = _finding(source_models=("gpt-6-astra",))
     f_other = _finding(source_models=("gpt-6.1-sol",))
 
-    # FinderBatch 拒绝空 model / 空 session_id / 混合或异源 findings
+    # FinderBatch 拒绝空 model / 空 session_id / 空 head_sha / 混合或异源 findings
     with pytest.raises(ConvergenceError):
-        FinderBatch(model="   ", session_id="s1", findings=())
+        FinderBatch(model="   ", session_id="s1", head_sha=HEAD_1, findings=())
     with pytest.raises(ConvergenceError):
-        FinderBatch(model="gpt-6-astra", session_id="", findings=())
+        FinderBatch(model="gpt-6-astra", session_id="", head_sha=HEAD_1, findings=())
     with pytest.raises(ConvergenceError):
-        FinderBatch(model="gpt-6-astra", session_id="s1", findings=(f_other,))
+        FinderBatch(model="gpt-6-astra", session_id="s1", head_sha="   ", findings=())
+    with pytest.raises(ConvergenceError):
+        FinderBatch(model="gpt-6-astra", session_id="s1", head_sha=HEAD_1, findings=(f_other,))
 
     # 双 finder 面板传空批次或少传 1 批 -> 立即报错，绝不产生空候选伪 PASS
     with pytest.raises(ConvergenceError):
@@ -2347,7 +2402,7 @@ def test_r6_finding1_and_finding2_finder_batch_and_round_candidates_unbypassable
             round_number=1,
             head_sha=HEAD_1,
             panel=DEFAULT_PANEL,
-            finder_batches=(FinderBatch(model="gpt-6-astra", session_id="s1", findings=(f_ok,)),),
+            finder_batches=(FinderBatch(model="gpt-6-astra", session_id="s1", head_sha=HEAD_1, findings=(f_ok,)),),
         )
 
     # 模型多重集不匹配 -> 拒绝
@@ -2357,8 +2412,8 @@ def test_r6_finding1_and_finding2_finder_batch_and_round_candidates_unbypassable
             head_sha=HEAD_1,
             panel=DEFAULT_PANEL,
             finder_batches=(
-                FinderBatch(model="gpt-6-astra", session_id="s1", findings=()),
-                FinderBatch(model="gpt-6-astra", session_id="s2", findings=()),
+                FinderBatch(model="gpt-6-astra", session_id="s1", head_sha=HEAD_1, findings=()),
+                FinderBatch(model="gpt-6-astra", session_id="s2", head_sha=HEAD_1, findings=()),
             ),
         )
 
@@ -2374,8 +2429,8 @@ def test_r6_finding1_and_finding2_finder_batch_and_round_candidates_unbypassable
             head_sha=HEAD_1,
             panel=same_model_panel,
             finder_batches=(
-                FinderBatch(model="gpt-6.1-sol", session_id="dup-session", findings=()),
-                FinderBatch(model="gpt-6.1-sol", session_id="dup-session", findings=()),
+                FinderBatch(model="gpt-6.1-sol", session_id="dup-session", head_sha=HEAD_1, findings=()),
+                FinderBatch(model="gpt-6.1-sol", session_id="dup-session", head_sha=HEAD_1, findings=()),
             ),
         )
     ok_same_model = build_round_candidates(
@@ -2383,8 +2438,8 @@ def test_r6_finding1_and_finding2_finder_batch_and_round_candidates_unbypassable
         head_sha=HEAD_1,
         panel=same_model_panel,
         finder_batches=(
-            FinderBatch(model="gpt-6.1-sol", session_id="sess-a", findings=(f_other,)),
-            FinderBatch(model="gpt-6.1-sol", session_id="sess-b", findings=()),
+            FinderBatch(model="gpt-6.1-sol", session_id="sess-a", head_sha=HEAD_1, findings=(f_other,)),
+            FinderBatch(model="gpt-6.1-sol", session_id="sess-b", head_sha=HEAD_1, findings=()),
         ),
     )
     assert len(ok_same_model.findings) == 1
@@ -2427,7 +2482,7 @@ def test_r6_finding3_verifier_round_head_binding_and_resolved_by_fix_guard() -> 
         round_number=1,
         head_sha=head_a,
         panel=DEFAULT_PANEL,
-        finder_batches=_batches_for_panel([f_a], round_number=1),
+        finder_batches=_batches_for_panel([f_a], round_number=1, head_sha=head_a),
     )
     ver_a = parse_verifier_output(
         {
@@ -2450,7 +2505,7 @@ def test_r6_finding3_verifier_round_head_binding_and_resolved_by_fix_guard() -> 
         round_number=2,
         head_sha=head_b,
         panel=DEFAULT_PANEL,
-        finder_batches=_batches_for_panel([], round_number=2),
+        finder_batches=_batches_for_panel([], round_number=2, head_sha=head_b),
         history=(entry_a,),
     )
     verifier_json_b = {
@@ -2472,7 +2527,7 @@ def test_r6_finding3_verifier_round_head_binding_and_resolved_by_fix_guard() -> 
         round_number=3,
         head_sha=head_c,
         panel=DEFAULT_PANEL,
-        finder_batches=_batches_for_panel([f_c], round_number=3),
+        finder_batches=_batches_for_panel([f_c], round_number=3, head_sha=head_c),
         history=(entry_a, entry_b),
     )
     assert cand_c.prior_important == ()
@@ -2548,8 +2603,8 @@ def test_r6_finding4_cross_round_merge_preserves_current_round_location_and_evid
         head_sha=HEAD_2,
         panel=DEFAULT_PANEL,
         finder_batches=(
-            FinderBatch(model="gpt-6-astra", session_id="r2-s1", findings=()),
-            FinderBatch(model="gpt-6.1-sol", session_id="r2-s2", findings=(f_r2,)),
+            FinderBatch(model="gpt-6-astra", session_id="r2-s1", head_sha=HEAD_2, findings=()),
+            FinderBatch(model="gpt-6.1-sol", session_id="r2-s2", head_sha=HEAD_2, findings=(f_r2,)),
         ),
         history=(entry1,),
     )
@@ -2763,3 +2818,552 @@ def test_r6_finding6_finding7_finding8_commonmark_inline_linkdef_and_line_ending
     assert parse_body(f'\\<span title="\n{d2}\n">') == ["def67890"]
     assert parse_body(f'\\[x](/u "\n{d2}\n")') == ["def67890"]
     assert parse_body(f"说明 ``未闭合\n{d2}") == ["def67890"]
+
+
+# ── 8. R7 全链路根治回归：Codex R6 全部 11 项 Important 最小反例 ──────────────
+
+
+def test_r7_finding1_verified_finding_binds_round_and_head_blocking_cross_round_replay() -> None:
+    """R6 Finding 1 反例：第 1 轮 confirmed -> 第 2 轮 resolved_by_fix -> 第 3 轮重开 confirmed -> 第 4 轮 VerifiedRound(c4, v2.verdicts) 必须拒收。"""
+    f1 = _finding(severity=Severity.IMPORTANT, file="pilot1742/replay.py", line=10, category="竞态", failure_scenario="写丢状态")
+
+    # Round 1: confirmed
+    c1 = build_round_candidates(
+        round_number=1,
+        head_sha=HEAD_1,
+        panel=DEFAULT_PANEL,
+        finder_batches=_batches_for_panel([f1], round_number=1, head_sha=HEAD_1),
+    )
+    v1 = parse_verifier_output(
+        _verifier_payload(c1, [{"finding_id": f1.finding_id, "verdict": "confirmed", "verifier_evidence": "r1"}]),
+        c1,
+        verifier_model="claude-opus-5-5",
+    )
+    assert v1.verdicts[0].round_number == 1
+    assert v1.verdicts[0].head_sha == HEAD_1
+    dec1 = evaluate_round(v1)
+    e1 = dec1.to_history_entry(rendered=render_findings_comment(1928, HEAD_1, dec1))
+
+    # Round 2: resolved_by_fix -> PASS
+    c2 = build_round_candidates(
+        round_number=2,
+        head_sha=HEAD_2,
+        panel=DEFAULT_PANEL,
+        finder_batches=_batches_for_panel([], round_number=2, head_sha=HEAD_2),
+        history=(e1,),
+    )
+    v2 = parse_verifier_output(
+        _verifier_payload(c2, [{"finding_id": f1.finding_id, "verdict": "resolved_by_fix", "verifier_evidence": "r2 fixed"}]),
+        c2,
+        verifier_model="claude-opus-5-5",
+    )
+    assert v2.verdicts[0].round_number == 2
+    assert v2.verdicts[0].head_sha == HEAD_2
+    dec2 = evaluate_round(v2)
+    e2 = dec2.to_history_entry(rendered=render_findings_comment(1928, HEAD_2, dec2))
+    assert dec2.outcome == RoundOutcome.PASS
+
+    # Round 3: reopened & confirmed
+    c3 = build_round_candidates(
+        round_number=3,
+        head_sha=HEAD_3,
+        panel=DEFAULT_PANEL,
+        finder_batches=_batches_for_panel([f1], round_number=3, head_sha=HEAD_3),
+        history=(e1, e2),
+    )
+    v3 = parse_verifier_output(
+        _verifier_payload(c3, [{"finding_id": f1.finding_id, "verdict": "confirmed", "verifier_evidence": "r3 reopened"}]),
+        c3,
+        verifier_model="claude-opus-5-5",
+    )
+    dec3 = evaluate_round(v3)
+    e3 = dec3.to_history_entry(rendered=render_findings_comment(1928, HEAD_3, dec3))
+
+    # Round 4: f1 in prior_important -> 企图重放 v2.verdicts（round=2, head=HEAD_2）到 c4 必须立即报错
+    c4 = build_round_candidates(
+        round_number=4,
+        head_sha=HEAD_4,
+        panel=DEFAULT_PANEL,
+        finder_batches=_batches_for_panel([], round_number=4, head_sha=HEAD_4),
+        history=(e1, e2, e3),
+    )
+    with pytest.raises(ConvergenceError):
+        VerifiedRound(c4, v2.verdicts)
+
+    # 非法 round_number / 空 head_sha 的 VerifiedFinding 构造期即拒绝
+    with pytest.raises(ConvergenceError):
+        VerifiedFinding(f1, VerificationVerdict.CONFIRMED, "claude-opus-5-5", "ok", round_number=0, head_sha=HEAD_1)
+    with pytest.raises(ConvergenceError):
+        VerifiedFinding(f1, VerificationVerdict.CONFIRMED, "claude-opus-5-5", "ok", round_number=1, head_sha="  ")
+
+
+def test_r7_finding2_finder_batch_binds_head_sha_and_forbids_cross_round_session_reuse() -> None:
+    """R6 Finding 2 反例：HEAD A 的 finder_batches 原样传入 HEAD B 第 2 轮或同 HEAD 复用旧 session_id 必须立即拒收。"""
+    f1 = _finding(severity=Severity.IMPORTANT)
+    c1 = build_round_candidates(
+        round_number=1,
+        head_sha=HEAD_1,
+        panel=DEFAULT_PANEL,
+        finder_batches=_batches_for_panel([f1], round_number=1, head_sha=HEAD_1),
+    )
+    v1 = parse_verifier_output(
+        _verifier_payload(c1, [{"finding_id": f1.finding_id, "verdict": "confirmed", "verifier_evidence": "r1"}]),
+        c1,
+        verifier_model="claude-opus-5-5",
+    )
+    dec1 = evaluate_round(v1)
+    e1 = dec1.to_history_entry(rendered=render_findings_comment(1928, HEAD_1, dec1))
+    assert e1.finder_session_ids == frozenset({"r1-slot-1", "r1-slot-2"})
+
+    # 1) HEAD A 的 c1.finder_batches 原样传入 HEAD B 第 2 轮 -> 立即拒收
+    with pytest.raises(ConvergenceError):
+        build_round_candidates(
+            round_number=2,
+            head_sha=HEAD_2,
+            panel=DEFAULT_PANEL,
+            finder_batches=c1.finder_batches,
+            history=(e1,),
+        )
+    with pytest.raises(ConvergenceError):
+        RoundCandidates(
+            round_number=2,
+            head_sha=HEAD_2,
+            panel=DEFAULT_PANEL,
+            finder_batches=c1.finder_batches,
+            history=(e1,),
+        )
+
+    # 2) 即使同 head_sha 重跑，也不得复用历史轮次已用过的 session_id
+    reused_same_head_batches = (
+        FinderBatch(model="gpt-6-astra", session_id="r1-slot-1", head_sha=HEAD_1, findings=()),
+        FinderBatch(model="gpt-6.1-sol", session_id="r2-fresh-2", head_sha=HEAD_1, findings=()),
+    )
+    with pytest.raises(ConvergenceError):
+        build_round_candidates(
+            round_number=2,
+            head_sha=HEAD_1,
+            panel=DEFAULT_PANEL,
+            finder_batches=reused_same_head_batches,
+            history=(e1,),
+        )
+
+
+def test_r7_finding3_and_finding5_required_history_panel_and_settled_history_cross_family() -> None:
+    """R6 Finding 3 + Finding 5：RoundHistoryEntry.panel 必填封死注入；已结清历史发现不阻拦后续新面板换用原 finder 家族作核实者。"""
+    # Finding 3a: 省略 panel 构造 RoundHistoryEntry 立即报 TypeError；传 panel=None 报 ConvergenceError
+    f_gemini = _finding(severity=Severity.IMPORTANT, source_models=("gemini-2.5-pro",))
+    with pytest.raises(TypeError):
+        RoundHistoryEntry(1, HEAD_1, frozenset({f_gemini.finding_id}), (f_gemini,))  # type: ignore[call-arg]
+    with pytest.raises(ConvergenceError):
+        RoundHistoryEntry(1, HEAD_1, frozenset({f_gemini.finding_id}), (f_gemini,), panel=None)  # type: ignore[arg-type]
+
+    # Finding 3b: 无法把 gemini_finding 注入双 GPT 历史链（首轮及后续轮均拒收）
+    with pytest.raises(ConvergenceError):
+        RoundHistoryEntry(1, HEAD_1, frozenset({f_gemini.finding_id}), (f_gemini,), panel=DEFAULT_PANEL)
+    e1_pass = RoundHistoryEntry(1, HEAD_1, frozenset(), (), panel=DEFAULT_PANEL, outcome=RoundOutcome.PASS)
+    e2_forged = RoundHistoryEntry(2, HEAD_2, frozenset({f_gemini.finding_id}), (f_gemini,), panel=DEFAULT_PANEL)
+    with pytest.raises(ConvergenceError):
+        build_round_candidates(
+            round_number=3,
+            head_sha=HEAD_3,
+            panel=DEFAULT_PANEL,
+            finder_batches=_batches_for_panel([], round_number=3, head_sha=HEAD_3),
+            history=(e1_pass, e2_forged),
+        )
+
+    # Finding 5: 第 1 轮 GPT 发现/Claude 确认 -> 第 2 轮修复并 PASS -> 第 3 轮改双 Gemini finder + GPT verifier 且无结转 -> 正常通过！
+    f_gpt = _finding(severity=Severity.IMPORTANT, file="pilot1742/f5.py", line=15, source_models=("gpt-6-astra",))
+    c1 = build_round_candidates(
+        round_number=1,
+        head_sha=HEAD_1,
+        panel=DEFAULT_PANEL,
+        finder_batches=_batches_for_panel([f_gpt], round_number=1, head_sha=HEAD_1),
+    )
+    v1 = parse_verifier_output(
+        _verifier_payload(c1, [{"finding_id": f_gpt.finding_id, "verdict": "confirmed", "verifier_evidence": "r1"}]),
+        c1,
+        verifier_model="claude-opus-5-5",
+    )
+    dec1 = evaluate_round(v1)
+    entry1 = dec1.to_history_entry(rendered=render_findings_comment(1928, HEAD_1, dec1))
+
+    c2 = build_round_candidates(
+        round_number=2,
+        head_sha=HEAD_2,
+        panel=DEFAULT_PANEL,
+        finder_batches=_batches_for_panel([], round_number=2, head_sha=HEAD_2),
+        history=(entry1,),
+    )
+    v2 = parse_verifier_output(
+        _verifier_payload(c2, [{"finding_id": f_gpt.finding_id, "verdict": "resolved_by_fix", "verifier_evidence": "fixed"}]),
+        c2,
+        verifier_model="claude-opus-5-5",
+    )
+    dec2 = evaluate_round(v2)
+    entry2 = dec2.to_history_entry(rendered=render_findings_comment(1928, HEAD_2, dec2))
+    assert dec2.outcome == RoundOutcome.PASS
+
+    gemini_finders_gpt_verifier = ReviewPanel(
+        finder_models=("gemini-4-neon", "gemini-2.5-pro"),
+        verifier_model="gpt-6.1-sol",
+        require_verifier=True,
+    )
+    f_r3_gemini = _finding(
+        severity=Severity.NIT,
+        file="pilot1742/new_mod.py",
+        line=8,
+        category="命名",
+        failure_scenario="变量命名可更直观",
+        source_models=("gemini-4-neon",),
+    )
+    c3 = build_round_candidates(
+        round_number=3,
+        head_sha=HEAD_3,
+        panel=gemini_finders_gpt_verifier,
+        finder_batches=_batches_for_panel([f_r3_gemini], panel=gemini_finders_gpt_verifier, round_number=3, head_sha=HEAD_3),
+        history=(entry1, entry2),
+    )
+    assert c3.prior_important == ()
+    v3 = parse_verifier_output(
+        _verifier_payload(c3, [{"finding_id": f_r3_gemini.finding_id, "verdict": "confirmed", "verifier_evidence": "nit ok"}]),
+        c3,
+        verifier_model="gpt-6.1-sol",
+    )
+    dec3 = evaluate_round(v3)
+    assert dec3.outcome == RoundOutcome.PASS
+
+    # 对照：若第 1 轮 GPT 发现尚未结清（仍在第 2 轮 prior_important 中），第 2 轮改用 GPT verifier 仍必须拒收
+    with pytest.raises(ConvergenceError):
+        build_round_candidates(
+            round_number=2,
+            head_sha=HEAD_2,
+            panel=gemini_finders_gpt_verifier,
+            finder_batches=_batches_for_panel([], panel=gemini_finders_gpt_verifier, round_number=2, head_sha=HEAD_2),
+            history=(entry1,),
+        )
+
+
+def test_r7_finding4_verified_round_validates_author_reply_target_matching() -> None:
+    """R6 Finding 4 反例：指向其他指纹/坐标/过期行内/歧义目标的回复塞进 resolved_by_wontfix 必须立即拒收。"""
+    f_a = _finding(severity=Severity.IMPORTANT, file="pilot1742/demo.py", line=42, category="c1", failure_scenario="s1")
+    f_b = _finding(severity=Severity.IMPORTANT, file="pilot1742/demo.py", line=88, category="c2", failure_scenario="s2")
+    assert f_a.finding_id != "abcdef"
+    cand_single = _candidates([f_a], round_number=1, head_sha=HEAD_1)
+    cand_pair = _candidates([f_a, f_b], round_number=1, head_sha=HEAD_1)
+
+    # 1) 指向 abcdef 的回复塞给 f_a -> 立即抛 ConvergenceError
+    wrong_id_reply = AuthorReply("abcdef", None, None, "无关回复", "901", "alice")
+    with pytest.raises(ConvergenceError):
+        VerifiedRound(
+            cand_single,
+            (
+                VerifiedFinding(
+                    finding=f_a,
+                    verdict=VerificationVerdict.RESOLVED_BY_WONTFIX,
+                    verifier_model="claude-opus-5-5",
+                    verifier_evidence="伪造绑定",
+                    round_number=1,
+                    head_sha=HEAD_1,
+                    author_reply=wrong_id_reply,
+                ),
+            ),
+        )
+
+    # 2) 错误 file:line 坐标回复塞给 f_a -> 立即抛 ConvergenceError
+    wrong_loc_reply = AuthorReply(None, "pilot1742/demo.py", 999, "错误行号", "902", "alice")
+    with pytest.raises(ConvergenceError):
+        VerifiedFinding(
+            finding=f_a,
+            verdict=VerificationVerdict.RESOLVED_BY_WONTFIX,
+            verifier_model="claude-opus-5-5",
+            verifier_evidence="错误行号",
+            round_number=1,
+            head_sha=HEAD_1,
+            author_reply=wrong_loc_reply,
+        )
+
+    # 3) 过期行内评论（line=None, is_inline_anchor=True）-> 立即抛 ConvergenceError
+    outdated_inline_reply = AuthorReply(None, "pilot1742/demo.py", None, "过期评论", "903", "alice", is_inline_anchor=True)
+    with pytest.raises(ConvergenceError):
+        VerifiedFinding(
+            finding=f_a,
+            verdict=VerificationVerdict.RESOLVED_BY_WONTFIX,
+            verifier_model="claude-opus-5-5",
+            verifier_evidence="过期评论",
+            round_number=1,
+            head_sha=HEAD_1,
+            author_reply=outdated_inline_reply,
+        )
+
+    # 4) 仅文件级回复在单发现上成立，但在双同文件发现候选集上存在歧义 -> VerifiedRound 立即抛 ConvergenceError
+    ambig_file_reply = AuthorReply(None, "pilot1742/demo.py", None, "整文件不修", "904", "alice")
+    vf_a_ambig = VerifiedFinding(
+        finding=f_a,
+        verdict=VerificationVerdict.RESOLVED_BY_WONTFIX,
+        verifier_model="claude-opus-5-5",
+        verifier_evidence="试图用歧义文件回复解除 f_a",
+        round_number=1,
+        head_sha=HEAD_1,
+        author_reply=ambig_file_reply,
+    )
+    vf_b_ok = VerifiedFinding(
+        finding=f_b,
+        verdict=VerificationVerdict.CONFIRMED,
+        verifier_model="claude-opus-5-5",
+        verifier_evidence="仍成立",
+        round_number=1,
+        head_sha=HEAD_1,
+    )
+    with pytest.raises(ConvergenceError):
+        VerifiedRound(cand_pair, (vf_a_ambig, vf_b_ok))
+
+
+def test_r7_finding6_outdated_github_inline_comment_never_falls_back_to_original_line() -> None:
+    """R6 Finding 6 反例：line=None, original_line=42 的过期评论无显式目标时不得误绑到当前 HEAD 第 42 行新发现。"""
+    f_new = _finding(
+        severity=Severity.IMPORTANT,
+        file="pilot1742/demo.py",
+        line=42,
+        category="新缺陷",
+        failure_scenario="新提交在第 42 行引入的空指针",
+    )
+    outdated_inline = [
+        {
+            "id": 701,
+            "user": {"login": "alice", "type": "User"},
+            "path": "pilot1742/demo.py",
+            "line": None,
+            "original_line": 42,
+            "original_commit_id": HEAD_1,
+            "body": "不修：旧问题无需改",
+        }
+    ]
+    replies = parse_wontfix_replies(outdated_inline, allowed_authors={"alice"})
+    assert all(r.line is None for r in replies)
+    assert bind_author_replies([f_new], replies) == {}
+
+    # 过期评论若正文写了显式 [finding_id]，仍可按指纹精确绑定
+    outdated_with_explicit_id = [
+        {
+            "id": 702,
+            "user": {"login": "alice", "type": "User"},
+            "path": "pilot1742/demo.py",
+            "line": None,
+            "original_line": 42,
+            "original_commit_id": HEAD_1,
+            "body": f"[{f_new.finding_id}] 不修：显式指纹明确确认不修",
+        }
+    ]
+    replies_explicit = parse_wontfix_replies(outdated_with_explicit_id, allowed_authors={"alice"})
+    bound_explicit = bind_author_replies([f_new], replies_explicit)
+    assert set(bound_explicit.keys()) == {f_new.finding_id}
+    assert bound_explicit[f_new.finding_id].reason == "显式指纹明确确认不修"
+
+
+def test_r7_finding7_explicit_file_line_reply_key_no_collision_and_conflict_guard() -> None:
+    """R6 Finding 7 反例：同评论 id=9 含 a.py:1 与 b.py:2 同理由指令，第 1 轮消费 A 后第 2 轮 B 仍有效且可解除 B。"""
+    f_a = _finding(severity=Severity.IMPORTANT, file="a.py", line=1, category="cA", failure_scenario="sA")
+    f_b = _finding(severity=Severity.IMPORTANT, file="b.py", line=2, category="cB", failure_scenario="sB")
+
+    comment_9 = [
+        {
+            "id": 9,
+            "user": {"login": "alice", "type": "User"},
+            "body": "a.py:1 不修：兼容性\nb.py:2 不修：兼容性",
+        }
+    ]
+    replies = parse_wontfix_replies(comment_9, allowed_authors={"alice"})
+    assert len(replies) == 2
+    assert replies[0].reply_key == "comment:9:loc:a.py:1"
+    assert replies[1].reply_key == "comment:9:loc:b.py:2"
+    assert replies[0].reply_key != replies[1].reply_key
+
+    # 第 1 轮：消费 A（A 解除，B 仍确认阻断）
+    c1 = build_round_candidates(
+        round_number=1,
+        head_sha=HEAD_1,
+        panel=DEFAULT_PANEL,
+        finder_batches=_batches_for_panel([f_a, f_b], round_number=1, head_sha=HEAD_1),
+    )
+    v1 = parse_verifier_output(
+        _verifier_payload(
+            c1,
+            [
+                {"finding_id": f_a.finding_id, "verdict": "resolved_by_wontfix", "verifier_evidence": "采信 A 兼容性理由"},
+                {"finding_id": f_b.finding_id, "verdict": "confirmed", "verifier_evidence": "B 待进一步核查"},
+            ],
+        ),
+        c1,
+        verifier_model="claude-opus-5-5",
+        author_replies=replies,
+    )
+    dec1 = evaluate_round(v1)
+    e1 = dec1.to_history_entry(rendered=render_findings_comment(1928, HEAD_1, dec1))
+    assert "comment:9:loc:a.py:1" in e1.consumed_reply_keys
+    assert f"comment:9:resolved:{f_a.finding_id}" in e1.consumed_reply_keys
+    assert "comment:9:loc:b.py:2" not in e1.consumed_reply_keys
+
+    # 第 2 轮：B 依然有效且可正常解除 B
+    plan2 = plan_next_round(BASE_SHA, HEAD_2, [e1], author_replies=replies)
+    assert [r.reply_key for r in plan2.author_replies] == ["comment:9:loc:b.py:2"]
+    c2 = build_round_candidates(
+        round_number=2,
+        head_sha=HEAD_2,
+        panel=DEFAULT_PANEL,
+        finder_batches=_batches_for_panel([], round_number=2, head_sha=HEAD_2),
+        history=plan2.history,
+    )
+    v2 = parse_verifier_output(
+        _verifier_payload(
+            c2,
+            [{"finding_id": f_b.finding_id, "verdict": "resolved_by_wontfix", "verifier_evidence": "第 2 轮采信 B 兼容性理由"}],
+        ),
+        c2,
+        verifier_model="claude-opus-5-5",
+        author_replies=plan2.author_replies,
+        consumed_reply_keys=plan2.consumed_reply_keys,
+    )
+    dec2 = evaluate_round(v2)
+    assert dec2.outcome == RoundOutcome.PASS
+    assert v2.verdicts[0].author_reply is not None
+    assert v2.verdicts[0].author_reply.reply_key == "comment:9:loc:b.py:2"
+
+    # 同评论内针对同一 (target_file, target_line) 同理由去重、不同理由拒收歧义
+    dup_loc = parse_wontfix_replies(
+        [{"id": 10, "author": "alice", "body": "a.py:1 不修：同理由\na.py:1 不修：同理由"}],
+        allowed_authors={"alice"},
+    )
+    assert len(dup_loc) == 1
+    conflict_loc = parse_wontfix_replies(
+        [{"id": 11, "author": "alice", "body": "a.py:1 不修：理由甲\na.py:1 不修：理由乙"}],
+        allowed_authors={"alice"},
+    )
+    assert conflict_loc == ()
+    direct_conflict = [
+        AuthorReply(None, "a.py", 1, "理由甲", "12", "alice"),
+        AuthorReply(None, "a.py", 1, "理由乙", "12", "alice"),
+    ]
+    assert bind_author_replies([f_a], direct_conflict) == {}
+
+
+def test_r7_finding8_finding9_finding10_commonmark_ascii_digits_inline_html_tags_and_code_span_reasons() -> None:
+    """R6 Finding 8 + Finding 9 + Finding 10：全角数字禁作列表、配对行内抑制标签屏蔽、行内代码理由保真与禁零宽空理由。"""
+    fid = "a98df8e465064919"
+
+    def parse_one(body: str) -> tuple[AuthorReply, ...]:
+        return parse_wontfix_replies(
+            [{"id": 880, "user": {"login": "alice", "type": "User"}, "body": body}],
+            allowed_authors={"alice"},
+        )
+
+    # Finding 8: 仅允许 ASCII [0-9] 作为有序列表标记，全角数字 ２. / 阿拉伯-印度数字 ١. 不得中断引用块
+    assert parse_one(f"> 引用\n２. [{fid}] 不修：示例") == ()
+    assert parse_one(f"> 引用\n١. [{fid}] 不修：示例") == ()
+    ascii_list_interrupt = parse_one(f"> 引用\n2. [{fid}] 不修：ASCII 有序列表中断引用")
+    assert [(r.finding_id, r.reason) for r in ascii_list_interrupt] == [(fid, "ASCII 有序列表中断引用")]
+
+    # Finding 9: 屏蔽行内配对 HTML 代码/原样标签内部文本
+    for tag in ("code", "pre", "kbd", "samp", "var", "script", "style", "textarea", "template", "noscript"):
+        assert parse_one(f"说明 <{tag}>\n[{fid}] 不修：示例\n</{tag}>") == ()
+    assert parse_one(f"<code>[{fid}] 不修：单行标签内示例</code>") == ()
+    assert parse_one(f"说明 <code class=\"py\">\n[{fid}] 不修：带属性标签\n</code>\n[def67890] 不修：闭合后真实理由") == (
+        AuthorReply("def67890", None, None, "闭合后真实理由", "880", "alice"),
+    )
+    assert parse_one(f"说明 <script>\n<code>\n[{fid}] 不修：script 内嵌 code\n</code>\n</script>") == ()
+    assert parse_one(f"`<code>`\n[{fid}] 不修：反引号里的开标签不开启抑制栈")[0].finding_id == fid
+
+    # Finding 10: 行内代码作理由保留真实内容，禁零宽/空反引号/纯注释充当理由
+    r_code_only = parse_one(f"[{fid}] 不修：`兼容旧配置`")
+    assert len(r_code_only) == 1
+    assert r_code_only[0].finding_id == fid
+    assert r_code_only[0].reason == "兼容旧配置"
+    assert "\u200b" not in r_code_only[0].reason
+
+    r_multi_code = parse_one(f"[{fid}] 不修：依赖 `foo` 与 `bar` 兼容")
+    assert len(r_multi_code) == 1
+    assert r_multi_code[0].reason == "依赖 foo 与 bar 兼容"
+
+    assert parse_one(f"[{fid}] 不修：`   `") == ()
+    assert parse_one(f"[{fid}] 不修：<!-- 注释 -->") == ()
+    assert parse_one(f"[{fid}] 不修：\u200b\ufeff") == ()
+    assert parse_one(f"说明 `示例\n[{fid}] 不修：x\n结束`") == ()
+    assert parse_one(f"说明 <code>\n[{fid}] 不修：x\n</code>") == ()
+
+    with pytest.raises(ConvergenceError):
+        AuthorReply(fid, None, None, "\u200b\ufeff", "881", "alice")
+
+
+def test_r7_finding11_rendered_comment_binds_round_head_and_enforces_non_blocking_conservation() -> None:
+    """R6 Finding 11 反例：RenderedComment 强绑定 (round_number, head_sha) 与非阻断发现守恒，绝不让 Nit 凭空消失。"""
+    f_nit = _finding(
+        severity=Severity.NIT,
+        file="pilot1742/nit_only.py",
+        line=12,
+        category="可读性",
+        failure_scenario="局部变量命名不够清晰",
+    )
+
+    # decisionA: 第 1 轮 0 发现 -> 渲染出空 rA
+    dec_a = evaluate_round(_verified_round([], round_number=1, head_sha=HEAD_1))
+    r_a = render_findings_comment(1928, HEAD_1, dec_a)
+    assert r_a.round_number == 1
+    assert r_a.head_sha == HEAD_1
+    assert r_a.posted_fingerprints == frozenset()
+    assert r_a.deferred_fingerprints == frozenset()
+
+    # decisionB: 同轮同 HEAD 但含 1 项确认 Nit -> 传空 rA 必须因非阻断覆盖不守恒抛 ConvergenceError
+    dec_b_same_round = evaluate_round(
+        _verified_round([_verified(f_nit, VerificationVerdict.CONFIRMED)], round_number=1, head_sha=HEAD_1)
+    )
+    with pytest.raises(ConvergenceError):
+        dec_b_same_round.to_history_entry(rendered=r_a)
+
+    # decisionB2: 第 2 轮 HEAD_2 含 Nit -> 传第 1 轮 rA 因 (round_number, head_sha) 不匹配抛 ConvergenceError
+    e1_empty = dec_a.to_history_entry(rendered=r_a)
+    dec_b_round2 = evaluate_round(
+        _verified_round(
+            [_verified(f_nit, VerificationVerdict.CONFIRMED)],
+            round_number=2,
+            head_sha=HEAD_2,
+            history=[e1_empty],
+        )
+    )
+    with pytest.raises(ConvergenceError):
+        dec_b_round2.to_history_entry(rendered=r_a)
+
+    # 伪造 posted 与 deferred 重叠的 RenderedComment 构造期即拒收
+    vf_nit = dec_b_same_round.non_blocking_findings[0]
+    with pytest.raises(ConvergenceError):
+        RenderedComment(
+            round_number=1,
+            head_sha=HEAD_1,
+            body="fake",
+            posted_fingerprints=frozenset({f_nit.finding_id}),
+            deferred_fingerprints=frozenset({f_nit.finding_id}),
+            omitted_non_blocking_fingerprints=frozenset({f_nit.finding_id}),
+            truncated=True,
+            omitted_non_blocking=(vf_nit,),
+        )
+
+    # 正常渲染 dec_b_same_round 并转历史 -> 成功且 f_nit 完整入账；第 2 轮重报同 Nit（已贴抑制）仍守恒通过
+    r_b = render_findings_comment(1928, HEAD_1, dec_b_same_round)
+    assert r_b.round_number == 1
+    assert r_b.head_sha == HEAD_1
+    assert r_b.posted_fingerprints == frozenset({f_nit.finding_id})
+    assert r_b.deferred_fingerprints == frozenset()
+    e1_nit = dec_b_same_round.to_history_entry(rendered=r_b)
+    assert f_nit.finding_id in e1_nit.posted_fingerprints
+
+    dec_r2_suppressed = evaluate_round(
+        _verified_round(
+            [_verified(f_nit, VerificationVerdict.CONFIRMED)],
+            round_number=2,
+            head_sha=HEAD_2,
+            history=[e1_nit],
+        )
+    )
+    r_r2 = render_findings_comment(1928, HEAD_2, dec_r2_suppressed)
+    assert r_r2.posted_fingerprints == frozenset()
+    assert r_r2.deferred_fingerprints == frozenset()
+    e2_nit = dec_r2_suppressed.to_history_entry(rendered=r_r2)
+    assert f_nit.finding_id in e2_nit.posted_fingerprints
