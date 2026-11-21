@@ -5798,7 +5798,10 @@ fn r14_source_keeper_seal_and_next_request_share_explicit_parent() {
                     |shard_of: &dyn Fn(&(newchan_rust::s_content::NodeDigest, usize)) -> usize| {
                         cold_index_slots_for_test(&digest_shards, shard_of)
                     };
+                // Boat Linux：1328 个实际摘要、256 片；旧 16 片为 2496 槽。
+                const R14_SHARDED_INDEX_SLOTS: usize = 6156;
                 let sharded_slots = derived_slots(&|(_, shard)| *shard);
+                assert_eq!(sharded_slots, R14_SHARDED_INDEX_SLOTS, "W 夹具独立分片槽数");
                 let index_growth = (sharded_slots - R14_INDEX_SLOTS) * slot_before_p2a;
                 let sealed_before_p2a = sealed_before_p2a_for(current_len)
                     + schema_growth

@@ -285,6 +285,7 @@ V5要求新的Q3_REAL_EXPORT路径
 Value证书不得复用JsonInner判定
 VersionMismatch：s-session/3 写入口必须显式使用 --protocol-revision s-session/3
 W cut 不得发旧串域
+W 夹具独立分片槽数
 W 夹具索引槽数（由各片条目数独立推出）
 W 对象带请求
 W 未定原件必须是 typed internal record
