@@ -23,8 +23,9 @@ cd rust && cargo build --release --features production_session \
 | Bᵢ | `b_chong_session serve --chong <id>` | `economic.b[i].db` | 同上 | 同上 |
 | X | `x_execution_session serve` | `x.db` | 同上 | `x_meta.writer_epoch` |
 
-launcher 不打开任何域库；各域进程自行持锁与 epoch。S/E/B 任一退出 → 回收全部、退出码 1；
-X 退出只记日志，S/E/B 继续。SIGTERM/SIGINT → 向全部子进程发 SIGTERM，10 秒宽限后 SIGKILL，全部 wait 后退出码 0。
+launcher 不打开任何域库；各域进程自行持锁与 epoch。S/E/B 任一退出 → 回收其余域、退出码 1；
+X 退出只记日志，S/E/B 继续。旧 simulation / dry-run 骨架收到 SIGTERM/SIGINT 后向存活子进程发 SIGTERM，超出 10 秒宽限期则强制回收。
+已部署有序停止的正式会话由 launcher 先向 S、E 和各 B 的控制管道写停止字节；停机可能失败，按[第 8 节](#8-选对启动停止与恢复入口)逐域核实。
 
 ## manifest（`production-session-manifest/1`）
 
@@ -156,9 +157,11 @@ Clamp 与迁移后 `data_version` 连续性复核还会以 `HistoricalAuditStale
 
 ### 停机与证据保全
 
-下列 `launch_s.sh service` 命令仅供独立 S。对 ADR 0065 管辖的目录，按[正式会话入口](#8-选对启动停止与恢复入口)停机，确认所有相关进程与连接退出后，从步骤 2 保全。
+1. **按实际部署入口停机。**
 
-1. 使用同一配置和控制目录执行 README 已有的 status/stop，再查 status。下面逐字复用 [README:74-75](../s_session/README.md#L74) 与 [README:107-108](../s_session/README.md#L107-L108) 的命令，路径须对应故障实例。
+   **正式会话：** 按[第 8 节](#8-选对启动停止与恢复入口)通过本次部署的控制面停机，记录实例、启动批次、launcher 及相关域的 PID 和停止结果。不要运行下列独立 S 命令。
+
+   **独立 S（`s_service_control.py`）：** 使用故障实例的原配置和控制目录执行 status/stop，再查 status。命令来自 [README:74-75](../s_session/README.md#L74) 与 [README:107-108](../s_session/README.md#L107-L108)。`stop` 按 Q→S 停止，仅管理已登记且身份匹配的进程。保留 status/stop 输出。
 
    ```bash
    ./s_session/launch_s.sh service status \
@@ -169,22 +172,20 @@ Clamp 与迁移后 `data_version` 连续性复核还会以 `HistoricalAuditStale
      --config "$S_RUN_ROOT/manual/config.json" --state-dir "$S_RUN_ROOT/manual/control"
    ```
 
-   `stop` 按 Q→S 停止，仅管理已登记且身份匹配的进程。必须另行确认同库所有 S/Q、外部 SQLite 工具、调试器等进程与连接均已停止；status 不能证明外部连接不存在。停止超时、身份不明或仍有连接时，停在此步，不复制变化中的现场，不自动升级为 KILL，也不打开 SQLite 探查库。记录状态输出、停止结果及确认人。
+   **两种入口都要确认**同库的写者、读者及外部 SQLite 工具、调试器等进程与连接均已停止，并记录确认人。任一停止超时、身份不明或仍有连接时，不复制变化中的库现场，不自动升级为 KILL，也不打开 SQLite 探查库。
 
-2. 全部停止后，先记录原件绝对路径、设备号/inode、字节大小、mtime 与采集时间，复制后再次核对原件这些属性并核对副本字节。符号链接须按链接本身的元数据登记并记录链接目标，悬空链接也算现场原件。复制会产生新 inode，副本 inode 不能代替原件记录。主库、每个存在的旁挂、stderr 文件和控制目录内每份记录都须登记；不存在的旁挂也记录为不存在。复制或核对失败即停在人工门，保留错误，不覆盖旧证据包。
+2. **保全共用的库文件。** 全部停止后，逐件登记文件原件的绝对路径、设备号/inode、字节大小、mtime 与采集时间，复制后复核原件这些属性和副本字节。符号链接登记链接本身的元数据及链接目标，悬空链接也算原件。不存在的旁挂记录为不存在；副本 inode 不能代替原件记录。复制或核对失败即停在人工门，保留错误，不覆盖旧证据包。
 
-   保全清单包括主库、`-wal`、`-shm`、`-journal`，以及下列四个 audit-ledger 旁挂，名称依据 `rust/src/bin/s_session_v3/admission_provider.rs:117-123`：`.audit-ledger.sqlite`、`.audit-ledger.sqlite-wal`、`.audit-ledger.sqlite-shm`、`.audit-ledger.sqlite-journal`。同时保全数据库旁的控制/写锁及 owner 记录、整个原控制目录、冻结配置与资源原件、写者 stderr。launcher 管理的 S stdout/stderr 同写控制目录 `s.log`，进程记录为 `s.process.json/q.process.json`，依据 `s_session/s_service_control.py:329-330`、`:550-553`；若还有外部 stderr 重定向文件，也要复制。
+   下列清单覆盖主库、SQLite 与 audit-ledger 旁挂、控制 owner、控制锁和写锁；audit-ledger 名称见 `rust/src/bin/s_session_v3/admission_provider.rs:117-123`。将 `S_DB`、`S_EVIDENCE` 设为已核对的主库和全新仓外证据目录的绝对路径，证据目录须位于原件目录之外。`cp -RPp` 复制链接本身并保留属性，不移动或删除原件。元数据清单与停机记录一并归档。
 
-   以下仅为文件保全命令，不是恢复命令。先将 `S_DB`、`S_STATE`、`S_EVIDENCE` 设为已核对的主库、原控制目录、全新仓外证据目录的绝对路径；证据目录须位于原件目录之外。`cp -RPp` 保留属性并复制链接对象，不跟随符号链接。任何命令失败即停止。元数据清单、status/stop 回执也存入该证据目录。
-
+   <!-- drill: preserve-s-db -->
    ```bash
    (
    set -eu
    : "${S_DB:?须设置故障主库绝对路径}"
-   : "${S_STATE:?须设置原控制目录绝对路径}"
    : "${S_EVIDENCE:?须设置全新仓外证据目录绝对路径}"
-   mkdir "$S_EVIDENCE"
-   mkdir "$S_EVIDENCE/database" "$S_EVIDENCE/control" "$S_EVIDENCE/logs"
+   mkdir -m 0700 "$S_EVIDENCE"
+   mkdir "$S_EVIDENCE/database"
    cp -RPp "$S_DB" "$S_EVIDENCE/database/"
    for suffix in -wal -shm -journal \
      .audit-ledger.sqlite .audit-ledger.sqlite-wal \
@@ -194,11 +195,27 @@ Clamp 与迁移后 `data_version` 连续性复核还会以 `HistoricalAuditStale
        cp -RPp "$S_DB$suffix" "$S_EVIDENCE/database/"
      fi
    done
-   cp -RPp "$S_STATE/." "$S_EVIDENCE/control/"
    )
    ```
 
-   对清单中位于上述目录以外的配置、资源与 stderr 原件，逐份以 `cp -RPp` 复制到证据目录，保留路径映射。所有复制只保全，不移动或删除原件；复制不能保留原 inode，必须单独记录。
+3. **按入口保全首错与运行记录。** 两种入口都要保全实际发布件的版本、冻结配置、资源原件和 clock plan；归档文件时沿用步骤 2 的元数据与字节核对，并记原件到副本的路径映射。
+
+   **正式会话（`production_session`）：** 从部署记录核对本次实例、启动批次（宿主机/启动时间或调用 ID）、launcher PID、发布件和原 manifest，登记 manifest 中实际使用的 `state_dir`；归档 manifest 和本次生成的 `state_dir/structure-source.json`，若拒启发生在生成前则记录未生成。正式 launcher 不生成 Python 控制器的 `s.log`、`s.process.json` 或 `q.process.json`。
+
+   - **定位日志。** S `serve` 的 stdout 被丢弃，stderr 继承 launcher 的 stderr。查本次启动实际生效的重定向或服务配置，从真正收到 stderr 的文件、服务管理器或采集器保存本次调用从启动到退出的原始日志。
+   - **限定批次。** 共享日志用部署记录中的实例和调用 ID 限定；无调用 ID 时须有等价的宿主机、实例与启动时间/PID 记录来排除其他批次。保留事件原序、选择条件及来源。
+   - **核对首错。** 用同一批次的 `spawn` 核 S 域及子 PID，并对照 `exit`/停止记录。子进程错误可能早于 `spawn` 行，且不一定自带域和 PID；采集器若只标 launcher PID，不得当成 S PID。未 `spawn` 就拒绝时保留 launcher 首错（S init 失败也经 launcher 报出），将 S `serve` PID 记为未分配。仅凭 `stopped`、时间相近或错误文本相似不能确认归属；归属不明时记录缺口，保留现场，不取其他实例的日志代替。
+
+   例如 stderr 已重定向到**仅属本次调用、已封存**的文件时，将 `SESSION_STDERR` 设为该文件经核实的实际绝对路径（不是链接），复制原件后在副本中定位首错。共享日志先按上段限定并导出，保留原始行与来源记录，不把整份混合文件当作本次调用的证据。
+
+   <!-- drill: preserve-formal-stderr -->
+   ```bash
+   test -f "$SESSION_STDERR" && test ! -L "$SESSION_STDERR" &&
+     mkdir "$S_EVIDENCE/logs" &&
+     cp -p "$SESSION_STDERR" "$S_EVIDENCE/logs/session-stderr.log"
+   ```
+
+   **独立 S（`s_service_control.py`）：** 归档原控制目录。控制器将 S stdout/stderr 同写 `s.log`，进程记录为 `s.process.json` 和（启用 Q 时的）`q.process.json`，见 `s_session/s_service_control.py:329-330`、`:550-553`。核对这些记录是否匹配故障实例与 PID；若还有外部 stderr 重定向，另外保全。将 `S_STATE` 设为已核对的原控制目录绝对路径，在步骤 2 新建的证据目录下执行 `mkdir "$S_EVIDENCE/control" && cp -RPp "$S_STATE/." "$S_EVIDENCE/control/"`。
 
 ### 人工恢复门
 
@@ -206,7 +223,7 @@ Clamp 与迁移后 `data_version` 连续性复核还会以 `HistoricalAuditStale
 
 已核对 [ADR 0042:38-42](adr/0042-s-writer-incremental-production-path.md#L38) 与 [README:111-120](../s_session/README.md#L111)：它们批准的是监督器 `recover`、增量持久态重建、随后 `start-s` 的既有链；README 的具体 `stop-s → service recover → start-s` 示例绑定冻结 op95、epoch 2 和 `recover-001`，不能直接套到任意完整性故障。这两份合同均未批准完整性拒绝后“用普通 SQLite 连接正常关闭以清理旁挂”。本节因此不提供该操作或后续可执行恢复序列，`recover` 也不能越过上面的介质拒门。
 
-运维负责人将完整错误文本、触发类别、故障时间、二进制版本/摘要、配置/资源/clock plan、控制目录与进程身份/停止回执、外部连接停止确认、原件元数据清单和完整副本交给 #1481 主控；由 #1481 主控提交用户/恢复合同裁定人决定可信原件来源、冲突处置、允许的介质恢复步骤和与故障匹配的 epoch/恢复事件，并将批准结果补入运维合同。未经该决定不恢复写入。若后续批准普通连接正常关闭，须明确它会把 WAL 检查点进主库，操作后仍必须走 `recover/start-s` 的完整 H1 冷认证，不能将旁挂消失当成认证成功。
+运维负责人将完整错误文本、触发类别、故障时间、二进制版本/摘要、配置/资源/clock plan、对应启动入口的日志与运行记录、进程身份与停止回执、外部连接停止确认、原件元数据清单和完整副本交给 #1481 主控；由 #1481 主控提交用户/恢复合同裁定人决定可信原件来源、冲突处置、允许的介质恢复步骤和与故障匹配的 epoch/恢复事件，并将批准结果补入运维合同。未经该决定不恢复写入。若后续批准普通连接正常关闭，须明确它会把 WAL 检查点进主库；独立 S 操作后仍须完整执行 `recover/start-s` 的 H1 冷认证，正式会话仍按第 8 节的恢复门，不能将旁挂消失当成认证成功。
 
 ## 已知卡点（#1769）
 
@@ -387,19 +404,41 @@ launcher 已退出，而域仍在原端点服务或持原锁时，由获准发�
 E 或任一 B 的库从备份恢复，或曾由不识 `clean_close/1` 的二进制开服时，即使库内标记与当前持久代相同，也不能证明最近一次服务已正常关库。由获授权的域运维逐域正式恢复，不能先试启看是否报错。
 
 1. 停原实例并排除旧 writer、SQLite 外部连接和自动拉起。查备份来源、恢复范围、原库及旁挂一致性、最后可信 cut、原代、刚才用过的二进制、未决责任。确认 E 和各 B 原库齐全；部分缺库不 init，全失也不能把产品的首启行为当成恢复。保全原库、侧件、配置及已有回执。不要手工改标记或库代。
-2. 使用含具名恢复和本合同的正式发布件。部署侧隔离继续生效，先释放人工维护 FD，由对应域 bin 自取原锁。准备获准的 `economic-recovery/1` 原件，绑定域、会话、会话代、经济 manifest、最新持久 cut 和恢复前代，使用本事故的唯一 `recovery_id`。下例只运行需要恢复的域；`RELEASE` 是已核 bin 目录，`ECON_MANIFEST` 和各 DB、请求路径从部署记录取。stdout 保存到本次证据目录；失败不进入启动。
+2. 使用含具名恢复和本合同的正式发布件。部署侧隔离继续生效，先释放人工维护 FD，由对应域 bin 自取原锁。准备获准的 `economic-recovery/1` 原件，绑定域、会话、会话代、经济 manifest、最新持久 cut 和恢复前代，使用本事故的唯一 `recovery_id`。下例只运行需要恢复的域；`RELEASE` 是已核 bin 目录，`ECON_MANIFEST` 和各 DB、请求路径从部署记录取。将 `RECOVERY_EVIDENCE` 设为本事故已核准、已存在的证据父目录绝对路径。每次尝试独占创建新的子目录，分存 stdout、stderr 和退出码。
 
    <!-- drill: recover-e -->
    ```bash
+   (
+   set -eu
+   stamp=$(date -u +%Y%m%dT%H%M%SZ)
+   attempt=$(mktemp -d "${RECOVERY_EVIDENCE:?}/e-$stamp.XXXXXX")
+   printf 'E 恢复证据：%s\n' "$attempt"
+   rc=0
    "$RELEASE/e_economic_session" recover-named --manifest "$ECON_MANIFEST" \
-     --db "$E_DB" --recovery-request "$E_REQUEST" > "$E_RECEIPT"
+     --db "$E_DB" --recovery-request "$E_REQUEST" \
+     > "$attempt/recover.stdout" 2> "$attempt/recover.stderr" || rc=$?
+   printf '%s\n' "$rc" > "$attempt/exit-code"
+   exit "$rc"
+   )
    ```
 
    <!-- drill: recover-b -->
    ```bash
+   (
+   set -eu
+   stamp=$(date -u +%Y%m%dT%H%M%SZ)
+   attempt=$(mktemp -d "${RECOVERY_EVIDENCE:?}/b-$stamp.XXXXXX")
+   printf 'B:%s 恢复证据：%s\n' "$CHONG" "$attempt"
+   rc=0
    "$RELEASE/b_chong_session" recover-named --manifest "$ECON_MANIFEST" \
-     --db "$B_DB" --chong "$CHONG" --recovery-request "$B_REQUEST" > "$B_RECEIPT"
+     --db "$B_DB" --chong "$CHONG" --recovery-request "$B_REQUEST" \
+     > "$attempt/recover.stdout" 2> "$attempt/recover.stderr" || rc=$?
+   printf '%s\n' "$rc" > "$attempt/exit-code"
+   exit "$rc"
+   )
    ```
+
+   非零退出时，本次目录只登记为失败证据，即使 stdout 非空也不当作回执；保留旧回执原件，不覆盖、不删除，不启动 launcher。成功退出后仍须核对 stdout 的回执，核对通过才登记为本次成功回执；再次尝试也使用新目录。
 
    只有明确获准按非具名恢复合同交接有效代的部署，才改用对应域的 `recover`（同一 `--manifest`、`--db` 及 B 的 `--chong`，无 `--recovery-request`）；非具名结果不能冒充 launcher 的具名请求。恢复回执丢失时，用相同请求 `query-recovery` 查原回执，再用 `current-recovery` 核是否对应当前代，两者参数与 `recover-named` 相同。重取回执不会重写已被 serve 消费的标记；若期间开服又崩溃，重新判明恢复需要，不能复用旧回执放行。
 3. 核对回执的域、cut、有效代和实际部署合同。对具名链，用 `launcher-economic-recovery/1` 的 `requests` 对象把已恢复、需回执交接的域（`E`、`B:<id>`）映射到各自原请求文件的绝对路径；未换代域继续用 manifest 的代。不要把回执文件当成请求文件。例如仅恢复 E 时，计划为：
