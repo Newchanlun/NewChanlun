@@ -15,8 +15,8 @@ use std::time::Duration;
 
 // #1406 C6a：分页是单独、显式授权的只读协议，不接管旧单帧读失败。
 const READ_PAGES: &str = "economic-read-pages/1";
-const READ_CHUNK: usize = 262_144;
-const READ_CACHE: usize = 4 * 1_048_576;
+pub(super) const READ_CHUNK: usize = 262_144;
+pub(super) const READ_CACHE: usize = 4 * 1_048_576;
 const READ_FRAME: usize = 1_048_576;
 const READ_TRANSFERS: usize = 4;
 const READ_CHANGES: usize = 32;
@@ -29,6 +29,7 @@ struct ReadTransfer {
     descriptor_hash: String,
     document: Option<Vec<u8>>,
     cuts: Vec<StoredImage>,
+    allow_oversize_source_cut: bool,
     deadline: std::time::Instant,
 }
 impl ReadTransfer {
@@ -177,10 +178,11 @@ fn read_object(fields: &Value, raw_field: &str, raw: &[u8]) -> Result<Vec<u8>, S
     append_read_bytes(&mut out, b"}")?;
     Ok(out)
 }
-fn selected_image_meta(
+fn selected_image_meta_metered(
     c: &Connection,
     config: &Config,
     query: &Value,
+    budget: &mut ReadBudget<'_>,
 ) -> Result<StoredImage, String> {
     if !query["cut"].is_null() && !query["as_known_ns"].is_null() {
         return Err("InvalidDomain：cut与AsKnown不能同时指定".into());
@@ -194,21 +196,22 @@ fn selected_image_meta(
         nonnegative(required(wanted, "commit_seq")?, "commit_seq")?
     } else if !query["as_known_ns"].is_null() {
         let ns = nonnegative(required(query, "as_known_ns")?, "as_known_ns")?;
-        c.query_row(
-            "SELECT max(seq) FROM commits WHERE CAST(commit_ns AS INTEGER)<=?",
-            [ns],
-            |r| r.get::<_, Option<i64>>(0),
-        )
-        .map_err(err)?
-        .ok_or("MissingDependency：AsKnown早于域创世")?
+        budget
+            .one(
+                c,
+                "SELECT max(seq) FROM commits WHERE CAST(commit_ns AS INTEGER)<=?",
+                [ns],
+                |r| r.get::<_, Option<i64>>(0),
+            )?
+            .ok_or("MissingDependency：AsKnown早于域创世")?
     } else {
-        c.query_row("SELECT max(seq) FROM commits", [], |r| {
-            r.get::<_, Option<i64>>(0)
-        })
-        .map_err(err)?
-        .ok_or("MissingDependency：域无创世cut")?
+        budget
+            .one(c, "SELECT max(seq) FROM commits", [], |r| {
+                r.get::<_, Option<i64>>(0)
+            })?
+            .ok_or("MissingDependency：域无创世cut")?
     };
-    let image = stored_image(c, selected, READ_CACHE)?;
+    let image = stored_image_metered(c, selected, READ_CACHE, budget)?;
     if !query["cut"].is_null() && query["cut"] != cut(config, image.seq, &image.root) {
         return Err("IdentityConflict：cut根不匹配".into());
     }
@@ -217,18 +220,19 @@ fn selected_image_meta(
 fn fixed_image_bytes(
     c: &Connection,
     image: &StoredImage,
-    deadline: std::time::Instant,
+    budget: &mut ReadBudget<'_>,
 ) -> Result<Vec<u8>, String> {
-    check_operation_deadline(None, Some(deadline))?;
-    let raw = stored_image_bytes(c, image, 0, image.bytes)?;
+    budget.before()?;
+    let raw = stored_image_bytes_metered(c, image, 0, image.bytes, budget)?;
     let parsed = crate::session_protocol::strict_json(&raw)
         .map_err(|e| format!("StorageUnavailable：持久图像解析失败：{e}"))?;
     if canonical_json(&parsed).as_bytes() != raw.as_slice() {
         return Err("StorageUnavailable：持久图像不是原canonical字节".into());
     }
-    check_operation_deadline(None, Some(deadline))?;
+    budget.before()?;
     Ok(raw)
 }
+#[allow(clippy::too_many_arguments)]
 fn fixed_read_document(
     c: &mut Connection,
     config: &Config,
@@ -236,18 +240,82 @@ fn fixed_read_document(
     runtime: &Value,
     query: &Value,
     deadline: std::time::Instant,
-) -> Result<(Vec<u8>, Vec<StoredImage>, StoredImage, &'static str), String> {
+    projection_perms: Option<super::read_projection::ReadPermissions>,
+) -> Result<(Vec<u8>, Vec<StoredImage>, StoredImage, &'static str, bool), String> {
     let tx = c.transaction().map_err(err)?;
     check_operation_deadline(None, Some(deadline))?;
     check_epoch(&tx, epoch)?;
+    let mut job = if config.revision()? == SCHEMA_V2 {
+        Some(new_content_job(&tx, config)?)
+    } else {
+        None
+    };
+    let effective_deadline = if let Some(j) = job.as_mut() {
+        deadline.min(
+            j.first_read_deadline()
+                .map_err(|e| format!("Incomplete：内容 job 截止：{e}"))?,
+        )
+    } else {
+        deadline
+    };
+    let mut budget = ReadBudget::new(job.as_mut(), Some(effective_deadline));
+    budget.before()?;
     let operation = required(query, "op")?;
     let mut cuts = Vec::new();
     let mut changes = Vec::new();
+    let mut allow_oversize_source = false;
+    let mut fixed_cuts = None;
     let next = match operation {
         "ReadView" => {
             exact(query, &["op", "cut", "as_known_ns"])?;
-            let selected = selected_image_meta(&tx, config, query)?;
+            let selected = selected_image_meta_metered(&tx, config, query, &mut budget)?;
             cuts.push(selected.clone());
+            selected
+        }
+        super::read_projection::OP_READ_PROJECTION => {
+            super::read_projection::check_projection_contract(config)?;
+            fixed_cuts = projection_query_cuts(
+                query,
+                &["op", "projection_revision", "cut", "as_known_ns"],
+                config,
+            )?;
+            if required(query, "projection_revision")?
+                != super::read_projection::PROJECTION_REVISION
+            {
+                return Err("SchemaUnsupported：未知只读经济投影版本".into());
+            }
+            let selected = super::read_projection::select_projection_meta(
+                &tx,
+                config,
+                query,
+                false,
+                &mut budget,
+            )?;
+            cuts.push(selected.clone());
+            allow_oversize_source = true;
+            selected
+        }
+        super::read_projection::OP_READ_ORIGINAL_AT_CUT => {
+            super::read_projection::check_projection_contract(config)?;
+            fixed_cuts = projection_query_cuts(
+                query,
+                &["op", "projection_revision", "cut", "kind", "object_id"],
+                config,
+            )?;
+            if required(query, "projection_revision")?
+                != super::read_projection::PROJECTION_REVISION
+            {
+                return Err("SchemaUnsupported：未知只读经济投影版本".into());
+            }
+            let selected = super::read_projection::select_projection_meta(
+                &tx,
+                config,
+                query,
+                true,
+                &mut budget,
+            )?;
+            cuts.push(selected.clone());
+            allow_oversize_source = true;
             selected
         }
         "Watch" => {
@@ -255,35 +323,40 @@ fn fixed_read_document(
             let after = if query["after_cut"].is_null() {
                 -1
             } else {
-                let selected = selected_image_meta(
+                let selected = selected_image_meta_metered(
                     &tx,
                     config,
                     &json!({"cut":query["after_cut"],"as_known_ns":null}),
+                    &mut budget,
                 )?;
                 let seq = selected.seq;
                 cuts.push(selected);
                 seq
             };
-            let next = selected_image_meta(&tx, config, &json!({"cut":null,"as_known_ns":null}))?;
-            let count: i64 = tx
-                .query_row(
-                    "SELECT count(*) FROM commits WHERE seq>? AND seq<=?",
-                    params![after, next.seq],
-                    |r| r.get(0),
-                )
-                .map_err(err)?;
+            let next = selected_image_meta_metered(
+                &tx,
+                config,
+                &json!({"cut":null,"as_known_ns":null}),
+                &mut budget,
+            )?;
+            let count: i64 = budget.one(
+                &tx,
+                "SELECT count(*) FROM commits WHERE seq>? AND seq<=?",
+                params![after, next.seq],
+                |r| r.get(0),
+            )?;
             if count < 0 || count > READ_CHANGES as i64 {
                 return Err("QueryBudgetExceeded：完整Watch超过32条".into());
             }
-            let mut statement = tx
-                .prepare("SELECT seq FROM commits WHERE seq>? AND seq<=? ORDER BY seq")
-                .map_err(err)?;
-            let rows = statement
-                .query_map(params![after, next.seq], |r| r.get::<_, i64>(0))
-                .map_err(err)?;
+            let seqs: Vec<i64> = budget.all(
+                &tx,
+                "SELECT seq FROM commits WHERE seq>? AND seq<=? ORDER BY seq",
+                params![after, next.seq],
+                |r| r.get::<_, i64>(0),
+            )?;
             let mut total = 0usize;
-            for row in rows {
-                let image = stored_image(&tx, row.map_err(err)?, READ_CACHE)?;
+            for seq in seqs {
+                let image = stored_image_metered(&tx, seq, READ_CACHE, &mut budget)?;
                 total = total
                     .checked_add(image.bytes)
                     .filter(|n| *n <= READ_CACHE)
@@ -296,24 +369,51 @@ fn fixed_read_document(
             }
             next
         }
-        _ => return Err("SchemaUnsupported：分页只接受ReadView/Watch".into()),
+        _ => {
+            return Err(
+                "SchemaUnsupported：分页只接受ReadView/Watch/ReadProjection/ReadOriginalAtCut"
+                    .into(),
+            )
+        }
     };
-    // 每次 open 沿原审计核一次；所有 SQL 的检查共享本读截止。续页不重跑历史。
-    let mut job = if config.revision()? == SCHEMA_V2 {
-        Some(new_content_job(&tx, config)?)
-    } else {
-        None
-    };
-    audit_with_deadline(&tx, config, job.as_mut(), Some(deadline))?;
+    // 每次 open 沿既有完整离线审计核一次；所有 SQL 共用同一 ReadBudget 与最早期限。续页不重跑历史。
+    audit_with_budget(&tx, config, &mut budget)?;
     let (document, kind) = if operation == "ReadView" {
-        let raw = fixed_image_bytes(&tx, &next, deadline)?;
+        let raw = fixed_image_bytes(&tx, &next, &mut budget)?;
         let fields = json!({"kind":"EconomicView","domain_id":config.domain,"cut":cut(config,next.seq,&next.root),"image_hash":sha256_hex(&raw),"image":null,"commit_ns":next.commit_ns,"writer_epoch":epoch.to_string(),"runtime":runtime});
         (read_object(&fields, "image", &raw)?, "EconomicView")
+    } else if operation == super::read_projection::OP_READ_PROJECTION {
+        let doc = super::read_projection::build_projection_document(
+            &tx,
+            config,
+            epoch,
+            runtime,
+            &next,
+            fixed_cuts,
+            &mut budget,
+        )?;
+        (doc, super::read_projection::KIND_PROJECTION_VIEW)
+    } else if operation == super::read_projection::OP_READ_ORIGINAL_AT_CUT {
+        let kind = required(query, "kind")?;
+        let object_id = required(query, "object_id")?;
+        let perms = projection_perms.unwrap_or_default();
+        let doc = super::read_projection::build_original_at_cut_document(
+            &tx,
+            config,
+            epoch,
+            &next,
+            kind,
+            object_id,
+            &perms,
+            fixed_cuts,
+            &mut budget,
+        )?;
+        (doc, super::read_projection::KIND_ORIGINAL_AT_CUT)
     } else {
         let mut array = Vec::new();
         append_read_bytes(&mut array, b"[")?;
         for (index, image) in changes.iter().enumerate() {
-            let raw = fixed_image_bytes(&tx, image, deadline)?;
+            let raw = fixed_image_bytes(&tx, image, &mut budget)?;
             let fields = json!({"cut":cut(config,image.seq,&image.root),"image_hash":sha256_hex(&raw),"image":null,"commit_ns":image.commit_ns});
             let change = read_object(&fields, "image", &raw)?;
             if index != 0 {
@@ -325,9 +425,9 @@ fn fixed_read_document(
         let fields = json!({"kind":"EconomicChanges","domain_id":config.domain,"cut":cut(config,next.seq,&next.root),"changes":null,"writer_epoch":epoch.to_string()});
         (read_object(&fields, "changes", &array)?, "EconomicChanges")
     };
-    check_operation_deadline(None, Some(deadline))?;
+    budget.before()?;
     tx.commit().map_err(err)?;
-    Ok((document, cuts, next, kind))
+    Ok((document, cuts, next, kind, allow_oversize_source))
 }
 
 fn checked_transfer_roots(
@@ -350,7 +450,12 @@ fn checked_transfer_roots(
         }
     }
     for image in &entry.cuts {
-        if stored_image(&tx, image.seq, READ_CACHE)? != *image {
+        let current = if entry.allow_oversize_source_cut {
+            stored_image_meta(&tx, image.seq)?
+        } else {
+            stored_image(&tx, image.seq, READ_CACHE)?
+        };
+        if current != *image {
             return Err("StorageUnavailable：分页固定cut身份改变".into());
         }
         check_operation_deadline(None, Some(entry.deadline))?;
@@ -420,9 +525,20 @@ fn paged_read(
             let request_hash = hash(e);
             let query = &p["query"];
             // 分页权限不隐含扩大原逻辑查询权限。
-            let mut logical_request = e.clone();
-            logical_request["payload"] = query.clone();
-            config.authorized(&logical_request)?;
+            let projection_perms = if query
+                .get("op")
+                .and_then(Value::as_str)
+                .is_some_and(|op| super::read_projection::PROJECTION_READ_OPS.contains(&op))
+            {
+                Some(super::read_projection::check_authorization(
+                    config, e, query,
+                )?)
+            } else {
+                let mut logical_request = e.clone();
+                logical_request["payload"] = query.clone();
+                config.authorized(&logical_request)?;
+                None
+            };
             if let Some(entry) = state
                 .entries
                 .values_mut()
@@ -457,6 +573,7 @@ fn paged_read(
                 descriptor_hash: "0".repeat(64),
                 document: None,
                 cuts: Vec::new(),
+                allow_oversize_source_cut: false,
                 deadline,
             };
             if state
@@ -468,8 +585,8 @@ fn paged_read(
             }
             // 先签去重身份：任何审计/编码失败都不能用相同 open 消息重开时间窗。
             state.entries.insert(id.clone(), entry);
-            let (document, cuts, next, kind) =
-                fixed_read_document(c, config, epoch, runtime, query, deadline)?;
+            let (document, cuts, next, kind, allow_oversize_source_cut) =
+                fixed_read_document(c, config, epoch, runtime, query, deadline, projection_perms)?;
             let mut fixed_cuts = serde_json::Map::new();
             fixed_cuts.insert(config.domain.clone(), cut(config, next.seq, &next.root));
             let mut owner_epochs = serde_json::Map::new();
@@ -490,6 +607,7 @@ fn paged_read(
             entry.descriptor_hash = descriptor_hash;
             entry.document = Some(document);
             entry.cuts = cuts;
+            entry.allow_oversize_source_cut = allow_oversize_source_cut;
             if state.retained_bytes() > READ_CACHE {
                 state.entries.get_mut(&id).unwrap().release_document();
                 return Err("QueryBudgetExceeded：逻辑原文与分页共享元数据超过4MiB".into());
@@ -579,7 +697,8 @@ fn handle_paged_read(
             let code = if error.starts_with("SchemaUnsupported")
                 && (error.contains("只读分页版本")
                     || error.contains("分页只接受")
-                    || error.contains("未知只读分页操作"))
+                    || error.contains("未知只读分页操作")
+                    || error.contains("economic-read-projection/1"))
             {
                 "SchemaUnsupported"
             } else if error.starts_with("IdentityConflict")
@@ -591,6 +710,8 @@ fn handle_paged_read(
                 "MissingDependency"
             } else if error.starts_with("SnapshotExpired")
                 || error.starts_with("Incomplete：经济操作最早绝对期限已过")
+                || (error.starts_with("Incomplete")
+                    && (error.contains("DEADLINE") || error.contains("deadline")))
             {
                 "TransferExpired"
             } else if error.starts_with("QueryBudgetExceeded") || error.starts_with("Incomplete") {
@@ -631,6 +752,43 @@ fn exact(v: &Value, keys: &[&str]) -> Result<(), String> {
         return Err("SchemaUnsupported：业务字段不完整或多余".into());
     }
     Ok(())
+}
+
+// 老调用仍只固定本域。传入显式向量时，必须由同一个本域 cut 锚定；不能以向量替代本地实读。
+fn projection_query_cuts<'a>(
+    query: &'a Value,
+    fields: &[&str],
+    config: &Config,
+) -> Result<Option<&'a serde_json::Map<String, Value>>, String> {
+    let Some(value) = query.get("fixed_cuts") else {
+        exact(query, fields)?;
+        return Ok(None);
+    };
+    let mut fields = fields.to_vec();
+    fields.push("fixed_cuts");
+    exact(query, &fields)?;
+    let cuts = value
+        .as_object()
+        .ok_or("InvalidDomain：fixed_cuts 须是域切面向量")?;
+    if query["cut"].is_null() || cuts.get(&config.domain) != query.get("cut") {
+        return Err("IdentityConflict：fixed_cuts 本域切面与请求不符".into());
+    }
+    for (domain, node) in cuts {
+        exact(node, &["domain_id", "commit_seq", "root_hash"])?;
+        if node["domain_id"] != *domain {
+            return Err("IdentityConflict：fixed_cuts 域与 cut 不符".into());
+        }
+        nonnegative(required(node, "commit_seq")?, "fixed_cuts.commit_seq")?;
+        let root = required(node, "root_hash")?;
+        if root.len() != 64
+            || !root
+                .bytes()
+                .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+        {
+            return Err("InvalidDomain：fixed_cuts 根摘要无效".into());
+        }
+    }
+    Ok(Some(cuts))
 }
 fn message_key(e: &Value) -> String {
     hash(&json!([
@@ -872,7 +1030,11 @@ fn resolve_evidence(
         tx.commit().map_err(err)?;
         return Ok(r);
     }
-    let (mut next, covered) = tb03c_e::resolve_image(config, &image, p)?;
+    let (order, _) = tb03c_e::check_resolve_preconditions(config, &image, p)?;
+    let witnesses =
+        super::tb03c_sim_resolve::verify_live_x_witnesses(&tx, config, &image, p, &order)?;
+    let (mut next, covered) =
+        tb03c_e::resolve_image_with_witnesses(config, &image, p, witnesses.as_ref())?;
     let seq = seq.checked_add(1).ok_or("InvalidDomain：commit seq溢出")?;
     let recovered_ns: String = tx
         .query_row(
@@ -885,7 +1047,7 @@ fn resolve_evidence(
         .max(nonnegative(&recovered_ns, "epoch at_ns")?)
         .to_string();
     let (_, _, ns) = clocks(config, e, &floor, epoch)?;
-    let event = tb03c_e::resolve_history(e, &covered, seq, &ns);
+    let event = tb03c_e::resolve_history_with_witnesses(e, &covered, seq, &ns, witnesses.as_ref());
     next["history"].as_array_mut().unwrap().push(event.clone());
     sync_pending(&tx, &next)?;
     let cut = append(&tx, config, seq, &prev, &ns, &next)?;
@@ -1550,11 +1712,93 @@ pub(super) fn serve(config: &Config, epoch: i64, e_epoch: i64) -> Result<(), Str
         }
     })
 }
+/// #1375：恢复准备读口。只出具指定 X 批的逐件接纳状态和原字节；
+/// 缺失项仍由获准来源走原 CaptureExternal。读取不得落 E 事实或清 Pending。
+fn inspect_simulation_capture_batch(
+    config: &Config,
+    batch_id: &str,
+    receipt_digest: &str,
+    x_id: &str,
+    x_epoch: i64,
+) -> Result<Value, String> {
+    let binding = &config.manifest["history_simulation_source"];
+    if !binding.is_object() {
+        return Err("SchemaUnsupported：本会话未冻结模拟 X 原件来源".into());
+    }
+    let source = json!({
+        "session_id":config.session,"session_generation":config.generation,
+        "source_namespace":required(binding,"source_namespace")?,
+        "source_epoch":required(binding,"source_epoch")?,
+        "producer_id":required(binding,"producer_id")?,
+        "producer_epoch":required(binding,"producer_epoch")?,
+        "payload":{"op":"CaptureExternal"}
+    });
+    config.authorized(&source)?;
+    let (mut c, _) = open(&config.db, true)?;
+    let tx = c.transaction().map_err(err)?;
+    audit(&tx, config)?;
+    let (seq, root, _, _) = latest(&tx)?;
+    let receipt = crate::history_simulation::intake::committed_capture_batch(
+        &config.manifest,
+        batch_id,
+        receipt_digest,
+        x_id,
+        x_epoch,
+    )?;
+    let originals = receipt["originals"]
+        .as_array()
+        .ok_or("StorageUnavailable：模拟批缺原件列表")?;
+    let mut entries = Vec::with_capacity(originals.len());
+    for doc in originals {
+        // X 的冷审已逐字比对原件表和规范化回执值。按 Capture 的同一规则派生
+        // fact_key，不另创身份，也不替调用者生成 token / message_id。
+        let raw = canonical_json(doc);
+        let (_, event) = decode(&raw, "/event", config.book_rules()?)?;
+        let key = fact_key(&event)?;
+        let recorded = row(&tx, "facts", &key)?;
+        let capture_receipt = match recorded {
+            Some(record) => {
+                if record["raw_utf8"] != raw
+                    || record["json_pointer"] != "/event"
+                    || record["source_producer"]["producer_id"] != source["producer_id"]
+                    || record["source_producer"]["producer_epoch"] != source["producer_epoch"]
+                {
+                    return Err("IdentityConflict：X 原件与 E 已接纳事实不一致".into());
+                }
+                Some(row(&tx, "receipts", &key)?.ok_or("StorageUnavailable：E 缺原接纳回执")?)
+            }
+            None => None,
+        };
+        entries.push(json!({
+            "fact_key":key,"external_fact_id":event["source"]["external_fact_id"],
+            "source_cursor":event["source"]["source_cursor"],
+            "source_event_time":event["source"]["source_event_time"],
+            "raw_utf8":raw,"json_pointer":"/event",
+            "state":if capture_receipt.is_some() {"Recorded"} else {"Missing"},
+            "receipt":capture_receipt,"pending":row(&tx,"pending",&key)?
+        }));
+    }
+    tx.commit().map_err(err)?;
+    Ok(json!({
+        "kind":"SimulationCaptureBatch","domain_id":config.domain,
+        "e_cut":cut(config,seq,&root),"x_id":x_id,"x_writer_epoch":x_epoch.to_string(),
+        "batch_id":batch_id,"bar_index":receipt["bar_index"],"batch_receipt_sha256":receipt_digest,
+        "state_content_hash":receipt["state_content_hash"],
+        "source_namespace":source["source_namespace"],"source_epoch":source["source_epoch"],
+        "producer_id":source["producer_id"],"producer_epoch":source["producer_epoch"],
+        "entries":entries,"release_eligibility":"NotEvaluated"
+    }))
+}
+
 /// 正式 owner 入口。init/recover/serve 共用同一域独占锁；不给客户端创建替代权威路径。
 pub fn cli(is_b: bool) -> Result<(), String> {
     let mut args = std::env::args().skip(1);
     let command = args.next().ok_or(
-        "usage: init|serve|recover --manifest FILE --db FILE [--chong ID] [--epoch N --e-epoch N]",
+        if is_b {
+            "usage: init|serve|recover --manifest FILE --db FILE --chong ID [--epoch N --e-epoch N]"
+        } else {
+            "usage: init|serve|recover --manifest FILE --db FILE [--epoch N]; inspect-simulation-capture-batch --manifest FILE --db FILE --batch-id ID --batch-receipt-sha256 HASH --x-id ID --x-epoch N"
+        },
     )?;
     let mut opts = BTreeMap::new();
     while let Some(k) = args.next() {
@@ -1563,8 +1807,22 @@ pub fn cli(is_b: bool) -> Result<(), String> {
         }
         opts.insert(k, args.next().ok_or("InvalidDomain：参数缺值")?);
     }
+    let inspect_batch = !is_b && command == "inspect-simulation-capture-batch";
+    let valid = if inspect_batch {
+        [
+            "--manifest",
+            "--db",
+            "--batch-id",
+            "--batch-receipt-sha256",
+            "--x-id",
+            "--x-epoch",
+        ]
+        .as_slice()
+    } else {
+        ["--manifest", "--db", "--chong", "--epoch", "--e-epoch"].as_slice()
+    };
     for k in opts.keys() {
-        if !["--manifest", "--db", "--chong", "--epoch", "--e-epoch"].contains(&k.as_str()) {
+        if !valid.contains(&k.as_str()) {
             return Err(format!("InvalidDomain：未知参数{k}"));
         }
     }
@@ -1580,6 +1838,17 @@ pub fn cli(is_b: bool) -> Result<(), String> {
     )?;
     if !is_b && opts.contains_key("--chong") {
         return Err("InvalidDomain：E不能指定重".into());
+    }
+    if inspect_batch {
+        let result = inspect_simulation_capture_batch(
+            &config,
+            get("--batch-id")?,
+            get("--batch-receipt-sha256")?,
+            get("--x-id")?,
+            positive(get("--x-epoch")?, "--x-epoch")?,
+        )?;
+        println!("{}", canonical_json(&result));
+        return Ok(());
     }
     let _lock = process_lock(&config.db, &config.domain)?;
     match command.as_str() {

@@ -1,7 +1,4 @@
-//! #1407 C2 第 1、2 项的集成锁：E 经正式入口放行的命令，经共同信封查询真 E，被 X 的 AcceptExact 接纳，
-//! 随后受控 S 条件执行、X 占有调用。E 与 X 都是生产 serve 循环；S 仍是受控夹具（真 S producer 归 TB04-D/E）。
-//! 本批 E 仍是 TestOnly 时钟（alpha 放行读数 162）；E 改读 logical-bar/1 归 C2 第 4 项。在那之前，X 先走 162 根空 bar
-//! 让接纳前沿追上放行读数，这里只锁条件清单与信封两处断点，不作时钟域证据。
+//! 真 E socket 在逻辑 bar 2 放行，X 在前沿 1 拒绝、前沿 2 接纳；受控 S 只在执行时签发。
 use super::*;
 use crate::history_simulation::runtime::Profile as XProfile;
 use rusqlite::types::ValueRef;
@@ -183,7 +180,7 @@ fn controlled_s(socket: PathBuf, bar: i64, calls: Arc<AtomicUsize>) {
                     }
                     r["state"] = json!("ExecuteCommitted");
                     r["receipt_id"] = q["command"]["change"]["order"]["eligibility_ref"].clone();
-                    r["commit_ns"] = json!(bar);
+                    r["commit_ns"] = json!(bar.to_string());
                     records.insert(id, r.clone());
                     r
                 }
@@ -206,16 +203,21 @@ fn controlled_s(socket: PathBuf, bar: i64, calls: Arc<AtomicUsize>) {
         }
     });
 }
-fn x_profile(f: &Fixture) -> Value {
-    let mut model = serde_json::to_value(crate::history_simulation::tests::model()).unwrap();
-    model["symbol"] = json!("alpha");
+fn x_profile_with(
+    f: &Fixture,
+    model: crate::history_simulation::model::Model,
+    socket_name: &str,
+) -> Value {
     let (namespace, epoch, producer, _) = X_SOURCE;
     let e = &f.configs[0];
     json!({"model":model,"session_id":e.session,"session_generation":e.generation,"x_id":producer,
-        "source_namespace":namespace,"source_epoch":epoch,"socket":f.dir.join("x.sock"),
+        "source_namespace":namespace,"source_epoch":epoch,"socket":f.dir.join(socket_name),
         "e":{"socket":f.dir.join("e.sock"),"authority_id":"E","authority_epoch":"1","schema_revision":e.revision().unwrap(),"reply_namespace":"economic-session/replies","producer_id":e.producer},
         "s":{"socket":f.dir.join("s.sock"),"authority_id":"S","authority_epoch":"1","schema_revision":S_SCHEMA,"reply_namespace":S_REPLIES,"producer_id":S_PRODUCER},
         "conditions":f.data["exact_release"]["conditions"],"timeout_ms":5000,"max_frame_bytes":1048576})
+}
+fn x_profile(f: &Fixture) -> Value {
+    x_profile_with(f, alpha_sim_model(), "x.sock")
 }
 fn bar(index: i64, changes: Value) -> Value {
     json!({"request_id":format!("b{index}"),"known_frontier_cut":format!("frontier{index}"),
@@ -223,62 +225,602 @@ fn bar(index: i64, changes: Value) -> Value {
         "close_changes":changes,"scenario_busts":[]})
 }
 
-const RELEASE_NS: i64 = 162;
-
+fn logical_bar_fixture() -> Fixture {
+    Fixture::build_with(
+        "100",
+        None,
+        &[("slot", &["alpha", "beta"])],
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        Some(ExactClock::LogicalBarV6),
+    )
+}
 #[test]
 fn e_formal_release_is_accepted_by_x_over_the_common_envelope() {
-    let mut f = fixture(None);
+    let mut f = logical_bar_fixture();
     committed(&mut f);
     dispatch(&mut f, "alpha");
-    let released = f.handle(0, "ReleaseExact-alpha", release_payload(&f, "alpha"));
-    assert_eq!(released["record"]["state"], "ReleasedExact", "{released}");
-    assert_eq!(
-        released["record"]["release_commit_ns"],
-        RELEASE_NS.to_string()
-    );
-    let command = released["record"]["command"].clone();
-
-    let profile: XProfile = serde_json::from_value(x_profile(&f)).unwrap();
-    profile.validate().unwrap();
-    let parsed: crate::history_simulation::runtime::ExactCommand =
-        serde_json::from_value(command.clone()).unwrap();
-    assert_eq!(serde_json::to_value(&parsed).unwrap(), command);
-
-    let e_config = f.configs[0].clone();
+    let e_config = Config::load(&f.dir.join("manifest.json"), &f.configs[0].db, None).unwrap();
     std::thread::spawn(move || service::serve(&e_config, 1, 1).unwrap());
     wait_for(&f.dir.join("e.sock"));
+    let released = exchange(
+        &f.dir.join("e.sock"),
+        &envelope("ReleaseExact-alpha", release_payload(&f, "alpha")),
+    )["payload"]
+        .clone();
+    assert_eq!(released["record"]["state"], "ReleasedExact", "{released}");
+    assert_eq!(
+        released["record"]["release_commit_ns"], "2",
+        "E 放行读数是 bar 2"
+    );
+    let command = released["record"]["command"].clone();
+    assert_eq!(command["model_ref"], json!(alpha_sim_model().model_ref()));
+
     let s_calls = Arc::new(AtomicUsize::new(0));
-    controlled_s(f.dir.join("s.sock"), RELEASE_NS, s_calls.clone());
+    controlled_s(f.dir.join("s.sock"), 2, s_calls.clone());
+    let profile: XProfile = serde_json::from_value(x_profile(&f)).unwrap();
     let x_db = f.dir.join("x.sqlite");
-    let db = x_db.clone();
     let serving = profile.clone();
+    let db = x_db.clone();
     std::thread::spawn(move || {
         let (mut c, _) = crate::economic_session::open_durable_db(&db).unwrap();
         crate::history_simulation::runtime::serve(&mut c, &serving, 1).unwrap()
     });
     let xs = f.dir.join("x.sock");
     wait_for(&xs);
-    for index in 0..RELEASE_NS {
-        assert_eq!(
-            x(&xs, "AdvanceBar", bar(index, json!([])))["kind"],
-            "SimulationBatch"
-        );
-    }
+
+    // #1621 负例：X 推进 bar 0 后前沿为 1，E 放行读数 2。X 持久写前拒绝，E 不变，S 未被调用。
+    assert_eq!(
+        x(&xs, "AdvanceBar", bar(0, json!([])))["kind"],
+        "SimulationBatch"
+    );
     let before = economic_tables(&f);
+    let x_before = tables(&x_db);
+    let early = x(&xs, "AcceptExact", command.clone());
+    assert_eq!(early["kind"], "Error", "{early}");
+    assert!(
+        early["error"]
+            .as_str()
+            .unwrap()
+            .starts_with("InvalidDomain：X 接纳时钟早于 E 持久交付"),
+        "{early}"
+    );
+    assert_eq!(
+        x(&xs, "QueryCommand", json!("cmd-alpha"))["state"],
+        "NoRecord"
+    );
+    assert_eq!(s_calls.load(Ordering::SeqCst), 0, "早 1 个读数不得调用 S");
+    assert_eq!(tables(&x_db), x_before, "拒绝不落任何 X 业务行");
+    assert_eq!(economic_tables(&f), before, "E/B 全表不变");
+    assert_eq!(query_command(&mut f, "alpha")["state"], "ReleasedExact");
+
+    // 正例：推进 bar 1 后前沿为 2 = E 放行读数，合法重试被接纳；接纳本身仍不调用 S。
+    assert_eq!(
+        x(&xs, "AdvanceBar", bar(1, json!([])))["kind"],
+        "SimulationBatch"
+    );
     let accepted = x(&xs, "AcceptExact", command.clone());
     assert_eq!(accepted["state"], "Accepted", "{accepted}");
-    assert_eq!(accepted["causal_refs"][0]["release_commit_ns"], RELEASE_NS);
-    assert_eq!(s_calls.load(Ordering::SeqCst), 0, "接纳不产生调用权");
-    assert_eq!(economic_tables(&f), before, "QueryReleasedExact 只读");
-    let claimed = x(
-        &xs,
-        "AdvanceBar",
-        bar(RELEASE_NS, json!([command["change"]])),
+    assert_eq!(
+        accepted["x_accept"],
+        json!({"received_ns":"2","first_known_ns":"2","commit_ns":"2"})
     );
+    assert_eq!(accepted["causal_refs"][0]["release_commit_ns"], "2");
+    assert_eq!(s_calls.load(Ordering::SeqCst), 0, "接纳不产生调用权");
+
+    let parsed: crate::history_simulation::runtime::ExactCommand =
+        serde_json::from_value(command.clone()).unwrap();
+    let claimed = x(&xs, "AdvanceBar", bar(2, json!([parsed.change])));
     assert_eq!(claimed["kind"], "SimulationBatch", "{claimed}");
     assert_eq!(s_calls.load(Ordering::SeqCst), 1, "S 恰一次");
     assert_eq!(
         x(&xs, "QueryCommand", json!("cmd-alpha"))["state"],
         "Observed"
     );
+    let filled = x(&xs, "AdvanceBar", bar(3, json!([])));
+    let fill = &filled["originals"][0]["event"]["fill"];
+    assert_eq!(
+        (
+            &fill["family_id"],
+            &fill["quantity"],
+            &fill["amount"],
+            &fill["fee"]
+        ),
+        (&json!("family-alpha"), &json!(2), &json!(28), &json!(1)),
+        "{filled}"
+    );
+    assert_eq!(query_command(&mut f, "alpha")["state"], "ReleasedExact");
+}
+
+/// #1407 C3 反例闭环：同一 `/6` E 放行的 `cmd-alpha`，X 装载同 `model_id`/`revision` 但 maker 费率 1%→10%
+/// 的模型时必须在 `AcceptExact` 拒绝，不得调用 S、不得落 X 业务行、不得改写 E 责任；
+/// 伪造 `command.model_ref` 匹配篡改模型亦在 E 的 `QueryReleasedExact` 遭 `IdentityConflict` 拒绝。
+#[test]
+fn swapped_fee_rate_model_and_forged_model_ref_are_rejected_without_s_calls() {
+    let mut f = logical_bar_fixture();
+    committed(&mut f);
+    dispatch(&mut f, "alpha");
+    let e_config = Config::load(&f.dir.join("manifest.json"), &f.configs[0].db, None).unwrap();
+    std::thread::spawn(move || service::serve(&e_config, 1, 1).unwrap());
+    wait_for(&f.dir.join("e.sock"));
+    let released = exchange(
+        &f.dir.join("e.sock"),
+        &envelope("ReleaseExact-alpha", release_payload(&f, "alpha")),
+    )["payload"]
+        .clone();
+    assert_eq!(released["record"]["state"], "ReleasedExact", "{released}");
+    let command = released["record"]["command"].clone();
+
+    let s_calls = Arc::new(AtomicUsize::new(0));
+    controlled_s(f.dir.join("s.sock"), 2, s_calls.clone());
+
+    let mut altered_model = alpha_sim_model();
+    altered_model.fee_profile.maker.numerator = 10;
+    assert_eq!(altered_model.model_id, alpha_sim_model().model_id);
+    assert_eq!(altered_model.revision, alpha_sim_model().revision);
+    assert_ne!(
+        altered_model.content_hash(),
+        alpha_sim_model().content_hash()
+    );
+
+    let profile: XProfile =
+        serde_json::from_value(x_profile_with(&f, altered_model.clone(), "x-alt.sock")).unwrap();
+    let x_db = f.dir.join("x-alt.sqlite");
+    let serving = profile.clone();
+    let db = x_db.clone();
+    std::thread::spawn(move || {
+        let (mut c, _) = crate::economic_session::open_durable_db(&db).unwrap();
+        crate::history_simulation::runtime::serve(&mut c, &serving, 1).unwrap()
+    });
+    let xs = f.dir.join("x-alt.sock");
+    wait_for(&xs);
+    assert_eq!(
+        x(&xs, "AdvanceBar", bar(0, json!([])))["kind"],
+        "SimulationBatch"
+    );
+    assert_eq!(
+        x(&xs, "AdvanceBar", bar(1, json!([])))["kind"],
+        "SimulationBatch"
+    );
+
+    let e_before = economic_tables(&f);
+    let x_before = tables(&x_db);
+
+    // 臂 1：原封不动递交 E 放行的 cmd-alpha → X 直接核对实际装载模型内容并拒绝。
+    let rejected = x(&xs, "AcceptExact", command.clone());
+    assert_eq!(rejected["kind"], "Error", "{rejected}");
+    assert_eq!(
+        rejected["error"],
+        "IdentityConflict：精确命令获准模型身份与 X 实际装载模型内容不符"
+    );
+
+    // 臂 2：攻击者改写 command.model_ref 以匹配篡改后的 X 模型 → E QueryReleasedExact 拒绝。
+    let mut forged = command.clone();
+    forged["model_ref"] = json!(altered_model.model_ref());
+    let forged_reply = x(&xs, "AcceptExact", forged);
+    assert_eq!(forged_reply["kind"], "Error", "{forged_reply}");
+    assert!(
+        forged_reply["error"]
+            .as_str()
+            .unwrap()
+            .contains("IdentityConflict：同 command_id 的命令内容与 E 已交付对象不同"),
+        "{forged_reply}"
+    );
+
+    assert_eq!(
+        x(&xs, "QueryCommand", json!("cmd-alpha"))["state"],
+        "NoRecord"
+    );
+    assert_eq!(s_calls.load(Ordering::SeqCst), 0, "未获准模型不得调用 S");
+    assert_eq!(tables(&x_db), x_before, "拒绝后 X 业务表零变更");
+    assert_eq!(economic_tables(&f), e_before, "E/B 全表零变更");
+    assert_eq!(query_command(&mut f, "alpha")["state"], "ReleasedExact");
+}
+
+/// #1407 C3 R2 升级配对与独立 E 守门：
+/// 1. `tb03b-finance/5` + `logical-bar/1` 历史模拟会话仍允许普通财务操作（Prepare/Reserve/Commit），
+///    但独立 E 拒绝新签 `MakeDispatchable` 与 `ReleaseExact`（`VersionUnsupported`，不要求 X 在线）；
+/// 2. 既有已提交 `Dispatchable`（如父头 `#2081` 遗留库）：原 ID 重试优先重取原回执，新 `ReleaseExact` 被拒且保持 `Dispatchable`、责任不变；
+/// 3. 既有已提交 `ReleasedExact`：原 ID / 新消息同内容重试均优先重取原回执，篡改仍 `IdentityConflict`，
+///    `QueryCommand` / `QueryReleasedExact` 原义不变；该旧 `/5` 命令原样或伪造 `model_ref` 递交 `/3` X 均被拒绝且零调用。
+#[test]
+fn legacy_v5_command_cannot_borrow_v3_x_model() {
+    let mut f = Fixture::build_with(
+        "100",
+        None,
+        &[("slot", &["alpha", "beta"])],
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        Some(ExactClock::LogicalBar),
+    );
+    committed(&mut f);
+
+    // 1) 未进入 Dispatchable 时：独立 E 拒绝新 MakeDispatchable，E/B 全表零变更。
+    let e_before_new_dispatch = economic_tables(&f);
+    let refused_md = f.handle(0, "MakeDispatchable-alpha", dispatch_payload(&f, "alpha"));
+    assert_eq!(refused_md["kind"], "Error", "{refused_md}");
+    assert!(
+        refused_md["error"]
+            .as_str()
+            .unwrap()
+            .starts_with("VersionUnsupported："),
+        "{refused_md}"
+    );
+    assert_eq!(economic_tables(&f), e_before_new_dispatch);
+
+    // 2) 模拟父头 #2081 历史库中已提交的 Dispatchable（绕过新写门直接调用 persist 落历史原件）。
+    let raw_input = std::fs::read_to_string(f.dir.join("input.json")).unwrap();
+    let commit_key = format!("{}:CommitDecision:{}", REV_V5, hash(&json!("alpha")));
+    let b_config = &f.configs[1];
+    let commit_proof = proof(&f.configs[0], &b_config.domain, &commit_key).unwrap();
+    let md_env = envelope("MakeDispatchable-alpha", dispatch_payload(&f, "alpha"));
+    let historical_md = persist(
+        &mut f.dbs[0],
+        &f.configs[0],
+        1,
+        &md_env,
+        json!({"input_raw": raw_input, "commit_proof": commit_proof}),
+    )
+    .unwrap();
+    assert_eq!(
+        historical_md["kind"], "DispatchableReceipt",
+        "{historical_md}"
+    );
+
+    // 已有 Dispatchable：原 ID 重试优先查回原收据；QueryCommand 仍为 Dispatchable；新 ReleaseExact 被拒且不改状态。
+    let e_dispatchable = economic_tables(&f);
+    let replay_md = f.handle(0, "MakeDispatchable-alpha", dispatch_payload(&f, "alpha"));
+    assert_eq!(replay_md, historical_md);
+    assert_eq!(query_command(&mut f, "alpha")["state"], "Dispatchable");
+    let refused_rel = f.handle(0, "ReleaseExact-alpha", release_payload(&f, "alpha"));
+    assert_eq!(refused_rel["kind"], "Error", "{refused_rel}");
+    assert!(
+        refused_rel["error"]
+            .as_str()
+            .unwrap()
+            .starts_with("VersionUnsupported："),
+        "{refused_rel}"
+    );
+    assert_eq!(query_command(&mut f, "alpha")["state"], "Dispatchable");
+    assert_eq!(economic_tables(&f), e_dispatchable);
+
+    // 3) 模拟父头 #2081 历史库中已提交的 ReleasedExact：原 ID 重试优先查回，篡改仍 IdentityConflict。
+    let rel_env = envelope("ReleaseExact-alpha", release_payload(&f, "alpha"));
+    let historical_rel = persist(
+        &mut f.dbs[0],
+        &f.configs[0],
+        1,
+        &rel_env,
+        json!({"input_raw": raw_input}),
+    )
+    .unwrap();
+    assert_eq!(
+        historical_rel["record"]["state"], "ReleasedExact",
+        "{historical_rel}"
+    );
+    let legacy_command = historical_rel["record"]["command"].clone();
+    assert!(legacy_command.get("model_ref").is_none());
+
+    let e_config = Config::load(&f.dir.join("manifest.json"), &f.configs[0].db, None).unwrap();
+    std::thread::spawn(move || service::serve(&e_config, 1, 1).unwrap());
+    wait_for(&f.dir.join("e.sock"));
+    let replayed = exchange(&f.dir.join("e.sock"), &rel_env)["payload"].clone();
+    assert_eq!(replayed, historical_rel);
+    let mut tampered = release_payload(&f, "alpha");
+    tampered["x_epoch"] = json!("9");
+    let conflict = exchange(
+        &f.dir.join("e.sock"),
+        &envelope("ReleaseExact-alpha", tampered),
+    )["payload"]
+        .clone();
+    assert_eq!(conflict["kind"], "Error", "{conflict}");
+    assert!(
+        conflict["error"]
+            .as_str()
+            .unwrap()
+            .starts_with("IdentityConflict："),
+        "{conflict}"
+    );
+    // 同库另一条未释放决策 beta 的新 MakeDispatchable 仍被拒。
+    let refused_beta = exchange(
+        &f.dir.join("e.sock"),
+        &envelope("MakeDispatchable-beta", dispatch_payload(&f, "beta")),
+    )["payload"]
+        .clone();
+    assert_eq!(refused_beta["kind"], "Error", "{refused_beta}");
+    assert!(
+        refused_beta["error"]
+            .as_str()
+            .unwrap()
+            .starts_with("VersionUnsupported："),
+        "{refused_beta}"
+    );
+
+    let s_calls = Arc::new(AtomicUsize::new(0));
+    controlled_s(f.dir.join("s.sock"), 2, s_calls.clone());
+    let profile: XProfile = serde_json::from_value(x_profile(&f)).unwrap();
+    let x_db = f.dir.join("x-v5.sqlite");
+    let serving = profile.clone();
+    let db = x_db.clone();
+    std::thread::spawn(move || {
+        let (mut c, _) = crate::economic_session::open_durable_db(&db).unwrap();
+        crate::history_simulation::runtime::serve(&mut c, &serving, 1).unwrap()
+    });
+    let xs = f.dir.join("x.sock");
+    wait_for(&xs);
+    assert_eq!(
+        x(&xs, "AdvanceBar", bar(0, json!([])))["kind"],
+        "SimulationBatch"
+    );
+    assert_eq!(
+        x(&xs, "AdvanceBar", bar(1, json!([])))["kind"],
+        "SimulationBatch"
+    );
+
+    let e_before = economic_tables(&f);
+    let x_before = tables(&x_db);
+
+    // 原样递交 `/5` 命令 → X 在反序列化阶段拒绝（缺少 model_ref）。
+    let raw_reject = x(&xs, "AcceptExact", legacy_command.clone());
+    assert_eq!(raw_reject["kind"], "Error", "{raw_reject}");
+    assert!(
+        raw_reject["error"].as_str().unwrap().contains("model_ref"),
+        "{raw_reject}"
+    );
+
+    // 给 `/5` 命令强塞 X 模型的 `model_ref` → `/5` E 的 QueryReleasedExact 拒绝。
+    let mut forged = legacy_command.clone();
+    forged["model_ref"] = json!(alpha_sim_model().model_ref());
+    let forged_reject = x(&xs, "AcceptExact", forged);
+    assert_eq!(forged_reject["kind"], "Error", "{forged_reject}");
+    assert!(
+        forged_reject["error"]
+            .as_str()
+            .unwrap()
+            .contains("IdentityConflict"),
+        "{forged_reject}"
+    );
+
+    assert_eq!(
+        x(&xs, "QueryCommand", json!("cmd-alpha"))["state"],
+        "NoRecord"
+    );
+    assert_eq!(s_calls.load(Ordering::SeqCst), 0);
+    assert_eq!(tables(&x_db), x_before);
+    assert_eq!(economic_tables(&f), e_before);
+}
+
+/// #1407 C3 R3 决定性双臂：同一冻结历史目标（`x_target=X/1` + `history-sim/*` + `TestOnly` 时钟 + 无归档来源）下：
+/// - 臂 1（`b9d898dc` 形态：向目标 `X` 授予 `QueryReleasedExact`）：正式 E 拒绝新 `MakeDispatchable`/`ReleaseExact`
+///   （`VersionUnsupported`），不依赖时钟名、归档来源或 X 在线，同时保留原已提交收据重取与其余 `/5` 写入；
+/// - 臂 2（真正隔离的 C1 离线形态：未向目标 `X` 授予 `QueryReleasedExact`）：离线 `MakeDispatchable`/`ReleaseExact`
+///   与原 `unit` 查询继续通过；真实 X 身份经正式 E socket 请求 `QueryReleasedExact` 必然被 `Config::authorized` 拒绝，
+///   且 `manifest_hash` 已在 init 冻结，永不可向真实 X 兑现。
+#[test]
+fn testonly_fin5_distinguishes_x_authorized_pairing_from_isolated_c1() {
+    // 臂 1：TestOnly + 无归档来源 + X 获准 QueryReleasedExact（b9d898dc 正式配对形态）→ 拒新交付。
+    let mut paired = Fixture::build_with(
+        "100",
+        None,
+        &[("slot", &["alpha", "beta"])],
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        Some(ExactClock::TestOnlyWithX),
+    );
+    assert_eq!(paired.configs[0].manifest["clock"]["kind"], "TestOnly");
+    assert!(paired.configs[0]
+        .manifest
+        .get("history_simulation_source")
+        .is_none());
+    committed(&mut paired);
+    let paired_before = economic_tables(&paired);
+
+    let paired_cfg = Config::load(
+        &paired.dir.join("manifest.json"),
+        &paired.configs[0].db,
+        None,
+    )
+    .unwrap();
+    std::thread::spawn(move || service::serve(&paired_cfg, 1, 1).unwrap());
+    wait_for(&paired.dir.join("e.sock"));
+
+    let refused_md = exchange(
+        &paired.dir.join("e.sock"),
+        &envelope("MakeDispatchable-alpha", dispatch_payload(&paired, "alpha")),
+    )["payload"]
+        .clone();
+    assert_eq!(refused_md["kind"], "Error", "{refused_md}");
+    assert!(
+        refused_md["error"]
+            .as_str()
+            .unwrap()
+            .starts_with("VersionUnsupported："),
+        "{refused_md}"
+    );
+    assert_eq!(economic_tables(&paired), paired_before);
+
+    // 臂 2：相同冻结目标 + TestOnly + 无归档来源，但不向目标 X 授予 QueryReleasedExact（真正隔离的 C1 离线）。
+    let mut isolated = Fixture::build_with(
+        "100",
+        None,
+        &[("slot", &["alpha", "beta"])],
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        Some(ExactClock::TestOnly),
+    );
+    assert_eq!(isolated.configs[0].manifest["clock"]["kind"], "TestOnly");
+    assert!(isolated.configs[0]
+        .manifest
+        .get("history_simulation_source")
+        .is_none());
+    committed(&mut isolated);
+
+    let iso_cfg = Config::load(
+        &isolated.dir.join("manifest.json"),
+        &isolated.configs[0].db,
+        None,
+    )
+    .unwrap();
+    std::thread::spawn(move || service::serve(&iso_cfg, 1, 1).unwrap());
+    wait_for(&isolated.dir.join("e.sock"));
+
+    let md = exchange(
+        &isolated.dir.join("e.sock"),
+        &envelope(
+            "MakeDispatchable-alpha",
+            dispatch_payload(&isolated, "alpha"),
+        ),
+    )["payload"]
+        .clone();
+    assert_eq!(md["kind"], "DispatchableReceipt", "{md}");
+    let rel = exchange(
+        &isolated.dir.join("e.sock"),
+        &envelope("ReleaseExact-alpha", release_payload(&isolated, "alpha")),
+    )["payload"]
+        .clone();
+    assert_eq!(rel["kind"], "ReleasedExactReceipt", "{rel}");
+    assert_eq!(rel["record"]["release_commit_ns"], "162");
+
+    // 真实 X 身份（producer_id="X"）向该隔离 E 发起 QueryReleasedExact 必被 Config::authorized 拒绝，永无法兑现。
+    let (ns, ep, prod, pep) = X_SOURCE;
+    let q_payload = authority_query(&isolated, &rel["record"]["command"], "1");
+    let x_env = json!({
+        "schema_revision": "economic-session/1",
+        "session_id": isolated.configs[0].session,
+        "session_generation": isolated.configs[0].generation,
+        "source_namespace": ns,
+        "source_epoch": ep,
+        "message_id": "x-try-redeem-isolated-c1",
+        "producer_id": prod,
+        "producer_epoch": pep,
+        "payload_hash": hash(&q_payload),
+        "causal_refs": [],
+        "payload": q_payload,
+    });
+    let x_reply = exchange(&isolated.dir.join("e.sock"), &x_env)["payload"].clone();
+    assert_eq!(x_reply["kind"], "Error", "{x_reply}");
+    assert!(
+        x_reply["error"].as_str().unwrap().contains("来源未获准"),
+        "{x_reply}"
+    );
+}
+
+/// #1407 C3 R4 B1 守门精确化：
+/// 1. 冻结 `x_target=X/1`，但 `authorized_sources` 仅向 `X/2`（且故意设 `source_epoch="1"`）授
+///    `QueryReleasedExact`，另向 `X/1` 仅授 `ReadView`（不可跨项拼权限）：
+///    - 离线 `MakeDispatchable` / `ReleaseExact` 放行；
+///    - 真实 `X/1` 查 `QueryReleasedExact` 被 E `Config::authorized` 拒绝（`来源未获准`）；
+///    - `X/2` 即使伪造 `model_ref` 试图以 `writer_epoch=2` 接纳该 `x_epoch=1` 命令亦被拒绝。
+/// 2. 冻结 `x_target=X/1`，同一条授权项匹配 `producer_id="X"` + `producer_epoch="1"` +
+///    `QueryReleasedExact`，但 `source_namespace="custom-sim-ns"`、`source_epoch="99"`：
+///    - 不把可配置来源 `source_namespace`/`source_epoch` 误当作 writer epoch，E 仍以
+///      `VersionUnsupported` 拒绝新交付。
+#[test]
+fn fin5_gate_requires_same_entry_target_x_id_and_writer_epoch() {
+    // 1) 错代 X/2 授权 + X/1 仅 ReadView（拆项）：离线可签，真实 X/1 查不出。
+    let mut wrong_epoch = Fixture::build_with(
+        "100",
+        None,
+        &[("slot", &["alpha", "beta"])],
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        Some(ExactClock::TestOnlyWrongEpochAndSplitX),
+    );
+    committed(&mut wrong_epoch);
+    let we_cfg = Config::load(
+        &wrong_epoch.dir.join("manifest.json"),
+        &wrong_epoch.configs[0].db,
+        None,
+    )
+    .unwrap();
+    std::thread::spawn(move || service::serve(&we_cfg, 1, 1).unwrap());
+    wait_for(&wrong_epoch.dir.join("e.sock"));
+
+    let md = exchange(
+        &wrong_epoch.dir.join("e.sock"),
+        &envelope(
+            "MakeDispatchable-alpha",
+            dispatch_payload(&wrong_epoch, "alpha"),
+        ),
+    )["payload"]
+        .clone();
+    assert_eq!(md["kind"], "DispatchableReceipt", "{md}");
+    let rel = exchange(
+        &wrong_epoch.dir.join("e.sock"),
+        &envelope("ReleaseExact-alpha", release_payload(&wrong_epoch, "alpha")),
+    )["payload"]
+        .clone();
+    assert_eq!(rel["kind"], "ReleasedExactReceipt", "{rel}");
+
+    // 真实 X/1 发起 QueryReleasedExact 必被 Config::authorized 拒（来源未获准）。
+    let q_payload = authority_query(&wrong_epoch, &rel["record"]["command"], "1");
+    let x1_env = json!({
+        "schema_revision": "economic-session/1",
+        "session_id": wrong_epoch.configs[0].session,
+        "session_generation": wrong_epoch.configs[0].generation,
+        "source_namespace": "x-sim",
+        "source_epoch": "epoch1",
+        "message_id": "x1-query-unapproved",
+        "producer_id": "X",
+        "producer_epoch": "1",
+        "payload_hash": hash(&q_payload),
+        "causal_refs": [],
+        "payload": q_payload,
+    });
+    let x1_reply = exchange(&wrong_epoch.dir.join("e.sock"), &x1_env)["payload"].clone();
+    assert_eq!(x1_reply["kind"], "Error", "{x1_reply}");
+    assert!(
+        x1_reply["error"].as_str().unwrap().contains("来源未获准"),
+        "{x1_reply}"
+    );
+
+    // 2) 非 "1" 的 source_epoch="99" 但同一条授权项匹配 (X, producer_epoch="1", QueryReleasedExact)：必须拒绝。
+    let mut custom_src = Fixture::build_with(
+        "100",
+        None,
+        &[("slot", &["alpha", "beta"])],
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        Some(ExactClock::TestOnlyCustomSourceEpochX),
+    );
+    committed(&mut custom_src);
+    let before = economic_tables(&custom_src);
+    let refused = custom_src.handle(
+        0,
+        "MakeDispatchable-alpha",
+        dispatch_payload(&custom_src, "alpha"),
+    );
+    assert_eq!(refused["kind"], "Error", "{refused}");
+    assert!(
+        refused["error"]
+            .as_str()
+            .unwrap()
+            .starts_with("VersionUnsupported："),
+        "{refused}"
+    );
+    assert_eq!(economic_tables(&custom_src), before);
 }

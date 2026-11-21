@@ -308,6 +308,45 @@ def _page_changes(changes, domain, base, end):
         raise ValueError("分页变化未达固定前沿")
 
 
+ECONOMIC_PROJECTION_REVISION = "economic-read-projection/1"
+PROJECTION_ORIGINAL_KINDS = ("fact", "allocation", "decision", "grant", "command", "model")
+
+
+def _raise_if_read_error(response):
+    if type(response) is dict and response.get("kind") == "EconomicReadError":
+        _page_fields(response, ("schema_revision", "kind", "code", "detail", "transfer_id"), "EconomicReadError")
+        if response["schema_revision"] != ECONOMIC_PAGE_REVISION:
+            raise ValueError("EconomicReadError 页协议版本不符")
+        code, detail = response["code"], response["detail"]
+        if type(code) is not str or not code or type(detail) is not str or not detail:
+            raise ValueError("EconomicReadError 错误码或详情缺失")
+        raise ValueError(detail if detail.startswith(code) else f"{code}：{detail}")
+
+
+def _verify_projection_view(view, expected_cut, *, as_known_ns=None):
+    if view.get("projection_revision") != ECONOMIC_PROJECTION_REVISION:
+        raise ValueError("投影视图版本不符")
+    if view.get("audit_verified") is not True:
+        raise ValueError("投影视图缺少完整审计确认")
+    _page_hash(view.get("authoritative_image_hash"), "authoritative_image_hash")
+    _page_integer(view.get("authoritative_image_bytes"), "authoritative_image_bytes", positive=True)
+    projection = view.get("projection")
+    if type(projection) is not dict:
+        raise ValueError("投影视图正文非对象")
+    proj_bytes = canonical(projection)
+    if _page_hash(view.get("projection_hash"), "projection_hash") != hashlib.sha256(proj_bytes).hexdigest():
+        raise ValueError("投影视图摘要与投影正文不符")
+    if _page_integer(view.get("projection_bytes"), "projection_bytes", positive=True) != len(proj_bytes):
+        raise ValueError("投影视图字节长度与投影正文不符")
+    if type(view.get("omitted_peer_images")) is not list:
+        raise ValueError("投影视图省略证明锚点列表缺失")
+    _page_integer(view.get("commit_ns"), "commit_ns")
+    if as_known_ns is not None and int(view["commit_ns"]) > int(as_known_ns):
+        raise ValueError("投影视图晚于获知截止")
+    if expected_cut is not None and view.get("cut") != expected_cut:
+        raise ValueError("投影视图 cut 与请求固定切面不符")
+
+
 def _verify_page_document(value, descriptor, query, *, producer, session_id,
                           session_generation, manifest_hash, producer_epoch, owner_epochs):
     """只核页描述符与原逻辑对象的身份投影；金融 oracle 仍在调用方。"""
@@ -324,12 +363,37 @@ def _verify_page_document(value, descriptor, query, *, producer, session_id,
             if (query["as_known_ns"] is not None
                     and int(value["commit_ns"]) > int(query["as_known_ns"])):
                 raise ValueError("分页正文晚于获知截止")
+        elif kind == "EconomicProjectionView":
+            if value.get("session_id") != session_id or value.get("session_generation") != session_generation:
+                raise ValueError("投影正文会话身份不符")
+            _verify_projection_view(value, query["cut"], as_known_ns=query["as_known_ns"])
+        elif kind == "EconomicOriginalAtCut":
+            if (value.get("projection_revision") != ECONOMIC_PROJECTION_REVISION
+                    or value.get("session_id") != session_id
+                    or value.get("session_generation") != session_generation
+                    or value.get("audit_verified") is not True
+                    or value.get("original_kind") != query["kind"]
+                    or value.get("object_id") != query["object_id"]
+                    or value.get("cut") != query["cut"]):
+                raise ValueError("同切面原件正文与请求身份或切面不符")
+            _page_hash(value.get("authoritative_image_hash"), "authoritative_image_hash")
+            _page_integer(value.get("authoritative_image_bytes"), "authoritative_image_bytes", positive=True)
+            _page_integer(value.get("commit_ns"), "commit_ns")
         else:
             _page_changes(value.get("changes"), producer, query["after_cut"], value["cut"])
         return
     if (value.get("session_id") != session_id or value.get("session_generation") != session_generation
             or value.get("manifest_hash") != manifest_hash):
         raise ValueError("Q 分页正文会话/manifest 不同")
+    if kind == "EconomicProjectionOriginal":
+        if (value.get("projection_revision") != ECONOMIC_PROJECTION_REVISION
+                or value.get("domain_id") != query["domain_id"]
+                or value.get("original_kind") != query["kind"]
+                or value.get("object_id") != query["object_id"]
+                or value.get("cuts") != query["cuts"]
+                or value.get("cuts") != descriptor["fixed_cuts"]):
+            raise ValueError("Q 同切面原件正文与固定切面向量或身份不符")
+        return
     _page_fields(value.get("domains"), owner_epochs, "正文 domains")
     for domain, view in value["domains"].items():
         if type(view) is not dict or view.get("status") not in ("Available", "Unavailable"):
@@ -339,7 +403,7 @@ def _verify_page_document(value, descriptor, query, *, producer, session_id,
             if fixed is not None:
                 raise ValueError("Unavailable 不能冒充已固定 cut")
             continue
-        actual = view.get("cut" if kind == "EconomicSnapshot" else "next_cut")
+        actual = view.get("cut" if kind in ("EconomicSnapshot", "EconomicProjection") else "next_cut")
         _page_cut(actual, domain)
         if fixed != actual:
             raise ValueError("Q 正文 cut 与描述符不同")
@@ -351,6 +415,11 @@ def _verify_page_document(value, descriptor, query, *, producer, session_id,
             if (query["as_known_ns"] is not None
                     and int(view["commit_ns"]) > int(query["as_known_ns"])):
                 raise ValueError("Q 正文晚于获知截止")
+        elif kind == "EconomicProjection":
+            _verify_projection_view(view, None if query["cuts"] is None else query["cuts"][domain],
+                                    as_known_ns=query["as_known_ns"])
+            if view.get("writer_epoch") != owner_epochs[domain]:
+                raise ValueError("Q 投影域 writer_epoch 与描述符不符")
         elif view.get("base_cut") != query["cuts"][domain]:
             raise ValueError("Q watch 正文 base cut 与请求不同")
         else:
@@ -370,6 +439,24 @@ def _verify_page_document(value, descriptor, query, *, producer, session_id,
               or value.get("mode") != ("AsKnown" if query["cuts"] is not None
                                        or query["as_known_ns"] is not None else "Current")):
             raise ValueError("Q snapshot 模式或获知选择不同")
+    elif kind == "EconomicProjection":
+        if value.get("projection_revision") != ECONOMIC_PROJECTION_REVISION:
+            raise ValueError("Q 投影版本不符")
+        completeness = ("CompleteProjectionVector"
+                        if all(v["status"] == "Available" for v in value["domains"].values())
+                        else "PartialProjectionVector")
+        if value.get("projection_completeness") != completeness:
+            raise ValueError("Q projection 完整性标签与域状态不同")
+        token = "economic-projection-" + digest({k: v for k, v in value.items() if k != "projection_token"})
+        if value.get("projection_token") != token:
+            raise ValueError("Q projection 原 token 摘要不同")
+        if query["projection_token"] is not None:
+            if token != query["projection_token"]:
+                raise ValueError("Q projection 未返回请求 token")
+        elif (value.get("as_known_ns") != query["as_known_ns"]
+              or value.get("mode") != ("AsKnown" if query["cuts"] is not None
+                                       or query["as_known_ns"] is not None else "Current")):
+            raise ValueError("Q projection 模式或获知选择不同")
 
 
 def read_economic_pages(query, fetch, *, session_id, session_generation,
@@ -410,31 +497,56 @@ def read_economic_pages(query, fetch, *, session_id, session_generation,
             raise ValueError("分页 owner 身份或 epoch 不符")
     else:
         raise ValueError("分页生产者身份不符")
-    kinds = ({"snapshot": "EconomicSnapshot", "watch": "EconomicWatch"} if public
-             else {"ReadView": "EconomicView", "Watch": "EconomicChanges"})
+    kinds = ({
+        "snapshot": "EconomicSnapshot",
+        "watch": "EconomicWatch",
+        "projection": "EconomicProjection",
+        "projection_original": "EconomicProjectionOriginal",
+    } if public else {
+        "ReadView": "EconomicView",
+        "Watch": "EconomicChanges",
+        "ReadProjection": "EconomicProjectionView",
+        "ReadOriginalAtCut": "EconomicOriginalAtCut",
+    })
     if type(query) is not dict or query.get("op") not in kinds:
         raise ValueError("分页只接受已声明的原只读操作")
     op = query["op"]
     expected_kind = kinds[op]
-    query_fields = {"ReadView": ("op", "cut", "as_known_ns"), "Watch": ("op", "after_cut"),
-                    "snapshot": ("op", "cuts", "as_known_ns", "snapshot_token"), "watch": ("op", "cuts")}
+    query_fields = {
+        "ReadView": ("op", "cut", "as_known_ns"),
+        "Watch": ("op", "after_cut"),
+        "ReadProjection": ("op", "projection_revision", "cut", "as_known_ns"),
+        "ReadOriginalAtCut": ("op", "projection_revision", "cut", "kind", "object_id"),
+        "snapshot": ("op", "cuts", "as_known_ns", "snapshot_token"),
+        "watch": ("op", "cuts"),
+        "projection": ("op", "projection_revision", "cuts", "as_known_ns", "projection_token"),
+        "projection_original": ("op", "projection_revision", "domain_id", "kind", "object_id", "cuts"),
+    }
     _page_fields(query, query_fields[op], op)
-    if op in ("ReadView", "Watch"):
-        selected = query["cut" if op == "ReadView" else "after_cut"]
+    if op in ("ReadProjection", "ReadOriginalAtCut", "projection", "projection_original"):
+        if query["projection_revision"] != ECONOMIC_PROJECTION_REVISION:
+            raise ValueError("投影查询版本不符")
+    if op in ("ReadView", "Watch", "ReadProjection", "ReadOriginalAtCut"):
+        selected = query["cut" if op != "Watch" else "after_cut"]
         if selected is not None:
             _page_cut(selected, producer)
-        if op == "ReadView":
+        elif op == "ReadOriginalAtCut":
+            raise ValueError("ReadOriginalAtCut 须指定固定 cut")
+        if op in ("ReadView", "ReadProjection"):
             if query["as_known_ns"] is not None:
                 _page_integer(query["as_known_ns"], "as_known_ns")
             if selected is not None and query["as_known_ns"] is not None:
                 raise ValueError("固定 cut 与 as_known_ns 不可混用")
+        if op == "ReadOriginalAtCut":
+            if query["kind"] not in PROJECTION_ORIGINAL_KINDS or type(query["object_id"]) is not str or not query["object_id"]:
+                raise ValueError("ReadOriginalAtCut 原件类型或身份非法")
     else:
         if query["cuts"] is not None:
             _page_fields(query["cuts"], owner_epochs, "cuts")
             for domain, cut in query["cuts"].items():
                 _page_cut(cut, domain)
-        elif op == "watch":
-            raise ValueError("watch 须给出完整 base cuts")
+        elif op in ("watch", "projection_original"):
+            raise ValueError(f"{op} 须给出完整固定 cuts 向量")
         if op == "snapshot":
             token = query["snapshot_token"]
             if token is not None and (type(token) is not str or not token
@@ -444,6 +556,20 @@ def read_economic_pages(query, fetch, *, session_id, session_generation,
                 _page_integer(query["as_known_ns"], "as_known_ns")
                 if query["cuts"] is not None:
                     raise ValueError("固定向量与 as_known_ns 不可混用")
+        elif op == "projection":
+            token = query["projection_token"]
+            if token is not None and (type(token) is not str or not token
+                                      or query["cuts"] is not None or query["as_known_ns"] is not None):
+                raise ValueError("projection token 不能混入新选择条件")
+            if query["as_known_ns"] is not None:
+                _page_integer(query["as_known_ns"], "as_known_ns")
+                if query["cuts"] is not None:
+                    raise ValueError("固定向量与 as_known_ns 不可混用")
+        elif op == "projection_original":
+            if (query["domain_id"] not in owner_epochs
+                    or query["kind"] not in PROJECTION_ORIGINAL_KINDS
+                    or type(query["object_id"]) is not str or not query["object_id"]):
+                raise ValueError("projection_original 域、类型或身份非法")
     query = decode_frame(canonical(query))
     query_hash = digest(query)
 
@@ -463,6 +589,7 @@ def read_economic_pages(query, fetch, *, session_id, session_generation,
 
     opened = call({"schema_revision": ECONOMIC_PAGE_REVISION, "op": "EconomicReadOpen",
                    "query": query, "requested_remaining_ms": str(remaining_ms())})
+    _raise_if_read_error(opened)
     _page_fields(opened, ("schema_revision", "kind", "descriptor", "descriptor_sha256"), "Open")
     if opened["schema_revision"] != ECONOMIC_PAGE_REVISION or opened["kind"] != "EconomicReadOpened":
         raise ValueError("Open 页协议版本或 kind 不符")
@@ -481,6 +608,7 @@ def read_economic_pages(query, fetch, *, session_id, session_generation,
     def close():
         response = call({"schema_revision": ECONOMIC_PAGE_REVISION, "op": "EconomicReadClose",
                          "transfer_id": transfer_id, "descriptor_sha256": descriptor_hash})
+        _raise_if_read_error(response)
         _page_fields(response, ("schema_revision", "kind", "transfer_id", "descriptor_sha256"), "Close")
         if response != {"schema_revision": ECONOMIC_PAGE_REVISION, "kind": "EconomicReadClosed",
                         "transfer_id": transfer_id, "descriptor_sha256": descriptor_hash}:
@@ -505,7 +633,7 @@ def read_economic_pages(query, fetch, *, session_id, session_generation,
                 _page_cut(cut, domain)
         if not public:
             fixed_cut = descriptor["fixed_cuts"][producer]
-            if op == "ReadView" and query["cut"] is not None and fixed_cut != query["cut"]:
+            if op in ("ReadView", "ReadProjection", "ReadOriginalAtCut") and query["cut"] is not None and fixed_cut != query["cut"]:
                 raise ValueError("descriptor 未固定请求 cut")
             if (op == "Watch" and query["after_cut"] is not None
                     and int(fixed_cut["commit_seq"]) < int(query["after_cut"]["commit_seq"])):
@@ -525,6 +653,7 @@ def read_economic_pages(query, fetch, *, session_id, session_generation,
             response = call({"schema_revision": ECONOMIC_PAGE_REVISION, "op": "EconomicReadPage",
                              "transfer_id": transfer_id, "descriptor_sha256": descriptor_hash,
                              "offset": str(offset), "requested_remaining_ms": str(remaining_ms())})
+            _raise_if_read_error(response)
             _page_fields(response, ("schema_revision", "kind", "transfer_id", "descriptor_sha256", "offset",
                                     "raw_byte_count", "chunk_sha256", "data_base64", "next_offset", "done"), "Page")
             if (response["schema_revision"] != ECONOMIC_PAGE_REVISION or response["kind"] != "EconomicReadPage"

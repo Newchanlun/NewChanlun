@@ -574,10 +574,21 @@ fn derive(
     event: &Value,
     record: &Value,
 ) -> Result<(), String> {
+    let sp = json!({"profile":event["stable_point"]["profile"],"seq":event["stable_point"]["seq"]});
+    derive_with_sp(book, before, seq, ns, sp, record)
+}
+
+fn derive_with_sp(
+    book: &mut Value,
+    before: Option<(Value, Option<i64>)>,
+    seq: i64,
+    ns: &str,
+    sp: Value,
+    record: &Value,
+) -> Result<(), String> {
     let n = Numbers::of(book)?;
     let status = n.status()?;
     let remaining = n.cost_remaining()?;
-    let sp = json!({"profile":event["stable_point"]["profile"],"seq":event["stable_point"]["seq"]});
     let mut events = book["phase"]["events"]
         .as_array()
         .cloned()
@@ -702,6 +713,9 @@ fn apply_with(
     )?;
     if super::tb03c_allocation::is_projected(&event) {
         return apply_projected(image, record, &doc, &event, seq, ns);
+    }
+    if super::tb03c_sim_resolve::is_history_sim(&event) {
+        return apply_history_sim(image, record, &doc, &event, seq, ns);
     }
     if event.get("valuation_observation").is_some() {
         return Err("SchemaUnsupported：估值观察只记 E，不进 B 成本账（C05.4）".into());
@@ -1007,6 +1021,163 @@ fn apply_projected(
         &mut next,
         "history",
         json!({"kind":if unmatched.is_some(){"Unmatched"}else{"ApplyAllocation"},"application":a,"source":event["source"],"event":event,"resolved_allocation":allocation,"commit_seq":seq.to_string(),"commit_ns":ns}),
+    );
+    Ok((next, unmatched.is_some()))
+}
+
+/// #1425 TB-04-F 单一明确原责任域：消费 E 已持久验证的模拟成交与具名因果费用分配。
+/// 费用须待前件成交在本 B 已持久 Applied；不信任原件自报归属，只消费 E `resolved_allocation`。
+fn apply_history_sim(
+    image: &Value,
+    record: &Value,
+    doc: &Value,
+    event: &Value,
+    seq: i64,
+    ns: &str,
+) -> Result<(Value, bool), String> {
+    let allocation = record
+        .get("resolved_allocation")
+        .ok_or("AwaitingDependency：缺 E 逐重分配证明")?;
+    let id = super::tb03c_allocation::application_id(record)?;
+    let domain = super::tb03c_allocation::application_domain(record)?;
+    let source_kind = required(allocation, "source_kind")?;
+    if source_kind != super::tb03c_sim_resolve::SOURCE_FILL
+        && source_kind != super::tb03c_sim_resolve::SOURCE_FEE
+    {
+        return Err("SchemaUnsupported：未知模拟分配来源类型".into());
+    }
+    if source_kind == super::tb03c_sim_resolve::SOURCE_FEE {
+        let orig_key = required(allocation, "original_fact_key")?;
+        let orig_alloc = required(allocation, "original_allocation_id")?;
+        if !array(image, "applied")?.iter().any(|a| {
+            a["fact_key"] == orig_key
+                && a["allocation_id"] == orig_alloc
+                && a["status"] == "Applied"
+        }) {
+            return Err("AwaitingDependency：本重尚未持久应用模拟费用前件 fill".into());
+        }
+    }
+    let old = &image["book"];
+    let mut next = image.clone();
+    let unmatched = if old.is_null() {
+        Some("opening_missing_undeclared")
+    } else if old["family_id"] != allocation["family_id"] {
+        Some("family_mismatch")
+    } else {
+        None
+    };
+    if let Some(code) = unmatched {
+        push(
+            &mut next,
+            "unmatched",
+            json!({
+                "fact_key": record["fact_key"],
+                "allocation_id": id,
+                "reason_code": code,
+                "reason": code,
+                "command_id": allocation["command_id"],
+                "grant_id": allocation["grant_id"],
+                "responsibility_ref": allocation["responsibility_ref"],
+                "fill_allocation_policy_id": allocation["fill_allocation_policy_id"],
+                "policy_revision": allocation["policy_revision"],
+                "commit_seq": seq.to_string(),
+                "commit_ns": ns,
+            }),
+        );
+    } else {
+        if old["side"] != "long"
+            || old["symbol"] != allocation["symbol"]
+            || old["chong_id"] != allocation["chong_id"]
+            || old["units"] != doc["units"]
+        {
+            return Err("IdentityConflict：模拟买单分配与重的方向/身份/量纲不符".into());
+        }
+        let mut book = old.clone();
+        let n = Numbers::of(old)?;
+        let before = Some((json!(n.status()?), n.cost_remaining()?));
+        let units = integer(allocation, "units")?;
+        let quantity = add(integer(old, "actual_quantity")?, units)?;
+        if quantity < 0 {
+            return Err("InvalidDomain：重内不穿零：持量不可为负".into());
+        }
+        book["actual_quantity"] = json!(quantity.to_string());
+        income(&mut book, &allocation["income_changes"])?;
+        let resolve_cut = record["e_resolution_proof"]["receipt"]["cut"].clone();
+        let mut comps = Vec::new();
+        if source_kind == super::tb03c_sim_resolve::SOURCE_FILL {
+            if units <= 0 || integer(allocation, "commission")? != 0 {
+                return Err("IdentityConflict：模拟成交分配数量或延期费用形状不符".into());
+            }
+            comps.push(json!({
+                "kind": "acquisition_cash",
+                "canonical_amount": allocation["acquisition_cash"],
+                "derivation": {
+                    "kind": "E_resolved_history_sim_fill",
+                    "allocation_id": id,
+                    "command_id": allocation["command_id"],
+                    "grant_id": allocation["grant_id"],
+                    "responsibility_ref": allocation["responsibility_ref"],
+                    "resolve_cut": resolve_cut,
+                }
+            }));
+        } else {
+            if units != 0 {
+                return Err("IdentityConflict：模拟费用分配不得变动数量".into());
+            }
+            comps.push(json!({
+                "kind": "fee_only",
+                "canonical_amount": allocation["fee_only"],
+                "fee_type": allocation["fee_type"],
+                "cause": "fill",
+                "derivation": {
+                    "kind": "E_resolved_history_sim_fee",
+                    "allocation_id": id,
+                    "command_id": allocation["command_id"],
+                    "grant_id": allocation["grant_id"],
+                    "responsibility_ref": allocation["responsibility_ref"],
+                    "original_fact_key": allocation["original_fact_key"],
+                    "original_allocation_id": allocation["original_allocation_id"],
+                    "resolve_cut": resolve_cut,
+                }
+            }));
+        }
+        component_effects(&mut book, &comps, record, false)?;
+        let bar_index = doc["bar"]["index"]
+            .as_i64()
+            .filter(|&v| v >= 0)
+            .ok_or("InvalidDomain：模拟原件缺 bar.index")?;
+        let sp = json!({"profile": "logical-bar/1", "seq": bar_index.to_string()});
+        derive_with_sp(&mut book, before, seq, ns, sp, record)?;
+        next["book"] = book;
+    }
+    push(&mut next, "recorded", record.clone());
+    let a = json!({
+        "fact_key": record["fact_key"],
+        "fact_hash": record["fact_hash"],
+        "allocation_id": id,
+        "target_domain": domain,
+        "status": if unmatched.is_some() { "Unmatched" } else { "Applied" },
+        "command_id": allocation["command_id"],
+        "grant_id": allocation["grant_id"],
+        "responsibility_ref": allocation["responsibility_ref"],
+        "fill_allocation_policy_id": allocation["fill_allocation_policy_id"],
+        "policy_revision": allocation["policy_revision"],
+        "commit_seq": seq.to_string(),
+        "commit_ns": ns,
+    });
+    push(&mut next, "applied", a.clone());
+    push(
+        &mut next,
+        "history",
+        json!({
+            "kind": if unmatched.is_some() { "Unmatched" } else { "ApplyAllocation" },
+            "application": a,
+            "source": event["source"],
+            "event": event,
+            "resolved_allocation": allocation,
+            "commit_seq": seq.to_string(),
+            "commit_ns": ns,
+        }),
     );
     Ok((next, unmatched.is_some()))
 }

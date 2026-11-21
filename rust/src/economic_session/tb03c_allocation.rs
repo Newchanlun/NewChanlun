@@ -378,22 +378,31 @@ pub(super) fn resolve(
     Ok(())
 }
 
+fn requires_e_resolution(event: &Value) -> bool {
+    is_projected(event) || super::tb03c_sim_resolve::is_history_sim(event)
+}
+
 /// 固定 E 已审计快照内取实际 Resolve 提交；B 保存两份证明，恢复无需当前 E。
 pub(super) fn attach_resolution(
     c: &rusqlite::Connection,
     config: &Config,
     record: &mut Value,
 ) -> Result<(), String> {
-    if !is_projected(&record["event"]) {
+    if !requires_e_resolution(&record["event"]) {
         return Ok(());
     }
+    let missing = if super::tb03c_sim_resolve::is_history_sim(&record["event"]) {
+        "AwaitingDependency：模拟事实尚无 E 持久分配"
+    } else {
+        "AwaitingDependency：净额事实尚无 E 持久分配"
+    };
     let image = super::store::latest(c)?.3;
     let row = image["fill_allocations"]
         .as_array()
-        .ok_or("AwaitingDependency：净额事实尚无 E 持久分配")?
+        .ok_or(missing)?
         .iter()
         .find(|r| r["fact_key"] == record["fact_key"])
-        .ok_or("AwaitingDependency：净额事实尚无 E 持久分配")?;
+        .ok_or(missing)?;
     let id = config
         .domain
         .strip_prefix("B:")
@@ -442,7 +451,7 @@ pub(super) fn attach_resolution(
 }
 
 pub(super) fn verify_resolution(record: &Value, config: &Config) -> Result<(), String> {
-    if !is_projected(&record["event"]) {
+    if !requires_e_resolution(&record["event"]) {
         if record.get("resolved_allocation").is_some() || record.get("e_resolution_proof").is_some()
         {
             return Err("StorageUnavailable：单重原件不得夹带净额派生证明".into());
@@ -477,8 +486,18 @@ pub(super) fn verify_resolution(record: &Value, config: &Config) -> Result<(), S
     {
         return Err("StorageUnavailable：Resolve 原消息授权/操作不符".into());
     }
-    let (mut next, covered) = super::tb03c_e::resolve_image(&ec, previous, &request["payload"])?;
-    let history = super::tb03c_e::resolve_history(&request, &covered, seq, ns);
+    let witnesses = proof["image"]["history"]
+        .as_array()
+        .and_then(|a| a.last())
+        .and_then(|e| e.get("x_execution_witnesses"));
+    let (mut next, covered) = super::tb03c_e::resolve_image_with_witnesses(
+        &ec,
+        previous,
+        &request["payload"],
+        witnesses,
+    )?;
+    let history =
+        super::tb03c_e::resolve_history_with_witnesses(&request, &covered, seq, ns, witnesses);
     next["history"]
         .as_array_mut()
         .unwrap()

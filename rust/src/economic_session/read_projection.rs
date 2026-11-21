@@ -1,0 +1,4015 @@
+//! #1425 方案 1：固定切面的只读经济投影（`economic-read-projection/1`）与同切面按需取证。
+//!
+//! 适用合同与三类读取成本边界：
+//! - 合同收口：仅适用于 `economic-session/1` + `tb03b-finance/6` + `tb03c-book/*`，不向 `/2` 或旧财务/旧书账开放；
+//!   不改写账本协议、不改原 SQLite 表结构/根链/审计、不抬 4 MiB/1 MiB 上限，不为旧 `/1` 用法新增 Job 前置。
+//! - `ReadProjection` / `ReadOriginalAtCut` 可随本域固定 `cut` 提供 `fixed_cuts`，使 owner 同时约束跨域证据；
+//!   不提供时保留本域读法，聚合端仍独立实核跨域向量。
+//! - 成本 1（完整离线重放 `audit_with_budget`）：每次 `EconomicReadOpen` 沿既有完整离线审计逐提交重放
+//!   `commits.image`（见 `store.rs::audit_with_budget`），这是全历史完整性重放开销，并非 256 KiB 分片缓冲。
+//! - 成本 2（256 KiB 分片投影扫描 `build_projection_document`）：通过 `store::stored_image_bytes_metered`
+//!   按 `READ_CHUNK`（256 KiB）流式分块读取目标 cut 的 `commits.image`，边算完整原像 `SHA-256` 并核对
+//!   `cut.root_hash`，边零缓冲跳过并摘要 8 类跨 owner 嵌入全镜像证明子树；投影输出严格 ≤ 4 MiB 共享缓存帽，
+//!   传输帧 ≤ 1 MiB。
+//! - 成本 3（同切面按需取证 `build_original_at_cut_document`）：同 256 KiB 流式扫描 + `ReadBudget` 计量
+//!   `receipts`/`applications` 查询，按调用方实际获准权限一一绑定返回证据类别，绝不借命令/分配读未授权原字节。
+//! - 所有新 SQL 均沿 `ReadBudget` 在 I/O 前后同时守 Job 与最早绝对期限，并在适用 Job 时先记实读字节。
+//! - 严格区分权威原像与投影视图：`authoritative_image_hash`/`authoritative_image_bytes` 绑定全量原像与
+//!   `cut.root_hash`，`projection_hash`/`projection_bytes` 仅绑定投影正文，不把截字段后的摘要当全镜像或包含证明。
+//! - 原件精确字节不改：面向浏览器的整数精确表示单列在 `simulation_original_text_view` / `*_exact_text`
+//!   （显式 `representation = "ExactDecimalIntegerTextProjection"`），不放松客户端严格 JSON 解析器，也不回退 `latest`。
+use super::book::hash;
+use super::service::{READ_CACHE, READ_CHUNK};
+use super::store::{
+    cut, metered_row, root_with_image_hash, stored_image_bytes_metered, stored_image_meta_metered,
+    Config, ReadBudget, StoredImage, SCHEMA_V1,
+};
+use super::tb03c_transfer::B_SOURCE_DEBIT_PROOF;
+use super::voice::{exact, OPENING_BASIS, OPENING_E_CUT, VOICE_RECORDS};
+use crate::session_protocol::{canonical_json, nonnegative, required, sha256_hex, strict_json};
+use rusqlite::Connection;
+use serde_json::{json, Map, Value};
+use sha2::{Digest, Sha256};
+use std::collections::HashSet;
+
+pub(super) const PROJECTION_REVISION: &str = "economic-read-projection/1";
+pub(super) const OP_READ_PROJECTION: &str = "ReadProjection";
+pub(super) const OP_READ_ORIGINAL_AT_CUT: &str = "ReadOriginalAtCut";
+pub(super) const PROJECTION_READ_OPS: &[&str] = &[OP_READ_PROJECTION, OP_READ_ORIGINAL_AT_CUT];
+pub(super) const ORIGINAL_AT_CUT_KINDS: &[&str] = &[
+    "fact",
+    "allocation",
+    "decision",
+    "grant",
+    "command",
+    "model",
+];
+pub(super) const KIND_PROJECTION_VIEW: &str = "EconomicProjectionView";
+pub(super) const KIND_ORIGINAL_AT_CUT: &str = "EconomicOriginalAtCut";
+const EXACT_TEXT_REPR: &str = "ExactDecimalIntegerTextProjection";
+const MAX_JSON_DEPTH: usize = 128;
+
+/// 同切面取证的实际获准权限快照：每项证据类别与所授只读权限一一绑定，不扩权。
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(super) struct ReadPermissions {
+    pub query_fact: bool,
+    pub query_allocation: bool,
+    pub query_decision: bool,
+    pub query_grant: bool,
+    pub query_command: bool,
+}
+
+/// 明确收口 `economic-read-projection/1` 适用合同：仅 `economic-session/1` + `tb03b-finance/6` + `tb03c-book/*`。
+pub(super) fn check_projection_contract(config: &Config) -> Result<(), String> {
+    if config.revision()? != SCHEMA_V1
+        || !config.book_rules()?.is_tb03c()
+        || config.manifest["finance"]["schema_revision"] != "tb03b-finance/6"
+    {
+        return Err(
+            "SchemaUnsupported：economic-read-projection/1 仅适用于 economic-session/1 + tb03b-finance/6 + tb03c-book/* 合同"
+                .into(),
+        );
+    }
+    Ok(())
+}
+
+/// 为 `EconomicReadOpen` 中的投影/同切面取证校验合同边界与原逻辑授权（不扩权、不改 `BASE_OPS`）。
+pub(super) fn check_authorization(
+    config: &Config,
+    envelope: &Value,
+    query: &Value,
+) -> Result<ReadPermissions, String> {
+    check_projection_contract(config)?;
+    let op = required(query, "op")?;
+    let check_op = |required_op: &str| -> Result<(), String> {
+        let mut req = envelope.clone();
+        req["payload"] = json!({"op": required_op});
+        config.authorized(&req)
+    };
+    let perms = ReadPermissions {
+        query_fact: check_op("QueryFact").is_ok(),
+        query_allocation: check_op("QueryAllocation").is_ok(),
+        query_decision: check_op("QueryDecision").is_ok(),
+        query_grant: check_op("QueryGrant").is_ok(),
+        query_command: check_op("QueryCommand").is_ok(),
+    };
+    match op {
+        OP_READ_PROJECTION => {
+            check_op("ReadView")?;
+            Ok(perms)
+        }
+        OP_READ_ORIGINAL_AT_CUT => {
+            check_op("ReadView")?;
+            match required(query, "kind")? {
+                "fact" => check_op("QueryFact")?,
+                "allocation" => check_op("QueryAllocation")?,
+                "decision" => check_op("QueryDecision")?,
+                "grant" => check_op("QueryGrant")?,
+                "command" => check_op("QueryCommand")?,
+                "model" => {
+                    if config.domain == "E" {
+                        if !perms.query_command && !perms.query_fact {
+                            return Err("InvalidDomain：来源未获准执行该操作".into());
+                        }
+                    } else {
+                        check_op("QueryFact")?;
+                    }
+                }
+                _ => return Err("SchemaUnsupported：未知同切面取证原件类型".into()),
+            }
+            Ok(perms)
+        }
+        _ => Err("SchemaUnsupported：未知投影读取操作".into()),
+    }
+}
+
+/// 选择固定 cut 的只读元数据（走 `ReadBudget` 计量与最早截止检查；不施加 4 MiB 原像上限）。
+/// 不存在、根不匹配或未来 cut 均当场拒绝，绝不回退 `latest`。
+pub(super) fn select_projection_meta(
+    c: &Connection,
+    config: &Config,
+    query: &Value,
+    require_explicit_cut: bool,
+    budget: &mut ReadBudget<'_>,
+) -> Result<StoredImage, String> {
+    if require_explicit_cut {
+        if query["cut"].is_null() {
+            return Err("InvalidDomain：同切面原件查询必须指定固定 cut".into());
+        }
+    } else if !query["cut"].is_null() && !query["as_known_ns"].is_null() {
+        return Err("InvalidDomain：cut与AsKnown不能同时指定".into());
+    }
+    let selected = if !query["cut"].is_null() {
+        let wanted = &query["cut"];
+        exact(wanted, &["domain_id", "commit_seq", "root_hash"])?;
+        if wanted["domain_id"] != config.domain {
+            return Err("IdentityConflict：跨域cut".into());
+        }
+        nonnegative(required(wanted, "commit_seq")?, "commit_seq")?
+    } else if !query["as_known_ns"].is_null() {
+        let ns = nonnegative(required(query, "as_known_ns")?, "as_known_ns")?;
+        budget
+            .one(
+                c,
+                "SELECT max(seq) FROM commits WHERE CAST(commit_ns AS INTEGER)<=?",
+                [ns],
+                |r| r.get::<_, Option<i64>>(0),
+            )?
+            .ok_or("MissingDependency：AsKnown早于域创世")?
+    } else {
+        budget
+            .one(c, "SELECT max(seq) FROM commits", [], |r| {
+                r.get::<_, Option<i64>>(0)
+            })?
+            .ok_or("MissingDependency：域无创世cut")?
+    };
+    let meta = stored_image_meta_metered(c, selected, budget)?;
+    if !query["cut"].is_null() && query["cut"] != cut(config, meta.seq, &meta.root) {
+        return Err("IdentityConflict：cut根不匹配".into());
+    }
+    Ok(meta)
+}
+
+/// 分块流式读取器：每次仅从 SQLite 读至多 `READ_CHUNK`（256 KiB）字节，
+/// 全程经由共同 `ReadBudget` 在 I/O 前后检查 Job 与最早截止、先计实读字节，并推进全量原像 `Sha256`。
+struct ChunkedImageStream<'a, 'b> {
+    c: &'a Connection,
+    meta: &'a StoredImage,
+    budget: &'a mut ReadBudget<'b>,
+    offset: usize,
+    buf: Vec<u8>,
+    pos: usize,
+    hasher: Sha256,
+    chunk_reads: usize,
+    max_chunk_bytes: usize,
+}
+
+impl<'a, 'b> ChunkedImageStream<'a, 'b> {
+    fn new(c: &'a Connection, meta: &'a StoredImage, budget: &'a mut ReadBudget<'b>) -> Self {
+        Self {
+            c,
+            meta,
+            budget,
+            offset: 0,
+            buf: Vec::new(),
+            pos: 0,
+            hasher: Sha256::new(),
+            chunk_reads: 0,
+            max_chunk_bytes: 0,
+        }
+    }
+
+    fn refill(&mut self) -> Result<bool, String> {
+        if self.pos < self.buf.len() {
+            return Ok(true);
+        }
+        if self.offset >= self.meta.bytes {
+            return Ok(false);
+        }
+        let take = READ_CHUNK.min(self.meta.bytes - self.offset);
+        let chunk = stored_image_bytes_metered(self.c, self.meta, self.offset, take, self.budget)?;
+        self.hasher.update(&chunk);
+        self.offset += chunk.len();
+        self.chunk_reads += 1;
+        self.max_chunk_bytes = self.max_chunk_bytes.max(chunk.len());
+        self.buf = chunk;
+        self.pos = 0;
+        Ok(true)
+    }
+
+    fn peek(&mut self) -> Result<Option<u8>, String> {
+        if !self.refill()? {
+            return Ok(None);
+        }
+        Ok(Some(self.buf[self.pos]))
+    }
+
+    fn next_byte(&mut self) -> Result<Option<u8>, String> {
+        if !self.refill()? {
+            return Ok(None);
+        }
+        let b = self.buf[self.pos];
+        self.pos += 1;
+        Ok(Some(b))
+    }
+
+    fn expect_byte(&mut self, expected: u8) -> Result<(), String> {
+        match self.next_byte()? {
+            Some(b) if b == expected => Ok(()),
+            _ => Err("StorageUnavailable：持久图像非预期JSON分隔符".into()),
+        }
+    }
+
+    fn skip_ws(&mut self) -> Result<(), String> {
+        while let Some(b) = self.peek()? {
+            if matches!(b, b' ' | b'\n' | b'\r' | b'\t') {
+                self.pos += 1;
+            } else {
+                break;
+            }
+        }
+        Ok(())
+    }
+
+    fn finish_and_verify_root(mut self, config: &Config) -> Result<String, String> {
+        self.skip_ws()?;
+        if self.peek()?.is_some() || self.offset != self.meta.bytes {
+            return Err("StorageUnavailable：持久图像存在未消费尾字节".into());
+        }
+        let digest = self.hasher.finalize();
+        let image_hash: String = digest.iter().map(|b| format!("{b:02x}")).collect();
+        let expected_root = root_with_image_hash(
+            config,
+            self.meta.seq,
+            &self.meta.previous_root,
+            &self.meta.commit_ns,
+            &image_hash,
+        );
+        if expected_root != self.meta.root {
+            return Err("StorageUnavailable：流式完整原像摘要与持久cut根不符".into());
+        }
+        self.budget.before()?;
+        Ok(image_hash)
+    }
+}
+
+fn charge_budget(remaining: &mut usize, bytes: usize) -> Result<(), String> {
+    *remaining = remaining
+        .checked_sub(bytes)
+        .ok_or("QueryBudgetExceeded：投影正文超过4MiB逻辑预算")?;
+    Ok(())
+}
+
+/// 零缓存跳过任意 JSON 子树并同步计算精确 `Sha256` 与字节数（仅 O(depth) 栈空间）。
+fn skip_and_hash_value(
+    stream: &mut ChunkedImageStream<'_, '_>,
+    depth: usize,
+) -> Result<(String, usize), String> {
+    let mut hasher = Sha256::new();
+    let mut len = 0usize;
+    skip_into_hasher(stream, &mut hasher, &mut len, depth)?;
+    let digest = hasher.finalize();
+    Ok((digest.iter().map(|b| format!("{b:02x}")).collect(), len))
+}
+
+fn skip_into_hasher(
+    stream: &mut ChunkedImageStream<'_, '_>,
+    hasher: &mut Sha256,
+    len: &mut usize,
+    depth: usize,
+) -> Result<(), String> {
+    if depth > MAX_JSON_DEPTH {
+        return Err("StorageUnavailable：JSON嵌套深度超限".into());
+    }
+    stream.skip_ws()?;
+    let Some(first) = stream.peek()? else {
+        return Err("StorageUnavailable：JSON值意外截断".into());
+    };
+    let push = |h: &mut Sha256, n: &mut usize, b: u8| {
+        h.update([b]);
+        *n += 1;
+    };
+    match first {
+        b'"' => {
+            let b = stream.next_byte()?.unwrap();
+            push(hasher, len, b);
+            let mut escaped = false;
+            loop {
+                if !stream.refill()? {
+                    return Err("StorageUnavailable：JSON字符串未闭合".into());
+                }
+                let start = stream.pos;
+                let slice = &stream.buf[start..];
+                let mut i = 0usize;
+                let mut closed = false;
+                while i < slice.len() {
+                    let c = slice[i];
+                    i += 1;
+                    if escaped {
+                        escaped = false;
+                    } else if c == b'\\' {
+                        escaped = true;
+                    } else if c == b'"' {
+                        closed = true;
+                        break;
+                    }
+                }
+                hasher.update(&slice[..i]);
+                *len += i;
+                stream.pos = start + i;
+                if closed {
+                    break;
+                }
+            }
+            Ok(())
+        }
+        b'{' => {
+            let b = stream.next_byte()?.unwrap();
+            push(hasher, len, b);
+            stream.skip_ws()?;
+            if stream.peek()? == Some(b'}') {
+                let c = stream.next_byte()?.unwrap();
+                push(hasher, len, c);
+                return Ok(());
+            }
+            loop {
+                stream.skip_ws()?;
+                if stream.peek()? != Some(b'"') {
+                    return Err("StorageUnavailable：JSON对象键非字符串".into());
+                }
+                skip_into_hasher(stream, hasher, len, depth + 1)?;
+                stream.skip_ws()?;
+                let colon = stream
+                    .next_byte()?
+                    .filter(|&c| c == b':')
+                    .ok_or("StorageUnavailable：JSON对象缺冒号")?;
+                push(hasher, len, colon);
+                skip_into_hasher(stream, hasher, len, depth + 1)?;
+                stream.skip_ws()?;
+                match stream.next_byte()? {
+                    Some(b',') => push(hasher, len, b','),
+                    Some(b'}') => {
+                        push(hasher, len, b'}');
+                        return Ok(());
+                    }
+                    _ => return Err("StorageUnavailable：JSON对象未闭合".into()),
+                }
+            }
+        }
+        b'[' => {
+            let b = stream.next_byte()?.unwrap();
+            push(hasher, len, b);
+            stream.skip_ws()?;
+            if stream.peek()? == Some(b']') {
+                let c = stream.next_byte()?.unwrap();
+                push(hasher, len, c);
+                return Ok(());
+            }
+            loop {
+                skip_into_hasher(stream, hasher, len, depth + 1)?;
+                stream.skip_ws()?;
+                match stream.next_byte()? {
+                    Some(b',') => push(hasher, len, b','),
+                    Some(b']') => {
+                        push(hasher, len, b']');
+                        return Ok(());
+                    }
+                    _ => return Err("StorageUnavailable：JSON数组未闭合".into()),
+                }
+            }
+        }
+        b't' | b'f' | b'n' => {
+            let expected: &[u8] = match first {
+                b't' => b"true",
+                b'f' => b"false",
+                _ => b"null",
+            };
+            for &e in expected {
+                let c = stream
+                    .next_byte()?
+                    .filter(|&x| x == e)
+                    .ok_or("StorageUnavailable：JSON字面量非法")?;
+                push(hasher, len, c);
+            }
+            Ok(())
+        }
+        b'-' | b'0'..=b'9' => {
+            while let Some(c) = stream.peek()? {
+                if c.is_ascii_digit() || matches!(c, b'-' | b'+' | b'.' | b'e' | b'E') {
+                    let b = stream.next_byte()?.unwrap();
+                    push(hasher, len, b);
+                } else {
+                    break;
+                }
+            }
+            Ok(())
+        }
+        _ => Err("StorageUnavailable：JSON非法起始字节".into()),
+    }
+}
+
+fn parse_string_token(
+    stream: &mut ChunkedImageStream<'_, '_>,
+    budget: &mut usize,
+) -> Result<String, String> {
+    stream.skip_ws()?;
+    stream.expect_byte(b'"')?;
+    let mut raw = vec![b'"'];
+    charge_budget(budget, 1)?;
+    let mut escaped = false;
+    loop {
+        let c = stream
+            .next_byte()?
+            .ok_or("StorageUnavailable：JSON字符串未闭合")?;
+        charge_budget(budget, 1)?;
+        raw.push(c);
+        if escaped {
+            escaped = false;
+        } else if c == b'\\' {
+            escaped = true;
+        } else if c == b'"' {
+            break;
+        }
+    }
+    serde_json::from_slice::<String>(&raw)
+        .map_err(|e| format!("StorageUnavailable：JSON字符串解析失败：{e}"))
+}
+
+#[derive(Clone)]
+enum PathSeg {
+    Key(String),
+    Index(usize),
+}
+
+fn path_to_string(path: &[PathSeg]) -> String {
+    let mut out = String::new();
+    for seg in path {
+        match seg {
+            PathSeg::Key(k) => {
+                if !out.is_empty() {
+                    out.push('.');
+                }
+                out.push_str(k);
+            }
+            PathSeg::Index(i) => {
+                out.push('[');
+                out.push_str(&i.to_string());
+                out.push(']');
+            }
+        }
+    }
+    out
+}
+
+/// 仅对显式登记的 8 类跨 owner 内联全镜像字段执行零缓冲流式摘要省略，绝不按名字盲猜。
+fn is_omitted_peer_image_path(path: &[PathSeg], key: &str) -> bool {
+    if !matches!(key, "image" | "previous_image" | "current_image") {
+        return false;
+    }
+    match path {
+        // recorded[*].{e_commit_proof, e_resolution_proof, b_source_debit_proof}.{image, previous_image}
+        [PathSeg::Key(root), PathSeg::Index(_), PathSeg::Key(proof)]
+            if root == "recorded"
+                && matches!(
+                    proof.as_str(),
+                    "e_commit_proof" | "e_resolution_proof" | B_SOURCE_DEBIT_PROOF
+                ) =>
+        {
+            true
+        }
+        // history[*].witness.{grant_proof, commit_proof}.{image, current_image}
+        [PathSeg::Key(root), PathSeg::Index(_), PathSeg::Key(w), PathSeg::Key(proof)]
+            if root == "history"
+                && w == "witness"
+                && matches!(proof.as_str(), "grant_proof" | "commit_proof") =>
+        {
+            true
+        }
+        // history[*].witness.prepared_proofs[*].{image, current_image}
+        [PathSeg::Key(root), PathSeg::Index(_), PathSeg::Key(w), PathSeg::Key(p), PathSeg::Index(_)]
+            if root == "history" && w == "witness" && p == "prepared_proofs" =>
+        {
+            true
+        }
+        _ => false,
+    }
+}
+
+/// 仅对 `recorded[*].event.simulation_original` 与 `history[*].event.simulation_original`
+/// 生成严格区分的精确十进制文本视图（保留 `original_sha256` 指向原字节，绝不伪装成原字节）。
+fn is_simulation_original_path(path: &[PathSeg], key: &str) -> bool {
+    if key != "simulation_original" {
+        return false;
+    }
+    matches!(
+        path,
+        [PathSeg::Key(root), PathSeg::Index(_), PathSeg::Key(ev)]
+            if (root == "recorded" || root == "history") && ev == "event"
+    )
+}
+
+/// 精确整数转规范十进制文本；拒绝任何非整数浮点数，杜绝 JS Number 舍入。
+pub(super) fn to_exact_decimal_text(value: &Value) -> Result<Value, String> {
+    match value {
+        Value::Null | Value::Bool(_) | Value::String(_) => Ok(value.clone()),
+        Value::Number(n) => {
+            if let Some(i) = n.as_i64() {
+                Ok(Value::String(i.to_string()))
+            } else if let Some(u) = n.as_u64() {
+                Ok(Value::String(u.to_string()))
+            } else {
+                Err("InvalidDomain：投影整数精确文本视图拒绝非整数数值".into())
+            }
+        }
+        Value::Array(items) => {
+            let mut out = Vec::with_capacity(items.len());
+            for item in items {
+                out.push(to_exact_decimal_text(item)?);
+            }
+            Ok(Value::Array(out))
+        }
+        Value::Object(map) => {
+            let mut out = Map::new();
+            for (k, v) in map {
+                out.insert(k.clone(), to_exact_decimal_text(v)?);
+            }
+            Ok(Value::Object(out))
+        }
+    }
+}
+
+fn assert_no_json_numbers(value: &Value) -> Result<(), String> {
+    match value {
+        Value::Null | Value::Bool(_) | Value::String(_) => Ok(()),
+        Value::Number(_) => {
+            Err("InvalidDomain：经济投影正文不得包含裸 JSON 数值，必须使用精确文本视图".into())
+        }
+        Value::Array(items) => {
+            for item in items {
+                assert_no_json_numbers(item)?;
+            }
+            Ok(())
+        }
+        Value::Object(map) => {
+            for v in map.values() {
+                assert_no_json_numbers(v)?;
+            }
+            Ok(())
+        }
+    }
+}
+
+fn parse_projected_value(
+    stream: &mut ChunkedImageStream<'_, '_>,
+    budget: &mut usize,
+    path: &mut Vec<PathSeg>,
+    omitted: &mut Vec<Value>,
+    depth: usize,
+) -> Result<Value, String> {
+    if depth > MAX_JSON_DEPTH {
+        return Err("StorageUnavailable：JSON嵌套深度超限".into());
+    }
+    stream.skip_ws()?;
+    let Some(first) = stream.peek()? else {
+        return Err("StorageUnavailable：JSON值意外截断".into());
+    };
+    match first {
+        b'"' => Ok(Value::String(parse_string_token(stream, budget)?)),
+        b'{' => {
+            stream.expect_byte(b'{')?;
+            charge_budget(budget, 2)?;
+            stream.skip_ws()?;
+            let mut map = Map::new();
+            if stream.peek()? == Some(b'}') {
+                stream.next_byte()?;
+                return Ok(Value::Object(map));
+            }
+            loop {
+                let key = parse_string_token(stream, budget)?;
+                stream.skip_ws()?;
+                stream.expect_byte(b':')?;
+                charge_budget(budget, 2)?;
+                if is_omitted_peer_image_path(path, &key) {
+                    let (sub_hash, sub_len) = skip_and_hash_value(stream, depth + 1)?;
+                    path.push(PathSeg::Key(key.clone()));
+                    let full_path = path_to_string(path);
+                    path.pop();
+                    let anchor = json!({
+                        "omitted_kind": "EmbeddedPeerImage",
+                        "sha256": sub_hash,
+                        "byte_len": sub_len.to_string(),
+                    });
+                    omitted.push(json!({
+                        "path": full_path,
+                        "omitted_kind": "EmbeddedPeerImage",
+                        "sha256": sub_hash,
+                        "byte_len": sub_len.to_string(),
+                    }));
+                    let new_key = format!("{key}_omitted");
+                    charge_budget(budget, new_key.len() + 128)?;
+                    map.insert(new_key, anchor);
+                } else if is_simulation_original_path(path, &key) {
+                    let mut raw_orig = Vec::new();
+                    collect_raw_value(stream, &mut raw_orig, budget, depth + 1)?;
+                    let parsed = strict_json(&raw_orig)?;
+                    let orig_sha = sha256_hex(canonical_json(&parsed).as_bytes());
+                    let text_view = json!({
+                        "representation": EXACT_TEXT_REPR,
+                        "original_sha256": orig_sha,
+                        "value": to_exact_decimal_text(&parsed)?,
+                    });
+                    charge_budget(budget, 128)?;
+                    map.insert("simulation_original_text_view".into(), text_view);
+                } else {
+                    path.push(PathSeg::Key(key.clone()));
+                    let val = parse_projected_value(stream, budget, path, omitted, depth + 1)?;
+                    path.pop();
+                    map.insert(key, val);
+                }
+                stream.skip_ws()?;
+                match stream.next_byte()? {
+                    Some(b',') => continue,
+                    Some(b'}') => break,
+                    _ => return Err("StorageUnavailable：JSON对象未闭合".into()),
+                }
+            }
+            Ok(Value::Object(map))
+        }
+        b'[' => {
+            stream.expect_byte(b'[')?;
+            charge_budget(budget, 2)?;
+            stream.skip_ws()?;
+            let mut arr = Vec::new();
+            if stream.peek()? == Some(b']') {
+                stream.next_byte()?;
+                return Ok(Value::Array(arr));
+            }
+            let mut idx = 0usize;
+            loop {
+                path.push(PathSeg::Index(idx));
+                let val = parse_projected_value(stream, budget, path, omitted, depth + 1)?;
+                path.pop();
+                arr.push(val);
+                idx += 1;
+                stream.skip_ws()?;
+                match stream.next_byte()? {
+                    Some(b',') => {
+                        charge_budget(budget, 1)?;
+                        continue;
+                    }
+                    Some(b']') => break,
+                    _ => return Err("StorageUnavailable：JSON数组未闭合".into()),
+                }
+            }
+            Ok(Value::Array(arr))
+        }
+        b't' | b'f' | b'n' => {
+            let expected: &[u8] = match first {
+                b't' => b"true",
+                b'f' => b"false",
+                _ => b"null",
+            };
+            for &e in expected {
+                stream
+                    .next_byte()?
+                    .filter(|&x| x == e)
+                    .ok_or("StorageUnavailable：JSON字面量非法")?;
+            }
+            charge_budget(budget, expected.len())?;
+            Ok(match first {
+                b't' => Value::Bool(true),
+                b'f' => Value::Bool(false),
+                _ => Value::Null,
+            })
+        }
+        b'-' | b'0'..=b'9' => {
+            let mut raw = Vec::new();
+            while let Some(c) = stream.peek()? {
+                if c.is_ascii_digit() || matches!(c, b'-' | b'+' | b'.' | b'e' | b'E') {
+                    let b = stream.next_byte()?.unwrap();
+                    charge_budget(budget, 1)?;
+                    raw.push(b);
+                } else {
+                    break;
+                }
+            }
+            strict_json(&raw)
+        }
+        _ => Err("StorageUnavailable：JSON非法起始字节".into()),
+    }
+}
+
+fn collect_raw_value(
+    stream: &mut ChunkedImageStream<'_, '_>,
+    out: &mut Vec<u8>,
+    budget: &mut usize,
+    depth: usize,
+) -> Result<(), String> {
+    if depth > MAX_JSON_DEPTH {
+        return Err("StorageUnavailable：JSON嵌套深度超限".into());
+    }
+    stream.skip_ws()?;
+    let Some(first) = stream.peek()? else {
+        return Err("StorageUnavailable：JSON值意外截断".into());
+    };
+    let push = |out: &mut Vec<u8>, budget: &mut usize, b: u8| -> Result<(), String> {
+        charge_budget(budget, 1)?;
+        out.push(b);
+        Ok(())
+    };
+    match first {
+        b'"' => {
+            let b = stream.next_byte()?.unwrap();
+            push(out, budget, b)?;
+            let mut escaped = false;
+            loop {
+                let c = stream
+                    .next_byte()?
+                    .ok_or("StorageUnavailable：JSON字符串未闭合")?;
+                push(out, budget, c)?;
+                if escaped {
+                    escaped = false;
+                } else if c == b'\\' {
+                    escaped = true;
+                } else if c == b'"' {
+                    break;
+                }
+            }
+            Ok(())
+        }
+        b'{' => {
+            let b = stream.next_byte()?.unwrap();
+            push(out, budget, b)?;
+            stream.skip_ws()?;
+            if stream.peek()? == Some(b'}') {
+                let c = stream.next_byte()?.unwrap();
+                return push(out, budget, c);
+            }
+            loop {
+                collect_raw_value(stream, out, budget, depth + 1)?;
+                stream.skip_ws()?;
+                let colon = stream
+                    .next_byte()?
+                    .filter(|&c| c == b':')
+                    .ok_or("StorageUnavailable：JSON对象缺冒号")?;
+                push(out, budget, colon)?;
+                collect_raw_value(stream, out, budget, depth + 1)?;
+                stream.skip_ws()?;
+                match stream.next_byte()? {
+                    Some(b',') => push(out, budget, b',')?,
+                    Some(b'}') => return push(out, budget, b'}'),
+                    _ => return Err("StorageUnavailable：JSON对象未闭合".into()),
+                }
+            }
+        }
+        b'[' => {
+            let b = stream.next_byte()?.unwrap();
+            push(out, budget, b)?;
+            stream.skip_ws()?;
+            if stream.peek()? == Some(b']') {
+                let c = stream.next_byte()?.unwrap();
+                return push(out, budget, c);
+            }
+            loop {
+                collect_raw_value(stream, out, budget, depth + 1)?;
+                stream.skip_ws()?;
+                match stream.next_byte()? {
+                    Some(b',') => push(out, budget, b',')?,
+                    Some(b']') => return push(out, budget, b']'),
+                    _ => return Err("StorageUnavailable：JSON数组未闭合".into()),
+                }
+            }
+        }
+        b't' | b'f' | b'n' => {
+            let expected: &[u8] = match first {
+                b't' => b"true",
+                b'f' => b"false",
+                _ => b"null",
+            };
+            for &e in expected {
+                let c = stream
+                    .next_byte()?
+                    .filter(|&x| x == e)
+                    .ok_or("StorageUnavailable：JSON字面量非法")?;
+                push(out, budget, c)?;
+            }
+            Ok(())
+        }
+        b'-' | b'0'..=b'9' => {
+            while let Some(c) = stream.peek()? {
+                if c.is_ascii_digit() || matches!(c, b'-' | b'+' | b'.' | b'e' | b'E') {
+                    let b = stream.next_byte()?.unwrap();
+                    push(out, budget, b)?;
+                } else {
+                    break;
+                }
+            }
+            Ok(())
+        }
+        _ => Err("StorageUnavailable：JSON非法起始字节".into()),
+    }
+}
+
+/// 唯一出口：所有离开 `read_projection` 的文档均在此执行不变量 A（本域切面/回执前沿）、
+/// 不变量 B（同切面取证按读权隔离的序列化后置校验）、精确文本数值约束、4 MiB 容量帽与 `ReadBudget` 截止检查。
+fn finalize_projection_reply(
+    config: &Config,
+    selected: &StoredImage,
+    doc: &Value,
+    perms: Option<&ReadPermissions>,
+    vector: Option<&Map<String, Value>>,
+    budget: &mut ReadBudget<'_>,
+) -> Result<Vec<u8>, String> {
+    verify_embedded_cuts_not_after_selected(config, selected, doc, vector, |_| {})?;
+    if let Some(p) = perms {
+        if doc["kind"] == KIND_ORIGINAL_AT_CUT {
+            verify_original_permission_bounds(&doc["original"], p)?;
+        }
+    }
+    assert_no_json_numbers(doc)?;
+    let encoded = canonical_json(doc).into_bytes();
+    if encoded.len() > READ_CACHE {
+        return Err("QueryBudgetExceeded：完整投影或同切面原件文档超过4MiB逻辑预算".into());
+    }
+    budget.before()?;
+    Ok(encoded)
+}
+
+fn is_cut_shape(map: &Map<String, Value>) -> bool {
+    map.len() == 3
+        && map.contains_key("domain_id")
+        && map.contains_key("commit_seq")
+        && map.contains_key("root_hash")
+}
+
+const FILL_ALLOCATION_ROW_ALLOWED: &[&str] = &[
+    "fact_key",
+    "fact_hash",
+    "projection_kind",
+    "source_kind",
+    "manifest_hash",
+    "symbol",
+    "fill_allocation_policy_id",
+    "policy_revision",
+    "from",
+    "to",
+    "report_kind",
+    "component",
+    "original_fact_key",
+    "original_allocation_id",
+    "command_id",
+    "grant_id",
+    "responsibility_ref",
+    "plan_hash",
+    "command_plan_hash",
+    "command_hash",
+    "evidence_id",
+    "allocations",
+    "x_execution_witness",
+];
+
+const ALLOCATION_ITEM_ALLOWED: &[&str] = &[
+    "allocation_id",
+    "source_kind",
+    "chong_id",
+    "command_id",
+    "grant_id",
+    "responsibility_ref",
+    "family_id",
+    "revision",
+    "symbol",
+    "manifest_hash",
+    "units",
+    "acquisition_cash",
+    "commission",
+    "fee_deferred_to_cause_fact",
+    "reported_fill_fee",
+    "fee_only",
+    "fee_type",
+    "cause",
+    "original_fact_key",
+    "original_allocation_id",
+    "income_changes",
+    "fill_allocation_policy_id",
+    "policy_revision",
+    "component",
+    "reversal",
+    "unmatched_reason",
+    "status",
+    "target_domain",
+];
+
+const X_EXECUTION_WITNESS_ALLOWED: &[&str] = &[
+    "witness_revision",
+    "x_profile_revision",
+    "x_id",
+    "x_epoch",
+    "session_id",
+    "session_generation",
+    "source_namespace",
+    "source_epoch",
+    "model_content_hash",
+    "command_id",
+    "command_hash",
+    "e_release_receipt_key",
+    "e_release_cut",
+    "e_release_commit_ns",
+    "x_release_evidence",
+    "x_accept_clock",
+    "x_command_state",
+    "x_execute_evidence",
+    "attempt_batch_id",
+    "attempt_batch_bar_index",
+    "attempt_batch_request_sha256",
+    "attempt_batch_receipt_sha256",
+    "originals_batch_id",
+    "originals_batch_bar_index",
+    "originals_batch_receipt_sha256",
+    "fact_raw_sha256",
+];
+
+const X_ACCEPT_CLOCK_ALLOWED: &[&str] = &["received_ns", "first_known_ns", "commit_ns"];
+const CUT_ALLOWED: &[&str] = &["domain_id", "commit_seq", "root_hash"];
+const X_AUTHORITY_EVIDENCE_BASE_ALLOWED: &[&str] = &[
+    "protocol",
+    "session_id",
+    "session_generation",
+    "authority_id",
+    "authority_epoch",
+    "command_id",
+    "command_hash",
+    "state",
+    "receipt_id",
+    "release_receipt_id",
+    "commit_ns",
+];
+const X_EXECUTE_EVIDENCE_ALLOWED: &[&str] = &["claimed_ns", "reply"];
+const COMMAND_REF_ALLOWED: &[&str] = &["command_id", "command_hash"];
+const PROJECTED_RECORD_BASE_ALLOWED: &[&str] = &[
+    "fact_key",
+    "fact_hash",
+    "raw_sha256",
+    "raw_utf8",
+    "json_pointer",
+    "event",
+    "token",
+    "target_domain",
+    "source_event_time",
+    "source_received_time",
+    "source_producer",
+    "origin_message",
+    "origin_request_hash",
+    "received_ns",
+    "first_known_ns",
+    "commit_ns",
+    "recorded_seq",
+    "cut",
+    "e_domain_id",
+    "e_session_id",
+    "e_session_generation",
+    "e_commit_proof",
+    "e_commit_proof_omitted",
+    "e_receipt",
+    "e_resolution_proof",
+    B_SOURCE_DEBIT_PROOF,
+    "b_observation",
+    "b_origin_message",
+    "b_origin_request_hash",
+];
+
+fn assert_whitelist_keys(val: &Value, allowed: &[&str], label: &str) -> Result<(), String> {
+    let Some(map) = val.as_object() else {
+        return Err(format!("InvalidDomain：{label} 必须为对象"));
+    };
+    for key in map.keys() {
+        if !allowed.contains(&key.as_str()) {
+            return Err(format!(
+                "InvalidDomain：{label} 存在未声明字段（不在读权白名单内）：{key}"
+            ));
+        }
+    }
+    Ok(())
+}
+
+struct CutCheck<'a> {
+    domain: &'a str,
+    selected: Value,
+    vector: Option<&'a Map<String, Value>>,
+    checked: HashSet<*const Value>,
+}
+
+#[derive(Clone, Copy)]
+enum CutEvidenceShape {
+    Cut,
+    Receipt,
+    Witness,
+}
+
+fn evidence_shape(map: &Map<String, Value>) -> Option<CutEvidenceShape> {
+    if is_cut_shape(map) {
+        Some(CutEvidenceShape::Cut)
+    } else if map
+        .get("kind")
+        .and_then(Value::as_str)
+        .is_some_and(|k| !k.starts_with("Economic"))
+        && map
+            .get("cut")
+            .and_then(Value::as_object)
+            .is_some_and(is_cut_shape)
+    {
+        Some(CutEvidenceShape::Receipt)
+    } else if map.get("witness_revision").is_some_and(Value::is_string)
+        && map.contains_key("e_release_cut")
+    {
+        Some(CutEvidenceShape::Witness)
+    } else {
+        None
+    }
+}
+
+// 来源分量由 book.rs / tb03c_book.rs 原样拷贝；E 派生分量不带这两个来源字段。
+fn source_cost_component(item: &Value) -> bool {
+    item["source_ref"].is_string() && item["amount_text"].is_string()
+}
+
+impl CutCheck<'_> {
+    fn check_protocol_cut(
+        &mut self,
+        node: &Value,
+        expected_domain: Option<&str>,
+    ) -> Result<(), String> {
+        let Some(map) = node.as_object() else {
+            return Err("StorageUnavailable：内嵌cut非对象".into());
+        };
+        if !is_cut_shape(map) {
+            return Err("StorageUnavailable：内嵌cut字段不完整或多余".into());
+        }
+        let cdomain = required(node, "domain_id")?;
+        if let Some(exp) = expected_domain {
+            if cdomain != exp {
+                return Err(format!(
+                    "StorageUnavailable：回执域与期望域不符：期望 {exp}，实际 {cdomain}"
+                ));
+            }
+        }
+        let cseq = nonnegative(required(node, "commit_seq")?, "cut.commit_seq")?;
+        let croot = required(node, "root_hash")?;
+        if croot.len() != 64
+            || !croot
+                .bytes()
+                .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+        {
+            return Err("StorageUnavailable：内嵌cut缺少完整根摘要".into());
+        }
+        let bound = if cdomain == self.domain {
+            Some(&self.selected)
+        } else if let Some(vector) = self.vector {
+            Some(
+                vector
+                    .get(cdomain)
+                    .ok_or("MissingDependency：回执所属域不在固定向量中")?,
+            )
+        } else {
+            None
+        };
+        if let Some(bound) = bound {
+            let selected_seq = nonnegative(required(bound, "commit_seq")?, "cut.commit_seq")?;
+            if cseq > selected_seq {
+                return Err(format!("MissingDependency：回执({cdomain}:{cseq})晚于请求固定cut({cdomain}:{selected_seq})，拒绝泄漏未来状态"));
+            }
+            if cseq == selected_seq && node != bound {
+                return Err("IdentityConflict：同序号回执根与固定切面根不符".into());
+            }
+        }
+        self.checked.insert(std::ptr::from_ref(node));
+        Ok(())
+    }
+
+    fn check_finance_record_cuts(
+        &mut self,
+        rec: &Value,
+        owner_domain: Option<&str>,
+    ) -> Result<(), String> {
+        let Some(map) = rec.as_object() else {
+            return Ok(());
+        };
+        self.check_voice_basis(rec)?;
+        self.check_voice_basis(&rec["prepared"]["voice"])?;
+        if let Some(pc) = map.get("prepared_cut").filter(|v| !v.is_null()) {
+            let exp = map.get("owner").and_then(Value::as_str).or(owner_domain);
+            self.check_protocol_cut(pc, exp)?;
+        }
+        if let Some(cc) = map.get("commit_cut").filter(|v| !v.is_null()) {
+            let exp = map.get("owner").and_then(Value::as_str);
+            self.check_protocol_cut(cc, exp)?;
+        }
+        if let Some(grant) = map.get("grant").and_then(Value::as_object) {
+            if let Some(pc) = grant.get("prepared_cut").filter(|v| !v.is_null()) {
+                self.check_protocol_cut(pc, grant.get("owner").and_then(Value::as_str))?;
+            }
+            if let Some(ec) = grant.get("e_cut").filter(|v| !v.is_null()) {
+                self.check_protocol_cut(ec, Some("E"))?;
+            }
+            if let Some(orig_g) = grant.get("original").and_then(Value::as_object) {
+                if let Some(pc) = orig_g.get("prepared_cut").filter(|v| !v.is_null()) {
+                    let exp = orig_g.get("owner").and_then(Value::as_str).or(owner_domain);
+                    self.check_protocol_cut(pc, exp)?;
+                }
+            }
+        }
+        if let Some(lcr) = map.get("local_commit_receipt").and_then(Value::as_object) {
+            if let Some(ec) = lcr.get("e_cut").filter(|v| !v.is_null()) {
+                self.check_protocol_cut(ec, Some("E"))?;
+            }
+        }
+        if let Some(grants) = map.get("grants").and_then(Value::as_array) {
+            for g in grants {
+                if let Some(pc) = g.get("prepared_cut").filter(|v| !v.is_null()) {
+                    let exp = g.get("owner").and_then(Value::as_str);
+                    self.check_protocol_cut(pc, exp)?;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn check_voice_basis(&mut self, record: &Value) -> Result<(), String> {
+        if let Some(ec) = record
+            .get(OPENING_BASIS)
+            .and_then(|basis| basis.get(OPENING_E_CUT))
+            .filter(|v| !v.is_null())
+        {
+            self.check_protocol_cut(ec, Some("E"))?;
+        }
+        Ok(())
+    }
+
+    fn check_protocol_receipt(
+        &mut self,
+        receipt: &Value,
+        expected_domain: Option<&str>,
+    ) -> Result<(), String> {
+        let Some(map) = receipt.as_object() else {
+            return Err("StorageUnavailable：回执非对象".into());
+        };
+        let Some(rcut) = map.get("cut") else {
+            return Err("StorageUnavailable：回执缺失cut".into());
+        };
+        let Some(rdomain) = map.get("domain_id").and_then(Value::as_str) else {
+            return Err("StorageUnavailable：回执缺失domain_id".into());
+        };
+        let cut_dom = rcut
+            .as_object()
+            .and_then(|m| m.get("domain_id"))
+            .and_then(Value::as_str);
+        if cut_dom != Some(rdomain) {
+            return Err("StorageUnavailable：原回执域与cut域不匹配".into());
+        }
+        if let Some(exp) = expected_domain {
+            if rdomain != exp {
+                return Err(format!(
+                    "StorageUnavailable：回执域与期望域不符：期望 {exp}，实际 {rdomain}"
+                ));
+            }
+        }
+        self.checked.insert(std::ptr::from_ref(receipt));
+        self.check_protocol_cut(rcut, expected_domain)?;
+        if let Some(rec) = map.get("record").filter(|v| v.is_object()) {
+            self.check_finance_record_cuts(rec, Some(rdomain))?;
+        }
+        Ok(())
+    }
+
+    fn check_fill_row_cuts(&mut self, row: &Value) -> Result<(), String> {
+        self.check_execution_witness(&row["x_execution_witness"])
+    }
+
+    fn check_execution_witness(&mut self, witness: &Value) -> Result<(), String> {
+        if let Some(ec) = witness.get("e_release_cut").filter(|v| !v.is_null()) {
+            self.checked.insert(std::ptr::from_ref(witness));
+            self.check_protocol_cut(ec, Some("E"))?;
+        }
+        Ok(())
+    }
+
+    fn check_peer_proof_cuts(&mut self, proof: &Value) -> Result<(), String> {
+        let Some(map) = proof.as_object() else {
+            return Ok(());
+        };
+        let pdom = map.get("domain_id").and_then(Value::as_str);
+        if let Some(cc) = map.get("current_cut").filter(|v| !v.is_null()) {
+            self.check_protocol_cut(cc, pdom)?;
+        }
+        if let Some(r) = map.get("receipt").filter(|v| !v.is_null()) {
+            self.check_protocol_receipt(r, pdom)?;
+        }
+        if let Some(img) = map.get("image").filter(|v| v.is_object()) {
+            self.check_image_protocol_cuts(img, pdom)?;
+        }
+        if let Some(img) = map.get("current_image").filter(|v| v.is_object()) {
+            self.check_image_protocol_cuts(img, pdom)?;
+        }
+        Ok(())
+    }
+
+    fn check_record_protocol_cuts(&mut self, rec: &Value) -> Result<(), String> {
+        let Some(map) = rec.as_object() else {
+            return Ok(());
+        };
+        // 仅检查协议定义的证据字段，绝不把来源数据（event / raw_utf8 / raw_exact_text）内同名键当协议回执。
+        if let Some(c) = map.get("cut").filter(|v| !v.is_null()) {
+            self.check_protocol_cut(c, Some("E"))?;
+        }
+        if let Some(er) = map.get("e_receipt").filter(|v| !v.is_null()) {
+            self.check_protocol_receipt(er, Some("E"))?;
+        }
+        if let Some(erp) = map.get("e_resolution_proof").and_then(Value::as_object) {
+            if let Some(r) = erp.get("receipt").filter(|v| !v.is_null()) {
+                self.check_protocol_receipt(r, Some("E"))?;
+            }
+            if let Some(img) = erp.get("image").filter(|v| v.is_object()) {
+                self.check_image_protocol_cuts(img, Some("E"))?;
+            }
+            if let Some(img) = erp.get("previous_image").filter(|v| v.is_object()) {
+                self.check_image_protocol_cuts(img, Some("E"))?;
+            }
+        }
+        if let Some(img) = map
+            .get("e_commit_proof")
+            .and_then(|p| p.get("image"))
+            .filter(|v| v.is_object())
+        {
+            self.check_image_protocol_cuts(img, Some("E"))?;
+        }
+        if let Some(sdp) = map.get(B_SOURCE_DEBIT_PROOF).and_then(Value::as_object) {
+            let sd = sdp.get("domain_id").and_then(Value::as_str);
+            if let Some(r) = sdp.get("receipt").filter(|v| !v.is_null()) {
+                self.check_protocol_receipt(r, sd)?;
+            }
+            if let Some(img) = sdp.get("image").filter(|v| v.is_object()) {
+                self.check_image_protocol_cuts(img, sd)?;
+            }
+            if let Some(img) = sdp.get("previous_image").filter(|v| v.is_object()) {
+                self.check_image_protocol_cuts(img, sd)?;
+            }
+        }
+        Ok(())
+    }
+
+    fn check_image_protocol_cuts(
+        &mut self,
+        img: &Value,
+        owner_domain: Option<&str>,
+    ) -> Result<(), String> {
+        let Some(map) = img.as_object() else {
+            return Ok(());
+        };
+        if let Some(book) = map.get("book").and_then(Value::as_object) {
+            if let Some(ec) = book
+                .get("opening_fact_ref")
+                .and_then(|r| r.get("e_cut"))
+                .filter(|v| !v.is_null())
+            {
+                self.check_protocol_cut(ec, Some("E"))?;
+            }
+            for key in ["known_cost_components", "cost_events"] {
+                if let Some(items) = book.get(key).and_then(Value::as_array) {
+                    for item in items {
+                        if key == "known_cost_components" && source_cost_component(item) {
+                            continue;
+                        }
+                        if let Some(rc) = item
+                            .get("derivation")
+                            .and_then(|d| d.get("resolve_cut"))
+                            .filter(|v| !v.is_null())
+                        {
+                            self.check_protocol_cut(rc, Some("E"))?;
+                        }
+                    }
+                }
+            }
+            if let Some(records) = book
+                .get("voice")
+                .and_then(|voice| voice.get(VOICE_RECORDS))
+                .and_then(Value::as_array)
+            {
+                for record in records {
+                    self.check_voice_basis(record)?;
+                }
+            }
+        }
+        for key in ["recorded", "pending"] {
+            if let Some(recs) = map.get(key).and_then(Value::as_array) {
+                for rec in recs {
+                    self.check_record_protocol_cuts(rec)?;
+                }
+            }
+        }
+        if let Some(rows) = map.get("fill_allocations").and_then(Value::as_array) {
+            for row in rows {
+                self.check_fill_row_cuts(row)?;
+            }
+        }
+        if let Some(fin) = map.get("finance").and_then(Value::as_object) {
+            if let Some(decs) = fin.get("decisions").and_then(Value::as_array) {
+                for d in decs {
+                    self.check_finance_record_cuts(d, owner_domain)?;
+                }
+            }
+            if let Some(slots) = fin.get("slots").and_then(Value::as_array) {
+                for s in slots {
+                    if let Some(grants) = s.get("grants").and_then(Value::as_array) {
+                        for g in grants {
+                            self.check_finance_record_cuts(g, owner_domain)?;
+                        }
+                    }
+                }
+            }
+            if let Some(cmds) = fin.get("commands").and_then(Value::as_array) {
+                for c in cmds {
+                    self.check_finance_record_cuts(c, owner_domain)?;
+                }
+            }
+            if let Some(responsibilities) = fin.get("responsibilities").and_then(Value::as_array) {
+                for r in responsibilities {
+                    self.check_finance_record_cuts(r, owner_domain)?;
+                }
+            }
+        }
+        if let Some(hist) = map.get("history").and_then(Value::as_array) {
+            for h in hist {
+                if let Some(ws) = h.get("x_execution_witnesses").and_then(Value::as_object) {
+                    for w in ws.values() {
+                        self.check_execution_witness(w)?;
+                    }
+                }
+                if let Some(rec) = h.get("record").filter(|v| v.is_object()) {
+                    self.check_finance_record_cuts(rec, owner_domain)?;
+                }
+                if let Some(hw) = h.get("witness").and_then(Value::as_object) {
+                    if let Some(ps) = hw.get("prepared_proofs").and_then(Value::as_array) {
+                        for p in ps {
+                            self.check_peer_proof_cuts(p)?;
+                        }
+                    }
+                    if let Some(gp) = hw.get("grant_proof").filter(|v| v.is_object()) {
+                        self.check_peer_proof_cuts(gp)?;
+                    }
+                    if let Some(cp) = hw.get("commit_proof").filter(|v| v.is_object()) {
+                        self.check_peer_proof_cuts(cp)?;
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn check_original_protocol_cuts(
+        &mut self,
+        orig: &Value,
+        domain: &str,
+        original_kind: &str,
+    ) -> Result<(), String> {
+        let Some(map) = orig.as_object() else {
+            return Err("StorageUnavailable：同切面原件载荷非对象".into());
+        };
+        match original_kind {
+            "fact" => {
+                if map.get("domain_id").and_then(Value::as_str) != Some(domain) {
+                    return Err(format!(
+                        "StorageUnavailable：回执域与期望域不符：期望 {domain}"
+                    ));
+                }
+                let Some(recs) = map.get("receipts").and_then(Value::as_array) else {
+                    return Err("StorageUnavailable：事实原件缺失回执列表".into());
+                };
+                for r in recs {
+                    let exp = if domain == "E" {
+                        "E"
+                    } else if r.get("kind").and_then(Value::as_str) == Some("Recorded") {
+                        "E"
+                    } else {
+                        domain
+                    };
+                    self.check_protocol_receipt(r, Some(exp))?;
+                }
+                if let Some(prec) = map.get("projected_record").filter(|v| !v.is_null()) {
+                    self.check_record_protocol_cuts(prec)?;
+                }
+                if let Some(row) = map.get("fill_allocation_row").filter(|v| !v.is_null()) {
+                    self.check_fill_row_cuts(row)?;
+                }
+            }
+            "allocation" => {
+                if map.get("domain_id").and_then(Value::as_str) != Some(domain) {
+                    return Err(format!(
+                        "StorageUnavailable：回执域与期望域不符：期望 {domain}"
+                    ));
+                }
+                if domain == "E" {
+                    let rec = map
+                        .get("resolve_receipt")
+                        .ok_or("StorageUnavailable：E 分配缺失 resolve_receipt")?;
+                    self.check_protocol_receipt(rec, Some("E"))?;
+                    if let Some(row) = map.get("fill_allocation_row").filter(|v| !v.is_null()) {
+                        self.check_fill_row_cuts(row)?;
+                    }
+                } else {
+                    let rec = map
+                        .get("receipt")
+                        .ok_or("StorageUnavailable：B 分配缺失 receipt")?;
+                    self.check_protocol_receipt(rec, Some(domain))?;
+                }
+                if let Some(fact) = map.get("fact").filter(|v| !v.is_null()) {
+                    self.check_original_protocol_cuts(fact, domain, "fact")?;
+                }
+            }
+            "model" => {
+                if map.get("domain_id").and_then(Value::as_str) != Some(domain) {
+                    return Err(format!(
+                        "StorageUnavailable：回执域与期望域不符：期望 {domain}"
+                    ));
+                }
+            }
+            "decision" => {
+                if map.get("domain_id").and_then(Value::as_str) != Some(domain) {
+                    return Err(format!(
+                        "StorageUnavailable：回执域与期望域不符：期望 {domain}"
+                    ));
+                }
+                let Some(recs) = map.get("receipts").and_then(Value::as_array) else {
+                    return Err("StorageUnavailable：决定原件缺失回执列表".into());
+                };
+                for r in recs {
+                    self.check_protocol_receipt(r, Some(domain))?;
+                }
+                if let Some(dec) = map.get("decision").filter(|v| v.is_object()) {
+                    self.check_finance_record_cuts(dec, Some(domain))?;
+                }
+            }
+            "grant" => {
+                if domain != "E" || map.get("domain_id").and_then(Value::as_str) != Some("E") {
+                    return Err("StorageUnavailable：回执域与期望域不符：期望 E".into());
+                }
+                let rec = map
+                    .get("receipt")
+                    .ok_or("StorageUnavailable：授信原件缺失 receipt")?;
+                self.check_protocol_receipt(rec, Some("E"))?;
+                if let Some(g) = map.get("grant").filter(|v| v.is_object()) {
+                    self.check_finance_record_cuts(g, Some("E"))?;
+                }
+            }
+            "command" => {
+                if domain != "E" || map.get("domain_id").and_then(Value::as_str) != Some("E") {
+                    return Err("StorageUnavailable：回执域与期望域不符：期望 E".into());
+                }
+                if let Some(c) = map.get("cut").filter(|v| !v.is_null()) {
+                    self.check_protocol_cut(c, Some("E"))?;
+                }
+                if let Some(recs) = map.get("receipts").and_then(Value::as_array) {
+                    for r in recs {
+                        self.check_protocol_receipt(r, Some("E"))?;
+                    }
+                }
+                if let Some(rec) = map.get("record").filter(|v| v.is_object()) {
+                    self.check_finance_record_cuts(rec, Some("E"))?;
+                }
+            }
+            other => return Err(format!("StorageUnavailable：未知同切面原件类型：{other}")),
+        }
+        Ok(())
+    }
+
+    // 未列举的位置也不能带出未来切面。测试可收集差集，锁定协议访问器本身的覆盖率。
+    fn unlisted<'doc>(
+        &self,
+        node: &'doc Value,
+        path: &mut Vec<PathSeg>,
+        missing: &mut Vec<(&'doc Value, CutEvidenceShape)>,
+        observe: &mut impl FnMut(&[PathSeg]),
+    ) {
+        match node {
+            Value::Object(map) => {
+                if let Some(shape) = evidence_shape(map) {
+                    if !self.checked.contains(&std::ptr::from_ref(node)) {
+                        observe(path);
+                        missing.push((node, shape));
+                    }
+                    if matches!(shape, CutEvidenceShape::Cut) {
+                        return;
+                    }
+                }
+                for (key, value) in map {
+                    if matches!(
+                        key.as_str(),
+                        "raw_utf8"
+                            | "raw_exact_text"
+                            | "model_raw_utf8"
+                            | "model_exact_text"
+                            | "event"
+                    ) {
+                        continue;
+                    }
+                    path.push(PathSeg::Key(key.clone()));
+                    self.unlisted(value, path, missing, observe);
+                    path.pop();
+                }
+            }
+            Value::Array(items) => {
+                let components = matches!(path.as_slice(), [.., PathSeg::Key(book), PathSeg::Key(key)] if book == "book" && key == "known_cost_components");
+                for (i, value) in items.iter().enumerate() {
+                    if components && source_cost_component(value) {
+                        continue;
+                    }
+                    path.push(PathSeg::Index(i));
+                    self.unlisted(value, path, missing, observe);
+                    path.pop();
+                }
+            }
+            _ => (),
+        }
+    }
+}
+
+/// 同一出口检查本域切面；显式向量读还检查随请求提供的其他域界限。
+fn verify_embedded_cuts_not_after_selected(
+    config: &Config,
+    selected: &StoredImage,
+    root: &Value,
+    vector: Option<&Map<String, Value>>,
+    mut unlisted: impl FnMut(&[PathSeg]),
+) -> Result<(), String> {
+    let mut checker = CutCheck {
+        domain: &config.domain,
+        selected: cut(config, selected.seq, &selected.root),
+        vector,
+        checked: HashSet::new(),
+    };
+    checker.check_protocol_cut(&root["cut"], Some(&config.domain))?;
+    match root["kind"].as_str().unwrap_or("") {
+        KIND_PROJECTION_VIEW => {
+            checker.check_image_protocol_cuts(&root["projection"], Some(&config.domain))?
+        }
+        KIND_ORIGINAL_AT_CUT => checker.check_original_protocol_cuts(
+            &root["original"],
+            &config.domain,
+            required(root, "original_kind")?,
+        )?,
+        other => return Err(format!("StorageUnavailable：未知投影文档类型：{other}")),
+    }
+    let mut missing = Vec::new();
+    checker.unlisted(root, &mut Vec::new(), &mut missing, &mut unlisted);
+    for (node, shape) in missing {
+        if checker.checked.contains(&std::ptr::from_ref(node)) {
+            continue;
+        }
+        match shape {
+            CutEvidenceShape::Cut => checker.check_protocol_cut(node, None)?,
+            CutEvidenceShape::Receipt => checker.check_protocol_receipt(node, None)?,
+            CutEvidenceShape::Witness => checker.check_execution_witness(node)?,
+        }
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+pub(super) fn assert_writer_cut_coverage(config: &Config, doc: &Value) {
+    let selected = StoredImage {
+        seq: doc["cut"]["commit_seq"].as_str().unwrap().parse().unwrap(),
+        root: doc["cut"]["root_hash"].as_str().unwrap().to_owned(),
+        previous_root: String::new(),
+        commit_ns: String::new(),
+        bytes: 0,
+    };
+    let mut missing = Vec::new();
+    verify_embedded_cuts_not_after_selected(config, &selected, doc, None, |p| {
+        missing.push(path_to_string(p));
+    })
+    .unwrap();
+    assert!(missing.is_empty(), "{}: {missing:?}", doc["kind"]);
+}
+
+fn verify_fill_allocation_row_whitelist(
+    row: &Value,
+    perms: &ReadPermissions,
+) -> Result<(), String> {
+    assert_whitelist_keys(row, FILL_ALLOCATION_ROW_ALLOWED, "fill_allocation_row")?;
+    if let Some(allocs) = row.get("allocations").and_then(Value::as_array) {
+        for item in allocs {
+            assert_whitelist_keys(
+                item,
+                ALLOCATION_ITEM_ALLOWED,
+                "fill_allocation_row.allocations[]",
+            )?;
+        }
+    }
+    if let Some(witness) = row.get("x_execution_witness").filter(|v| !v.is_null()) {
+        assert_whitelist_keys(witness, X_EXECUTION_WITNESS_ALLOWED, "x_execution_witness")?;
+        if let Some(ec) = witness.get("e_release_cut").filter(|v| !v.is_null()) {
+            assert_whitelist_keys(ec, CUT_ALLOWED, "x_execution_witness.e_release_cut")?;
+        }
+        if let Some(clock) = witness.get("x_accept_clock").filter(|v| !v.is_null()) {
+            assert_whitelist_keys(
+                clock,
+                X_ACCEPT_CLOCK_ALLOWED,
+                "x_execution_witness.x_accept_clock",
+            )?;
+        }
+        let check_auth = |val: &Value, label: &str| -> Result<(), String> {
+            let Some(map) = val.as_object() else {
+                return Err(format!("InvalidDomain：{label} 必须为对象"));
+            };
+            if !perms.query_command && map.get("command").is_some_and(|v| !v.is_null()) {
+                return Err(
+                    "InvalidDomain：未获准 QueryCommand 却在内嵌执行见证中包含完整命令".into(),
+                );
+            }
+            for key in map.keys() {
+                let allowed = X_AUTHORITY_EVIDENCE_BASE_ALLOWED.contains(&key.as_str())
+                    || (perms.query_command && key == "command")
+                    || (!perms.query_command && key == "command_ref");
+                if !allowed {
+                    return Err(format!(
+                        "InvalidDomain：{label} 存在未声明字段（不在读权白名单内）：{key}"
+                    ));
+                }
+            }
+            if let Some(cref) = map.get("command_ref").filter(|v| !v.is_null()) {
+                assert_whitelist_keys(cref, COMMAND_REF_ALLOWED, &format!("{label}.command_ref"))?;
+            }
+            Ok(())
+        };
+        if let Some(rel) = witness.get("x_release_evidence").filter(|v| !v.is_null()) {
+            check_auth(rel, "x_release_evidence")?;
+        }
+        if let Some(exec) = witness.get("x_execute_evidence").filter(|v| !v.is_null()) {
+            assert_whitelist_keys(exec, X_EXECUTE_EVIDENCE_ALLOWED, "x_execute_evidence")?;
+            if let Some(rep) = exec.get("reply").filter(|v| !v.is_null()) {
+                check_auth(rep, "x_execute_evidence.reply")?;
+            }
+        }
+    }
+    Ok(())
+}
+
+/// 不变量 B（Rust 出口后置校验）：按结构位置与正向白名单确认序列化后的 `original`
+/// 不含读者未获准类别的证据字节或任何未声明字段。
+fn verify_original_permission_bounds(
+    original: &Value,
+    perms: &ReadPermissions,
+) -> Result<(), String> {
+    let Some(map) = original.as_object() else {
+        return Err("InvalidDomain：原件载荷必须为对象".into());
+    };
+    let kind = map.get("kind").and_then(Value::as_str);
+    if !perms.query_fact
+        && (matches!(kind, Some("EconomicFactAtCut"))
+            || map.get("raw_utf8").is_some_and(|v| !v.is_null())
+            || map.get("raw_exact_text").is_some_and(|v| !v.is_null())
+            || map.get("model_raw_utf8").is_some_and(|v| !v.is_null())
+            || map.get("model_exact_text").is_some_and(|v| !v.is_null())
+            || map.get("projected_record").is_some_and(|v| !v.is_null())
+            || map.get("fact").is_some_and(|v| !v.is_null()))
+    {
+        return Err("InvalidDomain：未获准 QueryFact 却包含事实或模型原字节".into());
+    }
+    if !perms.query_command && matches!(kind, Some("EconomicCommand")) {
+        return Err("InvalidDomain：未获准 QueryCommand 却包含命令原件".into());
+    }
+    if !perms.query_allocation
+        && (matches!(kind, Some("EconomicAllocationAtCut"))
+            || map.get("fill_allocation_row").is_some_and(|v| !v.is_null()))
+    {
+        return Err("InvalidDomain：未获准 QueryAllocation 却包含分配原件".into());
+    }
+    if !perms.query_decision && matches!(kind, Some("EconomicDecision")) {
+        return Err("InvalidDomain：未获准 QueryDecision 却包含决定原件".into());
+    }
+    if !perms.query_grant && matches!(kind, Some("EconomicGrant")) {
+        return Err("InvalidDomain：未获准 QueryGrant 却包含授信原件".into());
+    }
+    if let Some(row) = map.get("fill_allocation_row").filter(|v| !v.is_null()) {
+        verify_fill_allocation_row_whitelist(row, perms)?;
+    }
+    if let Some(prec) = map.get("projected_record").filter(|v| !v.is_null()) {
+        let Some(pmap) = prec.as_object() else {
+            return Err("InvalidDomain：projected_record 必须为对象".into());
+        };
+        if !perms.query_allocation
+            && pmap
+                .get("resolved_allocation")
+                .is_some_and(|v| !v.is_null())
+        {
+            return Err("InvalidDomain：未获准 QueryAllocation 却包含分配原件".into());
+        }
+        for key in pmap.keys() {
+            let allowed = PROJECTED_RECORD_BASE_ALLOWED.contains(&key.as_str())
+                || (perms.query_allocation && key == "resolved_allocation")
+                || (!perms.query_allocation && key == "resolved_allocation_ref");
+            if !allowed {
+                return Err(format!(
+                    "InvalidDomain：projected_record 存在未声明字段（不在读权白名单内）：{key}"
+                ));
+            }
+        }
+    }
+    if let Some(fact) = map.get("fact").filter(|v| !v.is_null()) {
+        verify_original_permission_bounds(fact, perms)?;
+    }
+    Ok(())
+}
+
+fn copy_whitelisted_fields(src: &Map<String, Value>, allowed: &[&str]) -> Map<String, Value> {
+    let mut out = Map::new();
+    for &key in allowed {
+        if let Some(val) = src.get(key) {
+            out.insert(key.into(), val.clone());
+        }
+    }
+    out
+}
+
+fn serialize_authority_evidence_object(src: &Map<String, Value>, perms: &ReadPermissions) -> Value {
+    let mut out = copy_whitelisted_fields(src, X_AUTHORITY_EVIDENCE_BASE_ALLOWED);
+    if perms.query_command {
+        if let Some(cmd) = src.get("command") {
+            out.insert("command".into(), cmd.clone());
+        }
+    } else {
+        out.insert(
+            "command_ref".into(),
+            json!({
+                "command_id": src.get("command_id").cloned().unwrap_or(Value::Null),
+                "command_hash": src.get("command_hash").cloned().unwrap_or(Value::Null),
+            }),
+        );
+    }
+    Value::Object(out)
+}
+
+/// 单一权限裁剪序列化层（不变量 B）：逐层正向白名单构造执行见证，未列举键默认不可见；
+/// 无 `QueryCommand` 时仅暴露 `command_ref` 与非命令因果字段，不暴露完整 `command` 正文。
+fn serialize_x_execution_witness(witness: &Value, perms: &ReadPermissions) -> Value {
+    let Some(map) = witness.as_object() else {
+        return Value::Null;
+    };
+    let mut out = Map::new();
+    for &key in X_EXECUTION_WITNESS_ALLOWED {
+        let Some(val) = map.get(key) else {
+            continue;
+        };
+        let scoped = match key {
+            "e_release_cut" => val
+                .as_object()
+                .map(|m| Value::Object(copy_whitelisted_fields(m, CUT_ALLOWED)))
+                .unwrap_or(Value::Null),
+            "x_accept_clock" => val
+                .as_object()
+                .map(|m| Value::Object(copy_whitelisted_fields(m, X_ACCEPT_CLOCK_ALLOWED)))
+                .unwrap_or(Value::Null),
+            "x_release_evidence" => val
+                .as_object()
+                .map(|m| serialize_authority_evidence_object(m, perms))
+                .unwrap_or(Value::Null),
+            "x_execute_evidence" => val
+                .as_object()
+                .map(|exec| {
+                    let mut exec_out = Map::new();
+                    if let Some(claimed) = exec.get("claimed_ns") {
+                        exec_out.insert("claimed_ns".into(), claimed.clone());
+                    }
+                    if let Some(reply) = exec.get("reply").and_then(Value::as_object) {
+                        exec_out.insert(
+                            "reply".into(),
+                            serialize_authority_evidence_object(reply, perms),
+                        );
+                    }
+                    Value::Object(exec_out)
+                })
+                .unwrap_or(Value::Null),
+            _ => val.clone(),
+        };
+        out.insert(key.into(), scoped);
+    }
+    Value::Object(out)
+}
+
+fn serialize_fill_allocation_row(row: &Value, perms: &ReadPermissions) -> Value {
+    let Some(map) = row.as_object() else {
+        return Value::Null;
+    };
+    let mut out = Map::new();
+    for &key in FILL_ALLOCATION_ROW_ALLOWED {
+        let Some(val) = map.get(key) else {
+            continue;
+        };
+        let scoped = match key {
+            "allocations" => val
+                .as_array()
+                .map(|items| {
+                    Value::Array(
+                        items
+                            .iter()
+                            .filter_map(|item| {
+                                item.as_object().map(|m| {
+                                    Value::Object(copy_whitelisted_fields(
+                                        m,
+                                        ALLOCATION_ITEM_ALLOWED,
+                                    ))
+                                })
+                            })
+                            .collect(),
+                    )
+                })
+                .unwrap_or_else(|| json!([])),
+            "x_execution_witness" => serialize_x_execution_witness(val, perms),
+            _ => val.clone(),
+        };
+        out.insert(key.into(), scoped);
+    }
+    Value::Object(out)
+}
+
+fn serialize_projected_record(rec: &Value, perms: &ReadPermissions) -> Value {
+    let Some(map) = rec.as_object() else {
+        return Value::Null;
+    };
+    let mut out = copy_whitelisted_fields(map, PROJECTED_RECORD_BASE_ALLOWED);
+    if let Some(alloc) = map.get("resolved_allocation") {
+        if perms.query_allocation {
+            out.insert("resolved_allocation".into(), alloc.clone());
+        } else {
+            out.insert(
+                "resolved_allocation_ref".into(),
+                json!({
+                    "allocation_id": alloc.get("allocation_id").cloned().unwrap_or(Value::Null),
+                    "chong_id": alloc.get("chong_id").cloned().unwrap_or(Value::Null),
+                }),
+            );
+        }
+    }
+    Value::Object(out)
+}
+
+struct FactRef {
+    fact_key: String,
+    fact_hash: String,
+}
+
+struct FactModelBytes {
+    source_fact_key: Value,
+    source_raw_sha256: Value,
+    model_raw_utf8: String,
+    model_exact_text: Value,
+}
+
+/// 受类型约束的同切面取证载荷：所有内嵌事实、分配、执行见证与模型原字节均通过单一 `serialize_for(perms)` 统一裁剪，
+/// 调用点不得手写零散 `null` 补丁。
+enum OriginalAtCutPayload {
+    Fact {
+        domain_id: String,
+        fact_key: String,
+        fact_hash: Value,
+        raw_sha256: String,
+        json_pointer: Value,
+        raw_utf8: String,
+        raw_exact_text: Value,
+        projected_record: Value,
+        fill_allocation_row: Option<Value>,
+        receipts: Vec<Value>,
+    },
+    EAllocation {
+        allocation_id: String,
+        fill_allocation_row: Value,
+        resolve_receipt: Value,
+        fact_ref: FactRef,
+        fact: Option<Box<OriginalAtCutPayload>>,
+    },
+    BAllocation {
+        domain_id: String,
+        allocation_id: String,
+        applied_entry: Value,
+        application: Value,
+        receipt: Value,
+        fact_ref: FactRef,
+        fact: Option<Box<OriginalAtCutPayload>>,
+    },
+    Model {
+        domain_id: String,
+        object_id: String,
+        model_ref: Value,
+        fact_model: Option<FactModelBytes>,
+    },
+    Decision {
+        domain_id: String,
+        decision: Value,
+        receipts: Vec<Value>,
+    },
+    Grant {
+        grant: Value,
+        receipt: Value,
+    },
+    Command {
+        command_id: String,
+        state: Value,
+        cut: Value,
+        record_and_receipts: Option<(Value, Vec<Value>)>,
+    },
+}
+
+impl OriginalAtCutPayload {
+    fn serialize_for(&self, perms: &ReadPermissions) -> Result<Value, String> {
+        match self {
+            Self::Fact {
+                domain_id,
+                fact_key,
+                fact_hash,
+                raw_sha256,
+                json_pointer,
+                raw_utf8,
+                raw_exact_text,
+                projected_record,
+                fill_allocation_row,
+                receipts,
+            } => {
+                if !perms.query_fact {
+                    return Err("InvalidDomain：来源未获准 QueryFact，不能序列化事实原件".into());
+                }
+                let scoped_row = if perms.query_allocation {
+                    fill_allocation_row
+                        .as_ref()
+                        .map(|r| serialize_fill_allocation_row(r, perms))
+                } else {
+                    None
+                };
+                Ok(json!({
+                    "kind": "EconomicFactAtCut",
+                    "domain_id": domain_id,
+                    "fact_key": fact_key,
+                    "fact_hash": fact_hash,
+                    "raw_sha256": raw_sha256,
+                    "json_pointer": json_pointer,
+                    "raw_utf8": raw_utf8,
+                    "raw_exact_text": raw_exact_text,
+                    "projected_record": serialize_projected_record(projected_record, perms),
+                    "fill_allocation_row": scoped_row,
+                    "receipts": receipts,
+                }))
+            }
+            Self::EAllocation {
+                allocation_id,
+                fill_allocation_row,
+                resolve_receipt,
+                fact_ref,
+                fact,
+            } => {
+                if !perms.query_allocation {
+                    return Err(
+                        "InvalidDomain：来源未获准 QueryAllocation，不能序列化分配原件".into(),
+                    );
+                }
+                let fact_json = match (perms.query_fact, fact.as_deref()) {
+                    (true, Some(f)) => f.serialize_for(perms)?,
+                    _ => Value::Null,
+                };
+                Ok(json!({
+                    "kind": "EconomicAllocationAtCut",
+                    "domain_id": "E",
+                    "allocation_id": allocation_id,
+                    "fill_allocation_row": serialize_fill_allocation_row(fill_allocation_row, perms),
+                    "resolve_receipt": resolve_receipt,
+                    "fact_ref": {"fact_key": fact_ref.fact_key, "fact_hash": fact_ref.fact_hash},
+                    "fact": fact_json,
+                }))
+            }
+            Self::BAllocation {
+                domain_id,
+                allocation_id,
+                applied_entry,
+                application,
+                receipt,
+                fact_ref,
+                fact,
+            } => {
+                if !perms.query_allocation {
+                    return Err(
+                        "InvalidDomain：来源未获准 QueryAllocation，不能序列化分配原件".into(),
+                    );
+                }
+                let fact_json = match (perms.query_fact, fact.as_deref()) {
+                    (true, Some(f)) => f.serialize_for(perms)?,
+                    _ => Value::Null,
+                };
+                Ok(json!({
+                    "kind": "EconomicAllocationAtCut",
+                    "domain_id": domain_id,
+                    "allocation_id": allocation_id,
+                    "applied_entry": applied_entry,
+                    "application": application,
+                    "receipt": receipt,
+                    "fact_ref": {"fact_key": fact_ref.fact_key, "fact_hash": fact_ref.fact_hash},
+                    "fact": fact_json,
+                }))
+            }
+            Self::Model {
+                domain_id,
+                object_id,
+                model_ref,
+                fact_model,
+            } => match (perms.query_fact, fact_model) {
+                (true, Some(fm)) => Ok(json!({
+                    "kind": "EconomicModelAtCut",
+                    "domain_id": domain_id,
+                    "object_id": object_id,
+                    "source_fact_key": fm.source_fact_key,
+                    "source_raw_sha256": fm.source_raw_sha256,
+                    "model_ref": model_ref,
+                    "model_raw_utf8": fm.model_raw_utf8,
+                    "model_exact_text": fm.model_exact_text,
+                })),
+                _ => Ok(json!({
+                    "kind": "EconomicModelAtCut",
+                    "domain_id": domain_id,
+                    "object_id": object_id,
+                    "model_ref": model_ref,
+                    "model_raw_utf8": Value::Null,
+                    "model_exact_text": Value::Null,
+                    "source_fact_key": Value::Null,
+                })),
+            },
+            Self::Decision {
+                domain_id,
+                decision,
+                receipts,
+            } => {
+                if !perms.query_decision {
+                    return Err(
+                        "InvalidDomain：来源未获准 QueryDecision，不能序列化决定原件".into(),
+                    );
+                }
+                Ok(json!({
+                    "kind": "EconomicDecision",
+                    "domain_id": domain_id,
+                    "decision": decision,
+                    "receipts": receipts,
+                }))
+            }
+            Self::Grant { grant, receipt } => {
+                if !perms.query_grant {
+                    return Err("InvalidDomain：来源未获准 QueryGrant，不能序列化授信原件".into());
+                }
+                Ok(json!({
+                    "kind": "EconomicGrant",
+                    "domain_id": "E",
+                    "grant": grant,
+                    "receipt": receipt,
+                }))
+            }
+            Self::Command {
+                command_id,
+                state,
+                cut,
+                record_and_receipts,
+            } => {
+                if !perms.query_command {
+                    return Err("InvalidDomain：来源未获准 QueryCommand，不能序列化命令原件".into());
+                }
+                match record_and_receipts {
+                    Some((record, receipts)) => Ok(json!({
+                        "kind": "EconomicCommand",
+                        "domain_id": "E",
+                        "command_id": command_id,
+                        "state": state,
+                        "record": record,
+                        "receipts": receipts,
+                        "cut": cut,
+                    })),
+                    None => Ok(json!({
+                        "kind": "EconomicCommand",
+                        "domain_id": "E",
+                        "command_id": command_id,
+                        "state": "NoRecord",
+                        "cut": cut,
+                    })),
+                }
+            }
+        }
+    }
+}
+
+/// 流式构建 `EconomicProjectionView`（投影扫描峰值读缓冲 256 KiB；输出严格受 `READ_CACHE` 4 MiB 约束；
+/// 所有分片 SQL 沿 `ReadBudget` 计量并守最早绝对期限）。
+pub(super) fn build_projection_document(
+    c: &Connection,
+    config: &Config,
+    epoch: i64,
+    runtime: &Value,
+    selected: &StoredImage,
+    vector: Option<&Map<String, Value>>,
+    budget: &mut ReadBudget<'_>,
+) -> Result<Vec<u8>, String> {
+    let mut stream = ChunkedImageStream::new(c, selected, budget);
+    let mut doc_budget = READ_CACHE;
+    let mut path = Vec::new();
+    let mut omitted = Vec::new();
+    let projection =
+        parse_projected_value(&mut stream, &mut doc_budget, &mut path, &mut omitted, 0)?;
+    if !projection.is_object() {
+        return Err("StorageUnavailable：持久图像顶层非对象".into());
+    }
+    assert_no_json_numbers(&projection)?;
+    let authoritative_image_hash = stream.finish_and_verify_root(config)?;
+    let projection_canonical = canonical_json(&projection);
+    let projection_bytes = projection_canonical.len();
+    if projection_bytes > READ_CACHE {
+        return Err("QueryBudgetExceeded：投影正文超过4MiB逻辑预算".into());
+    }
+    let projection_hash = sha256_hex(projection_canonical.as_bytes());
+    let doc = json!({
+        "kind": KIND_PROJECTION_VIEW,
+        "projection_revision": PROJECTION_REVISION,
+        "domain_id": config.domain,
+        "session_id": config.session,
+        "session_generation": config.generation,
+        "cut": cut(config, selected.seq, &selected.root),
+        "commit_ns": selected.commit_ns,
+        "writer_epoch": epoch.to_string(),
+        "audit_verified": true,
+        "authoritative_image_hash": authoritative_image_hash,
+        "authoritative_image_bytes": selected.bytes.to_string(),
+        "projection_hash": projection_hash,
+        "projection_bytes": projection_bytes.to_string(),
+        "omitted_peer_images": omitted,
+        "projection": projection,
+        "runtime": runtime,
+    });
+    finalize_projection_reply(config, selected, &doc, None, vector, budget)
+}
+
+fn check_receipt_domain(receipt: &Value, domain: &str) -> Result<(), String> {
+    if receipt["cut"]["domain_id"] != domain {
+        return Err("StorageUnavailable：原回执域不匹配".into());
+    }
+    Ok(())
+}
+
+/// 同切面按需取证：流式扫描指定 `cut` 的 `commits.image`（峰值 256 KiB 缓冲，核对全量原像根），
+/// 严格按 `perms` 通过 `OriginalAtCutPayload::serialize_for` 统一裁剪，并在单一出口 `finalize_projection_reply` 核验不变量 A/B。
+#[allow(clippy::too_many_arguments)]
+pub(super) fn build_original_at_cut_document(
+    c: &Connection,
+    config: &Config,
+    epoch: i64,
+    selected: &StoredImage,
+    kind: &str,
+    object_id: &str,
+    perms: &ReadPermissions,
+    vector: Option<&Map<String, Value>>,
+    budget: &mut ReadBudget<'_>,
+) -> Result<Vec<u8>, String> {
+    if !ORIGINAL_AT_CUT_KINDS.contains(&kind) {
+        return Err("SchemaUnsupported：未知同切面原件类型".into());
+    }
+    let authoritative_image_hash;
+    let projected = {
+        let mut stream = ChunkedImageStream::new(c, selected, budget);
+        let mut doc_budget = READ_CACHE;
+        let mut path = Vec::new();
+        let mut omitted = Vec::new();
+        let val = parse_projected_value(&mut stream, &mut doc_budget, &mut path, &mut omitted, 0)?;
+        authoritative_image_hash = stream.finish_and_verify_root(config)?;
+        val
+    };
+    let at_cut = cut(config, selected.seq, &selected.root);
+
+    let typed_payload = match kind {
+        "fact" => extract_fact_at_cut(c, config, &projected, object_id, perms, budget)?,
+        "allocation" => extract_allocation_at_cut(c, config, &projected, object_id, perms, budget)?,
+        "model" => extract_model_at_cut(config, &projected, object_id, perms)?,
+        "decision" => extract_decision_at_cut(c, config, &projected, object_id, budget)?,
+        "grant" => extract_grant_at_cut(c, config, &projected, object_id, budget)?,
+        "command" => extract_command_at_cut(c, config, selected, &projected, object_id, budget)?,
+        _ => unreachable!(),
+    };
+    let payload = typed_payload.serialize_for(perms)?;
+
+    let doc = json!({
+        "kind": KIND_ORIGINAL_AT_CUT,
+        "projection_revision": PROJECTION_REVISION,
+        "domain_id": config.domain,
+        "session_id": config.session,
+        "session_generation": config.generation,
+        "cut": at_cut,
+        "commit_ns": selected.commit_ns,
+        "writer_epoch": epoch.to_string(),
+        "audit_verified": true,
+        "authoritative_image_hash": authoritative_image_hash,
+        "authoritative_image_bytes": selected.bytes.to_string(),
+        "original_kind": kind,
+        "object_id": object_id,
+        "original": payload,
+    });
+    finalize_projection_reply(config, selected, &doc, Some(perms), vector, budget)
+}
+
+fn extract_fact_at_cut(
+    c: &Connection,
+    config: &Config,
+    projected: &Value,
+    fact_key: &str,
+    perms: &ReadPermissions,
+    budget: &mut ReadBudget<'_>,
+) -> Result<OriginalAtCutPayload, String> {
+    if !perms.query_fact {
+        return Err("InvalidDomain：来源未获准 QueryFact，不能读取事实原件".into());
+    }
+    let recorded = projected["recorded"]
+        .as_array()
+        .ok_or("StorageUnavailable：recorded 缺失")?;
+    let rec = recorded
+        .iter()
+        .find(|r| r["fact_key"] == fact_key)
+        .ok_or("MissingDependency：指定固定切面不存在该事实原件")?;
+    let raw_utf8 = required(rec, "raw_utf8")?;
+    let raw_sha256 = required(rec, "raw_sha256")?;
+    if sha256_hex(raw_utf8.as_bytes()) != raw_sha256 {
+        return Err("StorageUnavailable：事实原件 raw_utf8 与 raw_sha256 不符".into());
+    }
+    let parsed_raw = strict_json(raw_utf8.as_bytes())?;
+    let raw_exact_text = to_exact_decimal_text(&parsed_raw)?;
+
+    let mut receipts = Vec::new();
+    if config.domain == "E" {
+        let receipt = metered_row(c, "receipts", fact_key, budget)?
+            .ok_or("StorageUnavailable：E 事实缺持久回执")?;
+        check_receipt_domain(&receipt, "E")?;
+        receipts.push(receipt);
+    } else {
+        if let Some(e_receipt) = rec.get("e_receipt") {
+            receipts.push(e_receipt.clone());
+        }
+        let app_id = super::tb03c_allocation::application_id(rec)?;
+        if let Some(b_receipt) = metered_row(c, "receipts", app_id, budget)? {
+            check_receipt_domain(&b_receipt, &config.domain)?;
+            receipts.push(b_receipt);
+        }
+    }
+    let fill_allocation_row = if config.domain == "E" && perms.query_allocation {
+        projected
+            .get("fill_allocations")
+            .and_then(Value::as_array)
+            .and_then(|rows| rows.iter().find(|r| r["fact_key"] == fact_key).cloned())
+    } else {
+        None
+    };
+    Ok(OriginalAtCutPayload::Fact {
+        domain_id: config.domain.clone(),
+        fact_key: fact_key.to_string(),
+        fact_hash: rec["fact_hash"].clone(),
+        raw_sha256: raw_sha256.to_string(),
+        json_pointer: rec["json_pointer"].clone(),
+        raw_utf8: raw_utf8.to_string(),
+        raw_exact_text: json!({
+            "representation": EXACT_TEXT_REPR,
+            "raw_sha256": raw_sha256,
+            "value": raw_exact_text,
+        }),
+        projected_record: rec.clone(),
+        fill_allocation_row,
+        receipts,
+    })
+}
+
+fn extract_allocation_at_cut(
+    c: &Connection,
+    config: &Config,
+    projected: &Value,
+    allocation_id: &str,
+    perms: &ReadPermissions,
+    budget: &mut ReadBudget<'_>,
+) -> Result<OriginalAtCutPayload, String> {
+    if !perms.query_allocation {
+        return Err("InvalidDomain：来源未获准 QueryAllocation，不能读取分配原件".into());
+    }
+    if config.domain == "E" {
+        let rows = projected
+            .get("fill_allocations")
+            .and_then(Value::as_array)
+            .ok_or("MissingDependency：指定固定切面无 E 派生分配记录")?;
+        let row_match = rows
+            .iter()
+            .find(|r| {
+                r["allocations"]
+                    .as_array()
+                    .is_some_and(|al| al.iter().any(|a| a["allocation_id"] == allocation_id))
+            })
+            .ok_or("MissingDependency：指定固定切面不存在该 E 分配记录")?;
+        let fact_key = required(row_match, "fact_key")?;
+        let fact_hash = required(row_match, "fact_hash")?;
+        let evidence_id = required(row_match, "evidence_id")?;
+        let resolve_receipt = metered_row(
+            c,
+            "receipts",
+            &super::tb03c_e::receipt_key(evidence_id),
+            budget,
+        )?
+        .ok_or("StorageUnavailable：E 分配缺 Resolve 持久回执")?;
+        check_receipt_domain(&resolve_receipt, "E")?;
+        let fact = if perms.query_fact {
+            Some(Box::new(extract_fact_at_cut(
+                c, config, projected, fact_key, perms, budget,
+            )?))
+        } else {
+            None
+        };
+        return Ok(OriginalAtCutPayload::EAllocation {
+            allocation_id: allocation_id.to_string(),
+            fill_allocation_row: row_match.clone(),
+            resolve_receipt,
+            fact_ref: FactRef {
+                fact_key: fact_key.to_string(),
+                fact_hash: fact_hash.to_string(),
+            },
+            fact,
+        });
+    }
+    let applied = projected["applied"]
+        .as_array()
+        .ok_or("StorageUnavailable：applied 缺失")?;
+    let app_entry = applied
+        .iter()
+        .find(|a| a["allocation_id"] == allocation_id)
+        .ok_or("MissingDependency：指定固定切面不存在该 B 应用分配")?;
+    let fact_key = required(app_entry, "fact_key")?;
+    let fact_hash = required(app_entry, "fact_hash")?;
+    let application = metered_row(c, "applications", allocation_id, budget)?
+        .ok_or("StorageUnavailable：B 应用记录缺失")?;
+    let receipt = metered_row(c, "receipts", allocation_id, budget)?
+        .ok_or("StorageUnavailable：B 应用回执缺失")?;
+    check_receipt_domain(&receipt, &config.domain)?;
+    let fact = if perms.query_fact {
+        Some(Box::new(extract_fact_at_cut(
+            c, config, projected, fact_key, perms, budget,
+        )?))
+    } else {
+        None
+    };
+    Ok(OriginalAtCutPayload::BAllocation {
+        domain_id: config.domain.clone(),
+        allocation_id: allocation_id.to_string(),
+        applied_entry: app_entry.clone(),
+        application,
+        receipt,
+        fact_ref: FactRef {
+            fact_key: fact_key.to_string(),
+            fact_hash: fact_hash.to_string(),
+        },
+        fact,
+    })
+}
+
+fn extract_model_at_cut(
+    config: &Config,
+    projected: &Value,
+    object_id: &str,
+    perms: &ReadPermissions,
+) -> Result<OriginalAtCutPayload, String> {
+    let recorded = projected["recorded"]
+        .as_array()
+        .ok_or("StorageUnavailable：recorded 缺失")?;
+    // 授权与查找/返回分支严格一一绑定：
+    // - QueryCommand 仅可按命令查找并读取命令固化的 model_ref，无 QueryFact 时绝不遍历 recorded 或返回事实模型原字节；
+    // - QueryFact 仅可按 fact_key 从事实原件读取 model_raw_utf8，无 QueryCommand 时绝不遍历 finance.commands。
+    let mut command_model_ref: Option<Value> = None;
+    let mut matched_fact: Option<&Value> = if perms.query_fact {
+        recorded.iter().find(|r| r["fact_key"] == object_id)
+    } else {
+        None
+    };
+    if config.domain == "E" && perms.query_command {
+        if let Some(cmds) = projected
+            .get("finance")
+            .and_then(|f| f.get("commands"))
+            .and_then(Value::as_array)
+        {
+            if let Some(cmd) = cmds.iter().find(|c| c["command_id"] == object_id) {
+                if cmd["state"] != "ReleasedExact" {
+                    return Err("MissingDependency：指定切面该命令尚未 ReleasedExact".into());
+                }
+                let mr = cmd["command"]["model_ref"].clone();
+                if !mr.is_object() {
+                    return Err("MissingDependency：指定切面命令不含固化 model_ref".into());
+                }
+                command_model_ref = Some(mr);
+                if perms.query_fact && matched_fact.is_none() {
+                    matched_fact = recorded.iter().find(|r| {
+                        r["event"]["event"] == crate::history_simulation::intake::EVENT
+                            && (r["event"]["simulation_original_text_view"]["value"]["fill"]
+                                ["command_id"]
+                                == object_id
+                                || r["event"]["simulation_original_text_view"]["value"]
+                                    ["command_id"]
+                                    == object_id)
+                    });
+                }
+            }
+        }
+    }
+    let Some(rec) = matched_fact else {
+        if let Some(mr) = command_model_ref {
+            return Ok(OriginalAtCutPayload::Model {
+                domain_id: config.domain.clone(),
+                object_id: object_id.to_string(),
+                model_ref: mr,
+                fact_model: None,
+            });
+        }
+        if config.domain == "E" && !perms.query_fact {
+            return Err("InvalidDomain：来源未获准 QueryFact，不能按事实原件读取模型原字节".into());
+        }
+        if config.domain == "E" && !perms.query_command {
+            return Err(
+                "InvalidDomain：来源未获准 QueryCommand，且指定切面不存在该事实模型原件".into(),
+            );
+        }
+        return Err("MissingDependency：指定固定切面不存在对应模型原件或命令".into());
+    };
+    let raw_utf8 = required(rec, "raw_utf8")?;
+    let doc = strict_json(raw_utf8.as_bytes())?;
+    let model = &doc["model"];
+    if !model.is_object() {
+        return Err("MissingDependency：指定原件不含模拟模型对象".into());
+    }
+    let model_raw_utf8 = canonical_json(model);
+    let model_hash = sha256_hex(model_raw_utf8.as_bytes());
+    if doc["model_content_hash"] != model_hash {
+        return Err("IdentityConflict：模拟原件内嵌 model 与 model_content_hash 不符".into());
+    }
+    let model_ref = json!({
+        "model_id": required(model, "model_id")?,
+        "revision": required(model, "revision")?,
+        "content_hash": model_hash,
+    });
+    if let Some(ref cmd_mr) = command_model_ref {
+        if cmd_mr != &model_ref {
+            return Err("IdentityConflict：命令固化 model_ref 与模拟原件模型不符".into());
+        }
+    }
+    Ok(OriginalAtCutPayload::Model {
+        domain_id: config.domain.clone(),
+        object_id: object_id.to_string(),
+        model_ref,
+        fact_model: Some(FactModelBytes {
+            source_fact_key: rec["fact_key"].clone(),
+            source_raw_sha256: rec["raw_sha256"].clone(),
+            model_raw_utf8,
+            model_exact_text: json!({
+                "representation": EXACT_TEXT_REPR,
+                "content_hash": model_hash,
+                "value": to_exact_decimal_text(model)?,
+            }),
+        }),
+    })
+}
+
+fn extract_decision_at_cut(
+    c: &Connection,
+    config: &Config,
+    projected: &Value,
+    decision_id: &str,
+    budget: &mut ReadBudget<'_>,
+) -> Result<OriginalAtCutPayload, String> {
+    if config.domain == "E" {
+        return Err("SchemaUnsupported：decision 仅属于 B 重".into());
+    }
+    let decisions = projected["finance"]["decisions"]
+        .as_array()
+        .ok_or("MissingDependency：指定切面无 decisions")?;
+    let d = decisions
+        .iter()
+        .find(|x| x["decision_id"] == decision_id)
+        .ok_or("MissingDependency：指定固定切面不存在该 decision")?;
+    let mut receipts = Vec::new();
+    for event in projected["history"]
+        .as_array()
+        .ok_or("StorageUnavailable：history 缺失")?
+        .iter()
+        .filter(|x| super::finance::is_event(x) && x["record"]["decision_id"] == decision_id)
+    {
+        let rk = super::finance::key_for(config, &event["request"]["payload"])?;
+        let r =
+            metered_row(c, "receipts", &rk, budget)?.ok_or("StorageUnavailable：决定缺原回执")?;
+        check_receipt_domain(&r, &config.domain)?;
+        receipts.push(r);
+    }
+    Ok(OriginalAtCutPayload::Decision {
+        domain_id: config.domain.clone(),
+        decision: d.clone(),
+        receipts,
+    })
+}
+
+fn extract_grant_at_cut(
+    c: &Connection,
+    config: &Config,
+    projected: &Value,
+    grant_id: &str,
+    budget: &mut ReadBudget<'_>,
+) -> Result<OriginalAtCutPayload, String> {
+    if config.domain != "E" {
+        return Err("SchemaUnsupported：grant 仅属于 E".into());
+    }
+    let slots = projected["finance"]["slots"]
+        .as_array()
+        .ok_or("MissingDependency：指定切面无 slots")?;
+    for slot in slots {
+        if let Some(g) = slot["grants"]
+            .as_array()
+            .and_then(|gs| gs.iter().find(|g| g["grant_id"] == grant_id))
+        {
+            let rk =
+                super::finance::receipt_key_for(config, "Reserve", required(slot, "slot_id")?)?;
+            let receipt = metered_row(c, "receipts", &rk, budget)?
+                .ok_or("StorageUnavailable：grant 缺原回执")?;
+            check_receipt_domain(&receipt, "E")?;
+            return Ok(OriginalAtCutPayload::Grant {
+                grant: g.clone(),
+                receipt,
+            });
+        }
+    }
+    Err("MissingDependency：指定固定切面尚无该 grant".into())
+}
+
+fn extract_command_at_cut(
+    c: &Connection,
+    config: &Config,
+    selected: &StoredImage,
+    projected: &Value,
+    command_id: &str,
+    budget: &mut ReadBudget<'_>,
+) -> Result<OriginalAtCutPayload, String> {
+    if config.domain != "E" {
+        return Err("SchemaUnsupported：command 仅属于 E".into());
+    }
+    let at = cut(config, selected.seq, &selected.root);
+    let commands = projected["finance"]["commands"]
+        .as_array()
+        .ok_or("MissingDependency：指定切面无 commands")?;
+    let Some(cmd) = commands.iter().find(|x| x["command_id"] == command_id) else {
+        return Ok(OriginalAtCutPayload::Command {
+            command_id: command_id.to_string(),
+            state: json!("NoRecord"),
+            cut: at,
+            record_and_receipts: None,
+        });
+    };
+    let mut receipts = Vec::new();
+    for event in projected["history"]
+        .as_array()
+        .ok_or("StorageUnavailable：history 缺失")?
+        .iter()
+        .filter(|x| {
+            matches!(
+                x["kind"].as_str(),
+                Some("MakeDispatchable" | "ReleaseExact")
+            ) && x["record"]["decision_id"] == cmd["decision_id"]
+        })
+    {
+        let rk = super::finance::key_for(config, &event["request"]["payload"])?;
+        let r =
+            metered_row(c, "receipts", &rk, budget)?.ok_or("StorageUnavailable：命令缺原回执")?;
+        check_receipt_domain(&r, "E")?;
+        receipts.push(r);
+    }
+    let _ = hash(cmd);
+    Ok(OriginalAtCutPayload::Command {
+        command_id: command_id.to_string(),
+        state: cmd["state"].clone(),
+        cut: at,
+        record_and_receipts: Some((cmd.clone(), receipts)),
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::s_content::job::{Existing, Job, JobLimits, DEADLINE, LIMIT_EXCEEDED};
+    use rusqlite::params;
+    use std::cell::Cell;
+    use std::rc::Rc;
+    use std::time::{Duration, Instant};
+
+    fn build_projection_document(
+        c: &Connection,
+        cfg: &Config,
+        epoch: i64,
+        runtime: &Value,
+        selected: &StoredImage,
+        budget: &mut ReadBudget<'_>,
+    ) -> Result<Vec<u8>, String> {
+        super::build_projection_document(c, cfg, epoch, runtime, selected, None, budget)
+    }
+
+    fn build_original_at_cut_document(
+        c: &Connection,
+        cfg: &Config,
+        epoch: i64,
+        selected: &StoredImage,
+        kind: &str,
+        id: &str,
+        perms: &ReadPermissions,
+        budget: &mut ReadBudget<'_>,
+    ) -> Result<Vec<u8>, String> {
+        super::build_original_at_cut_document(
+            c, cfg, epoch, selected, kind, id, perms, None, budget,
+        )
+    }
+
+    fn test_conn_with_commit(
+        config: &Config,
+        seq: i64,
+        prev: &str,
+        ns: &str,
+        image: &Value,
+    ) -> (Connection, StoredImage) {
+        let c = Connection::open_in_memory().unwrap();
+        c.execute_batch(
+            "CREATE TABLE commits(seq INTEGER PRIMARY KEY, prev_root TEXT NOT NULL, root TEXT NOT NULL, commit_ns TEXT NOT NULL, image TEXT NOT NULL);
+             CREATE TABLE receipts(k TEXT PRIMARY KEY, json TEXT NOT NULL);
+             CREATE TABLE applications(k TEXT PRIMARY KEY, fact_key TEXT NOT NULL UNIQUE, json TEXT NOT NULL);",
+        )
+        .unwrap();
+        let raw = canonical_json(image);
+        let img_hash = sha256_hex(raw.as_bytes());
+        let r = root_with_image_hash(config, seq, prev, ns, &img_hash);
+        c.execute(
+            "INSERT INTO commits(seq, prev_root, root, commit_ns, image) VALUES(?,?,?,?,?)",
+            params![seq, prev, r, ns, raw],
+        )
+        .unwrap();
+        let meta = super::super::store::stored_image_meta(&c, seq).unwrap();
+        (c, meta)
+    }
+
+    fn fin6_config(domain: &str, ops: &[&str]) -> Config {
+        Config {
+            domain: domain.into(),
+            session: "sess-proj-test".into(),
+            generation: "1".into(),
+            manifest_hash: "0".repeat(64),
+            manifest: json!({
+                "schema_revision": "economic-manifest/1",
+                "protocol_revision": "economic-session/1",
+                "book_revision": "tb03c-book/1",
+                "finance": {"schema_revision": "tb03b-finance/6"},
+                "authorized_sources": [{
+                    "source_namespace": "q-test",
+                    "source_epoch": "1",
+                    "producer_id": "Q:sess-proj-test",
+                    "producer_epoch": "1",
+                    "operations": ops
+                }]
+            }),
+            producer: format!("{domain}:sess-proj-test"),
+            db: std::path::PathBuf::from("/tmp/dummy.db"),
+            socket: std::path::PathBuf::from("/tmp/dummy.sock"),
+        }
+    }
+
+    fn dummy_config() -> Config {
+        fin6_config("B:alpha", &["ReadView", "QueryFact", "QueryAllocation"])
+    }
+
+    fn q_envelope() -> Value {
+        json!({
+            "session_id": "sess-proj-test",
+            "session_generation": "1",
+            "source_namespace": "q-test",
+            "source_epoch": "1",
+            "producer_id": "Q:sess-proj-test",
+            "producer_epoch": "1",
+            "payload": {}
+        })
+    }
+
+    fn big_image_with_peer_proof() -> (Value, String, usize) {
+        let big_pad = "x".repeat(600_000);
+        let peer_img = json!({"book": null, "padding": big_pad});
+        let expected_peer_hash = sha256_hex(canonical_json(&peer_img).as_bytes());
+        let expected_peer_len = canonical_json(&peer_img).len();
+        let raw_orig = canonical_json(&json!({
+            "format": "history-sim-economic-originals/1",
+            "event": {"fill": {"amount": 28, "price": 14, "quantity": 2, "fee": 1, "revision": 1}}
+        }));
+        let image = json!({
+            "book": null,
+            "pending": [],
+            "applied": [],
+            "unmatched": [],
+            "recorded": [{
+                "fact_key": "a".repeat(64),
+                "fact_hash": "b".repeat(64),
+                "raw_sha256": sha256_hex(raw_orig.as_bytes()),
+                "json_pointer": "/event",
+                "raw_utf8": raw_orig,
+                "event": {
+                    "event": "history-sim-unresolved/1",
+                    "simulation_original": {"fill": {"amount": 28, "price": 14, "quantity": 2, "fee": 1, "revision": 1}}
+                },
+                "e_commit_proof": {
+                    "previous_root": "1".repeat(64),
+                    "commit_ns": "10",
+                    "image": peer_img
+                }
+            }],
+            "history": []
+        });
+        (image, expected_peer_hash, expected_peer_len)
+    }
+
+    #[test]
+    fn streams_multi_chunk_peer_image_without_full_load_and_verifies_root() {
+        let cfg = dummy_config();
+        let (image, expected_peer_hash, expected_peer_len) = big_image_with_peer_proof();
+        let (c, meta) = test_conn_with_commit(&cfg, 6, &"9".repeat(64), "10", &image);
+        assert!(meta.bytes > 600_000);
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let mut budget = ReadBudget::new(None, Some(deadline));
+        let mut stream = ChunkedImageStream::new(&c, &meta, &mut budget);
+        let mut doc_budget = READ_CACHE;
+        let mut path = Vec::new();
+        let mut omitted = Vec::new();
+        let projected =
+            parse_projected_value(&mut stream, &mut doc_budget, &mut path, &mut omitted, 0)
+                .unwrap();
+        assert!(stream.chunk_reads >= 3, "must stream in <=256KiB chunks");
+        assert!(stream.max_chunk_bytes <= READ_CHUNK);
+        let auth_hash = stream.finish_and_verify_root(&cfg).unwrap();
+        assert_eq!(auth_hash, sha256_hex(canonical_json(&image).as_bytes()));
+        assert_eq!(omitted.len(), 1);
+        assert_eq!(omitted[0]["sha256"], expected_peer_hash);
+        assert_eq!(omitted[0]["byte_len"], expected_peer_len.to_string());
+        assert_eq!(
+            projected["recorded"][0]["e_commit_proof"]["image_omitted"]["sha256"],
+            expected_peer_hash
+        );
+        assert!(projected["recorded"][0]["e_commit_proof"]
+            .get("image")
+            .is_none());
+        assert_eq!(
+            projected["recorded"][0]["event"]["simulation_original_text_view"]["representation"],
+            EXACT_TEXT_REPR
+        );
+        assert_eq!(
+            projected["recorded"][0]["event"]["simulation_original_text_view"]["value"]["fill"]
+                ["amount"],
+            "28"
+        );
+        assert!(projected["recorded"][0]["event"]
+            .get("simulation_original")
+            .is_none());
+        assert_no_json_numbers(&projected).unwrap();
+
+        let mut budget2 = ReadBudget::new(None, Some(deadline));
+        let doc_bytes =
+            build_projection_document(&c, &cfg, 1, &json!({}), &meta, &mut budget2).unwrap();
+        let doc = strict_json(&doc_bytes).unwrap();
+        assert_eq!(doc["kind"], KIND_PROJECTION_VIEW);
+        assert_eq!(doc["projection_revision"], PROJECTION_REVISION);
+        assert_eq!(doc["authoritative_image_hash"], auth_hash);
+        assert_ne!(doc["projection_hash"], doc["authoritative_image_hash"]);
+        assert!(doc_bytes.len() < 4096);
+    }
+
+    #[test]
+    fn rejects_tampered_stored_image_against_cut_root() {
+        let cfg = dummy_config();
+        let image = json!({"book": null, "recorded": [], "pending": [], "applied": [], "unmatched": [], "history": []});
+        let (c, meta) = test_conn_with_commit(&cfg, 1, &"9".repeat(64), "5", &image);
+        c.execute(
+            "UPDATE commits SET root=? WHERE seq=1",
+            [format!("f{}", &"0".repeat(63))],
+        )
+        .unwrap();
+        let bad_meta = super::super::store::stored_image_meta(&c, 1).unwrap();
+        assert_ne!(bad_meta.root, meta.root);
+        let mut budget = ReadBudget::new(None, Some(Instant::now() + Duration::from_secs(10)));
+        let err_msg =
+            build_projection_document(&c, &cfg, 1, &json!({}), &bad_meta, &mut budget).unwrap_err();
+        assert!(
+            err_msg.contains("原像摘要与持久cut根不符"),
+            "unexpected: {err_msg}"
+        );
+    }
+
+    #[test]
+    fn rejects_non_integer_number_in_exact_decimal_text() {
+        let err_msg = to_exact_decimal_text(&json!({"x": 1.25})).unwrap_err();
+        assert!(err_msg.contains("非整数"), "unexpected: {err_msg}");
+    }
+
+    fn test_job_limits(max_wire: u64, max_ms: u64) -> JobLimits {
+        JobLimits {
+            max_total_wire_bytes: max_wire,
+            max_total_node_bytes: 16_777_216,
+            max_total_nodes: 100_000,
+            max_total_records: 100_000,
+            max_total_requests: 100,
+            max_elapsed_ms: max_ms,
+            max_staged_bytes: 16_777_216,
+            max_store_bytes: 16_777_216,
+        }
+    }
+
+    #[test]
+    fn job_wire_byte_cap_stops_chunked_projection_without_extra_reads_or_success() {
+        let cfg = dummy_config();
+        let (image, _, _) = big_image_with_peer_proof();
+        let (c, meta) = test_conn_with_commit(&cfg, 6, &"9".repeat(64), "10", &image);
+        // 3 chunks (~600KB > 524,288B): cap allows chunk 1 (262,144) but trips right on chunk 2 (524,288 > 400,000).
+        let clock = Rc::new(Cell::new(Instant::now()));
+        let clock_job = clock.clone();
+        let mut job = Job::new(
+            test_job_limits(400_000, 10_000),
+            Existing {
+                store_bytes: 0,
+                staged_bytes: 0,
+            },
+            Box::new(move || clock_job.get()),
+        )
+        .unwrap();
+        let mut budget = ReadBudget::new(
+            Some(&mut job),
+            Some(Instant::now() + Duration::from_secs(30)),
+        );
+        let err =
+            build_projection_document(&c, &cfg, 1, &json!({}), &meta, &mut budget).unwrap_err();
+        assert!(
+            err.starts_with("Incomplete：SQL 实读累计"),
+            "unexpected: {err}"
+        );
+        let snap = job.snapshot();
+        assert_eq!(snap.stopped, Some(LIMIT_EXCEEDED));
+        // Stopped immediately after chunk 2 was charged; chunk 3 was NEVER read!
+        assert_eq!(snap.wire_bytes, u128::from((READ_CHUNK * 2) as u64));
+    }
+
+    #[test]
+    fn job_earlier_deadline_stops_before_next_chunk_even_when_ingress_deadline_is_far() {
+        let cfg = dummy_config();
+        let (image, _, _) = big_image_with_peer_proof();
+        let (c, meta) = test_conn_with_commit(&cfg, 6, &"9".repeat(64), "10", &image);
+        let clock = Rc::new(Cell::new(Instant::now()));
+        let clock_job = clock.clone();
+        let mut job = Job::new(
+            test_job_limits(16_777_216, 1),
+            Existing {
+                store_bytes: 0,
+                staged_bytes: 0,
+            },
+            Box::new(move || clock_job.get()),
+        )
+        .unwrap();
+        // Advance job clock on return of SQL #1 (chunk 1), while ingress deadline is 60s in the future!
+        let _guard = super::super::tb03c_c5_read_tests::expire_after_sql_returns(clock, 1);
+        let mut budget = ReadBudget::new(
+            Some(&mut job),
+            Some(Instant::now() + Duration::from_secs(60)),
+        );
+        let err =
+            build_projection_document(&c, &cfg, 1, &json!({}), &meta, &mut budget).unwrap_err();
+        assert!(err.starts_with("Incomplete"), "unexpected: {err}");
+        let snap = job.snapshot();
+        assert_eq!(snap.stopped, Some(DEADLINE));
+        // Chunk 1 returned and was accounted, then stopped before chunk 2 ever ran!
+        assert_eq!(snap.wire_bytes, u128::from(READ_CHUNK as u64));
+    }
+
+    #[test]
+    fn job_meters_select_meta_and_original_receipt_sql_rows() {
+        let cfg = fin6_config("E", &["ReadView", "QueryFact", "QueryAllocation"]);
+        let raw_orig = canonical_json(&json!({
+            "format": "history-sim-economic-originals/1",
+            "model": {"model_id": "m1", "revision": "r1"},
+            "model_content_hash": sha256_hex(canonical_json(&json!({"model_id": "m1", "revision": "r1"})).as_bytes()),
+            "event": {"kind": "fill", "fill": {"command_id": "cmd-1", "amount": 28}}
+        }));
+        let fk = "a".repeat(64);
+        let image = json!({
+            "book": null,
+            "recorded": [{
+                "fact_key": fk,
+                "fact_hash": "b".repeat(64),
+                "raw_sha256": sha256_hex(raw_orig.as_bytes()),
+                "json_pointer": "/event",
+                "raw_utf8": raw_orig,
+                "event": {"event": "history-sim-unresolved/1", "simulation_original": {"kind": "fill"}}
+            }],
+            "pending": [],
+            "applied": [],
+            "unmatched": [],
+            "history": []
+        });
+        let (c, meta) = test_conn_with_commit(&cfg, 3, &"9".repeat(64), "10", &image);
+        let receipt = json!({"kind": "Recorded", "domain_id": "E", "fact_key": fk, "cut": cut(&cfg, 3, &meta.root)});
+        c.execute(
+            "INSERT INTO receipts(k, json) VALUES(?, ?)",
+            params![fk, canonical_json(&receipt)],
+        )
+        .unwrap();
+        let clock = Rc::new(Cell::new(Instant::now()));
+        let clock_job = clock.clone();
+        let mut job = Job::new(
+            test_job_limits(16_777_216, 10_000),
+            Existing {
+                store_bytes: 0,
+                staged_bytes: 0,
+            },
+            Box::new(move || clock_job.get()),
+        )
+        .unwrap();
+        let mut budget = ReadBudget::new(
+            Some(&mut job),
+            Some(Instant::now() + Duration::from_secs(10)),
+        );
+        let selected = select_projection_meta(
+            &c,
+            &cfg,
+            &json!({"op": OP_READ_ORIGINAL_AT_CUT, "projection_revision": PROJECTION_REVISION, "cut": cut(&cfg, 3, &meta.root), "kind": "fact", "object_id": fk}),
+            true,
+            &mut budget,
+        )
+        .unwrap();
+        let bytes_after_select = budget.job.as_deref().unwrap().snapshot().wire_bytes;
+        assert!(
+            bytes_after_select > 0,
+            "select_projection_meta must charge ReadBudget"
+        );
+        let perms = ReadPermissions {
+            query_fact: true,
+            ..ReadPermissions::default()
+        };
+        let doc = build_original_at_cut_document(
+            &c,
+            &cfg,
+            1,
+            &selected,
+            "fact",
+            &fk,
+            &perms,
+            &mut budget,
+        )
+        .unwrap();
+        assert!(!doc.is_empty());
+        let bytes_after_orig = job.snapshot().wire_bytes;
+        assert!(
+            bytes_after_orig >= bytes_after_select + u128::from(meta.bytes as u64) + u128::from(canonical_json(&receipt).len() as u64),
+            "chunk scan + receipt row must both be metered in ReadBudget: {bytes_after_orig} vs {bytes_after_select}"
+        );
+    }
+
+    #[test]
+    fn authorization_isolation_binds_model_and_allocation_to_granted_evidence_kind() {
+        let model = json!({"model_id": "m1", "revision": "r1"});
+        let model_raw = canonical_json(&model);
+        let model_hash = sha256_hex(model_raw.as_bytes());
+        let raw_orig = canonical_json(&json!({
+            "format": "history-sim-economic-originals/1",
+            "model": model,
+            "model_content_hash": model_hash,
+            "event": {"kind": "fill", "fill": {"command_id": "cmd-alpha", "amount": 28}}
+        }));
+        let fk = "a".repeat(64);
+        let aid = "sim-command:1";
+        let ev_id = "ev-1";
+        let full_command = json!({
+            "command_id": "cmd-alpha",
+            "allocation_id": "alloc-alpha",
+            "chong_id": "alpha",
+            "decision_id": "alpha",
+            "family_id": "fam-alpha",
+            "first_quantity": "2",
+            "grant_id": "grant-alpha",
+            "model_ref": {"model_id": "m1", "revision": "r1", "content_hash": model_hash},
+            "plan_hash": "1".repeat(64),
+            "revision": "1",
+            "side": "buy",
+            "symbol": "TEST",
+            "x_id": "X",
+            "x_epoch": "1",
+            "secret_marker": "full-e-command-body"
+        });
+        let cmd_hash = sha256_hex(canonical_json(&full_command).as_bytes());
+        let e_rel_cut = json!({"domain_id": "E", "commit_seq": "4", "root_hash": "4".repeat(64)});
+        let witness = json!({
+            "witness_revision": "x-sim-execution-witness/1",
+            "x_profile_revision": "x-execution-profile/3",
+            "x_id": "X",
+            "x_epoch": "1",
+            "session_id": "sess-proj-test",
+            "session_generation": "1",
+            "source_namespace": "x-sim",
+            "source_epoch": "1",
+            "model_content_hash": model_hash,
+            "command_id": "cmd-alpha",
+            "command_hash": cmd_hash,
+            "e_release_receipt_key": "rel-key-1",
+            "e_release_cut": e_rel_cut,
+            "e_release_commit_ns": "2",
+            "x_release_evidence": {
+                "protocol": "x-exact-authority/1",
+                "session_id": "sess-proj-test",
+                "session_generation": "1",
+                "authority_id": "E",
+                "command_id": "cmd-alpha",
+                "command_hash": cmd_hash,
+                "command": full_command,
+                "state": "ReleasedExact",
+                "receipt_id": "rel-key-1",
+                "release_receipt_id": null,
+                "commit_ns": "2"
+            },
+            "x_accept_clock": {"received_ns": "2", "first_known_ns": "2", "commit_ns": "2"},
+            "x_command_state": "Observed",
+            "x_execute_evidence": {
+                "claimed_ns": "2",
+                "reply": {
+                    "protocol": "x-exact-authority/1",
+                    "session_id": "sess-proj-test",
+                    "session_generation": "1",
+                    "authority_id": "S",
+                    "command_id": "cmd-alpha",
+                    "command_hash": cmd_hash,
+                    "command": full_command,
+                    "state": "ExecuteCommitted",
+                    "receipt_id": "elig-1",
+                    "release_receipt_id": "rel-key-1",
+                    "commit_ns": "2"
+                }
+            },
+            "attempt_batch_id": "b2",
+            "attempt_batch_bar_index": "2",
+            "attempt_batch_request_sha256": "5".repeat(64),
+            "attempt_batch_receipt_sha256": "6".repeat(64),
+            "originals_batch_id": "b3",
+            "originals_batch_bar_index": "3",
+            "originals_batch_receipt_sha256": "7".repeat(64),
+            "fact_raw_sha256": sha256_hex(raw_orig.as_bytes())
+        });
+        let image = json!({
+            "book": null,
+            "recorded": [{
+                "fact_key": fk,
+                "fact_hash": "b".repeat(64),
+                "raw_sha256": sha256_hex(raw_orig.as_bytes()),
+                "json_pointer": "/event",
+                "raw_utf8": raw_orig,
+                "event": {"event": "history-sim-unresolved/1", "simulation_original": {"kind": "fill", "fill": {"command_id": "cmd-alpha", "amount": 28}}}
+            }],
+            "pending": [],
+            "applied": [],
+            "unmatched": [],
+            "fill_allocations": [{
+                "fact_key": fk,
+                "fact_hash": "b".repeat(64),
+                "source_kind": "history_sim_fill",
+                "evidence_id": ev_id,
+                "x_execution_witness": witness,
+                "allocations": [{"allocation_id": aid, "chong_id": "alpha"}]
+            }],
+            "finance": {
+                "schema_revision": "tb03b-finance/6",
+                "commands": [{
+                    "command_id": "cmd-alpha",
+                    "decision_id": "alpha",
+                    "state": "ReleasedExact",
+                    "command": full_command
+                }]
+            },
+            "history": []
+        });
+        let cfg_all = fin6_config(
+            "E",
+            &["ReadView", "QueryFact", "QueryAllocation", "QueryCommand"],
+        );
+        let (c, meta) = test_conn_with_commit(&cfg_all, 5, &"9".repeat(64), "10", &image);
+        let fact_receipt = json!({"kind": "Recorded", "domain_id": "E", "fact_key": fk, "cut": cut(&cfg_all, 5, &meta.root)});
+        let res_receipt = json!({"kind": "Resolved", "domain_id": "E", "evidence_id": ev_id, "cut": cut(&cfg_all, 5, &meta.root)});
+        c.execute(
+            "INSERT INTO receipts(k, json) VALUES(?, ?), (?, ?)",
+            params![
+                fk,
+                canonical_json(&fact_receipt),
+                super::super::tb03c_e::receipt_key(ev_id),
+                canonical_json(&res_receipt)
+            ],
+        )
+        .unwrap();
+
+        let env = q_envelope();
+        let deadline = Instant::now() + Duration::from_secs(10);
+
+        // 1. QueryCommand-only: querying model by command_id returns ONLY model_ref (no model_raw_utf8!);
+        //    querying model by fact_key is REJECTED.
+        let cfg_cmd_only = fin6_config("E", &["ReadView", "QueryCommand"]);
+        let perms_cmd = check_authorization(
+            &cfg_cmd_only,
+            &env,
+            &json!({"op": OP_READ_ORIGINAL_AT_CUT, "kind": "model", "object_id": "cmd-alpha"}),
+        )
+        .unwrap();
+        assert!(perms_cmd.query_command && !perms_cmd.query_fact);
+        let mut b1 = ReadBudget::new(None, Some(deadline));
+        let cmd_model_doc = strict_json(
+            &build_original_at_cut_document(
+                &c,
+                &cfg_cmd_only,
+                1,
+                &meta,
+                "model",
+                "cmd-alpha",
+                &perms_cmd,
+                &mut b1,
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            cmd_model_doc["original"]["model_ref"]["content_hash"],
+            model_hash
+        );
+        assert!(cmd_model_doc["original"]["model_raw_utf8"].is_null());
+        assert!(cmd_model_doc["original"]["model_exact_text"].is_null());
+        assert!(cmd_model_doc["original"]["source_fact_key"].is_null());
+        let mut b2 = ReadBudget::new(None, Some(deadline));
+        let err_fk = build_original_at_cut_document(
+            &c,
+            &cfg_cmd_only,
+            1,
+            &meta,
+            "model",
+            &fk,
+            &perms_cmd,
+            &mut b2,
+        )
+        .unwrap_err();
+        assert!(err_fk.contains("QueryFact"), "unexpected: {err_fk}");
+
+        // 2. QueryFact-only: querying model by fact_key returns model_raw_utf8;
+        //    querying model by command_id is REJECTED (cannot traverse finance.commands without QueryCommand).
+        let cfg_fact_only = fin6_config("E", &["ReadView", "QueryFact"]);
+        let perms_fact = check_authorization(
+            &cfg_fact_only,
+            &env,
+            &json!({"op": OP_READ_ORIGINAL_AT_CUT, "kind": "model", "object_id": fk}),
+        )
+        .unwrap();
+        assert!(perms_fact.query_fact && !perms_fact.query_command);
+        let mut b3 = ReadBudget::new(None, Some(deadline));
+        let fact_model_doc = strict_json(
+            &build_original_at_cut_document(
+                &c,
+                &cfg_fact_only,
+                1,
+                &meta,
+                "model",
+                &fk,
+                &perms_fact,
+                &mut b3,
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(fact_model_doc["original"]["model_raw_utf8"], model_raw);
+        let mut b4 = ReadBudget::new(None, Some(deadline));
+        let err_cmd = build_original_at_cut_document(
+            &c,
+            &cfg_fact_only,
+            1,
+            &meta,
+            "model",
+            "cmd-alpha",
+            &perms_fact,
+            &mut b4,
+        )
+        .unwrap_err();
+        assert!(err_cmd.contains("QueryCommand"), "unexpected: {err_cmd}");
+
+        // 3. QueryAllocation-only: returns allocation + resolve_receipt + named fact_ref ONLY (fact is null, NO raw_utf8,
+        //    AND embedded x_execution_witness redacts BOTH x_release_evidence.command and x_execute_evidence.reply.command!).
+        let cfg_alloc_only = fin6_config("E", &["ReadView", "QueryAllocation"]);
+        let perms_alloc = check_authorization(
+            &cfg_alloc_only,
+            &env,
+            &json!({"op": OP_READ_ORIGINAL_AT_CUT, "kind": "allocation", "object_id": aid}),
+        )
+        .unwrap();
+        assert!(
+            perms_alloc.query_allocation && !perms_alloc.query_fact && !perms_alloc.query_command
+        );
+        let mut b5 = ReadBudget::new(None, Some(deadline));
+        let alloc_doc = strict_json(
+            &build_original_at_cut_document(
+                &c,
+                &cfg_alloc_only,
+                1,
+                &meta,
+                "allocation",
+                aid,
+                &perms_alloc,
+                &mut b5,
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        assert!(alloc_doc["original"]["fact"].is_null());
+        assert_eq!(alloc_doc["original"]["fact_ref"]["fact_key"], fk);
+        let alloc_wire = canonical_json(&alloc_doc);
+        assert!(!alloc_wire.contains("raw_utf8"));
+        assert!(!alloc_wire.contains("full-e-command-body"));
+        let w = &alloc_doc["original"]["fill_allocation_row"]["x_execution_witness"];
+        assert!(w["x_release_evidence"].get("command").is_none());
+        assert_eq!(
+            w["x_release_evidence"]["command_ref"]["command_id"],
+            "cmd-alpha"
+        );
+        assert_eq!(
+            w["x_release_evidence"]["command_ref"]["command_hash"],
+            cmd_hash
+        );
+        assert!(w["x_execute_evidence"]["reply"].get("command").is_none());
+        assert_eq!(
+            w["x_execute_evidence"]["reply"]["command_ref"]["command_id"],
+            "cmd-alpha"
+        );
+        assert_eq!(
+            w["x_execute_evidence"]["reply"]["command_ref"]["command_hash"],
+            cmd_hash
+        );
+
+        // 3b. QueryFact + QueryAllocation (without QueryCommand): querying fact embeds fill_allocation_row
+        //     whose x_execution_witness MUST ALSO redact full E commands through the single serializer!
+        let cfg_fact_alloc = fin6_config("E", &["ReadView", "QueryFact", "QueryAllocation"]);
+        let perms_fa = check_authorization(
+            &cfg_fact_alloc,
+            &env,
+            &json!({"op": OP_READ_ORIGINAL_AT_CUT, "kind": "fact", "object_id": fk}),
+        )
+        .unwrap();
+        let mut b5b = ReadBudget::new(None, Some(deadline));
+        let fact_with_alloc = strict_json(
+            &build_original_at_cut_document(
+                &c,
+                &cfg_fact_alloc,
+                1,
+                &meta,
+                "fact",
+                &fk,
+                &perms_fa,
+                &mut b5b,
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        assert!(!canonical_json(&fact_with_alloc).contains("full-e-command-body"));
+        assert!(
+            fact_with_alloc["original"]["fill_allocation_row"]["x_execution_witness"]
+                ["x_release_evidence"]
+                .get("command")
+                .is_none()
+        );
+
+        // 4. Full permissions (QueryAllocation + QueryFact + QueryCommand): embeds full fact & full witness commands.
+        let perms_all = check_authorization(
+            &cfg_all,
+            &env,
+            &json!({"op": OP_READ_ORIGINAL_AT_CUT, "kind": "allocation", "object_id": aid}),
+        )
+        .unwrap();
+        let mut b6 = ReadBudget::new(None, Some(deadline));
+        let full_alloc = strict_json(
+            &build_original_at_cut_document(
+                &c,
+                &cfg_all,
+                1,
+                &meta,
+                "allocation",
+                aid,
+                &perms_all,
+                &mut b6,
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(full_alloc["original"]["fact"]["raw_utf8"], raw_orig);
+        assert_eq!(
+            full_alloc["original"]["fill_allocation_row"]["x_execution_witness"]
+                ["x_release_evidence"]["command"],
+            full_command
+        );
+        assert_eq!(
+            full_alloc["original"]["fill_allocation_row"]["x_execution_witness"]
+                ["x_execute_evidence"]["reply"]["command"],
+            full_command
+        );
+    }
+
+    #[test]
+    fn rust_entry_enumeration_enforces_invariants_a_and_b_at_single_exit() {
+        let model = json!({"model_id": "m1", "revision": "r1"});
+        let model_raw = canonical_json(&model);
+        let model_hash = sha256_hex(model_raw.as_bytes());
+        let raw_orig = canonical_json(&json!({
+            "format": "history-sim-economic-originals/1",
+            "model": model,
+            "model_content_hash": model_hash,
+            "event": {"kind": "fee", "command_id": "cmd-alpha", "amount": 1}
+        }));
+        let fk = "f".repeat(64);
+        let aid = "sim-command-fee:1";
+        let ev_id = "ev-fee";
+        let cfg = fin6_config(
+            "E",
+            &[
+                "ReadView",
+                "QueryFact",
+                "QueryAllocation",
+                "QueryGrant",
+                "QueryCommand",
+            ],
+        );
+        let future_cut_e8 =
+            json!({"domain_id": "E", "commit_seq": "8", "root_hash": "8".repeat(64)});
+        let future_cut_e10 =
+            json!({"domain_id": "E", "commit_seq": "10", "root_hash": "a".repeat(64)});
+        let image_with_future = json!({
+            "book": null,
+            "recorded": [{
+                "fact_key": fk,
+                "fact_hash": "b".repeat(64),
+                "raw_sha256": sha256_hex(raw_orig.as_bytes()),
+                "json_pointer": "/event",
+                "raw_utf8": raw_orig,
+                "e_receipt": {"kind": "Recorded", "domain_id": "E", "cut": future_cut_e8},
+                "event": {"event": "history-sim-unresolved/1", "simulation_original": {"kind": "fee", "command_id": "cmd-alpha", "amount": 1}}
+            }],
+            "pending": [],
+            "applied": [],
+            "unmatched": [],
+            "fill_allocations": [{
+                "fact_key": fk,
+                "fact_hash": "b".repeat(64),
+                "source_kind": "history_sim_fee",
+                "evidence_id": ev_id,
+                "x_execution_witness": {
+                    "e_release_cut": future_cut_e8
+                },
+                "allocations": [{"allocation_id": aid, "chong_id": "alpha"}]
+            }],
+            "finance": {
+                "schema_revision": "tb03b-finance/6",
+                "rights": [],
+                "decisions": [],
+                "slots": [{"slot_id": "slot-1", "grants": [{"grant_id": "g-1", "prepared_cut": future_cut_e10}]}],
+                "responsibilities": [],
+                "commands": [{"command_id": "cmd-alpha", "decision_id": "alpha", "state": "ReleasedExact", "command": {"model_ref": {"model_id": "m1", "revision": "r1", "content_hash": model_hash}}}]
+            },
+            "history": [{
+                "kind": "ReleaseExact",
+                "record": {"decision_id": "alpha", "command_id": "cmd-alpha"},
+                "request": {"payload": {"op": "ReleaseExact", "command_id": "cmd-alpha"}}
+            }]
+        });
+        let (c, meta_e6) = test_conn_with_commit(&cfg, 6, &"9".repeat(64), "6", &image_with_future);
+        let rec_future =
+            json!({"kind": "Recorded", "domain_id": "E", "fact_key": fk, "cut": future_cut_e8});
+        let res_future = json!({"kind": "Resolved", "domain_id": "E", "evidence_id": ev_id, "cut": future_cut_e10});
+        let grant_future =
+            json!({"kind": "ReserveReceipt", "domain_id": "E", "cut": future_cut_e10});
+        let cmd_future =
+            json!({"kind": "ReleasedExactReceipt", "domain_id": "E", "cut": future_cut_e10});
+        c.execute(
+            "INSERT INTO receipts(k, json) VALUES(?, ?), (?, ?), (?, ?), (?, ?)",
+            params![
+                fk,
+                canonical_json(&rec_future),
+                super::super::tb03c_e::receipt_key(ev_id),
+                canonical_json(&res_future),
+                super::super::finance::receipt_key_for(&cfg, "Reserve", "slot-1").unwrap(),
+                canonical_json(&grant_future),
+                super::super::finance::receipt_key_for(&cfg, "ReleaseExact", "cmd-alpha").unwrap(),
+                canonical_json(&cmd_future),
+            ],
+        )
+        .unwrap();
+
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let perms_all = ReadPermissions {
+            query_fact: true,
+            query_allocation: true,
+            query_decision: true,
+            query_grant: true,
+            query_command: true,
+        };
+
+        // Enumerate EVERY projection read op directly from PROJECTION_READ_OPS and EVERY kind in ORIGINAL_AT_CUT_KINDS!
+        for &op in PROJECTION_READ_OPS {
+            match op {
+                OP_READ_PROJECTION => {
+                    let mut budget = ReadBudget::new(None, Some(deadline));
+                    let err =
+                        build_projection_document(&c, &cfg, 1, &json!({}), &meta_e6, &mut budget)
+                            .unwrap_err();
+                    assert!(
+                        err.starts_with("MissingDependency"),
+                        "ReadProjection must reject embedded future E:8/E:10 under E:6: {err}"
+                    );
+                }
+                OP_READ_ORIGINAL_AT_CUT => {
+                    for &kind in ORIGINAL_AT_CUT_KINDS {
+                        let mut budget = ReadBudget::new(None, Some(deadline));
+                        match kind {
+                            "fact" => {
+                                let err = build_original_at_cut_document(
+                                    &c,
+                                    &cfg,
+                                    1,
+                                    &meta_e6,
+                                    kind,
+                                    &fk,
+                                    &perms_all,
+                                    &mut budget,
+                                )
+                                .unwrap_err();
+                                assert!(err.starts_with("MissingDependency"), "fact: {err}");
+                            }
+                            "allocation" => {
+                                let err = build_original_at_cut_document(
+                                    &c,
+                                    &cfg,
+                                    1,
+                                    &meta_e6,
+                                    kind,
+                                    aid,
+                                    &perms_all,
+                                    &mut budget,
+                                )
+                                .unwrap_err();
+                                assert!(err.starts_with("MissingDependency"), "allocation: {err}");
+                            }
+                            "grant" => {
+                                let err = build_original_at_cut_document(
+                                    &c,
+                                    &cfg,
+                                    1,
+                                    &meta_e6,
+                                    kind,
+                                    "g-1",
+                                    &perms_all,
+                                    &mut budget,
+                                )
+                                .unwrap_err();
+                                assert!(err.starts_with("MissingDependency"), "grant: {err}");
+                            }
+                            "command" => {
+                                let err = build_original_at_cut_document(
+                                    &c,
+                                    &cfg,
+                                    1,
+                                    &meta_e6,
+                                    kind,
+                                    "cmd-alpha",
+                                    &perms_all,
+                                    &mut budget,
+                                )
+                                .unwrap_err();
+                                assert!(err.starts_with("MissingDependency"), "command: {err}");
+                            }
+                            "model" => {
+                                // Positive: QueryFact returns model exact bytes at E:6; Negative: QueryAllocation-only is rejected!
+                                let ok = build_original_at_cut_document(
+                                    &c,
+                                    &cfg,
+                                    1,
+                                    &meta_e6,
+                                    kind,
+                                    &fk,
+                                    &perms_all,
+                                    &mut budget,
+                                )
+                                .expect("model positive control at E:6 must succeed");
+                                assert!(!ok.is_empty());
+                                let mut b_neg = ReadBudget::new(None, Some(deadline));
+                                let err = build_original_at_cut_document(
+                                    &c,
+                                    &cfg,
+                                    1,
+                                    &meta_e6,
+                                    kind,
+                                    "cmd-alpha",
+                                    &ReadPermissions {
+                                        query_allocation: true,
+                                        ..ReadPermissions::default()
+                                    },
+                                    &mut b_neg,
+                                )
+                                .unwrap_err();
+                                assert!(err.starts_with("InvalidDomain"), "model negative: {err}");
+                            }
+                            "decision" => {
+                                // B-side decision kind with future own-domain cut B:alpha:8 under B:alpha:6.
+                                let cfg_b = fin6_config("B:alpha", &["ReadView", "QueryDecision"]);
+                                let b_future_cut = json!({"domain_id": "B:alpha", "commit_seq": "8", "root_hash": "8".repeat(64)});
+                                let b_img = json!({
+                                    "book": null, "recorded": [], "pending": [], "applied": [], "unmatched": [],
+                                    "finance": {"schema_revision": "tb03b-finance/6", "rights": [], "decisions": [{"decision_id": "d1", "prepared_cut": b_future_cut}], "slots": [], "responsibilities": []},
+                                    "history": []
+                                });
+                                let (cb, metab) =
+                                    test_conn_with_commit(&cfg_b, 6, &"9".repeat(64), "6", &b_img);
+                                let mut budget_b = ReadBudget::new(None, Some(deadline));
+                                let err_b = build_original_at_cut_document(
+                                    &cb,
+                                    &cfg_b,
+                                    1,
+                                    &metab,
+                                    "decision",
+                                    "d1",
+                                    &ReadPermissions {
+                                        query_decision: true,
+                                        ..ReadPermissions::default()
+                                    },
+                                    &mut budget_b,
+                                )
+                                .unwrap_err();
+                                assert!(
+                                    err_b.starts_with("MissingDependency"),
+                                    "decision must reject future cut: {err_b}"
+                                );
+                            }
+                            other => panic!("unhandled ORIGINAL_AT_CUT_KINDS entry: {other}"),
+                        }
+                    }
+                }
+                other => panic!("unhandled PROJECTION_READ_OPS entry: {other}"),
+            }
+        }
+    }
+
+    #[test]
+    fn contract_gate_rejects_non_fin6_non_tb03c_and_v2() {
+        for mut cfg in [
+            fin6_config("E", &["ReadView"]),
+            fin6_config("E", &["ReadView"]),
+            fin6_config("E", &["ReadView"]),
+        ]
+        .into_iter()
+        .enumerate()
+        .map(|(i, mut c)| {
+            match i {
+                0 => c.manifest["finance"]["schema_revision"] = json!("tb03b-finance/5"),
+                1 => c.manifest["book_revision"] = Value::Null,
+                _ => c.manifest["protocol_revision"] = json!("economic-session/2"),
+            }
+            c
+        }) {
+            let err = check_projection_contract(&cfg).unwrap_err();
+            assert!(err.starts_with("SchemaUnsupported"), "unexpected: {err}");
+            let _ = &mut cfg;
+        }
+    }
+
+    #[test]
+    #[ignore = "先用 tb04f_single_owner_entry.py --read-coverage 生成真实 owner 应答"]
+    fn r7_writer_documents_have_no_unlisted_cuts() {
+        let path = std::env::var_os("ECONOMIC_READ_COVERAGE").expect("指定 read-cut-coverage.json");
+        let corpus: Value = serde_json::from_reader(std::fs::File::open(path).unwrap()).unwrap();
+        let mut kinds = std::collections::BTreeSet::new();
+        let mut views = std::collections::BTreeSet::new();
+        for doc in corpus["owner"].as_array().unwrap() {
+            let domain = doc["domain_id"].as_str().unwrap();
+            assert_writer_cut_coverage(&fin6_config(domain, &[]), doc);
+            if doc["kind"] == KIND_ORIGINAL_AT_CUT {
+                kinds.insert(doc["original_kind"].as_str().unwrap());
+            } else {
+                views.insert(domain);
+            }
+        }
+        assert_eq!(kinds, ORIGINAL_AT_CUT_KINDS.iter().copied().collect());
+        assert_eq!(views, ["E", "B:alpha", "B:beta"].into_iter().collect());
+    }
+
+    #[test]
+    fn r7_transfer_receipt_obeys_explicit_peer_vector() {
+        let cfg = fin6_config("B:beta", &["ReadView"]);
+        for source_seq in [9, 6] {
+            let alpha = fin6_config("B:alpha", &[]);
+            let e = fin6_config("E", &[]);
+            let source_cut = cut(&alpha, source_seq, &"6".repeat(64));
+            let image = json!({"recorded":[{"b_source_debit_proof":{
+                "domain_id":"B:alpha", "receipt":{"kind":"Applied", "domain_id":"B:alpha", "cut":source_cut}
+            }}]});
+            let (conn, selected) = test_conn_with_commit(&cfg, 4, &"1".repeat(64), "4", &image);
+            let vector = json!({
+                "E":cut(&e,10,&"a".repeat(64)),
+                "B:alpha":cut(&alpha,6,&"6".repeat(64)),
+                "B:beta":cut(&cfg,4,&selected.root)
+            });
+            let mut budget = ReadBudget::new(None, None);
+            let result = super::build_projection_document(
+                &conn,
+                &cfg,
+                1,
+                &Value::Null,
+                &selected,
+                vector.as_object(),
+                &mut budget,
+            );
+            if source_seq == 9 {
+                assert!(result.unwrap_err().contains("B:alpha:9"));
+            } else {
+                let doc: Value = serde_json::from_slice(&result.unwrap()).unwrap();
+                let mut missed = Vec::new();
+                verify_embedded_cuts_not_after_selected(
+                    &cfg,
+                    &selected,
+                    &doc,
+                    vector.as_object(),
+                    |p| missed.push(path_to_string(p)),
+                )
+                .unwrap();
+                assert!(missed.is_empty(), "{missed:?}");
+                assert_eq!(
+                    doc["projection"]["recorded"][0][B_SOURCE_DEBIT_PROOF]["receipt"]["cut"],
+                    source_cut
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn r7_projection_rejects_voice_and_unlisted_future_cuts() {
+        let cfg = fin6_config("E", &["ReadView"]);
+        let e12 = cut(&cfg, 12, &"c".repeat(64));
+        for image in [
+            json!({"book":{"voice":{"records":[{"opening_basis":{"e_cut":e12}}]}}}),
+            json!({"finance":{"decisions":[{"e_future_proof":{"cut":e12}}]}}),
+            json!({"leaked_receipt":{"kind":"Recorded","domain_id":"E","cut":e12}}),
+        ] {
+            let (conn, selected) = test_conn_with_commit(&cfg, 10, &"1".repeat(64), "10", &image);
+            let mut budget = ReadBudget::new(None, None);
+            let result =
+                build_projection_document(&conn, &cfg, 1, &Value::Null, &selected, &mut budget);
+            assert!(
+                matches!(result, Err(ref e) if e.starts_with("MissingDependency")),
+                "{result:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn r7_projection_preserves_writer_original_fields() {
+        let perms = ReadPermissions {
+            query_fact: true,
+            query_allocation: true,
+            ..Default::default()
+        };
+        let proof =
+            json!({"domain_id":"B:alpha", "receipt":{"kind":"Applied", "domain_id":"B:alpha"}});
+        let record = serialize_projected_record(&json!({"b_source_debit_proof": proof}), &perms);
+        let row = serialize_fill_allocation_row(
+            &json!({"x_execution_witness": {
+                "x_release_evidence": {"authority_epoch":"1"},
+                "x_execute_evidence": {"reply":{"authority_epoch":"1"}}
+            }}),
+            &perms,
+        );
+        assert_eq!(record["b_source_debit_proof"], proof);
+        assert_eq!(
+            row["x_execution_witness"]["x_release_evidence"]["authority_epoch"],
+            "1"
+        );
+        assert_eq!(
+            row["x_execution_witness"]["x_execute_evidence"]["reply"]["authority_epoch"],
+            "1"
+        );
+    }
+
+    #[test]
+    fn r6_source_data_with_protocol_named_keys_succeeds_while_protocol_future_receipt_rejected() {
+        let model = json!({
+            "model_id": "m1",
+            "revision": "r1",
+            "receipt": {"label": "Model note"},
+            "cut": {"arbitrary": "not-a-cut"},
+            "witness": {"author": "desk"}
+        });
+        let model_raw = canonical_json(&model);
+        let model_hash = sha256_hex(model_raw.as_bytes());
+        let raw_doc = json!({
+            "events": [{"event": "open_chong", "units": 4, "receipt": {"label": "Event note"}}],
+            "receipt": {"label": "Delivery note"},
+            "cut": {"note": "user-cut"},
+            "e_cut": {"note": "user-ecut"},
+            "witness": {"author": "desk"},
+            "model": model,
+            "model_content_hash": model_hash,
+        });
+        let raw_utf8 = canonical_json(&raw_doc);
+        let raw_sha = sha256_hex(raw_utf8.as_bytes());
+        let fk = "a".repeat(64);
+        let cfg = fin6_config("E", &["ReadView", "QueryFact", "QueryCommand"]);
+        let img = json!({
+            "book": null,
+            "recorded": [{
+                "fact_key": fk,
+                "fact_hash": "b".repeat(64),
+                "raw_sha256": raw_sha,
+                "json_pointer": "/events/0",
+                "raw_utf8": raw_utf8,
+                "event": {"event": "open_chong", "receipt": {"label": "Event note"}, "cut": {"note": "x"}, "witness": {"w": "1"}}
+            }],
+            "pending": [],
+            "applied": [],
+            "unmatched": [],
+            "finance": {"schema_revision": "tb03b-finance/6", "rights": [], "decisions": [], "slots": [], "responsibilities": [], "commands": []},
+            "history": []
+        });
+        let (c, meta_e1) = test_conn_with_commit(&cfg, 1, &"1".repeat(64), "1", &img);
+        let e1_cut = cut(&cfg, meta_e1.seq, &meta_e1.root);
+        let rec_e1 = json!({"kind": "Recorded", "domain_id": "E", "fact_key": fk, "cut": e1_cut});
+        c.execute(
+            "INSERT INTO receipts(k, json) VALUES(?, ?)",
+            params![fk, canonical_json(&rec_e1)],
+        )
+        .unwrap();
+
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let perms = ReadPermissions {
+            query_fact: true,
+            query_command: true,
+            ..ReadPermissions::default()
+        };
+        // Positive: ReadProjection, ReadOriginalAtCut(fact), and ReadOriginalAtCut(model) MUST all succeed!
+        let mut b1 = ReadBudget::new(None, Some(deadline));
+        let proj = build_projection_document(&c, &cfg, 1, &json!({}), &meta_e1, &mut b1)
+            .expect("source data with receipt/cut/witness keys must not break ReadProjection");
+        assert!(!proj.is_empty());
+
+        let mut b2 = ReadBudget::new(None, Some(deadline));
+        let fact_bytes =
+            build_original_at_cut_document(&c, &cfg, 1, &meta_e1, "fact", &fk, &perms, &mut b2)
+                .expect(
+                    "Recorded fact with source receipt/cut/witness notes must return exact bytes",
+                );
+        let fact_doc: Value = serde_json::from_slice(&fact_bytes).unwrap();
+        assert_eq!(fact_doc["original"]["raw_utf8"], raw_utf8);
+
+        let mut b3 = ReadBudget::new(None, Some(deadline));
+        let model_bytes =
+            build_original_at_cut_document(&c, &cfg, 1, &meta_e1, "model", &fk, &perms, &mut b3)
+                .expect("model with source receipt/cut/witness keys must return exact bytes");
+        let model_doc: Value = serde_json::from_slice(&model_bytes).unwrap();
+        assert_eq!(model_doc["original"]["model_raw_utf8"], model_raw);
+
+        // Negative: real protocol receipt at E:8 under E:1 MUST still be rejected with MissingDependency!
+        let rec_e8 = json!({"kind": "Recorded", "domain_id": "E", "fact_key": fk, "cut": {"domain_id": "E", "commit_seq": "8", "root_hash": "8".repeat(64)}});
+        c.execute(
+            "UPDATE receipts SET json=? WHERE k=?",
+            params![canonical_json(&rec_e8), fk],
+        )
+        .unwrap();
+        let mut b4 = ReadBudget::new(None, Some(deadline));
+        let err =
+            build_original_at_cut_document(&c, &cfg, 1, &meta_e1, "fact", &fk, &perms, &mut b4)
+                .unwrap_err();
+        assert!(
+            err.starts_with("MissingDependency"),
+            "expected MissingDependency, got: {err}"
+        );
+    }
+
+    #[test]
+    fn r6_five_layer_whitelist_strips_unknown_fields_and_postcheck_rejects_leaks() {
+        let p_alloc = ReadPermissions {
+            query_allocation: true,
+            ..ReadPermissions::default()
+        };
+        let p_alloc_cmd = ReadPermissions {
+            query_allocation: true,
+            query_command: true,
+            ..ReadPermissions::default()
+        };
+        let e6_cut = json!({"domain_id": "E", "commit_seq": "6", "root_hash": "6".repeat(64)});
+        let witness = json!({
+            "witness_revision": "x-sim-execution-witness/1",
+            "x_profile_revision": "x-execution-profile/3",
+            "x_id": "X",
+            "x_epoch": "1",
+            "session_id": "s1",
+            "session_generation": "1",
+            "source_namespace": "x-sim",
+            "source_epoch": "1",
+            "model_content_hash": "m".repeat(64),
+            "command_id": "cmd-alpha",
+            "command_hash": "c".repeat(64),
+            "e_release_receipt_key": "rel-1",
+            "e_release_cut": e6_cut,
+            "e_release_commit_ns": "2",
+            "x_accept_clock": {"received_ns": "2", "first_known_ns": "2", "commit_ns": "2", "review_new_label": "blue"},
+            "x_command_state": "Observed",
+            "attempt_batch_id": "b2",
+            "attempt_batch_bar_index": "2",
+            "attempt_batch_request_sha256": "1".repeat(64),
+            "attempt_batch_receipt_sha256": "2".repeat(64),
+            "originals_batch_id": "b3",
+            "originals_batch_bar_index": "3",
+            "originals_batch_receipt_sha256": "3".repeat(64),
+            "fact_raw_sha256": "4".repeat(64),
+            "review_new_label": "blue",
+            "x_release_evidence": {
+                "protocol": "x-exact-authority/1",
+                "command_id": "cmd-alpha",
+                "command_hash": "c".repeat(64),
+                "command": {"command_id": "cmd-alpha"},
+                "review_new_label": "blue"
+            },
+            "x_execute_evidence": {
+                "claimed_ns": "2",
+                "review_new_label": "blue",
+                "reply": {
+                    "protocol": "x-exact-authority/1",
+                    "command_id": "cmd-alpha",
+                    "command_hash": "c".repeat(64),
+                    "command": {"command_id": "cmd-alpha"},
+                    "review_new_label": "blue"
+                }
+            }
+        });
+        let row = json!({
+            "fact_key": "f".repeat(64),
+            "fact_hash": "e".repeat(64),
+            "evidence_id": "ev-1",
+            "review_new_label": "blue",
+            "allocations": [{"allocation_id": "sim-command-fee:1", "chong_id": "alpha", "review_new_label": "blue"}],
+            "x_execution_witness": witness
+        });
+
+        // Serializer MUST strip unknown keys at ALL FIVE layers (+ allocations & x_accept_clock) for BOTH permission profiles!
+        for perms in [&p_alloc, &p_alloc_cmd] {
+            let out = serialize_fill_allocation_row(&row, perms);
+            assert!(
+                out.get("review_new_label").is_none(),
+                "row leaked unknown field"
+            );
+            assert!(
+                out.pointer("/allocations/0/review_new_label").is_none(),
+                "allocation item leaked unknown field"
+            );
+            assert!(
+                out.pointer("/x_execution_witness/review_new_label")
+                    .is_none(),
+                "witness outer leaked unknown field"
+            );
+            assert!(
+                out.pointer("/x_execution_witness/x_accept_clock/review_new_label")
+                    .is_none(),
+                "x_accept_clock leaked unknown field"
+            );
+            assert!(
+                out.pointer("/x_execution_witness/x_release_evidence/review_new_label")
+                    .is_none(),
+                "release leaked unknown field"
+            );
+            assert!(
+                out.pointer("/x_execution_witness/x_execute_evidence/review_new_label")
+                    .is_none(),
+                "execute leaked unknown field"
+            );
+            assert!(
+                out.pointer("/x_execution_witness/x_execute_evidence/reply/review_new_label")
+                    .is_none(),
+                "reply leaked unknown field"
+            );
+            // Positive: legitimate fields preserved and postcheck passes!
+            assert_eq!(out["fact_key"], "f".repeat(64));
+            assert_eq!(
+                out["x_execution_witness"]["witness_revision"],
+                "x-sim-execution-witness/1"
+            );
+            assert!(verify_original_permission_bounds(
+                &json!({"kind": "EconomicAllocationAtCut", "fill_allocation_row": out}),
+                perms
+            )
+            .is_ok());
+        }
+
+        // Negative: postcheck MUST reject an unstripped unknown key at ANY of the five layers!
+        let clean = serialize_fill_allocation_row(&row, &p_alloc);
+        let pointers = [
+            ("row", "/fill_allocation_row"),
+            ("witness", "/fill_allocation_row/x_execution_witness"),
+            (
+                "release",
+                "/fill_allocation_row/x_execution_witness/x_release_evidence",
+            ),
+            (
+                "execute",
+                "/fill_allocation_row/x_execution_witness/x_execute_evidence",
+            ),
+            (
+                "reply",
+                "/fill_allocation_row/x_execution_witness/x_execute_evidence/reply",
+            ),
+        ];
+        for (layer, ptr) in pointers {
+            let mut mutated =
+                json!({"kind": "EconomicAllocationAtCut", "fill_allocation_row": clean.clone()});
+            mutated
+                .pointer_mut(ptr)
+                .unwrap()
+                .as_object_mut()
+                .unwrap()
+                .insert("review_new_label".into(), json!("blue"));
+            let err = verify_original_permission_bounds(&mutated, &p_alloc).unwrap_err();
+            assert!(
+                err.contains("白名单") || err.contains("未知字段"),
+                "postcheck must reject unknown key at layer {layer}, got: {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn r6_receipt_domain_ownership_binding_enforced_at_rust_exit() {
+        let cfg = fin6_config("B:alpha", &["ReadView", "QueryAllocation"]);
+        let b6_cut =
+            json!({"domain_id": "B:alpha", "commit_seq": "6", "root_hash": "6".repeat(64)});
+        let e6_cut = json!({"domain_id": "E", "commit_seq": "6", "root_hash": "e".repeat(64)});
+        let selected = StoredImage {
+            seq: 6,
+            previous_root: "5".repeat(64),
+            root: "6".repeat(64),
+            commit_ns: "6".into(),
+            bytes: 128,
+        };
+        let bad_doc = json!({
+            "kind": KIND_ORIGINAL_AT_CUT,
+            "domain_id": "B:alpha",
+            "cut": b6_cut,
+            "original_kind": "allocation",
+            "original": {
+                "kind": "EconomicAllocationAtCut",
+                "domain_id": "B:alpha",
+                "allocation_id": "a1",
+                "receipt": {"kind": "Applied", "domain_id": "E", "cut": e6_cut},
+                "fact_ref": {"fact_key": "f".repeat(64), "fact_hash": "e".repeat(64)},
+                "fact": null
+            }
+        });
+        let err = verify_embedded_cuts_not_after_selected(&cfg, &selected, &bad_doc, None, |_| {})
+            .unwrap_err();
+        assert!(
+            err.contains("期望域") || err.contains("不匹配"),
+            "wrong receipt domain must be rejected, got: {err}"
+        );
+
+        let ok_doc = json!({
+            "kind": KIND_ORIGINAL_AT_CUT,
+            "domain_id": "B:alpha",
+            "cut": b6_cut,
+            "original_kind": "allocation",
+            "original": {
+                "kind": "EconomicAllocationAtCut",
+                "domain_id": "B:alpha",
+                "allocation_id": "a1",
+                "receipt": {"kind": "Applied", "domain_id": "B:alpha", "cut": b6_cut},
+                "fact_ref": {"fact_key": "f".repeat(64), "fact_hash": "e".repeat(64)},
+                "fact": null
+            }
+        });
+        assert!(
+            verify_embedded_cuts_not_after_selected(&cfg, &selected, &ok_doc, None, |_| {}).is_ok()
+        );
+    }
+}

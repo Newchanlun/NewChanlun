@@ -9,8 +9,13 @@
 //! 用法：
 //!   x_execution_session serve --db FILE --profile FILE --writer-epoch N
 //!   x_execution_session query --db FILE
+//!   x_execution_session query-history --db FILE
+//!   x_execution_session query-command --db FILE --command-id ID
+//!   x_execution_session query-batch --db FILE --batch-id ID
+//!   x_execution_session query-original --db FILE --original-id ID
 //!   x_execution_session submit|cancel --db FILE      （恒 UnsupportedCapability）
-use newchan_rust::session_protocol::positive;
+use newchan_rust::history_simulation::EXACT_PROFILE_REVISION;
+use newchan_rust::session_protocol::{canonical_json, positive};
 use newchan_rust::session_transport::process_lock;
 use rusqlite::{Connection, OpenFlags, OptionalExtension};
 use serde_json::{json, Value};
@@ -23,7 +28,7 @@ const MODES: [&str; 4] = ["simulation", "dry-run", "experiment", "production"];
 const SCHEMA: &str =
     "CREATE TABLE IF NOT EXISTS x_meta(key TEXT PRIMARY KEY, value TEXT NOT NULL);";
 
-/// 执行 profile（`x-execution-profile/1`）。凭据只经 `credential_scope.env` 指名的环境变量
+/// 历史模拟采用 /3（`EXACT_PROFILE_REVISION`），其他执行 profile 保留 /1。凭据只经 `credential_scope.env` 指明的环境变量
 /// 进入本进程；值永不落库、不打印。
 struct Profile {
     revision: String,
@@ -44,9 +49,14 @@ impl Profile {
             .as_str()
             .unwrap_or_default()
             .to_string();
-        if revision != PROFILE_REVISION {
+        let expected = if v["history_simulation"].is_null() {
+            PROFILE_REVISION
+        } else {
+            EXACT_PROFILE_REVISION
+        };
+        if revision != expected {
             return Err(format!(
-                "VersionUnsupported：执行 profile 版本 `{revision}` 不是 {PROFILE_REVISION}"
+                "VersionUnsupported：执行 profile 版本 `{revision}` 不是 {expected}"
             ));
         }
         let mode = v["mode"]
@@ -110,6 +120,47 @@ fn meta_get(conn: &Connection, key: &str) -> Result<Option<String>, String> {
         .map_err(err)
 }
 
+/// #1407 C3 R3：在持写锁与可读写 WAL 打开之前，以只读连接（可看见 live WAL、不触发 checkpoint、
+/// 不改写 `.db` 或 `-wal` 字节）预检既有 X 库版本/域兼容性，防止错误续开旧 `/1`、`/2` 历史模拟库时
+/// 悄然合入或删除未 checkpoint 的 WAL。
+fn preflight_existing_db(db: &Path, profile: &Profile, epoch: i64) -> Result<(), String> {
+    if !db.exists() {
+        return Ok(());
+    }
+    let conn = Connection::open_with_flags(db, OpenFlags::SQLITE_OPEN_READ_ONLY).map_err(err)?;
+    conn.busy_timeout(Duration::from_secs(2)).map_err(err)?;
+    let has_meta: bool = conn
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='x_meta')",
+            [],
+            |r| r.get(0),
+        )
+        .map_err(err)?;
+    if !has_meta {
+        return Ok(());
+    }
+    let simulation = profile.history_simulation.is_some();
+    let old_simulation = meta_get(&conn, "history_simulation")?;
+    let old_mode = meta_get(&conn, "profile_mode")?;
+    if old_mode.is_some() && (old_simulation.as_deref() == Some("true")) != simulation {
+        return Err("IdentityConflict：模拟原件执行域不可与其他 profile 共用 X 库".into());
+    }
+    if old_simulation.as_deref() == Some("true")
+        && meta_get(&conn, "profile_revision")?.as_deref() != Some(EXACT_PROFILE_REVISION)
+    {
+        return Err("VersionUnsupported：旧历史模拟库须从空库重放".into());
+    }
+    if let Some(stored) = meta_get(&conn, "writer_epoch")? {
+        let stored: i64 = stored.parse().map_err(err)?;
+        if epoch < stored {
+            return Err(format!(
+                "StaleWriter：X writer_epoch={epoch} 低于已持久化的 {stored}"
+            ));
+        }
+    }
+    Ok(())
+}
+
 /// 持锁后建库/续库：epoch 只增不减（低 epoch 为陈旧写者），profile 版本、模式、指纹与
 /// 发送面状态在同一事务落盘。
 fn persist(conn: &mut Connection, profile: &Profile, epoch: i64) -> Result<Value, String> {
@@ -120,6 +171,11 @@ fn persist(conn: &mut Connection, profile: &Profile, epoch: i64) -> Result<Value
     let old_mode = meta_get(&tx, "profile_mode")?;
     if old_mode.is_some() && (old_simulation.as_deref() == Some("true")) != simulation {
         return Err("IdentityConflict：模拟原件执行域不可与其他 profile 共用 X 库".into());
+    }
+    if old_simulation.as_deref() == Some("true")
+        && meta_get(&tx, "profile_revision")?.as_deref() != Some(EXACT_PROFILE_REVISION)
+    {
+        return Err("VersionUnsupported：旧历史模拟库须从空库重放".into());
     }
     if let Some(stored) = meta_get(&tx, "writer_epoch")? {
         let stored: i64 = stored.parse().map_err(err)?;
@@ -179,15 +235,34 @@ fn args() -> Result<(String, BTreeMap<String, String>), String> {
     let mut it = std::env::args().skip(1);
     let command = it
         .next()
-        .ok_or("usage: serve|query|submit|cancel --db FILE ...")?;
+        .ok_or("usage: serve|query|query-history|query-command|query-batch|query-original|submit|cancel --db FILE ...")?;
     let mut opts = BTreeMap::new();
     while let Some(k) = it.next() {
-        if !["--db", "--profile", "--writer-epoch"].contains(&k.as_str()) || opts.contains_key(&k) {
+        if ![
+            "--db",
+            "--profile",
+            "--writer-epoch",
+            "--command-id",
+            "--batch-id",
+            "--original-id",
+        ]
+        .contains(&k.as_str())
+            || opts.contains_key(&k)
+        {
             return Err(format!("InvalidDomain：未知/重复参数 {k}"));
         }
         opts.insert(k, it.next().ok_or("InvalidDomain：参数缺值")?);
     }
     Ok((command, opts))
+}
+
+fn check_allowed(opts: &BTreeMap<String, String>, allowed: &[&str]) -> Result<(), String> {
+    for k in opts.keys() {
+        if !allowed.contains(&k.as_str()) {
+            return Err(format!("InvalidDomain：本子命令不接受参数 {k}"));
+        }
+    }
+    Ok(())
 }
 
 fn run() -> Result<(), String> {
@@ -200,8 +275,10 @@ fn run() -> Result<(), String> {
     let db = Path::new(get("--db")?);
     match command.as_str() {
         "serve" => {
+            check_allowed(&opts, &["--db", "--profile", "--writer-epoch"])?;
             let profile = Profile::load(Path::new(get("--profile")?))?;
             let epoch = positive(get("--writer-epoch")?, "writer_epoch")?;
+            preflight_existing_db(db, &profile, epoch)?;
             let _lock = process_lock(db, "X")?;
             let (mut conn, storage) = newchan_rust::economic_session::open_durable_db(db)?;
             eprintln!("x_execution_session storage {storage}");
@@ -233,9 +310,42 @@ fn run() -> Result<(), String> {
             }
         }
         "query" => {
+            check_allowed(&opts, &["--db"])?;
             let conn =
                 Connection::open_with_flags(db, OpenFlags::SQLITE_OPEN_READ_ONLY).map_err(err)?;
+            conn.busy_timeout(Duration::from_secs(2)).map_err(err)?;
             println!("{}", query_conn(&conn)?);
+            Ok(())
+        }
+        "query-history" => {
+            check_allowed(&opts, &["--db"])?;
+            let out = newchan_rust::history_simulation::runtime::inspect_history(db)?;
+            println!("{}", canonical_json(&out));
+            Ok(())
+        }
+        "query-command" => {
+            check_allowed(&opts, &["--db", "--command-id"])?;
+            let out = newchan_rust::history_simulation::runtime::inspect_command(
+                db,
+                get("--command-id")?,
+            )?;
+            println!("{}", canonical_json(&out));
+            Ok(())
+        }
+        "query-batch" => {
+            check_allowed(&opts, &["--db", "--batch-id"])?;
+            let out =
+                newchan_rust::history_simulation::runtime::inspect_batch(db, get("--batch-id")?)?;
+            println!("{}", canonical_json(&out));
+            Ok(())
+        }
+        "query-original" => {
+            check_allowed(&opts, &["--db", "--original-id"])?;
+            let out = newchan_rust::history_simulation::runtime::inspect_original(
+                db,
+                get("--original-id")?,
+            )?;
+            println!("{}", canonical_json(&out));
             Ok(())
         }
         "submit" | "cancel" => Err(format!(

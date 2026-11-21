@@ -414,6 +414,113 @@ fn c5_transfer_uses_real_source_debit_and_zero_principal_is_not_missing() {
     store::audit(&s.connections[2], &s.configs[2]).unwrap();
 }
 #[test]
+fn r7_transfer_writer_projection_and_original_cover_source_proof() {
+    use super::read_projection as rp;
+    let mut s = Session::new("r7-transfer-coverage");
+    let (source, target, _) = transfer_documents();
+    apply_sources(&mut s, &source, 3);
+    let debit = s.capture(&source, 3);
+    let source_bound = s.image(1)["recorded"].as_array().unwrap().len();
+    let source_before = store::stored_image_meta(&s.connections[1], source_bound as i64).unwrap();
+    let source_applied = s.apply(1, &debit);
+    let captured = s.capture(&target, 0);
+    let applied = s.apply(2, &captured);
+    assert_eq!(applied["kind"], "Applied", "{applied}");
+    s.audit();
+    let cfg = &s.configs[2];
+    let mut budget = store::ReadBudget::new(None, None);
+    let db = &s.connections[2];
+    let selected =
+        rp::select_projection_meta(db, cfg, &json!({"cut":applied["cut"]}), true, &mut budget)
+            .unwrap();
+    let mut vector = serde_json::Map::new();
+    vector.insert("E".into(), captured["cut"].clone());
+    vector.insert("B:T".into(), applied["cut"].clone());
+    vector.insert(
+        "B:S".into(),
+        store::cut(&s.configs[1], source_before.seq, &source_before.root),
+    );
+    let err = rp::build_projection_document(
+        db,
+        cfg,
+        1,
+        &json!({}),
+        &selected,
+        Some(&vector),
+        &mut budget,
+    )
+    .unwrap_err();
+    assert!(
+        err.starts_with("MissingDependency") && err.contains("B:S:4"),
+        "{err}"
+    );
+    vector.insert("B:S".into(), source_applied["cut"].clone());
+    let projection = rp::build_projection_document(
+        db,
+        cfg,
+        1,
+        &json!({}),
+        &selected,
+        Some(&vector),
+        &mut budget,
+    )
+    .unwrap();
+    let original = rp::build_original_at_cut_document(
+        db,
+        cfg,
+        1,
+        &selected,
+        "fact",
+        captured["fact_key"].as_str().unwrap(),
+        &rp::ReadPermissions {
+            query_fact: true,
+            ..Default::default()
+        },
+        Some(&vector),
+        &mut budget,
+    )
+    .unwrap();
+    let view: Value = serde_json::from_slice(&projection).unwrap();
+    let fact: Value = serde_json::from_slice(&original).unwrap();
+    rp::assert_writer_cut_coverage(cfg, &view);
+    rp::assert_writer_cut_coverage(cfg, &fact);
+    let key = super::tb03c_transfer::B_SOURCE_DEBIT_PROOF;
+    assert_eq!(
+        view["projection"]["recorded"][0][key]["receipt"],
+        source_applied
+    );
+    assert_eq!(
+        fact["original"]["projected_record"][key],
+        view["projection"]["recorded"][0][key]
+    );
+    if let Some(path) = std::env::var_os("ECONOMIC_TRANSFER_COVERAGE") {
+        let mut views = vec![view];
+        for owner in [0, 1] {
+            let peer = &s.configs[owner];
+            let db = &s.connections[owner];
+            let query = json!({"cut":vector[&peer.domain]});
+            let selected = rp::select_projection_meta(db, peer, &query, true, &mut budget).unwrap();
+            let bytes = rp::build_projection_document(
+                db,
+                peer,
+                1,
+                &json!({}),
+                &selected,
+                Some(&vector),
+                &mut budget,
+            )
+            .unwrap();
+            views.push(serde_json::from_slice(&bytes).unwrap());
+        }
+        std::fs::write(
+            path,
+            canonical_json(&json!({"views":views,"original":fact})),
+        )
+        .unwrap();
+    }
+}
+
+#[test]
 fn c5_transfer_claim_conflict_and_source_lot_overconsumption_are_closed() {
     let mut s = Session::new("c5-transfer-conflicts");
     let (source, t, mut u) = transfer_documents();

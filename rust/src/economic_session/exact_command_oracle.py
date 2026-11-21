@@ -49,8 +49,8 @@ conditions = [
     ]
 ]
 change = {"kind": "submit", "order": {
-    "command_id": "cmd-alpha", "family_id": "family-alpha", "chong_id": "alpha", "revision": 1, "side": "buy",
-    "quantity": 2, "kind": {"kind": "limit", "price": 14}, "eligibility_ref": "S:cmd-alpha",
+    "command_id": "cmd-alpha", "family_id": "family-alpha", "chong_id": "alpha", "revision": "1", "side": "buy",
+    "quantity": "2", "kind": {"kind": "limit", "price": "14"}, "eligibility_ref": "S:cmd-alpha",
     "projection_manifest": "TestOnly-projection/alpha"}}
 certificate = {
     "rd11_policy": "controlled-fixture-rd11", "responsibility_refs": [grant_id],
@@ -58,8 +58,8 @@ certificate = {
     "market_dependencies": ["TestOnly-market/1407-c1"], "rule_revision": "TestOnly-rule/1407-c1",
     "conditions": conditions}
 command = {
-    "command_id": "cmd-alpha", "logical_order_family": "family-alpha", "session_id": "tb03b-unit",
-    "session_generation": "1", "x_id": "X", "x_epoch": 1, "symbol": "alpha", "projection_kind": "per_leg",
+    "command_id": "cmd-alpha", "logical_order_family": "family-alpha", "first_quantity": "2", "allocation_id": "alloc-alpha", "session_id": "tb03b-unit",
+    "session_generation": "1", "x_id": "X", "x_epoch": "1", "symbol": "alpha", "projection_kind": "per_leg",
     "change": change, "plan_hash": sha(change), "certificate_hash": sha(certificate), "certificate": certificate}
 print(json.dumps({
     "scope": "#1407 C1 L9 hand-built ExactCommand worked example; Python stdlib only",
