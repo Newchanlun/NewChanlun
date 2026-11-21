@@ -634,6 +634,7 @@
     "group_actions": {},
     "send_authorization": {
       "ticket": 1412,
+      "mode": "disabled_until_1412_per_action",
       "comment_id": null,
       "body_sha256": null,
       "signature_fence": "at18-send-authorization/1"

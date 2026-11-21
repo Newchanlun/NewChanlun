@@ -1198,9 +1198,10 @@
         "send_authorization": {
           "type": "object",
           "additionalProperties": false,
-          "required": ["ticket", "comment_id", "body_sha256", "signature_fence"],
+          "required": ["ticket", "comment_id", "body_sha256", "signature_fence", "mode"],
           "properties": {
             "ticket": {"const": 1412},
+            "mode": {"const": "disabled_until_1412_per_action"},
             "comment_id": {"anyOf": [{"type": "integer", "minimum": 1}, {"type": "null"}]},
             "body_sha256": {"anyOf": [{"type": "string", "pattern": "^[0-9a-f]{64}$"}, {"type": "null"}]},
             "signature_fence": {"const": "at18-send-authorization/1"}

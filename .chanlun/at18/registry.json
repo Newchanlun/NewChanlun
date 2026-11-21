@@ -1,7 +1,7 @@
 {
   "schema_version": "at18-registry/1",
   "crosswalk_sha256": "0d31d68e75a6d672c948e8708bfb261549029c7310f7ad4dbb326c087157ce5d",
-  "adapter_contract_sha256": "77b5f6cf41cfbcb2a0b19558d905777517a1e7972763f7411c82ef954109bf55",
+  "adapter_contract_sha256": "cd8808cfe052afde9ee3d3576ab76f6c324d4e21ead4b150c89017d5697ead99",
   "experiment_profile_id": null,
   "checks": [],
   "bindings": [],

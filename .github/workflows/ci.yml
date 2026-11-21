@@ -220,7 +220,7 @@ jobs:
         #   pip install ./rust（maturin 冷编）   11.7s
         run: |
           python -m pip install --upgrade pip
-          pip install -e ".[test]" pytest-xdist
+          pip install -e ".[test]" pytest-xdist -r scripts/at18/requirements.txt
           pip install "nautilus_trader==1.229.0"
           CARGO_TARGET_DIR="$HOME/.cache/newchan-rust-target" pip install ./rust
 

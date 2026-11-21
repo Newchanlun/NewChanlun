@@ -49,7 +49,8 @@ def canonical_bases(root, crosswalk):
         dsts[identity] = row
         for kind, (_, _, field) in TABLES.items():
             linked = unique(row[field], "COVERAGE_SOURCE", identity)
-            require(linked <= ids[kind].keys(), "COVERAGE_SOURCE", identity)
+            require(all(member in ids[kind] and identity in ids[kind][member]["destination_ids"]
+                        for member in linked), "COVERAGE_SOURCE", f"{identity}.{field} ownership")
     require(set(dsts) == {f"DST-{i:02d}" for i in range(1, 7)}, "COVERAGE_SOURCE", "Destination")
     for table in ids.values():
         for row in table.values():
@@ -197,7 +198,7 @@ def load(root, *, base=None):
         command(check, root)
         require(check["runner"] != "command" or check["key_aware"] and check["expected_count"] == 1,
                 "CHECK_SELECTOR", cid)
-        annotations[cid] = annotation(check, check_source)
+        annotations[cid] = annotation(check, check_source, root)
         if (record := check["record"]) is not None:
             tb = RECORD.fullmatch(record)
             require(((record in SPECIAL and evidence == "experiment") or (tb and tb[1] == evidence))
@@ -207,13 +208,16 @@ def load(root, *, base=None):
         checks[cid] = check
     identities(reg)
     unique((b["binding_id"] for b in reg["bindings"]), "REGISTRY_INVALID", "binding_id")
+    registered_bases = defaultdict(set)
     for binding in reg["bindings"]:
         bid, slice_id, basis = binding["binding_id"], binding["slice_id"], binding["basis"]
         require(NAME.fullmatch(bid), "REGISTRY_INVALID", bid)
         keys = [(slice_id, k["kind"], k["id"]) for k in binding["keys"]]
         for key in keys:
-            require(key in bases, "KEY_NOT_EXPECTED", key)
-            require((basis["path"], basis["pointer"]) in bases[key], "BASIS_MISMATCH", key)
+            require(key in bases and slice_id != "TB-11", "KEY_NOT_EXPECTED", key)
+            actual = (basis["path"], basis["pointer"])
+            require(actual in bases[key], "BASIS_MISMATCH", key)
+            registered_bases[key].add(actual)
         data = checked_source(basis, "BASIS_MISMATCH")
         if basis["path"] not in basis_docs:
             basis_docs[basis["path"]] = strict_json(data, basis["path"])
@@ -238,6 +242,9 @@ def load(root, *, base=None):
                         "CHECK_NOT_ANNOTATED", name)
                 active_keys[name].update((*key, basis["path"], basis["pointer"]) for key in keys)
                 used.add(name)
+    # 骨架可不登记某个键；一旦登记，就必须一次交齐该键的全部规范出处。
+    for key, registered in registered_bases.items():
+        require(registered == bases[key], "BASIS_INCOMPLETE", key)
     experiment_groups = {group for group, (evidence, _) in groups.items() if evidence == "experiment"}
     auth = contract["experiment_authorization"]
     require(auth["group_actions"].keys() == experiment_groups, "DOMAIN_INVALID", "experiment group scope")

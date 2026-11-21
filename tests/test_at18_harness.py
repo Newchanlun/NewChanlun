@@ -22,7 +22,8 @@ adapter = importlib.import_module("adapter")
 from common import ADAPTER, CROSSWALK, LEDGERS, REGISTRY, Invalid, json_bytes, sha, strict_json  # noqa: E402
 from registry import OPENING_CENSUS, canonical_bases, load  # noqa: E402
 from run_checks import execute, run_group, run_identity  # noqa: E402
-from workflow import bundle_name, plan, seal_matrix, seal_scaffold  # noqa: E402
+from workflow import (_manifest, authority_comment, bundle_name, plan, producer_anchors,
+                      producer_job_name, seal_matrix, seal_scaffold)  # noqa: E402
 
 DATA = ROOT / "tests/fixtures/at18"
 IDENTITY = run_identity("d" * 40, 104, 2)
@@ -122,6 +123,7 @@ def bind(repo, text, *, runner="pytest", selector="test_exact", source="trial/te
 
 
 PY_CASE = "# @at18 TB-01 story US-ST-001\ndef test_exact():\n    assert True\n"
+RUST_PACKAGE = '[package]\nname = "probe"\nversion = "0.1.0"\nedition = "2021"\n'
 NODE_CASE = """import { test } from 'node:test';
 // @at18 TB-01 story US-ST-001
 test('run.entry+1', () => {});
@@ -255,6 +257,7 @@ def test_node_reporter_and_literal_selection(repo, kind, status):
 def test_cargo_libtest_isolated_process_stub(repo, monkeypatch, outcome, passed, failed, ignored, status):
     check = bind(repo, "// @at18 TB-01 story US-ST-001\n#[test]\nfn guard() {}\n",
                  runner="cargo-test", selector="guard+production_session/guard", source="rust/tests/guard.rs")
+    (repo / "rust/Cargo.toml").write_text(RUST_PACKAGE)
     mock = repo / "fixture-bin/cargo"
     mock.parent.mkdir()
     mock.write_text(f"""#!/bin/sh
@@ -296,7 +299,7 @@ def test_scaffold_plan_normalized_execution_and_seal(repo, evidence):
     assert run_group(repo, loaded, evidence, None, IDENTITY, path)
     doc = read(path, "execution.json")
     assert doc["registry_sha256"] == meta["registry_sha"] and doc["checks"] == doc["records"] == []
-    seal = seal_matrix(loaded, evidence, IDENTITY, artifacts)
+    seal = seal_matrix(loaded, evidence, IDENTITY, artifacts, {None: sha((path / "execution.json").read_bytes())})
     assert seal["has_seals"] == "false"
     assert seal["scaffold_sha"] == sha((path / "execution.json").read_bytes())
     receipt = repo / "receipt"
@@ -320,14 +323,16 @@ def test_nonempty_group_seal_binds_every_record_and_exact_attempt(repo):
     assert manifest["checks"][0]["executed"] == manifest["checks"][0]["expected"] == 1
     assert manifest["checks"][0]["argv"] == [str(repo / source)]
     record = manifest["records"][0]
-    assert json.loads(seal_matrix(loaded, "simulation", IDENTITY, artifacts)["seals"]) == {
-        "include": [{"group": "g-1", "profile": "none", "record": "tb.simulation.TB-01", "sha256": record["sha256"]}]}
+    digest = sha((path / "execution.json").read_bytes())
+    anchors = {"g-1": digest}
+    assert json.loads(seal_matrix(loaded, "simulation", IDENTITY, artifacts, anchors)["seals"]) == {
+        "include": [{"group": "g-1", "profile": "none", "record": "tb.simulation.TB-01", "sha256": record["sha256"], "execution_sha": digest}]}
     with pytest.raises(Invalid, match="RECORD_UNSEALED"):
-        seal_matrix(loaded, "simulation", IDENTITY | {"run_attempt": 3}, artifacts)
+        seal_matrix(loaded, "simulation", IDENTITY | {"run_attempt": 3}, artifacts, anchors)
     entity = path / record["path"]
     entity.write_bytes(entity.read_bytes() + b" ")
     with pytest.raises(Invalid, match="RECORD_UNSEALED"):
-        seal_matrix(loaded, "simulation", IDENTITY, artifacts)
+        seal_matrix(loaded, "simulation", IDENTITY, artifacts, anchors)
 
 
 def test_f_adapter_requires_f_bytes_and_recent_accepted_anchor(repo):
@@ -438,7 +443,7 @@ def test_2133_and_1412_signature_origins_reject_wrong_domain(repo, problem):
                                                               "actions": ["place"]}, 302)
     params = {"repo": repo_id, "profile_id": "P1-demo", "groups": ["g"],
               "now": "2026-11-22T00:00:00Z" if problem == "expired" else "2026-11-21T00:00:00.000001Z"}
-    if problem in ("valid-query", "valid-send"):
+    if problem == "valid-query":
         assert adapter.experiment_authority(contract, comments, **params) == auth_doc
     else:
         with pytest.raises(Invalid, match="AUTH_REQUIRED"):
@@ -609,7 +614,16 @@ def test_actions_entrypoints_scaffold_at_f(repo, evidence):
     artifacts = temp / "artifacts"
     bundle = artifacts / bundle_name(evidence, 3, None)
     step("run", "--output", str(bundle))
-    step("seal-plan", "--artifacts", str(artifacts))
+    identity = run_identity(head, 456, 3)
+    digest = dict(row.split("=", 1) for row in output.read_text().splitlines())["execution_sha"]
+    page = producer_job(load(repo), evidence, None, identity, digest)
+    fixture_gh = temp / "gh"
+    fixture_gh.write_text("#!/bin/sh\n[ \"$*\" = 'api --paginate --slurp repos/test/repo/actions/runs/456/attempts/3/jobs?per_page=100' ] || exit 8\n"
+                          + "printf '%s' '" + json.dumps([{"total_count": 1, "jobs": [page]}]) + "'\n")
+    fixture_gh.chmod(0o755)
+    step("seal-plan", "--artifacts", str(artifacts),
+         env=env | {"PATH": str(temp) + os.pathsep + env["PATH"], "GITHUB_REPOSITORY": "test/repo",
+                    "GH_TOKEN": "test-only"})
     results = dict(row.split("=", 1) for row in output.read_text().splitlines())
     assert results["scaffold_sha"] == sha((bundle / "execution.json").read_bytes())
     sealed = temp / "sealed"
@@ -620,3 +634,298 @@ def test_actions_entrypoints_scaffold_at_f(repo, evidence):
     assert receipt["registry_sha256"] == results["registry_sha"]
     wrong = step("plan", env=env | {"GITHUB_REF": "refs/heads/not-main"}, check=False)
     assert wrong.returncode == 1 and "RUN_IDENTITY" in wrong.stderr
+
+
+def producer_job(loaded, evidence, group, identity, digest):
+    return {"name": producer_job_name(loaded, evidence, group), "head_sha": identity["head"],
+            "run_id": identity["run_id"], "run_attempt": identity["run_attempt"], "head_branch": "main",
+            "status": "completed", "conclusion": "success",
+            "steps": [{"name": f"at18-anchor {digest}", "status": "completed", "conclusion": "success"}]}
+
+
+@pytest.mark.parametrize(("evidence", "label"), [("simulation", "acceptance"), ("experiment", "experiment")])
+def test_seal_ancestors_require_exact_success_and_skip(evidence, label):
+    jobs = yaml.safe_load((ROOT / f".github/workflows/at18-{label}.yml").read_text())["jobs"]
+
+    def eligible(name, **state):
+        expr = jobs[name]["if"].strip().removeprefix("${{").removesuffix("}}").strip()
+        # 保留显式状态函数这一条件，不把 Actions 默认 success() 偷换成本地真值。
+        assert expr.startswith("!cancelled() && ")
+        expr = expr.replace("!cancelled()", "not cancelled").replace("&&", "and").replace("||", "or")
+        for key, value in state.items():
+            expr = expr.replace(key.replace("__", "."), repr(value))
+        return eval(expr, {"__builtins__": {}})
+
+    for has_groups, active, terminal in (("true", "checks", "seal"), ("false", "scaffold", "seal_scaffold")):
+        condition = {"cancelled": False, "needs__plan__result": "success",
+                     "needs__plan__outputs__has_groups": has_groups, "needs__checks__result": "skipped",
+                     "needs__scaffold__result": "skipped", "needs__seal_plan__result": "success",
+                     "needs__seal_plan__outputs__has_seals": "true",
+                     "needs__seal_plan__outputs__scaffold_sha": "a" * 64}
+        condition[f"needs__{active}__result"] = "success"
+        assert eligible("seal_plan", **condition) and eligible(terminal, **condition)
+        inactive = "checks" if active == "scaffold" else "scaffold"
+        for failed in ("failure", "cancelled", "skipped"):
+            assert not eligible("seal_plan", **(condition | {f"needs__{active}__result": failed}))
+            assert not eligible(terminal, **(condition | {"needs__seal_plan__result": failed}))
+            assert not eligible(terminal, **(condition | {f"needs__{active}__result": failed}))
+        for result in ("success", "failure", "cancelled"):
+            assert not eligible("seal_plan", **(condition | {f"needs__{inactive}__result": result}))
+            assert not eligible(terminal, **(condition | {f"needs__{inactive}__result": result}))
+        assert not eligible("seal_plan", **(condition | {"cancelled": True}))
+        assert not eligible(terminal, **(condition | {"cancelled": True}))
+        assert not eligible(terminal, **(condition | {"needs__plan__result": "failure"}))
+
+
+def test_rust_same_leaf_in_different_file_is_not_the_pinned_definition(repo, monkeypatch):
+    marked = "// @at18 TB-01 story US-ST-001\n#[test]\nfn count() {}\n"
+    check = bind(repo, "mod child;\n" + marked, runner="cargo-test", selector="lib/count", source="rust/src/lib.rs")
+    (repo / "rust/Cargo.toml").write_text(RUST_PACKAGE)
+    child = repo / "rust/src/child.rs"
+    child.write_text("#[test]\nfn count() {}\n")
+    loaded = load(repo)
+    bad = copy.deepcopy(check)
+    bad["selector"] = "lib/child::count"
+    reg = read(repo, REGISTRY)
+    reg["checks"] = [bad]
+    write(repo, REGISTRY, reg)
+    result = lint(repo)
+    assert result.returncode == 1 and "Rust definition file is rust/src/child.rs" in result.stderr
+    monkeypatch.setattr("run_checks.subprocess.run", lambda *a, **k: pytest.fail("wrong file must not execute"))
+    result, _ = execute(repo, bad, loaded[1], IDENTITY, set(), loaded[-1][check["check_id"]])
+    assert result["status"] == "FAIL" and result["diagnostic"] == "CHECK_SELECTOR"
+    bad["source"] = {"path": "rust/src/child.rs", "sha256": sha(child.read_bytes())}
+    write(repo, REGISTRY, reg)
+    with pytest.raises(Invalid, match="CHECK_NOT_ANNOTATED"):
+        load(repo)
+    child.write_text(marked)
+    bad["source"]["sha256"] = sha(child.read_bytes())
+    write(repo, REGISTRY, reg)
+    assert load(repo)[-1][check["check_id"]] == (2, 3)
+
+
+@pytest.mark.parametrize(("selector", "target"), [("bin:probe/outer::count", "--bin"),
+                                                  ("test:probe/outer::count", "--test")])
+def test_rust_explicit_cargo_target_and_inline_path(repo, selector, target):
+    from check_selector import command
+    tagged = "mod outer {\n// @at18 TB-01 story US-ST-001\n#[test]\nfn count() {}\n}\n"
+    check = bind(repo, tagged, runner="cargo-test", selector=selector, source="rust/custom.rs")
+    (repo / "rust/Cargo.toml").write_text(RUST_PACKAGE + f'[[{target[2:]}]]\nname = "probe"\npath = "custom.rs"\n')
+    assert load(repo)[-1][check["check_id"]] == (3, 4)
+    assert command(check, repo)[5:8] == [target, "probe", "outer::count"]
+
+
+@pytest.mark.parametrize("drift", ["changed-bytes", "symlink", "repinned-outside-f"])
+def test_check_revalidates_loaded_source_at_execution(repo, drift):
+    check = bind(repo, PY_CASE)
+    head = commit(repo, "F")
+    loaded = load(repo)
+    path = repo / check["source"]["path"]
+    if drift == "symlink":
+        target = repo / "test_other.py"
+        path.rename(target)
+        path.symlink_to(target)
+    else:
+        path.write_text(PY_CASE + "# later bytes\n")
+        if drift == "repinned-outside-f":
+            loaded[0]["checks"][0]["source"]["sha256"] = sha(path.read_bytes())
+    out = repo / "results"
+    assert not run_group(repo, loaded, "simulation", "g-1", IDENTITY, out, head=head)
+    result = read(out, "execution.json")["checks"][0]
+    assert result["status"] == "FAIL" and result["exit_code"] is None
+    assert result["diagnostic"] == ("INVALID_PATH" if drift == "symlink" else "CHECK_SOURCE_DRIFT")
+
+
+def test_destination_membership_rejects_wrong_owner_even_after_repin(repo):
+    base = commit(repo, "valid")
+    crosswalk = read(repo, CROSSWALK)
+    first = next(x for x in crosswalk["destination_success_obligations"] if x["destination_id"] == "DST-01")
+    family = next(x for x in crosswalk["family_entry_links"] if x["id"] == "DST-02")
+    assert first["destination_id"] not in family["destination_ids"]
+    first["family_entry_ids"].append(family["id"])
+    write(repo, CROSSWALK, crosswalk)
+    reg = read(repo, REGISTRY)
+    reg["crosswalk_sha256"] = sha((repo / CROSSWALK).read_bytes())
+    write(repo, REGISTRY, reg)
+    result = lint(repo, "--base", base)
+    assert result.returncode == 1 and "COVERAGE_SOURCE: DST-01.family_entry_ids ownership" in result.stderr
+
+
+def test_started_key_requires_all_bases_even_when_other_keys_are_unbound(repo):
+    assert lint(repo).returncode == 0
+    bind(repo, PY_CASE.replace("TB-01", "TB-02"))
+    reg = read(repo, REGISTRY)
+    bases = canonical_bases(repo, read(repo, CROSSWALK))[0][("TB-02", "story", "US-ST-001")]
+    assert len(bases) == 24
+    template = reg["bindings"][0] | {"slice_id": "TB-02"}
+    reg["bindings"] = [template | {"binding_id": f"b-{i}",
+                        "basis": {"path": path, "pointer": ptr, "sha256": sha((repo / path).read_bytes())}}
+                       for i, (path, ptr) in enumerate(sorted(bases))]
+    write(repo, REGISTRY, reg | {"bindings": reg["bindings"][:1]})
+    result = lint(repo)
+    assert result.returncode == 1 and "BASIS_INCOMPLETE" in result.stderr
+    write(repo, REGISTRY, reg)
+    assert lint(repo).returncode == 0
+
+
+@pytest.mark.parametrize("change", ["unaltered", "edited-before", "edited-after", "edited-at-signature",
+                                    "missing-updated", "signed-comment-edited", "new-comment"])
+def test_authority_observes_edits_to_earlier_comments(monkeypatch, change):
+    before, signed, after = ("2026-11-21T00:00:00Z", "2026-11-21T00:00:02Z", "2026-11-21T00:00:03Z")
+    past = {"id": 5, "created_at": before, "updated_at": before}
+    pin = {"id": 6, "created_at": signed, "updated_at": signed}
+    if change == "edited-before":
+        past["updated_at"] = "2026-11-21T00:00:01Z"
+    if change == "edited-after":
+        past["updated_at"] = after
+    if change == "edited-at-signature":
+        past["updated_at"] = signed
+    if change == "missing-updated":
+        del past["updated_at"]
+    if change == "signed-comment-edited":
+        pin["updated_at"] = after
+    if change == "new-comment":
+        past.update(id=7, created_at=after, updated_at=after)
+    def gh(argv, **kwargs):
+        return subprocess.CompletedProcess(argv, 0, json_bytes([[pin], [past]] if "--paginate" in argv else {}), b"")
+    monkeypatch.setattr("workflow.subprocess.run", gh)
+    if change in {"unaltered", "edited-before"}:
+        assert authority_comment("test/repo", {"ticket": 2133, "comment_id": 6}, "fixture") == pin
+    else:
+        with pytest.raises(Invalid, match="AUTH_REQUIRED"):
+            authority_comment("test/repo", {"ticket": 2133, "comment_id": 6}, "fixture")
+
+
+@pytest.mark.parametrize("action", ["place", "cancel", "modify", "reduce_only_close"])
+def test_experiment_send_hard_gate_precedes_remote_signatures(repo, monkeypatch, action):
+    import workflow
+    loaded = load(repo)
+    rule = loaded[1]["experiment_authorization"]
+    rule.update(comment_id=301, body_sha256="a" * 64, group_actions={"g": ["query", action]})
+    rule["send_authorization"].update(comment_id=302, body_sha256="b" * 64)
+    monkeypatch.setattr(workflow, "authority_comment", lambda *_: pytest.fail("external action blocked before lookup"))
+    with pytest.raises(Invalid, match="1412/per-action gate not connected"):
+        workflow.authorize(loaded, ["g"], "fixture-token")
+
+
+@pytest.mark.parametrize("payload_change", [
+    'payload["unregistered_fixture_note"] = "CANARY"',
+    'payload["conditions"]["debug"] = {"note": "CANARY"}',
+    'payload["output"]["samples"] = [{"debug_context": "CANARY"}]',
+    'payload["tests"] = [{"check_id": "ck", "source_path": "x", "name": "n", "note": "CANARY"}]',
+])
+def test_original_record_is_rejected_before_group_upload(repo, payload_change):
+    source = "trial/record"
+    bind(repo, RECORD_CASE.replace("\ndoc =", f"\n{payload_change}\ndoc ="), runner="command",
+         source=source, selector=source, key_aware=True, record="tb.simulation.TB-01")
+    loaded = load(repo)
+    bundle = repo / "results"
+    assert not run_group(repo, loaded, "simulation", "g-1", IDENTITY, bundle)
+    assert {p.name for p in bundle.iterdir()} == {"execution.json"}
+    raw = (bundle / "execution.json").read_bytes()
+    assert b"CANARY" not in raw and b"RECORD_PUBLIC_SCHEMA" in raw
+
+
+@pytest.mark.parametrize("fault", ["wrong-group", "wrong-attempt", "wrong-head", "failed-job", "failed-step",
+                                   "duplicate-job", "extra-anchor", "incomplete-page", "no-anchor"])
+def test_server_anchor_is_bound_to_exact_producer(repo, fault):
+    bind(repo, PY_CASE)
+    loaded = load(repo)
+    job = producer_job(loaded, "simulation", "g-1", IDENTITY, "e" * 64)
+    assert producer_anchors(loaded, "simulation", IDENTITY, [{"jobs": [job], "total_count": 1}]) == {"g-1": "e" * 64}
+    if fault == "wrong-group":
+        job["name"] = job["name"].replace("g-1", "g-2")
+    if fault == "wrong-attempt":
+        job["run_attempt"] += 1
+    if fault == "wrong-head":
+        job["head_sha"] = "f" * 40
+    if fault == "failed-job":
+        job["conclusion"] = "failure"
+    if fault == "failed-step":
+        job["steps"][0]["conclusion"] = "failure"
+    if fault == "extra-anchor":
+        job["steps"] *= 2
+    if fault == "no-anchor":
+        job["steps"] = []
+    with pytest.raises(Invalid, match="RECORD_UNSEALED"):
+        producer_anchors(loaded, "simulation", IDENTITY, [
+            {"jobs": [job], "total_count": 2 if fault == "incomplete-page" else 1}
+        ] if fault != "duplicate-job" else [{"jobs": [job], "total_count": 2}] * 2)
+
+
+def test_seal_rejects_a_fully_self_consistent_substitution(repo):
+    source = "trial/record"
+    bind(repo, RECORD_CASE, runner="command", source=source, selector=source,
+         key_aware=True, record="tb.simulation.TB-01")
+    loaded = load(repo)
+    bundle = repo / "artifact" / bundle_name("simulation", IDENTITY["run_attempt"], "g-1")
+    assert run_group(repo, loaded, "simulation", "g-1", IDENTITY, bundle)
+    anchor = sha((bundle / "execution.json").read_bytes())
+    manifest = read(bundle, "execution.json")
+    row = manifest["records"][0]
+    raw = read(bundle, row["path"])
+    raw["payload"]["output"]["samples"] = [90]
+    row["sha256"] = sha(json_bytes(raw))
+    revised = "record-" + row["sha256"] + ".json"
+    (bundle / row["path"]).rename(bundle / revised)
+    row["path"] = revised
+    write(bundle, revised, raw)
+    write(bundle, "execution.json", manifest)
+    # 变化后的包内引用仍完整，但无权替换生产者从 Jobs API 传出的锚。
+    with pytest.raises(Invalid, match="producer manifest sha256"):
+        seal_matrix(loaded, "simulation", IDENTITY, bundle.parent, {"g-1": anchor})
+    with pytest.raises(Invalid, match="producer manifest sha256"):
+        _manifest(loaded, "simulation", "g-1", IDENTITY, bundle, anchor)
+
+
+def test_permission_record_closes_nested_objects_and_does_not_archive_refusal_debug(repo):
+    contract = load(repo)[1]
+    rule = contract["run_records"]["permission.experiment"]
+    timestamp = "2026-11-21T00:00:00Z"
+    record = {"schema_version": rule["version"], "venue_profile_sha256": "a" * 64,
+              "capability_record_sha256": "b" * 64, "derived_credential_public_id": "public-id",
+              "user_role": {"request": {"public_id": "public-id"},
+                            "response": {"role": "agent", "data": {"user": "public-id"}},
+                            "received_at": timestamp},
+              "binding": {"writer_epoch": 2, "profile_id": "P1-demo", "profile_version": 3,
+                          "venue_profile_sha256": "a" * 64, "capability_record_version": "P1-v1",
+                          "capability_record_sha256": "b" * 64, "tb09_fingerprint": "d" * 64,
+                          "authorization_id": "ticket:2133", "evidence_class": "experiment"},
+              "launch": {"writer_epoch": 2, "launch_seq": 1, "launched_at": timestamp,
+                         "tb09_fingerprint_computed": "d" * 64, "credential_public_id_verified": True,
+                         "session_permission_verified": True, "send_state": "refused",
+                         "send_refusal_class": "ReadOnly", "send_refusal_detail": None}}
+    assert adapter.public_payload(contract, "permission.experiment", record)["role_user"] == "public-id"
+    for path, field, value in [
+        (("user_role", "response", "data"), "debug", {"request_dump": "CANARY"}),
+        (("binding",), "context", "CANARY"),
+        (("launch",), "send_refusal_detail", "CANARY"),
+    ]:
+        mutated = copy.deepcopy(record)
+        adapter.pointer(mutated, "/" + "/".join(path))[field] = value
+        with pytest.raises(Invalid, match="RECORD_PUBLIC_SCHEMA"):
+            adapter.public_payload(contract, "permission.experiment", mutated)
+
+
+def test_experiment_failure_uploads_only_new_closed_diagnostic(repo):
+    workflow = yaml.safe_load((ROOT / ".github/workflows/at18-experiment.yml").read_text())
+    steps = workflow["jobs"]["checks"]["steps"]
+    primary, diagnostic = [step for step in steps if step.get("uses") == "actions/upload-artifact@v4"]
+    assert primary["if"] == "steps.run.outcome == 'success'"
+    assert diagnostic["if"] == "${{ !cancelled() && steps.diagnostic.outcome == 'success' }}"
+    assert diagnostic["with"]["path"] == "${{ steps.workspace.outputs.path }}/diagnostic.json"
+    assert diagnostic["with"]["name"].startswith("at18-diagnostic-")
+    head = commit(repo, "F")
+    env = os.environ | {"GITHUB_SHA": head, "GITHUB_RUN_ID": "4", "GITHUB_RUN_ATTEMPT": "2",
+                        "GITHUB_EVENT_NAME": "workflow_dispatch", "GITHUB_REF": "refs/heads/main"}
+    temp = repo / "fixture-run"
+    temp.mkdir()
+    write(temp, "execution/raw.json", {"unregistered_fixture_note": "CANARY"})
+    output = temp / "diagnostic.json"
+    command = (sys.executable, str(PROGRAMS / "workflow.py"), "diagnostic", "experiment",
+               "--root", str(repo), "--output", str(output))
+    sh(repo, *command, env=env)
+    assert read(temp, "diagnostic.json") == {
+        "schema_version": "at18-diagnostic/1", **run_identity(head, 4, 2),
+        "evidence_class": "experiment", "status": "GROUP_REJECTED"}
+    assert sh(repo, *command, env=env, check=False).returncode == 1

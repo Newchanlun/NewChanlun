@@ -51,8 +51,10 @@ jobs:
         env:
           AT18_GROUP: ${{ matrix.group }}
         run: python scripts/at18/workflow.py run simulation --group="$AT18_GROUP" --output "$RUNNER_TEMP/at18-execution"
-      - uses: actions/upload-artifact@v4
-        if: always() && (steps.run.outcome == 'success' || steps.run.outcome == 'failure')
+      # 矩阵作业输出键会相互覆盖；Jobs API 的成功上传 step 保留每组独立锚。
+      - name: at18-anchor ${{ steps.run.outputs.execution_sha }}
+        uses: actions/upload-artifact@v4
+        if: steps.run.outcome == 'success'
         with:
           name: at18-${{ github.run_attempt }}-simulation-g-${{ matrix.group }}
           path: ${{ runner.temp }}/at18-execution/
@@ -75,8 +77,10 @@ jobs:
         with:
           python-version: "3.13"
       - run: python -m pip install -r scripts/at18/requirements.txt
-      - run: python scripts/at18/workflow.py run simulation --output "$RUNNER_TEMP/at18-scaffold"
-      - uses: actions/upload-artifact@v4
+      - id: run
+        run: python scripts/at18/workflow.py run simulation --output "$RUNNER_TEMP/at18-scaffold"
+      - name: at18-anchor ${{ steps.run.outputs.execution_sha }}
+        uses: actions/upload-artifact@v4
         with:
           name: at18-${{ github.run_attempt }}-simulation-scaffold
           path: ${{ runner.temp }}/at18-scaffold/
@@ -84,11 +88,14 @@ jobs:
           retention-days: 14
 
   seal_plan:
+    permissions:
+      contents: read
+      actions: read
     needs: [plan, checks, scaffold]
     if: >-
       ${{ !cancelled() && needs.plan.result == 'success' &&
-      ((needs.plan.outputs.has_groups == 'true' && needs.checks.result == 'success') ||
-       (needs.plan.outputs.has_groups == 'false' && needs.scaffold.result == 'success')) }}
+      ((needs.plan.outputs.has_groups == 'true' && needs.checks.result == 'success' && needs.scaffold.result == 'skipped') ||
+       (needs.plan.outputs.has_groups == 'false' && needs.scaffold.result == 'success' && needs.checks.result == 'skipped')) }}
     name: at18-seal-plan simulation ${{ needs.plan.outputs.registry_sha }}
     runs-on: ubuntu-latest
     timeout-minutes: 8
@@ -110,11 +117,16 @@ jobs:
           pattern: at18-${{ github.run_attempt }}-simulation-*
           path: ${{ runner.temp }}/at18-input
       - id: plan
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: python scripts/at18/workflow.py seal-plan simulation --artifacts "$RUNNER_TEMP/at18-input"
 
   seal_scaffold:
-    needs: [plan, seal_plan]
-    if: needs.plan.outputs.has_groups == 'false' && needs.seal_plan.outputs.scaffold_sha != ''
+    needs: [plan, seal_plan, checks, scaffold]
+    if: >-
+      ${{ !cancelled() && needs.plan.result == 'success' && needs.seal_plan.result == 'success' &&
+      needs.plan.outputs.has_groups == 'false' && needs.checks.result == 'skipped' &&
+      needs.scaffold.result == 'success' && needs.seal_plan.outputs.scaffold_sha != '' }}
     name: at18-seal-scaffold simulation ${{ needs.plan.outputs.registry_sha }} ${{ needs.seal_plan.outputs.scaffold_sha }}
     runs-on: ubuntu-latest
     timeout-minutes: 8
@@ -144,8 +156,11 @@ jobs:
           retention-days: 14
 
   seal:
-    needs: [plan, seal_plan]
-    if: needs.seal_plan.outputs.has_seals == 'true'
+    needs: [plan, seal_plan, checks, scaffold]
+    if: >-
+      ${{ !cancelled() && needs.plan.result == 'success' && needs.seal_plan.result == 'success' &&
+      needs.plan.outputs.has_groups == 'true' && needs.checks.result == 'success' &&
+      needs.scaffold.result == 'skipped' && needs.seal_plan.outputs.has_seals == 'true' }}
     name: at18-seal ${{ matrix.record }} ${{ matrix.profile }} ${{ needs.plan.outputs.registry_sha }} ${{ matrix.sha256 }}
     runs-on: ubuntu-latest
     timeout-minutes: 8
@@ -170,7 +185,8 @@ jobs:
           AT18_RECORD: ${{ matrix.record }}
           AT18_PROFILE: ${{ matrix.profile }}
           AT18_SHA: ${{ matrix.sha256 }}
+          AT18_EXECUTION_SHA: ${{ matrix.execution_sha }}
         run: >-
           python scripts/at18/workflow.py seal simulation
           --group="$AT18_GROUP" --record="$AT18_RECORD"
-          --profile="$AT18_PROFILE" --sha256="$AT18_SHA" --artifacts "$RUNNER_TEMP/at18-input"
+          --profile="$AT18_PROFILE" --sha256="$AT18_SHA" --execution-sha="$AT18_EXECUTION_SHA" --artifacts "$RUNNER_TEMP/at18-input"

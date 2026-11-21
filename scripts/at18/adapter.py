@@ -79,6 +79,63 @@ def decode_payload(contract, record, obj):
     return decode_fields(contract, rule["fields"], obj)
 
 
+
+# R07 公开协议：从固定字段指针构建闭合对象；只有显式列出的业务容器可作叶。
+PUBLIC_TOKEN = re.compile(r"[A-Za-z0-9_][A-Za-z0-9._:/+@~=%#\[\]-]{0,191}")
+
+
+def _public_fields(contract, fields, obj, *, version_pointer=None):
+    rules = {}
+    if version_pointer is not None:
+        rules[version_pointer] = {}
+    rules.update((rule["pointer"], rule) for rule in fields.values())
+    tree = {}
+    for path, rule in rules.items():
+        branch = tree
+        for part in path.split("/")[1:]:
+            branch = branch.setdefault(part.replace("~1", "/").replace("~0", "~"), {})
+        branch[None] = rule
+
+    def walk(shape, value, field=None):
+        rule = shape.get(None, {})
+        keys = shape.keys() - {None}
+        if keys:
+            require(isinstance(value, dict) and value.keys() == keys,
+                    "RECORD_PUBLIC_SCHEMA", "unknown or missing fields")
+            for key in keys:
+                walk(shape[key], value[key], key)
+        elif child := rule.get("decode_as"):
+            if rule["type"] == "object-array":
+                for item in value:
+                    _public_fields(contract, contract["item_sources"][child], item)
+            else:
+                _public_fields(contract, contract["item_sources"][child], value)
+        elif rule.get("type") == "object":
+            validators = {
+                "conditions": lambda v: v.keys() <= {"processes"} and
+                all(type(n) is int and n > 0 for n in v.values()),
+                "output": lambda v: v.keys() <= {"samples"} and
+                all(isinstance(seq, list) and all(type(n) in (int, float) for n in seq)
+                    for seq in v.values()),
+            }
+            require(field in validators and validators[field](value), "RECORD_PUBLIC_SCHEMA", "business object")
+        elif field == "send_refusal_detail":
+            # 仅收枚举式 refusal class；详细错误可能含请求或凭据。
+            require(value is None, "RECORD_PUBLIC_SCHEMA", "refusal detail")
+        elif rule.get("type") in ("string", "nullable-string", "profile-id", "nullable-profile-id", "pointer"):
+            require(value is None or (value == "" and rule["type"] == "pointer") or
+                    (isinstance(value, str) and PUBLIC_TOKEN.fullmatch(value.lstrip("/") if rule["type"] == "pointer" else value)),
+                    "RECORD_PUBLIC_SCHEMA", "business token")
+
+    walk(tree, obj)
+
+
+def public_payload(contract, record, obj):
+    payload = decode_payload(contract, record, obj)
+    rule = contract["run_records"][record if record in SPECIAL else "tb"]
+    _public_fields(contract, rule["fields"], obj, version_pointer=rule["version_pointer"])
+    return payload
+
 def decode_legacy(root, contract, identity, issues, comments):
     # issues/comments 以 GitHub 记录身份索引；调用方须完整取回分页。
     rule = contract["legacy_sources"][identity]
@@ -193,19 +250,20 @@ def _signed_authority(contract, rule, comment, *, repo, profile_id, now):
     return auth
 
 
+def require_query_only(contract, groups):
+    rule = contract["experiment_authorization"]
+    declared = rule["group_actions"]
+    require(groups and all(group in declared for group in groups), "AUTH_REQUIRED", "experiment group scope")
+    # pin 只固定授权原文。接入 #1412 的实际逐动作调用门之前，不能解锁任何外效。
+    require(all(declared[group] == ["query"] for group in groups),
+            "AUTH_REQUIRED", "ticket:1412/per-action gate not connected")
+
+
 def experiment_authority(contract, comments, *, repo, profile_id, now, groups):
+    require_query_only(contract, groups)
     rule = contract["experiment_authorization"]
     auth = _signed_authority(contract, rule, comments.get(2133), repo=repo, profile_id=profile_id, now=now)
-    declared = rule["group_actions"]
-    require(all(group in declared for group in groups), "AUTH_REQUIRED", "experiment group scope")
-    actions = {action for group in groups for action in declared[group]}
-    require(actions and actions <= set(auth["actions"]), "AUTH_REQUIRED", "ticket:2133/actions")
-    sends = actions - {"query"}
-    if sends:
-        send = _signed_authority(contract, rule["send_authorization"], comments.get(1412),
-                                 repo=repo, profile_id=profile_id, now=now)
-        require(sends <= set(send["actions"]) and all(send[key] == auth[key] for key in ("runner_group", "runner_label")),
-                "AUTH_REQUIRED", "ticket:1412/actions")
+    require("query" in auth["actions"], "AUTH_REQUIRED", "ticket:2133/actions")
     return auth
 
 
