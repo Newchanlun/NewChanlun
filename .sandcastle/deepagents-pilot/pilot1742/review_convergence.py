@@ -92,6 +92,7 @@ _ATX_HEADING_BODY_RE = re.compile(r"^#{1,6}(?:[ \t]|$)")
 _SETEXT_UNDERLINE_BODY_RE = re.compile(r"^(?:=+|-+)[ \t]*$")
 _THEMATIC_BREAK_BODY_RE = re.compile(r"^(?:(?:-[ \t]*){3,}|(?:\*[ \t]*){3,}|(?:_[ \t]*){3,})$")
 _LIST_ITEM_MARKER_BODY_RE = re.compile(r"^(?:(?P<bullet>[-*+])|(?P<num>[0-9]{1,9})[.)])(?=[ \t]|$)")
+_GFM_TABLE_DELIM_CELL_RE = re.compile(r"^:?-+:?$")
 _HTML_BLOCK_1_START_RE = re.compile(r"^<(?:pre|script|style|textarea)(?:[ \t>]|$)", re.IGNORECASE)
 _HTML_BLOCK_1_END_RE = re.compile(r"</(?:pre|script|style|textarea)>", re.IGNORECASE)
 _HTML_BLOCK_4_START_RE = re.compile(r"^<![A-Za-z]")
@@ -224,10 +225,11 @@ def _require_visible_text(raw: Any, field_name: str) -> str:
 
 
 def _require_visible_markdown_text(raw: Any, field_name: str) -> str:
-    """要求字段在 GFM 渲染后至少包含 1 个可见基字符（封堵 HTML 实体/注释/空标签/链接引用定义等不可见占位文本）。"""
-    text = _require_visible_text(raw, field_name)
-    if _has_visible_gfm_text(text):
-        return text
+    """要求字段在 GFM 渲染后至少包含 1 个可见基字符（保留原始前导缩进，避免破坏 4 空格/Tab 缩进代码块语义）。"""
+    _require_visible_text(raw, field_name)
+    assert isinstance(raw, str)
+    if _has_visible_gfm_text(raw):
+        return raw
     raise ConvergenceError(f"{field_name} 在 Markdown/GFM 渲染后不包含任何可见字符：{raw!r}")
 
 
@@ -519,6 +521,11 @@ def _pick_best_text(values: Sequence[str]) -> str:
     return min((v.strip() for v in values), key=lambda s: (-len(s), s))
 
 
+def _pick_best_markdown_text(values: Sequence[str]) -> str:
+    """在保留原始 Markdown 前导缩进语义的前提下确定性择优。"""
+    return min(values, key=lambda s: (-len(s.strip()), s))
+
+
 def _reduce_finding_group(entries: Sequence[tuple[str, Finding]]) -> Finding:
     """对同指纹分组一次性确定性归约，保证结果完全与输入顺序无关。"""
     group = [item for _, item in entries]
@@ -534,8 +541,8 @@ def _reduce_finding_group(entries: Sequence[tuple[str, Finding]]) -> Finding:
         preferred_line = min(fallback_lines) if fallback_lines else None
 
     category = _pick_best_text([f.category for f in top_members])
-    failure_scenario = _pick_best_text([f.failure_scenario for f in top_members])
-    evidence = _pick_best_text([f.evidence for f in group])
+    failure_scenario = _pick_best_markdown_text([f.failure_scenario for f in top_members])
+    evidence = _pick_best_markdown_text([f.evidence for f in group])
     scopes = [f.class_scope.strip() for f in group if f.class_scope is not None]
     class_scope = _pick_best_text(scopes) if scopes else None
 
@@ -882,8 +889,14 @@ class _Paragraph:
     lines: list[str]
 
 
+@dataclass
+class _Table:
+    header_cells: tuple[str, ...]
+    body_rows: list[tuple[str, ...]] = field(default_factory=list)
+
+
 _Container = _BlockQuote | _ListItem
-_Leaf = _FencedCode | _IndentedCode | _HTMLBlock | _Paragraph
+_Leaf = _FencedCode | _IndentedCode | _HTMLBlock | _Paragraph | _Table
 
 
 def _match_html_block_start(rest: str, *, allow_type7: bool) -> int | None:
@@ -1962,16 +1975,101 @@ def _extract_atx_heading_text(rest: str) -> str:
     return content
 
 
+def _split_gfm_table_row(line: str, *, require_pipe: bool) -> list[str] | None:
+    """按 GFM §4.10 将表格行拆分为单元格列表。
+
+    - 剥离首尾 ASCII 空格/制表符；
+    - 仅将前面连续反斜杠个数为偶数的 `|` 视作未转义分隔符（奇数个为转义 `\\|`）；
+    - 若 `require_pipe=True` 且全行不存在未转义 `|`，返回 None；
+    - 剥离首部单个未转义 `|` 与尾部单个未转义 `|`（尾部转义 `\\|` 不剥离）；
+    - 按剩余未转义 `|` 切分单元格，每格去除首尾 ASCII 空格/制表符并将 `\\|` 还原为 `|`。
+    """
+    stripped = line.strip(" \t")
+    if not stripped:
+        return None if require_pipe else []
+    pipe_positions: list[int] = []
+    for idx, ch in enumerate(stripped):
+        if ch == "|":
+            bs_count = 0
+            j = idx - 1
+            while j >= 0 and stripped[j] == "\\":
+                bs_count += 1
+                j -= 1
+            if bs_count % 2 == 0:
+                pipe_positions.append(idx)
+    if require_pipe and not pipe_positions:
+        return None
+    if len(pipe_positions) == 1 and len(stripped) == 1:
+        return []
+    start = 0
+    end = len(stripped)
+    inner_pipes = pipe_positions
+    if inner_pipes and inner_pipes[0] == 0:
+        start = 1
+        inner_pipes = inner_pipes[1:]
+    if inner_pipes and inner_pipes[-1] == len(stripped) - 1:
+        end = len(stripped) - 1
+        inner_pipes = inner_pipes[:-1]
+    cells: list[str] = []
+    seg_start = start
+    for p in inner_pipes:
+        cells.append(stripped[seg_start:p].strip(" \t").replace("\\|", "|"))
+        seg_start = p + 1
+    cells.append(stripped[seg_start:end].strip(" \t").replace("\\|", "|"))
+    return cells
+
+
+def _is_gfm_table_delimiter_row(line: str, expected_cols: int) -> bool:
+    """按 GFM §4.10 校验表格分隔行：必须含至少一个未转义 `|`，列数与表头一致，且每格匹配 `^:?-+:?$`。"""
+    if expected_cols <= 0:
+        return False
+    cells = _split_gfm_table_row(line, require_pipe=True)
+    if cells is None or len(cells) != expected_cols:
+        return False
+    return all(_GFM_TABLE_DELIM_CELL_RE.fullmatch(cell) is not None for cell in cells)
+
+
+def _can_interrupt_gfm_table(rest: str) -> bool:
+    """判定缩进 <= 3 的非空行是否开启可打断 GFM 表格的块级元素。"""
+    if rest.startswith(">"):
+        return True
+    if _ATX_HEADING_BODY_RE.match(rest) is not None:
+        return True
+    if _FENCE_OPEN_BACKTICK_BODY_RE.match(rest) is not None or _FENCE_OPEN_TILDE_BODY_RE.match(rest) is not None:
+        return True
+    if _match_html_block_start(rest, allow_type7=False) is not None:
+        return True
+    if _THEMATIC_BREAK_BODY_RE.match(rest) is not None:
+        return True
+    list_match = _LIST_ITEM_MARKER_BODY_RE.match(rest)
+    if list_match is not None:
+        marker_width = list_match.end()
+        is_bullet = list_match.group("bullet") is not None
+        ordered_num = int(list_match.group("num")) if not is_bullet else 0
+        is_empty_item = not rest[marker_width:].strip(" \t")
+        return (not is_empty_item) and (is_bullet or ordered_num == 1)
+    return False
+
+
+def _is_html_suppressed(state: _HtmlSuppressState) -> bool:
+    return (
+        state.in_comment
+        or state.raw_text_tag is not None
+        or state.in_open_tag
+        or any(t in _SILENT_INLINE_HTML_TAGS for t in state.tag_stack)
+    )
+
+
 def _parse_commonmark_blocks(
     body: str,
     *,
     include_all_visible_blocks: bool = False,
-) -> tuple[list[tuple[Literal["paragraph", "heading", "html", "code"], str]], frozenset[str]]:
-    """按 CommonMark Phase-1 容器栈/叶子块 + §4.7 链接引用定义剥离收集文档块与已定义链接标签。"""
+) -> tuple[list[tuple[Literal["paragraph", "heading", "html", "code", "table_cell"], str]], frozenset[str]]:
+    """按 CommonMark Phase-1 容器栈/叶子块（含 GFM §4.10 管道表格）+ §4.7 链接引用定义剥离收集文档块与已定义链接标签。"""
     containers: list[_Container] = []
     leaf: _Leaf | None = None
     defined_labels: set[str] = set()
-    doc_blocks: list[tuple[Literal["paragraph", "heading", "html", "code"], str]] = []
+    doc_blocks: list[tuple[Literal["paragraph", "heading", "html", "code", "table_cell"], str]] = []
 
     def in_blockquote() -> bool:
         return any(isinstance(c, _BlockQuote) for c in containers)
@@ -1988,6 +2086,13 @@ def _parse_commonmark_blocks(
         elif isinstance(leaf, (_FencedCode, _IndentedCode)):
             if include_all_visible_blocks and emit and leaf.lines:
                 doc_blocks.append(("code", "\n".join(leaf.lines)))
+        elif isinstance(leaf, _Table):
+            if include_all_visible_blocks and emit:
+                for cell in leaf.header_cells:
+                    doc_blocks.append(("table_cell", cell))
+                for row in leaf.body_rows:
+                    for cell in row:
+                        doc_blocks.append(("table_cell", cell))
         leaf = None
 
     def close_unmatched(matched_count: int) -> None:
@@ -2064,6 +2169,27 @@ def _parse_commonmark_blocks(
                     leaf.lines.append(cursor.rest_text())
                     continue
                 close_leaf()
+            if isinstance(leaf, _Table):
+                if cursor.is_blank():
+                    close_leaf()
+                    continue
+                if cursor.indent_ahead() <= 3:
+                    saved = cursor.save()
+                    cursor.advance_cols(cursor.indent_ahead())
+                    if _can_interrupt_gfm_table(cursor.rest_text()):
+                        cursor.restore(saved)
+                        close_leaf()
+                    else:
+                        cursor.restore(saved)
+                        row_cells = _split_gfm_table_row(cursor.rest_text(), require_pipe=False)
+                        if row_cells is not None:
+                            leaf.body_rows.append(tuple(row_cells[: len(leaf.header_cells)]))
+                        continue
+                else:
+                    row_cells = _split_gfm_table_row(cursor.rest_text(), require_pipe=False)
+                    if row_cells is not None:
+                        leaf.body_rows.append(tuple(row_cells[: len(leaf.header_cells)]))
+                    continue
 
         if matched < len(containers) and not isinstance(leaf, _Paragraph):
             close_unmatched(matched)
@@ -2195,6 +2321,18 @@ def _parse_commonmark_blocks(
                     continue
                 cursor.restore(after_marker_state)
 
+            if (
+                same_container_para
+                and isinstance(leaf, _Paragraph)
+                and len(leaf.lines) == 1
+                and _strip_leading_link_ref_defs(leaf.lines[0], None)
+            ):
+                header_cells = _split_gfm_table_row(leaf.lines[0], require_pipe=True)
+                if header_cells and _is_gfm_table_delimiter_row(rest, len(header_cells)):
+                    leaf = _Table(header_cells=tuple(header_cells))
+                    line_consumed = True
+                    break
+
             cursor.restore(saved)
             break
 
@@ -2232,7 +2370,7 @@ def _extract_visible_paragraph_lines(body: str) -> list[tuple[str, list[tuple[st
 
 
 def _has_visible_gfm_text(text: str) -> bool:
-    """按 GFM 渲染语义判定文本是否包含至少 1 个可见基字符（覆盖段落/列表/引用/标题/围栏与缩进代码/非静默 HTML）。"""
+    """按 GFM 渲染语义判定文本是否包含至少 1 个可见基字符（覆盖段落/列表/引用/标题/围栏与缩进代码/GFM 表格/非静默 HTML）。"""
     doc_blocks, frozen_labels = _parse_commonmark_blocks(text, include_all_visible_blocks=True)
     html_suppress_state = _HtmlSuppressState(suppressed_tags=_SILENT_INLINE_HTML_TAGS)
     for block_kind, block_text in doc_blocks:
@@ -2244,15 +2382,18 @@ def _has_visible_gfm_text(text: str) -> bool:
                     return True
             continue
         if block_kind == "code":
-            if (
-                html_suppress_state.in_comment
-                or html_suppress_state.raw_text_tag is not None
-                or html_suppress_state.in_open_tag
-                or any(t in _SILENT_INLINE_HTML_TAGS for t in html_suppress_state.tag_stack)
-            ):
+            if _is_html_suppressed(html_suppress_state):
                 continue
             for code_line in block_text.split("\n"):
                 if _clean_display_reason(code_line):
+                    return True
+            continue
+        if block_kind == "table_cell":
+            if _is_html_suppressed(html_suppress_state):
+                continue
+            for line_tokens in _scan_inline_dual(block_text, frozen_labels, html_suppress_state):
+                display_text = "".join(d_part for _, d_part in line_tokens)
+                if _clean_display_reason(display_text):
                     return True
             continue
         for line_tokens in _scan_inline_dual(block_text, frozen_labels, html_suppress_state):

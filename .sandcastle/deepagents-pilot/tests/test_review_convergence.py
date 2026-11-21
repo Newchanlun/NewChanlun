@@ -6882,6 +6882,7 @@ def test_r15_gfm_visibility_accepts_blocks_and_rejects_invisible_variants() -> N
         "<!-- note -->real text",
         "\n\n    return None",
         "    return None",
+        "    &#x3164;",
         "---\n\n    return None",
         "<!-- note -->\n\n    return None",
         "[x]: /demo\n\n    return None",
@@ -6890,7 +6891,6 @@ def test_r15_gfm_visibility_accepts_blocks_and_rejects_invisible_variants() -> N
         "⚠️",
     )
     for good_md in valid_block_samples:
-        expected_text = good_md.strip()
         vr = parse_verifier_output(
             _verifier_payload(
                 cand,
@@ -6899,7 +6899,7 @@ def test_r15_gfm_visibility_accepts_blocks_and_rejects_invisible_variants() -> N
             cand,
             verifier_model="claude-opus-5-5",
         )
-        assert vr.verdicts[0].verifier_evidence == expected_text
+        assert vr.verdicts[0].verifier_evidence == good_md
         f_ok = _finding(failure_scenario=good_md, evidence=good_md)
         assert f_ok.failure_scenario == good_md
         assert f_ok.evidence == good_md
@@ -6930,7 +6930,6 @@ def test_r15_gfm_visibility_accepts_blocks_and_rejects_invisible_variants() -> N
         "&#x3164;\n---",
         "**&#x3164;**\n===",
         "    \u3164",
-        "    &#x3164;",
         "---\n\n    \u3164",
         "[x]: /demo\n\n    \u3164",
         "<!-- hidden -->",
@@ -7231,3 +7230,292 @@ def test_r15_stale_confirmed_consumes_unpinned_cross_head_coord_replies() -> Non
     )
     dec3_pinned = evaluate_round(v3_pinned)
     assert pinned_rk in dec3_pinned.consumed_reply_keys
+
+
+def test_r16_gfm_pipe_table_visibility_and_wontfix_isolation() -> None:
+    """R16 Important 1：完整支持 GFM §4.10 管道表格，拒绝全不可见/超列丢弃表格证据并彻底隔离表格内伪不修指令。"""
+    f1 = _finding(severity=Severity.IMPORTANT, file="pilot1742/demo.py", line=42)
+    fid = f1.finding_id
+    cand = _candidates([f1])
+
+    invisible_table_samples = (
+        "| &#8203; |\n| --- |",
+        "| &#8203; |\n| --- |\n| &#8203; | extra_dropped_cell |",
+        "> | &#8203; |\n> | --- |",
+        "- | &#8203; |\n  | --- |",
+        "| |\n| --- |",
+        "||\n| --- |",
+        "| &#8203; | &#x3164; |\n| :--- | ---: |\n| <!-- hidden --> | ![alt](/x.png) |",
+        "| &#8203; |\n| --- |\n| ~~&#8203;~~ |",
+        "[x]: /demo\n\n| [&#8203;][x] |\n| --- |",
+        "<template>\n\n| visible |\n| --- |\n\n</template>",
+        "| &#8203; |\n| --- |\n    <!-- hidden -->",
+        "| &#8203; |\n| --- |\n| <script>alert(1)</script> |",
+    )
+    for bad_table in invisible_table_samples:
+        with pytest.raises(ConvergenceError):
+            parse_verifier_output(
+                _verifier_payload(
+                    cand,
+                    [{"finding_id": fid, "verdict": "rejected", "verifier_evidence": bad_table}],
+                ),
+                cand,
+                verifier_model="claude-opus-5-5",
+            )
+        with pytest.raises(ConvergenceError):
+            VerifiedFinding(
+                finding=f1,
+                verdict=VerificationVerdict.REJECTED,
+                verifier_model="claude-opus-5-5",
+                verifier_evidence=bad_table,
+                round_number=1,
+                head_sha=HEAD_1,
+            )
+        with pytest.raises(ConvergenceError):
+            _finding(failure_scenario=bad_table)
+        with pytest.raises(ConvergenceError):
+            _finding(evidence=bad_table)
+        with pytest.raises(ConvergenceError):
+            parse_finder_output(
+                {
+                    "findings": [
+                        {
+                            "severity": "Important",
+                            "file": "pilot1742/demo.py",
+                            "line": 42,
+                            "category": "空值解引用",
+                            "failure_scenario": bad_table,
+                            "evidence": "真实证据",
+                        }
+                    ]
+                },
+                source_model="gpt-6-astra",
+            )
+
+    visible_table_samples = (
+        "| demo.py:42 |\n| --- |",
+        "说明 | 位置\n--- | ---\nA | B",
+        "| &#8203; |\n| --- |\n| \\| |",
+        "| &#8203; |\n| --- |\n| `&#8203;` |",
+        "| &#8203; | &#8203; |\n| --- | --- |\n| x\\\\| y |",
+        "| &#8203; |\n| --- |\n| x\\\\\\| |",
+        "| &#8203; |\n| --- |\n| x\\|",
+        "| demo.py:42\n| ---",
+        "demo.py:42 |\n--- |",
+        "> | demo.py:42 |\n> | --- |",
+        "- | demo.py:42 |\n  | --- |",
+        "| &#8203; |\n| --- |\n\nvisible after table",
+    )
+    for good_table in visible_table_samples:
+        vr = parse_verifier_output(
+            _verifier_payload(
+                cand,
+                [{"finding_id": fid, "verdict": "rejected", "verifier_evidence": good_table}],
+            ),
+            cand,
+            verifier_model="claude-opus-5-5",
+        )
+        assert vr.verdicts[0].verifier_evidence == good_table
+        dec = evaluate_round(vr)
+        assert dec.outcome == RoundOutcome.PASS
+        f_ok = _finding(failure_scenario=good_table, evidence=good_table)
+        assert f_ok.failure_scenario == good_table
+        assert f_ok.evidence == good_table
+
+    # 表格内全部伪不修指令均须跳过
+    table_only_comments = [
+        {
+            "id": 9201,
+            "user": {"login": "alice", "type": "User"},
+            "body": "说明 | 位置\n--- | ---\ndemo.py:42 不修：示例 | A",
+        },
+        {
+            "id": 9202,
+            "user": {"login": "alice", "type": "User"},
+            "body": "| 位置 | 说明 |\n| --- | --- |\n| demo.py:42 不修：表格单元格内 | A |",
+        },
+        {
+            "id": 9203,
+            "user": {"login": "alice", "type": "User"},
+            "body": "| a | b |\n| --- | --- |\ndemo.py:42 不修：无竖线表体续行",
+        },
+        {
+            "id": 9204,
+            "user": {"login": "alice", "type": "User"},
+            "body": "| a |\n| --- |\n    demo.py:42 不修：4空格缩进不打断表格",
+        },
+        {
+            "id": 9205,
+            "user": {"login": "alice", "type": "User"},
+            "body": "- | a |\n  | --- |\n  | demo.py:42 不修：列表内表格 |",
+        },
+        {
+            "id": 9206,
+            "user": {"login": "alice", "type": "User"},
+            "body": "> | a |\n> | --- |\n> | demo.py:42 不修：引用内表格 |",
+        },
+    ]
+    assert parse_wontfix_replies(table_only_comments, allowed_authors={"alice"}) == ()
+
+    # 表格闭合后的正文段落、打断表格的列表项均正常解析为回复
+    after_table_replies = parse_wontfix_replies(
+        [
+            {
+                "id": 9211,
+                "user": {"login": "alice", "type": "User"},
+                "body": "| a |\n| --- |\n\ndemo.py:42 不修：正文理由",
+            },
+            {
+                "id": 9212,
+                "user": {"login": "alice", "type": "User"},
+                "body": "| a |\n| --- |\n- demo.py:42 不修：无序列表打断表格",
+            },
+            {
+                "id": 9213,
+                "user": {"login": "alice", "type": "User"},
+                "body": "| a |\n| --- |\n1. demo.py:42 不修：有序列表打断表格",
+            },
+        ],
+        allowed_authors={"alice"},
+    )
+    assert [(r.comment_id, r.file, r.line, r.reason) for r in after_table_replies] == [
+        ("9211", "demo.py", 42, "正文理由"),
+        ("9212", "demo.py", 42, "无序列表打断表格"),
+        ("9213", "demo.py", 42, "有序列表打断表格"),
+    ]
+
+
+def test_r16_indented_code_preserves_leading_indent_across_all_markdown_entries() -> None:
+    """R16 Important 2：保留 4 空格/Tab 缩进代码前导缩进，三个 Markdown 入口全链路放行合法缩进代码并拒绝 3/0 空格注释与真不可见字符。"""
+    valid_indented_samples = (
+        "    <!-- hidden -->",
+        "\t<!-- hidden -->",
+        "    &#x3164;",
+        "\t&#x3164;",
+        "    <span></span>",
+    )
+    for good_code in valid_indented_samples:
+        # 1. parse_finder_output -> Finding -> merge_and_dedupe_findings -> build_round_candidates
+        parsed_findings = parse_finder_output(
+            {
+                "findings": [
+                    {
+                        "severity": "Important",
+                        "file": "pilot1742/demo.py",
+                        "line": 42,
+                        "category": "缩进代码证据",
+                        "failure_scenario": good_code,
+                        "evidence": good_code,
+                    }
+                ]
+            },
+            source_model="gpt-6-astra",
+        )
+        assert len(parsed_findings) == 1
+        assert parsed_findings[0].failure_scenario == good_code
+        assert parsed_findings[0].evidence == good_code
+
+        c_round = build_round_candidates(
+            round_number=1,
+            head_sha=HEAD_1,
+            panel=DEFAULT_PANEL,
+            finder_batches=_batches_for_panel(list(parsed_findings), round_number=1, head_sha=HEAD_1),
+        )
+        assert c_round.findings[0].failure_scenario == good_code
+        assert c_round.findings[0].evidence == good_code
+        fid = c_round.findings[0].finding_id
+
+        # 2. parse_verifier_output -> VerifiedFinding -> evaluate_round -> render_findings_comment -> to_history_entry
+        vr_confirmed = parse_verifier_output(
+            _verifier_payload(
+                c_round,
+                [{"finding_id": fid, "verdict": "confirmed", "verifier_evidence": good_code}],
+            ),
+            c_round,
+            verifier_model="claude-opus-5-5",
+        )
+        assert vr_confirmed.verdicts[0].verifier_evidence == good_code
+        dec_blocked = evaluate_round(vr_confirmed)
+        assert dec_blocked.outcome == RoundOutcome.BLOCKED
+        rendered = render_findings_comment(1928, HEAD_1, dec_blocked)
+        assert parse_comment_marker(rendered.body) == (1928, 1, HEAD_1)
+        assert good_code in rendered.body
+        hist_entry = dec_blocked.to_history_entry(rendered=rendered)
+        assert fid in hist_entry.posted_fingerprints
+
+        vr_rejected = parse_verifier_output(
+            _verifier_payload(
+                c_round,
+                [{"finding_id": fid, "verdict": "rejected", "verifier_evidence": good_code}],
+            ),
+            c_round,
+            verifier_model="claude-opus-5-5",
+        )
+        assert vr_rejected.verdicts[0].verifier_evidence == good_code
+        dec_pass = evaluate_round(vr_rejected)
+        assert dec_pass.outcome == RoundOutcome.PASS
+
+    f_base = _finding(severity=Severity.IMPORTANT, file="pilot1742/demo.py", line=42)
+    cand_base = _candidates([f_base])
+    rejected_samples = (
+        "   <!-- hidden -->",
+        "<!-- hidden -->",
+        "    \u3164",
+        "\t\u3164",
+        "   &#x3164;",
+    )
+    for bad_md in rejected_samples:
+        with pytest.raises(ConvergenceError):
+            _finding(failure_scenario=bad_md)
+        with pytest.raises(ConvergenceError):
+            _finding(evidence=bad_md)
+        with pytest.raises(ConvergenceError):
+            parse_finder_output(
+                {
+                    "findings": [
+                        {
+                            "severity": "Important",
+                            "file": "pilot1742/demo.py",
+                            "line": 42,
+                            "category": "空值解引用",
+                            "failure_scenario": bad_md,
+                            "evidence": "真实证据",
+                        }
+                    ]
+                },
+                source_model="gpt-6-astra",
+            )
+        with pytest.raises(ConvergenceError):
+            parse_finder_output(
+                {
+                    "findings": [
+                        {
+                            "severity": "Important",
+                            "file": "pilot1742/demo.py",
+                            "line": 42,
+                            "category": "空值解引用",
+                            "failure_scenario": "真实场景",
+                            "evidence": bad_md,
+                        }
+                    ]
+                },
+                source_model="gpt-6-astra",
+            )
+        with pytest.raises(ConvergenceError):
+            VerifiedFinding(
+                finding=f_base,
+                verdict=VerificationVerdict.REJECTED,
+                verifier_model="claude-opus-5-5",
+                verifier_evidence=bad_md,
+                round_number=1,
+                head_sha=HEAD_1,
+            )
+        with pytest.raises(ConvergenceError):
+            parse_verifier_output(
+                _verifier_payload(
+                    cand_base,
+                    [{"finding_id": f_base.finding_id, "verdict": "rejected", "verifier_evidence": bad_md}],
+                ),
+                cand_base,
+                verifier_model="claude-opus-5-5",
+            )
