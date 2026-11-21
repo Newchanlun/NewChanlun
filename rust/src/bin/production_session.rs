@@ -14,6 +14,7 @@
 //!
 //! 用法：production_session --manifest FILE
 use newchan_rust::structure_source::Declaration;
+use newchan_rust::x_execution_profile::credential_injection;
 use serde_json::{json, Value};
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
@@ -182,14 +183,14 @@ fn load_manifest(path: &Path) -> Result<Manifest, String> {
             xp["mode"]
         ));
     }
-    let credential_env = text(&xp, "credential_scope.env")?.to_string();
+    let injection = credential_injection(&xp)?;
     // 凭据文件缺失不在此判错：是否必需由 X 按 profile 裁决（MissingDependency）。
-    let credential = xp["credential_scope"]["file"]
-        .as_str()
+    let credential = injection
+        .file
         .and_then(|f| std::fs::read_to_string(f).ok())
         .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty())
-        .map(|value| (credential_env, value));
+        .map(|value| (injection.env.to_owned(), value));
     Ok(Manifest {
         state_dir: PathBuf::from(text(&raw, "state_dir")?),
         raw,

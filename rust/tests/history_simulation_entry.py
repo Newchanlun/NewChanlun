@@ -120,7 +120,7 @@ def run(name):
     # S's long schema_revision keeps every S request larger than the matching E reply (oversized-frame case below).
     sim=dict(model=model(),session_id='session',session_generation='g1',x_id='X',source_namespace='x-sim',source_epoch='epoch1',socket=str(xp),e=dict(socket=str(e.path),authority_id='E',authority_epoch='e1',schema_revision='e-authority-fixture/1',reply_namespace='e/replies',producer_id='E:session'),s=dict(socket=str(s.path),authority_id='S',authority_epoch='s1',schema_revision='s-authority-fixture/1#'+'s'*512,reply_namespace='s/replies',producer_id='S:session'),conditions=CONDITIONS,timeout_ms=500,max_frame_bytes=262144)
     SIM.clear(); SIM.update(sim)
-    profile=dict(profile_revision='x-execution-profile/1',mode='simulation',credential_scope=dict(env='UNUSED_SIMULATION_CREDENTIAL'),history_simulation=sim)
+    profile=dict(profile_revision='x-execution-profile/1',mode='simulation',credential_scope=dict(env='NC_X_VENUE_CREDENTIAL_SIMULATION'),history_simulation=sim)
     pp=directory/'profile.json'; pp.write_text(canonical(profile)); db=directory/'x.sqlite'
     log=open(directory/'x.log','ab')
     fixture=len(sys.argv)>3 and sys.argv[3]=='runtime-fixture'
