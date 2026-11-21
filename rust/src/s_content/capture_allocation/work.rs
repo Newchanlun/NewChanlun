@@ -34,6 +34,7 @@ impl WorkBudget {
         }
     }
 
+    #[inline]
     fn reserve_layout(&self, layout: Layout, kind: &'static str) -> Result<(), CodecError> {
         match self {
             Self::Owned(b) => b.reserve_layout(layout, kind),
@@ -46,12 +47,14 @@ impl WorkBudget {
             Self::Scratch(b) => b.release(layout),
         }
     }
+    #[inline]
     fn release_layout(&self, layout: Layout) {
         match self {
             Self::Owned(b) => b.release_layout(layout),
             Self::Scratch(b) => b.release(layout),
         }
     }
+    #[inline]
     fn commit_layout(&self, layout: Layout) {
         if let Self::Owned(b) = self {
             b.commit_layout(layout);
@@ -101,6 +104,7 @@ impl LedgerAllocator {
 // SAFETY: every allocation uses the requested valid Layout, and every matching release uses
 // the same allocator ledger and Layout. Owned vectors/maps keep this Arc alive through Drop.
 unsafe impl Allocator for LedgerAllocator {
+    #[inline]
     fn allocate(&self, layout: Layout) -> Result<NonNull<[u8]>, AllocError> {
         self.budget
             .reserve_layout(layout, self.kind)
@@ -121,6 +125,7 @@ unsafe impl Allocator for LedgerAllocator {
         self.budget.commit_layout(layout);
         Ok(NonNull::slice_from_raw_parts(p, layout.size()))
     }
+    #[inline]
     unsafe fn deallocate(&self, p: NonNull<u8>, layout: Layout) {
         if layout.size() == 0 {
             return;
@@ -200,12 +205,61 @@ impl<T> CodecVec<T> {
     }
     /// 同一个 Plain buffer 的原许可随 owner 移动；不是 Owned Layout。
     /// 已有非空裸 buffer 的费用来源不明，不能在这里重签掩盖旧 retain。
+    #[inline]
     pub fn try_reserve_native(
         &mut self,
         work: &super::scratch::WorkScope,
         additional: usize,
     ) -> Result<(), CodecError> {
-        self.reserve_native_work(&work.budget(), additional)
+        use super::scratch::ScratchFailure;
+        // 统一入口先核当前操作域，再核旧 owner 父身份；容量足够也不能绕过。
+        // 双失效时保留当前操作域首错，不把旧 payload 重签到新父账。
+        work.check_current()?;
+        if self
+            .native_permit
+            .as_ref()
+            .is_some_and(|old| !old.belongs_to_parent(work))
+        {
+            return Err(work.reject(ScratchFailure::Ledger));
+        }
+        let VecStorage::Plain(values) = &mut self.storage else {
+            return Err(work.reject(ScratchFailure::Ledger));
+        };
+        if self.native_permit.is_none() && values.capacity() != 0 && std::mem::size_of::<T>() != 0 {
+            return Err(work.reject(ScratchFailure::Ledger));
+        }
+        let needed = values
+            .len()
+            .checked_add(additional)
+            .ok_or_else(|| work.reject(ScratchFailure::Budget))?;
+        if needed <= values.capacity() {
+            if self.native_permit.is_none() {
+                self.native_permit = Some(work.reserve_native(0)?);
+            }
+            return Ok(());
+        }
+        let next = needed
+            .max(
+                values
+                    .capacity()
+                    .checked_mul(2)
+                    .ok_or_else(|| work.reject(ScratchFailure::Budget))?,
+            )
+            .max(4);
+        let bytes = next
+            .checked_mul(std::mem::size_of::<T>())
+            .ok_or_else(|| work.reject(ScratchFailure::Budget))?;
+        let permit = work.reserve_native(bytes)?;
+        // 独立新块使旧 allocation 与旧许可在完整新块准入/分配时都真实存活。
+        let mut replacement = Vec::new();
+        replacement
+            .try_reserve_exact(next)
+            .map_err(|_| work.reject(ScratchFailure::Allocation))?;
+        replacement.append(values);
+        let old = std::mem::replace(values, replacement);
+        drop(old);
+        self.native_permit = Some(permit);
+        Ok(())
     }
     /// #1488 冷原件接纳的原子入口。所有可能失败的容量/新块准入均在接纳前。
     /// #1488 P3-a：无生产调用方（生产父账恒拒接纳），只随测试/Native测试臂编译。
@@ -276,7 +330,6 @@ impl<T> CodecVec<T> {
         {
             return Err(work.native_failure(ScratchFailure::Ledger));
         }
-        drop(probe);
         let VecStorage::Plain(values) = &mut self.storage else {
             return Err(work.native_failure(ScratchFailure::Ledger));
         };
@@ -289,10 +342,11 @@ impl<T> CodecVec<T> {
             .ok_or_else(|| work.native_failure(ScratchFailure::Budget))?;
         if needed <= values.capacity() {
             if self.native_permit.is_none() {
-                self.native_permit = work.reserve_native(0)?;
+                self.native_permit = Some(probe);
             }
             return Ok(());
         }
+        drop(probe);
         let next = needed
             .max(
                 values
@@ -494,6 +548,7 @@ impl<T> CodecVec<T> {
             .map(super::scratch::NativeReservation::bytes)
     }
     /// Native 写入必须带本次活 scope；共享入口核父身份并先准入完整新块。
+    #[inline]
     pub fn try_push_native(
         &mut self,
         value: T,
@@ -645,6 +700,7 @@ impl CodecVec<u8> {
         }
     }
     /// 字节追加只复制u8，不开放可能深复制payload的泛型Clone入口。
+    #[inline]
     pub fn try_extend_bytes_native(
         &mut self,
         bytes: &[u8],
@@ -657,6 +713,7 @@ impl CodecVec<u8> {
         }
         Ok(())
     }
+    #[inline]
     pub fn try_extend_bytes(&mut self, bytes: &[u8]) -> Result<(), CodecError> {
         self.extend_from_slice(bytes)
     }
@@ -664,6 +721,7 @@ impl CodecVec<u8> {
 
 impl<T> Deref for CodecVec<T> {
     type Target = [T];
+    #[inline]
     fn deref(&self) -> &[T] {
         match &self.storage {
             VecStorage::Plain(v) => v,
@@ -672,6 +730,7 @@ impl<T> Deref for CodecVec<T> {
     }
 }
 impl<T> DerefMut for CodecVec<T> {
+    #[inline]
     fn deref_mut(&mut self) -> &mut [T] {
         match &mut self.storage {
             VecStorage::Plain(v) => v,
@@ -843,10 +902,14 @@ impl<K: Eq + Hash, V> WorkMap<K, V> {
             Self::Owned(m) => m.allocation_size(),
         }
     }
+    #[inline]
     pub(crate) fn insert(&mut self, k: K, v: V) -> Result<Option<V>, CodecError> {
         match self {
             Self::Plain(m) => Ok(m.insert(k, v)),
             Self::Owned(m) => {
+                if m.len() < m.capacity() {
+                    return Ok(m.insert(k, v));
+                }
                 if let Some(old) = m.get_mut(&k) {
                     return Ok(Some(std::mem::replace(old, v)));
                 }
@@ -969,10 +1032,14 @@ impl<T: Eq + Hash> WorkSet<T> {
             )
         })
     }
+    #[inline]
     pub(crate) fn insert(&mut self, v: T) -> Result<bool, CodecError> {
         match self {
             Self::Plain(m) => Ok(m.insert(v)),
             Self::Owned(m) => {
+                if m.len() < m.capacity() {
+                    return Ok(m.insert(v));
+                }
                 if m.contains(&v) {
                     return Ok(false);
                 }
