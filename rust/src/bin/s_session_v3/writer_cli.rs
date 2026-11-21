@@ -57,7 +57,17 @@ const GATE_FIELDS_TEXT: &str =
 /// 旧启动器对 Unix socket 路径的 100 字节上限（`s_service_control.py`），本入口沿用。
 const SOCKET_PATH_BYTES: usize = 100;
 
-const SERVE_FLAGS: [&str; 9] = [
+const NAMED_RECOVERY_FLAGS: [&str; 7] = [
+    "--protocol-revision",
+    "--admission-job-limits",
+    "--db",
+    "--profile",
+    "--clock-plan",
+    "--structure-source",
+    "--s-recovery-request",
+];
+const SERVE_FLAGS: [&str; 10] = [
+    "--s-recovery-request",
     "--structure-source",
     "--admission-job-limits",
     "--protocol-revision",
@@ -227,6 +237,7 @@ struct ServeOptions {
     socket: PathBuf,
     resources: PathBuf,
     structure_source: Option<PathBuf>,
+    named_recovery: Option<PathBuf>,
 }
 struct AdvanceOptions {
     db: PathBuf,
@@ -294,9 +305,15 @@ pub(super) fn run_with_policy(
             .map_err(|error| error.to_string())?;
             recover(options, admission)
         }
-        other => Err(format!(
-            "VersionUnsupported：S3 写入口只分派 serve/advance/recover，收到 `{other}`"
-        )),
+        other => match named_recovery::Action::from_command(other) {
+            Some(action) => {
+                run_named_recovery(args, other, action)?;
+                Ok(None)
+            }
+            None => Err(format!(
+                "VersionUnsupported：S3 写入口只分派 serve/advance/recover，收到 `{other}`"
+            )),
+        },
     }
 }
 
@@ -415,6 +432,7 @@ impl ServeOptions {
         selector(&values, "serve")?;
         Ok(Self {
             structure_source: values.get("--structure-source").map(PathBuf::from),
+            named_recovery: values.get("--s-recovery-request").map(PathBuf::from),
             db: existing_file(required(&values, "serve", "--db")?, "--db")?,
             profile: existing_file(required(&values, "serve", "--profile")?, "--profile")?,
             epoch: epoch(
@@ -536,6 +554,64 @@ impl RecoverOptions {
     }
 }
 
+fn read_named_request(
+    admission: &mut super::admission_anchor::PreparedAdmission,
+    path: &Path,
+) -> Result<named_recovery::Request, String> {
+    named_recovery::Request::parse(&admission.read_file(path, Some(named_recovery::REQUEST_LIMIT))?)
+}
+
+fn read_named_config(
+    admission: &mut super::admission_anchor::PreparedAdmission,
+    clock: v2::ClockPlan,
+    profile_hash: String,
+    structure_source: &Path,
+) -> Result<named_recovery::FrozenConfig, String> {
+    let source = strict_json(&admission.read_file(structure_source, None)?)?;
+    Ok(named_recovery::FrozenConfig {
+        clock,
+        profile_hash,
+        source: newchan_rust::structure_source::Declaration::parse(&source)?,
+    })
+}
+
+fn run_named_recovery(
+    args: &[String],
+    command: &str,
+    action: named_recovery::Action,
+) -> Result<(), String> {
+    let flags = if action == named_recovery::Action::Inspect {
+        &NAMED_RECOVERY_FLAGS[..NAMED_RECOVERY_FLAGS.len() - 1]
+    } else {
+        &NAMED_RECOVERY_FLAGS[..]
+    };
+    let values = parse_flags(command, args, flags)?;
+    selector(&values, command)?;
+    let path = |key| required(&values, command, key).map(Path::new);
+    let db = path("--db")?;
+    let profile = path("--profile")?;
+    let clock = path("--clock-plan")?;
+    let source = path("--structure-source")?;
+    let request = if action == named_recovery::Action::Inspect {
+        None
+    } else {
+        Some(path("--s-recovery-request")?)
+    };
+    let mut admission = super::admission_anchor::from_args_for_db(
+        db,
+        args,
+        super::admission_anchor::ControlEnv::capture(),
+    )
+    .map_err(|e| e.to_string())?;
+    let request = request
+        .map(|file| read_named_request(&mut admission, file))
+        .transpose()?;
+    let clock = v2::ClockPlan::parse(strict_json(&admission.read_file(clock, None)?)?)?;
+    let (_, profile_hash) = checked_profile_bytes(&admission.read_file(profile, None)?)?;
+    let config = read_named_config(&mut admission, clock, profile_hash, source)?;
+    named_recovery::emit(db, admission, action, config, request)
+}
+
 /// 原第七门：当前审计路径不跨请求保留源，以结构 0 <= 显式正 cap 核验。
 /// 普通结构服务不依赖 C09 持久条件 FIFO；Driver 仍只接纳既有 typed op。
 fn serve_authorization(resources: &SResources) -> Result<(), String> {
@@ -608,7 +684,7 @@ fn open_theta_diagnostic(
     clock: v2::ClockPlan,
     resources: &SResources,
     mode: s_allocation::Mode,
-    admission: super::admission_anchor::PreparedAdmission,
+    admission: super::admission::WriterAdmission,
 ) -> Result<Driver, String> {
     Driver::open_for_serve_theta_diagnostic_testonly(
         &options.db,
@@ -617,7 +693,7 @@ fn open_theta_diagnostic(
         clock,
         resources.limit("audit_cache_source_bytes"),
         mode,
-        admission.into(),
+        admission,
     )
 }
 
@@ -627,7 +703,7 @@ fn open_theta_diagnostic(
     _: v2::ClockPlan,
     _: &SResources,
     _: s_allocation::Mode,
-    _: super::admission_anchor::PreparedAdmission,
+    _: super::admission::WriterAdmission,
 ) -> Result<Driver, String> {
     unreachable!("theta_diagnostic_testonly 在此构建只会返回 false 或拒绝")
 }
@@ -756,13 +832,29 @@ fn serve_with_policy(
             .map_err(|e| admission.diagnostic(e))?,
     )
     .map_err(|e| admission.diagnostic(e))?;
-    let _frozen_profile = checked_profile_bytes(&admission.read_file(&options.profile, None)?)
+    let (_, profile_hash) = checked_profile_bytes(&admission.read_file(&options.profile, None)?)
         .map_err(|e| admission.diagnostic(e))?;
     serve_authorization(&resources)?;
     #[cfg(feature = "s_capture_native_testonly")]
     if diagnostic_fixture {
+        if options.named_recovery.is_some() {
+            return Err("InvalidDomain：具名恢复回执不能授权诊断服务".into());
+        }
         return serve_diagnostic_fixture(&options, clock, &resources, mode, admission);
     }
+    let admission: super::admission::WriterAdmission = if let Some(path) = &options.named_recovery {
+        let source = options
+            .structure_source
+            .as_deref()
+            .ok_or("S3WriterArgsUnsupported：具名恢复后启动必须绑定 --structure-source")?;
+        let request = read_named_request(&mut admission, path)?;
+        let config = read_named_config(&mut admission, clock.clone(), profile_hash, source)?;
+        let scope = super::admission::WriterScope::admit_named(&options.db, admission)?;
+        scope.verify_named_startup(&config, &request, &options.epoch)?;
+        scope.into()
+    } else {
+        admission.into()
+    };
     #[cfg(feature = "s_incremental")]
     let native_bootstrap = matches!(mode, s_allocation::Mode::CapturedNative);
     #[cfg(feature = "s_incremental")]
@@ -776,7 +868,7 @@ fn serve_with_policy(
             resources.limit("incremental_retention_bytes"),
             mode,
             production,
-            admission.into(),
+            admission,
         )?
     } else {
         let driver = if theta_diagnostic {
@@ -789,7 +881,7 @@ fn serve_with_policy(
                 clock,
                 resources.limit("audit_cache_source_bytes"),
                 mode,
-                admission.into(),
+                admission,
             )?
         } else {
             #[cfg(test)]
@@ -801,7 +893,7 @@ fn serve_with_policy(
                     clock,
                     resources.limit("audit_cache_source_bytes"),
                     mode,
-                    admission.into(),
+                    admission,
                 )?
             }
             #[cfg(not(test))]
@@ -821,7 +913,7 @@ fn serve_with_policy(
             clock,
             resources.limit("audit_cache_source_bytes"),
             mode,
-            admission.into(),
+            admission,
         )?
     } else {
         #[cfg(test)]
@@ -833,7 +925,7 @@ fn serve_with_policy(
                 clock,
                 resources.limit("audit_cache_source_bytes"),
                 mode,
-                admission.into(),
+                admission,
             )?
         }
         #[cfg(not(test))]
@@ -842,7 +934,9 @@ fn serve_with_policy(
     #[cfg(not(feature = "s_incremental"))]
     let identity = driver.identity()?;
     let control_instance_id = std::env::var("S_CONTROL_INSTANCE_ID").ok();
-    driver.check_structure_source(options.structure_source.as_deref())?;
+    if options.named_recovery.is_none() {
+        driver.check_structure_source(options.structure_source.as_deref())?;
+    }
     driver.finish_startup()?;
     let bounds = resources.transport_bounds();
     serve_unix(

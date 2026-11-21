@@ -993,6 +993,10 @@ fn err(e: impl std::fmt::Display) -> String {
 }
 
 #[cfg(test)]
+#[path = "named_recovery_tests.rs"]
+mod named_recovery_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use crate::tests::located_ohlc_input;
@@ -1010,11 +1014,11 @@ mod tests {
             .join()
             .unwrap_or_else(|panic| std::panic::resume_unwind(panic));
     }
-    struct Fixture {
-        path: PathBuf,
-        db: PathBuf,
-        profile: PathBuf,
-        clock: v2::ClockPlan,
+    pub(super) struct Fixture {
+        pub(super) path: PathBuf,
+        pub(super) db: PathBuf,
+        pub(super) profile: PathBuf,
+        pub(super) clock: v2::ClockPlan,
         preserve: bool,
     }
     impl Drop for Fixture {
@@ -1050,7 +1054,7 @@ mod tests {
                 Some(&source),
             )
         }
-        fn with_clock_declared(
+        pub(super) fn with_clock_declared(
             clock_value: Value,
             source: Option<&newchan_rust::structure_source::Declaration>,
         ) -> Self {
@@ -1094,7 +1098,7 @@ mod tests {
                 json!({"schema_revision":"s-clock-system/1","clock_id":"s3-driver-system","unit":"ns"}),
             )
         }
-        fn open(&self, epoch: &str) -> Result<Driver, String> {
+        pub(super) fn open(&self, epoch: &str) -> Result<Driver, String> {
             Driver::open(
                 &self.db,
                 &self.profile,
@@ -1121,7 +1125,7 @@ mod tests {
                 crate::v3::admission_anchor::test_prepare(&self.db).into(),
             )
         }
-        fn ingest(n: i64) -> Value {
+        pub(super) fn ingest(n: i64) -> Value {
             let row = match n {
                 1 => ("a", 0, 6, 12, 3, 7),
                 2 => ("b", 10, 8, 16, 6, 12),

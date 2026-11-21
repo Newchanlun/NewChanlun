@@ -111,6 +111,7 @@ mod source_audit;
 mod state;
 #[cfg(test)]
 pub(crate) use state::trace_event as diagnostic_trace_event;
+mod named_recovery;
 mod writer_cli;
 #[cfg(test)]
 pub(crate) use admission_private::s4_read_trace as diagnostic_s4_read_trace;
@@ -223,6 +224,9 @@ fn dispatch_with_policy(args: &[String], production: bool) -> Result<bool, Strin
         }
     }
     if positions.is_empty() {
+        if named_recovery::Action::from_command(cmd).is_some() {
+            return Err("VersionUnsupported：具名恢复必须显式选择 s-session/3".into());
+        }
         if matches!(
             cmd,
             "financial-basis-ref"
@@ -251,7 +255,10 @@ fn dispatch_with_policy(args: &[String], production: bool) -> Result<bool, Strin
         #[cfg(not(unix))]
         return Err("VersionUnsupported：Q3监听入口当前需要Unix平台".into());
     }
-    if matches!(cmd, "serve" | "advance" | "recover") && value == PROTOCOL_REVISION {
+    if (matches!(cmd, "serve" | "advance" | "recover")
+        || named_recovery::Action::from_command(cmd).is_some())
+        && value == PROTOCOL_REVISION
+    {
         let out = if production {
             writer_cli::run(args)?
         } else {

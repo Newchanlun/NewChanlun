@@ -1737,6 +1737,35 @@ impl AuditConnection {
         clock: &v2::ClockPlan,
         clock_event: &str,
     ) -> Result<Value, String> {
+        self.recover_transaction(
+            new_epoch,
+            clock,
+            clock_event,
+            #[cfg(test)]
+            None,
+        )
+    }
+
+    #[cfg(test)]
+    pub(super) fn recover_named_transaction_for_test(
+        &self,
+        named: super::named_recovery::TestTransition<'_>,
+    ) -> Result<Value, String> {
+        self.recover_transaction(
+            &named.next()?,
+            &named.config.clock,
+            named.event()?,
+            Some(&named),
+        )
+    }
+
+    fn recover_transaction(
+        &self,
+        new_epoch: &str,
+        clock: &v2::ClockPlan,
+        clock_event: &str,
+        #[cfg(test)] named: Option<&super::named_recovery::TestTransition<'_>>,
+    ) -> Result<Value, String> {
         let next = parse_writer_epoch(new_epoch, "new writer_epoch")?;
         let active = self.begin(TransactionBehavior::Immediate)?;
         let tx = active.tx();
@@ -1751,6 +1780,8 @@ impl AuditConnection {
         super::require_current_writer_rule(
             &meta_get_opt(tx, "rule_revision")?.ok_or_else(|| invalid("缺rule_revision"))?,
         )?;
+        #[cfg(test)]
+        let named_clock = named.map(|named| named.check(tx)).transpose()?;
         let current = meta_get_opt(tx, "writer_epoch")?.ok_or_else(|| invalid("缺writer_epoch"))?;
         let from = parse_writer_epoch(&current, "current writer_epoch")?;
         // 持久 epoch 严格上升门即换代证明构造门（原 next<=from 门并入，文案与顺序不变）。
@@ -1798,6 +1829,15 @@ impl AuditConnection {
         tx.execute("INSERT INTO writer_epoch_history(from_epoch,to_epoch,generation_at_transition,advance_state_at_transition,transitioned_at) VALUES(?1,?2,?3,'idle',?4)",params![current,new_epoch,generation,transitioned_at]).map_err(invalid)?;
         let result = json!({"ok":true,"previous_epoch":current,"new_epoch":new_epoch,"epoch_transitioned":true,"recovered_begin":recovered,
             "reachable_root":{"generation":generation,"structure_cut":meta_get_opt(tx,"structure_cut")?,"index_frontier":meta_get_opt(tx,"index_frontier")?}});
+        #[cfg(test)]
+        let result = if let (Some(named), Some((admitted_next, expected))) = (named, named_clock) {
+            if admitted_next != next {
+                return Err(invalid("S具名恢复写者代与事务不一致"));
+            }
+            named.record(tx, next, &expected, &transitioned_at)?
+        } else {
+            result
+        };
         drop(control);
         #[cfg(all(test, feature = "s_incremental"))]
         if let Some(hook) = RECOVER_AFTER_WRITE.with(Cell::take) {

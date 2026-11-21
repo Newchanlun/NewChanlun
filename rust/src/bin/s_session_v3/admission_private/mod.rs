@@ -552,26 +552,41 @@ fn audit_business(
     account: &SharedAccounting<'_, '_>,
     prefix: &mut RejectionPrefix<'_>,
 ) -> Result<(), String> {
+    audited_transaction(conn, account, |tx, account, deadline| {
+        audit_core(
+            tx,
+            account,
+            deadline,
+            prefix,
+            |conn, db, epoch, clock, profile| {
+                audit_legacy_serve_prefix(conn, account, db, epoch, clock, profile)
+            },
+        )
+    })
+}
+
+fn audited_transaction<T>(
+    conn: &rusqlite::Connection,
+    account: &SharedAccounting<'_, '_>,
+    operation: impl FnOnce(
+        &rusqlite::Transaction<'_>,
+        &SharedAccounting<'_, '_>,
+        std::time::Instant,
+    ) -> Result<T, String>,
+) -> Result<T, String> {
     account.precheck().map_err(|e| e.to_string())?;
     let deadline = account
         .with_account(|account| account.first_read_deadline())
         .map_err(|e| e.to_string())?;
     // rusqlite 的安全共享借用事务口；conn 的独占生命周期由 Session 保持。
     let tx = conn.unchecked_transaction().map_err(|e| e.to_string())?;
-    let result = audit_core(
-        &tx,
-        account,
-        deadline,
-        prefix,
-        |conn, db, epoch, clock, profile| {
-            audit_legacy_serve_prefix(conn, account, db, epoch, clock, profile)
-        },
-    );
+    let result = operation(&tx, account, deadline);
+    let returned = result.as_ref().map(|_| ()).map_err(Clone::clone);
     // #1527：先记录业务实际返回；此前回调观察到的首错仍居前。
     account
         .errors
         .borrow_mut()
-        .returned(ErrorPhase::Business, &result);
+        .returned(ErrorPhase::Business, &returned);
     account.errors.borrow_mut().phase = ErrorPhase::Rollback;
     // 显式结束事务后再关闭 connection；原审计错误优先，清理错误不会变成成功。
     // 仅撤下 VM 计算门完成回滚/关闭；VFS 实际 I/O 门仍在，不能再作业务查询。
@@ -593,7 +608,38 @@ fn audit_business(
         .errors
         .borrow_mut()
         .returned(ErrorPhase::Gate, &gate);
-    result.and(disabled).and(ended).and(gate)
+    result.and_then(|value| {
+        disabled?;
+        ended?;
+        gate?;
+        Ok(value)
+    })
+}
+
+/// 具名恢复只读取钉住的原件；回调不接触路径、不打开第二连接、也不授予写权限。
+pub(super) fn inspect_recovery<T>(
+    source: &MeasuredDomain,
+    account: &mut AdmissionAccounting<'_>,
+    operation: impl FnOnce(&rusqlite::Transaction<'_>) -> Result<T, String>,
+) -> Result<T, String> {
+    super::named_recovery::validate_main(source.main_fd()?, account)?;
+    super::named_recovery::validate_wal(source.wal_fd()?, account)?;
+    read_session(source, account, true, |conn, shared| {
+        audited_transaction(conn, shared, |tx, budget, deadline| {
+            audit_core(
+                tx,
+                budget,
+                deadline,
+                &mut RejectionPrefix::NativeComponentAudit,
+                |_, _, _, _, _| Err("SRecoveryMediumUnproven".into()),
+            )?;
+            if shared.delta.get() != crate::DeltaShape::Current {
+                return Err("VersionUnsupported：具名恢复不迁移旧 schema".into());
+            }
+            operation(tx)
+        })
+    })
+    .map(|(value, _)| value)
 }
 
 /// C 回调只看受限门面；不得取得 Job、StartedAdmission 或结束资格。

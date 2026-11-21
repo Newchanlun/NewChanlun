@@ -17,11 +17,17 @@ pub(super) struct Lock {
 }
 impl Lock {
     pub(super) fn acquire(db: &Path, suffix: &str) -> Result<Self, String> {
+        Self::open(db, suffix, true)
+    }
+    pub(super) fn acquire_existing(db: &Path, suffix: &str) -> Result<Self, String> {
+        Self::open(db, suffix, false)
+    }
+    fn open(db: &Path, suffix: &str, create: bool) -> Result<Self, String> {
         let path = provider::sidecar(db, suffix);
         let file = OpenOptions::new()
             .read(true)
             .write(true)
-            .create(true)
+            .create(create)
             .truncate(false)
             .mode(0o600)
             .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK | libc::O_CLOEXEC)
@@ -329,10 +335,30 @@ impl WriterScope {
             super::admission_private::RejectionPrefix::LegacyWrite,
         )
     }
+    pub(super) fn admit_named(db: &Path, prepared: PreparedAdmission) -> Result<Self, String> {
+        if db != std::fs::canonicalize(db).map_err(|_| "SRecoveryMediumUnproven")? {
+            return Err("SRecoveryMediumUnproven".into());
+        }
+        Self::admit_prefix_locked(
+            db,
+            prepared,
+            super::admission_private::RejectionPrefix::None,
+            Lock::acquire_existing,
+        )
+    }
+
     fn admit_prefix(
         db: &Path,
         prepared: PreparedAdmission,
         prefix: super::admission_private::RejectionPrefix<'_>,
+    ) -> Result<Self, String> {
+        Self::admit_prefix_locked(db, prepared, prefix, Lock::acquire)
+    }
+    fn admit_prefix_locked(
+        db: &Path,
+        prepared: PreparedAdmission,
+        prefix: super::admission_private::RejectionPrefix<'_>,
+        lock: fn(&Path, &str) -> Result<Lock, String>,
     ) -> Result<Self, String> {
         let mixed_resources = prepared.is_mixed();
         let consumed = prepared.consume().map_err(|e| e.to_string())?;
@@ -342,10 +368,10 @@ impl WriterScope {
             return Err(consumed.failure("AdmissionDatabaseMismatch"));
         }
         consumed.check(Stage::E5).map_err(|e| e.to_string())?;
-        let writer_result = Lock::acquire(consumed.lease().db_path(), ".writer.lock");
+        let writer_result = lock(consumed.lease().db_path(), ".writer.lock");
         consumed.check(Stage::E5).map_err(|e| e.to_string())?;
         let writer = writer_result.map_err(|e| consumed.failure(&e))?;
-        let maintenance_result = Lock::acquire(consumed.lease().db_path(), ".maintenance.lock");
+        let maintenance_result = lock(consumed.lease().db_path(), ".maintenance.lock");
         consumed.check(Stage::E5).map_err(|e| e.to_string())?;
         let maintenance = maintenance_result.map_err(|e| consumed.failure(&e))?;
         let source = MeasuredDomain::measure(&consumed)?;
@@ -458,6 +484,28 @@ impl WriterScope {
     pub(crate) fn require_admitted(&self) -> Result<(), String> {
         self.inner.require(self.db_path())
     }
+    /// 具名启动在自己的 R4 锁内检查原回执，早于开写连接和 pending 推进。
+    pub(super) fn verify_named_startup(
+        &self,
+        config: &super::named_recovery::FrozenConfig,
+        request: &super::named_recovery::Request,
+        epoch: &str,
+    ) -> Result<(), String> {
+        self.require_admitted()?;
+        self.inner.source.verify_recovery_identity()?;
+        {
+            let mut state = self.inner.accounting.borrow_mut();
+            let finished = state.as_mut().ok_or("StartupAccountingFinished")?;
+            super::admission_private::inspect_recovery(
+                &self.inner.source,
+                &mut finished.accounting(),
+                |conn| super::named_recovery::verify_startup(conn, config, request, epoch),
+            )?;
+        }
+        self.inner.source.verify_recovery_identity()?;
+        self.require_admitted()
+    }
+
     pub(crate) fn enter(&self) -> Result<OpenGuard, String> {
         self.require_admitted()?;
         ACTIVE.with(|slot| {
@@ -491,40 +539,54 @@ impl WriterScope {
     }
     pub(crate) fn write_result(&self, value: &serde_json::Value) -> Result<(), String> {
         self.require_admitted()?;
-        let mut payload = serde_json::to_vec(value).map_err(|_| "AdmissionOutputEncodeFailed")?;
-        payload.push(b'\n');
         let mut state = self.inner.accounting.borrow_mut();
         let account = state.as_mut().ok_or("StartupAccountingFinished")?;
-        let mut stdout = std::io::stdout().lock();
-        let mut offset = 0;
-        while offset < payload.len() {
-            account
-                .accounting()
-                .pre_io_check()
-                .map_err(|e| e.to_string())?;
-            let result = stdout.write(&payload[offset..]);
-            match result {
-                Ok(n) => {
-                    account
-                        .accounting()
-                        .charge_wire_bytes(n as u64)
-                        .map_err(|e| e.to_string())?;
-                    if n == 0 {
-                        return Err("AdmissionOutputWriteZero".into());
-                    }
-                    offset += n;
+        emit_accounted(value, account)
+    }
+}
+
+fn emit_accounted(
+    value: &serde_json::Value,
+    account: &mut FinishedAdmission,
+) -> Result<(), String> {
+    let mut payload = serde_json::to_vec(value).map_err(|_| "AdmissionOutputEncodeFailed")?;
+    payload.push(b'\n');
+    emit_accounted_payload(&payload, account)
+}
+
+pub(super) fn emit_accounted_payload(
+    payload: &[u8],
+    account: &mut FinishedAdmission,
+) -> Result<(), String> {
+    let mut stdout = std::io::stdout().lock();
+    let mut offset = 0;
+    while offset < payload.len() {
+        account
+            .accounting()
+            .pre_io_check()
+            .map_err(|e| e.to_string())?;
+        let result = stdout.write(&payload[offset..]);
+        match result {
+            Ok(n) => {
+                account
+                    .accounting()
+                    .charge_wire_bytes(n as u64)
+                    .map_err(|e| e.to_string())?;
+                if n == 0 {
+                    return Err("AdmissionOutputWriteZero".into());
                 }
-                Err(_) => {
-                    account
-                        .accounting()
-                        .check_deadline()
-                        .map_err(|e| e.to_string())?;
-                    return Err("AdmissionOutputWriteFailed".into());
-                }
+                offset += n;
+            }
+            Err(_) => {
+                account
+                    .accounting()
+                    .check_deadline()
+                    .map_err(|e| e.to_string())?;
+                return Err("AdmissionOutputWriteFailed".into());
             }
         }
-        account.finish_output().map_err(|e| e.to_string())
     }
+    account.finish_output().map_err(|e| e.to_string())
 }
 /// 输出仍持同一 scope/父账；序列化结果不能先丢掉账本再由 dispatch 无账 println。
 pub(crate) struct CommandOutput {

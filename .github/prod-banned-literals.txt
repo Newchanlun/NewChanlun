@@ -84,6 +84,7 @@ Incomplete：Watch批数越过冻结上限
 Incomplete：完整Q回复超过max_reply_bytes
 InvalidDomain：delivery retain必须大于0
 InvalidDomain：session_generation 必须大于0
+InvalidDomain：具名恢复回执不能授权诊断服务
 JSON和scope都析构后父账回到原基线
 JSON真实载荷析构归还原许可
 K1恢复只接受Native游标线形
@@ -167,6 +168,7 @@ R14仅增加已批准的记录溯源列
 R2：Ledger 类 scratch 错误与桥同字也须拒绝
 R2：闭包 Ok 但期间有 Ledger → 工作账损坏
 R2：闭包期间任何 Ledger 构造都须拒绝
+R4 必须拒绝脏介质
 REPLACE 删除不入计数
 REQUEST_AUDIT_ARM
 REQUEST_AUDIT_DB
@@ -217,8 +219,13 @@ S_AUDIT_COST_DB
 S_AUDIT_COST_EXPECT_GENERATION
 S_DIAGNOSTIC_FIXTURE_TESTONLY
 S_EVIDENCE_MEASURE
+S_NAMED_CRASH_DB
+S_NAMED_CRASH_EPOCH
+S_NAMED_CRASH_PHASE
+S_NAMED_CRASH_PROFILE
 S_NATIVE_SQLITE_CACHE_KIB
 S_ORDINARY_WIRE_CHILD
+S_RECOVERY_CRASH_CUT_DURABLE
 S_TEST_AUDIT_CACHE_SOURCE_BYTES
 SchemaUnsupported：history_mode不符
 SchemaUnsupported：projection anchor必须是exact四字段
@@ -251,6 +258,7 @@ StorageUnavailable：records 与封存批次/同 cut 持久快照不一致
 StorageUnavailable：records 重复成员
 StorageUnavailable：本次对象缺不可变字段 kind
 System 提交必须带封批读数
+S具名恢复写者代与事务不一致
 TB1717_S_EXPORT
 TB1717_S_EXPORT 未设置
 TOP 窗口应产对象
@@ -275,6 +283,7 @@ TestOnly：cross-publish-after-prepare
 TestOnly：stop_after_accept
 TestOnly：stop_after_begin
 TestOnly：system clock 注入读数耗尽
+TestOnly：具名恢复写后失败
 T物理占用不超E+O+A
 UPDATE catalog SET impl_status='implemented', proof_status='bad'; INSERT INTO catalog VALUES('后错',7,NULL,NULL,NULL);
 Unknown 回执也持有许可
@@ -701,6 +710,7 @@ writer/recover闭合后无SHM
 关系投影逐字段
 关系见证必须指向本代 bi 对象
 关系见证是文本
+具名恢复写后失败
 具名版本不得全局过滤同价原因
 兼容anchor仅接无scope值
 内容 Commit 已完成，不能伪称回滚
@@ -826,6 +836,7 @@ writer/recover闭合后无SHM
 只新增数组根和新字符串
 只有实际read集合持账
 只用于 s-session/3
+只读审计和拒绝不得更改任一原件
 叶本身是序列必须拒绝
 合法Merkle畸形在None/Some均须由原业务判据拒绝
 合法收紧额度保留完整候选；旧128倍门会提前丢弃
@@ -961,6 +972,7 @@ writer/recover闭合后无SHM
 子值仍存活，原父析构不能退其费
 子账拒绝必须在真实 alloc 前
 子路径闭包小于整根闭包
+子进程必须在强杀前跨过持久边界
 字段/成员形状不符：预期Array/24
 字段导航不得写入
 字段结果entries与UTF8 key必须真实留账
@@ -1106,6 +1118,7 @@ writer/recover闭合后无SHM
 成功与两类失败均恢复inner角色
 成功单位并入 owner 证明并计保留
 成功或拒绝均不泄漏请求证据
+成功时必须发出一个完整结果
 成功种子仍逐根严格读取当前header
 成功链保留原来源池
 所有真实事实拥有者销毁后归基线
@@ -1234,6 +1247,7 @@ writer/recover闭合后无SHM
 旧入口不构造 Owned
 旧口径下物理占用逃出T
 旧口径多放出物理−合同
+旧回执不得开服
 旧块析构后临时共存许可必须返还
 旧域MoveIn不可在新域拆分
 旧对象用本批占位
@@ -1319,6 +1333,7 @@ writer/recover闭合后无SHM
 未比较齐旧依赖时不得返回旧根证明供前缀复用
 未登记源版本必须拒绝
 未知tag，拒绝flush
+未知夹具切面
 未知版本不得创建库
 未签 synthetic profile 不得打开 Driver
 未被引用的历史身份不得读不可变内容
