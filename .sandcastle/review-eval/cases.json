@@ -224,15 +224,8 @@
         {
           "file": ".sandcastle/deepagents-pilot/pilot1742/agent.py",
           "line_start": 284,
-          "line_end": 284,
-          "summary": "未同步核对 DevSkim sha256 绑定即改写 agent.py，导致门禁已审误报清单整体失效。",
-          "category": "ci_gate_breakage"
-        },
-        {
-          "file": ".sandcastle/deepagents-pilot/pilot1742/agent.py",
-          "line_start": 355,
           "line_end": 355,
-          "summary": "同上，改动 agent.py 破坏 .github/devskim-reviewed-1488.json 的文件哈希钉住约束。",
+          "summary": "未同步核对 .github/devskim-reviewed-1488.json 的文件哈希钉住约束即改写 agent.py（第 284 行与第 355 行），导致 DevSkim 已审误报清单整体失效。",
           "category": "ci_gate_breakage"
         }
       ]

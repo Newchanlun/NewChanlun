@@ -26,6 +26,7 @@ _BLOCKING_SEVERITIES: frozenset[str] = frozenset({"blocking", "important"})
 _VALID_SEVERITIES: frozenset[str] = frozenset({"blocking", "important", "nit", "pre_existing", "info"})
 _VALID_VERDICTS: frozenset[str] = frozenset({"PASS", "BLOCK", "FAILED"})
 _VALID_SCORE_VERDICTS: frozenset[str] = frozenset({"PASS", "BLOCK", "FAILED", "MISSING"})
+_UNDECIDED_SCORE_VERDICTS: frozenset[str] = frozenset({"FAILED", "MISSING"})
 _SHA_RE = re.compile(r"^[0-9a-f]{40}$")
 _DIFF_HUNK_RE = re.compile(r"^@@ -\d+(?:,\d+)? \+(\d+)(?:,(\d+))? @@")
 
@@ -135,6 +136,7 @@ class EvalScore:
 
     total_cases: int
     evaluated_cases: int
+    failed_cases: int
     missing_cases: int
     coverage_rate: float
     bug_cases: int
@@ -168,10 +170,12 @@ class ScoreComparison:
     clean_false_positive_rate_delta: float
     blocking_precision_delta: float
     f1_delta: float
+    coverage_rate_delta: float
     improved_cases: tuple[str, ...]
     regressed_cases: tuple[str, ...]
     mixed_cases: tuple[str, ...]
     unchanged_cases: tuple[str, ...]
+    undecided_cases: tuple[str, ...]
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -278,10 +282,9 @@ def _require_int(raw: Any, field: str) -> int:
 
 
 def _require_sha(raw: Any, field: str) -> str:
-    value = _require_nonempty_str(raw, field)
-    if not _SHA_RE.fullmatch(value):
+    if not isinstance(raw, str) or not _SHA_RE.fullmatch(raw):
         raise EvalValidationError(f"字段 {field} 必须是 40 位小写 Git SHA：{raw!r}")
-    return value
+    return raw
 
 
 def _parse_bug_location(raw: Any, prefix: str) -> BugLocation:
@@ -581,6 +584,14 @@ def load_predictions(path: Path) -> tuple[CasePrediction, ...]:
     return tuple(predictions)
 
 
+def _finding_coord_key(finding: PredictedFinding) -> tuple[str, int | None, int | None]:
+    norm_file = _norm_path(finding.file)
+    if finding.line_start is None:
+        return (norm_file, None, None)
+    eff_end = finding.line_end if finding.line_end is not None else finding.line_start
+    return (norm_file, finding.line_start, eff_end)
+
+
 def _finding_matches_location(
     loc: BugLocation,
     finding: PredictedFinding,
@@ -592,7 +603,7 @@ def _finding_matches_location(
         return False
     f_start = finding.line_start
     f_end = finding.line_end if finding.line_end is not None else finding.line_start
-    if f_end - f_start > max_finding_span:
+    if f_end - f_start + 1 > max_finding_span:
         return False
     if _norm_path(loc.file) != _norm_path(finding.file):
         return False
@@ -650,10 +661,11 @@ def score_predictions(
 
     口径：
     - 默认严格要求 predictions 覆盖 cases 的全部 case_id；仅在显式 allow_partial=True 时记为 MISSING 并暴露 coverage_rate。
+    - evaluated_cases 仅计实际产生裁定（PASS / BLOCK）的案例数；FAILED 计入 failed_cases、MISSING 计入 missing_cases，两者均计入未裁定覆盖缺口（coverage_rate = evaluated_cases / total_cases）。
     - bug_case_recall：真实 bug 案被判 BLOCK 且至少一条阻断/Important 发现命中真实 bug_location 的比例。
-    - bug_location_recall：所有真实 bug_location 中经一对一最大匹配命中的比例（跨度超过 max_finding_span 的宽区间发现不计命中）。
-    - clean_false_positive_rate：已评真实 clean 案中只要 verdict == BLOCK 一律计为误报（无论 findings 为空、仅含 nit 或含 blocking）。
-    - blocking_precision：所有阻断/Important 发现中经一对一匹配计为真阳性的比例（重复发现不重复领取真阳性）。
+    - bug_location_recall：所有真实 bug_location 中经规范坐标去重后一对一最大匹配命中的比例（闭区间跨度超过 max_finding_span 的宽区间发现不计命中）。
+    - clean_false_positive_rate：已实际裁定（PASS / BLOCK）的真实 clean 案中只要 verdict == BLOCK 一律计为误报（FAILED / MISSING 不充当零误报分母）。
+    - blocking_precision：所有阻断/Important 发现（含重复副本）中经去重一对一匹配计为真阳性的比例（重复发现惩罚精确率且不领取额外位置召回）。
     - f1：blocking_precision 与 bug_location_recall 的调和平均。
     """
     if line_tolerance < 0:
@@ -669,6 +681,8 @@ def score_predictions(
             raise EvalValidationError(f"预测中存在重复 case_id：{pred.case_id}")
         if pred.case_id not in case_ids:
             raise EvalValidationError(f"预测中存在未知 case_id：{pred.case_id}")
+        if pred.verdict not in _VALID_VERDICTS:
+            raise EvalValidationError(f"预测中存在非法 verdict：{pred.verdict!r}")
         pred_map[pred.case_id] = pred
 
     missing_ids = [c.case_id for c in cases if c.case_id not in pred_map]
@@ -679,6 +693,8 @@ def score_predictions(
 
     bug_cases = 0
     clean_cases = 0
+    evaluated_cases = 0
+    failed_cases = 0
     evaluated_clean_cases = 0
     missing_cases = 0
     recalled_bug_cases = 0
@@ -714,6 +730,11 @@ def score_predictions(
             )
             continue
 
+        if case_pred.verdict == "FAILED":
+            failed_cases += 1
+        else:
+            evaluated_cases += 1
+
         blocking_findings = [f for f in case_pred.findings if f.is_blocking]
         total_blocking_findings += len(blocking_findings)
 
@@ -722,9 +743,17 @@ def score_predictions(
             total_bug_locations += len(case.bug_locations)
             matched_indices: tuple[int, ...] = ()
             if case_pred.verdict == "BLOCK":
+                dedup_blocking_findings: list[PredictedFinding] = []
+                seen_coords: set[tuple[str, int | None, int | None]] = set()
+                for finding in blocking_findings:
+                    coord_key = _finding_coord_key(finding)
+                    if coord_key in seen_coords:
+                        continue
+                    seen_coords.add(coord_key)
+                    dedup_blocking_findings.append(finding)
                 matched_indices = _match_findings_to_locations(
                     case.bug_locations,
-                    blocking_findings,
+                    dedup_blocking_findings,
                     line_tolerance=line_tolerance,
                     max_finding_span=max_finding_span,
                 )
@@ -752,7 +781,8 @@ def score_predictions(
             )
         else:
             clean_cases += 1
-            evaluated_clean_cases += 1
+            if case_pred.verdict in ("PASS", "BLOCK"):
+                evaluated_clean_cases += 1
             # 干净 PR 只要终态为 BLOCK 一律计为误报（无论 findings 为空、仅含 nit 或含 important/blocking）。
             is_fp = case_pred.verdict == "BLOCK"
             if is_fp:
@@ -772,7 +802,6 @@ def score_predictions(
                 )
             )
 
-    evaluated_cases = len(cases) - missing_cases
     coverage_rate = evaluated_cases / len(cases) if cases else 0.0
     bug_case_recall = recalled_bug_cases / bug_cases if bug_cases else 0.0
     bug_location_recall = matched_bug_locations / total_bug_locations if total_bug_locations else 0.0
@@ -787,6 +816,7 @@ def score_predictions(
     return EvalScore(
         total_cases=len(cases),
         evaluated_cases=evaluated_cases,
+        failed_cases=failed_cases,
         missing_cases=missing_cases,
         coverage_rate=round(coverage_rate, 6),
         bug_cases=bug_cases,
@@ -852,6 +882,7 @@ def _score_from_dict(raw: dict[str, Any]) -> EvalScore:
         return EvalScore(
             total_cases=int(raw["total_cases"]),
             evaluated_cases=int(raw["evaluated_cases"]),
+            failed_cases=int(raw["failed_cases"]),
             missing_cases=int(raw["missing_cases"]),
             coverage_rate=float(raw["coverage_rate"]),
             bug_cases=int(raw["bug_cases"]),
@@ -923,10 +954,26 @@ def compare_scores(before: EvalScore, after: EvalScore) -> ScoreComparison:
     regressed: list[str] = []
     mixed: list[str] = []
     unchanged: list[str] = []
+    undecided: list[str] = []
 
     for case_id in sorted(before_map):
         b = before_map[case_id]
         a = after_map[case_id]
+        b_undecided = b.verdict in _UNDECIDED_SCORE_VERDICTS
+        a_undecided = a.verdict in _UNDECIDED_SCORE_VERDICTS
+        if b_undecided or a_undecided:
+            if b_undecided and a_undecided:
+                undecided.append(case_id)
+            elif a_undecided:
+                b_was_good = (b.kind == "clean" and b.verdict == "PASS") or (b.kind == "bug" and b.bug_recalled)
+                if b_was_good:
+                    regressed.append(case_id)
+                else:
+                    undecided.append(case_id)
+            else:
+                undecided.append(case_id)
+            continue
+
         if b.kind == "bug":
             b_recall = (int(b.bug_recalled), b.matched_locations)
             a_recall = (int(a.bug_recalled), a.matched_locations)
@@ -962,10 +1009,12 @@ def compare_scores(before: EvalScore, after: EvalScore) -> ScoreComparison:
         clean_false_positive_rate_delta=round(after.clean_false_positive_rate - before.clean_false_positive_rate, 6),
         blocking_precision_delta=round(after.blocking_precision - before.blocking_precision, 6),
         f1_delta=round(after.f1 - before.f1, 6),
+        coverage_rate_delta=round(after.coverage_rate - before.coverage_rate, 6),
         improved_cases=tuple(improved),
         regressed_cases=tuple(regressed),
         mixed_cases=tuple(mixed),
         unchanged_cases=tuple(unchanged),
+        undecided_cases=tuple(undecided),
     )
 
 
@@ -1116,6 +1165,7 @@ def analyze_review_runs(
 
     all_prs: set[int] = set()
     prs_with_any_pass: set[int] = set()
+    prs_with_unorderable_pass: set[int] = set()
     pr_timeline: dict[int, list[_RunTimelineRecord]] = defaultdict(list)
     undeterminable_block_findings = 0
 
@@ -1173,6 +1223,14 @@ def analyze_review_runs(
         target_source = target_data or (
             outcome_data.get("target") if outcome_data and isinstance(outcome_data.get("target"), dict) else None
         )
+        raw_target_run_id = target_source.get("run_id") if isinstance(target_source, dict) else None
+        target_run_id = (
+            raw_target_run_id.strip()
+            if isinstance(raw_target_run_id, str) and raw_target_run_id.strip()
+            else None
+        )
+        run_dir_run_ids = {rid for rid in (outcome_run_id, target_run_id) if rid is not None}
+
         run_pr_number: int | None = None
         if isinstance(target_source, dict):
             pr_raw = target_source.get("pr_number")
@@ -1187,6 +1245,16 @@ def analyze_review_runs(
             receipt = _read_json_dict(receipt_path, runs_dir, corrupted_files)
             if receipt is None:
                 continue
+            receipt_run_id_raw = receipt.get("run_id")
+            receipt_run_id = (
+                receipt_run_id_raw.strip()
+                if isinstance(receipt_run_id_raw, str) and receipt_run_id_raw.strip()
+                else None
+            )
+            if receipt_run_id is not None and any(receipt_run_id != rid for rid in run_dir_run_ids):
+                corrupted_files.append(str(receipt_path.relative_to(runs_dir)))
+                continue
+
             total_receipts += 1
             r_status = str(receipt.get("status") or "unknown").lower()
             if r_status == "completed":
@@ -1195,13 +1263,7 @@ def analyze_review_runs(
                 failed_receipts += 1
 
             model = str(receipt.get("model") or receipt_path.parent.name)
-            receipt_run_id_raw = receipt.get("run_id")
-            receipt_run_id = (
-                receipt_run_id_raw.strip()
-                if isinstance(receipt_run_id_raw, str) and receipt_run_id_raw.strip()
-                else None
-            )
-            effective_run_id = outcome_run_id or receipt_run_id or run_dir.name
+            effective_run_id = outcome_run_id or target_run_id or receipt_run_id or run_dir.name
 
             result = receipt.get("result")
             if not isinstance(result, dict):
@@ -1228,6 +1290,8 @@ def analyze_review_runs(
         has_valid_ts = isinstance(reg_raw, int) and not isinstance(reg_raw, bool) and reg_raw > 0
         if run_pr_number is None or not has_valid_ts:
             unorderable_runs += 1
+            if run_pr_number is not None and verdict == "PASS":
+                prs_with_unorderable_pass.add(run_pr_number)
             if verdict == "BLOCK" and run_blocking_findings > 0:
                 undeterminable_block_findings += run_blocking_findings
             continue
@@ -1256,7 +1320,7 @@ def analyze_review_runs(
     inferred_fixed = 0
     total_block_findings = 0
 
-    for _pr_number, records in sorted(pr_timeline.items()):
+    for pr_number, records in sorted(pr_timeline.items()):
         ordered_runs = sorted(records, key=lambda r: (r.registered_at_ns, r.attempt, r.dir_name))
 
         first_pass_idx: int | None = None
@@ -1295,7 +1359,9 @@ def analyze_review_runs(
             if has_diff_head_pass:
                 total_block_findings += rec.blocking_finding_count
                 inferred_fixed += rec.blocking_finding_count
-            elif any(not later.head_sha for later in strictly_later_passes):
+            elif pr_number in prs_with_unorderable_pass or any(
+                not later.head_sha for later in strictly_later_passes
+            ):
                 undeterminable_block_findings += rec.blocking_finding_count
             else:
                 total_block_findings += rec.blocking_finding_count
@@ -1530,7 +1596,7 @@ def render_baseline_markdown(metrics: BaselineMetrics) -> str:
             "### 4.3 后续 head 转 PASS 推定（启发式）",
             "",
             f"- 可判定 BLOCK 运行中的非 Nit 阻断发现总数：`{metrics.subsequent_head_pass_total_block_findings}`",
-            f"- 缺合法时间戳或 `head_sha` 不可判定的 BLOCK 发现条数：`{metrics.subsequent_head_pass_undeterminable_findings}`",
+            f"- 缺合法时间戳/`head_sha` 或同 PR 存在不可排序 PASS 而不可判定的 BLOCK 发现条数：`{metrics.subsequent_head_pass_undeterminable_findings}`",
             f"- 同 PR 后续更晚时间戳出现不同非空 `head_sha` 且终态转 PASS 的推定已修条数：`{metrics.subsequent_head_pass_inferred_fixed}`（`{_fmt_pct(metrics.subsequent_head_pass_inferred_rate)}`）",
             "",
             "## 五、显式去向台账统计（`load_dispositions`）",
