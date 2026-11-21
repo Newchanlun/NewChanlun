@@ -3948,7 +3948,7 @@ def test_r9_important1_cross_head_stale_location_blocks_coordinate_binding_and_p
     )
     dec1 = evaluate_round(v1)
     e1 = dec1.to_history_entry(rendered=render_findings_comment(1928, HEAD_1, dec1))
-    assert e1.stale_location_fingerprints == frozenset()
+    assert e1.relocated_fingerprints == frozenset({f1.finding_id})
 
     # 第 2 轮切 HEAD_2，双 finder 均返回空 -> f1 保留 line=42 供展示，但记入 stale_location_fingerprints
     c2 = build_round_candidates(
@@ -4022,8 +4022,9 @@ def test_r9_important1_cross_head_stale_location_blocks_coordinate_binding_and_p
     )
     dec2_still = evaluate_round(v2_still)
     assert dec2_still.stale_location_fingerprints == frozenset({f1.finding_id})
+    assert dec2_still.relocated_fingerprints == frozenset()
     e2_still = dec2_still.to_history_entry(rendered=render_findings_comment(1928, HEAD_2, dec2_still))
-    assert e2_still.stale_location_fingerprints == frozenset({f1.finding_id})
+    assert e2_still.relocated_fingerprints == frozenset()
 
     c3_same_head = build_round_candidates(
         round_number=3,
@@ -4102,7 +4103,7 @@ def test_r9_important1_cross_head_stale_location_blocks_coordinate_binding_and_p
     )
     assert v2_reloc.verdicts[0].verdict is VerificationVerdict.RESOLVED_BY_WONTFIX
 
-    # RoundHistoryEntry 校验 stale_location_fingerprints 必须是 unresolved_important 的子集
+    # RoundHistoryEntry 校验 relocated_fingerprints 必须是 unresolved_important 的子集
     with pytest.raises(ConvergenceError):
         RoundHistoryEntry(
             1,
@@ -4111,7 +4112,7 @@ def test_r9_important1_cross_head_stale_location_blocks_coordinate_binding_and_p
             (),
             panel=DEFAULT_PANEL,
             finder_session_ids=frozenset({"s-stale-1", "s-stale-2"}),
-            stale_location_fingerprints=frozenset({f1.finding_id}),
+            relocated_fingerprints=frozenset({f1.finding_id}),
         )
 
 
@@ -4399,4 +4400,523 @@ def test_r9_important6_normalizes_commit_sha_case_to_block_same_head_fix_bypass(
         1928,
         1,
         sha_lower,
+    )
+
+
+# ── 11. R10 精准回归：Codex R9 全部 7 项 Important 最小反例 ──────────────────────
+
+
+def test_r10_important1_rejects_abbreviated_and_invalid_commit_shas() -> None:
+    """R9 Important 1：全链路仅接受完整 40 位（SHA-1）或 64 位（SHA-256）十六进制 SHA，入口立即拒绝短 SHA。"""
+    full_sha1 = "c93c17d9887e17b0955ca49f7e213116ef9fa324"
+    short_sha = "c93c17d"
+    full_sha256_upper = "ABCDEF0123456789" * 4
+    full_sha256_lower = full_sha256_upper.lower()
+    f1 = _finding(severity=Severity.IMPORTANT, file="pilot1742/sha_len.py", line=15)
+
+    # 第 1 轮使用完整 40 位 SHA
+    c1 = build_round_candidates(
+        round_number=1,
+        head_sha=full_sha1,
+        panel=DEFAULT_PANEL,
+        finder_batches=_batches_for_panel([f1], round_number=1, head_sha=full_sha1),
+    )
+    v1 = parse_verifier_output(
+        _verifier_payload(c1, [{"finding_id": f1.finding_id, "verdict": "confirmed", "verifier_evidence": "r1 确认"}]),
+        c1,
+        verifier_model="claude-opus-5-5",
+    )
+    dec1 = evaluate_round(v1)
+    e1 = dec1.to_history_entry(rendered=render_findings_comment(1928, full_sha1, dec1))
+
+    # 核心反例：第 2 轮传入 7 位短 SHA `c93c17d`，所有入口立即抛 ConvergenceError，绝不被误判为新提交已修复
+    for bad_sha in (
+        short_sha,
+        "a" * 39,
+        "a" * 41,
+        "a" * 63,
+        "a" * 65,
+        "g" * 40,
+        "HEAD",
+        "",
+        "   ",
+    ):
+        with pytest.raises(ConvergenceError):
+            plan_next_round(BASE_SHA, bad_sha, (e1,))
+        with pytest.raises(ConvergenceError):
+            FinderBatch(model="gpt-6-astra", session_id="s-short", head_sha=bad_sha, findings=())
+        with pytest.raises(ConvergenceError):
+            RoundCandidates(
+                round_number=2,
+                head_sha=bad_sha,
+                panel=DEFAULT_PANEL,
+                finder_batches=(),
+                history=(e1,),
+            )
+        with pytest.raises(ConvergenceError):
+            VerifiedFinding(
+                finding=f1,
+                verdict=VerificationVerdict.RESOLVED_BY_FIX,
+                verifier_model="claude-opus-5-5",
+                verifier_evidence="短 SHA 绕过尝试",
+                round_number=2,
+                head_sha=bad_sha,
+            )
+        with pytest.raises(ConvergenceError):
+            RoundHistoryEntry(
+                1,
+                bad_sha,
+                frozenset(),
+                (),
+                panel=DEFAULT_PANEL,
+                finder_session_ids=frozenset({"s1", "s2"}),
+            )
+        with pytest.raises(ConvergenceError):
+            render_findings_comment(1928, bad_sha, dec1)
+
+    # verifier 输出中携带短 SHA 同样立即拒绝
+    c2_same = build_round_candidates(
+        round_number=2,
+        head_sha=full_sha1,
+        panel=DEFAULT_PANEL,
+        finder_batches=_batches_for_panel([], round_number=2, head_sha=full_sha1),
+        history=(e1,),
+    )
+    with pytest.raises(ConvergenceError):
+        parse_verifier_output(
+            {
+                "round_number": 2,
+                "head_sha": short_sha,
+                "verdicts": [{"finding_id": f1.finding_id, "verdict": "resolved_by_fix", "verifier_evidence": "短 SHA"}],
+            },
+            c2_same,
+            verifier_model="claude-opus-5-5",
+        )
+
+    # 正向对照：完整 64 位 SHA-256（大写）正常接受并规范化为小写
+    plan_sha256 = plan_next_round(BASE_SHA, full_sha256_upper, (e1,))
+    assert plan_sha256.diff_head_sha == full_sha256_lower
+    c2_sha256 = build_round_candidates(
+        round_number=2,
+        head_sha=full_sha256_upper,
+        panel=DEFAULT_PANEL,
+        finder_batches=_batches_for_panel([], round_number=2, head_sha=full_sha256_upper),
+        history=(e1,),
+    )
+    assert c2_sha256.head_sha == full_sha256_lower
+    assert parse_comment_marker(f"{COMMENT_MARKER_PREFIX} pr=1928 round=2 head={full_sha256_upper} -->") == (
+        1928,
+        2,
+        full_sha256_lower,
+    )
+    assert parse_comment_marker(f"{COMMENT_MARKER_PREFIX} pr=1928 round=2 head={short_sha} -->") is None
+
+
+def test_r10_important2_stale_location_fail_closed_via_relocated_fingerprints() -> None:
+    """R9 Important 2：RoundHistoryEntry 改为 fail-closed 的 relocated_fingerprints，缺省空集永不放行过期坐标。"""
+    f1 = _finding(severity=Severity.IMPORTANT, file="pilot1742/demo.py", line=42)
+
+    # RoundHistoryEntry 已移除 fail-open 的 stale_location_fingerprints 参数
+    with pytest.raises(TypeError):
+        RoundHistoryEntry(
+            1,
+            HEAD_1,
+            frozenset({f1.finding_id}),
+            (f1,),
+            panel=DEFAULT_PANEL,
+            finder_session_ids=frozenset({"r1-fc-1", "r1-fc-2"}),
+            stale_location_fingerprints=frozenset(),  # type: ignore[call-arg]
+        )
+
+    # 第 1 轮在 HEAD_1 确认 demo.py:42
+    c1 = build_round_candidates(
+        round_number=1,
+        head_sha=HEAD_1,
+        panel=DEFAULT_PANEL,
+        finder_batches=_batches_for_panel([f1], round_number=1, head_sha=HEAD_1),
+    )
+    v1 = parse_verifier_output(
+        _verifier_payload(c1, [{"finding_id": f1.finding_id, "verdict": "confirmed", "verifier_evidence": "r1 确认"}]),
+        c1,
+        verifier_model="claude-opus-5-5",
+    )
+    dec1 = evaluate_round(v1)
+    assert dec1.relocated_fingerprints == frozenset({f1.finding_id})
+    e1 = dec1.to_history_entry(rendered=render_findings_comment(1928, HEAD_1, dec1))
+    assert e1.relocated_fingerprints == frozenset({f1.finding_id})
+
+    # 第 2 轮切到 HEAD_2、finder 为空 -> e2.relocated_fingerprints 为空集
+    c2 = build_round_candidates(
+        round_number=2,
+        head_sha=HEAD_2,
+        panel=DEFAULT_PANEL,
+        finder_batches=_batches_for_panel([], round_number=2, head_sha=HEAD_2),
+        history=(e1,),
+    )
+    v2 = parse_verifier_output(
+        _verifier_payload(c2, [{"finding_id": f1.finding_id, "verdict": "confirmed", "verifier_evidence": "r2 仍在"}]),
+        c2,
+        verifier_model="claude-opus-5-5",
+    )
+    dec2 = evaluate_round(v2)
+    e2 = dec2.to_history_entry(rendered=render_findings_comment(1928, HEAD_2, dec2))
+    assert e2.relocated_fingerprints == frozenset()
+
+    # 核心反例：把 e2 缺省/重置为 relocated_fingerprints=frozenset()，第 3 轮留在 HEAD_2 且 finder 仍空
+    e2_rehydrated = RoundHistoryEntry(
+        round_number=e2.round_number,
+        head_sha=e2.head_sha,
+        posted_fingerprints=e2.posted_fingerprints,
+        unresolved_important=e2.unresolved_important,
+        panel=e2.panel,
+        finder_session_ids=e2.finder_session_ids,
+        resolved_fingerprints=e2.resolved_fingerprints,
+        consumed_reply_keys=e2.consumed_reply_keys,
+        rejected_fingerprints=e2.rejected_fingerprints,
+        pending_non_blocking=e2.pending_non_blocking,
+        outcome=e2.outcome,
+    )
+    assert e2_rehydrated.relocated_fingerprints == frozenset()
+
+    c3 = build_round_candidates(
+        round_number=3,
+        head_sha=HEAD_2,
+        panel=DEFAULT_PANEL,
+        finder_batches=_batches_for_panel([], round_number=3, head_sha=HEAD_2),
+        history=(e1, e2_rehydrated),
+    )
+    assert c3.stale_location_fingerprints == frozenset({f1.finding_id})
+
+    inline_42 = parse_wontfix_replies(
+        [
+            {
+                "id": 1001,
+                "user": {"login": "alice", "type": "User"},
+                "path": "pilot1742/demo.py",
+                "side": "RIGHT",
+                "line": 42,
+                "body": "不修：旧行号测试夹具",
+            }
+        ],
+        allowed_authors={"alice"},
+    )
+    assert bind_author_replies(c3.findings, inline_42, stale_location_fingerprints=c3.stale_location_fingerprints) == {}
+    with pytest.raises(ConvergenceError):
+        parse_verifier_output(
+            _verifier_payload(
+                c3,
+                [{"finding_id": f1.finding_id, "verdict": "resolved_by_wontfix", "verifier_evidence": "试图借缺省历史放行旧行号"}],
+            ),
+            c3,
+            verifier_model="claude-opus-5-5",
+            author_replies=inline_42,
+        )
+
+    # 伪造 relocated_fingerprints：第 2 轮换用 gemini 面板却未将 gemini 写入 source_models，立即拒收
+    gemini_panel = ReviewPanel(
+        finder_models=("gemini-2.5-pro", "gemini-2.5-flash"),
+        verifier_model="claude-opus-5-5",
+        require_verifier=True,
+    )
+    e2_forged_reloc = RoundHistoryEntry(
+        2,
+        HEAD_2,
+        frozenset({f1.finding_id}),
+        (f1,),
+        panel=gemini_panel,
+        finder_session_ids=frozenset({"r2-fg-1", "r2-fg-2"}),
+        relocated_fingerprints=frozenset({f1.finding_id}),
+    )
+    with pytest.raises(ConvergenceError):
+        plan_next_round(BASE_SHA, HEAD_2, (e1, e2_forged_reloc))
+
+    # 正向对照：第 2 轮 finder 在 HEAD_2 重新定位到第 20 行 -> 第 3 轮留在 HEAD_2 时坐标有效，切 HEAD_3 再次过期
+    f1_line20 = _finding(severity=Severity.IMPORTANT, file="pilot1742/demo.py", line=20)
+    c2_reloc = build_round_candidates(
+        round_number=2,
+        head_sha=HEAD_2,
+        panel=DEFAULT_PANEL,
+        finder_batches=_batches_for_panel([f1_line20], round_number=2, head_sha=HEAD_2),
+        history=(e1,),
+    )
+    v2_reloc = parse_verifier_output(
+        _verifier_payload(c2_reloc, [{"finding_id": f1.finding_id, "verdict": "confirmed", "verifier_evidence": "r2 仍在第 20 行"}]),
+        c2_reloc,
+        verifier_model="claude-opus-5-5",
+    )
+    dec2_reloc = evaluate_round(v2_reloc)
+    e2_reloc = dec2_reloc.to_history_entry(rendered=render_findings_comment(1928, HEAD_2, dec2_reloc))
+    assert e2_reloc.relocated_fingerprints == frozenset({f1.finding_id})
+
+    c3_still_h2 = build_round_candidates(
+        round_number=3,
+        head_sha=HEAD_2,
+        panel=DEFAULT_PANEL,
+        finder_batches=_batches_for_panel([], round_number=3, head_sha=HEAD_2),
+        history=(e1, e2_reloc),
+    )
+    assert c3_still_h2.stale_location_fingerprints == frozenset()
+    inline_20 = parse_wontfix_replies(
+        [
+            {
+                "id": 1002,
+                "user": {"login": "alice", "type": "User"},
+                "path": "pilot1742/demo.py",
+                "side": "RIGHT",
+                "line": 20,
+                "body": "不修：已核对 HEAD_2 第 20 行",
+            }
+        ],
+        allowed_authors={"alice"},
+    )
+    v3_ok = parse_verifier_output(
+        _verifier_payload(
+            c3_still_h2,
+            [{"finding_id": f1.finding_id, "verdict": "resolved_by_wontfix", "verifier_evidence": "同 HEAD 有效坐标核实通过"}],
+        ),
+        c3_still_h2,
+        verifier_model="claude-opus-5-5",
+        author_replies=inline_20,
+    )
+    assert v3_ok.verdicts[0].verdict is VerificationVerdict.RESOLVED_BY_WONTFIX
+
+    c3_moved_h3 = build_round_candidates(
+        round_number=3,
+        head_sha=HEAD_3,
+        panel=DEFAULT_PANEL,
+        finder_batches=_batches_for_panel([], round_number=3, head_sha=HEAD_3),
+        history=(e1, e2_reloc),
+    )
+    assert c3_moved_h3.stale_location_fingerprints == frozenset({f1.finding_id})
+
+
+def test_r10_important3_history_chain_blocks_same_family_and_quick_pass_clearances() -> None:
+    """R9 Important 3：历史链对每轮结转进入的发现（含被解除/驳回项）强制校验跨家族核实与禁止快审直通结清。"""
+    f1 = _finding(
+        severity=Severity.IMPORTANT,
+        file="pilot1742/self_reject.py",
+        line=25,
+        source_models=("gpt-6-astra",),
+    )
+    e1 = RoundHistoryEntry(
+        1,
+        HEAD_1,
+        frozenset({f1.finding_id}),
+        (f1,),
+        panel=DEFAULT_PANEL,
+        finder_session_ids=frozenset({"r1-sr-1", "r1-sr-2"}),
+    )
+
+    # 核心反例：第 2 轮用与原 finder 同家族的 gpt-6-astra 作核实者，试图把 f1 标为 rejected 或 resolved
+    tampered_r2_panel = ReviewPanel(
+        finder_models=("gemini-2.5-pro", "gemini-2.5-flash"),
+        verifier_model="gpt-6-astra",
+        require_verifier=True,
+    )
+    for clearance_kw in (
+        {"rejected_fingerprints": frozenset({f1.finding_id})},
+        {"resolved_fingerprints": frozenset({f1.finding_id})},
+    ):
+        e2_tampered = RoundHistoryEntry(
+            2,
+            HEAD_2,
+            frozenset(),
+            (),
+            panel=tampered_r2_panel,
+            finder_session_ids=frozenset({"r2-sr-1", "r2-sr-2"}),
+            **clearance_kw,
+        )
+        with pytest.raises(ConvergenceError):
+            plan_next_round(BASE_SHA, HEAD_3, (e1, e2_tampered))
+        with pytest.raises(ConvergenceError):
+            RoundCandidates(
+                round_number=3,
+                head_sha=HEAD_3,
+                panel=DEFAULT_PANEL,
+                finder_batches=_batches_for_panel([], round_number=3, head_sha=HEAD_3),
+                history=(e1, e2_tampered),
+            )
+
+    # 快审直通面板（require_verifier=False）无独立核实者，禁止出现任何 resolved_fingerprints 或 rejected_fingerprints
+    quick_panel = ReviewPanel(
+        finder_models=("gemini-2.5-pro",),
+        verifier_model=None,
+        require_verifier=False,
+    )
+    for clearance_kw in (
+        {"rejected_fingerprints": frozenset({f1.finding_id})},
+        {"resolved_fingerprints": frozenset({f1.finding_id})},
+    ):
+        with pytest.raises(ConvergenceError):
+            RoundHistoryEntry(
+                2,
+                HEAD_2,
+                frozenset(),
+                (),
+                panel=quick_panel,
+                finder_session_ids=frozenset({"r2-qp-1"}),
+                **clearance_kw,
+            )
+
+    # 正向对照：第 2 轮由异家族核实者（claude-opus-5-5）合法结清后，第 3 轮无结转项，可自由选用 gpt-6-astra 作核实者
+    e2_legit = RoundHistoryEntry(
+        2,
+        HEAD_2,
+        frozenset(),
+        (),
+        panel=DEFAULT_PANEL,
+        finder_session_ids=frozenset({"r2-ok-1", "r2-ok-2"}),
+        rejected_fingerprints=frozenset({f1.finding_id}),
+    )
+    plan3 = plan_next_round(BASE_SHA, HEAD_3, (e1, e2_legit))
+    assert plan3.round_number == 3
+    assert plan3.unresolved_prior_important == ()
+    c3_gpt_verifier = build_round_candidates(
+        round_number=3,
+        head_sha=HEAD_3,
+        panel=tampered_r2_panel,
+        finder_batches=_batches_for_panel([], panel=tampered_r2_panel, round_number=3, head_sha=HEAD_3),
+        history=(e1, e2_legit),
+    )
+    assert c3_gpt_verifier.prior_important == ()
+
+
+def test_r10_important4_and_5_cross_block_quoted_attrs_and_html5_non_void_tags() -> None:
+    """R9 Important 4 + 5：跨空行未闭带引号 HTML 属性状态持久传递，且 12 个非空抑制标签写 `/>` 仍按 HTML5 入栈。"""
+    fid = "a98df8e465064919"
+
+    def parse_one(body: str) -> tuple[AuthorReply, ...]:
+        return parse_wontfix_replies(
+            [{"id": 1010, "user": {"login": "alice", "type": "User"}, "body": body}],
+            allowed_authors={"alice"},
+        )
+
+    # Important 4 核心反例：双引号与单引号跨空行属性包裹 </blockquote>，不提前闭合外层 <blockquote>
+    assert (
+        parse_one(f'<blockquote>\n<div title="\n\n</blockquote>">\n\n[{fid}] 不修：引用示例\n\n</div></blockquote>')
+        == ()
+    )
+    assert (
+        parse_one(f"<blockquote>\n<div title='\n\n</blockquote>'>\n\n[{fid}] 不修：引用示例\n\n</div></blockquote>")
+        == ()
+    )
+    assert (
+        parse_one(
+            f'<blockquote>\n<div title="\n\ntext </blockquote>">\n\n[{fid}] 不修：引用示例\n\n</div></blockquote>'
+        )
+        == ()
+    )
+    assert parse_one(f'<blockquote title="\n\n">\n\n[{fid}] 不修：引用内示例\n\n</blockquote>') == ()
+
+    # 正向对照：非抑制标签跨空行引号属性闭合后，后续段落恢复可见
+    after_div_attr = parse_one(f'<div title="\n\nhello">\n\n[{fid}] 不修：闭合后真理由')
+    assert [(r.finding_id, r.reason) for r in after_div_attr] == [(fid, "闭合后真理由")]
+
+    # Important 5 核心反例：<blockquote/> 与 <code/> 在 HTML5 中绝不自闭合，全部 12 个抑制标签同理
+    assert parse_one(f"<blockquote/>\n\n[{fid}] 不修：引用示例\n\n</blockquote>") == ()
+    assert parse_one(f"<code/>\n\n[{fid}] 不修：代码示例\n\n</code>") == ()
+    assert parse_one(f"说明 <code/> [{fid}] 不修：行内代码示例 </code>") == ()
+    for tag in (
+        "code",
+        "pre",
+        "kbd",
+        "samp",
+        "var",
+        "script",
+        "style",
+        "textarea",
+        "template",
+        "noscript",
+        "blockquote",
+        "q",
+    ):
+        assert parse_one(f"<{tag}/>\n\n[{fid}] 不修：示例\n\n</{tag}>") == ()
+        assert parse_one(f"<{tag} />\n\n[{fid}] 不修：示例\n\n</{tag}>") == ()
+        recovered = parse_one(f"<{tag}/>\n\n[{fid}] 不修：示例\n\n</{tag}>\n\n[def67890] 不修：闭合后真理由")
+        assert [(r.finding_id, r.reason) for r in recovered] == [("def67890", "闭合后真理由")]
+
+
+def test_r10_important6_paragraph_wide_emphasis_delimiters_across_soft_breaks() -> None:
+    """R9 Important 6：在整段范围内配对强调/删除线定界符，封杀跨软换行 `**&#8203;\\n&#8203;**` 伪理由并保留合法多行强调。"""
+    fid = "a98df8e465064919"
+
+    def parse_one(body: str) -> tuple[AuthorReply, ...]:
+        return parse_wontfix_replies(
+            [{"id": 1020, "user": {"login": "alice", "type": "User"}, "body": body}],
+            allowed_authors={"alice"},
+        )
+
+    # 核心反例：跨软换行/硬换行的空强调/删除线定界符配对剥离后理由为空 -> 0 条回复
+    for empty_multiline in (
+        f"[{fid}] 不修：**&#8203;\n&#8203;**",
+        f"[{fid}] 不修：*&#8203;\n&#8203;*",
+        f"[{fid}] 不修：_&#8203;\n&#8203;_",
+        f"[{fid}] 不修：__&#8203;\n&#8203;__",
+        f"[{fid}] 不修：~~&#8203;\n&#8203;~~",
+        f"[{fid}] 不修：**&nbsp;\n&nbsp;**",
+        f"[{fid}] 不修：**&#8203;\\\n&#8203;**",
+        f"[{fid}] 不修：**[&#8203;\n&#8203;](https://example.com)**",
+    ):
+        assert parse_one(empty_multiline) == (), f"expected 0 replies for {empty_multiline!r}"
+
+    # 正向对照：跨软换行强调包裹真实理由 -> 剥离定界符后提取第 1 行可见理由
+    multiline_ok = parse_one(f"[{fid}] 不修：**兼容旧配置\n补充说明**")
+    assert [(r.finding_id, r.reason) for r in multiline_ok] == [(fid, "兼容旧配置")]
+
+    # 跨空行属于不同段落，不跨段落误配对
+    cross_para = parse_one(f"[{fid}] 不修：**单边星号\n\n第二段**")
+    assert [(r.finding_id, r.reason) for r in cross_para] == [(fid, "**单边星号")]
+
+    # 回归确认 R8 规则完好
+    assert [(r.finding_id, r.reason) for r in parse_one(f"[{fid}] 不修：`&nbsp;`")] == [(fid, "&nbsp;")]
+    assert [(r.finding_id, r.reason) for r in parse_one(f"[{fid}] 不修：&amp;nbsp;")] == [(fid, "&nbsp;")]
+    assert parse_one(f"[{fid}] 不修：**&#8203;**") == ()
+    assert [(r.finding_id, r.reason) for r in parse_one(f"[{fid}] 不修：**兼容旧配置**")] == [(fid, "兼容旧配置")]
+
+
+def test_r10_important7_machine_comment_filter_uses_parse_comment_marker_only() -> None:
+    """R9 Important 7：仅凭首行 parse_comment_marker 跳过机器评论，不误杀正文/代码块中提及标记前缀的人类回复。"""
+    fid = "a98df8e465064919"
+
+    # 核心反例：人类评论在代码块中演示机器评论标记前缀，随后给出真实不修回复
+    body_with_fenced_marker = (
+        f"示例：\n\n```\n{COMMENT_MARKER_PREFIX}\n```\n\n[{fid}] 不修：保留兼容性"
+    )
+    replies = parse_wontfix_replies(
+        [{"id": 1030, "user": {"login": "alice", "type": "User"}, "body": body_with_fenced_marker}],
+        allowed_authors={"alice"},
+    )
+    assert [(r.finding_id, r.reason) for r in replies] == [(fid, "保留兼容性")]
+
+    # 引用块中提及完整机器标记行同样不误杀后续人类回复
+    body_with_quoted_marker = (
+        f"> {COMMENT_MARKER_PREFIX} pr=1928 round=1 head={HEAD_1} -->\n\n[{fid}] 不修：引用机器人标记后回复"
+    )
+    quoted_replies = parse_wontfix_replies(
+        [{"id": 1031, "user": {"login": "alice", "type": "User"}, "body": body_with_quoted_marker}],
+        allowed_authors={"alice"},
+    )
+    assert [(r.finding_id, r.reason) for r in quoted_replies] == [(fid, "引用机器人标记后回复")]
+
+    # 首行含非法短 SHA 标记不算机器评论且不抛异常，后续真实回复正常提取
+    body_malformed_marker = (
+        f"{COMMENT_MARKER_PREFIX} pr=1928 round=1 head=c93c17d -->\n\n[{fid}] 不修：非合法机器标记"
+    )
+    malformed_replies = parse_wontfix_replies(
+        [{"id": 1032, "user": {"login": "alice", "type": "User"}, "body": body_malformed_marker}],
+        allowed_authors={"alice"},
+    )
+    assert [(r.finding_id, r.reason) for r in malformed_replies] == [(fid, "非合法机器标记")]
+
+    # 正向对照：真实由 render_findings_comment 生成的机器评论仍被可靠跳过
+    f1 = _finding(severity=Severity.IMPORTANT, file="pilot1742/demo.py", line=42)
+    dec1 = evaluate_round(_verified_round([_verified(f1, VerificationVerdict.CONFIRMED)], round_number=1, head_sha=HEAD_1))
+    rendered = render_findings_comment(1928, HEAD_1, dec1)
+    assert parse_comment_marker(rendered.body) == (1928, 1, HEAD_1)
+    assert (
+        parse_wontfix_replies(
+            [{"id": 1033, "user": {"login": "alice", "type": "User"}, "body": rendered.body}],
+            allowed_authors={"alice"},
+        )
+        == ()
     )

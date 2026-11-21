@@ -83,7 +83,7 @@ _MODEL_FAMILY_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
 )
 
 _COMMENT_MARKER_RE = re.compile(
-    r"^<!--\s*deepagents:review-findings\s+pr=(?P<pr>[1-9][0-9]*)\s+round=(?P<round>[1-9][0-9]*)\s+head=(?P<head>\S+)\s*-->$"
+    r"^<!--\s*deepagents:review-findings\s+pr=(?P<pr>[1-9][0-9]*)\s+round=(?P<round>[1-9][0-9]*)\s+head=(?P<head>[0-9a-fA-F]{40}|[0-9a-fA-F]{64})\s*-->$"
 )
 
 _FENCE_OPEN_BACKTICK_BODY_RE = re.compile(r"^(`{3,})[^`]*$")
@@ -175,7 +175,7 @@ _WONTFIX_HEAD_RE = re.compile(
 )
 
 
-_COMMIT_SHA_HEX_RE = re.compile(r"[0-9a-fA-F]{4,64}")
+_COMMIT_SHA_HEX_RE = re.compile(r"[0-9a-fA-F]{40}|[0-9a-fA-F]{64}")
 
 
 def _require_non_empty_str(raw: Any, field_name: str) -> str:
@@ -189,9 +189,11 @@ def _require_non_empty_str(raw: Any, field_name: str) -> str:
 
 def _normalize_commit_sha(raw: Any, field_name: str) -> str:
     value = _require_non_empty_str(raw, field_name)
-    if _COMMIT_SHA_HEX_RE.fullmatch(value):
-        return value.lower()
-    return value
+    if not _COMMIT_SHA_HEX_RE.fullmatch(value):
+        raise ConvergenceError(
+            f"{field_name} 必须是完整的 40 位（SHA-1）或 64 位（SHA-256）十六进制 Git 提交 SHA：{raw!r}"
+        )
+    return value.lower()
 
 
 def _normalize_file(raw: Any) -> str:
@@ -1123,13 +1125,20 @@ def _decode_commonmark_entity(text: str, pos: int) -> tuple[str, int] | None:
     return decoded, ent_m.end()
 
 
+_HTML_OPEN_TAG_HEAD_RE = re.compile(r"<([A-Za-z][A-Za-z0-9-]*)(?=[ \t\n\r\f/>]|$)")
+_HTML_CLOSE_TAG_HEAD_RE = re.compile(r"</([A-Za-z][A-Za-z0-9-]*)[ \t\n\r\f]*>")
+
+
 @dataclass
 class _HtmlSuppressState:
-    """跨空行/跨段落持久传递的文档级 HTML 抑制状态（抑制标签栈、未闭 HTML 注释、未闭原始文本标签）。"""
+    """跨空行/跨段落持久传递的文档级 HTML 抑制状态（抑制标签栈、未闭 HTML 注释、未闭原始文本标签、跨块开放标签与引号属性）。"""
 
     tag_stack: list[str] = field(default_factory=list)
     in_comment: bool = False
     raw_text_tag: str | None = None
+    in_open_tag: bool = False
+    open_tag_quote: str | None = None
+    pending_open_tag_name: str | None = None
 
 
 @dataclass
@@ -1155,10 +1164,10 @@ def _is_cm_punctuation(ch: str) -> bool:
 
 
 def _apply_emphasis_delimiters(
-    line_tokens: list[tuple[str, str]],
+    tokens: list[tuple[str, str] | None],
     delims: list[_DelimRun],
 ) -> None:
-    """按 CommonMark §6.2 与 GFM ~~ 左右翼规则剥离单行内配对强调/删除线定界符的 display_stream 文本。"""
+    """按 CommonMark §6.2 与 GFM ~~ 左右翼规则在整段范围内剥离配对强调/删除线定界符的 display_stream 文本。"""
     if len(delims) < 2:
         return
     for closer_idx, closer in enumerate(delims):
@@ -1192,12 +1201,70 @@ def _apply_emphasis_delimiters(
                 delims[mid_idx].can_close = False
     for d in delims:
         if d.rem != d.orig_len:
-            m_part, _ = line_tokens[d.token_idx]
-            line_tokens[d.token_idx] = (m_part, d.char * d.rem)
+            tok = tokens[d.token_idx]
+            assert tok is not None
+            m_part, _ = tok
+            tokens[d.token_idx] = (m_part, d.char * d.rem)
+
+
+def _finish_open_tag(state: _HtmlSuppressState) -> None:
+    """按 HTML5 规则完成开标签闭合：12 个抑制标签均属非空元素，无论是否带 `/>` 均入栈。"""
+    tag_name = state.pending_open_tag_name
+    state.in_open_tag = False
+    state.open_tag_quote = None
+    state.pending_open_tag_name = None
+    if tag_name is not None and tag_name in _SUPPRESSED_INLINE_HTML_TAGS:
+        state.tag_stack.append(tag_name)
+        if tag_name in _RAW_TEXT_HTML_TAGS:
+            state.raw_text_tag = tag_name
+
+
+def _advance_in_open_tag(text: str, start: int, state: _HtmlSuppressState) -> int:
+    """按 HTML5 词法推进原始 HTML 块内的开放标签属性扫描，支持跨块未闭引号属性。"""
+    n = len(text)
+    i = start
+    expect_attr_value = False
+    in_unquoted_value = False
+    while i < n:
+        if state.open_tag_quote is not None:
+            q_pos = text.find(state.open_tag_quote, i)
+            if q_pos == -1:
+                return n
+            state.open_tag_quote = None
+            i = q_pos + 1
+            expect_attr_value = False
+            in_unquoted_value = False
+            continue
+        ch = text[i]
+        if ch == ">":
+            _finish_open_tag(state)
+            return i + 1
+        if expect_attr_value:
+            if ch in (" ", "\t", "\n", "\r", "\f"):
+                i += 1
+                continue
+            if ch in ('"', "'"):
+                state.open_tag_quote = ch
+                expect_attr_value = False
+                i += 1
+                continue
+            expect_attr_value = False
+            in_unquoted_value = True
+            i += 1
+            continue
+        if in_unquoted_value:
+            if ch in (" ", "\t", "\n", "\r", "\f"):
+                in_unquoted_value = False
+            i += 1
+            continue
+        if ch == "=":
+            expect_attr_value = True
+        i += 1
+    return n
 
 
 def _update_html_suppress_state(text: str, state: _HtmlSuppressState) -> None:
-    """扫描真实原始 HTML 块内容，按开/闭标签与跨块注释/原始文本标签状态更新持久抑制状态。"""
+    """扫描真实原始 HTML 块内容，按 HTML5 开/闭标签、跨块注释、原始文本标签与未闭引号属性状态更新持久抑制状态。"""
     n = len(text)
     i = 0
     while i < n:
@@ -1220,6 +1287,9 @@ def _update_html_suppress_state(text: str, state: _HtmlSuppressState) -> None:
                         break
             i = close_m.end()
             continue
+        if state.in_open_tag:
+            i = _advance_in_open_tag(text, i, state)
+            continue
         lt = text.find("<", i)
         if lt == -1:
             return
@@ -1236,29 +1306,41 @@ def _update_html_suppress_state(text: str, state: _HtmlSuppressState) -> None:
                 return
             i = end_pos + 3
             continue
-        html_m = _INLINE_RAW_HTML_RE.match(text, lt)
-        if html_m is None:
-            if text.startswith(("<?", "<![CDATA["), lt):
+        if text.startswith("<?", lt):
+            end_pos = text.find("?>", lt + 2)
+            if end_pos == -1:
                 return
-            i = lt + 1
+            i = end_pos + 2
             continue
-        raw_html = html_m.group(0)
-        close_tag_m = _INLINE_HTML_CLOSE_NAME_RE.fullmatch(raw_html)
+        if text.startswith("<![CDATA[", lt):
+            end_pos = text.find("]]>", lt + 9)
+            if end_pos == -1:
+                return
+            i = end_pos + 3
+            continue
+        if _HTML_BLOCK_4_START_RE.match(text, lt) is not None:
+            end_pos = text.find(">", lt + 2)
+            if end_pos == -1:
+                return
+            i = end_pos + 1
+            continue
+        close_tag_m = _HTML_CLOSE_TAG_HEAD_RE.match(text, lt)
         if close_tag_m is not None:
             tag_name = close_tag_m.group(1).lower()
             if tag_name in state.tag_stack:
                 while state.tag_stack:
                     if state.tag_stack.pop() == tag_name:
                         break
-        elif not raw_html.startswith(("<!--", "<?", "<!")):
-            open_tag_m = _INLINE_HTML_OPEN_NAME_RE.match(raw_html)
-            if open_tag_m is not None and not raw_html.rstrip().endswith("/>"):
-                tag_name = open_tag_m.group(1).lower()
-                if tag_name in _SUPPRESSED_INLINE_HTML_TAGS:
-                    state.tag_stack.append(tag_name)
-                    if tag_name in _RAW_TEXT_HTML_TAGS:
-                        state.raw_text_tag = tag_name
-        i = html_m.end()
+            i = close_tag_m.end()
+            continue
+        open_head_m = _HTML_OPEN_TAG_HEAD_RE.match(text, lt)
+        if open_head_m is not None:
+            state.in_open_tag = True
+            state.open_tag_quote = None
+            state.pending_open_tag_name = open_head_m.group(1).lower()
+            i = _advance_in_open_tag(text, open_head_m.end(), state)
+            continue
+        i = lt + 1
 
 
 def _extract_code_span_text(inner: str) -> str:
@@ -1273,28 +1355,29 @@ def _scan_inline_dual(
     text: str,
     defined_labels: frozenset[str] = frozenset(),
     suppress_state: _HtmlSuppressState | None = None,
+    *,
+    is_top_level_paragraph: bool = True,
 ) -> list[list[tuple[str, str]]]:
-    """CommonMark §6 段落行内双流扫描器：同步维护按行对齐的 (match_stream, display_stream)。
+    """CommonMark §6 段落行内双流扫描器：整段配对强调/删除线定界符后，再按行切分对齐的 (match_stream, display_stream)。
 
-    - match_stream：用于指令头匹配；代码跨度、自动链接、跨块未闭注释、抑制标签（<code>/<blockquote>/<pre>/<script> 等）、
+    - match_stream：用于指令头匹配；代码跨度、自动链接、跨块未闭注释/开放标签/引号属性、抑制标签（<code>/<blockquote>/<pre>/<script> 等）、
       图片与链接目标/标题均写入非匹配哨兵 `\\x01` 且不产生新行，彻底阻断伪指令注入。
     - display_stream：用于确认合法指令后提取人类可读理由；行内代码跨度原样保留不解码，对普通文本严格单次解码 HTML 实体，
-      剥离原始 HTML 与单行配对 Markdown 强调/删除线定界符。
+      剥离原始 HTML 与整段配对 Markdown 强调/删除线定界符（含跨软换行配对）。
     """
     state = suppress_state if suppress_state is not None else _HtmlSuppressState()
     stack = state.tag_stack
-    lines: list[list[tuple[str, str]]] = [[]]
-    line_delims: list[list[_DelimRun]] = [[]]
+    tokens: list[tuple[str, str] | None] = []
+    delims: list[_DelimRun] = []
     n = len(text)
     i = 0
 
     def emit(m_part: str, d_part: str) -> None:
         if m_part or d_part:
-            lines[-1].append((m_part, d_part))
+            tokens.append((m_part, d_part))
 
     def emit_newline() -> None:
-        lines.append([])
-        line_delims.append([])
+        tokens.append(None)
 
     while i < n:
         # 0a. 处于跨块未闭 HTML 注释内：忽略一切标签，仅当行内原始 HTML 含 --> 时关闭注释
@@ -1362,7 +1445,55 @@ def _scan_inline_dual(
             i += 1
             continue
 
-        # 0c. 处于抑制 HTML 标签栈内（如 <code>、<blockquote>、<pre>、<kbd> 等）
+        # 0c. 处于跨块未闭 HTML 开标签（含跨块未闭带引号属性）内
+        if state.in_open_tag:
+            if state.open_tag_quote is not None:
+                q_pos = text.find(state.open_tag_quote, i)
+                if q_pos == -1:
+                    emit("\x01", "")
+                    i = n
+                    break
+                state.open_tag_quote = None
+                emit("\x01", "")
+                i = q_pos + 1
+                continue
+            ch = text[i]
+            if ch == "`":
+                tick_end, found_end = _find_code_span_end(text, i)
+                emit("\x01", "")
+                if found_end != -1:
+                    _finish_open_tag(state)
+                    i = found_end
+                else:
+                    i = tick_end
+                continue
+            if ch == "<":
+                auto_m = _AUTOLINK_URI_RE.match(text, i) or _AUTOLINK_EMAIL_RE.match(text, i)
+                if auto_m is not None:
+                    _finish_open_tag(state)
+                    emit("\x01", "")
+                    i = auto_m.end()
+                    continue
+                html_m = _INLINE_RAW_HTML_RE.match(text, i)
+                if html_m is not None:
+                    _finish_open_tag(state)
+                    emit("\x01", "")
+                    i = html_m.end()
+                    continue
+            if ch == "=":
+                j = i + 1
+                while j < n and text[j] in (" ", "\t", "\n", "\r", "\f"):
+                    j += 1
+                if j < n and text[j] in ('"', "'"):
+                    state.open_tag_quote = text[j]
+                    emit("\x01", "")
+                    i = j + 1
+                    continue
+            emit("\x01", "")
+            i += 1
+            continue
+
+        # 0d. 处于抑制 HTML 标签栈内（如 <code>、<blockquote>、<pre>、<kbd> 等）
         if stack:
             silent = any(t in _SILENT_INLINE_HTML_TAGS for t in stack)
             ch = text[i]
@@ -1395,7 +1526,7 @@ def _scan_inline_dual(
                                     break
                     elif not raw_html.startswith(("<!--", "<?", "<!")):
                         open_tag_m = _INLINE_HTML_OPEN_NAME_RE.match(raw_html)
-                        if open_tag_m is not None and not raw_html.rstrip().endswith("/>"):
+                        if open_tag_m is not None:
                             tag_name = open_tag_m.group(1).lower()
                             if tag_name in _SUPPRESSED_INLINE_HTML_TAGS:
                                 stack.append(tag_name)
@@ -1479,7 +1610,7 @@ def _scan_inline_dual(
                 raw_html = html_m.group(0)
                 if not raw_html.startswith(("<!--", "<?", "<!", "</")):
                     open_tag_m = _INLINE_HTML_OPEN_NAME_RE.match(raw_html)
-                    if open_tag_m is not None and not raw_html.rstrip().endswith("/>"):
+                    if open_tag_m is not None:
                         tag_name = open_tag_m.group(1).lower()
                         if tag_name in _SUPPRESSED_INLINE_HTML_TAGS:
                             stack.append(tag_name)
@@ -1521,11 +1652,16 @@ def _scan_inline_dual(
             if close_bracket != -1:
                 link_end = _match_link_tail(text, i, close_bracket, defined_labels)
                 if link_end is not None:
-                    inner_lines = _scan_inline_dual(text[i + 1 : close_bracket], defined_labels, state)
-                    lines[-1].extend(inner_lines[0])
+                    inner_lines = _scan_inline_dual(
+                        text[i + 1 : close_bracket],
+                        defined_labels,
+                        state,
+                        is_top_level_paragraph=False,
+                    )
+                    tokens.extend(inner_lines[0])
                     for extra_line in inner_lines[1:]:
-                        lines.append(extra_line)
-                        line_delims.append([])
+                        emit_newline()
+                        tokens.extend(extra_line)
                     if link_end > close_bracket + 1:
                         emit("\x01", "")
                     i = link_end
@@ -1544,7 +1680,7 @@ def _scan_inline_dual(
                 i = next_i
                 continue
 
-        # 8. CommonMark §6.2 / GFM ~~ 强调与删除线定界符串记录（基于原始源码左右字符判定左右翼）
+        # 8. CommonMark §6.2 / GFM ~~ 强调与删除线定界符串记录（基于原始源码左右字符判定左右翼，跨整段配对）
         if ch in ("*", "_", "~"):
             run_end = i + 1
             while run_end < n and text[run_end] == ch:
@@ -1564,10 +1700,10 @@ def _scan_inline_dual(
             else:
                 can_open = left_flanking
                 can_close = right_flanking
-            token_idx = len(lines[-1])
+            token_idx = len(tokens)
             emit(run, run)
             if can_open or can_close:
-                line_delims[-1].append(
+                delims.append(
                     _DelimRun(
                         token_idx=token_idx,
                         char=ch,
@@ -1584,10 +1720,19 @@ def _scan_inline_dual(
         emit(ch, ch)
         i += 1
 
-    for line_tokens, delims in zip(lines, line_delims, strict=True):
-        if delims:
-            _apply_emphasis_delimiters(line_tokens, delims)
+    # 顶层段落由 `</p>` 收尾：若仍处于已闭引号的开放标签内，`</p>` 的 `>` 会在 HTML5 中闭合该开标签
+    if is_top_level_paragraph and state.in_open_tag and state.open_tag_quote is None:
+        _finish_open_tag(state)
 
+    if delims:
+        _apply_emphasis_delimiters(tokens, delims)
+
+    lines: list[list[tuple[str, str]]] = [[]]
+    for tok in tokens:
+        if tok is None:
+            lines.append([])
+        else:
+            lines[-1].append(tok)
     return lines
 
 
@@ -1906,7 +2051,7 @@ def parse_wontfix_replies(
         body = comment.get("body")
         if not isinstance(body, str) or not body.strip():
             continue
-        if COMMENT_MARKER_PREFIX in body:
+        if parse_comment_marker(body) is not None:
             continue
         if _is_bot_comment(comment):
             continue
@@ -2182,7 +2327,7 @@ class RoundHistoryEntry:
     rejected_fingerprints: frozenset[str] = frozenset()
     pending_non_blocking: tuple[VerifiedFinding, ...] = ()
     outcome: RoundOutcome | None = None
-    stale_location_fingerprints: frozenset[str] = frozenset()
+    relocated_fingerprints: frozenset[str] = frozenset()
 
     def __post_init__(self) -> None:
         if type(self.round_number) is not int or self.round_number <= 0:
@@ -2250,6 +2395,8 @@ class RoundHistoryEntry:
             raise ConvergenceError("rejected_fingerprints 必须是 frozenset[str]")
         for fp in self.rejected_fingerprints:
             _require_non_empty_str(fp, "rejected_fingerprints[]")
+        if not self.panel.require_verifier and (self.resolved_fingerprints or self.rejected_fingerprints):
+            raise ConvergenceError("快审直通轮次无独立核实者，禁止记录 resolved_fingerprints 或 rejected_fingerprints")
         if self.resolved_fingerprints & self.rejected_fingerprints:
             raise ConvergenceError("同一轮次内 resolved_fingerprints 与 rejected_fingerprints 不得重叠")
         cleared_ids = self.resolved_fingerprints | self.rejected_fingerprints
@@ -2289,26 +2436,27 @@ class RoundHistoryEntry:
             pending_ids.add(fid)
         if pending_ids & (self.posted_fingerprints | cleared_ids):
             raise ConvergenceError("pending_non_blocking 不得与已贴出或已解除/驳回指纹重叠")
-        if not isinstance(self.stale_location_fingerprints, frozenset):
-            raise ConvergenceError("stale_location_fingerprints 必须是 frozenset[str]")
-        norm_stale = frozenset(
-            _require_non_empty_str(fp, "stale_location_fingerprints[]").lower()
-            for fp in self.stale_location_fingerprints
+        if not isinstance(self.relocated_fingerprints, frozenset):
+            raise ConvergenceError("relocated_fingerprints 必须是 frozenset[str]")
+        norm_relocated = frozenset(
+            _require_non_empty_str(fp, "relocated_fingerprints[]").lower()
+            for fp in self.relocated_fingerprints
         )
-        if not (norm_stale <= unresolved_ids):
-            extra_stale = sorted(norm_stale - unresolved_ids)
+        if not (norm_relocated <= unresolved_ids):
+            extra_relocated = sorted(norm_relocated - unresolved_ids)
             raise ConvergenceError(
-                f"stale_location_fingerprints 必须是 unresolved_important 指纹的子集，发现多余指纹：{extra_stale!r}"
+                f"relocated_fingerprints 必须是 unresolved_important 指纹的子集，发现多余指纹：{extra_relocated!r}"
             )
-        object.__setattr__(self, "stale_location_fingerprints", norm_stale)
+        object.__setattr__(self, "relocated_fingerprints", norm_relocated)
 
 
-def _validate_history_chain(history: Sequence[RoundHistoryEntry]) -> frozenset[str]:
-    """校验连续轮次历史链的完整性、会话唯一性、未解除 Important 守恒与来源模型合法性，返回全部历史 finder session_id。"""
+def _validate_history_chain(history: Sequence[RoundHistoryEntry]) -> tuple[frozenset[str], dict[str, str]]:
+    """校验连续轮次历史链的完整性、会话唯一性、跨轮异家族核实与未解除 Important 守恒，返回 (全部历史 session_id, 每条未解除项最后定位提交 SHA)。"""
     allowed_historical_finders: set[str] = set()
     historical_session_ids: set[str] = set()
     prev_unresolved_sources: dict[str, frozenset[str]] = {}
     prev_unresolved_ids: set[str] = set()
+    located_head_by_fp: dict[str, str] = {}
     for idx, entry in enumerate(history, start=1):
         if not isinstance(entry, RoundHistoryEntry):
             raise ConvergenceError(f"history[{idx - 1}] 必须是 RoundHistoryEntry")
@@ -2323,10 +2471,25 @@ def _validate_history_chain(history: Sequence[RoundHistoryEntry]) -> frozenset[s
             )
         historical_session_ids.update(entry.finder_session_ids)
 
+        if not entry.panel.require_verifier and (entry.resolved_fingerprints or entry.rejected_fingerprints):
+            raise ConvergenceError(
+                f"历史第 {idx} 轮为快审直通模式（无独立核实者），禁止记录 resolved_fingerprints 或 rejected_fingerprints"
+            )
+        entry_verifier_family = entry.panel.verifier_family
+        if entry_verifier_family is not None:
+            for prev_fp, prev_sources in prev_unresolved_sources.items():
+                for src_model in prev_sources:
+                    if infer_model_family(src_model) == entry_verifier_family:
+                        raise ConvergenceError(
+                            f"历史第 {idx} 轮核实者模型 {entry.panel.verifier_model!r}（家族 {entry_verifier_family}）"
+                            f"不得与前轮结转发现 {prev_fp} 来源模型 {src_model!r} 同家族"
+                        )
+
         entry_finders = frozenset(m.strip() for m in entry.panel.finder_models)
         allowed_historical_finders.update(entry_finders)
 
         seen_hist_ids: set[str] = set()
+        next_located_head: dict[str, str] = {}
         for item in entry.unresolved_important:
             if item.severity != Severity.IMPORTANT:
                 raise ConvergenceError(f"历史未解除发现仅允许 Important，收到 {item.severity.value}")
@@ -2339,7 +2502,7 @@ def _validate_history_chain(history: Sequence[RoundHistoryEntry]) -> frozenset[s
                 raise ConvergenceError(f"历史发现 {fid} 缺少真实 finder source_models，禁止绕过异家族核实校验")
             for src_model in real_models:
                 src_family = infer_model_family(src_model)
-                if entry.panel.verifier_family is not None and src_family == entry.panel.verifier_family:
+                if entry_verifier_family is not None and src_family == entry_verifier_family:
                     raise ConvergenceError(
                         f"历史第 {idx} 轮核实者模型 {entry.panel.verifier_model!r} "
                         f"不得与发现 {fid} 来源模型 {src_model!r} 同家族"
@@ -2360,6 +2523,17 @@ def _validate_history_chain(history: Sequence[RoundHistoryEntry]) -> frozenset[s
                     f"历史第 {idx} 轮未解除发现 {fid} 的来源模型 {unknown_models!r} "
                     f"既不在当轮 panel.finder_models 中，也非合法累计历史结转来源"
                 )
+            if fid in prev_unresolved_ids:
+                if fid in entry.relocated_fingerprints:
+                    if not (set(real_models) & entry_finders):
+                        raise ConvergenceError(
+                            f"历史第 {idx} 轮声明重新定位了发现 {fid}，但其 source_models {real_models!r} 不含当轮任何 finder"
+                        )
+                    next_located_head[fid] = entry.head_sha
+                else:
+                    next_located_head[fid] = located_head_by_fp[fid]
+            else:
+                next_located_head[fid] = entry.head_sha
 
         unaccounted = prev_unresolved_ids - (seen_hist_ids | entry.resolved_fingerprints | entry.rejected_fingerprints)
         if unaccounted:
@@ -2370,13 +2544,15 @@ def _validate_history_chain(history: Sequence[RoundHistoryEntry]) -> frozenset[s
         if entry.outcome == RoundOutcome.PASS:
             prev_unresolved_sources = {}
             prev_unresolved_ids = set()
+            located_head_by_fp = {}
         else:
             prev_unresolved_sources = {
                 f.finding_id: frozenset(_real_source_models(f.source_models))
                 for f in entry.unresolved_important
             }
             prev_unresolved_ids = seen_hist_ids
-    return frozenset(historical_session_ids)
+            located_head_by_fp = next_located_head
+    return frozenset(historical_session_ids), located_head_by_fp
 
 
 @dataclass(frozen=True)
@@ -2449,7 +2625,7 @@ class RoundCandidates:
             )
 
         verifier_family = self.panel.verifier_family
-        historical_session_ids = _validate_history_chain(self.history)
+        historical_session_ids, located_head_by_fp = _validate_history_chain(self.history)
 
         if not self.history or self.history[-1].outcome == RoundOutcome.PASS:
             prior_important: tuple[Finding, ...] = ()
@@ -2493,12 +2669,9 @@ class RoundCandidates:
         current_round_findings = merge_and_dedupe_findings([(b.model, b.findings) for b in self.finder_batches])
 
         # 2. 跨轮结转合并：同指纹在本轮重现时保留当前轮新定位与证据，锁定 severity=IMPORTANT 并合并 source_models；
-        # 未在本轮重现且跨 HEAD 或继承上轮过期标记的发现，保留 prior.line 供展示但记入 stale_location_fingerprints
+        # 未在本轮重现且最后一次定位提交 != 当前 HEAD 的发现，保留 prior.line 供展示但 fail-closed 记入 stale_location_fingerprints
         current_by_fp = {f.finding_id: f for f in current_round_findings}
         merged_by_fp: dict[str, Finding] = dict(current_by_fp)
-        prev_entry = self.history[-1] if self.history else None
-        prev_head_changed = prev_entry is not None and norm_head != prev_entry.head_sha
-        prev_stale = prev_entry.stale_location_fingerprints if prev_entry is not None else frozenset()
         stale_fps: set[str] = set()
         for prior in prior_important:
             fp = prior.finding_id
@@ -2517,7 +2690,7 @@ class RoundCandidates:
                     source_models=combined_sources,
                 )
             else:
-                if prev_head_changed or fp in prev_stale:
+                if located_head_by_fp.get(fp) != norm_head:
                     stale_fps.add(fp)
                 merged_by_fp[fp] = Finding(
                     severity=Severity.IMPORTANT,
@@ -2974,6 +3147,7 @@ class RoundDecision:
     consumed_reply_keys: frozenset[str] = frozenset()
     finder_session_ids: frozenset[str] = frozenset()
     stale_location_fingerprints: frozenset[str] = frozenset()
+    relocated_fingerprints: frozenset[str] = frozenset()
 
     def __post_init__(self) -> None:
         norm_head = _normalize_commit_sha(self.head_sha, "RoundDecision.head_sha")
@@ -2985,6 +3159,13 @@ class RoundDecision:
             for fp in self.stale_location_fingerprints
         )
         object.__setattr__(self, "stale_location_fingerprints", norm_stale)
+        if not isinstance(self.relocated_fingerprints, frozenset):
+            raise ConvergenceError("RoundDecision.relocated_fingerprints 必须是 frozenset[str]")
+        norm_relocated = frozenset(
+            _require_non_empty_str(fp, "relocated_fingerprints[]").lower()
+            for fp in self.relocated_fingerprints
+        )
+        object.__setattr__(self, "relocated_fingerprints", norm_relocated)
 
     @property
     def cleared_fingerprints(self) -> frozenset[str]:
@@ -3059,7 +3240,7 @@ class RoundDecision:
             ),
             finder_session_ids=self.finder_session_ids,
             outcome=self.outcome,
-            stale_location_fingerprints=self.stale_location_fingerprints
+            relocated_fingerprints=self.relocated_fingerprints
             & frozenset(f.finding_id for f in self.unresolved_important),
         )
 
@@ -3140,6 +3321,9 @@ def evaluate_round(
     consumed_reply_keys = frozenset(consumed_keys)
     unresolved_ids = frozenset(f.finding_id for f in unresolved_important)
     stale_unresolved = verified.candidates.stale_location_fingerprints & unresolved_ids
+    relocated_unresolved = (
+        frozenset(f.finding_id for f in verified.candidates.current_round_findings) & unresolved_ids
+    )
 
     if not blocking:
         n_nit = sum(1 for vf in non_blocking if vf.finding.severity == Severity.NIT)
@@ -3184,6 +3368,7 @@ def evaluate_round(
         consumed_reply_keys=consumed_reply_keys,
         finder_session_ids=frozenset(b.session_id for b in verified.candidates.finder_batches),
         stale_location_fingerprints=stale_unresolved,
+        relocated_fingerprints=relocated_unresolved,
     )
 
 
