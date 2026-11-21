@@ -414,7 +414,74 @@
     const raw = await auditRaw(snapshot, charge),
       groups = new Map(),
       shapes = new Map(),
-      records = [];
+      records = [],
+      rawRefById = new Map(),
+      rawRefEffective = new Map(),
+      rawPlainById = new Map(),
+      rawPlainEffective = new Map();
+    for (const [k, r] of raw.byId) {
+      const rr = await rawReference(r);
+      rawRefById.set(k, rr);
+      if (!r.reader && r.plain && typeof r.plain === "object") {
+        let ok = true;
+        const p = {};
+        for (let idx = 0; idx < RAWREF.length; idx++) {
+          const fk = RAWREF[idx], val = r.plain[fk];
+          if (typeof val !== "string") { ok = false; break; }
+          p[fk] = val;
+        }
+        if (ok) rawPlainById.set(k, p);
+      }
+    }
+    for (const [coord, r] of raw.effective) {
+      const rr = await rawReference(r);
+      rawRefEffective.set(coord, rr);
+      if (!r.reader && r.plain && typeof r.plain === "object") {
+        let ok = true;
+        const p = {};
+        for (let idx = 0; idx < RAWREF.length; idx++) {
+          const fk = RAWREF[idx], val = r.plain[fk];
+          if (typeof val !== "string") { ok = false; break; }
+          p[fk] = val;
+        }
+        if (ok) rawPlainEffective.set(coord, p);
+      }
+    }
+    function checkRefPlain(p, active) {
+      if (!p || typeof p !== "object" || Array.isArray(p) || p instanceof V.Value) return false;
+      const ks = Object.keys(p);
+      if (ks.length !== RAWREF.length) return false;
+      for (let idx = 0; idx < RAWREF.length; idx++) {
+        const fk = RAWREF[idx];
+        if (!Object.hasOwn(p, fk) || typeof p[fk] !== "string") return false;
+      }
+      if (p.identity_key.length === 0) return false;
+      if (typeof p.identity_key.isWellFormed === "function") {
+        for (let idx = 0; idx < ks.length; idx++) if (!ks[idx].isWellFormed()) return false;
+        for (let idx = 0; idx < RAWREF.length; idx++) if (!p[RAWREF[idx]].isWellFormed()) return false;
+      } else {
+        return false;
+      }
+      const key = JSON.stringify([p.identity_key, p.revision]);
+      const exp = rawPlainById.get(key);
+      if (!exp) {
+        if (!raw.byId.has(key)) need(false, "对象八键来源未绑定独立完整原始历史");
+        return false;
+      }
+      for (let idx = 0; idx < RAWREF.length; idx++) {
+        const fk = RAWREF[idx];
+        if (p[fk] !== exp[fk]) need(false, "对象八键来源未绑定独立完整原始历史");
+      }
+      if (active) {
+        const eff = rawPlainEffective.get(p.source_coord);
+        if (!eff) return false;
+        for (let idx = 0; idx < RAWREF.length; idx++) {
+          const fk = RAWREF[idx];
+          if (p[fk] !== eff[fk]) need(false, "活动对象使用旧修订");
+        }
+      }
+      return true;
+    }
     for (const family of ["objects", "withdrawn_objects"])
       for await (const record of (await f(snapshot, family)).items()) {
         charge();
@@ -425,30 +492,56 @@
         const refs = await f(record, "input_refs"),
           active = (await s(record, "lifecycle")) === "active";
         async function checkRef(ref) {
+          if (ref instanceof V.Value) {
+            if (!ref.reader && checkRefPlain(ref.plain, active)) return;
+          } else if (checkRefPlain(ref, active)) return;
           await keys(ref, RAWREF, "来源八键");
-          const r = raw.byId.get(
-            JSON.stringify([
-              await t(ref, "identity_key"),
-              await s(ref, "revision"),
-            ]),
-          );
+          const rKey = JSON.stringify([
+            await t(ref, "identity_key"),
+            await s(ref, "revision"),
+          ]);
+          const r = rawRefById.get(rKey);
           need(
-            r && (await equal(ref, await rawReference(r))),
+            r && (await equal(ref, r)),
             "对象八键来源未绑定独立完整原始历史",
           );
-          if (active)
+          if (active) {
+            const effCoord = await s(ref, "source_coord");
+            const effRef = rawRefEffective.get(effCoord) || (await rawReference({}));
             need(
-              await equal(
-                ref,
-                await rawReference(
-                  raw.effective.get(await s(ref, "source_coord")) || {},
-                ),
-              ),
+              await equal(ref, effRef),
               "活动对象使用旧修订",
             );
+          }
         }
         if (typed.TB02_KINDS.includes(kind)) {
-          for await (const ref of refs.items()) await checkRef(ref);
+          if (!refs.reader && Array.isArray(refs.plain)) {
+            const arr = refs.plain;
+            for (let idx = 0; idx < arr.length; idx++) {
+              need(Object.hasOwn(arr, idx), "稀疏数组");
+              if (!checkRefPlain(arr[idx], active)) await checkRef(of(arr[idx]));
+            }
+          } else {
+            for await (const ref of refs.items()) await checkRef(ref);
+          }
+        } else if (!refs.reader && Array.isArray(refs.plain)) {
+          const gArr = refs.plain;
+          for (let gi = 0; gi < gArr.length; gi++) {
+            need(Object.hasOwn(gArr, gi), "稀疏数组");
+            const group = of(gArr[gi]);
+            for (const name of ["raw_refs", "dependency_refs"]) {
+              const listV = await f(group, name);
+              if (!listV.reader && Array.isArray(listV.plain)) {
+                const arr = listV.plain;
+                for (let idx = 0; idx < arr.length; idx++) {
+                  need(Object.hasOwn(arr, idx), "稀疏数组");
+                  if (!checkRefPlain(arr[idx], active)) await checkRef(of(arr[idx]));
+                }
+              } else {
+                for await (const ref of listV.items()) await checkRef(ref);
+              }
+            }
+          }
         } else
           for await (const group of refs.items())
             for (const name of ["raw_refs", "dependency_refs"])
