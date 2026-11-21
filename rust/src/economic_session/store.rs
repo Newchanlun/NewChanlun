@@ -544,7 +544,7 @@ fn canonical_target(p: &Path) -> Result<PathBuf, String> {
             .join(p.file_name().ok_or("InvalidDomain：路径无文件名")?))
     }
 }
-fn filesystem(path: &Path) -> Result<String, String> {
+pub(super) fn filesystem(path: &Path) -> Result<String, String> {
     let target = if path.exists() {
         path.canonicalize().map_err(err)?
     } else {
@@ -602,6 +602,14 @@ fn filesystem(path: &Path) -> Result<String, String> {
         Ok(k)
     }
 }
+pub(super) fn checked_sqlite_version() -> Result<i32, String> {
+    let version = rusqlite::version_number();
+    if version < 3_051_003 {
+        return Err("StorageUnavailable：运行SQLite缺WAL-reset修复".into());
+    }
+    Ok(version)
+}
+
 pub(crate) fn open(db: &Path, read_only: bool) -> Result<(Connection, Value), String> {
     open_metered(db, read_only, &mut ReadBudget::new(None, None))
 }
@@ -636,10 +644,7 @@ fn open_flags(
     let read_only = flags.contains(OpenFlags::SQLITE_OPEN_READ_ONLY);
     let c = Connection::open_with_flags(db, flags).map_err(err)?;
     c.busy_timeout(Duration::from_secs(2)).map_err(err)?;
-    let version = rusqlite::version_number();
-    if version < 3_051_003 {
-        return Err("StorageUnavailable：运行SQLite缺WAL-reset修复".into());
-    }
+    let version = checked_sqlite_version()?;
     if !read_only {
         if flags.contains(OpenFlags::SQLITE_OPEN_CREATE) {
             c.execute_batch("PRAGMA journal_mode=WAL;").map_err(err)?;

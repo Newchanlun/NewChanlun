@@ -1,5 +1,6 @@
 //! ADR 0073：冻结创世身份，追加权威代向量；部署定位符不进入业务原件。
 use super::{error, ids, Profile};
+use crate::economic_session::validate_recovery_id;
 use crate::session_protocol::{canonical_json, nonnegative, positive, strict_json};
 use rusqlite::{params, Connection};
 use serde::{Deserialize, Serialize};
@@ -139,21 +140,11 @@ fn digest(s: &str) -> Result<(), String> {
         Err(error("恢复配置或切面摘要不是规范业务摘要"))
     }
 }
-fn recovery_id(id: &str) -> Result<(), String> {
-    if id.len() > 96 {
-        return Err(error("恢复 ID 超过上限"));
-    }
-    if id.is_ascii() {
-        ids::name(id, "recovery_id")
-    } else {
-        Err(error("恢复 ID 必须是 ASCII"))
-    }
-}
 impl Identities {
     pub(super) fn validate(&self, p: &Profile) -> Result<(), String> {
         digest(&self.e_manifest_hash)?;
         let s: StructureConfig = serde_json::from_value(self.s_config.clone()).map_err(error)?;
-        ids::reference(&s.rule_revision, "S rule_revision")?;
+        ids::s_rule_revision(&s.rule_revision)?;
         for value in [&s.profile_hash, &s.catalog_hash, &s.clock_plan_hash] {
             digest(value)?;
         }
@@ -193,7 +184,7 @@ impl Identities {
                 {
                     return Err(conflict("E 回执未绑定创世域/版本/业务配置"));
                 }
-                recovery_id(&q.recovery_id)?;
+                validate_recovery_id(&q.recovery_id)?;
                 nonnegative(&q.cut.commit_seq, "commit_seq")?;
                 digest(&q.cut.root_hash)?;
                 (q.from_epoch, q.session_id, q.session_generation)
@@ -206,7 +197,7 @@ impl Identities {
                 {
                     return Err(conflict("S 回执未绑定创世域/版本/业务配置"));
                 }
-                recovery_id(&q.recovery_id)?;
+                validate_recovery_id(&q.recovery_id)?;
                 ids::reference(&q.clock_event_id, "S clock_event_id")?;
                 nonnegative(&q.cut.generation, "generation")?;
                 ids::reference(&q.cut.structure_cut, "S structure_cut")?;

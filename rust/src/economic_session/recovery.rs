@@ -24,6 +24,19 @@ pub(super) struct Request {
     from: i64,
 }
 
+pub(crate) fn validate_recovery_id(id: &str) -> Result<(), String> {
+    if id.is_empty()
+        || id.len() > 96
+        || matches!(id, "." | "..")
+        || !id
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b"-_.".contains(&b))
+    {
+        return Err("InvalidDomain：recovery_id 必须为 1..96 字节的非路径 ASCII 标识".into());
+    }
+    Ok(())
+}
+
 impl Request {
     pub(super) fn load(path: &Path, config: &Config) -> Result<Self, String> {
         let mut raw = Vec::new();
@@ -45,13 +58,7 @@ impl Request {
             return Err("InvalidDomain：恢复请求格式未知".into());
         }
         let id = required(&document, "recovery_id")?;
-        if id.len() > 96
-            || !id
-                .bytes()
-                .all(|b| b.is_ascii_alphanumeric() || b"-_.".contains(&b))
-        {
-            return Err("InvalidDomain：恢复身份必须为 1..96 字节的 ASCII 标识".into());
-        }
+        validate_recovery_id(id)?;
         let key = format!("{SCHEMA}:{id}");
         let from = positive(required(&document, "from_epoch")?, "from_epoch")?;
         for (field, expected) in [
@@ -126,14 +133,13 @@ pub(super) fn run(config: &Config, request: &Request, action: Action) -> Result<
     } else {
         c.transaction().map_err(err)?
     };
+    if action == Action::VerifyCurrent {
+        return verify_current(&tx, config, request);
+    }
     audit(&tx, config)?;
     let epoch = recovery_epoch(&tx)?;
-    if let Some((next, original)) = request.find(&tx, config)? {
-        return if action == Action::VerifyCurrent && next != epoch {
-            Err("StaleWriter：原恢复收据不能授权当前写者".into())
-        } else {
-            Ok(original)
-        };
+    if let Some((_, original)) = request.find(&tx, config)? {
+        return Ok(original);
     }
     if action != Action::Recover {
         return Err("MissingDependency：具名恢复收据不存在".into());
@@ -157,6 +163,18 @@ pub(super) fn run(config: &Config, request: &Request, action: Action) -> Result<
     Ok(original)
 }
 
+fn verify_current(c: &Connection, config: &Config, request: &Request) -> Result<Value, String> {
+    audit(c, config)?;
+    let epoch = recovery_epoch(c)?;
+    let (next, original) = request
+        .find(c, config)?
+        .ok_or("MissingDependency：具名恢复收据不存在")?;
+    if next != epoch {
+        return Err("StaleWriter：原恢复收据不能授权当前写者".into());
+    }
+    Ok(original)
+}
+
 /// X 已由受控启动方收到 current-recovery 原件后，在原 E 库上做只读复核。
 /// 与 CLI 共用域审计、原 cut、历史收据和当前 epoch 判据；不竞争在线 E 的写者锁。
 #[cfg(unix)]
@@ -171,7 +189,8 @@ pub(crate) fn verify_x_current_recovery(
         return Err("IdentityConflict：X 恢复要求原新版 E 部署".into());
     }
     let request = Request::parse(receipt["request"].clone(), &config)?;
-    if run(&config, &request, Action::VerifyCurrent)? != *receipt {
+    let original = super::recovery_snapshot::read(db, |c| verify_current(c, &config, &request))?;
+    if original != *receipt {
         return Err("IdentityConflict：X 的 E 恢复回执与域本地原件不同".into());
     }
     Ok(())

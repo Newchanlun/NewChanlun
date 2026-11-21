@@ -1,11 +1,12 @@
 //! ADR 0073：每条历史事件核当时唯一权威绑定；当前查询不能重写原执行证明。
 use super::{
-    authority_binding::History, authority_frame, authority_reply, error, logical_now,
+    authority_binding::History, authority_frame, authority_reply, error, hash, logical_now,
     query_execution_frame, store, validate_accept_clock, validate_execution_record, AcceptClock,
     Batch, ExactCommand, Profile,
 };
 use crate::session_protocol::{canonical_json, strict_json};
-use rusqlite::{params, Connection};
+use rusqlite::{params, Connection, OptionalExtension};
+use serde::Deserialize;
 use serde_json::{json, Value};
 
 pub(super) fn record(
@@ -31,6 +32,102 @@ pub(super) struct Event {
     pub(super) original: Value,
 }
 
+impl Event {
+    fn decode(
+        h: &History,
+        seq: i64,
+        phase: String,
+        binding_seq: i64,
+        raw: String,
+    ) -> Result<Self, String> {
+        let original = strict_json(raw.as_bytes())?;
+        if h.seq_at_event(seq) != binding_seq || raw != canonical_json(&original) {
+            return Err(conflict("历史事件与发生时的绑定或规范原件不符"));
+        }
+        Ok(Self {
+            seq,
+            binding_seq,
+            phase,
+            original,
+        })
+    }
+
+    fn parts(&self) -> Vec<(&'static str, &Value)> {
+        let doc = &self.original;
+        let mut parts = match self.phase.as_str() {
+            "accept" => vec![("request", &doc["request"]), ("reply", &doc["reply"])],
+            "request" => vec![("request", &doc["request"]), ("batch", &doc["batch"])],
+            "evidence" => vec![("original_reply", &doc["original_reply"])],
+            "claim" | "observe" | "publish" => vec![("batch", &doc["batch"])],
+            _ => vec![],
+        };
+        if self.phase == "evidence" && !doc["observed_query"].is_null() {
+            let q = &doc["observed_query"];
+            parts.extend([
+                ("query_request", &q["request"]),
+                ("query_reply", &q["reply"]),
+            ]);
+        }
+        parts
+    }
+
+    fn summary(&self) -> Value {
+        let parts: serde_json::Map<String, Value> = self
+            .parts()
+            .into_iter()
+            .map(|(name, doc)| (name.into(), json!(hash(doc))))
+            .collect();
+        let doc = &self.original;
+        let mut summary = json!({
+            "event_seq":self.seq, "binding_seq":self.binding_seq, "phase":self.phase,
+            "record_sha256":hash(doc), "parts":parts
+        });
+        if !doc["evidence_event_seq"].is_null() {
+            summary["caused_by_event_seq"] = doc["evidence_event_seq"].clone();
+        } else if !doc["claim_event_seq"].is_null() {
+            summary["caused_by_event_seq"] = doc["claim_event_seq"].clone();
+        }
+        if !doc["observed_query"].is_null() {
+            let q = &doc["observed_query"];
+            summary["observed_query"] = json!({
+                "s_authority_epoch":q["reply"]["producer_epoch"], "read_ns":q["read_ns"]
+            });
+        }
+        summary
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct OriginalRef {
+    event_seq: i64,
+    part: String,
+}
+
+pub(super) fn query_original(
+    c: &Connection,
+    h: &History,
+    reference: OriginalRef,
+) -> Result<Value, String> {
+    let (id, phase, seq, raw) = c.query_row(
+        "SELECT command_id,phase,binding_seq,original FROM x_authority_events WHERE event_seq=?1",
+        [reference.event_seq], |r| Ok((r.get::<_, String>(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+    ).optional().map_err(error)?.ok_or("MissingDependency：历史事件不存在")?;
+    let event = Event::decode(h, reference.event_seq, phase, seq, raw)?;
+    let original = match reference.part.as_str() {
+        "record" => event.original,
+        "result" if event.phase == "publish" => store::read_batch(c, &id)?,
+        part => event
+            .parts()
+            .into_iter()
+            .find(|(name, _)| *name == part)
+            .map(|(_, value)| value.clone())
+            .ok_or("MissingDependency：该事件没有指定原件")?,
+    };
+    Ok(json!({"kind":"AuthorityOriginal","event_seq":event.seq,
+        "binding_seq":event.binding_seq,"part":reference.part,"original":original}))
+}
+
 fn read_events(
     c: &Connection,
     h: &History,
@@ -53,16 +150,7 @@ fn read_events(
     let mut events = Vec::new();
     for row in rows {
         let (seq, phase, binding_seq, raw) = row.map_err(error)?;
-        let original = strict_json(raw.as_bytes())?;
-        if h.seq_at_event(seq) != binding_seq || raw != canonical_json(&original) {
-            return Err(conflict("历史事件与发生时的绑定或规范原件不符"));
-        }
-        events.push(Event {
-            seq,
-            binding_seq,
-            phase,
-            original,
-        });
+        events.push(Event::decode(h, seq, phase, binding_seq, raw)?);
     }
     Ok(events)
 }
@@ -305,6 +393,15 @@ pub(super) fn audit(
     Ok(())
 }
 
+/// 极长的原收据 ID 按原回包引用读取；在线摘要从不复制无界字段。
+fn receipt_id(id: &Value) -> Value {
+    if canonical_json(id).len() <= 512 {
+        id.clone()
+    } else {
+        Value::Null
+    }
+}
+
 pub(super) fn query(
     c: &Connection,
     genesis: &Profile,
@@ -312,31 +409,62 @@ pub(super) fn query(
     epoch: i64,
     id: &str,
 ) -> Result<Value, String> {
-    use rusqlite::OptionalExtension;
+    let current = h.profile_at(genesis, h.current_seq())?;
+    let mut response = json!({
+        "kind":"ExactCommandState","command_id":id,"state":"NoRecord",
+        "current_binding_seq":h.current_seq(),"x_writer_epoch":epoch,
+        "current_e_authority_epoch":current.e.authority_epoch,
+        "current_s_authority_epoch":current.s.authority_epoch,"read_ns":logical_now(c)?
+    });
     let Some(row) = c
         .query_row(&format!("{COMMANDS} WHERE id=?1"), [id], command_row)
         .optional()
         .map_err(error)?
     else {
-        return Ok(
-            json!({"kind":"ExactCommandState","command_id":id,"state":"NoRecord",
-            "current_binding_seq":h.current_seq(),"read_ns":logical_now(c)?}),
-        );
+        return Ok(response);
     };
     let events = verify(c, genesis, h, epoch, &row)?;
     let accept = &events[0];
     let reply = &accept.original["reply"]["payload"];
-    let history: Vec<Value> = events.iter().map(|e|
-        json!({"event_seq":e.seq,"binding_seq":e.binding_seq,"phase":e.phase,"original":e.original})
-    ).collect();
-    Ok(
-        json!({"kind":"ExactCommandState","command_id":id,"state":row.state,
-        "current_binding_seq":h.current_seq(),"read_ns":logical_now(c)?,
-        "x_accept":accept.original["clock"],
-        "causal_refs":[{"authority_id":reply["authority_id"],"authority_epoch":reply["authority_epoch"],
-            "receipt_id":row.release,"command_hash":reply["command_hash"],"release_commit_ns":reply["commit_ns"]}],
-        "authority_history":history}),
-    )
+    response["state"] = json!(row.state);
+    response["x_accept"] = accept.original["clock"].clone();
+    response["causal_refs"] = json!([{
+        "authority_id":reply["authority_id"], "authority_epoch":reply["authority_epoch"],
+        "receipt_id":receipt_id(&reply["receipt_id"]), "command_hash":reply["command_hash"],
+        "release_commit_ns":reply["commit_ns"], "event_seq":accept.seq, "part":"reply"
+    }]);
+    response["authority_history"] = json!(events.iter().map(Event::summary).collect::<Vec<_>>());
+    if let Some(request) = events.get(1) {
+        let original = &request.original["request"]["payload"];
+        let mut execution = json!({
+            "binding_seq":request.binding_seq,"s_authority_epoch":original["authority_epoch"],
+            "request_event_seq":request.seq
+        });
+        if let Some(evidence) = events.get(2) {
+            let reply = &evidence.original["original_reply"]["payload"];
+            execution["receipt"] = json!({
+                "event_seq":evidence.seq,"part":"original_reply",
+                "receipt_id":receipt_id(&reply["receipt_id"]),"commit_ns":reply["commit_ns"]
+            });
+        }
+        response["s_execution"] = execution;
+        let batch = &request.original["batch"];
+        let mut result = json!({
+            "state":"Pending","request_event_seq":request.seq,"request_sha256":hash(batch)
+        });
+        if row.state == "Observed" {
+            let id = batch["request_id"]
+                .as_str()
+                .ok_or_else(|| conflict("原批身份缺失"))?;
+            let event = publication(c, h, id, batch)?;
+            result["state"] = json!("Published");
+            result["result_event_seq"] = json!(event.seq);
+            result["binding_seq"] = json!(event.binding_seq);
+            result["result_sha256"] = json!(hash(&store::read_batch(c, id)?));
+        }
+        response["batch_result"] = result;
+    }
+    Ok(response)
 }
 
 pub(super) fn link(c: &Connection, id: &str, phase: &str) -> Result<i64, String> {

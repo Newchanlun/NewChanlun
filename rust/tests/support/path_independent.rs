@@ -613,6 +613,7 @@ fn workload(
         manifest["business"]["clock"]["plan"]["recover_ns"] = json!(["125", "2000"]);
         save(&ec_manifest, &manifest);
         let sim = &mut configured["history_simulation"];
+        sim["business"]["max_frame_bytes"] = json!(8192);
         sim["business"]["recovery_identity"] = json!({
             "e_manifest_hash":digest(&manifest["business"]),"s_config":s_recovery_config(),
         });
@@ -831,7 +832,7 @@ fn workload(
         save(
             &e_request,
             &json!({
-                "schema_revision":"economic-recovery/1","domain_id":"E","recovery_id":"recovered-e",
+                "schema_revision":"economic-recovery/1","domain_id":"E","recovery_id":"recovery..nightly",
                 "session_id":SESSION_ID,"session_generation":"1","from_epoch":"1",
                 "manifest_hash":digest(&manifest["business"]),"cut":release["cut"],
             }),
@@ -968,22 +969,32 @@ fn workload(
     let accepted = x(space, "AcceptExact", command.clone());
     assert_eq!(accepted["state"], "Accepted", "{accepted}");
     if recovery.is_some() {
-        let q = &accepted["authority_history"][0];
-        assert_eq!(q["binding_seq"], 1);
-        assert_eq!(q["original"]["reply"]["producer_epoch"], "2");
-        assert_eq!(q["original"]["request"]["producer_epoch"], "1");
-        assert_eq!(q["original"]["request"]["source_epoch"], "one");
-        assert_eq!(q["original"]["reply"]["payload"]["command"], *command);
-        assert_eq!(
-            q["original"]["reply"]["payload"]["receipt_id"],
-            release["receipt_key"]
-        );
-        assert_eq!(q["original"]["reply"]["payload"]["commit_ns"], RELEASE_NS);
+        let event = &accepted["authority_history"][0];
+        assert_eq!(event["binding_seq"], 1);
+        let raw = |part| {
+            let fetched = expect(
+                x(
+                    space,
+                    "QueryAuthorityOriginal",
+                    json!({"event_seq":event["event_seq"],"part":part}),
+                ),
+                "AuthorityOriginal",
+            );
+            assert_eq!(digest(&fetched["original"]), event["parts"][part]);
+            fetched["original"].clone()
+        };
+        let (request, reply) = (raw("request"), raw("reply"));
+        assert_eq!(reply["producer_epoch"], "2");
+        assert_eq!(request["producer_epoch"], "1");
+        assert_eq!(request["source_epoch"], "one");
+        assert_eq!(reply["payload"]["command"], *command);
+        assert_eq!(reply["payload"]["receipt_id"], release["receipt_key"]);
+        assert_eq!(reply["payload"]["commit_ns"], RELEASE_NS);
         println!(
             "X first E2 exchange binds current E envelope, original ReleaseExact receipt and clock"
         );
     }
-    expect(
+    let first_batch = expect(
         x(
             space,
             "AdvanceBar",
@@ -992,6 +1003,17 @@ fn workload(
         "SimulationBatch",
     );
     source.join().unwrap();
+    if recovery.is_some() {
+        let observed = x(space, "QueryCommand", command["command_id"].clone());
+        assert_eq!(observed["state"], "Observed", "{observed}");
+        assert_eq!(x(space, "AcceptExact", command.clone()), observed);
+        assert_eq!(observed["batch_result"]["state"], "Published");
+        assert_eq!(
+            observed["batch_result"]["result_sha256"],
+            digest(&first_batch)
+        );
+        println!("true E/B/X with controlled S and 8 KiB: accepted/observed/replayed readback, S served one qualification");
+    }
     let batch = expect(
         x(
             space,
@@ -1633,7 +1655,7 @@ enum RecoveryArm {
 }
 
 fn s_recovery_config() -> Value {
-    json!({"rule_revision":"rule/1","profile_hash":"1".repeat(64),"catalog_hash":"2".repeat(64),
+    json!({"rule_revision":"s2-axis-quantifiers+new-bi/2","profile_hash":"1".repeat(64),"catalog_hash":"2".repeat(64),
         "clock_plan_hash":"3".repeat(64),"structure_source":{"category":"TestOnlyStructure","namespaces":[DECLARED_NS]}})
 }
 fn s_recovery(from: i64) -> Value {

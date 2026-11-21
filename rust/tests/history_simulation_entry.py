@@ -454,15 +454,16 @@ def run(name):
 def rebind_attempts():
     """Real X + controlled S seam; the E live E/B arm is in production_session_entry."""
     profile_path=ROOT/'x.json'; db=ROOT/'x.db'; xp=ROOT/'x'; sp=ROOT/'s'; ep=ROOT/'e'
-    sdb=ROOT/'s.db'; edb=ROOT/'e.db'; manifest=ROOT/'e.json'; handoff_path=ROOT/'rebind.json'
+    e_directory=ROOT/'E data #%?'; e_directory.mkdir()
+    sdb=ROOT/'s.db'; edb=e_directory/'e.db'; manifest=e_directory/'e.json'; handoff_path=ROOT/'rebind.json'
     sim=dict(model=model(),session_id='session',session_generation='1',x_id='X',
         source_namespace='x-sim',source_epoch='epoch1',
         e=dict(authority_id='E',authority_epoch='1',schema_revision='economic-session/1',
             reply_namespace='economic-session/replies',producer_id='E:session'),
         s=dict(authority_id='S',authority_epoch='1',schema_revision='s-authority-fixture/1',
             reply_namespace='s/replies',producer_id='S:session'),
-        conditions=CONDITIONS,timeout_ms=600,max_frame_bytes=1048576)
-    s_config=dict(rule_revision='rule/1',profile_hash='1'*64,catalog_hash='2'*64,
+        conditions=CONDITIONS,timeout_ms=600,max_frame_bytes=8192)
+    s_config=dict(rule_revision='s2-axis-quantifiers+new-bi/2',profile_hash='1'*64,catalog_hash='2'*64,
         clock_plan_hash='3'*64,structure_source=dict(category='TestOnlyStructure',namespaces=['testonly.ohlc']))
     e_business=dict(schema_revision='economic-manifest/2',protocol_revision='economic-session/1',
         book_revision='tb03c-book/1',session_id='session',session_generation='1',
@@ -471,14 +472,16 @@ def rebind_attempts():
             producer_epoch='1',operations=['ReadView'])],
         resources=dict(max_frame_bytes='1048576',read_timeout_ms='1000',write_timeout_ms='1000',
             response_timeout_ms='2000',queue_capacity='2',max_connections='2'),
-        clock=dict(kind='TestOnly',plan=dict(init_ns='1',recover_ns=['10'],messages={})))
+        clock=dict(kind='TestOnly',plan=dict(init_ns='1',recover_ns=['10','20'],messages={})))
     e_deploy=dict(schema_revision='economic-deployment/1',domains={
         'E':dict(db=str(edb),socket=str(ep)),'B:alpha':dict(db=str(ROOT/'b.db'),socket=str(ROOT/'b'))},
         voice={},finance=None,fault_markers=[],x_db=None)
     manifest.write_text(canonical(dict(schema_revision='economic-session-config/2',business=e_business,deployment=e_deploy)))
-    def e_cli(op,*args):
-        result=subprocess.run([os.environ['X_FIXTURE_E_BIN'],op,'--db',str(edb),
+    def run_e(op,*args):
+        return subprocess.run([os.environ['X_FIXTURE_E_BIN'],op,'--db',str(edb),
             '--manifest',str(manifest),*args],capture_output=True,timeout=5)
+    def e_cli(op,*args):
+        result=run_e(op,*args)
         assert result.returncode==0,(result.stdout,result.stderr)
         return json.loads(result.stdout)
     original_cut=e_cli('init')['cut']
@@ -496,8 +499,8 @@ def rebind_attempts():
     def save(v):
         with os.fdopen(os.open(handoff_path,os.O_WRONLY|os.O_CREAT|os.O_TRUNC,0o600),'w') as f:
             f.write(canonical(v))
-    def refused(args):
-        result=subprocess.run(args,capture_output=True,timeout=5)
+    def refused(args,env=None):
+        result=subprocess.run(args,capture_output=True,timeout=5,env=env)
         assert result.returncode==2,(result.stdout,result.stderr)
         return result.stderr.decode()
     def source_s(from_epoch):
@@ -509,6 +512,12 @@ def rebind_attempts():
                 clock_event_id=f'recover-{from_epoch}')))
     def handoff(from_epoch):
         return dict(schema_revision='x-authority-rebind-input/1',domains=['S'],s=source_s(from_epoch))
+    def e_handoff(receipt):
+        return dict(schema_revision='x-authority-rebind-input/1',domains=['E'],
+            e=dict(verification='current-recovery',db=str(edb),receipt=receipt))
+    def inventory():
+        return {p.name:(p.stat().st_size,p.stat().st_mtime_ns,p.stat().st_ctime_ns,p.read_bytes())
+                for p in e_directory.iterdir()}
     def dump():
         with sqlite3.connect(db) as conn: return '\n'.join(conn.iterdump())
     def binding():
@@ -527,6 +536,23 @@ def rebind_attempts():
         result=ask(op,val)
         assert result['kind']==kind,result
         return result
+    def fetch(event,part,expected_hash):
+        value=verdict('QueryAuthorityOriginal',dict(event_seq=event,part=part),'AuthorityOriginal')
+        assert value['event_seq']==event and value['part']==part,value
+        assert digest(value['original'])==expected_hash,value
+        return value['original']
+    def records(id,result):
+        # 对照持久原件逐项验摘要与读取，保留原有跨恢复不变性检查。
+        with sqlite3.connect(db) as conn:
+            stored=dict(conn.execute('SELECT event_seq,original FROM x_authority_events WHERE command_id=?',
+                (id,)))
+        for event in result['authority_history']:
+            seq=event['event_seq']; original=json.loads(stored[seq])
+            assert event['record_sha256']==digest(original)
+            for part,expected in event['parts'].items():
+                field=original['observed_query'][part[6:]] if part.startswith('query_') else original[part]
+                assert fetch(seq,part,expected)==field
+        return result['authority_history']
     def start(rebind=False,other=db,profile=profile_path):
         p=subprocess.Popen(argv(rebind,other,profile),stdout=subprocess.DEVNULL,stderr=log)
         for _ in range(500):
@@ -585,7 +611,24 @@ def rebind_attempts():
     log=open(ROOT/'x.log','wb',buffering=0)
     e=Source(ep,'E'); s=Source(sp,'S')
     p=None
+    holder=None
     try:
+        # #2128 现役写者原值；原字节入创世记录，不做代理别名。
+        upstream='s2-axis-quantifiers+new-bi/2+segment-second/2+segment-turn/1+second-seq-scan-budget/2+segment-first-own/1+center-seed/1+center-pair/1+raw-initialization-w/2+bounded-layout/2'
+        branch=ROOT/'upstream.db'; branch_profile=ROOT/'upstream.json'; variant=copy.deepcopy(outer)
+        variant['history_simulation']['deployment']['db']=str(branch)
+        rule_config=variant['history_simulation']['business']['recovery_identity']['s_config']
+        for rule in ('/tmp/version/2','a/../2','a/./2',r'a\/2','file://rule/2','a\n/2',
+                     'state.sqlite/2','rule/2+state.json/1','a//2','a/2+'):
+            rule_config['rule_revision']=rule; branch_profile.write_text(canonical(variant))
+            assert 'S rule_revision' in refused(argv(False,branch,branch_profile)),rule
+            assert not branch.exists()
+        rule_config['rule_revision']=upstream; branch_profile.write_text(canonical(variant))
+        p=start(other=branch,profile=branch_profile); stop_x(p); p=None
+        with sqlite3.connect(branch) as conn:
+            assert any(upstream in row for row, in conn.execute('SELECT v FROM x_sim_meta'))
+        print('official S rule spellings accepted unchanged: stack and #2128; path and file negatives rejected')
+
         save(handoff(1))
         assert '原 X 库' in refused(argv(True))
         assert not db.exists() and not Path(str(db)+'.writer.lock').exists()
@@ -595,16 +638,30 @@ def rebind_attempts():
         db.rename(ROOT/'uninitialized.db')
         p=start()
         observed,ready,lost,pending=map(cmd,['o','a','b','next'])
-        for val in (observed,ready,lost,pending):
+        accepted=verdict('AcceptExact',observed,'ExactCommandState')
+        assert accepted['state']=='Accepted'
+        for val in (ready,lost,pending):
             assert verdict('AcceptExact',val,'ExactCommandState')['state']=='Accepted'
-        verdict('AdvanceBar',batch(0,[observed['change']]),'SimulationBatch')
+        batch0=verdict('AdvanceBar',batch(0,[observed['change']]),'SimulationBatch')
+        observed_view=query('o','Observed')
+        replay=ask('AcceptExact',observed)
+        assert replay==observed_view
+        assert observed_view['batch_result']['state']=='Published'
+        receipt=observed_view['batch_result']
+        assert fetch(receipt['result_event_seq'],'result',receipt['result_sha256'])==batch0
+        for event in records('o',observed_view):
+            fetch(event['event_seq'],'record',event['record_sha256'])
+        assert len([q for q in s.calls if q['command_id']=='o'])==1
+        sizes=[len(canonical(v).encode())+1 for v in (accepted,batch0,observed_view,replay)]
+        assert max(sizes)<4096,sizes
+        print(f'8192-byte max: AcceptExact, AdvanceBar, QueryCommand, exact resend = {sizes} bytes; per-part/whole originals JSON, S claim=1')
         mixed=batch(1,[ready['change'],lost['change']])
         s.drop='b'
         verdict('AdvanceBar',mixed,'Error')
         states={'o':'Observed','a':'ExecutionReady','b':'ExecutionRequested','next':'Accepted'}
         frozen={k:query(k,v)['authority_history'] for k,v in states.items()}
         assert all(item['binding_seq']==0 for rows in frozen.values() for item in rows)
-        assert all(item['original']['request']['payload']['authority_epoch']=='1'
+        assert all(fetch(item['event_seq'],'request',item['parts']['request'])['payload']['authority_epoch']=='1'
             for rows in frozen.values() for item in rows if item['phase'] in ('accept','request'))
         stop_x(p); p=None; audit()
         before=dump()
@@ -644,17 +701,40 @@ def rebind_attempts():
         print('authority_rebind_rejects_invalid_transition: malformed/old/query/wrong S context/no X DB rejected without writes')
 
         e_request=ROOT/'e-recovery.json'
-        e_request.write_text(canonical(dict(schema_revision='economic-recovery/1',domain_id='E',
-            recovery_id='recover-e',session_id='session',session_generation='1',from_epoch='1',
-            manifest_hash=digest(e_business),cut=original_cut)))
+        request_e=dict(schema_revision='economic-recovery/1',domain_id='E',
+            recovery_id='recovery..nightly',session_id='session',session_generation='1',from_epoch='1',
+            manifest_hash=digest(e_business),cut=original_cut)
+        for bad in ('a/b',r'a\b','.','..','','a\n','x'*97):
+            e_request.write_text(canonical(dict(request_e,recovery_id=bad)))
+            refusal=run_e('recover-named','--recovery-request',str(e_request))
+            assert refusal.returncode==1 and b'recovery_id' in refusal.stderr,refusal.stderr
+        e_request.write_text(canonical(request_e))
+        holder=sqlite3.connect(edb)
+        holder.execute('BEGIN')
+        assert holder.execute('SELECT MAX(epoch) FROM epochs').fetchone()==(1,)
         actual=e_cli('recover-named','--recovery-request',str(e_request))
         assert actual==e_cli('current-recovery','--recovery-request',str(e_request))
-        combined=handoff(1)
-        combined.update(domains=['E','S'],e=dict(verification='current-recovery',db=str(edb),receipt=actual))
+        wal=Path(str(edb)+'-wal'); shm=Path(str(edb)+'-shm')
+        assert wal.stat().st_size>32 and shm.exists()
+        with sqlite3.connect(edb.as_uri()+'?immutable=1',uri=True) as checkpoint:
+            # 证明跳过活动 WAL 会错误地看到 E1。
+            assert checkpoint.execute('SELECT MAX(epoch) FROM epochs').fetchone()==(1,)
+        combined=e_handoff(actual)
+        combined.update(domains=['E','S'],s=source_s(1))
+        for bad in ('a/b',r'a\b','..'):
+            invalid=copy.deepcopy(combined); invalid['e']['receipt']['request']['recovery_id']=bad
+            save(invalid); assert 'recovery_id' in refused(argv(True)) and dump()==before
         save(combined)
         e.epoch='2'; s.epoch='2'; s.drop=None
+        media=inventory()
+        assert 'X 临时目录' in refused(argv(True),dict(os.environ,TMPDIR=str(e_directory)))
+        assert inventory()==media and dump()==before
         p=start(True)
         assert binding()[1]['new_vector']==dict(e_authority_epoch=2,s_authority_epoch=2)
+        assert binding()[1]['receipts'][0]['original']==actual
+        assert inventory()==media
+        holder.close(); holder=None
+        print('active WAL: checkpoint=1, X verified committed E2 recovery..nightly and binding_seq=1; E directory/bytes/mtime/ctime unchanged')
         for k,v in states.items():
             result=query(k,v)
             assert result['current_binding_seq']==1 and result['authority_history']==frozen[k],result
@@ -674,9 +754,17 @@ def rebind_attempts():
         old_claims={id:query(id,'MayHaveCalled')['authority_history'] for id in ('a','b')}
         evidence=old_claims['b'][2]
         assert evidence['binding_seq']==1
-        assert evidence['original']['observed_query']['reply']['producer_epoch']=='2'
-        assert evidence['original']['original_reply']['producer_epoch']=='1'
-        assert evidence['original']['original_reply']['payload']['commit_ns']==0
+        assert evidence['observed_query']==dict(s_authority_epoch='2',read_ns=1)
+        during=query('b','MayHaveCalled')
+        assert during['current_s_authority_epoch']=='2' and during['read_ns']==1
+        assert during['s_execution']==dict(binding_seq=0,s_authority_epoch='1',
+            request_event_seq=old_claims['b'][1]['event_seq'],
+            receipt=dict(event_seq=evidence['event_seq'],part='original_reply',receipt_id='S:b',commit_ns=0))
+        records('b',during)
+        oversized=verdict('QueryAuthorityOriginal',
+            dict(event_seq=evidence['event_seq'],part='record'),'Error')
+        assert oversized['error']=='ResponseTooLarge',oversized
+        print('8192-byte max: oversized historical record returned ResponseTooLarge; individual frames remained readable')
         assert old_claims['a'][2]['binding_seq']==0
         assert [m['op'] for m in s.calls if m['command_id']=='b']==[
             'RequestConditionalExecution','QueryExecuteCommitted','QueryExecuteCommitted','QueryExecuteCommitted']
@@ -712,10 +800,35 @@ def rebind_attempts():
         with sqlite3.connect(db) as conn:
             conn.execute("UPDATE x_authority_events SET binding_seq=0 WHERE command_id='o' AND phase='accept'")
         p=start(); assert len(binding())==3
+        stop_x(p); p=None
+
+        # 上游原值的另一原库仍在 E1；确保 X 要查 E 原库才知道 1→2 已过时。
+        e_request.write_text(canonical(dict(request_e,recovery_id='recover-again',from_epoch='2')))
+        latest=e_cli('recover-named','--recovery-request',str(e_request))
+        assert latest['writer_epoch']=='3'
+        assert latest==e_cli('current-recovery','--recovery-request',str(e_request))
+        checkpoint=sqlite3.connect(edb)
+        assert checkpoint.execute('PRAGMA wal_checkpoint(TRUNCATE)').fetchone()[0]==0
+        checkpoint.close()
+        media=inventory()
+        assert not wal.exists() and not shm.exists(), list(media)
+        save(e_handoff(actual))
+        assert 'StaleWriter' in refused(argv(True,branch,branch_profile))
+        with sqlite3.connect(branch) as conn:
+            assert conn.execute('SELECT binding_seq FROM x_authority_bindings').fetchall()==[(0,)]
+        assert inventory()==media
+        save(e_handoff(latest))
+        p=start(True)
+        assert binding()[3]['new_vector']==dict(e_authority_epoch=3,s_authority_epoch=3)
+        assert binding()[3]['receipts'][0]['original']==latest
+        assert inventory()==media
+        stop_x(p); p=None; audit()
+        print('checkpointed E1→E2→E3: stale receipt rejected, latest accepted; 0 WAL, SHM or extra files, E bytes and metadata unchanged')
         print('authority_rebind_s_and_dual_domain_vector: controlled S 1→2 with genuine E recovery; S alone 2→3, E stays 2')
         print('authority_rebind_preserves_original_attempts: Accepted, ExecutionRequested/NoRecord/bad proof, ExecutionReady, MayHaveCalled, Observed; one S claim per command, exact historic wire replay and audit')
     finally:
         if p is not None and p.poll() is None: stop_x(p)
+        if holder is not None: holder.close()
         log.close(); e.sock.close(); s.sock.close()
 
 if __name__=='__main__':

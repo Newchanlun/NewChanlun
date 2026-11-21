@@ -1660,6 +1660,11 @@ fn serve_initialized(
                             .ok_or("InvalidDomain：QueryCommand 身份须字符串")?;
                         query_command(c, genesis, history, epoch, id)
                     }
+                    "QueryAuthorityOriginal" => authority_history::query_original(
+                        c,
+                        history.ok_or("UnsupportedCapability：本库没有权威履历")?,
+                        serde_json::from_value(r.payload).map_err(error)?,
+                    ),
                     "QueryBatch" => store::read_batch(
                         c,
                         r.payload
@@ -1675,10 +1680,15 @@ fn serve_initialized(
                     _ => Err("UnsupportedCapability：未知 X 操作".into()),
                 }
             })();
-            match result {
+            let response = match result {
                 Ok(v) => v,
                 Err(e) => json!({"kind":"Error","error":e}),
+            };
+            // 和传输层使用同一规范编码，加一字节行尾。旧 profile 保留原协议行为。
+            if history.is_some() && canonical_json(&response).len() >= p.max_frame_bytes {
+                return json!({"kind":"Error","error":"ResponseTooLarge"});
             }
+            response
         },
     )
 }

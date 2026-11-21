@@ -18,7 +18,9 @@ mod phase_trace;
 mod quantity_calibration;
 mod recovery;
 #[cfg(unix)]
-pub(crate) use recovery::verify_x_current_recovery;
+pub(crate) use recovery::{validate_recovery_id, verify_x_current_recovery};
+#[cfg(unix)]
+mod recovery_snapshot;
 mod service;
 mod sr_expansion;
 mod store;
