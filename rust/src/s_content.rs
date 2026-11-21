@@ -9829,7 +9829,7 @@ mod native_owner_codec_bridge_tests {
     }
 
     #[test]
-    fn native_index_multi_shard_reservation_failure_releases_all_and_allocates_nothing() {
+    fn native_index_multi_shard_reservation_failure_refunds_headers_and_table_permits() {
         let keys = [[0; 32], [0xff; 32]];
         assert_ne!(
             NativeCaptureIndex::shard(&keys[0]),

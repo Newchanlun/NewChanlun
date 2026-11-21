@@ -155,7 +155,7 @@ impl NativeCaptureIndex {
         Ok(staged)
     }
     #[cfg(test)]
-    fn with_hasher(state: std::collections::hash_map::RandomState) -> Self {
+    pub(super) fn with_hasher(state: std::collections::hash_map::RandomState) -> Self {
         let mut index = Self::new();
         for shard in &mut index.shards {
             shard.table = HashMap::with_hasher(state.clone());

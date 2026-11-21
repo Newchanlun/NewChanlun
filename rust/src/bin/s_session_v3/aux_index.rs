@@ -2888,8 +2888,8 @@ mod tests {
 
     /// #1488 0077 P50（mut-0057 M2a 盲区）：Legacy→Native 转换期的索引许可须按「槽数×(size_of+1)」
     /// 全额计入本请求 scope（转换期峰值越过转换前 live + 许可）；漏计控制字节（M2a）或不经 scope
-    /// 预留都变红。#1855 起冷转换按各片真实桶数取 hash_room 档：槽数取转换后各片真实表容量
-    /// （≥8 桶时容量为桶数的 7/8）换算的桶数，每片另加 hash_room 的 16 槽。
+    /// 预留都变红。#1642 按摘要实测分布独立推出各冷片桶数（含小片档），
+    /// 非空片另加 hash_room 的 16 槽，固定堆上的表头块也须在转换期预付。
     #[cfg(feature = "s_capture_native_testonly")]
     #[test]
     fn p50_legacy_to_native_index_permit_counts_control_byte_per_slot() {
@@ -2922,12 +2922,14 @@ mod tests {
                 let native = legacy
                     .enable_native_frame_reuse_admitted(Some(scope))
                     .map_err(err)?;
-                let (index_bytes, slot_now, _) = native
+                let (index_bytes, slot_now, _, shard_headers) = native
                     .native_index_layout_for_testonly()
                     .expect("转换后须为 Native");
-                let tables = native.native_retention_numbers().expect("转换后须为 Native");
-                // 原件索引固定 16 片；本夹具每片都有节点。
-                let slots = tables.index_capacity * 8 / 7 + 16 * 16;
+                let digest_shards = native.native_index_digest_shards_for_testonly()
+                    .expect("转换后须为 Native");
+                let slots = super::super::audit_owner::cold_index_slots_for_test(
+                    &digest_shards, |(_, shard)| *shard,
+                );
                 assert_eq!(
                     index_bytes,
                     slots * slot_now,
@@ -2935,9 +2937,10 @@ mod tests {
                 );
                 // 转换期瞬时共存：索引许可先于 Legacy 原件释放计入，峰值须越过「转换前 live + 许可」。
                 // （净 live 增量因 Legacy 释放小于许可，不作判据。）
+                let fees = index_bytes + shard_headers;
                 assert!(
-                    peak_before < before + index_bytes && budget.peak() >= before + index_bytes,
-                    "索引许可须在转换期计入本 scope：live {before}，峰值 {peak_before} → {}，许可 {index_bytes}",
+                    peak_before < before + fees && budget.peak() >= before + fees,
+                    "索引许可须在转换期计入本 scope：live {before}，峰值 {peak_before} → {}，许可 {fees}",
                     budget.peak()
                 );
                 eprintln!(

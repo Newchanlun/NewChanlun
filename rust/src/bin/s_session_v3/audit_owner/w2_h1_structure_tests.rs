@@ -927,3 +927,41 @@ fn issue1642_issue1424_down_newbirth_signed_budget() {
         }
     }
 }
+
+#[test]
+fn issue1642_signed_writer_still_refuses_source_growth_one_byte_over_local_cap() {
+    use super::{SOURCE_APPEND_CAP_AT_GROWTH, SOURCE_APPEND_CAP_RECEIPT};
+
+    let envelopes = issue1424_down_123();
+    let fixture = W2H1Fixture::new(8);
+    let mut writer = fixture.open(&fixture.db);
+    assert_eq!(writer.handle(envelopes[0].clone()).unwrap()["kind"], "Committed");
+    for (i, envelope) in envelopes[..8].iter().enumerate().skip(1) {
+        SOURCE_APPEND_CAP_AT_GROWTH.with(|p| p.set(Some(1)));
+        let before = state::full_audit_calls_for_test();
+        let (result, allocations, refusals) =
+            issue1642_observe(&mut writer, envelope, "small-cap", i + 1);
+        SOURCE_APPEND_CAP_AT_GROWTH.with(|p| p.set(None));
+        assert_eq!(state::full_audit_calls_for_test(), before);
+        if let Some((growth, original_cap)) = SOURCE_APPEND_CAP_RECEIPT.with(|p| p.take()) {
+            assert!(original_cap >= growth);
+            assert!(refusals.is_empty(), "必须是局部拒绝，不是父账拒绝");
+            assert_eq!(result.unwrap_err(), M8D_P3_RESOURCE_REFUSAL);
+            let rejected = allocations.last().unwrap();
+            assert_eq!(rejected["growth"], growth);
+            assert_eq!(rejected["cap"], growth - 1);
+            assert!(rejected["parent_remaining"].as_u64().unwrap() >= growth as u64);
+            assert_eq!(rejected["appended"], false);
+            assert_eq!(rejected["allocated"], 0);
+            let pending = issue1642_persisted_receipt(&fixture.db, i as i64 + 1);
+            assert_eq!(pending["status"], "AcceptedPending");
+            assert!(pending["batch_id"].is_null());
+            let prior = issue1642_persisted_receipt(&fixture.db, i as i64);
+            assert_eq!(prior["status"], "Committed");
+            println!("ISSUE1642_SMALL_CAP g={} pending={pending} prior={prior}", i + 1);
+            return;
+        }
+        assert_eq!(result.unwrap()["kind"], "Committed");
+    }
+    panic!("小帽负控必须触及真实来源索引扩容");
+}

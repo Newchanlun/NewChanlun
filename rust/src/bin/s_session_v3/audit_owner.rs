@@ -5470,6 +5470,24 @@ fn p1_alpha_stray_on_keeper_ledger_survives_discard_retry_and_is_rejected() {
     );
 }
 
+/// 用夹具的各片条目数而不是实际容量/许可复算冷表，包含小片 4/8 桶档及非空表的控制组。
+#[cfg(all(test, feature = "s_capture_native_testonly"))]
+pub(super) fn cold_index_slots_for_test(
+    digest_shards: &[(newchan_rust::s_content::NodeDigest, usize)],
+    shard_of: impl Fn(&(newchan_rust::s_content::NodeDigest, usize)) -> usize,
+) -> usize {
+    let mut counts = [0usize; newchan_rust::s_content::AuditCapture::NATIVE_INDEX_SHARDS];
+    for entry in digest_shards {
+        counts[shard_of(entry)] += 1;
+    }
+    counts.into_iter().map(|n| match n {
+        0 => 0,
+        1..=3 => 4 + 16,
+        4..=7 => 8 + 16,
+        _ => (n * 8 / 7).next_power_of_two() + 16,
+    }).sum()
+}
+
 #[cfg(all(test, feature = "s_capture_native_testonly"))]
 #[test]
 fn r14_source_keeper_seal_and_next_request_share_explicit_parent() {
@@ -5773,21 +5791,9 @@ fn r14_source_keeper_seal_and_next_request_share_explicit_parent() {
                 // 和 hashbrown `capacity_to_buckets`（<4 条 4 桶，<8 条 8 桶，否则 ⌊n·8/7⌋ 取 2 的幂）加每表
                 // 16 字节控制组推出槽数；空片不建表。负控：旧选择器 `digest[0] % 16` 得 2304，单表得 2064。
                 assert_eq!(digest_shards.len(), R14_NODES, "索引条目数等于来源节点数");
-                let table_slots = |n: usize| match n {
-                    0 => 0,
-                    1..=3 => 4 + 16,
-                    4..=7 => 8 + 16,
-                    _ => (n * 8 / 7).next_power_of_two() + 16,
+                let derived_slots = |shard_of: &dyn Fn(&(newchan_rust::s_content::NodeDigest, usize)) -> usize| {
+                    cold_index_slots_for_test(&digest_shards, shard_of)
                 };
-                let derived_slots =
-                    |shard_of: &dyn Fn(&(newchan_rust::s_content::NodeDigest, usize)) -> usize| {
-                        let mut counts =
-                            [0usize; newchan_rust::s_content::AuditCapture::NATIVE_INDEX_SHARDS];
-                        for entry in &digest_shards {
-                            counts[shard_of(entry)] += 1;
-                        }
-                        counts.into_iter().map(table_slots).sum::<usize>()
-                    };
                 let sharded_slots = derived_slots(&|(_, shard)| *shard);
                 let index_growth = (sharded_slots - R14_INDEX_SLOTS) * slot_before_p2a;
                 let sealed_before_p2a = sealed_before_p2a_for(current_len)
