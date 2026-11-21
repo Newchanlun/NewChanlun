@@ -1290,12 +1290,378 @@ fn launcher_and_e_refuse_duplicate_fx_revisions_before_start() {
     }
 }
 
+/// 仅服务 `non_history_preserves_parent_startup_and_x_degradation` 的最小有界边界：
+/// 临时文件 stderr（无管道读线程）、独立进程组 RAII 守卫（`WNOWAIT` 固定 `pgid`，只对 `-pgid` 发兜底
+/// SIGKILL，不按 `/proc` 裸 PID 发信号）、非阻塞 `connect` + `session_transport` 共享总截止。
+mod non_history_bound {
+    use super::{launcher_bin, sha256_hex, Space, CREDENTIAL_KEY, SESSION, THETA_DIAGNOSTIC};
+    use newchan_rust::session_transport::{read_frame, write_frame_observed, NoObserver};
+    use serde_json::{json, Value};
+    use std::fs::File;
+    use std::io::ErrorKind;
+    use std::os::fd::{AsRawFd, FromRawFd};
+    use std::os::unix::net::UnixStream;
+    use std::os::unix::process::CommandExt;
+    use std::path::{Path, PathBuf};
+    use std::process::{Child, Command, ExitStatus, Stdio};
+    use std::time::{Duration, Instant};
+
+    pub(super) fn launcher_events(stderr: &str) -> Vec<Value> {
+        stderr
+            .lines()
+            .filter_map(|l| l.strip_prefix("production_session "))
+            .filter_map(|raw| serde_json::from_str::<Value>(raw).ok())
+            .collect()
+    }
+
+    fn wait_while(cap: Duration, mut busy: impl FnMut() -> bool) -> bool {
+        let until = Instant::now() + cap;
+        while busy() && Instant::now() < until {
+            std::thread::sleep(Duration::from_millis(25));
+        }
+        !busy()
+    }
+
+    /// 只读探测本测试进程组是否仍有除 leader 外的存活成员（绝不向裸 PID 发信号）。
+    pub(super) fn has_other_live_pgid_member(owner_pgid: u32) -> bool {
+        let self_pid = std::process::id();
+        std::fs::read_dir("/proc")
+            .ok()
+            .into_iter()
+            .flatten()
+            .flatten()
+            .any(|e| {
+                let Ok(pid) = e.file_name().to_string_lossy().parse::<u32>() else {
+                    return false;
+                };
+                if pid == owner_pgid || pid == self_pid {
+                    return false;
+                }
+                let Ok(stat) = std::fs::read_to_string(format!("/proc/{pid}/stat")) else {
+                    return false;
+                };
+                let Some((_, rest)) = stat.rsplit_once(')') else {
+                    return false;
+                };
+                let mut f = rest.split_whitespace();
+                f.next().is_some_and(|st| st != "Z")
+                    && f.nth(1).and_then(|s| s.parse::<u32>().ok()) == Some(owner_pgid)
+            })
+    }
+
+    pub(super) struct NonHistoryLauncher {
+        child: Child,
+        pgid: u32,
+        stderr_path: PathBuf,
+        reaped: bool,
+    }
+
+    impl NonHistoryLauncher {
+        pub(super) fn spawn(space: &Space, manifest: &Path, log_name: &str) -> Self {
+            assert!(
+                std::env::var_os(CREDENTIAL_KEY).is_none(),
+                "测试环境不得含哨兵键"
+            );
+            let stderr_path = space.path(log_name);
+            let child = Command::new(launcher_bin())
+                .args(["--manifest"])
+                .arg(manifest)
+                .env_remove(CREDENTIAL_KEY)
+                .env_remove(THETA_DIAGNOSTIC.0)
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::from(File::create(&stderr_path).unwrap()))
+                .process_group(0)
+                .spawn()
+                .unwrap();
+            let pgid = child.id();
+            Self {
+                child,
+                pgid,
+                stderr_path,
+                reaped: false,
+            }
+        }
+
+        pub(super) fn id(&self) -> u32 {
+            self.pgid
+        }
+
+        fn read_stderr(&self) -> String {
+            std::fs::read_to_string(&self.stderr_path).unwrap_or_default()
+        }
+
+        /// `WNOWAIT` 探测 leader 退出但不回收，保持 `pgid` 由内核固定不被复用。
+        pub(super) fn leader_exited(&self) -> bool {
+            if self.reaped {
+                return true;
+            }
+            let mut info: libc::siginfo_t = unsafe { std::mem::zeroed() };
+            let ret = unsafe {
+                libc::waitid(
+                    libc::P_PID,
+                    self.pgid as libc::id_t,
+                    &mut info,
+                    libc::WEXITED | libc::WNOHANG | libc::WNOWAIT,
+                )
+            };
+            ret == 0 && unsafe { info.si_pid() != 0 }
+        }
+
+        pub(super) fn wait_until<T>(
+            &self,
+            what: &str,
+            timeout: Duration,
+            mut check: impl FnMut(&str) -> Option<T>,
+        ) -> T {
+            let deadline = Instant::now() + timeout;
+            loop {
+                let log = self.read_stderr();
+                if let Some(found) = check(&log) {
+                    return found;
+                }
+                if self.leader_exited() {
+                    let final_log = self.read_stderr();
+                    if let Some(found) = check(&final_log) {
+                        return found;
+                    }
+                    panic!("{what}：launcher 提前退出\n{final_log}");
+                }
+                assert!(
+                    Instant::now() < deadline,
+                    "{what} 超时（上限 {timeout:?}）\n{log}"
+                );
+                std::thread::sleep(Duration::from_millis(25));
+            }
+        }
+
+        pub(super) fn wait_exit(
+            mut self,
+            timeout: Duration,
+        ) -> Result<(ExitStatus, String), String> {
+            let started = Instant::now();
+            if !wait_while(timeout, || !self.leader_exited()) {
+                let _ = self.shutdown(false);
+                return Err(format!(
+                    "launcher 超过上限 {timeout:?}（耗时 {:?}）未退出，已清理进程组 {}：\n{}",
+                    started.elapsed(),
+                    self.pgid,
+                    self.read_stderr()
+                ));
+            }
+            self.shutdown(true)
+        }
+
+        pub(super) fn stop_gracefully(mut self) -> Result<(ExitStatus, String), String> {
+            self.shutdown(true)
+        }
+
+        fn shutdown(&mut self, require_graceful: bool) -> Result<(ExitStatus, String), String> {
+            if self.reaped {
+                return Err("launcher 已回收".into());
+            }
+            let (grace, kill_cap) = (Duration::from_secs(15), Duration::from_secs(5));
+            let mut escalated = false;
+            if !self.leader_exited() {
+                unsafe { libc::kill(self.pgid as libc::pid_t, libc::SIGTERM) };
+                if !wait_while(grace, || !self.leader_exited()) {
+                    escalated = true;
+                    // SAFETY: leader 尚未回收，`pgid` 由内核固定归本测试所有。
+                    unsafe { libc::kill(-(self.pgid as libc::pid_t), libc::SIGKILL) };
+                    wait_while(kill_cap, || !self.leader_exited());
+                }
+            }
+            let mut stragglers = false;
+            if !wait_while(Duration::from_millis(200), || {
+                has_other_live_pgid_member(self.pgid)
+            }) {
+                stragglers = true;
+                wait_while(kill_cap, || {
+                    unsafe { libc::kill(-(self.pgid as libc::pid_t), libc::SIGKILL) };
+                    has_other_live_pgid_member(self.pgid)
+                });
+            }
+            let still_live = has_other_live_pgid_member(self.pgid);
+            let status = self
+                .leader_exited()
+                .then(|| self.child.try_wait().ok().flatten())
+                .flatten();
+            self.reaped = true;
+            let log = self.read_stderr();
+            if escalated || still_live || (require_graceful && stragglers) {
+                return Err(format!(
+                    "launcher 进程组 {} 停机异常（escalated={escalated}, still_live={still_live}, stragglers={stragglers}）：\n{log}",
+                    self.pgid
+                ));
+            }
+            let status = status.ok_or_else(|| format!("launcher 未返回退出状态：\n{log}"))?;
+            Ok((status, log))
+        }
+    }
+
+    impl Drop for NonHistoryLauncher {
+        fn drop(&mut self) {
+            if !self.reaped {
+                let _ = self.shutdown(false);
+            }
+        }
+    }
+
+    /// 路径在 bind 后、listen 前就可见；只在尚未写请求的 connect 阶段等待监听就绪或队列腾位。
+    pub(super) fn connect_unix_bounded(
+        socket: &Path,
+        deadline: Instant,
+    ) -> Result<UnixStream, String> {
+        let bytes = socket.as_os_str().as_encoded_bytes();
+        let mut addr: libc::sockaddr_un = unsafe { std::mem::zeroed() };
+        if bytes.len() >= addr.sun_path.len() || bytes.contains(&0) {
+            return Err(format!("Unix socket 路径非法：{}", socket.display()));
+        }
+        addr.sun_family = libc::AF_UNIX as libc::sa_family_t;
+        for (d, s) in addr.sun_path.iter_mut().zip(bytes) {
+            *d = *s as libc::c_char;
+        }
+        let len = (std::mem::offset_of!(libc::sockaddr_un, sun_path) + bytes.len() + 1)
+            as libc::socklen_t;
+        let left = || {
+            deadline
+                .checked_duration_since(Instant::now())
+                .filter(|d| !d.is_zero())
+                .ok_or_else(|| {
+                    format!(
+                        "Unix connect 等待监听就绪或队列腾位超时：{}",
+                        socket.display()
+                    )
+                })
+        };
+        let stream = 'connect: loop {
+            left()?;
+            let fd = unsafe {
+                libc::socket(
+                    libc::AF_UNIX,
+                    libc::SOCK_STREAM | libc::SOCK_NONBLOCK | libc::SOCK_CLOEXEC,
+                    0,
+                )
+            };
+            if fd < 0 {
+                return Err(format!(
+                    "创建 Unix socket 失败：{}",
+                    std::io::Error::last_os_error()
+                ));
+            }
+            let stream = unsafe { UnixStream::from_raw_fd(fd) };
+            let rc = unsafe {
+                libc::connect(
+                    stream.as_raw_fd(),
+                    (&addr as *const libc::sockaddr_un).cast(),
+                    len,
+                )
+            };
+            if rc == 0 {
+                break stream;
+            }
+            let err = std::io::Error::last_os_error();
+            match err.raw_os_error() {
+                Some(libc::EINTR) => continue,
+                Some(e)
+                    if e == libc::EAGAIN || e == libc::EWOULDBLOCK || e == libc::ECONNREFUSED => {}
+                Some(libc::EINPROGRESS) => loop {
+                    let ms = left()?
+                        .as_nanos()
+                        .div_ceil(1_000_000)
+                        .max(1)
+                        .min(i32::MAX as u128) as i32;
+                    let mut pfd = libc::pollfd {
+                        fd: stream.as_raw_fd(),
+                        events: libc::POLLOUT,
+                        revents: 0,
+                    };
+                    let n = unsafe { libc::poll(&mut pfd, 1, ms) };
+                    if n < 0 && std::io::Error::last_os_error().kind() == ErrorKind::Interrupted {
+                        continue;
+                    }
+                    if n <= 0 {
+                        return Err(format!("Unix connect poll 超时/失败：{}", socket.display()));
+                    }
+                    let (mut code, mut olen) = (
+                        0 as libc::c_int,
+                        std::mem::size_of::<libc::c_int>() as libc::socklen_t,
+                    );
+                    let r = unsafe {
+                        libc::getsockopt(
+                            stream.as_raw_fd(),
+                            libc::SOL_SOCKET,
+                            libc::SO_ERROR,
+                            (&mut code as *mut libc::c_int).cast(),
+                            &mut olen,
+                        )
+                    };
+                    if r == 0 && code == libc::ECONNREFUSED {
+                        break;
+                    }
+                    if r != 0 || code != 0 {
+                        return Err(format!("Unix connect socket error {code}"));
+                    }
+                    break 'connect stream;
+                },
+                _ => return Err(format!("连接 S socket {} 失败：{err}", socket.display())),
+            }
+            std::thread::sleep(Duration::from_millis(5).min(left()?));
+        };
+        stream
+            .set_nonblocking(false)
+            .map_err(|e| format!("恢复阻塞模式失败：{e}"))?;
+        Ok(stream)
+    }
+
+    pub(super) fn s_ingest_bounded(
+        socket: &Path,
+        ns: &str,
+        n: u32,
+        timeout: Duration,
+    ) -> Result<Value, String> {
+        let started = Instant::now();
+        let deadline = started + timeout;
+        let tag = |stage: &str, e: String| {
+            format!(
+                "S socket 事务失败（stage={stage}，上限 {timeout:?}，耗时 {:?}）：{e}",
+                started.elapsed()
+            )
+        };
+        let mut stream = connect_unix_bounded(socket, deadline).map_err(|e| tag("connect", e))?;
+        let raw = json!({"schema_revision":"s-ohlc/1","session_id":SESSION,"source_namespace":ns,"source_epoch":"1",
+            "instrument":"TEST.OHLC","profile":"ohlc_integer_tb02a_v1",
+            "events":[{"event_id":format!("bar-{n}"),"revision":"1","seq":(n * 10).to_string(),"received_at":"2026-09-18T00:00:00Z",
+                "raw_text":"3/12","open":"6","high":"12","low":"3","close":"7","timestamp":(n * 10).to_string(),"volume":"1"}]});
+        let payload = json!({"op":"ingest","target_session_id":SESSION,"target_session_generation":"1","writer_epoch":"1",
+            "clock_event_id":format!("input-{n}"),"raw_input":raw});
+        let envelope = json!({"schema_revision":"s-session/3","session_id":SESSION,"session_generation":"1",
+            "source_namespace":ns,"source_epoch":"1","message_id":format!("message-{n}"),"producer_id":"pse-test",
+            "producer_epoch":"1","payload_hash":sha256_hex(newchan_rust::session_protocol::canonical_json(&payload).as_bytes()),
+            "causal_refs":[],"payload":payload});
+        let frame = format!(
+            "{}\n",
+            newchan_rust::session_protocol::canonical_json(&envelope)
+        );
+        write_frame_observed(&mut stream, frame.as_bytes(), deadline, &mut NoObserver)
+            .map_err(|e| tag("write", e))?;
+        stream
+            .shutdown(std::net::Shutdown::Write)
+            .map_err(|e| tag("shutdown_write", e.to_string()))?;
+        read_frame(&mut stream, 1_048_576, deadline, Ok).map_err(|e| tag("read_reply", e))
+    }
+}
+
 /// #1407 C3 R3：非历史模拟 `/1` 装配恢复父版行为：
-/// 1. 坏非历史 X `profile_revision` 仍由非关键 X 自行拒绝退出，S/E/B 照常启动存活；
+/// 1. 坏非历史 X `profile_revision` 仍由非关键 X 自行拒绝退出，S/E/B 照常启动存活并完成真实 S 提交；
 /// 2. launcher 不在 `load_manifest` 预读 `economic.manifest`，未给正常非历史配置新增前置依赖。
 #[test]
 fn non_history_preserves_parent_startup_and_x_degradation() {
-    // 1) 非历史配置 + 坏 X revision：S/E/B 正常启动，X 作为非关键进程自行拒绝，launcher 不提前整组退出。
+    use non_history_bound::{
+        has_other_live_pgid_member, launcher_events, s_ingest_bounded, NonHistoryLauncher,
+    };
+
+    // 1) 非历史配置 + 坏 X revision：`launcher` 声明在 `space` 之后，任何路径先按进程组清理再删临时目录。
     let space = Space::new();
     let source = declaration("TestOnlyStructure", DECLARED_NS);
     let s_db = s_init_v3(&space, Some(&source));
@@ -1311,33 +1677,149 @@ fn non_history_preserves_parent_startup_and_x_degradation() {
         }),
     );
     let manifest = launcher_manifest(&space, "simulation", &source, &s_db, &limits, &bad_xp);
-    let mut launcher = spawn_launcher(&manifest);
-    eventually("S socket", || space.path("s.sock").exists());
-    eventually("E socket", || space.path("e.sock").exists());
-    eventually("B socket", || space.path("b.sock").exists());
-    eventually("X 非关键退出后仅 S/E/B 存活", || {
-        let names: Vec<String> = domain_children(launcher.id())
-            .into_iter()
-            .map(|(n, _)| n)
-            .collect();
-        names.iter().any(|n| n == "s_structure_session")
-            && names.iter().any(|n| n == "e_economic_session")
-            && names.iter().any(|n| n == "b_chong_session")
-            && !names.iter().any(|n| n == "x_execution_session")
-    });
-    assert!(
-        launcher.try_wait().unwrap().is_none(),
-        "坏非历史 X 不应导致整组 launcher 提前退出"
+    let launcher = NonHistoryLauncher::spawn(&space, &manifest, "launcher.stderr.log");
+    let (s_pid, e_pid, b_pid, x_pid, x_exit) = launcher.wait_until(
+        "launcher 观测到同一 X 的退出事件",
+        Duration::from_secs(30),
+        |log| {
+            let events = launcher_events(log);
+            let spawn_pid = |domain: &str| {
+                events.iter().enumerate().find_map(|(i, ev)| {
+                    (ev["event"] == "spawn" && ev["domain"] == domain)
+                        .then(|| ev["pid"].as_u64().and_then(|p| u32::try_from(p).ok()))
+                        .flatten()
+                        .map(|pid| (i, pid))
+                })
+            };
+            let (_, s_pid) = spawn_pid("S")?;
+            let (_, e_pid) = spawn_pid("E")?;
+            let (_, b_pid) = spawn_pid("B:one")?;
+            let (xi, x_pid) = spawn_pid("X")?;
+            let x_exit = events
+                .iter()
+                .enumerate()
+                .find(|(i, ev)| *i > xi && ev["event"] == "exit" && ev["domain"] == "X")
+                .map(|(_, ev)| ev.clone())?;
+            Some((s_pid, e_pid, b_pid, x_pid, x_exit))
+        },
     );
-    assert_eq!(stop(&mut launcher).code(), Some(0));
-    let stderr = launcher_stderr(&mut launcher);
+
+    assert_eq!(
+        x_exit["critical"],
+        json!(false),
+        "坏 X 应标为非关键：{x_exit}"
+    );
+    let x_status = x_exit["status"].as_str().unwrap_or_default();
     assert!(
-        stderr.contains("VersionUnsupported"),
+        x_status.starts_with("exit status: ") && x_status != "exit status: 0",
+        "{x_exit}"
+    );
+    assert!(
+        !Path::new(&format!("/proc/{x_pid}")).exists(),
+        "原 X pid={x_pid} 应已回收"
+    );
+    assert!(!space.path("x.db").exists(), "坏 X 不得创建 x.db");
+    assert!(
+        !launcher.leader_exited(),
+        "坏非历史 X 不应导致 launcher 提前退出"
+    );
+
+    for (name, file) in [
+        ("S socket", "s.sock"),
+        ("E socket", "e.sock"),
+        ("B socket", "b.sock"),
+    ] {
+        launcher.wait_until(name, Duration::from_secs(30), |_| {
+            space.path(file).exists().then_some(())
+        });
+    }
+    let expected_kids = vec![
+        ("b_chong_session".to_string(), b_pid),
+        ("e_economic_session".to_string(), e_pid),
+        ("s_structure_session".to_string(), s_pid),
+    ];
+    assert_eq!(
+        domain_children(launcher.id()),
+        expected_kids,
+        "X 退出后应仅留原 S/E/B"
+    );
+    for db in [s_db.clone(), space.path("e.db"), space.path("b.db")] {
+        assert_lock_held(&db);
+    }
+    assert!(meta(&s_db, "SELECT value FROM meta WHERE key='writer_epoch'").is_some());
+    for db in ["e.db", "b.db"] {
+        launcher.wait_until(
+            &format!("{db} writer_epoch"),
+            Duration::from_secs(30),
+            |_| meta(&space.path(db), "SELECT v FROM meta WHERE k='writer_epoch'").map(|_| ()),
+        );
+    }
+
+    let before_rows = raw_rows(&s_db);
+    let before_gen = meta(&s_db, "SELECT value FROM meta WHERE key='generation'").unwrap();
+    let accepted = s_ingest_bounded(
+        &space.path("s.sock"),
+        DECLARED_NS,
+        1,
+        Duration::from_secs(30),
+    )
+    .unwrap_or_else(|e| panic!("X 退出后有界 S socket 写入失败：{e}"));
+    assert!(
+        !accepted.to_string().contains("InvalidDomain")
+            && !accepted.to_string().contains("\"error\""),
+        "X 退出后 S 应接纳声明源写入：{accepted}"
+    );
+    launcher.wait_until("S 提交推进 generation", Duration::from_secs(30), |_| {
+        meta(&s_db, "SELECT value FROM meta WHERE key='generation'")
+            .filter(|g| g != &before_gen)
+            .map(|_| ())
+    });
+    assert_eq!(raw_rows(&s_db), before_rows + 1, "{accepted}");
+    assert_eq!(
+        domain_children(launcher.id()),
+        expected_kids,
+        "S 写入后原 S/E/B 应继续存活"
+    );
+    assert!(
+        !launcher.leader_exited(),
+        "其他域继续运行期间 launcher 不得提前退出"
+    );
+
+    let launcher_pid = launcher.id();
+    let (status, stderr) = launcher
+        .stop_gracefully()
+        .unwrap_or_else(|e| panic!("正常停止失败：{e}"));
+    assert_eq!(status.code(), Some(0), "正常停止应返回 0：{stderr}");
+    for pid in [launcher_pid, s_pid, e_pid, b_pid, x_pid] {
+        assert!(
+            !Path::new(&format!("/proc/{pid}")).exists(),
+            "停止后进程 {pid} 未回收"
+        );
+    }
+    assert!(
+        !has_other_live_pgid_member(launcher_pid),
+        "停止后进程组 {launcher_pid} 不得有残留"
+    );
+    assert!(
+        stderr.contains("VersionUnsupported") && stderr.contains("x-execution-profile/99"),
         "X 应报 VersionUnsupported：{stderr}"
     );
+    let events = launcher_events(&stderr);
+    let x_spawns: Vec<&Value> = events
+        .iter()
+        .filter(|e| e["event"] == "spawn" && e["domain"] == "X")
+        .collect();
+    assert_eq!(x_spawns.len(), 1, "同一 X 应只拉起一次：{stderr}");
+    assert_eq!(x_spawns[0]["pid"].as_u64(), Some(u64::from(x_pid)));
+    let exits: Vec<&Value> = events.iter().filter(|e| e["event"] == "exit").collect();
+    assert_eq!(exits.len(), 1, "除坏 X 外不应有其他域提前退出：{stderr}");
+    assert_eq!(exits[0]["domain"], "X", "{stderr}");
+    assert_eq!(exits[0]["critical"], json!(false), "{stderr}");
     assert!(
-        stderr.contains("\"domain\":\"X\"") && stderr.contains("\"critical\":false"),
-        "launcher 应记录非关键 X 退出：{stderr}"
+        events
+            .iter()
+            .any(|e| e["event"] == "stopped" && e["failed"] == json!(false)),
+        "非关键 X 退出不应将整组停止标为 failed：{stderr}"
     );
 
     // 2) 非历史配置 + 缺失 economic.manifest：load_manifest 不预读 E 配置，先建 state_dir 再由 E init 报错。
@@ -1348,14 +1830,23 @@ fn non_history_preserves_parent_startup_and_x_degradation() {
     let xp2 = x_profile(&space2, "simulation", None, Some("tb09-sentinel"), false);
     let manifest2 = launcher_manifest(&space2, "simulation", &source2, &s_db2, &limits2, &xp2);
     std::fs::remove_file(space2.path("economic.json")).unwrap();
-    let out = run_refusal(
-        Command::new(launcher_bin())
-            .arg("--manifest")
-            .arg(&manifest2),
+    let launcher2 = NonHistoryLauncher::spawn(&space2, &manifest2, "launcher-missing-e.stderr.log");
+    let launcher2_pid = launcher2.id();
+    let (status2, stderr2) = launcher2
+        .wait_exit(Duration::from_secs(30))
+        .unwrap_or_else(|e| panic!("缺 economic.manifest 启动探针异常：{e}"));
+    assert!(!status2.success(), "{stderr2}");
+    assert!(
+        !Path::new(&format!("/proc/{launcher2_pid}")).exists()
+            && !has_other_live_pgid_member(launcher2_pid),
+        "缺 economic.manifest 探针退出后进程组 {launcher2_pid} 不得有残留"
     );
-    assert!(!out.status.success());
     assert!(
         space2.path("launcher-state").is_dir(),
-        "非历史配置不应在 load_manifest 预读 economic.manifest"
+        "不应在 load_manifest 预读 economic.manifest：{stderr2}"
+    );
+    assert!(
+        stderr2.contains("E init 失败") && !stderr2.contains("VersionUnsupported"),
+        "缺 economic.manifest 应推进至 E init 报错：{stderr2}"
     );
 }
