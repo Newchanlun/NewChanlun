@@ -1525,3 +1525,89 @@ test("#1496 R6 B4：完整 validateState 用实际 cut 约束 E/F 根", async ()
     await rejected(st, kind === C.CENTER_KINDS[6] ? /TB02E_GENERATION/ : /TB02F_GENERATION/);
   }
 });
+
+async function retimeRetainedRoles(rows, known, fixed) {
+  const version = rows.find(r => r.kind === C.CENTER_KINDS[6]);
+  const ids = version.payload.data.r5_deferred_object_ids;
+  const retained = rows.find(r => r.kind === C.CENTER_KINDS[2] && ids.includes(r.object_id));
+  assert.equal(retained.first_known_generation, "1");
+  assert.equal(retained.published_generation, "1");
+  assert.equal(retained.payload.data.known_at.generation, "1");
+  const changes = new Map();
+  async function reidentify(r) {
+    const before = r.object_id;
+    const { kind, fact_key, payload, input_refs } = r;
+    r.object_id = await Q3.V.identity(0x20, {
+      kind, fact_key, payload, input_refs, profile_id: fixed.profile_id, rule_revision: fixed.rule_revision,
+    }, "obj3-");
+    assert.notEqual(r.object_id, before);
+    changes.set(before, r.object_id);
+    C.validateCenterPayload(kind, payload);
+    await Q3.validateTB02Identity(r, fixed);
+  }
+  retained.payload.data.known_at.generation = known;
+  const index = ids.indexOf(retained.object_id);
+  await reidentify(retained);
+  ids[index] = retained.object_id;
+  ids.sort();
+  await reidentify(version);
+  return changes;
+}
+
+test("#1496 R7 B4：保留角色获知代不得晚于首次发布代，即使不超过实际 cut", async () => {
+  const rows = pendingLiteralCut(), axes = axes22(rows);
+  const retained = copy(centerCut().find(r => r.kind === C.CENTER_KINDS[2]));
+  Object.assign(retained, { object_id: "obj3-retained-roles", published_generation: "1" });
+  const version = rows.find(r => r.kind === C.CENTER_KINDS[6]);
+  const pair = rows.find(r => r.kind === C.PAIR_KINDS[4]);
+  for (const root of [version, pair]) {
+    root.first_known_generation = root.published_generation = "2";
+    root.payload.data.known_at = { ...K, generation: "2" };
+  }
+  version.payload.data.waiting_reasons.push("R5_RECOMPUTE_DEFERRED");
+  version.payload.data.r5_deferred_object_ids = [retained.object_id];
+  rows.push(retained);
+  for (const r of [version, retained]) {
+    r.fact_key = r.kind + ":" + r.payload.slot;
+    r.input_refs = [];
+  }
+  C.validateCenterFamilyCut(rows, axes);
+  C.validateCenterFamilyCut(rows, axes, "2");
+  const fixed = { profile_id: "ohlc_integer_tb02a_v1", rule_revision: typed.W2_PUBLICATION_RULE, protocol: "s-session/3" };
+  for (const known of ["3", "2"]) {
+    const candidate = copy(rows);
+    await retimeRetainedRoles(candidate, known, fixed);
+    assert.throws(() => C.validateCenterFamilyCut(candidate, axes), /TB02E_GENERATION/);
+    assert.throws(() => C.validateCenterFamilyCut(candidate, axes, "2"), /TB02E_GENERATION/);
+  }
+});
+
+// 外供真实同库 g2 状态（Astra full-state.cjs 解码产物），避免把 128 MB 导出重复入仓。
+const realG2State = process.env.Q3_R5_REAL_G2_STATE;
+test("#1496 R7 B4：真实 g2 的保留角色经完整 validateState 拒绝晚获知代", {
+  skip: realG2State ? false : "通过 Q3_R5_REAL_G2_STATE 提供真实 g2 完整状态",
+}, async () => {
+  const state = JSON.parse(require("node:fs").readFileSync(realG2State, "utf8"));
+  const { snapshot, cut } = state;
+  const family = new Set([...C.CENTER_KINDS, ...C.PAIR_KINDS, "CC-013.segment"]);
+  const rows = snapshot.objects.filter(r => family.has(r.kind));
+  const eRoot = rows.find(r => r.kind === C.CENTER_KINDS[6]);
+  assert.equal(cut.generation, "2");
+  assert.equal(eRoot.payload.data.r5_deferred_object_ids.length, 16);
+  assert.equal(API.FAMILIES.reduce((n, k) => n + snapshot[k].length, 0), 1984);
+  await Q3.validateState(state, "s-session/3");
+  const fixed = { profile_id: snapshot.profile_id, rule_revision: snapshot.rule_revision, protocol: "s-session/3" };
+  for (const known of ["3", "2"]) {
+    const mutated = copy(rows);
+    const changes = await retimeRetainedRoles(mutated, known, fixed);
+    const changed = new Map(mutated.filter(r => [...changes.values()].includes(r.object_id)).map(r => [r.object_id, r]));
+    const before = { ...state, snapshot: {
+      ...snapshot, objects: snapshot.objects.map(r => changed.get(changes.get(r.object_id)) ?? r),
+    } };
+    const candidate = JSON.parse(JSON.stringify(before).replace(/obj3-[0-9a-f]{64}/g, id => changes.get(id) ?? id));
+    const axes = candidate.snapshot.catalog_evidence.axes;
+    assert.throws(() => C.validateCenterFamilyCut(mutated, axes), /TB02E_GENERATION/);
+    assert.throws(() => C.validateCenterFamilyCut(mutated, axes, "2"), /TB02E_GENERATION/);
+    await assert.rejects(() => Q3.validateState(candidate, "s-session/3"), /TB02E_GENERATION/);
+  }
+});

@@ -791,6 +791,8 @@
     ["CC-018", PAIR_KINDS.slice(0, 1), needF], ["CC-020", PAIR_KINDS.slice(1, 2), needF]];
   const publicationGenerations = r => [r.first_known_generation, r.published_generation, r.generation]
     .filter(g => g !== undefined).map(g => BigInt(g));
+  const payloadKnowledgeGenerations = ({known_at, formed_known_at, settled_known_at}) =>
+    [known_at, formed_known_at, settled_known_at].filter(k => k != null).map(k => BigInt(k.generation));
 
   // 同 cut 活动集（含 CC-013.segment 普通原件）的完整中枢族链接：旧 validatePairCut 去掉规则分支后的同序组合。
   function validateCenterFamilyCut(records, axes = null, cutGeneration = null) {
@@ -820,9 +822,15 @@
       needE(pending !== undefined, "DEFERRED", "R5 待重算必须由本代未决中枢边界触发");
       for (const objectId of ids) {
         const record = records.find(r => r.object_id === objectId);
-        needE(record !== undefined && retainable.has(record.kind) && record.first_known_generation !== undefined
-          && publicationGenerations(record).every(g => g < rootKnown && (cut === null || g < cut)),
-          "DEFERRED", "R5 待重算对象必须是先前已发布且本代仍活动的结构原件");
+        needE(record !== undefined && retainable.has(record.kind) && record.first_known_generation !== undefined,
+          "DEFERRED", "R5 待重算对象必须是有首次发布代的活动结构原件");
+        const published = publicationGenerations(record);
+        needE(published.every(g => g < rootKnown && (cut === null || g < cut)),
+          "DEFERRED", "R5 待重算对象必须早于版本根和实际 cut 发布");
+        // 旧载荷须在原件发布时已知；只对照当前 cut 会放过等号边界。
+        const known = payloadKnowledgeGenerations(record.payload.data);
+        needE(known.every(k => published.every(g => k <= g)),
+          "GENERATION", "R5 待重算原件获知代不得晚于原件发布代");
         if (record.kind === CENTER_KINDS[3]) deferredAssignments.add(record.payload.data.unit.unit_id);
       }
       records = records.filter(r => !ids.has(r.object_id));
@@ -831,10 +839,9 @@
     validatePairVersionCount(records);
     for (const r of records) {
       if (cut !== null) {
-        const {known_at, formed_known_at, settled_known_at} = r.payload.data;
-        const known = [known_at, formed_known_at, settled_known_at].filter(k => k != null);
+        const known = payloadKnowledgeGenerations(r.payload.data);
         const needX = PAIR_KINDS.includes(r.kind) ? needF : needE;
-        needX(publicationGenerations(r).every(g => g <= cut) && known.every(k => BigInt(k.generation) <= cut),
+        needX(publicationGenerations(r).every(g => g <= cut) && known.every(g => g <= cut),
           "GENERATION", "活动原件获知代或发布代不得晚于实际 cut");
       }
       if (CENTER_KINDS.includes(r.kind))
