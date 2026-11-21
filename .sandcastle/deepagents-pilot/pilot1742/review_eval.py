@@ -243,6 +243,8 @@ class BaselineMetrics:
     findings_by_receipt_status: dict[str, int]
     findings_by_model: dict[str, int]
     finding_heuristic_categories: dict[str, int]
+    style_or_format_findings: int
+    nit_style_or_format_findings: int
     subsequent_head_pass_inferred_fixed: int
     subsequent_head_pass_total_block_findings: int
     subsequent_head_pass_undeterminable_findings: int
@@ -293,6 +295,39 @@ def _require_sha(raw: Any, field: str) -> str:
     return raw
 
 
+def _merge_line_ranges(ranges: Sequence[tuple[int, int]]) -> tuple[tuple[int, int], ...]:
+    """将闭区间按升序排序并合并重叠或相邻区间。"""
+    if not ranges:
+        return ()
+    ordered = sorted(ranges)
+    merged: list[tuple[int, int]] = [ordered[0]]
+    for r_start, r_end in ordered[1:]:
+        prev_start, prev_end = merged[-1]
+        if r_start <= prev_end + 1:
+            merged[-1] = (prev_start, max(prev_end, r_end))
+        else:
+            merged.append((r_start, r_end))
+    return tuple(merged)
+
+
+def _validate_bug_location_ranges(all_ranges: Sequence[tuple[int, int]], prefix: str) -> None:
+    """校验 BugLocation 的全部区间满足 1 <= start <= end 且严格升序、互不重叠、无重复、无相邻未合并段。"""
+    if not all_ranges:
+        raise EvalValidationError(f"{prefix} 至少需要一个行号区间")
+    prev_end: int | None = None
+    for idx, (r_start, r_end) in enumerate(all_ranges):
+        if isinstance(r_start, bool) or not isinstance(r_start, int) or isinstance(r_end, bool) or not isinstance(r_end, int):
+            raise EvalValidationError(f"{prefix} 行号区间必须是整数：{r_start!r}..{r_end!r}")
+        if r_start < 1 or r_end < r_start:
+            raise EvalValidationError(f"{prefix} 行号区间非法：{r_start}..{r_end}")
+        if prev_end is not None and r_start <= prev_end + 1:
+            raise EvalValidationError(
+                f"{prefix} 的行号区间必须严格升序且无重叠、无重复、无相邻未合并段："
+                f"第 {idx} 段 {r_start}..{r_end} 与前一段末尾 {prev_end} 冲突"
+            )
+        prev_end = r_end
+
+
 def _parse_bug_location(raw: Any, prefix: str) -> BugLocation:
     if not isinstance(raw, dict):
         raise EvalValidationError(f"{prefix} 必须是 JSON 对象")
@@ -314,6 +349,7 @@ def _parse_bug_location(raw: Any, prefix: str) -> BugLocation:
         if r_start < 1 or r_end < r_start:
             raise EvalValidationError(f"{r_prefix} 行号区间非法：{r_start}..{r_end}")
         extra_ranges.append((r_start, r_end))
+    _validate_bug_location_ranges(((line_start, line_end), *extra_ranges), prefix)
     summary = _require_nonempty_str(raw.get("summary"), f"{prefix}.summary")
     category = _require_nonempty_str(raw.get("category"), f"{prefix}.category")
     return BugLocation(
@@ -441,31 +477,35 @@ def _git_diff_added_ranges(
 
 
 def compute_cases_fingerprint(cases: Sequence[EvalCase]) -> str:
-    """按规范排序后的案例元数据与缺陷位置计算评测集 sha256 指纹。"""
-    canonical = [
-        {
-            "case_id": c.case_id,
-            "kind": c.kind,
-            "base_sha": c.base_sha,
-            "head_sha": c.head_sha,
-            "bug_locations": [
+    """按规范排序后的案例元数据与合并规范化后的缺陷位置计算评测集 sha256 指纹。"""
+    canonical = []
+    for c in sorted(cases, key=lambda item: item.case_id):
+        locs_payload = []
+        for loc in c.bug_locations:
+            norm_ranges = _merge_line_ranges(loc.all_ranges)
+            locs_payload.append(
                 {
                     "file": _norm_path(loc.file),
-                    "line_start": loc.line_start,
-                    "line_end": loc.line_end,
-                    "extra_ranges": [[r_start, r_end] for r_start, r_end in loc.extra_ranges],
+                    "line_start": norm_ranges[0][0],
+                    "line_end": norm_ranges[0][1],
+                    "extra_ranges": [[r_start, r_end] for r_start, r_end in norm_ranges[1:]],
                 }
-                for loc in c.bug_locations
-            ],
-        }
-        for c in sorted(cases, key=lambda item: item.case_id)
-    ]
+            )
+        canonical.append(
+            {
+                "case_id": c.case_id,
+                "kind": c.kind,
+                "base_sha": c.base_sha,
+                "head_sha": c.head_sha,
+                "bug_locations": locs_payload,
+            }
+        )
     encoded = json.dumps(canonical, ensure_ascii=False, separators=(",", ":"), sort_keys=True).encode("utf-8")
     return hashlib.sha256(encoded).hexdigest()
 
 
 def validate_cases(cases: Sequence[EvalCase], repo_root: Path | None = None) -> None:
-    """校验评测集不变式；提供 repo_root 时同时核验 Git 提交、文件行号界限与 diff hunk 归属。"""
+    """校验评测集不变式；提供 repo_root 时同时核验 Git 提交、文件行号界限与 diff hunk 逐行覆盖。"""
     if not cases:
         raise EvalValidationError("评测集不能为空")
 
@@ -493,11 +533,7 @@ def validate_cases(cases: Sequence[EvalCase], repo_root: Path | None = None) -> 
             for loc in case.bug_locations:
                 if not _norm_path(loc.file):
                     raise EvalValidationError(f"{case.case_id} 存在空文件路径")
-                for r_start, r_end in loc.all_ranges:
-                    if r_start < 1 or r_end < r_start:
-                        raise EvalValidationError(
-                            f"{case.case_id} 的 {loc.file} 行号非法：{r_start}..{r_end}"
-                        )
+                _validate_bug_location_ranges(loc.all_ranges, f"{case.case_id} 的 {loc.file}")
         elif case.kind == "clean":
             if case.bug_locations:
                 raise EvalValidationError(f"clean 案 {case.case_id} 的 bug_locations 必须为空")
@@ -523,19 +559,25 @@ def validate_cases(cases: Sequence[EvalCase], repo_root: Path | None = None) -> 
                 total_lines = line_count_cache[cache_key]
                 diff_key = (case.base_sha, case.head_sha, norm_file)
                 if diff_key not in diff_hunk_cache:
-                    diff_hunk_cache[diff_key] = _git_diff_added_ranges(
-                        repo_root, case.base_sha, case.head_sha, norm_file
+                    diff_hunk_cache[diff_key] = _merge_line_ranges(
+                        _git_diff_added_ranges(repo_root, case.base_sha, case.head_sha, norm_file)
                     )
-                added_ranges = diff_hunk_cache[diff_key]
+                merged_added_ranges = diff_hunk_cache[diff_key]
                 for r_start, r_end in loc.all_ranges:
                     if r_end > total_lines:
                         raise EvalValidationError(
                             f"{case.case_id} 的 {norm_file} 行号越界：{r_end} > {total_lines}"
                         )
-                    if not any(r_start <= h_end and r_end >= h_start for h_start, h_end in added_ranges):
+                    if not any(
+                        h_start <= r_start and r_end <= h_end for h_start, h_end in merged_added_ranges
+                    ):
+                        hunks_desc = (
+                            ", ".join(f"{h_start}..{h_end}" for h_start, h_end in merged_added_ranges) or "无"
+                        )
                         raise EvalValidationError(
                             f"{case.case_id} 的 {norm_file}:{r_start}..{r_end} "
-                            f"未与 {case.base_sha[:10]}..{case.head_sha[:10]} 的新增/修改 diff hunk 相交"
+                            f"未完全落在 {case.base_sha[:10]}..{case.head_sha[:10]} 的新增/修改 diff hunk 内"
+                            f"（可用 hunk：{hunks_desc}）"
                         )
 
 
@@ -1125,12 +1167,26 @@ def load_dispositions(jsonl_path: Path) -> tuple[DispositionEntry, ...]:
     return tuple(entries)
 
 
+def is_non_blocking_or_nit_finding(text: str, receipt_result_status: str) -> bool:
+    """启发式判断单条发现是否属于 Nit / 非阻断级别（与格式主题正交）。"""
+    return bool(_NON_BLOCKING_NIT_RE.search(text)) or receipt_result_status == "completed"
+
+
+def is_style_or_format_finding(text: str) -> bool:
+    """启发式判断单条发现是否涉及代码格式/风格主题（与是否阻断正交）。"""
+    return bool(_STYLE_FORMAT_RE.search(text))
+
+
 def classify_finding_heuristic(text: str, receipt_result_status: str) -> str:
-    """对历史纯文本审查发现做启发式归类（非人工真值，仅作基线参考）。"""
-    if _STYLE_FORMAT_RE.search(text):
-        return "style_or_format"
-    if _NON_BLOCKING_NIT_RE.search(text) or receipt_result_status == "completed":
+    """对历史纯文本审查发现做启发式归类（非人工真值，仅作基线参考）。
+
+    先判阻断级别再判格式主题：Nit / 非阻断发现即使提及格式（如 `[Nit] formatting`）
+    也归入 `non_blocking_or_nit`；格式主题由 `is_style_or_format_finding` 正交独立计数。
+    """
+    if is_non_blocking_or_nit_finding(text, receipt_result_status):
         return "non_blocking_or_nit"
+    if is_style_or_format_finding(text):
+        return "blocking_style_or_format"
     if receipt_result_status == "blocked" or _BLOCKING_MARKER_RE.search(text):
         return "blocking_substantive"
     return "other"
@@ -1164,16 +1220,48 @@ def _compute_round_distribution(rounds_list: Sequence[int]) -> RoundDistribution
     )
 
 
-def _read_json_dict(path: Path, runs_dir: Path, corrupted: list[str]) -> dict[str, Any] | None:
+def _append_corrupted(path: Path, runs_dir: Path, corrupted: list[str], corrupted_seen: set[str]) -> None:
+    rel = str(path.relative_to(runs_dir))
+    if rel not in corrupted_seen:
+        corrupted_seen.add(rel)
+        corrupted.append(rel)
+
+
+def _read_json_dict(
+    path: Path,
+    runs_dir: Path,
+    corrupted: list[str],
+    corrupted_seen: set[str],
+) -> dict[str, Any] | None:
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, UnicodeDecodeError, json.JSONDecodeError):
-        corrupted.append(str(path.relative_to(runs_dir)))
+        _append_corrupted(path, runs_dir, corrupted, corrupted_seen)
         return None
     if not isinstance(data, dict):
-        corrupted.append(str(path.relative_to(runs_dir)))
+        _append_corrupted(path, runs_dir, corrupted, corrupted_seen)
         return None
     return data
+
+
+def _parse_optional_nonempty_str_field(data: dict[str, Any] | None, key: str) -> tuple[str | None, bool]:
+    """解析可选非空字符串身份字段，返回 (规范值, 是否显式非法)；键省略返回 (None, False)。"""
+    if data is None or key not in data:
+        return (None, False)
+    raw = data[key]
+    if not isinstance(raw, str) or not raw.strip():
+        return (None, True)
+    return (raw.strip(), False)
+
+
+def _parse_optional_positive_int_field(data: dict[str, Any] | None, key: str) -> tuple[int | None, bool]:
+    """解析可选正整数身份字段，返回 (规范值, 是否显式非法)；键省略返回 (None, False)。"""
+    if data is None or key not in data:
+        return (None, False)
+    raw = data[key]
+    if isinstance(raw, bool) or not isinstance(raw, int) or raw <= 0:
+        return (None, True)
+    return (raw, False)
 
 
 @dataclass(frozen=True)
@@ -1201,6 +1289,7 @@ def analyze_review_runs(
 
     run_dirs = sorted(p for p in runs_dir.iterdir() if p.is_dir())
     corrupted_files: list[str] = []
+    corrupted_seen: set[str] = set()
     verdict_counts: Counter[str] = Counter()
     missing_outcome_runs = 0
     reused_runs = 0
@@ -1217,6 +1306,8 @@ def analyze_review_runs(
     findings_by_receipt_status: Counter[str] = Counter()
     findings_by_model: Counter[str] = Counter()
     finding_heuristic_categories: Counter[str] = Counter()
+    style_or_format_findings = 0
+    nit_style_or_format_findings = 0
 
     all_prs: set[int] = set()
     prs_with_any_pass: set[int] = set()
@@ -1230,24 +1321,75 @@ def analyze_review_runs(
     for run_dir in run_dirs:
         target_path = run_dir / "target.json"
         outcome_path = run_dir / "outcome.json"
+        receipt_paths = sorted(run_dir.glob("*/receipt.json"))
 
+        # 第一阶段：先读取目录级文件并完成跨文件身份一致性校验，非法或冲突目录彻底隔离。
         target_data: dict[str, Any] | None = None
         if target_path.exists():
-            target_data = _read_json_dict(target_path, runs_dir, corrupted_files)
+            target_data = _read_json_dict(target_path, runs_dir, corrupted_files, corrupted_seen)
 
         outcome_data: dict[str, Any] | None = None
         if outcome_path.exists():
-            outcome_data = _read_json_dict(outcome_path, runs_dir, corrupted_files)
-        else:
+            outcome_data = _read_json_dict(outcome_path, runs_dir, corrupted_files, corrupted_seen)
+
+        outcome_target = (
+            outcome_data.get("target")
+            if outcome_data is not None and isinstance(outcome_data.get("target"), dict)
+            else None
+        )
+
+        t_run_id, t_run_id_bad = _parse_optional_nonempty_str_field(target_data, "run_id")
+        t_pr, t_pr_bad = _parse_optional_positive_int_field(target_data, "pr_number")
+        t_head, t_head_bad = _parse_optional_nonempty_str_field(target_data, "head_sha")
+
+        o_run_id, o_run_id_bad = _parse_optional_nonempty_str_field(outcome_data, "run_id")
+        o_pr, o_pr_bad = _parse_optional_positive_int_field(outcome_data, "pr_number")
+        o_head, o_head_bad = _parse_optional_nonempty_str_field(outcome_data, "head_sha")
+
+        ot_run_id, ot_run_id_bad = _parse_optional_nonempty_str_field(outcome_target, "run_id")
+        ot_pr, ot_pr_bad = _parse_optional_positive_int_field(outcome_target, "pr_number")
+        ot_head, ot_head_bad = _parse_optional_nonempty_str_field(outcome_target, "head_sha")
+
+        dir_run_ids = {rid for rid in (t_run_id, o_run_id, ot_run_id) if rid is not None}
+        dir_prs = {pr for pr in (t_pr, o_pr, ot_pr) if pr is not None}
+        dir_heads = {sha for sha in (t_head, o_head, ot_head) if sha is not None}
+
+        dir_run_id_invalid = t_run_id_bad or o_run_id_bad or ot_run_id_bad
+        dir_pr_invalid = t_pr_bad or o_pr_bad or ot_pr_bad
+        dir_head_invalid = t_head_bad or o_head_bad or ot_head_bad
+        dir_head_non_str = any(
+            d is not None and "head_sha" in d and not isinstance(d["head_sha"], str)
+            for d in (target_data, outcome_data, outcome_target)
+        )
+        dir_head_conflict = len(dir_heads) > 1 or (bool(dir_heads) and dir_head_invalid) or dir_head_non_str
+
+        dir_identity_corrupted = (
+            len(dir_run_ids) > 1
+            or len(dir_prs) > 1
+            or dir_head_conflict
+            or dir_run_id_invalid
+            or dir_pr_invalid
+        )
+        if dir_identity_corrupted:
+            if target_path.exists():
+                _append_corrupted(target_path, runs_dir, corrupted_files, corrupted_seen)
+            if outcome_path.exists():
+                _append_corrupted(outcome_path, runs_dir, corrupted_files, corrupted_seen)
+            for rp in receipt_paths:
+                _append_corrupted(rp, runs_dir, corrupted_files, corrupted_seen)
+            verdict_counts["CORRUPTED_IDENTITY"] += 1
+            continue
+
+        if not outcome_path.exists():
             missing_outcome_runs += 1
+
+        dir_run_id: str | None = next(iter(dir_run_ids), None)
+        run_pr_number: int | None = next(iter(dir_prs), None)
+        dir_head_sha: str = next(iter(dir_heads), "")
 
         verdict = "MISSING_OUTCOME"
         is_reused = False
-        outcome_run_id: str | None = None
         if outcome_data is not None:
-            raw_run_id = outcome_data.get("run_id")
-            if isinstance(raw_run_id, str) and raw_run_id.strip():
-                outcome_run_id = raw_run_id.strip()
             raw_verdict = outcome_data.get("verdict")
             verdict = str(raw_verdict).upper() if isinstance(raw_verdict, str) and raw_verdict.strip() else "UNKNOWN"
             verdict_counts[verdict] += 1
@@ -1275,61 +1417,51 @@ def analyze_review_runs(
         else:
             verdict_counts["MISSING_OUTCOME"] += 1
 
-        outcome_target = (
-            outcome_data.get("target")
-            if outcome_data is not None and isinstance(outcome_data.get("target"), dict)
-            else None
-        )
-        target_source = target_data or outcome_target
-        raw_target_file_run_id = target_data.get("run_id") if isinstance(target_data, dict) else None
-        target_file_run_id = (
-            raw_target_file_run_id.strip()
-            if isinstance(raw_target_file_run_id, str) and raw_target_file_run_id.strip()
-            else None
-        )
-        raw_outcome_target_run_id = outcome_target.get("run_id") if isinstance(outcome_target, dict) else None
-        outcome_target_run_id = (
-            raw_outcome_target_run_id.strip()
-            if isinstance(raw_outcome_target_run_id, str) and raw_outcome_target_run_id.strip()
-            else None
-        )
-        target_run_id = target_file_run_id or outcome_target_run_id
-        run_dir_run_ids = {
-            rid for rid in (outcome_run_id, target_file_run_id, outcome_target_run_id) if rid is not None
-        }
-        run_id_conflict = len(run_dir_run_ids) > 1
-        if run_id_conflict:
-            if outcome_data is not None and (outcome_run_id is not None or outcome_target_run_id is not None):
-                corrupted_files.append(str(outcome_path.relative_to(runs_dir)))
-            if target_data is not None and target_file_run_id is not None:
-                corrupted_files.append(str(target_path.relative_to(runs_dir)))
+        if run_pr_number is not None:
+            all_prs.add(run_pr_number)
+            if verdict == "PASS":
+                prs_with_any_pass.add(run_pr_number)
 
-        run_pr_number: int | None = None
-        if isinstance(target_source, dict):
-            pr_raw = target_source.get("pr_number")
-            if isinstance(pr_raw, int) and not isinstance(pr_raw, bool):
-                run_pr_number = pr_raw
-                all_prs.add(run_pr_number)
-                if verdict == "PASS":
-                    prs_with_any_pass.add(run_pr_number)
-
-        run_blocking_findings = 0
-        for receipt_path in sorted(run_dir.glob("*/receipt.json")):
-            receipt = _read_json_dict(receipt_path, runs_dir, corrupted_files)
+        # 第二阶段：预扫描目录内所有回执、校验单回执合法性与跨回执身份一致性后再提交统计与台账。
+        candidate_receipts: list[tuple[Path, dict[str, Any], str | None, int | None, str | None]] = []
+        for receipt_path in receipt_paths:
+            receipt = _read_json_dict(receipt_path, runs_dir, corrupted_files, corrupted_seen)
             if receipt is None:
                 continue
-            receipt_run_id_raw = receipt.get("run_id")
-            receipt_run_id = (
-                receipt_run_id_raw.strip()
-                if isinstance(receipt_run_id_raw, str) and receipt_run_id_raw.strip()
-                else None
-            )
-            if run_id_conflict or (
-                receipt_run_id is not None and any(receipt_run_id != rid for rid in run_dir_run_ids)
-            ):
-                corrupted_files.append(str(receipt_path.relative_to(runs_dir)))
-                continue
+            r_run_id, r_run_id_bad = _parse_optional_nonempty_str_field(receipt, "run_id")
+            r_pr, r_pr_bad = _parse_optional_positive_int_field(receipt, "pr_number")
+            r_head, r_head_bad = _parse_optional_nonempty_str_field(receipt, "head_sha")
 
+            if r_run_id_bad or r_pr_bad or r_head_bad:
+                _append_corrupted(receipt_path, runs_dir, corrupted_files, corrupted_seen)
+                continue
+            if dir_run_id is not None and r_run_id is not None and r_run_id != dir_run_id:
+                _append_corrupted(receipt_path, runs_dir, corrupted_files, corrupted_seen)
+                continue
+            if run_pr_number is not None and r_pr is not None and r_pr != run_pr_number:
+                _append_corrupted(receipt_path, runs_dir, corrupted_files, corrupted_seen)
+                continue
+            if dir_head_sha and r_head is not None and r_head != dir_head_sha:
+                _append_corrupted(receipt_path, runs_dir, corrupted_files, corrupted_seen)
+                continue
+            candidate_receipts.append((receipt_path, receipt, r_run_id, r_pr, r_head))
+
+        cand_run_ids = {r_rid for _, _, r_rid, _, _ in candidate_receipts if r_rid is not None}
+        cand_prs = {r_pr for _, _, _, r_pr, _ in candidate_receipts if r_pr is not None}
+        cand_heads = {r_head for _, _, _, _, r_head in candidate_receipts if r_head is not None}
+        cross_receipt_conflict = (
+            (dir_run_id is None and len(cand_run_ids) > 1)
+            or (run_pr_number is None and len(cand_prs) > 1)
+            or (not dir_head_sha and len(cand_heads) > 1)
+        )
+        if cross_receipt_conflict:
+            for rp, _, _, _, _ in candidate_receipts:
+                _append_corrupted(rp, runs_dir, corrupted_files, corrupted_seen)
+            candidate_receipts = []
+
+        resolved_receipt_run_id = dir_run_id or next(iter(cand_run_ids), None) or run_dir.name
+        run_blocking_findings = 0
+        for receipt_path, receipt, r_run_id, _r_pr, _r_head in candidate_receipts:
             total_receipts += 1
             r_status = str(receipt.get("status") or "unknown").lower()
             if r_status == "completed":
@@ -1338,7 +1470,7 @@ def analyze_review_runs(
                 failed_receipts += 1
 
             model = str(receipt.get("model") or receipt_path.parent.name)
-            effective_run_id = outcome_run_id or target_run_id or receipt_run_id or run_dir.name
+            effective_run_id = r_run_id or resolved_receipt_run_id
 
             result = receipt.get("result")
             if not isinstance(result, dict):
@@ -1356,19 +1488,23 @@ def analyze_review_runs(
                 total_findings += 1
                 findings_by_receipt_status[result_status] += 1
                 findings_by_model[model] += 1
+                is_non_blocking = is_non_blocking_or_nit_finding(text, result_status)
+                if is_style_or_format_finding(text):
+                    style_or_format_findings += 1
+                    if is_non_blocking:
+                        nit_style_or_format_findings += 1
                 category = classify_finding_heuristic(text, result_status)
                 finding_heuristic_categories[category] += 1
-                if verdict == "BLOCK" and result_status == "blocked" and category != "non_blocking_or_nit":
+                if verdict == "BLOCK" and result_status == "blocked" and not is_non_blocking:
                     run_blocking_findings += 1
 
+        target_source = target_data or outcome_target
         reg_raw = target_source.get("registered_at_ns") if isinstance(target_source, dict) else None
         has_valid_ts = isinstance(reg_raw, int) and not isinstance(reg_raw, bool) and reg_raw > 0
-        raw_head = target_source.get("head_sha") if isinstance(target_source, dict) else None
-        head_sha = raw_head.strip() if isinstance(raw_head, str) else ""
         if run_pr_number is None or not has_valid_ts:
             unorderable_runs += 1
             if run_pr_number is not None and verdict == "PASS":
-                unorderable_pass_heads_by_pr[run_pr_number].add(head_sha or None)
+                unorderable_pass_heads_by_pr[run_pr_number].add(dir_head_sha or None)
             if verdict == "BLOCK" and run_blocking_findings > 0:
                 undeterminable_block_findings += run_blocking_findings
             continue
@@ -1382,7 +1518,7 @@ def analyze_review_runs(
                 registered_at_ns=reg_raw,
                 attempt=attempt,
                 dir_name=run_dir.name,
-                head_sha=head_sha,
+                head_sha=dir_head_sha,
                 verdict=verdict,
                 is_reused=is_reused,
                 blocking_finding_count=run_blocking_findings,
@@ -1532,6 +1668,8 @@ def analyze_review_runs(
         findings_by_receipt_status=dict(sorted(findings_by_receipt_status.items())),
         findings_by_model=dict(sorted(findings_by_model.items())),
         finding_heuristic_categories=dict(sorted(finding_heuristic_categories.items())),
+        style_or_format_findings=style_or_format_findings,
+        nit_style_or_format_findings=nit_style_or_format_findings,
         subsequent_head_pass_inferred_fixed=inferred_fixed,
         subsequent_head_pass_total_block_findings=total_block_findings,
         subsequent_head_pass_undeterminable_findings=undeterminable_block_findings,
@@ -1669,6 +1807,17 @@ def render_baseline_markdown(metrics: BaselineMetrics) -> str:
     for cat, cnt in metrics.finding_heuristic_categories.items():
         lines.append(f"| `{cat}` | {cnt} | {_fmt_pct(cnt / metrics.total_findings if metrics.total_findings else 0.0)} |")
 
+    blocking_style_count = metrics.style_or_format_findings - metrics.nit_style_or_format_findings
+    style_ratio = metrics.style_or_format_findings / metrics.total_findings if metrics.total_findings else 0.0
+    lines.extend(
+        [
+            "",
+            f"- 格式/风格主题正交命中总数（不区分阻断与 Nit）：`{metrics.style_or_format_findings}`（`{_fmt_pct(style_ratio)}`）",
+            f"  - 其中阻断态格式类（`blocking_style_or_format`）：`{blocking_style_count}`",
+            f"  - 其中 Nit / 非阻断格式类（`nit_style_or_format_findings`，互斥主类归入 `non_blocking_or_nit`）：`{metrics.nit_style_or_format_findings}`",
+        ]
+    )
+
     lines.extend(
         [
             "",
@@ -1705,8 +1854,11 @@ def render_baseline_markdown(metrics: BaselineMetrics) -> str:
 
 
 def _write_text_file(path: Path, content: str) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(content, encoding="utf-8")
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(content, encoding="utf-8")
+    except OSError as exc:
+        raise EvalValidationError(f"无法写入输出文件 {path}: {exc}") from exc
 
 
 def _build_parser() -> argparse.ArgumentParser:

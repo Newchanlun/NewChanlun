@@ -47,7 +47,7 @@ PYTHONPATH=../approval-signing "$VENV_PY" -m pilot1742.review_eval baseline-stat
         {
           "file": "scripts/wayfinder_engine.mts",
           "line_start": 270,
-          "line_end": 274,
+          "line_end": 271,
           "severity": "blocking",
           "summary": "撤销路径误用严格解析导致不成形 BLOCK 被忽略"
         }
@@ -65,5 +65,5 @@ PYTHONPATH=../approval-signing "$VENV_PY" -m pilot1742.review_eval baseline-stat
 ## 如何新增事故/回滚案例
 
 1. 用 `git show` 核实引入缺陷的提交（`head_sha`）、其审查基线（`base_sha`）以及后续回退/修复提交（`fix_sha`），均须填完整 40 位小写 SHA（不允许带空白字符）。
-2. 用 `git diff -U0 <base_sha> <head_sha> -- <file>` 与 `git show <head_sha>:<file>` 核实每个 `bug_location` 的相对路径与 `line_start..line_end`（若同一逻辑缺陷分散在同一文件的多个离散改动点，可用可选字段 `"extra_ranges": [[start, end], ...]` 逐一列出离散可接受区间，避免用大跨度把中间未改动行包进去），确保每个区间均落在 `base_sha..head_sha` 实际新增/修改的行范围内。
-3. 追加到 `cases.json` 后，在完整历史仓库（非浅克隆）执行 `PYTHONPATH=../approval-signing "$VENV_PY" -m pilot1742.review_eval validate-cases --cases ../review-eval/cases.json --repo-root ../..` 确认全量校验（含对象存在性、行号界限与 diff hunk 归属核验）通过。
+2. 用 `git diff -U0 <base_sha> <head_sha> -- <file>` 与 `git show <head_sha>:<file>` 核实每个 `bug_location` 的相对路径与 `line_start..line_end`（若同一逻辑缺陷分散在同一文件的多个离散改动点，可用可选字段 `"extra_ranges": [[start, end], ...]` 按严格升序、互不重叠、无重复、无相邻未合并段逐一列出），确保每一段的每一行均完全落在 `base_sha..head_sha` 合并后的新增/修改 diff hunk 范围内（不得包含未改动空档行）。
+3. 追加到 `cases.json` 后，在完整历史仓库（非浅克隆）执行 `PYTHONPATH=../approval-signing "$VENV_PY" -m pilot1742.review_eval validate-cases --cases ../review-eval/cases.json --repo-root ../..` 确认全量校验（含对象存在性、区间规范性、行号界限与 diff hunk 逐行覆盖核验）通过。

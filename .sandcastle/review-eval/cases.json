@@ -23,7 +23,12 @@
         {
           "file": "rust/src/theta_v0/parser/segment.rs",
           "line_start": 1176,
-          "line_end": 1224,
+          "line_end": 1187,
+          "extra_ranges": [
+            [1193, 1193],
+            [1215, 1217],
+            [1223, 1223]
+          ],
           "summary": "divide_segments_core 在重扫未能复现种子扫描终结时静默回退到旧种子扫描特征事实。",
           "category": "spec_violation"
         }
@@ -43,7 +48,7 @@
         {
           "file": "scripts/wayfinder_engine.mts",
           "line_start": 270,
-          "line_end": 274,
+          "line_end": 271,
           "summary": "isSpecApproved 对撤销路径也要求通过整行严格 parseSpecRuling，格式偏差的 BLOCK 评论被当成无关评论跳过，既有 PASS 保持放行（fail-open）。",
           "category": "fail_open_regression"
         }
@@ -63,7 +68,10 @@
         {
           "file": ".sandcastle/decision-claimer.mts",
           "line_start": 753,
-          "line_end": 764,
+          "line_end": 753,
+          "extra_ranges": [
+            [763, 763]
+          ],
           "summary": "SIGN_HEAD_RE 仅匹配首行前缀，带否定后缀的评论首行仍被认定为合法签署。",
           "category": "authz_bypass"
         }
@@ -162,15 +170,15 @@
       "bug_locations": [
         {
           "file": ".sandcastle/claim-loop.mts",
-          "line_start": 158,
-          "line_end": 171,
+          "line_start": 168,
+          "line_end": 169,
           "summary": "refreshHostMain 仅靠 git merge --ff-only 判失败，但 HEAD 领先 origin/main 时 ff-only 仍返回 0，部署候选未被 fail-closed 拦截。",
           "category": "fail_open_regression"
         },
         {
           "file": ".sandcastle/deepagents-pilot/pilot1742/executor.py",
           "line_start": 917,
-          "line_end": 924,
+          "line_end": 921,
           "summary": "executor serve 在 --once 模式下吞掉 IdentityError 并返回 0，破坏 cutover-runbook 对退出码 2 的探活契约。",
           "category": "error_swallowing"
         },
@@ -197,14 +205,22 @@
         {
           "file": ".sandcastle/deepagents-pilot/pilot1742/external_review.py",
           "line_start": 1108,
-          "line_end": 1160,
+          "line_end": 1126,
+          "extra_ranges": [
+            [1143, 1143],
+            [1148, 1148],
+            [1158, 1158]
+          ],
           "summary": "通过可选 --app-identity 命令行参数指定审查 App 身份，review_sweep 派出的子进程不传该参数会静默回退到执行器 App。",
           "category": "config_drift"
         },
         {
           "file": ".sandcastle/deepagents-pilot/pilot1742/github_app.py",
           "line_start": 69,
-          "line_end": 88,
+          "line_end": 70,
+          "extra_ranges": [
+            [82, 87]
+          ],
           "summary": "frozen dataclass AppIdentity 的 installation_permissions 存为普通可变 dict，实例创建后仍可原地篡改权限集合。",
           "category": "immutability_violation"
         }

@@ -18,8 +18,11 @@ from pilot1742.review_eval import (
     EvalValidationError,
     PredictedFinding,
     analyze_review_runs,
+    classify_finding_heuristic,
     compare_scores,
     compute_cases_fingerprint,
+    is_non_blocking_or_nit_finding,
+    is_style_or_format_finding,
     load_cases,
     load_dispositions,
     main,
@@ -1265,8 +1268,10 @@ def test_analyze_review_runs_rounds_corrupted_and_dispositions(tmp_path: Path) -
     assert metrics.total_findings == 5
     assert metrics.findings_by_receipt_status == {"blocked": 3, "completed": 2}
     assert metrics.finding_heuristic_categories["blocking_substantive"] == 1
-    assert metrics.finding_heuristic_categories["style_or_format"] == 1
+    assert metrics.finding_heuristic_categories["blocking_style_or_format"] == 1
     assert metrics.finding_heuristic_categories["non_blocking_or_nit"] == 3
+    assert metrics.style_or_format_findings == 1
+    assert metrics.nit_style_or_format_findings == 0
     # p101-r2 的 2 条非 Nit 阻断发现随后在 p101-r3 更晚时间戳不同 head 转 PASS
     assert metrics.subsequent_head_pass_total_block_findings == 2
     assert metrics.subsequent_head_pass_inferred_fixed == 2
@@ -1883,3 +1888,430 @@ def test_cli_end_to_end_and_exit_codes(tmp_path: Path, capsys: pytest.CaptureFix
 
     # 非法输入返回退出码 2（fail-closed）
     assert main(["validate-cases", "--cases", str(tmp_path / "missing.json")]) == 2
+
+
+def test_bug_location_ranges_validation_and_fingerprint_normalization(tmp_path: Path) -> None:
+    bad_range_cases: list[tuple[str, int, int, tuple[tuple[int, int], ...]]] = [
+        ("duplicate", 10, 12, ((10, 12),)),
+        ("unsorted", 20, 25, ((10, 12),)),
+        ("overlapping", 10, 15, ((14, 20),)),
+        ("adjacent-unmerged", 10, 15, ((16, 20),)),
+        ("extra-adjacent", 10, 12, ((20, 22), (23, 25))),
+        ("extra-unsorted", 10, 12, ((30, 32), (20, 22))),
+    ]
+    for label, start, end, extra in bad_range_cases:
+        case = EvalCase(
+            case_id=f"bad-{label}",
+            kind="bug",
+            title=label,
+            base_sha=SHA_1,
+            head_sha=SHA_2,
+            bug_locations=(
+                BugLocation(
+                    file="a.py",
+                    line_start=start,
+                    line_end=end,
+                    extra_ranges=extra,
+                    summary="s",
+                    category="c",
+                ),
+            ),
+        )
+        with pytest.raises(EvalValidationError, match="严格升序"):
+            validate_cases((case,))
+
+        json_path = tmp_path / f"bad_{label}.json"
+        json_path.write_text(
+            json.dumps(
+                {
+                    "schema_version": SCHEMA_VERSION,
+                    "cases": [
+                        {
+                            "case_id": f"bad-{label}",
+                            "kind": "bug",
+                            "title": label,
+                            "base_sha": SHA_1,
+                            "head_sha": SHA_2,
+                            "fix_sha": None,
+                            "bug_locations": [
+                                {
+                                    "file": "a.py",
+                                    "line_start": start,
+                                    "line_end": end,
+                                    "extra_ranges": [[s, e] for s, e in extra],
+                                    "summary": "s",
+                                    "category": "c",
+                                }
+                            ],
+                        }
+                    ],
+                }
+            ),
+            encoding="utf-8",
+        )
+        with pytest.raises(EvalValidationError, match="严格升序"):
+            load_cases(json_path)
+
+    # 即使绕过 validate_cases 直接调用 compute_cases_fingerprint，等价行集合也产生相同指纹
+    canonical_merged = EvalCase(
+        case_id="fp-norm",
+        kind="bug",
+        title="norm",
+        base_sha=SHA_1,
+        head_sha=SHA_2,
+        bug_locations=(BugLocation(file="a.py", line_start=10, line_end=20, summary="s", category="c"),),
+    )
+    adjacent_unmerged = EvalCase(
+        case_id="fp-norm",
+        kind="bug",
+        title="norm",
+        base_sha=SHA_1,
+        head_sha=SHA_2,
+        bug_locations=(
+            BugLocation(
+                file="a.py",
+                line_start=16,
+                line_end=20,
+                extra_ranges=((10, 15), (12, 14)),
+                summary="s",
+                category="c",
+            ),
+        ),
+    )
+    assert compute_cases_fingerprint((canonical_merged,)) == compute_cases_fingerprint((adjacent_unmerged,))
+
+
+def test_diff_hunk_full_line_coverage_and_segment_1210_counterexample(tmp_path: Path) -> None:
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _git(repo, "init", "-q", "-b", "main")
+    _git(repo, "config", "user.name", "Test")
+    _git(repo, "config", "user.email", "test@example.invalid")
+    (repo / "gap.py").write_text("l1\nl2\nl3\nl4\nl5\nl6\n", encoding="utf-8")
+    _git(repo, "add", "gap.py")
+    _git(repo, "commit", "-qm", "base")
+    base_sha = _git(repo, "rev-parse", "HEAD")
+
+    # 仅改第 1..2 行与第 5..6 行，第 3..4 行未改动
+    (repo / "gap.py").write_text("l1_new\nl2_new\nl3\nl4\nl5_new\nl6_new\n", encoding="utf-8")
+    _git(repo, "add", "gap.py")
+    _git(repo, "commit", "-qm", "head")
+    head_sha = _git(repo, "rev-parse", "HEAD")
+
+    # 横跨未改动空档 3..4 的 1..6 必须被严格逐行包含校验拒绝
+    spanning_gap = EvalCase(
+        case_id="span-gap",
+        kind="bug",
+        title="含未改动空档",
+        base_sha=base_sha,
+        head_sha=head_sha,
+        bug_locations=(BugLocation(file="gap.py", line_start=1, line_end=6, summary="s", category="c"),),
+    )
+    with pytest.raises(EvalValidationError, match="未完全落在.*可用 hunk：1\\.\\.2, 5\\.\\.6"):
+        validate_cases((spanning_gap,), repo_root=repo)
+
+    # 拆成 1..2 与 extra_ranges=((5, 6),) 后通过
+    split_clean = EvalCase(
+        case_id="split-clean",
+        kind="bug",
+        title="精确离散区间",
+        base_sha=base_sha,
+        head_sha=head_sha,
+        bug_locations=(
+            BugLocation(
+                file="gap.py",
+                line_start=1,
+                line_end=2,
+                extra_ranges=((5, 6),),
+                summary="s",
+                category="c",
+            ),
+        ),
+    )
+    validate_cases((split_clean,), repo_root=repo)
+
+    # R4 反例：cases.json 中 bug-1978 loc[1] 精确拆段后，报未改动空行 segment.rs:1210 在 line_tolerance=0 下绝不命中
+    cases = load_cases(CANONICAL_CASES)
+    case_1978 = next(c for c in cases if c.case_id == "bug-1978-segment-seed-scan-revert")
+    assert case_1978.bug_locations[1].all_ranges == ((1176, 1187), (1193, 1193), (1215, 1217), (1223, 1223))
+    score_1210 = score_predictions(
+        (case_1978,),
+        (
+            CasePrediction(
+                case_id=case_1978.case_id,
+                verdict="BLOCK",
+                findings=(
+                    PredictedFinding(
+                        file="rust/src/theta_v0/parser/segment.rs",
+                        line_start=1210,
+                        line_end=1210,
+                        severity="blocking",
+                    ),
+                ),
+            ),
+        ),
+        line_tolerance=0,
+    )
+    assert score_1210.matched_bug_locations == 0
+    assert score_1210.bug_case_recall == pytest.approx(0.0)
+
+
+def test_explicit_invalid_identity_fields_and_cross_receipt_conflict(tmp_path: Path) -> None:
+    runs_dir = tmp_path / "runs"
+    runs_dir.mkdir()
+
+    # 1) 回执携带显式非法 run_id=7 与 run_id="   "：绝不回退到目录 run_id，记入 corrupted_files 并拒收
+    run_bad_r = runs_dir / "run-bad-receipt"
+    run_bad_r.mkdir()
+    (run_bad_r / "target.json").write_text(
+        json.dumps(
+            {
+                "run_id": "R1",
+                "pr_number": 701,
+                "base_sha": "0" * 40,
+                "head_sha": "a" * 40,
+                "registered_at_ns": 100,
+                "attempt": 1,
+            }
+        ),
+        encoding="utf-8",
+    )
+    (run_bad_r / "outcome.json").write_text(
+        json.dumps({"run_id": "R1", "verdict": "BLOCK", "reviews": [{"model": "M-ok", "verdict": "BLOCK"}]}),
+        encoding="utf-8",
+    )
+    for model_name, bad_rid in (("M-int", 7), ("M-ws", "   ")):
+        mdir = run_bad_r / model_name
+        mdir.mkdir()
+        (mdir / "receipt.json").write_text(
+            json.dumps(
+                {
+                    "run_id": bad_rid,
+                    "status": "completed",
+                    "model": model_name,
+                    "result": {"status": "blocked", "findings": ["[P1] 非法 run_id 发现"]},
+                }
+            ),
+            encoding="utf-8",
+        )
+    m_ok = run_bad_r / "M-ok"
+    m_ok.mkdir()
+    (m_ok / "receipt.json").write_text(
+        json.dumps(
+            {
+                "run_id": "R1",
+                "status": "completed",
+                "model": "M-ok",
+                "result": {"status": "blocked", "findings": ["[P1] 合法回执发现"]},
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    # 2) 目录层无 run_id 且无 outcome.json，但两份回执分别声明 "A" 与 "B"（另含省略 run_id 的第 3 份）
+    #    -> 整个目录所有回执全部进 corrupted_files 并拒收
+    run_split = runs_dir / "run-no-outcome-split"
+    run_split.mkdir()
+    (run_split / "target.json").write_text(
+        json.dumps({"pr_number": 702, "head_sha": "b" * 40, "registered_at_ns": 200, "attempt": 1}),
+        encoding="utf-8",
+    )
+    for model_name, extra in (("M-a", {"run_id": "A"}), ("M-b", {"run_id": "B"}), ("M-omit", {})):
+        mdir = run_split / model_name
+        mdir.mkdir()
+        payload: dict[str, object] = {
+            "status": "completed",
+            "model": model_name,
+            "result": {"status": "blocked", "findings": [f"[P1] {model_name} 发现"]},
+            **extra,
+        }
+        (mdir / "receipt.json").write_text(json.dumps(payload), encoding="utf-8")
+
+    metrics = analyze_review_runs(runs_dir)
+    assert metrics.corrupted_files == (
+        "run-bad-receipt/M-int/receipt.json",
+        "run-bad-receipt/M-ws/receipt.json",
+        "run-no-outcome-split/M-a/receipt.json",
+        "run-no-outcome-split/M-b/receipt.json",
+        "run-no-outcome-split/M-omit/receipt.json",
+    )
+    assert metrics.total_receipts == 1
+    assert metrics.total_findings == 1
+
+    # 拒收的非法/冲突回执均不可被 dispositions 台账引用
+    for rid, pr, model in (
+        ("R1", 701, "M-int"),
+        ("R1", 701, "M-ws"),
+        ("A", 702, "M-a"),
+        ("B", 702, "M-b"),
+        ("run-no-outcome-split", 702, "M-omit"),
+    ):
+        with pytest.raises(EvalValidationError, match="不存在的回执"):
+            analyze_review_runs(
+                runs_dir,
+                dispositions=(
+                    DispositionEntry(
+                        run_id=rid,
+                        pr_number=pr,
+                        model=model,
+                        finding_index=0,
+                        disposition=DispositionLabel.FIXED,
+                    ),
+                ),
+            )
+
+
+def test_conflicting_target_and_outcome_identity_isolated_from_pr_timeline(tmp_path: Path) -> None:
+    runs_dir = tmp_path / "runs"
+    runs_dir.mkdir()
+
+    # R4 反例：PR 1 在 t=1, head A 有有效 BLOCK（1 条阻断发现）
+    _write_run(
+        runs_dir,
+        "p1-r1-block",
+        pr_number=1,
+        head_sha="a" * 40,
+        registered_at_ns=1,
+        attempt=1,
+        verdict="BLOCK",
+        reviews=[{"model": "claude-opus-5-5", "verdict": "BLOCK"}],
+        receipts={
+            "claude-opus-5-5": {
+                "run_id": "run-p1-r1-block",
+                "status": "completed",
+                "model": "claude-opus-5-5",
+                "result": {"status": "blocked", "findings": ["[P1] 真实缺陷"]},
+            }
+        },
+    )
+
+    # 下一目录：target.json 属 PR 1、run B、t=2、head B，但 outcome.json 的 PASS 属 PR 2、run C
+    conflict_dir = runs_dir / "p1-vs-p2-conflict"
+    conflict_dir.mkdir()
+    (conflict_dir / "target.json").write_text(
+        json.dumps(
+            {
+                "run_id": "B",
+                "pr_number": 1,
+                "base_sha": "0" * 40,
+                "head_sha": "b" * 40,
+                "registered_at_ns": 2,
+                "attempt": 2,
+            }
+        ),
+        encoding="utf-8",
+    )
+    (conflict_dir / "outcome.json").write_text(
+        json.dumps(
+            {
+                "run_id": "C",
+                "verdict": "PASS",
+                "reused_from": "earlier-run",
+                "target": {
+                    "run_id": "C",
+                    "pr_number": 2,
+                    "head_sha": "c" * 40,
+                    "registered_at_ns": 2,
+                    "attempt": 1,
+                },
+                "reviews": [
+                    {"model": "claude-opus-5-5", "verdict": "PASS"},
+                    {"model": "kimi-k3.1-pro", "verdict": "PASS"},
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    c_receipt_dir = conflict_dir / "claude-opus-5-5"
+    c_receipt_dir.mkdir()
+    (c_receipt_dir / "receipt.json").write_text(
+        json.dumps(
+            {
+                "run_id": "C",
+                "status": "completed",
+                "model": "claude-opus-5-5",
+                "result": {"status": "completed", "findings": ["非阻断：冲突目录内回执"]},
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    metrics = analyze_review_runs(runs_dir)
+    assert metrics.total_runs == 2
+    assert metrics.verdict_counts == {"BLOCK": 1, "CORRUPTED_IDENTITY": 1}
+    assert metrics.corrupted_files == (
+        "p1-vs-p2-conflict/target.json",
+        "p1-vs-p2-conflict/outcome.json",
+        "p1-vs-p2-conflict/claude-opus-5-5/receipt.json",
+    )
+    assert metrics.unique_prs == 1
+    assert metrics.prs_with_pass == 0
+    assert metrics.prs_without_pass == 1
+    assert metrics.reused_runs == 0
+    assert metrics.total_receipts == 1
+    assert metrics.total_findings == 1
+    assert metrics.model_verdict_counts == {"claude-opus-5-5": {"BLOCK": 1}}
+    assert metrics.model_pair_agreement == {}
+    assert metrics.subsequent_head_pass_inferred_fixed == 0
+    assert metrics.subsequent_head_pass_total_block_findings == 1
+    assert metrics.subsequent_head_pass_undeterminable_findings == 0
+
+
+def test_orthogonal_nit_and_style_format_classification(tmp_path: Path) -> None:
+    assert is_non_blocking_or_nit_finding("[Nit] formatting", "blocked") is True
+    assert is_style_or_format_finding("[Nit] formatting") is True
+    assert classify_finding_heuristic("[Nit] formatting", "blocked") == "non_blocking_or_nit"
+
+    assert is_non_blocking_or_nit_finding("请运行 rustfmt 修复缩进格式问题", "blocked") is False
+    assert is_style_or_format_finding("请运行 rustfmt 修复缩进格式问题") is True
+    assert classify_finding_heuristic("请运行 rustfmt 修复缩进格式问题", "blocked") == "blocking_style_or_format"
+
+    assert classify_finding_heuristic("[P1] 越权漏洞", "blocked") == "blocking_substantive"
+
+    # R4 反例：合法时间与 head 的 BLOCK 轮次，result.status="blocked"，唯一发现 "[Nit] formatting"
+    runs_dir = tmp_path / "runs"
+    runs_dir.mkdir()
+    _write_run(
+        runs_dir,
+        "p801-r1-nit-fmt",
+        pr_number=801,
+        head_sha="a" * 40,
+        registered_at_ns=100,
+        attempt=1,
+        verdict="BLOCK",
+        receipts={
+            "claude-opus-5-5": {
+                "run_id": "run-p801-r1-nit-fmt",
+                "status": "completed",
+                "model": "claude-opus-5-5",
+                "result": {"status": "blocked", "findings": ["[Nit] formatting"]},
+            }
+        },
+    )
+
+    metrics = analyze_review_runs(runs_dir)
+    assert metrics.total_findings == 1
+    assert metrics.style_or_format_findings == 1
+    assert metrics.nit_style_or_format_findings == 1
+    assert metrics.finding_heuristic_categories == {"non_blocking_or_nit": 1}
+    assert metrics.subsequent_head_pass_total_block_findings == 0
+    assert metrics.subsequent_head_pass_undeterminable_findings == 0
+    assert metrics.subsequent_head_pass_inferred_fixed == 0
+
+    md = render_baseline_markdown(metrics)
+    assert "格式/风格主题正交命中总数" in md
+    assert "nit_style_or_format_findings" in md
+
+
+def test_cli_unwritable_out_json_returns_friendly_error_without_traceback(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    runs_dir = tmp_path / "runs"
+    runs_dir.mkdir()
+    rc = main(["baseline-stats", "--runs-dir", str(runs_dir), "--out-json", "/dev/null/out.json"])
+    captured = capsys.readouterr()
+    assert rc == 2
+    assert "/dev/null/out.json" in captured.err
+    assert "无法写入输出文件" in captured.err
+    assert "Traceback" not in captured.err
