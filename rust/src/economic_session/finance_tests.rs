@@ -1639,6 +1639,16 @@ fn old_finance_contracts_refuse_cap_activation() {
     assert!(revision(&m).unwrap_err().contains("混写"));
     m["protocol_revision"] = json!(SCHEMA_V2);
     assert_eq!(revision(&m).unwrap(), REV_V4);
+    m["finance"]["schema_revision"] = json!(REV_V7);
+    assert!(revision(&m).unwrap_err().contains("混写"));
+    m["schema_revision"] = json!(deployment::BUSINESS);
+    assert_eq!(revision(&m).unwrap(), REV_V7);
+    m["protocol_revision"] = json!(SCHEMA_V1);
+    assert!(revision(&m).unwrap_err().contains("混写"));
+    m["finance"]["schema_revision"] = json!(REV_V6);
+    assert_eq!(revision(&m).unwrap(), REV_V6);
+    m["finance"]["schema_revision"] = json!(REV_V3);
+    assert!(revision(&m).unwrap_err().contains("混写"));
     let gates: Vec<(&str, bool, bool)> = CONTRACTS
         .iter()
         .map(|c| (c.revision, c.content, c.cap_activation))
@@ -1650,7 +1660,9 @@ fn old_finance_contracts_refuse_cap_activation() {
             (REV_V2, true, false),
             (REV_V3, false, true),
             (REV_V4, true, true),
-            (REV_V5, false, false)
+            (REV_V5, false, false),
+            (REV_V6, false, true),
+            (REV_V7, true, true),
         ]
     );
     m["finance"] = Value::Null;

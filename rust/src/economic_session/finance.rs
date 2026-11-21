@@ -149,8 +149,10 @@ const CAP_RECORD_REV: &str = "funding-cap-policy-record/1";
 fn cap_activation_contract(config: &Config) -> Result<(), String> {
     if contract(&config.manifest)?.cap_activation {
         Ok(())
-    } else {
+    } else if deployment::is_business(&config.manifest) {
         Err("SchemaUnsupported：当前 FIN 写合同不支持 cap 激活".into())
+    } else {
+        Err("SchemaUnsupported：cap 激活只属于 tb03b-finance/3 与 /4；/1、/2 不接受新激活".into())
     }
 }
 /// 签署原件逐项绑定激活请求：适用政策身份与量纲、签署版本与所取代版本、金额、有效期、签署先于原子点。
@@ -286,8 +288,10 @@ pub(super) fn exact_release_selected(m: &Value) -> bool {
 fn exact_release_contract(config: &Config) -> Result<(), String> {
     if contract(&config.manifest)?.exact_release {
         Ok(())
-    } else {
+    } else if deployment::is_business(&config.manifest) {
         Err("SchemaUnsupported：当前 FIN 写合同不支持精确命令".into())
+    } else {
+        Err("SchemaUnsupported：精确命令只属于 tb03b-finance/5".into())
     }
 }
 pub(super) fn enabled(config: &Config) -> bool {
