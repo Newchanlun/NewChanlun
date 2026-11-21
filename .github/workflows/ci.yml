@@ -1133,7 +1133,12 @@ jobs:
       # #1875：具名锁 4 路并行（run-1488-delta-ci.py 每条仍是独立进程、--exact，逐条核对哈希与日志、结果按计划顺序）。
       #   托管 runner 也取 4，与同类 4 核托管机上 extras 的 RUST_TEST_THREADS=4 同口径；串行时 A/B/C 锁曾是托管路径的关键路径（run 42373511176：22.1 min）。
       CI_1488_TEST_JOBS: "4"
-      # #1875：关 debuginfo（与 PR #2102 同口径），第三方依赖在下方开 opt-level=2 并缓存；本仓保持 dev opt-level=0。
+      # #1875：开本仓 dev opt-level=1 + debug=0（debug-assertions 与 overflow-checks 显式保持开启，
+      #   第三方依赖由下方 [profile.dev.package."*"] opt-level=2 覆盖并缓存，0 重编），使 b2_native_warm_cold
+      #   等 103 条锁从 O0 的 ~200s 降至 ~25s。
+      CARGO_PROFILE_DEV_OPT_LEVEL: "1"
+      CARGO_PROFILE_DEV_DEBUG_ASSERTIONS: "true"
+      CARGO_PROFILE_DEV_OVERFLOW_CHECKS: "true"
       CARGO_PROFILE_DEV_DEBUG: "0"
     defaults:
       run:
