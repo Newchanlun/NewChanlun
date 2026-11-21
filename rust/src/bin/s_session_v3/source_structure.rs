@@ -184,13 +184,12 @@ impl<L: Lookup> CurrentR5<'_, L> {
             .is_ok()
     }
 
-    pub fn validate(&self) -> Result<(), PublishError> {
+    /// 来源审计也可只收到本代生成集。原件的活动性由持久对象差分与历史复算核验。
+    pub fn validate_present(&self) -> Result<(), PublishError> {
         for id in self.deferred {
-            let object = self
-                .lookup
-                .object(id.as_str())
-                .ok_or_else(|| err("R5 待重算原件不在活动集"))?;
-            if !super::super::content_structure::r5_deferable_kind(object.kind.as_str()) {
+            if self.lookup.object(id.as_str()).is_some_and(|object| {
+                !super::super::content_structure::r5_deferable_kind(object.kind.as_str())
+            }) {
                 return Err(err("R5 待重算原件不在 E/F 领域"));
             }
         }
@@ -453,7 +452,7 @@ pub(super) fn audit_full(
         lookup: &lookup,
         deferred: &deferred,
     };
-    current.validate()?;
+    current.validate_present()?;
     for o in objects {
         if is_kind(rule, o.kind.as_str()) && !current.is_deferred(o.id.as_str()) {
             audit_links(s, o, &current)?;
@@ -2318,6 +2317,8 @@ mod ef_entity_tests {
             "segment:5"
         );
 
+        // 生成集不含旧原件：它们的活动性由独立索引的差分验证。
+        full(&mut nodes, &mixed.rows).unwrap();
         let mut active_cut = mixed.rows.clone();
         active_cut.extend(
             before

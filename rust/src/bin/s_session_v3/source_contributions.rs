@@ -1404,7 +1404,7 @@ impl NativeSourceState {
             lookup: &lookup,
             deferred: &deferred,
         };
-        current.validate()?;
+        current.validate_present()?;
         // 原件可能内容未变而在本代恢复为可用，须按新切面的端点重新核查。
         for id in old_deferred
             .iter()
