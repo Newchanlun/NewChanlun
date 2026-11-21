@@ -251,14 +251,14 @@
 
 ### #2114 受影响代码清单（2026-11-20）
 
-行号锚定 `16b9820f0266e43c768a35a4d4994696ea8eb820`（#1426，Draft PR #2124）。
+行号锚定 `16b9820f0266e43c768a35a4d4994696ea8eb820`（#1426，[草稿 PR #2124](https://github.com/Newchanlun/NewChanlun/pull/2124)，叠在 #1855 之上）。下表的 GitHub 文件链接均指向该提交，所指文件尚未合入 main。
 
 | 归属 | 入口 | 实施边界 |
 |---|---|---|
-| #1426 | `rust/src/theta_v0/classifier/trend_formation.rs:58–69,107–119,145–185,251–268,277–308,337–338`；`rust/tests/trend_formation_1426.rs:237–475,478–631,633–660,774–802,824–927,929–1149`；`rust/tests/fixtures/trend_formation_1426.json` | `confirmed()` 改读两端同源 R5；未接 #1496 前所有切面 `formed()` 都为空，123 的严格分离仍是观察。台账留所有相邻关系，形成侧仅投影实例首对；`is_final()` 的扫描尾语义不能代替 R5。 |
-| #1496 / #1419、#1424 | `rust/src/theta_v0/classifier/center_scan.rs:121,288,461–484`；`formal/Origin/ScanAssemblyMirror.lean:352–381`（角色参考） | 提供共用结算证据，订正中枢正本 §5.2、§9 R5；五叶不动。 |
+| #1426 | [`trend_formation.rs:58–69,107–119,145–185,251–268,277–308,337–338`](https://github.com/Newchanlun/NewChanlun/blob/16b9820f0266e43c768a35a4d4994696ea8eb820/rust/src/theta_v0/classifier/trend_formation.rs#L58-L69)；[`trend_formation_1426.rs:237–475,478–631,633–660,774–802,824–927,929–1149`](https://github.com/Newchanlun/NewChanlun/blob/16b9820f0266e43c768a35a4d4994696ea8eb820/rust/tests/trend_formation_1426.rs#L237-L475)；[`trend_formation_1426.json`](https://github.com/Newchanlun/NewChanlun/blob/16b9820f0266e43c768a35a4d4994696ea8eb820/rust/tests/fixtures/trend_formation_1426.json) | `confirmed()` 改读两端同源 R5；未接 #1496 前所有切面 `formed()` 都为空，123 的严格分离仍是观察。台账留所有相邻关系，形成侧仅投影实例首对；`is_final()` 的扫描尾语义不能代替 R5。 |
+| #1496 / #1419、#1424 | [`center_scan.rs:121,288,461–484`](https://github.com/Newchanlun/NewChanlun/blob/16b9820f0266e43c768a35a4d4994696ea8eb820/rust/src/theta_v0/classifier/center_scan.rs#L121)；`formal/Origin/ScanAssemblyMirror.lean:352–381`（角色参考） | 提供共用结算证据，订正中枢正本 §5.2、§9 R5；五叶不动。 |
 | #1432/#1433/#1437 | `rust/src/theta_v0/classifier/signal.rs:365–439`；`formal/Origin/BspClassification.lean:92–97,362–366`；`formal/Origin/TrendCompleteClassification.lean:66–80` | 保持趋势背驰、标准一类及完成分类各自判据；不可把观察或反向结算当同向前件。 |
-| S/Q、#1429/#2072 | `rust/src/bin/s_session_v3/content_structure.rs:2751–2752,2790–2816,2835–2842`；`rust/src/bin/s_session_v3/source_structure.rs:123–142`；`s_session/browser/q3-center.js:397–400,413–417,473–512,540–563` | 使用 S 提交与变更流；`leaf_revised`、`pending_upgrade` 是既有关系变更名，不是形成侧枚举。读者不从关系叶冒推趋势，上级构造只消费已完成且归属有证的材料。 |
+| S/Q、#1429/#2072 | [`content_structure.rs:2751–2752,2790–2816,2835–2842`](https://github.com/Newchanlun/NewChanlun/blob/16b9820f0266e43c768a35a4d4994696ea8eb820/rust/src/bin/s_session_v3/content_structure.rs#L2751-L2752)；[`source_structure.rs:123–142`](https://github.com/Newchanlun/NewChanlun/blob/16b9820f0266e43c768a35a4d4994696ea8eb820/rust/src/bin/s_session_v3/source_structure.rs#L123-L142)；[`q3-center.js:397–400,413–417,473–512,540–563`](https://github.com/Newchanlun/NewChanlun/blob/16b9820f0266e43c768a35a4d4994696ea8eb820/s_session/browser/q3-center.js#L397-L400) | 使用 S 提交与变更流；`leaf_revised`、`pending_upgrade` 是既有关系变更名，不是形成侧枚举。读者不从关系叶冒推趋势，上级构造只消费已完成且归属有证的材料。 |
 
 ---
 
