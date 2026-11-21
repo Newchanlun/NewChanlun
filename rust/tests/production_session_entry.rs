@@ -1317,6 +1317,25 @@ fn layout_resolves_not_yet_existing_db_dirs() {
 }
 
 #[test]
+fn layout_preserves_missing_path_suffix_in_measurement_domain() {
+    let mut f = LayoutFixture::new();
+    let family = f.dir("s/s.db.fam");
+    for (member, suffix, source) in [
+        (
+            f.path("admission"),
+            "missing/../sub",
+            "s.admission_job_limits",
+        ),
+        (family, "missing/../x", "s.db"),
+    ] {
+        assert!(!member.join("missing").exists());
+        let q = member.join(suffix);
+        f.e_db(&q.join("e.db"));
+        f.assert_conflict("economic.e.db", &q, source, &member);
+    }
+}
+
+#[test]
 fn layout_rejects_x_db_file_symlink_into_s_parent() {
     let mut f = LayoutFixture::new();
     std::fs::File::create(f.path("s/x.db")).unwrap();
@@ -1477,6 +1496,21 @@ fn layout_accepts_separate_directories() {
 }
 
 #[test]
+fn layout_accepts_parent_of_existing_symlink_target() {
+    let mut f = LayoutFixture::with_layout(true, true);
+    // 链接的词法父目录是 P；链接不属 S 库名族，目标的物理父目录在测量域外。
+    symlink(f.dir("e/child"), f.path("s/physical-link")).unwrap();
+    let physical_db = f.path("e/e.db");
+    assert!(!physical_db.exists());
+    f.e_db(&f.path("s/physical-link/../e.db"));
+    f.assert_listens();
+    assert_eq!(
+        meta(&physical_db, "SELECT v FROM meta WHERE k='writer_epoch'").as_deref(),
+        Some("1")
+    );
+}
+
+#[test]
 fn layout_allows_launcher_state_dir_equal_s_parent() {
     let mut f = LayoutFixture::with_layout(true, true);
     f.launcher["state_dir"] = json!(f.path("s"));
@@ -1574,5 +1608,31 @@ fn layout_rejects_unreadable_or_incomplete_economic_manifest() {
             "{stderr}"
         );
         f.economic = valid.clone();
+    }
+}
+
+#[test]
+fn layout_rejects_duplicate_economic_manifest_key_before_start() {
+    let f = LayoutFixture::new();
+    clock_plan(&f.space);
+    f.write_manifests();
+    let mut economic = f.economic.to_string();
+    assert_eq!(f.economic["schema_revision"], "economic-manifest/1");
+    economic.insert_str(1, r#""schema_revision":"economic-manifest/1","#);
+    std::fs::write(f.path("economic.json"), economic).unwrap();
+    let stderr = f.assert_refused();
+    assert!(
+        stderr.contains("InvalidDomain：经济 manifest JSON")
+            && stderr.contains("duplicate key schema_revision"),
+        "{stderr}"
+    );
+    for rel in [
+        "launcher-state/structure-source.json",
+        "s/s.db",
+        "e/e.db",
+        "b/b.db",
+        "x/x.db",
+    ] {
+        assert!(!f.path(rel).exists(), "{rel} 在拒启后出现");
     }
 }

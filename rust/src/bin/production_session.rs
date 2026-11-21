@@ -13,6 +13,7 @@
 //!   `_redact`）过滤后写 stderr。
 //!
 //! 用法：production_session --manifest FILE
+use newchan_rust::session_protocol::strict_json;
 use newchan_rust::structure_source::Declaration;
 use serde_json::{json, Value};
 use std::collections::BTreeSet;
@@ -112,7 +113,7 @@ fn read_json(path: &Path, what: &str) -> Result<Value, String> {
     serde_json::from_str(&raw).map_err(|e| format!("InvalidDomain：{what} JSON 解析失败：{e}"))
 }
 
-/// ADR 0059：不存在的路径从最近存在祖先继续解析；悬空链接也是链接，不是缺失段。
+/// ADR 0059：先解析链接，再把不存在的尾段原样接到最近存在祖先之后。
 fn canon_layout_path(path: &Path) -> io::Result<PathBuf> {
     let path = if path.as_os_str().is_empty() {
         Path::new(".")
@@ -138,7 +139,7 @@ fn canon_layout_path(path: &Path) -> io::Result<PathBuf> {
             resolved.pop();
             continue;
         }
-        resolved.push(part);
+        resolved.push(&part);
         match std::fs::symlink_metadata(&resolved) {
             Ok(meta) if meta.is_symlink() => {
                 links += 1;
@@ -150,7 +151,13 @@ fn canon_layout_path(path: &Path) -> io::Result<PathBuf> {
                 todo.extend(target.components().rev().map(|c| c.as_os_str().to_owned()));
             }
             Ok(_) => (),
-            Err(err) if err.kind() == io::ErrorKind::NotFound => (),
+            Err(err) if err.kind() == io::ErrorKind::NotFound => {
+                resolved.pop();
+                let mut path = resolved.canonicalize()?;
+                path.push(part);
+                path.extend(todo.into_iter().rev());
+                return Ok(path);
+            }
             Err(err) => return Err(err),
         }
     }
@@ -256,7 +263,15 @@ fn check_admission_layout(raw: &Value, chongs: &[Value]) -> Result<(), String> {
     }
     layout.check_db("x.db", Path::new(text(raw, "x.db")?))?;
 
-    let economic = read_json(Path::new(text(raw, "economic.manifest")?), "经济 manifest")?;
+    let economic_path = Path::new(text(raw, "economic.manifest")?);
+    let economic_bytes = std::fs::read(economic_path).map_err(|e| {
+        format!(
+            "InvalidDomain：读经济 manifest {} 失败：{e}",
+            economic_path.display()
+        )
+    })?;
+    let economic = strict_json(&economic_bytes)
+        .map_err(|e| format!("InvalidDomain：经济 manifest JSON 解析失败：{e}"))?;
     layout.check_socket("e.socket", &economic["e"]["socket"])?;
     let routes = economic["chongs"]
         .as_array()
