@@ -190,25 +190,22 @@ where
         return Err("prototype_audit_allocation_incomplete：owned对象diff入口未启用".into());
     }
     let admission = NativeAdmission(work);
-    let mut old_by_id = bj::new_map::<&str, usize>(allocation);
-    let mut active_by_id = bj::new_map::<&str, usize>(allocation);
+    let mut old_by_id = bj::new_map::<&str, (usize, Option<usize>)>(allocation);
     for (index, entry) in old.iter().enumerate() {
-        if !old_by_id.contains_key(identity(&entry.key.object_id)) {
-            admission
-                .native_map_room(&mut old_by_id)
-                .map_err(|e| e.to_string())?;
-        }
-        old_by_id
-            .insert(identity(&entry.key.object_id), index)
-            .map_err(|e| e.to_string())?;
-        if entry.active {
-            if !active_by_id.contains_key(identity(&entry.key.object_id)) {
+        let id = identity(&entry.key.object_id);
+        if let Some(slot) = old_by_id.get_mut(id) {
+            slot.0 = index;
+            if entry.active {
+                slot.1 = Some(index);
+            }
+        } else {
+            if old_by_id.len() == old_by_id.capacity() {
                 admission
-                    .native_map_room(&mut active_by_id)
+                    .native_map_room(&mut old_by_id)
                     .map_err(|e| e.to_string())?;
             }
-            active_by_id
-                .insert(identity(&entry.key.object_id), index)
+            old_by_id
+                .insert(id, (index, entry.active.then_some(index)))
                 .map_err(|e| e.to_string())?;
         }
     }
@@ -219,8 +216,8 @@ where
             .enumerate()
             .filter(|(_, e)| e.active)
             .map(|(i, _)| i),
-        |id| old_by_id.get(id).copied(),
-        |id| active_by_id.get(id).copied(),
+        |id| old_by_id.get(id).map(|&(known, _)| known),
+        |id| old_by_id.get(id).and_then(|&(_, active)| active),
         allocation,
         work,
     )
@@ -270,7 +267,7 @@ where
     // 同槽位候选取**末位**：与旧实现 `new_objects.iter().collect::<BTreeMap<_,_>>()` 同语义。
     let mut new_by_slot = bj::new_map::<&Slot, usize>(allocation);
     for (index, key) in new.iter().enumerate() {
-        if !new_by_slot.contains_key(&key.slot) {
+        if new_by_slot.len() == new_by_slot.capacity() && !new_by_slot.contains_key(&key.slot) {
             admission
                 .native_map_room(&mut new_by_slot)
                 .map_err(|e| e.to_string())?;
@@ -335,24 +332,33 @@ where
 
     // 2) 本次候选按给定序：同 ID 先核不可变内容，再定「未变化 / 拒绝复活 / 真实出生」。
     for (new_index, key) in new.iter().enumerate() {
-        let existing = known(identity(&key.object_id));
-        if let Some(old_index) = existing {
+        let id = identity(&key.object_id);
+        let existing = known(id);
+        let existing_owner = if let Some(old_index) = existing {
+            let owner = old(old_index);
             // 先既有、后候选：与旧实现同一求值次序，读失败原样上报。
-            let stored_content = old(old_index).borrow().key.immutable.read()?;
+            let stored_content = owner.borrow().key.immutable.read()?;
             let candidate_content = key.immutable.read()?;
             if stored_content != candidate_content {
                 return Err(format!(
-                    "IdentityConflict：object_id `{}` 已存在且不可变内容不同（同 ID 异内容不得覆盖或吞掉）",
-                    identity(&key.object_id)
+                    "IdentityConflict：object_id `{id}` 已存在且不可变内容不同（同 ID 异内容不得覆盖或吞掉）",
                 ));
             }
-        }
-        match active_known(identity(&key.object_id)) {
-            Some(old_index) => {
-                if old(old_index).borrow().key.slot != key.slot {
+            Some((old_index, owner))
+        } else {
+            None
+        };
+        match active_known(id) {
+            Some(active_index) => {
+                let slot_matches = match &existing_owner {
+                    Some((old_index, owner)) if *old_index == active_index => {
+                        owner.borrow().key.slot == key.slot
+                    }
+                    _ => old(active_index).borrow().key.slot == key.slot,
+                };
+                if !slot_matches {
                     return Err(format!(
-                        "StorageUnavailable：object_id `{}` 的活动发生区间与本次不一致",
-                        identity(&key.object_id)
+                        "StorageUnavailable：object_id `{id}` 的活动发生区间与本次不一致",
                     ));
                 }
                 // 未变化：不重发（changes-only 域的 Delta 不重复完整活动集）。
@@ -360,8 +366,7 @@ where
             None => {
                 if existing.is_some() {
                     return Err(format!(
-                        "IdentityConflict：object_id `{}` 是已撤回历史身份，不得复活",
-                        identity(&key.object_id)
+                        "IdentityConflict：object_id `{id}` 是已撤回历史身份，不得复活",
                     ));
                 }
                 admission
