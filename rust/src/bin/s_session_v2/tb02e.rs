@@ -12,7 +12,8 @@ pub(super) const KINDS: &[&str] = &[
 ];
 pub(super) const SCHEMA_REVISION: &str = "s-center/1";
 pub(super) const SEMANTIC_VERSION: &str = "center-seed/1";
-pub(super) const POLICY_VERSION: &str = "strict_seed_zn_outer_c_resume";
+pub(super) const POLICY_VERSION: &str = "strict_seed_zn_outer_r5_c_resume";
+pub(super) const LEGACY_POLICY_VERSION: &str = "strict_seed_zn_outer_c_resume";
 pub(super) const DELIVERED_SCOPE: &str = "l0_strict_seed_zn_roles_c_resume_assignment";
 /// 版本对象与 CC-016/017/022 目录轴的延后范围（根裁定 D-J 第 4 点：带实票号）。
 pub(super) const DEFERRED_SCOPE: [&str; 5] = [

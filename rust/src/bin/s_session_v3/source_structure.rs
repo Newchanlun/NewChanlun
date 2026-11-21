@@ -72,7 +72,13 @@ pub(super) fn audit_payload(
         ("policy_version", policy),
         ("view_role", "main"),
     ] {
-        if text(s, p, k)? != v {
+        let observed = text(s, p, k)?;
+        let legacy_policy = k == "policy_version"
+            && ((crate::tb02e::KINDS.contains(&kind)
+                && observed == crate::tb02e::LEGACY_POLICY_VERSION)
+                || (crate::tb02f::KINDS.contains(&kind)
+                    && observed == crate::tb02f::LEGACY_POLICY_VERSION));
+        if !legacy_policy && observed != v {
             return Err(err("结构语义头不符"));
         }
     }
@@ -192,6 +198,8 @@ pub(super) fn references(
                     "second_sequence_object_id",
                     "unit_object_id",
                     "witness_object_id",
+                    "leave_object_id",
+                    "pullback_object_id",
                     "object_id",
                 ] {
                     if let Some(value) = s.lookup_optional_field_ref(r.view(), key).map_err(err)? {
@@ -209,7 +217,7 @@ pub(super) fn references(
                         }
                     }
                 }
-                for key in ["unit", "units", "after"] {
+                for key in ["unit", "units", "r5", "after"] {
                     if let Some(value) = s.lookup_optional_field_ref(r.view(), key).map_err(err)? {
                         walk(s, &value, out)?;
                     }
@@ -1138,6 +1146,25 @@ fn audit_entity_fields(
             }
         }
         "CC-016.center" => {
+            if let Some(proof) = s.lookup_optional_field_ref(d.view(), "r5").map_err(err)? {
+                if proof.kind() != Kind::Null {
+                    for (unit_key, id_key) in [
+                        ("leave_unit", "leave_object_id"),
+                        ("pullback_unit", "pullback_object_id"),
+                    ] {
+                        let id = text(s, &proof, id_key)?;
+                        let unit = lookup
+                            .object(id.as_str())
+                            .ok_or_else(|| err("R5 腿对象悬空"))?;
+                        let entity_id = text(s, &proof, unit_key)?;
+                        if unit.kind != "CC-013.segment"
+                            || !points_back(s, unit, "entity_id", &entity_id)?
+                        {
+                            return Err(err("R5 腿对象与实体错绑"));
+                        }
+                    }
+                }
+            }
             let attempt = field_entity(s, d, "seed_attempt_id", lookup)?
                 .ok_or_else(|| err("结构实体字段端点悬空"))?;
             if !points_back(s, attempt, "center_id", &me)? {
@@ -2130,6 +2157,44 @@ mod ef_entity_tests {
             *counts.entry(r.kind.as_str()).or_default() += 1;
         }
         format!("{counts:?}")
+    }
+
+    #[test]
+    fn r5_settlement_clock_waits_for_completed_retest_and_keeps_first_cut() {
+        let mut nodes = sc::MemoryNodes::default();
+        let mut producer = Cc004Producer::new(tb02a::PROFILE, crate::V3_STRUCTURE_RULE_REVISION);
+        for i in 0..8 {
+            producer
+                .bind_source(
+                    &mut nodes,
+                    i,
+                    content_producer::RawRefSpec {
+                        identity_key: format!("raw-{i}"),
+                        payload_hash: "h".into(),
+                        receipt_id: format!("receipt-{i}"),
+                        event_id: format!("bar-{i}"),
+                        input_revision: "1".into(),
+                        revision: 1,
+                        seq: i,
+                        source_coord: i.to_string(),
+                    },
+                )
+                .unwrap();
+        }
+        let before = cut(&mut nodes, &mut producer, 5, 28, &[]);
+        let proved = cut(&mut nodes, &mut producer, 6, 29, &before.records);
+        let later = cut(&mut nodes, &mut producer, 7, 30, &proved.records);
+        let a = data_of(&before.rows, "CC-016.center")[0];
+        let b = data_of(&proved.rows, "CC-016.center")[0];
+        let c = data_of(&later.rows, "CC-016.center")[0];
+        assert_eq!(a["settled"], false);
+        assert_eq!(a["settled_known_at"], Value::Null);
+        assert_eq!(b["settled"], true);
+        assert_eq!(b["r5"]["leave_unit"], "segment:4");
+        assert_eq!(b["r5"]["pullback_unit"], "segment:5");
+        assert_eq!(b["settled_known_at"]["generation"], "29");
+        assert_eq!(c["settled_known_at"], b["settled_known_at"]);
+        assert_eq!(a["entity_id"], c["entity_id"]);
     }
 
     #[test]

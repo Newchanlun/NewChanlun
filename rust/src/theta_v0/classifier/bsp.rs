@@ -736,19 +736,19 @@ mod tests {
             // 2026-08-29 #1291 G5 F-2：signal.rs 二类提取入口补 m2_broke_center 方向敏感
             // 真检查与文档（+9 行）⟹ 七处夹具点统一 +9，逐条重核内容不变（同为测试夹具
             // source_index 过滤），同条目重登记。
-            "theta_v0/classifier/signal.rs:1954",
-            "theta_v0/classifier/signal.rs:2108",
-            "theta_v0/classifier/signal.rs:2339",
-            "theta_v0/classifier/signal.rs:2681",
-            "theta_v0/classifier/signal.rs:2693",
-            "theta_v0/classifier/signal.rs:2715",
-            "theta_v0/classifier/signal.rs:2737",
-            "theta_v0/classifier/signal.rs:2742",
-            "theta_v0/classifier/signal.rs:2743",
-            "theta_v0/classifier/signal.rs:2881",
-            "theta_v0/classifier/signal.rs:2914",
-            "theta_v0/classifier/signal.rs:3181",
-            "theta_v0/classifier/signal.rs:3249",
+            "theta_v0/classifier/signal.rs:2034",
+            "theta_v0/classifier/signal.rs:2188",
+            "theta_v0/classifier/signal.rs:2419",
+            "theta_v0/classifier/signal.rs:2761",
+            "theta_v0/classifier/signal.rs:2773",
+            "theta_v0/classifier/signal.rs:2795",
+            "theta_v0/classifier/signal.rs:2817",
+            "theta_v0/classifier/signal.rs:2822",
+            "theta_v0/classifier/signal.rs:2823",
+            "theta_v0/classifier/signal.rs:2961",
+            "theta_v0/classifier/signal.rs:2994",
+            "theta_v0/classifier/signal.rs:3261",
+            "theta_v0/classifier/signal.rs:3329",
             // 2026-08-21 #1080 S2 Phase2：`judge_first_from_gates` 加默认关闭只读捕获
             // seam（+14 行）——本块锚点待全量合并后按 whitelist 测试实报行号统一订正。            // （2026-08-16 #648 T1：classifier/mod.rs 内联测试 4273 行抽离至 classifier/tests/            // 主题件 ⟹ 该夹具点同内容随迁 mod.rs:4574 → tests/pipeline_geometry.rs:1565，
             // 重核内容不变（同为测试夹具 source_index 过滤），同条目重登记。

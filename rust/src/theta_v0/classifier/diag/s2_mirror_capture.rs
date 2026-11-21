@@ -478,6 +478,7 @@ pub fn run_first_production_diagnostics() -> Vec<FirstAssemblyCapture> {
             DivergenceGauge::ForceL,
             &strokes,
             sorted,
+            super::super::signal::T3InCSource::NativeSegments,
             Some(0),
             &mut grades,
         );
@@ -708,6 +709,7 @@ pub fn capture_fixture_frontier(
         level,
         centers,
         segments,
+        None,
         anchor_dirs,
         departure_ends,
         blocks,

@@ -335,7 +335,13 @@ fn verify_prior(
         ("policy_version", header(kind).2),
         ("view_role", "main"),
     ] {
-        if field_text(nodes, &payload, key)? != want {
+        let observed = field_text(nodes, &payload, key)?;
+        let legacy_policy = key == "policy_version"
+            && ((crate::tb02e::KINDS.contains(&kind)
+                && observed == crate::tb02e::LEGACY_POLICY_VERSION)
+                || (crate::tb02f::KINDS.contains(&kind)
+                    && observed == crate::tb02f::LEGACY_POLICY_VERSION));
+        if !legacy_policy && observed != want {
             return Err(format!("prior {key} 不符").into());
         }
     }
@@ -1982,22 +1988,48 @@ pub(super) fn build_ef_units(
         };
         let next = wf
             .next_tested_unit
-            .filter(|&k| k == units.len())
-            .and(inputs.in_progress.as_ref())
+            .and_then(|k| {
+                inputs.completed.get(k).or_else(|| {
+                    (k == units.len())
+                        .then_some(inputs.in_progress.as_ref())
+                        .flatten()
+                })
+            })
             .map(|u| s(&u.unit_id, nodes))
             .transpose()?
             .unwrap_or(CV::Null);
+        let r5 = match wf.settlement {
+            Some(proof) => obj(
+                [
+                    ("leave_unit", s(ids[proof.leave_unit()], nodes)?),
+                    ("pullback_unit", s(ids[proof.pullback_unit()], nodes)?),
+                    (
+                        "leave_object_id",
+                        s(&inputs.completed[proof.leave_unit()].object_id, nodes)?,
+                    ),
+                    (
+                        "pullback_object_id",
+                        s(&inputs.completed[proof.pullback_unit()].object_id, nodes)?,
+                    ),
+                ],
+                nodes,
+            )?,
+            None => CV::Null,
+        };
+        let same_proof = |nodes: &mut dyn NodeStore, p: &Built| -> Result<bool, sc::ContextError> {
+            // 旧规则没有同一首回抽证据，不能借用其结算钟。
+            Ok(field(nodes, p, "r5").is_ok() && root_eq(p, "r5", r5.clone_in(nodes)?, nodes)?)
+        };
         let break_unit = wf
             .break_unit
             .map(|k| s(ids[k], nodes))
             .transpose()?
             .unwrap_or(CV::Null);
         let prior = old(crate::tb02e::KINDS[1], entity);
-        let settled = if wf.settled {
+        let settled = if wf.settlement.is_some() {
             match prior {
                 Some(p)
-                    if root_eq(p, "settled", CV::Bool(true), nodes)?
-                        && root_eq(p, "break_unit", break_unit.clone_in(nodes)?, nodes)? =>
+                    if root_eq(p, "settled", CV::Bool(true), nodes)? && same_proof(nodes, p)? =>
                 {
                     field(nodes, p, "settled_known_at")?
                 }
@@ -2043,6 +2075,14 @@ pub(super) fn build_ef_units(
                 ("status", s(status, nodes)?),
                 ("settled", CV::Bool(wf.settled)),
                 ("break_unit", break_unit),
+                ("r5", r5.clone_in(nodes)?),
+                (
+                    "r5_pending_unit",
+                    wf.pending_boundary
+                        .map(|k| s(ids[k], nodes))
+                        .transpose()?
+                        .unwrap_or(CV::Null),
+                ),
                 ("break_up", CV::Bool(wf.break_up.unwrap_or(false))),
                 ("break_up_defined", CV::Bool(wf.break_up.is_some())),
                 (
@@ -2068,7 +2108,14 @@ pub(super) fn build_ef_units(
         )?;
         let (data, revision, changed) = revise_node(prior, value, nodes)?;
         let mut sources = unit_sources(members, nodes)?;
-        if let Some(k) = wf.break_unit {
+        if let Some(proof) = wf.settlement {
+            for k in [proof.leave_unit(), proof.pullback_unit()] {
+                if k > wf.last {
+                    sources.extend(inputs.completed[k].sources.iter().copied(), nodes)?;
+                }
+            }
+        }
+        if let Some(k) = wf.pending_boundary {
             sources.extend(inputs.completed[k].sources.iter().copied(), nodes)?;
         }
         let sources = sorted_sources(sources);
@@ -2216,7 +2263,11 @@ pub(super) fn build_ef_units(
                 if count < member_ids.len() as u64 {
                     changes.push("member_added", nodes)?;
                 }
-                if !root_eq(p, "settled", CV::Bool(true), nodes)? && wf.settled {
+                if root_eq(p, "settled", CV::Bool(true), nodes)? {
+                    if !wf.settled || !same_proof(nodes, p)? {
+                        changes.push("settlement_revised", nodes)?;
+                    }
+                } else if wf.settled {
                     changes.push("settled", nodes)?;
                 }
                 if field_text(nodes, p, "status")? != "UPGRADE_PENDING_TB02H" && wf.upgrade_pending

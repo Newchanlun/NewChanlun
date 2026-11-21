@@ -3518,7 +3518,7 @@ mod tests {
                     "TB-02-E",
                     crate::tb02e::SCHEMA_REVISION,
                     "center-seed/1",
-                    "strict_seed_zn_outer_c_resume",
+                    crate::tb02e::POLICY_VERSION,
                     "l0_strict_seed_zn_roles_c_resume_assignment",
                 ),
                 (
@@ -3526,7 +3526,7 @@ mod tests {
                     "TB-02-F",
                     crate::tb02f::SCHEMA_REVISION,
                     "center-pair/1",
-                    "zn_outer_five_leaf_pending_ge9",
+                    crate::tb02f::POLICY_VERSION,
                     "l0_adjacent_pair_five_leaf_zn_outer_and_unit_core_position",
                 ),
             ] {

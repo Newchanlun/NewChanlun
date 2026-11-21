@@ -121,7 +121,8 @@ pub(crate) use cert::{
 };
 pub use cert::{PanDivCert, QuasiSecondCert};
 pub(crate) use gates::{
-    first_structural_gates, judge_first_cached, judge_first_from_gates, FirstStructuralGates,
+    first_structural_gates, judge_first_cached, judge_first_cached_with_r5, judge_first_from_gates,
+    FirstStructuralGates,
 };
 #[cfg(test)]
 pub(crate) use pan_div_short::{
@@ -298,49 +299,73 @@ pub(crate) fn judge_third_cert(
     leave_anchor: Option<Direction>,
     retest_seg: &Segment,
 ) -> Option<ThirdClassCert> {
-    let leave = seg_end(leave_seg);
-    let retest = seg_end(retest_seg);
-    match (leave_anchor, retest.dir) {
-        // 3 买：向上离开（leave 端点 > c.zg）+ 向下回试（retest 低点 > c.zg，不触及闭区间中枢）。
-        (Some(Direction::Up), Direction::Down) if leave.price > c.zg && retest.price > c.zg => {
-            let situ = EndpointSituation {
-                after_first_buy: false,
-                is_pullback_end: false,
-                left_center: true,         // 离开最近中枢（leave.price > c.zg）
-                retrace_not_reenter: true, // 回试不触及闭区间中枢（retest > c.zg，严格）
-                below_last_center: false,
-                is_sell_side: false,
-            };
-            let mut bits = endpoint_to_bsp(&situ);
-            bits.third_class_entry = Some(third_class_entry_identity(c, leave_seg, retest_seg));
-            Some(ThirdClassCert {
-                point: make_third_point(retest.source_index, bits, retest.price, c),
-                center: *c,
-                departure_interval: (leave_seg.start_index, leave_seg.end_index),
-                retest_interval: (retest_seg.start_index, retest_seg.end_index),
-            })
-        }
-        // 3 卖：向下离开（leave 端点 < c.zd）+ 向上回抽（retest 高点 < c.zd，不触及闭区间中枢）。
-        (Some(Direction::Down), Direction::Up) if leave.price < c.zd && retest.price < c.zd => {
-            let situ = EndpointSituation {
-                after_first_buy: false,
-                is_pullback_end: false,
-                left_center: true,
-                retrace_not_reenter: true,
-                below_last_center: false,
-                is_sell_side: true,
-            };
-            let mut bits = endpoint_to_bsp(&situ);
-            bits.third_class_entry = Some(third_class_entry_identity(c, leave_seg, retest_seg));
-            Some(ThirdClassCert {
-                point: make_third_point(retest.source_index, bits, retest.price, c),
-                center: *c,
-                departure_interval: (leave_seg.start_index, leave_seg.end_index),
-                retest_interval: (retest_seg.start_index, retest_seg.end_index),
-            })
-        }
-        // 同向相邻（无回试）/破中枢方向不符/触及中枢：非第三类结构。
-        _ => None,
+    use super::center::{r5_joint, R5Joint};
+    use super::pipeline::segment_to_unit;
+
+    let leave = segment_to_unit(leave_seg);
+    let retest = segment_to_unit(retest_seg);
+    if leave_anchor != Some(leave.direction) || leave.end_index != c.end_index {
+        return None;
+    }
+    let R5Joint::Proven { side } = r5_joint(c.zd, c.zg, &leave, &retest) else {
+        return None;
+    };
+    Some(third_from_roles(
+        c,
+        leave_seg,
+        retest_seg,
+        side,
+        if side == Direction::Down {
+            retest.hi
+        } else {
+            retest.lo
+        },
+    ))
+}
+
+/// 点位消费扫描见证，不再用端价或 anchor 重判腿角色。
+pub(super) fn third_from_r5(
+    c: &Center,
+    units: &[Segment],
+    proof: super::center_scan::R5Proof,
+) -> Option<ThirdClassCert> {
+    if proof.core() != (c.zd, c.zg) {
+        return None;
+    }
+    let leave = units.get(proof.leave_unit())?;
+    let retest = units.get(proof.pullback_unit())?;
+    Some(third_from_roles(
+        c,
+        leave,
+        retest,
+        proof.side(),
+        proof.pullback_extreme(),
+    ))
+}
+
+pub(super) fn third_from_roles(
+    c: &Center,
+    leave_seg: &Segment,
+    retest_seg: &Segment,
+    side: Direction,
+    price: Tick,
+) -> ThirdClassCert {
+    let is_sell = side == Direction::Down;
+    let situ = EndpointSituation {
+        after_first_buy: false,
+        is_pullback_end: false,
+        left_center: true,
+        retrace_not_reenter: true,
+        below_last_center: false,
+        is_sell_side: is_sell,
+    };
+    let mut bits = endpoint_to_bsp(&situ);
+    bits.third_class_entry = Some(third_class_entry_identity(c, leave_seg, retest_seg));
+    ThirdClassCert {
+        point: make_third_point(retest_seg.end_index, bits, price, c),
+        center: *c,
+        departure_interval: (leave_seg.start_index, leave_seg.end_index),
+        retest_interval: (retest_seg.start_index, retest_seg.end_index),
     }
 }
 
@@ -353,15 +378,7 @@ fn judge_third(
     judge_third_cert(c, leave_seg, leave_anchor, retest_seg).map(|cert| cert.point)
 }
 
-/// ★R1（2026-07-17 代理裁定，p112 实证 + doc-trend §2）：趋势背驰 c 内含对最后中枢 B 的
-/// 第三类买卖点（037:18 必要合取项）。判据 = [`judge_third_cert`] 几何**去 anchor 门**
-/// （anchor 门是 Q7-#1 工程资格，非教义；p112 §2-T3 同口径）：从 `max(c_start, last.end_index)`
-/// 起向未来扫紧邻段对，找首个「leave 同趋势方向且端点破核心（Up: >zg / Down: <zd）∧ retest
-/// 反向且端点不重回核心」对，回试段允许落在旧 turn（#105 单腿 seg_c.1）之后——**全离开段口径**
-/// （037:22，p112 T3_ext 机械化 `third_class_extended` 同构），两端点以 `as_of` 界（禁前视）。
-///
-/// 返回首个命中 `(leave.end_index, retest.end_index)`；无命中 ⟹ None（c 未确立，037:18 否则
-/// 条款「按盘整背驰处理」的适用域）。
+/// 趋势 c 只消费该枢边界的一次首回抽（#1496），不搜索晚段补证。
 pub(crate) fn trend_third_class_in_c(
     segments: &[Segment],
     last: &Center,
@@ -369,23 +386,14 @@ pub(crate) fn trend_third_class_in_c(
     c_start: usize,
     as_of: usize,
 ) -> Option<(usize, usize)> {
-    let lo = segments.partition_point(|s| s.start_index < c_start.max(last.end_index));
-    let hi = segments.partition_point(|s| s.end_index <= as_of);
-    let win = &segments[lo..hi];
-    for pair in win.windows(2) {
-        let (leave, retest) = (&pair[0], &pair[1]);
-        if leave.direction != direction || retest.direction == direction {
-            continue;
-        }
-        let hit = match direction {
-            Direction::Up => leave.end_price > last.zg && retest.end_price > last.zg,
-            Direction::Down => leave.end_price < last.zd && retest.end_price < last.zd,
-        };
-        if hit {
-            return Some((leave.end_index, retest.end_index));
-        }
+    let leave_at = segments.partition_point(|s| s.end_index < last.end_index);
+    let leave = segments.get(leave_at)?;
+    let retest = segments.get(leave_at + 1)?;
+    if retest.end_index > as_of || retest.start_index < c_start || leave.direction != direction {
+        return None;
     }
-    None
+    let cert = judge_third_cert(last, leave, Some(direction), retest)?;
+    Some((cert.departure_interval.1, cert.retest_interval.1))
 }
 
 /// T3-in-c 固定首对分级器五桶 Missing 原因（#606 S1，ADR 补充十五/十六）。
@@ -498,7 +506,42 @@ pub enum T3InCScan {
     Missing,
 }
 
-/// #1229 裁定 a：把 [`trend_third_class_in_c`] 的后扫结果折成统一 T3-in-c 分级（全窗后扫）。
+#[derive(Clone, Copy)]
+pub(crate) enum T3InCSource {
+    NativeSegments,
+    Scanned(Option<super::center_scan::R5Proof>),
+}
+
+impl T3InCSource {
+    pub(super) fn grade(
+        self,
+        segments: &[Segment],
+        center: &Center,
+        direction: Direction,
+        c_start: usize,
+        as_of: usize,
+    ) -> T3InCScan {
+        match self {
+            Self::NativeSegments => t3_in_c_scan_grade(segments, center, direction, c_start, as_of),
+            Self::Scanned(Some(proof)) if proof.side() == direction => {
+                match third_from_r5(center, segments, proof) {
+                    Some(cert)
+                        if cert.retest_interval.0 >= c_start && cert.retest_interval.1 <= as_of =>
+                    {
+                        T3InCScan::Present {
+                            leave_interval: cert.departure_interval,
+                            retest_interval: cert.retest_interval,
+                        }
+                    }
+                    _ => T3InCScan::Missing,
+                }
+            }
+            Self::Scanned(_) => T3InCScan::Missing,
+        }
+    }
+}
+
+/// 把共用边界见证的区间折成 T3-in-c 分级（#1496）。
 ///
 /// `trend_third_class_in_c` 只回 `(leave.end_index, retest.end_index)`；本函数按终点反查真实段
 /// 补 `start_index`（段终点在 `segments` 内唯一——段序列共享端点且严格递增）。命中回退成
@@ -944,6 +987,37 @@ pub fn extract_signals_with_hist_anchored(
     // `level=None` ⟹ 记录 `level` 字段为占位 0，由 `Classification` 装配方按真实级别盖章。
     grade_sink: &mut Vec<FirstClassGradeRecord>,
 ) -> (Vec<BspPoint>, Vec<PanDivCert>) {
+    extract_signals_with_r5(
+        centers,
+        segments,
+        anchor_dirs,
+        departure_ends,
+        None,
+        hist,
+        dif,
+        closes_tick,
+        close_src,
+        gauge,
+        strokes,
+        grade_sink,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(super) fn extract_signals_with_r5(
+    centers: &[Center],
+    segments: &[Segment],
+    anchor_dirs: Option<&[Option<Direction>]>,
+    departure_ends: Option<&[usize]>,
+    r5_meta: Option<&[super::recursive_tower::WinMeta]>,
+    hist: &[f64],
+    dif: &[f64],
+    closes_tick: &[Tick],
+    close_src: &[usize],
+    gauge: DivergenceGauge,
+    strokes: &[Stroke],
+    grade_sink: &mut Vec<FirstClassGradeRecord>,
+) -> (Vec<BspPoint>, Vec<PanDivCert>) {
     // ★线段按 start_index **稳定**升序排一次（生产路径 parser 线段账本本已 start_index 严格单调
     // 递增——流式 push 时 seg_start 单调推进，segment.rs:344-380——故排序对生产路径是恒等）。稳定
     // 排序保证 start_index 相同时保留原序。中枢归属用 start_index，单趟扫描需线段时间序。
@@ -1126,6 +1200,7 @@ pub fn extract_signals_with_hist_anchored(
             strokes,
             None,
             departure_in,
+            r5_meta,
             &mut points,
             &mut pan_divs,
             grade_sink,
@@ -1297,6 +1372,7 @@ pub fn extract_first_third_resume(
                 strokes,
                 Some(level),
                 departure_ends,
+                None,
                 pts,
                 pans,
                 grades,
@@ -1401,6 +1477,7 @@ fn judge_segment(
     // ★#1028 裁定 A：与 `sorted` 平行的 departure 单元终点数组（L≥1 由调用方预算）；`None` =
     // L0（segment 自身即 departure 单元，点锚回退 seg.end_index）。
     departure_ends: Option<&[usize]>,
+    r5_meta: Option<&[super::recursive_tower::WinMeta]>,
     points: &mut Vec<BspPoint>,
     pan_divs: &mut Vec<PanDivCert>,
     grade_sink: &mut Vec<FirstClassGradeRecord>,
@@ -1431,7 +1508,7 @@ fn judge_segment(
         });
         // Q5 λ_C（codex ac4 #2）：当前 episode 首同向段起点（共享 helper，逐段计算）。
         let c_start_entry = departure_move_c_start(sorted, anchors_self, c, dir, seg.start_index);
-        if let Some(pf) = judge_first_cached(
+        if let Some(pf) = judge_first_cached_with_r5(
             c,
             dir,
             seg,
@@ -1446,6 +1523,9 @@ fn judge_segment(
             gauge,
             strokes,
             sorted,
+            r5_meta.map_or(T3InCSource::NativeSegments, |m| {
+                T3InCSource::Scanned(m[c_idx].settlement)
+            }),
             level,
             grade_sink,
         ) {
@@ -1464,23 +1544,23 @@ fn judge_segment(
         }
     }
 
-    // 第三类：当前段作 retest，前一段作 leave。中枢归属 = **leave 段离开的最近中枢**（第18课
-    // 「该中枢」），故用 leave 段 start_index 定位中枢，retest 相对**同一**中枢判一次。
-    // ★#487 不改这条既有最近归属路径；四边框时间配对只用于接线层额外给出的挂起历史候选。
+    if let Some(meta) = r5_meta {
+        if let Some(proof) = meta.get(c_idx).and_then(|m| m.settlement) {
+            if proof.pullback_unit() == i {
+                if let Some(cert) = third_from_r5(c, sorted, proof) {
+                    points.push(cert.point);
+                }
+            }
+        }
+        return;
+    }
+    // #1496 字面分支：从末成员与它紧邻的首回抽取证，不在失败后另找一对。
     if i > 0 {
         let leave_seg = &sorted[i - 1];
-        if let Some(c_leave_idx) =
-            nearest_confirmed_center_idx(centers_sorted, leave_seg.start_index)
+        if let Some(c_leave_idx) = nearest_confirmed_center_idx(centers_sorted, leave_seg.end_index)
         {
             let c_leave = &centers_sorted[c_leave_idx];
-            // ★#816 B-3（020:62【正文】「必须是第一次」= 判据级必要条件，显式名分）：
-            // `first_retrace_pair` —— leave 必须是该中枢右边之后的**第一条**段（其前一
-            // 段起点在中枢右边之前），retest 为其紧随段；首个配对失败（价格重回）后
-            // 出现的远期相邻对**不得**回填（与 #487 historical-bound 配对规则同口径）。
-            // 语义锚 = Lean `BspClassification.IsType3Buy/Sell` 的 `firstRetrace` 合取项。
-            let first_retrace_pair = i == 1 || sorted[i - 2].start_index < c_leave.end_index;
-            // ADR 补充十三 / #486 / Spec #485：leave 段须有方向锚；L≥1 的 `anchors`
-            // 已由调用层换成结构方向。retest 段仍只是几何回试角色。
+            let first_retrace_pair = leave_seg.end_index == c_leave.end_index;
             if first_retrace_pair {
                 if let Some(p) = judge_third(c_leave, leave_seg, anchors[i - 1], seg) {
                     points.push(p);

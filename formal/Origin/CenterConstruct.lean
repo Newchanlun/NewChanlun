@@ -48,9 +48,12 @@ import Origin.ChanlunElements
 import Origin.CenterStates
 import Origin.CenterFull
 import Origin.CenterConstruction
+import Origin.R5Settlement
 import Lean.Data.Json
 
 namespace NewChanlun.Origin
+
+open R5Settlement
 
 /-! ═══════════════════════════════════════════════════════════════════════
     § 1. centersOfWithOuter：List Segment → List CenterWithOuter（真算，非平凡桩）
@@ -345,7 +348,7 @@ theorem centersOfWithOuter_nontrivial :
   - `zd/zg`：固定核心区间（**全三段** `max3(lows)/min3(highs)`，frozen v1）。
   - `start/end`：构成段在 completed 序列中的起止下标（end 随弱接触延伸增长）。
   - `count`：构成段数 `end - start + 1`。
-  - `settled`：是否已结算（`j < n`——延伸后仍有后续段离开核心则结算）。
+  - `settled`：有已完成首回抽不回的 R5 见证；仅离开不结算。
   - `breakIndex`：结算时离开核心的段下标（未结算 = -1，用 `Int`）。
   - `breakUp`：离开方向（reference `break_direction` "up"/"down" 的布尔编码，true=up）。未结算时
     离开方向未定义，本 reference 沿用占位编码 `true`，不带语义（#1419 根裁定 r2 R4：S 事实层对未结算
@@ -363,6 +366,10 @@ structure RefZhongshu where
   breakUp : Bool
   gg : Tick
   dd : Tick
+  upgraded : Bool := false
+  leave : Option Nat := none
+  pullback : Option Nat := none
+  returned : Option Nat := none
 deriving Repr, DecidableEq
 
 /-- 三元 max（reference `max(a,b,c)`，全三段核心 ZD 用）。 -/
@@ -377,143 +384,99 @@ def min3 (a b c : Tick) : Tick := tmin (tmin a b) c
 def weakOverlap (compHigh compLow zd zg : Tick) : Bool :=
   decide (compHigh ≥ zd) && decide (compLow ≤ zg)
 
-/--
-  **reference 离开方向（reference_chanlun.py:88-93 逐字）** —— 结算段相对核心的离开方向。
-  `low > zg → up`；`high < zd → down`；否则 `high > zg ? up : down`（防御分支）。返回 true=up。
--/
-def breakDirectionUp (compHigh compLow zd zg : Tick) : Bool :=
-  if compLow > zg then true
-  else if compHigh < zd then false
-  else decide (compHigh > zg)
+/-- #2141：已由同一构造流来源核实的两个角色，不从价域反猜离开。 -/
+structure RefRoles where
+  seed : Nat
+  leave : Nat
+  side : Direction
+  pullback : Option Nat
+  nonZn : Bool
+deriving Repr
 
-/--
-  **completed 段的 (high, low, 方向) 投影** —— 中枢算法读区间端点（reference ComponentLike）与方向。
-  对齐 `CenterConstruction.segHigh/segLow`（向上段 hi=endPrice/向下段 lo=endPrice 已规约）。
-  ★#1419 D-A：带方向，供外缘只聚合 Zn（与 seed 首段同向）——不用位次奇偶，避免上级不交替输入上
-  Lean 与 Rust 分成两个判断（#804）。
--/
-def segHL (s : Segment) : Tick × Tick × Direction := (segHigh s, segLow s, s.direction)
+inductive RefBoundary where
+  | openEnd
+  | pending
+  | destroyed (leave pullback : Nat) (side : Direction)
+  | upgrade
+  deriving Repr, DecidableEq
 
-/-- 外缘累积一步（★#1419 D-A/D-D）：方向 `d` 等于 seed 首段方向 `zdir`（Zn）才并入 `(h, l)`。 -/
-def znAgg (zdir d : Direction) (gg dd h l : Tick) : Tick × Tick :=
-  if decide (d = zdir) then (tmax gg h, tmin dd l) else (gg, dd)
+def asR5Unit (s : Segment) : UnitRange :=
+  ⟨s.direction, segLow s, segHigh s,
+    s.startIndex, s.endIndex, segLow_le_segHigh s⟩
 
-/-- #1419：非 Zn 不改外缘；是否成为成员仍单独由 weakOverlap 决定。 -/
-theorem znAgg_other_direction (zdir d : Direction) (gg dd h l : Tick) (hd : d ≠ zdir) :
-    znAgg zdir d gg dd h l = (gg, dd) := by
-  simp [znAgg, hd]
+/-- 左折叠的成员边界：遇到未证首回抽即止；返回两腿先接纳再数有波动成员。 -/
+def extendR5 (comps : List UnitRange) (roles : List RefRoles) (zd zg : Tick)
+    (seed : Nat) (zdir : Direction) :
+    Nat → Nat → Nat → Option Nat → (Nat × RefBoundary × Option Nat)
+  | 0, j, _, returned => (j, .openEnd, returned)
+  | fuel + 1, j, waves, returned =>
+    if waves ≥ 9 then (j, .upgrade, returned)
+    else match comps[j]? with
+    | none => (j, .openEnd, returned)
+    | some u =>
+      if weakOverlap u.hi u.lo zd zg then
+        extendR5 comps roles zd zg seed zdir fuel (j+1)
+          (waves + if u.lo < u.hi then 1 else 0) returned
+      else match roles.find? (fun l => l.seed == seed && l.leave == j) with
+      | none =>
+        match comps[j-1]? with
+        | some prev =>
+          match r5Joint zd zg prev u with
+          | .proven side => (j, .destroyed (j-1) j side, returned)
+          | _ => (j, .pending, returned)
+        | none => (j, .pending, returned)
+      | some leg =>
+        match comps[j+1]? with
+        | some pullback =>
+          if leg.pullback ≠ some (j+1) ∨ ¬ StrictOutside zd zg u leg.side then
+            (j, .pending, returned)
+          else if weakOverlap pullback.hi pullback.lo zd zg then
+            if leg.nonZn ∧ u.direction ≠ zdir then
+              extendR5 comps roles zd zg seed zdir fuel (j+2)
+                (waves + (if u.lo < u.hi then 1 else 0) +
+                  (if pullback.lo < pullback.hi then 1 else 0)) (some (j+1))
+            else (j, .pending, some (j+1))
+          else if StrictOutside zd zg pullback leg.side then
+            (j, .destroyed j (j+1) leg.side, returned)
+          else (j, .pending, returned)
+        | none => (j, .pending, returned)
 
-/--
-  **弱接触延伸内循环（reference_chanlun.py:129-134 的 `while j<n and weak_overlap`）** ——
-  从下标 `j` 起，对固定核心 `[zd,zg]` 逐段做弱接触延伸，返回 `(end, j', gg', dd')`。★#1419 S3：
-  延伸成员都进中枢（end 前进），gg/dd 只聚合与 seed 首段同向（`zdir`）的 Zn 成员（`znAgg`）。
-  fuel = 剩余段数上界（保证 ≥ 实际可延伸段数，终止机器检查；reference while 由 `j<n` 终止）。
-
-  返回 `(end, jOut, gg, dd)`：`end`=最后延伸到的段下标，`jOut`=首个不延伸（离开/越界）的段下标。
-
-  ★#812 L7 登记（≥9 段升级重切，本票显式登记不可行，未实装）：现状是延伸**无段数上限**——只要
-  弱接触成立就一直延伸。zhongshu.md §9.2 L7 处置要求补「≥9 段升级重切」（S-4 阈值 = 总段数 ≥9 =
-  3 本体 + 6 延伸，硬判据；Z-4 触发后按每 3 段切成 k 个本级子中枢，每个子中枢核心按其自身三段
-  **重算**、不继承母核心，算不出核心 `ZD ≥ ZG` 的子窗不产出）。**三侧同步是硬前置**（zhongshu.md
-  §11：Python P13 与 Lean 全空，不同步 parity 断言必红）：Rust `ref_v1.rs` 对照镜像与 Python
-  `a_zhongshu_v1.py` 的 ≥9 升级重切不在本票（Lean-only）范围，Lean 单侧实装会使
-  `theta_v0_center_parity` bit-exact 契约在 9+ 段输入上失效 ⟹ 本文件**暂不实装**，待三侧同步批次
-  （Rust R6/R7/R8 + Python P13）同拍落地后再补本函数与 `refStep`/`refLoop` 的升级重切。
--/
-def extendWeak (comps : List (Tick × Tick × Direction)) (zd zg : Tick) (zdir : Direction) :
-    Nat → Nat → Nat → Tick → Tick → (Nat × Nat × Tick × Tick)
-  | 0,        endAcc, j, gg, dd => (endAcc, j, gg, dd)  -- fuel 耗尽（不可达：fuel ≥ 剩余段数）
-  | fuel + 1, endAcc, j, gg, dd =>
-      match comps[j]? with
-      | none => (endAcc, j, gg, dd)  -- j 越界（reference `j < n` 假）
-      | some (h, l, d) =>
-          if weakOverlap h l zd zg then
-            -- 延伸：end=j，gg/dd 只并入 Zn（#1419 S3），j+=1，fuel-1
-            let (gg', dd') := znAgg zdir d gg dd h l
-            extendWeak comps zd zg zdir fuel j (j + 1) gg' dd'
-          else
-            (endAcc, j, gg, dd)  -- 段离开核心（reference while 条件假，settled 候选）
-
-/-- #1419：弱接触的非 Zn 仍推进成员边界，保持冻结核心与外缘，再处理下一单元。 -/
-theorem extendWeak_nonZn_member (comps : List (Tick × Tick × Direction))
-    (zd zg : Tick) (zdir d : Direction) (fuel endAcc j : Nat) (gg dd h l : Tick)
-    (hc : comps[j]? = some (h, l, d)) (hw : weakOverlap h l zd zg = true) (hd : d ≠ zdir) :
-    extendWeak comps zd zg zdir (fuel + 1) endAcc j gg dd =
-      extendWeak comps zd zg zdir fuel j (j + 1) gg dd := by
-  simp only [extendWeak, hc, hw, if_true, znAgg_other_direction zdir d gg dd h l hd]
-
-/--
-  **reference 主滑窗（reference_chanlun.py:117-155 的 `while i+2 < n`）** ——
-  从下标 `i` 起识别一个 v1 中枢，返回 `(中枢?, 下一个 i)`。fuel 保证终止（每步 i 严格增）。
-
-  沿用 reference 的滑窗结构，按已裁规则适配：
-  - 前三段 `zd=max3(lows)/zg=min3(highs)`（全三段核心，frozen v1）。
-  - `zg <= zd`（核心空）⟹ 无中枢，`i+=1` 滑窗（reference:122-124）。
-  - 否则：gg/dd 初始取 seed 三段中的 Zn（首段恒为 Zn，第 2、3 段与首段同向才算；★#1419 S3），
-    弱接触延伸（extendWeak，同样只聚合 Zn），`settled = jOut < n`。
-  - `settled` ⟹ 下一个 `i = end + 2`（★#812 Z-5 C 口径：跳过突破段 `jOut = end+1`，
-    突破段不属于任何中枢；覆盖 reference:150-151 的 A 口径重叠回退 `max(jOut-2,end)`）；
-    未结算 ⟹ 停止（reference:152-153 break，返回 i=n 终止外循环）。
--/
-def refStep (comps : List (Tick × Tick × Direction)) (n : Nat) (i : Nat) :
+/-- 核心仍取全三段；R5 只改变成员右界、续扫及结算。 -/
+def refStep (comps : List UnitRange) (roles : List RefRoles) (n i : Nat) :
     (Option RefZhongshu × Nat) :=
   match comps[i]?, comps[i+1]?, comps[i+2]? with
-  | some (h1, l1, d1), some (h2, l2, d2), some (h3, l3, d3) =>
-      let zd := max3 l1 l2 l3
-      let zg := min3 h1 h2 h3
-      if decide (zg ≤ zd) then
-        (none, i + 1)  -- 核心空：滑窗前进 1（reference:122-124）
+  | some a, some b, some c =>
+      let zd := max3 a.lo b.lo c.lo
+      let zg := min3 a.hi b.hi c.hi
+      if zg ≤ zd then (none, i+1)
       else
-        -- ★#1419 S3：seed 外缘只取 Zn（首段 d1 恒为 Zn，第 2、3 段与 d1 同向才并入）
-        let (gg12, dd12) := znAgg d1 d2 h1 l1 h2 l2
-        let (gg0, dd0) := znAgg d1 d3 gg12 dd12 h3 l3
-        -- 弱接触延伸从 j=i+3 起（fuel = n 充分上界）
-        let (endE, jOut, gg, dd) := extendWeak comps zd zg d1 n (i + 2) (i + 3) gg0 dd0
-        let settled := decide (jOut < n)
-        let zs : RefZhongshu :=
-          { zd := zd, zg := zg, start := i, «end» := endE, count := endE - i + 1,
-            settled := settled,
-            breakIndex := if settled then (jOut : Int) else (-1 : Int),
-            breakUp := if settled then
-                         (match comps[jOut]? with
-                          | some (hb, lb, _) => breakDirectionUp hb lb zd zg
-                          | none => true)
-                       else true,
-            gg := gg, dd := dd }
-        if settled then
-          -- ★#812 Z-5 C 口径：跳过突破段 jOut（= endE+1），下一个 i = endE + 2
-          (some zs, endE + 2)
-        else
-          (some zs, n)  -- 未结算：break（i=n 终止外循环，reference:152-153）
-  | _, _, _ => (none, n)  -- 不足三段：终止（reference `i+2 < n` 假）
+        let waves := ([a,b,c].filter (fun u => decide (u.lo < u.hi))).length
+        let (exit, boundary, returned) := extendR5 comps roles zd zg i a.direction n (i+3) waves none
+        let (gg, dd) := ((comps.drop (i+1)).take (exit-i-1)).foldl
+          (fun (g,d) u => if u.direction = a.direction then (tmax g u.hi, tmin d u.lo) else (g,d))
+          (a.hi, a.lo)
+        let (settled, leave, pullback, up, upgraded, next) :=
+          match boundary with
+          | .destroyed l r side => (true, some l, some r, side == .up, false, exit+1)
+          | .upgrade => (false, none, none, true, true, exit)
+          | _ => (false, none, none, true, false, n)
+        (some { zd, zg, start := i, «end» := exit-1, count := exit-i, settled,
+                breakIndex := if settled then (exit : Int) else -1, breakUp := up,
+                gg, dd, upgraded, leave, pullback, returned }, next)
+  | _, _, _ => (none, n)
 
-/--
-  **reference 外循环（reference_chanlun.py:115-155 的 `while i+2 < n` 全体）** ——
-  fuel-bounded 递归收集所有 v1 中枢。fuel = n（i 每步严格增 ⟹ 至多 n 步，终止机器检查）。
--/
-def refLoop (comps : List (Tick × Tick × Direction)) (n : Nat) : Nat → Nat → List RefZhongshu
-  | 0,        _ => []  -- fuel 耗尽（不可达：fuel = n ≥ 步数）
+/-- 已证破坏的连接跳过一格；升级母窗在首个未读单元之后不再延伸。 -/
+def refLoop (comps : List UnitRange) (roles : List RefRoles) (n : Nat) :
+    Nat → Nat → List RefZhongshu
+  | 0, _ => []
   | fuel + 1, i =>
-      if decide (i + 2 < n) then
-        let (zsOpt, iNext) := refStep comps n i
-        -- iNext 保证 > i（核心空 i+1；settled endE+2 > i；未结算 iNext=n>i）
-        -- fuel-1 配合 iNext 单调增保证终止
-        match zsOpt with
-        | some zs => zs :: refLoop comps n fuel iNext
-        | none    => refLoop comps n fuel iNext
-      else []
+    if i+2 < n then
+      let (zs, next) := refStep comps roles n i
+      zs.toList ++ refLoop comps roles n fuel next
+    else []
 
-/--
-  **★已裁中枢构造（reference_chanlun.py `zhongshus_from_components_ref` 的骨架）** ——
-  `List Segment → List RefZhongshu`。完成态段 → (high,low,方向) 投影 → Zn 外缘与 C 续扫。
-
-  对齐 reference:96-155：`n = len(completed)`，`n < 3 ⟹ []`，否则 refLoop 收集。
-  本函数不做 `completed_mask` 过滤（输入已是完成态段；mask 过滤在调用点，reference:158-160）。
--/
-def refZhongshusFromComponents (segs : List Segment) : List RefZhongshu :=
-  let comps := segs.map segHL
-  let n := comps.length
-  if decide (n < 3) then [] else refLoop comps n n 0
+def refZhongshusFromComponents (segs : List Segment) (roles : List RefRoles := []) : List RefZhongshu :=
+  refLoop (segs.map asR5Unit) roles segs.length segs.length 0
 
 /-! ──────────────────────────────────────────────────────────────────────
     § 5.5.1 v0/v1 反例裁决（NewChanlunEngineAudit.lean Lean 重证，L0）
@@ -607,7 +570,7 @@ theorem witness_ref_last_unsettled :
 
 /-- 延伸 fixture 第四段（弱接触：high=16≥zd=12 ∧ low=13≤zg=15 ⟹ 延伸吸收）。 -/
 def refSeg3Ext : Segment := { direction := Direction.down, startIndex := 3, endIndex := 4, startPrice := 16, endPrice := 13 }
-/-- 结算段（离开核心向上：low=20>zg=15 ⟹ 不弱接触 ⟹ 中枢结算，break_direction=up）。 -/
+/-- 向上外段：缺首回抽，不能结算。 -/
 def refSeg4Break : Segment := { direction := Direction.up, startIndex := 4, endIndex := 5, startPrice := 25, endPrice := 22 }
 
 /--
@@ -619,13 +582,13 @@ theorem witness_ref_extends_to_four :
       = some 4 := by native_decide
 
 /--
-  **★结算段触发 settled + break_direction=up（reference:136-145，L0）** —— 五段序列
+  **★单哨兵不触发结算（#2141）** —— 五段序列
   [refSeg0..refSeg2, refSeg3Ext, refSeg4Break]：核心 [12,15]，第四段延伸（count→4），
-  第五段 [22,25] low=22>zg=15 离开 ⟹ jOut=4<n=5 ⟹ settled=True，breakUp=true。
+  第五段 [22,25] 在核心外，没有已证回抽，故不结算。
 -/
-theorem witness_ref_settled_break_up :
+theorem witness_ref_outward_leg_without_retest :
     (refZhongshusFromComponents [refSeg0, refSeg1, refSeg2, refSeg3Ext, refSeg4Break]).head?.map
-      (fun zs => (zs.settled, zs.breakUp, zs.breakIndex)) = some (true, true, (4 : Int)) := by
+      (fun zs => (zs.settled, zs.breakUp, zs.breakIndex)) = some (false, true, (-1 : Int)) := by
   native_decide
 
 /-! ──────────────────────────────────────────────────────────────────────
@@ -717,10 +680,43 @@ theorem witness_zn_direction_not_parity :
     § 5.5.4 机器导出 parity fixture（#eval → JSON，rust include_str! 耦合）
     ═══════════════════════════════════════════════════════════════════════ -/
 
+/-- #2141 C 型合成输入；角色作为输入提供，不冒充 BTC 原件。 -/
+def cExamplePrefix : List Segment :=
+  [ { direction := .down, startIndex := 0, endIndex := 1, startPrice := 40, endPrice := 20 },
+    { direction := .up,   startIndex := 1, endIndex := 2, startPrice := 20, endPrice := 35 },
+    { direction := .down, startIndex := 2, endIndex := 3, startPrice := 35, endPrice := 25 } ]
+
+def cExample (j : Nat) (retLo : Tick) : List Segment :=
+  cExamplePrefix ++ (List.range (j-3)).map (fun k =>
+    { direction := if k % 2 = 0 then .up else .down, startIndex := k+3, endIndex := k+4,
+      startPrice := 25, endPrice := 35 }) ++
+    [ { direction := .up, startIndex := j, endIndex := j+1, startPrice := 36, endPrice := 50 },
+      { direction := .down, startIndex := j+1, endIndex := j+2, startPrice := 50, endPrice := retLo } ]
+
+def cRoles (j : Nat) : List RefRoles := [⟨0, j, .up, some (j+1), true⟩]
+
+theorem witness_return_five :
+    (refZhongshusFromComponents (cExample 3 33) (cRoles 3)).head?.map
+      (fun z => (z.count, z.gg, z.upgraded, z.settled, z.returned)) =
+      some (5,50,false,false,some 4) := by native_decide
+
+theorem witness_return_nine :
+    (refZhongshusFromComponents (cExample 7 33) (cRoles 7)).head?.map
+      (fun z => (z.count, z.upgraded, z.settled, z.returned)) =
+      some (9,true,false,some 8) := by native_decide
+
+theorem witness_outside_first_pullback :
+    (refZhongshusFromComponents (cExample 3 37) (cRoles 3)).head?.map
+      (fun z => (z.count, z.settled, z.breakIndex, z.leave, z.pullback)) =
+      some (3,true,3,some 3,some 4) := by native_decide
+
 open Lean (Json) in
 /-- 把一个 RefZhongshu 序列化为 JSON 对象（所有字段来自真求值，机器产）。 -/
 def refZhongshuJson (zs : RefZhongshu) : Json :=
+  let idx := fun (x : Option Nat) => x.elim Json.null (fun n => Json.num (n : Int))
   Json.mkObj [
+    ("upgraded", Json.bool zs.upgraded), ("leave", idx zs.leave),
+    ("pullback", idx zs.pullback), ("returned", idx zs.returned),
     ("zd", Json.num zs.zd), ("zg", Json.num zs.zg),
     ("gg", Json.num zs.gg), ("dd", Json.num zs.dd),
     ("start", Json.num (zs.start : Int)), ("end", Json.num (zs.«end» : Int)),
@@ -772,6 +768,9 @@ def refV1FixtureJson : Json :=
       ((refZhongshusFromComponents (segsOfEndpoints e4Endpoints)).map refZhongshuJson).toArray),
     ("zn_direction_not_parity", Json.arr
       ((refZhongshusFromComponents dirExtSegs).map refZhongshuJson).toArray),
+    ("r5_return_five", Json.arr ((refZhongshusFromComponents (cExample 3 33) (cRoles 3)).map refZhongshuJson).toArray),
+    ("r5_return_nine", Json.arr ((refZhongshusFromComponents (cExample 7 33) (cRoles 7)).map refZhongshuJson).toArray),
+    ("r5_strict_first_pullback", Json.arr ((refZhongshusFromComponents (cExample 3 37) (cRoles 3)).map refZhongshuJson).toArray),
     ("v0_v1_interval", Json.mkObj [
       ("fixture", Json.str "s0=[10,20],s1=[12,15],s2=[11,18]"),
       ("v1_zd", Json.num (refV1Interval 10 20 12 15 11 18).1),

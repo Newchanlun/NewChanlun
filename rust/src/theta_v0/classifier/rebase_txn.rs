@@ -1175,6 +1175,7 @@ mod tests {
             win_start,
             win_exit,
             read_end_src: read_end,
+            settlement: None,
             emitted,
         }
     }

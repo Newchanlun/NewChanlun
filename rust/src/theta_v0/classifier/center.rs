@@ -955,14 +955,35 @@ pub fn r5_joint(zd: Tick, zg: Tick, prev: &UnitRange, cur: &UnitRange) -> R5Join
     if !unit_core_position(prev, zd, zg).closed_overlap() {
         return R5Joint::PrevOutsideCore;
     }
-    let same_extreme = match side {
-        Direction::Up => prev.hi == cur.hi,
-        Direction::Down => prev.lo == cur.lo,
-    };
-    if prev.end_index == cur.start_index && same_extreme {
-        R5Joint::Proven { side }
+    if !r5_connected(side, prev, cur) {
+        return R5Joint::JointNotConnected;
+    }
+    R5Joint::Proven { side }
+}
+
+fn r5_connected(side: Direction, leave: &UnitRange, pullback: &UnitRange) -> bool {
+    leave.end_index == pullback.start_index
+        && match side {
+            Direction::Up => leave.hi == pullback.hi,
+            Direction::Down => leave.lo == pullback.lo,
+        }
+}
+
+/// 在已证离开的范围内分类首个已证回抽；缺证与返回不同。
+/// 外段自身为离开的分支只能由同源角色输入进入，不能由区间位置猜角色（#2141）。
+pub(super) fn r5_pullback(
+    zd: Tick,
+    zg: Tick,
+    side: Direction,
+    pullback: &UnitRange,
+) -> Option<bool> {
+    let pos = unit_core_position(pullback, zd, zg);
+    if pos.closed_overlap() {
+        Some(true)
+    } else if pos.leave_side() == Some(side) {
+        Some(false)
     } else {
-        R5Joint::JointNotConnected
+        None
     }
 }
 
@@ -1009,7 +1030,7 @@ mod tests {
     }
 
     #[test]
-    fn r5_joint_proven_implies_third_cert() {
+    fn r5_joint_and_third_cert_share_the_same_gate() {
         use super::super::super::types::Segment;
         use super::super::signal::judge_third_cert;
 
@@ -1045,7 +1066,7 @@ mod tests {
                 unit(20, 24, up(), 5, 15),
                 R5Joint::Proven { side: down() },
             ),
-            // #2141：关节极值不等时，既有三类点端价门通过，R5 字面见证缺席。
+            // #2141：关节极值不等时，不发 R5 字面见证或三类证书。
             (
                 unit(16, 20, up(), 22, 45),
                 unit(20, 24, down(), 38, 50),
@@ -1054,7 +1075,7 @@ mod tests {
         ] {
             assert_eq!(r5_joint(core.zd, core.zg, &prev, &cur), expected);
             let cert = judge_third_cert(&core, &segment(prev), Some(prev.direction), &segment(cur));
-            assert!(cert.is_some());
+            assert_eq!(cert.is_some(), matches!(expected, R5Joint::Proven { .. }));
         }
     }
 

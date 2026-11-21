@@ -9,8 +9,8 @@
 //! 归属规则来自根裁定（`ROOT-RULINGS-1419.md` D9/D-G/D-I 与 r2 第 6 条 R2/R3/R6），原文未讲到这一层：
 //!
 //! - 成员 ⟹ `CENTER_MEMBER`；≥9 成员窗口内的单元 ⟹ `NOT_YET_ASSIGNED/UPGRADE_PENDING_TB02H`（R3，D-I）。
-//! - 结算中枢 A 之后、下一中枢 B 之前：B 已成立 ⟹ 全部 `CONNECTOR(A→B)`；B 未成立 ⟹ 突破段与「以自身为
-//!   起点的 seed 已评估且失败」的单元 `CONNECTOR(A→pending)`，其余 `NOT_YET_ASSIGNED/SEED_NOT_YET_EVALUABLE`。
+//! - 已证破坏的 A 与已成立的 B 之间为 `CONNECTOR(A→B)`；B 尚未成立时，唯已证突破段为
+//!   `CONNECTOR(A→pending)`。挂起边界与升级不发 R5 连接（#2141）。
 //! - 首个中枢之前，以及尚无任何中枢时 ⟹ `NOT_YET_ASSIGNED/NO_LEFT_CENTER_IN_WINDOW`（R2），区分信息放
 //!   `seed_from_self`；突破段的 `seed_from_self` 记 `NOT_EVALUATED`（R6）。
 //! - 进行中单元（不在扫描输入里）由调用方记 `NOT_YET_ASSIGNED/UNIT_NOT_COMPLETED`。
@@ -19,10 +19,12 @@
 
 use super::super::types::{Center, Direction, Segment, Tick};
 use super::center::{
-    breaks_upward, center_pair_facts, is_zn, r5_joint, unit_core_position, CenterPairFacts,
+    center_pair_facts, is_zn, r5_joint, r5_pullback, unit_core_position, CenterPairFacts,
     CenterRoles, R5Joint, RoleVar, SeedFacts, UnitCorePosition, UnitRange,
 };
-use super::recursive_tower::{scan_center_facts, WinMeta, WindowScanCursor};
+use super::recursive_tower::{
+    scan_center_facts_with_r5 as scan_with_sink, WinMeta, WindowScanCursor,
+};
 
 /// 生产塔 L0 的单元列表：同一层已确认线段逐个经塔同一投影（`pipeline::segment_to_unit`）。S 事实层用它与
 /// 已发布的 `CC-013.segment` 逐位对账（schema v1 §1 输入合同），保证与塔扫描同一输入（#804 L3）。
@@ -55,17 +57,20 @@ impl ScanSink for NoopSink {
     const WANTS_FACTS: bool = false;
 }
 
-/// 一个成立窗口：成员 = `units[seed_at..exit]`；`exit < len` ⟹ `units[exit]` 是突破段、中枢已结算。
+/// 一个成立窗口：成员 = `units[seed_at..exit]`，结算与读域由边界见证决定。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct ScanWindow {
     /// seed 第一单元下标（首成员）。
     pub seed_at: usize,
-    /// 首个不延伸的单元下标；等于输入长度时窗口开放。
+    /// 末成员之后的下标（不蕴含突破）。
     pub exit: usize,
     /// 成员数达到 `UPGRADE_TOTAL_SEGMENTS`（≥9），塔按第33课重切子中枢。
     pub upgraded: bool,
     /// 本窗口塔侧产出的中枢数（<9 为 1）。
     pub emitted: usize,
+    pub boundary: R5Boundary,
+    /// 最近一次已证返回（含因 Zn 归属未决而未获准接纳的返回）。
+    pub last_return: Option<R5Proof>,
 }
 
 /// 一次 seed 评估。
@@ -124,22 +129,123 @@ pub enum R5Witness {
     Absent(R5Gap),
 }
 
-/// 缺席不授权换判据（#799）；朝外突破、极值不等与占位方向的未裁分支见 #2141。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// 缺席不授权换判据（#799、#2141）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum R5Gap {
     Open,
-    /// 本次扫描中第一个关节未证的更早结算窗口序号（从 0 起）。
-    UpstreamUnproven {
-        window: usize,
-    },
     UpgradePending,
     BreakUnitOutward,
+    AwaitingFirstPullback,
+    FirstPullbackUnproven,
+    DirectionUnproven,
+    ReturnedMembershipUnresolved,
     DirectionNotAlternating,
     JointNotConnected,
 }
 
-/// 共用扫描证实的离开和首次回抽；下标均相对于本次输入。
+/// 本窗最终边界。升级不是破坏；未决不能启用续扫。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum R5Boundary {
+    Open,
+    Pending { gap: R5Gap, tested: usize },
+    Destroyed(R5Proof),
+    Upgrade,
+}
+
+impl R5Boundary {
+    pub(super) fn read_end_src(self, units: &[UnitRange], exit: usize) -> usize {
+        match self {
+            Self::Destroyed(proof) => units[proof.pullback_unit()].end_index,
+            Self::Upgrade => units[exit - 1].end_index,
+            Self::Open | Self::Pending { .. } => usize::MAX,
+        }
+    }
+}
+
+/// 首个不重叠单元自身担当离开时的独立同源角色证据。
+/// 输入者已经核验中心、构造流、完成、首次性及关节（非投影极值推测）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct R5AttestedLegs {
+    pub seed: usize,
+    pub leave: usize,
+    pub side: Direction,
+    pub first_pullback: Option<usize>,
+    /// 已核实离开是否为 Zn；None 保留成员未决。独立角色不改变走势本体方向。
+    pub leave_is_zn: Option<bool>,
+}
+
+/// 已完成单元的方向出处及该构造流的外段角色证据。不读取级别。
+#[derive(Debug, Clone, Copy)]
+pub enum R5DirectionSource<'a> {
+    Native,
+    Verified(&'a [Option<Direction>]),
+    Unproven,
+}
+
+impl R5DirectionSource<'_> {
+    fn matches(self, at: usize, direction: Direction) -> bool {
+        match self {
+            Self::Native => true,
+            Self::Verified(values) => values.get(at).copied().flatten() == Some(direction),
+            Self::Unproven => false,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum R5Step {
+    Pending(R5Gap),
+    Destroyed(R5Proof),
+    Returned { proof: R5Proof, admit: bool },
+}
+
+/// 首个不重叠边界的唯一角色分派。独立同源见证不是字面关节失败后的重试。
+pub(super) fn r5_step(
+    core: (Tick, Tick),
+    units: &[UnitRange],
+    seed: usize,
+    j: usize,
+    directions: R5DirectionSource<'_>,
+    attested: Option<&R5AttestedLegs>,
+) -> R5Step {
+    let (zd, zg) = core;
+    if let Some(legs) = attested {
+        if unit_core_position(&units[j], zd, zg).leave_side() != Some(legs.side) {
+            return R5Step::Pending(R5Gap::FirstPullbackUnproven);
+        }
+        let Some(pullback) = units.get(j + 1) else {
+            return R5Step::Pending(R5Gap::AwaitingFirstPullback);
+        };
+        if legs.first_pullback != Some(j + 1) {
+            return R5Step::Pending(R5Gap::FirstPullbackUnproven);
+        }
+        let proof = R5Proof::new(j, j + 1, legs.side, core, pullback);
+        return match r5_pullback(zd, zg, legs.side, pullback) {
+            Some(true) => R5Step::Returned {
+                proof,
+                admit: legs.leave_is_zn == Some(false) && !is_zn(&units[j], &units[seed]),
+            },
+            Some(false) => R5Step::Destroyed(proof),
+            None => R5Step::Pending(R5Gap::FirstPullbackUnproven),
+        };
+    }
+    let (prev, cur) = (&units[j - 1], &units[j]);
+    if !directions.matches(j - 1, prev.direction) || !directions.matches(j, cur.direction) {
+        return R5Step::Pending(R5Gap::DirectionUnproven);
+    }
+    match r5_joint(zd, zg, prev, cur) {
+        R5Joint::Proven { side } => R5Step::Destroyed(R5Proof::new(j - 1, j, side, core, cur)),
+        R5Joint::BreakUnitOutward => R5Step::Pending(R5Gap::BreakUnitOutward),
+        R5Joint::DirectionNotAlternating => R5Step::Pending(R5Gap::DirectionNotAlternating),
+        R5Joint::JointNotConnected => R5Step::Pending(R5Gap::JointNotConnected),
+        R5Joint::NotOutside | R5Joint::PrevOutsideCore => {
+            R5Step::Pending(R5Gap::FirstPullbackUnproven)
+        }
+    }
+}
+
+/// 共用扫描证实的离开和首次回抽；下标均相对于本次输入。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct R5Proof {
     leave_unit: usize,
     pullback_unit: usize,
@@ -149,6 +255,25 @@ pub struct R5Proof {
 }
 
 impl R5Proof {
+    fn new(
+        leave_unit: usize,
+        pullback_unit: usize,
+        side: Direction,
+        core: (Tick, Tick),
+        u: &UnitRange,
+    ) -> Self {
+        Self {
+            leave_unit,
+            pullback_unit,
+            side,
+            core,
+            pullback_extreme: match side {
+                Direction::Up => u.lo,
+                Direction::Down => u.hi,
+            },
+        }
+    }
+
     pub fn leave_unit(&self) -> usize {
         self.leave_unit
     }
@@ -177,8 +302,19 @@ pub fn scan_center_facts_full(
     units: &[UnitRange],
     build: fn(&UnitRange, &UnitRange, &UnitRange) -> Option<Center>,
 ) -> CenterScanFacts {
+    scan_center_facts_with_r5(units, build, R5DirectionSource::Native, &[])
+}
+
+/// 扫描已完成的单一构造流；`attested` 以来自该流的 (seed, leave) 升序提供。
+pub fn scan_center_facts_with_r5(
+    units: &[UnitRange],
+    build: fn(&UnitRange, &UnitRange, &UnitRange) -> Option<Center>,
+    direction_source: R5DirectionSource<'_>,
+    attested: &[R5AttestedLegs],
+) -> CenterScanFacts {
     let mut sink = FactSink::default();
-    let (centers, metas, cursor) = scan_center_facts(units, build, 0, &mut sink);
+    let (centers, metas, cursor) =
+        scan_with_sink(units, build, 0, direction_source, attested, &mut sink);
     CenterScanFacts {
         len: units.len(),
         centers,
@@ -218,6 +354,8 @@ pub struct CenterWindowFacts {
     pub last: usize,
     /// 是否已结算（有突破段）。
     pub settled: bool,
+    pub settlement: Option<R5Proof>,
+    pub pending_boundary: Option<usize>,
     /// 突破段（结算时）。
     pub break_unit: Option<usize>,
     /// 离开方向（结算时；未结算无定义，根裁定 r2 R4）。
@@ -313,8 +451,10 @@ pub struct UnitFacts {
 pub enum TestedRole {
     /// <9 窗口的延伸成员（seed 之后）。
     ExtensionMember,
-    /// 突破段：首个严格离开冻结核心的单元，中枢在此结算。
+    /// 共用扫描证明破坏后的连接单元；角色与位置独立。
     BreakUnit,
+    /// 有位置证据、尚无构造归属的边界。
+    UnresolvedBoundary,
     /// ≥9 窗口的延伸成员（归属待 #1429，`UPGRADE_PENDING_TB02H`）。
     UpgradePendingMember,
 }
@@ -324,6 +464,7 @@ impl TestedRole {
         match self {
             TestedRole::ExtensionMember => "EXTENSION_MEMBER",
             TestedRole::BreakUnit => "BREAK_UNIT",
+            TestedRole::UnresolvedBoundary => "UNRESOLVED_BOUNDARY",
             TestedRole::UpgradePendingMember => "UPGRADE_PENDING_MEMBER",
         }
     }
@@ -373,52 +514,15 @@ impl CenterScanFacts {
     /// 每个窗口一项，按扫描顺序。须传共用扫描本次的完整输入；不证明输入窗起点之前的结算。
     pub fn r5_witnesses(&self, units: &[UnitRange]) -> Vec<R5Witness> {
         assert_eq!(units.len(), self.len, "units 必须是本次扫描的输入");
-        let mut witnesses = Vec::with_capacity(self.windows.len());
-        let mut first_unproven = None;
-        let mut center_at = 0;
-        for (window, w) in self.windows.iter().enumerate() {
-            // 升级窗的各子中枢都继承父窗口的冻结核心；首个产出就能读到。
-            let (center, _) = &self.centers[center_at];
-            center_at += w.emitted;
-            let witness = if w.exit == self.len {
-                R5Witness::Absent(R5Gap::Open)
-            } else if let Some(window) = first_unproven {
-                R5Witness::Absent(R5Gap::UpstreamUnproven { window })
-            } else {
-                let cur = &units[w.exit];
-                let joint = r5_joint(center.zd, center.zg, &units[w.exit - 1], cur);
-                // 升级只压住本窗发布，是否阻断后窗仍由原窗口关节决定。
-                if !matches!(joint, R5Joint::Proven { .. }) {
-                    first_unproven = Some(window);
-                }
-                if w.upgraded {
-                    R5Witness::Absent(R5Gap::UpgradePending)
-                } else {
-                    match joint {
-                        R5Joint::Proven { side } => R5Witness::Proven(R5Proof {
-                            leave_unit: w.exit - 1,
-                            pullback_unit: w.exit,
-                            side,
-                            core: (center.zd, center.zg),
-                            pullback_extreme: match side {
-                                Direction::Up => cur.lo,
-                                Direction::Down => cur.hi,
-                            },
-                        }),
-                        R5Joint::BreakUnitOutward => R5Witness::Absent(R5Gap::BreakUnitOutward),
-                        R5Joint::DirectionNotAlternating => {
-                            R5Witness::Absent(R5Gap::DirectionNotAlternating)
-                        }
-                        R5Joint::JointNotConnected => R5Witness::Absent(R5Gap::JointNotConnected),
-                        R5Joint::NotOutside | R5Joint::PrevOutsideCore => {
-                            unreachable!("共用扫描的末成员与冻结核心相交，退出段严格在外")
-                        }
-                    }
-                }
-            };
-            witnesses.push(witness);
-        }
-        witnesses
+        self.windows
+            .iter()
+            .map(|w| match w.boundary {
+                R5Boundary::Open => R5Witness::Absent(R5Gap::Open),
+                R5Boundary::Pending { gap, .. } => R5Witness::Absent(gap),
+                R5Boundary::Destroyed(proof) => R5Witness::Proven(proof),
+                R5Boundary::Upgrade => R5Witness::Absent(R5Gap::UpgradePending),
+            })
+            .collect()
     }
 
     /// 每个成立窗口的发布事实。`units` 必须是本次扫描的输入。
@@ -429,15 +533,32 @@ impl CenterScanFacts {
             .map(|w| {
                 let members = &units[w.seed_at..w.exit];
                 let roles = CenterRoles::of_members(members);
-                let settled = w.exit < self.len;
+                let proof = match w.boundary {
+                    R5Boundary::Destroyed(proof) => Some(proof),
+                    _ => None,
+                };
+                let next_tested_unit = match w.boundary {
+                    R5Boundary::Open => Some(w.exit),
+                    R5Boundary::Pending {
+                        gap: R5Gap::AwaitingFirstPullback,
+                        ..
+                    } => Some(w.exit + 1),
+                    R5Boundary::Pending { .. } => Some(w.exit),
+                    _ => None,
+                };
                 CenterWindowFacts {
                     first: w.seed_at,
                     last: w.exit - 1,
-                    settled,
-                    break_unit: settled.then_some(w.exit),
-                    break_up: settled.then(|| breaks_upward(&units[w.exit], roles.zd, roles.zg)),
-                    resume_anchor: settled.then_some(w.exit + 1),
-                    next_tested_unit: (!settled).then_some(w.exit),
+                    settled: proof.is_some(),
+                    settlement: proof,
+                    pending_boundary: match w.boundary {
+                        R5Boundary::Pending { tested, .. } => Some(tested),
+                        _ => None,
+                    },
+                    break_unit: proof.map(|_| w.exit),
+                    break_up: proof.map(|p| p.side() == Direction::Up),
+                    resume_anchor: proof.map(|_| w.exit + 1),
+                    next_tested_unit,
                     upgrade_pending: w.upgraded,
                     zn_members: members
                         .iter()
@@ -498,14 +619,16 @@ impl CenterScanFacts {
         let Some(left) = self.windows.iter().rposition(|w| w.exit <= k) else {
             return UnitAssignment::NotYetAssigned(WaitReason::NoLeftCenterInWindow);
         };
+        if !matches!(self.windows[left].boundary, R5Boundary::Destroyed(_)) {
+            return UnitAssignment::NotYetAssigned(WaitReason::SeedNotYetEvaluable);
+        }
         if let Some(right) = (left + 1 < self.windows.len()).then_some(left + 1) {
             return UnitAssignment::Connector {
                 left,
                 right: Some(right),
             };
         }
-        let is_breakout = self.windows[left].exit == k;
-        if is_breakout || self.seed_from_self(k) == SeedFromSelf::Failed {
+        if self.windows[left].exit == k {
             UnitAssignment::Connector { left, right: None }
         } else {
             UnitAssignment::NotYetAssigned(WaitReason::SeedNotYetEvaluable)
@@ -535,22 +658,23 @@ impl CenterScanFacts {
             .iter()
             .map(|w| {
                 let roles = CenterRoles::of_members(&units[w.seed_at..w.exit]);
-                let last_tested = if w.exit < self.len {
-                    w.exit
-                } else {
-                    w.exit - 1
+                let last_tested = match w.boundary {
+                    R5Boundary::Destroyed(_) | R5Boundary::Pending { .. } => w.exit,
+                    R5Boundary::Open | R5Boundary::Upgrade => w.exit - 1,
                 };
                 (w.seed_at + 3..=last_tested)
                     .map(|k| {
                         let position = unit_core_position(&units[k], roles.zd, roles.zg);
                         let role = if k == w.exit {
-                            TestedRole::BreakUnit
+                            match w.boundary {
+                                R5Boundary::Destroyed(_) => TestedRole::BreakUnit,
+                                _ => TestedRole::UnresolvedBoundary,
+                            }
                         } else if w.upgraded {
                             TestedRole::UpgradePendingMember
                         } else {
                             TestedRole::ExtensionMember
                         };
-                        debug_assert_eq!(position.closed_overlap(), role != TestedRole::BreakUnit);
                         TestedPosition {
                             unit: k,
                             position,
@@ -569,6 +693,7 @@ impl CenterScanFacts {
         self.windows
             .windows(2)
             .enumerate()
+            .filter(|(_, pair)| matches!(pair[0].boundary, R5Boundary::Destroyed(_)))
             .map(|(left, pair)| {
                 let (a, b) = (&pair[0], &pair[1]);
                 let outcome = if a.upgraded || b.upgraded {
@@ -592,14 +717,108 @@ impl CenterScanFacts {
     /// 扫描停止处。
     pub fn scan_state(&self) -> ScanState {
         match self.windows.last() {
-            Some(w) if w.exit == self.len => ScanState::Extending {
-                center: self.windows.len() - 1,
-                next_unit: self.len,
-            },
+            Some(w) if matches!(w.boundary, R5Boundary::Open | R5Boundary::Pending { .. }) => {
+                ScanState::Extending {
+                    center: self.windows.len() - 1,
+                    next_unit: if matches!(
+                        w.boundary,
+                        R5Boundary::Pending {
+                            gap: R5Gap::AwaitingFirstPullback,
+                            ..
+                        }
+                    ) {
+                        w.exit + 1
+                    } else {
+                        w.exit
+                    },
+                }
+            }
             _ => ScanState::SeekingSeed {
                 seed_start: self.cursor.consumed,
                 awaiting_unit: self.cursor.consumed + 2,
             },
         }
+    }
+}
+
+#[cfg(test)]
+mod r5_resume_tests {
+    use super::*;
+    use crate::theta_v0::classifier::center::center_from_segments;
+
+    #[test]
+    fn r5_full_and_resumed_windows_share_the_pullback_dependency() {
+        let units: Vec<_> = [
+            (Direction::Down, 20, 40),
+            (Direction::Up, 20, 35),
+            (Direction::Down, 25, 35),
+            (Direction::Up, 36, 50),
+            (Direction::Down, 37, 50),
+            (Direction::Up, 38, 50),
+            (Direction::Down, 39, 49),
+        ]
+        .into_iter()
+        .enumerate()
+        .map(|(k, (direction, lo, hi))| UnitRange {
+            start_index: k,
+            end_index: k + 1,
+            direction,
+            lo,
+            hi,
+        })
+        .collect();
+        let roles = [R5AttestedLegs {
+            seed: 0,
+            leave: 3,
+            side: Direction::Up,
+            first_pullback: Some(4),
+            leave_is_zn: Some(false),
+        }];
+        let mut old =
+            scan_center_facts_with_r5(&[], center_from_segments, R5DirectionSource::Native, &roles);
+        for len in 1..=units.len() {
+            let input = &units[..len];
+            let full = scan_center_facts_with_r5(
+                input,
+                center_from_segments,
+                R5DirectionSource::Native,
+                &roles,
+            );
+            let mut sink = FactSink::default();
+            let (tail, metas, cursor) = scan_with_sink(
+                input,
+                center_from_segments,
+                old.cursor.resume_from,
+                R5DirectionSource::Native,
+                &roles,
+                &mut sink,
+            );
+            let keep = old.centers.len() - old.cursor.last_window_emitted;
+            assert_eq!([&old.centers[..keep], &tail].concat(), full.centers);
+            assert_eq!([&old.metas[..keep], &metas].concat(), full.metas);
+            let keep_windows = old.windows.len().saturating_sub(1);
+            assert_eq!(
+                [&old.windows[..keep_windows], &sink.windows].concat(),
+                full.windows
+            );
+            assert_eq!(cursor, full.cursor);
+            old = full;
+        }
+        assert_eq!(old.metas[0].read_end_src, units[4].end_index);
+        assert_eq!(old.metas[0].settlement.unwrap().pullback_unit(), 4);
+        let mut revised = units;
+        revised[4].lo = 33;
+        let new = scan_center_facts_with_r5(
+            &revised,
+            center_from_segments,
+            R5DirectionSource::Native,
+            &roles,
+        );
+        let first_dirty = revised[4].start_index;
+        assert_eq!(
+            old.metas.partition_point(|m| m.read_end_src < first_dirty),
+            0
+        );
+        assert!(!new.window_facts(&revised)[0].settled);
     }
 }

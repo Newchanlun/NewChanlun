@@ -19,8 +19,8 @@ const U = ["segment:1:0", "segment:1:3", "segment:1:6", "segment:1:9"],
   CID = "center:1:0";
 const unit = (k) => ({ unit_id: U[k], unit_object_id: "obj3-seg" + k, direction: RANGE[k][0], lo: RANGE[k][1], hi: RANGE[k][2] });
 const wrap = (tuple, slot, data) => ({ schema_revision: tuple[0], semantic_version: tuple[1], policy_version: tuple[2], view_role: tuple[3], object_generation: "1", slot, data });
-const e = (slot, data) => wrap(C.CENTER_TUPLE, slot, data),
-  f = (slot, data) => wrap(C.PAIR_TUPLE, slot, data);
+const e = (slot, data) => wrap(C.LEGACY_CENTER_TUPLE, slot, data),
+  f = (slot, data) => wrap(C.LEGACY_PAIR_TUPLE, slot, data);
 const role = (value, contributors, frozen) => ({ value, contributors, same_price_witness: contributors.length >= 2 ? contributors : [], frozen, null_reason: null });
 function centerCut() {
   // 四个完成段：seed U0..U2 成立（ZD=12/ZG=18），U3 严格在下 ⟹ 结算、break_up=false，U3 为右侧待定连接段。
@@ -1278,4 +1278,79 @@ test("B6 完整 validateState：未定原件撤回代含其坐标的在世定向
     await rejected(secondGroup(asW2(await g5()), direction), /W2未定原件有多个定向替代候选/);
     t.diagnostic("第二组 " + direction + " 即拒");
   }
+});
+
+test("#1496 R5：价域在外不等于构造突破，旧代仍用原合同", () => {
+  const old = centerCut();
+  const oldUcp = old.find(r => r.kind === C.PAIR_KINDS[0]);
+  const roleMismatch = copy(oldUcp.payload);
+  roleMismatch.data.construction_role = "EXTENSION_MEMBER";
+  assert.throws(() => C.validatePairPayload(oldUcp.kind, roleMismatch), /TB02F_ROLE/);
+
+  const current = copy(old).filter(r => r.payload.data.relation_kind !== "connects_left");
+  for (const r of current) {
+    if (C.CENTER_KINDS.includes(r.kind)) r.payload.policy_version = C.CENTER_TUPLE[2];
+    if (C.PAIR_KINDS.includes(r.kind)) r.payload.policy_version = C.PAIR_TUPLE[2];
+  }
+  const find = kind => current.find(r => r.kind === kind);
+  const center = find(C.CENTER_KINDS[1]);
+  Object.assign(center.payload.data, {
+    status: "EXTENDING", members: U.slice(0, 4), settled: false, break_unit: null,
+    break_up_defined: false, resume_anchor: null, settled_known_at: null, r5: null, r5_pending_unit: null,
+  });
+  const assignment = current.find(r => r.object_id === "obj3-assign3");
+  Object.assign(assignment.payload.data, {
+    status: "CENTER_MEMBER", center_id: CID, left_center_id: null, right_pending: false,
+  });
+  const memberEdge = copy(current.find(r => r.payload.data.relation_kind === "member_of"));
+  memberEdge.object_id = "obj3-member3";
+  memberEdge.payload.slot[0] = U[3];
+  memberEdge.payload.data.source_id = U[3];
+  current.push(memberEdge);
+  find(C.CENTER_KINDS[5]).payload.data.after = center.payload.data;
+  Object.assign(find(C.CENTER_KINDS[6]).payload.data.scan_cursor, {
+    state: "EXTENDING", center_id: CID, awaiting_offset: "1",
+  });
+  const ucp = find(C.PAIR_KINDS[0]);
+  ucp.payload.data.construction_role = "EXTENSION_MEMBER";
+  C.validateCenterFamilyCut(current, axes22(current));
+  ucp.payload.data.construction_role = "BREAK_UNIT";
+  assert.throws(() => C.validateCenterFamilyCut(current, axes22(current)), /TB02F_ROLE/);
+  C.validateCenterFamilyCut(old, axes22(old));
+});
+
+test("#1496 R5：无首回抽证明的旧结算不得进入新规则 cut", () => {
+  const old = centerCut().find(r => r.kind === C.CENTER_KINDS[1]);
+  const payload = copy(old.payload);
+  payload.policy_version = C.CENTER_TUPLE[2];
+  payload.data.r5 = null;
+  payload.data.r5_pending_unit = null;
+  assert.throws(() => C.validateCenterPayload(old.kind, payload), /TB02E_SETTLEMENT/);
+  C.validateCenterPayload(old.kind, old.payload);
+});
+
+test("#1496 R5：未决外段保留五叶位置，不发布为连接", () => {
+  const rows = centerCut().filter(r => r.payload.data.relation_kind !== "connects_left");
+  for (const r of rows) {
+    if (C.CENTER_KINDS.includes(r.kind)) r.payload.policy_version = C.CENTER_TUPLE[2];
+    if (C.PAIR_KINDS.includes(r.kind)) r.payload.policy_version = C.PAIR_TUPLE[2];
+  }
+  const data = kind => rows.find(r => r.kind === kind).payload.data;
+  const c = data(C.CENTER_KINDS[1]);
+  Object.assign(c, {
+    settled: false, status: "EXTENDING", break_unit: null, break_up_defined: false, resume_anchor: null,
+    settled_known_at: null, next_tested_unit: U[3], r5: null, r5_pending_unit: U[3],
+  });
+  Object.assign(data(C.CENTER_KINDS[5]), {after: c});
+  Object.assign(data(C.CENTER_KINDS[6]).scan_cursor, {
+    state: "EXTENDING", center_id: CID, awaiting_unit_id: U[3],
+    awaiting_after_unit_id: null, awaiting_offset: null,
+  });
+  Object.assign(rows.find(r => r.object_id === "obj3-assign3").payload.data, {
+    status: "NOT_YET_ASSIGNED", left_center_id: null, right_pending: false, reason: "SEED_NOT_YET_EVALUABLE",
+  });
+  data(C.PAIR_KINDS[0]).construction_role = "UNRESOLVED_BOUNDARY";
+  C.validateCenterFamilyCut(rows, axes22(rows));
+  data(C.PAIR_KINDS[0]).construction_role = "BREAK_UNIT";
+  assert.throws(() => C.validateCenterFamilyCut(rows, axes22(rows)), /TB02F_ROLE/);
 });

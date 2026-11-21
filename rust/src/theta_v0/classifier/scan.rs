@@ -511,6 +511,7 @@ fn issue1087_scan_sink_emissions(
             strokes,
             level,
             departure_ends,
+            None,
             &mut points,
             &mut pan_divs,
             &mut grades,
@@ -545,6 +546,7 @@ pub(crate) fn merged_scan_resume(
     level: u32,
     centers: &[Center],
     segments: &[Segment],
+    r5_meta: Option<&[super::recursive_tower::WinMeta]>,
     anchor_dirs: Option<&[Option<Direction>]>,
     departure_ends: Option<&[usize]>,
     #[cfg(feature = "issue1087_parity")] cp_scan: &[super::recursive_tower::CpScanOwnership],
@@ -675,6 +677,7 @@ pub(crate) fn merged_scan_resume(
                 strokes,
                 level,
                 departure_ends,
+                r5_meta,
                 pts,
                 pans,
                 grades,
@@ -802,11 +805,12 @@ pub(crate) fn merged_scan_resume(
     debug_assert!(
         {
             let mut full_grades = Vec::new();
-            let (full_pts, full_pans) = signal::extract_signals_with_hist_anchored(
+            let (full_pts, full_pans) = signal::extract_signals_with_r5(
                 centers,
                 segments,
                 anchor_dirs,
                 departure_ends,
+                r5_meta,
                 hist,
                 dif,
                 closes_tick,
@@ -926,6 +930,7 @@ fn merged_judge_segment(
     strokes: &[Stroke],
     level: u32,
     departure_ends: Option<&[usize]>,
+    r5_meta: Option<&[super::recursive_tower::WinMeta]>,
     points: &mut Vec<BspPoint>,
     pan_divs: &mut Vec<PanDivCert>,
     grade_sink: &mut Vec<FirstClassGradeRecord>,
@@ -971,6 +976,9 @@ fn merged_judge_segment(
                 gauge,
                 strokes,
                 sorted,
+                r5_meta.map_or(signal::T3InCSource::NativeSegments, |m| {
+                    signal::T3InCSource::Scanned(m[c_idx].settlement)
+                }),
                 Some(level),
                 grade_sink,
             ) {
@@ -998,13 +1006,26 @@ fn merged_judge_segment(
     }
 
     // 第三类：当前段作 retest，前一段作 leave。
+    if let Some(meta) = r5_meta {
+        let at = signal::nearest_confirmed_center_idx(centers_sorted, seg.start_index);
+        if let Some((center, proof)) =
+            at.and_then(|k| Some((&centers_sorted[k], meta.get(k)?.settlement?)))
+        {
+            if proof.pullback_unit() == i {
+                if let Some(cert) = signal::third_from_r5(center, sorted, proof) {
+                    points.push(cert.point);
+                }
+            }
+        }
+        return;
+    }
     if i > 0 {
         let leave_seg = &sorted[i - 1];
         if let Some(c_leave_idx) =
-            signal::nearest_confirmed_center_idx(centers_sorted, leave_seg.start_index)
+            signal::nearest_confirmed_center_idx(centers_sorted, leave_seg.end_index)
         {
             let c_leave = &centers_sorted[c_leave_idx];
-            let first_retrace_pair = i == 1 || sorted[i - 2].start_index < c_leave.end_index;
+            let first_retrace_pair = leave_seg.end_index == c_leave.end_index;
             if first_retrace_pair {
                 let cert = signal::judge_third_cert(c_leave, leave_seg, anchors[i - 1], seg);
                 super::diag::s2_mirror_capture::record_third_assembly(
@@ -1184,6 +1205,7 @@ pub(crate) fn project_cand_delta_events(
             strokes,
             level,
             dep_ends_in,
+            None,
             &mut points,
             &mut pan_divs,
             &mut grades,
@@ -1375,7 +1397,7 @@ pub(crate) fn cp_event_projection(
         if leave.start_index < c_start_full || retest.end_index > event_end {
             return None;
         }
-        if signal::nearest_confirmed_center_idx(centers, leave.start_index) != Some(c_idx) {
+        if signal::nearest_confirmed_center_idx(centers, leave.end_index) != Some(c_idx) {
             return None;
         }
         let cert = signal::judge_third_cert(c, leave, anchors[i - 1], retest)?;

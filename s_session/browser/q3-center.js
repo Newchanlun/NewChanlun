@@ -21,7 +21,8 @@
   const PAIR_KINDS = ["CC-018.unit_core_position", "CC-020.center_pair", "CC-055.pair_relation", "CC-055.pair_change", "CC-056.pair_version"];
   // ── #1419 TB-02-E 中枢事实（schema s-center/1，tb1419-schema.md v1）。与 s_tb02_contract.py 同序同原因码，
   // test_tb02e_contract 对共享语料逐条对拍两侧结论与原因码。
-  const CENTER_TUPLE = ["s-center/1", "center-seed/1", "strict_seed_zn_outer_c_resume", "main"];
+  const LEGACY_CENTER_TUPLE = ["s-center/1", "center-seed/1", "strict_seed_zn_outer_c_resume", "main"];
+  const CENTER_TUPLE = ["s-center/1", "center-seed/1", "strict_seed_zn_outer_r5_c_resume", "main"];
   const TB02E_DELIVERED = ["l0_strict_seed_vector_and_core_order", "zn_outer_inner_roles_with_contributors", "c_resume_assignment_and_connectors"];
   const TB02E_DEFERRED = ["global_G009_upper_levels_1429", "ge9_upgrade_1429", "third_class_and_break_1434", "expansion_newborn_1424", "connector_upper_construction_1429"];
   const ROLE_LAYOUT = [["CORE", ["ZD", "ZG"]], ["OUTER", ["DD", "GG"]], ["INNER_EXTREMA", ["D", "G"]]];
@@ -87,7 +88,8 @@
   }
   function validateCenterPayload(kind, p) {
     keysE(p, ["schema_revision", "semantic_version", "policy_version", "view_role", "object_generation", "slot", "data"], "中枢合同");
-    needE(equal([p.schema_revision, p.semantic_version, p.policy_version, p.view_role], CENTER_TUPLE), "VERSION", "中枢规则/范围版本不符");
+    const tuple = [p.schema_revision, p.semantic_version, p.policy_version, p.view_role], r5 = equal(tuple, CENTER_TUPLE);
+    needE(r5 || equal(tuple, LEGACY_CENTER_TUPLE), "VERSION", "中枢规则/范围版本不符");
     intE(p.object_generation, "object_generation", 1);
     const d = p.data;
     if (kind === CENTER_KINDS[0]) {
@@ -130,7 +132,7 @@
       }
       knownE(d.known_at);
     } else if (kind === CENTER_KINDS[1]) {
-      keysE(d, ["entity_id", "entity_revision", "seed_attempt_id", "seed_units", "zn_direction", "members", "zn_members", "status", "settled", "break_unit", "break_up", "break_up_defined", "resume_anchor", "next_tested_unit", "roles_id", "formed_known_at", "settled_known_at"], kind);
+      keysE(d, ["entity_id", "entity_revision", "seed_attempt_id", "seed_units", "zn_direction", "members", "zn_members", "status", "settled", "break_unit", "break_up", "break_up_defined", "resume_anchor", "next_tested_unit", "roles_id", "formed_known_at", "settled_known_at", ...(r5 ? ["r5", "r5_pending_unit"] : [])], kind);
       const members = idList(d.members, "members");
       needE(members.length >= 3, "MEMBERS", "中枢至少 seed 三单元");
       members.forEach(unitAnchor);
@@ -143,9 +145,21 @@
       needE(zn.length >= 1 && zn[0] === members[0] && zn.every(z => members.includes(z)), "ZN", "Zn 成员须含首单元且属成员");
       needE(["UP", "DOWN"].includes(d.zn_direction), "SHAPE", "zn_direction 未声明");
       needE(["EXTENDING", "SETTLED", "UPGRADE_PENDING_TB02H"].includes(d.status), "SHAPE", "中枢状态未声明");
-      needE((d.status === "UPGRADE_PENDING_TB02H") === (members.length >= 9), "UPGRADE", "≥9 成员须且只须标 UPGRADE_PENDING_TB02H");
+      needE(r5 || (d.status === "UPGRADE_PENDING_TB02H") === (members.length >= 9), "UPGRADE", "≥9 成员须且只须标 UPGRADE_PENDING_TB02H");
       needE([d.settled, d.break_up, d.break_up_defined].every(x => typeof x === "boolean"), "SHAPE", "结算位错型");
       const settled = d.settled;
+      if (r5) {
+        needE((d.r5 !== null) === settled && !(settled && d.status === "UPGRADE_PENDING_TB02H"), "SETTLEMENT", "结算须且仅须有首回抽证据；升级不结算");
+        if (d.r5_pending_unit !== null) {
+          needE(d.status === "EXTENDING" && !members.includes(d.r5_pending_unit), "SETTLEMENT", "未决边界不能已结算或属于成员");
+          unitAnchor(d.r5_pending_unit);
+        }
+        if (settled) {
+          keysE(d.r5, ["leave_unit", "pullback_unit", "leave_object_id", "pullback_object_id"], "r5");
+          unitAnchor(d.r5.leave_unit); unitAnchor(d.r5.pullback_unit);
+          textE(d.r5.leave_object_id, "r5.leave_object_id"); textE(d.r5.pullback_object_id, "r5.pullback_object_id");
+        }
+      }
       if (d.status !== "UPGRADE_PENDING_TB02H") needE((d.status === "SETTLED") === settled, "SETTLEMENT", "状态与 settled 不符");
       needE((d.break_unit !== null) === settled && (d.resume_anchor !== null) === settled && (d.settled_known_at !== null) === settled, "SETTLEMENT", "结算位与突破段/续扫锚/结算时点不一致");
       needE(d.break_up_defined === settled, "BREAK_UP_UNDEFINED", "未结算中枢 break_up_defined 须为 false（R4）");
@@ -199,7 +213,7 @@
     } else if (kind === CENTER_KINDS[5]) {
       keysE(d, ["entity_id", "change", "before", "after", "known_at", "object_id"], kind);
       textE(d.entity_id, "entity_id");
-      needE(["formed", "member_added", "roles_updated", "settled", "upgrade_pending", "withdrawn"].includes(d.change), "SHAPE", "未声明中枢变化");
+      needE(["formed", "member_added", "roles_updated", "settled", "upgrade_pending", "withdrawn", ...(r5 ? ["settlement_revised"] : [])].includes(d.change), "SHAPE", "未声明中枢变化");
       const withdrawn = d.change === "withdrawn";
       needE((d.after === null) === withdrawn && (d.object_id === null) === withdrawn && (d.before === null) === (d.change === "formed"), "SHAPE", "变化前后件与变化种类不符");
       if (d.object_id !== null) textE(d.object_id, "object_id");
@@ -256,23 +270,30 @@
     const unitAt = k => (k >= 0 && k < n ? completed[k][0] : k === n ? ip : null);
     const last = centers.length ? centers[centers.length - 1] : null;
     let wait;
-    if (last !== null && !last.settled) {
+    const r5 = versions[0].payload.policy_version === CENTER_TUPLE[2];
+    const extending = last !== null && !last.settled && !(r5 && last.status === "UPGRADE_PENDING_TB02H");
+    if (extending) {
       needE(cur.state === "EXTENDING" && cur.center_id === last.entity_id && cur.seed_start_unit_id === null, "SCAN_CURSOR", "末中枢开放时游标须 EXTENDING 指末中枢");
       wait = pos.get(last.members[last.members.length - 1]) + 1;
+      if (r5 && last.next_tested_unit !== null) {
+        const next = last.next_tested_unit === ip ? n : pos.get(last.next_tested_unit);
+        needE(next === wait || next === wait + 1, "SCAN_CURSOR", "未决边界最多等待同一离开的首回抽");
+        wait = next;
+      }
     } else {
-      let s = last !== null ? pos.get(last.members[last.members.length - 1]) + 2 : 0;
+      let s = last !== null ? pos.get(last.members[last.members.length - 1]) + (r5 && !last.settled ? 1 : 2) : 0;
       while (s < n && attempts.get("seed_attempt:" + unitAnchor(completed[s][0]))?.result === "EXCLUDED") s++;
       needE(cur.state === "SEEKING_SEED" && cur.center_id === null && cur.seed_start_unit_id === unitAt(s), "SCAN_CURSOR", "SEEKING_SEED 起点须为续扫锚经 EXCLUDED 尝试推进后的位置");
       wait = s + 2;
     }
     let want;
-    if (wait === n && ip !== null) want = [ip, null, null];
+    if ((r5 && wait < n) || (wait === n && ip !== null)) want = [unitAt(wait), null, null];
     else {
       needE(wait > n - 1, "SCAN_CURSOR", "等待位置不得落在已完成单元上");
       want = [null, n ? completed[n - 1][0] : null, String(wait - (n - 1))];
     }
     needE(cur.awaiting_unit_id === want[0] && cur.awaiting_after_unit_id === want[1] && cur.awaiting_offset === want[2], "SCAN_CURSOR", "等待位置的实体锚不符");
-    if (last !== null && !last.settled) needE(last.next_tested_unit === want[0], "SCAN_CURSOR", "游标与中枢 next_tested_unit 不一致");
+    if (extending) needE(last.next_tested_unit === want[0], "SCAN_CURSOR", "游标与中枢 next_tested_unit 不一致");
   }
   function validateCenterLinks(records, axes = null) {
     const byKind = Object.fromEntries(CENTER_KINDS.map(k => [k, records.filter(r => r.kind === k)]));
@@ -303,6 +324,7 @@
     const universe = new Set([...seg.keys(), ...pending.keys()]);
     needE(assignments.size === universe.size && [...universe].every(u => assignments.has(u)), "ASSIGNMENT_CONSISTENCY", "每个单元须恰一归属");
     const memberOf = new Map();
+    const r5 = byKind[CENTER_KINDS[6]][0]?.payload.policy_version === CENTER_TUPLE[2];
     for (const c of centers) {
       for (const m of c.members) needE(seg.has(m), "MEMBER_NOT_COMPLETED", "成员不是同 cut 已完成段");
       const first = pos.get(c.members[0]);
@@ -320,14 +342,26 @@
       const units = c.members.map(m => seg.get(m));
       const zn = c.members.filter((m, i) => units[i][4] === units[0][4]);
       needE(equal(c.zn_members, zn) && c.zn_direction === units[0][4], "ZN", "Zn 成员须是与首单元同向的全部成员");
+      if (r5 && c.r5_pending_unit !== null) {
+        needE(completed[first + units.length]?.[0] === c.r5_pending_unit, "SETTLEMENT", "未决边界必须紧随已证成员");
+      }
+      if (r5) needE(upgrade === (units.filter(u => u[2] < u[3]).length >= 9), "UPGRADE", "应按有波动的全部成员计升级");
       if (c.settled) {
         const nxt = first + c.members.length;
         needE(nxt < completed.length && completed[nxt][0] === c.break_unit, "BREAK_UNIT", "突破段须是末成员后的下一个完成单元");
         const seedUnits = c.members.slice(0, 3).map(m => seg.get(m));
         const zd = seedUnits.map(u => u[2]).reduce((a, b) => (b > a ? b : a)), zg = seedUnits.map(u => u[3]).reduce((a, b) => (b < a ? b : a));
         const b = completed[nxt];
-        const up = b[2] > zg ? true : b[3] < zd ? false : b[3] > zg;
-        needE(c.break_up === up, "BREAK_UP", "break_up 与突破段方向不符（C4）");
+        if (r5) {
+          const proof = c.r5, l = pos.get(proof.leave_unit), r = pos.get(proof.pullback_unit);
+          needE((l === nxt - 1 || l === nxt) && r === l + 1, "SETTLEMENT", "首回抽须紧随已证离开");
+          const leave = completed[l], retest = completed[r];
+          needE(leave[1] === proof.leave_object_id && retest[1] === proof.pullback_object_id, "UNIT_SOURCE", "两腿须引用同 cut 已完成单元");
+          needE(c.break_up ? retest[2] > zg : retest[3] < zd, "BREAK_UP", "首回抽整段须严格在离开侧");
+        } else {
+          const up = b[2] > zg ? true : b[3] < zd ? false : b[3] > zg;
+          needE(c.break_up === up, "BREAK_UP", "break_up 与突破段方向不符（C4）");
+        }
       }
       const rd = roles.get(c.entity_id);
       needE(rd !== undefined && rd.entity_id === c.roles_id, "ROLES_LINK", "中枢缺同 cut 角色对象");
@@ -347,6 +381,10 @@
     for (let i = 0; i + 1 < centers.length; i++) {
       const a = centers[i], b = centers[i + 1];
       const aLast = pos.get(a.members[a.members.length - 1]), bFirst = pos.get(b.members[0]);
+      if (r5 && a.status === "UPGRADE_PENDING_TB02H") {
+        needE(bFirst > aLast, "RESUME_ANCHOR", "重切后不得重用母窗成员");
+        continue;
+      }
       needE(bFirst !== aLast + 1, "PLUS_ONE_REUSE", "下一中枢首成员是上一中枢末成员的下一个单元（+1 复用）");
       needE(bFirst > aLast + 1 && a.settled, "RESUME_ANCHOR", "下一中枢首成员早于续扫锚或上一中枢未结算");
       for (let k = aLast + 1; k < bFirst; k++) {
@@ -387,7 +425,8 @@
   }
   // ── #1424 TB-02-F 相邻中枢五叶关系（CC-020）与延伸测试单元位置（CC-018），schema s-center-pair/1。与 s_tb02_contract.py
   // 同序同原因码（TB02F_<CODE>），test_tb02f_contract 对共享语料逐条对拍两侧结论与原因码。根裁定 #1424 issuecomment-6160553615。
-  const PAIR_TUPLE = ["s-center-pair/1", "center-pair/1", "zn_outer_five_leaf_pending_ge9", "main"];
+  const LEGACY_PAIR_TUPLE = ["s-center-pair/1", "center-pair/1", "zn_outer_five_leaf_pending_ge9", "main"];
+  const PAIR_TUPLE = ["s-center-pair/1", "center-pair/1", "zn_outer_five_leaf_r5_roles", "main"];
   const TB02F_DELIVERED = ["l0_unit_core_position_five_leaves", "l0_adjacent_pair_five_leaves_zn_outer_with_full_matrix", "expansion_relation_separate_from_realization"];
   const TB02F_DEFERRED = ["upper_level_pairs_1429", "ge9_pairs_pending_1429", "upper_center_realization_1429", "trend_realization_1426", "first_retest_destruction_1434", "two_step_settlement_r5_1496"];
   const PAIR_LEAVES = ["CORE_NOT_STRICTLY_SEPARATED", "UP_NEWBIRTH", "DOWN_NEWBIRTH", "UP_EXPANSION", "DOWN_EXPANSION"];
@@ -443,7 +482,8 @@
   }
   function validatePairPayload(kind, p) {
     keysF(p, ["schema_revision", "semantic_version", "policy_version", "view_role", "object_generation", "slot", "data"], "中枢对合同");
-    needF(equal([p.schema_revision, p.semantic_version, p.policy_version, p.view_role], PAIR_TUPLE), "VERSION", "中枢对规则/范围版本不符");
+    const tuple = [p.schema_revision, p.semantic_version, p.policy_version, p.view_role], r5 = equal(tuple, PAIR_TUPLE);
+    needF(r5 || equal(tuple, LEGACY_PAIR_TUPLE), "VERSION", "中枢对规则/范围版本不符");
     intF(p.object_generation, "object_generation", 1);
     const d = p.data;
     if (kind === PAIR_KINDS[0]) {
@@ -454,7 +494,7 @@
       textF(u.unit_object_id, "unit_object_id");
       needF(["UP", "DOWN"].includes(u.direction), "SHAPE", "unit.direction 未声明");
       const lo = intF(u.lo, "unit.lo"), hi = intF(u.hi, "unit.hi");
-      needF(lo < hi, "SHAPE", "单元区间须 lo<hi");
+      needF(r5 ? lo <= hi : lo < hi, "SHAPE", "已完成单元区间不得倒置");
       needF(d.entity_id === "ucp:" + ca + ":" + ua, "IDENTITY", "位置身份未绑定中枢与单元");
       intF(d.center_revision, "center_revision", 1);
       keysF(d.core, ["ZD", "ZG"], "core");
@@ -465,8 +505,9 @@
       const closed = ["LOW_TOUCH", "INTERIOR_CONTACT", "HIGH_TOUCH"].includes(pos);
       const side = pos === "STRICT_BELOW" ? "DOWN" : pos === "STRICT_ABOVE" ? "UP" : null;
       needF(d.closed_overlap === closed && d.strict_leave === !closed && d.leave_side === side, "POSITION", "重叠/离开位与位置不符（离开侧只按区间位置判）");
-      needF(TESTED_ROLES.includes(d.construction_role), "SHAPE", "构造角色未声明");
-      needF((d.construction_role === "BREAK_UNIT") === !closed, "ROLE", "突破段恰为严格离开的测试单元");
+      needF(TESTED_ROLES.includes(d.construction_role) || (r5 && d.construction_role === "UNRESOLVED_BOUNDARY"), "SHAPE", "构造角色未声明");
+      needF(r5 ? d.construction_role !== "BREAK_UNIT" || !closed : (d.construction_role === "BREAK_UNIT") === !closed,
+        "ROLE", "突破段须严格在外；严格在外本身不授予构造角色");
       needF(d.destruction === PAIR_DESTRUCTION, "DESTRUCTION", "离开不是破坏：首回试与破坏归 #1434");
       knownF(d.known_at);
     } else if (kind === PAIR_KINDS[1]) {
@@ -650,6 +691,7 @@
       needF(roles.has(c.entity_id), "CORE", "中枢缺同 cut 角色对象");
       for (const m of c.members.slice(3)) wantTested.set(JSON.stringify([c.entity_id, m]), upgrade.get(c.entity_id) ? "UPGRADE_PENDING_MEMBER" : "EXTENSION_MEMBER");
       if (c.settled) wantTested.set(JSON.stringify([c.entity_id, c.break_unit]), "BREAK_UNIT");
+      if (c.r5_pending_unit) wantTested.set(JSON.stringify([c.entity_id, c.r5_pending_unit]), "UNRESOLVED_BOUNDARY");
     }
     const byCenter = new Map(centers.map(c => [c.entity_id, c])), ucps = new Map();
     for (const r of byKind[PAIR_KINDS[0]]) {
@@ -671,11 +713,14 @@
       needF(!pairs.has(key), "PAIR_COUNT", "同一中枢对重复");
       pairs.set(key, d);
     }
-    const adjacent = centers.slice(1).map((b, i) => JSON.stringify([centers[i].entity_id, b.entity_id]));
+    const r5 = byKind[PAIR_KINDS[4]][0]?.payload.policy_version === PAIR_TUPLE[2];
+    const adjacent = centers.slice(1).flatMap((b, i) =>
+      !r5 || centers[i].settled ? [JSON.stringify([centers[i].entity_id, b.entity_id])] : []);
     needF([...pairs.keys()].every(k => adjacent.includes(k)), "ADJACENCY", "中枢对的两端不是扫描相邻中枢");
     needF(pairs.size === adjacent.length, "PAIR_COUNT", "中枢数 n 时须恰 n−1 个对（缺对或多对）");
     for (let i = 0; i + 1 < centers.length; i++) {
       const a = centers[i], b = centers[i + 1], d = pairs.get(JSON.stringify([a.entity_id, b.entity_id]));
+      if (r5 && !a.settled) continue;
       needF(d.a_revision === a.entity_revision && d.b_revision === b.entity_revision, "REVISION", "对所引中枢修订号与中枢当前修订不符");
       const between = completed.slice(pos.get(a.members[a.members.length - 1]) + 1, pos.get(b.members[0])).map(u => u[0]);
       needF(equal(d.connector_units, between), "CONNECTORS", "连接段须恰为两中枢之间的全部完成单元");
@@ -736,7 +781,7 @@
         needX(equal([...axes[axis].evidence.object_ids].sort(), ids), "AXIS_BINDING", axis + " 目录证据未绑定实际中枢族对象");
       }
   }
-  return Object.freeze({CENTER_KINDS: Object.freeze(CENTER_KINDS), PAIR_KINDS: Object.freeze(PAIR_KINDS), CENTER_TUPLE, PAIR_TUPLE,
+  return Object.freeze({CENTER_KINDS: Object.freeze(CENTER_KINDS), PAIR_KINDS: Object.freeze(PAIR_KINDS), CENTER_TUPLE, PAIR_TUPLE, LEGACY_CENTER_TUPLE, LEGACY_PAIR_TUPLE,
     TB02E_DELIVERED, TB02E_DEFERRED, TB02F_DELIVERED, TB02F_DEFERRED,
     validateCenterPayload, validatePairPayload, validatePairPublication, validatePairHistory, validateCenterFamilyCut});
 });

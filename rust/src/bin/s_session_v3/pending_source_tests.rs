@@ -429,7 +429,7 @@ fn assert_pending_w2_oracle(
             "TB-02-E",
             "s-center/1",
             "center-seed/1",
-            "strict_seed_zn_outer_c_resume",
+            crate::tb02e::POLICY_VERSION,
             json!({
             "input_frontier":frontier.to_string(), "known_at":known, "waiting_reasons":[],
             "scan_cursor":{"state":"SEEKING_SEED","center_id":null,"seed_start_unit_id":null,
@@ -441,7 +441,7 @@ fn assert_pending_w2_oracle(
             "TB-02-F",
             "s-center-pair/1",
             "center-pair/1",
-            "zn_outer_five_leaf_pending_ge9",
+            crate::tb02f::POLICY_VERSION,
             json!({
             "input_frontier":frontier.to_string(), "known_at":known, "waiting_reasons":[], "pair_count":"0", "pending_pairs":"0",
             "delivered_scope":"l0_adjacent_pair_five_leaf_zn_outer_and_unit_core_position", "deferred_scope":tb02f::DEFERRED_SCOPE}),
