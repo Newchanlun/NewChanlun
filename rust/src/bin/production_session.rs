@@ -16,11 +16,12 @@
 use newchan_rust::structure_source::Declaration;
 use serde_json::{json, Value};
 use std::collections::BTreeSet;
-use std::io::{self, Read};
+use std::io::{self, PipeReader, Read};
+use std::os::fd::AsRawFd;
 use std::os::unix::process::{CommandExt, ExitStatusExt};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitStatus, Stdio};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicPtr, AtomicU8, Ordering};
 use std::time::{Duration, Instant};
 
 const MANIFEST_REVISION: &str = "production-session-manifest/1";
@@ -39,10 +40,89 @@ const S_PASS: [&str; 3] = [
     "S_THETA_DIAGNOSTIC_TESTONLY",
 ];
 
-static STOP_REQUESTED: AtomicBool = AtomicBool::new(false);
+const START_COMMITTED: u8 = 1;
+const STOP_REQUESTED: u8 = 2;
+// 启动器进程存续期间保留共享映射，供 fork 后、exec 前的子进程参与门控。
+struct StartGate {
+    launcher_pid: libc::pid_t,
+    state: AtomicU8,
+}
+
+static START_GATE: AtomicPtr<StartGate> = AtomicPtr::new(std::ptr::null_mut());
+
+fn start_gate() -> &'static StartGate {
+    // SAFETY：在安装处理器及首次 spawn 前初始化；映射在 launcher 退出前一直有效。
+    unsafe { &*START_GATE.load(Ordering::Acquire) }
+}
 
 extern "C" fn on_stop(_: libc::c_int) {
-    STOP_REQUESTED.store(true, Ordering::Relaxed);
+    let gate = start_gate();
+    // SAFETY：getpid 是 async-signal-safe；未 exec 的域不能代 launcher 标记停服。
+    if unsafe { libc::getpid() } == gate.launcher_pid {
+        gate.state.fetch_or(STOP_REQUESTED, Ordering::AcqRel);
+    }
+}
+
+fn install_signal_policy() -> io::Result<()> {
+    // SAFETY：映射私有于 launcher 及 fork 后尚未 exec 的子进程；只通过原子访问。
+    unsafe {
+        let gate = libc::mmap(
+            std::ptr::null_mut(),
+            std::mem::size_of::<StartGate>(),
+            libc::PROT_READ | libc::PROT_WRITE,
+            libc::MAP_SHARED | libc::MAP_ANON,
+            -1,
+            0,
+        );
+        if gate == libc::MAP_FAILED {
+            return Err(io::Error::last_os_error());
+        }
+        let gate = gate.cast::<StartGate>();
+        gate.write(StartGate {
+            launcher_pid: libc::getpid(),
+            state: AtomicU8::new(0),
+        });
+        START_GATE.store(gate, Ordering::Release);
+        let stop = on_stop as *const () as libc::sighandler_t;
+        // 恢复 SIGCHLD 默认动作（也清除 SA_NOCLDWAIT），保留子进程的真实退出状态。
+        for (signal, handler) in [
+            (libc::SIGCHLD, libc::SIG_DFL),
+            (libc::SIGTERM, stop),
+            (libc::SIGINT, stop),
+        ] {
+            if libc::signal(signal, handler) == libc::SIG_ERR {
+                return Err(io::Error::last_os_error());
+            }
+        }
+    }
+    Ok(())
+}
+
+/// 预查节省不必要的 fork；真正的授权在子进程 exec 前，与停服共用一次原子状态转换。
+fn spawn_before_stop(command: &mut Command) -> io::Result<Option<Child>> {
+    if shutdown_requested() {
+        return Ok(None);
+    }
+    // SAFETY：在 setsid 后只访问无锁原子；失败时 Rust 报回 errno，不执行域程序。
+    unsafe {
+        command.pre_exec(|| {
+            start_gate()
+                .state
+                .compare_exchange(0, START_COMMITTED, Ordering::AcqRel, Ordering::Acquire)
+                .map(|_| ())
+                .map_err(|_| io::Error::from_raw_os_error(libc::ECANCELED))
+        });
+    }
+    let result = command.spawn();
+    // 若子进程先获得授权，spawn 返回前它仍属本次在途启动。保留其间收到的停服，
+    // 登记该子进程后就回收，不再授权下一次启动。
+    let state = start_gate()
+        .state
+        .fetch_and(!START_COMMITTED, Ordering::AcqRel);
+    match result {
+        Err(e) if e.raw_os_error() == Some(libc::ECANCELED) && state == STOP_REQUESTED => Ok(None),
+        result => result.map(Some),
+    }
 }
 
 /// 与 `_redact` 同口径：敏感键名的值整体遮蔽；24 位以上纯 token 字符的字符串遮蔽。
@@ -283,7 +363,7 @@ fn clean(mut command: Command, pass: &[&str]) -> Command {
 }
 
 fn shutdown_requested() -> bool {
-    STOP_REQUESTED.load(Ordering::Relaxed)
+    start_gate().state.load(Ordering::Acquire) & STOP_REQUESTED != 0
 }
 
 /// 接养组长退出后遗留的组内后代；Linux 上不能假设外部 PID 1 会回收它们。
@@ -325,10 +405,12 @@ struct DomainProcess {
     domain: String,
     leader: Child,
     status: Option<ExitStatus>,
+    leader_unwaitable: bool,
     // Some 只用于常驻域；init 的退出由 run_once 处理。
     critical: Option<bool>,
     phase: StopPhase,
     group_gone: bool,
+    kill_failed: bool,
 }
 
 impl DomainProcess {
@@ -337,9 +419,11 @@ impl DomainProcess {
             domain,
             leader,
             status: None,
+            leader_unwaitable: false,
             critical,
             phase: StopPhase::NotSignaled,
             group_gone: false,
+            kill_failed: false,
         }
     }
 
@@ -348,13 +432,29 @@ impl DomainProcess {
         self.leader.id() as libc::pid_t
     }
 
-    /// 返回且保存首次取得的组长状态。组长状态和组是否已消失是两件事。
-    fn poll_leader(&mut self) -> io::Result<Option<ExitStatus>> {
-        if self.status.is_some() {
-            return Ok(None);
+    /// 首次取得的退出按当时的阶段登记；之后清理后代时不改写。
+    fn observe_exit(&mut self) -> io::Result<bool> {
+        if self.status.is_some() || self.leader_unwaitable {
+            return Ok(false);
         }
-        self.status = self.leader.try_wait()?;
-        Ok(self.status)
+        match self.leader.try_wait() {
+            Ok(None) => Ok(false),
+            Ok(Some(status)) => {
+                self.status = Some(status);
+                if let Some(critical) = self.critical.filter(|_| !self.phase.explains(status)) {
+                    log(
+                        "exit",
+                        json!({"domain": self.domain, "status": status.to_string(), "critical": critical}),
+                    );
+                    return Ok(critical);
+                }
+                Ok(false)
+            }
+            Err(e) => {
+                self.leader_unwaitable = e.raw_os_error() == Some(libc::ECHILD);
+                Err(e)
+            }
+        }
     }
 
     fn probe_or_signal_group(&mut self, signal: libc::c_int) -> io::Result<bool> {
@@ -376,28 +476,24 @@ impl DomainProcess {
             StopSignal::Term => (libc::SIGTERM, StopPhase::TermSent),
             StopSignal::Kill => (libc::SIGKILL, StopPhase::KillSent),
         };
-        if self.probe_or_signal_group(raw)? {
+        if self.probe_or_signal_group(raw)? && self.status.is_none() && !self.leader_unwaitable {
             self.phase = phase;
         }
         Ok(())
     }
 
-    fn fully_reaped(&mut self) -> io::Result<bool> {
-        if self.status.is_none() {
-            return Ok(false);
-        }
-        if !self.group_gone {
-            #[cfg(target_os = "linux")]
+    fn reap_group(&mut self) -> io::Result<()> {
+        #[cfg(target_os = "linux")]
+        if !self.group_gone && (self.status.is_some() || self.leader_unwaitable) {
             self.reap_adopted()?;
-            self.probe_or_signal_group(0)?;
         }
-        Ok(self.group_gone)
+        Ok(())
     }
 
     #[cfg(target_os = "linux")]
     fn reap_adopted(&self) -> io::Result<()> {
         loop {
-            // SAFETY：组长已由 Child 回收；这里只等同 PGID 下被接养的后代，不取其他域的状态。
+            // SAFETY：组长已回收或不具备 wait 资格；这里只等同 PGID 下被接养的后代。
             match unsafe { libc::waitpid(-self.pgid(), std::ptr::null_mut(), libc::WNOHANG) } {
                 0 => return Ok(()),
                 n if n > 0 => continue,
@@ -414,121 +510,253 @@ impl DomainProcess {
     }
 }
 
-struct GroupPoll {
-    failed: bool,
-    all_reaped: bool,
+fn supervise(children: &mut [DomainProcess]) -> Result<bool, String> {
+    let mut failed = false;
+    for child in children {
+        failed |= child
+            .observe_exit()
+            .map_err(|e| format!("{}：等待组长退出失败：{e}", child.domain))?;
+        // X 可能很早退出；及时回收并确认组消失，不在很久以后使用旧 PGID。
+        if child.status.is_some() {
+            child
+                .reap_group()
+                .and_then(|()| child.probe_or_signal_group(0))
+                .map_err(|e| format!("{}：进程组回收失败：{e}", child.domain))?;
+        }
+    }
+    Ok(failed)
 }
 
-/// 监督、停服前和回收时走同一个出口；已登记的状态不重算。
-fn poll_groups(children: &mut [DomainProcess]) -> Result<GroupPoll, String> {
-    let mut result = GroupPoll {
-        failed: false,
-        all_reaped: true,
-    };
-    for child in children {
-        let status = child
-            .poll_leader()
-            .map_err(|e| format!("{}：等待组长退出失败：{e}", child.domain))?;
-        // X 可能很早退出；持续回收并记下组已消失，不在很久以后再用旧 PGID 发信号。
-        result.all_reaped &= child
-            .fully_reaped()
-            .map_err(|e| format!("{}：进程组回收失败：{e}", child.domain))?;
-        if let (Some(status), Some(critical)) = (status, child.critical) {
-            if !child.phase.explains(status) {
-                log(
-                    "exit",
-                    json!({"domain": child.domain, "status": status.to_string(), "critical": critical}),
-                );
-                result.failed |= critical;
+#[derive(Default)]
+struct StopOutcome {
+    failed: bool,
+    errors: BTreeSet<String>,
+}
+
+impl StopOutcome {
+    fn record<T>(&mut self, result: io::Result<T>, domain: &str, action: &str) -> Option<T> {
+        match result {
+            Ok(value) => Some(value),
+            Err(e) => {
+                self.errors.insert(format!("{domain}：{action}：{e}"));
+                None
             }
         }
     }
-    Ok(result)
-}
 
-fn stop_groups(children: &mut [DomainProcess], grace: Duration) -> Result<bool, String> {
-    let signal_all = |children: &mut [DomainProcess], signal| {
-        for child in children {
-            child
-                .signal(signal)
-                .map_err(|e| format!("{}：进程组停服信号失败：{e}", child.domain))?;
+    fn observe(&mut self, child: &mut DomainProcess) -> bool {
+        let result = child.observe_exit();
+        match self.record(result, &child.domain, "等待组长退出失败") {
+            Some(failed) => {
+                self.failed |= failed;
+                true
+            }
+            None => false,
         }
-        Ok::<_, String>(())
-    };
-    // 保留已经可取得的退出状态，但不依赖这次补查与发信号之间没有竞态。
-    let mut failed = poll_groups(children)?.failed;
-    signal_all(children, StopSignal::Term)?;
-    let deadline = Instant::now() + grace;
-    let mut escalated = false;
-    loop {
-        let poll = poll_groups(children)?;
-        failed |= poll.failed;
-        if poll.all_reaped {
-            return Ok(failed);
-        }
-        if !escalated && Instant::now() >= deadline {
-            signal_all(children, StopSignal::Kill)?;
-            escalated = true;
-        }
-        std::thread::sleep(STOP_POLL);
     }
 }
 
-/// 返回 false 表示停服已取消启动。两条管道在等待和停服期间都持续排空。
+fn stop_groups(
+    children: &mut [DomainProcess],
+    grace: Duration,
+    mut extra: impl FnMut(StopSignal) -> io::Result<bool>,
+) -> Result<bool, String> {
+    let mut outcome = StopOutcome::default();
+    let mut deadline = None;
+    let mut phase = StopSignal::Term;
+    let mut signal = Some(phase);
+    loop {
+        let escalated = matches!(phase, StopSignal::Kill);
+        let mut all_reaped = true;
+        for child in children.iter_mut() {
+            // 发送信号前就地核验这个组长，不能用前一个组尚未收到信号时的陈旧状态推进阶段。
+            let wait_ok = outcome.observe(child);
+            if let Some(signal) = signal {
+                let result = child.signal(signal);
+                if outcome
+                    .record(result, &child.domain, "进程组停服信号失败")
+                    .is_none()
+                    && escalated
+                {
+                    child.kill_failed = true;
+                }
+            }
+            // 回收报错仍查组是否存活；已尝试 KILL 的故障组不阻止其他组收尾。
+            let result = child.reap_group();
+            let reap_ok = outcome
+                .record(result, &child.domain, "进程组回收失败")
+                .is_some();
+            let result = child.probe_or_signal_group(0);
+            let alive = outcome.record(result, &child.domain, "核验进程组退出失败");
+            all_reaped &= alive == Some(false)
+                || (escalated && (!wait_ok || !reap_ok || child.kill_failed || alive.is_none()));
+        }
+        all_reaped &= match extra(phase) {
+            Ok(reaped) => reaped,
+            Err(e) => {
+                outcome.errors.insert(format!("init 清理失败：{e}"));
+                matches!(phase, StopSignal::Kill)
+            }
+        };
+        if all_reaped {
+            return if outcome.errors.is_empty() {
+                Ok(outcome.failed)
+            } else {
+                Err(outcome.errors.into_iter().collect::<Vec<_>>().join("；"))
+            };
+        }
+        let deadline = *deadline.get_or_insert_with(|| Instant::now() + grace);
+        if !escalated && Instant::now() >= deadline {
+            phase = StopSignal::Kill;
+            signal = Some(phase);
+        } else {
+            signal = None;
+            std::thread::sleep(STOP_POLL);
+        }
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn stop_adopted_init_children(
+    sid: libc::pid_t,
+    phase: StopSignal,
+    signaled: &mut std::collections::BTreeMap<libc::pid_t, libc::c_int>,
+) -> io::Result<bool> {
+    // launcher 是单线程 subreaper。只处理已接养、仍在该 init SID、但不在原组的直属子进程。
+    // SIGCHLD 默认处理保证未 wait 的 PID 不会在检查后被复用。
+    let children = std::fs::read_to_string("/proc/thread-self/children")?;
+    let signal = match phase {
+        StopSignal::Term => libc::SIGTERM,
+        StopSignal::Kill => libc::SIGKILL,
+    };
+    let mut all_reaped = true;
+    for pid in children
+        .split_ascii_whitespace()
+        .filter_map(|p| p.parse::<libc::pid_t>().ok())
+    {
+        if pid == sid {
+            continue;
+        }
+        // SAFETY：getsid/getpgid 只读取内核元数据，不操作其他子进程的等待状态。
+        if unsafe { libc::getsid(pid) != sid || libc::getpgid(pid) == sid } {
+            continue;
+        }
+        // 即使本轮全部 wait 成功，也补扫一次：已退出的养子可能又留下了同会话子进程。
+        all_reaped = false;
+        // SAFETY：只 wait 已核验的直属养子；WNOHANG 不阻塞。
+        match unsafe { libc::waitpid(pid, std::ptr::null_mut(), libc::WNOHANG) } {
+            n if n > 0 => {
+                signaled.remove(&pid);
+            }
+            0 => {
+                if signaled.get(&pid) != Some(&signal) {
+                    // SAFETY：这个 PID 是尚待回收的同会话直属养子。
+                    if unsafe { libc::kill(pid, signal) } == -1 {
+                        let e = io::Error::last_os_error();
+                        if e.raw_os_error() != Some(libc::ESRCH) {
+                            return Err(e);
+                        }
+                    }
+                    signaled.insert(pid, signal);
+                }
+            }
+            _ => {
+                let e = io::Error::last_os_error();
+                if !matches!(e.raw_os_error(), Some(libc::EINTR | libc::ECHILD)) {
+                    return Err(e);
+                }
+            }
+        }
+    }
+    Ok(all_reaped)
+}
+
+/// init stdout 无消费者；stderr 在 launcher 线程非阻塞限量排空，取消不依赖写端 EOF。
+fn drain_init_output(pipe: &mut PipeReader, bytes: &mut Vec<u8>) -> io::Result<()> {
+    let mut buf = [0_u8; 8192];
+    for _ in 0..16 {
+        match pipe.read(&mut buf) {
+            Ok(0) => return Ok(()),
+            Ok(n) => bytes.extend_from_slice(&buf[..n]),
+            Err(e) if e.kind() == io::ErrorKind::WouldBlock => return Ok(()),
+            Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
+            Err(e) => return Err(e),
+        }
+    }
+    Ok(())
+}
+
+/// 返回 false 表示停服已取消启动。
 fn run_once(mut command: Command, what: &str) -> Result<bool, String> {
     if shutdown_requested() {
         return Ok(false);
     }
-    let mut leader = command
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
+    let read_error = |e| format!("StorageUnavailable：读取 {what} init 输出失败：{e}");
+    let (mut pipe, writer) = io::pipe().map_err(read_error)?;
+    // SAFETY：只设置 launcher 的私有读端；子进程的写端保持阻塞语义。
+    if unsafe { libc::fcntl(pipe.as_raw_fd(), libc::F_SETFL, libc::O_NONBLOCK) } == -1 {
+        return Err(read_error(io::Error::last_os_error()));
+    }
+    command.stdout(Stdio::null()).stderr(writer);
+    let leader = spawn_before_stop(&mut command)
         .map_err(|e| format!("MissingDependency：{what} 启动失败：{e}"))?;
-    let mut stdout = leader.stdout.take().expect("init stdout 已配置管道");
-    let mut stderr = leader.stderr.take().expect("init stderr 已配置管道");
+    drop(command);
+    let Some(leader) = leader else {
+        return Ok(false);
+    };
     let mut child = DomainProcess::new(what.into(), leader, None);
-    std::thread::scope(|scope| {
-        let stdout = scope.spawn(move || io::copy(&mut stdout, &mut io::sink()));
-        let stderr = scope.spawn(move || {
-            let mut bytes = Vec::new();
-            stderr.read_to_end(&mut bytes).map(|_| bytes)
-        });
-        let finished = loop {
-            if shutdown_requested() {
-                break Ok(None);
-            }
-            match child.poll_leader() {
-                Ok(None) => std::thread::sleep(STOP_POLL),
-                result => break result,
-            }
-        };
-        // 正常结束也要收尾；组长退出不保证所有继承管道的后代都退出了。
-        stop_groups(std::slice::from_mut(&mut child), INIT_STOP_GRACE)?;
-        let read_error = |e| format!("StorageUnavailable：读取 {what} init 输出失败：{e}");
-        stdout
-            .join()
-            .expect("init stdout 读取线程")
-            .map_err(read_error)?;
-        let stderr = stderr
-            .join()
-            .expect("init stderr 读取线程")
-            .map_err(read_error)?;
-        let Some(status) = finished.map_err(|e| format!("{what}：等待 init 退出失败：{e}"))?
-        else {
-            return Ok(false);
-        };
-        if !status.success() {
-            return Err(format!(
-                "{}（{what} init 失败，{status}）",
-                String::from_utf8_lossy(&stderr).trim(),
-            ));
-        }
+    let mut bytes = Vec::new();
+    let finished = loop {
         if shutdown_requested() {
-            return Ok(false);
+            break Ok(None);
         }
-        log("init", json!({"domain": what}));
-        Ok(true)
-    })
+        if let Err(e) = drain_init_output(&mut pipe, &mut bytes) {
+            break Err(read_error(e));
+        }
+        if let Err(e) = child.observe_exit() {
+            break Err(format!("{what}：等待 init 退出失败：{e}"));
+        }
+        if child.status.is_some() {
+            break Ok(child.status);
+        }
+        std::thread::sleep(STOP_POLL);
+    };
+    #[cfg(target_os = "linux")]
+    let sid = child.pgid();
+    #[cfg(target_os = "linux")]
+    let mut signaled = std::collections::BTreeMap::new();
+    let mut output_error = None;
+    stop_groups(
+        std::slice::from_mut(&mut child),
+        INIT_STOP_GRACE,
+        |_phase| {
+            if output_error.is_none() {
+                output_error = drain_init_output(&mut pipe, &mut bytes).err();
+            }
+            #[cfg(target_os = "linux")]
+            if shutdown_requested() {
+                return stop_adopted_init_children(sid, _phase, &mut signaled);
+            }
+            Ok(true)
+        },
+    )?;
+    let Some(status) = finished? else {
+        return Ok(false);
+    };
+    if let Some(e) = output_error {
+        return Err(read_error(e));
+    }
+    if !status.success() {
+        return Err(format!(
+            "{}（{what} init 失败，{status}）",
+            String::from_utf8_lossy(&bytes).trim(),
+        ));
+    }
+    if shutdown_requested() {
+        return Ok(false);
+    }
+    log("init", json!({"domain": what}));
+    Ok(true)
 }
 
 fn stopped(failed: bool) -> i32 {
@@ -542,11 +770,7 @@ fn run() -> Result<i32, String> {
         [flag, path] if flag == "--manifest" => PathBuf::from(path),
         _ => return Err("InvalidDomain：usage: production_session --manifest FILE".into()),
     };
-    // SAFETY：只登记写原子标志的 async-signal-safe 处理器。
-    unsafe {
-        libc::signal(libc::SIGTERM, on_stop as *const () as libc::sighandler_t);
-        libc::signal(libc::SIGINT, on_stop as *const () as libc::sighandler_t);
-    }
+    install_signal_policy().map_err(|e| format!("MissingDependency：无法设置会话信号处理：{e}"))?;
     #[cfg(target_os = "linux")]
     adopt_orphans().map_err(|e| format!("MissingDependency：无法接养域进程组后代：{e}"))?;
     let m = load_manifest(&manifest_path)?;
@@ -624,7 +848,7 @@ fn run() -> Result<i32, String> {
 
     let supervised = if spawned.is_ok() {
         loop {
-            match poll_groups(&mut children).map(|poll| poll.failed) {
+            match supervise(&mut children) {
                 Ok(false) if !shutdown_requested() => {
                     std::thread::sleep(Duration::from_millis(100));
                 }
@@ -635,9 +859,12 @@ fn run() -> Result<i32, String> {
         Ok(false)
     };
 
-    let stopped_failed = stop_groups(&mut children, STOP_GRACE)?;
-    spawned?;
-    Ok(stopped(supervised? | stopped_failed))
+    let cleanup = stop_groups(&mut children, STOP_GRACE, |_| Ok(true));
+    match (spawned.and(supervised), cleanup) {
+        (Ok(failed), Ok(stopped_failed)) => Ok(stopped(failed | stopped_failed)),
+        (Err(first), Err(cleanup)) => Err(format!("{first}；{cleanup}")),
+        (Err(error), _) | (_, Err(error)) => Err(error),
+    }
 }
 
 /// 按 S、E、各 Bᵢ、X 顺序拉起；已拉起的子进程即刻登记进 `children`，供调用方统一回收。
@@ -655,13 +882,12 @@ fn spawn_domains(
     let e_db = text(raw, "economic.e.db")?;
     let chongs = raw["economic"]["b"].as_array().cloned().unwrap_or_default();
     let mut spawn = |domain: String, mut c: Command, critical: bool| -> Result<(), String> {
-        if shutdown_requested() {
-            return Ok(());
-        }
         c.stdout(Stdio::null());
-        let child = c
-            .spawn()
-            .map_err(|e| format!("MissingDependency：{domain} 启动失败：{e}"))?;
+        let Some(child) = spawn_before_stop(&mut c)
+            .map_err(|e| format!("MissingDependency：{domain} 启动失败：{e}"))?
+        else {
+            return Ok(());
+        };
         let pid = child.id();
         children.push(DomainProcess::new(domain.clone(), child, Some(critical)));
         log("spawn", json!({"domain": domain, "pid": pid}));
