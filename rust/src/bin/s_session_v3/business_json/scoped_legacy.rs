@@ -196,30 +196,59 @@ impl<'a> ScopedLegacyRecord<'a> {
             PlainJson::try_clone_from(value, Some(work)).map_err(MixedJsonError::Resource)?;
         Ok(Self { owner, work, kind })
     }
-    pub(crate) fn text(&mut self, field: Field, text: &str) -> Result<(), MixedJsonError> {
-        let permit = self
-            .work
-            .reserve_native(text.len())
+    fn insert_inline_value(
+        &mut self,
+        field: Field,
+        value_bytes: usize,
+        value: Value,
+    ) -> Result<(), MixedJsonError> {
+        let key = field.name();
+        let work = self.work;
+        work.check_current().map_err(MixedJsonError::Resource)?;
+        let object = self
+            .owner
+            .value
+            .as_object()
+            .ok_or_else(|| MixedJsonError::Business("旧域投影必须是对象".into()))?;
+        if object.contains_key(key) {
+            return Err(MixedJsonError::Business("已有字段须用受控替换".into()));
+        }
+        let total = super::json_layout::tree_slots::<String, Value>(1)
+            .checked_add(key.len())
+            .and_then(|n| n.checked_add(value_bytes))
+            .ok_or_else(|| {
+                MixedJsonError::Resource(
+                    work.reject(sc::capture_allocation::scratch::ScratchFailure::Budget),
+                )
+            })?;
+        let permit = work
+            .reserve_native(total)
             .map_err(MixedJsonError::Resource)?;
-        self.insert(
-            field,
-            PlainJson::from_reserved(Value::String(text.to_owned()), Some(permit)),
-        )
+        self.owner
+            .child_permits
+            .try_reserve_native(work, 1)
+            .map_err(MixedJsonError::Resource)?;
+        self.owner
+            .value
+            .as_object_mut()
+            .unwrap()
+            .insert(key.to_owned(), value);
+        self.owner
+            .child_permits
+            .try_push(permit)
+            .expect("已预留字段许可");
+        Ok(())
+    }
+    pub(crate) fn text(&mut self, field: Field, text: &str) -> Result<(), MixedJsonError> {
+        self.insert_inline_value(field, text.len(), Value::String(text.to_owned()))
     }
     pub(crate) fn integer(&mut self, field: Field, n: i64) -> Result<(), MixedJsonError> {
-        let text = NativeValue::try_format(format_args!("{n}"), Some(self.work))
-            .map_err(MixedJsonError::Resource)?;
-        self.text(field, text.as_ref())
+        let mut buf = [0u8; 20];
+        let s = fmt_i64_stack(n, &mut buf);
+        self.text(field, s)
     }
     pub(crate) fn numeric(&mut self, field: Field, n: i64) -> Result<(), MixedJsonError> {
-        let permit = self
-            .work
-            .reserve_native(0)
-            .map_err(MixedJsonError::Resource)?;
-        self.insert(
-            field,
-            PlainJson::from_reserved(Value::from(n), Some(permit)),
-        )
+        self.insert_inline_value(field, 0, Value::from(n))
     }
     pub(crate) fn borrowed(&mut self, field: Field, value: &Value) -> Result<(), MixedJsonError> {
         let child =
@@ -227,11 +256,7 @@ impl<'a> ScopedLegacyRecord<'a> {
         self.insert(field, child)
     }
     pub(crate) fn null(&mut self, field: Field) -> Result<(), MixedJsonError> {
-        let permit = self
-            .work
-            .reserve_native(0)
-            .map_err(MixedJsonError::Resource)?;
-        self.insert(field, PlainJson::from_reserved(Value::Null, Some(permit)))
+        self.insert_inline_value(field, 0, Value::Null)
     }
     pub(crate) fn insert(&mut self, field: Field, child: PlainJson) -> Result<(), MixedJsonError> {
         self.insert_legacy_key(field.name(), child)
@@ -315,14 +340,9 @@ impl<'a> ScopedLegacyRecord<'a> {
         self.replace_owned(field, child)
     }
     pub(crate) fn replace_integer(&mut self, field: Field, n: i64) -> Result<(), MixedJsonError> {
-        let text = NativeValue::try_format(format_args!("{n}"), Some(self.work))
-            .map_err(MixedJsonError::Resource)?;
-        let permit = self
-            .work
-            .reserve_native(text.len())
-            .map_err(MixedJsonError::Resource)?;
-        let child = PlainJson::from_reserved(Value::String(text.as_ref().to_owned()), Some(permit));
-        self.replace_owned(field, child)
+        let mut buf = [0u8; 20];
+        let s = fmt_i64_stack(n, &mut buf);
+        self.replace_text(field, s)
     }
     pub(crate) fn replace_owned(
         &mut self,
@@ -951,21 +971,49 @@ pub(crate) fn legacy_payload(value: &Value, work: &WorkScope) -> Result<PlainJso
         _ => PlainJson::try_clone_from(value, Some(work)).map_err(MixedJsonError::Resource),
     }
 }
+fn fmt_i64_stack(n: i64, buf: &mut [u8; 20]) -> &str {
+    let mut u = n.unsigned_abs();
+    let mut i = 20;
+    loop {
+        i -= 1;
+        buf[i] = b'0' + (u % 10) as u8;
+        u /= 10;
+        if u == 0 {
+            break;
+        }
+    }
+    if n < 0 {
+        i -= 1;
+        buf[i] = b'-';
+    }
+    std::str::from_utf8(&buf[i..]).expect("ascii digits")
+}
+fn fmt_u64_stack(mut u: u64, buf: &mut [u8; 20]) -> &str {
+    let mut i = 20;
+    loop {
+        i -= 1;
+        buf[i] = b'0' + (u % 10) as u8;
+        u /= 10;
+        if u == 0 {
+            break;
+        }
+    }
+    std::str::from_utf8(&buf[i..]).expect("ascii digits")
+}
 fn wire_integers(value: &Value, work: &WorkScope) -> Result<PlainJson, MixedJsonError> {
     if let Value::Number(n) = value {
-        let text = if let Some(i) = n.as_i64() {
-            Some(NativeValue::try_format(format_args!("{i}"), Some(work)))
+        let mut buf = [0u8; 20];
+        let s = if let Some(i) = n.as_i64() {
+            Some(fmt_i64_stack(i, &mut buf))
         } else {
-            n.as_u64()
-                .map(|u| NativeValue::try_format(format_args!("{u}"), Some(work)))
+            n.as_u64().map(|u| fmt_u64_stack(u, &mut buf))
         };
-        if let Some(text) = text {
-            let text = text.map_err(MixedJsonError::Resource)?;
+        if let Some(s) = s {
             let permit = work
-                .reserve_native(text.as_ref().len())
+                .reserve_native(s.len())
                 .map_err(MixedJsonError::Resource)?;
             return Ok(PlainJson::from_reserved(
-                Value::String(text.as_ref().clone()),
+                Value::String(s.to_owned()),
                 Some(permit),
             ));
         }
@@ -1206,6 +1254,7 @@ pub(crate) fn project_raw_event_wire(
         out.borrowed(field, &value[key])?;
     }
     out.integer(Field::Seq, integer_value(&value["seq"])?)?;
+    let is_raw_ohlc = value["schema_revision"] == crate::tb02a::RAW_SCHEMA;
     for (key, field) in [
         ("source_namespace", Field::SourceNamespace),
         ("source_epoch", Field::SourceEpoch),
@@ -1218,14 +1267,16 @@ pub(crate) fn project_raw_event_wire(
         ("volume", Field::Volume),
         ("source_coord", Field::SourceCoord),
     ] {
+        if is_raw_ohlc && matches!(field, Field::Price) {
+            continue;
+        }
         out.borrowed(field, &value[key])?;
     }
     match value["supersedes_revision"].as_i64() {
         Some(n) => out.integer(Field::SupersedesRevision, n)?,
         None => out.null(Field::SupersedesRevision)?,
     }
-    if value["schema_revision"] == crate::tb02a::RAW_SCHEMA {
-        out.remove(Field::Price)?;
+    if is_raw_ohlc {
         for (key, field) in [
             ("schema_revision", Field::SchemaRevision),
             ("open", Field::Open),
