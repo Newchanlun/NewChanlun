@@ -15,24 +15,37 @@ pub struct TransportRef<'a> {
     extent: Option<u64>,
 }
 impl<'a> TransportRef<'a> {
+    #[inline]
     pub fn from_json_view(node: JsonView<'a>) -> Result<Self, CodecError> {
         Self::from_json_view_typed(node).map_err(|e| e.into_codec())
     }
+    #[inline]
     pub fn from_json_view_typed(node: JsonView<'a>) -> Result<Self, RefDiagnostic<'a>> {
         let map = node.as_object().ok_or(RefDiagnostic::Object)?;
-        for key in map.keys() {
-            if !matches!(key, "format" | "root" | "kind" | "extent") {
-                return Err(RefDiagnostic::Extra(key));
+        let (mut format_v, mut root_v, mut kind_v, mut extent_v) = (None, None, None, None);
+        for (key, value) in map.iter() {
+            match key {
+                "format" => format_v = Some(value),
+                "root" => root_v = Some(value),
+                "kind" => kind_v = Some(value),
+                "extent" => extent_v = Some(value),
+                _ => return Err(RefDiagnostic::Extra(key)),
             }
         }
-        let field = |name: &'static str| map.get(name).ok_or(RefDiagnostic::Missing(name));
-        let format = field("format")?
+        let format = format_v
+            .ok_or(RefDiagnostic::Missing("format"))?
             .as_str()
             .ok_or(RefDiagnostic::Text("format"))?;
-        let root = field("root")?.as_str().ok_or(RefDiagnostic::Text("root"))?;
-        let kind_name = field("kind")?.as_str().ok_or(RefDiagnostic::Text("kind"))?;
+        let root = root_v
+            .ok_or(RefDiagnostic::Missing("root"))?
+            .as_str()
+            .ok_or(RefDiagnostic::Text("root"))?;
+        let kind_name = kind_v
+            .ok_or(RefDiagnostic::Missing("kind"))?
+            .as_str()
+            .ok_or(RefDiagnostic::Text("kind"))?;
         let kind = Kind::from_name(kind_name).ok_or(RefDiagnostic::Kind(kind_name))?;
-        let extent_node = field("extent")?;
+        let extent_node = extent_v.ok_or(RefDiagnostic::Missing("extent"))?;
         let extent = if extent_node.is_null() {
             None
         } else if let Some(text) = extent_node.as_str() {
@@ -50,21 +63,27 @@ impl<'a> TransportRef<'a> {
             extent,
         })
     }
+    #[inline]
     pub fn format(self) -> &'a str {
         self.format
     }
+    #[inline]
     pub fn root(self) -> &'a str {
         self.root
     }
+    #[inline]
     pub fn kind(self) -> Kind {
         self.kind
     }
+    #[inline]
     pub fn extent(self) -> Option<u64> {
         self.extent
     }
+    #[inline]
     pub fn digest(self) -> Result<NodeDigest, CodecError> {
         super::transport_digest(self.format, self.root)
     }
+    #[inline]
     pub fn try_owned_ref(self) -> Result<RefOwner, CodecError> {
         Ok(RefOwner::new(self.kind, self.digest()?, self.extent))
     }
@@ -170,6 +189,7 @@ pub struct RefOwner {
 impl RefOwner {
     // Representation only: some callers have checked actual nodes; TransportRef callers
     // have checked only the declaration. No trust is added and no source is read here.
+    #[inline]
     pub(super) fn new(kind: Kind, digest: NodeDigest, extent: Option<u64>) -> Self {
         let mut root = [0u8; 68];
         root[..4].copy_from_slice(ROOT_PREFIX.as_bytes());
@@ -185,22 +205,28 @@ impl RefOwner {
             extent,
         }
     }
+    #[inline]
     pub fn view(&self) -> RefView<'_> {
         RefView::Owned(self)
     }
+    #[inline]
     pub fn format(&self) -> &'static str {
         CONTENT_FORMAT
     }
+    #[inline]
     pub fn root(&self) -> &str {
         // SAFETY: private constructor writes only the ASCII prefix and lowercase hex.
         unsafe { std::str::from_utf8_unchecked(&self.root) }
     }
+    #[inline]
     pub fn kind(&self) -> Kind {
         self.kind
     }
+    #[inline]
     pub fn extent(&self) -> Option<u64> {
         self.extent
     }
+    #[inline]
     pub fn digest(&self) -> NodeDigest {
         self.digest
     }
@@ -211,30 +237,35 @@ pub enum RefView<'a> {
     Owned(&'a RefOwner),
 }
 impl RefView<'_> {
+    #[inline]
     pub fn format(&self) -> &str {
         match self {
             Self::Normal(r) => &r.format,
             Self::Owned(r) => r.format(),
         }
     }
+    #[inline]
     pub fn root(&self) -> &str {
         match self {
             Self::Normal(r) => &r.root,
             Self::Owned(r) => r.root(),
         }
     }
+    #[inline]
     pub fn kind(&self) -> Kind {
         match self {
             Self::Normal(r) => r.kind,
             Self::Owned(r) => r.kind(),
         }
     }
+    #[inline]
     pub fn extent(&self) -> Option<u64> {
         match self {
             Self::Normal(r) => r.extent,
             Self::Owned(r) => r.extent(),
         }
     }
+    #[inline]
     pub fn digest(&self) -> Result<NodeDigest, CodecError> {
         match self {
             Self::Normal(r) => r.digest(),
@@ -333,6 +364,7 @@ impl<'names> OwnedRefFields<'names> {
         }
         self.entries.try_push((key, reference))
     }
+    #[inline]
     pub fn get(&self, key: &str) -> Option<&RefOwner> {
         self.entries
             .binary_search_by(|(name, _)| name.cmp(&key))
