@@ -21,7 +21,7 @@ sys.path.insert(0, str(PROGRAMS))
 adapter = importlib.import_module("adapter")
 from common import ADAPTER, CROSSWALK, LEDGERS, REGISTRY, Invalid, json_bytes, sha, strict_json  # noqa: E402
 from registry import OPENING_CENSUS, canonical_bases, load  # noqa: E402
-from run_checks import execute, run_group, run_identity, validate_record  # noqa: E402
+from run_checks import execute, run_group, run_identity  # noqa: E402
 from workflow import (_manifest, authority_comment, bundle_name, plan, producer_anchors,
                       producer_job_name, seal_matrix, seal_scaffold)  # noqa: E402
 
@@ -315,9 +315,8 @@ def test_scaffold_plan_normalized_execution_and_seal(repo, evidence):
 
 
 def test_nonempty_group_seal_binds_every_record_and_exact_attempt(repo):
-    source = "trial/record"
-    bind(repo, RECORD_CASE, runner="command", source=source, selector=source,
-         key_aware=True, record="tb.simulation.TB-01")
+    check = register_r03_record(repo, R03_CASES[0])
+    source = check["source"]["path"]
     loaded = load(repo)
     meta = plan(loaded, "simulation")
     assert json.loads(meta["groups"]) == {"include": [{"group": "g-1"}]}
@@ -354,15 +353,18 @@ def r03_record_key(case):
     return {"slice_id": tb, "kind": kind, "id": key_id, "basis_path": path, "basis_pointer": ptr}
 
 
-def register_r03_record(repo, case, *, text=RECORD_CASE, group="g-1", evidence="simulation", profile=None, also=()):
-    source = f"trial/{group}"
+def register_r03_record(repo, case, *, text=RECORD_CASE, group="g-1", evidence="simulation", profile=None,
+                        also=(), produces_record=True):
+    source = f"trial/{group}" if produces_record else f"trial/{group}-witness"
     check = bind(repo, text, runner="command", source=source, selector=source, group=group, profile=profile,
                  key_aware=True, record=f"tb.{evidence}.{case[1]}")
     reg = read(repo, REGISTRY)
     check["evidence_class"] = evidence
+    if not produces_record:
+        check["record"] = None
     reg["checks"][-1] = check
     reg["bindings"].extend({
-        "binding_id": f"{group}-{i}", "slice_id": tb, "keys": [{"kind": kind, "id": key_id}],
+        "binding_id": f"{check['check_id']}-{i}", "slice_id": tb, "keys": [{"kind": kind, "id": key_id}],
         "basis": {"path": path, "pointer": ptr, "sha256": sha((repo / path).read_bytes())},
         "domains": [{"evidence_class": evidence, "profile_id": profile, "result": "VERIFIED",
                      "deferred_gate": None, "checks": [check["check_id"]]}],
@@ -416,9 +418,7 @@ def test_real_r03_basis_archives_one_original(repo, path, tb, kind, key_id, ptr)
     item, = manifest["records"]
     assert {p.name for p in bundle.iterdir()} == {"execution.json", item["path"]}
     original = read(bundle, item["path"])
-    allowed = adapter.record_r03_bindings(loaded[0], check["record"], check["profile_id"])
-    assert validate_record(loaded[1], original, check, identity, allowed_r03=allowed)["payload"]["keys"] == [
-        r03_record_key(case)]
+    assert original["payload"]["keys"] == [r03_record_key(case)]
     execution_sha = sha((bundle / "execution.json").read_bytes())
     job = producer_job(loaded, "simulation", group, identity, execution_sha)
     anchors = producer_anchors(loaded, "simulation", identity, [{"jobs": [job], "total_count": 1}])
@@ -449,33 +449,79 @@ def test_r03_rejects_bad_basis_in_group_and_final_seal(repo, fault):
     # 见证仍是正确登记键；原件写一个正确键和一个坏键。
     text = RECORD_CASE.replace("\ndoc =", f"\npayload['keys'] = [*keys, {bad!r}]\ndoc =")
     check = register_r03_record(repo, R03_CASES[0], text=text, profile=profile)
+    assert_r03_rejected(repo, check, {"keys": [good, bad]},
+                        "RECORD_PUBLIC_SCHEMA" if fault == "linebreak" else "BASIS_MISMATCH")
+
+
+def assert_r03_rejected(repo, check, payload_change, diagnostic, *, peer=None):
     head = commit(repo, "register producer and R03 fixtures")
     identity = run_identity(head, 104, 2)
     loaded = load(repo)
+    group = check["group"]
+    if peer is not None and peer["group"] != group:
+        peer_bundle = repo / "peer-bundle"
+        assert run_group(repo, loaded, "simulation", peer["group"], identity, peer_bundle, head=head)
+        peer_execution, = read(peer_bundle, "execution.json")["checks"]
+        assert (peer_execution["check_id"], peer_execution["executed"], peer_execution["status"]) == (
+            peer["check_id"], 1, "PASS")
     bundle = repo / "bundle"
-    accepted = run_group(repo, loaded, "simulation", check["group"], identity, bundle, head=head)
+    accepted = run_group(repo, loaded, "simulation", group, identity, bundle, head=head)
     manifest = read(bundle, "execution.json")
-    # 测末级 seal 本身：用相符的原件摘要、清单摘要和成功执行元数据直喂篡改原件。
+    execution = next(row for row in manifest["checks"] if row["check_id"] == check["check_id"])
+    if peer is not None and peer["group"] == group:
+        peer_execution = next(row for row in manifest["checks"] if row["check_id"] == peer["check_id"])
+        assert (peer_execution["executed"], peer_execution["status"]) == (1, "PASS")
+    # 直喂末级 seal：原件与清单摘要自洽，登记检查有成功执行证据，只有 payload 有错。
+    source = check["source"]["path"]
+    payload = {"schema_version": "at18-tb-entity/1", "tb_id": "TB-01", "evidence_class": "simulation",
+               "profile_id": check["profile_id"], "keys": [r03_record_key(R03_CASES[0])],
+               "tests": [{"check_id": check["check_id"], "name": source, "source_path": source}],
+               "conditions": {}, "output": {}} | payload_change
     raw = {"schema_version": "at18-run-record/1", "record": check["record"], **identity,
-           "check_id": check["check_id"], "profile_id": profile,
-           "payload": {"schema_version": "at18-tb-entity/1", "tb_id": "TB-01", "evidence_class": "simulation",
-                       "profile_id": profile, "tests": [], "keys": [good, bad], "conditions": {}, "output": {}}}
+           "check_id": check["check_id"], "profile_id": check["profile_id"], "payload": payload}
     record_sha = sha(json_bytes(raw))
     forged = repo / "forged"
     filename = f"record-{record_sha}.json"
     write(forged, filename, raw)
-    execution, = manifest["checks"]
-    forged_manifest = manifest | {"checks": [execution | {"status": "PASS", "diagnostic": None}], "records": [{
-        "path": filename, "record": check["record"], "sha256": record_sha,
-        "check_id": check["check_id"], "profile_id": profile,
-    }]}
+    forged_manifest = manifest | {
+        "checks": [row | {"status": "PASS", "diagnostic": None} for row in manifest["checks"]],
+        "records": [{"path": filename, "record": check["record"], "sha256": record_sha,
+                     "check_id": check["check_id"], "profile_id": check["profile_id"]}],
+    }
     write(forged, "execution.json", forged_manifest)
     decision = final_seal(repo, forged, check, identity, record_sha, sha(json_bytes(forged_manifest)))
-    assert not accepted and decision.returncode == 1, (manifest, decision.stderr)
-    diagnostic = "RECORD_PUBLIC_SCHEMA" if fault == "linebreak" else "BASIS_MISMATCH"
+    assert (accepted, len(manifest["records"]), decision.returncode) == (False, 0, 1), (manifest, decision.stderr)
     assert execution["executed"] == 1 and execution["exit_code"] == 0
     assert execution["diagnostic"] == diagnostic and diagnostic in decision.stderr
-    assert manifest["records"] == [] and {p.name for p in bundle.iterdir()} == {"execution.json"}
+    assert {p.name for p in bundle.iterdir()} == {"execution.json"}
+
+
+@pytest.mark.parametrize(("fault", "diagnostic"), [
+    ("other-group-check", "BASIS_MISMATCH"),
+    ("same-group-check", "BASIS_MISMATCH"),
+    ("empty-keys", "RECORD_PUBLIC_SCHEMA"),
+    ("duplicate-key", "RECORD_PUBLIC_SCHEMA"),
+    ("test-check-id", "RECORD_UNSEALED"),
+    ("test-name", "RECORD_UNSEALED"),
+    ("test-source-path", "RECORD_UNSEALED"),
+])
+def test_r03_rejects_bad_partition_in_group_and_final_seal(repo, fault, diagnostic):
+    own_key = r03_record_key(R03_CASES[0])
+    if fault.startswith("test-"):
+        test = {"check_id": "check-0", "name": "trial/g-1", "source_path": "trial/g-1"}
+        test.update({"test-check-id": {"check_id": "check-1"}, "test-name": {"name": "not-executed"},
+                     "test-source-path": {"source_path": "trial/other"}}[fault])
+        payload_change = {"tests": [test]}
+    else:
+        keys = {"empty-keys": [], "duplicate-key": [own_key, own_key]}.get(fault, [r03_record_key(R03_CASES[1])])
+        payload_change = {"keys": keys}
+    text = RECORD_CASE.replace("\ndoc =", f"\npayload.update({payload_change!r})\ndoc =")
+    producer = register_r03_record(repo, R03_CASES[0], text=text)
+    peer = None
+    if fault in ("same-group-check", "other-group-check", "test-check-id"):
+        group = "other" if fault == "other-group-check" else producer["group"]
+        peer = register_r03_record(repo, R03_CASES[1], text=COMMAND_CASE, group=group, produces_record=False)
+    assert_r03_rejected(repo, producer, payload_change, diagnostic, peer=peer)
 
 
 @pytest.mark.parametrize(("field", "value", "error"), [
@@ -1116,9 +1162,7 @@ def test_server_anchor_is_bound_to_exact_producer(repo, fault):
 
 
 def test_seal_rejects_a_fully_self_consistent_substitution(repo):
-    source = "trial/record"
-    bind(repo, RECORD_CASE, runner="command", source=source, selector=source,
-         key_aware=True, record="tb.simulation.TB-01")
+    register_r03_record(repo, R03_CASES[0])
     loaded = load(repo)
     bundle = repo / "artifact" / bundle_name("simulation", IDENTITY["run_attempt"], "g-1")
     assert run_group(repo, loaded, "simulation", "g-1", IDENTITY, bundle)

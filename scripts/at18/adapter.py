@@ -6,7 +6,7 @@ from datetime import datetime, timezone
 from urllib.parse import urlsplit
 
 from common import (ADAPTER, COMMIT, NAME, RECORD, REGISTRY, SHA, SPECIAL, Invalid, git, git_blob, json_bytes, key_token,
-                    path_name, pointer, require, sha, strict_json, tree_entry, validate_schema)
+                    path_name, pointer, require, sha, strict_json, tree_entry, unique, validate_schema)
 
 def timestamp(value):
     # 比较以原始精度进行；不把纳秒或更细时间截到 Python datetime 的微秒。
@@ -141,27 +141,16 @@ def _public_fields(contract, fields, obj, *, version_pointer=None, item_source=N
     walk(tree, obj)
 
 
-def record_r03_bindings(registry, record, profile_id):
-    """从已通过静态门的 F 登记册选择该记录 TB 与运行域的出处。"""
-    if not (tb := RECORD.fullmatch(record or "")):
-        return set()
-    return {
-        (binding["slice_id"], key["kind"], key["id"], binding["basis"]["path"], binding["basis"]["pointer"])
-        for binding in registry["bindings"] if binding["slice_id"] == tb[2]
-        if any((d["evidence_class"], d["profile_id"]) == (tb[1], profile_id) and d["result"] != "BOUNDED_DEFERRED"
-               for d in binding["domains"])
-        for key in binding["keys"]
-    }
-
-
 def public_payload(contract, record, obj, *, allowed_r03=()):
     payload = decode_payload(contract, record, obj)
     rule = contract["run_records"][record if record in SPECIAL else "tb"]
     _public_fields(contract, rule["fields"], obj, version_pointer=rule["version_pointer"])
     if tb := RECORD.fullmatch(record):
-        for key in payload["keys"]:
-            identity = (key["slice_id"], key["kind"], key["id"], key["basis_path"], key["basis_pointer"])
-            require(key["slice_id"] == tb[2] and identity in allowed_r03, "BASIS_MISMATCH", "TB record key provenance")
+        identities = unique(((key["slice_id"], key["kind"], key["id"], key["basis_path"], key["basis_pointer"])
+                             for key in payload["keys"]), "RECORD_PUBLIC_SCHEMA", "duplicate TB record key")
+        require(bool(identities), "RECORD_PUBLIC_SCHEMA", "empty TB record keys")
+        require(all(key[0] == tb[2] and key in allowed_r03 for key in identities),
+                "BASIS_MISMATCH", "TB record key provenance")
     return payload
 
 def decode_legacy(root, contract, identity, issues, comments):

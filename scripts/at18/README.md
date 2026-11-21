@@ -25,7 +25,7 @@ PR 上的同一入口额外计算真正的 merge-base，禁止原有键、basis 
 
 登记了 `record` 的检查在 `AT18_RECORD_DIR` 写业务原件。外层身份读 `AT18_RECORD`、`AT18_PROFILE_ID`（空表示 null）、`AT18_CHECK_ID`、`AT18_F`、`AT18_RUN_ID`、`AT18_RUN_ATTEMPT`；payload 的版本、来源字段及引用角色见 F 上的适配器合同。上传前递归拒绝未知字段、诊断上下文和自由文本；TB 的 `conditions` 只收正整数 `processes`，`output` 只收数值数组 `samples`（均可省略其中字段）。后续 TB 如需新增业务度量，随生产者同审新增固定字段及类型。experiment 失败时只上传当前运行新建的封闭诊断 JSON，不上传原件、执行清单或进程日志。
 
-TB 原件的每条 `keys` 须逐值匹配 F 登记册中本 TB、本证据类和本 profile 的运行域绑定，包括 `basis_path` 和 `basis_pointer`；指针不能含控制字符。生产组归档前与末级封印各核一遍。单个分件可以只带部分登记键，整套覆盖仍由下游验收。
+TB 业务原件的 `keys` 必须非空且五元组不重复。每条键须逐值匹配 F 登记册中本 TB、本证据类、本 profile 下绑定到**该原件的生产检查**的键，包括 `basis_path` 和 `basis_pointer`；指针不能含控制字符。`payload.tests` 声明的检查、测试名称和源码路径须对应本组本次实际通过的该检查。生产组归档前与末级封印共用此校验。单个分件可以只带该检查的部分登记键，整套覆盖仍由下游验收。
 
 ## 调用与消费
 

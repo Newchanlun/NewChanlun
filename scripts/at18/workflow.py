@@ -8,7 +8,7 @@ import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
-from adapter import experiment_authority, profile_token, record_r03_bindings, require_query_only, timestamp
+from adapter import experiment_authority, profile_token, require_query_only, timestamp
 from check_selector import selector_matches
 from common import Invalid, SHA, git, json_bytes, read_regular, require, sha, strict_json, unique
 from registry import load
@@ -169,7 +169,7 @@ def fetch_producer_jobs(identity):
 
 
 def _manifest(loaded, evidence, group, identity, bundle, expected_sha):
-    reg, contract, digest, _, _ = loaded
+    reg, contract, digest, keys, _ = loaded
     raw_manifest = read_regular(bundle, "execution.json")
     require(isinstance(expected_sha, str) and SHA.fullmatch(expected_sha)
             and sha(raw_manifest) == expected_sha, "RECORD_UNSEALED", "producer manifest sha256")
@@ -183,6 +183,7 @@ def _manifest(loaded, evidence, group, identity, bundle, expected_sha):
     expected = {c["check_id"]: c for c in reg["checks"] if (c["evidence_class"], c["group"]) == (evidence, group)}
     require(expected.keys() == unique((r["check_id"] for r in manifest["checks"]), "RECORD_UNSEALED", "checks"),
             "RECORD_UNSEALED", "group checks")
+    passed_tests = {}
     for result in manifest["checks"]:
         check = expected[result["check_id"]]
         require(result.keys() == EXECUTION_FIELDS and result["status"] == "PASS" and result["diagnostic"] is None
@@ -196,6 +197,7 @@ def _manifest(loaded, evidence, group, identity, bundle, expected_sha):
         require(all(selector_matches(check, name) for name in names)
                 and all(row["status"] == "passed" for row in result["tests"]),
                 "RECORD_UNSEALED", "execution identities")
+        passed_tests[result["check_id"]] = names
     paths, producer_ids, seals = set(), set(), []
     for row in manifest["records"]:
         require(row.keys() == {"path", "record", "sha256", "check_id", "profile_id"}
@@ -207,8 +209,9 @@ def _manifest(loaded, evidence, group, identity, bundle, expected_sha):
                 "RECORD_UNSEALED", "inventory owner")
         raw = read_regular(bundle, row["path"])
         require(sha(raw) == row["sha256"], "RECORD_UNSEALED", "record sha256")
-        allowed_r03 = record_r03_bindings(reg, check["record"], check["profile_id"])
-        validate_record(contract, strict_json(raw, "record"), check, identity, allowed_r03=allowed_r03)
+        cid = check["check_id"]
+        validate_record(contract, strict_json(raw, "record"), check, identity,
+                        allowed_r03=keys.get(cid, ()), executed_names=passed_tests[cid])
         paths.add(row["path"])
         producer_ids.add(row["check_id"])
         seals.append(dict(group=group, record=row["record"], profile=profile_token(row["profile_id"]),

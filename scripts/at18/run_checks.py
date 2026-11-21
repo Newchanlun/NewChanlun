@@ -7,7 +7,7 @@ import subprocess
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
-from adapter import decode_fields, public_payload, record_r03_bindings
+from adapter import decode_fields, public_payload
 from check_selector import annotation, command, selector_matches
 from common import (COMMIT, Invalid, RECORD, SPECIAL, git_blob, json_bytes, path_name, read_regular, require,
                     sha, strict_json, unique)
@@ -74,7 +74,8 @@ def witness(work, expected):
             "CHECK_WITNESS", "identities")
 
 
-def validate_record(contract, document, check, identity, *, allowed_r03):
+def validate_record(contract, document, check, identity, *, allowed_r03, executed_names):
+    """核对同一记录生产者的登记键与本次通过的测试。"""
     require(document.keys() == set(RECORD_FIELDS), "RECORD_UNSEALED", "run-record fields")
     fields = decode_fields(contract, contract["run_record_envelope"], document)
     require(check["record"] is not None and all(fields[field] == value for field, value in {
@@ -85,6 +86,9 @@ def validate_record(contract, document, check, identity, *, allowed_r03):
     if (tb := RECORD.fullmatch(check["record"])):
         require((payload["evidence_class"], payload["tb_id"], payload["profile_id"]) ==
                 (tb[1], tb[2], check["profile_id"]), "RECORD_UNSEALED", "TB payload identity")
+        require(all(test["check_id"] == check["check_id"] and test["name"] in executed_names
+                    and test["source_path"] == check["source"]["path"] for test in payload["tests"]),
+                "RECORD_UNSEALED", "TB payload test identity")
     elif check["record"] in SPECIAL:
         binding = check["record"] == "permission.experiment"
         profile_id = payload["binding_profile_id" if binding else "profile_id"]
@@ -94,7 +98,7 @@ def validate_record(contract, document, check, identity, *, allowed_r03):
     return fields
 
 
-def _records(contract, work, check, identity, allowed_r03):
+def _records(contract, work, check, identity, allowed_r03, executed_names):
     directory = work / "records"
     require(not directory.is_symlink() and directory.is_dir(), "RECORD_UNSEALED", "records")
     files = sorted(directory.iterdir())
@@ -104,14 +108,14 @@ def _records(contract, work, check, identity, allowed_r03):
         require(path.suffix == ".json", "RECORD_UNSEALED", "record suffix")
         raw = read_regular(work, f"records/{path.name}")
         doc = strict_json(raw, "run record")
-        validate_record(contract, doc, check, identity, allowed_r03=allowed_r03)
+        validate_record(contract, doc, check, identity, allowed_r03=allowed_r03, executed_names=executed_names)
         digest = sha(raw)
         require(digest not in records, "RECORD_UNSEALED", "duplicate record bytes")
         records[digest] = raw
     return records
 
 
-def execute(root, check, contract, identity, keys, line, *, allowed_r03=(), head=None):
+def execute(root, check, contract, identity, keys, line, *, head=None):
     argv = command(check, root)
     metadata = {"check_id": check["check_id"], "argv": argv, "expected": check["expected_count"],
                 "executed": None, "ignored": None, "skipped": None, "exit_code": None, "tests": [],
@@ -181,13 +185,13 @@ def execute(root, check, contract, identity, keys, line, *, allowed_r03=(), head
                             skipped=sum(row["status"] == "skipped" for row in rows),
                             ignored=sum(row["status"] == "ignored" for row in rows),
                             tests=sorted(rows, key=lambda row: row["name"].encode()))
-            require(len(set(names)) == len(names), "CHECK_EXECUTION", "duplicate tests")
+            executed_names = unique(names, "CHECK_EXECUTION", "duplicate tests")
             require(result.returncode == 0 and metadata["executed"] == check["expected_count"]
                     and metadata["ignored"] == metadata["skipped"] == 0
                     and all(row["status"] == "passed" for row in rows), "CHECK_EXECUTION", "exit/counts")
             if check["key_aware"]:
                 witness(work, expected_keys)
-            records = _records(contract, work, check, identity, allowed_r03)
+            records = _records(contract, work, check, identity, keys, executed_names)
             metadata["status"] = "PASS"
             return metadata, records
         except (ValueError, TypeError, KeyError, OSError, SyntaxError) as error:
@@ -210,9 +214,7 @@ def run_group(root, loaded, evidence, group, identity, out, *, before_check=None
         if before_check is not None:
             before_check()
         cid = check["check_id"]
-        allowed_r03 = record_r03_bindings(reg, check["record"], check["profile_id"])
-        actual, records = execute(root, check, contract, identity, keys.get(cid, set()), lines[cid],
-                                  allowed_r03=allowed_r03, head=head)
+        actual, records = execute(root, check, contract, identity, keys.get(cid, ()), lines[cid], head=head)
         results.append(actual)
         for content_sha, raw in sorted(records.items()):
             name = "record-" + content_sha + ".json"
