@@ -25,6 +25,15 @@ pub(crate) const SCHEMA: &str = SCHEMA_V1;
 /// manifest 顶层的版本选择子：缺省 `/1`（旧 manifest 逐字仍可读），显式只认两个已知值。
 /// 外层 `economic-manifest/1` 不因此改变。
 const REVISION_FIELD: &str = "protocol_revision";
+/// ADR 0056:52 simulation 证据类的时钟 kind；E 只在 `tb03b-finance/5` 下认（#1407 C2）。
+pub(super) const LOGICAL_BAR: &str = "logical-bar/1";
+/// 财务 TestOnly 输入域可配的组件时钟：TestOnly，或 `/5` 下的 logical-bar/1。二者都不是 System，
+/// 所以 TestOnly 财务输入照旧不进生产时钟。
+pub(super) fn component_clock(manifest: &Value) -> bool {
+    manifest["clock"]["kind"] == "TestOnly"
+        || (manifest["clock"]["kind"] == LOGICAL_BAR
+            && super::finance::exact_release_selected(manifest))
+}
 /// `economic-session/1`、`/2` 的封闭已知 op 集合（两个域版本同一份，§5.8 逐字冻结）。
 /// 并列子合同的 op（`sr-expansion/1`、`domain-event-withdrawal/1`）只在该子合同被选择时另行算已知。
 pub(crate) const BASE_OPS: [&str; 22] = [
@@ -146,6 +155,8 @@ impl Config {
         let sr_expansion = super::sr_expansion::validate_config(&manifest)?;
         // #1778：持久撤回同为并列子合同 `domain-event-withdrawal/1`；未选择它的 manifest 不认识其写口。
         let withdrawal = super::domain_event::withdrawal_selected(&manifest)?;
+        // #1375 AC2：市场 FX 报价与影响封闸为并列子合同 `fx-valuation/1`；未选择它的域完全不变。
+        let fx_valuation = super::fx_valuation::validate_config(&manifest)?;
         super::evidence::validate_config(&manifest)?;
         super::finance::validate_config(&manifest)?;
         let exact_release = super::finance::exact_release_selected(&manifest);
@@ -237,6 +248,9 @@ impl Config {
                     || (sr_expansion
                         && [super::sr_expansion::OP, super::sr_expansion::QUERY].contains(&op))
                     || (withdrawal && op == super::domain_event::WITHDRAW_OP)
+                    || (fx_valuation
+                        && [super::fx_valuation::QUERY, super::fx_valuation::IMPORT_OP]
+                            .contains(&op))
                     || (exact_release && super::finance::EXACT_OPS.contains(&op));
                 if !known || !unique.insert(op) {
                     return Err("InvalidDomain：操作权限未知或重复".into());
@@ -261,6 +275,10 @@ impl Config {
             "System" => (),
             "TestOnly" => {
                 nonnegative(required(&manifest["clock"]["plan"], "init_ns")?, "init_ns")?;
+            }
+            // #1407 C2：只在 `/5` 生效，旧合同的时钟闭集不变。
+            LOGICAL_BAR if exact_release => {
+                nonnegative(required(&manifest["clock"]["bars"], "init")?, "init bar")?;
             }
             _ => return Err("InvalidDomain：必须显式指定时钟adapter".into()),
         }
@@ -321,6 +339,9 @@ impl Config {
         phase: &str,
         recovery_index: usize,
     ) -> Result<String, String> {
+        if self.manifest["clock"]["kind"] == LOGICAL_BAR {
+            return self.logical_bar(msg, phase, recovery_index);
+        }
         if self.manifest["clock"]["kind"] == "System" {
             let n = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
@@ -350,6 +371,34 @@ impl Config {
             format!("MissingDependency：TestOnly时钟缺{phase}/{msg:?}/{recovery_index}")
         })?;
         nonnegative(s, phase)?;
+        Ok(s.to_owned())
+    }
+    /// ADR 0052:296、ADR 0056:52：simulation 下 E 不读系统时钟。读数是调度把该消息交给 E 时的
+    /// bar_index，received/first_known/commit 三相同值，与 X 接纳时钟（已提交前沿 + 1）同一单位。
+    /// 调度表随 manifest 冻结，进 manifest_hash。
+    fn logical_bar(
+        &self,
+        msg: Option<&str>,
+        phase: &str,
+        recovery_index: usize,
+    ) -> Result<String, String> {
+        let bars = &self.manifest["clock"]["bars"];
+        let v = match msg {
+            Some(m) => {
+                let v = &bars["messages"][m];
+                if v.is_array() {
+                    &v[recovery_index]
+                } else {
+                    v
+                }
+            }
+            None if phase == "recover_ns" => &bars["recover"][recovery_index],
+            None => &bars["init"],
+        };
+        let s = v.as_str().ok_or_else(|| {
+            format!("MissingDependency：logical-bar/1 调度缺{phase}/{msg:?}/{recovery_index}")
+        })?;
+        nonnegative(s, "bar_index")?;
         Ok(s.to_owned())
     }
     pub fn authorized(&self, e: &Value) -> Result<(), String> {
@@ -826,6 +875,9 @@ pub(crate) fn init(config: &Config) -> Result<Value, String> {
     if let Some(revision) = super::domain_event::withdrawal_bound_revision(config)? {
         set_meta(&tx, super::domain_event::WITHDRAWAL_META_KEY, revision)?;
     }
+    if let Some(revision) = super::fx_valuation::bound_revision(config)? {
+        set_meta(&tx, super::fx_valuation::META_KEY, revision)?;
+    }
     let ns = config.clock(None, "init_ns", 0)?;
     tx.execute("INSERT INTO epochs VALUES(1,'init',?)", [&ns])
         .map_err(err)?;
@@ -1048,6 +1100,17 @@ pub(super) fn audit_with_budget(
             "IdentityConflict：撤回子合同版本未由 init 显式绑定；不得在 recover 暗迁移".into(),
         );
     }
+    let fx_revision: Option<String> = budget.optional(
+        c,
+        "SELECT v FROM meta WHERE k=?",
+        [super::fx_valuation::META_KEY],
+        |r| r.get(0),
+    )?;
+    if fx_revision.as_deref() != super::fx_valuation::bound_revision(config)? {
+        return Err(
+            "IdentityConflict：FX 估值子合同版本未由 init 显式绑定；不得在 recover 暗迁移".into(),
+        );
+    }
     // 上面已核 meta 与选择相等：此后「已选择」即「本域已在 init 绑定」，四处撤回分支共用此前置。
     let withdrawal = super::domain_event::withdrawal_bound(config)?;
     // 内容格式登记与 Voice 版本同一条纪律：只认 init 显式绑定，recover 不暗迁移。
@@ -1210,6 +1273,7 @@ pub(super) fn audit_with_budget(
                 x["recorded"].as_array_mut().unwrap().push(record.clone());
                 let p = super::tb03c_e::pending_entry(config, &previous_image, record, seq)?;
                 x["pending"].as_array_mut().unwrap().push(p);
+                super::fx_valuation::apply_capture(config, &mut x, record)?;
                 x["history"].as_array_mut().unwrap().push(json!({"kind":"CaptureExternal","fact_key":record["fact_key"],"commit_seq":seq.to_string(),"commit_ns":ns}));
                 x
             } else {
@@ -1667,7 +1731,10 @@ pub(crate) fn verify_e_copy(record: &Value, config: &Config) -> Result<(), Strin
 
 pub(crate) fn verify_record(r: &Value, rules: super::book::Rules) -> Result<(), String> {
     let raw = required(r, "raw_utf8")?;
-    let (doc, event) = decode(raw, required(r, "json_pointer")?, rules)?;
+    let pointer = r["json_pointer"]
+        .as_str()
+        .ok_or("SchemaUnsupported：缺字符串 json_pointer")?;
+    let (doc, event) = decode(raw, pointer, rules)?;
     if r["raw_sha256"] != sha256_hex(raw.as_bytes())
         || r["event"] != event
         || r["fact_key"] != fact_key(&event)?

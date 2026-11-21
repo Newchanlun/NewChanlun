@@ -13,6 +13,9 @@ pub(super) fn report(event: &Value) -> &Value {
     event.get("netted_fill").unwrap_or(&event["per_leg_report"])
 }
 pub(super) fn target_domain(event: &Value) -> Result<String, String> {
+    if super::fx_valuation::is_fx_quote_event(event) {
+        return Ok(format!("E:fx:{}", required(&event["quote"], "instrument")?));
+    }
     if is_projected(event) {
         Ok(format!(
             "E:{}:{}",

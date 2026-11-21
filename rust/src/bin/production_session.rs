@@ -13,6 +13,7 @@
 //!   `_redact`）过滤后写 stderr。
 //!
 //! 用法：production_session --manifest FILE
+use newchan_rust::session_protocol::strict_json;
 use newchan_rust::structure_source::Declaration;
 use serde_json::{json, Value};
 use std::collections::BTreeSet;
@@ -105,10 +106,10 @@ fn text<'a>(v: &'a Value, path: &str) -> Result<&'a str, String> {
         .ok_or_else(|| format!("InvalidDomain：manifest 缺 {path}"))
 }
 
-fn read_json(path: &Path, what: &str) -> Result<Value, String> {
-    let raw = std::fs::read_to_string(path)
+fn read_contract_json(path: &Path, what: &str) -> Result<Value, String> {
+    let raw = std::fs::read(path)
         .map_err(|e| format!("InvalidDomain：读{what} {} 失败：{e}", path.display()))?;
-    serde_json::from_str(&raw).map_err(|e| format!("InvalidDomain：{what} JSON 解析失败：{e}"))
+    strict_json(&raw).map_err(|e| format!("InvalidDomain：{what} JSON 解析失败：{e}"))
 }
 
 struct Manifest {
@@ -122,7 +123,10 @@ struct Manifest {
 
 /// 完整校验 manifest；此阶段不创建任何域文件。
 fn load_manifest(path: &Path) -> Result<Manifest, String> {
-    let raw = read_json(path, "manifest")?;
+    let doc = std::fs::read_to_string(path)
+        .map_err(|e| format!("InvalidDomain：读manifest {} 失败：{e}", path.display()))?;
+    let raw: Value = serde_json::from_str(&doc)
+        .map_err(|e| format!("InvalidDomain：manifest JSON 解析失败：{e}"))?;
     if raw["manifest_revision"].as_str() != Some(MANIFEST_REVISION) {
         return Err(format!(
             "VersionUnsupported：manifest_revision 必须是 {MANIFEST_REVISION}"
@@ -175,12 +179,19 @@ fn load_manifest(path: &Path) -> Result<Manifest, String> {
         }
     }
     let x_profile = PathBuf::from(text(&raw, "x.profile")?);
-    let xp = read_json(&x_profile, "X 执行 profile")?;
+    let xp = read_contract_json(&x_profile, "X 执行 profile")?;
     if xp["mode"].as_str() != Some(profile.as_str()) {
         return Err(format!(
             "InvalidDomain：X 执行 profile mode `{}` 与运行 profile `{profile}` 不一致",
             xp["mode"]
         ));
+    }
+    if xp.get("history_simulation").is_some_and(|v| !v.is_null()) {
+        check_history_simulation_assembly(
+            &profile,
+            &xp,
+            Path::new(text(&raw, "economic.manifest")?),
+        )?;
     }
     let credential_env = text(&xp, "credential_scope.env")?.to_string();
     // 凭据文件缺失不在此判错：是否必需由 X 按 profile 裁决（MissingDependency）。
@@ -198,6 +209,57 @@ fn load_manifest(path: &Path) -> Result<Manifest, String> {
         x_profile,
         credential,
     })
+}
+
+/// #1407 C3 R3：仅当 `x.profile` 显式声明 `history_simulation` 时，在创建任何状态目录、
+/// 初始化或拉起任何域库前读取经济域 manifest 并拒绝不兼容的 E/X 历史模拟装配。
+/// 非历史模拟配置（`/1` 骨架、dry-run、experiment、production，含坏非历史 X revision）
+/// 不预读经济域 manifest、不改变原启动条件与非关键 X 降级行为。
+fn check_history_simulation_assembly(
+    profile: &str,
+    xp: &Value,
+    econ_path: &Path,
+) -> Result<(), String> {
+    if profile != "simulation" {
+        return Err("InvalidDomain：history_simulation 仅允许 simulation profile".into());
+    }
+    use newchan_rust::economic_session::FxReleaseRevision;
+    use newchan_rust::history_simulation::{
+        runtime::Profile, EXACT_PROFILE_REVISION, FX_RELEASE_PROFILE_REVISION,
+    };
+
+    let x_rev = xp["profile_revision"].as_str().unwrap_or_default();
+    if !matches!(x_rev, EXACT_PROFILE_REVISION | FX_RELEASE_PROFILE_REVISION) {
+        return Err(format!(
+            "VersionUnsupported：历史模拟 X 执行 profile 版本 `{x_rev}` 已退场或不兼容，\
+             正式装配须使用 {EXACT_PROFILE_REVISION} 或 {FX_RELEASE_PROFILE_REVISION}（旧 /1、/2 库仅供只读取证）"
+        ));
+    }
+    let econ = read_contract_json(econ_path, "经济域 manifest")?;
+    let finance_rev = econ["finance"]["schema_revision"].as_str();
+    if finance_rev != Some("tb03b-finance/6") {
+        return Err(format!(
+            "VersionUnsupported：历史模拟装配拒绝将 E 财务子合同 `{}` 与 {x_rev} 混配；\
+             须使用 tb03b-finance/6 的模型绑定命令（原 /5 收据、责任与查询保持原义）",
+            finance_rev.unwrap_or("<none>")
+        ));
+    }
+    let compatible = match &econ["fx_valuation"] {
+        Value::Null => x_rev == EXACT_PROFILE_REVISION,
+        fx => {
+            (x_rev == EXACT_PROFILE_REVISION && fx["schema_revision"] == "fx-valuation/1")
+                || (x_rev == FX_RELEASE_PROFILE_REVISION
+                    && fx["schema_revision"] == json!(FxReleaseRevision::ReleaseBound))
+        }
+    };
+    if !compatible {
+        return Err(format!(
+            "VersionUnsupported：X profile `{x_rev}` 与 E 的 FX 合同不匹配；\
+             静态 X/3 配 FX/1 或非 FX，动态 X/4 只配 FX/2"
+        ));
+    }
+    Profile::from_declared_revision(x_rev, xp["history_simulation"].clone())?;
+    Ok(())
 }
 
 fn sibling(name: &str) -> Result<PathBuf, String> {
