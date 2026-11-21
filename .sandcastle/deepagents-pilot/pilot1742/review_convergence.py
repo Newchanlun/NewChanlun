@@ -161,6 +161,34 @@ _COMMONMARK_ENTITY_RE = re.compile(
 )
 _INVISIBLE_STRIP_CATEGORIES = frozenset({"Cf", "Cc", "Cs", "Zl", "Zp"})
 _INVISIBLE_CHECK_CATEGORIES = frozenset({"Cf", "Cc", "Cs", "Cn", "Co", "Zl", "Zp", "Zs", "Mn", "Me", "Mc"})
+_DEFAULT_IGNORABLE_OR_BLANK_CODE_POINTS = frozenset(
+    {
+        0x00AD,
+        0x034F,
+        0x061C,
+        0x115F,
+        0x1160,
+        0x2800,
+        0x3164,
+        0xFEFF,
+        0xFFA0,
+    }
+)
+_DEFAULT_IGNORABLE_OR_BLANK_RANGES: tuple[tuple[int, int], ...] = (
+    (0x17B4, 0x17B5),
+    (0x180B, 0x180F),
+    (0x200B, 0x200F),
+    (0x202A, 0x202E),
+    (0x2060, 0x206F),
+    (0xFE00, 0xFE0F),
+    (0xFFF0, 0xFFF8),
+    (0x1BCA0, 0x1BCA3),
+    (0x1D173, 0x1D17A),
+    (0xE0000, 0xE0FFF),
+)
+_CONSUMED_FINDING_HEX_RE = re.compile(r"[0-9a-f]{6,16}")
+_CONSUMED_DIGEST_HEX_RE = re.compile(r"[0-9a-f]{16}")
+_CONSUMED_POS_INT_RE = re.compile(r"[1-9][0-9]*")
 
 _WONTFIX_HEAD_RE = re.compile(
     r"^(?:(?:[-*+]|[0-9]+[.)])[ \t]+)?"
@@ -236,6 +264,58 @@ def _normalize_str_collection(
     if require_non_empty and not normalized:
         raise ConvergenceError(f"{field_name} 不能为空")
     return frozenset(normalized)
+
+
+def _validate_consumed_reply_key(raw: Any, field_name: str) -> str:
+    """严格校验已消费回复键规范格式，禁止首尾空白、评论 ID 含空白或冒号、以及非规范指纹/坐标写法。"""
+    if not isinstance(raw, str):
+        raise ConvergenceError(f"{field_name} 必须是非空字符串：{raw!r}")
+    if not raw or raw != raw.strip():
+        raise ConvergenceError(f"{field_name} 不得为空或含首尾空白：{raw!r}")
+    if raw.lower().startswith("comment:"):
+        if not raw.startswith("comment:"):
+            raise ConvergenceError(f"{field_name} 的 comment: 前缀必须为小写规范格式：{raw!r}")
+        rest = raw[len("comment:") :]
+        parts = rest.split(":", 2)
+        if len(parts) != 3:
+            raise ConvergenceError(f"{field_name} 格式非法：{raw!r}")
+        cid, kind, payload = parts
+        if not cid or cid != cid.strip() or any(_is_invisible_or_ignorable_char(ch) for ch in cid):
+            raise ConvergenceError(f"{field_name} 中的评论 ID 非法（不得为空或含空白/不可见字符）：{raw!r}")
+        if kind == "finding":
+            if not _CONSUMED_FINDING_HEX_RE.fullmatch(payload):
+                raise ConvergenceError(f"{field_name} 的 finding 指纹必须是 6–16 位小写十六进制：{raw!r}")
+        elif kind in ("inline", "resolved"):
+            if not _CONSUMED_DIGEST_HEX_RE.fullmatch(payload):
+                raise ConvergenceError(f"{field_name} 的 {kind} 指纹/摘要必须是 16 位小写十六进制：{raw!r}")
+        elif kind == "loc":
+            if not payload or payload != payload.strip():
+                raise ConvergenceError(f"{field_name} 的 loc 坐标非法：{raw!r}")
+            if ":" in payload:
+                file_part, line_part = payload.rsplit(":", 1)
+                if ":" in file_part or not _CONSUMED_POS_INT_RE.fullmatch(line_part):
+                    raise ConvergenceError(f"{field_name} 的 loc 行号或路径格式非法：{raw!r}")
+            else:
+                file_part = payload
+            if not file_part or file_part != file_part.strip():
+                raise ConvergenceError(f"{field_name} 的 loc 路径含空白或为空：{raw!r}")
+            try:
+                norm_file = _normalize_file(file_part)
+            except ConvergenceError as exc:
+                raise ConvergenceError(f"{field_name} 的 loc 路径非法：{raw!r}") from exc
+            if norm_file != file_part:
+                raise ConvergenceError(
+                    f"{field_name} 的 loc 路径必须为规范形式（期望 {norm_file!r}）：{raw!r}"
+                )
+        else:
+            raise ConvergenceError(f"{field_name} 包含未知回复键类型 {kind!r}：{raw!r}")
+    return raw
+
+
+def _validate_consumed_reply_keys(values: Collection[str], field_name: str) -> frozenset[str]:
+    if not isinstance(values, Collection) or isinstance(values, (str, bytes)):
+        raise ConvergenceError(f"{field_name} 必须是字符串集合：{values!r}")
+    return frozenset(_validate_consumed_reply_key(item, f"{field_name}[]") for item in values)
 
 
 def _real_source_models(models: Sequence[str]) -> tuple[str, ...]:
@@ -1104,15 +1184,22 @@ def _find_matching_bracket(
     return -1
 
 
+def _is_invisible_or_ignorable_char(ch: str) -> bool:
+    """判定字符是否为空白、不可见格式/控制/组合记号、Unicode Default_Ignorable_Code_Point 或空白填充符。"""
+    if ch.isspace() or unicodedata.category(ch) in _INVISIBLE_CHECK_CATEGORIES:
+        return True
+    cp = ord(ch)
+    if cp in _DEFAULT_IGNORABLE_OR_BLANK_CODE_POINTS:
+        return True
+    return any(lo <= cp <= hi for lo, hi in _DEFAULT_IGNORABLE_OR_BLANK_RANGES)
+
+
 def _clean_display_reason(raw: str) -> str:
     """剥离行内匹配哨兵与不可见格式/控制/代理/分隔字符，保留正文组合记号并校验至少含一个可见基字符。"""
     cleaned = "".join(
         ch for ch in raw if ch != "\x01" and unicodedata.category(ch) not in _INVISIBLE_STRIP_CATEGORIES
     ).strip()
-    if not any(
-        not ch.isspace() and unicodedata.category(ch) not in _INVISIBLE_CHECK_CATEGORIES
-        for ch in cleaned
-    ):
+    if not any(not _is_invisible_or_ignorable_char(ch) for ch in cleaned):
         return ""
     return cleaned
 
@@ -2069,9 +2156,6 @@ def parse_wontfix_replies(
             continue
         fallback_file, fallback_line = _extract_comment_file_and_line(comment)
 
-        comment_replies: list[AuthorReply] = []
-        id_reasons: dict[str, set[str]] = {}
-        loc_reasons: dict[tuple[str, int | None], set[str]] = {}
         seen_exact: set[tuple[str | None, str | None, int | None, bool, str]] = set()
         for raw_match, line_tokens in _extract_visible_paragraph_lines(body):
             leading_ws = len(raw_match) - len(raw_match.lstrip(" \t"))
@@ -2110,12 +2194,8 @@ def parse_wontfix_replies(
                 continue
             seen_exact.add(exact_sig)
 
-            if finding_id is not None:
-                id_reasons.setdefault(finding_id, set()).add(norm_reason)
-            elif not is_inline_anchor and file_path is not None:
-                loc_reasons.setdefault((file_path, line_num), set()).add(norm_reason)
-
-            comment_replies.append(
+            # 仅对完全相同的 (锚点形态, 归一化理由) 做幂等去重；不同理由指令全部保留交由下游按解析后最终目标整组裁决
+            replies.append(
                 AuthorReply(
                     finding_id=finding_id,
                     file=file_path,
@@ -2126,27 +2206,6 @@ def parse_wontfix_replies(
                     is_inline_anchor=is_inline_anchor,
                 )
             )
-
-        # 同评论内针对同一 target_finding_id（含前后端缀重叠）或同一显式 (file, line) 出现不同理由的冲突指令时拒收歧义
-        conflicting_ids = {fid for fid, reasons in id_reasons.items() if len(reasons) > 1}
-        conflicting_locs = {loc for loc, reasons in loc_reasons.items() if len(reasons) > 1}
-        for item in comment_replies:
-            if item.finding_id is not None and (
-                item.finding_id in conflicting_ids
-                or any(
-                    item.finding_id.startswith(cfid) or cfid.startswith(item.finding_id)
-                    for cfid in conflicting_ids
-                )
-            ):
-                continue
-            if (
-                item.finding_id is None
-                and not item.is_inline_anchor
-                and item.file is not None
-                and (_normalize_file(item.file), item.line) in conflicting_locs
-            ):
-                continue
-            replies.append(item)
     return tuple(replies)
 
 
@@ -2170,7 +2229,7 @@ def _analyze_author_replies(
         seen_ids.add(fid)
         finding_list.append(item)
 
-    consumed_keys = _normalize_str_collection(consumed_reply_keys, "consumed_reply_keys")
+    consumed_keys = _validate_consumed_reply_keys(consumed_reply_keys, "consumed_reply_keys")
     consumed_cids = _normalize_str_collection(consumed_comment_ids, "consumed_comment_ids")
     stale_fps = _normalize_str_collection(
         stale_location_fingerprints,
@@ -2178,25 +2237,12 @@ def _analyze_author_replies(
         lowercase=True,
     )
 
-    # 校验并识别同评论内针对同一字面量或同一解析后目标指纹 fid 的冲突指令（含缩写+全长、ID+坐标混写）
     validated_replies: list[AuthorReply] = []
-    comment_id_reasons: dict[tuple[str, str], set[str]] = {}
-    comment_loc_reasons: dict[tuple[str, str, int | None], set[str]] = {}
     for reply in replies:
         if not isinstance(reply, AuthorReply):
             raise ConvergenceError(f"replies 元素必须是 AuthorReply：{reply!r}")
-        cid = _require_non_empty_str(reply.comment_id, "reply.comment_id")
+        _require_non_empty_str(reply.comment_id, "reply.comment_id")
         validated_replies.append(reply)
-        if reply.reply_key not in consumed_keys and cid not in consumed_cids:
-            norm_reason = _normalize_fingerprint_text(reply.reason, "reason")
-            if reply.finding_id is not None:
-                key_pair = (cid, reply.finding_id.strip().lower())
-                comment_id_reasons.setdefault(key_pair, set()).add(norm_reason)
-            elif not reply.is_inline_anchor and reply.file is not None:
-                loc_triple = (cid, _normalize_file(reply.file), reply.line)
-                comment_loc_reasons.setdefault(loc_triple, set()).add(norm_reason)
-    conflicting_comment_ids = {pair for pair, reasons in comment_id_reasons.items() if len(reasons) > 1}
-    conflicting_comment_locs = {triple for triple, reasons in comment_loc_reasons.items() if len(reasons) > 1}
 
     matched_keys_by_id: dict[str, set[str]] = {}
     comment_target_reasons: dict[tuple[str, str], set[str]] = {}
@@ -2216,10 +2262,14 @@ def _analyze_author_replies(
         if not matches:
             continue
 
+        norm_reason = _normalize_fingerprint_text(reply.reason, "reason")
         for matched_finding in matches:
-            keys_set = matched_keys_by_id.setdefault(matched_finding.finding_id, set())
+            matched_fid = matched_finding.finding_id
+            keys_set = matched_keys_by_id.setdefault(matched_fid, set())
             keys_set.add(reply.reply_key)
-            keys_set.add(_resolved_reply_key(cid, matched_finding.finding_id))
+            keys_set.add(_resolved_reply_key(cid, matched_fid))
+            if _resolved_reply_key(cid, matched_fid) not in consumed_keys:
+                comment_target_reasons.setdefault((cid, matched_fid), set()).add(norm_reason)
 
         # 命中 0 个或超过 1 个活跃候选均拒绝绑定（绝不让一条歧义回复解除多个发现）
         if len(matches) != 1:
@@ -2229,23 +2279,13 @@ def _analyze_author_replies(
         if _resolved_reply_key(cid, target_id) in consumed_keys:
             continue
 
-        norm_reason = _normalize_fingerprint_text(reply.reason, "reason")
-        comment_target_reasons.setdefault((cid, target_id), set()).add(norm_reason)
         resolved_entries.append((cid, target_id, specificity, reply))
 
+    # 同一 (comment_id, target_id) 下聚合全部命中回复后若存在 > 1 种不同归一化理由，整组拒收
     conflicting_comment_targets = {pair for pair, reasons in comment_target_reasons.items() if len(reasons) > 1}
     best_by_id: dict[str, tuple[int, AuthorReply]] = {}
     for cid, target_id, specificity, reply in resolved_entries:
         if (cid, target_id) in conflicting_comment_targets:
-            continue
-        if reply.finding_id is not None and (cid, reply.finding_id.strip().lower()) in conflicting_comment_ids:
-            continue
-        if (
-            reply.finding_id is None
-            and not reply.is_inline_anchor
-            and reply.file is not None
-            and (cid, _normalize_file(reply.file), reply.line) in conflicting_comment_locs
-        ):
             continue
         current = best_by_id.get(target_id)
         if current is None or specificity >= current[0]:
@@ -2322,7 +2362,7 @@ class VerifiedFinding:
         if not isinstance(self.related_reply_keys, tuple):
             raise ConvergenceError("VerifiedFinding.related_reply_keys 必须是字符串元组")
         for rk in self.related_reply_keys:
-            _require_non_empty_str(rk, "related_reply_keys[]")
+            _validate_consumed_reply_key(rk, "related_reply_keys[]")
 
     @property
     def is_blocking(self) -> bool:
@@ -2427,7 +2467,7 @@ class RoundHistoryEntry:
         if not isinstance(self.consumed_reply_keys, frozenset):
             raise ConvergenceError("consumed_reply_keys 必须是 frozenset[str]")
         for rk in self.consumed_reply_keys:
-            _require_non_empty_str(rk, "consumed_reply_keys[]")
+            _validate_consumed_reply_key(rk, "consumed_reply_keys[]")
         if not isinstance(self.finder_session_ids, frozenset):
             raise ConvergenceError("finder_session_ids 必须是 frozenset[str]")
         norm_sessions = frozenset(_require_non_empty_str(sid, "finder_session_ids[]") for sid in self.finder_session_ids)
@@ -2564,6 +2604,11 @@ def _validate_history_chain(
             else:
                 next_located_anchor[fid] = (entry.head_sha, item_loc[0], item_loc[1])
 
+        validated_entry_consumed = frozenset(
+            _validate_consumed_reply_key(rk, f"history[{idx - 1}].consumed_reply_keys[]")
+            for rk in entry.consumed_reply_keys
+        )
+
         for raw_fp in entry.resolved_fingerprints:
             norm_fp = raw_fp.strip().lower()
             can_resolve_by_fix = (
@@ -2578,8 +2623,7 @@ def _validate_history_chain(
                     and rk.startswith("comment:")
                     and rk.endswith(suffix)
                     and len(rk) > len("comment:") + len(suffix)
-                    and bool(rk[len("comment:") : -len(suffix)].strip())
-                    for rk in entry.consumed_reply_keys
+                    for rk in validated_entry_consumed
                 )
                 if not has_wontfix_proof:
                     raise ConvergenceError(
@@ -2594,7 +2638,7 @@ def _validate_history_chain(
                 f"历史第 {idx} 轮遗漏了前轮未解除的 Important 发现（无结转/解除/驳回记录）：{sorted(unaccounted)!r}"
             )
 
-        historical_consumed_reply_keys.update(entry.consumed_reply_keys)
+        historical_consumed_reply_keys.update(validated_entry_consumed)
         prev_entry = entry
         if entry.outcome == RoundOutcome.PASS:
             prev_unresolved_sources = {}
@@ -2986,7 +3030,7 @@ def parse_verifier_output(
         candidate_list.append(candidate)
 
     history_consumed: frozenset[str] = frozenset().union(*(entry.consumed_reply_keys for entry in candidates.history))
-    extra_consumed = _normalize_str_collection(consumed_reply_keys, "consumed_reply_keys")
+    extra_consumed = _validate_consumed_reply_keys(consumed_reply_keys, "consumed_reply_keys")
     effective_consumed = history_consumed | extra_consumed
 
     bound_replies, matched_keys_by_id = _analyze_author_replies(
@@ -3067,6 +3111,10 @@ class RoundPlan:
     def __post_init__(self) -> None:
         object.__setattr__(self, "diff_base_sha", _normalize_commit_sha(self.diff_base_sha, "RoundPlan.diff_base_sha"))
         object.__setattr__(self, "diff_head_sha", _normalize_commit_sha(self.diff_head_sha, "RoundPlan.diff_head_sha"))
+        if not isinstance(self.consumed_reply_keys, frozenset):
+            raise ConvergenceError("RoundPlan.consumed_reply_keys 必须是 frozenset[str]")
+        for rk in self.consumed_reply_keys:
+            _validate_consumed_reply_key(rk, "RoundPlan.consumed_reply_keys[]")
 
     @property
     def prior_important_ids(self) -> frozenset[str]:
@@ -3208,6 +3256,10 @@ class RoundDecision:
     def __post_init__(self) -> None:
         norm_head = _normalize_commit_sha(self.head_sha, "RoundDecision.head_sha")
         object.__setattr__(self, "head_sha", norm_head)
+        if not isinstance(self.consumed_reply_keys, frozenset):
+            raise ConvergenceError("RoundDecision.consumed_reply_keys 必须是 frozenset[str]")
+        for rk in self.consumed_reply_keys:
+            _validate_consumed_reply_key(rk, "RoundDecision.consumed_reply_keys[]")
         if not isinstance(self.stale_location_fingerprints, frozenset):
             raise ConvergenceError("RoundDecision.stale_location_fingerprints 必须是 frozenset[str]")
         norm_stale = frozenset(

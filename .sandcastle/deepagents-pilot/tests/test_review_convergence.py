@@ -17,6 +17,7 @@ from pilot1742.review_convergence import (
     RenderedComment,
     ReviewPanel,
     RoundCandidates,
+    RoundDecision,
     RoundHistoryEntry,
     RoundOutcome,
     Severity,
@@ -2860,7 +2861,7 @@ def test_r6_finding5_consumed_reply_key_decoupled_from_directive_order() -> None
     assert by_id[f_b.finding_id].author_reply is not None
     assert by_id[f_b.finding_id].author_reply.reason == "新说明"
 
-    # 同评论内针对同一 target_finding_id 的重复相同指令去重；冲突不同理由指令拒收歧义
+    # 同评论内针对同一 target_finding_id 的重复相同指令去重；冲突不同理由指令保留至下游按解析后目标整组拒收
     dup_same = parse_wontfix_replies(
         [{"id": 9, "author": "alice", "body": f"[{f_a.finding_id}] 不修：同理由\n[{f_a.finding_id}] 不修：同理由"}],
         allowed_authors={"alice"},
@@ -2870,7 +2871,19 @@ def test_r6_finding5_consumed_reply_key_decoupled_from_directive_order() -> None
         [{"id": 10, "author": "alice", "body": f"[{f_a.finding_id}] 不修：理由甲\n[{f_a.finding_id}] 不修：理由乙"}],
         allowed_authors={"alice"},
     )
-    assert conflict_diff == ()
+    assert len(conflict_diff) == 2
+    assert bind_author_replies([f_a], conflict_diff) == {}
+    cand_conflict_id = _candidates([f_a])
+    with pytest.raises(ConvergenceError):
+        parse_verifier_output(
+            _verifier_payload(
+                cand_conflict_id,
+                [{"finding_id": f_a.finding_id, "verdict": "resolved_by_wontfix", "verifier_evidence": "冲突指令不得放行"}],
+            ),
+            cand_conflict_id,
+            verifier_model="claude-opus-5-5",
+            author_replies=conflict_diff,
+        )
 
 
 def test_r6_finding6_finding7_finding8_commonmark_inline_linkdef_and_line_endings() -> None:
@@ -3375,7 +3388,7 @@ def test_r7_finding7_explicit_file_line_reply_key_no_collision_and_conflict_guar
     assert v2.verdicts[0].author_reply is not None
     assert v2.verdicts[0].author_reply.reply_key == "comment:9:loc:b.py:2"
 
-    # 同评论内针对同一 (target_file, target_line) 同理由去重、不同理由拒收歧义
+    # 同评论内针对同一 (target_file, target_line) 同理由去重、不同理由保留至下游按解析后目标整组拒收
     dup_loc = parse_wontfix_replies(
         [{"id": 10, "author": "alice", "body": "a.py:1 不修：同理由\na.py:1 不修：同理由"}],
         allowed_authors={"alice"},
@@ -3385,7 +3398,19 @@ def test_r7_finding7_explicit_file_line_reply_key_no_collision_and_conflict_guar
         [{"id": 11, "author": "alice", "body": "a.py:1 不修：理由甲\na.py:1 不修：理由乙"}],
         allowed_authors={"alice"},
     )
-    assert conflict_loc == ()
+    assert len(conflict_loc) == 2
+    assert bind_author_replies([f_a], conflict_loc) == {}
+    cand_conflict_loc = _candidates([f_a])
+    with pytest.raises(ConvergenceError):
+        parse_verifier_output(
+            _verifier_payload(
+                cand_conflict_loc,
+                [{"finding_id": f_a.finding_id, "verdict": "resolved_by_wontfix", "verifier_evidence": "冲突坐标指令不得放行"}],
+            ),
+            cand_conflict_loc,
+            verifier_model="claude-opus-5-5",
+            author_replies=conflict_loc,
+        )
     direct_conflict = [
         AuthorReply(None, "a.py", 1, "理由甲", "12", "alice"),
         AuthorReply(None, "a.py", 1, "理由乙", "12", "alice"),
@@ -4963,19 +4988,18 @@ def test_r11_important1_history_chain_requires_valid_resolution_basis() -> None:
             history=(e1, e2_same_head_unproven),
         )
 
-    # 伪造空 comment_id 消费键同样拒收
-    e2_empty_cid = RoundHistoryEntry(
-        2,
-        HEAD_1,
-        frozenset(),
-        (),
-        panel=DEFAULT_PANEL,
-        finder_session_ids=frozenset({"r11-i1-r2e-1", "r11-i1-r2e-2"}),
-        resolved_fingerprints=frozenset({f1.finding_id}),
-        consumed_reply_keys=frozenset({f"comment::resolved:{f1.finding_id}"}),
-    )
+    # 伪造空 comment_id 消费键在构造 RoundHistoryEntry 时即立即拒收
     with pytest.raises(ConvergenceError):
-        plan_next_round(BASE_SHA, HEAD_1, (e1, e2_empty_cid))
+        RoundHistoryEntry(
+            2,
+            HEAD_1,
+            frozenset(),
+            (),
+            panel=DEFAULT_PANEL,
+            finder_session_ids=frozenset({"r11-i1-r2e-1", "r11-i1-r2e-2"}),
+            resolved_fingerprints=frozenset({f1.finding_id}),
+            consumed_reply_keys=frozenset({f"comment::resolved:{f1.finding_id}"}),
+        )
 
     # 第 1 轮直接标 resolved_fingerprints 但无消费键 -> 拒收
     e1_unproven = RoundHistoryEntry(
@@ -5253,7 +5277,7 @@ def test_r11_important4_same_comment_conflict_grouped_by_resolved_target_fingerp
     )
     assert bind_author_replies([f1], mixed_anchor) == {}
 
-    # 同评论走私前缀：[F[:8]] 理由甲 + [F] 理由乙 + [F] 理由丙 -> 全部拒收
+    # 同评论走私前缀：[F[:8]] 理由甲 + [F] 理由乙 + [F] 理由丙 -> 保留至下游按解析后目标整组拒收
     smuggled_prefix = parse_wontfix_replies(
         [
             {
@@ -5264,7 +5288,18 @@ def test_r11_important4_same_comment_conflict_grouped_by_resolved_target_fingerp
         ],
         allowed_authors={"alice"},
     )
-    assert smuggled_prefix == ()
+    assert len(smuggled_prefix) == 3
+    assert bind_author_replies([f1], smuggled_prefix) == {}
+    with pytest.raises(ConvergenceError):
+        parse_verifier_output(
+            _verifier_payload(
+                cand,
+                [{"finding_id": fid, "verdict": "resolved_by_wontfix", "verifier_evidence": "走私前缀不得放行"}],
+            ),
+            cand,
+            verifier_model="claude-opus-5-5",
+            author_replies=smuggled_prefix,
+        )
     assert (
         bind_author_replies(
             [f1],
@@ -5411,3 +5446,355 @@ def test_r11_important6_parse_comment_marker_requires_0_to_3_leading_spaces() ->
             )
             == ()
         )
+
+
+def test_r12_important1_preserve_conflicting_directives_until_target_resolution() -> None:
+    """R11 Important 1：不在 parse_wontfix_replies 提前丢弃冲突指令，保留全部指令至下游按解析后最终目标整组拒收。"""
+    f1 = _finding(severity=Severity.IMPORTANT, file="pilot1742/demo.py", line=42)
+    f2 = _finding(
+        severity=Severity.IMPORTANT,
+        file="pilot1742/other.py",
+        line=10,
+        category="边界",
+        failure_scenario="同评论独立发现不受影响",
+    )
+    fid = f1.finding_id
+    cand_f1 = _candidates([f1])
+
+    # Codex R11 最小反例：[F] 甲 + [F] 乙 + pilot1742/demo.py:42 丙 -> 整组拒收，绝不绑定 F
+    id_conflict_plus_loc = parse_wontfix_replies(
+        [
+            {
+                "id": 2501,
+                "user": {"login": "alice", "type": "User"},
+                "body": f"[{fid}] 不修：甲\n[{fid}] 不修：乙\npilot1742/demo.py:42 不修：丙",
+            }
+        ],
+        allowed_authors={"alice"},
+    )
+    assert len(id_conflict_plus_loc) == 3
+    assert bind_author_replies([f1], id_conflict_plus_loc) == {}
+    with pytest.raises(ConvergenceError):
+        parse_verifier_output(
+            _verifier_payload(
+                cand_f1,
+                [{"finding_id": fid, "verdict": "resolved_by_wontfix", "verifier_evidence": "试图借坐标绕过重复 ID 冲突"}],
+            ),
+            cand_f1,
+            verifier_model="claude-opus-5-5",
+            author_replies=id_conflict_plus_loc,
+        )
+
+    # 反向反例：pilot1742/demo.py:42 甲 + pilot1742/demo.py:42 乙 + [F] 丙 -> 同样整组拒收
+    loc_conflict_plus_id = parse_wontfix_replies(
+        [
+            {
+                "id": 2502,
+                "user": {"login": "alice", "type": "User"},
+                "body": f"pilot1742/demo.py:42 不修：甲\npilot1742/demo.py:42 不修：乙\n[{fid}] 不修：丙",
+            }
+        ],
+        allowed_authors={"alice"},
+    )
+    assert len(loc_conflict_plus_id) == 3
+    assert bind_author_replies([f1], loc_conflict_plus_id) == {}
+    with pytest.raises(ConvergenceError):
+        parse_verifier_output(
+            _verifier_payload(
+                cand_f1,
+                [{"finding_id": fid, "verdict": "resolved_by_wontfix", "verifier_evidence": "试图借 ID 绕过重复坐标冲突"}],
+            ),
+            cand_f1,
+            verifier_model="claude-opus-5-5",
+            author_replies=loc_conflict_plus_id,
+        )
+
+    # 重复 ID + 纯行内锚点混合 -> 同样整组拒收
+    id_conflict_plus_inline = parse_wontfix_replies(
+        [
+            {
+                "id": 2503,
+                "user": {"login": "alice", "type": "User"},
+                "path": "pilot1742/demo.py",
+                "side": "RIGHT",
+                "line": 42,
+                "body": f"[{fid}] 不修：甲\n[{fid}] 不修：乙\n不修：丙",
+            }
+        ],
+        allowed_authors={"alice"},
+    )
+    assert len(id_conflict_plus_inline) == 3
+    assert bind_author_replies([f1], id_conflict_plus_inline) == {}
+
+    # 同评论中 f1 存在冲突（含坐标走私）时仅拒收 f1，同评论内独立发现 f2 的无冲突指令不受影响
+    mixed_with_f2 = parse_wontfix_replies(
+        [
+            {
+                "id": 2504,
+                "user": {"login": "alice", "type": "User"},
+                "body": (
+                    f"[{fid}] 不修：甲\n"
+                    f"[{fid}] 不修：乙\n"
+                    f"pilot1742/demo.py:42 不修：丙\n"
+                    f"[{f2.finding_id}] 不修：独立合法理由"
+                ),
+            }
+        ],
+        allowed_authors={"alice"},
+    )
+    bound_mixed = bind_author_replies([f1, f2], mixed_with_f2)
+    assert set(bound_mixed.keys()) == {f2.finding_id}
+    assert bound_mixed[f2.finding_id].reason == "独立合法理由"
+    cand_both = _candidates([f1, f2])
+    ver_both = parse_verifier_output(
+        _verifier_payload(
+            cand_both,
+            [
+                {"finding_id": fid, "verdict": "confirmed", "verifier_evidence": "f1 冲突未解除"},
+                {"finding_id": f2.finding_id, "verdict": "resolved_by_wontfix", "verifier_evidence": "f2 合法采信"},
+            ],
+        ),
+        cand_both,
+        verifier_model="claude-opus-5-5",
+        author_replies=mixed_with_f2,
+    )
+    by_fid = {vf.finding.finding_id: vf for vf in ver_both.verdicts}
+    assert by_fid[f2.finding_id].author_reply is not None
+    assert by_fid[f2.finding_id].author_reply.reason == "独立合法理由"
+
+
+def test_r12_important2_strict_consumed_reply_keys_canonical_format() -> None:
+    """R11 Important 2：严格校验 consumed_reply_keys 规范格式，拒绝评论 ID / 指纹含空格或非规范写法。"""
+    f1 = _finding(severity=Severity.IMPORTANT, file="pilot1742/demo.py", line=42)
+    fid = f1.finding_id
+
+    # Codex R11 最小反例：第 1 轮用 comment:42:resolved:<F> 解除 F -> 第 2 轮重开确认 F -> 第 3 轮传 comment: 42 :resolved:<F>
+    e1 = RoundHistoryEntry(
+        1,
+        HEAD_1,
+        frozenset(),
+        (),
+        panel=DEFAULT_PANEL,
+        finder_session_ids=frozenset({"r12-i2-r1-1", "r12-i2-r1-2"}),
+        resolved_fingerprints=frozenset({fid}),
+        consumed_reply_keys=frozenset({f"comment:42:resolved:{fid}"}),
+    )
+    e2 = RoundHistoryEntry(
+        2,
+        HEAD_2,
+        frozenset({fid}),
+        (f1,),
+        panel=DEFAULT_PANEL,
+        finder_session_ids=frozenset({"r12-i2-r2-1", "r12-i2-r2-2"}),
+    )
+
+    # 1) 构造 RoundHistoryEntry 立即抛 ConvergenceError
+    with pytest.raises(ConvergenceError):
+        RoundHistoryEntry(
+            3,
+            HEAD_2,
+            frozenset(),
+            (),
+            panel=DEFAULT_PANEL,
+            finder_session_ids=frozenset({"r12-i2-r3-1", "r12-i2-r3-2"}),
+            resolved_fingerprints=frozenset({fid}),
+            consumed_reply_keys=frozenset({f"comment: 42 :resolved:{fid}"}),
+        )
+
+    # 2) 即使绕过 __post_init__ 篡改历史项，plan_next_round 与 RoundCandidates 也在 _validate_history_chain 中立即拒收
+    e3_tampered = RoundHistoryEntry(
+        3,
+        HEAD_2,
+        frozenset(),
+        (),
+        panel=DEFAULT_PANEL,
+        finder_session_ids=frozenset({"r12-i2-r3t-1", "r12-i2-r3t-2"}),
+        resolved_fingerprints=frozenset({fid}),
+        consumed_reply_keys=frozenset({f"comment:99:resolved:{fid}"}),
+    )
+    object.__setattr__(e3_tampered, "consumed_reply_keys", frozenset({f"comment: 42 :resolved:{fid}"}))
+    with pytest.raises(ConvergenceError):
+        plan_next_round(BASE_SHA, HEAD_2, (e1, e2, e3_tampered))
+    with pytest.raises(ConvergenceError):
+        RoundCandidates(
+            round_number=4,
+            head_sha=HEAD_2,
+            panel=DEFAULT_PANEL,
+            finder_batches=_batches_for_panel([], round_number=4, head_sha=HEAD_2),
+            history=(e1, e2, e3_tampered),
+        )
+
+    # 3) 覆盖所有非法键形态：RoundHistoryEntry / RoundDecision / parse_verifier_output / bind_author_replies 全部统一拒收
+    bad_keys = (
+        "",
+        "   ",
+        f" comment:42:resolved:{fid}",
+        f"comment:42:resolved:{fid} ",
+        f"COMMENT:42:resolved:{fid}",
+        f"comment: 42 :resolved:{fid}",
+        f"comment:42 :resolved:{fid}",
+        f"comment: 42:resolved:{fid}",
+        f"comment:4 2:resolved:{fid}",
+        f"comment:42\u200b:resolved:{fid}",
+        f"comment:42\u3164:resolved:{fid}",
+        f"comment::resolved:{fid}",
+        f"comment:42:resolved:{fid.upper()}",
+        f"comment:42:resolved: {fid}",
+        "comment:42:resolved:abcdef12",
+        "comment:42:finding:abcde",
+        "comment:42:finding:ABCDEF12",
+        "comment:42:inline:0123456789abcde",
+        "comment:42:inline:0123456789ABCDEF",
+        f"comment:42:unknown:{fid}",
+        "comment:42:loc:",
+        "comment:42:loc:./pilot1742/demo.py:42",
+        "comment:42:loc:pilot1742//demo.py:42",
+        "comment:42:loc:pilot1742/demo.py:0",
+        "comment:42:loc:pilot1742/demo.py:042",
+        "comment:42:loc:pilot1742/demo.py: 42",
+        "comment:42:loc:pilot1742/demo.py:",
+        "comment:42:loc:a:b:42",
+        f"comment:42:extra:resolved:{fid}",
+    )
+    cand = _candidates([f1])
+    valid_payload = _verifier_payload(
+        cand,
+        [{"finding_id": fid, "verdict": "confirmed", "verifier_evidence": "确认问题存在"}],
+    )
+    for bad_key in bad_keys:
+        with pytest.raises(ConvergenceError):
+            RoundHistoryEntry(
+                1,
+                HEAD_1,
+                frozenset(),
+                (),
+                panel=DEFAULT_PANEL,
+                finder_session_ids=frozenset({"r12-bad-1", "r12-bad-2"}),
+                consumed_reply_keys=frozenset({bad_key}),
+            )
+        with pytest.raises(ConvergenceError):
+            RoundDecision(
+                round_number=1,
+                head_sha=HEAD_1,
+                panel=DEFAULT_PANEL,
+                outcome=RoundOutcome.PASS,
+                github_state="success",
+                description="pass",
+                stop_auto_rereview=False,
+                verified_findings=(),
+                blocking_findings=(),
+                non_blocking_findings=(),
+                resolved_findings=(),
+                rejected_findings=(),
+                postable_findings=(),
+                unresolved_important=(),
+                consumed_reply_keys=frozenset({bad_key}),
+            )
+        with pytest.raises(ConvergenceError):
+            parse_verifier_output(
+                valid_payload,
+                cand,
+                verifier_model="claude-opus-5-5",
+                consumed_reply_keys={bad_key},
+            )
+        with pytest.raises(ConvergenceError):
+            bind_author_replies([f1], (), consumed_reply_keys={bad_key})
+
+    # 4) 正向对照：4 种规范格式全部通过
+    canonical_keys = frozenset(
+        {
+            f"comment:42:finding:{fid[:8]}",
+            f"comment:42:finding:{fid}",
+            "comment:42:inline:0123456789abcdef",
+            f"comment:42:resolved:{fid}",
+            "comment:42:loc:pilot1742/demo.py",
+            "comment:42:loc:pilot1742/demo.py:42",
+        }
+    )
+    ok_entry = RoundHistoryEntry(
+        1,
+        HEAD_1,
+        frozenset(),
+        (),
+        panel=DEFAULT_PANEL,
+        finder_session_ids=frozenset({"r12-ok-1", "r12-ok-2"}),
+        resolved_fingerprints=frozenset({fid}),
+        consumed_reply_keys=canonical_keys,
+    )
+    assert plan_next_round(BASE_SHA, HEAD_2, (ok_entry,)).consumed_reply_keys == canonical_keys
+
+
+def test_r12_important3_exclude_default_ignorable_and_blank_fillers_from_visible_base() -> None:
+    """R11 Important 3：将所有 Unicode Default_Ignorable_Code_Point 与空白填充符排除出可见基字符判定。"""
+    f1 = _finding(severity=Severity.IMPORTANT, file="pilot1742/demo.py", line=42)
+    fid = f1.finding_id
+
+    def parse_one(body: str) -> tuple[AuthorReply, ...]:
+        return parse_wontfix_replies(
+            [{"id": 2601, "user": {"login": "alice", "type": "User"}, "body": body}],
+            allowed_authors={"alice"},
+        )
+
+    # Codex R11 最小反例：Hangul Filler (U+3164) 与其他空白填充符/Default_Ignorable -> 0 条回复
+    for blank_body in (
+        f"[{fid}] 不修：&#x3164;",
+        f"[{fid}] 不修：&#x115F;&#x1160;&#xFFA0;&#x2800;",
+        f"[{fid}] 不修：\u3164",
+        f"[{fid}] 不修：\u115f\u1160\uffa0\u2800",
+        f"[{fid}] 不修：&#x00AD;&#x034F;&#x061C;&#x17B4;&#x17B5;&#x180B;&#x180E;",
+        f"[{fid}] 不修：&#x200B;&#x202A;&#x2060;&#xFEFF;&#x1BCA0;&#x1D173;&#xE0020;&#xE0100;",
+    ):
+        assert parse_one(blank_body) == (), f"expected 0 replies for {blank_body!r}"
+
+    # 端到端验证 resolved_by_wontfix 抛 ConvergenceError
+    cand = _candidates([f1])
+    with pytest.raises(ConvergenceError):
+        parse_verifier_output(
+            _verifier_payload(
+                cand,
+                [{"finding_id": fid, "verdict": "resolved_by_wontfix", "verifier_evidence": "试图用 U+3164 充当理由"}],
+            ),
+            cand,
+            verifier_model="claude-opus-5-5",
+            author_replies=parse_one(f"[{fid}] 不修：&#x3164;"),
+        )
+
+    # 直接构造 AuthorReply 同样全部抛 ConvergenceError
+    for bad_reason in (
+        "\u3164",
+        "\u115f",
+        "\u1160",
+        "\uffa0",
+        "\u2800",
+        "\u115f\u1160\uffa0\u2800",
+        "\u00ad",
+        "\u034f",
+        "\u061c",
+        "\u17b4",
+        "\u17b5",
+        "\u180b",
+        "\u180e",
+        "\u200b",
+        "\u202a",
+        "\u2060",
+        "\ufeff",
+        "\U0001bca0",
+        "\U0001d173",
+        "\U000e0020",
+        "\U000e0100",
+    ):
+        with pytest.raises(ConvergenceError):
+            AuthorReply(fid, None, None, bad_reason, "2602", "alice")
+
+    # 正向对照：含变体选择符的 emoji、变音符、韩文音节全部完整保留
+    emoji_replies = parse_one(f"[{fid}] 不修：⚠️ 保留兼容性")
+    assert [(r.finding_id, r.reason) for r in emoji_replies] == [(fid, "⚠️ 保留兼容性")]
+    assert "\ufe0f" in emoji_replies[0].reason
+
+    cafe_replies = parse_one(f"[{fid}] 不修：café")
+    assert [(r.finding_id, r.reason) for r in cafe_replies] == [(fid, "café")]
+    cafe_nfd_replies = parse_one(f"[{fid}] 不修：cafe\u0301")
+    assert [(r.finding_id, r.reason) for r in cafe_nfd_replies] == [(fid, "cafe\u0301")]
+
+    korean_replies = parse_one(f"[{fid}] 不修：한국어")
+    assert [(r.finding_id, r.reason) for r in korean_replies] == [(fid, "한국어")]
