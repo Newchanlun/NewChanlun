@@ -190,7 +190,7 @@ fn pending(lease: &Lease) -> u64 {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(feature = "s_lock_subset_testonly")))]
 mod tests {
     use super::*;
     use serde_json::json;

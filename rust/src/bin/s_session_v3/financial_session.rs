@@ -1886,6 +1886,6 @@ pub(super) fn stop(args: &[String]) -> Result<(), String> {
     Ok(())
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(feature = "s_lock_subset_testonly")))]
 #[path = "financial_session_tests.rs"]
 mod tests;

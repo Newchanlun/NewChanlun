@@ -604,7 +604,7 @@ pub(crate) fn take_publication_consumed_for_test() -> Vec<usize> {
     PUBLICATION_CONSUMED.with(|seen| std::mem::take(&mut *seen.borrow_mut()))
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(feature = "s_lock_subset_testonly")))]
 mod tests {
     use super::*;
     use sc::capture_allocation::scratch::{

@@ -2093,7 +2093,7 @@ pub(crate) fn audit_source_step(
     Ok((state.counts(), state, exports))
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(feature = "s_lock_subset_testonly")))]
 mod component_tests {
     use super::*;
     #[test]

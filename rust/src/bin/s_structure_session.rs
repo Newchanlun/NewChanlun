@@ -11484,7 +11484,7 @@ mod tests {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(feature = "s_lock_subset_testonly")))]
 mod staged_graph_audit_regressions {
     use super::*;
     use crate::tests::{
@@ -12246,7 +12246,7 @@ mod staged_graph_audit_regressions {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(feature = "s_lock_subset_testonly")))]
 mod record_borrow_regressions {
     use super::*;
 

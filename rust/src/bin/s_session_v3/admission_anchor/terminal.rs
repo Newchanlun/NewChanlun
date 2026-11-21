@@ -312,7 +312,7 @@ pub(crate) fn note_cleanup(later: [Option<FixedFailure>; 7], unaccepted: u128, o
     });
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(feature = "s_lock_subset_testonly")))]
 mod tests {
     use super::*;
     use newchan_rust::s_content::job::{Existing, Job};

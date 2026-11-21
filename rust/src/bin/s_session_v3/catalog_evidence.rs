@@ -956,7 +956,11 @@ fn canonical_matches(
     Ok(out.equal && out.remaining.is_empty())
 }
 
-#[cfg(all(test, feature = "s_incremental"))]
+#[cfg(all(
+    test,
+    feature = "s_incremental",
+    not(feature = "s_lock_subset_testonly")
+))]
 mod native_catalog_temp_tests {
     use super::super::audit_store::NativeAdmission;
     use super::*;
@@ -2017,7 +2021,7 @@ mod tests {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(feature = "s_lock_subset_testonly")))]
 mod r9_catalog_stream_tests {
     use super::*;
 

@@ -895,7 +895,7 @@ fn edge_object(
     write_value(s, sc::ValueView::Object(&fields))
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(feature = "s_lock_subset_testonly")))]
 mod tests {
     use super::*;
     use sc::path::PathStep;

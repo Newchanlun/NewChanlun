@@ -533,7 +533,7 @@ impl<K: FixedKey, V> DoubleEndedIterator for Iter<'_, K, V> {
 }
 impl<K: FixedKey, V> std::iter::FusedIterator for Iter<'_, K, V> {}
 
-#[cfg(test)]
+#[cfg(all(test, not(feature = "s_lock_subset_testonly")))]
 mod tests {
     use super::*;
     use sc::capture_allocation::scratch::{CodecWork, ScratchCharge, ScratchParent, WorkError};

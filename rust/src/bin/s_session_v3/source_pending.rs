@@ -828,7 +828,7 @@ pub(super) fn audit_with_proofs<'a>(
     Ok(pending)
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(feature = "s_lock_subset_testonly")))]
 mod tests {
     use super::*;
 

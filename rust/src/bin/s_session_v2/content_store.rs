@@ -1453,7 +1453,7 @@ impl NodeSource for ReadStore<'_> {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(feature = "s_lock_subset_testonly")))]
 mod tests {
     use super::*;
 
@@ -3648,7 +3648,7 @@ pub(crate) fn capture_slab_for_prototype(
     slab.finish()
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(feature = "s_lock_subset_testonly")))]
 mod capture_allocation_tests {
     use super::*;
     use s_content::capture_allocation::{CaptureSlab, OwnedBudget, INCOMPLETE, LIMIT};

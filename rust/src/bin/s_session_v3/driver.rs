@@ -958,7 +958,7 @@ fn err(e: impl std::fmt::Display) -> String {
     format!("S3DriverInvalid：{e}")
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(feature = "s_h1_lock_subset_testonly")))]
 mod tests {
     use super::*;
     use crate::tests::located_ohlc_input;
