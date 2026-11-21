@@ -17,7 +17,7 @@
 use newchan_rust::history_simulation::{
     runtime, EXACT_PROFILE_REVISION, FX_RELEASE_PROFILE_REVISION,
 };
-use newchan_rust::session_protocol::{canonical_json, positive};
+use newchan_rust::session_protocol::{canonical_json, positive, strict_json};
 use newchan_rust::session_transport::process_lock;
 use rusqlite::{Connection, OpenFlags, OptionalExtension};
 use serde_json::{json, Value};
@@ -43,9 +43,9 @@ struct Profile {
 
 impl Profile {
     fn load(path: &Path) -> Result<Self, String> {
-        let text = std::fs::read_to_string(path)
-            .map_err(|e| format!("InvalidDomain：读执行 profile 失败：{e}"))?;
-        let v: Value = serde_json::from_str(&text)
+        let raw =
+            std::fs::read(path).map_err(|e| format!("InvalidDomain：读执行 profile 失败：{e}"))?;
+        let v = strict_json(&raw)
             .map_err(|e| format!("InvalidDomain：执行 profile JSON 解析失败：{e}"))?;
         let revision = v["profile_revision"]
             .as_str()

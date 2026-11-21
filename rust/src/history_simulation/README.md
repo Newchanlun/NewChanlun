@@ -229,7 +229,7 @@ Q 来源需获 `QueryCommand` 权限；启用已有 `EconomicReadOpen/Page/Close
 3. **X 自持配置不等于 E 授权**：旧进程曾运行过或 X 本地持有 `x-profile.json`，都不能证明 E 授权过该实装模型（C3 反例 `06a767ab` 已证在 `FIN/5 + X/2` 下仅将 X 的 maker 费率分子 `1 → 10` 即可静默产生错费成交）。
 4. **不伪造兼容、不放宽 `/3`**：不得给 `/3` 增加可选 `model_ref`、不得回填或重签旧 `/5` 命令、不得靠事后拆换旧二进制或仅改版本字符串假装兼容。
 
-因此，本候选提出最小升级与退场合同：退掉可向目标真实历史 X 交付未绑定模型授权的旧写入入口，保留全部既有收据、其他 `/5` 经济写入、非历史用途、真正不可兑现的离线 C1 验算以及完整只读查询取证（涵盖全部历史正式 `/1` 世代、`/2` 与 `/3`）；新执行统一走显式 `tb03b-finance/6 + x-execution-profile/3` 新会话。
+因此，本候选提出最小升级与退场合同：退掉可向目标真实历史 X 交付未绑定模型授权的旧写入入口，保留全部既有收据、其他 `/5` 经济写入、非历史用途、真正不可兑现的离线 C1 验算以及完整只读查询取证（涵盖全部历史正式 `/1` 世代、`/2` 与 `/3`）；旧 FIN/5 会话迁至静态合同，按第 6 节另建 `tb03b-finance/6 + x-execution-profile/3` 会话。新建 FX/2 动态放行会话使用 `tb03b-finance/6 + x-execution-profile/4`，并显式声明 `history_simulation.fx_valuation_revision = "fx-valuation/2"`。
 
 ### 2. 拟定生效点、退场范围、现有能力分界与三处守门
 
@@ -323,7 +323,7 @@ Q 来源需获 `QueryCommand` 权限；启用已有 `EconomicReadOpen/Page/Close
 | `/2` X 库 `ExecutionReady` / `ExecutionRequested` + pending 批 / `MayHaveCalled` | `/3` X `serve` 预检以 `VersionUnsupported` 拒绝，不静默 checkpoint 活 WAL，不得自动重放成新外效 | 按第 4 节封存并恢复到独立可写取证目录后，用 `x_execution_session query-command` 查 `state`、`attempt_batch_id`、`attempt_batch_bar_index`、`pending_batch_id`、`pending_epoch`、`execute_evidence`、`execute_evidence_claimed_ns_audit`（`/2` 强制核验 `claimed_ns == attempt_batch.bar.index`）；`query-batch` 对未提交 pending 批报 `MissingDependency`；保留未决外效与原 E 责任 |
 | `/2` X 库已提交终态批（`Observed`，如 `b3` 含原 `fill`+`fee`） | `/3` X `serve` 拒绝续写；原批与原件零改写保留 | 恢复至可写取证目录后，用 `x_execution_session query-history` / `query-command` / `query-batch` / `query-original` 逐字节读出 `Observed`、原批（含 `originals`）、`committed_batches[*].batch_receipt_sha256` 与 `fill`+`fee` 原件；若原 E 会话满足第 3 节全部前提（已冻结 `history_simulation_source` 且 `CaptureExternal` 获准），可继续用原 E 的 `e_economic_session inspect-simulation-capture-batch` 核验并按需 `CaptureExternal` 补录 |
 
-**新历史模拟会话迁移步骤（显式 `FIN/6 + X/3`）：**
+**旧 FIN/5 历史模拟会话迁至静态合同的步骤（显式 `FIN/6 + X/3`）：**
 
 1. 固定本次拟执行的 typed `Model` JSON，计算规范内容摘要：`content_hash = sha256(canonical_json(model))`（64 位小写十六进制）。
 2. 新建独立的会话目录与全新空 S/E/B/X 库及新的 `session_id` / `session_generation`（不得原地覆写或复用旧 FIN/5 E 库或 `/2` X 库）。

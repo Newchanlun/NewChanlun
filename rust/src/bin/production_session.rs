@@ -13,6 +13,7 @@
 //!   `_redact`）过滤后写 stderr。
 //!
 //! 用法：production_session --manifest FILE
+use newchan_rust::session_protocol::strict_json;
 use newchan_rust::structure_source::Declaration;
 use serde_json::{json, Value};
 use std::collections::BTreeSet;
@@ -105,10 +106,10 @@ fn text<'a>(v: &'a Value, path: &str) -> Result<&'a str, String> {
         .ok_or_else(|| format!("InvalidDomain：manifest 缺 {path}"))
 }
 
-fn read_json(path: &Path, what: &str) -> Result<Value, String> {
-    let raw = std::fs::read_to_string(path)
+fn read_contract_json(path: &Path, what: &str) -> Result<Value, String> {
+    let raw = std::fs::read(path)
         .map_err(|e| format!("InvalidDomain：读{what} {} 失败：{e}", path.display()))?;
-    serde_json::from_str(&raw).map_err(|e| format!("InvalidDomain：{what} JSON 解析失败：{e}"))
+    strict_json(&raw).map_err(|e| format!("InvalidDomain：{what} JSON 解析失败：{e}"))
 }
 
 struct Manifest {
@@ -122,7 +123,10 @@ struct Manifest {
 
 /// 完整校验 manifest；此阶段不创建任何域文件。
 fn load_manifest(path: &Path) -> Result<Manifest, String> {
-    let raw = read_json(path, "manifest")?;
+    let doc = std::fs::read_to_string(path)
+        .map_err(|e| format!("InvalidDomain：读manifest {} 失败：{e}", path.display()))?;
+    let raw: Value = serde_json::from_str(&doc)
+        .map_err(|e| format!("InvalidDomain：manifest JSON 解析失败：{e}"))?;
     if raw["manifest_revision"].as_str() != Some(MANIFEST_REVISION) {
         return Err(format!(
             "VersionUnsupported：manifest_revision 必须是 {MANIFEST_REVISION}"
@@ -175,7 +179,7 @@ fn load_manifest(path: &Path) -> Result<Manifest, String> {
         }
     }
     let x_profile = PathBuf::from(text(&raw, "x.profile")?);
-    let xp = read_json(&x_profile, "X 执行 profile")?;
+    let xp = read_contract_json(&x_profile, "X 执行 profile")?;
     if xp["mode"].as_str() != Some(profile.as_str()) {
         return Err(format!(
             "InvalidDomain：X 执行 profile mode `{}` 与运行 profile `{profile}` 不一致",
@@ -231,7 +235,7 @@ fn check_history_simulation_assembly(
              正式装配须使用 {EXACT_PROFILE_REVISION} 或 {FX_RELEASE_PROFILE_REVISION}（旧 /1、/2 库仅供只读取证）"
         ));
     }
-    let econ = read_json(econ_path, "经济域 manifest")?;
+    let econ = read_contract_json(econ_path, "经济域 manifest")?;
     let finance_rev = econ["finance"]["schema_revision"].as_str();
     if finance_rev != Some("tb03b-finance/6") {
         return Err(format!(

@@ -22,6 +22,9 @@ use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Output, Stdio};
 use std::time::{Duration, Instant};
 
+#[path = "fixtures/issue1407_ce_s07/profile.rs"]
+mod ce_s07_profile;
+
 const SESSION: &str = "s-session-testonly-001";
 const DECLARED_NS: &str = "testonly.ohlc";
 /// 能力 manifest 中的 HL 场所 namespace（执行行情；不得进 S）。
@@ -1195,6 +1198,95 @@ fn launcher_refuses_incompatible_history_simulation_assemblies_before_writing() 
         ] {
             assert!(!db.exists(), "{case}: 不兼容装配不得创建 {}", db.display());
         }
+    }
+}
+
+#[test]
+fn launcher_and_e_refuse_duplicate_fx_revisions_before_start() {
+    use ce_s07_profile::{duplicate_revision, x_fx2_profile, FX1, FX2};
+
+    let space = Space::new();
+    let source = declaration("TestOnlyStructure", DECLARED_NS);
+    let s_db = space.s_db();
+    let xp = space.path("x-profile.json");
+    let x_profile = x_fx2_profile(&space.path("uncreated-sockets"));
+    write_json(&xp, &x_profile);
+    let manifest = launcher_manifest(
+        &space,
+        "simulation",
+        &source,
+        &s_db,
+        &space.path("limits.json"),
+        &xp,
+    );
+    let e_manifest = space.path("economic.json");
+    let mut econ: Value = serde_json::from_slice(&std::fs::read(&e_manifest).unwrap()).unwrap();
+    econ["finance"] = json!({"schema_revision": "tb03b-finance/6"});
+    econ["fx_valuation"] = json!({"schema_revision": FX2});
+    write_json(&e_manifest, &econ);
+    let run_launcher = || {
+        run_refusal(
+            Command::new(launcher_bin())
+                .arg("--manifest")
+                .arg(&manifest),
+        )
+    };
+
+    // 无冲突的 E/X 配对必须到达 start。把正控状态目录放在普通文件下，阻止实际初始化。
+    let launcher: Value = serde_json::from_slice(&std::fs::read(&manifest).unwrap()).unwrap();
+    let mut control_manifest = launcher.clone();
+    control_manifest["state_dir"] = json!(manifest.join("uncreatable"));
+    write_json(&manifest, &control_manifest);
+    let control = run_launcher();
+    let stderr = String::from_utf8_lossy(&control.stderr);
+    assert_eq!(control.status.code(), Some(2), "{stderr}");
+    assert!(stderr.contains(r#""event":"start""#), "{stderr}");
+    assert!(stderr.contains("StorageUnavailable"), "{stderr}");
+    write_json(&manifest, &launcher);
+
+    for (path, clean, key, reader) in [
+        (&xp, &x_profile, "fx_valuation_revision", "X 执行 profile"),
+        (&e_manifest, &econ, "schema_revision", "经济域 manifest"),
+    ] {
+        for (first, last) in [(FX1, FX2), (FX2, FX1)] {
+            std::fs::write(path, duplicate_revision(clean, key, first, last)).unwrap();
+            let want = format!("duplicate key {key}");
+            let out = run_launcher();
+            let stderr = String::from_utf8_lossy(&out.stderr);
+            assert_eq!(out.status.code(), Some(2), "{first} → {last}: {stderr}");
+            assert!(
+                stderr.contains(reader) && stderr.contains(&want),
+                "{first} → {last}: {stderr}"
+            );
+            assert!(!stderr.contains(r#""event":"start""#), "{stderr}");
+            if path == &e_manifest {
+                // 用同一份原始文件调用真正的 E，而非另造一份已解码样本。
+                let out = run(Command::new(env!("CARGO_BIN_EXE_e_economic_session"))
+                    .args(["init", "--manifest"])
+                    .arg(&e_manifest)
+                    .arg("--db")
+                    .arg(space.path("e.db")));
+                let stderr = String::from_utf8_lossy(&out.stderr);
+                assert_eq!(out.status.code(), Some(1), "{first} → {last}: {stderr}");
+                assert!(stderr.contains(&want), "{first} → {last}: {stderr}");
+                assert!(out.stdout.is_empty());
+            }
+            assert!(!space.path("launcher-state").exists());
+            for db in [
+                s_db.clone(),
+                space.path("e.db"),
+                space.path("b.db"),
+                space.path("x.db"),
+            ] {
+                assert!(!db.exists(), "不应建库：{}", db.display());
+                assert!(
+                    !db.with_extension("db.writer.lock").exists(),
+                    "不应持锁：{}",
+                    db.display()
+                );
+            }
+        }
+        write_json(path, clean);
     }
 }
 
