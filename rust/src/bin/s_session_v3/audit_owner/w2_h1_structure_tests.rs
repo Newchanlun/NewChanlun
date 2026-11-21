@@ -336,11 +336,13 @@ fn w2_h1_roundtrip_selected(
             Err(error) => {
                 assert_eq!(first_refusal, Some(n), "在线第 {n} 代意外拒绝：{error}");
                 issue1642_assert_parent_refusal(&error, &allocations, &refusals);
+                let previous = issue1642_persisted_receipt(&f.db, n as i64 - 1);
+                assert_eq!(previous["status"], "Committed");
                 let pending = issue1642_persisted_receipt(&f.db, n as i64);
                 assert_eq!(pending["status"], "AcceptedPending");
                 assert!(pending["batch_id"].is_null());
                 println!(
-                    "M8D_P3_RECEIPT lock={} g={n} outcome=parent_refused pending={pending}",
+                    "M8D_P3_RECEIPT lock={} g={n} outcome=parent_refused previous={previous} pending={pending}",
                     lock.unwrap().name,
                 );
                 break;
@@ -769,8 +771,9 @@ fn w2_h1_cold_ef_seed_pair_qualification_and_canonical_matches_online() {
     M8D_P3_LOCK.with(|l| {
         l.set(Some(M8dP3Lock {
             name: "ef",
-            // 签署值 V 下 EF 在本代首拒（签署记录第 3、4 条），归轨道二 #1642；轨道二交付后再改 None。
-            first_refusal: Some(76),
+            // #1642：原 V 下 g76、g77 已提交，g78 来源扩容全通过后在父分域首拒。
+            // 父预算问题解决并实跑 107 代后改 None；当前锁逐位比对可发布前缀。
+            first_refusal: Some(78),
         }))
     });
     let envelopes: Vec<_> = w2_h1_ef_rows()
