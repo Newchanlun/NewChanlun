@@ -245,11 +245,21 @@ _NON_BLOCKING_BODY_HIT_RE = re.compile(
     r")",
     re.IGNORECASE,
 )
-_ZH_STANDALONE_CLAUSE_BOUNDARY_RE = re.compile(r"[。！？!?；;，,：:（(【\[]")
-_ZH_STANDALONE_VERDICT_PREFIX_RE = re.compile(
-    r"^(?:(?:所以|因此|故此|故|从而|于是|但是|但|不过|然而|暂时|暂|仍然|仍|"
-    r"本条|该条|本项|该项|此项|此问题|该问题|这里|此处|这|目前|当前|因而|"
-    r"均|都|也|亦|先|且|并|属于|属)\s*)*$"
+_ZH_VERDICT_SENTENCE_BOUNDARY_RE = re.compile(r"[。！？!?；;：:（(【\[]")
+_ZH_VERDICT_CLAUSE_BOUNDARY_RE = re.compile(r"[。！？!?；;，,：:（(【\[]")
+_ZH_REVIEW_SUBJECT_PATTERN = (
+    r"(?:"
+    r"(?:本|该|此)(?:次|轮|条|项|处)\s*(?:评审|审查|复审|review)?|"
+    r"(?:本|该|此)?(?:评审|审查|复审)|"
+    r"(?:本|该|此)(?:问题|发现|告警|差异)"
+    r")"
+)
+_ZH_BARE_NON_BLOCKING_LEAD_RE = re.compile(
+    r"^(?:"
+    rf"(?:(?:但是|但|不过|然而)\s*)?{_ZH_REVIEW_SUBJECT_PATTERN}|"
+    rf"(?:所以|因此|故此|因而|从而|故)(?:\s*{_ZH_REVIEW_SUBJECT_PATTERN})?"
+    r")(?:\s*(?:暂时|暂|先|仍然|仍|均|都|也|亦))*$",
+    re.IGNORECASE,
 )
 _BODY_CLAUSE_BOUNDARY_RE = re.compile(r"[。！？!?；;，,]")
 _BODY_CONJUNCTION_RESET_RE = re.compile(
@@ -1665,9 +1675,12 @@ def _is_negated_body_prefix(prefix: str) -> bool:
 
 
 def _is_standalone_zh_verdict_clause_prefix(prefix: str) -> bool:
-    """判断裸“不阻断”所在当前子句前缀是否为独立评审结论位（空或仅含纯评审结论引导词）。"""
-    clause_prefix = _ZH_STANDALONE_CLAUSE_BOUNDARY_RE.split(prefix)[-1].strip()
-    return bool(_ZH_STANDALONE_VERDICT_PREFIX_RE.fullmatch(clause_prefix))
+    """判断裸“不阻断”前文是否为句/括号级空前缀，或由显式评审主语/因果结论词引导。"""
+    sentence_prefix = _ZH_VERDICT_SENTENCE_BOUNDARY_RE.split(prefix)[-1].strip()
+    if sentence_prefix == "":
+        return True
+    clause_prefix = _ZH_VERDICT_CLAUSE_BOUNDARY_RE.split(prefix)[-1].strip()
+    return bool(clause_prefix and _ZH_BARE_NON_BLOCKING_LEAD_RE.fullmatch(clause_prefix))
 
 
 def _has_non_blocking_body_signal(text: str) -> bool:

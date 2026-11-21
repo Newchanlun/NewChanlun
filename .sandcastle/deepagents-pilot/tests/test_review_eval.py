@@ -5510,7 +5510,7 @@ def test_r20_tag_exact_token_clause_negation_and_body_quote_modifier_penetration
     # 正文正例：因果/转折词后及逗号分句后的肯定非阻断措辞不被前文否定误排
     for body_affirmative in (
         "没有影响所以不构成阻断",
-        "文件不存在，但不阻断",
+        "文件不存在，但本条不阻断",
         "不是大问题，所以非阻断",
         "并非核心路径，因此不作为阻断理由",
         "并非致命缺陷但属于非阻断",
@@ -5788,17 +5788,59 @@ def test_r24_colon_dot_gate_terminators_and_bare_non_blocking_clause_guard() -> 
             runtime_action_blocking
         )
 
+    # 注：裸逗号无主语的“，不阻断”/“，但不阻断”/“，目前暂不阻断”与运行态“系统只告警，不阻断”句法同构，
+    # 历史 583-run 2,578 条无标签发现中 0 条依赖裸逗号空前缀，默认保守归阻断；此处使用句界或显式评审/因果主语。
     for standalone_verdict_nb in (
-        "这是精度问题，不阻断。",
+        "这是精度问题。不阻断。",
+        "这是精度问题，因此不阻断。",
         "不在 CI 路径上，所以不阻断。",
-        "文件不存在，但不阻断。",
+        "文件不存在，但本条不阻断。",
         "小问题（不阻断）。",
         "不阻断。",
         "不阻断.",
-        "问题影响面极小，目前暂不阻断。",
+        "问题影响面极小，因此暂不阻断。",
         "仅影响日志格式，本项不阻断：后续清理即可。",
     ):
         assert is_non_blocking_or_nit_finding(standalone_verdict_nb, "blocked") is True, standalone_verdict_nb
         assert classify_finding_heuristic(standalone_verdict_nb, "blocked") == "non_blocking_or_nit", (
             standalone_verdict_nb
         )
+
+
+def test_r25_sentence_boundary_and_explicit_review_subject_lead_for_bare_non_blocking() -> None:
+    # Important 1：禁止逗号放行空前缀或裸“但”/“暂”，覆盖运行态逗号切分与否定引用反例
+    for runtime_or_negated_blocking in (
+        "鉴权失败后，系统只告警、不阻断，未授权写入仍然成功。",
+        "鉴权失败后，系统只告警，不阻断，未授权写入仍然成功。",
+        "鉴权失败后，系统只告警，不阻断。",
+        "鉴权失败后，系统只告警，但不阻断，未授权写入仍然成功。",
+        "鉴权失败后，系统降级，暂不阻断，未授权写入仍然成功。",
+        "鉴权失败后，系统降级，目前暂不阻断，未授权写入仍然成功。",
+        "这并非“本次评审不阻断”，必须修复。",
+    ):
+        assert is_non_blocking_or_nit_finding(runtime_or_negated_blocking, "blocked") is False, (
+            runtime_or_negated_blocking
+        )
+        assert classify_finding_heuristic(runtime_or_negated_blocking, "blocked") == "blocking_substantive", (
+            runtime_or_negated_blocking
+        )
+
+    # Important 2：支持句/括号级空前缀，以及显式评审/条目主语或因果结论词引导的裸“不阻断”
+    for explicit_verdict_nb in (
+        "仅日志文案有误，本次评审不阻断。",
+        "仅日志文案有误，本轮 review 暂不阻断。",
+        "仅日志文案有误，此次审查不阻断。",
+        "仅日志文案有误，本条不阻断。",
+        "文件不存在，但本条不阻断。",
+        "行为上是停摆而非误放，因此不阻断，但应在后续对齐。",
+        "不在 CI 路径上，所以不阻断。",
+        "小问题（不阻断）。",
+        "结论：不阻断。",
+        "不阻断。",
+        "仅影响文档。不阻断。",
+        "不阻断 PR：仅需补一条注释。",
+        "不阻断 PR.",
+        "该告警不阻断 CI，可延后处理。",
+    ):
+        assert is_non_blocking_or_nit_finding(explicit_verdict_nb, "blocked") is True, explicit_verdict_nb
+        assert classify_finding_heuristic(explicit_verdict_nb, "blocked") == "non_blocking_or_nit", explicit_verdict_nb
