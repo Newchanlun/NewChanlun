@@ -35,7 +35,10 @@ impl Request {
         if raw.len() as u64 > REQUEST_LIMIT {
             return Err("InvalidDomain：恢复请求超过上限".into());
         }
-        let document = strict_json(&raw)?;
+        Self::parse(strict_json(&raw)?, config)
+    }
+
+    fn parse(document: Value, config: &Config) -> Result<Self, String> {
         if document.as_object().map(|object| object.len()) != Some(8)
             || document["schema_revision"] != SCHEMA
         {
@@ -152,6 +155,26 @@ pub(super) fn run(config: &Config, request: &Request, action: Action) -> Result<
     .map_err(err)?;
     tx.commit().map_err(err)?;
     Ok(original)
+}
+
+/// X 已由受控启动方收到 current-recovery 原件后，在原 E 库上做只读复核。
+/// 与 CLI 共用域审计、原 cut、历史收据和当前 epoch 判据；不竞争在线 E 的写者锁。
+#[cfg(unix)]
+pub(crate) fn verify_x_current_recovery(
+    manifest: &Path,
+    db: &Path,
+    socket: &str,
+    receipt: &Value,
+) -> Result<(), String> {
+    let config = Config::load(manifest, db, None)?;
+    if config.deployment.is_none() || config.socket != Path::new(socket) {
+        return Err("IdentityConflict：X 恢复要求原新版 E 部署".into());
+    }
+    let request = Request::parse(receipt["request"].clone(), &config)?;
+    if run(&config, &request, Action::VerifyCurrent)? != *receipt {
+        return Err("IdentityConflict：X 的 E 恢复回执与域本地原件不同".into());
+    }
+    Ok(())
 }
 
 #[cfg(test)]

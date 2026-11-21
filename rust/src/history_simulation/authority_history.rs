@@ -1,0 +1,302 @@
+//! ADR 0073：每条历史事件核当时唯一权威绑定；当前查询不能重写原执行证明。
+use super::{
+    authority_binding::History, authority_frame, authority_reply, error, logical_now,
+    query_execution_frame, validate_accept_clock, validate_execution_record, AcceptClock,
+    ExactCommand, Profile,
+};
+use crate::session_protocol::{canonical_json, strict_json};
+use rusqlite::{params, Connection};
+use serde_json::{json, Value};
+
+pub(super) fn record(
+    c: &Connection,
+    history: Option<&History>,
+    id: &str,
+    phase: &str,
+    original: Value,
+) -> Result<(), String> {
+    if let Some(h) = history {
+        c.execute(
+            "INSERT INTO x_authority_events(command_id,phase,binding_seq,original) VALUES(?1,?2,?3,?4)",
+            params![id, phase, h.current_seq(), canonical_json(&original)],
+        ).map_err(error)?;
+    }
+    Ok(())
+}
+
+pub(super) struct Event {
+    seq: i64,
+    pub(super) binding_seq: i64,
+    phase: String,
+    pub(super) original: Value,
+}
+
+fn read_events(c: &Connection, h: &History, id: &str) -> Result<Vec<Event>, String> {
+    let mut q = c.prepare(
+        "SELECT event_seq,phase,binding_seq,original FROM x_authority_events WHERE command_id=?1 ORDER BY event_seq",
+    ).map_err(error)?;
+    let rows = q
+        .query_map([id], |r| {
+            Ok((
+                r.get::<_, i64>(0)?,
+                r.get::<_, String>(1)?,
+                r.get::<_, i64>(2)?,
+                r.get::<_, String>(3)?,
+            ))
+        })
+        .map_err(error)?;
+    let mut events = Vec::new();
+    for row in rows {
+        let (seq, phase, binding_seq, raw) = row.map_err(error)?;
+        let original = strict_json(raw.as_bytes())?;
+        if h.seq_at_event(seq) != binding_seq || raw != canonical_json(&original) {
+            return Err(conflict("历史事件与发生时的绑定或规范原件不符"));
+        }
+        events.push(Event {
+            seq,
+            binding_seq,
+            phase,
+            original,
+        });
+    }
+    Ok(events)
+}
+
+pub(super) fn attempt(c: &Connection, h: &History, id: &str) -> Result<Event, String> {
+    read_events(c, h, id)?
+        .into_iter()
+        .find(|e| e.phase == "request")
+        .ok_or_else(|| conflict("原 S 尝试不存在"))
+}
+
+fn conflict(s: &str) -> String {
+    format!("IdentityConflict：{s}")
+}
+
+fn check_original_shape(value: &Value, fields: &[&str]) -> Result<(), String> {
+    if value
+        .as_object()
+        .is_some_and(|o| o.len() == fields.len() && fields.iter().all(|f| o.contains_key(*f)))
+    {
+        Ok(())
+    } else {
+        Err(conflict("缺原交换或因果字段"))
+    }
+}
+struct CommandRow {
+    id: String,
+    raw: String,
+    state: String,
+    release: String,
+    accept_clock: String,
+    release_evidence: String,
+    attempt: Option<String>,
+    execution: Option<String>,
+}
+
+fn command_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<CommandRow> {
+    Ok(CommandRow {
+        id: r.get(0)?,
+        raw: r.get(1)?,
+        state: r.get(2)?,
+        release: r.get(3)?,
+        accept_clock: r.get(4)?,
+        release_evidence: r.get(5)?,
+        attempt: r.get(6)?,
+        execution: r.get(7)?,
+    })
+}
+
+const COMMANDS: &str = "SELECT id,command,state,release_receipt,accept_clock,release_evidence,attempt_batch,execute_evidence FROM x_exact_commands";
+
+fn verify(
+    c: &Connection,
+    genesis: &Profile,
+    h: &History,
+    epoch: i64,
+    row: &CommandRow,
+) -> Result<Vec<Event>, String> {
+    let events = read_events(c, h, &row.id)?;
+    let expected: &[&str] = match row.state.as_str() {
+        "Accepted" => &["accept"],
+        "ExecutionRequested" => &["accept", "request"],
+        "ExecutionReady" => &["accept", "request", "evidence"],
+        "MayHaveCalled" => &["accept", "request", "evidence", "claim"],
+        "Observed" => &["accept", "request", "evidence", "claim", "observe"],
+        _ => return Err(conflict("命令状态未知")),
+    };
+    if !events
+        .iter()
+        .map(|e| e.phase.as_str())
+        .eq(expected.iter().copied())
+    {
+        return Err(conflict("命令阶段与不可变事件不相符"));
+    }
+    let command: ExactCommand = serde_json::from_str(&row.raw).map_err(error)?;
+    let accept = &events[0];
+    let p = h.profile_at(genesis, accept.binding_seq)?;
+    command.validate(&p, epoch)?;
+    if command.command_id != row.id || super::encode(&command)? != row.raw {
+        return Err(conflict("接纳原命令身份或规范字节不符"));
+    }
+    let doc = &accept.original;
+    check_original_shape(doc, &["request", "reply", "clock"])?;
+    let frame = authority_frame(&p, &p.e, epoch, "QueryReleasedExact", &command, None)?;
+    if doc["request"] != frame.envelope {
+        return Err(conflict("原 E 请求不符"));
+    }
+    let released = authority_reply(
+        &p,
+        &p.e,
+        "QueryReleasedExact",
+        &command,
+        None,
+        &frame,
+        &doc["reply"],
+    )?;
+    let clock: AcceptClock = serde_json::from_value(doc["clock"].clone()).map_err(error)?;
+    validate_accept_clock(&clock, released.commit_ns)?;
+    if released.receipt_id != row.release
+        || super::encode(&released)? != row.release_evidence
+        || super::encode(&clock)? != row.accept_clock
+    {
+        return Err(conflict("接纳原回执或接纳时钟不符"));
+    }
+    let Some(attempt) = events.get(1) else {
+        return Ok(events);
+    };
+    let original = &attempt.original;
+    check_original_shape(original, &["request", "batch"])?;
+    let old = h.profile_at(genesis, attempt.binding_seq)?;
+    let request = authority_frame(
+        &old,
+        &old.s,
+        epoch,
+        "RequestConditionalExecution",
+        &command,
+        Some(&row.release),
+    )?;
+    if original["request"] != request.envelope
+        || Some(canonical_json(&original["batch"]).as_str()) != row.attempt.as_deref()
+        || original["batch"]["bar"]["index"]
+            .as_i64()
+            .is_none_or(|t| t < clock.commit_ns)
+    {
+        return Err(conflict("原 S 尝试的请求/归属批/时钟不符"));
+    }
+    let Some(evidence) = events.get(2) else {
+        return Ok(events);
+    };
+    let doc = &evidence.original;
+    check_original_shape(doc, &["original_reply", "observed_query", "claimed_ns"])?;
+    let executed = authority_reply(
+        &old,
+        &old.s,
+        "RequestConditionalExecution",
+        &command,
+        Some(&row.release),
+        &request,
+        &doc["original_reply"],
+    )?;
+    if doc["observed_query"].is_null() {
+        if evidence.binding_seq != attempt.binding_seq {
+            return Err(conflict("直接执行的证据不能跨绑定"));
+        }
+    } else {
+        let query = &doc["observed_query"];
+        check_original_shape(query, &["request", "reply", "read_ns"])?;
+        let active = h.profile_at(genesis, evidence.binding_seq)?;
+        let current =
+            query_execution_frame(&active, epoch, &command, &row.release, &request.envelope)?;
+        if query["request"] != current.envelope
+            || super::verified_query_original(&active, &current, &query["reply"])?
+                != &doc["original_reply"]
+            || query["read_ns"] != doc["claimed_ns"]
+        {
+            return Err(conflict("当前查询不是原 S 请求的已提交证据"));
+        }
+    }
+    let execution = json!({"reply":executed,"claimed_ns":doc["claimed_ns"]});
+    validate_execution_record(&old, &command, &row.release, &execution)?;
+    if doc["claimed_ns"] != original["batch"]["bar"]["index"]
+        || Some(canonical_json(&execution).as_str()) != row.execution.as_deref()
+    {
+        return Err(conflict("执行原件/时钟与原批次不符"));
+    }
+    if let Some(claim) = events.get(3) {
+        if claim.original != json!({"batch":original["batch"],"evidence_event_seq":evidence.seq}) {
+            return Err(conflict("调用占有未绑定原批及资格"));
+        }
+        if let Some(observed) = events.get(4) {
+            if observed.original != json!({"batch":original["batch"],"claim_event_seq":claim.seq}) {
+                return Err(conflict("批次提交未绑定唯一调用占有"));
+            }
+        }
+    }
+    Ok(events)
+}
+
+pub(super) fn audit(
+    c: &Connection,
+    genesis: &Profile,
+    h: &History,
+    epoch: i64,
+) -> Result<(), String> {
+    let mut q = c.prepare(COMMANDS).map_err(error)?;
+    let rows = q.query_map([], command_row).map_err(error)?;
+    let mut expected = 0i64;
+    for row in rows {
+        expected += verify(c, genesis, h, epoch, &row.map_err(error)?)?.len() as i64;
+    }
+    let (count, min, max): (i64, i64, i64) = c.query_row(
+        "SELECT COUNT(*),COALESCE(MIN(event_seq),1),COALESCE(MAX(event_seq),0) FROM x_authority_events",
+        [], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+    ).map_err(error)?;
+    if count != expected || min != 1 || max != count {
+        return Err(conflict("有缺失、游离或不连续的权威事件"));
+    }
+    Ok(())
+}
+
+pub(super) fn query(
+    c: &Connection,
+    genesis: &Profile,
+    h: &History,
+    epoch: i64,
+    id: &str,
+) -> Result<Value, String> {
+    use rusqlite::OptionalExtension;
+    let Some(row) = c
+        .query_row(&format!("{COMMANDS} WHERE id=?1"), [id], command_row)
+        .optional()
+        .map_err(error)?
+    else {
+        return Ok(
+            json!({"kind":"ExactCommandState","command_id":id,"state":"NoRecord",
+            "current_binding_seq":h.current_seq(),"read_ns":logical_now(c)?}),
+        );
+    };
+    let events = verify(c, genesis, h, epoch, &row)?;
+    let accept = &events[0];
+    let reply = &accept.original["reply"]["payload"];
+    let history: Vec<Value> = events.iter().map(|e|
+        json!({"event_seq":e.seq,"binding_seq":e.binding_seq,"phase":e.phase,"original":e.original})
+    ).collect();
+    Ok(
+        json!({"kind":"ExactCommandState","command_id":id,"state":row.state,
+        "current_binding_seq":h.current_seq(),"read_ns":logical_now(c)?,
+        "x_accept":accept.original["clock"],
+        "causal_refs":[{"authority_id":reply["authority_id"],"authority_epoch":reply["authority_epoch"],
+            "receipt_id":row.release,"command_hash":reply["command_hash"],"release_commit_ns":reply["commit_ns"]}],
+        "authority_history":history}),
+    )
+}
+
+pub(super) fn link(c: &Connection, id: &str, phase: &str) -> Result<i64, String> {
+    c.query_row(
+        "SELECT event_seq FROM x_authority_events WHERE command_id=?1 AND phase=?2",
+        [id, phase],
+        |r| r.get(0),
+    )
+    .map_err(error)
+}

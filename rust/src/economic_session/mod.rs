@@ -17,6 +17,8 @@ mod financial_reader_resources;
 mod phase_trace;
 mod quantity_calibration;
 mod recovery;
+#[cfg(unix)]
+pub(crate) use recovery::verify_x_current_recovery;
 mod service;
 mod sr_expansion;
 mod store;

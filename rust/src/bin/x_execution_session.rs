@@ -11,13 +11,15 @@
 //!   x_execution_session query --db FILE
 //!   x_execution_session submit|cancel --db FILE      （恒 UnsupportedCapability）
 use newchan_rust::history_simulation::runtime::{
-    audit_persisted, validate_execution_profile_header, ConfiguredProfile,
+    audit_persisted, validate_execution_profile_header, ConfiguredProfile, RebindInput,
 };
 use newchan_rust::session_protocol::{positive, strict_json};
 use newchan_rust::session_transport::process_lock;
 use rusqlite::{Connection, OpenFlags, OptionalExtension};
 use serde_json::{json, Value};
 use std::collections::BTreeMap;
+use std::io::Read;
+use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
 use std::path::Path;
 use std::time::Duration;
 
@@ -168,12 +170,69 @@ fn args() -> Result<(String, BTreeMap<String, String>), String> {
         .ok_or("usage: serve|query|submit|cancel --db FILE ...")?;
     let mut opts = BTreeMap::new();
     while let Some(k) = it.next() {
-        if !["--db", "--profile", "--writer-epoch"].contains(&k.as_str()) || opts.contains_key(&k) {
+        if (!["--db", "--profile", "--writer-epoch"].contains(&k.as_str())
+            && !(command == "serve" && k == "--authority-rebind"))
+            || opts.contains_key(&k)
+        {
             return Err(format!("InvalidDomain：未知/重复参数 {k}"));
         }
         opts.insert(k, it.next().ok_or("InvalidDomain：参数缺值")?);
     }
     Ok((command, opts))
+}
+
+fn read_rebind(path: &Path) -> Result<RebindInput, String> {
+    // 私有受控启动输入；禁止代理到 socket、symlink 或阻塞型设备。
+    let file = std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+        .open(path)
+        .map_err(err)?;
+    let metadata = file.metadata().map_err(err)?;
+    if !metadata.is_file() || metadata.mode() & 0o077 != 0 {
+        return Err("InvalidDomain：重绑输入必须是仅启动方可访问的普通文件".into());
+    }
+    let mut raw = Vec::new();
+    const LIMIT: usize = 16_384;
+    file.take((LIMIT + 1) as u64)
+        .read_to_end(&mut raw)
+        .map_err(err)?;
+    if raw.len() > LIMIT {
+        return Err("InvalidDomain：重绑输入超过上限".into());
+    }
+    RebindInput::parse(&raw)
+}
+
+fn rebind(
+    db: &Path,
+    profile: &Profile,
+    simulation: &ConfiguredProfile,
+    epoch: i64,
+    path: &Path,
+) -> Result<(), String> {
+    let input = read_rebind(path)?;
+    if !db.is_file() {
+        return Err("MissingDependency：重绑要求原 X 库".into());
+    }
+    let _lock = process_lock(db, "X")?;
+    // 不走普通创建路径；即使指定了不存在、未初始化或旧版库，也不执行 DDL/迁移。
+    let mut conn =
+        Connection::open_with_flags(db, OpenFlags::SQLITE_OPEN_READ_WRITE).map_err(err)?;
+    conn.execute_batch("PRAGMA synchronous=FULL; PRAGMA fullfsync=ON; PRAGMA foreign_keys=ON;")
+        .map_err(err)?;
+    let tx = conn
+        .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+        .map_err(err)?;
+    if meta_get(&tx, "writer_epoch")?.as_deref() != Some(epoch.to_string().as_str())
+        || meta_get(&tx, "profile_revision")?.as_deref() != Some(profile.revision.as_str())
+        || meta_get(&tx, "profile_mode")?.as_deref() != Some("simulation")
+        || meta_get(&tx, "history_simulation")?.as_deref() != Some("true")
+    {
+        return Err("IdentityConflict：重绑不可改变原 X 写者或 profile".into());
+    }
+    simulation.rebind_in_transaction(&tx, epoch, &input)?;
+    tx.commit().map_err(err)?;
+    simulation.serve(&mut conn, epoch)
 }
 
 fn run() -> Result<(), String> {
@@ -190,6 +249,13 @@ fn run() -> Result<(), String> {
             let epoch = positive(get("--writer-epoch")?, "writer_epoch")?;
             if let Some(simulation) = &profile.history_simulation {
                 simulation.check_serve_deployment(db)?;
+            }
+            if let Some(path) = opts.get("--authority-rebind") {
+                let simulation = profile
+                    .history_simulation
+                    .as_ref()
+                    .ok_or("InvalidDomain：重绑只用于 simulation X")?;
+                return rebind(db, &profile, simulation, epoch, Path::new(path));
             }
             let _lock = process_lock(db, "X")?;
             let (mut conn, storage) = newchan_rust::economic_session::open_durable_db(db)?;

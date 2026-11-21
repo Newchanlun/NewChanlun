@@ -15,6 +15,13 @@ use std::os::unix::{fs::MetadataExt, net::UnixStream};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
+#[path = "authority_binding.rs"]
+mod authority_binding;
+#[path = "authority_history.rs"]
+mod authority_history;
+pub use authority_binding::RebindInput;
+use authority_binding::{Domains, History, Identities};
+
 pub const WIRE: &str = "x-exact-simulation/1";
 pub const AUTHORITY_WIRE: &str = "x-exact-authority/1";
 const EXECUTION_PROFILE_V1: &str = "x-execution-profile/1";
@@ -43,6 +50,9 @@ pub fn validate_execution_profile_header(
 }
 fn hash<T: Serialize>(v: &T) -> String {
     sha256_hex(canonical_json(&serde_json::to_value(v).expect("integer domain")).as_bytes())
+}
+fn encode<T: Serialize>(value: &T) -> Result<String, String> {
+    Ok(canonical_json(&serde_json::to_value(value).map_err(error)?))
 }
 fn error(e: impl std::fmt::Display) -> String {
     format!("InvalidDomain：{e}")
@@ -110,6 +120,7 @@ impl AuthorityIdentity {
 #[serde(deny_unknown_fields)]
 struct BusinessProfile {
     schema_revision: String,
+    recovery_identity: Option<Identities>,
     model: Model,
     session_id: String,
     session_generation: String,
@@ -179,6 +190,7 @@ impl BusinessProfile {
 #[serde(deny_unknown_fields)]
 struct Deployment {
     schema_revision: String,
+    recovery_domains: Option<Domains>,
     db: String,
     socket: String,
     e_socket: String,
@@ -196,6 +208,7 @@ struct SplitProfile {
 pub struct ConfiguredProfile {
     profile: Profile,
     binding: Option<(Value, Value)>,
+    recovery: Option<(Identities, Domains)>,
 }
 impl ConfiguredProfile {
     pub fn parse(value: Value) -> Result<Self, String> {
@@ -211,6 +224,7 @@ impl ConfiguredProfile {
         Ok(Self {
             profile,
             binding: None,
+            recovery: None,
         })
     }
     fn split(business: Value, deployment: Value) -> Result<Self, String> {
@@ -227,6 +241,14 @@ impl ConfiguredProfile {
             return Err("InvalidDomain：X 部署位置非法".into());
         }
         b.validate_identity()?;
+        let recovery = match (b.recovery_identity, d.recovery_domains) {
+            (Some(identity), Some(domains)) => {
+                domains.validate(&d.db)?;
+                Some((identity, domains))
+            }
+            (None, None) => None,
+            _ => return Err(error("新版 X 的恢复身份与部署须同时固定")),
+        };
         let profile = Profile {
             model: b.model,
             session_id: b.session_id,
@@ -242,9 +264,13 @@ impl ConfiguredProfile {
             max_frame_bytes: b.max_frame_bytes,
         };
         profile.validate()?;
+        if let Some((identity, _)) = &recovery {
+            identity.validate(&profile)?;
+        }
         Ok(Self {
             profile,
             binding: Some((business, deployment)),
+            recovery,
         })
     }
     fn check_db(&self, db: &Path) -> Result<(), String> {
@@ -278,10 +304,47 @@ impl ConfiguredProfile {
         c: &rusqlite::Transaction<'_>,
         epoch: i64,
     ) -> Result<(), String> {
-        initialize_bound(c, &self.profile, self.binding.as_ref(), epoch)
+        initialize_bound(
+            c,
+            &self.profile,
+            self.binding.as_ref(),
+            self.identities(),
+            epoch,
+        )
     }
+    fn identities(&self) -> Option<&Identities> {
+        self.recovery.as_ref().map(|(identities, _)| identities)
+    }
+
+    /// 既有库、持有原 X writer lock；启动方不得用此入口初始化。
+    pub fn rebind_in_transaction(
+        &self,
+        c: &rusqlite::Transaction<'_>,
+        epoch: i64,
+        input: &RebindInput,
+    ) -> Result<(), String> {
+        let (identities, domains) = self
+            .recovery
+            .as_ref()
+            .ok_or("IdentityConflict：原 X 库没有创世恢复合同，不允许就地升级")?;
+        let history = validate_bound(
+            c,
+            &self.profile,
+            self.binding.as_ref(),
+            Some(identities),
+            epoch,
+        )?
+        .ok_or("IdentityConflict：恢复要求已初始化的 X 原库")?;
+        history.append(c, &self.profile, identities, domains, input)
+    }
+
+    /// bin 已在原 writer lock 下提交初始化/重绑事务，之后才能发布 socket。
     pub fn serve(&self, c: &mut Connection, epoch: i64) -> Result<(), String> {
-        serve_bound(c, &self.profile, self.binding.as_ref(), epoch)
+        let history = self
+            .identities()
+            .map(|ids| History::load(c, &self.profile, epoch, ids))
+            .transpose()?;
+        serve_initialized(c, &self.profile, history.as_ref(), epoch)
     }
 }
 
@@ -405,7 +468,14 @@ pub fn audit_persisted(c: &Connection) -> Result<(), String> {
     } else {
         ConfiguredProfile::legacy(business)?
     };
-    validate_bound(c, &config.profile, config.binding.as_ref(), epoch)
+    validate_bound(
+        c,
+        &config.profile,
+        config.binding.as_ref(),
+        config.identities(),
+        epoch,
+    )
+    .map(|_| ())
 }
 
 impl Profile {
@@ -673,7 +743,7 @@ fn audit_accepts(c: &Connection, p: &Profile) -> Result<(), String> {
     }
     Ok(())
 }
-fn audit_execution(c: &Connection, p: &Profile) -> Result<(), String> {
+fn audit_execution(c: &Connection, p: &Profile, history: Option<&History>) -> Result<(), String> {
     let pending = store::pending_batch(c)?;
     let mut required = std::collections::BTreeMap::new();
     let mut q = c
@@ -759,7 +829,9 @@ fn audit_execution(c: &Connection, p: &Profile) -> Result<(), String> {
                     evidence.as_deref().ok_or("IdentityConflict：执行缺S原件")?,
                 )
                 .map_err(error)?;
-                validate_execution_record(p, &command, &release, &evidence)?;
+                if history.is_none() {
+                    validate_execution_record(p, &command, &release, &evidence)?;
+                }
             }
         } else if state != "Accepted" || attempt.is_some() || evidence.is_some() {
             return Err("IdentityConflict：游离执行命令".into());
@@ -828,6 +900,14 @@ fn authority_frame(
     release: Option<&str>,
 ) -> Result<AuthorityFrame, String> {
     let payload = json!({"op":op,"protocol":AUTHORITY_WIRE,"session_id":p.session_id,"session_generation":p.session_generation,"authority_id":a.authority_id,"authority_epoch":a.authority_epoch,"command_id":command.command_id,"command_hash":hash(command),"command":command,"release_receipt_id":release});
+    checked_frame(p, a, epoch, payload)
+}
+fn checked_frame(
+    p: &Profile,
+    a: &Authority,
+    epoch: i64,
+    payload: Value,
+) -> Result<AuthorityFrame, String> {
     let payload_hash = sha256_hex(canonical_json(&payload).as_bytes());
     let envelope = json!({"schema_revision":a.schema_revision,"session_id":p.session_id,"session_generation":p.session_generation,"source_namespace":p.source_namespace,"source_epoch":p.source_epoch,"message_id":format!("x-authority-{payload_hash}"),"producer_id":p.x_id,"producer_epoch":epoch.to_string(),"payload_hash":payload_hash,"causal_refs":[],"payload":payload});
     let mut bytes = canonical_json(&envelope).into_bytes();
@@ -841,22 +921,46 @@ fn authority_frame(
 fn authority_connect(a: &Authority) -> Result<UnixStream, String> {
     UnixStream::connect(&a.socket).map_err(io)
 }
+/// 当前 S 的只读查询显式携带发生时的原请求；查询不能变成新的资格申请。
+fn query_execution_frame(
+    p: &Profile,
+    epoch: i64,
+    command: &ExactCommand,
+    release: &str,
+    attempt: &Value,
+) -> Result<AuthorityFrame, String> {
+    let frame = authority_frame(
+        p,
+        &p.s,
+        epoch,
+        "QueryExecuteCommitted",
+        command,
+        Some(release),
+    )?;
+    let mut payload = frame.envelope["payload"].clone();
+    payload["original_attempt"] = attempt.clone();
+    checked_frame(p, &p.s, epoch, payload)
+}
+
 fn authority_exchange(
     p: &Profile,
-    a: &Authority,
-    op: &str,
-    command: &ExactCommand,
-    release: Option<&str>,
     mut stream: UnixStream,
     frame: &AuthorityFrame,
-) -> Result<AuthorityReply, String> {
-    // 权威期限只量这次交换。连接之后、写帧之前 X 先持久 ExecutionRequested（synchronous=FULL），
-    // 本地落盘不计入对端期限：否则慢盘会在一个字节都没发出时超时，命令却已标成「可能已发出」，
-    // 只能查询 S 的 NoRecord，永远卡住（#1407 C2，CI run 42772775704）。
+) -> Result<Value, String> {
+    // 连接之后、写帧之前 X 先持久 ExecutionRequested（synchronous=FULL）。
+    // 本地落盘不计入对端期限，不能在一个字节未发时误入只读恢复（#1407 C2）。
     let deadline = Instant::now() + Duration::from_millis(p.timeout_ms);
     write_frame_observed(&mut stream, &frame.bytes, deadline, &mut NoObserver)?;
     stream.shutdown(std::net::Shutdown::Write).map_err(io)?;
-    let reply = read_frame(&mut stream, p.max_frame_bytes, deadline, json_frame)?;
+    read_frame(&mut stream, p.max_frame_bytes, deadline, json_frame)
+}
+
+fn checked_payload<'a>(
+    p: &Profile,
+    a: &Authority,
+    frame: &AuthorityFrame,
+    reply: &'a Value,
+) -> Result<&'a Value, String> {
     let expected = reply_envelope(
         &frame.envelope,
         reply["payload"].clone(),
@@ -867,7 +971,7 @@ fn authority_exchange(
         &a.producer_id,
         &a.authority_epoch,
     );
-    if reply != expected {
+    if *reply != expected {
         return Err("IdentityConflict：权威回复信封的身份/epoch/因果/规范字节不符".into());
     }
     let payload = &reply["payload"];
@@ -877,10 +981,41 @@ fn authority_exchange(
             payload["error"].as_str().unwrap_or("未具名错误")
         ));
     }
-    let r: AuthorityReply = serde_json::from_value(payload.clone()).map_err(error)?;
+    Ok(payload)
+}
+
+fn authority_reply(
+    p: &Profile,
+    a: &Authority,
+    op: &str,
+    command: &ExactCommand,
+    release: Option<&str>,
+    frame: &AuthorityFrame,
+    reply: &Value,
+) -> Result<AuthorityReply, String> {
+    let r: AuthorityReply =
+        serde_json::from_value(checked_payload(p, a, frame, reply)?.clone()).map_err(error)?;
     validate_authority_reply(p, a, op, command, release, &r)?;
     Ok(r)
 }
+
+fn verified_query_original<'a>(
+    p: &Profile,
+    frame: &AuthorityFrame,
+    reply: &'a Value,
+) -> Result<&'a Value, String> {
+    let payload = checked_payload(p, &p.s, frame, reply)?;
+    if payload["kind"] != "ExecuteCommittedOriginal"
+        || !payload
+            .as_object()
+            .is_some_and(|o| o.len() == 2 && o.contains_key("original_reply"))
+    {
+        return Err("MissingDependency：S 查询缺可独立核证的原 ExecuteCommitted".into());
+    }
+    Ok(&payload["original_reply"])
+}
+
+#[cfg(test)]
 fn authority(
     p: &Profile,
     a: &Authority,
@@ -890,8 +1025,8 @@ fn authority(
     release: Option<&str>,
 ) -> Result<AuthorityReply, String> {
     let frame = authority_frame(p, a, epoch, op, command, release)?;
-    let connection = authority_connect(a)?;
-    authority_exchange(p, a, op, command, release, connection, &frame)
+    let reply = authority_exchange(p, authority_connect(a)?, &frame)?;
+    authority_reply(p, a, op, command, release, &frame, &reply)
 }
 
 fn validate_authority_reply(
@@ -928,7 +1063,7 @@ fn validate_authority_reply(
             r.state
         ));
     }
-    if release.is_some() && r.release_receipt_id.as_deref() != release {
+    if r.release_receipt_id.as_deref() != release {
         return Err("IdentityConflict：S 收据未绑定本次精确交付".into());
     }
     Ok(())
@@ -946,7 +1081,17 @@ fn get(
     .optional()
     .map_err(error)
 }
-fn query_command(c: &Connection, p: &Profile, id: &str) -> Result<Value, String> {
+fn query_command(
+    c: &Connection,
+    genesis: &Profile,
+    history: Option<&History>,
+    epoch: i64,
+    id: &str,
+) -> Result<Value, String> {
+    if let Some(history) = history {
+        return authority_history::query(c, genesis, history, epoch, id);
+    }
+    let p = genesis;
     match get(c, id)? {
         None => Ok(json!({"kind":"ExactCommandState","command_id":id,"state":"NoRecord"})),
         Some((_, release, state, _)) => {
@@ -970,28 +1115,53 @@ fn accept(
     p: &Profile,
     epoch: i64,
     command: ExactCommand,
+    genesis: &Profile,
+    history: Option<&History>,
 ) -> Result<Value, String> {
-    if store::pending_batch(c)?.is_some() {
+    let pending = store::pending_batch(c)?.is_some();
+    if pending && history.is_none() {
         return Err("PendingBatch：未完成批次只允许同内容恢复或只读".into());
     }
-    let received_ns = logical_now(c)?;
-    let raw = canonical_json(&serde_json::to_value(&command).map_err(error)?);
+    let raw = encode(&command)?;
     if let Some((old, _, _, _)) = get(c, &command.command_id)? {
         if raw != old {
             return Err("IdentityConflict：同 command_id 改变内容/epoch".into());
         }
-        return query_command(c, p, &command.command_id);
+        return query_command(c, genesis, history, epoch, &command.command_id);
     }
+    if pending {
+        return Err("PendingBatch：未完成批次只允许同内容恢复或只读".into());
+    }
+    let received_ns = logical_now(c)?;
     command.validate(p, epoch)?;
-    let released = authority(p, &p.e, epoch, "QueryReleasedExact", &command, None)?;
+    let frame = authority_frame(p, &p.e, epoch, "QueryReleasedExact", &command, None)?;
+    let reply = authority_exchange(p, authority_connect(&p.e)?, &frame)?;
+    let released = authority_reply(
+        p,
+        &p.e,
+        "QueryReleasedExact",
+        &command,
+        None,
+        &frame,
+        &reply,
+    )?;
     let clock = AcceptClock {
         received_ns,
         first_known_ns: received_ns,
         commit_ns: received_ns,
     };
     validate_accept_clock(&clock, released.commit_ns)?;
-    c.execute("INSERT INTO x_exact_commands(id,command,release_receipt,state,attempt_batch,accept_clock,release_evidence) VALUES(?1,?2,?3,'Accepted',NULL,?4,?5)",params![command.command_id,raw,released.receipt_id,canonical_json(&serde_json::to_value(&clock).map_err(error)?),canonical_json(&serde_json::to_value(&released).map_err(error)?)]).map_err(error)?;
-    query_command(c, p, &command.command_id)
+    let tx = c.transaction().map_err(error)?;
+    tx.execute("INSERT INTO x_exact_commands(id,command,release_receipt,state,attempt_batch,accept_clock,release_evidence) VALUES(?1,?2,?3,'Accepted',NULL,?4,?5)",params![command.command_id,raw,released.receipt_id,encode(&clock)?,encode(&released)?]).map_err(error)?;
+    authority_history::record(
+        &tx,
+        history,
+        &command.command_id,
+        "accept",
+        json!({"request":frame.envelope,"reply":reply,"clock":clock}),
+    )?;
+    tx.commit().map_err(error)?;
+    query_command(c, genesis, history, epoch, &command.command_id)
 }
 fn command_id(change: &Change) -> &str {
     match change {
@@ -999,10 +1169,18 @@ fn command_id(change: &Change) -> &str {
         Change::Cancel { command_id, .. } => command_id,
     }
 }
-fn execute(c: &mut Connection, p: &Profile, epoch: i64, mut batch: Batch) -> Result<Value, String> {
+fn execute(
+    c: &mut Connection,
+    p: &Profile,
+    epoch: i64,
+    mut batch: Batch,
+    genesis: &Profile,
+    history: Option<&History>,
+) -> Result<Value, String> {
     batch.normalize();
-    let encoded = canonical_json(&serde_json::to_value(&batch).map_err(error)?);
-    if store::pending_batch(c)?.is_some_and(|old| old != encoded) {
+    let encoded = encode(&batch)?;
+    let pending = store::pending_batch(c)?;
+    if pending.as_ref().is_some_and(|old| *old != encoded) {
         return Err("PendingBatch：未完成批次不得由另一批推进".into());
     }
     if let Some(result) = store::replay_batch(c, &batch)? {
@@ -1020,11 +1198,10 @@ fn execute(c: &mut Connection, p: &Profile, epoch: i64, mut batch: Batch) -> Res
         let (raw, release, state, attempt) =
             get(c, id)?.ok_or("MissingDependency：X 尚未接纳精确命令")?;
         if state != "Accepted"
-            && !((state == "MayHaveCalled"
-                || state == "ExecutionReady"
-                || state == "ExecutionRequested")
-                && attempt.as_deref()
-                    == Some(canonical_json(&serde_json::to_value(&batch).map_err(error)?).as_str()))
+            && !(matches!(
+                state.as_str(),
+                "MayHaveCalled" | "ExecutionReady" | "ExecutionRequested"
+            ) && attempt.as_deref() == Some(encoded.as_str()))
         {
             return Err("IdentityConflict：该 command 已作用于另一批次".into());
         }
@@ -1033,75 +1210,168 @@ fn execute(c: &mut Connection, p: &Profile, epoch: i64, mut batch: Batch) -> Res
         if command.change != *change {
             return Err("IdentityConflict：批次改变精确命令".into());
         }
-        let op = match state.as_str() {
-            "Accepted" => Some("RequestConditionalExecution"),
-            "ExecutionRequested" => Some("QueryExecuteCommitted"),
+        let claimed_ns = batch.bar.index;
+        let original = if let Some(h) = history {
+            let accepted: String = c
+                .query_row(
+                    "SELECT accept_clock FROM x_exact_commands WHERE id=?1",
+                    [id],
+                    |r| r.get(0),
+                )
+                .map_err(error)?;
+            let clock: AcceptClock = serde_json::from_str(&accepted).map_err(error)?;
+            if claimed_ns < clock.commit_ns {
+                return Err("InvalidDomain：原 S 尝试不得早于 X 接纳".into());
+            }
+            if state == "Accepted" {
+                None
+            } else {
+                Some(authority_history::attempt(c, h, id)?)
+            }
+        } else {
+            None
+        };
+        // 在 PendingBatch 持久化前检查所有出帧界。
+        let call = match state.as_str() {
+            "Accepted" => Some(authority_frame(
+                p,
+                &p.s,
+                epoch,
+                "RequestConditionalExecution",
+                &command,
+                Some(&release),
+            )?),
+            "ExecutionRequested" => Some(match &original {
+                Some(attempt) => query_execution_frame(
+                    p,
+                    epoch,
+                    &command,
+                    &release,
+                    &attempt.original["request"],
+                )?,
+                None => authority_frame(
+                    p,
+                    &p.s,
+                    epoch,
+                    "QueryExecuteCommitted",
+                    &command,
+                    Some(&release),
+                )?,
+            }),
             _ => None,
         };
-        // 帧界超限是确定未发出的失败，须在持久 PendingBatch 前拒绝，否则同批恢复永远超限。
-        let call = match op {
-            Some(op) => Some((
-                op,
-                authority_frame(p, &p.s, epoch, op, &command, Some(&release))?,
-            )),
-            None => None,
-        };
-        commands.push((command, release, call));
+        commands.push((command, release, state, call, original));
     }
-    let pending_tx = c.transaction().map_err(error)?;
-    pending_tx.execute("INSERT INTO x_sim_meta(k,v) VALUES('pending_batch',?1) ON CONFLICT(k) DO UPDATE SET v=excluded.v",[&encoded]).map_err(error)?;
-    pending_tx.execute("INSERT INTO x_sim_meta(k,v) VALUES('pending_epoch',?1) ON CONFLICT(k) DO UPDATE SET v=excluded.v",[epoch.to_string()]).map_err(error)?;
-    pending_tx.commit().map_err(error)?;
-    let mut executed_records = Vec::new();
-    for (command, release, call) in commands {
-        // AcceptExact 不产生调用权；在真正模型动作前才取得本命令 S 终态。
-        let executed = match call {
-            Some((op, frame)) => {
-                let connection = authority_connect(&p.s)?;
-                if op == "RequestConditionalExecution" {
-                    c.execute("UPDATE x_exact_commands SET state='ExecutionRequested',attempt_batch=?2 WHERE id=?1 AND state='Accepted'",params![command.command_id,encoded]).map_err(error)?;
-                    // 测试钩：把这次持久写拉长到超过对端期限，复现慢盘。
-                    #[cfg(test)]
-                    if std::env::var("ISSUE1381_TEST_SLOW_CLAIM").is_ok() {
-                        std::thread::sleep(Duration::from_millis(p.timeout_ms + 200));
-                    }
-                }
-                authority_exchange(p, &p.s, op, &command, Some(&release), connection, &frame)?
+    if pending.is_none() {
+        let tx = c.transaction().map_err(error)?;
+        tx.execute(
+            "INSERT INTO x_sim_meta(k,v) VALUES('pending_batch',?1)",
+            [&encoded],
+        )
+        .map_err(error)?;
+        tx.execute(
+            "INSERT INTO x_sim_meta(k,v) VALUES('pending_epoch',?1)",
+            [epoch.to_string()],
+        )
+        .map_err(error)?;
+        tx.commit().map_err(error)?;
+    }
+    let batch_doc = serde_json::to_value(&batch).map_err(error)?;
+    for (command, release, state, call, original) in commands {
+        let Some(frame) = call else { continue };
+        let connection = authority_connect(&p.s)?;
+        let first = state == "Accepted";
+        if first {
+            let tx = c.transaction().map_err(error)?;
+            let changed = tx.execute("UPDATE x_exact_commands SET state='ExecutionRequested',attempt_batch=?2 WHERE id=?1 AND state='Accepted'",
+                params![command.command_id,encoded]).map_err(error)?;
+            if changed != 1 {
+                return Err("IdentityConflict：原 S 请求只占一次".into());
             }
-            None => {
-                let raw: String = c
-                    .query_row(
-                        "SELECT execute_evidence FROM x_exact_commands WHERE id=?1",
-                        [&command.command_id],
-                        |r| r.get(0),
-                    )
-                    .map_err(error)?;
-                let evidence: Value = serde_json::from_str(&raw).map_err(error)?;
-                validate_execution_record(p, &command, &release, &evidence)?
+            authority_history::record(
+                &tx,
+                history,
+                &command.command_id,
+                "request",
+                json!({"request":frame.envelope,"batch":batch_doc}),
+            )?;
+            tx.commit().map_err(error)?;
+            #[cfg(test)]
+            if std::env::var("ISSUE1381_TEST_SLOW_CLAIM").is_ok() {
+                std::thread::sleep(Duration::from_millis(p.timeout_ms + 200));
             }
-        };
-        let eligibility = match &command.change {
-            Change::Submit { order } | Change::Replace { order } => &order.eligibility_ref,
-            Change::Cancel {
-                eligibility_ref, ..
-            } => eligibility_ref,
-        };
-        if eligibility != &executed.receipt_id {
-            return Err("IdentityConflict：命令资格引用未绑定 S 实际提交收据".into());
         }
+        let wire = authority_exchange(p, connection, &frame)?;
         let claimed_ns = batch.bar.index;
-        if claimed_ns < executed.commit_ns {
-            return Err("InvalidDomain：X 调用占有早于 S 持久提交".into());
+        let (receipt, execution_profile, original_reply, observed) =
+            if let (Some(h), Some(attempt)) = (history, original) {
+                let raw = verified_query_original(p, &frame, &wire)?.clone();
+                let old = h.profile_at(genesis, attempt.binding_seq)?;
+                let request = authority_frame(
+                    &old,
+                    &old.s,
+                    epoch,
+                    "RequestConditionalExecution",
+                    &command,
+                    Some(&release),
+                )?;
+                if request.envelope != attempt.original["request"] {
+                    return Err("IdentityConflict：S 查询并非针对已持久的原尝试".into());
+                }
+                let receipt = authority_reply(
+                    &old,
+                    &old.s,
+                    "RequestConditionalExecution",
+                    &command,
+                    Some(&release),
+                    &request,
+                    &raw,
+                )?;
+                (
+                    receipt,
+                    old,
+                    raw,
+                    json!({"request":frame.envelope,"reply":wire,"read_ns":claimed_ns}),
+                )
+            } else {
+                let op = if first {
+                    "RequestConditionalExecution"
+                } else {
+                    "QueryExecuteCommitted"
+                };
+                let receipt =
+                    authority_reply(p, &p.s, op, &command, Some(&release), &frame, &wire)?;
+                (receipt, p.clone(), wire, Value::Null)
+            };
+        let evidence = json!({"reply":receipt,"claimed_ns":claimed_ns});
+        validate_execution_record(&execution_profile, &command, &release, &evidence)?;
+        let tx = c.transaction().map_err(error)?;
+        let changed = tx.execute("UPDATE x_exact_commands SET state='ExecutionReady',execute_evidence=?3 WHERE id=?1 AND attempt_batch=?2 AND state='ExecutionRequested'",
+            params![command.command_id,encoded,canonical_json(&evidence)]).map_err(error)?;
+        if changed != 1 {
+            return Err("IdentityConflict：S 原资格只落一次".into());
         }
-        let evidence = json!({"reply":executed,"claimed_ns":claimed_ns});
-        c.execute("UPDATE x_exact_commands SET state='ExecutionReady',attempt_batch=?2,execute_evidence=COALESCE(execute_evidence,?3) WHERE id=?1 AND state IN ('ExecutionRequested','ExecutionReady')",params![command.command_id,encoded,canonical_json(&evidence)]).map_err(error)?;
-        executed_records.push((command.command_id, evidence));
+        authority_history::record(
+            &tx,
+            history,
+            &command.command_id,
+            "evidence",
+            json!({"original_reply":original_reply,"observed_query":observed,"claimed_ns":claimed_ns}),
+        )?;
+        tx.commit().map_err(error)?;
     }
     let tx = c.transaction().map_err(error)?;
-    tx.execute("INSERT INTO x_sim_meta(k,v) VALUES('pending_batch',?1) ON CONFLICT(k) DO UPDATE SET v=excluded.v",[&encoded]).map_err(error)?;
-    for (id, evidence) in &executed_records {
-        let changed=tx.execute("UPDATE x_exact_commands SET state='MayHaveCalled',attempt_batch=?2,execute_evidence=COALESCE(execute_evidence,?3) WHERE id=?1 AND (state='ExecutionReady' OR (state='MayHaveCalled' AND attempt_batch=?2))",params![id,encoded,canonical_json(evidence)]).map_err(error)?;
-        if changed != 1 {
+    for id in &ids {
+        let changed = tx.execute("UPDATE x_exact_commands SET state='MayHaveCalled' WHERE id=?1 AND attempt_batch=?2 AND state='ExecutionReady'",
+            params![id,encoded]).map_err(error)?;
+        if changed == 1 {
+            if history.is_some() {
+                let evidence = authority_history::link(&tx, id, "evidence")?;
+                authority_history::record(&tx, history, id, "claim",
+                    json!({"batch":batch_doc,"evidence_event_seq":evidence}))?;
+            }
+        } else if !tx.query_row("SELECT EXISTS(SELECT 1 FROM x_exact_commands WHERE id=?1 AND attempt_batch=?2 AND state='MayHaveCalled')",
+            params![id,encoded], |r| r.get::<_, bool>(0)).map_err(error)? {
             return Err("IdentityConflict：X 同命令调用占有冲突".into());
         }
     }
@@ -1114,8 +1384,23 @@ fn execute(c: &mut Connection, p: &Profile, epoch: i64, mut batch: Batch) -> Res
     {
         std::process::exit(43);
     }
-    // 仅本地模拟 adapter 有已验证的同批 SQLite 幂等合同；此恢复许可不适用于网络场所。
-    store::commit_batch_with_commands(c, &batch, &ids.into_iter().collect::<Vec<_>>())
+    // 仅本地模拟 adapter 有同批 SQLite 幂等合同；不适用于网络场所。
+    let ids: Vec<_> = ids.into_iter().collect();
+    store::commit_batch_with_commands(c, &batch, &ids, |tx| {
+        if history.is_some() {
+            for id in &ids {
+                let claim = authority_history::link(tx, id, "claim")?;
+                authority_history::record(
+                    tx,
+                    history,
+                    id,
+                    "observe",
+                    json!({"batch":batch_doc,"claim_event_seq":claim}),
+                )?;
+            }
+        }
+        Ok(())
+    })
 }
 
 fn validate_pending_epoch(c: &Connection, epoch: i64) -> Result<(), String> {
@@ -1143,15 +1428,17 @@ fn validate_pending_epoch(c: &Connection, epoch: i64) -> Result<(), String> {
 
 /// 在 bin 写入 writer_epoch 之前检查已有冻结合同与接纳记录。
 pub fn validate_existing(c: &Connection, p: &Profile, epoch: i64) -> Result<(), String> {
-    validate_bound(c, p, None, epoch)
+    validate_bound(c, p, None, None, epoch).map(|_| ())
 }
 fn validate_bound(
     c: &Connection,
     p: &Profile,
     binding: Option<&(Value, Value)>,
+    identities: Option<&Identities>,
     epoch: i64,
-) -> Result<(), String> {
+) -> Result<Option<History>, String> {
     p.validate()?;
+    let mut history = None;
     let exists: bool = c
         .query_row(
             "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='x_sim_meta')",
@@ -1197,15 +1484,22 @@ fn validate_bound(
         }
         validate_pending_epoch(c, epoch)?;
         store::audit_history(c)?;
+        if let Some(identities) = identities {
+            history = Some(History::load(c, p, epoch, identities)?);
+        }
     }
     let commands:bool=c.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='x_exact_commands')",[],|r|r.get(0)).map_err(error)?;
     if commands {
-        audit_accepts(c, p)?;
-        audit_execution(c, p)?;
+        if let Some(history) = &history {
+            authority_history::audit(c, p, history, epoch)?;
+        } else {
+            audit_accepts(c, p)?;
+        }
+        audit_execution(c, p, history.as_ref())?;
     } else if exists {
         return Err("IdentityConflict：模拟历史缺命令权威表".into());
     }
-    Ok(())
+    Ok(history)
 }
 
 /// 必须由调用方持有SQLite事务；X launcher把自身meta/epoch纳入同一次提交。
@@ -1214,7 +1508,7 @@ pub fn initialize_in_transaction(
     p: &Profile,
     epoch: i64,
 ) -> Result<(), String> {
-    initialize_bound(c, p, None, epoch)
+    initialize_bound(c, p, None, None, epoch)
 }
 fn business_binding(p: &Profile, binding: Option<&(Value, Value)>) -> Result<String, String> {
     Ok(match binding {
@@ -1226,9 +1520,10 @@ fn initialize_bound(
     c: &rusqlite::Transaction<'_>,
     p: &Profile,
     binding: Option<&(Value, Value)>,
+    identities: Option<&Identities>,
     epoch: i64,
 ) -> Result<(), String> {
-    validate_bound(c, p, binding, epoch)?;
+    validate_bound(c, p, binding, identities, epoch)?;
     let exists: bool = c
         .query_row(
             "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='x_sim_meta')",
@@ -1254,20 +1549,15 @@ fn initialize_bound(
         )
         .map_err(error)?;
     }
+    if identities.is_some() {
+        authority_binding::initialize(c, p, epoch)?;
+    }
     Ok(())
 }
 
 pub fn serve(c: &mut Connection, p: &Profile, epoch: i64) -> Result<(), String> {
-    serve_bound(c, p, None, epoch)
-}
-fn serve_bound(
-    c: &mut Connection,
-    p: &Profile,
-    binding: Option<&(Value, Value)>,
-    epoch: i64,
-) -> Result<(), String> {
     let tx = c.transaction().map_err(error)?;
-    initialize_bound(&tx, p, binding, epoch)?;
+    initialize_in_transaction(&tx, p, epoch)?;
     #[cfg(test)]
     if std::env::var("ISSUE1381_TEST_INIT_INTERRUPT")
         .ok()
@@ -1285,6 +1575,22 @@ fn serve_bound(
     {
         std::process::exit(45);
     }
+    serve_initialized(c, p, None, epoch)
+}
+
+fn serve_initialized(
+    c: &mut Connection,
+    genesis: &Profile,
+    history: Option<&History>,
+    epoch: i64,
+) -> Result<(), String> {
+    let active;
+    let p = if let Some(h) = history {
+        active = h.profile_at(genesis, h.current_seq())?;
+        &active
+    } else {
+        genesis
+    };
     let timeout = Duration::from_millis(p.timeout_ms);
     serve_unix(
         Path::new(&p.socket),
@@ -1306,19 +1612,23 @@ fn serve_bound(
                         p,
                         epoch,
                         serde_json::from_value(r.payload).map_err(error)?,
+                        genesis,
+                        history,
                     ),
                     "AdvanceBar" => execute(
                         c,
                         p,
                         epoch,
                         serde_json::from_value(r.payload).map_err(error)?,
+                        genesis,
+                        history,
                     ),
                     "QueryCommand" => {
                         let id = r
                             .payload
                             .as_str()
                             .ok_or("InvalidDomain：QueryCommand 身份须字符串")?;
-                        query_command(c, p, id)
+                        query_command(c, genesis, history, epoch, id)
                     }
                     "QueryBatch" => store::read_batch(
                         c,

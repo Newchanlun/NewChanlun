@@ -326,12 +326,13 @@ pub(crate) fn validate_batch(c: &Connection, batch: &Batch) -> Result<(), String
 
 #[cfg(test)]
 pub(crate) fn commit_batch(c: &mut Connection, batch: &Batch) -> Result<Value, String> {
-    commit_batch_with_commands(c, batch, &[])
+    commit_batch_with_commands(c, batch, &[], |_| Ok(()))
 }
 pub(crate) fn commit_batch_with_commands(
     c: &mut Connection,
     batch: &Batch,
     command_ids: &[String],
+    before_commit: impl FnOnce(&rusqlite::Transaction<'_>) -> Result<(), String>,
 ) -> Result<Value, String> {
     let mut normalized = batch.clone();
     normalized.normalize();
@@ -394,6 +395,7 @@ pub(crate) fn commit_batch_with_commands(
         [],
     )
     .map_err(storage)?;
+    before_commit(&tx)?;
     #[cfg(test)]
     if batch.request_id == "b1" && std::env::var_os("ISSUE1381_TEST_CRASH_BEFORE_COMMIT").is_some()
     {
